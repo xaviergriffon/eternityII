@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VariablesViewState
+   version = "1.0">
+   <ContextStates>
+      <ContextState
+         contextName = "put:lifo.c">
+         <PersistentStrings>
+            <PersistentString
+               value = "(struct possibility_packet *)new_element-&gt;value">
+            </PersistentString>
+         </PersistentStrings>
+      </ContextState>
+      <ContextState
+         contextName = "server:main.c">
+      </ContextState>
+      <ContextState
+         contextName = "scroll:lifo.c">
+      </ContextState>
+      <ContextState
+         contextName = "first_possibility:main.c">
+      </ContextState>
+   </ContextStates>
+</VariablesViewState>
