@@ -38,4 +38,6 @@ int check_datas();
 int check_file(int f);
 int check_files();
 int search_min_datas();
+
+int remove_possibilities_with_no_next(map_big_array *mapParts);
 #endif

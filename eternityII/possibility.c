@@ -76,7 +76,7 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 
 struct possibility_packet *crypt_to_network(struct possibility_packet *packet)
 {
-
+    
 	return NULL;
 }
 
@@ -246,6 +246,31 @@ int save_possibility(char *filename, struct possibility_packet *possibility)
 	return 0;
 }
 
+int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts)
+{
+    int result = 0;
+    
+    // initialisation
+	uint8_t x = possibility->x;
+	uint8_t y = possibility->y;
+    key_part wsearch = what_search(mapParts, x, y, *possibility);
+	
+	int8_t p[4] = {wsearch.k1,wsearch.k2,wsearch.k3,wsearch.k4};
+    struct array_part *search = get_parts_bigarray(mapParts, p);
+	int s;
+	if(search->size > 0)
+	{
+		for(s=0; s< search->size && result == 0; s++)
+		{
+			if(search->parts[s].id != 0 && possibility->faceused[search->parts[s].id -1] == 0)
+			{
+                result = 1;
+            }
+        }
+    }
+    return result;
+}
+
 int search_possiblity(File *result,struct possibility_packet *possiblity, map_big_array *mapParts)
 {
 	int max_result=0;
@@ -256,7 +281,7 @@ int search_possiblity(File *result,struct possibility_packet *possiblity, map_bi
 	// initialisation
 	x = possiblity->x;
 	y = possiblity->y;
-
+    
 	cur_dir = possiblity->direcory;
 	part = NULL;
 	
@@ -276,7 +301,7 @@ int search_possiblity(File *result,struct possibility_packet *possiblity, map_bi
 			if(search->parts[s].id != 0 && possiblity->faceused[search->parts[s].id -1] == 0)
 			{
 				part = &search->parts[s];
-
+                
 				memcpy(&poss, possiblity, sizeof(*possiblity));
 				poss.grid[x][y].k1 = part->top;
 				poss.grid[x][y].k2 = part->right;
@@ -342,7 +367,7 @@ int search_possiblity(File *result,struct possibility_packet *possiblity, map_bi
  -3 directory > or < dir_possibilities
  -4 alloc <= 0
  -5 alloc <> faceused
-*/
+ */
 int check_possibility(struct possibility_packet *packet)
 {
 	if(packet == NULL) return -1;

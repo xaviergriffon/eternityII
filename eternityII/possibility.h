@@ -39,6 +39,7 @@ typedef struct
 
 struct possibility_packet *generate_possibility_packet(int x, int y, struct part *etern[ETERN_SIZE][ETERN_SIZE], int directory);
 key_part what_search(map_big_array *map_parts, int x, int y, struct possibility_packet possiblity);
+int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts);
 int search_possiblity(File *result,struct possibility_packet *possiblity, map_big_array *mapParts);
 
 int change_dir(int cur_dir, int x, int y, struct possibility_packet *possiblity);
@@ -57,7 +58,7 @@ int save_possibility(char *filename, struct possibility_packet *possibility);
  -3 directory > or < dir_possibilities
  -4 alloc <= 0
  -5 alloc <> faceused
-*/
+ */
 int check_possibility(struct possibility_packet *packet);
 
 int test_directions();

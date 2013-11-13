@@ -7,7 +7,7 @@
 #include <readline/readline.h>
 #ifdef WIN32
 #include <winsock2.h>
-#else 
+#else
 #include <sys/times.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -46,6 +46,8 @@ static long inst_unknow = 0;
 static char *lastcheck = NULL;
 
 static int request = 0;
+
+static char* partsFiles = NULL;
 
 typedef struct
 {
@@ -219,7 +221,7 @@ void *client (void *userdata)
 			{
 				aposs->possibilities = possibilityPacket;
 				aposs->size = 1;
-			
+                
 				if(add_possibility(aposs) == 0)
 				{
 					send_instruction(client->socket_id,INST_CONSIDERED);
@@ -303,7 +305,7 @@ void runserver(const char* file)
 		thread_params[i].tid = NULL;
 		thread_params[i].compteur = i;
 	}
-
+    
 	socket_id = create_tcp_server(2000, NB_THREADS);
 	long acceptclient = 0;
 	while (1) {
@@ -316,7 +318,7 @@ void runserver(const char* file)
 			exit(EXIT_FAILURE);
 		}
         acceptclient++;
-
+        
 		thread_id = -1;
 		while (thread_id == -1) {
 			/* recherche d'un thread libre */
@@ -440,7 +442,7 @@ void *autosearch (void *userdata)
 			while(db->size > 0)
 			{
 				scroll(db, &aposs->possibilities[aposs->size]);
-					
+                
 				aposs->size++;
 			}
 			if(add_possibility(aposs))
@@ -458,7 +460,7 @@ void *autosearch (void *userdata)
 			free(aposs->possibilities);
 		}
 		free_file(db);
-	
+        
 		if(client->aposs->size > 0)
 		{
 			free(client->aposs->possibilities);
@@ -693,7 +695,7 @@ void first_possibility(map_big_array *mapParts)
 	
 	free(aposs->possibilities);
 	free(aposs);
-
+    
 }
 
 void failed_arg()
@@ -849,13 +851,19 @@ static void * console(void *param)
 				printf("directions : NOK !\n");
 			}
 		}
+        if(strcmp(buffer, "rmnonext") == 0)
+        {
+            map_big_array *map_parts = prepare_map_part(partsFiles);
+            remove_possibilities_with_no_next(map_parts);
+            free_bigarray(map_parts);
+        }
 		if(strcmp(buffer, "min") == 0)
 		{
 			printf("min :%i\n",search_min_datas());
 		}
 		if(strcmp(buffer, "help") == 0)
 		{
-			printf("commands:\n  help\n  check\n  backup\n  restore\n  import\n  print\n  regroup\n  sorta\n  sortd\n  split\n  checkdatas\n  checkfiles\n  checkdirections\n  min\n  exit\n");
+			printf("commands:\n  help\n  check\n  backup\n  restore\n  import\n  print\n  regroup\n  sorta\n  sortd\n  split\n  checkdatas\n  checkfiles\n  checkdirections\n  min\n  rmnonext\n  exit\n");
 		}
 		free(buffer);
 		buffer= NULL;
@@ -886,7 +894,7 @@ int run_console(int server)
 
 int main(int argc, const char * argv[])
 {
-
+    
 	
 	if (argc >= 2) {
 		lastcheck = calloc(1000, sizeof(char));
@@ -905,6 +913,7 @@ int main(int argc, const char * argv[])
 			init_compteurs();
 			run_checker(0);
 			run_console(0);
+            partsFiles = (char *)(argv[4]);
 			runclient(serverIp, argv[4]);
 		} else if (strcmp("tcpserver", argv[1]) == 0) {
 			printf("server\n");
@@ -916,6 +925,7 @@ int main(int argc, const char * argv[])
 			init_compteurs();
 			run_checker(1);
 			run_console(1);
+            partsFiles = (char *)(argv[3]);
 			runserver(argv[3]);
 		} else if(strcmp("test", argv[1])==0) {
 			if(argc >= 3) {
@@ -929,7 +939,7 @@ int main(int argc, const char * argv[])
 		} else {
 			failed_arg();
 		}
-				
+        
 	} else {
 		failed_arg();
 	}

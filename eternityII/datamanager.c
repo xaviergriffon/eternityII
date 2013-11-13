@@ -99,7 +99,7 @@ int put_to_server(array_possibility_packet *possibilities)
 			printf("problème de prise en compte du serveur\n");
 		}
 	}
-
+    
 	send_instruction(socket_id, INST_END);
 	shutdown(socket_id, 2);
 	int err = close(socket_id);
@@ -109,7 +109,7 @@ int put_to_server(array_possibility_packet *possibilities)
 	}
 	
 	return 0;
-
+    
 }
 
 int put_to_local(array_possibility_packet *possibilities)
@@ -303,7 +303,7 @@ array_possibility_packet *get_last_possibility(int max_result)
 	result->size = 0;
 	result->possibilities = NULL;
 	
-
+    
 	if(server_ip != NULL)
 	{
 		scroll_from_server(result, max_result);
@@ -502,9 +502,9 @@ int regroup_datas_nolock()
 			}
 			
 		}
-
+        
 	}
-					printf("regroup size :%i\n",size);
+    printf("regroup size :%i\n",size);
 	free(packet);
 	packet = NULL;
 	return 0;
@@ -516,6 +516,53 @@ int regroup_datas()
 	regroup_datas_nolock();
 	unlock_all_file();
 	return 0;
+}
+
+int remove_possibilities_with_no_next(map_big_array *mapParts)
+{
+    lock_all_file();
+    int fp;
+	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		Element *currElement = file_possibility[fp].file.start;
+        
+		while (currElement != NULL)
+		{
+            Element *nextElement =NULL;
+			struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+			if(!possibility_has_a_next(possibility, mapParts))
+			{
+                
+				if(currElement->previous != NULL)
+                {
+                    currElement->previous->next = currElement->next;
+                } else {
+                    // On est au début
+                    file_possibility[fp].file.start = currElement->next;
+                }
+                if(currElement->next != NULL)
+                {
+                    currElement->next->previous = currElement->previous;
+                } else {
+                    file_possibility[fp].file.end = currElement->previous;
+                }
+                nextElement = currElement->next;
+                free (currElement->value);
+                free (currElement);
+                currElement = NULL;
+                file_possibility[fp].file.size--;
+                
+			}
+            if(nextElement == NULL && currElement != NULL)
+            {
+                currElement = currElement->next;
+            } else {
+                currElement = nextElement;
+            }
+		}
+	}
+    unlock_all_file();
+    return 0;
 }
 
 int split_datas_nolock(int nbsplit)
@@ -623,7 +670,7 @@ int search_min_datas()
 	}
 	
 	unlock_all_file();
-
+    
 	return result;
 }
 
@@ -719,21 +766,21 @@ void *sort_d_mono(void *f)
 						file_poss->file.end = currElement;
 					}
                     /*
-                    if(check_file(intf)){
-                        printf("--datas--\n");
-                        print_file(intf);
-                        printf("--\n");
-                        printf("On file:%i curr:",intf);
-                        print_possibility_packet(currElement->value);
-                        printf("On file:%i next:",intf);
-                        print_possibility_packet(nextElement->value);
-                        printf("On file:%i start:",intf);
-                        print_possibility_packet(file_poss->file.start->value);
-                        printf("On file:%i end:",intf);
-                        print_possibility_packet(file_poss->file.end->value);
-                        exit(EXIT_FAILURE);
-                    }
-                    */
+                     if(check_file(intf)){
+                     printf("--datas--\n");
+                     print_file(intf);
+                     printf("--\n");
+                     printf("On file:%i curr:",intf);
+                     print_possibility_packet(currElement->value);
+                     printf("On file:%i next:",intf);
+                     print_possibility_packet(nextElement->value);
+                     printf("On file:%i start:",intf);
+                     print_possibility_packet(file_poss->file.start->value);
+                     printf("On file:%i end:",intf);
+                     print_possibility_packet(file_poss->file.end->value);
+                     exit(EXIT_FAILURE);
+                     }
+                     */
                     if(file_poss->file.start != nextElement)
 					{
                         nextElement = nextElement->previous;
@@ -866,7 +913,7 @@ int sort_descending_mthread()
 	
 	printf("sort d one thread\n");
 	sort_descending_nolock();
-
+    
 	unlock_all_file();
 	return 0;
 }
