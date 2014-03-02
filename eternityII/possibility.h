@@ -12,6 +12,7 @@ typedef unsigned short uint16_t;
 
 #include "part.h"
 #include "lifo.h"
+#include "etii_opencl_instance.h"
 
 #define ETERN_SIZE 16
 #define ETERN_PARTS 256
@@ -50,6 +51,7 @@ struct possibility_packet *decrypt_from_network(struct possibility_packet *packe
 int print_possibility_packet(struct possibility_packet *packet);
 int save_possibility(char *filename, struct possibility_packet *possibility);
 
+File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbPossibility,map_big_array *mapParts);
 
 /*
  0 OK

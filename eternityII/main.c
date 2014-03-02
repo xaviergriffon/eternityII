@@ -31,6 +31,7 @@ typedef struct in_addr IN_ADDR;
 #include "part.h"
 #include "lifo.h"
 #include "etii_protocol.h"
+#include "etii_opencl.h"
 
 #define NB_CONNECTIONS_PAR_THREAD 1
 #define MICRO_SLEEP 100
@@ -38,6 +39,8 @@ typedef struct in_addr IN_ADDR;
 #define EXIT_CMD "exit"
 #define REQUEST_STOP 1
 #define MAX_STOCK_BY_THREAD 100
+
+pthread_mutex_t max_lock;
 
 static int NB_THREADS = 10;
 
@@ -429,6 +432,10 @@ void *autosearch (void *userdata)
 				if(max > max_result)
 				{
 					max_result = max;
+					if(max_result >= ETERN_PARTS)
+					{
+						printf("Erreur alloc > ETERN_PARTS\n");
+					}
 					printf("max result:%i\n",max_result);
 				}
 			}
@@ -473,6 +480,136 @@ void *autosearch (void *userdata)
 	return NULL;
 }
 
+void *searchOpenCL (void *userdata)
+{
+	client_possibility_t *client = userdata;
+	int nbPossMax = 400;
+	etii_cl_instance *instance = create_etii_cl_instance(CL_DEVICE_TYPE_CPU, client->map_part,nbPossMax);
+	
+	while(1)
+	{
+		while (client->aposs == NULL)
+		{
+			usleep(MICRO_SLEEP);
+		}
+		File *db = malloc(sizeof(File));
+		init_file_with_cache(db, 3000, sizeof(struct possibility_packet));
+		struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
+		struct possibility_packet *posss = malloc(sizeof(struct possibility_packet) * nbPossMax);
+		int a;
+		for(a=0; a < client->aposs->size;a++)
+		{
+			put(db,&client->aposs->possibilities[a]);
+			while(db->size > 0 && client->request == 0)
+			{
+				if(db->size > MAX_STOCK_BY_THREAD && 1> 2)
+				{
+					array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
+					int reste = db->size - MAX_STOCK_BY_THREAD;
+					aposs->possibilities = malloc(sizeof(struct possibility_packet) * (MAX_STOCK_BY_THREAD));
+					aposs->size = 0;
+					while(db->size > reste)
+					{
+						scroll(db, &aposs->possibilities[aposs->size]);
+						
+						aposs->size++;
+					}
+					// En cas d'erreur on remet les possibilitées dans la file
+					if(add_possibility(aposs))
+					{
+						printf("error on add_possibility\n");
+						int p;
+						for(p=0; p < aposs->size;p++)
+						{
+							put(db,&aposs->possibilities[p]);
+						}
+					}
+					free(aposs->possibilities);
+					free(aposs);
+					
+					
+				}
+				lastfilesize[client->compteur] = db->size;
+				
+                int nbSearch = 0;
+                while(db->size > 0 && nbSearch < nbPossMax)
+                {
+					scroll(db,&posss[nbSearch]);
+                    nbSearch++;
+                    compteurs[client->compteur]++;
+                    
+                }
+				
+				File *possibilities = search_possiblity_opencl(instance,posss,nbSearch,client->map_part);
+				
+				while(possibilities->size > 0)
+				{
+					struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
+					scroll(possibilities,possibility);
+
+					pthread_mutex_lock(&max_lock);
+					if(possibility->alloc > max_result)
+					{
+						
+						max_result = possibility->alloc;
+						
+						if(max_result >= ETERN_PARTS)
+						{
+							printf("Erreur alloc > ETERN_PARTS\n");
+						}
+						printf("max result:%i\n",max_result);
+					}
+					pthread_mutex_unlock(&max_lock);
+					put(db,possibility);
+
+					free(possibility);
+				}
+				
+				free_file(possibilities);
+			}
+		}
+		free(posss);
+		free(possibilityPacket);
+		if(client->request == REQUEST_STOP && db->size > 0)
+		{
+			array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
+			aposs->possibilities = malloc(sizeof(struct possibility_packet) * (db->size));
+			aposs->size = 0;
+			while(db->size > 0)
+			{
+				scroll(db, &aposs->possibilities[aposs->size]);
+                
+				aposs->size++;
+			}
+			if(add_possibility(aposs))
+			{
+				printf("Error with possibility : \n");
+				int p;
+				for (p=0;p < aposs->size;p++)
+				{
+					struct possibility_packet *possibility = &aposs->possibilities[p];
+					print_possibility_packet(possibility);
+					save_possibility("./error_possibility",possibility);
+				}
+				
+			}
+			free(aposs->possibilities);
+		}
+		free_file(db);
+        
+		if(client->aposs->size > 0)
+		{
+			free(client->aposs->possibilities);
+		}
+		free(client->aposs);
+		client->aposs = NULL;
+		client->works =0;
+	}
+	
+	free_etii_cl_instance(instance);
+	return NULL;
+}
+
 void runThreadClient(const char *file)
 {
 	client_possibility_t *thread_params;
@@ -500,7 +637,7 @@ void runThreadClient(const char *file)
 		
 		/* Création du thread */
 		thread_params[i].tid = malloc(sizeof(pthread_t));
-		if(0 != pthread_create((thread_params[i].tid), thread_attributes, autosearch, &(thread_params[i])))
+		if(0 != pthread_create((thread_params[i].tid), thread_attributes, searchOpenCL, &(thread_params[i])))
 		{
 			fprintf(stderr, "Problème avec pthread_create()\n");
 			free(thread_attributes);
@@ -674,9 +811,14 @@ void first_possibility(map_big_array *mapParts)
 	while (possibilities->size > 0) {
 		struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
 		scroll(possibilities,packet);
+		printf("packet->alloc:%i",packet->alloc);
 		if(packet->alloc > max_result)
 		{
 			max_result = packet->alloc;
+			if(max_result >= ETERN_PARTS)
+			{
+				printf("Erreur alloc > ETERN_PARTS\n");
+			}
 			printf("max result:%i\n",max_result);
 		}
 		array_possibility_packet *aposs2 = malloc(sizeof(array_possibility_packet));

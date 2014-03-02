@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "possibility.h"
+#include "etii_opencl.h"
 
 static int directions[256] = {135,221,210,34,45,255,254,253,237,222,223,239,238,240,224,208,209,226,242,241,225,0,1,2,18,33,32,16,17,13,14,15,31,47,46,29,30,118,119,120,136,152,151,150,134,252,251,250,249,248,247,246,245,244,243,192,176,160,144,128,112,96,80,64,48,3,4,5,6,7,8,9,10,11,12,63,79,95,111,127,143,159,175,191,207,236,235,234,233,232,231,230,229,228,227,193,177,161,145,129,113,97,81,65,49,19,20,21,22,23,24,25,26,27,28,62,78,94,110,126,142,158,174,190,206,220,219,218,217,216,215,214,213,212,211,194,178,162,146,130,114,98,82,66,50,35,36,37,38,39,40,41,42,43,44,61,77,93,109,125,141,157,173,189,205,204,203,202,201,200,199,198,197,196,195,179,163,147,131,115,99,83,67,51,52,53,54,55,56,57,58,59,60,76,92,108,124,140,156,172,188,187,186,185,184,183,182,181,180,164,148,132,116,100,84,68,69,70,71,72,73,74,75,91,107,123,139,155,171,170,169,168,167,166,165,149,133,117,101,85,86,87,88,89,90,106,122,138,154,102,103,104,105,121,137,153};
 
@@ -87,6 +88,9 @@ struct possibility_packet *decrypt_from_network(struct possibility_packet *packe
 
 key_part what_search(map_big_array *map_parts, int x, int y, struct possibility_packet possiblity)
 {
+	if(x==14 && y == 11 && possiblity.alloc == 9) {
+		printf("xy\n");
+	}
 	//char *result = malloc(MAX_KEY_LENGTH * sizeof(char));
 	key_part result;
 	result.k1 =-2;
@@ -151,6 +155,10 @@ key_part what_search(map_big_array *map_parts, int x, int y, struct possibility_
 		{
 			result.k4 = possiblity.grid[x-1][y].k2;
 		}
+	}
+	
+	if(result.k1 == -1 && result.k2 == -1 && result.k3 == -1 && result.k4 == -1) {
+		printf("nothing to search\n");
 	}
 	
 	return result;
@@ -396,4 +404,118 @@ int print_possibility_packet(struct possibility_packet *packet)
 {
 	printf("possibility x:%i y:%i facesused:%i directory:%i\n",packet->x,packet->y,packet->alloc,packet->direcory);
 	return 0;
+}
+
+File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbPossibility,map_big_array *mapParts)
+{
+    File *result = malloc(sizeof(File));
+    init_file_with_cache(result, 300, sizeof(struct possibility_packet));
+    
+	struct part *part = malloc(sizeof(struct part));
+	// initialisation
+
+    
+	
+	int *next_dir = malloc(sizeof(int)*nbPossibility);
+	
+	key_part *wsearch = malloc(sizeof(key_part) * nbPossibility);
+	int w;
+	for(w = 0; w < nbPossibility; w++)
+	{
+		uint8_t x = possiblity[w].x;
+		uint8_t y = possiblity[w].y;
+		int cur_dir = possiblity[w].direcory;
+		key_part ws = what_search(mapParts, x, y, possiblity[w]);
+		memcpy(&wsearch[w], &ws, sizeof(ws));
+		//free(ws);
+		
+		next_dir[w] = change_dir(cur_dir, x, y, &possiblity[w]);
+	}
+	if(possiblity->alloc >= ETERN_PARTS)
+	{
+		printf("Erreur alloc > ETERN_PARTS\n");
+	}
+	
+	File **fileParts = test_opencl(instance,wsearch, possiblity, nbPossibility);
+
+	int f;
+	for(f=0;f < nbPossibility;f++)
+	{
+		if(fileParts[f]->size > 0)
+		{
+//			printf("fileparts:%i size:%i\n",f,fileParts[f]->size);
+			while (fileParts[f]->size > 0) {
+				scroll(fileParts[f], part);
+				if(part != NULL)
+				{
+					struct possibility_packet *poss = malloc(sizeof(struct possibility_packet));
+					memcpy(poss, &possiblity[f], sizeof(struct possibility_packet));
+					uint8_t x = possiblity[f].x;
+					uint8_t y = possiblity[f].y;
+					poss->grid[x][y].k1 = part->top;
+					poss->grid[x][y].k2 = part->right;
+					poss->grid[x][y].k3 = part->bottom;
+					poss->grid[x][y].k4 = part->left;
+					if(poss->alloc > ETERN_PARTS)
+					{
+						printf("Erreur alloc > ETERN_PARTS\n");
+					}
+					
+					poss->alloc++;
+					if(poss->alloc > ETERN_PARTS)
+					{
+						
+						printf("Erreur alloc > ETERN_PARTS\n");
+					}
+					if(poss->alloc == ETERN_PARTS)
+					{
+						printf("fin de la boucle à %i \n", poss->alloc);
+						printf("solution trouvée\n");
+						for(x = 0; x < ETERN_SIZE; x++)
+						{
+							for(y=0;y < ETERN_SIZE; y++)
+							{
+								struct part *part = get_one_part(mapParts, poss->grid[x][y]);
+								printf("%i;%i; ",x,y);
+								print_part(part);
+							}
+						}
+						save_possibility("./solution",poss);
+						free(poss);
+						free(wsearch);
+						exit(EXIT_SUCCESS);
+					}
+					poss->direcory = next_dir[f];
+					if (poss->direcory == DIR_UP)
+					{
+						poss->y--;
+					} else if (poss->direcory == DIR_RIGHT)
+					{
+						poss->x++;
+					} else if (poss->direcory == DIR_DOWN)
+					{
+						poss->y++;
+					} else if (poss->direcory == DIR_LEFT)
+					{
+						poss->x--;
+					}
+					
+					poss->faceused[part->id -1] = 1;
+					put (result, poss);
+					free(poss);
+				}
+				
+				
+			}
+			
+		}
+		free_file(fileParts[f]);
+	}
+	free(part);
+	part = NULL;
+	free(fileParts);
+    
+	free(wsearch);
+	free(next_dir);
+    return result;
 }

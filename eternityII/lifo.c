@@ -136,7 +136,7 @@ int scroll_fifo (File * suite, void *dest){
 	}
 	suite->start = supp_element->next;
 	void *result = supp_element->value;
-	memcpy(result, dest, suite->sizeofvalue);
+	memcpy(dest, result, suite->sizeofvalue);
 	
 	if(inside_cache(suite, supp_element))
 	{
