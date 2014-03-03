@@ -252,7 +252,7 @@ etii_cl_instance *create_etii_cl_instance(cl_device_type device_type, map_big_ar
 	size_t w_ids, h_ids;
 	w_ids = h_ids = 529;//23*23
 	cl_image_format iformat_ids;
-	iformat_ids.image_channel_data_type = CL_SIGNED_INT8;
+	iformat_ids.image_channel_data_type = CL_SIGNED_INT16;
 	iformat_ids.image_channel_order = CL_RGBA;
 	cl_image_desc idesc_ids;
 	idesc_ids.image_width = w_ids;
@@ -266,7 +266,7 @@ etii_cl_instance *create_etii_cl_instance(cl_device_type device_type, map_big_ar
 	idesc_ids.buffer = NULL;
     cl_mem img_ids = CL_CHECK_ERR(clCreateImage(context, CL_MEM_READ_ONLY, &iformat_ids, &idesc_ids, NULL, &_err));
 	long ids_size = w_ids * h_ids * 4;
-    int8_t *ids = malloc(sizeof(int8_t)*ids_size);
+    int16_t *ids = malloc(sizeof(int16_t)*ids_size);
     int i_positions = 0;
 	int nb_real_faces = map->sizearray-1;
 	int k1;
@@ -367,8 +367,9 @@ File **test_opencl(etii_cl_instance *instance, key_part *keys, struct possibilit
    
     
 	for (int i=0; i<nbresearch; i++) {
+		struct possibility_packet poss =possiblity[i];
 		CL_CHECK(clEnqueueWriteBuffer(instance->queue, instance->key_buffer, CL_TRUE, i*sizeof(key_part), sizeof(key_part), &keys[i], 0, NULL, NULL));
-        CL_CHECK(clEnqueueWriteBuffer(instance->queue, instance->faceused_buffer, CL_TRUE, i*sizeof(uint8_t)*256, sizeof(uint8_t)*256, &possiblity[i].faceused, 0, NULL, NULL));
+        CL_CHECK(clEnqueueWriteBuffer(instance->queue, instance->faceused_buffer, CL_TRUE, i*sizeof(uint8_t)*256, sizeof(uint8_t)*256, poss.faceused, 0, NULL, NULL));
 	}
 	
 	/*
@@ -400,8 +401,8 @@ File **test_opencl(etii_cl_instance *instance, key_part *keys, struct possibilit
 	 
 	
 	cl_event kernel_completion;
-	size_t global_work_size[1] = { nbresearch };
-	size_t local_work_size[1] = { 1 };
+	size_t global_work_size[1] = { 768 };
+	size_t local_work_size[1] = { 64 };
 	
 	CL_CHECK(clEnqueueNDRangeKernel(instance->queue, kernel, 1, NULL, global_work_size, local_work_size, 0, NULL, &kernel_completion));
 	CL_CHECK(clWaitForEvents(1, &kernel_completion));
@@ -419,13 +420,7 @@ File **test_opencl(etii_cl_instance *instance, key_part *keys, struct possibilit
         int nbResult = 0;
         CL_CHECK(clEnqueueReadBuffer(instance->queue, instance->qt_buffer, CL_TRUE, i*sizeof(int), sizeof(int), &nbResult, 0, NULL, NULL));
 //		printf("qt:%i\n",nbResult);
-		if(nbResult > RESULT_BY_SEARCH)
-		{
-			
-			printf("i:%i | k1:%i;k2:%i,k3:%i,k3:%i nbresult:%i\n",i,keys[i].k1,keys[i].k2,keys[i].k3,keys[i].k4,nbResult);
 
-			printf("nbResult > RESULT_BY_SEARCH\n");
-		}
 		struct part *data = malloc(sizeof(struct part));
         for(int r=0; r < nbResult; r++)
         {

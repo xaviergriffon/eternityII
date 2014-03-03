@@ -483,7 +483,7 @@ void *autosearch (void *userdata)
 void *searchOpenCL (void *userdata)
 {
 	client_possibility_t *client = userdata;
-	int nbPossMax = 400;
+	int nbPossMax = 768;
 	etii_cl_instance *instance = create_etii_cl_instance(CL_DEVICE_TYPE_CPU, client->map_part,nbPossMax);
 	
 	while(1)
@@ -552,11 +552,6 @@ void *searchOpenCL (void *userdata)
 					{
 						
 						max_result = possibility->alloc;
-						
-						if(max_result >= ETERN_PARTS)
-						{
-							printf("Erreur alloc > ETERN_PARTS\n");
-						}
 						printf("max result:%i\n",max_result);
 					}
 					pthread_mutex_unlock(&max_lock);

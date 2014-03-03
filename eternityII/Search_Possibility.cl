@@ -62,7 +62,7 @@ __kernel void search_part_img(__global key_part *src, __global struct part *dst_
 	
 	int i = get_global_id(0);
 	int rsize = 0;
-	//if(i < nbresearch) {
+	if(i < nbresearch) {
 		key_part key = src[i];
 		const sampler_t sampler=CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST;
 		
@@ -80,17 +80,13 @@ __kernel void search_part_img(__global key_part *src, __global struct part *dst_
 			int x = (imap.r + p) % 225;
 			int y = imap.g + (imap.r - x + p) / 225;
 			int2 xy={x,y};
-
-	
+			
+			
 			int4 ipart = read_imagei(datas,sampler,xy);
 			int2 idxy= positionxy(ipart.r,ipart.g,ipart.b,ipart.a,nb_real_faces);
 			int4 iid = read_imagei(ids,sampler, idxy);
-			
-			//printf("part r: %i g:%i b:%i a:%i\n",ipart.r,ipart.g,ipart.b,ipart.a);
-			//		printf("iid %i \n",iid.r);
-			//		printf("xy.r (id) %i | xy.g: %i | p: %i \n",xy.r,xy.g,p);
-			
-			if((&src_faceused[i])[iid.r -1] == 0)
+						
+			if(src_faceused[i*256+iid.r -1] == 0)
 			{
 				dst_parts[r + added].id = iid.r;
 				dst_parts[r + added].top = ipart.r;
@@ -106,8 +102,7 @@ __kernel void search_part_img(__global key_part *src, __global struct part *dst_
 			}
 		}
 
-		//printf("fin global i:%i \n",i);
 		dst_qt[i] = rsize;
-	//}
+	}
 	
 }

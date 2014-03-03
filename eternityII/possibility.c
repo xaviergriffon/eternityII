@@ -359,7 +359,6 @@ int search_possiblity(File *result,struct possibility_packet *possiblity, map_bi
 				
 				poss.faceused[part->id -1] = 1;
 				put (result, &poss);
-                
 			}
 		}
 		//free(poss);
@@ -431,42 +430,30 @@ File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_pac
 		
 		next_dir[w] = change_dir(cur_dir, x, y, &possiblity[w]);
 	}
-	if(possiblity->alloc >= ETERN_PARTS)
-	{
-		printf("Erreur alloc > ETERN_PARTS\n");
-	}
 	
 	File **fileParts = test_opencl(instance,wsearch, possiblity, nbPossibility);
-
+	struct possibility_packet *poss = malloc(sizeof(struct possibility_packet));
 	int f;
 	for(f=0;f < nbPossibility;f++)
 	{
 		if(fileParts[f]->size > 0)
 		{
-//			printf("fileparts:%i size:%i\n",f,fileParts[f]->size);
 			while (fileParts[f]->size > 0) {
 				scroll(fileParts[f], part);
 				if(part != NULL)
 				{
-					struct possibility_packet *poss = malloc(sizeof(struct possibility_packet));
+					
 					memcpy(poss, &possiblity[f], sizeof(struct possibility_packet));
+
 					uint8_t x = possiblity[f].x;
 					uint8_t y = possiblity[f].y;
 					poss->grid[x][y].k1 = part->top;
 					poss->grid[x][y].k2 = part->right;
 					poss->grid[x][y].k3 = part->bottom;
 					poss->grid[x][y].k4 = part->left;
-					if(poss->alloc > ETERN_PARTS)
-					{
-						printf("Erreur alloc > ETERN_PARTS\n");
-					}
 					
 					poss->alloc++;
-					if(poss->alloc > ETERN_PARTS)
-					{
-						
-						printf("Erreur alloc > ETERN_PARTS\n");
-					}
+
 					if(poss->alloc == ETERN_PARTS)
 					{
 						printf("fin de la boucle à %i \n", poss->alloc);
@@ -499,10 +486,11 @@ File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_pac
 					{
 						poss->x--;
 					}
-					
+
 					poss->faceused[part->id -1] = 1;
+
 					put (result, poss);
-					free(poss);
+					
 				}
 				
 				
@@ -511,6 +499,7 @@ File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_pac
 		}
 		free_file(fileParts[f]);
 	}
+	free(poss);
 	free(part);
 	part = NULL;
 	free(fileParts);
