@@ -344,6 +344,8 @@ etii_cl_instance *create_etii_cl_instance(cl_device_type device_type, map_big_ar
     instance->img_datas = img_datas;
     instance->img_map = img_map;
     instance->img_ids = img_ids;
+	instance->partsBuffer = malloc(sizeof(struct part) * MAX_SOURCE_SIZE * max_research);
+	instance->resultsBuffer = malloc(sizeof(int) * max_research);
 	
     return instance;
 }
@@ -364,13 +366,16 @@ File **test_opencl(etii_cl_instance *instance, key_part *keys, struct possibilit
 	
 //	printf("size of part : %lu\n",sizeof(struct part));
     
-   
-    
+   CL_CHECK(clEnqueueWriteBuffer(instance->queue, instance->key_buffer, CL_TRUE, 0, sizeof(key_part)*nbresearch, keys, 0, NULL, NULL));
+	uint8_t *faceused = malloc(sizeof(uint8_t)*256*nbresearch);
 	for (int i=0; i<nbresearch; i++) {
 		struct possibility_packet poss =possiblity[i];
-		CL_CHECK(clEnqueueWriteBuffer(instance->queue, instance->key_buffer, CL_TRUE, i*sizeof(key_part), sizeof(key_part), &keys[i], 0, NULL, NULL));
-        CL_CHECK(clEnqueueWriteBuffer(instance->queue, instance->faceused_buffer, CL_TRUE, i*sizeof(uint8_t)*256, sizeof(uint8_t)*256, poss.faceused, 0, NULL, NULL));
+		for(int p=0;p<256;p++) {
+			faceused[i*256+p]=poss.faceused[p];
+		}
 	}
+	CL_CHECK(clEnqueueWriteBuffer(instance->queue, instance->faceused_buffer, CL_TRUE, 0, sizeof(uint8_t)*256*nbresearch, faceused, 0, NULL, NULL));
+	free(faceused);
 	
 	/*
     cl_kernel kernel;
@@ -401,8 +406,8 @@ File **test_opencl(etii_cl_instance *instance, key_part *keys, struct possibilit
 	 
 	
 	cl_event kernel_completion;
-	size_t global_work_size[1] = { 768 };
-	size_t local_work_size[1] = { 64 };
+	size_t global_work_size[1] = { nbresearch };
+	size_t local_work_size[1] = { 1 };
 	
 	CL_CHECK(clEnqueueNDRangeKernel(instance->queue, kernel, 1, NULL, global_work_size, local_work_size, 0, NULL, &kernel_completion));
 	CL_CHECK(clWaitForEvents(1, &kernel_completion));
@@ -414,29 +419,26 @@ File **test_opencl(etii_cl_instance *instance, key_part *keys, struct possibilit
 	
 //	printf("-duree = %ld ms | r:%i\n", ms, nbr);
 //	printf("Result:");
-	for (int i=0; i<nbresearch; i++) {
-//        printf("---%i\n",i);
-        int p_thread = i*sizeof(struct part) * RESULT_BY_SEARCH;
-        int nbResult = 0;
-        CL_CHECK(clEnqueueReadBuffer(instance->queue, instance->qt_buffer, CL_TRUE, i*sizeof(int), sizeof(int), &nbResult, 0, NULL, NULL));
-//		printf("qt:%i\n",nbResult);
-
-		struct part *data = malloc(sizeof(struct part));
-        for(int r=0; r < nbResult; r++)
-        {
-            
-            int position = p_thread + r*sizeof(struct part);
-            CL_CHECK(clEnqueueReadBuffer(instance->queue, instance->output_buffer, CL_TRUE, position, sizeof(struct part), data, 0, NULL, NULL));
-            put(results[i], data);
-			//print_part(data);
-			nbr++;
-//            printf(" %i --", data->id);
-        }
-		free(data);
-//        printf("\n");
+	for(int i=0;i< nbresearch;i++) {
+		instance->resultsBuffer[i]=0;
 	}
-//	printf("\n");
-		
+	CL_CHECK(clEnqueueReadBuffer(instance->queue, instance->qt_buffer, CL_TRUE, 0, sizeof(int) * instance->max_research, instance->resultsBuffer, 0, NULL, NULL));
+	
+	CL_CHECK(clEnqueueReadBuffer(instance->queue, instance->output_buffer, CL_TRUE, 0, sizeof(struct part)* instance->max_research *RESULT_BY_SEARCH, instance->partsBuffer, 0, NULL, NULL));
+
+	for (int i=0; i<nbresearch; i++) {
+		if(instance->resultsBuffer[i] >0) {
+			int p_thread = i* RESULT_BY_SEARCH;
+			
+			for(int r=0; r < instance->resultsBuffer[i]; r++)
+			{
+				put(results[i], &instance->partsBuffer[p_thread+r]);
+				nbr++;
+			}
+
+		}
+	}
+
 	CL_CHECK(clReleaseKernel(kernel));
 	gettimeofday(&tmv2, NULL);
 	ms = (tmv2.tv_sec-tmv1.tv_sec)*1000
@@ -465,5 +467,7 @@ int free_etii_cl_instance(etii_cl_instance *instance)
     
     CL_CHECK(clReleaseProgram(instance->program));
 	CL_CHECK(clReleaseContext(instance->context));
+	free(instance->partsBuffer);
+	free(instance->resultsBuffer);
     return 0;
 }

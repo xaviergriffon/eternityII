@@ -32,6 +32,8 @@ typedef struct
 	
     int mapsizearray;
 	int max_research;
+	struct part *partsBuffer;
+	int *resultsBuffer;
     
 } etii_cl_instance;
 

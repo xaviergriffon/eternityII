@@ -483,8 +483,8 @@ void *autosearch (void *userdata)
 void *searchOpenCL (void *userdata)
 {
 	client_possibility_t *client = userdata;
-	int nbPossMax = 768;
-	etii_cl_instance *instance = create_etii_cl_instance(CL_DEVICE_TYPE_CPU, client->map_part,nbPossMax);
+	int nbPossMax = 64;
+	etii_cl_instance *instance = create_etii_cl_instance(CL_DEVICE_TYPE_GPU, client->map_part,nbPossMax);
 	
 	while(1)
 	{
