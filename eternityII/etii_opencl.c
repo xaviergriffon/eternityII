@@ -406,8 +406,8 @@ File **test_opencl(etii_cl_instance *instance, key_part *keys, struct possibilit
 	 
 	
 	cl_event kernel_completion;
-	size_t global_work_size[1] = { nbresearch };
-	size_t local_work_size[1] = { 1 };
+	size_t global_work_size[1] = { nbresearch*64};
+	size_t local_work_size[1] = { 64 };
 	
 	CL_CHECK(clEnqueueNDRangeKernel(instance->queue, kernel, 1, NULL, global_work_size, local_work_size, 0, NULL, &kernel_completion));
 	CL_CHECK(clWaitForEvents(1, &kernel_completion));

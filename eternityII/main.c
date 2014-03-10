@@ -41,6 +41,7 @@ typedef struct in_addr IN_ADDR;
 #define MAX_STOCK_BY_THREAD 100
 
 pthread_mutex_t max_lock;
+pthread_mutex_t build_cl_instance;
 
 static int NB_THREADS = 10;
 
@@ -483,8 +484,10 @@ void *autosearch (void *userdata)
 void *searchOpenCL (void *userdata)
 {
 	client_possibility_t *client = userdata;
-	int nbPossMax = 64;
+	int nbPossMax = 24;
+	pthread_mutex_lock(&build_cl_instance);
 	etii_cl_instance *instance = create_etii_cl_instance(CL_DEVICE_TYPE_GPU, client->map_part,nbPossMax);
+	pthread_mutex_unlock(&build_cl_instance);
 	
 	while(1)
 	{
@@ -547,14 +550,14 @@ void *searchOpenCL (void *userdata)
 					struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
 					scroll(possibilities,possibility);
 
-					pthread_mutex_lock(&max_lock);
+//					pthread_mutex_lock(&max_lock);
 					if(possibility->alloc > max_result)
 					{
 						
 						max_result = possibility->alloc;
 						printf("max result:%i\n",max_result);
 					}
-					pthread_mutex_unlock(&max_lock);
+//					pthread_mutex_unlock(&max_lock);
 					put(db,possibility);
 
 					free(possibility);
