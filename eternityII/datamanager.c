@@ -102,7 +102,7 @@ int put_to_server(array_possibility_packet *possibilities)
     
 	send_instruction(socket_id, INST_END);
 	shutdown(socket_id, 2);
-	int err = close(socket_id);
+	int err = closesocket(socket_id);
 	if(0 != err)
 	{
 		printf("erreur close :%i\n",err);
@@ -210,7 +210,7 @@ void scroll_from_server(array_possibility_packet *result,int max_result)
 	
 	send_instruction(socket_id, INST_END);
 	shutdown(socket_id, 2);
-	int err = close(socket_id);
+	int err = closesocket(socket_id);
 	if(0 != err)
 	{
 		printf("erreur close :%i\n",err);
@@ -461,7 +461,7 @@ int print_file(int fp)
         if(currElement->value != NULL)
         {
             struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-            printf("x:%i y:%i directory:%i alloc:%i\n",possibility->x,possibility->y,possibility->direcory,possibility->alloc);
+            printf("x:%i y:%i alloc:%i\n",possibility->x,possibility->y,possibility->alloc);
         } else {
             printf("null value\n");
         }
@@ -518,7 +518,7 @@ int regroup_datas()
 	return 0;
 }
 
-int remove_possibilities_with_no_next(map_big_array *mapParts)
+int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part *all_rotate_part)
 {
     lock_all_file();
     int fp;
@@ -530,7 +530,7 @@ int remove_possibilities_with_no_next(map_big_array *mapParts)
 		{
             Element *nextElement =NULL;
 			struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-			if(!possibility_has_a_next(possibility, mapParts))
+			if(!possibility_has_a_next(possibility, mapParts,all_rotate_part))
 			{
                 
 				if(currElement->previous != NULL)

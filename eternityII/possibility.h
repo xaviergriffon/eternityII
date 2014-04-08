@@ -13,6 +13,7 @@ typedef unsigned short uint16_t;
 #include "part.h"
 #include "lifo.h"
 #include "etii_opencl_instance.h"
+#include "packed.h"
 
 #define ETERN_SIZE 16
 #define ETERN_PARTS 256
@@ -21,16 +22,15 @@ typedef unsigned short uint16_t;
 #define DIR_DOWN 3
 #define DIR_LEFT 4
 
-struct possibility_packet
+PACK(
+	 struct possibility_packet
 {
     uint8_t x;
     uint8_t y;
-    key_part grid[ETERN_SIZE][ETERN_SIZE];
+    int16_t grid[ETERN_SIZE][ETERN_SIZE];
 	uint16_t alloc;
 	uint8_t faceused[ETERN_PARTS];
-	uint8_t direcory;
-    
-} __attribute__((packed));
+});
 
 typedef struct
 {
@@ -39,9 +39,10 @@ typedef struct
 } array_possibility_packet;
 
 struct possibility_packet *generate_possibility_packet(int x, int y, struct part *etern[ETERN_SIZE][ETERN_SIZE], int directory);
-key_part what_search(map_big_array *map_parts, int x, int y, struct possibility_packet possiblity);
-int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts);
-int search_possiblity(File *result,struct possibility_packet *possiblity, map_big_array *mapParts);
+key_part what_search(struct array_part *all_rotate_parts, int x, int y, struct possibility_packet *possiblity);
+
+int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);
+int search_possiblity(File *result,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part);
 
 int change_dir(int cur_dir, int x, int y, struct possibility_packet *possiblity);
 
@@ -51,7 +52,7 @@ struct possibility_packet *decrypt_from_network(struct possibility_packet *packe
 int print_possibility_packet(struct possibility_packet *packet);
 int save_possibility(char *filename, struct possibility_packet *possibility);
 
-File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbPossibility,map_big_array *mapParts);
+File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbPossibility,map_big_array *mapParts, struct array_part *all_rotate_part);
 
 /*
  0 OK

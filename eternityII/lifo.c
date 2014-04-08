@@ -50,11 +50,6 @@ long position_cache(File *file, Element *element)
 
 /* (ajouter) un élément dans la file */
 int put (File * suite, void *value){
-	if(suite->sizeofvalue <=0)
-	{
-		printf("ALERT File with no sizeofvalue\n");
-	}
-	
 	Element *new_element = NULL;
 	if(suite->lastPostionCache < suite->cacheSize)
 	{
@@ -102,9 +97,10 @@ int scroll (File * suite, void *dest){
 	void *result = supp_element->value;
 	memcpy(dest, result, suite->sizeofvalue);
 	
-	if(inside_cache(suite, supp_element))
+	long position = position_cache(suite, supp_element);
+	if(position > -1)
 	{
-		if (position_cache(suite, supp_element) == suite->lastPostionCache -1)
+		if (position == suite->lastPostionCache -1)
 		{
 			suite->lastPostionCache--;
 		}

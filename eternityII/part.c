@@ -48,24 +48,25 @@ struct part *rotatePart(struct part *p, int nbRotate)
     return result;
 }
 
-struct array_part * rotate_all_parts(struct array_part apart)
+struct array_part * rotate_all_parts(struct array_part *apart)
 {
     struct array_part *result = malloc(sizeof *result);
-    result->size = apart.size * 4;
-    result->parts = malloc((result->size) * sizeof *result->parts);
+    result->size = apart->size * 4;
+    result->parts = calloc((result->size+4) ,sizeof(struct part));
     
     int p=0;
 	// on ne prend pas en compte l'id 0
     int i = 1;
     while(p< result->size)
     {
-        struct part *part = &apart.parts[i];
+        struct part *part = &apart->parts[i];
         int r;
         for (r=0; r < 4; r++)
         {
 			
 			struct part *rotatepart = rotatePart(part, r);
-			memcpy(&result->parts[p], rotatepart, sizeof(*rotatepart));
+			int position = i+ 256*r;
+			memcpy(&result->parts[position], rotatepart, sizeof(struct part));
 			//print_part(rotatepart);
             free(rotatepart);
 			p++;
@@ -75,13 +76,13 @@ struct array_part * rotate_all_parts(struct array_part apart)
     return result;
 }
 
-int search_max_face(struct array_part apart)
+int search_max_face(struct array_part *apart)
 {
     int maxface = 0;
     int i;
-    for (i = 1; i <= apart.size; i++)
+    for (i = 1; i <= apart->size; i++)
     {
-        struct part *p = &apart.parts[i];
+        struct part *p = &apart->parts[i];
         if (p->top > maxface)
         {
             maxface = p->top;
@@ -102,10 +103,9 @@ int search_max_face(struct array_part apart)
     return maxface;
 }
 
-struct array_part * search_face(struct array_part apart, int face, int position)
+struct array_part * search_face(struct array_part *apart, int face, int position)
 {
-    struct array_part *result = malloc(sizeof *result);
-    result->size = 0;
+
 	struct list_part *list = malloc(sizeof *list);
 	list->value = NULL;
 	list->next = NULL;
@@ -113,10 +113,10 @@ struct array_part * search_face(struct array_part apart, int face, int position)
 	curList = list;
 	int array_size = 0;
 	int i;
-    for (i = 0; i < apart.size; i++)
+    for (i = 0; i < apart->size; i++)
     {
         int present = 0;
-        struct part *p = &apart.parts[i];
+        struct part *p = &apart->parts[i];
         if ((position == PART_TOP || position == PART_NONE) && (p->top == face || (face == FACE_UNKNOW && p->top != 0)))
         {
             present = 1;
@@ -138,12 +138,7 @@ struct array_part * search_face(struct array_part apart, int face, int position)
 				curList->value = p;
 			} else
 			{
-				struct list_part *newList;
-				if (NULL == (newList = malloc(sizeof *newList)))
-				{
-					fprintf(stderr, "Problème avec malloc()\n");
-					exit(EXIT_FAILURE);
-				}
+				struct list_part *newList = malloc(sizeof *newList);
 				newList->value = p;
 				newList->next = NULL;
 				curList->next = newList;
@@ -153,13 +148,14 @@ struct array_part * search_face(struct array_part apart, int face, int position)
         }
     }
 	
+	struct array_part *result = malloc(sizeof(struct array_part));
+	result->parts = NULL;
+    result->size = 0;
 	if(array_size > 0)
 	{
-	if (NULL == (result->parts = malloc((array_size) * sizeof *result->parts)))
-	{
-		fprintf(stderr, "Problème avec malloc()\n");
-		exit(EXIT_FAILURE);
-	}
+		size_t allocsize = array_size * sizeof(struct part);
+		struct part *parts = malloc(allocsize);
+		result->parts = parts;
 	}else
 	{
 		result->parts = NULL;
@@ -291,11 +287,30 @@ struct array_part *get_parts_bigarray(map_big_array *map,int8_t p[4])
 	int8_t k3 = convert_p(p[2], map->sizearray);
 	int8_t k4 = convert_p(p[3], map->sizearray);
 	parts = map->bigarray[k1][k2][k3][k4];
-
+//	if(parts->size > 0 && parts->parts[0].id <0) {
+//		printf("get_parts_bigarray error : size:%i for %i:%i:%i:%i-%i:%i:%i:%i r[0].id = %i\n",parts->size,p[0],p[1],p[2],p[3],k1,k2,k3,k4,parts->parts[0].id );
+//	}
     return parts;
 }
 
-map_big_array *buildBigArray(struct array_part apart,int maxFace)
+void check_array(struct array_part *apart) {
+	printf("check_array :\n");
+	if(apart != NULL) {
+		printf("size:%i\n",apart->size);
+		for(int i=0;i <apart->size;i++) {
+			struct part p=apart->parts[i];
+			if(p.id < 0 || p.id > 256) {
+				printf("p[%i] id false:%i\n",i,p.id);
+				print_part(&p);
+			}
+		}
+	} else {
+		printf("array_part NULL\n");
+	}
+	printf("check_array end\n");
+}
+
+map_big_array *buildBigArray(struct array_part *apart,int maxFace)
 {
 	int sizeBigArray = (maxFace + 2);
 	map_big_array *result = malloc(sizeof(map_big_array));
@@ -326,8 +341,11 @@ map_big_array *buildBigArray(struct array_part apart,int maxFace)
 			}
 			big_array[p1][p2] = malloc(sizeof(struct array_part**)*sizeBigArray);
 			
-            struct array_part *arraypart2 = search_face(*arraypart1, f2, PART_RIGHT);
-            
+            struct array_part *arraypart2 = search_face(arraypart1, f2, PART_RIGHT);
+//            if(f1 >=0 && f2>=0 && arraypart2->size > maxarray)
+//			{
+//				maxarray = arraypart2->size;
+//			}
 			int f3;
 			for(f3=-1;f3 <= maxFace;f3++)
 			{
@@ -338,7 +356,7 @@ map_big_array *buildBigArray(struct array_part apart,int maxFace)
 				}
 				big_array[p1][p2][p3] = malloc(sizeof(struct array_part*)*sizeBigArray);
                 
-                struct array_part *arraypart3 = search_face(*arraypart2, f3, PART_BOTTOM);
+                struct array_part *arraypart3 = search_face(arraypart2, f3, PART_BOTTOM);
                 
 				int f4;
 				for(f4=-1;f4 <= maxFace;f4++)
@@ -351,7 +369,7 @@ map_big_array *buildBigArray(struct array_part apart,int maxFace)
 					
 
 					
-                    struct array_part *arraypart = search_face(*arraypart3, f4, PART_LEFT);
+                    struct array_part *arraypart = search_face(arraypart3, f4, PART_LEFT);
 					if(f1 >=0 || f2>=0 || f3>=0 || f4>=0)
 					{
 						if(arraypart->size > maxarray)
@@ -360,6 +378,7 @@ map_big_array *buildBigArray(struct array_part apart,int maxFace)
 						}
 							}
 					big_array[p1][p2][p3][p4] = copy_array_part(arraypart);
+					
                     free_array_part(arraypart);
 				}
                 free_array_part(arraypart3);
@@ -375,7 +394,7 @@ map_big_array *buildBigArray(struct array_part apart,int maxFace)
 	return result;
 }
 
-struct map_part *buildMapPart(struct array_part apart, int maxFace)
+struct map_part *buildMapPart(struct array_part *apart, int maxFace)
 {
 	err = 0;
 	struct map_part *result = malloc(sizeof *result);
@@ -383,7 +402,7 @@ struct map_part *buildMapPart(struct array_part apart, int maxFace)
 	// Considérant un tot de 50% de croisement du hash, on répercute sur la taille
 	result->sizemap = result->size * 1.5;
 	long size = (result->sizemap * sizeof(*result->elements));
-    printf("taille part : %i\n", apart.size);
+    printf("taille part : %i\n", apart->size);
     printf("nb mappart : %i\n", result->sizemap);
 	printf("alloc : %li\n",size);
 	result->elements = calloc(result->sizemap,sizeof(*result->elements));
@@ -404,7 +423,7 @@ struct map_part *buildMapPart(struct array_part apart, int maxFace)
 			char *c2 = malloc(MAX_KEY_LENGTH * sizeof(char));//calloc('\0', MAX_KEY_LENGTH * sizeof(char));
 			sprintf(c2, "%s_%d",c1,f2);
 			
-            struct array_part *arraypart2 = search_face(*arraypart1, f2, PART_RIGHT);
+            struct array_part *arraypart2 = search_face(arraypart1, f2, PART_RIGHT);
             
 			int f3;
 			for(f3=-1;f3 <= maxFace;f3++)
@@ -413,7 +432,7 @@ struct map_part *buildMapPart(struct array_part apart, int maxFace)
 				sprintf(c3, "%s_%d",c2,f3);
 				
                 
-                struct array_part *arraypart3 = search_face(*arraypart2, f3, PART_BOTTOM);
+                struct array_part *arraypart3 = search_face(arraypart2, f3, PART_BOTTOM);
                 
 				int f4;
 				for(f4=-1;f4 <= maxFace;f4++)
@@ -421,7 +440,7 @@ struct map_part *buildMapPart(struct array_part apart, int maxFace)
 					char *c4 = malloc(MAX_KEY_LENGTH * sizeof(char));//calloc('\0', MAX_KEY_LENGTH * sizeof(char));
 					sprintf(c4, "%s_%d",c3,f4);
 					key_int = hash(c4);
-                    struct array_part *arraypart = search_face(*arraypart3, f4, PART_LEFT);
+                    struct array_part *arraypart = search_face(arraypart3, f4, PART_LEFT);
 					put_part(result, key_int, c4, arraypart);
                     free_array_part(arraypart);
 				}
@@ -561,16 +580,11 @@ struct part* get_one_part(map_big_array *map_parts, key_part key)
     return result;
 }
 
-map_big_array *prepare_map_part(const char* file)
+map_big_array *prepare_map_part(struct array_part *rotateParts)
 {
-	struct array_part apart= read_parts(file);
-	int maxface = search_max_face(apart);
-	struct array_part *rotateParts = rotate_all_parts(apart);
-	free(apart.parts);
-	map_big_array *mapParts = buildBigArray(*rotateParts, maxface);
+	int maxface = search_max_face(rotateParts);
+	map_big_array *mapParts = buildBigArray(rotateParts, maxface);
 	
-	free(rotateParts->parts);
-	free(rotateParts);
 	
 	return mapParts;
 }
@@ -636,3 +650,8 @@ struct map_in_one *regroup_map(map_big_array *map)
 	
 	return result;
 }
+
+int16_t idpart(int id, int8_t rotation) {
+    return id + 256 * rotation;
+}
+

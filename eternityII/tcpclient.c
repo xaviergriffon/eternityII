@@ -1,11 +1,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
+#ifdef WIN32
+#include <winsock2.h>
+#define sleep(s) Sleep(s*1000)
+#else
+#include <sys/times.h>
 #include <sys/types.h>
+#include <sys/socket.h>
 #include <netinet/in.h>
-#include <netdb.h>
+#include <arpa/inet.h>
+#include <unistd.h> /* close */
+#include <netdb.h> /* gethostbyname */
+#define INVALID_SOCKET -1
+#define SOCKET_ERROR -1
+#define closesocket(s) close(s)
+typedef int SOCKET;
+typedef struct sockaddr_in SOCKADDR_IN;
+typedef struct sockaddr SOCKADDR;
+typedef struct in_addr IN_ADDR;
+#endif
+
 #include "tcpclient.h"
 
 #define NB_ATTEMPTS 10
@@ -29,9 +44,9 @@ int create_tcp_client(const char *hostname, int port)
 	/* création de la socket */
 	if(-1 == (socket_id = socket(PF_INET,SOCK_STREAM, 0)))
 	{
-				printf("Impossible de créer une socket\n");
+		printf("Impossible de créer une socket\n");
 		fprintf(stderr, "Impossible de créer une socket\n");
-
+		
 		exit(EXIT_FAILURE);
 	}
 	
@@ -42,9 +57,9 @@ int create_tcp_client(const char *hostname, int port)
 	tv.tv_sec = 5;
 	tv.tv_usec = 0;
 	setsockopt(socket_id, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(struct timeval));
-
+	
 	//setsockopt(socket_id, SOL_SOCKET, SO_NOSIGPIPE, &optval, sizeof(int));
-
+	
 	/* connexion au serveur */
 	sockname.sin_family = host_address->h_addrtype;
 	sockname.sin_port = htons(port);
@@ -55,7 +70,7 @@ int create_tcp_client(const char *hostname, int port)
 		if(-1 == (connect(socket_id, (struct sockaddr *)&sockname, sizeof(struct sockaddr_in))))
 		{
 			fprintf(stderr, "Impossible de connecter la socket au serveur '%s' tentative:%i\n",hostname,t);
-			close(socket_id);
+			closesocket(socket_id);
 			if (t == NB_ATTEMPTS) {
 				socket_id = -1;
 				break;

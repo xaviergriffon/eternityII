@@ -12,7 +12,7 @@
 #include "possibility.h"
 #include "etii_opencl.h"
 
-static int directions[256] = {135,221,210,34,45,255,254,253,237,222,223,239,238,240,224,208,209,226,242,241,225,0,1,2,18,33,32,16,17,13,14,15,31,47,46,29,30,118,119,120,136,152,151,150,134,252,251,250,249,248,247,246,245,244,243,192,176,160,144,128,112,96,80,64,48,3,4,5,6,7,8,9,10,11,12,63,79,95,111,127,143,159,175,191,207,236,235,234,233,232,231,230,229,228,227,193,177,161,145,129,113,97,81,65,49,19,20,21,22,23,24,25,26,27,28,62,78,94,110,126,142,158,174,190,206,220,219,218,217,216,215,214,213,212,211,194,178,162,146,130,114,98,82,66,50,35,36,37,38,39,40,41,42,43,44,61,77,93,109,125,141,157,173,189,205,204,203,202,201,200,199,198,197,196,195,179,163,147,131,115,99,83,67,51,52,53,54,55,56,57,58,59,60,76,92,108,124,140,156,172,188,187,186,185,184,183,182,181,180,164,148,132,116,100,84,68,69,70,71,72,73,74,75,91,107,123,139,155,171,170,169,168,167,166,165,149,133,117,101,85,86,87,88,89,90,106,122,138,154,102,103,104,105,121,137,153};
+static int directions[256] = {135,221,210,34,45,255,254,253,237,222,223,239,238,240,224,208,209,226,242,241,225,0,1,2,18,33,32,16,17,15,31,47,46,29,13,14,30,119,120,136,152,151,150,134,118,252,251,250,249,248,247,246,245,244,243,192,176,160,144,128,112,96,80,64,48,3,4,5,6,7,8,9,10,11,12,63,79,95,111,127,143,159,175,191,207,236,235,234,233,232,231,230,229,228,227,193,177,161,145,129,113,97,81,65,49,19,20,21,22,23,24,25,26,27,28,62,78,94,110,126,142,158,174,190,206,220,219,218,217,216,215,214,213,212,211,194,178,162,146,130,114,98,82,66,50,35,36,37,38,39,40,41,42,43,44,61,77,93,109,125,141,157,173,189,205,204,203,202,201,200,199,198,197,196,195,179,163,147,131,115,99,83,67,51,52,53,54,55,56,57,58,59,60,76,92,108,124,140,156,172,188,187,186,185,184,183,182,181,180,164,148,132,116,100,84,68,69,70,71,72,73,74,75,91,107,123,139,155,171,170,169,168,167,166,165,149,133,117,101,85,86,87,88,89,90,106,122,138,154,102,103,104,105,121,137,153};
 
 int test_directions()
 {
@@ -46,7 +46,6 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 	struct possibility_packet *result = malloc(sizeof(*result));
 	result->x = x;
 	result->y = y;
-	result->direcory = directory;
 	result->alloc = 0;
 	
 	memset(result->faceused, 0, sizeof(result->faceused));
@@ -60,15 +59,12 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 			struct part *part = etern[l][h];
 			if(part != NULL)
 			{
-				result->grid[l][h].k1 = part->top;
-				result->grid[l][h].k2 = part->right;
-				result->grid[l][h].k3 = part->bottom;
-				result->grid[l][h].k4 = part->left;
-				result->faceused[part->id-1] = 1;
+				result->grid[l][h] = part->id + part->rotation * 256;
+                result->faceused[part->id-1] = 1;
 				result->alloc++;
 			} else
 			{
-				result->grid[l][h].k1 = -2;
+				result->grid[l][h] = -2;
 			}
 		}
 	}
@@ -86,11 +82,8 @@ struct possibility_packet *decrypt_from_network(struct possibility_packet *packe
 	return NULL;
 }
 
-key_part what_search(map_big_array *map_parts, int x, int y, struct possibility_packet possiblity)
+key_part what_search(struct array_part *all_rotate_parts, int x, int y, struct possibility_packet *possiblity)
 {
-	if(x==14 && y == 11 && possiblity.alloc == 9) {
-		printf("xy\n");
-	}
 	//char *result = malloc(MAX_KEY_LENGTH * sizeof(char));
 	key_part result;
 	result.k1 =-2;
@@ -103,12 +96,12 @@ key_part what_search(map_big_array *map_parts, int x, int y, struct possibility_
 		result.k1 = 0;
 	} else
 	{
-		if(possiblity.grid[x][y-1].k1 < 0)
+		if(possiblity->grid[x][y-1] < 0)
 		{
 			result.k1 = -1;
 		} else
 		{
-			result.k1 = possiblity.grid[x][y-1].k3;
+			result.k1 = all_rotate_parts->parts[possiblity->grid[x][y-1]].bottom;
 		}
 	}
 	
@@ -118,12 +111,12 @@ key_part what_search(map_big_array *map_parts, int x, int y, struct possibility_
 		result.k2 = 0;
 	} else
 	{
-		if(possiblity.grid[x+1][y].k1 < 0)
+		if(possiblity->grid[x+1][y] < 0)
 		{
 			result.k2 = -1;
 		} else
 		{
-			result.k2 = possiblity.grid[x+1][y].k4;
+			result.k2 = all_rotate_parts->parts[possiblity->grid[x+1][y]].left;
 		}
 	}
 	
@@ -133,12 +126,12 @@ key_part what_search(map_big_array *map_parts, int x, int y, struct possibility_
 		result.k3 = 0;
 	} else
 	{
-		if(possiblity.grid[x][y+1].k1 < 0)
+		if(possiblity->grid[x][y+1] < 0)
 		{
 			result.k3 = -1;
 		} else
 		{
-			result.k3 = possiblity.grid[x][y+1].k1;
+			result.k3 = all_rotate_parts->parts[possiblity->grid[x][y+1]].top;
 		}
 	}
 	
@@ -148,18 +141,18 @@ key_part what_search(map_big_array *map_parts, int x, int y, struct possibility_
 		result.k4 = 0;
 	} else
 	{
-		if(possiblity.grid[x-1][y].k1 < 0)
+		if(possiblity->grid[x-1][y] < 0)
 		{
 			result.k4 = -1;
 		} else
 		{
-			result.k4 = possiblity.grid[x-1][y].k2;
+			result.k4 = all_rotate_parts->parts[possiblity->grid[x-1][y]].right;
 		}
 	}
 	
-	if(result.k1 == -1 && result.k2 == -1 && result.k3 == -1 && result.k4 == -1) {
-		printf("nothing to search\n");
-	}
+//	if(result.k1 == -1 && result.k2 == -1 && result.k3 == -1 && result.k4 == -1) {
+//		printf("nothing to search x:%i y:%i \n",x,y);
+//	}
 	
 	return result;
 }
@@ -200,6 +193,7 @@ key_part what_search(map_big_array *map_parts, int x, int y, struct possibility_
  return cur_dir;
  }
  */
+/*
 int change_dir(int cur_dir, int x, int y, struct possibility_packet *possiblity)
 {
     if (cur_dir == DIR_UP)
@@ -237,6 +231,7 @@ int change_dir(int cur_dir, int x, int y, struct possibility_packet *possiblity)
 	
     return cur_dir;
 }
+ */
 
 int save_possibility(char *filename, struct possibility_packet *possibility)
 {
@@ -254,14 +249,14 @@ int save_possibility(char *filename, struct possibility_packet *possibility)
 	return 0;
 }
 
-int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts)
+int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part)
 {
     int result = 0;
     
     // initialisation
 	uint8_t x = possibility->x;
 	uint8_t y = possibility->y;
-    key_part wsearch = what_search(mapParts, x, y, *possibility);
+    key_part wsearch = what_search(all_rotate_part, x, y, possibility);
 	
 	int8_t p[4] = {wsearch.k1,wsearch.k2,wsearch.k3,wsearch.k4};
     struct array_part *search = get_parts_bigarray(mapParts, p);
@@ -279,88 +274,71 @@ int possibility_has_a_next(struct possibility_packet *possibility, map_big_array
     return result;
 }
 
-int search_possiblity(File *result,struct possibility_packet *possiblity, map_big_array *mapParts)
+int search_possiblity(File *result,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part)
 {
 	int max_result=0;
     uint8_t x;
 	uint8_t y;
-	int cur_dir;
-	struct part *part = NULL;
+	
 	// initialisation
 	x = possiblity->x;
 	y = possiblity->y;
     
-	cur_dir = possiblity->direcory;
-	part = NULL;
-	
-	key_part wsearch = what_search(mapParts, x, y, *possiblity);
+	//cur_dir = possiblity->direcory;
+	key_part wsearch = what_search(all_rotate_part, x, y, possiblity);
 	
 	int8_t p[4] = {wsearch.k1,wsearch.k2,wsearch.k3,wsearch.k4};
-	int next_dir = change_dir(cur_dir, x, y, possiblity);
+	//int next_dir = change_dir(cur_dir, x, y, possiblity);
 	struct array_part *search = get_parts_bigarray(mapParts, p);
 	int s;
-	if(search->size > 0)
-	{
+
 		// test performance
 		//struct possibility_packet *poss = malloc(sizeof(*poss));
-		struct possibility_packet poss;
+		
 		for(s=0; s< search->size; s++)
 		{
 			if(search->parts[s].id != 0 && possiblity->faceused[search->parts[s].id -1] == 0)
 			{
-				part = &search->parts[s];
-                
-				memcpy(&poss, possiblity, sizeof(*possiblity));
-				poss.grid[x][y].k1 = part->top;
-				poss.grid[x][y].k2 = part->right;
-				poss.grid[x][y].k3 = part->bottom;
-				poss.grid[x][y].k4 = part->left;
-				poss.alloc++;
-				if(poss.alloc >= ETERN_PARTS)
+				struct part part = search->parts[s];
+                // On injecte dans la pile afin qu'un copie soit faite puis on utilise la copie
+				put (result, possiblity);
+				struct possibility_packet *poss = (struct possibility_packet *)result->end->value;
+				poss->grid[x][y] = idpart(part.id, part.rotation);
+				poss->alloc++;
+				if(poss->alloc >= ETERN_PARTS)
 				{
-					printf("fin de la boucle à %i \n", poss.alloc);
+					printf("fin de la boucle à %i \n", poss->alloc);
 					printf("solution trouvée\n");
 					for(x = 0; x < ETERN_SIZE; x++)
 					{
 						for(y=0;y < ETERN_SIZE; y++)
 						{
-							struct part *part = get_one_part(mapParts, poss.grid[x][y]);
+							//struct part *part = get_one_part(mapParts, poss.grid[x][y]);
+                            struct part *part = &all_rotate_part->parts[poss->grid[x][y]];
 							printf("%i;%i; ",x,y);
 							print_part(part);
 						}
 					}
-					save_possibility("./solution",&poss);
+					save_possibility("./solution",poss);
 					//free(poss);
 					//free(wsearch);
 					exit(EXIT_SUCCESS);
 				}
-				if(poss.alloc > max_result)
+				if(poss->alloc > max_result)
 				{
-					max_result = poss.alloc;
-				}
-				poss.direcory = next_dir;
-				if (poss.direcory == DIR_UP)
-				{
-					poss.y--;
-				} else if (poss.direcory == DIR_RIGHT)
-				{
-					poss.x++;
-				} else if (poss.direcory == DIR_DOWN)
-				{
-					poss.y++;
-				} else if (poss.direcory == DIR_LEFT)
-				{
-					poss.x--;
+					max_result = poss->alloc;
 				}
 				
-				div_t xy = div(directions[poss.alloc], ETERN_SIZE);
-				poss.x = xy.rem;
-				poss.y = xy.quot;
+//				div_t xy = div(directions[poss.alloc], ETERN_SIZE);
+//				poss.x = xy.rem;
+//				poss.y = xy.quot;
+				poss->x = directions[poss->alloc] % ETERN_SIZE;
+				poss->y = (directions[poss->alloc] - poss->x) / ETERN_SIZE;
+
 				
-				poss.faceused[part->id -1] = 1;
-				put (result, &poss);
+				poss->faceused[part.id -1] = 1;
+				//put (result, &poss);
 			}
-		}
 		//free(poss);
 	}
 	
@@ -381,7 +359,7 @@ int check_possibility(struct possibility_packet *packet)
 	
 	if(packet->x < 0 || packet->x >= ETERN_SIZE || packet->y < 0 || packet->y >= ETERN_SIZE) return -2;
 	
-	if(packet->direcory < DIR_UP || packet->direcory > DIR_LEFT) return -3;
+	//if(packet->direcory < DIR_UP || packet->direcory > DIR_LEFT) return -3;
 	
 	if(packet->alloc <= 0) return -4;
 	
@@ -401,21 +379,14 @@ int check_possibility(struct possibility_packet *packet)
 
 int print_possibility_packet(struct possibility_packet *packet)
 {
-	printf("possibility x:%i y:%i facesused:%i directory:%i\n",packet->x,packet->y,packet->alloc,packet->direcory);
+	printf("possibility x:%i y:%i facesused:%i \n",packet->x,packet->y,packet->alloc);
 	return 0;
 }
 
-File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbPossibility,map_big_array *mapParts)
+File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbPossibility,map_big_array *mapParts, struct array_part *all_rotate_part)
 {
     File *result = malloc(sizeof(File));
-    init_file_with_cache(result, 300, sizeof(struct possibility_packet));
-    
-	struct part *part = malloc(sizeof(struct part));
-	// initialisation
-
-    
-	
-	int *next_dir = malloc(sizeof(int)*nbPossibility);
+    init_file_with_cache(result, nbPossibility * 60, sizeof(struct possibility_packet));
 	
 	key_part *wsearch = malloc(sizeof(key_part) * nbPossibility);
 	int w;
@@ -423,34 +394,29 @@ File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_pac
 	{
 		uint8_t x = possiblity[w].x;
 		uint8_t y = possiblity[w].y;
-		int cur_dir = possiblity[w].direcory;
-		key_part ws = what_search(mapParts, x, y, possiblity[w]);
+		//int cur_dir = possiblity[w].direcory;
+		key_part ws = what_search(all_rotate_part, x, y, &possiblity[w]);
 		memcpy(&wsearch[w], &ws, sizeof(ws));
 		//free(ws);
-		
-		next_dir[w] = change_dir(cur_dir, x, y, &possiblity[w]);
 	}
 	
 	File **fileParts = test_opencl(instance,wsearch, possiblity, nbPossibility);
-	struct possibility_packet *poss = malloc(sizeof(struct possibility_packet));
 	int f;
+	int16_t *kpart = malloc(sizeof(int16_t));
 	for(f=0;f < nbPossibility;f++)
 	{
 		if(fileParts[f]->size > 0)
 		{
 			while (fileParts[f]->size > 0) {
-				scroll(fileParts[f], part);
-				if(part != NULL)
+				scroll(fileParts[f], kpart);
+				if(kpart != NULL)
 				{
-					
-					memcpy(poss, &possiblity[f], sizeof(struct possibility_packet));
+					put (result, &possiblity[f]);
+					struct possibility_packet *poss = result->end->value;
 
 					uint8_t x = possiblity[f].x;
 					uint8_t y = possiblity[f].y;
-					poss->grid[x][y].k1 = part->top;
-					poss->grid[x][y].k2 = part->right;
-					poss->grid[x][y].k3 = part->bottom;
-					poss->grid[x][y].k4 = part->left;
+					poss->grid[x][y] = *kpart;
 					
 					poss->alloc++;
 
@@ -462,7 +428,7 @@ File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_pac
 						{
 							for(y=0;y < ETERN_SIZE; y++)
 							{
-								struct part *part = get_one_part(mapParts, poss->grid[x][y]);
+								struct part *part = &all_rotate_part->parts[poss->grid[x][y]];
 								printf("%i;%i; ",x,y);
 								print_part(part);
 							}
@@ -472,25 +438,11 @@ File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_pac
 						free(wsearch);
 						exit(EXIT_SUCCESS);
 					}
-					poss->direcory = next_dir[f];
-					if (poss->direcory == DIR_UP)
-					{
-						poss->y--;
-					} else if (poss->direcory == DIR_RIGHT)
-					{
-						poss->x++;
-					} else if (poss->direcory == DIR_DOWN)
-					{
-						poss->y++;
-					} else if (poss->direcory == DIR_LEFT)
-					{
-						poss->x--;
-					}
-
-					poss->faceused[part->id -1] = 1;
-
-					put (result, poss);
 					
+					poss->x = directions[poss->alloc] % ETERN_SIZE;
+					poss->y = (directions[poss->alloc] - poss->x) / ETERN_SIZE;
+					
+					poss->faceused[*kpart % 256] = 1;
 				}
 				
 				
@@ -499,12 +451,11 @@ File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_pac
 		}
 		free_file(fileParts[f]);
 	}
-	free(poss);
-	free(part);
-	part = NULL;
+	free(kpart);
+	kpart = NULL;
 	free(fileParts);
     
 	free(wsearch);
-	free(next_dir);
+
     return result;
 }

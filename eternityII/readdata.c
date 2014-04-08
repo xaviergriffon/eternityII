@@ -1,9 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "readdata.h"
-#include "part.h"
 
-struct array_part read_parts(const char *file)
+struct array_part *read_parts(const char *file)
 {
 	int np = 0;
 	
@@ -25,9 +24,9 @@ struct array_part read_parts(const char *file)
 	{
 		exit(EXIT_FAILURE);
 	}
-    struct array_part array;
-    array.size = np;
-    array.parts = parts;
+    struct array_part *array = malloc(sizeof(struct array_part));
+    array->size = np;
+    array->parts = parts;
     
 	parts[0].id = 0;
 	parts[0].top = 0;

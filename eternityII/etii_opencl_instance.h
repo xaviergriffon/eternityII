@@ -14,6 +14,8 @@
 #include <CL/cl.h>
 #endif
 
+#include "part.h"
+
 typedef struct
 {
     cl_context context;
@@ -21,7 +23,6 @@ typedef struct
     
     cl_command_queue queue;
     cl_mem map_buffer;
-    cl_mem parts_buffer;
 	cl_mem key_buffer;
 	cl_mem faceused_buffer;
 	cl_mem output_buffer;
@@ -29,11 +30,14 @@ typedef struct
     cl_mem img_map;
     cl_mem img_datas;
 	cl_mem img_ids;
+	cl_mem img_keys;
+	cl_mem img_output;
 	
     int mapsizearray;
 	int max_research;
-	struct part *partsBuffer;
-	int *resultsBuffer;
+	key_part *partsBuffer;
+	uint8_t *resultsBuffer;
+	int16_t *imgoutflat;
     
 } etii_cl_instance;
 

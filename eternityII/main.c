@@ -4,9 +4,22 @@
 #include <pthread.h>
 #include <time.h>
 
-#include <readline/readline.h>
+//#include <readline/readline.h>
 #ifdef WIN32
 #include <winsock2.h>
+#define sleep(s) Sleep(s*1000)
+#include <windows.h>
+
+void usleep(int waitTime) {
+	__int64 time1 = 0, time2 = 0, freq = 0;
+	
+	QueryPerformanceCounter((LARGE_INTEGER *)&time1);
+	QueryPerformanceFrequency((LARGE_INTEGER *)&freq);
+	
+	do {
+		QueryPerformanceCounter((LARGE_INTEGER *)&time2);
+	} while ((time2 - time1) < waitTime);
+}
 #else
 #include <sys/times.h>
 #include <sys/types.h>
@@ -32,6 +45,7 @@ typedef struct in_addr IN_ADDR;
 #include "lifo.h"
 #include "etii_protocol.h"
 #include "etii_opencl.h"
+#include "readdata.h"
 
 #define NB_CONNECTIONS_PAR_THREAD 1
 #define MICRO_SLEEP 100
@@ -68,6 +82,7 @@ typedef struct
 	pthread_t *tid;
 	array_possibility_packet *aposs;
 	map_big_array *map_part;
+    struct array_part *all_rotate_part;
 	int compteur;
 	int request;
 } client_possibility_t;
@@ -75,8 +90,7 @@ typedef struct
 
 unsigned long long *compteurs = NULL;
 unsigned long long *lastfilesize = NULL;
-
-void first_possibility(map_big_array *mapParts);
+void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_part);
 
 static unsigned long long getted_possibility_not_null = 0;
 
@@ -270,7 +284,7 @@ void *client (void *userdata)
 	}
 	
 	shutdown(client->socket_id, 2);
-	int err = close(client->socket_id);
+	int err = closesocket(client->socket_id);
 	if(0 != err)
 	{
 		printf("erreur close :%i\n",err);
@@ -287,9 +301,14 @@ void *client (void *userdata)
 
 void runserver(const char* file)
 {
-    map_big_array *map_parts = prepare_map_part(file);
-	first_possibility(map_parts);
+	struct array_part *apart= read_parts(file);
+	
+	struct array_part *rotateParts = rotate_all_parts(apart);
+    map_big_array *map_parts = prepare_map_part(rotateParts);
+    free_array_part(apart);
+	first_possibility(map_parts,rotateParts);
 	free_bigarray(map_parts);
+	free_array_part(rotateParts);
 	
 	int socket_id;
 	client_t *thread_params;
@@ -428,7 +447,7 @@ void *autosearch (void *userdata)
 				scroll(db, possibilityPacket);
 				compteurs[client->compteur]++;
 				
-				int max = search_possiblity(db, possibilityPacket, client->map_part);
+				int max = search_possiblity(db, possibilityPacket, client->map_part, client->all_rotate_part);
 				
 				if(max > max_result)
 				{
@@ -484,7 +503,7 @@ void *autosearch (void *userdata)
 void *searchOpenCL (void *userdata)
 {
 	client_possibility_t *client = userdata;
-	int nbPossMax = 24;
+	int nbPossMax = 128;
 	pthread_mutex_lock(&build_cl_instance);
 	etii_cl_instance *instance = create_etii_cl_instance(CL_DEVICE_TYPE_GPU, client->map_part,nbPossMax);
 	pthread_mutex_unlock(&build_cl_instance);
@@ -496,7 +515,7 @@ void *searchOpenCL (void *userdata)
 			usleep(MICRO_SLEEP);
 		}
 		File *db = malloc(sizeof(File));
-		init_file_with_cache(db, 3000, sizeof(struct possibility_packet));
+		init_file_with_cache(db, MAX_STOCK_BY_THREAD, sizeof(struct possibility_packet));
 		struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
 		struct possibility_packet *posss = malloc(sizeof(struct possibility_packet) * nbPossMax);
 		int a;
@@ -505,7 +524,7 @@ void *searchOpenCL (void *userdata)
 			put(db,&client->aposs->possibilities[a]);
 			while(db->size > 0 && client->request == 0)
 			{
-				if(db->size > MAX_STOCK_BY_THREAD && 1> 2)
+				if(db->size > MAX_STOCK_BY_THREAD)
 				{
 					array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
 					int reste = db->size - MAX_STOCK_BY_THREAD;
@@ -543,23 +562,23 @@ void *searchOpenCL (void *userdata)
                     
                 }
 				
-				File *possibilities = search_possiblity_opencl(instance,posss,nbSearch,client->map_part);
+				File *possibilities = search_possiblity_opencl(instance,posss,nbSearch,client->map_part,client->all_rotate_part);
 				
 				while(possibilities->size > 0)
 				{
 					struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
 					scroll(possibilities,possibility);
-
-//					pthread_mutex_lock(&max_lock);
+					
+					//					pthread_mutex_lock(&max_lock);
 					if(possibility->alloc > max_result)
 					{
 						
 						max_result = possibility->alloc;
 						printf("max result:%i\n",max_result);
 					}
-//					pthread_mutex_unlock(&max_lock);
+					//					pthread_mutex_unlock(&max_lock);
 					put(db,possibility);
-
+					
 					free(possibility);
 				}
 				
@@ -619,11 +638,14 @@ void runThreadClient(const char *file)
 		fprintf(stderr, "Problème avec malloc()\n");
 		exit(EXIT_FAILURE);
 	}
+	struct array_part *apart= read_parts(file);
 	for(i = 0; i < NB_THREADS; i++)
 	{
 		thread_params[i].works = 0;
 		thread_params[i].aposs = NULL;
-		thread_params[i].map_part = prepare_map_part(file);
+		struct array_part *rotateParts = rotate_all_parts(apart);
+		thread_params[i].all_rotate_part =rotateParts;
+		thread_params[i].map_part = prepare_map_part(rotateParts);
 		thread_params[i].tid = NULL;
 		thread_params[i].compteur = i;
 		thread_params[i].request = 0;
@@ -635,7 +657,7 @@ void runThreadClient(const char *file)
 		
 		/* Création du thread */
 		thread_params[i].tid = malloc(sizeof(pthread_t));
-		if(0 != pthread_create((thread_params[i].tid), thread_attributes, searchOpenCL, &(thread_params[i])))
+		if (0 != pthread_create((thread_params[i].tid), thread_attributes, autosearch, &(thread_params[i])))
 		{
 			fprintf(stderr, "Problème avec pthread_create()\n");
 			free(thread_attributes);
@@ -644,6 +666,7 @@ void runThreadClient(const char *file)
 		pthread_attr_destroy(thread_attributes);
 		free(thread_attributes);
 	}
+	free_array_part(apart);
     
 	while (1)
 	{
@@ -695,10 +718,14 @@ void runclient(const char *hostname, const char *file)
 
 void runauto(const char *file)
 {
+	struct array_part *apart= read_parts(file);
+	struct array_part *rotateParts = rotate_all_parts(apart);
 	// On prépare les premières possiblitées en local
-	map_big_array *map_parts = prepare_map_part(file);
-	first_possibility(map_parts);
+	map_big_array *map_parts = prepare_map_part(rotateParts);
+	first_possibility(map_parts, rotateParts);
 	free_bigarray(map_parts);
+	free_array_part(rotateParts);
+	free_array_part(apart);
 	
 	runThreadClient(file);
 	
@@ -720,7 +747,7 @@ struct part* part_139_i8(map_big_array *mapParts)
     return part;
 }
 
-void first_possibility(map_big_array *mapParts)
+void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_part)
 {
 	struct part *etern[ETERN_SIZE][ETERN_SIZE];
     int x;
@@ -733,8 +760,8 @@ void first_possibility(map_big_array *mapParts)
         }
     }
 	
-	x = (ETERN_SIZE/2) -1;
-	y = ((ETERN_SIZE/2) +1)  -1;
+	x = 7;
+	y = 8;
 	int cur_dir = DIR_UP;
     
     struct part *part = part_139_i8(mapParts);
@@ -772,7 +799,7 @@ void first_possibility(map_big_array *mapParts)
 			printf("part 181 r3 not found\n");
 			exit(EXIT_FAILURE);
 		}
-		etern[2][12] = part;
+		etern[2][13] = part;
 		
 		// 249 N14 -- rotation 0
 		// 8 5 9 10
@@ -783,7 +810,7 @@ void first_possibility(map_big_array *mapParts)
 			printf("part 249 r0 not found\n");
 			exit(EXIT_FAILURE);
 		}
-		etern[13][12] = part;
+		etern[13][13] = part;
 		
 		// on commence vers le haut
 		// et sur l'angle en bas à droite
@@ -805,7 +832,7 @@ void first_possibility(map_big_array *mapParts)
 	
 	File *possibilities = malloc(sizeof(File));
 	init_file_with_cache(possibilities, 0, sizeof(struct possibility_packet));
-	search_possiblity(possibilities, &aposs->possibilities[0], mapParts);
+	search_possiblity(possibilities, &aposs->possibilities[0], mapParts, all_rotate_part);
 	while (possibilities->size > 0) {
 		struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
 		scroll(possibilities,packet);
@@ -885,6 +912,37 @@ int init_compteurs()
 	return 0;
 }
 
+static char * getcmdline() {
+	char * line = malloc(100), *linep = line;
+	size_t lenmax = 100, len = lenmax;
+	int c;
+	
+	if (line == NULL)
+		return NULL;
+	
+	for (;;) {
+		c = fgetc(stdin);
+		if (c == EOF || c == '\n')
+			break;
+		
+		if (--len == 0) {
+			len = lenmax;
+			char * linen = realloc(linep, lenmax *= 2);
+			
+			if (linen == NULL) {
+				free(linep);
+				return NULL;
+			}
+			line = linen + (line - linep);
+			linep = linen;
+		}
+		
+		if ((*line++ = c) == '\n')
+			break;
+	}
+	*line = '\0';
+	return linep;
+}
 static void * console(void *param)
 {
 	int server = *(int *)param;
@@ -892,7 +950,8 @@ static void * console(void *param)
 	char *buffer = NULL;
 	while(buffer == NULL)
 	{
-		buffer = readline("commande :");
+		printf("commande :");
+		buffer = getcmdline();
 		printf("\n");
 		if(strcmp(buffer, EXIT_CMD) == 0)
 		{
@@ -993,9 +1052,14 @@ static void * console(void *param)
 		}
         if(strcmp(buffer, "rmnonext") == 0)
         {
-            map_big_array *map_parts = prepare_map_part(partsFiles);
-            remove_possibilities_with_no_next(map_parts);
+			struct array_part *apart= read_parts(partsFiles);
+			
+			struct array_part *rotateParts = rotate_all_parts(apart);
+            map_big_array *map_parts = prepare_map_part(rotateParts);
+            remove_possibilities_with_no_next(map_parts, rotateParts);
             free_bigarray(map_parts);
+			free_array_part(rotateParts);
+			free_array_part(apart);
         }
 		if(strcmp(buffer, "min") == 0)
 		{

@@ -2,13 +2,10 @@
 #define eternityII_etii_protocol_h
 
 #include "possibility.h"
+#include "packed.h"
 
 #ifdef WIN32
-#define PACK( __Declaration__ ) __pragma( pack(push, 1) ) __Declaration__ __pragma( pack(pop) )
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-#else
-#define PACK( __Declaration__ ) __Declaration__ __attribute__((__packed__))
+#include <stdint.h>
 #endif
 
 #define INST_ERROR -1
@@ -20,13 +17,13 @@ typedef unsigned short uint16_t;
 #define INST_NULL 6
 
 
-
-struct packet
+PACK(
+	 struct packet
 {
     uint8_t instruction;
     struct possibility_packet possibility;
     
-}__attribute__((packed));
+});
 
 int8_t recv_instruction(int socket_id);
 

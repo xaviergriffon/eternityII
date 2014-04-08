@@ -2,6 +2,6 @@
 #define eternityII_readdata_h
 #include "part.h"
 
-struct array_part read_parts(const char *files);
+struct array_part *read_parts(const char *files);
 
 #endif

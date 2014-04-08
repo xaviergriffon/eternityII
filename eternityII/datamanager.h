@@ -39,5 +39,5 @@ int check_file(int f);
 int check_files();
 int search_min_datas();
 
-int remove_possibilities_with_no_next(map_big_array *mapParts);
+int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part *all_rotate_part);
 #endif

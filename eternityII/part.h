@@ -1,6 +1,11 @@
 #ifndef eternityII_part_h
 #define eternityII_part_h
 
+#include "packed.h"
+#ifdef WIN32
+#include <stdint.h>
+#endif
+
 #define PART_NONE -1
 #define PART_TOP 0
 #define PART_RIGHT 1
@@ -10,14 +15,14 @@
 #define MAX_KEY_LENGTH 12
 #define MAX_FACE_MAP 24
 
-
-typedef struct __attribute__((packed))
+PACK(
+	 typedef struct
 {
     int8_t k1;
     int8_t k2;
 	int8_t k3;
 	int8_t k4;
-} key_part;
+}) key_part;
 
 struct part
 {
@@ -39,7 +44,7 @@ struct array_part
 {
     int size;
     struct part *parts;
-};
+} ;
 
 struct map_in_one
 {
@@ -80,16 +85,19 @@ void print_part(struct part *p);
  */
 struct part *rotatePart(struct part *p, int nbRotate);
 
-int search_max_face(struct array_part apart);
+int16_t idpart(int id, int8_t rotation);
 
-struct array_part * rotate_all_parts(struct array_part apart);
+int search_max_face(struct array_part *apart);
 
-struct array_part * search_face(struct array_part apart, int face, int position);
+struct array_part * rotate_all_parts(struct array_part *apart);
 
-struct map_part *buildMapPart(struct array_part apart, int maxFace);
-map_big_array *buildBigArray(struct array_part apart,int maxFace);
+struct array_part * search_face(struct array_part *apart, int face, int position);
+
+struct map_part *buildMapPart(struct array_part *apart, int maxFace);
+map_big_array *buildBigArray(struct array_part *apart,int maxFace);
 
 //struct array_part *get_parts(struct map_part *map,char *key);
+void check_array(struct array_part *apart);
 struct array_part *get_parts_bigarray(map_big_array *map,int8_t p[4]);
 
 struct map_in_one *regroup_map(map_big_array *map);
@@ -103,6 +111,6 @@ struct array_part *copy_array_part(struct array_part *apart);
 
 struct part* get_one_part(map_big_array *map_parts, key_part key);
 
-map_big_array *prepare_map_part(const char* file);
+map_big_array *prepare_map_part(struct array_part *apart);
 
 #endif

@@ -57,7 +57,7 @@ inline int2 positionxy_key(key_part p,int sizearray)
     return positionxy(k1,k2,k3,k4,sizearray);
 }
 
-__kernel void search_part_img(__global key_part *src, __global struct part *dst_parts, __global int *dst_qt, int result_by_search, __global uint8_t *src_faceused, __read_only image2d_t map,__read_only image2d_t datas, __read_only image2d_t ids, int sizearray, int nbresearch)
+__kernel void search_part_img(__read_only image2d_t img_src, __global short *data_dst, __global uint8_t *dst_qt, int result_by_search, __global uint8_t *src_faceused, __read_only image2d_t map,__read_only image2d_t datas, __read_only image2d_t ids, int sizearray, int nbresearch)
 {
 	
 	//	int i = get_global_id(0);
@@ -65,18 +65,25 @@ __kernel void search_part_img(__global key_part *src, __global struct part *dst_
 	int l = get_local_id(0);
 	
 	__local uint4 imap;
-	__local int used[64];
-	__local int positions[64];
-	__local struct part resultParts[64];
+	__local int4 ikey;
+	__local uint8_t used[64];
+	__local uint8_t positions[64];
+	__local short resultParts[64];
 	if(g < nbresearch) {
 		const sampler_t sampler=CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST;
 		
 		if(l == 0) {
-			
-			key_part key = src[g];
+			int2 xy={0,g};
+			ikey = read_imagei(img_src,sampler,xy);
+			key_part key;
+			key.k1 = ikey.r;
+			key.k2 = ikey.g;
+			key.k3 = ikey.b;
+			key.k4 = ikey.a;
 			imap = read_imageui(map,sampler,positionxy_key(key,sizearray));
 		}
 		used[l] = 0;
+		
 		barrier(CLK_LOCAL_MEM_FENCE);
 		uint p;
 		int r = g * result_by_search;
@@ -95,20 +102,16 @@ __kernel void search_part_img(__global key_part *src, __global struct part *dst_
 			
 			if(src_faceused[g*256+iid.r -1] == 0)
 			{
-				resultParts[l].id = iid.r;
-				resultParts[l].top = ipart.r;
-				resultParts[l].right = ipart.g;
-				resultParts[l].bottom = ipart.b;
-				resultParts[l].left = ipart.a;
-				resultParts[l].rotation = iid.g;
+				resultParts[l] = iid.r + 256 * iid.g;
+				//resultParts[l].k4 = ipart.a;
 				used[l] = 1;
 			}
 		}
 		barrier(CLK_LOCAL_MEM_FENCE);
 		if(l == 0) {
-			int rsize = 0;
-			int u;
-			int gap=0;
+			uint8_t rsize = 0;
+			uint8_t u;
+			int8_t gap=0;
 			for(u=0;u<64;u++) {
 				if(used[u] == 1){
 					rsize++;
@@ -119,17 +122,16 @@ __kernel void search_part_img(__global key_part *src, __global struct part *dst_
 				
 			}
 			dst_qt[g] = rsize;
+			//			printf("g:%i l:%i result:%i\n",g,l,rsize);
 		}
 		
 		barrier(CLK_LOCAL_MEM_FENCE);
 		if(used[l] == 1) {
-			int position = r+ positions[l];
-			dst_parts[position].id = resultParts[l].id;
-			dst_parts[position].top = resultParts[l].top;
-			dst_parts[position].right = resultParts[l].right;
-			dst_parts[position].bottom = resultParts[l].bottom;
-			dst_parts[position].left = resultParts[l].left;
-			dst_parts[position].rotation = resultParts[l].rotation;
+			//			printf("g:%i l:%i\n",g,l);
+			data_dst[g*result_by_search + positions[l]] = resultParts[l];
+//			int4 values ={resultParts[l].k1,resultParts[l].k2,resultParts[l].k3,resultParts[l].k4};
+			//			printf("values:%i,%i,%i,%i\n",values.r,values.g,values.b,values.a);
+//			write_imagei (	img_dst, position, values);
 		}
 	}
 	
