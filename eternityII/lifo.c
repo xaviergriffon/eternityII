@@ -70,6 +70,7 @@ int put (File * suite, void *value){
 	new_element->previous = NULL;
 	new_element->next = NULL;
 	
+	// par précaution du cache on vérifie que qu'il ne s'agit pas de la meme valeur
 	memcpy (new_element->value, value, suite->sizeofvalue);
 	
 	if(suite->end == NULL){
@@ -120,6 +121,45 @@ int scroll (File * suite, void *dest){
 	
 	return 1;
 }
+
+void *scroll_cache(File * suite, void *cache){
+	Element *supp_element;
+	if (suite->size == 0 || suite->end == NULL)
+		return 0;
+	supp_element = suite->end;
+	if(supp_element->previous != NULL)
+	{
+		supp_element->previous->next = NULL;
+	}
+	suite->end = supp_element->previous;
+	void *result = supp_element->value;
+
+	long position = position_cache(suite, supp_element);
+	if(position > -1)
+	{
+		if (position == suite->lastPostionCache -1)
+		{
+			suite->lastPostionCache--;
+		}
+	} else
+	{
+		memcpy(cache, result, suite->sizeofvalue);
+		free (result);
+		free (supp_element);
+		result = cache;
+	}
+	
+	suite->size--;
+	
+	if(suite->size ==0)
+	{
+		suite->start = NULL;
+		suite->end = NULL;
+	}
+	
+	return result;
+}
+
 
 int scroll_fifo (File * suite, void *dest){
 	Element *supp_element;

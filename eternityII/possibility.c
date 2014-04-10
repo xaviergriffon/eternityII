@@ -14,6 +14,30 @@
 
 static int directions[256] = {135,221,210,34,45,255,254,253,237,239,223,222,238,240,224,208,209,241,242,226,225,0,1,2,18,16,32,33,17,15,31,47,46,14,13,29,30,252,251,250,249,248,247,246,245,244,243,192,176,160,144,128,112,96,80,64,48,3,4,5,6,7,8,9,10,11,12,63,79,95,111,127,143,159,175,191,207,236,235,234,233,232,231,230,229,228,227,193,177,161,145,129,113,97,81,65,49,19,20,21,22,23,24,25,26,27,28,62,78,94,110,126,142,158,174,190,206,220,219,218,217,216,215,214,213,212,211,194,178,162,146,130,114,98,82,66,50,35,36,37,38,39,40,41,42,43,44,61,77,93,109,125,141,157,173,189,205,204,203,202,201,200,199,198,197,196,195,179,163,147,131,115,99,83,67,51,52,53,54,55,56,57,58,59,60,76,92,108,124,140,156,172,188,187,186,185,184, 183,182,181,180,164,148,132,116,100,84,68,69,70,71,72,73,74,75,91,107,123,139,155,171,170,169,168,167,166,165,149,133,117,101,85,86,87,88,89,90,106,122,138,154,153,152,151,150,134,118,102,103,104,105,121,137,119,136,120};
 
+static int dirx[256] = {7,13,2,2,13,15,14,13,13,15,15,14,14,0,0,0,1,1,2,2,1,0,1,2,2,0,0,1,1,15,15,15,14,14,13,13,14,12,11,10,9,8,7,6,5,4,3,0,0,0,0,0,0,0,0,0,0,3,4,5,6,7,8,9,10,11,12,15,15,15,15,15,15,15,15,15,15,12,11,10,9,8,7,6,5,4,3,1,1,1,1,1,1,1,1,1,1,3,4,5,6,7,8,9,10,11,12,14,14,14,14,14,14,14,14,14,14,12,11,10,9,8,7,6,5,4,3,2,2,2,2,2,2,2,2,2,2,3,4,5,6,7,8,9,10,11,12,13,13,13,13,13,13,13,13,13,13,12,11,10,9,8,7,6,5,4,3,3,3,3,3,3,3,3,3,3,4,5,6,7,8,9,10,11,12,12,12,12,12,12,12,12,12,11,10,9,8,7,6,5,4,4,4,4,4,4,4,4,5,6,7,8,9,10,11,11,11,11,11,11,11,10,9,8,7,6,5,5,5,5,5,5,6,7,8,9,10,10,10,10,10,9,8,7,6,6,6,6,7,8,9,9,9,7,8,8};
+
+static int diry[256] = {8,13,13,2,2,15,15,15,14,14,13,13,14,15,14,13,13,15,15,14,14,0,0,0,1,1,2,2,1,0,1,2,2,0,0,1,1,15,15,15,15,15,15,15,15,15,15,12,11,10,9,8,7,6,5,4,3,0,0,0,0,0,0,0,0,0,0,3,4,5,6,7,8,9,10,11,12,14,14,14,14,14,14,14,14,14,14,12,11,10,9,8,7,6,5,4,3,1,1,1,1,1,1,1,1,1,1,3,4,5,6,7,8,9,10,11,12,13,13,13,13,13,13,13,13,13,13,12,11,10,9,8,7,6,5,4,3,2,2,2,2,2,2,2,2,2,2,3,4,5,6,7,8,9,10,11,12,12,12,12,12,12,12,12,12,12,12,11,10,9,8,7,6,5,4,3,3,3,3,3,3,3,3,3,3,4,5,6,7,8,9,10,11,11,11,11,11,11,11,11,11,10,9,8,7,6,5,4,4,4,4,4,4,4,4,5,6,7,8,9,10,10,10,10,10,10,10,9,8,7,6,5,5,5,5,5,5,6,7,8,9,9,9,9,9,8,7,6,6,6,6,7,8,7,8,7};
+
+int decode_direction()
+{
+	printf("/nx : ");
+	int i;
+	for(i=0;i<256;i++) {
+		int x = directions[i] % ETERN_SIZE;
+		printf("%i,",x);
+	}
+	
+	printf("/ny : ");
+	for(i=0;i<256;i++) {
+		int x = directions[i] % ETERN_SIZE;
+		int y = (directions[i] - x) / ETERN_SIZE;
+		printf("%i,",y);
+	}
+	
+
+	return 0;
+}
+
 int test_directions()
 {
 	int grille[ETERN_PARTS];
@@ -80,6 +104,75 @@ struct possibility_packet *crypt_to_network(struct possibility_packet *packet)
 struct possibility_packet *decrypt_from_network(struct possibility_packet *packet)
 {
 	return NULL;
+}
+
+void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity,key_part *key) {
+	key->k1 =-2;
+	key->k2 =-2;
+	key->k3 =-2;
+	key->k4 =-2;
+	
+	int x = possiblity->x;
+	int y = possiblity->y;
+	// TOP
+	if(y -1 < 0)
+	{
+		key->k1 = 0;
+	} else
+	{
+		if(possiblity->grid[x][y-1] < 0)
+		{
+			key->k1 = -1;
+		} else
+		{
+			key->k1 = all_rotate_parts->parts[possiblity->grid[x][y-1]].bottom;
+		}
+	}
+	
+	// RIGHT
+	if(x + 1 >= ETERN_SIZE)
+	{
+		key->k2 = 0;
+	} else
+	{
+		if(possiblity->grid[x+1][y] < 0)
+		{
+			key->k2 = -1;
+		} else
+		{
+			key->k2 = all_rotate_parts->parts[possiblity->grid[x+1][y]].left;
+		}
+	}
+	
+	// BOTTOM
+	if(y + 1 >= ETERN_SIZE)
+	{
+		key->k3 = 0;
+	} else
+	{
+		if(possiblity->grid[x][y+1] < 0)
+		{
+			key->k3 = -1;
+		} else
+		{
+			key->k3 = all_rotate_parts->parts[possiblity->grid[x][y+1]].top;
+		}
+	}
+	
+	// LEFT
+	if(x -1 < 0)
+	{
+		key->k4 = 0;
+	} else
+	{
+		if(possiblity->grid[x-1][y] < 0)
+		{
+			key->k4 = -1;
+		} else
+		{
+			key->k4 = all_rotate_parts->parts[possiblity->grid[x-1][y]].right;
+		}
+	}
 }
 
 key_part what_search(struct array_part *all_rotate_parts, int x, int y, struct possibility_packet *possiblity)
@@ -332,9 +425,10 @@ int search_possiblity(File *result,struct possibility_packet *possiblity, map_bi
 //				div_t xy = div(directions[poss.alloc], ETERN_SIZE);
 //				poss.x = xy.rem;
 //				poss.y = xy.quot;
-				poss->x = directions[poss->alloc] % ETERN_SIZE;
-				poss->y = (directions[poss->alloc] - poss->x) / ETERN_SIZE;
-
+//				poss->x = directions[poss->alloc] % ETERN_SIZE;
+//				poss->y = (directions[poss->alloc] - poss->x) / ETERN_SIZE;
+				poss->x = dirx[poss->alloc];
+				poss->y = diry[poss->alloc];
 				
 				poss->faceused[part.id -1] = 1;
 				//put (result, &poss);
@@ -345,6 +439,75 @@ int search_possiblity(File *result,struct possibility_packet *possiblity, map_bi
 	//free(wsearch);
 	return max_result;
 }
+
+int search_possiblity_light(File *result,key_part *key,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, struct possibility_packet **pointCache)
+{
+	int max_result=0;
+    uint8_t x;
+	uint8_t y;
+	
+	// initialisation
+	x = possiblity->x;
+	y = possiblity->y;
+    
+	struct array_part *search = get_parts_bigarray_with_key(mapParts, key);
+	int s;
+	
+	
+	for(s=0; s< search->size; s++)
+	{
+		if(search->parts[s].id != 0 && possiblity->faceused[search->parts[s].id -1] == 0)
+		{
+			// On injecte dans la pile afin qu'un copie soit faite puis on utilise la copie
+			put (result, possiblity);
+			struct possibility_packet *poss = (struct possibility_packet *)result->end->value;
+			pointCache[s] = poss;
+		} else {
+			pointCache[s] = NULL;
+		}
+	}
+	for(s=0; s< search->size; s++)
+	{
+		if(pointCache[s] != NULL) {
+			struct part part = search->parts[s];
+			
+			struct possibility_packet *poss = pointCache[s];
+			poss->grid[x][y] = idpart(part.id, part.rotation);
+			poss->alloc++;
+			if(poss->alloc >= ETERN_PARTS)
+			{
+				printf("fin de la boucle à %i \n", poss->alloc);
+				printf("solution trouvée\n");
+				for(x = 0; x < ETERN_SIZE; x++)
+				{
+					for(y=0;y < ETERN_SIZE; y++)
+					{
+						//struct part *part = get_one_part(mapParts, poss.grid[x][y]);
+						struct part *part = &all_rotate_part->parts[poss->grid[x][y]];
+						printf("%i;%i; ",x,y);
+						print_part(part);
+					}
+				}
+				save_possibility("./solution",poss);
+				//free(poss);
+				//free(wsearch);
+				exit(EXIT_SUCCESS);
+			}
+			if(poss->alloc > max_result)
+			{
+				max_result = poss->alloc;
+			}
+			
+			poss->x = dirx[poss->alloc];
+			poss->y = diry[poss->alloc];
+			
+			
+			poss->faceused[part.id -1] = 1;
+		}
+	}
+	return max_result;
+}
+
 /*
  0 OK
  -1 packet NULL
@@ -439,8 +602,8 @@ File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_pac
 						exit(EXIT_SUCCESS);
 					}
 					
-					poss->x = directions[poss->alloc] % ETERN_SIZE;
-					poss->y = (directions[poss->alloc] - poss->x) / ETERN_SIZE;
+					poss->x = dirx[poss->alloc];
+					poss->y = diry[poss->alloc];
 					
 					poss->faceused[*kpart % 256] = 1;
 				}

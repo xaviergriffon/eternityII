@@ -99,6 +99,7 @@ map_big_array *buildBigArray(struct array_part *apart,int maxFace);
 //struct array_part *get_parts(struct map_part *map,char *key);
 void check_array(struct array_part *apart);
 struct array_part *get_parts_bigarray(map_big_array *map,int8_t p[4]);
+struct array_part *get_parts_bigarray_with_key(map_big_array *map,key_part *key);
 
 struct map_in_one *regroup_map(map_big_array *map);
 

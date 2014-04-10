@@ -292,6 +292,20 @@ struct array_part *get_parts_bigarray(map_big_array *map,int8_t p[4])
 //	}
     return parts;
 }
+struct array_part *get_parts_bigarray_with_key(map_big_array *map,key_part *key)
+{
+    struct array_part *parts = NULL;
+	
+	int8_t k1 = convert_p(key->k1, map->sizearray);
+	int8_t k2 = convert_p(key->k2, map->sizearray);
+	int8_t k3 = convert_p(key->k3, map->sizearray);
+	int8_t k4 = convert_p(key->k4, map->sizearray);
+	parts = map->bigarray[k1][k2][k3][k4];
+	//	if(parts->size > 0 && parts->parts[0].id <0) {
+	//		printf("get_parts_bigarray error : size:%i for %i:%i:%i:%i-%i:%i:%i:%i r[0].id = %i\n",parts->size,p[0],p[1],p[2],p[3],k1,k2,k3,k4,parts->parts[0].id );
+	//	}
+    return parts;
+}
 
 void check_array(struct array_part *apart) {
 	printf("check_array :\n");
