@@ -1,6 +1,7 @@
 #ifndef eternityII_lifo_h
 #define eternityII_lifo_h
 
+
 typedef struct ElementList{
 	void *value;
     struct ElementList *previous;

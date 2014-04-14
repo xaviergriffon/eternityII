@@ -114,6 +114,7 @@ void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_
 	
 	int x = possiblity->x;
 	int y = possiblity->y;
+
 	// TOP
 	if(y -1 < 0)
 	{
@@ -440,7 +441,44 @@ int search_possiblity(File *result,struct possibility_packet *possiblity, map_bi
 	return max_result;
 }
 
-int search_possiblity_light(File *result,key_part *key,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, struct possibility_packet **pointCache)
+/* (ajouter) un élément dans la file */
+void put_possibility (File * suite, struct possibility_packet *value){
+	Element *new_element = NULL;
+	if(suite->lastPostionCache < suite->cacheSize)
+	{
+		
+		new_element = &suite->cacheElement[suite->lastPostionCache];
+		suite->lastPostionCache++;
+	} else
+	{
+		new_element = malloc(sizeof(Element));
+		if (suite->sizeofvalue <= 0 || (new_element->value = malloc(suite->sizeofvalue))
+			== NULL)
+		{
+			free (new_element);
+			return;
+		}
+	}
+	
+	new_element->previous = NULL;
+	new_element->next = NULL;
+	
+	// par précaution du cache on vérifie que qu'il ne s'agit pas de la meme valeur
+	memcpy (new_element->value, value, sizeof(struct possibility_packet));
+	
+	if(suite->end == NULL){
+		suite->start = new_element;
+		suite->end = new_element;
+	}else {
+		suite->end->next = new_element;
+		new_element->previous = suite->end;
+		suite->end = new_element;
+	}
+	suite->size++;
+	return;
+}
+
+int search_possiblity_light(File *result,key_part *key,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part,int16_t idParts[ETERN_PARTS][4])
 {
 	int max_result=0;
     uint8_t x;
@@ -449,60 +487,59 @@ int search_possiblity_light(File *result,key_part *key,struct possibility_packet
 	// initialisation
 	x = possiblity->x;
 	y = possiblity->y;
+
+	uint16_t incAlloc = possiblity->alloc + 1;
+	uint8_t nX = dirx[incAlloc];
+	uint8_t nY = diry[incAlloc];
     
 	struct array_part *search = get_parts_bigarray_with_key(mapParts, key);
 	int s;
-	
-	
+	int lastId =0;
+	struct possibility_packet *currPossibility = possiblity;
 	for(s=0; s< search->size; s++)
 	{
-		if(search->parts[s].id != 0 && possiblity->faceused[search->parts[s].id -1] == 0)
+		int position = search->parts[s].id -1;
+		if(!currPossibility->faceused[position])
 		{
-			// On injecte dans la pile afin qu'un copie soit faite puis on utilise la copie
-			put (result, possiblity);
-			struct possibility_packet *poss = (struct possibility_packet *)result->end->value;
-			pointCache[s] = poss;
-		} else {
-			pointCache[s] = NULL;
+
+			put_possibility(result, currPossibility);
+			currPossibility = result->end->value;
+			if(lastId) {
+				currPossibility->faceused[lastId -1] = 0;
+			}
+			
+			currPossibility->grid[x][y] = idParts[search->parts[s].id][search->parts[s].rotation];
+			currPossibility->alloc = incAlloc;
+			
+			currPossibility->x = nX;
+			currPossibility->y = nY;
+			
+			currPossibility->faceused[position] = 1;
+			lastId = search->parts[s].id;
 		}
 	}
-	for(s=0; s< search->size; s++)
-	{
-		if(pointCache[s] != NULL) {
-			struct part part = search->parts[s];
-			
-			struct possibility_packet *poss = pointCache[s];
-			poss->grid[x][y] = idpart(part.id, part.rotation);
-			poss->alloc++;
-			if(poss->alloc >= ETERN_PARTS)
+
+	if (lastId) {
+		max_result = incAlloc;
+		if(max_result >= ETERN_PARTS)
+		{
+			struct possibility_packet *poss = currPossibility;
+			printf("fin de la boucle à %i \n", poss->alloc);
+			printf("solution trouvée\n");
+			for(x = 0; x < ETERN_SIZE; x++)
 			{
-				printf("fin de la boucle à %i \n", poss->alloc);
-				printf("solution trouvée\n");
-				for(x = 0; x < ETERN_SIZE; x++)
+				for(y=0;y < ETERN_SIZE; y++)
 				{
-					for(y=0;y < ETERN_SIZE; y++)
-					{
-						//struct part *part = get_one_part(mapParts, poss.grid[x][y]);
-						struct part *part = &all_rotate_part->parts[poss->grid[x][y]];
-						printf("%i;%i; ",x,y);
-						print_part(part);
-					}
+					//struct part *part = get_one_part(mapParts, poss.grid[x][y]);
+					struct part *part = &all_rotate_part->parts[poss->grid[x][y]];
+					printf("%i;%i; ",x,y);
+					print_part(part);
 				}
-				save_possibility("./solution",poss);
-				//free(poss);
-				//free(wsearch);
-				exit(EXIT_SUCCESS);
 			}
-			if(poss->alloc > max_result)
-			{
-				max_result = poss->alloc;
-			}
-			
-			poss->x = dirx[poss->alloc];
-			poss->y = diry[poss->alloc];
-			
-			
-			poss->faceused[part.id -1] = 1;
+			save_possibility("./solution",poss);
+			//free(poss);
+			//free(wsearch);
+			exit(EXIT_SUCCESS);
 		}
 	}
 	return max_result;
@@ -542,7 +579,8 @@ int check_possibility(struct possibility_packet *packet)
 
 int print_possibility_packet(struct possibility_packet *packet)
 {
-	printf("possibility x:%i y:%i facesused:%i \n",packet->x,packet->y,packet->alloc);
+
+	printf("possibility facesused:%i \n",packet->alloc);
 	return 0;
 }
 

@@ -400,6 +400,13 @@ void *autosearch (void *userdata)
 {
 	client_possibility_t *client = userdata;
 	
+	int16_t idParts[ETERN_PARTS][4];
+	for(int p=0; p < ETERN_PARTS;p++) {
+		for(int r=0; r < 4;r++) {
+			idParts[p][r] = p + ETERN_PARTS * r;
+		}
+	}
+	
 	while(1)
 	{
 		while (client->aposs == NULL)
@@ -409,7 +416,7 @@ void *autosearch (void *userdata)
 		File *db = malloc(sizeof(File));
 		init_file_with_cache(db, 350, sizeof(struct possibility_packet));
 		struct possibility_packet *possibilityPacketCache = malloc(sizeof(struct possibility_packet));
-		struct possibility_packet **pointCache = malloc(client->all_rotate_part->size * sizeof(struct possibility_packet*));
+
 		key_part *key = malloc(sizeof(key_part));
 		int a;
 		for(a=0; a < client->aposs->size;a++)
@@ -447,11 +454,12 @@ void *autosearch (void *userdata)
 				lastfilesize[client->compteur] = db->size;
 				
 				struct possibility_packet *possibilityPacket = scroll_cache(db, possibilityPacketCache);
+				//scroll(db, possibilityPacketCache);
 				compteurs[client->compteur]++;
 				
 				what_search_to_key(client->all_rotate_part, possibilityPacket,key);
 				
-				int max = search_possiblity_light(db, key, possibilityPacket, client->map_part, client->all_rotate_part, pointCache);
+				int max = search_possiblity_light(db, key, possibilityPacket, client->map_part, client->all_rotate_part,idParts);
 				
 				if(max > max_result)
 				{
@@ -466,7 +474,6 @@ void *autosearch (void *userdata)
 		}
 		free(possibilityPacketCache);
 		free(key);
-		free(pointCache);
 		if(client->request == REQUEST_STOP && db->size > 0)
 		{
 			array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));

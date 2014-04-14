@@ -21,16 +21,17 @@ typedef unsigned short uint16_t;
 #define DIR_RIGHT 2
 #define DIR_DOWN 3
 #define DIR_LEFT 4
-
-PACK(
-	 struct possibility_packet
-{
-    uint8_t x;
-    uint8_t y;
-    int16_t grid[ETERN_SIZE][ETERN_SIZE];
-	uint16_t alloc;
-	uint8_t faceused[ETERN_PARTS];
-});
+ 
+ PACK(
+ struct possibility_packet
+ {
+ uint8_t x;
+ uint8_t y;
+ int16_t grid[ETERN_SIZE][ETERN_SIZE];
+ uint16_t alloc;
+ uint8_t faceused[ETERN_PARTS];
+ });
+ 
 
 typedef struct
 {
@@ -44,7 +45,7 @@ void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_
 
 int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);
 int search_possiblity(File *result,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part);
-int search_possiblity_light(File *result,key_part *key,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, struct possibility_packet **pointCache);
+int search_possiblity_light(File *result,key_part *key,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part,int16_t idParts[ETERN_PARTS][4]);
 
 int change_dir(int cur_dir, int x, int y, struct possibility_packet *possiblity);
 

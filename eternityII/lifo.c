@@ -26,9 +26,18 @@ void init_file_with_cache(File *suite, int cacheSize, size_t sizeofvalue)
 	int e;
 	for(e = 0; e < cacheSize; e++)
 	{
-		suite->cacheElement[e].next = NULL;
-		suite->cacheElement[e].previous = NULL;
 		suite->cacheElement[e].value = malloc(sizeofvalue);
+		// Construction de la suite
+		if(e>0) {
+			suite->cacheElement[e].previous = &suite->cacheElement[e-1];
+			suite->cacheElement[e-1].next = NULL;
+		} else {
+			suite->cacheElement[e].previous = &suite->cacheElement[e];
+		}
+		
+		if(e == cacheSize -1 ) {
+			suite->cacheElement[e].next = NULL;
+		}
 	}
 }
 
@@ -46,7 +55,6 @@ long position_cache(File *file, Element *element)
 	
 	return element - file->cacheElement;
 }
-
 
 /* (ajouter) un élément dans la file */
 int put (File * suite, void *value){
