@@ -32,12 +32,19 @@ typedef struct
 	cl_mem img_ids;
 	cl_mem img_keys;
 	cl_mem img_output;
+	cl_mem img_mapId;
+	cl_mem datasIds;
+	cl_mem all_rotate_ids;
+	cl_mem possibility;
+	cl_mem output_possibility;
+	cl_mem directions;
 	
     int mapsizearray;
 	int max_research;
 	key_part *partsBuffer;
 	uint8_t *resultsBuffer;
 	int16_t *imgoutflat;
+	void *output_possibility_buffer;
     
 } etii_cl_instance;
 

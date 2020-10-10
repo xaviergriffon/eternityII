@@ -36,6 +36,8 @@ typedef struct sockaddr_in SOCKADDR_IN;
 typedef struct sockaddr SOCKADDR;
 typedef struct in_addr IN_ADDR;
 #endif
+
+#include "static_variables.h"
 #include "possibility.h"
 
 #include "datamanager.h"
@@ -44,26 +46,28 @@ typedef struct in_addr IN_ADDR;
 #include "part.h"
 #include "lifo.h"
 #include "etii_protocol.h"
-#include "etii_opencl.h"
+//#include "etii_opencl.h"
 #include "readdata.h"
+#include "etii_client.h"
+#include "etii_search.h"
 
-#define NB_CONNECTIONS_PAR_THREAD 1
-#define MICRO_SLEEP 100
-#define THREAD_MICRO_SLEEP 10000
+
 #define EXIT_CMD "exit"
-#define REQUEST_STOP 1
-#define MAX_STOCK_BY_THREAD 100
+
+
 
 pthread_mutex_t max_lock;
 pthread_mutex_t build_cl_instance;
-
-static int NB_THREADS = 10;
 
 static long inst_unknow = 0;
 
 static char *lastcheck = NULL;
 
-static int request = 0;
+// Partagées en extern dans static_variables
+unsigned long long *compteurs = NULL;
+int *lastfilesize = NULL;
+int NB_THREADS = 10;
+int request = REQUEST_CONTINUE;
 
 static char* partsFiles = NULL;
 
@@ -76,20 +80,8 @@ typedef struct
 	int compteur;
 } client_t;
 
-typedef struct
-{
-	int works;
-	pthread_t *tid;
-	array_possibility_packet *aposs;
-	map_big_array *map_part;
-    struct array_part *all_rotate_part;
-	int compteur;
-	int request;
-} client_possibility_t;
 
 
-unsigned long long *compteurs = NULL;
-unsigned long long *lastfilesize = NULL;
 void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_part);
 
 static unsigned long long getted_possibility_not_null = 0;
@@ -176,7 +168,7 @@ static void *check_client_threads()
 		for(f=0; f < NB_THREADS; f++)
 		{
 			char *temp = calloc(1000, sizeof(char));
-			sprintf(temp, "Thread %i file size:%lli\n",f,lastfilesize[f]);
+			sprintf(temp, "Thread %i file size:%i\n",f,lastfilesize[f]);
 			strcat(lastcheck, temp);
 			free(temp);
 		}
@@ -329,15 +321,16 @@ void runserver(const char* file)
 		thread_params[i].compteur = i;
 	}
     
+	
 	socket_id = create_tcp_server(2000, NB_THREADS);
 	long acceptclient = 0;
 	while (1) {
 		int client_id;
 		int thread_id;
-		
+
 		if(-1 == (client_id = accept(socket_id, NULL, 0)))
 		{
-			fprintf(stderr, "Erreur sur accept()\n");
+			fprintf(stderr, "Erreur sur accept() : %i\n",client_id);
 			exit(EXIT_FAILURE);
 		}
         acceptclient++;
@@ -396,129 +389,13 @@ void runserver(const char* file)
 	exit(EXIT_SUCCESS);
 }
 
-void *autosearch (void *userdata)
-{
-	client_possibility_t *client = userdata;
-	
-	int16_t idParts[ETERN_PARTS][4];
-	for(int p=0; p < ETERN_PARTS;p++) {
-		for(int r=0; r < 4;r++) {
-			idParts[p][r] = p + ETERN_PARTS * r;
-		}
-	}
-	
-	while(1)
-	{
-		while (client->aposs == NULL)
-		{
-			usleep(MICRO_SLEEP);
-		}
-		File *db = malloc(sizeof(File));
-		init_file_with_cache(db, 350, sizeof(struct possibility_packet));
-		struct possibility_packet *possibilityPacketCache = malloc(sizeof(struct possibility_packet));
-
-		key_part *key = malloc(sizeof(key_part));
-		int a;
-		for(a=0; a < client->aposs->size;a++)
-		{
-			put(db,&client->aposs->possibilities[a]);
-			while(db->size > 0 && client->request == 0)
-			{
-				if(db->size > MAX_STOCK_BY_THREAD)
-				{
-					array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-					int reste = db->size - MAX_STOCK_BY_THREAD;
-					aposs->possibilities = malloc(sizeof(struct possibility_packet) * (MAX_STOCK_BY_THREAD));
-					aposs->size = 0;
-					while(db->size > reste)
-					{
-						scroll(db, &aposs->possibilities[aposs->size]);
-						
-						aposs->size++;
-					}
-					// En cas d'erreur on remet les possibilitées dans la file
-					if(add_possibility(aposs))
-					{
-						printf("error on add_possibility\n");
-						int p;
-						for(p=0; p < aposs->size;p++)
-						{
-							put(db,&aposs->possibilities[p]);
-						}
-					}
-					free(aposs->possibilities);
-					free(aposs);
-					
-					
-				}
-				lastfilesize[client->compteur] = db->size;
-				
-				struct possibility_packet *possibilityPacket = scroll_cache(db, possibilityPacketCache);
-				//scroll(db, possibilityPacketCache);
-				compteurs[client->compteur]++;
-				
-				what_search_to_key(client->all_rotate_part, possibilityPacket,key);
-				
-				int max = search_possiblity_light(db, key, possibilityPacket, client->map_part, client->all_rotate_part,idParts);
-				
-				if(max > max_result)
-				{
-					max_result = max;
-					if(max_result >= ETERN_PARTS)
-					{
-						printf("Erreur alloc > ETERN_PARTS\n");
-					}
-					printf("max result:%i\n",max_result);
-				}
-			}
-		}
-		free(possibilityPacketCache);
-		free(key);
-		if(client->request == REQUEST_STOP && db->size > 0)
-		{
-			array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-			aposs->possibilities = malloc(sizeof(struct possibility_packet) * (db->size));
-			aposs->size = 0;
-			while(db->size > 0)
-			{
-				scroll(db, &aposs->possibilities[aposs->size]);
-                
-				aposs->size++;
-			}
-			if(add_possibility(aposs))
-			{
-				printf("Error with possibility : \n");
-				int p;
-				for (p=0;p < aposs->size;p++)
-				{
-					struct possibility_packet *possibility = &aposs->possibilities[p];
-					print_possibility_packet(possibility);
-					save_possibility("./error_possibility",possibility);
-				}
-				
-			}
-			free(aposs->possibilities);
-		}
-		free_file(db);
-        
-		if(client->aposs->size > 0)
-		{
-			free(client->aposs->possibilities);
-		}
-		free(client->aposs);
-		client->aposs = NULL;
-		client->works =0;
-	}
-	
-	return NULL;
-}
-
+/*
 void *searchOpenCL (void *userdata)
 {
 	client_possibility_t *client = userdata;
-	int nbPossMax = 128;
+	int nbPossMax = 1;
 	pthread_mutex_lock(&build_cl_instance);
-	etii_cl_instance *instance = create_etii_cl_instance(CL_DEVICE_TYPE_GPU, client->map_part,nbPossMax);
+	etii_cl_instance *instance = create_etii_cl_instance(CL_DEVICE_TYPE_GPU, client->map_part,nbPossMax, client->all_rotate_part);
 	pthread_mutex_unlock(&build_cl_instance);
 	
 	while(1)
@@ -575,7 +452,8 @@ void *searchOpenCL (void *userdata)
                     
                 }
 				
-				File *possibilities = search_possiblity_opencl(instance,posss,nbSearch,client->map_part,client->all_rotate_part);
+				//File *possibilities = search_possiblity_opencl(instance,posss,nbSearch,client->map_part,client->all_rotate_part);
+				File *possibilities = search_possiblity_light_opencl(instance,posss,nbSearch);
 				
 				while(possibilities->size > 0)
 				{
@@ -639,84 +517,7 @@ void *searchOpenCL (void *userdata)
 	free_etii_cl_instance(instance);
 	return NULL;
 }
-
-void runThreadClient(const char *file)
-{
-	client_possibility_t *thread_params;
-	int i;
-	
-	/* création du tableau de structures client_possibility_t avec un élément par thread */
-	if(NULL == (thread_params = malloc(sizeof(*thread_params) * NB_THREADS)))
-	{
-		fprintf(stderr, "Problème avec malloc()\n");
-		exit(EXIT_FAILURE);
-	}
-	struct array_part *apart= read_parts(file);
-	for(i = 0; i < NB_THREADS; i++)
-	{
-		thread_params[i].works = 0;
-		thread_params[i].aposs = NULL;
-		struct array_part *rotateParts = rotate_all_parts(apart);
-		thread_params[i].all_rotate_part =rotateParts;
-		thread_params[i].map_part = prepare_map_part(rotateParts);
-		thread_params[i].tid = NULL;
-		thread_params[i].compteur = i;
-		thread_params[i].request = 0;
-		
-		/* création d'un nouveau thread */
-		pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
-		pthread_attr_init(thread_attributes);
-		pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
-		
-		/* Création du thread */
-		thread_params[i].tid = malloc(sizeof(pthread_t));
-		if (0 != pthread_create((thread_params[i].tid), thread_attributes, autosearch, &(thread_params[i])))
-		{
-			fprintf(stderr, "Problème avec pthread_create()\n");
-			free(thread_attributes);
-			exit(EXIT_FAILURE);
-		}
-		pthread_attr_destroy(thread_attributes);
-		free(thread_attributes);
-	}
-	free_array_part(apart);
-    
-	while (1)
-	{
-		int threadworking = 0;
-		for(i = 0; i < NB_THREADS; i++)
-		{
-			if(request == 0)
-			{
-				if(thread_params[i].works == 0)
-				{
-					array_possibility_packet *aposs = get_last_possibility(1);
-					if(aposs->size > 0)
-					{
-						thread_params[i].aposs = aposs;
-						thread_params[i].works = 1;;
-					} else
-					{
-						free(aposs);
-					}
-				}
-			} else
-			{
-				if(thread_params[i].works == 1)
-				{
-					thread_params[i].request = request;
-					threadworking++;
-				}
-			}
-		}
-		
-		if(request == REQUEST_STOP && threadworking == 0)
-		{
-			exit(EXIT_SUCCESS);
-		}
-		usleep(THREAD_MICRO_SLEEP);
-	}
-}
+ */
 
 void runclient(const char *hostname, const char *file)
 {
@@ -880,7 +681,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
 
 void failed_arg()
 {
-	printf("Indiquer parametre suivant :\ntcpserver\ntcpclient 'serveur'\n");
+	printf("Indiquer parametre suivant :\ntcpserver [number of threads] [pieces.csv]\ntcpclient [serveur] [number of threads] [pieces.csv]\n");
 }
 
 int run_checker(int server)
@@ -913,8 +714,10 @@ int run_checker(int server)
 
 int init_compteurs()
 {
+    printf("allocation mémoire %i pour compteurs et lastfilesize\n", NB_THREADS);
 	compteurs = malloc(sizeof(unsigned long long) * NB_THREADS);
-	lastfilesize = malloc(sizeof(unsigned long long) * NB_THREADS);
+	lastfilesize = malloc(sizeof(int) * NB_THREADS);
+    printf("fin allocation compteurs et lastfilesize\n");
 	
 	int c;
 	for(c=0; c < NB_THREADS;c++)

@@ -20,8 +20,9 @@
 #include "possibility.h"
 
 int check_devices(cl_device_type device_type);
-etii_cl_instance *create_etii_cl_instance(cl_device_type device_type, map_big_array *map, int max_research);
+etii_cl_instance *create_etii_cl_instance(cl_device_type device_type, map_big_array *map, int max_research, struct array_part *all_rotate_part);
 int free_etii_cl_instance(etii_cl_instance *instance);
 File **test_opencl(etii_cl_instance *instance, key_part *keys, struct possibility_packet *possiblity, int nbresearch);
+File *search_possibility_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbresearch);
 
 #endif

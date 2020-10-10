@@ -35,9 +35,10 @@ int create_tcp_server(int port, int nb_max_clients)
 	
 	setsockopt(socket_id, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(int));
 	struct timeval tv;
-	tv.tv_sec = 5;
+	tv.tv_sec = 60;
 	tv.tv_usec = 0;
-	setsockopt(socket_id, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(struct timeval));
+	// Voir pour mettre le timeout sur la session
+	//setsockopt(socket_id, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(struct timeval));
 	
 	//setsockopt(socket_id, SOL_SOCKET, SO_NOSIGPIPE, &optval, sizeof(int));
 	/* Affectation d'une adresse */

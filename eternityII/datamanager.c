@@ -96,6 +96,7 @@ int put_to_server(array_possibility_packet *possibilities)
 			printf("problème send : %li\n",result);
 		}
 		if(recv_instruction(socket_id) != INST_CONSIDERED){
+            //TODO : reintegrer la possiblité
 			printf("problème de prise en compte du serveur\n");
 		}
 	}
@@ -530,7 +531,7 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
 		{
             Element *nextElement =NULL;
 			struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-			if(!possibility_has_a_next(possibility, mapParts,all_rotate_part))
+			if(!possibility_all_has_a_next(possibility, mapParts,all_rotate_part))
 			{
                 
 				if(currElement->previous != NULL)

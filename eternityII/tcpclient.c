@@ -54,7 +54,7 @@ int create_tcp_client(const char *hostname, int port)
 	optval = 1;
 	setsockopt(socket_id, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(int));
 	struct timeval tv;
-	tv.tv_sec = 5;
+	tv.tv_sec = 60;
 	tv.tv_usec = 0;
 	setsockopt(socket_id, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(struct timeval));
 	

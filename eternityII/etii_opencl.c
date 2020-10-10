@@ -106,14 +106,14 @@ int check_devices(cl_device_type device_type)
 		CL_CHECK(clGetDeviceInfo(devices[i], CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS,sizeof(buf_ulong), &buf_ulong, NULL));
 		printf("  CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS = %llu\n", (unsigned long long)buf_ulong);
 	}
-	free(devices);
+
 	if (devices_n == 0)
 		return 1;
     
     return 0;
 }
 
-etii_cl_instance *create_etii_cl_instance(cl_device_type device_type, map_big_array *map, int max_research)
+etii_cl_instance *create_etii_cl_instance(cl_device_type device_type, map_big_array *map, int max_research, struct array_part *all_rotate_part)
 {
 	check_devices(device_type);
 	cl_platform_id platforms[100];
@@ -171,6 +171,11 @@ etii_cl_instance *create_etii_cl_instance(cl_device_type device_type, map_big_ar
 	CL_CHECK_ERR(clCreateBuffer(context, CL_MEM_WRITE_ONLY, sizeof(int16_t)*max_research*RESULT_BY_SEARCH, NULL, &_err), output_buffer);
 	cl_mem qt_buffer;
 	CL_CHECK_ERR(clCreateBuffer(context, CL_MEM_WRITE_ONLY, sizeof(uint8_t)*max_research, NULL, &_err), qt_buffer);
+	
+	cl_mem possibility;
+	CL_CHECK_ERR(clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(struct possibility_packet)*max_research, NULL, &_err), possibility);;
+	cl_mem output_possibility;
+	CL_CHECK_ERR(clCreateBuffer(context, CL_MEM_WRITE_ONLY, sizeof(struct possibility_packet)*max_research*RESULT_BY_SEARCH, NULL, &_err), output_possibility);;
 	
 	size_t w_src, h_src;
 	w_src = 1;
@@ -346,12 +351,73 @@ etii_cl_instance *create_etii_cl_instance(cl_device_type device_type, map_big_ar
 		}
 	}
 	
+	// Construction IMAGES representant les resultats en ids(id*rotation*255)
+	
+	size_t w_mapIds, h_mapIds;
+	w_mapIds = h_mapIds = 576;
+	cl_image_format iformat_mapIds;
+	iformat_mapIds.image_channel_data_type = CL_UNSIGNED_INT16;
+	iformat_mapIds.image_channel_order = CL_RGBA;
+	cl_image_desc idescIds;
+	idescIds.image_width = w_map;
+	idescIds.image_height = h_map;
+	idescIds.image_type = CL_MEM_OBJECT_IMAGE2D;
+	idescIds.image_slice_pitch = 0;
+	idescIds.image_row_pitch = 0;
+	idescIds.image_array_size = 1;
+	idescIds.num_mip_levels = 0;
+	idescIds.num_samples = 0;
+	idescIds.buffer = NULL;
+	
+	long mapIds_size = w_map * h_map * 4;
+    long dataIds_size = mapinone->nbparts;
+	cl_mem img_mapIds;
+	CL_CHECK_ERR(clCreateImage(context, CL_MEM_READ_ONLY, &iformat_mapIds, &idescIds, NULL, &_err), img_mapIds);
+	
+	uint16_t *mapIds = malloc(sizeof(uint16_t)*mapIds_size);
+	uint16_t *dataIds = malloc(sizeof(uint16_t)*dataIds_size);
+	
+	d_positions = 0;
+    m_positions = 0;
+    for(m = 0; m < mapinone->nbarrays;m++)
+    {
+        mapIds[m_positions] = d_positions;
+
+        mapIds[m_positions+1] = (uint16_t)(mapinone->quantity[m]);
+        mapIds[m_positions+2] = 0;
+		mapIds[m_positions+3] = 0;
+        m_positions = m_positions+4;
+        
+        int d;
+        for(d=0; d < mapinone->quantity[m]; d++)
+        {
+            struct part part = mapinone->parts[mapinone->position[m]+d];
+            dataIds[d_positions] = idpart(part.id,part.rotation);
+            d_positions++;
+        }
+        
+    }
+	
+	cl_mem datasIds;
+	CL_CHECK_ERR(clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(int16_t)*dataIds_size, NULL, &_err), datasIds);
 	
 	
-	
+	cl_mem allRotatePart;
+	CL_CHECK_ERR(clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(struct part)*all_rotate_part->size, NULL, &_err), allRotatePart);
     
+	cl_mem directions;
+	CL_CHECK_ERR(clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(uint8_t)*256, NULL, &_err), directions);
+	
     cl_command_queue queue;
 	CL_CHECK_ERR(clCreateCommandQueue(context, devices[0], CL_QUEUE_PROFILING_ENABLE, &_err), queue);
+	
+	CL_CHECK(clEnqueueWriteBuffer(queue, datasIds, CL_TRUE, 0, sizeof(int16_t)*dataIds_size, dataIds, 0, NULL, NULL));
+	CL_CHECK(clEnqueueWriteBuffer(queue, allRotatePart, CL_TRUE, 0, sizeof(struct part)*all_rotate_part->size, all_rotate_part->parts, 0, NULL, NULL));
+	 uint8_t t_directions[256] = {135,221,210,34,45,255,254,253,237,239,223,222,238,240,224,208,209,241,242,226,225,0,1,2,18,16,32,33,17,15,31,47,46,14,13,29,30,252,251,250,249,248,247,246,245,244,243,192,176,160,144,128,112,96,80,64,48,3,4,5,6,7,8,9,10,11,12,63,79,95,111,127,143,159,175,191,207,236,235,234,233,232,231,230,229,228,227,193,177,161,145,129,113,97,81,65,49,19,20,21,22,23,24,25,26,27,28,62,78,94,110,126,142,158,174,190,206,220,219,218,217,216,215,214,213,212,211,194,178,162,146,130,114,98,82,66,50,35,36,37,38,39,40,41,42,43,44,61,77,93,109,125,141,157,173,189,205,204,203,202,201,200,199,198,197,196,195,179,163,147,131,115,99,83,67,51,52,53,54,55,56,57,58,59,60,76,92,108,124,140,156,172,188,187,186,185,184, 183,182,181,180,164,148,132,116,100,84,68,69,70,71,72,73,74,75,91,107,123,139,155,171,170,169,168,167,166,165,149,133,117,101,85,86,87,88,89,90,106,122,138,154,153,152,151,150,134,118,102,103,104,105,121,137,119,136,120};
+	CL_CHECK(clEnqueueWriteBuffer(queue, directions, CL_TRUE, 0, sizeof(uint8_t)*256, t_directions, 0, NULL, NULL));
+	
+	
+	
     
     size_t origin[] = {0,0,0};
 	size_t region[] = {w_map,h_map, 1};
@@ -362,6 +428,12 @@ etii_cl_instance *create_etii_cl_instance(cl_device_type device_type, map_big_ar
 	
 	size_t region_id[] = {w_ids,h_ids, 1};
     CL_CHECK(clEnqueueWriteImage(queue, img_ids, CL_TRUE, origin, region_id, 0, 0, ids, 0, NULL, NULL));
+	
+	size_t region_mapIds[] = {w_mapIds,h_mapIds, 1};
+    CL_CHECK(clEnqueueWriteImage(queue, img_mapIds, CL_TRUE, origin, region_mapIds, 0, 0, mapIds, 0, NULL, NULL));
+	
+	free(mapIds);
+	free(dataIds);
 	free(maps);
 	free(datas);
 	free(ids);
@@ -383,13 +455,66 @@ etii_cl_instance *create_etii_cl_instance(cl_device_type device_type, map_big_ar
     instance->img_datas = img_datas;
     instance->img_map = img_map;
     instance->img_ids = img_ids;
+	instance->img_mapId = img_mapIds;
+	instance->datasIds = datasIds;
+	instance->all_rotate_ids = allRotatePart;
 	instance->partsBuffer = malloc(sizeof(key_part) * MAX_SOURCE_SIZE * max_research);
 	instance->resultsBuffer = malloc(sizeof(uint8_t) * max_research);
 	//	long results_size = RESULT_BY_SEARCH * instance->max_research * (RESULT_BY_SEARCH +1)*4;
     instance->imgoutflat = malloc(sizeof(int16_t)*max_research*RESULT_BY_SEARCH);
+	instance->possibility = possibility;
+	instance->output_possibility = output_possibility;
+	instance->output_possibility_buffer = malloc(sizeof(struct possibility_packet)*max_research*RESULT_BY_SEARCH);
+	instance->directions = directions;
 	
     return instance;
 }
+
+File *search_possibility_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbresearch) {
+	File *result = malloc(sizeof(File));
+	init_file_with_cache(result, RESULT_BY_SEARCH, sizeof(struct possibility_packet));
+		
+	CL_CHECK(clEnqueueWriteBuffer(instance->queue, instance->possibility, CL_TRUE, 0, sizeof(struct possibility_packet)*nbresearch, possiblity, 0, NULL, NULL));
+	cl_kernel kernel;
+	CL_CHECK_ERR(clCreateKernel(instance->program, "search_possibility", &_err), kernel);
+	//__kernel void search_possibility(__global struct possibility_packet *possibility, __read_only image2d_t mapParts,int sizearray,__global int16_t *datas,__global struct part *all_rotate_parts, __global struct possibility_packet *resultPossibility, __global unsigned short *nbResult, int maxResulByGroup)
+
+	CL_CHECK(clSetKernelArg(kernel, 0, sizeof(instance->possibility), &instance->possibility));
+	CL_CHECK(clSetKernelArg(kernel, 1, sizeof(instance->img_mapId), &instance->img_mapId));
+	CL_CHECK(clSetKernelArg(kernel, 2, sizeof(instance->mapsizearray), &instance->mapsizearray));
+	CL_CHECK(clSetKernelArg(kernel, 3, sizeof(instance->datasIds), &instance->datasIds));
+	CL_CHECK(clSetKernelArg(kernel, 4, sizeof(instance->all_rotate_ids), &instance->all_rotate_ids));
+	CL_CHECK(clSetKernelArg(kernel, 5, sizeof(instance->output_possibility), &instance->output_possibility));
+	CL_CHECK(clSetKernelArg(kernel, 6, sizeof(instance->qt_buffer), &instance->qt_buffer));
+	int result_by_search = RESULT_BY_SEARCH;
+    CL_CHECK(clSetKernelArg(kernel, 7, sizeof(int), &result_by_search));
+	CL_CHECK(clSetKernelArg(kernel, 8, sizeof(instance->directions), &instance->directions));
+	
+	cl_event kernel_completion;
+	size_t global_work_size[1] = { nbresearch*256};
+	size_t local_work_size[1] = { 256 };
+	
+	CL_CHECK(clEnqueueNDRangeKernel(instance->queue, kernel, 1, NULL, global_work_size, local_work_size, 0, NULL, &kernel_completion));
+	CL_CHECK(clWaitForEvents(1, &kernel_completion));
+	CL_CHECK(clReleaseEvent(kernel_completion));
+	
+	for(int i=0;i< nbresearch;i++) {
+		instance->resultsBuffer[i]=0;
+	}
+	
+	CL_CHECK(clEnqueueReadBuffer(instance->queue, instance->qt_buffer, CL_TRUE, 0, sizeof(uint8_t) * instance->max_research, instance->resultsBuffer, 0, NULL, NULL));
+	CL_CHECK(clEnqueueReadBuffer(instance->queue, instance->output_possibility, CL_TRUE, 0, sizeof(struct possibility_packet) * instance->max_research * RESULT_BY_SEARCH, instance->output_possibility_buffer, 0, NULL, NULL));
+	
+	for(int i=0;i< nbresearch;i++) {
+		int r;
+		for(r=0; r < instance->resultsBuffer[i]; r++) {
+			put(result,&instance->output_possibility_buffer[i*RESULT_BY_SEARCH + r]);
+		}
+	}
+	
+	return result;
+}
+
 
 File **test_opencl(etii_cl_instance *instance, key_part *keys, struct possibility_packet *possiblity, int nbresearch)
 {
@@ -509,8 +634,11 @@ int free_etii_cl_instance(etii_cl_instance *instance)
 	CL_CHECK(clReleaseMemObject(instance->img_ids));
 	CL_CHECK(clReleaseMemObject(instance->img_keys));
 	CL_CHECK(clReleaseMemObject(instance->img_output));
-	
-    
+	CL_CHECK(clReleaseMemObject(instance->img_mapId));
+	CL_CHECK(clReleaseMemObject(instance->all_rotate_ids));
+	CL_CHECK(clReleaseMemObject(instance->datasIds));
+	CL_CHECK(clReleaseMemObject(instance->directions));
+	   
     CL_CHECK(clReleaseCommandQueue(instance->queue));
     
     CL_CHECK(clReleaseProgram(instance->program));
@@ -518,5 +646,6 @@ int free_etii_cl_instance(etii_cl_instance *instance)
 	free(instance->partsBuffer);
 	free(instance->resultsBuffer);
 	free(instance->imgoutflat);
+	free(instance->output_possibility_buffer);
     return 0;
 }

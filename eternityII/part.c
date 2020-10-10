@@ -217,7 +217,7 @@ unsigned int hash (char *str)
 
 int put_part(struct map_part *map, unsigned int key_int, char *key, struct array_part *apart)
 {
-	int l = abs(key_int) % map->size;
+	int l = key_int % map->size;
 	int first = l;
 	int r=0;
 	while (map->elements[l].key_int != 0 && l < map->sizemap) {
@@ -293,6 +293,9 @@ struct array_part *get_parts_bigarray(map_big_array *map,int8_t p[4])
 //	}
     return parts;
 }
+/*
+ * Indique toutes les pieces pouvant correspondre à la recherhce (key)
+ */
 struct array_part *get_parts_bigarray_with_key(map_big_array *map,key_part *key)
 {
     struct array_part *parts = NULL;

@@ -12,11 +12,11 @@ typedef unsigned short uint16_t;
 
 #include "part.h"
 #include "lifo.h"
-#include "etii_opencl_instance.h"
+//#include "etii_opencl_instance.h"
 #include "packed.h"
+#include "static_variables.h"
 
-#define ETERN_SIZE 16
-#define ETERN_PARTS 256
+
 #define DIR_UP 1
 #define DIR_RIGHT 2
 #define DIR_DOWN 3
@@ -44,6 +44,7 @@ key_part what_search(struct array_part *all_rotate_parts, int x, int y, struct p
 void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity,key_part *key);
 
 int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);
+int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);
 int search_possiblity(File *result,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part);
 int search_possiblity_light(File *result,key_part *key,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part,int16_t idParts[ETERN_PARTS][4]);
 
@@ -55,7 +56,9 @@ struct possibility_packet *decrypt_from_network(struct possibility_packet *packe
 int print_possibility_packet(struct possibility_packet *packet);
 int save_possibility(char *filename, struct possibility_packet *possibility);
 
-File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbPossibility,map_big_array *mapParts, struct array_part *all_rotate_part);
+// File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbPossibility,map_big_array *mapParts, struct array_part *all_rotate_part);
+
+// File *search_possiblity_light_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbPossibility);
 
 /*
  0 OK
@@ -67,6 +70,6 @@ File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_pac
  */
 int check_possibility(struct possibility_packet *packet);
 
-int test_directions();
-int decode_direction();
+int test_directions(void);
+int decode_direction(void);
 #endif
