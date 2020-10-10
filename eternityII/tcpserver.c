@@ -34,9 +34,9 @@ int create_tcp_server(int port, int nb_max_clients)
 	}
 	
 	setsockopt(socket_id, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(int));
-	struct timeval tv;
-	tv.tv_sec = 60;
-	tv.tv_usec = 0;
+	//struct timeval tv;
+	//tv.tv_sec = 60;
+	//tv.tv_usec = 0;
 	// Voir pour mettre le timeout sur la session
 	//setsockopt(socket_id, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(struct timeval));
 	
