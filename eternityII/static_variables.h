@@ -7,6 +7,16 @@
 //
 
 #ifndef static_variables_h
+
+#ifdef WIN32
+#define PACK( __Declaration__ ) __pragma( pack(push, 1) ) __Declaration__ __pragma( pack(pop) )
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+#else
+#include <stdint.h>
+#define PACK( __Declaration__ ) __Declaration__ __attribute__((__packed__))
+#endif
+
 #define static_variables_h
 
 #define NB_CONNECTIONS_PAR_THREAD 1
