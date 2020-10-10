@@ -29,4 +29,6 @@ extern int request;
 extern unsigned long long *compteurs;
 extern int *lastfilesize;
 
+extern uint16_t max_result;
+
 #endif /* static_variables_h */

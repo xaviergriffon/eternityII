@@ -20,6 +20,7 @@ typedef struct sockaddr_in SOCKADDR_IN;
 typedef struct sockaddr SOCKADDR;
 typedef struct in_addr IN_ADDR;
 #endif
+#include "static_variables.h"
 #include "lifo.h"
 #include "datamanager.h"
 #include "tcpclient.h"

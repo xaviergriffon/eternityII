@@ -68,6 +68,7 @@ unsigned long long *compteurs = NULL;
 int *lastfilesize = NULL;
 int NB_THREADS = 10;
 int request = REQUEST_CONTINUE;
+uint16_t max_result = 0;
 
 static char* partsFiles = NULL;
 

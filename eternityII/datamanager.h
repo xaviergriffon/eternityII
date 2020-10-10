@@ -6,7 +6,6 @@
 #include "lifo.h"
 
 #define NB_FILE_POSSIBILITY 10
-static uint16_t max_result = 0;
 
 typedef struct
 {
