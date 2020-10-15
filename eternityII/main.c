@@ -915,8 +915,6 @@ int run_console(int server)
 
 int main(int argc, const char * argv[])
 {
-    
-	
 	if (argc >= 2) {
 		lastcheck = calloc(1000, sizeof(char));
 		

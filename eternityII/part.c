@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "static_variables.h"
 #include "part.h"
 #include "readdata.h"
 
@@ -21,7 +22,6 @@ void print_part(struct part *p)
 struct part *rotatePart(struct part *p, int nbRotate)
 {
     struct part *result = malloc(sizeof(*result));
-    
     result->id = p->id;
     result->top = p->top;
     result->right = p->right;
@@ -65,7 +65,7 @@ struct array_part * rotate_all_parts(struct array_part *apart)
         {
 			
 			struct part *rotatepart = rotatePart(part, r);
-			int position = i+ 256*r;
+			int position = i+ ETERN_PARTS *r;
 			memcpy(&result->parts[position], rotatepart, sizeof(struct part));
 			//print_part(rotatepart);
             free(rotatepart);

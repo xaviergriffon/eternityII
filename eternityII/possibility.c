@@ -593,17 +593,17 @@ void put_possibility (File * suite, struct possibility_packet *value){
 	new_element->next = NULL;
 	
 	// par précaution du cache on vérifie que qu'il ne s'agit pas de la meme valeur
-	memcpy (new_element->value, value, sizeof(struct possibility_packet));
+    memcpy (new_element->value, value, sizeof(struct possibility_packet));
 	
     // On place l'élément dans la suite
-	if(suite->end == NULL){
+	if(suite->start == NULL){
 		suite->start = new_element;
-		suite->end = new_element;
 	}else {
 		suite->end->next = new_element;
 		new_element->previous = suite->end;
-		suite->end = new_element;
 	}
+    
+    suite->end = new_element;
 	suite->size++;
 	return;
 }

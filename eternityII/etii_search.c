@@ -49,8 +49,8 @@ void *autosearch (void *userdata)
 {
     client_possibility_t *client = userdata;
     
-    int16_t idParts[ETERN_PARTS][4];
-    for(int p=0; p < ETERN_PARTS;p++) {
+    int16_t idParts[ETERN_PARTS+1][4];
+    for(int p=0; p <= ETERN_PARTS;p++) {
         for(int r=0; r < 4;r++) {
             idParts[p][r] = p + ETERN_PARTS * r;
         }
