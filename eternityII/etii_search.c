@@ -69,7 +69,7 @@ void *autosearch (void *userdata)
         // Initialisation de la suite
         // 350 ???
         init_file_with_cache(db, 350, sizeof(struct possibility_packet));
-        struct possibility_packet *possibilityPacketCache = malloc(sizeof(struct possibility_packet));
+        //struct possibility_packet *possibilityPacketCache = malloc(sizeof(struct possibility_packet));
 
         // Représentation de la piece que l'on recherche dans les pieces disponbiles.
         // certaines faces ne sont pas définies
@@ -89,7 +89,16 @@ void *autosearch (void *userdata)
                 lastfilesize[client->compteur] = db->size;
                 
                 // Consomation d'un cache ??
-                struct possibility_packet *possibilityPacket = scroll_cache(db, possibilityPacketCache);
+                struct possibility_packet *possibilityPacket = scroll_cache(db);
+#ifdef CHECK_POSSIBILITY
+                int analyse = check_possibility(possibilityPacket);
+                if (analyse < 0)
+                {
+                    printf("possibility error : %i\n",analyse);
+                    printf(" ---");
+                    print_possibility_packet(possibilityPacket);
+                }
+#endif // CHECK_POSSIBILITY
                 
                 // Statistique possibilité étudiées
                 compteurs[client->compteur]++;
@@ -111,7 +120,7 @@ void *autosearch (void *userdata)
                 }
             }
         }
-        free(possibilityPacketCache);
+        //free(possibilityPacketCache);
         free(key);
         if(client->request == REQUEST_STOP && db->size > 0)
         {

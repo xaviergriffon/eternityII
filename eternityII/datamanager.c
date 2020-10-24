@@ -188,6 +188,15 @@ void scroll_from_server(array_possibility_packet *result,int max_result)
 			printf("No possibility recept\n");
 		}else
 		{
+#ifdef CHECK_POSSIBILITY
+            int analyse = check_possibility(possibilityPacket);
+            if (analyse < 0)
+            {
+                printf("possibility error : %i\n",analyse);
+                printf(" ---");
+                print_possibility_packet(possibilityPacket);
+            }
+#endif // CHECK_POSSIBILITY
 			//printf("recev ");
 			//print_possibility_packet(possibilityPacket);
 			put(&file, possibilityPacket);

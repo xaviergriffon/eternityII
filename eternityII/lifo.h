@@ -26,7 +26,7 @@ int put (File * suite, void *value);
 
 /* DE_FILER*/
 int scroll (File * suite, void *dest);
-void *scroll_cache(File * suite, void *cache);
+void *scroll_cache(File * suite);
 //int scroll_fifo (File * suite, void *dest);
 
 void free_file(File *suite);

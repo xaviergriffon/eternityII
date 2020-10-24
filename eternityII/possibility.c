@@ -416,6 +416,28 @@ int save_possibility(char *filename, struct possibility_packet *possibility)
 	return 0;
 }
 
+void checkIfResultFound(struct possibility_packet *poss, struct array_part *all_rotate_part) {
+    if(poss->alloc >= ETERN_PARTS)
+    {
+        printf("fin de la boucle à %i \n", poss->alloc);
+        printf("solution trouvée\n");
+        for(int x = 0; x < ETERN_SIZE; x++)
+        {
+            for(int y=0;y < ETERN_SIZE; y++)
+            {
+                //struct part *part = get_one_part(mapParts, poss.grid[x][y]);
+                struct part *part = &all_rotate_part->parts[poss->grid[x][y]];
+                printf("%i;%i; ",x,y);
+                print_part(part);
+            }
+        }
+        save_possibility("./solution",poss);
+        //free(poss);
+        //free(wsearch);
+        exit(EXIT_SUCCESS);
+    }
+}
+
 int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part)
 {
     int result = 0;
@@ -569,6 +591,15 @@ int search_possiblity(File *result,struct possibility_packet *possiblity, map_bi
 
 /* (ajouter) un élément dans la file */
 void put_possibility (File * suite, struct possibility_packet *value){
+#ifdef CHECK_POSSIBILITY
+    int analyse = check_possibility(value);
+    if (analyse < 0)
+    {
+        printf("possibility error : %i\n",analyse);
+        printf(" ---");
+        print_possibility_packet(value);
+    }
+#endif // CHECK_POSSIBILITY
 	Element *new_element = NULL;
     // On vérifie on peut encore positionner dans le cache
 	if(suite->lastPostionCache < suite->cacheSize)
@@ -623,7 +654,7 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
 	uint8_t nY = diry[incAlloc];
 	
 	int s;
-	int lastId =0;
+	int lastId =-1;
 	
 	struct possibility_packet *currPossibility = possiblity;
 	
@@ -639,14 +670,16 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
             // Si la piece n'est pas déjà utilisée dans la suite de possibilité, on a donc une possiblité supplémentaire
             if(!currPossibility->faceused[position])
             {
+                
+                // On ajoute la définition d'une possibilité dans la suite.
+                // effectue une copie dans le end->value
+                put_possibility(result, currPossibility);
+                // On se place à la fin de la suite qui correspond à la nouvelle définition
+                currPossibility = result->end->value;
                 // Dans le cas où on a déjà généré une possiblité, on libère la piece qui avait été utilisée avant de généré un nouveau jeu
-                if(lastId) {
+                if(lastId>0) {
                     currPossibility->faceused[lastId -1] = 0;
                 }
-                // On ajoute la définition d'une possibilité dans la suite.
-                put_possibility(result, currPossibility);
-                // On se placce à la fin de la suite qui correspond à la nouvelle définition
-                currPossibility = result->end->value;
                 // On place la piece
                 currPossibility->grid[x][y] = idParts[search->parts[s].id][search->parts[s].rotation];
                 // statistique du nombre de piece placée
@@ -657,13 +690,26 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
                 // On indique que la piece est utilisée
                 currPossibility->faceused[position] = 1;
                 // identifiant de la dernière piece utilisée
+                
                 lastId = search->parts[s].id;
                 // On vérifie que les emplacements libres ont tous une piece possible
                 // Si qu'une possiblité, alors place la piece
-                if(possibility_all_has_a_next(currPossibility, mapParts, all_rotate_part) == 0) {
+                /*
+                 * TODO : faire plus tard (après put ou après la boucle) car est recopié sur les autres qui n'ont pas la meme piece a position.
+                if(possibility_all_has_a_next(currPossibility, mapParts, all_rotate_part) == 0 && incAlloc < ETERN_PARTS) {
                     // Consomme la suite ou fournie la possiblité actuel si pas d'élément dans la suite
-                    scroll_cache(result, currPossibility);
+                    scroll_cache(result);
                 }
+                 */
+#ifdef CHECK_POSSIBILITY
+                int analyse = check_possibility(currPossibility);
+                if (analyse < 0)
+                {
+                    printf("possibility error : %i\n",analyse);
+                    printf(" ---");
+                    print_possibility_packet(currPossibility);
+                }
+#endif // CHECK_POSSIBILITY
                 // si toutes les pieces sont placées alors on n'entrera pas dasn le if !faceused et sortira donc
             }
         }
@@ -680,35 +726,27 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
 		currPossibility->y = nY;
         // On vérifie que les emplacements libres ont tous une piece possible
         // Si qu'une possiblité, alors place la piece
-		if(possibility_all_has_a_next(currPossibility, mapParts, all_rotate_part) == 0) {
-            // pk consommer ?
-			//scroll_cache(result, currPossibility);
+        /*
+		if(possibility_all_has_a_next(currPossibility, mapParts, all_rotate_part) == 0 && incAlloc < ETERN_PARTS) {
+            // On consomme pour éviter de recalculer
+            scroll_cache(result);
 		}
+         */
+#ifdef CHECK_POSSIBILITY
+        int analyse = check_possibility(currPossibility);
+        if (analyse < 0)
+        {
+            printf("possibility error : %i\n",analyse);
+            printf(" ---");
+            print_possibility_packet(currPossibility);
+        }
+#endif // CHECK_POSSIBILITY
 	}
 
     // On a au moins placé une piece
-	if (lastId) {
+	if (lastId>-1) {
 		max_result = incAlloc;
-		if(max_result >= ETERN_PARTS)
-		{
-			struct possibility_packet *poss = currPossibility;
-			printf("fin de la boucle à %i \n", poss->alloc);
-			printf("solution trouvée\n");
-			for(x = 0; x < ETERN_SIZE; x++)
-			{
-				for(y=0;y < ETERN_SIZE; y++)
-				{
-					//struct part *part = get_one_part(mapParts, poss.grid[x][y]);
-					struct part *part = &all_rotate_part->parts[poss->grid[x][y]];
-					printf("%i;%i; ",x,y);
-					print_part(part);
-				}
-			}
-			save_possibility("./solution",poss);
-			//free(poss);
-			//free(wsearch);
-			exit(EXIT_SUCCESS);
-		}
+        checkIfResultFound(currPossibility, all_rotate_part);
 	}
 	return max_result;
 }
@@ -719,7 +757,7 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
  -2 (x or y) > ETERN_SIZE or < 0
  -3 directory > or < dir_possibilities
  -4 alloc <= 0
- -5 alloc <> faceused
+ -5 alloc > faceused
  */
 int check_possibility(struct possibility_packet *packet)
 {
@@ -740,7 +778,11 @@ int check_possibility(struct possibility_packet *packet)
 			faceused++;
 		}
 	}
-	if(faceused != packet->alloc) return -5;
+    // peu être différent à cause de possibility_all_has_a_next qui alloue où il n'y a qu'une possibilité
+    // mais ne change pas alloc pour poursuivre la recherche
+    if(faceused < packet->alloc) {
+        return -5;
+    }
 	
 	return 0;
 }

@@ -130,12 +130,12 @@ int scroll (File * suite, void *dest){
 	return 1;
 }
 
-// TODO : expliquer ce cache ??
+// TODO : Revoir cette méthode
 // Consomme la suite ou fournie le cache si pas d'élément dans la suite
-void *scroll_cache(File * suite, void *cache){
+void *scroll_cache(File * suite){
 	Element *supp_element;
 	if (suite->size == 0 || suite->end == NULL)
-		return 0;
+		return NULL;
 	supp_element = suite->end;
 	if(supp_element->previous != NULL)
 	{
@@ -153,10 +153,12 @@ void *scroll_cache(File * suite, void *cache){
 		}
 	} else
 	{
+        /*
 		memcpy(cache, result, suite->sizeofvalue);
 		free (result);
 		free (supp_element);
 		result = cache;
+         */
 	}
 	
 	suite->size--;
