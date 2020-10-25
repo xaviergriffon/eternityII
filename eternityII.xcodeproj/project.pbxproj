@@ -15,8 +15,6 @@
 		4792036817B94EDE00B9DD3C /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = 4792036717B94EDE00B9DD3C /* main.c */; };
 		4792037217B9558100B9DD3C /* tcpserver.c in Sources */ = {isa = PBXBuildFile; fileRef = 4792037117B9558100B9DD3C /* tcpserver.c */; };
 		4792037517B96F2B00B9DD3C /* tcpclient.c in Sources */ = {isa = PBXBuildFile; fileRef = 4792037417B96F2B00B9DD3C /* tcpclient.c */; };
-		47CA8A0418C32DAF001F3A9F /* Search_Possibility.cl in Sources */ = {isa = PBXBuildFile; fileRef = 47CA8A0118C32DAF001F3A9F /* Search_Possibility.cl */; };
-		47CA8A0518C32DAF001F3A9F /* etii_opencl.c in Sources */ = {isa = PBXBuildFile; fileRef = 47CA8A0218C32DAF001F3A9F /* etii_opencl.c */; };
 		47CF07D717F4CB8000A0FBA7 /* etii_protocol.c in Sources */ = {isa = PBXBuildFile; fileRef = 47CF07D617F4CB8000A0FBA7 /* etii_protocol.c */; };
 		47CFC39417BFF3260009A35D /* part.c in Sources */ = {isa = PBXBuildFile; fileRef = 47CFC39317BFF3260009A35D /* part.c */; };
 		47E2A99217EA2F65002A1BE0 /* datamanager.c in Sources */ = {isa = PBXBuildFile; fileRef = 47E2A98E17EA2F65002A1BE0 /* datamanager.c */; };
@@ -53,10 +51,6 @@
 		4792037117B9558100B9DD3C /* tcpserver.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = tcpserver.c; sourceTree = "<group>"; };
 		4792037317B96F2000B9DD3C /* tcpclient.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = tcpclient.h; sourceTree = "<group>"; };
 		4792037417B96F2B00B9DD3C /* tcpclient.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = tcpclient.c; sourceTree = "<group>"; };
-		47CA8A0118C32DAF001F3A9F /* Search_Possibility.cl */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.opencl; path = Search_Possibility.cl; sourceTree = "<group>"; };
-		47CA8A0218C32DAF001F3A9F /* etii_opencl.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = etii_opencl.c; sourceTree = "<group>"; };
-		47CA8A0718C32DBE001F3A9F /* etii_opencl_instance.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = etii_opencl_instance.h; sourceTree = "<group>"; };
-		47CA8A0818C32DBE001F3A9F /* etii_opencl.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = etii_opencl.h; sourceTree = "<group>"; };
 		47CF07D617F4CB8000A0FBA7 /* etii_protocol.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = etii_protocol.c; sourceTree = "<group>"; };
 		47CFC39217BFE8CA0009A35D /* part.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = part.h; sourceTree = "<group>"; };
 		47CFC39317BFF3260009A35D /* part.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = part.c; sourceTree = "<group>"; };
@@ -101,10 +95,6 @@
 			isa = PBXGroup;
 			children = (
 				4716B71418F0A9A1003E8DB5 /* packed.h */,
-				47CA8A0718C32DBE001F3A9F /* etii_opencl_instance.h */,
-				47CA8A0818C32DBE001F3A9F /* etii_opencl.h */,
-				47CA8A0118C32DAF001F3A9F /* Search_Possibility.cl */,
-				47CA8A0218C32DAF001F3A9F /* etii_opencl.c */,
 				47E2A99117EA2F65002A1BE0 /* possibility.h */,
 				4749292F17EA3C6D00298558 /* possibility.c */,
 				47E2A98F17EA2F65002A1BE0 /* datamanager.h */,
@@ -191,11 +181,9 @@
 				4745D09F17D14BF000274B87 /* lifo.c in Sources */,
 				47CFC39417BFF3260009A35D /* part.c in Sources */,
 				476B5D5117BFAD4E00B2EE5C /* readdata.c in Sources */,
-				47CA8A0518C32DAF001F3A9F /* etii_opencl.c in Sources */,
 				472D879B252A5A960000D5FA /* etii_client.c in Sources */,
 				4792037517B96F2B00B9DD3C /* tcpclient.c in Sources */,
 				4792037217B9558100B9DD3C /* tcpserver.c in Sources */,
-				47CA8A0418C32DAF001F3A9F /* Search_Possibility.cl in Sources */,
 				4792036817B94EDE00B9DD3C /* main.c in Sources */,
 				472D87A1252A5EEE0000D5FA /* etii_search.c in Sources */,
 			);

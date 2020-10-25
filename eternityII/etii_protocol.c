@@ -1,11 +1,3 @@
-//
-//  etii_protocol.c
-//  eternityII
-//
-//  Created by Xavier GRIFFON on 26/09/13.
-//  Copyright (c) 2013 Xavier GRIFFON. All rights reserved.
-//
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

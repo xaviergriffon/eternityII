@@ -26,7 +26,7 @@ PACK(
 
 struct part
 {
-    int id;
+    int16_t id;
     int8_t top;
     int8_t right;
     int8_t bottom;
@@ -80,12 +80,15 @@ struct map_part
 void print_part(struct part *p);
 
 /*
+ * Indique un id correspondant à une piece dans un sens de rotation
+ */
+uint16_t id_for_rotated_part(uint16_t id, uint8_t rotated_position);
+
+/*
  * Rotation dans le sens des aiguilles d'une montres
  * le départ est donc top
  */
 struct part *rotatePart(struct part *p, int nbRotate);
-
-int16_t idpart(int id, int8_t rotation);
 
 int search_max_face(struct array_part *apart);
 

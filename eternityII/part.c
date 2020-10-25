@@ -669,7 +669,11 @@ struct map_in_one *regroup_map(map_big_array *map)
 	return result;
 }
 
-int16_t idpart(int id, int8_t rotation) {
-    return id + 256 * rotation;
+
+/**
+ rotated_position : 0 à 3
+ */
+uint16_t id_for_rotated_part(uint16_t id, uint8_t rotated_position) {
+    return id + ETERN_PARTS * rotated_position;
 }
 

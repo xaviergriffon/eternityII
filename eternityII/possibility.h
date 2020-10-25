@@ -12,7 +12,6 @@ typedef unsigned short uint16_t;
 
 #include "part.h"
 #include "lifo.h"
-//#include "etii_opencl_instance.h"
 #include "packed.h"
 #include "static_variables.h"
 

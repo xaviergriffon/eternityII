@@ -1,11 +1,3 @@
-//
-//  etii_client.h
-//  eternityII
-//
-//  Created by Xavier GRIFFON on 04/10/2020.
-//  Copyright © 2020 Xavier GRIFFON. All rights reserved.
-//
-
 #ifndef etii_client_h
 #define etii_client_h
 
@@ -23,6 +15,7 @@ typedef struct
     struct array_part *all_rotate_part;
     int compteur;
     int request;
+    int max_shots_per_second;
 } client_possibility_t;
 
 void runThreadClient(const char *file);

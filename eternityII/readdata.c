@@ -41,7 +41,7 @@ struct array_part *read_parts(const char *file)
 		int left;
 		int bottom;
 		int right;
-		fscanf(f, "%d %d %d %d %d",
+		fscanf(f, "%hd %d %d %d %d",
 			  &parts[count].id,
 			   &top,
 			   &left,

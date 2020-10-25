@@ -99,6 +99,7 @@ int put_to_server(array_possibility_packet *possibilities)
 		if(recv_instruction(socket_id) != INST_CONSIDERED){
             //TODO : reintegrer la possiblité
 			printf("problème de prise en compte du serveur\n");
+            
 		}
 	}
     

@@ -4,7 +4,6 @@
 #include <pthread.h>
 #include <time.h>
 
-//#include <readline/readline.h>
 #ifdef WIN32
 #include <winsock2.h>
 #define sleep(s) Sleep(s*1000)
@@ -46,7 +45,6 @@ typedef struct in_addr IN_ADDR;
 #include "part.h"
 #include "lifo.h"
 #include "etii_protocol.h"
-//#include "etii_opencl.h"
 #include "readdata.h"
 #include "etii_client.h"
 #include "etii_search.h"
@@ -299,7 +297,7 @@ void runserver(const char* file)
 	struct array_part *rotateParts = rotate_all_parts(apart);
     map_big_array *map_parts = prepare_map_part(rotateParts);
     free_array_part(apart);
-	first_possibility(map_parts,rotateParts);
+	first_possibility(map_parts, rotateParts);
 	free_bigarray(map_parts);
 	free_array_part(rotateParts);
 	
@@ -387,138 +385,8 @@ void runserver(const char* file)
 			}
 		}
 	}
-	exit(EXIT_SUCCESS);
+	//exit(EXIT_SUCCESS);
 }
-
-/*
-void *searchOpenCL (void *userdata)
-{
-	client_possibility_t *client = userdata;
-	int nbPossMax = 1;
-	pthread_mutex_lock(&build_cl_instance);
-	etii_cl_instance *instance = create_etii_cl_instance(CL_DEVICE_TYPE_GPU, client->map_part,nbPossMax, client->all_rotate_part);
-	pthread_mutex_unlock(&build_cl_instance);
-	
-	while(1)
-	{
-		while (client->aposs == NULL)
-		{
-			usleep(MICRO_SLEEP);
-		}
-		File *db = malloc(sizeof(File));
-		init_file_with_cache(db, MAX_STOCK_BY_THREAD, sizeof(struct possibility_packet));
-		struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
-		struct possibility_packet *posss = malloc(sizeof(struct possibility_packet) * nbPossMax);
-		int a;
-		for(a=0; a < client->aposs->size;a++)
-		{
-			put(db,&client->aposs->possibilities[a]);
-			while(db->size > 0 && client->request == 0)
-			{
-				if(db->size > MAX_STOCK_BY_THREAD)
-				{
-					array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-					int reste = db->size - MAX_STOCK_BY_THREAD;
-					aposs->possibilities = malloc(sizeof(struct possibility_packet) * (MAX_STOCK_BY_THREAD));
-					aposs->size = 0;
-					while(db->size > reste)
-					{
-						scroll(db, &aposs->possibilities[aposs->size]);
-						
-						aposs->size++;
-					}
-					// En cas d'erreur on remet les possibilitées dans la file
-					if(add_possibility(aposs))
-					{
-						printf("error on add_possibility\n");
-						int p;
-						for(p=0; p < aposs->size;p++)
-						{
-							put(db,&aposs->possibilities[p]);
-						}
-					}
-					free(aposs->possibilities);
-					free(aposs);
-					
-					
-				}
-				lastfilesize[client->compteur] = db->size;
-				
-                int nbSearch = 0;
-                while(db->size > 0 && nbSearch < nbPossMax)
-                {
-					scroll(db,&posss[nbSearch]);
-                    nbSearch++;
-                    compteurs[client->compteur]++;
-                    
-                }
-				
-				//File *possibilities = search_possiblity_opencl(instance,posss,nbSearch,client->map_part,client->all_rotate_part);
-				File *possibilities = search_possiblity_light_opencl(instance,posss,nbSearch);
-				
-				while(possibilities->size > 0)
-				{
-					struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
-					scroll(possibilities,possibility);
-					
-					//					pthread_mutex_lock(&max_lock);
-					if(possibility->alloc > max_result)
-					{
-						
-						max_result = possibility->alloc;
-						printf("max result:%i\n",max_result);
-					}
-					//					pthread_mutex_unlock(&max_lock);
-					put(db,possibility);
-					
-					free(possibility);
-				}
-				
-				free_file(possibilities);
-			}
-		}
-		free(posss);
-		free(possibilityPacket);
-		if(client->request == REQUEST_STOP && db->size > 0)
-		{
-			array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-			aposs->possibilities = malloc(sizeof(struct possibility_packet) * (db->size));
-			aposs->size = 0;
-			while(db->size > 0)
-			{
-				scroll(db, &aposs->possibilities[aposs->size]);
-                
-				aposs->size++;
-			}
-			if(add_possibility(aposs))
-			{
-				printf("Error with possibility : \n");
-				int p;
-				for (p=0;p < aposs->size;p++)
-				{
-					struct possibility_packet *possibility = &aposs->possibilities[p];
-					print_possibility_packet(possibility);
-					save_possibility("./error_possibility",possibility);
-				}
-				
-			}
-			free(aposs->possibilities);
-		}
-		free_file(db);
-        
-		if(client->aposs->size > 0)
-		{
-			free(client->aposs->possibilities);
-		}
-		free(client->aposs);
-		client->aposs = NULL;
-		client->works =0;
-	}
-	
-	free_etii_cl_instance(instance);
-	return NULL;
-}
- */
 
 void runclient(const char *hostname, const char *file)
 {
@@ -637,18 +505,35 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
 		cur_dir = DIR_LEFT;
 	}
 	
-	
-	
-	array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-	aposs->size = 1;
-	aposs->possibilities = generate_possibility_packet(x, y, etern, cur_dir);
-	getted_possibility_not_null++;
-	
+    int16_t idParts[ETERN_PARTS+1][4];
+    for(int p=0; p <= ETERN_PARTS;p++) {
+        for(int r=0; r < 4;r++) {
+            idParts[p][r] = p + ETERN_PARTS * r;
+        }
+    }
 	
 	File *possibilities = malloc(sizeof(File));
 	init_file_with_cache(possibilities, 0, sizeof(struct possibility_packet));
-	search_possiblity(possibilities, &aposs->possibilities[0], mapParts, all_rotate_part);
-	while (possibilities->size > 0) {
+    key_part *key = malloc(sizeof(key_part));
+    
+    struct possibility_packet *possibilityPacket = generate_possibility_packet(x, y, etern, cur_dir);
+    getted_possibility_not_null++;
+    // alimente key pour indiquer quoi chercher
+    what_search_to_key(all_rotate_part, possibilityPacket, key);
+    int max = search_possiblity_light(possibilities, key, possibilityPacket, mapParts, all_rotate_part, idParts);
+    
+    // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
+    if(max > max_result)
+    {
+        max_result = max;
+        if(max_result >= ETERN_PARTS)
+        {
+            printf("Erreur alloc > ETERN_PARTS\n");
+        }
+        printf("max result:%i\n",max_result);
+    }
+    
+    while (possibilities->size > 0) {
 		struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
 		scroll(possibilities,packet);
 		printf("packet->alloc:%i",packet->alloc);
@@ -674,10 +559,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
 		free(aposs2);
 	}
 	free_file(possibilities);
-	
-	free(aposs->possibilities);
-	free(aposs);
-    
+    free(key);
 }
 
 void failed_arg()
@@ -842,6 +724,7 @@ static void * console(void *param)
 		{
 			check_files();
 		}
+        // TODO : check all_parts pour vérifier calcul rotation
 		if(strncmp(buffer, "sortd ", 6) == 0)
 		{
 			int f = atoi(&buffer[6]);

@@ -1,10 +1,3 @@
-//
-//  etii_search.c
-//  eternityII
-//
-//  Created by Xavier GRIFFON on 04/10/2020.
-//  Copyright © 2020 Xavier GRIFFON. All rights reserved.
-//
 #include <unistd.h>
 #include <stdlib.h>
 #include "etii_search.h"
@@ -118,6 +111,8 @@ void *autosearch (void *userdata)
                     }
                     printf("max result:%i\n",max_result);
                 }
+                // TODO : mettre en place un controle de consomation (< à x "100000") pour avoir un service en continue peu consommateur
+                //usleep(1);
             }
         }
         //free(possibilityPacketCache);
@@ -149,6 +144,7 @@ void *autosearch (void *userdata)
         }
         free_file(db);
         
+        // A faire tout le temps ou juste si on arrete ?
         if(client->aposs->size > 0)
         {
             free(client->aposs->possibilities);

@@ -1,10 +1,3 @@
-//
-//  etii_client.c
-//  eternityII
-//
-//  Created by Xavier GRIFFON on 04/10/2020.
-//  Copyright © 2020 Xavier GRIFFON. All rights reserved.
-//
 #include <unistd.h>
 #include <stdlib.h>
 #include "etii_client.h"
@@ -34,6 +27,7 @@ void runThreadClient(const char *file)
         thread_params[i].tid = NULL;
         thread_params[i].compteur = i;
         thread_params[i].request = 0;
+        thread_params[i].max_shots_per_second = -1;
         
         /* création d'un nouveau thread */
         pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
