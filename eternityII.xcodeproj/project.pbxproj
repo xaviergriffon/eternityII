@@ -14,6 +14,7 @@
 		476B5D5117BFAD4E00B2EE5C /* readdata.c in Sources */ = {isa = PBXBuildFile; fileRef = 476B5D5017BFAD4E00B2EE5C /* readdata.c */; };
 		47808C3525485461005405A4 /* console.c in Sources */ = {isa = PBXBuildFile; fileRef = 47808C3425485461005405A4 /* console.c */; };
 		47808C3825485867005405A4 /* static_variables.c in Sources */ = {isa = PBXBuildFile; fileRef = 47808C3725485867005405A4 /* static_variables.c */; };
+		47808C3C2548BE95005405A4 /* etii_server.c in Sources */ = {isa = PBXBuildFile; fileRef = 47808C3B2548BE95005405A4 /* etii_server.c */; };
 		4792036817B94EDE00B9DD3C /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = 4792036717B94EDE00B9DD3C /* main.c */; };
 		4792037217B9558100B9DD3C /* tcpserver.c in Sources */ = {isa = PBXBuildFile; fileRef = 4792037117B9558100B9DD3C /* tcpserver.c */; };
 		4792037517B96F2B00B9DD3C /* tcpclient.c in Sources */ = {isa = PBXBuildFile; fileRef = 4792037417B96F2B00B9DD3C /* tcpclient.c */; };
@@ -50,6 +51,8 @@
 		47808C3325485461005405A4 /* console.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = console.h; sourceTree = "<group>"; };
 		47808C3425485461005405A4 /* console.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = console.c; sourceTree = "<group>"; };
 		47808C3725485867005405A4 /* static_variables.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = static_variables.c; sourceTree = "<group>"; };
+		47808C3A2548BE95005405A4 /* etii_server.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = etii_server.h; sourceTree = "<group>"; };
+		47808C3B2548BE95005405A4 /* etii_server.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = etii_server.c; sourceTree = "<group>"; };
 		4792036417B94EDE00B9DD3C /* eternityII */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = eternityII; sourceTree = BUILT_PRODUCTS_DIR; };
 		4792036717B94EDE00B9DD3C /* main.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = main.c; sourceTree = "<group>"; };
 		4792037017B9556900B9DD3C /* tcpserver.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = tcpserver.h; sourceTree = "<group>"; };
@@ -127,6 +130,8 @@
 				47808C3325485461005405A4 /* console.h */,
 				47808C3425485461005405A4 /* console.c */,
 				47808C3725485867005405A4 /* static_variables.c */,
+				47808C3A2548BE95005405A4 /* etii_server.h */,
+				47808C3B2548BE95005405A4 /* etii_server.c */,
 			);
 			path = eternityII;
 			sourceTree = "<group>";
@@ -190,6 +195,7 @@
 				47CFC39417BFF3260009A35D /* part.c in Sources */,
 				476B5D5117BFAD4E00B2EE5C /* readdata.c in Sources */,
 				472D879B252A5A960000D5FA /* etii_client.c in Sources */,
+				47808C3C2548BE95005405A4 /* etii_server.c in Sources */,
 				4792037517B96F2B00B9DD3C /* tcpclient.c in Sources */,
 				4792037217B9558100B9DD3C /* tcpserver.c in Sources */,
 				47808C3825485867005405A4 /* static_variables.c in Sources */,

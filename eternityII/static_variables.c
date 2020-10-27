@@ -17,3 +17,11 @@ char* partsFiles = NULL;
 
 unsigned long long getted_possibility_not_null = 0;
 uint16_t max_result = 0;
+//int request = REQUEST_CONTINUE;
+
+
+int request = REQUEST_CONTINUE;
+
+long inst_unknow = 0;
+
+int NB_THREADS = 10;

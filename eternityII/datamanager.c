@@ -128,9 +128,7 @@ int put_to_local(array_possibility_packet *possibilities)
             {
                 if(possibilities->possibilities[t].alloc > max_result)
                 {
-					//pthread_mutex_lock(&max_lock);
                     max_result = possibilities->possibilities[t].alloc;
-					//pthread_mutex_unlock(&max_lock);
                     printf("max result:%i\n",max_result);
                 }
                 if(possibilities->possibilities[t].x < 0 || possibilities->possibilities[t].y < 0 || possibilities->possibilities[t].x > 16 || possibilities->possibilities[t].y > 16)

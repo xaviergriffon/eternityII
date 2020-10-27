@@ -30,7 +30,6 @@ extern uint8_t dirx[ETERN_PARTS];
 extern uint8_t diry[ETERN_PARTS];
 
 extern int NB_THREADS;
-extern int request;
 
 extern unsigned long long *compteurs;
 extern int *lastfilesize;
@@ -42,5 +41,11 @@ extern char *lastcheck;
 extern char* partsFiles;
 
 extern unsigned long long getted_possibility_not_null;
+
+extern int request;
+
+extern long inst_unknow;
+
+extern int NB_THREADS;
 
 #endif /* static_variables_h */

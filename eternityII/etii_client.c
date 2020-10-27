@@ -1,5 +1,7 @@
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
+
 #include "etii_client.h"
 #include "readdata.h"
 #include "datamanager.h"
@@ -26,7 +28,6 @@ void runThreadClient(const char *file)
         thread_params[i].map_part = prepare_map_part(rotateParts);
         thread_params[i].tid = NULL;
         thread_params[i].compteur = i;
-        thread_params[i].request = 0;
         thread_params[i].max_shots_per_second = -1;
         
         /* création d'un nouveau thread */
@@ -71,7 +72,6 @@ void runThreadClient(const char *file)
             {
                 if(thread_params[i].works == 1)
                 {
-                    thread_params[i].request = request;
                     threadworking++;
                 }
             }
@@ -79,8 +79,76 @@ void runThreadClient(const char *file)
         
         if(request == REQUEST_STOP && threadworking == 0)
         {
-            exit(EXIT_SUCCESS);
+            break;
         }
         usleep(THREAD_MICRO_SLEEP);
     }
+}
+
+void runMonoClient(const char *file)
+{
+    client_possibility_t *thread_params = malloc(sizeof(*thread_params));
+    
+    struct array_part *apart= read_parts(file);
+    thread_params->works = 0;
+    thread_params->aposs = get_last_possibility(1);
+    struct array_part *rotateParts = rotate_all_parts(apart);
+    thread_params->all_rotate_part =rotateParts;
+    thread_params->map_part = prepare_map_part(rotateParts);
+    thread_params->tid = NULL;
+    thread_params->compteur = 0;
+    thread_params->max_shots_per_second = -1;
+    
+    free_array_part(apart);
+    
+    autosearch(thread_params);    
+}
+
+
+void *check_client_threads(void *param)
+{
+    unsigned long long lastactive = 0;
+    int sleep_time = 10;
+    while(1)
+    {
+        free(lastcheck);
+        lastcheck = calloc(1000, sizeof(char));
+        unsigned long long currentactive = lastactive;
+        int c;
+        lastactive = 0;
+        for(c=0; c < NB_THREADS;c++)
+        {
+            lastactive = lastactive + compteurs[c];
+        }
+        currentactive = lastactive - currentactive;
+        getted_possibility_not_null = lastactive;
+        
+        unsigned long long file_possibility_stock = 0;
+        int f;
+        for(f=0; f < NB_FILE_POSSIBILITY; f++)
+        {
+            int f_size = file_size(f);
+            char *temp = calloc(1000, sizeof(char));
+            sprintf(temp, "file:%i stock:%i\n",f,f_size);
+            strcat(lastcheck, temp);
+            free(temp);
+            file_possibility_stock = file_possibility_stock + f_size;
+        }
+        for(f=0; f < NB_THREADS; f++)
+        {
+            char *temp = calloc(1000, sizeof(char));
+            sprintf(temp, "Thread %i file size:%i\n",f,lastfilesize[f]);
+            strcat(lastcheck, temp);
+            free(temp);
+        }
+        unsigned long long bys = currentactive / sleep_time;
+        char *temp = calloc(1000, sizeof(char));
+        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\ngetted possibility not null :%lli\nmax result :%i\n",sleep_time,currentactive, bys,file_possibility_stock,getted_possibility_not_null, max_result);
+        strcat(lastcheck, temp);
+        free(temp);
+        
+        sleep(sleep_time);
+    }
+    
+    return NULL;
 }

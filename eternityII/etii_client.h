@@ -14,9 +14,12 @@ typedef struct
     map_big_array *map_part;
     struct array_part *all_rotate_part;
     int compteur;
-    int request;
+    //int request;
     int max_shots_per_second;
 } client_possibility_t;
 
 void runThreadClient(const char *file);
+void runMonoClient(const char *file);
+void *check_client_threads(void *param);
+
 #endif /* etii_client_h */

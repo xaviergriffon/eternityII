@@ -49,23 +49,17 @@ void *autosearch (void *userdata)
         }
     }
     
-    uint8_t *cdirx = malloc(sizeof(uint8_t) * ETERN_PARTS);
-    for (int i = 0; i < ETERN_PARTS; i++) {
-        cdirx[i] = dirx[i];
-    }
-    
-    uint8_t *cdiry = malloc(sizeof(uint8_t) * ETERN_PARTS);
-    for (int i = 0; i < ETERN_PARTS; i++) {
-        cdiry[i] = diry[i];
-    }
-    
     // Boucle infinie pour maintenir le thread
     while(1)
     {
         // Attente d'un jeu de possibilité
-        while (client->aposs == NULL)
+        while (client->aposs == NULL && request == REQUEST_CONTINUE)
         {
             usleep(MICRO_SLEEP);
+        }
+        
+        if (client->aposs == NULL) {
+            break;
         }
         // allocation mémoire pour la suite
         File *db = malloc(sizeof(File));
@@ -83,7 +77,8 @@ void *autosearch (void *userdata)
         {
             put(db,&client->aposs->possibilities[a]);
             // On poursuit tant qu'il y a du stock et qu'on a toujours l'instruction de continuer
-            while(db->size > 0 && client->request == REQUEST_CONTINUE)
+            //while(db->size > 0 && client->request == REQUEST_CONTINUE)
+            while(db->size > 0 && request == REQUEST_CONTINUE)
             {
                 // Si trop d'étude à faire pour 1 thread, alors on délègue le reste.
                 checkAndDelegatePossibilitiesIfNeeded(db);
@@ -109,7 +104,7 @@ void *autosearch (void *userdata)
                 // alimente key pour indiquer quoi chercher
                 what_search_to_key(client->all_rotate_part, possibilityPacket, key);
                 
-                int max = search_possiblity_light(db, key, possibilityPacket, client->map_part, client->all_rotate_part, idParts, cdirx, cdiry);
+                int max = search_possiblity_light(db, key, possibilityPacket, client->map_part, client->all_rotate_part, idParts);
                 
                 // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
                 if(max > max_result)
@@ -127,7 +122,8 @@ void *autosearch (void *userdata)
         }
         //free(possibilityPacketCache);
         free(key);
-        if(client->request == REQUEST_STOP && db->size > 0)
+        //if(client->request == REQUEST_STOP && db->size > 0)
+        if (request == REQUEST_STOP && db->size > 0)
         {
             array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
             aposs->possibilities = malloc(sizeof(struct possibility_packet) * (db->size));
@@ -162,10 +158,11 @@ void *autosearch (void *userdata)
         free(client->aposs);
         client->aposs = NULL;
         client->works = 0;
+        
+        if (request == REQUEST_STOP) {
+            break;
+        }
     }
-    
-    free(cdirx);
-    free(cdiry);
     
     return NULL;
 }

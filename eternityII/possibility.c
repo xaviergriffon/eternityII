@@ -477,7 +477,7 @@ void put_possibility (File * suite, struct possibility_packet *value){
 	return;
 }
 
-int search_possiblity_light(File *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4], uint8_t *dirx, uint8_t *diry)
+int search_possiblity_light(File *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4])
 {
 	int max_result=0;
     uint8_t x;
@@ -726,17 +726,6 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         }
     }
     
-    
-    uint8_t *cdirx = malloc(sizeof(uint8_t) * ETERN_PARTS);
-    for (int i = 0; i < ETERN_PARTS; i++) {
-        cdirx[i] = dirx[i];
-    }
-    
-    uint8_t *cdiry = malloc(sizeof(uint8_t) * ETERN_PARTS);
-    for (int i = 0; i < ETERN_PARTS; i++) {
-        cdiry[i] = diry[i];
-    }
-    
     File *possibilities = malloc(sizeof(File));
     init_file_with_cache(possibilities, 0, sizeof(struct possibility_packet));
     key_part *key = malloc(sizeof(key_part));
@@ -745,7 +734,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
     getted_possibility_not_null++;
     // alimente key pour indiquer quoi chercher
     what_search_to_key(all_rotate_part, possibilityPacket, key);
-    int max = search_possiblity_light(possibilities, key, possibilityPacket, mapParts, all_rotate_part, idParts, cdirx, cdiry);
+    int max = search_possiblity_light(possibilities, key, possibilityPacket, mapParts, all_rotate_part, idParts);
     
     // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
     if(max > max_result)
@@ -785,6 +774,4 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
     }
     free_file(possibilities);
     free(key);
-    free(cdirx);
-    free(cdiry);
 }
