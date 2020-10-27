@@ -49,6 +49,16 @@ void *autosearch (void *userdata)
         }
     }
     
+    uint8_t *cdirx = malloc(sizeof(uint8_t) * ETERN_PARTS);
+    for (int i = 0; i < ETERN_PARTS; i++) {
+        cdirx[i] = dirx[i];
+    }
+    
+    uint8_t *cdiry = malloc(sizeof(uint8_t) * ETERN_PARTS);
+    for (int i = 0; i < ETERN_PARTS; i++) {
+        cdiry[i] = diry[i];
+    }
+    
     // Boucle infinie pour maintenir le thread
     while(1)
     {
@@ -99,7 +109,7 @@ void *autosearch (void *userdata)
                 // alimente key pour indiquer quoi chercher
                 what_search_to_key(client->all_rotate_part, possibilityPacket, key);
                 
-                int max = search_possiblity_light(db, key, possibilityPacket, client->map_part, client->all_rotate_part,idParts);
+                int max = search_possiblity_light(db, key, possibilityPacket, client->map_part, client->all_rotate_part, idParts, cdirx, cdiry);
                 
                 // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
                 if(max > max_result)
@@ -153,6 +163,9 @@ void *autosearch (void *userdata)
         client->aposs = NULL;
         client->works = 0;
     }
+    
+    free(cdirx);
+    free(cdiry);
     
     return NULL;
 }

@@ -45,7 +45,7 @@ void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_
 int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);
 int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);
 int search_possiblity(File *result,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part);
-int search_possiblity_light(File *result,key_part *key,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part,int16_t idParts[ETERN_PARTS][4]);
+int search_possiblity_light(File *result,key_part *key,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part,int16_t idParts[ETERN_PARTS][4], uint8_t *dirx, uint8_t *diry);
 
 int change_dir(int cur_dir, int x, int y, struct possibility_packet *possiblity);
 
@@ -55,10 +55,7 @@ struct possibility_packet *decrypt_from_network(struct possibility_packet *packe
 int print_possibility_packet(struct possibility_packet *packet);
 int save_possibility(char *filename, struct possibility_packet *possibility);
 
-// File *search_possiblity_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbPossibility,map_big_array *mapParts, struct array_part *all_rotate_part);
-
-// File *search_possiblity_light_opencl(etii_cl_instance *instance,struct possibility_packet *possiblity, int nbPossibility);
-
+void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_part);
 /*
  0 OK
  -1 packet NULL

@@ -53,7 +53,7 @@ void runThreadClient(const char *file)
         int threadworking = 0;
         for(i = 0; i < NB_THREADS; i++)
         {
-            if(request == 0)
+            if(request == REQUEST_CONTINUE)
             {
                 if(thread_params[i].works == 0)
                 {

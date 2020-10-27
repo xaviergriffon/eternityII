@@ -37,6 +37,7 @@ typedef struct in_addr IN_ADDR;
 #endif
 
 #include "static_variables.h"
+#include "console.h"
 #include "possibility.h"
 
 #include "datamanager.h"
@@ -49,26 +50,14 @@ typedef struct in_addr IN_ADDR;
 #include "etii_client.h"
 #include "etii_search.h"
 
-
-#define EXIT_CMD "exit"
-
-
-
 pthread_mutex_t max_lock;
 pthread_mutex_t build_cl_instance;
 
 static long inst_unknow = 0;
 
-static char *lastcheck = NULL;
 
-// Partagées en extern dans static_variables
-unsigned long long *compteurs = NULL;
-int *lastfilesize = NULL;
 int NB_THREADS = 10;
 int request = REQUEST_CONTINUE;
-uint16_t max_result = 0;
-
-static char* partsFiles = NULL;
 
 typedef struct
 {
@@ -79,11 +68,6 @@ typedef struct
 	int compteur;
 } client_t;
 
-
-
-void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_part);
-
-static unsigned long long getted_possibility_not_null = 0;
 
 static void *check_server()
 {
@@ -418,149 +402,8 @@ void runauto(const char *file)
 
 /********************/
 
-struct part* part_139_i8(map_big_array *mapParts)
-{
-	key_part key = {2,15,15,3};
-	struct part *part = get_one_part(mapParts, key);
-	if(part == NULL)
-	{
-		printf("part 139 not found\n");
-		exit(EXIT_FAILURE);
-	}
-    return part;
-}
 
-void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_part)
-{
-	struct part *etern[ETERN_SIZE][ETERN_SIZE];
-    int x;
-	int y;
-	// initialisation
-    for (x = 0; x < ETERN_SIZE; x++) {
-        for(y=0; y < ETERN_SIZE; y++)
-        {
-            etern[x][y] = NULL;
-        }
-    }
-	
-	x = 7;
-	y = 8;
-	int cur_dir = DIR_UP;
-    
-    struct part *part = part_139_i8(mapParts);
-	if(part != NULL) {
-		etern[x][y] = part;
-		
-		// 208 C3 -- rotation 3
-		// 1 13 12 3
-		key_part k208 = {13,12,3,1};
-		part = get_one_part(mapParts, k208);
-		if(part == NULL)
-		{
-			printf("part 208 r3 not found\n");
-			exit(EXIT_FAILURE);
-		}
-		etern[2][2] = part;
-		
-		// 255 C14 -- rotation 3
-		// 7 13 11 13
-		key_part k255 = {13,11,13,7};
-		part = get_one_part(mapParts, k255);
-		if(part == NULL)
-		{
-			printf("part 255 r3 not found\n");
-			exit(EXIT_FAILURE);
-		}
-		etern[13][2] = part;
-		
-		// 181 N3-- rotation 3
-		// 3 7 15 5
-		key_part k181 = {7,15,5,3};
-		part = get_one_part(mapParts, k181);
-		if(part == NULL)
-		{
-			printf("part 181 r3 not found\n");
-			exit(EXIT_FAILURE);
-		}
-		etern[2][13] = part;
-		
-		// 249 N14 -- rotation 0
-		// 8 5 9 10
-		key_part k249 = {8,5,9,10};
-		part = get_one_part(mapParts, k249);
-		if(part == NULL)
-		{
-			printf("part 249 r0 not found\n");
-			exit(EXIT_FAILURE);
-		}
-		etern[13][13] = part;
-		
-		// on commence vers le haut
-		// et sur l'angle en bas à droite
-		x = ETERN_SIZE -1;
-		y = ETERN_SIZE -1;
-		
-	} else
-	{
-		cur_dir = DIR_LEFT;
-	}
-	
-    int16_t idParts[ETERN_PARTS+1][4];
-    for(int p=0; p <= ETERN_PARTS;p++) {
-        for(int r=0; r < 4;r++) {
-            idParts[p][r] = p + ETERN_PARTS * r;
-        }
-    }
-	
-	File *possibilities = malloc(sizeof(File));
-	init_file_with_cache(possibilities, 0, sizeof(struct possibility_packet));
-    key_part *key = malloc(sizeof(key_part));
-    
-    struct possibility_packet *possibilityPacket = generate_possibility_packet(x, y, etern, cur_dir);
-    getted_possibility_not_null++;
-    // alimente key pour indiquer quoi chercher
-    what_search_to_key(all_rotate_part, possibilityPacket, key);
-    int max = search_possiblity_light(possibilities, key, possibilityPacket, mapParts, all_rotate_part, idParts);
-    
-    // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
-    if(max > max_result)
-    {
-        max_result = max;
-        if(max_result >= ETERN_PARTS)
-        {
-            printf("Erreur alloc > ETERN_PARTS\n");
-        }
-        printf("max result:%i\n",max_result);
-    }
-    
-    while (possibilities->size > 0) {
-		struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
-		scroll(possibilities,packet);
-		printf("packet->alloc:%i",packet->alloc);
-		if(packet->alloc > max_result)
-		{
-			max_result = packet->alloc;
-			if(max_result >= ETERN_PARTS)
-			{
-				printf("Erreur alloc > ETERN_PARTS\n");
-			}
-			printf("max result:%i\n",max_result);
-		}
-		array_possibility_packet *aposs2 = malloc(sizeof(array_possibility_packet));
-		aposs2->size = 1;
-		aposs2->possibilities = packet;
-		if(add_possibility(aposs2))
-		{
-			printf("error on add_possibility\n");
-			exit(EXIT_FAILURE);
-		}
-		getted_possibility_not_null++;
-		free(aposs2->possibilities);
-		free(aposs2);
-	}
-	free_file(possibilities);
-    free(key);
-}
+
 
 void failed_arg()
 {
@@ -611,190 +454,7 @@ int init_compteurs()
 	return 0;
 }
 
-static char * getcmdline() {
-	char * line = malloc(100), *linep = line;
-	size_t lenmax = 100, len = lenmax;
-	int c;
-	
-	if (line == NULL)
-		return NULL;
-	
-	for (;;) {
-		c = fgetc(stdin);
-		if (c == EOF || c == '\n')
-			break;
-		
-		if (--len == 0) {
-			len = lenmax;
-			char * linen = realloc(linep, lenmax *= 2);
-			
-			if (linen == NULL) {
-				free(linep);
-				return NULL;
-			}
-			line = linen + (line - linep);
-			linep = linen;
-		}
-		
-		if ((*line++ = c) == '\n')
-			break;
-	}
-	*line = '\0';
-	return linep;
-}
-static void * console(void *param)
-{
-	int server = *(int *)param;
-	char *def_file = "./eternityII.back";
-	char *buffer = NULL;
-	while(buffer == NULL)
-	{
-		printf("commande :");
-		buffer = getcmdline();
-		printf("\n");
-		if(strcmp(buffer, EXIT_CMD) == 0)
-		{
-			if(server == 0)
-			{
-				request = REQUEST_STOP;
-				free(buffer);
-				buffer= NULL;
-				while (1)
-				{
-					printf("*");
-					usleep(MICRO_SLEEP);
-				}
-				
-			} else
-			{
-				break;
-			}
-		}
-		if(strcmp(buffer, "check") == 0)
-		{
-			printf("%s\n",lastcheck);
-		}
-		if(strcmp(buffer, "backup") == 0)
-		{
-			printf("start backup\n");
-			backup(def_file);
-			printf("backup ended\n");
-		}
-		if(strcmp(buffer, "restore") == 0)
-		{
-			printf("start restore\n");
-			restore(def_file);
-			printf("backup restore\n");
-		}
-		if(strcmp(buffer, "import") == 0)
-		{
-			printf("start import\n");
-			import(def_file);
-			printf("backup restore\n");
-		}
-		if(strcmp(buffer, "print") == 0)
-		{
-			printdatamanager();
-		}
-		if(strcmp(buffer, "sorta") == 0)
-		{
-			sort_ascending();
-		}
-		if(strcmp(buffer, "sortd") == 0)
-		{
-			sort_descending();
-		}
-		if(strcmp(buffer, "sortdm") == 0)
-		{
-			sort_descending_mthread();
-		}
-		if(strcmp(buffer, "split") == 0)
-		{
-			split_datas();
-		}
-		if(strcmp(buffer, "regroup") == 0)
-		{
-			regroup_datas();
-		}
-		if(strcmp(buffer, "checkdatas") == 0)
-		{
-			check_datas();
-		}
-		if(strcmp(buffer, "checkfiles") == 0)
-		{
-			check_files();
-		}
-        // TODO : check all_parts pour vérifier calcul rotation
-		if(strncmp(buffer, "sortd ", 6) == 0)
-		{
-			int f = atoi(&buffer[6]);
-			sort_d_mono(&f);
-		}
-        if(strncmp(buffer, "printfile ", 10) == 0)
-		{
-			int f = atoi(&buffer[10]);
-			print_file(f);
-		}
-		if(strncmp(buffer, "checkfile ", 10) == 0)
-		{
-			int f = atoi(&buffer[10]);
-			check_file(f);
-		}
-		if(strcmp(buffer, "checkdirections") == 0)
-		{
-			if(test_directions() == 0)
-			{
-				printf("directions : ok\n");
-			} else
-			{
-				printf("directions : NOK !\n");
-			}
-		}
-        if(strcmp(buffer, "rmnonext") == 0)
-        {
-			struct array_part *apart= read_parts(partsFiles);
-			
-			struct array_part *rotateParts = rotate_all_parts(apart);
-            map_big_array *map_parts = prepare_map_part(rotateParts);
-            remove_possibilities_with_no_next(map_parts, rotateParts);
-            free_bigarray(map_parts);
-			free_array_part(rotateParts);
-			free_array_part(apart);
-        }
-		if(strcmp(buffer, "min") == 0)
-		{
-			printf("min :%i\n",search_min_datas());
-		}
-		if(strcmp(buffer, "help") == 0)
-		{
-			printf("commands:\n  help\n  check\n  backup\n  restore\n  import\n  print\n  regroup\n  sorta\n  sortd\n  split\n  checkdatas\n  checkfiles\n  checkdirections\n  min\n  rmnonext\n  exit\n");
-		}
-		free(buffer);
-		buffer= NULL;
-	}
-	exit(EXIT_SUCCESS);
-}
 
-int run_console(int server)
-{
-	pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
-	pthread_attr_init(thread_attributes);
-	pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
-	pthread_t thread;
-	/* Création du thread */
-	
-	int *param = malloc(sizeof(int));
-	*param = server;
-	if(0 != pthread_create(&thread, NULL, console, param))
-	{
-		fprintf(stderr, "Problème avec pthread_create()\n");
-		free(thread_attributes);
-		exit(EXIT_FAILURE);
-	}
-	pthread_attr_destroy(thread_attributes);
-	free(thread_attributes);
-	return 0;
-}
 
 int main(int argc, const char * argv[])
 {

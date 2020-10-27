@@ -3,6 +3,7 @@
 #include <string.h>
 #include "static_variables.h"
 #include "possibility.h"
+#include "datamanager.h"
 
 int decode_direction()
 {
@@ -476,7 +477,7 @@ void put_possibility (File * suite, struct possibility_packet *value){
 	return;
 }
 
-int search_possiblity_light(File *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4])
+int search_possiblity_light(File *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4], uint8_t *dirx, uint8_t *diry)
 {
 	int max_result=0;
     uint8_t x;
@@ -629,4 +630,161 @@ int print_possibility_packet(struct possibility_packet *packet)
 
 	printf("possibility facesused:%i \n",packet->alloc);
 	return 0;
+}
+
+struct part* part_139_i8(map_big_array *mapParts)
+{
+    key_part key = {2,15,15,3};
+    struct part *part = get_one_part(mapParts, key);
+    if(part == NULL)
+    {
+        printf("part 139 not found\n");
+        exit(EXIT_FAILURE);
+    }
+    return part;
+}
+
+void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_part)
+{
+    struct part *etern[ETERN_SIZE][ETERN_SIZE];
+    int x;
+    int y;
+    // initialisation
+    for (x = 0; x < ETERN_SIZE; x++) {
+        for(y=0; y < ETERN_SIZE; y++)
+        {
+            etern[x][y] = NULL;
+        }
+    }
+    
+    x = 7;
+    y = 8;
+    int cur_dir = DIR_UP;
+    
+    struct part *part = part_139_i8(mapParts);
+    if(part != NULL) {
+        etern[x][y] = part;
+        
+        // 208 C3 -- rotation 3
+        // 1 13 12 3
+        key_part k208 = {13,12,3,1};
+        part = get_one_part(mapParts, k208);
+        if(part == NULL)
+        {
+            printf("part 208 r3 not found\n");
+            exit(EXIT_FAILURE);
+        }
+        etern[2][2] = part;
+        
+        // 255 C14 -- rotation 3
+        // 7 13 11 13
+        key_part k255 = {13,11,13,7};
+        part = get_one_part(mapParts, k255);
+        if(part == NULL)
+        {
+            printf("part 255 r3 not found\n");
+            exit(EXIT_FAILURE);
+        }
+        etern[13][2] = part;
+        
+        // 181 N3-- rotation 3
+        // 3 7 15 5
+        key_part k181 = {7,15,5,3};
+        part = get_one_part(mapParts, k181);
+        if(part == NULL)
+        {
+            printf("part 181 r3 not found\n");
+            exit(EXIT_FAILURE);
+        }
+        etern[2][13] = part;
+        
+        // 249 N14 -- rotation 0
+        // 8 5 9 10
+        key_part k249 = {8,5,9,10};
+        part = get_one_part(mapParts, k249);
+        if(part == NULL)
+        {
+            printf("part 249 r0 not found\n");
+            exit(EXIT_FAILURE);
+        }
+        etern[13][13] = part;
+        
+        // on commence vers le haut
+        // et sur l'angle en bas à droite
+        x = ETERN_SIZE -1;
+        y = ETERN_SIZE -1;
+        
+    } else
+    {
+        cur_dir = DIR_LEFT;
+    }
+    
+    int16_t idParts[ETERN_PARTS+1][4];
+    for(int p=0; p <= ETERN_PARTS;p++) {
+        for(int r=0; r < 4;r++) {
+            idParts[p][r] = p + ETERN_PARTS * r;
+        }
+    }
+    
+    
+    uint8_t *cdirx = malloc(sizeof(uint8_t) * ETERN_PARTS);
+    for (int i = 0; i < ETERN_PARTS; i++) {
+        cdirx[i] = dirx[i];
+    }
+    
+    uint8_t *cdiry = malloc(sizeof(uint8_t) * ETERN_PARTS);
+    for (int i = 0; i < ETERN_PARTS; i++) {
+        cdiry[i] = diry[i];
+    }
+    
+    File *possibilities = malloc(sizeof(File));
+    init_file_with_cache(possibilities, 0, sizeof(struct possibility_packet));
+    key_part *key = malloc(sizeof(key_part));
+    
+    struct possibility_packet *possibilityPacket = generate_possibility_packet(x, y, etern, cur_dir);
+    getted_possibility_not_null++;
+    // alimente key pour indiquer quoi chercher
+    what_search_to_key(all_rotate_part, possibilityPacket, key);
+    int max = search_possiblity_light(possibilities, key, possibilityPacket, mapParts, all_rotate_part, idParts, cdirx, cdiry);
+    
+    // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
+    if(max > max_result)
+    {
+        max_result = max;
+        if(max_result >= ETERN_PARTS)
+        {
+            printf("Erreur alloc > ETERN_PARTS\n");
+        }
+        printf("max result:%i\n",max_result);
+    }
+    
+    while (possibilities->size > 0) {
+        struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
+        scroll(possibilities,packet);
+        printf("packet->alloc:%i",packet->alloc);
+        if(packet->alloc > max_result)
+        {
+            max_result = packet->alloc;
+            if(max_result >= ETERN_PARTS)
+            {
+                printf("Erreur alloc > ETERN_PARTS\n");
+            }
+            printf("max result:%i\n",max_result);
+        }
+        array_possibility_packet *aposs2 = malloc(sizeof(array_possibility_packet));
+        aposs2->size = 1;
+        aposs2->possibilities = packet;
+        if(add_possibility(aposs2))
+        {
+            printf("error on add_possibility\n");
+            exit(EXIT_FAILURE);
+        }
+        getted_possibility_not_null++;
+        free(aposs2->possibilities);
+        free(aposs2);
+    }
+    free_file(possibilities);
+    free(key);
+    free(cdirx);
+    free(cdiry);
 }
