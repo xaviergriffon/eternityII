@@ -20,7 +20,7 @@
 PACK(
 	 struct packet
 {
-    uint8_t instruction;
+    u_int8_t instruction;
     struct possibility_packet possibility;
     
 });

@@ -3,8 +3,8 @@
 
 #ifdef WIN32
 #define PACK( __Declaration__ ) __pragma( pack(push, 1) ) __Declaration__ __pragma( pack(pop) )
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
+typedef unsigned char u_int8_t;
+typedef unsigned short u_int16_t;
 #else
 #include <stdint.h>
 #define PACK( __Declaration__ ) __Declaration__ __attribute__((__packed__))
@@ -24,11 +24,11 @@ typedef unsigned short uint16_t;
  PACK(
  struct possibility_packet
  {
- uint8_t x;
- uint8_t y;
+ u_int8_t x;
+ u_int8_t y;
  int16_t grid[ETERN_SIZE][ETERN_SIZE];
- uint16_t alloc;
- uint8_t faceused[ETERN_PARTS];
+ u_int16_t alloc;
+ u_int8_t faceused[ETERN_PARTS];
  });
  
 

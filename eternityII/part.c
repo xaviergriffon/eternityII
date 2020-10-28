@@ -673,7 +673,7 @@ struct map_in_one *regroup_map(map_big_array *map)
 /**
  rotated_position : 0 à 3
  */
-uint16_t id_for_rotated_part(uint16_t id, uint8_t rotated_position) {
+u_int16_t id_for_rotated_part(u_int16_t id, u_int8_t rotated_position) {
     return id + ETERN_PARTS * rotated_position;
 }
 

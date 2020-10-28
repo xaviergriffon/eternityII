@@ -354,8 +354,8 @@ int possibility_has_a_next(struct possibility_packet *possibility, map_big_array
     int result = 0;
     
     // initialisation
-	uint8_t x = possibility->x;
-	uint8_t y = possibility->y;
+	u_int8_t x = possibility->x;
+	u_int8_t y = possibility->y;
     key_part wsearch = what_search(all_rotate_part, x, y, possibility);
 	
 	int8_t p[4] = {wsearch.k1,wsearch.k2,wsearch.k3,wsearch.k4};
@@ -489,16 +489,16 @@ void put_possibility (File * suite, struct possibility_packet *value){
 int search_possiblity_light(File *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4])
 {
 	int max_result=0;
-    uint8_t x;
-	uint8_t y;
+    u_int8_t x;
+	u_int8_t y;
 	
 	// initialisation
 	x = possiblity->x;
 	y = possiblity->y;
 
-	uint16_t incAlloc = possiblity->alloc + 1;
-	uint8_t nX = dirx[incAlloc];
-	uint8_t nY = diry[incAlloc];
+	u_int16_t incAlloc = possiblity->alloc + 1;
+	u_int8_t nX = dirx[incAlloc];
+	u_int8_t nY = diry[incAlloc];
 	
 	int s;
 	int lastId =-1;
