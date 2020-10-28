@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>IDESourceControlProjectFavoriteDictionaryKey</key>
+	<false/>
+	<key>IDESourceControlProjectIdentifier</key>
+	<string>B9C44F72-ABF2-40F8-8396-7AF1C2A0E368</string>
+	<key>IDESourceControlProjectName</key>
+	<string>eternityII</string>
+	<key>IDESourceControlProjectOriginsDictionary</key>
+	<dict>
+		<key>351B4A33188493C9244DD6BA29E65AD4C3728CF8</key>
+		<string>https://github.com/xaviergriffon/eternityII.git</string>
+	</dict>
+	<key>IDESourceControlProjectPath</key>
+	<string>eternityII.xcodeproj</string>
+	<key>IDESourceControlProjectRelativeInstallPathDictionary</key>
+	<dict>
+		<key>351B4A33188493C9244DD6BA29E65AD4C3728CF8</key>
+		<string>../..</string>
+	</dict>
+	<key>IDESourceControlProjectURL</key>
+	<string>https://github.com/xaviergriffon/eternityII.git</string>
+	<key>IDESourceControlProjectVersion</key>
+	<integer>111</integer>
+	<key>IDESourceControlProjectWCCIdentifier</key>
+	<string>351B4A33188493C9244DD6BA29E65AD4C3728CF8</string>
+	<key>IDESourceControlProjectWCConfigurations</key>
+	<array>
+		<dict>
+			<key>IDESourceControlRepositoryExtensionIdentifierKey</key>
+			<string>public.vcs.git</string>
+			<key>IDESourceControlWCCIdentifierKey</key>
+			<string>351B4A33188493C9244DD6BA29E65AD4C3728CF8</string>
+			<key>IDESourceControlWCCName</key>
+			<string>eternityII</string>
+		</dict>
+	</array>
+</dict>
+</plist>

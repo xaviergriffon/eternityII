@@ -6,7 +6,7 @@
 #include "part.h"
 #include "readdata.h"
 
-int err = 0;
+int error = 0;
 int relocated = 0;
 int maxrelocate = 0;
 
@@ -241,7 +241,7 @@ int put_part(struct map_part *map, unsigned int key_int, char *key, struct array
 	} else
 	{
 		printf("Probleme d'emplacement ligne:%i key_int:%i key:%s\n",l, key_int, key);
-		err++;
+        error++;
 	}
 
 	return l;
@@ -414,7 +414,7 @@ map_big_array *buildBigArray(struct array_part *apart,int maxFace)
 
 struct map_part *buildMapPart(struct array_part *apart, int maxFace)
 {
-	err = 0;
+    error = 0;
 	struct map_part *result = malloc(sizeof *result);
 	result->size = pow((maxFace +2), 4);
 	// Considérant un tot de 50% de croisement du hash, on répercute sur la taille
@@ -471,7 +471,7 @@ struct map_part *buildMapPart(struct array_part *apart, int maxFace)
         free_array_part(arraypart1);
 		
 	}
-	printf("nb erreur :%i\n",err);
+	printf("nb erreur :%i\n",error);
 	printf("relocalisé : %i\n",relocated);
 	printf("max relocate : %i\n",maxrelocate);
 	return result;
