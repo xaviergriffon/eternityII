@@ -3,8 +3,8 @@
 
 #ifdef WIN32
 #define PACK( __Declaration__ ) __pragma( pack(push, 1) ) __Declaration__ __pragma( pack(pop) )
-typedef unsigned char u_int8_t;
-typedef unsigned short u_int16_t;
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
 #else
 #include <stdint.h>
 #define PACK( __Declaration__ ) __Declaration__ __attribute__((__packed__))
@@ -23,18 +23,18 @@ typedef unsigned short u_int16_t;
 #define ETERN_PARTS 256
 //#define CHECK_POSSIBILITY 1
 
-extern u_int8_t directions[ETERN_PARTS];
+extern uint8_t directions[ETERN_PARTS];
 
-extern u_int8_t dirx[ETERN_PARTS];
+extern uint8_t dirx[ETERN_PARTS];
 
-extern u_int8_t diry[ETERN_PARTS];
+extern uint8_t diry[ETERN_PARTS];
 
 extern int NB_THREADS;
 
 extern unsigned long long *compteurs;
 extern int *lastfilesize;
 
-extern u_int16_t max_result;
+extern uint16_t max_result;
 extern char *lastcheck;
 
 // TODO : deplacer dans un parametre ?

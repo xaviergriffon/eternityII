@@ -82,7 +82,7 @@ void print_part(struct part *p);
 /*
  * Indique un id correspondant à une piece dans un sens de rotation
  */
-u_int16_t id_for_rotated_part(u_int16_t id, u_int8_t rotated_position);
+uint16_t id_for_rotated_part(uint16_t id, uint8_t rotated_position);
 
 /*
  * Rotation dans le sens des aiguilles d'une montres
