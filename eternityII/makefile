@@ -13,8 +13,8 @@ endif
 # etii_opencl.o ${OPENCLLIB}
 
 CFLAGS= -Wall -std=gnu99 -Ofast
-eternityII: lifo.o tcpclient.o tcpserver.o part.o readdata.o datamanager.o possibility.o etii_protocol.o etii_client.o etii_search.o main.o
-	gcc -pthread -o eternityII lifo.o tcpclient.o tcpserver.o part.o datamanager.o possibility.o readdata.o etii_protocol.o etii_client.o etii_search.o main.o ${CFLAGS} ${CPPFLAGS}
+eternityII: static_variables.o lifo.o tcpclient.o tcpserver.o part.o readdata.o datamanager.o possibility.o etii_protocol.o etii_client.o etii_server.o etii_search.o console.o main.o
+	gcc -pthread -o eternityII static_variables.o lifo.o tcpclient.o tcpserver.o part.o datamanager.o possibility.o readdata.o etii_protocol.o etii_client.o etii_server.o etii_search.o console.o main.o ${CFLAGS} ${CPPFLAGS}
 
 clean: 
 	rm *.o eternityII
