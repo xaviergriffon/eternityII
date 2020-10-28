@@ -163,7 +163,7 @@ int main(int argc, const char * argv[])
 			init_compteurs();
 			run_checker(0);
 			run_console(0);
-            runauto(argv[3]);
+            runauto(argv[2]);
 		} else {
 			failed_arg();
             exit(EXIT_FAILURE);

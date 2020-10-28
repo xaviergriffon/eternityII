@@ -1,0 +1,45 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "cppbuild",
+			"label": "C/C++: clang build eternityII Debug mode",
+			"command": "/usr/bin/clang",
+			"args": [
+				"-pthread",
+				"-g",// compilation avec flag debug
+				"${workspaceFolder}/*.c",
+				"-o",
+				"${fileDirname}/eternityIIDebug"
+			],
+			"options": {
+				"cwd": "/usr/bin"
+			},
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build",
+			"detail": "compiler: /usr/bin/clang"
+		},
+		{
+			"type": "cppbuild",
+			"label": "C/C++: clang build eternityII Release",
+			"command": "/usr/bin/clang",
+			"args": [
+				"-Ofast",
+				"-pthread",
+				"${workspaceFolder}/*.c",
+				"-o",
+				"${fileDirname}/eternityII"
+			],
+			"options": {
+				"cwd": "/usr/bin"
+			},
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build",
+			"detail": "compiler: /usr/bin/clang"
+		}
+	]
+}
