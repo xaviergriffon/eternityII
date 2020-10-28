@@ -7,6 +7,53 @@
 #include "datamanager.h"
 #include "etii_search.h"
 
+void *feed_thread_aposs(void *param) {
+    client_possibility_t *thread_params = param;
+    while (request == REQUEST_CONTINUE) {
+        for(int i = 0; i < NB_THREADS; i++)
+        {
+            if(request == REQUEST_CONTINUE)
+            {
+                if(thread_params[i].works == 0)
+                {
+                    array_possibility_packet *aposs = get_last_possibility(1);
+                    if(aposs->size > 0)
+                    {
+                        thread_params[i].aposs = aposs;
+                        thread_params[i].works = 1;;
+                        //printf("alimentation thread %i\n", i);
+                    } else
+                    {
+                        free(aposs);
+                    }
+                }
+            }
+        }
+        
+        usleep(THREAD_MICRO_SLEEP);
+    }
+    
+    return NULL;
+}
+
+void build_feed_thread(client_possibility_t *thread_params) {
+    /* création d'un nouveau thread */
+    pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
+    pthread_attr_init(thread_attributes);
+    pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    
+    /* Création du thread */
+    if (0 != pthread_create(&thread, thread_attributes, feed_thread_aposs, thread_params))
+    {
+        fprintf(stderr, "Problème avec pthread_create()\n");
+        free(thread_attributes);
+        exit(EXIT_FAILURE);
+    }
+    pthread_attr_destroy(thread_attributes);
+    free(thread_attributes);
+}
+
 void runThreadClient(const char *file)
 {
     client_possibility_t *thread_params;
@@ -37,7 +84,6 @@ void runThreadClient(const char *file)
         
         /* Création du thread */
         thread_params[i].tid = malloc(sizeof(pthread_t));
-        // searchOpenCL
         if (0 != pthread_create((thread_params[i].tid), thread_attributes, autosearch, &(thread_params[i])))
         {
             fprintf(stderr, "Problème avec pthread_create()\n");
@@ -49,31 +95,16 @@ void runThreadClient(const char *file)
     }
     free_array_part(apart);
     
+    build_feed_thread(thread_params);
+    
     while (1)
     {
         int threadworking = 0;
         for(i = 0; i < NB_THREADS; i++)
         {
-            if(request == REQUEST_CONTINUE)
+            if(thread_params[i].works == 1)
             {
-                if(thread_params[i].works == 0)
-                {
-                    array_possibility_packet *aposs = get_last_possibility(1);
-                    if(aposs->size > 0)
-                    {
-                        thread_params[i].aposs = aposs;
-                        thread_params[i].works = 1;;
-                    } else
-                    {
-                        free(aposs);
-                    }
-                }
-            } else
-            {
-                if(thread_params[i].works == 1)
-                {
-                    threadworking++;
-                }
+                threadworking++;
             }
         }
         
@@ -98,9 +129,9 @@ void runMonoClient(const char *file)
     thread_params->tid = NULL;
     thread_params->compteur = 0;
     thread_params->max_shots_per_second = -1;
-    
     free_array_part(apart);
     
+    build_feed_thread(thread_params);
     autosearch(thread_params);    
 }
 

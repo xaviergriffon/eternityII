@@ -158,6 +158,7 @@ void *autosearch (void *userdata)
         free(client->aposs);
         client->aposs = NULL;
         client->works = 0;
+        lastfilesize[client->compteur] = 0;
         
         if (request == REQUEST_STOP) {
             break;

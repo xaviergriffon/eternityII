@@ -376,7 +376,7 @@ int possibility_has_a_next(struct possibility_packet *possibility, map_big_array
 
 /*
  * retourne 1 si les place sont encore libre et que des possiblités (> 1) existes
- * 0 si plus aucune piece n'est plaçable ou qu'elles sont toutes placées
+ * 0 si plus aucune piece n'est plaçable
  */
 int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part)
 {
@@ -384,6 +384,7 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
     
 	key_part wsearch;
 	int c;
+    int alloc = possibility->alloc;
     // On parcours
 	for(c=possibility->alloc;c < ETERN_PARTS && result == 1;c++) {
 		result = 0;
@@ -406,12 +407,16 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 							if( search->size == 1) {
 								possibility->faceused[search->parts[s].id -1] = 1;
 								possibility->grid[x][y] = id_for_rotated_part(search->parts[s].id, search->parts[s].rotation);
+                                alloc++;
 							}
 							result = 1;
 						}
 					}
 					
-				}
+                } else {
+                    // On a rien trouvé, il n'y a donc pas de suite
+                    break;
+                }
 			}else {
 				result = 1;
 				break;
@@ -419,10 +424,14 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 		} else {
 			result = 1;
 		}
-		
-		
-		
 	}
+    if (alloc > possibility->alloc) {
+        printf("all has next (%i) allocated %i -> %i\n", result, possibility->alloc, alloc);
+    }
+    if (alloc == ETERN_PARTS) {
+        possibility->alloc = alloc;
+        checkIfResultFound(possibility, all_rotate_part);
+    }
 	
 	return result;
 }

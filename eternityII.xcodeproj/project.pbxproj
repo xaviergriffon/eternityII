@@ -120,18 +120,18 @@
 				4792037017B9556900B9DD3C /* tcpserver.h */,
 				4792037117B9558100B9DD3C /* tcpserver.c */,
 				4792036717B94EDE00B9DD3C /* main.c */,
-				4792036517B94EDE00B9DD3C /* Products */,
 				47F585E8252A24E000FC7CE9 /* readme.txt */,
 				472D8799252A5A960000D5FA /* etii_client.h */,
 				472D879A252A5A960000D5FA /* etii_client.c */,
-				472D879D252A5E350000D5FA /* static_variables.h */,
 				472D879F252A5EEE0000D5FA /* etii_search.h */,
 				472D87A0252A5EEE0000D5FA /* etii_search.c */,
 				47808C3325485461005405A4 /* console.h */,
 				47808C3425485461005405A4 /* console.c */,
+				472D879D252A5E350000D5FA /* static_variables.h */,
 				47808C3725485867005405A4 /* static_variables.c */,
 				47808C3A2548BE95005405A4 /* etii_server.h */,
 				47808C3B2548BE95005405A4 /* etii_server.c */,
+				4792036517B94EDE00B9DD3C /* Products */,
 			);
 			path = eternityII;
 			sourceTree = "<group>";

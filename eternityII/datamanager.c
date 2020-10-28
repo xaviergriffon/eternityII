@@ -528,6 +528,9 @@ int regroup_datas()
 	return 0;
 }
 
+// Test qu'une seule fois de placer. On peut donc trouver des possibilités avec suite mais en ayant placé les cases ayant
+// qu'une seule possibilité, au tir suivant la possibilité peut avoir aucune suite car des pieces placées (1 seule poss) ont
+// pu éléminer une case à plusieurs possiblités.
 int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part *all_rotate_part)
 {
     lock_all_file();
@@ -540,20 +543,23 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
 		{
             Element *nextElement =NULL;
 			struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-			if(!possibility_all_has_a_next(possibility, mapParts,all_rotate_part))
+			if(!possibility_all_has_a_next(possibility, mapParts, all_rotate_part))
 			{
-                
+                // On place le suivant du précédent au suivant du courrant
 				if(currElement->previous != NULL)
                 {
                     currElement->previous->next = currElement->next;
                 } else {
-                    // On est au début
+                    // On est au début alors la pile commence au suivant
                     file_possibility[fp].file.start = currElement->next;
                 }
+                
+                // On a une suite alors le précédent du suivant devient le précédent du courrant
                 if(currElement->next != NULL)
                 {
                     currElement->next->previous = currElement->previous;
                 } else {
+                    // Pas de suite alors la fin de la pile  devient le précédent (ou null)
                     file_possibility[fp].file.end = currElement->previous;
                 }
                 nextElement = currElement->next;
@@ -563,10 +569,13 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                 file_possibility[fp].file.size--;
                 
 			}
+            
+            // Aucune suite n'a été determiné et on a un courrant alors on prend sa suite.
             if(nextElement == NULL && currElement != NULL)
             {
                 currElement = currElement->next;
             } else {
+                // On a déterminé une suite alors on l'étudie à la prochaine boucle
                 currElement = nextElement;
             }
 		}
