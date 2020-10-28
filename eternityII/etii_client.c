@@ -7,6 +7,7 @@
 #include "datamanager.h"
 #include "etii_search.h"
 
+// Méthode chargée d'alimenter les threads quand lors file est à 0
 void *feed_thread_aposs(void *param) {
     client_possibility_t *thread_params = param;
     while (request == REQUEST_CONTINUE) {
@@ -36,6 +37,7 @@ void *feed_thread_aposs(void *param) {
     return NULL;
 }
 
+// Construit un thread d'alimentation des files des threads de recherche
 void build_feed_thread(client_possibility_t *thread_params) {
     /* création d'un nouveau thread */
     pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
