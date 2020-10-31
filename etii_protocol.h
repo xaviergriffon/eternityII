@@ -2,7 +2,6 @@
 #define eternityII_etii_protocol_h
 
 #include "possibility.h"
-#include "packed.h"
 
 #ifdef WIN32
 #include <stdint.h>
@@ -15,6 +14,7 @@
 #define INST_END 4
 #define INST_CONSIDERED 5
 #define INST_NULL 6
+#define INST_POSSIBILITY_ANALYSED 7
 
 
 PACK(

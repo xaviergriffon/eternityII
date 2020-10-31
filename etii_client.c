@@ -17,9 +17,15 @@ void *feed_thread_aposs(void *param) {
             {
                 if(thread_params[i].works == 0)
                 {
+                    send_possibility_analysed(i);
+
                     array_possibility_packet *aposs = get_last_possibility(1);
                     if(aposs->size > 0)
                     {
+                        // On alimente la pile des poissiblités en étude
+                        for (int p = 0; p < aposs->size; p++) {
+                            add_possibility_analysed(&aposs->possibilities[p], i);
+                        }
                         thread_params[i].aposs = aposs;
                         thread_params[i].works = 1;;
                         //printf("alimentation thread %i\n", i);
@@ -86,6 +92,7 @@ void runThreadClient(const char *file)
         
         /* Création du thread */
         thread_params[i].tid = malloc(sizeof(pthread_t));
+        thread_params[i].id = i;
         if (0 != pthread_create((thread_params[i].tid), thread_attributes, autosearch, &(thread_params[i])))
         {
             fprintf(stderr, "Problème avec pthread_create()\n");
@@ -124,7 +131,7 @@ void runMonoClient(const char *file)
     
     struct array_part *apart= read_parts(file);
     thread_params->works = 0;
-    thread_params->aposs = get_last_possibility(1);
+    thread_params->aposs = NULL;
     struct array_part *rotateParts = rotate_all_parts(apart);
     thread_params->all_rotate_part =rotateParts;
     thread_params->map_part = prepare_map_part(rotateParts);

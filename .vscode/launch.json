@@ -16,6 +16,34 @@
             "environment": [],
             "externalConsole": false,
             "MIMode": "lldb"
+        },
+        {
+            "name": "Debug Server eternityII",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/eternityIIDebug",
+            "args": ["tcpserver",
+                "80",
+                "./pieces.csv"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb"
+        },
+        {
+            "name": "Debug Client eternityII",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/eternityIIDebug",
+            "args": ["tcpclient",
+                "localhost",
+                "./pieces.csv"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb"
         }
     ]
 }

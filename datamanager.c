@@ -40,6 +40,20 @@ static file_possibility_t file_possibility[NB_FILE_POSSIBILITY] =
     {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
 };
 
+static file_possibility_t file_possibility_analysed[NB_FILE_POSSIBILITY] =
+{
+	{{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+	{{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
+};
+
 char*server_ip = NULL;
 
 int maintenance = 0;
@@ -72,7 +86,7 @@ char *get_server_ip()
 int put_to_server(array_possibility_packet *possibilities)
 {
 	int socket_id = -1;
-	if(-1 == (socket_id = create_tcp_client(server_ip, 2000)))
+	if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
 	{
 		fprintf(stderr, "Erreur sur accept()\n");
 		return -1;
@@ -164,11 +178,218 @@ int add_possibility(array_possibility_packet *possibilities)
 	return error;
 }
 
+int remove_possibility_analysed(struct possibility_packet *possibility, int thread) {
+#ifdef CHECK_POSSIBILITY
+    int analyse = check_possibility(possibility);
+    if (analyse < 0)
+    {
+        printf("possibility error : %i\n",analyse);
+        printf(" ---");
+        print_possibility_packet(possibility);
+    }
+#endif // CHECK_POSSIBILITY
+	int removed_possibility = 0;
+	int currfile = 0;
+	if (thread >=0) {
+		currfile = thread;
+	}
+	while(removed_possibility == 0)
+	{
+		if(pthread_mutex_trylock(&file_possibility_analysed[currfile].lock) == 0)
+		{
+			File *file = &file_possibility_analysed[currfile].file;
+			// On défile la suite pour retrouver la possibilité
+			Element *element = file->start;
+			while (removed_possibility == 0 && element != NULL) {
+				struct possibility_packet *possibilityInFile = element->value;
+				// comparaison
+
+				if (compare_possibility(possibilityInFile, possibility) == 0) {
+					// TODO : factoriser
+					if (element->next != NULL) {
+						Element *currentElement = element;
+						element = element->next;
+						if (currentElement->previous != NULL) {
+							currentElement->previous->next = element;
+							element->previous = currentElement->previous;
+						} else {
+							file->start = element;
+							element->previous = NULL;
+						}
+					} else {
+						if (file->start == element) {
+							file->start = NULL;
+							file->end = NULL;
+						} else {
+							file->end = element->previous;
+						}
+					}
+					file->size--;
+
+					removed_possibility = 1;
+				} else {
+					// On passe au suivant
+					element = element->next;
+				}
+			}
+			
+			
+			pthread_mutex_unlock(&file_possibility_analysed[currfile].lock);
+		}
+		if (thread < 0) {
+			currfile++;
+			if(currfile >= NB_FILE_POSSIBILITY)
+			{
+				// On n'a pas retrouvé la possibilité
+				return 1;
+			}
+		} else if (removed_possibility == 0) {
+			// On n'a pas retrouvé la possibilité
+			return 1;
+		}
+	}
+	return 0;
+}
+
+void send_possibility_analysed(int thread) {
+	if (server_ip == NULL) {
+
+		if(pthread_mutex_trylock(&file_possibility_analysed[thread].lock) == 0)
+		{
+			File *file = &file_possibility_analysed[thread].file;
+			Element *element = file->start->value;
+			struct possibility_packet *possibility = element->value;
+			while (possibility != NULL) {
+				if (element->next != NULL) {
+					Element *currentElement = element;
+					element = element->next;
+					if (currentElement->previous != NULL) {
+						currentElement->previous->next = element;
+						element->previous = currentElement->previous;
+					} else {
+						file->start = element;
+						element->previous = NULL;
+					}
+				} else {
+					if (file->start == element) {
+						file->start = NULL;
+						file->end = NULL;
+					} else {
+						file->end = element->previous;
+					}
+					possibility = NULL;
+				}
+				file->size--;
+			}
+
+			pthread_mutex_unlock(&file_possibility_analysed[thread].lock);
+		}
+
+		return;
+	}
+
+	int socket_id = -1;
+	if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
+	{
+		fprintf(stderr, "Erreur sur accept()\n");
+		return;
+	}
+	if(pthread_mutex_trylock(&file_possibility_analysed[thread].lock) == 0)
+	{
+		File *file = &file_possibility_analysed[thread].file;
+		if (file->start != NULL) {
+			Element *element = file->start;
+			struct possibility_packet *possibility = element->value;
+			while (possibility != NULL) {
+				send_instruction(socket_id, INST_POSSIBILITY_ANALYSED);
+				ssize_t result = send(socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
+				if (result != sizeof(struct possibility_packet)) {
+					printf("problème send_possibility_analysed : %li\n",result);
+					break;
+				}
+				if(recv_instruction(socket_id) != INST_CONSIDERED){
+					break;
+				}
+
+				if (element->next != NULL) {
+					Element *currentElement = element;
+					element = element->next;
+					if (currentElement->previous != NULL) {
+						currentElement->previous->next = element;
+						element->previous = currentElement->previous;
+					} else {
+						file->start = element;
+						element->previous = NULL;
+					}
+                    possibility = element->value;
+				} else {
+					if (file->start == element) {
+						file->start = NULL;
+						file->end = NULL;
+					} else {
+						file->end = element->previous;
+					}
+					possibility = NULL;
+				}
+				file->size--;
+			}
+		}
+
+		pthread_mutex_unlock(&file_possibility_analysed[thread].lock);
+	}
+
+	send_instruction(socket_id, INST_END);
+	shutdown(socket_id, 2);
+	int err = closesocket(socket_id);
+	if(0 != err)
+	{
+		printf("erreur close :%i\n",err);
+	}
+}
+
+int add_possibility_analysed(struct possibility_packet *possiblity, int thread) {
+	int addpossibility = 0;
+	int currfile = 0;
+	if (thread >=0) {
+		currfile = thread;
+	}
+	while(possiblity != NULL && addpossibility == 0)
+	{
+		if(pthread_mutex_trylock(&file_possibility_analysed[currfile].lock) == 0)
+		{
+			if(possiblity->alloc > max_result)
+			{
+				max_result = possiblity->alloc;
+				printf("max result:%i\n",max_result);
+			}
+			if(possiblity->x < 0 || possiblity->y < 0 || possiblity->x > ETERN_SIZE || possiblity->y > ETERN_SIZE)
+			{
+				printf("alert\n");
+			}
+			
+			put(&file_possibility_analysed[currfile].file, possiblity);
+			addpossibility = 1;
+			pthread_mutex_unlock(&file_possibility_analysed[currfile].lock);
+		}
+		if (thread < 0) {
+			currfile++;
+			if(currfile >= NB_FILE_POSSIBILITY)
+			{
+				currfile = 0;
+				usleep(MICRO_SLEEP);
+			}
+		} else if (addpossibility == 0) {
+			usleep(MICRO_SLEEP);
+		}
+	}
+	return 0;
+}
+
 void scroll_from_server(array_possibility_packet *result,int max_result)
 {
 	
 	int socket_id = -1;
-	if(-1 == (socket_id = create_tcp_client(server_ip, 2000)))
+	if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
 	{
 		fprintf(stderr, "Erreur sur accept()\n");
 		return;
@@ -340,6 +561,16 @@ int file_size(int nfile)
 	return result;
 }
 
+int file_analysed_size(int nfile)
+{
+	int result = -1;
+	if(nfile >= 0 && nfile < NB_FILE_POSSIBILITY)
+	{
+		result = file_possibility_analysed[nfile].file.size;
+	}
+	return result;
+}
+
 int datas_size()
 {
 	int result = 0;
@@ -411,6 +642,62 @@ int backup(char *filename)
 	return 0;
 }
 
+void lock_all_file_analysed()
+{
+	maintenance = 1;
+	int fp;
+	// Bloquage des files
+	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		pthread_mutex_lock(&file_possibility_analysed[fp].lock);
+	}
+}
+
+void unlock_all_file_analysed()
+{
+	int fp;
+	//libération des files
+	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		pthread_mutex_unlock(&file_possibility_analysed[fp].lock);
+	}
+	maintenance = 0;
+}
+
+int backup_analysed(char *filename)
+{
+	if(!maintenance)
+	{
+		FILE *f = fopen(filename, "w");
+		if(!f)
+		{
+			printf("file :%s",filename);
+			perror("fopen()");
+			exit(EXIT_FAILURE);
+		}
+		
+		lock_all_file_analysed();
+		int fp;
+		for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+		{
+			Element *currElement = file_possibility_analysed[fp].file.start;
+			while(currElement != NULL)
+			{
+				if(currElement->value != NULL)
+				{
+					struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+					fwrite(possibility, sizeof(struct possibility_packet), 1, f);
+				}
+				currElement = currElement->next;
+			}
+		}
+		unlock_all_file_analysed();
+		
+		fclose(f);
+	}
+	return 0;
+}
+
 int import(char *filename)
 {
 	FILE *f = fopen(filename, "r");
@@ -460,6 +747,51 @@ int restore(char *filename)
 	unlock_all_file();
 	
 	import(filename);
+	return 0;
+}
+
+int import_analysed(char *filename)
+{
+	FILE *f = fopen(filename, "r");
+	if(!f)
+	{
+		printf("file :%s",filename);
+		perror("fopen()");
+		exit(EXIT_FAILURE);
+	}
+	
+	struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
+	while(fread(possibility, sizeof(struct possibility_packet),1,f))
+	{
+		add_possibility_analysed(possibility, -1);
+	}
+	
+	free(possibility);
+	
+	
+	fclose(f);
+	return 0;
+}
+
+int restore_analysed(char *filename)
+{
+	lock_all_file_analysed();
+	int fp;
+	//vidage des files
+	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		File *suite = &file_possibility_analysed[fp].file;
+		while(suite->size >0)
+		{
+			struct possibility_packet *value = malloc(sizeof(struct possibility_packet));
+			scroll(suite, value);
+			free(value);
+		}
+	}
+	
+	unlock_all_file_analysed();
+	
+	import_analysed(filename);
 	return 0;
 }
 
@@ -822,17 +1154,17 @@ int check_file(int f)
 	int result = 0;
 	
 	file_possibility_t file_poss =file_possibility[f];
-	File file = file_poss.file;
+	File *file = &file_poss.file;
 	
-	if(file.size == 0)
+	if(file->size == 0)
 	{
-		if(file.start != NULL)
+		if(file->start != NULL)
 		{
 			printf("File:%i size=0 and start not null\n",f);
 			result = -1;
 		}
 		
-		if(file.end != NULL)
+		if(file->end != NULL)
 		{
 			printf("File:%i size=0 and end not null\n",f);
 			result = -1;
@@ -843,7 +1175,7 @@ int check_file(int f)
 	int t;
 	Element *currElement = file_poss.file.start;
 	Element *lastElement = currElement;
-	for(t=0; t < file.size && currElement != NULL;t++)
+	for(t=0; t < file->size && currElement != NULL;t++)
 	{
 		if(currElement->value == NULL){
 			printf("File:%i value NULL\n",f);
@@ -855,11 +1187,11 @@ int check_file(int f)
 	
 	if(currElement != NULL)
 	{
-		printf("File:%i last analysed element is not null | file.size:%i analysed:%i",f,file.size, t);
+		printf("File:%i last analysed element is not null | file.size:%i analysed:%i",f,file->size, t);
 		result = -1;
 	}
-	if (t != file.size || lastElement != file.end) {
-		printf("File:%i end not correspond to the size:%i analysed:%i\n",f,file.size,t);
+	if (t != file->size || lastElement != file->end) {
+		printf("File:%i end not correspond to the size:%i analysed:%i\n",f,file->size,t);
 		result=-1;
 	}
 	return result;

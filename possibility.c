@@ -9,13 +9,13 @@ int decode_direction()
 {
 	printf("/nx : ");
 	int i;
-	for(i=0;i<256;i++) {
+	for(i=0;i < ETERN_PARTS;i++) {
 		int x = directions[i] % ETERN_SIZE;
 		printf("%i,",x);
 	}
 	
 	printf("/ny : ");
-	for(i=0;i<256;i++) {
+	for(i=0;i < ETERN_PARTS;i++) {
 		int x = directions[i] % ETERN_SIZE;
 		int y = (directions[i] - x) / ETERN_SIZE;
 		printf("%i,",y);
@@ -665,7 +665,8 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
             etern[x][y] = NULL;
         }
     }
-    
+
+#if ETERN_PARTS == 256
     x = 7;
     y = 8;
     int cur_dir = DIR_UP;
@@ -727,6 +728,11 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
     {
         cur_dir = DIR_LEFT;
     }
+#else
+    x = 1;
+    y = 1;
+    int cur_dir = DIR_LEFT;
+#endif
     
     int16_t idParts[ETERN_PARTS+1][4];
     for(int p=0; p <= ETERN_PARTS;p++) {
@@ -783,4 +789,39 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
     }
     free_file(possibilities);
     free(key);
+}
+
+int compare_possibility(struct possibility_packet *packet, struct possibility_packet *other_packet) {
+	if ((packet == NULL && other_packet != NULL)
+		|| (packet != NULL && other_packet == NULL)) {
+			return -1;
+	}
+    
+    if (packet == NULL && other_packet == NULL) {
+        return 0;
+    }
+
+	if (packet->alloc != other_packet->alloc) {
+		return -1;
+	}
+
+	if (packet->x != other_packet->x || packet->y != other_packet->y) {
+		return -1;
+	}
+
+	for (int u = 0; u < ETERN_PARTS; u++) {
+		if (packet->faceused[u] != other_packet->faceused[u]) {
+			return -1;
+		}
+	}
+
+	for (int x = 0; x < ETERN_SIZE; x++) {
+		for (int y = 0; y < ETERN_SIZE; y++) {
+			if (packet->grid[x][y] != other_packet->grid[x][y]) {
+				return -1;
+			}
+		}
+	}
+
+	return 0;
 }

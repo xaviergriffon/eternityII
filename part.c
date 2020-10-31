@@ -279,7 +279,7 @@ int8_t convert_p(int8_t p, int maxFace)
 	return result;
 }
 
-struct array_part *get_parts_bigarray(map_big_array *map,int8_t p[4])
+struct array_part *get_parts_bigarray(map_big_array *map, int8_t p[4])
 {
     struct array_part *parts = NULL;
 

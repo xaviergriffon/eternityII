@@ -21,7 +21,8 @@ typedef unsigned short uint16_t;
 #define DIR_DOWN 3
 #define DIR_LEFT 4
  
- PACK(
+
+PACK(
  struct possibility_packet
  {
  uint8_t x;
@@ -30,7 +31,6 @@ typedef unsigned short uint16_t;
  uint16_t alloc;
  uint8_t faceused[ETERN_PARTS];
  });
- 
 
 typedef struct
 {
@@ -68,4 +68,6 @@ int check_possibility(struct possibility_packet *packet);
 
 int test_directions(void);
 int decode_direction(void);
+
+int compare_possibility(struct possibility_packet *packet, struct possibility_packet *other_packet);
 #endif

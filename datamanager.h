@@ -15,15 +15,22 @@ typedef struct
 
 int add_possibility(array_possibility_packet *possibilities);
 array_possibility_packet *get_last_possibility(int max_result);
+int add_possibility_analysed(struct possibility_packet *possiblity, int thread);
+void send_possibility_analysed(int thread);
+int remove_possibility_analysed(struct possibility_packet *possiblity, int thread);
 int file_size(int nfile);
+int file_analysed_size(int nfile);
 int datas_size(void);
 
 void set_server_ip(const char *server);
 char *get_server_ip(void);
 
 int backup(char *filename);
+int backup_analysed(char *filename);
 int restore(char *filename);
+int restore_analysed(char *filename);
 int import(char *filename);
+int import_analysed(char *filename);
 
 int print_file(int fp);
 int printdatamanager(void);

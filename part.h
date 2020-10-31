@@ -9,6 +9,7 @@ typedef unsigned short uint16_t;
 #include <stdint.h>
 #endif
 
+
 #define PART_NONE -1
 #define PART_TOP 0
 #define PART_RIGHT 1

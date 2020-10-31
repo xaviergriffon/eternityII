@@ -55,6 +55,17 @@ void *check_server(void *param)
             free(temp);
             file_possibility_stock = file_possibility_stock + f_size;
         }
+
+        unsigned long long file_possibility_analysed_stock = 0;
+        for(f=0; f < NB_FILE_POSSIBILITY; f++)
+        {
+            int f_size = file_analysed_size(f);
+            char *temp = calloc(1000, sizeof(char));
+            sprintf(temp, "file_analysed:%i stock:%i\n",f,f_size);
+            strcat(lastcheck, temp);
+            free(temp);
+            file_possibility_analysed_stock = file_possibility_analysed_stock + f_size;
+        }
         unsigned long long bys = currentactive / sleep_time;
         char *temp = calloc(1000, sizeof(char));
         sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\ngetted possibility not null :%lli\nmax result on server :%i\n",sleep_time,currentactive, bys,file_possibility_stock,getted_possibility_not_null, max_result);
@@ -64,6 +75,7 @@ void *check_server(void *param)
         if(lastBack == 6)
         {
             backup("./temp.back");
+            backup_analysed("./temp_analysed.back");
             lastBack = 0;
         } else
         {
@@ -105,9 +117,13 @@ void *communicate_with_client (void *userdata)
             for (p=0;p < lastPossibilityPacketSend->size;p++)
             {
                 struct possibility_packet *possibility = &lastPossibilityPacketSend->possibilities[p];
+                add_possibility_analysed(possibility, -1);
                 //printf("send ");
                 //print_possibility_packet(possibility);
-                send(client->socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
+                ssize_t ssize = send(client->socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
+                if (ssize != sizeof(struct possibility_packet)) {
+                    printf("erreur d'envoi");
+                }
             }
             if(p == 0)
             {
@@ -137,6 +153,21 @@ void *communicate_with_client (void *userdata)
             free(aposs);
             
             
+        } else if (instruction == INST_POSSIBILITY_ANALYSED) {
+            struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
+            ssize_t ssize = recv(client->socket_id, (struct possibility_packet *)possibilityPacket, sizeof(struct possibility_packet), 0);
+            if (sizeof(struct possibility_packet) == ssize) {
+                if(remove_possibility_analysed(possibilityPacket, -1) == 0)
+                {
+                    send_instruction(client->socket_id,INST_CONSIDERED);
+                    
+                } else{
+                    send_instruction(client->socket_id,INST_ERROR);
+                }
+            } else {
+                printf("bad possibility recept\n");
+            }
+            free (possibilityPacket);
         } else
         {
             inst_unknow++;
@@ -213,7 +244,7 @@ void runserver(const char* file)
     }
     
     
-    socket_id = create_tcp_server(2000, NB_THREADS);
+    socket_id = create_tcp_server(SERVER_PORT, NB_THREADS);
     long acceptclient = 0;
     while (1) {
         int client_id;
@@ -252,7 +283,9 @@ void runserver(const char* file)
                         //thread_id = i;
                         if(clientt.tid != NULL)
                         {
-                            free(thread_params[i].tid);
+                            if (thread_params[i].tid != NULL) {
+                                free(thread_params[i].tid);
+                            }
                             thread_params[i].tid = NULL;
                         }
                         thread_params[i].socket_id = -1;

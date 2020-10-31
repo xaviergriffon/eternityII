@@ -45,7 +45,9 @@ static char * getcmdline() {
 void * console(void *param)
 {
     int server = *(int *)param;
+    // TODO : externaliser ces valeurs
     char *def_file = "./eternityII.back";
+    char *def_analyse_file = "./eternityII-in_analyse.back";
     char *buffer = NULL;
     while(buffer == NULL)
     {
@@ -78,18 +80,21 @@ void * console(void *param)
         {
             printf("start backup\n");
             backup(def_file);
+            backup_analysed(def_analyse_file);
             printf("backup ended\n");
         }
         if(strcmp(buffer, "restore") == 0)
         {
             printf("start restore\n");
             restore(def_file);
+            restore_analysed(def_analyse_file);
             printf("backup restore\n");
         }
         if(strcmp(buffer, "import") == 0)
         {
             printf("start import\n");
             import(def_file);
+            import_analysed(def_analyse_file);
             printf("backup restore\n");
         }
         if(strcmp(buffer, "print") == 0)

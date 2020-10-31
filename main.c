@@ -129,6 +129,7 @@ int init_compteurs()
 
 int main(int argc, const char * argv[])
 {
+	printf("Version %i", VERSION);
 	if (argc >= 2) {
 		lastcheck = calloc(1000, sizeof(char));
 		

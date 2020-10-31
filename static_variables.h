@@ -10,6 +10,7 @@ typedef unsigned short uint16_t;
 #define PACK( __Declaration__ ) __Declaration__ __attribute__((__packed__))
 #endif
 
+#define VERSION 1
 
 #define NB_CONNECTIONS_PAR_THREAD 1
 #define MICRO_SLEEP 100
@@ -19,8 +20,14 @@ typedef unsigned short uint16_t;
 #define REQUEST_STOP 1
 #define REQUEST_CONTINUE 0
 
-#define ETERN_SIZE 16
 #define ETERN_PARTS 256
+#if ETERN_PARTS == 256
+#define ETERN_SIZE 16
+#else
+// 16 pieces
+#define ETERN_SIZE 4
+#endif // ETERN_PARTS == 256
+
 //#define CHECK_POSSIBILITY 1
 
 extern uint8_t directions[ETERN_PARTS];
@@ -47,5 +54,7 @@ extern int request;
 extern long inst_unknow;
 
 extern int NB_THREADS;
+
+extern int SERVER_PORT;
 
 #endif /* static_variables_h */

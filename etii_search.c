@@ -147,6 +147,8 @@ void *autosearch (void *userdata)
                 
             }
             free(aposs->possibilities);
+
+            send_possibility_analysed(client->id);
         }
         free_file(db);
         

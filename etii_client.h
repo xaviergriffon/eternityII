@@ -16,6 +16,7 @@ typedef struct
     int compteur;
     //int request;
     int max_shots_per_second;
+    int id;
 } client_possibility_t;
 
 void runThreadClient(const char *file);
