@@ -62,6 +62,70 @@ void build_feed_thread(client_possibility_t *thread_params) {
     free(thread_attributes);
 }
 
+void *control_thread(void *param) {
+    client_possibility_t *thread_params = param;
+    unsigned long long lastCheck[NB_THREADS];
+    unsigned long long oneSecond[NB_THREADS];
+    int nbCheck = 0;
+    while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
+        for(int i = 0; i < NB_THREADS; i++)
+        {
+            if(request == REQUEST_CONTINUE && max_search_by_sec > 0)
+            {
+                client_possibility_t *thread = &thread_params[i];
+                if(thread->works == 1 && thread->aposs > 0)
+                {
+                    unsigned long long inMillis = compteurs[i] - lastCheck[i];
+                    lastCheck[i] = compteurs[i];
+                    oneSecond[i] = oneSecond[i] + inMillis;
+                    if (request == REQUEST_CONTINUE && oneSecond[i] >= max_search_by_sec) {
+                        request = REQUEST_PAUSE;
+                    } else {
+                        if (request == REQUEST_PAUSE) {
+                            request = REQUEST_CONTINUE;
+                        }
+                    }
+                }
+            }
+        }
+        if (nbCheck > 1000) {
+            nbCheck = 0;
+            for (int i = 0; i < NB_THREADS; i++) {
+                oneSecond[i] = 0; 
+            }
+            if (request == REQUEST_PAUSE) {
+                request = REQUEST_CONTINUE;
+            }
+        } else {
+            nbCheck++;
+        }
+        // La priorité est au traitement lors on effectue des controles espacés.
+        usleep(1000);
+    }
+    return NULL;
+}
+
+/* 
+ * Construit un thread chargé de controler le nombre de recherche par seconde
+ */
+void build_control_thread(client_possibility_t *thread_params) {
+    /* création d'un nouveau thread */
+    pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
+    pthread_attr_init(thread_attributes);
+    pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    
+    /* Création du thread */
+    if (0 != pthread_create(&thread, thread_attributes, control_thread, thread_params))
+    {
+        fprintf(stderr, "Problème avec pthread_create()\n");
+        free(thread_attributes);
+        exit(EXIT_FAILURE);
+    }
+    pthread_attr_destroy(thread_attributes);
+    free(thread_attributes);
+}
+
 void runThreadClient(const char *file)
 {
     client_possibility_t *thread_params;
@@ -141,6 +205,7 @@ void runMonoClient(const char *file)
     free_array_part(apart);
     
     build_feed_thread(thread_params);
+    build_control_thread(thread_params);
     autosearch(thread_params);    
 }
 

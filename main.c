@@ -160,7 +160,7 @@ int main(int argc, const char * argv[])
 			runserver(argv[3]);
 		} else if(strcmp("test", argv[1])==0) {
             NB_THREADS = 1;
-			
+			max_search_by_sec = 100000;
 			init_compteurs();
 			run_checker(0);
 			run_console(0);

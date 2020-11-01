@@ -35,3 +35,5 @@ long inst_unknow = 0;
 int NB_THREADS = 10;
 
 int SERVER_PORT = 2000;
+
+unsigned long long max_search_by_sec = -1;

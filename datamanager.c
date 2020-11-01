@@ -257,29 +257,31 @@ void send_possibility_analysed(int thread) {
 		if(pthread_mutex_trylock(&file_possibility_analysed[thread].lock) == 0)
 		{
 			File *file = &file_possibility_analysed[thread].file;
-			Element *element = file->start->value;
-			struct possibility_packet *possibility = element->value;
-			while (possibility != NULL) {
-				if (element->next != NULL) {
-					Element *currentElement = element;
-					element = element->next;
-					if (currentElement->previous != NULL) {
-						currentElement->previous->next = element;
-						element->previous = currentElement->previous;
+			Element *element = file->start;
+			if (element != NULL) {
+				struct possibility_packet *possibility = element->value;
+				while (possibility != NULL) {
+					if (element->next != NULL) {
+						Element *currentElement = element;
+						element = element->next;
+						if (currentElement->previous != NULL) {
+							currentElement->previous->next = element;
+							element->previous = currentElement->previous;
+						} else {
+							file->start = element;
+							element->previous = NULL;
+						}
 					} else {
-						file->start = element;
-						element->previous = NULL;
+						if (file->start == element) {
+							file->start = NULL;
+							file->end = NULL;
+						} else {
+							file->end = element->previous;
+						}
+						possibility = NULL;
 					}
-				} else {
-					if (file->start == element) {
-						file->start = NULL;
-						file->end = NULL;
-					} else {
-						file->end = element->previous;
-					}
-					possibility = NULL;
+					file->size--;
 				}
-				file->size--;
 			}
 
 			pthread_mutex_unlock(&file_possibility_analysed[thread].lock);

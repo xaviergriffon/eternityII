@@ -53,7 +53,7 @@ void *autosearch (void *userdata)
     while(1)
     {
         // Attente d'un jeu de possibilité
-        while (client->aposs == NULL && request == REQUEST_CONTINUE)
+        while (client->aposs == NULL && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
         {
             usleep(MICRO_SLEEP);
         }
@@ -75,49 +75,56 @@ void *autosearch (void *userdata)
         // Consommation des possibilités demandées
         for(a=0; a < client->aposs->size;a++)
         {
-            put(db,&client->aposs->possibilities[a]);
-            // On poursuit tant qu'il y a du stock et qu'on a toujours l'instruction de continuer
-            //while(db->size > 0 && client->request == REQUEST_CONTINUE)
-            while(db->size > 0 && request == REQUEST_CONTINUE)
+            put(db, &client->aposs->possibilities[a]);
+            // Boucle permettant d'effectuer un controle de la consommation sans "trop" imputer la boucle suivante effectuant un controle "miminum"
+            while (db->size > 0 && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
             {
-                // Si trop d'étude à faire pour 1 thread, alors on délègue le reste.
-                checkAndDelegatePossibilitiesIfNeeded(db);
-                
-                // Statistique du nombre de possiblité en étude
-                lastfilesize[client->compteur] = db->size;
-                
-                // Consomation d'un cache ??
-                struct possibility_packet *possibilityPacket = scroll_cache(db);
-#ifdef CHECK_POSSIBILITY
-                int analyse = check_possibility(possibilityPacket);
-                if (analyse < 0)
+                // On poursuit tant qu'il y a du stock et qu'on a toujours l'instruction de continuer
+                //while(db->size > 0 && client->request == REQUEST_CONTINUE)
+                while(db->size > 0 && request == REQUEST_CONTINUE)
                 {
-                    printf("possibility error : %i\n",analyse);
-                    printf(" ---");
-                    print_possibility_packet(possibilityPacket);
-                }
-#endif // CHECK_POSSIBILITY
-                
-                // Statistique possibilité étudiées
-                compteurs[client->compteur]++;
-                
-                // alimente key pour indiquer quoi chercher
-                what_search_to_key(client->all_rotate_part, possibilityPacket, key);
-                
-                int max = search_possiblity_light(db, key, possibilityPacket, client->map_part, client->all_rotate_part, idParts);
-                
-                // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
-                if(max > max_result)
-                {
-                    max_result = max;
-                    if(max_result >= ETERN_PARTS)
+                    // Si trop d'étude à faire pour 1 thread, alors on délègue le reste.
+                    checkAndDelegatePossibilitiesIfNeeded(db);
+                    
+                    // Statistique du nombre de possiblité en étude
+                    lastfilesize[client->compteur] = db->size;
+                    
+                    // Consomation d'un cache ??
+                    struct possibility_packet *possibilityPacket = scroll_cache(db);
+    #ifdef CHECK_POSSIBILITY
+                    int analyse = check_possibility(possibilityPacket);
+                    if (analyse < 0)
                     {
-                        printf("Erreur alloc > ETERN_PARTS\n");
+                        printf("possibility error : %i\n",analyse);
+                        printf(" ---");
+                        print_possibility_packet(possibilityPacket);
                     }
-                    printf("max result:%i\n",max_result);
+    #endif // CHECK_POSSIBILITY
+                    
+                    // Statistique possibilité étudiées
+                    compteurs[client->compteur]++;
+                    
+                    // alimente key pour indiquer quoi chercher
+                    what_search_to_key(client->all_rotate_part, possibilityPacket, key);
+                    
+                    int max = search_possiblity_light(db, key, possibilityPacket, client->map_part, client->all_rotate_part, idParts);
+                    
+                    // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
+                    if(max > max_result)
+                    {
+                        max_result = max;
+                        if(max_result >= ETERN_PARTS)
+                        {
+                            printf("Erreur alloc > ETERN_PARTS\n");
+                        }
+                        printf("max result:%i\n",max_result);
+                    }
                 }
-                // TODO : mettre en place un controle de consomation (< à x "100000") pour avoir un service en continue peu consommateur
-                //usleep(1);
+
+                if (request == REQUEST_PAUSE)
+                {
+                    usleep(MICRO_PAUSE);
+                }
             }
         }
         //free(possibilityPacketCache);
