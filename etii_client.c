@@ -200,6 +200,7 @@ void runMonoClient(const char *file)
     thread_params->all_rotate_part =rotateParts;
     thread_params->map_part = prepare_map_part(rotateParts);
     thread_params->tid = NULL;
+    thread_params->id = 0;
     thread_params->compteur = 0;
     thread_params->max_shots_per_second = -1;
     free_array_part(apart);
