@@ -637,7 +637,38 @@ int check_possibility(struct possibility_packet *packet)
 int print_possibility_packet(struct possibility_packet *packet)
 {
 
-	printf("possibility facesused:%i \n",packet->alloc);
+	char *grid = malloc(sizeof(char) * (((ETERN_SIZE*5 + 2) * ETERN_SIZE) + ETERN_SIZE*2)); // 5 = 3chiffres + espace + virgule
+	int c = 0;
+	grid[c++] = '[';
+	for (int y = 0; y < ETERN_SIZE; y++) {
+		if (y > 0) {
+			grid[c++] = ',';
+			grid[c++] = ' ';
+		}
+		grid[c++] = '[';
+		for (int x = 0; x < ETERN_SIZE; x++) {
+			if (x > 0) {
+				grid[c++] = ',';
+				grid[c++] = ' ';
+			}
+			char str[10];
+
+			sprintf(str, "%i", packet->grid[x][y]);
+			for (int i = 0; i < strlen(str); i++)
+			{
+				grid[c++] = str[i];
+			}
+		}
+		grid[c++] = ']';
+	}
+	grid[c++] = ']';
+	grid[c++] = '\0';
+	printf("{\"alloc\":%i,\"x\":%i, \"y\":%i, \"grid\":{", packet->alloc, packet->x, packet->y);
+	printf(grid);
+	printf("}}\n");
+	
+	free(grid);
+	
 	return 0;
 }
 

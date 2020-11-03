@@ -193,6 +193,12 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 	if (thread >=0) {
 		currfile = thread;
 	}
+#ifdef CHECK_POSSIBILITY
+	printf("a supprimer : \n");
+	print_possibility_packet(possibility);
+	printf("en cours d'analyse:\n");
+	print_all_file_analysed();
+#endif // CHECK_POSSIBILITY
 	while(removed_possibility == 0)
 	{
 		if(pthread_mutex_trylock(&file_possibility_analysed[currfile].lock) == 0)
@@ -222,6 +228,7 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 							file->end = NULL;
 						} else {
 							file->end = element->previous;
+							element->previous->next = NULL;
 						}
 					}
 					file->size--;
@@ -241,13 +248,23 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 			if(currfile >= NB_FILE_POSSIBILITY)
 			{
 				// On n'a pas retrouvé la possibilité
+#ifdef CHECK_POSSIBILITY
+				printf("non supprimée \n");
+#endif // CHECK_POSSIBILITY
 				return 1;
 			}
 		} else if (removed_possibility == 0) {
+#ifdef CHECK_POSSIBILITY
+			printf("non supprimée \n");
+#endif // CHECK_POSSIBILITY
 			// On n'a pas retrouvé la possibilité
 			return 1;
 		}
 	}
+#ifdef CHECK_POSSIBILITY
+	printf("après suppression (supprimer :%i) : \n", removed_possibility);
+	print_all_file_analysed();
+#endif // CHECK_POSSIBILITY
 	return 0;
 }
 
@@ -277,6 +294,7 @@ void send_possibility_analysed(int thread) {
 							file->end = NULL;
 						} else {
 							file->end = element->previous;
+							element->previous->next = NULL;
 						}
 						possibility = NULL;
 					}
@@ -310,6 +328,8 @@ void send_possibility_analysed(int thread) {
 					break;
 				}
 				if(recv_instruction(socket_id) != INST_CONSIDERED){
+					printf("possiblité analysée non prise en compte :\n");
+					print_possibility_packet(possibility);
 					break;
 				}
 
@@ -330,6 +350,7 @@ void send_possibility_analysed(int thread) {
 						file->end = NULL;
 					} else {
 						file->end = element->previous;
+						element->previous->next = NULL;
 					}
 					possibility = NULL;
 				}
@@ -805,7 +826,7 @@ int print_file(int fp)
         if(currElement->value != NULL)
         {
             struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-            printf("x:%i y:%i alloc:%i\n",possibility->x,possibility->y,possibility->alloc);
+            print_possibility_packet(possibility);
         } else {
             printf("null value\n");
         }
@@ -824,6 +845,38 @@ int printdatamanager()
 	}
 	
 	unlock_all_file();
+	
+	return 0;
+}
+
+int print_file_analysed(int fp)
+{
+	printf("file_analysed %i, size:%i\n", fp, file_possibility_analysed[fp].file.size);
+    Element *currElement = file_possibility_analysed[fp].file.start;
+    while(currElement != NULL)
+    {
+        if(currElement->value != NULL)
+        {
+            struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+            print_possibility_packet(possibility);
+        } else {
+            printf("null value\n");
+        }
+        currElement = currElement->next;
+    }
+    return 0;
+}
+
+int print_all_file_analysed()
+{
+	lock_all_file_analysed();
+	int fp;
+	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		print_file_analysed(fp);
+	}
+	
+	unlock_all_file_analysed();
 	
 	return 0;
 }

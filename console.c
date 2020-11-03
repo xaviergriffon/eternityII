@@ -171,6 +171,9 @@ void * console(void *param)
             free_array_part(rotateParts);
             free_array_part(apart);
         }
+        if(strcmp(buffer, "printanalysed") == 0) {
+            print_all_file_analysed();
+        }
         if(strcmp(buffer, "min") == 0)
         {
             printf("min :%i\n",search_min_datas());

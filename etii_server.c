@@ -162,6 +162,8 @@ void *communicate_with_client (void *userdata)
                     send_instruction(client->socket_id,INST_CONSIDERED);
                     
                 } else{
+                    printf("possibility analysed not removed\n");
+                    print_possibility_packet(possibilityPacket);
                     send_instruction(client->socket_id,INST_ERROR);
                 }
             } else {
