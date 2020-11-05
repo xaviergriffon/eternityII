@@ -10,7 +10,7 @@
 // Méthode chargée d'alimenter les threads quand lors file est à 0
 void *feed_thread_aposs(void *param) {
     client_possibility_t *thread_params = param;
-    while (request == REQUEST_CONTINUE) {
+    while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
         for(int i = 0; i < NB_THREADS; i++)
         {
             if(request == REQUEST_CONTINUE)
