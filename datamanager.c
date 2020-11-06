@@ -25,6 +25,7 @@ typedef struct in_addr IN_ADDR;
 #include "datamanager.h"
 #include "tcpclient.h"
 #include "etii_protocol.h"
+#include "readdata.h"
 
 static file_possibility_t file_possibility[NB_FILE_POSSIBILITY] =
 {
@@ -770,6 +771,40 @@ int restore(char *filename)
 	unlock_all_file();
 	
 	import(filename);
+	return 0;
+}
+
+int import_json() {
+	lock_all_file();
+	
+	int fp;
+	//vidage des files
+	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		File *suite = &file_possibility[fp].file;
+		while(suite->size >0)
+		{
+			struct possibility_packet *value = malloc(sizeof(struct possibility_packet));
+			scroll(suite, value);
+			free(value);
+		}
+	}
+	unlock_all_file();
+
+	const char *json = "{\"alloc\": 98, \"x\": 4, \"y\": 1, \"grid\": [[259, 571, 567, 525, 554, 524, 549, 522, 536, 543, 541, 539, 528, 563, 551, 514], [291, 201, 763, 213, -2, -2, -2, -2, -2, -2, -2, -2, -2, 629, 481, 825], [309, 699, 976, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 1023, 842, 817], [301, 1010, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 776], [263, 435, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 790], [270, 1008, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 794], [297, 495, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 777], [289, 888, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 773], [273, 844, -2, -2, -2, -2, -2, 651, -2, -2, -2, -2, -2, -2, -2, 783], [312, 200, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 788], [290, 698, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 787], [296, 996, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 779], [274, 861, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 818], [314, 998, 949, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 249, 700, 798], [316, 1013, 1009, 849, 856, 345, 890, 389, 452, 735, 851, 319, 383, 110, 900, 796], [4, 21, 47, 44, 32, 36, 46, 48, 43, 23, 54, 38, 52, 6, 25, 769]]}";
+	struct possibility_packet *possibility = read_from_json(json);
+	if (possibility != NULL) {
+		array_possibility_packet *possibilities = malloc(sizeof(array_possibility_packet));
+		possibilities->size = 1;
+		possibilities->possibilities = malloc(sizeof(struct possibility_packet));
+		memcpy(&possibilities->possibilities[0], possibility, sizeof(struct possibility_packet));
+		add_possibility(possibilities);
+		
+		free(possibilities->possibilities);
+		free(possibilities);
+		free(possibility);
+		return 1;
+	}
 	return 0;
 }
 

@@ -131,7 +131,7 @@ int main(int argc, const char * argv[])
 {
 	printf("Version %i", VERSION);
 	if (argc >= 2) {
-		lastcheck = calloc(1000, sizeof(char));
+		lastcheck = calloc(2000, sizeof(char));
 		
 		if(strcmp("tcpclient", argv[1]) == 0) {
 			printf("client\n");

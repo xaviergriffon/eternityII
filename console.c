@@ -97,6 +97,11 @@ void * console(void *param)
             import_analysed(def_analyse_file);
             printf("backup restore\n");
         }
+        if (strcmp(buffer, "loadjson") == 0) {
+            printf("load from json\n");
+            import_json();
+            printf("backup json\n");
+        }
         if(strcmp(buffer, "print") == 0)
         {
             printdatamanager();

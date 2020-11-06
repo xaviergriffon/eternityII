@@ -218,7 +218,7 @@ void *check_client_threads(void *param)
     while(1)
     {
         free(lastcheck);
-        lastcheck = calloc(1000, sizeof(char));
+        lastcheck = calloc(2000, sizeof(char));
         unsigned long long currentactive = lastactive;
         int c;
         lastactive = 0;
@@ -243,13 +243,14 @@ void *check_client_threads(void *param)
         for(f=0; f < NB_THREADS; f++)
         {
             char *temp = calloc(1000, sizeof(char));
-            sprintf(temp, "Thread %i file size:%i\n",f,lastfilesize[f]);
+            sprintf(temp, "Thread %i file size:%i\n", f, lastfilesize[f]);
             strcat(lastcheck, temp);
             free(temp);
         }
         unsigned long long bys = currentactive / sleep_time;
         char *temp = calloc(1000, sizeof(char));
-        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\ngetted possibility not null :%lli\nmax result :%i\n",sleep_time,currentactive, bys,file_possibility_stock,getted_possibility_not_null, max_result);
+        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\nmax search by sec : %lli\nmax result :%i\n",
+            sleep_time,currentactive, bys, file_possibility_stock, max_search_by_sec, max_result);
         strcat(lastcheck, temp);
         free(temp);
         

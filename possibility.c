@@ -663,9 +663,9 @@ int print_possibility_packet(struct possibility_packet *packet)
 	}
 	grid[c++] = ']';
 	grid[c++] = '\0';
-	printf("{\"alloc\":%i,\"x\":%i, \"y\":%i, \"grid\":{", packet->alloc, packet->x, packet->y);
-	printf(grid);
-	printf("}}\n");
+	printf("{\"alloc\": %i, \"x\" :%i, \"y \":%i, \"grid\":", packet->alloc, packet->x, packet->y);
+	printf("%s", grid);
+	printf("}\n");
 	
 	free(grid);
 	

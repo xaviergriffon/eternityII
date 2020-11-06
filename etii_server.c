@@ -33,7 +33,7 @@ void *check_server(void *param)
     while(1)
     {
         free(lastcheck);
-        lastcheck = calloc(1000, sizeof(char));
+        lastcheck = calloc(2000, sizeof(char));
         unsigned long long currentactive = lastactive;
         int c;
         lastactive = 0;
