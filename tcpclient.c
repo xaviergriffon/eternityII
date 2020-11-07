@@ -37,8 +37,7 @@ int create_tcp_client(const char *hostname, int port)
 	{
 		printf("Impossible de d'identifier la machine '%s'\n",hostname);
 		fprintf(stderr, "Impossible de d'identifier la machine '%s'\n",hostname);
-		
-		exit(EXIT_FAILURE);
+		return -1;
 	}
 	
 	/* création de la socket */
@@ -46,8 +45,7 @@ int create_tcp_client(const char *hostname, int port)
 	{
 		printf("Impossible de créer une socket\n");
 		fprintf(stderr, "Impossible de créer une socket\n");
-		
-		exit(EXIT_FAILURE);
+		return -1;
 	}
 	
 	/* Changement d'un paramètre pour rendre la socket réutilisable directement */

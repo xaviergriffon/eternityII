@@ -155,6 +155,10 @@ void * console(void *param)
             int f = atoi(&buffer[6]);
             max_search_by_sec = f;
         }
+        if(strncmp(buffer, "maxStockByThread ", 17) == 0) {
+            int f = atoi(&buffer[17]);
+            max_stock_by_thread = f;
+        }
         if(strcmp(buffer, "checkdirections") == 0)
         {
             if(test_directions() == 0)
@@ -185,7 +189,7 @@ void * console(void *param)
         }
         if(strcmp(buffer, "help") == 0)
         {
-            printf("commands:\n  help\n  check\n  backup\n  restore\n  import\n  print\n  regroup\n  sorta\n  sortd\n  split\n  checkdatas\n  checkfiles\n  checkdirections\n  min\n  rmnonext\n limit n\n exit\n");
+            printf("commands:\n  help\n  check\n  backup\n  restore\n  import\n  print\n  regroup\n  sorta\n  sortd\n  split\n  checkdatas\n  checkfiles\n  checkdirections\n  min\n  rmnonext\n  maxStockByThread n\n  limit n\n exit\n");
         }
         free(buffer);
         buffer= NULL;

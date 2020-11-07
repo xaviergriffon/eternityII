@@ -37,3 +37,5 @@ int NB_THREADS = 10;
 int SERVER_PORT = 2000;
 
 unsigned long long max_search_by_sec = -1;
+
+int max_stock_by_thread = MAX_STOCK_BY_THREAD;

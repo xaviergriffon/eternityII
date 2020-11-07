@@ -70,4 +70,7 @@ int test_directions(void);
 int decode_direction(void);
 
 int compare_possibility(struct possibility_packet *packet, struct possibility_packet *other_packet);
+
+array_possibility_packet *build_single_array_possibility_packet(struct possibility_packet *possibility);
+void free_array_possibility_packet(array_possibility_packet *possibilities);
 #endif

@@ -31,7 +31,7 @@ void *feed_thread_aposs(void *param) {
                         //printf("alimentation thread %i\n", i);
                     } else
                     {
-                        free(aposs);
+                        free_array_possibility_packet(aposs);
                     }
                 }
             }
@@ -64,8 +64,12 @@ void build_feed_thread(client_possibility_t *thread_params) {
 
 void *control_thread(void *param) {
     client_possibility_t *thread_params = param;
-    unsigned long long lastCheck[NB_THREADS];
-    unsigned long long oneSecond[NB_THREADS];
+    unsigned long long *lastCheck = malloc(sizeof(unsigned long long) * NB_THREADS);
+    unsigned long long *oneSecond = malloc(sizeof(unsigned long long) * NB_THREADS);
+    for (int t = 0; t < NB_THREADS; t++) {
+        lastcheck[t] = 0;
+        oneSecond[t] = 0;
+    }
     int nbCheck = 0;
     while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
         for(int i = 0; i < NB_THREADS; i++)
@@ -102,6 +106,9 @@ void *control_thread(void *param) {
         // La priorité est au traitement lors on effectue des controles espacés.
         usleep(1000);
     }
+    
+    free(lastCheck);
+    free(oneSecond);
     return NULL;
 }
 

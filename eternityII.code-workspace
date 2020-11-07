@@ -7,7 +7,8 @@
 	"settings": {
 		"files.associations": {
 			"locale": "c",
-			"ostream": "c"
+			"ostream": "c",
+			"__locale": "c"
 		}
 	}
 }

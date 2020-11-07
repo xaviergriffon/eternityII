@@ -9,11 +9,11 @@
  * Controle et délègue les possibilités dépassant le nombre authorisé par thread.
  */
 void checkAndDelegatePossibilitiesIfNeeded(File *db) {
-    if(db->size > MAX_STOCK_BY_THREAD)
+    if(db->size > max_stock_by_thread)
     {
         array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-        int reste = db->size - MAX_STOCK_BY_THREAD;
-        aposs->possibilities = malloc(sizeof(struct possibility_packet) * (MAX_STOCK_BY_THREAD));
+        int reste = db->size - max_stock_by_thread;
+        aposs->possibilities = malloc(sizeof(struct possibility_packet) * (max_stock_by_thread));
         aposs->size = 0;
         while(db->size > reste)
         {
@@ -21,18 +21,12 @@ void checkAndDelegatePossibilitiesIfNeeded(File *db) {
             
             aposs->size++;
         }
-        // En cas d'erreur on remet les possibilitées dans la file
+        // En cas d'erreur les possibilités sont remises en locale
         if(add_possibility(aposs))
         {
             printf("error on add_possibility\n");
-            int p;
-            for(p=0; p < aposs->size;p++)
-            {
-                put(db,&aposs->possibilities[p]);
-            }
         }
-        free(aposs->possibilities);
-        free(aposs);
+        free_array_possibility_packet(aposs);
         
         
     }
@@ -141,19 +135,12 @@ void *autosearch (void *userdata)
                 
                 aposs->size++;
             }
+            // En cas d'erreur, les possibilités sont remises en locale.
             if(add_possibility(aposs))
             {
-                printf("Error with possibility : \n");
-                int p;
-                for (p=0;p < aposs->size;p++)
-                {
-                    struct possibility_packet *possibility = &aposs->possibilities[p];
-                    print_possibility_packet(possibility);
-                    save_possibility("./error_possibility",possibility);
-                }
-                
+                printf("Error on add_possibility \n");
             }
-            free(aposs->possibilities);
+            free_array_possibility_packet(aposs);
 
             send_possibility_analysed(client->id);
         }

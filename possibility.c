@@ -806,17 +806,15 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
             }
             printf("max result:%i\n",max_result);
         }
-        array_possibility_packet *aposs2 = malloc(sizeof(array_possibility_packet));
-        aposs2->size = 1;
-        aposs2->possibilities = packet;
+        array_possibility_packet *aposs2 = build_single_array_possibility_packet(packet);
         if(add_possibility(aposs2))
         {
             printf("error on add_possibility\n");
+			// Pour l'initialisation, on crash car ce n'est vraiment pas normal
             exit(EXIT_FAILURE);
         }
         getted_possibility_not_null++;
-        free(aposs2->possibilities);
-        free(aposs2);
+		free_array_possibility_packet(aposs2);
     }
     free_file(possibilities);
     free(key);
@@ -855,4 +853,24 @@ int compare_possibility(struct possibility_packet *packet, struct possibility_pa
 	}
 
 	return 0;
+}
+
+array_possibility_packet *build_single_array_possibility_packet(struct possibility_packet *possibility) {
+	array_possibility_packet *result = malloc(sizeof(array_possibility_packet));
+	if (possibility != NULL) {
+		result->size = 1;
+	} else {
+		result->size = 0;
+	}
+	result->possibilities = malloc(sizeof(struct possibility_packet));
+	memcpy(&result->possibilities[0], possibility, sizeof(struct possibility_packet));
+
+	return result;
+}
+
+void free_array_possibility_packet(array_possibility_packet *possibilities) {
+	if (possibilities->possibilities != NULL) {
+		free(possibilities->possibilities);
+	}
+	free(possibilities);
 }

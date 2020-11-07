@@ -31,12 +31,12 @@ int restore(char *filename);
 int restore_analysed(char *filename);
 int import(char *filename);
 int import_analysed(char *filename);
-int import_json();
+int import_json(void);
 
 int print_file(int fp);
 int printdatamanager(void);
 int print_file_analysed(int fp);
-int print_all_file_analysed();
+int print_all_file_analysed(void);
 int sort_ascending(void);
 int sort_descending(void);
 int sort_descending_mthread(void);

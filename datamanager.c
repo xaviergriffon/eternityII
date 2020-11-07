@@ -57,6 +57,8 @@ static file_possibility_t file_possibility_analysed[NB_FILE_POSSIBILITY] =
 
 char*server_ip = NULL;
 
+int put_to_local(array_possibility_packet *possibilities);
+
 int maintenance = 0;
 
 void set_server_ip(const char *server)
@@ -90,6 +92,7 @@ int put_to_server(array_possibility_packet *possibilities)
 	if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
 	{
 		fprintf(stderr, "Erreur sur accept()\n");
+		put_to_local(possibilities);
 		return -1;
 	}
 	
@@ -111,10 +114,12 @@ int put_to_server(array_possibility_packet *possibilities)
 		if (result <= 0) {
 			printf("problème send : %li\n",result);
 		}
-		if(recv_instruction(socket_id) != INST_CONSIDERED){
-            //TODO : reintegrer la possiblité
+		if(recv_instruction(socket_id) != INST_CONSIDERED) {
 			printf("problème de prise en compte du serveur\n");
-            
+			array_possibility_packet *single_array = build_single_array_possibility_packet(possibility);
+			put_to_local(single_array);
+			free_array_possibility_packet(single_array);
+			print_possibility_packet(possibility);
 		}
 	}
     
@@ -409,7 +414,7 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread) 
 	return 0;
 }
 
-void scroll_from_server(array_possibility_packet *result,int max_result)
+void scroll_from_server(array_possibility_packet *result, int max_result)
 {
 	
 	int socket_id = -1;
@@ -472,7 +477,7 @@ void scroll_from_server(array_possibility_packet *result,int max_result)
 	}
 }
 
-void scroll_from_local(array_possibility_packet *result,int max_result)
+void scroll_from_local(array_possibility_packet *result, int max_result)
 {
 	int getpossibility = 0;
 	int currfile = 0;
@@ -558,14 +563,13 @@ array_possibility_packet *get_last_possibility(int max_result)
 	result->size = 0;
 	result->possibilities = NULL;
 	
+	scroll_from_local(result, max_result);
     
-	if(server_ip != NULL)
+	if(result->size == 0 && server_ip != NULL)
 	{
 		scroll_from_server(result, max_result);
-	}else
-	{
-		scroll_from_local(result, max_result);
 	}
+
 	if(result->size == 0)
 	{
 		printf("result 0 \n");
@@ -741,8 +745,7 @@ int import(char *filename)
 		memcpy(&possibilities->possibilities[0], possibility, sizeof(struct possibility_packet));
 		add_possibility(possibilities);
 		
-		free(possibilities->possibilities);
-		free(possibilities);
+		free_array_possibility_packet(possibilities);
 	}
 	
 	free(possibility);
@@ -800,8 +803,7 @@ int import_json() {
 		memcpy(&possibilities->possibilities[0], possibility, sizeof(struct possibility_packet));
 		add_possibility(possibilities);
 		
-		free(possibilities->possibilities);
-		free(possibilities);
+		free_array_possibility_packet(possibilities);
 		free(possibility);
 		return 1;
 	}

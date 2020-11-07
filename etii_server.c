@@ -107,14 +107,13 @@ void *communicate_with_client (void *userdata)
         {
             if(lastPossibilityPacketSend != NULL)
             {
-                free(lastPossibilityPacketSend->possibilities);
-                free(lastPossibilityPacketSend);
+                free_array_possibility_packet(lastPossibilityPacketSend);
                 lastPossibilityPacketSend = NULL;
             }
-            // TODO : a revoir pour demander au client
-            int p=1;
-            lastPossibilityPacketSend = get_last_possibility(p);
-            for (p=0;p < lastPossibilityPacketSend->size;p++)
+            
+            lastPossibilityPacketSend = get_last_possibility(1);
+            int p = 0;
+            for (p = 0; p < lastPossibilityPacketSend->size; p++)
             {
                 struct possibility_packet *possibility = &lastPossibilityPacketSend->possibilities[p];
                 add_possibility_analysed(possibility, -1);

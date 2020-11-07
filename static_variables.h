@@ -61,4 +61,6 @@ extern int SERVER_PORT;
 
 extern unsigned long long max_search_by_sec;
 
+extern int max_stock_by_thread;
+
 #endif /* static_variables_h */

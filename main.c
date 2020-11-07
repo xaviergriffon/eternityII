@@ -58,6 +58,14 @@ void runclient(const char *hostname, const char *file)
 	
     runMonoClient(file);
 	
+	// Comme on est en mode client, on ne devrait plus rien avoir dans les files
+	// si c'est le cas, il s'agit d'une erreur
+	if (datas_size() > 0) {
+		char *def_file = "./failed_exit_eternityII.back";
+    	char *def_analyse_file = "./failed_exit_eternityII-in_analyse.back";
+		backup(def_file);
+        backup_analysed(def_analyse_file);
+	}
 }
 
 void runauto(const char *file)

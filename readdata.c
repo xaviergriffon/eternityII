@@ -154,6 +154,7 @@ void compute_grid(struct possibility_packet *possibility, char *str_value) {
                     break;
                 }
             } while (match == 0);
+            free(pmatch);
             /* libreation de l'expression compiliée */
             regfree (&preg);
         }
@@ -273,6 +274,7 @@ struct possibility_packet * read_from_json(const char *json_possiblity) {
                     break;
                 }
             } while (match == 0);
+            free(pmatch);
             /* libreation de l'expression compiliée */
             regfree (&preg);
         }
