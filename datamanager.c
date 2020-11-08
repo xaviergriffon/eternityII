@@ -218,8 +218,8 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 
 				if (compare_possibility(possibilityInFile, possibility) == 0) {
 					// TODO : factoriser
+                    Element *currentElement = element;
 					if (element->next != NULL) {
-						Element *currentElement = element;
 						element = element->next;
 						if (currentElement->previous != NULL) {
 							currentElement->previous->next = element;
@@ -237,6 +237,10 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 							element->previous->next = NULL;
 						}
 					}
+                    if (possibilityInFile != NULL) {
+                        free(possibilityInFile);
+                    }
+                    free(currentElement);
 					file->size--;
 
 					removed_possibility = 1;
@@ -282,30 +286,11 @@ void send_possibility_analysed(int thread) {
 			File *file = &file_possibility_analysed[thread].file;
 			Element *element = file->start;
 			if (element != NULL) {
-				struct possibility_packet *possibility = element->value;
-				while (possibility != NULL) {
-					if (element->next != NULL) {
-						Element *currentElement = element;
-						element = element->next;
-						if (currentElement->previous != NULL) {
-							currentElement->previous->next = element;
-							element->previous = currentElement->previous;
-						} else {
-							file->start = element;
-							element->previous = NULL;
-						}
-					} else {
-						if (file->start == element) {
-							file->start = NULL;
-							file->end = NULL;
-						} else {
-							file->end = element->previous;
-							element->previous->next = NULL;
-						}
-						possibility = NULL;
-					}
-					file->size--;
+                struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
+				while (scroll(file, possibility)) {
+                    ;
 				}
+                free(possibility);
 			}
 
 			pthread_mutex_unlock(&file_possibility_analysed[thread].lock);
@@ -324,9 +309,8 @@ void send_possibility_analysed(int thread) {
 	{
 		File *file = &file_possibility_analysed[thread].file;
 		if (file->start != NULL) {
-			Element *element = file->start;
-			struct possibility_packet *possibility = element->value;
-			while (possibility != NULL) {
+			struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
+			while (scroll(file, possibility)) {
 				send_instruction(socket_id, INST_POSSIBILITY_ANALYSED);
 				ssize_t result = send(socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
 				if (result != sizeof(struct possibility_packet)) {
@@ -336,11 +320,12 @@ void send_possibility_analysed(int thread) {
 				if(recv_instruction(socket_id) != INST_CONSIDERED){
 					printf("possiblité analysée non prise en compte :\n");
 					print_possibility_packet(possibility);
+                    put(file, possibility);
 					break;
 				}
-
+/*
+                Element *currentElement = element;
 				if (element->next != NULL) {
-					Element *currentElement = element;
 					element = element->next;
 					if (currentElement->previous != NULL) {
 						currentElement->previous->next = element;
@@ -360,8 +345,12 @@ void send_possibility_analysed(int thread) {
 					}
 					possibility = NULL;
 				}
+                // TODO : tester si liste avec cache
+                free(currentElement);
 				file->size--;
+ */
 			}
+            free(possibility);
 		}
 
 		pthread_mutex_unlock(&file_possibility_analysed[thread].lock);
@@ -510,6 +499,7 @@ void scroll_from_local(array_possibility_packet *result, int max_result)
 							packet = NULL;
 						} else
 						{
+                            free(packet);
 							nothing = 1;
 						}
 					}
@@ -794,7 +784,8 @@ int import_json() {
 	}
 	unlock_all_file();
 
-	const char *json = "{\"alloc\": 98, \"x\": 4, \"y\": 1, \"grid\": [[259, 571, 567, 525, 554, 524, 549, 522, 536, 543, 541, 539, 528, 563, 551, 514], [291, 201, 763, 213, -2, -2, -2, -2, -2, -2, -2, -2, -2, 629, 481, 825], [309, 699, 976, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 1023, 842, 817], [301, 1010, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 776], [263, 435, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 790], [270, 1008, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 794], [297, 495, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 777], [289, 888, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 773], [273, 844, -2, -2, -2, -2, -2, 651, -2, -2, -2, -2, -2, -2, -2, 783], [312, 200, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 788], [290, 698, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 787], [296, 996, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 779], [274, 861, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 818], [314, 998, 949, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 249, 700, 798], [316, 1013, 1009, 849, 856, 345, 890, 389, 452, 735, 851, 319, 383, 110, 900, 796], [4, 21, 47, 44, 32, 36, 46, 48, 43, 23, 54, 38, 52, 6, 25, 769]]}";
+	//const char *json = "{\"alloc\": 98, \"x\": 4, \"y\": 1, \"grid\": [[259, 571, 567, 525, 554, 524, 549, 522, 536, 543, 541, 539, 528, 563, 551, 514], [291, 201, 763, 213, -2, -2, -2, -2, -2, -2, -2, -2, -2, 629, 481, 825], [309, 699, 976, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 1023, 842, 817], [301, 1010, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 776], [263, 435, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 790], [270, 1008, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 794], [297, 495, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 777], [289, 888, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 773], [273, 844, -2, -2, -2, -2, -2, 651, -2, -2, -2, -2, -2, -2, -2, 783], [312, 200, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 788], [290, 698, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 787], [296, 996, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 779], [274, 861, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 818], [314, 998, 949, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 249, 700, 798], [316, 1013, 1009, 849, 856, 345, 890, 389, 452, 735, 851, 319, 383, 110, 900, 796], [4, 21, 47, 44, 32, 36, 46, 48, 43, 23, 54, 38, 52, 6, 25, 769]]}";
+	const char *json = "{\"alloc\": 120, \"x\" :9, \"y\": 13, \"grid\": [[259, 563, 567, 525, 554, 522, 536, 543, 544, 541, 540, 528, 518, 562, 551, 514], [283, 319, 377, 456, 845, 334, 113, 979, 982, 146, 622, 660, 641, 629, 481, 825], [286, 189, 976, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 1023, 842, 817], [308, 422, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 950, 776], [263, 434, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 459, 790], [268, 253, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 865, 794], [301, 508, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 390, 777], [270, 132, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 882, 783], [297, 624, -2, -2, -2, -2, -2, 651, -2, -2, -2, -2, -2, -2, 168, 788], [292, 98, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 684, 787], [300, 588, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 1018, 779], [289, 713, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 855, 773], [273, 460, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 908, 805], [314, 998, 949, -2, -2, -2, -2, -2, -2, -2, 853, 323, 706, 249, 131, 814], [316, 1013, 1009, 615, 379, 446, 1002, 496, 744, 725, 986, 647, 222, 759, 638, 802], [4, 21, 47, 48, 40, 18, 53, 43, 23, 56, 35, 54, 38, 59, 25, 769]]}";
 	struct possibility_packet *possibility = read_from_json(json);
 	if (possibility != NULL) {
 		array_possibility_packet *possibilities = malloc(sizeof(array_possibility_packet));

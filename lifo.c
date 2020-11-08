@@ -66,13 +66,14 @@ int put (File * suite, void *value){
 		suite->lastPostionCache++;
 	} else
 	{
-		new_element = malloc(sizeof(Element));
-		if (suite->sizeofvalue <= 0 || (new_element->value = malloc(suite->sizeofvalue))
-			== NULL)
-		{
+		
+        if (suite->sizeofvalue <= 0) {
 			free (new_element);
 			return 0;
-		}
+        } else {
+            new_element = malloc(sizeof(Element));
+            new_element->value = malloc(suite->sizeofvalue);
+        }
 	}
 
 	new_element->previous = NULL;
@@ -153,6 +154,7 @@ void *scroll_cache(File * suite){
 		}
 	} else
 	{
+        // TODO : SI n'est pas dans le cache, alors vider mémoire
         /*
 		memcpy(cache, result, suite->sizeofvalue);
 		free (result);

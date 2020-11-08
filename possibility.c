@@ -663,7 +663,7 @@ int print_possibility_packet(struct possibility_packet *packet)
 	}
 	grid[c++] = ']';
 	grid[c++] = '\0';
-	printf("{\"alloc\": %i, \"x\" :%i, \"y \":%i, \"grid\":", packet->alloc, packet->x, packet->y);
+	printf("{\"alloc\": %i, \"x\": %i, \"y\": %i, \"grid\": ", packet->alloc, packet->x, packet->y);
 	printf("%s", grid);
 	printf("}\n");
 	
@@ -815,6 +815,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         }
         getted_possibility_not_null++;
 		free_array_possibility_packet(aposs2);
+        free(packet);
     }
     free_file(possibilities);
     free(key);

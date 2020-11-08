@@ -180,22 +180,24 @@ void *communicate_with_client (void *userdata)
         
         instruction = recv_instruction(client->socket_id);
     }
-    if((instruction == -1 || instruction != INST_END) && lastPossibilityPacketSend != NULL)
+    if(lastPossibilityPacketSend != NULL)
     {
-        if(add_possibility(lastPossibilityPacketSend))
-        {
-            printf("Error with possibility : \n");
-            int p;
-            for (p=0;p < lastPossibilityPacketSend->size;p++)
+        if (instruction == -1 || instruction != INST_END) {
+            if(add_possibility(lastPossibilityPacketSend))
             {
-                struct possibility_packet *possibility = &lastPossibilityPacketSend->possibilities[p];
-                print_possibility_packet(possibility);
-                save_possibility("./error_possibility",possibility);
+                printf("Error with possibility : \n");
+                int p;
+                for (p=0;p < lastPossibilityPacketSend->size;p++)
+                {
+                    struct possibility_packet *possibility = &lastPossibilityPacketSend->possibilities[p];
+                    print_possibility_packet(possibility);
+                    save_possibility("./error_possibility",possibility);
+                }
+                
             }
-            
         }
-        free(lastPossibilityPacketSend->possibilities);
-        free(lastPossibilityPacketSend);
+        
+        free_array_possibility_packet(lastPossibilityPacketSend);
     }
     
     shutdown(client->socket_id, 2);
@@ -305,6 +307,7 @@ void runserver(const char* file)
                             exit(EXIT_FAILURE);
                         }
                         pthread_attr_destroy(thread_attributes);
+                        free(thread_attributes);
                         break;
                     }
                 }

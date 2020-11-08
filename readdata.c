@@ -27,6 +27,7 @@ struct array_part *read_parts(const char *file)
     int NB_PARTS = (np+1);
 	if(NULL == (parts = malloc(NB_PARTS * sizeof *parts)))
 	{
+        // TODO : tracer l'erreur
 		exit(EXIT_FAILURE);
 	}
     struct array_part *array = malloc(sizeof(struct array_part));
