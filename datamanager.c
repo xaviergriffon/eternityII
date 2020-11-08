@@ -569,8 +569,6 @@ array_possibility_packet *get_last_possibility(int max_result)
 	if(result->size == 0)
 	{
 		printf("result 0 \n");
-	} else {
-		
 	}
 	return result;
 }
