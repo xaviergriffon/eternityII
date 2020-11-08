@@ -205,8 +205,10 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 	printf("en cours d'analyse:\n");
 	print_all_file_analysed();
 #endif // CHECK_POSSIBILITY
+
 	while(removed_possibility == 0)
 	{
+		int checked = 0;
 		if(pthread_mutex_trylock(&file_possibility_analysed[currfile].lock) == 0)
 		{
 			File *file = &file_possibility_analysed[currfile].file;
@@ -250,25 +252,29 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 				}
 			}
 			
-			
+			checked = 1;
 			pthread_mutex_unlock(&file_possibility_analysed[currfile].lock);
 		}
-		if (thread < 0) {
-			currfile++;
-			if(currfile >= NB_FILE_POSSIBILITY)
-			{
-				// On n'a pas retrouvé la possibilité
+		if (checked == 1) {
+			if (thread < 0) {
+				currfile++;
+				if(currfile >= NB_FILE_POSSIBILITY)
+				{
+					// On n'a pas retrouvé la possibilité
+#ifdef CHECK_POSSIBILITY
+					printf("non supprimée \n");
+#endif // CHECK_POSSIBILITY
+					return 1;
+				}
+			} else if (removed_possibility == 0) {
 #ifdef CHECK_POSSIBILITY
 				printf("non supprimée \n");
 #endif // CHECK_POSSIBILITY
+				// On n'a pas retrouvé la possibilité
 				return 1;
 			}
-		} else if (removed_possibility == 0) {
-#ifdef CHECK_POSSIBILITY
-			printf("non supprimée \n");
-#endif // CHECK_POSSIBILITY
-			// On n'a pas retrouvé la possibilité
-			return 1;
+		} else {
+			usleep(MICRO_SLEEP);
 		}
 	}
 #ifdef CHECK_POSSIBILITY
