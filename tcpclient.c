@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #ifdef WIN32
 #include <winsock2.h>
 #define sleep(s) Sleep(s*1000)
@@ -22,6 +23,7 @@ typedef struct in_addr IN_ADDR;
 #endif
 
 #include "tcpclient.h"
+#include "static_variables.h"
 
 #define NB_ATTEMPTS 10
 
@@ -40,6 +42,9 @@ int create_tcp_client(const char *hostname, int port)
 		return -1;
 	}
 	
+	if (opened_tcp > 0) {
+		printf("socket déjà en cours !!!\n");
+	}
 	/* création de la socket */
 	if(-1 == (socket_id = socket(PF_INET,SOCK_STREAM, 0)))
 	{
@@ -47,14 +52,16 @@ int create_tcp_client(const char *hostname, int port)
 		fprintf(stderr, "Impossible de créer une socket\n");
 		return -1;
 	}
-	
+
 	/* Changement d'un paramètre pour rendre la socket réutilisable directement */
 	optval = 1;
 	setsockopt(socket_id, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(int));
 	struct timeval tv;
-	tv.tv_sec = 60;
+	tv.tv_sec = tcp_timeout;
 	tv.tv_usec = 0;
 	setsockopt(socket_id, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(struct timeval));
+	setsockopt(socket_id, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(struct timeval));
+	
 	
 	//setsockopt(socket_id, SOL_SOCKET, SO_NOSIGPIPE, &optval, sizeof(int));
 	
@@ -63,12 +70,14 @@ int create_tcp_client(const char *hostname, int port)
 	sockname.sin_port = htons(port);
 	memcpy((char*) &(sockname.sin_addr.s_addr), host_address->h_addr_list[0], host_address->h_length);
 	int t;
-	for(t = 1; t <= NB_ATTEMPTS;t++)
+	for(t = 1; t <= NB_ATTEMPTS; t++)
 	{
+
 		if(-1 == (connect(socket_id, (struct sockaddr *)&sockname, sizeof(struct sockaddr_in))))
 		{
 			fprintf(stderr, "Impossible de connecter la socket au serveur '%s' tentative:%i\n",hostname,t);
 			closesocket(socket_id);
+			opened_tcp--;
 			if (t == NB_ATTEMPTS) {
 				socket_id = -1;
 				break;
@@ -78,6 +87,7 @@ int create_tcp_client(const char *hostname, int port)
 			
 		} else
 		{
+			opened_tcp++;
 			break;
 		}
 	}

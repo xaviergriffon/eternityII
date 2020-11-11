@@ -8,7 +8,7 @@
 /**
  * Controle et délègue les possibilités dépassant le nombre authorisé par thread.
  */
-void checkAndDelegatePossibilitiesIfNeeded(File *db) {
+void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibility, File *db) {
     if(db->size > max_stock_by_thread)
     {
         array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
@@ -22,7 +22,7 @@ void checkAndDelegatePossibilitiesIfNeeded(File *db) {
             aposs->size++;
         }
         // En cas d'erreur les possibilités sont remises en locale
-        if(add_possibility(aposs))
+        if(add_possibility(client_possibility, aposs))
         {
             printf("error on add_possibility\n");
         }
@@ -52,102 +52,103 @@ void *autosearch (void *userdata)
             usleep(MICRO_SLEEP);
         }
         
-        if (client->works == 1) {
-            // allocation mémoire pour la suite
-            File *db = malloc(sizeof(File));
-            // Initialisation de la suite
-            // 350 ???
-            init_file_with_cache(db, 350, sizeof(struct possibility_packet));
-            //struct possibility_packet *possibilityPacketCache = malloc(sizeof(struct possibility_packet));
+        // allocation mémoire pour la suite
+        File *db = malloc(sizeof(File));
+        // Initialisation de la suite
+        // 350 ???
+        init_file_with_cache(db, 350, sizeof(struct possibility_packet));
+        //struct possibility_packet *possibilityPacketCache = malloc(sizeof(struct possibility_packet));
 
-            // Représentation de la piece que l'on recherche dans les pieces disponbiles.
-            // certaines faces ne sont pas définies
-            key_part *key = malloc(sizeof(key_part));
-            int a;
-            // Consommation des possibilités demandées
-            for(a=0; client->aposs != NULL && a < client->aposs->size;a++)
+        // Représentation de la piece que l'on recherche dans les pieces disponbiles.
+        // certaines faces ne sont pas définies
+        key_part *key = malloc(sizeof(key_part));
+        int a;
+        // Consommation des possibilités demandées
+        for(a=0; client->aposs != NULL && a < client->aposs->size;a++)
+        {
+            put(db, &client->aposs->possibilities[a]);
+            // Boucle permettant d'effectuer un controle de la consommation sans "trop" imputer la boucle suivante effectuant un controle "miminum"
+            while (db->size > 0 && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
             {
-                put(db, &client->aposs->possibilities[a]);
-                // Boucle permettant d'effectuer un controle de la consommation sans "trop" imputer la boucle suivante effectuant un controle "miminum"
-                while (db->size > 0 && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+                // On poursuit tant qu'il y a du stock et qu'on a toujours l'instruction de continuer
+                //while(db->size > 0 && client->request == REQUEST_CONTINUE)
+                while(db->size > 0 && request == REQUEST_CONTINUE)
                 {
-                    // On poursuit tant qu'il y a du stock et qu'on a toujours l'instruction de continuer
-                    //while(db->size > 0 && client->request == REQUEST_CONTINUE)
-                    while(db->size > 0 && request == REQUEST_CONTINUE)
-                    {
-                        // Si trop d'étude à faire pour 1 thread, alors on délègue le reste.
-                        checkAndDelegatePossibilitiesIfNeeded(db);
-                        
-                        // Statistique du nombre de possiblité en étude
-                        lastfilesize[client->compteur] = db->size;
-                        
-                        // Consomation d'un cache ??
-                        struct possibility_packet *possibilityPacket = scroll_cache(db);
-        #ifdef CHECK_POSSIBILITY
-                        int analyse = check_possibility(possibilityPacket);
-                        if (analyse < 0)
-                        {
-                            printf("possibility error : %i\n",analyse);
-                            printf(" ---");
-                            print_possibility_packet(possibilityPacket);
-                        }
-        #endif // CHECK_POSSIBILITY
-                        
-                        // Statistique possibilité étudiées
-                        compteurs[client->compteur]++;
-                        
-                        // alimente key pour indiquer quoi chercher
-                        what_search_to_key(client->all_rotate_part, possibilityPacket, key);
-                        
-                        int max = search_possiblity_light(db, key, possibilityPacket, client->map_part, client->all_rotate_part, idParts);
-                        
-                        // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
-                        if(max > max_result)
-                        {
-                            max_result = max;
-                            if(max_result >= ETERN_PARTS)
-                            {
-                                printf("Erreur alloc > ETERN_PARTS\n");
-                            }
-                            printf("max result:%i\n",max_result);
-                        }
-                    }
-
-                    if (request == REQUEST_PAUSE)
-                    {
-                        usleep(MICRO_PAUSE);
-                    }
-                }
-            }
-            //free(possibilityPacketCache);
-            free(key);
-            //if(client->request == REQUEST_STOP && db->size > 0)
-            if (request == REQUEST_STOP && db->size > 0)
-            {
-                array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-                aposs->possibilities = malloc(sizeof(struct possibility_packet) * (db->size));
-                aposs->size = 0;
-                while(db->size > 0)
-                {
-                    scroll(db, &aposs->possibilities[aposs->size]);
+                    // Si trop d'étude à faire pour 1 thread, alors on délègue le reste.
+                    checkAndDelegatePossibilitiesIfNeeded(client, db);
                     
-                    aposs->size++;
+                    // Statistique du nombre de possiblité en étude
+                    lastfilesize[client->compteur] = db->size;
+                    
+                    // Consomation d'un cache ??
+                    struct possibility_packet *possibilityPacket = scroll_cache(db);
+    #ifdef CHECK_POSSIBILITY
+                    int analyse = check_possibility(possibilityPacket);
+                    if (analyse < 0)
+                    {
+                        printf("possibility error : %i\n",analyse);
+                        printf(" ---");
+                        print_possibility_packet(possibilityPacket);
+                    }
+    #endif // CHECK_POSSIBILITY
+                    
+                    // Statistique possibilité étudiées
+                    compteurs[client->compteur]++;
+                    
+                    // alimente key pour indiquer quoi chercher
+                    what_search_to_key(client->all_rotate_part, possibilityPacket, key);
+                    
+                    int max = search_possiblity_light(db, key, possibilityPacket, client->map_part, client->all_rotate_part, idParts);
+                    
+                    // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
+                    if(max > max_result)
+                    {
+                        max_result = max;
+                        if(max_result >= ETERN_PARTS)
+                        {
+                            printf("Erreur alloc > ETERN_PARTS\n");
+                        }
+                        printf("max result:%i\n",max_result);
+                    }
                 }
-                // En cas d'erreur, les possibilités sont remises en locale.
-                if(add_possibility(aposs))
-                {
-                    printf("Error on add_possibility \n");
-                }
-                free_array_possibility_packet(aposs);
 
-                send_possibility_analysed(client->id);
+                if (request == REQUEST_PAUSE)
+                {
+                    usleep(MICRO_PAUSE);
+                }
             }
-            free_file(db);
-            
-            // A faire tout le temps ou juste si on arrete ?
-            free_array_possibility_packet(client->aposs);
         }
-        client->aposs = NULL;
+        //free(possibilityPacketCache);
+        free(key);
+        //if(client->request == REQUEST_STOP && db->size > 0)
+        if (request == REQUEST_STOP && db->size > 0)
+        {
+            array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
+            aposs->possibilities = malloc(sizeof(struct possibility_packet) * (db->size));
+            aposs->size = 0;
+            while(db->size > 0)
+            {
+                scroll(db, &aposs->possibilities[aposs->size]);
+                
+                aposs->size++;
+            }
+            // En cas d'erreur, les possibilités sont remises en locale.
+            if(add_possibility(client, aposs))
+            {
+                printf("Error on add_possibility \n");
+            }
+            free_array_possibility_packet(aposs);
+
+            send_possibility_analysed(client);
+        }
+        free_file(db);
+        
+        // A faire tout le temps ou juste si on arrete ?
+        if (client->aposs != NULL) {
+            free_array_possibility_packet(client->aposs);
+            client->aposs = NULL;
+        }
+        
         client->works = 0;
         lastfilesize[client->compteur] = 0;
         

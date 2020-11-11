@@ -15,6 +15,7 @@
 #define INST_CONSIDERED 5
 #define INST_NULL 6
 #define INST_POSSIBILITY_ANALYSED 7
+#define INST_TEST_CONNECTED 8
 
 
 PACK(
@@ -27,6 +28,10 @@ PACK(
 
 int8_t recv_instruction(int socket_id);
 
-void send_instruction(int socket_id, int8_t instruction);
+long send_instruction(int socket_id, int8_t instruction);
+
+int is_connected(int socket_id);
+
+void close_socket(int socket_id);
 
 #endif

@@ -93,7 +93,7 @@ void * console(void *param)
         if(strcmp(buffer, "import") == 0)
         {
             printf("start import\n");
-            import(def_file);
+            import(NULL, def_file);
             import_analysed(def_analyse_file);
             printf("backup restore\n");
         }

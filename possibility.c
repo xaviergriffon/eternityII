@@ -807,7 +807,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
             printf("max result:%i\n",max_result);
         }
         array_possibility_packet *aposs2 = build_single_array_possibility_packet(packet);
-        if(add_possibility(aposs2))
+        if(add_possibility(NULL, aposs2))
         {
             printf("error on add_possibility\n");
 			// Pour l'initialisation, on crash car ce n'est vraiment pas normal

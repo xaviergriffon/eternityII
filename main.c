@@ -133,8 +133,6 @@ int init_compteurs()
 	return 0;
 }
 
-
-
 int main(int argc, const char * argv[])
 {
 	printf("Version %i", VERSION);

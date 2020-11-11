@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <unistd.h> /* close */
 #include <netdb.h> /* gethostbyname */
+#include <fcntl.h>
 #define INVALID_SOCKET -1
 #define SOCKET_ERROR -1
 #define closesocket(s) close(s)
@@ -20,6 +21,7 @@ typedef struct sockaddr SOCKADDR;
 typedef struct in_addr IN_ADDR;
 #endif
 #include "tcpserver.h"
+#include "static_variables.h"
 
 int create_tcp_server(int port, int nb_max_clients)
 {
@@ -32,13 +34,8 @@ int create_tcp_server(int port, int nb_max_clients)
 		fprintf(stderr, "Impossible de créer un socket\n");
 		exit(EXIT_FAILURE);
 	}
-	
+	// on permet la réutilisation de la socket après sa fermeture.
 	setsockopt(socket_id, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(int));
-	//struct timeval tv;
-	//tv.tv_sec = 60;
-	//tv.tv_usec = 0;
-	// Voir pour mettre le timeout sur la session
-	//setsockopt(socket_id, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(struct timeval));
 	
 	//setsockopt(socket_id, SOL_SOCKET, SO_NOSIGPIPE, &optval, sizeof(int));
 	/* Affectation d'une adresse */
@@ -55,6 +52,7 @@ int create_tcp_server(int port, int nb_max_clients)
 	}
 	
 	/* mise en écoute de la socket */
+	printf("max clients: %i\n", nb_max_clients);
 	if(-1 == (listen(socket_id, nb_max_clients)))
 	{
 		fprintf(stderr, "Erreur sur listen()\n");

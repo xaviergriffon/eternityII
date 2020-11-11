@@ -39,3 +39,11 @@ int SERVER_PORT = 2000;
 unsigned long long max_search_by_sec = -1;
 
 int max_stock_by_thread = MAX_STOCK_BY_THREAD;
+
+int communication_in_progress = 0;
+
+int opened_tcp = 0;
+
+long nb_client = 0;
+
+int tcp_timeout = DEFAULT_TCP_TIMEOUT;

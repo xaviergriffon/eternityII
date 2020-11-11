@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <errno.h>
+#include <time.h>
 
 #include "static_variables.h"
 #include "etii_protocol.h"
@@ -22,8 +24,10 @@ typedef struct
     int socket_id;
     map_big_array *map_part;
     int compteur;
+    struct tms start_socket;
 } client_t;
 
+client_t *thread_params = NULL;
 
 void *check_server(void *param)
 {
@@ -67,8 +71,18 @@ void *check_server(void *param)
             file_possibility_analysed_stock = file_possibility_analysed_stock + f_size;
         }
         unsigned long long bys = currentactive / sleep_time;
+
+        int activeThread = 0;
+        if (thread_params != NULL) {
+            for (int t = 0; t < NB_THREADS; t++) {
+                if (thread_params[t].socket_id != -1) {
+                    activeThread++;
+                }
+            }
+        }
+
         char *temp = calloc(1000, sizeof(char));
-        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\ngetted possibility not null :%lli\nmax result on server :%i\n",sleep_time,currentactive, bys,file_possibility_stock,getted_possibility_not_null, max_result);
+        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,file_possibility_stock,getted_possibility_not_null, max_result, activeThread);
         strcat(lastcheck, temp);
         free(temp);
         
@@ -90,7 +104,6 @@ void *check_server(void *param)
 void *communicate_with_client (void *userdata)
 {
     client_t *client = userdata;
-    
     while (client->socket_id == -1)
     {
         usleep(MICRO_SLEEP);
@@ -111,7 +124,7 @@ void *communicate_with_client (void *userdata)
                 lastPossibilityPacketSend = NULL;
             }
             
-            lastPossibilityPacketSend = get_last_possibility(1);
+            lastPossibilityPacketSend = get_last_possibility(NULL, 1);
             int p = 0;
             for (p = 0; p < lastPossibilityPacketSend->size; p++)
             {
@@ -120,8 +133,8 @@ void *communicate_with_client (void *userdata)
                 //printf("send ");
                 //print_possibility_packet(possibility);
                 ssize_t ssize = send(client->socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
-                if (ssize != sizeof(struct possibility_packet)) {
-                    printf("erreur d'envoi");
+                if (ssize < 0) {
+                    printf("erreur d'envoi %i\n", errno);
                 }
             }
             if(p == 0)
@@ -133,12 +146,13 @@ void *communicate_with_client (void *userdata)
         {
             array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
             struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
-            if(sizeof(struct possibility_packet) == recv(client->socket_id, (struct possibility_packet *)possibilityPacket, sizeof(struct possibility_packet),0))
+            long receive = recv(client->socket_id, (struct possibility_packet *)possibilityPacket, sizeof(struct possibility_packet),0);
+            if(sizeof(struct possibility_packet) == receive)
             {
                 aposs->possibilities = possibilityPacket;
                 aposs->size = 1;
                 
-                if(add_possibility(aposs) == 0)
+                if(add_possibility(NULL, aposs) == 0)
                 {
                     send_instruction(client->socket_id,INST_CONSIDERED);
                     
@@ -146,7 +160,11 @@ void *communicate_with_client (void *userdata)
                     send_instruction(client->socket_id,INST_ERROR);
                 }
             } else{
-                printf("bad possibility recept\n");
+                printf("bad possibility recept");
+                if (receive < 0) {
+                    printf(" : %i", errno);
+                }
+                printf("\n");
             }
             free(possibilityPacket);
             free(aposs);
@@ -166,9 +184,15 @@ void *communicate_with_client (void *userdata)
                     send_instruction(client->socket_id,INST_ERROR);
                 }
             } else {
-                printf("bad possibility recept\n");
+                printf("bad possibility recept");
+                if (ssize < 0) {
+                    printf(" : %i", errno);
+                }
+                printf("\n");
             }
             free (possibilityPacket);
+        } else if (instruction == INST_TEST_CONNECTED) {
+            send_instruction(client->socket_id, INST_TEST_CONNECTED);
         } else
         {
             inst_unknow++;
@@ -183,7 +207,7 @@ void *communicate_with_client (void *userdata)
     if(lastPossibilityPacketSend != NULL)
     {
         if (instruction == -1 || instruction != INST_END) {
-            if(add_possibility(lastPossibilityPacketSend))
+            if(add_possibility(NULL, lastPossibilityPacketSend))
             {
                 printf("Error with possibility : \n");
                 int p;
@@ -202,18 +226,52 @@ void *communicate_with_client (void *userdata)
     
     shutdown(client->socket_id, 2);
     int err = closesocket(client->socket_id);
+    opened_tcp--;
     if(0 != err)
     {
         printf("erreur close :%i\n",err);
     }
     
     usleep(THREAD_MICRO_SLEEP);
-    client->exist =0;
-    client->socket_id = -1;
     
+    client->socket_id = -1;
+
+    client->exist =0;
+    
+
     //printf("fin du thread\n");
     
     return NULL;
+}
+
+void create_server_thread(client_t *thread_params, int i) {
+    client_t clientt = thread_params[i];
+    /* création d'un nouveau thread */
+    if(clientt.tid != NULL)
+    {
+        if (thread_params[i].tid != NULL) {
+            free(thread_params[i].tid);
+        }
+        thread_params[i].tid = NULL;
+    }
+    thread_params[i].socket_id = -1;
+    
+    
+    pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
+    pthread_attr_init(thread_attributes);
+    pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
+    /* Création du thread */
+    thread_params[i].tid = malloc(sizeof(pthread_t));
+    if(0 != pthread_create((thread_params[i].tid), thread_attributes, communicate_with_client, &(thread_params[i])))
+    {
+        fprintf(stderr, "Problème avec pthread_create()\n");
+        free(thread_attributes);
+        exit(EXIT_FAILURE);
+    }
+    pthread_attr_destroy(thread_attributes);
+    free(thread_attributes);
+
+    thread_params[i].exist = 1;
 }
 
 void runserver(const char* file)
@@ -228,7 +286,7 @@ void runserver(const char* file)
     free_array_part(rotateParts);
     
     int socket_id;
-    client_t *thread_params;
+    
     
     int i;
     
@@ -253,12 +311,23 @@ void runserver(const char* file)
         int client_id;
         int thread_id;
 
-        if(-1 == (client_id = accept(socket_id, NULL, 0)))
+        if((client_id = accept(socket_id, NULL, 0)) < 0)
         {
-            fprintf(stderr, "Erreur sur accept() : %i\n",client_id);
-            exit(EXIT_FAILURE);
+            if (errno == EDEADLK || errno == EDEADLK || errno == EWOULDBLOCK) {
+                printf("resource blocked, try again\n");
+                continue;
+            } else {
+                fprintf(stderr, "Erreur sur accept() : %i\n", errno);
+                exit(EXIT_FAILURE);
+            }
         }
         acceptclient++;
+        struct timeval tv;
+        tv.tv_sec = tcp_timeout;
+        tv.tv_usec = 0;
+        // Timeout sur les sessions
+        setsockopt(client_id, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(struct timeval));
+        setsockopt(client_id, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(struct timeval));
         
         thread_id = -1;
         while (thread_id == -1) {
@@ -271,46 +340,33 @@ void runserver(const char* file)
                 {
                     thread_id = t;
                     thread_params[t].socket_id = client_id;
+                    times(&thread_params[i].start_socket);
                     break;
                 }
             }
             
-            if(NB_THREADS == t)
+            int nbCreated = 0;
+            // A chaque affectation, on vérifie les threads pour en regéréner 1 si besoin
+            // et affecter directement le client si il ne l'a pas été.
+            for(i = 0; i < NB_THREADS; i++)
             {
-                for(i = 0; i < NB_THREADS; i++)
+                client_t clientt = thread_params[i];
+                if(clientt.exist == 0)
                 {
-                    client_t clientt = thread_params[i];
-                    if(clientt.exist == 0)
-                    {
-                        /* création d'un nouveau thread */
-                        //thread_id = i;
-                        if(clientt.tid != NULL)
-                        {
-                            if (thread_params[i].tid != NULL) {
-                                free(thread_params[i].tid);
-                            }
-                            thread_params[i].tid = NULL;
-                        }
-                        thread_params[i].socket_id = -1;
-                        thread_params[i].exist = 1;
-                        //printf("Thread %d\n",i);
-                        
-                        pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
-                        pthread_attr_init(thread_attributes);
-                        pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
-                        /* Création du thread */
-                        thread_params[i].tid = malloc(sizeof(pthread_t));
-                        if(0 != pthread_create((thread_params[i].tid), thread_attributes, communicate_with_client, &(thread_params[i])))
-                        {
-                            fprintf(stderr, "Problème avec pthread_create()\n");
-                            free(thread_attributes);
-                            exit(EXIT_FAILURE);
-                        }
-                        pthread_attr_destroy(thread_attributes);
-                        free(thread_attributes);
-                        break;
+                    create_server_thread(thread_params, i);
+
+                    if (thread_id == -1) {
+                        thread_id = i;
+                        thread_params[i].socket_id = client_id;
+                        times(&thread_params[i].start_socket);
                     }
+                    //printf("Thread %d\n",i);
+                    nbCreated++;
+                    break;
                 }
+            }
+            if (thread_id == -1 && nbCreated == 0) {
+                printf("all thread used\n");
             }
         }
     }

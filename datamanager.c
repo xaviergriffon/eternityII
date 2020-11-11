@@ -12,6 +12,7 @@
 #include <arpa/inet.h>
 #include <unistd.h> /* close */
 #include <netdb.h> /* gethostbyname */
+#include <errno.h>
 #define INVALID_SOCKET -1
 #define SOCKET_ERROR -1
 #define closesocket(s) close(s)
@@ -86,16 +87,20 @@ char *get_server_ip()
 	}
 }
 
-int put_to_server(array_possibility_packet *possibilities)
+int put_to_server(client_possibility_t *client_possibility, array_possibility_packet *possibilities)
 {
-	int socket_id = -1;
-	if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
-	{
-		fprintf(stderr, "Erreur sur accept()\n");
-		put_to_local(possibilities);
-		return -1;
-	}
+	int socket_id = client_possibility->socket_id;
 	
+	if (socket_id == -1 || is_connected(socket_id) == 0) {	
+		if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
+		{
+			fprintf(stderr, "Erreur sur accept()\n");
+			return -1;
+		}
+		client_possibility->socket_id = socket_id;
+		times(&client_possibility->start_socket);
+	}
+
 	int t;
 	for(t=0; t< possibilities->size; t++)
 	{
@@ -112,7 +117,7 @@ int put_to_server(array_possibility_packet *possibilities)
 		struct possibility_packet *possibility = &possibilities->possibilities[t];
 		long result = send(socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
 		if (result <= 0) {
-			printf("problème send : %li\n",result);
+			printf("problème put_to_server send : %i\n", errno);
 		}
 		if(recv_instruction(socket_id) != INST_CONSIDERED) {
 			printf("problème de prise en compte du serveur\n");
@@ -123,14 +128,6 @@ int put_to_server(array_possibility_packet *possibilities)
 		}
 	}
     
-	send_instruction(socket_id, INST_END);
-	shutdown(socket_id, 2);
-	int err = closesocket(socket_id);
-	if(0 != err)
-	{
-		printf("erreur close :%i\n",err);
-	}
-	
 	return 0;
     
 }
@@ -170,12 +167,12 @@ int put_to_local(array_possibility_packet *possibilities)
 	return 0;
 }
 
-int add_possibility(array_possibility_packet *possibilities)
+int add_possibility(client_possibility_t *client_possibility, array_possibility_packet *possibilities)
 {
 	int error = 0;
-    if(server_ip != NULL)
+    if(server_ip != NULL && client_possibility != NULL)
 	{
-		error = put_to_server(possibilities);
+		error = put_to_server(client_possibility, possibilities);
 	} else
 	{
 		error = put_to_local(possibilities);
@@ -284,9 +281,9 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 	return 0;
 }
 
-void send_possibility_analysed(int thread) {
+void send_possibility_analysed(client_possibility_t *client_possibility) {
+	int thread = client_possibility->id;
 	if (server_ip == NULL) {
-
 		if(pthread_mutex_trylock(&file_possibility_analysed[thread].lock) == 0)
 		{
 			File *file = &file_possibility_analysed[thread].file;
@@ -305,11 +302,15 @@ void send_possibility_analysed(int thread) {
 		return;
 	}
 
-	int socket_id = -1;
-	if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
-	{
-		fprintf(stderr, "Erreur sur accept()\n");
-		return;
+	int socket_id = client_possibility->socket_id;
+	if (socket_id == -1 || is_connected(socket_id) == 0) {	
+		if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
+		{
+			fprintf(stderr, "Erreur sur accept()\n");
+			return;
+		}
+		client_possibility->socket_id = socket_id;
+		times(&client_possibility->start_socket);
 	}
 	if(pthread_mutex_trylock(&file_possibility_analysed[thread].lock) == 0)
 	{
@@ -319,12 +320,19 @@ void send_possibility_analysed(int thread) {
 			while (scroll(file, possibility)) {
 				send_instruction(socket_id, INST_POSSIBILITY_ANALYSED);
 				ssize_t result = send(socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
-				if (result != sizeof(struct possibility_packet)) {
-					printf("problème send_possibility_analysed : %li\n",result);
+				if (result < 0 ) {
+					printf("problème send_possibility_analysed : %i\n", errno);
 					break;
 				}
 				if(recv_instruction(socket_id) != INST_CONSIDERED){
-					printf("possiblité analysée non prise en compte :\n");
+					printf("possibilité analysée non prise en compte :\n");
+					struct tms t2;
+					times(&t2);
+					time_t t;
+					int tops = sysconf(_SC_CLK_TCK);
+					t = ((t2.tms_utime + t2.tms_stime)
+							- (client_possibility->start_socket.tms_utime + client_possibility->start_socket.tms_stime)) * 1000 / tops;
+					printf ("socket time : %ld\n", t);
 					print_possibility_packet(possibility);
                     put(file, possibility);
 					break;
@@ -362,13 +370,6 @@ void send_possibility_analysed(int thread) {
 		pthread_mutex_unlock(&file_possibility_analysed[thread].lock);
 	}
 
-	send_instruction(socket_id, INST_END);
-	shutdown(socket_id, 2);
-	int err = closesocket(socket_id);
-	if(0 != err)
-	{
-		printf("erreur close :%i\n",err);
-	}
 }
 
 int add_possibility_analysed(struct possibility_packet *possiblity, int thread) {
@@ -409,14 +410,18 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread) 
 	return 0;
 }
 
-void scroll_from_server(array_possibility_packet *result, int max_result)
+void scroll_from_server(client_possibility_t *client_possibility, array_possibility_packet *result, int max_result)
 {
-	
 	int socket_id = -1;
-	if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
-	{
-		fprintf(stderr, "Erreur sur accept()\n");
-		return;
+	socket_id = client_possibility->socket_id;
+	if (socket_id == -1 || is_connected(socket_id) == 0) {	
+		if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
+		{
+			fprintf(stderr, "Erreur sur accept()\n");
+			return;
+		}
+		client_possibility->socket_id = socket_id;
+		times(&client_possibility->start_socket);
 	}
 	
 	File file;
@@ -427,9 +432,11 @@ void scroll_from_server(array_possibility_packet *result, int max_result)
 		struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
 		send_instruction(socket_id, INST_GET);
 		long r= recv(socket_id, (struct possibility_packet *)possibilityPacket, sizeof(struct possibility_packet),0);
-		if(r != sizeof(struct possibility_packet))
+		if(r == 0)
 		{
 			printf("No possibility recept\n");
+		} else if (r < 0) {
+			printf("error when receive possibility :%i\n", errno);
 		}else
 		{
 #ifdef CHECK_POSSIBILITY
@@ -461,14 +468,6 @@ void scroll_from_server(array_possibility_packet *result, int max_result)
 			free(packet);
 			p++;
 		}
-	}
-	
-	send_instruction(socket_id, INST_END);
-	shutdown(socket_id, 2);
-	int err = closesocket(socket_id);
-	if(0 != err)
-	{
-		printf("erreur close :%i\n",err);
 	}
 }
 
@@ -553,7 +552,7 @@ void scroll_from_local(array_possibility_packet *result, int max_result)
 	}
 }
 
-array_possibility_packet *get_last_possibility(int max_result)
+array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result)
 {
 	array_possibility_packet *result = malloc(sizeof(array_possibility_packet));
 	result->size = 0;
@@ -563,7 +562,7 @@ array_possibility_packet *get_last_possibility(int max_result)
     
 	if(result->size == 0 && server_ip != NULL)
 	{
-		scroll_from_server(result, max_result);
+		scroll_from_server(client_possibility, result, max_result);
 	}
 
 	if(result->size == 0)
@@ -720,7 +719,7 @@ int backup_analysed(char *filename)
 	return 0;
 }
 
-int import(char *filename)
+int import(client_possibility_t *client_possibility, char *filename)
 {
 	FILE *f = fopen(filename, "r");
 	if(!f)
@@ -737,7 +736,7 @@ int import(char *filename)
 		possibilities->size = 1;
 		possibilities->possibilities = malloc(sizeof(struct possibility_packet));
 		memcpy(&possibilities->possibilities[0], possibility, sizeof(struct possibility_packet));
-		add_possibility(possibilities);
+		add_possibility(client_possibility, possibilities);
 		
 		free_array_possibility_packet(possibilities);
 	}
@@ -767,7 +766,7 @@ int restore(char *filename)
 	
 	unlock_all_file();
 	
-	import(filename);
+	import(NULL, filename);
 	return 0;
 }
 
@@ -796,7 +795,7 @@ int import_json() {
 		possibilities->size = 1;
 		possibilities->possibilities = malloc(sizeof(struct possibility_packet));
 		memcpy(&possibilities->possibilities[0], possibility, sizeof(struct possibility_packet));
-		add_possibility(possibilities);
+		add_possibility(NULL, possibilities);
 		
 		free_array_possibility_packet(possibilities);
 		free(possibility);

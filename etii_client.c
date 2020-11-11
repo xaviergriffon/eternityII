@@ -6,6 +6,7 @@
 #include "readdata.h"
 #include "datamanager.h"
 #include "etii_search.h"
+#include "etii_protocol.h"
 
 // Méthode chargée d'alimenter les threads quand lors file est à 0
 void *feed_thread_aposs(void *param) {
@@ -15,11 +16,12 @@ void *feed_thread_aposs(void *param) {
         {
             if(request == REQUEST_CONTINUE)
             {
-                if(thread_params[i].works == 0)
+                client_possibility_t *client_possibility = &thread_params[i];
+                if(client_possibility->works == 0)
                 {
-                    send_possibility_analysed(i);
+                    send_possibility_analysed(client_possibility);
 
-                    array_possibility_packet *aposs = get_last_possibility(1);
+                    array_possibility_packet *aposs = get_last_possibility(client_possibility, 1);
                     if(aposs->size > 0)
                     {
                         // On alimente la pile des poissiblités en étude
@@ -164,6 +166,10 @@ void runThreadClient(const char *file)
         /* Création du thread */
         thread_params[i].tid = malloc(sizeof(pthread_t));
         thread_params[i].id = i;
+        thread_params[i].socket_id = -1;
+        pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+        thread_params[i].socket_mutex = mutex;
+        times(&thread_params[i].start_socket);
         if (0 != pthread_create((thread_params[i].tid), thread_attributes, autosearch, &(thread_params[i])))
         {
             fprintf(stderr, "Problème avec pthread_create()\n");
@@ -194,6 +200,13 @@ void runThreadClient(const char *file)
         }
         usleep(THREAD_MICRO_SLEEP);
     }
+
+    // Fermeture des connections
+    for (i = 0; i < NB_THREADS; i++) {
+        if (thread_params[i].socket_id != -1 && is_connected(thread_params[i].socket_id)) {
+            close_socket(thread_params[i].socket_id);
+        }
+    }
 }
 
 void runMonoClient(const char *file)
@@ -210,11 +223,19 @@ void runMonoClient(const char *file)
     thread_params->id = 0;
     thread_params->compteur = 0;
     thread_params->max_shots_per_second = -1;
+    thread_params->socket_id = -1;
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    thread_params->socket_mutex = mutex;
+    times(&thread_params->start_socket);
     free_array_part(apart);
     
     build_feed_thread(thread_params);
     build_control_thread(thread_params);
-    autosearch(thread_params);    
+    autosearch(thread_params);
+
+    if (thread_params->socket_id != -1 && is_connected(thread_params->socket_id)) {
+        close_socket(thread_params->socket_id);
+    }
 }
 
 
@@ -256,8 +277,8 @@ void *check_client_threads(void *param)
         }
         unsigned long long bys = currentactive / sleep_time;
         char *temp = calloc(1000, sizeof(char));
-        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\nmax search by sec : %lli\nmax stock by thread : %i\nmax result :%i\n",
-            sleep_time, currentactive, bys, file_possibility_stock, max_search_by_sec, max_stock_by_thread, max_result);
+        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\nmax search by sec : %lli\nmax stock by thread : %i\nmax result :%i\nsocket opened :%i\n",
+            sleep_time, currentactive, bys, file_possibility_stock, max_search_by_sec, max_stock_by_thread, max_result, opened_tcp);
         strcat(lastcheck, temp);
         free(temp);
         

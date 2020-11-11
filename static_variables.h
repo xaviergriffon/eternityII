@@ -22,6 +22,8 @@ typedef unsigned short uint16_t;
 #define REQUEST_CONTINUE 0
 #define REQUEST_PAUSE 2
 
+#define DEFAULT_TCP_TIMEOUT 10
+
 #define ETERN_PARTS 256
 #if ETERN_PARTS == 256
 #define ETERN_SIZE 16
@@ -63,4 +65,12 @@ extern unsigned long long max_search_by_sec;
 
 extern int max_stock_by_thread;
 
+
+extern int communication_in_progress;
+
+extern int opened_tcp;
+
+extern long nb_client;
+
+extern int tcp_timeout;
 #endif /* static_variables_h */
