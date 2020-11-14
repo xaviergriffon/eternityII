@@ -277,8 +277,11 @@ void *check_client_threads(void *param)
         }
         unsigned long long bys = currentactive / sleep_time;
         char *temp = calloc(1000, sizeof(char));
-        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\nmax search by sec : %lli\nmax stock by thread : %i\nmax result :%i\nsocket opened :%i\n",
-            sleep_time, currentactive, bys, file_possibility_stock, max_search_by_sec, max_stock_by_thread, max_result, opened_tcp);
+        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\nmax search by sec : %lli\nmax stock by thread : %i\nmax result :%i\n",
+            sleep_time, currentactive, bys, file_possibility_stock, max_search_by_sec, max_stock_by_thread, max_result);
+#ifdef DEBUG_SOCKET
+        sprintf(temp, "%ssocket opened :%i\n", temp, opened_tcp);
+#endif // DEBUG_SOCKET
         strcat(lastcheck, temp);
         free(temp);
         

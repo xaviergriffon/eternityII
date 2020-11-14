@@ -82,7 +82,7 @@ void *autosearch (void *userdata)
                     
                     // Consomation d'un cache ??
                     struct possibility_packet *possibilityPacket = scroll_cache(db);
-    #ifdef CHECK_POSSIBILITY
+    #ifdef DEBUG_CHECK_POSSIBILITY
                     int analyse = check_possibility(possibilityPacket);
                     if (analyse < 0)
                     {
@@ -90,7 +90,7 @@ void *autosearch (void *userdata)
                         printf(" ---");
                         print_possibility_packet(possibilityPacket);
                     }
-    #endif // CHECK_POSSIBILITY
+    #endif // DEBUG_CHECK_POSSIBILITY
                     
                     // Statistique possibilité étudiées
                     compteurs[client->compteur]++;

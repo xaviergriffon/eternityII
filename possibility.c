@@ -438,7 +438,7 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 
 /* (ajouter) un élément dans la file */
 void put_possibility (File * suite, struct possibility_packet *value){
-#ifdef CHECK_POSSIBILITY
+#ifdef DEBUG_CHECK_POSSIBILITY
     int analyse = check_possibility(value);
     if (analyse < 0)
     {
@@ -446,7 +446,7 @@ void put_possibility (File * suite, struct possibility_packet *value){
         printf(" ---");
         print_possibility_packet(value);
     }
-#endif // CHECK_POSSIBILITY
+#endif // DEBUG_CHECK_POSSIBILITY
 	Element *new_element = NULL;
     // On vérifie on peut encore positionner dans le cache
 	if(suite->lastPostionCache < suite->cacheSize)
@@ -548,7 +548,7 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
                     scroll_cache(result);
                 }
                  */
-#ifdef CHECK_POSSIBILITY
+#ifdef DEBUG_CHECK_POSSIBILITY
                 int analyse = check_possibility(currPossibility);
                 if (analyse < 0)
                 {
@@ -556,7 +556,7 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
                     printf(" ---");
                     print_possibility_packet(currPossibility);
                 }
-#endif // CHECK_POSSIBILITY
+#endif // DEBUG_CHECK_POSSIBILITY
                 // si toutes les pieces sont placées alors on n'entrera pas dasn le if !faceused et sortira donc
             }
         }
@@ -579,7 +579,7 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
             scroll_cache(result);
 		}
          */
-#ifdef CHECK_POSSIBILITY
+#ifdef DEBUG_CHECK_POSSIBILITY
         int analyse = check_possibility(currPossibility);
         if (analyse < 0)
         {
@@ -587,7 +587,7 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
             printf(" ---");
             print_possibility_packet(currPossibility);
         }
-#endif // CHECK_POSSIBILITY
+#endif // DEBUG_CHECK_POSSIBILITY
 	}
 
     // On a au moins placé une piece
@@ -860,11 +860,12 @@ array_possibility_packet *build_single_array_possibility_packet(struct possibili
 	array_possibility_packet *result = malloc(sizeof(array_possibility_packet));
 	if (possibility != NULL) {
 		result->size = 1;
+        result->possibilities = malloc(sizeof(struct possibility_packet));
+        memcpy(&result->possibilities[0], possibility, sizeof(struct possibility_packet));
 	} else {
 		result->size = 0;
+        result->possibilities = NULL;
 	}
-	result->possibilities = malloc(sizeof(struct possibility_packet));
-	memcpy(&result->possibilities[0], possibility, sizeof(struct possibility_packet));
 
 	return result;
 }

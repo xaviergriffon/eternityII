@@ -37,14 +37,15 @@ int create_tcp_client(const char *hostname, int port)
 	/* Recherche de l'adresse de la machine distance */
 	if(NULL == (host_address = gethostbyname(hostname)))
 	{
-		printf("Impossible de d'identifier la machine '%s'\n",hostname);
-		fprintf(stderr, "Impossible de d'identifier la machine '%s'\n",hostname);
+		fprintf(stderr, "Unable to identify the machine '%s'\n",hostname);
 		return -1;
 	}
-	
+
+#ifdef DEBUG_SOCKET
 	if (opened_tcp > 0) {
 		printf("socket déjà en cours !!!\n");
 	}
+#endif // DEBUG_SOCKET
 	/* création de la socket */
 	if(-1 == (socket_id = socket(PF_INET,SOCK_STREAM, 0)))
 	{
@@ -75,9 +76,11 @@ int create_tcp_client(const char *hostname, int port)
 
 		if(-1 == (connect(socket_id, (struct sockaddr *)&sockname, sizeof(struct sockaddr_in))))
 		{
-			fprintf(stderr, "Impossible de connecter la socket au serveur '%s' tentative:%i\n",hostname,t);
+			fprintf(stderr, "The socket can not connect to server '%s' attempt:%i\n", hostname,t);
 			closesocket(socket_id);
+#ifdef DEBUG_SOCKET
 			opened_tcp--;
+#endif // DEBUG_SOCKET
 			if (t == NB_ATTEMPTS) {
 				socket_id = -1;
 				break;
@@ -87,7 +90,9 @@ int create_tcp_client(const char *hostname, int port)
 			
 		} else
 		{
+#ifdef DEBUG_SOCKET
 			opened_tcp++;
+#endif // DEBUG_SOCKET
 			break;
 		}
 	}

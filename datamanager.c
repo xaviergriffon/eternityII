@@ -182,7 +182,7 @@ int add_possibility(client_possibility_t *client_possibility, array_possibility_
 }
 
 int remove_possibility_analysed(struct possibility_packet *possibility, int thread) {
-#ifdef CHECK_POSSIBILITY
+#ifdef DEBUG_CHECK_POSSIBILITY
     int analyse = check_possibility(possibility);
     if (analyse < 0)
     {
@@ -190,18 +190,18 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
         printf(" ---");
         print_possibility_packet(possibility);
     }
-#endif // CHECK_POSSIBILITY
+#endif // DEBUG_CHECK_POSSIBILITY
 	int removed_possibility = 0;
 	int currfile = 0;
 	if (thread >=0) {
 		currfile = thread;
 	}
-#ifdef CHECK_POSSIBILITY
+#ifdef DEBUG_CHECK_POSSIBILITY
 	printf("a supprimer : \n");
 	print_possibility_packet(possibility);
 	printf("en cours d'analyse:\n");
 	print_all_file_analysed();
-#endif // CHECK_POSSIBILITY
+#endif // DEBUG_CHECK_POSSIBILITY
 
 	while(removed_possibility == 0)
 	{
@@ -258,15 +258,15 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 				if(currfile >= NB_FILE_POSSIBILITY)
 				{
 					// On n'a pas retrouvé la possibilité
-#ifdef CHECK_POSSIBILITY
+#ifdef DEBUG_CHECK_POSSIBILITY
 					printf("non supprimée \n");
-#endif // CHECK_POSSIBILITY
+#endif // DEBUG_CHECK_POSSIBILITY
 					return 1;
 				}
 			} else if (removed_possibility == 0) {
-#ifdef CHECK_POSSIBILITY
+#ifdef DEBUG_CHECK_POSSIBILITY
 				printf("non supprimée \n");
-#endif // CHECK_POSSIBILITY
+#endif // DEBUG_CHECK_POSSIBILITY
 				// On n'a pas retrouvé la possibilité
 				return 1;
 			}
@@ -274,10 +274,10 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 			usleep(MICRO_SLEEP);
 		}
 	}
-#ifdef CHECK_POSSIBILITY
+#ifdef DEBUG_CHECK_POSSIBILITY
 	printf("après suppression (supprimer :%i) : \n", removed_possibility);
 	print_all_file_analysed();
-#endif // CHECK_POSSIBILITY
+#endif // DEBUG_CHECK_POSSIBILITY
 	return 0;
 }
 
@@ -329,7 +329,7 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 					struct tms t2;
 					times(&t2);
 					time_t t;
-					int tops = sysconf(_SC_CLK_TCK);
+					long tops = sysconf(_SC_CLK_TCK);
 					t = ((t2.tms_utime + t2.tms_stime)
 							- (client_possibility->start_socket.tms_utime + client_possibility->start_socket.tms_stime)) * 1000 / tops;
 					printf ("socket time : %ld\n", t);
@@ -439,7 +439,7 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 			printf("error when receive possibility :%i\n", errno);
 		}else
 		{
-#ifdef CHECK_POSSIBILITY
+#ifdef DEBUG_CHECK_POSSIBILITY
             int analyse = check_possibility(possibilityPacket);
             if (analyse < 0)
             {
@@ -447,7 +447,7 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
                 printf(" ---");
                 print_possibility_packet(possibilityPacket);
             }
-#endif // CHECK_POSSIBILITY
+#endif // DEBUG_CHECK_POSSIBILITY
 			//printf("recev ");
 			//print_possibility_packet(possibilityPacket);
 			put(&file, possibilityPacket);

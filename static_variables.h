@@ -32,7 +32,10 @@ typedef unsigned short uint16_t;
 #define ETERN_SIZE 4
 #endif // ETERN_PARTS == 256
 
-//#define CHECK_POSSIBILITY 1
+// Permet de contrôler les données des possibilités générés ou reçus
+//#define DEBUG_CHECK_POSSIBILITY 1
+// Trace des informations de la socket lors des déconnexions etc...
+//#define DEBUG_SOCKET
 
 extern uint8_t directions[ETERN_PARTS];
 
@@ -68,7 +71,9 @@ extern int max_stock_by_thread;
 
 extern int communication_in_progress;
 
+#ifdef DEBUG_SOCKET
 extern int opened_tcp;
+#endif // DEBUG_SOCKET
 
 extern long nb_client;
 

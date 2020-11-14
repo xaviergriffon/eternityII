@@ -226,7 +226,9 @@ void *communicate_with_client (void *userdata)
     
     shutdown(client->socket_id, 2);
     int err = closesocket(client->socket_id);
+#ifdef DEBUG_SOCKET
     opened_tcp--;
+#endif // DEBUG_SOCKET
     if(0 != err)
     {
         printf("erreur close :%i\n",err);
