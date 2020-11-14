@@ -280,7 +280,7 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 #endif // DEBUG_CHECK_POSSIBILITY
 	return 0;
 }
-
+// TODO : retourner si envoyé ou pas
 void send_possibility_analysed(client_possibility_t *client_possibility) {
 	int thread = client_possibility->id;
 	if (server_ip == NULL) {
@@ -321,11 +321,11 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 				send_instruction(socket_id, INST_POSSIBILITY_ANALYSED);
 				ssize_t result = send(socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
 				if (result < 0 ) {
-					printf("problème send_possibility_analysed : %i\n", errno);
+					printf("error when send_possibility_analysed : %i\n", errno);
 					break;
 				}
 				if(recv_instruction(socket_id) != INST_CONSIDERED){
-					printf("possibilité analysée non prise en compte :\n");
+					printf("possibility analyzed not taken into account :\n");
 					struct tms t2;
 					times(&t2);
 					time_t t;

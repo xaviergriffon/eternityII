@@ -154,10 +154,10 @@ void *communicate_with_client (void *userdata)
                 
                 if(add_possibility(NULL, aposs) == 0)
                 {
-                    send_instruction(client->socket_id,INST_CONSIDERED);
+                    send_instruction(client->socket_id, INST_CONSIDERED);
                     
                 } else{
-                    send_instruction(client->socket_id,INST_ERROR);
+                    send_instruction(client->socket_id, INST_ERROR);
                 }
             } else{
                 printf("bad possibility recept");
@@ -165,6 +165,7 @@ void *communicate_with_client (void *userdata)
                     printf(" : %i", errno);
                 }
                 printf("\n");
+                send_instruction(client->socket_id, INST_ERROR);
             }
             free(possibilityPacket);
             free(aposs);
@@ -189,6 +190,7 @@ void *communicate_with_client (void *userdata)
                     printf(" : %i", errno);
                 }
                 printf("\n");
+                send_instruction(client->socket_id, INST_ERROR);
             }
             free (possibilityPacket);
         } else if (instruction == INST_TEST_CONNECTED) {
