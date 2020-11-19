@@ -432,7 +432,7 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 		struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
 		send_instruction(socket_id, INST_GET);
 		long r= recv(socket_id, (struct possibility_packet *)possibilityPacket, sizeof(struct possibility_packet),0);
-		if(r == 0)
+		if(r == 0 || (r == sizeof(int8_t) && (*(int8_t *)possibilityPacket) == INST_NULL))
 		{
 			printf("No possibility recept\n");
 		} else if (r < 0) {
