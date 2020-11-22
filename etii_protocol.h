@@ -16,10 +16,12 @@
 #define INST_NULL 6
 #define INST_POSSIBILITY_ANALYSED 7
 #define INST_TEST_CONNECTED 8
-
+#define INST_CHECK_VERSION 9
+#define INST_SUPPORTED_VERSION 10
+#define INST_UNSUPPORTED_VERSION 11
 
 PACK(
-	 struct packet
+struct packet
 {
     uint8_t instruction;
     struct possibility_packet possibility;

@@ -65,40 +65,45 @@ void build_feed_thread(client_possibility_t *thread_params) {
 }
 
 void *control_thread(void *param) {
-    client_possibility_t *thread_params = param;
-    unsigned long long *lastCheck = malloc(sizeof(unsigned long long) * NB_THREADS);
-    unsigned long long *oneSecond = malloc(sizeof(unsigned long long) * NB_THREADS);
-    for (int t = 0; t < NB_THREADS; t++) {
-        lastcheck[t] = 0;
-        oneSecond[t] = 0;
+    if (NB_THREADS <= 0) {
+        return NULL;
     }
+    client_possibility_t *thread_params = param;
+    unsigned long long *lastCheck = malloc(sizeof(unsigned long long));
+    unsigned long long *oneSecond = malloc(sizeof(unsigned long long));
+    *lastCheck = 0;
+    *oneSecond = 0;
+    
     int nbCheck = 0;
     while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
-        for(int i = 0; i < NB_THREADS; i++)
+        if(request == REQUEST_CONTINUE && max_search_by_sec > 0)
         {
-            if(request == REQUEST_CONTINUE && max_search_by_sec > 0)
+            client_possibility_t *thread = &thread_params[1];
+            if(thread->works == 1 && thread->aposs > 0)
             {
-                client_possibility_t *thread = &thread_params[i];
-                if(thread->works == 1 && thread->aposs > 0)
-                {
-                    unsigned long long inMillis = compteurs[i] - lastCheck[i];
-                    lastCheck[i] = compteurs[i];
-                    oneSecond[i] = oneSecond[i] + inMillis;
-                    if (request == REQUEST_CONTINUE && oneSecond[i] >= max_search_by_sec) {
-                        request = REQUEST_PAUSE;
-                    } else {
-                        if (request == REQUEST_PAUSE) {
-                            request = REQUEST_CONTINUE;
-                        }
+                unsigned long long inMillis = 0;
+                if (compteurs[1] >= *lastCheck) {
+                    inMillis = compteurs[1] - *lastCheck;
+                } else {
+                    // le compteur a fait un tour
+                    inMillis = ((inMillis - 1) - *lastCheck) + compteurs[1];
+                }
+                
+                *lastCheck = compteurs[1];
+                *oneSecond = *oneSecond + inMillis;
+                if (request == REQUEST_CONTINUE && *oneSecond >= max_search_by_sec) {
+                    request = REQUEST_PAUSE;
+                } else {
+                    if (request == REQUEST_PAUSE) {
+                        request = REQUEST_CONTINUE;
                     }
                 }
             }
         }
+        
         if (nbCheck > 1000) {
             nbCheck = 0;
-            for (int i = 0; i < NB_THREADS; i++) {
-                oneSecond[i] = 0; 
-            }
+            *oneSecond = 0;
             if (request == REQUEST_PAUSE) {
                 request = REQUEST_CONTINUE;
             }
@@ -241,21 +246,11 @@ void runMonoClient(const char *file)
 
 void *check_client_threads(void *param)
 {
-    unsigned long long lastactive = 0;
     int sleep_time = 10;
     while(1)
     {
         free(lastcheck);
         lastcheck = calloc(2000, sizeof(char));
-        unsigned long long currentactive = lastactive;
-        int c;
-        lastactive = 0;
-        for(c=0; c < NB_THREADS;c++)
-        {
-            lastactive = lastactive + compteurs[c];
-        }
-        currentactive = lastactive - currentactive;
-        getted_possibility_not_null = lastactive;
         
         unsigned long long file_possibility_stock = 0;
         int f;
@@ -268,17 +263,24 @@ void *check_client_threads(void *param)
             free(temp);
             file_possibility_stock = file_possibility_stock + f_size;
         }
+        
+        unsigned long long bys = 0;
         for(f=0; f < NB_THREADS; f++)
         {
             char *temp = calloc(1000, sizeof(char));
-            sprintf(temp, "Thread %i file size:%i\n", f, lastfilesize[f]);
+            sprintf(temp, "Fork %i file size:%i\n", f, fork_statistics[f].possibilities_in_stock);
             strcat(lastcheck, temp);
             free(temp);
+            if (fork_statistics[f].max_result > max_result) {
+                max_result = fork_statistics[f].max_result;
+            }
+            
+            bys += fork_statistics[f].shots_per_second;
         }
-        unsigned long long bys = currentactive / sleep_time;
+                
         char *temp = calloc(1000, sizeof(char));
-        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\nmax search by sec : %lli\nmax stock by thread : %i\nmax result :%i\n",
-            sleep_time, currentactive, bys, file_possibility_stock, max_search_by_sec, max_stock_by_thread, max_result);
+        sprintf(temp, "active thread/s :%lli\npossibility in stock :%lli\nmax search by sec : %lli\nmax stock by thread : %i\nmax result :%i\n",
+            bys, file_possibility_stock, max_search_by_sec, max_stock_by_thread, max_result);
 #ifdef DEBUG_SOCKET
         sprintf(temp, "%ssocket opened :%i\n", temp, opened_tcp);
 #endif // DEBUG_SOCKET

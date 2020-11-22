@@ -69,6 +69,10 @@
             isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
+            argument = "1"
+            isEnabled = "YES">
+         </CommandLineArgument>
+         <CommandLineArgument
             argument = "./pieces.csv"
             isEnabled = "YES">
          </CommandLineArgument>
@@ -77,11 +81,6 @@
          <AdditionalOption
             key = "DYLD_INSERT_LIBRARIES"
             value = "/usr/lib/libgmalloc.dylib"
-            isEnabled = "YES">
-         </AdditionalOption>
-         <AdditionalOption
-            key = "NSZombieEnabled"
-            value = "YES"
             isEnabled = "YES">
          </AdditionalOption>
          <AdditionalOption

@@ -21,6 +21,8 @@
 		4781C2812549DBFE0065D6D0 /* etii_protocol.c in Sources */ = {isa = PBXBuildFile; fileRef = 4781C26E2549DBFE0065D6D0 /* etii_protocol.c */; };
 		4781C2822549DBFE0065D6D0 /* etii_search.c in Sources */ = {isa = PBXBuildFile; fileRef = 4781C26F2549DBFE0065D6D0 /* etii_search.c */; };
 		4781C2832549DBFE0065D6D0 /* part.c in Sources */ = {isa = PBXBuildFile; fileRef = 4781C2732549DBFE0065D6D0 /* part.c */; };
+		47BEE79F2569013F0047C348 /* command_lines.c in Sources */ = {isa = PBXBuildFile; fileRef = 47BEE79D256821230047C348 /* command_lines.c */; };
+		47D25A5625658F080025E241 /* local_socket.c in Sources */ = {isa = PBXBuildFile; fileRef = 47D25A5325658E9C0025E241 /* local_socket.c */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -68,6 +70,11 @@
 		4781C2742549DBFE0065D6D0 /* packed.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = packed.h; sourceTree = "<group>"; };
 		4781C2752549DBFE0065D6D0 /* part.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = part.h; sourceTree = "<group>"; };
 		4781C2912549ED6B0065D6D0 /* eternityII */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = eternityII; sourceTree = BUILT_PRODUCTS_DIR; };
+		479C0939256AD4FF000163EE /* etii_statistic.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = etii_statistic.h; sourceTree = "<group>"; };
+		47BEE79C256821230047C348 /* command_lines.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = command_lines.h; sourceTree = "<group>"; };
+		47BEE79D256821230047C348 /* command_lines.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = command_lines.c; sourceTree = "<group>"; };
+		47D25A5325658E9C0025E241 /* local_socket.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = local_socket.c; sourceTree = "<group>"; };
+		47D25A5425658E9C0025E241 /* local_socket.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = local_socket.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -92,6 +99,11 @@
 		4792035B17B94EDE00B9DD3C = {
 			isa = PBXGroup;
 			children = (
+				479C0939256AD4FF000163EE /* etii_statistic.h */,
+				47BEE79C256821230047C348 /* command_lines.h */,
+				47BEE79D256821230047C348 /* command_lines.c */,
+				47D25A5325658E9C0025E241 /* local_socket.c */,
+				47D25A5425658E9C0025E241 /* local_socket.h */,
 				4781C26A2549DBFD0065D6D0 /* console.c */,
 				4781C26B2549DBFD0065D6D0 /* console.h */,
 				4781C25E2549DBFD0065D6D0 /* datamanager.c */,
@@ -179,12 +191,14 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				47D25A5625658F080025E241 /* local_socket.c in Sources */,
 				4781C2812549DBFE0065D6D0 /* etii_protocol.c in Sources */,
 				4781C27E2549DBFE0065D6D0 /* console.c in Sources */,
 				4781C2772549DBFE0065D6D0 /* tcpserver.c in Sources */,
 				4781C2792549DBFE0065D6D0 /* lifo.c in Sources */,
 				4781C27A2549DBFE0065D6D0 /* datamanager.c in Sources */,
 				4781C2762549DBFE0065D6D0 /* etii_server.c in Sources */,
+				47BEE79F2569013F0047C348 /* command_lines.c in Sources */,
 				4781C27D2549DBFE0065D6D0 /* main.c in Sources */,
 				4781C27B2549DBFE0065D6D0 /* tcpclient.c in Sources */,
 				4781C27F2549DBFE0065D6D0 /* etii_client.c in Sources */,
@@ -244,7 +258,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 10.8;
+				MACOSX_DEPLOYMENT_TARGET = 10.9;
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_CFLAGS = "";
 				SDKROOT = macosx;
@@ -292,7 +306,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 10.8;
+				MACOSX_DEPLOYMENT_TARGET = 10.9;
 				OTHER_CFLAGS = "";
 				SDKROOT = macosx;
 				VALID_ARCHS = x86_64;

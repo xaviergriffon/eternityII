@@ -114,9 +114,24 @@ void *communicate_with_client (void *userdata)
     int8_t instruction = recv_instruction(client->socket_id);
     
     array_possibility_packet *lastPossibilityPacketSend = NULL;
+    int version_supported = 0;
     while(instruction != -1 && instruction != INST_END)
     {
-        if(instruction == INST_GET)
+        if (instruction == INST_CHECK_VERSION) {
+            int client_version = -1;
+            ssize_t ssize = recv(client->socket_id, &client_version, sizeof(int), 0);
+            if (ssize != sizeof(int)) {
+                printf("error on recept client version\n");
+                break;
+            }
+            if (version == client_version) {
+                send_instruction(client->socket_id, INST_SUPPORTED_VERSION);
+                version_supported = 1;
+            } else {
+                printf("Version of client unsupported\n");
+                send_instruction(client->socket_id, INST_UNSUPPORTED_VERSION);
+            }
+        } else if(instruction == INST_GET && version_supported == 1)
         {
             if(lastPossibilityPacketSend != NULL)
             {
@@ -142,7 +157,7 @@ void *communicate_with_client (void *userdata)
                 send_instruction(client->socket_id,INST_NULL);
             }
             
-        } else if(instruction == INST_ADD)
+        } else if(instruction == INST_ADD && version_supported == 1)
         {
             array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
             struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
@@ -171,7 +186,7 @@ void *communicate_with_client (void *userdata)
             free(aposs);
             
             
-        } else if (instruction == INST_POSSIBILITY_ANALYSED) {
+        } else if (instruction == INST_POSSIBILITY_ANALYSED && version_supported == 1) {
             struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
             ssize_t ssize = recv(client->socket_id, (struct possibility_packet *)possibilityPacket, sizeof(struct possibility_packet), 0);
             if (sizeof(struct possibility_packet) == ssize) {
@@ -195,6 +210,10 @@ void *communicate_with_client (void *userdata)
             free (possibilityPacket);
         } else if (instruction == INST_TEST_CONNECTED) {
             send_instruction(client->socket_id, INST_TEST_CONNECTED);
+        } else if (version_supported == 0) {
+            printf("Version of client unsupported\n");
+            send_instruction(client->socket_id, INST_UNSUPPORTED_VERSION);
+            break;
         } else
         {
             inst_unknow++;
@@ -242,9 +261,6 @@ void *communicate_with_client (void *userdata)
 
     client->exist =0;
     
-
-    //printf("fin du thread\n");
-    
     return NULL;
 }
 
@@ -281,7 +297,6 @@ void create_server_thread(client_t *thread_params, int i) {
 void runserver(const char* file)
 {
     struct array_part *apart= read_parts(file);
-    
     struct array_part *rotateParts = rotate_all_parts(apart);
     map_big_array *map_parts = prepare_map_part(rotateParts);
     free_array_part(apart);
@@ -289,18 +304,13 @@ void runserver(const char* file)
     free_bigarray(map_parts);
     free_array_part(rotateParts);
     
-    int socket_id;
-    
-    
-    int i;
-    
     /* création du tableau de structures client_t avec un élément par thread */
     if(NULL == (thread_params = malloc(sizeof(*thread_params) * NB_THREADS)))
     {
         fprintf(stderr, "Problème avec malloc()\n");
         exit(EXIT_FAILURE);
     }
-    for(i = 0; i < NB_THREADS; i++)
+    for(int i = 0; i < NB_THREADS; i++)
     {
         thread_params[i].exist = 0;
         thread_params[i].socket_id = -1;
@@ -309,9 +319,9 @@ void runserver(const char* file)
     }
     
     
-    socket_id = create_tcp_server(SERVER_PORT, NB_THREADS);
+    int socket_id = create_tcp_server(SERVER_PORT, NB_THREADS);
     long acceptclient = 0;
-    while (1) {
+    while (request != REQUEST_STOP) {
         int client_id;
         int thread_id;
 
@@ -344,7 +354,7 @@ void runserver(const char* file)
                 {
                     thread_id = t;
                     thread_params[t].socket_id = client_id;
-                    times(&thread_params[i].start_socket);
+                    times(&thread_params[t].start_socket);
                     break;
                 }
             }
@@ -352,19 +362,17 @@ void runserver(const char* file)
             int nbCreated = 0;
             // A chaque affectation, on vérifie les threads pour en regéréner 1 si besoin
             // et affecter directement le client si il ne l'a pas été.
-            for(i = 0; i < NB_THREADS; i++)
+            for(int i = 0; i < NB_THREADS; i++)
             {
                 client_t clientt = thread_params[i];
                 if(clientt.exist == 0)
                 {
                     create_server_thread(thread_params, i);
-
                     if (thread_id == -1) {
                         thread_id = i;
                         thread_params[i].socket_id = client_id;
                         times(&thread_params[i].start_socket);
                     }
-                    //printf("Thread %d\n",i);
                     nbCreated++;
                     break;
                 }

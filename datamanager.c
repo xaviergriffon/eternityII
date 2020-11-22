@@ -87,18 +87,39 @@ char *get_server_ip()
 	}
 }
 
-int put_to_server(client_possibility_t *client_possibility, array_possibility_packet *possibilities)
-{
+int check_and_connect_to_server(client_possibility_t *client_possibility) {
 	int socket_id = client_possibility->socket_id;
-	
 	if (socket_id == -1 || is_connected(socket_id) == 0) {	
 		if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
 		{
 			fprintf(stderr, "Erreur sur accept()\n");
 			return -1;
 		}
+
+		// Controle de version
+		send_instruction(socket_id, INST_CHECK_VERSION);
+		send(socket_id, &version, sizeof(int), 0);
+		int8_t result = recv_instruction(socket_id);
+		if (result != INST_SUPPORTED_VERSION) {
+			printf("Version not supported by server\n");
+			close_socket(socket_id);
+			request = REQUEST_STOP;
+			return -1;
+			//exit(EXIT_FAILURE);
+		}
+
 		client_possibility->socket_id = socket_id;
 		times(&client_possibility->start_socket);
+	}
+
+	return socket_id;
+}
+
+int put_to_server(client_possibility_t *client_possibility, array_possibility_packet *possibilities)
+{
+	int socket_id = check_and_connect_to_server(client_possibility);
+	if (socket_id == -1) {	
+		return -1;
 	}
 
 	int t;
@@ -302,15 +323,9 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 		return;
 	}
 
-	int socket_id = client_possibility->socket_id;
-	if (socket_id == -1 || is_connected(socket_id) == 0) {	
-		if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
-		{
-			fprintf(stderr, "Erreur sur accept()\n");
-			return;
-		}
-		client_possibility->socket_id = socket_id;
-		times(&client_possibility->start_socket);
+	int socket_id = check_and_connect_to_server(client_possibility);
+	if (socket_id == -1) {	
+		return;
 	}
 	if(pthread_mutex_trylock(&file_possibility_analysed[thread].lock) == 0)
 	{
@@ -412,16 +427,9 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread) 
 
 void scroll_from_server(client_possibility_t *client_possibility, array_possibility_packet *result, int max_result)
 {
-	int socket_id = -1;
-	socket_id = client_possibility->socket_id;
-	if (socket_id == -1 || is_connected(socket_id) == 0) {	
-		if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
-		{
-			fprintf(stderr, "Erreur sur accept()\n");
-			return;
-		}
-		client_possibility->socket_id = socket_id;
-		times(&client_possibility->start_socket);
+	int socket_id = check_and_connect_to_server(client_possibility);
+	if (socket_id == -1) {	
+		return;
 	}
 	
 	File file;
@@ -636,7 +644,7 @@ int backup(char *filename)
 		FILE *f = fopen(filename, "w");
 		if(!f)
 		{
-			printf("file :%s",filename);
+			printf("backup file :%s",filename);
 			perror("fopen()");
 			exit(EXIT_FAILURE);
 		}
@@ -692,7 +700,7 @@ int backup_analysed(char *filename)
 		FILE *f = fopen(filename, "w");
 		if(!f)
 		{
-			printf("file :%s",filename);
+			printf("backup_analysed file :%s",filename);
 			perror("fopen()");
 			exit(EXIT_FAILURE);
 		}
@@ -724,7 +732,7 @@ int import(client_possibility_t *client_possibility, char *filename)
 	FILE *f = fopen(filename, "r");
 	if(!f)
 	{
-		printf("file :%s",filename);
+		printf("import file :%s",filename);
 		perror("fopen()");
 		exit(EXIT_FAILURE);
 	}
@@ -809,7 +817,7 @@ int import_analysed(char *filename)
 	FILE *f = fopen(filename, "r");
 	if(!f)
 	{
-		printf("file :%s",filename);
+		printf("import_analysed file :%s",filename);
 		perror("fopen()");
 		exit(EXIT_FAILURE);
 	}
@@ -1112,7 +1120,7 @@ int search_min_datas()
 }
 
 // TODO : revoir le trie pour prendre en compte le cache
-int sort_ascending()
+int sort_ascending(void)
 {
 	
 	lock_all_file();

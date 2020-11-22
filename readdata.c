@@ -14,7 +14,7 @@ struct array_part *read_parts(const char *file)
 	FILE *f = fopen(file, "r");
 	if(!f)
 	{
-		printf("file :%s",file);
+		printf("read_parts file :%s",file);
 		perror("fopen()");
 		exit(EXIT_FAILURE);
 	}

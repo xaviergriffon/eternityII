@@ -2,15 +2,17 @@
 #define static_variables_h
 
 #ifdef WIN32
-#define PACK( __Declaration__ ) __pragma( pack(push, 1) ) __Declaration__ __pragma( pack(pop) )
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 #else
 #include <stdint.h>
-#define PACK( __Declaration__ ) __Declaration__ __attribute__((__packed__))
 #endif
+#include <unistd.h>
+#include <ctype.h>
+#include <sys/un.h>
+#include "etii_statistic.h"
 
-#define VERSION 1
+#define VERSION 2
 
 #define NB_CONNECTIONS_PAR_THREAD 1
 #define MICRO_SLEEP 100
@@ -32,10 +34,18 @@ typedef unsigned short uint16_t;
 #define ETERN_SIZE 4
 #endif // ETERN_PARTS == 256
 
+#define BUF_SIZE 300
+
 // Permet de contrôler les données des possibilités générés ou reçus
 //#define DEBUG_CHECK_POSSIBILITY 1
 // Trace des informations de la socket lors des déconnexions etc...
 //#define DEBUG_SOCKET
+// Trace les informations dans les signaux
+//#define DEBUG_SIGNAL
+// Trace les informations pour les sockets locale
+//#define DEBUG_LOCAL_SOCKET
+// Passe en mono-process pour pouvoir débeugger
+//#define DEBUG_IN_MONO_PROCESS
 
 extern uint8_t directions[ETERN_PARTS];
 
@@ -62,6 +72,22 @@ extern long inst_unknow;
 
 extern int NB_THREADS;
 
+extern int version;
+
+extern pid_t parent_pid;
+
+extern pid_t *childrens_pid;
+
+extern char **forkId;
+
+extern struct client_statistics *fork_statistics;
+
+extern int fork_checker_socket_id;
+
+extern struct sockaddr_un main_addr;
+
+extern int *main_socket_id;
+
 extern int SERVER_PORT;
 
 extern unsigned long long max_search_by_sec;
@@ -78,4 +104,6 @@ extern int opened_tcp;
 extern long nb_client;
 
 extern int tcp_timeout;
+
+extern int server;
 #endif /* static_variables_h */

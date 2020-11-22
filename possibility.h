@@ -2,12 +2,10 @@
 #define eternityII_possibility_h
 
 #ifdef WIN32
-#define PACK( __Declaration__ ) __pragma( pack(push, 1) ) __Declaration__ __pragma( pack(pop) )
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 #else
 #include <stdint.h>
-#define PACK( __Declaration__ ) __Declaration__ __attribute__((__packed__))
 #endif
 
 #include "part.h"

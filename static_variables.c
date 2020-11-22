@@ -17,11 +17,13 @@ uint8_t diry[ETERN_PARTS] = {0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3};
 #endif
 unsigned long long *compteurs = NULL;
 
+struct client_statistics *fork_statistics = NULL;
+
 int *lastfilesize = NULL;
 char *lastcheck = NULL;
 
 // TODO : deplacer dans un parametre ?
-char* partsFiles = NULL;
+char* partsFiles = "./pieces.csv";
 
 unsigned long long getted_possibility_not_null = 0;
 uint16_t max_result = 0;
@@ -33,6 +35,18 @@ int request = REQUEST_CONTINUE;
 long inst_unknow = 0;
 
 int NB_THREADS = 10;
+
+int version = VERSION;
+
+int parent_pid = -1;
+
+pid_t *childrens_pid = NULL;
+
+struct sockaddr_un main_addr;
+
+int *main_socket_id = NULL;
+
+char **forkId = NULL;
 
 int SERVER_PORT = 2000;
 
@@ -48,3 +62,7 @@ int opened_tcp = 0;
 long nb_client = 0;
 
 int tcp_timeout = DEFAULT_TCP_TIMEOUT;
+
+int fork_checker_socket_id = -1;
+
+int server = 0;

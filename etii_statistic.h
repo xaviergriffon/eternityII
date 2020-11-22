@@ -1,0 +1,16 @@
+#ifndef etii_statistic_h
+#define etii_statistic_h
+
+#include <stdio.h>
+#include "packed.h"
+
+PACK(
+struct client_statistics {
+    unsigned long long shots_per_second;
+    uint32_t possibilities_in_stock;
+    uint32_t analyses_in_stock;
+    uint16_t max_result;
+});
+
+
+#endif /* etii_statistic_h */

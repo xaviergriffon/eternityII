@@ -27,6 +27,10 @@ void usleep(int waitTime) {
 #include <arpa/inet.h>
 #include <unistd.h> /* close */
 #include <netdb.h> /* gethostbyname */
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <signal.h>
+#include <errno.h>
 #define INVALID_SOCKET -1
 #define SOCKET_ERROR -1
 #define closesocket(s) close(s)
@@ -50,6 +54,9 @@ typedef struct in_addr IN_ADDR;
 #include "etii_client.h"
 #include "etii_search.h"
 #include "etii_server.h"
+#include "local_socket.h"
+#include "command_lines.h"
+#include "etii_statistic.h"
 
 void runclient(const char *hostname, const char *file)
 {
@@ -61,10 +68,14 @@ void runclient(const char *hostname, const char *file)
 	// Comme on est en mode client, on ne devrait plus rien avoir dans les files
 	// si c'est le cas, il s'agit d'une erreur
 	if (datas_size() > 0) {
-		char *def_file = "./failed_exit_eternityII.back";
-    	char *def_analyse_file = "./failed_exit_eternityII-in_analyse.back";
+		char *def_file = malloc(sizeof(char) * 50);
+        sprintf(def_file, "./failed_exit_eternityII_%i.back", getpid());
+        char *def_analyse_file = malloc(sizeof(char) * 60);
+        sprintf(def_analyse_file, "./failed_exit_eternityII-in_analyse_%i.back", getpid());
 		backup(def_file);
         backup_analysed(def_analyse_file);
+        free(def_file);
+        free(def_analyse_file);
 	}
 }
 
@@ -115,16 +126,113 @@ int run_checker(int server)
 	free(thread_attributes);
 	return 0;
 }
+void run_fork_thread(int *socket_id);
+
+void *fork_checker(void *param) {
+	struct sockaddr_un main_addr = *(struct sockaddr_un *)param;
+	char socket_fork[50];
+    sprintf(socket_fork, "etii_fork.%d", getpid());
+    struct sockaddr_un fork_addr = build_sockaddr(socket_fork);
+    fork_checker_socket_id = create_udp_local_socket(fork_addr);
+
+	printf("fork_checker_socket_id: %i\n", fork_checker_socket_id);
+	if (fork_checker_socket_id > 0) {
+		int *so = &fork_checker_socket_id;
+		printf("fork_checker_socket_id: %i\n", *so);
+		run_fork_thread(so);
+	}
+    
+    // TPS tests per second
+    unsigned long long oldSPS[5];
+    for (int c = 0; c < 5; c++) {
+        oldSPS[c] = 0;
+    }
+    int t = 0;
+    unsigned long long last_counter = 0;
+    struct client_statistics *statistic = malloc(sizeof(struct client_statistics));
+	while(request != REQUEST_STOP && fork_checker_socket_id > 0) {
+        unsigned long long counter = compteurs[0];
+        unsigned long long sps = 0;
+        if (counter >= last_counter) {
+            sps = counter - last_counter;
+        } else {
+            // le compteur a fait un tour
+            sps = ((sps - 1) - last_counter) + counter;
+        }
+        last_counter = counter;
+        oldSPS[t] = sps;
+        t++;
+        if (t >= 5) {
+            t = 0;
+        }
+        
+        // on effectue une moyenne sur 5 secondes
+        // les valeurs à 0 ne sont pas comptées
+        int m = 0;
+        for (int i = 0; i < 5; i++) {
+            if (oldSPS[i] > 0) {
+                m++;
+                sps += oldSPS[i];
+            }
+        }
+        if (m > 0) {
+            sps = sps / m;
+        } else {
+            sps = 0;
+        }
+        statistic->shots_per_second = sps;
+        
+        int analyses_in_stock = 0;
+        for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+            analyses_in_stock += file_analysed_size(f);
+        }
+        statistic->analyses_in_stock = analyses_in_stock;
+        statistic->possibilities_in_stock = lastfilesize[0];
+        statistic->max_result = max_result;
+        
+#ifdef DEBUG_LOCAL_SOCKET
+        if(
+#endif // DEBUG_LOCAL_SOCKET
+		sendto(fork_checker_socket_id, statistic, sizeof(struct client_statistics), MSG_DONTWAIT, (struct sockaddr *) &main_addr,
+                               sizeof(struct sockaddr_un))
+#ifdef DEBUG_LOCAL_SOCKET
+           != sizeof(unsigned long long) ) {
+            printf("cl %d error %i sendto : %s\n", getpid(), errno, strerror(errno));
+        }
+#else
+        ;
+#endif // DEBUG_LOCAL_SOCKET
+		sleep(1);
+	}
+    free(statistic);
+    
+	return NULL;
+}
+
+int run_fork_checker(struct sockaddr_un main_addr)
+{
+	pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
+	pthread_attr_init(thread_attributes);
+	pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
+	pthread_t thread;
+	
+	if(0 != pthread_create(&thread, thread_attributes, fork_checker, &main_addr))
+	{
+		fprintf(stderr, "Problème avec pthread_create()\n");
+		free(thread_attributes);
+		exit(EXIT_FAILURE);
+	}
+	pthread_attr_destroy(thread_attributes);
+	free(thread_attributes);
+	return 0;
+}
 
 int init_compteurs()
 {
-    printf("allocation mémoire %i pour compteurs et lastfilesize\n", NB_THREADS);
 	compteurs = malloc(sizeof(unsigned long long) * NB_THREADS);
 	lastfilesize = malloc(sizeof(int) * NB_THREADS);
-    printf("fin allocation compteurs et lastfilesize\n");
 	
-	int c;
-	for(c=0; c < NB_THREADS;c++)
+	for(int c = 0; c < NB_THREADS;c++)
 	{
 		compteurs[c] = 0;
 		lastfilesize[c] = 0;
@@ -133,9 +241,208 @@ int init_compteurs()
 	return 0;
 }
 
+void signal_end_handler(int sig)
+{
+#ifdef DEBUG_SIGNAL
+    printf("receive signal : %i\n", sig);
+    fflush(stdout);
+#endif // DEBUG_SIGNAL
+	request = REQUEST_STOP;
+    if (childrens_pid != NULL && parent_pid == getpid()) {
+		for (int c = 0; c < NB_THREADS; c++) {
+            if (childrens_pid[c] > 0) {
+                kill(childrens_pid[c], sig);
+            }
+		}
+	}
+    if (server == 1) {
+        exit(0);
+    }
+}
+
+/*
+ * Prise en charge du signal SIGCHLD
+ */
+void sigchld_handler(int signal) {
+	// lecture du statut pour éviter les process zombie
+	int status = 0;
+#ifdef DEBUG_SIGNAL
+	pid_t wpid;
+    while(0 < (wpid = waitpid(-1, &status, WNOHANG)));
+	printf("Exit status of %d was %d\n", (int)wpid, status);
+	if(WIFEXITED(status)) {
+		/* The child process exited normally */
+		printf("Exit value %d\n", WEXITSTATUS(status));
+	} else if(WIFSIGNALED(status)) {
+		/* The child process was killed by a signal. Note the use of strsignal
+			to make the output human-readable. */
+		printf("Killed by %s\n", strsignal(WTERMSIG(status)));
+	}
+    fflush(stdout);
+#else
+    while(0 < waitpid(-1, &status, WNOHANG));
+#endif // DEBUG_SIGNAL
+}
+
+void init_sigchld_sigaction() {
+ 	struct sigaction sa;
+     //memset(&sa, 0, sizeof *sa);
+     sa.sa_handler = sigchld_handler;
+     sa.sa_flags = SA_SIGINFO|SA_RESTART;
+     sigemptyset(&(sa.sa_mask));
+     if (sigaction(SIGCHLD, &sa, NULL) != 0) {
+         fprintf(stderr, "Problème avec sigaction()\n");
+         exit(EXIT_FAILURE);
+     }
+ }
+
+void wait_child() {
+ 	
+    int status = 0;
+#ifdef DEBUG_SIGNAL
+    pid_t wpid;
+ 	while ((wpid = wait(&status)) >= 0) {
+        printf("Exit status of %d was %d\n", (int)wpid, status);
+ 		if(WIFEXITED(status)) {
+ 			/* The child process exited normally */
+ 			printf("Exit value %d\n", WEXITSTATUS(status));
+ 		} else if(WIFSIGNALED(status)) {
+ 			/* The child process was killed by a signal. Note the use of strsignal
+ 				to make the output human-readable. */
+ 			printf("Killed by %s\n", strsignal(WTERMSIG(status)));
+ 		}
+    }
+#else
+    while (wait(&status) >= 0);
+#endif // DEBUG_SIGNAL
+ }
+void *server_udp(void *param) {
+    int socket_id = *(int*)param;
+    
+    struct sockaddr_un claddr;
+    ssize_t numBytes;
+    socklen_t len;
+    
+    struct client_statistics *statistics = malloc(sizeof(struct client_statistics));
+
+    while (request != REQUEST_STOP) {
+        len = sizeof(struct sockaddr_un);
+        numBytes = recvfrom(socket_id, statistics, sizeof(struct client_statistics), 0,
+                            (struct sockaddr *) &claddr, &len);
+        if (numBytes == -1) {
+            if (request != REQUEST_STOP) {
+                if (errno == EBADF) {
+#ifdef DEBUG_LOCAL_SOCKET
+                    printf("srv error invalid descriptor on recvfrom\n");
+                    fflush(stdout);
+#endif // DEBUG_LOCAL_SOCKET
+                    break;
+                }
+                printf("srv error %i on recvfrom\n", errno);
+                fflush(stdout);
+            }
+            continue;
+        }
+        
+        for (int cpt = 0; cpt < NB_THREADS; cpt++) {
+            if (strcmp(claddr.sun_path, forkId[cpt]) == 0) {
+                memcpy(&fork_statistics[cpt], statistics, sizeof(struct client_statistics));
+                break;
+            }
+        }
+    }
+    
+    free(statistics);
+    
+    return NULL;
+}
+
+void run_server_thread(int *socket_id) {
+    printf("srv  socket_id %i\n", *socket_id);
+    pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
+    pthread_attr_init(thread_attributes);
+    pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    if(0 != pthread_create(&thread, thread_attributes, server_udp, socket_id))
+        {
+            fprintf(stderr, "Problème avec pthread_create()\n");
+            free(thread_attributes);
+            exit(EXIT_FAILURE);
+        }
+        pthread_attr_destroy(thread_attributes);
+        free(thread_attributes);
+}
+
+void *fork_udp(void *param) {
+	int socket_id = *(int*)param;
+    struct sockaddr_un srv_addr;
+    ssize_t numBytes;
+    socklen_t len;
+    char *value = malloc(sizeof(char) * 100);
+    while (request != REQUEST_STOP) {
+        len = sizeof(struct sockaddr_un);
+        numBytes = recvfrom(socket_id, value, sizeof(char) * 100, 0,
+                            (struct sockaddr *) &srv_addr, &len);
+        if (numBytes == -1) {
+            if (request != REQUEST_STOP) {
+                printf("cl error %i on recvfrom\n", errno);
+                fflush(stdout);
+            }
+            continue;
+        }
+		value[numBytes] = '\0';
+        do_command_line(value);
+    }
+    
+    free(value);
+    return NULL;
+}
+
+void run_fork_thread(int *socket_id) {
+	printf("cl socket_id %i\n", *socket_id);
+	pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
+    pthread_attr_init(thread_attributes);
+    pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    if(0 != pthread_create(&thread, thread_attributes, fork_udp, socket_id))
+	{
+		fprintf(stderr, "run_fork_thread Problème avec pthread_create()\n");
+		free(thread_attributes);
+		exit(EXIT_FAILURE);
+	}
+	pthread_attr_destroy(thread_attributes);
+	free(thread_attributes);
+}
+
+void init_childs() {
+    childrens_pid = malloc(sizeof(pid_t) * NB_THREADS);
+    forkId = malloc(sizeof(char *) * NB_THREADS);
+    fork_statistics = malloc(sizeof(struct client_statistics) * NB_THREADS);
+    for (int c = 0; c < NB_THREADS; c++) {
+        childrens_pid[c] = -1;
+        forkId[c] = malloc(sizeof(char) * 300);
+        forkId[c][0] = '\0';
+        
+        fork_statistics[c].analyses_in_stock = 0;
+        fork_statistics[c].possibilities_in_stock = 0;
+        fork_statistics[c].shots_per_second = 0;
+    }
+}
+
+void init_signals() {
+    // TODO : voir si besoin de tous
+    signal(SIGINT, signal_end_handler);
+    signal(SIGHUP, signal_end_handler);
+    signal(SIGQUIT, signal_end_handler);
+    signal(SIGKILL, signal_end_handler);
+    signal(SIGTERM, signal_end_handler);
+}
+
 int main(int argc, const char * argv[])
 {
-	printf("Version %i", VERSION);
+	parent_pid = getpid();
+	printf("Version %i", version);
+	
 	if (argc >= 2) {
 		lastcheck = calloc(2000, sizeof(char));
 		
@@ -146,24 +453,100 @@ int main(int argc, const char * argv[])
 			if(argc >= 3){
 				serverIp = (char *)argv[2];
 			}
+            if(argc >= 4) {
+                NB_THREADS = atoi(argv[3]);
+            }
+#ifdef DEBUG_IN_MONO_PROCESS
+            NB_THREADS = 1;
+#endif
+            init_childs();
+            init_compteurs();
+            init_signals();
+			
+			char socket_main[50];
+			sprintf(socket_main, "etii_main.%d", getpid());
+			main_addr = build_sockaddr(socket_main);
+			printf("socket main : %s\n", socket_main);
 
-			init_compteurs();
+			int *socket_id = malloc(sizeof(int));
+			*socket_id = create_udp_local_socket(main_addr);
+			if (socket_id > 0) {
+				run_server_thread(socket_id);
+			}
+			main_socket_id = socket_id;
+					
+			init_sigchld_sigaction();
+			
 			run_checker(0);
 			run_console(0);
-            partsFiles = (char *)(argv[3]);
-			runclient(serverIp, partsFiles);
+            if(argc >= 5) {
+                partsFiles = (char *)(argv[4]);
+            }
+
+			pid_t child_pid = -1;
+			for (int c = 0; c < NB_THREADS; c++) {
+				if (parent_pid == getpid()) {
+#ifdef DEBUG_IN_MONO_PROCESS
+                    child_pid = getpid();
+#else
+                    child_pid = fork();
+#endif // DEBUG_IN_MONO_PROCESS
+                    if (child_pid != 0) {
+                        // on enregistre les informations du process fils
+                        sprintf(forkId[c], "etii_fork.%d", child_pid);
+                        childrens_pid[c] = child_pid;
+#ifndef DEBUG_IN_MONO_PROCESS
+                    } else {
+#endif // DEBUG_IN_MONO_PROCESS
+                        // un fils tourne sur 1 seul thread
+                        NB_THREADS = 1;
+                        // création d'un thread chargé de remonter l'information du compteur
+                        run_fork_checker(main_addr);
+                        
+                        runclient(serverIp, partsFiles);
+                        
+                        if (fork_checker_socket_id > 0) {
+                            close(fork_checker_socket_id);
+                        }
+                        char socket_fork[50];
+                        sprintf(socket_fork, "etii_fork.%d", getpid());
+                        struct sockaddr_un fork_addr = build_sockaddr(socket_fork);
+#ifdef DEBUG_LOCAL_SOCKET
+                        printf("remove : %s\n", fork_addr.sun_path);
+                        fflush(stdout);
+#endif // DEBUG_LOCAL_SOCKET
+                        remove(fork_addr.sun_path);
+                    }
+				}
+			}
+
+			if (parent_pid == getpid()) {
+ 				wait_child();
+                close(*socket_id);
+#ifdef DEBUG_LOCAL_SOCKET
+                printf("remove : %s\n", main_addr.sun_path);
+                fflush(stdout);
+#endif // DEBUG_LOCAL_SOCKET
+                remove(main_addr.sun_path);
+ 			}
 		} else if (strcmp("tcpserver", argv[1]) == 0) {
 			printf("server\n");
+            server = 1;
+            NB_THREADS = 80;
 			if(argc >= 3) {
 				printf("arg 2 : %s",argv[2]);
 				NB_THREADS = atoi(argv[2]);
 			}
-			printf("Nb threads : %i\n",NB_THREADS);
+			printf("Nb threads : %i\n", NB_THREADS);
+            init_childs();
+            init_signals();
 			init_compteurs();
 			run_checker(1);
 			run_console(1);
-            partsFiles = (char *)(argv[3]);
-			runserver(argv[3]);
+            if(argc >= 4) {
+                partsFiles = (char *)(argv[3]);
+            }
+			runserver(partsFiles);
 		} else if(strcmp("test", argv[1])==0) {
             NB_THREADS = 1;
 			max_search_by_sec = 100000;

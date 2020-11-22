@@ -316,7 +316,7 @@ int save_possibility(char *filename, struct possibility_packet *possibility)
 	FILE *f = fopen(filename, "w");
 	if(!f)
 	{
-		printf("file :%s",filename);
+		printf("save_possibility file :%s",filename);
 		perror("fopen()");
 		exit(EXIT_FAILURE);
 	}
@@ -336,15 +336,15 @@ void checkIfResultFound(struct possibility_packet *poss, struct array_part *all_
         {
             for(int y=0;y < ETERN_SIZE; y++)
             {
-                //struct part *part = get_one_part(mapParts, poss.grid[x][y]);
                 struct part *part = &all_rotate_part->parts[poss->grid[x][y]];
                 printf("%i;%i; ",x,y);
                 print_part(part);
             }
         }
-        save_possibility("./solution",poss);
-        //free(poss);
-        //free(wsearch);
+        char *fileName = calloc(100, sizeof(char));
+        sprintf(fileName, "./solution_%i", getpid());
+        save_possibility(fileName, poss);
+        free(fileName);
         exit(EXIT_SUCCESS);
     }
 }
@@ -605,6 +605,7 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
  -3 directory > or < dir_possibilities
  -4 alloc <= 0
  -5 alloc > faceused
+ -6 x7 y8 bad part
  */
 int check_possibility(struct possibility_packet *packet)
 {
@@ -631,6 +632,10 @@ int check_possibility(struct possibility_packet *packet)
         return -5;
     }
 	
+    if (packet->grid[7][8] != id_for_rotated_part(139, 2)) {
+        return -6;
+    }
+
 	return 0;
 }
 
