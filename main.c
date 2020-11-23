@@ -131,7 +131,8 @@ void run_fork_thread(int *socket_id);
 void *fork_checker(void *param) {
 	struct sockaddr_un main_addr = *(struct sockaddr_un *)param;
 	char socket_fork[50];
-    sprintf(socket_fork, "etii_fork.%d", getpid());
+    int sp_len = sprintf(socket_fork, "etii_fork.%d", getpid());
+    socket_fork[sp_len] = '\0';
     struct sockaddr_un fork_addr = build_sockaddr(socket_fork);
     fork_checker_socket_id = create_udp_local_socket(fork_addr);
 
@@ -493,7 +494,8 @@ int main(int argc, const char * argv[])
 #endif // DEBUG_IN_MONO_PROCESS
                     if (child_pid != 0) {
                         // on enregistre les informations du process fils
-                        sprintf(forkId[c], "etii_fork.%d", child_pid);
+                        int sp_len = sprintf(forkId[c], "etii_fork.%d", child_pid);
+                        forkId[c][sp_len] = '\0';
                         childrens_pid[c] = child_pid;
 #ifndef DEBUG_IN_MONO_PROCESS
                     } else {
@@ -509,7 +511,8 @@ int main(int argc, const char * argv[])
                             close(fork_checker_socket_id);
                         }
                         char socket_fork[50];
-                        sprintf(socket_fork, "etii_fork.%d", getpid());
+                        int sp_len = sprintf(socket_fork, "etii_fork.%d", getpid());
+                        socket_fork[sp_len] = '\0';
                         struct sockaddr_un fork_addr = build_sockaddr(socket_fork);
 #ifdef DEBUG_LOCAL_SOCKET
                         printf("remove : %s\n", fork_addr.sun_path);
