@@ -193,16 +193,15 @@ void *fork_checker(void *param) {
         statistic->analyses_in_stock = analyses_in_stock;
         statistic->possibilities_in_stock = lastfilesize[0];
         statistic->max_result = max_result;
-        size_t mainAdressLength = size_of_sockaddr_un(main_addr);
 #ifdef DEBUG_LOCAL_SOCKET
         //printf("send to %s on socket %i stat %lli\n", main_addr->sun_path, fork_checker_socket_id, statistic->shots_per_second);
         if(
 #endif // DEBUG_LOCAL_SOCKET
         
-		sendto(fork_checker_socket_id, statistic, sizeof(statistic), MSG_DONTWAIT, (struct sockaddr *) main_addr,
-                               mainAdressLength)
+		sendto(fork_checker_socket_id, statistic, sizeof(struct client_statistics), MSG_DONTWAIT, (struct sockaddr *) main_addr,
+                               sizeof(struct sockaddr_un))
 #ifdef DEBUG_LOCAL_SOCKET
-           != sizeof(statistic) ) {
+           != sizeof(struct client_statistics) ) {
             printf("fork_checker cl %d error %i sendto : %s\n", getpid(), errno, strerror(errno));
         }
 #else
@@ -327,12 +326,11 @@ void *server_udp(void *param) {
     
     struct sockaddr_un *claddr = malloc(sizeof(struct sockaddr_un));
     ssize_t numBytes;
-    socklen_t len;
+    socklen_t len = sizeof(struct sockaddr_un);;
     
     struct client_statistics *statistics = malloc(sizeof(struct client_statistics));
 
     while (request != REQUEST_STOP) {
-        len = size_of_sockaddr_un(claddr);
         numBytes = recvfrom(socket_id, statistics, sizeof(struct client_statistics), 0,
                             (struct sockaddr *) claddr, &len);
         if (numBytes == -1) {
@@ -384,10 +382,9 @@ void *fork_udp(void *param) {
 	int socket_id = *(int*)param;
     struct sockaddr_un *srv_addr = malloc(sizeof(struct sockaddr_un));
     ssize_t numBytes;
-    socklen_t len;
+    socklen_t len = sizeof(struct sockaddr_un);
     char *value = malloc(sizeof(char) * 100);
     while (request != REQUEST_STOP) {
-        len = sizeof(struct sockaddr_un);
         numBytes = recvfrom(socket_id, value, sizeof(char) * 100, 0,
                             (struct sockaddr *) srv_addr, &len);
         if (numBytes == -1) {
@@ -517,8 +514,8 @@ int main(int argc, const char * argv[])
                             close(fork_checker_socket_id);
                         }
                         char socket_fork[50];
-                        int sp_len = sprintf(socket_fork, "etii_fork.%d", getpid());
-                        socket_fork[sp_len] = '\0';
+                        int socket_fork_len = sprintf(socket_fork, "etii_fork.%d", getpid());
+                        socket_fork[socket_fork_len] = '\0';
                         struct sockaddr_un *fork_addr = build_sockaddr(socket_fork);
 #ifdef DEBUG_LOCAL_SOCKET
                         printf("remove : %s\n", fork_addr->sun_path);

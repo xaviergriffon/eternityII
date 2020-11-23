@@ -21,8 +21,8 @@ struct sockaddr_un *build_sockaddr(const char *filename) {
     return addr;
 }
 
-size_t size_of_sockaddr_un(struct sockaddr_un *svaddr) {
-    return strlen(svaddr->sun_path) + sizeof(svaddr->sun_family);
+socklen_t size_of_sockaddr_un(struct sockaddr_un *svaddr) {
+    return (socklen_t)(strlen(svaddr->sun_path) + sizeof(svaddr->sun_family) + 1);
 }
 
 int create_udp_local_socket(struct sockaddr_un *svaddr) {
@@ -39,7 +39,7 @@ int create_udp_local_socket(struct sockaddr_un *svaddr) {
         return -1;
     }
 
-    size_t addr_len = size_of_sockaddr_un(svaddr);
+    socklen_t addr_len = size_of_sockaddr_un(svaddr);
     if (bind(socket_id, (struct sockaddr *) svaddr, addr_len) == -1) {
         printf("error %i on bind for %s\n", errno, svaddr->sun_path);
         return -1;
@@ -131,9 +131,8 @@ void send_command_to_childs(char *command) {
         for (int f = 0; f < NB_THREADS; f++) {
             if (strcmp(forkId[f], "") != 0) {
                 struct sockaddr_un *cl_addr = build_sockaddr(forkId[f]);
-                size_t clientAdressLength = size_of_sockaddr_un(cl_addr);
                 if (sendto(*main_socket_id, command, strlen(command), MSG_DONTWAIT, (struct sockaddr *) cl_addr,
-                            clientAdressLength) != strlen(command)) {
+                            sizeof(struct sockaddr_un)) != strlen(command)) {
                     printf("send_command_to_childs cl %d error %i send : %s\n", getpid(), errno, strerror(errno));
                     
                 }
