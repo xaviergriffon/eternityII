@@ -129,17 +129,20 @@ int run_checker(int server)
 void run_fork_thread(int *socket_id);
 
 void *fork_checker(void *param) {
-	struct sockaddr_un main_addr = *(struct sockaddr_un *)param;
+	struct sockaddr_un *main_addr = (struct sockaddr_un *)param;
 	char socket_fork[50];
     int sp_len = sprintf(socket_fork, "etii_fork.%d", getpid());
     socket_fork[sp_len] = '\0';
-    struct sockaddr_un fork_addr = build_sockaddr(socket_fork);
+    struct sockaddr_un *fork_addr = build_sockaddr(socket_fork);
+#ifdef DEBUG_LOCAL_SOCKET
+    printf("socket fork : %s\n", socket_fork);
+#endif // DEBUG_LOCAL_SOCKET
     fork_checker_socket_id = create_udp_local_socket(fork_addr);
+    free(fork_addr);
 
 	printf("fork_checker_socket_id: %i\n", fork_checker_socket_id);
 	if (fork_checker_socket_id > 0) {
 		int *so = &fork_checker_socket_id;
-		printf("fork_checker_socket_id: %i\n", *so);
 		run_fork_thread(so);
 	}
     
@@ -190,15 +193,17 @@ void *fork_checker(void *param) {
         statistic->analyses_in_stock = analyses_in_stock;
         statistic->possibilities_in_stock = lastfilesize[0];
         statistic->max_result = max_result;
-        
+        size_t mainAdressLength = size_of_sockaddr_un(main_addr);
 #ifdef DEBUG_LOCAL_SOCKET
+        //printf("send to %s on socket %i stat %lli\n", main_addr->sun_path, fork_checker_socket_id, statistic->shots_per_second);
         if(
 #endif // DEBUG_LOCAL_SOCKET
-		sendto(fork_checker_socket_id, statistic, sizeof(struct client_statistics), MSG_DONTWAIT, (struct sockaddr *) &main_addr,
-                               sizeof(struct sockaddr_un))
+        
+		sendto(fork_checker_socket_id, statistic, sizeof(statistic), MSG_DONTWAIT, (struct sockaddr *) main_addr,
+                               mainAdressLength)
 #ifdef DEBUG_LOCAL_SOCKET
-           != sizeof(unsigned long long) ) {
-            printf("cl %d error %i sendto : %s\n", getpid(), errno, strerror(errno));
+           != sizeof(statistic) ) {
+            printf("fork_checker cl %d error %i sendto : %s\n", getpid(), errno, strerror(errno));
         }
 #else
         ;
@@ -210,14 +215,14 @@ void *fork_checker(void *param) {
 	return NULL;
 }
 
-int run_fork_checker(struct sockaddr_un main_addr)
+int run_fork_checker(struct sockaddr_un *main_addr)
 {
 	pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
 	pthread_attr_init(thread_attributes);
 	pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
 	pthread_t thread;
 	
-	if(0 != pthread_create(&thread, thread_attributes, fork_checker, &main_addr))
+	if(0 != pthread_create(&thread, thread_attributes, fork_checker, main_addr))
 	{
 		fprintf(stderr, "Problème avec pthread_create()\n");
 		free(thread_attributes);
@@ -320,16 +325,16 @@ void wait_child() {
 void *server_udp(void *param) {
     int socket_id = *(int*)param;
     
-    struct sockaddr_un claddr;
+    struct sockaddr_un *claddr = malloc(sizeof(struct sockaddr_un));
     ssize_t numBytes;
     socklen_t len;
     
     struct client_statistics *statistics = malloc(sizeof(struct client_statistics));
 
     while (request != REQUEST_STOP) {
-        len = sizeof(struct sockaddr_un);
+        len = size_of_sockaddr_un(claddr);
         numBytes = recvfrom(socket_id, statistics, sizeof(struct client_statistics), 0,
-                            (struct sockaddr *) &claddr, &len);
+                            (struct sockaddr *) claddr, &len);
         if (numBytes == -1) {
             if (request != REQUEST_STOP) {
                 if (errno == EBADF) {
@@ -346,12 +351,13 @@ void *server_udp(void *param) {
         }
         
         for (int cpt = 0; cpt < NB_THREADS; cpt++) {
-            if (strcmp(claddr.sun_path, forkId[cpt]) == 0) {
+            if (strcmp(claddr->sun_path, forkId[cpt]) == 0) {
                 memcpy(&fork_statistics[cpt], statistics, sizeof(struct client_statistics));
                 break;
             }
         }
     }
+    free(claddr);
     
     free(statistics);
     
@@ -376,14 +382,14 @@ void run_server_thread(int *socket_id) {
 
 void *fork_udp(void *param) {
 	int socket_id = *(int*)param;
-    struct sockaddr_un srv_addr;
+    struct sockaddr_un *srv_addr = malloc(sizeof(struct sockaddr_un));
     ssize_t numBytes;
     socklen_t len;
     char *value = malloc(sizeof(char) * 100);
     while (request != REQUEST_STOP) {
         len = sizeof(struct sockaddr_un);
         numBytes = recvfrom(socket_id, value, sizeof(char) * 100, 0,
-                            (struct sockaddr *) &srv_addr, &len);
+                            (struct sockaddr *) srv_addr, &len);
         if (numBytes == -1) {
             if (request != REQUEST_STOP) {
                 printf("cl error %i on recvfrom\n", errno);
@@ -394,7 +400,7 @@ void *fork_udp(void *param) {
 		value[numBytes] = '\0';
         do_command_line(value);
     }
-    
+    free(srv_addr);
     free(value);
     return NULL;
 }
@@ -513,12 +519,13 @@ int main(int argc, const char * argv[])
                         char socket_fork[50];
                         int sp_len = sprintf(socket_fork, "etii_fork.%d", getpid());
                         socket_fork[sp_len] = '\0';
-                        struct sockaddr_un fork_addr = build_sockaddr(socket_fork);
+                        struct sockaddr_un *fork_addr = build_sockaddr(socket_fork);
 #ifdef DEBUG_LOCAL_SOCKET
-                        printf("remove : %s\n", fork_addr.sun_path);
+                        printf("remove : %s\n", fork_addr->sun_path);
                         fflush(stdout);
 #endif // DEBUG_LOCAL_SOCKET
-                        remove(fork_addr.sun_path);
+                        remove(fork_addr->sun_path);
+                        free(fork_addr);
                     }
 				}
 			}
@@ -527,11 +534,12 @@ int main(int argc, const char * argv[])
  				wait_child();
                 close(*socket_id);
 #ifdef DEBUG_LOCAL_SOCKET
-                printf("remove : %s\n", main_addr.sun_path);
+                printf("remove : %s\n", main_addr->sun_path);
                 fflush(stdout);
 #endif // DEBUG_LOCAL_SOCKET
-                remove(main_addr.sun_path);
+                remove(main_addr->sun_path);
  			}
+            free(main_addr);
 		} else if (strcmp("tcpserver", argv[1]) == 0) {
 			printf("server\n");
             server = 1;

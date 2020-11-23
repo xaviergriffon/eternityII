@@ -84,7 +84,7 @@ extern struct client_statistics *fork_statistics;
 
 extern int fork_checker_socket_id;
 
-extern struct sockaddr_un main_addr;
+extern struct sockaddr_un *main_addr;
 
 extern int *main_socket_id;
 

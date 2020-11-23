@@ -42,7 +42,7 @@ int parent_pid = -1;
 
 pid_t *childrens_pid = NULL;
 
-struct sockaddr_un main_addr;
+struct sockaddr_un *main_addr = NULL;
 
 int *main_socket_id = NULL;
 
