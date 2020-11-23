@@ -78,18 +78,18 @@ void *control_thread(void *param) {
     while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
         if(request == REQUEST_CONTINUE && max_search_by_sec > 0)
         {
-            client_possibility_t *thread = &thread_params[1];
+            client_possibility_t *thread = &thread_params[0];
             if(thread->works == 1 && thread->aposs > 0)
             {
                 unsigned long long inMillis = 0;
-                if (compteurs[1] >= *lastCheck) {
-                    inMillis = compteurs[1] - *lastCheck;
+                if (compteurs[0] >= *lastCheck) {
+                    inMillis = compteurs[0] - *lastCheck;
                 } else {
                     // le compteur a fait un tour
-                    inMillis = ((inMillis - 1) - *lastCheck) + compteurs[1];
+                    inMillis = ((inMillis - 1) - *lastCheck) + compteurs[0];
                 }
                 
-                *lastCheck = compteurs[1];
+                *lastCheck = compteurs[0];
                 *oneSecond = *oneSecond + inMillis;
                 if (request == REQUEST_CONTINUE && *oneSecond >= max_search_by_sec) {
                     request = REQUEST_PAUSE;

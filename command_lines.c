@@ -86,13 +86,7 @@ int sort_descending_interpreter(void) {
 int max_stock_by_thread_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments != NULL) {
-        max_search_by_sec = atoi(arguments);
-        printf("%i new max_search_by_sec : %llu\n", getpid(), max_search_by_sec);
-        /*
-        if (parent_pid != getpid()) {
-            printf("%i new max_search_by_sec : %llu\n", getpid(), max_search_by_sec);
-        }
-         */
+        max_stock_by_thread = atoi(arguments);
         return 0;
     }
     return -1;
