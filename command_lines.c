@@ -294,7 +294,7 @@ command_description *find_command(const char *instruction) {
 
 int do_command_line(char *command) {
     int result = 0;
-    if (command != NULL) {
+    if (command != NULL && strlen(command) > 0) {
         size_t command_length = strlen(command) + 1;
         char *toSplit = malloc(sizeof(char) * command_length);
         strncpy(toSplit, command, command_length);
