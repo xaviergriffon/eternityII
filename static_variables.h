@@ -35,9 +35,11 @@ typedef unsigned short uint16_t;
 #endif // ETERN_PARTS == 256
 
 #define BUF_SIZE 300
-
+// ------------- Flags pour Debug -----------------
 // Permet de contrôler les données des possibilités générés ou reçus
 //#define DEBUG_CHECK_POSSIBILITY 1
+// Trace des informations lors d'un rmnonext
+//#define DEBUG_RM_NO_NEXT
 // Trace des informations de la socket lors des déconnexions etc...
 //#define DEBUG_SOCKET
 // Trace les informations dans les signaux
@@ -46,6 +48,7 @@ typedef unsigned short uint16_t;
 //#define DEBUG_LOCAL_SOCKET
 // Passe en mono-process pour pouvoir débeugger
 //#define DEBUG_IN_MONO_PROCESS
+// ------------------------------------------------
 
 extern uint8_t directions[ETERN_PARTS];
 
@@ -94,7 +97,6 @@ extern unsigned long long max_search_by_sec;
 
 extern int max_stock_by_thread;
 
-
 extern int communication_in_progress;
 
 #ifdef DEBUG_SOCKET
@@ -106,4 +108,6 @@ extern long nb_client;
 extern int tcp_timeout;
 
 extern int server;
+
+extern int server_rmnonext_timing;
 #endif /* static_variables_h */

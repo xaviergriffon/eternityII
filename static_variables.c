@@ -66,3 +66,5 @@ int tcp_timeout = DEFAULT_TCP_TIMEOUT;
 int fork_checker_socket_id = -1;
 
 int server = 0;
+
+int server_rmnonext_timing = 30;

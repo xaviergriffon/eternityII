@@ -398,8 +398,6 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 				int s;
 				if(search->size > 0)
 				{
-					
-					
 					for(s=0; s< search->size && result == 0; s++)
 					{
 						if(search->parts[s].id != 0 && possibility->faceused[search->parts[s].id -1] == 0)
@@ -425,9 +423,11 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 			result = 1;
 		}
 	}
+#ifdef DEBUG_RM_NO_NEXT
     if (alloc > possibility->alloc) {
         printf("all has next (%i) allocated %i -> %i\n", result, possibility->alloc, alloc);
     }
+#endif // DEBUG_RM_NO_NEXT
     if (alloc == ETERN_PARTS) {
         possibility->alloc = alloc;
         checkIfResultFound(possibility, all_rotate_part);

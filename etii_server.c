@@ -29,6 +29,18 @@ typedef struct
 
 client_t *thread_params = NULL;
 
+int get_active_threads(client_t *thread_params) {
+    int activeThread = 0;
+    if (thread_params != NULL) {
+        for (int t = 0; t < NB_THREADS; t++) {
+            if (thread_params[t].socket_id != -1) {
+                activeThread++;
+            }
+        }
+    }
+    
+    return activeThread;
+}
 void *check_server(void *param)
 {
     unsigned long long lastactive = 0;
@@ -72,14 +84,7 @@ void *check_server(void *param)
         }
         unsigned long long bys = currentactive / sleep_time;
 
-        int activeThread = 0;
-        if (thread_params != NULL) {
-            for (int t = 0; t < NB_THREADS; t++) {
-                if (thread_params[t].socket_id != -1) {
-                    activeThread++;
-                }
-            }
-        }
+        int activeThread = get_active_threads(thread_params);
 
         char *temp = calloc(1000, sizeof(char));
         sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,file_possibility_stock,getted_possibility_not_null, max_result, activeThread);
@@ -294,6 +299,47 @@ void create_server_thread(client_t *thread_params, int i) {
     thread_params[i].exist = 1;
 }
 
+void *rmnonext_thread(void *param) {
+    struct array_part *apart= read_parts(partsFiles);
+    struct array_part *rotateParts = rotate_all_parts(apart);
+    map_big_array *map_parts = prepare_map_part(rotateParts);
+    while(request != REQUEST_STOP) {
+        if (get_active_threads(thread_params) <= 0) {
+#ifdef DEBUG_RM_NO_NEXT
+            printf("Auto rmnonext\n");
+#endif // DEBUG_RM_NO_NEXT
+            remove_possibilities_with_no_next(map_parts, rotateParts);
+#ifdef DEBUG_RM_NO_NEXT
+        } else {
+            
+            printf("No auto rmnonext because thread active\n");
+#endif // DEBUG_RM_NO_NEXT
+        }
+        sleep(server_rmnonext_timing);
+    }
+    free_bigarray(map_parts);
+    free_array_part(rotateParts);
+    free_array_part(apart);
+    
+    return NULL;
+}
+
+void create_rmnonext_thread(void) {
+    pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
+    pthread_attr_init(thread_attributes);
+    pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
+    /* Création du thread */
+    pthread_t thread;
+    if(0 != pthread_create(&thread, thread_attributes, rmnonext_thread, NULL))
+    {
+        fprintf(stderr, "create_rmnonext_thread : Problème avec pthread_create()\n");
+        free(thread_attributes);
+        exit(EXIT_FAILURE);
+    }
+    pthread_attr_destroy(thread_attributes);
+    free(thread_attributes);
+}
+
 void runserver(const char* file)
 {
     struct array_part *apart= read_parts(file);
@@ -303,6 +349,9 @@ void runserver(const char* file)
     first_possibility(map_parts, rotateParts);
     free_bigarray(map_parts);
     free_array_part(rotateParts);
+    
+    // Demarrage d'un thread de nettoyage des possibilités sans suite
+    create_rmnonext_thread();
     
     /* création du tableau de structures client_t avec un élément par thread */
     if(NULL == (thread_params = malloc(sizeof(*thread_params) * NB_THREADS)))
