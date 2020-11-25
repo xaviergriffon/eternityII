@@ -76,8 +76,7 @@ void *control_thread(void *param) {
     
     int nbCheck = 0;
     while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
-        if(request == REQUEST_CONTINUE && max_search_by_sec > 0)
-        {
+        if(max_search_by_sec > 0) {
             client_possibility_t *thread = &thread_params[0];
             if(thread->works == 1 && thread->aposs > 0)
             {
@@ -91,12 +90,18 @@ void *control_thread(void *param) {
                 
                 *lastCheck = compteurs[0];
                 *oneSecond = *oneSecond + inMillis;
-                if (request == REQUEST_CONTINUE && *oneSecond >= max_search_by_sec) {
+                long double divider = nbCheck / 1000.0;
+                unsigned long long simulationBySec = *oneSecond / divider;
+                if (request == REQUEST_CONTINUE && simulationBySec >= max_search_by_sec) {
                     request = REQUEST_PAUSE;
                 } else {
-                    if (request == REQUEST_PAUSE) {
+                    if (request == REQUEST_PAUSE && simulationBySec < max_search_by_sec) {
                         request = REQUEST_CONTINUE;
                     }
+                }
+            } else {
+                if (request == REQUEST_PAUSE) {
+                    request = REQUEST_CONTINUE;
                 }
             }
         }
