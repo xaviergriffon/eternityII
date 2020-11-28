@@ -51,7 +51,11 @@ void *autosearch (void *userdata)
         {
             usleep(MICRO_SLEEP);
         }
-        
+        // TODO : transformer en BIG Tableau qui serait checker lors de la recherche des possiblités
+        // pour voir si suffisant et dnas le cas contraire alloué une marge *2
+        // de toute façon, on check sa quantité pour diminué donc ne sera jamais trop gros
+        // ceci permettrai de diminuer les controles sur la suite lors des put et scroll
+        // on ferai plus que des memcpy
         // allocation mémoire pour la suite
         File *db = malloc(sizeof(File));
         // Initialisation de la suite
@@ -96,8 +100,8 @@ void *autosearch (void *userdata)
                     compteurs[client->compteur]++;
                     
                     // alimente key pour indiquer quoi chercher
-                    what_search_to_key(client->all_rotate_part, possibilityPacket, key);
-                    
+                    //what_search_to_key(client->all_rotate_part, possibilityPacket, key);
+                    what_search_to_key2(client->all_rotate_part, possibilityPacket, key, client->map_part->sizearrayM);
                     int max = search_possiblity_light(db, key, possibilityPacket, client->map_part, client->all_rotate_part, idParts);
                     
                     // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace

@@ -30,30 +30,30 @@ typedef struct in_addr IN_ADDR;
 
 static file_possibility_t file_possibility[NB_FILE_POSSIBILITY] =
 {
-	{{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-	{{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
+	{{NULL,NULL,0,0,NULL,NULL, 0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+	{{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
 };
 
 static file_possibility_t file_possibility_analysed[NB_FILE_POSSIBILITY] =
 {
-	{{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-	{{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
+	{{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+	{{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
 };
 
 char*server_ip = NULL;
@@ -1116,6 +1116,10 @@ int search_min_datas()
 	
 	unlock_all_file();
     
+    // Il n'y a donc aucun élément
+    if (result > ETERN_PARTS) {
+        result = 0;
+    }
 	return result;
 }
 

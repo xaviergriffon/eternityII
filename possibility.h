@@ -39,6 +39,7 @@ typedef struct
 struct possibility_packet *generate_possibility_packet(int x, int y, struct part *etern[ETERN_SIZE][ETERN_SIZE], int directory);
 key_part what_search(struct array_part *all_rotate_parts, int x, int y, struct possibility_packet *possiblity);
 void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity,key_part *key);
+void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face);
 
 int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);
 int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);

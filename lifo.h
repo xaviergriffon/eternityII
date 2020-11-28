@@ -15,6 +15,7 @@ typedef struct ListeRepere{
 	int size;
 	int cacheSize;
 	Element *cacheElement;
+    Element * cacheEndPosition;
 	long lastPostionCache;
 	size_t sizeofvalue;
 } File;
