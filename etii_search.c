@@ -100,14 +100,19 @@ void *autosearch (void *userdata)
             //put(db, &client->aposs->possibilities[a]);
             put_big_table(bt, &client->aposs->possibilities[a]);
             // Boucle permettant d'effectuer un controle de la consommation sans "trop" imputer la boucle suivante effectuant un controle "miminum"
+            int noCheckDelegate = 0;
             while (bt->size > 0 && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
             {
                 // On poursuit tant qu'il y a du stock et qu'on a toujours l'instruction de continuer
                 //while(db->size > 0 && client->request == REQUEST_CONTINUE)
                 while(bt->size > 0 && request == REQUEST_CONTINUE)
                 {
-                    // Si trop d'étude à faire pour 1 thread, alors on délègue le reste.
-                    checkAndDelegatePossibilitiesIfNeeded_with_big_table(client, bt);
+                    noCheckDelegate++;
+                    if (noCheckDelegate > 1000) {
+                        // Si trop d'étude à faire pour 1 thread, alors on délègue le reste.
+                        checkAndDelegatePossibilitiesIfNeeded_with_big_table(client, bt);
+                        noCheckDelegate = 0;
+                    }
                     
                     // Statistique du nombre de possiblité en étude
                     lastfilesize[client->compteur] = bt->size;
