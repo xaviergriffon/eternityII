@@ -47,7 +47,7 @@ typedef unsigned short uint16_t;
 // Trace les informations pour les sockets locale
 //#define DEBUG_LOCAL_SOCKET
 // Passe en mono-process pour pouvoir débeugger
-#define DEBUG_IN_MONO_PROCESS
+//#define DEBUG_IN_MONO_PROCESS
 // ------------------------------------------------
 
 extern uint8_t directions[ETERN_PARTS];

@@ -240,3 +240,63 @@ void free_file(File *suite)
 	free(suite);
 }
 
+void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue) {
+    table->value = malloc(sizeofvalue * incrementSize);
+    table->incrementSize = incrementSize;
+    table->size = 0;
+    table->realsize = incrementSize;
+    table->lastPositionUsed = -1;
+    table->sizeofvalue = sizeofvalue;
+}
+
+void *big_table_value(big_table *table, int position) {
+    return ((char *)table->value + (table->lastPositionUsed * table->sizeofvalue));
+}
+
+void *put_big_table(big_table *table, void *value) {
+    // Test s'il faut allouer plus de mémoire
+    if (table->realsize == table->size) {
+        printf("recalcul de la taille de big_table\n");
+        size_t oldSize = table->realsize * table->sizeofvalue;
+        table->realsize = table->realsize + table->incrementSize;
+        void *newValue = malloc(table->sizeofvalue * table->realsize);
+        memcpy(newValue, table->value, oldSize);
+        free(table->value);
+        table->value = newValue;
+    }
+    table->lastPositionUsed++;
+    table->size++;
+    void *result = big_table_value(table, table->lastPositionUsed);
+    memcpy(result, value, table->sizeofvalue);
+    
+    return result;
+}
+
+int scroll_big_table(big_table *table, void *dest) {
+    if (table->size > 0) {
+        memcpy(dest, big_table_value(table, table->lastPositionUsed), table->sizeofvalue);
+        table->lastPositionUsed--;
+        table->size--;
+        
+        return 1;
+    }
+    
+    return 0;;
+}
+
+void *scroll_big_table_cache(big_table *table) {
+    void *result = NULL;
+    if (table->size > 0) {
+        result = big_table_value(table, table->lastPositionUsed);
+        table->lastPositionUsed--;
+        table->size--;
+    }
+    return result;
+}
+
+void free_big_table(big_table *table) {
+    if (table->value != NULL) {
+        free(table->value);
+    }
+    free(table);
+}

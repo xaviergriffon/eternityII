@@ -20,17 +20,32 @@ typedef struct ListeRepere{
 	size_t sizeofvalue;
 } File;
 
+typedef struct BigTable {
+    void *value;
+    int size;
+    int realsize;
+    size_t sizeofvalue;
+    int lastPositionUsed;
+    int incrementSize;
+} big_table;
+
 /* initialisation */
 void init_file_with_cache(File *suite, int cacheSize, size_t sizeofvalue);
+void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue);
 
 /* ENFILER*/
 int put (File * suite, void *value);
+
+void *put_big_table(big_table *table, void *value);
 
 /* DE_FILER*/
 int scroll (File * suite, void *dest);
 void *scroll_cache(File * suite);
 //int scroll_fifo (File * suite, void *dest);
 
-void free_file(File *suite);
+int scroll_big_table(big_table *table, void *dest);
+void *scroll_big_table_cache(big_table *table);
 
+void free_file(File *suite);
+void free_big_table(big_table *table);
 #endif

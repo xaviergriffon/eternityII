@@ -46,6 +46,8 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 int search_possiblity(File *result,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part);
 int search_possiblity_light(File *result,key_part *key,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part,int16_t idParts[ETERN_PARTS][4]);
 
+int search_possiblity_light_with_big_table(big_table *result,key_part *key,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part,int16_t idParts[ETERN_PARTS][4]);
+
 int change_dir(int cur_dir, int x, int y, struct possibility_packet *possiblity);
 
 struct possibility_packet *crypt_to_network(struct possibility_packet *packet);

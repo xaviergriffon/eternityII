@@ -709,6 +709,122 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
 	return max_result;
 }
 
+int search_possiblity_light_with_big_table(big_table *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4])
+{
+    int max_result=0;
+    uint8_t x;
+    uint8_t y;
+    
+    // initialisation
+    x = possiblity->x;
+    y = possiblity->y;
+
+    uint16_t incAlloc = possiblity->alloc + 1;
+    uint8_t nX = dirx[incAlloc];
+    uint8_t nY = diry[incAlloc];
+    
+    int s;
+    int lastId =-1;
+    
+    struct possibility_packet *currPossibility = possiblity;
+    
+    // On vérifie si la possibilité à cette position n'est toujours pas connu.
+    if(currPossibility->grid[x][y] == -2) {
+    
+        // TODO : vérifier si suffisament d'espace mémoire pour intégrer un le nombre de possibilité retournée
+        
+        
+        // TODO : voir pour réviser la recherche avec seulement des id de all_rotate_part
+        // liste des pieces répondant à la recherche (key)
+        struct array_part *search = get_parts_bigarray_with_key(mapParts, key);
+        for(s=0; s< search->size; s++)
+        {
+            int position = search->parts[s].id -1;
+            // Si la piece n'est pas déjà utilisée dans la suite de possibilité, on a donc une possiblité supplémentaire
+            if(!currPossibility->faceused[position])
+            {
+                
+                // On ajoute la définition d'une possibilité dans la suite.
+                // effectue une copie dans le end->value
+                // TODO : utiliser un système moins couteux en copie de mémoire
+                
+                // On se place à la fin de la suite qui correspond à la nouvelle définition
+                currPossibility = put_big_table(result, currPossibility);;
+                // Dans le cas où on a déjà généré une possiblité, on libère la piece qui avait été utilisée avant de généré un nouveau jeu
+                if(lastId>0) {
+                    currPossibility->faceused[lastId -1] = 0;
+                }
+                // On place la piece
+                currPossibility->grid[x][y] = idParts[search->parts[s].id][search->parts[s].rotation];
+                // statistique du nombre de piece placée
+                currPossibility->alloc = incAlloc;
+                
+                currPossibility->x = nX;
+                currPossibility->y = nY;
+                // On indique que la piece est utilisée
+                currPossibility->faceused[position] = 1;
+                // identifiant de la dernière piece utilisée
+                
+                lastId = search->parts[s].id;
+                // On vérifie que les emplacements libres ont tous une piece possible
+                // Si qu'une possiblité, alors place la piece
+                /*
+                 * TODO : faire plus tard (après put ou après la boucle) car est recopié sur les autres qui n'ont pas la meme piece a position.
+                if(possibility_all_has_a_next(currPossibility, mapParts, all_rotate_part) == 0 && incAlloc < ETERN_PARTS) {
+                    // Consomme la suite ou fournie la possiblité actuel si pas d'élément dans la suite
+                    scroll_cache(result);
+                }
+                 */
+#ifdef DEBUG_CHECK_POSSIBILITY
+                int analyse = check_possibility(currPossibility);
+                if (analyse < 0)
+                {
+                    printf("possibility error : %i\n",analyse);
+                    printf(" ---");
+                    print_possibility_packet(currPossibility);
+                }
+#endif // DEBUG_CHECK_POSSIBILITY
+                // si toutes les pieces sont placées alors on n'entrera pas dasn le if !faceused et sortira donc
+            }
+        }
+    } else {
+        // ?? à quoi correspond % 256
+        //lastId = currPossibility->grid[x][y] % 256;
+        lastId = 1;// pour indiquer qu'on a trouvé qqc
+        
+        // On remet la possibilté dans la suite car elle ne doit pas être résolu sinon on aurait arreter
+        put_big_table(result, currPossibility);
+        currPossibility->alloc = incAlloc;
+        
+        currPossibility->x = nX;
+        currPossibility->y = nY;
+        // On vérifie que les emplacements libres ont tous une piece possible
+        // Si qu'une possiblité, alors place la piece
+        /*
+        if(possibility_all_has_a_next(currPossibility, mapParts, all_rotate_part) == 0 && incAlloc < ETERN_PARTS) {
+            // On consomme pour éviter de recalculer
+            scroll_cache(result);
+        }
+         */
+#ifdef DEBUG_CHECK_POSSIBILITY
+        int analyse = check_possibility(currPossibility);
+        if (analyse < 0)
+        {
+            printf("possibility error : %i\n",analyse);
+            printf(" ---");
+            print_possibility_packet(currPossibility);
+        }
+#endif // DEBUG_CHECK_POSSIBILITY
+    }
+
+    // On a au moins placé une piece
+    if (lastId>-1) {
+        max_result = incAlloc;
+        checkIfResultFound(currPossibility, all_rotate_part);
+    }
+    return max_result;
+}
+
 /*
  0 OK
  -1 packet NULL
