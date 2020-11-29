@@ -12,7 +12,7 @@ typedef unsigned short uint16_t;
 #include <sys/un.h>
 #include "etii_statistic.h"
 
-#define VERSION 2
+#define VERSION 3
 
 #define NB_CONNECTIONS_PAR_THREAD 1
 #define MICRO_SLEEP 100
@@ -29,9 +29,11 @@ typedef unsigned short uint16_t;
 #define ETERN_PARTS 256
 #if ETERN_PARTS == 256
 #define ETERN_SIZE 16
+#define FACES_USED_SIZE 17// (ETERN_PARTS / 16) + 1;
 #else
 // 16 pieces
 #define ETERN_SIZE 4
+#define FACES_USED_SIZE 2// (ETERN_PARTS / 16) + 1;
 #endif // ETERN_PARTS == 256
 
 #define BUF_SIZE 300
@@ -49,7 +51,7 @@ typedef unsigned short uint16_t;
 // Passe en mono-process pour pouvoir débeugger
 //#define DEBUG_IN_MONO_PROCESS
 // ------------------------------------------------
-
+#define FACES_USED_BITS
 extern uint8_t directions[ETERN_PARTS];
 
 extern uint8_t dirx[ETERN_PARTS];

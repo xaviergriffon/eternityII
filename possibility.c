@@ -5,6 +5,23 @@
 #include "possibility.h"
 #include "datamanager.h"
 
+#ifdef FACES_USED_BITS
+void set_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part, uint8_t boolean) {
+    uint16_t groupe = part / 16;
+    uint16_t number = faceused[groupe];
+    int8_t n = part % 16;
+    number = (number & ~(1 << n)) | (boolean << n);
+    faceused[groupe] = number;
+}
+
+uint8_t is_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part) {
+    uint16_t groupe = part / 16;
+    uint16_t number = faceused[groupe];
+    int8_t n = part % 16;
+    return (number >> n) & 1;
+}
+#endif // FACES_USED_BITS
+
 int decode_direction()
 {
 	printf("/nx : ");
@@ -61,6 +78,11 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 	
 	memset(result->faceused, 0, sizeof(result->faceused));
 	
+#ifdef FACES_USED_BITS
+	memset(result->b_faceused, 0, sizeof(result->b_faceused));
+#else
+    memset(result->faceused, 0, sizeof(result->faceused));
+#endif // FACES_USED_BITS
 	int l;
 	for (l = 0; l < ETERN_SIZE; l++)
 	{
@@ -71,7 +93,11 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 			if(part != NULL)
 			{
 				result->grid[l][h] = id_for_rotated_part(part->id, part->rotation);
+#ifdef FACES_USED_BITS
+                set_face_used(result->b_faceused, part->id-1, 1);
+#else
                 result->faceused[part->id-1] = 1;
+#endif
 				result->alloc++;
 			} else
 			{
@@ -472,7 +498,11 @@ int possibility_has_a_next(struct possibility_packet *possibility, map_big_array
 	{
 		for(s=0; s< search->size && result == 0; s++)
 		{
-			if(search->parts[s].id != 0 && possibility->faceused[search->parts[s].id -1] == 0)
+#ifdef FACES_USED_BITS
+			if(search->parts[s].id != 0 && is_face_used(possibility->b_faceused, search->parts[s].id -1) == 0)
+#else
+            if(search->parts[s].id != 0 && possibility->faceused[search->parts[s].id -1] == 0)
+#endif // FACES_USED_BITS
 			{
                 result = 1;
             }
@@ -507,10 +537,18 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 				{
 					for(s=0; s< search->size && result == 0; s++)
 					{
-						if(search->parts[s].id != 0 && possibility->faceused[search->parts[s].id -1] == 0)
+#ifdef FACES_USED_BITS
+						if(search->parts[s].id != 0 && is_face_used(possibility->b_faceused, search->parts[s].id -1) == 0)
+#else
+                        if(search->parts[s].id != 0 && possibility->faceused[search->parts[s].id -1] == 0)
+#endif // FACES_USED_BITS
 						{
 							if( search->size == 1) {
-								possibility->faceused[search->parts[s].id -1] = 1;
+#ifdef FACES_USED_BITS
+                                set_face_used(possibility->b_faceused, search->parts[s].id - 1, 1);
+#else
+                                possibility->faceused[search->parts[s].id -1] = 1;
+#endif // FACES_USED_BITS
 								possibility->grid[x][y] = id_for_rotated_part(search->parts[s].id, search->parts[s].rotation);
                                 alloc++;
 							}
@@ -625,7 +663,11 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
         {
             int position = search->parts[s].id -1;
             // Si la piece n'est pas déjà utilisée dans la suite de possibilité, on a donc une possiblité supplémentaire
+#ifdef FACES_USED_BITS
+            if(!is_face_used(currPossibility->b_faceused, position))
+#else
             if(!currPossibility->faceused[position])
+#endif // FACES_USED_BITS
             {
                 
                 // On ajoute la définition d'une possibilité dans la suite.
@@ -636,7 +678,11 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
                 currPossibility = result->end->value;
                 // Dans le cas où on a déjà généré une possiblité, on libère la piece qui avait été utilisée avant de généré un nouveau jeu
                 if(lastId>0) {
+#ifdef FACES_USED_BITS
+                    set_face_used(currPossibility->b_faceused, lastId - 1, 0);
+#else
                     currPossibility->faceused[lastId -1] = 0;
+#endif // FACES_USED_BITS
                 }
                 // On place la piece
                 currPossibility->grid[x][y] = idParts[search->parts[s].id][search->parts[s].rotation];
@@ -646,7 +692,11 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
                 currPossibility->x = nX;
                 currPossibility->y = nY;
                 // On indique que la piece est utilisée
+#ifdef FACES_USED_BITS
+                set_face_used(currPossibility->b_faceused, position, 1);
+#else
                 currPossibility->faceused[position] = 1;
+#endif // FACES_USED_BITS
                 // identifiant de la dernière piece utilisée
                 
                 lastId = search->parts[s].id;
@@ -722,8 +772,6 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
     uint16_t incAlloc = possiblity->alloc + 1;
     uint8_t nX = dirx[incAlloc];
     uint8_t nY = diry[incAlloc];
-    
-    int s;
     int lastId =-1;
     
     struct possibility_packet *currPossibility = possiblity;
@@ -737,11 +785,16 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
         // TODO : voir pour réviser la recherche avec seulement des id de all_rotate_part
         // liste des pieces répondant à la recherche (key)
         struct array_part *search = get_parts_bigarray_with_key(mapParts, key);
-        for(s=0; s< search->size; s++)
+        for(int s=0; s< search->size; s++)
         {
+            // Position de la pieces dans faceused
             int position = search->parts[s].id -1;
             // Si la piece n'est pas déjà utilisée dans la suite de possibilité, on a donc une possiblité supplémentaire
+#ifdef FACES_USED_BITS
+            if(!is_face_used(currPossibility->b_faceused, position))
+#else
             if(!currPossibility->faceused[position])
+#endif // FACES_USED_BITS
             {
                 
                 // On ajoute la définition d'une possibilité dans la suite.
@@ -752,7 +805,11 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
                 currPossibility = put_big_table(result, currPossibility);;
                 // Dans le cas où on a déjà généré une possiblité, on libère la piece qui avait été utilisée avant de généré un nouveau jeu
                 if(lastId>0) {
+#ifdef FACES_USED_BITS
+                    set_face_used(currPossibility->b_faceused, lastId - 1, 0);
+#else
                     currPossibility->faceused[lastId -1] = 0;
+#endif // FACES_USED_BITS
                 }
                 // On place la piece
                 currPossibility->grid[x][y] = idParts[search->parts[s].id][search->parts[s].rotation];
@@ -762,7 +819,11 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
                 currPossibility->x = nX;
                 currPossibility->y = nY;
                 // On indique que la piece est utilisée
+#ifdef FACES_USED_BITS
+                set_face_used(currPossibility->b_faceused, position, 1);
+#else
                 currPossibility->faceused[position] = 1;
+#endif
                 // identifiant de la dernière piece utilisée
                 
                 lastId = search->parts[s].id;
@@ -819,10 +880,10 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
 
     // On a au moins placé une piece
     if (lastId>-1) {
-        max_result = incAlloc;
         checkIfResultFound(currPossibility, all_rotate_part);
+        return incAlloc;
     }
-    return max_result;
+    return 0;
 }
 
 /*
@@ -848,7 +909,11 @@ int check_possibility(struct possibility_packet *packet)
 	int faceused= 0;
 	for(i = 0; i < ETERN_PARTS;i++)
 	{
-		if(packet->faceused[i] == 1)
+#ifdef FACES_USED_BITS
+		if(is_face_used(packet->b_faceused, i) == 1)
+#else
+        if(packet->faceused[i] == 1)
+#endif // FACES_USED_BITS
 		{
 			faceused++;
 		}
@@ -1072,7 +1137,11 @@ int compare_possibility(struct possibility_packet *packet, struct possibility_pa
 	}
 
 	for (int u = 0; u < ETERN_PARTS; u++) {
-		if (packet->faceused[u] != other_packet->faceused[u]) {
+#ifdef FACES_USED_BITS
+		if (is_face_used(packet->b_faceused, u) != is_face_used(other_packet->b_faceused, u)) {
+#else
+        if (packet->faceused[u] != other_packet->faceused[u]) {
+#endif // FACES_USED_BITS
 			return -1;
 		}
 	}

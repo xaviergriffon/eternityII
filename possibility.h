@@ -27,7 +27,11 @@ PACK(
  uint8_t y;
  int16_t grid[ETERN_SIZE][ETERN_SIZE];
  uint16_t alloc;
+ #ifdef FACES_USED_BITS
+ uint16_t b_faceused[FACES_USED_SIZE];
+ #else
  uint8_t faceused[ETERN_PARTS];
+ #endif // FACES_USED_BITS
  });
 
 typedef struct
@@ -36,6 +40,10 @@ typedef struct
 	struct possibility_packet *possibilities;
 } array_possibility_packet;
 
+#ifdef FACES_USED_BITS
+void set_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part, uint8_t boolean);
+uint8_t is_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part);
+#endif // FACES_USED_BITS
 struct possibility_packet *generate_possibility_packet(int x, int y, struct part *etern[ETERN_SIZE][ETERN_SIZE], int directory);
 key_part what_search(struct array_part *all_rotate_parts, int x, int y, struct possibility_packet *possiblity);
 void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity,key_part *key);
