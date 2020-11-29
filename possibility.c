@@ -75,9 +75,6 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 	result->x = x;
 	result->y = y;
 	result->alloc = 0;
-	
-	memset(result->faceused, 0, sizeof(result->faceused));
-	
 #ifdef FACES_USED_BITS
 	memset(result->b_faceused, 0, sizeof(result->b_faceused));
 #else
