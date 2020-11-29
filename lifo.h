@@ -25,7 +25,6 @@ typedef struct BigTable {
     int size;
     int realsize;
     size_t sizeofvalue;
-    int lastPositionUsed;
     int incrementSize;
 } big_table;
 
