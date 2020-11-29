@@ -108,14 +108,16 @@ void *autosearch (void *userdata)
                 while(bt->size > 0 && request == REQUEST_CONTINUE)
                 {
                     noCheckDelegate++;
-                    if (noCheckDelegate > 1000) {
+                    // TODO : voir pour calculer 1/2s (vitesse/s / 2)
+                    if (noCheckDelegate == 1000000) {
                         // Si trop d'étude à faire pour 1 thread, alors on délègue le reste.
                         checkAndDelegatePossibilitiesIfNeeded_with_big_table(client, bt);
+                        
+                        // Statistique du nombre de possiblité en étude
+                        lastfilesize[client->compteur] = bt->size;
+                        
                         noCheckDelegate = 0;
                     }
-                    
-                    // Statistique du nombre de possiblité en étude
-                    lastfilesize[client->compteur] = bt->size;
                     
                     // Consomation d'un cache ??
                     struct possibility_packet *possibilityPacket = scroll_big_table_cache(bt);
@@ -135,18 +137,23 @@ void *autosearch (void *userdata)
                     // alimente key pour indiquer quoi chercher
                     //what_search_to_key(client->all_rotate_part, possibilityPacket, key);
                     what_search_to_key2(client->all_rotate_part, possibilityPacket, key, client->map_part->sizearrayM);
-                    int max = search_possiblity_light_with_big_table(bt, key, possibilityPacket, client->map_part, client->all_rotate_part, idParts);
+                    int max =
+                    search_possiblity_light_with_big_table(bt, key, possibilityPacket, client->map_part, client->all_rotate_part, idParts);
+                    
                     
                     // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
                     if(max > max_result)
                     {
                         max_result = max;
+#ifdef DEBUG_CHECK_POSSIBILITY
                         if(max_result >= ETERN_PARTS)
                         {
                             printf("Erreur alloc > ETERN_PARTS\n");
                         }
                         printf("max result:%i\n",max_result);
+#endif // DEBUG_CHECK_POSSIBILITY
                     }
+                     
                 }
 
                 if (request == REQUEST_PAUSE)

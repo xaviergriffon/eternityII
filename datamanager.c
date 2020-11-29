@@ -128,12 +128,14 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
 		if(possibilities->possibilities[t].alloc > max_result)
 		{
 			max_result = possibilities->possibilities[t].alloc;
-			printf("max result:%i\n",max_result);
+			//printf("max result:%i\n",max_result);
 		}
+        /*
 		if(possibilities->possibilities[t].x < 0 || possibilities->possibilities[t].y < 0 || possibilities->possibilities[t].x > 16 || possibilities->possibilities[t].y > 16)
 		{
 			printf("alert\n");
 		}
+         */
 		send_instruction(socket_id, INST_ADD);
 		struct possibility_packet *possibility = &possibilities->possibilities[t];
 		long result = send(socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
@@ -167,12 +169,14 @@ int put_to_local(array_possibility_packet *possibilities)
                 if(possibilities->possibilities[t].alloc > max_result)
                 {
                     max_result = possibilities->possibilities[t].alloc;
-                    printf("max result:%i\n",max_result);
+                    //printf("max result:%i\n",max_result);
                 }
+                /*
                 if(possibilities->possibilities[t].x < 0 || possibilities->possibilities[t].y < 0 || possibilities->possibilities[t].x > 16 || possibilities->possibilities[t].y > 16)
                 {
                     printf("alert\n");
                 }
+                 */
 				
                 put(&file_possibility[currfile].file, &possibilities->possibilities[t]);
             }
@@ -400,12 +404,14 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread) 
 			if(possiblity->alloc > max_result)
 			{
 				max_result = possiblity->alloc;
-				printf("max result:%i\n",max_result);
+				//printf("max result:%i\n",max_result);
 			}
+            /*
 			if(possiblity->x < 0 || possiblity->y < 0 || possiblity->x > ETERN_SIZE || possiblity->y > ETERN_SIZE)
 			{
 				printf("alert\n");
 			}
+             */
 			
 			put(&file_possibility_analysed[currfile].file, possiblity);
 			addpossibility = 1;
