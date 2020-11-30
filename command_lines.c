@@ -9,7 +9,7 @@
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
-#define NB_COMMANDS 23
+#define NB_COMMANDS 24
 
 typedef struct
 {
@@ -26,6 +26,7 @@ int exit_interpreter(void);
 int check_interpreter(void);
 int backup_interpreter(void);
 int restore_interpreter(void);
+int restoreOld_interpreter(void);
 int import_interpreter(void);
 int loadjson_interpreter(void);
 int print_interpreter(void);
@@ -51,6 +52,7 @@ static command_description commands[NB_COMMANDS] = {
     {"check", check_interpreter, 0},
     {"backup", backup_interpreter, 1},
     {"restore", restore_interpreter, 1},
+    {"restoreOld", restoreOld_interpreter, 1},
     {"import", import_interpreter, 0},
     {"loadjson", loadjson_interpreter, 0},
     {"print", print_interpreter, 0},
@@ -167,6 +169,17 @@ int restore_interpreter(void) {
     char *def_analyse_file = DEF_ANALYSE_FILE;
     printf("start restore\n");
     restore(def_file);
+    restore_analysed(def_analyse_file);
+    printf("backup restore\n");
+    
+    return 0;
+}
+
+int restoreOld_interpreter(void) {
+    char *def_file = DEF_FILE;
+    char *def_analyse_file = DEF_ANALYSE_FILE;
+    printf("start restore\n");
+    restore_old_file(def_file);
     restore_analysed(def_analyse_file);
     printf("backup restore\n");
     

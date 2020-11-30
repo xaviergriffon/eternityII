@@ -29,6 +29,7 @@ char *get_server_ip(void);
 int backup(char *filename);
 int backup_analysed(char *filename);
 int restore(char *filename);
+int restore_old_file(char *filename);
 int restore_analysed(char *filename);
 int import(client_possibility_t *client_possibility, char *filename);
 int import_analysed(char *filename);
