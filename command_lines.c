@@ -9,7 +9,7 @@
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
-#define NB_COMMANDS 24
+#define NB_COMMANDS 25
 
 typedef struct
 {
@@ -42,6 +42,7 @@ int rmnonext_interpreter(void);
 int printanalysed_interpreter(void);
 int min_interpreter(void);
 int help_interpreter(void);
+int statistic_interpreter(void);
 
 static command_description commands[NB_COMMANDS] = {
     {"sorta", sort_ascending_interpreter, 0},
@@ -66,6 +67,7 @@ static command_description commands[NB_COMMANDS] = {
     {"checkdirections", checkdirections_interpreter, 0},
     {"rmnonext", rmnonext_interpreter, 1},
     {"printanalysed", printanalysed_interpreter, 1},
+    {"statistic", statistic_interpreter, 0},
     {"min", min_interpreter, 1},
     {"help", help_interpreter, 0}
 };
@@ -171,11 +173,11 @@ int restore_interpreter(void) {
     restore(def_file);
     restore_analysed(def_analyse_file);
     printf("backup restore\n");
-    
     return 0;
 }
 
 int restoreOld_interpreter(void) {
+#ifdef FACES_USED_BITS
     char *def_file = DEF_FILE;
     char *def_analyse_file = DEF_ANALYSE_FILE;
     printf("start restore\n");
@@ -183,6 +185,7 @@ int restoreOld_interpreter(void) {
     restore_analysed(def_analyse_file);
     printf("backup restore\n");
     
+#endif // FACES_USED_BITS
     return 0;
 }
 
@@ -223,6 +226,10 @@ int regroup_interpreter(void) {
 
 int checkdatas_interpreter(void) {
     return check_datas();
+}
+
+int statistic_interpreter(void) {
+    return statistic_datas();
 }
 
 int checkfiles_interpreter(void) {

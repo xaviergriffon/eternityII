@@ -744,6 +744,7 @@ int backup_analysed(char *filename)
 	return 0;
 }
 
+#ifdef FACES_USED_BITS
 int import_old_file(client_possibility_t *client_possibility, char *filename)
 {
 	FILE *f = fopen(filename, "r");
@@ -809,6 +810,7 @@ int restore_old_file(char *filename)
     import_old_file(NULL, filename);
     return 0;
 }
+#endif // FACES_USED_BITS
 
 int import(client_possibility_t *client_possibility, char *filename)
 {
@@ -1176,6 +1178,38 @@ int check_datas()
 	
 	printf("check_datas analyses:%i\n",count);
 	return 0;
+}
+
+int statistic_datas(void)
+{
+    lock_all_file();
+    int count=0;
+    int fp;
+    int countSize[ETERN_PARTS];
+    for (int i = 0; i < ETERN_PARTS; i++) {
+        countSize[i] = 0;
+    }
+    for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+    {
+        Element *currElement = file_possibility[fp].file.start;
+        while (currElement != NULL)
+        {
+            count++;
+            struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+            countSize[possibility->alloc]++;
+            currElement = currElement->next;
+        }
+    }
+    
+    unlock_all_file();
+    
+    printf("check_datas analyses:%i\n",count);
+    for (int i = 0; i < ETERN_PARTS; i++) {
+            printf("%i : %i\n", i, countSize[i]);
+        
+        countSize[i] = 0;
+    }
+    return 0;
 }
 
 int search_min_datas()

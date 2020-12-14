@@ -29,7 +29,9 @@ char *get_server_ip(void);
 int backup(char *filename);
 int backup_analysed(char *filename);
 int restore(char *filename);
+#ifdef FACES_USED_BITS
 int restore_old_file(char *filename);
+#endif // FACES_USED_BITS
 int restore_analysed(char *filename);
 int import(client_possibility_t *client_possibility, char *filename);
 int import_analysed(char *filename);
@@ -46,6 +48,7 @@ void *sort_d_mono(void *f);
 int regroup_datas(void);
 int split_datas(void);
 int check_datas(void);
+int statistic_datas(void);
 int check_file(int f);
 int check_files(void);
 int search_min_datas(void);

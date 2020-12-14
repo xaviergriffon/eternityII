@@ -67,7 +67,6 @@ void *autosearch (void *userdata)
             idParts[p][r] = p + ETERN_PARTS * r;
         }
     }
-    
     // Boucle infinie pour maintenir le thread
     while(1)
     {
@@ -77,7 +76,7 @@ void *autosearch (void *userdata)
             usleep(MICRO_SLEEP);
         }
         // TODO : transformer en BIG Tableau qui serait checker lors de la recherche des possiblités
-        // pour voir si suffisant et dnas le cas contraire alloué une marge *2
+        // pour voir si suffisant et dans le cas contraire allouer une marge *2
         // de toute façon, on check sa quantité pour diminué donc ne sera jamais trop gros
         // ceci permettrai de diminuer les controles sur la suite lors des put et scroll
         // on ferai plus que des memcpy
@@ -140,7 +139,6 @@ void *autosearch (void *userdata)
                     int max =
                     search_possiblity_light_with_big_table(bt, key, possibilityPacket, client->map_part, client->all_rotate_part, idParts);
                     
-                    
                     // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
                     if(max > max_result)
                     {
@@ -153,7 +151,6 @@ void *autosearch (void *userdata)
                         printf("max result:%i\n",max_result);
 #endif // DEBUG_CHECK_POSSIBILITY
                     }
-                     
                 }
 
                 if (request == REQUEST_PAUSE)
