@@ -29,6 +29,7 @@ void usleep(int waitTime) {
 #include <netdb.h> /* gethostbyname */
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <signal.h>
 #include <errno.h>
 #define INVALID_SOCKET -1
