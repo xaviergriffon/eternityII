@@ -64,6 +64,7 @@ typedef struct array_part ****big_array;
 typedef struct
 {
 	int sizearray;
+    int sizearrayM;
 	big_array *bigarray;
 } map_big_array;
 

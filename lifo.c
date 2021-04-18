@@ -9,6 +9,7 @@ void init_file(File * suite){
 	suite->size = 0;
 	suite->cacheSize = 0;
 	suite->cacheElement = NULL;
+    suite->cacheEndPosition = NULL;
 	suite->sizeofvalue = 0;
 	suite->lastPostionCache = 0;
 }
@@ -19,7 +20,9 @@ void init_file_with_cache(File *suite, int cacheSize, size_t sizeofvalue)
 	suite->cacheSize = cacheSize;
 	if(cacheSize > 0)
 	{
-		suite->cacheElement = malloc(sizeof(Element) * cacheSize);
+        size_t cacheElementSize = sizeof(Element) * cacheSize;
+		suite->cacheElement = malloc(cacheElementSize);
+        suite->cacheEndPosition = &suite->cacheElement[cacheSize - 1];
 		
 	}
 	suite->sizeofvalue = sizeofvalue;
@@ -43,7 +46,8 @@ void init_file_with_cache(File *suite, int cacheSize, size_t sizeofvalue)
 
 int inside_cache(File *file, Element *element)
 {
-	return file->cacheElement <= element && element < file->cacheElement+file->cacheSize;
+    // On vérifie si la position de l'élément se trouve dans la zone mémoire de cacheElemeent
+	return file->cacheElement <= element && element <= file->cacheEndPosition;
 }
 
 long position_cache(File *file, Element *element)
@@ -53,7 +57,8 @@ long position_cache(File *file, Element *element)
 		return -1;
 	}
 	
-	return element - file->cacheElement;
+    // Utilisation des pointeurs pour calculer la position
+	return file->cacheElement - element;
 }
 
 /* (ajouter) un élément dans la file */
@@ -107,13 +112,18 @@ int scroll (File * suite, void *dest){
 	void *result = supp_element->value;
 	memcpy(dest, result, suite->sizeofvalue);
 	
-	long position = position_cache(suite, supp_element);
-	if(position > -1)
-	{
-		if (position == suite->lastPostionCache -1)
-		{
-			suite->lastPostionCache--;
-		}
+    // TODO : simplement tester si il s'agit de suite->cacheElement[suite->lastPostionCache]
+    /*
+    long position = position_cache(suite, supp_element);
+    if(position > -1)
+    {
+        if (position == suite->lastPostionCache -1)
+        {
+            suite->lastPostionCache--;
+        }
+     */
+    if (suite->lastPostionCache > 0 && &suite->cacheElement[suite->lastPostionCache -1] == supp_element) {
+        suite->lastPostionCache--;
 	} else
 	{
 		free (result);
@@ -135,6 +145,7 @@ int scroll (File * suite, void *dest){
 // Consomme la suite ou fournie le cache si pas d'élément dans la suite
 void *scroll_cache(File * suite){
 	Element *supp_element;
+    // TODO : hors sécu, est-ce qu'on doit tester end ? size devrait êtr suffisant
 	if (suite->size == 0 || suite->end == NULL)
 		return NULL;
 	supp_element = suite->end;
@@ -145,6 +156,8 @@ void *scroll_cache(File * suite){
 	suite->end = supp_element->previous;
 	void *result = supp_element->value;
 
+    // TODO : simplement tester si il s'agit de suite->cacheElement[suite->lastPostionCache]
+    /*
 	long position = position_cache(suite, supp_element);
 	if(position > -1)
 	{
@@ -152,6 +165,9 @@ void *scroll_cache(File * suite){
 		{
 			suite->lastPostionCache--;
 		}
+     */
+    if (suite->lastPostionCache > 0 && &suite->cacheElement[suite->lastPostionCache -1] == supp_element) {
+        suite->lastPostionCache--;
 	} else
 	{
         // TODO : SI n'est pas dans le cache, alors vider mémoire
@@ -224,3 +240,58 @@ void free_file(File *suite)
 	free(suite);
 }
 
+void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue) {
+    table->value = malloc(sizeofvalue * incrementSize);
+    table->incrementSize = incrementSize;
+    table->size = 0;
+    table->realsize = incrementSize;
+    table->sizeofvalue = sizeofvalue;
+}
+
+void *big_table_value(big_table *table, int position) {
+    return ((char *)table->value + (position * table->sizeofvalue));
+}
+
+void *put_big_table(big_table *table, void *value) {
+    // Test s'il faut allouer plus de mémoire
+    if (table->realsize == table->size) {
+        size_t oldSize = table->realsize * table->sizeofvalue;
+        table->realsize = table->realsize + table->incrementSize;
+        void *newValue = malloc(table->sizeofvalue * table->realsize);
+        memcpy(newValue, table->value, oldSize);
+        free(table->value);
+        table->value = newValue;
+    }
+    
+    void *result = big_table_value(table, table->size);
+    table->size++;
+    memcpy(result, value, table->sizeofvalue);
+    
+    return result;
+}
+
+int scroll_big_table(big_table *table, void *dest) {
+    if (table->size > 0) {
+        table->size--;
+        memcpy(dest, big_table_value(table, table->size), table->sizeofvalue);
+        
+        return 1;
+    }
+    
+    return 0;;
+}
+
+void *scroll_big_table_cache(big_table *table) {
+    if (table->size > 0) {
+        table->size--;
+        return big_table_value(table, table->size);
+    }
+    return NULL;
+}
+
+void free_big_table(big_table *table) {
+    if (table->value != NULL) {
+        free(table->value);
+    }
+    free(table);
+}
