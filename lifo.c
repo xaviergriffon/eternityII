@@ -241,7 +241,7 @@ void free_file(File *suite)
 }
 
 void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue) {
-    table->value = malloc(sizeofvalue * incrementSize);
+    table->value = malloc(incrementSize * sizeofvalue);
     table->incrementSize = incrementSize;
     table->size = 0;
     table->realsize = incrementSize;
@@ -249,24 +249,29 @@ void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue) {
 }
 
 void *big_table_value(big_table *table, int position) {
-    return ((char *)table->value + (position * table->sizeofvalue));
+    return ((void *)table->value + (position * table->sizeofvalue));
 }
 
 void *put_big_table(big_table *table, void *value) {
     // Test s'il faut allouer plus de mémoire
+	void *oldTableValue = table->value;
     if (table->realsize == table->size) {
         size_t oldSize = table->realsize * table->sizeofvalue;
         table->realsize = table->realsize + table->incrementSize;
         void *newValue = malloc(table->sizeofvalue * table->realsize);
         memcpy(newValue, table->value, oldSize);
-        free(table->value);
-        table->value = newValue;
+		table->value = newValue;
     }
     
     void *result = big_table_value(table, table->size);
     table->size++;
     memcpy(result, value, table->sizeofvalue);
-    
+	// Si la table a été redimensionnée, on supprime l'ancienne
+	// Ceci est fait en dernier pour gérer le cas d'une valeur réinserrée et donc présente
+	// dans l'ancienne table
+	if (oldTableValue != table->value) {
+		free(oldTableValue);
+	}
     return result;
 }
 
