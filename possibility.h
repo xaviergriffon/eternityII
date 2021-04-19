@@ -28,7 +28,7 @@ PACK(
  int16_t grid[ETERN_SIZE][ETERN_SIZE];
  uint16_t alloc;
  #ifdef FACES_USED_BITS
- uint16_t b_faceused[FACES_USED_SIZE];
+ uint16_t b_faceused[FACES_USED_SIZE] __attribute__ ((aligned (16)));
  #else
  uint8_t faceused[ETERN_PARTS];
  #endif // FACES_USED_BITS

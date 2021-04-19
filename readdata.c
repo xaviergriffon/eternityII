@@ -19,8 +19,13 @@ struct array_part *read_parts(const char *file)
 		exit(EXIT_FAILURE);
 	}
 	
-	fscanf(f, "ntiles: %d", &np);
-	printf("ntiles:%i\n",np);
+	if (fscanf(f, "ntiles: %d", &np))
+	{
+		printf("ntiles:%i\n",np);
+	} else
+	{
+		exit(EXIT_FAILURE);
+	}
 
 
     struct part *parts = NULL;
@@ -47,21 +52,26 @@ struct array_part *read_parts(const char *file)
 		int left;
 		int bottom;
 		int right;
-		fscanf(f, "%hd %d %d %d %d",
+		if (fscanf(f, "%hd %d %d %d %d",
 			  &parts[count].id,
 			   &top,
 			   &left,
 			   &bottom,
-			   &right);
+			   &right))
 		
-		parts[count].top=(int8_t)top;
-		parts[count].left=(int8_t)left;
-		parts[count].bottom=(int8_t)bottom;
-		parts[count].right=(int8_t)right;
-        parts[count].rotation = 0;
+		{
+			parts[count].top=(int8_t)top;
+			parts[count].left=(int8_t)left;
+			parts[count].bottom=(int8_t)bottom;
+			parts[count].right=(int8_t)right;
+        		parts[count].rotation = 0;
 		
-		//print_part(&parts[count]);
-		count++;
+			//print_part(&parts[count]);
+			count++;
+		} else
+		{
+			exit(EXIT_FAILURE);
+		}
 	}
 	
 	fclose(f);
@@ -218,7 +228,7 @@ struct possibility_packet * read_from_json(const char *json_possiblity) {
                         if (value != NULL) {
                             size_t value_size = strlen(value);
                             lastValue = malloc(sizeof(char) * (value_size + 1));
-                            strncpy (lastValue, value, value_size);
+                            memcpy (lastValue, value, value_size);
                             lastValue[value_size] = '\0';
                             
                             free(value);
