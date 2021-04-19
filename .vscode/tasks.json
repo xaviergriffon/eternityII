@@ -9,14 +9,14 @@
 		},
 		{
 			"type": "cppbuild",
-			"label": "C/C++: clang build eternityII Debug mode",
-			"command": "/usr/bin/clang",
+			"label": "C/C++: gcc build eternityII Debug mode",
+			"command": "/usr/bin/gcc",
 			"args": [
 				"-pthread",
 				"-g",// compilation avec flag debug
 				"${workspaceFolder}/*.c",
 				"-o",
-				"${fileDirname}/eternityIIDebug"
+				"${workspaceFolder}/eternityIIDebug"
 			],
 			"options": {
 				"cwd": "/usr/bin"
@@ -25,18 +25,18 @@
 				"$gcc"
 			],
 			"group": "build",
-			"detail": "compiler: /usr/bin/clang"
+			"detail": "compiler: /usr/bin/gcc"
 		},
 		{
 			"type": "cppbuild",
-			"label": "C/C++: clang build eternityII Release",
-			"command": "/usr/bin/clang",
+			"label": "C/C++: gcc build eternityII Release",
+			"command": "/usr/bin/gcc",
 			"args": [
 				"-Ofast",
 				"-pthread",
 				"${workspaceFolder}/*.c",
 				"-o",
-				"${fileDirname}/eternityII"
+				"${workspaceFolder}/eternityII"
 			],
 			"options": {
 				"cwd": "/usr/bin"
@@ -45,7 +45,7 @@
 				"$gcc"
 			],
 			"group": "build",
-			"detail": "compiler: /usr/bin/clang"
+			"detail": "compiler: /usr/bin/gcc"
 		}
 	]
 }

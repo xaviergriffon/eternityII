@@ -5,6 +5,25 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "(gdb) Launch",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/eternityII",
+            "args": ["tcpclient", "localhost", "1"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
             "name": "Debug eternityII",
             "type": "cppdbg",
             "request": "launch",
@@ -16,7 +35,7 @@
             "environment": [],
             "externalConsole": true,
             "MIMode": "lldb",
-            "preLaunchTask": "C/C++: clang build eternityII Debug mode"
+            "preLaunchTask": "C/C++: gcc build eternityII Debug mode"
         },
         {
             "name": "Debug Server eternityII",
@@ -40,14 +59,13 @@
             "program": "${workspaceFolder}/eternityIIDebug",
             "args": ["tcpclient",
                 "localhost",
-                "1",
-                "./pieces.csv"],
+                "1"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
             "externalConsole": true,
             "MIMode": "lldb",
-            "preLaunchTask": "C/C++: clang build eternityII Debug mode"
+            "preLaunchTask": "C/C++: gcc build eternityII Debug mode"
         }
     ]
 }
