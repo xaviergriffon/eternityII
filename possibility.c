@@ -95,7 +95,6 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 #else
                 result->faceused[part->id-1] = 1;
 #endif
-				result->alloc++;
 			} else
 			{
 				result->grid[l][h] = -2;
