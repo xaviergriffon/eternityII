@@ -1153,7 +1153,8 @@ int split_datas()
 int check_datas()
 {
 	lock_all_file();
-	int count=0;
+	int count = 0;
+    int errors = 0;
 	int fp;
 	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
 	{
@@ -1167,8 +1168,7 @@ int check_datas()
 				printf("possibility error : %i\n",analyse);
 				printf(" ---");
 				print_possibility_packet((struct possibility_packet *)currElement->value);
-				unlock_all_file();
-				return -1;
+                errors++;
 			}
 			currElement = currElement->next;
 		}
@@ -1176,8 +1176,8 @@ int check_datas()
 	
 	unlock_all_file();
 	
-	printf("check_datas analyses:%i\n",count);
-	return 0;
+	printf("check_datas errors %i on %i\n", errors, count);
+    return errors > 0 ? -1 : 0;
 }
 
 int statistic_datas(void)
