@@ -14,7 +14,7 @@ void init_file(File * suite){
 	suite->lastPostionCache = 0;
 }
 
-void init_file_with_cache(File *suite, int cacheSize, size_t sizeofvalue)
+void init_file_with_cache(File *suite, unsigned long long cacheSize, size_t sizeofvalue)
 {
 	init_file(suite);
 	suite->cacheSize = cacheSize;
@@ -26,7 +26,7 @@ void init_file_with_cache(File *suite, int cacheSize, size_t sizeofvalue)
 		
 	}
 	suite->sizeofvalue = sizeofvalue;
-	int e;
+	unsigned long long e;
 	for(e = 0; e < cacheSize; e++)
 	{
 		suite->cacheElement[e].value = malloc(sizeofvalue);
@@ -84,7 +84,6 @@ int put (File * suite, void *value){
 	new_element->previous = NULL;
 	new_element->next = NULL;
 	
-	// par précaution du cache on vérifie que qu'il ne s'agit pas de la meme valeur
 	memcpy (new_element->value, value, suite->sizeofvalue);
 	
 	if(suite->end == NULL){
@@ -220,6 +219,78 @@ int scroll_fifo (File * suite, void *dest){
 	return 1;
 }
 
+void extract_element(File *suite, Element *element) {
+	Element *previous = element->previous;
+	Element *next = element->next;
+
+	if (previous != NULL) {
+		previous->next = next;
+	} else {
+		// L'élément était le 1er
+		if (suite != NULL && suite->start == element) {
+			suite->start = next;
+		}
+	}
+
+	if (next != NULL) {
+		next->previous = previous;
+	} else {
+		// L'élément était le dernier
+		if (suite != NULL && suite->end == element) {
+			suite->end = previous;
+		}
+	}
+    
+    element->previous = NULL;
+    element->next = NULL;
+}
+
+// Positionne l'élément avant la cible
+void move_before(File *suite, Element *element, Element *target) {
+	if(element != NULL && target != NULL) {
+		// On extrait l'élément de ça position actuelle
+		extract_element(suite, element);
+		
+		Element *targetPrevious = target->previous;
+		element->previous = targetPrevious;
+		if (targetPrevious != NULL) {
+			targetPrevious->next = element;
+		} else {
+			// La cible est la 1ère
+			if (suite != NULL && suite->start == target) {
+				suite->start = element;
+			}
+		}
+
+		// On place l'élément avant
+		element->next = target;
+		target->previous = element;
+	}
+}
+
+// Positionne l'élément après la cible
+void move_after(File *suite, Element *element, Element *target) {
+	if(element != NULL && target != NULL) {
+		// On extrait l'élément de ça position actuelle
+		extract_element(suite, element);
+
+		Element *targetNext = target->next;
+		element->next = targetNext;
+		if (targetNext != NULL) {
+			targetNext->previous = element;
+		} else {
+			// La cible est dernière
+			if (suite != NULL && suite->end == target) {
+				suite->end = element;
+			}
+		}
+
+		// On place l'élément après
+		element->previous = target;
+		target->next = element;
+	}
+}
+
 void free_file(File *suite)
 {
 	void *value = malloc(suite->sizeofvalue);
@@ -230,7 +301,7 @@ void free_file(File *suite)
 	free(value);
 	if(suite->cacheSize > 0)
 	{
-		int c;
+		unsigned long long c;
 		for(c = 0; c < suite->cacheSize;c++)
 		{
 			free(suite->cacheElement[c].value);
@@ -248,7 +319,7 @@ void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue) {
     table->sizeofvalue = sizeofvalue;
 }
 
-void *big_table_value(big_table *table, int position) {
+void *big_table_value(big_table *table, unsigned long long position) {
     return ((void *)table->value + (position * table->sizeofvalue));
 }
 

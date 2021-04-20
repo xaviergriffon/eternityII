@@ -975,7 +975,7 @@ int printdatamanager()
 
 int print_file_analysed(int fp)
 {
-	printf("file_analysed %i, size:%i\n", fp, file_possibility_analysed[fp].file.size);
+	printf("file_analysed %i, size:%llu\n", fp, file_possibility_analysed[fp].file.size);
     Element *currElement = file_possibility_analysed[fp].file.start;
     while(currElement != NULL)
     {
@@ -1243,53 +1243,85 @@ int search_min_datas()
 // TODO : revoir le trie pour prendre en compte le cache
 int sort_ascending(void)
 {
-	
+	// on bloque les files le temps du trie
 	lock_all_file();
+	// regroupement pour ne parcourir qu'une seule file
 	regroup_datas_nolock();
-	Element *currElement = file_possibility[0].file.start;
+
+	// Tableau d'éléments permettants d'avoir des repaires d'éléments classés
+	// On mémorise par nb possibilités allouées.
+	Element **orderedLair = malloc(sizeof(Element*) * (ETERN_PARTS +1));
+	for (int l = 0; l < ETERN_PARTS +1; l++) {
+		orderedLair[l] = NULL;
+	}
+	
+	File *file = &file_possibility[0].file;
+	unsigned long long position = 0;
+	int percent = 0;
+	unsigned long long fivePercent = file->size * 0.05;
+	unsigned long long nextShow = fivePercent;
+
+	printf("0");
+	fflush(stdout);
+
+	Element *currElement = file->start;
+	// 1er point de repaire
 	while (currElement != NULL)
 	{
+		position++;
+		if (position >= nextShow) {
+			nextShow += fivePercent;
+			percent += 5;
+			printf("--%i", percent);
+			fflush(stdout);
+		}
+
 		Element *nextElement = currElement->next;
-		if(nextElement != NULL && currElement->value != NULL)
-		{
-			if(nextElement->value != NULL)
-			{
-				struct possibility_packet *curr = currElement->value;
+		if (currElement->value != NULL) {
+			struct possibility_packet *curr = currElement->value;
+			int currAlloc = curr->alloc;
+			if (orderedLair[currAlloc] == NULL) {
+				orderedLair[currAlloc] = currElement;
+			}
+
+			if(nextElement != NULL && nextElement->value != NULL)
+			{	
 				struct possibility_packet *next = nextElement->value;
+				int nextAlloc = next->alloc;
+				if (orderedLair[nextAlloc] == NULL) {
+					orderedLair[nextAlloc] = nextElement;
+				}
+
+				// Si l'élément n'est pas trié, on le place par rapport aux repaires
 				if(curr->alloc > next->alloc)
 				{
-					if(currElement->previous != NULL)
-					{
-						currElement->previous->next = nextElement;
+					// On essaye de voir si on peut le placer avant un "suivant"
+					Element *target = NULL;
+					for (int b = currAlloc +1; b < ETERN_PARTS+1 && target == NULL; b++) {
+						target = orderedLair[b];
 					}
-					if(nextElement->next != NULL)
-					{
-						nextElement->next->previous = currElement;
-					}
-					nextElement->previous = currElement->previous;
-					currElement->next = nextElement->next;
-					currElement->previous = nextElement;
-					nextElement->next = currElement;
-					if(file_possibility[0].file.start == currElement)
-					{
-						file_possibility[0].file.start = nextElement;
-					}
-					if(file_possibility[0].file.end == nextElement)
-					{
-						file_possibility[0].file.end = currElement;
+					if (target != NULL) {
+						move_before(file, currElement, target);
+					} else {
+						// Pas de suivant, on place donc à la fin de la suite
+						move_after(file, currElement, file->end);
 					}
 					
-                    if(file_possibility[0].file.start != nextElement)
+					if(file->start != nextElement)
 					{
-                        nextElement = nextElement->previous;
-                        
-                    }
+						nextElement = nextElement->previous;
+						position -= 2;
+					} else {
+						position = 0;
+					}
+					
 				}
 			}
 		}
 		
 		currElement = nextElement;
 	}
+	printf("--100\n");
 	unlock_all_file();
 	return 0;
 }
@@ -1387,7 +1419,7 @@ int check_file(int f)
 	}
 	
 	// test que la fin correspond à la taille
-	int t;
+	unsigned long long t;
 	Element *currElement = file_poss.file.start;
 	Element *lastElement = currElement;
 	for(t=0; t < file->size && currElement != NULL;t++)
@@ -1402,11 +1434,11 @@ int check_file(int f)
 	
 	if(currElement != NULL)
 	{
-		printf("File:%i last analysed element is not null | file.size:%i analysed:%i",f,file->size, t);
+		printf("File:%i last analysed element is not null | file.size:%llu analysed:%llu",f,file->size, t);
 		result = -1;
 	}
 	if (t != file->size || lastElement != file->end) {
-		printf("File:%i end not correspond to the size:%i analysed:%i\n",f,file->size,t);
+		printf("File:%i end not correspond to the size:%llu analysed:%llu\n",f,file->size,t);
 		result=-1;
 	}
 	return result;
