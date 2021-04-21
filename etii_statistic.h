@@ -7,8 +7,8 @@
 PACK(
 struct client_statistics {
     unsigned long long shots_per_second;
-    uint32_t possibilities_in_stock;
-    uint32_t analyses_in_stock;
+    unsigned long long possibilities_in_stock;
+    unsigned long long analyses_in_stock;
     uint16_t max_result;
 });
 

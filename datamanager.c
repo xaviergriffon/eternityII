@@ -597,37 +597,31 @@ array_possibility_packet *get_last_possibility(client_possibility_t *client_poss
 	return result;
 }
 
-int file_size(int nfile)
+unsigned long long file_size(int nfile)
 {
-	int result = -1;
 	if(nfile >= 0 && nfile < NB_FILE_POSSIBILITY)
 	{
-		result = file_possibility[nfile].file.size;
+		return file_possibility[nfile].file.size;
 	}
-	return result;
+    return 0;
 }
 
-int file_analysed_size(int nfile)
+unsigned long long file_analysed_size(int nfile)
 {
-	int result = -1;
 	if(nfile >= 0 && nfile < NB_FILE_POSSIBILITY)
 	{
-		result = file_possibility_analysed[nfile].file.size;
+		return file_possibility_analysed[nfile].file.size;
 	}
-	return result;
+	return 0;
 }
 
-int datas_size()
+unsigned long long datas_size()
 {
-	int result = 0;
+    unsigned long long result = 0;
 	int f;
 	for(f=0; f < NB_FILE_POSSIBILITY; f++)
 	{
-		int fsize = file_size(f);
-		if(fsize >0)
-		{
-			result = result + fsize;
-		}
+        result += file_size(f);
 	}
 	return result;
 }
@@ -1005,10 +999,10 @@ int print_all_file_analysed()
 	return 0;
 }
 
-int regroup_datas_nolock()
+unsigned long long regroup_datas_nolock()
 {
 	int fp;
-	int size = file_possibility[0].file.size;
+    unsigned long long size = file_possibility[0].file.size;
 	struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
 	for (fp=1; fp < NB_FILE_POSSIBILITY; fp++)
 	{
@@ -1025,7 +1019,7 @@ int regroup_datas_nolock()
 		}
         
 	}
-    printf("regroup size :%i\n",size);
+    printf("regroup size :%llu\n",size);
 	free(packet);
 	packet = NULL;
 	return 0;
@@ -1111,8 +1105,8 @@ int split_datas_nolock(int nbsplit)
 		}
 	}
 	
-	div_t d = div(file->size, nbsplit);
-	int quotient = d.quot;
+	lldiv_t d = lldiv(file->size, nbsplit);
+	long long quotient = d.quot;
 	if(d.rem != 0)
 	{
 		quotient++;

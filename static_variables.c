@@ -27,7 +27,7 @@ unsigned long long *compteurs = NULL;
 
 struct client_statistics *fork_statistics = NULL;
 
-int *lastfilesize = NULL;
+unsigned long long *lastfilesize = NULL;
 char *lastcheck = NULL;
 
 // TODO : deplacer dans un parametre ?

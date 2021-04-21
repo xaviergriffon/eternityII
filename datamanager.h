@@ -19,9 +19,9 @@ array_possibility_packet *get_last_possibility(client_possibility_t *client_poss
 int add_possibility_analysed(struct possibility_packet *possiblity, int thread);
 void send_possibility_analysed(client_possibility_t *client_possibility);
 int remove_possibility_analysed(struct possibility_packet *possiblity, int thread);
-int file_size(int nfile);
-int file_analysed_size(int nfile);
-int datas_size(void);
+unsigned long long file_size(int nfile);
+unsigned long long file_analysed_size(int nfile);
+unsigned long long datas_size(void);
 
 void set_server_ip(const char *server);
 char *get_server_ip(void);

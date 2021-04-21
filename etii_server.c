@@ -64,9 +64,9 @@ void *check_server(void *param)
         int f;
         for(f=0; f < NB_FILE_POSSIBILITY; f++)
         {
-            int f_size = file_size(f);
+            unsigned long long f_size = file_size(f);
             char *temp = calloc(1000, sizeof(char));
-            sprintf(temp, "file:%i stock:%i\n",f,f_size);
+            sprintf(temp, "file:%i stock:%llu\n",f,f_size);
             strcat(lastcheck, temp);
             free(temp);
             file_possibility_stock = file_possibility_stock + f_size;
@@ -75,9 +75,9 @@ void *check_server(void *param)
         unsigned long long file_possibility_analysed_stock = 0;
         for(f=0; f < NB_FILE_POSSIBILITY; f++)
         {
-            int f_size = file_analysed_size(f);
+            unsigned long long f_size = file_analysed_size(f);
             char *temp = calloc(1000, sizeof(char));
-            sprintf(temp, "file_analysed:%i stock:%i\n",f,f_size);
+            sprintf(temp, "file_analysed:%i stock:%llu\n",f,f_size);
             strcat(lastcheck, temp);
             free(temp);
             file_possibility_analysed_stock = file_possibility_analysed_stock + f_size;

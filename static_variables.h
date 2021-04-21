@@ -62,7 +62,7 @@ extern uint8_t diry[ETERN_PARTS];
 extern int NB_THREADS;
 
 extern unsigned long long *compteurs;
-extern int *lastfilesize;
+extern unsigned long long *lastfilesize;
 
 extern uint16_t max_result;
 extern char *lastcheck;
