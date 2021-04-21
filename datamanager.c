@@ -1265,7 +1265,6 @@ int sort_ascending(void)
 	fflush(stdout);
 
 	Element *currElement = file->start;
-	// 1er point de repaire
 	while (currElement != NULL)
 	{
 		position++;
@@ -1330,60 +1329,73 @@ void *sort_d_mono(void *f)
 {
     int intf = *(int *)f;
 	printf("sort d file:%i\n",intf);
+
+	// Tableau d'éléments permettants d'avoir des repaires d'éléments classés
+	// On mémorise par nb possibilités allouées.
+	Element **orderedLair = malloc(sizeof(Element*) * (ETERN_PARTS +1));
+	for (int l = 0; l < ETERN_PARTS +1; l++) {
+		orderedLair[l] = NULL;
+	}
+	
 	file_possibility_t *file_poss =&file_possibility[intf];
-	Element *currElement = file_poss->file.start;
+	File *file = &file_poss->file;
+	unsigned long long position = 0;
+	int percent = 0;
+	unsigned long long fivePercent = file->size * 0.05;
+	unsigned long long nextShow = fivePercent;
+
+	printf("0");
+	fflush(stdout);
+
+	Element *currElement = file->start;
 	while (currElement != NULL)
 	{
+		position++;
+		if (position >= nextShow) {
+			nextShow += fivePercent;
+			percent += 5;
+			printf("--%i", percent);
+			fflush(stdout);
+		}
+
 		Element *nextElement = currElement->next;
-		if(nextElement != NULL && currElement->value != NULL)
-		{
-			if(nextElement->value != NULL)
-			{
-				struct possibility_packet *curr = currElement->value;
+		if (currElement->value != NULL) {
+			struct possibility_packet *curr = currElement->value;
+			int currAlloc = curr->alloc;
+			if (orderedLair[currAlloc] == NULL) {
+				orderedLair[currAlloc] = currElement;
+			}
+
+			if(nextElement != NULL && nextElement->value != NULL)
+			{	
 				struct possibility_packet *next = nextElement->value;
+				int nextAlloc = next->alloc;
+				if (orderedLair[nextAlloc] == NULL) {
+					orderedLair[nextAlloc] = nextElement;
+				}
+
+				// Si l'élément n'est pas trié, on le place par rapport aux repaires
 				if(curr->alloc < next->alloc)
 				{
-					if(currElement->previous != NULL)
-					{
-						currElement->previous->next = nextElement;
+					// On essaye de voir si on peut le placer avant un "précédent" repaire
+					Element *target = NULL;
+					for (int b = currAlloc -1; b > 0 && target == NULL; b--) {
+						target = orderedLair[b];
 					}
-					if(nextElement->next != NULL)
-					{
-						nextElement->next->previous = currElement;
+					if (target != NULL) {
+						move_before(file, currElement, target);
+					} else {
+						// Pas de précédent, on place donc à la fin de la suite car est le plus petit
+						move_after(file, currElement, file->end);
 					}
-					nextElement->previous = currElement->previous;
-					currElement->next = nextElement->next;
-					currElement->previous = nextElement;
-					nextElement->next = currElement;
-					if(file_poss->file.start == currElement)
+					
+					if(file->start != nextElement)
 					{
-						file_poss->file.start = nextElement;
+						nextElement = nextElement->previous;
+						position -= 2;
+					} else {
+						position = 0;
 					}
-					if(file_poss->file.end == nextElement)
-					{
-						file_poss->file.end = currElement;
-					}
-                    /*
-                     if(check_file(intf)){
-                     printf("--datas--\n");
-                     print_file(intf);
-                     printf("--\n");
-                     printf("On file:%i curr:",intf);
-                     print_possibility_packet(currElement->value);
-                     printf("On file:%i next:",intf);
-                     print_possibility_packet(nextElement->value);
-                     printf("On file:%i start:",intf);
-                     print_possibility_packet(file_poss->file.start->value);
-                     printf("On file:%i end:",intf);
-                     print_possibility_packet(file_poss->file.end->value);
-                     exit(EXIT_FAILURE);
-                     }
-                     */
-                    if(file_poss->file.start != nextElement)
-					{
-                        nextElement = nextElement->previous;
-						
-                    }
 					
 				}
 			}
@@ -1391,7 +1403,7 @@ void *sort_d_mono(void *f)
 		
 		currElement = nextElement;
 	}
-	
+	printf("--100\n");
 	printf("end sort d file:%i\n",*(int *)f);
 	return NULL;
 }
