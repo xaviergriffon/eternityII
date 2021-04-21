@@ -2,10 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#ifdef WIN32
-#include <winsock2.h>
-#define sleep(s) Sleep(s*1000)
-#else
 #include <sys/times.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -13,14 +9,6 @@
 #include <arpa/inet.h>
 #include <unistd.h> /* close */
 #include <netdb.h> /* gethostbyname */
-#define INVALID_SOCKET -1
-#define SOCKET_ERROR -1
-#define closesocket(s) close(s)
-typedef int SOCKET;
-typedef struct sockaddr_in SOCKADDR_IN;
-typedef struct sockaddr SOCKADDR;
-typedef struct in_addr IN_ADDR;
-#endif
 
 #include "tcpclient.h"
 #include "static_variables.h"
@@ -77,7 +65,7 @@ int create_tcp_client(const char *hostname, int port)
 		if(-1 == (connect(socket_id, (struct sockaddr *)&sockname, sizeof(struct sockaddr_in))))
 		{
 			fprintf(stderr, "The socket can not connect to server '%s' attempt:%i\n", hostname,t);
-			closesocket(socket_id);
+			close(socket_id);
 #ifdef DEBUG_SOCKET
 			opened_tcp--;
 #endif // DEBUG_SOCKET

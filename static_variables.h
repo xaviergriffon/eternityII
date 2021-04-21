@@ -1,12 +1,7 @@
 #ifndef static_variables_h
 #define static_variables_h
 
-#ifdef WIN32
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-#else
 #include <stdint.h>
-#endif
 #include <unistd.h>
 #include <ctype.h>
 #include <sys/un.h>

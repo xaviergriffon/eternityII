@@ -3,10 +3,6 @@
 
 #include "possibility.h"
 
-#ifdef WIN32
-#include <stdint.h>
-#endif
-
 #define INST_ERROR -1
 #define INST_ADD 1
 #define INST_GET 2
@@ -20,13 +16,12 @@
 #define INST_SUPPORTED_VERSION 10
 #define INST_UNSUPPORTED_VERSION 11
 
-PACK(
-struct packet
+typedef struct
 {
     uint8_t instruction;
     struct possibility_packet possibility;
     
-});
+} __attribute__((__packed__)) packet;
 
 int8_t recv_instruction(int socket_id);
 

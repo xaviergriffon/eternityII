@@ -1,26 +1,18 @@
 #ifndef eternityII_possibility_h
 #define eternityII_possibility_h
 
-#ifdef WIN32
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-#else
 #include <stdint.h>
-#endif
 
 #include "part.h"
 #include "lifo.h"
 #include "packed.h"
 #include "static_variables.h"
 
-
 #define DIR_UP 1
 #define DIR_RIGHT 2
 #define DIR_DOWN 3
 #define DIR_LEFT 4
  
-
-PACK(
  struct possibility_packet
  {
  uint8_t x;
@@ -32,7 +24,7 @@ PACK(
  #else
  uint8_t faceused[ETERN_PARTS];
  #endif // FACES_USED_BITS
- });
+ } __attribute__((__packed__));
 
 typedef struct
 {

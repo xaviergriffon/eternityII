@@ -1,14 +1,9 @@
 #ifndef eternityII_part_h
 #define eternityII_part_h
 
-#include "packed.h"
-#ifdef WIN32
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-#else
 #include <stdint.h>
-#endif
 
+#include "packed.h"
 
 #define PART_NONE -1
 #define PART_TOP 0
@@ -19,14 +14,14 @@ typedef unsigned short uint16_t;
 #define MAX_KEY_LENGTH 12
 #define MAX_FACE_MAP 24
 
-PACK(
-	 typedef struct
+
+typedef struct
 {
     int8_t k1;
     int8_t k2;
 	int8_t k3;
 	int8_t k4;
-}) key_part;
+} __attribute__((__packed__)) key_part;
 
 struct part
 {
