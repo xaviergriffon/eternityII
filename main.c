@@ -1,45 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
-#include <time.h>
 
-#ifdef WIN32
-#include <winsock2.h>
-#define sleep(s) Sleep(s*1000)
-#include <windows.h>
-
-void usleep(int waitTime) {
-	__int64 time1 = 0, time2 = 0, freq = 0;
-	
-	QueryPerformanceCounter((LARGE_INTEGER *)&time1);
-	QueryPerformanceFrequency((LARGE_INTEGER *)&freq);
-	
-	do {
-		QueryPerformanceCounter((LARGE_INTEGER *)&time2);
-	} while ((time2 - time1) < waitTime);
-}
-#else
-#include <sys/times.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h> /* close */
-#include <netdb.h> /* gethostbyname */
-#include <sys/stat.h>
-#include <sys/un.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <errno.h>
-#define INVALID_SOCKET -1
-#define SOCKET_ERROR -1
-#define closesocket(s) close(s)
-typedef int SOCKET;
-typedef struct sockaddr_in SOCKADDR_IN;
-typedef struct sockaddr SOCKADDR;
-typedef struct in_addr IN_ADDR;
-#endif
 
 #include "static_variables.h"
 #include "console.h"

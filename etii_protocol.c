@@ -1,9 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef WIN32
-#include <winsock2.h>
-#else
+
 #include <sys/times.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -12,14 +10,7 @@
 #include <unistd.h> /* close */
 #include <netdb.h> /* gethostbyname */
 #include <errno.h>
-#define INVALID_SOCKET -1
-#define SOCKET_ERROR -1
-#define closesocket(s) close(s)
-typedef int SOCKET;
-typedef struct sockaddr_in SOCKADDR_IN;
-typedef struct sockaddr SOCKADDR;
-typedef struct in_addr IN_ADDR;
-#endif
+
 #include "etii_protocol.h"
 
 int8_t recv_instruction(int socket_id)
@@ -72,7 +63,7 @@ int is_connected(int socket_id) {
 		opened_tcp--;
 #endif // DEBUG_SOCKET
 		shutdown(socket_id, 2);
-		closesocket(socket_id);
+        close(socket_id);
 		return 0;
 	}
 	result = recv_instruction(socket_id);
@@ -82,7 +73,7 @@ int is_connected(int socket_id) {
 		opened_tcp--;
 #endif // DEBUG_SOCKET
 		shutdown(socket_id, 2);
-		closesocket(socket_id);
+        close(socket_id);
 		return 0;
 	}
 	// Le serveur nous retourne qu'il met fin
@@ -92,7 +83,7 @@ int is_connected(int socket_id) {
 		opened_tcp--;
 #endif // DEBUG_SOCKET
 		shutdown(socket_id, 2);
-		closesocket(socket_id);
+        close(socket_id);
 		return 0;
 	}
 	if (result != INST_TEST_CONNECTED) {
@@ -104,7 +95,7 @@ int is_connected(int socket_id) {
 void close_socket(int socket_id) {
 	send_instruction(socket_id, INST_END);
 	shutdown(socket_id, 2);
-	int err = closesocket(socket_id);
+	int err = close(socket_id);
 #ifdef DEBUG_SOCKET
 	opened_tcp--;
 #endif // DEBUG_SOCKET
