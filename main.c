@@ -29,6 +29,7 @@ void usleep(int waitTime) {
 #include <netdb.h> /* gethostbyname */
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <signal.h>
 #include <errno.h>
 #define INVALID_SOCKET -1
@@ -235,7 +236,7 @@ int run_fork_checker(struct sockaddr_un *main_addr)
 int init_compteurs()
 {
 	compteurs = malloc(sizeof(unsigned long long) * NB_THREADS);
-	lastfilesize = malloc(sizeof(int) * NB_THREADS);
+	lastfilesize = malloc(sizeof(unsigned long long) * NB_THREADS);
 	
 	for(int c = 0; c < NB_THREADS;c++)
 	{

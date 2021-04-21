@@ -317,7 +317,7 @@ int do_command_line(char *command) {
     if (command != NULL && strlen(command) > 0) {
         size_t command_length = strlen(command) + 1;
         char *toSplit = malloc(sizeof(char) * command_length);
-        strncpy(toSplit, command, command_length);
+        memcpy(toSplit, command, command_length);
         char *instruction = strtok(toSplit, " ");
         command_description *command_desc = find_command(instruction);
         if (command_desc != NULL) {

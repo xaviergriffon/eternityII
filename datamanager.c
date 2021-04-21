@@ -597,37 +597,31 @@ array_possibility_packet *get_last_possibility(client_possibility_t *client_poss
 	return result;
 }
 
-int file_size(int nfile)
+unsigned long long file_size(int nfile)
 {
-	int result = -1;
 	if(nfile >= 0 && nfile < NB_FILE_POSSIBILITY)
 	{
-		result = file_possibility[nfile].file.size;
+		return file_possibility[nfile].file.size;
 	}
-	return result;
+    return 0;
 }
 
-int file_analysed_size(int nfile)
+unsigned long long file_analysed_size(int nfile)
 {
-	int result = -1;
 	if(nfile >= 0 && nfile < NB_FILE_POSSIBILITY)
 	{
-		result = file_possibility_analysed[nfile].file.size;
+		return file_possibility_analysed[nfile].file.size;
 	}
-	return result;
+	return 0;
 }
 
-int datas_size()
+unsigned long long datas_size()
 {
-	int result = 0;
+    unsigned long long result = 0;
 	int f;
 	for(f=0; f < NB_FILE_POSSIBILITY; f++)
 	{
-		int fsize = file_size(f);
-		if(fsize >0)
-		{
-			result = result + fsize;
-		}
+        result += file_size(f);
 	}
 	return result;
 }
@@ -975,7 +969,7 @@ int printdatamanager()
 
 int print_file_analysed(int fp)
 {
-	printf("file_analysed %i, size:%i\n", fp, file_possibility_analysed[fp].file.size);
+	printf("file_analysed %i, size:%llu\n", fp, file_possibility_analysed[fp].file.size);
     Element *currElement = file_possibility_analysed[fp].file.start;
     while(currElement != NULL)
     {
@@ -1005,10 +999,10 @@ int print_all_file_analysed()
 	return 0;
 }
 
-int regroup_datas_nolock()
+unsigned long long regroup_datas_nolock()
 {
 	int fp;
-	int size = file_possibility[0].file.size;
+    unsigned long long size = file_possibility[0].file.size;
 	struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
 	for (fp=1; fp < NB_FILE_POSSIBILITY; fp++)
 	{
@@ -1025,7 +1019,7 @@ int regroup_datas_nolock()
 		}
         
 	}
-    printf("regroup size :%i\n",size);
+    printf("regroup size :%llu\n",size);
 	free(packet);
 	packet = NULL;
 	return 0;
@@ -1111,8 +1105,8 @@ int split_datas_nolock(int nbsplit)
 		}
 	}
 	
-	div_t d = div(file->size, nbsplit);
-	int quotient = d.quot;
+	lldiv_t d = lldiv(file->size, nbsplit);
+	long long quotient = d.quot;
 	if(d.rem != 0)
 	{
 		quotient++;
@@ -1153,7 +1147,8 @@ int split_datas()
 int check_datas()
 {
 	lock_all_file();
-	int count=0;
+	int count = 0;
+    int errors = 0;
 	int fp;
 	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
 	{
@@ -1167,8 +1162,7 @@ int check_datas()
 				printf("possibility error : %i\n",analyse);
 				printf(" ---");
 				print_possibility_packet((struct possibility_packet *)currElement->value);
-				unlock_all_file();
-				return -1;
+                errors++;
 			}
 			currElement = currElement->next;
 		}
@@ -1176,8 +1170,8 @@ int check_datas()
 	
 	unlock_all_file();
 	
-	printf("check_datas analyses:%i\n",count);
-	return 0;
+	printf("check_datas errors %i on %i\n", errors, count);
+    return errors > 0 ? -1 : 0;
 }
 
 int statistic_datas(void)
@@ -1243,53 +1237,84 @@ int search_min_datas()
 // TODO : revoir le trie pour prendre en compte le cache
 int sort_ascending(void)
 {
-	
+	// on bloque les files le temps du trie
 	lock_all_file();
+	// regroupement pour ne parcourir qu'une seule file
 	regroup_datas_nolock();
-	Element *currElement = file_possibility[0].file.start;
+
+	// Tableau d'éléments permettants d'avoir des repaires d'éléments classés
+	// On mémorise par nb possibilités allouées.
+	Element **orderedLair = malloc(sizeof(Element*) * (ETERN_PARTS +1));
+	for (int l = 0; l < ETERN_PARTS +1; l++) {
+		orderedLair[l] = NULL;
+	}
+	
+	File *file = &file_possibility[0].file;
+	unsigned long long position = 0;
+	int percent = 0;
+	unsigned long long fivePercent = file->size * 0.05;
+	unsigned long long nextShow = fivePercent;
+
+	printf("0");
+	fflush(stdout);
+
+	Element *currElement = file->start;
 	while (currElement != NULL)
 	{
+		position++;
+		if (position >= nextShow) {
+			nextShow += fivePercent;
+			percent += 5;
+			printf("--%i", percent);
+			fflush(stdout);
+		}
+
 		Element *nextElement = currElement->next;
-		if(nextElement != NULL && currElement->value != NULL)
-		{
-			if(nextElement->value != NULL)
-			{
-				struct possibility_packet *curr = currElement->value;
+		if (currElement->value != NULL) {
+			struct possibility_packet *curr = currElement->value;
+			int currAlloc = curr->alloc;
+			if (orderedLair[currAlloc] == NULL) {
+				orderedLair[currAlloc] = currElement;
+			}
+
+			if(nextElement != NULL && nextElement->value != NULL)
+			{	
 				struct possibility_packet *next = nextElement->value;
+				int nextAlloc = next->alloc;
+				if (orderedLair[nextAlloc] == NULL) {
+					orderedLair[nextAlloc] = nextElement;
+				}
+
+				// Si l'élément n'est pas trié, on le place par rapport aux repaires
 				if(curr->alloc > next->alloc)
 				{
-					if(currElement->previous != NULL)
-					{
-						currElement->previous->next = nextElement;
+					// On essaye de voir si on peut le placer avant un "suivant"
+					Element *target = NULL;
+					for (int b = currAlloc +1; b < ETERN_PARTS+1 && target == NULL; b++) {
+						target = orderedLair[b];
 					}
-					if(nextElement->next != NULL)
-					{
-						nextElement->next->previous = currElement;
-					}
-					nextElement->previous = currElement->previous;
-					currElement->next = nextElement->next;
-					currElement->previous = nextElement;
-					nextElement->next = currElement;
-					if(file_possibility[0].file.start == currElement)
-					{
-						file_possibility[0].file.start = nextElement;
-					}
-					if(file_possibility[0].file.end == nextElement)
-					{
-						file_possibility[0].file.end = currElement;
+					if (target != NULL) {
+						move_before(file, currElement, target);
+					} else {
+						// Pas de suivant, on place donc à la fin de la suite
+						move_after(file, currElement, file->end);
 					}
 					
-                    if(file_possibility[0].file.start != nextElement)
+					if(file->start != nextElement)
 					{
-                        nextElement = nextElement->previous;
-                        
-                    }
+						nextElement = nextElement->previous;
+						position -= 2;
+					} else {
+						position = 0;
+					}
+					
 				}
 			}
 		}
 		
 		currElement = nextElement;
 	}
+	printf("--100\n");
 	unlock_all_file();
 	return 0;
 }
@@ -1298,60 +1323,73 @@ void *sort_d_mono(void *f)
 {
     int intf = *(int *)f;
 	printf("sort d file:%i\n",intf);
+
+	// Tableau d'éléments permettants d'avoir des repaires d'éléments classés
+	// On mémorise par nb possibilités allouées.
+	Element **orderedLair = malloc(sizeof(Element*) * (ETERN_PARTS +1));
+	for (int l = 0; l < ETERN_PARTS +1; l++) {
+		orderedLair[l] = NULL;
+	}
+	
 	file_possibility_t *file_poss =&file_possibility[intf];
-	Element *currElement = file_poss->file.start;
+	File *file = &file_poss->file;
+	unsigned long long position = 0;
+	int percent = 0;
+	unsigned long long fivePercent = file->size * 0.05;
+	unsigned long long nextShow = fivePercent;
+
+	printf("0");
+	fflush(stdout);
+
+	Element *currElement = file->start;
 	while (currElement != NULL)
 	{
+		position++;
+		if (position >= nextShow) {
+			nextShow += fivePercent;
+			percent += 5;
+			printf("--%i", percent);
+			fflush(stdout);
+		}
+
 		Element *nextElement = currElement->next;
-		if(nextElement != NULL && currElement->value != NULL)
-		{
-			if(nextElement->value != NULL)
-			{
-				struct possibility_packet *curr = currElement->value;
+		if (currElement->value != NULL) {
+			struct possibility_packet *curr = currElement->value;
+			int currAlloc = curr->alloc;
+			if (orderedLair[currAlloc] == NULL) {
+				orderedLair[currAlloc] = currElement;
+			}
+
+			if(nextElement != NULL && nextElement->value != NULL)
+			{	
 				struct possibility_packet *next = nextElement->value;
+				int nextAlloc = next->alloc;
+				if (orderedLair[nextAlloc] == NULL) {
+					orderedLair[nextAlloc] = nextElement;
+				}
+
+				// Si l'élément n'est pas trié, on le place par rapport aux repaires
 				if(curr->alloc < next->alloc)
 				{
-					if(currElement->previous != NULL)
-					{
-						currElement->previous->next = nextElement;
+					// On essaye de voir si on peut le placer avant un "précédent" repaire
+					Element *target = NULL;
+					for (int b = currAlloc -1; b > 0 && target == NULL; b--) {
+						target = orderedLair[b];
 					}
-					if(nextElement->next != NULL)
-					{
-						nextElement->next->previous = currElement;
+					if (target != NULL) {
+						move_before(file, currElement, target);
+					} else {
+						// Pas de précédent, on place donc à la fin de la suite car est le plus petit
+						move_after(file, currElement, file->end);
 					}
-					nextElement->previous = currElement->previous;
-					currElement->next = nextElement->next;
-					currElement->previous = nextElement;
-					nextElement->next = currElement;
-					if(file_poss->file.start == currElement)
+					
+					if(file->start != nextElement)
 					{
-						file_poss->file.start = nextElement;
+						nextElement = nextElement->previous;
+						position -= 2;
+					} else {
+						position = 0;
 					}
-					if(file_poss->file.end == nextElement)
-					{
-						file_poss->file.end = currElement;
-					}
-                    /*
-                     if(check_file(intf)){
-                     printf("--datas--\n");
-                     print_file(intf);
-                     printf("--\n");
-                     printf("On file:%i curr:",intf);
-                     print_possibility_packet(currElement->value);
-                     printf("On file:%i next:",intf);
-                     print_possibility_packet(nextElement->value);
-                     printf("On file:%i start:",intf);
-                     print_possibility_packet(file_poss->file.start->value);
-                     printf("On file:%i end:",intf);
-                     print_possibility_packet(file_poss->file.end->value);
-                     exit(EXIT_FAILURE);
-                     }
-                     */
-                    if(file_poss->file.start != nextElement)
-					{
-                        nextElement = nextElement->previous;
-						
-                    }
 					
 				}
 			}
@@ -1359,7 +1397,7 @@ void *sort_d_mono(void *f)
 		
 		currElement = nextElement;
 	}
-	
+	printf("--100\n");
 	printf("end sort d file:%i\n",*(int *)f);
 	return NULL;
 }
@@ -1387,7 +1425,7 @@ int check_file(int f)
 	}
 	
 	// test que la fin correspond à la taille
-	int t;
+	unsigned long long t;
 	Element *currElement = file_poss.file.start;
 	Element *lastElement = currElement;
 	for(t=0; t < file->size && currElement != NULL;t++)
@@ -1402,11 +1440,11 @@ int check_file(int f)
 	
 	if(currElement != NULL)
 	{
-		printf("File:%i last analysed element is not null | file.size:%i analysed:%i",f,file->size, t);
+		printf("File:%i last analysed element is not null | file.size:%llu analysed:%llu",f,file->size, t);
 		result = -1;
 	}
 	if (t != file->size || lastElement != file->end) {
-		printf("File:%i end not correspond to the size:%i analysed:%i\n",f,file->size,t);
+		printf("File:%i end not correspond to the size:%llu analysed:%llu\n",f,file->size,t);
 		result=-1;
 	}
 	return result;

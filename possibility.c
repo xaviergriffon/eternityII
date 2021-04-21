@@ -95,7 +95,6 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 #else
                 result->faceused[part->id-1] = 1;
 #endif
-				result->alloc++;
 			} else
 			{
 				result->grid[l][h] = -2;
@@ -761,7 +760,6 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
 
 int search_possiblity_light_with_big_table(big_table *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4])
 {
-    int max_result=0;
     uint8_t x;
     uint8_t y;
     
@@ -1003,6 +1001,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
     if(part != NULL) {
         etern[x][y] = part;
         
+#if ETERN_WITH_INDICES
         // 208 C3 -- rotation 3
         // 1 13 12 3
         key_part k208 = {13,12,3,1};
@@ -1051,7 +1050,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         // et sur l'angle en bas à droite
         x = ETERN_SIZE -1;
         y = ETERN_SIZE -1;
-        
+#endif
     } else
     {
         cur_dir = DIR_LEFT;

@@ -12,30 +12,35 @@ typedef struct ElementList{
 typedef struct ListeRepere{
 	Element *start;
 	Element *end;
-	int size;
-	int cacheSize;
+	unsigned long long size;
+	unsigned long long cacheSize;
 	Element *cacheElement;
     Element * cacheEndPosition;
-	long lastPostionCache;
+	unsigned long long lastPostionCache;
 	size_t sizeofvalue;
 } File;
 
 typedef struct BigTable {
     void *value;
-    int size;
-    int realsize;
+    unsigned long long size;
+    unsigned long long realsize;
     size_t sizeofvalue;
     int incrementSize;
 } big_table;
 
 /* initialisation */
-void init_file_with_cache(File *suite, int cacheSize, size_t sizeofvalue);
+void init_file_with_cache(File *suite, unsigned long long cacheSize, size_t sizeofvalue);
 void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue);
 
 /* ENFILER*/
 int put (File * suite, void *value);
 
 void *put_big_table(big_table *table, void *value);
+
+// Positionne l'élément avant la cible
+void move_before(File *suite, Element *element, Element *target);
+// Positionne l'élément après la cible
+void move_after(File *suite, Element *element, Element *target);
 
 /* DE_FILER*/
 int scroll (File * suite, void *dest);

@@ -12,10 +12,10 @@ void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibil
     if(db->size > max_stock_by_thread)
     {
         array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-        int reste = db->size - max_stock_by_thread;
+        unsigned long long remains = db->size - max_stock_by_thread;
         aposs->possibilities = malloc(sizeof(struct possibility_packet) * (max_stock_by_thread));
         aposs->size = 0;
-        while(db->size > reste)
+        while(db->size > remains)
         {
             scroll(db, &aposs->possibilities[aposs->size]);
             
@@ -39,10 +39,10 @@ void checkAndDelegatePossibilitiesIfNeeded_with_big_table(client_possibility_t *
     if(bt->size > max_stock_by_thread)
     {
         array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-        int reste = bt->size - max_stock_by_thread;
+        unsigned long long remains = bt->size - max_stock_by_thread;
         aposs->possibilities = malloc(sizeof(struct possibility_packet) * (max_stock_by_thread));
         aposs->size = 0;
-        while(bt->size > reste)
+        while(bt->size > remains)
         {
             scroll_big_table(bt, &aposs->possibilities[aposs->size]);
             

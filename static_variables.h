@@ -12,7 +12,7 @@ typedef unsigned short uint16_t;
 #include <sys/un.h>
 #include "etii_statistic.h"
 
-#define VERSION 3
+#define VERSION 4
 
 #define NB_CONNECTIONS_PAR_THREAD 1
 #define MICRO_SLEEP 100
@@ -27,6 +27,7 @@ typedef unsigned short uint16_t;
 #define DEFAULT_TCP_TIMEOUT 10
 
 #define ETERN_PARTS 256
+//#define ETERN_WITH_INDICES 1
 #if ETERN_PARTS == 256
 #define ETERN_SIZE 16
 #define FACES_USED_SIZE 17// (ETERN_PARTS / 16) + 1;
@@ -61,7 +62,7 @@ extern uint8_t diry[ETERN_PARTS];
 extern int NB_THREADS;
 
 extern unsigned long long *compteurs;
-extern int *lastfilesize;
+extern unsigned long long *lastfilesize;
 
 extern uint16_t max_result;
 extern char *lastcheck;

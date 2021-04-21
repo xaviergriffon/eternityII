@@ -261,9 +261,9 @@ void *check_client_threads(void *param)
         int f;
         for(f=0; f < NB_FILE_POSSIBILITY; f++)
         {
-            int f_size = file_size(f);
+            unsigned long long f_size = file_size(f);
             char *temp = calloc(1000, sizeof(char));
-            sprintf(temp, "file:%i stock:%i\n",f,f_size);
+            sprintf(temp, "file:%i stock:%llu\n", f, f_size);
             strcat(lastcheck, temp);
             free(temp);
             file_possibility_stock = file_possibility_stock + f_size;
@@ -273,7 +273,7 @@ void *check_client_threads(void *param)
         for(f=0; f < NB_THREADS; f++)
         {
             char *temp = calloc(1000, sizeof(char));
-            sprintf(temp, "Fork %i file size:%i\n", f, fork_statistics[f].possibilities_in_stock);
+            sprintf(temp, "Fork %i file size:%llu\n", f, fork_statistics[f].possibilities_in_stock);
             strcat(lastcheck, temp);
             free(temp);
             if (fork_statistics[f].max_result > max_result) {
