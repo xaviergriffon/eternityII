@@ -71,7 +71,7 @@ int put (File * suite, void *value){
 		suite->lastPostionCache++;
 	} else
 	{
-		
+		// TODO : voir pour éviter de faire dans le put
         if (suite->sizeofvalue <= 0) {
 			free (new_element);
 			return 0;

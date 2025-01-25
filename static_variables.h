@@ -45,7 +45,7 @@
 // Trace les informations pour les sockets locale
 //#define DEBUG_LOCAL_SOCKET
 // Passe en mono-process pour pouvoir débeugger
-//#define DEBUG_IN_MONO_PROCESS
+#define DEBUG_IN_MONO_PROCESS
 // ------------------------------------------------
 #define FACES_USED_BITS
 extern uint8_t directions[ETERN_PARTS];
@@ -53,7 +53,9 @@ extern uint8_t directions[ETERN_PARTS];
 extern uint8_t dirx[ETERN_PARTS];
 
 extern uint8_t diry[ETERN_PARTS];
-
+/**
+ * @brief  Nombre de threads clients
+ */
 extern int NB_THREADS;
 
 extern unsigned long long *compteurs;
@@ -70,8 +72,6 @@ extern unsigned long long getted_possibility_not_null;
 extern int request;
 
 extern long inst_unknow;
-
-extern int NB_THREADS;
 
 extern int version;
 

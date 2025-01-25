@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		4721E6682735C0630098008D /* logger.c in Sources */ = {isa = PBXBuildFile; fileRef = 4721E667273518820098008D /* logger.c */; };
 		4781C2762549DBFE0065D6D0 /* etii_server.c in Sources */ = {isa = PBXBuildFile; fileRef = 4781C2572549DBFD0065D6D0 /* etii_server.c */; };
 		4781C2772549DBFE0065D6D0 /* tcpserver.c in Sources */ = {isa = PBXBuildFile; fileRef = 4781C2592549DBFD0065D6D0 /* tcpserver.c */; };
 		4781C2782549DBFE0065D6D0 /* possibility.c in Sources */ = {isa = PBXBuildFile; fileRef = 4781C25B2549DBFD0065D6D0 /* possibility.c */; };
@@ -38,6 +39,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		4721E6662735150F0098008D /* logger.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = logger.h; sourceTree = "<group>"; };
+		4721E667273518820098008D /* logger.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = logger.c; sourceTree = "<group>"; };
 		4781C2572549DBFD0065D6D0 /* etii_server.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = etii_server.c; sourceTree = "<group>"; };
 		4781C2582549DBFD0065D6D0 /* possibility.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = possibility.h; sourceTree = "<group>"; };
 		4781C2592549DBFD0065D6D0 /* tcpserver.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = tcpserver.c; sourceTree = "<group>"; };
@@ -47,7 +50,6 @@
 		4781C25D2549DBFD0065D6D0 /* static_variables.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = static_variables.h; sourceTree = "<group>"; };
 		4781C25E2549DBFD0065D6D0 /* datamanager.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = datamanager.c; sourceTree = "<group>"; };
 		4781C25F2549DBFD0065D6D0 /* README.md */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
-		4781C2602549DBFD0065D6D0 /* directions.csv */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = directions.csv; sourceTree = "<group>"; };
 		4781C2612549DBFD0065D6D0 /* tcpclient.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = tcpclient.c; sourceTree = "<group>"; };
 		4781C2622549DBFD0065D6D0 /* tcpclient.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = tcpclient.h; sourceTree = "<group>"; };
 		4781C2632549DBFD0065D6D0 /* tcpserver.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = tcpserver.h; sourceTree = "<group>"; };
@@ -67,7 +69,6 @@
 		4781C2712549DBFE0065D6D0 /* etii_search.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = etii_search.h; sourceTree = "<group>"; };
 		4781C2722549DBFE0065D6D0 /* readdata.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = readdata.h; sourceTree = "<group>"; };
 		4781C2732549DBFE0065D6D0 /* part.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = part.c; sourceTree = "<group>"; };
-		4781C2742549DBFE0065D6D0 /* packed.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = packed.h; sourceTree = "<group>"; };
 		4781C2752549DBFE0065D6D0 /* part.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = part.h; sourceTree = "<group>"; };
 		4781C2912549ED6B0065D6D0 /* eternityII */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = eternityII; sourceTree = BUILT_PRODUCTS_DIR; };
 		479C0939256AD4FF000163EE /* etii_statistic.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = etii_statistic.h; sourceTree = "<group>"; };
@@ -99,6 +100,8 @@
 		4792035B17B94EDE00B9DD3C = {
 			isa = PBXGroup;
 			children = (
+				4721E667273518820098008D /* logger.c */,
+				4721E6662735150F0098008D /* logger.h */,
 				479C0939256AD4FF000163EE /* etii_statistic.h */,
 				47BEE79C256821230047C348 /* command_lines.h */,
 				47BEE79D256821230047C348 /* command_lines.c */,
@@ -108,7 +111,6 @@
 				4781C26B2549DBFD0065D6D0 /* console.h */,
 				4781C25E2549DBFD0065D6D0 /* datamanager.c */,
 				4781C2662549DBFD0065D6D0 /* datamanager.h */,
-				4781C2602549DBFD0065D6D0 /* directions.csv */,
 				4781C26C2549DBFD0065D6D0 /* etii_client.c */,
 				4781C2672549DBFD0065D6D0 /* etii_client.h */,
 				4781C26E2549DBFE0065D6D0 /* etii_protocol.c */,
@@ -120,7 +122,6 @@
 				4781C25C2549DBFD0065D6D0 /* lifo.c */,
 				4781C25A2549DBFD0065D6D0 /* lifo.h */,
 				4781C2682549DBFD0065D6D0 /* main.c */,
-				4781C2742549DBFE0065D6D0 /* packed.h */,
 				4781C2732549DBFE0065D6D0 /* part.c */,
 				4781C2752549DBFE0065D6D0 /* part.h */,
 				4781C2692549DBFD0065D6D0 /* pieces.csv */,
@@ -191,6 +192,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4721E6682735C0630098008D /* logger.c in Sources */,
 				47D25A5625658F080025E241 /* local_socket.c in Sources */,
 				4781C2812549DBFE0065D6D0 /* etii_protocol.c in Sources */,
 				4781C27E2549DBFE0065D6D0 /* console.c in Sources */,

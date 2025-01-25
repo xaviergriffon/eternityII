@@ -23,6 +23,7 @@
 #include "local_socket.h"
 #include "command_lines.h"
 #include "etii_statistic.h"
+#include "logger.h"
 
 void runclient(const char *hostname, const char *file)
 {
@@ -60,9 +61,9 @@ void runauto(const char *file)
 }
 
 
-void failed_arg()
+void failed_arg(void)
 {
-	printf("Indiquer parametre suivant :\ntcpserver [nombre de threads] [pieces.csv]\ntcpclient [serveur] [pieces.csv]\n");
+	log_error("Indiquer parametre suivant :\ntcpserver [nombre de threads] [pieces.csv]\ntcpclient [serveur] [pieces.csv]\n");
 }
 
 int run_checker(int server)
@@ -84,7 +85,7 @@ int run_checker(int server)
 	
 	if(0 != pthread_create(&thread, NULL, method, NULL))
 	{
-		fprintf(stderr, "Problème avec pthread_create()\n");
+		log_error("Problème avec pthread_create()\n");
 		free(thread_attributes);
 		exit(EXIT_FAILURE);
 	}
@@ -101,12 +102,12 @@ void *fork_checker(void *param) {
     socket_fork[sp_len] = '\0';
     struct sockaddr_un *fork_addr = build_sockaddr(socket_fork);
 #ifdef DEBUG_LOCAL_SOCKET
-    printf("socket fork : %s\n", socket_fork);
+    log_debug("socket fork : %s\n", socket_fork);
 #endif // DEBUG_LOCAL_SOCKET
-    fork_checker_socket_id = create_udp_local_socket(fork_addr);
+    fork_checker_socket_id = build_udp_local_socket(fork_addr);
     free(fork_addr);
 
-	printf("fork_checker_socket_id: %i\n", fork_checker_socket_id);
+	log_info("fork_checker_socket_id: %i\n", fork_checker_socket_id);
 	if (fork_checker_socket_id > 0) {
 		int *so = &fork_checker_socket_id;
 		run_fork_thread(so);
@@ -168,7 +169,7 @@ void *fork_checker(void *param) {
                                sizeof(struct sockaddr_un))
 #ifdef DEBUG_LOCAL_SOCKET
            != sizeof(struct client_statistics) ) {
-            printf("fork_checker cl %d error %i sendto : %s\n", getpid(), errno, strerror(errno));
+            log_debug("fork_checker cl %d error %i sendto : %s\n", getpid(), errno, strerror(errno));
         }
 #else
         ;
@@ -189,7 +190,7 @@ int run_fork_checker(struct sockaddr_un *main_addr)
 	
 	if(0 != pthread_create(&thread, thread_attributes, fork_checker, main_addr))
 	{
-		fprintf(stderr, "Problème avec pthread_create()\n");
+		log_error("Problème avec pthread_create()\n");
 		free(thread_attributes);
 		exit(EXIT_FAILURE);
 	}
@@ -198,7 +199,7 @@ int run_fork_checker(struct sockaddr_un *main_addr)
 	return 0;
 }
 
-int init_compteurs()
+int init_compteurs(void)
 {
 	compteurs = malloc(sizeof(unsigned long long) * NB_THREADS);
 	lastfilesize = malloc(sizeof(unsigned long long) * NB_THREADS);
@@ -212,11 +213,17 @@ int init_compteurs()
 	return 0;
 }
 
+void signal_ignored(int sig) {
+#ifdef DEBUG_SIGNAL
+    log_debug("catch signal %s\n", strsignal(sig));
+#endif
+}
+
 void signal_end_handler(int sig)
 {
 #ifdef DEBUG_SIGNAL
-    printf("receive signal : %i\n", sig);
-    fflush(stdout);
+    log_console("receive signal : %i\n", sig);
+    flush_console();
 #endif // DEBUG_SIGNAL
 	request = REQUEST_STOP;
     if (childrens_pid != NULL && parent_pid == getpid()) {
@@ -238,49 +245,51 @@ void sigchld_handler(int signal) {
 	// lecture du statut pour éviter les process zombie
 	int status = 0;
 #ifdef DEBUG_SIGNAL
+    log_debug("sigchld_handler\n");
 	pid_t wpid;
     while(0 < (wpid = waitpid(-1, &status, WNOHANG)));
-	printf("Exit status of %d was %d\n", (int)wpid, status);
+	log_debug("Exit status of %d was %d\n", (int)wpid, status);
 	if(WIFEXITED(status)) {
 		/* The child process exited normally */
-		printf("Exit value %d\n", WEXITSTATUS(status));
+		log_debug("Exit value %d\n", WEXITSTATUS(status));
 	} else if(WIFSIGNALED(status)) {
 		/* The child process was killed by a signal. Note the use of strsignal
 			to make the output human-readable. */
-		printf("Killed by %s\n", strsignal(WTERMSIG(status)));
+		log_debug("Killed by %s\n", strsignal(WTERMSIG(status)));
 	}
-    fflush(stdout);
+    flush_debug();
 #else
     while(0 < waitpid(-1, &status, WNOHANG));
 #endif // DEBUG_SIGNAL
 }
 
-void init_sigchld_sigaction() {
+void init_sigchld_sigaction(void) {
  	struct sigaction sa;
      //memset(&sa, 0, sizeof *sa);
      sa.sa_handler = sigchld_handler;
      sa.sa_flags = SA_SIGINFO|SA_RESTART;
      sigemptyset(&(sa.sa_mask));
      if (sigaction(SIGCHLD, &sa, NULL) != 0) {
-         fprintf(stderr, "Problème avec sigaction()\n");
+         log_error("Problème avec sigaction()\n");
          exit(EXIT_FAILURE);
      }
  }
 
-void wait_child() {
+void wait_child(void) {
  	
     int status = 0;
 #ifdef DEBUG_SIGNAL
+    log_debug("wait_child\n");
     pid_t wpid;
  	while ((wpid = wait(&status)) >= 0) {
-        printf("Exit status of %d was %d\n", (int)wpid, status);
+        log_debug("Exit status of %d was %d\n", (int)wpid, status);
  		if(WIFEXITED(status)) {
  			/* The child process exited normally */
- 			printf("Exit value %d\n", WEXITSTATUS(status));
+ 			log_debug("Exit value %d\n", WEXITSTATUS(status));
  		} else if(WIFSIGNALED(status)) {
  			/* The child process was killed by a signal. Note the use of strsignal
  				to make the output human-readable. */
- 			printf("Killed by %s\n", strsignal(WTERMSIG(status)));
+ 			log_debug("Killed by %s\n", strsignal(WTERMSIG(status)));
  		}
     }
 #else
@@ -303,13 +312,13 @@ void *server_udp(void *param) {
             if (request != REQUEST_STOP) {
                 if (errno == EBADF) {
 #ifdef DEBUG_LOCAL_SOCKET
-                    printf("srv error invalid descriptor on recvfrom\n");
-                    fflush(stdout);
+                    log_debug("srv error invalid descriptor on recvfrom\n");
+                    flush_debug();
 #endif // DEBUG_LOCAL_SOCKET
                     break;
                 }
-                printf("srv error %i on recvfrom\n", errno);
-                fflush(stdout);
+                log_errno("srv error on recvfrom => ");
+                flush_error();
             }
             continue;
         }
@@ -329,14 +338,14 @@ void *server_udp(void *param) {
 }
 
 void run_server_thread(int *socket_id) {
-    printf("srv  socket_id %i\n", *socket_id);
+    log_info("srv  socket_id %i\n", *socket_id);
     pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
     pthread_attr_init(thread_attributes);
     pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
     pthread_t thread;
     if(0 != pthread_create(&thread, thread_attributes, server_udp, socket_id))
         {
-            fprintf(stderr, "Problème avec pthread_create()\n");
+            log_error("Problème avec pthread_create()\n");
             free(thread_attributes);
             exit(EXIT_FAILURE);
         }
@@ -355,8 +364,8 @@ void *fork_udp(void *param) {
                             (struct sockaddr *) srv_addr, &len);
         if (numBytes == -1) {
             if (request != REQUEST_STOP) {
-                printf("cl error %i on recvfrom\n", errno);
-                fflush(stdout);
+                log_errno("cl error on recvfrom => ");
+                flush_error();
             }
             continue;
         }
@@ -369,14 +378,14 @@ void *fork_udp(void *param) {
 }
 
 void run_fork_thread(int *socket_id) {
-	printf("cl socket_id %i\n", *socket_id);
+	log_info("cl socket_id %i\n", *socket_id);
 	pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
     pthread_attr_init(thread_attributes);
     pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
     pthread_t thread;
     if(0 != pthread_create(&thread, thread_attributes, fork_udp, socket_id))
 	{
-		fprintf(stderr, "run_fork_thread Problème avec pthread_create()\n");
+		log_error("run_fork_thread Problème avec pthread_create()\n");
 		free(thread_attributes);
 		exit(EXIT_FAILURE);
 	}
@@ -384,7 +393,7 @@ void run_fork_thread(int *socket_id) {
 	free(thread_attributes);
 }
 
-void init_childs() {
+void init_childs(void) {
     childrens_pid = malloc(sizeof(pid_t) * NB_THREADS);
     forkId = malloc(sizeof(char *) * NB_THREADS);
     fork_statistics = malloc(sizeof(struct client_statistics) * NB_THREADS);
@@ -399,25 +408,26 @@ void init_childs() {
     }
 }
 
-void init_signals() {
+void init_signals(void) {
     // TODO : voir si besoin de tous
     signal(SIGINT, signal_end_handler);
     signal(SIGHUP, signal_end_handler);
     signal(SIGQUIT, signal_end_handler);
     signal(SIGKILL, signal_end_handler);
     signal(SIGTERM, signal_end_handler);
+    signal(SIGPIPE, signal_ignored);
 }
 
 int main(int argc, const char * argv[])
 {
 	parent_pid = getpid();
-	printf("Version %i", version);
+	log_info("Version %i", version);
 	
 	if (argc >= 2) {
 		lastcheck = calloc(2000, sizeof(char));
 		
 		if(strcmp("tcpclient", argv[1]) == 0) {
-			printf("client\n");
+			log_info("client\n");
             NB_THREADS = 1;
 			char *serverIp = "localhost";
 			if(argc >= 3){
@@ -436,10 +446,10 @@ int main(int argc, const char * argv[])
 			char socket_main[50];
 			sprintf(socket_main, "etii_main.%d", getpid());
 			main_addr = build_sockaddr(socket_main);
-			printf("socket main : %s\n", socket_main);
+			log_info("socket main : %s\n", socket_main);
 
 			int *socket_id = malloc(sizeof(int));
-			*socket_id = create_udp_local_socket(main_addr);
+			*socket_id = build_udp_local_socket(main_addr);
 			if (socket_id > 0) {
 				run_server_thread(socket_id);
 			}
@@ -484,8 +494,8 @@ int main(int argc, const char * argv[])
                         socket_fork[socket_fork_len] = '\0';
                         struct sockaddr_un *fork_addr = build_sockaddr(socket_fork);
 #ifdef DEBUG_LOCAL_SOCKET
-                        printf("remove : %s\n", fork_addr->sun_path);
-                        fflush(stdout);
+                        log_debug("remove : %s\n", fork_addr->sun_path);
+                        flush_debug();
 #endif // DEBUG_LOCAL_SOCKET
                         remove(fork_addr->sun_path);
                         free(fork_addr);
@@ -497,21 +507,21 @@ int main(int argc, const char * argv[])
  				wait_child();
                 close(*socket_id);
 #ifdef DEBUG_LOCAL_SOCKET
-                printf("remove : %s\n", main_addr->sun_path);
-                fflush(stdout);
+                log_debug("remove : %s\n", main_addr->sun_path);
+                flush_debug();
 #endif // DEBUG_LOCAL_SOCKET
                 remove(main_addr->sun_path);
  			}
             free(main_addr);
 		} else if (strcmp("tcpserver", argv[1]) == 0) {
-			printf("server\n");
+			log_info("server\n");
             server = 1;
             NB_THREADS = 80;
 			if(argc >= 3) {
-				printf("arg 2 : %s",argv[2]);
+				log_info("arg 2 : %s",argv[2]);
 				NB_THREADS = atoi(argv[2]);
 			}
-			printf("Nb threads : %i\n", NB_THREADS);
+			log_info("Nb threads : %i\n", NB_THREADS);
             init_childs();
             init_signals();
 			init_compteurs();

@@ -65,12 +65,13 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
  -4 alloc <= 0
  -5 alloc <> faceused
  */
-int check_possibility(struct possibility_packet *packet);
+int check_possibility(struct possibility_packet *packet, struct array_part *rotateParts);
 
 int test_directions(void);
 int decode_direction(void);
 
 int compare_possibility(struct possibility_packet *packet, struct possibility_packet *other_packet);
+int is_origin_of(struct possibility_packet *packet, struct possibility_packet *other_packet);
 
 array_possibility_packet *build_single_array_possibility_packet(struct possibility_packet *possibility);
 void free_array_possibility_packet(array_possibility_packet *possibilities);

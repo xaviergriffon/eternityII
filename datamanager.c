@@ -4,6 +4,7 @@
 #include <netdb.h> /* gethostbyname */
 #include <errno.h>
 
+#include "logger.h"
 #include "static_variables.h"
 #include "lifo.h"
 #include "datamanager.h"
@@ -82,10 +83,11 @@ char *get_server_ip()
 
 int check_and_connect_to_server(client_possibility_t *client_possibility) {
 	int socket_id = client_possibility->socket_id;
-	if (socket_id == -1 || is_connected(socket_id) == 0) {	
+    // Création de connexion si "non connecté" ou "si erreur lors du test"
+	if (socket_id == -1 || is_connected(socket_id) <= 0) {
 		if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
 		{
-			fprintf(stderr, "Erreur sur accept()\n");
+			log_errno("Erreur sur accept() => ");
 			return -1;
 		}
 
@@ -94,7 +96,7 @@ int check_and_connect_to_server(client_possibility_t *client_possibility) {
 		send(socket_id, &version, sizeof(int), 0);
 		int8_t result = recv_instruction(socket_id);
 		if (result != INST_SUPPORTED_VERSION) {
-			printf("Version not supported by server\n");
+			log_error("Version not supported by server\n");
 			close_socket(socket_id);
 			request = REQUEST_STOP;
 			return -1;
@@ -133,10 +135,10 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
 		struct possibility_packet *possibility = &possibilities->possibilities[t];
 		long result = send(socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
 		if (result <= 0) {
-			printf("problème put_to_server send : %i\n", errno);
+			log_errno("problème put_to_server send => ");
 		}
 		if(recv_instruction(socket_id) != INST_CONSIDERED) {
-			printf("problème de prise en compte du serveur\n");
+			log_error("problème de prise en compte du serveur\n");
 			array_possibility_packet *single_array = build_single_array_possibility_packet(possibility);
 			put_to_local(single_array);
 			free_array_possibility_packet(single_array);
@@ -201,11 +203,11 @@ int add_possibility(client_possibility_t *client_possibility, array_possibility_
 
 int remove_possibility_analysed(struct possibility_packet *possibility, int thread) {
 #ifdef DEBUG_CHECK_POSSIBILITY
-    int analyse = check_possibility(possibility);
+    int analyse = check_possibility(possibility, NULL);
     if (analyse < 0)
     {
-        printf("possibility error : %i\n",analyse);
-        printf(" ---");
+        log_debug("possibility error : %i\n",analyse);
+        log_debug(" ---");
         print_possibility_packet(possibility);
     }
 #endif // DEBUG_CHECK_POSSIBILITY
@@ -215,9 +217,9 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 		currfile = thread;
 	}
 #ifdef DEBUG_CHECK_POSSIBILITY
-	printf("a supprimer : \n");
+	log_debug("a supprimer : \n");
 	print_possibility_packet(possibility);
-	printf("en cours d'analyse:\n");
+    log_debug("en cours d'analyse:\n");
 	print_all_file_analysed();
 #endif // DEBUG_CHECK_POSSIBILITY
 
@@ -277,13 +279,13 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 				{
 					// On n'a pas retrouvé la possibilité
 #ifdef DEBUG_CHECK_POSSIBILITY
-					printf("non supprimée \n");
+					log_debug("non supprimée \n");
 #endif // DEBUG_CHECK_POSSIBILITY
 					return 1;
 				}
 			} else if (removed_possibility == 0) {
 #ifdef DEBUG_CHECK_POSSIBILITY
-				printf("non supprimée \n");
+                log_debug("non supprimée \n");
 #endif // DEBUG_CHECK_POSSIBILITY
 				// On n'a pas retrouvé la possibilité
 				return 1;
@@ -293,7 +295,7 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 		}
 	}
 #ifdef DEBUG_CHECK_POSSIBILITY
-	printf("après suppression (supprimer :%i) : \n", removed_possibility);
+    log_debug("après suppression (supprimer :%i) : \n", removed_possibility);
 	print_all_file_analysed();
 #endif // DEBUG_CHECK_POSSIBILITY
 	return 0;
@@ -333,18 +335,18 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 				send_instruction(socket_id, INST_POSSIBILITY_ANALYSED);
 				ssize_t result = send(socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
 				if (result < 0 ) {
-					printf("error when send_possibility_analysed : %i\n", errno);
+					log_errno("Error when send_possibility_analysed => ");
 					break;
 				}
 				if(recv_instruction(socket_id) != INST_CONSIDERED){
-					printf("possibility analyzed not taken into account :\n");
+					log_error("possibility analyzed not taken into account :\n");
 					struct tms t2;
 					times(&t2);
 					time_t t;
 					long tops = sysconf(_SC_CLK_TCK);
 					t = ((t2.tms_utime + t2.tms_stime)
 							- (client_possibility->start_socket.tms_utime + client_possibility->start_socket.tms_stime)) * 1000 / tops;
-					printf ("socket time : %ld\n", t);
+                    log_error ("socket time : %ld\n", t);
 					print_possibility_packet(possibility);
                     put(file, possibility);
 					break;
@@ -441,17 +443,17 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 		long r= recv(socket_id, (struct possibility_packet *)possibilityPacket, sizeof(struct possibility_packet),0);
 		if(r == 0 || (r == sizeof(int8_t) && (*(int8_t *)possibilityPacket) == INST_NULL))
 		{
-			printf("No possibility recept\n");
+			log_info("No possibility recept\n");
 		} else if (r < 0) {
-			printf("error when receive possibility :%i\n", errno);
+			log_errno("Error when receive possibility => ");
 		}else
 		{
 #ifdef DEBUG_CHECK_POSSIBILITY
-            int analyse = check_possibility(possibilityPacket);
+            int analyse = check_possibility(possibilityPacket, client_possibility->all_rotate_part);
             if (analyse < 0)
             {
-                printf("possibility error : %i\n",analyse);
-                printf(" ---");
+                log_debug("possibility error : %i\n",analyse);
+                log_debug(" ---");
                 print_possibility_packet(possibilityPacket);
             }
 #endif // DEBUG_CHECK_POSSIBILITY
@@ -574,7 +576,7 @@ array_possibility_packet *get_last_possibility(client_possibility_t *client_poss
 
 	if(result->size == 0)
 	{
-		printf("result 0 \n");
+		log_info("result 0 \n");
 	}
 	return result;
 }
@@ -608,7 +610,7 @@ unsigned long long datas_size()
 	return result;
 }
 
-void lock_all_file()
+void lock_all_file(void)
 {
 	maintenance = 1;
 	int fp;
@@ -619,7 +621,7 @@ void lock_all_file()
 	}
 }
 
-void unlock_all_file()
+void unlock_all_file(void)
 {
 	int fp;
 	//libération des files
@@ -637,9 +639,9 @@ int backup(char *filename)
 		FILE *f = fopen(filename, "w");
 		if(!f)
 		{
-			printf("backup file :%s",filename);
+			log_error("backup file :%s",filename);
 			perror("fopen()");
-			exit(EXIT_FAILURE);
+			return -1;
 		}
 		
 		lock_all_file();
@@ -664,7 +666,7 @@ int backup(char *filename)
 	return 0;
 }
 
-void lock_all_file_analysed()
+void lock_all_file_analysed(void)
 {
 	maintenance = 1;
 	int fp;
@@ -675,7 +677,7 @@ void lock_all_file_analysed()
 	}
 }
 
-void unlock_all_file_analysed()
+void unlock_all_file_analysed(void)
 {
 	int fp;
 	//libération des files
@@ -693,7 +695,7 @@ int backup_analysed(char *filename)
 		FILE *f = fopen(filename, "w");
 		if(!f)
 		{
-			printf("backup_analysed file :%s",filename);
+			log_error("backup_analysed file :%s",filename);
 			perror("fopen()");
 			exit(EXIT_FAILURE);
 		}
@@ -726,7 +728,7 @@ int import_old_file(client_possibility_t *client_possibility, char *filename)
 	FILE *f = fopen(filename, "r");
 	if(!f)
 	{
-		printf("import file :%s",filename);
+		log_error("import file :%s",filename);
 		perror("fopen()");
 		exit(EXIT_FAILURE);
 	}
@@ -793,9 +795,9 @@ int import(client_possibility_t *client_possibility, char *filename)
     FILE *f = fopen(filename, "r");
     if(!f)
     {
-        printf("import file :%s",filename);
+        log_error("import file :%s",filename);
         perror("fopen()");
-        exit(EXIT_FAILURE);
+        return -1;
     }
     
     struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
@@ -878,7 +880,7 @@ int import_analysed(char *filename)
 	FILE *f = fopen(filename, "r");
 	if(!f)
 	{
-		printf("import_analysed file :%s",filename);
+		log_error("import_analysed file :%s",filename);
 		perror("fopen()");
 		exit(EXIT_FAILURE);
 	}
@@ -928,7 +930,7 @@ int print_file(int fp)
             struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
             print_possibility_packet(possibility);
         } else {
-            printf("null value\n");
+            log_info("null value\n");
         }
         currElement = currElement->next;
     }
@@ -951,7 +953,7 @@ int printdatamanager()
 
 int print_file_analysed(int fp)
 {
-	printf("file_analysed %i, size:%llu\n", fp, file_possibility_analysed[fp].file.size);
+	log_info("file_analysed %i, size:%llu\n", fp, file_possibility_analysed[fp].file.size);
     Element *currElement = file_possibility_analysed[fp].file.start;
     while(currElement != NULL)
     {
@@ -960,7 +962,7 @@ int print_file_analysed(int fp)
             struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
             print_possibility_packet(possibility);
         } else {
-            printf("null value\n");
+            log_info("null value\n");
         }
         currElement = currElement->next;
     }
@@ -981,7 +983,7 @@ int print_all_file_analysed()
 	return 0;
 }
 
-unsigned long long regroup_datas_nolock()
+unsigned long long regroup_datas_nolock(void)
 {
 	int fp;
     unsigned long long size = file_possibility[0].file.size;
@@ -1001,7 +1003,7 @@ unsigned long long regroup_datas_nolock()
 		}
         
 	}
-    printf("regroup size :%llu\n",size);
+    log_info("regroup size :%llu\n",size);
 	free(packet);
 	packet = NULL;
 	return 0;
@@ -1128,6 +1130,9 @@ int split_datas()
 
 int check_datas()
 {
+    struct array_part *apart= read_parts(partsFiles);
+    
+    struct array_part *rotateParts = rotate_all_parts(apart);
 	lock_all_file();
 	int count = 0;
     int errors = 0;
@@ -1138,11 +1143,11 @@ int check_datas()
 		while (currElement != NULL)
 		{
 			count++;
-			int analyse = check_possibility((struct possibility_packet *)currElement->value);
+			int analyse = check_possibility((struct possibility_packet *)currElement->value, rotateParts);
 			if (analyse < 0)
 			{
-				printf("possibility error : %i\n",analyse);
-				printf(" ---");
+				log_error("possibility error : %i\n",analyse);
+                log_error(" ---");
 				print_possibility_packet((struct possibility_packet *)currElement->value);
                 errors++;
 			}
@@ -1152,7 +1157,218 @@ int check_datas()
 	
 	unlock_all_file();
 	
-	printf("check_datas errors %i on %i\n", errors, count);
+	log_info("check_datas errors %i on %i\n", errors, count);
+    return errors > 0 ? -1 : 0;
+}
+
+#define nbDuplicateThread 8
+unsigned long long duplicateCount[nbDuplicateThread];
+unsigned long long duplicateErrors[nbDuplicateThread];
+unsigned long long duplicateFinish[nbDuplicateThread];
+unsigned long long duplicateAnalyzed[nbDuplicateThread];
+
+struct arg_duplicate_thread {
+    Element *currElement;
+    int filePossibility;
+    unsigned long long position;
+    unsigned long long nbCombinations;
+    int threadPosition;
+};
+
+void *check_duplicate_thread(void *arguments) {
+    struct arg_duplicate_thread *args = (struct arg_duplicate_thread *)arguments;
+    Element *currElement = args->currElement;
+    int fp= args->filePossibility;
+    unsigned long long position = args->position;
+    int cfp;
+    while (currElement != NULL && duplicateAnalyzed[args->threadPosition] <= args->nbCombinations)
+    {
+        duplicateCount[args->threadPosition]++;
+        for (cfp=fp; cfp < NB_FILE_POSSIBILITY; cfp++)
+        {
+            unsigned long long comparePosition = 0;
+            Element *elementToCompare = NULL;
+            if (fp == cfp) {
+                elementToCompare = currElement->next;
+                comparePosition = position + 1;
+                //printf("%i position %llu start with next for %llu\n", args->threadPosition, position, duplicateCount[args->threadPosition]);
+            } else {
+                elementToCompare = file_possibility[cfp].file.start;
+                //printf("%i position %llu start with start %i for %llu\n", args->threadPosition, position, cfp, duplicateCount[args->threadPosition]);
+            }
+            while (elementToCompare != NULL)
+            {
+                if (currElement != elementToCompare) {
+                    int analyse = compare_possibility((struct possibility_packet *)currElement->value, (struct possibility_packet *)elementToCompare->value);
+                    if (analyse == 0)
+                    {
+                        log_info("possibility error : %i F%i:%llu to F%i:%llu\n",analyse, fp, position, cfp, comparePosition);
+                        // print_possibility_packet((struct possibility_packet *)currElement->value);
+                        duplicateErrors[args->threadPosition]++;
+                    } else {
+                        analyse = is_origin_of(currElement->value, elementToCompare->value);
+                        if (analyse == 1) {
+                            log_info("possibility origin error : F%i:%llu to F%i:%llu\n", fp, position, cfp, comparePosition);
+                            duplicateErrors[args->threadPosition]++;
+                        }
+                    }
+                } else {
+                    log_info("possibility error : equals F%i:%llu to F%i:%llu\n", fp, position, cfp, comparePosition);
+                    duplicateErrors[args->threadPosition]++;
+                }
+                elementToCompare = elementToCompare->next;
+                comparePosition++;
+                duplicateAnalyzed[args->threadPosition]++;
+            }
+            
+        }
+        if (currElement != NULL) {
+            currElement = currElement->next;
+            position++;
+        }
+        if (position >= file_possibility[fp].file.size) {
+            fp++;
+            position = 0;
+            currElement = NULL;
+            if (fp < NB_FILE_POSSIBILITY) {
+                currElement = file_possibility[fp].file.start;
+            }
+        }
+
+    }
+    
+    duplicateFinish[args->threadPosition] = 1;
+    return NULL;
+}
+
+void print_duplicate_args(struct arg_duplicate_thread *args) {
+    log_info("thread:%i fileP:%i position:%llu nbCombinations:%llu\n", args->threadPosition, args->filePossibility, args->position, args->nbCombinations);
+}
+
+void run_check_duplicate_thread(Element *currElement, int filePossibility, unsigned long long position, unsigned long long nbCombinations, int threadPosition) {
+    struct arg_duplicate_thread *args = malloc(sizeof(struct arg_duplicate_thread));
+    args->currElement = currElement;
+    args->filePossibility = filePossibility;
+    args->threadPosition = threadPosition;
+    args->position = position;
+    args->nbCombinations = nbCombinations;
+    print_duplicate_args(args);
+    pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
+    pthread_attr_init(thread_attributes);
+    pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    if(0 != pthread_create(&thread, thread_attributes, check_duplicate_thread, args))
+        {
+            log_error("Problème avec pthread_create()\n");
+            duplicateFinish[args->threadPosition] = 1;
+            free(thread_attributes);
+            free(args);
+            return;
+        }
+        pthread_attr_destroy(thread_attributes);
+        free(thread_attributes);
+}
+
+void print_duplicate_activity(unsigned long long dataSize, unsigned long long nbCombinations) {
+    unsigned long long current = 0;
+    unsigned long long errors = 0;
+    unsigned long long analyzed = 0;
+    int activeThreads = 0;
+    for (int t = 0; t < nbDuplicateThread; t++) {
+        current += duplicateCount[t];
+        errors += duplicateErrors[t];
+        analyzed += duplicateAnalyzed[t];
+        if (duplicateFinish[t] == 0) {
+            activeThreads++;
+        }
+    }
+    
+    double percentCombination = (analyzed/(nbCombinations*1.0))*100.0;
+    log_info("analyzed: %llu/%llu %f/100 | %llu / %llu | errors: %llu | active threads: %i\n", analyzed, nbCombinations, percentCombination, current, dataSize, errors, activeThreads);
+}
+
+unsigned long long count_combinations(unsigned long long x) {
+    unsigned long long i;
+    unsigned long long z = x - 1;
+    unsigned long long result = 0;
+    unsigned long long lastResult = 0;
+    for (i=1; i < x; i++) {
+        lastResult = result;
+        result += z;
+        if (result < lastResult || result <= 0) {
+            log_error("bug on count_combinations\n");
+        }
+        z--;
+    }
+    return result;
+}
+
+int check_duplicate()
+{
+    lock_all_file();
+    unsigned long long count = 0;
+    unsigned long long errors = 0;
+    
+    unsigned long long dataSize = datas_size();
+    unsigned long long nbCombinations = count_combinations(dataSize);
+    unsigned long long nbByThread = nbCombinations / nbDuplicateThread;
+    log_info("qt: %llu nb combinations %llu | nb/threads: %llu\n", dataSize, nbCombinations, nbByThread);
+    
+    int fp = 0;
+    Element *currElement = file_possibility[fp].file.start;
+    unsigned long long position = 0;
+    unsigned long long allocated = 0;
+    unsigned long long remains = dataSize;
+    for (int t = 0; t < nbDuplicateThread && fp < NB_FILE_POSSIBILITY && allocated < nbCombinations; t++) {
+        duplicateCount[t] = 0;
+        duplicateErrors[t] = 0;
+        duplicateFinish[t] = 0;
+        duplicateAnalyzed[t] = 0;
+        unsigned long long last = nbByThread;
+        if (t == nbDuplicateThread - 1) {
+            last = nbCombinations - allocated;
+        }
+        run_check_duplicate_thread(currElement, fp, position, last, t);
+        // Pour le dernier -> pas besoin
+        if (t < nbDuplicateThread - 1) {
+            unsigned long long allocatedToThread = remains - 1;
+            while (allocatedToThread < nbByThread && currElement != NULL) {
+                remains--;
+                allocatedToThread += remains;
+                position++;
+                if (position > file_possibility[fp].file.size) {
+                    fp++;
+                    position = 0;
+                    if (fp >= NB_FILE_POSSIBILITY) {
+                        currElement = NULL;
+                        break;
+                    }
+                    currElement = file_possibility[fp].file.start;
+                } else {
+                    currElement = currElement->next;
+                }
+            }
+            allocated += allocatedToThread;
+        }
+    }
+        
+    for (int t = 0; t < nbDuplicateThread; t++) {
+        int loop = 0;
+        while (duplicateFinish[t] == 0) {
+            sleep(1);
+            loop++;
+            if (loop == 30) {
+                loop = 0;
+                print_duplicate_activity(dataSize, nbCombinations);
+            }
+        }
+        count += duplicateCount[t];
+        errors += duplicateErrors[t];
+    }
+    
+    unlock_all_file();
+    
+    log_info("check_duplicate errors %llu on %llu\n", errors, count);
     return errors > 0 ? -1 : 0;
 }
 
@@ -1179,9 +1395,9 @@ int statistic_datas(void)
     
     unlock_all_file();
     
-    printf("check_datas analyses:%i\n",count);
+    log_info("check_datas analyses:%i\n",count);
     for (int i = 0; i < ETERN_PARTS; i++) {
-            printf("%i : %i\n", i, countSize[i]);
+        log_info("%i : %i\n", i, countSize[i]);
         
         countSize[i] = 0;
     }
@@ -1237,8 +1453,8 @@ int sort_ascending(void)
 	unsigned long long fivePercent = file->size * 0.05;
 	unsigned long long nextShow = fivePercent;
 
-	printf("0");
-	fflush(stdout);
+	log_console("0");
+    flush_console();
 
 	Element *currElement = file->start;
 	while (currElement != NULL)
@@ -1247,8 +1463,8 @@ int sort_ascending(void)
 		if (position >= nextShow) {
 			nextShow += fivePercent;
 			percent += 5;
-			printf("--%i", percent);
-			fflush(stdout);
+            log_console("--%i", percent);
+            flush_console();
 		}
 
 		Element *nextElement = currElement->next;
@@ -1296,7 +1512,7 @@ int sort_ascending(void)
 		
 		currElement = nextElement;
 	}
-	printf("--100\n");
+	log_console("--100\n");
 	unlock_all_file();
 	return 0;
 }
@@ -1304,7 +1520,7 @@ int sort_ascending(void)
 void *sort_d_mono(void *f)
 {
     int intf = *(int *)f;
-	printf("sort d file:%i\n",intf);
+	log_info("sort d file:%i\n",intf);
 
 	// Tableau d'éléments permettants d'avoir des repaires d'éléments classés
 	// On mémorise par nb possibilités allouées.
@@ -1320,8 +1536,8 @@ void *sort_d_mono(void *f)
 	unsigned long long fivePercent = file->size * 0.05;
 	unsigned long long nextShow = fivePercent;
 
-	printf("0");
-	fflush(stdout);
+	log_console("0");
+    flush_console();
 
 	Element *currElement = file->start;
 	while (currElement != NULL)
@@ -1330,8 +1546,8 @@ void *sort_d_mono(void *f)
 		if (position >= nextShow) {
 			nextShow += fivePercent;
 			percent += 5;
-			printf("--%i", percent);
-			fflush(stdout);
+			log_console("--%i", percent);
+            flush_console();
 		}
 
 		Element *nextElement = currElement->next;
@@ -1379,8 +1595,8 @@ void *sort_d_mono(void *f)
 		
 		currElement = nextElement;
 	}
-	printf("--100\n");
-	printf("end sort d file:%i\n",*(int *)f);
+	log_console("--100\n");
+	log_info("end sort d file:%i\n",*(int *)f);
 	return NULL;
 }
 
@@ -1395,13 +1611,13 @@ int check_file(int f)
 	{
 		if(file->start != NULL)
 		{
-			printf("File:%i size=0 and start not null\n",f);
+			log_info("File:%i size=0 and start not null\n",f);
 			result = -1;
 		}
 		
 		if(file->end != NULL)
 		{
-			printf("File:%i size=0 and end not null\n",f);
+            log_info("File:%i size=0 and end not null\n",f);
 			result = -1;
 		}
 	}
@@ -1413,7 +1629,7 @@ int check_file(int f)
 	for(t=0; t < file->size && currElement != NULL;t++)
 	{
 		if(currElement->value == NULL){
-			printf("File:%i value NULL\n",f);
+            log_info("File:%i value NULL\n",f);
 			result = -1;
 		}
 		lastElement = currElement;
@@ -1422,11 +1638,11 @@ int check_file(int f)
 	
 	if(currElement != NULL)
 	{
-		printf("File:%i last analysed element is not null | file.size:%llu analysed:%llu",f,file->size, t);
+        log_info("File:%i last analysed element is not null | file.size:%llu analysed:%llu",f,file->size, t);
 		result = -1;
 	}
 	if (t != file->size || lastElement != file->end) {
-		printf("File:%i end not correspond to the size:%llu analysed:%llu\n",f,file->size,t);
+        log_info("File:%i end not correspond to the size:%llu analysed:%llu\n",f,file->size,t);
 		result=-1;
 	}
 	return result;
@@ -1445,11 +1661,11 @@ int check_files()
 	return 0;
 }
 
-int sort_descending_nolock()
+int sort_descending_nolock(void)
 {
-	printf("regroup datas \n");
+    log_info("regroup datas \n");
 	regroup_datas_nolock();
-	printf("sort file 0\n");
+    log_info("sort file 0\n");
 	int *i = malloc(sizeof(int));
 	i[0] = 0;
 	sort_d_mono(&i[0]);
@@ -1457,7 +1673,7 @@ int sort_descending_nolock()
 	return 0;
 }
 
-void sortdmthread()
+void sortdmthread(void)
 {
 	pthread_t *tid = malloc( NB_FILE_POSSIBILITY * sizeof(pthread_t) );
 	int *f = malloc(NB_FILE_POSSIBILITY * sizeof(int));
@@ -1492,12 +1708,12 @@ int sort_descending_mthread()
 		{
 			nbfile++;
 		}
-		printf("split to:%i\n",nbfile);
+        log_info("split to:%i\n",nbfile);
 		split_datas_nolock(nbfile);
 		sortdmthread();
 	}
 	
-	printf("sort d one thread\n");
+    log_info("sort d one thread\n");
 	sort_descending_nolock();
     
 	unlock_all_file();
