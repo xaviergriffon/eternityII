@@ -1,6 +1,9 @@
+#include "etii_search.h"
+
 #include <unistd.h>
 #include <stdlib.h>
-#include "etii_search.h"
+
+#include "logger.h"
 #include "static_variables.h"
 #include "etii_client.h"
 #include "datamanager.h"
@@ -24,7 +27,7 @@ void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibil
         // En cas d'erreur les possibilités sont remises en locale
         if(add_possibility(client_possibility, aposs))
         {
-            printf("error on add_possibility\n");
+            log_error("error on add_possibility\n");
         }
         free_array_possibility_packet(aposs);
         
@@ -51,7 +54,7 @@ void checkAndDelegatePossibilitiesIfNeeded_with_big_table(client_possibility_t *
         // En cas d'erreur les possibilités sont remises en locale
         if(add_possibility(client_possibility, aposs))
         {
-            printf("error on add_possibility\n");
+            log_error("error on add_possibility\n");
         }
         free_array_possibility_packet(aposs);
     }
@@ -121,11 +124,11 @@ void *autosearch (void *userdata)
                     // Consomation d'un cache ??
                     struct possibility_packet *possibilityPacket = scroll_big_table_cache(bt);
     #ifdef DEBUG_CHECK_POSSIBILITY
-                    int analyse = check_possibility(possibilityPacket);
+                    int analyse = check_possibility(possibilityPacket, client->all_rotate_part);
                     if (analyse < 0)
                     {
-                        printf("possibility error : %i\n",analyse);
-                        printf(" ---");
+                        log_error("possibility error : %i\n",analyse);
+                        log_error(" ---");
                         print_possibility_packet(possibilityPacket);
                     }
     #endif // DEBUG_CHECK_POSSIBILITY
@@ -146,9 +149,9 @@ void *autosearch (void *userdata)
 #ifdef DEBUG_CHECK_POSSIBILITY
                         if(max_result >= ETERN_PARTS)
                         {
-                            printf("Erreur alloc > ETERN_PARTS\n");
+                            log_error("Erreur alloc > ETERN_PARTS\n");
                         }
-                        printf("max result:%i\n",max_result);
+                        log_info("max result:%i\n",max_result);
 #endif // DEBUG_CHECK_POSSIBILITY
                     }
                 }
@@ -175,7 +178,7 @@ void *autosearch (void *userdata)
             // En cas d'erreur, les possibilités sont remises en locale.
             if(add_possibility(client, aposs))
             {
-                printf("Error on add_possibility \n");
+                log_error("Error on add_possibility \n");
             }
             free_array_possibility_packet(aposs);
 

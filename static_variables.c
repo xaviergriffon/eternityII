@@ -56,7 +56,7 @@ int *main_socket_id = NULL;
 
 char **forkId = NULL;
 
-int SERVER_PORT = 2000;
+int SERVER_PORT = 2020;
 
 unsigned long long max_search_by_sec = 0;
 

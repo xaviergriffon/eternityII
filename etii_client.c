@@ -1,14 +1,18 @@
+#include "etii_client.h"
+
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "etii_client.h"
+#include "logger.h"
 #include "readdata.h"
 #include "datamanager.h"
 #include "etii_search.h"
 #include "etii_protocol.h"
 
-// Méthode chargée d'alimenter les threads quand lors file est à 0
+/**
+ * @brief Méthode chargée d'alimenter les threads quand lors file est à 0
+ */
 void *feed_thread_aposs(void *param) {
     client_possibility_t *thread_params = param;
     while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
@@ -45,7 +49,9 @@ void *feed_thread_aposs(void *param) {
     return NULL;
 }
 
-// Construit un thread d'alimentation des files des threads de recherche
+/**
+ * @brief Construit un thread d'alimentation des files des threads de recherche
+ */
 void build_feed_thread(client_possibility_t *thread_params) {
     /* création d'un nouveau thread */
     pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
@@ -56,7 +62,7 @@ void build_feed_thread(client_possibility_t *thread_params) {
     /* Création du thread */
     if (0 != pthread_create(&thread, thread_attributes, feed_thread_aposs, thread_params))
     {
-        fprintf(stderr, "Problème avec pthread_create()\n");
+        log_error("Problème avec pthread_create()\n");
         free(thread_attributes);
         exit(EXIT_FAILURE);
     }
@@ -137,7 +143,7 @@ void build_control_thread(client_possibility_t *thread_params) {
     /* Création du thread */
     if (0 != pthread_create(&thread, thread_attributes, control_thread, thread_params))
     {
-        fprintf(stderr, "Problème avec pthread_create()\n");
+        log_error("Problème avec pthread_create()\n");
         free(thread_attributes);
         exit(EXIT_FAILURE);
     }
@@ -153,7 +159,7 @@ void runThreadClient(const char *file)
     /* création du tableau de structures client_possibility_t avec un élément par thread */
     if(NULL == (thread_params = malloc(sizeof(*thread_params) * NB_THREADS)))
     {
-        fprintf(stderr, "Problème avec malloc()\n");
+        log_error("Problème avec malloc()\n");
         exit(EXIT_FAILURE);
     }
     struct array_part *apart= read_parts(file);
@@ -182,7 +188,7 @@ void runThreadClient(const char *file)
         times(&thread_params[i].start_socket);
         if (0 != pthread_create((thread_params[i].tid), thread_attributes, autosearch, &(thread_params[i])))
         {
-            fprintf(stderr, "Problème avec pthread_create()\n");
+            log_error("Problème avec pthread_create()\n");
             free(thread_attributes);
             exit(EXIT_FAILURE);
         }

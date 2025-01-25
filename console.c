@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <pthread.h>
 
+#include "logger.h"
 #include "static_variables.h"
 #include "command_lines.h"
 
@@ -46,9 +47,9 @@ void * console(void *param)
     char *buffer = NULL;
     while(buffer == NULL)
     {
-        printf("commande :");
+        log_console("commande :");
         buffer = getcmdline();
-        printf("\n");
+        log_console("\n");
         do_command_line(buffer);
         free(buffer);
         buffer= NULL;
@@ -57,7 +58,7 @@ void * console(void *param)
 }
 
 
-int run_console(int server)
+void run_console(int server)
 {
     pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
     pthread_attr_init(thread_attributes);
@@ -69,11 +70,10 @@ int run_console(int server)
     *param = server;
     if(0 != pthread_create(&thread, NULL, console, param))
     {
-        fprintf(stderr, "Problème avec pthread_create()\n");
+        log_error("Problème avec pthread_create()\n");
         free(thread_attributes);
         exit(EXIT_FAILURE);
     }
     pthread_attr_destroy(thread_attributes);
     free(thread_attributes);
-    return 0;
 }

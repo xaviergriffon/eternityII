@@ -3,6 +3,9 @@
 
 #include <stdio.h>
 
+/**
+ * @brief Structure pour des statistiques d'un thread calculant des possiblités.
+ */
 struct client_statistics {
     unsigned long long shots_per_second;
     unsigned long long possibilities_in_stock;

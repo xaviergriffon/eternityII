@@ -5,6 +5,7 @@
 #include <string.h>
 #include <regex.h>
 
+#include "logger.h"
 #include "static_variables.h"
 
 struct array_part *read_parts(const char *file)
@@ -14,14 +15,14 @@ struct array_part *read_parts(const char *file)
 	FILE *f = fopen(file, "r");
 	if(!f)
 	{
-		printf("read_parts file :%s",file);
+		log_error("read_parts file :%s",file);
 		perror("fopen()");
 		exit(EXIT_FAILURE);
 	}
 	
 	if (fscanf(f, "ntiles: %d", &np))
 	{
-		printf("ntiles:%i\n",np);
+		log_info("ntiles:%i\n",np);
 	} else
 	{
 		exit(EXIT_FAILURE);
@@ -112,7 +113,7 @@ void compute_grid(struct possibility_packet *possibility, char *str_value) {
                         // Par sécurité on vérifie qu'on dépasse pas le tableau
                         // fait au début car la dernière valeur relevé passera le compteur au dessus lors du y>=...
                         if (y >= ETERN_SIZE) {
-                            printf("nombre de colonne trop important");
+                            log_error("nombre de colonne trop important");
                             break;
                         }
                         value = malloc (sizeof (*value) * (size + 1));
@@ -138,7 +139,7 @@ void compute_grid(struct possibility_packet *possibility, char *str_value) {
                     
                     cursor += end ;
                     if (strlen(cursor) == 0) {
-                        printf("fin recherche");
+                        log_info("fin recherche");
                         break;
                     }
                     
@@ -174,7 +175,7 @@ void compute_grid(struct possibility_packet *possibility, char *str_value) {
             regfree (&preg);
         }
     } else {
-        printf("erreur compilation regest %i\n", err);
+        log_error("erreur compilation regest %i\n", err);
     }
 }
 
@@ -264,7 +265,7 @@ struct possibility_packet * read_from_json(const char *json_possiblity) {
                     
                     cursor += firstEnd + 1;
                     if (strlen(cursor) == 0) {
-                        printf("fin recherche");
+                        log_info("fin recherche");
                         break;
                     }
                 }
@@ -298,7 +299,7 @@ struct possibility_packet * read_from_json(const char *json_possiblity) {
             regfree (&preg);
         }
     } else {
-        printf("erreur compilation regest %i\n", err);
+        log_error("erreur compilation regest %i\n", err);
     }
         
     return possibility;

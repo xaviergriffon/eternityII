@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <time.h>
 
+#include "logger.h"
 #include "static_variables.h"
 #include "etii_protocol.h"
 #include "datamanager.h"
@@ -23,11 +24,14 @@ typedef struct
     pthread_t *tid;
     int socket_id;
     map_big_array *map_part;
-    int compteur;
+    int compteur; // Numéro de compteur
     struct tms start_socket;
 } client_t;
 
 client_t *thread_params = NULL;
+
+// Nombre de modification des files par client
+unsigned long long *fileUpdates = NULL;
 
 int get_active_threads(client_t *thread_params) {
     int activeThread = 0;
@@ -44,6 +48,8 @@ int get_active_threads(client_t *thread_params) {
 void *check_server(void *param)
 {
     unsigned long long lastactive = 0;
+    unsigned long long clientsFileUpdates = 0;
+    unsigned long long lastClientsFileUpdateBackup = 0;
     int sleep_time = 10;
     int lastBack = 0;
     while(1)
@@ -53,9 +59,13 @@ void *check_server(void *param)
         unsigned long long currentactive = lastactive;
         int c;
         lastactive = 0;
+        clientsFileUpdates = 0;
         for(c=0; c < NB_THREADS;c++)
         {
             lastactive = lastactive + compteurs[c];
+            if (fileUpdates != NULL) {
+                clientsFileUpdates = clientsFileUpdates + fileUpdates[c];
+            }
         }
         currentactive = lastactive - currentactive;
         getted_possibility_not_null = lastactive;
@@ -91,12 +101,15 @@ void *check_server(void *param)
         strcat(lastcheck, temp);
         free(temp);
         
-        if(lastBack == 6)
+        
+        
+        if(lastBack >= 6 && lastClientsFileUpdateBackup != clientsFileUpdates)
         {
+            lastClientsFileUpdateBackup = clientsFileUpdates;
             backup("./temp.back");
             backup_analysed("./temp_analysed.back");
             lastBack = 0;
-        } else
+        } else if (lastBack < 6)
         {
             lastBack++;
         }
@@ -114,8 +127,6 @@ void *communicate_with_client (void *userdata)
         usleep(MICRO_SLEEP);
     }
     
-    compteurs[client->compteur]++;
-    
     int8_t instruction = recv_instruction(client->socket_id);
     
     array_possibility_packet *lastPossibilityPacketSend = NULL;
@@ -126,14 +137,14 @@ void *communicate_with_client (void *userdata)
             int client_version = -1;
             ssize_t ssize = recv(client->socket_id, &client_version, sizeof(int), 0);
             if (ssize != sizeof(int)) {
-                printf("error on recept client version\n");
+                log_error("error on recept client version\n");
                 break;
             }
             if (version == client_version) {
                 send_instruction(client->socket_id, INST_SUPPORTED_VERSION);
                 version_supported = 1;
             } else {
-                printf("Version of client unsupported\n");
+                log_error("Version of client unsupported\n");
                 send_instruction(client->socket_id, INST_UNSUPPORTED_VERSION);
             }
         } else if(instruction == INST_GET && version_supported == 1)
@@ -153,9 +164,12 @@ void *communicate_with_client (void *userdata)
                 //printf("send ");
                 //print_possibility_packet(possibility);
                 ssize_t ssize = send(client->socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
+                
                 if (ssize < 0) {
-                    printf("erreur d'envoi %i\n", errno);
+                    log_errno("Erreur d'envoi => ");
                 }
+                compteurs[client->compteur]++;
+                fileUpdates[client->compteur]++;
             }
             if(p == 0)
             {
@@ -175,16 +189,17 @@ void *communicate_with_client (void *userdata)
                 if(add_possibility(NULL, aposs) == 0)
                 {
                     send_instruction(client->socket_id, INST_CONSIDERED);
+                    fileUpdates[client->compteur]++;
                     
                 } else{
                     send_instruction(client->socket_id, INST_ERROR);
                 }
             } else{
-                printf("bad possibility recept");
+                log_error("bad possibility recept");
                 if (receive < 0) {
-                    printf(" : %i", errno);
+                    log_errno(" => ");
                 }
-                printf("\n");
+                log_error("\n");
                 send_instruction(client->socket_id, INST_ERROR);
             }
             free(possibilityPacket);
@@ -200,30 +215,30 @@ void *communicate_with_client (void *userdata)
                     send_instruction(client->socket_id,INST_CONSIDERED);
                     
                 } else{
-                    printf("possibility analysed not removed\n");
+                    log_error("possibility analysed not removed\n");
                     print_possibility_packet(possibilityPacket);
                     send_instruction(client->socket_id,INST_ERROR);
                 }
             } else {
-                printf("bad possibility recept");
+                log_error("bad possibility recept");
                 if (ssize < 0) {
-                    printf(" : %i", errno);
+                    log_errno(" => ");
                 }
-                printf("\n");
+                log_error("\n");
                 send_instruction(client->socket_id, INST_ERROR);
             }
             free (possibilityPacket);
         } else if (instruction == INST_TEST_CONNECTED) {
             send_instruction(client->socket_id, INST_TEST_CONNECTED);
         } else if (version_supported == 0) {
-            printf("Version of client unsupported\n");
+            log_error("Version of client unsupported\n");
             send_instruction(client->socket_id, INST_UNSUPPORTED_VERSION);
             break;
         } else
         {
             inst_unknow++;
-            printf("server instruction inconnu: %i\n",instruction);
-            printf("nb inst inconnu%li\n",inst_unknow);
+            log_error("server instruction inconnu: %i\n",instruction);
+            log_error("nb inst inconnu%li\n",inst_unknow);
             
             break;
         }
@@ -235,7 +250,7 @@ void *communicate_with_client (void *userdata)
         if (instruction == -1 || instruction != INST_END) {
             if(add_possibility(NULL, lastPossibilityPacketSend))
             {
-                printf("Error with possibility : \n");
+                log_error("Error with possibility : \n");
                 int p;
                 for (p=0;p < lastPossibilityPacketSend->size;p++)
                 {
@@ -257,7 +272,7 @@ void *communicate_with_client (void *userdata)
 #endif // DEBUG_SOCKET
     if(0 != err)
     {
-        printf("erreur close :%i\n",err);
+        log_error("erreur close :%i\n",err);
     }
     
     usleep(THREAD_MICRO_SLEEP);
@@ -289,7 +304,7 @@ void create_server_thread(client_t *thread_params, int i) {
     thread_params[i].tid = malloc(sizeof(pthread_t));
     if(0 != pthread_create((thread_params[i].tid), thread_attributes, communicate_with_client, &(thread_params[i])))
     {
-        fprintf(stderr, "Problème avec pthread_create()\n");
+        log_error("Problème avec pthread_create()\n");
         free(thread_attributes);
         exit(EXIT_FAILURE);
     }
@@ -306,13 +321,13 @@ void *rmnonext_thread(void *param) {
     while(request != REQUEST_STOP) {
         if (get_active_threads(thread_params) <= 0) {
 #ifdef DEBUG_RM_NO_NEXT
-            printf("Auto rmnonext\n");
+            log_debug("Auto rmnonext\n");
 #endif // DEBUG_RM_NO_NEXT
             remove_possibilities_with_no_next(map_parts, rotateParts);
 #ifdef DEBUG_RM_NO_NEXT
         } else {
             
-            printf("No auto rmnonext because thread active\n");
+            log_debug("No auto rmnonext because thread active\n");
 #endif // DEBUG_RM_NO_NEXT
         }
         sleep(server_rmnonext_timing);
@@ -332,7 +347,7 @@ void create_rmnonext_thread(void) {
     pthread_t thread;
     if(0 != pthread_create(&thread, thread_attributes, rmnonext_thread, NULL))
     {
-        fprintf(stderr, "create_rmnonext_thread : Problème avec pthread_create()\n");
+        log_error("create_rmnonext_thread : Problème avec pthread_create()\n");
         free(thread_attributes);
         exit(EXIT_FAILURE);
     }
@@ -356,15 +371,17 @@ void runserver(const char* file)
     /* création du tableau de structures client_t avec un élément par thread */
     if(NULL == (thread_params = malloc(sizeof(*thread_params) * NB_THREADS)))
     {
-        fprintf(stderr, "Problème avec malloc()\n");
+        log_error("Problème avec malloc()\n");
         exit(EXIT_FAILURE);
     }
+    fileUpdates = malloc(sizeof(unsigned long long) * NB_THREADS);
     for(int i = 0; i < NB_THREADS; i++)
     {
         thread_params[i].exist = 0;
         thread_params[i].socket_id = -1;
         thread_params[i].tid = NULL;
         thread_params[i].compteur = i;
+        fileUpdates[i] = 0;
     }
     
     
@@ -377,10 +394,10 @@ void runserver(const char* file)
         if((client_id = accept(socket_id, NULL, 0)) < 0)
         {
             if (errno == EDEADLK || errno == EDEADLK || errno == EWOULDBLOCK) {
-                printf("resource blocked, try again\n");
+                log_errno("resource blocked, try again => ");
                 continue;
             } else {
-                fprintf(stderr, "Erreur sur accept() : %i\n", errno);
+                log_errno("Erreur sur accept() => ");
                 exit(EXIT_FAILURE);
             }
         }
@@ -427,7 +444,7 @@ void runserver(const char* file)
                 }
             }
             if (thread_id == -1 && nbCreated == 0) {
-                printf("all thread used\n");
+                log_info("all thread used\n");
             }
         }
     }

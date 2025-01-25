@@ -7,11 +7,13 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <errno.h>
 #include <unistd.h> /* close */
 #include <netdb.h> /* gethostbyname */
 #include <fcntl.h>
 
 #include "tcpserver.h"
+#include "logger.h"
 #include "static_variables.h"
 
 int create_tcp_server(int port, int nb_max_clients)
@@ -22,7 +24,7 @@ int create_tcp_server(int port, int nb_max_clients)
 	
 	if(-1 == (socket_id = socket(PF_INET, SOCK_STREAM, 0)))
 	{
-		fprintf(stderr, "Impossible de créer un socket\n");
+        log_error("Impossible de créer un socket\n");
 		exit(EXIT_FAILURE);
 	}
 	// on permet la réutilisation de la socket après sa fermeture.
@@ -38,15 +40,15 @@ int create_tcp_server(int port, int nb_max_clients)
 	
 	if(-1 == (bind(socket_id, (struct sockaddr *) &sockname, sizeof(struct sockaddr_in))))
 	{
-		fprintf(stderr, "Erreur sur bind()\n");
+        log_errno("Erreur sur bind() => ");
 		exit(EXIT_FAILURE);
 	}
 	
 	/* mise en écoute de la socket */
-	printf("max clients: %i\n", nb_max_clients);
+    log_info("max clients: %i\n", nb_max_clients);
 	if(-1 == (listen(socket_id, nb_max_clients)))
 	{
-		fprintf(stderr, "Erreur sur listen()\n");
+        log_errno("Erreur sur listen() => ");
 		exit(EXIT_FAILURE);
 	}
 	return (socket_id);

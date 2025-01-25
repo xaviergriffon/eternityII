@@ -7,11 +7,12 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <unistd.h> /* close */
-#include <netdb.h> /* gethostbyname */
+#include <unistd.h>
+#include <netdb.h>
 #include <errno.h>
 
 #include "etii_protocol.h"
+#include "logger.h"
 
 int8_t recv_instruction(int socket_id)
 {
@@ -26,11 +27,11 @@ int8_t recv_instruction(int socket_id)
 			// TODO: faire un end timeout
 			result = INST_END;
 		} else {
-			printf("error on recv_instruction : %i\n", errno);
+            log_errno("Error on recv_instruction => ");
 		}
 	} else if (rRecv == 0) {
 #ifdef DEBUG_SOCKET
-		printf("recv_instruction recv 0\n");
+		log_debug("recv_instruction recv 0\n");
 #endif // DEBUG_SOCKET
 		result = INST_END;
 	} else {
@@ -48,7 +49,7 @@ long send_instruction(int socket_id, int8_t instruction)
 	*i_instruction = instruction;
 	long result = send(socket_id, (int8_t *)i_instruction, sizeof(int8_t), 0);
 	if (result <= 0) {
-		printf("error on send_instruction %i : %i\n", instruction, errno);
+        log_errno("Error on send_instruction %i (result %li) => ", instruction, result);
 	}
 	free(i_instruction);
 
@@ -58,8 +59,8 @@ long send_instruction(int socket_id, int8_t instruction)
 int is_connected(int socket_id) {
 	long result = send_instruction(socket_id, INST_TEST_CONNECTED);
 	if (result <= 0) {
+        log_info("socket deconnected s\n");
 #ifdef DEBUG_SOCKET
-		printf("socket deconnected s\n");
 		opened_tcp--;
 #endif // DEBUG_SOCKET
 		shutdown(socket_id, 2);
@@ -69,17 +70,18 @@ int is_connected(int socket_id) {
 	result = recv_instruction(socket_id);
 	if (result <= 0) {
 #ifdef DEBUG_SOCKET
-		printf("socket deconnected r\n");
+        log_debug("socket deconnected r\n");
 		opened_tcp--;
 #endif // DEBUG_SOCKET
+        log_error("Error on test connection : %li\n", result);
 		shutdown(socket_id, 2);
         close(socket_id);
 		return 0;
 	}
 	// Le serveur nous retourne qu'il met fin
-	if (result == INST_END) {
+    if (result == INST_END) {
 #ifdef DEBUG_SOCKET
-		printf("socket deconnected by server\n");
+        log_debug("socket deconnected by server\n");
 		opened_tcp--;
 #endif // DEBUG_SOCKET
 		shutdown(socket_id, 2);
@@ -87,7 +89,8 @@ int is_connected(int socket_id) {
 		return 0;
 	}
 	if (result != INST_TEST_CONNECTED) {
-        printf("wrong instruction received for connection test : %li\n", result);
+        log_error("wrong instruction received for connection test : %li\n", result);
+        return 0;
 	}
 	return 1;
 }
@@ -102,6 +105,6 @@ void close_socket(int socket_id) {
 
 	if(0 != err)
 	{
-		printf("error on close socket :%i\n",err);
+		log_error("error on close socket :%i\n",err);
 	}
 }

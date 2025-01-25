@@ -1,41 +1,49 @@
+#include "possibility.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "logger.h"
 #include "static_variables.h"
-#include "possibility.h"
 #include "datamanager.h"
+#include "readdata.h"
 
 #ifdef FACES_USED_BITS
 void set_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part, uint8_t boolean) {
-    uint16_t groupe = part / 16;
+    //uint16_t groupe = part / 16;
+    uint16_t groupe = part >> 4;
     uint16_t number = faceused[groupe];
-    int8_t n = part % 16;
+    //int8_t n = part % 16;
+    int8_t n = part - (groupe << 4);
     number = (number & ~(1 << n)) | (boolean << n);
     faceused[groupe] = number;
 }
 
 uint8_t is_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part) {
-    uint16_t groupe = part / 16;
+    //uint16_t groupe = part / 16;
+    uint16_t groupe = part >> 4;
     uint16_t number = faceused[groupe];
-    int8_t n = part % 16;
+    //int8_t n = part % 16;
+    int8_t n = part - (groupe << 4);
     return (number >> n) & 1;
 }
 #endif // FACES_USED_BITS
 
 int decode_direction()
 {
-	printf("/nx : ");
+	log_info("/nx : ");
 	int i;
 	for(i=0;i < ETERN_PARTS;i++) {
 		int x = directions[i] % ETERN_SIZE;
-		printf("%i,",x);
+        log_info("%i,",x);
 	}
 	
-	printf("/ny : ");
+    log_info("/ny : ");
 	for(i=0;i < ETERN_PARTS;i++) {
 		int x = directions[i] % ETERN_SIZE;
 		int y = (directions[i] - x) / ETERN_SIZE;
-		printf("%i,",y);
+        log_info("%i,",y);
 	}
 	
 
@@ -61,7 +69,7 @@ int test_directions()
 	{
 		if(grille[i] == 0)
 		{
-			printf("grille : %i not use\n", i);
+            log_info("grille : %i not use\n", i);
 			return -1;
 		}
 	}
@@ -448,7 +456,7 @@ int save_possibility(char *filename, struct possibility_packet *possibility)
 	FILE *f = fopen(filename, "w");
 	if(!f)
 	{
-		printf("save_possibility file :%s",filename);
+		log_error("save_possibility file :%s",filename);
 		perror("fopen()");
 		exit(EXIT_FAILURE);
 	}
@@ -462,14 +470,14 @@ int save_possibility(char *filename, struct possibility_packet *possibility)
 void checkIfResultFound(struct possibility_packet *poss, struct array_part *all_rotate_part) {
     if(poss->alloc >= ETERN_PARTS)
     {
-        printf("fin de la boucle à %i \n", poss->alloc);
-        printf("solution trouvée\n");
+        log_info("fin de la boucle à %i \n", poss->alloc);
+        log_info("solution trouvée\n");
         for(int x = 0; x < ETERN_SIZE; x++)
         {
             for(int y=0;y < ETERN_SIZE; y++)
             {
                 struct part *part = &all_rotate_part->parts[poss->grid[x][y]];
-                printf("%i;%i; ",x,y);
+                log_info("%i;%i; ",x,y);
                 print_part(part);
             }
         }
@@ -569,7 +577,7 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 	}
 #ifdef DEBUG_RM_NO_NEXT
     if (alloc > possibility->alloc) {
-        printf("all has next (%i) allocated %i -> %i\n", result, possibility->alloc, alloc);
+        log_debug("all has next (%i) allocated %i -> %i\n", result, possibility->alloc, alloc);
     }
 #endif // DEBUG_RM_NO_NEXT
     if (alloc == ETERN_PARTS) {
@@ -583,11 +591,11 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 /* (ajouter) un élément dans la file */
 void put_possibility (File * suite, struct possibility_packet *value){
 #ifdef DEBUG_CHECK_POSSIBILITY
-    int analyse = check_possibility(value);
+    int analyse = check_possibility(value, NULL);
     if (analyse < 0)
     {
-        printf("possibility error : %i\n",analyse);
-        printf(" ---");
+        log_error("possibility error : %i\n",analyse);
+        log_error(" ---");
         print_possibility_packet(value);
     }
 #endif // DEBUG_CHECK_POSSIBILITY
@@ -709,11 +717,11 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
                 }
                  */
 #ifdef DEBUG_CHECK_POSSIBILITY
-                int analyse = check_possibility(currPossibility);
+                int analyse = check_possibility(currPossibility, all_rotate_part);
                 if (analyse < 0)
                 {
-                    printf("possibility error : %i\n",analyse);
-                    printf(" ---");
+                    log_error("possibility error : %i\n",analyse);
+                    log_error(" ---");
                     print_possibility_packet(currPossibility);
                 }
 #endif // DEBUG_CHECK_POSSIBILITY
@@ -740,11 +748,11 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
 		}
          */
 #ifdef DEBUG_CHECK_POSSIBILITY
-        int analyse = check_possibility(currPossibility);
+        int analyse = check_possibility(currPossibility, all_rotate_part);
         if (analyse < 0)
         {
-            printf("possibility error : %i\n",analyse);
-            printf(" ---");
+            log_error("possibility error : %i\n",analyse);
+            log_error(" ---");
             print_possibility_packet(currPossibility);
         }
 #endif // DEBUG_CHECK_POSSIBILITY
@@ -835,11 +843,11 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
                 }
                  */
 #ifdef DEBUG_CHECK_POSSIBILITY
-                int analyse = check_possibility(currPossibility);
+                int analyse = check_possibility(currPossibility, all_rotate_part);
                 if (analyse < 0)
                 {
-                    printf("possibility error : %i\n",analyse);
-                    printf(" ---");
+                    log_error("possibility error : %i\n",analyse);
+                    log_error(" ---");
                     print_possibility_packet(currPossibility);
                 }
 #endif // DEBUG_CHECK_POSSIBILITY
@@ -866,11 +874,11 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
         }
          */
 #ifdef DEBUG_CHECK_POSSIBILITY
-        int analyse = check_possibility(currPossibility);
+        int analyse = check_possibility(currPossibility, all_rotate_part);
         if (analyse < 0)
         {
-            printf("possibility error : %i\n",analyse);
-            printf(" ---");
+            log_error("possibility error : %i\n",analyse);
+            log_error(" ---");
             print_possibility_packet(currPossibility);
         }
 #endif // DEBUG_CHECK_POSSIBILITY
@@ -892,9 +900,16 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
  -4 alloc <= 0
  -5 alloc > faceused
  -6 x7 y8 bad part
+ -7 allocated part bad value
  */
-int check_possibility(struct possibility_packet *packet)
+int check_possibility(struct possibility_packet *packet, struct array_part *rotateParts)
 {
+    if (rotateParts == NULL) {
+        struct array_part *apart= read_parts(partsFiles);
+        
+        rotateParts = rotate_all_parts(apart);
+    }
+    
 	if(packet == NULL) return -1;
 	
 	if(packet->x < 0 || packet->x >= ETERN_SIZE || packet->y < 0 || packet->y >= ETERN_SIZE) return -2;
@@ -924,6 +939,75 @@ int check_possibility(struct possibility_packet *packet)
 	
     if (packet->grid[7][8] != id_for_rotated_part(139, 2)) {
         return -6;
+    }
+    
+    // map_big_array *map_parts = prepare_map_part(rotateParts);
+    
+    // Controle que les pieces correspondent à leur "entourage"
+    for (int p = 0; p < packet->alloc; p++) {
+        uint8_t x = dirx[p];
+        uint8_t y = diry[p];
+        int16_t gridValue = packet->grid[x][y];
+        if (gridValue < 0 || gridValue >= rotateParts->size) {
+            return -7;
+        }
+        struct part partXY = rotateParts->parts[gridValue];
+        
+        int8_t top = 0;
+        // TOP
+        if (y -1 >= 0)
+        {
+            if (packet->grid[x][y-1] < 0) {
+                top = -1;
+            } else {
+                top = rotateParts->parts[packet->grid[x][y-1]].bottom;
+            }
+        }
+        if (top != -1 && partXY.top != top) {
+            return -9;
+        }
+        
+        // RIGHT
+        int8_t right = 0;
+        if (x + 1 < ETERN_SIZE)
+        {
+            if (packet->grid[x+1][y] < 0) {
+                right = -1;
+            } else {
+                right = rotateParts->parts[packet->grid[x+1][y]].left;
+            }
+        }
+        if (right != -1 && partXY.right != right) {
+            return -9;
+        }
+        
+        // BOTTOM
+        int8_t bottom = 0;
+        if (y + 1 < ETERN_SIZE)
+        {
+            if (packet->grid[x][y+1] < 0) {
+                bottom = -1;
+            } else {
+                bottom = rotateParts->parts[packet->grid[x][y+1]].top;
+            }
+        }
+        if (bottom != -1 && partXY.bottom != bottom) {
+            return -9;
+        }
+        
+        // LEFT
+        int8_t left = 0;
+        if (x - 1 >= 0)
+        {
+            if (packet->grid[x-1][y] < 0) {
+                left = -1;
+            } else {
+                left = rotateParts->parts[packet->grid[x-1][y]].right;
+            }
+        }
+        if (left != -1 && partXY.left != left) {
+            return -9;
+        }
     }
 
 	return 0;
@@ -958,9 +1042,9 @@ int print_possibility_packet(struct possibility_packet *packet)
 	}
 	grid[c++] = ']';
 	grid[c++] = '\0';
-	printf("{\"alloc\": %i, \"x\": %i, \"y\": %i, \"grid\": ", packet->alloc, packet->x, packet->y);
-	printf("%s", grid);
-	printf("}\n");
+	log_info("{\"alloc\": %i, \"x\": %i, \"y\": %i, \"grid\": ", packet->alloc, packet->x, packet->y);
+    log_info("%s", grid);
+    log_info("}\n");
 	
 	free(grid);
 	
@@ -973,7 +1057,7 @@ struct part* part_139_i8(map_big_array *mapParts)
     struct part *part = get_one_part(mapParts, key);
     if(part == NULL)
     {
-        printf("part 139 not found\n");
+        log_error("part 139 not found\n");
         exit(EXIT_FAILURE);
     }
     return part;
@@ -1008,7 +1092,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         part = get_one_part(mapParts, k208);
         if(part == NULL)
         {
-            printf("part 208 r3 not found\n");
+            log_error("part 208 r3 not found\n");
             exit(EXIT_FAILURE);
         }
         etern[2][2] = part;
@@ -1019,7 +1103,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         part = get_one_part(mapParts, k255);
         if(part == NULL)
         {
-            printf("part 255 r3 not found\n");
+            log_error("part 255 r3 not found\n");
             exit(EXIT_FAILURE);
         }
         etern[13][2] = part;
@@ -1030,7 +1114,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         part = get_one_part(mapParts, k181);
         if(part == NULL)
         {
-            printf("part 181 r3 not found\n");
+            log_error("part 181 r3 not found\n");
             exit(EXIT_FAILURE);
         }
         etern[2][13] = part;
@@ -1041,7 +1125,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         part = get_one_part(mapParts, k249);
         if(part == NULL)
         {
-            printf("part 249 r0 not found\n");
+            log_error("part 249 r0 not found\n");
             exit(EXIT_FAILURE);
         }
         etern[13][13] = part;
@@ -1084,28 +1168,28 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         max_result = max;
         if(max_result >= ETERN_PARTS)
         {
-            printf("Erreur alloc > ETERN_PARTS\n");
+            log_error("Erreur alloc > ETERN_PARTS\n");
         }
-        printf("max result:%i\n",max_result);
+        log_info("max result:%i\n",max_result);
     }
     
     while (possibilities->size > 0) {
         struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
         scroll(possibilities,packet);
-        printf("packet->alloc:%i",packet->alloc);
+        log_info("packet->alloc:%i\n",packet->alloc);
         if(packet->alloc > max_result)
         {
             max_result = packet->alloc;
             if(max_result >= ETERN_PARTS)
             {
-                printf("Erreur alloc > ETERN_PARTS\n");
+                log_error("Erreur alloc > ETERN_PARTS\n");
             }
-            printf("max result:%i\n",max_result);
+            log_info("max result:%i\n",max_result);
         }
         array_possibility_packet *aposs2 = build_single_array_possibility_packet(packet);
         if(add_possibility(NULL, aposs2))
         {
-            printf("error on add_possibility\n");
+            log_error("error on add_possibility\n");
 			// Pour l'initialisation, on crash car ce n'est vraiment pas normal
             exit(EXIT_FAILURE);
         }
@@ -1118,42 +1202,65 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
 }
 
 int compare_possibility(struct possibility_packet *packet, struct possibility_packet *other_packet) {
-	if ((packet == NULL && other_packet != NULL)
-		|| (packet != NULL && other_packet == NULL)) {
-			return -1;
-	}
-    
-    if (packet == NULL && other_packet == NULL) {
-        return 0;
+    // Test si l'un est null alors est-ce que les deux le sont
+    if (packet == NULL || other_packet == NULL) {
+        return packet == other_packet ? -1 : 0;
     }
 
+    // Test différence de pieces placées
 	if (packet->alloc != other_packet->alloc) {
-		return -1;
+		return -2;
 	}
 
+    // Test de la position
 	if (packet->x != other_packet->x || packet->y != other_packet->y) {
-		return -1;
+		return -3;
 	}
 
+    // Test sur les pieces utilisées
 	for (int u = 0; u < ETERN_PARTS; u++) {
 #ifdef FACES_USED_BITS
 		if (is_face_used(packet->b_faceused, u) != is_face_used(other_packet->b_faceused, u)) {
 #else
         if (packet->faceused[u] != other_packet->faceused[u]) {
 #endif // FACES_USED_BITS
-			return -1;
+			return -4;
 		}
 	}
 
+    // Test si les pieces sont placées à la même position (et meme sens)
 	for (int x = 0; x < ETERN_SIZE; x++) {
 		for (int y = 0; y < ETERN_SIZE; y++) {
 			if (packet->grid[x][y] != other_packet->grid[x][y]) {
-				return -1;
+				return -5;
 			}
 		}
 	}
 
 	return 0;
+}
+    
+int is_origin_of(struct possibility_packet *packet, struct possibility_packet *other_packet) {
+    // Test si l'un est null alors biensur que non
+    if (packet == NULL || other_packet == NULL) {
+        return 0;
+    }
+
+    // Le sens est imposé et on ne cherche pas une égalité
+    if (packet->alloc >= other_packet->alloc) {
+        return -1;
+    }
+
+    // Test si les pieces alloués sont les memes
+    for (int p = 0; p < packet->alloc; p++) {
+        uint8_t x = dirx[p];
+        uint8_t y = diry[p];
+        if (packet->grid[x][y] != other_packet->grid[x][y]) {
+            return -2;
+        }
+    }
+    
+    return 1;
 }
 
 array_possibility_packet *build_single_array_possibility_packet(struct possibility_packet *possibility) {

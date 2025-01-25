@@ -3,18 +3,25 @@
 #include <stdlib.h>
 #include <signal.h>
 
+#include "logger.h"
 #include "datamanager.h"
 #include "local_socket.h"
 #include "readdata.h"
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
-#define NB_COMMANDS 25
+#define NB_COMMANDS 26
 
+/**
+ * @brief Définition d'une commande prise en charge
+ */
 typedef struct
 {
+    /// nom de l'instruction
     char *command;
+    /// fonction à exectuer pour la commande
     int (*interpreter)(void);
+    ///indique si la commande doit être transmise aux threads fils
     int8_t send_to_childs;
 } command_description;
 
@@ -34,6 +41,7 @@ int sortdm_interpreter(void);
 int split_interpreter(void);
 int regroup_interpreter(void);
 int checkdatas_interpreter(void);
+int check_duplicate_interpreter(void);
 int checkfiles_interpreter(void);
 int printfile_interpreter(void);
 int checkfile_interpreter(void);
@@ -44,6 +52,9 @@ int min_interpreter(void);
 int help_interpreter(void);
 int statistic_interpreter(void);
 
+/**
+ * @brief Commandes prises en charge.
+ */
 static command_description commands[NB_COMMANDS] = {
     {"sorta", sort_ascending_interpreter, 0},
     {"sortd", sort_descending_interpreter, 0},
@@ -61,6 +72,7 @@ static command_description commands[NB_COMMANDS] = {
     {"split", split_interpreter, 0},
     {"regroup", regroup_interpreter, 0},
     {"checkdatas", checkdatas_interpreter, 0},
+    {"checkduplicate", check_duplicate_interpreter, 0},
     {"checkfiles", checkfiles_interpreter, 0},
     {"printfile", printfile_interpreter, 0},
     {"checkfile", checkfile_interpreter, 0},
@@ -107,12 +119,12 @@ int limit_interpreter(void) {
 }
 
 int check_interpreter(void) {
-    printf("%s\n",lastcheck);
+    log_info("%s\n",lastcheck);
     return 0;
 }
 
 int backup_interpreter(void) {
-    printf("start backup\n");
+    log_info("start backup\n");
     char *def_file = DEF_FILE;
     char *def_analyse_file = DEF_ANALYSE_FILE;
     int isServer = server;
@@ -126,7 +138,7 @@ int backup_interpreter(void) {
     }
     backup(def_file);
     backup_analysed(def_analyse_file);
-    printf("backup ended\n");
+    log_info("backup ended\n");
     if (isServer == 0) {
         free(def_file);
         free(def_analyse_file);
@@ -150,11 +162,11 @@ int exit_interpreter(void) {
             while (1)
             {
                 if (cptloop == 10) {
-                    printf("\r            ");
-                    printf("\r");
+                    log_console("\r            ");
+                    log_console("\r");
                     cptloop = 0;
                 }
-                printf("*");
+                log_console("*");
                 cptloop++;
                 usleep(MICRO_SLEEP);
             }
@@ -169,10 +181,10 @@ int exit_interpreter(void) {
 int restore_interpreter(void) {
     char *def_file = DEF_FILE;
     char *def_analyse_file = DEF_ANALYSE_FILE;
-    printf("start restore\n");
+    log_info("start restore\n");
     restore(def_file);
     restore_analysed(def_analyse_file);
-    printf("backup restore\n");
+    log_info("backup restore\n");
     return 0;
 }
 
@@ -180,10 +192,10 @@ int restoreOld_interpreter(void) {
 #ifdef FACES_USED_BITS
     char *def_file = DEF_FILE;
     char *def_analyse_file = DEF_ANALYSE_FILE;
-    printf("start restore\n");
+    log_info("start restore\n");
     restore_old_file(def_file);
     restore_analysed(def_analyse_file);
-    printf("backup restore\n");
+    log_info("backup restore\n");
     
 #endif // FACES_USED_BITS
     return 0;
@@ -192,18 +204,18 @@ int restoreOld_interpreter(void) {
 int import_interpreter(void) {
     char *def_file = DEF_FILE;
     char *def_analyse_file = DEF_ANALYSE_FILE;
-    printf("start import\n");
+    log_info("start import\n");
     import(NULL, def_file);
     import_analysed(def_analyse_file);
-    printf("backup restore\n");
+    log_info("backup restore\n");
     
     return 0;
 }
 
 int loadjson_interpreter(void) {
-    printf("load from json\n");
+    log_info("load from json\n");
     import_json();
-    printf("backup json\n");
+    log_info("backup json\n");
     
     return 0;
 }
@@ -228,6 +240,9 @@ int checkdatas_interpreter(void) {
     return check_datas();
 }
 
+int check_duplicate_interpreter(void) {
+    return check_duplicate();
+}
 int statistic_interpreter(void) {
     return statistic_datas();
 }
@@ -257,10 +272,10 @@ int checkfile_interpreter(void) {
 int checkdirections_interpreter(void) {
     if(test_directions() == 0)
     {
-        printf("directions : ok\n");
+        log_info("directions : ok\n");
     } else
     {
-        printf("directions : NOK !\n");
+        log_info("directions : NOK !\n");
     }
     
     return 0;
@@ -284,7 +299,7 @@ int printanalysed_interpreter(void) {
 }
 
 int min_interpreter(void) {
-    printf("min : %i\n",search_min_datas());
+    log_info("min : %i\n",search_min_datas());
     
     return 0;
 }
@@ -297,7 +312,7 @@ int help_interpreter(void) {
         strcat(help, commands[c].command);
         strcat(help, "\n");
     }
-    printf("%s", help);
+    log_info("%s", help);
     free(help);
     return 0;
 }

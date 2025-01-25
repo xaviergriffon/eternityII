@@ -1,9 +1,12 @@
+#include "part.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include "static_variables.h"
-#include "part.h"
+
+#include "logger.h"
 #include "readdata.h"
 
 int error = 0;
@@ -12,7 +15,7 @@ int maxrelocate = 0;
 
 void print_part(struct part *p)
 {
-	printf("part [id:%i,rotation:%i / top:%i,left:%i,bottom:%i,right:%i]\n",p->id,p->rotation, p->top, p->left,p->bottom, p->right);
+	log_info("part [id:%i,rotation:%i / top:%i,left:%i,bottom:%i,right:%i]\n",p->id,p->rotation, p->top, p->left,p->bottom, p->right);
 }
 
 /*
@@ -173,7 +176,7 @@ struct array_part * search_face(struct array_part *apart, int face, int position
 		{
 			if(c>1)
 			{
-				printf("no value ligne:%i\n", c);
+				log_info("no value ligne:%i\n", c);
 			}
 		}
 		struct list_part *last = curList;
@@ -230,7 +233,7 @@ int put_part(struct map_part *map, unsigned int key_int, char *key, struct array
 		maxrelocate = r;
     if(l >= map->sizemap)
     {
-        printf("map trop petite \n");
+        log_error("map trop petite \n");
         exit(EXIT_FAILURE);
     }
 	if (map->elements[l].key_int == 0)
@@ -240,7 +243,7 @@ int put_part(struct map_part *map, unsigned int key_int, char *key, struct array
 		map->elements[l].apart = copy_array_part(apart);
 	} else
 	{
-		printf("Probleme d'emplacement ligne:%i key_int:%i key:%s\n",l, key_int, key);
+		log_error("Probleme d'emplacement ligne:%i key_int:%i key:%s\n",l, key_int, key);
         error++;
 	}
 
@@ -324,20 +327,20 @@ struct array_part *get_parts_bigarray_with_key(map_big_array *map,key_part *key)
 }
 
 void check_array(struct array_part *apart) {
-	printf("check_array :\n");
+	log_info("check_array :\n");
 	if(apart != NULL) {
-		printf("size:%i\n",apart->size);
+		log_info("size:%i\n",apart->size);
 		for(int i=0;i <apart->size;i++) {
 			struct part p=apart->parts[i];
 			if(p.id < 0 || p.id > 256) {
-				printf("p[%i] id false:%i\n",i,p.id);
+				log_info("p[%i] id false:%i\n",i,p.id);
 				print_part(&p);
 			}
 		}
 	} else {
-		printf("array_part NULL\n");
+		log_info("array_part NULL\n");
 	}
-	printf("check_array end\n");
+	log_info("check_array end\n");
 }
 
 map_big_array *buildBigArray(struct array_part *apart,int maxFace)
@@ -421,7 +424,7 @@ map_big_array *buildBigArray(struct array_part *apart,int maxFace)
         free_array_part(arraypart1);
 		
 	}
-	printf("max array:%i\n",maxarray);
+	log_info("max array:%i\n",maxarray);
 	return result;
 }
 
@@ -433,9 +436,9 @@ struct map_part *buildMapPart(struct array_part *apart, int maxFace)
 	// Considérant un tot de 50% de croisement du hash, on répercute sur la taille
 	result->sizemap = result->size * 1.5;
 	long size = (result->sizemap * sizeof(*result->elements));
-    printf("taille part : %i\n", apart->size);
-    printf("nb mappart : %i\n", result->sizemap);
-	printf("alloc : %li\n",size);
+    log_info("taille part : %i\n", apart->size);
+    log_info("nb mappart : %i\n", result->sizemap);
+	log_info("alloc : %li\n",size);
 	result->elements = calloc(result->sizemap,sizeof(*result->elements));
 	int f1;
 	unsigned int key_int;
@@ -484,9 +487,9 @@ struct map_part *buildMapPart(struct array_part *apart, int maxFace)
         free_array_part(arraypart1);
 		
 	}
-	printf("nb erreur :%i\n",error);
-	printf("relocalisé : %i\n",relocated);
-	printf("max relocate : %i\n",maxrelocate);
+	log_info("nb erreur :%i\n",error);
+    log_info("relocalisé : %i\n",relocated);
+    log_info("max relocate : %i\n",maxrelocate);
 	return result;
 }
 
@@ -659,11 +662,11 @@ struct map_in_one *regroup_map(map_big_array *map)
 							memcpy(&result->parts[nbParts + p], &apart->parts[p], sizeof(apart->parts[p]));
 						}
 						if(apart->size > 1024){
-							printf("apart->size > 1024\n");
+                            log_info("apart->size > 1024\n");
 						}
 						nbParts+=apart->size;
 					}else{
-						printf("apart null\n");
+                        log_info("apart null\n");
 					}
 				}
 			}
@@ -677,7 +680,7 @@ struct map_in_one *regroup_map(map_big_array *map)
 		result->parts = NULL;
 	}
 	result->nbparts = nbParts;
-	printf("nbparts:%i\n",nbParts);
+    log_info("nbparts:%i\n",nbParts);
 	
 	return result;
 }
