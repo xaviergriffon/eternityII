@@ -47,7 +47,7 @@ void runThreadClient(const char *file);
  * 
  * @param file fichier contenant la définition des pieces
  */
-void runMonoClient(const char *file);
+void run_mono_client(const char *file);
 /**
  * @brief Effectue un contrôle des threads client
  * 

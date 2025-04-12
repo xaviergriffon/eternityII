@@ -12,7 +12,7 @@
  *
  * @param[in] command instruction au format texte.
  * @return 0 si l'instruction a été correctement interpretée.
- *          Sinon -1 ou négatif correspondant au code erreur de la commande.
+ *          Sinon -1 pour commande inconnue ou un négatif correspondant au code erreur de la commande.
  */
 int do_command_line(char *command);
 #endif /* command_lines_h */

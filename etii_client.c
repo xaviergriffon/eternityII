@@ -87,14 +87,14 @@ void *control_thread(void *param) {
             if(thread->works == 1 && thread->aposs > 0)
             {
                 unsigned long long inMillis = 0;
-                if (compteurs[0] >= *lastCheck) {
-                    inMillis = compteurs[0] - *lastCheck;
+                if (counters[0] >= *lastCheck) {
+                    inMillis = counters[0] - *lastCheck;
                 } else {
                     // le compteur a fait un tour
-                    inMillis = ((inMillis - 1) - *lastCheck) + compteurs[0];
+                    inMillis = ((inMillis - 1) - *lastCheck) + counters[0];
                 }
                 
-                *lastCheck = compteurs[0];
+                *lastCheck = counters[0];
                 *oneSecond = *oneSecond + inMillis;
                 long double divider = nbCheck / 1000.0;
                 unsigned long long simulationBySec = *oneSecond / divider;
@@ -225,7 +225,7 @@ void runThreadClient(const char *file)
     }
 }
 
-void runMonoClient(const char *file)
+void run_mono_client(const char *file)
 {
     client_possibility_t *thread_params = malloc(sizeof(*thread_params));
     
@@ -253,7 +253,6 @@ void runMonoClient(const char *file)
         close_socket(thread_params->socket_id);
     }
 }
-
 
 void *check_client_threads(void *param)
 {

@@ -62,13 +62,13 @@ void *check_server(void *param)
         clientsFileUpdates = 0;
         for(c=0; c < NB_THREADS;c++)
         {
-            lastactive = lastactive + compteurs[c];
+            lastactive = lastactive + counters[c];
             if (fileUpdates != NULL) {
                 clientsFileUpdates = clientsFileUpdates + fileUpdates[c];
             }
         }
         currentactive = lastactive - currentactive;
-        getted_possibility_not_null = lastactive;
+        non_null_possibilities = lastactive;
         
         unsigned long long file_possibility_stock = 0;
         int f;
@@ -97,7 +97,7 @@ void *check_server(void *param)
         int activeThread = get_active_threads(thread_params);
 
         char *temp = calloc(1000, sizeof(char));
-        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,file_possibility_stock,getted_possibility_not_null, max_result, activeThread);
+        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,file_possibility_stock,non_null_possibilities, max_result, activeThread);
         strcat(lastcheck, temp);
         free(temp);
         
@@ -168,7 +168,7 @@ void *communicate_with_client (void *userdata)
                 if (ssize < 0) {
                     log_errno("Erreur d'envoi => ");
                 }
-                compteurs[client->compteur]++;
+                counters[client->compteur]++;
                 fileUpdates[client->compteur]++;
             }
             if(p == 0)
@@ -315,7 +315,7 @@ void create_server_thread(client_t *thread_params, int i) {
 }
 
 void *rmnonext_thread(void *param) {
-    struct array_part *apart= read_parts(partsFiles);
+    struct array_part *apart= read_parts(parts_files);
     struct array_part *rotateParts = rotate_all_parts(apart);
     map_big_array *map_parts = prepare_map_part(rotateParts);
     while(request != REQUEST_STOP) {
@@ -386,7 +386,6 @@ void runserver(const char* file)
     
     
     int socket_id = create_tcp_server(SERVER_PORT, NB_THREADS);
-    long acceptclient = 0;
     while (request != REQUEST_STOP) {
         int client_id;
         int thread_id;
@@ -401,7 +400,6 @@ void runserver(const char* file)
                 exit(EXIT_FAILURE);
             }
         }
-        acceptclient++;
         struct timeval tv;
         tv.tv_sec = tcp_timeout;
         tv.tv_usec = 0;
