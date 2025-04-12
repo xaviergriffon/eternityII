@@ -282,7 +282,7 @@ int checkdirections_interpreter(void) {
 }
 
 int rmnonext_interpreter(void) {
-    struct array_part *apart= read_parts(partsFiles);
+    struct array_part *apart= read_parts(parts_files);
     
     struct array_part *rotateParts = rotate_all_parts(apart);
     map_big_array *map_parts = prepare_map_part(rotateParts);

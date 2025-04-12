@@ -10,7 +10,7 @@
 
 #define EXIT_CMD "exit"
 
-static char * getcmdline() {
+static char * getcmdline(void) {
     char * line = malloc(100), *linep = line;
     size_t lenmax = 100, len = lenmax;
     int c;
@@ -56,7 +56,6 @@ void * console(void *param)
     }
     exit(EXIT_SUCCESS);
 }
-
 
 void run_console(int server)
 {

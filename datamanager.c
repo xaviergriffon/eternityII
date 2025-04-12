@@ -69,7 +69,7 @@ void set_server_ip(const char *server)
 		strcpy(server_ip, server);
 	}
 }
-char *get_server_ip()
+char *get_server_ip(void)
 {
 	if(server_ip != NULL)
 	{
@@ -599,7 +599,7 @@ unsigned long long file_analysed_size(int nfile)
 	return 0;
 }
 
-unsigned long long datas_size()
+unsigned long long datas_size(void)
 {
     unsigned long long result = 0;
 	int f;
@@ -841,7 +841,7 @@ int restore(char *filename)
 	return 0;
 }
 
-int import_json() {
+int import_json(void) {
 	lock_all_file();
 	
 	int fp;
@@ -937,7 +937,7 @@ int print_file(int fp)
     return 0;
 }
 
-int printdatamanager()
+int printdatamanager(void)
 {
 	lock_all_file();
 	int fp;
@@ -969,7 +969,7 @@ int print_file_analysed(int fp)
     return 0;
 }
 
-int print_all_file_analysed()
+int print_all_file_analysed(void)
 {
 	lock_all_file_analysed();
 	int fp;
@@ -1009,7 +1009,7 @@ unsigned long long regroup_datas_nolock(void)
 	return 0;
 }
 
-int regroup_datas()
+int regroup_datas(void)
 {
 	lock_all_file();
 	regroup_datas_nolock();
@@ -1120,7 +1120,7 @@ int split_datas_nolock(int nbsplit)
 	return 0;
 }
 
-int split_datas()
+int split_datas(void)
 {
 	lock_all_file();
 	split_datas_nolock(NB_FILE_POSSIBILITY);
@@ -1128,9 +1128,9 @@ int split_datas()
 	return 0;
 }
 
-int check_datas()
+int check_datas(void)
 {
-    struct array_part *apart= read_parts(partsFiles);
+    struct array_part *apart= read_parts(parts_files);
     
     struct array_part *rotateParts = rotate_all_parts(apart);
 	lock_all_file();
@@ -1303,7 +1303,7 @@ unsigned long long count_combinations(unsigned long long x) {
     return result;
 }
 
-int check_duplicate()
+int check_duplicate(void)
 {
     lock_all_file();
     unsigned long long count = 0;
@@ -1404,7 +1404,7 @@ int statistic_datas(void)
     return 0;
 }
 
-int search_min_datas()
+int search_min_datas(void)
 {
 	int result = ETERN_PARTS + 1;
 	lock_all_file();
@@ -1648,7 +1648,7 @@ int check_file(int f)
 	return result;
 }
 
-int check_files()
+int check_files(void)
 {
 	int f;
 	for(f = 0; f < NB_FILE_POSSIBILITY;f++)
@@ -1694,7 +1694,7 @@ void sortdmthread(void)
 	free(f);
 }
 
-int sort_descending_mthread()
+int sort_descending_mthread(void)
 {
 	lock_all_file();
 	
@@ -1721,7 +1721,7 @@ int sort_descending_mthread()
 }
 
 // TODO : revoir le trie pour prendre en compte le cache
-int sort_descending()
+int sort_descending(void)
 {
 	lock_all_file();
 	

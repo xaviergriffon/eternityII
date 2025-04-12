@@ -23,7 +23,7 @@ uint8_t dirx[ETERN_PARTS] = {0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3};
 uint8_t diry[ETERN_PARTS] = {0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3};
 
 #endif
-unsigned long long *compteurs = NULL;
+unsigned long long *counters = NULL;
 
 struct client_statistics *fork_statistics = NULL;
 
@@ -31,9 +31,13 @@ unsigned long long *lastfilesize = NULL;
 char *lastcheck = NULL;
 
 // TODO : deplacer dans un parametre ?
-char* partsFiles = "./pieces.csv";
+#if ETERN_PARTS == 256
+char* parts_files = "./pieces.csv";
+#else
+char* parts_files = "./pieces16.csv";
+#endif // ETERN_PARTS == 256
 
-unsigned long long getted_possibility_not_null = 0;
+unsigned long long non_null_possibilities = 0;
 uint16_t max_result = 0;
 //int request = REQUEST_CONTINUE;
 

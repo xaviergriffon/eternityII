@@ -30,8 +30,6 @@ void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibil
             log_error("error on add_possibility\n");
         }
         free_array_possibility_packet(aposs);
-        
-        
     }
 }
 
@@ -64,10 +62,12 @@ void *autosearch (void *userdata)
 {
     client_possibility_t *client = userdata;
     
-    int16_t idParts[ETERN_PARTS+1][4];
-    for(int p=0; p <= ETERN_PARTS;p++) {
-        for(int r=0; r < 4;r++) {
-            idParts[p][r] = p + ETERN_PARTS * r;
+    int16_t idParts[ETERN_PARTS+1][PART_SIZES];
+    for(int p=0; p <= ETERN_PARTS; p++) {
+        int base = p;
+        for(int r=0; r < PART_SIZES; r++) {
+            idParts[p][r] = base;
+            base += ETERN_PARTS;
         }
     }
     // Boucle infinie pour maintenir le thread
@@ -123,7 +123,7 @@ void *autosearch (void *userdata)
                     
                     // Consomation d'un cache ??
                     struct possibility_packet *possibilityPacket = scroll_big_table_cache(bt);
-    #ifdef DEBUG_CHECK_POSSIBILITY
+#ifdef DEBUG_CHECK_POSSIBILITY
                     int analyse = check_possibility(possibilityPacket, client->all_rotate_part);
                     if (analyse < 0)
                     {
@@ -131,10 +131,10 @@ void *autosearch (void *userdata)
                         log_error(" ---");
                         print_possibility_packet(possibilityPacket);
                     }
-    #endif // DEBUG_CHECK_POSSIBILITY
+#endif // DEBUG_CHECK_POSSIBILITY
                     
                     // Statistique possibilité étudiées
-                    compteurs[client->compteur]++;
+                    counters[client->compteur]++;
                     
                     // alimente key pour indiquer quoi chercher
                     //what_search_to_key(client->all_rotate_part, possibilityPacket, key);
@@ -158,7 +158,7 @@ void *autosearch (void *userdata)
 
                 if (request == REQUEST_PAUSE)
                 {
-                    usleep(MICRO_PAUSE);
+                    usleep(MICRO_SHORT_SLEEP);
                 }
             }
         }

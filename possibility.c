@@ -30,7 +30,7 @@ uint8_t is_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part) {
 }
 #endif // FACES_USED_BITS
 
-int decode_direction()
+int decode_direction(void)
 {
 	log_info("/nx : ");
 	int i;
@@ -50,7 +50,7 @@ int decode_direction()
 	return 0;
 }
 
-int test_directions()
+int test_directions(void)
 {
 	int grille[ETERN_PARTS];
 	int i;
@@ -905,7 +905,7 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
 int check_possibility(struct possibility_packet *packet, struct array_part *rotateParts)
 {
     if (rotateParts == NULL) {
-        struct array_part *apart= read_parts(partsFiles);
+        struct array_part *apart= read_parts(parts_files);
         
         rotateParts = rotate_all_parts(apart);
     }
@@ -1157,10 +1157,11 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
     key_part *key = malloc(sizeof(key_part));
     
     struct possibility_packet *possibilityPacket = generate_possibility_packet(x, y, etern, cur_dir);
-    getted_possibility_not_null++;
+    non_null_possibilities++;
     // alimente key pour indiquer quoi chercher
     what_search_to_key2(all_rotate_part, possibilityPacket, key, mapParts->sizearrayM);
     int max = search_possiblity_light(possibilities, key, possibilityPacket, mapParts, all_rotate_part, idParts);
+    free(possibilityPacket);
     
     // Si le résultat à dépasser le plus grand qu'on a trouvé, on trace
     if(max > max_result)
@@ -1193,7 +1194,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
 			// Pour l'initialisation, on crash car ce n'est vraiment pas normal
             exit(EXIT_FAILURE);
         }
-        getted_possibility_not_null++;
+        non_null_possibilities++;
 		free_array_possibility_packet(aposs2);
         free(packet);
     }

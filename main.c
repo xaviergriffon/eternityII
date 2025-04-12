@@ -25,12 +25,215 @@
 #include "etii_statistic.h"
 #include "logger.h"
 
-void runclient(const char *hostname, const char *file)
+void handle_tcpclient(int argc, const char *argv[]);
+void handle_tcpserver(int argc, const char *argv[]);
+void handle_test(const char *arg);
+void failed_arg(void);
+
+/**
+ * @brief Point d'entrée du programme.
+ *
+ * Ceci est la fonction principale où commence l'exécution du programme.
+ *
+ * @param argc Le nombre d'arguments de la ligne de commande.
+ * @param argv Un tableau de chaînes terminées par un caractère nul représentant les arguments de la ligne de commande.
+ * @return Un entier représentant le statut de sortie du programme.
+ *         En général, retourner 0 indique une exécution réussie.
+ */
+int main(int argc, const char *argv[]) {
+    parent_pid = getpid();
+    log_info("Version %i", version);
+
+    if (argc >= 2) {
+        lastcheck = calloc(2000, sizeof(char));
+
+        if (strcmp("tcpclient", argv[1]) == 0) {
+            handle_tcpclient(argc, argv);
+        } else if (strcmp("tcpserver", argv[1]) == 0) {
+            handle_tcpserver(argc, argv);
+        } else if (strcmp("test", argv[1]) == 0) {
+            char* file = parts_files;
+            if (argc > 2) {
+                file = (char *)(argv[2]);
+            }
+            handle_test(file);
+        } else {
+            failed_arg();
+            exit(EXIT_FAILURE);
+        }
+    } else {
+        failed_arg();
+        exit(EXIT_FAILURE);
+    }
+
+    exit(EXIT_SUCCESS);
+}
+
+void run_client(const char *hostname, const char *file);
+void run_server_thread(int *socket_id);
+void init_childs(void);
+void init_sigchld_sigaction(void);
+void init_signals(void);
+void wait_child(void);
+int run_checker(int server);
+int init_counters(void);
+int run_fork_checker(struct sockaddr_un *main_addr);
+
+/**
+ * @brief Gère le client TCP.
+ *
+ * Cette fonction initialise les fils, les signaux, les compteurs, les vérifications, la console, et exécute le client.
+ *
+ * @param argc Le nombre d'arguments de la ligne de commande.
+ * @param argv Un tableau de chaînes terminées par un caractère nul représentant les arguments de la ligne de commande.
+ */
+void handle_tcpclient(int argc, const char *argv[]) {
+    log_info("client\n");
+    NB_THREADS = 1;
+    char *serverIp = "localhost";
+    if (argc >= 3) {
+        serverIp = (char *)argv[2];
+    }
+    if (argc >= 4) {
+        NB_THREADS = atoi(argv[3]);
+    }
+#ifdef DEBUG_IN_MONO_PROCESS
+    NB_THREADS = 1;
+#endif
+    init_childs();
+    init_counters();
+    init_signals();
+
+    char socket_main[50];
+    sprintf(socket_main, "etii_main.%d", getpid());
+    main_addr = build_sockaddr(socket_main);
+    log_info("socket main : %s\n", socket_main);
+
+    int *socket_id = malloc(sizeof(int));
+    *socket_id = build_udp_local_socket(main_addr);
+    if (socket_id > 0) {
+        run_server_thread(socket_id);
+    }
+    main_socket_id = socket_id;
+
+    init_sigchld_sigaction();
+
+    run_checker(0);
+    run_console(0);
+    if (argc >= 5) {
+        parts_files = (char *)(argv[4]);
+    }
+
+    pid_t child_pid = -1;
+    for (int c = 0; c < NB_THREADS; c++) {
+        if (parent_pid == getpid()) {
+#ifdef DEBUG_IN_MONO_PROCESS
+            child_pid = getpid();
+#else
+            child_pid = fork();
+#endif // DEBUG_IN_MONO_PROCESS
+            if (child_pid != 0) {
+                int sp_len = sprintf(forkId[c], "etii_fork.%d", child_pid);
+                forkId[c][sp_len] = '\0';
+                childrens_pid[c] = child_pid;
+#ifndef DEBUG_IN_MONO_PROCESS
+            } else {
+#endif // DEBUG_IN_MONO_PROCESS
+                NB_THREADS = 1;
+                run_fork_checker(main_addr);
+                run_client(serverIp, parts_files);
+
+                if (fork_checker_socket_id > 0) {
+                    close(fork_checker_socket_id);
+                }
+                char socket_fork[50];
+                int socket_fork_len = sprintf(socket_fork, "etii_fork.%d", getpid());
+                socket_fork[socket_fork_len] = '\0';
+                struct sockaddr_un *fork_addr = build_sockaddr(socket_fork);
+#ifdef DEBUG_LOCAL_SOCKET
+                log_debug("remove : %s\n", fork_addr->sun_path);
+                flush_debug();
+#endif // DEBUG_LOCAL_SOCKET
+                remove(fork_addr->sun_path);
+                free(fork_addr);
+            }
+        }
+    }
+
+    if (parent_pid == getpid()) {
+        wait_child();
+        close(*socket_id);
+#ifdef DEBUG_LOCAL_SOCKET
+        log_debug("remove : %s\n", main_addr->sun_path);
+        flush_debug();
+#endif // DEBUG_LOCAL_SOCKET
+        remove(main_addr->sun_path);
+    }
+    free(main_addr);
+}
+
+/**
+ * @brief Gère le serveur TCP.
+ *
+ * Cette fonction initialise les fils, les signaux, les compteurs, les vérifications, la console, et exécute le serveur.
+ *
+ * @param argc Le nombre d'arguments de la ligne de commande.
+ * @param argv Un tableau de chaînes terminées par un caractère nul représentant les arguments de la ligne de commande.
+ */
+void handle_tcpserver(int argc, const char *argv[]) {
+    log_info("server\n");
+    server = 1;
+    NB_THREADS = 80;
+    if (argc >= 3) {
+        log_info("arg 2 : %s", argv[2]);
+        NB_THREADS = atoi(argv[2]);
+    }
+    log_info("Nb threads : %i\n", NB_THREADS);
+    init_childs();
+    init_signals();
+    init_counters();
+    run_checker(1);
+    run_console(1);
+    if (argc >= 4) {
+        parts_files = (char *)(argv[3]);
+    }
+    runserver(parts_files);
+}
+
+void run_auto(const char *file);
+
+/**
+ * @brief Gère le test.
+ *
+ * Cette fonction initialise les compteurs, les vérifications, la console, et exécute le test.
+ *
+ * @param file fichier à traiter.
+ */
+void handle_test(const char *file) {
+    NB_THREADS = 1;
+    max_search_by_sec = 100000;
+    init_childs();
+    init_counters();
+    run_checker(0);
+    run_console(0);
+    run_auto(file);
+}
+
+/**
+ * @brief Exécute le client avec le nom d'hôte et le fichier spécifiés.
+ *
+ * Cette fonction initie une connexion client au nom d'hôte donné et traite
+ * le fichier spécifié.
+ *
+ * @param hostname Le nom d'hôte auquel se connecter.
+ * @param file Le fichier à traiter.
+ */
+void run_client(const char *hostname, const char *file)
 {
 	// On indique au manager de passer par un serveur
 	set_server_ip(hostname);
 	
-    runMonoClient(file);
+    run_mono_client(file);
 	
 	// Comme on est en mode client, on ne devrait plus rien avoir dans les files
 	// si c'est le cas, il s'agit d'une erreur
@@ -46,7 +249,15 @@ void runclient(const char *hostname, const char *file)
 	}
 }
 
-void runauto(const char *file)
+/**
+ * @brief Exécute le programme en mode automatique.
+ *
+ * Cette fonction lit les pièces du fichier spécifié, les fait tourner, prépare une carte des pièces,
+ * et détermine les premières possibilités. Ensuite, elle exécute le client en mode automatique.
+ *
+ * @param file Le fichier à traiter.
+ */
+void run_auto(const char *file)
 {
 	struct array_part *apart= read_parts(file);
 	struct array_part *rotateParts = rotate_all_parts(apart);
@@ -57,15 +268,22 @@ void runauto(const char *file)
 	free_array_part(rotateParts);
 	free_array_part(apart);
 	
-	runMonoClient(file);
+	run_mono_client(file);
 }
 
-
+/**
+ * @brief Affiche un message d'erreur indiquant que les arguments sont incorrects.
+ */
 void failed_arg(void)
 {
 	log_error("Indiquer parametre suivant :\ntcpserver [nombre de threads] [pieces.csv]\ntcpclient [serveur] [pieces.csv]\n");
 }
 
+/**
+ * @brief Initialise le thread chargé de faire les statistiques.
+ * 
+ * @param server 1 si le thread est pour le serveur, 0 pour le client.
+ */
 int run_checker(int server)
 {
 	pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
@@ -122,7 +340,7 @@ void *fork_checker(void *param) {
     unsigned long long last_counter = 0;
     struct client_statistics *statistic = malloc(sizeof(struct client_statistics));
 	while(request != REQUEST_STOP && fork_checker_socket_id > 0) {
-        unsigned long long counter = compteurs[0];
+        unsigned long long counter = counters[0];
         unsigned long long sps = 0;
         if (counter >= last_counter) {
             sps = counter - last_counter;
@@ -181,6 +399,16 @@ void *fork_checker(void *param) {
 	return NULL;
 }
 
+/**
+ * @brief Exécute le vérificateur de fork dans un thread détaché.
+ *
+ * Cette fonction initialise les attributs du thread, définit le thread comme détaché,
+ * et crée un nouveau thread pour exécuter le vérificateur de fork. Si la création du thread échoue,
+ * elle enregistre un message d'erreur et quitte le programme.
+ *
+ * @param main_addr Un pointeur vers une structure sockaddr_un contenant l'adresse principale.
+ * @return Retourne 0 en cas de succès.
+ */
 int run_fork_checker(struct sockaddr_un *main_addr)
 {
 	pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
@@ -188,25 +416,39 @@ int run_fork_checker(struct sockaddr_un *main_addr)
 	pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
 	pthread_t thread;
 	
+    // Start the fork checker.
 	if(0 != pthread_create(&thread, thread_attributes, fork_checker, main_addr))
 	{
 		log_error("Problème avec pthread_create()\n");
 		free(thread_attributes);
 		exit(EXIT_FAILURE);
 	}
+    
+    // Clean up the thread attributes.
 	pthread_attr_destroy(thread_attributes);
 	free(thread_attributes);
+    
 	return 0;
 }
 
-int init_compteurs(void)
+/**
+ * @brief Initialise les compteurs utilisés dans le programme.
+ *
+ * Cette fonction configure et initialise tous les compteurs nécessaires
+ * au bon fonctionnement du programme. Elle doit être appelée au début du
+ * programme avant que les compteurs ne soient utilisés.
+ *
+ * @return int Retourne 0 si l'initialisation est réussie, ou un code
+ * d'erreur non nul en cas d'échec.
+ */
+int init_counters(void)
 {
-	compteurs = malloc(sizeof(unsigned long long) * NB_THREADS);
+	counters = malloc(sizeof(unsigned long long) * NB_THREADS);
 	lastfilesize = malloc(sizeof(unsigned long long) * NB_THREADS);
 	
 	for(int c = 0; c < NB_THREADS;c++)
 	{
-		compteurs[c] = 0;
+		counters[c] = 0;
 		lastfilesize[c] = 0;
 	}
 
@@ -263,6 +505,9 @@ void sigchld_handler(int signal) {
 #endif // DEBUG_SIGNAL
 }
 
+/**
+ * @brief Initialise les signaux pour les threads enfants.
+ */
 void init_sigchld_sigaction(void) {
  	struct sigaction sa;
      //memset(&sa, 0, sizeof *sa);
@@ -296,7 +541,7 @@ void wait_child(void) {
     while (wait(&status) >= 0);
 #endif // DEBUG_SIGNAL
  }
-void *server_udp(void *param) {
+void *server_tcp(void *param) {
     int socket_id = *(int*)param;
     
     struct sockaddr_un *claddr = malloc(sizeof(struct sockaddr_un));
@@ -337,13 +582,22 @@ void *server_udp(void *param) {
     return NULL;
 }
 
+/**
+ * @brief Exécute le serveur TCP dans un thread détaché.
+ *
+ * Cette fonction initialise les attributs du thread, définit le thread comme détaché,
+ * et crée un nouveau thread pour exécuter le serveur TCP. Si la création du thread échoue,
+ * elle enregistre un message d'erreur et quitte le programme.
+ *
+ * @param socket_id Un pointeur vers un entier contenant l'identifiant du socket.
+ */
 void run_server_thread(int *socket_id) {
     log_info("srv  socket_id %i\n", *socket_id);
     pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
     pthread_attr_init(thread_attributes);
     pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
     pthread_t thread;
-    if(0 != pthread_create(&thread, thread_attributes, server_udp, socket_id))
+    if(0 != pthread_create(&thread, thread_attributes, server_tcp, socket_id))
         {
             log_error("Problème avec pthread_create()\n");
             free(thread_attributes);
@@ -393,6 +647,9 @@ void run_fork_thread(int *socket_id) {
 	free(thread_attributes);
 }
 
+/**
+ * @brief Initialise les attributs des threads enfants.
+ */
 void init_childs(void) {
     childrens_pid = malloc(sizeof(pid_t) * NB_THREADS);
     forkId = malloc(sizeof(char *) * NB_THREADS);
@@ -408,6 +665,13 @@ void init_childs(void) {
     }
 }
 
+/**
+ * @brief Initialise les gestionnaires de signaux pour l'application.
+ *
+ * Cette fonction configure les gestionnaires de signaux nécessaires pour s'assurer que
+ * l'application peut gérer divers signaux de manière appropriée. Elle est
+ * généralement appelée pendant la phase d'initialisation du programme.
+ */
 void init_signals(void) {
     // TODO : voir si besoin de tous
     signal(SIGINT, signal_end_handler);
@@ -417,137 +681,3 @@ void init_signals(void) {
     signal(SIGTERM, signal_end_handler);
     signal(SIGPIPE, signal_ignored);
 }
-
-int main(int argc, const char * argv[])
-{
-	parent_pid = getpid();
-	log_info("Version %i", version);
-	
-	if (argc >= 2) {
-		lastcheck = calloc(2000, sizeof(char));
-		
-		if(strcmp("tcpclient", argv[1]) == 0) {
-			log_info("client\n");
-            NB_THREADS = 1;
-			char *serverIp = "localhost";
-			if(argc >= 3){
-				serverIp = (char *)argv[2];
-			}
-            if(argc >= 4) {
-                NB_THREADS = atoi(argv[3]);
-            }
-#ifdef DEBUG_IN_MONO_PROCESS
-            NB_THREADS = 1;
-#endif
-            init_childs();
-            init_compteurs();
-            init_signals();
-			
-			char socket_main[50];
-			sprintf(socket_main, "etii_main.%d", getpid());
-			main_addr = build_sockaddr(socket_main);
-			log_info("socket main : %s\n", socket_main);
-
-			int *socket_id = malloc(sizeof(int));
-			*socket_id = build_udp_local_socket(main_addr);
-			if (socket_id > 0) {
-				run_server_thread(socket_id);
-			}
-			main_socket_id = socket_id;
-					
-			init_sigchld_sigaction();
-			
-			run_checker(0);
-			run_console(0);
-            if(argc >= 5) {
-                partsFiles = (char *)(argv[4]);
-            }
-
-			pid_t child_pid = -1;
-			for (int c = 0; c < NB_THREADS; c++) {
-				if (parent_pid == getpid()) {
-#ifdef DEBUG_IN_MONO_PROCESS
-                    child_pid = getpid();
-#else
-                    child_pid = fork();
-#endif // DEBUG_IN_MONO_PROCESS
-                    if (child_pid != 0) {
-                        // on enregistre les informations du process fils
-                        int sp_len = sprintf(forkId[c], "etii_fork.%d", child_pid);
-                        forkId[c][sp_len] = '\0';
-                        childrens_pid[c] = child_pid;
-#ifndef DEBUG_IN_MONO_PROCESS
-                    } else {
-#endif // DEBUG_IN_MONO_PROCESS
-                        // un fils tourne sur 1 seul thread
-                        NB_THREADS = 1;
-                        // création d'un thread chargé de remonter l'information du compteur
-                        run_fork_checker(main_addr);
-                        
-                        runclient(serverIp, partsFiles);
-                        
-                        if (fork_checker_socket_id > 0) {
-                            close(fork_checker_socket_id);
-                        }
-                        char socket_fork[50];
-                        int socket_fork_len = sprintf(socket_fork, "etii_fork.%d", getpid());
-                        socket_fork[socket_fork_len] = '\0';
-                        struct sockaddr_un *fork_addr = build_sockaddr(socket_fork);
-#ifdef DEBUG_LOCAL_SOCKET
-                        log_debug("remove : %s\n", fork_addr->sun_path);
-                        flush_debug();
-#endif // DEBUG_LOCAL_SOCKET
-                        remove(fork_addr->sun_path);
-                        free(fork_addr);
-                    }
-				}
-			}
-
-			if (parent_pid == getpid()) {
- 				wait_child();
-                close(*socket_id);
-#ifdef DEBUG_LOCAL_SOCKET
-                log_debug("remove : %s\n", main_addr->sun_path);
-                flush_debug();
-#endif // DEBUG_LOCAL_SOCKET
-                remove(main_addr->sun_path);
- 			}
-            free(main_addr);
-		} else if (strcmp("tcpserver", argv[1]) == 0) {
-			log_info("server\n");
-            server = 1;
-            NB_THREADS = 80;
-			if(argc >= 3) {
-				log_info("arg 2 : %s",argv[2]);
-				NB_THREADS = atoi(argv[2]);
-			}
-			log_info("Nb threads : %i\n", NB_THREADS);
-            init_childs();
-            init_signals();
-			init_compteurs();
-			run_checker(1);
-			run_console(1);
-            if(argc >= 4) {
-                partsFiles = (char *)(argv[3]);
-            }
-			runserver(partsFiles);
-		} else if(strcmp("test", argv[1])==0) {
-            NB_THREADS = 1;
-			max_search_by_sec = 100000;
-			init_compteurs();
-			run_checker(0);
-			run_console(0);
-            runauto(argv[2]);
-		} else {
-			failed_arg();
-            exit(EXIT_FAILURE);
-		}
-        
-	} else {
-		failed_arg();
-        exit(EXIT_FAILURE);
-	}
-    
-    exit(EXIT_SUCCESS);
-}
-

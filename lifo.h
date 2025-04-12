@@ -32,7 +32,7 @@ typedef struct BigTable {
 void init_file_with_cache(File *suite, unsigned long long cacheSize, size_t sizeofvalue);
 void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue);
 
-/* ENFILER*/
+// Ajout d'une valeur dans la suite
 int put (File * suite, void *value);
 
 void *put_big_table(big_table *table, void *value);
@@ -42,7 +42,7 @@ void move_before(File *suite, Element *element, Element *target);
 // Positionne l'élément après la cible
 void move_after(File *suite, Element *element, Element *target);
 
-/* DE_FILER*/
+// Extrait un élément de la suite
 int scroll (File * suite, void *dest);
 void *scroll_cache(File * suite);
 //int scroll_fifo (File * suite, void *dest);

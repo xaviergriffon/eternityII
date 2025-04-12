@@ -15,7 +15,7 @@ int maxrelocate = 0;
 
 void print_part(struct part *p)
 {
-	log_info("part [id:%i,rotation:%i / top:%i,left:%i,bottom:%i,right:%i]\n",p->id,p->rotation, p->top, p->left,p->bottom, p->right);
+	log_info("part [id:%i,rotation:%i / top:%i,left:%i,bottom:%i,right:%i]\n", p->id, p->rotation, p->top, p->left, p->bottom, p->right);
 }
 
 /*
@@ -24,89 +24,106 @@ void print_part(struct part *p)
  */
 struct part *rotatePart(struct part *p, int nbRotate)
 {
-    struct part *result = malloc(sizeof(*result));
-    result->id = p->id;
-    result->top = p->top;
-    result->right = p->right;
-    result->bottom = p->bottom;
-    result->left = p->left;
-    
-    int tour = nbRotate;
-    if(tour >= 4)
-    {
-        tour = tour % 4;
-    }
-    result->rotation = tour;
-    
-    int t;
-    for(t=0; t < tour; t++)
-    {
+	struct part *result = malloc(sizeof(*result));
+	result->id = p->id;
+	result->top = p->top;
+	result->right = p->right;
+	result->bottom = p->bottom;
+	result->left = p->left;
+
+	int tour = nbRotate;
+	if (tour >= 4)
+	{
+		tour = tour % 4;
+	}
+	result->rotation = tour;
+
+	int t;
+	for (t = 0; t < tour; t++)
+	{
 		int8_t left = result->left;
 		result->left = result->bottom;
 		result->bottom = result->right;
 		result->right = result->top;
-        result->top = left;
-    }
-    
-    return result;
+		result->top = left;
+	}
+
+	return result;
 }
 
-struct array_part * rotate_all_parts(struct array_part *apart)
+struct array_part *rotate_all_parts(struct array_part *apart)
 {
-    struct array_part *result = malloc(sizeof *result);
-    result->size = apart->size * 4;
-    result->parts = calloc((result->size+4) ,sizeof(struct part));
-    
-    int p=0;
+	struct array_part *result = malloc(sizeof *result);
+	result->size = apart->size * 4;
+	// TODO : pourquoi +4 ?
+	// Sans doute pour la propriété size de la structure array_part mais ce n'est pas très propre
+	result->parts = calloc((result->size + 4), sizeof(struct part));
+
+	int p = 0;
+	// TODO : pourquoi on commence à 1 ?
 	// on ne prend pas en compte l'id 0
-    int i = 1;
-    while(p< result->size)
-    {
-        struct part *part = &apart->parts[i];
-        int r;
-        for (r=0; r < 4; r++)
-        {
-			
+	int i = 1;
+	while (p < result->size)
+	{
+		struct part *part = &apart->parts[i];
+		int r;
+		for (r = 0; r < 4; r++)
+		{
+
 			struct part *rotatepart = rotatePart(part, r);
-			int position = i+ ETERN_PARTS *r;
+			int position = i + ETERN_PARTS * r;
 			memcpy(&result->parts[position], rotatepart, sizeof(struct part));
-			//print_part(rotatepart);
-            free(rotatepart);
+			// print_part(rotatepart);
+			free(rotatepart);
 			p++;
-        }
-        i++;
-    }
-    return result;
+		}
+		i++;
+	}
+	return result;
 }
 
 int search_max_face(struct array_part *apart)
 {
-    int maxface = 0;
-    int i;
-    for (i = 1; i <= apart->size; i++)
-    {
-        struct part *p = &apart->parts[i];
-        if (p->top > maxface)
-        {
-            maxface = p->top;
-        }
-        if (p->right > maxface)
-        {
-            maxface = p->right;
-        }
-        if (p->bottom > maxface)
-        {
-            maxface = p->bottom;
-        }
-        if (p->left > maxface)
-        {
-            maxface = p->left;
-        }
-    }
-    return maxface;
+	int maxface = 0;
+	int i;
+	for (i = 1; i <= apart->size; i++)
+	{
+		struct part *p = &apart->parts[i];
+		if (p->top > maxface)
+		{
+			maxface = p->top;
+		}
+		if (p->right > maxface)
+		{
+			maxface = p->right;
+		}
+		if (p->bottom > maxface)
+		{
+			maxface = p->bottom;
+		}
+		if (p->left > maxface)
+		{
+			maxface = p->left;
+		}
+	}
+	return maxface;
 }
 
-struct array_part * search_face(struct array_part *apart, int face, int position)
+/**
+ * @brief Recherche des pièces dans le tableau qui correspondent à la face et à la position spécifiées.
+ *
+ * Cette fonction parcourt le tableau de pièces donné et recherche les pièces
+ * qui correspondent aux critères de face et de position spécifiés. Elle renvoie un nouveau tableau
+ * contenant les pièces correspondantes.
+ *
+ * @param apart Pointeur vers le tableau de pièces à rechercher.
+ * @param face La valeur de la face à rechercher. Si FACE_UNKNOW, toute valeur de face non nulle est considérée comme une correspondance.
+ * @param position La position à rechercher (PART_TOP, PART_RIGHT, PART_BOTTOM, PART_LEFT, ou PART_NONE).
+ * @return Un pointeur vers une nouvelle structure array_part contenant les pièces correspondantes.
+ *
+ * @note L'appelant est responsable de la libération de la mémoire allouée pour la structure array_part retournée.
+ */
+struct array_part *search_face(struct array_part *apart, int face, int position)
 {
 
 	struct list_part *list = malloc(sizeof *list);
@@ -116,30 +133,34 @@ struct array_part * search_face(struct array_part *apart, int face, int position
 	curList = list;
 	int array_size = 0;
 	int i;
-    for (i = 0; i < apart->size; i++)
-    {
-        int present = 0;
-        struct part *p = &apart->parts[i];
-        if ((position == PART_TOP || position == PART_NONE) && (p->top == face || (face == FACE_UNKNOW && p->top != 0)))
-        {
-            present = 1;
-        }else if ((position == PART_RIGHT || position == PART_NONE) && (p->right == face || (face == FACE_UNKNOW && p->right != 0)))
-        {
-            present = 1;
-        }else if ((position == PART_BOTTOM || position == PART_NONE) && (p->bottom == face || (face == FACE_UNKNOW && p->bottom != 0)))
-        {
-            present = 1;
-        }else if ((position == PART_LEFT || position == PART_NONE) && (p->left == face || (face == FACE_UNKNOW && p->left != 0)))
-        {
-            present = 1;
-        }
-        
-        if (present != 0)
-        {
-			if(curList->value == NULL)
+	for (i = 0; i < apart->size; i++)
+	{
+		int present = 0;
+		struct part *p = &apart->parts[i];
+		if ((position == PART_TOP || position == PART_NONE) && (p->top == face || (face == FACE_UNKNOW && p->top != 0)))
+		{
+			present = 1;
+		}
+		else if ((position == PART_RIGHT || position == PART_NONE) && (p->right == face || (face == FACE_UNKNOW && p->right != 0)))
+		{
+			present = 1;
+		}
+		else if ((position == PART_BOTTOM || position == PART_NONE) && (p->bottom == face || (face == FACE_UNKNOW && p->bottom != 0)))
+		{
+			present = 1;
+		}
+		else if ((position == PART_LEFT || position == PART_NONE) && (p->left == face || (face == FACE_UNKNOW && p->left != 0)))
+		{
+			present = 1;
+		}
+
+		if (present != 0)
+		{
+			if (curList->value == NULL)
 			{
 				curList->value = p;
-			} else
+			}
+			else
 			{
 				struct list_part *newList = malloc(sizeof *newList);
 				newList->value = p;
@@ -148,46 +169,50 @@ struct array_part * search_face(struct array_part *apart, int face, int position
 				curList = newList;
 			}
 			array_size++;
-        }
-    }
-	
+		}
+	}
+
 	struct array_part *result = malloc(sizeof(struct array_part));
 	result->parts = NULL;
-    result->size = 0;
-	if(array_size > 0)
+	result->size = 0;
+	if (array_size > 0)
 	{
 		size_t allocsize = array_size * sizeof(struct part);
 		struct part *parts = malloc(allocsize);
 		result->parts = parts;
-	}else
+	}
+	else
 	{
 		result->parts = NULL;
 	}
-	
+
 	curList = list;
 	int c = 0;
 	result->size = array_size;
-	while (curList != NULL) {
-		if(curList->value != NULL)
+	while (curList != NULL)
+	{
+		if (curList->value != NULL)
 		{
 			result->parts[c] = *curList->value;
 			c++;
-		} else
+		}
+		else
 		{
-			if(c>1)
+			if (c > 1)
 			{
 				log_info("no value ligne:%i\n", c);
 			}
 		}
 		struct list_part *last = curList;
 		curList = curList->next;
-		
+
 		free(last);
 	}
-    return result;
+	return result;
 }
 
-unsigned long hashmap_hash_int(unsigned long key){
+unsigned long hashmap_hash_int(unsigned long key)
+{
 	/* Robert Jenkins' 32 bit Mix Function */
 	key += (key << 12);
 	key ^= (key >> 22);
@@ -197,54 +222,56 @@ unsigned long hashmap_hash_int(unsigned long key){
 	key ^= (key >> 2);
 	key += (key << 7);
 	key ^= (key >> 12);
-	
+
 	/* Knuth's Multiplicative Method */
-	//key = (key >> 3) * 2654435761;
-	
+	// key = (key >> 3) * 2654435761;
+
 	return key % 1024;
 }
 
-unsigned int hash (char *str)
+unsigned int hash(char *str)
 {
-    unsigned int hash = *str;//5381
+	unsigned int hash = *str; // 5381
 	while (*str != 0)
-    {
-        int c = *str;
-        //hash = hash * 33 + c;
-        hash = ((hash << 5) + hash) + c;
-        str++;
-    }
-		
-    return hash;
+	{
+		int c = *str;
+		// hash = hash * 33 + c;
+		hash = ((hash << 5) + hash) + c;
+		str++;
+	}
+
+	return hash;
 }
 
 int put_part(struct map_part *map, unsigned int key_int, char *key, struct array_part *apart)
 {
 	int l = key_int % map->size;
 	int first = l;
-	int r=0;
-	while (map->elements[l].key_int != 0 && l < map->sizemap) {
+	int r = 0;
+	while (map->elements[l].key_int != 0 && l < map->sizemap)
+	{
 		r++;
 		l++;
 	}
-	if(first != l)
+	if (first != l)
 		relocated++;
-	if(r > maxrelocate)
+	if (r > maxrelocate)
 		maxrelocate = r;
-    if(l >= map->sizemap)
-    {
-        log_error("map trop petite \n");
-        exit(EXIT_FAILURE);
-    }
+	if (l >= map->sizemap)
+	{
+		log_error("map trop petite \n");
+		exit(EXIT_FAILURE);
+	}
 	if (map->elements[l].key_int == 0)
 	{
 		map->elements[l].key_int = key_int;
 		map->elements[l].key = key;
 		map->elements[l].apart = copy_array_part(apart);
-	} else
+	}
+	else
 	{
-		log_error("Probleme d'emplacement ligne:%i key_int:%i key:%s\n",l, key_int, key);
-        error++;
+		log_error("Probleme d'emplacement ligne:%i key_int:%i key:%s\n", l, key_int, key);
+		error++;
 	}
 
 	return l;
@@ -252,33 +279,34 @@ int put_part(struct map_part *map, unsigned int key_int, char *key, struct array
 
 struct array_part *get_parts(struct map_part *map, char *key)
 {
-    struct array_part *parts = NULL;
-    
-    int key_int = hash(key);
-    int l = abs(key_int) % map->size;
-    struct map_part_element *mpe = NULL;
-    while (mpe == NULL && l < map->sizemap) {
-        struct map_part_element *temp = &map->elements[l];
-		if(temp != NULL && temp->key_int == key_int && strcmp(key, temp->key) == 0)
-        {
-            mpe = &map->elements[l];
-        }
+	struct array_part *parts = NULL;
+
+	int key_int = hash(key);
+	int l = abs(key_int) % map->size;
+	struct map_part_element *mpe = NULL;
+	while (mpe == NULL && l < map->sizemap)
+	{
+		struct map_part_element *temp = &map->elements[l];
+		if (temp != NULL && temp->key_int == key_int && strcmp(key, temp->key) == 0)
+		{
+			mpe = &map->elements[l];
+		}
 		l++;
 	}
-    if(mpe != NULL)
-    {
-        parts = mpe->apart;
-    }
-    return parts;
+	if (mpe != NULL)
+	{
+		parts = mpe->apart;
+	}
+	return parts;
 }
 
 // maxFace = map->sizearray - 1;
 int8_t convert_p(int8_t p, int maxFaceM)
 {
 	int8_t result = p;
-	if(result ==-1)
+	if (result == -1)
 	{
-        // TODO : voir pour passer en dur
+		// TODO : voir pour passer en dur
 		result = maxFaceM;
 	}
 	return result;
@@ -286,210 +314,206 @@ int8_t convert_p(int8_t p, int maxFaceM)
 
 struct array_part *get_parts_bigarray(map_big_array *map, int8_t p[4])
 {
-    struct array_part *parts = NULL;
-/*
-	int8_t k1 = convert_p(p[0], map->sizearrayM);
-	int8_t k2 = convert_p(p[1], map->sizearrayM);
-	int8_t k3 = convert_p(p[2], map->sizearrayM);
-	int8_t k4 = convert_p(p[3], map->sizearrayM);
- */
-    int8_t k1 = p[0];
-    int8_t k2 = p[1];
-    int8_t k3 = p[2];
-    int8_t k4 = p[3];
+	struct array_part *parts = NULL;
+	/*
+		int8_t k1 = convert_p(p[0], map->sizearrayM);
+		int8_t k2 = convert_p(p[1], map->sizearrayM);
+		int8_t k3 = convert_p(p[2], map->sizearrayM);
+		int8_t k4 = convert_p(p[3], map->sizearrayM);
+	 */
+	int8_t k1 = p[0];
+	int8_t k2 = p[1];
+	int8_t k3 = p[2];
+	int8_t k4 = p[3];
 	parts = map->bigarray[k1][k2][k3][k4];
-//	if(parts->size > 0 && parts->parts[0].id <0) {
-//		printf("get_parts_bigarray error : size:%i for %i:%i:%i:%i-%i:%i:%i:%i r[0].id = %i\n",parts->size,p[0],p[1],p[2],p[3],k1,k2,k3,k4,parts->parts[0].id );
-//	}
-    return parts;
+	//	if(parts->size > 0 && parts->parts[0].id <0) {
+	//		printf("get_parts_bigarray error : size:%i for %i:%i:%i:%i-%i:%i:%i:%i r[0].id = %i\n",parts->size,p[0],p[1],p[2],p[3],k1,k2,k3,k4,parts->parts[0].id );
+	//	}
+	return parts;
 }
 /*
  * Indique toutes les pieces pouvant correspondre à la recherhce (key)
  */
-struct array_part *get_parts_bigarray_with_key(map_big_array *map,key_part *key)
+struct array_part *get_parts_bigarray_with_key(map_big_array *map, key_part *key)
 {
-    struct array_part *parts = NULL;
+	struct array_part *parts = NULL;
 	/*
 	int8_t k1 = convert_p(key->k1, map->sizearrayM);
 	int8_t k2 = convert_p(key->k2, map->sizearrayM);
 	int8_t k3 = convert_p(key->k3, map->sizearrayM);
 	int8_t k4 = convert_p(key->k4, map->sizearrayM);
-     */
-    int8_t k1 = (int)key->k1;
-    int8_t k2 = (int)key->k2;
-    int8_t k3 = (int)key->k3;
-    int8_t k4 = (int)key->k4;
+		 */
+	int8_t k1 = (int)key->k1;
+	int8_t k2 = (int)key->k2;
+	int8_t k3 = (int)key->k3;
+	int8_t k4 = (int)key->k4;
 	parts = map->bigarray[k1][k2][k3][k4];
 	//	if(parts->size > 0 && parts->parts[0].id <0) {
 	//		printf("get_parts_bigarray error : size:%i for %i:%i:%i:%i-%i:%i:%i:%i r[0].id = %i\n",parts->size,p[0],p[1],p[2],p[3],k1,k2,k3,k4,parts->parts[0].id );
 	//	}
-    return parts;
+	return parts;
 }
 
-void check_array(struct array_part *apart) {
+void check_array(struct array_part *apart)
+{
 	log_info("check_array :\n");
-	if(apart != NULL) {
-		log_info("size:%i\n",apart->size);
-		for(int i=0;i <apart->size;i++) {
-			struct part p=apart->parts[i];
-			if(p.id < 0 || p.id > 256) {
-				log_info("p[%i] id false:%i\n",i,p.id);
+	if (apart != NULL)
+	{
+		log_info("size:%i\n", apart->size);
+		for (int i = 0; i < apart->size; i++)
+		{
+			struct part p = apart->parts[i];
+			if (p.id < 0 || p.id > 256)
+			{
+				log_info("p[%i] id false:%i\n", i, p.id);
 				print_part(&p);
 			}
 		}
-	} else {
+	}
+	else
+	{
 		log_info("array_part NULL\n");
 	}
 	log_info("check_array end\n");
 }
 
-map_big_array *buildBigArray(struct array_part *apart,int maxFace)
+map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 {
 	int sizeBigArray = (maxFace + 2);
 	map_big_array *result = malloc(sizeof(map_big_array));
 	result->sizearray = sizeBigArray;
-    result->sizearrayM = sizeBigArray - 1;
-	result->bigarray = malloc(sizeof(big_array)*sizeBigArray);
+	result->sizearrayM = sizeBigArray - 1;
+	result->bigarray = malloc(sizeof(big_array) * sizeBigArray);
 	struct array_part *****big_array = result->bigarray;
 
 	int maxarray = 0;
 	int f1;
-	for(f1=-1;f1 <= maxFace;f1++)
+	for (f1 = -1; f1 <= maxFace; f1++)
 	{
-        struct array_part *arraypart1 = search_face(apart, f1, PART_TOP);
+		struct array_part *arraypart1 = search_face(apart, f1, PART_TOP);
 		int p1 = f1;
-		if(abs(p1) != p1)
+		if (abs(p1) != p1)
 		{
 			p1 = maxFace + abs(p1);
 		}
-		
-		big_array[p1] = malloc(sizeof(struct array_part***)*sizeBigArray);
-		
+
+		big_array[p1] = malloc(sizeof(struct array_part ***) * sizeBigArray);
+
 		int f2;
-		for(f2=-1;f2 <= maxFace;f2++)
+		for (f2 = -1; f2 <= maxFace; f2++)
 		{
 			int p2 = f2;
-			if(abs(p2) != p2)
+			if (abs(p2) != p2)
 			{
 				p2 = maxFace + abs(p2);
 			}
-			big_array[p1][p2] = malloc(sizeof(struct array_part**)*sizeBigArray);
-			
-            struct array_part *arraypart2 = search_face(arraypart1, f2, PART_RIGHT);
-//            if(f1 >=0 && f2>=0 && arraypart2->size > maxarray)
-//			{
-//				maxarray = arraypart2->size;
-//			}
+			big_array[p1][p2] = malloc(sizeof(struct array_part **) * sizeBigArray);
+
+			struct array_part *arraypart2 = search_face(arraypart1, f2, PART_RIGHT);
+			//            if(f1 >=0 && f2>=0 && arraypart2->size > maxarray)
+			//			{
+			//				maxarray = arraypart2->size;
+			//			}
 			int f3;
-			for(f3=-1;f3 <= maxFace;f3++)
+			for (f3 = -1; f3 <= maxFace; f3++)
 			{
 				int p3 = f3;
-				if(abs(p3) != p3)
+				if (abs(p3) != p3)
 				{
 					p3 = maxFace + abs(p3);
 				}
-				big_array[p1][p2][p3] = malloc(sizeof(struct array_part*)*sizeBigArray);
-                
-                struct array_part *arraypart3 = search_face(arraypart2, f3, PART_BOTTOM);
-                
+				big_array[p1][p2][p3] = malloc(sizeof(struct array_part *) * sizeBigArray);
+
+				struct array_part *arraypart3 = search_face(arraypart2, f3, PART_BOTTOM);
+
 				int f4;
-				for(f4=-1;f4 <= maxFace;f4++)
+				for (f4 = -1; f4 <= maxFace; f4++)
 				{
 					int p4 = f4;
-					if(abs(p4) != p4)
+					if (abs(p4) != p4)
 					{
 						p4 = maxFace + abs(p4);
 					}
-					
 
-					
-                    struct array_part *arraypart = search_face(arraypart3, f4, PART_LEFT);
-					if(f1 >=0 || f2>=0 || f3>=0 || f4>=0)
+					struct array_part *arraypart = search_face(arraypart3, f4, PART_LEFT);
+					if (f1 >= 0 || f2 >= 0 || f3 >= 0 || f4 >= 0)
 					{
-						if(arraypart->size > maxarray)
+						if (arraypart->size > maxarray)
 						{
 							maxarray = arraypart->size;
 						}
-							}
+					}
 					big_array[p1][p2][p3][p4] = copy_array_part(arraypart);
-					
-                    free_array_part(arraypart);
+
+					free_array_part(arraypart);
 				}
-                free_array_part(arraypart3);
-				
+				free_array_part(arraypart3);
 			}
-            free_array_part(arraypart2);
-			
+			free_array_part(arraypart2);
 		}
-        free_array_part(arraypart1);
-		
+		free_array_part(arraypart1);
 	}
-	log_info("max array:%i\n",maxarray);
+	log_info("max array:%i\n", maxarray);
 	return result;
 }
 
 struct map_part *buildMapPart(struct array_part *apart, int maxFace)
 {
-    error = 0;
+	error = 0;
 	struct map_part *result = malloc(sizeof *result);
-	result->size = pow((maxFace +2), 4);
+	result->size = pow((maxFace + 2), 4);
 	// Considérant un tot de 50% de croisement du hash, on répercute sur la taille
 	result->sizemap = result->size * 1.5;
 	long size = (result->sizemap * sizeof(*result->elements));
-    log_info("taille part : %i\n", apart->size);
-    log_info("nb mappart : %i\n", result->sizemap);
-	log_info("alloc : %li\n",size);
-	result->elements = calloc(result->sizemap,sizeof(*result->elements));
+	log_info("taille part : %i\n", apart->size);
+	log_info("nb mappart : %i\n", result->sizemap);
+	log_info("alloc : %li\n", size);
+	result->elements = calloc(result->sizemap, sizeof(*result->elements));
 	int f1;
 	unsigned int key_int;
-    
-	for(f1=-1;f1 <= maxFace;f1++)
+
+	for (f1 = -1; f1 <= maxFace; f1++)
 	{
-		char *c1 = malloc(MAX_KEY_LENGTH * sizeof(char));//calloc('\0', MAX_KEY_LENGTH * sizeof(char));
+		char *c1 = malloc(MAX_KEY_LENGTH * sizeof(char)); // calloc('\0', MAX_KEY_LENGTH * sizeof(char));
 		sprintf(c1, "%d", f1);
-		
-        struct array_part *arraypart1 = search_face(apart, f1, PART_TOP);
-        
-		
+
+		struct array_part *arraypart1 = search_face(apart, f1, PART_TOP);
+
 		int f2;
-		for(f2=-1;f2 <= maxFace;f2++)
+		for (f2 = -1; f2 <= maxFace; f2++)
 		{
-			char *c2 = malloc(MAX_KEY_LENGTH * sizeof(char));//calloc('\0', MAX_KEY_LENGTH * sizeof(char));
-			sprintf(c2, "%s_%d",c1,f2);
-			
-            struct array_part *arraypart2 = search_face(arraypart1, f2, PART_RIGHT);
-            
+			char *c2 = malloc(MAX_KEY_LENGTH * sizeof(char)); // calloc('\0', MAX_KEY_LENGTH * sizeof(char));
+			sprintf(c2, "%s_%d", c1, f2);
+
+			struct array_part *arraypart2 = search_face(arraypart1, f2, PART_RIGHT);
+
 			int f3;
-			for(f3=-1;f3 <= maxFace;f3++)
+			for (f3 = -1; f3 <= maxFace; f3++)
 			{
-				char *c3 = malloc(MAX_KEY_LENGTH * sizeof(char));//calloc('\0', MAX_KEY_LENGTH * sizeof(char));
-				sprintf(c3, "%s_%d",c2,f3);
-				
-                
-                struct array_part *arraypart3 = search_face(arraypart2, f3, PART_BOTTOM);
-                
+				char *c3 = malloc(MAX_KEY_LENGTH * sizeof(char)); // calloc('\0', MAX_KEY_LENGTH * sizeof(char));
+				sprintf(c3, "%s_%d", c2, f3);
+
+				struct array_part *arraypart3 = search_face(arraypart2, f3, PART_BOTTOM);
+
 				int f4;
-				for(f4=-1;f4 <= maxFace;f4++)
+				for (f4 = -1; f4 <= maxFace; f4++)
 				{
-					char *c4 = malloc(MAX_KEY_LENGTH * sizeof(char));//calloc('\0', MAX_KEY_LENGTH * sizeof(char));
-					sprintf(c4, "%s_%d",c3,f4);
+					char *c4 = malloc(MAX_KEY_LENGTH * sizeof(char)); // calloc('\0', MAX_KEY_LENGTH * sizeof(char));
+					sprintf(c4, "%s_%d", c3, f4);
 					key_int = hash(c4);
-                    struct array_part *arraypart = search_face(arraypart3, f4, PART_LEFT);
+					struct array_part *arraypart = search_face(arraypart3, f4, PART_LEFT);
 					put_part(result, key_int, c4, arraypart);
-                    free_array_part(arraypart);
+					free_array_part(arraypart);
 				}
-                free_array_part(arraypart3);
-				
+				free_array_part(arraypart3);
 			}
-            free_array_part(arraypart2);
-			
+			free_array_part(arraypart2);
 		}
-        free_array_part(arraypart1);
-		
+		free_array_part(arraypart1);
 	}
-	log_info("nb erreur :%i\n",error);
-    log_info("relocalisé : %i\n",relocated);
-    log_info("max relocate : %i\n",maxrelocate);
+	log_info("nb erreur :%i\n", error);
+	log_info("relocalisé : %i\n", relocated);
+	log_info("max relocate : %i\n", maxrelocate);
 	return result;
 }
 
@@ -497,14 +521,13 @@ int free_map_part(struct map_part *map_parts)
 {
 
 	int i;
-	for(i = 0; i < map_parts->sizemap; i++)
+	for (i = 0; i < map_parts->sizemap; i++)
 	{
-        free(map_parts->elements[i].key);
-		if(map_parts->elements[i].apart != NULL)
+		free(map_parts->elements[i].key);
+		if (map_parts->elements[i].apart != NULL)
 		{
 			free_array_part(map_parts->elements[i].apart);
 		}
-
 	}
 	free(map_parts->elements);
 	free(map_parts);
@@ -513,12 +536,12 @@ int free_map_part(struct map_part *map_parts)
 
 int free_array_part(struct array_part *array_parts)
 {
-    if(array_parts != NULL)
-    {
-        free(array_parts->parts);
-    }
+	if (array_parts != NULL)
+	{
+		free(array_parts->parts);
+	}
 	free(array_parts);
-	
+
 	return 0;
 }
 
@@ -526,170 +549,169 @@ int free_bigarray(map_big_array *array_parts)
 {
 	int sizeBigArray = array_parts->sizearray;
 	int f1;
-	for(f1=0;f1 < sizeBigArray;f1++)
+	for (f1 = 0; f1 < sizeBigArray; f1++)
 	{
-        
 		int f2;
-		for(f2=0;f2 < sizeBigArray;f2++)
+		for (f2 = 0; f2 < sizeBigArray; f2++)
 		{
-            
 			int f3;
-			for(f3=0;f3 < sizeBigArray;f3++)
+			for (f3 = 0; f3 < sizeBigArray; f3++)
 			{
 				int f4;
-				for(f4=0;f4 < sizeBigArray;f4++)
+				for (f4 = 0; f4 < sizeBigArray; f4++)
 				{
-                    free_array_part(array_parts->bigarray[f1][f2][f3][f4]);
+					free_array_part(array_parts->bigarray[f1][f2][f3][f4]);
 				}
-                free(array_parts->bigarray[f1][f2][f3]);
-				
+				free(array_parts->bigarray[f1][f2][f3]);
 			}
-            free(array_parts->bigarray[f1][f2]);
-			
+			free(array_parts->bigarray[f1][f2]);
 		}
-        free(array_parts->bigarray[f1]);
-		
+		free(array_parts->bigarray[f1]);
 	}
+	free(array_parts->bigarray);
 	free(array_parts);
 	return 0;
 }
 
 int free_map_in_one(struct map_in_one *map)
 {
-    if(map->position != NULL)
-    {
-        free(map->position);
-    }
-    if(map->quantity != NULL)
-    {
-        free(map->quantity);
-    }
-    if(map->parts != NULL)
-    {
-        free(map->parts);
-    }
+	if (map->position != NULL)
+	{
+		free(map->position);
+	}
+	if (map->quantity != NULL)
+	{
+		free(map->quantity);
+	}
+	if (map->parts != NULL)
+	{
+		free(map->parts);
+	}
 	free(map);
 	return 0;
 }
 
 struct array_part *copy_array_part(struct array_part *apart)
 {
-    struct array_part *result = NULL;
-    
-    if(apart != NULL)
-    {
-        result = malloc(sizeof(*result));
-        result->size = apart->size;
-        result->parts = NULL;
-        
-        if(apart->size > 0)
-        {
-            int sizeofarray = apart->size * sizeof(struct part);
-            result->parts = malloc(sizeofarray);
-            int i;
-            for(i=0;i<apart->size;i++)
-            {
-                struct part *part = &apart->parts[i];
-                memcpy(&result->parts[i], part, sizeof(*part));
-            }
-        }
-    }
-    
-    return result;
+	struct array_part *result = NULL;
+
+	if (apart != NULL)
+	{
+		result = malloc(sizeof(*result));
+		result->size = apart->size;
+		result->parts = NULL;
+
+		if (apart->size > 0)
+		{
+			int sizeofarray = apart->size * sizeof(struct part);
+			result->parts = malloc(sizeofarray);
+			int i;
+			for (i = 0; i < apart->size; i++)
+			{
+				struct part *part = &apart->parts[i];
+				memcpy(&result->parts[i], part, sizeof(*part));
+			}
+		}
+	}
+
+	return result;
 }
 
-struct part* get_one_part(map_big_array *map_parts, key_part key)
+struct part *get_one_part(map_big_array *map_parts, key_part key)
 {
-    struct part *result = NULL;
-	if(key.k1 > -2)
+	struct part *result = NULL;
+	if (key.k1 > -2)
 	{
-		int8_t p[4] = {key.k1,key.k2,key.k3,key.k4};
+		int8_t p[4] = {key.k1, key.k2, key.k3, key.k4};
 		struct array_part *search = get_parts_bigarray(map_parts, p);
-		if(search != NULL && search->size == 1)
+		if (search != NULL && search->size == 1)
 		{
 			result = &search->parts[0];
 		}
 	}
-    
-    return result;
+
+	return result;
 }
 
 map_big_array *prepare_map_part(struct array_part *rotateParts)
 {
 	int maxface = search_max_face(rotateParts);
 	map_big_array *mapParts = buildBigArray(rotateParts, maxface);
-	
-	
+
 	return mapParts;
 }
 
 struct map_in_one *regroup_map(map_big_array *map)
 {
 	struct map_in_one *result = malloc(sizeof(struct map_in_one));
-	
+
 	int sizeBigArray = map->sizearray;
 	result->nbarrays = pow(sizeBigArray, 4);
-	
+
 	result->position = malloc(sizeof(int) * result->nbarrays);
 	result->quantity = malloc(sizeof(int) * result->nbarrays);
 	result->parts = malloc(sizeof(struct part) * result->nbarrays);
 	int nbParts = 0;
-	int dsize = sizeBigArray*sizeBigArray;
+	int dsize = sizeBigArray * sizeBigArray;
 	int f1;
-	for(f1=0;f1 < sizeBigArray;f1++)
+	for (f1 = 0; f1 < sizeBigArray; f1++)
 	{
 		int f2;
-		for(f2=0;f2 < sizeBigArray;f2++)
+		for (f2 = 0; f2 < sizeBigArray; f2++)
 		{
 			int f3;
-			for(f3=0;f3 < sizeBigArray;f3++)
+			for (f3 = 0; f3 < sizeBigArray; f3++)
 			{
 				int f4;
-				for(f4=0;f4 < sizeBigArray;f4++)
+				for (f4 = 0; f4 < sizeBigArray; f4++)
 				{
-					
-					int narray = f1*sizeBigArray*dsize+f2*dsize+f3*sizeBigArray+f4;
+
+					int narray = f1 * sizeBigArray * dsize + f2 * dsize + f3 * sizeBigArray + f4;
 					result->quantity[narray] = 0;
 					result->position[narray] = 0;
-                    struct array_part *apart = map->bigarray[f1][f2][f3][f4];
-					if(apart != NULL)
+					struct array_part *apart = map->bigarray[f1][f2][f3][f4];
+					if (apart != NULL)
 					{
 						result->quantity[narray] = apart->size;
 						result->position[narray] = nbParts;
 						int p;
-						for(p=0;p < apart->size;p++)
+						for (p = 0; p < apart->size; p++)
 						{
 							memcpy(&result->parts[nbParts + p], &apart->parts[p], sizeof(apart->parts[p]));
 						}
-						if(apart->size > 1024){
-                            log_info("apart->size > 1024\n");
+						if (apart->size > 1024)
+						{
+							log_info("apart->size > 1024\n");
 						}
-						nbParts+=apart->size;
-					}else{
-                        log_info("apart null\n");
+						nbParts += apart->size;
+					}
+					else
+					{
+						log_info("apart null\n");
 					}
 				}
 			}
 		}
 	}
-	if(nbParts > 0)
+	if (nbParts > 0)
 	{
-		//result->parts = realloc(result->parts, sizeof(struct part) * nbParts);
-	} else {
+		// result->parts = realloc(result->parts, sizeof(struct part) * nbParts);
+	}
+	else
+	{
 		free(result->parts);
 		result->parts = NULL;
 	}
 	result->nbparts = nbParts;
-    log_info("nbparts:%i\n",nbParts);
-	
+	log_info("nbparts:%i\n", nbParts);
+
 	return result;
 }
-
 
 /**
  rotated_position : 0 à 3
  */
-uint16_t id_for_rotated_part(uint16_t id, uint8_t rotated_position) {
-    return id + ETERN_PARTS * rotated_position;
+uint16_t id_for_rotated_part(uint16_t id, uint8_t rotated_position)
+{
+	return id + ETERN_PARTS * rotated_position;
 }
-

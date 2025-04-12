@@ -92,6 +92,14 @@ struct part *rotatePart(struct part *p, int nbRotate);
 
 int search_max_face(struct array_part *apart);
 
+/**
+ * @brief Fait tourner toutes les pièces dans le tableau donné.
+ *
+ * Cette fonction prend un tableau de pièces et fait tourner chaque pièce.
+ *
+ * @param apart Pointeur vers le tableau de pièces à faire tourner.
+ * @return Pointeur vers le tableau de pièces après rotation.
+ */
 struct array_part * rotate_all_parts(struct array_part *apart);
 
 struct array_part * search_face(struct array_part *apart, int face, int position);

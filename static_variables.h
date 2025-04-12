@@ -9,9 +9,12 @@
 
 #define VERSION 4
 
-#define NB_CONNECTIONS_PAR_THREAD 1
+#define NB_CONNECTIONS_PER_THREAD 1
+// Temps d'attente de 100 microsecondes
 #define MICRO_SLEEP 100
-#define MICRO_PAUSE 10
+// Temps d'attente court de 10 microsecondes
+#define MICRO_SHORT_SLEEP 10
+// Temps d'attente pour les boucles de threads
 #define THREAD_MICRO_SLEEP 10000
 #define MAX_STOCK_BY_THREAD 300
 
@@ -21,6 +24,7 @@
 
 #define DEFAULT_TCP_TIMEOUT 10
 
+#define PART_SIZES 4
 #define ETERN_PARTS 256
 //#define ETERN_WITH_INDICES 1
 #if ETERN_PARTS == 256
@@ -58,16 +62,16 @@ extern uint8_t diry[ETERN_PARTS];
  */
 extern int NB_THREADS;
 
-extern unsigned long long *compteurs;
+extern unsigned long long *counters;
 extern unsigned long long *lastfilesize;
 
 extern uint16_t max_result;
 extern char *lastcheck;
 
 // TODO : deplacer dans un parametre ?
-extern char* partsFiles;
+extern char* parts_files;
 
-extern unsigned long long getted_possibility_not_null;
+extern unsigned long long non_null_possibilities;
 
 extern int request;
 
