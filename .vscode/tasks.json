@@ -1,51 +1,47 @@
 {
-	"version": "2.0.0",
-	"tasks": [
-		{
-			"label": "Open Terminal",
-			"type": "shell",
-			"command": "osascript -e 'tell application \"Terminal\"\ndo script \"echo hello\"\nend tell'",
-			"problemMatcher": []
-		},
-		{
-			"type": "cppbuild",
-			"label": "C/C++: gcc build eternityII Debug mode",
-			"command": "/usr/bin/gcc",
-			"args": [
-				"-pthread",
-				"-g",// compilation avec flag debug
-				"${workspaceFolder}/*.c",
-				"-o",
-				"${workspaceFolder}/eternityIIDebug"
-			],
-			"options": {
-				"cwd": "/usr/bin"
-			},
-			"problemMatcher": [
-				"$gcc"
-			],
-			"group": "build",
-			"detail": "compiler: /usr/bin/gcc"
-		},
-		{
-			"type": "cppbuild",
-			"label": "C/C++: gcc build eternityII Release",
-			"command": "/usr/bin/gcc",
-			"args": [
-				"-Ofast",
-				"-pthread",
-				"${workspaceFolder}/*.c",
-				"-o",
-				"${workspaceFolder}/eternityII"
-			],
-			"options": {
-				"cwd": "/usr/bin"
-			},
-			"problemMatcher": [
-				"$gcc"
-			],
-			"group": "build",
-			"detail": "compiler: /usr/bin/gcc"
-		}
-	]
-}
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "build-eternityII",
+        "type": "shell",
+        "command": "make",
+        "args": [],
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+        "problemMatcher": ["$gcc"],
+        "detail": "Generated task to build the project using Makefile."
+      }, 
+      {
+        "label": "build-eternityIIDebugClient",
+        "type": "shell",
+        "command": "make",
+        "args": [
+          "EXECUTABLE=eternityIIDebugClient",
+          "DEBUG=1"
+        ],
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+        "problemMatcher": ["$gcc"],
+        "detail": "Generated task to build the project using Makefile."
+      },
+      {
+        "label": "build-eternityIIDebugServer",
+        "type": "shell",
+        "command": "make",
+        "args": [
+          "EXECUTABLE=eternityIIDebugServer",
+          "DEBUG=1"
+        ],
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+        "problemMatcher": ["$gcc"],
+        "detail": "Generated task to build the project using Makefile."
+      }
+    ]
+  }

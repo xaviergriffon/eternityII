@@ -1,71 +1,65 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-        {
-            "name": "(gdb) Launch",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/eternityII",
-            "args": ["tcpclient", "localhost", "1"],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [],
-            "externalConsole": false,
-            "MIMode": "gdb",
-            "setupCommands": [
-                {
-                    "description": "Enable pretty-printing for gdb",
-                    "text": "-enable-pretty-printing",
-                    "ignoreFailures": true
-                }
-            ]
-        },
-        {
-            "name": "Debug eternityII",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/eternityIIDebug",
-            "args": ["test",
+      {
+        "type": "cppdbg",
+        "request": "launch",
+        "name": "Launch eternityII",
+        "program": "${workspaceFolder}/eternityII",
+        "args": ["test",
             "./pieces.csv"],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [],
-            "externalConsole": true,
-            "MIMode": "lldb",
-            "preLaunchTask": "C/C++: gcc build eternityII Debug mode"
-        },
-        {
-            "name": "Debug Server eternityII",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/eternityIIDebug",
-            "args": ["tcpserver",
+        "stopAtEntry": false,
+        "cwd": "${workspaceFolder}",
+        "environment": [],
+        "externalConsole": false,
+        "preLaunchTask": "build-eternityII"
+      },
+      {
+        "type": "cppdbg",
+        "request": "launch",
+        "name": "Launch eternityII Server",
+        "program": "${workspaceFolder}/eternityIIDebugServer",
+        "args": ["tcpserver",
                 "80",
                 "./pieces.csv"],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [],
-            "externalConsole": true,
-            "MIMode": "lldb",
-            "preLaunchTask": "C/C++: clang build eternityII Debug mode"
-        },
-        {
-            "name": "Debug Client eternityII",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/eternityIIDebug",
-            "args": ["tcpclient",
+        "stopAtEntry": false,
+        "cwd": "${workspaceFolder}",
+        "externalConsole": false,
+        "preLaunchTask": "build-eternityIIDebugServer",
+        "MIMode": "gdb",
+        "miDebuggerPath": "/usr/bin/gdb"
+      },
+      {
+        "type": "cppdbg",
+        "request": "launch",
+        "name": "Launch eternityII Client",
+        "program": "${workspaceFolder}/eternityIIDebugClient",
+        "args": ["tcpclient",
                 "localhost",
-                "1"],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [],
-            "externalConsole": true,
-            "MIMode": "lldb",
-            "preLaunchTask": "C/C++: gcc build eternityII Debug mode"
-        }
+                "1",
+                "./pieces.csv"],
+        "stopAtEntry": false,
+        "cwd": "${workspaceFolder}",
+        "externalConsole": false,
+        "preLaunchTask": "build-eternityIIDebugClient",
+        "MIMode": "gdb",
+        "miDebuggerPath": "/usr/bin/gdb"
+      },
+      {
+        "type": "cppdbg",
+        "request": "launch",
+        "name": "Launch eternityII Client multithread",
+        "program": "${workspaceFolder}/eternityIIDebugClient",
+        "args": ["tcpclient",
+                "localhost",
+                "6",
+                "./pieces.csv"],
+        "stopAtEntry": false,
+        "cwd": "${workspaceFolder}",
+        "externalConsole": false,
+        "preLaunchTask": "build-eternityIIDebugClient",
+        "MIMode": "gdb",
+        "miDebuggerPath": "/usr/bin/gdb"
+      }
     ]
-}
+  }

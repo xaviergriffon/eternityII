@@ -48,8 +48,10 @@
 //#define DEBUG_SIGNAL
 // Trace les informations pour les sockets locale
 //#define DEBUG_LOCAL_SOCKET
-// Passe en mono-process pour pouvoir débeugger
-#define DEBUG_IN_MONO_PROCESS
+// Passe en mono-process pour pouvoir débugger
+//#define DEBUG_IN_MONO_PROCESS
+// Trace des informations sur les commandes
+//#define DEBUG_COMMANDS
 // ------------------------------------------------
 #define FACES_USED_BITS
 extern uint8_t directions[ETERN_PARTS];

@@ -150,14 +150,24 @@ int exit_interpreter(void) {
     request = REQUEST_STOP;
     if (server == 0) {
         if (parent_pid == getpid()) {
+            // On attend que les threads enfants se terminent
             if (childrens_pid != NULL) {
+#ifdef DEBUG_SIGNAL
+                log_info("send signal to child\n");
+#endif // DEBUG_SIGNAL
                 for (int c = 0; c < NB_THREADS; c++) {
-                    if (childrens_pid[c] > 0) {
-                        kill(childrens_pid[c], SIGINT);
+                    // On attend que le thread se termine
+                    pid_t childrenPid = childrens_pid[c];
+                    // On envoie le signal d'interruption
+                    if (childrenPid > 0) {
+                        kill(childrenPid, SIGINT);
                     }
                 }
+#ifdef DEBUG_SIGNAL
+                log_info("send signal to child done\n");
+#endif // DEBUG_SIGNAL
             }
-            
+
             int cptloop = 0;
             while (1)
             {
@@ -170,6 +180,8 @@ int exit_interpreter(void) {
                 cptloop++;
                 usleep(MICRO_SLEEP);
             }
+
+            
         }
     } else  {
         exit(EXIT_SUCCESS);
