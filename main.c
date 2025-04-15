@@ -74,6 +74,7 @@ void run_server_thread(int *socket_id);
 void init_childs(void);
 void init_sigchld_sigaction(void);
 void init_signals(void);
+void configure_child_signals(void);
 void wait_child(void);
 int run_checker(int server);
 int init_counters(void);
@@ -468,13 +469,17 @@ void signal_end_handler(int sig)
     flush_console();
 #endif // DEBUG_SIGNAL
 	request = REQUEST_STOP;
+    log_info("request stop from signal %s\n", strsignal(sig));
     if (childrens_pid != NULL && parent_pid == getpid()) {
 		for (int c = 0; c < NB_THREADS; c++) {
             if (childrens_pid[c] > 0) {
                 kill(childrens_pid[c], sig);
             }
 		}
-	}
+    } else if (childrens_pid != NULL && parent_pid != getpid()) {
+        log_info("child %d receive signal %s\n", getpid(), strsignal(sig));
+    }
+
     if (server == 1) {
         exit(0);
     }
@@ -489,8 +494,11 @@ void sigchld_handler(int signal) {
 #ifdef DEBUG_SIGNAL
     log_debug("sigchld_handler\n");
 	pid_t wpid;
-    while(0 < (wpid = waitpid(-1, &status, WNOHANG)));
-	log_debug("Exit status of %d was %d\n", (int)wpid, status);
+    while(0 < (wpid = waitpid(-1, &status, WNOHANG))) {
+        log_debug("waitpid %d\n", (int)wpid);
+    }
+	
+    log_debug("Exit status of %d was %d\n", (int)wpid, status);
 	if(WIFEXITED(status)) {
 		/* The child process exited normally */
 		log_debug("Exit value %d\n", WEXITSTATUS(status));
@@ -521,7 +529,7 @@ void init_sigchld_sigaction(void) {
  }
 
 void wait_child(void) {
- 	
+    log_info("start wait_child\n");
     int status = 0;
 #ifdef DEBUG_SIGNAL
     log_debug("wait_child\n");
@@ -540,6 +548,7 @@ void wait_child(void) {
 #else
     while (wait(&status) >= 0);
 #endif // DEBUG_SIGNAL
+    log_info("end wait_child\n");
  }
 void *server_tcp(void *param) {
     int socket_id = *(int*)param;
@@ -608,6 +617,9 @@ void run_server_thread(int *socket_id) {
 }
 
 void *fork_udp(void *param) {
+    // Configure les signaux pour ce thread
+    configure_child_signals();
+
 	int socket_id = *(int*)param;
     struct sockaddr_un *srv_addr = malloc(sizeof(struct sockaddr_un));
     ssize_t numBytes;
@@ -673,11 +685,39 @@ void init_childs(void) {
  * généralement appelée pendant la phase d'initialisation du programme.
  */
 void init_signals(void) {
-    // TODO : voir si besoin de tous
-    signal(SIGINT, signal_end_handler);
-    signal(SIGHUP, signal_end_handler);
-    signal(SIGQUIT, signal_end_handler);
-    signal(SIGKILL, signal_end_handler);
-    signal(SIGTERM, signal_end_handler);
+    struct sigaction sa;
+    sa.sa_handler = signal_end_handler;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+
+    // Configure les signaux pour le processus principal et les threads enfants
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
+    sigaction(SIGQUIT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
+    // Ignorer SIGPIPE
     signal(SIGPIPE, signal_ignored);
+}
+
+
+/**
+ * @brief Configure les signaux pour les threads enfants.
+ *
+ * Cette fonction est appelée dans chaque thread enfant pour s'assurer qu'ils
+ * écoutent les signaux comme SIGINT.
+ */
+void configure_child_signals(void) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+
+    struct sigaction sa;
+    sa.sa_handler = signal_end_handler;
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+
+    // Configure SIGINT pour les threads enfants
+    sigaction(SIGINT, &sa, NULL);
 }

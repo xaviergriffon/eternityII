@@ -1,0 +1,11 @@
+{
+    "files.associations": {
+        "stdio.h": "c",
+        "string.h": "c",
+        "socket.h": "c",
+        "cerrno": "c",
+        "functional": "c",
+        "console.h": "c",
+        "atomic": "c"
+    }
+}

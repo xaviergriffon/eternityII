@@ -17,15 +17,22 @@
 int8_t recv_instruction(int socket_id)
 {
 	int8_t result = -1;
-	
 	int8_t *instruction = calloc(1,sizeof(int8_t));
 	*instruction = INST_ERROR;
-	long rRecv = recv(socket_id, (int8_t *)instruction, sizeof(int8_t),0);
+	//long rRecv = recv(socket_id, (int8_t *)instruction, sizeof(int8_t),0);
+	long rRecv = -1;
+	long maxTentative = 10;
+	do {
+		rRecv = recv(socket_id, (int8_t *)instruction, sizeof(int8_t),0);
+		maxTentative--;
+	} while (rRecv == -1 && errno == EINTR && maxTentative > 0);
 	if (rRecv < 0) {
 		// Deconnection timeout
 		if (errno == EDEADLK || errno == EDEADLK || errno == EWOULDBLOCK) {
 			// TODO: faire un end timeout
 			result = INST_END;
+		} else if (errno == EINTR) {
+			log_errno("recv_instruction recv EINTR => ");
 		} else {
             log_errno("Error on recv_instruction => ");
 		}
