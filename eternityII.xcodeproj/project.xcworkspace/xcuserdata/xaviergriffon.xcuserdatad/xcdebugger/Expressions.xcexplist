@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VariablesViewState
+   version = "1.0">
+   <ContextStates>
+      <ContextState
+         contextName = "getcmdline:main.c">
+         <PersistentStrings>
+            <PersistentString
+               value = "lastfilesize[0]">
+            </PersistentString>
+         </PersistentStrings>
+      </ContextState>
+      <ContextState
+         contextName = "server:main.c">
+      </ContextState>
+      <ContextState
+         contextName = "search_possiblity_light:possibility.c">
+         <PersistentStrings>
+            <PersistentString
+               value = "search-&gt;parts[s].id">
+            </PersistentString>
+            <PersistentString
+               value = "idParts[search-&gt;parts[s].id][search-&gt;parts[s].rotation] ">
+            </PersistentString>
+            <PersistentString
+               value = "search-&gt;parts[s].rotation">
+            </PersistentString>
+         </PersistentStrings>
+      </ContextState>
+      <ContextState
+         contextName = "runclient:main.c">
+         <PersistentStrings>
+            <PersistentString
+               value = "lastfilesize[1]">
+            </PersistentString>
+         </PersistentStrings>
+      </ContextState>
+      <ContextState
+         contextName = "check_client_threads:main.c">
+         <PersistentStrings>
+            <PersistentString
+               value = "lastfilesize[0]">
+            </PersistentString>
+         </PersistentStrings>
+      </ContextState>
+      <ContextState
+         contextName = "scroll:lifo.c">
+      </ContextState>
+      <ContextState
+         contextName = "put_possibility:possibility.c">
+         <PersistentStrings>
+            <PersistentString
+               value = "sizeof(new_element-&gt;value)">
+            </PersistentString>
+            <PersistentString
+               value = "sizeof(value)">
+            </PersistentString>
+         </PersistentStrings>
+      </ContextState>
+      <ContextState
+         contextName = "main:main.c">
+         <PersistentStrings>
+            <PersistentString
+               value = "communication_in_progress">
+            </PersistentString>
+         </PersistentStrings>
+      </ContextState>
+      <ContextState
+         contextName = "signal_pipe_handler:main.c">
+      </ContextState>
+      <ContextState
+         contextName = "what_search_in_grid_to_key:possibility.c">
+         <PersistentStrings>
+            <PersistentString
+               value = "possiblity-&gt;grid[x+1][y]">
+            </PersistentString>
+         </PersistentStrings>
+      </ContextState>
+      <ContextState
+         contextName = "backup_interpreter:command_lines.c">
+         <PersistentStrings>
+            <PersistentString
+               value = "sizeof(*def_analyse_file)">
+            </PersistentString>
+         </PersistentStrings>
+      </ContextState>
+      <ContextState
+         contextName = "possibilityCpy:possibility.c">
+         <PersistentStrings>
+            <PersistentString
+               value = "sizeof(char)">
+            </PersistentString>
+            <PersistentString
+               value = "sizeof(long)">
+            </PersistentString>
+         </PersistentStrings>
+      </ContextState>
+      <ContextState
+         contextName = "put:lifo.c">
+         <PersistentStrings>
+            <PersistentString
+               value = "(struct possibility_packet *)new_element-&gt;value">
+            </PersistentString>
+         </PersistentStrings>
+      </ContextState>
+      <ContextState
+         contextName = "first_possibility:main.c">
+      </ContextState>
+      <ContextState
+         contextName = "autosearch:etii_search.c">
+         <PersistentStrings>
+            <PersistentString
+               value = "lastfilesize[0]">
+            </PersistentString>
+         </PersistentStrings>
+      </ContextState>
+   </ContextStates>
+</VariablesViewState>
