@@ -60,9 +60,7 @@ struct array_part *rotate_all_parts(struct array_part *apart)
 	result->parts = calloc((result->size + 4), sizeof(struct part));
 
 	int p = 0;
-	// TODO : pourquoi on commence à 1 ?
-	// on ne prend pas en compte l'id 0
-	int i = 1;
+	int i = 0;
 	while (p < result->size)
 	{
 		struct part *part = &apart->parts[i];
@@ -86,7 +84,7 @@ int search_max_face(struct array_part *apart)
 {
 	int maxface = 0;
 	int i;
-	for (i = 1; i <= apart->size; i++)
+	for (i = 0; i < apart->size; i++)
 	{
 		struct part *p = &apart->parts[i];
 		if (p->top > maxface)

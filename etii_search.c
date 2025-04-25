@@ -76,6 +76,7 @@ void *autosearch (void *userdata)
         // Attente d'un jeu de possibilité
         while ((client->works == 0 || client->aposs == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
         {
+            log_info("thread %i waiting for possibilities\n", client->id);
             usleep(MICRO_SLEEP);
         }
         // TODO : transformer en BIG Tableau qui serait checker lors de la recherche des possiblités
@@ -192,12 +193,16 @@ void *autosearch (void *userdata)
             free_array_possibility_packet(client->aposs);
             client->aposs = NULL;
         }
-        
+        pthread_mutex_lock(&client->works_mutex);
         client->works = 0;
+        pthread_mutex_unlock(&client->works_mutex);
         lastfilesize[client->compteur] = 0;
         
         if (request == REQUEST_STOP) {
             break;
+        } else {
+            log_info("thread %i : end of search\n", client->id);
+            usleep(MICRO_SHORT_SLEEP);
         }
     }
     

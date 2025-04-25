@@ -44,7 +44,7 @@ int main(int argc, const char *argv[]) {
     parent_pid = getpid();
     log_info("Version %i", version);
 
-    if (argc >= 2) {
+    if (argc >= 2 && argv[1] != NULL) {
         lastcheck = calloc(2000, sizeof(char));
 
         if (strcmp("tcpclient", argv[1]) == 0) {
@@ -61,6 +61,7 @@ int main(int argc, const char *argv[]) {
             failed_arg();
             exit(EXIT_FAILURE);
         }
+        free(lastcheck);
     } else {
         failed_arg();
         exit(EXIT_FAILURE);
@@ -112,7 +113,7 @@ void handle_tcpclient(int argc, const char *argv[]) {
 
     int *socket_id = malloc(sizeof(int));
     *socket_id = build_udp_local_socket(main_addr);
-    if (socket_id > 0) {
+    if (*socket_id > 0) {
         run_server_thread(socket_id);
     }
     main_socket_id = socket_id;
@@ -379,6 +380,7 @@ void *fork_checker(void *param) {
         statistic->analyses_in_stock = analyses_in_stock;
         statistic->possibilities_in_stock = lastfilesize[0];
         statistic->max_result = max_result;
+        statistic->works = 0;
 #ifdef DEBUG_LOCAL_SOCKET
         //printf("send to %s on socket %i stat %lli\n", main_addr->sun_path, fork_checker_socket_id, statistic->shots_per_second);
         if(
@@ -469,15 +471,16 @@ void signal_end_handler(int sig)
     flush_console();
 #endif // DEBUG_SIGNAL
 	request = REQUEST_STOP;
-    log_info("request stop from signal %s\n", strsignal(sig));
     if (childrens_pid != NULL && parent_pid == getpid()) {
 		for (int c = 0; c < NB_THREADS; c++) {
             if (childrens_pid[c] > 0) {
                 kill(childrens_pid[c], sig);
             }
 		}
+#ifdef DEBUG_SIGNAL
     } else if (childrens_pid != NULL && parent_pid != getpid()) {
         log_info("child %d receive signal %s\n", getpid(), strsignal(sig));
+#endif
     }
 
     if (server == 1) {

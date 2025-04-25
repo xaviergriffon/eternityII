@@ -6,6 +6,7 @@
         "cerrno": "c",
         "functional": "c",
         "console.h": "c",
-        "atomic": "c"
+        "atomic": "c",
+        "tcpclient.h": "c"
     }
 }
