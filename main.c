@@ -380,7 +380,6 @@ void *fork_checker(void *param) {
         statistic->analyses_in_stock = analyses_in_stock;
         statistic->possibilities_in_stock = lastfilesize[0];
         statistic->max_result = max_result;
-        statistic->works = 0;
 #ifdef DEBUG_LOCAL_SOCKET
         //printf("send to %s on socket %i stat %lli\n", main_addr->sun_path, fork_checker_socket_id, statistic->shots_per_second);
         if(
