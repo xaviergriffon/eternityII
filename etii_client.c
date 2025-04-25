@@ -21,10 +21,10 @@ void *feed_thread_aposs(void *param) {
             if(request == REQUEST_CONTINUE)
             {
                 client_possibility_t *client_possibility = &thread_params[i];
+                pthread_mutex_lock(&thread_params[i].works_mutex);
                 if(client_possibility->works == 0)
                 {
                     send_possibility_analysed(client_possibility);
-
                     array_possibility_packet *aposs = get_last_possibility(client_possibility, 1);
                     if(aposs->size > 0)
                     {
@@ -40,6 +40,7 @@ void *feed_thread_aposs(void *param) {
                         free_array_possibility_packet(aposs);
                     }
                 }
+                pthread_mutex_unlock(&thread_params[i].works_mutex);
             }
         }
         
@@ -184,7 +185,7 @@ void runThreadClient(const char *file)
         thread_params[i].id = i;
         thread_params[i].socket_id = -1;
         pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-        thread_params[i].socket_mutex = mutex;
+        thread_params[i].works_mutex = mutex;
         times(&thread_params[i].start_socket);
         if (0 != pthread_create((thread_params[i].tid), thread_attributes, autosearch, &(thread_params[i])))
         {
@@ -209,7 +210,7 @@ void runThreadClient(const char *file)
                 threadworking++;
             }
         }
-        
+        // Lorsque l'instruction est stop, on attend que tous les threads soient terminés
         if(request == REQUEST_STOP && threadworking == 0)
         {
             break;
@@ -241,7 +242,7 @@ void run_mono_client(const char *file)
     thread_params->max_shots_per_second = -1;
     thread_params->socket_id = -1;
     pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-    thread_params->socket_mutex = mutex;
+    thread_params->works_mutex = mutex;
     times(&thread_params->start_socket);
     free_array_part(apart);
     

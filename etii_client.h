@@ -19,6 +19,7 @@
 typedef struct
 {
     int works;
+    pthread_mutex_t works_mutex;
     pthread_t *tid;
     /**
      * @todo définir et renommer
@@ -30,7 +31,6 @@ typedef struct
     int max_shots_per_second;
     int id;
     int socket_id;
-    pthread_mutex_t socket_mutex;
     struct tms start_socket;
 } client_possibility_t;
 
