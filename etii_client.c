@@ -15,6 +15,9 @@
  */
 void *feed_thread_aposs(void *param) {
     client_possibility_t *thread_params = param;
+#ifdef DEBUG_THREAD
+    log_info("START aposs thread %i\n", getpid());
+#endif // DEBUG_THREAD
     while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
         for(int i = 0; i < NB_THREADS; i++)
         {
@@ -46,7 +49,9 @@ void *feed_thread_aposs(void *param) {
         
         usleep(THREAD_MICRO_SLEEP);
     }
-    
+#ifdef DEBUG_THREAD
+    log_info("END aposs thread %i\n", getpid());
+#endif // DEBUG_THREAD
     return NULL;
 }
 
@@ -75,39 +80,50 @@ void *control_thread(void *param) {
     if (NB_THREADS <= 0) {
         return NULL;
     }
+#ifdef DEBUG_THREAD
+    log_info("START control thread %i\n", getpid());
+#endif // DEBUG_THREAD
     client_possibility_t *thread_params = param;
-    unsigned long long *lastCheck = malloc(sizeof(unsigned long long));
-    unsigned long long *oneSecond = malloc(sizeof(unsigned long long));
-    *lastCheck = 0;
-    *oneSecond = 0;
+    unsigned long long *lastCheck = malloc(sizeof(unsigned long long) * NB_THREADS);
+    int t;
+    for (t = 0; t < NB_THREADS; t++)
+    {
+        lastCheck[t] = 0;
+    }
     
+    unsigned long long *oneSecond = malloc(sizeof(unsigned long long));
+    *oneSecond = 0;
     int nbCheck = 0;
     while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
         if(max_search_by_sec > 0) {
-            client_possibility_t *thread = &thread_params[0];
-            if(thread->works == 1 && thread->aposs > 0)
+            for(t = 0; t < NB_THREADS; t++)
             {
-                unsigned long long inMillis = 0;
-                if (counters[0] >= *lastCheck) {
-                    inMillis = counters[0] - *lastCheck;
+                client_possibility_t *thread = &thread_params[t];
+                if(thread->works == 1 && thread->aposs > 0)
+                {
+                    unsigned long long inMillis = 0;
+                    if (counters[t] >= lastCheck[t]) {
+                        inMillis = counters[t] - lastCheck[t];
+                    } else {
+                        // le compteur a fait un tour
+                        inMillis = ((inMillis - 1) - lastCheck[t]) + counters[t];
+                    }
+                    
+                    lastCheck[t] = counters[t];
+                    *oneSecond = *oneSecond + inMillis;
                 } else {
-                    // le compteur a fait un tour
-                    inMillis = ((inMillis - 1) - *lastCheck) + counters[0];
-                }
-                
-                *lastCheck = counters[0];
-                *oneSecond = *oneSecond + inMillis;
-                long double divider = nbCheck / 1000.0;
-                unsigned long long simulationBySec = *oneSecond / divider;
-                if (request == REQUEST_CONTINUE && simulationBySec >= max_search_by_sec) {
-                    request = REQUEST_PAUSE;
-                } else {
-                    if (request == REQUEST_PAUSE && simulationBySec < max_search_by_sec) {
+                    // TODO : pourquoi révéiller les threads ici ?
+                    if (request == REQUEST_PAUSE) {
                         request = REQUEST_CONTINUE;
                     }
                 }
+            }
+            long double divider = nbCheck / 1000.0;
+            unsigned long long simulationBySec = *oneSecond / divider;
+            if (request == REQUEST_CONTINUE && simulationBySec >= max_search_by_sec) {
+                request = REQUEST_PAUSE;
             } else {
-                if (request == REQUEST_PAUSE) {
+                if (request == REQUEST_PAUSE && simulationBySec < max_search_by_sec) {
                     request = REQUEST_CONTINUE;
                 }
             }
@@ -125,7 +141,9 @@ void *control_thread(void *param) {
         // La priorité est au traitement lors on effectue des controles espacés.
         usleep(1000);
     }
-    
+#ifdef DEBUG_THREAD
+    log_info("END control thread %i\n", getpid());
+#endif // DEBUG_THREAD
     free(lastCheck);
     free(oneSecond);
     return NULL;
@@ -238,6 +256,7 @@ void run_mono_client(const char *file)
     thread_params->map_part = prepare_map_part(rotateParts);
     thread_params->tid = NULL;
     thread_params->id = 0;
+    thread_params->pid = getpid();
     thread_params->compteur = 0;
     thread_params->max_shots_per_second = -1;
     thread_params->socket_id = -1;

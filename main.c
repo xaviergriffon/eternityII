@@ -127,6 +127,7 @@ void handle_tcpclient(int argc, const char *argv[]) {
     }
 
     pid_t child_pid = -1;
+    int fork_error = 0;
     for (int c = 0; c < NB_THREADS; c++) {
         if (parent_pid == getpid()) {
 #ifdef DEBUG_IN_MONO_PROCESS
@@ -135,12 +136,37 @@ void handle_tcpclient(int argc, const char *argv[]) {
             child_pid = fork();
 #endif // DEBUG_IN_MONO_PROCESS
             if (child_pid != 0) {
+                if (child_pid == -1) {
+                    log_error("fork error %i\n", errno);
+                    fork_error++;
+                    if (fork_error > 10) {
+                        log_error("too many fork error %i\n", fork_error);
+                        // ON arrête le programme en indiquant via le signal et met l'indice au nombre de threads.
+                        request = REQUEST_STOP;
+                        c = NB_THREADS;
+                    }
+                    c--;
+                    continue;
+                }
+#ifdef DEBUG_THREAD
+                log_info("child %i created\n", child_pid);
+#endif // DEBUG_THREAD
                 int sp_len = sprintf(forkId[c], "etii_fork.%d", child_pid);
                 forkId[c][sp_len] = '\0';
                 childrens_pid[c] = child_pid;
+                int childStatus = 0;
+                waitpid(child_pid, &childStatus, WNOHANG);
+                if (childStatus != 0) {
+                    log_error("child %i error %i\n", child_pid, childStatus);
+                    c--;
+                    continue;
+                }
 #ifndef DEBUG_IN_MONO_PROCESS
             } else {
 #endif // DEBUG_IN_MONO_PROCESS
+#ifdef DEBUG_THREAD
+                log_info("NEW thread %i\n", getpid());
+#endif // DEBUG_THREAD
                 NB_THREADS = 1;
                 run_fork_checker(main_addr);
                 run_client(serverIp, parts_files);
@@ -333,16 +359,22 @@ void *fork_checker(void *param) {
 		run_fork_thread(so);
 	}
     
-    // TPS tests per second
+    // TPS tests per second (5 secondes)
     unsigned long long oldSPS[5];
     for (int c = 0; c < 5; c++) {
         oldSPS[c] = 0;
     }
-    int t = 0;
+    int s = 0;
+    int t;
     unsigned long long last_counter = 0;
     struct client_statistics *statistic = malloc(sizeof(struct client_statistics));
 	while(request != REQUEST_STOP && fork_checker_socket_id > 0) {
-        unsigned long long counter = counters[0];
+        unsigned long long counter = 0;
+        unsigned long long possibilities_in_stock = 0;
+        for (t = 0; t < NB_THREADS; t++) {
+            counter += counters[t];
+            possibilities_in_stock += lastfilesize[t];
+        }
         unsigned long long sps = 0;
         if (counter >= last_counter) {
             sps = counter - last_counter;
@@ -351,10 +383,10 @@ void *fork_checker(void *param) {
             sps = ((sps - 1) - last_counter) + counter;
         }
         last_counter = counter;
-        oldSPS[t] = sps;
-        t++;
-        if (t >= 5) {
-            t = 0;
+        oldSPS[s] = sps;
+        s++;
+        if (s >= 5) {
+            s = 0;
         }
         
         // on effectue une moyenne sur 5 secondes
@@ -378,7 +410,7 @@ void *fork_checker(void *param) {
             analyses_in_stock += file_analysed_size(f);
         }
         statistic->analyses_in_stock = analyses_in_stock;
-        statistic->possibilities_in_stock = lastfilesize[0];
+        statistic->possibilities_in_stock = possibilities_in_stock;
         statistic->max_result = max_result;
 #ifdef DEBUG_LOCAL_SOCKET
         //printf("send to %s on socket %i stat %lli\n", main_addr->sun_path, fork_checker_socket_id, statistic->shots_per_second);

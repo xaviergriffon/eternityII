@@ -30,6 +30,7 @@ typedef struct
     int compteur;
     int max_shots_per_second;
     int id;
+    pid_t pid;
     int socket_id;
     struct tms start_socket;
 } client_possibility_t;
