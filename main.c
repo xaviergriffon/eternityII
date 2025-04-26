@@ -99,6 +99,9 @@ void handle_tcpclient(int argc, const char *argv[]) {
     if (argc >= 4) {
         NB_THREADS = atoi(argv[3]);
     }
+    if (argc >= 5) {
+        max_stock_by_thread = atoi(argv[4]);
+    }
 #ifdef DEBUG_IN_MONO_PROCESS
     NB_THREADS = 1;
 #endif
@@ -122,8 +125,8 @@ void handle_tcpclient(int argc, const char *argv[]) {
 
     run_checker(0);
     run_console(0);
-    if (argc >= 5) {
-        parts_files = (char *)(argv[4]);
+    if (argc >= 6) {
+        parts_files = (char *)(argv[5]);
     }
 
     pid_t child_pid = -1;
