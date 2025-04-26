@@ -26,7 +26,7 @@
 
 #define PART_SIZES 4
 #define ETERN_PARTS 256
-//#define ETERN_WITH_INDICES 1
+#define ETERN_WITH_INDICES 1
 #if ETERN_PARTS == 256
 #define ETERN_SIZE 16
 #define FACES_USED_SIZE 17// (ETERN_PARTS / 16) + 1;

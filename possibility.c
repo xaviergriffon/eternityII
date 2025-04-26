@@ -1129,11 +1129,6 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
             exit(EXIT_FAILURE);
         }
         etern[13][13] = part;
-        
-        // on commence vers le haut
-        // et sur l'angle en bas à droite
-        x = ETERN_SIZE -1;
-        y = ETERN_SIZE -1;
 #endif
     } else
     {
