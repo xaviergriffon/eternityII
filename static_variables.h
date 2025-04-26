@@ -52,6 +52,8 @@
 //#define DEBUG_IN_MONO_PROCESS
 // Trace des informations sur les commandes
 //#define DEBUG_COMMANDS
+// Trace des informations sur les threads
+//#define DEBUG_THREAD
 // ------------------------------------------------
 #define FACES_USED_BITS
 extern uint8_t directions[ETERN_PARTS];

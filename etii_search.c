@@ -61,7 +61,6 @@ void checkAndDelegatePossibilitiesIfNeeded_with_big_table(client_possibility_t *
 void *autosearch (void *userdata)
 {
     client_possibility_t *client = userdata;
-    
     int16_t idParts[ETERN_PARTS+1][PART_SIZES];
     for(int p=0; p <= ETERN_PARTS; p++) {
         int base = p;
@@ -70,13 +69,15 @@ void *autosearch (void *userdata)
             base += ETERN_PARTS;
         }
     }
+#ifdef DEBUG_THREAD
+    log_info("START search thread %i\n", client->pid);
+#endif // DEBUG_THREAD
     // Boucle infinie pour maintenir le thread
     while(1)
     {
         // Attente d'un jeu de possibilité
         while ((client->works == 0 || client->aposs == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
         {
-            log_info("thread %i waiting for possibilities\n", client->id);
             usleep(MICRO_SLEEP);
         }
         // TODO : transformer en BIG Tableau qui serait checker lors de la recherche des possiblités
@@ -168,6 +169,9 @@ void *autosearch (void *userdata)
         //if(client->request == REQUEST_STOP && db->size > 0)
         if (request == REQUEST_STOP && bt->size > 0)
         {
+#ifdef DEBUG_THREAD
+            log_info("thread %i stop\n", client->pid);
+#endif // DEBUG_THREAD
             array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
             aposs->possibilities = malloc(sizeof(struct possibility_packet) * (bt->size));
             aposs->size = 0;
@@ -201,10 +205,12 @@ void *autosearch (void *userdata)
         if (request == REQUEST_STOP) {
             break;
         } else {
-            log_info("thread %i : end of search\n", client->id);
             usleep(MICRO_SHORT_SLEEP);
         }
     }
+#ifdef DEBUG_THREAD
+    log_info("END search thread %i\n", client->pid);
+#endif // DEBUG_THREAD
     
     return NULL;
 }
