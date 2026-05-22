@@ -52,4 +52,5 @@ void *scroll_big_table_cache(big_table *table);
 
 void free_file(File *suite);
 void free_big_table(big_table *table);
+void clear_big_table(big_table *table);
 #endif

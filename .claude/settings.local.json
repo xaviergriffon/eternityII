@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep -n \"^[a-zA-Z].*\\(.*\\).*{$\" /Users/xaviergriffon/Developpement/GitHub/eternityII/main.c)"
+      "Bash(grep -n \"^[a-zA-Z].*\\(.*\\).*{$\" /Users/xaviergriffon/Developpement/GitHub/eternityII/main.c)",
+      "Bash(make clean *)",
+      "Bash(make)"
     ]
   }
 }
