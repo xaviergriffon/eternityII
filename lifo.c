@@ -450,7 +450,7 @@ void *put_big_table(big_table *table, void *value) {
 	void *oldTableValue = table->value;
     if (table->realsize == table->size) {
         size_t oldSize = table->realsize * table->sizeofvalue;
-        table->realsize = table->realsize + table->incrementSize;
+        table->realsize *= 2;
         void *newValue = malloc(table->sizeofvalue * table->realsize);
         memcpy(newValue, table->value, oldSize);
 		table->value = newValue;
@@ -514,4 +514,19 @@ void free_big_table(big_table *table) {
         free(table->value);
     }
     free(table);
+}
+
+/**
+ * @brief Libère uniquement le buffer interne d'un `big_table` alloué sur la pile.
+ *
+ * Contrairement à `free_big_table`, ne libère pas la structure elle-même.
+ * À utiliser quand `table` est alloué sur la pile (stack).
+ *
+ * @param table Tableau dont le buffer interne doit être libéré.
+ */
+void clear_big_table(big_table *table) {
+    if (table->value != NULL) {
+        free(table->value);
+        table->value = NULL;
+    }
 }

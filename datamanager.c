@@ -495,45 +495,39 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 	File file;
 	init_file_with_cache(&file, 0, sizeof(struct possibility_packet));
 	
+	struct possibility_packet buffer;
 	int r;
 	for(r=0; r < max_result;r++){
-		struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
 		send_instruction(socket_id, INST_GET);
-		long r= recv(socket_id, (struct possibility_packet *)possibilityPacket, sizeof(struct possibility_packet),0);
-		if(r == 0 || (r == sizeof(int8_t) && (*(int8_t *)possibilityPacket) == INST_NULL))
+		long recv_r = recv(socket_id, &buffer, sizeof(buffer), 0);
+		if(recv_r == 0 || (recv_r == sizeof(int8_t) && (*(int8_t *)&buffer) == INST_NULL))
 		{
 			log_info("No possibility recept\n");
-		} else if (r < 0) {
+		} else if (recv_r < 0) {
 			log_errno("Error when receive possibility => ");
 		}else
 		{
 #ifdef DEBUG_CHECK_POSSIBILITY
-            int analyse = check_possibility(possibilityPacket, client_possibility->all_rotate_part);
+            int analyse = check_possibility(&buffer, client_possibility->all_rotate_part);
             if (analyse < 0)
             {
                 log_debug("possibility error : %i\n",analyse);
                 log_debug(" ---");
-                print_possibility_packet(possibilityPacket);
+                print_possibility_packet(&buffer);
             }
 #endif // DEBUG_CHECK_POSSIBILITY
-			//printf("recev ");
-			//print_possibility_packet(possibilityPacket);
-			put(&file, possibilityPacket);
+			put(&file, &buffer);
 		}
-		free(possibilityPacket);
 	}
-	
+
 	if(file.size > 0)
 	{
 		result->possibilities = malloc(file.size * sizeof(struct possibility_packet));
 		int p = 0;
 		while(file.size > 0)
 		{
-			struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
-			scroll(&file, packet);
-			memcpy(&result->possibilities[p], packet, sizeof(*packet));
+			scroll(&file, &result->possibilities[p]);
 			result->size++;
-			free(packet);
 			p++;
 		}
 	}
@@ -571,33 +565,27 @@ void scroll_from_local(array_possibility_packet *result, int max_result)
 					int p;
 					int nothing = 0;
 					File file;
+					struct possibility_packet packet;
 					init_file_with_cache(&file, 0, sizeof(struct possibility_packet));
 					for(p=0; p < max_result && nothing == 0;p++)
 					{
-						struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
-						if(scroll(&file_possibility[currfile].file,packet))
+						if(scroll(&file_possibility[currfile].file, &packet))
 						{
-							put(&file, packet);
-							free(packet);
-							packet = NULL;
+							put(&file, &packet);
 						} else
 						{
-                            free(packet);
 							nothing = 1;
 						}
 					}
-					
+
 					if(file.size > 0)
 					{
 						result->possibilities = malloc(file.size * sizeof(struct possibility_packet));
 						p = 0;
 						while(file.size > 0)
 						{
-							struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
-							scroll(&file, packet);
-							memcpy(&result->possibilities[p], packet, sizeof(*packet));
+							scroll(&file, &result->possibilities[p]);
 							result->size++;
-							free(packet);
 							p++;
 						}
 					}
