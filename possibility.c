@@ -10,6 +10,15 @@
 #include "readdata.h"
 
 #ifdef FACES_USED_BITS
+/**
+ * @brief Marque ou démarque une pièce comme utilisée dans le masque de bits.
+ *
+ * Stocke l'information sous forme de bitmask compact (1 bit par pièce, groupes de 16).
+ *
+ * @param faceused Masque de bits des pièces utilisées (tableau de FACES_USED_SIZE uint16_t).
+ * @param part     Identifiant de la pièce (base 0, i.e. id-1).
+ * @param boolean  1 = utilisée, 0 = libre.
+ */
 void set_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part, uint8_t boolean) {
     //uint16_t groupe = part / 16;
     uint16_t groupe = part >> 4;
@@ -20,6 +29,13 @@ void set_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part, uint8_t bo
     faceused[groupe] = number;
 }
 
+/**
+ * @brief Indique si une pièce est marquée comme utilisée dans le masque de bits.
+ *
+ * @param faceused Masque de bits des pièces utilisées.
+ * @param part     Identifiant de la pièce (base 0).
+ * @return         1 si utilisée, 0 si libre.
+ */
 uint8_t is_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part) {
     //uint16_t groupe = part / 16;
     uint16_t groupe = part >> 4;
@@ -30,6 +46,14 @@ uint8_t is_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part) {
 }
 #endif // FACES_USED_BITS
 
+/**
+ * @brief Affiche dans les logs les coordonnées x et y de chaque position du parcours.
+ *
+ * Outil de débogage permettant de visualiser l'ordre dans lequel les cases
+ * de la grille sont parcourues (tableau `directions`).
+ *
+ * @return 0.
+ */
 int decode_direction(void)
 {
 	log_info("/nx : ");
@@ -77,6 +101,19 @@ int test_directions(void)
 	return 0;
 }
 
+/**
+ * @brief Crée un `possibility_packet` représentant l'état actuel de la grille.
+ *
+ * Encode chaque pièce placée dans `etern` sous la forme d'un indice de rotation
+ * (`id_for_rotated_part`) et construit le masque des pièces utilisées.
+ * Les cases vides sont encodées à -2.
+ *
+ * @param x         Coordonnée x de la prochaine case à remplir.
+ * @param y         Coordonnée y de la prochaine case à remplir.
+ * @param etern     Grille 2D de pointeurs vers les pièces placées (NULL = vide).
+ * @param directory Direction de parcours courante (constante DIR_*).
+ * @return          Paquet alloué représentant cet état (à libérer par l'appelant).
+ */
 struct possibility_packet *generate_possibility_packet(int x, int y, struct part *etern[ETERN_SIZE][ETERN_SIZE], int directory)
 {
 	struct possibility_packet *result = malloc(sizeof(*result));
@@ -112,17 +149,41 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 	return result;
 }
 
+/**
+ * @brief Chiffre un paquet pour l'envoi réseau. (Non implémenté)
+ * @param packet Paquet source.
+ * @return       NULL (non implémenté).
+ */
 struct possibility_packet *crypt_to_network(struct possibility_packet *packet)
 {
     
 	return NULL;
 }
 
+/**
+ * @brief Déchiffre un paquet reçu du réseau. (Non implémenté)
+ * @param packet Paquet source.
+ * @return       NULL (non implémenté).
+ */
 struct possibility_packet *decrypt_from_network(struct possibility_packet *packet)
 {
 	return NULL;
 }
 
+/**
+ * @brief Calcule la clé de recherche pour une case (x, y) quelconque de la grille.
+ *
+ * Variante de `what_search_to_key2` qui prend des coordonnées explicites au lieu
+ * d'utiliser la position courante du paquet. Utilisée par `possibility_all_has_a_next`
+ * pour tester chaque case libre de la grille.
+ *
+ * @param all_rotate_parts Tableau de toutes les rotations.
+ * @param possiblity       Paquet courant (état de la grille).
+ * @param x                Coordonnée x de la case à tester.
+ * @param y                Coordonnée y de la case à tester.
+ * @param key              Clé résultante (sortie).
+ * @param all_face         Valeur représentant « toute face » dans la map (= map->sizearrayM).
+ */
 void what_search_in_grid_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, int8_t x, int8_t y,key_part *key, int8_t all_face) {
 	key->k1 =-2;
 	key->k2 =-2;
@@ -192,6 +253,20 @@ void what_search_in_grid_to_key(struct array_part *all_rotate_parts, struct poss
 }
 
 
+/**
+ * @brief Calcule la clé de recherche pour la case courante du paquet.
+ *
+ * Détermine les contraintes de bord imposées par les pièces voisines déjà placées.
+ * - k1 = bord TOP requis (bottom du voisin du dessus, 0 si bord de grille, all_face si voisin absent)
+ * - k2 = bord RIGHT requis
+ * - k3 = bord BOTTOM requis
+ * - k4 = bord LEFT requis
+ *
+ * @param all_rotate_parts Tableau de toutes les rotations.
+ * @param possiblity       Paquet courant indiquant la position (x, y) à remplir.
+ * @param key              Clé résultante (sortie).
+ * @param all_face         Valeur représentant « toute face » (= map->sizearrayM).
+ */
 void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face) {
     // TODO : ne pas utilisé -1 mais MAX_FACE-1 pour éviter de le faire dans convert_p
     // -2 : non défini
@@ -279,8 +354,15 @@ void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility
         }
     }
 }
-/*
- * Alimente dans key, une représentation de quoi chercher pour l'emplacement.
+/**
+ * @brief Calcule la clé de recherche pour la case courante (version sans all_face).
+ *
+ * Identique à `what_search_to_key2` mais utilise -1 (au lieu de all_face) pour
+ * représenter les voisins absents. Destinée à la `map_part` avec hachage textuel.
+ *
+ * @param all_rotate_parts Tableau de toutes les rotations.
+ * @param possiblity       Paquet courant.
+ * @param key              Clé résultante (sortie).
  */
 void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key) {
     // TODO : ne pas utilisé -1 mais MAX_FACE-1 pour éviter de le faire dans convert_p
@@ -367,6 +449,17 @@ void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_
 	}
 }
 
+/**
+ * @brief Calcule et retourne la clé de recherche pour une case donnée.
+ *
+ * Version retournant une `key_part` par valeur au lieu d'écrire dans un pointeur.
+ *
+ * @param all_rotate_parts Tableau de toutes les rotations.
+ * @param x                Coordonnée x de la case.
+ * @param y                Coordonnée y de la case.
+ * @param possiblity       État courant de la grille.
+ * @return                 Clé de recherche (k1=top, k2=right, k3=bottom, k4=left).
+ */
 key_part what_search(struct array_part *all_rotate_parts, int x, int y, struct possibility_packet *possiblity)
 {
 	//char *result = malloc(MAX_KEY_LENGTH * sizeof(char));
@@ -451,6 +544,13 @@ key_part what_search(struct array_part *all_rotate_parts, int x, int y, struct p
 	return result;
 }
 
+/**
+ * @brief Sérialise un `possibility_packet` dans un fichier binaire.
+ *
+ * @param filename    Chemin du fichier de destination.
+ * @param possibility Paquet à sauvegarder.
+ * @return            0 en cas de succès.
+ */
 int save_possibility(char *filename, struct possibility_packet *possibility)
 {
 	FILE *f = fopen(filename, "w");
@@ -467,6 +567,15 @@ int save_possibility(char *filename, struct possibility_packet *possibility)
 	return 0;
 }
 
+/**
+ * @brief Vérifie si toutes les 256 pièces sont placées et traite la solution trouvée.
+ *
+ * Si `alloc >= ETERN_PARTS`, affiche la grille, sauvegarde le fichier solution
+ * (`./solution_<pid>`) et termine le processus avec EXIT_SUCCESS.
+ *
+ * @param poss            Paquet à vérifier.
+ * @param all_rotate_part Tableau de toutes les rotations (pour affichage).
+ */
 void checkIfResultFound(struct possibility_packet *poss, struct array_part *all_rotate_part) {
     if(poss->alloc >= ETERN_PARTS)
     {
@@ -489,6 +598,16 @@ void checkIfResultFound(struct possibility_packet *poss, struct array_part *all_
     }
 }
 
+/**
+ * @brief Indique si la case courante du paquet a au moins une pièce posable.
+ *
+ * Vérifie uniquement la case indiquée par `possibility->x` et `possibility->y`.
+ *
+ * @param possibility    Paquet à tester.
+ * @param mapParts       Tableau 4D de lookup.
+ * @param all_rotate_part Tableau de toutes les rotations.
+ * @return               1 si au moins une pièce disponible peut être placée, 0 sinon.
+ */
 int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part)
 {
     int result = 0;
@@ -518,9 +637,17 @@ int possibility_has_a_next(struct possibility_packet *possibility, map_big_array
     return result;
 }
 
-/*
- * retourne 1 si les place sont encore libre et que des possiblités (> 1) existes
- * 0 si plus aucune piece n'est plaçable
+/**
+ * @brief Vérifie que toutes les cases encore libres de la grille ont au moins une pièce posable.
+ *
+ * Parcourt toutes les cases non encore remplies à partir de `possibility->alloc`.
+ * Si une case n'admet aucune pièce, retourne 0 (le paquet est sans issue).
+ * Optimisation : si une case n'admet qu'une seule pièce, la place immédiatement.
+ *
+ * @param possibility    Paquet à analyser (peut être modifié si des pièces uniques sont placées).
+ * @param mapParts       Tableau 4D de lookup.
+ * @param all_rotate_part Tableau de toutes les rotations.
+ * @return               1 si toutes les cases libres ont au moins une suite, 0 sinon.
  */
 int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part)
 {
@@ -588,7 +715,15 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 	return result;
 }
 
-/* (ajouter) un élément dans la file */
+/**
+ * @brief Ajoute un `possibility_packet` en fin de file.
+ *
+ * Identique à `put` mais typé pour `possibility_packet`. En mode DEBUG_CHECK_POSSIBILITY,
+ * valide le paquet avant insertion.
+ *
+ * @param suite File cible.
+ * @param value Paquet à ajouter (copié dans la file).
+ */
 void put_possibility (File * suite, struct possibility_packet *value){
 #ifdef DEBUG_CHECK_POSSIBILITY
     int analyse = check_possibility(value, NULL);
@@ -638,6 +773,22 @@ void put_possibility (File * suite, struct possibility_packet *value){
 	return;
 }
 
+/**
+ * @brief Développe un paquet en ajoutant une pièce à la case courante.
+ *
+ * Pour chaque pièce compatible avec la clé (et non encore utilisée), crée une
+ * copie du paquet avec la pièce placée et l'ajoute dans `result`. Utilise une
+ * `File` comme structure de résultat.
+ *
+ * @param result       File de destination des nouveaux paquets.
+ * @param key          Clé de recherche pour la case courante.
+ * @param possiblity   Paquet source à développer.
+ * @param mapParts     Tableau 4D de lookup.
+ * @param all_rotate_part Tableau de toutes les rotations.
+ * @param idParts      Table de pré-calcul des indices de rotation [id][rotation].
+ * @return             Nombre de pièces allouées dans le meilleur paquet produit,
+ *                     ou 0 si aucune pièce posable.
+ */
 int search_possiblity_light(File *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4])
 {
 	int max_result=0;
@@ -766,6 +917,21 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
 	return max_result;
 }
 
+/**
+ * @brief Développe un paquet en ajoutant une pièce à la case courante (version big_table).
+ *
+ * Variante de `search_possiblity_light` utilisant un `big_table` comme structure
+ * de résultat. Plus performante car évite les allocations individuelles de la `File`.
+ * C'est cette version qui est utilisée dans la boucle principale de `autosearch`.
+ *
+ * @param result       Tableau dynamique de destination des nouveaux paquets.
+ * @param key          Clé de recherche pour la case courante.
+ * @param possiblity   Paquet source à développer.
+ * @param mapParts     Tableau 4D de lookup.
+ * @param all_rotate_part Tableau de toutes les rotations.
+ * @param idParts      Table de pré-calcul des indices de rotation [id][rotation].
+ * @return             Nombre de pièces allouées (`alloc`) dans le paquet produit, ou 0.
+ */
 int search_possiblity_light_with_big_table(big_table *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4])
 {
     uint8_t x;
@@ -892,15 +1058,15 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
     return 0;
 }
 
-/*
- 0 OK
- -1 packet NULL
- -2 (x or y) > ETERN_SIZE or < 0
- -3 directory > or < dir_possibilities
- -4 alloc <= 0
- -5 alloc > faceused
- -6 x7 y8 bad part
- -7 allocated part bad value
+/**
+ * @brief Valide l'intégrité d'un `possibility_packet`.
+ *
+ * @param packet      Paquet à valider.
+ * @param rotateParts Tableau de toutes les rotations (chargé depuis `parts_files` si NULL).
+ * @return  0 si valide, sinon un code négatif :
+ *          -1 packet NULL, -2 coordonnées hors grille, -4 alloc ≤ 0,
+ *          -5 nombre de faces utilisées < alloc, -6 pièce absente à (7,8),
+ *          -7 valeur de grille invalide, -9 incohérence de bord.
  */
 int check_possibility(struct possibility_packet *packet, struct array_part *rotateParts)
 {
@@ -1013,6 +1179,14 @@ int check_possibility(struct possibility_packet *packet, struct array_part *rota
 	return 0;
 }
 
+/**
+ * @brief Affiche un `possibility_packet` au format JSON dans les logs.
+ *
+ * Format : `{"alloc": N, "x": X, "y": Y, "grid": [[...], ...]}`.
+ *
+ * @param packet Paquet à afficher.
+ * @return       0.
+ */
 int print_possibility_packet(struct possibility_packet *packet)
 {
 
@@ -1051,6 +1225,15 @@ int print_possibility_packet(struct possibility_packet *packet)
 	return 0;
 }
 
+/**
+ * @brief Retourne la pièce 139 dans sa rotation i8 (rotation 2, bords 2,15,15,3).
+ *
+ * Cette pièce est l'indice fixe officiel du puzzle Eternity II placé en (7,8).
+ * Quitte le programme si la pièce est introuvable dans la map (configuration invalide).
+ *
+ * @param mapParts Tableau 4D de lookup.
+ * @return         Pointeur vers la pièce 139 r2 dans la map.
+ */
 struct part* part_139_i8(map_big_array *mapParts)
 {
     key_part key = {2,15,15,3};
@@ -1063,6 +1246,18 @@ struct part* part_139_i8(map_big_array *mapParts)
     return part;
 }
 
+/**
+ * @brief Génère l'ensemble des possibilités initiales et les injecte dans le datamanager.
+ *
+ * Pour le puzzle 16×16 (ETERN_PARTS == 256), place les indices officiels connus
+ * (pièces 139, 208, 255, 181, 249) à leurs positions fixes, puis développe la
+ * première case libre pour produire toutes les positions de départ.
+ *
+ * Ces possibilités initiales sont ensuite distribuées par le serveur aux clients.
+ *
+ * @param mapParts        Tableau 4D de lookup.
+ * @param all_rotate_part Tableau de toutes les rotations.
+ */
 void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_part)
 {
     struct part *etern[ETERN_SIZE][ETERN_SIZE];
@@ -1197,6 +1392,15 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
     free(key);
 }
 
+/**
+ * @brief Compare deux paquets et retourne 0 s'ils sont identiques.
+ *
+ * @param packet       Premier paquet.
+ * @param other_packet Second paquet.
+ * @return  0 si identiques, sinon un code négatif indiquant la première différence :
+ *          -1 nullité différente, -2 alloc diffèrent, -3 position (x,y) différente,
+ *          -4 masque de pièces utilisées différent, -5 grille différente.
+ */
 int compare_possibility(struct possibility_packet *packet, struct possibility_packet *other_packet) {
     // Test si l'un est null alors est-ce que les deux le sont
     if (packet == NULL || other_packet == NULL) {
@@ -1236,6 +1440,16 @@ int compare_possibility(struct possibility_packet *packet, struct possibility_pa
 	return 0;
 }
     
+/**
+ * @brief Indique si `packet` est un préfixe de `other_packet`.
+ *
+ * Vérifie que toutes les pièces placées dans `packet` (jusqu'à `packet->alloc`)
+ * sont identiques à celles d'`other_packet` aux mêmes positions.
+ *
+ * @param packet       Paquet supposément ancêtre (alloc inférieur).
+ * @param other_packet Paquet supposément descendant.
+ * @return  1 si `packet` est bien un ancêtre, -1 si alloc ≥, -2 si grilles divergent, 0 si NULL.
+ */
 int is_origin_of(struct possibility_packet *packet, struct possibility_packet *other_packet) {
     // Test si l'un est null alors biensur que non
     if (packet == NULL || other_packet == NULL) {
@@ -1259,6 +1473,14 @@ int is_origin_of(struct possibility_packet *packet, struct possibility_packet *o
     return 1;
 }
 
+/**
+ * @brief Emballe un unique `possibility_packet` dans un `array_possibility_packet`.
+ *
+ * Copie le paquet dans un tableau de taille 1, format attendu par `add_possibility`.
+ *
+ * @param possibility Paquet à emballer (peut être NULL → tableau de taille 0).
+ * @return            `array_possibility_packet` alloué (à libérer avec `free_array_possibility_packet`).
+ */
 array_possibility_packet *build_single_array_possibility_packet(struct possibility_packet *possibility) {
 	array_possibility_packet *result = malloc(sizeof(array_possibility_packet));
 	if (possibility != NULL) {
@@ -1273,6 +1495,10 @@ array_possibility_packet *build_single_array_possibility_packet(struct possibili
 	return result;
 }
 
+/**
+ * @brief Libère un `array_possibility_packet` et son tableau de paquets interne.
+ * @param possibilities Structure à libérer.
+ */
 void free_array_possibility_packet(array_possibility_packet *possibilities) {
 	if (possibilities->possibilities != NULL) {
 		free(possibilities->possibilities);

@@ -8,6 +8,19 @@
 #include "logger.h"
 #include "static_variables.h"
 
+/**
+ * @brief Lit et parse le fichier CSV de définition des pièces.
+ *
+ * Format attendu :
+ * - Première ligne : `ntiles: N`
+ * - Lignes suivantes : `id top right bottom left`
+ *
+ * La pièce 0 (bordure) est insérée automatiquement avec tous ses bords à 0.
+ *
+ * @param file Chemin du fichier CSV.
+ * @return     Tableau de `N+1` pièces alloué (à libérer avec `free_array_part`).
+ *             Quitte le programme en cas d'erreur d'ouverture ou de parse.
+ */
 struct array_part *read_parts(const char *file)
 {
 	int np = 0;
@@ -79,6 +92,16 @@ struct array_part *read_parts(const char *file)
     return array;
 }
 
+/**
+ * @brief Parse une chaîne JSON représentant la grille et alimente `possibility->grid`.
+ *
+ * Extrait tous les entiers de `str_value` (regex `(-*[0-9]+)`) et les range
+ * colonne par colonne dans la grille. Met également à jour le masque `b_faceused`
+ * pour chaque pièce présente (valeur ≥ 0).
+ *
+ * @param possibility Paquet à remplir (grid et b_faceused modifiés en sortie).
+ * @param str_value   Chaîne JSON contenant les valeurs de la grille.
+ */
 void compute_grid(struct possibility_packet *possibility, char *str_value) {
 
     const char *str_regex = "(-*[0-9]+)";
@@ -179,7 +202,16 @@ void compute_grid(struct possibility_packet *possibility, char *str_value) {
     }
 }
 
-struct possibility_packet * read_from_json(const char *json_possiblity) {  
+/**
+ * @brief Désérialise un `possibility_packet` depuis une chaîne JSON.
+ *
+ * Extrait les champs `alloc`, `x`, `y` et `grid` via une regex. La grille
+ * est parsée en appelant `compute_grid`. Utilisé par la commande `loadjson`.
+ *
+ * @param json_possiblity Chaîne JSON au format produit par `print_possibility_packet`.
+ * @return                Paquet alloué (à libérer par l'appelant), ou NULL en cas d'erreur.
+ */
+struct possibility_packet * read_from_json(const char *json_possiblity) {
     regex_t preg;
     const char *str_regex = "\"([^\"]*)\": ([^,{\\[]+|\\[(\\[[^[]+\\][, ]*)+\\]|\\[[^]]+\\])";
     

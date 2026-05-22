@@ -76,6 +76,17 @@ void build_feed_thread(client_possibility_t *thread_params) {
     free(thread_attributes);
 }
 
+/**
+ * @brief Thread de contrôle du débit de recherche.
+ *
+ * Compare le nombre de possibilités traitées par rapport à `max_search_by_sec`.
+ * Si le débit dépasse la limite, passe `request` à REQUEST_PAUSE pour ralentir
+ * les threads de recherche. Reprend dès que le débit redescend sous la limite.
+ * Ne fait rien si `max_search_by_sec == 0` (mode illimité).
+ *
+ * @param param Tableau de `client_possibility_t` (un par thread de recherche).
+ * @return      NULL.
+ */
 void *control_thread(void *param) {
     if (NB_THREADS <= 0) {
         return NULL;
@@ -149,8 +160,9 @@ void *control_thread(void *param) {
     return NULL;
 }
 
-/* 
- * Construit un thread chargé de controler le nombre de recherche par seconde
+/**
+ * @brief Démarre le thread de contrôle du débit de recherche en mode détaché.
+ * @param thread_params Tableau de contextes de threads de recherche.
  */
 void build_control_thread(client_possibility_t *thread_params) {
     /* création d'un nouveau thread */
@@ -170,6 +182,14 @@ void build_control_thread(client_possibility_t *thread_params) {
     free(thread_attributes);
 }
 
+/**
+ * @brief Lance le client en mode multi-thread avec `NB_THREADS` threads de recherche.
+ *
+ * Crée un thread `autosearch` par valeur de `NB_THREADS`, un thread d'alimentation
+ * (`feed_thread_aposs`) et attend que tous les threads aient terminé avant de retourner.
+ *
+ * @param file Chemin du fichier CSV de définition des pièces.
+ */
 void runThreadClient(const char *file)
 {
     client_possibility_t *thread_params;
@@ -244,6 +264,15 @@ void runThreadClient(const char *file)
     }
 }
 
+/**
+ * @brief Lance le client en mode mono-thread (un seul thread `autosearch`).
+ *
+ * Mode utilisé par les processus enfants issus du fork. Initialise le contexte
+ * client, démarre les threads d'alimentation et de contrôle, puis exécute
+ * `autosearch` dans le thread courant.
+ *
+ * @param file Chemin du fichier CSV de définition des pièces.
+ */
 void run_mono_client(const char *file)
 {
     client_possibility_t *thread_params = malloc(sizeof(*thread_params));
@@ -274,6 +303,17 @@ void run_mono_client(const char *file)
     }
 }
 
+/**
+ * @brief Thread de statistiques du client (lancé par `run_checker`).
+ *
+ * Toutes les 10 secondes, collecte et formate dans `lastcheck` :
+ * - la taille de chaque file de possibilités,
+ * - les statistiques de chaque processus fork (vitesse, stock),
+ * - le nombre global de traitements par seconde et le meilleur résultat atteint.
+ *
+ * @param param Non utilisé.
+ * @return      NULL (boucle infinie).
+ */
 void *check_client_threads(void *param)
 {
     int sleep_time = 10;

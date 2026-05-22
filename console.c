@@ -10,6 +10,14 @@
 
 #define EXIT_CMD "exit"
 
+/**
+ * @brief Lit une ligne depuis stdin avec buffer extensible.
+ *
+ * Commence avec un buffer de 100 octets, le double si nécessaire. Arrête la
+ * lecture sur EOF ou '\\n'.
+ *
+ * @return Ligne lue (à libérer par l'appelant), ou NULL en cas d'erreur d'allocation.
+ */
 static char * getcmdline(void) {
     char * line = malloc(100), *linep = line;
     size_t lenmax = 100, len = lenmax;
@@ -42,6 +50,16 @@ static char * getcmdline(void) {
     return linep;
 }
 
+/**
+ * @brief Thread de la console interactive.
+ *
+ * Boucle infinie : affiche le prompt, lit une commande, la délègue à
+ * `do_command_line`. Appelle `exit(EXIT_SUCCESS)` si `getcmdline` renvoie NULL
+ * (EOF/erreur).
+ *
+ * @param param Non utilisé.
+ * @return      Ne retourne pas (exit ou boucle infinie).
+ */
 void * console(void *param)
 {
     char *buffer = NULL;
@@ -57,6 +75,10 @@ void * console(void *param)
     exit(EXIT_SUCCESS);
 }
 
+/**
+ * @brief Démarre le thread de console interactive en mode détaché.
+ * @param server 1 si mode serveur, 0 si mode client (passé en paramètre au thread, non utilisé actuellement).
+ */
 void run_console(int server)
 {
     pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);

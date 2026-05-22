@@ -84,10 +84,12 @@ static command_description commands[NB_COMMANDS] = {
     {"help", help_interpreter, 0}
 };
 
+/** @brief Interpréteur de la commande `sorta` : tri ascendant des possibilités. */
 int sort_ascending_interpreter(void) {
     return sort_ascending();
 }
 
+/** @brief Interpréteur de la commande `sortd [n_file]` : tri descendant, optionnellement sur un seul fichier. */
 int sort_descending_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments == NULL) {
@@ -99,6 +101,7 @@ int sort_descending_interpreter(void) {
     return 0;
 }
 
+/** @brief Interpréteur de `maxStockByThread <n>` : fixe la limite de possibilités par thread. */
 int max_stock_by_thread_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments != NULL) {
@@ -108,6 +111,7 @@ int max_stock_by_thread_interpreter(void) {
     return -1;
 }
 
+/** @brief Interpréteur de `limit <n>` : fixe le débit maximum de recherche par seconde. */
 int limit_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments != NULL) {
@@ -118,11 +122,13 @@ int limit_interpreter(void) {
     return -1;
 }
 
+/** @brief Interpréteur de `check` : affiche le rapport de statistiques `lastcheck`. */
 int check_interpreter(void) {
     log_info("%s\n",lastcheck);
     return 0;
 }
 
+/** @brief Interpréteur de `backup` : sauvegarde les files de possibilités dans les fichiers `.back`. */
 int backup_interpreter(void) {
     log_info("start backup\n");
     char *def_file = DEF_FILE;
@@ -146,6 +152,7 @@ int backup_interpreter(void) {
     return 0;
 }
 
+/** @brief Interpréteur de `exit` : arrête proprement le programme (signal SIGINT aux enfants en mode client). */
 int exit_interpreter(void) {
     request = REQUEST_STOP;
     if (server == 0) {
@@ -190,6 +197,7 @@ int exit_interpreter(void) {
     return 0;
 }
 
+/** @brief Interpréteur de `restore` : restaure les possibilités depuis les fichiers `.back` par défaut. */
 int restore_interpreter(void) {
     char *def_file = DEF_FILE;
     char *def_analyse_file = DEF_ANALYSE_FILE;
@@ -200,6 +208,7 @@ int restore_interpreter(void) {
     return 0;
 }
 
+/** @brief Interpréteur de `restoreOld` : restaure depuis un format ancien (nécessite `FACES_USED_BITS`). */
 int restoreOld_interpreter(void) {
 #ifdef FACES_USED_BITS
     char *def_file = DEF_FILE;
@@ -213,6 +222,7 @@ int restoreOld_interpreter(void) {
     return 0;
 }
 
+/** @brief Interpréteur de `import` : importe les possibilités depuis les fichiers `.back` sans effacer les files actuelles. */
 int import_interpreter(void) {
     char *def_file = DEF_FILE;
     char *def_analyse_file = DEF_ANALYSE_FILE;
@@ -224,6 +234,7 @@ int import_interpreter(void) {
     return 0;
 }
 
+/** @brief Interpréteur de `loadjson` : importe une possibilité depuis une chaîne JSON (stdin/clipboard). */
 int loadjson_interpreter(void) {
     log_info("load from json\n");
     import_json();
@@ -232,37 +243,46 @@ int loadjson_interpreter(void) {
     return 0;
 }
 
+/** @brief Interpréteur de `print` : affiche l'état du data manager (files, tailles). */
 int print_interpreter(void) {
     return printdatamanager();
 }
 
+/** @brief Interpréteur de `sortdm` : tri descendant multi-threadé des fichiers de possibilités. */
 int sortdm_interpreter(void) {
     return sort_descending_mthread();
 }
 
+/** @brief Interpréteur de `split` : répartit les possibilités entre les différentes files. */
 int split_interpreter(void) {
     return split_datas();
 }
 
+/** @brief Interpréteur de `regroup` : regroupe toutes les possibilités dans une seule file. */
 int regroup_interpreter(void) {
     return regroup_datas();
 }
 
+/** @brief Interpréteur de `checkdatas` : vérifie la cohérence des possibilités stockées. */
 int checkdatas_interpreter(void) {
     return check_datas();
 }
 
+/** @brief Interpréteur de `checkduplicate` : recherche et supprime les doublons dans les files. */
 int check_duplicate_interpreter(void) {
     return check_duplicate();
 }
+/** @brief Interpréteur de `statistic` : affiche les statistiques détaillées des données. */
 int statistic_interpreter(void) {
     return statistic_datas();
 }
 
+/** @brief Interpréteur de `checkfiles` : vérifie la cohérence de toutes les files de possibilités. */
 int checkfiles_interpreter(void) {
     return check_files();
 }
 
+/** @brief Interpréteur de `printfile <n>` : affiche le contenu du fichier de possibilités numéro n. */
 int printfile_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments != NULL) {
@@ -272,6 +292,7 @@ int printfile_interpreter(void) {
     return -1;
 }
 
+/** @brief Interpréteur de `checkfile <n>` : vérifie la cohérence du fichier de possibilités numéro n. */
 int checkfile_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments != NULL) {
@@ -281,6 +302,7 @@ int checkfile_interpreter(void) {
     return -1;
 }
 
+/** @brief Interpréteur de `checkdirections` : vérifie la cohérence du tableau de traversée `directions`. */
 int checkdirections_interpreter(void) {
     if(test_directions() == 0)
     {
@@ -293,6 +315,7 @@ int checkdirections_interpreter(void) {
     return 0;
 }
 
+/** @brief Interpréteur de `rmnonext` : supprime les possibilités sans continuation valide. */
 int rmnonext_interpreter(void) {
     struct array_part *apart= read_parts(parts_files);
     
@@ -306,16 +329,19 @@ int rmnonext_interpreter(void) {
     return 0;
 }
 
+/** @brief Interpréteur de `printanalysed` : affiche les possibilités en cours d'analyse. */
 int printanalysed_interpreter(void) {
     return print_all_file_analysed();
 }
 
+/** @brief Interpréteur de `min` : affiche le nombre minimal de pièces placées parmi toutes les possibilités. */
 int min_interpreter(void) {
     log_info("min : %i\n",search_min_datas());
     
     return 0;
 }
 
+/** @brief Interpréteur de `help` : affiche la liste des commandes disponibles. */
 int help_interpreter(void) {
     char *help = calloc(NB_COMMANDS * 100, sizeof(char));
     strcat(help, "commands :\n");
@@ -329,6 +355,11 @@ int help_interpreter(void) {
     return 0;
 }
 
+/**
+ * @brief Recherche une `command_description` par son nom dans le tableau `commands`.
+ * @param instruction Nom de la commande à chercher.
+ * @return            Pointeur vers la commande trouvée, ou NULL si inconnue.
+ */
 command_description *find_command(const char *instruction) {
     for (int c =0; c < NB_COMMANDS; c++) {
         command_description *command = &commands[c];
@@ -339,6 +370,15 @@ command_description *find_command(const char *instruction) {
     return NULL;
 }
 
+/**
+ * @brief Parse et exécute une ligne de commande.
+ *
+ * Tokenize `command` sur les espaces, trouve la commande via `find_command`,
+ * l'exécute, et la propage aux processus enfants si `send_to_childs == 1`.
+ *
+ * @param command Ligne de commande saisie par l'utilisateur (modifiée par `strtok`).
+ * @return        0 en cas de succès, -1 si commande inconnue ou erreur d'interpréteur.
+ */
 int do_command_line(char *command) {
     int result = 0;
     if (command != NULL && strlen(command) > 0) {
