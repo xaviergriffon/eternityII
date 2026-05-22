@@ -855,7 +855,7 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
             }
         }
     } else {
-        // ?? à quoi correspond % 256
+        // ?? à quoi correspond % 256 : l'identifiant de la piece (reste division par 256)
         //lastId = currPossibility->grid[x][y] % 256;
         lastId = 1;// pour indiquer qu'on a trouvé qqc
         
