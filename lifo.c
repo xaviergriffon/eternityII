@@ -3,6 +3,10 @@
 #include <string.h>
 #include "lifo.h"
 
+/**
+ * @brief Initialise une `File` à l'état vide sans cache.
+ * @param suite File à initialiser.
+ */
 void init_file(File * suite){
 	suite->start = NULL;
 	suite->end = NULL;
@@ -14,6 +18,17 @@ void init_file(File * suite){
 	suite->lastPostionCache = 0;
 }
 
+/**
+ * @brief Initialise une `File` avec un cache pré-alloué d'éléments.
+ *
+ * Les `cacheSize` premiers éléments insérés réutilisent le bloc mémoire pré-alloué,
+ * évitant autant d'appels `malloc` au démarrage. Une fois le cache épuisé, les
+ * éléments suivants sont alloués dynamiquement.
+ *
+ * @param suite       File à initialiser.
+ * @param cacheSize   Nombre d'éléments pré-alloués dans le cache (0 = aucun cache).
+ * @param sizeofvalue Taille en octets de chaque valeur stockée.
+ */
 void init_file_with_cache(File *suite, unsigned long long cacheSize, size_t sizeofvalue)
 {
 	init_file(suite);
@@ -44,12 +59,24 @@ void init_file_with_cache(File *suite, unsigned long long cacheSize, size_t size
 	}
 }
 
+/**
+ * @brief Indique si un élément appartient au bloc de cache pré-alloué de la file.
+ * @param file    File propriétaire du cache.
+ * @param element Élément à tester.
+ * @return        1 si l'élément est dans le cache, 0 sinon.
+ */
 int inside_cache(File *file, Element *element)
 {
     // On vérifie si la position de l'élément se trouve dans la zone mémoire de cacheElemeent
 	return file->cacheElement <= element && element <= file->cacheEndPosition;
 }
 
+/**
+ * @brief Retourne la position d'un élément dans le cache, ou -1 s'il n'en fait pas partie.
+ * @param file    File propriétaire du cache.
+ * @param element Élément à localiser.
+ * @return        Position dans le cache (≥ 0), ou -1 si hors cache.
+ */
 long position_cache(File *file, Element *element)
 {
 	if(!inside_cache(file, element))
@@ -61,7 +88,16 @@ long position_cache(File *file, Element *element)
 	return file->cacheElement - element;
 }
 
-/* (ajouter) un élément dans la file */
+/**
+ * @brief Ajoute un élément en fin de file (mode FIFO).
+ *
+ * Copie `sizeofvalue` octets depuis `value` dans un nouvel élément. Réutilise
+ * le cache pré-alloué si possible, sinon alloue dynamiquement.
+ *
+ * @param suite File cible.
+ * @param value Pointeur vers la valeur à copier.
+ * @return      1 en cas de succès, 0 si la file n'est pas initialisée.
+ */
 int put (File * suite, void *value){
 	Element *new_element = NULL;
 	if(suite->lastPostionCache < suite->cacheSize)
@@ -98,6 +134,16 @@ int put (File * suite, void *value){
 	return 1;
 }
 
+/**
+ * @brief Extrait et copie le dernier élément de la file (mode LIFO).
+ *
+ * L'élément est retiré de la file et sa valeur copiée dans `dest`.
+ * La mémoire de l'élément est libérée (sauf s'il appartient au cache).
+ *
+ * @param suite File source.
+ * @param dest  Tampon de destination (doit avoir au moins `sizeofvalue` octets).
+ * @return      1 si un élément a été extrait, 0 si la file est vide.
+ */
 int scroll (File * suite, void *dest){
 	Element *supp_element;
 	if (suite->size == 0 || suite->end == NULL)
@@ -140,8 +186,15 @@ int scroll (File * suite, void *dest){
 	return 1;
 }
 
-// TODO : Revoir cette méthode
-// Consomme la suite ou fournie le cache si pas d'élément dans la suite
+/**
+ * @brief Extrait le dernier élément de la file et retourne un pointeur direct vers sa valeur.
+ *
+ * Contrairement à `scroll`, ne copie pas la valeur : retourne le pointeur interne.
+ * L'appelant ne doit pas libérer ce pointeur s'il appartient au cache.
+ *
+ * @param suite File source.
+ * @return      Pointeur vers la valeur de l'élément extrait, ou NULL si la file est vide.
+ */
 void *scroll_cache(File * suite){
 	Element *supp_element;
     // TODO : hors sécu, est-ce qu'on doit tester end ? size devrait êtr suffisant
@@ -190,6 +243,13 @@ void *scroll_cache(File * suite){
 }
 
 
+/**
+ * @brief Extrait et copie le premier élément de la file (mode FIFO).
+ *
+ * @param suite File source.
+ * @param dest  Tampon de destination.
+ * @return      1 si un élément a été extrait, 0 si la file est vide.
+ */
 int scroll_fifo (File * suite, void *dest){
 	Element *supp_element;
 	if (suite->size == 0)
@@ -219,6 +279,16 @@ int scroll_fifo (File * suite, void *dest){
 	return 1;
 }
 
+/**
+ * @brief Détache un élément de sa position dans la liste chaînée sans le libérer.
+ *
+ * Met à jour les pointeurs `previous` et `next` des voisins, ainsi que `start`
+ * et `end` de la file si l'élément était en tête ou en queue.
+ * Ne décrémente pas `suite->size`.
+ *
+ * @param suite   File contenant l'élément (peut être NULL si la file n'est pas connue).
+ * @param element Élément à détacher.
+ */
 void extract_element(File *suite, Element *element) {
 	Element *previous = element->previous;
 	Element *next = element->next;
@@ -245,7 +315,16 @@ void extract_element(File *suite, Element *element) {
     element->next = NULL;
 }
 
-// Positionne l'élément avant la cible
+/**
+ * @brief Déplace un élément juste avant un élément cible dans la liste.
+ *
+ * Extrait `element` de sa position actuelle puis l'insère immédiatement avant `target`.
+ * Met à jour `suite->start` si nécessaire.
+ *
+ * @param suite   File contenant les deux éléments.
+ * @param element Élément à déplacer.
+ * @param target  Élément devant lequel insérer.
+ */
 void move_before(File *suite, Element *element, Element *target) {
 	if(element != NULL && target != NULL) {
 		// On extrait l'élément de ça position actuelle
@@ -268,7 +347,16 @@ void move_before(File *suite, Element *element, Element *target) {
 	}
 }
 
-// Positionne l'élément après la cible
+/**
+ * @brief Déplace un élément juste après un élément cible dans la liste.
+ *
+ * Extrait `element` de sa position actuelle puis l'insère immédiatement après `target`.
+ * Met à jour `suite->end` si nécessaire.
+ *
+ * @param suite   File contenant les deux éléments.
+ * @param element Élément à déplacer.
+ * @param target  Élément après lequel insérer.
+ */
 void move_after(File *suite, Element *element, Element *target) {
 	if(element != NULL && target != NULL) {
 		// On extrait l'élément de ça position actuelle
@@ -291,6 +379,14 @@ void move_after(File *suite, Element *element, Element *target) {
 	}
 }
 
+/**
+ * @brief Vide et libère complètement une `File` et son cache.
+ *
+ * Extrait tous les éléments restants, libère le cache pré-alloué si présent,
+ * puis libère la structure `File` elle-même.
+ *
+ * @param suite File à libérer.
+ */
 void free_file(File *suite)
 {
 	void *value = malloc(suite->sizeofvalue);
@@ -311,6 +407,16 @@ void free_file(File *suite)
 	free(suite);
 }
 
+/**
+ * @brief Initialise un tableau dynamique `big_table`.
+ *
+ * Alloue un bloc initial de `incrementSize` éléments. Le tableau grossit
+ * automatiquement par incréments de `incrementSize` lors des insertions.
+ *
+ * @param table         Tableau à initialiser.
+ * @param incrementSize Nombre d'éléments alloués à chaque agrandissement.
+ * @param sizeofvalue   Taille en octets de chaque élément.
+ */
 void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue) {
     table->value = malloc(incrementSize * sizeofvalue);
     table->incrementSize = incrementSize;
@@ -319,10 +425,26 @@ void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue) {
     table->sizeofvalue = sizeofvalue;
 }
 
+/**
+ * @brief Retourne un pointeur vers l'élément à la position donnée dans le tableau.
+ * @param table    Tableau source.
+ * @param position Indice (base 0) de l'élément.
+ * @return         Pointeur vers l'élément.
+ */
 void *big_table_value(big_table *table, unsigned long long position) {
     return ((void *)table->value + (position * table->sizeofvalue));
 }
 
+/**
+ * @brief Ajoute un élément en fin du tableau dynamique, en l'agrandissant si nécessaire.
+ *
+ * Si le tableau est plein, réalloue un nouveau bloc copiant le contenu précédent,
+ * puis libère l'ancien bloc. L'agrandissement se fait par `incrementSize` éléments.
+ *
+ * @param table Tableau cible.
+ * @param value Pointeur vers la valeur à copier.
+ * @return      Pointeur vers la copie insérée dans le tableau.
+ */
 void *put_big_table(big_table *table, void *value) {
     // Test s'il faut allouer plus de mémoire
 	void *oldTableValue = table->value;
@@ -346,6 +468,15 @@ void *put_big_table(big_table *table, void *value) {
     return result;
 }
 
+/**
+ * @brief Extrait et copie le dernier élément du tableau (mode LIFO).
+ *
+ * Décrémente la taille logique du tableau sans réallouer la mémoire.
+ *
+ * @param table Tableau source.
+ * @param dest  Tampon de destination (au moins `sizeofvalue` octets).
+ * @return      1 si un élément a été extrait, 0 si le tableau est vide.
+ */
 int scroll_big_table(big_table *table, void *dest) {
     if (table->size > 0) {
         table->size--;
@@ -357,6 +488,15 @@ int scroll_big_table(big_table *table, void *dest) {
     return 0;;
 }
 
+/**
+ * @brief Extrait le dernier élément du tableau et retourne un pointeur direct vers sa valeur.
+ *
+ * Contrairement à `scroll_big_table`, ne copie pas : retourne le pointeur interne.
+ * L'espace mémoire reste valide jusqu'au prochain `put_big_table`.
+ *
+ * @param table Tableau source.
+ * @return      Pointeur vers la valeur extraite, ou NULL si le tableau est vide.
+ */
 void *scroll_big_table_cache(big_table *table) {
     if (table->size > 0) {
         table->size--;
@@ -365,6 +505,10 @@ void *scroll_big_table_cache(big_table *table) {
     return NULL;
 }
 
+/**
+ * @brief Libère la mémoire d'un `big_table` et de son contenu.
+ * @param table Tableau à libérer.
+ */
 void free_big_table(big_table *table) {
     if (table->value != NULL) {
         free(table->value);

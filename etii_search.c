@@ -9,7 +9,13 @@
 #include "datamanager.h"
 
 /**
- * Controle et délègue les possibilités dépassant le nombre authorisé par thread.
+ * @brief Délègue au serveur les possibilités excédant `max_stock_by_thread` dans une `File`.
+ *
+ * Extrait (`scroll`) les éléments en surplus de `db` vers un `array_possibility_packet`,
+ * les pousse via `add_possibility`, puis libère le tableau temporaire.
+ *
+ * @param client_possibility Contexte du thread client (socket, mutex, etc.).
+ * @param db                 File locale dont on contrôle la taille.
  */
 void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibility, File *db) {
     if(db->size > max_stock_by_thread)
@@ -34,7 +40,13 @@ void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibil
 }
 
 /**
- * Controle et délègue les possibilités dépassant le nombre authorisé par thread.
+ * @brief Délègue au serveur les possibilités excédant `max_stock_by_thread` dans un `big_table`.
+ *
+ * Variante de `checkAndDelegatePossibilitiesIfNeeded` utilisant un `big_table`
+ * au lieu d'une `File`.
+ *
+ * @param client_possibility Contexte du thread client.
+ * @param bt                 Table de grande capacité dont on contrôle la taille.
  */
 void checkAndDelegatePossibilitiesIfNeeded_with_big_table(client_possibility_t *client_possibility, big_table *bt) {
     if(bt->size > max_stock_by_thread)
@@ -58,6 +70,19 @@ void checkAndDelegatePossibilitiesIfNeeded_with_big_table(client_possibility_t *
     }
 }
 
+/**
+ * @brief Thread de recherche principale (worker de résolution du puzzle).
+ *
+ * Attend que `client->works == 1` puis consomme toutes les `possibility_packet`
+ * du tableau `client->aposs`. Pour chaque paquet, applique `what_search_to_key2`
+ * puis `search_possiblity_light_with_big_table`, et délègue le surplus au serveur
+ * via `checkAndDelegatePossibilitiesIfNeeded_with_big_table` toutes les 1 000 000
+ * itérations. Met à jour `max_result`, gère les états PAUSE/STOP, et renvoie
+ * les possibilités non traitées au serveur avant de s'arrêter.
+ *
+ * @param userdata Pointeur vers un `client_possibility_t` alloué par le parent.
+ * @return         NULL.
+ */
 void *autosearch (void *userdata)
 {
     client_possibility_t *client = userdata;

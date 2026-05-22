@@ -14,6 +14,15 @@
 #include "etii_protocol.h"
 #include "logger.h"
 
+/**
+ * @brief Reçoit une instruction (1 octet) depuis un socket TCP.
+ *
+ * Réessaie jusqu'à 10 fois en cas d'interruption `EINTR`. Retourne `INST_END`
+ * sur timeout (`EWOULDBLOCK`/`EDEADLK`) ou fermeture propre (recv == 0).
+ *
+ * @param socket_id Descripteur du socket connecté.
+ * @return          Byte d'instruction reçu, ou `INST_END` (-1) en cas d'erreur/déconnexion.
+ */
 int8_t recv_instruction(int socket_id)
 {
 	int8_t result = -1;
@@ -50,6 +59,13 @@ int8_t recv_instruction(int socket_id)
 	return result;
 }
 
+/**
+ * @brief Envoie une instruction (1 octet) sur un socket TCP.
+ *
+ * @param socket_id   Descripteur du socket connecté.
+ * @param instruction Byte d'instruction à envoyer (cf. constantes `INST_*`).
+ * @return            Nombre d'octets envoyés, ou valeur ≤ 0 en cas d'erreur.
+ */
 long send_instruction(int socket_id, int8_t instruction)
 {
 	int8_t *i_instruction = calloc(1,sizeof(int8_t));
@@ -63,6 +79,16 @@ long send_instruction(int socket_id, int8_t instruction)
 	return result;
 }
 
+/**
+ * @brief Teste si un socket TCP est toujours connecté.
+ *
+ * Envoie `INST_TEST_CONNECTED` et attend la même réponse en retour.
+ * Ferme et shutdownle socket si la connexion est rompue ou si le serveur
+ * renvoie `INST_END`.
+ *
+ * @param socket_id Descripteur du socket à tester.
+ * @return          1 si connecté, 0 sinon (le socket est fermé dans ce cas).
+ */
 int is_connected(int socket_id) {
 	long result = send_instruction(socket_id, INST_TEST_CONNECTED);
 	if (result <= 0) {
@@ -102,6 +128,10 @@ int is_connected(int socket_id) {
 	return 1;
 }
 
+/**
+ * @brief Ferme proprement un socket TCP en envoyant `INST_END` au préalable.
+ * @param socket_id Descripteur du socket à fermer.
+ */
 void close_socket(int socket_id) {
 	send_instruction(socket_id, INST_END);
 	shutdown(socket_id, 2);

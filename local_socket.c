@@ -13,6 +13,11 @@
 #include "logger.h"
 #include "static_variables.h"
 
+/**
+ * @brief Alloue et initialise une structure `sockaddr_un` pour un socket Unix.
+ * @param filename Chemin du socket Unix (tronqué à `sizeof(sun_path) - 1`).
+ * @return         Pointeur alloué (à libérer par l'appelant).
+ */
 struct sockaddr_un *build_sockaddr(const char *filename) {
     struct sockaddr_un *addr = malloc(sizeof(struct sockaddr_un));
     memset(addr, 0, sizeof(struct sockaddr_un));
@@ -22,10 +27,28 @@ struct sockaddr_un *build_sockaddr(const char *filename) {
     return addr;
 }
 
+/**
+ * @brief Calcule la taille effective d'une `sockaddr_un`.
+ *
+ * Tient compte de la longueur réelle de `sun_path` plutôt que de `sizeof`.
+ *
+ * @param svaddr Adresse Unix dont on calcule la taille.
+ * @return       Taille en octets utilisable pour `bind`/`sendto`.
+ */
 socklen_t size_of_sockaddr_un(struct sockaddr_un *svaddr) {
     return (socklen_t)(strlen(svaddr->sun_path) + sizeof(svaddr->sun_family) + 1);
 }
 
+/**
+ * @brief Crée un socket UDP Unix lié à l'adresse donnée.
+ *
+ * Supprime le fichier socket existant (s'il y en a un), crée un socket
+ * `PF_UNIX/SOCK_DGRAM` et le lie à `svaddr`. Utilisé pour la communication
+ * IPC parent↔enfant.
+ *
+ * @param svaddr Adresse Unix cible (le fichier sera créé/recréé).
+ * @return       Descripteur du socket, ou -1 en cas d'erreur.
+ */
 int build_udp_local_socket(struct sockaddr_un *svaddr) {
     unlink(svaddr->sun_path);
     
@@ -50,6 +73,15 @@ int build_udp_local_socket(struct sockaddr_un *svaddr) {
     return socket_id;
 }
 
+/**
+ * @brief Envoie une commande texte à tous les processus enfants via UDP Unix.
+ *
+ * N'envoie que si le processus courant est le parent (`parent_pid == getpid()`).
+ * Itère sur les `NB_THREADS` entrées de `forkId` et envoie `command` en mode
+ * non-bloquant (`MSG_DONTWAIT`) à chacun.
+ *
+ * @param command Chaîne de commande à transmettre (ex. "backup", "exit").
+ */
 void send_command_to_childs(char *command) {
     if (parent_pid == getpid()) {
         for (int f = 0; f < NB_THREADS; f++) {

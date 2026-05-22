@@ -33,6 +33,14 @@ client_t *thread_params = NULL;
 // Nombre de modification des files par client
 unsigned long long *fileUpdates = NULL;
 
+/**
+ * @brief Compte le nombre de threads serveur actuellement connectés à un client.
+ *
+ * Un thread est considéré actif si son `socket_id` est différent de -1.
+ *
+ * @param thread_params Tableau des contextes de threads serveur.
+ * @return              Nombre de threads actifs.
+ */
 int get_active_threads(client_t *thread_params) {
     int activeThread = 0;
     if (thread_params != NULL) {
@@ -45,6 +53,17 @@ int get_active_threads(client_t *thread_params) {
     
     return activeThread;
 }
+/**
+ * @brief Thread de statistiques du serveur (lancé par `run_checker`).
+ *
+ * Toutes les 10 secondes, collecte dans `lastcheck` le stock de chaque file,
+ * les possibilités en cours d'analyse, le débit global et le meilleur résultat.
+ * Déclenche automatiquement une sauvegarde (`temp.back`) toutes les minutes
+ * si le stock a évolué depuis le dernier backup.
+ *
+ * @param param Non utilisé.
+ * @return      NULL (boucle infinie).
+ */
 void *check_server(void *param)
 {
     unsigned long long lastactive = 0;
@@ -119,6 +138,19 @@ void *check_server(void *param)
     return NULL;
 }
 
+/**
+ * @brief Thread de communication avec un client TCP connecté.
+ *
+ * Gère le protocole etii : vérification de version, puis boucle sur les instructions :
+ * - INST_GET : envoie une possibilité depuis le datamanager au client.
+ * - INST_ADD : reçoit une possibilité du client et l'ajoute au datamanager.
+ * - INST_POSSIBILITY_ANALYSED : signale qu'une possibilité a été traitée.
+ * - INST_TEST_CONNECTED : répond pour maintenir la connexion.
+ * À la déconnexion, remet les dernières possibilités envoyées dans le datamanager.
+ *
+ * @param userdata Pointeur vers le `client_t` du thread.
+ * @return         NULL.
+ */
 void *communicate_with_client (void *userdata)
 {
     client_t *client = userdata;
@@ -284,6 +316,15 @@ void *communicate_with_client (void *userdata)
     return NULL;
 }
 
+/**
+ * @brief Crée (ou recrée) le thread de communication pour le slot client `i`.
+ *
+ * Réinitialise le `socket_id` à -1 avant de créer le thread : celui-ci attendra
+ * dans `communicate_with_client` que le socket soit affecté par la boucle principale.
+ *
+ * @param thread_params Tableau des contextes de threads serveur.
+ * @param i             Indice du slot à initialiser.
+ */
 void create_server_thread(client_t *thread_params, int i) {
     client_t clientt = thread_params[i];
     /* création d'un nouveau thread */
@@ -314,6 +355,17 @@ void create_server_thread(client_t *thread_params, int i) {
     thread_params[i].exist = 1;
 }
 
+/**
+ * @brief Thread d'élagage automatique des possibilités sans suite.
+ *
+ * Toutes les `server_rmnonext_timing` secondes, si aucun client n'est connecté,
+ * appelle `remove_possibilities_with_no_next` pour nettoyer le datamanager.
+ * L'élagage est suspendu tant que des clients sont actifs afin de ne pas
+ * bloquer les files (mutex) pendant qu'elles sont en cours d'alimentation.
+ *
+ * @param param Non utilisé.
+ * @return      NULL.
+ */
 void *rmnonext_thread(void *param) {
     struct array_part *apart= read_parts(parts_files);
     struct array_part *rotateParts = rotate_all_parts(apart);
@@ -339,6 +391,9 @@ void *rmnonext_thread(void *param) {
     return NULL;
 }
 
+/**
+ * @brief Démarre le thread d'élagage automatique en mode détaché.
+ */
 void create_rmnonext_thread(void) {
     pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
     pthread_attr_init(thread_attributes);
@@ -355,6 +410,17 @@ void create_rmnonext_thread(void) {
     free(thread_attributes);
 }
 
+/**
+ * @brief Point d'entrée du serveur EternityII.
+ *
+ * Initialise les possibilités de départ, démarre le thread d'élagage, crée
+ * le pool de threads de communication, puis entre dans la boucle d'acceptation
+ * TCP. Chaque client accepté est affecté à un slot libre du pool ; si tous les
+ * slots sont occupés, un nouveau slot est créé dynamiquement dans la limite de
+ * `NB_THREADS`.
+ *
+ * @param file Chemin du fichier CSV de définition des pièces.
+ */
 void runserver(const char* file)
 {
     struct array_part *apart= read_parts(file);

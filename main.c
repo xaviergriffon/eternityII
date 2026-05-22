@@ -344,6 +344,18 @@ int run_checker(int server)
 }
 void run_fork_thread(int *socket_id);
 
+/**
+ * @brief Thread de statistiques du processus enfant (fork).
+ *
+ * Crée le socket Unix local de l'enfant (`etii_fork.<pid>`), démarre le thread
+ * `fork_udp` pour la réception des commandes IPC, puis toutes les secondes :
+ * - calcule le débit moyen sur 5 s (`shots_per_second`),
+ * - compte les possibilités en stock et en analyse,
+ * - envoie une structure `client_statistics` au parent via `sendto`.
+ *
+ * @param param Pointeur vers la `sockaddr_un` du socket principal du parent.
+ * @return      NULL.
+ */
 void *fork_checker(void *param) {
 	struct sockaddr_un *main_addr = (struct sockaddr_un *)param;
 	char socket_fork[50];
@@ -492,12 +504,22 @@ int init_counters(void)
 	return 0;
 }
 
+/** @brief Gestionnaire de signal no-op (utilisé pour SIGPIPE). */
 void signal_ignored(int sig) {
 #ifdef DEBUG_SIGNAL
     log_debug("catch signal %s\n", strsignal(sig));
 #endif
 }
 
+/**
+ * @brief Gestionnaire de signal d'arrêt (SIGINT, SIGTERM, SIGHUP, SIGQUIT).
+ *
+ * Positionne `request = REQUEST_STOP` et propage le signal à tous les processus
+ * enfants (si le processus courant est le parent). En mode serveur, appelle
+ * `exit(0)` directement.
+ *
+ * @param sig Numéro du signal reçu.
+ */
 void signal_end_handler(int sig)
 {
 #ifdef DEBUG_SIGNAL
@@ -522,8 +544,13 @@ void signal_end_handler(int sig)
     }
 }
 
-/*
- * Prise en charge du signal SIGCHLD
+/**
+ * @brief Gestionnaire de SIGCHLD : récolte les statuts des processus enfants terminés.
+ *
+ * Appelle `waitpid(-1, WNOHANG)` en boucle pour éviter les zombies. En mode
+ * DEBUG_SIGNAL, journalise les codes de sortie et les signaux reçus.
+ *
+ * @param signal Numéro du signal (toujours SIGCHLD).
  */
 void sigchld_handler(int signal) {
 	// lecture du statut pour éviter les process zombie
@@ -565,6 +592,12 @@ void init_sigchld_sigaction(void) {
      }
  }
 
+/**
+ * @brief Attend la terminaison de tous les processus enfants (mode client parent).
+ *
+ * Boucle sur `wait()` jusqu'à ce qu'il n'y ait plus d'enfants. En mode
+ * DEBUG_SIGNAL, journalise les codes de sortie de chaque enfant.
+ */
 void wait_child(void) {
     log_info("start wait_child\n");
     int status = 0;
@@ -587,6 +620,16 @@ void wait_child(void) {
 #endif // DEBUG_SIGNAL
     log_info("end wait_child\n");
  }
+/**
+ * @brief Thread de réception des statistiques IPC en provenance des processus enfants (parent).
+ *
+ * Reçoit des structures `client_statistics` via `recvfrom` sur le socket Unix principal,
+ * identifie l'enfant émetteur en comparant `sun_path` avec `forkId[]`, et met à jour
+ * `fork_statistics[cpt]` par copie mémoire.
+ *
+ * @param param Pointeur vers l'entier `socket_id` du socket UDP Unix principal.
+ * @return      NULL.
+ */
 void *server_tcp(void *param) {
     int socket_id = *(int*)param;
     
@@ -653,6 +696,16 @@ void run_server_thread(int *socket_id) {
         free(thread_attributes);
 }
 
+/**
+ * @brief Thread de réception des commandes IPC dans les processus enfants.
+ *
+ * Reçoit des chaînes de commande envoyées par le parent via UDP Unix et les
+ * délègue à `do_command_line`. Configure les signaux enfant via
+ * `configure_child_signals` au démarrage.
+ *
+ * @param param Pointeur vers l'entier `socket_id` du socket UDP Unix de l'enfant.
+ * @return      NULL.
+ */
 void *fork_udp(void *param) {
     // Configure les signaux pour ce thread
     configure_child_signals();
@@ -680,6 +733,10 @@ void *fork_udp(void *param) {
     return NULL;
 }
 
+/**
+ * @brief Démarre le thread `fork_udp` (réception des commandes IPC) en mode détaché.
+ * @param socket_id Pointeur vers le descripteur du socket UDP Unix de l'enfant.
+ */
 void run_fork_thread(int *socket_id) {
 	log_info("cl socket_id %i\n", *socket_id);
 	pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);

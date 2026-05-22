@@ -13,14 +13,24 @@ int error = 0;
 int relocated = 0;
 int maxrelocate = 0;
 
+/**
+ * @brief Affiche les informations d'une pièce dans les logs.
+ * @param p Pointeur vers la pièce à afficher.
+ */
 void print_part(struct part *p)
 {
 	log_info("part [id:%i,rotation:%i / top:%i,left:%i,bottom:%i,right:%i]\n", p->id, p->rotation, p->top, p->left, p->bottom, p->right);
 }
 
-/*
- * Rotation dans le sens des aiguilles d'une montres
- * le départ est donc top
+/**
+ * @brief Fait pivoter une pièce dans le sens des aiguilles d'une montre.
+ *
+ * La position de départ est TOP. Une rotation d'un quart de tour transforme :
+ * top → right, right → bottom, bottom → left, left → top.
+ *
+ * @param p        Pièce source à pivoter.
+ * @param nbRotate Nombre de quarts de tour (0 à 3 ; réduit modulo 4 si supérieur).
+ * @return         Nouvelle pièce allouée représentant la pièce pivotée (à libérer par l'appelant).
  */
 struct part *rotatePart(struct part *p, int nbRotate)
 {
@@ -51,6 +61,15 @@ struct part *rotatePart(struct part *p, int nbRotate)
 	return result;
 }
 
+/**
+ * @brief Génère les quatre rotations de chaque pièce du tableau source.
+ *
+ * Le résultat contient `apart->size * 4` entrées. La pièce d'id `i` en rotation `r`
+ * se trouve à l'indice `i + ETERN_PARTS * r` dans le tableau résultant.
+ *
+ * @param apart Tableau de pièces originales.
+ * @return      Nouveau tableau de toutes les rotations (à libérer par l'appelant).
+ */
 struct array_part *rotate_all_parts(struct array_part *apart)
 {
 	struct array_part *result = malloc(sizeof *result);
@@ -80,6 +99,15 @@ struct array_part *rotate_all_parts(struct array_part *apart)
 	return result;
 }
 
+/**
+ * @brief Retourne la valeur maximale de couleur de bord présente dans le tableau de pièces.
+ *
+ * Parcourt les quatre bords (top, right, bottom, left) de chaque pièce pour
+ * trouver la valeur la plus élevée. Sert à dimensionner les structures de lookup.
+ *
+ * @param apart Tableau de pièces à analyser.
+ * @return      Valeur maximale de face trouvée.
+ */
 int search_max_face(struct array_part *apart)
 {
 	int maxface = 0;
@@ -209,6 +237,15 @@ struct array_part *search_face(struct array_part *apart, int face, int position)
 	return result;
 }
 
+/**
+ * @brief Fonction de hachage d'un entier (Robert Jenkins' 32-bit Mix).
+ *
+ * Utilisée en interne pour distribuer les clés dans la table de hachage.
+ * Le résultat est réduit modulo 1024.
+ *
+ * @param key Clé entière à hacher.
+ * @return    Valeur de hachage dans l'intervalle [0, 1023].
+ */
 unsigned long hashmap_hash_int(unsigned long key)
 {
 	/* Robert Jenkins' 32 bit Mix Function */
@@ -227,6 +264,15 @@ unsigned long hashmap_hash_int(unsigned long key)
 	return key % 1024;
 }
 
+/**
+ * @brief Calcule un hash djb2-like sur une chaîne de caractères.
+ *
+ * Variante : hash = (hash << 5) + hash + c (équivalent à hash * 33 + c).
+ * Utilisé pour indexer les pièces par clé textuelle dans `buildMapPart`.
+ *
+ * @param str Chaîne à hacher (terminée par '\0').
+ * @return    Valeur de hachage non signée.
+ */
 unsigned int hash(char *str)
 {
 	unsigned int hash = *str; // 5381
@@ -241,6 +287,18 @@ unsigned int hash(char *str)
 	return hash;
 }
 
+/**
+ * @brief Insère un tableau de pièces dans la table de hachage à la clé donnée.
+ *
+ * En cas de collision, sonde linéairement la table jusqu'à un emplacement libre.
+ * Le tableau `apart` est copié en profondeur dans la table.
+ *
+ * @param map     Table de hachage cible.
+ * @param key_int Valeur de hachage de la clé textuelle.
+ * @param key     Clé textuelle (ownership transféré à la table).
+ * @param apart   Tableau de pièces à stocker.
+ * @return        Indice de l'emplacement utilisé dans la table.
+ */
 int put_part(struct map_part *map, unsigned int key_int, char *key, struct array_part *apart)
 {
 	int l = key_int % map->size;
@@ -275,6 +333,13 @@ int put_part(struct map_part *map, unsigned int key_int, char *key, struct array
 	return l;
 }
 
+/**
+ * @brief Recherche un tableau de pièces dans la table de hachage par clé textuelle.
+ *
+ * @param map Table de hachage dans laquelle chercher.
+ * @param key Clé textuelle au format "f1_f2_f3_f4" (faces top, right, bottom, left).
+ * @return    Tableau de pièces correspondant, ou NULL si la clé est absente.
+ */
 struct array_part *get_parts(struct map_part *map, char *key)
 {
 	struct array_part *parts = NULL;
@@ -298,7 +363,17 @@ struct array_part *get_parts(struct map_part *map, char *key)
 	return parts;
 }
 
-// maxFace = map->sizearray - 1;
+/**
+ * @brief Convertit une valeur de face -1 (toute face) en l'indice maximal du tableau.
+ *
+ * Dans la `map_big_array`, la dimension supplémentaire à l'indice `maxFaceM`
+ * représente « n'importe quelle face ». Cette fonction effectue la conversion
+ * pour que le lookup dans le tableau 4D reste valide.
+ *
+ * @param p        Valeur de face (-1 = toute face, ≥ 0 = couleur spécifique).
+ * @param maxFaceM Indice maximal du tableau (= map->sizearrayM).
+ * @return         Indice utilisable directement dans `bigarray`.
+ */
 int8_t convert_p(int8_t p, int maxFaceM)
 {
 	int8_t result = p;
@@ -310,6 +385,15 @@ int8_t convert_p(int8_t p, int maxFaceM)
 	return result;
 }
 
+/**
+ * @brief Retourne les pièces compatibles avec les quatre contraintes de bord données.
+ *
+ * Effectue une lookup directe dans la structure 4D indexée par (top, right, bottom, left).
+ *
+ * @param map Tableau 4D des pièces pré-calculé.
+ * @param p   Tableau de 4 valeurs de face [top, right, bottom, left] (0 = bordure, -1 = libre).
+ * @return    Tableau de pièces compatibles (appartient à la map, ne pas libérer).
+ */
 struct array_part *get_parts_bigarray(map_big_array *map, int8_t p[4])
 {
 	struct array_part *parts = NULL;
@@ -329,8 +413,14 @@ struct array_part *get_parts_bigarray(map_big_array *map, int8_t p[4])
 	//	}
 	return parts;
 }
-/*
- * Indique toutes les pieces pouvant correspondre à la recherhce (key)
+/**
+ * @brief Retourne les pièces compatibles avec une `key_part` de recherche.
+ *
+ * Variante de `get_parts_bigarray` acceptant une `key_part` plutôt qu'un tableau brut.
+ *
+ * @param map Tableau 4D des pièces pré-calculé.
+ * @param key Clé de recherche (k1=top, k2=right, k3=bottom, k4=left).
+ * @return    Tableau de pièces compatibles (appartient à la map, ne pas libérer).
  */
 struct array_part *get_parts_bigarray_with_key(map_big_array *map, key_part *key)
 {
@@ -352,6 +442,14 @@ struct array_part *get_parts_bigarray_with_key(map_big_array *map, key_part *key
 	return parts;
 }
 
+/**
+ * @brief Vérifie l'intégrité d'un tableau de pièces et logue les anomalies.
+ *
+ * Signale dans les logs toute pièce dont l'id est hors de la plage [0, 256].
+ * Utilisé à des fins de débogage.
+ *
+ * @param apart Tableau de pièces à vérifier (peut être NULL).
+ */
 void check_array(struct array_part *apart)
 {
 	log_info("check_array :\n");
@@ -375,6 +473,21 @@ void check_array(struct array_part *apart)
 	log_info("check_array end\n");
 }
 
+/**
+ * @brief Construit la structure de lookup 4D indexée par (top, right, bottom, left).
+ *
+ * Pour chaque combinaison possible de valeurs de bord (de -1 à maxFace),
+ * stocke la liste des pièces dont les bords correspondent. Les valeurs -1
+ * représentent « toute couleur » et sont mappées à l'indice supplémentaire
+ * `maxFace + 1`.
+ *
+ * Cette structure est la principale table de lookup du moteur de recherche :
+ * un accès direct en O(1) retourne toutes les pièces posables à un emplacement.
+ *
+ * @param apart   Tableau de toutes les rotations (sortie de `rotate_all_parts`).
+ * @param maxFace Valeur maximale de couleur de bord (sortie de `search_max_face`).
+ * @return        Tableau 4D alloué (à libérer avec `free_bigarray`).
+ */
 map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 {
 	int sizeBigArray = (maxFace + 2);
@@ -455,6 +568,16 @@ map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 	return result;
 }
 
+/**
+ * @brief Construit la table de hachage de lookup des pièces (implémentation legacy).
+ *
+ * Indexe les pièces par clé textuelle "top_right_bottom_left".
+ * Conservée pour compatibilité ; préférer `buildBigArray` qui est plus rapide.
+ *
+ * @param apart   Tableau de toutes les rotations.
+ * @param maxFace Valeur maximale de couleur de bord.
+ * @return        Table de hachage allouée (à libérer avec `free_map_part`).
+ */
 struct map_part *buildMapPart(struct array_part *apart, int maxFace)
 {
 	error = 0;
@@ -515,6 +638,11 @@ struct map_part *buildMapPart(struct array_part *apart, int maxFace)
 	return result;
 }
 
+/**
+ * @brief Libère la mémoire d'une table de hachage `map_part`.
+ * @param map_parts Table à libérer.
+ * @return 0.
+ */
 int free_map_part(struct map_part *map_parts)
 {
 
@@ -532,6 +660,11 @@ int free_map_part(struct map_part *map_parts)
 	return 0;
 }
 
+/**
+ * @brief Libère la mémoire d'un `array_part` et de son tableau de pièces interne.
+ * @param array_parts Tableau à libérer (peut être NULL).
+ * @return 0.
+ */
 int free_array_part(struct array_part *array_parts)
 {
 	if (array_parts != NULL)
@@ -543,6 +676,14 @@ int free_array_part(struct array_part *array_parts)
 	return 0;
 }
 
+/**
+ * @brief Libère la mémoire du tableau de lookup 4D `map_big_array`.
+ *
+ * Libère récursivement les quatre niveaux du tableau et tous les `array_part` qu'il contient.
+ *
+ * @param array_parts Structure 4D à libérer.
+ * @return 0.
+ */
 int free_bigarray(map_big_array *array_parts)
 {
 	int sizeBigArray = array_parts->sizearray;
@@ -571,6 +712,11 @@ int free_bigarray(map_big_array *array_parts)
 	return 0;
 }
 
+/**
+ * @brief Libère la mémoire d'un `map_in_one`.
+ * @param map Structure à libérer.
+ * @return 0.
+ */
 int free_map_in_one(struct map_in_one *map)
 {
 	if (map->position != NULL)
@@ -589,6 +735,12 @@ int free_map_in_one(struct map_in_one *map)
 	return 0;
 }
 
+/**
+ * @brief Crée une copie profonde d'un `array_part`.
+ *
+ * @param apart Tableau source à copier (peut être NULL).
+ * @return      Nouveau tableau alloué avec les mêmes pièces, ou NULL si `apart` est NULL.
+ */
 struct array_part *copy_array_part(struct array_part *apart)
 {
 	struct array_part *result = NULL;
@@ -615,6 +767,16 @@ struct array_part *copy_array_part(struct array_part *apart)
 	return result;
 }
 
+/**
+ * @brief Retourne une pièce unique correspondant à la clé, ou NULL s'il y en a plusieurs.
+ *
+ * Utile pour les emplacements contraignants n'admettant qu'une seule pièce possible
+ * (typiquement les indices fixes du puzzle officiel).
+ *
+ * @param map_parts Tableau 4D de lookup.
+ * @param key       Clé de recherche (k1=top, k2=right, k3=bottom, k4=left).
+ * @return          Pointeur vers la pièce si et seulement si exactement une pièce correspond ; NULL sinon.
+ */
 struct part *get_one_part(map_big_array *map_parts, key_part key)
 {
 	struct part *result = NULL;
@@ -631,6 +793,15 @@ struct part *get_one_part(map_big_array *map_parts, key_part key)
 	return result;
 }
 
+/**
+ * @brief Construit le tableau de lookup 4D à partir des pièces avec rotations.
+ *
+ * Enchaîne `search_max_face` et `buildBigArray`. C'est le point d'entrée principal
+ * pour préparer la structure de recherche de pièces.
+ *
+ * @param rotateParts Tableau de toutes les rotations (sortie de `rotate_all_parts`).
+ * @return            Tableau 4D alloué (à libérer avec `free_bigarray`).
+ */
 map_big_array *prepare_map_part(struct array_part *rotateParts)
 {
 	int maxface = search_max_face(rotateParts);
@@ -639,6 +810,16 @@ map_big_array *prepare_map_part(struct array_part *rotateParts)
 	return mapParts;
 }
 
+/**
+ * @brief Aplatit le tableau 4D en une structure linéaire `map_in_one`.
+ *
+ * Concatène toutes les pièces de tous les compartiments du tableau 4D dans un
+ * seul tableau contigu, avec des tableaux d'index `position` et `quantity` pour
+ * retrouver les pièces d'un compartiment donné. Permet un accès cache-friendly.
+ *
+ * @param map Tableau 4D source.
+ * @return    Structure `map_in_one` allouée (à libérer avec `free_map_in_one`).
+ */
 struct map_in_one *regroup_map(map_big_array *map)
 {
 	struct map_in_one *result = malloc(sizeof(struct map_in_one));
@@ -707,7 +888,14 @@ struct map_in_one *regroup_map(map_big_array *map)
 }
 
 /**
- rotated_position : 0 à 3
+ * @brief Calcule l'indice d'une pièce dans le tableau des rotations.
+ *
+ * Le tableau `all_rotate_parts` (sortie de `rotate_all_parts`) indexe les pièces
+ * sous la forme `id + ETERN_PARTS * rotation`. Cette fonction encapsule ce calcul.
+ *
+ * @param id               Identifiant de la pièce (1..ETERN_PARTS).
+ * @param rotated_position Indice de rotation (0..3).
+ * @return                 Indice dans `all_rotate_parts->parts[]`.
  */
 uint16_t id_for_rotated_part(uint16_t id, uint8_t rotated_position)
 {

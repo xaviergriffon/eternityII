@@ -81,6 +81,16 @@ char *get_server_ip(void)
 	}
 }
 
+/**
+ * @brief Vérifie la connexion TCP au serveur et la (ré)établit si nécessaire.
+ *
+ * Si le socket du client est invalide ou déconnecté, ouvre une nouvelle connexion,
+ * effectue le handshake de version et met à jour `client_possibility->socket_id`.
+ * Déclenche `REQUEST_STOP` si la version n'est pas supportée.
+ *
+ * @param client_possibility Contexte du thread client.
+ * @return                   Identifiant du socket valide, ou -1 en cas d'échec.
+ */
 int check_and_connect_to_server(client_possibility_t *client_possibility) {
 	int socket_id = client_possibility->socket_id;
     // Création de connexion si "non connecté" ou "si erreur lors du test"
@@ -110,6 +120,16 @@ int check_and_connect_to_server(client_possibility_t *client_possibility) {
 	return socket_id;
 }
 
+/**
+ * @brief Envoie un tableau de possibilités au serveur TCP.
+ *
+ * Pour chaque possibilité, envoie INST_ADD suivi du paquet et attend INST_CONSIDERED.
+ * En cas d'erreur d'acquittement, replie la possibilité dans les files locales.
+ *
+ * @param client_possibility Contexte du thread client (contient le socket).
+ * @param possibilities      Tableau de possibilités à envoyer.
+ * @return                   0 en cas de succès, -1 si la connexion échoue.
+ */
 int put_to_server(client_possibility_t *client_possibility, array_possibility_packet *possibilities)
 {
 	int socket_id = check_and_connect_to_server(client_possibility);
@@ -150,6 +170,15 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
     
 }
 
+/**
+ * @brief Insère un tableau de possibilités dans les files locales (sans serveur).
+ *
+ * Utilise un trylock pour trouver une file non verrouillée parmi les 10 disponibles.
+ * Toutes les possibilités sont insérées dans la même file (première libre trouvée).
+ *
+ * @param possibilities Tableau de possibilités à insérer.
+ * @return              0.
+ */
 int put_to_local(array_possibility_packet *possibilities)
 {
 	int addpossibility = 0;
@@ -300,7 +329,16 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 #endif // DEBUG_CHECK_POSSIBILITY
 	return 0;
 }
-// TODO : retourner si envoyé ou pas
+/**
+ * @brief Envoie au serveur les possibilités de la file « analysées » du thread.
+ *
+ * En mode local (sans serveur), vide simplement la file analysée. En mode
+ * client-serveur, envoie chaque `possibility_packet` via `INST_POSSIBILITY_ANALYSED`
+ * et attend l'accusé `INST_CONSIDERED`. En cas d'erreur, remet la possibilité
+ * dans la file et interrompt l'envoi.
+ *
+ * @param client_possibility Contexte du thread (id, socket, mutex, etc.).
+ */
 void send_possibility_analysed(client_possibility_t *client_possibility) {
 	int thread = client_possibility->id;
 	if (server_ip == NULL) {
@@ -386,6 +424,17 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 
 }
 
+/**
+ * @brief Ajoute une possibilité dans la file « analysées » du thread indiqué.
+ *
+ * Tente un trylock sur `file_possibility_analysed[thread]`. Si `thread < 0`,
+ * tourne sur toutes les files jusqu'à en trouver une disponible. Met à jour
+ * `max_result` si `alloc` du paquet est supérieur.
+ *
+ * @param possiblity Paquet à enregistrer comme « en cours d'analyse ».
+ * @param thread     Index du thread cible (≥ 0), ou -1 pour la première file libre.
+ * @return           0 si ajouté, -1 si toutes les files sont verrouillées.
+ */
 int add_possibility_analysed(struct possibility_packet *possiblity, int thread) {
 	int addpossibility = 0;
 	int currfile = 0;
@@ -426,6 +475,16 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread) 
 	return 0;
 }
 
+/**
+ * @brief Récupère des possibilités depuis le serveur TCP.
+ *
+ * Envoie `max_result` fois INST_GET et collecte les paquets reçus dans `result`.
+ * Un INST_NULL en réponse indique qu'il n'y a plus de possibilité disponible.
+ *
+ * @param client_possibility Contexte du thread client.
+ * @param result             Tableau de résultats à remplir.
+ * @param max_result         Nombre maximum de possibilités à demander.
+ */
 void scroll_from_server(client_possibility_t *client_possibility, array_possibility_packet *result, int max_result)
 {
 	int socket_id = check_and_connect_to_server(client_possibility);
@@ -480,6 +539,16 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 	}
 }
 
+/**
+ * @brief Extrait des possibilités des files locales.
+ *
+ * Parcourt les 10 files en mode trylock pour en trouver une disponible.
+ * Extrait jusqu'à `max_result` possibilités depuis la première file non vide trouvée.
+ * Réessaie sur les autres files si la première est vide.
+ *
+ * @param result     Tableau de résultats à remplir.
+ * @param max_result Nombre maximum de possibilités à extraire.
+ */
 void scroll_from_local(array_possibility_packet *result, int max_result)
 {
 	int getpossibility = 0;
@@ -610,6 +679,12 @@ unsigned long long datas_size(void)
 	return result;
 }
 
+/**
+ * @brief Verrouille toutes les files de possibilités et active le mode maintenance.
+ *
+ * Appel bloquant (pthread_mutex_lock) sur chacune des `NB_FILE_POSSIBILITY` files.
+ * Doit être suivi d'un appel à `unlock_all_file`.
+ */
 void lock_all_file(void)
 {
 	maintenance = 1;
@@ -621,6 +696,9 @@ void lock_all_file(void)
 	}
 }
 
+/**
+ * @brief Déverrouille toutes les files de possibilités et désactive le mode maintenance.
+ */
 void unlock_all_file(void)
 {
 	int fp;
@@ -666,6 +744,9 @@ int backup(char *filename)
 	return 0;
 }
 
+/**
+ * @brief Verrouille toutes les files des possibilités en cours d'analyse.
+ */
 void lock_all_file_analysed(void)
 {
 	maintenance = 1;
@@ -677,6 +758,9 @@ void lock_all_file_analysed(void)
 	}
 }
 
+/**
+ * @brief Déverrouille toutes les files des possibilités en cours d'analyse.
+ */
 void unlock_all_file_analysed(void)
 {
 	int fp;
@@ -983,6 +1067,13 @@ int print_all_file_analysed(void)
 	return 0;
 }
 
+/**
+ * @brief Regroupe toutes les files en une seule (file 0) sans verrouillage.
+ *
+ * Doit être appelée avec les files déjà verrouillées.
+ *
+ * @return Taille totale de la file 0 après regroupement.
+ */
 unsigned long long regroup_datas_nolock(void)
 {
 	int fp;
@@ -1073,6 +1164,15 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
     return 0;
 }
 
+/**
+ * @brief Répartit équitablement les possibilités entre `nbsplit` files sans verrouillage.
+ *
+ * Regroupe d'abord tout dans la file 0, puis distribue par quotient égal.
+ * Doit être appelée avec les files déjà verrouillées.
+ *
+ * @param nbsplit Nombre de files cibles (≤ NB_FILE_POSSIBILITY).
+ * @return        0.
+ */
 int split_datas_nolock(int nbsplit)
 {
 	regroup_datas_nolock();
@@ -1175,6 +1275,16 @@ struct arg_duplicate_thread {
     int threadPosition;
 };
 
+/**
+ * @brief Thread de détection des doublons dans les files de possibilités.
+ *
+ * Chaque thread traite un sous-ensemble des paires (nbCombinations / nbDuplicateThread).
+ * Utilise `compare_possibility` et `is_origin_of` pour détecter les doublons exacts
+ * et les relations ancêtre-descendant entre possibilités.
+ *
+ * @param arguments Pointeur vers un `arg_duplicate_thread` décrivant la partition à analyser.
+ * @return          NULL.
+ */
 void *check_duplicate_thread(void *arguments) {
     struct arg_duplicate_thread *args = (struct arg_duplicate_thread *)arguments;
     Element *currElement = args->currElement;
@@ -1241,10 +1351,23 @@ void *check_duplicate_thread(void *arguments) {
     return NULL;
 }
 
+/**
+ * @brief Affiche dans les logs la configuration d'un thread de détection de doublons.
+ * @param args Paramètres du thread à afficher.
+ */
 void print_duplicate_args(struct arg_duplicate_thread *args) {
     log_info("thread:%i fileP:%i position:%llu nbCombinations:%llu\n", args->threadPosition, args->filePossibility, args->position, args->nbCombinations);
 }
 
+/**
+ * @brief Lance un thread de détection de doublons pour la partition spécifiée.
+ *
+ * @param currElement    Premier élément de la partition à analyser.
+ * @param filePossibility Indice de la file de départ.
+ * @param position       Position de départ dans la file.
+ * @param nbCombinations Nombre de paires à analyser par ce thread.
+ * @param threadPosition Indice du thread dans les tableaux de statistiques.
+ */
 void run_check_duplicate_thread(Element *currElement, int filePossibility, unsigned long long position, unsigned long long nbCombinations, int threadPosition) {
     struct arg_duplicate_thread *args = malloc(sizeof(struct arg_duplicate_thread));
     args->currElement = currElement;
@@ -1269,6 +1392,12 @@ void run_check_duplicate_thread(Element *currElement, int filePossibility, unsig
         free(thread_attributes);
 }
 
+/**
+ * @brief Affiche la progression et les erreurs des threads de détection de doublons.
+ *
+ * @param dataSize       Nombre total de possibilités analysées.
+ * @param nbCombinations Nombre total de paires à comparer.
+ */
 void print_duplicate_activity(unsigned long long dataSize, unsigned long long nbCombinations) {
     unsigned long long current = 0;
     unsigned long long errors = 0;
@@ -1287,6 +1416,14 @@ void print_duplicate_activity(unsigned long long dataSize, unsigned long long nb
     log_info("analyzed: %llu/%llu %f/100 | %llu / %llu | errors: %llu | active threads: %i\n", analyzed, nbCombinations, percentCombination, current, dataSize, errors, activeThreads);
 }
 
+/**
+ * @brief Calcule le nombre de combinaisons de paires C(x, 2) = x*(x-1)/2.
+ *
+ * Utilisé par `check_duplicate` pour estimer la charge de travail de comparaison.
+ *
+ * @param x Nombre d'éléments.
+ * @return  Nombre de paires uniques.
+ */
 unsigned long long count_combinations(unsigned long long x) {
     unsigned long long i;
     unsigned long long z = x - 1;
@@ -1661,6 +1798,13 @@ int check_files(void)
 	return 0;
 }
 
+/**
+ * @brief Regroupe et trie les possibilités en ordre décroissant sans verrouillage.
+ *
+ * Doit être appelée avec les files déjà verrouillées.
+ *
+ * @return 0.
+ */
 int sort_descending_nolock(void)
 {
     log_info("regroup datas \n");
@@ -1673,6 +1817,12 @@ int sort_descending_nolock(void)
 	return 0;
 }
 
+/**
+ * @brief Trie toutes les files en parallèle (un thread par file).
+ *
+ * Lance `NB_FILE_POSSIBILITY` threads de tri descendant en parallèle
+ * et attend leur fin avec `pthread_join`.
+ */
 void sortdmthread(void)
 {
 	pthread_t *tid = malloc( NB_FILE_POSSIBILITY * sizeof(pthread_t) );
