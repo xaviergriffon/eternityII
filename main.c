@@ -116,18 +116,20 @@ void handle_tcpclient(int argc, const char *argv[]) {
 
     int *socket_id = malloc(sizeof(int));
     *socket_id = build_udp_local_socket(main_addr);
-    if (*socket_id > 0) {
-        run_server_thread(socket_id);
-    }
     main_socket_id = socket_id;
 
     init_sigchld_sigaction();
 
-    run_checker(0);
-    run_console(0);
     if (argc >= 6) {
         parts_files = (char *)(argv[5]);
     }
+
+    // IMPORTANT : aucun thread du parent (console, checker, réception stats) ne
+    // doit tourner pendant la boucle de fork(). Sinon, si l'un d'eux détient le
+    // verrou d'un FILE stdio (ex. la console au milieu d'un printf) au moment du
+    // fork, l'enfant hérite de ce verrou verrouillé par un thread qui n'existe
+    // pas chez lui : son premier printf se bloque alors définitivement. On reste
+    // donc mono-thread jusqu'à la fin des forks, puis on lance les threads.
 
     pid_t child_pid = -1;
     int fork_error = 0;
@@ -192,6 +194,13 @@ void handle_tcpclient(int argc, const char *argv[]) {
     }
 
     if (parent_pid == getpid()) {
+        // Les forks sont terminés : on peut démarrer les threads du parent.
+        if (*socket_id > 0) {
+            run_server_thread(socket_id);
+        }
+        run_checker(0);
+        run_console(0);
+
         wait_child();
         close(*socket_id);
 #ifdef DEBUG_LOCAL_SOCKET

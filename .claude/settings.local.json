@@ -3,7 +3,10 @@
     "allow": [
       "Bash(grep -n \"^[a-zA-Z].*\\(.*\\).*{$\" /Users/xaviergriffon/Developpement/GitHub/eternityII/main.c)",
       "Bash(make clean *)",
-      "Bash(make)"
+      "Bash(make)",
+      "Bash(pkill -9 -f \"eternityII tcp\")",
+      "Bash(pkill -f \"sleep 900\")",
+      "Bash(rm -f /tmp/etii_srv_in /tmp/etii_server.log /tmp/etii_client.log /tmp/etii_seed.log)"
     ]
   }
 }

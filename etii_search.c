@@ -61,10 +61,12 @@ void checkAndDelegatePossibilitiesIfNeeded_with_big_table(client_possibility_t *
             
             aposs->size++;
         }
-        // En cas d'erreur les possibilités sont remises en locale
         if(add_possibility(client_possibility, aposs))
         {
-            log_error("error on add_possibility\n");
+            log_error("error on add_possibility — remise en table locale\n");
+            for(int i = aposs->size - 1; i >= 0; i--) {
+                put_big_table(bt, &aposs->possibilities[i]);
+            }
         }
         free_array_possibility_packet(aposs);
     }
