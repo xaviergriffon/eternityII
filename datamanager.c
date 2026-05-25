@@ -3,6 +3,7 @@
 #include <string.h>
 #include <netdb.h> /* gethostbyname */
 #include <errno.h>
+#include <time.h>
 
 #include "logger.h"
 #include "static_variables.h"
@@ -117,6 +118,9 @@ int check_and_connect_to_server(client_possibility_t *client_possibility) {
 		times(&client_possibility->start_socket);
 	}
 
+	// Tout échange réseau passe ici : on rafraîchit l'horodatage d'activité
+	// pour que le keepalive ne pingue que pendant les vraies périodes d'inactivité.
+	client_possibility->last_socket_activity = time(NULL);
 	return socket_id;
 }
 
@@ -132,18 +136,22 @@ int check_and_connect_to_server(client_possibility_t *client_possibility) {
  */
 int put_to_server(client_possibility_t *client_possibility, array_possibility_packet *possibilities)
 {
+	// Échange réseau atomique : empêche l'entrelacement avec le thread d'alimentation.
+	pthread_mutex_lock(&client_possibility->socket_mutex);
 	int socket_id = check_and_connect_to_server(client_possibility);
-	if (socket_id == -1) {	
+	if (socket_id == -1) {
+		pthread_mutex_unlock(&client_possibility->socket_mutex);
 		return -1;
 	}
 
 	int t;
-	for(t=0; t< possibilities->size; t++)
+	int connection_lost = 0;
+	int last_routed = -1; /* indice du dernier élément déjà remis en local */
+	for(t=0; t < possibilities->size && !connection_lost; t++)
 	{
 		if(possibilities->possibilities[t].alloc > max_result)
 		{
 			max_result = possibilities->possibilities[t].alloc;
-			//printf("max result:%i\n",max_result);
 		}
         /*
 		if(possibilities->possibilities[t].x < 0 || possibilities->possibilities[t].y < 0 || possibilities->possibilities[t].x > 16 || possibilities->possibilities[t].y > 16)
@@ -156,18 +164,41 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
 		long result = send(socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
 		if (result <= 0) {
 			log_errno("problème put_to_server send => ");
+			/* L'envoi a échoué : on sort et on remet t..fin en local */
+			connection_lost = 1;
+			break;
 		}
-		if(recv_instruction(socket_id) != INST_CONSIDERED) {
-			log_error("problème de prise en compte du serveur\n");
+		int8_t ack = recv_instruction(socket_id);
+		if(ack != INST_CONSIDERED) {
+			log_error("problème de prise en compte du serveur (ack=%d)\n", ack);
 			array_possibility_packet *single_array = build_single_array_possibility_packet(possibility);
 			put_to_local(single_array);
 			free_array_possibility_packet(single_array);
 			print_possibility_packet(possibility);
+			if (ack == INST_END) {
+				/* Connexion perdue (timeout ou fermeture) : on sort et on remet t+1..fin en local */
+				last_routed = t;
+				connection_lost = 1;
+				break;
+			}
 		}
 	}
-    
+
+	if (connection_lost) {
+		int first_remaining = (last_routed >= 0) ? last_routed + 1 : t;
+		if (first_remaining < possibilities->size) {
+			array_possibility_packet remaining;
+			remaining.possibilities = &possibilities->possibilities[first_remaining];
+			remaining.size = possibilities->size - first_remaining;
+			put_to_local(&remaining);
+		}
+		pthread_mutex_unlock(&client_possibility->socket_mutex);
+		return -1;
+	}
+
+	pthread_mutex_unlock(&client_possibility->socket_mutex);
 	return 0;
-    
+
 }
 
 /**
@@ -360,8 +391,11 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 		return;
 	}
 
+	// Échange réseau atomique : empêche l'entrelacement avec le thread d'alimentation.
+	pthread_mutex_lock(&client_possibility->socket_mutex);
 	int socket_id = check_and_connect_to_server(client_possibility);
-	if (socket_id == -1) {	
+	if (socket_id == -1) {
+		pthread_mutex_unlock(&client_possibility->socket_mutex);
 		return;
 	}
 	if(pthread_mutex_trylock(&file_possibility_analysed[thread].lock) == 0)
@@ -374,6 +408,7 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 				ssize_t result = send(socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
 				if (result < 0 ) {
 					log_errno("Error when send_possibility_analysed => ");
+					put(file, possibility);
 					break;
 				}
 				if(recv_instruction(socket_id) != INST_CONSIDERED){
@@ -422,6 +457,7 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 		pthread_mutex_unlock(&file_possibility_analysed[thread].lock);
 	}
 
+	pthread_mutex_unlock(&client_possibility->socket_mutex);
 }
 
 /**
@@ -487,11 +523,14 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread) 
  */
 void scroll_from_server(client_possibility_t *client_possibility, array_possibility_packet *result, int max_result)
 {
+	// Échange réseau atomique : empêche l'entrelacement avec le thread de recherche.
+	pthread_mutex_lock(&client_possibility->socket_mutex);
 	int socket_id = check_and_connect_to_server(client_possibility);
-	if (socket_id == -1) {	
+	if (socket_id == -1) {
+		pthread_mutex_unlock(&client_possibility->socket_mutex);
 		return;
 	}
-	
+
 	File file;
 	init_file_with_cache(&file, 0, sizeof(struct possibility_packet));
 	
@@ -531,6 +570,7 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 			p++;
 		}
 	}
+	pthread_mutex_unlock(&client_possibility->socket_mutex);
 }
 
 /**
@@ -1828,7 +1868,8 @@ void sortdmthread(void)
 	{
 		pthread_join( tid[i], NULL );
 	}
-	
+
+	free(tid);
 	free(f);
 }
 

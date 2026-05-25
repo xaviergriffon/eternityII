@@ -85,11 +85,11 @@ char* parts_files = "./pieces16.csv";
 #endif // ETERN_PARTS == 256
 
 unsigned long long non_null_possibilities = 0;
-uint16_t max_result = 0;
+volatile uint16_t max_result = 0;
 //int request = REQUEST_CONTINUE;
 
 
-int request = REQUEST_CONTINUE;
+volatile int request = REQUEST_CONTINUE;
 
 long inst_unknow = 0;
 

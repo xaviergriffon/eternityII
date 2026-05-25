@@ -69,7 +69,7 @@ extern int NB_THREADS;
 extern unsigned long long *counters;
 extern unsigned long long *lastfilesize;
 
-extern uint16_t max_result;
+extern volatile uint16_t max_result;
 extern char *lastcheck;
 
 // TODO : deplacer dans un parametre ?
@@ -77,7 +77,7 @@ extern char* parts_files;
 
 extern unsigned long long non_null_possibilities;
 
-extern int request;
+extern volatile int request;
 
 extern long inst_unknow;
 

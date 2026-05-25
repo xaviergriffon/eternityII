@@ -176,19 +176,32 @@ int exit_interpreter(void) {
             }
 
             int cptloop = 0;
-            while (1)
-            {
+            int remaining;
+            // On attend que tous les enfants soient réellement terminés.
+            // kill(pid, 0) renvoie 0 tant que le process existe, -1 (ESRCH)
+            // une fois qu'il a été récolté par wait_child / sigchld_handler.
+            do {
+                remaining = 0;
+                if (childrens_pid != NULL) {
+                    for (int c = 0; c < NB_THREADS; c++) {
+                        if (childrens_pid[c] > 0 && kill(childrens_pid[c], 0) == 0) {
+                            remaining++;
+                        }
+                    }
+                }
                 if (cptloop == 10) {
                     log_console("\r            ");
                     log_console("\r");
                     cptloop = 0;
                 }
                 log_console("*");
+                flush_console();
                 cptloop++;
                 usleep(MICRO_SLEEP);
-            }
-
-            
+            } while (remaining > 0);
+            log_console("\n");
+            flush_console();
+            exit(EXIT_SUCCESS);
         }
     } else  {
         exit(EXIT_SUCCESS);

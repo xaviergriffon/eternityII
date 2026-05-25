@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <sys/times.h>
+#include <time.h>
 #include "static_variables.h"
 #include "possibility.h"
 
@@ -18,8 +19,12 @@
  */
 typedef struct
 {
-    int works;
+    volatile int works;
     pthread_mutex_t works_mutex;
+    /// Sérialise les échanges réseau sur socket_id : le thread d'alimentation et
+    /// le thread de recherche partagent le même socket, et leurs échanges
+    /// (send_instruction + send + recv ack) ne doivent pas s'entrelacer.
+    pthread_mutex_t socket_mutex;
     pthread_t *tid;
     /**
      * @todo définir et renommer
@@ -33,6 +38,10 @@ typedef struct
     pid_t pid;
     int socket_id;
     struct tms start_socket;
+    /// Horodatage (wall-clock) du dernier échange réseau, pour le keepalive :
+    /// un worker occupé sur son stock local doit pinguer le serveur avant son
+    /// timeout d'inactivité (tcp_timeout), sinon le serveur ferme la session.
+    time_t last_socket_activity;
 } client_possibility_t;
 
 /**

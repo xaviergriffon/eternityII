@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "logger.h"
 #include "readdata.h"
@@ -24,29 +25,61 @@ void *feed_thread_aposs(void *param) {
             if(request == REQUEST_CONTINUE)
             {
                 client_possibility_t *client_possibility = &thread_params[i];
+                // Vérification rapide sous mutex, puis relâchement avant l'I/O réseau
+                // pour ne pas bloquer autosearch sur pthread_mutex_lock(works_mutex)
+                // pendant la durée des échanges TCP (send_possibility_analysed /
+                // get_last_possibility peuvent attendre le serveur).
                 pthread_mutex_lock(&thread_params[i].works_mutex);
-                if(client_possibility->works == 0)
+                int need_work = (client_possibility->works == 0);
+                pthread_mutex_unlock(&thread_params[i].works_mutex);
+
+                if(need_work)
                 {
+                    // I/O réseau hors du mutex
                     send_possibility_analysed(client_possibility);
                     array_possibility_packet *aposs = get_last_possibility(client_possibility, 1);
                     if(aposs->size > 0)
                     {
-                        // On alimente la pile des poissiblités en étude
+                        // On alimente la pile des possibilités en étude
                         for (int p = 0; p < aposs->size; p++) {
                             add_possibility_analysed(&aposs->possibilities[p], i);
                         }
+                        // Réacquisition du mutex uniquement pour la mise à jour de aposs/works
+                        pthread_mutex_lock(&thread_params[i].works_mutex);
                         thread_params[i].aposs = aposs;
-                        thread_params[i].works = 1;;
-                        //printf("alimentation thread %i\n", i);
+                        thread_params[i].works = 1;
+                        pthread_mutex_unlock(&thread_params[i].works_mutex);
                     } else
                     {
                         free_array_possibility_packet(aposs);
                     }
                 }
-                pthread_mutex_unlock(&thread_params[i].works_mutex);
+                else if (client_possibility->socket_id != -1)
+                {
+                    // Keepalive : un worker occupé sur son stock local ne parle pas
+                    // au serveur. Sans ping, le serveur ferme la session après
+                    // tcp_timeout secondes d'inactivité (SO_RCVTIMEO) → Broken pipe
+                    // à la prochaine I/O. On pingue donc avant l'échéance.
+                    time_t now = time(NULL);
+                    int interval = (tcp_timeout > 2) ? (tcp_timeout / 2) : 1;
+                    if (now - client_possibility->last_socket_activity >= interval)
+                    {
+                        pthread_mutex_lock(&client_possibility->socket_mutex);
+                        if (client_possibility->socket_id != -1) {
+                            if (is_connected(client_possibility->socket_id)) {
+                                client_possibility->last_socket_activity = now;
+                            } else {
+                                // Déjà fermée : on oublie le socket, il sera rouvert
+                                // au prochain besoin de travail.
+                                client_possibility->socket_id = -1;
+                            }
+                        }
+                        pthread_mutex_unlock(&client_possibility->socket_mutex);
+                    }
+                }
             }
         }
-        
+
         usleep(THREAD_MICRO_SLEEP);
     }
 #ifdef DEBUG_THREAD
@@ -110,7 +143,7 @@ void *control_thread(void *param) {
             for(t = 0; t < NB_THREADS; t++)
             {
                 client_possibility_t *thread = &thread_params[t];
-                if(thread->works == 1 && thread->aposs > 0)
+                if(thread->works == 1 && thread->aposs != NULL)
                 {
                     unsigned long long inMillis = 0;
                     if (counters[t] >= lastCheck[t]) {
@@ -129,8 +162,9 @@ void *control_thread(void *param) {
                     }
                 }
             }
-            long double divider = nbCheck / 1000.0;
-            unsigned long long simulationBySec = *oneSecond / divider;
+            if (nbCheck > 0) {
+            long double divider = nbCheck / 1000.0L;
+            unsigned long long simulationBySec = (unsigned long long)(*oneSecond / divider);
             if (request == REQUEST_CONTINUE && simulationBySec >= max_search_by_sec) {
                 request = REQUEST_PAUSE;
             } else {
@@ -138,6 +172,7 @@ void *control_thread(void *param) {
                     request = REQUEST_CONTINUE;
                 }
             }
+        }
         }
         
         if (nbCheck > 1000) {
@@ -224,6 +259,9 @@ void runThreadClient(const char *file)
         thread_params[i].socket_id = -1;
         pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
         thread_params[i].works_mutex = mutex;
+        pthread_mutex_t smutex = PTHREAD_MUTEX_INITIALIZER;
+        thread_params[i].socket_mutex = smutex;
+        thread_params[i].last_socket_activity = time(NULL);
         times(&thread_params[i].start_socket);
         if (0 != pthread_create((thread_params[i].tid), thread_attributes, autosearch, &(thread_params[i])))
         {
@@ -258,9 +296,11 @@ void runThreadClient(const char *file)
 
     // Fermeture des connections
     for (i = 0; i < NB_THREADS; i++) {
+        pthread_mutex_lock(&thread_params[i].socket_mutex);
         if (thread_params[i].socket_id != -1 && is_connected(thread_params[i].socket_id)) {
             close_socket(thread_params[i].socket_id);
         }
+        pthread_mutex_unlock(&thread_params[i].socket_mutex);
     }
 }
 
@@ -291,6 +331,9 @@ void run_mono_client(const char *file)
     thread_params->socket_id = -1;
     pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     thread_params->works_mutex = mutex;
+    pthread_mutex_t smutex = PTHREAD_MUTEX_INITIALIZER;
+    thread_params->socket_mutex = smutex;
+    thread_params->last_socket_activity = time(NULL);
     times(&thread_params->start_socket);
     free_array_part(apart);
     
@@ -298,9 +341,11 @@ void run_mono_client(const char *file)
     build_control_thread(thread_params);
     autosearch(thread_params);
 
+    pthread_mutex_lock(&thread_params->socket_mutex);
     if (thread_params->socket_id != -1 && is_connected(thread_params->socket_id)) {
         close_socket(thread_params->socket_id);
     }
+    pthread_mutex_unlock(&thread_params->socket_mutex);
 }
 
 /**
