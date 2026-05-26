@@ -580,7 +580,7 @@ void checkIfResultFound(struct possibility_packet *poss, struct array_part *all_
     if(poss->alloc >= ETERN_PARTS)
     {
         log_info("fin de la boucle à %i \n", poss->alloc);
-        log_info("solution trouvée\n");
+        log_event("SOLUTION FOUND! (%i pieces) - saved to ./solution_%i", poss->alloc, getpid());
         for(int x = 0; x < ETERN_SIZE; x++)
         {
             for(int y=0;y < ETERN_SIZE; y++)

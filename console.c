@@ -62,6 +62,7 @@ static char * getcmdline(void) {
  */
 void * console(void *param)
 {
+    status_zone_init();
     char *buffer = NULL;
     while(buffer == NULL)
     {

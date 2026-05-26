@@ -541,7 +541,9 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 		long recv_r = recv(socket_id, &buffer, sizeof(buffer), 0);
 		if(recv_r == 0 || (recv_r == sizeof(int8_t) && (*(int8_t *)&buffer) == INST_NULL))
 		{
+#ifdef DEBUG_SOCKET
 			log_info("No possibility recept\n");
+#endif // DEBUG_SOCKET
 		} else if (recv_r < 0) {
 			log_errno("Error when receive possibility => ");
 		}else
@@ -673,7 +675,9 @@ array_possibility_packet *get_last_possibility(client_possibility_t *client_poss
 
 	if(result->size == 0)
 	{
+#ifdef DEBUG_SOCKET
 		log_info("result 0 \n");
+#endif // DEBUG_SOCKET
 	}
 	return result;
 }

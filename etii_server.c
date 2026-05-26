@@ -71,6 +71,7 @@ void *check_server(void *param)
     unsigned long long lastClientsFileUpdateBackup = 0;
     int sleep_time = 10;
     int lastBack = 0;
+    int last_record = max_result;
     while(1)
     {
         free(lastcheck);
@@ -119,9 +120,12 @@ void *check_server(void *param)
         sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,file_possibility_stock,non_null_possibilities, max_result, activeThread);
         strcat(lastcheck, temp);
         free(temp);
-        
-        
-        
+
+        if (max_result > last_record) {
+            last_record = max_result;
+            log_event("new record: %i pieces placed", max_result);
+        }
+
         if(lastBack >= 6 && lastClientsFileUpdateBackup != clientsFileUpdates)
         {
             lastClientsFileUpdateBackup = clientsFileUpdates;
@@ -508,7 +512,7 @@ void runserver(const char* file)
                 }
             }
             if (thread_id == -1 && nbCreated == 0) {
-                log_info("all thread used\n");
+                log_event("request unfulfilled: all threads busy");
             }
         }
     }

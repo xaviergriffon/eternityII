@@ -564,7 +564,9 @@ map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 		}
 		free_array_part(arraypart1);
 	}
+#ifdef DEBUG_CHECK_POSSIBILITY
 	log_info("max array:%i\n", maxarray);
+#endif // DEBUG_CHECK_POSSIBILITY
 	return result;
 }
 
