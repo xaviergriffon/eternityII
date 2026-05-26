@@ -362,6 +362,7 @@ void run_mono_client(const char *file)
 void *check_client_threads(void *param)
 {
     int sleep_time = 10;
+    int last_record = max_result;
     while(1)
     {
         free(lastcheck);
@@ -401,9 +402,14 @@ void *check_client_threads(void *param)
 #endif // DEBUG_SOCKET
         strcat(lastcheck, temp);
         free(temp);
-        
+
+        if (max_result > last_record) {
+            last_record = max_result;
+            log_event("new record: %i pieces placed", max_result);
+        }
+
         sleep(sleep_time);
     }
-    
+
     return NULL;
 }

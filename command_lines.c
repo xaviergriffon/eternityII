@@ -122,9 +122,10 @@ int limit_interpreter(void) {
     return -1;
 }
 
-/** @brief Interpréteur de `check` : affiche le rapport de statistiques `lastcheck`. */
+/** @brief Interpréteur de `check` : réaffiche le rapport de statistiques `lastcheck` en place (sans défilement). */
 int check_interpreter(void) {
-    log_info("%s\n",lastcheck);
+    clear_console();
+    log_info("%s\n", lastcheck != NULL ? lastcheck : "");
     return 0;
 }
 
