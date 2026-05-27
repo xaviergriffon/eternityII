@@ -24,9 +24,23 @@ endif
 
 EXECUTABLE ?= eternityII
 
-$(EXECUTABLE): logger.o static_variables.o local_socket.o lifo.o tcpclient.o tcpserver.o part.o readdata.o datamanager.o possibility.o etii_protocol.o etii_client.o etii_server.o etii_search.o command_lines.o console.o main.o
-	gcc -pthread -o $(EXECUTABLE) logger.o static_variables.o local_socket.o lifo.o tcpclient.o tcpserver.o part.o datamanager.o possibility.o readdata.o etii_protocol.o etii_client.o etii_server.o etii_search.o command_lines.o console.o main.o ${CFLAGS} ${CPPFLAGS}
+# Active l'interface ncurses optionnelle (par défaut : interface ANSI sans
+# dépendance externe). Avec NCURSES=1, on compile logger_ncurses.c à la place
+# de logger.c et on lie -lncurses. Le binaire reste 100% compilable sans
+# ncurses tant que NCURSES est laissé à 0.
+NCURSES ?= 0
+ifeq ($(NCURSES),1)
+    CFLAGS += -DUSE_NCURSES
+    LOGGER_OBJ := logger_ncurses.o
+    NCURSES_LIB := -lncurses
+else
+    LOGGER_OBJ := logger.o
+    NCURSES_LIB :=
+endif
+
+$(EXECUTABLE): $(LOGGER_OBJ) static_variables.o local_socket.o lifo.o tcpclient.o tcpserver.o part.o readdata.o datamanager.o possibility.o etii_protocol.o etii_client.o etii_server.o etii_search.o command_lines.o command_history.o console.o main.o
+	gcc -pthread -o $(EXECUTABLE) $(LOGGER_OBJ) static_variables.o local_socket.o lifo.o tcpclient.o tcpserver.o part.o datamanager.o possibility.o readdata.o etii_protocol.o etii_client.o etii_server.o etii_search.o command_lines.o command_history.o console.o main.o ${CFLAGS} ${CPPFLAGS} $(NCURSES_LIB)
 	$(CLEAN_OBJS)
 
-clean: 
+clean:
 	rm -f *.o $(EXECUTABLE)
