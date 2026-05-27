@@ -24,6 +24,7 @@
 #include "command_lines.h"
 #include "etii_statistic.h"
 #include "logger.h"
+#include "ipc_protocol.h"
 
 void handle_tcpclient(int argc, const char *argv[]);
 void handle_tcpserver(int argc, const char *argv[]);
@@ -436,15 +437,20 @@ void *fork_checker(void *param) {
         statistic->analyses_in_stock = analyses_in_stock;
         statistic->possibilities_in_stock = possibilities_in_stock;
         statistic->max_result = max_result;
+        /* On préfixe le datagramme d'un octet de type pour permettre au
+           parent de multiplexer stats / logs / événements sur le même
+           socket. Voir ipc_protocol.h. */
+        char ipcbuf[1 + sizeof(struct client_statistics)];
+        ipcbuf[0] = IPC_MSG_STATS;
+        memcpy(ipcbuf + 1, statistic, sizeof(struct client_statistics));
 #ifdef DEBUG_LOCAL_SOCKET
-        //printf("send to %s on socket %i stat %lli\n", main_addr->sun_path, fork_checker_socket_id, statistic->shots_per_second);
         if(
 #endif // DEBUG_LOCAL_SOCKET
-        
-		sendto(fork_checker_socket_id, statistic, sizeof(struct client_statistics), MSG_DONTWAIT, (struct sockaddr *) main_addr,
+
+		sendto(fork_checker_socket_id, ipcbuf, sizeof ipcbuf, MSG_DONTWAIT, (struct sockaddr *) main_addr,
                                sizeof(struct sockaddr_un))
 #ifdef DEBUG_LOCAL_SOCKET
-           != sizeof(struct client_statistics) ) {
+           != (ssize_t)sizeof ipcbuf ) {
             log_debug("fork_checker cl %d error %i sendto : %s\n", getpid(), errno, strerror(errno));
         }
 #else
@@ -610,23 +616,37 @@ void init_sigchld_sigaction(void) {
 void wait_child(void) {
     log_info("start wait_child\n");
     int status = 0;
-#ifdef DEBUG_SIGNAL
-    log_debug("wait_child\n");
     pid_t wpid;
- 	while ((wpid = wait(&status)) >= 0) {
-        log_debug("Exit status of %d was %d\n", (int)wpid, status);
- 		if(WIFEXITED(status)) {
- 			/* The child process exited normally */
- 			log_debug("Exit value %d\n", WEXITSTATUS(status));
- 		} else if(WIFSIGNALED(status)) {
- 			/* The child process was killed by a signal. Note the use of strsignal
- 				to make the output human-readable. */
- 			log_debug("Killed by %s\n", strsignal(WTERMSIG(status)));
- 		}
-    }
+    /* Boucle tant que wait() réussit OU est interrompu par un signal.
+       Avec ncurses (SIGWINCH au redimensionnement) ou tout autre signal
+       sans SA_RESTART, wait() peut retourner -1 avec errno==EINTR : il ne
+       faut PAS sortir, sinon le parent terminerait alors que des enfants
+       sont encore vivants (qui deviendraient des orphelins). On ne quitte
+       que sur ECHILD (plus d'enfants) ou une vraie erreur. */
+    while (1) {
+        wpid = wait(&status);
+        if (wpid > 0) {
+#ifdef DEBUG_SIGNAL
+            log_debug("Exit status of %d was %d\n", (int)wpid, status);
+            if (WIFEXITED(status)) {
+                log_debug("Exit value %d\n", WEXITSTATUS(status));
+            } else if (WIFSIGNALED(status)) {
+                log_debug("Killed by %s\n", strsignal(WTERMSIG(status)));
+            }
 #else
-    while (wait(&status) >= 0);
+            (void)wpid;
+            (void)status;
 #endif // DEBUG_SIGNAL
+            continue;
+        }
+        if (wpid == -1 && errno == EINTR) {
+            /* Interrompu par un signal (ex: SIGWINCH installé par ncurses
+               sans SA_RESTART). On retente. */
+            continue;
+        }
+        /* Plus d'enfants à attendre (ECHILD) ou erreur fatale : on sort. */
+        break;
+    }
     log_info("end wait_child\n");
  }
 /**
@@ -641,18 +661,26 @@ void wait_child(void) {
  */
 void *server_tcp(void *param) {
     int socket_id = *(int*)param;
-    
+
     struct sockaddr_un *claddr = malloc(sizeof(struct sockaddr_un));
     ssize_t numBytes;
-    socklen_t len = sizeof(struct sockaddr_un);;
-    
-    struct client_statistics *statistics = malloc(sizeof(struct client_statistics));
+    socklen_t len = sizeof(struct sockaddr_un);
+
+    /* Tampon dimensionné pour le plus gros message attendu :
+       1 octet de type + max(struct client_statistics, IPC_LINE_MAX+1). */
+    size_t bufsz = 1 + sizeof(struct client_statistics);
+    if (bufsz < 1 + IPC_LINE_MAX + 1) bufsz = 1 + IPC_LINE_MAX + 1;
+    char *buf = malloc(bufsz);
 
     while (request != REQUEST_STOP) {
-        numBytes = recvfrom(socket_id, statistics, sizeof(struct client_statistics), 0,
+        len = sizeof(struct sockaddr_un);
+        numBytes = recvfrom(socket_id, buf, bufsz, 0,
                             (struct sockaddr *) claddr, &len);
         if (numBytes == -1) {
             if (request != REQUEST_STOP) {
+                if (errno == EINTR) {
+                    continue;
+                }
                 if (errno == EBADF) {
 #ifdef DEBUG_LOCAL_SOCKET
                     log_debug("srv error invalid descriptor on recvfrom\n");
@@ -665,18 +693,53 @@ void *server_tcp(void *param) {
             }
             continue;
         }
-        
-        for (int cpt = 0; cpt < NB_THREADS; cpt++) {
-            if (strcmp(claddr->sun_path, forkId[cpt]) == 0) {
-                memcpy(&fork_statistics[cpt], statistics, sizeof(struct client_statistics));
+        if (numBytes < 1) {
+            continue;
+        }
+
+        int8_t type = (int8_t)buf[0];
+        switch (type) {
+            case IPC_MSG_STATS:
+                if (numBytes >= (ssize_t)(1 + sizeof(struct client_statistics))) {
+                    for (int cpt = 0; cpt < NB_THREADS; cpt++) {
+                        if (strcmp(claddr->sun_path, forkId[cpt]) == 0) {
+                            memcpy(&fork_statistics[cpt], buf + 1,
+                                   sizeof(struct client_statistics));
+                            break;
+                        }
+                    }
+                }
                 break;
-            }
+
+            case IPC_MSG_LOG_INFO:
+                buf[numBytes] = '\0';
+                log_info("%s", buf + 1);
+                break;
+            case IPC_MSG_LOG_ERROR:
+                buf[numBytes] = '\0';
+                log_error("%s", buf + 1);
+                break;
+            case IPC_MSG_LOG_DEBUG:
+                buf[numBytes] = '\0';
+                log_debug("%s", buf + 1);
+                break;
+            case IPC_MSG_LOG_CONSOLE:
+                buf[numBytes] = '\0';
+                log_console("%s", buf + 1);
+                break;
+            case IPC_MSG_EVENT:
+                buf[numBytes] = '\0';
+                log_event("%s", buf + 1);
+                break;
+
+            default:
+                /* Type inconnu : on ignore silencieusement (compat avenir). */
+                break;
         }
     }
     free(claddr);
-    
-    free(statistics);
-    
+    free(buf);
+
     return NULL;
 }
 

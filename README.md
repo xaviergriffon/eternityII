@@ -17,19 +17,22 @@ Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisa
 
 - Le **serveur** maintient une liste de positions de plateau (« possibilités ») à explorer et les distribue aux clients.
 - Chaque **client** fork `N` processus enfants. Chaque enfant se connecte au serveur, récupère des possibilités, les explore, puis renvoie les nouvelles positions découvertes.
-- Les processus enfants communiquent avec leur parent via des **sockets Unix UDP locaux** (`etii_fork.<pid>`) pour remonter les statistiques en temps réel.
+- Les processus enfants communiquent avec leur parent via des **sockets Unix UDP locaux** (`etii_fork.<pid>`) pour :
+  - remonter les statistiques en temps réel (`shots/sec`, possibilités en stock, `max_result`) ;
+  - **router leurs logs** (`log_info`, `log_error`, `log_event`, …) au parent — qui possède la seule console, ce qui évite tout entrelacement dans le terminal et permet le bon fonctionnement de l'interface ncurses (voir [ipc_protocol.h](ipc_protocol.h)).
 - Un seul client peut aussi fonctionner en mode **autonome** (`test`) sans serveur, utile pour des tests rapides.
 
 ## Compilation
 
 ```sh
-make                          # Build de production → ./eternityII
+make                          # Build de production (ANSI, sans dépendance) → ./eternityII
 make DEBUG=1                  # Build debug (symboles -g, conservation des .o)
+make NCURSES=1                # Build avec interface ncurses (liée à -lncurses)
 make EXECUTABLE=monBinaire    # Nom de sortie personnalisé
 make clean                    # Supprime les binaires et objets
 ```
 
-Prérequis : `gcc`, `make`, pthreads (disponibles en standard sur macOS et Linux).
+Prérequis : `gcc`, `make`, pthreads (disponibles en standard sur macOS et Linux). L'option `NCURSES=1` est facultative et nécessite ncurses (présent par défaut sur macOS et la plupart des distributions Linux) ; sans elle, le programme compile et tourne avec une interface texte ANSI pure, sans dépendance externe.
 
 ## Utilisation
 
@@ -116,6 +119,87 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard. Tape
 
 Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`, `rmnonext`, `limit`, `maxStockByThread`, `min`, `printanalysed`) sont automatiquement retransmises à tous les processus fils via socket Unix.
 
+## Interface interactive
+
+### Zone Events (en bas de l'écran)
+
+Les évènements notables sont affichés dans une bande fixe en bas de la console, juste au-dessus du prompt :
+
+```
+┌──────────────────────────────────┐
+│  Sortie des commandes, logs…     │
+│  …                               │
+│  commande : check                │
+│  file:0 stock:0                  │
+│  …                               │
+├──────────────────────────────────┤
+│  Events                          │  ← bande inversée, fixe
+│  [21:29:30] new record: 65 …     │
+│  [21:30:15] SOLUTION FOUND! …    │
+│  …                               │
+└──────────────────────────────────┘
+│  commande : _                    │
+```
+
+Trois évènements sont actuellement câblés :
+
+| Évènement | Source |
+|---|---|
+| `new record: N pieces placed` | Détecté à chaque tick du checker (10 s) quand `max_result` augmente |
+| `request unfulfilled: all threads busy` | Côté serveur, quand un nouveau client se connecte mais aucun thread libre |
+| `SOLUTION FOUND! (N pieces) - saved to ./solution_<pid>` | Émis depuis `checkIfResultFound` quand les 256 pièces sont placées |
+
+Tout évènement est **horodaté et écrit dans `events.log`** (en plus de l'affichage dans la zone), ce qui te permet de garder une trace persistante hors session :
+
+```sh
+tail -f events.log
+```
+
+### Réaffichage en place de `check`
+
+La commande `check` réécrit son rapport au même endroit au lieu de défiler, pour éviter l'effet « scroll continu » quand on la tape plusieurs fois. La région de défilement ANSI commence en haut de l'écran, donc les sorties longues (par ex. `statistic`, `print`) restent capturées par le **scrollback natif du terminal** (molette, Cmd+↑).
+
+### Historique des commandes (flèches ↑ / ↓)
+
+Les 100 dernières commandes saisies sont conservées en mémoire pour la session. Les touches ↑ et ↓ rappellent les commandes précédentes (comme dans bash) :
+
+| Touche | Effet |
+|---|---|
+| ↑ | Rappelle la commande précédente (la première pression mémorise la saisie en cours pour pouvoir y revenir) |
+| ↓ | Avance vers les commandes plus récentes ; revient à la saisie en cours en bas |
+| Entrée | Exécute la commande et l'ajoute à l'historique (dédoublonnage si identique à la précédente) |
+| Backspace | Efface le dernier caractère |
+
+L'historique fonctionne dans les deux builds. En ANSI, le terminal est basculé en mode non-canonique (`tcsetattr`) le temps de la session pour permettre l'interception des séquences `\033[A` / `\033[B`. Le mode initial est restauré automatiquement à la sortie. Si stdin n'est pas un TTY (sortie redirigée), le programme retombe sur la lecture ligne-par-ligne classique.
+
+### Interface ncurses (optionnelle, `make NCURSES=1`)
+
+Le build `NCURSES=1` remplace l'affichage ANSI par une vraie interface ncurses à trois zones :
+
+```
+┌────────────────────────────────────┐
+│  output_pad (scrollable, 3000 l.)  │
+│  …                                 │
+├────────────────────────────────────┤
+│  Events  [+47 sous la vue]         │
+│  …                                 │
+├────────────────────────────────────┤
+│  commande : _                      │
+└────────────────────────────────────┘
+```
+
+Touches de navigation dans l'historique :
+
+| Touche | Effet |
+|---|---|
+| `PgUp` / `PgDn` | Remonte / descend d'une page |
+| `Home` / `End` | Tout en haut / tout en bas |
+| `Entrée` | Réactive le suivi automatique du bas |
+
+Quand on n'est pas en bas, le titre de la zone Events affiche le nombre de lignes cachées (`[+N sous la vue — PgDn/End pour revenir]`).
+
+Le build par défaut (sans `NCURSES=1`) reste 100 % fonctionnel et **sans aucune dépendance** sur ncurses.
+
 ## Format du fichier de pièces
 
 ```
@@ -129,7 +213,9 @@ ntiles: 256
 - Le fichier `pieces.csv` contient les 256 pièces officielles du puzzle 16×16.
 - Le fichier `pieces16.csv` contient 16 pièces pour un puzzle 4×4 (tests rapides).
 
-## Fichiers de sauvegarde (`.back`)
+## Fichiers générés
+
+### Sauvegardes (`.back`)
 
 Le programme sérialise ses files de possibilités dans des fichiers binaires `.back` :
 
@@ -142,7 +228,14 @@ Le programme sérialise ses files de possibilités dans des fichiers binaires `.
 
 Ces fichiers permettent de reprendre une recherche interrompue avec la commande `restore`.
 
+### Journal et solutions
+
+| Fichier | Contenu |
+|---|---|
+| `events.log` | Journal des évènements horodatés (nouveaux records, solutions, etc.). Append-only. |
+| `solution_<pid>` | Plateau sérialisé quand une solution complète est trouvée (déclenche aussi un évènement). |
+
 ## TODO
 
-- Affichage des statistiques en temps réel sans faire défiler la console
-- Historique des commandes avec les flèches (↑/↓)
+- Persister l'historique des commandes entre sessions (fichier `.eternityII_history`)
+- Élargir la liste des évènements câblés (déconnexions client, erreurs de protocole, …)

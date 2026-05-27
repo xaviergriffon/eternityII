@@ -7,8 +7,15 @@
 #include <time.h>
 #include <pthread.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 #include "logger.h"
+#include "static_variables.h"
+#include "ipc_protocol.h"
+
+/* Taille max d'une ligne de log formatée (avant routage IPC ou affichage). */
+#define LOG_LINE_MAX 4096
 
 /* ------------------------------------------------------------------------- */
 /*  Zone d'affichage fixe (événements) + journal fichier                     */
@@ -44,6 +51,44 @@ static int zone_rows = 0;    /* hauteur du terminal au dernier réglage         
 
 static void redraw_event_zone_locked(void); /* appelant détient output_mutex    */
 
+/* ------------------------------------------------------------------------- */
+/*  IPC : routage des logs des enfants forkés vers le parent                 */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * @brief Vrai si le processus courant est un enfant forké en mode client
+ *        et qu'il dispose d'un socket pour parler au parent.
+ *
+ * Le processus parent (mode client/serveur/test) a `parent_pid == getpid()`
+ * et écrit ses logs localement comme avant. Les enfants forkés ont un
+ * `getpid()` différent et envoient leurs logs au parent par IPC pour qu'ils
+ * apparaissent dans l'unique console (sinon plusieurs processus écriraient
+ * en concurrence dans le terminal).
+ */
+static int log_should_route_to_parent(void)
+{
+    return parent_pid != 0
+        && parent_pid != getpid()
+        && fork_checker_socket_id > 0
+        && main_addr != NULL;
+}
+
+/**
+ * @brief Envoie au parent un datagramme UDP : 1 octet de type + texte.
+ *        Best-effort (MSG_DONTWAIT) : si le tampon est plein le message est
+ *        perdu sans bloquer le thread appelant.
+ */
+static void log_send_to_parent(int8_t type, const char *text)
+{
+    char buf[1 + IPC_LINE_MAX];
+    size_t len = strlen(text);
+    if (len > IPC_LINE_MAX - 1) len = IPC_LINE_MAX - 1;
+    buf[0] = (char)type;
+    memcpy(buf + 1, text, len);
+    sendto(fork_checker_socket_id, buf, len + 1, MSG_DONTWAIT,
+           (struct sockaddr *) main_addr, sizeof(struct sockaddr_un));
+}
+
 /**
  * @brief Renvoie le nombre de lignes du terminal, ou 0 si indéterminable.
  */
@@ -65,12 +110,21 @@ static int query_terminal_rows(void)
  */
 void log_errno(const char *format, ...)
 {
+    char buf[LOG_LINE_MAX];
     va_list args;
-    pthread_mutex_lock(&output_mutex);
     va_start(args, format);
-    vfprintf(stderr, format, args);
+    int n = vsnprintf(buf, sizeof buf, format, args);
     va_end(args);
-    fprintf(stderr, "%i : %s \n", errno, strerror(errno));
+    if (n < 0) n = 0;
+    if (n > (int)sizeof buf - 1) n = (int)sizeof buf - 1;
+    snprintf(buf + n, sizeof buf - n, "%i : %s \n", errno, strerror(errno));
+
+    if (log_should_route_to_parent()) {
+        log_send_to_parent(IPC_MSG_LOG_ERROR, buf);
+        return;
+    }
+    pthread_mutex_lock(&output_mutex);
+    fputs(buf, stderr);
     fflush(stderr);
     pthread_mutex_unlock(&output_mutex);
 }
@@ -80,11 +134,18 @@ void log_errno(const char *format, ...)
  */
 void log_error(const char *format, ...)
 {
+    char buf[LOG_LINE_MAX];
     va_list args;
-    pthread_mutex_lock(&output_mutex);
     va_start(args, format);
-    vfprintf(stderr, format, args);
+    vsnprintf(buf, sizeof buf, format, args);
     va_end(args);
+
+    if (log_should_route_to_parent()) {
+        log_send_to_parent(IPC_MSG_LOG_ERROR, buf);
+        return;
+    }
+    pthread_mutex_lock(&output_mutex);
+    fputs(buf, stderr);
     fflush(stderr);
     pthread_mutex_unlock(&output_mutex);
 }
@@ -94,11 +155,18 @@ void log_error(const char *format, ...)
  */
 void log_info(const char *format, ...)
 {
+    char buf[LOG_LINE_MAX];
     va_list args;
-    pthread_mutex_lock(&output_mutex);
     va_start(args, format);
-    vfprintf(stdout, format, args);
+    vsnprintf(buf, sizeof buf, format, args);
     va_end(args);
+
+    if (log_should_route_to_parent()) {
+        log_send_to_parent(IPC_MSG_LOG_INFO, buf);
+        return;
+    }
+    pthread_mutex_lock(&output_mutex);
+    fputs(buf, stdout);
     pthread_mutex_unlock(&output_mutex);
 }
 
@@ -107,11 +175,18 @@ void log_info(const char *format, ...)
  */
 void log_debug(const char *format, ...)
 {
+    char buf[LOG_LINE_MAX];
     va_list args;
-    pthread_mutex_lock(&output_mutex);
     va_start(args, format);
-    vfprintf(stdout, format, args);
+    vsnprintf(buf, sizeof buf, format, args);
     va_end(args);
+
+    if (log_should_route_to_parent()) {
+        log_send_to_parent(IPC_MSG_LOG_DEBUG, buf);
+        return;
+    }
+    pthread_mutex_lock(&output_mutex);
+    fputs(buf, stdout);
     pthread_mutex_unlock(&output_mutex);
 }
 
@@ -120,11 +195,18 @@ void log_debug(const char *format, ...)
  */
 void log_console(const char *format, ...)
 {
+    char buf[LOG_LINE_MAX];
     va_list args;
-    pthread_mutex_lock(&output_mutex);
     va_start(args, format);
-    vprintf(format, args);
+    vsnprintf(buf, sizeof buf, format, args);
     va_end(args);
+
+    if (log_should_route_to_parent()) {
+        log_send_to_parent(IPC_MSG_LOG_CONSOLE, buf);
+        return;
+    }
+    pthread_mutex_lock(&output_mutex);
+    fputs(buf, stdout);
     fflush(stdout);
     pthread_mutex_unlock(&output_mutex);
 }
@@ -213,6 +295,14 @@ void log_event(const char *format, ...)
     size_t l = strlen(msg);
     while (l > 0 && (msg[l - 1] == '\n' || msg[l - 1] == '\r')) {
         msg[--l] = '\0';
+    }
+
+    /* Si on est un enfant forké : on relaie au parent qui se chargera de
+       l'horodatage, du journal fichier et de l'affichage. Évite plusieurs
+       écrivains sur events.log et garde un seul affichage cohérent. */
+    if (log_should_route_to_parent()) {
+        log_send_to_parent(IPC_MSG_EVENT, msg);
+        return;
     }
 
     time_t now = time(NULL);

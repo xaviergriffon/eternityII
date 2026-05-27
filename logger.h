@@ -24,4 +24,17 @@ void clear_console(void);
 void status_zone_init(void);
 /** @brief Restaure le terminal (région de défilement complète). Enregistré via atexit par status_zone_init. */
 void status_zone_teardown(void);
+
+#ifdef USE_NCURSES
+/**
+ * @brief Boucle interactive de la console implémentée avec ncurses.
+ *
+ * Implémentée dans `logger_ncurses.c`. Remplace la boucle prompt/getcmdline
+ * classique : gère les fenêtres ncurses (sortie scrollable, zone Events, ligne
+ * de saisie), lit les caractères au clavier, dispatche les commandes via
+ * `do_command_line`. Ne retourne pas (appelle `exit` quand l'utilisateur quitte).
+ */
+void nc_console_loop(void);
+#endif /* USE_NCURSES */
+
 #endif /* logger_h */
