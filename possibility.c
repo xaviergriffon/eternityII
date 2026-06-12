@@ -819,6 +819,11 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
         struct array_part *search = get_parts_bigarray_with_key(mapParts, key);
         for(s=0; s< search->size; s++)
         {
+            // bouchon id = 0 de la map (faces nulles) : pas une pièce
+            if(search->parts[s].id == 0)
+            {
+                continue;
+            }
             int position = search->parts[s].id -1;
             // Si la piece n'est pas déjà utilisée dans la suite de possibilité, on a donc une possiblité supplémentaire
 #ifdef FACES_USED_BITS
@@ -886,8 +891,11 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
         
         // On remet la possibilté dans la suite car elle ne doit pas être résolu sinon on aurait arreter
 		put_possibility(result, currPossibility);
+		// On poursuit sur la copie poussée dans la file : muter l'original
+		// laisserait la copie avec alloc/x/y périmés
+		currPossibility = result->end->value;
 		currPossibility->alloc = incAlloc;
-		
+
 		currPossibility->x = nX;
 		currPossibility->y = nY;
         // On vérifie que les emplacements libres ont tous une piece possible
@@ -917,6 +925,78 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
 	return max_result;
 }
 
+#if FORWARD_CHECK_K > 0
+/**
+ * @brief Forward-checking court sur les FORWARD_CHECK_K prochaines cases du parcours.
+ *
+ * Inspecte les cases `directions[alloc] ... directions[alloc + FORWARD_CHECK_K - 1]`
+ * (en s'arrêtant si on dépasse `ETERN_PARTS`). Pour chacune des cases encore vides,
+ * calcule la clé de contraintes à partir de l'état courant du plateau et interroge
+ * la `map_big_array`. Si l'une de ces cases n'admet plus aucune pièce candidate
+ * disponible (toutes utilisées, ou aucun résultat dans la map), la branche est
+ * sans issue et la fonction retourne 0.
+ *
+ * Cette vérification est appelée juste après chaque placement dans
+ * `search_possiblity_light_with_big_table` : elle permet d'élaguer des branches
+ * mortes avant qu'elles soient empilées dans le `big_table`, sans changer l'ordre
+ * statique du parcours `directions[]`.
+ *
+ * Note : entièrement supprimée à la compilation quand `FORWARD_CHECK_K == 0`
+ * (debit brut strictement identique au code d'origine).
+ *
+ * @param possibility    Paquet à tester (avec la pièce qu'on vient de placer).
+ * @param mapParts       Tableau 4D de lookup.
+ * @param all_rotate_part Tableau de toutes les rotations.
+ * @return 1 si toutes les cases inspectées ont au moins une pièce candidate, 0 sinon.
+ */
+int forward_check_next_k(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part)
+{
+    int alloc = possibility->alloc;
+    int end = alloc + FORWARD_CHECK_K;
+    if (end > ETERN_PARTS) end = ETERN_PARTS;
+
+    int8_t all_face = mapParts->sizearrayM;
+    key_part wsearch;
+
+    for (int c = alloc; c < end; c++) {
+        int8_t x = dirx[c];
+        int8_t y = diry[c];
+
+        // Si la case a déjà été remplie (cas où une pièce a été placée à l'avance), on saute
+        if (possibility->grid[x][y] != -2) {
+            continue;
+        }
+
+        what_search_in_grid_to_key(all_rotate_part, possibility, x, y, &wsearch, all_face);
+
+        struct array_part *search = get_parts_bigarray_with_key(mapParts, &wsearch);
+        if (search == NULL || search->size == 0) {
+            return 0;  // case morte : aucune pièce candidate
+        }
+
+        // Vérifier qu'au moins une pièce candidate n'est pas déjà utilisée ailleurs
+        int found = 0;
+        for (int s = 0; s < search->size; s++) {
+            if (search->parts[s].id != 0
+#ifdef FACES_USED_BITS
+                && !is_face_used(possibility->b_faceused, search->parts[s].id - 1)
+#else
+                && !possibility->faceused[search->parts[s].id - 1]
+#endif // FACES_USED_BITS
+                ) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            return 0;  // case morte : toutes les pièces candidates sont déjà utilisées
+        }
+    }
+
+    return 1;
+}
+#endif // FORWARD_CHECK_K > 0
+
 /**
  * @brief Développe un paquet en ajoutant une pièce à la case courante (version big_table).
  *
@@ -945,20 +1025,31 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
     uint8_t nX = dirx[incAlloc];
     uint8_t nY = diry[incAlloc];
     int lastId =-1;
-    
+#if FORWARD_CHECK_K > 0
+    // Nombre de branches effectivement empilées dans `result` (i.e. ayant passé le
+    // forward-checking). Utilisé pour ne pas faussement bumper `max_result` quand
+    // toutes les pièces candidates sont rejetées par le forward-check.
+    int pushed = 0;
+#endif
+
     struct possibility_packet *currPossibility = possiblity;
-    
+
     // On vérifie si la possibilité à cette position n'est toujours pas connu.
     if(currPossibility->grid[x][y] == -2) {
-    
+
         // TODO : vérifier si suffisament d'espace mémoire pour intégrer un le nombre de possibilité retournée
-        
-        
+
+
         // TODO : voir pour réviser la recherche avec seulement des id de all_rotate_part
         // liste des pieces répondant à la recherche (key)
         struct array_part *search = get_parts_bigarray_with_key(mapParts, key);
         for(int s=0; s< search->size; s++)
         {
+            // bouchon id = 0 de la map (faces nulles) : pas une pièce
+            if(search->parts[s].id == 0)
+            {
+                continue;
+            }
             // Position de la pieces dans faceused
             int position = search->parts[s].id -1;
             // Si la piece n'est pas déjà utilisée dans la suite de possibilité, on a donc une possiblité supplémentaire
@@ -968,11 +1059,11 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
             if(!currPossibility->faceused[position])
 #endif // FACES_USED_BITS
             {
-                
+
                 // On ajoute la définition d'une possibilité dans la suite.
                 // effectue une copie dans le end->value
                 // TODO : utiliser un système moins couteux en copie de mémoire
-                
+
                 // On se place à la fin de la suite qui correspond à la nouvelle définition
                 currPossibility = put_big_table(result, currPossibility);;
                 // Dans le cas où on a déjà généré une possiblité, on libère la piece qui avait été utilisée avant de généré un nouveau jeu
@@ -987,7 +1078,7 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
                 currPossibility->grid[x][y] = idParts[search->parts[s].id][search->parts[s].rotation];
                 // statistique du nombre de piece placée
                 currPossibility->alloc = incAlloc;
-                
+
                 currPossibility->x = nX;
                 currPossibility->y = nY;
                 // On indique que la piece est utilisée
@@ -997,7 +1088,7 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
                 currPossibility->faceused[position] = 1;
 #endif
                 // identifiant de la dernière piece utilisée
-                
+
                 lastId = search->parts[s].id;
                 // On vérifie que les emplacements libres ont tous une piece possible
                 // Si qu'une possiblité, alors place la piece
@@ -1018,19 +1109,47 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
                 }
 #endif // DEBUG_CHECK_POSSIBILITY
                 // si toutes les pieces sont placées alors on n'entrera pas dasn le if !faceused et sortira donc
+
+#if FORWARD_CHECK_K > 0
+                // Forward-checking : on inspecte les FORWARD_CHECK_K prochaines cases
+                // pour détecter une impasse immédiate. Si une case n'a déjà plus de
+                // pièce candidate, on dépile cette branche sans la pousser dans la file.
+                // `lastId` et `currPossibility` restent valides : la prochaine itération
+                // réutilisera le même slot via `put_big_table` (memcpy sur soi) et
+                // appliquera correctement l'undo de la pièce courante via lastId.
+                if (incAlloc < ETERN_PARTS) {
+                    __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
+                    if (!forward_check_next_k(currPossibility, mapParts, all_rotate_part)) {
+                        // dépile la branche (le slot mémoire est conservé pour réutilisation
+                        // par le prochain put_big_table)
+                        result->size--;
+                        __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
+                    } else {
+                        pushed++;
+                    }
+                } else {
+                    pushed++;
+                }
+#endif // FORWARD_CHECK_K > 0
             }
         }
     } else {
         // ?? à quoi correspond % 256 : l'identifiant de la piece (reste division par 256)
         //lastId = currPossibility->grid[x][y] % 256;
         lastId = 1;// pour indiquer qu'on a trouvé qqc
-        
+
         // On remet la possibilté dans la suite car elle ne doit pas être résolu sinon on aurait arreter
-        put_big_table(result, currPossibility);
+        // On poursuit sur le slot écrit dans la table : quand le paquet source
+        // n'est pas déjà ce slot (pas d'aliasing), muter l'original laisserait
+        // le slot avec alloc/x/y périmés
+        currPossibility = put_big_table(result, currPossibility);
         currPossibility->alloc = incAlloc;
-        
+
         currPossibility->x = nX;
         currPossibility->y = nY;
+#if FORWARD_CHECK_K > 0
+        pushed = 1;
+#endif
         // On vérifie que les emplacements libres ont tous une piece possible
         // Si qu'une possiblité, alors place la piece
         /*
@@ -1048,10 +1167,26 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
             print_possibility_packet(currPossibility);
         }
 #endif // DEBUG_CHECK_POSSIBILITY
+#if FORWARD_CHECK_K > 0
+        // Forward-checking sur la cellule déjà pré-remplie : même logique que dans
+        // la branche principale.
+        if (incAlloc < ETERN_PARTS) {
+            __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
+            if (!forward_check_next_k(currPossibility, mapParts, all_rotate_part)) {
+                result->size--;
+                pushed = 0;
+                __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
+            }
+        }
+#endif // FORWARD_CHECK_K > 0
     }
 
-    // On a au moins placé une piece
-    if (lastId>-1) {
+    // On a au moins placé une piece (et passé le forward-checking si activé)
+#if FORWARD_CHECK_K > 0
+    if (pushed > 0) {
+#else
+    if (lastId > -1) {
+#endif
         checkIfResultFound(currPossibility, all_rotate_part);
         return incAlloc;
     }
@@ -1064,8 +1199,9 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
  * @param packet      Paquet à valider.
  * @param rotateParts Tableau de toutes les rotations (chargé depuis `parts_files` si NULL).
  * @return  0 si valide, sinon un code négatif :
- *          -1 packet NULL, -2 coordonnées hors grille, -4 alloc ≤ 0,
- *          -5 nombre de faces utilisées < alloc, -6 pièce absente à (7,8),
+ *          -1 packet NULL, -2 coordonnées hors grille, -4 alloc > ETERN_PARTS
+ *          (alloc = 0 est l'état genèse, valide),
+ *          -5 nombre de faces utilisées < alloc, -6 pièce absente à (7,8) (puzzle 256),
  *          -7 valeur de grille invalide, -9 incohérence de bord.
  */
 int check_possibility(struct possibility_packet *packet, struct array_part *rotateParts)
@@ -1082,7 +1218,8 @@ int check_possibility(struct possibility_packet *packet, struct array_part *rota
 	
 	//if(packet->direcory < DIR_UP || packet->direcory > DIR_LEFT) return -3;
 	
-	if(packet->alloc <= 0) return -4;
+	// alloc = 0 est l'état genèse (aucune case du parcours encore traitée)
+	if(packet->alloc > ETERN_PARTS) return -4;
 	
 	int i;
 	int faceused= 0;
@@ -1103,9 +1240,11 @@ int check_possibility(struct possibility_packet *packet, struct array_part *rota
         return -5;
     }
 	
+#if ETERN_PARTS == 256
     if (packet->grid[7][8] != id_for_rotated_part(139, 2)) {
         return -6;
     }
+#endif // ETERN_PARTS == 256
     
     // map_big_array *map_parts = prepare_map_part(rotateParts);
     
@@ -1177,6 +1316,48 @@ int check_possibility(struct possibility_packet *packet, struct array_part *rota
     }
 
 	return 0;
+}
+
+/**
+ * @brief Rend un paquet conforme à l'invariant de parcours (alloc ⇔ directions[alloc]).
+ *
+ * Invariant attendu par les moteurs de recherche : les cases
+ * `directions[0..alloc-1]` sont remplies et `(x, y)` désigne la prochaine case
+ * à étudier, `directions[alloc]`. Les paquets produits avant la correction du
+ * paquet genèse (démarrage sur la case de l'indice (7,8) au lieu de
+ * `directions[0]`) violent cet invariant : la case (0,0) reste vide derrière la
+ * position de reprise et le parcours ne la revisiterait jamais.
+ *
+ * La réparation recule `alloc` sur la première case vide du parcours et y
+ * repositionne `(x, y)`. Les cases remplies au-delà sont conservées : les
+ * moteurs les traitent comme des indices fixes (niveau sans décision).
+ *
+ * @param packet Paquet à normaliser (modifié en place).
+ * @return       0 si le paquet était déjà conforme, 1 s'il a été réparé.
+ */
+int normalize_possibility_packet(struct possibility_packet *packet)
+{
+    // Première case vide dans l'ordre de parcours
+    uint16_t firstHole = ETERN_PARTS;
+    for (uint16_t p = 0; p < ETERN_PARTS; p++) {
+        if (packet->grid[dirx[p]][diry[p]] == -2) {
+            firstHole = p;
+            break;
+        }
+    }
+
+    int repaired = 0;
+    if (packet->alloc > firstHole) {
+        packet->alloc = firstHole;
+        repaired = 1;
+    }
+    if (packet->alloc < ETERN_PARTS
+        && (packet->x != dirx[packet->alloc] || packet->y != diry[packet->alloc])) {
+        packet->x = dirx[packet->alloc];
+        packet->y = diry[packet->alloc];
+        repaired = 1;
+    }
+    return repaired;
 }
 
 /**
@@ -1272,14 +1453,13 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
     }
 
 #if ETERN_PARTS == 256
-    x = 7;
-    y = 8;
     int cur_dir = DIR_UP;
-    
+
+    // Indice officiel : pièce 139 r2 en (7,8). La case sera enjambée par le
+    // parcours directions[] (niveau sans décision), comme les autres indices.
     struct part *part = part_139_i8(mapParts);
-    if(part != NULL) {
-        etern[x][y] = part;
-        
+    etern[7][8] = part;
+
 #if ETERN_WITH_INDICES
         // 208 C3 -- rotation 3
         // 1 13 12 3
@@ -1325,16 +1505,17 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         }
         etern[13][13] = part;
 #endif
-    } else
-    {
-        cur_dir = DIR_LEFT;
-    }
 #else
-    x = 1;
-    y = 1;
     int cur_dir = DIR_LEFT;
 #endif
-    
+
+    // Paquet genèse : invariant alloc = 0 ⇔ prochaine case = directions[0].
+    // Démarrer ailleurs (ex. sur la case d'un indice) laisserait directions[0]
+    // définitivement vide : le parcours ne repasse jamais derrière alloc.
+    x = dirx[0];
+    y = diry[0];
+
+
     int16_t idParts[ETERN_PARTS+1][4];
     for(int p=0; p <= ETERN_PARTS;p++) {
         for(int r=0; r < 4;r++) {
@@ -1368,6 +1549,15 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
         scroll(possibilities,packet);
         log_info("packet->alloc:%i\n",packet->alloc);
+        // Contrôle au démarrage : chaque possibilité initiale doit respecter
+        // l'invariant de parcours et être valide
+        int analyse = check_possibility(packet, all_rotate_part);
+        if (normalize_possibility_packet(packet) || analyse < 0) {
+            log_error("first_possibility : paquet initial incohérent (check : %i)\n", analyse);
+            print_possibility_packet(packet);
+            // Pour l'initialisation, on crash car ce n'est vraiment pas normal
+            exit(EXIT_FAILURE);
+        }
         if(packet->alloc > max_result)
         {
             max_result = packet->alloc;

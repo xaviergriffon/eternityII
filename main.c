@@ -392,6 +392,10 @@ void *fork_checker(void *param) {
     int s = 0;
     int t;
     unsigned long long last_counter = 0;
+#if FORWARD_CHECK_K > 0
+    unsigned long long last_fc_pruned = 0;
+    unsigned long long last_fc_attempts = 0;
+#endif // FORWARD_CHECK_K > 0
     struct client_statistics *statistic = malloc(sizeof(struct client_statistics));
 	while(request != REQUEST_STOP && fork_checker_socket_id > 0) {
         unsigned long long counter = 0;
@@ -456,6 +460,22 @@ void *fork_checker(void *param) {
 #else
         ;
 #endif // DEBUG_LOCAL_SOCKET
+#if FORWARD_CHECK_K > 0
+        // Statistique du forward-checking : taux d'élagage instantané (delta sur 1s)
+        // et cumulé. Permet de mesurer le rapport gain/coût de la valeur de
+        // FORWARD_CHECK_K choisie.
+        unsigned long long fc_p_now = __atomic_load_n(&fc_pruned, __ATOMIC_RELAXED);
+        unsigned long long fc_a_now = __atomic_load_n(&fc_attempts, __ATOMIC_RELAXED);
+        unsigned long long fc_p_delta = fc_p_now - last_fc_pruned;
+        unsigned long long fc_a_delta = fc_a_now - last_fc_attempts;
+        last_fc_pruned = fc_p_now;
+        last_fc_attempts = fc_a_now;
+        double rate_1s = (fc_a_delta > 0) ? (100.0 * (double)fc_p_delta / (double)fc_a_delta) : 0.0;
+        double rate_cum = (fc_a_now > 0) ? (100.0 * (double)fc_p_now / (double)fc_a_now) : 0.0;
+        log_info("forward-check (K=%d) : %llu/%llu pruned in 1s (%.2f%%), cumul %llu/%llu (%.2f%%)\n",
+                 FORWARD_CHECK_K, fc_p_delta, fc_a_delta, rate_1s,
+                 fc_p_now, fc_a_now, rate_cum);
+#endif // FORWARD_CHECK_K > 0
 		sleep(1);
 	}
     free(statistic);

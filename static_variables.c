@@ -70,6 +70,11 @@ uint8_t dirx[ETERN_PARTS] = {0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3};
 uint8_t diry[ETERN_PARTS] = {0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3};
 
 #endif
+#if FORWARD_CHECK_K > 0
+volatile unsigned long long fc_pruned = 0;
+volatile unsigned long long fc_attempts = 0;
+#endif // FORWARD_CHECK_K > 0
+
 unsigned long long *counters = NULL;
 
 struct client_statistics *fork_statistics = NULL;

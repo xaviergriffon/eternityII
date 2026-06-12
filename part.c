@@ -64,8 +64,13 @@ struct part *rotatePart(struct part *p, int nbRotate)
 /**
  * @brief Génère les quatre rotations de chaque pièce du tableau source.
  *
- * Le résultat contient `apart->size * 4` entrées. La pièce d'id `i` en rotation `r`
- * se trouve à l'indice `i + ETERN_PARTS * r` dans le tableau résultant.
+ * La pièce d'id `i` (1..apart->size) en rotation `r` se trouve à l'indice
+ * `i + ETERN_PARTS * r` dans le tableau résultant. L'indice 0 reste le bouchon
+ * id = 0 (calloc), et `size` couvre l'indice maximal `apart->size + ETERN_PARTS * 3`.
+ *
+ * Les ids commençant à 1, itérer depuis l'indice 0 décalerait tout d'un cran :
+ * le bouchon occuperait les indices `ETERN_PARTS * r` et la dernière pièce ne
+ * serait jamais intégrée — donc absente de la map et inutilisable par la recherche.
  *
  * @param apart Tableau de pièces originales.
  * @return      Nouveau tableau de toutes les rotations (à libérer par l'appelant).
@@ -73,14 +78,14 @@ struct part *rotatePart(struct part *p, int nbRotate)
 struct array_part *rotate_all_parts(struct array_part *apart)
 {
 	struct array_part *result = malloc(sizeof *result);
-	result->size = apart->size * 4;
+	// + 1 pour le bouchon id = 0 à l'indice 0
+	result->size = apart->size * 4 + 1;
 	// TODO : pourquoi +4 ?
 	// Sans doute pour la propriété size de la structure array_part mais ce n'est pas très propre
 	result->parts = calloc((result->size + 4), sizeof(struct part));
 
-	int p = 0;
-	int i = 0;
-	while (p < result->size)
+	int i;
+	for (i = 1; i <= apart->size; i++)
 	{
 		struct part *part = &apart->parts[i];
 		int r;
@@ -92,9 +97,7 @@ struct array_part *rotate_all_parts(struct array_part *apart)
 			memcpy(&result->parts[position], rotatepart, sizeof(struct part));
 			// print_part(rotatepart);
 			free(rotatepart);
-			p++;
 		}
-		i++;
 	}
 	return result;
 }

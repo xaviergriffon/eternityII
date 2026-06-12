@@ -41,8 +41,10 @@ key_part what_search(struct array_part *all_rotate_parts, int x, int y, struct p
 void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity,key_part *key);
 void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face);
 
+void checkIfResultFound(struct possibility_packet *poss, struct array_part *all_rotate_part);
 int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);
 int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);
+int forward_check_next_k(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);
 int search_possiblity(File *result,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part);
 int search_possiblity_light(File *result,key_part *key,struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part,int16_t idParts[ETERN_PARTS][4]);
 
@@ -62,10 +64,11 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
  -1 packet NULL
  -2 x or y > ETERN_SIZE
  -3 directory > or < dir_possibilities
- -4 alloc <= 0
+ -4 alloc > ETERN_PARTS (alloc = 0 est l'état genèse, valide)
  -5 alloc <> faceused
  */
 int check_possibility(struct possibility_packet *packet, struct array_part *rotateParts);
+int normalize_possibility_packet(struct possibility_packet *packet);
 
 int test_directions(void);
 int decode_direction(void);
