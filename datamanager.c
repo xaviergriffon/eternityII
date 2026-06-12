@@ -865,7 +865,10 @@ int import_old_file(client_possibility_t *client_possibility, char *filename)
         for(int i = 0; i < ETERN_PARTS;i++) {
             set_face_used(new_possibility->b_faceused, i, old_possibility->faceused[i]);
         }
-        
+
+        // Fichiers ancien format : répare l'invariant alloc/directions si besoin
+        normalize_possibility_packet(new_possibility);
+
 		array_possibility_packet *possibilities = malloc(sizeof(array_possibility_packet));
 		possibilities->size = 1;
 		possibilities->possibilities = malloc(sizeof(struct possibility_packet));
@@ -917,17 +920,24 @@ int import(client_possibility_t *client_possibility, char *filename)
     }
     
     struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
+    int repaired = 0;
     while(fread(possibility, sizeof(struct possibility_packet),1,f))
     {
+        // Paquets d'anciens fichiers .back : un trou peut subsister derrière la
+        // position de reprise (case (0,0) jamais traitée par l'ancien moteur)
+        repaired += normalize_possibility_packet(possibility);
         array_possibility_packet *possibilities = malloc(sizeof(array_possibility_packet));
         possibilities->size = 1;
         possibilities->possibilities = malloc(sizeof(struct possibility_packet));
         memcpy(&possibilities->possibilities[0], possibility, sizeof(struct possibility_packet));
         add_possibility(client_possibility, possibilities);
-        
+
         free_array_possibility_packet(possibilities);
     }
-    
+    if (repaired > 0) {
+        log_info("import : %i paquets ancien format normalisés (invariant alloc/directions)\n", repaired);
+    }
+
     free(possibility);
     
     

@@ -37,6 +37,20 @@
 #endif // ETERN_PARTS == 256
 
 #define BUF_SIZE 300
+
+/**
+ * @brief Taille de la fenêtre de forward-checking.
+ *
+ * Après avoir placé une pièce à `directions[i]`, on vérifie que les
+ * `FORWARD_CHECK_K` prochaines cases (`directions[i+1] ... directions[i+K]`)
+ * possèdent encore au moins une pièce candidate compatible compte tenu de
+ * l'état courant du plateau et du stock de pièces. Si l'une est « morte »,
+ * la branche est abandonnée immédiatement sans la pousser dans la file.
+ *
+ * Une valeur plus élevée détecte les impasses plus tôt mais coûte plus de
+ * lookups par placement. K=3 est un bon compromis par défaut.
+ */
+#define FORWARD_CHECK_K 0
 // ------------- Flags pour Debug -----------------
 // Permet de contrôler les données des possibilités générés ou reçus
 //#define DEBUG_CHECK_POSSIBILITY 1
@@ -56,6 +70,26 @@
 //#define DEBUG_THREAD
 // ------------------------------------------------
 #define FACES_USED_BITS
+
+#if FORWARD_CHECK_K > 0
+/**
+ * @brief Compteur global du nombre de branches élaguées par forward-checking.
+ *
+ * Incrémenté à chaque fois qu'une pièce candidate placée dans le moteur de
+ * recherche est rejetée parce qu'une des `FORWARD_CHECK_K` prochaines cases
+ * est devenue « morte ». Utilise des additions atomiques relaxées pour
+ * limiter la contention inter-threads.
+ */
+extern volatile unsigned long long fc_pruned;
+
+/**
+ * @brief Compteur global du nombre total d'appels au forward-checking.
+ *
+ * Sert de dénominateur pour calculer le taux d'élagage `fc_pruned / fc_attempts`.
+ */
+extern volatile unsigned long long fc_attempts;
+#endif // FORWARD_CHECK_K > 0
+
 extern uint8_t directions[ETERN_PARTS];
 
 extern uint8_t dirx[ETERN_PARTS];
