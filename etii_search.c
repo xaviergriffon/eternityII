@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "logger.h"
 #include "static_variables.h"
@@ -101,6 +102,119 @@ typedef struct {
 } bt_level;
 
 /**
+ * @brief Initialise le cache de contraintes : la clé de recherche de chaque case de la grille.
+ *
+ * Pour chaque case, `constraints[x][y]` contient la clé (k1=top, k2=right,
+ * k3=bottom, k4=left) que `what_search_in_grid_to_key` calculerait : 0 pour un
+ * bord de grille, `all_face` pour un voisin vide, sinon la couleur imposée par
+ * le voisin placé. Le cache est ensuite maintenu incrémentalement à chaque
+ * placement/retrait (`bt_propagate_place`/`bt_propagate_undo`), ce qui rend le
+ * calcul de clé de la boucle chaude gratuit (une lecture de 4 octets).
+ *
+ * @param constraints     Cache à initialiser.
+ * @param board           Plateau courant.
+ * @param all_rotate_part Tableau de toutes les rotations.
+ * @param all_face        Valeur « toute face » (= map->sizearrayM).
+ */
+static void bt_init_constraints(key_part constraints[ETERN_SIZE][ETERN_SIZE],
+                                struct possibility_packet *board,
+                                struct array_part *all_rotate_part, int8_t all_face)
+{
+    for (int cx = 0; cx < ETERN_SIZE; cx++) {
+        for (int cy = 0; cy < ETERN_SIZE; cy++) {
+            what_search_in_grid_to_key(all_rotate_part, board, (int8_t)cx, (int8_t)cy, &constraints[cx][cy], all_face);
+        }
+    }
+}
+
+/**
+ * @brief Propage les couleurs d'une pièce placée en (cx, cy) vers les clés de ses voisines.
+ * @param constraints Cache de contraintes.
+ * @param cx          Colonne de la pièce placée.
+ * @param cy          Ligne de la pièce placée.
+ * @param p           Pièce placée (rotation déjà appliquée).
+ */
+static inline void bt_propagate_place(key_part constraints[ETERN_SIZE][ETERN_SIZE], int cx, int cy, const struct part *p)
+{
+    if (cy > 0)              constraints[cx][cy - 1].k3 = p->top;
+    if (cx < ETERN_SIZE - 1) constraints[cx + 1][cy].k4 = p->right;
+    if (cy < ETERN_SIZE - 1) constraints[cx][cy + 1].k1 = p->bottom;
+    if (cx > 0)              constraints[cx - 1][cy].k2 = p->left;
+}
+
+/**
+ * @brief Annule la propagation d'une pièce retirée de (cx, cy) : ses voisines redeviennent libres de ce côté.
+ * @param constraints Cache de contraintes.
+ * @param cx          Colonne de la pièce retirée.
+ * @param cy          Ligne de la pièce retirée.
+ * @param all_face    Valeur « toute face ».
+ */
+static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE], int cx, int cy, int8_t all_face)
+{
+    if (cy > 0)              constraints[cx][cy - 1].k3 = all_face;
+    if (cx < ETERN_SIZE - 1) constraints[cx + 1][cy].k4 = all_face;
+    if (cy < ETERN_SIZE - 1) constraints[cx][cy + 1].k1 = all_face;
+    if (cx > 0)              constraints[cx - 1][cy].k2 = all_face;
+}
+
+#if FORWARD_CHECK_K > 0
+/**
+ * @brief Forward-checking de la boucle chaude, basé sur le cache de contraintes.
+ *
+ * Même sémantique que `forward_check_next_k` (possibility.c) mais sans recalcul
+ * de clé : la clé de chaque case inspectée est lue directement dans le cache.
+ *
+ * @param constraints Cache de contraintes maintenu par le backtracking.
+ * @param board       Plateau courant (grille + masque des pièces utilisées).
+ * @param mapParts    Table de lookup.
+ * @param alloc       Indice de la première case non remplie du parcours.
+ * @return            1 si toutes les cases inspectées ont au moins une pièce candidate, 0 sinon.
+ */
+static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
+                            struct possibility_packet *board,
+                            map_big_array *mapParts, int alloc)
+{
+    int end = alloc + FORWARD_CHECK_K;
+    if (end > ETERN_PARTS) {
+        end = ETERN_PARTS;
+    }
+
+    for (int c = alloc; c < end; c++) {
+        int8_t x = dirx[c];
+        int8_t y = diry[c];
+
+        // Case déjà remplie (pièce placée à l'avance) : on saute
+        if (board->grid[x][y] != -2) {
+            continue;
+        }
+
+        struct array_part *search = get_parts_bigarray_with_key(mapParts, &constraints[x][y]);
+        if (search->size == 0) {
+            // case morte : aucune pièce candidate
+            __atomic_fetch_add(&fc_pruned_at[c - alloc + 1], 1, __ATOMIC_RELAXED);
+            return 0;
+        }
+
+        // Vérifier qu'au moins une pièce candidate n'est pas déjà utilisée ailleurs
+        int found = 0;
+        for (int s = 0; s < search->size; s++) {
+            if (search->parts[s].id != 0 && !BOARD_FACE_USED(board, search->parts[s].id - 1)) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            // case morte : toutes les pièces candidates sont déjà utilisées
+            __atomic_fetch_add(&fc_pruned_at[c - alloc + 1], 1, __ATOMIC_RELAXED);
+            return 0;
+        }
+    }
+
+    return 1;
+}
+#endif // FORWARD_CHECK_K > 0
+
+/**
  * @brief Compte les possibilités en attente (frères non explorés) dans la pile de décisions.
  *
  * Pour chaque niveau, les candidats restants sont évalués avec le masque des
@@ -145,14 +259,16 @@ static unsigned long long bt_count_pending(const struct possibility_packet *boar
 }
 
 /**
- * @brief Matérialise en paquets les frères non explorés de la pile, du plus haut de l'arbre vers le bas.
+ * @brief Matérialise en paquets les frères non explorés de la pile, du plus profond vers la racine.
  *
- * Reconstruit l'état du plateau à chaque niveau (annulation puis ré-application
- * des placements sur une copie de travail) et produit, pour chaque candidat
+ * Reconstruit l'état du plateau à chaque niveau (annulation progressive des
+ * placements sur une copie de travail) et produit, pour chaque candidat
  * restant, le `possibility_packet` que l'ancienne implémentation aurait poussé
  * dans sa file : pièce placée, `alloc` incrémenté, position sur la case suivante,
- * forward-checking appliqué. Les niveaux les moins profonds sont matérialisés en
- * premier : on cède le haut de l'arbre (gros sous-arbres) et on garde le bas.
+ * forward-checking appliqué. Les niveaux les plus profonds sont matérialisés en
+ * premier — comme l'ancienne file LIFO qui expédiait les nœuds les plus récents :
+ * on cède le bas de l'arbre (petites unités de travail vite consommées, stock
+ * serveur maigre) et le haut reste local.
  *
  * Les positions de reprise consommées sont retournées dans `new_next_s` mais ne
  * sont PAS appliquées à la pile : l'appelant ne les applique qu'une fois l'envoi
@@ -179,21 +295,17 @@ static int bt_materialize_pending(client_possibility_t *client,
     struct possibility_packet scratch;
     memcpy(&scratch, board, sizeof(scratch));
 
-    // Retour à l'état racine
-    for (int i = top; i >= 0; i--) {
-        if (stack[i].placed_pos >= 0) {
-            int d = start_depth + i;
-            scratch.grid[dirx[d]][diry[d]] = -2;
-            BOARD_SET_FACE(&scratch, stack[i].placed_pos, 0);
-        }
-    }
-
     int count = 0;
     int i;
-    for (i = 0; i <= top && count < max_out; i++) {
+    for (i = top; i >= 0 && count < max_out; i--) {
         int d = start_depth + i;
         const bt_level *lvl = &stack[i];
         new_next_s[i] = lvl->next_s;
+        // Annulation du placement du niveau : scratch = état au moment du choix
+        if (lvl->placed_pos >= 0) {
+            scratch.grid[dirx[d]][diry[d]] = -2;
+            BOARD_SET_FACE(&scratch, lvl->placed_pos, 0);
+        }
         if (lvl->search != NULL) {
             uint8_t cx = dirx[d];
             uint8_t cy = diry[d];
@@ -220,6 +332,8 @@ static int bt_materialize_pending(client_possibility_t *client,
                 }
                 pkt->x = dirx[d + 1];
                 pkt->y = diry[d + 1];
+                // Nouvel état de plateau : le contrôle pruner ne vaut plus
+                pkt->checked = 0;
 #if FORWARD_CHECK_K > 0
                 __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
                 if (!forward_check_next_k(pkt, client->map_part, client->all_rotate_part)) {
@@ -232,14 +346,9 @@ static int bt_materialize_pending(client_possibility_t *client,
             }
             new_next_s[i] = s;
         }
-        // Ré-application du placement courant du niveau
-        if (lvl->placed_pos >= 0) {
-            scratch.grid[dirx[d]][diry[d]] = board->grid[dirx[d]][diry[d]];
-            BOARD_SET_FACE(&scratch, lvl->placed_pos, 1);
-        }
     }
     // Niveaux non parcourus (limite atteinte) : positions de reprise inchangées
-    for (; i <= top; i++) {
+    for (; i >= 0; i--) {
         new_next_s[i] = stack[i].next_s;
     }
     return count;
@@ -326,6 +435,8 @@ static void bt_flush_pending(client_possibility_t *client,
     cur->alloc = start_depth + top + 1;
     cur->x = dirx[cur->alloc];
     cur->y = diry[cur->alloc];
+    // Des pièces ont pu être placées depuis la racine : contrôle pruner caduc
+    cur->checked = 0;
     aposs->size++;
 
     if (add_possibility(client, aposs)) {
@@ -362,12 +473,19 @@ static int search_packet_backtracking(client_possibility_t *client,
     struct possibility_packet board;
     memcpy(&board, root, sizeof(board));
 
+    // Cache de contraintes : clé de recherche de chaque case, maintenue
+    // incrémentalement à chaque placement/retrait
+    const int8_t all_face = (int8_t)client->map_part->sizearrayM;
+    key_part constraints[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(constraints, &board, client->all_rotate_part, all_face);
+
     // Pile de décisions : un niveau par case explorée depuis la racine
     bt_level stack[ETERN_PARTS];
     int top = -1;
     const int start_depth = board.alloc;
-    key_part key;
     int noCheckDelegate = 0;
+    // Date de la dernière délégation (0 = jamais : la première est autorisée)
+    struct timespec last_delegate = {0, 0};
 
     // Statistique : le paquet racine compte comme une possibilité étudiée
     counters[client->compteur]++;
@@ -393,11 +511,21 @@ static int search_packet_backtracking(client_possibility_t *client,
         }
 
         noCheckDelegate++;
-        // TODO : voir pour calculer 1/2s (vitesse/s / 2)
         if (noCheckDelegate == 1000000) {
-            // Si trop d'étude à faire pour 1 thread, alors on délègue une partie
-            bt_delegate_if_needed(client, &board, stack, top, start_depth, idParts);
             noCheckDelegate = 0;
+            // La fréquence de délégation est bornée en temps et non en nombre de
+            // nœuds : une délégation = jusqu'à max_stock_by_thread aller-retours
+            // TCP synchrones exécutés par ce thread. Indexée sur les nœuds, elle
+            // croîtrait avec la vitesse du moteur et mangerait le gain.
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long long elapsed_ms = (now.tv_sec - last_delegate.tv_sec) * 1000LL
+                                 + (now.tv_nsec - last_delegate.tv_nsec) / 1000000LL;
+            if (elapsed_ms >= DELEGATE_MIN_INTERVAL_MS) {
+                // Si trop d'étude à faire pour 1 thread, alors on délègue une partie
+                bt_delegate_if_needed(client, &board, stack, top, start_depth, idParts);
+                last_delegate = now;
+            }
         }
 
         uint8_t x = dirx[depth];
@@ -420,8 +548,21 @@ static int search_packet_backtracking(client_possibility_t *client,
         board.x = x;
         board.y = y;
         board.alloc = depth;
-        what_search_to_key2(client->all_rotate_part, &board, &key, client->map_part->sizearrayM);
-        stack[top].search = get_parts_bigarray_with_key(client->map_part, &key);
+#ifdef DEBUG_CHECK_POSSIBILITY
+        // Contrôle de cohérence du cache de contraintes face au recalcul complet
+        {
+            key_part recomputed;
+            what_search_in_grid_to_key(client->all_rotate_part, &board, (int8_t)x, (int8_t)y, &recomputed, all_face);
+            if (recomputed.k1 != constraints[x][y].k1 || recomputed.k2 != constraints[x][y].k2
+                || recomputed.k3 != constraints[x][y].k3 || recomputed.k4 != constraints[x][y].k4) {
+                log_error("constraints cache mismatch (%i,%i) : cache %i/%i/%i/%i recalc %i/%i/%i/%i\n",
+                          x, y,
+                          constraints[x][y].k1, constraints[x][y].k2, constraints[x][y].k3, constraints[x][y].k4,
+                          recomputed.k1, recomputed.k2, recomputed.k3, recomputed.k4);
+            }
+        }
+#endif // DEBUG_CHECK_POSSIBILITY
+        stack[top].search = get_parts_bigarray_with_key(client->map_part, &constraints[x][y]);
 
         // Place le prochain candidat du niveau courant, sinon remonte (backtrack)
         int placed = 0;
@@ -435,6 +576,7 @@ static int search_packet_backtracking(client_possibility_t *client,
             if (lvl->placed_pos >= 0) {
                 board.grid[cx][cy] = -2;
                 BOARD_SET_FACE(&board, lvl->placed_pos, 0);
+                bt_propagate_undo(constraints, cx, cy, all_face);
                 lvl->placed_pos = -1;
             }
 
@@ -452,15 +594,17 @@ static int search_packet_backtracking(client_possibility_t *client,
                     // On place la piece
                     board.grid[cx][cy] = idParts[search->parts[s].id][search->parts[s].rotation];
                     BOARD_SET_FACE(&board, position, 1);
+                    bt_propagate_place(constraints, cx, cy, &search->parts[s]);
                     board.alloc = d + 1;
 #if FORWARD_CHECK_K > 0
                     // Forward-checking : on inspecte les FORWARD_CHECK_K prochaines cases
                     // pour détecter une impasse immédiate
                     if (d + 1 < ETERN_PARTS) {
                         __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
-                        if (!forward_check_next_k(&board, client->map_part, client->all_rotate_part)) {
+                        if (!bt_forward_check(constraints, &board, client->map_part, d + 1)) {
                             board.grid[cx][cy] = -2;
                             BOARD_SET_FACE(&board, position, 0);
+                            bt_propagate_undo(constraints, cx, cy, all_face);
                             __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
                             continue;
                         }
@@ -555,7 +699,6 @@ void *autosearch (void *userdata)
 #ifdef DEBUG_THREAD
             log_info("thread %i stop\n", client->pid);
 #endif // DEBUG_THREAD
-            int leftovers = stopped;
             // Renvoie au serveur les paquets racines non encore traités
             if (client->aposs != NULL && a < client->aposs->size)
             {
@@ -573,12 +716,11 @@ void *autosearch (void *userdata)
                     log_error("Error on add_possibility \n");
                 }
                 free_array_possibility_packet(aposs);
-                leftovers = 1;
             }
-            if (leftovers)
-            {
-                send_possibility_analysed(client);
-            }
+            // Acquittement inconditionnel : le thread d'alimentation est arrêté et
+            // n'acquittera plus — sans cet envoi, le travail terminé de ce cycle
+            // resterait « en analyse » sur le serveur pour toujours.
+            send_possibility_analysed(client);
         }
 
         // A faire tout le temps ou juste si on arrete ?
@@ -599,6 +741,123 @@ void *autosearch (void *userdata)
     }
 #ifdef DEBUG_THREAD
     log_info("END search thread %i\n", client->pid);
+#endif // DEBUG_THREAD
+
+    return NULL;
+}
+
+/**
+ * @brief Thread de vérification d'un client pruner (mode `tcppruner`).
+ *
+ * Consomme les `possibility_packet` non vérifiées fournies par le serveur
+ * (INST_GET_TO_CHECK, par lots de PRUNER_BATCH_SIZE). Pour chacune, contrôle
+ * via `possibility_all_has_a_next` que toutes les cases vides restantes ont
+ * encore au moins une pièce candidate :
+ * - morte : éliminée (compteur `pruner_removed`) — elle ne retournera jamais
+ *   dans le stock du serveur ;
+ * - vivante : renvoyée au serveur marquée `checked = 1` (pool dédié, servi en
+ *   priorité aux clients de recherche). Le contrôle place au passage les
+ *   pièces forcées (cases à candidat unique) et détecte les solutions
+ *   complètes.
+ *
+ * Le contrôle travaille sur une copie : l'original reste intact pour
+ * l'acquittement INST_POSSIBILITY_ANALYSED (comparaison par contenu côté
+ * serveur).
+ *
+ * @param userdata Pointeur vers un `client_possibility_t` alloué par le parent.
+ * @return         NULL.
+ */
+void *autoprune (void *userdata)
+{
+    client_possibility_t *client = userdata;
+#ifdef DEBUG_THREAD
+    log_info("START prune thread %i\n", client->pid);
+#endif // DEBUG_THREAD
+    // Boucle infinie pour maintenir le thread
+    while(1)
+    {
+        // Attente d'un jeu de possibilité
+        while ((client->works == 0 || client->aposs == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+        {
+            usleep(MICRO_SLEEP);
+        }
+
+        int a = 0;
+        while (client->aposs != NULL && a < client->aposs->size && request != REQUEST_STOP)
+        {
+            if (request == REQUEST_PAUSE)
+            {
+                usleep(MICRO_SHORT_SLEEP);
+                continue;
+            }
+            // Copie de travail : l'original doit rester intact pour l'acquittement
+            struct possibility_packet work;
+            memcpy(&work, &client->aposs->possibilities[a], sizeof(work));
+            // Statistique possibilité étudiée
+            counters[client->compteur]++;
+            if (work.checked || possibility_all_has_a_next(&work, client->map_part, client->all_rotate_part))
+            {
+                work.checked = 1;
+                pruner_checked++;
+                array_possibility_packet *alive = build_single_array_possibility_packet(&work);
+                if (add_possibility(client, alive))
+                {
+                    log_error("error on add_possibility (pruner)\n");
+                }
+                free_array_possibility_packet(alive);
+            } else
+            {
+                // Branche morte : éliminée du stock
+                pruner_removed++;
+            }
+            a++;
+        }
+        lastfilesize[client->compteur] = 0;
+
+        if (request == REQUEST_STOP)
+        {
+#ifdef DEBUG_THREAD
+            log_info("prune thread %i stop\n", client->pid);
+#endif // DEBUG_THREAD
+            if (client->aposs != NULL && a < client->aposs->size)
+            {
+                // Renvoie au serveur les possibilités non encore vérifiées, telles quelles
+                array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
+                aposs->possibilities = malloc(sizeof(struct possibility_packet) * (client->aposs->size - a));
+                aposs->size = 0;
+                for (; a < client->aposs->size; a++)
+                {
+                    memcpy(&aposs->possibilities[aposs->size], &client->aposs->possibilities[a], sizeof(struct possibility_packet));
+                    aposs->size++;
+                }
+                if (add_possibility(client, aposs))
+                {
+                    log_error("Error on add_possibility \n");
+                }
+                free_array_possibility_packet(aposs);
+            }
+            // Acquittement inconditionnel : le lot traité (jusqu'à PRUNER_BATCH_SIZE
+            // possibilités) doit être purgé du suivi « en analyse » du serveur,
+            // le thread d'alimentation ne le fera plus après l'arrêt.
+            send_possibility_analysed(client);
+        }
+
+        if (client->aposs != NULL) {
+            free_array_possibility_packet(client->aposs);
+            client->aposs = NULL;
+        }
+        pthread_mutex_lock(&client->works_mutex);
+        client->works = 0;
+        pthread_mutex_unlock(&client->works_mutex);
+
+        if (request == REQUEST_STOP) {
+            break;
+        } else {
+            usleep(MICRO_SHORT_SLEEP);
+        }
+    }
+#ifdef DEBUG_THREAD
+    log_info("END prune thread %i\n", client->pid);
 #endif // DEBUG_THREAD
 
     return NULL;

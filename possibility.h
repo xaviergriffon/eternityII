@@ -24,6 +24,10 @@
  #else
  uint8_t faceused[ETERN_PARTS];
  #endif // FACES_USED_BITS
+ /// 1 si un client pruner a vérifié que toutes les cases vides ont encore au
+ /// moins une pièce candidate. Remis à 0 sur tout paquet issu d'une expansion
+ /// (le contrôle ne vaut que pour l'état exact du plateau).
+ uint8_t checked;
  } __attribute__((__packed__));
 
 typedef struct
@@ -33,13 +37,43 @@ typedef struct
 } array_possibility_packet;
 
 #ifdef FACES_USED_BITS
-void set_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part, uint8_t boolean);
-uint8_t is_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part);
+/**
+ * @brief Marque ou démarque une pièce comme utilisée dans le masque de bits.
+ *
+ * Stocke l'information sous forme de bitmask compact (1 bit par pièce, groupes de 16).
+ * Inline : appelée pour chaque candidat de la boucle chaude de recherche.
+ *
+ * @param faceused Masque de bits des pièces utilisées (tableau de FACES_USED_SIZE uint16_t).
+ * @param part     Identifiant de la pièce (base 0, i.e. id-1).
+ * @param boolean  1 = utilisée, 0 = libre.
+ */
+static inline void set_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part, uint8_t boolean) {
+    uint16_t groupe = part >> 4;
+    uint16_t number = faceused[groupe];
+    int8_t n = part - (groupe << 4);
+    number = (number & ~(1 << n)) | (boolean << n);
+    faceused[groupe] = number;
+}
+
+/**
+ * @brief Indique si une pièce est marquée comme utilisée dans le masque de bits.
+ *
+ * Inline : appelée pour chaque candidat de la boucle chaude de recherche.
+ *
+ * @param faceused Masque de bits des pièces utilisées.
+ * @param part     Identifiant de la pièce (base 0).
+ * @return         1 si utilisée, 0 si libre.
+ */
+static inline uint8_t is_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part) {
+    uint16_t groupe = part >> 4;
+    return (faceused[groupe] >> (part - (groupe << 4))) & 1;
+}
 #endif // FACES_USED_BITS
 struct possibility_packet *generate_possibility_packet(int x, int y, struct part *etern[ETERN_SIZE][ETERN_SIZE], int directory);
 key_part what_search(struct array_part *all_rotate_parts, int x, int y, struct possibility_packet *possiblity);
 void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity,key_part *key);
 void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face);
+void what_search_in_grid_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, int8_t x, int8_t y, key_part *key, int8_t all_face);
 
 void checkIfResultFound(struct possibility_packet *poss, struct array_part *all_rotate_part);
 int possibility_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);

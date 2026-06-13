@@ -4,6 +4,14 @@
 #include <stdio.h>
 
 /**
+ * @brief Taille maximale de fenêtre de forward-checking supportée par les statistiques.
+ *
+ * Dimensionne le tableau `fc_pruned_at` indépendamment de `FORWARD_CHECK_K`
+ * (qui n'est pas encore défini lors de l'inclusion de ce header).
+ */
+#define FC_STAT_MAX_K 8
+
+/**
  * @brief Structure pour des statistiques d'un thread calculant des possiblités.
  */
 struct client_statistics {
@@ -11,6 +19,16 @@ struct client_statistics {
     unsigned long long possibilities_in_stock;
     unsigned long long analyses_in_stock;
     uint16_t max_result;
+    /** Cumul des tentatives de placement soumises au forward-checking. */
+    unsigned long long fc_attempts;
+    /** Cumul des placements élagués par le forward-checking. */
+    unsigned long long fc_pruned;
+    /** Cumul des élagages par distance de la première case morte (indice 1..K). */
+    unsigned long long fc_pruned_at[FC_STAT_MAX_K + 1];
+    /** Cumul des possibilités validées par un client pruner (0 en mode recherche). */
+    unsigned long long pruner_checked;
+    /** Cumul des possibilités mortes éliminées par un client pruner. */
+    unsigned long long pruner_removed;
 } __attribute__((__packed__));
 
 

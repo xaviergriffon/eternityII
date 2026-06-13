@@ -14,4 +14,12 @@
  * @return void* null. Retourne un pointeur afin de respecter le format d'une méthode de thread.
  */
 void *autosearch (void *userdata);
+
+/**
+ * @brief Thread de vérification d'un client pruner (mode `tcppruner`).
+ *
+ * @param userdata contexte du thread client (type attendu : client_possibility_t)
+ * @return void* null.
+ */
+void *autoprune (void *userdata);
 #endif /* etii_search_h */

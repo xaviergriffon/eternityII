@@ -73,7 +73,14 @@ uint8_t diry[ETERN_PARTS] = {0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3};
 #if FORWARD_CHECK_K > 0
 volatile unsigned long long fc_pruned = 0;
 volatile unsigned long long fc_attempts = 0;
+volatile unsigned long long fc_pruned_at[FORWARD_CHECK_K + 1] = {0};
 #endif // FORWARD_CHECK_K > 0
+
+int pruner_mode = 0;
+
+volatile unsigned long long pruner_checked = 0;
+
+volatile unsigned long long pruner_removed = 0;
 
 unsigned long long *counters = NULL;
 

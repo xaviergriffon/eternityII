@@ -9,42 +9,8 @@
 #include "datamanager.h"
 #include "readdata.h"
 
-#ifdef FACES_USED_BITS
-/**
- * @brief Marque ou démarque une pièce comme utilisée dans le masque de bits.
- *
- * Stocke l'information sous forme de bitmask compact (1 bit par pièce, groupes de 16).
- *
- * @param faceused Masque de bits des pièces utilisées (tableau de FACES_USED_SIZE uint16_t).
- * @param part     Identifiant de la pièce (base 0, i.e. id-1).
- * @param boolean  1 = utilisée, 0 = libre.
- */
-void set_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part, uint8_t boolean) {
-    //uint16_t groupe = part / 16;
-    uint16_t groupe = part >> 4;
-    uint16_t number = faceused[groupe];
-    //int8_t n = part % 16;
-    int8_t n = part - (groupe << 4);
-    number = (number & ~(1 << n)) | (boolean << n);
-    faceused[groupe] = number;
-}
-
-/**
- * @brief Indique si une pièce est marquée comme utilisée dans le masque de bits.
- *
- * @param faceused Masque de bits des pièces utilisées.
- * @param part     Identifiant de la pièce (base 0).
- * @return         1 si utilisée, 0 si libre.
- */
-uint8_t is_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t part) {
-    //uint16_t groupe = part / 16;
-    uint16_t groupe = part >> 4;
-    uint16_t number = faceused[groupe];
-    //int8_t n = part % 16;
-    int8_t n = part - (groupe << 4);
-    return (number >> n) & 1;
-}
-#endif // FACES_USED_BITS
+// set_face_used / is_face_used : désormais static inline dans possibility.h
+// (appelées pour chaque candidat de la boucle chaude de recherche).
 
 /**
  * @brief Affiche dans les logs les coordonnées x et y de chaque position du parcours.
@@ -120,6 +86,7 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 	result->x = x;
 	result->y = y;
 	result->alloc = 0;
+	result->checked = 0;
 #ifdef FACES_USED_BITS
 	memset(result->b_faceused, 0, sizeof(result->b_faceused));
 #else
@@ -971,7 +938,9 @@ int forward_check_next_k(struct possibility_packet *possibility, map_big_array *
 
         struct array_part *search = get_parts_bigarray_with_key(mapParts, &wsearch);
         if (search == NULL || search->size == 0) {
-            return 0;  // case morte : aucune pièce candidate
+            // case morte : aucune pièce candidate
+            __atomic_fetch_add(&fc_pruned_at[c - alloc + 1], 1, __ATOMIC_RELAXED);
+            return 0;
         }
 
         // Vérifier qu'au moins une pièce candidate n'est pas déjà utilisée ailleurs
@@ -989,7 +958,9 @@ int forward_check_next_k(struct possibility_packet *possibility, map_big_array *
             }
         }
         if (!found) {
-            return 0;  // case morte : toutes les pièces candidates sont déjà utilisées
+            // case morte : toutes les pièces candidates sont déjà utilisées
+            __atomic_fetch_add(&fc_pruned_at[c - alloc + 1], 1, __ATOMIC_RELAXED);
+            return 0;
         }
     }
 

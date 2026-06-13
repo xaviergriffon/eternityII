@@ -50,6 +50,28 @@ static file_possibility_t file_possibility_analysed[NB_FILE_POSSIBILITY] =
  uint8_t faceused[ETERN_PARTS];
  } __attribute__((__packed__));
 
+/**
+ * @brief Files des possibilités vérifiées par un client pruner (`checked == 1`).
+ *
+ * Servies en priorité aux clients de recherche (INST_GET). Le pool historique
+ * `file_possibility` reçoit les possibilités non vérifiées et alimente les
+ * clients pruners (INST_GET_TO_CHECK) ainsi que, en repli, les clients de
+ * recherche quand ce pool-ci est vide (fonctionnement sans pruner inchangé).
+ */
+static file_possibility_t file_possibility_checked[NB_FILE_POSSIBILITY] =
+{
+	{{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+	{{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
+};
+
 
 char*server_ip = NULL;
 
@@ -210,33 +232,57 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
  * @param possibilities Tableau de possibilités à insérer.
  * @return              0.
  */
-int put_to_local(array_possibility_packet *possibilities)
+/**
+ * @brief Insère dans `pool` les possibilités du tableau retenues par le filtre `want_checked`.
+ *
+ * Même mécanique que l'historique `put_to_local` : trylock pour trouver une
+ * file libre, toutes les possibilités retenues vont dans la même file.
+ *
+ * @param pool          Pool de files cible.
+ * @param possibilities Tableau de possibilités à filtrer/insérer.
+ * @param want_checked   1 pour le pool vérifié (checked == 1), 0 pour le reste.
+ * @return              0.
+ */
+static int put_to_pool(file_possibility_t *pool, array_possibility_packet *possibilities, int want_checked)
 {
+	int count = 0;
+	int t;
+	for(t=0; t < possibilities->size; t++)
+	{
+		// Routage robuste : seul checked == 1 est « vérifié », toute autre valeur
+		// (0, ou résidu de padding d'anciens fichiers v4) va au pool standard
+		if((possibilities->possibilities[t].checked == 1) == want_checked)
+		{
+			count++;
+		}
+	}
+	if(count == 0)
+	{
+		return 0;
+	}
+
 	int addpossibility = 0;
 	int currfile = 0;
-	while(possibilities != NULL && addpossibility == 0)
+	while(addpossibility == 0)
 	{
-		if(pthread_mutex_trylock(&file_possibility[currfile].lock) == 0)
+		if(pthread_mutex_trylock(&pool[currfile].lock) == 0)
 		{
-            int t;
             for(t=0; t< possibilities->size; t++)
             {
+                if((possibilities->possibilities[t].checked == 1) != want_checked)
+                {
+                    continue;
+                }
                 if(possibilities->possibilities[t].alloc > max_result)
                 {
                     max_result = possibilities->possibilities[t].alloc;
                     //printf("max result:%i\n",max_result);
                 }
-                /*
-                if(possibilities->possibilities[t].x < 0 || possibilities->possibilities[t].y < 0 || possibilities->possibilities[t].x > 16 || possibilities->possibilities[t].y > 16)
-                {
-                    printf("alert\n");
-                }
-                 */
 				
-                put(&file_possibility[currfile].file, &possibilities->possibilities[t]);
+                put(&pool[currfile].file, &possibilities->possibilities[t]);
             }
 			addpossibility = 1;
-			pthread_mutex_unlock(&file_possibility[currfile].lock);
+			pthread_mutex_unlock(&pool[currfile].lock);
 		}
 		currfile++;
 		if(currfile >= NB_FILE_POSSIBILITY)
@@ -244,6 +290,19 @@ int put_to_local(array_possibility_packet *possibilities)
 			currfile = 0;
 		}
 	}
+	return 0;
+}
+
+int put_to_local(array_possibility_packet *possibilities)
+{
+	if(possibilities == NULL)
+	{
+		return 0;
+	}
+	// Routage par le flag `checked` : les possibilités vérifiées par un pruner
+	// vont dans leur pool dédié, les autres dans le pool historique.
+	put_to_pool(file_possibility, possibilities, 0);
+	put_to_pool(file_possibility_checked, possibilities, 1);
 	return 0;
 }
 
@@ -535,9 +594,11 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 	init_file_with_cache(&file, 0, sizeof(struct possibility_packet));
 	
 	struct possibility_packet buffer;
+	// Un client pruner demande des possibilités non vérifiées
+	int8_t get_instruction = pruner_mode ? INST_GET_TO_CHECK : INST_GET;
 	int r;
 	for(r=0; r < max_result;r++){
-		send_instruction(socket_id, INST_GET);
+		send_instruction(socket_id, get_instruction);
 		long recv_r = recv(socket_id, &buffer, sizeof(buffer), 0);
 		if(recv_r == 0 || (recv_r == sizeof(int8_t) && (*(int8_t *)&buffer) == INST_NULL))
 		{
@@ -585,7 +646,7 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
  * @param result     Tableau de résultats à remplir.
  * @param max_result Nombre maximum de possibilités à extraire.
  */
-void scroll_from_local(array_possibility_packet *result, int max_result)
+static void scroll_from_pool(file_possibility_t *pool, array_possibility_packet *result, int max_result)
 {
 	int getpossibility = 0;
 	int currfile = 0;
@@ -602,7 +663,7 @@ void scroll_from_local(array_possibility_packet *result, int max_result)
 			if(filetested[f] == 0)
 			{
 				currfile = f;
-				if(pthread_mutex_trylock(&file_possibility[currfile].lock) == 0)
+				if(pthread_mutex_trylock(&pool[currfile].lock) == 0)
 				{
 					int p;
 					int nothing = 0;
@@ -611,7 +672,7 @@ void scroll_from_local(array_possibility_packet *result, int max_result)
 					init_file_with_cache(&file, 0, sizeof(struct possibility_packet));
 					for(p=0; p < max_result && nothing == 0;p++)
 					{
-						if(scroll(&file_possibility[currfile].file, &packet))
+						if(scroll(&pool[currfile].file, &packet))
 						{
 							put(&file, &packet);
 						} else
@@ -634,7 +695,7 @@ void scroll_from_local(array_possibility_packet *result, int max_result)
 					
 					filetested[f] = 1;
 					getpossibility = 1;
-					pthread_mutex_unlock(&file_possibility[currfile].lock);
+					pthread_mutex_unlock(&pool[currfile].lock);
 				}
 			}
 		}
@@ -660,6 +721,38 @@ void scroll_from_local(array_possibility_packet *result, int max_result)
 	}
 }
 
+/**
+ * @brief Extrait des possibilités pour un client de recherche.
+ *
+ * Sert en priorité le pool vérifié par les pruners, puis, s'il est vide, le
+ * pool historique (comportement inchangé quand aucun pruner ne tourne).
+ *
+ * @param result     Tableau de résultats à remplir.
+ * @param max_result Nombre maximum de possibilités à extraire.
+ */
+void scroll_from_local(array_possibility_packet *result, int max_result)
+{
+	scroll_from_pool(file_possibility_checked, result, max_result);
+	if(result->size == 0)
+	{
+		scroll_from_pool(file_possibility, result, max_result);
+	}
+}
+
+/**
+ * @brief Extrait des possibilités non vérifiées pour un client pruner.
+ *
+ * Pool historique uniquement : pas de repli sur le pool vérifié (une
+ * possibilité déjà vérifiée n'a pas besoin de repasser par un pruner).
+ *
+ * @param result     Tableau de résultats à remplir.
+ * @param max_result Nombre maximum de possibilités à extraire.
+ */
+void scroll_from_local_tocheck(array_possibility_packet *result, int max_result)
+{
+	scroll_from_pool(file_possibility, result, max_result);
+}
+
 array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result)
 {
 	array_possibility_packet *result = malloc(sizeof(array_possibility_packet));
@@ -682,6 +775,26 @@ array_possibility_packet *get_last_possibility(client_possibility_t *client_poss
 	return result;
 }
 
+/**
+ * @brief Extrait des possibilités non vérifiées du datamanager local (côté serveur).
+ *
+ * Utilisé par le handler INST_GET_TO_CHECK : aucune bascule réseau, le serveur
+ * sert son propre stock.
+ *
+ * @param max_result Nombre maximum de possibilités à extraire.
+ * @return           Tableau alloué (à libérer avec `free_array_possibility_packet`).
+ */
+array_possibility_packet *get_last_possibility_tocheck(int max_result)
+{
+	array_possibility_packet *result = malloc(sizeof(array_possibility_packet));
+	result->size = 0;
+	result->possibilities = NULL;
+
+	scroll_from_local_tocheck(result, max_result);
+
+	return result;
+}
+
 unsigned long long file_size(int nfile)
 {
 	if(nfile >= 0 && nfile < NB_FILE_POSSIBILITY)
@@ -689,6 +802,15 @@ unsigned long long file_size(int nfile)
 		return file_possibility[nfile].file.size;
 	}
     return 0;
+}
+
+unsigned long long file_checked_size(int nfile)
+{
+	if(nfile >= 0 && nfile < NB_FILE_POSSIBILITY)
+	{
+		return file_possibility_checked[nfile].file.size;
+	}
+	return 0;
 }
 
 unsigned long long file_analysed_size(int nfile)
@@ -707,6 +829,7 @@ unsigned long long datas_size(void)
 	for(f=0; f < NB_FILE_POSSIBILITY; f++)
 	{
         result += file_size(f);
+        result += file_checked_size(f);
 	}
 	return result;
 }
@@ -721,10 +844,11 @@ void lock_all_file(void)
 {
 	maintenance = 1;
 	int fp;
-	// Bloquage des files
+	// Bloquage des files (les deux pools : non vérifié et vérifié)
 	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
 	{
 		pthread_mutex_lock(&file_possibility[fp].lock);
+		pthread_mutex_lock(&file_possibility_checked[fp].lock);
 	}
 }
 
@@ -734,10 +858,11 @@ void lock_all_file(void)
 void unlock_all_file(void)
 {
 	int fp;
-	//libération des files
+	//libération des files (les deux pools)
 	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
 	{
 		pthread_mutex_unlock(&file_possibility[fp].lock);
+		pthread_mutex_unlock(&file_possibility_checked[fp].lock);
 	}
 	maintenance = 0;
 }
@@ -759,6 +884,18 @@ int backup(char *filename)
 		for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
 		{
 			Element *currElement = file_possibility[fp].file.start;
+			while(currElement != NULL)
+			{
+				if(currElement->value != NULL)
+				{
+					struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+					fwrite(possibility, sizeof(struct possibility_packet), 1, f);
+				}
+				currElement = currElement->next;
+			}
+			// Pool vérifié : le flag `checked` est dans le paquet, la restauration
+			// re-routera automatiquement chaque possibilité dans le bon pool.
+			currElement = file_possibility_checked[fp].file.start;
 			while(currElement != NULL)
 			{
 				if(currElement->value != NULL)
@@ -813,7 +950,7 @@ int backup_analysed(char *filename)
 		{
 			log_error("backup_analysed file :%s",filename);
 			perror("fopen()");
-			exit(EXIT_FAILURE);
+			return -1;
 		}
 		
 		lock_all_file_analysed();
@@ -923,6 +1060,12 @@ int import(client_possibility_t *client_possibility, char *filename)
     int repaired = 0;
     while(fread(possibility, sizeof(struct possibility_packet),1,f))
     {
+        // Anciens fichiers .back (v4) : l'octet `checked` correspond à du padding
+        // (taille de structure inchangée) et peut contenir n'importe quoi.
+        // On assainit : tout ce qui n'est pas exactement 1 redevient « à vérifier ».
+        if (possibility->checked != 1) {
+            possibility->checked = 0;
+        }
         // Paquets d'anciens fichiers .back : un trou peut subsister derrière la
         // position de reprise (case (0,0) jamais traitée par l'ancien moteur)
         repaired += normalize_possibility_packet(possibility);
@@ -947,24 +1090,37 @@ int import(client_possibility_t *client_possibility, char *filename)
 
 int restore(char *filename)
 {
+	// Contrôle avant vidage : un fichier illisible ne doit pas faire perdre le stock courant
+	FILE *f = fopen(filename, "r");
+	if(!f)
+	{
+		log_error("restore file :%s",filename);
+		perror("fopen()");
+		return -1;
+	}
+	fclose(f);
+
 	lock_all_file();
 	int fp;
-	//vidage des files
+	//vidage des files (les deux pools)
 	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
 	{
 		File *suite = &file_possibility[fp].file;
+		struct possibility_packet value;
 		while(suite->size >0)
 		{
-			struct possibility_packet *value = malloc(sizeof(struct possibility_packet));
-			scroll(suite, value);
-			free(value);
+			scroll(suite, &value);
+		}
+		suite = &file_possibility_checked[fp].file;
+		while(suite->size >0)
+		{
+			scroll(suite, &value);
 		}
 	}
-	
+
 	unlock_all_file();
-	
-	import(NULL, filename);
-	return 0;
+
+	return import(NULL, filename);
 }
 
 int import_json(void) {
@@ -1008,7 +1164,7 @@ int import_analysed(char *filename)
 	{
 		log_error("import_analysed file :%s",filename);
 		perror("fopen()");
-		exit(EXIT_FAILURE);
+		return -1;
 	}
 	
 	struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
@@ -1026,6 +1182,16 @@ int import_analysed(char *filename)
 
 int restore_analysed(char *filename)
 {
+	// Contrôle avant vidage : un fichier illisible ne doit pas faire perdre le stock courant
+	FILE *f = fopen(filename, "r");
+	if(!f)
+	{
+		log_error("restore_analysed file :%s",filename);
+		perror("fopen()");
+		return -1;
+	}
+	fclose(f);
+
 	lock_all_file_analysed();
 	int fp;
 	//vidage des files
@@ -1039,11 +1205,10 @@ int restore_analysed(char *filename)
 			free(value);
 		}
 	}
-	
+
 	unlock_all_file_analysed();
-	
-	import_analysed(filename);
-	return 0;
+
+	return import_analysed(filename);
 }
 
 int print_file(int fp)
