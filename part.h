@@ -54,13 +54,23 @@ struct map_in_one
 	struct part *parts;
 };
 
-typedef struct array_part ****big_array;
-
+/**
+ * @brief Table de lookup à plat des pièces par contraintes de bord.
+ *
+ * Remplace l'ancien tableau 4D de pointeurs (4 déréférencements en cascade)
+ * par un unique bloc contigu de `sizearray^4` listes, indexé par
+ * `((k1*M + k2)*M + k3)*M + k4`. Les listes de candidats elles-mêmes sont
+ * compactées bout à bout dans `arena` : un lookup = un calcul d'indice
+ * + une lecture, et chaque liste est contiguë en mémoire.
+ */
 typedef struct
 {
 	int sizearray;
     int sizearrayM;
-	big_array *bigarray;
+	/** `sizearray^4` listes contiguës ; `parts` pointe dans `arena`. */
+	struct array_part *flat;
+	/** Toutes les listes de candidats bout à bout. */
+	struct part *arena;
 } map_big_array;
 
 struct map_part_element
@@ -109,8 +119,36 @@ map_big_array *buildBigArray(struct array_part *apart,int maxFace);
 
 //struct array_part *get_parts(struct map_part *map,char *key);
 void check_array(struct array_part *apart);
-struct array_part *get_parts_bigarray(map_big_array *map,int8_t p[4]);
-struct array_part *get_parts_bigarray_with_key(map_big_array *map,key_part *key);
+
+/**
+ * @brief Retourne les pièces compatibles avec les quatre contraintes de bord données.
+ *
+ * Lookup direct dans la table à plat : un calcul d'indice et une lecture.
+ *
+ * @param map Table de lookup pré-calculée.
+ * @param p   Tableau de 4 valeurs de face [top, right, bottom, left] (0 = bordure, sizearrayM = libre).
+ * @return    Tableau de pièces compatibles (appartient à la map, ne pas libérer).
+ */
+static inline struct array_part *get_parts_bigarray(map_big_array *map, int8_t p[4])
+{
+	int m = map->sizearray;
+	return &map->flat[(((int)p[0] * m + p[1]) * m + p[2]) * m + p[3]];
+}
+
+/**
+ * @brief Retourne les pièces compatibles avec une `key_part` de recherche.
+ *
+ * Variante de `get_parts_bigarray` acceptant une `key_part` plutôt qu'un tableau brut.
+ *
+ * @param map Table de lookup pré-calculée.
+ * @param key Clé de recherche (k1=top, k2=right, k3=bottom, k4=left).
+ * @return    Tableau de pièces compatibles (appartient à la map, ne pas libérer).
+ */
+static inline struct array_part *get_parts_bigarray_with_key(map_big_array *map, key_part *key)
+{
+	int m = map->sizearray;
+	return &map->flat[(((int)key->k1 * m + key->k2) * m + key->k3) * m + key->k4];
+}
 
 struct map_in_one *regroup_map(map_big_array *map);
 

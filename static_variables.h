@@ -7,7 +7,7 @@
 #include <sys/un.h>
 #include "etii_statistic.h"
 
-#define VERSION 4
+#define VERSION 5
 
 #define NB_CONNECTIONS_PER_THREAD 1
 // Temps d'attente de 100 microsecondes
@@ -17,6 +17,15 @@
 // Temps d'attente pour les boucles de threads
 #define THREAD_MICRO_SLEEP 10000
 #define MAX_STOCK_BY_THREAD 300
+// Intervalle minimal entre deux délégations de possibilités au serveur (ms).
+// Une délégation coûte jusqu'à max_stock_by_thread aller-retours TCP synchrones
+// exécutés par le thread de recherche : sa fréquence doit être bornée en temps,
+// pas en nombre de nœuds explorés (sinon elle croît avec la vitesse du moteur).
+#define DELEGATE_MIN_INTERVAL_MS 500
+// Nombre de possibilités demandées au serveur par requête d'un client pruner.
+// Le contrôle d'une possibilité est rapide : sans lot, l'aller-retour TCP
+// dominerait le coût.
+#define PRUNER_BATCH_SIZE 100
 
 #define REQUEST_STOP 1
 #define REQUEST_CONTINUE 0
@@ -50,7 +59,7 @@
  * Une valeur plus élevée détecte les impasses plus tôt mais coûte plus de
  * lookups par placement. K=3 est un bon compromis par défaut.
  */
-#define FORWARD_CHECK_K 0
+#define FORWARD_CHECK_K 6
 // ------------- Flags pour Debug -----------------
 // Permet de contrôler les données des possibilités générés ou reçus
 //#define DEBUG_CHECK_POSSIBILITY 1
@@ -88,6 +97,21 @@ extern volatile unsigned long long fc_pruned;
  * Sert de dénominateur pour calculer le taux d'élagage `fc_pruned / fc_attempts`.
  */
 extern volatile unsigned long long fc_attempts;
+
+#if FORWARD_CHECK_K > FC_STAT_MAX_K
+#error "FORWARD_CHECK_K dépasse FC_STAT_MAX_K (voir etii_statistic.h)"
+#endif
+
+/**
+ * @brief Cumul des élagages par distance de la première case morte.
+ *
+ * `fc_pruned_at[j]` compte les élagages dont la première case sans candidat
+ * est à distance j (1..FORWARD_CHECK_K) du placement testé. La somme des
+ * indices 1..K vaut `fc_pruned`. Permet d'estimer la taille des sous-arbres
+ * économisés (croissance géométrique avec la distance) et donc le rapport
+ * gain/coût de la valeur de K choisie.
+ */
+extern volatile unsigned long long fc_pruned_at[FORWARD_CHECK_K + 1];
 #endif // FORWARD_CHECK_K > 0
 
 extern uint8_t directions[ETERN_PARTS];
@@ -99,6 +123,22 @@ extern uint8_t diry[ETERN_PARTS];
  * @brief  Nombre de threads clients
  */
 extern int NB_THREADS;
+
+/**
+ * @brief 1 si le processus est un client pruner (mode `tcppruner`).
+ *
+ * Un client pruner ne cherche pas : il demande au serveur des possibilités non
+ * vérifiées (INST_GET_TO_CHECK), contrôle que toutes leurs cases vides ont
+ * encore au moins une pièce candidate (`possibility_all_has_a_next`), élimine
+ * les mortes et renvoie les survivantes marquées `checked = 1`.
+ */
+extern int pruner_mode;
+
+/** @brief Cumul des possibilités validées (et renvoyées) par ce processus pruner. */
+extern volatile unsigned long long pruner_checked;
+
+/** @brief Cumul des possibilités mortes éliminées par ce processus pruner. */
+extern volatile unsigned long long pruner_removed;
 
 extern unsigned long long *counters;
 extern unsigned long long *lastfilesize;

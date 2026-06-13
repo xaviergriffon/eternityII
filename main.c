@@ -50,6 +50,11 @@ int main(int argc, const char *argv[]) {
 
         if (strcmp("tcpclient", argv[1]) == 0) {
             handle_tcpclient(argc, argv);
+        } else if (strcmp("tcppruner", argv[1]) == 0) {
+            // Client pruner : même plomberie que le client de recherche, mais les
+            // threads exécutent autoprune et demandent du travail à vérifier
+            pruner_mode = 1;
+            handle_tcpclient(argc, argv);
         } else if (strcmp("tcpserver", argv[1]) == 0) {
             handle_tcpserver(argc, argv);
         } else if (strcmp("test", argv[1]) == 0) {
@@ -101,7 +106,12 @@ void handle_tcpclient(int argc, const char *argv[]) {
         NB_THREADS = atoi(argv[3]);
     }
     if (argc >= 5) {
-        max_stock_by_thread = atoi(argv[4]);
+        if (pruner_mode) {
+            // tcppruner [serveur] [nb_threads] [pieces.csv] : pas de stock local
+            parts_files = (char *)(argv[4]);
+        } else {
+            max_stock_by_thread = atoi(argv[4]);
+        }
     }
 #ifdef DEBUG_IN_MONO_PROCESS
     NB_THREADS = 1;
@@ -317,7 +327,7 @@ void run_auto(const char *file)
  */
 void failed_arg(void)
 {
-	log_error("Indiquer parametre suivant :\ntcpserver [nombre de threads] [pieces.csv]\ntcpclient [serveur] [pieces.csv]\n");
+	log_error("Indiquer parametre suivant :\ntcpserver [nombre de threads] [pieces.csv]\ntcpclient [serveur] [nb_threads] [max_stock] [pieces.csv]\ntcppruner [serveur] [nb_threads] [pieces.csv]\n");
 }
 
 /**
@@ -392,11 +402,7 @@ void *fork_checker(void *param) {
     int s = 0;
     int t;
     unsigned long long last_counter = 0;
-#if FORWARD_CHECK_K > 0
-    unsigned long long last_fc_pruned = 0;
-    unsigned long long last_fc_attempts = 0;
-#endif // FORWARD_CHECK_K > 0
-    struct client_statistics *statistic = malloc(sizeof(struct client_statistics));
+    struct client_statistics *statistic = calloc(1, sizeof(struct client_statistics));
 	while(request != REQUEST_STOP && fork_checker_socket_id > 0) {
         unsigned long long counter = 0;
         unsigned long long possibilities_in_stock = 0;
@@ -441,6 +447,18 @@ void *fork_checker(void *param) {
         statistic->analyses_in_stock = analyses_in_stock;
         statistic->possibilities_in_stock = possibilities_in_stock;
         statistic->max_result = max_result;
+#if FORWARD_CHECK_K > 0
+        // Statistiques du forward-checking : cumuls du processus, agrégés et
+        // affichés par le parent dans le rapport de la commande `check`.
+        statistic->fc_attempts = __atomic_load_n(&fc_attempts, __ATOMIC_RELAXED);
+        statistic->fc_pruned = __atomic_load_n(&fc_pruned, __ATOMIC_RELAXED);
+        for (int j = 1; j <= FORWARD_CHECK_K; j++) {
+            statistic->fc_pruned_at[j] = __atomic_load_n(&fc_pruned_at[j], __ATOMIC_RELAXED);
+        }
+#endif // FORWARD_CHECK_K > 0
+        // Statistiques du client pruner (restent à zéro en mode recherche)
+        statistic->pruner_checked = pruner_checked;
+        statistic->pruner_removed = pruner_removed;
         /* On préfixe le datagramme d'un octet de type pour permettre au
            parent de multiplexer stats / logs / événements sur le même
            socket. Voir ipc_protocol.h. */
@@ -460,22 +478,6 @@ void *fork_checker(void *param) {
 #else
         ;
 #endif // DEBUG_LOCAL_SOCKET
-#if FORWARD_CHECK_K > 0
-        // Statistique du forward-checking : taux d'élagage instantané (delta sur 1s)
-        // et cumulé. Permet de mesurer le rapport gain/coût de la valeur de
-        // FORWARD_CHECK_K choisie.
-        unsigned long long fc_p_now = __atomic_load_n(&fc_pruned, __ATOMIC_RELAXED);
-        unsigned long long fc_a_now = __atomic_load_n(&fc_attempts, __ATOMIC_RELAXED);
-        unsigned long long fc_p_delta = fc_p_now - last_fc_pruned;
-        unsigned long long fc_a_delta = fc_a_now - last_fc_attempts;
-        last_fc_pruned = fc_p_now;
-        last_fc_attempts = fc_a_now;
-        double rate_1s = (fc_a_delta > 0) ? (100.0 * (double)fc_p_delta / (double)fc_a_delta) : 0.0;
-        double rate_cum = (fc_a_now > 0) ? (100.0 * (double)fc_p_now / (double)fc_a_now) : 0.0;
-        log_info("forward-check (K=%d) : %llu/%llu pruned in 1s (%.2f%%), cumul %llu/%llu (%.2f%%)\n",
-                 FORWARD_CHECK_K, fc_p_delta, fc_a_delta, rate_1s,
-                 fc_p_now, fc_a_now, rate_cum);
-#endif // FORWARD_CHECK_K > 0
 		sleep(1);
 	}
     free(statistic);
@@ -852,6 +854,7 @@ void init_childs(void) {
     childrens_pid = malloc(sizeof(pid_t) * NB_THREADS);
     forkId = malloc(sizeof(char *) * NB_THREADS);
     fork_statistics = malloc(sizeof(struct client_statistics) * NB_THREADS);
+    memset(fork_statistics, 0, sizeof(struct client_statistics) * NB_THREADS);
     for (int c = 0; c < NB_THREADS; c++) {
         childrens_pid[c] = -1;
         forkId[c] = malloc(sizeof(char) * 300);

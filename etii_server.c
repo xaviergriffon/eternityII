@@ -75,7 +75,7 @@ void *check_server(void *param)
     while(1)
     {
         free(lastcheck);
-        lastcheck = calloc(2000, sizeof(char));
+        lastcheck = calloc(4000, sizeof(char));
         unsigned long long currentactive = lastactive;
         int c;
         lastactive = 0;
@@ -89,35 +89,41 @@ void *check_server(void *param)
         }
         currentactive = lastactive - currentactive;
         non_null_possibilities = lastactive;
-        
+
         unsigned long long file_possibility_stock = 0;
+        // Pool des possibilités vérifiées par les pruners : 10 files, comme le
+        // pool standard (trylock pour servir plusieurs requêtes en parallèle)
+        unsigned long long file_possibility_checked_stock = 0;
+        unsigned long long file_possibility_analysed_stock = 0;
+        char *table = calloc(2000, sizeof(char));
+        int table_offset = sprintf(table,
+            "File queues\n"
+            "File |    Unchecked |      Checked |     Analysed\n"
+            "-----+--------------+--------------+-------------\n");
         int f;
         for(f=0; f < NB_FILE_POSSIBILITY; f++)
         {
             unsigned long long f_size = file_size(f);
-            char *temp = calloc(1000, sizeof(char));
-            sprintf(temp, "file:%i stock:%llu\n",f,f_size);
-            strcat(lastcheck, temp);
-            free(temp);
-            file_possibility_stock = file_possibility_stock + f_size;
+            unsigned long long f_checked_size = file_checked_size(f);
+            unsigned long long f_analysed_size = file_analysed_size(f);
+            table_offset += sprintf(table + table_offset, "%4i | %12llu | %12llu | %12llu\n",
+                                    f, f_size, f_checked_size, f_analysed_size);
+            file_possibility_stock += f_size;
+            file_possibility_checked_stock += f_checked_size;
+            file_possibility_analysed_stock += f_analysed_size;
         }
+        sprintf(table + table_offset, "-----+--------------+--------------+-------------\n"
+                                      "Total| %12llu | %12llu | %12llu\n",
+                file_possibility_stock, file_possibility_checked_stock, file_possibility_analysed_stock);
+        strcat(lastcheck, table);
+        free(table);
 
-        unsigned long long file_possibility_analysed_stock = 0;
-        for(f=0; f < NB_FILE_POSSIBILITY; f++)
-        {
-            unsigned long long f_size = file_analysed_size(f);
-            char *temp = calloc(1000, sizeof(char));
-            sprintf(temp, "file_analysed:%i stock:%llu\n",f,f_size);
-            strcat(lastcheck, temp);
-            free(temp);
-            file_possibility_analysed_stock = file_possibility_analysed_stock + f_size;
-        }
         unsigned long long bys = currentactive / sleep_time;
 
         int activeThread = get_active_threads(thread_params);
 
         char *temp = calloc(1000, sizeof(char));
-        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,file_possibility_stock,non_null_possibilities, max_result, activeThread);
+        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,non_null_possibilities, max_result, activeThread);
         strcat(lastcheck, temp);
         free(temp);
 
@@ -212,6 +218,34 @@ void *communicate_with_client (void *userdata)
                 send_instruction(client->socket_id,INST_NULL);
             }
             
+        } else if(instruction == INST_GET_TO_CHECK && version_supported == 1)
+        {
+            // Client pruner : sert le pool non vérifié uniquement (pas de repli)
+            if(lastPossibilityPacketSend != NULL)
+            {
+                free_array_possibility_packet(lastPossibilityPacketSend);
+                lastPossibilityPacketSend = NULL;
+            }
+
+            lastPossibilityPacketSend = get_last_possibility_tocheck(1);
+            int p = 0;
+            for (p = 0; p < lastPossibilityPacketSend->size; p++)
+            {
+                struct possibility_packet *possibility = &lastPossibilityPacketSend->possibilities[p];
+                add_possibility_analysed(possibility, -1);
+                ssize_t ssize = send(client->socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
+
+                if (ssize < 0) {
+                    log_errno("Erreur d'envoi => ");
+                }
+                counters[client->compteur]++;
+                fileUpdates[client->compteur]++;
+            }
+            if(p == 0)
+            {
+                send_instruction(client->socket_id,INST_NULL);
+            }
+
         } else if(instruction == INST_ADD && version_supported == 1)
         {
             array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
@@ -284,6 +318,13 @@ void *communicate_with_client (void *userdata)
     if(lastPossibilityPacketSend != NULL)
     {
         if (instruction == -1 || instruction != INST_END) {
+            // La possibilité retourne en stock : on retire son entrée « en analyse »
+            // pour ne pas laisser de suivi orphelin dans file_analysed
+            int rp;
+            for (rp = 0; rp < lastPossibilityPacketSend->size; rp++)
+            {
+                remove_possibility_analysed(&lastPossibilityPacketSend->possibilities[rp], -1);
+            }
             if(add_possibility(NULL, lastPossibilityPacketSend))
             {
                 log_error("Error with possibility : \n");

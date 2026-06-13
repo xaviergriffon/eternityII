@@ -28,10 +28,18 @@ typedef struct
 
 int add_possibility(client_possibility_t *client_possibility, array_possibility_packet *possibilities);
 array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result);
+/**
+ * @brief Extrait des possibilités non vérifiées du datamanager local (côté serveur).
+ *
+ * @param max_result Nombre maximum de possibilités à extraire.
+ * @return           Tableau alloué (à libérer avec `free_array_possibility_packet`).
+ */
+array_possibility_packet *get_last_possibility_tocheck(int max_result);
 int add_possibility_analysed(struct possibility_packet *possiblity, int thread);
 void send_possibility_analysed(client_possibility_t *client_possibility);
 int remove_possibility_analysed(struct possibility_packet *possiblity, int thread);
 unsigned long long file_size(int nfile);
+unsigned long long file_checked_size(int nfile);
 unsigned long long file_analysed_size(int nfile);
 unsigned long long datas_size(void);
 

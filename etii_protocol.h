@@ -23,6 +23,9 @@
 #define INST_CHECK_VERSION 9
 #define INST_SUPPORTED_VERSION 10
 #define INST_UNSUPPORTED_VERSION 11
+/// Demande d'une possibilité à vérifier (client pruner) : le serveur sert le
+/// pool non vérifié uniquement, sans repli sur le pool vérifié.
+#define INST_GET_TO_CHECK 12
 /**
  * @}
  */

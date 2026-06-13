@@ -211,15 +211,46 @@ int exit_interpreter(void) {
     return 0;
 }
 
-/** @brief Interpréteur de `restore` : restaure les possibilités depuis les fichiers `.back` par défaut. */
+/** @brief Interpréteur de `restore [fichier [fichier_analyse]]` : restaure les possibilités depuis les fichiers `.back`. */
 int restore_interpreter(void) {
     char *def_file = DEF_FILE;
     char *def_analyse_file = DEF_ANALYSE_FILE;
+    char *arguments = strtok(NULL, " ");
+    if (arguments != NULL) {
+        def_file = arguments;
+        arguments = strtok(NULL, " ");
+        if (arguments != NULL) {
+            def_analyse_file = arguments;
+        }
+    }
     log_info("start restore\n");
-    restore(def_file);
-    restore_analysed(def_analyse_file);
-    log_info("backup restore\n");
-    return 0;
+
+    // Suspension de la recherche pendant le remplacement du stock : sans cela,
+    // les threads de recherche consomment et délèguent des possibilités au
+    // milieu du vidage/réimport et mélangent ancien et nouvel état.
+    int previous_request = request;
+    if (previous_request == REQUEST_CONTINUE) {
+        request = REQUEST_PAUSE;
+        usleep(THREAD_MICRO_SLEEP);
+    }
+
+    int result = restore(def_file);
+    if (result != 0) {
+        log_error("restore impossible (%s) : stock conservé\n", def_file);
+    } else if (restore_analysed(def_analyse_file) != 0) {
+        log_error("restore analysed impossible (%s) : files analysées conservées\n", def_analyse_file);
+        result = -1;
+    }
+
+    // On ne reprend que si aucun arrêt n'a été demandé entre-temps
+    if (request == REQUEST_PAUSE) {
+        request = previous_request;
+    }
+
+    if (result == 0) {
+        log_info("backup restore\n");
+    }
+    return result;
 }
 
 /** @brief Interpréteur de `restoreOld` : restaure depuis un format ancien (nécessite `FACES_USED_BITS`). */

@@ -389,63 +389,6 @@ int8_t convert_p(int8_t p, int maxFaceM)
 }
 
 /**
- * @brief Retourne les pièces compatibles avec les quatre contraintes de bord données.
- *
- * Effectue une lookup directe dans la structure 4D indexée par (top, right, bottom, left).
- *
- * @param map Tableau 4D des pièces pré-calculé.
- * @param p   Tableau de 4 valeurs de face [top, right, bottom, left] (0 = bordure, -1 = libre).
- * @return    Tableau de pièces compatibles (appartient à la map, ne pas libérer).
- */
-struct array_part *get_parts_bigarray(map_big_array *map, int8_t p[4])
-{
-	struct array_part *parts = NULL;
-	/*
-		int8_t k1 = convert_p(p[0], map->sizearrayM);
-		int8_t k2 = convert_p(p[1], map->sizearrayM);
-		int8_t k3 = convert_p(p[2], map->sizearrayM);
-		int8_t k4 = convert_p(p[3], map->sizearrayM);
-	 */
-	int8_t k1 = p[0];
-	int8_t k2 = p[1];
-	int8_t k3 = p[2];
-	int8_t k4 = p[3];
-	parts = map->bigarray[k1][k2][k3][k4];
-	//	if(parts->size > 0 && parts->parts[0].id <0) {
-	//		printf("get_parts_bigarray error : size:%i for %i:%i:%i:%i-%i:%i:%i:%i r[0].id = %i\n",parts->size,p[0],p[1],p[2],p[3],k1,k2,k3,k4,parts->parts[0].id );
-	//	}
-	return parts;
-}
-/**
- * @brief Retourne les pièces compatibles avec une `key_part` de recherche.
- *
- * Variante de `get_parts_bigarray` acceptant une `key_part` plutôt qu'un tableau brut.
- *
- * @param map Tableau 4D des pièces pré-calculé.
- * @param key Clé de recherche (k1=top, k2=right, k3=bottom, k4=left).
- * @return    Tableau de pièces compatibles (appartient à la map, ne pas libérer).
- */
-struct array_part *get_parts_bigarray_with_key(map_big_array *map, key_part *key)
-{
-	struct array_part *parts = NULL;
-	/*
-	int8_t k1 = convert_p(key->k1, map->sizearrayM);
-	int8_t k2 = convert_p(key->k2, map->sizearrayM);
-	int8_t k3 = convert_p(key->k3, map->sizearrayM);
-	int8_t k4 = convert_p(key->k4, map->sizearrayM);
-		 */
-	int8_t k1 = (int)key->k1;
-	int8_t k2 = (int)key->k2;
-	int8_t k3 = (int)key->k3;
-	int8_t k4 = (int)key->k4;
-	parts = map->bigarray[k1][k2][k3][k4];
-	//	if(parts->size > 0 && parts->parts[0].id <0) {
-	//		printf("get_parts_bigarray error : size:%i for %i:%i:%i:%i-%i:%i:%i:%i r[0].id = %i\n",parts->size,p[0],p[1],p[2],p[3],k1,k2,k3,k4,parts->parts[0].id );
-	//	}
-	return parts;
-}
-
-/**
  * @brief Vérifie l'intégrité d'un tableau de pièces et logue les anomalies.
  *
  * Signale dans les logs toute pièce dont l'id est hors de la plage [0, 256].
@@ -497,10 +440,11 @@ map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 	map_big_array *result = malloc(sizeof(map_big_array));
 	result->sizearray = sizeBigArray;
 	result->sizearrayM = sizeBigArray - 1;
-	result->bigarray = malloc(sizeof(big_array) * sizeBigArray);
-	struct array_part *****big_array = result->bigarray;
+	unsigned long long nbKeys = (unsigned long long)sizeBigArray * sizeBigArray * sizeBigArray * sizeBigArray;
+	result->flat = malloc(sizeof(struct array_part) * nbKeys);
 
 	int maxarray = 0;
+	unsigned long long totalParts = 0;
 	int f1;
 	for (f1 = -1; f1 <= maxFace; f1++)
 	{
@@ -511,8 +455,6 @@ map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 			p1 = maxFace + abs(p1);
 		}
 
-		big_array[p1] = malloc(sizeof(struct array_part ***) * sizeBigArray);
-
 		int f2;
 		for (f2 = -1; f2 <= maxFace; f2++)
 		{
@@ -521,13 +463,8 @@ map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 			{
 				p2 = maxFace + abs(p2);
 			}
-			big_array[p1][p2] = malloc(sizeof(struct array_part **) * sizeBigArray);
 
 			struct array_part *arraypart2 = search_face(arraypart1, f2, PART_RIGHT);
-			//            if(f1 >=0 && f2>=0 && arraypart2->size > maxarray)
-			//			{
-			//				maxarray = arraypart2->size;
-			//			}
 			int f3;
 			for (f3 = -1; f3 <= maxFace; f3++)
 			{
@@ -536,7 +473,6 @@ map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 				{
 					p3 = maxFace + abs(p3);
 				}
-				big_array[p1][p2][p3] = malloc(sizeof(struct array_part *) * sizeBigArray);
 
 				struct array_part *arraypart3 = search_face(arraypart2, f3, PART_BOTTOM);
 
@@ -557,15 +493,41 @@ map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 							maxarray = arraypart->size;
 						}
 					}
-					big_array[p1][p2][p3][p4] = copy_array_part(arraypart);
-
-					free_array_part(arraypart);
+					// On vole le tableau de pièces de search_face (compacté en arène plus bas)
+					unsigned long long idx = (((unsigned long long)p1 * sizeBigArray + p2) * sizeBigArray + p3) * sizeBigArray + p4;
+					result->flat[idx].size = arraypart->size;
+					result->flat[idx].parts = arraypart->parts;
+					totalParts += arraypart->size;
+					free(arraypart);
 				}
 				free_array_part(arraypart3);
 			}
 			free_array_part(arraypart2);
 		}
 		free_array_part(arraypart1);
+	}
+
+	// Compactage : toutes les listes bout à bout dans un unique bloc contigu
+	result->arena = totalParts > 0 ? malloc(sizeof(struct part) * totalParts) : NULL;
+	unsigned long long position = 0;
+	for (unsigned long long idx = 0; idx < nbKeys; idx++)
+	{
+		struct array_part *entry = &result->flat[idx];
+		if (entry->size > 0)
+		{
+			memcpy(&result->arena[position], entry->parts, sizeof(struct part) * entry->size);
+			free(entry->parts);
+			entry->parts = &result->arena[position];
+			position += entry->size;
+		}
+		else
+		{
+			if (entry->parts != NULL)
+			{
+				free(entry->parts);
+			}
+			entry->parts = NULL;
+		}
 	}
 #ifdef DEBUG_CHECK_POSSIBILITY
 	log_info("max array:%i\n", maxarray);
@@ -691,28 +653,11 @@ int free_array_part(struct array_part *array_parts)
  */
 int free_bigarray(map_big_array *array_parts)
 {
-	int sizeBigArray = array_parts->sizearray;
-	int f1;
-	for (f1 = 0; f1 < sizeBigArray; f1++)
+	if (array_parts->arena != NULL)
 	{
-		int f2;
-		for (f2 = 0; f2 < sizeBigArray; f2++)
-		{
-			int f3;
-			for (f3 = 0; f3 < sizeBigArray; f3++)
-			{
-				int f4;
-				for (f4 = 0; f4 < sizeBigArray; f4++)
-				{
-					free_array_part(array_parts->bigarray[f1][f2][f3][f4]);
-				}
-				free(array_parts->bigarray[f1][f2][f3]);
-			}
-			free(array_parts->bigarray[f1][f2]);
-		}
-		free(array_parts->bigarray[f1]);
+		free(array_parts->arena);
 	}
-	free(array_parts->bigarray);
+	free(array_parts->flat);
 	free(array_parts);
 	return 0;
 }
@@ -836,46 +781,23 @@ struct map_in_one *regroup_map(map_big_array *map)
 	result->quantity = malloc(sizeof(int) * result->nbarrays);
 	result->parts = malloc(sizeof(struct part) * result->nbarrays);
 	int nbParts = 0;
-	int dsize = sizeBigArray * sizeBigArray;
-	int f1;
-	for (f1 = 0; f1 < sizeBigArray; f1++)
+	// La table à plat est déjà ordonnée par (f1, f2, f3, f4) : simple parcours linéaire
+	int narray;
+	for (narray = 0; narray < result->nbarrays; narray++)
 	{
-		int f2;
-		for (f2 = 0; f2 < sizeBigArray; f2++)
+		struct array_part *apart = &map->flat[narray];
+		result->quantity[narray] = apart->size;
+		result->position[narray] = nbParts;
+		int p;
+		for (p = 0; p < apart->size; p++)
 		{
-			int f3;
-			for (f3 = 0; f3 < sizeBigArray; f3++)
-			{
-				int f4;
-				for (f4 = 0; f4 < sizeBigArray; f4++)
-				{
-
-					int narray = f1 * sizeBigArray * dsize + f2 * dsize + f3 * sizeBigArray + f4;
-					result->quantity[narray] = 0;
-					result->position[narray] = 0;
-					struct array_part *apart = map->bigarray[f1][f2][f3][f4];
-					if (apart != NULL)
-					{
-						result->quantity[narray] = apart->size;
-						result->position[narray] = nbParts;
-						int p;
-						for (p = 0; p < apart->size; p++)
-						{
-							memcpy(&result->parts[nbParts + p], &apart->parts[p], sizeof(apart->parts[p]));
-						}
-						if (apart->size > 1024)
-						{
-							log_info("apart->size > 1024\n");
-						}
-						nbParts += apart->size;
-					}
-					else
-					{
-						log_info("apart null\n");
-					}
-				}
-			}
+			memcpy(&result->parts[nbParts + p], &apart->parts[p], sizeof(apart->parts[p]));
 		}
+		if (apart->size > 1024)
+		{
+			log_info("apart->size > 1024\n");
+		}
+		nbParts += apart->size;
 	}
 	if (nbParts > 0)
 	{

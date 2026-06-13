@@ -37,7 +37,9 @@ void *feed_thread_aposs(void *param) {
                 {
                     // I/O réseau hors du mutex
                     send_possibility_analysed(client_possibility);
-                    array_possibility_packet *aposs = get_last_possibility(client_possibility, 1);
+                    // Un pruner consomme vite : on demande un lot pour amortir les
+                    // allers-retours TCP ; un client de recherche garde 1 racine
+                    array_possibility_packet *aposs = get_last_possibility(client_possibility, pruner_mode ? PRUNER_BATCH_SIZE : 1);
                     if(aposs->size > 0)
                     {
                         // On alimente la pile des possibilités en étude
@@ -263,7 +265,7 @@ void runThreadClient(const char *file)
         thread_params[i].socket_mutex = smutex;
         thread_params[i].last_socket_activity = time(NULL);
         times(&thread_params[i].start_socket);
-        if (0 != pthread_create((thread_params[i].tid), thread_attributes, autosearch, &(thread_params[i])))
+        if (0 != pthread_create((thread_params[i].tid), thread_attributes, pruner_mode ? autoprune : autosearch, &(thread_params[i])))
         {
             log_error("Problème avec pthread_create()\n");
             free(thread_attributes);
@@ -339,7 +341,11 @@ void run_mono_client(const char *file)
     
     build_feed_thread(thread_params);
     build_control_thread(thread_params);
-    autosearch(thread_params);
+    if (pruner_mode) {
+        autoprune(thread_params);
+    } else {
+        autosearch(thread_params);
+    }
 
     pthread_mutex_lock(&thread_params->socket_mutex);
     if (thread_params->socket_id != -1 && is_connected(thread_params->socket_id)) {
@@ -366,37 +372,93 @@ void *check_client_threads(void *param)
     while(1)
     {
         free(lastcheck);
-        lastcheck = calloc(2000, sizeof(char));
+        lastcheck = calloc(4000, sizeof(char));
         
-        unsigned long long file_possibility_stock = 0;
-        int f;
-        for(f=0; f < NB_FILE_POSSIBILITY; f++)
-        {
-            unsigned long long f_size = file_size(f);
-            char *temp = calloc(1000, sizeof(char));
-            sprintf(temp, "file:%i stock:%llu\n", f, f_size);
-            strcat(lastcheck, temp);
-            free(temp);
-            file_possibility_stock = file_possibility_stock + f_size;
-        }
-        
+        // Côté client, le travail tourne dans les processus fork (mémoire séparée
+        // après fork) : les files locales du parent sont vides. La donnée réelle
+        // est dans fork_statistics[], par fork. On présente donc un tableau par
+        // fork : stock local en cours d'étude et possibilités en cours d'analyse.
+        unsigned long long fork_possibility_stock = 0;
+        unsigned long long fork_analysed_stock = 0;
+        char *table = calloc(2000, sizeof(char));
+        int table_offset = sprintf(table,
+            "Thread queues\n"
+            "Fork |     In stock |     Analysed\n"
+            "-----+--------------+-------------\n");
         unsigned long long bys = 0;
+        int f;
         for(f=0; f < NB_THREADS; f++)
         {
-            char *temp = calloc(1000, sizeof(char));
-            sprintf(temp, "Fork %i file size:%llu\n", f, fork_statistics[f].possibilities_in_stock);
-            strcat(lastcheck, temp);
-            free(temp);
             if (fork_statistics[f].max_result > max_result) {
                 max_result = fork_statistics[f].max_result;
             }
-            
+
             bys += fork_statistics[f].shots_per_second;
+            unsigned long long in_stock = fork_statistics[f].possibilities_in_stock;
+            unsigned long long analysed = fork_statistics[f].analyses_in_stock;
+            table_offset += sprintf(table + table_offset, "%4i | %12llu | %12llu\n",
+                                    f, in_stock, analysed);
+            fork_possibility_stock += in_stock;
+            fork_analysed_stock += analysed;
         }
+        table_offset += sprintf(table + table_offset,
+                                "-----+--------------+-------------\n"
+                                "Total| %12llu | %12llu\n",
+                                fork_possibility_stock, fork_analysed_stock);
+        strcat(lastcheck, table);
+        free(table);
                 
+#if FORWARD_CHECK_K > 0
+        // Forward-checking : agrégat des forks + compteurs du processus courant
+        // (ces derniers couvrent les modes test et DEBUG_IN_MONO_PROCESS).
+        unsigned long long fca = __atomic_load_n(&fc_attempts, __ATOMIC_RELAXED);
+        unsigned long long fcp = __atomic_load_n(&fc_pruned, __ATOMIC_RELAXED);
+        unsigned long long fcd[FORWARD_CHECK_K + 1];
+        for (int j = 1; j <= FORWARD_CHECK_K; j++) {
+            fcd[j] = __atomic_load_n(&fc_pruned_at[j], __ATOMIC_RELAXED);
+        }
+        for (f = 0; f < NB_THREADS; f++) {
+            fca += fork_statistics[f].fc_attempts;
+            fcp += fork_statistics[f].fc_pruned;
+            for (int j = 1; j <= FORWARD_CHECK_K; j++) {
+                fcd[j] += fork_statistics[f].fc_pruned_at[j];
+            }
+        }
+        if (fca > 0) {
+            char *fctemp = calloc(1000, sizeof(char));
+            int fcoff = sprintf(fctemp, "forward-check K=%d : pruned %llu/%llu (%.2f%%), par distance :",
+                                FORWARD_CHECK_K, fcp, fca, 100.0 * (double)fcp / (double)fca);
+            for (int j = 1; j <= FORWARD_CHECK_K; j++) {
+                fcoff += sprintf(fctemp + fcoff, " d%d:%.1f%%", j,
+                                 fcp > 0 ? 100.0 * (double)fcd[j] / (double)fcp : 0.0);
+            }
+            sprintf(fctemp + fcoff, "\n");
+            strcat(lastcheck, fctemp);
+            free(fctemp);
+        }
+#endif // FORWARD_CHECK_K > 0
+
+        // Statistiques pruner : agrégat des forks + compteurs du processus courant
+        unsigned long long prc = pruner_checked;
+        unsigned long long prr = pruner_removed;
+        for (f = 0; f < NB_THREADS; f++) {
+            prc += fork_statistics[f].pruner_checked;
+            prr += fork_statistics[f].pruner_removed;
+        }
+        if (prc + prr > 0) {
+            char *prtemp = calloc(200, sizeof(char));
+            sprintf(prtemp, "pruner : %llu mortes / %llu vérifiées (%.2f%%)\n",
+                    prr, prc + prr, 100.0 * (double)prr / (double)(prc + prr));
+            strcat(lastcheck, prtemp);
+            free(prtemp);
+        }
+
         char *temp = calloc(1000, sizeof(char));
-        sprintf(temp, "active thread/s :%lli\npossibility in stock :%lli\nmax search by sec : %lli\nmax stock by thread : %i\nmax result :%i\n",
-            bys, file_possibility_stock, max_search_by_sec, max_stock_by_thread, max_result);
+        sprintf(temp, "active thread/s :%lli\npossibility in stock :%lli (analysed:%llu)\nmax search by sec : %lli\nmax stock by thread : %i\nmax result :%i\n",
+            bys,
+            fork_possibility_stock,
+            fork_analysed_stock,
+            max_search_by_sec, max_stock_by_thread, max_result);
 #ifdef DEBUG_SOCKET
         sprintf(temp, "%ssocket opened :%i\n", temp, opened_tcp);
 #endif // DEBUG_SOCKET
