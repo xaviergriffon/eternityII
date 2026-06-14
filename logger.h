@@ -1,10 +1,21 @@
 #ifndef logger_h
 #define logger_h
+
+/** @brief Affiche un message d'erreur suivi du message système associé à `errno` (sur stderr). */
 void log_errno(const char *format, ...);
+
+/** @brief Affiche un message d'erreur sur stderr. */
 void log_error(const char *format, ...);
+
+/** @brief Affiche un message informatif sur stdout. */
 void log_info(const char *format, ...);
+
+/** @brief Affiche un message de débogage sur stdout. */
 void log_debug(const char *format, ...);
+
+/** @brief Affiche un message destiné à l'affichage interactif de la console. */
 void log_console(const char *format, ...);
+
 /**
  * @brief Enregistre un événement notable (nouveau record, demande non satisfaite,
  *        solution...) dans la zone d'affichage fixe et dans le journal `events.log`.
@@ -23,10 +34,15 @@ void log_event(const char *format, ...);
  * no-op : les statistiques restent consultables via la commande `check`.
  */
 void log_status(const char *format, ...);
+/** @brief Vide le tampon de sortie standard (pour `log_console`). */
 void flush_console(void);
+/** @brief Vide le tampon de sortie standard (pour `log_debug`). */
 void flush_debug(void);
+/** @brief Vide le tampon d'erreur standard (pour `log_error` / `log_errno`). */
 void flush_error(void);
+/** @brief Vide le tampon de sortie standard (pour `log_info`). */
 void flush_info(void);
+/** @brief Efface le contenu affiché par la console interactive. */
 void clear_console(void);
 /** @brief Installe la zone d'affichage fixe (région de défilement ANSI). À appeler depuis le thread console. */
 void status_zone_init(void);
