@@ -28,29 +28,133 @@ typedef struct BigTable {
     int incrementSize;
 } big_table;
 
-/* initialisation */
+/**
+ * @brief Initialise une `File` avec un cache pré-alloué d'éléments.
+ *
+ * Les `cacheSize` premiers éléments insérés réutilisent le bloc mémoire
+ * pré-alloué, évitant autant d'appels `malloc` au démarrage. Une fois le
+ * cache épuisé, les éléments suivants sont alloués dynamiquement.
+ *
+ * @param suite       File à initialiser.
+ * @param cacheSize   Nombre d'éléments pré-alloués (0 = aucun cache).
+ * @param sizeofvalue Taille en octets de chaque valeur stockée.
+ */
 void init_file_with_cache(File *suite, unsigned long long cacheSize, size_t sizeofvalue);
+
+/**
+ * @brief Initialise un tableau dynamique `big_table`.
+ *
+ * Alloue un bloc initial de `incrementSize` éléments. Le tableau grossit
+ * automatiquement lors des insertions.
+ *
+ * @param table         Tableau à initialiser.
+ * @param incrementSize Nombre d'éléments alloués à chaque agrandissement.
+ * @param sizeofvalue   Taille en octets de chaque élément.
+ */
 void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue);
 
-// Ajout d'une valeur dans la suite
+/**
+ * @brief Ajoute un élément en fin de la file (mode FIFO/pile).
+ *
+ * Réutilise le cache pré-alloué si disponible, sinon alloue dynamiquement.
+ *
+ * @param suite File cible.
+ * @param value Pointeur vers la valeur à copier.
+ * @return      1 si l'insertion a réussi, 0 en cas d'erreur.
+ */
 int put (File * suite, void *value);
 
+/**
+ * @brief Ajoute un élément en fin du tableau dynamique, en l'agrandissant si nécessaire.
+ *
+ * @param table Tableau cible.
+ * @param value Pointeur vers la valeur à copier.
+ * @return      Pointeur vers la copie insérée dans le tableau.
+ */
 void *put_big_table(big_table *table, void *value);
 
-// Positionne l'élément avant la cible
+/**
+ * @brief Déplace un élément juste avant l'élément cible dans la file.
+ *
+ * @param suite   File propriétaire des deux éléments.
+ * @param element Élément à déplacer.
+ * @param target  Élément devant lequel insérer.
+ */
 void move_before(File *suite, Element *element, Element *target);
-// Positionne l'élément après la cible
+
+/**
+ * @brief Déplace un élément juste après l'élément cible dans la file.
+ *
+ * @param suite   File propriétaire des deux éléments.
+ * @param element Élément à déplacer.
+ * @param target  Élément après lequel insérer.
+ */
 void move_after(File *suite, Element *element, Element *target);
 
-// Extrait un élément de la suite
+/**
+ * @brief Extrait et copie le dernier élément de la file (mode LIFO).
+ *
+ * L'élément est retiré de la file et sa valeur copiée dans `dest`.
+ *
+ * @param suite File source.
+ * @param dest  Tampon de destination (au moins `sizeofvalue` octets).
+ * @return      1 si un élément a été extrait, 0 si la file est vide.
+ */
 int scroll (File * suite, void *dest);
-void *scroll_cache(File * suite);
-//int scroll_fifo (File * suite, void *dest);
 
+/**
+ * @brief Extrait le dernier élément de la file et retourne un pointeur direct vers sa valeur.
+ *
+ * Contrairement à `scroll`, ne copie pas la valeur : retourne le pointeur
+ * interne. L'appelant ne doit pas libérer ce pointeur s'il appartient au cache.
+ *
+ * @param suite File source.
+ * @return      Pointeur vers la valeur de l'élément extrait, ou NULL si vide.
+ */
+void *scroll_cache(File * suite);
+
+/**
+ * @brief Extrait et copie le dernier élément du tableau dynamique (mode LIFO).
+ *
+ * Décrémente la taille logique du tableau sans réallouer la mémoire.
+ *
+ * @param table Tableau source.
+ * @param dest  Tampon de destination (au moins `sizeofvalue` octets).
+ * @return      1 si un élément a été extrait, 0 si le tableau est vide.
+ */
 int scroll_big_table(big_table *table, void *dest);
+
+/**
+ * @brief Extrait le dernier élément du tableau et retourne un pointeur direct vers sa valeur.
+ *
+ * Ne copie pas : retourne le pointeur interne. L'espace reste valide jusqu'au
+ * prochain `put_big_table`.
+ *
+ * @param table Tableau source.
+ * @return      Pointeur vers la valeur extraite, ou NULL si le tableau est vide.
+ */
 void *scroll_big_table_cache(big_table *table);
 
+/**
+ * @brief Libère tous les éléments d'une `File` ainsi que la structure elle-même.
+ * @param suite File à libérer.
+ */
 void free_file(File *suite);
+
+/**
+ * @brief Libère la mémoire d'un `big_table` alloué sur le tas et de son buffer interne.
+ * @param table Tableau à libérer.
+ */
 void free_big_table(big_table *table);
+
+/**
+ * @brief Libère uniquement le buffer interne d'un `big_table` alloué sur la pile.
+ *
+ * Contrairement à `free_big_table`, ne libère pas la structure elle-même.
+ * À utiliser quand `table` est déclaré sur la pile (stack).
+ *
+ * @param table Tableau dont le buffer interne doit être libéré.
+ */
 void clear_big_table(big_table *table);
+
 #endif
