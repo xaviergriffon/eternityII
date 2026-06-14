@@ -11,6 +11,10 @@
 #include "etii_search.h"
 #include "etii_protocol.h"
 
+#ifdef WITH_CUDA
+#include "gpu_pruner.h"
+#endif // WITH_CUDA
+
 /**
  * @brief Méthode chargée d'alimenter les threads quand lors file est à 0
  */
@@ -341,6 +345,19 @@ void run_mono_client(const char *file)
     
     build_feed_thread(thread_params);
     build_control_thread(thread_params);
+#ifdef WITH_CUDA
+    if (gpu_pruner_mode) {
+        // Les contextes CUDA ne sont pas hérités par fork() : l'init GPU doit
+        // avoir lieu ici, dans le processus enfant, après construction de la map.
+        if (gpu_pruner_init(thread_params->map_part, thread_params->all_rotate_part) != 0) {
+            log_error("gpu_pruner_init a échoué — abandon du processus pruner GPU\n");
+            request = REQUEST_STOP;
+        } else {
+            autoprune_gpu(thread_params);
+            gpu_pruner_shutdown();
+        }
+    } else
+#endif // WITH_CUDA
     if (pruner_mode) {
         autoprune(thread_params);
     } else {
