@@ -11,6 +11,7 @@ eternityII is a C program that attempts to solve the [Eternity II puzzle](https:
 ```sh
 make                          # Release build → ./eternityII
 make DEBUG=1                  # Debug build (keeps .o files, adds -g)
+make NCURSES=1                # Build with ncurses UI (links -lncurses, replaces logger.c with logger_ncurses.c)
 make EXECUTABLE=myBinary      # Custom output name
 make clean                    # Remove all build artifacts
 ```
@@ -82,8 +83,12 @@ The protocol uses fixed-size `packet` structs containing an `instruction` byte a
 | `tcpclient.c` / `tcpserver.c` | Low-level TCP socket setup |
 | `local_socket.c` | Unix domain UDP sockets for parent↔child IPC |
 | `lifo.c` | Queue (`File`) and flat array (`big_table`) data structures |
-| `console.c` / `command_lines.c` | Interactive command parsing from stdin |
-| `logger.c` | Thread-safe `log_info/log_debug/log_error/log_console` macros |
+| `console.c` / `command_lines.c` | Interactive command parsing from stdin; Levenshtein-based typo suggestion for unknown commands |
+| `command_history.c` | In-session command history (↑/↓ recall, 100-entry ring, dedup) |
+| `logger.c` | Thread-safe `log_info/log_debug/log_error/log_console/log_event/log_status` — ANSI build |
+| `logger_ncurses.c` | Ncurses variant of logger (compiled instead of `logger.c` when `NCURSES=1`); 4-pane layout: output pad, stats banner, events, input |
+| `ipc_protocol.h` | Structs for parent↔child Unix socket messages (stats, log forwarding) |
+| `etii_statistic.h` | `client_statistics` struct sent by child processes to parent every second |
 | `static_variables.c` | All global state (counters, flags, pids, socket handles) |
 
 ## Debug Flags

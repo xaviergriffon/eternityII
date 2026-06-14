@@ -87,7 +87,7 @@ Exécute la recherche localement sans serveur. Utile pour valider la configurati
 
 ## Commandes interactives
 
-Une fois lancé, le programme écoute des commandes sur l'entrée standard. Taper `help` pour la liste complète.
+Une fois lancé, le programme écoute des commandes sur l'entrée standard. Taper `help` pour la liste complète. En cas de faute de frappe, le programme propose automatiquement la commande la plus proche (`vouliez-vous dire "sortd" ?`).
 
 | Commande | Description |
 |---|---|
@@ -106,6 +106,7 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard. Tape
 | `rmnonext` | Supprime les possibilités sans continuation possible (élagage) |
 | `min` | Affiche le niveau minimum dans les files |
 | `statistic` | Affiche des statistiques sur le contenu des files |
+| `loadjson` | Importe une possibilité depuis une chaîne JSON (équivalent de `import` pour le format JSON) |
 | `checkdatas` | Vérifie l'intégrité des possibilités |
 | `checkduplicate` | Recherche les doublons dans les files |
 | `checkfiles` | Vérifie l'intégrité de toutes les files |
@@ -174,12 +175,14 @@ L'historique fonctionne dans les deux builds. En ANSI, le terminal est basculé 
 
 ### Interface ncurses (optionnelle, `make NCURSES=1`)
 
-Le build `NCURSES=1` remplace l'affichage ANSI par une vraie interface ncurses à trois zones :
+Le build `NCURSES=1` remplace l'affichage ANSI par une vraie interface ncurses à quatre zones :
 
 ```
 ┌────────────────────────────────────┐
 │  output_pad (scrollable, 3000 l.)  │
 │  …                                 │
+├────────────────────────────────────┤
+│  coups/s:… stock:… record:…        │  ← bandeau stats live (vidéo inverse)
 ├────────────────────────────────────┤
 │  Events  [+47 sous la vue]         │
 │  …                                 │
@@ -187,6 +190,8 @@ Le build `NCURSES=1` remplace l'affichage ANSI par une vraie interface ncurses �
 │  commande : _                      │
 └────────────────────────────────────┘
 ```
+
+Le **bandeau de stats** (mis à jour en continu par le thread checker) affiche : `coups/s`, `stock`, `analyse`, `record` et `limite`. Il est rafraîchi via `log_status()` et ne perturbe pas le défilement du pad de sortie.
 
 Touches de navigation dans l'historique :
 
