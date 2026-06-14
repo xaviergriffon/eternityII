@@ -1,3 +1,6 @@
 
 .DS_Store
 eternityII.xcodeproj/project.xcworkspace/xcuserdata/xaviergriffon.xcuserdatad/UserInterfaceState.xcuserstate
+eternityII
+*.back
+*.log
