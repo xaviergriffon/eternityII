@@ -57,6 +57,14 @@ int main(int argc, const char *argv[]) {
             handle_tcpclient(argc, argv);
         } else if (strcmp("tcpserver", argv[1]) == 0) {
             handle_tcpserver(argc, argv);
+#ifdef WITH_CUDA
+        } else if (strcmp("gpupruner", argv[1]) == 0) {
+            // Pruner GPU : même plomberie que tcppruner, mais le contrôle des
+            // lots est exécuté sur le GPU (cf. gpu_pruner.cu / autoprune_gpu).
+            pruner_mode = 1;
+            gpu_pruner_mode = 1;
+            handle_tcpclient(argc, argv);
+#endif // WITH_CUDA
         } else if (strcmp("test", argv[1]) == 0) {
             char* file = parts_files;
             if (argc > 2) {
@@ -327,7 +335,11 @@ void run_auto(const char *file)
  */
 void failed_arg(void)
 {
-	log_error("Indiquer parametre suivant :\ntcpserver [nombre de threads] [pieces.csv]\ntcpclient [serveur] [nb_threads] [max_stock] [pieces.csv]\ntcppruner [serveur] [nb_threads] [pieces.csv]\n");
+	log_error("Indiquer parametre suivant :\ntcpserver [nombre de threads] [pieces.csv]\ntcpclient [serveur] [nb_threads] [max_stock] [pieces.csv]\ntcppruner [serveur] [nb_threads] [pieces.csv]\n"
+#ifdef WITH_CUDA
+	          "gpupruner [serveur] [nb_threads] [pieces.csv]\n"
+#endif // WITH_CUDA
+	);
 }
 
 /**

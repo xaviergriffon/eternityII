@@ -134,6 +134,17 @@ extern int NB_THREADS;
  */
 extern int pruner_mode;
 
+#ifdef WITH_CUDA
+/**
+ * @brief 1 si le processus est un client pruner GPU (mode `gpupruner`).
+ *
+ * Implique `pruner_mode == 1` (même plomberie réseau que `tcppruner`) mais le
+ * contrôle des lots est délégué au GPU via `gpu_pruner_check_batch`. N'existe que
+ * dans les builds CUDA (`make CUDA=1`).
+ */
+extern int gpu_pruner_mode;
+#endif // WITH_CUDA
+
 /** @brief Cumul des possibilités validées (et renvoyées) par ce processus pruner. */
 extern volatile unsigned long long pruner_checked;
 

@@ -11,6 +11,10 @@
 #include "datamanager.h"
 #include "possibility.h"
 
+#ifdef WITH_CUDA
+#include "gpu_pruner.h"
+#endif // WITH_CUDA
+
 // Accès au masque des pièces utilisées, indépendant de FACES_USED_BITS
 #ifdef FACES_USED_BITS
 #define BOARD_FACE_USED(b, pos)   is_face_used((b)->b_faceused, (pos))
@@ -862,3 +866,169 @@ void *autoprune (void *userdata)
 
     return NULL;
 }
+
+#ifdef WITH_CUDA
+/**
+ * @brief Thread de vérification d'un client pruner GPU (mode `gpupruner`).
+ *
+ * Variante de `autoprune` (etii_search.c) : au lieu de contrôler chaque paquet
+ * individuellement via `possibility_all_has_a_next`, tout le lot
+ * `client->aposs` est contrôlé par un seul `gpu_pruner_check_batch`. Le reste du
+ * flux (renvoi des vivants marqués `checked = 1`, élimination des morts,
+ * statistiques, gestion de l'arrêt) est identique au pruner CPU, qui reste
+ * l'implémentation de référence.
+ *
+ * `gpu_pruner_init` doit avoir été appelé dans ce processus au préalable
+ * (cf. run_mono_client).
+ *
+ * Le lot est traité de façon atomique (tout ou rien) : à la différence du
+ * pruner CPU qui peut s'arrêter au milieu du lot, on contrôle l'ensemble en un
+ * appel GPU (quelques microsecondes pour un lot de PRUNER_BATCH_SIZE). Sur
+ * REQUEST_STOP avant traitement, le lot entier est renvoyé au serveur tel quel.
+ *
+ * @param userdata Pointeur vers un `client_possibility_t` alloué par le parent.
+ * @return         NULL.
+ */
+void *autoprune_gpu (void *userdata)
+{
+    client_possibility_t *client = userdata;
+#ifdef DEBUG_THREAD
+    log_info("START gpu prune thread %i\n", client->pid);
+#endif // DEBUG_THREAD
+    while (1)
+    {
+        // Attente d'un jeu de possibilité
+        while ((client->works == 0 || client->aposs == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+        {
+            usleep(MICRO_SLEEP);
+        }
+
+        int processed = 0;
+        if (client->aposs != NULL && request != REQUEST_STOP)
+        {
+            // Respect d'une éventuelle limitation de débit
+            while (request == REQUEST_PAUSE)
+            {
+                usleep(MICRO_SHORT_SLEEP);
+            }
+
+            if (request != REQUEST_STOP)
+            {
+                int n = client->aposs->size;
+                // Statistique : tout le lot est étudié
+                counters[client->compteur] += n;
+
+                uint8_t alive[PRUNER_BATCH_SIZE];
+
+#ifdef GPU_PRUNER_VERIFY
+                // Vérification croisée : on garde une copie de l'entrée avant
+                // mutation GPU pour rejouer le contrôle CPU et comparer.
+                struct possibility_packet *snapshot =
+                    malloc(sizeof(struct possibility_packet) * n);
+                memcpy(snapshot, client->aposs->possibilities,
+                       sizeof(struct possibility_packet) * n);
+#endif // GPU_PRUNER_VERIFY
+
+                gpu_pruner_check_batch(client->aposs->possibilities, n, alive);
+
+#ifdef GPU_PRUNER_VERIFY
+                for (int a = 0; a < n; a++)
+                {
+                    struct possibility_packet cpu;
+                    memcpy(&cpu, &snapshot[a], sizeof(cpu));
+                    int cpu_alive = cpu.checked
+                        ? 1
+                        : possibility_all_has_a_next(&cpu, client->map_part, client->all_rotate_part);
+                    if ((cpu_alive ? 1 : 0) != (alive[a] ? 1 : 0))
+                    {
+                        log_error("gpu_pruner VERIFY: divergence vivant/mort paquet %d : gpu=%d cpu=%d\n",
+                                  a, alive[a], cpu_alive);
+                    }
+                    else if (cpu_alive)
+                    {
+                        int cmp = compare_possibility(&cpu, &client->aposs->possibilities[a]);
+                        if (cmp != 0)
+                        {
+                            log_error("gpu_pruner VERIFY: divergence de contenu (%d) paquet %d\n", cmp, a);
+                        }
+                    }
+                }
+                free(snapshot);
+#endif // GPU_PRUNER_VERIFY
+
+                for (int a = 0; a < n; a++)
+                {
+                    if (alive[a])
+                    {
+                        struct possibility_packet *pk = &client->aposs->possibilities[a];
+                        // Plateau complété par placements forcés : solution trouvée
+                        if (pk->alloc >= ETERN_PARTS)
+                        {
+                            checkIfResultFound(pk, client->all_rotate_part);
+                        }
+                        pruner_checked++;
+                        array_possibility_packet *alivearr = build_single_array_possibility_packet(pk);
+                        if (add_possibility(client, alivearr))
+                        {
+                            log_error("error on add_possibility (gpu pruner)\n");
+                        }
+                        free_array_possibility_packet(alivearr);
+                    }
+                    else
+                    {
+                        // Branche morte : éliminée du stock
+                        pruner_removed++;
+                    }
+                }
+                processed = 1;
+            }
+        }
+        lastfilesize[client->compteur] = 0;
+
+        if (request == REQUEST_STOP)
+        {
+#ifdef DEBUG_THREAD
+            log_info("gpu prune thread %i stop\n", client->pid);
+#endif // DEBUG_THREAD
+            if (client->aposs != NULL && !processed)
+            {
+                // Lot non traité : renvoyé au serveur tel quel
+                array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
+                aposs->possibilities = malloc(sizeof(struct possibility_packet) * client->aposs->size);
+                aposs->size = 0;
+                for (int a = 0; a < client->aposs->size; a++)
+                {
+                    memcpy(&aposs->possibilities[aposs->size], &client->aposs->possibilities[a], sizeof(struct possibility_packet));
+                    aposs->size++;
+                }
+                if (add_possibility(client, aposs))
+                {
+                    log_error("Error on add_possibility \n");
+                }
+                free_array_possibility_packet(aposs);
+            }
+            // Acquittement inconditionnel du lot (cf. autoprune)
+            send_possibility_analysed(client);
+        }
+
+        if (client->aposs != NULL) {
+            free_array_possibility_packet(client->aposs);
+            client->aposs = NULL;
+        }
+        pthread_mutex_lock(&client->works_mutex);
+        client->works = 0;
+        pthread_mutex_unlock(&client->works_mutex);
+
+        if (request == REQUEST_STOP) {
+            break;
+        } else {
+            usleep(MICRO_SHORT_SLEEP);
+        }
+    }
+#ifdef DEBUG_THREAD
+    log_info("END gpu prune thread %i\n", client->pid);
+#endif // DEBUG_THREAD
+
+    return NULL;
+}
+#endif // WITH_CUDA
