@@ -127,6 +127,12 @@ void *check_server(void *param)
         strcat(lastcheck, temp);
         free(temp);
 
+        /* Bandeau de stats « live » : résumé compact poussé à chaque tour.
+           En mode ncurses il s'affiche en continu ; en mode ANSI, no-op. */
+        log_status(" coups/s:%llu  stock:%llu  checked:%llu  analyse:%llu  record:%i/%i  threads:%i ",
+                   bys, file_possibility_stock, file_possibility_checked_stock,
+                   file_possibility_analysed_stock, max_result, ETERN_PARTS, activeThread);
+
         if (max_result > last_record) {
             last_record = max_result;
             log_event("new record: %i pieces placed", max_result);

@@ -416,6 +416,58 @@ command_description *find_command(const char *instruction) {
 }
 
 /**
+ * @brief Distance d'édition de Levenshtein entre deux chaînes (insertions,
+ *        suppressions, substitutions). Sert à proposer la commande la plus
+ *        proche en cas de faute de frappe.
+ */
+static int levenshtein(const char *a, const char *b) {
+    int la = (int)strlen(a);
+    int lb = (int)strlen(b);
+    if (la == 0) return lb;
+    if (lb == 0) return la;
+    if (lb > 62) lb = 62;   /* borne de sécurité : les commandes sont courtes */
+    int prev[64], cur[64];
+    for (int j = 0; j <= lb; j++) prev[j] = j;
+    for (int i = 1; i <= la; i++) {
+        cur[0] = i;
+        for (int j = 1; j <= lb; j++) {
+            int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            int del = prev[j] + 1;
+            int ins = cur[j - 1] + 1;
+            int sub = prev[j - 1] + cost;
+            int m = del < ins ? del : ins;
+            cur[j] = m < sub ? m : sub;
+        }
+        memcpy(prev, cur, sizeof(int) * (lb + 1));
+    }
+    return prev[lb];
+}
+
+/**
+ * @brief Renvoie la commande connue la plus proche de `instruction`, ou NULL
+ *        si aucune n'est suffisamment proche (au plus 1/3 de sa longueur
+ *        d'éditions, borné à 3).
+ */
+static const char *closest_command(const char *instruction) {
+    const char *best = NULL;
+    int best_dist = 1 << 30;
+    for (int c = 0; c < NB_COMMANDS; c++) {
+        int d = levenshtein(instruction, commands[c].command);
+        if (d < best_dist) {
+            best_dist = d;
+            best = commands[c].command;
+        }
+    }
+    if (best != NULL) {
+        int threshold = (int)strlen(best) / 3;
+        if (threshold < 1) threshold = 1;
+        if (threshold > 3) threshold = 3;
+        if (best_dist <= threshold) return best;
+    }
+    return NULL;
+}
+
+/**
  * @brief Parse et exécute une ligne de commande.
  *
  * Tokenize `command` sur les espaces, trouve la commande via `find_command`,
@@ -431,6 +483,11 @@ int do_command_line(char *command) {
         char *toSplit = malloc(sizeof(char) * command_length);
         memcpy(toSplit, command, command_length);
         char *instruction = strtok(toSplit, " ");
+        if (instruction == NULL) {
+            /* Ligne ne contenant que des espaces : rien à exécuter. */
+            free(toSplit);
+            return 0;
+        }
         command_description *command_desc = find_command(instruction);
         if (command_desc != NULL) {
             result = command_desc->interpreter();
@@ -438,6 +495,15 @@ int do_command_line(char *command) {
                 send_command_to_childs(command);
             }
         } else {
+            /* Commande inconnue : on le signale (au lieu d'échouer en silence)
+               et on propose la commande la plus proche en cas de faute de frappe. */
+            const char *suggestion = closest_command(instruction);
+            if (suggestion != NULL) {
+                log_error("commande inconnue : %s -- vouliez-vous dire \"%s\" ? (tapez \"help\")\n",
+                          instruction, suggestion);
+            } else {
+                log_error("commande inconnue : %s (tapez \"help\" pour la liste)\n", instruction);
+            }
             result = -1;
         }
         free(toSplit);
