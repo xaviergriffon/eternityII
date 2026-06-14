@@ -9,6 +9,8 @@
  *   │  output_pad (pad ncurses)      │
  *   │  log_info / log_error / ...    │  ← scrollable via PgUp/PgDn/Home/End
  *   │  ...                           │
+ *   ├────────────────────────────────┤  ← stats_win (bandeau live)
+ *   │ coups/s … stock … record …     │  (vidéo inverse, MAJ par le checker)
  *   ├────────────────────────────────┤  ← début events_win
  *   │  Events  [+N pour PgDn/End]    │  (titre vidéo inverse + indicateur scroll)
  *   │  [hh:mm:ss] event 1            │
@@ -55,6 +57,11 @@
 #define EVENT_LOG_FILE   "events.log"
 #define LOG_LINE_MAX     4096
 
+/* Bandeau de statistiques « live » : une ligne d'état en vidéo inverse,
+   rafraîchie en continu par le thread checker via log_status(). */
+#define STATS_ZONE_LINES 1
+#define STATUS_MSG_MAX   512
+
 /* Taille du pad de sortie : nombre maximum de lignes d'historique
    conservées. ~3000 lignes × ~200 cols × ~8 octets ≈ 5 Mo. */
 #define OUTPUT_PAD_LINES 3000
@@ -69,9 +76,13 @@ static int             event_count = 0;
 static pthread_mutex_t event_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static WINDOW *output_pad = NULL;  /* pad scrollable, plus grand que l'écran */
+static WINDOW *stats_win  = NULL;  /* bandeau de stats live (1 ligne)        */
 static WINDOW *events_win = NULL;
 static WINDOW *input_win  = NULL;
 static int     nc_active  = 0;
+
+/* Dernier texte du bandeau de stats (protégé par output_mutex). */
+static char status_buf[STATUS_MSG_MAX] = " stats : en attente du premier rapport... ";
 
 /* État de défilement du pad de sortie. */
 static int output_screen_h = 0;    /* hauteur visible de la zone de sortie    */
@@ -86,6 +97,7 @@ static int  input_len = 0;
 
 static void nc_draw_events_locked(void);
 static void nc_draw_input_locked(void);
+static void nc_draw_status_locked(void);
 static void nc_refresh_pad_locked(void);
 
 /* ------------------------------------------------------------------------- */
@@ -155,19 +167,27 @@ static void nc_setup_layout_locked(void)
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
 
+    int stats_h  = STATS_ZONE_LINES;     /* bandeau live                      */
     int events_h = EVENT_ZONE_LINES + 1; /* titre + N événements              */
     int input_h  = 1;
-    int output_h = rows - events_h - input_h;
+    int output_h = rows - stats_h - events_h - input_h;
     if (output_h < 1) {
-        /* Terminal très petit : on rabote la zone Events pour garder ≥1
-           ligne d'output et la ligne de saisie. */
-        events_h = (rows >= 3) ? rows - 2 : 1;
-        output_h = 1;
-        input_h  = 1;
+        /* Terminal trop petit : on sacrifie d'abord le bandeau stats... */
+        stats_h = 0;
+        output_h = rows - events_h - input_h;
+        if (output_h < 1) {
+            /* ...puis on rabote la zone Events pour garder ≥1 ligne d'output
+               et la ligne de saisie. */
+            events_h = (rows >= 3) ? rows - 2 : 1;
+            output_h = 1;
+            input_h  = 1;
+        }
     }
     output_screen_h = output_h;
 
-    /* events_win et input_win sont recréés (pas d'historique à préserver). */
+    /* stats_win, events_win et input_win sont recréés (pas d'historique à
+       préserver ; le texte du bandeau est conservé dans status_buf). */
+    if (stats_win)  { delwin(stats_win);  stats_win  = NULL; }
     if (events_win) { delwin(events_win); events_win = NULL; }
     if (input_win)  { delwin(input_win);  input_win  = NULL; }
 
@@ -183,8 +203,15 @@ static void nc_setup_layout_locked(void)
         wresize(output_pad, OUTPUT_PAD_LINES, cols);
     }
 
-    events_win = newwin(events_h, cols, output_h, 0);
-    input_win  = newwin(input_h,  cols, output_h + events_h, 0);
+    /* Empilement vertical : output / [stats] / events / input. */
+    int y = output_h;
+    if (stats_h > 0) {
+        stats_win = newwin(stats_h, cols, y, 0);
+        y += stats_h;
+    }
+    events_win = newwin(events_h, cols, y, 0);
+    y += events_h;
+    input_win  = newwin(input_h,  cols, y, 0);
 
     if (input_win) {
         keypad(input_win, TRUE);
@@ -201,6 +228,7 @@ static void nc_setup_layout_locked(void)
     }
 
     werase(stdscr); wnoutrefresh(stdscr);
+    if (stats_win)  { werase(stats_win);  wnoutrefresh(stats_win);  }
     if (events_win) { werase(events_win); wnoutrefresh(events_win); }
     if (input_win)  { werase(input_win);  wnoutrefresh(input_win);  }
     nc_refresh_pad_locked();
@@ -286,6 +314,28 @@ static void nc_draw_input_locked(void)
     waddnstr(input_win, input_buf + start, show_len);
     wmove(input_win, 0, promlen + show_len);
     wrefresh(input_win);
+}
+
+/**
+ * @brief Affiche le bandeau de stats live (vidéo inverse, sur toute la largeur).
+ *        Sous `output_mutex`. Le curseur est rendu à la zone de saisie.
+ */
+static void nc_draw_status_locked(void)
+{
+    if (!nc_active || !stats_win) return;
+    int cols = getmaxx(stats_win);
+    werase(stats_win);
+    int len = (int)strlen(status_buf);
+    if (len > cols) len = cols;
+    wattron(stats_win, A_REVERSE);
+    mvwaddnstr(stats_win, 0, 0, status_buf, len);
+    for (int c = len; c < cols; c++) {
+        waddch(stats_win, ' ');
+    }
+    wattroff(stats_win, A_REVERSE);
+    wnoutrefresh(stats_win);
+    if (input_win) wnoutrefresh(input_win); /* restaure le curseur sur input */
+    doupdate();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -463,6 +513,30 @@ void log_event(const char *format, ...)
     pthread_mutex_unlock(&output_mutex);
 }
 
+void log_status(const char *format, ...)
+{
+    char buf[STATUS_MSG_MAX];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buf, sizeof buf, format, args);
+    va_end(args);
+
+    /* Le thread checker qui appelle log_status() tourne dans le parent ; il n'y
+       a pas de routage IPC à faire. Si un enfant forké appelait malgré tout,
+       on ignore (il n'a pas de bandeau à mettre à jour). */
+    if (log_should_route_to_parent()) {
+        return;
+    }
+
+    pthread_mutex_lock(&output_mutex);
+    strncpy(status_buf, buf, sizeof status_buf - 1);
+    status_buf[sizeof status_buf - 1] = '\0';
+    if (nc_active) {
+        nc_draw_status_locked();
+    }
+    pthread_mutex_unlock(&output_mutex);
+}
+
 /* ------------------------------------------------------------------------- */
 /*  Cycle de vie : init / teardown                                           */
 /* ------------------------------------------------------------------------- */
@@ -482,6 +556,7 @@ void status_zone_init(void)
     curs_set(1);
     nc_setup_layout_locked();
     nc_active = 1;
+    nc_draw_status_locked();
     nc_draw_events_locked();
     nc_draw_input_locked();
     pthread_mutex_unlock(&output_mutex);
@@ -497,6 +572,7 @@ void status_zone_teardown(void)
     pthread_mutex_lock(&output_mutex);
     nc_active = 0;
     if (output_pad) { delwin(output_pad); output_pad = NULL; }
+    if (stats_win)  { delwin(stats_win);  stats_win  = NULL; }
     if (events_win) { delwin(events_win); events_win = NULL; }
     if (input_win)  { delwin(input_win);  input_win  = NULL; }
     endwin();
@@ -559,6 +635,7 @@ void nc_console_loop(void)
         if (ch == KEY_RESIZE) {
             pthread_mutex_lock(&output_mutex);
             nc_setup_layout_locked();
+            nc_draw_status_locked();
             nc_draw_events_locked();
             nc_draw_input_locked();
             pthread_mutex_unlock(&output_mutex);

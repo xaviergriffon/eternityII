@@ -15,6 +15,14 @@ void log_console(const char *format, ...);
  * normalement.
  */
 void log_event(const char *format, ...);
+/**
+ * @brief Met à jour le bandeau de statistiques « live » (vitesse, stock, record…).
+ *
+ * En mode ncurses, remplace le contenu d'une ligne d'état fixe rafraîchie en
+ * continu par le thread de statistiques. En mode ANSI (sans ncurses), c'est un
+ * no-op : les statistiques restent consultables via la commande `check`.
+ */
+void log_status(const char *format, ...);
 void flush_console(void);
 void flush_debug(void);
 void flush_error(void);

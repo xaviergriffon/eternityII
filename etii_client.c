@@ -465,6 +465,20 @@ void *check_client_threads(void *param)
         strcat(lastcheck, temp);
         free(temp);
 
+        /* Bandeau de stats « live » : résumé compact poussé à chaque tour.
+           En mode ncurses il s'affiche en continu ; en mode ANSI, no-op. */
+        {
+            char limit_str[24];
+            if (max_search_by_sec > 0) {
+                snprintf(limit_str, sizeof limit_str, "%llu", (unsigned long long)max_search_by_sec);
+            } else {
+                snprintf(limit_str, sizeof limit_str, "-");
+            }
+            log_status(" coups/s:%llu  stock:%llu  analyse:%llu  record:%i/%i  limite:%s ",
+                       bys, fork_possibility_stock, fork_analysed_stock,
+                       max_result, ETERN_PARTS, limit_str);
+        }
+
         if (max_result > last_record) {
             last_record = max_result;
             log_event("new record: %i pieces placed", max_result);

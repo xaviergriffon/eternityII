@@ -281,6 +281,19 @@ static void redraw_event_zone_locked(void)
     fflush(stdout);
 }
 
+/**
+ * @brief Bandeau de statistiques « live » : sans objet en mode ANSI.
+ *
+ * Le mode ANSI ne réserve pas de ligne d'état dédiée (seule la zone Events est
+ * fixe). Les statistiques agrégées restent consultables via la commande `check`.
+ * Cette fonction existe pour préserver l'interface commune avec la variante
+ * ncurses (`logger_ncurses.c`).
+ */
+void log_status(const char *format, ...)
+{
+    (void)format;
+}
+
 void log_event(const char *format, ...)
 {
     char msg[EVENT_MSG_MAX];
