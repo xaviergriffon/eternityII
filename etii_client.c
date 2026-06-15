@@ -388,17 +388,25 @@ void *check_client_threads(void *param)
     int last_record = max_result;
     while(1)
     {
+        // Les buffers de stats sont dimensionnés selon NB_THREADS : une ligne
+        // de tableau par fork. Avec un buffer FIXE, un NB_THREADS élevé (ex.
+        // 100) débordait et corrompait le tas ("double free or corruption" /
+        // abort). On alloue donc en fonction du nombre de forks (+ marge pour
+        // l'en-tête, le pied de tableau et les lignes forward-check / pruner /
+        // résumé concaténées dans lastcheck).
+        size_t table_size = 256 + (size_t)NB_THREADS * 80;
+        size_t lastcheck_size = table_size + 4096;
         free(lastcheck);
-        lastcheck = calloc(4000, sizeof(char));
-        
+        lastcheck = calloc(lastcheck_size, sizeof(char));
+
         // Côté client, le travail tourne dans les processus fork (mémoire séparée
         // après fork) : les files locales du parent sont vides. La donnée réelle
         // est dans fork_statistics[], par fork. On présente donc un tableau par
         // fork : stock local en cours d'étude et possibilités en cours d'analyse.
         unsigned long long fork_possibility_stock = 0;
         unsigned long long fork_analysed_stock = 0;
-        char *table = calloc(2000, sizeof(char));
-        int table_offset = sprintf(table,
+        char *table = calloc(table_size, sizeof(char));
+        int table_offset = snprintf(table, table_size,
             "Thread queues\n"
             "Fork |     In stock |     Analysed\n"
             "-----+--------------+-------------\n");
@@ -413,15 +421,15 @@ void *check_client_threads(void *param)
             bys += fork_statistics[f].shots_per_second;
             unsigned long long in_stock = fork_statistics[f].possibilities_in_stock;
             unsigned long long analysed = fork_statistics[f].analyses_in_stock;
-            table_offset += sprintf(table + table_offset, "%4i | %12llu | %12llu\n",
-                                    f, in_stock, analysed);
+            table_offset += snprintf(table + table_offset, table_size - table_offset,
+                                     "%4i | %12llu | %12llu\n", f, in_stock, analysed);
             fork_possibility_stock += in_stock;
             fork_analysed_stock += analysed;
         }
-        table_offset += sprintf(table + table_offset,
-                                "-----+--------------+-------------\n"
-                                "Total| %12llu | %12llu\n",
-                                fork_possibility_stock, fork_analysed_stock);
+        table_offset += snprintf(table + table_offset, table_size - table_offset,
+                                 "-----+--------------+-------------\n"
+                                 "Total| %12llu | %12llu\n",
+                                 fork_possibility_stock, fork_analysed_stock);
         strcat(lastcheck, table);
         free(table);
                 
