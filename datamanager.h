@@ -193,6 +193,17 @@ int print_file_analysed(int fp);
 /** @brief Affiche au format JSON toutes les files d'analyse en cours. */
 int print_all_file_analysed(void);
 
+/**
+ * @brief Remet dans le stock toutes les possibilités en cours d'analyse.
+ *
+ * Vide les files `file_possibility_analysed` et réinjecte les paquets dans le
+ * stock non vérifié. À appeler quand des clients sont morts sans signaler la
+ * fin de leur traitement.
+ *
+ * @return 0.
+ */
+int restock_analysed(void);
+
 /** @brief Trie toutes les files de possibilités par ordre croissant de `alloc`. */
 int sort_ascending(void);
 

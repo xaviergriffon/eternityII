@@ -10,7 +10,7 @@
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
-#define NB_COMMANDS 26
+#define NB_COMMANDS 27
 
 /**
  * @brief Définition d'une commande prise en charge
@@ -48,6 +48,7 @@ int checkfile_interpreter(void);
 int checkdirections_interpreter(void);
 int rmnonext_interpreter(void);
 int printanalysed_interpreter(void);
+int restockanalysed_interpreter(void);
 int min_interpreter(void);
 int help_interpreter(void);
 int statistic_interpreter(void);
@@ -79,6 +80,7 @@ static command_description commands[NB_COMMANDS] = {
     {"checkdirections", checkdirections_interpreter, 0},
     {"rmnonext", rmnonext_interpreter, 1},
     {"printanalysed", printanalysed_interpreter, 1},
+    {"restockanalysed", restockanalysed_interpreter, 0},
     {"statistic", statistic_interpreter, 0},
     {"min", min_interpreter, 1},
     {"help", help_interpreter, 0}
@@ -377,6 +379,11 @@ int rmnonext_interpreter(void) {
 /** @brief Interpréteur de `printanalysed` : affiche les possibilités en cours d'analyse. */
 int printanalysed_interpreter(void) {
     return print_all_file_analysed();
+}
+
+/** @brief Interpréteur de `restockanalysed` : remet les possibilités en cours d'analyse dans le stock. */
+int restockanalysed_interpreter(void) {
+    return restock_analysed();
 }
 
 /** @brief Interpréteur de `min` : affiche le nombre minimal de pièces placées parmi toutes les possibilités. */

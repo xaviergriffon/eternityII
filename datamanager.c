@@ -571,6 +571,54 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread) 
 }
 
 /**
+ * @brief Remet dans le stock toutes les possibilités en cours d'analyse.
+ *
+ * Vide chaque file `file_possibility_analysed` et réinjecte les paquets dans
+ * `file_possibility` (stock non vérifié). Utile quand des clients sont morts
+ * sans avoir terminé leur travail.
+ *
+ * @return 0.
+ */
+int restock_analysed(void) {
+    unsigned long long moved = 0;
+    for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+        pthread_mutex_lock(&file_possibility_analysed[f].lock);
+        File *src = &file_possibility_analysed[f].file;
+        unsigned long long count = src->size;
+        if (count == 0) {
+            pthread_mutex_unlock(&file_possibility_analysed[f].lock);
+            continue;
+        }
+        struct possibility_packet *buf = malloc(count * sizeof(struct possibility_packet));
+        unsigned long long n = 0;
+        while (n < count && scroll(src, &buf[n])) {
+            n++;
+        }
+        pthread_mutex_unlock(&file_possibility_analysed[f].lock);
+
+        for (unsigned long long i = 0; i < n; i++) {
+            int dest = 0;
+            int added = 0;
+            while (!added) {
+                if (pthread_mutex_trylock(&file_possibility[dest].lock) == 0) {
+                    if (buf[i].alloc > max_result) max_result = buf[i].alloc;
+                    put(&file_possibility[dest].file, &buf[i]);
+                    pthread_mutex_unlock(&file_possibility[dest].lock);
+                    added = 1;
+                } else {
+                    dest = (dest + 1) % NB_FILE_POSSIBILITY;
+                    usleep(MICRO_SLEEP);
+                }
+            }
+            moved++;
+        }
+        free(buf);
+    }
+    log_info("restock_analysed : %llu possibilité(s) remise(s) dans le stock\n", moved);
+    return 0;
+}
+
+/**
  * @brief Récupère des possibilités depuis le serveur TCP.
  *
  * Envoie `max_result` fois INST_GET et collecte les paquets reçus dans `result`.
