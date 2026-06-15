@@ -269,9 +269,12 @@ void run_console(int server)
     *param = server;
     if(0 != pthread_create(&thread, NULL, console, param))
     {
-        log_error("Problème avec pthread_create()\n");
+        // Non fatal : sous forte pression de ressources, on poursuit sans
+        // console interactive plutôt que de planter l'application.
+        log_error("run_console : pthread_create a échoué — console interactive indisponible\n");
         free(thread_attributes);
-        exit(EXIT_FAILURE);
+        free(param);
+        return;
     }
     pthread_attr_destroy(thread_attributes);
     free(thread_attributes);
