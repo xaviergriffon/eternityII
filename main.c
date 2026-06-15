@@ -161,15 +161,23 @@ void handle_tcpclient(int argc, const char *argv[]) {
 #endif // DEBUG_IN_MONO_PROCESS
             if (child_pid != 0) {
                 if (child_pid == -1) {
-                    log_error("fork error %i\n", errno);
+                    // Échec de création de CE process : on le signale et on
+                    // poursuit avec les autres. On NE retente pas le même slot
+                    // (pas de c--) et on N'arrête PAS l'application ici : seule
+                    // l'absence TOTALE de process l'arrêtera (bilan après la
+                    // boucle). Exigence : « indiquer que les process n'ont pas
+                    // été créés, ne s'arrêter que si aucun n'a pu l'être ».
+                    log_error("fork error : process %i/%i non créé (errno=%i)\n",
+                              c + 1, NB_THREADS, errno);
                     fork_error++;
-                    if (fork_error > 10) {
-                        log_error("too many fork error %i\n", fork_error);
-                        // ON arrête le programme en indiquant via le signal et met l'indice au nombre de threads.
-                        request = REQUEST_STOP;
-                        c = NB_THREADS;
+                    childrens_pid[c] = -1;
+                    // Ressources visiblement épuisées : inutile d'insister, on
+                    // conserve les process déjà créés et on passe à la suite.
+                    if (fork_error >= 10) {
+                        log_error("création de process interrompue après %i échecs ; "
+                                  "poursuite avec les process déjà créés\n", fork_error);
+                        break;
                     }
-                    c--;
                     continue;
                 }
 #ifdef DEBUG_THREAD
@@ -213,7 +221,32 @@ void handle_tcpclient(int argc, const char *argv[]) {
     }
 
     if (parent_pid == getpid()) {
-        // Les forks sont terminés : on peut démarrer les threads du parent.
+        // Bilan de création : combien de process enfants ont réellement démarré.
+        int created = 0;
+        for (int c = 0; c < NB_THREADS; c++) {
+            if (childrens_pid[c] > 0) {
+                created++;
+            }
+        }
+        if (created == 0) {
+            // SEUL cas d'arrêt : aucun process n'a pu être créé. Rien à tuer,
+            // on libère et on sort proprement.
+            log_error("aucun process enfant n'a pu être créé — arrêt de l'application\n");
+            close(*socket_id);
+            remove(main_addr->sun_path);
+            free(main_addr);
+            return;
+        }
+        if (fork_error > 0) {
+            log_info("%i/%i process créés ; %i non créés (ressources insuffisantes) — poursuite\n",
+                     created, NB_THREADS, fork_error);
+        }
+
+        // Les forks sont terminés : on peut démarrer les threads du parent. Ces
+        // démarrages sont désormais NON fatals (cf. run_server_thread /
+        // run_checker / run_console) : sous forte pression de ressources, le
+        // parent tourne en mode dégradé au lieu de planter en laissant les
+        // process enfants orphelins.
         if (*socket_id > 0) {
             run_server_thread(socket_id);
         }
@@ -366,9 +399,12 @@ int run_checker(int server)
 	
 	if(0 != pthread_create(&thread, NULL, method, NULL))
 	{
-		log_error("Problème avec pthread_create()\n");
+		// Non fatal : sous forte pression de ressources (trop de threads/process
+		// demandés), on poursuit sans thread de statistiques plutôt que de
+		// planter l'application.
+		log_error("run_checker : pthread_create a échoué — pas de thread de statistiques\n");
 		free(thread_attributes);
-		exit(EXIT_FAILURE);
+		return -1;
 	}
 	pthread_attr_destroy(thread_attributes);
 	free(thread_attributes);
@@ -794,9 +830,11 @@ void run_server_thread(int *socket_id) {
     pthread_t thread;
     if(0 != pthread_create(&thread, thread_attributes, server_tcp, socket_id))
         {
-            log_error("Problème avec pthread_create()\n");
+            // Non fatal : on poursuit sans thread de réception des statistiques
+            // plutôt que de planter (et d'orphaniser les process enfants).
+            log_error("run_server_thread : pthread_create a échoué — pas de réception de statistiques\n");
             free(thread_attributes);
-            exit(EXIT_FAILURE);
+            return;
         }
         pthread_attr_destroy(thread_attributes);
         free(thread_attributes);
@@ -851,9 +889,11 @@ void run_fork_thread(int *socket_id) {
     pthread_t thread;
     if(0 != pthread_create(&thread, thread_attributes, fork_udp, socket_id))
 	{
-		log_error("run_fork_thread Problème avec pthread_create()\n");
+		// Non fatal : ce process enfant tourne sans thread de commandes IPC
+		// plutôt que de mourir sous la pression des ressources.
+		log_error("run_fork_thread : pthread_create a échoué — pas de commandes IPC pour ce process\n");
 		free(thread_attributes);
-		exit(EXIT_FAILURE);
+		return;
 	}
 	pthread_attr_destroy(thread_attributes);
 	free(thread_attributes);
