@@ -35,6 +35,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <errno.h>
+#include <signal.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <time.h>
@@ -68,6 +69,10 @@
 
 /* Sérialise toutes les écritures ncurses : la lib n'est pas thread-safe. */
 static pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Flag indiquant qu'un redimensionnement est en attente (depuis SIGWINCH). */
+static volatile sig_atomic_t resize_pending = 0;
+
 
 /* Ring buffer des derniers événements. */
 static char            event_ring[EVENT_ZONE_LINES][EVENT_MSG_MAX];
@@ -164,20 +169,24 @@ static int pad_max_view_top(int visible_h)
  */
 static void nc_setup_layout_locked(void)
 {
+    /* Lorsqu'on est appelé suite à un KEY_RESIZE, ncurses a déjà redimensionné
+       stdscr et mis à jour LINES/COLS : on lit donc directement la nouvelle
+       taille. NB : ne PAS appeler resizeterm() ici — cela réinjecte un
+       KEY_RESIZE dans la file d'entrée (boucle de resize infinie). */
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
 
-    int stats_h  = STATS_ZONE_LINES;     /* bandeau live                      */
-    int events_h = EVENT_ZONE_LINES + 1; /* titre + N événements              */
+    if (rows < 3)  rows = 3;
+    if (cols < 40) cols = 40;
+
+    int stats_h  = STATS_ZONE_LINES;
+    int events_h = EVENT_ZONE_LINES + 1;
     int input_h  = 1;
     int output_h = rows - stats_h - events_h - input_h;
     if (output_h < 1) {
-        /* Terminal trop petit : on sacrifie d'abord le bandeau stats... */
         stats_h = 0;
         output_h = rows - events_h - input_h;
         if (output_h < 1) {
-            /* ...puis on rabote la zone Events pour garder ≥1 ligne d'output
-               et la ligne de saisie. */
             events_h = (rows >= 3) ? rows - 2 : 1;
             output_h = 1;
             input_h  = 1;
@@ -185,14 +194,12 @@ static void nc_setup_layout_locked(void)
     }
     output_screen_h = output_h;
 
-    /* stats_win, events_win et input_win sont recréés (pas d'historique à
-       préserver ; le texte du bandeau est conservé dans status_buf). */
+    /* Nettoyer les anciennes fenêtres. */
     if (stats_win)  { delwin(stats_win);  stats_win  = NULL; }
     if (events_win) { delwin(events_win); events_win = NULL; }
     if (input_win)  { delwin(input_win);  input_win  = NULL; }
 
-    /* Le pad d'output est créé une seule fois ; sur resize, wresize
-       préserve le contenu (avec reflow horizontal au passage). */
+    /* Le pad d'output : créé une fois, redimensionné sur resize. */
     if (!output_pad) {
         output_pad = newpad(OUTPUT_PAD_LINES, cols);
         if (output_pad) {
@@ -200,26 +207,34 @@ static void nc_setup_layout_locked(void)
             idlok(output_pad, TRUE);
         }
     } else {
-        wresize(output_pad, OUTPUT_PAD_LINES, cols);
+        /* wresize() peut échouer en cas de manque de mémoire ;
+           on ignore l'erreur et on continue avec l'ancienne taille. */
+        if (cols > 0) {
+            wresize(output_pad, OUTPUT_PAD_LINES, cols);
+        }
     }
 
-    /* Empilement vertical : output / [stats] / events / input. */
+    /* Nouvelles fenêtres : empilement vertical output / [stats] / events / input.
+       NB : ne pas journaliser ici en cas d'échec de newwin() — log_error()
+       reprend output_mutex (non récursif) que l'on détient déjà → deadlock.
+       Toutes les routines de dessin tolèrent une fenêtre NULL. */
     int y = output_h;
     if (stats_h > 0) {
         stats_win = newwin(stats_h, cols, y, 0);
         y += stats_h;
     }
+
     events_win = newwin(events_h, cols, y, 0);
     y += events_h;
-    input_win  = newwin(input_h,  cols, y, 0);
+
+    input_win = newwin(input_h, cols, y, 0);
 
     if (input_win) {
         keypad(input_win, TRUE);
         nodelay(input_win, TRUE);
     }
 
-    /* Si on est en mode auto-stick, on recolle la vue au bas du pad pour
-       que la dernière ligne écrite reste visible après le resize. */
+    /* Repositionner la vue du pad si nécessaire. */
     if (auto_stick) {
         pad_view_top = pad_max_view_top(output_screen_h);
     } else {
@@ -227,12 +242,32 @@ static void nc_setup_layout_locked(void)
         if (pad_view_top > max_top) pad_view_top = max_top;
     }
 
-    werase(stdscr); wnoutrefresh(stdscr);
-    if (stats_win)  { werase(stats_win);  wnoutrefresh(stats_win);  }
-    if (events_win) { werase(events_win); wnoutrefresh(events_win); }
-    if (input_win)  { werase(input_win);  wnoutrefresh(input_win);  }
+    /* Forcer un redraw complet : invalide la copie interne de l'écran ncurses
+       pour que doupdate() réécrive chaque cellule sans se fier à son cache. */
+    clearok(curscr, TRUE);
+
+    if (stdscr) {
+        werase(stdscr);
+        wnoutrefresh(stdscr);
+    }
+    if (stats_win) {
+        werase(stats_win);
+        wnoutrefresh(stats_win);
+    }
+    if (events_win) {
+        werase(events_win);
+        wnoutrefresh(events_win);
+    }
+    if (input_win) {
+        werase(input_win);
+        wnoutrefresh(input_win);
+    }
     nc_refresh_pad_locked();
+    nc_draw_status_locked();
+    nc_draw_events_locked();
     doupdate();
+
+    resize_pending = 0;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -243,14 +278,17 @@ static void nc_setup_layout_locked(void)
 static void nc_refresh_pad_locked(void)
 {
     if (!nc_active || !output_pad || output_screen_h <= 0) return;
+    if (!stdscr) return;
+
     int cols = getmaxx(stdscr);
+    if (cols <= 0) cols = 80;
+
     /* pnoutrefresh prépare la mise à jour ; doupdate la pousse à l'écran. */
-    pnoutrefresh(output_pad,
-                 pad_view_top, 0,
-                 0, 0,
-                 output_screen_h - 1, cols - 1);
-    if (input_win) wnoutrefresh(input_win); /* restaure le curseur sur input */
-    doupdate();
+    if (pnoutrefresh(output_pad, pad_view_top, 0, 0, 0,
+                     output_screen_h - 1, cols - 1) != ERR) {
+        if (input_win) wnoutrefresh(input_win);
+        doupdate();
+    }
 }
 
 static void nc_draw_events_locked(void)
@@ -268,10 +306,10 @@ static void nc_draw_events_locked(void)
     pthread_mutex_unlock(&event_mutex);
 
     int cols = getmaxx(events_win);
+    if (cols <= 0) cols = 80;
+
     werase(events_win);
 
-    /* Titre + indicateur de scroll (combien de lignes sous la vue, si on
-       est remonté dans l'historique). */
     char title[128];
     int hidden = pad_max_view_top(output_screen_h) - pad_view_top;
     if (hidden > 0) {
@@ -305,13 +343,19 @@ static void nc_draw_input_locked(void)
 {
     if (!nc_active || !input_win) return;
     int cols = getmaxx(input_win);
+    if (cols <= 0) cols = 80;
+
     werase(input_win);
     mvwaddstr(input_win, 0, 0, INPUT_PROMPT);
     int promlen = (int)strlen(INPUT_PROMPT);
     int avail = cols - promlen - 1;
+    if (avail < 0) avail = 0;
     int show_len = input_len > avail ? avail : input_len;
     int start = input_len - show_len;
-    waddnstr(input_win, input_buf + start, show_len);
+    if (start < 0) start = 0;
+    if (show_len > 0) {
+        waddnstr(input_win, input_buf + start, show_len);
+    }
     wmove(input_win, 0, promlen + show_len);
     wrefresh(input_win);
 }
@@ -324,6 +368,8 @@ static void nc_draw_status_locked(void)
 {
     if (!nc_active || !stats_win) return;
     int cols = getmaxx(stats_win);
+    if (cols <= 0) cols = 80;
+
     werase(stats_win);
     int len = (int)strlen(status_buf);
     if (len > cols) len = cols;
@@ -334,7 +380,7 @@ static void nc_draw_status_locked(void)
     }
     wattroff(stats_win, A_REVERSE);
     wnoutrefresh(stats_win);
-    if (input_win) wnoutrefresh(input_win); /* restaure le curseur sur input */
+    if (input_win) wnoutrefresh(input_win);
     doupdate();
 }
 
@@ -350,13 +396,10 @@ static void nc_write_output_locked(const char *text)
             pad_view_top = pad_max_view_top(output_screen_h);
         }
         nc_refresh_pad_locked();
-        /* Si on est remonté dans l'historique, le bandeau Events doit
-           refléter le nombre de lignes désormais cachées sous la vue
-           (qui a augmenté avec la nouvelle ligne d'output). */
         if (!auto_stick && events_win) {
             nc_draw_events_locked();
         }
-    } else {
+    } else if (!nc_active) {
         fputs(text, stdout);
         fflush(stdout);
     }
@@ -571,11 +614,14 @@ void status_zone_teardown(void)
     }
     pthread_mutex_lock(&output_mutex);
     nc_active = 0;
+    resize_pending = 0;
     if (output_pad) { delwin(output_pad); output_pad = NULL; }
     if (stats_win)  { delwin(stats_win);  stats_win  = NULL; }
     if (events_win) { delwin(events_win); events_win = NULL; }
     if (input_win)  { delwin(input_win);  input_win  = NULL; }
-    endwin();
+    if (stdscr) {
+        endwin();
+    }
     pthread_mutex_unlock(&output_mutex);
 }
 
@@ -615,16 +661,29 @@ void nc_console_loop(void)
     int input_dirty = 0;
 
     while (1) {
+        /* Vérifier si un redimensionnement a été signalé par SIGWINCH. */
+        if (resize_pending) {
+            pthread_mutex_lock(&output_mutex);
+            nc_setup_layout_locked();   /* dessine déjà stats + events */
+            if (nc_active) {
+                nc_draw_input_locked(); /* repose le curseur sur la saisie */
+            }
+            pthread_mutex_unlock(&output_mutex);
+            continue;
+        }
+
         if (input_dirty) {
             pthread_mutex_lock(&output_mutex);
-            nc_draw_input_locked();
+            if (nc_active) {
+                nc_draw_input_locked();
+            }
             pthread_mutex_unlock(&output_mutex);
             input_dirty = 0;
         }
 
         int ch;
         pthread_mutex_lock(&output_mutex);
-        ch = input_win ? wgetch(input_win) : ERR;
+        ch = (nc_active && input_win) ? wgetch(input_win) : ERR;
         pthread_mutex_unlock(&output_mutex);
 
         if (ch == ERR) {
@@ -632,13 +691,9 @@ void nc_console_loop(void)
             continue;
         }
 
+        /* KEY_RESIZE : ncurses a déjà mis à jour LINES/COLS. */
         if (ch == KEY_RESIZE) {
-            pthread_mutex_lock(&output_mutex);
-            nc_setup_layout_locked();
-            nc_draw_status_locked();
-            nc_draw_events_locked();
-            nc_draw_input_locked();
-            pthread_mutex_unlock(&output_mutex);
+            resize_pending = 1;
             continue;
         }
 

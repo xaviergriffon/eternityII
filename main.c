@@ -629,6 +629,7 @@ void signal_end_handler(int sig)
     }
 }
 
+
 /**
  * @brief Gestionnaire de SIGCHLD : récolte les statuts des processus enfants terminés.
  *
@@ -928,6 +929,9 @@ void init_childs(void) {
 void init_signals(void) {
     struct sigaction sa;
     sa.sa_handler = signal_end_handler;
+    /* Pas de SA_RESTART : on veut que les appels bloquants (accept, recvfrom,
+       wait) renvoient EINTR sur réception d'un signal d'arrêt, afin que leurs
+       boucles puissent constater request==REQUEST_STOP et sortir proprement. */
     sa.sa_flags = 0;
     sigemptyset(&sa.sa_mask);
 

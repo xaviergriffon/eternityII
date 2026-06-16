@@ -509,7 +509,14 @@ void runserver(const char* file)
 
         if((client_id = accept(socket_id, NULL, 0)) < 0)
         {
-            if (errno == EDEADLK || errno == EDEADLK || errno == EWOULDBLOCK) {
+            if (errno == EINTR) {
+                /* accept() interrompu par un signal (ex. SIGWINCH installé par
+                   ncurses sans SA_RESTART lors d'un redimensionnement). Ce
+                   n'est PAS une erreur : on réessaie (ou on sort proprement si
+                   un arrêt a été demandé entre-temps). */
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 log_errno("resource blocked, try again => ");
                 continue;
             } else {
