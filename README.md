@@ -28,11 +28,54 @@ Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisa
 make                          # Build de production (ANSI, sans dépendance) → ./eternityII
 make DEBUG=1                  # Build debug (symboles -g, conservation des .o)
 make NCURSES=1                # Build avec interface ncurses (liée à -lncurses)
+make CUDA=1                   # Build avec pruner GPU CUDA (mode `gpupruner`)
 make EXECUTABLE=monBinaire    # Nom de sortie personnalisé
 make clean                    # Supprime les binaires et objets
 ```
 
 Prérequis : `gcc`, `make`, pthreads (disponibles en standard sur macOS et Linux). L'option `NCURSES=1` est facultative et nécessite ncurses (présent par défaut sur macOS et la plupart des distributions Linux) ; sans elle, le programme compile et tourne avec une interface texte ANSI pure, sans dépendance externe.
+
+### Compilation CUDA (pruner GPU, optionnel)
+
+Le build `CUDA=1` active un **pruner GPU** (mode d'exécution `gpupruner`) : même plomberie réseau que `tcppruner`, mais le contrôle de chaque lot de possibilités est exécuté sur le GPU (`gpu_pruner.cu` / `gpu_pruner.h`, dont le kernel calque la fonction CPU `possibility_all_has_a_next`). La cible matérielle est une carte **NVIDIA** ; le code a été validé sur **Jetson Orin Nano**, dont la mémoire unifiée permet l'usage de `cudaMallocManaged` en zero-copy.
+
+> **Plateforme** : Linux/NVIDIA uniquement. macOS (Darwin) n'est **pas** supporté pour ce mode (pas de `nvcc`, pas de runtime CUDA). Le build par défaut (`make`, sans `CUDA=1`) reste strictement identique au binaire classique : tout le code GPU est encadré par `#ifdef WITH_CUDA`, aucun `.cu` n'est compilé et le runtime CUDA n'est pas lié.
+
+**Prérequis :**
+
+- Un **GPU NVIDIA** compatible CUDA et ses pilotes.
+- Le **toolkit CUDA** (`nvcc` + runtime `libcudart`). Installé par défaut sous `/usr/local/cuda` (surchargeable via `CUDA_PATH`).
+- Une **architecture GPU** (`NVCC_ARCH`) correspondant à la carte (Jetson Orin Nano = `sm_87`, défaut).
+
+**Commandes :**
+
+```sh
+make CUDA=1                              # Active gpupruner (ajoute -DWITH_CUDA,
+                                         #   compile gpu_pruner.cu avec nvcc,
+                                         #   lie -lcudart -lstdc++)
+make CUDA=1 VERIFY=1                     # Build de vérification croisée : rejoue le
+                                         #   contrôle CPU pour chaque lot et logue
+                                         #   toute divergence GPU/CPU (parité stricte)
+```
+
+**Variables surchargeables :**
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `NVCC` | `nvcc` | Chemin du compilateur CUDA (doit être dans le `PATH`, sinon échec explicite) |
+| `CUDA_PATH` | `/usr/local/cuda` | Racine du toolkit CUDA (pour `-L$(CUDA_PATH)/lib64`) |
+| `NVCC_ARCH` | `sm_87` | Architecture GPU cible (Orin Nano = `sm_87`) |
+| `NVCCFLAGS` | `-O3 -arch=$(NVCC_ARCH)` | Drapeaux passés à `nvcc` |
+
+**Note Jetson** : sur Jetson Orin Nano, `nvcc` n'est pas dans le `PATH` par défaut. Indiquer son chemin explicitement, et exporter le runtime CUDA à l'exécution :
+
+```sh
+make CUDA=1 NVCC=/usr/local/cuda/bin/nvcc
+# puis à l'exécution :
+LD_LIBRARY_PATH=/usr/local/cuda/lib64 ./eternityII gpupruner localhost 4
+```
+
+Le mode `VERIFY=1` n'est utile que pour valider la parité GPU/CPU ; en production, laisser `VERIFY=0` (le code de vérification est alors entièrement exclu du binaire).
 
 ## Utilisation
 
@@ -76,6 +119,23 @@ Exemples :
 ./eternityII tcpclient 192.168.1.10 8
 ./eternityII tcpclient localhost 4 300 pieces.csv
 ```
+
+### Mode pruner (élagage)
+
+Un **pruner** réutilise la même plomberie réseau qu'un client, mais au lieu d'explorer il demande au serveur des possibilités *à vérifier* et élague celles qui n'ont aucune continuation possible. Deux variantes :
+
+```sh
+./eternityII tcppruner [serveur] [nb_threads] [fichier_pieces.csv]   # élagage CPU
+./eternityII gpupruner [serveur] [nb_threads] [fichier_pieces.csv]   # élagage GPU (build CUDA=1)
+```
+
+| Paramètre | Défaut | Description |
+|---|---|---|
+| `serveur` | `localhost` | Adresse IP ou nom d'hôte du serveur |
+| `nb_threads` | 1 | Nombre de processus de vérification à forker |
+| `fichier_pieces.csv` | `pieces.csv` | Fichier de définition des pièces |
+
+> Le mode `gpupruner` n'est disponible que si le binaire a été compilé avec `make CUDA=1` (voir [Compilation CUDA](#compilation-cuda-pruner-gpu-optionnel)). Sur Jetson, penser à `LD_LIBRARY_PATH=/usr/local/cuda/lib64`.
 
 ### Mode test (autonome)
 
