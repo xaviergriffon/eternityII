@@ -125,8 +125,8 @@ Exemples :
 Un **pruner** réutilise la même plomberie réseau qu'un client, mais au lieu d'explorer il demande au serveur des possibilités *à vérifier* et élague celles qui n'ont aucune continuation possible. Deux variantes :
 
 ```sh
-./eternityII tcppruner [serveur] [nb_threads] [fichier_pieces.csv]   # élagage CPU
-./eternityII gpupruner [serveur] [nb_threads] [fichier_pieces.csv]   # élagage GPU (build CUDA=1)
+./eternityII tcppruner [serveur] [nb_threads] [fichier_pieces.csv] [taille_lot]   # élagage CPU
+./eternityII gpupruner [serveur] [nb_threads] [fichier_pieces.csv] [taille_lot]   # élagage GPU (build CUDA=1)
 ```
 
 | Paramètre | Défaut | Description |
@@ -134,8 +134,26 @@ Un **pruner** réutilise la même plomberie réseau qu'un client, mais au lieu d
 | `serveur` | `localhost` | Adresse IP ou nom d'hôte du serveur |
 | `nb_threads` | 1 | Nombre de processus de vérification à forker |
 | `fichier_pieces.csv` | `pieces.csv` | Fichier de définition des pièces |
+| `taille_lot` | 100 | Nombre de possibilités échangées par aller-retour TCP (borné à 65536) |
 
 > Le mode `gpupruner` n'est disponible que si le binaire a été compilé avec `make CUDA=1` (voir [Compilation CUDA](#compilation-cuda-pruner-gpu-optionnel)). Sur Jetson, penser à `LD_LIBRARY_PATH=/usr/local/cuda/lib64`.
+
+#### Échange par lots
+
+Le contrôle d'une possibilité est très rapide : sans lot, l'aller-retour TCP (une requête `GET` puis un acquittement par possibilité) plafonne le débit réseau et affame le GPU. Le pruner échange donc avec le serveur **par lots** : il demande jusqu'à `taille_lot` possibilités en un seul aller-retour et acquitte de même le lot analysé.
+
+La taille de lot **borne la mémoire** détenue par le pruner (il ne reçoit/acquitte jamais plus que ce lot) et dimensionne les tampons GPU (un lot = un lancement de kernel sur tous les SM). Elle se règle :
+
+- **au démarrage** : 4ᵉ argument de `tcppruner` / `gpupruner` (`taille_lot`) ;
+- **à l'exécution** : commande interactive `prunerBatch <n>` (propagée aux process enfants).
+
+Exemples :
+```sh
+./eternityII tcppruner localhost 4 pieces.csv 500     # lots de 500 (CPU)
+./eternityII gpupruner localhost 1 pieces.csv 4096    # lots de 4096 (GPU)
+```
+
+> ⚠️ **Compatibilité protocole** : cet échange par lots fait passer la `VERSION` du protocole de 5 à 6. Le handshake exige une égalité stricte des versions — **tous les nœuds (serveur, clients, pruners) doivent être recompilés ensemble** ; un binaire VERSION 6 ne dialogue pas avec un VERSION 5.
 
 ### Mode test (autonome)
 
@@ -177,8 +195,9 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard. Tape
 | `printanalysed` | Affiche les possibilités en cours d'analyse |
 | `limit N` | Limite la vitesse de recherche à `N` essais/seconde (0 = illimité) |
 | `maxStockByThread N` | Ajuste le stock max par thread à la volée |
+| `prunerBatch N` | Ajuste la taille de lot d'échange du pruner à la volée (borné à [1, 65536]) |
 
-Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`, `rmnonext`, `limit`, `maxStockByThread`, `min`, `printanalysed`) sont automatiquement retransmises à tous les processus fils via socket Unix.
+Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`, `rmnonext`, `limit`, `maxStockByThread`, `prunerBatch`, `min`, `printanalysed`) sont automatiquement retransmises à tous les processus fils via socket Unix.
 
 ## Interface interactive
 
