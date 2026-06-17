@@ -252,6 +252,47 @@ void *communicate_with_client (void *userdata)
                 send_instruction(client->socket_id,INST_NULL);
             }
 
+        } else if(instruction == INST_GET_TO_CHECK_BATCH && version_supported == 1)
+        {
+            // Client pruner (échange par lot) : un seul aller-retour pour N
+            // possibilités non vérifiées. N est borné par le client (sa mémoire)
+            // et re-borné ici (équité entre pruners, mémoire serveur).
+            int32_t requested = 0;
+            if (recv_all(client->socket_id, &requested, sizeof(requested)) != (long)sizeof(requested))
+            {
+                log_error("batch tocheck : nombre demandé non reçu\n");
+                break;
+            }
+            if (requested < 1) requested = 1;
+            if (requested > PRUNER_BATCH_MAX) requested = PRUNER_BATCH_MAX;
+
+            if(lastPossibilityPacketSend != NULL)
+            {
+                free_array_possibility_packet(lastPossibilityPacketSend);
+                lastPossibilityPacketSend = NULL;
+            }
+            lastPossibilityPacketSend = get_last_possibility_tocheck(requested);
+            int32_t k = (int32_t)lastPossibilityPacketSend->size;
+            for (int p = 0; p < k; p++)
+            {
+                add_possibility_analysed(&lastPossibilityPacketSend->possibilities[p], -1);
+                counters[client->compteur]++;
+                fileUpdates[client->compteur]++;
+            }
+            // Envoi : compte K puis, si K > 0, le bloc contigu des K paquets.
+            if (send_all(client->socket_id, &k, sizeof(k)) != (long)sizeof(k))
+            {
+                log_errno("Erreur d'envoi (compte lot) => ");
+            }
+            else if (k > 0)
+            {
+                if (send_all(client->socket_id, lastPossibilityPacketSend->possibilities,
+                             (size_t)k * sizeof(struct possibility_packet)) < 0)
+                {
+                    log_errno("Erreur d'envoi (bloc lot) => ");
+                }
+            }
+
         } else if(instruction == INST_ADD && version_supported == 1)
         {
             array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
@@ -304,6 +345,36 @@ void *communicate_with_client (void *userdata)
                 send_instruction(client->socket_id, INST_ERROR);
             }
             free (possibilityPacket);
+        } else if (instruction == INST_POSSIBILITY_ANALYSED_BATCH && version_supported == 1) {
+            // Acquittement par lot : M paquets en un aller-retour, un seul INST_CONSIDERED.
+            int32_t m = 0;
+            if (recv_all(client->socket_id, &m, sizeof(m)) != (long)sizeof(m)) {
+                log_error("batch analysed : nombre non reçu\n");
+                break;
+            }
+            if (m < 0 || m > PRUNER_BATCH_MAX) {
+                log_error("batch analysed : compte hors borne (%d)\n", m);
+                break;
+            }
+            int transfer_ok = 1;
+            struct possibility_packet pkt;
+            for (int p = 0; p < m; p++) {
+                if (recv_all(client->socket_id, &pkt, sizeof(pkt)) != (long)sizeof(pkt)) {
+                    log_error("batch analysed : paquet %d incomplet\n", p);
+                    transfer_ok = 0;
+                    break;
+                }
+                if (remove_possibility_analysed(&pkt, -1) != 0) {
+                    // Non bloquant : l'entrée « en analyse » a pu déjà être retirée.
+                    log_error("batch analysed : possibilité non retirée (%d)\n", p);
+                }
+            }
+            if (transfer_ok) {
+                send_instruction(client->socket_id, INST_CONSIDERED);
+            } else {
+                send_instruction(client->socket_id, INST_ERROR);
+                break;
+            }
         } else if (instruction == INST_TEST_CONNECTED) {
             send_instruction(client->socket_id, INST_TEST_CONNECTED);
         } else if (version_supported == 0) {

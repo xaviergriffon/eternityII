@@ -918,7 +918,17 @@ void *autoprune_gpu (void *userdata)
                 // Statistique : tout le lot est étudié
                 counters[client->compteur] += n;
 
-                uint8_t alive[PRUNER_BATCH_SIZE];
+                // Lot de taille configurable (jusqu'à pruner_batch_size, borné par
+                // PRUNER_BATCH_MAX) : verdicts vivant/mort alloués selon n, pas une
+                // taille fixe (l'ancien tableau pile PRUNER_BATCH_SIZE débordait dès
+                // qu'un lot dépassait 100).
+                uint8_t *alive = malloc((size_t)n * sizeof(uint8_t));
+                if (alive == NULL)
+                {
+                    log_error("gpu pruner : allocation alive (%d) impossible — lot renvoyé au serveur\n", n);
+                }
+                else
+                {
 
 #ifdef GPU_PRUNER_VERIFY
                 // Vérification croisée : on garde une copie de l'entrée avant
@@ -980,7 +990,9 @@ void *autoprune_gpu (void *userdata)
                         pruner_removed++;
                     }
                 }
+                free(alive);
                 processed = 1;
+                }
             }
         }
         lastfilesize[client->compteur] = 0;

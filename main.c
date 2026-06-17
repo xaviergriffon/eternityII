@@ -115,10 +115,21 @@ void handle_tcpclient(int argc, const char *argv[]) {
     }
     if (argc >= 5) {
         if (pruner_mode) {
-            // tcppruner [serveur] [nb_threads] [pieces.csv] : pas de stock local
+            // tcppruner [serveur] [nb_threads] [pieces.csv] [batch] : pas de stock local
             parts_files = (char *)(argv[4]);
         } else {
             max_stock_by_thread = atoi(argv[4]);
+        }
+    }
+    if (pruner_mode && argc >= 6) {
+        // Taille du lot d'échange pruner (configurable au démarrage). Bornée pour
+        // maîtriser la mémoire du pruner et les tampons GPU.
+        pruner_batch_size = atoi(argv[5]);
+        if (pruner_batch_size < 1) {
+            pruner_batch_size = 1;
+        }
+        if (pruner_batch_size > PRUNER_BATCH_MAX) {
+            pruner_batch_size = PRUNER_BATCH_MAX;
         }
     }
 #ifdef DEBUG_IN_MONO_PROCESS
@@ -139,7 +150,10 @@ void handle_tcpclient(int argc, const char *argv[]) {
 
     init_sigchld_sigaction();
 
-    if (argc >= 6) {
+    // argv[5] = pieces.csv pour un client de recherche. Pour un pruner, argv[5]
+    // est la taille de lot (cf. plus haut) et le fichier de pièces reste argv[4] :
+    // on ne l'écrase donc pas ici.
+    if (!pruner_mode && argc >= 6) {
         parts_files = (char *)(argv[5]);
     }
 

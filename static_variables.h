@@ -7,7 +7,7 @@
 #include <sys/un.h>
 #include "etii_statistic.h"
 
-#define VERSION 5
+#define VERSION 6
 
 #define NB_CONNECTIONS_PER_THREAD 1
 // Temps d'attente de 100 microsecondes
@@ -22,10 +22,14 @@
 // exécutés par le thread de recherche : sa fréquence doit être bornée en temps,
 // pas en nombre de nœuds explorés (sinon elle croît avec la vitesse du moteur).
 #define DELEGATE_MIN_INTERVAL_MS 500
-// Nombre de possibilités demandées au serveur par requête d'un client pruner.
-// Le contrôle d'une possibilité est rapide : sans lot, l'aller-retour TCP
-// dominerait le coût.
+// Nombre de possibilités demandées au serveur par requête d'un client pruner
+// (valeur PAR DÉFAUT de `pruner_batch_size`). Le contrôle d'une possibilité est
+// rapide : sans lot, l'aller-retour TCP dominerait le coût.
 #define PRUNER_BATCH_SIZE 100
+// Borne supérieure de la taille de lot pruner configurable (`pruner_batch_size`).
+// Plafonne la mémoire d'un échange par lot (côté serveur comme pruner) et la
+// taille des tampons GPU managés. 65536 × ~0,5 Ko ≈ 36 Mo.
+#define PRUNER_BATCH_MAX 65536
 
 #define REQUEST_STOP 1
 #define REQUEST_CONTINUE 0
@@ -133,6 +137,17 @@ extern int NB_THREADS;
  * les mortes et renvoie les survivantes marquées `checked = 1`.
  */
 extern int pruner_mode;
+
+/**
+ * @brief Nombre de possibilités qu'un client pruner demande/acquitte par lot.
+ *
+ * Configurable au démarrage (argument CLI de `tcppruner`/`gpupruner`) et à
+ * l'exécution via la commande `prunerBatch <n>` (propagée aux process enfants).
+ * Borne la mémoire de l'échange : le pruner ne détient jamais plus que ce lot,
+ * la capacité mémoire n'a donc pas à être supposée illimitée. Défaut
+ * `PRUNER_BATCH_SIZE`, plafonné à `PRUNER_BATCH_MAX`.
+ */
+extern int pruner_batch_size;
 
 #ifdef WITH_CUDA
 /**

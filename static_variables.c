@@ -78,6 +78,8 @@ volatile unsigned long long fc_pruned_at[FORWARD_CHECK_K + 1] = {0};
 
 int pruner_mode = 0;
 
+int pruner_batch_size = PRUNER_BATCH_SIZE;
+
 #ifdef WITH_CUDA
 int gpu_pruner_mode = 0;
 #endif // WITH_CUDA

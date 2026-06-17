@@ -79,6 +79,46 @@ long send_instruction(int socket_id, int8_t instruction)
 	return result;
 }
 
+long recv_all(int socket_id, void *buf, size_t len)
+{
+	size_t total = 0;
+	char *p = (char *)buf;
+	while (total < len) {
+		long r = recv(socket_id, p + total, len - total, 0);
+		if (r > 0) {
+			total += (size_t)r;
+			continue;
+		}
+		if (r == 0) {
+			// Pair fermé : on rend le total partiel, l'appelant détecte < len.
+			return (long)total;
+		}
+		if (errno == EINTR) {
+			continue;
+		}
+		return -1;
+	}
+	return (long)total;
+}
+
+long send_all(int socket_id, const void *buf, size_t len)
+{
+	size_t total = 0;
+	const char *p = (const char *)buf;
+	while (total < len) {
+		long s = send(socket_id, p + total, len - total, 0);
+		if (s > 0) {
+			total += (size_t)s;
+			continue;
+		}
+		if (s < 0 && errno == EINTR) {
+			continue;
+		}
+		return -1;
+	}
+	return (long)total;
+}
+
 /**
  * @brief Teste si un socket TCP est toujours connecté.
  *

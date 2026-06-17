@@ -10,7 +10,7 @@
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
-#define NB_COMMANDS 27
+#define NB_COMMANDS 28
 
 /**
  * @brief Définition d'une commande prise en charge
@@ -28,6 +28,7 @@ typedef struct
 int sort_ascending_interpreter(void);
 int sort_descending_interpreter(void);
 int max_stock_by_thread_interpreter(void);
+int pruner_batch_interpreter(void);
 int limit_interpreter(void);
 int exit_interpreter(void);
 int check_interpreter(void);
@@ -60,6 +61,7 @@ static command_description commands[NB_COMMANDS] = {
     {"sorta", sort_ascending_interpreter, 0},
     {"sortd", sort_descending_interpreter, 0},
     {"maxStockByThread", max_stock_by_thread_interpreter, 1},
+    {"prunerBatch", pruner_batch_interpreter, 1},
     {"limit", limit_interpreter, 1},
     {"exit", exit_interpreter, 0},
     {"check", check_interpreter, 0},
@@ -108,6 +110,29 @@ int max_stock_by_thread_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments != NULL) {
         max_stock_by_thread = atoi(arguments);
+        return 0;
+    }
+    return -1;
+}
+
+/**
+ * @brief Interpréteur de `prunerBatch <n>` : fixe la taille de lot d'échange du
+ *        pruner (nombre de possibilités demandées/acquittées par aller-retour).
+ *
+ * Propagée aux process enfants (send_to_childs = 1). Bornée à [1, PRUNER_BATCH_MAX]
+ * pour maîtriser la mémoire du pruner et les tampons GPU.
+ */
+int pruner_batch_interpreter(void) {
+    char *arguments = strtok(NULL, " ");
+    if (arguments != NULL) {
+        int v = atoi(arguments);
+        if (v < 1) {
+            v = 1;
+        }
+        if (v > PRUNER_BATCH_MAX) {
+            v = PRUNER_BATCH_MAX;
+        }
+        pruner_batch_size = v;
         return 0;
     }
     return -1;
