@@ -1,0 +1,45 @@
+name: CI
+
+# Build + tests unitaires (greatest) + couverture (gcov) à chaque push et PR.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# Annule les runs obsolètes sur une même réf (push rapprochés).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # gcc / make / gcov sont préinstallés sur ubuntu-latest.
+      - name: Versions des outils
+        run: gcc --version && make --version && gcov --version
+
+      - name: Build release
+        run: make
+
+      - name: Tests unitaires
+        run: make test
+
+      - name: Couverture de code
+        run: make coverage
+
+  ncurses-build:
+    name: Build variante ncurses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dépendance ncurses
+        run: sudo apt-get update && sudo apt-get install -y libncurses-dev
+
+      # Vérifie que le chemin logger_ncurses.c compile et lie toujours.
+      - name: Build NCURSES=1
+        run: make NCURSES=1

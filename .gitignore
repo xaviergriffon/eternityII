@@ -4,3 +4,9 @@ eternityII.xcodeproj/project.xcworkspace/xcuserdata/xaviergriffon.xcuserdatad/Us
 eternityII
 *.back
 *.log
+tests/run_tests
+tests/run_tests.dSYM/
+tests/coverage/
+*.gcov
+*.gcno
+*.gcda
