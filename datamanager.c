@@ -461,56 +461,41 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 	{
 		File *file = &file_possibility_analysed[thread].file;
 		if (file->start != NULL) {
-			struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
-			while (scroll(file, possibility)) {
-				send_instruction(socket_id, INST_POSSIBILITY_ANALYSED);
-				ssize_t result = send(socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
-				if (result < 0 ) {
-					log_errno("Error when send_possibility_analysed => ");
-					put(file, possibility);
-					break;
-				}
-				if(recv_instruction(socket_id) != INST_CONSIDERED){
-					log_error("possibility analyzed not taken into account :\n");
-					struct tms t2;
-					times(&t2);
-					time_t t;
-					long tops = sysconf(_SC_CLK_TCK);
-					t = ((t2.tms_utime + t2.tms_stime)
-							- (client_possibility->start_socket.tms_utime + client_possibility->start_socket.tms_stime)) * 1000 / tops;
-                    log_error ("socket time : %ld\n", t);
-					print_possibility_packet(possibility);
-                    put(file, possibility);
-					break;
-				}
-/*
-                Element *currentElement = element;
-				if (element->next != NULL) {
-					element = element->next;
-					if (currentElement->previous != NULL) {
-						currentElement->previous->next = element;
-						element->previous = currentElement->previous;
-					} else {
-						file->start = element;
-						element->previous = NULL;
+			// Acquittement par lot : on draine la file par tranches de
+			// pruner_batch_size et on envoie chaque tranche en un seul
+			// INST_POSSIBILITY_ANALYSED_BATCH (un INST_CONSIDERED par tranche).
+			// Borne la mémoire (cap paquets) et lève le plafond « 1 aller-retour
+			// par possibilité » de l'ancien acquittement individuel.
+			int cap = (pruner_batch_size > 0) ? pruner_batch_size : 1;
+			struct possibility_packet *buf = malloc((size_t)cap * sizeof(struct possibility_packet));
+			if (buf != NULL) {
+				int drained;
+				do {
+					drained = 0;
+					while (drained < cap && scroll(file, &buf[drained])) {
+						drained++;
 					}
-                    possibility = element->value;
-				} else {
-					if (file->start == element) {
-						file->start = NULL;
-						file->end = NULL;
-					} else {
-						file->end = element->previous;
-						element->previous->next = NULL;
+					if (drained == 0) {
+						break;
 					}
-					possibility = NULL;
-				}
-                // TODO : tester si liste avec cache
-                free(currentElement);
-				file->size--;
- */
+					int32_t m = drained;
+					size_t bytes = (size_t)drained * sizeof(struct possibility_packet);
+					int sent_ok = (send_instruction(socket_id, INST_POSSIBILITY_ANALYSED_BATCH) > 0)
+					           && (send_all(socket_id, &m, sizeof(m)) == (long)sizeof(m))
+					           && (send_all(socket_id, buf, bytes) == (long)bytes);
+					if (!sent_ok) {
+						log_errno("Error when send_possibility_analysed (batch) => ");
+						for (int i = 0; i < drained; i++) put(file, &buf[i]);
+						break;
+					}
+					if (recv_instruction(socket_id) != INST_CONSIDERED) {
+						log_error("batch analysed non pris en compte (%d possibilités), remise en file\n", drained);
+						for (int i = 0; i < drained; i++) put(file, &buf[i]);
+						break;
+					}
+				} while (drained == cap);
+				free(buf);
 			}
-            free(possibility);
 		}
 
 		pthread_mutex_unlock(&file_possibility_analysed[thread].lock);
@@ -634,6 +619,37 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 	pthread_mutex_lock(&client_possibility->socket_mutex);
 	int socket_id = check_and_connect_to_server(client_possibility);
 	if (socket_id == -1) {
+		pthread_mutex_unlock(&client_possibility->socket_mutex);
+		return;
+	}
+
+	// Client pruner : échange par lot (un seul aller-retour pour jusqu'à
+	// max_result possibilités). max_result = pruner_batch_size borne la mémoire
+	// détenue : le pruner ne reçoit jamais plus que ce lot.
+	if (pruner_mode)
+	{
+		int32_t requested = max_result;
+		int ok = (send_instruction(socket_id, INST_GET_TO_CHECK_BATCH) > 0)
+		      && (send_all(socket_id, &requested, sizeof(requested)) == (long)sizeof(requested));
+		int32_t k = 0;
+		if (ok && recv_all(socket_id, &k, sizeof(k)) == (long)sizeof(k) && k > 0)
+		{
+			if (k > requested) k = requested; // garde-fou défensif
+			size_t bytes = (size_t)k * sizeof(struct possibility_packet);
+			result->possibilities = malloc(bytes);
+			if (recv_all(socket_id, result->possibilities, bytes) == (long)bytes)
+			{
+				result->size = k;
+			}
+			else
+			{
+				log_error("batch tocheck : bloc de %d possibilités incomplet\n", k);
+				free(result->possibilities);
+				result->possibilities = NULL;
+				result->size = 0;
+			}
+		}
+		// k == 0 → rien de disponible : result reste vide.
 		pthread_mutex_unlock(&client_possibility->socket_mutex);
 		return;
 	}

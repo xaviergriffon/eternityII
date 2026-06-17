@@ -43,7 +43,7 @@ void *feed_thread_aposs(void *param) {
                     send_possibility_analysed(client_possibility);
                     // Un pruner consomme vite : on demande un lot pour amortir les
                     // allers-retours TCP ; un client de recherche garde 1 racine
-                    array_possibility_packet *aposs = get_last_possibility(client_possibility, pruner_mode ? PRUNER_BATCH_SIZE : 1);
+                    array_possibility_packet *aposs = get_last_possibility(client_possibility, pruner_mode ? pruner_batch_size : 1);
                     if(aposs->size > 0)
                     {
                         // On alimente la pile des possibilités en étude

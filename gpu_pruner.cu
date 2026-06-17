@@ -60,7 +60,11 @@ static GpuMap g_map;
 static int    g_inited = 0;
 static struct possibility_packet *g_packets = NULL; /* buffer de travail (managed) */
 static uint8_t                   *g_alive   = NULL; /* sorties (managed) */
-static const int                  g_cap = PRUNER_BATCH_SIZE;
+/* Capacité d'un lancement kernel, fixée à l'init selon `pruner_batch_size`
+   (bornée par PRUNER_BATCH_MAX). Un lot plus grand est traité par tranches de
+   g_cap ; on dimensionne donc g_cap à la taille de lot configurée pour qu'un
+   lot tienne en un seul lancement (occupation GPU maximale). */
+static int                        g_cap = PRUNER_BATCH_SIZE;
 
 /* ----------------------------------------------------------------------------
  * Réimplémentations __device__ (parité stricte avec possibility.c / possibility.h)
@@ -296,6 +300,17 @@ extern "C" int gpu_pruner_init(const map_big_array *map, const struct array_part
     }
     if ((err = cudaMemcpyToSymbol(c_diry, diry, ETERN_PARTS * sizeof(uint8_t))) != cudaSuccess) {
         return gpu_fail("cudaMemcpyToSymbol(diry)", err);
+    }
+
+    // Capacité d'un lancement = taille de lot configurée (bornée). Permet de
+    // traiter tout un lot pruner en un seul kernel (plusieurs blocs sur tous les
+    // SM) plutôt qu'en tranches de PRUNER_BATCH_SIZE.
+    g_cap = pruner_batch_size;
+    if (g_cap < 1) {
+        g_cap = 1;
+    }
+    if (g_cap > PRUNER_BATCH_MAX) {
+        g_cap = PRUNER_BATCH_MAX;
     }
 
     // Buffers de travail (managed) dimensionnés pour un lot.

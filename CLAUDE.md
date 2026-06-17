@@ -27,6 +27,11 @@ The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` inste
 # Start a client (does the search)
 ./eternityII tcpclient [server_host] [nb_threads] [max_stock_per_thread] [pieces.csv]
 
+# Start a pruner client (validates unchecked possibilities, batched exchange)
+./eternityII tcppruner [server_host] [nb_threads] [pieces.csv] [batch_size]
+# GPU pruner (CUDA build only): same args, batch checked on the GPU
+./eternityII gpupruner [server_host] [nb_threads] [pieces.csv] [batch_size]
+
 # Self-contained test/auto mode (no server needed)
 ./eternityII test [pieces.csv]
 ```
@@ -56,6 +61,11 @@ The protocol uses fixed-size `packet` structs containing an `instruction` byte a
 | `INST_NULL` | 6 | No possibility available |
 | `INST_POSSIBILITY_ANALYSED` | 7 | Possibility already analysed |
 | `INST_CHECK_VERSION` / `INST_SUPPORTED_VERSION` / `INST_UNSUPPORTED_VERSION` | 9/10/11 | Version handshake |
+| `INST_GET_TO_CHECK` | 12 | Pruner requests one unchecked possibility |
+| `INST_GET_TO_CHECK_BATCH` | 13 | Pruner requests up to N unchecked possibilities in one round-trip (`int32` N → `int32` K + K packets) |
+| `INST_POSSIBILITY_ANALYSED_BATCH` | 14 | Pruner acks M analysed possibilities in one round-trip (`int32` M + M packets → one `INST_CONSIDERED`) |
+
+A pruner exchanges with the server in batches of `pruner_batch_size` (configurable via the 4th `tcppruner`/`gpupruner` CLI arg, or the `prunerBatch <n>` console command, capped at `PRUNER_BATCH_MAX`), bounding its memory. `recv_all`/`send_all` (etii_protocol.c) handle the partial-transfer of multi-packet blocks. Bumping the wire format requires bumping `VERSION` (exact-match handshake).
 
 ### Core Data Structures
 
