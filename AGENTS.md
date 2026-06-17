@@ -13,7 +13,11 @@ make                          # Release build → ./eternityII
 make DEBUG=1                  # Debug build (keeps .o files, adds -g)
 make EXECUTABLE=myBinary      # Custom output name
 make clean                    # Remove all build artifacts
+make test                     # Build & run the greatest unit-test suite (tests/)
+make coverage                 # Run tests under gcov, print per-module line coverage
 ```
+
+Unit tests live in `tests/` (greatest, single-header, vendored — no external dep) and cover the pure-logic modules `lifo.c`, `part.c`, `readdata.c`. `make test` links only the modules under test plus their deps (never `main.c`); fixtures are hand-built to stay independent of `ETERN_PARTS`. CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs build + test + coverage and a `NCURSES=1` compile-check on every push/PR.
 
 The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` instead of `-lOpenCL` (OpenCL support is currently commented out in the link step).
 

@@ -14,6 +14,8 @@ make DEBUG=1                  # Debug build (keeps .o files, adds -g)
 make NCURSES=1                # Build with ncurses UI (links -lncurses, replaces logger.c with logger_ncurses.c)
 make EXECUTABLE=myBinary      # Custom output name
 make clean                    # Remove all build artifacts
+make test                     # Build & run the greatest unit-test suite (tests/)
+make coverage                 # Run tests under gcov, print per-module line coverage
 ```
 
 The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` instead of `-lOpenCL` (OpenCL support is currently commented out in the link step).
@@ -37,6 +39,24 @@ The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` inste
 ```
 
 Default piece file: `pieces.csv` (256-piece puzzle). A smaller 16-piece variant is `pieces16.csv`.
+
+## Testing
+
+Unit tests live in `tests/` and use [greatest](https://github.com/silentbicycle/greatest) — a single-header C test framework vendored as `tests/greatest.h` (no external dependency). Currently covers the pure-logic modules `lifo.c`, `part.c`, `readdata.c`.
+
+```sh
+make test       # compile tests/ + run; non-zero exit on failure (CI-ready)
+make coverage   # same, instrumented with --coverage; prints a gcov per-module summary
+```
+
+Conventions to keep in mind when adding or extending tests:
+
+- **No `main.c` in the test binary.** `make test` links only the modules under test plus their transitive link deps (`logger.o`, `static_variables.o`). The `TEST_SRCS` / `TEST_MODULES` Makefile variables control this; each test file exposes a `SUITE` registered in `tests/test_main.c`.
+- **Hand-built fixtures, not `pieces.csv` / `rotate_all_parts`.** Tests construct small `part` / `array_part` structs inline, so they stay independent of `ETERN_PARTS` (256 vs 16) and need no data file in the CWD. `rotate_all_parts` indexes by `i + ETERN_PARTS*r` and is only correct when `ETERN_PARTS` matches the real puzzle size — don't build fixtures through it.
+- **Error paths that call `exit()` aren't tested** where the code aborts (e.g. a missing CSV in `read_parts`): greatest runs in-process, so an `exit()` would kill the whole runner. Covering those would require forking per test.
+- **Coverage artifacts** (`.o/.gcno/.gcda/.gcov`) stay confined to `tests/coverage/` (gitignored, removed by `make clean`). `make coverage` compiles one object per source so gcov finds clean `.gcno` names; drill into `tests/coverage/<module>.c.gcov` (`#####` = never executed).
+
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the release build, `make test`, `make coverage`, and a compile-check of the `NCURSES=1` variant on every push and PR. CUDA isn't exercised in CI (no `nvcc` on runners).
 
 ## Architecture
 

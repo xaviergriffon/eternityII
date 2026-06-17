@@ -77,6 +77,35 @@ LD_LIBRARY_PATH=/usr/local/cuda/lib64 ./eternityII gpupruner localhost 4
 
 Le mode `VERIFY=1` n'est utile que pour valider la parité GPU/CPU ; en production, laisser `VERIFY=0` (le code de vérification est alors entièrement exclu du binaire).
 
+## Tests et couverture
+
+Des tests unitaires couvrent les modules à logique pure (`lifo.c`, `part.c`, `readdata.c`), basés sur [greatest](https://github.com/silentbicycle/greatest) — un framework C *single-header* vendoré dans `tests/`, **sans dépendance externe** à installer.
+
+```sh
+make test        # compile et lance la suite (code de sortie non nul si échec)
+make coverage    # idem + rapport de couverture par module (gcov)
+```
+
+`make test` produit un binaire isolé (`tests/run_tests`) qui ne lie **que** les modules testés et leurs dépendances — `main.c` n'est jamais inclus. `make coverage` recompile en mode instrumenté et affiche le pourcentage de lignes couvertes :
+
+```
+===== Couverture de code (modules testés) =====
+  lifo.c         Lines executed:48.29% of 234
+  part.c         Lines executed:50.77% of 388
+  readdata.c     Lines executed:18.75% of 192
+```
+
+Le détail ligne par ligne est dans `tests/coverage/<module>.c.gcov` (lignes jamais exécutées marquées `#####`). Voir [tests/README.md](tests/README.md) pour ajouter un test ou générer un rapport HTML (lcov).
+
+## Intégration continue
+
+À chaque push et pull request, [GitHub Actions](.github/workflows/ci.yml) :
+
+- compile le build de production (`make`), lance les tests unitaires (`make test`) et la couverture (`make coverage`) ;
+- vérifie que la variante ncurses (`make NCURSES=1`) compile toujours.
+
+Le mode CUDA n'est pas testé en CI (pas de `nvcc` sur les runners ; la validation se fait sur Jetson).
+
 ## Utilisation
 
 ### Mode serveur
