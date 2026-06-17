@@ -1261,17 +1261,22 @@ int restore_analysed(char *filename)
 
 int print_file(int fp)
 {
-    Element *currElement = file_possibility[fp].file.start;
-    while(currElement != NULL)
+    // Les deux pools sont affichés : non vérifié et vérifié (checked == 1)
+    File *pools[2] = { &file_possibility[fp].file, &file_possibility_checked[fp].file };
+    for (int p = 0; p < 2; p++)
     {
-        if(currElement->value != NULL)
+        Element *currElement = pools[p]->start;
+        while(currElement != NULL)
         {
-            struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-            print_possibility_packet(possibility);
-        } else {
-            log_info("null value\n");
+            if(currElement->value != NULL)
+            {
+                struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+                print_possibility_packet(possibility);
+            } else {
+                log_info("null value\n");
+            }
+            currElement = currElement->next;
         }
-        currElement = currElement->next;
     }
     return 0;
 }
@@ -1323,42 +1328,60 @@ int print_all_file_analysed(void)
 }
 
 /**
- * @brief Regroupe toutes les files en une seule (file 0) sans verrouillage.
+ * @brief Regroupe toutes les files d'un pool dans sa file 0, sans verrouillage.
  *
  * Doit être appelée avec les files déjà verrouillées.
  *
- * @return Taille totale de la file 0 après regroupement.
+ * @param pool Tableau de files (pool non vérifié ou vérifié).
+ * @return     Taille totale de la file 0 après regroupement.
  */
-unsigned long long regroup_datas_nolock(void)
+static unsigned long long regroup_pool_nolock(file_possibility_t *pool)
 {
 	int fp;
-    unsigned long long size = file_possibility[0].file.size;
+	unsigned long long size = pool[0].file.size;
 	struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
 	for (fp=1; fp < NB_FILE_POSSIBILITY; fp++)
 	{
-		
-		while (file_possibility[fp].file.size > 0) {
-			
-			scroll(&file_possibility[fp].file,packet);
+
+		while (pool[fp].file.size > 0) {
+
+			scroll(&pool[fp].file,packet);
 			if(packet!=NULL)
 			{
-				put(&file_possibility[0].file, packet);
+				put(&pool[0].file, packet);
 				size++;
 			}
-			
+
 		}
-        
+
 	}
-    log_info("regroup size :%llu\n",size);
 	free(packet);
 	packet = NULL;
+	return size;
+}
+
+/**
+ * @brief Regroupe le pool non vérifié dans sa file 0, sans verrouillage.
+ *
+ * Doit être appelée avec les files déjà verrouillées. Utilisée en interne par
+ * les routines de tri/répartition, qui ne travaillent que sur le pool non
+ * vérifié.
+ *
+ * @return 0.
+ */
+unsigned long long regroup_datas_nolock(void)
+{
+	unsigned long long size = regroup_pool_nolock(file_possibility);
+	log_info("regroup size :%llu\n",size);
 	return 0;
 }
 
 int regroup_datas(void)
 {
 	lock_all_file();
-	regroup_datas_nolock();
+	// Les deux pools sont regroupés indépendamment : non vérifié et vérifié
+	regroup_pool_nolock(file_possibility);
+	regroup_pool_nolock(file_possibility_checked);
 	unlock_all_file();
 	return 0;
 }
@@ -1370,6 +1393,8 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
 {
     lock_all_file();
     int fp;
+	// Seul le pool non vérifié est élagué : une possibilité vérifiée (checked == 1)
+	// a déjà été confirmée vivante par un pruner, elle a donc forcément une suite.
 	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
 	{
 		Element *currElement = file_possibility[fp].file.start;
@@ -1428,57 +1453,71 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
  * @param nbsplit Nombre de files cibles (≤ NB_FILE_POSSIBILITY).
  * @return        0.
  */
-int split_datas_nolock(int nbsplit)
+/**
+ * @brief Répartit un pool sur `nbsplit` files, sans verrouillage.
+ * @param pool    Tableau de files (pool non vérifié ou vérifié).
+ * @param nbsplit Nombre de files cibles (≤ NB_FILE_POSSIBILITY).
+ * @return        0.
+ */
+static int split_pool_nolock(file_possibility_t *pool, int nbsplit)
 {
-	regroup_datas_nolock();
-	
+	regroup_pool_nolock(pool);
+
 	File *file = malloc(sizeof(File));
 	init_file_with_cache(file, 0, sizeof(struct possibility_packet));
 	struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
-	while (file_possibility[0].file.size > 0)
+	while (pool[0].file.size > 0)
 	{
-		
-		if(scroll(&file_possibility[0].file, possibility))
+
+		if(scroll(&pool[0].file, possibility))
 		{
 			put(file, possibility);
 		}
 	}
-	
+
 	lldiv_t d = lldiv(file->size, nbsplit);
 	long long quotient = d.quot;
 	if(d.rem != 0)
 	{
 		quotient++;
 	}
-	
+
 	int f;
 	for (f=0; f < nbsplit; f++){
-		while(file_possibility[f].file.size < quotient && file->size > 0){
+		while(pool[f].file.size < quotient && file->size > 0){
 			if(scroll(file, possibility))
 			{
-				put(&file_possibility[f].file, possibility);
+				put(&pool[f].file, possibility);
 			}
 		}
 	}
-	
+
 	// si le quotient n'était pas bon on vide dans la premiere liste pour éviter la perte
 	while(file->size > 0){
 		if(scroll(file, possibility))
 		{
-			put(&file_possibility[0].file, possibility);
+			put(&pool[0].file, possibility);
 		}
 	}
-	
+
 	free(possibility);
 	free_file(file);
-	
+
 	return 0;
+}
+
+int split_datas_nolock(int nbsplit)
+{
+	// Pool non vérifié uniquement (utilisé en interne par le tri multi-thread)
+	return split_pool_nolock(file_possibility, nbsplit);
 }
 
 int split_datas(void)
 {
 	lock_all_file();
-	split_datas_nolock(NB_FILE_POSSIBILITY);
+	// Les deux pools sont répartis indépendamment : non vérifié et vérifié
+	split_pool_nolock(file_possibility, NB_FILE_POSSIBILITY);
+	split_pool_nolock(file_possibility_checked, NB_FILE_POSSIBILITY);
 	unlock_all_file();
 	return 0;
 }
@@ -1494,24 +1533,29 @@ int check_datas(void)
 	int fp;
 	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
 	{
-		Element *currElement = file_possibility[fp].file.start;
-		while (currElement != NULL)
+		// Les deux pools sont vérifiés : non vérifié et vérifié (checked == 1)
+		File *pools[2] = { &file_possibility[fp].file, &file_possibility_checked[fp].file };
+		for (int p = 0; p < 2; p++)
 		{
-			count++;
-			int analyse = check_possibility((struct possibility_packet *)currElement->value, rotateParts);
-			if (analyse < 0)
+			Element *currElement = pools[p]->start;
+			while (currElement != NULL)
 			{
-				log_error("possibility error : %i\n",analyse);
-                log_error(" ---");
-				print_possibility_packet((struct possibility_packet *)currElement->value);
-                errors++;
+				count++;
+				int analyse = check_possibility((struct possibility_packet *)currElement->value, rotateParts);
+				if (analyse < 0)
+				{
+					log_error("possibility error : %i\n",analyse);
+					log_error(" ---");
+					print_possibility_packet((struct possibility_packet *)currElement->value);
+					errors++;
+				}
+				currElement = currElement->next;
 			}
-			currElement = currElement->next;
 		}
 	}
-	
+
 	unlock_all_file();
-	
+
 	log_info("check_datas errors %i on %i\n", errors, count);
     return errors > 0 ? -1 : 0;
 }
@@ -1700,8 +1744,19 @@ int check_duplicate(void)
     lock_all_file();
     unsigned long long count = 0;
     unsigned long long errors = 0;
-    
-    unsigned long long dataSize = datas_size();
+
+    // NOTE : la détection de doublons ne balaie que le pool non vérifié.
+    // Le walker threadé (check_duplicate_thread) référence directement
+    // file_possibility[] pour partitionner et comparer ; étendre la recherche
+    // au pool vérifié (checked == 1) imposerait de chaîner 2*NB_FILE_POSSIBILITY
+    // files dans une même séquence — hors périmètre ici. On dimensionne donc le
+    // travail sur la taille du seul pool non vérifié (et non datas_size(), qui
+    // inclut le pool vérifié) pour que le nombre de combinaisons corresponde
+    // exactement aux éléments réellement parcourus.
+    unsigned long long dataSize = 0;
+    for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+        dataSize += file_size(f);
+    }
     unsigned long long nbCombinations = count_combinations(dataSize);
     unsigned long long nbByThread = nbCombinations / nbDuplicateThread;
     log_info("qt: %llu nb combinations %llu | nb/threads: %llu\n", dataSize, nbCombinations, nbByThread);
@@ -1775,18 +1830,26 @@ int statistic_datas(void)
     }
     for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
     {
-        Element *currElement = file_possibility[fp].file.start;
-        while (currElement != NULL)
+        // Les deux pools comptent : non vérifié et vérifié (checked == 1)
+        File *pools[2] = { &file_possibility[fp].file, &file_possibility_checked[fp].file };
+        for (int p = 0; p < 2; p++)
         {
-            count++;
-            struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-            countSize[possibility->alloc]++;
-            currElement = currElement->next;
+            Element *currElement = pools[p]->start;
+            while (currElement != NULL)
+            {
+                count++;
+                struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+                if (possibility != NULL)
+                {
+                    countSize[possibility->alloc]++;
+                }
+                currElement = currElement->next;
+            }
         }
     }
-    
+
     unlock_all_file();
-    
+
     log_info("check_datas analyses:%i\n",count);
     for (int i = 0; i < ETERN_PARTS; i++) {
         log_info("%i : %i\n", i, countSize[i]);
@@ -1796,6 +1859,27 @@ int statistic_datas(void)
     return 0;
 }
 
+/**
+ * @brief Met à jour `current` avec le plus petit `alloc` trouvé dans `file`.
+ * @param file    File à parcourir.
+ * @param current Minimum courant.
+ * @return        Le minimum entre `current` et tous les `alloc` de `file`.
+ */
+static int min_alloc_in_file(File *file, int current)
+{
+	Element *currElement = file->start;
+	while (currElement != NULL)
+	{
+		struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+		if(possibility != NULL && possibility->alloc < current)
+		{
+			current = possibility->alloc;
+		}
+		currElement = currElement->next;
+	}
+	return current;
+}
+
 int search_min_datas(void)
 {
 	int result = ETERN_PARTS + 1;
@@ -1803,18 +1887,11 @@ int search_min_datas(void)
 	int fp;
 	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
 	{
-		Element *currElement = file_possibility[fp].file.start;
-		while (currElement != NULL)
-		{
-			struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-			if(possibility->alloc < result)
-			{
-				result = possibility->alloc;
-			}
-			currElement = currElement->next;
-		}
+		// Les deux pools comptent : non vérifié et vérifié (checked == 1)
+		result = min_alloc_in_file(&file_possibility[fp].file, result);
+		result = min_alloc_in_file(&file_possibility_checked[fp].file, result);
 	}
-	
+
 	unlock_all_file();
     
     // Il n'y a donc aucun élément
@@ -1825,12 +1902,18 @@ int search_min_datas(void)
 }
 
 // TODO : revoir le trie pour prendre en compte le cache
-int sort_ascending(void)
+/**
+ * @brief Trie une `File` en place, par nombre de pièces placées croissant.
+ *
+ * Doit être appelée avec les files déjà verrouillées.
+ *
+ * @param file File à trier (déjà regroupée).
+ */
+static void sort_one_file_ascending(File *file)
 {
-	// on bloque les files le temps du trie
-	lock_all_file();
-	// regroupement pour ne parcourir qu'une seule file
-	regroup_datas_nolock();
+	if (file->start == NULL) {
+		return;
+	}
 
 	// Tableau d'éléments permettants d'avoir des repaires d'éléments classés
 	// On mémorise par nb possibilités allouées.
@@ -1838,8 +1921,7 @@ int sort_ascending(void)
 	for (int l = 0; l < ETERN_PARTS +1; l++) {
 		orderedLair[l] = NULL;
 	}
-	
-	File *file = &file_possibility[0].file;
+
 	unsigned long long position = 0;
 	int percent = 0;
 	unsigned long long fivePercent = file->size * 0.05;
@@ -1868,7 +1950,7 @@ int sort_ascending(void)
 			}
 
 			if(nextElement != NULL && nextElement->value != NULL)
-			{	
+			{
 				struct possibility_packet *next = nextElement->value;
 				int nextAlloc = next->alloc;
 				if (orderedLair[nextAlloc] == NULL) {
@@ -1889,7 +1971,7 @@ int sort_ascending(void)
 						// Pas de suivant, on place donc à la fin de la suite
 						move_after(file, currElement, file->end);
 					}
-					
+
 					if(file->start != nextElement)
 					{
 						nextElement = nextElement->previous;
@@ -1897,22 +1979,42 @@ int sort_ascending(void)
 					} else {
 						position = 0;
 					}
-					
+
 				}
 			}
 		}
-		
+
 		currElement = nextElement;
 	}
 	log_console("--100\n");
+	free(orderedLair);
+}
+
+int sort_ascending(void)
+{
+	// on bloque les files le temps du trie
+	lock_all_file();
+	// regroupement pour ne parcourir qu'une seule file, pour chaque pool
+	regroup_pool_nolock(file_possibility);
+	sort_one_file_ascending(&file_possibility[0].file);
+	regroup_pool_nolock(file_possibility_checked);
+	sort_one_file_ascending(&file_possibility_checked[0].file);
 	unlock_all_file();
 	return 0;
 }
 
-void *sort_d_mono(void *f)
+/**
+ * @brief Trie une `File` en place, par nombre de pièces placées décroissant.
+ *
+ * Doit être appelée avec les files déjà verrouillées.
+ *
+ * @param file File à trier (déjà regroupée).
+ */
+static void sort_one_file_descending(File *file)
 {
-    int intf = *(int *)f;
-	log_info("sort d file:%i\n",intf);
+	if (file->start == NULL) {
+		return;
+	}
 
 	// Tableau d'éléments permettants d'avoir des repaires d'éléments classés
 	// On mémorise par nb possibilités allouées.
@@ -1920,9 +2022,7 @@ void *sort_d_mono(void *f)
 	for (int l = 0; l < ETERN_PARTS +1; l++) {
 		orderedLair[l] = NULL;
 	}
-	
-	file_possibility_t *file_poss =&file_possibility[intf];
-	File *file = &file_poss->file;
+
 	unsigned long long position = 0;
 	int percent = 0;
 	unsigned long long fivePercent = file->size * 0.05;
@@ -1951,7 +2051,7 @@ void *sort_d_mono(void *f)
 			}
 
 			if(nextElement != NULL && nextElement->value != NULL)
-			{	
+			{
 				struct possibility_packet *next = nextElement->value;
 				int nextAlloc = next->alloc;
 				if (orderedLair[nextAlloc] == NULL) {
@@ -1972,7 +2072,7 @@ void *sort_d_mono(void *f)
 						// Pas de précédent, on place donc à la fin de la suite car est le plus petit
 						move_after(file, currElement, file->end);
 					}
-					
+
 					if(file->start != nextElement)
 					{
 						nextElement = nextElement->previous;
@@ -1980,62 +2080,85 @@ void *sort_d_mono(void *f)
 					} else {
 						position = 0;
 					}
-					
+
 				}
 			}
 		}
-		
+
 		currElement = nextElement;
 	}
 	log_console("--100\n");
-	log_info("end sort d file:%i\n",*(int *)f);
+	free(orderedLair);
+}
+
+void *sort_d_mono(void *f)
+{
+    int intf = *(int *)f;
+	log_info("sort d file:%i\n",intf);
+	sort_one_file_descending(&file_possibility[intf].file);
+	log_info("end sort d file:%i\n",intf);
 	return NULL;
 }
 
-int check_file(int f)
+/**
+ * @brief Vérifie la cohérence structurelle d'une `File` (taille, chaînage, fin).
+ * @param file  File à contrôler.
+ * @param f     Indice de la file (pour les messages).
+ * @param label Nom du pool (« unchecked » / « checked ») pour les messages.
+ * @return      0 si cohérent, -1 sinon.
+ */
+static int check_one_file(File *file, int f, const char *label)
 {
 	int result = 0;
-	
-	file_possibility_t file_poss =file_possibility[f];
-	File *file = &file_poss.file;
-	
+
 	if(file->size == 0)
 	{
 		if(file->start != NULL)
 		{
-			log_info("File:%i size=0 and start not null\n",f);
+			log_info("File:%i (%s) size=0 and start not null\n",f,label);
 			result = -1;
 		}
-		
+
 		if(file->end != NULL)
 		{
-            log_info("File:%i size=0 and end not null\n",f);
+			log_info("File:%i (%s) size=0 and end not null\n",f,label);
 			result = -1;
 		}
 	}
-	
+
 	// test que la fin correspond à la taille
 	unsigned long long t;
-	Element *currElement = file_poss.file.start;
+	Element *currElement = file->start;
 	Element *lastElement = currElement;
 	for(t=0; t < file->size && currElement != NULL;t++)
 	{
 		if(currElement->value == NULL){
-            log_info("File:%i value NULL\n",f);
+			log_info("File:%i (%s) value NULL\n",f,label);
 			result = -1;
 		}
 		lastElement = currElement;
 		currElement = currElement->next;
 	}
-	
+
 	if(currElement != NULL)
 	{
-        log_info("File:%i last analysed element is not null | file.size:%llu analysed:%llu",f,file->size, t);
+		log_info("File:%i (%s) last analysed element is not null | file.size:%llu analysed:%llu",f,label,file->size, t);
 		result = -1;
 	}
 	if (t != file->size || lastElement != file->end) {
-        log_info("File:%i end not correspond to the size:%llu analysed:%llu\n",f,file->size,t);
+		log_info("File:%i (%s) end not correspond to the size:%llu analysed:%llu\n",f,label,file->size,t);
 		result=-1;
+	}
+	return result;
+}
+
+int check_file(int f)
+{
+	// Les deux pools sont contrôlés : non vérifié et vérifié (checked == 1)
+	int result = check_one_file(&file_possibility[f].file, f, "unchecked");
+	if(check_one_file(&file_possibility_checked[f].file, f, "checked") != 0)
+	{
+		result = -1;
 	}
 	return result;
 }
@@ -2054,21 +2177,19 @@ int check_files(void)
 }
 
 /**
- * @brief Regroupe et trie les possibilités en ordre décroissant sans verrouillage.
+ * @brief Regroupe et trie le pool non vérifié en ordre décroissant, sans verrouillage.
  *
- * Doit être appelée avec les files déjà verrouillées.
+ * Doit être appelée avec les files déjà verrouillées. Ne traite que le pool non
+ * vérifié (utilisée en interne par le tri multi-thread).
  *
  * @return 0.
  */
 int sort_descending_nolock(void)
 {
     log_info("regroup datas \n");
-	regroup_datas_nolock();
+	regroup_pool_nolock(file_possibility);
     log_info("sort file 0\n");
-	int *i = malloc(sizeof(int));
-	i[0] = 0;
-	sort_d_mono(&i[0]);
-	free(i);
+	sort_one_file_descending(&file_possibility[0].file);
 	return 0;
 }
 
@@ -2121,7 +2242,12 @@ int sort_descending_mthread(void)
 	
     log_info("sort d one thread\n");
 	sort_descending_nolock();
-    
+
+	// Pool vérifié (généralement petit) : un seul passage de tri
+	log_info("sort d checked pool\n");
+	regroup_pool_nolock(file_possibility_checked);
+	sort_one_file_descending(&file_possibility_checked[0].file);
+
 	unlock_all_file();
 	return 0;
 }
@@ -2130,9 +2256,12 @@ int sort_descending_mthread(void)
 int sort_descending(void)
 {
 	lock_all_file();
-	
+
+	// Les deux pools sont triés indépendamment : non vérifié et vérifié
 	sort_descending_nolock();
-	
+	regroup_pool_nolock(file_possibility_checked);
+	sort_one_file_descending(&file_possibility_checked[0].file);
+
 	unlock_all_file();
 	return 0;
 }
