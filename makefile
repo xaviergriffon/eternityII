@@ -117,27 +117,41 @@ test:
 # ---------------------------------------------------------------------------
 COV_DIR            := tests/coverage
 COV_CFLAGS         := -Wall -std=gnu99 -O0 -g -I.
-# Modules dont on veut le rapport (les deps de link logger/static_variables
-# sont compilées mais pas reportées).
-COV_REPORT_MODULES := lifo.c part.c readdata.c
+# Couverture honnête sur TOUT le code de production : on instrumente chaque
+# module du build par défaut (un .gcno par fichier). Ceux que les tests
+# n'exercent pas (main.c, possibility.c, etii_*.c, …) n'ont pas de .gcda et
+# ressortent donc à 0 % — le pourcentage global reflète l'ensemble du code.
+# Exclus : logger_ncurses.c (variante NCURSES, exige <ncurses.h>) et
+# gpu_pruner.cu (variante CUDA, exige nvcc) — absents du build standard.
+COV_ALL_MODULES    := $(filter-out logger_ncurses.c,$(wildcard *.c))
+# Sous-ensemble réellement lié au binaire de test (le reste ne fournit qu'un
+# .gcno → 0 %) : les modules exercés + leurs deps de link.
+COV_LINK_MODULES   := $(TEST_MODULES)
 
 .PHONY: coverage
 coverage:
 	@mkdir -p $(COV_DIR)
-	@for src in $(TEST_SRCS) $(TEST_MODULES); do \
+	# 1. Instrumente TOUS les modules de production + les sources de test → un
+	#    .gcno par fichier, y compris les modules jamais exécutés (→ 0 %).
+	@for src in $(COV_ALL_MODULES) $(TEST_SRCS); do \
 		gcc $(COV_CFLAGS) --coverage -pthread -c $$src \
 			-o $(COV_DIR)/`basename $${src%.c}`.o || exit 1; \
 	done
-	@gcc $(COV_CFLAGS) --coverage -pthread $(COV_DIR)/*.o -lm -o $(COV_DIR)/run_tests
+	# 2. Lie le binaire de test avec les seuls modules exercés (+ harnais) :
+	#    main.c et les autres modules non liés ne produisent pas de .gcda.
+	@gcc $(COV_CFLAGS) --coverage -pthread \
+		$(addprefix $(COV_DIR)/,$(notdir $(TEST_SRCS:.c=.o))) \
+		$(addprefix $(COV_DIR)/,$(COV_LINK_MODULES:.c=.o)) \
+		-lm -o $(COV_DIR)/run_tests
 	@./$(COV_DIR)/run_tests
-	@gcov -o $(COV_DIR) $(COV_REPORT_MODULES) >/dev/null 2>&1 || true
+	@gcov -o $(COV_DIR) $(COV_ALL_MODULES) >/dev/null 2>&1 || true
 	@mv -f *.gcov $(COV_DIR)/ 2>/dev/null || true
 	@echo ""
-	@echo "===== Couverture de code (modules testés) ====="
-	@for src in $(COV_REPORT_MODULES); do \
+	@echo "===== Couverture de code (tout le code de production) ====="
+	@for src in $(COV_ALL_MODULES); do \
 		line=`gcov -n -o $(COV_DIR) $$src 2>/dev/null \
 			| grep -A1 "File '$$src'" | grep 'Lines executed' | head -1`; \
-		printf "  %-14s %s\n" "$$src" "$$line"; \
+		printf "  %-18s %s\n" "$$src" "$${line:-Lines executed:0.00% (non exercé)}"; \
 	done
 	@echo "Détail annoté : $(COV_DIR)/<module>.c.gcov"
 
@@ -145,14 +159,15 @@ coverage:
 # Rapports gcovr : Cobertura XML (Codecov), HTML navigable et résumé Markdown
 # (Job Summary + commentaire de PR), en un seul passage.
 #
-# Réutilise les .gcda produits par `coverage`. Nécessite gcovr (pip install gcovr
-# ou pipx ; bien plus léger/rapide que lcov). Le --filter ne garde que les
-# modules reportés ; sur macOS gcov natif = llvm-cov, on le signale à gcovr.
+# Réutilise les .gcda/.gcno produits par `coverage`. Nécessite gcovr (pip install
+# gcovr ou pipx ; bien plus léger/rapide que lcov). On exclut le répertoire des
+# tests pour ne reporter que le code de production ; sur macOS gcov natif =
+# llvm-cov, on le signale à gcovr.
 # ---------------------------------------------------------------------------
 COV_XML    := $(COV_DIR)/coverage.xml
 COV_HTML   := $(COV_DIR)/html
 COV_MD     := $(COV_DIR)/coverage.md
-COV_FILTER := --filter '(^|/)(lifo|part|readdata)\.c$$'
+COV_FILTER := --exclude '(^|/)tests/'
 GCOVR := gcovr
 ifeq ($(detected_OS),Darwin)
 	GCOVR := gcovr --gcov-executable "$(shell xcrun --find llvm-cov) gcov"
