@@ -82,8 +82,9 @@ Le mode `VERIFY=1` n'est utile que pour valider la parité GPU/CPU ; en producti
 Des tests unitaires couvrent les modules à logique pure (`lifo.c`, `part.c`, `readdata.c`), basés sur [greatest](https://github.com/silentbicycle/greatest) — un framework C *single-header* vendoré dans `tests/`, **sans dépendance externe** à installer.
 
 ```sh
-make test        # compile et lance la suite (code de sortie non nul si échec)
-make coverage    # idem + rapport de couverture par module (gcov)
+make test            # compile et lance la suite (code de sortie non nul si échec)
+make coverage        # idem + rapport de couverture par module (gcov)
+make coverage-report # rapports gcovr : Cobertura XML + HTML + résumé Markdown
 ```
 
 `make test` produit un binaire isolé (`tests/run_tests`) qui ne lie **que** les modules testés et leurs dépendances — `main.c` n'est jamais inclus. `make coverage` recompile en mode instrumenté et affiche le pourcentage de lignes couvertes :
@@ -95,13 +96,14 @@ make coverage    # idem + rapport de couverture par module (gcov)
   readdata.c     Lines executed:18.75% of 192
 ```
 
-Le détail ligne par ligne est dans `tests/coverage/<module>.c.gcov` (lignes jamais exécutées marquées `#####`). Voir [tests/README.md](tests/README.md) pour ajouter un test ou générer un rapport HTML (lcov).
+Le détail ligne par ligne est dans `tests/coverage/<module>.c.gcov` (lignes jamais exécutées marquées `#####`). `make coverage-report` produit en plus, via [gcovr](https://gcovr.com), un rapport HTML navigable, un Cobertura XML (consommé par Codecov) et un résumé Markdown. Voir [tests/README.md](tests/README.md) pour ajouter un test ou générer ces rapports.
 
 ## Intégration continue
 
 À chaque push et pull request, [GitHub Actions](.github/workflows/ci.yml) :
 
-- compile le build de production (`make`), lance les tests unitaires (`make test`) et la couverture (`make coverage`) ;
+- compile le build de production (`make`), lance les tests unitaires (`make test`) et les rapports de couverture (`make coverage-report`, via gcovr) ;
+- publie la couverture : envoi à Codecov (Cobertura), commentaire de couverture sur la PR + récapitulatif du run (Job Summary), et rapport HTML en artefact téléchargeable ;
 - vérifie que la variante ncurses (`make NCURSES=1`) compile toujours.
 
 Le mode CUDA n'est pas testé en CI (pas de `nvcc` sur les runners ; la validation se fait sur Jetson).

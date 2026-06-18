@@ -16,6 +16,7 @@ make EXECUTABLE=myBinary      # Custom output name
 make clean                    # Remove all build artifacts
 make test                     # Build & run the greatest unit-test suite (tests/)
 make coverage                 # Run tests under gcov, print per-module line coverage
+make coverage-report          # gcovr reports: Cobertura XML + HTML + Markdown summary
 ```
 
 The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` instead of `-lOpenCL` (OpenCL support is currently commented out in the link step).
@@ -45,8 +46,9 @@ Default piece file: `pieces.csv` (256-piece puzzle). A smaller 16-piece variant 
 Unit tests live in `tests/` and use [greatest](https://github.com/silentbicycle/greatest) — a single-header C test framework vendored as `tests/greatest.h` (no external dependency). Currently covers the pure-logic modules `lifo.c`, `part.c`, `readdata.c`.
 
 ```sh
-make test       # compile tests/ + run; non-zero exit on failure (CI-ready)
-make coverage   # same, instrumented with --coverage; prints a gcov per-module summary
+make test            # compile tests/ + run; non-zero exit on failure (CI-ready)
+make coverage        # same, instrumented with --coverage; prints a gcov per-module summary
+make coverage-report # gcovr over those .gcda → Cobertura XML + HTML + Markdown summary
 ```
 
 Conventions to keep in mind when adding or extending tests:
@@ -55,8 +57,9 @@ Conventions to keep in mind when adding or extending tests:
 - **Hand-built fixtures, not `pieces.csv` / `rotate_all_parts`.** Tests construct small `part` / `array_part` structs inline, so they stay independent of `ETERN_PARTS` (256 vs 16) and need no data file in the CWD. `rotate_all_parts` indexes by `i + ETERN_PARTS*r` and is only correct when `ETERN_PARTS` matches the real puzzle size — don't build fixtures through it.
 - **Error paths that call `exit()` aren't tested** where the code aborts (e.g. a missing CSV in `read_parts`): greatest runs in-process, so an `exit()` would kill the whole runner. Covering those would require forking per test.
 - **Coverage artifacts** (`.o/.gcno/.gcda/.gcov`) stay confined to `tests/coverage/` (gitignored, removed by `make clean`). `make coverage` compiles one object per source so gcov finds clean `.gcno` names; drill into `tests/coverage/<module>.c.gcov` (`#####` = never executed).
+- **`make coverage-report`** runs [gcovr](https://gcovr.com) (a pip/pipx tool, *not* needed for plain `make coverage`) over those `.gcda` to emit `tests/coverage/coverage.xml` (Cobertura, for Codecov), an HTML report under `tests/coverage/html/`, and `tests/coverage/coverage.md` (Markdown summary). On macOS it auto-passes `--gcov-executable "llvm-cov gcov"`; the `--filter` keeps only the reported modules.
 
-CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the release build, `make test`, `make coverage`, and a compile-check of the `NCURSES=1` variant on every push and PR. CUDA isn't exercised in CI (no `nvcc` on runners).
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the release build, `make test`, `make coverage-report`, and a compile-check of the `NCURSES=1` variant on every push and PR. The coverage results are published to **Codecov** (Cobertura `coverage.xml`; private repo → `CODECOV_TOKEN` secret required), as a **PR comment + Job Summary** (from `coverage.md` via `actions/github-script`), and as a downloadable **HTML artifact**. CUDA isn't exercised in CI (no `nvcc` on runners).
 
 ## Architecture
 
