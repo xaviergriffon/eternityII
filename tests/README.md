@@ -73,36 +73,32 @@ grep -n '#####' tests/coverage/readdata.c.gcov   # lignes non couvertes
 Les chemins d'erreur en `exit()` et les fonctions non encore testées (ex.
 `read_from_json` / `compute_grid`) ressortent ainsi comme non couverts.
 
-### Rapport HTML + lcov (`make coverage-html`)
+### Rapports gcovr (`make coverage-report`)
 
 ```sh
-brew install lcov          # macOS, non installé par défaut (Linux : apt-get install lcov)
-make coverage-html         # exécute `coverage` puis génère lcov + HTML
+pip install gcovr          # ou pipx install gcovr / brew install gcovr
+make coverage-report       # exécute `coverage` puis génère XML + HTML + Markdown
 open tests/coverage/html/index.html
 ```
 
-La cible produit `tests/coverage/coverage.info` (format lcov, consommé par
-Codecov en CI) et le rapport HTML navigable dans `tests/coverage/html/`. Sur
-macOS elle génère automatiquement un wrapper `llvm-cov gcov` pour lcov ; sur
-Linux/Jetson le gcov natif est utilisé directement.
+La cible produit en un passage, depuis les `.gcda` de `coverage` :
 
-En CI (`.github/workflows/ci.yml`), ce même rapport alimente trois sorties :
+- `tests/coverage/coverage.xml` — Cobertura, consommé par Codecov en CI ;
+- `tests/coverage/html/index.html` — rapport HTML navigable ;
+- `tests/coverage/coverage.md` — résumé Markdown (lignes/fonctions/branches).
 
-- **Codecov** (badge, annotations) — dépôt privé, donc le secret `CODECOV_TOKEN`
-  est **obligatoire** (pas d'upload « tokenless »).
-- **Commentaire de PR** + **Job Summary** : `make coverage-summary` transforme
-  `coverage.info` en tableau Markdown (`tests/lcov_to_md.awk`), publié via
+Sur macOS, gcov natif étant `llvm-cov`, la cible passe automatiquement
+`--gcov-executable "llvm-cov gcov"` à gcovr ; sur Linux/Jetson le gcov natif est
+utilisé directement.
+
+En CI (`.github/workflows/ci.yml`), ces sorties alimentent trois visualisations :
+
+- **Codecov** (badge, annotations) depuis `coverage.xml` — dépôt privé, donc le
+  secret `CODECOV_TOKEN` est **obligatoire** (pas d'upload « tokenless »).
+- **Commentaire de PR** + **Job Summary** : `coverage.md` publié via
   `actions/github-script` (Node 24, maintenu). 100 % GitHub, aucun service tiers,
-  le code privé ne sort pas. Aperçu local : `make coverage-summary`.
+  le code privé ne sort pas. Aperçu local : `cat tests/coverage/coverage.md`.
 - **Artefact** `coverage-html` téléchargeable depuis la page du run.
-
-La commande lcov manuelle équivalente :
-
-```sh
-lcov --capture --directory tests/coverage --output-file tests/coverage/cov.info \
-     --gcov-tool $(xcrun --find llvm-cov | sed 's/$/ gcov/')   # macOS : llvm-cov gcov
-genhtml tests/coverage/cov.info --output-directory tests/coverage/html
-```
 
 ## Ajouter un test
 

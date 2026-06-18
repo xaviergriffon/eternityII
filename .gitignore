@@ -10,5 +10,3 @@ tests/coverage/
 *.gcov
 *.gcno
 *.gcda
-
-coverage-summary.md

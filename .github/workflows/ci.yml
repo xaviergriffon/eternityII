@@ -32,25 +32,20 @@ jobs:
       - name: Tests unitaires
         run: make test
 
-      # lcov 2.x traîne une grosse chaîne de deps Perl → ~12 min d'install à froid.
-      # On met le paquet et ses deps en cache : les runs suivants le restaurent en
-      # quelques secondes (bump `version` pour invalider le cache). Action composite
-      # (shell), pas de runtime Node.
-      - name: Dépendance lcov (mise en cache)
-        uses: awalsh128/cache-apt-pkgs-action@v1.6.1
-        with:
-          packages: lcov
-          version: 1.0
+      # gcovr (outil Python) remplace lcov : installation pip en quelques secondes
+      # (Python préinstallé), un seul outil pour Cobertura XML + HTML + Markdown.
+      - name: Dépendance gcovr
+        run: pipx install gcovr
 
-      # `make coverage-html` exécute `coverage` (résumé console) puis produit
-      # tests/coverage/coverage.info (lcov, pour Codecov) et le rapport HTML.
-      - name: Couverture de code (gcov + lcov)
-        run: make coverage-html
+      # `make coverage-report` exécute `coverage` puis produit, via gcovr :
+      # coverage.xml (Cobertura, pour Codecov), le rapport HTML et coverage.md.
+      - name: Couverture de code (gcov + gcovr)
+        run: make coverage-report
 
-      # Résumé Markdown depuis coverage.info → visible dans le récap du run
-      # (Job Summary) et réutilisé tel quel pour le commentaire de PR.
+      # Résumé Markdown gcovr → visible dans le récap du run (Job Summary).
+      # Le même fichier sert au commentaire de PR ci-dessous.
       - name: Résumé de couverture
-        run: make coverage-summary | tee coverage-summary.md >> "$GITHUB_STEP_SUMMARY"
+        run: cat tests/coverage/coverage.md >> "$GITHUB_STEP_SUMMARY"
 
       # Visualisation hébergée : badge README, annotations.
       # Dépôt PRIVÉ → le token est OBLIGATOIRE (pas d'upload « tokenless »).
@@ -58,7 +53,7 @@ jobs:
       - name: Envoi vers Codecov
         uses: codecov/codecov-action@v6
         with:
-          files: ./tests/coverage/coverage.info
+          files: ./tests/coverage/coverage.xml
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
 
@@ -72,7 +67,7 @@ jobs:
           script: |
             const fs = require('fs');
             const marker = '<!-- coverage-report -->';
-            const body = marker + '\n' + fs.readFileSync('coverage-summary.md', 'utf8');
+            const body = marker + '\n' + fs.readFileSync('tests/coverage/coverage.md', 'utf8');
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
             const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number });
