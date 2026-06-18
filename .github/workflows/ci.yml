@@ -28,8 +28,32 @@ jobs:
       - name: Tests unitaires
         run: make test
 
-      - name: Couverture de code
-        run: make coverage
+      - name: Dépendance lcov
+        run: sudo apt-get update && sudo apt-get install -y lcov
+
+      # `make coverage-html` exécute `coverage` (résumé console) puis produit
+      # tests/coverage/coverage.info (lcov, pour Codecov) et le rapport HTML.
+      - name: Couverture de code (gcov + lcov)
+        run: make coverage-html
+
+      # Visualisation hébergée : badge README, commentaire de PR, annotations.
+      # Token optionnel pour un dépôt public ; fail_ci_if_error=false pour ne
+      # pas casser la CI si Codecov est indisponible ou le token absent.
+      - name: Envoi vers Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./tests/coverage/coverage.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+      # Fallback sans service tiers : rapport HTML navigable téléchargeable
+      # depuis la page du run (onglet « Artifacts »).
+      - name: Artefact rapport HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: tests/coverage/html
 
   ncurses-build:
     name: Build variante ncurses

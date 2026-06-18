@@ -140,3 +140,39 @@ coverage:
 		printf "  %-14s %s\n" "$$src" "$$line"; \
 	done
 	@echo "Détail annoté : $(COV_DIR)/<module>.c.gcov"
+
+# ---------------------------------------------------------------------------
+# Rapport lcov : coverage.info (consommé par Codecov) + HTML navigable.
+#
+# Réutilise les .gcda produits par `coverage`. Nécessite lcov/genhtml
+# (Linux : apt-get install lcov ; macOS : brew install lcov, voir tests/README.md
+# pour le --gcov-tool llvm-cov). On capture toute la suite puis on n'extrait que
+# les modules reportés (COV_REPORT_MODULES), pour ignorer les fichiers de test
+# et les en-têtes système. Les --ignore-errors couvrent les écarts de version
+# gcov/lcov fréquents sur les runners CI.
+# ---------------------------------------------------------------------------
+COV_INFO_ALL := $(COV_DIR)/coverage.all.info
+COV_INFO     := $(COV_DIR)/coverage.info
+COV_HTML     := $(COV_DIR)/html
+# macOS : gcov natif est llvm-cov ; lcov a besoin d'un wrapper « llvm-cov gcov »
+# (cf. tests/README.md). Sur Linux/Jetson (cible CI) gcov natif convient.
+COV_GCOV_OPT :=
+ifeq ($(detected_OS),Darwin)
+	COV_GCOV_OPT := --gcov-tool $(COV_DIR)/llvm-gcov.sh
+endif
+
+.PHONY: coverage-html
+coverage-html: coverage
+ifeq ($(detected_OS),Darwin)
+	@printf '#!/bin/sh\nexec "$(shell xcrun --find llvm-cov)" gcov "$$@"\n' \
+		> $(COV_DIR)/llvm-gcov.sh && chmod +x $(COV_DIR)/llvm-gcov.sh
+endif
+	lcov --capture --directory $(COV_DIR) --base-directory . $(COV_GCOV_OPT) \
+		--output-file $(COV_INFO_ALL) \
+		--ignore-errors mismatch,unused,empty,gcov
+	lcov --extract $(COV_INFO_ALL) $(addprefix */,$(COV_REPORT_MODULES)) \
+		--output-file $(COV_INFO) --ignore-errors unused,empty
+	genhtml $(COV_INFO) --output-directory $(COV_HTML) \
+		--ignore-errors source,empty
+	@echo "Rapport lcov : $(COV_INFO)"
+	@echo "Rapport HTML : $(COV_HTML)/index.html"

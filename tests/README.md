@@ -73,17 +73,28 @@ grep -n '#####' tests/coverage/readdata.c.gcov   # lignes non couvertes
 Les chemins d'erreur en `exit()` et les fonctions non encore testées (ex.
 `read_from_json` / `compute_grid`) ressortent ainsi comme non couverts.
 
-### Rapport HTML (optionnel, via lcov)
+### Rapport HTML + lcov (`make coverage-html`)
 
 ```sh
-brew install lcov                                   # non installé par défaut
-lcov --capture --directory tests/coverage --output-file tests/coverage/cov.info \
-     --gcov-tool $(xcrun --find llvm-cov | sed 's/$/ gcov/')   # macOS : llvm-cov gcov
-genhtml tests/coverage/cov.info --output-directory tests/coverage/html
+brew install lcov          # macOS, non installé par défaut (Linux : apt-get install lcov)
+make coverage-html         # exécute `coverage` puis génère lcov + HTML
 open tests/coverage/html/index.html
 ```
 
-Sur Linux/Jetson (gcc + gcov natif), l'option `--gcov-tool` est inutile.
+La cible produit `tests/coverage/coverage.info` (format lcov, consommé par
+Codecov en CI) et le rapport HTML navigable dans `tests/coverage/html/`. Sur
+macOS elle génère automatiquement un wrapper `llvm-cov gcov` pour lcov ; sur
+Linux/Jetson le gcov natif est utilisé directement.
+
+En CI (`.github/workflows/ci.yml`), ce même rapport est envoyé à **Codecov**
+(badge, commentaire de PR, annotations) et publié en **artefact** `coverage-html`
+téléchargeable depuis la page du run. La commande lcov manuelle équivalente :
+
+```sh
+lcov --capture --directory tests/coverage --output-file tests/coverage/cov.info \
+     --gcov-tool $(xcrun --find llvm-cov | sed 's/$/ gcov/')   # macOS : llvm-cov gcov
+genhtml tests/coverage/cov.info --output-directory tests/coverage/html
+```
 
 ## Ajouter un test
 
