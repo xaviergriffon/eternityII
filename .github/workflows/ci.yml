@@ -50,10 +50,16 @@ jobs:
       # Visualisation hébergée : badge README, annotations.
       # Dépôt PRIVÉ → le token est OBLIGATOIRE (pas d'upload « tokenless »).
       # Créer le secret CODECOV_TOKEN, sinon cette étape échoue.
+      # On envoie UNIQUEMENT le coverage.xml produit par gcovr (déjà filtré pour
+      # exclure tests/). disable_search + plugins:noop empêchent l'action de
+      # relancer son propre gcov sur les .gcda et d'y réinjecter les fichiers de
+      # test — sans quoi Codecov reporterait aussi le répertoire tests/.
       - name: Envoi vers Codecov
         uses: codecov/codecov-action@v6
         with:
           files: ./tests/coverage/coverage.xml
+          disable_search: true
+          plugins: noop
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
 
