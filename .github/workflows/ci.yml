@@ -15,6 +15,10 @@ jobs:
   test:
     name: Build & tests
     runs-on: ubuntu-latest
+    # pull-requests: write → permet au commentaire de couverture sur les PR.
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -37,14 +41,24 @@ jobs:
         run: make coverage-html
 
       # Visualisation hébergée : badge README, commentaire de PR, annotations.
-      # Token optionnel pour un dépôt public ; fail_ci_if_error=false pour ne
-      # pas casser la CI si Codecov est indisponible ou le token absent.
+      # Dépôt PRIVÉ → le token est OBLIGATOIRE (pas d'upload « tokenless »).
+      # Créer le secret CODECOV_TOKEN, sinon cette étape échoue.
       - name: Envoi vers Codecov
         uses: codecov/codecov-action@v4
         with:
           files: ./tests/coverage/coverage.info
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          fail_ci_if_error: true
+
+      # Visualisation 100 % GitHub : commentaire de couverture sur la PR, lu
+      # depuis coverage.info. Aucun service tiers, le code privé ne sort pas.
+      - name: Commentaire couverture (PR)
+        if: github.event_name == 'pull_request'
+        uses: romeovs/lcov-reporter-action@v0.4.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          lcov-file: ./tests/coverage/coverage.info
+          delete-old-comments: true
 
       # Fallback sans service tiers : rapport HTML navigable téléchargeable
       # depuis la page du run (onglet « Artifacts »).

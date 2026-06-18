@@ -86,9 +86,15 @@ Codecov en CI) et le rapport HTML navigable dans `tests/coverage/html/`. Sur
 macOS elle génère automatiquement un wrapper `llvm-cov gcov` pour lcov ; sur
 Linux/Jetson le gcov natif est utilisé directement.
 
-En CI (`.github/workflows/ci.yml`), ce même rapport est envoyé à **Codecov**
-(badge, commentaire de PR, annotations) et publié en **artefact** `coverage-html`
-téléchargeable depuis la page du run. La commande lcov manuelle équivalente :
+En CI (`.github/workflows/ci.yml`), ce même rapport alimente trois sorties :
+
+- **Codecov** (badge, annotations) — dépôt privé, donc le secret `CODECOV_TOKEN`
+  est **obligatoire** (pas d'upload « tokenless »).
+- **Commentaire de PR** via `lcov-reporter-action`, 100 % GitHub (aucun service
+  tiers), lu directement depuis `coverage.info`.
+- **Artefact** `coverage-html` téléchargeable depuis la page du run.
+
+La commande lcov manuelle équivalente :
 
 ```sh
 lcov --capture --directory tests/coverage --output-file tests/coverage/cov.info \
