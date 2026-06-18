@@ -60,34 +60,56 @@ struct array_part *read_parts(const char *file)
 	parts[0].right = 0;
     parts[0].rotation = 0;
 	int count = 1;
-	while(!feof(f))
+	for(;;)
 	{
+		int16_t id;
 		int top;
 		int left;
 		int bottom;
 		int right;
-		if (fscanf(f, "%hd %d %d %d %d",
-			  &parts[count].id,
+		int nread = fscanf(f, "%hd %d %d %d %d",
+			  &id,
 			   &top,
 			   &left,
 			   &bottom,
-			   &right))
-		
+			   &right);
+
+		if (nread == EOF)
 		{
-			parts[count].top=(int8_t)top;
-			parts[count].left=(int8_t)left;
-			parts[count].bottom=(int8_t)bottom;
-			parts[count].right=(int8_t)right;
-        		parts[count].rotation = 0;
-		
-			//print_part(&parts[count]);
-			count++;
-		} else
+			// Fin de fichier atteinte proprement : on sort de la boucle.
+			break;
+		}
+		if (nread != 5)
 		{
+			// Ligne malformée (moins de 5 champs lus).
+			log_error("read_parts: ligne malformée dans %s (%d champs lus sur 5)", file, nread);
 			exit(EXIT_FAILURE);
 		}
+		if (count > np)
+		{
+			// Plus de pièces que ntiles ne l'annonce : refus avant tout écrasement hors limites.
+			log_error("read_parts: trop de pièces dans %s (attendu %d)", file, np);
+			exit(EXIT_FAILURE);
+		}
+
+		parts[count].id=id;
+		parts[count].top=(int8_t)top;
+		parts[count].left=(int8_t)left;
+		parts[count].bottom=(int8_t)bottom;
+		parts[count].right=(int8_t)right;
+		parts[count].rotation = 0;
+
+		//print_part(&parts[count]);
+		count++;
 	}
-	
+
+	if (count != np + 1)
+	{
+		// Moins de pièces que ntiles ne l'annonce.
+		log_error("read_parts: %d pièces lues dans %s (attendu %d)", count - 1, file, np);
+		exit(EXIT_FAILURE);
+	}
+
 	fclose(f);
     return array;
 }

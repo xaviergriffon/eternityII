@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file is the single source of project guidance for AI coding agents (Claude Code, Codex, …) working with code in this repository. `CLAUDE.md` imports it via `@AGENTS.md`, so edit only this file.
 
 ## Project Overview
 
@@ -11,8 +11,12 @@ eternityII is a C program that attempts to solve the [Eternity II puzzle](https:
 ```sh
 make                          # Release build → ./eternityII
 make DEBUG=1                  # Debug build (keeps .o files, adds -g)
+make NCURSES=1                # Build with ncurses UI (links -lncurses, replaces logger.c with logger_ncurses.c)
 make EXECUTABLE=myBinary      # Custom output name
 make clean                    # Remove all build artifacts
+make test                     # Build & run the greatest unit-test suite (tests/)
+make coverage                 # Run tests under gcov, print per-module line coverage
+make coverage-report          # gcovr reports: Cobertura XML + HTML + Markdown summary
 ```
 
 The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` instead of `-lOpenCL` (OpenCL support is currently commented out in the link step).
@@ -26,11 +30,36 @@ The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` inste
 # Start a client (does the search)
 ./eternityII tcpclient [server_host] [nb_threads] [max_stock_per_thread] [pieces.csv]
 
+# Start a pruner client (validates unchecked possibilities, batched exchange)
+./eternityII tcppruner [server_host] [nb_threads] [pieces.csv] [batch_size]
+# GPU pruner (CUDA build only): same args, batch checked on the GPU
+./eternityII gpupruner [server_host] [nb_threads] [pieces.csv] [batch_size]
+
 # Self-contained test/auto mode (no server needed)
 ./eternityII test [pieces.csv]
 ```
 
 Default piece file: `pieces.csv` (256-piece puzzle). A smaller 16-piece variant is `pieces16.csv`.
+
+## Testing
+
+Unit tests live in `tests/` and use [greatest](https://github.com/silentbicycle/greatest) — a single-header C test framework vendored as `tests/greatest.h` (no external dependency). Currently covers the pure-logic modules `lifo.c`, `part.c`, `readdata.c`.
+
+```sh
+make test            # compile tests/ + run; non-zero exit on failure (CI-ready)
+make coverage        # same, instrumented with --coverage; prints a gcov per-module summary
+make coverage-report # gcovr over those .gcda → Cobertura XML + HTML + Markdown summary
+```
+
+Conventions to keep in mind when adding or extending tests:
+
+- **No `main.c` in the test binary.** `make test` links only the modules under test plus their transitive link deps (`logger.o`, `static_variables.o`). The `TEST_SRCS` / `TEST_MODULES` Makefile variables control this; each test file exposes a `SUITE` registered in `tests/test_main.c`.
+- **Hand-built fixtures, not `pieces.csv` / `rotate_all_parts`.** Tests construct small `part` / `array_part` structs inline, so they stay independent of `ETERN_PARTS` (256 vs 16) and need no data file in the CWD. `rotate_all_parts` indexes by `i + ETERN_PARTS*r` and is only correct when `ETERN_PARTS` matches the real puzzle size — don't build fixtures through it.
+- **Error paths that call `exit()` aren't tested** where the code aborts (e.g. a missing CSV in `read_parts`): greatest runs in-process, so an `exit()` would kill the whole runner. Covering those would require forking per test.
+- **Coverage artifacts** (`.o/.gcno/.gcda/.gcov`) stay confined to `tests/coverage/` (gitignored, removed by `make clean`). `make coverage` compiles one object per source so gcov finds clean `.gcno` names; drill into `tests/coverage/<module>.c.gcov` (`#####` = never executed).
+- **`make coverage-report`** runs [gcovr](https://gcovr.com) (a pip/pipx tool, *not* needed for plain `make coverage`) over those `.gcda` to emit `tests/coverage/coverage.xml` (Cobertura, for Codecov), an HTML report under `tests/coverage/html/`, and `tests/coverage/coverage.md` (Markdown summary). On macOS it auto-passes `--gcov-executable "llvm-cov gcov"`; the `--filter` keeps only the reported modules.
+
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the release build, `make test`, `make coverage-report`, and a compile-check of the `NCURSES=1` variant on every push and PR. The coverage results are published to **Codecov** (Cobertura `coverage.xml`; private repo → `CODECOV_TOKEN` secret required), as a **PR comment + Job Summary** (from `coverage.md` via `actions/github-script`), and as a downloadable **HTML artifact**. CUDA isn't exercised in CI (no `nvcc` on runners).
 
 ## Architecture
 
@@ -55,6 +84,11 @@ The protocol uses fixed-size `packet` structs containing an `instruction` byte a
 | `INST_NULL` | 6 | No possibility available |
 | `INST_POSSIBILITY_ANALYSED` | 7 | Possibility already analysed |
 | `INST_CHECK_VERSION` / `INST_SUPPORTED_VERSION` / `INST_UNSUPPORTED_VERSION` | 9/10/11 | Version handshake |
+| `INST_GET_TO_CHECK` | 12 | Pruner requests one unchecked possibility |
+| `INST_GET_TO_CHECK_BATCH` | 13 | Pruner requests up to N unchecked possibilities in one round-trip (`int32` N → `int32` K + K packets) |
+| `INST_POSSIBILITY_ANALYSED_BATCH` | 14 | Pruner acks M analysed possibilities in one round-trip (`int32` M + M packets → one `INST_CONSIDERED`) |
+
+A pruner exchanges with the server in batches of `pruner_batch_size` (configurable via the 4th `tcppruner`/`gpupruner` CLI arg, or the `prunerBatch <n>` console command, capped at `PRUNER_BATCH_MAX`), bounding its memory. `recv_all`/`send_all` (etii_protocol.c) handle the partial-transfer of multi-packet blocks. Bumping the wire format requires bumping `VERSION` (exact-match handshake).
 
 ### Core Data Structures
 
@@ -82,8 +116,12 @@ The protocol uses fixed-size `packet` structs containing an `instruction` byte a
 | `tcpclient.c` / `tcpserver.c` | Low-level TCP socket setup |
 | `local_socket.c` | Unix domain UDP sockets for parent↔child IPC |
 | `lifo.c` | Queue (`File`) and flat array (`big_table`) data structures |
-| `console.c` / `command_lines.c` | Interactive command parsing from stdin |
-| `logger.c` | Thread-safe `log_info/log_debug/log_error/log_console` macros |
+| `console.c` / `command_lines.c` | Interactive command parsing from stdin; Levenshtein-based typo suggestion for unknown commands |
+| `command_history.c` | In-session command history (↑/↓ recall, 100-entry ring, dedup) |
+| `logger.c` | Thread-safe `log_info/log_debug/log_error/log_console/log_event/log_status` — ANSI build |
+| `logger_ncurses.c` | Ncurses variant of logger (compiled instead of `logger.c` when `NCURSES=1`); 4-pane layout: output pad, stats banner, events, input |
+| `ipc_protocol.h` | Structs for parent↔child Unix socket messages (stats, log forwarding) |
+| `etii_statistic.h` | `client_statistics` struct sent by child processes to parent every second |
 | `static_variables.c` | All global state (counters, flags, pids, socket handles) |
 
 ## Debug Flags

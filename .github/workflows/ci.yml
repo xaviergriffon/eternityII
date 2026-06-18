@@ -1,0 +1,101 @@
+name: CI
+
+# Build + tests unitaires (greatest) + couverture (gcov) à chaque push et PR.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# Annule les runs obsolètes sur une même réf (push rapprochés).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & tests
+    runs-on: ubuntu-latest
+    # pull-requests: write → permet au commentaire de couverture sur les PR.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+
+      # gcc / make / gcov sont préinstallés sur ubuntu-latest.
+      - name: Versions des outils
+        run: gcc --version && make --version && gcov --version
+
+      - name: Build release
+        run: make
+
+      - name: Tests unitaires
+        run: make test
+
+      # gcovr (outil Python) remplace lcov : installation pip en quelques secondes
+      # (Python préinstallé), un seul outil pour Cobertura XML + HTML + Markdown.
+      - name: Dépendance gcovr
+        run: pipx install gcovr
+
+      # `make coverage-report` exécute `coverage` puis produit, via gcovr :
+      # coverage.xml (Cobertura, pour Codecov), le rapport HTML et coverage.md.
+      - name: Couverture de code (gcov + gcovr)
+        run: make coverage-report
+
+      # Résumé Markdown gcovr → visible dans le récap du run (Job Summary).
+      # Le même fichier sert au commentaire de PR ci-dessous.
+      - name: Résumé de couverture
+        run: cat tests/coverage/coverage.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Visualisation hébergée : badge README, annotations.
+      # Dépôt PRIVÉ → le token est OBLIGATOIRE (pas d'upload « tokenless »).
+      # Créer le secret CODECOV_TOKEN, sinon cette étape échoue.
+      - name: Envoi vers Codecov
+        uses: codecov/codecov-action@v6
+        with:
+          files: ./tests/coverage/coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+
+      # Commentaire de couverture sur la PR, 100 % GitHub (github-script, Node 24,
+      # maintenu). Met à jour le commentaire existant au lieu d'en empiler, via
+      # un marqueur HTML. Le code privé ne sort pas du dépôt.
+      - name: Commentaire couverture (PR)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- coverage-report -->';
+            const body = marker + '\n' + fs.readFileSync('tests/coverage/coverage.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      # Fallback sans service tiers : rapport HTML navigable téléchargeable
+      # depuis la page du run (onglet « Artifacts »).
+      - name: Artefact rapport HTML
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-html
+          path: tests/coverage/html
+
+  ncurses-build:
+    name: Build variante ncurses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Dépendance ncurses
+        run: sudo apt-get update && sudo apt-get install -y libncurses-dev
+
+      # Vérifie que le chemin logger_ncurses.c compile et lie toujours.
+      - name: Build NCURSES=1
+        run: make NCURSES=1

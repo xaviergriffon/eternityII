@@ -80,3 +80,92 @@ gpu_pruner.o: gpu_pruner.cu gpu_pruner.h possibility.h part.h static_variables.h
 
 clean:
 	rm -f *.o $(EXECUTABLE)
+	rm -f $(TEST_BIN)
+	rm -rf $(COV_DIR)
+	rm -f *.gcov *.gcno *.gcda
+
+# ---------------------------------------------------------------------------
+# Tests unitaires (framework greatest, vendoré dans tests/greatest.h).
+#
+# `make test` compile un binaire isolé qui ne tire QUE les modules sous test
+# et leurs dépendances de link (pas de main.c). Aucune dépendance externe à
+# installer : greatest est un header unique. -lm car part.c référence pow()
+# (non inliné sans optimisation) ; -pthread pour les mutex de logger.c.
+# ---------------------------------------------------------------------------
+TEST_BIN     := tests/run_tests
+TEST_SRCS    := tests/test_main.c tests/test_lifo.c tests/test_part.c tests/test_readdata.c
+# Modules de production exercés + leurs dépendances de link transitives.
+TEST_MODULES := lifo.c part.c readdata.c logger.c static_variables.c
+TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -I.
+
+.PHONY: test
+test:
+	gcc $(TEST_CFLAGS) -pthread -o $(TEST_BIN) $(TEST_SRCS) $(TEST_MODULES) -lm
+	./$(TEST_BIN)
+
+# ---------------------------------------------------------------------------
+# Couverture de code (gcov, intégré à gcc/clang — aucune install requise).
+#
+# Compile la suite instrumentée (--coverage = -fprofile-arcs -ftest-coverage,
+# -O0 pour un mapping ligne fidèle), la lance, puis agrège la couverture des
+# modules réellement testés. On compile un objet par source (.gcno aux noms
+# propres) pour que `gcov` s'y retrouve. Tous les artefacts (.o/.gcno/.gcda et
+# les .gcov annotés) restent confinés dans $(COV_DIR).
+#
+# Drill-down : ouvrir $(COV_DIR)/<module>.c.gcov — les lignes jamais exécutées
+# sont marquées '#####'. Rapport HTML optionnel via lcov : voir tests/README.md.
+# ---------------------------------------------------------------------------
+COV_DIR            := tests/coverage
+COV_CFLAGS         := -Wall -std=gnu99 -O0 -g -I.
+# Modules dont on veut le rapport (les deps de link logger/static_variables
+# sont compilées mais pas reportées).
+COV_REPORT_MODULES := lifo.c part.c readdata.c
+
+.PHONY: coverage
+coverage:
+	@mkdir -p $(COV_DIR)
+	@for src in $(TEST_SRCS) $(TEST_MODULES); do \
+		gcc $(COV_CFLAGS) --coverage -pthread -c $$src \
+			-o $(COV_DIR)/`basename $${src%.c}`.o || exit 1; \
+	done
+	@gcc $(COV_CFLAGS) --coverage -pthread $(COV_DIR)/*.o -lm -o $(COV_DIR)/run_tests
+	@./$(COV_DIR)/run_tests
+	@gcov -o $(COV_DIR) $(COV_REPORT_MODULES) >/dev/null 2>&1 || true
+	@mv -f *.gcov $(COV_DIR)/ 2>/dev/null || true
+	@echo ""
+	@echo "===== Couverture de code (modules testés) ====="
+	@for src in $(COV_REPORT_MODULES); do \
+		line=`gcov -n -o $(COV_DIR) $$src 2>/dev/null \
+			| grep -A1 "File '$$src'" | grep 'Lines executed' | head -1`; \
+		printf "  %-14s %s\n" "$$src" "$$line"; \
+	done
+	@echo "Détail annoté : $(COV_DIR)/<module>.c.gcov"
+
+# ---------------------------------------------------------------------------
+# Rapports gcovr : Cobertura XML (Codecov), HTML navigable et résumé Markdown
+# (Job Summary + commentaire de PR), en un seul passage.
+#
+# Réutilise les .gcda produits par `coverage`. Nécessite gcovr (pip install gcovr
+# ou pipx ; bien plus léger/rapide que lcov). Le --filter ne garde que les
+# modules reportés ; sur macOS gcov natif = llvm-cov, on le signale à gcovr.
+# ---------------------------------------------------------------------------
+COV_XML    := $(COV_DIR)/coverage.xml
+COV_HTML   := $(COV_DIR)/html
+COV_MD     := $(COV_DIR)/coverage.md
+COV_FILTER := --filter '(^|/)(lifo|part|readdata)\.c$$'
+GCOVR := gcovr
+ifeq ($(detected_OS),Darwin)
+	GCOVR := gcovr --gcov-executable "$(shell xcrun --find llvm-cov) gcov"
+endif
+
+.PHONY: coverage-report
+coverage-report: coverage
+	@mkdir -p $(COV_HTML)
+	$(GCOVR) --root . $(COV_FILTER) $(COV_DIR) \
+		--txt \
+		--cobertura $(COV_XML) \
+		--html-details $(COV_HTML)/index.html \
+		--markdown $(COV_MD) --markdown-title "Couverture de code"
+	@echo "Cobertura : $(COV_XML)"
+	@echo "HTML      : $(COV_HTML)/index.html"
+	@echo "Markdown  : $(COV_MD)"
