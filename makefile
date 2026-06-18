@@ -176,3 +176,11 @@ endif
 		--ignore-errors source,empty
 	@echo "Rapport lcov : $(COV_INFO)"
 	@echo "Rapport HTML : $(COV_HTML)/index.html"
+
+# Résumé Markdown de couverture depuis coverage.info (stdout). En CI : injecté
+# dans $GITHUB_STEP_SUMMARY et dans un commentaire de PR. En local : aperçu.
+# Suppose coverage.info présent (lancer `make coverage-html` au préalable).
+.PHONY: coverage-summary
+coverage-summary:
+	@test -f $(COV_INFO) || { echo "Manque $(COV_INFO) — lancer 'make coverage-html'" >&2; exit 1; }
+	@awk -f tests/lcov_to_md.awk $(COV_INFO)

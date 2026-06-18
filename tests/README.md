@@ -90,8 +90,10 @@ En CI (`.github/workflows/ci.yml`), ce même rapport alimente trois sorties :
 
 - **Codecov** (badge, annotations) — dépôt privé, donc le secret `CODECOV_TOKEN`
   est **obligatoire** (pas d'upload « tokenless »).
-- **Commentaire de PR** via `lcov-reporter-action`, 100 % GitHub (aucun service
-  tiers), lu directement depuis `coverage.info`.
+- **Commentaire de PR** + **Job Summary** : `make coverage-summary` transforme
+  `coverage.info` en tableau Markdown (`tests/lcov_to_md.awk`), publié via
+  `actions/github-script` (Node 24, maintenu). 100 % GitHub, aucun service tiers,
+  le code privé ne sort pas. Aperçu local : `make coverage-summary`.
 - **Artefact** `coverage-html` téléchargeable depuis la page du run.
 
 La commande lcov manuelle équivalente :
