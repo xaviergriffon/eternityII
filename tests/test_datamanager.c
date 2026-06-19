@@ -18,6 +18,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+
+/* Coupe temporairement stdout/stderr (fonctions verbeuses : tri, statistiques). */
+static int g_fd1 = -1, g_fd2 = -1;
+static void silence_std(void)
+{
+    fflush(stdout); fflush(stderr);
+    g_fd1 = dup(1); g_fd2 = dup(2);
+    int dn = open("/dev/null", O_WRONLY);
+    dup2(dn, 1); dup2(dn, 2); close(dn);
+}
+static void restore_std(void)
+{
+    fflush(stdout); fflush(stderr);
+    dup2(g_fd1, 1); dup2(g_fd2, 2);
+    close(g_fd1); close(g_fd2);
+}
 
 /* Vide entièrement les pools locaux (vérifié + non vérifié). */
 static void drain_datamanager(void)
@@ -26,6 +43,23 @@ static void drain_datamanager(void)
         array_possibility_packet *r = get_last_possibility(NULL, 1000);
         free_array_possibility_packet(r);
     }
+}
+
+/* Vide aussi le pool « analysed » (réinjecté dans le stock puis drainé). */
+static void drain_all(void)
+{
+    silence_std();
+    restock_analysed();
+    restore_std();
+    drain_datamanager();
+}
+
+/* Somme des tailles du pool analysed sur toutes les files. */
+static unsigned long long analysed_total(void)
+{
+    unsigned long long s = 0;
+    for (int f = 0; f < 10; f++) s += file_analysed_size(f);
+    return s;
 }
 
 /* Ajoute n possibilités non vérifiées (checked = 0) d'allocs donnés. */
@@ -195,6 +229,129 @@ TEST split_then_regroup_preserves_count(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * Pool « checked » : possibilités vérifiées par un pruner (checked == 1)
+ * ------------------------------------------------------------------------ */
+
+TEST checked_possibility_goes_to_checked_pool(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 6;
+    pk.checked = 1; /* routé vers file_possibility_checked */
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    add_possibility(NULL, &arr);
+
+    ASSERT_EQ_FMT(1ULL, file_checked_size(0), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_size(0), "%llu");      /* pas dans le pool non vérifié */
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");      /* mais compté dans le total */
+
+    drain_all();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * Pool « analysed » : add / file_analysed_size / restock
+ * ------------------------------------------------------------------------ */
+
+TEST analysed_add_and_restock(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 5;
+    add_possibility_analysed(&pk, 0); /* file analysed 0 */
+
+    ASSERT_EQ_FMT(1ULL, file_analysed_size(0), "%llu");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu"); /* le pool analysed n'est pas dans datas_size */
+
+    /* restock : remet la possibilité dans le stock principal */
+    silence_std();
+    restock_analysed();
+    restore_std();
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    drain_all();
+    PASS();
+}
+
+/* backup_analysed + restore_analysed : round-trip du pool analysed. */
+TEST analysed_backup_restore_round_trip(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    for (int i = 0; i < 3; i++) {
+        pk.alloc = (uint16_t)(i + 1);
+        add_possibility_analysed(&pk, 0);
+    }
+    ASSERT_EQ_FMT(3ULL, analysed_total(), "%llu");
+
+    char path[] = "/tmp/etii_back_an_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    silence_std();
+    ASSERT_EQ_FMT(0, backup_analysed(path), "%d");
+    restock_analysed();
+    restore_std();
+    drain_datamanager();
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+
+    silence_std();
+    int rc = restore_analysed(path);
+    restore_std();
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(3ULL, analysed_total(), "%llu"); /* les 3 sont revenues */
+
+    unlink(path);
+    drain_all();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * Tri / statistiques : exécution sans erreur, total préservé (sortie musellée)
+ * ------------------------------------------------------------------------ */
+
+TEST sort_preserves_count(void)
+{
+    drain_all();
+    int allocs[] = { 5, 2, 8, 1, 6 };
+    add_packets(allocs, 5);
+
+    silence_std();
+    int a = sort_ascending();
+    int d = sort_descending();
+    restore_std();
+
+    ASSERT_EQ_FMT(0, a, "%d");
+    ASSERT_EQ_FMT(0, d, "%d");
+    ASSERT_EQ_FMT(5ULL, datas_size(), "%llu"); /* total inchangé par le tri */
+
+    drain_all();
+    PASS();
+}
+
+TEST statistic_and_print_run(void)
+{
+    drain_all();
+    int allocs[] = { 3, 3 };
+    add_packets(allocs, 2);
+
+    silence_std();
+    statistic_datas();
+    printdatamanager();
+    print_all_file_analysed();
+    restore_std();
+
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
 SUITE(datamanager_suite)
 {
     RUN_TEST(server_ip_round_trip);
@@ -204,4 +361,9 @@ SUITE(datamanager_suite)
     RUN_TEST(backup_then_restore_preserves_count);
     RUN_TEST(restore_missing_file_returns_error);
     RUN_TEST(split_then_regroup_preserves_count);
+    RUN_TEST(checked_possibility_goes_to_checked_pool);
+    RUN_TEST(analysed_add_and_restock);
+    RUN_TEST(analysed_backup_restore_round_trip);
+    RUN_TEST(sort_preserves_count);
+    RUN_TEST(statistic_and_print_run);
 }

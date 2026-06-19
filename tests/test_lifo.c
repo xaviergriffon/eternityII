@@ -260,6 +260,102 @@ TEST big_table_scroll_cache_returns_internal_pointer(void)
     PASS();
 }
 
+/* put refuse une valeur de taille nulle (sizeofvalue <= 0) -> 0. */
+TEST file_put_rejects_zero_sizeofvalue(void)
+{
+    File f;
+    init_file_with_cache(&f, 0, 0); /* sizeofvalue = 0 */
+    int x = 1;
+    ASSERT_EQ_FMT(0, put(&f, &x), "%d");
+    ASSERT_EQ_FMT(0ULL, (unsigned long long)f.size, "%llu");
+    PASS();
+}
+
+/* scroll_cache : NULL sur file vide, et remise à zéro de start/end au dernier élément. */
+TEST file_scroll_cache_empty_and_full_drain(void)
+{
+    File *f = malloc(sizeof(File));
+    init_file_with_cache(f, 2, sizeof(int));
+    ASSERT_EQ(NULL, scroll_cache(f)); /* vide d'emblée */
+
+    int a = 1, b = 2;
+    put(f, &a);
+    put(f, &b);
+    ASSERT(scroll_cache(f) != NULL);
+    ASSERT(scroll_cache(f) != NULL); /* dernier -> start/end remis à NULL */
+    ASSERT_EQ_FMT(0ULL, (unsigned long long)f->size, "%llu");
+    ASSERT_EQ(NULL, scroll_cache(f));
+
+    free_file(f);
+    PASS();
+}
+
+/* position_cache renvoie l'offset (>= 0) d'un élément appartenant au cache. */
+TEST file_position_cache_inside(void)
+{
+    File *f = malloc(sizeof(File));
+    init_file_with_cache(f, 4, sizeof(int));
+    int v = 7;
+    put(f, &v);
+    Element *cached = f->start; /* cacheElement[0] */
+    ASSERT(inside_cache(f, cached));
+    ASSERT(position_cache(f, cached) >= 0); /* dans le cache -> pas la sentinelle -1 */
+    free_file(f);
+    PASS();
+}
+
+/* scroll_fifo emprunte le chemin « cache » quand les éléments sont pré-alloués. */
+TEST file_scroll_fifo_with_cache(void)
+{
+    File f;
+    init_file_with_cache(&f, 4, sizeof(int));
+    for (int i = 1; i <= 3; i++) put(&f, &i);
+
+    int v;
+    ASSERT_EQ_FMT(1, scroll_fifo(&f, &v), "%d"); ASSERT_EQ_FMT(1, v, "%d");
+    ASSERT_EQ_FMT(1, scroll_fifo(&f, &v), "%d"); ASSERT_EQ_FMT(2, v, "%d");
+    ASSERT_EQ_FMT(1, scroll_fifo(&f, &v), "%d"); ASSERT_EQ_FMT(3, v, "%d");
+    PASS();
+}
+
+/* move_before/move_after sur une cible interne (voisin non NULL) : couvre les
+   branches où targetPrevious / targetNext ne sont pas NULL. */
+TEST file_move_targets_non_extremity(void)
+{
+    File f;
+    init_file_with_cache(&f, 0, sizeof(int));
+    for (int i = 1; i <= 3; i++) put(&f, &i); /* [1,2,3] */
+    Element *e2 = f.start->next;
+    Element *e3 = f.end;
+    move_before(&f, e3, e2); /* 3 avant 2 (cible interne) -> [1,3,2] */
+
+    int v;
+    scroll_fifo(&f, &v); ASSERT_EQ_FMT(1, v, "%d");
+    scroll_fifo(&f, &v); ASSERT_EQ_FMT(3, v, "%d");
+    scroll_fifo(&f, &v); ASSERT_EQ_FMT(2, v, "%d");
+
+    /* nouveau jeu pour move_after sur cible interne */
+    init_file_with_cache(&f, 0, sizeof(int));
+    for (int i = 1; i <= 3; i++) put(&f, &i); /* [1,2,3] */
+    Element *e1 = f.start;
+    Element *mid = f.start->next; /* e2, cible interne (next != NULL) */
+    move_after(&f, e1, mid);      /* 1 après 2 -> [2,1,3] */
+    scroll_fifo(&f, &v); ASSERT_EQ_FMT(2, v, "%d");
+    scroll_fifo(&f, &v); ASSERT_EQ_FMT(1, v, "%d");
+    scroll_fifo(&f, &v); ASSERT_EQ_FMT(3, v, "%d");
+    PASS();
+}
+
+/* free_big_table libère un big_table alloué sur le tas (structure + buffer). */
+TEST big_table_free_big_table_heap(void)
+{
+    big_table *t = malloc(sizeof(big_table));
+    init_big_table(t, 2, sizeof(int));
+    for (int i = 0; i < 5; i++) put_big_table(t, &i);
+    free_big_table(t); /* doit tout libérer sans planter */
+    PASS();
+}
+
 SUITE(lifo_suite)
 {
     RUN_TEST(file_put_then_scroll_is_lifo);
@@ -274,4 +370,10 @@ SUITE(lifo_suite)
     RUN_TEST(file_free_file_releases_heap_allocated_file);
     RUN_TEST(big_table_grows_and_preserves_values);
     RUN_TEST(big_table_scroll_cache_returns_internal_pointer);
+    RUN_TEST(file_put_rejects_zero_sizeofvalue);
+    RUN_TEST(file_scroll_cache_empty_and_full_drain);
+    RUN_TEST(file_position_cache_inside);
+    RUN_TEST(file_scroll_fifo_with_cache);
+    RUN_TEST(file_move_targets_non_extremity);
+    RUN_TEST(big_table_free_big_table_heap);
 }
