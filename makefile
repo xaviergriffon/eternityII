@@ -12,13 +12,20 @@ endif
 
 # etii_opencl.o ${OPENCLLIB}
 
+# Flag d'optimisation : -Ofast sous Linux (gcc). Sous Darwin, clang déprécie
+# -Ofast (warning -Wdeprecated-ofast) et recommande son équivalent strict.
+OPTFLAGS := -Ofast
+ifeq ($(detected_OS),Darwin)
+	OPTFLAGS := -O3 -ffast-math
+endif
+
 # Ajout d'une variable DEBUG pour activer ou désactiver les informations de débogage
 DEBUG ?= 0
 ifeq ($(DEBUG),1)
-    CFLAGS= -Wall -std=gnu99 -Ofast -g
+    CFLAGS= -Wall -std=gnu99 $(OPTFLAGS) -g
 	CLEAN_OBJS =
 else
-    CFLAGS= -Wall -std=gnu99 -Ofast
+    CFLAGS= -Wall -std=gnu99 $(OPTFLAGS)
 	CLEAN_OBJS = rm *.o
 endif
 
