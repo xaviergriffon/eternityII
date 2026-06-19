@@ -107,3 +107,33 @@ jobs:
       # Vérifie que le chemin logger_ncurses.c compile et lie toujours.
       - name: Build NCURSES=1
         run: make NCURSES=1
+
+  cuda-build:
+    name: Build variante CUDA (gpupruner)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Installe le toolkit CUDA (nvcc + cudart-dev) sans GPU : COMPILER et LIER
+      # ne requièrent pas de carte NVIDIA. Méthode « network » → ne tire que les
+      # sous-paquets nécessaires (rapide). nvcc fournit le compilateur, cudart-dev
+      # les en-têtes <cuda_runtime.h> et la lib pour le link -lcudart.
+      - name: Toolkit CUDA
+        uses: Jimver/cuda-toolkit@v0.2.21
+        id: cuda-toolkit
+        with:
+          cuda: '12.5.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart-dev"]'
+
+      - name: Version nvcc
+        run: nvcc --version
+
+      # Compile-check du chemin CUDA=1 (gpu_pruner.cu via nvcc + link -lcudart),
+      # comme le job ncurses. NVCC_ARCH par défaut = sm_87 (Jetson Orin), que
+      # CUDA 12.5 sait compiler sans GPU. CUDA_PATH est exporté par l'action
+      # ci-dessus (le Makefile le respecte via `?=`). Le binaire n'est PAS exécuté :
+      # les runners GitHub n'ont pas de GPU NVIDIA. (Le chemin VERIFY=1 reste
+      # compilable de la même façon si l'on veut l'ajouter plus tard.)
+      - name: Build CUDA=1
+        run: make CUDA=1
