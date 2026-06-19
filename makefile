@@ -93,11 +93,11 @@ clean:
 # (non inliné sans optimisation) ; -pthread pour les mutex de logger.c.
 # ---------------------------------------------------------------------------
 TEST_BIN     := tests/run_tests
-TEST_SRCS    := tests/test_main.c tests/test_lifo.c tests/test_part.c tests/test_readdata.c tests/test_command_history.c tests/test_possibility.c tests/test_etii_protocol.c tests/test_command_match.c tests/test_datamanager.c tests/test_local_socket.c tests/test_tcp.c
+TEST_SRCS    := tests/test_main.c tests/test_lifo.c tests/test_part.c tests/test_readdata.c tests/test_command_history.c tests/test_possibility.c tests/test_etii_protocol.c tests/test_command_match.c tests/test_datamanager.c tests/test_local_socket.c tests/test_tcp.c tests/test_logger.c tests/test_command_lines.c tests/test_console.c
 # Modules de production exercés + leurs dépendances de link transitives.
 # tcpclient.c fournit le vrai create_tcp_client (plus de stub) ; tcpserver.c et
 # local_socket.c sont désormais exercés directement (boucle locale / IPC AF_UNIX).
-TEST_MODULES := lifo.c part.c readdata.c command_history.c command_match.c possibility.c etii_protocol.c datamanager.c local_socket.c tcpclient.c tcpserver.c logger.c static_variables.c
+TEST_MODULES := lifo.c part.c readdata.c command_history.c command_match.c possibility.c etii_protocol.c datamanager.c local_socket.c tcpclient.c tcpserver.c command_lines.c console.c logger.c static_variables.c
 TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -I.
 
 .PHONY: test
