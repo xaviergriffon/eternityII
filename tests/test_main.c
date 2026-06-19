@@ -17,6 +17,7 @@ SUITE_EXTERN(command_history_suite);
 SUITE_EXTERN(possibility_suite);
 SUITE_EXTERN(etii_protocol_suite);
 SUITE_EXTERN(command_match_suite);
+SUITE_EXTERN(datamanager_suite);
 
 GREATEST_MAIN_DEFS();
 
@@ -30,5 +31,6 @@ int main(int argc, char **argv)
     RUN_SUITE(possibility_suite);
     RUN_SUITE(etii_protocol_suite);
     RUN_SUITE(command_match_suite);
+    RUN_SUITE(datamanager_suite);
     GREATEST_MAIN_END(); /* affiche le récap et retourne le code de sortie */
 }
