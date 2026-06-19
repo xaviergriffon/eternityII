@@ -14,11 +14,15 @@
 #include "greatest.h"
 #include "../datamanager.h"
 #include "../possibility.h"
+#include "../part.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+
+/* Non déclarée dans datamanager.h (helper interne non statique). */
+unsigned long long count_combinations(unsigned long long x);
 
 /* Coupe temporairement stdout/stderr (fonctions verbeuses : tri, statistiques). */
 static int g_fd1 = -1, g_fd2 = -1;
@@ -352,6 +356,93 @@ TEST statistic_and_print_run(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * count_combinations : nombre de paires (x*(x-1)/2)
+ * ------------------------------------------------------------------------ */
+
+TEST count_combinations_is_triangular(void)
+{
+    ASSERT_EQ_FMT(0ULL, count_combinations(0), "%llu");
+    ASSERT_EQ_FMT(0ULL, count_combinations(1), "%llu");
+    ASSERT_EQ_FMT(1ULL, count_combinations(2), "%llu");
+    ASSERT_EQ_FMT(6ULL, count_combinations(4), "%llu");
+    ASSERT_EQ_FMT(10ULL, count_combinations(5), "%llu");
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * get_last_possibility_tocheck : extraction côté pruner (pool non vérifié)
+ * ------------------------------------------------------------------------ */
+
+TEST get_tocheck_drains_unchecked_pool(void)
+{
+    drain_all();
+    int allocs[] = { 3, 4 };
+    add_packets(allocs, 2); /* non vérifiées -> pool historique */
+
+    array_possibility_packet *r = get_last_possibility_tocheck(10);
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(2, r->size, "%d");
+    free_array_possibility_packet(r);
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    drain_all();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * remove_possibility_analysed : retrait ciblé dans le pool analysed
+ * ------------------------------------------------------------------------ */
+
+TEST remove_analysed_finds_then_misses(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 5;
+    add_possibility_analysed(&pk, 0);
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
+
+    /* trouvée et retirée -> 0 */
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, 0), "%d");
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+
+    /* deuxième passage : plus rien à retirer -> 1 */
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 0), "%d");
+
+    drain_all();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * remove_possibilities_with_no_next : élagage des impasses du stock
+ * ------------------------------------------------------------------------ */
+
+TEST remove_no_next_prunes_dead_packets(void)
+{
+    drain_all();
+    /* map sans pièce « tout bord 0 » : une case (0,0) vide reste sans candidat. */
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet pks[2];
+    memset(pks, 0, sizeof(pks));
+    /* pks[0] : grille pleine (tout à 0) -> a une suite, conservée */
+    /* pks[1] : trou sur la 1re case du parcours, clé (0,0,0,0) sans candidat -> impasse */
+    pks[1].grid[dirx[0]][diry[0]] = -2;
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+
+    remove_possibilities_with_no_next(map, &rp);
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* l'impasse a été retirée */
+
+    free_bigarray(map);
+    drain_all();
+    PASS();
+}
+
 SUITE(datamanager_suite)
 {
     RUN_TEST(server_ip_round_trip);
@@ -366,4 +457,8 @@ SUITE(datamanager_suite)
     RUN_TEST(analysed_backup_restore_round_trip);
     RUN_TEST(sort_preserves_count);
     RUN_TEST(statistic_and_print_run);
+    RUN_TEST(count_combinations_is_triangular);
+    RUN_TEST(get_tocheck_drains_unchecked_pool);
+    RUN_TEST(remove_analysed_finds_then_misses);
+    RUN_TEST(remove_no_next_prunes_dead_packets);
 }
