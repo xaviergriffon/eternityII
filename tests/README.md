@@ -25,12 +25,20 @@ Options utiles du runner (passées via greatest) :
 
 ## Organisation
 
-| Fichier | Couverture |
+Les suites sont rangées par domaine, **en miroir de `src/`** ; le harnais
+partagé reste à la racine de `tests/`.
+
+| Emplacement | Contenu |
 |---|---|
-| `test_main.c` | Point d'entrée unique du runner (enregistre les suites). |
-| `test_lifo.c` | `lifo.c` — `File` (put/scroll LIFO, cache) et `big_table` (croissance). |
-| `test_part.c` | `part.c` — `rotatePart`, `search_max_face`, `search_face`, `copy_array_part`, `id_for_rotated_part`, `buildBigArray`/`get_one_part`. |
-| `test_readdata.c` | `readdata.c` — `read_parts` (parsing CSV, chemin nominal). |
+| `tests/test_main.c` | Point d'entrée unique du runner (enregistre toutes les suites). |
+| `tests/greatest.h`, `tests/fork_assert.h` | Framework greatest + helper d'assertions par `fork()`. |
+| `tests/core/` | Suites des modules `src/core/` (`test_lifo`, `test_part`, `test_readdata`, `test_possibility`, `test_etii_search`, `test_datamanager`). |
+| `tests/net/` | Suites des modules `src/net/` (`test_etii_protocol`, `test_local_socket`, `test_tcp`). |
+| `tests/ui/` | Suites des modules `src/ui/` (`test_command_history`, `test_command_match`, `test_command_lines`, `test_console`, `test_logger`). |
+
+Chaque `test_<module>.c` inclut ses en-têtes de production en forme qualifiée
+(`#include "core/part.h"`, résolu via `-Isrc`) et le harnais en forme courte
+(`#include "greatest.h"`, résolu via `-Itests`).
 
 ## Conventions et limites
 
@@ -53,10 +61,10 @@ fidèle), la lance, puis affiche le pourcentage de lignes couvertes par module
 testé via **gcov** (intégré à gcc/clang — rien à installer) :
 
 ```
-===== Couverture de code (modules testés) =====
-  lifo.c         Lines executed:48.29% of 234
-  part.c         Lines executed:50.77% of 388
-  readdata.c     Lines executed:18.75% of 192
+===== Couverture de code (tout le code de production) =====
+  src/core/lifo.c    Lines executed:99.15% of 234
+  src/core/part.c    Lines executed:91.49% of 388
+  src/core/readdata.c Lines executed:85.42% of 192
 ```
 
 Tous les artefacts (`.o`, `.gcno`, `.gcda`, `.gcov`) restent dans
@@ -104,7 +112,7 @@ En CI (`.github/workflows/ci.yml`), ces sorties alimentent trois visualisations 
 
 1. Écrire un `TEST mon_test(void) { ...; PASS(); }` dans le `test_<module>.c`
    adéquat, puis l'ajouter au `SUITE(<module>_suite)` du même fichier.
-2. Pour un nouveau module : créer `tests/test_<module>.c` avec sa `SUITE`,
-   l'ajouter à `SUITE_EXTERN`/`RUN_SUITE` dans `test_main.c`, et compléter
-   `TEST_SRCS` / `TEST_MODULES` dans le `Makefile` (en ajoutant les dépendances
-   de link transitives du module).
+2. Pour un nouveau module : créer `tests/<domaine>/test_<module>.c` (même domaine
+   que le module sous `src/`) avec sa `SUITE`, l'ajouter à `SUITE_EXTERN`/`RUN_SUITE`
+   dans `test_main.c`, et compléter `TEST_SRCS` / `TEST_MODULES` dans le `Makefile`
+   (en ajoutant les dépendances de link transitives du module).

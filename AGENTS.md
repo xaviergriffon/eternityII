@@ -6,6 +6,19 @@ This file is the single source of project guidance for AI coding agents (Claude 
 
 eternityII is a C program that attempts to solve the [Eternity II puzzle](https://en.wikipedia.org/wiki/Eternity_II_puzzle) — a 16×16 grid with 256 pieces. It uses a distributed client-server architecture to parallelise the search space across multiple processes or machines.
 
+## Source Layout
+
+Sources live under `src/`, split into four domains. Includes are **explicit and domain-qualified** (e.g. `#include "core/part.h"`) and resolve via a single `-Isrc` (passed by both the Makefile and `target_include_directories(eternityII PRIVATE src)` in CMake).
+
+| Directory | Domain | Modules |
+|---|---|---|
+| `src/core/` | Puzzle logic & data structures + search engine | `part` `readdata` `possibility` `lifo` `packed`(h) `etii_search` `datamanager` |
+| `src/net/`  | TCP protocol & sockets, parent↔child IPC | `etii_protocol` `tcpclient` `tcpserver` `local_socket` `ipc_protocol`(h) |
+| `src/ui/`   | Logging, console, command handling | `logger` `logger_ncurses`(c) `console` `command_lines` `command_match` `command_history` |
+| `src/app/`  | Entry point, client/server roles, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_statistic`(h) `static_variables` `gpu_pruner`(.cu/.h) |
+
+Other top-level dirs: `data/` (puzzle definitions `pieces.csv`, `pieces16.csv`), `build/` (compilation objects, mirrors `src/`, gitignored), `tests/` (unit tests). Adding a `.c` means dropping it under the right `src/<domain>/` and adding its `build/<domain>/<name>.o` to the `OBJS` list (and to `add_executable` in `CMakeLists.txt`).
+
 ## Build Commands
 
 ```sh
@@ -25,25 +38,25 @@ The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` inste
 
 ```sh
 # Start the server (distributes possibilities to clients)
-./eternityII tcpserver [nb_threads] [pieces.csv]
+./eternityII tcpserver [nb_threads] [data/pieces.csv]
 
 # Start a client (does the search)
-./eternityII tcpclient [server_host] [nb_threads] [max_stock_per_thread] [pieces.csv]
+./eternityII tcpclient [server_host] [nb_threads] [max_stock_per_thread] [data/pieces.csv]
 
 # Start a pruner client (validates unchecked possibilities, batched exchange)
-./eternityII tcppruner [server_host] [nb_threads] [pieces.csv] [batch_size]
+./eternityII tcppruner [server_host] [nb_threads] [data/pieces.csv] [batch_size]
 # GPU pruner (CUDA build only): same args, batch checked on the GPU
-./eternityII gpupruner [server_host] [nb_threads] [pieces.csv] [batch_size]
+./eternityII gpupruner [server_host] [nb_threads] [data/pieces.csv] [batch_size]
 
 # Self-contained test/auto mode (no server needed)
-./eternityII test [pieces.csv]
+./eternityII test [data/pieces.csv]
 ```
 
-Default piece file: `pieces.csv` (256-piece puzzle). A smaller 16-piece variant is `pieces16.csv`.
+Puzzle definitions live in `data/`: `data/pieces.csv` (256-piece puzzle) and the 16-piece variant `data/pieces16.csv`. The code's built-in default (`parts_files` in `src/app/static_variables.c`) now points at `./data/pieces.csv` (or `./data/pieces16.csv` for the 16-piece build), so running from the repo root works without an explicit path argument.
 
 ## Testing
 
-Unit tests live in `tests/` and use [greatest](https://github.com/silentbicycle/greatest) — a single-header C test framework vendored as `tests/greatest.h` (no external dependency). The tests currently exercise the pure-logic modules `lifo.c`, `part.c`, `readdata.c`; the coverage report nonetheless spans the **whole default build** (every `.c` except the `NCURSES`/`CUDA` variants), so untested modules (`main.c`, `possibility.c`, `etii_*.c`, …) show up at 0 % and the global percentage reflects the entire codebase.
+Unit tests live in `tests/` and use [greatest](https://github.com/silentbicycle/greatest) — a single-header C test framework vendored as `tests/greatest.h` (no external dependency). Suites are organised by domain, **mirroring `src/`** (`tests/core/`, `tests/net/`, `tests/ui/`), while the shared harness stays at the `tests/` root (`test_main.c` runner, `greatest.h`, `fork_assert.h`). Test files include production headers in the domain-qualified form (`#include "core/part.h"`, resolved via `-Isrc`) and the harness in short form (`#include "greatest.h"`, resolved via `-Itests`). The coverage report spans the **whole default build** (every `src/**/*.c` except the `NCURSES`/`CUDA` variants), so modules the tests don't exercise (`src/app/main.c`, …) show up at 0 % and the global percentage reflects the entire codebase.
 
 ```sh
 make test            # compile tests/ + run; non-zero exit on failure (CI-ready)
@@ -53,7 +66,7 @@ make coverage-report # gcovr over those .gcda → Cobertura XML + HTML + Markdow
 
 Conventions to keep in mind when adding or extending tests:
 
-- **No `main.c` in the test binary.** `make test` links only the modules under test plus their transitive link deps (`logger.o`, `static_variables.o`). The `TEST_SRCS` / `TEST_MODULES` Makefile variables control this; each test file exposes a `SUITE` registered in `tests/test_main.c`.
+- **No `main.c` in the test binary.** `make test` links only the modules under test plus their transitive link deps (`src/ui/logger.c`, `src/app/static_variables.c`). The `TEST_SRCS` / `TEST_MODULES` Makefile variables (now `src/<domain>/…` paths) control this; each test file exposes a `SUITE` registered in `tests/test_main.c`.
 - **Hand-built fixtures, not `pieces.csv` / `rotate_all_parts`.** Tests construct small `part` / `array_part` structs inline, so they stay independent of `ETERN_PARTS` (256 vs 16) and need no data file in the CWD. `rotate_all_parts` indexes by `i + ETERN_PARTS*r` and is only correct when `ETERN_PARTS` matches the real puzzle size — don't build fixtures through it.
 - **Error paths that call `exit()` aren't tested** where the code aborts (e.g. a missing CSV in `read_parts`): greatest runs in-process, so an `exit()` would kill the whole runner. Covering those would require forking per test.
 - **Coverage artifacts** (`.o/.gcno/.gcda/.gcov`) stay confined to `tests/coverage/` (gitignored, removed by `make clean`). `make coverage` instruments **every default-build module** (`COV_ALL_MODULES`) so each gets a `.gcno`, then links the test binary with only the exercised subset (`COV_LINK_MODULES` = `TEST_MODULES`); modules that are compiled but never linked/run produce no `.gcda` and report 0 %. Drill into `tests/coverage/<module>.c.gcov` (`#####` = never executed).
@@ -92,41 +105,42 @@ A pruner exchanges with the server in batches of `pruner_batch_size` (configurab
 
 ### Core Data Structures
 
-- **`struct part`** (`part.h`): one puzzle piece — `id`, `top/right/bottom/left` face colours, `rotation`.
+- **`struct part`** (`src/core/part.h`): one puzzle piece — `id`, `top/right/bottom/left` face colours, `rotation`.
 - **`struct array_part`**: flat array of parts.
 - **`map_big_array`** / **`big_array`**: 4-dimensional array indexed by `(top, right, bottom, left)` face values, used as a fast lookup map from required edge colours → matching pieces.
-- **`struct possibility_packet`** (`possibility.h`): the full board state passed between client and server — current position `(x, y)`, the 16×16 grid of placed piece IDs, bitmask of used pieces (`b_faceused`), and an `alloc` counter.
-- **`File`** (`lifo.h`): doubly-linked list used as a queue of `possibility_packet` objects.
-- **`big_table`** (`lifo.h`): dynamically-growing flat array used as a high-performance result buffer.
-- **`client_possibility_t`** (`etii_client.h`): per-search-thread context holding its queue, map, socket, and counters.
+- **`struct possibility_packet`** (`src/core/possibility.h`): the full board state passed between client and server — current position `(x, y)`, the 16×16 grid of placed piece IDs, bitmask of used pieces (`b_faceused`), and an `alloc` counter.
+- **`File`** (`src/core/lifo.h`): doubly-linked list used as a queue of `possibility_packet` objects.
+- **`big_table`** (`src/core/lifo.h`): dynamically-growing flat array used as a high-performance result buffer.
+- **`client_possibility_t`** (`src/app/etii_client.h`): per-search-thread context holding its queue, map, socket, and counters.
 
 ### Key Module Responsibilities
 
 | File | Responsibility |
 |---|---|
-| `main.c` | Entry point; dispatches to server/client/test modes; manages fork lifecycle and signals |
-| `possibility.c` | Core search logic: generating, checking, and stepping through board possibilities |
-| `etii_search.c` | `autosearch()` — the inner search loop run by each thread |
-| `etii_client.c` | Client orchestration: spawns search threads, manages their lifecycle |
-| `etii_server.c` | Server: accepts TCP connections, distributes/collects possibilities |
-| `datamanager.c` | 10 mutex-protected possibility queues; backup/restore to `.back` files |
-| `part.c` | Piece rotation, map building (`prepare_map_part`), face lookups |
-| `readdata.c` | Parses `pieces.csv` into `array_part` |
-| `etii_protocol.c` | TCP send/recv helpers for `packet` structs |
-| `tcpclient.c` / `tcpserver.c` | Low-level TCP socket setup |
-| `local_socket.c` | Unix domain UDP sockets for parent↔child IPC |
-| `lifo.c` | Queue (`File`) and flat array (`big_table`) data structures |
-| `console.c` / `command_lines.c` | Interactive command parsing from stdin; Levenshtein-based typo suggestion for unknown commands |
-| `command_history.c` | In-session command history (↑/↓ recall, 100-entry ring, dedup) |
-| `logger.c` | Thread-safe `log_info/log_debug/log_error/log_console/log_event/log_status` — ANSI build |
-| `logger_ncurses.c` | Ncurses variant of logger (compiled instead of `logger.c` when `NCURSES=1`); 4-pane layout: output pad, stats banner, events, input |
-| `ipc_protocol.h` | Structs for parent↔child Unix socket messages (stats, log forwarding) |
-| `etii_statistic.h` | `client_statistics` struct sent by child processes to parent every second |
-| `static_variables.c` | All global state (counters, flags, pids, socket handles) |
+| `src/app/main.c` | Entry point; dispatches to server/client/test modes; manages fork lifecycle and signals |
+| `src/core/possibility.c` | Core search logic: generating, checking, and stepping through board possibilities |
+| `src/core/etii_search.c` | `autosearch()` — the inner search loop run by each thread |
+| `src/app/etii_client.c` | Client orchestration: spawns search threads, manages their lifecycle |
+| `src/app/etii_server.c` | Server: accepts TCP connections, distributes/collects possibilities |
+| `src/core/datamanager.c` | 10 mutex-protected possibility queues; backup/restore to `.back` files |
+| `src/core/part.c` | Piece rotation, map building (`prepare_map_part`), face lookups |
+| `src/core/readdata.c` | Parses `data/pieces.csv` into `array_part` |
+| `src/net/etii_protocol.c` | TCP send/recv helpers for `packet` structs |
+| `src/net/tcpclient.c` / `src/net/tcpserver.c` | Low-level TCP socket setup |
+| `src/net/local_socket.c` | Unix domain UDP sockets for parent↔child IPC |
+| `src/core/lifo.c` | Queue (`File`) and flat array (`big_table`) data structures |
+| `src/ui/console.c` / `src/ui/command_lines.c` | Interactive command parsing from stdin; Levenshtein-based typo suggestion for unknown commands |
+| `src/ui/command_history.c` | In-session command history (↑/↓ recall, 100-entry ring, dedup) |
+| `src/ui/logger.c` | Thread-safe `log_info/log_debug/log_error/log_console/log_event/log_status` — ANSI build |
+| `src/ui/logger_ncurses.c` | Ncurses variant of logger (compiled instead of `src/ui/logger.c` when `NCURSES=1`); 4-pane layout: output pad, stats banner, events, input |
+| `src/net/ipc_protocol.h` | Structs for parent↔child Unix socket messages (stats, log forwarding) |
+| `src/app/etii_statistic.h` | `client_statistics` struct sent by child processes to parent every second |
+| `src/app/static_variables.c` | All global state (counters, flags, pids, socket handles) |
+| `src/app/gpu_pruner.cu` | CUDA batch pruner kernel (compiled only with `CUDA=1`) |
 
 ## Debug Flags
 
-Defined (and commented out) in `static_variables.h`. Uncomment before building to enable:
+Defined (and commented out) in `src/app/static_variables.h`. Uncomment before building to enable:
 
 ```c
 #define DEBUG_IN_MONO_PROCESS  // forces single-process (no fork) — essential for debugger
@@ -141,12 +155,12 @@ Defined (and commented out) in `static_variables.h`. Uncomment before building t
 
 ## Puzzle Configuration
 
-`static_variables.h` controls the puzzle size:
+`src/app/static_variables.h` controls the puzzle size:
 
 ```c
 #define ETERN_PARTS 256   // 256 pieces → 16×16 board
 // or
-#define ETERN_PARTS 16    // 16 pieces  → 4×4 board (use pieces16.csv)
+#define ETERN_PARTS 16    // 16 pieces  → 4×4 board (use data/pieces16.csv)
 ```
 
 Changing `ETERN_PARTS` requires a full rebuild.
