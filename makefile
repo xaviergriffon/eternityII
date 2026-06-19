@@ -69,8 +69,8 @@ ifeq ($(VERIFY),1)
     CFLAGS += -DGPU_PRUNER_VERIFY
 endif
 
-$(EXECUTABLE): $(LOGGER_OBJ) static_variables.o local_socket.o lifo.o tcpclient.o tcpserver.o part.o readdata.o datamanager.o possibility.o etii_protocol.o etii_client.o etii_server.o etii_search.o command_lines.o command_history.o console.o main.o $(CUDA_OBJ)
-	gcc -pthread -o $(EXECUTABLE) $(LOGGER_OBJ) static_variables.o local_socket.o lifo.o tcpclient.o tcpserver.o part.o datamanager.o possibility.o readdata.o etii_protocol.o etii_client.o etii_server.o etii_search.o command_lines.o command_history.o console.o main.o $(CUDA_OBJ) ${CFLAGS} ${CPPFLAGS} $(NCURSES_LIB) $(CUDA_LIB)
+$(EXECUTABLE): $(LOGGER_OBJ) static_variables.o local_socket.o lifo.o tcpclient.o tcpserver.o part.o readdata.o datamanager.o possibility.o etii_protocol.o etii_client.o etii_server.o etii_search.o command_lines.o command_match.o command_history.o console.o main.o $(CUDA_OBJ)
+	gcc -pthread -o $(EXECUTABLE) $(LOGGER_OBJ) static_variables.o local_socket.o lifo.o tcpclient.o tcpserver.o part.o datamanager.o possibility.o readdata.o etii_protocol.o etii_client.o etii_server.o etii_search.o command_lines.o command_match.o command_history.o console.o main.o $(CUDA_OBJ) ${CFLAGS} ${CPPFLAGS} $(NCURSES_LIB) $(CUDA_LIB)
 	$(CLEAN_OBJS)
 
 # Compilation du module GPU (uniquement requis lorsque CUDA=1 ; cette règle n'est
@@ -93,10 +93,10 @@ clean:
 # (non inliné sans optimisation) ; -pthread pour les mutex de logger.c.
 # ---------------------------------------------------------------------------
 TEST_BIN     := tests/run_tests
-TEST_SRCS    := tests/test_main.c tests/test_lifo.c tests/test_part.c tests/test_readdata.c tests/test_command_history.c tests/test_possibility.c tests/test_etii_protocol.c tests/stubs.c
+TEST_SRCS    := tests/test_main.c tests/test_lifo.c tests/test_part.c tests/test_readdata.c tests/test_command_history.c tests/test_possibility.c tests/test_etii_protocol.c tests/test_command_match.c tests/stubs.c
 # Modules de production exercés + leurs dépendances de link transitives.
 # tests/stubs.c fournit add_possibility (no-op) pour lier possibility.c sans datamanager.
-TEST_MODULES := lifo.c part.c readdata.c command_history.c possibility.c etii_protocol.c logger.c static_variables.c
+TEST_MODULES := lifo.c part.c readdata.c command_history.c command_match.c possibility.c etii_protocol.c logger.c static_variables.c
 TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -I.
 
 .PHONY: test
