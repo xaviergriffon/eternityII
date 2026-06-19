@@ -38,7 +38,11 @@
 #define DEFAULT_TCP_TIMEOUT 10
 
 #define PART_SIZES 4
+// Surchargeable via -DETERN_PARTS=16 (puzzle 4×4) sans éditer ce fichier : la CI
+// compile les deux tailles. Défaut 256 (16×16). Cf. section Puzzle Configuration.
+#ifndef ETERN_PARTS
 #define ETERN_PARTS 256
+#endif
 #define ETERN_WITH_INDICES 1
 #if ETERN_PARTS == 256
 #define ETERN_SIZE 16
@@ -63,7 +67,11 @@
  * Une valeur plus élevée détecte les impasses plus tôt mais coûte plus de
  * lookups par placement. K=3 est un bon compromis par défaut.
  */
+// Surchargeable via -DFORWARD_CHECK_K=0 (désactive le forward-checking) : la CI
+// compile aussi cette variante. Défaut 6.
+#ifndef FORWARD_CHECK_K
 #define FORWARD_CHECK_K 6
+#endif
 // ------------- Flags pour Debug -----------------
 // Permet de contrôler les données des possibilités générés ou reçus
 //#define DEBUG_CHECK_POSSIBILITY 1

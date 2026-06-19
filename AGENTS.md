@@ -72,7 +72,7 @@ Conventions to keep in mind when adding or extending tests:
 - **Coverage artifacts** (`.o/.gcno/.gcda/.gcov`) stay confined to `tests/coverage/` (gitignored, removed by `make clean`). `make coverage` instruments **every default-build module** (`COV_ALL_MODULES`) so each gets a `.gcno`, then links the test binary with only the exercised subset (`COV_LINK_MODULES` = `TEST_MODULES`); modules that are compiled but never linked/run produce no `.gcda` and report 0 %. Drill into `tests/coverage/<module>.c.gcov` (`#####` = never executed).
 - **`make coverage-report`** runs [gcovr](https://gcovr.com) (a pip/pipx tool, *not* needed for plain `make coverage`) over those `.gcda`/`.gcno` to emit `tests/coverage/coverage.xml` (Cobertura, for Codecov), an HTML report under `tests/coverage/html/`, and `tests/coverage/coverage.md` (Markdown summary). After gcovr runs, `tests/coverage_by_domain.py` post-processes `coverage.md` to insert a **per-domain section** (`src/core/`, `src/net/`, `src/ui/`, `src/app/` subtotals, from gcovr's `--json-summary`) between the overall and per-file tables. On macOS it auto-passes `--gcov-executable "llvm-cov gcov"`; `COV_FILTER` `--exclude`s `tests/` so only production code is reported. The Codecov upload step pins `disable_search: true` + `plugins: noop` so the action ingests *only* this `coverage.xml` (otherwise its built-in gcov plugin would re-scan the `.gcda` and re-add the `tests/` directory).
 
-CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the release build, `make test`, `make coverage-report`, and a compile-check of the `NCURSES=1` variant on every push and PR. The coverage results are published to **Codecov** (Cobertura `coverage.xml`; private repo → `CODECOV_TOKEN` secret required), as a **PR comment + Job Summary** (from `coverage.md` via `actions/github-script`), and as a downloadable **HTML artifact**. CUDA isn't exercised in CI (no `nvcc` on runners).
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the release build (`make WERROR=1`), `make test`, and `make coverage-report` on every push and PR. **Guiding rule: CI compiles every build combination of the code, each with `WERROR=1` (any warning fails the build)** — so no conditionally-compiled path can rot unnoticed. Beyond the release build, dedicated compile-check jobs cover the `NCURSES=1` variant, the `CUDA=1` variant (plus `CUDA=1 VERIFY=1`, the `-DGPU_PRUNER_VERIFY` cross-check path), a build that enables **all** the `DEBUG_*` flags of `src/app/static_variables.h` at once, and the alternative puzzle/algorithm configs `ETERN_PARTS=16` (4×4 board) and `FORWARD_CHECK_K=0` (forward-checking compiled out). All of these are driven via `CPPFLAGS` (`-D…`), so the source stays untouched — which is why `ETERN_PARTS` and `FORWARD_CHECK_K` are `#ifndef`-guarded in the header (overridable, default `256`/`6`). The CUDA toolkit is installed on the runner (`Jimver/cuda-toolkit`, network method) for **compilation only**: GitHub runners have no NVIDIA GPU, so the CUDA binary is never executed (functional validation happens on Jetson) — likewise every variant job is a compile/link check, not a run. For the CUDA jobs `WERROR=1` is enforced on both sides: the gcc-compiled C under `WITH_CUDA` (`-Werror`) **and** the `nvcc`-compiled `.cu` kernel (the Makefile adds `-Werror all-warnings` to `NVCCFLAGS`). The coverage results are published to **Codecov** (Cobertura `coverage.xml`; private repo → `CODECOV_TOKEN` secret required), as a **PR comment + Job Summary** (from `coverage.md` via `actions/github-script`), and as a downloadable **HTML artifact**.
 
 ## Architecture
 
@@ -153,6 +153,8 @@ Defined (and commented out) in `src/app/static_variables.h`. Uncomment before bu
 #define DEBUG_RM_NO_NEXT       // traces rmnonext pruning
 ```
 
+Locally you uncomment them; CI instead enables **all** of them at once via `CPPFLAGS` (the `debug-build` job, `make WERROR=1 CPPFLAGS="-DDEBUG_… …"`) and fails on any warning — so this normally-dead trace code can't rot when surrounding symbols change. Add a new `DEBUG_*` flag → add its `-D` to that job.
+
 ## Puzzle Configuration
 
 `src/app/static_variables.h` controls the puzzle size:
@@ -163,4 +165,4 @@ Defined (and commented out) in `src/app/static_variables.h`. Uncomment before bu
 #define ETERN_PARTS 16    // 16 pieces  → 4×4 board (use data/pieces16.csv)
 ```
 
-Changing `ETERN_PARTS` requires a full rebuild.
+The `#define` is `#ifndef`-guarded, so you can also override it without editing the file: `make CPPFLAGS="-DETERN_PARTS=16"` (this is how CI compile-checks the 4×4 build). Same pattern for `FORWARD_CHECK_K`. Changing `ETERN_PARTS` requires a full rebuild.

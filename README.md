@@ -78,7 +78,7 @@ make CUDA=1 VERIFY=1                     # Build de vérification croisée : rej
 | `NVCC` | `nvcc` | Chemin du compilateur CUDA (doit être dans le `PATH`, sinon échec explicite) |
 | `CUDA_PATH` | `/usr/local/cuda` | Racine du toolkit CUDA (pour `-L$(CUDA_PATH)/lib64`) |
 | `NVCC_ARCH` | `sm_87` | Architecture GPU cible (Orin Nano = `sm_87`) |
-| `NVCCFLAGS` | `-O3 -arch=$(NVCC_ARCH)` | Drapeaux passés à `nvcc` |
+| `NVCCFLAGS` | `-O3 -arch=$(NVCC_ARCH)` | Drapeaux passés à `nvcc` (avec `WERROR=1`, le Makefile y ajoute `-Werror all-warnings` : tout warning nvcc devient une erreur, comme `-Werror` côté gcc) |
 
 **Note Jetson** : sur Jetson Orin Nano, `nvcc` n'est pas dans le `PATH` par défaut. Indiquer son chemin explicitement, et exporter le runtime CUDA à l'exécution :
 
@@ -115,11 +115,11 @@ Le détail ligne par ligne est dans `tests/coverage/<module>.c.gcov` (lignes jam
 
 À chaque push et pull request, [GitHub Actions](.github/workflows/ci.yml) :
 
-- compile le build de production (`make`), lance les tests unitaires (`make test`) et les rapports de couverture (`make coverage-report`, via gcovr) ;
+- compile le build de production (`make WERROR=1`), lance les tests unitaires (`make test`) et les rapports de couverture (`make coverage-report`, via gcovr) ;
 - publie la couverture : envoi à Codecov (Cobertura), commentaire de couverture sur la PR + récapitulatif du run (Job Summary), et rapport HTML en artefact téléchargeable ;
-- vérifie que la variante ncurses (`make NCURSES=1`) compile toujours.
+- **compile toutes les combinaisons du code**, chacune avec `WERROR=1` (tout warning bloque la CI), pour qu'aucun chemin compilé sous condition ne se désynchronise en silence : la variante ncurses (`make NCURSES=1`), la variante CUDA (`make CUDA=1` puis `make CUDA=1 VERIFY=1`), un build activant **tous** les flags `DEBUG_*` de [src/app/static_variables.h](src/app/static_variables.h) à la fois, et les configurations alternatives `ETERN_PARTS=16` (plateau 4×4) et `FORWARD_CHECK_K=0` (forward-checking retiré). Toutes pilotées via `CPPFLAGS` (`-D…`), sans toucher la source — ces deux `#define` sont guardés par `#ifndef` pour être surchargeables.
 
-Le mode CUDA n'est pas testé en CI (pas de `nvcc` sur les runners ; la validation se fait sur Jetson).
+Le toolkit CUDA est installé sur le runner (action `Jimver/cuda-toolkit`) pour la **compilation** seule : les runners GitHub n'ayant pas de GPU NVIDIA, le binaire CUDA n'est pas exécuté (la validation fonctionnelle se fait sur Jetson). Il en va de même pour les autres variantes : ce sont des contrôles de compilation/édition de liens, pas des exécutions.
 
 ## Utilisation
 

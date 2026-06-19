@@ -105,8 +105,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libncurses-dev
 
       # Vérifie que le chemin logger_ncurses.c compile et lie toujours.
+      # WERROR=1 : tout warning gcc dans la variante ncurses bloque la CI.
       - name: Build NCURSES=1
-        run: make NCURSES=1
+        run: make NCURSES=1 WERROR=1
 
   cuda-build:
     name: Build variante CUDA (gpupruner)
@@ -133,7 +134,60 @@ jobs:
       # comme le job ncurses. NVCC_ARCH par défaut = sm_87 (Jetson Orin), que
       # CUDA 12.5 sait compiler sans GPU. CUDA_PATH est exporté par l'action
       # ci-dessus (le Makefile le respecte via `?=`). Le binaire n'est PAS exécuté :
-      # les runners GitHub n'ont pas de GPU NVIDIA. (Le chemin VERIFY=1 reste
-      # compilable de la même façon si l'on veut l'ajouter plus tard.)
+      # les runners GitHub n'ont pas de GPU NVIDIA. WERROR=1 bloque la CI sur tout
+      # warning, côté gcc (code C sous WITH_CUDA : autoprune_gpu, etii_search.c)
+      # ET côté nvcc (le Makefile ajoute -Werror all-warnings à NVCCFLAGS pour le
+      # kernel .cu).
       - name: Build CUDA=1
-        run: make CUDA=1
+        run: make CUDA=1 WERROR=1
+
+      # Combinaison supplémentaire : vérification croisée GPU↔CPU activée
+      # (-DGPU_PRUNER_VERIFY) — un chemin de code distinct dans autoprune_gpu.
+      # On repart propre (make clean) : le build release supprime déjà build/
+      # mais conserve le binaire précédent.
+      - name: Build CUDA=1 VERIFY=1
+        run: make clean && make CUDA=1 VERIFY=1 WERROR=1
+
+  debug-build:
+    name: Build avec les flags DEBUG
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Les flags DEBUG_* sont des #define laissés commentés dans
+      # src/app/static_variables.h : leur code (traces socket/signal/thread,
+      # contrôles de possibilités, mono-process…) n'est donc jamais compilé par
+      # le build standard et peut « pourrir » sans qu'on le voie (symbole retiré,
+      # format printf obsolète, type changé…). On les active TOUS d'un coup via
+      # CPPFLAGS (injecté tel quel dans gcc par le Makefile) — sans toucher la
+      # source — pour garantir que ces chemins compilent et lient toujours.
+      # Comme les jobs ncurses/cuda : compile-check seul, le binaire n'est pas
+      # exécuté (DEBUG_IN_MONO_PROCESS change le comportement d'exécution).
+      # WERROR=1 : tout warning gcc dans ce code rarement compilé bloque la CI.
+      - name: Build avec tous les flags DEBUG_*
+        run: >
+          make WERROR=1
+          CPPFLAGS="-DDEBUG_CHECK_POSSIBILITY -DDEBUG_RM_NO_NEXT -DDEBUG_SOCKET
+          -DDEBUG_SIGNAL -DDEBUG_LOCAL_SOCKET -DDEBUG_IN_MONO_PROCESS
+          -DDEBUG_COMMANDS -DDEBUG_THREAD"
+
+  config-build:
+    name: Build variantes de configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # ETERN_PARTS et FORWARD_CHECK_K sont des #define de static_variables.h,
+      # guardés par #ifndef → surchargeables via CPPFLAGS sans toucher la source.
+      # On compile ici les configurations que le build par défaut (256 / K=6)
+      # n'exerce pas, chacune en WERROR=1. Compile-check seul (pas d'exécution).
+
+      # Puzzle 16 pièces (4×4) : branches #if ETERN_PARTS == 256 distinctes
+      # (ETERN_SIZE, FACES_USED_SIZE, placement des indices officiels).
+      - name: Build ETERN_PARTS=16 (puzzle 4×4)
+        run: make WERROR=1 CPPFLAGS="-DETERN_PARTS=16"
+
+      # Forward-checking désactivé : tout le bloc #if FORWARD_CHECK_K > 0 est
+      # supprimé à la compilation (chemin conçu exprès). On repart propre.
+      - name: Build FORWARD_CHECK_K=0 (forward-checking désactivé)
+        run: make clean && make WERROR=1 CPPFLAGS="-DFORWARD_CHECK_K=0"
