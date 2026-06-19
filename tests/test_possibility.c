@@ -558,6 +558,174 @@ TEST possibility_has_a_next_finds_and_excludes_used(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * search_possiblity_light : expansion d'un paquet (File de résultats)
+ * ------------------------------------------------------------------------ */
+
+/* Remplit idParts[p][r] = p + ETERN_PARTS*r (encodage des rotations). */
+static void fill_id_parts(int16_t idParts[ETERN_PARTS][4])
+{
+    for (int p = 0; p < ETERN_PARTS; p++)
+        for (int r = 0; r < 4; r++)
+            idParts[p][r] = (int16_t)(p + ETERN_PARTS * r);
+}
+
+/* Deux pièces de mêmes bords -> deux successeurs générés sur la case vide. */
+TEST search_light_expands_one_per_candidate(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 },
+        { .id = 2, .top = 0, .right = 2, .bottom = 3, .left = 0 }, /* mêmes bords */
+    };
+    struct array_part rp = { .size = 3, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->x = 0; p->y = 0; p->alloc = 0;
+
+    key_part key = { .k1 = 0, .k2 = 2, .k3 = 3, .k4 = 0 }; /* match exact des 2 pièces */
+    int16_t idParts[ETERN_PARTS][4];
+    fill_id_parts(idParts);
+
+    File result;
+    init_file_with_cache(&result, 0, sizeof(struct possibility_packet));
+
+    int max = search_possiblity_light(&result, &key, p, map, &rp, idParts);
+    ASSERT_EQ_FMT(1, max, "%d");                 /* incAlloc = 0 + 1 */
+    ASSERT_EQ_FMT(2ULL, (unsigned long long)result.size, "%llu"); /* un paquet par pièce */
+
+    /* Le premier successeur a la case (0,0) remplie et alloc = 1. */
+    struct possibility_packet out;
+    scroll(&result, &out);
+    ASSERT_EQ_FMT(1, (int)out.alloc, "%d");
+    ASSERT(out.grid[0][0] != -2);
+    while (result.size > 0) scroll(&result, &out); /* draine le reste */
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
+/* Case déjà remplie (indice fixe) : le paquet est simplement avancé. */
+TEST search_light_skips_prefilled_cell(void)
+{
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->x = 0; p->y = 0; p->alloc = 0;
+    p->grid[0][0] = 1; /* case courante déjà remplie (!= -2) */
+
+    key_part key = { .k1 = 0, .k2 = 2, .k3 = 3, .k4 = 0 };
+    int16_t idParts[ETERN_PARTS][4];
+    fill_id_parts(idParts);
+
+    File result;
+    init_file_with_cache(&result, 0, sizeof(struct possibility_packet));
+
+    int max = search_possiblity_light(&result, &key, p, map, &rp, idParts);
+    ASSERT_EQ_FMT(1, max, "%d");
+    ASSERT_EQ_FMT(1ULL, (unsigned long long)result.size, "%llu"); /* un seul paquet avancé */
+
+    struct possibility_packet out;
+    scroll(&result, &out);
+    ASSERT_EQ_FMT(1, (int)out.alloc, "%d");
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * forward_check_next_k : élagage des branches mortes
+ * ------------------------------------------------------------------------ */
+
+/* Une case libre sans aucune pièce candidate -> branche morte (0). */
+TEST forward_check_detects_dead_cell(void)
+{
+    /* pièce non-coin (top=5) : la case (0,0) exige top=0 (bord) -> aucun candidat */
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 5, .right = 6, .bottom = 7, .left = 8 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->alloc = 0; /* la fenêtre commence à la case directions[0] = (0,0) */
+
+    ASSERT_EQ_FMT(0, forward_check_next_k(p, map, &rp), "%d");
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
+/* Toutes les cases de la fenêtre sont déjà remplies -> rien à élaguer (1). */
+TEST forward_check_passes_when_cells_filled(void)
+{
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    /* grille toute à 0 (pas de -2) -> chaque case de la fenêtre est « remplie ». */
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = 0;
+
+    ASSERT_EQ_FMT(1, forward_check_next_k(p, map, &rp), "%d");
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * search_possiblity_light_with_big_table : expansion + forward-check
+ * ------------------------------------------------------------------------ */
+
+/* Les pièces coins placées laissent des cases aval sans candidat : le
+   forward-check élague toutes les branches -> big_table vide, retour 0. */
+TEST search_big_table_prunes_dead_branches(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 },
+        { .id = 2, .top = 0, .right = 2, .bottom = 3, .left = 0 },
+    };
+    struct array_part rp = { .size = 3, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->x = 0; p->y = 0; p->alloc = 0;
+
+    key_part key = { .k1 = 0, .k2 = 2, .k3 = 3, .k4 = 0 };
+    int16_t idParts[ETERN_PARTS][4];
+    fill_id_parts(idParts);
+
+    big_table result;
+    init_big_table(&result, 4, sizeof(struct possibility_packet));
+
+    int ret = search_possiblity_light_with_big_table(&result, &key, p, map, &rp, idParts);
+    ASSERT_EQ_FMT(0, ret, "%d");                              /* aucune branche retenue */
+    ASSERT_EQ_FMT(0ULL, (unsigned long long)result.size, "%llu");
+
+    clear_big_table(&result);
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
 SUITE(possibility_suite)
 {
     RUN_TEST(test_directions_covers_every_cell);
@@ -583,4 +751,9 @@ SUITE(possibility_suite)
     RUN_TEST(what_search_to_key2_uses_all_face_for_empty);
     RUN_TEST(what_search_in_grid_to_key_arbitrary_cell);
     RUN_TEST(possibility_has_a_next_finds_and_excludes_used);
+    RUN_TEST(search_light_expands_one_per_candidate);
+    RUN_TEST(search_light_skips_prefilled_cell);
+    RUN_TEST(forward_check_detects_dead_cell);
+    RUN_TEST(forward_check_passes_when_cells_filled);
+    RUN_TEST(search_big_table_prunes_dead_branches);
 }
