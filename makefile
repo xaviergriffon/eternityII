@@ -234,7 +234,10 @@ coverage:
 COV_XML    := $(COV_DIR)/coverage.xml
 COV_HTML   := $(COV_DIR)/html
 COV_MD     := $(COV_DIR)/coverage.md
+COV_JSON   := $(COV_DIR)/coverage-summary.json
 COV_FILTER := --exclude '(^|/)tests/'
+# Post-traitement : insère une section « Couverture par domaine » dans COV_MD.
+COV_BY_DOMAIN := tests/coverage_by_domain.py
 GCOVR := gcovr
 ifeq ($(detected_OS),Darwin)
 	GCOVR := gcovr --gcov-executable "$(shell xcrun --find llvm-cov) gcov"
@@ -247,7 +250,9 @@ coverage-report: coverage
 		--txt \
 		--cobertura $(COV_XML) \
 		--html-details $(COV_HTML)/index.html \
+		--json-summary $(COV_JSON) \
 		--markdown $(COV_MD) --markdown-title "Couverture de code"
+	@python3 $(COV_BY_DOMAIN) $(COV_JSON) $(COV_MD)
 	@echo "Cobertura : $(COV_XML)"
 	@echo "HTML      : $(COV_HTML)/index.html"
-	@echo "Markdown  : $(COV_MD)"
+	@echo "Markdown  : $(COV_MD)  (avec section par domaine)"

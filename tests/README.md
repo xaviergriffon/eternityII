@@ -95,6 +95,12 @@ La cible produit en un passage, depuis les `.gcda` de `coverage` :
 - `tests/coverage/html/index.html` — rapport HTML navigable ;
 - `tests/coverage/coverage.md` — résumé Markdown (lignes/fonctions/branches).
 
+Le `coverage.md` est ensuite enrichi d'une section **« Couverture par domaine »**
+(sous-totaux `src/core/`, `src/net/`, `src/ui/`, `src/app/`) insérée entre
+l'*overall* et le détail par fichier. Elle est calculée par
+[`tests/coverage_by_domain.py`](coverage_by_domain.py) à partir du
+`--json-summary` de gcovr (les sous-totaux se recoupent avec l'*overall*).
+
 Sur macOS, gcov natif étant `llvm-cov`, la cible passe automatiquement
 `--gcov-executable "llvm-cov gcov"` à gcovr ; sur Linux/Jetson le gcov natif est
 utilisé directement.
