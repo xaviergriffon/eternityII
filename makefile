@@ -93,10 +93,11 @@ clean:
 # (non inliné sans optimisation) ; -pthread pour les mutex de logger.c.
 # ---------------------------------------------------------------------------
 TEST_BIN     := tests/run_tests
-TEST_SRCS    := tests/test_main.c tests/test_lifo.c tests/test_part.c tests/test_readdata.c tests/test_command_history.c tests/test_possibility.c tests/test_etii_protocol.c tests/test_command_match.c tests/stubs.c
+TEST_SRCS    := tests/test_main.c tests/test_lifo.c tests/test_part.c tests/test_readdata.c tests/test_command_history.c tests/test_possibility.c tests/test_etii_protocol.c tests/test_command_match.c tests/test_datamanager.c tests/stubs.c
 # Modules de production exercés + leurs dépendances de link transitives.
-# tests/stubs.c fournit add_possibility (no-op) pour lier possibility.c sans datamanager.
-TEST_MODULES := lifo.c part.c readdata.c command_history.c command_match.c possibility.c etii_protocol.c logger.c static_variables.c
+# tests/stubs.c fournit create_tcp_client (no-op) : seul symbole réseau réclamé
+# par datamanager.c une fois les autres modules liés.
+TEST_MODULES := lifo.c part.c readdata.c command_history.c command_match.c possibility.c etii_protocol.c datamanager.c logger.c static_variables.c
 TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -I.
 
 .PHONY: test
