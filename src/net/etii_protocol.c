@@ -1,0 +1,187 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <sys/times.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <netdb.h>
+#include <errno.h>
+
+#include "net/etii_protocol.h"
+#include "ui/logger.h"
+
+/**
+ * @brief Reçoit une instruction (1 octet) depuis un socket TCP.
+ *
+ * Réessaie jusqu'à 10 fois en cas d'interruption `EINTR`. Retourne `INST_END`
+ * sur timeout (`EWOULDBLOCK`/`EDEADLK`) ou fermeture propre (recv == 0).
+ *
+ * @param socket_id Descripteur du socket connecté.
+ * @return          Byte d'instruction reçu, ou `INST_END` (-1) en cas d'erreur/déconnexion.
+ */
+int8_t recv_instruction(int socket_id)
+{
+	int8_t result = -1;
+	int8_t *instruction = calloc(1,sizeof(int8_t));
+	*instruction = INST_ERROR;
+	//long rRecv = recv(socket_id, (int8_t *)instruction, sizeof(int8_t),0);
+	long rRecv = -1;
+	long maxTentative = 10;
+	do {
+		rRecv = recv(socket_id, (int8_t *)instruction, sizeof(int8_t),0);
+		maxTentative--;
+	} while (rRecv == -1 && errno == EINTR && maxTentative > 0);
+	if (rRecv < 0) {
+		// Deconnection timeout
+		if (errno == EDEADLK || errno == EDEADLK || errno == EWOULDBLOCK) {
+			// TODO: faire un end timeout
+			result = INST_END;
+		} else if (errno == EINTR) {
+			log_errno("recv_instruction recv EINTR => ");
+		} else {
+            log_errno("Error on recv_instruction => ");
+		}
+	} else if (rRecv == 0) {
+#ifdef DEBUG_SOCKET
+		log_debug("recv_instruction recv 0\n");
+#endif // DEBUG_SOCKET
+		result = INST_END;
+	} else {
+		result = *instruction;
+	}
+	
+	free(instruction);
+	
+	return result;
+}
+
+/**
+ * @brief Envoie une instruction (1 octet) sur un socket TCP.
+ *
+ * @param socket_id   Descripteur du socket connecté.
+ * @param instruction Byte d'instruction à envoyer (cf. constantes `INST_*`).
+ * @return            Nombre d'octets envoyés, ou valeur ≤ 0 en cas d'erreur.
+ */
+long send_instruction(int socket_id, int8_t instruction)
+{
+	int8_t *i_instruction = calloc(1,sizeof(int8_t));
+	*i_instruction = instruction;
+	long result = send(socket_id, (int8_t *)i_instruction, sizeof(int8_t), 0);
+	if (result <= 0) {
+        log_errno("Error on send_instruction %i (result %li) => ", instruction, result);
+	}
+	free(i_instruction);
+
+	return result;
+}
+
+long recv_all(int socket_id, void *buf, size_t len)
+{
+	size_t total = 0;
+	char *p = (char *)buf;
+	while (total < len) {
+		long r = recv(socket_id, p + total, len - total, 0);
+		if (r > 0) {
+			total += (size_t)r;
+			continue;
+		}
+		if (r == 0) {
+			// Pair fermé : on rend le total partiel, l'appelant détecte < len.
+			return (long)total;
+		}
+		if (errno == EINTR) {
+			continue;
+		}
+		return -1;
+	}
+	return (long)total;
+}
+
+long send_all(int socket_id, const void *buf, size_t len)
+{
+	size_t total = 0;
+	const char *p = (const char *)buf;
+	while (total < len) {
+		long s = send(socket_id, p + total, len - total, 0);
+		if (s > 0) {
+			total += (size_t)s;
+			continue;
+		}
+		if (s < 0 && errno == EINTR) {
+			continue;
+		}
+		return -1;
+	}
+	return (long)total;
+}
+
+/**
+ * @brief Teste si un socket TCP est toujours connecté.
+ *
+ * Envoie `INST_TEST_CONNECTED` et attend la même réponse en retour.
+ * Ferme et shutdownle socket si la connexion est rompue ou si le serveur
+ * renvoie `INST_END`.
+ *
+ * @param socket_id Descripteur du socket à tester.
+ * @return          1 si connecté, 0 sinon (le socket est fermé dans ce cas).
+ */
+int is_connected(int socket_id) {
+	long result = send_instruction(socket_id, INST_TEST_CONNECTED);
+	if (result <= 0) {
+        log_info("socket deconnected s\n");
+#ifdef DEBUG_SOCKET
+		opened_tcp--;
+#endif // DEBUG_SOCKET
+		shutdown(socket_id, 2);
+        close(socket_id);
+		return 0;
+	}
+	result = recv_instruction(socket_id);
+	if (result <= 0) {
+#ifdef DEBUG_SOCKET
+        log_debug("socket deconnected r\n");
+		opened_tcp--;
+#endif // DEBUG_SOCKET
+        log_error("Error on test connection : %li\n", result);
+		shutdown(socket_id, 2);
+        close(socket_id);
+		return 0;
+	}
+	// Le serveur nous retourne qu'il met fin
+    if (result == INST_END) {
+#ifdef DEBUG_SOCKET
+        log_debug("socket deconnected by server\n");
+		opened_tcp--;
+#endif // DEBUG_SOCKET
+		shutdown(socket_id, 2);
+        close(socket_id);
+		return 0;
+	}
+	if (result != INST_TEST_CONNECTED) {
+        log_error("wrong instruction received for connection test : %li\n", result);
+        return 0;
+	}
+	return 1;
+}
+
+/**
+ * @brief Ferme proprement un socket TCP en envoyant `INST_END` au préalable.
+ * @param socket_id Descripteur du socket à fermer.
+ */
+void close_socket(int socket_id) {
+	send_instruction(socket_id, INST_END);
+	shutdown(socket_id, 2);
+	int err = close(socket_id);
+#ifdef DEBUG_SOCKET
+	opened_tcp--;
+#endif // DEBUG_SOCKET
+
+	if(0 != err)
+	{
+		log_error("error on close socket :%i\n",err);
+	}
+}

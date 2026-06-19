@@ -4,6 +4,10 @@ else
     detected_OS := $(shell sh -c 'uname 2>/dev/null || echo Unknown')
 endif
 
+# Les sources vivent sous src/<domaine>/ (core, net, ui, app). Les objets sont
+# générés sous build/ en miroir de src/ (build/ est gitignoré). -Isrc rend les
+# includes explicites "domaine/x.h" résolvables depuis n'importe quel domaine.
+BUILD_DIR := build
 
 OPENCLLIB := -lOpenCL
 ifeq ($(detected_OS),Darwin)
@@ -22,11 +26,11 @@ endif
 # Ajout d'une variable DEBUG pour activer ou désactiver les informations de débogage
 DEBUG ?= 0
 ifeq ($(DEBUG),1)
-    CFLAGS= -Wall -Wextra -std=gnu99 $(OPTFLAGS) -g
+    CFLAGS= -Wall -Wextra -std=gnu99 $(OPTFLAGS) -Isrc -g
 	CLEAN_OBJS =
 else
-    CFLAGS= -Wall -Wextra -std=gnu99 $(OPTFLAGS)
-	CLEAN_OBJS = rm *.o
+    CFLAGS= -Wall -Wextra -std=gnu99 $(OPTFLAGS) -Isrc
+	CLEAN_OBJS = rm -rf $(BUILD_DIR)
 endif
 
 # Traite les warnings comme des erreurs. Désactivé par défaut : le build local
@@ -71,7 +75,7 @@ ifeq ($(CUDA),1)
     NVCC_ARCH ?= sm_87
     NVCCFLAGS ?= -O3 -arch=$(NVCC_ARCH)
     CFLAGS += -DWITH_CUDA
-    CUDA_OBJ := gpu_pruner.o
+    CUDA_OBJ := $(BUILD_DIR)/app/gpu_pruner.o
     CUDA_LIB := -L$(CUDA_PATH)/lib64 -lcudart -lstdc++
 else
     CUDA_OBJ :=
@@ -86,17 +90,49 @@ ifeq ($(VERIFY),1)
     CFLAGS += -DGPU_PRUNER_VERIFY
 endif
 
-$(EXECUTABLE): $(LOGGER_OBJ) static_variables.o local_socket.o lifo.o tcpclient.o tcpserver.o part.o readdata.o datamanager.o possibility.o etii_protocol.o etii_client.o etii_server.o etii_search.o command_lines.o command_match.o command_history.o console.o main.o $(CUDA_OBJ)
-	gcc -pthread -o $(EXECUTABLE) $(LOGGER_OBJ) static_variables.o local_socket.o lifo.o tcpclient.o tcpserver.o part.o datamanager.o possibility.o readdata.o etii_protocol.o etii_client.o etii_server.o etii_search.o command_lines.o command_match.o command_history.o console.o main.o $(CUDA_OBJ) ${CFLAGS} ${CPPFLAGS} $(NCURSES_LIB) $(CUDA_LIB)
+# Liste des objets, en miroir de src/<domaine>/. $(LOGGER_OBJ) (logger.o ou
+# logger_ncurses.o) vit dans ui/ ; $(CUDA_OBJ) (vide sauf CUDA=1) dans app/.
+OBJS := \
+	$(BUILD_DIR)/ui/$(LOGGER_OBJ) \
+	$(BUILD_DIR)/app/static_variables.o \
+	$(BUILD_DIR)/net/local_socket.o \
+	$(BUILD_DIR)/core/lifo.o \
+	$(BUILD_DIR)/net/tcpclient.o \
+	$(BUILD_DIR)/net/tcpserver.o \
+	$(BUILD_DIR)/core/part.o \
+	$(BUILD_DIR)/core/readdata.o \
+	$(BUILD_DIR)/core/datamanager.o \
+	$(BUILD_DIR)/core/possibility.o \
+	$(BUILD_DIR)/net/etii_protocol.o \
+	$(BUILD_DIR)/app/etii_client.o \
+	$(BUILD_DIR)/app/etii_server.o \
+	$(BUILD_DIR)/core/etii_search.o \
+	$(BUILD_DIR)/ui/command_lines.o \
+	$(BUILD_DIR)/ui/command_match.o \
+	$(BUILD_DIR)/ui/command_history.o \
+	$(BUILD_DIR)/ui/console.o \
+	$(BUILD_DIR)/app/main.o \
+	$(CUDA_OBJ)
+
+$(EXECUTABLE): $(OBJS)
+	gcc -pthread -o $(EXECUTABLE) $(OBJS) ${CFLAGS} ${CPPFLAGS} $(NCURSES_LIB) $(CUDA_LIB)
 	$(CLEAN_OBJS)
 
+# Règle motif : build/<domaine>/x.o à partir de src/<domaine>/x.c. -Isrc est
+# déjà dans CFLAGS. mkdir -p crée build/<domaine>/ à la volée.
+$(BUILD_DIR)/%.o: src/%.c
+	@mkdir -p $(dir $@)
+	gcc $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+
 # Compilation du module GPU (uniquement requis lorsque CUDA=1 ; cette règle n'est
-# jamais invoquée sans CUDA=1 car gpu_pruner.o n'est alors pas une dépendance).
-gpu_pruner.o: gpu_pruner.cu gpu_pruner.h possibility.h part.h static_variables.h logger.h
-	$(NVCC) $(NVCCFLAGS) -DWITH_CUDA -c gpu_pruner.cu -o gpu_pruner.o
+# jamais invoquée sans CUDA=1 car $(CUDA_OBJ) est alors vide).
+$(BUILD_DIR)/app/gpu_pruner.o: src/app/gpu_pruner.cu src/app/gpu_pruner.h src/core/possibility.h src/core/part.h src/app/static_variables.h src/ui/logger.h
+	@mkdir -p $(dir $@)
+	$(NVCC) $(NVCCFLAGS) -DWITH_CUDA -Isrc -c src/app/gpu_pruner.cu -o $@
 
 clean:
-	rm -f *.o $(EXECUTABLE)
+	rm -rf $(BUILD_DIR)
+	rm -f $(EXECUTABLE)
 	rm -f $(TEST_BIN)
 	rm -rf $(COV_DIR)
 	rm -f *.gcov *.gcno *.gcda
@@ -110,12 +146,19 @@ clean:
 # (non inliné sans optimisation) ; -pthread pour les mutex de logger.c.
 # ---------------------------------------------------------------------------
 TEST_BIN     := tests/run_tests
-TEST_SRCS    := tests/test_main.c tests/test_lifo.c tests/test_part.c tests/test_readdata.c tests/test_command_history.c tests/test_possibility.c tests/test_etii_protocol.c tests/test_command_match.c tests/test_datamanager.c tests/test_local_socket.c tests/test_tcp.c tests/test_logger.c tests/test_command_lines.c tests/test_console.c tests/test_etii_search.c
+# test_main.c (runner) + greatest.h/fork_assert.h restent à la racine de tests/ ;
+# les suites sont rangées par domaine, en miroir de src/.
+TEST_SRCS    := tests/test_main.c \
+                tests/core/test_lifo.c tests/core/test_part.c tests/core/test_readdata.c tests/core/test_possibility.c tests/core/test_etii_search.c tests/core/test_datamanager.c \
+                tests/net/test_etii_protocol.c tests/net/test_local_socket.c tests/net/test_tcp.c \
+                tests/ui/test_command_history.c tests/ui/test_command_match.c tests/ui/test_command_lines.c tests/ui/test_console.c tests/ui/test_logger.c
 # Modules de production exercés + leurs dépendances de link transitives.
 # tcpclient.c fournit le vrai create_tcp_client (plus de stub) ; tcpserver.c et
 # local_socket.c sont désormais exercés directement (boucle locale / IPC AF_UNIX).
-TEST_MODULES := lifo.c part.c readdata.c command_history.c command_match.c possibility.c etii_protocol.c datamanager.c local_socket.c tcpclient.c tcpserver.c command_lines.c console.c etii_search.c logger.c static_variables.c
-TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -I.
+TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/command_history.c src/ui/command_match.c src/core/possibility.c src/net/etii_protocol.c src/core/datamanager.c src/net/local_socket.c src/net/tcpclient.c src/net/tcpserver.c src/ui/command_lines.c src/ui/console.c src/core/etii_search.c src/ui/logger.c src/app/static_variables.c
+# -Isrc : en-têtes de prod en "domaine/x.h". -Itests : greatest.h / fork_assert.h
+# (harnais partagé à la racine de tests/, alors que les suites sont en sous-dossiers).
+TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -Isrc -Itests
 
 .PHONY: test
 test:
@@ -135,14 +178,14 @@ test:
 # sont marquées '#####'. Rapport HTML optionnel via lcov : voir tests/README.md.
 # ---------------------------------------------------------------------------
 COV_DIR            := tests/coverage
-COV_CFLAGS         := -Wall -std=gnu99 -O0 -g -I.
+COV_CFLAGS         := -Wall -std=gnu99 -O0 -g -Isrc -Itests
 # Couverture honnête sur TOUT le code de production : on instrumente chaque
 # module du build par défaut (un .gcno par fichier). Ceux que les tests
 # n'exercent pas (main.c, possibility.c, etii_*.c, …) n'ont pas de .gcda et
 # ressortent donc à 0 % — le pourcentage global reflète l'ensemble du code.
 # Exclus : logger_ncurses.c (variante NCURSES, exige <ncurses.h>) et
 # gpu_pruner.cu (variante CUDA, exige nvcc) — absents du build standard.
-COV_ALL_MODULES    := $(filter-out logger_ncurses.c,$(wildcard *.c))
+COV_ALL_MODULES    := $(filter-out src/ui/logger_ncurses.c,$(wildcard src/*/*.c))
 # Sous-ensemble réellement lié au binaire de test (le reste ne fournit qu'un
 # .gcno → 0 %) : les modules exercés + leurs deps de link.
 COV_LINK_MODULES   := $(TEST_MODULES)
@@ -165,7 +208,7 @@ coverage:
 	#    main.c et les autres modules non liés ne produisent pas de .gcda.
 	@gcc $(COV_CFLAGS) --coverage -pthread \
 		$(addprefix $(COV_DIR)/,$(notdir $(TEST_SRCS:.c=.o))) \
-		$(addprefix $(COV_DIR)/,$(COV_LINK_MODULES:.c=.o)) \
+		$(addprefix $(COV_DIR)/,$(notdir $(COV_LINK_MODULES:.c=.o))) \
 		-lm -o $(COV_DIR)/run_tests
 	@./$(COV_DIR)/run_tests
 	@gcov -o $(COV_DIR) $(COV_ALL_MODULES) >/dev/null 2>&1 || true
@@ -191,7 +234,10 @@ coverage:
 COV_XML    := $(COV_DIR)/coverage.xml
 COV_HTML   := $(COV_DIR)/html
 COV_MD     := $(COV_DIR)/coverage.md
+COV_JSON   := $(COV_DIR)/coverage-summary.json
 COV_FILTER := --exclude '(^|/)tests/'
+# Post-traitement : insère une section « Couverture par domaine » dans COV_MD.
+COV_BY_DOMAIN := tests/coverage_by_domain.py
 GCOVR := gcovr
 ifeq ($(detected_OS),Darwin)
 	GCOVR := gcovr --gcov-executable "$(shell xcrun --find llvm-cov) gcov"
@@ -204,7 +250,9 @@ coverage-report: coverage
 		--txt \
 		--cobertura $(COV_XML) \
 		--html-details $(COV_HTML)/index.html \
+		--json-summary $(COV_JSON) \
 		--markdown $(COV_MD) --markdown-title "Couverture de code"
+	@python3 $(COV_BY_DOMAIN) $(COV_JSON) $(COV_MD)
 	@echo "Cobertura : $(COV_XML)"
 	@echo "HTML      : $(COV_HTML)/index.html"
-	@echo "Markdown  : $(COV_MD)"
+	@echo "Markdown  : $(COV_MD)  (avec section par domaine)"

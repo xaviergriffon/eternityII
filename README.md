@@ -19,8 +19,21 @@ Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisa
 - Chaque **client** fork `N` processus enfants. Chaque enfant se connecte au serveur, récupère des possibilités, les explore, puis renvoie les nouvelles positions découvertes.
 - Les processus enfants communiquent avec leur parent via des **sockets Unix UDP locaux** (`etii_fork.<pid>`) pour :
   - remonter les statistiques en temps réel (`shots/sec`, possibilités en stock, `max_result`) ;
-  - **router leurs logs** (`log_info`, `log_error`, `log_event`, …) au parent — qui possède la seule console, ce qui évite tout entrelacement dans le terminal et permet le bon fonctionnement de l'interface ncurses (voir [ipc_protocol.h](ipc_protocol.h)).
+  - **router leurs logs** (`log_info`, `log_error`, `log_event`, …) au parent — qui possède la seule console, ce qui évite tout entrelacement dans le terminal et permet le bon fonctionnement de l'interface ncurses (voir [src/net/ipc_protocol.h](src/net/ipc_protocol.h)).
 - Un seul client peut aussi fonctionner en mode **autonome** (`test`) sans serveur, utile pour des tests rapides.
+
+### Structure des sources
+
+Le code est rangé sous `src/`, réparti en quatre domaines ; les `#include` sont explicites et qualifiés par domaine (`#include "core/part.h"`), résolus via `-Isrc`.
+
+| Répertoire | Domaine |
+|---|---|
+| `src/core/` | Logique du puzzle, structures de données et moteur de recherche (`part`, `readdata`, `possibility`, `lifo`, `etii_search`, `datamanager`, …) |
+| `src/net/`  | Protocole TCP, sockets et IPC parent↔enfant (`etii_protocol`, `tcpclient`, `tcpserver`, `local_socket`, `ipc_protocol`) |
+| `src/ui/`   | Journalisation, console et commandes (`logger`, `logger_ncurses`, `console`, `command_lines`, `command_match`, `command_history`) |
+| `src/app/`  | Point d'entrée, rôles client/serveur, état global et GPU (`main`, `etii_client`, `etii_server`, `static_variables`, `gpu_pruner`) |
+
+Les données du puzzle sont dans `data/` (`pieces.csv`, `pieces16.csv`) et les objets de compilation dans `build/` (miroir de `src/`, ignoré par git).
 
 ## Compilation
 
@@ -37,7 +50,7 @@ Prérequis : `gcc`, `make`, pthreads (disponibles en standard sur macOS et Linux
 
 ### Compilation CUDA (pruner GPU, optionnel)
 
-Le build `CUDA=1` active un **pruner GPU** (mode d'exécution `gpupruner`) : même plomberie réseau que `tcppruner`, mais le contrôle de chaque lot de possibilités est exécuté sur le GPU (`gpu_pruner.cu` / `gpu_pruner.h`, dont le kernel calque la fonction CPU `possibility_all_has_a_next`). La cible matérielle est une carte **NVIDIA** ; le code a été validé sur **Jetson Orin Nano**, dont la mémoire unifiée permet l'usage de `cudaMallocManaged` en zero-copy.
+Le build `CUDA=1` active un **pruner GPU** (mode d'exécution `gpupruner`) : même plomberie réseau que `tcppruner`, mais le contrôle de chaque lot de possibilités est exécuté sur le GPU (`src/app/gpu_pruner.cu` / `src/app/gpu_pruner.h`, dont le kernel calque la fonction CPU `possibility_all_has_a_next`). La cible matérielle est une carte **NVIDIA** ; le code a été validé sur **Jetson Orin Nano**, dont la mémoire unifiée permet l'usage de `cudaMallocManaged` en zero-copy.
 
 > **Plateforme** : Linux/NVIDIA uniquement. macOS (Darwin) n'est **pas** supporté pour ce mode (pas de `nvcc`, pas de runtime CUDA). Le build par défaut (`make`, sans `CUDA=1`) reste strictement identique au binaire classique : tout le code GPU est encadré par `#ifdef WITH_CUDA`, aucun `.cu` n'est compilé et le runtime CUDA n'est pas lié.
 
@@ -79,7 +92,7 @@ Le mode `VERIFY=1` n'est utile que pour valider la parité GPU/CPU ; en producti
 
 ## Tests et couverture
 
-Des tests unitaires couvrent les modules à logique pure (`lifo.c`, `part.c`, `readdata.c`), basés sur [greatest](https://github.com/silentbicycle/greatest) — un framework C *single-header* vendoré dans `tests/`, **sans dépendance externe** à installer.
+Des tests unitaires couvrent les modules à logique pure (`src/core/lifo.c`, `src/core/part.c`, `src/core/readdata.c`), basés sur [greatest](https://github.com/silentbicycle/greatest) — un framework C *single-header* vendoré dans `tests/`, **sans dépendance externe** à installer.
 
 ```sh
 make test            # compile et lance la suite (code de sortie non nul si échec)
@@ -87,13 +100,13 @@ make coverage        # idem + rapport de couverture par module (gcov)
 make coverage-report # rapports gcovr : Cobertura XML + HTML + résumé Markdown
 ```
 
-`make test` produit un binaire isolé (`tests/run_tests`) qui ne lie **que** les modules testés et leurs dépendances — `main.c` n'est jamais inclus. `make coverage` recompile en mode instrumenté et affiche le pourcentage de lignes couvertes :
+`make test` produit un binaire isolé (`tests/run_tests`) qui ne lie **que** les modules testés et leurs dépendances — `src/app/main.c` n'est jamais inclus. `make coverage` recompile en mode instrumenté et affiche le pourcentage de lignes couvertes :
 
 ```
-===== Couverture de code (modules testés) =====
-  lifo.c         Lines executed:48.29% of 234
-  part.c         Lines executed:50.77% of 388
-  readdata.c     Lines executed:18.75% of 192
+===== Couverture de code (tout le code de production) =====
+  src/core/lifo.c        Lines executed:48.29% of 234
+  src/core/part.c        Lines executed:50.77% of 388
+  src/core/readdata.c    Lines executed:18.75% of 192
 ```
 
 Le détail ligne par ligne est dans `tests/coverage/<module>.c.gcov` (lignes jamais exécutées marquées `#####`). `make coverage-report` produit en plus, via [gcovr](https://gcovr.com), un rapport HTML navigable, un Cobertura XML (consommé par Codecov) et un résumé Markdown. Voir [tests/README.md](tests/README.md) pour ajouter un test ou générer ces rapports.
@@ -121,12 +134,12 @@ Lance le serveur qui distribue les possibilités aux clients.
 | Paramètre | Défaut | Description |
 |---|---|---|
 | `nb_threads` | 80 | Nombre de connexions clients simultanées |
-| `fichier_pieces.csv` | `pieces.csv` | Fichier de définition des pièces |
+| `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
 
 Exemple :
 ```sh
 ./eternityII tcpserver 80
-./eternityII tcpserver 80 pieces.csv
+./eternityII tcpserver 80 data/pieces.csv
 ```
 
 ### Mode client
@@ -142,13 +155,13 @@ Se connecte à un serveur et lance `N` processus de recherche en parallèle.
 | `serveur` | `localhost` | Adresse IP ou nom d'hôte du serveur |
 | `nb_threads` | 1 | Nombre de processus de recherche à forker |
 | `max_stock_par_thread` | 300 | Nombre max de possibilités stockées par thread avant d'en renvoyer au serveur |
-| `fichier_pieces.csv` | `pieces.csv` | Fichier de définition des pièces |
+| `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
 
 Exemples :
 ```sh
 ./eternityII tcpclient localhost
 ./eternityII tcpclient 192.168.1.10 8
-./eternityII tcpclient localhost 4 300 pieces.csv
+./eternityII tcpclient localhost 4 300 data/pieces.csv
 ```
 
 ### Mode pruner (élagage)
@@ -164,7 +177,7 @@ Un **pruner** réutilise la même plomberie réseau qu'un client, mais au lieu d
 |---|---|---|
 | `serveur` | `localhost` | Adresse IP ou nom d'hôte du serveur |
 | `nb_threads` | 1 | Nombre de processus de vérification à forker |
-| `fichier_pieces.csv` | `pieces.csv` | Fichier de définition des pièces |
+| `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
 | `taille_lot` | 100 | Nombre de possibilités échangées par aller-retour TCP (borné à 65536) |
 
 > Le mode `gpupruner` n'est disponible que si le binaire a été compilé avec `make CUDA=1` (voir [Compilation CUDA](#compilation-cuda-pruner-gpu-optionnel)). Sur Jetson, penser à `LD_LIBRARY_PATH=/usr/local/cuda/lib64`.
@@ -180,8 +193,8 @@ La taille de lot **borne la mémoire** détenue par le pruner (il ne reçoit/acq
 
 Exemples :
 ```sh
-./eternityII tcppruner localhost 4 pieces.csv 500     # lots de 500 (CPU)
-./eternityII gpupruner localhost 1 pieces.csv 4096    # lots de 4096 (GPU)
+./eternityII tcppruner localhost 4 data/pieces.csv 500     # lots de 500 (CPU)
+./eternityII gpupruner localhost 1 data/pieces.csv 4096    # lots de 4096 (GPU)
 ```
 
 > ⚠️ **Compatibilité protocole** : cet échange par lots fait passer la `VERSION` du protocole de 5 à 6. Le handshake exige une égalité stricte des versions — **tous les nœuds (serveur, clients, pruners) doivent être recompilés ensemble** ; un binaire VERSION 6 ne dialogue pas avec un VERSION 5.
@@ -325,8 +338,8 @@ ntiles: 256
 
 - Chaque pièce est définie par son identifiant et les 4 couleurs de ses bords (entiers).
 - La valeur `0` représente la bordure grise (bord du puzzle).
-- Le fichier `pieces.csv` contient les 256 pièces officielles du puzzle 16×16.
-- Le fichier `pieces16.csv` contient 16 pièces pour un puzzle 4×4 (tests rapides).
+- Le fichier `data/pieces.csv` contient les 256 pièces officielles du puzzle 16×16.
+- Le fichier `data/pieces16.csv` contient 16 pièces pour un puzzle 4×4 (tests rapides).
 
 ## Fichiers générés
 
