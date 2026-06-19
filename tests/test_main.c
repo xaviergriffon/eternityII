@@ -23,6 +23,7 @@ SUITE_EXTERN(tcp_suite);
 SUITE_EXTERN(logger_suite);
 SUITE_EXTERN(command_lines_suite);
 SUITE_EXTERN(console_suite);
+SUITE_EXTERN(etii_search_suite);
 
 GREATEST_MAIN_DEFS();
 
@@ -42,5 +43,6 @@ int main(int argc, char **argv)
     RUN_SUITE(logger_suite);
     RUN_SUITE(command_lines_suite);
     RUN_SUITE(console_suite);
+    RUN_SUITE(etii_search_suite);
     GREATEST_MAIN_END(); /* affiche le récap et retourne le code de sortie */
 }
