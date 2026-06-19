@@ -21,6 +21,8 @@ SUITE_EXTERN(datamanager_suite);
 SUITE_EXTERN(local_socket_suite);
 SUITE_EXTERN(tcp_suite);
 SUITE_EXTERN(logger_suite);
+SUITE_EXTERN(command_lines_suite);
+SUITE_EXTERN(console_suite);
 
 GREATEST_MAIN_DEFS();
 
@@ -38,5 +40,7 @@ int main(int argc, char **argv)
     RUN_SUITE(local_socket_suite);
     RUN_SUITE(tcp_suite);
     RUN_SUITE(logger_suite);
+    RUN_SUITE(command_lines_suite);
+    RUN_SUITE(console_suite);
     GREATEST_MAIN_END(); /* affiche le récap et retourne le code de sortie */
 }
