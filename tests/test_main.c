@@ -13,6 +13,8 @@
 SUITE_EXTERN(lifo_suite);
 SUITE_EXTERN(part_suite);
 SUITE_EXTERN(readdata_suite);
+SUITE_EXTERN(command_history_suite);
+SUITE_EXTERN(possibility_suite);
 
 GREATEST_MAIN_DEFS();
 
@@ -22,5 +24,7 @@ int main(int argc, char **argv)
     RUN_SUITE(lifo_suite);
     RUN_SUITE(part_suite);
     RUN_SUITE(readdata_suite);
+    RUN_SUITE(command_history_suite);
+    RUN_SUITE(possibility_suite);
     GREATEST_MAIN_END(); /* affiche le récap et retourne le code de sortie */
 }

@@ -11,6 +11,12 @@
 #include "../part.h"
 #include "../static_variables.h" /* ETERN_PARTS */
 
+/* Fonctions publiques non déclarées dans part.h : prototypes locaux. */
+int8_t          convert_p(int8_t p, int maxFaceM);
+unsigned long   hashmap_hash_int(unsigned long key);
+unsigned int    hash(char *str);
+struct array_part *get_parts(struct map_part *map, char *key);
+
 /* --------------------------------------------------------------------------
  * rotatePart : rotation horaire d'un quart de tour
  *   top -> right, right -> bottom, bottom -> left, left -> top
@@ -179,6 +185,115 @@ TEST build_big_array_lookup_finds_unique_part(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * convert_p / hashmap_hash_int / hash : helpers purs
+ * ------------------------------------------------------------------------ */
+
+/* convert_p remplace la face -1 (« toute couleur ») par l'indice max, laisse
+   les autres valeurs inchangées. */
+TEST convert_p_maps_minus_one_to_max(void)
+{
+    ASSERT_EQ_FMT(4, (int)convert_p(-1, 4), "%d"); /* -1 -> maxFaceM */
+    ASSERT_EQ_FMT(2, (int)convert_p(2, 4), "%d");  /* valeur concrète inchangée */
+    ASSERT_EQ_FMT(0, (int)convert_p(0, 4), "%d");
+    PASS();
+}
+
+/* hashmap_hash_int est déterministe et borné à [0, 1024[ (modulo 1024). */
+TEST hashmap_hash_int_is_deterministic_and_bounded(void)
+{
+    unsigned long a = hashmap_hash_int(123456);
+    unsigned long b = hashmap_hash_int(123456);
+    ASSERT_EQ_FMT(a, b, "%lu");      /* déterministe */
+    ASSERT(a < 1024);                /* borné */
+    ASSERT(hashmap_hash_int(0) < 1024);
+    PASS();
+}
+
+/* hash (djb2-like) est déterministe et distingue deux clés différentes. */
+TEST hash_is_deterministic_and_distinguishes(void)
+{
+    char k1[] = "1_2_3_1";
+    char k2[] = "1_2_3_2";
+    char k1bis[] = "1_2_3_1";
+    ASSERT_EQ_FMT(hash(k1), hash(k1bis), "%u"); /* même chaîne -> même hash */
+    ASSERT(hash(k1) != hash(k2));               /* chaînes différentes -> hash distincts */
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * buildMapPart + get_parts : map par clé textuelle "top_right_bottom_left"
+ * ------------------------------------------------------------------------ */
+
+TEST build_map_part_lookup_by_text_key(void)
+{
+    struct part parts[] = {
+        { .id = 0 },                                              /* bouchon bordure */
+        { .id = 1, .top = 1, .right = 2, .bottom = 3, .left = 1 },
+        { .id = 2, .top = 2, .right = 1, .bottom = 1, .left = 2 },
+    };
+    struct array_part a = { .size = 3, .parts = parts };
+
+    int maxFace = search_max_face(&a); /* 3 */
+    struct map_part *map = buildMapPart(&a, maxFace);
+
+    /* clé exacte de la pièce 1 : top=1, right=2, bottom=3, left=1 */
+    char key[] = "1_2_3_1";
+    struct array_part *hit = get_parts(map, key);
+    ASSERT(hit != NULL);
+    ASSERT_EQ_FMT(1, hit->size, "%d");
+    ASSERT_EQ_FMT(1, (int)hit->parts[0].id, "%d");
+
+    /* clé sans correspondance -> tableau vide (size 0). */
+    char absent[] = "3_3_3_3";
+    struct array_part *none = get_parts(map, absent);
+    ASSERT(none == NULL || none->size == 0);
+
+    free_map_part(map);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * regroup_map : aplatit la map_big_array en un seul tableau de pièces
+ * ------------------------------------------------------------------------ */
+
+TEST regroup_map_flattens_all_parts(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 1, .right = 2, .bottom = 3, .left = 1 },
+        { .id = 2, .top = 2, .right = 1, .bottom = 1, .left = 2 },
+    };
+    struct array_part a = { .size = 3, .parts = parts };
+
+    int maxFace = search_max_face(&a);
+    map_big_array *map = buildBigArray(&a, maxFace);
+
+    struct map_in_one *one = regroup_map(map);
+    ASSERT(one != NULL);
+    ASSERT(one->nbparts > 0);            /* des pièces ont bien été aplaties */
+    ASSERT(one->parts != NULL);
+
+    free_map_in_one(one);
+    free_bigarray(map);
+    PASS();
+}
+
+/* check_array est un helper de diagnostic : on vérifie surtout qu'il ne plante
+   pas sur un tableau valide ni sur NULL (couverture des deux branches). */
+TEST check_array_handles_valid_and_null(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 1, .right = 2, .bottom = 3, .left = 1 },
+    };
+    struct array_part a = { .size = 2, .parts = parts };
+
+    check_array(&a);
+    check_array(NULL);
+    PASS();
+}
+
 SUITE(part_suite)
 {
     RUN_TEST(rotate_part_zero_is_identity);
@@ -189,4 +304,10 @@ SUITE(part_suite)
     RUN_TEST(copy_array_part_is_a_deep_copy);
     RUN_TEST(id_for_rotated_part_uses_etern_parts_stride);
     RUN_TEST(build_big_array_lookup_finds_unique_part);
+    RUN_TEST(convert_p_maps_minus_one_to_max);
+    RUN_TEST(hashmap_hash_int_is_deterministic_and_bounded);
+    RUN_TEST(hash_is_deterministic_and_distinguishes);
+    RUN_TEST(build_map_part_lookup_by_text_key);
+    RUN_TEST(regroup_map_flattens_all_parts);
+    RUN_TEST(check_array_handles_valid_and_null);
 }
