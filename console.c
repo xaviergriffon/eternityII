@@ -238,6 +238,7 @@ static char *getcmdline(void)
  */
 void * console(void *param)
 {
+    (void)param;
     status_zone_init();
 #ifdef USE_NCURSES
     nc_console_loop();

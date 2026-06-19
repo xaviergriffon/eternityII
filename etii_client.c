@@ -384,6 +384,7 @@ void run_mono_client(const char *file)
  */
 void *check_client_threads(void *param)
 {
+    (void)param;
     int sleep_time = 10;
     int last_record = max_result;
     while(1)

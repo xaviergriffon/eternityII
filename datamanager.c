@@ -1500,7 +1500,7 @@ static int split_pool_nolock(file_possibility_t *pool, int nbsplit)
 
 	int f;
 	for (f=0; f < nbsplit; f++){
-		while(pool[f].file.size < quotient && file->size > 0){
+		while(pool[f].file.size < (unsigned long long)quotient && file->size > 0){
 			if(scroll(file, possibility))
 			{
 				put(&pool[f].file, possibility);

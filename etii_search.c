@@ -34,7 +34,7 @@
  * @param db                 File locale dont on contrôle la taille.
  */
 void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibility, File *db) {
-    if(db->size > max_stock_by_thread)
+    if(db->size > (unsigned long long)max_stock_by_thread)
     {
         array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
         unsigned long long remains = db->size - max_stock_by_thread;
@@ -65,7 +65,7 @@ void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibil
  * @param bt                 Table de grande capacité dont on contrôle la taille.
  */
 void checkAndDelegatePossibilitiesIfNeeded_with_big_table(client_possibility_t *client_possibility, big_table *bt) {
-    if(bt->size > max_stock_by_thread)
+    if(bt->size > (unsigned long long)max_stock_by_thread)
     {
         array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
         unsigned long long remains = bt->size - max_stock_by_thread;
