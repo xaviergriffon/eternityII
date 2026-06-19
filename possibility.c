@@ -82,6 +82,7 @@ int test_directions(void)
  */
 struct possibility_packet *generate_possibility_packet(int x, int y, struct part *etern[ETERN_SIZE][ETERN_SIZE], int directory)
 {
+	(void)directory;
 	struct possibility_packet *result = malloc(sizeof(*result));
 	result->x = x;
 	result->y = y;
@@ -123,7 +124,7 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
  */
 struct possibility_packet *crypt_to_network(struct possibility_packet *packet)
 {
-    
+	(void)packet;
 	return NULL;
 }
 
@@ -134,6 +135,7 @@ struct possibility_packet *crypt_to_network(struct possibility_packet *packet)
  */
 struct possibility_packet *decrypt_from_network(struct possibility_packet *packet)
 {
+	(void)packet;
 	return NULL;
 }
 
@@ -1185,7 +1187,9 @@ int check_possibility(struct possibility_packet *packet, struct array_part *rota
     
 	if(packet == NULL) return -1;
 	
-	if(packet->x < 0 || packet->x >= ETERN_SIZE || packet->y < 0 || packet->y >= ETERN_SIZE) return -2;
+	/* x et y sont des uint8_t : les tests « < 0 » seraient toujours faux
+	   (type non signé) — GCC les signale via -Wtype-limits. */
+	if(packet->x >= ETERN_SIZE || packet->y >= ETERN_SIZE) return -2;
 	
 	//if(packet->direcory < DIR_UP || packet->direcory > DIR_LEFT) return -3;
 	
@@ -1359,7 +1363,7 @@ int print_possibility_packet(struct possibility_packet *packet)
 			char str[10];
 
 			sprintf(str, "%i", packet->grid[x][y]);
-			for (int i = 0; i < strlen(str); i++)
+			for (size_t i = 0; i < strlen(str); i++)
 			{
 				grid[c++] = str[i];
 			}

@@ -605,6 +605,7 @@ int init_counters(void)
 
 /** @brief Gestionnaire de signal no-op (utilisé pour SIGPIPE). */
 void signal_ignored(int sig) {
+    (void)sig;
 #ifdef DEBUG_SIGNAL
     log_debug("catch signal %s\n", strsignal(sig));
 #endif
@@ -653,6 +654,7 @@ void signal_end_handler(int sig)
  * @param signal Numéro du signal (toujours SIGCHLD).
  */
 void sigchld_handler(int signal) {
+	(void)signal;
 	// lecture du statut pour éviter les process zombie
 	int status = 0;
 #ifdef DEBUG_SIGNAL

@@ -353,7 +353,7 @@ struct array_part *get_parts(struct map_part *map, char *key)
 	while (mpe == NULL && l < map->sizemap)
 	{
 		struct map_part_element *temp = &map->elements[l];
-		if (temp != NULL && temp->key_int == key_int && strcmp(key, temp->key) == 0)
+		if (temp != NULL && temp->key_int == (unsigned int)key_int && strcmp(key, temp->key) == 0)
 		{
 			mpe = &map->elements[l];
 		}

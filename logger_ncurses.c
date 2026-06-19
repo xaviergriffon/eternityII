@@ -529,9 +529,11 @@ void log_event(const char *format, ...)
     strftime(ts, sizeof ts, "%H:%M:%S", &tmv);
     snprintf(line, sizeof line, "[%s] %s", ts, msg);
 
+    /* line est déjà NUL-terminé par snprintf et fait EVENT_MSG_MAX octets :
+       un memcpy du buffer complet copie le terminateur (évite
+       -Wstringop-truncation sur le strncpy précédent). */
     pthread_mutex_lock(&event_mutex);
-    strncpy(event_ring[event_head], line, EVENT_MSG_MAX - 1);
-    event_ring[event_head][EVENT_MSG_MAX - 1] = '\0';
+    memcpy(event_ring[event_head], line, EVENT_MSG_MAX);
     event_head = (event_head + 1) % EVENT_ZONE_LINES;
     if (event_count < EVENT_ZONE_LINES) {
         event_count++;

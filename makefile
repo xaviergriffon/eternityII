@@ -22,10 +22,10 @@ endif
 # Ajout d'une variable DEBUG pour activer ou désactiver les informations de débogage
 DEBUG ?= 0
 ifeq ($(DEBUG),1)
-    CFLAGS= -Wall -std=gnu99 $(OPTFLAGS) -g
+    CFLAGS= -Wall -Wextra -std=gnu99 $(OPTFLAGS) -g
 	CLEAN_OBJS =
 else
-    CFLAGS= -Wall -std=gnu99 $(OPTFLAGS)
+    CFLAGS= -Wall -Wextra -std=gnu99 $(OPTFLAGS)
 	CLEAN_OBJS = rm *.o
 endif
 

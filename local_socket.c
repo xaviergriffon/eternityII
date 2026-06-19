@@ -88,7 +88,7 @@ void send_command_to_childs(char *command) {
             if (strcmp(forkId[f], "") != 0) {
                 struct sockaddr_un *cl_addr = build_sockaddr(forkId[f]);
                 if (sendto(*main_socket_id, command, strlen(command), MSG_DONTWAIT, (struct sockaddr *) cl_addr,
-                            sizeof(struct sockaddr_un)) != strlen(command)) {
+                            sizeof(struct sockaddr_un)) != (ssize_t)strlen(command)) {
                     log_errno("Error on send_command_to_childs cl %d => ", getpid());
                     
                 }

@@ -265,7 +265,7 @@ int scroll_fifo (File * suite, void *dest){
 	
 	if(inside_cache(suite, supp_element))
 	{
-		if (position_cache(suite, supp_element) == suite->lastPostionCache -1)
+		if ((unsigned long long)position_cache(suite, supp_element) == suite->lastPostionCache -1)
 		{
 			suite->lastPostionCache--;
 		}

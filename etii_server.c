@@ -66,6 +66,7 @@ int get_active_threads(client_t *thread_params) {
  */
 void *check_server(void *param)
 {
+    (void)param;
     unsigned long long lastactive = 0;
     unsigned long long clientsFileUpdates = 0;
     unsigned long long lastClientsFileUpdateBackup = 0;
@@ -489,6 +490,7 @@ void create_server_thread(client_t *thread_params, int i) {
  * @return      NULL.
  */
 void *rmnonext_thread(void *param) {
+    (void)param;
     struct array_part *apart= read_parts(parts_files);
     struct array_part *rotateParts = rotate_all_parts(apart);
     map_big_array *map_parts = prepare_map_part(rotateParts);

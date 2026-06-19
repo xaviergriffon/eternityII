@@ -276,7 +276,7 @@ struct possibility_packet * read_from_json(const char *json_possiblity) {
                     char *value = NULL;
                     long long firstEnd = pmatch[0].rm_eo;
                     char *lastValue = NULL;
-                    for (int m = 0; m < nmatch; m++) {
+                    for (size_t m = 0; m < nmatch; m++) {
                         if (lastValue != NULL) {
                             free(lastValue);
                         }
