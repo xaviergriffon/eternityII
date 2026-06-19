@@ -82,9 +82,12 @@ static char *getcmdline_cooked(void)
 
         if (--len == 0) {
             len = lenmax;
+            /* On capture l'offset avant le realloc : linep peut être libéré, le
+               réutiliser ensuite dans l'arithmétique déclenche -Wuse-after-free. */
+            size_t offset = line - linep;
             char *linen = realloc(linep, lenmax *= 2);
             if (linen == NULL) { free(linep); return NULL; }
-            line = linen + (line - linep);
+            line = linen + offset;
             linep = linen;
         }
         if ((*line++ = c) == '\n') break;

@@ -325,10 +325,11 @@ void log_event(const char *format, ...)
     strftime(ts, sizeof ts, "%H:%M:%S", &tmv);
     snprintf(line, sizeof line, "[%s] %s", ts, msg);
 
-    /* Stockage dans le buffer circulaire. */
+    /* Stockage dans le buffer circulaire. line est déjà NUL-terminé par
+       snprintf et fait EVENT_MSG_MAX octets : un memcpy du buffer complet copie
+       le terminateur (évite -Wstringop-truncation sur le strncpy précédent). */
     pthread_mutex_lock(&event_mutex);
-    strncpy(event_ring[event_head], line, EVENT_MSG_MAX - 1);
-    event_ring[event_head][EVENT_MSG_MAX - 1] = '\0';
+    memcpy(event_ring[event_head], line, EVENT_MSG_MAX);
     event_head = (event_head + 1) % EVENT_ZONE_LINES;
     if (event_count < EVENT_ZONE_LINES) {
         event_count++;
@@ -456,7 +457,9 @@ void clear_console(void)
     pthread_mutex_lock(&output_mutex);
     if (zone_active) {
         int region_bottom = zone_rows - ZONE_RESERVED;
-        char buf[16];
+        /* Assez large pour "\033[<int>;1H\033[K" quel que soit le nombre de
+           chiffres de r (un int → 11 chiffres max) : évite -Wformat-truncation. */
+        char buf[32];
         /* Efface ligne par ligne la région de défilement (sans toucher la zone). */
         for (int r = 1; r <= region_bottom; r++) {
             snprintf(buf, sizeof buf, "\033[%d;1H\033[K", r);

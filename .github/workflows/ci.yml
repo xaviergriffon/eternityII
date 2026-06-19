@@ -26,8 +26,10 @@ jobs:
       - name: Versions des outils
         run: gcc --version && make --version && gcov --version
 
+      # WERROR=1 : sous GCC, tout warning bloque le build (régression interdite).
+      # Le build local (macOS/clang) reste tolérant — voir le toggle dans le Makefile.
       - name: Build release
-        run: make
+        run: make WERROR=1
 
       - name: Tests unitaires
         run: make test

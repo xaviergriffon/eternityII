@@ -29,6 +29,16 @@ else
 	CLEAN_OBJS = rm *.o
 endif
 
+# Traite les warnings comme des erreurs. Désactivé par défaut : le build local
+# reste tolérant (et clang n'émet de toute façon pas les mêmes diagnostics que
+# GCC). La CI Linux/GCC appelle `make WERROR=1` pour bloquer toute régression :
+# l'enforcement vit là où tournent les analyses GCC (-Wstringop-truncation,
+# -Wformat-truncation, -Wuse-after-free, …) que clang ne reproduit pas.
+WERROR ?= 0
+ifeq ($(WERROR),1)
+    CFLAGS += -Werror
+endif
+
 EXECUTABLE ?= eternityII
 
 # Active l'interface ncurses optionnelle (par défaut : interface ANSI sans
