@@ -486,7 +486,10 @@ void *check_client_threads(void *param)
             fork_analysed_stock,
             max_search_by_sec, max_stock_by_thread, max_result);
 #ifdef DEBUG_SOCKET
-        sprintf(temp, "%ssocket opened :%i\n", temp, opened_tcp);
+        // Ajout à la suite : écrire à partir de la fin courante de `temp` plutôt
+        // que de le repasser en argument %s (destination/source qui se
+        // chevauchent → comportement indéfini, -Wrestrict).
+        sprintf(temp + strlen(temp), "socket opened :%i\n", opened_tcp);
 #endif // DEBUG_SOCKET
         strcat(lastcheck, temp);
         free(temp);

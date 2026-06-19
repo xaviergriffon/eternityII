@@ -74,6 +74,13 @@ ifeq ($(CUDA),1)
     CUDA_PATH ?= /usr/local/cuda
     NVCC_ARCH ?= sm_87
     NVCCFLAGS ?= -O3 -arch=$(NVCC_ARCH)
+    # WERROR=1 propage la sévérité au compilateur GPU : `-Werror all-warnings`
+    # transforme tout diagnostic nvcc du code device (cross-execution-space-call,
+    # déclarations dépréciées, réordonnancements…) en erreur — pendant exact du
+    # -Werror gcc côté C. Requiert nvcc >= 11.2 (CI : CUDA 12.5).
+    ifeq ($(WERROR),1)
+        NVCCFLAGS += -Werror all-warnings
+    endif
     CFLAGS += -DWITH_CUDA
     CUDA_OBJ := $(BUILD_DIR)/app/gpu_pruner.o
     CUDA_LIB := -L$(CUDA_PATH)/lib64 -lcudart -lstdc++
