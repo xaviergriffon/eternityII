@@ -726,6 +726,118 @@ TEST search_big_table_prunes_dead_branches(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * what_search_to_key : variante écrivant la clé, voisins vides encodés en -1
+ * ------------------------------------------------------------------------ */
+
+TEST what_search_to_key_empty_and_placed_neighbor(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 1, .right = 2, .bottom = 3, .left = 9 }, /* right=2 -> k2 */
+    };
+    struct array_part rp = { .size = 2, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->x = 0; p->y = 0;
+
+    key_part k;
+    what_search_to_key(&rp, p, &k);
+    ASSERT_EQ_FMT(0, (int)k.k1, "%d");  /* TOP bord */
+    ASSERT_EQ_FMT(-1, (int)k.k2, "%d"); /* RIGHT vide -> -1 */
+    ASSERT_EQ_FMT(-1, (int)k.k3, "%d"); /* BOTTOM vide -> -1 */
+    ASSERT_EQ_FMT(0, (int)k.k4, "%d");  /* LEFT bord */
+
+    /* place un voisin à droite : k2 = sa face gauche */
+    p->grid[1][0] = 1; /* parts[1].left = 9 */
+    what_search_to_key(&rp, p, &k);
+    ASSERT_EQ_FMT(9, (int)k.k2, "%d");
+
+    free(p);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * crypt_to_network / decrypt_from_network : non implémentées -> NULL
+ * ------------------------------------------------------------------------ */
+
+TEST crypt_decrypt_return_null(void)
+{
+    struct possibility_packet *p = new_zeroed_packet();
+    ASSERT_EQ(NULL, crypt_to_network(p));
+    ASSERT_EQ(NULL, decrypt_from_network(p));
+    free(p);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * print_possibility_packet : sérialisation JSON dans les logs (retour 0)
+ * ------------------------------------------------------------------------ */
+
+TEST print_possibility_packet_runs(void)
+{
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = 3; p->x = 1; p->y = 2;
+
+    int saved = dup(1);
+    int devnull = open("/dev/null", O_WRONLY);
+    dup2(devnull, 1);
+
+    int ret = print_possibility_packet(p);
+
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    close(devnull);
+
+    ASSERT_EQ_FMT(0, ret, "%d");
+    free(p);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * possibility_all_has_a_next : toutes les cases libres ont-elles une suite ?
+ * ------------------------------------------------------------------------ */
+
+/* Grille entièrement « remplie » (aucune case -2) : rien à vérifier -> 1. */
+TEST all_has_a_next_all_filled_returns_one(void)
+{
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet(); /* grid tout à 0 (pas de -2) */
+    p->alloc = 0;
+
+    ASSERT_EQ_FMT(1, possibility_all_has_a_next(p, map, &rp), "%d");
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
+/* Une case libre dont la clé n'a aucune pièce candidate -> impasse (0). */
+TEST all_has_a_next_dead_cell_returns_zero(void)
+{
+    /* pièce de bords 1 : le compartiment (0,0,0,0) reste vide. */
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    /* grille « remplie » de 0 sauf la 1re case du parcours, laissée vide. */
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = 0;
+    p->grid[dirx[0]][diry[0]] = -2; /* voisins = parts[0] (bords 0) -> clé (0,0,0,0) */
+
+    ASSERT_EQ_FMT(0, possibility_all_has_a_next(p, map, &rp), "%d");
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
 SUITE(possibility_suite)
 {
     RUN_TEST(test_directions_covers_every_cell);
@@ -756,4 +868,9 @@ SUITE(possibility_suite)
     RUN_TEST(forward_check_detects_dead_cell);
     RUN_TEST(forward_check_passes_when_cells_filled);
     RUN_TEST(search_big_table_prunes_dead_branches);
+    RUN_TEST(what_search_to_key_empty_and_placed_neighbor);
+    RUN_TEST(crypt_decrypt_return_null);
+    RUN_TEST(print_possibility_packet_runs);
+    RUN_TEST(all_has_a_next_all_filled_returns_one);
+    RUN_TEST(all_has_a_next_dead_cell_returns_zero);
 }
