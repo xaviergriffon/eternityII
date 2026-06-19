@@ -18,9 +18,12 @@
 #include "greatest.h"
 #include "../possibility.h"
 #include "../part.h"
+#include "fork_assert.h"
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <unistd.h>
 
 /* directions / dirx / diry sont des globaux définis dans static_variables.c
    (déclarés via static_variables.h, inclus par possibility.h). */
@@ -41,6 +44,27 @@ static struct array_part *make_dummy_rotate_parts(void)
 static struct possibility_packet *new_zeroed_packet(void)
 {
     return calloc(1, sizeof(struct possibility_packet));
+}
+
+/* Contexte partagé avec les fonctions-fils (copié par fork). */
+static struct possibility_packet *g_poss;
+static struct array_part *g_rot;
+static char g_solution_dir[256];
+static char g_save_path[256];
+
+/* Fonction-fils : grille complète -> checkIfResultFound exit(EXIT_SUCCESS).
+   On se place d'abord dans un répertoire temporaire pour confiner le fichier
+   ./solution_<pid> écrit avant l'exit. */
+static void child_check_result_found(void)
+{
+    if (chdir(g_solution_dir) != 0) _exit(99);
+    checkIfResultFound(g_poss, g_rot);
+}
+
+/* Fonction-fils : chemin non inscriptible -> save_possibility exit(EXIT_FAILURE). */
+static void child_save_unwritable(void)
+{
+    save_possibility(g_save_path, g_poss);
 }
 
 /* --------------------------------------------------------------------------
@@ -303,6 +327,92 @@ TEST normalize_leaves_conforming_packet_untouched(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * save_possibility : sérialisation binaire
+ * ------------------------------------------------------------------------ */
+
+TEST save_possibility_writes_packet_to_file(void)
+{
+    char path[] = "/tmp/etii_save_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = 42;
+    p->x = 5;
+    ASSERT_EQ_FMT(0, save_possibility(path, p), "%d");
+
+    /* relecture : les octets écrits doivent reconstituer le paquet. */
+    FILE *f = fopen(path, "r");
+    ASSERT(f != NULL);
+    struct possibility_packet q;
+    size_t n = fread(&q, sizeof(q), 1, f);
+    fclose(f);
+    unlink(path);
+
+    ASSERT_EQ_FMT(1, (int)n, "%d");
+    ASSERT_EQ_FMT(42, (int)q.alloc, "%d");
+    ASSERT_EQ_FMT(5, (int)q.x, "%d");
+
+    free(p);
+    PASS();
+}
+
+/* Chemin non inscriptible -> exit(EXIT_FAILURE), testé en fork. */
+TEST save_possibility_unwritable_exits(void)
+{
+    strcpy(g_save_path, "/etii_nonexistent_dir_zzz/out.bin");
+    g_poss = new_zeroed_packet();
+    int code = run_in_fork(child_save_unwritable, NULL);
+    free(g_poss);
+    ASSERT_EQ_FMT(EXIT_FAILURE, code, "%d");
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * checkIfResultFound : détection de solution complète
+ * ------------------------------------------------------------------------ */
+
+/* Grille incomplète (alloc < ETERN_PARTS) : ne fait rien, ne sort pas. */
+TEST check_if_result_found_below_complete_is_noop(void)
+{
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = 1;
+    struct array_part *rp = make_dummy_rotate_parts();
+
+    checkIfResultFound(p, rp); /* doit revenir sans exit ni crash */
+
+    free(p);
+    free_array_part(rp);
+    PASS();
+}
+
+/* Grille complète (alloc == ETERN_PARTS) : exit(EXIT_SUCCESS), testé en fork. */
+TEST check_if_result_found_complete_exits_success(void)
+{
+    strcpy(g_solution_dir, "/tmp/etii_sol_XXXXXX");
+    ASSERT(mkdtemp(g_solution_dir) != NULL);
+
+    g_poss = new_zeroed_packet();
+    g_poss->alloc = ETERN_PARTS;      /* grille « complète » */
+    g_rot = make_dummy_rotate_parts(); /* parts[0] valide (grid zéro -> index 0) */
+
+    pid_t pid = 0;
+    int code = run_in_fork(child_check_result_found, &pid);
+
+    /* Nettoyage du fichier solution confiné dans le répertoire temporaire. */
+    char sol[320];
+    snprintf(sol, sizeof(sol), "%s/solution_%d", g_solution_dir, (int)pid);
+    unlink(sol);
+    rmdir(g_solution_dir);
+
+    free(g_poss);
+    free_array_part(g_rot);
+    ASSERT_EQ_FMT(EXIT_SUCCESS, code, "%d");
+    PASS();
+}
+
 SUITE(possibility_suite)
 {
     RUN_TEST(test_directions_covers_every_cell);
@@ -319,4 +429,8 @@ SUITE(possibility_suite)
     RUN_TEST(generate_possibility_packet_encodes_grid);
     RUN_TEST(normalize_repairs_alloc_ahead_of_hole);
     RUN_TEST(normalize_leaves_conforming_packet_untouched);
+    RUN_TEST(save_possibility_writes_packet_to_file);
+    RUN_TEST(save_possibility_unwritable_exits);
+    RUN_TEST(check_if_result_found_below_complete_is_noop);
+    RUN_TEST(check_if_result_found_complete_exits_success);
 }

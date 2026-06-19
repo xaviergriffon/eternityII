@@ -11,10 +11,38 @@
 #include "greatest.h"
 #include "../readdata.h"
 #include "../part.h"
+#include "fork_assert.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+
+/* compute_grid n'est pas déclarée dans readdata.h (helper interne non statique). */
+void compute_grid(struct possibility_packet *possibility, char *str_value);
+
+/* Chemin partagé entre le parent et les fonctions-fils (copié par fork). */
+static char g_csv_path[256];
+
+/* Écrit `content` dans un fichier temporaire et renvoie son chemin (statique). */
+static const char *write_temp_csv(const char *content)
+{
+    static char path[256];
+    strcpy(path, "/tmp/etii_readdata_err_XXXXXX");
+    int fd = mkstemp(path);
+    if (fd < 0) return NULL;
+    FILE *fp = fdopen(fd, "w");
+    fputs(content, fp);
+    fclose(fp);
+    return path;
+}
+
+/* Fonction-fils : tente de lire le CSV pointé par g_csv_path (exit attendu). */
+static void child_read_parts(void)
+{
+    struct array_part *a = read_parts(g_csv_path);
+    free_array_part(a); /* non atteint si read_parts exit() */
+}
 
 /* Ordre des colonnes effectivement lu par read_parts : id top left bottom right. */
 TEST read_parts_parses_a_well_formed_csv(void)
@@ -98,8 +126,127 @@ TEST read_parts_reads_exactly_ntiles(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * Chemins d'erreur de read_parts (appellent exit) — testés via fork.
+ * EXIT_FAILURE == 1.
+ * ------------------------------------------------------------------------ */
+
+TEST read_parts_missing_file_exits(void)
+{
+    strcpy(g_csv_path, "/tmp/etii_does_not_exist_zzz_4242");
+    unlink(g_csv_path); /* on s'assure qu'il n'existe pas */
+    ASSERT_EQ_FMT(EXIT_FAILURE, run_in_fork(child_read_parts, NULL), "%d");
+    PASS();
+}
+
+TEST read_parts_bad_header_exits(void)
+{
+    const char *p = write_temp_csv("pas_de_ntiles_ici\n1 10 20 30 40\n");
+    ASSERT(p != NULL);
+    strcpy(g_csv_path, p);
+    int code = run_in_fork(child_read_parts, NULL);
+    unlink(g_csv_path);
+    ASSERT_EQ_FMT(EXIT_FAILURE, code, "%d");
+    PASS();
+}
+
+TEST read_parts_malformed_line_exits(void)
+{
+    const char *p = write_temp_csv("ntiles: 2\n1 10 20 30 40\nGARBAGE\n");
+    ASSERT(p != NULL);
+    strcpy(g_csv_path, p);
+    int code = run_in_fork(child_read_parts, NULL);
+    unlink(g_csv_path);
+    ASSERT_EQ_FMT(EXIT_FAILURE, code, "%d");
+    PASS();
+}
+
+TEST read_parts_too_many_pieces_exits(void)
+{
+    /* ntiles annonce 1 mais le fichier en contient 2 */
+    const char *p = write_temp_csv("ntiles: 1\n1 10 20 30 40\n2 11 21 31 41\n");
+    ASSERT(p != NULL);
+    strcpy(g_csv_path, p);
+    int code = run_in_fork(child_read_parts, NULL);
+    unlink(g_csv_path);
+    ASSERT_EQ_FMT(EXIT_FAILURE, code, "%d");
+    PASS();
+}
+
+TEST read_parts_too_few_pieces_exits(void)
+{
+    /* ntiles annonce 3 mais le fichier n'en contient qu'1 */
+    const char *p = write_temp_csv("ntiles: 3\n1 10 20 30 40\n");
+    ASSERT(p != NULL);
+    strcpy(g_csv_path, p);
+    int code = run_in_fork(child_read_parts, NULL);
+    unlink(g_csv_path);
+    ASSERT_EQ_FMT(EXIT_FAILURE, code, "%d");
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * compute_grid : remplissage colonne par colonne depuis une liste d'entiers.
+ * ------------------------------------------------------------------------ */
+
+TEST compute_grid_fills_cells_in_order(void)
+{
+    struct possibility_packet *p = calloc(1, sizeof(struct possibility_packet));
+
+    char values[] = "5 6 7"; /* x croît, y reste 0 tant que x < ETERN_SIZE */
+    compute_grid(p, values);
+
+    ASSERT_EQ_FMT(5, (int)p->grid[0][0], "%d");
+    ASSERT_EQ_FMT(6, (int)p->grid[1][0], "%d");
+    ASSERT_EQ_FMT(7, (int)p->grid[2][0], "%d");
+    /* les pièces (valeurs >= 0) sont marquées utilisées (id % ETERN_PARTS) */
+    ASSERT_EQ_FMT(1, (int)is_face_used(p->b_faceused, 5), "%d");
+
+    free(p);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * read_from_json : désérialisation alloc / x / y / grid.
+ * read_from_json écrit sur stdout (printf de debug) -> on la museler le temps
+ * de l'appel pour ne pas polluer la sortie du runner.
+ * ------------------------------------------------------------------------ */
+
+TEST read_from_json_parses_scalars_and_grid(void)
+{
+    int saved = dup(1);
+    int devnull = open("/dev/null", O_WRONLY);
+    dup2(devnull, 1);
+
+    struct possibility_packet *p =
+        read_from_json("{\"alloc\": 5, \"x\": 3, \"y\": 7, \"grid\": [[1, 2], [3, 4]]}");
+
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    close(devnull);
+
+    ASSERT(p != NULL);
+    ASSERT_EQ_FMT(5, (int)p->alloc, "%d");
+    ASSERT_EQ_FMT(3, (int)p->x, "%d");
+    ASSERT_EQ_FMT(7, (int)p->y, "%d");
+    /* grid alimentée par compute_grid : 1,2,3,4 en colonne 0 */
+    ASSERT_EQ_FMT(1, (int)p->grid[0][0], "%d");
+    ASSERT_EQ_FMT(2, (int)p->grid[1][0], "%d");
+
+    free(p);
+    PASS();
+}
+
 SUITE(readdata_suite)
 {
     RUN_TEST(read_parts_parses_a_well_formed_csv);
     RUN_TEST(read_parts_reads_exactly_ntiles);
+    RUN_TEST(read_parts_missing_file_exits);
+    RUN_TEST(read_parts_bad_header_exits);
+    RUN_TEST(read_parts_malformed_line_exits);
+    RUN_TEST(read_parts_too_many_pieces_exits);
+    RUN_TEST(read_parts_too_few_pieces_exits);
+    RUN_TEST(compute_grid_fills_cells_in_order);
+    RUN_TEST(read_from_json_parses_scalars_and_grid);
 }

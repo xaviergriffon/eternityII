@@ -132,6 +132,11 @@ COV_LINK_MODULES   := $(TEST_MODULES)
 .PHONY: coverage
 coverage:
 	@mkdir -p $(COV_DIR)
+	# 0. Purge les compteurs (.gcda) d'un run précédent : chaque `make coverage`
+	#    repart de zéro. Indispensable depuis l'ajout des tests par fork (les
+	#    fils flushent leur couverture en sortant ; re-fusionner sur des .gcda
+	#    périmés provoque des avertissements « cannot merge / corrupt arc tag »).
+	@rm -f $(COV_DIR)/*.gcda
 	# 1. Instrumente TOUS les modules de production + les sources de test → un
 	#    .gcno par fichier, y compris les modules jamais exécutés (→ 0 %).
 	@for src in $(COV_ALL_MODULES) $(TEST_SRCS); do \
