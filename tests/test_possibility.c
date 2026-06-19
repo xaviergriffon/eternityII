@@ -6,9 +6,10 @@
  * first_possibility) ou écrivent des fichiers. On ne teste ici QUE la logique
  * pure, sur des `possibility_packet` construits à la main (calloc → état zéro).
  *
- * Le seul symbole externe de datamanager appelé par le module (add_possibility)
- * est fourni en no-op par tests/stubs.c, ce qui évite de lier toute la chaîne
- * réseau.
+ * Les fonctions de recherche (what_search*, possibility_has_a_next) sont
+ * exercées sur de petits `array_part` / `map_big_array` construits à la main
+ * (coordonnées explicites), donc indépendamment du parcours `directions` à 256
+ * cases et sans pieces.csv.
  *
  * Build par défaut : ETERN_PARTS=256, ETERN_SIZE=16, FACES_USED_BITS actif
  * (masque de bits via set_face_used / is_face_used, déclarés inline dans
@@ -413,6 +414,150 @@ TEST check_if_result_found_complete_exits_success(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * what_search / what_search_to_key2 / what_search_in_grid_to_key
+ *
+ * Petit jeu de pièces dont seuls les bords comptent. grid stocke ici des
+ * indices directs dans all_rotate_parts->parts[] (ce qu'attendent ces
+ * fonctions). Les voisins absents (bord de grille) donnent 0 ; les cases vides
+ * (-2) donnent -1 (what_search) ou `all_face` (variantes ...to_key).
+ * ------------------------------------------------------------------------ */
+
+/* Au coin (0,0) d'un plateau vide : top/left = bord (0), right/bottom = vide (-1). */
+TEST what_search_corner_of_empty_board(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 },
+        { .id = 2, .top = 1, .right = 9, .bottom = 4, .left = 5 },
+    };
+    struct array_part rp = { .size = 3, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+
+    key_part k = what_search(&rp, 0, 0, p);
+    ASSERT_EQ_FMT(0, (int)k.k1, "%d");  /* TOP : bord */
+    ASSERT_EQ_FMT(-1, (int)k.k2, "%d"); /* RIGHT : vide */
+    ASSERT_EQ_FMT(-1, (int)k.k3, "%d"); /* BOTTOM : vide */
+    ASSERT_EQ_FMT(0, (int)k.k4, "%d");  /* LEFT : bord */
+
+    free(p);
+    PASS();
+}
+
+/* Un voisin placé impose le bord opposé : voisin de droite -> sa face gauche. */
+TEST what_search_reads_placed_neighbor(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 1, .right = 2, .bottom = 3, .left = 5 }, /* left = 5 */
+    };
+    struct array_part rp = { .size = 2, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->grid[1][0] = 1; /* voisin de droite de (0,0) = index 1 */
+
+    key_part k = what_search(&rp, 0, 0, p);
+    ASSERT_EQ_FMT(5, (int)k.k2, "%d"); /* RIGHT = left du voisin droit */
+    ASSERT_EQ_FMT(0, (int)k.k1, "%d"); /* TOP toujours bord */
+
+    free(p);
+    PASS();
+}
+
+/* what_search_to_key2 : case courante, voisins vides encodés en `all_face`. */
+TEST what_search_to_key2_uses_all_face_for_empty(void)
+{
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 0, .right = 1, .bottom = 1, .left = 0 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->x = 0;
+    p->y = 0;
+
+    key_part k;
+    const int8_t all_face = 7;
+    what_search_to_key2(&rp, p, &k, all_face);
+    ASSERT_EQ_FMT(0, (int)k.k1, "%d");          /* TOP bord */
+    ASSERT_EQ_FMT(all_face, (int)k.k2, "%d");   /* RIGHT vide -> all_face */
+    ASSERT_EQ_FMT(all_face, (int)k.k3, "%d");   /* BOTTOM vide -> all_face */
+    ASSERT_EQ_FMT(0, (int)k.k4, "%d");          /* LEFT bord */
+
+    free(p);
+    PASS();
+}
+
+/* what_search_in_grid_to_key : même chose pour une case (x,y) arbitraire. */
+TEST what_search_in_grid_to_key_arbitrary_cell(void)
+{
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 4, .right = 1, .bottom = 1, .left = 6 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    /* place un voisin sous la case (5,5) : grid[5][6] index 1, son top = 4 -> k3 */
+    p->grid[5][6] = 1;
+
+    key_part k;
+    what_search_in_grid_to_key(&rp, p, 5, 5, &k, 7);
+    ASSERT_EQ_FMT(7, (int)k.k1, "%d"); /* TOP vide -> all_face */
+    ASSERT_EQ_FMT(4, (int)k.k3, "%d"); /* BOTTOM = top du voisin du dessous */
+
+    free(p);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * possibility_has_a_next : au moins une pièce libre posable sur la case courante
+ * ------------------------------------------------------------------------ */
+
+/*
+ * get_parts_bigarray indexe la table à plat avec les valeurs brutes de la clé
+ * (sans convert_p), donc possibility_has_a_next ne donne un résultat valide que
+ * si la case courante a une clé CONCRÈTE (pas de -1 « voisin vide »). On entoure
+ * donc le coin (0,0) de voisins déjà placés : top/left = bord (0), right/bottom
+ * = faces des voisins -> clé exacte (0, 2, 3, 0).
+ */
+TEST possibility_has_a_next_finds_and_excludes_used(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 }, /* coin cible */
+        { .id = 2, .top = 5, .right = 6, .bottom = 7, .left = 2 }, /* voisin droit (left=2 -> k2) */
+        { .id = 3, .top = 3, .right = 8, .bottom = 9, .left = 4 }, /* voisin bas (top=3 -> k3) */
+    };
+    struct array_part rp = { .size = 4, .parts = parts };
+    int maxFace = search_max_face(&rp);
+    map_big_array *map = buildBigArray(&rp, maxFace);
+
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->x = 0;
+    p->y = 0;
+    p->grid[1][0] = 2; /* voisin droit placé -> k2 = parts[2].left = 2 */
+    p->grid[0][1] = 3; /* voisin bas placé   -> k3 = parts[3].top  = 3 */
+
+    /* clé concrète (0,2,3,0) : seule la pièce coin 1 correspond, non utilisée. */
+    ASSERT_EQ_FMT(1, possibility_has_a_next(p, map, &rp), "%d");
+
+    /* On marque la pièce 1 (id-1 = 0) comme utilisée : plus aucune candidate. */
+    set_face_used(p->b_faceused, 0, 1);
+    ASSERT_EQ_FMT(0, possibility_has_a_next(p, map, &rp), "%d");
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
 SUITE(possibility_suite)
 {
     RUN_TEST(test_directions_covers_every_cell);
@@ -433,4 +578,9 @@ SUITE(possibility_suite)
     RUN_TEST(save_possibility_unwritable_exits);
     RUN_TEST(check_if_result_found_below_complete_is_noop);
     RUN_TEST(check_if_result_found_complete_exits_success);
+    RUN_TEST(what_search_corner_of_empty_board);
+    RUN_TEST(what_search_reads_placed_neighbor);
+    RUN_TEST(what_search_to_key2_uses_all_face_for_empty);
+    RUN_TEST(what_search_in_grid_to_key_arbitrary_cell);
+    RUN_TEST(possibility_has_a_next_finds_and_excludes_used);
 }
