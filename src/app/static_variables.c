@@ -139,7 +139,6 @@ int communication_in_progress = 0;
 #ifdef DEBUG_SOCKET
 int opened_tcp = 0;
 #endif // DEBUG_SOCKET
-long nb_client = 0;
 
 int tcp_timeout = DEFAULT_TCP_TIMEOUT;
 

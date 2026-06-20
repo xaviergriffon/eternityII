@@ -810,19 +810,6 @@ TEST what_search_to_key_empty_and_placed_neighbor(void)
 }
 
 /* --------------------------------------------------------------------------
- * crypt_to_network / decrypt_from_network : non implémentées -> NULL
- * ------------------------------------------------------------------------ */
-
-TEST crypt_decrypt_return_null(void)
-{
-    struct possibility_packet *p = new_zeroed_packet();
-    ASSERT_EQ(NULL, crypt_to_network(p));
-    ASSERT_EQ(NULL, decrypt_from_network(p));
-    free(p);
-    PASS();
-}
-
-/* --------------------------------------------------------------------------
  * print_possibility_packet : sérialisation JSON dans les logs (retour 0)
  * ------------------------------------------------------------------------ */
 
@@ -922,7 +909,6 @@ SUITE(possibility_suite)
     RUN_TEST(forward_check_passes_when_cells_filled);
     RUN_TEST(search_big_table_prunes_dead_branches);
     RUN_TEST(what_search_to_key_empty_and_placed_neighbor);
-    RUN_TEST(crypt_decrypt_return_null);
     RUN_TEST(print_possibility_packet_runs);
     RUN_TEST(all_has_a_next_all_filled_returns_one);
     RUN_TEST(all_has_a_next_dead_cell_returns_zero);

@@ -248,26 +248,6 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
 int search_possiblity_light_with_big_table(big_table *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4]);
 
 /**
- * @brief Calcule la prochaine direction de parcours de la grille.
- *
- * Détermine si le parcours doit changer de direction à la position `(x, y)`
- * en fonction de la direction courante et de l'état du paquet.
- *
- * @param cur_dir    Direction courante (constante DIR_*).
- * @param x          Coordonnée x courante.
- * @param y          Coordonnée y courante.
- * @param possiblity Paquet courant.
- * @return           Nouvelle direction (constante DIR_*).
- */
-int change_dir(int cur_dir, int x, int y, struct possibility_packet *possiblity);
-
-/** @brief Chiffre un paquet pour l'envoi réseau. (Non implémenté — retourne NULL.) */
-struct possibility_packet *crypt_to_network(struct possibility_packet *packet);
-
-/** @brief Déchiffre un paquet reçu du réseau. (Non implémenté — retourne NULL.) */
-struct possibility_packet *decrypt_from_network(struct possibility_packet *packet);
-
-/**
  * @brief Affiche un `possibility_packet` au format JSON dans les logs.
  *
  * Format : `{"alloc": N, "x": X, "y": Y, "grid": [[...], ...]}`.
