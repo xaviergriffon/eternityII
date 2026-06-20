@@ -79,6 +79,19 @@ long send_instruction(int socket_id, int8_t instruction)
 	return result;
 }
 
+handshake_verdict_t handshake_verdict(int8_t result)
+{
+	if (result == INST_SUPPORTED_VERSION) {
+		return HANDSHAKE_OK;
+	}
+	if (result == INST_UNSUPPORTED_VERSION) {
+		return HANDSHAKE_VERSION_REJECTED;
+	}
+	// Tout le reste (INST_END/-1 de timeout, fermeture du pair, octet inattendu) :
+	// échec transitoire — on ne tue pas le client, on réessaiera plus tard.
+	return HANDSHAKE_RETRY;
+}
+
 long recv_all(int socket_id, void *buf, size_t len)
 {
 	size_t total = 0;

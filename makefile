@@ -166,10 +166,21 @@ TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/comma
 # -Isrc : en-têtes de prod en "domaine/x.h". -Itests : greatest.h / fork_assert.h
 # (harnais partagé à la racine de tests/, alors que les suites sont en sous-dossiers).
 TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -Isrc -Itests
+# Sanitizer optionnel pour `make test` : ASAN=1 instrumente le binaire de test
+# avec AddressSanitizer (use-after-free, double-free, débordements de tas/pile).
+# Utilisé par le job CI dédié. La détection de fuites (LSan) se règle au runtime
+# via ASAN_OPTIONS (la CI la désactive : le code a des fuites connues hors du
+# périmètre « sûreté mémoire »).
+ASAN ?= 0
+ifeq ($(ASAN),1)
+    TEST_SANFLAGS := -fsanitize=address -fno-omit-frame-pointer
+else
+    TEST_SANFLAGS :=
+endif
 
 .PHONY: test
 test:
-	gcc $(TEST_CFLAGS) -pthread -o $(TEST_BIN) $(TEST_SRCS) $(TEST_MODULES) -lm
+	gcc $(TEST_CFLAGS) $(TEST_SANFLAGS) -pthread -o $(TEST_BIN) $(TEST_SRCS) $(TEST_MODULES) -lm
 	./$(TEST_BIN)
 
 # ---------------------------------------------------------------------------

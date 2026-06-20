@@ -128,6 +128,24 @@ TEST close_socket_sends_end_before_closing(void)
     PASS();
 }
 
+/* handshake_verdict distingue les 3 issues du contrôle de version. Régression
+   du bug « faux Version not supported » : un timeout (INST_END) ou tout octet
+   inattendu doit donner HANDSHAKE_RETRY (réessayer), JAMAIS un refus de version
+   (qui, lui, arrête le client). Seul INST_UNSUPPORTED_VERSION est un vrai refus. */
+TEST handshake_verdict_distinguishes_outcomes(void)
+{
+    ASSERT_EQ_FMT((int)HANDSHAKE_OK,
+                  (int)handshake_verdict(INST_SUPPORTED_VERSION), "%d");
+    ASSERT_EQ_FMT((int)HANDSHAKE_VERSION_REJECTED,
+                  (int)handshake_verdict(INST_UNSUPPORTED_VERSION), "%d");
+    /* Cœur du bug corrigé : timeout / déconnexion ⇒ réessayer, pas arrêter. */
+    ASSERT_EQ_FMT((int)HANDSHAKE_RETRY, (int)handshake_verdict(INST_END), "%d");
+    ASSERT_EQ_FMT((int)HANDSHAKE_RETRY, (int)handshake_verdict(INST_NULL), "%d");
+    ASSERT_EQ_FMT((int)HANDSHAKE_RETRY, (int)handshake_verdict((int8_t)-1), "%d");
+    ASSERT_EQ_FMT((int)HANDSHAKE_RETRY, (int)handshake_verdict((int8_t)42), "%d");
+    PASS();
+}
+
 SUITE(etii_protocol_suite)
 {
     /* Aucun envoi vers un pair fermé ici, mais on neutralise SIGPIPE par
@@ -141,4 +159,5 @@ SUITE(etii_protocol_suite)
     RUN_TEST(is_connected_true_when_peer_echoes);
     RUN_TEST(is_connected_false_on_end);
     RUN_TEST(close_socket_sends_end_before_closing);
+    RUN_TEST(handshake_verdict_distinguishes_outcomes);
 }

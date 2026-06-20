@@ -128,7 +128,10 @@ int check_and_connect_to_server(client_possibility_t *client_possibility) {
 		send_instruction(socket_id, INST_CHECK_VERSION);
 		send(socket_id, &version, sizeof(int), 0);
 		int8_t result = recv_instruction(socket_id);
-		if (result == INST_UNSUPPORTED_VERSION) {
+		switch (handshake_verdict(result)) {
+		case HANDSHAKE_OK:
+			break;
+		case HANDSHAKE_VERSION_REJECTED:
 			// Refus EXPLICITE du serveur : incompatibilité de version réelle.
 			// C'est le seul cas qui justifie d'arrêter le client — réessayer ne
 			// servirait à rien tant que les binaires ne sont pas alignés.
@@ -136,8 +139,8 @@ int check_and_connect_to_server(client_possibility_t *client_possibility) {
 			close_socket(socket_id);
 			request = REQUEST_STOP;
 			return -1;
-		}
-		if (result != INST_SUPPORTED_VERSION) {
+		case HANDSHAKE_RETRY:
+		default:
 			// Pas de réponse exploitable au handshake : timeout (serveur saturé,
 			// « all threads busy »), connexion coupée ou pair occupé. Ce N'EST PAS
 			// une erreur de version : on ne doit donc PAS arrêter le client. On

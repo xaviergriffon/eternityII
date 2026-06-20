@@ -52,7 +52,40 @@ TEST console_reads_exit_command_and_exits(void)
     PASS();
 }
 
+/*
+ * Régression du bug « spin console » : en entrée non interactive, sur EOF de
+ * stdin, console() doit RENDRE LA MAIN (et non reboucler à l'infini en affichant
+ * « commande : » à pleine vitesse). On exécute console() dans un fils avec stdin
+ * = /dev/null (EOF immédiat) et un alarm(5) en garde-fou : si la boucle régresse
+ * et tourne sans fin, SIGALRM tue le fils → WIFSIGNALED → test rouge. Avec le
+ * correctif, console() revient aussitôt et le fils sort proprement (code 0).
+ */
+TEST console_returns_on_eof_without_spinning(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Enfant : stdin <- /dev/null (EOF immédiat), sorties -> /dev/null. */
+        int in = open("/dev/null", O_RDONLY);
+        if (in >= 0) { dup2(in, 0); if (in > 2) close(in); }
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); if (dn > 2) close(dn); }
+        alarm(5);          /* garde-fou : tue le fils si console() boucle sans fin */
+        console(NULL);     /* doit RETOURNER sur EOF (ni exit, ni boucle infinie)  */
+        _exit(0);          /* atteint uniquement si console() est revenue          */
+    }
+
+    ASSERT(pid > 0);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    /* Sortie normale code 0 = retour propre sur EOF. Un kill par SIGALRM (spin)
+       ou tout autre signal fait échouer le test. */
+    ASSERT(WIFEXITED(status));
+    ASSERT_EQ_FMT(0, WEXITSTATUS(status), "%d");
+    PASS();
+}
+
 SUITE(console_suite)
 {
     RUN_TEST(console_reads_exit_command_and_exits);
+    RUN_TEST(console_returns_on_eof_without_spinning);
 }
