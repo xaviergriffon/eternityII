@@ -395,28 +395,42 @@ void *communicate_with_client (void *userdata)
     }
     if(lastPossibilityPacketSend != NULL)
     {
-        if (instruction == -1 || instruction != INST_END) {
-            // La possibilité retourne en stock : on retire son entrée « en analyse »
-            // pour ne pas laisser de suivi orphelin dans file_analysed
-            int rp;
-            for (rp = 0; rp < lastPossibilityPacketSend->size; rp++)
+        // À la déconnexion (propre OU non), la dernière possibilité servie au
+        // client peut être restée « en analyse » : il l'a abandonnée sans
+        // acquittement — il a quitté sur une solution, expiré, ou fermé. On la
+        // rend alors au stock pour qu'elle reste exploitable.
+        //
+        // L'ancien test « if (instruction != INST_END) » NE rendait la
+        // possibilité que sur une déconnexion brutale. Or recv == 0 (fin de
+        // process client, fermeture propre, timeout) est justement mappé en
+        // INST_END par recv_instruction : la possibilité restait donc orpheline
+        // dans file_analysed dans tous les cas courants, et le stock « unchecked »
+        // se vidait possibilité par possibilité (symptôme « le serveur a du stock
+        // mais ne donne plus rien », flagrant en 16 pièces où chaque possibilité
+        // mène vite à une solution → sortie du client sans acquittement).
+        //
+        // On ne réinjecte QUE les possibilités encore présentes dans
+        // file_analysed : si le client l'avait acquittée (INST_POSSIBILITY_ANALYSED),
+        // remove_possibility_analysed renvoie ≠ 0 (déjà retirée) et on ne la remet
+        // pas — pas de doublon de travail déjà terminé.
+        for (int rp = 0; rp < lastPossibilityPacketSend->size; rp++)
+        {
+            struct possibility_packet *possibility = &lastPossibilityPacketSend->possibilities[rp];
+            if (remove_possibility_analysed(possibility, -1) != 0)
             {
-                remove_possibility_analysed(&lastPossibilityPacketSend->possibilities[rp], -1);
+                // Déjà acquittée par le client : rien à rendre.
+                continue;
             }
-            if(add_possibility(NULL, lastPossibilityPacketSend))
+            array_possibility_packet *single = build_single_array_possibility_packet(possibility);
+            if (add_possibility(NULL, single))
             {
                 log_error("Error with possibility : \n");
-                int p;
-                for (p=0;p < lastPossibilityPacketSend->size;p++)
-                {
-                    struct possibility_packet *possibility = &lastPossibilityPacketSend->possibilities[p];
-                    print_possibility_packet(possibility);
-                    save_possibility("./error_possibility",possibility);
-                }
-                
+                print_possibility_packet(possibility);
+                save_possibility("./error_possibility", possibility);
             }
+            free_array_possibility_packet(single);
         }
-        
+
         free_array_possibility_packet(lastPossibilityPacketSend);
     }
     
