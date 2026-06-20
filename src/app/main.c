@@ -45,6 +45,24 @@ int main(int argc, const char *argv[]) {
     parent_pid = getpid();
     log_info("Version %i", version);
 
+    // Option position-indépendante --stop-on-solution : on la retire de argv
+    // (compactage en place) pour ne pas perturber le parsing positionnel des
+    // modes, et on la lit AVANT tout fork → héritée par les process de recherche.
+    {
+        int w = 0;
+        for (int r = 0; r < argc; r++) {
+            if (strcmp(argv[r], "--stop-on-solution") == 0) {
+                stop_on_solution = 1;
+            } else {
+                argv[w++] = argv[r];
+            }
+        }
+        argc = w;
+    }
+    if (stop_on_solution) {
+        log_info("option : arrêt à la première solution activé (--stop-on-solution)\n");
+    }
+
     if (argc >= 2 && argv[1] != NULL) {
         lastcheck = calloc(2000, sizeof(char));
 
@@ -419,6 +437,8 @@ void failed_arg(void)
 #ifdef WITH_CUDA
 	          "gpupruner [serveur] [nb_threads] [pieces.csv]\n"
 #endif // WITH_CUDA
+	          "Option (n'importe où) : --stop-on-solution "
+	          "(s'arrêter à la 1re solution ; défaut : continuer)\n"
 	);
 }
 

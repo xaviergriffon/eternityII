@@ -155,6 +155,18 @@ extern int NB_THREADS;
 extern int pruner_mode;
 
 /**
+ * @brief 1 si l'on s'arrête à la première solution (option `--stop-on-solution`).
+ *
+ * Défaut 0 : on continue après une solution — le processus de recherche backtrack
+ * pour en chercher d'autres, et le serveur reste en service pour que les clients
+ * continuent d'explorer. À 1 : le processus de recherche qui trouve une solution
+ * sort, et le serveur qui en reçoit une sauvegarde son stock puis s'arrête.
+ *
+ * Lue dans `main()` AVANT tout fork → héritée par les processus enfants.
+ */
+extern int stop_on_solution;
+
+/**
  * @brief Nombre de possibilités qu'un client pruner demande/acquitte par lot.
  *
  * Configurable au démarrage (argument CLI de `tcppruner`/`gpupruner`) et à

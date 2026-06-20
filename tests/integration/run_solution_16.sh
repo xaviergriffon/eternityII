@@ -64,11 +64,14 @@ echo "  données : $DATA"
 echo "  travail : $WORK  (timeout ${TIMEOUT}s)"
 
 # --- Lancement serveur puis client ------------------------------------------
-"$BIN" tcpserver 1 "$DATA" </dev/null >server.log 2>&1 &
+# --stop-on-solution : le serveur s'arrête à la 1re solution (et sauvegarde son
+# stock), ce qui donne au test un point de terminaison déterministe. Sans ce
+# drapeau, le défaut est de continuer à tourner — voir AGENTS.md.
+"$BIN" tcpserver 1 "$DATA" --stop-on-solution </dev/null >server.log 2>&1 &
 SRV_PID=$!
 sleep 1   # laisse le serveur écouter (le client a de toute façon un back-off)
 
-"$BIN" tcpclient 127.0.0.1 1 1000 "$DATA" </dev/null >client.log 2>&1 &
+"$BIN" tcpclient 127.0.0.1 1 1000 "$DATA" --stop-on-solution </dev/null >client.log 2>&1 &
 CLI_PID=$!
 
 # --- Attente bornée de l'arrêt du serveur (il s'arrête sur solution) --------

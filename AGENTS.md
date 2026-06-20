@@ -53,6 +53,8 @@ The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` inste
 ./eternityII test [data/pieces.csv]
 ```
 
+**`--stop-on-solution`** (optional, accepted in any position by any mode, stripped from argv before the positional parse): stop at the **first** solution. A search process that finds one exits; a server that receives one backs up its queues and stops. **Default (flag absent): keep going** — the search process backtracks to look for more solutions and the server stays in service so clients keep exploring. Read in `main()` *before* any fork (global `stop_on_solution`), so forked search children inherit it. Each solution is saved to a **unique** file (`./solution_<pid>_<seq>` client-side, `./solution_server_<pid>_<seq>` server-side) — multiple solutions never overwrite one another.
+
 Puzzle definitions live in `data/`: `data/pieces.csv` (256-piece puzzle) and the 16-piece variant `data/pieces16.csv`. The code's built-in default (`parts_files` in `src/app/static_variables.c`) now points at `./data/pieces.csv` (or `./data/pieces16.csv` for the 16-piece build), so running from the repo root works without an explicit path argument.
 
 ## Testing
@@ -65,7 +67,7 @@ make coverage        # same, instrumented with --coverage; prints a gcov per-mod
 make coverage-report # gcovr over those .gcda → Cobertura XML + HTML + Markdown summary
 ```
 
-Beyond the unit suites, an **end-to-end integration test** (`tests/integration/run_solution_16.sh`, driven by `make test-integration`) exercises the real client/server protocol: it compiles an `ETERN_PARTS=16` binary, launches a server + a client, and checks that **both sides** observe the solution. The client solves the 4×4, reports it via `INST_SOLUTION`; the server displays it, backs up its queues (`./eternityII.back`, `./eternityII-in_analyse.back`) and **stops**. The script runs in an isolated `mktemp -d` working dir (no `.back`/`solution_*` ever land in the repo) and enforces a bounded timeout (`INTEGRATION_TIMEOUT`, default 60 s) so it can never hang. It asserts: server exited cleanly, both logs carry the solution, both `solution_*` files and the `.back` backups exist.
+Beyond the unit suites, an **end-to-end integration test** (`tests/integration/run_solution_16.sh`, driven by `make test-integration`) exercises the real client/server protocol: it compiles an `ETERN_PARTS=16` binary, launches a server + a client **both with `--stop-on-solution`**, and checks that **both sides** observe the solution. The client solves the 4×4, reports it via `INST_SOLUTION`; the server displays it, backs up its queues (`./eternityII.back`, `./eternityII-in_analyse.back`) and **stops** — that clean termination is what makes the test deterministic. The script runs in an isolated `mktemp -d` working dir (no `.back`/`solution_*` ever land in the repo) and enforces a bounded timeout (`INTEGRATION_TIMEOUT`, default 60 s) so it can never hang. It asserts: server exited cleanly, both logs carry the solution, both `solution_*` files and the `.back` backups exist.
 
 Conventions to keep in mind when adding or extending tests:
 
@@ -94,7 +96,7 @@ The protocol uses fixed-size `packet` structs containing an `instruction` byte a
 |---|---|---|
 | `INST_ADD` | 1 | Client sends a possibility to the server |
 | `INST_GET` | 2 | Client requests a possibility from the server |
-| `INST_SOLUTION` | 3 | Client found a solution (sends the full board; the search child also saves `./solution_<pid>` and exits). The server displays it, saves `./solution_server_<pid>`, backs up its queues and **stops**. |
+| `INST_SOLUTION` | 3 | Client found a solution: sends the full board; the search child also saves a unique `./solution_<pid>_<seq>`. The server displays it and saves a unique `./solution_server_<pid>_<seq>`. With `--stop-on-solution` the search child exits and the server backs up its queues and **stops**; by default both keep running to look for more solutions. |
 | `INST_END` | 4 | Session end |
 | `INST_CONSIDERED` | 5 | Acknowledge |
 | `INST_NULL` | 6 | No possibility available |

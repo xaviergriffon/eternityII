@@ -548,8 +548,16 @@ int save_possibility(char *filename, struct possibility_packet *possibility)
  * @param all_rotate_part Tableau de toutes les rotations (pour affichage).
  */
 void log_solution(struct possibility_packet *poss, struct array_part *all_rotate_part) {
+    // Nom de fichier unique : <pid> distingue les processus de recherche, le
+    // compteur atomique distingue plusieurs solutions trouvées par le même
+    // processus (mode « continuer après une solution »). Aucun écrasement.
+    static unsigned solution_seq = 0;
+    unsigned seq = __atomic_fetch_add(&solution_seq, 1, __ATOMIC_RELAXED);
+    char fileName[64];
+    snprintf(fileName, sizeof fileName, "./solution_%i_%u", (int)getpid(), seq);
+
     log_info("fin de la boucle à %i \n", poss->alloc);
-    log_event("SOLUTION FOUND! (%i pieces) - saved to ./solution_%i", poss->alloc, getpid());
+    log_event("SOLUTION FOUND! (%i pieces) - saved to %s", poss->alloc, fileName);
     for(int x = 0; x < ETERN_SIZE; x++)
     {
         for(int y=0;y < ETERN_SIZE; y++)
@@ -559,10 +567,7 @@ void log_solution(struct possibility_packet *poss, struct array_part *all_rotate
             print_part(part);
         }
     }
-    char *fileName = calloc(100, sizeof(char));
-    sprintf(fileName, "./solution_%i", getpid());
     save_possibility(fileName, poss);
-    free(fileName);
 }
 
 /**
@@ -571,7 +576,7 @@ void log_solution(struct possibility_packet *poss, struct array_part *all_rotate
  * Si `alloc >= ETERN_PARTS`, affiche/sauvegarde la grille (`log_solution`) et
  * termine le processus avec EXIT_SUCCESS. Utilisé par les chemins de recherche
  * sans contexte client (donc sans notification possible du serveur). Le chemin
- * de production (`autosearch`) passe par `report_solution` qui informe d'abord
+ * de production (`autosearch`) passe par `record_solution` qui informe d'abord
  * le serveur.
  *
  * @param poss            Paquet à vérifier.
