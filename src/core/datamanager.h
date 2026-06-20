@@ -79,6 +79,20 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread);
 void send_possibility_analysed(client_possibility_t *client_possibility);
 
 /**
+ * @brief Signale une solution complète au serveur (instruction INST_SOLUTION).
+ *
+ * Envoie le paquet solution sur le socket TCP du thread client, sous
+ * `socket_mutex`, et attend l'acquittement `INST_CONSIDERED`. Sans serveur
+ * configuré (mode local) ou si la connexion échoue, journalise et renvoie -1
+ * sans bloquer : la solution reste sauvegardée localement par `log_solution`.
+ *
+ * @param client_possibility Contexte du thread client (socket vers le serveur).
+ * @param possibility        Paquet solution à transmettre.
+ * @return                   0 si le serveur a acquitté, -1 sinon.
+ */
+int send_solution(client_possibility_t *client_possibility, struct possibility_packet *possibility);
+
+/**
  * @brief Retire une possibilité de la file des analyses en cours.
  *
  * Parcourt les files d'analyse en cherchant le paquet correspondant et le supprime.

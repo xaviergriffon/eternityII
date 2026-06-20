@@ -537,10 +537,42 @@ int save_possibility(char *filename, struct possibility_packet *possibility)
 }
 
 /**
+ * @brief Affiche la grille solution dans la console et la sauvegarde sur disque.
+ *
+ * Émet l'événement « SOLUTION FOUND », journalise chaque pièce placée puis écrit
+ * le fichier solution (`./solution_<pid>`). NE quitte PAS le processus : la
+ * notification éventuelle du serveur et l'arrêt restent à la charge de
+ * l'appelant (cf. `checkIfResultFound` pour les chemins sans contexte client).
+ *
+ * @param poss            Paquet solution (toutes les pièces placées).
+ * @param all_rotate_part Tableau de toutes les rotations (pour affichage).
+ */
+void log_solution(struct possibility_packet *poss, struct array_part *all_rotate_part) {
+    log_info("fin de la boucle à %i \n", poss->alloc);
+    log_event("SOLUTION FOUND! (%i pieces) - saved to ./solution_%i", poss->alloc, getpid());
+    for(int x = 0; x < ETERN_SIZE; x++)
+    {
+        for(int y=0;y < ETERN_SIZE; y++)
+        {
+            struct part *part = &all_rotate_part->parts[poss->grid[x][y]];
+            log_info("%i;%i; ",x,y);
+            print_part(part);
+        }
+    }
+    char *fileName = calloc(100, sizeof(char));
+    sprintf(fileName, "./solution_%i", getpid());
+    save_possibility(fileName, poss);
+    free(fileName);
+}
+
+/**
  * @brief Vérifie si toutes les 256 pièces sont placées et traite la solution trouvée.
  *
- * Si `alloc >= ETERN_PARTS`, affiche la grille, sauvegarde le fichier solution
- * (`./solution_<pid>`) et termine le processus avec EXIT_SUCCESS.
+ * Si `alloc >= ETERN_PARTS`, affiche/sauvegarde la grille (`log_solution`) et
+ * termine le processus avec EXIT_SUCCESS. Utilisé par les chemins de recherche
+ * sans contexte client (donc sans notification possible du serveur). Le chemin
+ * de production (`autosearch`) passe par `report_solution` qui informe d'abord
+ * le serveur.
  *
  * @param poss            Paquet à vérifier.
  * @param all_rotate_part Tableau de toutes les rotations (pour affichage).
@@ -548,21 +580,7 @@ int save_possibility(char *filename, struct possibility_packet *possibility)
 void checkIfResultFound(struct possibility_packet *poss, struct array_part *all_rotate_part) {
     if(poss->alloc >= ETERN_PARTS)
     {
-        log_info("fin de la boucle à %i \n", poss->alloc);
-        log_event("SOLUTION FOUND! (%i pieces) - saved to ./solution_%i", poss->alloc, getpid());
-        for(int x = 0; x < ETERN_SIZE; x++)
-        {
-            for(int y=0;y < ETERN_SIZE; y++)
-            {
-                struct part *part = &all_rotate_part->parts[poss->grid[x][y]];
-                log_info("%i;%i; ",x,y);
-                print_part(part);
-            }
-        }
-        char *fileName = calloc(100, sizeof(char));
-        sprintf(fileName, "./solution_%i", getpid());
-        save_possibility(fileName, poss);
-        free(fileName);
+        log_solution(poss, all_rotate_part);
         // Sortie immédiate. NE PAS positionner request=STOP ici : cela
         // réveillerait les threads auxiliaires (alimentation/contrôle), qui
         // écriraient dans les flux stdio au moment où exit() les vide (sortie

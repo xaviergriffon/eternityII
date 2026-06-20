@@ -263,6 +263,28 @@ static unsigned long long bt_count_pending(const struct possibility_packet *boar
 }
 
 /**
+ * @brief Traite une solution complète trouvée par un thread de recherche.
+ *
+ * Ordre voulu :
+ *   1. `log_solution` : affiche la grille (routée vers la console du parent) et
+ *      écrit le fichier solution local.
+ *   2. `send_solution` : signale la solution au serveur via TCP (synchrone,
+ *      acquittée). Ce passage bloquant joue aussi le rôle de barrière : il laisse
+ *      au processus parent le temps de vider les datagrammes IPC de l'étape 1
+ *      (dont l'événement « SOLUTION FOUND ») avant que ce processus ne disparaisse.
+ *   3. `exit` : sortie franche, comme `checkIfResultFound`.
+ *
+ * @param client Contexte du thread (socket serveur + table des rotations).
+ * @param poss   Paquet solution (toutes les pièces placées).
+ */
+static void report_solution(client_possibility_t *client, struct possibility_packet *poss)
+{
+    log_solution(poss, client->all_rotate_part);
+    send_solution(client, poss);
+    exit(EXIT_SUCCESS);
+}
+
+/**
  * @brief Matérialise en paquets les frères non explorés de la pile, du plus profond vers la racine.
  *
  * Reconstruit l'état du plateau à chaque niveau (annulation progressive des
@@ -331,8 +353,8 @@ static int bt_materialize_pending(client_possibility_t *client,
                 BOARD_SET_FACE(pkt, position, 1);
                 pkt->alloc = d + 1;
                 if (pkt->alloc >= ETERN_PARTS) {
-                    // Solution complète : sauvegarde et quitte le processus
-                    checkIfResultFound(pkt, client->all_rotate_part);
+                    // Solution complète : signale au serveur, sauvegarde, quitte
+                    report_solution(client, pkt);
                 }
                 pkt->x = dirx[d + 1];
                 pkt->y = diry[d + 1];
@@ -500,8 +522,8 @@ static int search_packet_backtracking(client_possibility_t *client,
 
         if (depth >= ETERN_PARTS) {
             board.alloc = depth;
-            // Toutes les pièces sont placées : sauvegarde et quitte le processus
-            checkIfResultFound(&board, client->all_rotate_part);
+            // Toutes les pièces sont placées : signale au serveur, sauvegarde, quitte
+            report_solution(client, &board);
         }
 
         if (request != REQUEST_CONTINUE) {
@@ -974,7 +996,7 @@ void *autoprune_gpu (void *userdata)
                         // Plateau complété par placements forcés : solution trouvée
                         if (pk->alloc >= ETERN_PARTS)
                         {
-                            checkIfResultFound(pk, client->all_rotate_part);
+                            report_solution(client, pk);
                         }
                         pruner_checked++;
                         array_possibility_packet *alivearr = build_single_array_possibility_packet(pk);

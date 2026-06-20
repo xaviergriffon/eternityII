@@ -162,6 +162,7 @@ void *check_server(void *param)
  * - INST_GET : envoie une possibilité depuis le datamanager au client.
  * - INST_ADD : reçoit une possibilité du client et l'ajoute au datamanager.
  * - INST_POSSIBILITY_ANALYSED : signale qu'une possibilité a été traitée.
+ * - INST_SOLUTION : reçoit une solution complète, l'affiche et la sauvegarde.
  * - INST_TEST_CONNECTED : répond pour maintenir la connexion.
  * À la déconnexion, remet les dernières possibilités envoyées dans le datamanager.
  *
@@ -376,6 +377,25 @@ void *communicate_with_client (void *userdata)
                 send_instruction(client->socket_id, INST_ERROR);
                 break;
             }
+        } else if (instruction == INST_SOLUTION && version_supported == 1) {
+            // Un client a trouvé une solution complète : on la reçoit, on
+            // l'affiche de façon visible (événement + journal) et on la
+            // sauvegarde côté serveur, puis on acquitte.
+            struct possibility_packet *sol = malloc(sizeof(struct possibility_packet));
+            if (recv_all(client->socket_id, sol, sizeof(struct possibility_packet))
+                    == (long)sizeof(struct possibility_packet)) {
+                log_event("SOLUTION reçue d'un client (%i pièces placées)", sol->alloc);
+                log_info("*** SOLUTION reçue d'un client (%i pièces) ***\n", sol->alloc);
+                char fileName[64];
+                snprintf(fileName, sizeof fileName, "./solution_server_%i", (int)getpid());
+                save_possibility(fileName, sol);
+                log_info("solution sauvegardée dans %s\n", fileName);
+                send_instruction(client->socket_id, INST_CONSIDERED);
+            } else {
+                log_error("réception de la solution incomplète\n");
+                send_instruction(client->socket_id, INST_ERROR);
+            }
+            free(sol);
         } else if (instruction == INST_TEST_CONNECTED) {
             send_instruction(client->socket_id, INST_TEST_CONNECTED);
         } else if (version_supported == 0) {
