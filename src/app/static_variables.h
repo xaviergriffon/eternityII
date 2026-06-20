@@ -16,6 +16,14 @@
 #define MICRO_SHORT_SLEEP 10
 // Temps d'attente pour les boucles de threads
 #define THREAD_MICRO_SLEEP 10000
+// Back-off du thread d'alimentation quand le serveur n'a AUCUNE possibilité à
+// fournir (stock épuisé, ou serveur saturé qui ne répond pas au handshake) : au
+// lieu de redemander toutes les THREAD_MICRO_SLEEP (≈ 100 req/s/thread, ce qui
+// alimente la contention « all threads busy »), on attend de plus en plus
+// longtemps (doublement) jusqu'à un plafond, puis on repart à zéro dès qu'un
+// travail est obtenu. Bornes en microsecondes.
+#define NO_WORK_SLEEP_START 50000    // 50 ms : première pause après un cycle à vide
+#define NO_WORK_SLEEP_MAX  500000    // 0,5 s : plafond (sous la limite usleep POSIX de 1 s)
 #define MAX_STOCK_BY_THREAD 300
 // Intervalle minimal entre deux délégations de possibilités au serveur (ms).
 // Une délégation coûte jusqu'à max_stock_by_thread aller-retours TCP synchrones

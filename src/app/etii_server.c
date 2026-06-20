@@ -605,6 +605,7 @@ void runserver(const char* file)
         setsockopt(client_id, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(struct timeval));
         
         thread_id = -1;
+        int busy_logged = 0; /* « all threads busy » : journalisé une seule fois par épisode d'attente */
         while (thread_id == -1) {
             /* recherche d'un thread libre */
             int t = 0;
@@ -619,7 +620,7 @@ void runserver(const char* file)
                     break;
                 }
             }
-            
+
             int nbCreated = 0;
             // A chaque affectation, on vérifie les threads pour en regéréner 1 si besoin
             // et affecter directement le client si il ne l'a pas été.
@@ -639,7 +640,17 @@ void runserver(const char* file)
                 }
             }
             if (thread_id == -1 && nbCreated == 0) {
-                log_event("request unfulfilled: all threads busy");
+                // Tous les threads sont occupés et aucun slot libre : on attend
+                // qu'un thread se libère. SANS pause, cette boucle tournait à
+                // plein régime (des dizaines de milliers de tours/seconde),
+                // saturant un cœur et noyant les logs du même message. On log
+                // l'épisode UNE fois, puis on cède le CPU le temps qu'un thread
+                // de communication termine sa session.
+                if (!busy_logged) {
+                    log_event("request unfulfilled: all threads busy (NB_THREADS=%i) — attente d'un thread libre", NB_THREADS);
+                    busy_logged = 1;
+                }
+                usleep(MICRO_SLEEP);
             }
         }
     }
