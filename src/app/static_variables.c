@@ -1,5 +1,6 @@
 #include "app/static_variables.h"
 #include <stdio.h>
+#include <string.h>
 
 #if ETERN_PARTS == 256
 
@@ -147,3 +148,16 @@ int fork_checker_socket_id = -1;
 int server = 0;
 
 int server_rmnonext_timing = 30;
+
+int parse_cli_options(int argc, const char *argv[])
+{
+    int w = 0;
+    for (int r = 0; r < argc; r++) {
+        if (strcmp(argv[r], "--stop-on-solution") == 0) {
+            stop_on_solution = 1;
+        } else {
+            argv[w++] = argv[r];
+        }
+    }
+    return w;
+}

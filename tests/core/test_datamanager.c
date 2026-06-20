@@ -443,9 +443,37 @@ TEST remove_no_next_prunes_dead_packets(void)
     PASS();
 }
 
+/* send_solution : en mode local (pas de serveur), doit renvoyer -1 sans toucher
+   au réseau ni planter — la solution reste sauvegardée localement par ailleurs.
+   Régression liée au signalement des solutions au serveur. */
+TEST send_solution_without_client_is_local_noop(void)
+{
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = ETERN_PARTS;
+    ASSERT_EQ_FMT(-1, send_solution(NULL, &pkt), "%d");
+    PASS();
+}
+
+TEST send_solution_without_server_configured_returns_error(void)
+{
+    set_server_ip(NULL);                 /* aucun serveur configuré (mode test/auto) */
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = ETERN_PARTS;
+    /* Le garde server_ip==NULL renvoie -1 AVANT tout lock/connexion : le client
+       zéro-initialisé (mutex non initialisé) n'est jamais déréférencé. */
+    ASSERT_EQ_FMT(-1, send_solution(&client, &pkt), "%d");
+    PASS();
+}
+
 SUITE(datamanager_suite)
 {
     RUN_TEST(server_ip_round_trip);
+    RUN_TEST(send_solution_without_client_is_local_noop);
+    RUN_TEST(send_solution_without_server_configured_returns_error);
     RUN_TEST(add_increases_datas_size);
     RUN_TEST(get_last_possibility_drains_pool);
     RUN_TEST(search_min_datas_finds_minimum);

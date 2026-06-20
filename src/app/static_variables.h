@@ -244,4 +244,17 @@ extern int tcp_timeout;
 extern int server;
 
 extern int server_rmnonext_timing;
+
+/**
+ * @brief Extrait les options globales de `argv` et les retire du tableau.
+ *
+ * Reconnaît `--stop-on-solution` (positionne `stop_on_solution`). Compacte
+ * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
+ * le parsing positionnel des modes. Appelée AVANT tout fork.
+ *
+ * @param argc Nombre d'arguments.
+ * @param argv Tableau d'arguments (modifié en place : options retirées).
+ * @return     Le nouveau nombre d'arguments (sans les options reconnues).
+ */
+int parse_cli_options(int argc, const char *argv[]);
 #endif /* static_variables_h */

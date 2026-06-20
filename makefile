@@ -159,7 +159,8 @@ TEST_BIN     := tests/run_tests
 TEST_SRCS    := tests/test_main.c \
                 tests/core/test_lifo.c tests/core/test_part.c tests/core/test_readdata.c tests/core/test_possibility.c tests/core/test_etii_search.c tests/core/test_datamanager.c \
                 tests/net/test_etii_protocol.c tests/net/test_local_socket.c tests/net/test_tcp.c \
-                tests/ui/test_command_history.c tests/ui/test_command_match.c tests/ui/test_command_lines.c tests/ui/test_console.c tests/ui/test_logger.c
+                tests/ui/test_command_history.c tests/ui/test_command_match.c tests/ui/test_command_lines.c tests/ui/test_console.c tests/ui/test_logger.c \
+                tests/app/test_static_variables.c
 # Modules de production exercés + leurs dépendances de link transitives.
 # tcpclient.c fournit le vrai create_tcp_client (plus de stub) ; tcpserver.c et
 # local_socket.c sont désormais exercés directement (boucle locale / IPC AF_UNIX).

@@ -45,20 +45,11 @@ int main(int argc, const char *argv[]) {
     parent_pid = getpid();
     log_info("Version %i", version);
 
-    // Option position-indépendante --stop-on-solution : on la retire de argv
-    // (compactage en place) pour ne pas perturber le parsing positionnel des
-    // modes, et on la lit AVANT tout fork → héritée par les process de recherche.
-    {
-        int w = 0;
-        for (int r = 0; r < argc; r++) {
-            if (strcmp(argv[r], "--stop-on-solution") == 0) {
-                stop_on_solution = 1;
-            } else {
-                argv[w++] = argv[r];
-            }
-        }
-        argc = w;
-    }
+    // Options position-indépendantes (ex. --stop-on-solution) : retirées de argv
+    // pour ne pas perturber le parsing positionnel des modes, et lues AVANT tout
+    // fork → héritées par les process de recherche enfants. Logique extraite
+    // (testée unitairement, cf. tests/app/test_static_variables.c).
+    argc = parse_cli_options(argc, argv);
     if (stop_on_solution) {
         log_info("option : arrêt à la première solution activé (--stop-on-solution)\n");
     }
