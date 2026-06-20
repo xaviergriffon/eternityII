@@ -766,7 +766,9 @@ TEST search_light_skips_prefilled_cell(void)
 
 /* --------------------------------------------------------------------------
  * forward_check_next_k : élagage des branches mortes
+ * Ces tests requièrent FORWARD_CHECK_K > 0 (fonction absente sinon).
  * ------------------------------------------------------------------------ */
+#if FORWARD_CHECK_K > 0
 
 /* Une case libre sans aucune pièce candidate -> branche morte (0). */
 TEST forward_check_detects_dead_cell(void)
@@ -809,6 +811,7 @@ TEST forward_check_passes_when_cells_filled(void)
 
 /* --------------------------------------------------------------------------
  * search_possiblity_light_with_big_table : expansion + forward-check
+ * Ce test vérifie l'élagage FK → ne s'applique qu'avec FORWARD_CHECK_K > 0.
  * ------------------------------------------------------------------------ */
 
 /* Les pièces coins placées laissent des cases aval sans candidat : le
@@ -845,6 +848,8 @@ TEST search_big_table_prunes_dead_branches(void)
     free(p);
     PASS();
 }
+
+#endif /* FORWARD_CHECK_K > 0 */
 
 /* --------------------------------------------------------------------------
  * what_search_to_key : variante écrivant la clé, voisins vides encodés en -1
@@ -977,9 +982,11 @@ SUITE(possibility_suite)
     RUN_TEST(possibility_has_a_next_finds_and_excludes_used);
     RUN_TEST(search_light_expands_one_per_candidate);
     RUN_TEST(search_light_skips_prefilled_cell);
+#if FORWARD_CHECK_K > 0
     RUN_TEST(forward_check_detects_dead_cell);
     RUN_TEST(forward_check_passes_when_cells_filled);
     RUN_TEST(search_big_table_prunes_dead_branches);
+#endif
     RUN_TEST(what_search_to_key_empty_and_placed_neighbor);
     RUN_TEST(print_possibility_packet_runs);
     RUN_TEST(all_has_a_next_all_filled_returns_one);

@@ -144,7 +144,7 @@ clean:
 	rm -f eternityII16
 	rm -f $(TEST_BIN) $(TEST_BIN_16)
 	rm -f $(SOLUTION16_H)
-	rm -rf $(COV_DIR) $(COV_DIR_16)
+	rm -rf $(COV_DIR) $(COV_DIR_16) $(COV_DIR_FK0) $(COV_DIR_DEBUG)
 	rm -f *.gcov *.gcno *.gcda
 
 # ---------------------------------------------------------------------------
@@ -253,6 +253,8 @@ test-integration:
 # ---------------------------------------------------------------------------
 COV_DIR            := tests/coverage
 COV_DIR_16         := tests/coverage-16
+COV_DIR_FK0        := tests/coverage-fk0
+COV_DIR_DEBUG      := tests/coverage-debug
 COV_CFLAGS         := -Wall -std=gnu99 -O0 -g -Isrc -Itests
 # Couverture honnête sur TOUT le code de production : on instrumente chaque
 # module du build par défaut (un .gcno par fichier). Ceux que les tests
@@ -335,6 +337,50 @@ coverage-16: $(SOLUTION16_H)
 	@mv -f *.gcov $(COV_DIR_16)/ 2>/dev/null || true
 	@echo "Passe 16 instrumentée : $(COV_DIR_16)/"
 
+# Passe FK=0 : ETERN_PARTS=16 + FORWARD_CHECK_K=0 → couvre les branches
+# #if FORWARD_CHECK_K > 0 absentes de la passe 256 et de la passe 16 standard.
+.PHONY: coverage-fk0
+coverage-fk0: $(SOLUTION16_H)
+	@mkdir -p $(COV_DIR_FK0)
+	@rm -f $(COV_DIR_FK0)/*.gcda
+	@for src in $(COV_ALL_MODULES) $(TEST_SRCS_16); do \
+		gcc $(COV_CFLAGS) -DETERN_PARTS=16 -DFORWARD_CHECK_K=0 --coverage -pthread -c $$src \
+			-o $(COV_DIR_FK0)/`basename $${src%.c}`.o || exit 1; \
+	done
+	@gcc $(COV_CFLAGS) -DETERN_PARTS=16 -DFORWARD_CHECK_K=0 --coverage -pthread \
+		$(addprefix $(COV_DIR_FK0)/,$(notdir $(TEST_SRCS_16:.c=.o))) \
+		$(addprefix $(COV_DIR_FK0)/,$(notdir $(COV_LINK_MODULES:.c=.o))) \
+		-lm -o $(COV_DIR_FK0)/run_tests
+	@./$(COV_DIR_FK0)/run_tests
+	@gcov -o $(COV_DIR_FK0) $(COV_ALL_MODULES) >/dev/null 2>&1 || true
+	@mv -f *.gcov $(COV_DIR_FK0)/ 2>/dev/null || true
+	@echo "Passe FK=0 instrumentée : $(COV_DIR_FK0)/"
+
+# Passe DEBUG : ETERN_PARTS=16 + tous les flags DEBUG_* → couvre les traces
+# #ifdef conditionnelles jamais compilées par le build standard. Réutilise les
+# mêmes defines que le job debug-build CI (compile-check) mais les fait tourner.
+DEBUG_CPPFLAGS := -DETERN_PARTS=16 \
+	-DDEBUG_CHECK_POSSIBILITY -DDEBUG_RM_NO_NEXT -DDEBUG_SOCKET \
+	-DDEBUG_SIGNAL -DDEBUG_LOCAL_SOCKET -DDEBUG_IN_MONO_PROCESS \
+	-DDEBUG_COMMANDS -DDEBUG_THREAD
+
+.PHONY: coverage-debug
+coverage-debug: $(SOLUTION16_H)
+	@mkdir -p $(COV_DIR_DEBUG)
+	@rm -f $(COV_DIR_DEBUG)/*.gcda
+	@for src in $(COV_ALL_MODULES) $(TEST_SRCS_16); do \
+		gcc $(COV_CFLAGS) $(DEBUG_CPPFLAGS) --coverage -pthread -c $$src \
+			-o $(COV_DIR_DEBUG)/`basename $${src%.c}`.o || exit 1; \
+	done
+	@gcc $(COV_CFLAGS) $(DEBUG_CPPFLAGS) --coverage -pthread \
+		$(addprefix $(COV_DIR_DEBUG)/,$(notdir $(TEST_SRCS_16:.c=.o))) \
+		$(addprefix $(COV_DIR_DEBUG)/,$(notdir $(COV_LINK_MODULES:.c=.o))) \
+		-lm -o $(COV_DIR_DEBUG)/run_tests
+	@./$(COV_DIR_DEBUG)/run_tests
+	@gcov -o $(COV_DIR_DEBUG) $(COV_ALL_MODULES) >/dev/null 2>&1 || true
+	@mv -f *.gcov $(COV_DIR_DEBUG)/ 2>/dev/null || true
+	@echo "Passe DEBUG instrumentée : $(COV_DIR_DEBUG)/"
+
 # ---------------------------------------------------------------------------
 # Rapports gcovr : Cobertura XML (Codecov), HTML navigable et résumé Markdown
 # (Job Summary + commentaire de PR), en un seul passage.
@@ -356,12 +402,12 @@ ifeq ($(detected_OS),Darwin)
 	GCOVR := gcovr --gcov-executable "$(shell xcrun --find llvm-cov) gcov"
 endif
 
-# Fusionne les DEUX passes (256 + 16) : gcovr agrège les compteurs par ligne
-# source sur les deux dossiers -> un seul rapport = union des lignes couvertes.
+# Fusionne les QUATRE passes (256, 16, FK=0, DEBUG) : gcovr agrège les compteurs
+# par ligne source sur tous les dossiers → union des lignes couvertes.
 .PHONY: coverage-report
-coverage-report: coverage coverage-16
+coverage-report: coverage coverage-16 coverage-fk0 coverage-debug
 	@mkdir -p $(COV_HTML)
-	$(GCOVR) --root . $(COV_FILTER) $(COV_DIR) $(COV_DIR_16) \
+	$(GCOVR) --root . $(COV_FILTER) $(COV_DIR) $(COV_DIR_16) $(COV_DIR_FK0) $(COV_DIR_DEBUG) \
 		--txt \
 		--cobertura $(COV_XML) \
 		--html-details $(COV_HTML)/index.html \
