@@ -3,8 +3,6 @@
 
 #include <stdint.h>
 
-#include "core/packed.h"
-
 #define PART_NONE -1
 #define PART_TOP 0
 #define PART_RIGHT 1

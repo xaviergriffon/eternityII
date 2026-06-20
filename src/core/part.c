@@ -7,7 +7,6 @@
 #include "app/static_variables.h"
 
 #include "ui/logger.h"
-#include "core/readdata.h"
 
 int error = 0;
 int relocated = 0;

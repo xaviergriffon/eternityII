@@ -6,7 +6,6 @@
 #include <pthread.h>
 
 #include "ui/logger.h"
-#include "app/static_variables.h"
 #include "ui/command_lines.h"
 
 #define EXIT_CMD "exit"

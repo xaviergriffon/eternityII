@@ -3,11 +3,11 @@
 
 #include <pthread.h>
 #include <unistd.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <errno.h>
-#include <time.h>
 
 #include "ui/logger.h"
 #include "app/static_variables.h"

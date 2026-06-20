@@ -118,28 +118,6 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 }
 
 /**
- * @brief Chiffre un paquet pour l'envoi réseau. (Non implémenté)
- * @param packet Paquet source.
- * @return       NULL (non implémenté).
- */
-struct possibility_packet *crypt_to_network(struct possibility_packet *packet)
-{
-	(void)packet;
-	return NULL;
-}
-
-/**
- * @brief Déchiffre un paquet reçu du réseau. (Non implémenté)
- * @param packet Paquet source.
- * @return       NULL (non implémenté).
- */
-struct possibility_packet *decrypt_from_network(struct possibility_packet *packet)
-{
-	(void)packet;
-	return NULL;
-}
-
-/**
  * @brief Calcule la clé de recherche pour une case (x, y) quelconque de la grille.
  *
  * Variante de `what_search_to_key2` qui prend des coordonnées explicites au lieu
