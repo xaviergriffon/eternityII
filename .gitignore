@@ -2,12 +2,19 @@
 .DS_Store
 eternityII.xcodeproj/project.xcworkspace/xcuserdata/xaviergriffon.xcuserdatad/UserInterfaceState.xcuserstate
 eternityII
+eternityII16
 build/
 *.back
 *.log
+solution_*
 tests/run_tests
 tests/run_tests.dSYM/
+tests/run_tests_16
+tests/run_tests_16.dSYM/
 tests/coverage/
+tests/coverage-16/
+# Tableau C généré au build depuis solution16.json (jamais commité).
+tests/fixtures/solution16.h
 *.gcov
 *.gcno
 *.gcda

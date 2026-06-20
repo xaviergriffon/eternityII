@@ -143,7 +143,9 @@ TEST check_possibility_alloc_exceeds_faceused_is_minus_five(void)
     PASS();
 }
 
-/* Paquet zéro (grid[7][8] == 0) : viole l'ancrage de la pièce genèse 139 r2. */
+#if ETERN_PARTS == 256
+/* Paquet zéro (grid[7][8] == 0) : viole l'ancrage de la pièce genèse 139 r2.
+   L'ancrage genèse n'existe qu'en puzzle 256 (cf. #if dans check_possibility). */
 TEST check_possibility_missing_genesis_anchor_is_minus_six(void)
 {
     struct array_part *rp = make_dummy_rotate_parts();
@@ -166,6 +168,7 @@ TEST check_possibility_valid_genesis_is_zero(void)
     free_array_part(rp);
     PASS();
 }
+#endif /* ETERN_PARTS == 256 */
 
 /* --------------------------------------------------------------------------
  * compare_possibility : première différence rencontrée
@@ -194,8 +197,8 @@ TEST compare_possibility_detects_each_difference(void)
     ASSERT_EQ_FMT(-4, compare_possibility(a, b), "%d");
     set_face_used(b->b_faceused, 5, 0);
 
-    /* grille différente -> -5 */
-    b->grid[3][4] = 42;
+    /* grille différente -> -5 (case (2,3) : valide en 4×4 comme en 16×16) */
+    b->grid[2][3] = 42;
     ASSERT_EQ_FMT(-5, compare_possibility(a, b), "%d");
 
     /* gestion du NULL : un seul NULL -> 0, deux NULL -> -1 */
@@ -548,11 +551,12 @@ TEST what_search_in_grid_to_key_arbitrary_cell(void)
     for (int x = 0; x < ETERN_SIZE; x++)
         for (int y = 0; y < ETERN_SIZE; y++)
             p->grid[x][y] = -2;
-    /* place un voisin sous la case (5,5) : grid[5][6] index 1, son top = 4 -> k3 */
-    p->grid[5][6] = 1;
+    /* place un voisin sous la case (1,1) : grid[1][2] index 1, son top = 4 -> k3
+       (coordonnées valides en 4×4 comme en 16×16) */
+    p->grid[1][2] = 1;
 
     key_part k;
-    what_search_in_grid_to_key(&rp, p, 5, 5, &k, 7);
+    what_search_in_grid_to_key(&rp, p, 1, 1, &k, 7);
     ASSERT_EQ_FMT(7, (int)k.k1, "%d"); /* TOP vide -> all_face */
     ASSERT_EQ_FMT(4, (int)k.k3, "%d"); /* BOTTOM = top du voisin du dessous */
 
@@ -892,8 +896,10 @@ SUITE(possibility_suite)
     RUN_TEST(check_possibility_out_of_bounds_is_minus_two);
     RUN_TEST(check_possibility_alloc_too_large_is_minus_four);
     RUN_TEST(check_possibility_alloc_exceeds_faceused_is_minus_five);
+#if ETERN_PARTS == 256
     RUN_TEST(check_possibility_missing_genesis_anchor_is_minus_six);
     RUN_TEST(check_possibility_valid_genesis_is_zero);
+#endif
     RUN_TEST(compare_possibility_detects_each_difference);
     RUN_TEST(is_origin_of_recognizes_prefix);
     RUN_TEST(build_single_array_wraps_one_packet);

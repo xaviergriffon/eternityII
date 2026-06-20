@@ -141,8 +141,9 @@ clean:
 	rm -rf $(BUILD_DIR)
 	rm -f $(EXECUTABLE)
 	rm -f eternityII16
-	rm -f $(TEST_BIN)
-	rm -rf $(COV_DIR)
+	rm -f $(TEST_BIN) $(TEST_BIN_16)
+	rm -f $(SOLUTION16_H)
+	rm -rf $(COV_DIR) $(COV_DIR_16)
 	rm -f *.gcov *.gcno *.gcda
 
 # ---------------------------------------------------------------------------
@@ -154,13 +155,31 @@ clean:
 # (non inliné sans optimisation) ; -pthread pour les mutex de logger.c.
 # ---------------------------------------------------------------------------
 TEST_BIN     := tests/run_tests
+TEST_BIN_16  := tests/run_tests_16
 # test_main.c (runner) + greatest.h/fork_assert.h restent à la racine de tests/ ;
 # les suites sont rangées par domaine, en miroir de src/.
-TEST_SRCS    := tests/test_main.c \
+# TEST_RUNNER : le point d'entrée greatest (commun aux deux binaires).
+# TEST_SUITES_COMMON : les suites indépendantes de ETERN_PARTS (jouées en 16 ET 256).
+# TEST_SOLUTION16 : la suite « solution réelle », valide UNIQUEMENT en build 16.
+TEST_RUNNER  := tests/test_main.c
+TEST_SUITES_COMMON := \
                 tests/core/test_lifo.c tests/core/test_part.c tests/core/test_readdata.c tests/core/test_possibility.c tests/core/test_etii_search.c tests/core/test_datamanager.c \
                 tests/net/test_etii_protocol.c tests/net/test_local_socket.c tests/net/test_tcp.c \
                 tests/ui/test_command_history.c tests/ui/test_command_match.c tests/ui/test_command_lines.c tests/ui/test_console.c tests/ui/test_logger.c \
                 tests/app/test_static_variables.c
+TEST_SOLUTION16 := tests/core/test_solution16.c
+# Jeu 256 (secondaire) : runner + suites communes. Jeu 16 (principal) : + solution16.
+TEST_SRCS    := $(TEST_RUNNER) $(TEST_SUITES_COMMON)
+TEST_SRCS_16 := $(TEST_RUNNER) $(TEST_SUITES_COMMON) $(TEST_SOLUTION16)
+
+# Fixture « solution réelle » 4×4 : JSON figé (commité) -> tableau C (généré au
+# build par un script Python, jamais commité). Cf. tests/fixtures/.
+SOLUTION16_JSON := tests/fixtures/solution16.json
+SOLUTION16_H    := tests/fixtures/solution16.h
+GEN_SOLUTION16  := tests/fixtures/gen_solution16.py
+
+$(SOLUTION16_H): $(SOLUTION16_JSON) $(GEN_SOLUTION16)
+	python3 $(GEN_SOLUTION16) $(SOLUTION16_JSON) > $@
 # Modules de production exercés + leurs dépendances de link transitives.
 # tcpclient.c fournit le vrai create_tcp_client (plus de stub) ; tcpserver.c et
 # local_socket.c sont désormais exercés directement (boucle locale / IPC AF_UNIX).
@@ -180,8 +199,18 @@ else
     TEST_SANFLAGS :=
 endif
 
-.PHONY: test
-test:
+# `make test` = gate complet : binaire PRINCIPAL 16 (suites communes + solution16)
+# puis binaire SECONDAIRE 256 (suites communes, chemins gardés #if ETERN_PARTS==256).
+.PHONY: test test-16 test-256
+test: test-16 test-256
+
+# Binaire principal : ETERN_PARTS=16, où un plateau plein est exploitable.
+test-16: $(SOLUTION16_H)
+	gcc $(TEST_CFLAGS) -DETERN_PARTS=16 $(TEST_SANFLAGS) -pthread -o $(TEST_BIN_16) $(TEST_SRCS_16) $(TEST_MODULES) -lm
+	./$(TEST_BIN_16)
+
+# Binaire secondaire : build par défaut (256), suites communes uniquement.
+test-256:
 	gcc $(TEST_CFLAGS) $(TEST_SANFLAGS) -pthread -o $(TEST_BIN) $(TEST_SRCS) $(TEST_MODULES) -lm
 	./$(TEST_BIN)
 
@@ -217,6 +246,7 @@ test-integration:
 # sont marquées '#####'. Rapport HTML optionnel via lcov : voir tests/README.md.
 # ---------------------------------------------------------------------------
 COV_DIR            := tests/coverage
+COV_DIR_16         := tests/coverage-16
 COV_CFLAGS         := -Wall -std=gnu99 -O0 -g -Isrc -Itests
 # Couverture honnête sur TOUT le code de production : on instrumente chaque
 # module du build par défaut (un .gcno par fichier). Ceux que les tests
@@ -261,6 +291,27 @@ coverage:
 	done
 	@echo "Détail annoté : $(COV_DIR)/<module>.c.gcov"
 
+# Passe 16 : même instrumentation mais en -DETERN_PARTS=16, sources = jeu 16
+# (suites communes + solution16). Artefacts confinés dans $(COV_DIR_16) pour que
+# gcovr puisse fusionner cette passe avec la passe 256 (lignes #if-exclusives à
+# chaque taille incluses dans l'union). Régénère d'abord le tableau C de la fixture.
+.PHONY: coverage-16
+coverage-16: $(SOLUTION16_H)
+	@mkdir -p $(COV_DIR_16)
+	@rm -f $(COV_DIR_16)/*.gcda
+	@for src in $(COV_ALL_MODULES) $(TEST_SRCS_16); do \
+		gcc $(COV_CFLAGS) -DETERN_PARTS=16 --coverage -pthread -c $$src \
+			-o $(COV_DIR_16)/`basename $${src%.c}`.o || exit 1; \
+	done
+	@gcc $(COV_CFLAGS) -DETERN_PARTS=16 --coverage -pthread \
+		$(addprefix $(COV_DIR_16)/,$(notdir $(TEST_SRCS_16:.c=.o))) \
+		$(addprefix $(COV_DIR_16)/,$(notdir $(COV_LINK_MODULES:.c=.o))) \
+		-lm -o $(COV_DIR_16)/run_tests
+	@./$(COV_DIR_16)/run_tests
+	@gcov -o $(COV_DIR_16) $(COV_ALL_MODULES) >/dev/null 2>&1 || true
+	@mv -f *.gcov $(COV_DIR_16)/ 2>/dev/null || true
+	@echo "Passe 16 instrumentée : $(COV_DIR_16)/"
+
 # ---------------------------------------------------------------------------
 # Rapports gcovr : Cobertura XML (Codecov), HTML navigable et résumé Markdown
 # (Job Summary + commentaire de PR), en un seul passage.
@@ -282,10 +333,12 @@ ifeq ($(detected_OS),Darwin)
 	GCOVR := gcovr --gcov-executable "$(shell xcrun --find llvm-cov) gcov"
 endif
 
+# Fusionne les DEUX passes (256 + 16) : gcovr agrège les compteurs par ligne
+# source sur les deux dossiers -> un seul rapport = union des lignes couvertes.
 .PHONY: coverage-report
-coverage-report: coverage
+coverage-report: coverage coverage-16
 	@mkdir -p $(COV_HTML)
-	$(GCOVR) --root . $(COV_FILTER) $(COV_DIR) \
+	$(GCOVR) --root . $(COV_FILTER) $(COV_DIR) $(COV_DIR_16) \
 		--txt \
 		--cobertura $(COV_XML) \
 		--html-details $(COV_HTML)/index.html \
