@@ -238,6 +238,39 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
 
 }
 
+int send_solution(client_possibility_t *client_possibility, struct possibility_packet *possibility)
+{
+	// Mode local (test/auto) : pas de serveur à prévenir. La solution reste
+	// sauvegardée localement par log_solution ; on ne signale rien.
+	if (client_possibility == NULL || server_ip == NULL) {
+		return -1;
+	}
+
+	// Échange réseau atomique : empêche l'entrelacement avec le thread d'alimentation.
+	pthread_mutex_lock(&client_possibility->socket_mutex);
+	int socket_id = check_and_connect_to_server(client_possibility);
+	if (socket_id == -1) {
+		pthread_mutex_unlock(&client_possibility->socket_mutex);
+		log_error("solution trouvée mais serveur injoignable pour la signaler\n");
+		return -1;
+	}
+
+	int rc = -1;
+	if (send_instruction(socket_id, INST_SOLUTION) > 0
+	    && send_all(socket_id, possibility, sizeof(*possibility)) == (long)sizeof(*possibility)) {
+		if (recv_instruction(socket_id) == INST_CONSIDERED) {
+			rc = 0;
+		} else {
+			log_error("le serveur n'a pas acquitté la solution\n");
+		}
+	} else {
+		log_errno("envoi de la solution au serveur a échoué => ");
+	}
+
+	pthread_mutex_unlock(&client_possibility->socket_mutex);
+	return rc;
+}
+
 /**
  * @brief Insère un tableau de possibilités dans les files locales (sans serveur).
  *

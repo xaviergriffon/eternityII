@@ -162,6 +162,7 @@ void *check_server(void *param)
  * - INST_GET : envoie une possibilité depuis le datamanager au client.
  * - INST_ADD : reçoit une possibilité du client et l'ajoute au datamanager.
  * - INST_POSSIBILITY_ANALYSED : signale qu'une possibilité a été traitée.
+ * - INST_SOLUTION : reçoit une solution complète, l'affiche et la sauvegarde.
  * - INST_TEST_CONNECTED : répond pour maintenir la connexion.
  * À la déconnexion, remet les dernières possibilités envoyées dans le datamanager.
  *
@@ -375,6 +376,51 @@ void *communicate_with_client (void *userdata)
             } else {
                 send_instruction(client->socket_id, INST_ERROR);
                 break;
+            }
+        } else if (instruction == INST_SOLUTION && version_supported == 1) {
+            // Un client a trouvé une solution complète : on la reçoit, on
+            // l'affiche de façon visible (événement + journal), on la sauvegarde
+            // côté serveur et on acquitte. Avec --stop-on-solution, on s'arrête
+            // ensuite en préservant le stock ; sinon on reste en service (les
+            // clients continuent d'explorer, d'autres solutions sont possibles).
+            struct possibility_packet *sol = malloc(sizeof(struct possibility_packet));
+            if (recv_all(client->socket_id, sol, sizeof(struct possibility_packet))
+                    == (long)sizeof(struct possibility_packet)) {
+                // Nom unique : <pid>_<seq> → plusieurs solutions ne s'écrasent pas.
+                static unsigned solution_seq = 0;
+                unsigned seq = __atomic_fetch_add(&solution_seq, 1, __ATOMIC_RELAXED);
+                char fileName[64];
+                snprintf(fileName, sizeof fileName, "./solution_server_%i_%u", (int)getpid(), seq);
+                log_event("SOLUTION reçue d'un client (%i pièces placées)", sol->alloc);
+                log_info("*** SOLUTION reçue d'un client (%i pièces) ***\n", sol->alloc);
+                save_possibility(fileName, sol);
+                log_info("solution sauvegardée dans %s\n", fileName);
+                send_instruction(client->socket_id, INST_CONSIDERED);
+                free(sol);
+
+                if (stop_on_solution) {
+                    // Garde un seul gagnant si deux clients signalent une
+                    // solution quasi simultanément.
+                    static volatile int solution_shutdown = 0;
+                    if (__atomic_test_and_set(&solution_shutdown, __ATOMIC_SEQ_CST) == 0) {
+                        request = REQUEST_STOP;
+                        // Sauvegarde du stock sous les noms par défaut de `restore`
+                        // (./eternityII.back, ./eternityII-in_analyse.back) : aucun
+                        // travail perdu, le serveur peut reprendre au redémarrage.
+                        backup("./eternityII.back");
+                        backup_analysed("./eternityII-in_analyse.back");
+                        log_event("serveur arrêté suite à la solution (stock sauvegardé)");
+                        log_info("serveur arrêté suite à la solution — stock sauvegardé\n");
+                        flush_info();
+                        exit(EXIT_SUCCESS);
+                    }
+                    break;
+                }
+                // Sinon : on continue à servir ce client.
+            } else {
+                log_error("réception de la solution incomplète\n");
+                send_instruction(client->socket_id, INST_ERROR);
+                free(sol);
             }
         } else if (instruction == INST_TEST_CONNECTED) {
             send_instruction(client->socket_id, INST_TEST_CONNECTED);

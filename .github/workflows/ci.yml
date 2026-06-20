@@ -115,6 +115,20 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
 
+  integration-test:
+    name: Test intégration client/serveur (16 pièces)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Scénario bout-en-bout : compile un binaire ETERN_PARTS=16, lance
+      # serveur + client. Le client résout le 4×4 et signale la solution
+      # (INST_SOLUTION) ; le serveur l'affiche, sauvegarde son stock (.back) et
+      # s'arrête. Le script vérifie que LES DEUX côtés ont le résultat, avec un
+      # timeout borné (jamais bloquant). pkill/mktemp/bash sont préinstallés.
+      - name: make test-integration
+        run: make test-integration
+
   ncurses-build:
     name: Build variante ncurses
     runs-on: ubuntu-latest

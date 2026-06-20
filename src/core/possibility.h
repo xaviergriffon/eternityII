@@ -140,6 +140,17 @@ void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility
 void what_search_in_grid_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, int8_t x, int8_t y, key_part *key, int8_t all_face);
 
 /**
+ * @brief Affiche et sauvegarde une solution complète (sans quitter le processus).
+ *
+ * Émet l'événement « SOLUTION FOUND », journalise la grille et écrit
+ * `./solution_<pid>`. L'appelant garde la main (notification serveur, arrêt…).
+ *
+ * @param poss            Paquet solution (toutes les pièces placées).
+ * @param all_rotate_part Tableau de toutes les rotations (pour l'affichage).
+ */
+void log_solution(struct possibility_packet *poss, struct array_part *all_rotate_part);
+
+/**
  * @brief Détecte si la grille est complète et sauvegarde la solution.
  *
  * Si `poss->alloc >= ETERN_PARTS`, affiche et sérialise la solution dans

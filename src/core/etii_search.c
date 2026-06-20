@@ -263,6 +263,32 @@ static unsigned long long bt_count_pending(const struct possibility_packet *boar
 }
 
 /**
+ * @brief Enregistre une solution complète trouvée par un thread de recherche.
+ *
+ * Toujours :
+ *   1. `log_solution` : affiche la grille (routée vers la console du parent) et
+ *      écrit un fichier solution unique.
+ *   2. `send_solution` : signale la solution au serveur via TCP (synchrone,
+ *      acquittée). Ce passage bloquant joue aussi le rôle de barrière : il laisse
+ *      au processus parent le temps de vider les datagrammes IPC de l'étape 1.
+ *
+ * Avec `--stop-on-solution`, on termine ensuite le processus (`exit`) ; sinon on
+ * rend la main à l'appelant, qui poursuit l'exploration pour trouver d'autres
+ * solutions.
+ *
+ * @param client Contexte du thread (socket serveur + table des rotations).
+ * @param poss   Paquet solution (toutes les pièces placées).
+ */
+static void record_solution(client_possibility_t *client, struct possibility_packet *poss)
+{
+    log_solution(poss, client->all_rotate_part);
+    send_solution(client, poss);
+    if (stop_on_solution) {
+        exit(EXIT_SUCCESS);
+    }
+}
+
+/**
  * @brief Matérialise en paquets les frères non explorés de la pile, du plus profond vers la racine.
  *
  * Reconstruit l'état du plateau à chaque niveau (annulation progressive des
@@ -331,8 +357,12 @@ static int bt_materialize_pending(client_possibility_t *client,
                 BOARD_SET_FACE(pkt, position, 1);
                 pkt->alloc = d + 1;
                 if (pkt->alloc >= ETERN_PARTS) {
-                    // Solution complète : sauvegarde et quitte le processus
-                    checkIfResultFound(pkt, client->all_rotate_part);
+                    // Solution complète parmi les frères : enregistre + signale.
+                    // Avec --stop-on-solution, record_solution ne revient pas.
+                    // Sinon on ne la matérialise pas (rien à explorer au-delà ;
+                    // dirx[d+1] serait hors borne) et on passe au candidat suivant.
+                    record_solution(client, pkt);
+                    continue;
                 }
                 pkt->x = dirx[d + 1];
                 pkt->y = diry[d + 1];
@@ -500,8 +530,13 @@ static int search_packet_backtracking(client_possibility_t *client,
 
         if (depth >= ETERN_PARTS) {
             board.alloc = depth;
-            // Toutes les pièces sont placées : sauvegarde et quitte le processus
-            checkIfResultFound(&board, client->all_rotate_part);
+            // Toutes les pièces sont placées : enregistre + signale au serveur.
+            // Avec --stop-on-solution, record_solution ne revient pas (exit).
+            // Sinon, on backtrack pour continuer à chercher d'autres solutions
+            // (saut direct dans la remontée : pas de niveau ETERN_PARTS à empiler,
+            // dirx/diry n'ont que ETERN_PARTS cases).
+            record_solution(client, &board);
+            goto backtrack;
         }
 
         if (request != REQUEST_CONTINUE) {
@@ -568,7 +603,11 @@ static int search_packet_backtracking(client_possibility_t *client,
 #endif // DEBUG_CHECK_POSSIBILITY
         stack[top].search = get_parts_bigarray_with_key(client->map_part, &constraints[x][y]);
 
-        // Place le prochain candidat du niveau courant, sinon remonte (backtrack)
+backtrack:;
+        // Place le prochain candidat du niveau courant, sinon remonte (backtrack).
+        // Atteint aussi par `goto` après une solution (mode « continuer ») : on
+        // repart du niveau courant, dont le placement gagnant sera annulé pour
+        // essayer le candidat suivant.
         int placed = 0;
         while (top >= 0) {
             bt_level *lvl = &stack[top];
@@ -971,10 +1010,14 @@ void *autoprune_gpu (void *userdata)
                     if (alive[a])
                     {
                         struct possibility_packet *pk = &client->aposs->possibilities[a];
-                        // Plateau complété par placements forcés : solution trouvée
+                        // Plateau complété par placements forcés : solution trouvée.
+                        // Avec --stop-on-solution, record_solution ne revient pas.
+                        // Sinon on l'enregistre et on ne la remet pas en circulation
+                        // (un plateau complet n'a plus rien à explorer).
                         if (pk->alloc >= ETERN_PARTS)
                         {
-                            checkIfResultFound(pk, client->all_rotate_part);
+                            record_solution(client, pk);
+                            continue;
                         }
                         pruner_checked++;
                         array_possibility_packet *alivearr = build_single_array_possibility_packet(pk);

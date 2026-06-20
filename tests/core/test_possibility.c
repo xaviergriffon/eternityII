@@ -68,6 +68,16 @@ static void child_save_unwritable(void)
     save_possibility(g_save_path, g_poss);
 }
 
+/* Fonction-fils : deux solutions consécutives dans un répertoire temporaire.
+   log_solution ne quitte PAS ; on revient et _exit(0). Le test vérifie ensuite
+   que deux fichiers distincts (solution_<pid>_0 et _1) ont été écrits. */
+static void child_two_solutions(void)
+{
+    if (chdir(g_solution_dir) != 0) _exit(99);
+    log_solution(g_poss, g_rot);
+    log_solution(g_poss, g_rot);
+}
+
 /* --------------------------------------------------------------------------
  * test_directions / decode_direction
  * ------------------------------------------------------------------------ */
@@ -402,15 +412,51 @@ TEST check_if_result_found_complete_exits_success(void)
     pid_t pid = 0;
     int code = run_in_fork(child_check_result_found, &pid);
 
-    /* Nettoyage du fichier solution confiné dans le répertoire temporaire. */
+    /* Nettoyage du fichier solution confiné dans le répertoire temporaire.
+       log_solution écrit un nom unique solution_<pid>_<seq> (seq=0 pour le 1er
+       et seul appel de ce fils fraîchement forké). */
     char sol[320];
-    snprintf(sol, sizeof(sol), "%s/solution_%d", g_solution_dir, (int)pid);
+    snprintf(sol, sizeof(sol), "%s/solution_%d_0", g_solution_dir, (int)pid);
     unlink(sol);
     rmdir(g_solution_dir);
 
     free(g_poss);
     free_array_part(g_rot);
     ASSERT_EQ_FMT(EXIT_SUCCESS, code, "%d");
+    PASS();
+}
+
+/* Régression : deux solutions trouvées par le même processus ne doivent PAS
+   s'écraser. log_solution numérote chaque fichier (solution_<pid>_<seq>). On
+   appelle log_solution deux fois dans un fils (process frais -> seq 0 puis 1) et
+   on vérifie que les DEUX fichiers existent et sont distincts. */
+TEST log_solution_writes_distinct_files_for_each_solution(void)
+{
+    strcpy(g_solution_dir, "/tmp/etii_sol2_XXXXXX");
+    ASSERT(mkdtemp(g_solution_dir) != NULL);
+
+    g_poss = new_zeroed_packet();
+    g_poss->alloc = ETERN_PARTS;
+    g_rot = make_dummy_rotate_parts();
+
+    pid_t pid = 0;
+    int code = run_in_fork(child_two_solutions, &pid);
+
+    char f0[320], f1[320];
+    snprintf(f0, sizeof(f0), "%s/solution_%d_0", g_solution_dir, (int)pid);
+    snprintf(f1, sizeof(f1), "%s/solution_%d_1", g_solution_dir, (int)pid);
+    int has0 = (access(f0, F_OK) == 0);
+    int has1 = (access(f1, F_OK) == 0);
+    unlink(f0);
+    unlink(f1);
+    rmdir(g_solution_dir);
+
+    free(g_poss);
+    free_array_part(g_rot);
+
+    ASSERT_EQ_FMT(0, code, "%d");   /* log_solution ne quitte pas : le fils revient */
+    ASSERT(has0);                   /* 1re solution écrite */
+    ASSERT(has1);                   /* 2e solution : nom distinct, aucun écrasement */
     PASS();
 }
 
@@ -858,6 +904,7 @@ SUITE(possibility_suite)
     RUN_TEST(save_possibility_unwritable_exits);
     RUN_TEST(check_if_result_found_below_complete_is_noop);
     RUN_TEST(check_if_result_found_complete_exits_success);
+    RUN_TEST(log_solution_writes_distinct_files_for_each_solution);
     RUN_TEST(what_search_corner_of_empty_board);
     RUN_TEST(what_search_reads_placed_neighbor);
     RUN_TEST(what_search_to_key2_uses_all_face_for_empty);

@@ -140,6 +140,7 @@ $(BUILD_DIR)/app/gpu_pruner.o: src/app/gpu_pruner.cu src/app/gpu_pruner.h src/co
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f $(EXECUTABLE)
+	rm -f eternityII16
 	rm -f $(TEST_BIN)
 	rm -rf $(COV_DIR)
 	rm -f *.gcov *.gcno *.gcda
@@ -158,7 +159,8 @@ TEST_BIN     := tests/run_tests
 TEST_SRCS    := tests/test_main.c \
                 tests/core/test_lifo.c tests/core/test_part.c tests/core/test_readdata.c tests/core/test_possibility.c tests/core/test_etii_search.c tests/core/test_datamanager.c \
                 tests/net/test_etii_protocol.c tests/net/test_local_socket.c tests/net/test_tcp.c \
-                tests/ui/test_command_history.c tests/ui/test_command_match.c tests/ui/test_command_lines.c tests/ui/test_console.c tests/ui/test_logger.c
+                tests/ui/test_command_history.c tests/ui/test_command_match.c tests/ui/test_command_lines.c tests/ui/test_console.c tests/ui/test_logger.c \
+                tests/app/test_static_variables.c
 # Modules de production exercés + leurs dépendances de link transitives.
 # tcpclient.c fournit le vrai create_tcp_client (plus de stub) ; tcpserver.c et
 # local_socket.c sont désormais exercés directement (boucle locale / IPC AF_UNIX).
@@ -182,6 +184,25 @@ endif
 test:
 	gcc $(TEST_CFLAGS) $(TEST_SANFLAGS) -pthread -o $(TEST_BIN) $(TEST_SRCS) $(TEST_MODULES) -lm
 	./$(TEST_BIN)
+
+# ---------------------------------------------------------------------------
+# Test d'intégration client/serveur (bout-en-bout) sur le puzzle 16 pièces.
+#
+# Compile un binaire dédié ETERN_PARTS=16 (le release nettoie build/ derrière
+# lui : pas d'objets parasites pour un `make` 256 ultérieur), puis lance le
+# scénario serveur+client de tests/integration/. Le client résout le 4×4,
+# signale la solution ; le serveur l'affiche, sauvegarde son stock et s'arrête.
+# Le script vérifie que les DEUX côtés ont le résultat, avec un timeout borné.
+# INTEGRATION_TIMEOUT (défaut 60s) surcharge le délai max.
+# ---------------------------------------------------------------------------
+INTEGRATION_BIN     := eternityII16
+INTEGRATION_TIMEOUT ?= 60
+.PHONY: test-integration
+test-integration:
+	$(MAKE) CPPFLAGS="-DETERN_PARTS=16" EXECUTABLE=$(INTEGRATION_BIN)
+	BIN=./$(INTEGRATION_BIN) DATA=data/pieces16.csv TIMEOUT=$(INTEGRATION_TIMEOUT) \
+		bash tests/integration/run_solution_16.sh; \
+		rc=$$?; rm -f ./$(INTEGRATION_BIN); exit $$rc
 
 # ---------------------------------------------------------------------------
 # Couverture de code (gcov, intégré à gcc/clang — aucune install requise).
