@@ -379,8 +379,8 @@ void *communicate_with_client (void *userdata)
             }
         } else if (instruction == INST_SOLUTION && version_supported == 1) {
             // Un client a trouvé une solution complète : on la reçoit, on
-            // l'affiche de façon visible (événement + journal) et on la
-            // sauvegarde côté serveur, puis on acquitte.
+            // l'affiche de façon visible (événement + journal), on la sauvegarde
+            // côté serveur, on acquitte, puis on s'arrête en préservant le stock.
             struct possibility_packet *sol = malloc(sizeof(struct possibility_packet));
             if (recv_all(client->socket_id, sol, sizeof(struct possibility_packet))
                     == (long)sizeof(struct possibility_packet)) {
@@ -391,11 +391,28 @@ void *communicate_with_client (void *userdata)
                 save_possibility(fileName, sol);
                 log_info("solution sauvegardée dans %s\n", fileName);
                 send_instruction(client->socket_id, INST_CONSIDERED);
+                free(sol);
+                // Arrêt du serveur sur solution. Garde un seul gagnant si deux
+                // clients signalent une solution quasi simultanément.
+                static volatile int solution_shutdown = 0;
+                if (__atomic_test_and_set(&solution_shutdown, __ATOMIC_SEQ_CST) == 0) {
+                    request = REQUEST_STOP;
+                    // Sauvegarde du stock sous les noms par défaut de `restore`
+                    // (./eternityII.back, ./eternityII-in_analyse.back) : aucun
+                    // travail perdu, le serveur peut reprendre au redémarrage.
+                    backup("./eternityII.back");
+                    backup_analysed("./eternityII-in_analyse.back");
+                    log_event("serveur arrêté suite à la solution (stock sauvegardé)");
+                    log_info("serveur arrêté suite à la solution — stock sauvegardé\n");
+                    flush_info();
+                    exit(EXIT_SUCCESS);
+                }
+                break;
             } else {
                 log_error("réception de la solution incomplète\n");
                 send_instruction(client->socket_id, INST_ERROR);
+                free(sol);
             }
-            free(sol);
         } else if (instruction == INST_TEST_CONNECTED) {
             send_instruction(client->socket_id, INST_TEST_CONNECTED);
         } else if (version_supported == 0) {

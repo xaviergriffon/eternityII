@@ -140,6 +140,7 @@ $(BUILD_DIR)/app/gpu_pruner.o: src/app/gpu_pruner.cu src/app/gpu_pruner.h src/co
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f $(EXECUTABLE)
+	rm -f eternityII16
 	rm -f $(TEST_BIN)
 	rm -rf $(COV_DIR)
 	rm -f *.gcov *.gcno *.gcda
@@ -182,6 +183,25 @@ endif
 test:
 	gcc $(TEST_CFLAGS) $(TEST_SANFLAGS) -pthread -o $(TEST_BIN) $(TEST_SRCS) $(TEST_MODULES) -lm
 	./$(TEST_BIN)
+
+# ---------------------------------------------------------------------------
+# Test d'intégration client/serveur (bout-en-bout) sur le puzzle 16 pièces.
+#
+# Compile un binaire dédié ETERN_PARTS=16 (le release nettoie build/ derrière
+# lui : pas d'objets parasites pour un `make` 256 ultérieur), puis lance le
+# scénario serveur+client de tests/integration/. Le client résout le 4×4,
+# signale la solution ; le serveur l'affiche, sauvegarde son stock et s'arrête.
+# Le script vérifie que les DEUX côtés ont le résultat, avec un timeout borné.
+# INTEGRATION_TIMEOUT (défaut 60s) surcharge le délai max.
+# ---------------------------------------------------------------------------
+INTEGRATION_BIN     := eternityII16
+INTEGRATION_TIMEOUT ?= 60
+.PHONY: test-integration
+test-integration:
+	$(MAKE) CPPFLAGS="-DETERN_PARTS=16" EXECUTABLE=$(INTEGRATION_BIN)
+	BIN=./$(INTEGRATION_BIN) DATA=data/pieces16.csv TIMEOUT=$(INTEGRATION_TIMEOUT) \
+		bash tests/integration/run_solution_16.sh; \
+		rc=$$?; rm -f ./$(INTEGRATION_BIN); exit $$rc
 
 # ---------------------------------------------------------------------------
 # Couverture de code (gcov, intégré à gcc/clang — aucune install requise).
