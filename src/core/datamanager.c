@@ -1,9 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <netdb.h> /* gethostbyname */
-#include <errno.h>
-#include <time.h>
+#include <netdb.h>
 
 #include "ui/logger.h"
 #include "app/static_variables.h"

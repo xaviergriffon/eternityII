@@ -1,5 +1,4 @@
 #include "app/static_variables.h"
-#include <stdio.h>
 #include <string.h>
 
 #if ETERN_PARTS == 256
@@ -107,8 +106,6 @@ char* parts_files = "./data/pieces16.csv";
 
 unsigned long long non_null_possibilities = 0;
 volatile uint16_t max_result = 0;
-//int request = REQUEST_CONTINUE;
-
 
 volatile int request = REQUEST_CONTINUE;
 

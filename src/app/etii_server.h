@@ -5,8 +5,6 @@
 #ifndef etii_server_h
 #define etii_server_h
 
-#include <stdio.h>
-
 /**
  * @brief Initialise et démarre le serveur EternityII.
  *

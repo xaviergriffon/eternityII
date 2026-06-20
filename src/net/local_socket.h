@@ -5,8 +5,6 @@
 #ifndef local_socket_h
 #define local_socket_h
 #include <sys/un.h>
-#include <stdio.h>
-#include <sys/socket.h>
 
 /**
  * @brief Construction d'une adresse de socket AF_UNIX vers le fichier

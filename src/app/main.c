@@ -5,6 +5,7 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <errno.h>
+#include <sys/socket.h>
 
 #include "app/static_variables.h"
 #include "ui/console.h"

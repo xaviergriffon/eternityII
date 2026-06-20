@@ -6,10 +6,8 @@
 #ifndef etii_client_h
 #define etii_client_h
 
-#include <stdio.h>
 #include <pthread.h>
 #include <sys/times.h>
-#include <time.h>
 #include "app/static_variables.h"
 #include "core/possibility.h"
 

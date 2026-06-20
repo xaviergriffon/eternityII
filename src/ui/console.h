@@ -5,8 +5,6 @@
 #ifndef console_h
 #define console_h
 
-#include <stdio.h>
-
 /**
  * @brief Lance un thread chargé d'écouter les saisies console
  * 

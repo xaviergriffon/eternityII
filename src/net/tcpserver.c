@@ -7,14 +7,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <errno.h>
 #include <unistd.h> /* close */
-#include <netdb.h> /* gethostbyname */
-#include <fcntl.h>
 
 #include "net/tcpserver.h"
 #include "ui/logger.h"
-#include "app/static_variables.h"
 
 /**
  * @brief Crée et met en écoute un socket TCP serveur.

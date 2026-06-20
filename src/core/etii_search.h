@@ -5,8 +5,6 @@
 #ifndef etii_search_h
 #define etii_search_h
 
-#include <stdio.h>
-
 /**
  * @brief Recherche des possibilités
  * 
