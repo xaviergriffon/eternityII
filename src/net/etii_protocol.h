@@ -41,6 +41,31 @@
  */
 
 /**
+ * @brief Verdict de l'interprétation de la réponse du serveur au handshake de version.
+ * @see handshake_verdict
+ */
+typedef enum {
+    HANDSHAKE_OK = 0,           /**< INST_SUPPORTED_VERSION : version acceptée, poursuivre. */
+    HANDSHAKE_VERSION_REJECTED, /**< INST_UNSUPPORTED_VERSION : refus réel → arrêter le client. */
+    HANDSHAKE_RETRY             /**< Toute autre réponse (timeout/INST_END, fermeture, octet
+                                     inattendu) : échec transitoire → réessayer plus tard. */
+} handshake_verdict_t;
+
+/**
+ * @brief Interprète la réponse du serveur au contrôle de version (fonction pure).
+ *
+ * Sépare la DÉCISION (3 cas distincts) de l'effet de bord (arrêt du client vs
+ * nouvelle tentative). Le point clé : un `INST_END` de timeout — renvoyé par
+ * `recv_instruction` quand le serveur saturé ne répond pas — ne doit JAMAIS être
+ * confondu avec un refus de version. Isolée ici, cette logique est testable sans
+ * réseau ni état global.
+ *
+ * @param result Octet renvoyé par `recv_instruction` après l'envoi de INST_CHECK_VERSION.
+ * @return       Le verdict correspondant.
+ */
+handshake_verdict_t handshake_verdict(int8_t result);
+
+/**
  * @brief Structure pour les échanges
  */
 typedef struct
@@ -49,7 +74,7 @@ typedef struct
     uint8_t instruction;
     /// Possibilité fournie
     struct possibility_packet possibility;
-    
+
 } __attribute__((__packed__)) packet;
 
 /**

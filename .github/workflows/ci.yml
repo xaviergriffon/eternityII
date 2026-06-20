@@ -95,6 +95,26 @@ jobs:
           name: coverage-html
           path: tests/coverage/html
 
+  test-asan:
+    name: Tests sous AddressSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Rejoue la suite greatest instrumentée par AddressSanitizer : détecte
+      # use-after-free, double-free et débordements dans les modules testés (et
+      # leurs deps de link). Complète le job `test` (build + run nominal) et la
+      # couverture, qui ne voient pas la sûreté mémoire à l'exécution.
+      #
+      # detect_leaks=0 : on cible les ERREURS mémoire, pas les fuites — le code a
+      # des fuites connues hors périmètre (contextes de threads, etc.) qui
+      # feraient échouer LeakSanitizer sans rapport avec ce qu'on veut garder vert.
+      # abort_on_error=1 : tout rapport ASan fait échouer le job (exit non nul).
+      - name: make test ASAN=1
+        run: make test ASAN=1
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+
   ncurses-build:
     name: Build variante ncurses
     runs-on: ubuntu-latest

@@ -23,7 +23,12 @@ void *feed_thread_aposs(void *param) {
 #ifdef DEBUG_THREAD
     log_info("START aposs thread %i\n", getpid());
 #endif // DEBUG_THREAD
+    // Pause courante quand le serveur n'a rien à fournir (0 = pas de back-off
+    // en cours, on utilise alors la cadence normale THREAD_MICRO_SLEEP).
+    useconds_t no_work_sleep = 0;
     while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
+        int needed_work = 0; // threads ayant demandé du travail ce tour
+        int got_work = 0;    // threads ayant effectivement reçu du travail
         for(int i = 0; i < NB_THREADS; i++)
         {
             if(request == REQUEST_CONTINUE)
@@ -39,6 +44,7 @@ void *feed_thread_aposs(void *param) {
 
                 if(need_work)
                 {
+                    needed_work++;
                     // I/O réseau hors du mutex
                     send_possibility_analysed(client_possibility);
                     // Un pruner consomme vite : on demande un lot pour amortir les
@@ -46,6 +52,7 @@ void *feed_thread_aposs(void *param) {
                     array_possibility_packet *aposs = get_last_possibility(client_possibility, pruner_mode ? pruner_batch_size : 1);
                     if(aposs->size > 0)
                     {
+                        got_work++;
                         // On alimente la pile des possibilités en étude
                         for (int p = 0; p < aposs->size; p++) {
                             add_possibility_analysed(&aposs->possibilities[p], i);
@@ -86,7 +93,28 @@ void *feed_thread_aposs(void *param) {
             }
         }
 
-        usleep(THREAD_MICRO_SLEEP);
+        // Pause adaptative : si des threads attendaient du travail mais que le
+        // serveur n'a RIEN fourni à aucun (stock épuisé, ou serveur saturé qui
+        // ne répond pas), on cède plus longtemps le CPU et on lève la pression
+        // réseau qui nourrit la contention « all threads busy » côté serveur. La
+        // pause double à chaque cycle à vide jusqu'à NO_WORK_SLEEP_MAX, et se
+        // réarme dès qu'un travail est obtenu (ou qu'aucun thread n'en réclame).
+        if (needed_work > 0 && got_work == 0)
+        {
+            no_work_sleep = (no_work_sleep == 0)
+                ? NO_WORK_SLEEP_START
+                : (no_work_sleep < NO_WORK_SLEEP_MAX ? no_work_sleep * 2 : NO_WORK_SLEEP_MAX);
+            if (no_work_sleep > NO_WORK_SLEEP_MAX)
+            {
+                no_work_sleep = NO_WORK_SLEEP_MAX;
+            }
+            usleep(no_work_sleep);
+        }
+        else
+        {
+            no_work_sleep = 0;
+            usleep(THREAD_MICRO_SLEEP);
+        }
     }
 #ifdef DEBUG_THREAD
     log_info("END aposs thread %i\n", getpid());
@@ -95,15 +123,22 @@ void *feed_thread_aposs(void *param) {
 }
 
 /**
- * @brief Construit un thread d'alimentation des files des threads de recherche
+ * @brief Construit un thread d'alimentation des files des threads de recherche.
+ *
+ * Le thread est créé JOIGNABLE (pas détaché) : l'appelant DOIT le joindre à
+ * l'arrêt (cf. run_mono_client). Sans cela, ce thread continuait de tourner
+ * pendant que `run_mono_client` revenait et que le process se démontait —
+ * accès concurrents aux structures partagées en cours de libération, source du
+ * « double free » intermittent observé à l'arrêt.
+ *
+ * @return Identifiant du thread créé (à passer à pthread_join).
  */
-void build_feed_thread(client_possibility_t *thread_params) {
+pthread_t build_feed_thread(client_possibility_t *thread_params) {
     /* création d'un nouveau thread */
     pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
     pthread_attr_init(thread_attributes);
-    pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
     pthread_t thread;
-    
+
     /* Création du thread */
     if (0 != pthread_create(&thread, thread_attributes, feed_thread_aposs, thread_params))
     {
@@ -113,6 +148,7 @@ void build_feed_thread(client_possibility_t *thread_params) {
     }
     pthread_attr_destroy(thread_attributes);
     free(thread_attributes);
+    return thread;
 }
 
 /**
@@ -202,16 +238,20 @@ void *control_thread(void *param) {
 }
 
 /**
- * @brief Démarre le thread de contrôle du débit de recherche en mode détaché.
+ * @brief Démarre le thread de contrôle du débit de recherche (joignable).
+ *
+ * Comme le thread d'alimentation, il est créé JOIGNABLE : l'appelant le joint à
+ * l'arrêt pour garantir qu'il ne tourne plus quand le process se démonte.
+ *
  * @param thread_params Tableau de contextes de threads de recherche.
+ * @return Identifiant du thread créé (à passer à pthread_join).
  */
-void build_control_thread(client_possibility_t *thread_params) {
+pthread_t build_control_thread(client_possibility_t *thread_params) {
     /* création d'un nouveau thread */
     pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
     pthread_attr_init(thread_attributes);
-    pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
     pthread_t thread;
-    
+
     /* Création du thread */
     if (0 != pthread_create(&thread, thread_attributes, control_thread, thread_params))
     {
@@ -221,6 +261,7 @@ void build_control_thread(client_possibility_t *thread_params) {
     }
     pthread_attr_destroy(thread_attributes);
     free(thread_attributes);
+    return thread;
 }
 
 /**
@@ -279,9 +320,9 @@ void runThreadClient(const char *file)
         free(thread_attributes);
     }
     free_array_part(apart);
-    
-    build_feed_thread(thread_params);
-    
+
+    pthread_t feed_tid = build_feed_thread(thread_params);
+
     while (1)
     {
         int threadworking = 0;
@@ -299,6 +340,10 @@ void runThreadClient(const char *file)
         }
         usleep(THREAD_MICRO_SLEEP);
     }
+
+    // Le thread d'alimentation est joignable : on attend sa fin avant de fermer
+    // les connexions, pour qu'il ne touche plus aux sockets qu'on va fermer.
+    pthread_join(feed_tid, NULL);
 
     // Fermeture des connections
     for (i = 0; i < NB_THREADS; i++) {
@@ -342,9 +387,9 @@ void run_mono_client(const char *file)
     thread_params->last_socket_activity = time(NULL);
     times(&thread_params->start_socket);
     free_array_part(apart);
-    
-    build_feed_thread(thread_params);
-    build_control_thread(thread_params);
+
+    pthread_t feed_tid = build_feed_thread(thread_params);
+    pthread_t control_tid = build_control_thread(thread_params);
 #ifdef WITH_CUDA
     if (gpu_pruner_mode) {
         // Les contextes CUDA ne sont pas hérités par fork() : l'init GPU doit
@@ -363,6 +408,16 @@ void run_mono_client(const char *file)
     } else {
         autosearch(thread_params);
     }
+
+    // autosearch/autoprune ne reviennent que sur REQUEST_STOP. On joint d'abord
+    // les threads auxiliaires : sans cela ils continuaient de tourner pendant
+    // que ce process se démontait, accédant aux structures partagées (files,
+    // aposs, sockets) en cours de libération — l'origine du « double free »
+    // intermittent à l'arrêt. Le join est borné : le thread d'alimentation finit
+    // au pire après le timeout de réception TCP (tcp_timeout), le thread de
+    // contrôle boucle en usleep court.
+    pthread_join(feed_tid, NULL);
+    pthread_join(control_tid, NULL);
 
     pthread_mutex_lock(&thread_params->socket_mutex);
     if (thread_params->socket_id != -1 && is_connected(thread_params->socket_id)) {

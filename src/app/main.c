@@ -111,7 +111,15 @@ void handle_tcpclient(int argc, const char *argv[]) {
         serverIp = (char *)argv[2];
     }
     if (argc >= 4) {
-        NB_THREADS = atoi(argv[3]);
+        int n = atoi(argv[3]);
+        if (n > 0) {
+            NB_THREADS = n;
+        } else {
+            // Un nombre de threads <= 0 (ou non numérique) donnerait 0 process de
+            // travail : le client ne ferait rien. On retombe sur 1.
+            log_error("nombre de threads invalide (\"%s\") — 1 thread par défaut\n", argv[3]);
+            NB_THREADS = 1;
+        }
     }
     if (argc >= 5) {
         if (pruner_mode) {
@@ -290,9 +298,34 @@ void handle_tcpserver(int argc, const char *argv[]) {
     log_info("server\n");
     server = 1;
     NB_THREADS = 80;
+    // Usage : tcpserver [nb_threads] [pieces.csv]. Le 1er argument est le NOMBRE
+    // DE THREADS, pas le fichier. Erreur fréquente : « tcpserver data/pieces16.csv »
+    // → atoi(chemin) == 0 → serveur démarré avec 0 thread de communication : il
+    // accepte les connexions mais ne les sert JAMAIS (stock figé, client inactif).
+    // On valide donc l'argument et on récupère le cas du fichier passé à sa place.
+    int file_arg = -1; // indice de l'argument « fichier de pièces », si fourni
     if (argc >= 3) {
-        log_info("arg 2 : %s", argv[2]);
-        NB_THREADS = atoi(argv[2]);
+        log_info("arg 2 : %s\n", argv[2]);
+        int n = atoi(argv[2]);
+        char c0 = argv[2][0];
+        int looks_numeric = (c0 == '+' || c0 == '-' || (c0 >= '0' && c0 <= '9'));
+        if (n > 0) {
+            NB_THREADS = n;
+            if (argc >= 4) file_arg = 3;
+        } else if (looks_numeric) {
+            // Nombre fourni mais non valide (0 ou négatif) : on garde le défaut.
+            log_error("nombre de threads invalide (\"%s\") — %i threads par défaut\n", argv[2], NB_THREADS);
+            if (argc >= 4) file_arg = 3;
+        } else {
+            // Pas un nombre : l'utilisateur a probablement passé le fichier ici.
+            // On garde le nombre de threads par défaut et on traite cet argument
+            // comme le fichier de pièces (sinon : serveur muet à 0 thread).
+            log_error("1er argument (\"%s\") interprété comme fichier de pièces ; "
+                      "le nombre de threads attendu à cette position est absent — "
+                      "%i threads par défaut. Usage : tcpserver [nb_threads] [pieces.csv]\n",
+                      argv[2], NB_THREADS);
+            file_arg = 2;
+        }
     }
     log_info("Nb threads : %i\n", NB_THREADS);
     init_childs();
@@ -300,8 +333,8 @@ void handle_tcpserver(int argc, const char *argv[]) {
     init_counters();
     run_checker(1);
     run_console(1);
-    if (argc >= 4) {
-        parts_files = (char *)(argv[3]);
+    if (file_arg >= 0) {
+        parts_files = (char *)(argv[file_arg]);
     }
     runserver(parts_files);
 }

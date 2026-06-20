@@ -563,6 +563,12 @@ void checkIfResultFound(struct possibility_packet *poss, struct array_part *all_
         sprintf(fileName, "./solution_%i", getpid());
         save_possibility(fileName, poss);
         free(fileName);
+        // Sortie immédiate. NE PAS positionner request=STOP ici : cela
+        // réveillerait les threads auxiliaires (alimentation/contrôle), qui
+        // écriraient dans les flux stdio au moment où exit() les vide (sortie
+        // perdue, voire course sur le tas). L'arrêt propre par signal est géré
+        // dans run_mono_client (join des threads) ; le fichier solution est déjà
+        // écrit (fclose), donc un exit() franc suffit ici.
         exit(EXIT_SUCCESS);
     }
 }

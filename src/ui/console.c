@@ -78,7 +78,19 @@ static char *getcmdline_cooked(void)
 
     for (;;) {
         c = fgetc(stdin);
-        if (c == EOF || c == '\n') break;
+        if (c == EOF) {
+            if (line == linep) {
+                /* EOF sans aucun caractère : stdin est épuisé/fermé (ex.
+                   redirection depuis /dev/null, pipe refermé). On renvoie NULL
+                   pour signaler la FIN d'entrée — distinct d'une ligne vide
+                   ("") — afin que la console cesse de lire au lieu de boucler
+                   à pleine vitesse sur un prompt « commande : ». */
+                free(linep);
+                return NULL;
+            }
+            break; /* EOF en fin de ligne non terminée : on rend la ligne lue */
+        }
+        if (c == '\n') break;
 
         if (--len == 0) {
             len = lenmax;
@@ -90,7 +102,7 @@ static char *getcmdline_cooked(void)
             line = linen + offset;
             linep = linen;
         }
-        if ((*line++ = c) == '\n') break;
+        *line++ = (char)c;
     }
     *line = '\0';
     return linep;
@@ -118,9 +130,10 @@ static char *getcmdline_raw(void)
     while (1) {
         int c = fgetc(stdin);
         if (c == EOF) {
-            char *r = malloc(1);
-            if (r) r[0] = '\0';
-            return r;
+            /* Fin d'entrée (Ctrl-D sur un TTY, ou stdin refermé) : on renvoie
+               NULL pour que la console s'arrête proprement, au lieu de boucler
+               sur une saisie vide. */
+            return NULL;
         }
 
         if (c == '\n' || c == '\r') {
@@ -242,19 +255,28 @@ void * console(void *param)
     status_zone_init();
 #ifdef USE_NCURSES
     nc_console_loop();
+    exit(EXIT_SUCCESS);
 #else
-    char *buffer = NULL;
-    while(buffer == NULL)
+    for (;;)
     {
         log_console("commande :");
-        buffer = getcmdline();
+        char *buffer = getcmdline();
         log_console("\n");
+        if (buffer == NULL)
+        {
+            /* Fin de l'entrée standard (stdin épuisé/fermé : /dev/null, pipe,
+               Ctrl-D) ou échec d'allocation. On NE doit PAS reboucler en
+               affichant « commande : » à pleine vitesse, ni terminer le process
+               (le serveur/client doit continuer à tourner sans console). On sort
+               donc de la boucle de saisie et le thread console s'arrête. */
+            break;
+        }
         do_command_line(buffer);
         free(buffer);
-        buffer= NULL;
     }
+    log_info("console : fin de l'entrée standard — console interactive arrêtée (le traitement continue)\n");
+    return NULL;
 #endif /* USE_NCURSES */
-    exit(EXIT_SUCCESS);
 }
 
 /**
