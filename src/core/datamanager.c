@@ -39,15 +39,6 @@ static file_possibility_t file_possibility_analysed[NB_FILE_POSSIBILITY] =
     {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
 };
 
- struct old_possibility_packet
- {
- uint8_t x;
- uint8_t y;
- int16_t grid[ETERN_SIZE][ETERN_SIZE];
- uint16_t alloc;
- uint8_t faceused[ETERN_PARTS];
- } __attribute__((__packed__));
-
 /**
  * @brief Files des possibilités vérifiées par un client pruner (`checked == 1`).
  *
@@ -1084,77 +1075,6 @@ int backup_analysed(char *filename)
 	}
 	return 0;
 }
-
-#ifdef FACES_USED_BITS
-int import_old_file(client_possibility_t *client_possibility, char *filename)
-{
-	FILE *f = fopen(filename, "r");
-	if(!f)
-	{
-		log_error("import file :%s",filename);
-		perror("fopen()");
-		exit(EXIT_FAILURE);
-	}
-	
-	struct old_possibility_packet *old_possibility = malloc(sizeof(struct old_possibility_packet));
-    struct possibility_packet *new_possibility = malloc(sizeof(struct possibility_packet));
-	while(fread(old_possibility, sizeof(struct old_possibility_packet),1,f))
-	{
-        new_possibility->alloc = old_possibility->alloc;
-        new_possibility->x = old_possibility->x;
-        new_possibility->y = old_possibility->y;
-        for(int y = 0; y < ETERN_SIZE; y++) {
-            for(int x = 0; x < ETERN_SIZE; x++) {
-                new_possibility->grid[y][x] = old_possibility->grid[y][x];
-            }
-        }
-        
-        for(int i = 0; i < ETERN_PARTS;i++) {
-            set_face_used(new_possibility->b_faceused, i, old_possibility->faceused[i]);
-        }
-
-        // Fichiers ancien format : répare l'invariant alloc/directions si besoin
-        normalize_possibility_packet(new_possibility);
-
-		array_possibility_packet *possibilities = malloc(sizeof(array_possibility_packet));
-		possibilities->size = 1;
-		possibilities->possibilities = malloc(sizeof(struct possibility_packet));
-		memcpy(&possibilities->possibilities[0], new_possibility, sizeof(struct possibility_packet));
-		add_possibility(client_possibility, possibilities);
-		
-		free_array_possibility_packet(possibilities);
-	}
-	
-	free(new_possibility);
-    free(old_possibility);
-	
-	
-	fclose(f);
-	return 0;
-}
-
-int restore_old_file(char *filename)
-{
-    lock_all_file();
-    int fp;
-    //vidage des files
-    for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
-    {
-        File *suite = &file_possibility[fp].file;
-        while(suite->size >0)
-        {
-            struct possibility_packet *value = malloc(sizeof(struct possibility_packet));
-            scroll(suite, value);
-            free(value);
-        }
-    }
-    
-    unlock_all_file();
-    
-    import_old_file(NULL, filename);
-    return 0;
-}
-#endif // FACES_USED_BITS
 
 int import(client_possibility_t *client_possibility, char *filename)
 {

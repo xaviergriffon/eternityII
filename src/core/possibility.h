@@ -19,11 +19,7 @@
  uint8_t y;
  int16_t grid[ETERN_SIZE][ETERN_SIZE];
  uint16_t alloc;
- #ifdef FACES_USED_BITS
  uint16_t b_faceused[FACES_USED_SIZE] __attribute__ ((aligned (16)));
- #else
- uint8_t faceused[ETERN_PARTS];
- #endif // FACES_USED_BITS
  /// 1 si un client pruner a vérifié que toutes les cases vides ont encore au
  /// moins une pièce candidate. Remis à 0 sur tout paquet issu d'une expansion
  /// (le contrôle ne vaut que pour l'état exact du plateau).
@@ -36,7 +32,6 @@ typedef struct
 	struct possibility_packet *possibilities;
 } array_possibility_packet;
 
-#ifdef FACES_USED_BITS
 /**
  * @brief Marque ou démarque une pièce comme utilisée dans le masque de bits.
  *
@@ -68,7 +63,6 @@ static inline uint8_t is_face_used(uint16_t faceused[FACES_USED_SIZE], uint16_t 
     uint16_t groupe = part >> 4;
     return (faceused[groupe] >> (part - (groupe << 4))) & 1;
 }
-#endif // FACES_USED_BITS
 /**
  * @brief Crée un `possibility_packet` représentant l'état actuel de la grille.
  *

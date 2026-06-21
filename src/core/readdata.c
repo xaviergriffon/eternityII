@@ -168,11 +168,7 @@ void compute_grid(struct possibility_packet *possibility, char *str_value) {
                         possibility->grid[x][y] = rPart;
                         if (rPart >= 0) {
                             int nPart = rPart % ETERN_PARTS;
-#ifdef FACES_USED_BITS
                             set_face_used(possibility->b_faceused, nPart, 1);
-#else
-                            possibility->faceused[nPart] = 1;
-#endif // FACES_USED_BITS
                         }
                         free(value);
                         x++;
@@ -265,11 +261,7 @@ struct possibility_packet * read_from_json(const char *json_possiblity) {
 						possibility = malloc(sizeof(struct possibility_packet));
 						// Initialisation des pieces utilisées
 						for (int p = 0; p < ETERN_PARTS; p++) {
-#ifdef FACES_USED_BITS
                             set_face_used(possibility->b_faceused, p, 0);
-#else
-                            possibility->faceused[p] = 0;
-#endif // FACES_USED_BITS
 						}
 					}
 

@@ -14,14 +14,9 @@
 #include "app/gpu_pruner.h"
 #endif // WITH_CUDA
 
-// Accès au masque des pièces utilisées, indépendant de FACES_USED_BITS
-#ifdef FACES_USED_BITS
+// Accès au masque des pièces utilisées
 #define BOARD_FACE_USED(b, pos)   is_face_used((b)->b_faceused, (pos))
 #define BOARD_SET_FACE(b, pos, v) set_face_used((b)->b_faceused, (pos), (v))
-#else
-#define BOARD_FACE_USED(b, pos)   ((b)->faceused[(pos)])
-#define BOARD_SET_FACE(b, pos, v) ((b)->faceused[(pos)] = (v))
-#endif // FACES_USED_BITS
 
 /**
  * @brief Délègue au serveur les possibilités excédant `max_stock_by_thread` dans une `File`.
