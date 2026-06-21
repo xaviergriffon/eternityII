@@ -15,12 +15,18 @@
 #include "core/datamanager.h"
 #include "core/possibility.h"
 #include "core/part.h"
+#include "net/etii_protocol.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <glob.h>
+#include <sys/socket.h>
+#include <pthread.h>
+
+/* put_to_server n'est pas exposée dans datamanager.h (helper interne). */
+int put_to_server(client_possibility_t *client_possibility, array_possibility_packet *possibilities);
 
 /* Non déclarée dans datamanager.h (helper interne non statique). */
 unsigned long long count_combinations(unsigned long long x);
@@ -518,6 +524,484 @@ TEST send_solution_without_server_configured_returns_error(void)
     PASS();
 }
 
+/* ==========================================================================
+ * Tests du chemin réseau : scroll_from_server, send_possibility_analysed,
+ * send_solution et put_to_server via socketpair
+ *
+ * On pré-remplit cp.socket_id avec l'extrémité client d'un socketpair AF_UNIX,
+ * ce qui court-circuite create_tcp_client().  Un thread pthread joue le rôle
+ * d'un mini-serveur sur l'extrémité serveur : il répond au handshake de
+ * is_connected (INST_TEST_CONNECTED → INST_TEST_CONNECTED) puis au protocole
+ * de la fonction testée.  Le thread est joint avant la fin du test pour
+ * éliminer toute race condition.
+ * ========================================================================== */
+
+/* Lecture robuste de exactement len octets (boucle recv côté mini-serveur). */
+static void recv_exact_sv(int fd, void *buf, size_t len)
+{
+    size_t done = 0;
+    while (done < len) {
+        ssize_t r = recv(fd, (char *)buf + done, len - done, 0);
+        if (r <= 0) break;
+        done += (size_t)r;
+    }
+}
+
+/* Mini-serveur scroll_from_server — renvoie un paquet :
+ *   1. is_connected
+ *   2. recv INST_GET → send possibility_packet
+ */
+static void *mini_srv_get_packet(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_GET */
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 7;
+    send(fd, &pkt, sizeof pkt, 0);
+    close(fd);
+    return NULL;
+}
+
+/* Mini-serveur scroll_from_server — aucune possibilité (INST_NULL) :
+ *   1. is_connected
+ *   2. recv INST_GET → send INST_NULL (1 octet)
+ */
+static void *mini_srv_get_null(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_GET */
+    b = INST_NULL;
+    send(fd, &b, 1, 0);
+    close(fd);
+    return NULL;
+}
+
+/* Mini-serveur send_possibility_analysed — acquittement :
+ *   1. is_connected
+ *   2. recv INST_POSSIBILITY_ANALYSED_BATCH + int32 M + M packets → INST_CONSIDERED
+ *   Répète jusqu'à ce que le client n'envoie plus rien (connexion fermée côté test).
+ */
+static void *mini_srv_analysed_ok(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    /* Drain all batches until the client stops sending. */
+    while (recv(fd, &b, 1, 0) == 1) {
+        /* b == INST_POSSIBILITY_ANALYSED_BATCH */
+        int32_t m = 0;
+        recv_exact_sv(fd, &m, sizeof m);
+        for (int32_t i = 0; i < m; i++) {
+            struct possibility_packet pkt;
+            recv_exact_sv(fd, &pkt, sizeof pkt);
+        }
+        b = INST_CONSIDERED;
+        send(fd, &b, 1, 0);
+    }
+    close(fd);
+    return NULL;
+}
+
+/* Mini-serveur put_to_server — mauvais ACK pour le premier paquet :
+ *   pkt[0] → INST_NULL (bad ack, non-fatal : item remis en local, boucle continue)
+ *   pkt[1] → INST_CONSIDERED
+ *   Résultat : rc=0 mais datas_size()==1 (pkt[0] dans le stock local).
+ */
+static void *mini_srv_put_bad_ack(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_ADD pkt[0] */
+    struct possibility_packet pkt;
+    recv_exact_sv(fd, &pkt, sizeof pkt);
+    b = INST_NULL;                                    /* ACK invalide, non-fatal */
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_ADD pkt[1] */
+    recv_exact_sv(fd, &pkt, sizeof pkt);
+    b = INST_CONSIDERED;
+    send(fd, &b, 1, 0);
+    close(fd);
+    return NULL;
+}
+
+/* Mini-serveur send_solution — succès :
+ *   1. is_connected : reçoit INST_TEST_CONNECTED → répond INST_TEST_CONNECTED
+ *   2. reçoit INST_SOLUTION + possibility_packet → répond INST_CONSIDERED
+ */
+static void *mini_srv_solution_ok(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_SOLUTION */
+    struct possibility_packet pkt;
+    recv_exact_sv(fd, &pkt, sizeof pkt);
+    b = INST_CONSIDERED;
+    send(fd, &b, 1, 0);
+    close(fd);
+    return NULL;
+}
+
+/* Mini-serveur send_solution — rejet :
+ *   Même handshake, puis répond INST_NULL au lieu de INST_CONSIDERED.
+ */
+static void *mini_srv_solution_reject(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_SOLUTION */
+    struct possibility_packet pkt;
+    recv_exact_sv(fd, &pkt, sizeof pkt);
+    b = INST_NULL;                                    /* acquittement refusé */
+    send(fd, &b, 1, 0);
+    close(fd);
+    return NULL;
+}
+
+/* Mini-serveur put_to_server — succès (2 paquets) :
+ *   handshake + INST_ADD + pkt → INST_CONSIDERED, deux fois.
+ */
+static void *mini_srv_put_ok(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    for (int i = 0; i < 2; i++) {
+        recv(fd, &b, 1, 0);                          /* INST_ADD */
+        struct possibility_packet pkt;
+        recv_exact_sv(fd, &pkt, sizeof pkt);
+        b = INST_CONSIDERED;
+        send(fd, &b, 1, 0);
+    }
+    close(fd);
+    return NULL;
+}
+
+/* Mini-serveur put_to_server — connexion perdue après le premier INST_ADD :
+ *   handshake + reçoit INST_ADD + pkt[0] → ferme le socket sans ACK.
+ *   Le client voit INST_END (recv == 0), remet pkt[1] en local et renvoie -1.
+ */
+static void *mini_srv_put_drop(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_ADD */
+    struct possibility_packet pkt;
+    recv_exact_sv(fd, &pkt, sizeof pkt);
+    close(fd);                                        /* fermeture sans ACK */
+    return NULL;
+}
+
+/* Initialise un client_possibility_t minimal avec un socket préexistant. */
+static void init_cp_with_socket(client_possibility_t *cp, int sock_fd)
+{
+    memset(cp, 0, sizeof *cp);
+    pthread_mutex_init(&cp->socket_mutex, NULL);
+    cp->socket_id = sock_fd;
+    cp->id = 0;
+}
+
+/* scroll_from_server : le serveur répond avec un paquet.
+ * Exercé via get_last_possibility avec pool local vide + server_ip configuré. */
+TEST scroll_from_server_returns_packet(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_get_packet, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    silence_std();
+    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    restore_std();
+
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(1, r->size, "%d");
+    ASSERT_EQ_FMT(7, (int)r->possibilities[0].alloc, "%d");
+    free_array_possibility_packet(r);
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* scroll_from_server : le serveur répond INST_NULL (stock vide côté serveur). */
+TEST scroll_from_server_returns_null(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_get_null, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    silence_std();
+    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    restore_std();
+
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(0, r->size, "%d"); /* serveur n'a rien donné */
+    free_array_possibility_packet(r);
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* send_possibility_analysed (chemin réseau) : envoie un batch INST_POSSIBILITY_ANALYSED_BATCH,
+ * le serveur ACK → la file analysed[0] est vidée. */
+TEST send_possibility_analysed_success(void)
+{
+    drain_all();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_analysed_ok, &fds[1]);
+
+    /* Ajoute 1 paquet dans file_possibility_analysed[0]. */
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 3;
+    add_possibility_analysed(&pk, 0);
+    ASSERT_EQ_FMT(1ULL, file_analysed_size(0), "%llu");
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    silence_std();
+    send_possibility_analysed(&cp);
+    restore_std();
+
+    ASSERT_EQ_FMT(0ULL, file_analysed_size(0), "%llu"); /* file vidée */
+
+    /* Fermer fds[0] pour débloquer le mini-serveur (son recv retourne 0). */
+    close(fds[0]);
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_all();
+    PASS();
+}
+
+/* put_to_server : ACK invalide non-fatal pour pkt[0] (INST_NULL ≠ INST_CONSIDERED et ≠ INST_END).
+ * L'item est remis en stock local et la boucle CONTINUE pour pkt[1] → rc=0 mais datas_size()==1. */
+TEST put_to_server_bad_ack_non_fatal(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_put_bad_ack, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    struct possibility_packet pkts[2];
+    memset(pkts, 0, sizeof pkts);
+    pkts[0].alloc = 3;
+    pkts[1].alloc = 4;
+    array_possibility_packet arr = { .size = 2, .possibilities = pkts };
+
+    silence_std();
+    int rc = put_to_server(&cp, &arr);
+    restore_std();
+
+    ASSERT_EQ_FMT(0, rc, "%d");          /* pas de connection_lost : rc=0 */
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* pkt[0] remis en local */
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+TEST send_solution_success(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_solution_ok, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = ETERN_PARTS;
+
+    silence_std();
+    int rc = send_solution(&cp, &pkt);
+    restore_std();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);                /* non fermé par send_solution en cas de succès */
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+TEST send_solution_server_rejects(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_solution_reject, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = ETERN_PARTS;
+
+    silence_std();
+    int rc = send_solution(&cp, &pkt);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+TEST put_to_server_success(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_put_ok, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    struct possibility_packet pkts[2];
+    memset(pkts, 0, sizeof pkts);
+    pkts[0].alloc = 3;
+    pkts[1].alloc = 4;
+    array_possibility_packet arr = { .size = 2, .possibilities = pkts };
+
+    silence_std();
+    int rc = put_to_server(&cp, &arr);
+    restore_std();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu"); /* aucune possibilité remise en local */
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* put_to_server : connexion perdue après le premier INST_ADD.
+ * Le mini-serveur ferme le socket sans ACK → le client reçoit INST_END pour
+ * l'acquittement du paquet 0 → remet pkt[1] en local et renvoie -1.
+ * Vérifie : retour -1 et datas_size() > 0 (pkt[1] remis en stock local). */
+TEST put_to_server_connection_lost(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_put_drop, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    struct possibility_packet pkts[2];
+    memset(pkts, 0, sizeof pkts);
+    pkts[0].alloc = 3;
+    pkts[1].alloc = 4;
+    array_possibility_packet arr = { .size = 2, .possibilities = pkts };
+
+    silence_std();
+    int rc = put_to_server(&cp, &arr);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT(datas_size() > 0); /* pkts[1] doit avoir été remis en stock local */
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);            /* put_to_server ne ferme pas le socket en cas d'erreur */
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
 SUITE(datamanager_suite)
 {
     RUN_TEST(server_ip_round_trip);
@@ -539,4 +1023,12 @@ SUITE(datamanager_suite)
     RUN_TEST(remove_analysed_finds_then_misses);
     RUN_TEST(remove_no_next_prunes_dead_packets);
     RUN_TEST(remove_no_next_handles_complete_solution);
+    RUN_TEST(scroll_from_server_returns_packet);
+    RUN_TEST(scroll_from_server_returns_null);
+    RUN_TEST(send_possibility_analysed_success);
+    RUN_TEST(put_to_server_bad_ack_non_fatal);
+    RUN_TEST(send_solution_success);
+    RUN_TEST(send_solution_server_rejects);
+    RUN_TEST(put_to_server_success);
+    RUN_TEST(put_to_server_connection_lost);
 }
