@@ -26,6 +26,7 @@ typedef struct
     map_big_array *map_part;
     int compteur; // Numéro de compteur
     struct tms start_socket;
+    struct array_part *rotate_parts;
 } client_t;
 
 client_t *thread_params = NULL;
@@ -390,10 +391,10 @@ void *communicate_with_client (void *userdata)
                 static unsigned solution_seq = 0;
                 unsigned seq = __atomic_fetch_add(&solution_seq, 1, __ATOMIC_RELAXED);
                 char fileName[64];
-                snprintf(fileName, sizeof fileName, "./solution_server_%i_%u", (int)getpid(), seq);
+                snprintf(fileName, sizeof fileName, "./solution_server_%i_%u.csv", (int)getpid(), seq);
                 log_event("SOLUTION reçue d'un client (%i pièces placées)", sol->alloc);
                 log_info("*** SOLUTION reçue d'un client (%i pièces) ***\n", sol->alloc);
-                save_possibility(fileName, sol);
+                save_solution_csv(fileName, sol, client->rotate_parts);
                 log_info("solution sauvegardée dans %s\n", fileName);
                 send_instruction(client->socket_id, INST_CONSIDERED);
                 free(sol);
@@ -613,11 +614,12 @@ void runserver(const char* file)
     free_array_part(apart);
     first_possibility(map_parts, rotateParts);
     free_bigarray(map_parts);
-    free_array_part(rotateParts);
-    
+    /* rotateParts reste en vie : les threads TCP l'utilisent pour sérialiser
+     * les solutions en CSV avec les couleurs de bord. Libéré en fin de runserver. */
+
     // Demarrage d'un thread de nettoyage des possibilités sans suite
     create_rmnonext_thread();
-    
+
     /* création du tableau de structures client_t avec un élément par thread */
     if(NULL == (thread_params = malloc(sizeof(*thread_params) * NB_THREADS)))
     {
@@ -631,6 +633,7 @@ void runserver(const char* file)
         thread_params[i].socket_id = -1;
         thread_params[i].tid = NULL;
         thread_params[i].compteur = i;
+        thread_params[i].rotate_parts = rotateParts;
         fileUpdates[i] = 0;
     }
     
@@ -714,4 +717,5 @@ void runserver(const char* file)
             }
         }
     }
+    free_array_part(rotateParts);
 }

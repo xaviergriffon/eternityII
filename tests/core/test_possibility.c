@@ -385,6 +385,76 @@ TEST save_possibility_unwritable_exits(void)
 }
 
 /* --------------------------------------------------------------------------
+ * save_solution_csv : sérialisation CSV
+ * ------------------------------------------------------------------------ */
+
+TEST save_solution_csv_writes_header_and_rows(void)
+{
+    char path[] = "/tmp/etii_csv_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    struct array_part *rp = make_dummy_rotate_parts();
+    struct possibility_packet *p = new_zeroed_packet();
+    /* initialize all cells as empty (-2), then place 2 pieces */
+    for (int i = 0; i < ETERN_SIZE; i++)
+        for (int j = 0; j < ETERN_SIZE; j++)
+            p->grid[i][j] = -2;
+    p->grid[0][0] = 0;
+    p->grid[0][1] = 0;
+    p->alloc = 2;
+
+    ASSERT_EQ_FMT(0, save_solution_csv(path, p, rp), "%d");
+
+    FILE *f = fopen(path, "r");
+    ASSERT(f != NULL);
+    char line[256];
+
+    /* première ligne = en-tête */
+    ASSERT(fgets(line, sizeof(line), f) != NULL);
+    ASSERT_STR_EQ("row,col,piece_id,rotation,top,right,bottom,left\n", line);
+
+    /* deux lignes de données */
+    ASSERT(fgets(line, sizeof(line), f) != NULL); /* (0,0) */
+    ASSERT(fgets(line, sizeof(line), f) != NULL); /* (0,1) */
+    ASSERT(fgets(line, sizeof(line), f) == NULL); /* EOF */
+
+    fclose(f);
+    unlink(path);
+    free(p);
+    free_array_part(rp);
+    PASS();
+}
+
+TEST save_solution_csv_null_parts_writes_minus_one_faces(void)
+{
+    char path[] = "/tmp/etii_csvn_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    struct possibility_packet *p = new_zeroed_packet();
+    p->grid[1][2] = 5; /* rotation-index 5 → piece_id=5%ETERN_PARTS, rotation=5/ETERN_PARTS */
+    p->alloc = 1;
+
+    ASSERT_EQ_FMT(0, save_solution_csv(path, p, NULL), "%d");
+
+    FILE *f = fopen(path, "r");
+    ASSERT(f != NULL);
+    char line[256];
+    fgets(line, sizeof(line), f); /* skip header */
+    ASSERT(fgets(line, sizeof(line), f) != NULL);
+    fclose(f);
+    unlink(path);
+    free(p);
+
+    /* la ligne doit se terminer par …,-1,-1,-1,-1 */
+    ASSERT(strstr(line, ",-1,-1,-1,-1") != NULL);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
  * checkIfResultFound : détection de solution complète
  * ------------------------------------------------------------------------ */
 
@@ -419,7 +489,7 @@ TEST check_if_result_found_complete_exits_success(void)
        log_solution écrit un nom unique solution_<pid>_<seq> (seq=0 pour le 1er
        et seul appel de ce fils fraîchement forké). */
     char sol[320];
-    snprintf(sol, sizeof(sol), "%s/solution_%d_0", g_solution_dir, (int)pid);
+    snprintf(sol, sizeof(sol), "%s/solution_%d_0.csv", g_solution_dir, (int)pid);
     unlink(sol);
     rmdir(g_solution_dir);
 
@@ -446,8 +516,8 @@ TEST log_solution_writes_distinct_files_for_each_solution(void)
     int code = run_in_fork(child_two_solutions, &pid);
 
     char f0[320], f1[320];
-    snprintf(f0, sizeof(f0), "%s/solution_%d_0", g_solution_dir, (int)pid);
-    snprintf(f1, sizeof(f1), "%s/solution_%d_1", g_solution_dir, (int)pid);
+    snprintf(f0, sizeof(f0), "%s/solution_%d_0.csv", g_solution_dir, (int)pid);
+    snprintf(f1, sizeof(f1), "%s/solution_%d_1.csv", g_solution_dir, (int)pid);
     int has0 = (access(f0, F_OK) == 0);
     int has1 = (access(f1, F_OK) == 0);
     unlink(f0);
@@ -895,6 +965,8 @@ SUITE(possibility_suite)
     RUN_TEST(normalize_leaves_conforming_packet_untouched);
     RUN_TEST(save_possibility_writes_packet_to_file);
     RUN_TEST(save_possibility_unwritable_exits);
+    RUN_TEST(save_solution_csv_writes_header_and_rows);
+    RUN_TEST(save_solution_csv_null_parts_writes_minus_one_faces);
     RUN_TEST(check_if_result_found_below_complete_is_noop);
     RUN_TEST(check_if_result_found_complete_exits_success);
     RUN_TEST(log_solution_writes_distinct_files_for_each_solution);

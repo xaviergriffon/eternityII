@@ -4,13 +4,13 @@
  * Contrairement aux autres suites — volontairement indépendantes de la taille du
  * puzzle et construites sur de petits fixtures à la main — celle-ci EXIGE le build
  * 16 cases : elle s'appuie sur un plateau RÉELLEMENT résolu, capturé une fois via
- * le moteur (save_possibility) puis figé dans tests/fixtures/solution16.json et
+ * le moteur (save_solution_csv) puis figé dans tests/fixtures/solution16.json et
  * transformé au build en tableau C (tests/fixtures/solution16.h, généré par
  * tests/fixtures/gen_solution16.py). Cette « golden fixture » sert trois
  * périmètres :
  *   - RÉSOLUTION   : la solution est reconnue (check_possibility == 0,
  *                    checkIfResultFound sort EXIT_SUCCESS, log_solution écrit un
- *                    fichier relisible identique au paquet).
+ *                    fichier CSV lisible avec les bonnes colonnes et le bon nombre de lignes).
  *   - NON-RÉSOLUTION : des copies dégradées de la fixture sont rejetées avec le
  *                    bon code de check_possibility, et checkIfResultFound ne sort pas.
  *   - COMMUNICATION : le paquet solution circule sur un socketpair (protocole
@@ -161,7 +161,7 @@ TEST golden_check_if_result_found_exits_success(void)
     int code = run_in_fork(child_check_result_found, &pid);
 
     char sol[320];
-    snprintf(sol, sizeof(sol), "%s/solution_%d_0", g_solution_dir, (int)pid);
+    snprintf(sol, sizeof(sol), "%s/solution_%d_0.csv", g_solution_dir, (int)pid);
     unlink(sol);
     rmdir(g_solution_dir);
 
@@ -171,7 +171,7 @@ TEST golden_check_if_result_found_exits_success(void)
     PASS();
 }
 
-/* log_solution écrit un fichier binaire relisible, identique au paquet golden. */
+/* log_solution écrit un CSV lisible avec en-tête et une ligne par pièce. */
 TEST golden_log_solution_roundtrips(void)
 {
     strcpy(g_solution_dir, "/tmp/etii_sol16r_XXXXXX");
@@ -186,17 +186,23 @@ TEST golden_log_solution_roundtrips(void)
     ASSERT_EQ_FMT(0, code, "%d"); /* log_solution ne quitte pas */
 
     char sol[320];
-    snprintf(sol, sizeof(sol), "%s/solution_%d_0", g_solution_dir, (int)pid);
+    snprintf(sol, sizeof(sol), "%s/solution_%d_0.csv", g_solution_dir, (int)pid);
     FILE *f = fopen(sol, "r");
     ASSERT(f != NULL);
-    struct possibility_packet q;
-    size_t n = fread(&q, sizeof(q), 1, f);
+
+    char line[256];
+    /* en-tête */
+    ASSERT(fgets(line, sizeof(line), f) != NULL);
+    ASSERT_STR_EQ("row,col,piece_id,rotation,top,right,bottom,left\n", line);
+
+    /* une ligne par pièce placée */
+    int count = 0;
+    while (fgets(line, sizeof(line), f)) count++;
     fclose(f);
     unlink(sol);
     rmdir(g_solution_dir);
 
-    ASSERT_EQ_FMT(1, (int)n, "%d");
-    ASSERT_EQ_FMT(0, compare_possibility(g_poss, &q), "%d"); /* relecture fidèle */
+    ASSERT_EQ_FMT(SOLUTION16_SIZE * SOLUTION16_SIZE, count, "%d");
 
     free(g_poss);
     free_array_part(g_rot);

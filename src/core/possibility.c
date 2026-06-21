@@ -514,6 +514,37 @@ int save_possibility(char *filename, struct possibility_packet *possibility)
 	return 0;
 }
 
+int save_solution_csv(const char *filename, const struct possibility_packet *poss,
+                      const struct array_part *all_rotate_part)
+{
+    FILE *f = fopen(filename, "w");
+    if (!f) {
+        log_error("save_solution_csv file: %s", filename);
+        perror("fopen()");
+        return -1;
+    }
+
+    fprintf(f, "row,col,piece_id,rotation,top,right,bottom,left\n");
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            int16_t idx = poss->grid[x][y];
+            if (idx < 0) continue;
+            if (all_rotate_part) {
+                const struct part *p = &all_rotate_part->parts[idx];
+                fprintf(f, "%d,%d,%d,%d,%d,%d,%d,%d\n",
+                        x, y, (int)p->id, (int)p->rotation,
+                        (int)p->top, (int)p->right, (int)p->bottom, (int)p->left);
+            } else {
+                fprintf(f, "%d,%d,%d,%d,-1,-1,-1,-1\n",
+                        x, y, idx % ETERN_PARTS, idx / ETERN_PARTS);
+            }
+        }
+    }
+
+    fclose(f);
+    return 0;
+}
+
 /**
  * @brief Affiche la grille solution dans la console et la sauvegarde sur disque.
  *
@@ -531,8 +562,8 @@ void log_solution(struct possibility_packet *poss, struct array_part *all_rotate
     // processus (mode « continuer après une solution »). Aucun écrasement.
     static unsigned solution_seq = 0;
     unsigned seq = __atomic_fetch_add(&solution_seq, 1, __ATOMIC_RELAXED);
-    char fileName[64];
-    snprintf(fileName, sizeof fileName, "./solution_%i_%u", (int)getpid(), seq);
+    char fileName[68];
+    snprintf(fileName, sizeof fileName, "./solution_%i_%u.csv", (int)getpid(), seq);
 
     log_info("fin de la boucle à %i \n", poss->alloc);
     log_event("SOLUTION FOUND! (%i pieces) - saved to %s", poss->alloc, fileName);
@@ -545,7 +576,7 @@ void log_solution(struct possibility_packet *poss, struct array_part *all_rotate
             print_part(part);
         }
     }
-    save_possibility(fileName, poss);
+    save_solution_csv(fileName, poss, all_rotate_part);
 }
 
 /**
