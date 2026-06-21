@@ -249,12 +249,7 @@ void handle_tcpclient(int argc, const char *argv[]) {
 
     if (parent_pid == getpid()) {
         // Bilan de création : combien de process enfants ont réellement démarré.
-        int created = 0;
-        for (int c = 0; c < NB_THREADS; c++) {
-            if (childrens_pid[c] > 0) {
-                created++;
-            }
-        }
+        int created = count_created_forks(childrens_pid, NB_THREADS);
         if (created == 0) {
             // SEUL cas d'arrêt : aucun process n'a pu être créé. Rien à tuer,
             // on libère et on sort proprement.
@@ -828,12 +823,10 @@ void *server_tcp(void *param) {
         switch (type) {
             case IPC_MSG_STATS:
                 if (numBytes >= (ssize_t)(1 + sizeof(struct client_statistics))) {
-                    for (int cpt = 0; cpt < NB_THREADS; cpt++) {
-                        if (strcmp(claddr->sun_path, forkId[cpt]) == 0) {
-                            memcpy(&fork_statistics[cpt], buf + 1,
-                                   sizeof(struct client_statistics));
-                            break;
-                        }
+                    int cpt = find_fork_index(claddr->sun_path, forkId, NB_THREADS);
+                    if (cpt >= 0) {
+                        memcpy(&fork_statistics[cpt], buf + 1,
+                               sizeof(struct client_statistics));
                     }
                 }
                 break;

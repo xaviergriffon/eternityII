@@ -16,6 +16,48 @@
 #include "app/gpu_pruner.h"
 #endif // WITH_CUDA
 
+useconds_t next_no_work_sleep(useconds_t current) {
+    if (current == 0) return NO_WORK_SLEEP_START;
+    if (current >= NO_WORK_SLEEP_MAX) return NO_WORK_SLEEP_MAX;
+    useconds_t doubled = current * 2;
+    return doubled > NO_WORK_SLEEP_MAX ? NO_WORK_SLEEP_MAX : doubled;
+}
+
+void init_client_possibility(client_possibility_t *p, struct array_part *rotateParts,
+                             map_big_array *map, int id, int compteur, pid_t pid) {
+    p->works = 0;
+    p->aposs = NULL;
+    p->all_rotate_part = rotateParts;
+    p->map_part = map;
+    p->tid = NULL;
+    p->id = id;
+    p->pid = pid;
+    p->compteur = compteur;
+    p->max_shots_per_second = -1;
+    p->socket_id = -1;
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    p->works_mutex = mutex;
+    pthread_mutex_t smutex = PTHREAD_MUTEX_INITIALIZER;
+    p->socket_mutex = smutex;
+    p->last_socket_activity = time(NULL);
+    times(&p->start_socket);
+}
+
+int count_created_forks(pid_t *pids, int nb) {
+    int created = 0;
+    for (int c = 0; c < nb; c++) {
+        if (pids[c] > 0) created++;
+    }
+    return created;
+}
+
+int find_fork_index(const char *sun_path, char **forkIds, int nb) {
+    for (int i = 0; i < nb; i++) {
+        if (strcmp(sun_path, forkIds[i]) == 0) return i;
+    }
+    return -1;
+}
+
 /**
  * @brief Méthode chargée d'alimenter les threads quand lors file est à 0
  */
@@ -102,13 +144,7 @@ void *feed_thread_aposs(void *param) {
         // réarme dès qu'un travail est obtenu (ou qu'aucun thread n'en réclame).
         if (needed_work > 0 && got_work == 0)
         {
-            no_work_sleep = (no_work_sleep == 0)
-                ? NO_WORK_SLEEP_START
-                : (no_work_sleep < NO_WORK_SLEEP_MAX ? no_work_sleep * 2 : NO_WORK_SLEEP_MAX);
-            if (no_work_sleep > NO_WORK_SLEEP_MAX)
-            {
-                no_work_sleep = NO_WORK_SLEEP_MAX;
-            }
+            no_work_sleep = next_no_work_sleep(no_work_sleep);
             // Découpage en tranches pour que REQUEST_STOP interrompe le back-off
             // sans attendre la totalité de no_work_sleep (jusqu'à 500 ms).
             useconds_t remaining = no_work_sleep;
@@ -295,30 +331,16 @@ void runThreadClient(const char *file)
     struct array_part *apart= read_parts(file);
     for(i = 0; i < NB_THREADS; i++)
     {
-        thread_params[i].works = 0;
-        thread_params[i].aposs = NULL;
         struct array_part *rotateParts = rotate_all_parts(apart);
-        thread_params[i].all_rotate_part =rotateParts;
-        thread_params[i].map_part = prepare_map_part(rotateParts);
-        thread_params[i].tid = NULL;
-        thread_params[i].compteur = i;
-        thread_params[i].max_shots_per_second = -1;
-        
+        map_big_array *map = prepare_map_part(rotateParts);
+        init_client_possibility(&thread_params[i], rotateParts, map, i, i, 0);
+
         /* création d'un nouveau thread */
         pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
         pthread_attr_init(thread_attributes);
         pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
-        
-        /* Création du thread */
+
         thread_params[i].tid = malloc(sizeof(pthread_t));
-        thread_params[i].id = i;
-        thread_params[i].socket_id = -1;
-        pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-        thread_params[i].works_mutex = mutex;
-        pthread_mutex_t smutex = PTHREAD_MUTEX_INITIALIZER;
-        thread_params[i].socket_mutex = smutex;
-        thread_params[i].last_socket_activity = time(NULL);
-        times(&thread_params[i].start_socket);
         if (0 != pthread_create((thread_params[i].tid), thread_attributes, pruner_mode ? autoprune : autosearch, &(thread_params[i])))
         {
             log_error("Problème avec pthread_create()\n");
@@ -376,25 +398,11 @@ void runThreadClient(const char *file)
 void run_mono_client(const char *file)
 {
     client_possibility_t *thread_params = malloc(sizeof(*thread_params));
-    
-    struct array_part *apart= read_parts(file);
-    thread_params->works = 0;
-    thread_params->aposs = NULL;
+
+    struct array_part *apart = read_parts(file);
     struct array_part *rotateParts = rotate_all_parts(apart);
-    thread_params->all_rotate_part =rotateParts;
-    thread_params->map_part = prepare_map_part(rotateParts);
-    thread_params->tid = NULL;
-    thread_params->id = 0;
-    thread_params->pid = getpid();
-    thread_params->compteur = 0;
-    thread_params->max_shots_per_second = -1;
-    thread_params->socket_id = -1;
-    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-    thread_params->works_mutex = mutex;
-    pthread_mutex_t smutex = PTHREAD_MUTEX_INITIALIZER;
-    thread_params->socket_mutex = smutex;
-    thread_params->last_socket_activity = time(NULL);
-    times(&thread_params->start_socket);
+    map_big_array *map = prepare_map_part(rotateParts);
+    init_client_possibility(thread_params, rotateParts, map, 0, 0, getpid());
     free_array_part(apart);
 
     pthread_t feed_tid = build_feed_thread(thread_params);

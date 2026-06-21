@@ -8,8 +8,10 @@
 
 #include <pthread.h>
 #include <sys/times.h>
+#include <sys/types.h>
 #include "app/static_variables.h"
 #include "core/possibility.h"
+#include "core/part.h"
 
 /**
  * @brief Structure représentant un thread de client EternityII
@@ -63,5 +65,55 @@ void run_mono_client(const char *file);
  * @return void* null. Retourne un pointeur afin de respecter le format d'une méthode de thread.
  */
 void *check_client_threads(void *param);
+
+/**
+ * @brief Calcule la prochaine durée de back-off quand le serveur n'a rien à fournir.
+ *
+ * Fonction pure : double la valeur jusqu'au plafond `NO_WORK_SLEEP_MAX`.
+ * Retourne `NO_WORK_SLEEP_START` si `current == 0` (premier cycle à vide).
+ *
+ * @param current Valeur de pause actuelle (en µs).
+ * @return Prochaine valeur de pause (en µs).
+ */
+useconds_t next_no_work_sleep(useconds_t current);
+
+/**
+ * @brief Initialise les champs d'une structure `client_possibility_t`.
+ *
+ * Factorise l'initialisation commune à `runThreadClient` et `run_mono_client`.
+ * L'appelant fournit les tableaux de pièces et la map déjà construits ; cette
+ * fonction ne fait aucun appel réseau ni appel système autre que `time()` et
+ * `times()`.
+ *
+ * @param p          Structure à initialiser.
+ * @param rotateParts Tableau de pièces en rotation (alloué par l'appelant).
+ * @param map         Map de lookup (allouée par l'appelant via `prepare_map_part`).
+ * @param id          Identifiant logique du thread (indice dans le pool).
+ * @param compteur    Indice du compteur associé.
+ * @param pid         PID du process propriétaire (0 si non utilisé).
+ */
+void init_client_possibility(client_possibility_t *p, struct array_part *rotateParts,
+                             map_big_array *map, int id, int compteur, pid_t pid);
+
+/**
+ * @brief Compte le nombre de processus enfants effectivement créés.
+ *
+ * Un processus est considéré créé si `pids[i] > 0`.
+ *
+ * @param pids Tableau des PID (taille `nb`).
+ * @param nb   Taille du tableau.
+ * @return     Nombre d'entrées où `pids[i] > 0`.
+ */
+int count_created_forks(pid_t *pids, int nb);
+
+/**
+ * @brief Cherche l'indice du socket Unix enfant dont le `sun_path` correspond.
+ *
+ * @param sun_path Chemin à chercher.
+ * @param forkIds  Tableau de chaînes (chemins socket de chaque fork).
+ * @param nb       Taille du tableau.
+ * @return         Indice du premier correspondant, ou -1 si absent.
+ */
+int find_fork_index(const char *sun_path, char **forkIds, int nb);
 
 #endif /* etii_client_h */
