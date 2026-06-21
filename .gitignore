@@ -1,6 +1,9 @@
 
 .DS_Store
-eternityII.xcodeproj/project.xcworkspace/xcuserdata/xaviergriffon.xcuserdatad/UserInterfaceState.xcuserstate
+.claude/
+.vscode/
+.idea/
+eternityII.xcodeproj/
 eternityII
 eternityII16
 build/
