@@ -216,7 +216,6 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard. Tape
 | `help` | Affiche la liste des commandes |
 | `backup` | Sauvegarde les files de possibilités dans `eternityII.back` et `eternityII-in_analyse.back` |
 | `restore` | Restaure les files depuis les fichiers `.back` |
-| `restoreOld` | Restaure depuis un fichier `.back` au format ancien |
 | `import` | Importe des possibilités depuis les fichiers `.back` dans les files courantes |
 | `exit` | Arrête proprement le programme (sauvegarde automatique) |
 | `check` | Affiche le dernier état analysé |

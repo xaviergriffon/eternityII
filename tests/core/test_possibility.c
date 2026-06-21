@@ -11,7 +11,7 @@
  * (coordonnées explicites), donc indépendamment du parcours `directions` à 256
  * cases et sans pieces.csv.
  *
- * Build par défaut : ETERN_PARTS=256, ETERN_SIZE=16, FACES_USED_BITS actif
+ * Build par défaut : ETERN_PARTS=256, ETERN_SIZE=16 actif
  * (masque de bits via set_face_used / is_face_used, déclarés inline dans
  * possibility.h). check_possibility impose en outre, en 256, la pièce genèse
  * 139 (rotation 2) en (7,8).

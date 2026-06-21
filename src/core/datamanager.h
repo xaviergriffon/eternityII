@@ -143,17 +143,6 @@ int backup_analysed(char *filename);
  * @return 0 si OK ou -1 en cas d'erreur
  */
 int restore(char *filename);
-#ifdef FACES_USED_BITS
-/**
- * @brief Restaure les files depuis un fichier de sauvegarde au format pre-bitmask.
- *
- * Utilisé pour migrer d'anciens fichiers `.back` vers le format FACES_USED_BITS.
- *
- * @param filename Chemin du fichier à importer.
- * @return         0 si OK ou -1 en cas d'erreur.
- */
-int restore_old_file(char *filename);
-#endif // FACES_USED_BITS
 /**
  * @brief Reconstruit les files de possibiltés en cours d'analyse avec le contenu du fichier
  * 

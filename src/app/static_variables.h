@@ -98,7 +98,6 @@
 // Trace des informations sur les threads
 //#define DEBUG_THREAD
 // ------------------------------------------------
-#define FACES_USED_BITS
 
 #if FORWARD_CHECK_K > 0
 /**
