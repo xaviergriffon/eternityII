@@ -1463,9 +1463,37 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
         
 		while (currElement != NULL)
 		{
-            Element *nextElement =NULL;
+            Element *nextElement = NULL;
 			struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-			if(!possibility_all_has_a_next(possibility, mapParts, all_rotate_part))
+            int has_next = possibility_all_has_a_next(possibility, mapParts, all_rotate_part);
+            int is_solution = (possibility->alloc >= ETERN_PARTS);
+
+            if (is_solution) {
+                /* Solution complète détectée par rmnonext (packet déjà complet ou
+                 * complété via placements forcés). On sauvegarde sans appeler exit()
+                 * afin de ne pas tuer le processus serveur. */
+                static unsigned rmnonext_sol_seq = 0;
+                unsigned seq = __atomic_fetch_add(&rmnonext_sol_seq, 1, __ATOMIC_RELAXED);
+                char fileName[64];
+                snprintf(fileName, sizeof fileName, "./solution_server_%i_%u",
+                         (int)getpid(), seq);
+                log_event("SOLUTION trouvée par rmnonext (%i pièces)", possibility->alloc);
+                log_info("*** SOLUTION trouvée par rmnonext (%i pièces) ***\n", possibility->alloc);
+                save_possibility(fileName, possibility);
+                log_info("solution sauvegardée dans %s\n", fileName);
+                if (stop_on_solution) {
+                    unlock_all_file();
+                    backup("./eternityII.back");
+                    backup_analysed("./eternityII-in_analyse.back");
+                    log_event("serveur arrêté suite à la solution (stock sauvegardé)");
+                    log_info("serveur arrêté suite à la solution — stock sauvegardé\n");
+                    flush_info();
+                    exit(EXIT_SUCCESS);
+                }
+                /* Le packet complet est retiré ci-dessous (déjà traité). */
+            }
+
+			if (is_solution || !has_next)
 			{
                 // On place le suivant du précédent au suivant du courrant
 				if(currElement->previous != NULL)
@@ -1475,7 +1503,7 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                     // On est au début alors la pile commence au suivant
                     file_possibility[fp].file.start = currElement->next;
                 }
-                
+
                 // On a une suite alors le précédent du suivant devient le précédent du courrant
                 if(currElement->next != NULL)
                 {
@@ -1489,7 +1517,7 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                 free (currElement);
                 currElement = NULL;
                 file_possibility[fp].file.size--;
-                
+
 			}
             
             // Aucune suite n'a été determiné et on a un courrant alors on prend sa suite.

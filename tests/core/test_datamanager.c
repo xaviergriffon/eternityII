@@ -20,6 +20,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <glob.h>
 
 /* Non déclarée dans datamanager.h (helper interne non statique). */
 unsigned long long count_combinations(unsigned long long x);
@@ -443,6 +444,54 @@ TEST remove_no_next_prunes_dead_packets(void)
     PASS();
 }
 
+/* remove_possibilities_with_no_next : un packet complet (alloc == ETERN_PARTS)
+   doit être traité comme solution et retiré de la file — sans appeler exit().
+   Régression : avant le correctif, possibility_all_has_a_next appelait
+   checkIfResultFound → exit() en contexte serveur, tuant le processus. */
+TEST remove_no_next_handles_complete_solution(void)
+{
+    drain_all();
+    /* map minimale (non utilisée car alloc == ETERN_PARTS → boucle vide) */
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = ETERN_PARTS; /* board complet */
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    add_possibility(NULL, &arr);
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    /* stop_on_solution doit être 0 pour que la fonction ne call pas exit() */
+    extern int stop_on_solution;
+    int saved_sos = stop_on_solution;
+    stop_on_solution = 0;
+
+    silence_std();
+    remove_possibilities_with_no_next(map, &rp);
+    restore_std();
+
+    stop_on_solution = saved_sos;
+
+    /* Le packet complet doit avoir été retiré (traité comme solution, non redistributé) */
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    /* Nettoyer les fichiers solution éventuellement créés (./solution_server_<pid>_*) */
+    char pattern[64];
+    snprintf(pattern, sizeof pattern, "./solution_server_%i_*", (int)getpid());
+    glob_t gp;
+    if (glob(pattern, 0, NULL, &gp) == 0) {
+        for (size_t i = 0; i < gp.gl_pathc; i++)
+            unlink(gp.gl_pathv[i]);
+        globfree(&gp);
+    }
+
+    free_bigarray(map);
+    drain_all();
+    PASS();
+}
+
 /* send_solution : en mode local (pas de serveur), doit renvoyer -1 sans toucher
    au réseau ni planter — la solution reste sauvegardée localement par ailleurs.
    Régression liée au signalement des solutions au serveur. */
@@ -489,4 +538,5 @@ SUITE(datamanager_suite)
     RUN_TEST(get_tocheck_drains_unchecked_pool);
     RUN_TEST(remove_analysed_finds_then_misses);
     RUN_TEST(remove_no_next_prunes_dead_packets);
+    RUN_TEST(remove_no_next_handles_complete_solution);
 }
