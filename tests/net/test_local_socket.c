@@ -113,10 +113,68 @@ TEST send_command_to_childs_noop_when_not_parent(void)
     PASS();
 }
 
+/* build_udp_local_socket : bind échoue quand le répertoire parent n'existe pas.
+ * unlink/remove renvoient ENOENT (ignoré), puis bind retourne ENOENT → -1.
+ * Couvre lignes 67-69 de local_socket.c (branche bind échoue → return -1). */
+TEST build_udp_local_socket_bind_fails(void)
+{
+    /* Chemin volontairement invalide : répertoire parent absent. */
+    const char *path = "/tmp/etii_ls_no_such_parent_dir_xyz/sock";
+    struct sockaddr_un *addr = build_sockaddr(path);
+    ASSERT(addr != NULL);
+
+    int fd = build_udp_local_socket(addr);
+    ASSERT_EQ_FMT(-1, fd, "%d");
+
+    free(addr);
+    PASS();
+}
+
+/* send_command_to_childs : sendto échoue quand la destination n'existe pas.
+ * On configure les globaux comme dans le test « delivers_datagram » mais on ne
+ * crée PAS le socket destinataire → sendto retourne -1 (ENOENT) → log_errno.
+ * Couvre lignes 90-93 de local_socket.c (branche sendto échoue). */
+TEST send_command_to_childs_sendto_fails(void)
+{
+    const char *main_path = "/tmp/etii_ls_sf_main";
+    const char *ghost_path = "/tmp/etii_ls_sf_ghost_no_socket";
+
+    struct sockaddr_un *main_addr_local = build_sockaddr(main_path);
+    int main_fd = build_udp_local_socket(main_addr_local);
+    ASSERT(main_fd >= 0);
+
+    int      saved_nb = NB_THREADS;
+    pid_t    saved_pp = parent_pid;
+    char   **saved_fk = forkId;
+    int     *saved_ms = main_socket_id;
+
+    NB_THREADS = 1;
+    parent_pid = getpid();
+    forkId = malloc(sizeof(char *));
+    forkId[0] = (char *)ghost_path; /* aucun socket ici */
+    main_socket_id = &main_fd;
+
+    /* sendto vers ghost_path → ENOENT → log_errno → pas de crash */
+    send_command_to_childs("test");
+
+    free(forkId);
+    NB_THREADS = saved_nb;
+    parent_pid = saved_pp;
+    forkId = saved_fk;
+    main_socket_id = saved_ms;
+
+    close(main_fd);
+    unlink(main_path);
+    free(main_addr_local);
+    PASS();
+}
+
 SUITE(local_socket_suite)
 {
     RUN_TEST(build_sockaddr_sets_family_and_path);
     RUN_TEST(size_of_sockaddr_un_matches_path_length);
     RUN_TEST(send_command_to_childs_delivers_datagram);
     RUN_TEST(send_command_to_childs_noop_when_not_parent);
+    RUN_TEST(build_udp_local_socket_bind_fails);
+    RUN_TEST(send_command_to_childs_sendto_fails);
 }

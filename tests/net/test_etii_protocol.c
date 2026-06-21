@@ -146,10 +146,77 @@ TEST handshake_verdict_distinguishes_outcomes(void)
     PASS();
 }
 
+/* send_instruction : le send échoue quand le pair est fermé (EPIPE, SIGPIPE ignoré).
+ * Couvre la branche « result <= 0 » de send_instruction (lignes 70-71). */
+TEST send_instruction_error_on_broken_socket(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+    close(sv[1]); /* plus de lecteur côté sv[0] */
+
+    long r = send_instruction(sv[0], INST_ADD);
+    ASSERT(r <= 0); /* EPIPE avec SIGPIPE ignoré */
+
+    close(sv[0]);
+    PASS();
+}
+
+/* is_connected : le send échoue quand le pair est fermé → retourne 0.
+ * Couvre le chemin « send fails » (lignes 143-150 : shutdown + close + return 0).
+ * is_connected ferme sv[0] lui-même dans ce chemin. */
+TEST is_connected_false_when_send_fails(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+    close(sv[1]); /* send_instruction dans is_connected va échouer */
+
+    ASSERT_EQ_FMT(0, is_connected(sv[0]), "%d");
+    /* sv[0] est fermé par is_connected — pas de double close. */
+    PASS();
+}
+
+/* is_connected : le pair répond un octet qui n'est ni INST_END ni
+ * INST_TEST_CONNECTED → retourne 0 SANS fermer le socket.
+ * Couvre lignes 173-175 (branche « wrong instruction »).
+ *
+ * Mécanisme mono-thread : on pré-charge le tampon de sv[0] avec INST_ADD via sv[1]
+ * avant l'appel.  is_connected(sv[0]) envoie INST_TEST_CONNECTED (sv[1] l'absorbe),
+ * lit INST_ADD depuis son tampon → mauvaise instruction → return 0. */
+TEST is_connected_false_on_wrong_instruction(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    /* Pré-charge sv[0] avec une mauvaise instruction. */
+    send_instruction(sv[1], INST_ADD);
+
+    ASSERT_EQ_FMT(0, is_connected(sv[0]), "%d");
+    /* sv[0] n'est PAS fermé dans ce chemin (contrairement aux autres return 0). */
+    close(sv[0]);
+    close(sv[1]);
+    PASS();
+}
+
+/* send_all : retourne -1 quand le pair est fermé (EPIPE dès le premier send).
+ * Couvre ligne 126 (branche « s < 0 && errno != EINTR → return -1 »). */
+TEST send_all_error_on_broken_socket(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+    close(sv[1]); /* ferme le lecteur — tout send sur sv[0] donnera EPIPE */
+
+    unsigned char buf[64] = { 0 };
+    long r = send_all(sv[0], buf, sizeof(buf));
+    ASSERT_EQ_FMT(-1L, r, "%ld");
+
+    close(sv[0]);
+    PASS();
+}
+
 SUITE(etii_protocol_suite)
 {
-    /* Aucun envoi vers un pair fermé ici, mais on neutralise SIGPIPE par
-       prudence pour que le runner ne meure jamais sur un send rompu. */
+    /* SIGPIPE ignoré dans toute la suite : les tests avec pair fermé font des
+       send() qui génèreraient SIGPIPE → on veut -1/EPIPE, pas un signal. */
     signal(SIGPIPE, SIG_IGN);
 
     RUN_TEST(instruction_round_trip);
@@ -160,4 +227,8 @@ SUITE(etii_protocol_suite)
     RUN_TEST(is_connected_false_on_end);
     RUN_TEST(close_socket_sends_end_before_closing);
     RUN_TEST(handshake_verdict_distinguishes_outcomes);
+    RUN_TEST(send_instruction_error_on_broken_socket);
+    RUN_TEST(is_connected_false_when_send_fails);
+    RUN_TEST(is_connected_false_on_wrong_instruction);
+    RUN_TEST(send_all_error_on_broken_socket);
 }
