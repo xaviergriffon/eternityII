@@ -685,9 +685,13 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 #endif // DEBUG_RM_NO_NEXT
     if (alloc == ETERN_PARTS) {
         possibility->alloc = alloc;
-        checkIfResultFound(possibility, all_rotate_part);
+        /* Ne pas appeler checkIfResultFound ici : cette fonction est invoquée
+         * depuis des contextes variés (serveur, pruner client). Chaque appelant
+         * teste possibility->alloc >= ETERN_PARTS et gère la solution dans son
+         * propre contexte (sauvegarde + exit côté client, sauvegarde sans exit
+         * côté serveur). */
     }
-	
+
 	return result;
 }
 

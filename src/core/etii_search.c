@@ -837,7 +837,10 @@ void *autoprune (void *userdata)
             memcpy(&work, &client->aposs->possibilities[a], sizeof(work));
             // Statistique possibilité étudiée
             counters[client->compteur]++;
-            if (work.checked || possibility_all_has_a_next(&work, client->map_part, client->all_rotate_part))
+            int has_next = possibility_all_has_a_next(&work, client->map_part, client->all_rotate_part);
+            if (work.alloc >= ETERN_PARTS)
+                checkIfResultFound(&work, client->all_rotate_part); /* exits si solution complète */
+            if (work.checked || has_next)
             {
                 work.checked = 1;
                 pruner_checked++;
@@ -987,6 +990,8 @@ void *autoprune_gpu (void *userdata)
                     int cpu_alive = cpu.checked
                         ? 1
                         : possibility_all_has_a_next(&cpu, client->map_part, client->all_rotate_part);
+                    if (cpu.alloc >= ETERN_PARTS)
+                        checkIfResultFound(&cpu, client->all_rotate_part); /* exits si solution complète */
                     if ((cpu_alive ? 1 : 0) != (alive[a] ? 1 : 0))
                     {
                         log_error("gpu_pruner VERIFY: divergence vivant/mort paquet %d : gpu=%d cpu=%d\n",
