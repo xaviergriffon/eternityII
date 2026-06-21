@@ -9,10 +9,12 @@
  * il réessaie NB_ATTEMPTS fois avec sleep(1) entre chaque (≈ 9 s).
  */
 #include "greatest.h"
+#include "fork_assert.h"
 #include "net/tcpserver.h"
 #include "net/tcpclient.h"
 #include "app/static_variables.h"
 
+#include <stdlib.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -48,8 +50,45 @@ TEST client_unresolvable_host_returns_minus_one(void)
     PASS();
 }
 
+/* Port déjà occupé par un socket en écoute (sans SO_REUSEADDR) : le fils
+ * hérite du socket bloquant via fork(), tente une nouvelle écoute sur le même
+ * port → bind échoue (EADDRINUSE) → create_tcp_server appelle exit(EXIT_FAILURE).
+ * run_in_fork capture ce code de sortie.
+ * Couvre lignes 50-51 de tcpserver.c (branche bind échoue → exit). */
+static int g_blocked_port = 0;
+static void try_server_on_blocked_port(void)
+{
+    create_tcp_server(g_blocked_port, 1);
+}
+
+TEST server_bind_fails_exits(void)
+{
+    /* Occupe le port sans SO_REUSEADDR : même un socket neuf avec SO_REUSEADDR
+       ne peut pas se lier à un port activement en écoute. */
+    int blocker = socket(PF_INET, SOCK_STREAM, 0);
+    ASSERT(blocker >= 0);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = 0;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    ASSERT_EQ_FMT(0, bind(blocker, (struct sockaddr *)&addr, sizeof(addr)), "%d");
+    ASSERT_EQ_FMT(0, listen(blocker, 1), "%d");
+    socklen_t len = sizeof(addr);
+    getsockname(blocker, (struct sockaddr *)&addr, &len);
+    g_blocked_port = ntohs(addr.sin_port);
+
+    /* Le fils hérite de blocker et essaie de lier le même port → exit(EXIT_FAILURE). */
+    int exit_code = run_in_fork(try_server_on_blocked_port, NULL);
+    ASSERT_EQ_FMT(EXIT_FAILURE, exit_code, "%d");
+
+    close(blocker);
+    PASS();
+}
+
 SUITE(tcp_suite)
 {
     RUN_TEST(server_listens_and_client_connects);
     RUN_TEST(client_unresolvable_host_returns_minus_one);
+    RUN_TEST(server_bind_fails_exits);
 }
