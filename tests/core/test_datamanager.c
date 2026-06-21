@@ -23,13 +23,17 @@
 #include <fcntl.h>
 #include <glob.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
 #include <pthread.h>
 
-/* put_to_server n'est pas exposée dans datamanager.h (helper interne). */
+/* Helpers internes de datamanager.c non exposés dans datamanager.h. */
 int put_to_server(client_possibility_t *client_possibility, array_possibility_packet *possibilities);
-
-/* Non déclarée dans datamanager.h (helper interne non statique). */
 unsigned long long count_combinations(unsigned long long x);
+int check_and_connect_to_server(client_possibility_t *client_possibility);
+
+/* Globales de static_variables.c utilisées par les tests du chemin connexion. */
+extern int SERVER_PORT;
+extern volatile int request;
 
 /* Coupe temporairement stdout/stderr (fonctions verbeuses : tri, statistiques). */
 static int g_fd1 = -1, g_fd2 = -1;
@@ -1002,6 +1006,230 @@ TEST put_to_server_connection_lost(void)
     PASS();
 }
 
+/* ==========================================================================
+ * Tests de check_and_connect_to_server : chemin « socket_id == -1 »
+ *
+ * Approche : mini-serveur TCP local sur 127.0.0.1:0 (port éphémère).
+ * SERVER_PORT (extern int) est écrit avec le port assigné par bind() ; aucune
+ * modification du Makefile n'est nécessaire — create_tcp_client() est exercé
+ * tel quel.  Pour le cas « connexion refusée » on règle request=REQUEST_STOP
+ * avant l'appel afin que la boucle de reconnexion s'arrête après la première
+ * tentative (RECONNECT_SHOULD_ABORT() court-circuite le sleep de 1 s × 10).
+ * ========================================================================== */
+
+/* Ouvre un socket TCP en écoute sur 127.0.0.1:0, écrit le port dans *port et
+ * renvoie le fd.  Retourne -1 en cas d'échec. */
+static int make_local_tcp_server(int *port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = 0;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(fd); return -1; }
+    if (listen(fd, 1) < 0) { close(fd); return -1; }
+    socklen_t len = sizeof(addr);
+    getsockname(fd, (struct sockaddr *)&addr, &len);
+    *port = ntohs(addr.sin_port);
+    return fd;
+}
+
+/* Argument partagé entre le test et le thread mini-serveur de handshake. */
+typedef struct {
+    int     srv_fd;     /* fd d'écoute à passer à accept() */
+    int8_t  response;   /* octet à renvoyer après avoir reçu INST_CHECK_VERSION */
+} handshake_srv_arg_t;
+
+/* Thread mini-serveur : accepte une connexion, lit INST_CHECK_VERSION + version,
+ * renvoie response.  Simule exactement ce que etii_server fait au handshake. */
+static void *mini_srv_handshake(void *arg)
+{
+    handshake_srv_arg_t *a = arg;
+    struct sockaddr_in cli;
+    socklen_t clen = sizeof(cli);
+    int cli_fd = accept(a->srv_fd, (struct sockaddr *)&cli, &clen);
+    if (cli_fd < 0) return NULL;
+    int8_t b;
+    recv(cli_fd, &b, 1, 0);                       /* INST_CHECK_VERSION */
+    int ver;
+    recv_exact_sv(cli_fd, &ver, sizeof(ver));      /* numéro de version */
+    send(cli_fd, &a->response, 1, 0);
+    close(cli_fd);
+    return NULL;
+}
+
+/* check_and_connect_to_server : handshake accepté (INST_SUPPORTED_VERSION).
+ * Vérifie que la fonction retourne un fd >= 0 et met à jour cp.socket_id. */
+TEST connect_and_handshake_ok(void)
+{
+    drain_datamanager();
+
+    int port;
+    int srv_fd = make_local_tcp_server(&port);
+    ASSERT(srv_fd >= 0);
+
+    handshake_srv_arg_t ha = { .srv_fd = srv_fd, .response = INST_SUPPORTED_VERSION };
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_handshake, &ha);
+
+    set_server_ip("127.0.0.1");
+    SERVER_PORT = port;
+
+    client_possibility_t cp;
+    memset(&cp, 0, sizeof(cp));
+    pthread_mutex_init(&cp.socket_mutex, NULL);
+    cp.socket_id = -1;
+
+    silence_std();
+    int rc = check_and_connect_to_server(&cp);
+    restore_std();
+
+    ASSERT(rc >= 0);
+    ASSERT_EQ_FMT(rc, cp.socket_id, "%d");
+
+    pthread_join(srv, NULL);
+    close(srv_fd);
+    if (cp.socket_id >= 0) close(cp.socket_id);
+    set_server_ip(NULL);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* check_and_connect_to_server : version refusée (INST_UNSUPPORTED_VERSION).
+ * Vérifie retour == -1 et request == REQUEST_STOP. */
+TEST connect_handshake_version_rejected(void)
+{
+    drain_datamanager();
+
+    int saved_request = request;
+    request = REQUEST_CONTINUE;
+
+    int port;
+    int srv_fd = make_local_tcp_server(&port);
+    ASSERT(srv_fd >= 0);
+
+    handshake_srv_arg_t ha = { .srv_fd = srv_fd, .response = INST_UNSUPPORTED_VERSION };
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_handshake, &ha);
+
+    set_server_ip("127.0.0.1");
+    SERVER_PORT = port;
+
+    client_possibility_t cp;
+    memset(&cp, 0, sizeof(cp));
+    pthread_mutex_init(&cp.socket_mutex, NULL);
+    cp.socket_id = -1;
+
+    silence_std();
+    int rc = check_and_connect_to_server(&cp);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT_EQ_FMT(REQUEST_STOP, request, "%d");
+
+    request = saved_request;
+    pthread_join(srv, NULL);
+    close(srv_fd);
+    set_server_ip(NULL);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* check_and_connect_to_server : réponse de handshake non reconnue (INST_END →
+ * HANDSHAKE_RETRY).  Vérifie retour == -1 sans modifier request. */
+TEST connect_handshake_retry(void)
+{
+    drain_datamanager();
+
+    int saved_request = request;
+    request = REQUEST_CONTINUE;
+
+    int port;
+    int srv_fd = make_local_tcp_server(&port);
+    ASSERT(srv_fd >= 0);
+
+    handshake_srv_arg_t ha = { .srv_fd = srv_fd, .response = INST_END };
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_handshake, &ha);
+
+    set_server_ip("127.0.0.1");
+    SERVER_PORT = port;
+
+    client_possibility_t cp;
+    memset(&cp, 0, sizeof(cp));
+    pthread_mutex_init(&cp.socket_mutex, NULL);
+    cp.socket_id = -1;
+
+    silence_std();
+    int rc = check_and_connect_to_server(&cp);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    /* HANDSHAKE_RETRY ne doit PAS positionner REQUEST_STOP. */
+    ASSERT_EQ_FMT(REQUEST_CONTINUE, request, "%d");
+
+    request = saved_request;
+    pthread_join(srv, NULL);
+    close(srv_fd);
+    set_server_ip(NULL);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* check_and_connect_to_server : create_tcp_client échoue (rien n'écoute).
+ * On règle request=REQUEST_STOP pour que la boucle de reconnexion s'arrête
+ * immédiatement après la première tentative (pas de sleep de 10 × 100 ms).
+ * Vérifie retour == -1. */
+TEST connect_create_tcp_client_fails(void)
+{
+    drain_datamanager();
+
+    /* Obtient un port garanti libre : bind sans listen, ferme aussitôt. */
+    int tmp = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT(tmp >= 0);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = 0;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bind(tmp, (struct sockaddr *)&addr, sizeof(addr));
+    socklen_t len = sizeof(addr);
+    getsockname(tmp, (struct sockaddr *)&addr, &len);
+    int free_port = ntohs(addr.sin_port);
+    close(tmp);   /* personne n'écoute sur ce port */
+
+    set_server_ip("127.0.0.1");
+    SERVER_PORT = free_port;
+
+    /* REQUEST_STOP court-circuite la boucle de retry dès la 1re tentative. */
+    int saved_request = request;
+    request = REQUEST_STOP;
+
+    client_possibility_t cp;
+    memset(&cp, 0, sizeof(cp));
+    pthread_mutex_init(&cp.socket_mutex, NULL);
+    cp.socket_id = -1;
+
+    silence_std();
+    int rc = check_and_connect_to_server(&cp);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+
+    request = saved_request;
+    set_server_ip(NULL);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
 SUITE(datamanager_suite)
 {
     RUN_TEST(server_ip_round_trip);
@@ -1031,4 +1259,8 @@ SUITE(datamanager_suite)
     RUN_TEST(send_solution_server_rejects);
     RUN_TEST(put_to_server_success);
     RUN_TEST(put_to_server_connection_lost);
+    RUN_TEST(connect_and_handshake_ok);
+    RUN_TEST(connect_handshake_version_rejected);
+    RUN_TEST(connect_handshake_retry);
+    RUN_TEST(connect_create_tcp_client_fails);
 }
