@@ -267,6 +267,21 @@ int print_possibility_packet(struct possibility_packet *packet);
 int save_possibility(char *filename, struct possibility_packet *possibility);
 
 /**
+ * @brief Sérialise une solution dans un fichier CSV lisible.
+ *
+ * En-tête : `row,col,piece_id,rotation,top,right,bottom,left`.
+ * Si `all_rotate_part` est NULL, les quatre colonnes de couleur de bord
+ * sont écrites comme `-1`.
+ *
+ * @param filename        Chemin du fichier de destination.
+ * @param poss            Paquet solution.
+ * @param all_rotate_part Tableau de toutes les rotations, ou NULL.
+ * @return                0 en cas de succès, -1 en cas d'erreur.
+ */
+int save_solution_csv(const char *filename, const struct possibility_packet *poss,
+                      const struct array_part *all_rotate_part);
+
+/**
  * @brief Génère et enregistre le paquet genèse (état initial du puzzle).
  *
  * Place les indices fixes officiels (pièce 139 r2 en (7,8), etc.) et crée

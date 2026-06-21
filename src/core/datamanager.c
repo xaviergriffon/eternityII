@@ -1475,11 +1475,11 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                 static unsigned rmnonext_sol_seq = 0;
                 unsigned seq = __atomic_fetch_add(&rmnonext_sol_seq, 1, __ATOMIC_RELAXED);
                 char fileName[64];
-                snprintf(fileName, sizeof fileName, "./solution_server_%i_%u",
+                snprintf(fileName, sizeof fileName, "./solution_server_%i_%u.csv",
                          (int)getpid(), seq);
                 log_event("SOLUTION trouvée par rmnonext (%i pièces)", possibility->alloc);
                 log_info("*** SOLUTION trouvée par rmnonext (%i pièces) ***\n", possibility->alloc);
-                save_possibility(fileName, possibility);
+                save_solution_csv(fileName, possibility, all_rotate_part);
                 log_info("solution sauvegardée dans %s\n", fileName);
                 if (stop_on_solution) {
                     unlock_all_file();
