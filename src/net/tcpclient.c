@@ -12,6 +12,9 @@
 #include "ui/logger.h"
 #include "app/static_variables.h"
 
+// Interrompt les tentatives de reconnexion dès que l'arrêt est demandé.
+#define RECONNECT_SHOULD_ABORT() (request == REQUEST_STOP)
+
 #define NB_ATTEMPTS 10
 
 /**
@@ -78,11 +81,14 @@ int create_tcp_client(const char *hostname, int port)
 #ifdef DEBUG_SOCKET
 			opened_tcp--;
 #endif // DEBUG_SOCKET
-			if (t == NB_ATTEMPTS) {
+			if (t == NB_ATTEMPTS || RECONNECT_SHOULD_ABORT()) {
 				socket_id = -1;
 				break;
 			} else {
-				sleep(1);
+				// Pause interruptible : vérifie REQUEST_STOP toutes les 100 ms
+				// plutôt qu'un sleep(1) plein qui bloquerait la sortie.
+				for (int s = 0; s < 10 && !RECONNECT_SHOULD_ABORT(); s++)
+					usleep(100000);
 			}
 			
 		} else
