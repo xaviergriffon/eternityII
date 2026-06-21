@@ -109,7 +109,15 @@ void *feed_thread_aposs(void *param) {
             {
                 no_work_sleep = NO_WORK_SLEEP_MAX;
             }
-            usleep(no_work_sleep);
+            // Découpage en tranches pour que REQUEST_STOP interrompe le back-off
+            // sans attendre la totalité de no_work_sleep (jusqu'à 500 ms).
+            useconds_t remaining = no_work_sleep;
+            while (remaining > 0 && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+            {
+                useconds_t step = remaining < THREAD_MICRO_SLEEP ? remaining : THREAD_MICRO_SLEEP;
+                usleep(step);
+                remaining -= step;
+            }
         }
         else
         {
