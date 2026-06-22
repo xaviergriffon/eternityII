@@ -18,21 +18,30 @@
 #include "core/readdata.h"
 #include "net/tcpserver.h"
 
-typedef struct
-{
-    int exist;
-    pthread_t *tid;
-    int socket_id;
-    map_big_array *map_part;
-    int compteur; // Numéro de compteur
-    struct tms start_socket;
-    struct array_part *rotate_parts;
-} client_t;
-
 client_t *thread_params = NULL;
 
 // Nombre de modification des files par client
 unsigned long long *fileUpdates = NULL;
+
+int32_t clamp_pruner_batch(int32_t requested) {
+    if (requested < 1) return 1;
+    if (requested > PRUNER_BATCH_MAX) return PRUNER_BATCH_MAX;
+    return requested;
+}
+
+int find_free_thread_slot(client_t *threads, int nb) {
+    for (int t = 0; t < nb; t++) {
+        if (threads[t].exist != 0 && threads[t].socket_id == -1) return t;
+    }
+    return -1;
+}
+
+int find_empty_thread_slot(client_t *threads, int nb) {
+    for (int i = 0; i < nb; i++) {
+        if (threads[i].exist == 0) return i;
+    }
+    return -1;
+}
 
 /**
  * @brief Compte le nombre de threads serveur actuellement connectés à un client.
@@ -266,8 +275,7 @@ void *communicate_with_client (void *userdata)
                 log_error("batch tocheck : nombre demandé non reçu\n");
                 break;
             }
-            if (requested < 1) requested = 1;
-            if (requested > PRUNER_BATCH_MAX) requested = PRUNER_BATCH_MAX;
+            requested = clamp_pruner_batch(requested);
 
             if(lastPossibilityPacketSend != NULL)
             {
@@ -670,37 +678,26 @@ void runserver(const char* file)
         thread_id = -1;
         int busy_logged = 0; /* « all threads busy » : journalisé une seule fois par épisode d'attente */
         while (thread_id == -1) {
-            /* recherche d'un thread libre */
-            int t = 0;
-            for(t = 0; t < NB_THREADS; t++)
-            {
-                client_t clientt = thread_params[t];
-                if(clientt.exist != 0 && clientt.socket_id == -1)
-                {
-                    thread_id = t;
-                    thread_params[t].socket_id = client_id;
-                    times(&thread_params[t].start_socket);
-                    break;
-                }
+            /* recherche d'un thread libre (existe mais en attente de client) */
+            int t = find_free_thread_slot(thread_params, NB_THREADS);
+            if (t >= 0) {
+                thread_id = t;
+                thread_params[t].socket_id = client_id;
+                times(&thread_params[t].start_socket);
             }
 
             int nbCreated = 0;
             // A chaque affectation, on vérifie les threads pour en regéréner 1 si besoin
             // et affecter directement le client si il ne l'a pas été.
-            for(int i = 0; i < NB_THREADS; i++)
-            {
-                client_t clientt = thread_params[i];
-                if(clientt.exist == 0)
-                {
-                    create_server_thread(thread_params, i);
-                    if (thread_id == -1) {
-                        thread_id = i;
-                        thread_params[i].socket_id = client_id;
-                        times(&thread_params[i].start_socket);
-                    }
-                    nbCreated++;
-                    break;
+            int e = find_empty_thread_slot(thread_params, NB_THREADS);
+            if (e >= 0) {
+                create_server_thread(thread_params, e);
+                if (thread_id == -1) {
+                    thread_id = e;
+                    thread_params[e].socket_id = client_id;
+                    times(&thread_params[e].start_socket);
                 }
+                nbCreated++;
             }
             if (thread_id == -1 && nbCreated == 0) {
                 // Tous les threads sont occupés et aucun slot libre : on attend

@@ -166,7 +166,8 @@ TEST_SUITES_COMMON := \
                 tests/core/test_lifo.c tests/core/test_part.c tests/core/test_readdata.c tests/core/test_possibility.c tests/core/test_etii_search.c tests/core/test_datamanager.c \
                 tests/net/test_etii_protocol.c tests/net/test_local_socket.c tests/net/test_tcp.c \
                 tests/ui/test_command_history.c tests/ui/test_command_match.c tests/ui/test_command_lines.c tests/ui/test_console.c tests/ui/test_logger.c \
-                tests/app/test_static_variables.c
+                tests/app/test_static_variables.c \
+                tests/app/test_etii_client.c tests/app/test_etii_server.c
 TEST_SOLUTION16 := tests/core/test_solution16.c
 # Jeu 256 (secondaire) : runner + suites communes. Jeu 16 (principal) : + solution16.
 TEST_SRCS    := $(TEST_RUNNER) $(TEST_SUITES_COMMON)
@@ -183,7 +184,7 @@ $(SOLUTION16_H): $(SOLUTION16_JSON) $(GEN_SOLUTION16)
 # Modules de production exercés + leurs dépendances de link transitives.
 # tcpclient.c fournit le vrai create_tcp_client (plus de stub) ; tcpserver.c et
 # local_socket.c sont désormais exercés directement (boucle locale / IPC AF_UNIX).
-TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/command_history.c src/ui/command_match.c src/core/possibility.c src/net/etii_protocol.c src/core/datamanager.c src/net/local_socket.c src/net/tcpclient.c src/net/tcpserver.c src/ui/command_lines.c src/ui/console.c src/core/etii_search.c src/ui/logger.c src/app/static_variables.c
+TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/command_history.c src/ui/command_match.c src/core/possibility.c src/net/etii_protocol.c src/core/datamanager.c src/net/local_socket.c src/net/tcpclient.c src/net/tcpserver.c src/ui/command_lines.c src/ui/console.c src/core/etii_search.c src/ui/logger.c src/app/static_variables.c src/app/etii_client.c src/app/etii_server.c
 # -Isrc : en-têtes de prod en "domaine/x.h". -Itests : greatest.h / fork_assert.h
 # (harnais partagé à la racine de tests/, alors que les suites sont en sous-dossiers).
 TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -Isrc -Itests
