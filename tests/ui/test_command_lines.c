@@ -291,8 +291,17 @@ TEST do_command_line_checkdatas_runs(void)
     PASS();
 }
 
-/* NB : la commande `checkduplicate` (check_duplicate) n'est pas testée : sa
- * boucle de jointure se bloque sur un petit stock (cf. test_datamanager.c). */
+/* checkduplicate : détection de doublons -> 0 sur un stock vide.
+ * Sûr depuis le correctif du blocage de check_duplicate sur petit stock
+ * (la jointure ne porte que sur les threads réellement lancés). */
+TEST do_command_line_checkduplicate_runs(void)
+{
+    dm_drain();
+    char cmd[] = "checkduplicate";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    dm_drain();
+    PASS();
+}
 
 SUITE(command_lines_suite)
 {
@@ -313,4 +322,5 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_checkfile_requires_arg);
     RUN_TEST(do_command_line_checkdirections_runs);
     RUN_TEST(do_command_line_checkdatas_runs);
+    RUN_TEST(do_command_line_checkduplicate_runs);
 }

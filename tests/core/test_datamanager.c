@@ -1353,14 +1353,46 @@ TEST regroup_split_nolock_preserve_count(void)
     PASS();
 }
 
-/* NB : check_duplicate (et ses threads check_duplicate_thread /
- * run_check_duplicate_thread) ne sont PAS testés ici. La boucle de jointure de
- * check_duplicate attend duplicateFinish[t] == 1 pour les 8 threads, alors que
- * seuls les threads effectivement lancés voient ce drapeau réinitialisé : sur
- * un petit stock (moins de 8 threads lancés) elle attend indéfiniment un thread
- * jamais créé. Un test unitaire bornable nécessiterait un stock assez grand
- * pour garantir le lancement des 8 threads (O(n²)), ce qui sort du périmètre.
- * Ces fonctions restent listées en Raison 5 du rapport. */
+/* check_duplicate : sur un stock vide, nbCombinations == 0 -> aucun thread lancé.
+ * Régression : avant le correctif, la boucle de jointure attendait les 8 threads
+ * (duplicateFinish[t]==1) alors qu'aucun n'était lancé -> blocage infini. Désormais
+ * elle ne joint que les `spawned` threads réellement créés -> retour immédiat 0. */
+TEST check_duplicate_empty_stock_returns_immediately(void)
+{
+    drain_all();
+    silence_std();
+    int rc = check_duplicate();
+    restore_std();
+    ASSERT_EQ_FMT(0, rc, "%d");
+    drain_all();
+    PASS();
+}
+
+/* check_duplicate : petit stock (3 possibilités) -> moins de nbDuplicateThread (8)
+ * threads lancés. Régression du même blocage : la jointure attendait des threads
+ * jamais créés. Les 3 possibilités sont deux à deux distinctes (allocs différents
+ * + première case du parcours différente) -> aucun doublon -> 0. */
+TEST check_duplicate_small_stock_no_error(void)
+{
+    drain_all();
+    struct possibility_packet pks[3];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < 3; i++) {
+        pks[i].alloc = (uint16_t)(i + 1);                  /* allocs distincts */
+        pks[i].grid[dirx[0]][diry[0]] = (int16_t)(i + 1);  /* préfixes divergents */
+    }
+    array_possibility_packet arr = { .size = 3, .possibilities = pks };
+    add_possibility(NULL, &arr);
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+
+    silence_std();
+    int rc = check_duplicate();
+    restore_std();
+    ASSERT_EQ_FMT(0, rc, "%d"); /* aucun doublon, et surtout : pas de blocage */
+
+    drain_all();
+    PASS();
+}
 
 SUITE(datamanager_suite)
 {
@@ -1400,4 +1432,6 @@ SUITE(datamanager_suite)
     RUN_TEST(check_datas_flags_invalid_packet);
     RUN_TEST(sort_descending_mthread_preserves_count);
     RUN_TEST(regroup_split_nolock_preserve_count);
+    RUN_TEST(check_duplicate_empty_stock_returns_immediately);
+    RUN_TEST(check_duplicate_small_stock_no_error);
 }

@@ -1776,6 +1776,13 @@ int check_duplicate(void)
     unsigned long long position = 0;
     unsigned long long allocated = 0;
     unsigned long long remains = dataSize;
+    // Nombre de threads réellement lancés : selon la taille du stock (et donc
+    // nbCombinations) la boucle ci-dessous peut en lancer moins de
+    // nbDuplicateThread, voire aucun (stock vide/à 1 élément -> nbCombinations==0).
+    // La boucle de jointure ne doit attendre QUE ces threads-là : un index non
+    // lancé garde un duplicateFinish résiduel qui ferait boucler l'attente sans
+    // fin sur un thread jamais créé.
+    int spawned = 0;
     for (int t = 0; t < nbDuplicateThread && fp < NB_FILE_POSSIBILITY && allocated < nbCombinations; t++) {
         duplicateCount[t] = 0;
         duplicateErrors[t] = 0;
@@ -1786,6 +1793,7 @@ int check_duplicate(void)
             last = nbCombinations - allocated;
         }
         run_check_duplicate_thread(currElement, fp, position, last, t);
+        spawned++;
         // Pour le dernier -> pas besoin
         if (t < nbDuplicateThread - 1) {
             unsigned long long allocatedToThread = remains - 1;
@@ -1809,7 +1817,8 @@ int check_duplicate(void)
         }
     }
         
-    for (int t = 0; t < nbDuplicateThread; t++) {
+    // On ne joint que les threads effectivement lancés (indices 0..spawned-1).
+    for (int t = 0; t < spawned; t++) {
         int loop = 0;
         while (duplicateFinish[t] == 0) {
             sleep(1);
