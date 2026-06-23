@@ -184,7 +184,11 @@ $(SOLUTION16_H): $(SOLUTION16_JSON) $(GEN_SOLUTION16)
 # Modules de production exercés + leurs dépendances de link transitives.
 # tcpclient.c fournit le vrai create_tcp_client (plus de stub) ; tcpserver.c et
 # local_socket.c sont désormais exercés directement (boucle locale / IPC AF_UNIX).
-TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/command_history.c src/ui/command_match.c src/core/possibility.c src/net/etii_protocol.c src/core/datamanager.c src/net/local_socket.c src/net/tcpclient.c src/net/tcpserver.c src/ui/command_lines.c src/ui/console.c src/core/etii_search.c src/ui/logger.c src/app/static_variables.c src/app/etii_client.c src/app/etii_server.c
+# NB : src/core/etii_search.c est ABSENT de cette liste à dessein —
+# tests/core/test_etii_search.c l'inclut directement (#include "core/etii_search.c")
+# pour tester ses helpers static ; le compiler aussi ici provoquerait des doubles
+# symboles au link. Ce test est donc l'unique fournisseur des symboles etii_search.
+TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/command_history.c src/ui/command_match.c src/core/possibility.c src/net/etii_protocol.c src/core/datamanager.c src/net/local_socket.c src/net/tcpclient.c src/net/tcpserver.c src/ui/command_lines.c src/ui/console.c src/ui/logger.c src/app/static_variables.c src/app/etii_client.c src/app/etii_server.c
 # -Isrc : en-têtes de prod en "domaine/x.h". -Itests : greatest.h / fork_assert.h
 # (harnais partagé à la racine de tests/, alors que les suites sont en sous-dossiers).
 TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -Isrc -Itests
@@ -259,6 +263,14 @@ COV_ALL_MODULES    := $(filter-out src/ui/logger_ncurses.c,$(wildcard src/*/*.c)
 # Sous-ensemble réellement lié au binaire de test (le reste ne fournit qu'un
 # .gcno → 0 %) : les modules exercés + leurs deps de link.
 COV_LINK_MODULES   := $(TEST_MODULES)
+# Modules dont la couverture provient d'un test qui les #include directement (et
+# non d'un objet lié) : ils sont instrumentés AU TRAVERS de la TU de test, jamais
+# compilés en standalone. Sinon leur .gcno standalone (sans .gcda — jamais lié)
+# masquerait la vraie couverture dans le résumé `gcov`. gcovr, lui, fusionne par
+# fichier source et les attribue correctement quoi qu'il arrive.
+# Cf. tests/core/test_etii_search.c (#include "core/etii_search.c").
+COV_INCLUDED_MODULES   := src/core/etii_search.c
+COV_STANDALONE_MODULES := $(filter-out $(COV_INCLUDED_MODULES),$(COV_ALL_MODULES))
 
 .PHONY: coverage
 coverage:
@@ -268,9 +280,10 @@ coverage:
 	#    fils flushent leur couverture en sortant ; re-fusionner sur des .gcda
 	#    périmés provoque des avertissements « cannot merge / corrupt arc tag »).
 	@rm -f $(COV_DIR)/*.gcda
-	# 1. Instrumente TOUS les modules de production + les sources de test → un
-	#    .gcno par fichier, y compris les modules jamais exécutés (→ 0 %).
-	@for src in $(COV_ALL_MODULES) $(TEST_SRCS); do \
+	# 1. Instrumente les modules standalone + les sources de test → un .gcno par
+	#    fichier (les modules jamais exécutés → 0 %). Les COV_INCLUDED_MODULES sont
+	#    instrumentés via leur TU de test (TEST_SRCS), pas compilés seuls.
+	@for src in $(COV_STANDALONE_MODULES) $(TEST_SRCS); do \
 		gcc $(COV_CFLAGS) --coverage -pthread -c $$src \
 			-o $(COV_DIR)/`basename $${src%.c}`.o || exit 1; \
 	done
@@ -281,12 +294,19 @@ coverage:
 		$(addprefix $(COV_DIR)/,$(notdir $(COV_LINK_MODULES:.c=.o))) \
 		-lm -o $(COV_DIR)/run_tests
 	@./$(COV_DIR)/run_tests
-	@gcov -o $(COV_DIR) $(COV_ALL_MODULES) >/dev/null 2>&1 || true
+	@gcov -o $(COV_DIR) $(COV_STANDALONE_MODULES) >/dev/null 2>&1 || true
+	# Les modules inclus par un test : leur .gcov réel vient de la TU de test.
+	@gcov -o $(COV_DIR) $(TEST_SRCS) >/dev/null 2>&1 || true
 	@mv -f *.gcov $(COV_DIR)/ 2>/dev/null || true
 	@echo ""
 	@echo "===== Couverture de code (tout le code de production) ====="
-	@for src in $(COV_ALL_MODULES); do \
+	@for src in $(COV_STANDALONE_MODULES); do \
 		line=`gcov -n -o $(COV_DIR) $$src 2>/dev/null \
+			| grep -A1 "File '$$src'" | grep 'Lines executed' | head -1`; \
+		printf "  %-18s %s\n" "$$src" "$${line:-Lines executed:0.00% (non exercé)}"; \
+	done
+	@for src in $(COV_INCLUDED_MODULES); do \
+		line=`gcov -n -o $(COV_DIR) $(TEST_SRCS) 2>/dev/null \
 			| grep -A1 "File '$$src'" | grep 'Lines executed' | head -1`; \
 		printf "  %-18s %s\n" "$$src" "$${line:-Lines executed:0.00% (non exercé)}"; \
 	done
@@ -300,7 +320,7 @@ coverage:
 coverage-16: $(SOLUTION16_H)
 	@mkdir -p $(COV_DIR_16)
 	@rm -f $(COV_DIR_16)/*.gcda
-	@for src in $(COV_ALL_MODULES) $(TEST_SRCS_16); do \
+	@for src in $(COV_STANDALONE_MODULES) $(TEST_SRCS_16); do \
 		gcc $(COV_CFLAGS) -DETERN_PARTS=16 --coverage -pthread -c $$src \
 			-o $(COV_DIR_16)/`basename $${src%.c}`.o || exit 1; \
 	done
@@ -309,7 +329,8 @@ coverage-16: $(SOLUTION16_H)
 		$(addprefix $(COV_DIR_16)/,$(notdir $(COV_LINK_MODULES:.c=.o))) \
 		-lm -o $(COV_DIR_16)/run_tests
 	@./$(COV_DIR_16)/run_tests
-	@gcov -o $(COV_DIR_16) $(COV_ALL_MODULES) >/dev/null 2>&1 || true
+	@gcov -o $(COV_DIR_16) $(COV_STANDALONE_MODULES) >/dev/null 2>&1 || true
+	@gcov -o $(COV_DIR_16) $(TEST_SRCS_16) >/dev/null 2>&1 || true
 	@mv -f *.gcov $(COV_DIR_16)/ 2>/dev/null || true
 	@echo "Passe 16 instrumentée : $(COV_DIR_16)/"
 
