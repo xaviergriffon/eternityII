@@ -31,9 +31,16 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
 unsigned long long count_combinations(unsigned long long x);
 int check_and_connect_to_server(client_possibility_t *client_possibility);
 
+/* Verrou global des files + variantes « nolock » (caller doit tenir le verrou). */
+void lock_all_file(void);
+void unlock_all_file(void);
+unsigned long long regroup_datas_nolock(void);
+int split_datas_nolock(int nbsplit);
+
 /* Globales de static_variables.c utilisées par les tests du chemin connexion. */
 extern int SERVER_PORT;
 extern volatile int request;
+extern volatile uint16_t max_result;
 
 /* Coupe temporairement stdout/stderr (fonctions verbeuses : tri, statistiques). */
 static int g_fd1 = -1, g_fd2 = -1;
@@ -1230,6 +1237,131 @@ TEST connect_create_tcp_client_fails(void)
     PASS();
 }
 
+/* ==========================================================================
+ * Vérification d'intégrité des files (check_file / check_files / check_datas)
+ *
+ * check_one_file (static) est exercé transitivement par check_file/check_files.
+ * Ces fonctions ne dépendent que de la cohérence interne des structures File ;
+ * un stock construit via add_possibility est forcément cohérent -> 0.
+ * ========================================================================== */
+
+/* check_files / check_file : stock vide et stock cohérent -> 0 (pas d'incohérence). */
+TEST check_files_reports_consistent_stock(void)
+{
+    drain_all();
+    /* Stock vide : toutes les files sont cohérentes (size==0, start/end==NULL). */
+    ASSERT_EQ_FMT(0, check_files(), "%d");
+    ASSERT_EQ_FMT(0, check_file(0), "%d");
+
+    /* Stock peuplé via add_possibility : la liste chaînée reste cohérente. */
+    int allocs[] = { 1, 2, 3, 4, 5 };
+    add_packets(allocs, 5);
+    ASSERT_EQ_FMT(0, check_files(), "%d"); /* aucune incohérence détectée */
+    ASSERT_EQ_FMT(0, check_file(0), "%d");
+
+    drain_all();
+    PASS();
+}
+
+/* check_datas : sur un stock vide, lit le CSV (présent à la racine du dépôt),
+ * ne trouve aucune possibilité -> 0 erreur. */
+TEST check_datas_empty_stock_is_ok(void)
+{
+    drain_all();
+    silence_std();
+    int rc = check_datas();
+    restore_std();
+    ASSERT_EQ_FMT(0, rc, "%d");
+    drain_all();
+    PASS();
+}
+
+/* check_datas : une possibilité manifestement invalide (alloc > ETERN_PARTS)
+ * est détectée par check_possibility (-4) -> check_datas renvoie -1.
+ * Indépendant de la taille du puzzle (le garde alloc précède tout le reste). */
+TEST check_datas_flags_invalid_packet(void)
+{
+    drain_all();
+    int saved_max = max_result;
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = (uint16_t)(ETERN_PARTS + 1); /* > ETERN_PARTS -> check_possibility renvoie -4 */
+    pk.checked = 0;
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_datas();
+    restore_std();
+    ASSERT_EQ_FMT(-1, rc, "%d"); /* au moins une possibilité invalide */
+
+    max_result = saved_max; /* add_possibility a pu monter max_result, on le restaure */
+    drain_all();
+    PASS();
+}
+
+/* ==========================================================================
+ * Tri multi-thread (sort_descending_mthread -> sortdmthread -> split_datas_nolock)
+ * et détection de doublons (check_duplicate -> *_thread).
+ * ========================================================================== */
+
+/* sort_descending_mthread : variante parallèle du tri. Vérifie que le total
+ * est préservé et que les files restent cohérentes après les passes de
+ * split/regroup/tri exécutées par les threads. */
+TEST sort_descending_mthread_preserves_count(void)
+{
+    drain_all();
+    int allocs[] = { 5, 2, 8, 1, 6, 3, 9, 4 };
+    add_packets(allocs, 8);
+    ASSERT_EQ_FMT(8ULL, datas_size(), "%llu");
+
+    silence_std();
+    int rc = sort_descending_mthread();
+    restore_std();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(8ULL, datas_size(), "%llu"); /* total inchangé */
+    ASSERT_EQ_FMT(0, check_files(), "%d");      /* files toujours cohérentes */
+
+    drain_all();
+    PASS();
+}
+
+/* regroup_datas_nolock / split_datas_nolock : variantes « caller tient le verrou ».
+ * On encadre l'appel par lock_all_file()/unlock_all_file() comme le ferait le code
+ * de production, et on vérifie la préservation du total. */
+TEST regroup_split_nolock_preserve_count(void)
+{
+    drain_all();
+    int allocs[10];
+    for (int i = 0; i < 10; i++) allocs[i] = i + 1;
+    add_packets(allocs, 10);
+
+    silence_std();
+    lock_all_file();
+    split_datas_nolock(NB_FILE_POSSIBILITY);   /* réparti sur toutes les files */
+    regroup_datas_nolock();                    /* re-consolidé dans la file 0 */
+    unlock_all_file();
+    restore_std();
+
+    ASSERT_EQ_FMT(10ULL, datas_size(), "%llu"); /* total préservé */
+    ASSERT_EQ_FMT(10ULL, file_size(0), "%llu"); /* tout regroupé dans la file 0 */
+    ASSERT_EQ_FMT(0, check_files(), "%d");
+
+    drain_all();
+    PASS();
+}
+
+/* NB : check_duplicate (et ses threads check_duplicate_thread /
+ * run_check_duplicate_thread) ne sont PAS testés ici. La boucle de jointure de
+ * check_duplicate attend duplicateFinish[t] == 1 pour les 8 threads, alors que
+ * seuls les threads effectivement lancés voient ce drapeau réinitialisé : sur
+ * un petit stock (moins de 8 threads lancés) elle attend indéfiniment un thread
+ * jamais créé. Un test unitaire bornable nécessiterait un stock assez grand
+ * pour garantir le lancement des 8 threads (O(n²)), ce qui sort du périmètre.
+ * Ces fonctions restent listées en Raison 5 du rapport. */
+
 SUITE(datamanager_suite)
 {
     RUN_TEST(server_ip_round_trip);
@@ -1263,4 +1395,9 @@ SUITE(datamanager_suite)
     RUN_TEST(connect_handshake_version_rejected);
     RUN_TEST(connect_handshake_retry);
     RUN_TEST(connect_create_tcp_client_fails);
+    RUN_TEST(check_files_reports_consistent_stock);
+    RUN_TEST(check_datas_empty_stock_is_ok);
+    RUN_TEST(check_datas_flags_invalid_packet);
+    RUN_TEST(sort_descending_mthread_preserves_count);
+    RUN_TEST(regroup_split_nolock_preserve_count);
 }
