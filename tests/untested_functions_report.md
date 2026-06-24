@@ -37,9 +37,9 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Rapport des fonctions sans tests unitaires — EternityII (49 % de couverture globale)</h2>
 
 <div class="summary-grid">
-  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">54</span><span class="metric-sub">sur 271 au total</span></div>
-  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">80 %</span><span class="metric-sub">217 / 271</span></div>
-  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">60 %</span><span class="metric-sub">3103 / 5191</span></div>
+  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">48</span><span class="metric-sub">sur 271 au total</span></div>
+  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">82 %</span><span class="metric-sub">223 / 271</span></div>
+  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">62 %</span><span class="metric-sub">3222 / 5191</span></div>
   <div class="metric"><span class="metric-label">Domaine le plus touché</span><span class="metric-value" style="font-size:15px">src/app/</span><span class="metric-sub">main.c à 0 %</span></div>
 </div>
 
@@ -89,7 +89,7 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
     <div class="fn-list" style="margin:4px 0">
       <span class="fn">sort_ascending_interpreter</span><span class="fn">sort_descending_interpreter</span><span class="fn">limit_interpreter</span><span class="fn">check_interpreter</span><span class="fn">backup_interpreter</span><span class="fn">restore_interpreter</span><span class="fn">import_interpreter</span><span class="fn">loadjson_interpreter</span><span class="fn">print_interpreter</span><span class="fn">sortdm_interpreter</span><span class="fn">split_interpreter</span><span class="fn">regroup_interpreter</span><span class="fn">checkdatas_interpreter</span><span class="fn">check_duplicate_interpreter</span><span class="fn">statistic_interpreter</span><span class="fn">checkfiles_interpreter</span><span class="fn">printfile_interpreter</span><span class="fn">checkfile_interpreter</span><span class="fn">checkdirections_interpreter</span><span class="fn">rmnonext_interpreter</span><span class="fn">printanalysed_interpreter</span><span class="fn">restockanalysed_interpreter</span><span class="fn">min_interpreter</span>
     </div>
-    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couverts (via <code>do_command_line</code> dans <code>tests/ui/test_command_lines.c</code>) : <code>sort_ascending</code>, <code>sort_descending</code>, <code>limit</code>, <code>print</code>, <code>sortdm</code>, <code>split</code>, <code>regroup</code>, <code>checkdatas</code>, <code>statistic</code>, <code>checkfiles</code>, <code>printfile</code>, <code>checkfile</code>, <code>checkdirections</code>, <code>printanalysed</code>, <code>restockanalysed</code>, <code>min</code>, et désormais <code>check</code>, <code>checkduplicate</code> et <code>loadjson</code> (ce dernier exerce <code>import_json</code> de bout en bout). <strong>19 / 23 couverts.</strong> Restent uniquement les 4 qui font de l'E/S fichiers : <code>backup</code> / <code>restore</code> / <code>import</code> (round-trip <code>.back</code>) et <code>rmnonext</code> (relit le CSV) — testables via un <code>chdir</code> vers un répertoire temporaire (même schéma que <code>make test-integration</code>).</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couverts (via <code>do_command_line</code> dans <code>tests/ui/test_command_lines.c</code>) : <code>sort_ascending</code>, <code>sort_descending</code>, <code>limit</code>, <code>print</code>, <code>sortdm</code>, <code>split</code>, <code>regroup</code>, <code>checkdatas</code>, <code>statistic</code>, <code>checkfiles</code>, <code>printfile</code>, <code>checkfile</code>, <code>checkdirections</code>, <code>printanalysed</code>, <code>restockanalysed</code>, <code>min</code>, et désormais <code>check</code>, <code>checkduplicate</code> et <code>loadjson</code> (ce dernier exerce <code>import_json</code> de bout en bout). Et désormais <code>backup</code> / <code>restore</code> / <code>import</code> via un round-trip <code>.back</code> dans un répertoire temporaire (<code>chdir</code> + <code>server = 1</code> pour des noms déterministes, nettoyage avant assertions). <strong>22 / 23 couverts.</strong> Reste uniquement <code>rmnonext</code> (relit le CSV des pièces — testable de même via un <code>chdir</code>, non encore fait).</p>
   </div>
 </div>
 
@@ -114,21 +114,22 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <!-- RAISON 4 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge b-amber">11 fonctions</span>
+    <span class="badge b-amber">7 fonctions</span>
     <span class="section-title">Terminal / PTY requis (isatty, ioctl, raw mode)</span>
   </div>
   <div class="reason-box r-amber">
     <div class="reason-label">Raison technique</div>
     <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px">Ces fonctions retournent immédiatement ou ne sont jamais appelées si <code>isatty(STDIN_FILENO)</code> ou <code>isatty(STDOUT_FILENO)</code> est faux — ce qui est toujours le cas en CI (stdout est un pipe). Les fonctions de la zone ANSI (<code>redraw_event_zone_locked</code>, <code>event_zone_loop</code>) ne sont atteintes que si <code>zone_active == 1</code>, ce qui nécessite un vrai terminal avec <code>TIOCGWINSZ</code>. Les tester nécessiterait de lancer un pseudo-terminal (PTY) via <code>openpty()</code>.</p>
-    <div class="file-ref">src/ui/console.c</div>
+    <div class="file-ref">src/ui/console.c — reste <code>run_console</code> (lance le thread console)</div>
     <div class="fn-list" style="margin:4px 0 8px">
-      <span class="fn">try_enable_raw_mode</span><span class="fn">getcmdline_raw</span><span class="fn">restore_termios_on_exit</span><span class="fn">console</span><span class="fn">run_console</span>
+      <span class="fn">run_console</span>
     </div>
     <div class="file-ref">src/ui/logger.c</div>
     <div class="fn-list" style="margin:4px 0">
       <span class="fn">query_terminal_rows</span><span class="fn">redraw_event_zone_locked</span><span class="fn">event_zone_loop</span><span class="fn">status_zone_init</span><span class="fn">status_zone_teardown</span><span class="fn">clear_console</span>
     </div>
-    <p style="font-size:12px;color:var(--color-text-secondary);margin:8px 0 0">Précision : <code>status_zone_init</code>, <code>status_zone_teardown</code> et <code>clear_console</code> ont leur première ligne couverte (garde <code>isatty</code>), mais leur corps réel (manipulation d'écran ANSI) est à 0 %.</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couverts (<code>tests/ui/test_console.c</code>) : le chemin <strong>raw</strong> de la console — <code>try_enable_raw_mode</code>, <code>getcmdline_raw</code> (74 %, avec backspace + flèches ↑/↓), <code>restore_termios_on_exit</code> — exercé via un vrai pseudo-terminal monté avec <code>posix_openpt</code> (POSIX, sans dépendance <code>-lutil</code> ni modification du Makefile), l'enfant lisant « exit » en mode raw. <code>console</code> l'était déjà (chemin cooked + EOF).</p>
+    <p style="font-size:12px;color:var(--color-text-secondary);margin:8px 0 0">Précision : <code>status_zone_init</code>, <code>status_zone_teardown</code> et <code>clear_console</code> ont leur première ligne couverte (garde <code>isatty</code>), mais leur corps réel (manipulation d'écran ANSI) est à 0 % — il faudrait un PTY <em>avec</em> <code>zone_active</code> et <code>TIOCGWINSZ</code>.</p>
   </div>
 </div>
 
@@ -186,15 +187,13 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <!-- RAISON 8 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge b-amber">1 fonction</span>
-    <span class="section-title">IPC parent-enfant (log_send_to_parent)</span>
+    <span class="badge" style="background:#E1F5EE;color:#0F6E56">2 fonctions — couvertes</span>
+    <span class="section-title">IPC parent-enfant (log_send_to_parent, import_json)</span>
   </div>
   <div class="reason-box r-purple">
     <div class="reason-label">Raison technique</div>
-    <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px"><code>log_send_to_parent</code> n'est appelée que si <code>log_should_route_to_parent()</code> est vrai, ce qui exige simultanément <code>parent_pid != getpid()</code>, <code>fork_checker_socket_id &gt; 0</code> et <code>main_addr != NULL</code>. Un <strong>fork n'est pas strictement nécessaire</strong> : dans un seul process, pointer ces trois globales sur un socket UDP récepteur lié à une adresse temporaire (et <code>parent_pid</code> sur une valeur ≠ <code>getpid()</code>), émettre un log, puis <code>recvfrom</code> le datagramme pour l'asserter — faisable, non encore fait.</p>
-    <div class="fn-list" style="margin:4px 0">
-      <span class="fn">log_send_to_parent</span><span class="fn" style="font-size:11px">src/ui/logger.c</span>
-    </div>
+    <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px"><code>log_send_to_parent</code> n'est appelée que si <code>log_should_route_to_parent()</code> est vrai, ce qui exige simultanément <code>parent_pid != getpid()</code>, <code>fork_checker_socket_id &gt; 0</code> et <code>main_addr != NULL</code>. Un <strong>fork n'est pas strictement nécessaire</strong> : dans un seul process, pointer ces trois globales sur un socket UDP récepteur lié à une adresse temporaire (et <code>parent_pid</code> sur une valeur ≠ <code>getpid()</code>), émettre un log, puis <code>recvfrom</code> le datagramme pour l'asserter.</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couvert (<code>tests/ui/test_logger.c</code>) : <code>log_send_to_parent</code> + <code>log_should_route_to_parent</code> — câblés (sans fork) sur un socket Unix DGRAM récepteur local ; le datagramme (octet de type <code>IPC_MSG_LOG_INFO</code> + texte) est relu par <code>recvfrom</code> et asserté. Exactement l'approche décrite ci-dessus.</p>
     <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couvert (<code>tests/core/test_datamanager.c</code>) : <code>import_json</code>. <strong>Correction du rapport</strong> : il ne lit PAS <code>STDIN</code> mais une chaîne JSON <em>codée en dur</em> dans le module — il draine les files puis ajoute exactement 1 possibilité (vérifié par <code>datas_size()</code>, sûr en build 256 comme 16 car <code>compute_grid</code> borne l'écriture à <code>ETERN_SIZE</code>).</p>
   </div>
 </div>

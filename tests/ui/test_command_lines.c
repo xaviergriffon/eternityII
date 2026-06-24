@@ -324,6 +324,64 @@ TEST do_command_line_loadjson_runs(void)
     PASS();
 }
 
+/* backup / restore / import : ces interprètes écrivent/lisent DEF_FILE relatif
+   ("./eternityII.back") -> on travaille dans un répertoire temporaire dédié, et
+   server = 1 rend les noms déterministes (pas de suffixe _<pid> côté client).
+   Round-trip : backup d'un stock, restore après vidage (total restauré), puis
+   import par-dessus (total doublé). Le nettoyage (chdir retour, unlink, rmdir,
+   restauration des globales) précède toute assertion : un échec ne doit jamais
+   laisser le CWD dans le répertoire temporaire et casser les suites suivantes. */
+TEST do_command_line_backup_restore_import_round_trip(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_bk_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+    int saved_server = server;
+    server = 1;
+
+    dm_drain();
+    int allocs[] = { 1, 2, 3, 4 };
+    dm_add(allocs, 4);
+
+    char backup[] = "backup";
+    int r_backup = run_command_quiet(backup);
+    int back_exists = access("./eternityII.back", F_OK) == 0;
+    int an_exists   = access("./eternityII-in_analyse.back", F_OK) == 0;
+
+    dm_drain();
+    unsigned long long after_drain = datas_size();
+    char restore[] = "restore";
+    int r_restore = run_command_quiet(restore);
+    unsigned long long after_restore = datas_size();
+
+    char import[] = "import";
+    int r_import = run_command_quiet(import);
+    unsigned long long after_import = datas_size();
+
+    /* --- nettoyage avant toute assertion --- */
+    dm_drain();
+    unlink("./eternityII.back");
+    unlink("./eternityII-in_analyse.back");
+    if (chdir(saved_cwd) != 0) { /* best-effort : rien de mieux à faire ici */ }
+    rmdir(dir);
+    server = saved_server;
+
+    ASSERT_EQ_FMT(0, r_backup, "%d");
+    ASSERT(back_exists);
+    ASSERT(an_exists);
+    ASSERT_EQ_FMT(0ULL, after_drain, "%llu");
+    ASSERT_EQ_FMT(0, r_restore, "%d");
+    ASSERT_EQ_FMT(4ULL, after_restore, "%llu");  /* les 4 possibilités sont revenues */
+    ASSERT_EQ_FMT(0, r_import, "%d");
+    ASSERT_EQ_FMT(8ULL, after_import, "%llu");   /* import ajoute par-dessus -> 4 + 4 */
+    PASS();
+}
+
 SUITE(command_lines_suite)
 {
     RUN_TEST(do_command_line_handles_empty_input);
@@ -346,4 +404,5 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_checkduplicate_runs);
     RUN_TEST(do_command_line_check_runs);
     RUN_TEST(do_command_line_loadjson_runs);
+    RUN_TEST(do_command_line_backup_restore_import_round_trip);
 }
