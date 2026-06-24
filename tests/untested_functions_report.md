@@ -37,9 +37,9 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Rapport des fonctions sans tests unitaires — EternityII (49 % de couverture globale)</h2>
 
 <div class="summary-grid">
-  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">48</span><span class="metric-sub">sur 271 au total</span></div>
-  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">82 %</span><span class="metric-sub">223 / 271</span></div>
-  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">62 %</span><span class="metric-sub">3222 / 5191</span></div>
+  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">37</span><span class="metric-sub">sur 271 au total</span></div>
+  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">86 %</span><span class="metric-sub">234 / 271</span></div>
+  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">64 %</span><span class="metric-sub">3313 / 5191</span></div>
   <div class="metric"><span class="metric-label">Domaine le plus touché</span><span class="metric-value" style="font-size:15px">src/app/</span><span class="metric-sub">main.c à 0 %</span></div>
 </div>
 
@@ -55,7 +55,7 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <!-- RAISON 1 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge b-red">37 fonctions</span>
+    <span class="badge b-red">26 fonctions</span>
     <span class="section-title">Orchestration multi-thread / multi-processus</span>
   </div>
   <div class="reason-box r-red">
@@ -65,14 +65,15 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
     <div class="fn-list" style="margin:4px 0 8px">
       <span class="fn">feed_thread_aposs</span><span class="fn">build_feed_thread</span><span class="fn">control_thread</span><span class="fn">build_control_thread</span><span class="fn">runThreadClient</span><span class="fn">run_mono_client</span><span class="fn">check_client_threads</span>
     </div>
-    <div class="file-ref">src/app/etii_server.c — 7 fonctions</div>
+    <div class="file-ref">src/app/etii_server.c — 6 fonctions</div>
     <div class="fn-list" style="margin:4px 0 8px">
-      <span class="fn">runserver</span><span class="fn">communicate_with_client</span><span class="fn">create_server_thread</span><span class="fn">rmnonext_thread</span><span class="fn">create_rmnonext_thread</span><span class="fn">get_active_threads</span><span class="fn">check_server</span>
+      <span class="fn">runserver</span><span class="fn">communicate_with_client</span><span class="fn">create_server_thread</span><span class="fn">rmnonext_thread</span><span class="fn">create_rmnonext_thread</span><span class="fn">check_server</span>
     </div>
-    <div class="file-ref">src/app/main.c — 23 fonctions</div>
+    <div class="file-ref">src/app/main.c — 13 fonctions (entry-point : non linké au binaire de test car il définit <code>main()</code>)</div>
     <div class="fn-list" style="margin:4px 0">
-      <span class="fn">main</span><span class="fn">handle_tcpclient</span><span class="fn">handle_tcpserver</span><span class="fn">handle_test</span><span class="fn">run_client</span><span class="fn">run_auto</span><span class="fn">run_checker</span><span class="fn">fork_checker</span><span class="fn">run_fork_checker</span><span class="fn">init_counters</span><span class="fn">signal_ignored</span><span class="fn">signal_end_handler</span><span class="fn">sigchld_handler</span><span class="fn">init_sigchld_sigaction</span><span class="fn">wait_child</span><span class="fn">server_tcp</span><span class="fn">run_server_thread</span><span class="fn">fork_udp</span><span class="fn">run_fork_thread</span><span class="fn">init_childs</span><span class="fn">init_signals</span><span class="fn">configure_child_signals</span><span class="fn">failed_arg</span>
+      <span class="fn">main</span><span class="fn">handle_tcpclient</span><span class="fn">handle_tcpserver</span><span class="fn">handle_test</span><span class="fn">run_client</span><span class="fn">run_auto</span><span class="fn">run_checker</span><span class="fn">fork_checker</span><span class="fn">run_fork_checker</span><span class="fn">server_tcp</span><span class="fn">run_server_thread</span><span class="fn">fork_udp</span><span class="fn">run_fork_thread</span>
     </div>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couvertes (11) : <code>get_active_threads</code> (<code>tests/app/test_etii_server.c</code> — fonction pure déjà liée) ; et, après <strong>extraction de <code>main.c</code> vers le nouveau module <code>src/app/app_runtime.c</code></strong>, les 10 fonctions de plomberie <code>init_counters</code>, <code>init_childs</code>, <code>failed_arg</code>, <code>signal_ignored</code>, <code>signal_end_handler</code>, <code>sigchld_handler</code>, <code>init_sigchld_sigaction</code>, <code>init_signals</code>, <code>configure_child_signals</code>, <code>wait_child</code> (<code>tests/app/test_app_runtime.c</code> — module à <strong>94 %</strong> ; chaque test sauvegarde/restaure la disposition des signaux pour ne pas casser le runner). Restent les 26 véritables boucles bloquantes (<code>accept()</code> / <code>while(1)</code> / fork) et l'entry-point <code>main</code> — légitimement hors périmètre unitaire.</p>
   </div>
 </div>
 
