@@ -303,6 +303,27 @@ TEST do_command_line_checkduplicate_runs(void)
     PASS();
 }
 
+/* check : réaffiche le dernier rapport `lastcheck` en place -> 0. lastcheck peut
+   être NULL (jamais calculé en test), le ternaire de l'interprète le gère. */
+TEST do_command_line_check_runs(void)
+{
+    char cmd[] = "check";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    PASS();
+}
+
+/* loadjson : importe la possibilité depuis la chaîne JSON codée en dur du module
+   (via import_json) -> 0, et exactement 1 possibilité au stock local. */
+TEST do_command_line_loadjson_runs(void)
+{
+    dm_drain();
+    char cmd[] = "loadjson";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    dm_drain();
+    PASS();
+}
+
 SUITE(command_lines_suite)
 {
     RUN_TEST(do_command_line_handles_empty_input);
@@ -323,4 +344,6 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_checkdirections_runs);
     RUN_TEST(do_command_line_checkdatas_runs);
     RUN_TEST(do_command_line_checkduplicate_runs);
+    RUN_TEST(do_command_line_check_runs);
+    RUN_TEST(do_command_line_loadjson_runs);
 }

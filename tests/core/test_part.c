@@ -186,6 +186,33 @@ TEST build_big_array_lookup_finds_unique_part(void)
 }
 
 /* --------------------------------------------------------------------------
+ * prepare_map_part : wrapper enchaînant search_max_face puis buildBigArray.
+ * On vérifie qu'il produit une map équivalente à l'enchaînement manuel testé
+ * ci-dessus (même lookup exact sur la pièce 1).
+ * ------------------------------------------------------------------------ */
+TEST prepare_map_part_builds_lookup_equivalent_to_manual(void)
+{
+    struct part parts[] = {
+        { .id = 0 },                                              /* bouchon bordure */
+        { .id = 1, .top = 1, .right = 2, .bottom = 3, .left = 1 },
+        { .id = 2, .top = 2, .right = 1, .bottom = 1, .left = 2 },
+    };
+    struct array_part a = { .size = 3, .parts = parts };
+
+    map_big_array *map = prepare_map_part(&a);
+    ASSERT(map != NULL);
+
+    /* le wrapper a bien dimensionné la map sur maxFace -> lookup exact pièce 1 */
+    int8_t key[4] = { 1, 2, 3, 1 };
+    struct array_part *hit = get_parts_bigarray(map, key);
+    ASSERT_EQ_FMT(1, hit->size, "%d");
+    ASSERT_EQ_FMT(1, (int)hit->parts[0].id, "%d");
+
+    free_bigarray(map);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
  * convert_p / hashmap_hash_int / hash : helpers purs
  * ------------------------------------------------------------------------ */
 
@@ -304,6 +331,7 @@ SUITE(part_suite)
     RUN_TEST(copy_array_part_is_a_deep_copy);
     RUN_TEST(id_for_rotated_part_uses_etern_parts_stride);
     RUN_TEST(build_big_array_lookup_finds_unique_part);
+    RUN_TEST(prepare_map_part_builds_lookup_equivalent_to_manual);
     RUN_TEST(convert_p_maps_minus_one_to_max);
     RUN_TEST(hashmap_hash_int_is_deterministic_and_bounded);
     RUN_TEST(hash_is_deterministic_and_distinguishes);

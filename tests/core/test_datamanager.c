@@ -37,6 +37,14 @@ void unlock_all_file(void);
 unsigned long long regroup_datas_nolock(void);
 int split_datas_nolock(int nbsplit);
 
+/* Affichage de progression de check_duplicate (en prod, atteint uniquement après
+   30 s d'attente d'un thread) + ses compteurs globaux (tableaux de nbDuplicateThread == 8). */
+void print_duplicate_activity(unsigned long long dataSize, unsigned long long nbCombinations);
+extern unsigned long long duplicateCount[];
+extern unsigned long long duplicateErrors[];
+extern unsigned long long duplicateFinish[];
+extern unsigned long long duplicateAnalyzed[];
+
 /* Globales de static_variables.c utilisées par les tests du chemin connexion. */
 extern int SERVER_PORT;
 extern volatile int request;
@@ -1394,6 +1402,45 @@ TEST check_duplicate_small_stock_no_error(void)
     PASS();
 }
 
+/* import_json : importe une possibilité depuis la chaîne JSON CODÉE EN DUR du
+ * module (et non depuis STDIN). Elle draine d'abord toutes les files puis ajoute
+ * exactement 1 possibilité au stock local (add_possibility, server_ip == NULL).
+ * Le plateau JSON est 16×16 mais compute_grid borne l'écriture à ETERN_SIZE :
+ * l'import est donc sûr aussi bien en build 256 qu'en build 16. Le flag `checked`
+ * du paquet n'est pas initialisé par read_from_json, mais put_to_pool route
+ * chaque paquet dans exactement un pool et datas_size() somme les deux -> le
+ * total vaut 1 quelle que soit la valeur résiduelle. */
+TEST import_json_loads_single_possibility(void)
+{
+    drain_all();
+    silence_std();              /* read_from_json/compute_grid impriment la trace de parsing */
+    int rc = import_json();
+    restore_std();
+    ASSERT_EQ_FMT(1, rc, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* print_duplicate_activity : purement de l'affichage de progression. En prod elle
+ * n'est atteinte qu'au bout de 30 s d'attente d'un thread dans la boucle de
+ * jointure de check_duplicate -> jamais touchée par les tests fonctionnels. On
+ * l'appelle directement avec les compteurs globaux positionnés à la main, en
+ * couvrant les deux branches du décompte (thread actif vs terminé). */
+TEST print_duplicate_activity_aggregates_counters(void)
+{
+    for (int t = 0; t < 8; t++) {                 /* nbDuplicateThread == 8 */
+        duplicateCount[t]    = (unsigned long long)t;
+        duplicateErrors[t]   = (t == 0) ? 2ULL : 0ULL;
+        duplicateAnalyzed[t] = (unsigned long long)(t * 3);
+        duplicateFinish[t]   = (unsigned long long)(t % 2); /* moitié actifs, moitié finis */
+    }
+    silence_std();
+    print_duplicate_activity(100, 50);            /* nbCombinations > 0 -> ratio fini */
+    restore_std();
+    PASS();
+}
+
 SUITE(datamanager_suite)
 {
     RUN_TEST(server_ip_round_trip);
@@ -1434,4 +1481,6 @@ SUITE(datamanager_suite)
     RUN_TEST(regroup_split_nolock_preserve_count);
     RUN_TEST(check_duplicate_empty_stock_returns_immediately);
     RUN_TEST(check_duplicate_small_stock_no_error);
+    RUN_TEST(import_json_loads_single_possibility);
+    RUN_TEST(print_duplicate_activity_aggregates_counters);
 }
