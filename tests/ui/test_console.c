@@ -10,6 +10,11 @@
  * fallback ligne-par-ligne), status_zone_init() (non-tty -> no-op), et le
  * dispatch do_command_line("exit").
  */
+/* Doit précéder tout include : sur la glibc, posix_openpt/grantpt/unlockpt/ptsname
+   ne sont déclarés qu'avec _XOPEN_SOURCE >= 600 (ou _GNU_SOURCE). Sans ça, sous
+   -std=gnu99 (qui n'active que _DEFAULT_SOURCE) ils sont implicitement déclarés et
+   ptsname() est supposée renvoyer un int -> pointeur tronqué -> open() échoue. */
+#define _GNU_SOURCE 1
 #include "greatest.h"
 #include "ui/console.h"
 #include "app/static_variables.h"
