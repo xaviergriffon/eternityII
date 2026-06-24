@@ -37,9 +37,9 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Rapport des fonctions sans tests unitaires — EternityII (49 % de couverture globale)</h2>
 
 <div class="summary-grid">
-  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">37</span><span class="metric-sub">sur 273 au total</span></div>
-  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">86 %</span><span class="metric-sub">236 / 273</span></div>
-  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">64 %</span><span class="metric-sub">3350 / 5204</span></div>
+  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">34</span><span class="metric-sub">sur 273 au total</span></div>
+  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">88 %</span><span class="metric-sub">239 / 273</span></div>
+  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">66 %</span><span class="metric-sub">3430 / 5204</span></div>
   <div class="metric"><span class="metric-label">Domaine le plus touché</span><span class="metric-value" style="font-size:15px">src/app/</span><span class="metric-sub">main.c à 0 %</span></div>
 </div>
 
@@ -116,22 +116,18 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <!-- RAISON 4 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge b-amber">7 fonctions</span>
+    <span class="badge b-amber">1 fonction</span>
     <span class="section-title">Terminal / PTY requis (isatty, ioctl, raw mode)</span>
   </div>
   <div class="reason-box r-amber">
     <div class="reason-label">Raison technique</div>
     <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px">Ces fonctions retournent immédiatement ou ne sont jamais appelées si <code>isatty(STDIN_FILENO)</code> ou <code>isatty(STDOUT_FILENO)</code> est faux — ce qui est toujours le cas en CI (stdout est un pipe). Les fonctions de la zone ANSI (<code>redraw_event_zone_locked</code>, <code>event_zone_loop</code>) ne sont atteintes que si <code>zone_active == 1</code>, ce qui nécessite un vrai terminal avec <code>TIOCGWINSZ</code>. Les tester nécessiterait de lancer un pseudo-terminal (PTY) via <code>openpty()</code>.</p>
-    <div class="file-ref">src/ui/console.c — reste <code>run_console</code> (lance le thread console)</div>
+    <div class="file-ref">src/ui/console.c — reste seulement <code>run_console</code> (lance le thread console — non testable)</div>
     <div class="fn-list" style="margin:4px 0 8px">
       <span class="fn">run_console</span>
     </div>
-    <div class="file-ref">src/ui/logger.c</div>
-    <div class="fn-list" style="margin:4px 0">
-      <span class="fn">query_terminal_rows</span><span class="fn">redraw_event_zone_locked</span><span class="fn">event_zone_loop</span><span class="fn">status_zone_init</span><span class="fn">status_zone_teardown</span><span class="fn">clear_console</span>
-    </div>
-    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couverts (<code>tests/ui/test_console.c</code>) : le chemin <strong>raw</strong> de la console — <code>try_enable_raw_mode</code>, <code>getcmdline_raw</code> (74 %, avec backspace + flèches ↑/↓), <code>restore_termios_on_exit</code> — exercé via un vrai pseudo-terminal monté avec <code>posix_openpt</code> (POSIX, sans dépendance <code>-lutil</code> ni modification du Makefile), l'enfant lisant « exit » en mode raw. <code>console</code> l'était déjà (chemin cooked + EOF).</p>
-    <p style="font-size:12px;color:var(--color-text-secondary);margin:8px 0 0">Précision : <code>status_zone_init</code>, <code>status_zone_teardown</code> et <code>clear_console</code> ont leur première ligne couverte (garde <code>isatty</code>), mais leur corps réel (manipulation d'écran ANSI) est à 0 % — il faudrait un PTY <em>avec</em> <code>zone_active</code> et <code>TIOCGWINSZ</code>.</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Couvert (<code>tests/ui/test_console.c</code>) : le chemin <strong>raw</strong> de la console — <code>try_enable_raw_mode</code>, <code>getcmdline_raw</code> (74 %, avec backspace + flèches ↑/↓), <code>restore_termios_on_exit</code> — via un PTY monté avec <code>posix_openpt</code> (POSIX, sans <code>-lutil</code>). <code>console</code> l'était déjà (cooked + EOF).</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ <strong>Tout le cycle de vie de la zone fixe ANSI</strong> est désormais couvert (<code>tests/ui/test_logger.c</code>) : <code>status_zone_init</code>, <code>status_zone_teardown</code>, <code>clear_console</code>, <code>query_terminal_rows</code>, <code>redraw_event_zone_locked</code> et le thread <code>event_zone_loop</code> — exercés dans un fils dont <strong>stdout est l'esclave d'un PTY</strong> (taille fixée via <code>TIOCSWINSZ</code> ; sortie par <code>exit(0)</code> pour que gcov écrive la couverture ; <code>alarm()</code> garde-fou). <code>logger.c</code> passe à <strong>89 % de lignes / 100 % de fonctions</strong>. Restent seulement les branches de redimensionnement et les chemins d'erreur (<code>pthread_create</code>/<code>ioctl</code> en échec).</p>
   </div>
 </div>
 
