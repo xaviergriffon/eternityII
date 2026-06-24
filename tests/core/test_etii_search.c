@@ -26,10 +26,17 @@
 #include "core/lifo.h"             /* File, big_table */
 #include "core/datamanager.h"      /* datas_size, get_last_possibility */
 #include "core/possibility.h"
-#include "app/static_variables.h"  /* max_stock_by_thread */
+#include "core/part.h"             /* prepare_map_part, rotate_all_parts */
+#include "core/readdata.h"         /* read_parts */
+#include "app/static_variables.h"  /* max_stock_by_thread, request, counters… */
+#include "fork_assert.h"           /* run_in_fork (chemins qui exit()) */
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <dirent.h>
 
 /* ======================================================================
  * checkAndDelegatePossibilitiesIfNeeded(_with_big_table)
@@ -303,6 +310,442 @@ TEST bt_forward_check_detects_dead_cells(void)
 }
 #endif /* FORWARD_CHECK_K > 0 */
 
+/* ======================================================================
+ * Délégation / flush / matérialisation de la pile de décisions.
+ *
+ * bt_materialize_pending, bt_delegate_if_needed et bt_flush_pending sont la
+ * frontière « format paquet » du backtracking in-place. On les exerce sans
+ * serveur (server_ip == NULL → add_possibility route vers le datamanager
+ * local) ni puzzle réel : un client minimal pointe sur une map UNIFORME
+ * (chaque clé -> mêmes candidats libres, comme make_uniform_map) si bien que le
+ * forward-checking passe toujours et que la matérialisation est déterministe,
+ * indépendamment de ETERN_PARTS.
+ *
+ * Fixture : pile à 2 niveaux le long du parcours dirx/diry depuis la racine
+ *   niveau 0 (case dirx[0]) : candidats [1,2,3], pièce 1 posée, next_s=1
+ *   niveau 1 (case dirx[1]) : candidats [4,5],   pièce 4 posée, next_s=1
+ * -> 3 frères non explorés (pièces 2,3 au niveau 0 ; pièce 5 au niveau 1).
+ * ====================================================================== */
+
+/* counters/lastfilesize sont des pointeurs alloués par init_counters() (main.c,
+ * absent du binaire de test) : on les alloue ici pour l'indice compteur 0. */
+static void ensure_counters(void)
+{
+    if (counters == NULL)     counters     = calloc(NB_THREADS, sizeof(*counters));
+    if (lastfilesize == NULL) lastfilesize = calloc(NB_THREADS, sizeof(*lastfilesize));
+}
+
+/* idParts comme dans autosearch : idParts[p][r] = p + ETERN_PARTS*r. */
+static void fill_idparts(int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
+{
+    for (int p = 0; p <= ETERN_PARTS; p++) {
+        int base = p;
+        for (int r = 0; r < PART_SIZES; r++) { idParts[p][r] = (int16_t)base; base += ETERN_PARTS; }
+    }
+}
+
+/* Pièces aux faces PETITES (toutes dans {0,1,2}) : indispensables dès qu'on POSE
+ * des pièces, car what_search_in_grid_to_key indexe la map par les couleurs de
+ * faces des voisins. make_parts() a des faces jusqu'à ~73 qui déborderaient le
+ * flat[3^4] de make_free_map (le test bt_forward_check l'évitait en gardant le
+ * plateau vide). 8 pièces (ids 1..8) couvrent les ids posés + les candidats. */
+static struct array_part *make_small_parts(void)
+{
+    static struct part parts[8];
+    static struct array_part ap;
+    for (int i = 0; i < 8; i++) {
+        memset(&parts[i], 0, sizeof(struct part));
+        parts[i].id     = (int16_t)(i + 1);
+        parts[i].top    = (int8_t)(i % 3);
+        parts[i].right  = (int8_t)((i + 1) % 3);
+        parts[i].bottom = (int8_t)((i + 2) % 3);
+        parts[i].left   = (int8_t)(i % 3);
+        parts[i].rotation = 0;
+    }
+    ap.size = 8;
+    ap.parts = parts;
+    return &ap;
+}
+
+/* Map uniforme dont CHAQUE clé renvoie [pièce 6, pièce 7] (toujours libres dans
+ * nos fixtures) : le forward-checking trouve donc toujours un candidat. */
+static map_big_array *make_free_map(void)
+{
+    static struct part cand[2] = { { .id = 6 }, { .id = 7 } };
+    static struct array_part list = { .size = 2, .parts = cand };
+    static map_big_array map;
+    static struct array_part flat[3 * 3 * 3 * 3];
+    map.sizearray  = 3;
+    map.sizearrayM = 2;
+    map.arena = NULL;
+    map.flat = flat;
+    for (int i = 0; i < 3 * 3 * 3 * 3; i++) flat[i] = list;
+    return &map;
+}
+
+/* Listes de candidats des deux niveaux (statiques : la pile garde des pointeurs). */
+static struct part lvl0_parts[3];
+static struct part lvl1_parts[2];
+static struct array_part lvl0_list;
+static struct array_part lvl1_list;
+
+/* Remplit board + stack (2 niveaux) et le client minimal. Renvoie top (=1). */
+static int build_two_level_fixture(struct possibility_packet *board, bt_level stack[2],
+                                   client_possibility_t *client)
+{
+    for (int i = 0; i < 3; i++) { memset(&lvl0_parts[i], 0, sizeof(struct part)); lvl0_parts[i].id = (int16_t)(i + 1); }
+    for (int i = 0; i < 2; i++) { memset(&lvl1_parts[i], 0, sizeof(struct part)); lvl1_parts[i].id = (int16_t)(i + 4); }
+    lvl0_list.size = 3; lvl0_list.parts = lvl0_parts; /* [1,2,3] */
+    lvl1_list.size = 2; lvl1_list.parts = lvl1_parts; /* [4,5]   */
+
+    make_empty_board(board);
+    /* Chemin courant : pièce 1 en dirx[0], pièce 4 en dirx[1]. */
+    board->grid[dirx[0]][diry[0]] = 1;
+    board->grid[dirx[1]][diry[1]] = 4;
+    set_face_used(board->b_faceused, 0, 1); /* pièce 1 */
+    set_face_used(board->b_faceused, 3, 1); /* pièce 4 */
+    board->alloc = 2;
+
+    stack[0].search = &lvl0_list; stack[0].next_s = 1; stack[0].placed_pos = 0; /* pièce 1 */
+    stack[1].search = &lvl1_list; stack[1].next_s = 1; stack[1].placed_pos = 3; /* pièce 4 */
+
+    memset(client, 0, sizeof(*client));
+    client->compteur = 0;
+    client->map_part = make_free_map();
+    client->all_rotate_part = make_small_parts();
+    return 1;
+}
+
+/* bt_materialize_pending : matérialise les frères du plus profond vers la racine. */
+TEST bt_materialize_pending_orders_deepest_first(void)
+{
+    drain_local();
+    ensure_counters();
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    struct possibility_packet out[8];
+    int new_next_s[2];
+    int n = bt_materialize_pending(&client, &board, stack, top, 0, idParts, out, 8, new_next_s);
+
+    /* 3 frères : pièce 5 (niveau 1, le plus profond), puis pièces 2 et 3 (niveau 0). */
+    ASSERT_EQ_FMT(3, n, "%d");
+    /* out[0] = niveau 1 : pièce 5 en dirx[1], alloc = 2 (= d+1, d=1). */
+    ASSERT_EQ_FMT(2, (int)out[0].alloc, "%d");
+    ASSERT_EQ_FMT(5, (int)out[0].grid[dirx[1]][diry[1]], "%d");
+    ASSERT(is_face_used(out[0].b_faceused, 4)); /* pièce 5 */
+    /* out[1] = niveau 0 : pièce 2 en dirx[0], alloc = 1 (= d+1, d=0). */
+    ASSERT_EQ_FMT(1, (int)out[1].alloc, "%d");
+    ASSERT_EQ_FMT(2, (int)out[1].grid[dirx[0]][diry[0]], "%d");
+    /* Positions de reprise consommées : niveau 1 épuisé (2), niveau 0 épuisé (3). */
+    ASSERT_EQ_FMT(2, new_next_s[1], "%d");
+    ASSERT_EQ_FMT(3, new_next_s[0], "%d");
+
+    PASS();
+}
+
+/* bt_materialize_pending : la limite max_out borne le nombre de paquets ; les
+ * niveaux non parcourus gardent leur next_s d'origine. */
+TEST bt_materialize_pending_respects_max_out(void)
+{
+    drain_local();
+    ensure_counters();
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    struct possibility_packet out[8];
+    int new_next_s[2];
+    int n = bt_materialize_pending(&client, &board, stack, top, 0, idParts, out, 1, new_next_s);
+
+    ASSERT_EQ_FMT(1, n, "%d");                 /* un seul (le plus profond) */
+    ASSERT_EQ_FMT(2, new_next_s[1], "%d");      /* niveau 1 consommé */
+    ASSERT_EQ_FMT(1, new_next_s[0], "%d");      /* niveau 0 inchangé (next_s d'origine) */
+
+    PASS();
+}
+
+/* bt_delegate_if_needed : stock implicite sous le seuil -> aucun envoi. */
+TEST bt_delegate_noop_below_threshold(void)
+{
+    drain_local();
+    ensure_counters();
+    max_stock_by_thread = 10;
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts);
+
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");          /* rien délégué */
+    ASSERT_EQ_FMT(3ULL, lastfilesize[0], "%llu");        /* pending = 3 enregistré */
+    ASSERT_EQ_FMT(1, stack[1].next_s, "%d");             /* pile inchangée */
+
+    PASS();
+}
+
+/* bt_delegate_if_needed : stock au-dessus du seuil -> max_stock_by_thread délégués
+ * au pool local, pile avancée, lastfilesize décrémenté du nombre envoyé. */
+TEST bt_delegate_moves_excess_to_local(void)
+{
+    drain_local();
+    ensure_counters();
+    max_stock_by_thread = 1;
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts);
+
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");           /* 1 possibilité déléguée */
+    ASSERT_EQ_FMT(2, stack[1].next_s, "%d");             /* niveau profond consommé */
+    ASSERT_EQ_FMT(2ULL, lastfilesize[0], "%llu");        /* 3 - 1 restant local */
+
+    drain_local();
+    PASS();
+}
+
+/* bt_flush_pending : renvoie TOUS les frères (3) + le paquet du chemin courant. */
+TEST bt_flush_pending_sends_all_plus_current(void)
+{
+    drain_local();
+    ensure_counters();
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    bt_flush_pending(&client, &board, stack, top, 0, idParts);
+
+    /* 3 frères matérialisés + 1 paquet « chemin courant » = 4. */
+    ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
+
+    drain_local();
+    PASS();
+}
+
+/* search_packet_backtracking : un REQUEST_STOP dès la racine renvoie tout le
+ * travail (ici : juste le paquet du chemin courant) au serveur local et sort
+ * avec le code « arrêt demandé » (1). Couvre la branche REQUEST_STOP + bt_flush. */
+TEST search_backtracking_stop_flushes_and_returns_one(void)
+{
+    drain_local();
+    ensure_counters();
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof(client));
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+
+    struct possibility_packet root;
+    make_empty_board(&root);
+    root.alloc = 0;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    int saved = request;
+    request = REQUEST_STOP;
+    int rc = search_packet_backtracking(&client, &root, idParts);
+    request = saved;
+
+    ASSERT_EQ_FMT(1, rc, "%d");                  /* arrêt demandé */
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");    /* le chemin courant renvoyé */
+
+    drain_local();
+    PASS();
+}
+
+#if ETERN_PARTS == 16
+/* ======================================================================
+ * Moteur de backtracking de bout en bout, sur le VRAI puzzle 4×4.
+ *
+ * L'espace de recherche 4×4 est fini et minuscule : lancé depuis la racine vide
+ * (alloc = 0), search_packet_backtracking explore tout l'arbre et RETOURNE — pas
+ * de boucle infinie, pas de thread. Et comme une solution existe, le parcours
+ * passe forcément par record_solution. Sans serveur (server_ip == NULL),
+ * send_solution est un no-op et log_solution écrit un fichier solution_*.csv
+ * dans le CWD : on isole l'appel dans un fork chdir()é vers un tmpdir.
+ * ====================================================================== */
+
+/* Contenu de data/pieces16.csv, embarqué (indépendance au CWD). */
+static const char *ES_PIECES16_CSV =
+    "ntiles: 16\n"
+    "1 3 0 1 5\n"  "2 2 4 0 0\n"  "3 0 0 1 2\n"  "4 1 7 2 0\n"
+    "5 8 6 6 8\n"  "6 7 3 0 4\n"  "7 5 7 6 6\n"  "8 8 3 0 3\n"
+    "9 1 0 3 7\n"  "10 0 4 2 0\n" "11 6 5 7 7\n" "12 1 0 0 3\n"
+    "13 6 5 8 5\n" "14 0 4 8 4\n" "15 0 2 5 4\n" "16 2 8 1 0\n";
+
+static struct array_part *es_make_rotate_parts(void)
+{
+    char path[] = "/tmp/etii_es_pieces16_XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) return NULL;
+    FILE *fp = fdopen(fd, "w");
+    if (fp == NULL) { close(fd); return NULL; }
+    fputs(ES_PIECES16_CSV, fp);
+    fclose(fp);
+    struct array_part *apart = read_parts(path);
+    unlink(path);
+    if (apart == NULL) return NULL;
+    struct array_part *rot = rotate_all_parts(apart);
+    free_array_part(apart);
+    return rot;
+}
+
+/* Contexte partagé avec les fonctions-fils (copié par fork). */
+static client_possibility_t es_client;
+static struct possibility_packet es_root;
+static int16_t es_idParts[ETERN_PARTS + 1][PART_SIZES];
+static char es_solution_dir[256];
+
+/* Fils : explore tout l'arbre (stop_on_solution = 0). record_solution NE sort
+ * pas ; la recherche revient avec 0 (sous-arbre épuisé). */
+static void es_child_full_explore(void)
+{
+    if (chdir(es_solution_dir) != 0) _exit(97);
+    stop_on_solution = 0;
+    request = REQUEST_CONTINUE;
+    int rc = search_packet_backtracking(&es_client, &es_root, es_idParts);
+    _exit(rc == 0 ? 0 : 3);
+}
+
+/* Fils : stop_on_solution = 1. La 1re solution déclenche record_solution ->
+ * exit(EXIT_SUCCESS) : on ne revient jamais au _exit(99) ci-dessous. */
+static void es_child_stop_on_solution(void)
+{
+    if (chdir(es_solution_dir) != 0) _exit(97);
+    stop_on_solution = 1;
+    request = REQUEST_CONTINUE;
+    search_packet_backtracking(&es_client, &es_root, es_idParts);
+    _exit(99); /* solution non trouvée / pas d'exit : échec */
+}
+
+/* Vrai : au moins un fichier solution_*.csv existe dans dir. */
+static int es_has_solution_file(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (d == NULL) return 0;
+    struct dirent *e;
+    int found = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "solution_", 9) == 0) { found = 1; break; }
+    }
+    closedir(d);
+    return found;
+}
+
+static void es_unlink_solutions(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (d == NULL) return;
+    struct dirent *e;
+    char path[512];
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "solution_", 9) == 0) {
+            snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+            unlink(path);
+        }
+    }
+    closedir(d);
+}
+
+/* Prépare es_client / es_root / es_idParts depuis pieces16.csv. */
+static int es_setup(void)
+{
+    struct array_part *rot = es_make_rotate_parts();
+    if (rot == NULL) return 0;
+    map_big_array *map = prepare_map_part(rot);
+    if (map == NULL) return 0;
+
+    memset(&es_client, 0, sizeof(es_client));
+    es_client.compteur = 0;
+    es_client.all_rotate_part = rot;
+    es_client.map_part = map;
+
+    make_empty_board(&es_root);
+    es_root.alloc = 0;
+
+    fill_idparts(es_idParts);
+    return 1;
+}
+
+/* Exploration complète : la recherche trouve la solution (fichier écrit) puis
+ * épuise l'arbre et retourne 0. Couvre search_packet_backtracking (chemin
+ * « solution puis goto backtrack ») et record_solution (sans exit). */
+TEST search_backtracking_solves_4x4_and_returns_zero(void)
+{
+    ensure_counters();
+    ASSERT(es_setup());
+
+    strcpy(es_solution_dir, "/tmp/etii_es_sol_XXXXXX");
+    ASSERT(mkdtemp(es_solution_dir) != NULL);
+
+    pid_t pid = 0;
+    int code = run_in_fork(es_child_full_explore, &pid);
+
+    int had_solution = es_has_solution_file(es_solution_dir);
+    es_unlink_solutions(es_solution_dir);
+    rmdir(es_solution_dir);
+
+    ASSERT_EQ_FMT(0, code, "%d");    /* sous-arbre entièrement exploré */
+    ASSERT(had_solution);            /* la solution a bien été enregistrée */
+
+    free_bigarray(es_client.map_part);
+    free_array_part(es_client.all_rotate_part);
+    PASS();
+}
+
+/* stop_on_solution = 1 : la 1re solution provoque exit(EXIT_SUCCESS) via
+ * record_solution. Couvre la branche d'arrêt-sur-solution. */
+TEST search_backtracking_stop_on_solution_exits_success(void)
+{
+    ensure_counters();
+    ASSERT(es_setup());
+
+    strcpy(es_solution_dir, "/tmp/etii_es_sos_XXXXXX");
+    ASSERT(mkdtemp(es_solution_dir) != NULL);
+
+    pid_t pid = 0;
+    int code = run_in_fork(es_child_stop_on_solution, &pid);
+
+    es_unlink_solutions(es_solution_dir);
+    rmdir(es_solution_dir);
+
+    ASSERT_EQ_FMT(EXIT_SUCCESS, code, "%d"); /* exit via record_solution */
+
+    free_bigarray(es_client.map_part);
+    free_array_part(es_client.all_rotate_part);
+    PASS();
+}
+#endif /* ETERN_PARTS == 16 */
+
 SUITE(etii_search_suite)
 {
     RUN_TEST(delegate_noop_below_threshold);
@@ -313,5 +756,15 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_count_pending_counts_remaining_free);
 #if FORWARD_CHECK_K > 0
     RUN_TEST(bt_forward_check_detects_dead_cells);
+#endif
+    RUN_TEST(bt_materialize_pending_orders_deepest_first);
+    RUN_TEST(bt_materialize_pending_respects_max_out);
+    RUN_TEST(bt_delegate_noop_below_threshold);
+    RUN_TEST(bt_delegate_moves_excess_to_local);
+    RUN_TEST(bt_flush_pending_sends_all_plus_current);
+    RUN_TEST(search_backtracking_stop_flushes_and_returns_one);
+#if ETERN_PARTS == 16
+    RUN_TEST(search_backtracking_solves_4x4_and_returns_zero);
+    RUN_TEST(search_backtracking_stop_on_solution_exits_success);
 #endif
 }

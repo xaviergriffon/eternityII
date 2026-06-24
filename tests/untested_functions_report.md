@@ -37,10 +37,10 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Rapport des fonctions sans tests unitaires — EternityII (49 % de couverture globale)</h2>
 
 <div class="summary-grid">
-  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">98</span><span class="metric-sub">sur 264 au total</span></div>
-  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">63 %</span><span class="metric-sub">166 / 264</span></div>
-  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">49 %</span><span class="metric-sub">2537 / 5179</span></div>
-  <div class="metric"><span class="metric-label">Domaine le plus touché</span><span class="metric-value" style="font-size:15px">src/app/</span><span class="metric-sub">0,8 % des lignes</span></div>
+  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">58</span><span class="metric-sub">sur 271 au total</span></div>
+  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">79 %</span><span class="metric-sub">213 / 271</span></div>
+  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">59 %</span><span class="metric-sub">3057 / 5191</span></div>
+  <div class="metric"><span class="metric-label">Domaine le plus touché</span><span class="metric-value" style="font-size:15px">src/app/</span><span class="metric-sub">main.c à 0 %</span></div>
 </div>
 
 <div class="legend">
@@ -96,17 +96,18 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <!-- RAISON 3 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge b-amber">12 fonctions</span>
-    <span class="section-title">Moteur de recherche backtracking (état complet requis)</span>
+    <span class="badge" style="background:#E1F5EE;color:#0F6E56">12 fonctions — couvertes</span>
+    <span class="section-title">Moteur de recherche backtracking (résolu via le build 16 pièces)</span>
   </div>
-  <div class="reason-box r-amber">
-    <div class="reason-label">Raison technique</div>
-    <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px">Ces fonctions opèrent sur une structure d'état complète : map 4D des pièces, pile de backtracking, contraintes propagées, possibilité en cours. <code>autosearch</code> et <code>search_packet_backtracking</code> sont des boucles d'exploration potentiellement infinies. Les fonctions de délégation TCP (<code>checkAndDelegate…</code>, <code>bt_flush_pending</code>) nécessitent une connexion serveur active.</p>
+  <div class="reason-box r-teal">
+    <div class="reason-label">Raison technique (obsolète)</div>
+    <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px">On pensait ces fonctions intestables : structure d'état complète (map 4D, pile de backtracking, contraintes propagées), <code>search_packet_backtracking</code> vue comme une boucle d'exploration potentiellement infinie, et délégation supposée exiger une connexion serveur active. <strong>Les deux verrous tombent en <code>ETERN_PARTS=16</code></strong> : l'espace 4×4 est fini, donc la recherche lancée depuis la racine vide explore tout l'arbre et <em>retourne</em> (pas de thread, pas de timeout) en passant forcément par <code>record_solution</code> — la solution existe ; et le mode local (<code>server_ip == NULL</code>) fait de <code>send_solution</code> un no-op pendant qu'<code>add_possibility</code> route vers le datamanager local, donc aucun serveur n'est requis pour la délégation.</p>
     <div class="file-ref">src/core/etii_search.c</div>
     <div class="fn-list" style="margin:4px 0">
       <span class="fn">bt_init_constraints</span><span class="fn">bt_propagate_place</span><span class="fn">bt_propagate_undo</span><span class="fn">bt_forward_check</span><span class="fn">bt_count_pending</span><span class="fn">bt_materialize_pending</span><span class="fn">bt_delegate_if_needed</span><span class="fn">bt_flush_pending</span><span class="fn">search_packet_backtracking</span><span class="fn">record_solution</span><span class="fn">checkAndDelegatePossibilitiesIfNeeded</span><span class="fn">checkAndDelegatePossibilitiesIfNeeded_with_big_table</span>
     </div>
-    <p style="font-size:12px;color:var(--color-text-secondary);margin:8px 0 0">Note : <code>autoprune</code> et <code>autoprune_gpu</code> sont dans la même situation mais comptabilisés dans src/app/ (0 %). <code>autosearch</code> a 2 lignes couvertes via l'initialisation du thread.</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Couverts (<code>tests/core/test_etii_search.c</code>, etii_search.c passe à 62 % en build 16) : les 5 helpers <code>bt_*</code> + les 2 <code>checkAndDelegate…</code> l'étaient déjà ; ajoutés ici — <code>bt_materialize_pending</code> / <code>bt_delegate_if_needed</code> / <code>bt_flush_pending</code> sur pile montée à la main avec une map uniforme (déterministes, indépendants de la taille) ; <code>search_packet_backtracking</code> + <code>record_solution</code> de bout en bout sur le vrai puzzle 4×4 : la solution est trouvée et enregistrée (fichier <code>solution_*.csv</code>) puis l'arbre est épuisé (retour 0), plus la branche <code>--stop-on-solution</code> (<code>exit(EXIT_SUCCESS)</code> via <code>run_in_fork</code>) et la branche <code>REQUEST_STOP</code> (flush + retour 1).</p>
+    <p style="font-size:12px;color:var(--color-text-secondary);margin:8px 0 0">Subtilité : <code>bt_delegate_if_needed</code> est inatteignable par la boucle naturelle en 4×4 (sa fréquence est bornée à 1 000 000 nœuds + <code>DELEGATE_MIN_INTERVAL_MS</code>) — d'où l'appel direct. Restent hors périmètre unitaire : <code>autoprune</code> / <code>autoprune_gpu</code> (boucles de thread pruner, comptées dans src/app/) et la branche <code>REQUEST_PAUSE</code> (spin mono-thread).</p>
   </div>
 </div>
 
