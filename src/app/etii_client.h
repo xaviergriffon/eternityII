@@ -116,4 +116,14 @@ int count_created_forks(pid_t *pids, int nb);
  */
 int find_fork_index(const char *sun_path, char **forkIds, int nb);
 
+/**
+ * @brief Construit le tableau « Thread queues » du rapport client (une ligne par
+ *        fork + Total) dans une chaîne allouée ; renvoie via out-params (NULL
+ *        accepté) le stock total, l'analysed total et la somme des coups/s, et
+ *        met à jour max_result. Buffer dimensionné sur NB_THREADS. À libérer.
+ */
+char *build_thread_queues_table(unsigned long long *out_stock,
+                                unsigned long long *out_analysed,
+                                unsigned long long *out_shots_per_sec);
+
 #endif /* etii_client_h */

@@ -94,4 +94,13 @@ int find_empty_thread_slot(client_t *threads, int nb);
  */
 int get_active_threads(client_t *thread_params);
 
+/**
+ * @brief Construit le tableau « File queues » du rapport serveur (une ligne par
+ *        file + Total) dans une chaîne allouée ; renvoie les totaux par pool via
+ *        les out-params (NULL accepté). À libérer par l'appelant.
+ */
+char *build_file_queues_table(unsigned long long *out_unchecked,
+                              unsigned long long *out_checked,
+                              unsigned long long *out_analysed);
+
 #endif /* etii_server_h */

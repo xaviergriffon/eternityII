@@ -37,9 +37,9 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Rapport des fonctions sans tests unitaires — EternityII (49 % de couverture globale)</h2>
 
 <div class="summary-grid">
-  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">37</span><span class="metric-sub">sur 271 au total</span></div>
-  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">86 %</span><span class="metric-sub">234 / 271</span></div>
-  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">64 %</span><span class="metric-sub">3313 / 5191</span></div>
+  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">37</span><span class="metric-sub">sur 273 au total</span></div>
+  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">86 %</span><span class="metric-sub">236 / 273</span></div>
+  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">64 %</span><span class="metric-sub">3350 / 5204</span></div>
   <div class="metric"><span class="metric-label">Domaine le plus touché</span><span class="metric-value" style="font-size:15px">src/app/</span><span class="metric-sub">main.c à 0 %</span></div>
 </div>
 
@@ -74,6 +74,7 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
       <span class="fn">main</span><span class="fn">handle_tcpclient</span><span class="fn">handle_tcpserver</span><span class="fn">handle_test</span><span class="fn">run_client</span><span class="fn">run_auto</span><span class="fn">run_checker</span><span class="fn">fork_checker</span><span class="fn">run_fork_checker</span><span class="fn">server_tcp</span><span class="fn">run_server_thread</span><span class="fn">fork_udp</span><span class="fn">run_fork_thread</span>
     </div>
     <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couvertes (11) : <code>get_active_threads</code> (<code>tests/app/test_etii_server.c</code> — fonction pure déjà liée) ; et, après <strong>extraction de <code>main.c</code> vers le nouveau module <code>src/app/app_runtime.c</code></strong>, les 10 fonctions de plomberie <code>init_counters</code>, <code>init_childs</code>, <code>failed_arg</code>, <code>signal_ignored</code>, <code>signal_end_handler</code>, <code>sigchld_handler</code>, <code>init_sigchld_sigaction</code>, <code>init_signals</code>, <code>configure_child_signals</code>, <code>wait_child</code> (<code>tests/app/test_app_runtime.c</code> — module à <strong>94 %</strong> ; chaque test sauvegarde/restaure la disposition des signaux pour ne pas casser le runner). Restent les 26 véritables boucles bloquantes (<code>accept()</code> / <code>while(1)</code> / fork) et l'entry-point <code>main</code> — légitimement hors périmètre unitaire.</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ <strong>Découpe des corps de boucle (Tier 1)</strong> : les deux boucles de <em>rapport de stats</em> <code>check_server</code> et <code>check_client_threads</code> restent des coquilles <code>while(1)+sleep</code> intestables, mais leur cœur — la construction des tableaux formatés — a été extrait dans des helpers purs couverts à 100 % : <code>build_file_queues_table</code> (<code>tests/app/test_etii_server.c</code>) et <code>build_thread_queues_table</code> (<code>tests/app/test_etii_client.c</code>). Le débordement de tas historique de la table client est désormais verrouillé par un test <code>NB_THREADS=100</code> sous ASan.</p>
   </div>
 </div>
 
