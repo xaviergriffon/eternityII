@@ -37,9 +37,9 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Rapport des fonctions sans tests unitaires — EternityII (49 % de couverture globale)</h2>
 
 <div class="summary-grid">
-  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">58</span><span class="metric-sub">sur 271 au total</span></div>
-  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">79 %</span><span class="metric-sub">213 / 271</span></div>
-  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">59 %</span><span class="metric-sub">3057 / 5191</span></div>
+  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">54</span><span class="metric-sub">sur 271 au total</span></div>
+  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">80 %</span><span class="metric-sub">217 / 271</span></div>
+  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">60 %</span><span class="metric-sub">3103 / 5191</span></div>
   <div class="metric"><span class="metric-label">Domaine le plus touché</span><span class="metric-value" style="font-size:15px">src/app/</span><span class="metric-sub">main.c à 0 %</span></div>
 </div>
 
@@ -89,7 +89,7 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
     <div class="fn-list" style="margin:4px 0">
       <span class="fn">sort_ascending_interpreter</span><span class="fn">sort_descending_interpreter</span><span class="fn">limit_interpreter</span><span class="fn">check_interpreter</span><span class="fn">backup_interpreter</span><span class="fn">restore_interpreter</span><span class="fn">import_interpreter</span><span class="fn">loadjson_interpreter</span><span class="fn">print_interpreter</span><span class="fn">sortdm_interpreter</span><span class="fn">split_interpreter</span><span class="fn">regroup_interpreter</span><span class="fn">checkdatas_interpreter</span><span class="fn">check_duplicate_interpreter</span><span class="fn">statistic_interpreter</span><span class="fn">checkfiles_interpreter</span><span class="fn">printfile_interpreter</span><span class="fn">checkfile_interpreter</span><span class="fn">checkdirections_interpreter</span><span class="fn">rmnonext_interpreter</span><span class="fn">printanalysed_interpreter</span><span class="fn">restockanalysed_interpreter</span><span class="fn">min_interpreter</span>
     </div>
-    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couverts (via <code>do_command_line</code> dans <code>tests/ui/test_command_lines.c</code>) : <code>sort_ascending</code>, <code>sort_descending</code>, <code>limit</code>, <code>print</code>, <code>sortdm</code>, <code>split</code>, <code>regroup</code>, <code>checkdatas</code>, <code>statistic</code>, <code>checkfiles</code>, <code>printfile</code>, <code>checkfile</code>, <code>checkdirections</code>, <code>printanalysed</code>, <code>restockanalysed</code>, <code>min</code>. Restent : ceux qui exigent un serveur/des fichiers ou appellent <code>exit()</code> (<code>check</code>, <code>backup</code>, <code>restore</code>, <code>import</code>, <code>loadjson</code>, <code>rmnonext</code>, <code>check_duplicate</code>).</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couverts (via <code>do_command_line</code> dans <code>tests/ui/test_command_lines.c</code>) : <code>sort_ascending</code>, <code>sort_descending</code>, <code>limit</code>, <code>print</code>, <code>sortdm</code>, <code>split</code>, <code>regroup</code>, <code>checkdatas</code>, <code>statistic</code>, <code>checkfiles</code>, <code>printfile</code>, <code>checkfile</code>, <code>checkdirections</code>, <code>printanalysed</code>, <code>restockanalysed</code>, <code>min</code>, et désormais <code>check</code>, <code>checkduplicate</code> et <code>loadjson</code> (ce dernier exerce <code>import_json</code> de bout en bout). <strong>19 / 23 couverts.</strong> Restent uniquement les 4 qui font de l'E/S fichiers : <code>backup</code> / <code>restore</code> / <code>import</code> (round-trip <code>.back</code>) et <code>rmnonext</code> (relit le CSV) — testables via un <code>chdir</code> vers un répertoire temporaire (même schéma que <code>make test-integration</code>).</p>
   </div>
 </div>
 
@@ -135,7 +135,7 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <!-- RAISON 5 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge b-gray">9 fonctions</span>
+    <span class="badge" style="background:#E1F5EE;color:#0F6E56">9 fonctions — couvertes</span>
     <span class="section-title">Commandes datamanager complexes (check_duplicate, sort mthread)</span>
   </div>
   <div class="reason-box r-gray">
@@ -145,7 +145,7 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
     <div class="fn-list" style="margin:4px 0">
       <span class="fn">check_duplicate</span><span class="fn">check_duplicate_thread</span><span class="fn">run_check_duplicate_thread</span><span class="fn">print_duplicate_args</span><span class="fn">print_duplicate_activity</span><span class="fn">sort_descending_mthread</span><span class="fn">sortdmthread</span><span class="fn">regroup_datas_nolock</span><span class="fn">split_datas_nolock</span>
     </div>
-    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couverts (<code>tests/core/test_datamanager.c</code>) : <code>sort_descending_mthread</code>, <code>sortdmthread</code>, <code>split_datas_nolock</code>, <code>regroup_datas_nolock</code> (tri parallèle + variantes « nolock » sous verrou explicite, total préservé), et <code>check_duplicate</code> / <code>check_duplicate_thread</code> / <code>run_check_duplicate_thread</code> (stock vide → retour immédiat ; petit stock distinct → 0). <strong>Bug corrigé</strong> : la boucle de jointure attendait <code>duplicateFinish[t]==1</code> pour les 8 threads alors que seuls les threads réellement lancés réinitialisent ce drapeau ; sur un petit stock (&lt; 8 threads) elle se bloquait indéfiniment. Elle ne joint désormais que les <code>spawned</code> threads effectivement créés.</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couverts (<code>tests/core/test_datamanager.c</code>) : <code>sort_descending_mthread</code>, <code>sortdmthread</code>, <code>split_datas_nolock</code>, <code>regroup_datas_nolock</code> (tri parallèle + variantes « nolock » sous verrou explicite, total préservé), et <code>check_duplicate</code> / <code>check_duplicate_thread</code> / <code>run_check_duplicate_thread</code> (stock vide → retour immédiat ; petit stock distinct → 0). Les deux helpers d'affichage sont aussi couverts : <code>print_duplicate_args</code> (transitivement, le petit stock lance un thread via <code>run_check_duplicate_thread</code>) et <code>print_duplicate_activity</code> (appel direct avec compteurs positionnés à la main — en prod elle n'est atteinte qu'après 30 s d'attente d'un thread dans la boucle de jointure). <strong>9 / 9 couverts.</strong> <strong>Bug corrigé</strong> : la boucle de jointure attendait <code>duplicateFinish[t]==1</code> pour les 8 threads alors que seuls les threads réellement lancés réinitialisent ce drapeau ; sur un petit stock (&lt; 8 threads) elle se bloquait indéfiniment. Elle ne joint désormais que les <code>spawned</code> threads effectivement créés.</p>
   </div>
 </div>
 
@@ -169,33 +169,33 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <!-- RAISON 7 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge" style="background:#E1F5EE;color:#0F6E56">3 fonctions</span>
+    <span class="badge b-teal" style="background:#FAEEDA;color:#854F0B">2 fonctions</span>
     <span class="section-title">Puzzle 256 pièces hardcodé (ETERN_PARTS == 256)</span>
   </div>
   <div class="reason-box r-teal">
     <div class="reason-label">Raison technique</div>
-    <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px"><code>first_possibility</code> génère toutes les positions de départ du puzzle 16×16 à partir de pièces connues (139, 208, 255…). La couverture est mesurée en build 256 pièces (<code>ETERN_PARTS=256</code>) mais cette fonction sort immédiatement si <code>ETERN_PARTS != 256</code>. <code>part_139_i8</code> est un helper qu'elle appelle. <code>prepare_map_part</code> est le point d'entrée de préparation appelé uniquement par <code>etii_client.c</code> et <code>etii_server.c</code>.</p>
+    <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px"><code>first_possibility</code> génère toutes les positions de départ du puzzle 16×16 à partir de pièces connues (139, 208, 255…). La couverture est mesurée en build 256 pièces (<code>ETERN_PARTS=256</code>) mais cette fonction sort immédiatement si <code>ETERN_PARTS != 256</code>. <code>part_139_i8</code> est un helper qu'elle appelle ; toutes deux exigent la vraie map 256 (donc le CSV en CWD) et sortent immédiatement en build 16.</p>
     <div class="fn-list" style="margin:4px 0">
       <span class="fn">first_possibility</span><span class="fn" style="font-size:11px">src/core/possibility.c</span>
       <span class="fn">part_139_i8</span><span class="fn" style="font-size:11px">src/core/possibility.c</span>
-      <span class="fn">prepare_map_part</span><span class="fn" style="font-size:11px">src/core/part.c</span>
     </div>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couvert (<code>tests/core/test_part.c</code>) : <code>prepare_map_part</code> — ce n'est qu'un wrapper <code>search_max_face</code> + <code>buildBigArray</code>, indépendant de <code>ETERN_PARTS</code> ; testé sur une <code>array_part</code> montée à la main (lookup exact équivalent à l'enchaînement manuel). Il n'avait pas sa place dans cette catégorie « 256 hardcodé ».</p>
   </div>
 </div>
 
 <!-- RAISON 8 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge" style="background:#FAEEDA;color:#854F0B">2 fonctions</span>
-    <span class="section-title">IPC parent-enfant (log_send_to_parent, import_json)</span>
+    <span class="badge b-amber">1 fonction</span>
+    <span class="section-title">IPC parent-enfant (log_send_to_parent)</span>
   </div>
   <div class="reason-box r-purple">
     <div class="reason-label">Raison technique</div>
-    <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px"><code>log_send_to_parent</code> n'est appelée que si <code>log_should_route_to_parent()</code> est vrai, ce qui exige simultanément <code>parent_pid != getpid()</code>, <code>fork_checker_socket_id &gt; 0</code> et <code>main_addr != NULL</code> — état d'un processus enfant réel. Possible avec <code>run_in_fork</code> mais complexe à câbler (IPC Unix entre les deux processus). <code>import_json</code> parse un format de solution spécifique depuis <code>STDIN</code>, jamais redirigé en test.</p>
+    <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px"><code>log_send_to_parent</code> n'est appelée que si <code>log_should_route_to_parent()</code> est vrai, ce qui exige simultanément <code>parent_pid != getpid()</code>, <code>fork_checker_socket_id &gt; 0</code> et <code>main_addr != NULL</code>. Un <strong>fork n'est pas strictement nécessaire</strong> : dans un seul process, pointer ces trois globales sur un socket UDP récepteur lié à une adresse temporaire (et <code>parent_pid</code> sur une valeur ≠ <code>getpid()</code>), émettre un log, puis <code>recvfrom</code> le datagramme pour l'asserter — faisable, non encore fait.</p>
     <div class="fn-list" style="margin:4px 0">
       <span class="fn">log_send_to_parent</span><span class="fn" style="font-size:11px">src/ui/logger.c</span>
-      <span class="fn">import_json</span><span class="fn" style="font-size:11px">src/core/datamanager.c</span>
     </div>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couvert (<code>tests/core/test_datamanager.c</code>) : <code>import_json</code>. <strong>Correction du rapport</strong> : il ne lit PAS <code>STDIN</code> mais une chaîne JSON <em>codée en dur</em> dans le module — il draine les files puis ajoute exactement 1 possibilité (vérifié par <code>datas_size()</code>, sûr en build 256 comme 16 car <code>compute_grid</code> borne l'écriture à <code>ETERN_SIZE</code>).</p>
   </div>
 </div>
 
