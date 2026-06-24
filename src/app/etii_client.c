@@ -444,6 +444,51 @@ void run_mono_client(const char *file)
 }
 
 /**
+ * @brief Construit le tableau « Thread queues » du rapport client (une ligne par
+ *        fork : in-stock / analysed, plus la ligne Total) dans une chaîne
+ *        fraîchement allouée. Renvoie via out-params (NULL accepté) le stock
+ *        total, l'analysed total et la somme des coups/s ; met à jour la globale
+ *        max_result avec le meilleur résultat parmi les forks.
+ *
+ * Le buffer est dimensionné sur NB_THREADS (256 + NB_THREADS*80) — régression
+ * d'un débordement de tas observé avec un buffer fixe sur un NB_THREADS élevé.
+ * Extrait du corps de boucle de check_client_threads pour être testable hors
+ * thread (pur : lit l'instantané fork_statistics[]).
+ *
+ * @return Chaîne allouée (à libérer par l'appelant).
+ */
+char *build_thread_queues_table(unsigned long long *out_stock,
+                                unsigned long long *out_analysed,
+                                unsigned long long *out_shots_per_sec)
+{
+    unsigned long long stock = 0, analysed = 0, bys = 0;
+    size_t size = 256 + (size_t)NB_THREADS * 80;
+    char *table = calloc(size, sizeof(char));
+    int off = snprintf(table, size,
+        "Thread queues\n"
+        "Fork |     In stock |     Analysed\n"
+        "-----+--------------+-------------\n");
+    for (int f = 0; f < NB_THREADS; f++) {
+        if (fork_statistics[f].max_result > max_result) {
+            max_result = fork_statistics[f].max_result;
+        }
+        bys += fork_statistics[f].shots_per_second;
+        unsigned long long in_stock = fork_statistics[f].possibilities_in_stock;
+        unsigned long long an = fork_statistics[f].analyses_in_stock;
+        off += snprintf(table + off, size - off,
+                        "%4i | %12llu | %12llu\n", f, in_stock, an);
+        stock += in_stock; analysed += an;
+    }
+    snprintf(table + off, size - off,
+             "-----+--------------+-------------\n"
+             "Total| %12llu | %12llu\n", stock, analysed);
+    if (out_stock)         *out_stock         = stock;
+    if (out_analysed)      *out_analysed      = analysed;
+    if (out_shots_per_sec) *out_shots_per_sec = bys;
+    return table;
+}
+
+/**
  * @brief Thread de statistiques du client (lancé par `run_checker`).
  *
  * Toutes les 10 secondes, collecte et formate dans `lastcheck` :
@@ -478,31 +523,10 @@ void *check_client_threads(void *param)
         // fork : stock local en cours d'étude et possibilités en cours d'analyse.
         unsigned long long fork_possibility_stock = 0;
         unsigned long long fork_analysed_stock = 0;
-        char *table = calloc(table_size, sizeof(char));
-        int table_offset = snprintf(table, table_size,
-            "Thread queues\n"
-            "Fork |     In stock |     Analysed\n"
-            "-----+--------------+-------------\n");
         unsigned long long bys = 0;
         int f;
-        for(f=0; f < NB_THREADS; f++)
-        {
-            if (fork_statistics[f].max_result > max_result) {
-                max_result = fork_statistics[f].max_result;
-            }
-
-            bys += fork_statistics[f].shots_per_second;
-            unsigned long long in_stock = fork_statistics[f].possibilities_in_stock;
-            unsigned long long analysed = fork_statistics[f].analyses_in_stock;
-            table_offset += snprintf(table + table_offset, table_size - table_offset,
-                                     "%4i | %12llu | %12llu\n", f, in_stock, analysed);
-            fork_possibility_stock += in_stock;
-            fork_analysed_stock += analysed;
-        }
-        table_offset += snprintf(table + table_offset, table_size - table_offset,
-                                 "-----+--------------+-------------\n"
-                                 "Total| %12llu | %12llu\n",
-                                 fork_possibility_stock, fork_analysed_stock);
+        char *table = build_thread_queues_table(&fork_possibility_stock,
+                                                &fork_analysed_stock, &bys);
         strcat(lastcheck, table);
         free(table);
                 

@@ -63,6 +63,45 @@ int get_active_threads(client_t *thread_params) {
     
     return activeThread;
 }
+
+/**
+ * @brief Construit le tableau « File queues » du rapport serveur (une ligne par
+ *        file : unchecked / checked / analysed, plus la ligne Total) dans une
+ *        chaîne fraîchement allouée. Renvoie les totaux par pool via les
+ *        out-params (NULL accepté).
+ *
+ * Extrait du corps de boucle de check_server pour être testable hors thread :
+ * pure (lit l'instantané des tailles de files), sans I/O ni sleep.
+ *
+ * @return Chaîne allouée (à libérer par l'appelant).
+ */
+char *build_file_queues_table(unsigned long long *out_unchecked,
+                              unsigned long long *out_checked,
+                              unsigned long long *out_analysed)
+{
+    unsigned long long unchecked = 0, checked = 0, analysed = 0;
+    size_t size = 256 + (size_t)NB_FILE_POSSIBILITY * 64;
+    char *table = calloc(size, sizeof(char));
+    int off = snprintf(table, size,
+        "File queues\n"
+        "File |    Unchecked |      Checked |     Analysed\n"
+        "-----+--------------+--------------+-------------\n");
+    for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+        unsigned long long u = file_size(f);
+        unsigned long long c = file_checked_size(f);
+        unsigned long long a = file_analysed_size(f);
+        off += snprintf(table + off, size - off,
+                        "%4i | %12llu | %12llu | %12llu\n", f, u, c, a);
+        unchecked += u; checked += c; analysed += a;
+    }
+    snprintf(table + off, size - off,
+             "-----+--------------+--------------+-------------\n"
+             "Total| %12llu | %12llu | %12llu\n", unchecked, checked, analysed);
+    if (out_unchecked) *out_unchecked = unchecked;
+    if (out_checked)   *out_checked   = checked;
+    if (out_analysed)  *out_analysed  = analysed;
+    return table;
+}
 /**
  * @brief Thread de statistiques du serveur (lancé par `run_checker`).
  *
@@ -101,31 +140,14 @@ void *check_server(void *param)
         currentactive = lastactive - currentactive;
         non_null_possibilities = lastactive;
 
-        unsigned long long file_possibility_stock = 0;
         // Pool des possibilités vérifiées par les pruners : 10 files, comme le
         // pool standard (trylock pour servir plusieurs requêtes en parallèle)
+        unsigned long long file_possibility_stock = 0;
         unsigned long long file_possibility_checked_stock = 0;
         unsigned long long file_possibility_analysed_stock = 0;
-        char *table = calloc(2000, sizeof(char));
-        int table_offset = sprintf(table,
-            "File queues\n"
-            "File |    Unchecked |      Checked |     Analysed\n"
-            "-----+--------------+--------------+-------------\n");
-        int f;
-        for(f=0; f < NB_FILE_POSSIBILITY; f++)
-        {
-            unsigned long long f_size = file_size(f);
-            unsigned long long f_checked_size = file_checked_size(f);
-            unsigned long long f_analysed_size = file_analysed_size(f);
-            table_offset += sprintf(table + table_offset, "%4i | %12llu | %12llu | %12llu\n",
-                                    f, f_size, f_checked_size, f_analysed_size);
-            file_possibility_stock += f_size;
-            file_possibility_checked_stock += f_checked_size;
-            file_possibility_analysed_stock += f_analysed_size;
-        }
-        sprintf(table + table_offset, "-----+--------------+--------------+-------------\n"
-                                      "Total| %12llu | %12llu | %12llu\n",
-                file_possibility_stock, file_possibility_checked_stock, file_possibility_analysed_stock);
+        char *table = build_file_queues_table(&file_possibility_stock,
+                                              &file_possibility_checked_stock,
+                                              &file_possibility_analysed_stock);
         strcat(lastcheck, table);
         free(table);
 

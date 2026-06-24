@@ -6,11 +6,25 @@
  *   - find_free_thread_slot  : premier slot exist!=0 && socket_id==-1
  *   - find_empty_thread_slot : premier slot exist==0
  *   - get_active_threads     : compte les slots connectés (socket_id != -1) sur NB_THREADS
+ *   - build_file_queues_table: tableau de stats par file (corps extrait de la
+ *                              boucle check_server)
  */
 #include "greatest.h"
 #include "app/etii_server.h"
+#include "core/datamanager.h"
+#include "core/possibility.h"
 
 #include <string.h>
+#include <stdlib.h>
+
+/* Vide le pool local du datamanager (état global partagé entre suites). */
+static void dm_drain_all(void)
+{
+    while (datas_size() > 0) {
+        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        free_array_possibility_packet(r);
+    }
+}
 
 /* ---------- clamp_pruner_batch ------------------------------------------- */
 
@@ -187,6 +201,47 @@ TEST active_threads_all_connected(void)
     PASS();
 }
 
+/* ---------- build_file_queues_table -------------------------------------- */
+
+/* Sur un stock vide, tous les totaux valent 0 et le tableau est bien structuré
+   (en-tête + ligne Total). Exerce la boucle complète sur NB_FILE_POSSIBILITY. */
+TEST file_queues_table_empty_is_all_zero(void)
+{
+    dm_drain_all();
+    unsigned long long u = 9, c = 9, a = 9;   /* sentinelles non nulles */
+    char *t = build_file_queues_table(&u, &c, &a);
+    int header = (strstr(t, "File queues") != NULL);
+    int total  = (strstr(t, "Total|") != NULL);
+    free(t);
+    ASSERT(header);
+    ASSERT(total);
+    ASSERT_EQ_FMT(0ULL, u, "%llu");
+    ASSERT_EQ_FMT(0ULL, c, "%llu");
+    ASSERT_EQ_FMT(0ULL, a, "%llu");
+    PASS();
+}
+
+/* Le total « unchecked » reflète le stock non vérifié réellement présent. */
+TEST file_queues_table_reflects_unchecked_stock(void)
+{
+    dm_drain_all();
+    struct possibility_packet pks[3];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < 3; i++) pks[i].alloc = (uint16_t)(i + 1);
+    array_possibility_packet arr = { .size = 3, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    unsigned long long u = 0, c = 0, a = 0;
+    char *t = build_file_queues_table(&u, &c, &a);
+    free(t);
+    dm_drain_all();
+
+    ASSERT_EQ_FMT(3ULL, u, "%llu");  /* 3 possibilités non vérifiées */
+    ASSERT_EQ_FMT(0ULL, c, "%llu");
+    ASSERT_EQ_FMT(0ULL, a, "%llu");
+    PASS();
+}
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_server_suite)
@@ -212,4 +267,7 @@ SUITE(etii_server_suite)
     RUN_TEST(active_threads_counts_connected_slots);
     RUN_TEST(active_threads_none_connected_is_zero);
     RUN_TEST(active_threads_all_connected);
+
+    RUN_TEST(file_queues_table_empty_is_all_zero);
+    RUN_TEST(file_queues_table_reflects_unchecked_stock);
 }

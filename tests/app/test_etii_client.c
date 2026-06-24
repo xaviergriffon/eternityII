@@ -2,14 +2,20 @@
  * Tests unitaires des fonctions pures extraites de etii_client.c.
  *
  * Fonctions couvertes :
- *   - next_no_work_sleep  : calcul du back-off adaptatif
- *   - count_created_forks : décompte des process enfants créés
- *   - find_fork_index     : recherche d'un socket fork par son chemin
+ *   - next_no_work_sleep       : calcul du back-off adaptatif
+ *   - count_created_forks      : décompte des process enfants créés
+ *   - find_fork_index          : recherche d'un socket fork par son chemin
+ *   - build_thread_queues_table: tableau de stats par fork (corps extrait de la
+ *                                boucle check_client_threads)
  */
 #include "greatest.h"
 #include "app/etii_client.h"
+#include "app/static_variables.h"
+#include "app/etii_statistic.h"
 
 #include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
 
 /* ---------- next_no_work_sleep ------------------------------------------- */
 
@@ -110,6 +116,71 @@ TEST find_no_match_returns_minus_one(void)
     PASS();
 }
 
+/* ---------- build_thread_queues_table ------------------------------------ */
+
+/* Agrège les statistiques par fork : totaux stock/analysed/coups-s + mise à jour
+   de max_result (meilleur des forks). NB_THREADS / fork_statistics / max_result
+   sont sauvegardés et restaurés (état global partagé entre suites). */
+TEST thread_queues_table_aggregates_forks(void)
+{
+    int saved_nb = NB_THREADS;
+    uint16_t saved_mr = max_result;
+    struct client_statistics *saved = fork_statistics;
+
+    struct client_statistics fs[3];
+    memset(fs, 0, sizeof fs);
+    fs[0].possibilities_in_stock = 10; fs[0].analyses_in_stock = 1; fs[0].shots_per_second = 100; fs[0].max_result = 50;
+    fs[1].possibilities_in_stock = 20; fs[1].analyses_in_stock = 2; fs[1].shots_per_second = 200; fs[1].max_result = 80;
+    fs[2].possibilities_in_stock = 30; fs[2].analyses_in_stock = 3; fs[2].shots_per_second = 300; fs[2].max_result = 40;
+    NB_THREADS = 3;
+    fork_statistics = fs;
+    max_result = 0;
+
+    unsigned long long stock = 0, analysed = 0, bys = 0;
+    char *t = build_thread_queues_table(&stock, &analysed, &bys);
+    int header = (strstr(t, "Thread queues") != NULL);
+    int total  = (strstr(t, "Total|") != NULL);
+    uint16_t mr = max_result;
+    free(t);
+
+    fork_statistics = saved; NB_THREADS = saved_nb; max_result = saved_mr;
+
+    ASSERT(header);
+    ASSERT(total);
+    ASSERT_EQ_FMT(60ULL, stock, "%llu");     /* 10+20+30 */
+    ASSERT_EQ_FMT(6ULL, analysed, "%llu");   /* 1+2+3 */
+    ASSERT_EQ_FMT(600ULL, bys, "%llu");      /* 100+200+300 */
+    ASSERT_EQ_FMT(80, (int)mr, "%d");        /* max des max_result par fork */
+    PASS();
+}
+
+/* Régression du débordement de tas : sur un NB_THREADS élevé, le buffer est
+   dimensionné dynamiquement (256 + NB_THREADS*80). ASan ferait échouer le test
+   en cas de corruption. */
+TEST thread_queues_table_large_nb_threads_no_overflow(void)
+{
+    int saved_nb = NB_THREADS;
+    uint16_t saved_mr = max_result;
+    struct client_statistics *saved = fork_statistics;
+
+    struct client_statistics *fs = calloc(100, sizeof *fs);
+    for (int i = 0; i < 100; i++) fs[i].possibilities_in_stock = 1;
+    NB_THREADS = 100;
+    fork_statistics = fs;
+
+    unsigned long long stock = 0, analysed = 0, bys = 0;
+    char *t = build_thread_queues_table(&stock, &analysed, &bys);
+    int ok = (t != NULL && strstr(t, "Total|") != NULL);
+    free(t);
+
+    fork_statistics = saved; NB_THREADS = saved_nb; max_result = saved_mr;
+    free(fs);
+
+    ASSERT(ok);
+    ASSERT_EQ_FMT(100ULL, stock, "%llu");   /* 100 forks * 1 */
+    PASS();
+}
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_client_suite)
@@ -129,4 +200,7 @@ SUITE(etii_client_suite)
     RUN_TEST(find_returns_correct_index);
     RUN_TEST(find_returns_first_match);
     RUN_TEST(find_no_match_returns_minus_one);
+
+    RUN_TEST(thread_queues_table_aggregates_forks);
+    RUN_TEST(thread_queues_table_large_nb_threads_no_overflow);
 }
