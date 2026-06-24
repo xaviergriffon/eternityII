@@ -8,8 +8,12 @@
  *
  * Effet de bord : la redirection rend isatty() faux, ce qui fait que
  * clear_console / status_zone_init / status_zone_teardown prennent leur
- * early-return (pas d'écriture de séquences ANSI dans le terminal du runner).
+ * early-return. Le cycle de vie réel de la zone fixe ANSI (vrai terminal) est
+ * couvert à part via un pseudo-terminal — voir status_zone_lifecycle_over_pty.
  */
+/* _GNU_SOURCE doit précéder tout include : sur la glibc, posix_openpt / grantpt /
+   unlockpt / ptsname ne sont déclarés qu'avec _XOPEN_SOURCE>=600 (cf. test_console.c). */
+#define _GNU_SOURCE 1
 #include "greatest.h"
 #include "ui/logger.h"
 #include "app/static_variables.h"
@@ -24,6 +28,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/time.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
 
 /* Capture sur FD (1=stdout, FP=stdout / 2=stderr, FP=stderr) la sortie de BODY
    dans le tampon OUT (tableau char). */
@@ -187,6 +193,64 @@ TEST log_routes_to_parent_over_udp_socket(void)
     PASS();
 }
 
+/*
+ * Cycle de vie de la zone fixe ANSI sur un VRAI terminal (pseudo-terminal).
+ * Les fonctions de zone (status_zone_init/teardown, clear_console, et le thread
+ * event_zone_loop + query_terminal_rows / redraw_event_zone_locked) sont gardées
+ * par isatty(STDOUT) et ioctl(TIOCGWINSZ) : seul un PTY les rend atteignables.
+ * On les exécute dans un fils dont stdout est l'esclave d'un PTY (taille fixée
+ * via TIOCSWINSZ) pour isoler du runner le thread détaché, l'atexit et les
+ * séquences ANSI. Le fils sort par exit(0) — et non _exit — afin que gcov écrive
+ * sa couverture ; alarm() est un garde-fou anti-blocage.
+ */
+TEST status_zone_lifecycle_over_pty(void)
+{
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    ASSERT(master >= 0);
+    ASSERT_EQ_FMT(0, grantpt(master), "%d");
+    ASSERT_EQ_FMT(0, unlockpt(master), "%d");
+    char *slave_name = ptsname(master);
+    ASSERT(slave_name != NULL);
+    int slave = open(slave_name, O_RDWR | O_NOCTTY);
+    ASSERT(slave >= 0);
+
+    /* Fenêtre assez haute pour réserver la zone (rows > ZONE_RESERVED+1 == 8). */
+    struct winsize ws = { .ws_row = 40, .ws_col = 120, .ws_xpixel = 0, .ws_ypixel = 0 };
+    ioctl(slave, TIOCSWINSZ, &ws);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Enfant : stdout = esclave PTY (vrai terminal -> isatty + TIOCGWINSZ OK). */
+        close(master);
+        dup2(slave, STDOUT_FILENO);
+        if (slave > 2) close(slave);
+        int dn = open("/dev/null", O_WRONLY);   /* stderr muet */
+        if (dn >= 0) { dup2(dn, 2); if (dn > 2) close(dn); }
+        alarm(5);                       /* garde-fou : write PTY / thread détaché */
+        status_zone_init();             /* isatty✓, query_terminal_rows✓, zone_active=1, thread */
+        usleep(50000);                  /* laisse event_zone_loop faire une itération (puis sleep) */
+        log_event("ZONE EVENT %d", 7);  /* déclenche redraw_event_zone_locked */
+        clear_console();                /* branche zone_active (efface la région) */
+        status_zone_teardown();         /* zone_active=0 -> event_zone_loop sortira */
+        exit(0);                        /* flush gcov + atexit teardown (no-op) ; thread en sleep */
+    }
+
+    ASSERT(pid > 0);
+    close(slave);
+    /* Draine l'affichage ANSI jusqu'à ce que l'enfant ferme l'esclave (sortie) :
+       évite tout blocage d'écriture côté enfant, se termine sur EOF/EIO du maître. */
+    char drainbuf[4096];
+    while (read(master, drainbuf, sizeof drainbuf) > 0) { /* jeter */ }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    close(master);
+    unlink("events.log");               /* log_event a écrit dans le CWD */
+
+    ASSERT(WIFEXITED(status));           /* sortie propre (pas tué par SIGALRM) */
+    ASSERT_EQ_FMT(0, WEXITSTATUS(status), "%d");
+    PASS();
+}
+
 SUITE(logger_suite)
 {
     RUN_TEST(log_info_formats_to_stdout);
@@ -197,4 +261,5 @@ SUITE(logger_suite)
     RUN_TEST(log_event_prints_and_logs);
     RUN_TEST(flush_and_zone_helpers_run);
     RUN_TEST(log_routes_to_parent_over_udp_socket);
+    RUN_TEST(status_zone_lifecycle_over_pty);
 }
