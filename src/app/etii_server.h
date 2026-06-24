@@ -82,4 +82,16 @@ int find_free_thread_slot(client_t *threads, int nb);
  */
 int find_empty_thread_slot(client_t *threads, int nb);
 
+/**
+ * @brief Compte les threads serveur actuellement connectés à un client.
+ *
+ * Parcourt les `NB_THREADS` premiers slots (la fonction lit la globale, sans
+ * paramètre de taille) et compte ceux dont `socket_id != -1` (un slot connecté),
+ * indépendamment de `exist`. Renvoie 0 si `thread_params` est NULL.
+ *
+ * @param thread_params Tableau des contextes de threads serveur (≥ NB_THREADS).
+ * @return              Nombre de slots connectés.
+ */
+int get_active_threads(client_t *thread_params);
+
 #endif /* etii_server_h */
