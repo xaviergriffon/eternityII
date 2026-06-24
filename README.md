@@ -31,7 +31,7 @@ Le code est rangé sous `src/`, réparti en quatre domaines ; les `#include` son
 | `src/core/` | Logique du puzzle, structures de données et moteur de recherche (`part`, `readdata`, `possibility`, `lifo`, `etii_search`, `datamanager`, …) |
 | `src/net/`  | Protocole TCP, sockets et IPC parent↔enfant (`etii_protocol`, `tcpclient`, `tcpserver`, `local_socket`, `ipc_protocol`) |
 | `src/ui/`   | Journalisation, console et commandes (`logger`, `logger_ncurses`, `console`, `command_lines`, `command_match`, `command_history`) |
-| `src/app/`  | Point d'entrée, rôles client/serveur, état global et GPU (`main`, `etii_client`, `etii_server`, `static_variables`, `gpu_pruner`) |
+| `src/app/`  | Point d'entrée, rôles client/serveur, signaux, état global et GPU (`main`, `etii_client`, `etii_server`, `app_runtime`, `static_variables`, `gpu_pruner`) |
 
 Les données du puzzle sont dans `data/` (`pieces.csv`, `pieces16.csv`) et les objets de compilation dans `build/` (miroir de `src/`, ignoré par git).
 

@@ -15,7 +15,7 @@ Sources live under `src/`, split into four domains. Includes are **explicit and 
 | `src/core/` | Puzzle logic & data structures + search engine | `part` `readdata` `possibility` `lifo` `packed`(h) `etii_search` `datamanager` |
 | `src/net/`  | TCP protocol & sockets, parent↔child IPC | `etii_protocol` `tcpclient` `tcpserver` `local_socket` `ipc_protocol`(h) |
 | `src/ui/`   | Logging, console, command handling | `logger` `logger_ncurses`(c) `console` `command_lines` `command_match` `command_history` |
-| `src/app/`  | Entry point, client/server roles, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_statistic`(h) `static_variables` `gpu_pruner`(.cu/.h) |
+| `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `app_runtime` `etii_statistic`(h) `static_variables` `gpu_pruner`(.cu/.h) |
 
 Other top-level dirs: `data/` (puzzle definitions `pieces.csv`, `pieces16.csv`), `build/` (compilation objects, mirrors `src/`, gitignored), `tests/` (unit tests). Adding a `.c` means dropping it under the right `src/<domain>/` and adding its `build/<domain>/<name>.o` to the `OBJS` list (and to `add_executable` in `CMakeLists.txt`).
 
@@ -69,7 +69,7 @@ make coverage-report # gcovr over those .gcda → Cobertura XML + HTML + Markdow
 
 Beyond the unit suites, an **end-to-end integration test** (`tests/integration/run_solution_16.sh`, driven by `make test-integration`) exercises the real client/server protocol: it compiles an `ETERN_PARTS=16` binary, launches a server + a client **both with `--stop-on-solution`**, and checks that **both sides** observe the solution. The client solves the 4×4, reports it via `INST_SOLUTION`; the server displays it, backs up its queues (`./eternityII.back`, `./eternityII-in_analyse.back`) and **stops** — that clean termination is what makes the test deterministic. The script runs in an isolated `mktemp -d` working dir (no `.back`/`solution_*` ever land in the repo) and enforces a bounded timeout (`INTEGRATION_TIMEOUT`, default 60 s) so it can never hang. It asserts: server exited cleanly, both logs carry the solution, both `solution_*` files and the `.back` backups exist.
 
-**Guiding rule: always try to add a unit test for every bug you fix and every behaviour you add**, so a past anomaly can never silently come back. When fixing a bug, first write (or extend) a test that fails on the old behaviour and passes on the fix; when adding a feature, cover its observable contract. If a piece of logic is hard to test, that is usually a sign to extract it into a small pure function (as was done for `parse_cli_options` in `src/app/static_variables.c`, tested in `tests/app/test_static_variables.c`) rather than to skip the test. The bugs already locked in this way: the server being told about solutions (`send_solution` local-mode guard, `tests/core/test_datamanager.c`), unique solution filenames so two solutions never overwrite (`log_solution`, `tests/core/test_possibility.c`), the `--stop-on-solution` argv parsing, and — end-to-end — the full client/server solution round-trip (`make test-integration`).
+**Guiding rule: always try to add a unit test for every bug you fix and every behaviour you add**, so a past anomaly can never silently come back. When fixing a bug, first write (or extend) a test that fails on the old behaviour and passes on the fix; when adding a feature, cover its observable contract. If a piece of logic is hard to test, that is usually a sign to extract it into a small pure function (as was done for `parse_cli_options` in `src/app/static_variables.c`, tested in `tests/app/test_static_variables.c`; and for the signal/bootstrap helpers moved out of the unlinkable `main.c` into `src/app/app_runtime.c`, tested in `tests/app/test_app_runtime.c`) rather than to skip the test. The bugs already locked in this way: the server being told about solutions (`send_solution` local-mode guard, `tests/core/test_datamanager.c`), unique solution filenames so two solutions never overwrite (`log_solution`, `tests/core/test_possibility.c`), the `--stop-on-solution` argv parsing, and — end-to-end — the full client/server solution round-trip (`make test-integration`).
 
 Conventions to keep in mind when adding or extending tests:
 
@@ -124,7 +124,8 @@ A pruner exchanges with the server in batches of `pruner_batch_size` (configurab
 
 | File | Responsibility |
 |---|---|
-| `src/app/main.c` | Entry point; dispatches to server/client/test modes; manages fork lifecycle and signals |
+| `src/app/main.c` | Entry point; dispatches to server/client/test modes; manages fork lifecycle (signal handlers & runtime bootstrap live in `app_runtime.c`) |
+| `src/app/app_runtime.c` | Process plumbing extracted from `main.c` to be unit-testable: signal handlers/installers (`signal_end_handler`, `sigchld_handler`, `init_signals`, `configure_child_signals`, `wait_child`, …) and runtime bootstrap (`init_counters`, `init_childs`, `failed_arg`) |
 | `src/core/possibility.c` | Core search logic: generating, checking, and stepping through board possibilities |
 | `src/core/etii_search.c` | `autosearch()` — the inner search loop run by each thread |
 | `src/app/etii_client.c` | Client orchestration: spawns search threads, manages their lifecycle |
