@@ -10,6 +10,11 @@
  * fallback ligne-par-ligne), status_zone_init() (non-tty -> no-op), et le
  * dispatch do_command_line("exit").
  */
+/* Doit précéder tout include : sur la glibc, posix_openpt/grantpt/unlockpt/ptsname
+   ne sont déclarés qu'avec _XOPEN_SOURCE >= 600 (ou _GNU_SOURCE). Sans ça, sous
+   -std=gnu99 (qui n'active que _DEFAULT_SOURCE) ils sont implicitement déclarés et
+   ptsname() est supposée renvoyer un int -> pointeur tronqué -> open() échoue. */
+#define _GNU_SOURCE 1
 #include "greatest.h"
 #include "ui/console.h"
 #include "app/static_variables.h"
@@ -84,8 +89,66 @@ TEST console_returns_on_eof_without_spinning(void)
     PASS();
 }
 
+/*
+ * Chemin RAW de la console : quand stdin EST un terminal (isatty vrai), getcmdline
+ * passe par try_enable_raw_mode() + getcmdline_raw() au lieu du fallback cooked.
+ * On fournit un vrai TTY via un pseudo-terminal (posix_openpt -> POSIX, pas de
+ * dépendance -lutil). L'enfant lit "exit" en mode raw et, en mode serveur,
+ * exit_interpreter termine le process proprement (code 0). alarm() est un
+ * garde-fou : si la lecture raw bloquait, SIGALRM tuerait l'enfant -> test rouge.
+ */
+TEST console_raw_mode_over_pty_reads_command(void)
+{
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    ASSERT(master >= 0);
+    ASSERT_EQ_FMT(0, grantpt(master), "%d");
+    ASSERT_EQ_FMT(0, unlockpt(master), "%d");
+    char *slave_name = ptsname(master);
+    ASSERT(slave_name != NULL);
+    int slave = open(slave_name, O_RDWR | O_NOCTTY);
+    ASSERT(slave >= 0);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Enfant : stdin = esclave PTY (un vrai tty -> chemin raw), sorties muettes. */
+        close(master);
+        dup2(slave, 0);
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); if (dn > 2) close(dn); }
+        if (slave > 2) close(slave);
+        server = 1;        /* exit_interpreter -> exit(EXIT_SUCCESS) direct */
+        alarm(5);          /* garde-fou : tue l'enfant si la lecture raw bloque */
+        console(NULL);     /* isatty(0) vrai -> try_enable_raw_mode + getcmdline_raw */
+        _exit(123);        /* non atteint (sortie via la commande exit) */
+    }
+
+    ASSERT(pid > 0);
+    close(slave);
+    /* Le parent « tape » une session au terminal maître. La séquence exerce les
+       branches d'édition de getcmdline_raw au-delà de la simple frappe :
+         "help\n"        commande dispatchée + ajoutée à l'historique
+         "\033[A"        flèche ↑  -> rappelle "help" (ESC '[' 'A' + historique)
+         "\033[B"        flèche ↓  -> revient au brouillon vide (ESC '[' 'B')
+         "zz\177\177"    deux frappes puis deux backspaces (0x7f) -> ligne vidée
+         "exit\n"        commande finale -> exit(EXIT_SUCCESS) en mode serveur
+       L'entrée est entièrement bufferisée par stdio dès la première lecture, donc
+       le déroulé est déterministe quel que soit l'ordonnancement. */
+    const char seq[] = "help\n\033[A\033[Bzz\177\177exit\n";
+    ssize_t w = write(master, seq, sizeof(seq) - 1);
+    ASSERT_EQ_FMT((int)(sizeof(seq) - 1), (int)w, "%d");
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    close(master);
+
+    ASSERT(WIFEXITED(status));               /* sortie propre (pas tué par SIGALRM) */
+    ASSERT_EQ_FMT(0, WEXITSTATUS(status), "%d");
+    PASS();
+}
+
 SUITE(console_suite)
 {
     RUN_TEST(console_reads_exit_command_and_exits);
     RUN_TEST(console_returns_on_eof_without_spinning);
+    RUN_TEST(console_raw_mode_over_pty_reads_command);
 }
