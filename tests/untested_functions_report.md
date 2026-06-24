@@ -39,7 +39,7 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <div class="summary-grid">
   <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">34</span><span class="metric-sub">sur 273 au total</span></div>
   <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">88 %</span><span class="metric-sub">239 / 273</span></div>
-  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">66 %</span><span class="metric-sub">3430 / 5204</span></div>
+  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">66 %</span><span class="metric-sub">3443 / 5204</span></div>
   <div class="metric"><span class="metric-label">Domaine le plus touché</span><span class="metric-value" style="font-size:15px">src/app/</span><span class="metric-sub">main.c à 0 %</span></div>
 </div>
 
