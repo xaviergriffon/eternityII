@@ -27,6 +27,7 @@ SUITE_EXTERN(etii_search_suite);
 SUITE_EXTERN(static_variables_suite);
 SUITE_EXTERN(etii_client_suite);
 SUITE_EXTERN(etii_server_suite);
+SUITE_EXTERN(app_runtime_suite);
 #if ETERN_PARTS == 16
 /* Suite « solution réelle » : n'existe que dans le build 4×4 (cf. test-16). */
 SUITE_EXTERN(solution16_suite);
@@ -54,6 +55,7 @@ int main(int argc, char **argv)
     RUN_SUITE(static_variables_suite);
     RUN_SUITE(etii_client_suite);
     RUN_SUITE(etii_server_suite);
+    RUN_SUITE(app_runtime_suite);
 #if ETERN_PARTS == 16
     RUN_SUITE(solution16_suite);
 #endif
