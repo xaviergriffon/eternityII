@@ -443,7 +443,7 @@ TEST save_solution_csv_null_parts_writes_minus_one_faces(void)
     FILE *f = fopen(path, "r");
     ASSERT(f != NULL);
     char line[256];
-    fgets(line, sizeof(line), f); /* skip header */
+    ASSERT(fgets(line, sizeof(line), f) != NULL); /* skip header (présent) */
     ASSERT(fgets(line, sizeof(line), f) != NULL);
     fclose(f);
     unlink(path);
