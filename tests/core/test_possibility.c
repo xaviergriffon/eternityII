@@ -170,6 +170,70 @@ TEST check_possibility_valid_genesis_is_zero(void)
 }
 #endif /* ETERN_PARTS == 256 */
 
+#if ETERN_PARTS != 256
+/* En 4×4, check_possibility n'a pas l'ancrage genèse 256 (return -6) : on atteint
+   donc la boucle de cohérence. La traversée commence en (0,0) (dirx[0]=diry[0]=0).
+   Ces cas valident les rejets que jamais un solve valide ne produit (les `return
+   -9` et `-7` ne sont couverts par aucun build sinon). */
+
+/* Valeur de grille invalide (< 0) à la 1re case du parcours -> -7. */
+TEST check_possibility_invalid_grid_value_is_minus_seven(void)
+{
+    struct part parts[] = { { .id = 0 }, { .id = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = 1;
+    set_face_used(p->b_faceused, 0, 1); /* faceused (1) >= alloc (1) */
+    p->grid[0][0] = -1;                 /* (dirx[0],diry[0]) = case invalide */
+    ASSERT_EQ_FMT(-7, check_possibility(p, &rp), "%d");
+    free(p);
+    PASS();
+}
+
+/* Pièce en (0,0) dont la face TOP != bord (0) -> incohérence de bord -> -9. */
+TEST check_possibility_border_mismatch_is_minus_nine(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 5, .right = 0, .bottom = 0, .left = 0 }, /* top=5 != bord */
+    };
+    struct array_part rp = { .size = 2, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->alloc = 1;
+    set_face_used(p->b_faceused, 0, 1);
+    p->grid[0][0] = 1; /* bord haut attendu = 0, mais la pièce a top = 5 */
+    ASSERT_EQ_FMT(-9, check_possibility(p, &rp), "%d");
+    free(p);
+    PASS();
+}
+
+/* Pièce en (0,0), bords corrects, mais son voisin de DROITE ne s'emboîte pas
+   (P.right != Q.left) -> incohérence -> -9. */
+TEST check_possibility_neighbor_mismatch_is_minus_nine(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 2, .bottom = 0, .left = 0 }, /* P : bords OK, right=2 */
+        { .id = 2, .top = 0, .right = 0, .bottom = 0, .left = 9 }, /* Q : left=9 != 2 */
+    };
+    struct array_part rp = { .size = 3, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->alloc = 1;
+    set_face_used(p->b_faceused, 0, 1);
+    p->grid[0][0] = 1; /* P, seule case visitée (alloc=1) */
+    p->grid[1][0] = 2; /* Q à droite, voisin incohérent */
+    ASSERT_EQ_FMT(-9, check_possibility(p, &rp), "%d");
+    free(p);
+    PASS();
+}
+#endif /* ETERN_PARTS != 256 */
+
 /* --------------------------------------------------------------------------
  * compare_possibility : première différence rencontrée
  * ------------------------------------------------------------------------ */
@@ -588,6 +652,58 @@ TEST what_search_reads_placed_neighbor(void)
     PASS();
 }
 
+/* Coin bas-droit avec voisins placés : RIGHT et BOTTOM sont des bords (0),
+   TOP/LEFT lisent les faces des voisins du dessus/de gauche. Couvre les branches
+   « bord droit/bas » et « voisin non-bord placé » de what_search (toutes
+   atteignables, indépendantes de la taille du plateau). */
+TEST what_search_bottom_right_with_neighbors(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 1, .right = 2, .bottom = 8, .left = 4 }, /* dessus : bottom = 8 */
+        { .id = 2, .top = 1, .right = 6, .bottom = 3, .left = 5 }, /* gauche : right = 6  */
+    };
+    struct array_part rp = { .size = 3, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    int last = ETERN_SIZE - 1;
+    p->grid[last][last - 1] = 1; /* voisin du dessus  */
+    p->grid[last - 1][last] = 2; /* voisin de gauche  */
+
+    key_part k = what_search(&rp, last, last, p);
+    ASSERT_EQ_FMT(8, (int)k.k1, "%d"); /* TOP  = bottom du voisin du dessus */
+    ASSERT_EQ_FMT(0, (int)k.k2, "%d"); /* RIGHT = bord (x+1 hors plateau)   */
+    ASSERT_EQ_FMT(0, (int)k.k3, "%d"); /* BOTTOM = bord (y+1 hors plateau)  */
+    ASSERT_EQ_FMT(6, (int)k.k4, "%d"); /* LEFT = right du voisin de gauche  */
+
+    free(p);
+    PASS();
+}
+
+/* Case intérieure (1,1) entourée de cases vides : les 4 voisins existent mais
+   sont vides (-2) -> les 4 faces valent -1. Couvre les branches « voisin
+   non-bord vide » TOP et LEFT de what_search. */
+TEST what_search_interior_empty_neighbors(void)
+{
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 2, .bottom = 3, .left = 4 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+
+    key_part k = what_search(&rp, 1, 1, p);
+    ASSERT_EQ_FMT(-1, (int)k.k1, "%d"); /* TOP : voisin (1,0) vide   */
+    ASSERT_EQ_FMT(-1, (int)k.k2, "%d"); /* RIGHT : voisin (2,1) vide */
+    ASSERT_EQ_FMT(-1, (int)k.k3, "%d"); /* BOTTOM : voisin (1,2) vide */
+    ASSERT_EQ_FMT(-1, (int)k.k4, "%d"); /* LEFT : voisin (0,1) vide  */
+
+    free(p);
+    PASS();
+}
+
 /* what_search_to_key2 : case courante, voisins vides encodés en `all_face`. */
 TEST what_search_to_key2_uses_all_face_for_empty(void)
 {
@@ -957,6 +1073,11 @@ SUITE(possibility_suite)
     RUN_TEST(check_possibility_missing_genesis_anchor_is_minus_six);
     RUN_TEST(check_possibility_valid_genesis_is_zero);
 #endif
+#if ETERN_PARTS != 256
+    RUN_TEST(check_possibility_invalid_grid_value_is_minus_seven);
+    RUN_TEST(check_possibility_border_mismatch_is_minus_nine);
+    RUN_TEST(check_possibility_neighbor_mismatch_is_minus_nine);
+#endif
     RUN_TEST(compare_possibility_detects_each_difference);
     RUN_TEST(is_origin_of_recognizes_prefix);
     RUN_TEST(build_single_array_wraps_one_packet);
@@ -972,6 +1093,8 @@ SUITE(possibility_suite)
     RUN_TEST(log_solution_writes_distinct_files_for_each_solution);
     RUN_TEST(what_search_corner_of_empty_board);
     RUN_TEST(what_search_reads_placed_neighbor);
+    RUN_TEST(what_search_bottom_right_with_neighbors);
+    RUN_TEST(what_search_interior_empty_neighbors);
     RUN_TEST(what_search_to_key2_uses_all_face_for_empty);
     RUN_TEST(what_search_in_grid_to_key_arbitrary_cell);
     RUN_TEST(possibility_has_a_next_finds_and_excludes_used);
