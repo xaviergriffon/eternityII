@@ -746,6 +746,77 @@ TEST search_backtracking_stop_on_solution_exits_success(void)
 }
 #endif /* ETERN_PARTS == 16 */
 
+/* --------------------------------------------------------------------------
+ * Corps de boucle d'autosearch extrait (testable hors de la boucle infinie).
+ * server_ip == NULL -> les renvois passent par le datamanager local.
+ * ------------------------------------------------------------------------ */
+
+/* requeue_unprocessed_packets : renvoie en local les paquets racines [from..size) ;
+   from >= size -> aucun renvoi. */
+TEST requeue_unprocessed_packets_routes_tail_locally(void)
+{
+    drain_local();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    struct possibility_packet pkts[5];
+    memset(pkts, 0, sizeof pkts);
+    for (int i = 0; i < 5; i++) pkts[i].alloc = (uint16_t)(i + 1);
+    array_possibility_packet aposs = { .size = 5, .possibilities = pkts };
+    client.aposs = &aposs;
+
+    requeue_unprocessed_packets(&client, 2);       /* [2..5) = 3 paquets renvoyés */
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+
+    requeue_unprocessed_packets(&client, 5);       /* from >= size -> no-op */
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+
+    drain_local();
+    PASS();
+}
+
+/* autosearch_step en REQUEST_STOP : le paquet racine 0 est traité
+   (search_packet_backtracking renvoie 1 sur STOP en renvoyant le chemin courant),
+   les paquets suivants sont renvoyés en local, le cycle est nettoyé et la
+   fonction renvoie 0 (on arrête la boucle). */
+TEST autosearch_step_stop_requeues_and_returns_zero(void)
+{
+    drain_local();
+    ensure_counters();
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&client.works_mutex, NULL); /* autosearch_step verrouille works_mutex */
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 3;
+    aposs->possibilities = calloc(3, sizeof(struct possibility_packet));
+    for (int i = 0; i < 3; i++) make_empty_board(&aposs->possibilities[i]);
+    client.aposs = aposs;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    init_id_parts(idParts);
+
+    int saved = request;
+    request = REQUEST_STOP;
+    int cont = autosearch_step(&client, idParts);
+    request = saved;
+
+    ASSERT_EQ_FMT(0, cont, "%d");                  /* 0 -> arrêt de la boucle */
+    ASSERT(client.aposs == NULL);                  /* cycle nettoyé */
+    ASSERT_EQ_FMT(0, (int)client.works, "%d");     /* works réinitialisé */
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");     /* 1 (chemin courant) + 2 (paquets [1..3)) */
+
+    pthread_mutex_destroy(&client.works_mutex);
+    /* map_part / all_rotate_part pointent du stockage statique (make_free_map /
+       make_small_parts) : pas de free, comme les autres tests du module. */
+    drain_local();
+    PASS();
+}
+
 SUITE(etii_search_suite)
 {
     RUN_TEST(delegate_noop_below_threshold);
@@ -763,6 +834,8 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_delegate_moves_excess_to_local);
     RUN_TEST(bt_flush_pending_sends_all_plus_current);
     RUN_TEST(search_backtracking_stop_flushes_and_returns_one);
+    RUN_TEST(requeue_unprocessed_packets_routes_tail_locally);
+    RUN_TEST(autosearch_step_stop_requeues_and_returns_zero);
 #if ETERN_PARTS == 16
     RUN_TEST(search_backtracking_solves_4x4_and_returns_zero);
     RUN_TEST(search_backtracking_stop_on_solution_exits_success);
