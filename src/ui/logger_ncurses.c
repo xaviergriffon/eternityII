@@ -441,6 +441,25 @@ void log_error(const char *format, ...)
     pthread_mutex_unlock(&output_mutex);
 }
 
+/**
+ * @brief Journalise un message d'erreur fatal puis termine le process.
+ *
+ * Variante ncurses : délègue à log_error (rendu dans le pad de sortie ou routage
+ * vers le parent) puis exit(EXIT_FAILURE), ce qui déclenche le teardown ncurses
+ * enregistré via atexit.
+ */
+__attribute__((noreturn))
+void fatal_error(const char *format, ...)
+{
+    char buf[LOG_LINE_MAX];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buf, sizeof buf, format, args);
+    va_end(args);
+    log_error("%s", buf);
+    exit(EXIT_FAILURE);
+}
+
 void log_info(const char *format, ...)
 {
     char buf[LOG_LINE_MAX];

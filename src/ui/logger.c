@@ -150,6 +150,25 @@ void log_error(const char *format, ...)
 }
 
 /**
+ * @brief Journalise un message d'erreur fatal puis termine le process.
+ *
+ * Délègue le rendu à log_error (qui gère le routage vers le parent et le flush),
+ * en passant le message déjà formaté via "%s" pour qu'un éventuel '%' littéral
+ * ne soit pas réinterprété, puis exit(EXIT_FAILURE).
+ */
+__attribute__((noreturn))
+void fatal_error(const char *format, ...)
+{
+    char buf[LOG_LINE_MAX];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buf, sizeof buf, format, args);
+    va_end(args);
+    log_error("%s", buf);
+    exit(EXIT_FAILURE);
+}
+
+/**
  * @brief Affiche un message informatif sur stdout.
  */
 void log_info(const char *format, ...)
