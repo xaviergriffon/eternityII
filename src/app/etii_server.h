@@ -139,4 +139,23 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                                  array_possibility_packet **lastSent,
                                  int *version_supported);
 
+/**
+ * @brief Décide si la sauvegarde automatique périodique doit avoir lieu ce tour
+ *        (logique de cadence extraite de la boucle `check_server`).
+ *
+ * Fonction pure (aucune I/O). La sauvegarde n'a lieu que tous les 6 tours ET
+ * uniquement si le total de mises à jour des files a changé depuis le dernier
+ * backup (inutile de resauvegarder un stock figé). Met à jour l'état en place :
+ * au déclenchement, `*lastBack` est remis à 0 et `*lastBackupUpdates` mémorise
+ * `currentUpdates` ; sinon, tant que la fenêtre n'est pas pleine, `*lastBack`
+ * est incrémenté.
+ *
+ * @param lastBack          In/out : nombre de tours écoulés depuis le dernier backup.
+ * @param lastBackupUpdates In/out : total des mises à jour au dernier backup.
+ * @param currentUpdates    Total courant des mises à jour des files.
+ * @return 1 si un backup doit être effectué ce tour, 0 sinon.
+ */
+int should_autobackup(int *lastBack, unsigned long long *lastBackupUpdates,
+                      unsigned long long currentUpdates);
+
 #endif /* etii_server_h */
