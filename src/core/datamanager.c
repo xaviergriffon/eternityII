@@ -392,32 +392,7 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 				// comparaison
 
 				if (compare_possibility(possibilityInFile, possibility) == 0) {
-					// TODO : factoriser
-                    Element *currentElement = element;
-					if (element->next != NULL) {
-						element = element->next;
-						if (currentElement->previous != NULL) {
-							currentElement->previous->next = element;
-							element->previous = currentElement->previous;
-						} else {
-							file->start = element;
-							element->previous = NULL;
-						}
-					} else {
-						if (file->start == element) {
-							file->start = NULL;
-							file->end = NULL;
-						} else {
-							file->end = element->previous;
-							element->previous->next = NULL;
-						}
-					}
-                    if (possibilityInFile != NULL) {
-                        free(possibilityInFile);
-                    }
-                    free(currentElement);
-					file->size--;
-
+					file_remove_element(file, element);
 					removed_possibility = 1;
 				} else {
 					// On passe au suivant
