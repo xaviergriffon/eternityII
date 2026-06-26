@@ -189,11 +189,13 @@ int scroll (File * suite, void *dest){
 /**
  * @brief Extrait le dernier élément de la file et retourne un pointeur direct vers sa valeur.
  *
- * Contrairement à `scroll`, ne copie pas la valeur : retourne le pointeur interne.
- * L'appelant ne doit pas libérer ce pointeur s'il appartient au cache.
+ * Contrairement à `scroll`, ne copie pas la valeur : retourne le pointeur interne si
+ * l'élément appartient au cache pré-alloué. Pour les éléments alloués dynamiquement
+ * (hors cache), libère le wrapper et la valeur puis retourne NULL.
  *
  * @param suite File source.
- * @return      Pointeur vers la valeur de l'élément extrait, ou NULL si la file est vide.
+ * @return      Pointeur vers la valeur (cache uniquement), ou NULL si la file est vide
+ *              ou si l'élément était hors cache.
  */
 void *scroll_cache(File * suite){
 	Element *supp_element;
@@ -208,27 +210,13 @@ void *scroll_cache(File * suite){
 	suite->end = supp_element->previous;
 	void *result = supp_element->value;
 
-    // TODO : simplement tester si il s'agit de suite->cacheElement[suite->lastPostionCache]
-    /*
-	long position = position_cache(suite, supp_element);
-	if(position > -1)
-	{
-		if (position == suite->lastPostionCache -1)
-		{
-			suite->lastPostionCache--;
-		}
-     */
     if (suite->lastPostionCache > 0 && &suite->cacheElement[suite->lastPostionCache -1] == supp_element) {
         suite->lastPostionCache--;
 	} else
 	{
-        // TODO : SI n'est pas dans le cache, alors vider mémoire
-        /*
-		memcpy(cache, result, suite->sizeofvalue);
-		free (result);
-		free (supp_element);
-		result = cache;
-         */
+		free(result);
+		free(supp_element);
+		result = NULL;
 	}
 	
 	suite->size--;
