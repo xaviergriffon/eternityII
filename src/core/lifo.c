@@ -368,6 +368,21 @@ void move_after(File *suite, Element *element, Element *target) {
 }
 
 /**
+ * @brief Supprime un élément de la file et libère sa mémoire si hors cache.
+ *
+ * @param suite   File contenant l'élément.
+ * @param element Élément à supprimer.
+ */
+void file_remove_element(File *suite, Element *element) {
+    extract_element(suite, element);
+    if (!inside_cache(suite, element)) {
+        free(element->value);
+        free(element);
+    }
+    suite->size--;
+}
+
+/**
  * @brief Vide et libère complètement une `File` et son cache.
  *
  * Extrait tous les éléments restants, libère le cache pré-alloué si présent,

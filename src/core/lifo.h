@@ -136,6 +136,18 @@ int scroll_big_table(big_table *table, void *dest);
 void *scroll_big_table_cache(big_table *table);
 
 /**
+ * @brief Supprime un élément de la file et libère sa mémoire si hors cache.
+ *
+ * Recâble les pointeurs des voisins, met à jour `suite->start` / `suite->end`
+ * si nécessaire, libère `element->value` et `element` s'ils ne sont pas dans le
+ * bloc de cache pré-alloué, et décrémente `suite->size`.
+ *
+ * @param suite   File contenant l'élément.
+ * @param element Élément à supprimer.
+ */
+void file_remove_element(File *suite, Element *element);
+
+/**
  * @brief Libère tous les éléments d'une `File` ainsi que la structure elle-même.
  * @param suite File à libérer.
  */
