@@ -14,7 +14,7 @@
  * @brief Reçoit une instruction (1 octet) depuis un socket TCP.
  *
  * Réessaie jusqu'à 10 fois en cas d'interruption `EINTR`. Retourne `INST_END`
- * sur timeout (`EWOULDBLOCK`/`EDEADLK`) ou fermeture propre (recv == 0).
+ * sur timeout (`EAGAIN`/`EWOULDBLOCK`/`ETIMEDOUT`) ou fermeture propre (recv == 0).
  *
  * @param socket_id Descripteur du socket connecté.
  * @return          Byte d'instruction reçu, ou `INST_END` (-1) en cas d'erreur/déconnexion.
@@ -33,8 +33,10 @@ int8_t recv_instruction(int socket_id)
 	} while (rRecv == -1 && errno == EINTR && maxTentative > 0);
 	if (rRecv < 0) {
 		// Deconnection timeout
-		if (errno == EDEADLK || errno == EDEADLK || errno == EWOULDBLOCK) {
-			// TODO: faire un end timeout
+		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
+#ifdef DEBUG_SOCKET
+			log_debug("recv_instruction: timeout ou socket non bloquant (errno=%d)\n", errno);
+#endif
 			result = INST_END;
 		} else if (errno == EINTR) {
 			log_errno("recv_instruction recv EINTR => ");
