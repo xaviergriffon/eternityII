@@ -715,7 +715,7 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
  * @param suite File cible.
  * @param value Paquet à ajouter (copié dans la file).
  */
-void put_possibility (File * suite, struct possibility_packet *value){
+int put_possibility (File * suite, struct possibility_packet *value){
 #ifdef DEBUG_CHECK_POSSIBILITY
     int analyse = check_possibility(value, NULL);
     if (analyse < 0)
@@ -729,28 +729,27 @@ void put_possibility (File * suite, struct possibility_packet *value){
     // On vérifie on peut encore positionner dans le cache
 	if(suite->lastPostionCache < suite->cacheSize)
 	{
-		
+
 		new_element = &suite->cacheElement[suite->lastPostionCache];
 		suite->lastPostionCache++;
 	} else
 	{
         // création d'un nouvel élément
 		new_element = malloc(sizeof(Element));
-        // ?????
 		if (suite->sizeofvalue <= 0 || (new_element->value = malloc(suite->sizeofvalue))
 			== NULL)
 		{
 			free (new_element);
-			return;
+			return 0;
 		}
 	}
-	
+
 	new_element->previous = NULL;
 	new_element->next = NULL;
-	
+
 	// par précaution du cache on vérifie que qu'il ne s'agit pas de la meme valeur
     memcpy (new_element->value, value, sizeof(struct possibility_packet));
-	
+
     // On place l'élément dans la suite
 	if(suite->start == NULL){
 		suite->start = new_element;
@@ -758,10 +757,10 @@ void put_possibility (File * suite, struct possibility_packet *value){
 		suite->end->next = new_element;
 		new_element->previous = suite->end;
 	}
-    
+
     suite->end = new_element;
 	suite->size++;
-	return;
+	return 1;
 }
 
 /**
@@ -802,9 +801,6 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
     // On vérifie si la possibilité à cette position n'est toujours pas connu.
 	if(currPossibility->grid[x][y] == -2) {
     
-        // TODO : vérifier si suffisament d'espace mémoire pour intégrer un le nombre de possibilité retournée
-        
-        
 		// TODO : voir pour réviser la recherche avec seulement des id de all_rotate_part
         // liste des pieces répondant à la recherche (key)
         struct array_part *search = get_parts_bigarray_with_key(mapParts, key);
@@ -819,11 +815,13 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
             // Si la piece n'est pas déjà utilisée dans la suite de possibilité, on a donc une possiblité supplémentaire
             if(!is_face_used(currPossibility->b_faceused, position))
             {
-                
                 // On ajoute la définition d'une possibilité dans la suite.
                 // effectue une copie dans le end->value
                 // TODO : utiliser un système moins couteux en copie de mémoire
-                put_possibility(result, currPossibility);
+                if (!put_possibility(result, currPossibility)) {
+                    log_error("put_possibility: malloc échoué à la position %d\n", incAlloc);
+                    break;
+                }
                 // On se place à la fin de la suite qui correspond à la nouvelle définition
                 currPossibility = result->end->value;
                 // Dans le cas où on a déjà généré une possiblité, on libère la piece qui avait été utilisée avant de généré un nouveau jeu
@@ -867,9 +865,12 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
         // ?? à quoi correspond % 256
 		//lastId = currPossibility->grid[x][y] % 256;
         lastId = 1;// pour indiquer qu'on a trouvé qqc
-        
+
         // On remet la possibilté dans la suite car elle ne doit pas être résolu sinon on aurait arreter
-		put_possibility(result, currPossibility);
+        if (!put_possibility(result, currPossibility)) {
+            log_error("put_possibility: malloc échoué à la position %d\n", incAlloc);
+            return max_result;
+        }
 		// On poursuit sur la copie poussée dans la file : muter l'original
 		// laisserait la copie avec alloc/x/y périmés
 		currPossibility = result->end->value;
@@ -1015,9 +1016,6 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
 
     // On vérifie si la possibilité à cette position n'est toujours pas connu.
     if(currPossibility->grid[x][y] == -2) {
-
-        // TODO : vérifier si suffisament d'espace mémoire pour intégrer un le nombre de possibilité retournée
-
 
         // TODO : voir pour réviser la recherche avec seulement des id de all_rotate_part
         // liste des pieces répondant à la recherche (key)
