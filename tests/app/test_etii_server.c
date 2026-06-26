@@ -11,11 +11,18 @@
  */
 #include "greatest.h"
 #include "app/etii_server.h"
+#include "app/static_variables.h"   /* counters, version */
 #include "core/datamanager.h"
 #include "core/possibility.h"
+#include "net/etii_protocol.h"      /* INST_*, send_instruction, recv_instruction, *_all */
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <sys/socket.h>
+
+extern unsigned long long *fileUpdates;   /* global défini dans etii_server.c */
 
 /* Vide le pool local du datamanager (état global partagé entre suites). */
 static void dm_drain_all(void)
@@ -310,6 +317,366 @@ TEST requeue_mixed_batch_returns_only_unacked(void)
     PASS();
 }
 
+/* ---------- communicate_with_client_step -------------------------------- */
+/*
+ * Le step fait de vraies I/O sur client->socket_id : on lui passe un bout d'un
+ * socketpair (sv[0]) et on joue le client sur l'autre bout (sv[1]). counters et
+ * fileUpdates sont indexés par client->compteur dans certaines branches : on les
+ * câble sur des tampons locaux (sauvegarde/restauration du global).
+ */
+
+static int make_pair(int sv[2])
+{
+    return socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+}
+
+static unsigned long long g_counters_buf[1];
+static unsigned long long g_fileupd_buf[1];
+static unsigned long long *g_saved_counters;
+static unsigned long long *g_saved_fileupd;
+
+static void wire_counters(void)
+{
+    g_saved_counters = counters;
+    g_saved_fileupd = fileUpdates;
+    g_counters_buf[0] = 0;
+    g_fileupd_buf[0] = 0;
+    counters = g_counters_buf;
+    fileUpdates = g_fileupd_buf;
+}
+
+static void unwire_counters(void)
+{
+    counters = g_saved_counters;
+    fileUpdates = g_saved_fileupd;
+}
+
+/* INST_TEST_CONNECTED : ping renvoyé tel quel, on continue. */
+TEST step_test_connected_pings_back(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 0;
+
+    int cont = communicate_with_client_step(&client, INST_TEST_CONNECTED, &last, &vsupp);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT((int)INST_TEST_CONNECTED, (int)recv_instruction(sv[1]), "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Instruction métier sans handshake de version : refus + arrêt. */
+TEST step_unsupported_version_stops(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 0;                 /* handshake jamais réalisé */
+
+    int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp);
+
+    ASSERT_EQ_FMT(0, cont, "%d");  /* ancien break */
+    ASSERT_EQ_FMT((int)INST_UNSUPPORTED_VERSION, (int)recv_instruction(sv[1]), "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Handshake de version réussi : version_supported passe à 1, on continue. */
+TEST step_check_version_ok(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 0;
+
+    int cv = version;              /* envoie exactement la version serveur */
+    ASSERT_EQ((ssize_t)sizeof(int), write(sv[1], &cv, sizeof(int)));
+
+    int cont = communicate_with_client_step(&client, INST_CHECK_VERSION, &last, &vsupp);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(1, vsupp, "%d");
+    ASSERT_EQ_FMT((int)INST_SUPPORTED_VERSION, (int)recv_instruction(sv[1]), "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Instruction inconnue (handshake fait) : arrêt. */
+TEST step_unknown_instruction_stops(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    int cont = communicate_with_client_step(&client, (int8_t)99, &last, &vsupp);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_ADD : la possibilité reçue est ajoutée au stock, INST_CONSIDERED renvoyé. */
+TEST step_add_stores_possibility(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 3;
+    ASSERT_EQ((ssize_t)sizeof pkt, write(sv[1], &pkt, sizeof pkt));
+
+    int cont = communicate_with_client_step(&client, INST_ADD, &last, &vsupp);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT((int)INST_CONSIDERED, (int)recv_instruction(sv[1]), "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    unwire_counters();
+    dm_drain_all();
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_GET sur stock vide : INST_NULL renvoyé, on continue. */
+TEST step_get_empty_sends_null(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT((int)INST_NULL, (int)recv_instruction(sv[1]), "%d");
+
+    unwire_counters();
+    if (last) free_array_possibility_packet(last);  /* tableau vide alloué par get_last_possibility */
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_GET avec une possibilité en stock : elle est envoyée au client et
+   retirée du stock (passée « en analyse »). */
+TEST step_get_serves_possibility(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    struct possibility_packet *p = malloc(sizeof *p);
+    memset(p, 0, sizeof *p);
+    p->alloc = 5;
+    array_possibility_packet *ap = malloc(sizeof *ap);
+    ap->size = 1;
+    ap->possibilities = p;
+    add_possibility(NULL, ap);
+    free_array_possibility_packet(ap);
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp);
+    ASSERT_EQ_FMT(1, cont, "%d");
+
+    struct possibility_packet got;
+    memset(&got, 0, sizeof got);
+    ASSERT_EQ((long)sizeof got, recv_all(sv[1], &got, sizeof got));
+    ASSERT_EQ_FMT(5, (int)got.alloc, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");      /* retirée du stock */
+
+    unwire_counters();
+    if (last) free_array_possibility_packet(last);
+    dm_drain_all();
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_POSSIBILITY_ANALYSED : la possibilité « en analyse » est acquittée. */
+TEST step_possibility_analysed_acks(void)
+{
+    dm_drain_all();
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 4;
+    add_possibility_analysed(&pkt, -1);
+    ASSERT_EQ((long)sizeof pkt, send_all(sv[1], &pkt, sizeof pkt));
+
+    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED, &last, &vsupp);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT((int)INST_CONSIDERED, (int)recv_instruction(sv[1]), "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_GET_TO_CHECK (pruner, unité) sur pool « à vérifier » vide : INST_NULL. */
+TEST step_get_to_check_empty_sends_null(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK, &last, &vsupp);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT((int)INST_NULL, (int)recv_instruction(sv[1]), "%d");
+
+    unwire_counters();
+    if (last) free_array_possibility_packet(last);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_GET_TO_CHECK_BATCH sur pool vide : on relit un compte K == 0. */
+TEST step_get_to_check_batch_empty_returns_zero(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    int32_t requested = 5;
+    ASSERT_EQ((long)sizeof requested, send_all(sv[1], &requested, sizeof requested));
+
+    int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK_BATCH, &last, &vsupp);
+    ASSERT_EQ_FMT(1, cont, "%d");
+
+    int32_t k = -1;
+    ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
+    ASSERT_EQ_FMT(0, (int)k, "%d");
+
+    unwire_counters();
+    if (last) free_array_possibility_packet(last);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_POSSIBILITY_ANALYSED_BATCH : M acquittements en un aller-retour. */
+TEST step_analysed_batch_acks(void)
+{
+    dm_drain_all();
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    struct possibility_packet pkts[2];
+    memset(pkts, 0, sizeof pkts);
+    pkts[0].alloc = 1;
+    pkts[1].alloc = 2;
+    add_possibility_analysed(&pkts[0], -1);
+    add_possibility_analysed(&pkts[1], -1);
+
+    int32_t m = 2;
+    ASSERT_EQ((long)sizeof m, send_all(sv[1], &m, sizeof m));
+    ASSERT_EQ((long)sizeof pkts, send_all(sv[1], pkts, sizeof pkts));
+
+    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED_BATCH, &last, &vsupp);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT((int)INST_CONSIDERED, (int)recv_instruction(sv[1]), "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_POSSIBILITY_ANALYSED_BATCH avec un compte hors borne : arrêt sans ack. */
+TEST step_analysed_batch_out_of_bounds_stops(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    int32_t m = PRUNER_BATCH_MAX + 1;
+    ASSERT_EQ((long)sizeof m, send_all(sv[1], &m, sizeof m));
+
+    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED_BATCH, &last, &vsupp);
+
+    ASSERT_EQ_FMT(0, cont, "%d");   /* ancien break, aucun INST_CONSIDERED */
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_server_suite)
@@ -343,4 +710,17 @@ SUITE(etii_server_suite)
     RUN_TEST(requeue_unacked_returns_to_stock);
     RUN_TEST(requeue_acked_is_skipped);
     RUN_TEST(requeue_mixed_batch_returns_only_unacked);
+
+    RUN_TEST(step_test_connected_pings_back);
+    RUN_TEST(step_unsupported_version_stops);
+    RUN_TEST(step_check_version_ok);
+    RUN_TEST(step_unknown_instruction_stops);
+    RUN_TEST(step_add_stores_possibility);
+    RUN_TEST(step_get_empty_sends_null);
+    RUN_TEST(step_get_serves_possibility);
+    RUN_TEST(step_possibility_analysed_acks);
+    RUN_TEST(step_get_to_check_empty_sends_null);
+    RUN_TEST(step_get_to_check_batch_empty_returns_zero);
+    RUN_TEST(step_analysed_batch_acks);
+    RUN_TEST(step_analysed_batch_out_of_bounds_stops);
 }

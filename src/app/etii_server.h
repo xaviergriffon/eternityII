@@ -120,4 +120,23 @@ char *build_file_queues_table(unsigned long long *out_unchecked,
  */
 void requeue_last_sent_possibility(array_possibility_packet *lastSent);
 
+/**
+ * @brief Traite une instruction reçue d'un client (un tour de la boucle de
+ *        `communicate_with_client`).
+ *
+ * Extrait du corps du `while` pour être testable hors thread (le socket peut
+ * être un socketpair). `*lastSent` mémorise le dernier lot servi à rendre au
+ * stock à la déconnexion ; `*version_supported` porte l'état du handshake d'un
+ * tour à l'autre.
+ *
+ * @param client            Contexte du thread (socket_id, compteur, rotate_parts).
+ * @param instruction        Instruction reçue à traiter.
+ * @param lastSent           In/out : dernier lot envoyé (libéré/réaffecté ici).
+ * @param version_supported  In/out : 1 si le handshake de version a réussi.
+ * @return 1 pour poursuivre la boucle, 0 pour s'arrêter.
+ */
+int communicate_with_client_step(client_t *client, int8_t instruction,
+                                 array_possibility_packet **lastSent,
+                                 int *version_supported);
+
 #endif /* etii_server_h */
