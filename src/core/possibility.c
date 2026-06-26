@@ -207,19 +207,6 @@ void what_search_in_grid_to_key(struct array_part *all_rotate_parts, struct poss
  * @param all_face         Valeur représentant « toute face » (= map->sizearrayM).
  */
 void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face) {
-    // TODO : ne pas utilisé -1 mais MAX_FACE-1 pour éviter de le faire dans convert_p
-    // -2 : non défini
-    // -1 toute face
-    // 0 bordure
-    
-    // Toujours valorisé dans les if
-    /*
-    key->k1 =-2;
-    key->k2 =-2;
-    key->k3 =-2;
-    key->k4 =-2;
-     */
-    
     int x = possiblity->x;
     int xm = x - 1;
     int xp = x + 1;
@@ -227,8 +214,7 @@ void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility
     int ym = y - 1;
     int yp = y + 1;
 
-    // tODO : diminuer les calculs -1 +1 en conservant le résultat
-    
+
     // TOP
     if(ym < 0)
     {
@@ -294,98 +280,82 @@ void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility
     }
 }
 /**
- * @brief Calcule la clé de recherche pour la case courante (version sans all_face).
+ * @brief Calcule la clé de recherche pour la case courante (version sortie pointeur, avec all_face).
  *
- * Identique à `what_search_to_key2` mais utilise -1 (au lieu de all_face) pour
- * représenter les voisins absents. Destinée à la `map_part` avec hachage textuel.
+ * Équivalent à `what_search_to_key2` avec `all_face` explicite pour les voisins absents.
  *
  * @param all_rotate_parts Tableau de toutes les rotations.
  * @param possiblity       Paquet courant.
  * @param key              Clé résultante (sortie).
+ * @param all_face         Valeur à utiliser pour un voisin absent.
  */
-void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key) {
-    // TODO : ne pas utilisé -1 mais MAX_FACE-1 pour éviter de le faire dans convert_p
-    // -2 : non défini
-    // -1 toute face
-    // 0 bordure
-    
-    // Toujours valorisé dans les if
-    /*
-	key->k1 =-2;
-	key->k2 =-2;
-	key->k3 =-2;
-	key->k4 =-2;
-     */
-	
-	int x = possiblity->x;
+void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face) {
+    int x = possiblity->x;
     int xm = x - 1;
     int xp = x + 1;
-	int y = possiblity->y;
+    int y = possiblity->y;
     int ym = y - 1;
     int yp = y + 1;
 
-    // tODO : diminuer les calculs -1 +1 en conservant le résultat
-    
-	// TOP
-	if(ym < 0)
-	{
-		key->k1 = 0;
-	} else
-	{
-        // Todo : tester -2 ou -1 (optim)
-		if(possiblity->grid[x][ym] < 0)
-		{
-			key->k1 = -1;
-		} else
-		{
-			key->k1 = all_rotate_parts->parts[possiblity->grid[x][ym]].bottom;
-		}
-	}
-	
-	// RIGHT
-	if(xp >= ETERN_SIZE)
-	{
-		key->k2 = 0;
-	} else
-	{
-		if(possiblity->grid[xp][y] < 0)
-		{
-			key->k2 = -1;
-		} else
-		{
-			key->k2 = all_rotate_parts->parts[possiblity->grid[xp][y]].left;
-		}
-	}
-	
-	// BOTTOM
-	if(yp >= ETERN_SIZE)
-	{
-		key->k3 = 0;
-	} else
-	{
-		if(possiblity->grid[x][yp] < 0)
-		{
-			key->k3 = -1;
-		} else
-		{
-			key->k3 = all_rotate_parts->parts[possiblity->grid[x][yp]].top;
-		}
-	}
-	
-	// LEFT
-	if(xm < 0)
-	{
-		key->k4 = 0;
-	} else
-	{
-		if(possiblity->grid[xm][y] < 0)
-		{
-			key->k4 = -1;
-		} else
-		{
-			key->k4 = all_rotate_parts->parts[possiblity->grid[xm][y]].right;
-		}
-	}
+    // TOP
+    if(ym < 0)
+    {
+        key->k1 = 0;
+    } else
+    {
+        if(possiblity->grid[x][ym] < 0)
+        {
+            key->k1 = all_face;
+        } else
+        {
+            key->k1 = all_rotate_parts->parts[possiblity->grid[x][ym]].bottom;
+        }
+    }
+
+    // RIGHT
+    if(xp >= ETERN_SIZE)
+    {
+        key->k2 = 0;
+    } else
+    {
+        if(possiblity->grid[xp][y] < 0)
+        {
+            key->k2 = all_face;
+        } else
+        {
+            key->k2 = all_rotate_parts->parts[possiblity->grid[xp][y]].left;
+        }
+    }
+
+    // BOTTOM
+    if(yp >= ETERN_SIZE)
+    {
+        key->k3 = 0;
+    } else
+    {
+        if(possiblity->grid[x][yp] < 0)
+        {
+            key->k3 = all_face;
+        } else
+        {
+            key->k3 = all_rotate_parts->parts[possiblity->grid[x][yp]].top;
+        }
+    }
+
+    // LEFT
+    if(xm < 0)
+    {
+        key->k4 = 0;
+    } else
+    {
+        if(possiblity->grid[xm][y] < 0)
+        {
+            key->k4 = all_face;
+        } else
+        {
+            key->k4 = all_rotate_parts->parts[possiblity->grid[xm][y]].right;
+        }
+    }
 }
 
 /**

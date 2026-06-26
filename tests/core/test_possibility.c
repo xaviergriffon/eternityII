@@ -964,7 +964,7 @@ TEST search_big_table_prunes_dead_branches(void)
 }
 
 /* --------------------------------------------------------------------------
- * what_search_to_key : variante écrivant la clé, voisins vides encodés en -1
+ * what_search_to_key : variante écrivant la clé, all_face=-1 pour voisins vides
  * ------------------------------------------------------------------------ */
 
 TEST what_search_to_key_empty_and_placed_neighbor(void)
@@ -981,7 +981,7 @@ TEST what_search_to_key_empty_and_placed_neighbor(void)
     p->x = 0; p->y = 0;
 
     key_part k;
-    what_search_to_key(&rp, p, &k);
+    what_search_to_key(&rp, p, &k, -1);
     ASSERT_EQ_FMT(0, (int)k.k1, "%d");  /* TOP bord */
     ASSERT_EQ_FMT(-1, (int)k.k2, "%d"); /* RIGHT vide -> -1 */
     ASSERT_EQ_FMT(-1, (int)k.k3, "%d"); /* BOTTOM vide -> -1 */
@@ -989,7 +989,7 @@ TEST what_search_to_key_empty_and_placed_neighbor(void)
 
     /* place un voisin à droite : k2 = sa face gauche */
     p->grid[1][0] = 1; /* parts[1].left = 9 */
-    what_search_to_key(&rp, p, &k);
+    what_search_to_key(&rp, p, &k, -1);
     ASSERT_EQ_FMT(9, (int)k.k2, "%d");
 
     free(p);
