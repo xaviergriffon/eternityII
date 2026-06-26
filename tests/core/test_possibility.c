@@ -1061,6 +1061,116 @@ TEST all_has_a_next_dead_cell_returns_zero(void)
     PASS();
 }
 
+#if ETERN_PARTS == 256
+/* ------------------------------------------------------------------------- *
+ *  Map synthétique 256 pièces (sans pieces.csv) pour tester first_possibility *
+ * ------------------------------------------------------------------------- *
+ *
+ * first_possibility (corps sous #if ETERN_PARTS == 256) place 5 pièces-indices
+ * — 139, 208, 255, 181, 249 — via get_one_part sur des clés fixes, puis
+ * développe la première case libre. La tester exige une vraie map 256, donc
+ * jusqu'ici le CSV en CWD : on s'en affranchit avec une map « synthétique ».
+ *
+ * Algorithme : 256 pièces base (rotation 0) ; 5 portent EXACTEMENT les faces que
+ * les clés recherchent (139 calibrée pour matcher en rotation 2, afin que la
+ * grille y stocke id_for_rotated_part(139,2) == 651, l'ancrage exigé par
+ * check_possibility) ; les 251 autres sont des tuiles intérieures identiques
+ * (4,4,4,4) — couleur 4 absente de toutes les clés, et sans face bordure (0) :
+ * aucune pièce n'est un coin, donc le développement de (0,0) [clé {0, libre,
+ * libre, 0}] ne trouve aucun candidat et reste borné (pas d'explosion).
+ *
+ * Rappel rotation (rotatePart) : une rotation envoie (T,R,B,L) -> (L,T,R,B),
+ * donc la rotation 2 donne (B,L,T,R). Pour que 139 présente {2,15,15,3} en r2,
+ * sa base doit être (T=15, R=3, B=2, L=15).
+ *
+ * Le pipeline réel rotate_all_parts -> prepare_map_part est légitime ici : sous
+ * ce #if, ETERN_PARTS vaut bien 256, donc l'indexation i + 256*r est correcte.
+ */
+
+/* Faces base (rotation 0) des pièces-indices ; commentaire = clé résolue. */
+struct syn_index_face { int id; int8_t top, right, bottom, left; };
+static const struct syn_index_face SYN_INDEX_FACES[] = {
+    {139, 15,  3,  2, 15}, /* rotation 2 -> {2,15,15,3} (part_139_i8)            */
+    {208, 13, 12,  3,  1}, /* rotation 0 -> {13,12,3,1}                          */
+    {255, 13, 11, 13,  7}, /* rotation 0 -> {13,11,13,7}                         */
+    {181,  7, 15,  5,  3}, /* rotation 0 -> {7,15,5,3}                           */
+    {249,  8,  5,  9, 10}, /* rotation 0 -> {8,5,9,10}                           */
+};
+
+/* Construit l'array_part 256 base (mêmes conventions que read_parts : size=256,
+ * parts[0] bouchon id 0, pièces réelles en 1..256). Si omit_id != 0, la
+ * pièce-indice correspondante GARDE ses faces de filler : sa clé ne résout plus
+ * (get_one_part -> NULL), ce qui sert à exercer les chemins fataux. */
+static struct array_part *make_synthetic_base_256(int omit_id)
+{
+    struct array_part *a = malloc(sizeof *a);
+    a->size = ETERN_PARTS;
+    a->parts = calloc(ETERN_PARTS + 1, sizeof(struct part)); /* indices 0..256 */
+    for (int i = 1; i <= ETERN_PARTS; i++) {
+        a->parts[i].id = i;
+        a->parts[i].rotation = 0;
+        a->parts[i].top = a->parts[i].right = a->parts[i].bottom = a->parts[i].left = 4;
+    }
+    for (size_t k = 0; k < sizeof SYN_INDEX_FACES / sizeof SYN_INDEX_FACES[0]; k++) {
+        const struct syn_index_face *s = &SYN_INDEX_FACES[k];
+        if (s->id == omit_id) continue; /* laissé filler -> clé non résolue */
+        a->parts[s->id].top    = s->top;
+        a->parts[s->id].right  = s->right;
+        a->parts[s->id].bottom = s->bottom;
+        a->parts[s->id].left   = s->left;
+    }
+    return a;
+}
+
+/* Contrat de la map synthétique : chacune des 5 clés des indices résout vers une
+ * pièce UNIQUE (get_one_part != NULL), 139 spécifiquement en rotation 2 (id
+ * grille 651). C'est le socle des futurs tests de first_possibility. */
+TEST synthetic_map_resolves_each_index_key(void)
+{
+    struct array_part *base = make_synthetic_base_256(0);
+    struct array_part *rot  = rotate_all_parts(base);
+    map_big_array     *map  = prepare_map_part(rot);
+
+    struct part *p139 = get_one_part(map, (key_part){2, 15, 15, 3});
+    ASSERT(p139 != NULL);
+    ASSERT_EQ_FMT(139, (int)p139->id, "%d");
+    ASSERT_EQ_FMT(2, (int)p139->rotation, "%d");
+    ASSERT_EQ_FMT((int)id_for_rotated_part(139, 2),
+                  (int)id_for_rotated_part(p139->id, p139->rotation), "%d");
+
+    struct part *p208 = get_one_part(map, (key_part){13, 12, 3, 1});
+    ASSERT(p208 != NULL); ASSERT_EQ_FMT(208, (int)p208->id, "%d");
+    struct part *p255 = get_one_part(map, (key_part){13, 11, 13, 7});
+    ASSERT(p255 != NULL); ASSERT_EQ_FMT(255, (int)p255->id, "%d");
+    struct part *p181 = get_one_part(map, (key_part){7, 15, 5, 3});
+    ASSERT(p181 != NULL); ASSERT_EQ_FMT(181, (int)p181->id, "%d");
+    struct part *p249 = get_one_part(map, (key_part){8, 5, 9, 10});
+    ASSERT(p249 != NULL); ASSERT_EQ_FMT(249, (int)p249->id, "%d");
+
+    free_bigarray(map);
+    free_array_part(rot);
+    free_array_part(base);
+    PASS();
+}
+
+/* Omettre une pièce-indice rend SA clé non résolue (NULL) sans affecter les
+ * autres : c'est exactement l'entrée des chemins fataux de first_possibility. */
+TEST synthetic_map_omitting_index_yields_null_key(void)
+{
+    struct array_part *base = make_synthetic_base_256(208);
+    struct array_part *rot  = rotate_all_parts(base);
+    map_big_array     *map  = prepare_map_part(rot);
+
+    ASSERT(get_one_part(map, (key_part){13, 12, 3, 1}) == NULL); /* 208 absent  */
+    ASSERT(get_one_part(map, (key_part){2, 15, 15, 3}) != NULL); /* 139 présent */
+
+    free_bigarray(map);
+    free_array_part(rot);
+    free_array_part(base);
+    PASS();
+}
+#endif /* ETERN_PARTS == 256 */
+
 SUITE(possibility_suite)
 {
     RUN_TEST(test_directions_covers_every_cell);
@@ -1072,6 +1182,8 @@ SUITE(possibility_suite)
 #if ETERN_PARTS == 256
     RUN_TEST(check_possibility_missing_genesis_anchor_is_minus_six);
     RUN_TEST(check_possibility_valid_genesis_is_zero);
+    RUN_TEST(synthetic_map_resolves_each_index_key);
+    RUN_TEST(synthetic_map_omitting_index_yields_null_key);
 #endif
 #if ETERN_PARTS != 256
     RUN_TEST(check_possibility_invalid_grid_value_is_minus_seven);
