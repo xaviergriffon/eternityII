@@ -778,7 +778,6 @@ static int autosearch_step(client_possibility_t *client,
     if (request == REQUEST_STOP) {
         return 0;
     }
-    usleep(MICRO_SHORT_SLEEP);
     return 1;
 }
 
@@ -806,6 +805,7 @@ void *autosearch (void *userdata)
     // Boucle infinie pour maintenir le thread ; autosearch_step renvoie 0 sur REQUEST_STOP
     while (autosearch_step(client, idParts))
     {
+        usleep(MICRO_SHORT_SLEEP);
     }
 #ifdef DEBUG_THREAD
     log_info("END search thread %i\n", client->pid);

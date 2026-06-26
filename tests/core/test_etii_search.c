@@ -817,6 +817,44 @@ TEST autosearch_step_stop_requeues_and_returns_zero(void)
     PASS();
 }
 
+/* autosearch_step hors arrêt (REQUEST_CONTINUE) : avec un jeu de possibilités
+   VIDE (size 0, non-NULL : on sort de l'attente sans déclencher de backtracking),
+   le cycle est nettoyé et la fonction renvoie 1 (on poursuit la boucle). Couvre
+   la branche « continue » sans lancer de recherche. */
+TEST autosearch_step_continue_returns_one(void)
+{
+    drain_local();
+    ensure_counters();
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1; /* works=1 + aposs non-NULL -> on sort de l'attente */
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 0;                                            /* aucun paquet à traiter */
+    aposs->possibilities = malloc(sizeof(struct possibility_packet)); /* libéré au nettoyage */
+    client.aposs = aposs;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    init_id_parts(idParts);
+
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    int cont = autosearch_step(&client, idParts);
+    request = saved;
+
+    ASSERT_EQ_FMT(1, cont, "%d");                  /* 1 -> on poursuit */
+    ASSERT(client.aposs == NULL);                  /* cycle nettoyé */
+    ASSERT_EQ_FMT(0, (int)client.works, "%d");     /* works réinitialisé */
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");     /* rien renvoyé (pas d'arrêt) */
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
 SUITE(etii_search_suite)
 {
     RUN_TEST(delegate_noop_below_threshold);
@@ -836,6 +874,7 @@ SUITE(etii_search_suite)
     RUN_TEST(search_backtracking_stop_flushes_and_returns_one);
     RUN_TEST(requeue_unprocessed_packets_routes_tail_locally);
     RUN_TEST(autosearch_step_stop_requeues_and_returns_zero);
+    RUN_TEST(autosearch_step_continue_returns_one);
 #if ETERN_PARTS == 16
     RUN_TEST(search_backtracking_solves_4x4_and_returns_zero);
     RUN_TEST(search_backtracking_stop_on_solution_exits_success);
