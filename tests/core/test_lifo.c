@@ -346,6 +346,32 @@ TEST file_move_targets_non_extremity(void)
     PASS();
 }
 
+/* scroll_cache sur File sans cache (cacheSize=0) : tous les éléments sont alloués
+   dynamiquement ; scroll_cache doit libérer le wrapper + la valeur et retourner NULL,
+   et size doit descendre à 0 après extraction complète. */
+TEST file_scroll_cache_no_cache_frees_and_size_decrements(void)
+{
+    File f;
+    init_file_with_cache(&f, 0, sizeof(int)); /* pas de cache : malloc/free purs */
+
+    for (int i = 1; i <= 3; i++) {
+        ASSERT_EQ_FMT(1, put(&f, &i), "%d");
+    }
+    ASSERT_EQ_FMT(3ULL, (unsigned long long)f.size, "%llu");
+
+    /* Hors cache : scroll_cache libère la mémoire et retourne NULL. */
+    ASSERT_EQ(NULL, scroll_cache(&f));
+    ASSERT_EQ_FMT(2ULL, (unsigned long long)f.size, "%llu");
+    ASSERT_EQ(NULL, scroll_cache(&f));
+    ASSERT_EQ_FMT(1ULL, (unsigned long long)f.size, "%llu");
+    ASSERT_EQ(NULL, scroll_cache(&f));
+    ASSERT_EQ_FMT(0ULL, (unsigned long long)f.size, "%llu");
+    ASSERT_EQ(NULL, f.start);
+    ASSERT_EQ(NULL, f.end);
+
+    PASS();
+}
+
 /* free_big_table libère un big_table alloué sur le tas (structure + buffer). */
 TEST big_table_free_big_table_heap(void)
 {
@@ -375,5 +401,6 @@ SUITE(lifo_suite)
     RUN_TEST(file_position_cache_inside);
     RUN_TEST(file_scroll_fifo_with_cache);
     RUN_TEST(file_move_targets_non_extremity);
+    RUN_TEST(file_scroll_cache_no_cache_frees_and_size_decrements);
     RUN_TEST(big_table_free_big_table_heap);
 }
