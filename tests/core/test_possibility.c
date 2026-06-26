@@ -599,7 +599,7 @@ TEST log_solution_writes_distinct_files_for_each_solution(void)
 }
 
 /* --------------------------------------------------------------------------
- * what_search / what_search_to_key2 / what_search_in_grid_to_key
+ * what_search / what_search_to_key / what_search_in_grid_to_key
  *
  * Petit jeu de pièces dont seuls les bords comptent. grid stocke ici des
  * indices directs dans all_rotate_parts->parts[] (ce qu'attendent ces
@@ -705,8 +705,8 @@ TEST what_search_interior_empty_neighbors(void)
     PASS();
 }
 
-/* what_search_to_key2 : case courante, voisins vides encodés en `all_face`. */
-TEST what_search_to_key2_uses_all_face_for_empty(void)
+/* what_search_to_key : case courante, voisins vides encodés en `all_face`. */
+TEST what_search_to_key_uses_all_face_for_empty(void)
 {
     struct part parts[] = { { .id = 0 }, { .id = 1, .top = 0, .right = 1, .bottom = 1, .left = 0 } };
     struct array_part rp = { .size = 2, .parts = parts };
@@ -719,7 +719,7 @@ TEST what_search_to_key2_uses_all_face_for_empty(void)
 
     key_part k;
     const int8_t all_face = 7;
-    what_search_to_key2(&rp, p, &k, all_face);
+    what_search_to_key(&rp, p, &k, all_face);
     ASSERT_EQ_FMT(0, (int)k.k1, "%d");          /* TOP bord */
     ASSERT_EQ_FMT(all_face, (int)k.k2, "%d");   /* RIGHT vide -> all_face */
     ASSERT_EQ_FMT(all_face, (int)k.k3, "%d");   /* BOTTOM vide -> all_face */
@@ -1336,7 +1336,7 @@ SUITE(possibility_suite)
     RUN_TEST(what_search_reads_placed_neighbor);
     RUN_TEST(what_search_bottom_right_with_neighbors);
     RUN_TEST(what_search_interior_empty_neighbors);
-    RUN_TEST(what_search_to_key2_uses_all_face_for_empty);
+    RUN_TEST(what_search_to_key_uses_all_face_for_empty);
     RUN_TEST(what_search_in_grid_to_key_arbitrary_cell);
     RUN_TEST(possibility_has_a_next_finds_and_excludes_used);
     RUN_TEST(search_light_expands_one_per_candidate);

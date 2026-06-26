@@ -112,7 +112,7 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 /**
  * @brief Calcule la clé de recherche pour une case (x, y) quelconque de la grille.
  *
- * Variante de `what_search_to_key2` qui prend des coordonnées explicites au lieu
+ * Variante de `what_search_to_key` qui prend des coordonnées explicites au lieu
  * d'utiliser la position courante du paquet. Utilisée par `possibility_all_has_a_next`
  * pour tester chaque case libre de la grille.
  *
@@ -205,89 +205,6 @@ void what_search_in_grid_to_key(struct array_part *all_rotate_parts, struct poss
  * @param possiblity       Paquet courant indiquant la position (x, y) à remplir.
  * @param key              Clé résultante (sortie).
  * @param all_face         Valeur représentant « toute face » (= map->sizearrayM).
- */
-void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face) {
-    int x = possiblity->x;
-    int xm = x - 1;
-    int xp = x + 1;
-    int y = possiblity->y;
-    int ym = y - 1;
-    int yp = y + 1;
-
-
-    // TOP
-    if(ym < 0)
-    {
-        key->k1 = 0;
-    } else
-    {
-        int16_t partId = possiblity->grid[x][ym];
-        if(partId < 0)
-        {
-            key->k1 = all_face;
-        } else
-        {
-            key->k1 = all_rotate_parts->parts[partId].bottom;
-        }
-    }
-    
-    // RIGHT
-    if(xp >= ETERN_SIZE)
-    {
-        key->k2 = 0;
-    } else
-    {
-        int16_t partId = possiblity->grid[xp][y];
-        if(partId < 0)
-        {
-            key->k2 = all_face;
-        } else
-        {
-            key->k2 = all_rotate_parts->parts[partId].left;
-        }
-    }
-    
-    // BOTTOM
-    if(yp >= ETERN_SIZE)
-    {
-        key->k3 = 0;
-    } else
-    {
-        int16_t partId = possiblity->grid[x][yp];
-        if(partId < 0)
-        {
-            key->k3 = all_face;
-        } else
-        {
-            key->k3 = all_rotate_parts->parts[partId].top;
-        }
-    }
-    
-    // LEFT
-    if(xm < 0)
-    {
-        key->k4 = 0;
-    } else
-    {
-        int16_t partId = possiblity->grid[xm][y];
-        if(partId < 0)
-        {
-            key->k4 = all_face;
-        } else
-        {
-            key->k4 = all_rotate_parts->parts[partId].right;
-        }
-    }
-}
-/**
- * @brief Calcule la clé de recherche pour la case courante (version sortie pointeur, avec all_face).
- *
- * Équivalent à `what_search_to_key2` avec `all_face` explicite pour les voisins absents.
- *
- * @param all_rotate_parts Tableau de toutes les rotations.
- * @param possiblity       Paquet courant.
- * @param key              Clé résultante (sortie).
- * @param all_face         Valeur à utiliser pour un voisin absent.
  */
 void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face) {
     int x = possiblity->x;
@@ -1458,7 +1375,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
     struct possibility_packet *possibilityPacket = generate_possibility_packet(x, y, etern, cur_dir);
     non_null_possibilities++;
     // alimente key pour indiquer quoi chercher
-    what_search_to_key2(all_rotate_part, possibilityPacket, key, mapParts->sizearrayM);
+    what_search_to_key(all_rotate_part, possibilityPacket, key, mapParts->sizearrayM);
     int max = search_possiblity_light(possibilities, key, possibilityPacket, mapParts, all_rotate_part, idParts);
     free(possibilityPacket);
     
