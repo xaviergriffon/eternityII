@@ -27,6 +27,8 @@
 #include "core/part.h"
 #include "core/readdata.h"
 #include "net/etii_protocol.h"
+#include "app/etii_server.h"        /* communicate_with_client_step, client_t */
+#include "app/static_variables.h"   /* stop_on_solution */
 #include "fork_assert.h"
 #include "fixtures/solution16.h"
 
@@ -37,6 +39,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <dirent.h>
 
 #if ETERN_PARTS != 16
 #error "test_solution16.c doit être compilé avec -DETERN_PARTS=16"
@@ -338,6 +341,127 @@ TEST solution_round_trips_over_socket(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * COMMUNICATION — branche INST_SOLUTION de communicate_with_client_step
+ *
+ * On exerce le vrai code serveur (réception du paquet + save_solution_csv +
+ * INST_CONSIDERED, puis, avec --stop-on-solution, backup + exit) en lui passant
+ * un bout d'un socketpair et la VRAIE solution 4×4. Les fichiers écrits
+ * (solution_server_*, *.back) sont confinés dans un répertoire temporaire.
+ * ------------------------------------------------------------------------ */
+
+/* Vide puis supprime un répertoire (fichiers de premier niveau uniquement). */
+static void empty_and_remove_dir(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (d != NULL) {
+        struct dirent *e;
+        char path[512];
+        while ((e = readdir(d)) != NULL) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+            snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+            unlink(path);
+        }
+        closedir(d);
+    }
+    rmdir(dir);
+}
+
+/* Contexte du fils pour la branche --stop-on-solution (copié par fork). */
+static client_t g_sol_client;
+
+/* Fonction-fils : INST_SOLUTION avec stop_on_solution -> backup + exit(EXIT_SUCCESS). */
+static void child_solution_stop(void)
+{
+    if (chdir(g_solution_dir) != 0) _exit(99);
+    stop_on_solution = 1;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+    communicate_with_client_step(&g_sol_client, INST_SOLUTION, &last, &vsupp);
+    /* La branche gagnante quitte par exit() : un retour ici est une anomalie. */
+    _exit(42);
+}
+
+/* Sans --stop-on-solution : la solution est sauvegardée, acquittée, et on
+   continue à servir le client (retour 1). */
+TEST solution_step_no_stop_acks_and_continues(void)
+{
+    char cwd[512];
+    ASSERT(getcwd(cwd, sizeof cwd) != NULL);
+    strcpy(g_solution_dir, "/tmp/etii_solstep_XXXXXX");
+    ASSERT(mkdtemp(g_solution_dir) != NULL);
+
+    struct array_part *rot = make_rotate_parts();
+    ASSERT(rot != NULL);
+    struct possibility_packet *golden = build_golden(rot);
+
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    ASSERT_EQ((long)sizeof(*golden), send_all(sv[0], golden, sizeof(*golden)));
+
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[1];
+    client.compteur = 0;
+    client.rotate_parts = rot;
+
+    int saved_stop = stop_on_solution;
+    stop_on_solution = 0;
+
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    /* Confine ./solution_server_*.csv dans le répertoire temporaire. */
+    ASSERT_EQ(0, chdir(g_solution_dir));
+    int cont = communicate_with_client_step(&client, INST_SOLUTION, &last, &vsupp);
+    int8_t ack = recv_instruction(sv[0]);
+    ASSERT_EQ(0, chdir(cwd));   /* restaure le CWD AVANT assertions/cleanup */
+
+    stop_on_solution = saved_stop;
+    close(sv[0]);
+    close(sv[1]);
+    empty_and_remove_dir(g_solution_dir);
+    free(golden);
+    free_array_part(rot);
+
+    ASSERT_EQ_FMT(1, cont, "%d");                        /* on continue à servir */
+    ASSERT_EQ_FMT((int)INST_CONSIDERED, (int)ack, "%d"); /* solution acquittée */
+    PASS();
+}
+
+/* Avec --stop-on-solution : le premier gagnant sauvegarde le stock et
+   exit(EXIT_SUCCESS). Exécuté en fils car la branche appelle exit(). */
+TEST solution_step_stop_backs_up_and_exits(void)
+{
+    strcpy(g_solution_dir, "/tmp/etii_solstop_XXXXXX");
+    ASSERT(mkdtemp(g_solution_dir) != NULL);
+
+    g_rot = make_rotate_parts();
+    ASSERT(g_rot != NULL);
+    struct possibility_packet *golden = build_golden(g_rot);
+
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    ASSERT_EQ((long)sizeof(*golden), send_all(sv[0], golden, sizeof(*golden)));
+
+    memset(&g_sol_client, 0, sizeof g_sol_client);
+    g_sol_client.socket_id = sv[1];
+    g_sol_client.compteur = 0;
+    g_sol_client.rotate_parts = g_rot;
+
+    pid_t pid = 0;
+    int code = run_in_fork(child_solution_stop, &pid);
+
+    close(sv[0]);
+    close(sv[1]);
+    empty_and_remove_dir(g_solution_dir);
+    free(golden);
+    free_array_part(g_rot);
+
+    ASSERT_EQ_FMT(EXIT_SUCCESS, code, "%d");   /* branche gagnante -> exit(EXIT_SUCCESS) */
+    PASS();
+}
+
 SUITE(solution16_suite)
 {
     /* Un send vers un pair fermé ne doit jamais tuer le runner. */
@@ -355,4 +479,6 @@ SUITE(solution16_suite)
     RUN_TEST(degraded_out_of_range_fields);
     /* Communication */
     RUN_TEST(solution_round_trips_over_socket);
+    RUN_TEST(solution_step_no_stop_acks_and_continues);
+    RUN_TEST(solution_step_stop_backs_up_and_exits);
 }
