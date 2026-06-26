@@ -79,8 +79,10 @@ struct array_part *rotate_all_parts(struct array_part *apart)
 	struct array_part *result = malloc(sizeof *result);
 	// + 1 pour le bouchon id = 0 à l'indice 0
 	result->size = apart->size * 4 + 1;
-	// TODO : pourquoi +4 ?
-	// Sans doute pour la propriété size de la structure array_part mais ce n'est pas très propre
+	/* Alloue result->size + 4 éléments. Les 4 supplémentaires sont du padding
+	   défensif : l'index max effectivement écrit/lu est
+	   apart->size + ETERN_PARTS*(4-1) = result->size - 1 (voir la boucle
+	   ci-dessous), donc ces 4 cases ne sont jamais touchées. */
 	result->parts = calloc((result->size + 4), sizeof(struct part));
 
 	int i;
@@ -381,7 +383,7 @@ int8_t convert_p(int8_t p, int maxFaceM)
 	int8_t result = p;
 	if (result == -1)
 	{
-		// TODO : voir pour passer en dur
+		/* maxFaceM dépend des données du CSV — pas de constante compile-time possible. */
 		result = maxFaceM;
 	}
 	return result;
