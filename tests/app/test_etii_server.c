@@ -677,6 +677,61 @@ TEST step_analysed_batch_out_of_bounds_stops(void)
     PASS();
 }
 
+/* ---------- should_autobackup -------------------------------------------- */
+/*
+ * Cadence de la sauvegarde automatique : tous les 6 tours ET seulement si le
+ * total de mises à jour a changé depuis le dernier backup.
+ */
+
+/* Sous le seuil : on incrémente le compteur, pas de backup, état de réf inchangé. */
+TEST autobackup_increments_below_threshold(void)
+{
+    int lastBack = 0;
+    unsigned long long lastBk = 0;
+    ASSERT_EQ_FMT(0, should_autobackup(&lastBack, &lastBk, 5), "%d");
+    ASSERT_EQ_FMT(1, lastBack, "%d");
+    ASSERT_EQ_FMT(0ULL, lastBk, "%llu");   /* pas de backup -> référence inchangée */
+    PASS();
+}
+
+/* Seuil atteint + stock modifié : backup, compteur remis à 0, référence mémorisée. */
+TEST autobackup_fires_at_threshold_when_changed(void)
+{
+    int lastBack = 6;
+    unsigned long long lastBk = 100;
+    ASSERT_EQ_FMT(1, should_autobackup(&lastBack, &lastBk, 150), "%d");
+    ASSERT_EQ_FMT(0, lastBack, "%d");
+    ASSERT_EQ_FMT(150ULL, lastBk, "%llu");
+    PASS();
+}
+
+/* Seuil atteint mais stock figé : pas de backup, compteur reste armé (pas d'incrément). */
+TEST autobackup_skips_at_threshold_when_unchanged(void)
+{
+    int lastBack = 6;
+    unsigned long long lastBk = 100;
+    ASSERT_EQ_FMT(0, should_autobackup(&lastBack, &lastBk, 100), "%d");
+    ASSERT_EQ_FMT(6, lastBack, "%d");        /* reste à 6, prêt à déclencher au prochain changement */
+    ASSERT_EQ_FMT(100ULL, lastBk, "%llu");
+    PASS();
+}
+
+/* La fenêtre complète est respectée : aucun backup avant 6 tours, même si le
+   stock bouge à chaque tour ; déclenchement au tour suivant. */
+TEST autobackup_waits_full_window_even_if_changed(void)
+{
+    int lastBack = 0;
+    unsigned long long lastBk = 0;
+    for (int t = 0; t < 6; t++) {
+        ASSERT_EQ_FMT(0, should_autobackup(&lastBack, &lastBk, (unsigned long long)(t + 1)), "%d");
+    }
+    ASSERT_EQ_FMT(6, lastBack, "%d");
+    ASSERT_EQ_FMT(1, should_autobackup(&lastBack, &lastBk, 999), "%d");
+    ASSERT_EQ_FMT(0, lastBack, "%d");
+    ASSERT_EQ_FMT(999ULL, lastBk, "%llu");
+    PASS();
+}
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_server_suite)
@@ -723,4 +778,9 @@ SUITE(etii_server_suite)
     RUN_TEST(step_get_to_check_batch_empty_returns_zero);
     RUN_TEST(step_analysed_batch_acks);
     RUN_TEST(step_analysed_batch_out_of_bounds_stops);
+
+    RUN_TEST(autobackup_increments_below_threshold);
+    RUN_TEST(autobackup_fires_at_threshold_when_changed);
+    RUN_TEST(autobackup_skips_at_threshold_when_unchanged);
+    RUN_TEST(autobackup_waits_full_window_even_if_changed);
 }

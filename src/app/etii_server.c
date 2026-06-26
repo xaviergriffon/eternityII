@@ -102,6 +102,28 @@ char *build_file_queues_table(unsigned long long *out_unchecked,
     if (out_analysed)  *out_analysed  = analysed;
     return table;
 }
+
+/**
+ * @brief Cadence de la sauvegarde automatique (logique extraite de check_server).
+ *
+ * Voir etii_server.h pour le contrat. Le seuil est de 6 tours.
+ */
+int should_autobackup(int *lastBack, unsigned long long *lastBackupUpdates,
+                      unsigned long long currentUpdates)
+{
+    if (*lastBack >= 6 && *lastBackupUpdates != currentUpdates)
+    {
+        *lastBackupUpdates = currentUpdates;
+        *lastBack = 0;
+        return 1;
+    }
+    else if (*lastBack < 6)
+    {
+        (*lastBack)++;
+    }
+    return 0;
+}
+
 /**
  * @brief Thread de statistiques du serveur (lancé par `run_checker`).
  *
@@ -171,15 +193,10 @@ void *check_server(void *param)
             log_event("new record: %i pieces placed", max_result);
         }
 
-        if(lastBack >= 6 && lastClientsFileUpdateBackup != clientsFileUpdates)
+        if (should_autobackup(&lastBack, &lastClientsFileUpdateBackup, clientsFileUpdates))
         {
-            lastClientsFileUpdateBackup = clientsFileUpdates;
             backup("./temp.back");
             backup_analysed("./temp_analysed.back");
-            lastBack = 0;
-        } else if (lastBack < 6)
-        {
-            lastBack++;
         }
         sleep(sleep_time);
     }
