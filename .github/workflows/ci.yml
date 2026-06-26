@@ -39,8 +39,8 @@ jobs:
       - name: Dépendance gcovr
         run: pipx install gcovr
 
-      # `make coverage-report` exécute `coverage` puis produit, via gcovr :
-      # coverage.xml (Cobertura, pour Codecov), le rapport HTML et coverage.md.
+      # `make coverage-report` exécute `coverage` (= coverage-256 + coverage-16)
+      # puis produit, via gcovr : coverage.xml (Cobertura), le rapport HTML et coverage.md.
       - name: Couverture de code (gcov + gcovr)
         run: make coverage-report
 
