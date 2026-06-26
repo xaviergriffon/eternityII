@@ -7,6 +7,22 @@ void log_errno(const char *format, ...);
 /** @brief Affiche un message d'erreur sur stderr. */
 void log_error(const char *format, ...);
 
+/**
+ * @brief Journalise un message d'erreur fatal via log_error puis termine le
+ *        process avec exit(EXIT_FAILURE).
+ *
+ * Funnel unique des erreurs fatales : centralise le motif répété
+ * `log_error(...); exit(EXIT_FAILURE);`. Marqué `noreturn`, donc l'appelant n'a
+ * pas à gérer le retour (ni à ajouter un exit() défensif derrière).
+ *
+ * Conçu comme point de couture pour les tests : les chemins fataux deviennent
+ * testables via fork (cf. tests/fork_assert.h) — le fils appelle fatal_error et
+ * sort, le parent inspecte WEXITSTATUS — et offrent un point central unique pour
+ * une future gestion globale (dump de crash, sortie structurée…).
+ */
+__attribute__((noreturn, format(printf, 1, 2)))
+void fatal_error(const char *format, ...);
+
 /** @brief Affiche un message informatif sur stdout. */
 void log_info(const char *format, ...);
 

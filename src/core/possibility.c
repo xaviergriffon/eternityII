@@ -1386,8 +1386,7 @@ struct part* part_139_i8(map_big_array *mapParts)
     struct part *part = get_one_part(mapParts, key);
     if(part == NULL)
     {
-        log_error("part 139 not found\n");
-        exit(EXIT_FAILURE);
+        fatal_error("part 139 not found\n");
     }
     return part;
 }
@@ -1432,8 +1431,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         part = get_one_part(mapParts, k208);
         if(part == NULL)
         {
-            log_error("part 208 r3 not found\n");
-            exit(EXIT_FAILURE);
+            fatal_error("part 208 r3 not found\n");
         }
         etern[2][2] = part;
         
@@ -1443,8 +1441,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         part = get_one_part(mapParts, k255);
         if(part == NULL)
         {
-            log_error("part 255 r3 not found\n");
-            exit(EXIT_FAILURE);
+            fatal_error("part 255 r3 not found\n");
         }
         etern[13][2] = part;
         
@@ -1454,8 +1451,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         part = get_one_part(mapParts, k181);
         if(part == NULL)
         {
-            log_error("part 181 r3 not found\n");
-            exit(EXIT_FAILURE);
+            fatal_error("part 181 r3 not found\n");
         }
         etern[2][13] = part;
         
@@ -1465,8 +1461,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         part = get_one_part(mapParts, k249);
         if(part == NULL)
         {
-            log_error("part 249 r0 not found\n");
-            exit(EXIT_FAILURE);
+            fatal_error("part 249 r0 not found\n");
         }
         etern[13][13] = part;
 #endif
@@ -1518,10 +1513,10 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         // l'invariant de parcours et être valide
         int analyse = check_possibility(packet, all_rotate_part);
         if (normalize_possibility_packet(packet) || analyse < 0) {
-            log_error("first_possibility : paquet initial incohérent (check : %i)\n", analyse);
+            // Pour l'initialisation, on crash car ce n'est vraiment pas normal :
+            // on dump d'abord le paquet fautif, puis fatal_error trace + sort.
             print_possibility_packet(packet);
-            // Pour l'initialisation, on crash car ce n'est vraiment pas normal
-            exit(EXIT_FAILURE);
+            fatal_error("first_possibility : paquet initial incohérent (check : %i)\n", analyse);
         }
         if(packet->alloc > max_result)
         {
@@ -1535,9 +1530,8 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         array_possibility_packet *aposs2 = build_single_array_possibility_packet(packet);
         if(add_possibility(NULL, aposs2))
         {
-            log_error("error on add_possibility\n");
 			// Pour l'initialisation, on crash car ce n'est vraiment pas normal
-            exit(EXIT_FAILURE);
+            fatal_error("error on add_possibility\n");
         }
         non_null_possibilities++;
 		free_array_possibility_packet(aposs2);

@@ -85,6 +85,42 @@ TEST log_errno_appends_strerror(void)
     PASS();
 }
 
+/* fatal_error : journalise le message sur stderr PUIS termine le process avec
+ * exit(EXIT_FAILURE). On l'exécute dans un fils dont stderr est redirigé vers un
+ * fichier temporaire (pas /dev/null comme run_in_fork) afin d'asserter À LA FOIS
+ * le code de sortie ET le message — ce funnel est le point de couture sur lequel
+ * s'appuient les tests fork des chemins fataux (cf. first_possibility). */
+TEST fatal_error_logs_then_exits_failure(void)
+{
+    char path[64];
+    snprintf(path, sizeof path, "/tmp/etii_fatal_%d.txt", (int)getpid());
+    unlink(path);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        int f = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (f >= 0) { dup2(f, 2); if (f > 2) close(f); }
+        fatal_error("fatal-%d boom", 42);
+        _exit(0); /* inatteignable : fatal_error est noreturn */
+    }
+    ASSERT(pid > 0);
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    ASSERT(WIFEXITED(status));
+    ASSERT_EQ_FMT(EXIT_FAILURE, WEXITSTATUS(status), "%d");
+
+    char buf[256] = {0};
+    FILE *f = fopen(path, "r");
+    ASSERT(f != NULL);
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    (void)n;
+    unlink(path);
+    ASSERT(strstr(buf, "fatal-42 boom") != NULL);
+    PASS();
+}
+
 /* log_status est un no-op en mode ANSI : aucune sortie. */
 TEST log_status_is_noop(void)
 {
@@ -256,6 +292,7 @@ SUITE(logger_suite)
     RUN_TEST(log_info_formats_to_stdout);
     RUN_TEST(log_debug_and_console_to_stdout);
     RUN_TEST(log_error_to_stderr);
+    RUN_TEST(fatal_error_logs_then_exits_failure);
     RUN_TEST(log_errno_appends_strerror);
     RUN_TEST(log_status_is_noop);
     RUN_TEST(log_event_prints_and_logs);
