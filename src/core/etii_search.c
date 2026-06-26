@@ -686,6 +686,101 @@ backtrack:;
     }
 }
 
+static void init_id_parts(int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
+{
+    for (int16_t p = 0; p <= ETERN_PARTS; p++) {
+        int16_t base = p;
+        for (int r = 0; r < PART_SIZES; r++) {
+            idParts[p][r] = base;
+            base = (int16_t)(base + ETERN_PARTS);
+        }
+    }
+}
+
+/**
+ * @brief À l'arrêt (REQUEST_STOP), renvoie au serveur — ou au stock local si
+ *        `server_ip == NULL` — les paquets racines `[from..size)` non traités.
+ *
+ * Extrait du corps de boucle d'autosearch pour être testable hors boucle infinie.
+ */
+static void requeue_unprocessed_packets(client_possibility_t *client, int from)
+{
+    if (client->aposs == NULL || from >= client->aposs->size) {
+        return;
+    }
+    array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
+    aposs->possibilities = malloc(sizeof(struct possibility_packet) * (client->aposs->size - from));
+    aposs->size = 0;
+    for (; from < client->aposs->size; from++)
+    {
+        memcpy(&aposs->possibilities[aposs->size], &client->aposs->possibilities[from], sizeof(struct possibility_packet));
+        aposs->size++;
+    }
+    // En cas d'erreur, les possibilités sont remises en locale.
+    if (add_possibility(client, aposs))
+    {
+        log_error("Error on add_possibility \n");
+    }
+    free_array_possibility_packet(aposs);
+}
+
+/**
+ * @brief Exécute un tour de la boucle de recherche d'autosearch.
+ *
+ * Attend du travail, consomme les paquets racines de `client->aposs` (un
+ * backtracking chacun), gère l'arrêt (REQUEST_STOP : renvoi du travail restant +
+ * acquittement) puis nettoie le cycle. Extrait du corps de `while(1)` pour être
+ * testable hors de la boucle infinie.
+ *
+ * @return 1 pour poursuivre la boucle, 0 pour s'arrêter (REQUEST_STOP).
+ */
+static int autosearch_step(client_possibility_t *client,
+                           int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
+{
+    // Attente d'un jeu de possibilité
+    while ((client->works == 0 || client->aposs == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+    {
+        usleep(MICRO_SLEEP);
+    }
+
+    // Consommation des possibilités demandées : un backtracking par paquet racine
+    int a = 0;
+    int stopped = 0;
+    while (client->aposs != NULL && a < client->aposs->size && !stopped)
+    {
+        stopped = search_packet_backtracking(client, &client->aposs->possibilities[a], idParts);
+        a++;
+    }
+
+    if (request == REQUEST_STOP)
+    {
+#ifdef DEBUG_THREAD
+        log_info("thread %i stop\n", client->pid);
+#endif // DEBUG_THREAD
+        // Renvoie au serveur les paquets racines non encore traités
+        requeue_unprocessed_packets(client, a);
+        // Acquittement inconditionnel : le thread d'alimentation est arrêté et
+        // n'acquittera plus — sans cet envoi, le travail terminé de ce cycle
+        // resterait « en analyse » sur le serveur pour toujours.
+        send_possibility_analysed(client);
+    }
+
+    // A faire tout le temps ou juste si on arrete ?
+    if (client->aposs != NULL) {
+        free_array_possibility_packet(client->aposs);
+        client->aposs = NULL;
+    }
+    pthread_mutex_lock(&client->works_mutex);
+    client->works = 0;
+    pthread_mutex_unlock(&client->works_mutex);
+    lastfilesize[client->compteur] = 0;
+
+    if (request == REQUEST_STOP) {
+        return 0;
+    }
+    return 1;
+}
+
 /**
  * @brief Thread de recherche principale (worker de résolution du puzzle).
  *
@@ -703,78 +798,14 @@ void *autosearch (void *userdata)
 {
     client_possibility_t *client = userdata;
     int16_t idParts[ETERN_PARTS+1][PART_SIZES];
-    for(int p=0; p <= ETERN_PARTS; p++) {
-        int base = p;
-        for(int r=0; r < PART_SIZES; r++) {
-            idParts[p][r] = base;
-            base += ETERN_PARTS;
-        }
-    }
+    init_id_parts(idParts);
 #ifdef DEBUG_THREAD
     log_info("START search thread %i\n", client->pid);
 #endif // DEBUG_THREAD
-    // Boucle infinie pour maintenir le thread
-    while(1)
+    // Boucle infinie pour maintenir le thread ; autosearch_step renvoie 0 sur REQUEST_STOP
+    while (autosearch_step(client, idParts))
     {
-        // Attente d'un jeu de possibilité
-        while ((client->works == 0 || client->aposs == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
-        {
-            usleep(MICRO_SLEEP);
-        }
-
-        // Consommation des possibilités demandées : un backtracking par paquet racine
-        int a = 0;
-        int stopped = 0;
-        while (client->aposs != NULL && a < client->aposs->size && !stopped)
-        {
-            stopped = search_packet_backtracking(client, &client->aposs->possibilities[a], idParts);
-            a++;
-        }
-
-        if (request == REQUEST_STOP)
-        {
-#ifdef DEBUG_THREAD
-            log_info("thread %i stop\n", client->pid);
-#endif // DEBUG_THREAD
-            // Renvoie au serveur les paquets racines non encore traités
-            if (client->aposs != NULL && a < client->aposs->size)
-            {
-                array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-                aposs->possibilities = malloc(sizeof(struct possibility_packet) * (client->aposs->size - a));
-                aposs->size = 0;
-                for (; a < client->aposs->size; a++)
-                {
-                    memcpy(&aposs->possibilities[aposs->size], &client->aposs->possibilities[a], sizeof(struct possibility_packet));
-                    aposs->size++;
-                }
-                // En cas d'erreur, les possibilités sont remises en locale.
-                if (add_possibility(client, aposs))
-                {
-                    log_error("Error on add_possibility \n");
-                }
-                free_array_possibility_packet(aposs);
-            }
-            // Acquittement inconditionnel : le thread d'alimentation est arrêté et
-            // n'acquittera plus — sans cet envoi, le travail terminé de ce cycle
-            // resterait « en analyse » sur le serveur pour toujours.
-            send_possibility_analysed(client);
-        }
-
-        // A faire tout le temps ou juste si on arrete ?
-        if (client->aposs != NULL) {
-            free_array_possibility_packet(client->aposs);
-            client->aposs = NULL;
-        }
-        pthread_mutex_lock(&client->works_mutex);
-        client->works = 0;
-        pthread_mutex_unlock(&client->works_mutex);
-        lastfilesize[client->compteur] = 0;
-
-        if (request == REQUEST_STOP) {
-            break;
-        } else {
-            usleep(MICRO_SHORT_SLEEP);
-        }
+        usleep(MICRO_SHORT_SLEEP);
     }
 #ifdef DEBUG_THREAD
     log_info("END search thread %i\n", client->pid);
