@@ -94,29 +94,16 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 key_part what_search(struct array_part *all_rotate_parts, int x, int y, struct possibility_packet *possiblity);
 
 /**
- * @brief Calcule la clé de recherche pour la case courante (version sortie pointeur, sans all_face).
- *
- * Identique à `what_search_to_key2` mais utilise -1 pour les voisins absents.
- * Destinée à la map par hachage textuel.
- *
- * @param all_rotate_parts Tableau de toutes les rotations.
- * @param possiblity       Paquet courant.
- * @param key              Clé résultante (sortie).
- */
-void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key);
-
-/**
  * @brief Calcule la clé de recherche pour la case courante (version sortie pointeur, avec all_face).
  *
- * Utilise `all_face` (= `sizearrayM` de la map) pour encoder les voisins absents,
- * permettant un accès direct dans le tableau 4D plat.
+ * Équivalent à `what_search_to_key2` avec `all_face` explicite pour les voisins absents.
  *
  * @param all_rotate_parts Tableau de toutes les rotations.
  * @param possiblity       Paquet courant.
  * @param key              Clé résultante (sortie).
- * @param all_face         Valeur à utiliser pour un voisin absent (= index « toute couleur »).
+ * @param all_face         Valeur à utiliser pour un voisin absent.
  */
-void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face);
+void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face);
 
 /**
  * @brief Calcule la clé de recherche pour la case `(x, y)` arbitraire dans la grille.

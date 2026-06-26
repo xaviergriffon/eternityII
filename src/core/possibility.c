@@ -112,7 +112,7 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 /**
  * @brief Calcule la clé de recherche pour une case (x, y) quelconque de la grille.
  *
- * Variante de `what_search_to_key2` qui prend des coordonnées explicites au lieu
+ * Variante de `what_search_to_key` qui prend des coordonnées explicites au lieu
  * d'utiliser la position courante du paquet. Utilisée par `possibility_all_has_a_next`
  * pour tester chaque case libre de la grille.
  *
@@ -206,20 +206,7 @@ void what_search_in_grid_to_key(struct array_part *all_rotate_parts, struct poss
  * @param key              Clé résultante (sortie).
  * @param all_face         Valeur représentant « toute face » (= map->sizearrayM).
  */
-void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face) {
-    // TODO : ne pas utilisé -1 mais MAX_FACE-1 pour éviter de le faire dans convert_p
-    // -2 : non défini
-    // -1 toute face
-    // 0 bordure
-    
-    // Toujours valorisé dans les if
-    /*
-    key->k1 =-2;
-    key->k2 =-2;
-    key->k3 =-2;
-    key->k4 =-2;
-     */
-    
+void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face) {
     int x = possiblity->x;
     int xm = x - 1;
     int xp = x + 1;
@@ -227,8 +214,6 @@ void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility
     int ym = y - 1;
     int yp = y + 1;
 
-    // tODO : diminuer les calculs -1 +1 en conservant le résultat
-    
     // TOP
     if(ym < 0)
     {
@@ -244,7 +229,7 @@ void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility
             key->k1 = all_rotate_parts->parts[partId].bottom;
         }
     }
-    
+
     // RIGHT
     if(xp >= ETERN_SIZE)
     {
@@ -260,7 +245,7 @@ void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility
             key->k2 = all_rotate_parts->parts[partId].left;
         }
     }
-    
+
     // BOTTOM
     if(yp >= ETERN_SIZE)
     {
@@ -276,7 +261,7 @@ void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility
             key->k3 = all_rotate_parts->parts[partId].top;
         }
     }
-    
+
     // LEFT
     if(xm < 0)
     {
@@ -292,100 +277,6 @@ void what_search_to_key2(struct array_part *all_rotate_parts, struct possibility
             key->k4 = all_rotate_parts->parts[partId].right;
         }
     }
-}
-/**
- * @brief Calcule la clé de recherche pour la case courante (version sans all_face).
- *
- * Identique à `what_search_to_key2` mais utilise -1 (au lieu de all_face) pour
- * représenter les voisins absents. Destinée à la `map_part` avec hachage textuel.
- *
- * @param all_rotate_parts Tableau de toutes les rotations.
- * @param possiblity       Paquet courant.
- * @param key              Clé résultante (sortie).
- */
-void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key) {
-    // TODO : ne pas utilisé -1 mais MAX_FACE-1 pour éviter de le faire dans convert_p
-    // -2 : non défini
-    // -1 toute face
-    // 0 bordure
-    
-    // Toujours valorisé dans les if
-    /*
-	key->k1 =-2;
-	key->k2 =-2;
-	key->k3 =-2;
-	key->k4 =-2;
-     */
-	
-	int x = possiblity->x;
-    int xm = x - 1;
-    int xp = x + 1;
-	int y = possiblity->y;
-    int ym = y - 1;
-    int yp = y + 1;
-
-    // tODO : diminuer les calculs -1 +1 en conservant le résultat
-    
-	// TOP
-	if(ym < 0)
-	{
-		key->k1 = 0;
-	} else
-	{
-        // Todo : tester -2 ou -1 (optim)
-		if(possiblity->grid[x][ym] < 0)
-		{
-			key->k1 = -1;
-		} else
-		{
-			key->k1 = all_rotate_parts->parts[possiblity->grid[x][ym]].bottom;
-		}
-	}
-	
-	// RIGHT
-	if(xp >= ETERN_SIZE)
-	{
-		key->k2 = 0;
-	} else
-	{
-		if(possiblity->grid[xp][y] < 0)
-		{
-			key->k2 = -1;
-		} else
-		{
-			key->k2 = all_rotate_parts->parts[possiblity->grid[xp][y]].left;
-		}
-	}
-	
-	// BOTTOM
-	if(yp >= ETERN_SIZE)
-	{
-		key->k3 = 0;
-	} else
-	{
-		if(possiblity->grid[x][yp] < 0)
-		{
-			key->k3 = -1;
-		} else
-		{
-			key->k3 = all_rotate_parts->parts[possiblity->grid[x][yp]].top;
-		}
-	}
-	
-	// LEFT
-	if(xm < 0)
-	{
-		key->k4 = 0;
-	} else
-	{
-		if(possiblity->grid[xm][y] < 0)
-		{
-			key->k4 = -1;
-		} else
-		{
-			key->k4 = all_rotate_parts->parts[possiblity->grid[xm][y]].right;
-		}
-	}
 }
 
 /**
@@ -1488,7 +1379,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
     struct possibility_packet *possibilityPacket = generate_possibility_packet(x, y, etern, cur_dir);
     non_null_possibilities++;
     // alimente key pour indiquer quoi chercher
-    what_search_to_key2(all_rotate_part, possibilityPacket, key, mapParts->sizearrayM);
+    what_search_to_key(all_rotate_part, possibilityPacket, key, mapParts->sizearrayM);
     int max = search_possiblity_light(possibilities, key, possibilityPacket, mapParts, all_rotate_part, idParts);
     free(possibilityPacket);
     
