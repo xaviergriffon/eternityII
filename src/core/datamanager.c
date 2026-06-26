@@ -1895,11 +1895,13 @@ int search_min_datas(void)
 	return result;
 }
 
-// TODO : revoir le trie pour prendre en compte le cache
 /**
  * @brief Trie une `File` en place, par nombre de pièces placées croissant.
  *
  * Doit être appelée avec les files déjà verrouillées.
+ *
+ * Tri en place par insertion. Requiert cacheSize == 0 : move_before/move_after
+ * recâblent les pointeurs prev/next sans mettre à jour le cache pré-alloué.
  *
  * @param file File à trier (déjà regroupée).
  */
@@ -2001,6 +2003,9 @@ int sort_ascending(void)
  * @brief Trie une `File` en place, par nombre de pièces placées décroissant.
  *
  * Doit être appelée avec les files déjà verrouillées.
+ *
+ * Tri en place par insertion. Requiert cacheSize == 0 : move_before/move_after
+ * recâblent les pointeurs prev/next sans mettre à jour le cache pré-alloué.
  *
  * @param file File à trier (déjà regroupée).
  */
@@ -2246,7 +2251,6 @@ int sort_descending_mthread(void)
 	return 0;
 }
 
-// TODO : revoir le trie pour prendre en compte le cache
 int sort_descending(void)
 {
 	lock_all_file();

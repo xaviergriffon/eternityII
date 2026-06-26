@@ -79,6 +79,9 @@ void *put_big_table(big_table *table, void *value);
  * @param suite   File propriétaire des deux éléments.
  * @param element Élément à déplacer.
  * @param target  Élément devant lequel insérer.
+ *
+ * @warning Invalide le cache pré-alloué si l'élément déplacé en fait partie.
+ *          N'utiliser qu'avec des Files dont cacheSize == 0.
  */
 void move_before(File *suite, Element *element, Element *target);
 
@@ -88,6 +91,9 @@ void move_before(File *suite, Element *element, Element *target);
  * @param suite   File propriétaire des deux éléments.
  * @param element Élément à déplacer.
  * @param target  Élément après lequel insérer.
+ *
+ * @warning Invalide le cache pré-alloué si l'élément déplacé en fait partie.
+ *          N'utiliser qu'avec des Files dont cacheSize == 0.
  */
 void move_after(File *suite, Element *element, Element *target);
 
