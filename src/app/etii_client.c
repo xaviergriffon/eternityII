@@ -197,6 +197,63 @@ pthread_t build_feed_thread(client_possibility_t *thread_params) {
 }
 
 /**
+ * @brief Un tour de régulation du débit (corps extrait de control_thread).
+ *
+ * Voir etii_client.h pour le contrat.
+ */
+void control_step(client_possibility_t *thread_params,
+                  unsigned long long *lastCheck,
+                  unsigned long long *oneSecond,
+                  int *nbCheck)
+{
+    if (max_search_by_sec > 0) {
+        for (int t = 0; t < NB_THREADS; t++)
+        {
+            client_possibility_t *thread = &thread_params[t];
+            if (thread->works == 1 && thread->aposs != NULL)
+            {
+                unsigned long long inMillis = 0;
+                if (counters[t] >= lastCheck[t]) {
+                    inMillis = counters[t] - lastCheck[t];
+                } else {
+                    // le compteur a fait un tour
+                    inMillis = ((inMillis - 1) - lastCheck[t]) + counters[t];
+                }
+
+                lastCheck[t] = counters[t];
+                *oneSecond = *oneSecond + inMillis;
+            } else {
+                // TODO : pourquoi révéiller les threads ici ?
+                if (request == REQUEST_PAUSE) {
+                    request = REQUEST_CONTINUE;
+                }
+            }
+        }
+        if (*nbCheck > 0) {
+            long double divider = *nbCheck / 1000.0L;
+            unsigned long long simulationBySec = (unsigned long long)(*oneSecond / divider);
+            if (request == REQUEST_CONTINUE && simulationBySec >= max_search_by_sec) {
+                request = REQUEST_PAUSE;
+            } else {
+                if (request == REQUEST_PAUSE && simulationBySec < max_search_by_sec) {
+                    request = REQUEST_CONTINUE;
+                }
+            }
+        }
+    }
+
+    if (*nbCheck > 1000) {
+        *nbCheck = 0;
+        *oneSecond = 0;
+        if (request == REQUEST_PAUSE) {
+            request = REQUEST_CONTINUE;
+        }
+    } else {
+        (*nbCheck)++;
+    }
+}
+
+/**
  * @brief Thread de contrôle du débit de recherche.
  *
  * Compare le nombre de possibilités traitées par rapport à `max_search_by_sec`.
@@ -226,51 +283,7 @@ void *control_thread(void *param) {
     *oneSecond = 0;
     int nbCheck = 0;
     while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
-        if(max_search_by_sec > 0) {
-            for(t = 0; t < NB_THREADS; t++)
-            {
-                client_possibility_t *thread = &thread_params[t];
-                if(thread->works == 1 && thread->aposs != NULL)
-                {
-                    unsigned long long inMillis = 0;
-                    if (counters[t] >= lastCheck[t]) {
-                        inMillis = counters[t] - lastCheck[t];
-                    } else {
-                        // le compteur a fait un tour
-                        inMillis = ((inMillis - 1) - lastCheck[t]) + counters[t];
-                    }
-                    
-                    lastCheck[t] = counters[t];
-                    *oneSecond = *oneSecond + inMillis;
-                } else {
-                    // TODO : pourquoi révéiller les threads ici ?
-                    if (request == REQUEST_PAUSE) {
-                        request = REQUEST_CONTINUE;
-                    }
-                }
-            }
-            if (nbCheck > 0) {
-            long double divider = nbCheck / 1000.0L;
-            unsigned long long simulationBySec = (unsigned long long)(*oneSecond / divider);
-            if (request == REQUEST_CONTINUE && simulationBySec >= max_search_by_sec) {
-                request = REQUEST_PAUSE;
-            } else {
-                if (request == REQUEST_PAUSE && simulationBySec < max_search_by_sec) {
-                    request = REQUEST_CONTINUE;
-                }
-            }
-        }
-        }
-        
-        if (nbCheck > 1000) {
-            nbCheck = 0;
-            *oneSecond = 0;
-            if (request == REQUEST_PAUSE) {
-                request = REQUEST_CONTINUE;
-            }
-        } else {
-            nbCheck++;
-        }
+        control_step(thread_params, lastCheck, oneSecond, &nbCheck);
         // La priorité est au traitement lors on effectue des controles espacés.
         usleep(1000);
     }

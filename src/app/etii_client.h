@@ -126,4 +126,25 @@ char *build_thread_queues_table(unsigned long long *out_stock,
                                 unsigned long long *out_analysed,
                                 unsigned long long *out_shots_per_sec);
 
+/**
+ * @brief Exécute un tour de la boucle de régulation du débit (`control_thread`).
+ *
+ * Fonction pure (aucune I/O, ne dort pas) extraite du corps du `while` de
+ * `control_thread` pour être testable hors du thread. Quand `max_search_by_sec`
+ * est positif, accumule les coups joués depuis le dernier tour
+ * (`counters[t] - lastCheck[t]`) sur les threads actifs, estime un débit par
+ * seconde et bascule la globale `request` entre REQUEST_CONTINUE et REQUEST_PAUSE
+ * selon ce débit. Réinitialise la fenêtre de mesure (`*oneSecond`, `*nbCheck`)
+ * tous les 1000 tours. Sans effet sur `request` si `max_search_by_sec == 0`.
+ *
+ * @param thread_params Tableau des contextes de threads de recherche (≥ NB_THREADS).
+ * @param lastCheck     Compteurs par thread du tour précédent (taille NB_THREADS).
+ * @param oneSecond     Accumulateur de coups de la fenêtre courante (in/out).
+ * @param nbCheck       Compteur de tours de la fenêtre courante (in/out).
+ */
+void control_step(client_possibility_t *thread_params,
+                  unsigned long long *lastCheck,
+                  unsigned long long *oneSecond,
+                  int *nbCheck);
+
 #endif /* etii_client_h */
