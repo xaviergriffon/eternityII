@@ -303,7 +303,7 @@ add_custom_target(test-integration
 
 # ============================================================
 # Couverture de code (gcov — intégré gcc/clang, aucune install requise)
-# `cmake --build . --target coverage`        → compile + exécute instrumenté
+# `cmake --build . --target coverage`        → deux passes (256+16) + gcovr --txt fusionné
 # `cmake --build . --target coverage-report` → génère XML/HTML/Markdown via gcovr
 #
 # Les .gcno/.gcda sont produits dans CMAKE_BINARY_DIR/CMakeFiles/<target>.dir/.
@@ -337,35 +337,56 @@ add_coverage_executable(run_tests_cov_256 "")
 add_coverage_executable(run_tests_cov_16 16 tests/core/test_solution16.c)
 add_dependencies(run_tests_cov_16 solution16_h)
 
-# Target `coverage` : réinitialise les .gcda puis exécute les deux passes
-# Fusionner les deux passes → l'union des lignes couvertes (lignes #if-exclusives incluses)
-add_custom_target(coverage
-    # Purge les compteurs d'un run précédent (évite les avertissements « corrupt arc tag »)
-    COMMAND find ${CMAKE_BINARY_DIR}/CMakeFiles -name "*.gcda" -delete
-    COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_SOURCE_DIR}
-            $<TARGET_FILE:run_tests_cov_256>
-    COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_SOURCE_DIR}
-            $<TARGET_FILE:run_tests_cov_16>
-    DEPENDS run_tests_cov_256 run_tests_cov_16
-    COMMENT "Couverture : passe 256 puis passe 16"
-)
+# Détection gcovr (utilisé par `coverage` pour le résumé texte et par `coverage-report`)
+find_program(GCOVR_EXE gcovr)
+# Sur macOS, gcov natif = llvm-cov ; on le signale à gcovr
+if(GCOVR_EXE AND APPLE)
+    execute_process(
+        COMMAND xcrun --find llvm-cov
+        OUTPUT_VARIABLE _LLVM_COV OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_LLVM_COV)
+        set(GCOVR_GCOV_OPT --gcov-executable "${_LLVM_COV} gcov")
+    endif()
+endif()
+
+# Target `coverage` : réinitialise les .gcda, exécute les deux passes, affiche
+# un résumé gcovr --txt fusionné (union des lignes couvertes par les deux tailles).
+# Requiert gcovr : pip install gcovr (ou pipx)
+if(GCOVR_EXE)
+    add_custom_target(coverage
+        COMMAND find ${CMAKE_BINARY_DIR}/CMakeFiles -name "*.gcda" -delete
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_SOURCE_DIR}
+                $<TARGET_FILE:run_tests_cov_256>
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_SOURCE_DIR}
+                $<TARGET_FILE:run_tests_cov_16>
+        COMMAND ${GCOVR_EXE}
+                ${GCOVR_GCOV_OPT}
+                --root ${CMAKE_CURRENT_SOURCE_DIR}
+                --exclude "(^|/)tests/"
+                ${CMAKE_BINARY_DIR}
+                --txt
+        DEPENDS run_tests_cov_256 run_tests_cov_16
+        COMMENT "Couverture : passe 256 + passe 16 → résumé gcovr fusionné"
+        VERBATIM
+    )
+else()
+    add_custom_target(coverage
+        COMMAND find ${CMAKE_BINARY_DIR}/CMakeFiles -name "*.gcda" -delete
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_SOURCE_DIR}
+                $<TARGET_FILE:run_tests_cov_256>
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_SOURCE_DIR}
+                $<TARGET_FILE:run_tests_cov_16>
+        DEPENDS run_tests_cov_256 run_tests_cov_16
+        COMMENT "Couverture : passe 256 + passe 16 (gcovr introuvable — pas de résumé texte)"
+    )
+    message(STATUS "gcovr introuvable : `coverage` ne produira pas de résumé texte (pip install gcovr)")
+endif()
 
 # Target `coverage-report` : génère XML (Codecov), HTML et Markdown via gcovr
 # Requiert gcovr : pip install gcovr (ou pipx)
-find_program(GCOVR_EXE gcovr)
 if(GCOVR_EXE)
-    # Sur macOS, gcov natif = llvm-cov ; on le signale à gcovr
-    if(APPLE)
-        execute_process(
-            COMMAND xcrun --find llvm-cov
-            OUTPUT_VARIABLE _LLVM_COV OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET
-        )
-        if(_LLVM_COV)
-            set(GCOVR_GCOV_OPT --gcov-executable "${_LLVM_COV} gcov")
-        endif()
-    endif()
-
     add_custom_target(coverage-report
         COMMAND ${CMAKE_COMMAND} -E make_directory ${COV_HTML}
         # Fusionne les .gcda des deux passes (BUILD_DIR contient les deux arborescences).
@@ -392,3 +413,4 @@ if(GCOVR_EXE)
 else()
     message(STATUS "gcovr introuvable : la cible coverage-report ne sera pas disponible (pip install gcovr)")
 endif()
+

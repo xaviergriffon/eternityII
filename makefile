@@ -242,14 +242,15 @@ test-integration:
 # ---------------------------------------------------------------------------
 # Couverture de code (gcov, intégré à gcc/clang — aucune install requise).
 #
-# Compile la suite instrumentée (--coverage = -fprofile-arcs -ftest-coverage,
-# -O0 pour un mapping ligne fidèle), la lance, puis agrège la couverture des
-# modules réellement testés. On compile un objet par source (.gcno aux noms
-# propres) pour que `gcov` s'y retrouve. Tous les artefacts (.o/.gcno/.gcda et
-# les .gcov annotés) restent confinés dans $(COV_DIR).
+# Deux passes d'instrumentation (--coverage = -fprofile-arcs -ftest-coverage,
+# -O0 pour un mapping ligne fidèle) : `coverage-256` (ETERN_PARTS=256) et
+# `coverage-16` (ETERN_PARTS=16). Chacune compile un objet par source (.gcno
+# aux noms propres) et confine ses artefacts dans son propre répertoire
+# ($(COV_DIR) et $(COV_DIR_16)).
 #
-# Drill-down : ouvrir $(COV_DIR)/<module>.c.gcov — les lignes jamais exécutées
-# sont marquées '#####'. Rapport HTML optionnel via lcov : voir tests/README.md.
+# `coverage` (= coverage-256 + coverage-16) fusionne les deux passes via gcovr
+# --txt : l'union des lignes couvertes par les deux tailles de puzzle.
+# Drill-down : $(COV_DIR)/<module>.c.gcov — lignes '#####' = jamais exécutées.
 # ---------------------------------------------------------------------------
 COV_DIR            := tests/coverage
 COV_DIR_16         := tests/coverage-16
@@ -273,10 +274,10 @@ COV_LINK_MODULES   := $(TEST_MODULES)
 COV_INCLUDED_MODULES   := src/core/etii_search.c
 COV_STANDALONE_MODULES := $(filter-out $(COV_INCLUDED_MODULES),$(COV_ALL_MODULES))
 
-.PHONY: coverage
-coverage:
+.PHONY: coverage-256
+coverage-256:
 	@mkdir -p $(COV_DIR)
-	# 0. Purge les compteurs (.gcda) d'un run précédent : chaque `make coverage`
+	# 0. Purge les compteurs (.gcda) d'un run précédent : chaque `make coverage-256`
 	#    repart de zéro. Indispensable depuis l'ajout des tests par fork (les
 	#    fils flushent leur couverture en sortant ; re-fusionner sur des .gcda
 	#    périmés provoque des avertissements « cannot merge / corrupt arc tag »).
@@ -319,6 +320,7 @@ coverage:
 # chaque taille incluses dans l'union). Régénère d'abord le tableau C de la fixture.
 .PHONY: coverage-16
 coverage-16: $(SOLUTION16_H)
+
 	@mkdir -p $(COV_DIR_16)
 	@rm -f $(COV_DIR_16)/*.gcda
 	@for src in $(COV_STANDALONE_MODULES) $(TEST_SRCS_16); do \
@@ -339,10 +341,10 @@ coverage-16: $(SOLUTION16_H)
 # Rapports gcovr : Cobertura XML (Codecov), HTML navigable et résumé Markdown
 # (Job Summary + commentaire de PR), en un seul passage.
 #
-# Réutilise les .gcda/.gcno produits par `coverage`. Nécessite gcovr (pip install
-# gcovr ou pipx ; bien plus léger/rapide que lcov). On exclut le répertoire des
-# tests pour ne reporter que le code de production ; sur macOS gcov natif =
-# llvm-cov, on le signale à gcovr.
+# Réutilise les .gcda/.gcno produits par `coverage-256` et `coverage-16`.
+# Nécessite gcovr (pip install gcovr ou pipx ; bien plus léger/rapide que lcov).
+# On exclut le répertoire des tests pour ne reporter que le code de production ;
+# sur macOS gcov natif = llvm-cov, on le signale à gcovr.
 # ---------------------------------------------------------------------------
 COV_XML    := $(COV_DIR)/coverage.xml
 COV_HTML   := $(COV_DIR)/html
@@ -357,9 +359,15 @@ ifeq ($(detected_OS),Darwin)
 endif
 
 # Fusionne les DEUX passes (256 + 16) : gcovr agrège les compteurs par ligne
-# source sur les deux dossiers -> un seul rapport = union des lignes couvertes.
+# source sur les deux dossiers -> résumé texte = union des lignes couvertes.
+# Point d'entrée habituel pour un check rapide en local (nécessite gcovr).
+.PHONY: coverage
+coverage: coverage-256 coverage-16
+	$(GCOVR) --root . $(COV_FILTER) $(COV_DIR) $(COV_DIR_16) --txt
+
+# Génère en plus le XML Cobertura, le rapport HTML et le résumé Markdown.
 .PHONY: coverage-report
-coverage-report: coverage coverage-16
+coverage-report: coverage
 	@mkdir -p $(COV_HTML)
 	$(GCOVR) --root . $(COV_FILTER) $(COV_DIR) $(COV_DIR_16) \
 		--txt \
