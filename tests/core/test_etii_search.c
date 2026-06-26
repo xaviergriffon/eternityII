@@ -855,6 +855,110 @@ TEST autosearch_step_continue_returns_one(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * autoprune_step : corps de boucle du pruner extrait (testable hors thread).
+ * ------------------------------------------------------------------------ */
+
+/* REQUEST_STOP : la boucle de traitement (gardée par request != STOP) ne tourne
+   pas -> tout le lot non vérifié est renvoyé en local, cycle nettoyé, retour 0. */
+TEST autoprune_step_stop_requeues_all_and_returns_zero(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 3;
+    aposs->possibilities = calloc(3, sizeof(struct possibility_packet));
+    client.aposs = aposs;
+
+    int saved = request;
+    request = REQUEST_STOP;
+    int cont = autoprune_step(&client);
+    request = saved;
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+    ASSERT(client.aposs == NULL);
+    ASSERT_EQ_FMT(0, (int)client.works, "%d");
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu"); /* lot entier renvoyé (rien traité) */
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
+/* REQUEST_CONTINUE + lot vide : rien à contrôler, cycle nettoyé, retour 1. */
+TEST autoprune_step_continue_empty_returns_one(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 0;
+    aposs->possibilities = malloc(sizeof(struct possibility_packet));
+    client.aposs = aposs;
+
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    int cont = autoprune_step(&client);
+    request = saved;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT(client.aposs == NULL);
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
+/* REQUEST_CONTINUE : un paquet VIVANT (map libre -> toujours un candidat, board
+   à alloc 0 donc pas de solution complète) est renvoyé marqué `checked` dans le
+   stock local, et pruner_checked est incrémenté. Couvre la branche de contrôle. */
+TEST autoprune_step_keeps_live_packet(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 1;
+    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
+    make_empty_board(&aposs->possibilities[0]);
+    client.aposs = aposs;
+
+    unsigned long long checked_before = pruner_checked;
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    int cont = autoprune_step(&client);
+    request = saved;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT(client.aposs == NULL);
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");                 /* vivant renvoyé en local */
+    ASSERT_EQ_FMT(checked_before + 1, pruner_checked, "%llu"); /* compteur incrémenté */
+
+    pthread_mutex_destroy(&client.works_mutex);
+    /* map_part / all_rotate_part : stockage statique, pas de free. */
+    drain_local();
+    PASS();
+}
+
 SUITE(etii_search_suite)
 {
     RUN_TEST(delegate_noop_below_threshold);
@@ -875,6 +979,9 @@ SUITE(etii_search_suite)
     RUN_TEST(requeue_unprocessed_packets_routes_tail_locally);
     RUN_TEST(autosearch_step_stop_requeues_and_returns_zero);
     RUN_TEST(autosearch_step_continue_returns_one);
+    RUN_TEST(autoprune_step_stop_requeues_all_and_returns_zero);
+    RUN_TEST(autoprune_step_continue_empty_returns_one);
+    RUN_TEST(autoprune_step_keeps_live_packet);
 #if ETERN_PARTS == 16
     RUN_TEST(search_backtracking_solves_4x4_and_returns_zero);
     RUN_TEST(search_backtracking_stop_on_solution_exits_success);

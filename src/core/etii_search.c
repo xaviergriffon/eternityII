@@ -815,6 +815,87 @@ void *autosearch (void *userdata)
 }
 
 /**
+ * @brief Exécute un tour de la boucle du pruner (autoprune).
+ *
+ * Attend du travail, contrôle chaque paquet de `client->aposs`
+ * (`possibility_all_has_a_next` : vivant -> renvoyé marqué `checked`, mort ->
+ * éliminé), gère l'arrêt (REQUEST_STOP : renvoi du lot non traité + acquittement)
+ * puis nettoie le cycle. Extrait du corps de `while(1)` pour être testable hors
+ * de la boucle infinie.
+ *
+ * @return 1 pour poursuivre la boucle, 0 pour s'arrêter (REQUEST_STOP).
+ */
+static int autoprune_step(client_possibility_t *client)
+{
+    // Attente d'un jeu de possibilité
+    while ((client->works == 0 || client->aposs == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+    {
+        usleep(MICRO_SLEEP);
+    }
+
+    int a = 0;
+    while (client->aposs != NULL && a < client->aposs->size && request != REQUEST_STOP)
+    {
+        if (request == REQUEST_PAUSE)
+        {
+            usleep(MICRO_SHORT_SLEEP);
+            continue;
+        }
+        // Copie de travail : l'original doit rester intact pour l'acquittement
+        struct possibility_packet work;
+        memcpy(&work, &client->aposs->possibilities[a], sizeof(work));
+        // Statistique possibilité étudiée
+        counters[client->compteur]++;
+        int has_next = possibility_all_has_a_next(&work, client->map_part, client->all_rotate_part);
+        if (work.alloc >= ETERN_PARTS)
+            checkIfResultFound(&work, client->all_rotate_part); /* exits si solution complète */
+        if (work.checked || has_next)
+        {
+            work.checked = 1;
+            pruner_checked++;
+            array_possibility_packet *alive = build_single_array_possibility_packet(&work);
+            if (add_possibility(client, alive))
+            {
+                log_error("error on add_possibility (pruner)\n");
+            }
+            free_array_possibility_packet(alive);
+        } else
+        {
+            // Branche morte : éliminée du stock
+            pruner_removed++;
+        }
+        a++;
+    }
+    lastfilesize[client->compteur] = 0;
+
+    if (request == REQUEST_STOP)
+    {
+#ifdef DEBUG_THREAD
+        log_info("prune thread %i stop\n", client->pid);
+#endif // DEBUG_THREAD
+        // Renvoie au serveur les possibilités non encore vérifiées, telles quelles
+        requeue_unprocessed_packets(client, a);
+        // Acquittement inconditionnel : le lot traité (jusqu'à PRUNER_BATCH_SIZE
+        // possibilités) doit être purgé du suivi « en analyse » du serveur,
+        // le thread d'alimentation ne le fera plus après l'arrêt.
+        send_possibility_analysed(client);
+    }
+
+    if (client->aposs != NULL) {
+        free_array_possibility_packet(client->aposs);
+        client->aposs = NULL;
+    }
+    pthread_mutex_lock(&client->works_mutex);
+    client->works = 0;
+    pthread_mutex_unlock(&client->works_mutex);
+
+    if (request == REQUEST_STOP) {
+        return 0;
+    }
+    return 1;
+}
+
+/**
  * @brief Thread de vérification d'un client pruner (mode `tcppruner`).
  *
  * Consomme les `possibility_packet` non vérifiées fournies par le serveur
@@ -841,91 +922,10 @@ void *autoprune (void *userdata)
 #ifdef DEBUG_THREAD
     log_info("START prune thread %i\n", client->pid);
 #endif // DEBUG_THREAD
-    // Boucle infinie pour maintenir le thread
-    while(1)
+    // Boucle infinie pour maintenir le thread ; autoprune_step renvoie 0 sur REQUEST_STOP
+    while (autoprune_step(client))
     {
-        // Attente d'un jeu de possibilité
-        while ((client->works == 0 || client->aposs == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
-        {
-            usleep(MICRO_SLEEP);
-        }
-
-        int a = 0;
-        while (client->aposs != NULL && a < client->aposs->size && request != REQUEST_STOP)
-        {
-            if (request == REQUEST_PAUSE)
-            {
-                usleep(MICRO_SHORT_SLEEP);
-                continue;
-            }
-            // Copie de travail : l'original doit rester intact pour l'acquittement
-            struct possibility_packet work;
-            memcpy(&work, &client->aposs->possibilities[a], sizeof(work));
-            // Statistique possibilité étudiée
-            counters[client->compteur]++;
-            int has_next = possibility_all_has_a_next(&work, client->map_part, client->all_rotate_part);
-            if (work.alloc >= ETERN_PARTS)
-                checkIfResultFound(&work, client->all_rotate_part); /* exits si solution complète */
-            if (work.checked || has_next)
-            {
-                work.checked = 1;
-                pruner_checked++;
-                array_possibility_packet *alive = build_single_array_possibility_packet(&work);
-                if (add_possibility(client, alive))
-                {
-                    log_error("error on add_possibility (pruner)\n");
-                }
-                free_array_possibility_packet(alive);
-            } else
-            {
-                // Branche morte : éliminée du stock
-                pruner_removed++;
-            }
-            a++;
-        }
-        lastfilesize[client->compteur] = 0;
-
-        if (request == REQUEST_STOP)
-        {
-#ifdef DEBUG_THREAD
-            log_info("prune thread %i stop\n", client->pid);
-#endif // DEBUG_THREAD
-            if (client->aposs != NULL && a < client->aposs->size)
-            {
-                // Renvoie au serveur les possibilités non encore vérifiées, telles quelles
-                array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-                aposs->possibilities = malloc(sizeof(struct possibility_packet) * (client->aposs->size - a));
-                aposs->size = 0;
-                for (; a < client->aposs->size; a++)
-                {
-                    memcpy(&aposs->possibilities[aposs->size], &client->aposs->possibilities[a], sizeof(struct possibility_packet));
-                    aposs->size++;
-                }
-                if (add_possibility(client, aposs))
-                {
-                    log_error("Error on add_possibility \n");
-                }
-                free_array_possibility_packet(aposs);
-            }
-            // Acquittement inconditionnel : le lot traité (jusqu'à PRUNER_BATCH_SIZE
-            // possibilités) doit être purgé du suivi « en analyse » du serveur,
-            // le thread d'alimentation ne le fera plus après l'arrêt.
-            send_possibility_analysed(client);
-        }
-
-        if (client->aposs != NULL) {
-            free_array_possibility_packet(client->aposs);
-            client->aposs = NULL;
-        }
-        pthread_mutex_lock(&client->works_mutex);
-        client->works = 0;
-        pthread_mutex_unlock(&client->works_mutex);
-
-        if (request == REQUEST_STOP) {
-            break;
-        } else {
-            usleep(MICRO_SHORT_SLEEP);
-        }
+        usleep(MICRO_SHORT_SLEEP);
     }
 #ifdef DEBUG_THREAD
     log_info("END prune thread %i\n", client->pid);
