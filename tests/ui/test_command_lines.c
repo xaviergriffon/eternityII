@@ -324,6 +324,25 @@ TEST do_command_line_loadjson_runs(void)
     PASS();
 }
 
+/* rmnonext : relit le CSV des pièces (parts_files), reconstruit la map et purge
+   les possibilités sans continuation valide -> 0. parts_files pointe par défaut
+   sur le CSV adapté au build (pieces.csv en 256, pieces16.csv en 16), résolu
+   relativement à la racine du dépôt (CWD de `make test`). Si le fichier est
+   introuvable (binaire lancé hors racine), on saute proprement plutôt que
+   d'échouer sur l'environnement. Stock vide : la purge ne fait que parcourir des
+   files vides, mais tout le corps de l'interprète est exercé. */
+TEST do_command_line_rmnonext_runs(void)
+{
+    if (access(parts_files, R_OK) != 0) {
+        SKIPm("CSV des pièces introuvable (lancer depuis la racine du dépôt)");
+    }
+    dm_drain();
+    char cmd[] = "rmnonext";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    dm_drain();
+    PASS();
+}
+
 /* backup / restore / import : ces interprètes écrivent/lisent DEF_FILE relatif
    ("./eternityII.back") -> on travaille dans un répertoire temporaire dédié, et
    server = 1 rend les noms déterministes (pas de suffixe _<pid> côté client).
@@ -404,5 +423,6 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_checkduplicate_runs);
     RUN_TEST(do_command_line_check_runs);
     RUN_TEST(do_command_line_loadjson_runs);
+    RUN_TEST(do_command_line_rmnonext_runs);
     RUN_TEST(do_command_line_backup_restore_import_round_trip);
 }

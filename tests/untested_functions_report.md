@@ -37,8 +37,8 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Rapport des fonctions sans tests unitaires — EternityII (49 % de couverture globale)</h2>
 
 <div class="summary-grid">
-  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">34</span><span class="metric-sub">sur 281 au total</span></div>
-  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">88 %</span><span class="metric-sub">247 / 281</span></div>
+  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">33</span><span class="metric-sub">sur 281 au total</span></div>
+  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">88 %</span><span class="metric-sub">248 / 281</span></div>
   <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">68 %</span><span class="metric-sub">3533 / 5204</span></div>
   <div class="metric"><span class="metric-label">Domaine le plus touché</span><span class="metric-value" style="font-size:15px">src/app/</span><span class="metric-sub">main.c à 0 %</span></div>
 </div>
@@ -84,7 +84,7 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <!-- RAISON 2 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge b-red">23 fonctions</span>
+    <span class="badge" style="background:#E1F5EE;color:#0F6E56">23 fonctions — couvertes</span>
     <span class="section-title">Interpréteurs de commandes console (dispatch via stdin)</span>
   </div>
   <div class="reason-box r-blue">
@@ -94,7 +94,7 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
     <div class="fn-list" style="margin:4px 0">
       <span class="fn">sort_ascending_interpreter</span><span class="fn">sort_descending_interpreter</span><span class="fn">limit_interpreter</span><span class="fn">check_interpreter</span><span class="fn">backup_interpreter</span><span class="fn">restore_interpreter</span><span class="fn">import_interpreter</span><span class="fn">loadjson_interpreter</span><span class="fn">print_interpreter</span><span class="fn">sortdm_interpreter</span><span class="fn">split_interpreter</span><span class="fn">regroup_interpreter</span><span class="fn">checkdatas_interpreter</span><span class="fn">check_duplicate_interpreter</span><span class="fn">statistic_interpreter</span><span class="fn">checkfiles_interpreter</span><span class="fn">printfile_interpreter</span><span class="fn">checkfile_interpreter</span><span class="fn">checkdirections_interpreter</span><span class="fn">rmnonext_interpreter</span><span class="fn">printanalysed_interpreter</span><span class="fn">restockanalysed_interpreter</span><span class="fn">min_interpreter</span>
     </div>
-    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couverts (via <code>do_command_line</code> dans <code>tests/ui/test_command_lines.c</code>) : <code>sort_ascending</code>, <code>sort_descending</code>, <code>limit</code>, <code>print</code>, <code>sortdm</code>, <code>split</code>, <code>regroup</code>, <code>checkdatas</code>, <code>statistic</code>, <code>checkfiles</code>, <code>printfile</code>, <code>checkfile</code>, <code>checkdirections</code>, <code>printanalysed</code>, <code>restockanalysed</code>, <code>min</code>, et désormais <code>check</code>, <code>checkduplicate</code> et <code>loadjson</code> (ce dernier exerce <code>import_json</code> de bout en bout). Et désormais <code>backup</code> / <code>restore</code> / <code>import</code> via un round-trip <code>.back</code> dans un répertoire temporaire (<code>chdir</code> + <code>server = 1</code> pour des noms déterministes, nettoyage avant assertions). <strong>22 / 23 couverts.</strong> Reste uniquement <code>rmnonext</code> (relit le CSV des pièces — testable de même via un <code>chdir</code>, non encore fait).</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couverts (via <code>do_command_line</code> dans <code>tests/ui/test_command_lines.c</code>) : <code>sort_ascending</code>, <code>sort_descending</code>, <code>limit</code>, <code>print</code>, <code>sortdm</code>, <code>split</code>, <code>regroup</code>, <code>checkdatas</code>, <code>statistic</code>, <code>checkfiles</code>, <code>printfile</code>, <code>checkfile</code>, <code>checkdirections</code>, <code>printanalysed</code>, <code>restockanalysed</code>, <code>min</code>, et désormais <code>check</code>, <code>checkduplicate</code> et <code>loadjson</code> (ce dernier exerce <code>import_json</code> de bout en bout). Et désormais <code>backup</code> / <code>restore</code> / <code>import</code> via un round-trip <code>.back</code> dans un répertoire temporaire (<code>chdir</code> + <code>server = 1</code> pour des noms déterministes, nettoyage avant assertions). Et désormais <code>rmnonext</code> (relit le CSV des pièces <code>parts_files</code> — résolu relativement à la racine du dépôt, CWD de <code>make test</code> ; <code>access()</code> garde-fou qui saute proprement hors racine — reconstruit la map et purge le stock). <strong>23 / 23 couverts.</strong></p>
   </div>
 </div>
 
