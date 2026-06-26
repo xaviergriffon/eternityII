@@ -37,8 +37,8 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Rapport des fonctions sans tests unitaires — EternityII (49 % de couverture globale)</h2>
 
 <div class="summary-grid">
-  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">33</span><span class="metric-sub">sur 282 au total</span></div>
-  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">88 %</span><span class="metric-sub">249 / 282</span></div>
+  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">31</span><span class="metric-sub">sur 282 au total</span></div>
+  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">89 %</span><span class="metric-sub">251 / 282</span></div>
   <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">68 %</span><span class="metric-sub">3533 / 5204</span></div>
   <div class="metric"><span class="metric-label">Domaine le plus touché</span><span class="metric-value" style="font-size:15px">src/app/</span><span class="metric-sub">main.c à 0 %</span></div>
 </div>
@@ -171,17 +171,18 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <!-- RAISON 7 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge b-teal" style="background:#FAEEDA;color:#854F0B">2 fonctions</span>
+    <span class="badge" style="background:#E1F5EE;color:#0F6E56">2 fonctions — couvertes</span>
     <span class="section-title">Puzzle 256 pièces hardcodé (ETERN_PARTS == 256)</span>
   </div>
   <div class="reason-box r-teal">
-    <div class="reason-label">Raison technique</div>
-    <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px"><code>first_possibility</code> génère toutes les positions de départ du puzzle 16×16 à partir de pièces connues (139, 208, 255…). La couverture est mesurée en build 256 pièces (<code>ETERN_PARTS=256</code>) mais cette fonction sort immédiatement si <code>ETERN_PARTS != 256</code>. <code>part_139_i8</code> est un helper qu'elle appelle ; toutes deux exigent la vraie map 256 (donc le CSV en CWD) et sortent immédiatement en build 16.</p>
+    <div class="reason-label">Raison technique (résolue)</div>
+    <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px"><code>first_possibility</code> génère toutes les positions de départ du puzzle 16×16 à partir de pièces connues (139, 208, 255…). La couverture est mesurée en build 256 pièces (<code>ETERN_PARTS=256</code>) mais cette fonction sort immédiatement si <code>ETERN_PARTS != 256</code>. <code>part_139_i8</code> est un helper qu'elle appelle ; toutes deux exigeaient la vraie map 256 (donc le CSV en CWD) et appelaient <code>exit()</code> directement.</p>
     <div class="fn-list" style="margin:4px 0">
       <span class="fn">first_possibility</span><span class="fn" style="font-size:11px">src/core/possibility.c</span>
       <span class="fn">part_139_i8</span><span class="fn" style="font-size:11px">src/core/possibility.c</span>
     </div>
-    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couvert (<code>tests/core/test_part.c</code>) : <code>prepare_map_part</code> — ce n'est qu'un wrapper <code>search_max_face</code> + <code>buildBigArray</code>, indépendant de <code>ETERN_PARTS</code> ; testé sur une <code>array_part</code> montée à la main (lookup exact équivalent à l'enchaînement manuel). Il n'avait pas sa place dans cette catégorie « 256 hardcodé ».</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ <strong>Les trois verrous tombent</strong> (<code>tests/core/test_possibility.c</code>, build 256). <strong>(1)</strong> Les <code>exit()</code> directs sont passés par un funnel <code>fatal_error()</code> (<code>noreturn</code>, dans le logger), interceptable. <strong>(2)</strong> La dépendance au CSV disparaît grâce à une <strong>map synthétique</strong> <code>make_synthetic_base_256()</code> : 256 pièces algorithmiques dont les 5 indices portent exactement les faces recherchées (139 calibrée pour matcher en rotation 2 → grille 651, l'ancrage exigé par <code>check_possibility</code>), le reste étant des tuiles intérieures identiques. <strong>(3)</strong> L'état global est isolé via <code>run_in_fork</code>. Tests : les <strong>5 pièces-indices manquantes</strong> rendent <code>first_possibility</code> fatale (couvre les 5 sites <code>fatal_error</code> + <code>part_139_i8</code>), et une map valide + un coin posable vérifie l'<strong>injection réelle</strong> (genèse + 1 résultat dans le datamanager, <code>datas_size +1</code>). Restent <code>#####</code>, par construction, les branches défensives « ne devrait jamais arriver » (overflow alloc, paquet incohérent, échec <code>add_possibility</code>).</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Au passage (<code>tests/core/test_part.c</code>) : <code>prepare_map_part</code> — wrapper <code>search_max_face</code> + <code>buildBigArray</code>, indépendant de <code>ETERN_PARTS</code>, testé sur une <code>array_part</code> montée à la main.</p>
   </div>
 </div>
 
