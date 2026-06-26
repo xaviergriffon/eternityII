@@ -127,6 +127,26 @@ char *build_thread_queues_table(unsigned long long *out_stock,
                                 unsigned long long *out_shots_per_sec);
 
 /**
+ * @brief Alimente un thread de recherche en travail (un tour de la boucle `for`
+ *        de `feed_thread_aposs`).
+ *
+ * Extrait du corps de boucle pour être testable hors thread (en mode local,
+ * `server_ip == NULL`, les échanges passent par le datamanager). No-op si
+ * `request != REQUEST_CONTINUE`. Quand le thread `i` manque de travail
+ * (`works == 0`), draine son « en analyse » puis tente d'obtenir une (ou un lot
+ * de) possibilité(s) ; s'il en reçoit, les empile et passe `works = 1`. Sinon,
+ * s'il a un socket ouvert, émet un keepalive. Incrémente en place `*needed_work`
+ * (thread ayant réclamé) et `*got_work` (thread ayant reçu).
+ *
+ * @param thread_params Tableau des contextes de threads de recherche.
+ * @param i             Indice du thread à alimenter.
+ * @param needed_work   Compteur in/out des threads ayant réclamé du travail.
+ * @param got_work      Compteur in/out des threads ayant reçu du travail.
+ */
+void feed_one_thread(client_possibility_t *thread_params, int i,
+                     int *needed_work, int *got_work);
+
+/**
  * @brief Exécute un tour de la boucle de régulation du débit (`control_thread`).
  *
  * Fonction pure (aucune I/O, ne dort pas) extraite du corps du `while` de

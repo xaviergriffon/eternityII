@@ -12,10 +12,22 @@
 #include "app/etii_client.h"
 #include "app/static_variables.h"
 #include "app/etii_statistic.h"
+#include "core/datamanager.h"
+#include "core/possibility.h"
 
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <pthread.h>
+
+/* Vide le stock local du datamanager (état global partagé entre suites). */
+static void dm_drain_local(void)
+{
+    while (datas_size() > 0) {
+        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        free_array_possibility_packet(r);
+    }
+}
 
 /* ---------- next_no_work_sleep ------------------------------------------- */
 
@@ -338,6 +350,133 @@ TEST control_step_window_resets_after_1000(void)
     PASS();
 }
 
+/* ---------- feed_one_thread ---------------------------------------------- */
+/*
+ * feed_one_thread alimente un thread en mode local (server_ip == NULL par
+ * défaut) : get_last_possibility/send_possibility_analysed passent par le
+ * datamanager. On câble un client_possibility_t à la main (mutex initialisés).
+ */
+
+static void init_test_client(client_possibility_t *c, int works)
+{
+    memset(c, 0, sizeof *c);
+    c->id = 0;
+    c->compteur = 0;
+    c->socket_id = -1;
+    c->works = works;
+    c->aposs = NULL;
+    pthread_mutex_init(&c->works_mutex, NULL);
+    pthread_mutex_init(&c->socket_mutex, NULL);
+}
+
+static void destroy_test_client(client_possibility_t *c)
+{
+    pthread_mutex_destroy(&c->works_mutex);
+    pthread_mutex_destroy(&c->socket_mutex);
+}
+
+/* request != REQUEST_CONTINUE : la fonction ne touche à rien. */
+TEST feed_one_thread_not_continue_is_noop(void)
+{
+    int saved_req = request;
+    request = REQUEST_STOP;
+
+    client_possibility_t client[1];
+    init_test_client(&client[0], 0);
+
+    int needed = 0, got = 0;
+    feed_one_thread(client, 0, &needed, &got);
+
+    ASSERT_EQ_FMT(0, needed, "%d");
+    ASSERT_EQ_FMT(0, got, "%d");
+
+    destroy_test_client(&client[0]);
+    request = saved_req;
+    PASS();
+}
+
+/* Thread sans travail, une possibilité dispo : il la reçoit et passe works=1. */
+TEST feed_one_thread_gets_work(void)
+{
+    int saved_req = request, saved_pm = pruner_mode;
+    dm_drain_local();
+    request = REQUEST_CONTINUE;
+    pruner_mode = 0;
+
+    struct possibility_packet *p = malloc(sizeof *p);
+    memset(p, 0, sizeof *p);
+    p->alloc = 2;
+    array_possibility_packet *ap = malloc(sizeof *ap);
+    ap->size = 1;
+    ap->possibilities = p;
+    add_possibility(NULL, ap);
+    free_array_possibility_packet(ap);
+
+    client_possibility_t client[1];
+    init_test_client(&client[0], 0);
+
+    int needed = 0, got = 0;
+    feed_one_thread(client, 0, &needed, &got);
+
+    ASSERT_EQ_FMT(1, needed, "%d");
+    ASSERT_EQ_FMT(1, got, "%d");
+    ASSERT_EQ_FMT(1, (int)client[0].works, "%d");
+    ASSERT(client[0].aposs != NULL);
+    ASSERT_EQ_FMT(1, client[0].aposs->size, "%d");
+
+    /* nettoyage : aposs reçue + vidage de l'« en analyse » du thread 0 */
+    free_array_possibility_packet(client[0].aposs);
+    send_possibility_analysed(&client[0]);
+    destroy_test_client(&client[0]);
+    request = saved_req;
+    pruner_mode = saved_pm;
+    PASS();
+}
+
+/* Thread sans travail mais stock vide : il a réclamé mais rien reçu. */
+TEST feed_one_thread_no_work_available(void)
+{
+    int saved_req = request, saved_pm = pruner_mode;
+    dm_drain_local();
+    request = REQUEST_CONTINUE;
+    pruner_mode = 0;
+
+    client_possibility_t client[1];
+    init_test_client(&client[0], 0);
+
+    int needed = 0, got = 0;
+    feed_one_thread(client, 0, &needed, &got);
+
+    ASSERT_EQ_FMT(1, needed, "%d");
+    ASSERT_EQ_FMT(0, got, "%d");
+    ASSERT_EQ_FMT(0, (int)client[0].works, "%d");
+
+    destroy_test_client(&client[0]);
+    request = saved_req;
+    pruner_mode = saved_pm;
+    PASS();
+}
+
+/* Thread occupé sans socket ouvert : ni demande ni keepalive. */
+TEST feed_one_thread_busy_no_socket_noop(void)
+{
+    int saved_req = request;
+    request = REQUEST_CONTINUE;
+
+    client_possibility_t client[1];
+    init_test_client(&client[0], 1);   /* works = 1 : occupé */
+
+    int needed = 0, got = 0;
+    feed_one_thread(client, 0, &needed, &got);
+
+    ASSERT_EQ_FMT(0, needed, "%d");
+    ASSERT_EQ_FMT(0, got, "%d");
+
+    destroy_test_client(&client[0]);
+    request = saved_req;
+    PASS();
+}
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_client_suite)
@@ -366,4 +505,9 @@ SUITE(etii_client_suite)
     RUN_TEST(control_step_low_rate_resumes);
     RUN_TEST(control_step_idle_thread_resumes);
     RUN_TEST(control_step_window_resets_after_1000);
+
+    RUN_TEST(feed_one_thread_not_continue_is_noop);
+    RUN_TEST(feed_one_thread_gets_work);
+    RUN_TEST(feed_one_thread_no_work_available);
+    RUN_TEST(feed_one_thread_busy_no_socket_noop);
 }
