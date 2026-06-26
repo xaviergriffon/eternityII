@@ -19,6 +19,7 @@
 #include "greatest.h"
 #include "core/possibility.h"
 #include "core/part.h"
+#include "core/datamanager.h"
 #include "fork_assert.h"
 
 #include <stdlib.h>
@@ -1169,6 +1170,82 @@ TEST synthetic_map_omitting_index_yields_null_key(void)
     free_array_part(base);
     PASS();
 }
+
+/* ------------------------------------------------------------------------- *
+ *  first_possibility : chemins fataux + injection (via la map synthétique)    *
+ * ------------------------------------------------------------------------- *
+ *
+ * first_possibility mute l'état global (datamanager, non_null_possibilities) et
+ * peut appeler exit() (fatal_error) sur pièce-indice introuvable. On l'exécute
+ * donc en processus fils (run_in_fork) : exit() n'y tue que le fils, et le fork
+ * isole les effets de bord globaux du runner. Les assertions du chemin valide
+ * sont encodées dans le code de sortie du fils. */
+
+/* Id de la pièce-indice à omettre (lu par run_fp_omit dans le fils via fork). */
+static int g_fp_omit_id;
+
+/* Omet une pièce-indice : sa clé ne résout plus -> first_possibility doit appeler
+ * fatal_error (part_139_i8 pour la genèse 139, get_one_part inline pour les 4
+ * autres) -> exit(EXIT_FAILURE). */
+static void run_fp_omit(void)
+{
+    struct array_part *base = make_synthetic_base_256(g_fp_omit_id);
+    struct array_part *rot  = rotate_all_parts(base);
+    map_big_array     *map  = prepare_map_part(rot);
+    first_possibility(map, rot); /* doit exit(EXIT_FAILURE) avant de revenir */
+}
+
+/* Map valide + UN coin posable en (0,0) : first_possibility développe la case,
+ * valide l'unique résultat (check_possibility/normalize) et l'injecte dans le
+ * datamanager. Effets attendus : non_null_possibilities += 2 (genèse + résultat)
+ * et exactement 1 possibilité injectée (datas_size +1). Encodés en code retour. */
+static void run_fp_valid_injects(void)
+{
+    struct array_part *base = make_synthetic_base_256(0);
+    /* Transforme la tuile filler id=1 en coin : top/left bord (0), right/bottom
+       couleurs inédites (6,14) absentes des clés -> aucune rotation ne collisionne
+       avec un indice, et seule la rotation 0 a (top=0 && left=0) -> 1 candidat. */
+    base->parts[1].top = 0; base->parts[1].right = 6;
+    base->parts[1].bottom = 14; base->parts[1].left = 0;
+
+    struct array_part *rot = rotate_all_parts(base);
+    map_big_array     *map = prepare_map_part(rot);
+
+    unsigned long long before_data = datas_size();
+    unsigned long long before_nn   = non_null_possibilities;
+
+    first_possibility(map, rot);
+
+    /* exit() (et non _exit) pour que gcov écrive la couverture du corps de
+       first_possibility exercé ici — cf. status_zone_lifecycle_over_pty. */
+    if (non_null_possibilities != before_nn + 2) exit(21);
+    if (datas_size() != before_data + 1)         exit(22);
+    exit(0); /* succès : flush gcov + atexit puis sortie nette */
+}
+
+/* Chaque pièce-indice manquante (genèse 139 + les 4 indices) rend
+ * first_possibility fatal : couvre les 5 sites fatal_error de la fonction. */
+TEST first_possibility_missing_each_index_is_fatal(void)
+{
+    const int ids[] = {139, 208, 255, 181, 249};
+    for (size_t i = 0; i < sizeof ids / sizeof ids[0]; i++) {
+        g_fp_omit_id = ids[i];
+        pid_t pid;
+        int code = run_in_fork(run_fp_omit, &pid);
+        ASSERT_EQ_FMTm("pièce-indice introuvable doit être fatale",
+                       EXIT_FAILURE, code, "%d");
+    }
+    PASS();
+}
+
+TEST first_possibility_valid_injects_one_possibility(void)
+{
+    pid_t pid;
+    int code = run_in_fork(run_fp_valid_injects, &pid);
+    /* 0 = OK ; 21 = compteur non_null inattendu ; 22 = datas_size inattendu. */
+    ASSERT_EQ_FMTm("first_possibility doit injecter 1 possibilité (code 0)", 0, code, "%d");
+    PASS();
+}
 #endif /* ETERN_PARTS == 256 */
 
 SUITE(possibility_suite)
@@ -1184,6 +1261,8 @@ SUITE(possibility_suite)
     RUN_TEST(check_possibility_valid_genesis_is_zero);
     RUN_TEST(synthetic_map_resolves_each_index_key);
     RUN_TEST(synthetic_map_omitting_index_yields_null_key);
+    RUN_TEST(first_possibility_missing_each_index_is_fatal);
+    RUN_TEST(first_possibility_valid_injects_one_possibility);
 #endif
 #if ETERN_PARTS != 256
     RUN_TEST(check_possibility_invalid_grid_value_is_minus_seven);
