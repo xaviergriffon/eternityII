@@ -34,13 +34,13 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 .leg-dot{width:10px;height:10px;border-radius:2px}
 </style>
 
-<h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Rapport des fonctions sans tests unitaires — EternityII (49 % de couverture globale)</h2>
+<h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Rapport des fonctions sans tests unitaires — EternityII (73 % de couverture de lignes)</h2>
 
 <div class="summary-grid">
-  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">31</span><span class="metric-sub">sur 282 au total</span></div>
-  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">89 %</span><span class="metric-sub">251 / 282</span></div>
-  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">68 %</span><span class="metric-sub">3533 / 5204</span></div>
-  <div class="metric"><span class="metric-label">Domaine le plus touché</span><span class="metric-value" style="font-size:15px">src/app/</span><span class="metric-sub">main.c à 0 %</span></div>
+  <div class="metric"><span class="metric-label">Fonctions non testées</span><span class="metric-value total-fn">31</span><span class="metric-sub">sur 283 au total</span></div>
+  <div class="metric"><span class="metric-label">Couverture fonctions</span><span class="metric-value">89 %</span><span class="metric-sub">252 / 283</span></div>
+  <div class="metric"><span class="metric-label">Couverture lignes</span><span class="metric-value">73 %</span><span class="metric-sub">3836 / 5225</span></div>
+  <div class="metric"><span class="metric-label">Couverture branches</span><span class="metric-value">67 %</span><span class="metric-sub">1524 / 2277</span></div>
 </div>
 
 <div class="legend">
@@ -52,18 +52,23 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
   <span class="leg-item"><span class="leg-dot" style="background:#7F77DD"></span>Branche rarement exécutable</span>
 </div>
 
+<div class="reason-box r-teal" style="margin:0 0 2rem">
+  <div class="reason-label">Constat clé</div>
+  <p style="font-size:13px;color:var(--color-text-secondary);margin:0">Les <strong>31 fonctions restantes sont des boucles bloquantes, des points d'entrée, ou des helpers atteignables uniquement via eux</strong> : threads de travail (<code>autosearch</code>, <code>console</code>…), boucles d'événements TCP / <code>accept()</code>, orchestrateurs de <code>fork</code>, l'entry-point <code>main()</code> et ses dispatchers (seule exception, <code>init_client_possibility</code> — un init de struct testable en isolation, mais aujourd'hui appelé seulement par le spawn de threads client non testé). Elles ne sont pas appelables en test unitaire sans instancier un processus complet. <strong>Tout le reste est couvert</strong> — la logique pure a été systématiquement extraite de ces boucles et testée (cf. sections vertes). Domaines : <code>src/core/</code> <strong>99 % des fonctions</strong> (155/157), <code>src/net/</code> <strong>100 %</strong> (13/13) ; le résidu non testé est concentré dans <code>src/app/</code> (boucles client/serveur + <code>main.c</code> à 0 %) et les 2 threads <code>autosearch</code>/<code>autoprune</code> + la console interactive.</p>
+</div>
+
 <!-- RAISON 1 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge b-red">26 fonctions</span>
+    <span class="badge b-red">27 fonctions</span>
     <span class="section-title">Orchestration multi-thread / multi-processus</span>
   </div>
   <div class="reason-box r-red">
     <div class="reason-label">Raison technique</div>
     <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px">Ces fonctions lancent des threads bloquants (<code>accept()</code>, boucles d'événements TCP, IPC fork), gèrent des signaux POSIX, ou sont le <code>main()</code> du programme. Elles ne peuvent pas être appelées en test unitaire sans instancier un processus complet avec durée de vie bornée — les remplacer par des mocks reviendrait à ne pas les tester.</p>
-    <div class="file-ref">src/app/etii_client.c — 7 fonctions</div>
+    <div class="file-ref">src/app/etii_client.c — 8 fonctions</div>
     <div class="fn-list" style="margin:4px 0 8px">
-      <span class="fn">feed_thread_aposs</span><span class="fn">build_feed_thread</span><span class="fn">control_thread</span><span class="fn">build_control_thread</span><span class="fn">runThreadClient</span><span class="fn">run_mono_client</span><span class="fn">check_client_threads</span>
+      <span class="fn">init_client_possibility</span><span class="fn">feed_thread_aposs</span><span class="fn">build_feed_thread</span><span class="fn">control_thread</span><span class="fn">build_control_thread</span><span class="fn">runThreadClient</span><span class="fn">run_mono_client</span><span class="fn">check_client_threads</span>
     </div>
     <div class="file-ref">src/app/etii_server.c — 6 fonctions</div>
     <div class="fn-list" style="margin:4px 0 8px">
@@ -73,7 +78,7 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
     <div class="fn-list" style="margin:4px 0">
       <span class="fn">main</span><span class="fn">handle_tcpclient</span><span class="fn">handle_tcpserver</span><span class="fn">handle_test</span><span class="fn">run_client</span><span class="fn">run_auto</span><span class="fn">run_checker</span><span class="fn">fork_checker</span><span class="fn">run_fork_checker</span><span class="fn">server_tcp</span><span class="fn">run_server_thread</span><span class="fn">fork_udp</span><span class="fn">run_fork_thread</span>
     </div>
-    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couvertes (11) : <code>get_active_threads</code> (<code>tests/app/test_etii_server.c</code> — fonction pure déjà liée) ; et, après <strong>extraction de <code>main.c</code> vers le nouveau module <code>src/app/app_runtime.c</code></strong>, les 10 fonctions de plomberie <code>init_counters</code>, <code>init_childs</code>, <code>failed_arg</code>, <code>signal_ignored</code>, <code>signal_end_handler</code>, <code>sigchld_handler</code>, <code>init_sigchld_sigaction</code>, <code>init_signals</code>, <code>configure_child_signals</code>, <code>wait_child</code> (<code>tests/app/test_app_runtime.c</code> — module à <strong>94 %</strong> ; chaque test sauvegarde/restaure la disposition des signaux pour ne pas casser le runner). Restent les 26 véritables boucles bloquantes (<code>accept()</code> / <code>while(1)</code> / fork) et l'entry-point <code>main</code> — légitimement hors périmètre unitaire.</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Désormais couvertes (11) : <code>get_active_threads</code> (<code>tests/app/test_etii_server.c</code> — fonction pure déjà liée) ; et, après <strong>extraction de <code>main.c</code> vers le nouveau module <code>src/app/app_runtime.c</code></strong>, les 10 fonctions de plomberie <code>init_counters</code>, <code>init_childs</code>, <code>failed_arg</code>, <code>signal_ignored</code>, <code>signal_end_handler</code>, <code>sigchld_handler</code>, <code>init_sigchld_sigaction</code>, <code>init_signals</code>, <code>configure_child_signals</code>, <code>wait_child</code> (<code>tests/app/test_app_runtime.c</code> — module à <strong>94 %</strong> ; chaque test sauvegarde/restaure la disposition des signaux pour ne pas casser le runner). Restent les <strong>27 fonctions listées</strong> : 26 véritables boucles bloquantes (<code>accept()</code> / <code>while(1)</code> / fork) et l'entry-point <code>main</code> avec ses dispatchers, plus <code>init_client_possibility</code> (init de struct, atteint seulement par le spawn de threads client) — légitimement hors périmètre unitaire.</p>
     <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ <strong>Découpe des corps de boucle (Tier 1)</strong> : les deux boucles de <em>rapport de stats</em> <code>check_server</code> et <code>check_client_threads</code> restent des coquilles <code>while(1)+sleep</code> intestables, mais leur cœur — la construction des tableaux formatés — a été extrait dans des helpers purs couverts à 100 % : <code>build_file_queues_table</code> (<code>tests/app/test_etii_server.c</code>) et <code>build_thread_queues_table</code> (<code>tests/app/test_etii_client.c</code>). Le débordement de tas historique de la table client est désormais verrouillé par un test <code>NB_THREADS=100</code> sous ASan. La cadence de sauvegarde automatique de <code>check_server</code> (« tous les 6 tours, et seulement si le stock a bougé ») est aussi extraite dans <code>should_autobackup</code> (fonction pure, 100 %, <code>tests/app/test_etii_server.c</code>) : la coquille ne fait plus qu'appeler <code>backup</code>/<code>backup_analysed</code> selon son verdict.</p>
     <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ <strong>Découpe des corps de boucle (Tier 1, suite — même approche que #51/#52)</strong> : <code>communicate_with_client</code> (boucle d'événements TCP) et <code>control_thread</code> (boucle de régulation) restent des threads bloquants, mais des morceaux purs en ont été extraits et couverts. <code>requeue_last_sent_possibility</code> (<code>tests/app/test_etii_server.c</code>) — le bloc « renvoi au stock des possibilités servies mais non acquittées » de la fin de <code>communicate_with_client</code>, jumeau de <code>requeue_unprocessed_packets</code> (#51) : testé en local (NULL no-op, possibilité en analyse rendue, possibilité acquittée ignorée, lot mixte). <code>control_step</code> (<code>tests/app/test_etii_client.c</code>) — un tour de <code>control_thread</code>, fonction pure sur les globales (<code>counters</code>, <code>max_search_by_sec</code>, <code>request</code>) : testé sur les bascules CONTINUE↔PAUSE selon le débit, le réveil d'un thread inactif et le reset de fenêtre à 1000 tours.</p>
     <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ <strong>Dispatch protocolaire extrait (Tier 1, suite)</strong> : le corps du <code>while</code> de <code>communicate_with_client</code> (gros <code>if/else if</code> sur l'instruction reçue) est sorti dans <code>communicate_with_client_step</code> (1 = continuer, 0 = arrêter), testé hors thread via un <strong>socketpair</strong> jouant le rôle du socket client (<code>tests/app/test_etii_server.c</code>) : <code>INST_TEST_CONNECTED</code>, handshake de version (ok / refus), instruction inconnue, <code>INST_ADD</code> (ajout au stock), <code>INST_GET</code> (vide → <code>INST_NULL</code> ; servie → retirée du stock), <code>INST_POSSIBILITY_ANALYSED</code>, <code>INST_GET_TO_CHECK</code>, <code>INST_GET_TO_CHECK_BATCH</code> et <code>INST_POSSIBILITY_ANALYSED_BATCH</code> (lot + compte hors borne). <strong>communicate_with_client_step couvert à 51 %</strong> (etii_server.c 13 % → 35 % de lignes en build 256). La branche <code>INST_SOLUTION</code> est désormais couverte dans la suite <strong>16 pièces</strong> (<code>tests/core/test_solution16.c</code>), qui dispose d'une vraie solution 4×4 : la branche est exercée via un <strong>socketpair</strong> + la fixture « golden » — sans <code>--stop-on-solution</code> (sauvegarde CSV + <code>INST_CONSIDERED</code> + retour 1) et avec (<code>run_in_fork</code> + <code>chdir</code> : backup du stock + <code>exit(EXIT_SUCCESS)</code>), fichiers confinés dans un répertoire temporaire. Reste, non couvert en unitaire, le service réel de paquets <em>tocheck</em> (lookup réseau réel).</p>
@@ -112,24 +117,24 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
       <span class="fn">bt_init_constraints</span><span class="fn">bt_propagate_place</span><span class="fn">bt_propagate_undo</span><span class="fn">bt_forward_check</span><span class="fn">bt_count_pending</span><span class="fn">bt_materialize_pending</span><span class="fn">bt_delegate_if_needed</span><span class="fn">bt_flush_pending</span><span class="fn">search_packet_backtracking</span><span class="fn">record_solution</span><span class="fn">checkAndDelegatePossibilitiesIfNeeded</span><span class="fn">checkAndDelegatePossibilitiesIfNeeded_with_big_table</span>
     </div>
     <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Couverts (<code>tests/core/test_etii_search.c</code>, etii_search.c passe à 62 % en build 16) : les 5 helpers <code>bt_*</code> + les 2 <code>checkAndDelegate…</code> l'étaient déjà ; ajoutés ici — <code>bt_materialize_pending</code> / <code>bt_delegate_if_needed</code> / <code>bt_flush_pending</code> sur pile montée à la main avec une map uniforme (déterministes, indépendants de la taille) ; <code>search_packet_backtracking</code> + <code>record_solution</code> de bout en bout sur le vrai puzzle 4×4 : la solution est trouvée et enregistrée (fichier <code>solution_*.csv</code>) puis l'arbre est épuisé (retour 0), plus la branche <code>--stop-on-solution</code> (<code>exit(EXIT_SUCCESS)</code> via <code>run_in_fork</code>) et la branche <code>REQUEST_STOP</code> (flush + retour 1).</p>
-    <p style="font-size:12px;color:var(--color-text-secondary);margin:8px 0 0">Subtilité : <code>bt_delegate_if_needed</code> est inatteignable par la boucle naturelle en 4×4 (sa fréquence est bornée à 1 000 000 nœuds + <code>DELEGATE_MIN_INTERVAL_MS</code>) — d'où l'appel direct. Restent hors périmètre unitaire : <code>autoprune</code> / <code>autoprune_gpu</code> (boucles de thread pruner, comptées dans src/app/) et la branche <code>REQUEST_PAUSE</code> (spin mono-thread).</p>
+    <p style="font-size:12px;color:var(--color-text-secondary);margin:8px 0 0">Subtilité : <code>bt_delegate_if_needed</code> est inatteignable par la boucle naturelle en 4×4 (sa fréquence est bornée à 1 000 000 nœuds + <code>DELEGATE_MIN_INTERVAL_MS</code>) — d'où l'appel direct. Restent hors périmètre unitaire dans <code>src/core/etii_search.c</code> (16/18 fonctions, 89 %), ce sont des <strong>boucles de thread</strong> : <code>autosearch</code> (thread de recherche) et <code>autoprune</code> (thread pruner) — ainsi que la branche <code>REQUEST_PAUSE</code> (spin mono-thread). <code>autoprune_gpu</code> est dans <code>gpu_pruner.cu</code> (build CUDA, non couvert).</p>
   </div>
 </div>
 
 <!-- RAISON 4 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge b-amber">1 fonction</span>
-    <span class="section-title">Terminal / PTY requis (isatty, ioctl, raw mode)</span>
+    <span class="badge b-amber">2 fonctions</span>
+    <span class="section-title">Boucle console interactive (thread + lancement)</span>
   </div>
   <div class="reason-box r-amber">
     <div class="reason-label">Raison technique</div>
-    <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px">Ces fonctions retournent immédiatement ou ne sont jamais appelées si <code>isatty(STDIN_FILENO)</code> ou <code>isatty(STDOUT_FILENO)</code> est faux — ce qui est toujours le cas en CI (stdout est un pipe). Les fonctions de la zone ANSI (<code>redraw_event_zone_locked</code>, <code>event_zone_loop</code>) ne sont atteintes que si <code>zone_active == 1</code>, ce qui nécessite un vrai terminal avec <code>TIOCGWINSZ</code>. Les tester nécessiterait de lancer un pseudo-terminal (PTY) via <code>openpty()</code>.</p>
-    <div class="file-ref">src/ui/console.c — reste seulement <code>run_console</code> (lance le thread console — non testable)</div>
+    <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px"><code>console</code> est le <strong>thread de la console</strong> : une boucle <code>while</code> qui lit une ligne (<code>getcmdline</code>) et la dispatche via <code>do_command_line</code> jusqu'à EOF/quit ; <code>run_console</code> ne fait que la lancer en thread détaché. Les exécuter en unitaire reviendrait à piloter une session interactive complète (stdin + état global). En revanche, leurs <strong>briques pures</strong> (lecture de ligne cooked/raw, dispatch des commandes) sont, elles, couvertes isolément.</p>
+    <div class="file-ref">src/ui/console.c — boucle de thread + son lanceur</div>
     <div class="fn-list" style="margin:4px 0 8px">
-      <span class="fn">run_console</span>
+      <span class="fn">console</span><span class="fn">run_console</span>
     </div>
-    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Couvert (<code>tests/ui/test_console.c</code>) : le chemin <strong>raw</strong> de la console — <code>try_enable_raw_mode</code>, <code>getcmdline_raw</code> (74 %, avec backspace + flèches ↑/↓), <code>restore_termios_on_exit</code> — via un PTY monté avec <code>posix_openpt</code> (POSIX, sans <code>-lutil</code>). <code>console</code> l'était déjà (cooked + EOF).</p>
+    <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ Couvert (<code>tests/ui/test_console.c</code>) : le chemin <strong>raw</strong> de la console — <code>try_enable_raw_mode</code>, <code>getcmdline_raw</code> (avec backspace + flèches ↑/↓), <code>restore_termios_on_exit</code> — via un PTY monté avec <code>posix_openpt</code> (POSIX, sans <code>-lutil</code>) ; et <code>getcmdline</code> en mode cooked + EOF. Seules restent non couvertes la boucle <code>console</code> elle-même et son lanceur <code>run_console</code> (ci-dessus).</p>
     <p style="font-size:12px;color:#0F6E56;margin:8px 0 0">✓ <strong>Tout le cycle de vie de la zone fixe ANSI</strong> est désormais couvert (<code>tests/ui/test_logger.c</code>) : <code>status_zone_init</code>, <code>status_zone_teardown</code>, <code>clear_console</code>, <code>query_terminal_rows</code>, <code>redraw_event_zone_locked</code> et le thread <code>event_zone_loop</code> — exercés dans un fils dont <strong>stdout est l'esclave d'un PTY</strong> (taille fixée via <code>TIOCSWINSZ</code> ; sortie par <code>exit(0)</code> pour que gcov écrive la couverture ; <code>alarm()</code> garde-fou). <code>logger.c</code> passe à <strong>89 % de lignes / 100 % de fonctions</strong>. Restent seulement les branches de redimensionnement et les chemins d'erreur (<code>pthread_create</code>/<code>ioctl</code> en échec).</p>
   </div>
 </div>
@@ -154,7 +159,7 @@ body{font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary)
 <!-- RAISON 6 -->
 <div class="section">
   <div class="section-header">
-    <span class="badge b-gray">4 fonctions</span>
+    <span class="badge" style="background:#E1F5EE;color:#0F6E56">4 fonctions — couvertes</span>
     <span class="section-title">Fonctions d'affichage / vérification appelées par les interpreters</span>
   </div>
   <div class="reason-box r-gray">
