@@ -222,65 +222,56 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent)
 }
 
 /**
- * @brief Thread de communication avec un client TCP connecté.
+ * @brief Traite une instruction reçue d'un client (un tour de la boucle de
+ *        `communicate_with_client`).
  *
- * Gère le protocole etii : vérification de version, puis boucle sur les instructions :
- * - INST_GET : envoie une possibilité depuis le datamanager au client.
- * - INST_ADD : reçoit une possibilité du client et l'ajoute au datamanager.
- * - INST_POSSIBILITY_ANALYSED : signale qu'une possibilité a été traitée.
- * - INST_SOLUTION : reçoit une solution complète, l'affiche et la sauvegarde.
- * - INST_TEST_CONNECTED : répond pour maintenir la connexion.
- * À la déconnexion, remet les dernières possibilités envoyées dans le datamanager.
+ * Extrait du corps du `while` pour être testable hors thread, via un socketpair
+ * jouant le rôle du socket client. `*lastSent` mémorise le dernier lot servi (à
+ * rendre au stock à la déconnexion) ; `*version_supported` porte l'état du
+ * handshake de version d'un tour à l'autre. Comportement strictement identique.
  *
- * @param userdata Pointeur vers le `client_t` du thread.
- * @return         NULL.
+ * @param client            Contexte du thread (socket_id, compteur, rotate_parts).
+ * @param instruction        Instruction reçue à traiter.
+ * @param lastSent           In/out : dernier lot envoyé (libéré/réaffecté ici).
+ * @param version_supported  In/out : 1 si le handshake de version a réussi.
+ * @return 1 pour poursuivre la boucle, 0 pour s'arrêter (anciens `break`).
  */
-void *communicate_with_client (void *userdata)
+int communicate_with_client_step(client_t *client, int8_t instruction,
+                                 array_possibility_packet **lastSent,
+                                 int *version_supported)
 {
-    client_t *client = userdata;
-    while (client->socket_id == -1)
-    {
-        usleep(MICRO_SLEEP);
-    }
-    
-    int8_t instruction = recv_instruction(client->socket_id);
-    
-    array_possibility_packet *lastPossibilityPacketSend = NULL;
-    int version_supported = 0;
-    while(instruction != -1 && instruction != INST_END)
-    {
         if (instruction == INST_CHECK_VERSION) {
             int client_version = -1;
             ssize_t ssize = recv(client->socket_id, &client_version, sizeof(int), 0);
             if (ssize != sizeof(int)) {
                 log_error("error on recept client version\n");
-                break;
+                return 0;
             }
             if (version == client_version) {
                 send_instruction(client->socket_id, INST_SUPPORTED_VERSION);
-                version_supported = 1;
+                *version_supported = 1;
             } else {
                 log_error("Version of client unsupported\n");
                 send_instruction(client->socket_id, INST_UNSUPPORTED_VERSION);
             }
-        } else if(instruction == INST_GET && version_supported == 1)
+        } else if(instruction == INST_GET && *version_supported == 1)
         {
-            if(lastPossibilityPacketSend != NULL)
+            if(*lastSent != NULL)
             {
-                free_array_possibility_packet(lastPossibilityPacketSend);
-                lastPossibilityPacketSend = NULL;
+                free_array_possibility_packet(*lastSent);
+                *lastSent = NULL;
             }
-            
-            lastPossibilityPacketSend = get_last_possibility(NULL, 1);
+
+            *lastSent = get_last_possibility(NULL, 1);
             int p = 0;
-            for (p = 0; p < lastPossibilityPacketSend->size; p++)
+            for (p = 0; p < (*lastSent)->size; p++)
             {
-                struct possibility_packet *possibility = &lastPossibilityPacketSend->possibilities[p];
+                struct possibility_packet *possibility = &(*lastSent)->possibilities[p];
                 add_possibility_analysed(possibility, -1);
                 //printf("send ");
                 //print_possibility_packet(possibility);
                 ssize_t ssize = send(client->socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
-                
+
                 if (ssize < 0) {
                     log_errno("Erreur d'envoi => ");
                 }
@@ -291,21 +282,21 @@ void *communicate_with_client (void *userdata)
             {
                 send_instruction(client->socket_id,INST_NULL);
             }
-            
-        } else if(instruction == INST_GET_TO_CHECK && version_supported == 1)
+
+        } else if(instruction == INST_GET_TO_CHECK && *version_supported == 1)
         {
             // Client pruner : sert le pool non vérifié uniquement (pas de repli)
-            if(lastPossibilityPacketSend != NULL)
+            if(*lastSent != NULL)
             {
-                free_array_possibility_packet(lastPossibilityPacketSend);
-                lastPossibilityPacketSend = NULL;
+                free_array_possibility_packet(*lastSent);
+                *lastSent = NULL;
             }
 
-            lastPossibilityPacketSend = get_last_possibility_tocheck(1);
+            *lastSent = get_last_possibility_tocheck(1);
             int p = 0;
-            for (p = 0; p < lastPossibilityPacketSend->size; p++)
+            for (p = 0; p < (*lastSent)->size; p++)
             {
-                struct possibility_packet *possibility = &lastPossibilityPacketSend->possibilities[p];
+                struct possibility_packet *possibility = &(*lastSent)->possibilities[p];
                 add_possibility_analysed(possibility, -1);
                 ssize_t ssize = send(client->socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
 
@@ -320,7 +311,7 @@ void *communicate_with_client (void *userdata)
                 send_instruction(client->socket_id,INST_NULL);
             }
 
-        } else if(instruction == INST_GET_TO_CHECK_BATCH && version_supported == 1)
+        } else if(instruction == INST_GET_TO_CHECK_BATCH && *version_supported == 1)
         {
             // Client pruner (échange par lot) : un seul aller-retour pour N
             // possibilités non vérifiées. N est borné par le client (sa mémoire)
@@ -329,20 +320,20 @@ void *communicate_with_client (void *userdata)
             if (recv_all(client->socket_id, &requested, sizeof(requested)) != (long)sizeof(requested))
             {
                 log_error("batch tocheck : nombre demandé non reçu\n");
-                break;
+                return 0;
             }
             requested = clamp_pruner_batch(requested);
 
-            if(lastPossibilityPacketSend != NULL)
+            if(*lastSent != NULL)
             {
-                free_array_possibility_packet(lastPossibilityPacketSend);
-                lastPossibilityPacketSend = NULL;
+                free_array_possibility_packet(*lastSent);
+                *lastSent = NULL;
             }
-            lastPossibilityPacketSend = get_last_possibility_tocheck(requested);
-            int32_t k = (int32_t)lastPossibilityPacketSend->size;
+            *lastSent = get_last_possibility_tocheck(requested);
+            int32_t k = (int32_t)(*lastSent)->size;
             for (int p = 0; p < k; p++)
             {
-                add_possibility_analysed(&lastPossibilityPacketSend->possibilities[p], -1);
+                add_possibility_analysed(&(*lastSent)->possibilities[p], -1);
                 counters[client->compteur]++;
                 fileUpdates[client->compteur]++;
             }
@@ -353,14 +344,14 @@ void *communicate_with_client (void *userdata)
             }
             else if (k > 0)
             {
-                if (send_all(client->socket_id, lastPossibilityPacketSend->possibilities,
+                if (send_all(client->socket_id, (*lastSent)->possibilities,
                              (size_t)k * sizeof(struct possibility_packet)) < 0)
                 {
                     log_errno("Erreur d'envoi (bloc lot) => ");
                 }
             }
 
-        } else if(instruction == INST_ADD && version_supported == 1)
+        } else if(instruction == INST_ADD && *version_supported == 1)
         {
             array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
             struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
@@ -369,12 +360,12 @@ void *communicate_with_client (void *userdata)
             {
                 aposs->possibilities = possibilityPacket;
                 aposs->size = 1;
-                
+
                 if(add_possibility(NULL, aposs) == 0)
                 {
                     send_instruction(client->socket_id, INST_CONSIDERED);
                     fileUpdates[client->compteur]++;
-                    
+
                 } else{
                     send_instruction(client->socket_id, INST_ERROR);
                 }
@@ -388,16 +379,16 @@ void *communicate_with_client (void *userdata)
             }
             free(possibilityPacket);
             free(aposs);
-            
-            
-        } else if (instruction == INST_POSSIBILITY_ANALYSED && version_supported == 1) {
+
+
+        } else if (instruction == INST_POSSIBILITY_ANALYSED && *version_supported == 1) {
             struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
             ssize_t ssize = recv(client->socket_id, (struct possibility_packet *)possibilityPacket, sizeof(struct possibility_packet), 0);
             if (sizeof(struct possibility_packet) == ssize) {
                 if(remove_possibility_analysed(possibilityPacket, -1) == 0)
                 {
                     send_instruction(client->socket_id,INST_CONSIDERED);
-                    
+
                 } else{
                     log_error("possibility analysed not removed\n");
                     print_possibility_packet(possibilityPacket);
@@ -412,16 +403,16 @@ void *communicate_with_client (void *userdata)
                 send_instruction(client->socket_id, INST_ERROR);
             }
             free (possibilityPacket);
-        } else if (instruction == INST_POSSIBILITY_ANALYSED_BATCH && version_supported == 1) {
+        } else if (instruction == INST_POSSIBILITY_ANALYSED_BATCH && *version_supported == 1) {
             // Acquittement par lot : M paquets en un aller-retour, un seul INST_CONSIDERED.
             int32_t m = 0;
             if (recv_all(client->socket_id, &m, sizeof(m)) != (long)sizeof(m)) {
                 log_error("batch analysed : nombre non reçu\n");
-                break;
+                return 0;
             }
             if (m < 0 || m > PRUNER_BATCH_MAX) {
                 log_error("batch analysed : compte hors borne (%d)\n", m);
-                break;
+                return 0;
             }
             int transfer_ok = 1;
             struct possibility_packet pkt;
@@ -440,9 +431,9 @@ void *communicate_with_client (void *userdata)
                 send_instruction(client->socket_id, INST_CONSIDERED);
             } else {
                 send_instruction(client->socket_id, INST_ERROR);
-                break;
+                return 0;
             }
-        } else if (instruction == INST_SOLUTION && version_supported == 1) {
+        } else if (instruction == INST_SOLUTION && *version_supported == 1) {
             // Un client a trouvé une solution complète : on la reçoit, on
             // l'affiche de façon visible (événement + journal), on la sauvegarde
             // côté serveur et on acquitte. Avec --stop-on-solution, on s'arrête
@@ -479,7 +470,7 @@ void *communicate_with_client (void *userdata)
                         flush_info();
                         exit(EXIT_SUCCESS);
                     }
-                    break;
+                    return 0;
                 }
                 // Sinon : on continue à servir ce client.
             } else {
@@ -489,19 +480,55 @@ void *communicate_with_client (void *userdata)
             }
         } else if (instruction == INST_TEST_CONNECTED) {
             send_instruction(client->socket_id, INST_TEST_CONNECTED);
-        } else if (version_supported == 0) {
+        } else if (*version_supported == 0) {
             log_error("Version of client unsupported\n");
             send_instruction(client->socket_id, INST_UNSUPPORTED_VERSION);
-            break;
+            return 0;
         } else
         {
             inst_unknow++;
             log_error("server instruction inconnu: %i\n",instruction);
             log_error("nb inst inconnu%li\n",inst_unknow);
-            
+
+            return 0;
+        }
+    return 1;
+}
+
+/**
+ * @brief Thread de communication avec un client TCP connecté.
+ *
+ * Gère le protocole etii : vérification de version, puis boucle sur les instructions :
+ * - INST_GET : envoie une possibilité depuis le datamanager au client.
+ * - INST_ADD : reçoit une possibilité du client et l'ajoute au datamanager.
+ * - INST_POSSIBILITY_ANALYSED : signale qu'une possibilité a été traitée.
+ * - INST_SOLUTION : reçoit une solution complète, l'affiche et la sauvegarde.
+ * - INST_TEST_CONNECTED : répond pour maintenir la connexion.
+ * À la déconnexion, remet les dernières possibilités envoyées dans le datamanager.
+ *
+ * @param userdata Pointeur vers le `client_t` du thread.
+ * @return         NULL.
+ */
+void *communicate_with_client (void *userdata)
+{
+    client_t *client = userdata;
+    while (client->socket_id == -1)
+    {
+        usleep(MICRO_SLEEP);
+    }
+
+    int8_t instruction = recv_instruction(client->socket_id);
+
+    array_possibility_packet *lastPossibilityPacketSend = NULL;
+    int version_supported = 0;
+    while(instruction != -1 && instruction != INST_END)
+    {
+        if (!communicate_with_client_step(client, instruction,
+                                          &lastPossibilityPacketSend, &version_supported))
+        {
             break;
         }
-        
+
         instruction = recv_instruction(client->socket_id);
     }
     if(lastPossibilityPacketSend != NULL)
