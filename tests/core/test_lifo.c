@@ -372,6 +372,33 @@ TEST file_scroll_cache_no_cache_frees_and_size_decrements(void)
     PASS();
 }
 
+/* file_remove_element supprime l'élément du milieu d'une File de 3 :
+   size passe à 2, les voisins se relient correctement. */
+TEST file_remove_element_removes_middle(void)
+{
+    File f;
+    init_file_with_cache(&f, 0, sizeof(int));
+    for (int i = 1; i <= 3; i++) put(&f, &i); /* [1,2,3] */
+
+    Element *e1 = f.start;
+    Element *e2 = e1->next;
+    Element *e3 = f.end;
+
+    file_remove_element(&f, e2);
+
+    ASSERT_EQ_FMT(2ULL, (unsigned long long)f.size, "%llu");
+    ASSERT_EQ(e1, f.start);
+    ASSERT_EQ(e3, f.end);
+    ASSERT_EQ(e3, e1->next);
+    ASSERT_EQ(e1, e3->previous);
+
+    /* Vide la file proprement. */
+    int v;
+    scroll(&f, &v); ASSERT_EQ_FMT(3, v, "%d");
+    scroll(&f, &v); ASSERT_EQ_FMT(1, v, "%d");
+    PASS();
+}
+
 /* free_big_table libère un big_table alloué sur le tas (structure + buffer). */
 TEST big_table_free_big_table_heap(void)
 {
@@ -403,4 +430,5 @@ SUITE(lifo_suite)
     RUN_TEST(file_move_targets_non_extremity);
     RUN_TEST(file_scroll_cache_no_cache_frees_and_size_decrements);
     RUN_TEST(big_table_free_big_table_heap);
+    RUN_TEST(file_remove_element_removes_middle);
 }
