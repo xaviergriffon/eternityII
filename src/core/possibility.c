@@ -220,12 +220,13 @@ void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_
         key->k1 = 0;
     } else
     {
-        if(possiblity->grid[x][ym] < 0)
+        int16_t partId = possiblity->grid[x][ym];
+        if(partId < 0)
         {
             key->k1 = all_face;
         } else
         {
-            key->k1 = all_rotate_parts->parts[possiblity->grid[x][ym]].bottom;
+            key->k1 = all_rotate_parts->parts[partId].bottom;
         }
     }
 
@@ -235,12 +236,13 @@ void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_
         key->k2 = 0;
     } else
     {
-        if(possiblity->grid[xp][y] < 0)
+        int16_t partId = possiblity->grid[xp][y];
+        if(partId < 0)
         {
             key->k2 = all_face;
         } else
         {
-            key->k2 = all_rotate_parts->parts[possiblity->grid[xp][y]].left;
+            key->k2 = all_rotate_parts->parts[partId].left;
         }
     }
 
@@ -250,12 +252,13 @@ void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_
         key->k3 = 0;
     } else
     {
-        if(possiblity->grid[x][yp] < 0)
+        int16_t partId = possiblity->grid[x][yp];
+        if(partId < 0)
         {
             key->k3 = all_face;
         } else
         {
-            key->k3 = all_rotate_parts->parts[possiblity->grid[x][yp]].top;
+            key->k3 = all_rotate_parts->parts[partId].top;
         }
     }
 
@@ -265,12 +268,13 @@ void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_
         key->k4 = 0;
     } else
     {
-        if(possiblity->grid[xm][y] < 0)
+        int16_t partId = possiblity->grid[xm][y];
+        if(partId < 0)
         {
             key->k4 = all_face;
         } else
         {
-            key->k4 = all_rotate_parts->parts[possiblity->grid[xm][y]].right;
+            key->k4 = all_rotate_parts->parts[partId].right;
         }
     }
 }
