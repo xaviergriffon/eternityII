@@ -210,6 +210,15 @@ int forward_check_next_k(struct possibility_packet *possibility, map_big_array *
 int search_possiblity(File *result, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part);
 
 /**
+ * @brief Ajoute un `possibility_packet` en fin de file.
+ *
+ * @param suite File cible.
+ * @param value Paquet à ajouter (copié dans la file).
+ * @return      1 en cas de succès, 0 si malloc a échoué.
+ */
+int put_possibility(File *suite, struct possibility_packet *value);
+
+/**
  * @brief Développe un paquet en générant tous les successeurs valides (version optimisée, sortie `File`).
  *
  * Variante de `search_possiblity` utilisant une clé pré-calculée et une table
