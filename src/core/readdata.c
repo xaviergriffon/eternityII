@@ -38,6 +38,7 @@ struct array_part *read_parts(const char *file)
 		log_info("ntiles:%i\n",np);
 	} else
 	{
+		log_error("read_parts: format ntiles invalide dans %s\n", file);
 		exit(EXIT_FAILURE);
 	}
 
@@ -46,7 +47,7 @@ struct array_part *read_parts(const char *file)
     int NB_PARTS = (np+1);
 	if(NULL == (parts = malloc(NB_PARTS * sizeof *parts)))
 	{
-        // TODO : tracer l'erreur
+		log_error("read_parts: malloc échoué pour %d pièces\n", NB_PARTS);
 		exit(EXIT_FAILURE);
 	}
     struct array_part *array = malloc(sizeof(struct array_part));
