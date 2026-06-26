@@ -61,6 +61,90 @@ int find_fork_index(const char *sun_path, char **forkIds, int nb) {
 /**
  * @brief Méthode chargée d'alimenter les threads quand lors file est à 0
  */
+/**
+ * @brief Alimente un thread de recherche en travail (un tour de la boucle `for`
+ *        de `feed_thread_aposs`).
+ *
+ * Extrait du corps de boucle pour être testable hors thread (en mode local,
+ * `server_ip == NULL`, les échanges passent par le datamanager). Ne fait rien si
+ * `request != REQUEST_CONTINUE`. Si le thread `i` n'a plus de travail
+ * (`works == 0`), draine son « en analyse » puis tente d'obtenir une (ou un lot
+ * de) possibilité(s) ; s'il en reçoit, les empile et passe `works = 1`. Sinon,
+ * s'il a un socket ouvert, émet un keepalive avant le timeout serveur. Les
+ * compteurs `*needed_work` / `*got_work` (threads ayant demandé / reçu du
+ * travail) sont incrémentés en place pour piloter le back-off de l'appelant.
+ *
+ * @param thread_params Tableau des contextes de threads de recherche.
+ * @param i             Indice du thread à alimenter.
+ * @param needed_work   Compteur in/out des threads ayant réclamé du travail.
+ * @param got_work      Compteur in/out des threads ayant reçu du travail.
+ */
+void feed_one_thread(client_possibility_t *thread_params, int i,
+                     int *needed_work, int *got_work)
+{
+    if (request != REQUEST_CONTINUE)
+    {
+        return;
+    }
+    client_possibility_t *client_possibility = &thread_params[i];
+    // Vérification rapide sous mutex, puis relâchement avant l'I/O réseau
+    // pour ne pas bloquer autosearch sur pthread_mutex_lock(works_mutex)
+    // pendant la durée des échanges TCP (send_possibility_analysed /
+    // get_last_possibility peuvent attendre le serveur).
+    pthread_mutex_lock(&thread_params[i].works_mutex);
+    int need_work = (client_possibility->works == 0);
+    pthread_mutex_unlock(&thread_params[i].works_mutex);
+
+    if(need_work)
+    {
+        (*needed_work)++;
+        // I/O réseau hors du mutex
+        send_possibility_analysed(client_possibility);
+        // Un pruner consomme vite : on demande un lot pour amortir les
+        // allers-retours TCP ; un client de recherche garde 1 racine
+        array_possibility_packet *aposs = get_last_possibility(client_possibility, pruner_mode ? pruner_batch_size : 1);
+        if(aposs->size > 0)
+        {
+            (*got_work)++;
+            // On alimente la pile des possibilités en étude
+            for (int p = 0; p < aposs->size; p++) {
+                add_possibility_analysed(&aposs->possibilities[p], i);
+            }
+            // Réacquisition du mutex uniquement pour la mise à jour de aposs/works
+            pthread_mutex_lock(&thread_params[i].works_mutex);
+            thread_params[i].aposs = aposs;
+            thread_params[i].works = 1;
+            pthread_mutex_unlock(&thread_params[i].works_mutex);
+        } else
+        {
+            free_array_possibility_packet(aposs);
+        }
+    }
+    else if (client_possibility->socket_id != -1)
+    {
+        // Keepalive : un worker occupé sur son stock local ne parle pas
+        // au serveur. Sans ping, le serveur ferme la session après
+        // tcp_timeout secondes d'inactivité (SO_RCVTIMEO) → Broken pipe
+        // à la prochaine I/O. On pingue donc avant l'échéance.
+        time_t now = time(NULL);
+        int interval = (tcp_timeout > 2) ? (tcp_timeout / 2) : 1;
+        if (now - client_possibility->last_socket_activity >= interval)
+        {
+            pthread_mutex_lock(&client_possibility->socket_mutex);
+            if (client_possibility->socket_id != -1) {
+                if (is_connected(client_possibility->socket_id)) {
+                    client_possibility->last_socket_activity = now;
+                } else {
+                    // Déjà fermée : on oublie le socket, il sera rouvert
+                    // au prochain besoin de travail.
+                    client_possibility->socket_id = -1;
+                }
+            }
+            pthread_mutex_unlock(&client_possibility->socket_mutex);
+        }
+    }
+}
+
 void *feed_thread_aposs(void *param) {
     client_possibility_t *thread_params = param;
 #ifdef DEBUG_THREAD
@@ -74,66 +158,7 @@ void *feed_thread_aposs(void *param) {
         int got_work = 0;    // threads ayant effectivement reçu du travail
         for(int i = 0; i < NB_THREADS; i++)
         {
-            if(request == REQUEST_CONTINUE)
-            {
-                client_possibility_t *client_possibility = &thread_params[i];
-                // Vérification rapide sous mutex, puis relâchement avant l'I/O réseau
-                // pour ne pas bloquer autosearch sur pthread_mutex_lock(works_mutex)
-                // pendant la durée des échanges TCP (send_possibility_analysed /
-                // get_last_possibility peuvent attendre le serveur).
-                pthread_mutex_lock(&thread_params[i].works_mutex);
-                int need_work = (client_possibility->works == 0);
-                pthread_mutex_unlock(&thread_params[i].works_mutex);
-
-                if(need_work)
-                {
-                    needed_work++;
-                    // I/O réseau hors du mutex
-                    send_possibility_analysed(client_possibility);
-                    // Un pruner consomme vite : on demande un lot pour amortir les
-                    // allers-retours TCP ; un client de recherche garde 1 racine
-                    array_possibility_packet *aposs = get_last_possibility(client_possibility, pruner_mode ? pruner_batch_size : 1);
-                    if(aposs->size > 0)
-                    {
-                        got_work++;
-                        // On alimente la pile des possibilités en étude
-                        for (int p = 0; p < aposs->size; p++) {
-                            add_possibility_analysed(&aposs->possibilities[p], i);
-                        }
-                        // Réacquisition du mutex uniquement pour la mise à jour de aposs/works
-                        pthread_mutex_lock(&thread_params[i].works_mutex);
-                        thread_params[i].aposs = aposs;
-                        thread_params[i].works = 1;
-                        pthread_mutex_unlock(&thread_params[i].works_mutex);
-                    } else
-                    {
-                        free_array_possibility_packet(aposs);
-                    }
-                }
-                else if (client_possibility->socket_id != -1)
-                {
-                    // Keepalive : un worker occupé sur son stock local ne parle pas
-                    // au serveur. Sans ping, le serveur ferme la session après
-                    // tcp_timeout secondes d'inactivité (SO_RCVTIMEO) → Broken pipe
-                    // à la prochaine I/O. On pingue donc avant l'échéance.
-                    time_t now = time(NULL);
-                    int interval = (tcp_timeout > 2) ? (tcp_timeout / 2) : 1;
-                    if (now - client_possibility->last_socket_activity >= interval)
-                    {
-                        pthread_mutex_lock(&client_possibility->socket_mutex);
-                        if (client_possibility->socket_id != -1) {
-                            if (is_connected(client_possibility->socket_id)) {
-                                client_possibility->last_socket_activity = now;
-                            } else {
-                                // Déjà fermée : on oublie le socket, il sera rouvert
-                                // au prochain besoin de travail.
-                                client_possibility->socket_id = -1;
-                            }
-                        }
-                        pthread_mutex_unlock(&client_possibility->socket_mutex);
-                    }
-                }
-            }
+            feed_one_thread(thread_params, i, &needed_work, &got_work);
         }
 
         // Pause adaptative : si des threads attendaient du travail mais que le
