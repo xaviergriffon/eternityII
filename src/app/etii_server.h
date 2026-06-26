@@ -9,6 +9,7 @@
 #include <sys/times.h>
 #include <stdint.h>
 #include "core/part.h"
+#include "core/possibility.h"
 #include "app/static_variables.h"
 
 /**
@@ -102,5 +103,21 @@ int get_active_threads(client_t *thread_params);
 char *build_file_queues_table(unsigned long long *out_unchecked,
                               unsigned long long *out_checked,
                               unsigned long long *out_analysed);
+
+/**
+ * @brief Renvoie au stock local les possibilités servies au client mais jamais
+ *        acquittées, à la déconnexion (propre ou brutale).
+ *
+ * Extrait du bloc de fin de `communicate_with_client` pour être testable hors de
+ * la boucle d'événements. Pour chaque possibilité de `lastSent` encore présente
+ * dans `file_analysed` (le client ne l'a pas acquittée via INST_POSSIBILITY_ANALYSED),
+ * elle est retirée de l'« en analyse » et réinjectée dans le stock via
+ * `add_possibility(NULL, …)`. Une possibilité déjà acquittée
+ * (`remove_possibility_analysed != 0`) n'est pas réinjectée : pas de doublon de
+ * travail terminé. NULL accepté (no-op). Ne libère PAS `lastSent`.
+ *
+ * @param lastSent Dernier lot de possibilités envoyé au client (peut être NULL).
+ */
+void requeue_last_sent_possibility(array_possibility_packet *lastSent);
 
 #endif /* etii_server_h */

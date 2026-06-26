@@ -242,6 +242,74 @@ TEST file_queues_table_reflects_unchecked_stock(void)
     PASS();
 }
 
+/* ---------- requeue_last_sent_possibility -------------------------------- */
+
+/* NULL : no-op, ne touche pas le stock. */
+TEST requeue_null_is_noop(void)
+{
+    dm_drain_all();
+    requeue_last_sent_possibility(NULL);
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+    PASS();
+}
+
+/* Possibilité encore « en analyse » (le client ne l'a pas acquittée) :
+   à la déconnexion, elle est retirée de l'« en analyse » et rendue au stock. */
+TEST requeue_unacked_returns_to_stock(void)
+{
+    dm_drain_all();
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 7;
+    add_possibility_analysed(&pkt, -1);          /* le serveur l'avait servie */
+
+    array_possibility_packet sent = { .size = 1, .possibilities = &pkt };
+    requeue_last_sent_possibility(&sent);
+
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");   /* rendue au stock */
+    dm_drain_all();
+    PASS();
+}
+
+/* Possibilité déjà acquittée (absente de file_analysed) : non réinjectée,
+   sinon le travail déjà terminé serait dupliqué. */
+TEST requeue_acked_is_skipped(void)
+{
+    dm_drain_all();
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 9;
+    /* jamais ajoutée à file_analysed : simule un client ayant déjà acquitté */
+
+    array_possibility_packet sent = { .size = 1, .possibilities = &pkt };
+    requeue_last_sent_possibility(&sent);
+
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* rien rendu */
+    PASS();
+}
+
+/* Lot mixte : seules les possibilités encore en analyse reviennent. */
+TEST requeue_mixed_batch_returns_only_unacked(void)
+{
+    dm_drain_all();
+
+    struct possibility_packet pkts[3];
+    memset(pkts, 0, sizeof pkts);
+    for (int i = 0; i < 3; i++) pkts[i].alloc = (uint16_t)(i + 1);
+    /* Seules pkts[0] et pkts[2] sont « en analyse » (pkts[1] déjà acquittée). */
+    add_possibility_analysed(&pkts[0], -1);
+    add_possibility_analysed(&pkts[2], -1);
+
+    array_possibility_packet sent = { .size = 3, .possibilities = pkts };
+    requeue_last_sent_possibility(&sent);
+
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+    dm_drain_all();
+    PASS();
+}
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_server_suite)
@@ -270,4 +338,9 @@ SUITE(etii_server_suite)
 
     RUN_TEST(file_queues_table_empty_is_all_zero);
     RUN_TEST(file_queues_table_reflects_unchecked_stock);
+
+    RUN_TEST(requeue_null_is_noop);
+    RUN_TEST(requeue_unacked_returns_to_stock);
+    RUN_TEST(requeue_acked_is_skipped);
+    RUN_TEST(requeue_mixed_batch_returns_only_unacked);
 }

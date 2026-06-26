@@ -181,6 +181,163 @@ TEST thread_queues_table_large_nb_threads_no_overflow(void)
     PASS();
 }
 
+/* ---------- control_step ------------------------------------------------- */
+/*
+ * control_step régule le débit via la globale `request`. Les tests sauvegardent
+ * et restaurent toutes les globales touchées (request, max_search_by_sec,
+ * NB_THREADS, counters) pour ne pas polluer les autres suites.
+ */
+
+/* En mode illimité (max_search_by_sec == 0), `request` n'est jamais modifié ;
+   seul le compteur de fenêtre avance. */
+TEST control_step_unlimited_leaves_request(void)
+{
+    int saved_req = request;
+    unsigned long long saved_max = max_search_by_sec;
+
+    request = REQUEST_CONTINUE;
+    max_search_by_sec = 0;
+    unsigned long long oneSecond = 0;
+    int nbCheck = 0;
+
+    control_step(NULL, NULL, &oneSecond, &nbCheck);
+
+    ASSERT_EQ_FMT(REQUEST_CONTINUE, request, "%d");
+    ASSERT_EQ_FMT(1, nbCheck, "%d");      /* fenêtre avancée */
+
+    request = saved_req;
+    max_search_by_sec = saved_max;
+    PASS();
+}
+
+/* Débit estimé au-dessus de la limite : CONTINUE -> PAUSE. */
+TEST control_step_high_rate_pauses(void)
+{
+    int saved_req = request;
+    unsigned long long saved_max = max_search_by_sec;
+    int saved_nb = NB_THREADS;
+    unsigned long long *saved_counters = counters;
+
+    NB_THREADS = 1;
+    max_search_by_sec = 1;
+    unsigned long long my_counters[1] = { 1000000ULL };
+    counters = my_counters;
+
+    array_possibility_packet dummy = { .size = 1, .possibilities = NULL };
+    client_possibility_t tp[1];
+    memset(tp, 0, sizeof tp);
+    tp[0].works = 1;
+    tp[0].aposs = &dummy;            /* thread actif */
+
+    unsigned long long lastCheck[1] = { 0ULL };
+    unsigned long long oneSecond = 0;
+    int nbCheck = 1;                 /* > 0 : le calcul de débit s'exécute */
+    request = REQUEST_CONTINUE;
+
+    control_step(tp, lastCheck, &oneSecond, &nbCheck);
+
+    ASSERT_EQ_FMT(REQUEST_PAUSE, request, "%d");
+    ASSERT_EQ_FMT(1000000ULL, lastCheck[0], "%llu");  /* compteur mémorisé */
+
+    request = saved_req;
+    max_search_by_sec = saved_max;
+    NB_THREADS = saved_nb;
+    counters = saved_counters;
+    PASS();
+}
+
+/* Débit estimé sous la limite : PAUSE -> CONTINUE. */
+TEST control_step_low_rate_resumes(void)
+{
+    int saved_req = request;
+    unsigned long long saved_max = max_search_by_sec;
+    int saved_nb = NB_THREADS;
+    unsigned long long *saved_counters = counters;
+
+    NB_THREADS = 1;
+    max_search_by_sec = 1000000000ULL;
+    unsigned long long my_counters[1] = { 1ULL };
+    counters = my_counters;
+
+    array_possibility_packet dummy = { .size = 1, .possibilities = NULL };
+    client_possibility_t tp[1];
+    memset(tp, 0, sizeof tp);
+    tp[0].works = 1;
+    tp[0].aposs = &dummy;
+
+    unsigned long long lastCheck[1] = { 0ULL };
+    unsigned long long oneSecond = 0;
+    int nbCheck = 1;
+    request = REQUEST_PAUSE;
+
+    control_step(tp, lastCheck, &oneSecond, &nbCheck);
+
+    ASSERT_EQ_FMT(REQUEST_CONTINUE, request, "%d");
+
+    request = saved_req;
+    max_search_by_sec = saved_max;
+    NB_THREADS = saved_nb;
+    counters = saved_counters;
+    PASS();
+}
+
+/* Thread inactif pendant une pause : la fenêtre le réveille (PAUSE -> CONTINUE). */
+TEST control_step_idle_thread_resumes(void)
+{
+    int saved_req = request;
+    unsigned long long saved_max = max_search_by_sec;
+    int saved_nb = NB_THREADS;
+    unsigned long long *saved_counters = counters;
+
+    NB_THREADS = 1;
+    max_search_by_sec = 1;
+    unsigned long long my_counters[1] = { 0ULL };
+    counters = my_counters;
+
+    client_possibility_t tp[1];
+    memset(tp, 0, sizeof tp);
+    tp[0].works = 0;                 /* inactif */
+    tp[0].aposs = NULL;
+
+    unsigned long long lastCheck[1] = { 0ULL };
+    unsigned long long oneSecond = 0;
+    int nbCheck = 0;                 /* 0 : pas de calcul de débit ce tour */
+    request = REQUEST_PAUSE;
+
+    control_step(tp, lastCheck, &oneSecond, &nbCheck);
+
+    ASSERT_EQ_FMT(REQUEST_CONTINUE, request, "%d");
+
+    request = saved_req;
+    max_search_by_sec = saved_max;
+    NB_THREADS = saved_nb;
+    counters = saved_counters;
+    PASS();
+}
+
+/* Au bout de 1000 tours, la fenêtre de mesure est réinitialisée et une pause
+   éventuelle est levée. */
+TEST control_step_window_resets_after_1000(void)
+{
+    int saved_req = request;
+    unsigned long long saved_max = max_search_by_sec;
+
+    max_search_by_sec = 0;           /* on isole le bloc de reset de fenêtre */
+    request = REQUEST_PAUSE;
+    unsigned long long oneSecond = 5;
+    int nbCheck = 1001;
+
+    control_step(NULL, NULL, &oneSecond, &nbCheck);
+
+    ASSERT_EQ_FMT(0, nbCheck, "%d");
+    ASSERT_EQ_FMT(0ULL, oneSecond, "%llu");
+    ASSERT_EQ_FMT(REQUEST_CONTINUE, request, "%d");
+
+    request = saved_req;
+    max_search_by_sec = saved_max;
+    PASS();
+}
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_client_suite)
@@ -203,4 +360,10 @@ SUITE(etii_client_suite)
 
     RUN_TEST(thread_queues_table_aggregates_forks);
     RUN_TEST(thread_queues_table_large_nb_threads_no_overflow);
+
+    RUN_TEST(control_step_unlimited_leaves_request);
+    RUN_TEST(control_step_high_rate_pauses);
+    RUN_TEST(control_step_low_rate_resumes);
+    RUN_TEST(control_step_idle_thread_resumes);
+    RUN_TEST(control_step_window_resets_after_1000);
 }
