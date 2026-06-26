@@ -107,14 +107,15 @@ int put (File * suite, void *value){
 		suite->lastPostionCache++;
 	} else
 	{
-		// TODO : voir pour éviter de faire dans le put
-        if (suite->sizeofvalue <= 0) {
-			free (new_element);
+		if (suite->sizeofvalue <= 0) {
 			return 0;
-        } else {
-            new_element = malloc(sizeof(Element));
-            new_element->value = malloc(suite->sizeofvalue);
-        }
+		}
+		new_element = malloc(sizeof(Element));
+		new_element->value = malloc(suite->sizeofvalue);
+		if (new_element->value == NULL) {
+			free(new_element);
+			return 0;
+		}
 	}
 
 	new_element->previous = NULL;
@@ -157,16 +158,6 @@ int scroll (File * suite, void *dest){
 	void *result = supp_element->value;
 	memcpy(dest, result, suite->sizeofvalue);
 	
-    // TODO : simplement tester si il s'agit de suite->cacheElement[suite->lastPostionCache]
-    /*
-    long position = position_cache(suite, supp_element);
-    if(position > -1)
-    {
-        if (position == suite->lastPostionCache -1)
-        {
-            suite->lastPostionCache--;
-        }
-     */
     if (suite->lastPostionCache > 0 && &suite->cacheElement[suite->lastPostionCache -1] == supp_element) {
         suite->lastPostionCache--;
 	} else
@@ -199,7 +190,8 @@ int scroll (File * suite, void *dest){
  */
 void *scroll_cache(File * suite){
 	Element *supp_element;
-    // TODO : hors sécu, est-ce qu'on doit tester end ? size devrait êtr suffisant
+    /* Invariant : size == 0 ⟺ end == NULL (garanti par put/scroll). Le test end évite un
+       déréférencement si l'invariant est rompu par un bug externe. */
 	if (suite->size == 0 || suite->end == NULL)
 		return NULL;
 	supp_element = suite->end;
