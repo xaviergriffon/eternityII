@@ -1248,6 +1248,56 @@ TEST first_possibility_valid_injects_one_possibility(void)
 }
 #endif /* ETERN_PARTS == 256 */
 
+/* --------------------------------------------------------------------------
+ * put_possibility : propagation d'erreur malloc
+ * ------------------------------------------------------------------------ */
+
+/* put_possibility retourne 0 quand sizeofvalue=0 (chemin malloc ← cache vide). */
+TEST put_possibility_returns_zero_on_bad_sizeofvalue(void)
+{
+    File file;
+    init_file_with_cache(&file, 0, 0); /* sizeofvalue=0 → chemin malloc échoue */
+    struct possibility_packet p;
+    memset(&p, 0, sizeof(p));
+    int ret = put_possibility(&file, &p);
+    ASSERT_EQ_FMT(0, ret, "%d");
+    ASSERT_EQ_FMT(0ULL, (unsigned long long)file.size, "%llu");
+    PASS();
+}
+
+/* search_possiblity_light s'arrête et retourne 0 quand put_possibility échoue. */
+TEST search_light_aborts_on_put_failure(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 },
+    };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->x = 0; p->y = 0; p->alloc = 0;
+
+    key_part key = { .k1 = 0, .k2 = 2, .k3 = 3, .k4 = 0 };
+    int16_t idParts[ETERN_PARTS][4];
+    fill_id_parts(idParts);
+
+    /* sizeofvalue=0 → put_possibility retourne 0 au premier appel */
+    File result;
+    init_file_with_cache(&result, 0, 0);
+
+    int max = search_possiblity_light(&result, &key, p, map, &rp, idParts);
+    ASSERT_EQ_FMT(0, max, "%d");
+    ASSERT_EQ_FMT(0ULL, (unsigned long long)result.size, "%llu");
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
 SUITE(possibility_suite)
 {
     RUN_TEST(test_directions_covers_every_cell);
@@ -1291,6 +1341,8 @@ SUITE(possibility_suite)
     RUN_TEST(possibility_has_a_next_finds_and_excludes_used);
     RUN_TEST(search_light_expands_one_per_candidate);
     RUN_TEST(search_light_skips_prefilled_cell);
+    RUN_TEST(put_possibility_returns_zero_on_bad_sizeofvalue);
+    RUN_TEST(search_light_aborts_on_put_failure);
     RUN_TEST(forward_check_detects_dead_cell);
     RUN_TEST(forward_check_passes_when_cells_filled);
     RUN_TEST(search_big_table_prunes_dead_branches);
