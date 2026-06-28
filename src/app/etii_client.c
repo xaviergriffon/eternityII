@@ -248,7 +248,15 @@ void control_step(client_possibility_t *thread_params,
                 lastCheck[t] = counters[t];
                 *oneSecond = *oneSecond + inMillis;
             } else {
-                // TODO : pourquoi révéiller les threads ici ?
+                /* Un thread inactif (pas de possibilité en cours) ne contribue
+                   pas au débit mesuré : le freiner n'a aucun effet régulateur.
+                   Le garder en pause serait même contre-productif —
+                   feed_one_thread() refuse de réclamer du travail au serveur
+                   tant que request != REQUEST_CONTINUE, donc la pause bloque
+                   aussi la demande réseau, pas seulement la recherche. On lève
+                   donc la pause pour que le thread d'alimentation puisse lui
+                   récupérer une possibilité dès le prochain cycle, sans
+                   attendre la prochaine régulation. */
                 if (request == REQUEST_PAUSE) {
                     request = REQUEST_CONTINUE;
                 }
