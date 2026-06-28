@@ -742,20 +742,7 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
                 // identifiant de la dernière piece utilisée
                 
                 lastId = search->parts[s].id;
-                // On vérifie que les emplacements libres ont tous une piece possible
-                // Si qu'une possiblité, alors place la piece
-                /*
-                 * Forward-checking inline laissé inactif. Le déclencher ici, juste
-                 * après le put, l'appliquerait sur un état déjà recopié pour les
-                 * autres candidats de la même position (timing décrit par l'ancien
-                 * commentaire) ; et ce rôle est désormais tenu par le chemin dédié
-                 * FORWARD_CHECK_K (forward_check_next_k), qui élague avant empilement.
-                 * Conservé en référence : coût attendu > bénéfice.
-                if(possibility_all_has_a_next(currPossibility, mapParts, all_rotate_part) == 0 && incAlloc < ETERN_PARTS) {
-                    // Consomme la suite ou fournie la possiblité actuel si pas d'élément dans la suite
-                    scroll_cache(result);
-                }
-                 */
+
 #ifdef DEBUG_CHECK_POSSIBILITY
                 int analyse = check_possibility(currPossibility, all_rotate_part);
                 if (analyse < 0)
@@ -785,14 +772,7 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
 
 		currPossibility->x = nX;
 		currPossibility->y = nY;
-        // On vérifie que les emplacements libres ont tous une piece possible
-        // Si qu'une possiblité, alors place la piece
-        /*
-		if(possibility_all_has_a_next(currPossibility, mapParts, all_rotate_part) == 0 && incAlloc < ETERN_PARTS) {
-            // On consomme pour éviter de recalculer
-            scroll_cache(result);
-		}
-         */
+
 #ifdef DEBUG_CHECK_POSSIBILITY
         int analyse = check_possibility(currPossibility, all_rotate_part);
         if (analyse < 0)
@@ -973,20 +953,7 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
                 // identifiant de la dernière piece utilisée
 
                 lastId = search->parts[s].id;
-                // On vérifie que les emplacements libres ont tous une piece possible
-                // Si qu'une possiblité, alors place la piece
-                /*
-                 * Forward-checking inline laissé inactif. Le déclencher ici, juste
-                 * après le put, l'appliquerait sur un état déjà recopié pour les
-                 * autres candidats de la même position (timing décrit par l'ancien
-                 * commentaire) ; et ce rôle est désormais tenu par le chemin dédié
-                 * FORWARD_CHECK_K (forward_check_next_k), qui élague avant empilement.
-                 * Conservé en référence : coût attendu > bénéfice.
-                if(possibility_all_has_a_next(currPossibility, mapParts, all_rotate_part) == 0 && incAlloc < ETERN_PARTS) {
-                    // Consomme la suite ou fournie la possiblité actuel si pas d'élément dans la suite
-                    scroll_cache(result);
-                }
-                 */
+
 #ifdef DEBUG_CHECK_POSSIBILITY
                 int analyse = check_possibility(currPossibility, all_rotate_part);
                 if (analyse < 0)
@@ -1038,14 +1005,7 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
 #if FORWARD_CHECK_K > 0
         pushed = 1;
 #endif
-        // On vérifie que les emplacements libres ont tous une piece possible
-        // Si qu'une possiblité, alors place la piece
-        /*
-        if(possibility_all_has_a_next(currPossibility, mapParts, all_rotate_part) == 0 && incAlloc < ETERN_PARTS) {
-            // On consomme pour éviter de recalculer
-            scroll_cache(result);
-        }
-         */
+
 #ifdef DEBUG_CHECK_POSSIBILITY
         int analyse = check_possibility(currPossibility, all_rotate_part);
         if (analyse < 0)
