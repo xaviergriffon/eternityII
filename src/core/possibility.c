@@ -692,7 +692,12 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
     // On vérifie si la possibilité à cette position n'est toujours pas connu.
 	if(currPossibility->grid[x][y] == -2) {
     
-		// TODO : voir pour réviser la recherche avec seulement des id de all_rotate_part
+		// get_parts_bigarray_with_key est zero-copy : elle renvoie un pointeur
+		// direct dans la map 4D (&map->flat[...]) et la boucle lit .id/.rotation
+		// sur place — aucune copie à éviter ici. Remplacer array_part par un
+		// simple tableau d'id imposerait une seconde structure parallèle dans la
+		// map pour un gain (densité de cache line) purement théorique et non
+		// mesuré : non retenu.
         // liste des pieces répondant à la recherche (key)
         struct array_part *search = get_parts_bigarray_with_key(mapParts, key);
         for(s=0; s< search->size; s++)
@@ -708,7 +713,13 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
             {
                 // On ajoute la définition d'une possibilité dans la suite.
                 // effectue une copie dans le end->value
-                // TODO : utiliser un système moins couteux en copie de mémoire
+                // put_possibility recopie le possibility_packet entier (~540 o) par
+                // candidat. La copie est intrinsèque : chaque pièce posée engendre un
+                // état de plateau distinct empilé pour exploration ultérieure (appel
+                // non récursif, une expansion par position). Les malloc sont déjà
+                // évités (cache d'Element ici, arène doublante côté big_table).
+                // Optimisation possible si le profiling le confirme : remplacer ce
+                // memcpy par un système de delta (n'enregistrer que la case modifiée).
                 if (!put_possibility(result, currPossibility)) {
                     log_error("put_possibility: malloc échoué à la position %d\n", incAlloc);
                     break;
@@ -734,7 +745,12 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
                 // On vérifie que les emplacements libres ont tous une piece possible
                 // Si qu'une possiblité, alors place la piece
                 /*
-                 * TODO : faire plus tard (après put ou après la boucle) car est recopié sur les autres qui n'ont pas la meme piece a position.
+                 * Forward-checking inline laissé inactif. Le déclencher ici, juste
+                 * après le put, l'appliquerait sur un état déjà recopié pour les
+                 * autres candidats de la même position (timing décrit par l'ancien
+                 * commentaire) ; et ce rôle est désormais tenu par le chemin dédié
+                 * FORWARD_CHECK_K (forward_check_next_k), qui élague avant empilement.
+                 * Conservé en référence : coût attendu > bénéfice.
                 if(possibility_all_has_a_next(currPossibility, mapParts, all_rotate_part) == 0 && incAlloc < ETERN_PARTS) {
                     // Consomme la suite ou fournie la possiblité actuel si pas d'élément dans la suite
                     scroll_cache(result);
@@ -908,7 +924,12 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
     // On vérifie si la possibilité à cette position n'est toujours pas connu.
     if(currPossibility->grid[x][y] == -2) {
 
-        // TODO : voir pour réviser la recherche avec seulement des id de all_rotate_part
+        // get_parts_bigarray_with_key est zero-copy : elle renvoie un pointeur
+        // direct dans la map 4D (&map->flat[...]) et la boucle lit .id/.rotation
+        // sur place — aucune copie à éviter ici. Remplacer array_part par un
+        // simple tableau d'id imposerait une seconde structure parallèle dans la
+        // map pour un gain (densité de cache line) purement théorique et non
+        // mesuré : non retenu.
         // liste des pieces répondant à la recherche (key)
         struct array_part *search = get_parts_bigarray_with_key(mapParts, key);
         for(int s=0; s< search->size; s++)
@@ -926,7 +947,13 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
 
                 // On ajoute la définition d'une possibilité dans la suite.
                 // effectue une copie dans le end->value
-                // TODO : utiliser un système moins couteux en copie de mémoire
+                // put_big_table recopie le possibility_packet entier (~540 o) par
+                // candidat. La copie est intrinsèque : chaque pièce posée engendre un
+                // état de plateau distinct empilé pour exploration ultérieure (appel
+                // non récursif, une expansion par position). L'arène est déjà
+                // pré-allouée : put_big_table ne malloc qu'au doublement.
+                // Optimisation possible si le profiling le confirme : remplacer ce
+                // memcpy par un système de delta (n'enregistrer que la case modifiée).
 
                 // On se place à la fin de la suite qui correspond à la nouvelle définition
                 currPossibility = put_big_table(result, currPossibility);;
@@ -949,7 +976,12 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
                 // On vérifie que les emplacements libres ont tous une piece possible
                 // Si qu'une possiblité, alors place la piece
                 /*
-                 * TODO : faire plus tard (après put ou après la boucle) car est recopié sur les autres qui n'ont pas la meme piece a position.
+                 * Forward-checking inline laissé inactif. Le déclencher ici, juste
+                 * après le put, l'appliquerait sur un état déjà recopié pour les
+                 * autres candidats de la même position (timing décrit par l'ancien
+                 * commentaire) ; et ce rôle est désormais tenu par le chemin dédié
+                 * FORWARD_CHECK_K (forward_check_next_k), qui élague avant empilement.
+                 * Conservé en référence : coût attendu > bénéfice.
                 if(possibility_all_has_a_next(currPossibility, mapParts, all_rotate_part) == 0 && incAlloc < ETERN_PARTS) {
                     // Consomme la suite ou fournie la possiblité actuel si pas d'élément dans la suite
                     scroll_cache(result);
