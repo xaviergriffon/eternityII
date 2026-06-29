@@ -521,7 +521,56 @@ TEST bt_delegate_moves_excess_to_local(void)
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");           /* 1 possibilité déléguée */
     ASSERT_EQ_FMT(2, stack[1].next_s, "%d");             /* niveau profond consommé */
     ASSERT_EQ_FMT(2ULL, lastfilesize[0], "%llu");        /* 3 - 1 restant local */
+    /* La délégation a alloué le buffer pré-alloué du thread (capacité = seuil). */
+    ASSERT(client.delegate_buf != NULL);
+    ASSERT_EQ_FMT(1, client.delegate_buf_capacity, "%d");
 
+    free(client.delegate_buf);                           /* libéré ici hors thread */
+    drain_local();
+    PASS();
+}
+
+/* bt_delegate_if_needed : le buffer pré-alloué est réutilisé d'un appel à l'autre
+ * et n'est agrandi (realloc) que si max_stock_by_thread augmente à chaud — jamais
+ * rétréci. Garde contre une régression de débordement si la limite grandit. */
+TEST bt_delegate_reuses_and_grows_buffer(void)
+{
+    drain_local();
+    ensure_counters();
+    max_stock_by_thread = 1;
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    build_two_level_fixture(&board, stack, &client);
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    /* 1er appel : alloue le buffer à la capacité = seuil courant (1). */
+    bt_delegate_if_needed(&client, &board, stack, 1, 0, idParts);
+    ASSERT(client.delegate_buf != NULL);
+    ASSERT_EQ_FMT(1, client.delegate_buf_capacity, "%d");
+    struct possibility_packet *first_buf = client.delegate_buf;
+
+    /* 2e appel, même seuil : le buffer est réutilisé tel quel (pas de realloc). */
+    build_two_level_fixture(&board, stack, &client);   /* reset pile/plateau... */
+    client.delegate_buf = first_buf;                   /* ...sans perdre le buffer */
+    client.delegate_buf_capacity = 1;
+    bt_delegate_if_needed(&client, &board, stack, 1, 0, idParts);
+    ASSERT_EQ(first_buf, client.delegate_buf);         /* même pointeur */
+    ASSERT_EQ_FMT(1, client.delegate_buf_capacity, "%d");
+
+    /* 3e appel après hausse de la limite (1 -> 2, < 3 pending pour rester au-dessus
+     * du seuil) : le buffer grandit pour tenir la nouvelle capacité. */
+    max_stock_by_thread = 2;
+    build_two_level_fixture(&board, stack, &client);
+    client.delegate_buf = first_buf;
+    client.delegate_buf_capacity = 1;
+    bt_delegate_if_needed(&client, &board, stack, 1, 0, idParts);
+    ASSERT(client.delegate_buf_capacity >= 2);          /* capacité suffisante */
+
+    free(client.delegate_buf);
     drain_local();
     PASS();
 }
@@ -974,6 +1023,7 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_materialize_pending_respects_max_out);
     RUN_TEST(bt_delegate_noop_below_threshold);
     RUN_TEST(bt_delegate_moves_excess_to_local);
+    RUN_TEST(bt_delegate_reuses_and_grows_buffer);
     RUN_TEST(bt_flush_pending_sends_all_plus_current);
     RUN_TEST(search_backtracking_stop_flushes_and_returns_one);
     RUN_TEST(requeue_unprocessed_packets_routes_tail_locally);

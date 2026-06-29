@@ -383,12 +383,48 @@ static int bt_materialize_pending(client_possibility_t *client,
 }
 
 /**
+ * @brief Garantit que le buffer de délégation pré-alloué du thread peut contenir
+ *        `capacity` paquets.
+ *
+ * Le tampon `client->delegate_buf` est réutilisé d'une délégation à l'autre pour
+ * éviter un malloc/free sur le chemin (semi-)chaud. `max_stock_by_thread` étant
+ * ajustable à chaud (console `maxStockByThread`, CLI), le tampon n'est agrandi
+ * que lorsque la limite augmente — jamais sur le régime nominal. La première
+ * délégation l'alloue (`delegate_buf == NULL`).
+ *
+ * @param client   Contexte du thread (porte le buffer et sa capacité).
+ * @param capacity Nombre de paquets requis (= `max_stock_by_thread`).
+ * @return         0 si le buffer est utilisable, -1 sur échec d'allocation
+ *                 (l'ancien buffer reste valide).
+ */
+static int bt_ensure_delegate_buf(client_possibility_t *client, int capacity)
+{
+    if (client->delegate_buf != NULL && client->delegate_buf_capacity >= capacity) {
+        return 0;
+    }
+    struct possibility_packet *grown =
+        realloc(client->delegate_buf, sizeof(struct possibility_packet) * capacity);
+    if (grown == NULL) {
+        return -1;
+    }
+    client->delegate_buf = grown;
+    client->delegate_buf_capacity = capacity;
+    return 0;
+}
+
+/**
  * @brief Délègue au serveur une partie du stock implicite si celui-ci dépasse `max_stock_by_thread`.
  *
  * Équivalent backtracking de `checkAndDelegatePossibilitiesIfNeeded_with_big_table` :
  * le stock est compté dans la pile de décisions, et au plus `max_stock_by_thread`
  * frères non explorés (les moins profonds) sont matérialisés puis envoyés.
  * Les niveaux délégués ne sont marqués consommés qu'après un envoi réussi.
+ *
+ * Le tableau de paquets matérialisés est écrit dans le buffer pré-alloué du
+ * thread (`client->delegate_buf`) plutôt que dans un bloc malloc/free à chaque
+ * appel ; le conteneur `array_possibility_packet` (8 octets) reste sur la pile.
+ * `add_possibility` copie chaque paquet (file locale via `put`, ou envoi TCP
+ * synchrone), donc le buffer reste réutilisable après l'appel.
  *
  * @param client      Contexte du thread client.
  * @param board       Plateau courant.
@@ -409,24 +445,27 @@ static void bt_delegate_if_needed(client_possibility_t *client,
         return;
     }
 
-    array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-    aposs->possibilities = malloc(sizeof(struct possibility_packet) * max_stock_by_thread);
+    if (bt_ensure_delegate_buf(client, max_stock_by_thread) != 0) {
+        // Échec d'allocation : on saute cette délégation, le travail reste local
+        log_error("error on delegate buffer allocation\n");
+        return;
+    }
+    array_possibility_packet aposs = { .size = 0, .possibilities = client->delegate_buf };
     int new_next_s[ETERN_PARTS];
-    aposs->size = bt_materialize_pending(client, board, stack, top, start_depth,
-                                         idParts, aposs->possibilities,
-                                         max_stock_by_thread, new_next_s);
-    if (aposs->size > 0) {
-        if (add_possibility(client, aposs)) {
+    aposs.size = bt_materialize_pending(client, board, stack, top, start_depth,
+                                        idParts, aposs.possibilities,
+                                        max_stock_by_thread, new_next_s);
+    if (aposs.size > 0) {
+        if (add_possibility(client, &aposs)) {
             // Échec d'envoi : la pile n'est pas marquée, le travail reste local
             log_error("error on add_possibility\n");
         } else {
             for (int i = 0; i <= top; i++) {
                 stack[i].next_s = new_next_s[i];
             }
-            lastfilesize[client->compteur] = pending - aposs->size;
+            lastfilesize[client->compteur] = pending - aposs.size;
         }
     }
-    free_array_possibility_packet(aposs);
 }
 
 /**
@@ -810,6 +849,14 @@ void *autosearch (void *userdata)
 #ifdef DEBUG_THREAD
     log_info("END search thread %i\n", client->pid);
 #endif // DEBUG_THREAD
+
+    // Libération du buffer de délégation pré-alloué (paresseusement par
+    // bt_delegate_if_needed ; NULL si ce thread n'a jamais délégué).
+    if (client->delegate_buf != NULL) {
+        free(client->delegate_buf);
+        client->delegate_buf = NULL;
+        client->delegate_buf_capacity = 0;
+    }
 
     return NULL;
 }

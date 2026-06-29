@@ -42,6 +42,16 @@ typedef struct
     /// un worker occupé sur son stock local doit pinguer le serveur avant son
     /// timeout d'inactivité (tcp_timeout), sinon le serveur ferme la session.
     time_t last_socket_activity;
+    /// Buffer de délégation réutilisé par `bt_delegate_if_needed` (etii_search.c) :
+    /// la boucle de recherche délègue le surplus de travail toutes les
+    /// DELEGATE_MIN_INTERVAL_MS et matérialise alors jusqu'à `max_stock_by_thread`
+    /// paquets. Pré-allouer ce tampon une fois par thread évite un
+    /// malloc/free de ~max_stock_by_thread × sizeof(possibility_packet) à chaque
+    /// délégation. Alloué paresseusement à la première délégation, agrandi si
+    /// `max_stock_by_thread` augmente à chaud, libéré en fin de thread `autosearch`.
+    struct possibility_packet *delegate_buf;
+    /// Capacité courante (en paquets) de `delegate_buf` (0 si non alloué).
+    int delegate_buf_capacity;
 } client_possibility_t;
 
 /**
