@@ -40,6 +40,8 @@ void init_client_possibility(client_possibility_t *p, struct array_part *rotateP
     pthread_mutex_t smutex = PTHREAD_MUTEX_INITIALIZER;
     p->socket_mutex = smutex;
     p->last_socket_activity = time(NULL);
+    p->delegate_buf = NULL;
+    p->delegate_buf_capacity = 0;
     times(&p->start_socket);
 }
 
