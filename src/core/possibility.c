@@ -616,23 +616,13 @@ int put_possibility (File * suite, struct possibility_packet *value){
         print_possibility_packet(value);
     }
 #endif // DEBUG_CHECK_POSSIBILITY
-	Element *new_element = NULL;
-    // On vérifie on peut encore positionner dans le cache
-	if(suite->lastPostionCache < suite->cacheSize)
+    // création d'un nouvel élément
+	Element *new_element = malloc(sizeof(Element));
+	if (suite->sizeofvalue <= 0 || (new_element->value = malloc(suite->sizeofvalue))
+		== NULL)
 	{
-
-		new_element = &suite->cacheElement[suite->lastPostionCache];
-		suite->lastPostionCache++;
-	} else
-	{
-        // création d'un nouvel élément
-		new_element = malloc(sizeof(Element));
-		if (suite->sizeofvalue <= 0 || (new_element->value = malloc(suite->sizeofvalue))
-			== NULL)
-		{
-			free (new_element);
-			return 0;
-		}
+		free (new_element);
+		return 0;
 	}
 
 	new_element->previous = NULL;
@@ -1365,7 +1355,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
     }
     
     File *possibilities = malloc(sizeof(File));
-    init_file_with_cache(possibilities, 0, sizeof(struct possibility_packet));
+    init_file(possibilities, sizeof(struct possibility_packet));
     key_part *key = malloc(sizeof(key_part));
     
     struct possibility_packet *possibilityPacket = generate_possibility_packet(x, y, etern, cur_dir);

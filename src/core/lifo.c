@@ -4,118 +4,36 @@
 #include "core/lifo.h"
 
 /**
- * @brief Initialise une `File` à l'état vide sans cache.
- * @param suite File à initialiser.
+ * @brief Initialise une `File` vide.
+ * @param suite       File à initialiser.
+ * @param sizeofvalue Taille en octets de chaque valeur stockée.
  */
-void init_file(File * suite){
+void init_file(File *suite, size_t sizeofvalue){
 	suite->start = NULL;
 	suite->end = NULL;
 	suite->size = 0;
-	suite->cacheSize = 0;
-	suite->cacheElement = NULL;
-    suite->cacheEndPosition = NULL;
-	suite->sizeofvalue = 0;
-	suite->lastPostionCache = 0;
-}
-
-/**
- * @brief Initialise une `File` avec un cache pré-alloué d'éléments.
- *
- * Les `cacheSize` premiers éléments insérés réutilisent le bloc mémoire pré-alloué,
- * évitant autant d'appels `malloc` au démarrage. Une fois le cache épuisé, les
- * éléments suivants sont alloués dynamiquement.
- *
- * @param suite       File à initialiser.
- * @param cacheSize   Nombre d'éléments pré-alloués dans le cache (0 = aucun cache).
- * @param sizeofvalue Taille en octets de chaque valeur stockée.
- */
-void init_file_with_cache(File *suite, unsigned long long cacheSize, size_t sizeofvalue)
-{
-	init_file(suite);
-	suite->cacheSize = cacheSize;
-	if(cacheSize > 0)
-	{
-        size_t cacheElementSize = sizeof(Element) * cacheSize;
-		suite->cacheElement = malloc(cacheElementSize);
-        suite->cacheEndPosition = &suite->cacheElement[cacheSize - 1];
-		
-	}
 	suite->sizeofvalue = sizeofvalue;
-	unsigned long long e;
-	for(e = 0; e < cacheSize; e++)
-	{
-		suite->cacheElement[e].value = malloc(sizeofvalue);
-		// Construction de la suite
-		if(e>0) {
-			suite->cacheElement[e].previous = &suite->cacheElement[e-1];
-			suite->cacheElement[e-1].next = NULL;
-		} else {
-			suite->cacheElement[e].previous = &suite->cacheElement[e];
-		}
-		
-		if(e == cacheSize -1 ) {
-			suite->cacheElement[e].next = NULL;
-		}
-	}
-}
-
-/**
- * @brief Indique si un élément appartient au bloc de cache pré-alloué de la file.
- * @param file    File propriétaire du cache.
- * @param element Élément à tester.
- * @return        1 si l'élément est dans le cache, 0 sinon.
- */
-int inside_cache(File *file, Element *element)
-{
-    // On vérifie si la position de l'élément se trouve dans la zone mémoire de cacheElemeent
-	return file->cacheElement <= element && element <= file->cacheEndPosition;
-}
-
-/**
- * @brief Retourne la position d'un élément dans le cache, ou -1 s'il n'en fait pas partie.
- * @param file    File propriétaire du cache.
- * @param element Élément à localiser.
- * @return        Position dans le cache (≥ 0), ou -1 si hors cache.
- */
-long position_cache(File *file, Element *element)
-{
-	if(!inside_cache(file, element))
-	{
-		return -1;
-	}
-	
-    // Utilisation des pointeurs pour calculer la position
-	return file->cacheElement - element;
 }
 
 /**
  * @brief Ajoute un élément en fin de file (mode FIFO).
  *
- * Copie `sizeofvalue` octets depuis `value` dans un nouvel élément. Réutilise
- * le cache pré-alloué si possible, sinon alloue dynamiquement.
+ * Copie `sizeofvalue` octets depuis `value` dans un nouvel élément alloué
+ * dynamiquement.
  *
  * @param suite File cible.
  * @param value Pointeur vers la valeur à copier.
  * @return      1 en cas de succès, 0 si la file n'est pas initialisée.
  */
 int put (File * suite, void *value){
-	Element *new_element = NULL;
-	if(suite->lastPostionCache < suite->cacheSize)
-	{
-		
-		new_element = &suite->cacheElement[suite->lastPostionCache];
-		suite->lastPostionCache++;
-	} else
-	{
-		if (suite->sizeofvalue <= 0) {
-			return 0;
-		}
-		new_element = malloc(sizeof(Element));
-		new_element->value = malloc(suite->sizeofvalue);
-		if (new_element->value == NULL) {
-			free(new_element);
-			return 0;
-		}
+	if (suite->sizeofvalue <= 0) {
+		return 0;
+	}
+	Element *new_element = malloc(sizeof(Element));
+	new_element->value = malloc(suite->sizeofvalue);
+	if (new_element->value == NULL) {
+		free(new_element);
+		return 0;
 	}
 
 	new_element->previous = NULL;
@@ -157,14 +75,9 @@ int scroll (File * suite, void *dest){
 	suite->end = supp_element->previous;
 	void *result = supp_element->value;
 	memcpy(dest, result, suite->sizeofvalue);
-	
-    if (suite->lastPostionCache > 0 && &suite->cacheElement[suite->lastPostionCache -1] == supp_element) {
-        suite->lastPostionCache--;
-	} else
-	{
-		free (result);
-		free (supp_element);
-	}
+
+	free (result);
+	free (supp_element);
 
 	suite->size--;
 
@@ -176,52 +89,6 @@ int scroll (File * suite, void *dest){
 	
 	return 1;
 }
-
-/**
- * @brief Extrait le dernier élément de la file et retourne un pointeur direct vers sa valeur.
- *
- * Contrairement à `scroll`, ne copie pas la valeur : retourne le pointeur interne si
- * l'élément appartient au cache pré-alloué. Pour les éléments alloués dynamiquement
- * (hors cache), libère le wrapper et la valeur puis retourne NULL.
- *
- * @param suite File source.
- * @return      Pointeur vers la valeur (cache uniquement), ou NULL si la file est vide
- *              ou si l'élément était hors cache.
- */
-void *scroll_cache(File * suite){
-	Element *supp_element;
-    /* Invariant : size == 0 ⟺ end == NULL (garanti par put/scroll). Le test end évite un
-       déréférencement si l'invariant est rompu par un bug externe. */
-	if (suite->size == 0 || suite->end == NULL)
-		return NULL;
-	supp_element = suite->end;
-	if(supp_element->previous != NULL)
-	{
-		supp_element->previous->next = NULL;
-	}
-	suite->end = supp_element->previous;
-	void *result = supp_element->value;
-
-    if (suite->lastPostionCache > 0 && &suite->cacheElement[suite->lastPostionCache -1] == supp_element) {
-        suite->lastPostionCache--;
-	} else
-	{
-		free(result);
-		free(supp_element);
-		result = NULL;
-	}
-	
-	suite->size--;
-	
-	if(suite->size ==0)
-	{
-		suite->start = NULL;
-		suite->end = NULL;
-	}
-	
-	return result;
-}
-
 
 /**
  * @brief Extrait et copie le premier élément de la file (mode FIFO).
@@ -242,18 +109,9 @@ int scroll_fifo (File * suite, void *dest){
 	suite->start = supp_element->next;
 	void *result = supp_element->value;
 	memcpy(dest, result, suite->sizeofvalue);
-	
-	if(inside_cache(suite, supp_element))
-	{
-		if ((unsigned long long)position_cache(suite, supp_element) == suite->lastPostionCache -1)
-		{
-			suite->lastPostionCache--;
-		}
-	} else
-	{
-		free (result);
-		free (supp_element);
-	}
+
+	free (result);
+	free (supp_element);
 	suite->size--;
 	
 	return 1;
@@ -367,18 +225,15 @@ void move_after(File *suite, Element *element, Element *target) {
  */
 void file_remove_element(File *suite, Element *element) {
     extract_element(suite, element);
-    if (!inside_cache(suite, element)) {
-        free(element->value);
-        free(element);
-    }
+    free(element->value);
+    free(element);
     suite->size--;
 }
 
 /**
- * @brief Vide et libère complètement une `File` et son cache.
+ * @brief Vide et libère complètement une `File` ainsi que la structure elle-même.
  *
- * Extrait tous les éléments restants, libère le cache pré-alloué si présent,
- * puis libère la structure `File` elle-même.
+ * Extrait et libère tous les éléments restants, puis libère la `File`.
  *
  * @param suite File à libérer.
  */
@@ -390,15 +245,6 @@ void free_file(File *suite)
 		scroll(suite,value);
 	}
 	free(value);
-	if(suite->cacheSize > 0)
-	{
-		unsigned long long c;
-		for(c = 0; c < suite->cacheSize;c++)
-		{
-			free(suite->cacheElement[c].value);
-		}
-		free(suite->cacheElement);
-	}
 	free(suite);
 }
 

@@ -13,30 +13,30 @@
 
 static file_possibility_t file_possibility[NB_FILE_POSSIBILITY] =
 {
-	{{NULL,NULL,0,0,NULL,NULL, 0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-	{{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
+	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
 };
 
 static file_possibility_t file_possibility_analysed[NB_FILE_POSSIBILITY] =
 {
-	{{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-	{{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
+	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
 };
 
 /**
@@ -49,16 +49,16 @@ static file_possibility_t file_possibility_analysed[NB_FILE_POSSIBILITY] =
  */
 static file_possibility_t file_possibility_checked[NB_FILE_POSSIBILITY] =
 {
-	{{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-	{{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,0,NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
+	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
+    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
 };
 
 
@@ -667,7 +667,7 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 	}
 
 	File file;
-	init_file_with_cache(&file, 0, sizeof(struct possibility_packet));
+	init_file(&file, sizeof(struct possibility_packet));
 	
 	struct possibility_packet buffer;
 	// Un client pruner demande des possibilités non vérifiées
@@ -745,7 +745,7 @@ static void scroll_from_pool(file_possibility_t *pool, array_possibility_packet 
 					int nothing = 0;
 					File file;
 					struct possibility_packet packet;
-					init_file_with_cache(&file, 0, sizeof(struct possibility_packet));
+					init_file(&file, sizeof(struct possibility_packet));
 					for(p=0; p < max_result && nothing == 0;p++)
 					{
 						if(scroll(&pool[currfile].file, &packet))
@@ -1449,7 +1449,7 @@ static int split_pool_nolock(file_possibility_t *pool, int nbsplit)
 	regroup_pool_nolock(pool);
 
 	File *file = malloc(sizeof(File));
-	init_file_with_cache(file, 0, sizeof(struct possibility_packet));
+	init_file(file, sizeof(struct possibility_packet));
 	struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
 	while (pool[0].file.size > 0)
 	{

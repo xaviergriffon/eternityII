@@ -13,10 +13,6 @@ typedef struct ListeRepere{
 	Element *start;
 	Element *end;
 	unsigned long long size;
-	unsigned long long cacheSize;
-	Element *cacheElement;
-    Element * cacheEndPosition;
-	unsigned long long lastPostionCache;
 	size_t sizeofvalue;
 } File;
 
@@ -29,17 +25,12 @@ typedef struct BigTable {
 } big_table;
 
 /**
- * @brief Initialise une `File` avec un cache pré-alloué d'éléments.
- *
- * Les `cacheSize` premiers éléments insérés réutilisent le bloc mémoire
- * pré-alloué, évitant autant d'appels `malloc` au démarrage. Une fois le
- * cache épuisé, les éléments suivants sont alloués dynamiquement.
+ * @brief Initialise une `File` vide.
  *
  * @param suite       File à initialiser.
- * @param cacheSize   Nombre d'éléments pré-alloués (0 = aucun cache).
  * @param sizeofvalue Taille en octets de chaque valeur stockée.
  */
-void init_file_with_cache(File *suite, unsigned long long cacheSize, size_t sizeofvalue);
+void init_file(File *suite, size_t sizeofvalue);
 
 /**
  * @brief Initialise un tableau dynamique `big_table`.
@@ -56,7 +47,7 @@ void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue);
 /**
  * @brief Ajoute un élément en fin de la file (mode FIFO/pile).
  *
- * Réutilise le cache pré-alloué si disponible, sinon alloue dynamiquement.
+ * Copie la valeur dans un nouvel élément alloué dynamiquement.
  *
  * @param suite File cible.
  * @param value Pointeur vers la valeur à copier.
@@ -103,17 +94,6 @@ void move_after(File *suite, Element *element, Element *target);
 int scroll (File * suite, void *dest);
 
 /**
- * @brief Extrait le dernier élément de la file et retourne un pointeur direct vers sa valeur.
- *
- * Contrairement à `scroll`, ne copie pas la valeur : retourne le pointeur
- * interne. L'appelant ne doit pas libérer ce pointeur s'il appartient au cache.
- *
- * @param suite File source.
- * @return      Pointeur vers la valeur de l'élément extrait, ou NULL si vide.
- */
-void *scroll_cache(File * suite);
-
-/**
  * @brief Extrait et copie le dernier élément du tableau dynamique (mode LIFO).
  *
  * Décrémente la taille logique du tableau sans réallouer la mémoire.
@@ -136,11 +116,11 @@ int scroll_big_table(big_table *table, void *dest);
 void *scroll_big_table_cache(big_table *table);
 
 /**
- * @brief Supprime un élément de la file et libère sa mémoire si hors cache.
+ * @brief Supprime un élément de la file et libère sa mémoire.
  *
  * Recâble les pointeurs des voisins, met à jour `suite->start` / `suite->end`
- * si nécessaire, libère `element->value` et `element` s'ils ne sont pas dans le
- * bloc de cache pré-alloué, et décrémente `suite->size`.
+ * si nécessaire, libère `element->value` et `element`, et décrémente
+ * `suite->size`.
  *
  * @param suite   File contenant l'élément.
  * @param element Élément à supprimer.
