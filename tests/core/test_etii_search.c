@@ -61,7 +61,7 @@ TEST delegate_noop_below_threshold(void)
     max_stock_by_thread = 10;
 
     File db;
-    init_file_with_cache(&db, 0, sizeof(struct possibility_packet));
+    init_file(&db, sizeof(struct possibility_packet));
     struct possibility_packet pk;
     memset(&pk, 0, sizeof(pk));
     for (int i = 0; i < 3; i++) { pk.alloc = (uint16_t)i; put(&db, &pk); }
@@ -82,7 +82,7 @@ TEST delegate_moves_excess_to_local_pool(void)
     max_stock_by_thread = 2;
 
     File db;
-    init_file_with_cache(&db, 0, sizeof(struct possibility_packet));
+    init_file(&db, sizeof(struct possibility_packet));
     struct possibility_packet pk;
     memset(&pk, 0, sizeof(pk));
     for (int i = 0; i < 5; i++) { pk.alloc = (uint16_t)i; put(&db, &pk); }

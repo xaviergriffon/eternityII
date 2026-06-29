@@ -11,8 +11,6 @@
    on les déclare ici pour les exercer directement. */
 int  scroll_fifo(File *suite, void *dest);
 void extract_element(File *suite, Element *element);
-int  inside_cache(File *file, Element *element);
-long position_cache(File *file, Element *element);
 
 /* --------------------------------------------------------------------------
  * File (liste chaînée doublement liée, exploitée en LIFO par put/scroll)
@@ -22,7 +20,7 @@ long position_cache(File *file, Element *element);
 TEST file_put_then_scroll_is_lifo(void)
 {
     File f;
-    init_file_with_cache(&f, 0, sizeof(int)); /* sans cache : malloc/free purs */
+    init_file(&f, sizeof(int));
 
     int v;
     for (int i = 1; i <= 3; i++) {
@@ -45,7 +43,7 @@ TEST file_put_then_scroll_is_lifo(void)
 TEST file_scroll_on_empty_returns_zero(void)
 {
     File f;
-    init_file_with_cache(&f, 0, sizeof(int));
+    init_file(&f, sizeof(int));
 
     int v = 42;
     ASSERT_EQ_FMT(0, scroll(&f, &v), "%d");
@@ -53,33 +51,11 @@ TEST file_scroll_on_empty_returns_zero(void)
     PASS();
 }
 
-/* Avec un cache pré-alloué, les premiers éléments réutilisent le bloc, les
- * suivants sont alloués dynamiquement ; l'ordre LIFO doit rester correct
- * de part et d'autre de la frontière du cache. */
-TEST file_cache_mixes_preallocated_and_heap(void)
-{
-    File f;
-    init_file_with_cache(&f, 4, sizeof(int)); /* cache de 4, on en pousse 6 */
-
-    int v;
-    for (int i = 0; i < 6; i++) {
-        ASSERT_EQ_FMT(1, put(&f, &i), "%d");
-    }
-    ASSERT(f.size == 6);
-
-    for (int expected = 5; expected >= 0; expected--) {
-        ASSERT_EQ_FMT(1, scroll(&f, &v), "%d");
-        ASSERT_EQ_FMT(expected, v, "%d");
-    }
-    ASSERT_EQ_FMT(0, scroll(&f, &v), "%d");
-    PASS();
-}
-
 /* scroll_fifo dépile en tête => ordre FIFO (1, 2, 3 dans l'ordre d'insertion). */
 TEST file_scroll_fifo_is_fifo(void)
 {
     File f;
-    init_file_with_cache(&f, 0, sizeof(int));
+    init_file(&f, sizeof(int));
 
     for (int i = 1; i <= 3; i++) {
         put(&f, &i);
@@ -101,7 +77,7 @@ TEST file_scroll_fifo_is_fifo(void)
 TEST file_move_before_reorders(void)
 {
     File f;
-    init_file_with_cache(&f, 0, sizeof(int));
+    init_file(&f, sizeof(int));
     for (int i = 1; i <= 3; i++) put(&f, &i);
 
     Element *e1 = f.start;
@@ -119,7 +95,7 @@ TEST file_move_before_reorders(void)
 TEST file_move_after_reorders(void)
 {
     File f;
-    init_file_with_cache(&f, 0, sizeof(int));
+    init_file(&f, sizeof(int));
     for (int i = 1; i <= 3; i++) put(&f, &i);
 
     Element *e1 = f.start;
@@ -138,7 +114,7 @@ TEST file_move_after_reorders(void)
 TEST file_extract_element_detaches_middle(void)
 {
     File f;
-    init_file_with_cache(&f, 0, sizeof(int));
+    init_file(&f, sizeof(int));
     for (int i = 1; i <= 3; i++) put(&f, &i);
 
     Element *e1 = f.start;
@@ -162,48 +138,12 @@ TEST file_extract_element_detaches_middle(void)
     PASS();
 }
 
-/* inside_cache / position_cache : un élément du bloc pré-alloué est "dans le
-   cache" ; un élément alloué dynamiquement (au-delà du cache) ne l'est pas. */
-TEST file_inside_cache_distinguishes_cached_and_heap(void)
-{
-    File *f = malloc(sizeof(File));
-    init_file_with_cache(f, 4, sizeof(int)); /* cache de 4 */
-    for (int i = 0; i < 6; i++) put(f, &i);  /* 4 cache + 2 tas */
-
-    Element *cached = f->start;                      /* cacheElement[0] */
-    Element *heap   = f->start->next->next->next->next; /* 5e élément, hors cache */
-
-    ASSERT(inside_cache(f, cached));
-    ASSERT_FALSE(inside_cache(f, heap));
-    ASSERT_EQ_FMT(-1L, position_cache(f, heap), "%ld"); /* sentinelle hors cache */
-
-    free_file(f);
-    PASS();
-}
-
-/* scroll_cache renvoie un pointeur direct vers la valeur de l'élément dépilé
-   (LIFO), sans copie. Utilisé avec cache pour éviter la fuite du chemin tas. */
-TEST file_scroll_cache_returns_internal_pointer(void)
-{
-    File *f = malloc(sizeof(File));
-    init_file_with_cache(f, 3, sizeof(int));
-    for (int i = 10; i <= 30; i += 10) put(f, &i);
-
-    int *p = (int *)scroll_cache(f);
-    ASSERT(p != NULL);
-    ASSERT_EQ_FMT(30, *p, "%d"); /* dernier inséré */
-    ASSERT_EQ_FMT(2ULL, (unsigned long long)f->size, "%llu");
-
-    free_file(f);
-    PASS();
-}
-
-/* free_file libère une File allouée sur le tas (structure + cache + éléments).
+/* free_file libère une File allouée sur le tas (structure + éléments).
    On vérifie surtout l'absence de crash/fuite (probant sous AddressSanitizer). */
 TEST file_free_file_releases_heap_allocated_file(void)
 {
     File *f = malloc(sizeof(File));
-    init_file_with_cache(f, 2, sizeof(int)); /* cache + débordement tas */
+    init_file(f, sizeof(int));
     for (int i = 0; i < 5; i++) put(f, &i);
 
     free_file(f); /* doit tout libérer sans planter */
@@ -264,57 +204,10 @@ TEST big_table_scroll_cache_returns_internal_pointer(void)
 TEST file_put_rejects_zero_sizeofvalue(void)
 {
     File f;
-    init_file_with_cache(&f, 0, 0); /* sizeofvalue = 0 */
+    init_file(&f, 0); /* sizeofvalue = 0 */
     int x = 1;
     ASSERT_EQ_FMT(0, put(&f, &x), "%d");
     ASSERT_EQ_FMT(0ULL, (unsigned long long)f.size, "%llu");
-    PASS();
-}
-
-/* scroll_cache : NULL sur file vide, et remise à zéro de start/end au dernier élément. */
-TEST file_scroll_cache_empty_and_full_drain(void)
-{
-    File *f = malloc(sizeof(File));
-    init_file_with_cache(f, 2, sizeof(int));
-    ASSERT_EQ(NULL, scroll_cache(f)); /* vide d'emblée */
-
-    int a = 1, b = 2;
-    put(f, &a);
-    put(f, &b);
-    ASSERT(scroll_cache(f) != NULL);
-    ASSERT(scroll_cache(f) != NULL); /* dernier -> start/end remis à NULL */
-    ASSERT_EQ_FMT(0ULL, (unsigned long long)f->size, "%llu");
-    ASSERT_EQ(NULL, scroll_cache(f));
-
-    free_file(f);
-    PASS();
-}
-
-/* position_cache renvoie l'offset (>= 0) d'un élément appartenant au cache. */
-TEST file_position_cache_inside(void)
-{
-    File *f = malloc(sizeof(File));
-    init_file_with_cache(f, 4, sizeof(int));
-    int v = 7;
-    put(f, &v);
-    Element *cached = f->start; /* cacheElement[0] */
-    ASSERT(inside_cache(f, cached));
-    ASSERT(position_cache(f, cached) >= 0); /* dans le cache -> pas la sentinelle -1 */
-    free_file(f);
-    PASS();
-}
-
-/* scroll_fifo emprunte le chemin « cache » quand les éléments sont pré-alloués. */
-TEST file_scroll_fifo_with_cache(void)
-{
-    File f;
-    init_file_with_cache(&f, 4, sizeof(int));
-    for (int i = 1; i <= 3; i++) put(&f, &i);
-
-    int v;
-    ASSERT_EQ_FMT(1, scroll_fifo(&f, &v), "%d"); ASSERT_EQ_FMT(1, v, "%d");
-    ASSERT_EQ_FMT(1, scroll_fifo(&f, &v), "%d"); ASSERT_EQ_FMT(2, v, "%d");
-    ASSERT_EQ_FMT(1, scroll_fifo(&f, &v), "%d"); ASSERT_EQ_FMT(3, v, "%d");
     PASS();
 }
 
@@ -323,7 +216,7 @@ TEST file_scroll_fifo_with_cache(void)
 TEST file_move_targets_non_extremity(void)
 {
     File f;
-    init_file_with_cache(&f, 0, sizeof(int));
+    init_file(&f, sizeof(int));
     for (int i = 1; i <= 3; i++) put(&f, &i); /* [1,2,3] */
     Element *e2 = f.start->next;
     Element *e3 = f.end;
@@ -335,7 +228,7 @@ TEST file_move_targets_non_extremity(void)
     scroll_fifo(&f, &v); ASSERT_EQ_FMT(2, v, "%d");
 
     /* nouveau jeu pour move_after sur cible interne */
-    init_file_with_cache(&f, 0, sizeof(int));
+    init_file(&f, sizeof(int));
     for (int i = 1; i <= 3; i++) put(&f, &i); /* [1,2,3] */
     Element *e1 = f.start;
     Element *mid = f.start->next; /* e2, cible interne (next != NULL) */
@@ -346,38 +239,12 @@ TEST file_move_targets_non_extremity(void)
     PASS();
 }
 
-/* scroll_cache sur File sans cache (cacheSize=0) : tous les éléments sont alloués
-   dynamiquement ; scroll_cache doit libérer le wrapper + la valeur et retourner NULL,
-   et size doit descendre à 0 après extraction complète. */
-TEST file_scroll_cache_no_cache_frees_and_size_decrements(void)
-{
-    File f;
-    init_file_with_cache(&f, 0, sizeof(int)); /* pas de cache : malloc/free purs */
-
-    for (int i = 1; i <= 3; i++) {
-        ASSERT_EQ_FMT(1, put(&f, &i), "%d");
-    }
-    ASSERT_EQ_FMT(3ULL, (unsigned long long)f.size, "%llu");
-
-    /* Hors cache : scroll_cache libère la mémoire et retourne NULL. */
-    ASSERT_EQ(NULL, scroll_cache(&f));
-    ASSERT_EQ_FMT(2ULL, (unsigned long long)f.size, "%llu");
-    ASSERT_EQ(NULL, scroll_cache(&f));
-    ASSERT_EQ_FMT(1ULL, (unsigned long long)f.size, "%llu");
-    ASSERT_EQ(NULL, scroll_cache(&f));
-    ASSERT_EQ_FMT(0ULL, (unsigned long long)f.size, "%llu");
-    ASSERT_EQ(NULL, f.start);
-    ASSERT_EQ(NULL, f.end);
-
-    PASS();
-}
-
 /* file_remove_element supprime l'élément du milieu d'une File de 3 :
    size passe à 2, les voisins se relient correctement. */
 TEST file_remove_element_removes_middle(void)
 {
     File f;
-    init_file_with_cache(&f, 0, sizeof(int));
+    init_file(&f, sizeof(int));
     for (int i = 1; i <= 3; i++) put(&f, &i); /* [1,2,3] */
 
     Element *e1 = f.start;
@@ -413,22 +280,15 @@ SUITE(lifo_suite)
 {
     RUN_TEST(file_put_then_scroll_is_lifo);
     RUN_TEST(file_scroll_on_empty_returns_zero);
-    RUN_TEST(file_cache_mixes_preallocated_and_heap);
     RUN_TEST(file_scroll_fifo_is_fifo);
     RUN_TEST(file_move_before_reorders);
     RUN_TEST(file_move_after_reorders);
     RUN_TEST(file_extract_element_detaches_middle);
-    RUN_TEST(file_inside_cache_distinguishes_cached_and_heap);
-    RUN_TEST(file_scroll_cache_returns_internal_pointer);
     RUN_TEST(file_free_file_releases_heap_allocated_file);
     RUN_TEST(big_table_grows_and_preserves_values);
     RUN_TEST(big_table_scroll_cache_returns_internal_pointer);
     RUN_TEST(file_put_rejects_zero_sizeofvalue);
-    RUN_TEST(file_scroll_cache_empty_and_full_drain);
-    RUN_TEST(file_position_cache_inside);
-    RUN_TEST(file_scroll_fifo_with_cache);
     RUN_TEST(file_move_targets_non_extremity);
-    RUN_TEST(file_scroll_cache_no_cache_frees_and_size_decrements);
     RUN_TEST(big_table_free_big_table_heap);
     RUN_TEST(file_remove_element_removes_middle);
 }

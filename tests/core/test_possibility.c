@@ -829,7 +829,7 @@ TEST search_light_expands_one_per_candidate(void)
     fill_id_parts(idParts);
 
     File result;
-    init_file_with_cache(&result, 0, sizeof(struct possibility_packet));
+    init_file(&result, sizeof(struct possibility_packet));
 
     int max = search_possiblity_light(&result, &key, p, map, &rp, idParts);
     ASSERT_EQ_FMT(1, max, "%d");                 /* incAlloc = 0 + 1 */
@@ -866,7 +866,7 @@ TEST search_light_skips_prefilled_cell(void)
     fill_id_parts(idParts);
 
     File result;
-    init_file_with_cache(&result, 0, sizeof(struct possibility_packet));
+    init_file(&result, sizeof(struct possibility_packet));
 
     int max = search_possiblity_light(&result, &key, p, map, &rp, idParts);
     ASSERT_EQ_FMT(1, max, "%d");
@@ -1256,7 +1256,7 @@ TEST first_possibility_valid_injects_one_possibility(void)
 TEST put_possibility_returns_zero_on_bad_sizeofvalue(void)
 {
     File file;
-    init_file_with_cache(&file, 0, 0); /* sizeofvalue=0 → chemin malloc échoue */
+    init_file(&file, 0); /* sizeofvalue=0 → chemin malloc échoue */
     struct possibility_packet p;
     memset(&p, 0, sizeof(p));
     int ret = put_possibility(&file, &p);
@@ -1287,7 +1287,7 @@ TEST search_light_aborts_on_put_failure(void)
 
     /* sizeofvalue=0 → put_possibility retourne 0 au premier appel */
     File result;
-    init_file_with_cache(&result, 0, 0);
+    init_file(&result, 0);
 
     int max = search_possiblity_light(&result, &key, p, map, &rp, idParts);
     ASSERT_EQ_FMT(0, max, "%d");
