@@ -1271,6 +1271,62 @@ TEST check_files_reports_consistent_stock(void)
     PASS();
 }
 
+/* check_one_file : détecte chaque incohérence structurelle d'une File. Exposée
+ * exprès (non statique) car aucune API publique ne permet de corrompre les pools
+ * internes — on monte donc des File/Element à la main, sur la pile (la fonction
+ * ne fait que LIRE, elle ne libère rien). Les log_info sont mis en sourdine.
+ * Couvre les branches restées mortes : size==0+start/end résiduels, value NULL,
+ * chaîne plus longue que size, end/size désynchronisés, et le retour 0. */
+TEST check_one_file_flags_each_inconsistency(void)
+{
+    int dummy = 42; /* valeur non NULL pour les éléments « sains » */
+
+    silence_std();
+
+    /* (1) size==0 mais start != NULL (start résiduel). */
+    Element e1 = { .value = &dummy, .previous = NULL, .next = NULL };
+    File f1 = { .start = &e1, .end = NULL, .size = 0, .sizeofvalue = sizeof dummy };
+    int r1 = check_one_file(&f1, 0, "test");
+
+    /* (2) size==0 mais end != NULL (end résiduel). */
+    Element e2 = { .value = &dummy, .previous = NULL, .next = NULL };
+    File f2 = { .start = NULL, .end = &e2, .size = 0, .sizeofvalue = sizeof dummy };
+    int r2 = check_one_file(&f2, 1, "test");
+
+    /* (3) un élément unique dont value == NULL. */
+    Element e3 = { .value = NULL, .previous = NULL, .next = NULL };
+    File f3 = { .start = &e3, .end = &e3, .size = 1, .sizeofvalue = sizeof dummy };
+    int r3 = check_one_file(&f3, 2, "test");
+
+    /* (4) size annoncée (1) < longueur réelle (2) -> currElement non NULL en fin
+       de boucle (chaîne plus longue que size). */
+    Element a = { .value = &dummy, .previous = NULL, .next = NULL };
+    Element b = { .value = &dummy, .previous = &a,   .next = NULL };
+    a.next = &b;
+    File f4 = { .start = &a, .end = &b, .size = 1, .sizeofvalue = sizeof dummy };
+    int r4 = check_one_file(&f4, 3, "test");
+
+    /* (5) taille cohérente (1 élément) mais pointeur end faux -> mismatch end. */
+    Element c = { .value = &dummy, .previous = NULL, .next = NULL };
+    File f5 = { .start = &c, .end = NULL, .size = 1, .sizeofvalue = sizeof dummy };
+    int r5 = check_one_file(&f5, 4, "test");
+
+    /* (0) File parfaitement cohérente -> 0 (retour OK exercé directement). */
+    Element ok = { .value = &dummy, .previous = NULL, .next = NULL };
+    File f0 = { .start = &ok, .end = &ok, .size = 1, .sizeofvalue = sizeof dummy };
+    int r0 = check_one_file(&f0, 5, "test");
+
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, r1, "%d"); /* start résiduel             */
+    ASSERT_EQ_FMT(-1, r2, "%d"); /* end résiduel               */
+    ASSERT_EQ_FMT(-1, r3, "%d"); /* value NULL                 */
+    ASSERT_EQ_FMT(-1, r4, "%d"); /* chaîne > size              */
+    ASSERT_EQ_FMT(-1, r5, "%d"); /* end/size désynchronisés    */
+    ASSERT_EQ_FMT(0,  r0, "%d"); /* File cohérente             */
+    PASS();
+}
+
 /* check_datas : sur un stock vide, lit le CSV (présent à la racine du dépôt),
  * ne trouve aucune possibilité -> 0 erreur. */
 TEST check_datas_empty_stock_is_ok(void)
@@ -1475,6 +1531,7 @@ SUITE(datamanager_suite)
     RUN_TEST(connect_handshake_retry);
     RUN_TEST(connect_create_tcp_client_fails);
     RUN_TEST(check_files_reports_consistent_stock);
+    RUN_TEST(check_one_file_flags_each_inconsistency);
     RUN_TEST(check_datas_empty_stock_is_ok);
     RUN_TEST(check_datas_flags_invalid_packet);
     RUN_TEST(sort_descending_mthread_preserves_count);
