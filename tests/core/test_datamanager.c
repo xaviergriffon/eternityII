@@ -233,6 +233,35 @@ TEST restore_missing_file_returns_error(void)
     PASS();
 }
 
+/* Chemins d'erreur fopen de backup/import : un répertoire inexistant fait
+ * échouer fopen("w") (backup, backup_analysed), un fichier absent fait échouer
+ * fopen("r") (import, import_analysed, restore_analysed). Toutes retournent -1
+ * sans toucher au stock. On met stdout/stderr en sourdine (log_error + perror). */
+TEST backup_and_import_return_error_on_bad_path(void)
+{
+    drain_all();
+    const char *nodir = "/tmp/etii_nonexistent_dir_zzz_42/x.back";
+    const char *absent = "/tmp/etii_no_such_file_zzz_42";
+    unlink(absent); /* on s'assure qu'il n'existe pas */
+
+    silence_std();
+    int rb  = backup((char *)nodir);
+    int rba = backup_analysed((char *)nodir);
+    int ri  = import(NULL, (char *)absent);
+    int ria = import_analysed((char *)absent);
+    int rra = restore_analysed((char *)absent);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rb,  "%d"); /* backup : fopen("w") sur dir absent       */
+    ASSERT_EQ_FMT(-1, rba, "%d"); /* backup_analysed : idem                   */
+    ASSERT_EQ_FMT(-1, ri,  "%d"); /* import : fopen("r") sur fichier absent    */
+    ASSERT_EQ_FMT(-1, ria, "%d"); /* import_analysed : idem                    */
+    ASSERT_EQ_FMT(-1, rra, "%d"); /* restore_analysed : idem                   */
+
+    drain_all();
+    PASS();
+}
+
 /* --------------------------------------------------------------------------
  * split_datas / regroup_datas : redistribution puis consolidation
  * ------------------------------------------------------------------------ */
@@ -1451,6 +1480,7 @@ SUITE(datamanager_suite)
     RUN_TEST(search_min_datas_finds_minimum);
     RUN_TEST(backup_then_restore_preserves_count);
     RUN_TEST(restore_missing_file_returns_error);
+    RUN_TEST(backup_and_import_return_error_on_bad_path);
     RUN_TEST(split_then_regroup_preserves_count);
     RUN_TEST(checked_possibility_goes_to_checked_pool);
     RUN_TEST(analysed_add_and_restock);
