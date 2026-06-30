@@ -1,0 +1,16 @@
+# Configuration clangd (LSP/IDE).
+#
+# Le build (makefile + CMake) passe -Isrc à gcc pour que les includes
+# domaine-qualifiés comme #include "core/part.h" résolvent. clangd ne lit
+# pas le makefile : sans cette indication il ne trouve pas ces en-têtes et
+# signale des faux positifs « file not found » qui cascadent ensuite en
+# types/fonctions inconnus.
+#
+# On rejoue donc ici les mêmes flags que le build par défaut. -Itests permet
+# d'analyser aussi les fichiers de tests/ (greatest.h, fork_assert.h).
+#
+# Limite : clangd n'analyse qu'une seule config de préprocesseur. Le code
+# derrière #ifdef NCURSES / WITH_CUDA reste grisé tant qu'on n'ajoute pas le
+# -D correspondant ci-dessous (au prix de griser le chemin par défaut).
+CompileFlags:
+  Add: [-Isrc, -Itests, -std=gnu99]
