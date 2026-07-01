@@ -53,6 +53,19 @@ TEST levenshtein_is_symmetric(void)
     PASS();
 }
 
+/* Second opérande plus long que 62 caractères : borné à 62 (garde-fou anti
+   dépassement des buffers prev/cur[64]). Le 63e caractère est ignoré. */
+TEST levenshtein_clamps_long_operand(void)
+{
+    char longb[70];
+    memset(longb, 'b', 63);
+    longb[63] = '\0';
+    /* la=1 (>0 pour dépasser les retours anticipés), lb=63 -> ramené à 62 :
+       distance("a", 62×'b') = 1 substitution + 61 insertions = 62. */
+    ASSERT_EQ_FMT(62, levenshtein("a", longb), "%d");
+    PASS();
+}
+
 /* --------------------------------------------------------------------------
  * closest_command
  * ------------------------------------------------------------------------ */
@@ -103,14 +116,37 @@ TEST closest_command_threshold_scales_with_length(void)
     PASS();
 }
 
+/* Liste de candidats vide (n == 0) : la boucle ne s'exécute pas, `best` reste
+   NULL -> retour NULL sans jamais déréférencer les candidats. */
+TEST closest_command_empty_candidate_list_is_null(void)
+{
+    ASSERT_EQ(NULL, closest_command("backup", NULL, 0));
+    PASS();
+}
+
+/* Commande candidate très courte (len < 3) : le seuil len/3 vaut 0 et est
+   relevé à 1 (plancher). Une correspondance exacte reste donc suggérée. */
+TEST closest_command_short_command_threshold_floor(void)
+{
+    const char *const shortcmds[] = { "hi", "ok" };
+    /* strlen("hi")/3 == 0 -> plancher à 1 ; distance 0 <= 1 -> suggéré. */
+    const char *s = closest_command("hi", shortcmds, 2);
+    ASSERT(s != NULL);
+    ASSERT_STR_EQ("hi", s);
+    PASS();
+}
+
 SUITE(command_match_suite)
 {
     RUN_TEST(levenshtein_identical_is_zero);
     RUN_TEST(levenshtein_empty_operands);
     RUN_TEST(levenshtein_counts_single_edits);
     RUN_TEST(levenshtein_is_symmetric);
+    RUN_TEST(levenshtein_clamps_long_operand);
     RUN_TEST(closest_command_suggests_near_typo);
     RUN_TEST(closest_command_returns_null_when_too_far);
     RUN_TEST(closest_command_exact_match);
     RUN_TEST(closest_command_threshold_scales_with_length);
+    RUN_TEST(closest_command_empty_candidate_list_is_null);
+    RUN_TEST(closest_command_short_command_threshold_floor);
 }

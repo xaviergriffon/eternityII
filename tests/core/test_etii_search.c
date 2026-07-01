@@ -228,6 +228,39 @@ TEST bt_propagate_matches_full_recompute(void)
 }
 
 /*
+ * bt_propagate_place/undo aux COINS du plateau : sur (0,0) et (SIZE-1,SIZE-1),
+ * certaines gardes de voisinage (cx>0, cy>0, cx<SIZE-1, cy<SIZE-1) sont fausses
+ * — jamais prises par le test en case intérieure (1,1). On vérifie qu'un
+ * place+undo au coin retrouve exactement le cache du plateau vide (pas d'écriture
+ * hors bornes). Couvre les côtés « bord » des gardes de bt_propagate_place/undo.
+ */
+TEST bt_propagate_covers_border_guards(void)
+{
+    struct array_part *all = make_parts();
+    const int idx = 6;
+    int corners[2][2] = { { 0, 0 }, { ETERN_SIZE - 1, ETERN_SIZE - 1 } };
+
+    for (int i = 0; i < 2; i++) {
+        int cx = corners[i][0], cy = corners[i][1];
+
+        struct possibility_packet empty;
+        make_empty_board(&empty);
+        key_part Cempty[ETERN_SIZE][ETERN_SIZE];
+        bt_init_constraints(Cempty, &empty, all, ALL_FACE);
+
+        key_part C[ETERN_SIZE][ETERN_SIZE];
+        memcpy(C, Cempty, sizeof(C));
+        bt_propagate_place(C, cx, cy, &all->parts[idx]);
+        bt_propagate_undo(C, cx, cy, ALL_FACE);
+
+        for (int x = 0; x < ETERN_SIZE; x++)
+            for (int y = 0; y < ETERN_SIZE; y++)
+                ASSERT(key_eq(&C[x][y], &Cempty[x][y]));
+    }
+    PASS();
+}
+
+/*
  * bt_count_pending : compte, pour chaque niveau de la pile, les candidats
  * restants (indice >= next_s) dont la pièce est libre dans l'état « racine ».
  * Pile : niveau 0 = [1,2,3] pièce 1 posée (next_s=1) ; niveau 1 = [4,5] pièce 4
@@ -1015,6 +1048,7 @@ SUITE(etii_search_suite)
     RUN_TEST(delegate_big_table_moves_excess);
     RUN_TEST(bt_init_constraints_empty_board);
     RUN_TEST(bt_propagate_matches_full_recompute);
+    RUN_TEST(bt_propagate_covers_border_guards);
     RUN_TEST(bt_count_pending_counts_remaining_free);
 #if FORWARD_CHECK_K > 0
     RUN_TEST(bt_forward_check_detects_dead_cells);

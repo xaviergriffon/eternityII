@@ -112,6 +112,23 @@ TEST search_face_filters_by_position_and_value(void)
     ASSERT_EQ_FMT(0, none->size, "%d");
     free_array_part(none);
 
+    /* FACE_UNKNOW : accepte toute face non nulle à la position demandée. Les 3
+       pièces (hors bordure) ont top/right/bottom/left != 0 -> 3 à chaque position.
+       Couvre les sous-conditions `face == FACE_UNKNOW` des 4 positions. */
+    int positions[] = { PART_TOP, PART_RIGHT, PART_BOTTOM, PART_LEFT };
+    for (int i = 0; i < 4; i++) {
+        struct array_part *any = search_face(&a, FACE_UNKNOW, positions[i]);
+        ASSERT_EQ_FMT(3, any->size, "%d");
+        free_array_part(any);
+    }
+
+    /* PART_NONE : cherche la face sur N'IMPORTE quel bord. Avec une face absente
+       (99), chaque pièce échoue les 4 tests en cascade -> évalue la sous-condition
+       `position == PART_NONE` aux 4 positions. Aucune correspondance -> 0. */
+    struct array_part *none_pos = search_face(&a, 99, PART_NONE);
+    ASSERT_EQ_FMT(0, none_pos->size, "%d");
+    free_array_part(none_pos);
+
     PASS();
 }
 
@@ -318,6 +335,16 @@ TEST check_array_handles_valid_and_null(void)
 
     check_array(&a);
     check_array(NULL);
+
+    /* Pièce à l'id hors borne [0, 256] : déclenche la branche de signalement
+       (log + print_part), jusqu'ici jamais prise (toutes les fixtures sont valides). */
+    struct part bad[] = {
+        { .id = 0 },
+        { .id = 300, .top = 1, .right = 2, .bottom = 3, .left = 4 }, /* > 256 */
+        { .id = -5,  .top = 5, .right = 6, .bottom = 7, .left = 8 }, /* < 0   */
+    };
+    struct array_part b = { .size = 3, .parts = bad };
+    check_array(&b);
     PASS();
 }
 

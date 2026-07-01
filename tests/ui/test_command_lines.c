@@ -157,6 +157,20 @@ TEST do_command_line_limit_requires_arg(void)
     PASS();
 }
 
+/* Commande inconnue : les deux issues du diagnostic de typo. « bakup » est à
+   distance 1 de « backup » (<= seuil) -> branche AVEC suggestion (closest_command
+   != NULL) ; « zzzzzzzzz » n'est proche d'aucune commande -> branche SANS
+   suggestion. Les deux renvoient -1. */
+TEST do_command_line_unknown_command_typo_suggestion(void)
+{
+    char near[] = "bakup";      /* proche de "backup" -> suggestion émise */
+    ASSERT_EQ_FMT(-1, run_command_quiet(near), "%d");
+
+    char far[] = "zzzzzzzzz";   /* trop loin -> aucune suggestion */
+    ASSERT_EQ_FMT(-1, run_command_quiet(far), "%d");
+    PASS();
+}
+
 /* ==========================================================================
  * Interprètes adossés au datamanager : dispatchés via do_command_line() sur un
  * petit stock construit à la main. On vérifie le code retour et la préservation
@@ -426,6 +440,7 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_pruner_batch_requires_arg);
     RUN_TEST(do_command_line_limit_sets_global);
     RUN_TEST(do_command_line_limit_requires_arg);
+    RUN_TEST(do_command_line_unknown_command_typo_suggestion);
     RUN_TEST(do_command_line_sort_runs);
     RUN_TEST(do_command_line_sortdm_runs);
     RUN_TEST(do_command_line_split_regroup_runs);

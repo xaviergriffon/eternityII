@@ -1420,6 +1420,20 @@ TEST check_files_reports_consistent_stock(void)
     PASS();
 }
 
+/* file_size / file_checked_size / file_analysed_size : un index hors de
+   [0, NB_FILE_POSSIBILITY[ renvoie 0 (garde de borne, côté false jamais pris
+   par les autres tests qui n'utilisent que des index valides). */
+TEST file_size_accessors_reject_out_of_range(void)
+{
+    ASSERT_EQ_FMT(0ULL, file_size(-1), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_size(NB_FILE_POSSIBILITY), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_checked_size(-1), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_checked_size(999), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_analysed_size(-7), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_analysed_size(NB_FILE_POSSIBILITY), "%llu");
+    PASS();
+}
+
 /* check_one_file : détecte chaque incohérence structurelle d'une File. Exposée
  * exprès (non statique) car aucune API publique ne permet de corrompre les pools
  * internes — on monte donc des File/Element à la main, sur la pile (la fonction
@@ -1685,6 +1699,7 @@ SUITE(datamanager_suite)
     RUN_TEST(connect_handshake_retry);
     RUN_TEST(connect_create_tcp_client_fails);
     RUN_TEST(check_files_reports_consistent_stock);
+    RUN_TEST(file_size_accessors_reject_out_of_range);
     RUN_TEST(check_one_file_flags_each_inconsistency);
     RUN_TEST(check_datas_empty_stock_is_ok);
     RUN_TEST(check_datas_flags_invalid_packet);
