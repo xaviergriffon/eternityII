@@ -268,6 +268,20 @@ int check_duplicate(void);
 int statistic_datas(void);
 
 /**
+ * @brief Vérifie la cohérence structurelle d'une `File` (taille, chaînage, fin).
+ *
+ * Exposée (plutôt que `static`) pour être testable en isolation : aucune API
+ * publique ne permet de fabriquer une `File` incohérente via les pools internes,
+ * donc les tests construisent des `File`/`Element` à la main.
+ *
+ * @param file  File à contrôler.
+ * @param f     Indice de la file (pour les messages de log).
+ * @param label Nom du pool (« unchecked » / « checked ») pour les messages.
+ * @return      0 si cohérent, -1 sinon.
+ */
+int check_one_file(File *file, int f, const char *label);
+
+/**
  * @brief Vérifie l'intégrité d'une file individuelle de possibilités.
  * @param f Numéro de la file à vérifier.
  * @return  0 si OK, -1 si une incohérence est détectée.

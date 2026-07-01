@@ -2101,7 +2101,7 @@ void *sort_d_mono(void *f)
  * @param label Nom du pool (« unchecked » / « checked ») pour les messages.
  * @return      0 si cohérent, -1 sinon.
  */
-static int check_one_file(File *file, int f, const char *label)
+int check_one_file(File *file, int f, const char *label)
 {
 	int result = 0;
 
