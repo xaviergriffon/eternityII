@@ -150,6 +150,24 @@ TEST read_parts_bad_header_exits(void)
     PASS();
 }
 
+/*
+ * Régression : sur un fichier vide, fscanf("ntiles: %d", ...) renvoie EOF (-1),
+ * une valeur vraie en C. L'ancien `if (fscanf(...))` prenait donc la branche de
+ * succès avec np non initialisé par fscanf, produisant silencieusement un
+ * puzzle 0-pièce au lieu de l'erreur attendue. Le correctif teste explicitement
+ * `== 1`.
+ */
+TEST read_parts_empty_file_exits(void)
+{
+    const char *p = write_temp_csv("");
+    ASSERT(p != NULL);
+    strcpy(g_csv_path, p);
+    int code = run_in_fork(child_read_parts, NULL);
+    unlink(g_csv_path);
+    ASSERT_EQ_FMT(EXIT_FAILURE, code, "%d");
+    PASS();
+}
+
 TEST read_parts_malformed_line_exits(void)
 {
     const char *p = write_temp_csv("ntiles: 2\n1 10 20 30 40\nGARBAGE\n");
@@ -286,6 +304,7 @@ SUITE(readdata_suite)
     RUN_TEST(read_parts_reads_exactly_ntiles);
     RUN_TEST(read_parts_missing_file_exits);
     RUN_TEST(read_parts_bad_header_exits);
+    RUN_TEST(read_parts_empty_file_exits);
     RUN_TEST(read_parts_malformed_line_exits);
     RUN_TEST(read_parts_too_many_pieces_exits);
     RUN_TEST(read_parts_too_few_pieces_exits);

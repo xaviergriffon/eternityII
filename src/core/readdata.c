@@ -33,7 +33,7 @@ struct array_part *read_parts(const char *file)
 		exit(EXIT_FAILURE);
 	}
 	
-	if (fscanf(f, "ntiles: %d", &np))
+	if (fscanf(f, "ntiles: %d", &np) == 1)
 	{
 		log_info("ntiles:%i\n",np);
 	} else
