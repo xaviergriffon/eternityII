@@ -109,6 +109,30 @@ TEST file_move_after_reorders(void)
     PASS();
 }
 
+/* move_before / move_after ignorent un argument NULL (element ou target) :
+   la liste reste inchangée. Couvre la garde `element != NULL && target != NULL`. */
+TEST file_move_ignores_null_args(void)
+{
+    File f;
+    init_file(&f, sizeof(int));
+    for (int i = 1; i <= 3; i++) put(&f, &i);
+    Element *e1 = f.start;
+    Element *e3 = f.end;
+
+    /* Chaque appel avec un NULL doit être un no-op. */
+    move_before(&f, NULL, e1);
+    move_before(&f, e3, NULL);
+    move_after(&f, NULL, e1);
+    move_after(&f, e3, NULL);
+
+    /* Ordre initial [1,2,3] préservé. */
+    int v;
+    scroll_fifo(&f, &v); ASSERT_EQ_FMT(1, v, "%d");
+    scroll_fifo(&f, &v); ASSERT_EQ_FMT(2, v, "%d");
+    scroll_fifo(&f, &v); ASSERT_EQ_FMT(3, v, "%d");
+    PASS();
+}
+
 /* extract_element détache l'élément du milieu : les voisins se relient,
    start/end restent corrects. (extract ne décrémente pas size : nettoyage manuel.) */
 TEST file_extract_element_detaches_middle(void)
@@ -283,6 +307,7 @@ SUITE(lifo_suite)
     RUN_TEST(file_scroll_fifo_is_fifo);
     RUN_TEST(file_move_before_reorders);
     RUN_TEST(file_move_after_reorders);
+    RUN_TEST(file_move_ignores_null_args);
     RUN_TEST(file_extract_element_detaches_middle);
     RUN_TEST(file_free_file_releases_heap_allocated_file);
     RUN_TEST(big_table_grows_and_preserves_values);

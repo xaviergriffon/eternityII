@@ -771,6 +771,46 @@ TEST what_search_to_key_uses_neighbor_faces_when_present(void)
     PASS();
 }
 
+/* what_search_to_key : bords RIGHT/BOTTOM hors plateau + voisins BAS/DROITE
+ * *présents*. Le test Tier A couvrait TOP/LEFT ; restaient les branches
+ * `xp >= ETERN_SIZE` (RIGHT bord), `yp >= ETERN_SIZE` (BOTTOM bord) et le voisin
+ * BAS posé (partId >= 0). On combine deux évaluations sur le même paquet. */
+TEST what_search_to_key_right_bottom_edges_and_present(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 1, .right = 2, .bottom = 3, .left = 4 }, /* voisin BAS   -> k3 = top   = 1 */
+        { .id = 2, .top = 5, .right = 6, .bottom = 7, .left = 8 }, /* voisin DROITE -> k2 = left  = 8 */
+    };
+    struct array_part rp = { .size = 3, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+
+    key_part k;
+    const int8_t all_face = 7;
+
+    /* (1) coin bas-droit : RIGHT et BOTTOM hors plateau -> k2 = k3 = 0. */
+    p->x = ETERN_SIZE - 1;
+    p->y = ETERN_SIZE - 1;
+    what_search_to_key(&rp, p, &k, all_face);
+    ASSERT_EQ_FMT(0, (int)k.k2, "%d"); /* RIGHT  hors plateau (xp >= SIZE) */
+    ASSERT_EQ_FMT(0, (int)k.k3, "%d"); /* BOTTOM hors plateau (yp >= SIZE) */
+
+    /* (2) case (1,1) avec voisins DROITE et BAS posés (branche partId >= 0). */
+    p->x = 1;
+    p->y = 1;
+    p->grid[2][1] = 2; /* RIGHT présent : grid[x+1][y] */
+    p->grid[1][2] = 1; /* BOTTOM présent : grid[x][y+1] */
+    what_search_to_key(&rp, p, &k, all_face);
+    ASSERT_EQ_FMT(8, (int)k.k2, "%d"); /* RIGHT présent  -> parts[2].left */
+    ASSERT_EQ_FMT(1, (int)k.k3, "%d"); /* BOTTOM présent -> parts[1].top  */
+
+    free(p);
+    PASS();
+}
+
 /* what_search_in_grid_to_key : même chose pour une case (x,y) arbitraire. */
 TEST what_search_in_grid_to_key_arbitrary_cell(void)
 {
@@ -1380,6 +1420,7 @@ SUITE(possibility_suite)
     RUN_TEST(what_search_interior_empty_neighbors);
     RUN_TEST(what_search_to_key_uses_all_face_for_empty);
     RUN_TEST(what_search_to_key_uses_neighbor_faces_when_present);
+    RUN_TEST(what_search_to_key_right_bottom_edges_and_present);
     RUN_TEST(what_search_in_grid_to_key_arbitrary_cell);
     RUN_TEST(possibility_has_a_next_finds_and_excludes_used);
     RUN_TEST(search_light_expands_one_per_candidate);
