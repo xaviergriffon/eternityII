@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <pthread.h>
 
 extern unsigned long long *fileUpdates;   /* global défini dans etii_server.c */
 
@@ -466,8 +467,58 @@ TEST step_add_stores_possibility(void)
     PASS();
 }
 
-/* INST_GET sur stock vide : INST_NULL renvoyé, on continue. */
-TEST step_get_empty_sends_null(void)
+/* Écrivain du test fragmenté : envoie le paquet en 2 send() séparés par un
+ * usleep, pour que le serveur lise d'abord un fragment incomplet. */
+struct frag_writer_arg { int fd; struct possibility_packet pkt; };
+static void *frag_writer(void *arg)
+{
+    struct frag_writer_arg *a = arg;
+    const size_t cut = 200;                          /* coupe en plein paquet */
+    send(a->fd, &a->pkt, cut, 0);
+    usleep(50000);                    /* laisse le serveur consommer le fragment */
+    send(a->fd, (const char *)&a->pkt + cut, sizeof a->pkt - cut, 0);
+    return NULL;
+}
+
+/* INST_ADD : la possibilité arrive en deux fragments TCP — recv_all doit la
+ * réassembler (échouait avant VERSION 7 : le recv() brut prenait le 1er
+ * fragment pour la réception complète → INST_ERROR + flux désynchronisé). */
+TEST step_add_reassembles_fragmented_packet(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    struct frag_writer_arg wa;
+    wa.fd = sv[1];
+    memset(&wa.pkt, 0, sizeof wa.pkt);
+    wa.pkt.alloc = 6;
+    pthread_t writer;
+    ASSERT_EQ(0, pthread_create(&writer, NULL, frag_writer, &wa));
+
+    int cont = communicate_with_client_step(&client, INST_ADD, &last, &vsupp);
+    pthread_join(writer, NULL);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT((int)INST_CONSIDERED, (int)recv_instruction(sv[1]), "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    unwire_counters();
+    dm_drain_all();
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_GET sur stock vide : compte K == 0 renvoyé (trame VERSION 7), on continue. */
+TEST step_get_empty_sends_zero_count(void)
 {
     dm_drain_all();
     wire_counters();
@@ -484,7 +535,9 @@ TEST step_get_empty_sends_null(void)
     int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp);
 
     ASSERT_EQ_FMT(1, cont, "%d");
-    ASSERT_EQ_FMT((int)INST_NULL, (int)recv_instruction(sv[1]), "%d");
+    int32_t k = -1;
+    ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
+    ASSERT_EQ_FMT(0, (int)k, "%d");
 
     unwire_counters();
     if (last) free_array_possibility_packet(last);  /* tableau vide alloué par get_last_possibility */
@@ -521,6 +574,10 @@ TEST step_get_serves_possibility(void)
     int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp);
     ASSERT_EQ_FMT(1, cont, "%d");
 
+    /* Trame VERSION 7 : compte K puis le bloc de K paquets. */
+    int32_t k = 0;
+    ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
+    ASSERT_EQ_FMT(1, (int)k, "%d");
     struct possibility_packet got;
     memset(&got, 0, sizeof got);
     ASSERT_EQ((long)sizeof got, recv_all(sv[1], &got, sizeof got));
@@ -563,8 +620,8 @@ TEST step_possibility_analysed_acks(void)
     PASS();
 }
 
-/* INST_GET_TO_CHECK (pruner, unité) sur pool « à vérifier » vide : INST_NULL. */
-TEST step_get_to_check_empty_sends_null(void)
+/* INST_GET_TO_CHECK (pruner, unité) sur pool « à vérifier » vide : K == 0. */
+TEST step_get_to_check_empty_sends_zero_count(void)
 {
     dm_drain_all();
     wire_counters();
@@ -581,7 +638,9 @@ TEST step_get_to_check_empty_sends_null(void)
     int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK, &last, &vsupp);
 
     ASSERT_EQ_FMT(1, cont, "%d");
-    ASSERT_EQ_FMT((int)INST_NULL, (int)recv_instruction(sv[1]), "%d");
+    int32_t k = -1;
+    ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
+    ASSERT_EQ_FMT(0, (int)k, "%d");
 
     unwire_counters();
     if (last) free_array_possibility_packet(last);
@@ -771,10 +830,11 @@ SUITE(etii_server_suite)
     RUN_TEST(step_check_version_ok);
     RUN_TEST(step_unknown_instruction_stops);
     RUN_TEST(step_add_stores_possibility);
-    RUN_TEST(step_get_empty_sends_null);
+    RUN_TEST(step_add_reassembles_fragmented_packet);
+    RUN_TEST(step_get_empty_sends_zero_count);
     RUN_TEST(step_get_serves_possibility);
     RUN_TEST(step_possibility_analysed_acks);
-    RUN_TEST(step_get_to_check_empty_sends_null);
+    RUN_TEST(step_get_to_check_empty_sends_zero_count);
     RUN_TEST(step_get_to_check_batch_empty_returns_zero);
     RUN_TEST(step_analysed_batch_acks);
     RUN_TEST(step_analysed_batch_out_of_bounds_stops);

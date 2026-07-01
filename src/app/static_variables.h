@@ -7,7 +7,10 @@
 #include <sys/un.h>
 #include "app/etii_statistic.h"
 
-#define VERSION 6
+// v7 : réponse GET unitaire cadrée (int32 K + K paquets, send_all/recv_all)
+// au lieu du send()/recv() brut discriminé par la longueur (INST_NULL 1 octet
+// vs paquet ~520 octets) — une lecture TCP partielle désynchronisait le flux.
+#define VERSION 7
 
 #define NB_CONNECTIONS_PER_THREAD 1
 // Temps d'attente de 100 microsecondes

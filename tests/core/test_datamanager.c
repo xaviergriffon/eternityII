@@ -752,9 +752,9 @@ static void recv_exact_sv(int fd, void *buf, size_t len)
     }
 }
 
-/* Mini-serveur scroll_from_server — renvoie un paquet :
+/* Mini-serveur scroll_from_server — renvoie un paquet (trame VERSION 7) :
  *   1. is_connected
- *   2. recv INST_GET → send possibility_packet
+ *   2. recv INST_GET → send int32 K=1 + possibility_packet
  */
 static void *mini_srv_get_packet(void *arg)
 {
@@ -764,6 +764,8 @@ static void *mini_srv_get_packet(void *arg)
     b = INST_TEST_CONNECTED;
     send(fd, &b, 1, 0);
     recv(fd, &b, 1, 0);                              /* INST_GET */
+    int32_t k = 1;
+    send(fd, &k, sizeof k, 0);
     struct possibility_packet pkt;
     memset(&pkt, 0, sizeof pkt);
     pkt.alloc = 7;
@@ -772,11 +774,11 @@ static void *mini_srv_get_packet(void *arg)
     return NULL;
 }
 
-/* Mini-serveur scroll_from_server — aucune possibilité (INST_NULL) :
+/* Mini-serveur scroll_from_server — aucune possibilité (compte K=0) :
  *   1. is_connected
- *   2. recv INST_GET → send INST_NULL (1 octet)
+ *   2. recv INST_GET → send int32 K=0
  */
-static void *mini_srv_get_null(void *arg)
+static void *mini_srv_get_empty(void *arg)
 {
     int fd = *(int *)arg;
     int8_t b;
@@ -784,8 +786,35 @@ static void *mini_srv_get_null(void *arg)
     b = INST_TEST_CONNECTED;
     send(fd, &b, 1, 0);
     recv(fd, &b, 1, 0);                              /* INST_GET */
-    b = INST_NULL;
+    int32_t k = 0;
+    send(fd, &k, sizeof k, 0);
+    close(fd);
+    return NULL;
+}
+
+/* Mini-serveur scroll_from_server — paquet envoyé en DEUX fragments TCP :
+ *   1. is_connected
+ *   2. recv INST_GET → send int32 K=1, puis le paquet en 2 send() séparés
+ *      par un usleep (le client lit le 1er fragment seul).
+ * Avant la trame VERSION 7, le client prenait le 1er fragment pour un paquet
+ * complet (garbage dans le stock) et se désynchronisait sur le reste. */
+static void *mini_srv_get_fragmented(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
     send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_GET */
+    int32_t k = 1;
+    send(fd, &k, sizeof k, 0);
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 9;
+    const size_t cut = 200;                          /* coupe en plein paquet */
+    send(fd, &pkt, cut, 0);
+    usleep(50000);                     /* laisse le client consommer le fragment */
+    send(fd, (const char *)&pkt + cut, sizeof pkt - cut, 0);
     close(fd);
     return NULL;
 }
@@ -1025,8 +1054,8 @@ TEST scroll_from_server_returns_packet(void)
     PASS();
 }
 
-/* scroll_from_server : le serveur répond INST_NULL (stock vide côté serveur). */
-TEST scroll_from_server_returns_null(void)
+/* scroll_from_server : le serveur répond K=0 (stock vide côté serveur). */
+TEST scroll_from_server_returns_empty(void)
 {
     drain_datamanager();
 
@@ -1034,7 +1063,7 @@ TEST scroll_from_server_returns_null(void)
     ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
 
     pthread_t srv;
-    pthread_create(&srv, NULL, mini_srv_get_null, &fds[1]);
+    pthread_create(&srv, NULL, mini_srv_get_empty, &fds[1]);
 
     client_possibility_t cp;
     init_cp_with_socket(&cp, fds[0]);
@@ -1046,6 +1075,40 @@ TEST scroll_from_server_returns_null(void)
 
     ASSERT(r != NULL);
     ASSERT_EQ_FMT(0, r->size, "%d"); /* serveur n'a rien donné */
+    free_array_possibility_packet(r);
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* scroll_from_server : le paquet arrive en deux fragments TCP — recv_all doit
+ * le réassembler (échouait avant la trame VERSION 7 : le 1er fragment était
+ * pris pour un paquet complet, alloc était du garbage). */
+TEST scroll_from_server_reassembles_fragmented_packet(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_get_fragmented, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    silence_std();
+    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    restore_std();
+
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(1, r->size, "%d");
+    ASSERT_EQ_FMT(9, (int)r->possibilities[0].alloc, "%d");
     free_array_possibility_packet(r);
 
     pthread_join(srv, NULL);
@@ -1913,7 +1976,8 @@ SUITE(datamanager_suite)
     RUN_TEST(remove_no_next_prunes_dead_packets);
     RUN_TEST(remove_no_next_handles_complete_solution);
     RUN_TEST(scroll_from_server_returns_packet);
-    RUN_TEST(scroll_from_server_returns_null);
+    RUN_TEST(scroll_from_server_returns_empty);
+    RUN_TEST(scroll_from_server_reassembles_fragmented_packet);
     RUN_TEST(scroll_from_server_pruner_batch_receives_all);
     RUN_TEST(scroll_from_server_pruner_batch_clamps_k_to_requested);
     RUN_TEST(scroll_from_server_pruner_batch_empty);

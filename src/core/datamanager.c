@@ -187,8 +187,11 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
          */
 		send_instruction(socket_id, INST_ADD);
 		struct possibility_packet *possibility = &possibilities->possibilities[t];
-		long result = send(socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
-		if (result <= 0) {
+		// send_all : un send() brut pouvait n'écrire qu'une partie du paquet
+		// et désynchroniser le flux (le serveur relisait la fin du paquet
+		// comme des instructions).
+		long result = send_all(socket_id, possibility, sizeof(struct possibility_packet));
+		if (result != (long)sizeof(struct possibility_packet)) {
 			log_errno("problème put_to_server send => ");
 			/* L'envoi a échoué : on sort et on remet t..fin en local */
 			connection_lost = 1;
@@ -886,21 +889,40 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 
 	File file;
 	init_file(&file, sizeof(struct possibility_packet));
-	
+
 	struct possibility_packet buffer;
 	int r;
-	for(r=0; r < max_result;r++){
+	int connection_ok = 1;
+	for(r=0; r < max_result && connection_ok; r++){
 		send_instruction(socket_id, INST_GET);
-		long recv_r = recv(socket_id, &buffer, sizeof(buffer), 0);
-		if(recv_r == 0 || (recv_r == sizeof(int8_t) && (*(int8_t *)&buffer) == INST_NULL))
+		// Réponse cadrée (VERSION 7) : compte K puis, si K > 0, K paquets.
+		// recv_all réassemble les lectures partielles — l'ancien recv() brut
+		// discriminait la réponse par sa longueur (1 octet = INST_NULL,
+		// sizeof(paquet) = possibilité) et prenait une lecture TCP partielle
+		// pour un paquet valide, en désynchronisant tout le flux.
+		int32_t k = 0;
+		if (recv_all(socket_id, &k, sizeof(k)) != (long)sizeof(k)) {
+			log_errno("Error when receive possibility count => ");
+			connection_ok = 0;
+			break;
+		}
+		if (k < 0 || k > PRUNER_BATCH_MAX) {
+			log_error("GET : compte de possibilités aberrant (%d)\n", k);
+			break;
+		}
+		if (k == 0)
 		{
 #ifdef DEBUG_SOCKET
 			log_info("No possibility recept\n");
 #endif // DEBUG_SOCKET
-		} else if (recv_r < 0) {
-			log_errno("Error when receive possibility => ");
-		}else
-		{
+			continue;
+		}
+		for (int32_t i = 0; i < k && connection_ok; i++) {
+			if (recv_all(socket_id, &buffer, sizeof(buffer)) != (long)sizeof(buffer)) {
+				log_error("GET : possibilité incomplète (paquet %d/%d)\n", i + 1, k);
+				connection_ok = 0;
+				break;
+			}
 #ifdef DEBUG_CHECK_POSSIBILITY
             int analyse = check_possibility(&buffer, client_possibility->all_rotate_part);
             if (analyse < 0)
