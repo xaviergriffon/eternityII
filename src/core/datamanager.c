@@ -888,11 +888,9 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 	init_file(&file, sizeof(struct possibility_packet));
 	
 	struct possibility_packet buffer;
-	// Un client pruner demande des possibilités non vérifiées
-	int8_t get_instruction = pruner_mode ? INST_GET_TO_CHECK : INST_GET;
 	int r;
 	for(r=0; r < max_result;r++){
-		send_instruction(socket_id, get_instruction);
+		send_instruction(socket_id, INST_GET);
 		long recv_r = recv(socket_id, &buffer, sizeof(buffer), 0);
 		if(recv_r == 0 || (recv_r == sizeof(int8_t) && (*(int8_t *)&buffer) == INST_NULL))
 		{
@@ -1534,11 +1532,8 @@ static unsigned long long regroup_pool_nolock(file_possibility_t *pool)
 		while (pool[fp].file.size > 0) {
 
 			scroll(&pool[fp].file,packet);
-			if(packet!=NULL)
-			{
-				put(&pool[0].file, packet);
-				size++;
-			}
+			put(&pool[0].file, packet);
+			size++;
 
 		}
 
