@@ -375,7 +375,7 @@ coverage-report: coverage
 		--html-details $(COV_HTML)/index.html \
 		--json-summary $(COV_JSON) \
 		--markdown $(COV_MD) --markdown-title "Couverture de code"
-	@python3 $(COV_BY_DOMAIN) $(COV_JSON) $(COV_MD)
+	@python3 $(COV_BY_DOMAIN) $(COV_JSON) $(COV_MD) $(COV_XML)
 	@echo "Cobertura : $(COV_XML)"
 	@echo "HTML      : $(COV_HTML)/index.html"
 	@echo "Markdown  : $(COV_MD)  (avec section par domaine)"
