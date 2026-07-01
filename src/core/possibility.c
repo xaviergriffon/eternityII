@@ -1044,23 +1044,31 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
  */
 int check_possibility(struct possibility_packet *packet, struct array_part *rotateParts)
 {
+    /* Allocations locales, uniquement quand rotateParts n'est pas fourni par
+       l'appelant : elles doivent être libérées sur TOUS les chemins de sortie
+       (voir label cleanup), sans quoi chaque appel avec rotateParts == NULL
+       fuit `apart` et le `rotateParts` reconstruit. */
+    struct array_part *local_apart = NULL;
+    struct array_part *local_rotate = NULL;
+    int result;
+
     if (rotateParts == NULL) {
-        struct array_part *apart= read_parts(parts_files);
-        
-        rotateParts = rotate_all_parts(apart);
+        local_apart = read_parts(parts_files);
+        local_rotate = rotate_all_parts(local_apart);
+        rotateParts = local_rotate;
     }
-    
-	if(packet == NULL) return -1;
-	
+
+	if(packet == NULL) { result = -1; goto cleanup; }
+
 	/* x et y sont des uint8_t : les tests « < 0 » seraient toujours faux
 	   (type non signé) — GCC les signale via -Wtype-limits. */
-	if(packet->x >= ETERN_SIZE || packet->y >= ETERN_SIZE) return -2;
-	
+	if(packet->x >= ETERN_SIZE || packet->y >= ETERN_SIZE) { result = -2; goto cleanup; }
+
 	//if(packet->direcory < DIR_UP || packet->direcory > DIR_LEFT) return -3;
-	
+
 	// alloc = 0 est l'état genèse (aucune case du parcours encore traitée)
-	if(packet->alloc > ETERN_PARTS) return -4;
-	
+	if(packet->alloc > ETERN_PARTS) { result = -4; goto cleanup; }
+
 	int i;
 	int faceused= 0;
 	for(i = 0; i < ETERN_PARTS;i++)
@@ -1073,27 +1081,30 @@ int check_possibility(struct possibility_packet *packet, struct array_part *rota
     // peu être différent à cause de possibility_all_has_a_next qui alloue où il n'y a qu'une possibilité
     // mais ne change pas alloc pour poursuivre la recherche
     if(faceused < packet->alloc) {
-        return -5;
+        result = -5;
+        goto cleanup;
     }
-	
+
 #if ETERN_PARTS == 256
     if (packet->grid[7][8] != id_for_rotated_part(139, 2)) {
-        return -6;
+        result = -6;
+        goto cleanup;
     }
 #endif // ETERN_PARTS == 256
-    
+
     // map_big_array *map_parts = prepare_map_part(rotateParts);
-    
+
     // Controle que les pieces correspondent à leur "entourage"
     for (int p = 0; p < packet->alloc; p++) {
         uint8_t x = dirx[p];
         uint8_t y = diry[p];
         int16_t gridValue = packet->grid[x][y];
         if (gridValue < 0 || gridValue >= rotateParts->size) {
-            return -7;
+            result = -7;
+            goto cleanup;
         }
         struct part partXY = rotateParts->parts[gridValue];
-        
+
         int8_t top = 0;
         // TOP
         if (y -1 >= 0)
@@ -1105,9 +1116,10 @@ int check_possibility(struct possibility_packet *packet, struct array_part *rota
             }
         }
         if (top != -1 && partXY.top != top) {
-            return -9;
+            result = -9;
+            goto cleanup;
         }
-        
+
         // RIGHT
         int8_t right = 0;
         if (x + 1 < ETERN_SIZE)
@@ -1119,9 +1131,10 @@ int check_possibility(struct possibility_packet *packet, struct array_part *rota
             }
         }
         if (right != -1 && partXY.right != right) {
-            return -9;
+            result = -9;
+            goto cleanup;
         }
-        
+
         // BOTTOM
         int8_t bottom = 0;
         if (y + 1 < ETERN_SIZE)
@@ -1133,9 +1146,10 @@ int check_possibility(struct possibility_packet *packet, struct array_part *rota
             }
         }
         if (bottom != -1 && partXY.bottom != bottom) {
-            return -9;
+            result = -9;
+            goto cleanup;
         }
-        
+
         // LEFT
         int8_t left = 0;
         if (x - 1 >= 0)
@@ -1147,11 +1161,21 @@ int check_possibility(struct possibility_packet *packet, struct array_part *rota
             }
         }
         if (left != -1 && partXY.left != left) {
-            return -9;
+            result = -9;
+            goto cleanup;
         }
     }
 
-	return 0;
+	result = 0;
+
+cleanup:
+    if (local_rotate != NULL) {
+        free_array_part(local_rotate);
+    }
+    if (local_apart != NULL) {
+        free_array_part(local_apart);
+    }
+    return result;
 }
 
 /**
