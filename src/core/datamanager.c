@@ -1818,8 +1818,10 @@ int statistic_datas(void)
     lock_all_file();
     int count=0;
     int fp;
-    int countSize[ETERN_PARTS];
-    for (int i = 0; i < ETERN_PARTS; i++) {
+    // +1 : alloc peut valoir ETERN_PARTS (plateau complet, ex. import d'un .back
+    // complet où normalize_possibility_packet ne réduit pas alloc faute de trou).
+    int countSize[ETERN_PARTS + 1];
+    for (int i = 0; i <= ETERN_PARTS; i++) {
         countSize[i] = 0;
     }
     for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
@@ -1845,9 +1847,9 @@ int statistic_datas(void)
     unlock_all_file();
 
     log_info("check_datas analyses:%i\n",count);
-    for (int i = 0; i < ETERN_PARTS; i++) {
+    for (int i = 0; i <= ETERN_PARTS; i++) {
         log_info("%i : %i\n", i, countSize[i]);
-        
+
         countSize[i] = 0;
     }
     return 0;

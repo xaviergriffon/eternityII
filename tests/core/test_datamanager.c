@@ -411,6 +411,26 @@ TEST statistic_and_print_run(void)
     PASS();
 }
 
+/* Non-régression : alloc == ETERN_PARTS (plateau complet, atteignable via import
+ * d'un .back complet où normalize_possibility_packet ne réduit pas alloc faute de
+ * trou) ne doit pas écrire hors bornes dans countSize[]. Surtout probant sous
+ * AddressSanitizer (make ASAN=1 ou équivalent), qui détecte l'écriture hors tableau
+ * même quand elle ne provoque pas de crash observable en build normal. */
+TEST statistic_datas_handles_full_board_alloc(void)
+{
+    drain_all();
+    int allocs[] = { ETERN_PARTS };
+    add_packets(allocs, 1);
+
+    silence_std();
+    int rc = statistic_datas();
+    restore_std();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    drain_all();
+    PASS();
+}
+
 /* --------------------------------------------------------------------------
  * count_combinations : nombre de paires (x*(x-1)/2)
  * ------------------------------------------------------------------------ */
@@ -1677,6 +1697,7 @@ SUITE(datamanager_suite)
     RUN_TEST(analysed_backup_restore_round_trip);
     RUN_TEST(sort_preserves_count);
     RUN_TEST(statistic_and_print_run);
+    RUN_TEST(statistic_datas_handles_full_board_alloc);
     RUN_TEST(count_combinations_is_triangular);
     RUN_TEST(get_tocheck_drains_unchecked_pool);
     RUN_TEST(remove_analysed_finds_then_misses);
