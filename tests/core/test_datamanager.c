@@ -371,6 +371,49 @@ TEST analysed_backup_restore_round_trip(void)
     PASS();
 }
 
+/* restore_analysed vide totalement chaque file avant de réimporter : un paquet
+ * présent avant restore mais absent de la sauvegarde ne doit plus être trouvable
+ * ensuite (garde-fou contre une éventuelle entrée d'index restée pendante après
+ * le vidage massif). */
+TEST analysed_restore_clears_untracked_packet(void)
+{
+    drain_all();
+    struct possibility_packet backed_up;
+    memset(&backed_up, 0, sizeof(backed_up));
+    backed_up.alloc = 9;
+    add_possibility_analysed(&backed_up, 1);
+
+    char path[] = "/tmp/etii_back_an2_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    silence_std();
+    ASSERT_EQ_FMT(0, backup_analysed(path), "%d");
+    restore_std();
+
+    /* Paquet supplémentaire, jamais sauvegardé, ajouté dans la même file. */
+    struct possibility_packet extra;
+    memset(&extra, 0, sizeof(extra));
+    extra.alloc = 11;
+    add_possibility_analysed(&extra, 1);
+    ASSERT_EQ_FMT(2ULL, file_analysed_size(1), "%llu");
+
+    silence_std();
+    int rc = restore_analysed(path);
+    restore_std();
+    ASSERT_EQ_FMT(0, rc, "%d");
+
+    /* Seul le paquet sauvegardé est revenu (import_analysed() ne préserve pas
+     * l'index de file d'origine : recherche sur toutes les files). */
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&backed_up, -1), "%d");
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&extra, -1), "%d");
+
+    unlink(path);
+    drain_all();
+    PASS();
+}
+
 /* --------------------------------------------------------------------------
  * Tri / statistiques : exécution sans erreur, total préservé (sortie musellée)
  * ------------------------------------------------------------------------ */
@@ -484,6 +527,74 @@ TEST remove_analysed_finds_then_misses(void)
 
     /* deuxième passage : plus rien à retirer -> 1 */
     ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 0), "%d");
+
+    drain_all();
+    PASS();
+}
+
+/* Deux paquets de contenu strictement identique dans la même file : chaque
+ * retrait n'en enlève qu'un seul (la file décroît de 1 à chaque appel), et le
+ * troisième retrait (plus rien de correspondant) échoue. */
+TEST remove_analysed_handles_duplicate_packets(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 7;
+    pk.x = 2;
+    pk.y = 3;
+    add_possibility_analysed(&pk, 0);
+    add_possibility_analysed(&pk, 0);
+    ASSERT_EQ_FMT(2ULL, analysed_total(), "%llu");
+
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, 0), "%d");
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
+
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, 0), "%d");
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 0), "%d");
+
+    drain_all();
+    PASS();
+}
+
+/* Un paquet remis dans le stock principal par restock_analysed() ne doit plus
+ * être trouvable dans le pool analysed ensuite : garde-fou contre une entrée
+ * d'index restée pendante après le vidage massif de restock_analysed. */
+TEST remove_analysed_after_restock_not_found(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 4;
+    add_possibility_analysed(&pk, 2); /* file analysed 2 */
+    ASSERT_EQ_FMT(1ULL, file_analysed_size(2), "%llu");
+
+    silence_std();
+    restock_analysed();
+    restore_std();
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 2), "%d");
+
+    drain_all();
+    PASS();
+}
+
+/* thread < 0 : remove_possibility_analysed doit chercher dans toutes les
+ * files, quelle que soit celle où le paquet a été ajouté. */
+TEST remove_analysed_searches_all_files_when_thread_negative(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 6;
+    add_possibility_analysed(&pk, 4); /* file analysed 4 */
+    ASSERT_EQ_FMT(1ULL, file_analysed_size(4), "%llu");
+
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1), "%d");
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
 
     drain_all();
     PASS();
@@ -715,6 +826,30 @@ static void *mini_srv_analysed_ok(void *arg)
         b = INST_CONSIDERED;
         send(fd, &b, 1, 0);
     }
+    close(fd);
+    return NULL;
+}
+
+/* Mini-serveur send_possibility_analysed — mauvais ACK (bloc remis en file) :
+ *   1. is_connected
+ *   2. recv INST_POSSIBILITY_ANALYSED_BATCH + int32 M + M packets → INST_NULL (≠ CONSIDERED)
+ */
+static void *mini_srv_analysed_bad_ack(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_POSSIBILITY_ANALYSED_BATCH */
+    int32_t m = 0;
+    recv_exact_sv(fd, &m, sizeof m);
+    for (int32_t i = 0; i < m; i++) {
+        struct possibility_packet pkt;
+        recv_exact_sv(fd, &pkt, sizeof pkt);
+    }
+    b = INST_NULL;
+    send(fd, &b, 1, 0);
     close(fd);
     return NULL;
 }
@@ -1005,8 +1140,51 @@ TEST send_possibility_analysed_success(void)
     restore_std();
 
     ASSERT_EQ_FMT(0ULL, file_analysed_size(0), "%llu"); /* file vidée */
+    /* Le paquet drainé par le batch envoyé ne doit plus être trouvable :
+     * garde-fou contre une entrée d'index laissée pendante par le drain. */
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 0), "%d");
 
     /* Fermer fds[0] pour débloquer le mini-serveur (son recv retourne 0). */
+    close(fds[0]);
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_all();
+    PASS();
+}
+
+/* send_possibility_analysed : le serveur rejette le batch (ACK ≠ CONSIDERED) ->
+ * le paquet est remis dans la file ET doit rester trouvable/retirable ensuite
+ * (garde-fou : le chemin de remise en file doit ré-indexer). */
+TEST send_possibility_analysed_bad_ack_requeues_and_reindexes(void)
+{
+    drain_all();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_analysed_bad_ack, &fds[1]);
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 3;
+    add_possibility_analysed(&pk, 0);
+    ASSERT_EQ_FMT(1ULL, file_analysed_size(0), "%llu");
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    silence_std();
+    send_possibility_analysed(&cp);
+    restore_std();
+
+    /* Rejeté par le serveur -> remis dans la file. */
+    ASSERT_EQ_FMT(1ULL, file_analysed_size(0), "%llu");
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, 0), "%d");
+    ASSERT_EQ_FMT(0ULL, file_analysed_size(0), "%llu");
+
     close(fds[0]);
     pthread_join(srv, NULL);
     set_server_ip(NULL);
@@ -1695,12 +1873,16 @@ SUITE(datamanager_suite)
     RUN_TEST(checked_possibility_goes_to_checked_pool);
     RUN_TEST(analysed_add_and_restock);
     RUN_TEST(analysed_backup_restore_round_trip);
+    RUN_TEST(analysed_restore_clears_untracked_packet);
     RUN_TEST(sort_preserves_count);
     RUN_TEST(statistic_and_print_run);
     RUN_TEST(statistic_datas_handles_full_board_alloc);
     RUN_TEST(count_combinations_is_triangular);
     RUN_TEST(get_tocheck_drains_unchecked_pool);
     RUN_TEST(remove_analysed_finds_then_misses);
+    RUN_TEST(remove_analysed_handles_duplicate_packets);
+    RUN_TEST(remove_analysed_after_restock_not_found);
+    RUN_TEST(remove_analysed_searches_all_files_when_thread_negative);
     RUN_TEST(remove_no_next_prunes_dead_packets);
     RUN_TEST(remove_no_next_handles_complete_solution);
     RUN_TEST(scroll_from_server_returns_packet);
@@ -1710,6 +1892,7 @@ SUITE(datamanager_suite)
     RUN_TEST(scroll_from_server_pruner_batch_empty);
     RUN_TEST(scroll_from_server_pruner_batch_incomplete_block);
     RUN_TEST(send_possibility_analysed_success);
+    RUN_TEST(send_possibility_analysed_bad_ack_requeues_and_reindexes);
     RUN_TEST(put_to_server_bad_ack_non_fatal);
     RUN_TEST(send_solution_success);
     RUN_TEST(send_solution_server_rejects);

@@ -357,6 +357,198 @@ int add_possibility(client_possibility_t *client_possibility, array_possibility_
 	return error;
 }
 
+/* ==========================================================================
+ * Index de recherche du pool « analysed » (accélère remove_possibility_analysed)
+ * ==========================================================================
+ *
+ * remove_possibility_analysed() est appelée pour CHAQUE possibilité acquittée
+ * (INST_POSSIBILITY_ANALYSED / _BATCH, requeue côté serveur) et balayait
+ * linéairement toute la file avec compare_possibility() : O(n) par retrait,
+ * O(n·M) pour un acquittement de M paquets. Cet index (une table de hachage
+ * par file, à chaînage séparé) ramène le cas courant — la possibilité
+ * recherchée est bien présente — à O(1) amorti : compare_possibility() n'est
+ * plus appelée que sur les quelques candidats du seau concerné, jamais sur
+ * toute la file.
+ *
+ * Le hash ne porte QUE sur les champs réellement comparés par
+ * compare_possibility() : alloc, x, y, les ETERN_PARTS premiers bits de
+ * b_faceused (soit ETERN_PARTS/16 mots), et grid. Il exclut `checked`
+ * (jamais comparé) ainsi que tout octet de bourrage de struct — b_faceused
+ * porte un `__attribute__((aligned(16)))` qui, combiné au `packed` global,
+ * introduit du padding avant lui ; ce padding n'est pas garanti initialisé et
+ * hacher l'image mémoire brute du paquet ferait diverger le hash de deux
+ * paquets pourtant égaux au sens de compare_possibility().
+ *
+ * L'index n'est jamais une source de vérité : sur un « miss » (rien dans le
+ * seau), remove_possibility_analysed() retombe sur le balayage linéaire
+ * historique. Un nœud qui n'a pas pu être alloué (OOM) ou toute divergence
+ * éventuelle n'affecte donc jamais la correction, seulement la performance de
+ * ce cas limite — la file reste la seule source de vérité.
+ */
+#define ANALYSED_INDEX_BUCKETS 8191
+
+typedef struct AnalysedIndexNode {
+	uint64_t hash;
+	Element *element;
+	struct AnalysedIndexNode *next;
+} AnalysedIndexNode;
+
+static AnalysedIndexNode *analysed_index[NB_FILE_POSSIBILITY][ANALYSED_INDEX_BUCKETS];
+
+/**
+ * @brief Calcule le hash d'une possibilité, cohérent avec `compare_possibility`.
+ * @param p Paquet à hacher.
+ * @return  Hash 64 bits (FNV-1a) des seuls champs comparés par `compare_possibility`.
+ */
+static uint64_t hash_possibility_key(const struct possibility_packet *p)
+{
+	uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
+	const uint64_t prime = 1099511628211ULL;
+
+#define ANALYSED_HASH_BYTE(b) do { h ^= (uint8_t)(b); h *= prime; } while (0)
+
+	ANALYSED_HASH_BYTE(p->x);
+	ANALYSED_HASH_BYTE(p->y);
+	ANALYSED_HASH_BYTE(p->alloc & 0xff);
+	ANALYSED_HASH_BYTE((p->alloc >> 8) & 0xff);
+
+	/* compare_possibility() ne teste que les ETERN_PARTS premiers bits de
+	 * b_faceused via is_face_used() ; le(s) mot(s) restant(s) (capacité au-delà
+	 * de ETERN_PARTS) est hors contrat d'égalité et ne doit pas être haché. */
+	for (int g = 0; g < ETERN_PARTS / 16; g++) {
+		uint16_t v = p->b_faceused[g];
+		ANALYSED_HASH_BYTE(v & 0xff);
+		ANALYSED_HASH_BYTE((v >> 8) & 0xff);
+	}
+
+	for (int x = 0; x < ETERN_SIZE; x++) {
+		for (int y = 0; y < ETERN_SIZE; y++) {
+			uint16_t v = (uint16_t)p->grid[x][y];
+			ANALYSED_HASH_BYTE(v & 0xff);
+			ANALYSED_HASH_BYTE((v >> 8) & 0xff);
+		}
+	}
+#undef ANALYSED_HASH_BYTE
+
+	return h;
+}
+
+/**
+ * @brief Indexe le dernier élément ajouté à `file_possibility_analysed[fileidx]`.
+ *
+ * À appeler juste après un `put()` réussi, avec `e == file->end`. En cas
+ * d'échec d'allocation du nœud d'index (OOM), l'élément reste dans la file
+ * mais non indexé : `remove_possibility_analysed` le retrouvera via son repli
+ * sur le balayage linéaire (jamais silencieusement perdu).
+ *
+ * @param fileidx Indice de la file analysée (0..NB_FILE_POSSIBILITY-1).
+ * @param e       Élément (déjà présent dans la file) à indexer.
+ */
+static void analysed_index_add(int fileidx, Element *e)
+{
+	AnalysedIndexNode *node = malloc(sizeof(AnalysedIndexNode));
+	if (node == NULL) {
+		return;
+	}
+	node->hash = hash_possibility_key((struct possibility_packet *)e->value);
+	node->element = e;
+	size_t bucket = node->hash % ANALYSED_INDEX_BUCKETS;
+	node->next = analysed_index[fileidx][bucket];
+	analysed_index[fileidx][bucket] = node;
+}
+
+/**
+ * @brief Retrouve puis retire de l'INDEX (pas de la file) l'élément dont la
+ *        valeur correspond à `key` au sens de `compare_possibility`.
+ *
+ * @param fileidx Indice de la file analysée.
+ * @param key     Paquet à retrouver.
+ * @return        L'`Element` de la file correspondant (à l'appelant de le
+ *                retirer avec `file_remove_element`), ou NULL si l'index n'a
+ *                pas (ou plus) de candidat pour cette clé.
+ */
+static Element *analysed_index_find_and_remove(int fileidx, const struct possibility_packet *key)
+{
+	uint64_t h = hash_possibility_key(key);
+	size_t bucket = h % ANALYSED_INDEX_BUCKETS;
+	AnalysedIndexNode *node = analysed_index[fileidx][bucket];
+	AnalysedIndexNode *prev = NULL;
+	while (node != NULL) {
+		if (node->hash == h && compare_possibility((struct possibility_packet *)node->element->value, (struct possibility_packet *)key) == 0) {
+			Element *found = node->element;
+			if (prev == NULL) {
+				analysed_index[fileidx][bucket] = node->next;
+			} else {
+				prev->next = node->next;
+			}
+			free(node);
+			return found;
+		}
+		prev = node;
+		node = node->next;
+	}
+	return NULL;
+}
+
+/**
+ * @brief Retire de l'index le nœud référençant précisément `victim`.
+ *
+ * À appeler AVANT tout `scroll()` qui libérerait `victim->value` (le hash est
+ * recalculé depuis cette valeur, encore valide à cet instant). Recherche par
+ * identité de pointeur (pas par contenu) : correct même en présence de
+ * doublons de contenu dans le même seau.
+ *
+ * @param fileidx Indice de la file analysée.
+ * @param victim  Élément sur le point d'être retiré de la file.
+ */
+static void analysed_index_remove_element(int fileidx, Element *victim)
+{
+	if (victim == NULL) {
+		return;
+	}
+	uint64_t h = hash_possibility_key((struct possibility_packet *)victim->value);
+	size_t bucket = h % ANALYSED_INDEX_BUCKETS;
+	AnalysedIndexNode *node = analysed_index[fileidx][bucket];
+	AnalysedIndexNode *prev = NULL;
+	while (node != NULL) {
+		if (node->element == victim) {
+			if (prev == NULL) {
+				analysed_index[fileidx][bucket] = node->next;
+			} else {
+				prev->next = node->next;
+			}
+			free(node);
+			return;
+		}
+		prev = node;
+		node = node->next;
+	}
+	/* Non trouvé (ex. jamais indexé suite à un malloc échoué) : rien à faire. */
+}
+
+/**
+ * @brief Vide entièrement l'index d'une file analysée.
+ *
+ * À appeler après tout drainage complet de `file_possibility_analysed[fileidx].file`
+ * (restock_analysed, restore_analysed, send_possibility_analysed en mode
+ * local) : les `Element*` référencés par l'index seraient sinon des
+ * pointeurs pendants (use-after-free au prochain hit).
+ *
+ * @param fileidx Indice de la file analysée.
+ */
+static void analysed_index_clear(int fileidx)
+{
+	for (size_t b = 0; b < ANALYSED_INDEX_BUCKETS; b++) {
+		AnalysedIndexNode *node = analysed_index[fileidx][b];
+		while (node != NULL) {
+			AnalysedIndexNode *next = node->next;
+			free(node);
+			node = next;
+		}
+		analysed_index[fileidx][b] = NULL;
+	}
+}
+
 int remove_possibility_analysed(struct possibility_packet *possibility, int thread) {
 #ifdef DEBUG_CHECK_POSSIBILITY
     int analyse = check_possibility(possibility, NULL);
@@ -385,21 +577,23 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 		if(pthread_mutex_trylock(&file_possibility_analysed[currfile].lock) == 0)
 		{
 			File *file = &file_possibility_analysed[currfile].file;
-			// On défile la suite pour retrouver la possibilité
-			Element *element = file->start;
-			while (removed_possibility == 0 && element != NULL) {
-				struct possibility_packet *possibilityInFile = element->value;
-				// comparaison
-
-				if (compare_possibility(possibilityInFile, possibility) == 0) {
-					file_remove_element(file, element);
-					removed_possibility = 1;
-				} else {
-					// On passe au suivant
+			// Chemin rapide : l'index de hachage retrouve la possibilité en
+			// O(1) amorti (cas courant : elle est bien présente).
+			Element *element = analysed_index_find_and_remove(currfile, possibility);
+			if (element == NULL) {
+				// Repli : balayage linéaire historique. Couvre l'absence
+				// réelle ET tout défaut d'indexation (ex. OOM lors d'un
+				// ajout) — la file reste toujours la source de vérité.
+				element = file->start;
+				while (element != NULL && compare_possibility((struct possibility_packet *)element->value, possibility) != 0) {
 					element = element->next;
 				}
 			}
-			
+			if (element != NULL) {
+				file_remove_element(file, element);
+				removed_possibility = 1;
+			}
+
 			checked = 1;
 			pthread_mutex_unlock(&file_possibility_analysed[currfile].lock);
 		}
@@ -454,6 +648,9 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
                     ;
 				}
                 free(possibility);
+                // La file est désormais entièrement vide : purge en bloc (pas de
+                // recherche possibilité par possibilité, juste des libérations).
+                analysed_index_clear(thread);
 			}
 
 			pthread_mutex_unlock(&file_possibility_analysed[thread].lock);
@@ -484,7 +681,12 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 				int drained;
 				do {
 					drained = 0;
-					while (drained < cap && scroll(file, &buf[drained])) {
+					// scroll() dépile file->end : on retire d'abord son entrée
+					// d'index (par identité de pointeur, tant que value est
+					// encore valide) puis on la sort réellement de la file.
+					while (drained < cap && file->end != NULL) {
+						analysed_index_remove_element(thread, file->end);
+						scroll(file, &buf[drained]);
 						drained++;
 					}
 					if (drained == 0) {
@@ -497,12 +699,16 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 					           && (send_all(socket_id, buf, bytes) == (long)bytes);
 					if (!sent_ok) {
 						log_errno("Error when send_possibility_analysed (batch) => ");
-						for (int i = 0; i < drained; i++) put(file, &buf[i]);
+						for (int i = 0; i < drained; i++) {
+							if (put(file, &buf[i])) analysed_index_add(thread, file->end);
+						}
 						break;
 					}
 					if (recv_instruction(socket_id) != INST_CONSIDERED) {
 						log_error("batch analysed non pris en compte (%d possibilités), remise en file\n", drained);
-						for (int i = 0; i < drained; i++) put(file, &buf[i]);
+						for (int i = 0; i < drained; i++) {
+							if (put(file, &buf[i])) analysed_index_add(thread, file->end);
+						}
 						break;
 					}
 				} while (drained == cap);
@@ -549,7 +755,10 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread) 
 			}
              */
 			
-			put(&file_possibility_analysed[currfile].file, possiblity);
+			File *target = &file_possibility_analysed[currfile].file;
+			if (put(target, possiblity)) {
+				analysed_index_add(currfile, target->end);
+			}
 			addpossibility = 1;
 			pthread_mutex_unlock(&file_possibility_analysed[currfile].lock);
 		}
@@ -591,6 +800,9 @@ int restock_analysed(void) {
         while (n < count && scroll(src, &buf[n])) {
             n++;
         }
+        // La file est désormais entièrement vide : purge en bloc de l'index
+        // (pas de recherche possibilité par possibilité).
+        analysed_index_clear(f);
         pthread_mutex_unlock(&file_possibility_analysed[f].lock);
 
         for (unsigned long long i = 0; i < n; i++) {
@@ -1209,6 +1421,8 @@ int restore_analysed(char *filename)
 			scroll(suite, value);
 			free(value);
 		}
+		// File désormais vide : purge en bloc de son index.
+		analysed_index_clear(fp);
 	}
 
 	unlock_all_file_analysed();
