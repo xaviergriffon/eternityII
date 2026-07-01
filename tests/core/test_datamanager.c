@@ -633,6 +633,44 @@ static void *mini_srv_get_null(void *arg)
     return NULL;
 }
 
+/* Paramètres du mini-serveur pruner batch : le serveur annonce `k_announced`
+ * possibilités puis en envoie réellement `packets_to_send` (les deux diffèrent
+ * pour les cas « k > requested » et « bloc incomplet »). */
+struct batch_srv_arg {
+    int fd;
+    int32_t k_announced;
+    int packets_to_send;
+    uint16_t first_alloc;
+};
+
+/* Mini-serveur scroll_from_server, chemin pruner (INST_GET_TO_CHECK_BATCH) :
+ *   1. is_connected
+ *   2. recv INST_GET_TO_CHECK_BATCH + int32 requested
+ *   3. send int32 k puis `packets_to_send` possibility_packet
+ * Puis close(fd) : un bloc plus court que k annoncé provoque un EOF côté client
+ * (recv_all partiel). */
+static void *mini_srv_tocheck_batch(void *arg)
+{
+    struct batch_srv_arg *a = arg;
+    int fd = a->fd;
+    int8_t b;
+    recv(fd, &b, 1, 0);                 /* sonde is_connected */
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                 /* INST_GET_TO_CHECK_BATCH */
+    int32_t requested = 0;
+    recv_exact_sv(fd, &requested, sizeof requested);
+    send(fd, &a->k_announced, sizeof a->k_announced, 0);
+    for (int i = 0; i < a->packets_to_send; i++) {
+        struct possibility_packet pkt;
+        memset(&pkt, 0, sizeof pkt);
+        pkt.alloc = (uint16_t)(a->first_alloc + i);
+        send(fd, &pkt, sizeof pkt, 0);
+    }
+    close(fd);
+    return NULL;
+}
+
 /* Mini-serveur send_possibility_analysed — acquittement :
  *   1. is_connected
  *   2. recv INST_POSSIBILITY_ANALYSED_BATCH + int32 M + M packets → INST_CONSIDERED
@@ -834,6 +872,88 @@ TEST scroll_from_server_returns_null(void)
     close(fds[0]);
     pthread_mutex_destroy(&cp.socket_mutex);
     drain_datamanager();
+    PASS();
+}
+
+/* Exécute un échange pruner batch complet contre le mini-serveur : pool local
+ * vidé + pruner_mode=1 + server_ip => get_last_possibility route vers la branche
+ * batch de scroll_from_server. Renvoie le résultat (à libérer par l'appelant). */
+static array_possibility_packet *run_pruner_batch(int32_t k_announced, int packets_to_send,
+                                                  int requested, uint16_t first_alloc)
+{
+    drain_datamanager();
+    int saved_pm = pruner_mode;
+    pruner_mode = 1;
+
+    int fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) { pruner_mode = saved_pm; return NULL; }
+
+    struct batch_srv_arg a = { .fd = fds[1], .k_announced = k_announced,
+                               .packets_to_send = packets_to_send, .first_alloc = first_alloc };
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_tocheck_batch, &a);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    silence_std();
+    array_possibility_packet *r = get_last_possibility(&cp, requested);
+    restore_std();
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    pruner_mode = saved_pm;
+    drain_datamanager();
+    return r;
+}
+
+/* Pruner batch : le serveur annonce k=2 et envoie 2 paquets -> les deux reçus. */
+TEST scroll_from_server_pruner_batch_receives_all(void)
+{
+    array_possibility_packet *r = run_pruner_batch(2, 2, 5, 11);
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(2, r->size, "%d");
+    ASSERT(r->possibilities != NULL);
+    ASSERT_EQ_FMT(11, (int)r->possibilities[0].alloc, "%d");
+    ASSERT_EQ_FMT(12, (int)r->possibilities[1].alloc, "%d");
+    free_array_possibility_packet(r);
+    PASS();
+}
+
+/* Pruner batch : k annoncé (5) > demandé (2) -> le client borne k à requested
+ * (garde-fou), lit exactement 2 paquets. */
+TEST scroll_from_server_pruner_batch_clamps_k_to_requested(void)
+{
+    array_possibility_packet *r = run_pruner_batch(5, 2, 2, 20);
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(2, r->size, "%d"); /* clampé à requested, pas 5 */
+    free_array_possibility_packet(r);
+    PASS();
+}
+
+/* Pruner batch : k=0 (rien de disponible) -> résultat vide, aucune allocation. */
+TEST scroll_from_server_pruner_batch_empty(void)
+{
+    array_possibility_packet *r = run_pruner_batch(0, 0, 5, 0);
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(0, r->size, "%d");
+    ASSERT(r->possibilities == NULL);
+    free_array_possibility_packet(r);
+    PASS();
+}
+
+/* Pruner batch : serveur annonce k=2 mais n'envoie qu'1 paquet puis ferme ->
+ * recv_all partiel -> le bloc incomplet est rejeté (result vidé, size 0). */
+TEST scroll_from_server_pruner_batch_incomplete_block(void)
+{
+    array_possibility_packet *r = run_pruner_batch(2, 1, 5, 30);
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(0, r->size, "%d");        /* bloc incomplet -> rejeté */
+    ASSERT(r->possibilities == NULL);       /* libéré et remis à NULL */
+    free_array_possibility_packet(r);
     PASS();
 }
 
@@ -1550,6 +1670,10 @@ SUITE(datamanager_suite)
     RUN_TEST(remove_no_next_handles_complete_solution);
     RUN_TEST(scroll_from_server_returns_packet);
     RUN_TEST(scroll_from_server_returns_null);
+    RUN_TEST(scroll_from_server_pruner_batch_receives_all);
+    RUN_TEST(scroll_from_server_pruner_batch_clamps_k_to_requested);
+    RUN_TEST(scroll_from_server_pruner_batch_empty);
+    RUN_TEST(scroll_from_server_pruner_batch_incomplete_block);
     RUN_TEST(send_possibility_analysed_success);
     RUN_TEST(put_to_server_bad_ack_non_fatal);
     RUN_TEST(send_solution_success);
