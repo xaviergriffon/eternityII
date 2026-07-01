@@ -174,6 +174,32 @@ TEST get_last_possibility_drains_pool(void)
 }
 
 /* --------------------------------------------------------------------------
+ * put_to_pool / scroll_from_pool : le trylock réussit toujours quand au moins
+ * une file du pool est libre (non régression du fallback usleep(MICRO_SLEEP)
+ * ajouté sur un tour complet sans verrou pris : cf. add_possibility_analysed).
+ * ------------------------------------------------------------------------ */
+
+TEST put_and_scroll_round_trip_succeeds_when_pool_free(void)
+{
+    drain_datamanager();
+
+    /* Plusieurs allers-retours consécutifs : chacun doit repartir d'une file
+     * libre et aboutir immédiatement, sans jamais boucler indéfiniment. */
+    for (int round = 0; round < 5; round++) {
+        int allocs[] = { 1, 2, 3, 4, 5 };
+        add_packets(allocs, 5);
+        ASSERT_EQ_FMT(5ULL, datas_size(), "%llu");
+
+        array_possibility_packet *r = get_last_possibility(NULL, 100);
+        ASSERT(r != NULL);
+        ASSERT_EQ_FMT(5, r->size, "%d");
+        free_array_possibility_packet(r);
+        ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+    }
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
  * search_min_datas : plus petit alloc présent (0 si vide)
  * ------------------------------------------------------------------------ */
 
@@ -1865,6 +1891,7 @@ SUITE(datamanager_suite)
     RUN_TEST(send_solution_without_server_configured_returns_error);
     RUN_TEST(add_increases_datas_size);
     RUN_TEST(get_last_possibility_drains_pool);
+    RUN_TEST(put_and_scroll_round_trip_succeeds_when_pool_free);
     RUN_TEST(search_min_datas_finds_minimum);
     RUN_TEST(backup_then_restore_preserves_count);
     RUN_TEST(restore_missing_file_returns_error);
