@@ -30,6 +30,9 @@ int put (File * suite, void *value){
 		return 0;
 	}
 	Element *new_element = malloc(sizeof(Element));
+	if (new_element == NULL) {
+		return 0;
+	}
 	new_element->value = malloc(suite->sizeofvalue);
 	if (new_element->value == NULL) {
 		free(new_element);

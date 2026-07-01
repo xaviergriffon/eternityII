@@ -266,6 +266,24 @@ TEST file_put_rejects_zero_sizeofvalue(void)
     PASS();
 }
 
+/* Contrat de retour de put() : 1 en cas de succès nominal, 0 si la file n'est
+ * pas exploitable (sizeofvalue <= 0, cf. file_put_rejects_zero_sizeofvalue
+ * ci-dessus). put() durcit aussi le cas malloc(sizeof(Element)) == NULL (OOM)
+ * en renvoyant 0 au lieu de déréférencer un pointeur NULL ; ce chemin n'est
+ * pas déclenchable de façon portable sans mocker malloc, donc non couvert ici
+ * (cf. le twin put_possibility() dans core/possibility.c, testé pareillement
+ * sans simulation d'OOM). */
+TEST file_put_returns_one_on_success(void)
+{
+    File f;
+    init_file(&f, sizeof(int));
+
+    int v = 7;
+    ASSERT_EQ_FMT(1, put(&f, &v), "%d");
+    ASSERT_EQ_FMT(1ULL, (unsigned long long)f.size, "%llu");
+    PASS();
+}
+
 /* move_before/move_after sur une cible interne (voisin non NULL) : couvre les
    branches où targetPrevious / targetNext ne sont pas NULL. */
 TEST file_move_targets_non_extremity(void)
@@ -345,6 +363,7 @@ SUITE(lifo_suite)
     RUN_TEST(big_table_grows_and_preserves_values);
     RUN_TEST(big_table_scroll_cache_returns_internal_pointer);
     RUN_TEST(file_put_rejects_zero_sizeofvalue);
+    RUN_TEST(file_put_returns_one_on_success);
     RUN_TEST(file_move_targets_non_extremity);
     RUN_TEST(big_table_free_big_table_heap);
     RUN_TEST(file_remove_element_removes_middle);
