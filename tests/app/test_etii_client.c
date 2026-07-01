@@ -14,11 +14,15 @@
 #include "app/etii_statistic.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
+#include "net/etii_protocol.h"
 
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <signal.h>
+#include <unistd.h>
 
 /* Vide le stock local du datamanager (état global partagé entre suites). */
 static void dm_drain_local(void)
@@ -477,6 +481,73 @@ TEST feed_one_thread_busy_no_socket_noop(void)
     PASS();
 }
 
+/* Thread occupé (works=1) AVEC un socket ouvert : au-delà de l'intervalle
+ * d'inactivité, feed_one_thread émet un keepalive (is_connected). Socket vivant
+ * -> l'horodatage d'activité est rafraîchi, le socket est conservé (ligne 138).
+ * On simule le serveur via un socketpair : sv[1] pré-charge l'écho attendu, que
+ * is_connected(sv[0]) relira. */
+TEST feed_one_thread_keepalive_refreshes_alive_socket(void)
+{
+    int saved_req = request;
+    request = REQUEST_CONTINUE;
+
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) FAILm("socketpair");
+
+    client_possibility_t client[1];
+    init_test_client(&client[0], 1);        /* works = 1 : occupé */
+    client[0].socket_id = sv[0];
+    client[0].last_socket_activity = 0;     /* intervalle keepalive forcément écoulé */
+
+    /* Réponse du serveur pré-chargée : is_connected(sv[0]) lira INST_TEST_CONNECTED. */
+    send_instruction(sv[1], INST_TEST_CONNECTED);
+
+    int needed = 0, got = 0;
+    feed_one_thread(client, 0, &needed, &got);
+
+    ASSERT_EQ_FMT(0, needed, "%d");                  /* pas de demande de travail    */
+    ASSERT_EQ_FMT(0, got, "%d");
+    ASSERT_EQ_FMT(sv[0], client[0].socket_id, "%d"); /* socket conservé (vivant)     */
+    ASSERT(client[0].last_socket_activity != 0);     /* activité rafraîchie à `now`  */
+
+    close(sv[0]);
+    close(sv[1]);
+    destroy_test_client(&client[0]);
+    request = saved_req;
+    PASS();
+}
+
+/* Même situation, mais le socket est mort (pair fermé) : is_connected échoue,
+ * feed_one_thread oublie le socket (socket_id = -1, ligne 142) — il sera rouvert
+ * au prochain besoin de travail. is_connected ferme sv[0] lui-même. */
+TEST feed_one_thread_keepalive_drops_dead_socket(void)
+{
+    int saved_req = request;
+    request = REQUEST_CONTINUE;
+    signal(SIGPIPE, SIG_IGN); /* send sur pair fermé -> EPIPE, pas de signal fatal */
+
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) FAILm("socketpair");
+    close(sv[1]);             /* pair fermé -> is_connected échoue et ferme sv[0] */
+
+    client_possibility_t client[1];
+    init_test_client(&client[0], 1);
+    client[0].socket_id = sv[0];
+    client[0].last_socket_activity = 0;
+
+    int needed = 0, got = 0;
+    feed_one_thread(client, 0, &needed, &got);
+
+    ASSERT_EQ_FMT(0, needed, "%d");
+    ASSERT_EQ_FMT(0, got, "%d");
+    ASSERT_EQ_FMT(-1, client[0].socket_id, "%d"); /* socket oublié */
+
+    /* sv[0] fermé par is_connected, sv[1] déjà fermé : rien à fermer ici. */
+    destroy_test_client(&client[0]);
+    request = saved_req;
+    PASS();
+}
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_client_suite)
@@ -510,4 +581,6 @@ SUITE(etii_client_suite)
     RUN_TEST(feed_one_thread_gets_work);
     RUN_TEST(feed_one_thread_no_work_available);
     RUN_TEST(feed_one_thread_busy_no_socket_noop);
+    RUN_TEST(feed_one_thread_keepalive_refreshes_alive_socket);
+    RUN_TEST(feed_one_thread_keepalive_drops_dead_socket);
 }
