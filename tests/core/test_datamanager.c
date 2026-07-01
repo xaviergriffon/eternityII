@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <glob.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <pthread.h>
 
@@ -1019,6 +1020,11 @@ static void init_cp_with_socket(client_possibility_t *cp, int sock_fd)
     pthread_mutex_init(&cp->socket_mutex, NULL);
     cp->socket_id = sock_fd;
     cp->id = 0;
+    /* Timeout de réception : si le mini-serveur ne parle pas la trame attendue
+     * (régression protocolaire), recv/recv_all échouent après 5 s au lieu de
+     * bloquer le runner — le test devient rouge, pas suspendu. */
+    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+    setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 }
 
 /* scroll_from_server : le serveur répond avec un paquet.

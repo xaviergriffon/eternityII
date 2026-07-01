@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <pthread.h>
 
 extern unsigned long long *fileUpdates;   /* global défini dans etii_server.c */
@@ -326,9 +327,23 @@ TEST requeue_mixed_batch_returns_only_unacked(void)
  * câble sur des tampons locaux (sauvegarde/restauration du global).
  */
 
+/* Timeout de réception : si le code sous test n'envoie pas ce que le test
+ * attend (régression protocolaire), recv/recv_all échouent après 5 s au lieu
+ * de bloquer le runner indéfiniment — le test devient rouge, pas suspendu. */
+static void set_recv_timeout(int fd)
+{
+    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+}
+
 static int make_pair(int sv[2])
 {
-    return socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    if (rc == 0) {
+        set_recv_timeout(sv[0]);
+        set_recv_timeout(sv[1]);
+    }
+    return rc;
 }
 
 static unsigned long long g_counters_buf[1];
