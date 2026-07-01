@@ -1,5 +1,7 @@
 # eternityII
 
+[![codecov](https://codecov.io/gh/xaviergriffon/eternityII/branch/master/graph/badge.svg?token=AAHN9LCWFR)](https://app.codecov.io/gh/xaviergriffon/eternityII)
+
 Solveur distribué pour le puzzle [Eternity II](https://fr.wikipedia.org/wiki/Eternity_II).
 
 Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisant correspondre les motifs sur les bords adjacents. L'espace de recherche étant astronomique, le programme exploite une architecture client-serveur pour distribuer le travail sur plusieurs processus, voire plusieurs machines.
