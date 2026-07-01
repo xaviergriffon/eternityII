@@ -488,7 +488,9 @@ struct frag_writer_arg { int fd; struct possibility_packet pkt; };
 static void *frag_writer(void *arg)
 {
     struct frag_writer_arg *a = arg;
-    const size_t cut = 200;                          /* coupe en plein paquet */
+    /* Coupe au milieu du paquet — relative à sizeof : le paquet ne fait que
+     * 64 octets en build ETERN_PARTS=16 (une constante absolue déborderait). */
+    const size_t cut = sizeof a->pkt / 2;
     send(a->fd, &a->pkt, cut, 0);
     usleep(50000);                    /* laisse le serveur consommer le fragment */
     send(a->fd, (const char *)&a->pkt + cut, sizeof a->pkt - cut, 0);

@@ -812,7 +812,9 @@ static void *mini_srv_get_fragmented(void *arg)
     struct possibility_packet pkt;
     memset(&pkt, 0, sizeof pkt);
     pkt.alloc = 9;
-    const size_t cut = 200;                          /* coupe en plein paquet */
+    /* Coupe au milieu du paquet — relative à sizeof : le paquet ne fait que
+     * 64 octets en build ETERN_PARTS=16 (une constante absolue déborderait). */
+    const size_t cut = sizeof pkt / 2;
     send(fd, &pkt, cut, 0);
     usleep(50000);                     /* laisse le client consommer le fragment */
     send(fd, (const char *)&pkt + cut, sizeof pkt - cut, 0);
