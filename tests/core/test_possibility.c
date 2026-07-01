@@ -729,6 +729,48 @@ TEST what_search_to_key_uses_all_face_for_empty(void)
     PASS();
 }
 
+/* what_search_to_key : voisins TOP et LEFT *présents* (branches partId >= 0).
+ * Les autres tests placent la case courante en haut/à gauche (y=0 / x=0), laissant
+ * les branches « voisin du dessus/de gauche posé » jamais exécutées. On place donc
+ * la case en (1,1) — coordonnées valides en 4×4 comme en 16×16 — avec une pièce
+ * posée au-dessus et à gauche, et les voisins droite/bas vides. */
+TEST what_search_to_key_uses_neighbor_faces_when_present(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 1, .right = 2, .bottom = 3, .left = 4 }, /* voisin du dessus -> k1 = bottom = 3 */
+        { .id = 2, .top = 5, .right = 6, .bottom = 7, .left = 8 }, /* voisin de gauche -> k4 = right  = 6 */
+    };
+    struct array_part rp = { .size = 3, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->x = 1;
+    p->y = 1;
+    p->grid[1][0] = 1; /* TOP présent  : grid[x][y-1] */
+    p->grid[0][1] = 2; /* LEFT présent : grid[x-1][y] */
+
+    key_part k;
+    const int8_t all_face = 7;
+    what_search_to_key(&rp, p, &k, all_face);
+    ASSERT_EQ_FMT(3, (int)k.k1, "%d");        /* TOP présent  -> parts[1].bottom */
+    ASSERT_EQ_FMT(all_face, (int)k.k2, "%d"); /* RIGHT vide   -> all_face        */
+    ASSERT_EQ_FMT(all_face, (int)k.k3, "%d"); /* BOTTOM vide  -> all_face        */
+    ASSERT_EQ_FMT(6, (int)k.k4, "%d");        /* LEFT présent -> parts[2].right  */
+
+    /* Mêmes cases haut/gauche mais VIDES (indice valide, contenu < 0) : branche
+       partId < 0 -> all_face, distincte du bord (k=0) et du voisin posé. */
+    p->grid[1][0] = -2; /* TOP  interne vide */
+    p->grid[0][1] = -2; /* LEFT interne vide */
+    what_search_to_key(&rp, p, &k, all_face);
+    ASSERT_EQ_FMT(all_face, (int)k.k1, "%d"); /* TOP  interne vide -> all_face */
+    ASSERT_EQ_FMT(all_face, (int)k.k4, "%d"); /* LEFT interne vide -> all_face */
+
+    free(p);
+    PASS();
+}
+
 /* what_search_in_grid_to_key : même chose pour une case (x,y) arbitraire. */
 TEST what_search_in_grid_to_key_arbitrary_cell(void)
 {
@@ -1337,6 +1379,7 @@ SUITE(possibility_suite)
     RUN_TEST(what_search_bottom_right_with_neighbors);
     RUN_TEST(what_search_interior_empty_neighbors);
     RUN_TEST(what_search_to_key_uses_all_face_for_empty);
+    RUN_TEST(what_search_to_key_uses_neighbor_faces_when_present);
     RUN_TEST(what_search_in_grid_to_key_arbitrary_cell);
     RUN_TEST(possibility_has_a_next_finds_and_excludes_used);
     RUN_TEST(search_light_expands_one_per_candidate);

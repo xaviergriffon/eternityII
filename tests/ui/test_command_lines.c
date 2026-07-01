@@ -120,7 +120,21 @@ TEST do_command_line_pruner_batch_is_clamped(void)
     ASSERT_EQ_FMT(0, run_command_quiet(low), "%d");
     ASSERT_EQ_FMT(1, pruner_batch_size, "%d");
 
+    char high[] = "prunerBatch 999999999"; /* > PRUNER_BATCH_MAX -> plafonné */
+    ASSERT_EQ_FMT(0, run_command_quiet(high), "%d");
+    ASSERT_EQ_FMT(PRUNER_BATCH_MAX, pruner_batch_size, "%d");
+
     pruner_batch_size = saved;
+    PASS();
+}
+
+/* prunerBatch sans argument -> -1 (erreur d'interprète), stock inchangé. */
+TEST do_command_line_pruner_batch_requires_arg(void)
+{
+    int saved = pruner_batch_size;
+    char cmd[] = "prunerBatch";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+    ASSERT_EQ_FMT(saved, pruner_batch_size, "%d");
     PASS();
 }
 
@@ -409,6 +423,7 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_max_stock_sets_global);
     RUN_TEST(do_command_line_max_stock_requires_arg);
     RUN_TEST(do_command_line_pruner_batch_is_clamped);
+    RUN_TEST(do_command_line_pruner_batch_requires_arg);
     RUN_TEST(do_command_line_limit_sets_global);
     RUN_TEST(do_command_line_limit_requires_arg);
     RUN_TEST(do_command_line_sort_runs);

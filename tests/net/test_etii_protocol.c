@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <string.h>
+#include <fcntl.h>
 
 /* Ouvre une paire de sockets connectés ; échoue le test si indisponible. */
 #define MAKE_PAIR(sv)                                  \
@@ -213,6 +214,22 @@ TEST send_all_error_on_broken_socket(void)
     PASS();
 }
 
+/* close_socket : close() interne échoue (fd déjà fermé → EBADF) → branche
+ * log_error (lignes 194-197). Le send_instruction/shutdown préalables sur le fd
+ * mort sont sans effet ; seul le close() final décide de la branche. */
+TEST close_socket_logs_error_on_bad_fd(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+    close(sv[0]);                       /* fd désormais invalide */
+    ASSERT(fcntl(sv[0], F_GETFD) == -1); /* précondition : sv[0] est bien fermé */
+
+    close_socket(sv[0]); /* close() interne renvoie -1 → exécute log_error */
+
+    close(sv[1]);
+    PASS();
+}
+
 SUITE(etii_protocol_suite)
 {
     /* SIGPIPE ignoré dans toute la suite : les tests avec pair fermé font des
@@ -231,4 +248,5 @@ SUITE(etii_protocol_suite)
     RUN_TEST(is_connected_false_when_send_fails);
     RUN_TEST(is_connected_false_on_wrong_instruction);
     RUN_TEST(send_all_error_on_broken_socket);
+    RUN_TEST(close_socket_logs_error_on_bad_fd);
 }

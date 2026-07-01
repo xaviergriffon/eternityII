@@ -238,6 +238,48 @@ TEST read_from_json_parses_scalars_and_grid(void)
     PASS();
 }
 
+/* compute_grid : str_value sans aucun entier -> regexec renvoie REG_NOMATCH dès
+ * la première passe (« groupe non trouvé »), la grille reste intacte. */
+TEST compute_grid_no_match_leaves_grid_untouched(void)
+{
+    struct possibility_packet *p = calloc(1, sizeof(struct possibility_packet));
+    p->grid[0][0] = -42; /* sentinelle : ne doit pas être écrasée */
+
+    int saved = dup(1);
+    int devnull = open("/dev/null", O_WRONLY);
+    dup2(devnull, 1);
+
+    compute_grid(p, "aucun chiffre ici");
+
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    close(devnull);
+
+    ASSERT_EQ_FMT(-42, (int)p->grid[0][0], "%d");
+    free(p);
+    PASS();
+}
+
+/* read_from_json : chaîne sans paire "clé": valeur -> REG_NOMATCH au 1er regexec,
+ * possibility reste NULL (« groupe non trouvé »). */
+TEST read_from_json_no_match_returns_null(void)
+{
+    int saved = dup(1);
+    int devnull = open("/dev/null", O_WRONLY);
+    dup2(devnull, 1);
+
+    struct possibility_packet *p = read_from_json("pas de paires cle valeur ici");
+
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    close(devnull);
+
+    ASSERT(p == NULL);
+    PASS();
+}
+
 SUITE(readdata_suite)
 {
     RUN_TEST(read_parts_parses_a_well_formed_csv);
@@ -248,5 +290,7 @@ SUITE(readdata_suite)
     RUN_TEST(read_parts_too_many_pieces_exits);
     RUN_TEST(read_parts_too_few_pieces_exits);
     RUN_TEST(compute_grid_fills_cells_in_order);
+    RUN_TEST(compute_grid_no_match_leaves_grid_untouched);
     RUN_TEST(read_from_json_parses_scalars_and_grid);
+    RUN_TEST(read_from_json_no_match_returns_null);
 }

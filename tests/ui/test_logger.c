@@ -229,6 +229,71 @@ TEST log_routes_to_parent_over_udp_socket(void)
     PASS();
 }
 
+/* log_send_to_parent : complète le test INFO ci-dessus en vérifiant l'octet de
+ * TYPE pour chaque autre niveau routé vers le parent (log_error/log_errno ->
+ * ERROR, log_debug -> DEBUG, log_console -> CONSOLE, log_event -> EVENT). Couvre
+ * les sites log_send_to_parent de logger.c restés morts (un seul, INFO, l'était).
+ * On collecte tous les types AVANT de restaurer les globales : un ASSERT en
+ * échec ferait un return et laisserait le routage actif pour les tests suivants. */
+TEST log_routes_each_type_to_parent(void)
+{
+    char path[64];
+    snprintf(path, sizeof path, "/tmp/etii_ipc_types_%d.sock", (int)getpid());
+    unlink(path);
+
+    int rx = socket(AF_UNIX, SOCK_DGRAM, 0);
+    ASSERT(rx >= 0);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    ASSERT_EQ_FMT(0, bind(rx, (struct sockaddr *)&addr, sizeof addr), "%d");
+
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(rx, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+
+    int tx = socket(AF_UNIX, SOCK_DGRAM, 0);
+    ASSERT(tx >= 0);
+
+    pid_t saved_parent = parent_pid;
+    int   saved_sock   = fork_checker_socket_id;
+    struct sockaddr_un *saved_addr = main_addr;
+
+    parent_pid = getpid() + 1;
+    fork_checker_socket_id = tx;
+    main_addr = &addr;
+
+    unsigned char buf[1 + IPC_LINE_MAX];
+    int t_error, t_errno, t_debug, t_console, t_event;
+
+    log_error("e1");
+    t_error   = (recvfrom(rx, buf, sizeof buf, 0, NULL, NULL) >= 1) ? buf[0] : -1;
+    errno = 0;
+    log_errno("e2");
+    t_errno   = (recvfrom(rx, buf, sizeof buf, 0, NULL, NULL) >= 1) ? buf[0] : -1;
+    log_debug("d1");
+    t_debug   = (recvfrom(rx, buf, sizeof buf, 0, NULL, NULL) >= 1) ? buf[0] : -1;
+    log_console("c1");
+    t_console = (recvfrom(rx, buf, sizeof buf, 0, NULL, NULL) >= 1) ? buf[0] : -1;
+    log_event("v1");
+    t_event   = (recvfrom(rx, buf, sizeof buf, 0, NULL, NULL) >= 1) ? buf[0] : -1;
+
+    parent_pid = saved_parent;
+    fork_checker_socket_id = saved_sock;
+    main_addr = saved_addr;
+
+    close(tx);
+    close(rx);
+    unlink(path);
+
+    ASSERT_EQ_FMT((int)IPC_MSG_LOG_ERROR,   t_error,   "%d");
+    ASSERT_EQ_FMT((int)IPC_MSG_LOG_ERROR,   t_errno,   "%d");
+    ASSERT_EQ_FMT((int)IPC_MSG_LOG_DEBUG,   t_debug,   "%d");
+    ASSERT_EQ_FMT((int)IPC_MSG_LOG_CONSOLE, t_console, "%d");
+    ASSERT_EQ_FMT((int)IPC_MSG_EVENT,       t_event,   "%d");
+    PASS();
+}
+
 /*
  * Cycle de vie de la zone fixe ANSI sur un VRAI terminal (pseudo-terminal).
  * Les fonctions de zone (status_zone_init/teardown, clear_console, et le thread
@@ -298,5 +363,6 @@ SUITE(logger_suite)
     RUN_TEST(log_event_prints_and_logs);
     RUN_TEST(flush_and_zone_helpers_run);
     RUN_TEST(log_routes_to_parent_over_udp_socket);
+    RUN_TEST(log_routes_each_type_to_parent);
     RUN_TEST(status_zone_lifecycle_over_pty);
 }
