@@ -325,6 +325,12 @@ static int put_to_pool(file_possibility_t *pool, array_possibility_packet *possi
 		if(currfile >= NB_FILE_POSSIBILITY)
 		{
 			currfile = 0;
+			// On ne cède le CPU que quand un tour complet des NB_FILE_POSSIBILITY
+			// files n'a permis de verrouiller aucune d'entre elles : le cas
+			// nominal (trylock réussi dès le premier essai) sort de la boucle
+			// via addpossibility avant même d'atteindre ce wraparound. Même
+			// motif que add_possibility_analysed.
+			usleep(MICRO_SLEEP);
 		}
 	}
 	return 0;
@@ -987,7 +993,18 @@ static void scroll_from_pool(file_possibility_t *pool, array_possibility_packet 
 				}
 			}
 		}
-		
+
+		if(getpossibility == 0)
+		{
+			// Le for ci-dessus n'a réussi aucun trylock sur les files restant à
+			// tester (sinon getpossibility serait passé à 1 et aurait stoppé le
+			// for) : un tour complet s'est fait sans le moindre verrou. On cède
+			// le CPU uniquement dans ce cas ; le cas nominal (verrou pris dès le
+			// premier essai) ne passe jamais par ici. Même motif que
+			// add_possibility_analysed.
+			usleep(MICRO_SLEEP);
+		}
+
 		if(getpossibility == 1 && result->size == 0)
 		{
 			int all_tested = 1;
@@ -999,7 +1016,7 @@ static void scroll_from_pool(file_possibility_t *pool, array_possibility_packet 
 					break;
 				}
 			}
-			
+
 			if(all_tested == 0)
 			{
 				getpossibility = 0;
