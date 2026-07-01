@@ -113,7 +113,13 @@ int scroll_fifo (File * suite, void *dest){
 	free (result);
 	free (supp_element);
 	suite->size--;
-	
+
+	if(suite->size == 0)
+	{
+		suite->start = NULL;
+		suite->end = NULL;
+	}
+
 	return 1;
 }
 

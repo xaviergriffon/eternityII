@@ -73,6 +73,37 @@ TEST file_scroll_fifo_is_fifo(void)
     PASS();
 }
 
+/* Après avoir vidé une file par scroll_fifo, put() doit repartir d'une file
+ * réellement vide (start == end == NULL) : sinon suite->end pointe vers un
+ * Element déjà libéré (use-after-free) et le put() suivant plante ou
+ * corrompt la mémoire au lieu de recréer un premier élément. */
+TEST file_scroll_fifo_resets_end_after_emptying(void)
+{
+    File f;
+    init_file(&f, sizeof(int));
+
+    for (int i = 1; i <= 3; i++) {
+        put(&f, &i);
+    }
+
+    int v;
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ_FMT(1, scroll_fifo(&f, &v), "%d");
+    }
+    ASSERT(f.size == 0);
+    ASSERT(f.start == NULL);
+    ASSERT(f.end == NULL);
+
+    int again = 42;
+    ASSERT_EQ_FMT(1, put(&f, &again), "%d");
+    ASSERT(f.size == 1);
+
+    ASSERT_EQ_FMT(1, scroll_fifo(&f, &v), "%d");
+    ASSERT_EQ_FMT(42, v, "%d");
+    ASSERT(f.size == 0);
+    PASS();
+}
+
 /* move_before déplace un élément juste avant un autre : [1,2,3] -> 3 avant 1 -> [3,1,2]. */
 TEST file_move_before_reorders(void)
 {
@@ -305,6 +336,7 @@ SUITE(lifo_suite)
     RUN_TEST(file_put_then_scroll_is_lifo);
     RUN_TEST(file_scroll_on_empty_returns_zero);
     RUN_TEST(file_scroll_fifo_is_fifo);
+    RUN_TEST(file_scroll_fifo_resets_end_after_emptying);
     RUN_TEST(file_move_before_reorders);
     RUN_TEST(file_move_after_reorders);
     RUN_TEST(file_move_ignores_null_args);
