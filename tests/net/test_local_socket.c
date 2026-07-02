@@ -169,6 +169,47 @@ TEST send_command_to_childs_sendto_fails(void)
     PASS();
 }
 
+/* build_udp_local_socket : le fd du socket ne doit PAS fuir quand bind()
+ * échoue après la création du socket. On répète l'échec ~50 fois (même
+ * chemin invalide : répertoire parent absent) puis on ouvre un vrai fichier
+ * : si chaque appel avait fui son fd, le numéro obtenu ici serait décalé
+ * d'environ 50 par rapport à la baseline. On vérifie qu'il en reste proche
+ * (fuite cumulée absente). Couvre le close(socket_id) ajouté sur les
+ * chemins d'erreur remove()/bind() de build_udp_local_socket. */
+TEST build_udp_local_socket_does_not_leak_fd_on_bind_failure(void)
+{
+    const char *path = "/tmp/etii_ls_no_such_parent_dir_leak/sock";
+
+    /* Baseline : fd d'un fichier ouvert avant la boucle d'échecs. */
+    char baseline_path[] = "/tmp/etii_ls_leak_baseline_XXXXXX";
+    int baseline_fd = mkstemp(baseline_path);
+    ASSERT(baseline_fd >= 0);
+
+    for (int i = 0; i < 50; i++) {
+        struct sockaddr_un *addr = build_sockaddr(path);
+        int fd = build_udp_local_socket(addr);
+        ASSERT_EQ_FMT(-1, fd, "%d"); /* bind échoue : répertoire parent absent */
+        free(addr);
+    }
+
+    /* Si les 50 tentatives avaient fui leur fd, celui-ci serait très au-delà
+     * de la baseline. Sans fuite, l'écart reste faible (quelques fds tout au
+     * plus, pour d'éventuelles ressources internes du runner de test). */
+    char probe_path[] = "/tmp/etii_ls_leak_probe_XXXXXX";
+    int probe_fd = mkstemp(probe_path);
+    ASSERT(probe_fd >= 0);
+
+    int gap = probe_fd - baseline_fd;
+    ASSERT(gap >= 0);
+    ASSERT(gap < 10); /* bien en-deçà des 50 fuites possibles si close() manquait */
+
+    close(baseline_fd);
+    close(probe_fd);
+    unlink(baseline_path);
+    unlink(probe_path);
+    PASS();
+}
+
 SUITE(local_socket_suite)
 {
     RUN_TEST(build_sockaddr_sets_family_and_path);
@@ -177,4 +218,5 @@ SUITE(local_socket_suite)
     RUN_TEST(send_command_to_childs_noop_when_not_parent);
     RUN_TEST(build_udp_local_socket_bind_fails);
     RUN_TEST(send_command_to_childs_sendto_fails);
+    RUN_TEST(build_udp_local_socket_does_not_leak_fd_on_bind_failure);
 }
