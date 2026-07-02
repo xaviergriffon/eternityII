@@ -895,7 +895,19 @@ static int autoprune_step(client_possibility_t *client)
         counters[client->compteur]++;
         int has_next = possibility_all_has_a_next(&work, client->map_part, client->all_rotate_part);
         if (work.alloc >= ETERN_PARTS)
-            checkIfResultFound(&work, client->all_rotate_part); /* exits si solution complète */
+        {
+            // Plateau complété par les placements forcés du contrôle : solution.
+            // Comme le pruner GPU : record_solution notifie le serveur
+            // (INST_SOLUTION, synchrone) et ne sort qu'avec --stop-on-solution ;
+            // sinon on poursuit le lot. Le plateau complet n'est pas remis en
+            // circulation (plus rien à explorer). L'ancien checkIfResultFound
+            // sortait inconditionnellement : serveur jamais prévenu (pas d'arrêt
+            // ni de backup avec --stop-on-solution côté serveur), lot jamais
+            // acquitté, mode « continuer » ignoré.
+            record_solution(client, &work);
+            a++;
+            continue;
+        }
         if (work.checked || has_next)
         {
             work.checked = 1;
@@ -1063,8 +1075,10 @@ void *autoprune_gpu (void *userdata)
                     int cpu_alive = cpu.checked
                         ? 1
                         : possibility_all_has_a_next(&cpu, client->map_part, client->all_rotate_part);
-                    if (cpu.alloc >= ETERN_PARTS)
-                        checkIfResultFound(&cpu, client->all_rotate_part); /* exits si solution complète */
+                    // Pas de checkIfResultFound ici : un plateau complété est
+                    // traité par la boucle principale ci-dessous (record_solution,
+                    // qui notifie le serveur) ; sortir pendant la vérification
+                    // croisée tuerait le processus avant cet enregistrement.
                     if ((cpu_alive ? 1 : 0) != (alive[a] ? 1 : 0))
                     {
                         log_error("gpu_pruner VERIFY: divergence vivant/mort paquet %d : gpu=%d cpu=%d\n",
