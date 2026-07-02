@@ -186,8 +186,18 @@ int backup_interpreter(void) {
         sprintf(temp, "%s_%i", def_analyse_file, getpid());
         def_analyse_file = temp;
     }
-    backup(def_file);
-    backup_analysed(def_analyse_file);
+    int rb = backup(def_file);
+    if (rb == BACKUP_SKIPPED_MAINTENANCE) {
+        log_info("backup de %s sauté (maintenance en cours)\n", def_file);
+    } else if (rb != BACKUP_OK) {
+        log_info("backup de %s échoué\n", def_file);
+    }
+    int rba = backup_analysed(def_analyse_file);
+    if (rba == BACKUP_SKIPPED_MAINTENANCE) {
+        log_info("backup de %s sauté (maintenance en cours)\n", def_analyse_file);
+    } else if (rba != BACKUP_OK) {
+        log_info("backup de %s échoué\n", def_analyse_file);
+    }
     log_info("backup ended\n");
     if (isServer == 0) {
         free(def_file);

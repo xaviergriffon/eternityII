@@ -22,7 +22,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <glob.h>
+#include <limits.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -286,6 +288,117 @@ TEST backup_and_import_return_error_on_bad_path(void)
     ASSERT_EQ_FMT(-1, rra, "%d"); /* restore_analysed : idem                   */
 
     drain_all();
+    PASS();
+}
+
+/* backup()/backup_analysed() écrivent d'abord dans "<filename>.tmp" puis
+ * rename() atomiquement vers filename : un backup réussi ne doit laisser
+ * aucun ".tmp" résiduel dans le répertoire. */
+TEST backup_leaves_no_residual_tmp_file(void)
+{
+    drain_datamanager();
+    int allocs[] = { 1, 2 };
+    add_packets(allocs, 2);
+
+    char dir_template[] = "/tmp/etii_backup_tmp_XXXXXX";
+    ASSERT(mkdtemp(dir_template) != NULL);
+
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/store.back", dir_template);
+    char tmp_path[PATH_MAX];
+    snprintf(tmp_path, sizeof tmp_path, "%s.tmp", path);
+
+    ASSERT_EQ_FMT(BACKUP_OK, backup(path), "%d");
+
+    struct stat st;
+    ASSERT_EQ_FMT(0, stat(path, &st), "%d");       /* le fichier final existe    */
+    ASSERT(stat(tmp_path, &st) != 0);              /* pas de .tmp résiduel       */
+
+    unlink(path);
+    rmdir(dir_template);
+    drain_datamanager();
+    PASS();
+}
+
+/* Une sauvegarde déclenchée pendant une maintenance en cours (lock_all_file,
+ * comme le fait déjà un backup/tri/regroup concurrent) doit être sautée — pas
+ * silencieusement réussie — et ne doit créer aucun fichier cible. Avant le
+ * correctif, backup()/backup_analysed() renvoyaient 0 (succès) dans ce cas. */
+TEST backup_skipped_during_maintenance_reports_distinct_code(void)
+{
+    drain_all();
+    int allocs[] = { 1 };
+    add_packets(allocs, 1);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 2;
+    add_possibility_analysed(&pk, 0);
+
+    char dir_template[] = "/tmp/etii_backup_maint_XXXXXX";
+    ASSERT(mkdtemp(dir_template) != NULL);
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/store.back", dir_template);
+    char path_an[PATH_MAX];
+    snprintf(path_an, sizeof path_an, "%s/analysed.back", dir_template);
+
+    lock_all_file(); /* simule une maintenance déjà en cours (positionne `maintenance`) */
+    int rb  = backup(path);
+    int rba = backup_analysed(path_an);
+    unlock_all_file();
+
+    ASSERT_EQ_FMT(BACKUP_SKIPPED_MAINTENANCE, rb,  "%d");
+    ASSERT_EQ_FMT(BACKUP_SKIPPED_MAINTENANCE, rba, "%d");
+
+    struct stat st;
+    ASSERT(stat(path, &st) != 0);    /* le fichier cible n'a pas été créé */
+    ASSERT(stat(path_an, &st) != 0);
+
+    rmdir(dir_template);
+    drain_all();
+    PASS();
+}
+
+/* Un backup réussi suivi d'un backup vers un chemin invalide (répertoire
+ * inexistant) ne doit pas altérer la sauvegarde précédente : le fichier
+ * temporaire échoue seul, le rename() n'a jamais lieu. */
+TEST backup_failure_preserves_previous_file(void)
+{
+    drain_datamanager();
+    int allocs[] = { 7, 8, 9 };
+    add_packets(allocs, 3);
+
+    char dir_template[] = "/tmp/etii_backup_prev_XXXXXX";
+    ASSERT(mkdtemp(dir_template) != NULL);
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/store.back", dir_template);
+
+    ASSERT_EQ_FMT(BACKUP_OK, backup(path), "%d");
+
+    struct stat before;
+    ASSERT_EQ_FMT(0, stat(path, &before), "%d");
+
+    /* Deuxième backup vers un sous-répertoire inexistant : doit échouer sans
+     * toucher au fichier existant (même nom que la sauvegarde précédente). */
+    char bad_path[PATH_MAX];
+    snprintf(bad_path, sizeof bad_path, "%s/missing_subdir/store.back", dir_template);
+    silence_std();
+    int rb = backup(bad_path);
+    restore_std();
+    ASSERT_EQ_FMT(BACKUP_ERROR, rb, "%d");
+
+    /* Le fichier original (même chemin cible) n'a pas bougé. */
+    struct stat after;
+    ASSERT_EQ_FMT(0, stat(path, &after), "%d");
+    ASSERT_EQ_FMT((long long)before.st_size, (long long)after.st_size, "%lld");
+
+    /* Round-trip : le contenu précédent est toujours restaurable intact. */
+    drain_datamanager();
+    ASSERT_EQ_FMT(0, restore(path), "%d");
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+
+    unlink(path);
+    rmdir(dir_template);
+    drain_datamanager();
     PASS();
 }
 
@@ -1967,6 +2080,9 @@ SUITE(datamanager_suite)
     RUN_TEST(backup_then_restore_preserves_count);
     RUN_TEST(restore_missing_file_returns_error);
     RUN_TEST(backup_and_import_return_error_on_bad_path);
+    RUN_TEST(backup_leaves_no_residual_tmp_file);
+    RUN_TEST(backup_skipped_during_maintenance_reports_distinct_code);
+    RUN_TEST(backup_failure_preserves_previous_file);
     RUN_TEST(split_then_regroup_preserves_count);
     RUN_TEST(checked_possibility_goes_to_checked_pool);
     RUN_TEST(analysed_add_and_restock);
