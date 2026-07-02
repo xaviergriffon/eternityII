@@ -753,6 +753,35 @@ TEST step_analysed_batch_out_of_bounds_stops(void)
     PASS();
 }
 
+/* INST_SOLUTION : réception incomplète (flux tronqué puis fermé) — même
+ * durcissement que INST_ADD ci-dessus : recv_all ne peut renvoyer un résultat
+ * court que sur EOF/erreur socket, donc le flux est irrécupérable et la
+ * session doit se clore (avant le fix : elle envoyait INST_ERROR et
+ * continuait sur un flux mort). */
+TEST step_solution_incomplete_stops(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    char fragment[8];
+    memset(fragment, 0, sizeof fragment);
+    ASSERT_EQ((ssize_t)sizeof fragment, write(sv[1], fragment, sizeof fragment));
+    close(sv[1]);
+
+    int cont = communicate_with_client_step(&client, INST_SOLUTION, &last, &vsupp);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+
+    close(sv[0]);
+    PASS();
+}
+
 /* ---------- should_autobackup -------------------------------------------- */
 /*
  * Cadence de la sauvegarde automatique : tous les 6 tours ET seulement si le
@@ -855,6 +884,7 @@ SUITE(etii_server_suite)
     RUN_TEST(step_get_to_check_batch_empty_returns_zero);
     RUN_TEST(step_analysed_batch_acks);
     RUN_TEST(step_analysed_batch_out_of_bounds_stops);
+    RUN_TEST(step_solution_incomplete_stops);
 
     RUN_TEST(autobackup_increments_below_threshold);
     RUN_TEST(autobackup_fires_at_threshold_when_changed);

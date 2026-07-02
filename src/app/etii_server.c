@@ -535,9 +535,13 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 }
                 // Sinon : on continue à servir ce client.
             } else {
+                // recv_all réassemble les lectures partielles ; un résultat court ne
+                // peut venir que d'un EOF/erreur socket → flux irrécupérable, on clôt
+                // la session (l'ancien recv() brut laissait la fin du paquet dans le
+                // flux, relue ensuite comme des instructions).
                 log_error("réception de la solution incomplète\n");
-                send_instruction(client->socket_id, INST_ERROR);
                 free(sol);
+                return 0;
             }
         } else if (instruction == INST_TEST_CONNECTED) {
             send_instruction(client->socket_id, INST_TEST_CONNECTED);
