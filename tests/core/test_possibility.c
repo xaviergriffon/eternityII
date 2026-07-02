@@ -1145,6 +1145,65 @@ TEST all_has_a_next_dead_cell_returns_zero(void)
 }
 
 #if ETERN_PARTS == 256
+/* Régression : une case totalement non contrainte NE DOIT PAS interrompre le
+ * balayage. Avant le correctif, dès qu'une case libre avait ses 4 clés égales
+ * à all_face (aucun voisin posé, pas de bord), la boucle faisait
+ * `result = 1; break;` et arrêtait d'examiner les cases suivantes du parcours
+ * `directions[]` -- alors qu'une case plus loin peut être morte (voisins posés
+ * dont la combinaison de bords ne correspond à aucune pièce). Ce test
+ * construit exactement ce plateau :
+ *   - c=60 -> (dirx[60],diry[60]) = (1,14) : case intérieure, 4 voisins vides
+ *     -> clé (all_face,all_face,all_face,all_face), satisfiable par
+ *     construction (le compartiment "toute face" contient toutes les pièces).
+ *   - c=67 -> (dirx[67],diry[67]) = (13,13) : case intérieure entourée de 4
+ *     pièces déjà posées dont la combinaison de bords ne correspond à AUCUNE
+ *     pièce du jeu -> impasse.
+ * (1,14) et (13,13) n'ont aucun voisin en commun : le premier reste bien
+ * totalement non contraint quels que soient les voisins placés autour du
+ * second. L'ancien code (break) renvoie 1 sans jamais atteindre c=67 ; le
+ * nouveau code doit poursuivre le balayage et renvoyer 0. */
+TEST all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell(void)
+{
+    struct part parts[] = {
+        { .id = 0 }, /* bouchon */
+        { .id = 1, .top = 9, .right = 9, .bottom = 9, .left = 9 }, /* candidat générique */
+        /* voisins posés autour de la case morte (13,13) -- ids 2..5, faces
+         * choisies pour qu'aucune pièce de rp n'ait simultanément
+         * top=8,right=7,bottom=6,left=6 (clé exacte de (13,13)). */
+        { .id = 2, .top = 0, .right = 0, .bottom = 6, .left = 0 }, /* voisin haut (13,12): bottom=6 -> k1 */
+        { .id = 3, .top = 0, .right = 0, .bottom = 0, .left = 7 }, /* voisin droit (14,13): left=7   -> k2 */
+        { .id = 4, .top = 8, .right = 0, .bottom = 0, .left = 0 }, /* voisin bas (13,14): top=8      -> k3 */
+        { .id = 5, .top = 0, .right = 6, .bottom = 0, .left = 0 }, /* voisin gauche (12,13): right=6 -> k4 */
+    };
+    struct array_part rp = { .size = 7, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2; /* tout libre par défaut */
+
+    /* Cases déjà posées : les 4 voisins de la case morte (13,13). */
+    p->grid[13][12] = 2;
+    p->grid[14][13] = 3;
+    p->grid[13][14] = 4;
+    p->grid[12][13] = 5;
+
+    /* Démarre le balayage à c=60 = (1,14), la première case intérieure du
+     * parcours, non contrainte. c=67 = (13,13) est atteinte plus loin. */
+    p->alloc = 60;
+    ASSERT_EQ_FMT((int8_t)1, dirx[60], "%d");
+    ASSERT_EQ_FMT((int8_t)14, diry[60], "%d");
+    ASSERT_EQ_FMT((int8_t)13, dirx[67], "%d");
+    ASSERT_EQ_FMT((int8_t)13, diry[67], "%d");
+
+    ASSERT_EQ_FMT(0, possibility_all_has_a_next(p, map, &rp), "%d");
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
 /* ------------------------------------------------------------------------- *
  *  Map synthétique 256 pièces (sans pieces.csv) pour tester first_possibility *
  * ------------------------------------------------------------------------- *
@@ -1434,4 +1493,7 @@ SUITE(possibility_suite)
     RUN_TEST(print_possibility_packet_runs);
     RUN_TEST(all_has_a_next_all_filled_returns_one);
     RUN_TEST(all_has_a_next_dead_cell_returns_zero);
+#if ETERN_PARTS == 256
+    RUN_TEST(all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell);
+#endif
 }
