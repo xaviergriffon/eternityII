@@ -14,8 +14,11 @@
  * doubles définitions au link). Ce fichier de test est donc l'unique fournisseur
  * des symboles de etii_search pour tout le binaire de test.
  *
- * Le reste du module (autosearch/autoprune/search_packet_backtracking) reste
- * constitué de boucles de threads, hors périmètre unitaire.
+ * `search_packet_backtracking` reste une boucle chaude de thread, hors
+ * périmètre unitaire. `autosearch`/`autoprune` (les enveloppes de thread
+ * elles-mêmes) sont couvertes en fin de fichier : REQUEST_STOP positionné
+ * avant l'appel fait sortir leur `while` dès le premier tour, sans thread réel
+ * ni fork — même pattern que control_thread/feed_thread_aposs (etii_client.c).
  */
 #include "greatest.h"
 
@@ -1145,6 +1148,85 @@ TEST autoprune_step_complete_board_stop_on_solution_exits(void)
     PASS();
 }
 
+/* ==========================================================================
+ * autosearch / autoprune : les enveloppes de thread elles-mêmes.
+ *
+ * `autosearch_step`/`autoprune_step` (le corps de boucle) sont déjà testés en
+ * détail ci-dessus. Les enveloppes `while (…_step(...)) usleep(...);` ne
+ * l'étaient pas : REQUEST_STOP avant l'appel fait sortir la boucle dès le
+ * premier tour (0 itération), ce qui exerce sans risque l'entrée/sortie de la
+ * fonction (allocation de idParts, libération de delegate_buf) — comme déjà
+ * fait pour control_thread/feed_thread_aposs (etii_client.c). Appel direct,
+ * pas de thread réel : aucune des deux ne bloque tant que REQUEST_STOP est
+ * déjà positionné.
+ * ========================================================================== */
+
+TEST autosearch_stops_immediately_on_request_stop(void)
+{
+    int saved_req = request;
+    request = REQUEST_STOP;
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    pthread_mutex_init(&client.works_mutex, NULL);
+    pthread_mutex_init(&client.socket_mutex, NULL);
+    client.socket_id = -1;
+
+    void *ret = autosearch(&client);
+    ASSERT_EQ(NULL, ret);
+
+    pthread_mutex_destroy(&client.works_mutex);
+    pthread_mutex_destroy(&client.socket_mutex);
+    request = saved_req;
+    PASS();
+}
+
+/* delegate_buf déjà alloué (délégation antérieure) : autosearch doit le
+ * libérer à la sortie, quel que soit le nombre de tours effectués. */
+TEST autosearch_frees_delegate_buffer_on_exit(void)
+{
+    int saved_req = request;
+    request = REQUEST_STOP;
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    pthread_mutex_init(&client.works_mutex, NULL);
+    pthread_mutex_init(&client.socket_mutex, NULL);
+    client.socket_id = -1;
+    client.delegate_buf = malloc(sizeof(struct possibility_packet) * 4);
+    client.delegate_buf_capacity = 4;
+
+    void *ret = autosearch(&client);
+    ASSERT_EQ(NULL, ret);
+    ASSERT_EQ(NULL, client.delegate_buf);
+    ASSERT_EQ_FMT(0, client.delegate_buf_capacity, "%d");
+
+    pthread_mutex_destroy(&client.works_mutex);
+    pthread_mutex_destroy(&client.socket_mutex);
+    request = saved_req;
+    PASS();
+}
+
+TEST autoprune_stops_immediately_on_request_stop(void)
+{
+    int saved_req = request;
+    request = REQUEST_STOP;
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    pthread_mutex_init(&client.works_mutex, NULL);
+    pthread_mutex_init(&client.socket_mutex, NULL);
+    client.socket_id = -1;
+
+    void *ret = autoprune(&client);
+    ASSERT_EQ(NULL, ret);
+
+    pthread_mutex_destroy(&client.works_mutex);
+    pthread_mutex_destroy(&client.socket_mutex);
+    request = saved_req;
+    PASS();
+}
+
 SUITE(etii_search_suite)
 {
     RUN_TEST(delegate_noop_below_threshold);
@@ -1176,4 +1258,8 @@ SUITE(etii_search_suite)
     RUN_TEST(search_backtracking_solves_4x4_and_returns_zero);
     RUN_TEST(search_backtracking_stop_on_solution_exits_success);
 #endif
+
+    RUN_TEST(autosearch_stops_immediately_on_request_stop);
+    RUN_TEST(autosearch_frees_delegate_buffer_on_exit);
+    RUN_TEST(autoprune_stops_immediately_on_request_stop);
 }

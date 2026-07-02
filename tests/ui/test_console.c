@@ -76,7 +76,10 @@ TEST console_returns_on_eof_without_spinning(void)
         if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); if (dn > 2) close(dn); }
         alarm(5);          /* garde-fou : tue le fils si console() boucle sans fin */
         console(NULL);     /* doit RETOURNER sur EOF (ni exit, ni boucle infinie)  */
-        _exit(0);          /* atteint uniquement si console() est revenue          */
+        /* exit() (pas _exit()) : _exit() sauterait le hook de flush de la
+           couverture de code (gcov/llvm-cov), qui n'enregistrerait alors jamais
+           les lignes du chemin EOF pourtant bien exécutées dans ce fils. */
+        exit(0);
     }
 
     ASSERT(pid > 0);
@@ -146,9 +149,34 @@ TEST console_raw_mode_over_pty_reads_command(void)
     PASS();
 }
 
+/*
+ * run_console() démarre un thread pthread DÉTACHÉ (pas un fork) : rien à
+ * flusher côté couverture de code, pas de fork() à gérer — on redirige juste
+ * le stdin DU PROCESS de test courant vers /dev/null pour que le thread
+ * détaché reçoive un EOF immédiat et se termine vite, puis on restaure stdin.
+ */
+TEST run_console_thread_returns_on_eof(void)
+{
+    fflush(stdout);
+    int saved_stdin = dup(0);
+    ASSERT(saved_stdin >= 0);
+    int devnull = open("/dev/null", O_RDONLY);
+    ASSERT(devnull >= 0);
+    dup2(devnull, 0);
+    close(devnull);
+
+    run_console(0);
+    usleep(50000); /* laisse le thread détaché lire l'EOF et se terminer */
+
+    dup2(saved_stdin, 0);
+    close(saved_stdin);
+    PASS();
+}
+
 SUITE(console_suite)
 {
     RUN_TEST(console_reads_exit_command_and_exits);
     RUN_TEST(console_returns_on_eof_without_spinning);
     RUN_TEST(console_raw_mode_over_pty_reads_command);
+    RUN_TEST(run_console_thread_returns_on_eof);
 }
