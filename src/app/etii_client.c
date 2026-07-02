@@ -537,40 +537,35 @@ char *build_thread_queues_table(unsigned long long *out_stock,
 }
 
 /**
- * @brief Thread de statistiques du client (lancé par `run_checker`).
+ * @brief Un tour de la boucle de `check_client_threads` (corps extrait pour être
+ *        testable hors thread, comme `check_server_step`).
  *
- * Toutes les 10 secondes, collecte et formate dans un buffer local, puis
- * publie dans `lastcheck` via `lastcheck_publish()` :
- * - la taille de chaque file de possibilités,
- * - les statistiques de chaque processus fork (vitesse, stock),
- * - le nombre global de traitements par seconde et le meilleur résultat atteint.
+ * Construit et publie le rapport de statistiques client (files par fork,
+ * forward-check, pruner), met à jour le bandeau `log_status` et détecte un
+ * nouveau record. Ne contient PAS le `sleep(sleep_time)` de fin de tour :
+ * c'est l'appelant (la boucle `while(1)` de `check_client_threads`) qui
+ * rythme les tours.
  *
- * @param param Non utilisé.
- * @return      NULL (boucle infinie).
+ * @param last_record In/out : meilleur résultat déjà annoncé (détection de record).
  */
-void *check_client_threads(void *param)
+void check_client_threads_step(int *last_record)
 {
-    (void)param;
-    int sleep_time = 10;
-    int last_record = max_result;
-    while(1)
-    {
-        // Les buffers de stats sont dimensionnés selon NB_THREADS : une ligne
-        // de tableau par fork. Avec un buffer FIXE, un NB_THREADS élevé (ex.
-        // 100) débordait et corrompait le tas ("double free or corruption" /
-        // abort). On alloue donc en fonction du nombre de forks (+ marge pour
-        // l'en-tête, le pied de tableau et les lignes forward-check / pruner /
-        // résumé concaténées dans le rapport).
-        //
-        // Rapport construit dans un buffer LOCAL (jamais dans `lastcheck`
-        // directement) : les strcat/sprintf qui suivent ne touchent aucun état
-        // partagé, donc aucun besoin de tenir un verrou pendant leur exécution.
-        // `lastcheck_publish()` n'est appelée qu'une fois le rapport complet,
-        // ce qui réduit la section critique au seul échange de pointeur (voir
-        // static_variables.h pour le détail de la race corrigée).
-        size_t table_size = 256 + (size_t)NB_THREADS * 80;
-        size_t lastcheck_size = table_size + 4096;
-        char *report = calloc(lastcheck_size, sizeof(char));
+    // Les buffers de stats sont dimensionnés selon NB_THREADS : une ligne
+    // de tableau par fork. Avec un buffer FIXE, un NB_THREADS élevé (ex.
+    // 100) débordait et corrompait le tas ("double free or corruption" /
+    // abort). On alloue donc en fonction du nombre de forks (+ marge pour
+    // l'en-tête, le pied de tableau et les lignes forward-check / pruner /
+    // résumé concaténées dans le rapport).
+    //
+    // Rapport construit dans un buffer LOCAL (jamais dans `lastcheck`
+    // directement) : les strcat/sprintf qui suivent ne touchent aucun état
+    // partagé, donc aucun besoin de tenir un verrou pendant leur exécution.
+    // `lastcheck_publish()` n'est appelée qu'une fois le rapport complet,
+    // ce qui réduit la section critique au seul échange de pointeur (voir
+    // static_variables.h pour le détail de la race corrigée).
+    size_t table_size = 256 + (size_t)NB_THREADS * 80;
+    size_t lastcheck_size = table_size + 4096;
+    char *report = calloc(lastcheck_size, sizeof(char));
 
         // Côté client, le travail tourne dans les processus fork (mémoire séparée
         // après fork) : les files locales du parent sont vides. La donnée réelle
@@ -661,11 +656,28 @@ void *check_client_threads(void *param)
                        max_result, ETERN_PARTS, limit_str);
         }
 
-        if (max_result > last_record) {
-            last_record = max_result;
+        if (max_result > *last_record) {
+            *last_record = max_result;
             log_event("new record: %i pieces placed", max_result);
         }
+}
 
+/**
+ * @brief Thread de statistiques du client (lancé par `run_checker`).
+ *
+ * Toutes les 10 secondes, appelle `check_client_threads_step` puis dort.
+ *
+ * @param param Non utilisé.
+ * @return      NULL (boucle infinie).
+ */
+void *check_client_threads(void *param)
+{
+    (void)param;
+    int sleep_time = 10;
+    int last_record = max_result;
+    while(1)
+    {
+        check_client_threads_step(&last_record);
         sleep(sleep_time);
     }
 

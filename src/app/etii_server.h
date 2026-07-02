@@ -54,6 +54,16 @@ void runserver(const char* file);
 void *check_server(void *param);
 
 /**
+ * @brief Un tour de la boucle de `check_server` (rapport + autobackup), sans le
+ *        `sleep` de fin de tour.
+ *
+ * Extrait pour être testable hors thread. Voir etii_server.c pour le détail
+ * des paramètres in/out (état persistant d'un tour à l'autre).
+ */
+void check_server_step(unsigned long long *lastactive, unsigned long long *lastClientsFileUpdateBackup,
+                       int *lastBack, int *last_record, int sleep_time);
+
+/**
  * @brief Borne le nombre de possibilités demandées en lot par un pruner.
  *
  * Fonction pure : garantit `1 ≤ result ≤ PRUNER_BATCH_MAX`.
