@@ -60,15 +60,17 @@ int build_udp_local_socket(struct sockaddr_un *svaddr) {
 
     if (remove(svaddr->sun_path) == -1 && errno != ENOENT) {
         log_errno("Error on remove-%s => ", svaddr->sun_path);
+        close(socket_id);
         return -1;
     }
 
     socklen_t addr_len = size_of_sockaddr_un(svaddr);
     if (bind(socket_id, (struct sockaddr *) svaddr, addr_len) == -1) {
         log_errno("Error on bind for %s => ", svaddr->sun_path);
+        close(socket_id);
         return -1;
     }
-    
+
     return socket_id;
 }
 

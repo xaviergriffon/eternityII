@@ -58,9 +58,16 @@ int put (File * suite, void *value);
 /**
  * @brief Ajoute un élément en fin du tableau dynamique, en l'agrandissant si nécessaire.
  *
+ * Contrat d'échec (OOM) : **NULL = échec, table inchangée.** Si l'allocation
+ * nécessaire (initiale ou d'agrandissement) échoue, la fonction retourne NULL
+ * sans modifier `table` (buffer, `size` et `realsize` restent tels qu'avant
+ * l'appel). Tout appelant DOIT tester le retour avant de le déréférencer ;
+ * en cas de NULL, la valeur à insérer n'a pas été prise en compte.
+ *
  * @param table Tableau cible.
  * @param value Pointeur vers la valeur à copier.
- * @return      Pointeur vers la copie insérée dans le tableau.
+ * @return      Pointeur vers la copie insérée dans le tableau, ou NULL si
+ *              l'allocation nécessaire a échoué (table inchangée).
  */
 void *put_big_table(big_table *table, void *value);
 
