@@ -1103,6 +1103,37 @@ TEST print_possibility_packet_runs(void)
     PASS();
 }
 
+/* Régression : grille entièrement remplie du pire cas en largeur d'affichage
+ * — id tourné maximal 4*ETERN_PARTS (id + ETERN_PARTS*rotation, cf.
+ * id_for_rotated_part), 4 chiffres par case en build 256. L'ancien budget du
+ * buffer de print_possibility_packet (5 chars/case, commentaire "3 chiffres +
+ * espace + virgule") était sous-dimensionné pour ce cas et débordait le tas ;
+ * ce test doit rester silencieux sous ASan (make test ASAN=1). */
+TEST print_possibility_packet_survives_max_width_grid(void)
+{
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = ETERN_PARTS;
+    p->x = 0; p->y = 0;
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = 4 * ETERN_PARTS; /* pire cas en largeur (4 chiffres en build 256) */
+
+    int saved = dup(1);
+    int devnull = open("/dev/null", O_WRONLY);
+    dup2(devnull, 1);
+
+    int ret = print_possibility_packet(p);
+
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    close(devnull);
+
+    ASSERT_EQ_FMT(0, ret, "%d");
+    free(p);
+    PASS();
+}
+
 /* --------------------------------------------------------------------------
  * possibility_all_has_a_next : toutes les cases libres ont-elles une suite ?
  * ------------------------------------------------------------------------ */
@@ -1432,6 +1463,7 @@ SUITE(possibility_suite)
     RUN_TEST(search_big_table_prunes_dead_branches);
     RUN_TEST(what_search_to_key_empty_and_placed_neighbor);
     RUN_TEST(print_possibility_packet_runs);
+    RUN_TEST(print_possibility_packet_survives_max_width_grid);
     RUN_TEST(all_has_a_next_all_filled_returns_one);
     RUN_TEST(all_has_a_next_dead_cell_returns_zero);
 }
