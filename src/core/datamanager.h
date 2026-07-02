@@ -113,7 +113,7 @@ unsigned long long datas_size(void);
 
 /**
  * @brief Renseigne l'IP du serveur
- * 
+ *
  * @param server IP du serveur au format texte.
  */
 void set_server_ip(const char *server);
@@ -121,19 +121,42 @@ void set_server_ip(const char *server);
  * @return l'IP du serveur
  */
 char *get_server_ip(void);
+
+/** @brief Code de retour de `backup`/`backup_analysed` : sauvegarde effectuée. */
+#define BACKUP_OK 0
+/** @brief Code de retour de `backup`/`backup_analysed` : échec (I/O, fopen, fwrite, rename…). */
+#define BACKUP_ERROR (-1)
 /**
- * @brief Effectue une sauvegarde fichier des files de possiblités
- * 
+ * @brief Code de retour de `backup`/`backup_analysed` : sauvegarde sautée car une
+ * maintenance (tri, regroup, autre backup…) était déjà en cours (`maintenance` != 0).
+ * Le fichier cible n'est ni créé ni modifié : l'ancienne sauvegarde reste intacte.
+ * Les appelants critiques (arrêt sur solution, autobackup, commande console) doivent
+ * journaliser ce cas : il ne s'agit PAS d'un succès silencieux.
+ */
+#define BACKUP_SKIPPED_MAINTENANCE 1
+
+/**
+ * @brief Effectue une sauvegarde fichier des files de possiblités.
+ *
+ * Écrit dans un fichier temporaire (`<filename>.tmp`, même répertoire) puis le
+ * bascule atomiquement (`rename`) vers `filename` : un crash pendant l'écriture
+ * ne corrompt jamais la sauvegarde précédente. `fwrite`/`fclose` sont contrôlés ;
+ * en cas d'échec le `.tmp` est supprimé et `filename` reste inchangé.
+ *
  * @param filename nom du fichier dans lequel faire la sauvegarde
- * @return 0 si OK ou -1 en cas d'erreur
+ * @return BACKUP_OK (0) si la sauvegarde a été écrite et publiée,
+ *         BACKUP_SKIPPED_MAINTENANCE (1) si elle a été sautée (maintenance en cours,
+ *         fichier cible non touché), BACKUP_ERROR (-1) en cas d'erreur d'E/S.
  */
 int backup(char *filename);
 /**
  * @brief Effectue une sauvegarde fichier des possibilités en cours d'anlayse.
  * Les possibilités en cours d'analyse sont les possibilités fournies par le serveur.
- * 
+ *
+ * Mêmes garanties atomiques que `backup` (fichier temporaire + rename).
+ *
  * @param filename nom du fichier dans lequel faire la sauvegarde
- * @return 0 si OK ou -1 en cas d'erreur 
+ * @return BACKUP_OK (0), BACKUP_SKIPPED_MAINTENANCE (1) ou BACKUP_ERROR (-1) — voir `backup`.
  */
 int backup_analysed(char *filename);
 /**

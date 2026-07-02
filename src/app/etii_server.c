@@ -195,8 +195,18 @@ void *check_server(void *param)
 
         if (should_autobackup(&lastBack, &lastClientsFileUpdateBackup, clientsFileUpdates))
         {
-            backup("./temp.back");
-            backup_analysed("./temp_analysed.back");
+            int rb = backup("./temp.back");
+            if (rb == BACKUP_SKIPPED_MAINTENANCE) {
+                log_error("autobackup : sauté (maintenance en cours) sur ./temp.back\n");
+            } else if (rb != BACKUP_OK) {
+                log_error("autobackup : échec sur ./temp.back\n");
+            }
+            int rba = backup_analysed("./temp_analysed.back");
+            if (rba == BACKUP_SKIPPED_MAINTENANCE) {
+                log_error("autobackup : sauté (maintenance en cours) sur ./temp_analysed.back\n");
+            } else if (rba != BACKUP_OK) {
+                log_error("autobackup : échec sur ./temp_analysed.back\n");
+            }
         }
         sleep(sleep_time);
     }
@@ -493,8 +503,21 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                         // Sauvegarde du stock sous les noms par défaut de `restore`
                         // (./eternityII.back, ./eternityII-in_analyse.back) : aucun
                         // travail perdu, le serveur peut reprendre au redémarrage.
-                        backup("./eternityII.back");
-                        backup_analysed("./eternityII-in_analyse.back");
+                        // Codes de retour non ignorés : un arrêt sur solution qui
+                        // croirait à tort avoir sauvegardé le stock serait un piège
+                        // classique de reprise sur crash.
+                        int rb = backup("./eternityII.back");
+                        if (rb == BACKUP_SKIPPED_MAINTENANCE) {
+                            log_error("arrêt sur solution : backup sauté (maintenance en cours) sur ./eternityII.back\n");
+                        } else if (rb != BACKUP_OK) {
+                            log_error("arrêt sur solution : échec du backup sur ./eternityII.back\n");
+                        }
+                        int rba = backup_analysed("./eternityII-in_analyse.back");
+                        if (rba == BACKUP_SKIPPED_MAINTENANCE) {
+                            log_error("arrêt sur solution : backup sauté (maintenance en cours) sur ./eternityII-in_analyse.back\n");
+                        } else if (rba != BACKUP_OK) {
+                            log_error("arrêt sur solution : échec du backup sur ./eternityII-in_analyse.back\n");
+                        }
                         log_event("serveur arrêté suite à la solution (stock sauvegardé)");
                         log_info("serveur arrêté suite à la solution — stock sauvegardé\n");
                         flush_info();

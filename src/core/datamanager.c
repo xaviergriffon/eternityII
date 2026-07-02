@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <netdb.h>
+#include <unistd.h>
 
 #include "ui/logger.h"
 #include "app/static_variables.h"
@@ -1192,50 +1193,107 @@ void unlock_all_file(void)
 	maintenance = 0;
 }
 
+/**
+ * @brief Construit le nom du fichier temporaire utilisé pour une sauvegarde atomique.
+ *
+ * Alloue `strlen(filename) + 5` octets (suffixe ".tmp" + '\0') ; l'appelant doit
+ * `free()` le résultat.
+ */
+static char *backup_tmp_path(const char *filename)
+{
+	size_t len = strlen(filename);
+	char *tmp = malloc(len + 5); // ".tmp" + '\0'
+	if (tmp != NULL)
+	{
+		memcpy(tmp, filename, len);
+		memcpy(tmp + len, ".tmp", 5);
+	}
+	return tmp;
+}
+
 int backup(char *filename)
 {
-	if(!maintenance)
+	if(maintenance)
 	{
-		FILE *f = fopen(filename, "w");
-		if(!f)
-		{
-			log_error("backup file :%s",filename);
-			perror("fopen()");
-			return -1;
-		}
-		
-		lock_all_file();
-		int fp;
-		for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
-		{
-			Element *currElement = file_possibility[fp].file.start;
-			while(currElement != NULL)
-			{
-				if(currElement->value != NULL)
-				{
-					struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-					fwrite(possibility, sizeof(struct possibility_packet), 1, f);
-				}
-				currElement = currElement->next;
-			}
-			// Pool vérifié : le flag `checked` est dans le paquet, la restauration
-			// re-routera automatiquement chaque possibilité dans le bon pool.
-			currElement = file_possibility_checked[fp].file.start;
-			while(currElement != NULL)
-			{
-				if(currElement->value != NULL)
-				{
-					struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-					fwrite(possibility, sizeof(struct possibility_packet), 1, f);
-				}
-				currElement = currElement->next;
-			}
-		}
-		unlock_all_file();
-		
-		fclose(f);
+		return BACKUP_SKIPPED_MAINTENANCE;
 	}
-	return 0;
+
+	char *tmp_filename = backup_tmp_path(filename);
+	if(!tmp_filename)
+	{
+		log_error("backup file :%s (malloc échoué)\n", filename);
+		return BACKUP_ERROR;
+	}
+
+	FILE *f = fopen(tmp_filename, "w");
+	if(!f)
+	{
+		log_error("backup file :%s",tmp_filename);
+		perror("fopen()");
+		free(tmp_filename);
+		return BACKUP_ERROR;
+	}
+
+	int write_error = 0;
+	lock_all_file();
+	int fp;
+	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		Element *currElement = file_possibility[fp].file.start;
+		while(currElement != NULL)
+		{
+			if(currElement->value != NULL)
+			{
+				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				if(fwrite(possibility, sizeof(struct possibility_packet), 1, f) != 1)
+				{
+					write_error = 1;
+				}
+			}
+			currElement = currElement->next;
+		}
+		// Pool vérifié : le flag `checked` est dans le paquet, la restauration
+		// re-routera automatiquement chaque possibilité dans le bon pool.
+		currElement = file_possibility_checked[fp].file.start;
+		while(currElement != NULL)
+		{
+			if(currElement->value != NULL)
+			{
+				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				if(fwrite(possibility, sizeof(struct possibility_packet), 1, f) != 1)
+				{
+					write_error = 1;
+				}
+			}
+			currElement = currElement->next;
+		}
+	}
+	unlock_all_file();
+
+	if(fclose(f) != 0)
+	{
+		write_error = 1;
+	}
+
+	if(write_error)
+	{
+		log_error("backup file :%s (écriture incomplète)\n", tmp_filename);
+		unlink(tmp_filename);
+		free(tmp_filename);
+		return BACKUP_ERROR;
+	}
+
+	if(rename(tmp_filename, filename) != 0)
+	{
+		log_error("backup file :%s -> %s (rename)",tmp_filename, filename);
+		perror("rename()");
+		unlink(tmp_filename);
+		free(tmp_filename);
+		return BACKUP_ERROR;
+	}
+
+	free(tmp_filename);
+	return BACKUP_OK;
 }
 
 /**
@@ -1268,36 +1326,72 @@ void unlock_all_file_analysed(void)
 
 int backup_analysed(char *filename)
 {
-	if(!maintenance)
+	if(maintenance)
 	{
-		FILE *f = fopen(filename, "w");
-		if(!f)
-		{
-			log_error("backup_analysed file :%s",filename);
-			perror("fopen()");
-			return -1;
-		}
-		
-		lock_all_file_analysed();
-		int fp;
-		for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
-		{
-			Element *currElement = file_possibility_analysed[fp].file.start;
-			while(currElement != NULL)
-			{
-				if(currElement->value != NULL)
-				{
-					struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-					fwrite(possibility, sizeof(struct possibility_packet), 1, f);
-				}
-				currElement = currElement->next;
-			}
-		}
-		unlock_all_file_analysed();
-		
-		fclose(f);
+		return BACKUP_SKIPPED_MAINTENANCE;
 	}
-	return 0;
+
+	char *tmp_filename = backup_tmp_path(filename);
+	if(!tmp_filename)
+	{
+		log_error("backup_analysed file :%s (malloc échoué)\n", filename);
+		return BACKUP_ERROR;
+	}
+
+	FILE *f = fopen(tmp_filename, "w");
+	if(!f)
+	{
+		log_error("backup_analysed file :%s",tmp_filename);
+		perror("fopen()");
+		free(tmp_filename);
+		return BACKUP_ERROR;
+	}
+
+	int write_error = 0;
+	lock_all_file_analysed();
+	int fp;
+	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		Element *currElement = file_possibility_analysed[fp].file.start;
+		while(currElement != NULL)
+		{
+			if(currElement->value != NULL)
+			{
+				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				if(fwrite(possibility, sizeof(struct possibility_packet), 1, f) != 1)
+				{
+					write_error = 1;
+				}
+			}
+			currElement = currElement->next;
+		}
+	}
+	unlock_all_file_analysed();
+
+	if(fclose(f) != 0)
+	{
+		write_error = 1;
+	}
+
+	if(write_error)
+	{
+		log_error("backup_analysed file :%s (écriture incomplète)\n", tmp_filename);
+		unlink(tmp_filename);
+		free(tmp_filename);
+		return BACKUP_ERROR;
+	}
+
+	if(rename(tmp_filename, filename) != 0)
+	{
+		log_error("backup_analysed file :%s -> %s (rename)",tmp_filename, filename);
+		perror("rename()");
+		unlink(tmp_filename);
+		free(tmp_filename);
+		return BACKUP_ERROR;
+	}
+
+	free(tmp_filename);
+	return BACKUP_OK;
 }
 
 int import(client_possibility_t *client_possibility, char *filename)
