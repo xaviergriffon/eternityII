@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "core/lifo.h"
+#include "ui/logger.h"
 
 /**
  * @brief Initialise une `File` vide.
@@ -244,11 +245,28 @@ void file_remove_element(File *suite, Element *element) {
  *
  * Extrait et libère tous les éléments restants, puis libère la `File`.
  *
+ * Si le tampon temporaire utilisé pour dépiler (`scroll`) ne peut être alloué
+ * (OOM), la `File` et ses éléments restants sont tout de même libérés (fuite
+ * évitée), simplement sans passer par `scroll`.
+ *
  * @param suite File à libérer.
  */
 void free_file(File *suite)
 {
 	void *value = malloc(suite->sizeofvalue);
+	if (value == NULL) {
+		log_error("free_file: malloc a échoué (sizeofvalue=%zu) — libération directe des éléments\n",
+		          suite->sizeofvalue);
+		Element *current = suite->start;
+		while (current != NULL) {
+			Element *next = current->next;
+			free(current->value);
+			free(current);
+			current = next;
+		}
+		free(suite);
+		return;
+	}
 	while(suite->size >0)
 	{
 		scroll(suite,value);
@@ -263,6 +281,11 @@ void free_file(File *suite)
  * Alloue un bloc initial de `incrementSize` éléments. Le tableau grossit
  * automatiquement par incréments de `incrementSize` lors des insertions.
  *
+ * Si l'allocation initiale échoue (OOM), la table est laissée dans un état
+ * sûr et détectable : `value = NULL`, `realsize = 0`, `size = 0`. Un appel
+ * ultérieur à `put_big_table` retentera une allocation initiale (cf. son
+ * propre contrat) plutôt que de déréférencer un pointeur NULL.
+ *
  * @param table         Tableau à initialiser.
  * @param incrementSize Nombre d'éléments alloués à chaque agrandissement.
  * @param sizeofvalue   Taille en octets de chaque élément.
@@ -271,8 +294,14 @@ void init_big_table(big_table *table, int incrementSize, size_t sizeofvalue) {
     table->value = malloc(incrementSize * sizeofvalue);
     table->incrementSize = incrementSize;
     table->size = 0;
-    table->realsize = incrementSize;
     table->sizeofvalue = sizeofvalue;
+    if (table->value == NULL) {
+        log_error("init_big_table: malloc a échoué (incrementSize=%d, sizeofvalue=%zu)\n",
+                  incrementSize, sizeofvalue);
+        table->realsize = 0;
+        return;
+    }
+    table->realsize = incrementSize;
 }
 
 /**
@@ -291,30 +320,64 @@ void *big_table_value(big_table *table, unsigned long long position) {
  * Si le tableau est plein, réalloue un nouveau bloc copiant le contenu précédent,
  * puis libère l'ancien bloc. L'agrandissement se fait par `incrementSize` éléments.
  *
+ * Contrat d'échec (OOM) : si l'allocation nécessaire échoue, la fonction
+ * retourne NULL et **ne modifie rien** — `table` reste dans l'état où elle
+ * était avant l'appel (ancien buffer intact, `size`/`realsize` inchangés).
+ * Tout appelant DOIT tester le retour avant de le déréférencer.
+ *
+ * Cas particulier : si `table->value` est déjà NULL (table issue d'un
+ * `init_big_table` dont le malloc initial avait échoué), cette fonction
+ * retente une allocation initiale de `incrementSize` éléments avant
+ * d'insérer ; en cas de nouvel échec elle retourne NULL sans rien changer.
+ *
  * @param table Tableau cible.
  * @param value Pointeur vers la valeur à copier.
- * @return      Pointeur vers la copie insérée dans le tableau.
+ * @return      Pointeur vers la copie insérée dans le tableau, ou NULL si
+ *              l'allocation nécessaire a échoué (table inchangée).
  */
 void *put_big_table(big_table *table, void *value) {
+    // Table issue d'un init_big_table qui avait échoué : on retente une
+    // allocation initiale avant de pouvoir insérer quoi que ce soit.
+    if (table->value == NULL) {
+        void *initialValue = malloc(table->sizeofvalue * (size_t)table->incrementSize);
+        if (initialValue == NULL) {
+            log_error("put_big_table: malloc initial a échoué (incrementSize=%d, sizeofvalue=%zu)\n",
+                      table->incrementSize, table->sizeofvalue);
+            return NULL;
+        }
+        table->value = initialValue;
+        table->realsize = table->incrementSize;
+    }
+
+    // `value` peut pointer à l'intérieur de l'ancien buffer (cas d'une
+    // réinsertion du dernier élément produit par put_big_table, cf.
+    // core/possibility.c). On ne libère donc l'ancien buffer qu'après le
+    // memcpy final qui lit `value` — jamais avant.
+    void *oldTableValue = table->value;
+
     // Test s'il faut allouer plus de mémoire
-	void *oldTableValue = table->value;
     if (table->realsize == table->size) {
         size_t oldSize = table->realsize * table->sizeofvalue;
-        table->realsize *= 2;
-        void *newValue = malloc(table->sizeofvalue * table->realsize);
+        unsigned long long newRealsize = table->realsize * 2;
+        void *newValue = malloc(table->sizeofvalue * newRealsize);
+        if (newValue == NULL) {
+            log_error("put_big_table: malloc d'agrandissement a échoué (realsize=%llu -> %llu, sizeofvalue=%zu) — table inchangée\n",
+                      table->realsize, newRealsize, table->sizeofvalue);
+            return NULL;
+        }
         memcpy(newValue, table->value, oldSize);
-		table->value = newValue;
+        table->value = newValue;
+        table->realsize = newRealsize;
     }
-    
+
     void *result = big_table_value(table, table->size);
     table->size++;
     memcpy(result, value, table->sizeofvalue);
-	// Si la table a été redimensionnée, on supprime l'ancienne
-	// Ceci est fait en dernier pour gérer le cas d'une valeur réinserrée et donc présente
-	// dans l'ancienne table
-	if (oldTableValue != table->value) {
-		free(oldTableValue);
-	}
+    // Si la table a été redimensionnée, on supprime l'ancienne maintenant que
+    // le memcpy ci-dessus a fini de lire `value` (qui pouvait y pointer).
+    if (oldTableValue != table->value) {
+        free(oldTableValue);
+    }
     return result;
 }
 

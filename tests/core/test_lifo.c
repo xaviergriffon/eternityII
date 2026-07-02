@@ -349,6 +349,78 @@ TEST big_table_free_big_table_heap(void)
     PASS();
 }
 
+/* Contrat de retour de put_big_table() : succès nominal -> pointeur non-NULL
+ * vers la copie insérée, size incrémenté, et agrandissement transparent une
+ * fois realsize atteint (realsize double). Le pointeur retourné pointe bien
+ * dans le buffer courant de la table (cohérent avec big_table_value). */
+TEST big_table_put_returns_non_null_and_grows(void)
+{
+    big_table t;
+    init_big_table(&t, 2, sizeof(int)); /* capacité initiale = 2 */
+    ASSERT(t.value != NULL);
+    ASSERT_EQ_FMT(2ULL, (unsigned long long)t.realsize, "%llu");
+    ASSERT_EQ_FMT(0ULL, (unsigned long long)t.size, "%llu");
+
+    int a = 10;
+    void *p1 = put_big_table(&t, &a);
+    ASSERT(p1 != NULL);
+    ASSERT_EQ_FMT(10, *(int *)p1, "%d");
+    ASSERT_EQ_FMT(1ULL, (unsigned long long)t.size, "%llu");
+    ASSERT_EQ_FMT(2ULL, (unsigned long long)t.realsize, "%llu"); /* pas encore plein */
+
+    int b = 20;
+    void *p2 = put_big_table(&t, &b); /* remplit la capacité initiale (size == realsize) */
+    ASSERT(p2 != NULL);
+    ASSERT_EQ_FMT(2ULL, (unsigned long long)t.size, "%llu");
+    ASSERT_EQ_FMT(2ULL, (unsigned long long)t.realsize, "%llu");
+
+    int c = 30;
+    void *p3 = put_big_table(&t, &c); /* déclenche l'agrandissement (2 -> 4) */
+    ASSERT(p3 != NULL);
+    ASSERT_EQ_FMT(30, *(int *)p3, "%d");
+    ASSERT_EQ_FMT(3ULL, (unsigned long long)t.size, "%llu");
+    ASSERT(t.realsize >= 3ULL); /* a bien grandi (doublement : 4) */
+    ASSERT_EQ_FMT(4ULL, (unsigned long long)t.realsize, "%llu");
+
+    /* Les valeurs précédemment insérées survivent au redimensionnement. */
+    int v;
+    ASSERT_EQ_FMT(1, scroll_big_table(&t, &v), "%d"); ASSERT_EQ_FMT(30, v, "%d");
+    ASSERT_EQ_FMT(1, scroll_big_table(&t, &v), "%d"); ASSERT_EQ_FMT(20, v, "%d");
+    ASSERT_EQ_FMT(1, scroll_big_table(&t, &v), "%d"); ASSERT_EQ_FMT(10, v, "%d");
+
+    clear_big_table(&t);
+    PASS();
+}
+
+/* Cohérence size/realsize juste après init_big_table : realsize == incrementSize
+ * demandé, size == 0, value non-NULL (allocation nominale, pas d'OOM). */
+TEST big_table_init_state_is_consistent(void)
+{
+    big_table t;
+    init_big_table(&t, 8, sizeof(double));
+    ASSERT(t.value != NULL);
+    ASSERT_EQ_FMT(0ULL, (unsigned long long)t.size, "%llu");
+    ASSERT_EQ_FMT(8ULL, (unsigned long long)t.realsize, "%llu");
+    ASSERT_EQ_FMT(8, t.incrementSize, "%d");
+    clear_big_table(&t);
+    PASS();
+}
+
+/* NOTE OOM (malloc réel indisponible/non simulable proprement en test unitaire
+ * portable, sans mocker malloc()) : init_big_table() et put_big_table() sont
+ * durcis contre un échec d'allocation --
+ *   - init_big_table() sur malloc() == NULL laisse la table dans un état sûr
+ *     et détectable : value = NULL, size = 0, realsize = 0.
+ *   - put_big_table() applique le contrat documenté dans lifo.h : « NULL =
+ *     échec, table inchangée ». Si table->value est NULL (table issue d'un
+ *     init_big_table() qui avait échoué), elle retente une allocation
+ *     initiale ; si l'agrandissement échoue, l'ancien buffer et size/realsize
+ *     restent intacts et la fonction retourne NULL sans rien modifier.
+ * Les appelants (core/possibility.c: search_possiblity_light_with_big_table,
+ * core/etii_search.c: checkAndDelegatePossibilitiesIfNeeded_with_big_table)
+ * testent désormais ce retour et se dégradent proprement (log_error + arrêt
+ * de l'expansion / perte contrôlée) plutôt que de déréférencer NULL. */
+
 SUITE(lifo_suite)
 {
     RUN_TEST(file_put_then_scroll_is_lifo);
@@ -367,4 +439,6 @@ SUITE(lifo_suite)
     RUN_TEST(file_move_targets_non_extremity);
     RUN_TEST(big_table_free_big_table_heap);
     RUN_TEST(file_remove_element_removes_middle);
+    RUN_TEST(big_table_put_returns_non_null_and_grows);
+    RUN_TEST(big_table_init_state_is_consistent);
 }

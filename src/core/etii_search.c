@@ -75,7 +75,14 @@ void checkAndDelegatePossibilitiesIfNeeded_with_big_table(client_possibility_t *
         {
             log_error("error on add_possibility — remise en table locale\n");
             for(int i = aposs->size - 1; i >= 0; i--) {
-                put_big_table(bt, &aposs->possibilities[i]);
+                if (put_big_table(bt, &aposs->possibilities[i]) == NULL) {
+                    // OOM : bt inchangée (contrat put_big_table). Les possibilités
+                    // restantes de aposs sont perdues (dégradation propre plutôt
+                    // qu'un crash sur déréférencement NULL) ; on l'indique.
+                    log_error("put_big_table a échoué (OOM) lors de la remise en table locale — %d possibilité(s) perdue(s)\n",
+                              i + 1);
+                    break;
+                }
             }
         }
         free_array_possibility_packet(aposs);

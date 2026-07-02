@@ -926,7 +926,15 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
                 // memcpy par un système de delta (n'enregistrer que la case modifiée).
 
                 // On se place à la fin de la suite qui correspond à la nouvelle définition
-                currPossibility = put_big_table(result, currPossibility);;
+                struct possibility_packet *pushedPossibility = put_big_table(result, currPossibility);
+                if (pushedPossibility == NULL) {
+                    // OOM : la table n'a pas été modifiée (contrat put_big_table).
+                    // On arrête d'explorer de nouvelles branches pour cette case ;
+                    // les possibilités déjà empilées restent valides.
+                    log_error("search_possiblity_light_with_big_table: put_big_table a échoué (OOM) — arrêt de l'expansion\n");
+                    break;
+                }
+                currPossibility = pushedPossibility;
                 // Dans le cas où on a déjà généré une possiblité, on libère la piece qui avait été utilisée avant de généré un nouveau jeu
                 if(lastId>0) {
                     set_face_used(currPossibility->b_faceused, lastId - 1, 0);
@@ -987,7 +995,15 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
         // On poursuit sur le slot écrit dans la table : quand le paquet source
         // n'est pas déjà ce slot (pas d'aliasing), muter l'original laisserait
         // le slot avec alloc/x/y périmés
-        currPossibility = put_big_table(result, currPossibility);
+        struct possibility_packet *pushedPossibility = put_big_table(result, currPossibility);
+        if (pushedPossibility == NULL) {
+            // OOM : la table n'a pas été modifiée (contrat put_big_table). On ne
+            // peut pas remettre cette possibilité en jeu ; elle est simplement
+            // perdue pour cette branche, sans corrompre la table existante.
+            log_error("search_possiblity_light_with_big_table: put_big_table a échoué (OOM) — possibilité perdue\n");
+            return 0;
+        }
+        currPossibility = pushedPossibility;
         currPossibility->alloc = incAlloc;
 
         currPossibility->x = nX;
