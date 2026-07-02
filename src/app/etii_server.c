@@ -127,8 +127,9 @@ int should_autobackup(int *lastBack, unsigned long long *lastBackupUpdates,
 /**
  * @brief Thread de statistiques du serveur (lancé par `run_checker`).
  *
- * Toutes les 10 secondes, collecte dans `lastcheck` le stock de chaque file,
- * les possibilités en cours d'analyse, le débit global et le meilleur résultat.
+ * Toutes les 10 secondes, collecte dans un buffer local le stock de chaque
+ * file, les possibilités en cours d'analyse, le débit global et le meilleur
+ * résultat, puis le publie dans `lastcheck` via `lastcheck_publish()`.
  * Déclenche automatiquement une sauvegarde (`temp.back`) toutes les minutes
  * si le stock a évolué depuis le dernier backup.
  *
@@ -146,8 +147,13 @@ void *check_server(void *param)
     int last_record = max_result;
     while(1)
     {
-        free(lastcheck);
-        lastcheck = calloc(4000, sizeof(char));
+        // Rapport construit dans un buffer LOCAL (jamais dans `lastcheck`
+        // directement) : les strcat/sprintf qui suivent ne touchent aucun état
+        // partagé, donc aucun besoin de tenir un verrou pendant leur exécution.
+        // `lastcheck_publish()` n'est appelée qu'une fois le rapport complet,
+        // ce qui réduit la section critique au seul échange de pointeur (voir
+        // static_variables.h pour le détail de la race corrigée).
+        char *report = calloc(4000, sizeof(char));
         unsigned long long currentactive = lastactive;
         int c;
         lastactive = 0;
@@ -170,7 +176,7 @@ void *check_server(void *param)
         char *table = build_file_queues_table(&file_possibility_stock,
                                               &file_possibility_checked_stock,
                                               &file_possibility_analysed_stock);
-        strcat(lastcheck, table);
+        strcat(report, table);
         free(table);
 
         unsigned long long bys = currentactive / sleep_time;
@@ -179,8 +185,10 @@ void *check_server(void *param)
 
         char *temp = calloc(1000, sizeof(char));
         sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,non_null_possibilities, max_result, activeThread);
-        strcat(lastcheck, temp);
+        strcat(report, temp);
         free(temp);
+
+        lastcheck_publish(report);
 
         /* Bandeau de stats « live » : résumé compact poussé à chaque tour.
            En mode ncurses il s'affiche en continu ; en mode ANSI, no-op. */
