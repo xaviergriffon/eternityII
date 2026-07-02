@@ -1230,8 +1230,24 @@ int normalize_possibility_packet(struct possibility_packet *packet)
  */
 int print_possibility_packet(struct possibility_packet *packet)
 {
+	// grid[x][y] est un int16_t : la case peut contenir un id de pièce TOURNÉ,
+	// codé id + ETERN_PARTS*rotation (cf. id_for_rotated_part), donc jusqu'à
+	// 4*ETERN_PARTS - 1 (rotation 0..3). En build 256 ça vaut au plus 1023 (4
+	// chiffres) ; les valeurs spéciales (vide -2, erreurs négatives type -9 de
+	// check_possibility) restent sur 2-3 caractères. Plutôt que de couper au
+	// plus juste, on borne large sur la plage réelle du type : un int16_t tient
+	// toujours sur au plus 6 caractères, signe compris ("-32768"). Chaque case
+	// coûte donc au plus 6 + 2 (le ", " de séparation) octets, et on ajoute la
+	// marge des crochets de ligne/grille + le '\0' final.
+	enum { STR_INT16_MAX_LEN = 6 }; // "-32768" = 6 caractères, borne large pour tout int16_t
+	const size_t cell_budget = STR_INT16_MAX_LEN + 2;         // valeur + ", "
+	const size_t row_budget = (cell_budget * ETERN_SIZE) + 2; // cases d'une ligne + "[" + "]"
+	const size_t grid_budget = (row_budget * ETERN_SIZE) + 4; // lignes + "[" + "]" + marge + '\0'
 
-	char *grid = malloc(sizeof(char) * (((ETERN_SIZE*5 + 2) * ETERN_SIZE) + ETERN_SIZE*2)); // 5 = 3chiffres + espace + virgule
+	char *grid = malloc(sizeof(char) * grid_budget);
+	if (grid == NULL) {
+		fatal_error("print_possibility_packet: malloc failed (%zu bytes)\n", grid_budget);
+	}
 	int c = 0;
 	grid[c++] = '[';
 	for (int y = 0; y < ETERN_SIZE; y++) {
@@ -1245,7 +1261,7 @@ int print_possibility_packet(struct possibility_packet *packet)
 				grid[c++] = ',';
 				grid[c++] = ' ';
 			}
-			char str[10];
+			char str[10]; // int16_t : "-32768\0" (7 octets) tient largement dans 10
 
 			sprintf(str, "%i", packet->grid[x][y]);
 			for (size_t i = 0; i < strlen(str); i++)
@@ -1260,9 +1276,9 @@ int print_possibility_packet(struct possibility_packet *packet)
 	log_info("{\"alloc\": %i, \"x\": %i, \"y\": %i, \"grid\": ", packet->alloc, packet->x, packet->y);
     log_info("%s", grid);
     log_info("}\n");
-	
+
 	free(grid);
-	
+
 	return 0;
 }
 
