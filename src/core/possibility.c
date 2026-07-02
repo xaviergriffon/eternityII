@@ -526,8 +526,11 @@ int possibility_has_a_next(struct possibility_packet *possibility, map_big_array
 /**
  * @brief Vérifie que toutes les cases encore libres de la grille ont au moins une pièce posable.
  *
- * Parcourt toutes les cases non encore remplies à partir de `possibility->alloc`.
- * Si une case n'admet aucune pièce, retourne 0 (le paquet est sans issue).
+ * Parcourt EXHAUSTIVEMENT toutes les cases non encore remplies à partir de
+ * `possibility->alloc` jusqu'à la fin de `directions[]` (une case non
+ * contrainte ne stoppe pas le balayage : elle est satisfiable par
+ * construction, cf. commentaire inline). Si une case n'admet aucune pièce,
+ * retourne 0 (le paquet est sans issue).
  * Optimisation : si une case n'admet qu'une seule pièce, la place immédiatement.
  *
  * @param possibility    Paquet à analyser (peut être modifié si des pièces uniques sont placées).
@@ -573,8 +576,19 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
                     break;
                 }
 			}else {
+				/* Case non contrainte (les 4 clés valent all_face : ni bord de
+				 * grille, ni voisin posé). Le compartiment "toute face" de la
+				 * map contient l'union de toutes les pièces (cf. buildBigArray),
+				 * donc cette case est satisfiable par construction tant qu'il
+				 * reste au moins une pièce non utilisée -- ce qui est
+				 * nécessairement vrai ici puisque le jeu complet n'est pas
+				 * épuisé. Ne PAS interrompre le balayage : une case plus loin
+				 * dans directions[] peut être contrainte (pièces pré-placées,
+				 * indices, trous d'import) et sans issue ; s'arrêter ici
+				 * masquerait cette impasse (sous-détection, cf. régression
+				 * all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell).
+				 */
 				result = 1;
-				break;
 			}
 		} else {
 			result = 1;
