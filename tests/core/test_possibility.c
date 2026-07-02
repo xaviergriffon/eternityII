@@ -1175,7 +1175,7 @@ TEST all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell(void)
         { .id = 4, .top = 8, .right = 0, .bottom = 0, .left = 0 }, /* voisin bas (13,14): top=8      -> k3 */
         { .id = 5, .top = 0, .right = 6, .bottom = 0, .left = 0 }, /* voisin gauche (12,13): right=6 -> k4 */
     };
-    struct array_part rp = { .size = 7, .parts = parts };
+    struct array_part rp = { .size = 6, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet *p = new_zeroed_packet();
