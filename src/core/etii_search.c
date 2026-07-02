@@ -776,13 +776,36 @@ static void requeue_unprocessed_packets(client_possibility_t *client, int from)
 static int autosearch_step(client_possibility_t *client,
                            int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
 {
-    // Attente d'un jeu de possibilité
-    while ((client->works == 0 || client->aposs == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+    // Attente d'un jeu de possibilité. `works` et `aposs` sont écrits ensemble
+    // sous works_mutex par feed_one_thread (etii_client.c) ; on les relit tous
+    // les deux sous ce même mutex, le usleep restant hors verrou pour ne pas
+    // bloquer le feed. Les lire sans verrou serait un comportement indéfini en
+    // C11 (accès concurrent non synchronisé à un objet non-atomique) : sur x86
+    // le modèle mémoire fort masque le problème en pratique, mais sur ARM (le
+    // GPU pruner tourne sur Jetson) rien ne garantit qu'un thread observant
+    // `works == 1` voie déjà la mise à jour de `aposs` — une réorganisation
+    // mémoire pourrait exposer un pointeur non encore publié. Le mutex donne
+    // la paire acquire/release nécessaire, sans requérir de types _Atomic.
+    // Même motif dans autoprune_step et (sous WITH_CUDA) autoprune_gpu.
+    int works_snapshot;
+    array_possibility_packet *aposs_snapshot;
+    pthread_mutex_lock(&client->works_mutex);
+    works_snapshot = client->works;
+    aposs_snapshot = client->aposs;
+    pthread_mutex_unlock(&client->works_mutex);
+    while ((works_snapshot == 0 || aposs_snapshot == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
     {
         usleep(MICRO_SLEEP);
+        pthread_mutex_lock(&client->works_mutex);
+        works_snapshot = client->works;
+        aposs_snapshot = client->aposs;
+        pthread_mutex_unlock(&client->works_mutex);
     }
 
-    // Consommation des possibilités demandées : un backtracking par paquet racine
+    // Consommation des possibilités demandées : un backtracking par paquet racine.
+    // On continue d'utiliser client->aposs (et non aposs_snapshot) : une fois la
+    // valeur observée non-NULL sous verrou, seul ce même thread la remet à NULL
+    // (en fin de step) — aucune course possible sur les lectures qui suivent.
     int a = 0;
     int stopped = 0;
     while (client->aposs != NULL && a < client->aposs->size && !stopped)
@@ -874,10 +897,22 @@ void *autosearch (void *userdata)
  */
 static int autoprune_step(client_possibility_t *client)
 {
-    // Attente d'un jeu de possibilité
-    while ((client->works == 0 || client->aposs == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+    // Attente d'un jeu de possibilité : works/aposs relus ensemble sous
+    // works_mutex (cf. commentaire détaillé dans autosearch_step ci-dessus —
+    // même risque théorique de réordonnancement mémoire, notamment sur ARM).
+    int works_snapshot;
+    array_possibility_packet *aposs_snapshot;
+    pthread_mutex_lock(&client->works_mutex);
+    works_snapshot = client->works;
+    aposs_snapshot = client->aposs;
+    pthread_mutex_unlock(&client->works_mutex);
+    while ((works_snapshot == 0 || aposs_snapshot == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
     {
         usleep(MICRO_SLEEP);
+        pthread_mutex_lock(&client->works_mutex);
+        works_snapshot = client->works;
+        aposs_snapshot = client->aposs;
+        pthread_mutex_unlock(&client->works_mutex);
     }
 
     int a = 0;
@@ -1023,10 +1058,23 @@ void *autoprune_gpu (void *userdata)
 #endif // DEBUG_THREAD
     while (1)
     {
-        // Attente d'un jeu de possibilité
-        while ((client->works == 0 || client->aposs == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+        // Attente d'un jeu de possibilité : works/aposs relus ensemble sous
+        // works_mutex (cf. commentaire détaillé dans autosearch_step —
+        // même risque théorique de réordonnancement mémoire, notamment sur
+        // ARM/Jetson, plateforme cible de ce pruner GPU).
+        int works_snapshot;
+        array_possibility_packet *aposs_snapshot;
+        pthread_mutex_lock(&client->works_mutex);
+        works_snapshot = client->works;
+        aposs_snapshot = client->aposs;
+        pthread_mutex_unlock(&client->works_mutex);
+        while ((works_snapshot == 0 || aposs_snapshot == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
         {
             usleep(MICRO_SLEEP);
+            pthread_mutex_lock(&client->works_mutex);
+            works_snapshot = client->works;
+            aposs_snapshot = client->aposs;
+            pthread_mutex_unlock(&client->works_mutex);
         }
 
         int processed = 0;
