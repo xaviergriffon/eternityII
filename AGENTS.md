@@ -99,18 +99,18 @@ The protocol uses fixed-size `packet` structs containing an `instruction` byte a
 | Constant | Value | Meaning |
 |---|---|---|
 | `INST_ADD` | 1 | Client sends a possibility to the server |
-| `INST_GET` | 2 | Client requests a possibility from the server |
+| `INST_GET` | 2 | Client requests a possibility from the server (response since v7: `int32` K + K packets, K ∈ {0, 1}) |
 | `INST_SOLUTION` | 3 | Client found a solution: sends the full board; the search child also saves a unique `./solution_<pid>_<seq>`. The server displays it and saves a unique `./solution_server_<pid>_<seq>`. With `--stop-on-solution` the search child exits and the server backs up its queues and **stops**; by default both keep running to look for more solutions. |
 | `INST_END` | 4 | Session end |
 | `INST_CONSIDERED` | 5 | Acknowledge |
-| `INST_NULL` | 6 | No possibility available |
+| `INST_NULL` | 6 | No possibility available (legacy: no longer emitted since v7 — GET responses carry an explicit `int32` count instead) |
 | `INST_POSSIBILITY_ANALYSED` | 7 | Possibility already analysed |
 | `INST_CHECK_VERSION` / `INST_SUPPORTED_VERSION` / `INST_UNSUPPORTED_VERSION` | 9/10/11 | Version handshake |
-| `INST_GET_TO_CHECK` | 12 | Pruner requests one unchecked possibility |
+| `INST_GET_TO_CHECK` | 12 | Pruner requests one unchecked possibility (response since v7: `int32` K + K packets, like `INST_GET`) |
 | `INST_GET_TO_CHECK_BATCH` | 13 | Pruner requests up to N unchecked possibilities in one round-trip (`int32` N → `int32` K + K packets) |
 | `INST_POSSIBILITY_ANALYSED_BATCH` | 14 | Pruner acks M analysed possibilities in one round-trip (`int32` M + M packets → one `INST_CONSIDERED`) |
 
-A pruner exchanges with the server in batches of `pruner_batch_size` (configurable via the 4th `tcppruner`/`gpupruner` CLI arg, or the `prunerBatch <n>` console command, capped at `PRUNER_BATCH_MAX`), bounding its memory. `recv_all`/`send_all` (etii_protocol.c) handle the partial-transfer of multi-packet blocks. Bumping the wire format requires bumping `VERSION` (exact-match handshake).
+A pruner exchanges with the server in batches of `pruner_batch_size` (configurable via the 4th `tcppruner`/`gpupruner` CLI arg, or the `prunerBatch <n>` console command, capped at `PRUNER_BATCH_MAX`), bounding its memory. **Every** `possibility_packet` transfer (unit GET/ADD/ANALYSED paths included, since v7) goes through `recv_all`/`send_all` (etii_protocol.c), which reassemble partial TCP transfers — a raw one-shot `send()`/`recv()` of a ~520-byte packet can transfer only part of it and desynchronise the whole connection stream. Bumping the wire format requires bumping `VERSION` (exact-match handshake).
 
 ### Core Data Structures
 

@@ -259,8 +259,8 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
 {
         if (instruction == INST_CHECK_VERSION) {
             int client_version = -1;
-            ssize_t ssize = recv(client->socket_id, &client_version, sizeof(int), 0);
-            if (ssize != sizeof(int)) {
+            long ssize = recv_all(client->socket_id, &client_version, sizeof(int));
+            if (ssize != (long)sizeof(int)) {
                 log_error("error on recept client version\n");
                 return 0;
             }
@@ -280,24 +280,26 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             }
 
             *lastSent = get_last_possibility(NULL, 1);
-            int p = 0;
-            for (p = 0; p < (*lastSent)->size; p++)
+            int32_t k = (int32_t)(*lastSent)->size;
+            for (int p = 0; p < k; p++)
             {
-                struct possibility_packet *possibility = &(*lastSent)->possibilities[p];
-                add_possibility_analysed(possibility, -1);
-                //printf("send ");
-                //print_possibility_packet(possibility);
-                ssize_t ssize = send(client->socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
-
-                if (ssize < 0) {
-                    log_errno("Erreur d'envoi => ");
-                }
+                add_possibility_analysed(&(*lastSent)->possibilities[p], -1);
                 counters[client->compteur]++;
                 fileUpdates[client->compteur]++;
             }
-            if(p == 0)
+            // Réponse cadrée (VERSION 7) : compte K puis, si K > 0, le bloc
+            // contigu des K paquets. send_all réassemble les envois partiels —
+            // l'ancien send() brut pouvait tronquer un paquet et désynchroniser
+            // tout le flux de la connexion.
+            if (send_all(client->socket_id, &k, sizeof(k)) != (long)sizeof(k))
             {
-                send_instruction(client->socket_id,INST_NULL);
+                log_errno("Erreur d'envoi (compte GET) => ");
+            }
+            else if (k > 0
+                     && send_all(client->socket_id, (*lastSent)->possibilities,
+                                 (size_t)k * sizeof(struct possibility_packet)) < 0)
+            {
+                log_errno("Erreur d'envoi (bloc GET) => ");
             }
 
         } else if(instruction == INST_GET_TO_CHECK && *version_supported == 1)
@@ -310,22 +312,23 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             }
 
             *lastSent = get_last_possibility_tocheck(1);
-            int p = 0;
-            for (p = 0; p < (*lastSent)->size; p++)
+            int32_t k = (int32_t)(*lastSent)->size;
+            for (int p = 0; p < k; p++)
             {
-                struct possibility_packet *possibility = &(*lastSent)->possibilities[p];
-                add_possibility_analysed(possibility, -1);
-                ssize_t ssize = send(client->socket_id, (struct possibility_packet *)possibility, sizeof(struct possibility_packet),0);
-
-                if (ssize < 0) {
-                    log_errno("Erreur d'envoi => ");
-                }
+                add_possibility_analysed(&(*lastSent)->possibilities[p], -1);
                 counters[client->compteur]++;
                 fileUpdates[client->compteur]++;
             }
-            if(p == 0)
+            // Réponse cadrée (VERSION 7) — même trame que INST_GET.
+            if (send_all(client->socket_id, &k, sizeof(k)) != (long)sizeof(k))
             {
-                send_instruction(client->socket_id,INST_NULL);
+                log_errno("Erreur d'envoi (compte GET tocheck) => ");
+            }
+            else if (k > 0
+                     && send_all(client->socket_id, (*lastSent)->possibilities,
+                                 (size_t)k * sizeof(struct possibility_packet)) < 0)
+            {
+                log_errno("Erreur d'envoi (bloc GET tocheck) => ");
             }
 
         } else if(instruction == INST_GET_TO_CHECK_BATCH && *version_supported == 1)
@@ -372,8 +375,12 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
         {
             array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
             struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
-            long receive = recv(client->socket_id, (struct possibility_packet *)possibilityPacket, sizeof(struct possibility_packet),0);
-            if(sizeof(struct possibility_packet) == receive)
+            // recv_all réassemble les lectures partielles ; un résultat court ne
+            // peut venir que d'un EOF/erreur socket → flux irrécupérable, on clôt
+            // la session (l'ancien recv() brut laissait la fin du paquet dans le
+            // flux, relue ensuite comme des instructions).
+            long receive = recv_all(client->socket_id, possibilityPacket, sizeof(struct possibility_packet));
+            if((long)sizeof(struct possibility_packet) == receive)
             {
                 aposs->possibilities = possibilityPacket;
                 aposs->size = 1;
@@ -392,7 +399,9 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                     log_errno(" => ");
                 }
                 log_error("\n");
-                send_instruction(client->socket_id, INST_ERROR);
+                free(possibilityPacket);
+                free(aposs);
+                return 0;
             }
             free(possibilityPacket);
             free(aposs);
@@ -400,8 +409,11 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
 
         } else if (instruction == INST_POSSIBILITY_ANALYSED && *version_supported == 1) {
             struct possibility_packet *possibilityPacket = malloc(sizeof(struct possibility_packet));
-            ssize_t ssize = recv(client->socket_id, (struct possibility_packet *)possibilityPacket, sizeof(struct possibility_packet), 0);
-            if (sizeof(struct possibility_packet) == ssize) {
+            // recv_all : même durcissement que INST_ADD — un paquet incomplet
+            // signifie un flux mort, on clôt la session au lieu de continuer
+            // sur un flux désynchronisé.
+            long ssize = recv_all(client->socket_id, possibilityPacket, sizeof(struct possibility_packet));
+            if ((long)sizeof(struct possibility_packet) == ssize) {
                 if(remove_possibility_analysed(possibilityPacket, -1) == 0)
                 {
                     send_instruction(client->socket_id,INST_CONSIDERED);
@@ -417,7 +429,8 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                     log_errno(" => ");
                 }
                 log_error("\n");
-                send_instruction(client->socket_id, INST_ERROR);
+                free(possibilityPacket);
+                return 0;
             }
             free (possibilityPacket);
         } else if (instruction == INST_POSSIBILITY_ANALYSED_BATCH && *version_supported == 1) {
