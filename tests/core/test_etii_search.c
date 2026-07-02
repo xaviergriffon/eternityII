@@ -664,6 +664,35 @@ TEST search_backtracking_stop_flushes_and_returns_one(void)
     PASS();
 }
 
+/* Vrai : au moins un fichier solution_*.csv existe dans dir. */
+static int es_has_solution_file(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (d == NULL) return 0;
+    struct dirent *e;
+    int found = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "solution_", 9) == 0) { found = 1; break; }
+    }
+    closedir(d);
+    return found;
+}
+
+static void es_unlink_solutions(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (d == NULL) return;
+    struct dirent *e;
+    char path[512];
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "solution_", 9) == 0) {
+            snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+            unlink(path);
+        }
+    }
+    closedir(d);
+}
+
 #if ETERN_PARTS == 16
 /* ======================================================================
  * Moteur de backtracking de bout en bout, sur le VRAI puzzle 4×4.
@@ -727,35 +756,6 @@ static void es_child_stop_on_solution(void)
     request = REQUEST_CONTINUE;
     search_packet_backtracking(&es_client, &es_root, es_idParts);
     _exit(99); /* solution non trouvée / pas d'exit : échec */
-}
-
-/* Vrai : au moins un fichier solution_*.csv existe dans dir. */
-static int es_has_solution_file(const char *dir)
-{
-    DIR *d = opendir(dir);
-    if (d == NULL) return 0;
-    struct dirent *e;
-    int found = 0;
-    while ((e = readdir(d)) != NULL) {
-        if (strncmp(e->d_name, "solution_", 9) == 0) { found = 1; break; }
-    }
-    closedir(d);
-    return found;
-}
-
-static void es_unlink_solutions(const char *dir)
-{
-    DIR *d = opendir(dir);
-    if (d == NULL) return;
-    struct dirent *e;
-    char path[512];
-    while ((e = readdir(d)) != NULL) {
-        if (strncmp(e->d_name, "solution_", 9) == 0) {
-            snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
-            unlink(path);
-        }
-    }
-    closedir(d);
 }
 
 /* Prépare es_client / es_root / es_idParts depuis pieces16.csv. */
@@ -1041,6 +1041,110 @@ TEST autoprune_step_keeps_live_packet(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * autoprune_step : plateau complet dans le lot (solution trouvée par le pruner).
+ *
+ * Comportement attendu (aligné sur le pruner GPU) : record_solution enregistre
+ * la solution (fichier + notification serveur) et, SANS --stop-on-solution, le
+ * processus survit, le plateau complet n'est pas remis en circulation et la
+ * boucle continue. L'ancien code appelait checkIfResultFound, qui sortait
+ * inconditionnellement (EXIT_SUCCESS) : serveur jamais prévenu, lot jamais
+ * acquitté, mode « continuer » ignoré.
+ * ------------------------------------------------------------------------ */
+
+/* Contexte partagé avec les fonctions-fils (copié par fork). */
+static client_possibility_t ap_client;
+static char ap_solution_dir[256];
+
+/* Prépare ap_client avec un lot d'un seul paquet COMPLET (alloc == ETERN_PARTS,
+   grille remplie de l'indice 0 : valide pour make_small_parts). */
+static void ap_setup_complete_batch(void)
+{
+    memset(&ap_client, 0, sizeof ap_client);
+    ap_client.compteur = 0;
+    ap_client.map_part = make_free_map();
+    ap_client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&ap_client.works_mutex, NULL);
+    ap_client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 1;
+    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
+    aposs->possibilities[0].alloc = ETERN_PARTS; /* grille = zéros via calloc */
+    ap_client.aposs = aposs;
+}
+
+/* Fils : stop_on_solution = 0. Nouvelle sémantique : autoprune_step revient
+   (retour 1), le plateau complet n'est PAS remis en circulation et un fichier
+   solution a été écrit. Sur l'ancien code, checkIfResultFound sortait
+   EXIT_SUCCESS avant tout cela (le _exit(42) n'était jamais atteint). */
+static void ap_child_solution_continue(void)
+{
+    if (chdir(ap_solution_dir) != 0) _exit(97);
+    stop_on_solution = 0;
+    request = REQUEST_CONTINUE;
+    int cont = autoprune_step(&ap_client);
+    if (cont != 1) _exit(43);
+    if (datas_size() != 0ULL) _exit(44);            /* pas de remise en stock */
+    if (!es_has_solution_file(".")) _exit(45);      /* solution enregistrée */
+    _exit(42);
+}
+
+/* Fils : stop_on_solution = 1. record_solution doit sortir EXIT_SUCCESS après
+   l'enregistrement ; atteindre le _exit(99) signifierait « pas d'arrêt ». */
+static void ap_child_solution_stop(void)
+{
+    if (chdir(ap_solution_dir) != 0) _exit(97);
+    stop_on_solution = 1;
+    request = REQUEST_CONTINUE;
+    autoprune_step(&ap_client);
+    _exit(99);
+}
+
+/* Sans --stop-on-solution : le pruner survit à une solution et continue. */
+TEST autoprune_step_complete_board_records_solution_and_continues(void)
+{
+    drain_local();
+    ensure_counters();
+    ap_setup_complete_batch();
+    strcpy(ap_solution_dir, "/tmp/etii_ap_sol_XXXXXX");
+    ASSERT(mkdtemp(ap_solution_dir) != NULL);
+
+    pid_t pid = 0;
+    int code = run_in_fork(ap_child_solution_continue, &pid);
+
+    es_unlink_solutions(ap_solution_dir);
+    rmdir(ap_solution_dir);
+    free_array_possibility_packet(ap_client.aposs); /* copie du parent */
+    pthread_mutex_destroy(&ap_client.works_mutex);
+
+    ASSERT_EQ_FMT(42, code, "%d");
+    PASS();
+}
+
+/* Avec --stop-on-solution : record_solution enregistre PUIS sort EXIT_SUCCESS. */
+TEST autoprune_step_complete_board_stop_on_solution_exits(void)
+{
+    drain_local();
+    ensure_counters();
+    ap_setup_complete_batch();
+    strcpy(ap_solution_dir, "/tmp/etii_ap_sos_XXXXXX");
+    ASSERT(mkdtemp(ap_solution_dir) != NULL);
+
+    pid_t pid = 0;
+    int code = run_in_fork(ap_child_solution_stop, &pid);
+
+    int had_solution = es_has_solution_file(ap_solution_dir);
+    es_unlink_solutions(ap_solution_dir);
+    rmdir(ap_solution_dir);
+    free_array_possibility_packet(ap_client.aposs); /* copie du parent */
+    pthread_mutex_destroy(&ap_client.works_mutex);
+
+    ASSERT_EQ_FMT(EXIT_SUCCESS, code, "%d");
+    ASSERT(had_solution); /* la solution est écrite AVANT l'exit */
+    PASS();
+}
+
 SUITE(etii_search_suite)
 {
     RUN_TEST(delegate_noop_below_threshold);
@@ -1066,6 +1170,8 @@ SUITE(etii_search_suite)
     RUN_TEST(autoprune_step_stop_requeues_all_and_returns_zero);
     RUN_TEST(autoprune_step_continue_empty_returns_one);
     RUN_TEST(autoprune_step_keeps_live_packet);
+    RUN_TEST(autoprune_step_complete_board_records_solution_and_continues);
+    RUN_TEST(autoprune_step_complete_board_stop_on_solution_exits);
 #if ETERN_PARTS == 16
     RUN_TEST(search_backtracking_solves_4x4_and_returns_zero);
     RUN_TEST(search_backtracking_stop_on_solution_exits_success);
