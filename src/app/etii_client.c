@@ -539,7 +539,8 @@ char *build_thread_queues_table(unsigned long long *out_stock,
 /**
  * @brief Thread de statistiques du client (lancé par `run_checker`).
  *
- * Toutes les 10 secondes, collecte et formate dans `lastcheck` :
+ * Toutes les 10 secondes, collecte et formate dans un buffer local, puis
+ * publie dans `lastcheck` via `lastcheck_publish()` :
  * - la taille de chaque file de possibilités,
  * - les statistiques de chaque processus fork (vitesse, stock),
  * - le nombre global de traitements par seconde et le meilleur résultat atteint.
@@ -559,11 +560,17 @@ void *check_client_threads(void *param)
         // 100) débordait et corrompait le tas ("double free or corruption" /
         // abort). On alloue donc en fonction du nombre de forks (+ marge pour
         // l'en-tête, le pied de tableau et les lignes forward-check / pruner /
-        // résumé concaténées dans lastcheck).
+        // résumé concaténées dans le rapport).
+        //
+        // Rapport construit dans un buffer LOCAL (jamais dans `lastcheck`
+        // directement) : les strcat/sprintf qui suivent ne touchent aucun état
+        // partagé, donc aucun besoin de tenir un verrou pendant leur exécution.
+        // `lastcheck_publish()` n'est appelée qu'une fois le rapport complet,
+        // ce qui réduit la section critique au seul échange de pointeur (voir
+        // static_variables.h pour le détail de la race corrigée).
         size_t table_size = 256 + (size_t)NB_THREADS * 80;
         size_t lastcheck_size = table_size + 4096;
-        free(lastcheck);
-        lastcheck = calloc(lastcheck_size, sizeof(char));
+        char *report = calloc(lastcheck_size, sizeof(char));
 
         // Côté client, le travail tourne dans les processus fork (mémoire séparée
         // après fork) : les files locales du parent sont vides. La donnée réelle
@@ -575,7 +582,7 @@ void *check_client_threads(void *param)
         int f;
         char *table = build_thread_queues_table(&fork_possibility_stock,
                                                 &fork_analysed_stock, &bys);
-        strcat(lastcheck, table);
+        strcat(report, table);
         free(table);
                 
 #if FORWARD_CHECK_K > 0
@@ -603,7 +610,7 @@ void *check_client_threads(void *param)
                                  fcp > 0 ? 100.0 * (double)fcd[j] / (double)fcp : 0.0);
             }
             sprintf(fctemp + fcoff, "\n");
-            strcat(lastcheck, fctemp);
+            strcat(report, fctemp);
             free(fctemp);
         }
 #endif // FORWARD_CHECK_K > 0
@@ -619,7 +626,7 @@ void *check_client_threads(void *param)
             char *prtemp = calloc(200, sizeof(char));
             sprintf(prtemp, "pruner : %llu mortes / %llu vérifiées (%.2f%%)\n",
                     prr, prc + prr, 100.0 * (double)prr / (double)(prc + prr));
-            strcat(lastcheck, prtemp);
+            strcat(report, prtemp);
             free(prtemp);
         }
 
@@ -635,8 +642,10 @@ void *check_client_threads(void *param)
         // chevauchent → comportement indéfini, -Wrestrict).
         sprintf(temp + strlen(temp), "socket opened :%i\n", opened_tcp);
 #endif // DEBUG_SOCKET
-        strcat(lastcheck, temp);
+        strcat(report, temp);
         free(temp);
+
+        lastcheck_publish(report);
 
         /* Bandeau de stats « live » : résumé compact poussé à chaque tour.
            En mode ncurses il s'affiche en continu ; en mode ANSI, no-op. */

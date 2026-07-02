@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <sys/un.h>
+#include <pthread.h>
 #include "app/etii_statistic.h"
 
 // v7 : réponse GET unitaire cadrée (int32 K + K paquets, send_all/recv_all)
@@ -200,7 +201,46 @@ extern unsigned long long *counters;
 extern unsigned long long *lastfilesize;
 
 extern volatile uint16_t max_result;
+
+/**
+ * @brief Dernier rapport de statistiques formaté (commande console `check`).
+ *
+ * Republié toutes les 10 secondes par les threads de statistiques
+ * (`check_server` / `check_client_threads`) : ceux-ci font free() de l'ancien
+ * buffer puis calloc()+strcat() un nouveau rapport, pendant que le thread
+ * console peut concurremment lire `lastcheck` à tout moment (commande
+ * `check`). Sans synchronisation, cette lecture peut tomber pendant le swap
+ * -> use-after-free (lecture d'un buffer déjà libéré) ou lecture d'un buffer
+ * encore partiellement rempli. `lastcheck_mutex` protège l'écriture ET la
+ * lecture ; voir `lastcheck_publish()`.
+ */
 extern char *lastcheck;
+
+/**
+ * @brief Mutex protégeant toutes les lectures/écritures de `lastcheck`.
+ *
+ * Toujours utiliser `lastcheck_publish()` pour publier un nouveau rapport
+ * (construit dans un buffer local par l'appelant) : la section critique se
+ * limite alors à l'échange de pointeur + free() de l'ancien buffer, ce qui
+ * garde le verrou détenu le moins longtemps possible. Les lecteurs (ex. la
+ * commande console `check`) doivent prendre ce même mutex avant de déréférencer
+ * `lastcheck`.
+ */
+extern pthread_mutex_t lastcheck_mutex;
+
+/**
+ * @brief Publie atomiquement un nouveau rapport `lastcheck`.
+ *
+ * Prend `lastcheck_mutex`, libère l'ancien buffer, installe `new_report` à sa
+ * place, puis relâche le mutex. `new_report` doit avoir été alloué (ex.
+ * calloc/malloc) par l'appelant, qui construit tout son contenu (les
+ * strcat/sprintf successifs) AVANT d'appeler cette fonction : la section
+ * critique reste ainsi réduite au seul échange de pointeur, jamais à la
+ * construction du rapport.
+ *
+ * @param new_report Nouveau buffer à publier (peut être NULL).
+ */
+void lastcheck_publish(char *new_report);
 
 // TODO : deplacer dans un parametre ?
 extern char* parts_files;

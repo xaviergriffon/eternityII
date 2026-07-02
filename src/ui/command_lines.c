@@ -8,6 +8,7 @@
 #include "net/local_socket.h"
 #include "core/readdata.h"
 #include "ui/command_match.h"
+#include "app/static_variables.h"
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
@@ -148,10 +149,26 @@ int limit_interpreter(void) {
     return -1;
 }
 
-/** @brief Interpréteur de `check` : réaffiche le rapport de statistiques `lastcheck` en place (sans défilement). */
+/**
+ * @brief Interpréteur de `check` : réaffiche le rapport de statistiques `lastcheck` en place (sans défilement).
+ *
+ * `lastcheck` est republié toutes les 10 secondes par un thread de
+ * statistiques (`check_server`/`check_client_threads`, via
+ * `lastcheck_publish()`), potentiellement pendant que cette commande
+ * s'exécute depuis le thread console. On prend donc `lastcheck_mutex` pour
+ * copier le rapport dans un buffer local (`strdup`), et on logge cette copie
+ * une fois le verrou relâché : sans cela, une lecture concurrente au swap
+ * pointeur/free pourrait déréférencer un buffer déjà libéré (use-after-free)
+ * ou encore en cours de remplissage.
+ */
 int check_interpreter(void) {
+    pthread_mutex_lock(&lastcheck_mutex);
+    char *report_copy = lastcheck != NULL ? strdup(lastcheck) : NULL;
+    pthread_mutex_unlock(&lastcheck_mutex);
+
     clear_console();
-    log_info("%s\n", lastcheck != NULL ? lastcheck : "");
+    log_info("%s\n", report_copy != NULL ? report_copy : "");
+    free(report_copy);
     return 0;
 }
 

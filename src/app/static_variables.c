@@ -1,4 +1,5 @@
 #include "app/static_variables.h"
+#include <stdlib.h>
 #include <string.h>
 
 #if ETERN_PARTS == 256
@@ -96,6 +97,21 @@ struct client_statistics *fork_statistics = NULL;
 
 unsigned long long *lastfilesize = NULL;
 char *lastcheck = NULL;
+pthread_mutex_t lastcheck_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/**
+ * @brief Voir la doc dans static_variables.h.
+ *
+ * Section critique volontairement réduite au strict échange de pointeur : la
+ * construction du rapport (potentiellement coûteuse : plusieurs strcat/sprintf)
+ * a déjà eu lieu dans le buffer local de l'appelant, hors du verrou.
+ */
+void lastcheck_publish(char *new_report) {
+    pthread_mutex_lock(&lastcheck_mutex);
+    free(lastcheck);
+    lastcheck = new_report;
+    pthread_mutex_unlock(&lastcheck_mutex);
+}
 
 // TODO : deplacer dans un parametre ?
 #if ETERN_PARTS == 256

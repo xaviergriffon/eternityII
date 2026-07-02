@@ -51,7 +51,11 @@ int main(int argc, const char *argv[]) {
     }
 
     if (argc >= 2 && argv[1] != NULL) {
-        lastcheck = calloc(2000, sizeof(char));
+        // Initialisation avant tout fork/thread de statistiques : pas de
+        // concurrence possible ici, mais on passe par lastcheck_publish()
+        // pour garder un unique point d'écriture protégé par lastcheck_mutex
+        // (cf. static_variables.h).
+        lastcheck_publish(calloc(2000, sizeof(char)));
 
         if (strcmp("tcpclient", argv[1]) == 0) {
             handle_tcpclient(argc, argv);
@@ -80,7 +84,7 @@ int main(int argc, const char *argv[]) {
             failed_arg();
             exit(EXIT_FAILURE);
         }
-        free(lastcheck);
+        lastcheck_publish(NULL);
     } else {
         failed_arg();
         exit(EXIT_FAILURE);
