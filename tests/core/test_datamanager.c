@@ -12,6 +12,7 @@
  * vide les files (l'état global est partagé entre tests).
  */
 #include "greatest.h"
+#include "fork_assert.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
 #include "core/part.h"
@@ -33,6 +34,7 @@
 int put_to_server(client_possibility_t *client_possibility, array_possibility_packet *possibilities);
 unsigned long long count_combinations(unsigned long long x);
 int check_and_connect_to_server(client_possibility_t *client_possibility);
+void scroll_from_server(client_possibility_t *client_possibility, array_possibility_packet *result, int max_result);
 
 /* Verrou global des files + variantes « nolock » (caller doit tenir le verrou). */
 void lock_all_file(void);
@@ -1128,6 +1130,69 @@ static void *mini_srv_put_drop(void *arg)
     return NULL;
 }
 
+/* Mini-serveur générique — répond au handshake is_connected puis ferme :
+ * pour les fonctions qui, après le contrôle de connexion, n'ont rien à
+ * échanger (ex. send_possibility_analysed avec file vide). */
+static void *mini_srv_handshake_then_close(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    close(fd);
+    return NULL;
+}
+
+/* Mini-serveur scroll_from_server — coupe la connexion AVANT le compte K :
+ * le client doit détecter l'EOF sur recv_all(K) et sortir proprement. */
+static void *mini_srv_get_no_count(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_GET */
+    close(fd);                                        /* EOF avant K */
+    return NULL;
+}
+
+/* Mini-serveur scroll_from_server — compte K aberrant (négatif) :
+ * le client doit rejeter la réponse sans lire de paquet. */
+static void *mini_srv_get_bad_count(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_GET */
+    int32_t k = -1;
+    send(fd, &k, sizeof k, 0);
+    close(fd);
+    return NULL;
+}
+
+/* Mini-serveur scroll_from_server — annonce K=1 mais n'envoie qu'un demi
+ * paquet avant de fermer : recv_all du paquet échoue (bloc incomplet). */
+static void *mini_srv_get_half_packet(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_GET */
+    int32_t k = 1;
+    send(fd, &k, sizeof k, 0);
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    send(fd, &pkt, sizeof pkt / 2, 0);               /* moitié seulement */
+    close(fd);
+    return NULL;
+}
+
 /* Initialise un client_possibility_t minimal avec un socket préexistant. */
 static void init_cp_with_socket(client_possibility_t *cp, int sock_fd)
 {
@@ -2068,6 +2133,622 @@ TEST print_duplicate_activity_aggregates_counters(void)
     PASS();
 }
 
+/* ==========================================================================
+ * Compléments de couverture (branches) : routage NULL/mixte, échecs réseau
+ * gracieux, erreurs de trame GET, batchs analysed multiples du cap, backup du
+ * pool vérifié, assainissement du flag checked, rename sur répertoire,
+ * rmnonext (impasse en tête, --stop-on-solution), doublons multi-fichiers,
+ * tris sur gros stock mélangé.
+ * ========================================================================== */
+
+/* add_possibility(NULL)/add_possibility_analysed(NULL) sont des no-ops ; un
+ * tableau mixte route chaque possibilité vers le pool de son flag checked. */
+TEST add_possibility_null_and_mixed_routing(void)
+{
+    drain_all();
+    ASSERT_EQ_FMT(0, add_possibility(NULL, NULL), "%d");
+    ASSERT_EQ_FMT(0, add_possibility_analysed(NULL, 0), "%d");
+
+    struct possibility_packet pks[2];
+    memset(pks, 0, sizeof pks);
+    pks[0].alloc = 2; pks[0].checked = 0;
+    pks[1].alloc = 3; pks[1].checked = 1;
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    unsigned long long ck = 0, unck = 0;
+    for (int f = 0; f < 10; f++) { ck += file_checked_size(f); unck += file_size(f); }
+    ASSERT_EQ_FMT(1ULL, ck, "%llu");
+    ASSERT_EQ_FMT(1ULL, unck, "%llu");
+    drain_all();
+    PASS();
+}
+
+/* Serveur injoignable (socket -1 + connexion refusée) : toutes les fonctions
+ * réseau échouent proprement — pas d'envoi, stock local intact. */
+TEST network_paths_fail_gracefully_when_unreachable(void)
+{
+    drain_all();
+
+    /* Port garanti libre : bind éphémère sans listen, fermé aussitôt. */
+    int tmp = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT(tmp >= 0);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = 0;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bind(tmp, (struct sockaddr *)&addr, sizeof addr);
+    socklen_t len = sizeof addr;
+    getsockname(tmp, (struct sockaddr *)&addr, &len);
+    int free_port = ntohs(addr.sin_port);
+    close(tmp);
+
+    set_server_ip("127.0.0.1");
+    int saved_port = SERVER_PORT;
+    SERVER_PORT = free_port;
+    int saved_request = request;
+    request = REQUEST_STOP;      /* court-circuite la boucle de retry connect */
+
+    client_possibility_t cp;
+    memset(&cp, 0, sizeof cp);
+    pthread_mutex_init(&cp.socket_mutex, NULL);
+    cp.socket_id = -1;
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 3;
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+
+    silence_std();
+    int rput = put_to_server(&cp, &arr);
+    int rsol = send_solution(&cp, &pk);
+    array_possibility_packet res = { .possibilities = NULL, .size = 0 };
+    scroll_from_server(&cp, &res, 2);
+    add_possibility_analysed(&pk, 0);
+    send_possibility_analysed(&cp);          /* cp.id == 0 : file analysée 0 */
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rput, "%d");
+    ASSERT_EQ_FMT(-1, rsol, "%d");
+    ASSERT_EQ_FMT(0, res.size, "%d");
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu"); /* rien parti, rien perdu */
+
+    request = saved_request;
+    SERVER_PORT = saved_port;
+    set_server_ip(NULL);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_all();
+    PASS();
+}
+
+/* put_to_server propage le record : max_result suit le plus grand alloc envoyé. */
+TEST put_to_server_updates_max_result(void)
+{
+    drain_datamanager();
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_put_ok, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    uint16_t saved_mr = max_result;
+    max_result = 0;
+
+    struct possibility_packet pks[2];
+    memset(pks, 0, sizeof pks);
+    pks[0].alloc = 6;
+    pks[1].alloc = 7;
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+
+    silence_std();
+    int rc = put_to_server(&cp, &arr);
+    restore_std();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(7, (int)max_result, "%d");
+    max_result = saved_mr;
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* scroll_from_server : EOF avant le compte K → sortie propre, résultat vide. */
+TEST scroll_from_server_count_recv_fails(void)
+{
+    drain_datamanager();
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_get_no_count, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    silence_std();
+    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    restore_std();
+
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(0, r->size, "%d");
+    free_array_possibility_packet(r);
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* scroll_from_server : compte K aberrant (négatif) rejeté sans lire de paquet. */
+TEST scroll_from_server_rejects_aberrant_count(void)
+{
+    drain_datamanager();
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_get_bad_count, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    silence_std();
+    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    restore_std();
+
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(0, r->size, "%d");
+    free_array_possibility_packet(r);
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* scroll_from_server : paquet incomplet (K=1 mais bloc tronqué) détecté. */
+TEST scroll_from_server_incomplete_packet_detected(void)
+{
+    drain_datamanager();
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_get_half_packet, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    silence_std();
+    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    restore_std();
+
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(0, r->size, "%d");
+    free_array_possibility_packet(r);
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* send_possibility_analysed : stock multiple exact du cap (2 lots de 2 puis un
+ * tour à vide) — le drainage par lots s'arrête proprement sur file vide. */
+TEST send_analysed_batch_drains_multiple_of_cap(void)
+{
+    drain_all();
+    int saved_cap = pruner_batch_size;
+    pruner_batch_size = 2;
+
+    for (int i = 0; i < 4; i++) {
+        struct possibility_packet pk;
+        memset(&pk, 0, sizeof pk);
+        pk.alloc = (uint16_t)(1 + i);
+        add_possibility_analysed(&pk, 0);
+    }
+    ASSERT_EQ_FMT(4ULL, analysed_total(), "%llu");
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_analysed_ok, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    silence_std();
+    send_possibility_analysed(&cp);
+    restore_std();
+
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+
+    close(fds[0]);        /* fin de session : débloque le mini-serveur */
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    pruner_batch_size = saved_cap;
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_all();
+    PASS();
+}
+
+/* send_possibility_analysed : pruner_batch_size == 0 → cap plancher de 1. */
+TEST send_analysed_batch_cap_defaults_to_one(void)
+{
+    drain_all();
+    int saved_cap = pruner_batch_size;
+    pruner_batch_size = 0;
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 4;
+    add_possibility_analysed(&pk, 0);
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_analysed_ok, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    silence_std();
+    send_possibility_analysed(&cp);
+    restore_std();
+
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+
+    close(fds[0]);
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    pruner_batch_size = saved_cap;
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_all();
+    PASS();
+}
+
+/* send_possibility_analysed : file vide côté client — connexion contrôlée
+ * mais aucun lot envoyé. */
+TEST send_analysed_with_empty_file_sends_nothing(void)
+{
+    drain_all();
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_handshake_then_close, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    silence_std();
+    send_possibility_analysed(&cp);   /* file analysée 0 vide */
+    restore_std();
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    PASS();
+}
+
+/* backup/backup_analysed : rename() du .tmp vers un répertoire existant échoue
+ * (EISDIR) — BACKUP_ERROR et aucun .tmp résiduel. */
+TEST backup_rename_onto_directory_fails(void)
+{
+    drain_datamanager();
+    char dir[] = "/tmp/etii_dir_XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+
+    silence_std();
+    int rb  = backup(dir);
+    int rba = backup_analysed(dir);
+    restore_std();
+
+    ASSERT_EQ_FMT(BACKUP_ERROR, rb, "%d");
+    ASSERT_EQ_FMT(BACKUP_ERROR, rba, "%d");
+
+    char tmp_path[128];
+    snprintf(tmp_path, sizeof tmp_path, "%s.tmp", dir);
+    ASSERT(access(tmp_path, F_OK) != 0);   /* le .tmp a été nettoyé */
+
+    rmdir(dir);
+    PASS();
+}
+
+/* backup sérialise AUSSI le pool vérifié ; restore vide les DEUX pools avant
+ * l'import et re-route chaque possibilité selon son flag checked. */
+TEST backup_covers_checked_pool_and_restore_drains_both(void)
+{
+    drain_all();
+    int allocs[] = { 3 };
+    add_packets(allocs, 1);
+    struct possibility_packet ck;
+    memset(&ck, 0, sizeof ck);
+    ck.alloc = 5; ck.checked = 1;
+    array_possibility_packet arr = { .size = 1, .possibilities = &ck };
+    add_possibility(NULL, &arr);
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+
+    char path[] = "/tmp/etii_back_ck_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    ASSERT_EQ_FMT(BACKUP_OK, backup(path), "%d");
+
+    /* Stock parasite dans chaque pool : restore doit le vider avant l'import. */
+    int junk[] = { 8 };
+    add_packets(junk, 1);
+    struct possibility_packet ck2;
+    memset(&ck2, 0, sizeof ck2);
+    ck2.alloc = 9; ck2.checked = 1;
+    array_possibility_packet arr2 = { .size = 1, .possibilities = &ck2 };
+    add_possibility(NULL, &arr2);
+    ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
+
+    silence_std();
+    int rr = restore(path);
+    restore_std();
+    ASSERT_EQ_FMT(0, rr, "%d");
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+    unsigned long long ck_total = 0;
+    for (int f = 0; f < 10; f++) ck_total += file_checked_size(f);
+    ASSERT_EQ_FMT(1ULL, ck_total, "%llu");
+
+    unlink(path);
+    drain_all();
+    PASS();
+}
+
+/* Fichiers .back v4 : un flag checked hors {0,1} (padding) est assaini à 0 au
+ * restore — la possibilité retourne au pool standard, jamais au pool vérifié. */
+TEST restore_sanitizes_legacy_checked_flag(void)
+{
+    drain_datamanager();
+    char path[] = "/tmp/etii_back_lg_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    FILE *f = fdopen(fd, "w");
+    ASSERT(f != NULL);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 5; pk.checked = 2;              /* résidu de padding v4 */
+    ASSERT(fwrite(&pk, sizeof pk, 1, f) == 1);
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 4; pk.checked = 1;              /* vraiment vérifiée */
+    ASSERT(fwrite(&pk, sizeof pk, 1, f) == 1);
+    fclose(f);
+
+    silence_std();
+    int rr = restore(path);
+    restore_std();
+    ASSERT_EQ_FMT(0, rr, "%d");
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+    unsigned long long ck_total = 0, unck_total = 0;
+    for (int ff = 0; ff < 10; ff++) {
+        ck_total += file_checked_size(ff);
+        unck_total += file_size(ff);
+    }
+    ASSERT_EQ_FMT(1ULL, ck_total, "%llu");    /* checked==1 → pool vérifié   */
+    ASSERT_EQ_FMT(1ULL, unck_total, "%llu");  /* checked==2 assaini → standard */
+
+    unlink(path);
+    drain_datamanager();
+    PASS();
+}
+
+/* import_json vide le stock non vérifié existant avant d'importer le JSON. */
+TEST import_json_drains_existing_stock(void)
+{
+    drain_all();
+    int allocs[] = { 2, 3 };
+    add_packets(allocs, 2);
+
+    silence_std();
+    int rc = import_json();
+    restore_std();
+
+    ASSERT_EQ_FMT(1, rc, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* l'ancien stock a été vidé */
+    drain_all();
+    PASS();
+}
+
+/* print_all_file_analysed parcourt et affiche les paquets en cours d'analyse. */
+TEST print_all_file_analysed_lists_packets(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 3;
+    add_possibility_analysed(&pk, 0);
+
+    silence_std();
+    int rc = print_all_file_analysed();
+    restore_std();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu"); /* affichage non destructif */
+    drain_all();
+    PASS();
+}
+
+/* rmnonext : impasse EN TÊTE de file (previous NULL, next non NULL) — le
+ * chaînage start/next->previous est recousu correctement. */
+TEST remove_no_next_removes_dead_packet_at_head(void)
+{
+    drain_all();
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet pks[2];
+    memset(pks, 0, sizeof pks);
+    /* pks[0] : trou sur la 1re case du parcours -> impasse, en tête de file */
+    pks[0].grid[dirx[0]][diry[0]] = -2;
+    /* pks[1] : grille pleine -> a une suite, conservée derrière l'impasse */
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+
+    remove_possibilities_with_no_next(map, &rp);
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    free_bigarray(map);
+    drain_all();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * rmnonext + --stop-on-solution : la détection d'une solution complète doit
+ * sauvegarder les files puis exit(EXIT_SUCCESS). exit() tuerait le runner :
+ * scénario exécuté dans un fork (cf. fork_assert.h), chdir vers un répertoire
+ * temporaire pour que les .back/solution ne polluent pas le dépôt.
+ * ------------------------------------------------------------------------ */
+
+static char g_sol_dir[64];
+
+static void fork_rmnonext_solution(void)
+{
+    if (chdir(g_sol_dir) != 0) exit(9);
+    extern int stop_on_solution;
+    stop_on_solution = 1;
+
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = ETERN_PARTS;                    /* plateau complet */
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    add_possibility(NULL, &arr);
+
+    remove_possibilities_with_no_next(map, &rp);
+    exit(7); /* la branche stop_on_solution aurait dû exit(EXIT_SUCCESS) */
+}
+
+TEST rmnonext_solution_with_stop_on_solution_exits(void)
+{
+    drain_all();
+    strcpy(g_sol_dir, "/tmp/etii_sol_XXXXXX");
+    ASSERT(mkdtemp(g_sol_dir) != NULL);
+
+    pid_t child = 0;
+    int code = run_in_fork(fork_rmnonext_solution, &child);
+    ASSERT_EQ_FMT(0, code, "%d"); /* exit(EXIT_SUCCESS) après backup */
+
+    /* Nettoyage : backups + solution écrite par le fils dans le tmpdir. */
+    char p[160];
+    snprintf(p, sizeof p, "%s/eternityII.back", g_sol_dir);
+    unlink(p);
+    snprintf(p, sizeof p, "%s/eternityII-in_analyse.back", g_sol_dir);
+    unlink(p);
+    snprintf(p, sizeof p, "%s/solution_server_%i_*", g_sol_dir, (int)child);
+    glob_t gp;
+    if (glob(p, 0, NULL, &gp) == 0) {
+        for (size_t i = 0; i < gp.gl_pathc; i++)
+            unlink(gp.gl_pathv[i]);
+        globfree(&gp);
+    }
+    rmdir(g_sol_dir);
+    PASS();
+}
+
+/* check_duplicate signale un doublon exact (compare == 0) ET une relation
+ * ancêtre/descendant (is_origin_of == 1) : retour -1. */
+TEST check_duplicate_flags_duplicates_and_origins(void)
+{
+    drain_all();
+    struct possibility_packet pks[3];
+    memset(pks, 0, sizeof pks);
+    /* pks[0] (A) : préfixe commun, alloc=1 */
+    pks[0].alloc = 1;
+    pks[0].grid[dirx[0]][diry[0]] = 200;
+    /* pks[1] (B) : descendant de A (même préfixe, alloc=2) -> erreur origin */
+    pks[1].alloc = 2;
+    pks[1].grid[dirx[0]][diry[0]] = 200;
+    pks[1].grid[dirx[1]][diry[1]] = 201;
+    /* pks[2] : copie exacte de A -> erreur duplicate */
+    pks[2] = pks[0];
+    array_possibility_packet arr = { .size = 3, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_duplicate();
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    drain_all();
+    PASS();
+}
+
+/* check_duplicate sur un stock réparti sur plusieurs files : le partitionnement
+ * multi-thread et le walker croisent les frontières de files, sans faux positif. */
+TEST check_duplicate_multi_thread_across_files(void)
+{
+    drain_all();
+    enum { N = 26 };
+    struct possibility_packet pks[N];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < N; i++) {
+        pks[i].alloc = 1;
+        pks[i].grid[dirx[0]][diry[0]] = (int16_t)(100 + i); /* tous distincts */
+    }
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas();               /* répartit sur les 10 files */
+    int rc = check_duplicate();
+    restore_std();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT((unsigned long long)N, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* Tris sur un stock mélangé assez gros pour déclencher l'affichage de
+ * progression et les déplacements dans les deux sens : comptage préservé. */
+TEST sort_large_shuffled_stock_both_directions(void)
+{
+    drain_all();
+    enum { N = 30 };
+    struct possibility_packet pks[N];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < N; i++) {
+        pks[i].alloc = (uint16_t)((i * 7) % 13 + 1); /* ordre pseudo-aléatoire */
+    }
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    sort_ascending();
+    sort_descending();
+    restore_std();
+
+    ASSERT_EQ_FMT((unsigned long long)N, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
 SUITE(datamanager_suite)
 {
     RUN_TEST(server_ip_round_trip);
@@ -2128,4 +2809,23 @@ SUITE(datamanager_suite)
     RUN_TEST(check_duplicate_small_stock_no_error);
     RUN_TEST(import_json_loads_single_possibility);
     RUN_TEST(print_duplicate_activity_aggregates_counters);
+    RUN_TEST(add_possibility_null_and_mixed_routing);
+    RUN_TEST(network_paths_fail_gracefully_when_unreachable);
+    RUN_TEST(put_to_server_updates_max_result);
+    RUN_TEST(scroll_from_server_count_recv_fails);
+    RUN_TEST(scroll_from_server_rejects_aberrant_count);
+    RUN_TEST(scroll_from_server_incomplete_packet_detected);
+    RUN_TEST(send_analysed_batch_drains_multiple_of_cap);
+    RUN_TEST(send_analysed_batch_cap_defaults_to_one);
+    RUN_TEST(send_analysed_with_empty_file_sends_nothing);
+    RUN_TEST(backup_rename_onto_directory_fails);
+    RUN_TEST(backup_covers_checked_pool_and_restore_drains_both);
+    RUN_TEST(restore_sanitizes_legacy_checked_flag);
+    RUN_TEST(import_json_drains_existing_stock);
+    RUN_TEST(print_all_file_analysed_lists_packets);
+    RUN_TEST(remove_no_next_removes_dead_packet_at_head);
+    RUN_TEST(rmnonext_solution_with_stop_on_solution_exits);
+    RUN_TEST(check_duplicate_flags_duplicates_and_origins);
+    RUN_TEST(check_duplicate_multi_thread_across_files);
+    RUN_TEST(sort_large_shuffled_stock_both_directions);
 }
