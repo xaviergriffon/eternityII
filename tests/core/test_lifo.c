@@ -562,6 +562,106 @@ TEST file_move_after_null_suite_target_is_tail(void)
     PASS();
 }
 
+/* extract_element : element->previous == NULL mais suite->start != element
+ * (orphelin hors liste) → branche FALSE de L148 ET L157 simultanément.
+ * Vérifie que start/end de la suite restent inchangés. */
+TEST file_extract_element_orphan_does_not_update_suite(void)
+{
+    File f;
+    init_file(&f, sizeof(int));
+    int a = 1, b = 2;
+    put(&f, &a); put(&f, &b); /* f = [e1, e2] */
+    Element *e1 = f.start;
+    Element *e2 = f.end;
+
+    /* Orphelin : previous==NULL et next==NULL → il n'appartient pas à f. */
+    Element orphan;
+    int ov = 99;
+    orphan.value = &ov;
+    orphan.previous = NULL;
+    orphan.next = NULL;
+
+    /* previous==NULL → L148 : suite->start == &orphan ? f->start=e1 ≠ &orphan → FALSE.
+     * next==NULL     → L157 : suite->end == &orphan ?  f->end=e2  ≠ &orphan → FALSE. */
+    extract_element(&f, &orphan);
+
+    ASSERT_EQ(e1, f.start); /* suite inchangée */
+    ASSERT_EQ(e2, f.end);
+    ASSERT_EQ(NULL, orphan.previous);
+    ASSERT_EQ(NULL, orphan.next);
+
+    int v;
+    scroll(&f, &v); ASSERT_EQ_FMT(2, v, "%d");
+    scroll(&f, &v); ASSERT_EQ_FMT(1, v, "%d");
+    PASS();
+}
+
+/* move_before : target->previous==NULL mais suite->start != target
+ * → branche FALSE de L187.
+ * On déplace e2 avant un orphelin hors liste. */
+TEST file_move_before_target_not_head_of_suite(void)
+{
+    File f;
+    init_file(&f, sizeof(int));
+    int a = 1, b = 2;
+    put(&f, &a); put(&f, &b); /* f = [e1, e2] */
+    Element *e2 = f.end;
+
+    Element orphan;
+    int ov = 99;
+    orphan.value = &ov;
+    orphan.previous = NULL;
+    orphan.next = NULL;
+
+    /* Après extract de e2, f=[e1].  targetPrevious=orphan->previous=NULL.
+     * f->start=e1 ≠ &orphan → FALSE au test L187. */
+    move_before(&f, e2, &orphan);
+
+    /* e2 câblé juste avant orphan */
+    ASSERT_EQ(NULL, e2->previous);
+    ASSERT_EQ(&orphan, e2->next);
+    ASSERT_EQ(e2, orphan.previous);
+
+    /* Nettoyage manuel : e1 reste dans f, e2 est décroché. */
+    Element *e1 = f.start;
+    free(e1->value); free(e1);
+    free(e2->value); free(e2);
+    PASS();
+}
+
+/* move_after : target->next==NULL mais suite->end != target
+ * → branche FALSE de L219.
+ * On déplace e1 après un orphelin hors liste. */
+TEST file_move_after_target_not_tail_of_suite(void)
+{
+    File f;
+    init_file(&f, sizeof(int));
+    int a = 1, b = 2;
+    put(&f, &a); put(&f, &b); /* f = [e1, e2] */
+    Element *e1 = f.start;
+
+    Element orphan;
+    int ov = 99;
+    orphan.value = &ov;
+    orphan.previous = NULL;
+    orphan.next = NULL;
+
+    /* Après extract de e1, f=[e2].  targetNext=orphan->next=NULL.
+     * f->end=e2 ≠ &orphan → FALSE au test L219. */
+    move_after(&f, e1, &orphan);
+
+    /* e1 câblé juste après orphan */
+    ASSERT_EQ(&orphan, e1->previous);
+    ASSERT_EQ(NULL, e1->next);
+    ASSERT_EQ(e1, orphan.next);
+
+    /* Nettoyage manuel : e2 reste dans f, e1 est décroché. */
+    Element *e2 = f.start;
+    free(e2->value); free(e2);
+    free(e1->value); free(e1);
+    PASS();
+}
+
 SUITE(lifo_suite)
 {
     RUN_TEST(file_put_then_scroll_is_lifo);
@@ -590,4 +690,7 @@ SUITE(lifo_suite)
     RUN_TEST(file_extract_element_null_suite_detaches_tail);
     RUN_TEST(file_move_before_null_suite_target_is_head);
     RUN_TEST(file_move_after_null_suite_target_is_tail);
+    RUN_TEST(file_extract_element_orphan_does_not_update_suite);
+    RUN_TEST(file_move_before_target_not_head_of_suite);
+    RUN_TEST(file_move_after_target_not_tail_of_suite);
 }
