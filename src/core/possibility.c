@@ -685,9 +685,14 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
 	y = possiblity->y;
 
 	uint16_t incAlloc = possiblity->alloc + 1;
-	uint8_t nX = dirx[incAlloc];
-	uint8_t nY = diry[incAlloc];
-	
+	// incAlloc == ETERN_PARTS : la pièce posée complète le plateau, il n'y a pas
+	// de case suivante. dirx[]/diry[] n'ont que ETERN_PARTS entrées (0..ETERN_PARTS-1) ;
+	// les lire à cet indice serait un débordement (détecté par ASan). checkIfResultFound
+	// (appelé en fin de fonction) sort le processus avant que x/y ne soient réutilisés :
+	// la valeur ici est un pur bouchon, jamais exploité.
+	uint8_t nX = (incAlloc < ETERN_PARTS) ? dirx[incAlloc] : 0;
+	uint8_t nY = (incAlloc < ETERN_PARTS) ? diry[incAlloc] : 0;
+
 	int s;
 	int lastId =-1;
 	
@@ -893,8 +898,13 @@ int search_possiblity_light_with_big_table(big_table *result, key_part *key, str
     y = possiblity->y;
 
     uint16_t incAlloc = possiblity->alloc + 1;
-    uint8_t nX = dirx[incAlloc];
-    uint8_t nY = diry[incAlloc];
+    // incAlloc == ETERN_PARTS : la pièce posée complète le plateau, il n'y a pas
+    // de case suivante. dirx[]/diry[] n'ont que ETERN_PARTS entrées (0..ETERN_PARTS-1) ;
+    // les lire à cet indice serait un débordement (détecté par ASan). checkIfResultFound
+    // (appelé en fin de fonction) sort le processus avant que x/y ne soient réutilisés :
+    // la valeur ici est un pur bouchon, jamais exploité.
+    uint8_t nX = (incAlloc < ETERN_PARTS) ? dirx[incAlloc] : 0;
+    uint8_t nY = (incAlloc < ETERN_PARTS) ? diry[incAlloc] : 0;
     int lastId =-1;
 #if FORWARD_CHECK_K > 0
     // Nombre de branches effectivement empilées dans `result` (i.e. ayant passé le
