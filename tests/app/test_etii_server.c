@@ -25,6 +25,9 @@
 #include <pthread.h>
 
 extern unsigned long long *fileUpdates;   /* global défini dans etii_server.c */
+extern client_t *thread_params;           /* global défini dans etii_server.c */
+void *communicate_with_client(void *userdata);
+void create_server_thread(client_t *thread_params, int i);
 
 /* Vide le pool local du datamanager (état global partagé entre suites). */
 static void dm_drain_all(void)
@@ -837,6 +840,246 @@ TEST autobackup_waits_full_window_even_if_changed(void)
     PASS();
 }
 
+/* ---------- check_server_step -------------------------------------------- */
+/*
+ * check_server_step lit `counters`/`fileUpdates` sur NB_THREADS entrées : on les
+ * câble sur des tampons de taille 1 (wire_counters) et on force NB_THREADS = 1
+ * pour ne jamais déborder. thread_params est mis à NULL (get_active_threads(NULL)
+ * -> 0), déjà couvert isolément par active_threads_null_is_zero.
+ */
+
+/* Lit lastcheck sous son mutex documenté (contrat de static_variables.h), comme
+ * le fait check_interpreter côté production. */
+static char *read_lastcheck_copy(void)
+{
+    pthread_mutex_lock(&lastcheck_mutex);
+    char *copy = lastcheck != NULL ? strdup(lastcheck) : NULL;
+    pthread_mutex_unlock(&lastcheck_mutex);
+    return copy;
+}
+
+/* Rapport de base : ni nouveau record ni autobackup (sous le seuil de 6 tours). */
+TEST check_server_step_reports_basic_stats(void)
+{
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+    uint16_t saved_mr = max_result;
+    max_result = 10;
+
+    unsigned long long lastactive = 0, lastBackupUpd = 0;
+    int lastBack = 0;
+    int last_record = (int)max_result;
+    check_server_step(&lastactive, &lastBackupUpd, &lastBack, &last_record, 10);
+
+    char *report = read_lastcheck_copy();
+    ASSERT(report != NULL);
+    ASSERT(strstr(report, "File queues") != NULL);
+    ASSERT(strstr(report, "active thread last") != NULL);
+    free(report);
+    ASSERT_EQ_FMT(10, last_record, "%d");   /* pas de nouveau record */
+    ASSERT_EQ_FMT(1, lastBack, "%d");       /* sous le seuil : incrémenté */
+
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    max_result = saved_mr;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
+/* Seuil d'autobackup atteint + stock modifié + nouveau record : les deux
+ * branches se déclenchent ensemble (backup réel sur ./temp*.back, nettoyé
+ * après coup). */
+TEST check_server_step_detects_record_and_autobackups(void)
+{
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+    uint16_t saved_mr = max_result;
+    max_result = 99;
+
+    unlink("events.log");
+    unlink("./temp.back");
+    unlink("./temp_analysed.back");
+    fileUpdates[0] = 5; /* != lastBackupUpd(0) -> autobackup se déclenche au seuil */
+
+    unsigned long long lastactive = 0, lastBackupUpd = 0;
+    int lastBack = 6; /* seuil atteint */
+    int last_record = 10;
+    check_server_step(&lastactive, &lastBackupUpd, &lastBack, &last_record, 10);
+
+    ASSERT_EQ_FMT(99, last_record, "%d");        /* nouveau record détecté */
+    ASSERT_EQ_FMT(0, lastBack, "%d");            /* backup déclenché -> remis à 0 */
+    ASSERT_EQ_FMT(5ULL, lastBackupUpd, "%llu");
+    ASSERT_EQ_FMT(0, access("./temp.back", F_OK), "%d");
+    ASSERT_EQ_FMT(0, access("./temp_analysed.back", F_OK), "%d");
+
+    unlink("./temp.back");
+    unlink("./temp_analysed.back");
+    unlink("events.log");
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    max_result = saved_mr;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
+/* ---------- communicate_with_client (wrapper complet) -------------------- */
+/*
+ * communicate_with_client boucle sur communicate_with_client_step (déjà testée
+ * unitairement ci-dessus) jusqu'à INST_END ou déconnexion, puis referme le
+ * socket et rend au stock la dernière possibilité servie non acquittée.
+ * On le lance dans un vrai pthread ; le socketpair joue la connexion TCP.
+ */
+
+/* Session complète : handshake de version puis INST_END -> fin propre. */
+static void *mini_srv_full_handshake_then_end(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b = INST_CHECK_VERSION;
+    send(fd, &b, 1, 0);
+    int v = version;
+    send(fd, &v, sizeof v, 0);
+    int8_t resp = 0;
+    recv(fd, &resp, 1, 0);                          /* INST_SUPPORTED_VERSION */
+    b = INST_END;
+    send(fd, &b, 1, 0);
+    return NULL;
+}
+
+TEST communicate_with_client_full_session_ends_cleanly(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.exist = 1;
+    client.compteur = 0;
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_full_handshake_then_end, &sv[1]);
+
+    void *ret = communicate_with_client(&client);
+    ASSERT_EQ(NULL, ret);
+    ASSERT_EQ_FMT(-1, client.socket_id, "%d");
+    ASSERT_EQ_FMT(0, client.exist, "%d");
+
+    pthread_join(srv, NULL);
+    close(sv[1]);
+    PASS();
+}
+
+/* Handshake puis INST_GET (une possibilité servie), puis déconnexion brutale
+ * (pas d'INST_END) : à la sortie de boucle, la dernière possibilité servie et
+ * jamais acquittée doit être rendue au stock (requeue_last_sent_possibility). */
+static void *mini_srv_handshake_get_then_drop(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b = INST_CHECK_VERSION;
+    send(fd, &b, 1, 0);
+    int v = version;
+    send(fd, &v, sizeof v, 0);
+    int8_t resp = 0;
+    recv(fd, &resp, 1, 0);                          /* INST_SUPPORTED_VERSION */
+    b = INST_GET;
+    send(fd, &b, 1, 0);
+    int32_t k = 0;
+    recv(fd, &k, sizeof k, 0);
+    if (k > 0) {
+        struct possibility_packet pkt;
+        recv(fd, &pkt, sizeof pkt, 0);
+    }
+    close(fd);                                      /* déconnexion sans acquittement */
+    return NULL;
+}
+
+TEST communicate_with_client_disconnect_requeues_pending_get(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    struct possibility_packet *p = malloc(sizeof *p);
+    memset(p, 0, sizeof *p);
+    p->alloc = 8;
+    array_possibility_packet *ap = malloc(sizeof *ap);
+    ap->size = 1; ap->possibilities = p;
+    add_possibility(NULL, ap);
+    free_array_possibility_packet(ap);
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.exist = 1;
+    client.compteur = 0;
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_handshake_get_then_drop, &sv[1]);
+
+    void *ret = communicate_with_client(&client);
+    ASSERT_EQ(NULL, ret);
+
+    pthread_join(srv, NULL);
+    close(sv[1]);
+
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* possibilité servie -> rendue au stock */
+
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
+/* ---------- create_server_thread ----------------------------------------- */
+/*
+ * Exerce les deux branches (tid == NULL / tid != NULL, libéré puis recréé) et,
+ * par construction, la boucle d'attente du socket + le wrapper
+ * communicate_with_client (session vidée immédiatement par un pair fermé :
+ * EOF dès le premier recv_instruction -> fin de boucle sans requeue).
+ */
+TEST create_server_thread_recreates_tid_on_second_call(void)
+{
+    client_t arr[1];
+    memset(&arr[0], 0, sizeof arr[0]);
+
+    create_server_thread(arr, 0);                   /* tid == NULL : pas de free */
+    ASSERT(arr[0].tid != NULL);
+    ASSERT_EQ_FMT(1, arr[0].exist, "%d");
+    ASSERT_EQ_FMT(-1, arr[0].socket_id, "%d");
+
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    close(sv[1]);                                    /* pair fermé -> EOF immédiat */
+    arr[0].socket_id = sv[0];
+
+    for (int i = 0; i < 200 && arr[0].exist != 0; i++) usleep(10000);
+    ASSERT_EQ_FMT(0, arr[0].exist, "%d");             /* session terminée proprement */
+
+    create_server_thread(arr, 0);                    /* tid != NULL : free + recréation */
+    ASSERT(arr[0].tid != NULL);
+    ASSERT_EQ_FMT(-1, arr[0].socket_id, "%d");
+
+    int sv2[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv2));
+    close(sv2[1]);
+    arr[0].socket_id = sv2[0];
+    for (int i = 0; i < 200 && arr[0].exist != 0; i++) usleep(10000);
+    ASSERT_EQ_FMT(0, arr[0].exist, "%d");
+
+    free(arr[0].tid);                                 /* thread détaché terminé : sûr */
+    PASS();
+}
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_server_suite)
@@ -890,4 +1133,12 @@ SUITE(etii_server_suite)
     RUN_TEST(autobackup_fires_at_threshold_when_changed);
     RUN_TEST(autobackup_skips_at_threshold_when_unchanged);
     RUN_TEST(autobackup_waits_full_window_even_if_changed);
+
+    RUN_TEST(check_server_step_reports_basic_stats);
+    RUN_TEST(check_server_step_detects_record_and_autobackups);
+
+    RUN_TEST(communicate_with_client_full_session_ends_cleanly);
+    RUN_TEST(communicate_with_client_disconnect_requeues_pending_get);
+
+    RUN_TEST(create_server_thread_recreates_tid_on_second_call);
 }

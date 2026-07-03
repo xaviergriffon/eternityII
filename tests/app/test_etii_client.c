@@ -24,6 +24,13 @@
 #include <signal.h>
 #include <unistd.h>
 
+/* Helpers internes de etii_client.c non exposés dans etii_client.h. */
+void *control_thread(void *param);
+pthread_t build_control_thread(client_possibility_t *thread_params);
+void *feed_thread_aposs(void *param);
+pthread_t build_feed_thread(client_possibility_t *thread_params);
+void check_client_threads_step(int *last_record);
+
 /* Vide le stock local du datamanager (état global partagé entre suites). */
 static void dm_drain_local(void)
 {
@@ -548,6 +555,256 @@ TEST feed_one_thread_keepalive_drops_dead_socket(void)
     PASS();
 }
 
+/* ---------- init_client_possibility --------------------------------------- */
+
+TEST init_client_possibility_sets_fields(void)
+{
+    client_possibility_t p;
+    memset(&p, 0xAA, sizeof p); /* bourrage non nul pour détecter les oublis */
+
+    struct array_part rp; memset(&rp, 0, sizeof rp);
+    map_big_array map; memset(&map, 0, sizeof map);
+
+    init_client_possibility(&p, &rp, &map, 3, 7, 4242);
+
+    ASSERT_EQ_FMT(0, p.works, "%d");
+    ASSERT_EQ(NULL, p.aposs);
+    ASSERT_EQ(&rp, p.all_rotate_part);
+    ASSERT_EQ(&map, p.map_part);
+    ASSERT_EQ(NULL, p.tid);
+    ASSERT_EQ_FMT(3, p.id, "%d");
+    ASSERT_EQ_FMT(4242, (int)p.pid, "%d");
+    ASSERT_EQ_FMT(7, p.compteur, "%d");
+    ASSERT_EQ_FMT(-1, p.max_shots_per_second, "%d");
+    ASSERT_EQ_FMT(-1, p.socket_id, "%d");
+    ASSERT_EQ(NULL, p.delegate_buf);
+    ASSERT_EQ_FMT(0, p.delegate_buf_capacity, "%d");
+
+    pthread_mutex_destroy(&p.works_mutex);
+    pthread_mutex_destroy(&p.socket_mutex);
+    PASS();
+}
+
+/* ---------- control_thread / build_control_thread ------------------------- */
+
+/* NB_THREADS <= 0 : retour immédiat, sans même allouer lastCheck/oneSecond. */
+TEST control_thread_nb_threads_zero_returns_null(void)
+{
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 0;
+    void *ret = control_thread(NULL);
+    ASSERT_EQ(NULL, ret);
+    NB_THREADS = saved_nb;
+    PASS();
+}
+
+/* REQUEST_STOP dès l'entrée : la boucle ne s'exécute jamais, mais l'allocation/
+ * libération de lastCheck/oneSecond est bien exercée (appel direct, sûr : pas
+ * d'usleep atteint). */
+TEST control_thread_stop_returns_null_without_looping(void)
+{
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    request = REQUEST_STOP;
+    NB_THREADS = 1;
+
+    client_possibility_t cp;
+    init_test_client(&cp, 0);
+
+    void *ret = control_thread(&cp);
+    ASSERT_EQ(NULL, ret);
+
+    destroy_test_client(&cp);
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    PASS();
+}
+
+/* build_control_thread : création réelle du thread pthread, joint après un
+ * retour immédiat (REQUEST_STOP déjà positionné). */
+TEST build_control_thread_runs_and_joins(void)
+{
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    request = REQUEST_STOP;
+    NB_THREADS = 1;
+
+    client_possibility_t cp;
+    init_test_client(&cp, 0);
+
+    pthread_t tid = build_control_thread(&cp);
+    pthread_join(tid, NULL);
+
+    destroy_test_client(&cp);
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    PASS();
+}
+
+/* ---------- feed_thread_aposs / build_feed_thread -------------------------- */
+
+/* REQUEST_STOP dès l'entrée : retour immédiat, aucune itération. */
+TEST feed_thread_aposs_stop_returns_null_without_looping(void)
+{
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    request = REQUEST_STOP;
+    NB_THREADS = 1;
+
+    client_possibility_t cp;
+    init_test_client(&cp, 0);
+
+    void *ret = feed_thread_aposs(&cp);
+    ASSERT_EQ(NULL, ret);
+
+    destroy_test_client(&cp);
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    PASS();
+}
+
+/* Pool local vide + REQUEST_CONTINUE : le thread réel réclame du travail, n'en
+ * reçoit pas, et exerce la pause adaptative (next_no_work_sleep) découpée en
+ * tranches — jusqu'à ce que le test positionne REQUEST_STOP, qui l'interrompt
+ * sans attendre la totalité du back-off. */
+TEST feed_thread_aposs_backs_off_when_no_work_available(void)
+{
+    dm_drain_local();
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    request = REQUEST_CONTINUE;
+    NB_THREADS = 1;
+
+    client_possibility_t cp;
+    init_test_client(&cp, 0);
+
+    pthread_t tid = build_feed_thread(&cp);
+    usleep(20000); /* laisse le thread réclamer du travail et entrer en back-off */
+    request = REQUEST_STOP;
+    pthread_join(tid, NULL);
+
+    destroy_test_client(&cp);
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    dm_drain_local();
+    PASS();
+}
+
+/* ---------- check_client_threads_step -------------------------------------- */
+
+/* Lit lastcheck sous son mutex documenté (contrat de static_variables.h), comme
+ * le fait check_interpreter côté production. */
+static char *read_lastcheck_copy(void)
+{
+    pthread_mutex_lock(&lastcheck_mutex);
+    char *copy = lastcheck != NULL ? strdup(lastcheck) : NULL;
+    pthread_mutex_unlock(&lastcheck_mutex);
+    return copy;
+}
+
+/* Rapport minimal : ni nouveau record, ni forward-check, ni pruner (tous les
+ * compteurs à 0) — seules les lignes de base (files, actif/s, limites) sont
+ * exercées. */
+TEST check_client_threads_step_basic_report(void)
+{
+    int saved_nb = NB_THREADS;
+    uint16_t saved_mr = max_result;
+    struct client_statistics *saved_fs = fork_statistics;
+    unsigned long long saved_msbs = max_search_by_sec;
+
+    struct client_statistics fs[1];
+    memset(fs, 0, sizeof fs);
+    NB_THREADS = 1;
+    fork_statistics = fs;
+    max_result = 10;
+    max_search_by_sec = 0;
+
+    int last_record = (int)max_result;
+    check_client_threads_step(&last_record);
+
+    char *report = read_lastcheck_copy();
+    ASSERT(report != NULL);
+    ASSERT(strstr(report, "Thread queues") != NULL);
+    ASSERT(strstr(report, "active thread/s") != NULL);
+    ASSERT_EQ_FMT(10, last_record, "%d"); /* pas de nouveau record */
+    free(report);
+
+    fork_statistics = saved_fs;
+    NB_THREADS = saved_nb;
+    max_result = saved_mr;
+    max_search_by_sec = saved_msbs;
+    PASS();
+}
+
+/* max_result > *last_record : détection de record (log_event -> events.log,
+ * nettoyé après coup comme dans test_logger.c). */
+TEST check_client_threads_step_detects_new_record(void)
+{
+    int saved_nb = NB_THREADS;
+    uint16_t saved_mr = max_result;
+    struct client_statistics *saved_fs = fork_statistics;
+
+    struct client_statistics fs[1];
+    memset(fs, 0, sizeof fs);
+    NB_THREADS = 1;
+    fork_statistics = fs;
+    max_result = 42;
+
+    unlink("events.log");
+    int last_record = 10;
+    check_client_threads_step(&last_record);
+    ASSERT_EQ_FMT(42, last_record, "%d");
+    unlink("events.log");
+
+    fork_statistics = saved_fs;
+    NB_THREADS = saved_nb;
+    max_result = saved_mr;
+    PASS();
+}
+
+#if FORWARD_CHECK_K > 0
+/* fca > 0 : la section forward-check est ajoutée au rapport ; prc+prr > 0 :
+ * la section pruner aussi. */
+TEST check_client_threads_step_reports_forward_check_and_pruner(void)
+{
+    int saved_nb = NB_THREADS;
+    uint16_t saved_mr = max_result;
+    struct client_statistics *saved_fs = fork_statistics;
+    unsigned long long saved_fca = fc_attempts;
+    unsigned long long saved_fcp = fc_pruned;
+    unsigned long long saved_prc = pruner_checked;
+    unsigned long long saved_prr = pruner_removed;
+
+    struct client_statistics fs[1];
+    memset(fs, 0, sizeof fs);
+    NB_THREADS = 1;
+    fork_statistics = fs;
+    max_result = 5;
+    fc_attempts = 100;
+    fc_pruned = 10;
+    pruner_checked = 3;
+    pruner_removed = 2;
+
+    int last_record = (int)max_result;
+    check_client_threads_step(&last_record);
+
+    char *report = read_lastcheck_copy();
+    ASSERT(report != NULL);
+    ASSERT(strstr(report, "forward-check") != NULL);
+    ASSERT(strstr(report, "pruner :") != NULL);
+    free(report);
+
+    fork_statistics = saved_fs;
+    NB_THREADS = saved_nb;
+    max_result = saved_mr;
+    fc_attempts = saved_fca;
+    fc_pruned = saved_fcp;
+    pruner_checked = saved_prc;
+    pruner_removed = saved_prr;
+    PASS();
+}
+#endif /* FORWARD_CHECK_K > 0 */
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_client_suite)
@@ -583,4 +840,19 @@ SUITE(etii_client_suite)
     RUN_TEST(feed_one_thread_busy_no_socket_noop);
     RUN_TEST(feed_one_thread_keepalive_refreshes_alive_socket);
     RUN_TEST(feed_one_thread_keepalive_drops_dead_socket);
+
+    RUN_TEST(init_client_possibility_sets_fields);
+
+    RUN_TEST(control_thread_nb_threads_zero_returns_null);
+    RUN_TEST(control_thread_stop_returns_null_without_looping);
+    RUN_TEST(build_control_thread_runs_and_joins);
+
+    RUN_TEST(feed_thread_aposs_stop_returns_null_without_looping);
+    RUN_TEST(feed_thread_aposs_backs_off_when_no_work_available);
+
+    RUN_TEST(check_client_threads_step_basic_report);
+    RUN_TEST(check_client_threads_step_detects_new_record);
+#if FORWARD_CHECK_K > 0
+    RUN_TEST(check_client_threads_step_reports_forward_check_and_pruner);
+#endif
 }

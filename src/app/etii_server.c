@@ -136,89 +136,109 @@ int should_autobackup(int *lastBack, unsigned long long *lastBackupUpdates,
  * @param param Non utilisé.
  * @return      NULL (boucle infinie).
  */
+/**
+ * @brief Un tour de la boucle de `check_server` (corps extrait pour être testable
+ *        hors thread, comme `communicate_with_client_step`).
+ *
+ * Construit et publie le rapport de statistiques serveur, met à jour le
+ * bandeau `log_status`, détecte un nouveau record et déclenche l'autobackup
+ * périodique. Ne contient PAS le `sleep(sleep_time)` de fin de tour : c'est
+ * l'appelant (la boucle `while(1)` de `check_server`) qui rythme les tours.
+ *
+ * @param lastactive                In/out : compteur cumulé de coups joués (fenêtre glissante).
+ * @param lastClientsFileUpdateBackup In/out : total des mises à jour de files au dernier backup.
+ * @param lastBack                  In/out : nombre de tours écoulés depuis le dernier backup.
+ * @param last_record                In/out : meilleur résultat déjà annoncé (détection de record).
+ * @param sleep_time                 Durée nominale du tour (secondes), utilisée pour le débit rapporté.
+ */
+void check_server_step(unsigned long long *lastactive, unsigned long long *lastClientsFileUpdateBackup,
+                       int *lastBack, int *last_record, int sleep_time)
+{
+    // Rapport construit dans un buffer LOCAL (jamais dans `lastcheck`
+    // directement) : les strcat/sprintf qui suivent ne touchent aucun état
+    // partagé, donc aucun besoin de tenir un verrou pendant leur exécution.
+    // `lastcheck_publish()` n'est appelée qu'une fois le rapport complet,
+    // ce qui réduit la section critique au seul échange de pointeur (voir
+    // static_variables.h pour le détail de la race corrigée).
+    char *report = calloc(4000, sizeof(char));
+    unsigned long long currentactive = *lastactive;
+    unsigned long long clientsFileUpdates = 0;
+    int c;
+    *lastactive = 0;
+    for(c=0; c < NB_THREADS;c++)
+    {
+        *lastactive = *lastactive + counters[c];
+        if (fileUpdates != NULL) {
+            clientsFileUpdates = clientsFileUpdates + fileUpdates[c];
+        }
+    }
+    currentactive = *lastactive - currentactive;
+    non_null_possibilities = *lastactive;
+
+    // Pool des possibilités vérifiées par les pruners : 10 files, comme le
+    // pool standard (trylock pour servir plusieurs requêtes en parallèle)
+    unsigned long long file_possibility_stock = 0;
+    unsigned long long file_possibility_checked_stock = 0;
+    unsigned long long file_possibility_analysed_stock = 0;
+    char *table = build_file_queues_table(&file_possibility_stock,
+                                          &file_possibility_checked_stock,
+                                          &file_possibility_analysed_stock);
+    strcat(report, table);
+    free(table);
+
+    unsigned long long bys = currentactive / sleep_time;
+
+    int activeThread = get_active_threads(thread_params);
+
+    char *temp = calloc(1000, sizeof(char));
+    sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,non_null_possibilities, max_result, activeThread);
+    strcat(report, temp);
+    free(temp);
+
+    lastcheck_publish(report);
+
+    /* Bandeau de stats « live » : résumé compact poussé à chaque tour.
+       En mode ncurses il s'affiche en continu ; en mode ANSI, no-op. */
+    log_status(" coups/s:%llu  stock:%llu  checked:%llu  analyse:%llu  record:%i/%i  threads:%i ",
+               bys, file_possibility_stock, file_possibility_checked_stock,
+               file_possibility_analysed_stock, max_result, ETERN_PARTS, activeThread);
+
+    if (max_result > *last_record) {
+        *last_record = max_result;
+        log_event("new record: %i pieces placed", max_result);
+    }
+
+    if (should_autobackup(lastBack, lastClientsFileUpdateBackup, clientsFileUpdates))
+    {
+        int rb = backup("./temp.back");
+        if (rb == BACKUP_SKIPPED_MAINTENANCE) {
+            log_error("autobackup : sauté (maintenance en cours) sur ./temp.back\n");
+        } else if (rb != BACKUP_OK) {
+            log_error("autobackup : échec sur ./temp.back\n");
+        }
+        int rba = backup_analysed("./temp_analysed.back");
+        if (rba == BACKUP_SKIPPED_MAINTENANCE) {
+            log_error("autobackup : sauté (maintenance en cours) sur ./temp_analysed.back\n");
+        } else if (rba != BACKUP_OK) {
+            log_error("autobackup : échec sur ./temp_analysed.back\n");
+        }
+    }
+}
+
 void *check_server(void *param)
 {
     (void)param;
     unsigned long long lastactive = 0;
-    unsigned long long clientsFileUpdates = 0;
     unsigned long long lastClientsFileUpdateBackup = 0;
     int sleep_time = 10;
     int lastBack = 0;
     int last_record = max_result;
     while(1)
     {
-        // Rapport construit dans un buffer LOCAL (jamais dans `lastcheck`
-        // directement) : les strcat/sprintf qui suivent ne touchent aucun état
-        // partagé, donc aucun besoin de tenir un verrou pendant leur exécution.
-        // `lastcheck_publish()` n'est appelée qu'une fois le rapport complet,
-        // ce qui réduit la section critique au seul échange de pointeur (voir
-        // static_variables.h pour le détail de la race corrigée).
-        char *report = calloc(4000, sizeof(char));
-        unsigned long long currentactive = lastactive;
-        int c;
-        lastactive = 0;
-        clientsFileUpdates = 0;
-        for(c=0; c < NB_THREADS;c++)
-        {
-            lastactive = lastactive + counters[c];
-            if (fileUpdates != NULL) {
-                clientsFileUpdates = clientsFileUpdates + fileUpdates[c];
-            }
-        }
-        currentactive = lastactive - currentactive;
-        non_null_possibilities = lastactive;
-
-        // Pool des possibilités vérifiées par les pruners : 10 files, comme le
-        // pool standard (trylock pour servir plusieurs requêtes en parallèle)
-        unsigned long long file_possibility_stock = 0;
-        unsigned long long file_possibility_checked_stock = 0;
-        unsigned long long file_possibility_analysed_stock = 0;
-        char *table = build_file_queues_table(&file_possibility_stock,
-                                              &file_possibility_checked_stock,
-                                              &file_possibility_analysed_stock);
-        strcat(report, table);
-        free(table);
-
-        unsigned long long bys = currentactive / sleep_time;
-
-        int activeThread = get_active_threads(thread_params);
-
-        char *temp = calloc(1000, sizeof(char));
-        sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,non_null_possibilities, max_result, activeThread);
-        strcat(report, temp);
-        free(temp);
-
-        lastcheck_publish(report);
-
-        /* Bandeau de stats « live » : résumé compact poussé à chaque tour.
-           En mode ncurses il s'affiche en continu ; en mode ANSI, no-op. */
-        log_status(" coups/s:%llu  stock:%llu  checked:%llu  analyse:%llu  record:%i/%i  threads:%i ",
-                   bys, file_possibility_stock, file_possibility_checked_stock,
-                   file_possibility_analysed_stock, max_result, ETERN_PARTS, activeThread);
-
-        if (max_result > last_record) {
-            last_record = max_result;
-            log_event("new record: %i pieces placed", max_result);
-        }
-
-        if (should_autobackup(&lastBack, &lastClientsFileUpdateBackup, clientsFileUpdates))
-        {
-            int rb = backup("./temp.back");
-            if (rb == BACKUP_SKIPPED_MAINTENANCE) {
-                log_error("autobackup : sauté (maintenance en cours) sur ./temp.back\n");
-            } else if (rb != BACKUP_OK) {
-                log_error("autobackup : échec sur ./temp.back\n");
-            }
-            int rba = backup_analysed("./temp_analysed.back");
-            if (rba == BACKUP_SKIPPED_MAINTENANCE) {
-                log_error("autobackup : sauté (maintenance en cours) sur ./temp_analysed.back\n");
-            } else if (rba != BACKUP_OK) {
-                log_error("autobackup : échec sur ./temp_analysed.back\n");
-            }
-        }
+        check_server_step(&lastactive, &lastClientsFileUpdateBackup, &lastBack, &last_record, sleep_time);
         sleep(sleep_time);
     }
-    
+
     return NULL;
 }
 

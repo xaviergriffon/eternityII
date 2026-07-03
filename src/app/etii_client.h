@@ -77,6 +77,16 @@ void run_mono_client(const char *file);
 void *check_client_threads(void *param);
 
 /**
+ * @brief Un tour de la boucle de `check_client_threads` (rapport + record), sans
+ *        le `sleep` de fin de tour.
+ *
+ * Extrait pour être testable hors thread. Voir etii_client.c pour le détail.
+ *
+ * @param last_record In/out : meilleur résultat déjà annoncé (détection de record).
+ */
+void check_client_threads_step(int *last_record);
+
+/**
  * @brief Calcule la prochaine durée de back-off quand le serveur n'a rien à fournir.
  *
  * Fonction pure : double la valeur jusqu'au plafond `NO_WORK_SLEEP_MAX`.
