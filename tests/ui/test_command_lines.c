@@ -11,6 +11,7 @@
  * donc la garde interne empêche tout envoi (pas besoin de forkId).
  */
 #include "greatest.h"
+#include "fork_assert.h"
 #include "ui/command_lines.h"
 #include "app/static_variables.h"
 #include "core/datamanager.h"
@@ -20,6 +21,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/wait.h>
+
+/* exit_interpreter n'est pas exposé dans command_lines.h (appelé uniquement via
+ * la table de dispatch de do_command_line). */
+int exit_interpreter(void);
 
 /* Exécute do_command_line en redirigeant stdout+stderr (les interprètes loguent). */
 static int run_command_quiet(char *cmd)
@@ -429,6 +435,198 @@ TEST do_command_line_backup_restore_import_round_trip(void)
     PASS();
 }
 
+/* ---------- exit_interpreter --------------------------------------------- */
+/*
+ * exit_interpreter appelle exit() dans deux cas (mode serveur ; mode client
+ * "parent" du process courant) : exécutés dans un fork (fork_assert.h) pour ne
+ * pas tuer le runner. Le globals utilisées (server/parent_pid/childrens_pid)
+ * ne sont positionnées QU'À L'INTÉRIEUR de la fonction forkée : fork() copie la
+ * mémoire du parent, donc rien à restaurer côté parent après coup.
+ */
+
+/* Mode serveur : exit(EXIT_SUCCESS) immédiat, sans toucher aux enfants. */
+static void fork_exit_server_mode(void)
+{
+    server = 1;
+    exit_interpreter();
+    _exit(99); /* non atteint */
+}
+
+TEST exit_interpreter_server_mode_exits_immediately(void)
+{
+    int code = run_in_fork(fork_exit_server_mode, NULL);
+    ASSERT_EQ_FMT(0, code, "%d");
+    PASS();
+}
+
+/* Mode client, process "parent" du point de vue courant, aucun enfant suivi
+ * (childrens_pid == NULL) : le tour d'attente est immédiat, puis exit(EXIT_SUCCESS). */
+static void fork_exit_client_parent_no_children(void)
+{
+    server = 0;
+    parent_pid = getpid();
+    childrens_pid = NULL;
+    exit_interpreter();
+    _exit(99); /* non atteint */
+}
+
+TEST exit_interpreter_client_parent_no_children_exits(void)
+{
+    int code = run_in_fork(fork_exit_client_parent_no_children, NULL);
+    ASSERT_EQ_FMT(0, code, "%d");
+    PASS();
+}
+
+/* Mode client, mais PAS le process "parent" (cas d'un thread de recherche
+ * forké) : ne fait rien de plus que positionner REQUEST_STOP et renvoyer 0,
+ * sans jamais appeler exit() -> testable directement, sans fork. */
+TEST exit_interpreter_client_non_parent_returns_zero(void)
+{
+    int saved_server = server;
+    pid_t saved_parent = parent_pid;
+    int saved_req = request;
+
+    server = 0;
+    parent_pid = getpid() + 999999; /* garanti différent du pid courant */
+
+    int r = exit_interpreter();
+
+    ASSERT_EQ_FMT(0, r, "%d");
+    ASSERT_EQ_FMT(REQUEST_STOP, request, "%d");
+
+    server = saved_server;
+    parent_pid = saved_parent;
+    request = saved_req;
+    PASS();
+}
+
+/* ---------- backup_interpreter (mode client) ----------------------------- */
+/*
+ * En mode client (server == 0), backup_interpreter suffixe les deux noms de
+ * fichier avec le pid courant (pas de collision entre plusieurs process client
+ * sur la même machine). Round-trip similaire à la version serveur ci-dessus,
+ * dans un répertoire temporaire dédié.
+ */
+TEST do_command_line_backup_client_mode_appends_pid(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_bkc_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+    int saved_server = server;
+    server = 0;
+
+    dm_drain();
+    int allocs[] = { 1, 2 };
+    dm_add(allocs, 2);
+
+    char backup[] = "backup";
+    int r_backup = run_command_quiet(backup);
+
+    char expected_file[64], expected_analyse[64];
+    snprintf(expected_file, sizeof expected_file, "./eternityII.back_%i", (int)getpid());
+    snprintf(expected_analyse, sizeof expected_analyse, "./eternityII-in_analyse.back_%i", (int)getpid());
+    int file_exists = access(expected_file, F_OK) == 0;
+    int analyse_exists = access(expected_analyse, F_OK) == 0;
+
+    dm_drain();
+    unlink(expected_file);
+    unlink(expected_analyse);
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+    server = saved_server;
+
+    ASSERT_EQ_FMT(0, r_backup, "%d");
+    ASSERT(file_exists);
+    ASSERT(analyse_exists);
+    PASS();
+}
+
+/* ---------- restore_interpreter avec arguments --------------------------- */
+/*
+ * restore [fichier [fichier_analyse]] : sans argument, restore_interpreter
+ * utilise les noms par défaut (déjà couvert par le round-trip serveur
+ * ci-dessus) ; avec 1 ou 2 arguments explicites, il restaure depuis des
+ * fichiers arbitraires — jamais exercé jusqu'ici.
+ */
+
+/* 1 argument : fichier de stock explicite, fichier d'analyse par défaut
+ * (absent -> restore_analysed échoue, mais le résultat global reste -1 sans
+ * perdre le stock déjà restauré depuis le fichier explicite). */
+TEST do_command_line_restore_with_one_argument(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_r1_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+
+    dm_drain();
+    int allocs[] = { 5, 6, 7 };
+    dm_add(allocs, 3);
+    ASSERT_EQ_FMT(0, backup("./custom.back"), "%d");
+
+    dm_drain();
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    char cmd[] = "restore ./custom.back";
+    int r = run_command_quiet(cmd);
+    unsigned long long after = datas_size();
+
+    dm_drain();
+    unlink("./custom.back");
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+
+    ASSERT_EQ_FMT(3ULL, after, "%llu"); /* le stock explicite est bien revenu */
+    (void)r; /* le code de retour dépend aussi de restore_analysed (fichier par défaut absent) */
+    PASS();
+}
+
+/* 2 arguments : fichier de stock ET fichier d'analyse explicites -> les deux
+ * restaurations réussissent, résultat 0. */
+TEST do_command_line_restore_with_two_arguments(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_r2_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+
+    dm_drain();
+    int allocs[] = { 8, 9 };
+    dm_add(allocs, 2);
+    ASSERT_EQ_FMT(0, backup("./custom.back"), "%d");
+    ASSERT_EQ_FMT(0, backup_analysed("./custom_analysed.back"), "%d");
+
+    dm_drain();
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    char cmd[] = "restore ./custom.back ./custom_analysed.back";
+    int r = run_command_quiet(cmd);
+    unsigned long long after = datas_size();
+
+    dm_drain();
+    unlink("./custom.back");
+    unlink("./custom_analysed.back");
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+
+    ASSERT_EQ_FMT(0, r, "%d");
+    ASSERT_EQ_FMT(2ULL, after, "%llu");
+    PASS();
+}
+
 SUITE(command_lines_suite)
 {
     RUN_TEST(do_command_line_handles_empty_input);
@@ -455,4 +653,12 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_loadjson_runs);
     RUN_TEST(do_command_line_rmnonext_runs);
     RUN_TEST(do_command_line_backup_restore_import_round_trip);
+
+    RUN_TEST(exit_interpreter_server_mode_exits_immediately);
+    RUN_TEST(exit_interpreter_client_parent_no_children_exits);
+    RUN_TEST(exit_interpreter_client_non_parent_returns_zero);
+
+    RUN_TEST(do_command_line_backup_client_mode_appends_pid);
+    RUN_TEST(do_command_line_restore_with_one_argument);
+    RUN_TEST(do_command_line_restore_with_two_arguments);
 }
