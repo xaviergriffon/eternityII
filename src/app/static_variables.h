@@ -197,6 +197,17 @@ extern volatile unsigned long long pruner_checked;
 /** @brief Cumul des possibilités mortes éliminées par ce processus pruner. */
 extern volatile unsigned long long pruner_removed;
 
+/**
+ * @brief Cumul des cases étudiées par ce processus pruner.
+ *
+ * Chaque contrôle d'une possibilité (`possibility_all_has_a_next`) balaie
+ * plusieurs cases du plateau : ce cumul compte chacune de ces études de case,
+ * la même unité que le compteur de coups de la recherche (`counters`), qui
+ * inclut désormais ces études. Permet de distinguer, dans le débit global,
+ * la part venant du pruner de celle de la recherche.
+ */
+extern volatile unsigned long long pruner_cells_studied;
+
 extern unsigned long long *counters;
 extern unsigned long long *lastfilesize;
 

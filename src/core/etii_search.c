@@ -933,9 +933,19 @@ static int autoprune_step(client_possibility_t *client)
         // Copie de travail : l'original doit rester intact pour l'acquittement
         struct possibility_packet work;
         memcpy(&work, &client->aposs->possibilities[a], sizeof(work));
-        // Statistique possibilité étudiée
-        counters[client->compteur]++;
-        int has_next = possibility_all_has_a_next(&work, client->map_part, client->all_rotate_part);
+        // Statistique : chaque case examinée par le contrôle compte comme un
+        // coup (même unité que la recherche), avec un minimum d'un coup par
+        // possibilité (plateau déjà complet : le balayage ne fait rien).
+        // `pruner_cells_studied` cumule la même quantité pour distinguer,
+        // dans le débit global, la part venant du pruner.
+        unsigned int cells_studied = 0;
+        int has_next = possibility_all_has_a_next_counted(&work, client->map_part, client->all_rotate_part, &cells_studied);
+        if (cells_studied == 0)
+        {
+            cells_studied = 1;
+        }
+        counters[client->compteur] += cells_studied;
+        pruner_cells_studied += cells_studied;
         if (work.alloc >= ETERN_PARTS)
         {
             // Plateau complété par les placements forcés du contrôle : solution.
@@ -1096,17 +1106,20 @@ void *autoprune_gpu (void *userdata)
             if (request != REQUEST_STOP)
             {
                 int n = client->aposs->size;
-                // Statistique : tout le lot est étudié
-                counters[client->compteur] += n;
 
                 // Lot de taille configurable (jusqu'à pruner_batch_size, borné par
                 // PRUNER_BATCH_MAX) : verdicts vivant/mort alloués selon n, pas une
                 // taille fixe (l'ancien tableau pile PRUNER_BATCH_SIZE débordait dès
                 // qu'un lot dépassait 100).
                 uint8_t *alive = malloc((size_t)n * sizeof(uint8_t));
+                // Cases examinées par paquet, remontées par le kernel : chaque
+                // case compte comme un coup (même unité que la recherche).
+                // NULL toléré : le comptage retombe alors sur 1 coup par paquet.
+                uint32_t *cells = malloc((size_t)n * sizeof(uint32_t));
                 if (alive == NULL)
                 {
                     log_error("gpu pruner : allocation alive (%d) impossible — lot renvoyé au serveur\n", n);
+                    free(cells);
                 }
                 else
                 {
@@ -1120,7 +1133,19 @@ void *autoprune_gpu (void *userdata)
                        sizeof(struct possibility_packet) * n);
 #endif // GPU_PRUNER_VERIFY
 
-                gpu_pruner_check_batch(client->aposs->possibilities, n, alive);
+                gpu_pruner_check_batch(client->aposs->possibilities, n, alive, cells);
+
+                // Statistique : chaque case examinée compte comme un coup, avec
+                // un minimum d'un coup par paquet (court-circuit `checked`,
+                // échec kernel ou allocation `cells` impossible).
+                unsigned long long batch_cells = 0;
+                for (int a = 0; a < n; a++)
+                {
+                    unsigned long long c = (cells != NULL && cells[a] > 0) ? cells[a] : 1;
+                    batch_cells += c;
+                }
+                counters[client->compteur] += batch_cells;
+                pruner_cells_studied += batch_cells;
 
 #ifdef GPU_PRUNER_VERIFY
                 for (int a = 0; a < n; a++)
@@ -1180,6 +1205,7 @@ void *autoprune_gpu (void *userdata)
                     }
                 }
                 free(alive);
+                free(cells);
                 processed = 1;
                 }
             }

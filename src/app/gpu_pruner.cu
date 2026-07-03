@@ -60,6 +60,7 @@ static GpuMap g_map;
 static int    g_inited = 0;
 static struct possibility_packet *g_packets = NULL; /* buffer de travail (managed) */
 static uint8_t                   *g_alive   = NULL; /* sorties (managed) */
+static uint32_t                  *g_cells   = NULL; /* cases examinées par paquet (managed) */
 /* Capacité d'un lancement kernel, fixée à l'init selon `pruner_batch_size`
    (bornée par PRUNER_BATCH_MAX). Un lot plus grand est traité par tranches de
    g_cap ; on dimensionne donc g_cap à la taille de lot configurée pour qu'un
@@ -132,14 +133,17 @@ __device__ static void dev_what_search_in_grid_to_key(const struct part *parts,
  * en anticipé que sur bucket vide (case morte) — une case « toute libre »
  * poursuit le balayage, comme côté CPU. En cas de complétion (`alloc == ETERN_PARTS`), met à jour `alloc` :
  * l'hôte détectera la solution (le device ne peut pas `exit()`).
+ * `cells[i]` reçoit le nombre de cases examinées (statistique de débit,
+ * même unité qu'un coup de la recherche ; 0 si court-circuit `checked`).
  */
-__global__ void prune_kernel(struct possibility_packet *pk, uint8_t *alive, int n, GpuMap map)
+__global__ void prune_kernel(struct possibility_packet *pk, uint8_t *alive, uint32_t *cells, int n, GpuMap map)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) {
         return;
     }
     struct possibility_packet *p = &pk[i];
+    cells[i] = 0;
 
     // Court-circuit : déjà vérifié → vivant sans recalcul ni mutation.
     if (p->checked) {
@@ -156,6 +160,7 @@ __global__ void prune_kernel(struct possibility_packet *pk, uint8_t *alive, int 
 
     for (int c = p->alloc; c < ETERN_PARTS && result == 1; c++) {
         result = 0;
+        cells[i]++;
         int8_t x = (int8_t)c_dirx[c];
         int8_t y = (int8_t)c_diry[c];
         if (p->grid[x][y] == -2) {
@@ -324,6 +329,9 @@ extern "C" int gpu_pruner_init(const map_big_array *map, const struct array_part
     if ((err = cudaMallocManaged(&g_alive, (size_t)g_cap * sizeof(uint8_t))) != cudaSuccess) {
         return gpu_fail("cudaMallocManaged(g_alive)", err);
     }
+    if ((err = cudaMallocManaged(&g_cells, (size_t)g_cap * sizeof(uint32_t))) != cudaSuccess) {
+        return gpu_fail("cudaMallocManaged(g_cells)", err);
+    }
 
     g_inited = 1;
     log_info("gpu_pruner: miroir map prêt (m=%d, clés=%lld, arène=%lld pièces, rotations=%d)\n",
@@ -331,7 +339,7 @@ extern "C" int gpu_pruner_init(const map_big_array *map, const struct array_part
     return 0;
 }
 
-extern "C" void gpu_pruner_check_batch(struct possibility_packet *packets, int n, uint8_t *alive_out)
+extern "C" void gpu_pruner_check_batch(struct possibility_packet *packets, int n, uint8_t *alive_out, uint32_t *cells_out)
 {
     if (!g_inited || n <= 0) {
         return;
@@ -347,7 +355,7 @@ extern "C" void gpu_pruner_check_batch(struct possibility_packet *packets, int n
         memcpy(g_packets, packets + base, (size_t)cnt * sizeof(struct possibility_packet));
 
         int blocks = (cnt + threads - 1) / threads;
-        prune_kernel<<<blocks, threads>>>(g_packets, g_alive, cnt, g_map);
+        prune_kernel<<<blocks, threads>>>(g_packets, g_alive, g_cells, cnt, g_map);
 
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
@@ -355,6 +363,9 @@ extern "C" void gpu_pruner_check_batch(struct possibility_packet *packets, int n
             // Conservateur : on marque tout vivant pour ne perdre aucune possibilité.
             for (int i = 0; i < cnt; i++) {
                 alive_out[base + i] = 1;
+                if (cells_out != NULL) {
+                    cells_out[base + i] = 0;
+                }
             }
             continue;
         }
@@ -362,13 +373,19 @@ extern "C" void gpu_pruner_check_batch(struct possibility_packet *packets, int n
             log_error("gpu_pruner: synchronisation échouée : %s\n", cudaGetErrorString(err));
             for (int i = 0; i < cnt; i++) {
                 alive_out[base + i] = 1;
+                if (cells_out != NULL) {
+                    cells_out[base + i] = 0;
+                }
             }
             continue;
         }
 
-        // Recopie des paquets mutés + drapeaux vivant/mort.
+        // Recopie des paquets mutés + drapeaux vivant/mort + cases examinées.
         memcpy(packets + base, g_packets, (size_t)cnt * sizeof(struct possibility_packet));
         memcpy(alive_out + base, g_alive, (size_t)cnt * sizeof(uint8_t));
+        if (cells_out != NULL) {
+            memcpy(cells_out + base, g_cells, (size_t)cnt * sizeof(uint32_t));
+        }
     }
 }
 
@@ -383,8 +400,10 @@ extern "C" void gpu_pruner_shutdown(void)
     cudaFree(g_map.part_dev);
     cudaFree(g_packets);
     cudaFree(g_alive);
+    cudaFree(g_cells);
     memset(&g_map, 0, sizeof(g_map));
     g_packets = NULL;
     g_alive = NULL;
+    g_cells = NULL;
     g_inited = 0;
 }

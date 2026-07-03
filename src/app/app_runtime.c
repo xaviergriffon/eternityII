@@ -389,6 +389,7 @@ void *fork_checker(void *param) {
         // Statistiques du client pruner (restent à zéro en mode recherche)
         statistic->pruner_checked = pruner_checked;
         statistic->pruner_removed = pruner_removed;
+        statistic->pruner_cells_studied = pruner_cells_studied;
         /* On préfixe le datagramme d'un octet de type pour permettre au
            parent de multiplexer stats / logs / événements sur le même
            socket. Voir ipc_protocol.h. */
