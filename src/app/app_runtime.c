@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <signal.h>
 #include <errno.h>
 #include <unistd.h>
@@ -472,6 +473,19 @@ void *server_tcp(void *param) {
         }
         if (numBytes < 1) {
             continue;
+        }
+
+        /* recvfrom() n'est PAS garanti terminer sun_path par un octet nul :
+         * le noyau n'écrit que `len` octets (convention SUN_LEN, qui exclut
+         * le terminateur). Sans ce nul explicite, find_fork_index() (qui
+         * compare via strcmp) peut lire au-delà de l'adresse reçue, dans la
+         * mémoire non initialisée de `claddr` (malloc, jamais remis à zéro). */
+        {
+            size_t addr_path_len = (size_t)len - offsetof(struct sockaddr_un, sun_path);
+            if (addr_path_len >= sizeof(claddr->sun_path)) {
+                addr_path_len = sizeof(claddr->sun_path) - 1;
+            }
+            claddr->sun_path[addr_path_len] = '\0';
         }
 
         int8_t type = (int8_t)buf[0];
