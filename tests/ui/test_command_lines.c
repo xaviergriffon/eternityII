@@ -21,11 +21,19 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 /* exit_interpreter n'est pas exposé dans command_lines.h (appelé uniquement via
  * la table de dispatch de do_command_line). */
 int exit_interpreter(void);
+
+/* lock_all_file / unlock_all_file ne sont pas dans datamanager.h mais sont
+ * accessibles via liaison directe (datamanager.c est toujours dans TEST_MODULES).
+ * Utilisées pour passer maintenance=1 sans deadlock (backup() vérifie le flag
+ * avant d'essayer de prendre les mutex). */
+extern void lock_all_file(void);
+extern void unlock_all_file(void);
 
 /* Exécute do_command_line en redirigeant stdout+stderr (les interprètes loguent). */
 static int run_command_quiet(char *cmd)
@@ -627,6 +635,153 @@ TEST do_command_line_restore_with_two_arguments(void)
     PASS();
 }
 
+/* check : ternaire « lastcheck != NULL » (L166) et « report_copy != NULL » (L170)
+ * jamais vrais dans les tests précédents — on publie un rapport non-NULL. */
+TEST do_command_line_check_with_non_null_lastcheck(void)
+{
+    pthread_mutex_lock(&lastcheck_mutex);
+    char *saved = lastcheck;
+    lastcheck = strdup("rapport test");
+    pthread_mutex_unlock(&lastcheck_mutex);
+
+    char cmd[] = "check";
+    int r = run_command_quiet(cmd);
+
+    pthread_mutex_lock(&lastcheck_mutex);
+    free(lastcheck);
+    lastcheck = saved;
+    pthread_mutex_unlock(&lastcheck_mutex);
+
+    ASSERT_EQ_FMT(0, r, "%d");
+    PASS();
+}
+
+/* backup avec maintenance active : backup() retourne BACKUP_SKIPPED_MAINTENANCE
+ * (L190 branche vraie, L196 branche vraie). lock_all_file() pose maintenance=1
+ * sans deadlock car backup() vérifie le flag avant toute prise de mutex. */
+TEST do_command_line_backup_skipped_when_maintenance(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_bkm_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+    int saved_server = server;
+    server = 1;
+
+    lock_all_file();
+    char cmd[] = "backup";
+    int r = run_command_quiet(cmd);
+    unlock_all_file();
+
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+    server = saved_server;
+
+    ASSERT_EQ_FMT(0, r, "%d"); /* backup_interpreter retourne toujours 0 */
+    PASS();
+}
+
+/* backup vers un répertoire non inscriptible : fopen échoue → BACKUP_ERROR
+ * (L192 branche vraie, L198 branche vraie). */
+TEST do_command_line_backup_fails_on_unwritable_dir(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_bkw_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+    if (chmod(dir, 0444) != 0) {
+        chdir(saved_cwd); rmdir(dir);
+        SKIPm("chmod non supporté sur cet environnement");
+    }
+    int saved_server = server;
+    server = 1;
+
+    char cmd[] = "backup";
+    int r = run_command_quiet(cmd);
+
+    chmod(dir, 0755);
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+    server = saved_server;
+
+    ASSERT_EQ_FMT(0, r, "%d"); /* backup_interpreter retourne toujours 0 */
+    PASS();
+}
+
+/* restore avec request != REQUEST_CONTINUE : la branche de pause (L285 fausse)
+ * et la remise en route (L299 fausse) ne sont jamais prises. En passant
+ * request=REQUEST_STOP avant l'appel, on couvre les deux branches fausses.
+ * On utilise un fichier inexistant → restore() renvoie -1 → L291 branche vraie. */
+TEST do_command_line_restore_when_not_running(void)
+{
+    int saved_req = request;
+    request = REQUEST_STOP; /* != REQUEST_CONTINUE */
+
+    char cmd[] = "restore /tmp/etii_nonexistent_restore_file.back";
+    int r = run_command_quiet(cmd);
+
+    request = saved_req;
+
+    /* restore() échoue sur fichier absent -> résultat non nul */
+    ASSERT_EQ_FMT(-1, r, "%d");
+    PASS();
+}
+
+/* restore avec fichier inexistant et request=REQUEST_CONTINUE : couvre L291 T
+ * (restore échoue) dans le chemin "pause / reprise". */
+TEST do_command_line_restore_fails_on_missing_file(void)
+{
+    int saved_req = request;
+    request = REQUEST_CONTINUE;
+
+    char cmd[] = "restore /tmp/etii_nonexistent_restore_file.back";
+    int r = run_command_quiet(cmd);
+
+    request = saved_req;
+
+    ASSERT_EQ_FMT(-1, r, "%d");
+    PASS();
+}
+
+/* exit_interpreter mode client avec childrens_pid != NULL (L215 branche vraie).
+ * On remplit le tableau avec un pid mort (> 0, pour L219 T) et un zéro (L219 F).
+ * Le pid mort fait échouer kill(pid, 0) → remaining reste 0 → boucle s'arrête
+ * → exit(EXIT_SUCCESS). Exécuté dans un fork pour ne pas tuer le runner. */
+static void fork_exit_client_with_children_array(void)
+{
+    server = 0;
+    parent_pid = getpid();
+
+    /* Crée un fils qui termine immédiatement pour obtenir un pid mort. */
+    pid_t dead_child = fork();
+    if (dead_child == 0) {
+        _exit(0);
+    }
+    waitpid(dead_child, NULL, 0); /* récolte → pid maintenant disparu */
+
+    pid_t pids[2] = { dead_child, 0 }; /* > 0 puis <= 0 : couvre L219 T et F */
+    childrens_pid = pids;
+    NB_THREADS = 2;
+
+    exit_interpreter();
+    _exit(99); /* non atteint */
+}
+
+TEST exit_interpreter_client_with_children_array_exits(void)
+{
+    int code = run_in_fork(fork_exit_client_with_children_array, NULL);
+    ASSERT_EQ_FMT(0, code, "%d");
+    PASS();
+}
+
 SUITE(command_lines_suite)
 {
     RUN_TEST(do_command_line_handles_empty_input);
@@ -661,4 +816,11 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_backup_client_mode_appends_pid);
     RUN_TEST(do_command_line_restore_with_one_argument);
     RUN_TEST(do_command_line_restore_with_two_arguments);
+
+    RUN_TEST(do_command_line_check_with_non_null_lastcheck);
+    RUN_TEST(do_command_line_backup_skipped_when_maintenance);
+    RUN_TEST(do_command_line_backup_fails_on_unwritable_dir);
+    RUN_TEST(do_command_line_restore_when_not_running);
+    RUN_TEST(do_command_line_restore_fails_on_missing_file);
+    RUN_TEST(exit_interpreter_client_with_children_array_exits);
 }
