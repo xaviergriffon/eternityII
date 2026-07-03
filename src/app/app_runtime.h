@@ -2,6 +2,7 @@
 #define app_runtime_h
 
 #include <sys/types.h>
+#include <sys/un.h>
 
 /*
  * Fonctions « plumbing » du processus, extraites de main.c pour être testables
@@ -91,5 +92,64 @@ enum {
 	TCPSERVER_ARG_AS_FILENAME = 2,
 };
 int parse_tcpserver_thread_arg(const char *arg, int default_nb_threads, int *out_nb_threads);
+
+/* ---- IPC parent<->enfants (sockets Unix UDP locales) ---- */
+
+/**
+ * @brief Thread de statistiques du processus enfant (fork).
+ *
+ * Crée le socket Unix local de l'enfant (`etii_fork.<pid>`), démarre le thread
+ * `fork_udp` pour la réception des commandes IPC, puis toutes les secondes :
+ * calcule le débit moyen sur 5 s, compte les possibilités en stock et en
+ * analyse, envoie une structure `client_statistics` au parent via `sendto`.
+ *
+ * @param param Pointeur vers la `sockaddr_un` du socket principal du parent.
+ * @return      NULL.
+ */
+void *fork_checker(void *param);
+
+/**
+ * @brief Exécute `fork_checker` dans un thread détaché.
+ * @param main_addr Adresse du socket principal du parent.
+ * @return 0 en cas de succès.
+ */
+int run_fork_checker(struct sockaddr_un *main_addr);
+
+/**
+ * @brief Thread de réception des statistiques IPC en provenance des processus
+ *        enfants (parent).
+ *
+ * Reçoit des structures `client_statistics` via `recvfrom` sur le socket Unix
+ * principal, identifie l'enfant émetteur en comparant `sun_path` avec
+ * `forkId[]`, et met à jour `fork_statistics[cpt]` par copie mémoire.
+ *
+ * @param param Pointeur vers l'entier `socket_id` du socket UDP Unix principal.
+ * @return      NULL.
+ */
+void *server_tcp(void *param);
+
+/**
+ * @brief Exécute `server_tcp` dans un thread détaché.
+ * @param socket_id Pointeur vers le descripteur du socket UDP Unix principal.
+ */
+void run_server_thread(int *socket_id);
+
+/**
+ * @brief Thread de réception des commandes IPC dans les processus enfants.
+ *
+ * Reçoit des chaînes de commande envoyées par le parent via UDP Unix et les
+ * délègue à `do_command_line`. Configure les signaux enfant via
+ * `configure_child_signals` au démarrage.
+ *
+ * @param param Pointeur vers l'entier `socket_id` du socket UDP Unix de l'enfant.
+ * @return      NULL.
+ */
+void *fork_udp(void *param);
+
+/**
+ * @brief Démarre le thread `fork_udp` (réception des commandes IPC) en mode détaché.
+ * @param socket_id Pointeur vers le descripteur du socket UDP Unix de l'enfant.
+ */
+void run_fork_thread(int *socket_id);
 
 #endif /* app_runtime_h */
