@@ -114,14 +114,12 @@ void handle_tcpclient(int argc, const char *argv[]) {
         serverIp = (char *)argv[2];
     }
     if (argc >= 4) {
-        int n = atoi(argv[3]);
-        if (n > 0) {
-            NB_THREADS = n;
-        } else {
+        int was_invalid = 0;
+        NB_THREADS = parse_positive_int_or_default(argv[3], 1, &was_invalid);
+        if (was_invalid) {
             // Un nombre de threads <= 0 (ou non numérique) donnerait 0 process de
             // travail : le client ne ferait rien. On retombe sur 1.
             log_error("nombre de threads invalide (\"%s\") — 1 thread par défaut\n", argv[3]);
-            NB_THREADS = 1;
         }
     }
     if (argc >= 5) {
@@ -304,17 +302,8 @@ void handle_tcpserver(int argc, const char *argv[]) {
     int file_arg = -1; // indice de l'argument « fichier de pièces », si fourni
     if (argc >= 3) {
         log_info("arg 2 : %s\n", argv[2]);
-        int n = atoi(argv[2]);
-        char c0 = argv[2][0];
-        int looks_numeric = (c0 == '+' || c0 == '-' || (c0 >= '0' && c0 <= '9'));
-        if (n > 0) {
-            NB_THREADS = n;
-            if (argc >= 4) file_arg = 3;
-        } else if (looks_numeric) {
-            // Nombre fourni mais non valide (0 ou négatif) : on garde le défaut.
-            log_error("nombre de threads invalide (\"%s\") — %i threads par défaut\n", argv[2], NB_THREADS);
-            if (argc >= 4) file_arg = 3;
-        } else {
+        switch (parse_tcpserver_thread_arg(argv[2], NB_THREADS, &NB_THREADS)) {
+        case TCPSERVER_ARG_AS_FILENAME:
             // Pas un nombre : l'utilisateur a probablement passé le fichier ici.
             // On garde le nombre de threads par défaut et on traite cet argument
             // comme le fichier de pièces (sinon : serveur muet à 0 thread).
@@ -323,6 +312,15 @@ void handle_tcpserver(int argc, const char *argv[]) {
                       "%i threads par défaut. Usage : tcpserver [nb_threads] [pieces.csv]\n",
                       argv[2], NB_THREADS);
             file_arg = 2;
+            break;
+        case TCPSERVER_ARG_INVALID_COUNT:
+            // Nombre fourni mais non valide (0 ou négatif) : on garde le défaut.
+            log_error("nombre de threads invalide (\"%s\") — %i threads par défaut\n", argv[2], NB_THREADS);
+            if (argc >= 4) file_arg = 3;
+            break;
+        default: // TCPSERVER_ARG_AS_COUNT
+            if (argc >= 4) file_arg = 3;
+            break;
         }
     }
     log_info("Nb threads : %i\n", NB_THREADS);
