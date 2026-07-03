@@ -18,6 +18,8 @@
 #include "app/app_runtime.h"
 #include "app/static_variables.h"
 #include "app/etii_statistic.h"
+#include "net/local_socket.h"
+#include "net/ipc_protocol.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +29,9 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/time.h>
 
 /* Redirige un FD vers /dev/null le temps d'un appel verbeux (wait_child logue). */
 static int g_saved_fd = -1, g_saved_target = -1;
@@ -366,6 +371,243 @@ TEST tcpserver_arg_plus_prefixed_number_is_count(void)
     PASS();
 }
 
+/* ==================== IPC parent<->enfants (sockets Unix UDP) ==================
+ *
+ * fork_checker / server_tcp / fork_udp bouclent sur recvfrom()/sleep() jusqu'à
+ * REQUEST_STOP. Comme pour communicate_with_client (etii_server.c) en P2, on
+ * les lance dans un vrai pthread (pas de fork() : aucun souci de flush de
+ * couverture), avec un socket Unix DGRAM réel construit via build_sockaddr +
+ * build_udp_local_socket (même pattern que tests/net/test_local_socket.c).
+ * SO_RCVTIMEO borne toute attente réseau : un blocage inattendu fait échouer
+ * le test au lieu de suspendre le runner.
+ */
+
+static void set_recv_timeout_ar(int fd, int seconds)
+{
+    struct timeval tv = { .tv_sec = seconds, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+}
+
+/* ---------- server_tcp ----------------------------------------------------- */
+
+/* Le serveur reçoit un IPC_MSG_STATS depuis un « enfant » identifié par son
+ * sun_path (forkId[0]) : fork_statistics[0] est mis à jour par copie exacte.
+ * Puis un IPC_MSG_EVENT (vérifié via events.log, comme test_logger.c) et un
+ * type inconnu (branche « default », débloque aussi la sortie sur
+ * REQUEST_STOP). */
+TEST server_tcp_updates_stats_and_handles_event_and_unknown_type(void)
+{
+    char server_path[] = "/tmp/etii_ar_srv_XXXXXX";
+    char child_path[]  = "/tmp/etii_ar_chd_XXXXXX";
+    int sfd = mkstemp(server_path); ASSERT(sfd >= 0); close(sfd); unlink(server_path);
+    int cfd = mkstemp(child_path);  ASSERT(cfd >= 0); close(cfd); unlink(child_path);
+
+    struct sockaddr_un *server_addr = build_sockaddr(server_path);
+    int server_fd = build_udp_local_socket(server_addr);
+    ASSERT(server_fd >= 0);
+    struct sockaddr_un *child_addr = build_sockaddr(child_path);
+    int child_fd = build_udp_local_socket(child_addr);
+    ASSERT(child_fd >= 0);
+    set_recv_timeout_ar(child_fd, 2); /* non utilisé en réception ici, par précaution */
+
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    char **saved_forkid = forkId;
+    struct client_statistics *saved_fs = fork_statistics;
+
+    request = REQUEST_CONTINUE;
+    NB_THREADS = 1;
+    forkId = malloc(sizeof(char *));
+    forkId[0] = (char *)child_path;
+    struct client_statistics fs[1];
+    memset(fs, 0, sizeof fs);
+    fork_statistics = fs;
+
+    pthread_t tid;
+    ASSERT_EQ_FMT(0, pthread_create(&tid, NULL, server_tcp, &server_fd), "%d");
+
+    /* IPC_MSG_STATS : payload connu, vérifié après réception. */
+    struct { int8_t type; struct client_statistics stat; } __attribute__((packed)) msg;
+    memset(&msg, 0, sizeof msg);
+    msg.type = IPC_MSG_STATS;
+    msg.stat.shots_per_second = 4242;
+    msg.stat.max_result = 99;
+    ASSERT_EQ_FMT((int)sizeof msg,
+                  (int)sendto(child_fd, &msg, sizeof msg, 0,
+                              (struct sockaddr *)server_addr, sizeof(struct sockaddr_un)),
+                  "%d");
+
+    /* Attente active bornée : fork_statistics[0] mis à jour de façon asynchrone. */
+    for (int i = 0; i < 100 && fork_statistics[0].shots_per_second == 0; i++) usleep(10000);
+    ASSERT_EQ_FMT(4242ULL, fork_statistics[0].shots_per_second, "%llu");
+    ASSERT_EQ_FMT(99, (int)fork_statistics[0].max_result, "%d");
+
+    /* IPC_MSG_EVENT : vérifié via events.log (comme test_logger.c). */
+    unlink("events.log");
+    char evbuf[16];
+    evbuf[0] = IPC_MSG_EVENT;
+    memcpy(evbuf + 1, "hi", 2);
+    ASSERT_EQ_FMT(3, (int)sendto(child_fd, evbuf, 3, 0,
+                                  (struct sockaddr *)server_addr, sizeof(struct sockaddr_un)), "%d");
+    int seen_event = 0;
+    for (int i = 0; i < 100 && !seen_event; i++) {
+        usleep(10000);
+        FILE *f = fopen("events.log", "r");
+        if (f != NULL) {
+            char line[64] = {0};
+            size_t n = fread(line, 1, sizeof line - 1, f);
+            fclose(f);
+            (void)n;
+            seen_event = (strstr(line, "hi") != NULL);
+        }
+    }
+    ASSERT(seen_event);
+    unlink("events.log");
+
+    /* Type inconnu (branche default) : ne doit pas planter. */
+    char unk[2] = { (char)0x7f, 0 };
+    sendto(child_fd, unk, 1, 0, (struct sockaddr *)server_addr, sizeof(struct sockaddr_un));
+    usleep(20000);
+
+    /* Débloque et arrête la boucle : REQUEST_STOP puis un dernier datagramme
+     * pour sortir du recvfrom() bloquant. */
+    request = REQUEST_STOP;
+    sendto(child_fd, unk, 1, 0, (struct sockaddr *)server_addr, sizeof(struct sockaddr_un));
+    pthread_join(tid, NULL);
+
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    free(forkId);
+    forkId = saved_forkid;
+    fork_statistics = saved_fs;
+    close(server_fd);
+    close(child_fd);
+    unlink(server_path);
+    unlink(child_path);
+    free(server_addr);
+    free(child_addr);
+    PASS();
+}
+
+/* ---------- fork_udp --------------------------------------------------------- */
+
+/* Reçoit une commande, la délègue à do_command_line (ici « help », inoffensive),
+ * puis sort sur REQUEST_STOP après un dernier datagramme de déblocage. */
+TEST fork_udp_delegates_command_then_stops(void)
+{
+    char sock_path[] = "/tmp/etii_ar_udp_XXXXXX";
+    int tfd = mkstemp(sock_path); ASSERT(tfd >= 0); close(tfd); unlink(sock_path);
+
+    struct sockaddr_un *addr = build_sockaddr(sock_path);
+    int fd = build_udp_local_socket(addr);
+    ASSERT(fd >= 0);
+
+    /* Émetteur : un second socket DGRAM anonyme suffit pour sendto(). */
+    int sender = socket(AF_UNIX, SOCK_DGRAM, 0);
+    ASSERT(sender >= 0);
+
+    int saved_req = request;
+    request = REQUEST_CONTINUE;
+
+    pthread_t tid;
+    ASSERT_EQ_FMT(0, pthread_create(&tid, NULL, fork_udp, &fd), "%d");
+
+    /* do_command_line("help") est verbeux : coupe stdout+stderr le temps du
+     * test (mute_fd/unmute_fd ne gèrent qu'un seul fd à la fois). */
+    fflush(NULL);
+    int s1 = dup(1), s2 = dup(2);
+    int dn = open("/dev/null", O_WRONLY);
+    if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); close(dn); }
+
+    char cmd[] = "help";
+    sendto(sender, cmd, strlen(cmd), 0, (struct sockaddr *)addr, sizeof(struct sockaddr_un));
+    usleep(30000); /* laisse fork_udp traiter la commande et reboucler sur recvfrom */
+
+    request = REQUEST_STOP;
+    sendto(sender, cmd, strlen(cmd), 0, (struct sockaddr *)addr, sizeof(struct sockaddr_un));
+    pthread_join(tid, NULL);
+
+    fflush(NULL);
+    dup2(s1, 1); dup2(s2, 2);
+    close(s1); close(s2);
+
+    request = saved_req;
+    close(sender);
+    close(fd);
+    unlink(sock_path);
+    free(addr);
+    PASS();
+}
+
+/* ---------- fork_checker ----------------------------------------------------- */
+
+/* fork_checker construit son propre socket (etii_fork.<pid>, chemin relatif au
+ * CWD comme en production), démarre fork_udp via run_fork_thread, puis envoie
+ * périodiquement ses statistiques au socket "parent" fourni. On vérifie la
+ * réception d'au moins un datagramme IPC_MSG_STATS, puis on arrête proprement
+ * les DEUX threads (fork_checker lui-même + le fork_udp qu'il a démarré). */
+TEST fork_checker_sends_stats_to_parent(void)
+{
+    char parent_path[] = "/tmp/etii_ar_parent_XXXXXX";
+    int pfd = mkstemp(parent_path); ASSERT(pfd >= 0); close(pfd); unlink(parent_path);
+
+    struct sockaddr_un *parent_addr = build_sockaddr(parent_path);
+    int parent_fd = build_udp_local_socket(parent_addr);
+    ASSERT(parent_fd >= 0);
+    set_recv_timeout_ar(parent_fd, 3);
+
+    char child_sock_path[64];
+    snprintf(child_sock_path, sizeof child_sock_path, "etii_fork.%d", (int)getpid());
+    unlink(child_sock_path); /* résidu éventuel d'un run précédent */
+
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    unsigned long long *saved_counters = counters;
+    unsigned long long *saved_lastfilesize = lastfilesize;
+    request = REQUEST_CONTINUE;
+    NB_THREADS = 1;
+    unsigned long long ctr_buf[1] = {0}, lfs_buf[1] = {0};
+    counters = ctr_buf;
+    lastfilesize = lfs_buf;
+
+    pthread_t tid;
+    ASSERT_EQ_FMT(0, pthread_create(&tid, NULL, fork_checker, parent_addr), "%d");
+
+    /* fork_checker envoie sa 1re statistique dès le démarrage (avant le 1er
+     * sleep(1)) : borne large (3s) pour absorber la charge du runner. */
+    char buf[1 + sizeof(struct client_statistics)];
+    ssize_t n = recvfrom(parent_fd, buf, sizeof buf, 0, NULL, NULL);
+    ASSERT(n > 0);
+    ASSERT_EQ_FMT((int)IPC_MSG_STATS, (int)buf[0], "%d");
+
+    /* Arrêt propre : REQUEST_STOP fait sortir fork_checker au prochain tour
+     * (borné par son sleep(1) interne) ; on débloque en plus le fork_udp
+     * qu'il a démarré (etii_fork.<pid>), sinon il resterait bloqué sur
+     * recvfrom indéfiniment. */
+    request = REQUEST_STOP;
+    int sender = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (sender >= 0) {
+        struct sockaddr_un *child_addr = build_sockaddr(child_sock_path);
+        char wake[] = "help";
+        sendto(sender, wake, strlen(wake), 0, (struct sockaddr *)child_addr, sizeof(struct sockaddr_un));
+        free(child_addr);
+        close(sender);
+    }
+
+    pthread_join(tid, NULL);
+    usleep(50000); /* laisse le fork_udp détaché terminer avant le nettoyage du fichier socket */
+
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    counters = saved_counters;
+    lastfilesize = saved_lastfilesize;
+    close(parent_fd);
+    unlink(parent_path);
+    unlink(child_sock_path);
+    free(parent_addr);
+    PASS();
+}
+
 SUITE(app_runtime_suite)
 {
     RUN_TEST(init_counters_allocates_zeroed);
@@ -393,4 +635,8 @@ SUITE(app_runtime_suite)
     RUN_TEST(tcpserver_arg_filename_is_detected);
     RUN_TEST(tcpserver_arg_empty_string_is_filename);
     RUN_TEST(tcpserver_arg_plus_prefixed_number_is_count);
+
+    RUN_TEST(server_tcp_updates_stats_and_handles_event_and_unknown_type);
+    RUN_TEST(fork_udp_delegates_command_then_stops);
+    RUN_TEST(fork_checker_sends_stats_to_parent);
 }
