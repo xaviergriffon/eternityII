@@ -57,8 +57,12 @@ int gpu_pruner_init(const map_big_array *map, const struct array_part *all_rotat
  * @param packets   Tableau de paquets (entrée/sortie, muté en place).
  * @param n         Nombre de paquets.
  * @param alive_out Tableau de sortie (au moins `n` octets) : 1 = vivant, 0 = mort.
+ * @param cells_out Sortie optionnelle (NULL accepté, au moins `n` entrées) :
+ *                  nombre de cases examinées par paquet (statistique de débit,
+ *                  même unité qu'un coup de la recherche ; 0 si court-circuit
+ *                  `checked` ou échec du lancement kernel).
  */
-void gpu_pruner_check_batch(struct possibility_packet *packets, int n, uint8_t *alive_out);
+void gpu_pruner_check_batch(struct possibility_packet *packets, int n, uint8_t *alive_out, uint32_t *cells_out);
 
 /** @brief Libère le miroir GPU et les buffers de travail. */
 void gpu_pruner_shutdown(void);

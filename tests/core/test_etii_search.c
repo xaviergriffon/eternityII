@@ -1793,6 +1793,8 @@ TEST autoprune_step_keeps_live_packet(void)
     client.aposs = aposs;
 
     unsigned long long checked_before = pruner_checked;
+    unsigned long long cells_before = pruner_cells_studied;
+    unsigned long long counter_before = counters[0];
     int saved = request;
     request = REQUEST_CONTINUE;
     int cont = autoprune_step(&client);
@@ -1802,6 +1804,11 @@ TEST autoprune_step_keeps_live_packet(void)
     ASSERT(client.aposs == NULL);
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");                 /* vivant renvoyé en local */
     ASSERT_EQ_FMT(checked_before + 1, pruner_checked, "%llu"); /* compteur incrémenté */
+    /* Plateau vide + map libre : le contrôle balaie les ETERN_PARTS cases, et
+       chaque case étudiée compte comme un coup (même unité que la recherche),
+       créditée au compteur de débit ET au cumul dédié au pruner. */
+    ASSERT_EQ_FMT(counter_before + ETERN_PARTS, counters[0], "%llu");
+    ASSERT_EQ_FMT(cells_before + ETERN_PARTS, pruner_cells_studied, "%llu");
 
     pthread_mutex_destroy(&client.works_mutex);
     /* map_part / all_rotate_part : stockage statique, pas de free. */

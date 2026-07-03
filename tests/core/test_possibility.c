@@ -2126,6 +2126,74 @@ TEST all_has_a_next_multi_candidate_skips_used_piece(void)
     PASS();
 }
 
+/* Variante comptée : le balayage complet d'une grille « remplie » (aucune case
+ * -2, résultat 1 à chaque itération) examine toutes les cases de alloc à
+ * ETERN_PARTS -> out_cells_studied = ETERN_PARTS. C'est l'unité créditée au
+ * compteur de coups des pruners (une étude par case, comme la recherche). */
+TEST all_has_a_next_counted_full_scan_counts_all_cells(void)
+{
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = 0;
+
+    unsigned int cells = 0;
+    ASSERT_EQ_FMT(1, possibility_all_has_a_next_counted(p, map, &rp, &cells), "%d");
+    ASSERT_EQ_FMT((unsigned int)ETERN_PARTS, cells, "%u");
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
+/* Variante comptée : une impasse sur la première case du parcours arrête le
+ * balayage immédiatement -> une seule case examinée. */
+TEST all_has_a_next_counted_dead_first_cell_counts_one(void)
+{
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = 0;
+    p->grid[dirx[0]][diry[0]] = -2; /* clé (0,0,0,0) : aucun candidat */
+
+    unsigned int cells = 0;
+    ASSERT_EQ_FMT(0, possibility_all_has_a_next_counted(p, map, &rp, &cells), "%d");
+    ASSERT_EQ_FMT(1u, cells, "%u");
+
+    /* NULL accepté : même verdict, pas de comptage. */
+    p->grid[dirx[0]][diry[0]] = -2;
+    ASSERT_EQ_FMT(0, possibility_all_has_a_next_counted(p, map, &rp, NULL), "%d");
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
+/* Variante comptée : plateau déjà complet (alloc = ETERN_PARTS), le balayage
+ * ne fait aucune itération -> 0 case examinée (l'appelant crédite alors un
+ * coup forfaitaire). */
+TEST all_has_a_next_counted_complete_board_counts_zero(void)
+{
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = ETERN_PARTS;
+
+    unsigned int cells = 42;
+    ASSERT_EQ_FMT(1, possibility_all_has_a_next_counted(p, map, &rp, &cells), "%d");
+    ASSERT_EQ_FMT(0u, cells, "%u");
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
 #if ETERN_PARTS == 256
 /* Régression : une case totalement non contrainte NE DOIT PAS interrompre le
  * balayage. Avant le correctif, dès qu'une case libre avait ses 4 clés égales
@@ -2502,6 +2570,9 @@ SUITE(possibility_suite)
     RUN_TEST(all_has_a_next_dead_cell_returns_zero);
     RUN_TEST(all_has_a_next_single_candidate_places_piece);
     RUN_TEST(all_has_a_next_multi_candidate_skips_used_piece);
+    RUN_TEST(all_has_a_next_counted_full_scan_counts_all_cells);
+    RUN_TEST(all_has_a_next_counted_dead_first_cell_counts_one);
+    RUN_TEST(all_has_a_next_counted_complete_board_counts_zero);
 #if ETERN_PARTS == 256
     RUN_TEST(all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell);
 #endif

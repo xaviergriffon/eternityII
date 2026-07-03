@@ -27,6 +27,8 @@ struct client_statistics {
     unsigned long long pruner_checked;
     /** Cumul des possibilités mortes éliminées par un client pruner. */
     unsigned long long pruner_removed;
+    /** Cumul des cases étudiées par un client pruner (0 en mode recherche). */
+    unsigned long long pruner_cells_studied;
 } __attribute__((__packed__));
 
 

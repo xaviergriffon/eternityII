@@ -536,18 +536,23 @@ int possibility_has_a_next(struct possibility_packet *possibility, map_big_array
  * @param possibility    Paquet à analyser (peut être modifié si des pièces uniques sont placées).
  * @param mapParts       Tableau 4D de lookup.
  * @param all_rotate_part Tableau de toutes les rotations.
+ * @param out_cells_studied Si non NULL, reçoit le nombre de cases examinées par
+ *                       le balayage (une par itération, arrêt anticipé inclus) —
+ *                       la même unité qu'un coup de la recherche.
  * @return               1 si toutes les cases libres ont au moins une suite, 0 sinon.
  */
-int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part)
+int possibility_all_has_a_next_counted(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part, unsigned int *out_cells_studied)
 {
     int result = 1;
-    
+
 	key_part wsearch;
 	int c;
     int alloc = possibility->alloc;
+    unsigned int cells_studied = 0;
     // On parcours
 	for(c=possibility->alloc;c < ETERN_PARTS && result == 1;c++) {
 		result = 0;
+		cells_studied++;
 		int8_t x = dirx[c];
 		int8_t y = diry[c];
 		if(possibility->grid[x][y] == -2) {
@@ -608,7 +613,16 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
          * côté serveur). */
     }
 
+    if (out_cells_studied != NULL) {
+        *out_cells_studied = cells_studied;
+    }
+
 	return result;
+}
+
+int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part)
+{
+    return possibility_all_has_a_next_counted(possibility, mapParts, all_rotate_part, NULL);
 }
 
 /**

@@ -169,6 +169,22 @@ int possibility_has_a_next(struct possibility_packet *possibility, map_big_array
 int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);
 
 /**
+ * @brief Variante de `possibility_all_has_a_next` comptant les cases examinées.
+ *
+ * Identique en tout point, mais si `out_cells_studied` est non NULL, y écrit le
+ * nombre de cases examinées par le balayage (une par itération, arrêt anticipé
+ * inclus). Utilisée par les pruners pour créditer le compteur de coups d'une
+ * étude par case, la même unité que la recherche.
+ *
+ * @param possibility       Paquet à analyser (peut être modifié).
+ * @param mapParts          Tableau 4D de lookup.
+ * @param all_rotate_part   Tableau de toutes les rotations.
+ * @param out_cells_studied Sortie optionnelle (NULL accepté) : cases examinées.
+ * @return                  1 si toutes les cases libres ont au moins une suite, 0 sinon.
+ */
+int possibility_all_has_a_next_counted(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part, unsigned int *out_cells_studied);
+
+/**
  * @brief Forward-checking sur les `FORWARD_CHECK_K` prochaines cases.
  *
  * Après avoir sélectionné une pièce candidate, vérifie que les prochaines

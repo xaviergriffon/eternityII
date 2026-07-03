@@ -613,14 +613,16 @@ void check_client_threads_step(int *last_record)
         // Statistiques pruner : agrégat des forks + compteurs du processus courant
         unsigned long long prc = pruner_checked;
         unsigned long long prr = pruner_removed;
+        unsigned long long prcells = pruner_cells_studied;
         for (f = 0; f < NB_THREADS; f++) {
             prc += fork_statistics[f].pruner_checked;
             prr += fork_statistics[f].pruner_removed;
+            prcells += fork_statistics[f].pruner_cells_studied;
         }
         if (prc + prr > 0) {
             char *prtemp = calloc(200, sizeof(char));
-            sprintf(prtemp, "pruner : %llu mortes / %llu vérifiées (%.2f%%)\n",
-                    prr, prc + prr, 100.0 * (double)prr / (double)(prc + prr));
+            sprintf(prtemp, "pruner : %llu mortes / %llu vérifiées (%.2f%%), %llu cases étudiées\n",
+                    prr, prc + prr, 100.0 * (double)prr / (double)(prc + prr), prcells);
             strcat(report, prtemp);
             free(prtemp);
         }
