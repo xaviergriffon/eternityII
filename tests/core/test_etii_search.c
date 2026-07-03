@@ -34,11 +34,16 @@
 #include "app/static_variables.h"  /* max_stock_by_thread, request, counters… */
 #include "fork_assert.h"           /* run_in_fork (chemins qui exit()) */
 
+#include "net/etii_protocol.h"     /* INST_TEST_CONNECTED / INST_END (mini-serveurs) */
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <fcntl.h>
 #include <dirent.h>
 
 /* ======================================================================
@@ -118,6 +123,162 @@ TEST delegate_big_table_moves_excess(void)
     ASSERT_EQ_FMT(3ULL, (unsigned long long)bt.size, "%llu");
     ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
 
+    clear_big_table(&bt);
+    drain_local();
+    PASS();
+}
+
+/* Variante big_table sous le seuil : aucune délégation (côté « noop » du garde). */
+TEST delegate_big_table_noop_below_threshold(void)
+{
+    drain_local();
+    max_stock_by_thread = 10;
+
+    big_table bt;
+    init_big_table(&bt, 4, sizeof(struct possibility_packet));
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    for (int i = 0; i < 3; i++) { pk.alloc = (uint16_t)i; put_big_table(&bt, &pk); }
+
+    checkAndDelegatePossibilitiesIfNeeded_with_big_table(NULL, &bt);
+
+    ASSERT_EQ_FMT(3ULL, (unsigned long long)bt.size, "%llu"); /* inchangé */
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");                /* rien délégué */
+
+    clear_big_table(&bt);
+    PASS();
+}
+
+/* ======================================================================
+ * Échec d'envoi au serveur (add_possibility != 0).
+ *
+ * Un socketpair joue le serveur : il acquitte le premier INST_ADD par
+ * INST_END (« connexion perdue »), ce qui fait échouer put_to_server —
+ * qui remet lui-même les possibilités au stock local — et renvoie -1 à
+ * add_possibility. On couvre ainsi les branches d'erreur des délégations,
+ * inatteignables en mode local (put_to_local n'échoue jamais).
+ * ====================================================================== */
+
+static int es_g_fd1 = -1, es_g_fd2 = -1;
+static void es_silence_std(void)
+{
+    fflush(stdout); fflush(stderr);
+    es_g_fd1 = dup(1); es_g_fd2 = dup(2);
+    int dn = open("/dev/null", O_WRONLY);
+    dup2(dn, 1); dup2(dn, 2); close(dn);
+}
+static void es_restore_std(void)
+{
+    fflush(stdout); fflush(stderr);
+    dup2(es_g_fd1, 1); dup2(es_g_fd2, 2);
+    close(es_g_fd1); close(es_g_fd2);
+}
+
+static void es_recv_exact(int fd, void *buf, size_t len)
+{
+    size_t got = 0;
+    while (got < len) {
+        ssize_t n = recv(fd, (char *)buf + got, len - got, 0);
+        if (n <= 0) return;
+        got += (size_t)n;
+    }
+}
+
+/* Mini-serveur : répond au probe is_connected, lit UN INST_ADD + paquet,
+ * acquitte INST_END (connexion perdue) et ferme. */
+static void *es_mini_srv_add_end(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);                 /* probe is_connected */
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                 /* INST_ADD */
+    struct possibility_packet pkt;
+    es_recv_exact(fd, &pkt, sizeof pkt);
+    b = INST_END;                       /* « connexion perdue » : échec du put */
+    send(fd, &b, 1, 0);
+    close(fd);
+    return NULL;
+}
+
+/* Branche le client (déjà construit) sur un mini-serveur défaillant. */
+static void es_attach_failing_server(client_possibility_t *cp, int fds[2], pthread_t *srv)
+{
+    socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+    pthread_create(srv, NULL, es_mini_srv_add_end, &fds[1]);
+    pthread_mutex_init(&cp->socket_mutex, NULL);
+    cp->socket_id = fds[0];
+    /* Garde-fou anti-blocage : si le protocole déraille, échec après 5 s. */
+    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+    setsockopt(fds[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    set_server_ip("127.0.0.1");
+}
+static void es_detach_failing_server(client_possibility_t *cp, int fds[2], pthread_t *srv)
+{
+    pthread_join(*srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp->socket_mutex);
+}
+
+/* checkAndDelegatePossibilitiesIfNeeded : échec d'envoi -> log + les possibilités
+ * extraites sont remises au stock local par put_to_server lui-même. */
+TEST delegate_file_error_reputs_locally(void)
+{
+    drain_local();
+    max_stock_by_thread = 2;
+
+    client_possibility_t cp;
+    memset(&cp, 0, sizeof cp);
+    int fds[2]; pthread_t srv;
+    es_attach_failing_server(&cp, fds, &srv);
+
+    File db;
+    init_file(&db, sizeof(struct possibility_packet));
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    for (int i = 0; i < 5; i++) { pk.alloc = (uint16_t)i; put(&db, &pk); }
+
+    es_silence_std();
+    checkAndDelegatePossibilitiesIfNeeded(&cp, &db);
+    es_restore_std();
+
+    ASSERT_EQ_FMT(3ULL, (unsigned long long)db.size, "%llu"); /* extraites de la file */
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");                /* remises en local */
+
+    es_detach_failing_server(&cp, fds, &srv);
+    while (db.size > 0) { struct possibility_packet t; scroll(&db, &t); }
+    drain_local();
+    PASS();
+}
+
+/* Variante big_table : en plus de la remise en local par put_to_server, l'échec
+ * déclenche la remise en table locale (put_big_table) des paquets extraits. */
+TEST delegate_big_table_error_reputs_to_table(void)
+{
+    drain_local();
+    max_stock_by_thread = 2;
+
+    client_possibility_t cp;
+    memset(&cp, 0, sizeof cp);
+    int fds[2]; pthread_t srv;
+    es_attach_failing_server(&cp, fds, &srv);
+
+    big_table bt;
+    init_big_table(&bt, 8, sizeof(struct possibility_packet));
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    for (int i = 0; i < 5; i++) { pk.alloc = (uint16_t)i; put_big_table(&bt, &pk); }
+
+    es_silence_std();
+    checkAndDelegatePossibilitiesIfNeeded_with_big_table(&cp, &bt);
+    es_restore_std();
+
+    /* Échec : les 2 paquets extraits sont remis dans la table locale (5 au total). */
+    ASSERT_EQ_FMT(5ULL, (unsigned long long)bt.size, "%llu");
+
+    es_detach_failing_server(&cp, fds, &srv);
     clear_big_table(&bt);
     drain_local();
     PASS();
@@ -299,7 +460,6 @@ TEST bt_count_pending_counts_remaining_free(void)
     PASS();
 }
 
-#if FORWARD_CHECK_K > 0
 /* Construit une map_big_array minuscule (sizearray=3, all_face=2) dont TOUTES les
  * entrées pointent vers `cand`. Indépendante de la traversée dirx/diry : peu
  * importe la case inspectée, le lookup renvoie toujours la même liste. */
@@ -315,6 +475,14 @@ static map_big_array *make_uniform_map(struct array_part *cand)
     return &map;
 }
 
+/* Map uniforme SANS candidat : toute clé renvoie une liste vide (case morte). */
+static map_big_array *make_dead_map(void)
+{
+    static struct array_part empty = { .size = 0, .parts = NULL };
+    return make_uniform_map(&empty);
+}
+
+#if FORWARD_CHECK_K > 0
 /* bt_forward_check : 1 si chaque case vide de la fenêtre a un candidat libre,
  * 0 si une case est morte (aucun candidat / tous utilisés). */
 TEST bt_forward_check_detects_dead_cells(void)
@@ -344,7 +512,49 @@ TEST bt_forward_check_detects_dead_cells(void)
 
     PASS();
 }
+
+/* bt_forward_check : une case PRÉ-REMPLIE de la fenêtre est sautée sans lookup
+ * (grid != -2), et un candidat id 0 (trou de map) est ignoré sans tuer la case. */
+TEST bt_forward_check_skips_prefilled_and_zero_id(void)
+{
+    struct possibility_packet board;
+    make_empty_board(&board);
+
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, make_parts(), 2);
+
+    /* La première case du parcours est déjà remplie : sautée par la fenêtre. */
+    board.grid[dirx[0]][diry[0]] = 3;
+
+    /* Candidats [id 0 (ignoré), id 9 (libre)] : les cases vides restent vivantes. */
+    struct part cand[2] = { { .id = 0 }, { .id = 9 } };
+    struct array_part list = { .size = 2, .parts = cand };
+    map_big_array *map = make_uniform_map(&list);
+    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 0), "%d");
+
+    PASS();
+}
 #endif /* FORWARD_CHECK_K > 0 */
+
+/* bt_count_pending : un niveau sans décision (case pré-remplie : search == NULL,
+ * placed_pos == -1) ne compte rien, et un candidat id 0 (trou de map) est ignoré. */
+TEST bt_count_pending_skips_no_decision_and_zero_id(void)
+{
+    struct part cand[3] = { { .id = 0 }, { .id = 2 }, { .id = 3 } };
+    struct array_part list = { .size = 3, .parts = cand };
+
+    bt_level stack[2];
+    /* niveau 0 : case pré-remplie -> ni candidats ni placement */
+    stack[0].search = NULL;  stack[0].next_s = 0; stack[0].placed_pos = -1;
+    /* niveau 1 : id 0 ignoré, ids 2 et 3 libres */
+    stack[1].search = &list; stack[1].next_s = 0; stack[1].placed_pos = -1;
+
+    struct possibility_packet board;
+    make_empty_board(&board);
+
+    ASSERT_EQ_FMT(2ULL, bt_count_pending(&board, stack, 1), "%llu");
+    PASS();
+}
 
 /* ======================================================================
  * Délégation / flush / matérialisation de la pile de décisions.
@@ -634,6 +844,243 @@ TEST bt_flush_pending_sends_all_plus_current(void)
     PASS();
 }
 
+/* bt_materialize_pending : un niveau sans décision (case pré-remplie :
+ * search == NULL, placed_pos == -1) est traversé sans rien produire, et un
+ * candidat id 0 (trou de map) est consommé sans être matérialisé. */
+TEST bt_materialize_skips_no_decision_level_and_zero_id(void)
+{
+    drain_local();
+    ensure_counters();
+
+    /* niveau 1 : candidats [6, 0, 7], pièce 6 posée (next_s=1). */
+    static struct part cand[3];
+    memset(cand, 0, sizeof cand);
+    cand[0].id = 6; cand[1].id = 0; cand[2].id = 7;
+    static struct array_part list;
+    list.size = 3; list.parts = cand;
+
+    struct possibility_packet board;
+    make_empty_board(&board);
+    board.grid[dirx[0]][diry[0]] = 3;   /* case pré-remplie (indice d'origine) */
+    board.grid[dirx[1]][diry[1]] = 6;   /* pièce 6 posée au niveau 1 */
+    set_face_used(board.b_faceused, 5, 1);
+    board.alloc = 2;
+
+    bt_level stack[2];
+    stack[0].search = NULL;  stack[0].next_s = 0; stack[0].placed_pos = -1;
+    stack[1].search = &list; stack[1].next_s = 1; stack[1].placed_pos = 5;
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    struct possibility_packet out[4];
+    int new_next_s[2];
+    int n = bt_materialize_pending(&client, &board, stack, 1, 0, idParts, out, 4, new_next_s);
+
+    /* Seul id 7 est matérialisé : id 0 sauté, niveau 0 sans décision. */
+    ASSERT_EQ_FMT(1, n, "%d");
+    ASSERT_EQ_FMT(7, (int)out[0].grid[dirx[1]][diry[1]], "%d");
+    ASSERT_EQ_FMT(3, new_next_s[1], "%d");   /* niveau 1 épuisé (id 0 consommé) */
+    ASSERT_EQ_FMT(0, new_next_s[0], "%d");   /* niveau sans décision : inchangé */
+
+    PASS();
+}
+
+#if FORWARD_CHECK_K > 0
+/* bt_materialize_pending : avec une map morte, chaque frère matérialisé échoue
+ * au forward-checking -> consommé sans être produit (branche « branche morte »). */
+TEST bt_materialize_dead_map_produces_nothing(void)
+{
+    drain_local();
+    ensure_counters();
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+    client.map_part = make_dead_map();   /* toutes les cases suivantes sont mortes */
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    struct possibility_packet out[8];
+    int new_next_s[2];
+    int n = bt_materialize_pending(&client, &board, stack, top, 0, idParts, out, 8, new_next_s);
+
+    ASSERT_EQ_FMT(0, n, "%d");               /* rien produit... */
+    ASSERT_EQ_FMT(2, new_next_s[1], "%d");   /* ...mais les candidats sont consommés */
+    ASSERT_EQ_FMT(3, new_next_s[0], "%d");
+
+    PASS();
+}
+
+/* bt_delegate_if_needed : stock au-dessus du seuil mais matérialisation vide
+ * (tous les frères élagués) -> aucun envoi, pile inchangée. */
+TEST bt_delegate_dead_map_sends_nothing(void)
+{
+    drain_local();
+    ensure_counters();
+    max_stock_by_thread = 1;
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+    client.map_part = make_dead_map();
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts);
+
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* rien envoyé */
+    ASSERT_EQ_FMT(1, stack[1].next_s, "%d");     /* pile non consommée */
+    ASSERT_EQ_FMT(3ULL, lastfilesize[0], "%llu"); /* pending compté avant élagage */
+
+    free(client.delegate_buf);
+    PASS();
+}
+#endif /* FORWARD_CHECK_K > 0 */
+
+/* bt_delegate_if_needed : échec d'envoi -> la pile n'est PAS consommée, le
+ * travail reste local (put_to_server a remis les paquets au stock local). */
+TEST bt_delegate_error_keeps_stack(void)
+{
+    drain_local();
+    ensure_counters();
+    max_stock_by_thread = 1;
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+
+    int fds[2]; pthread_t srv;
+    es_attach_failing_server(&client, fds, &srv);
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    es_silence_std();
+    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts);
+    es_restore_std();
+
+    ASSERT_EQ_FMT(1, stack[1].next_s, "%d");      /* pile inchangée (pas d'avance) */
+    ASSERT_EQ_FMT(3ULL, lastfilesize[0], "%llu"); /* stock implicite intact */
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");    /* paquet remis en local par put_to_server */
+
+    es_detach_failing_server(&client, fds, &srv);
+    free(client.delegate_buf);
+    drain_local();
+    PASS();
+}
+
+/* bt_flush_pending : échec d'envoi -> log, les paquets sont remis au stock
+ * local par put_to_server (aucune perte de travail). */
+TEST bt_flush_error_reputs_locally(void)
+{
+    drain_local();
+    ensure_counters();
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+
+    int fds[2]; pthread_t srv;
+    es_attach_failing_server(&client, fds, &srv);
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    es_silence_std();
+    bt_flush_pending(&client, &board, stack, top, 0, idParts);
+    es_restore_std();
+
+    /* 3 frères + le chemin courant : tous remis en local malgré l'échec. */
+    ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
+
+    es_detach_failing_server(&client, fds, &srv);
+    drain_local();
+    PASS();
+}
+
+/* ======================================================================
+ * bt_materialize_pending : une solution complète parmi les frères.
+ *
+ * Pile réduite à la DERNIÈRE case du parcours (start_depth = ETERN_PARTS-1) :
+ * le frère matérialisé a alloc == ETERN_PARTS -> record_solution (fichier +
+ * notification) puis, sans --stop-on-solution, il n'est PAS matérialisé (rien
+ * à explorer au-delà) et la boucle continue. Fork : log_solution écrit un
+ * fichier solution_* dans le CWD.
+ * ====================================================================== */
+
+static client_possibility_t mz_client;
+static struct possibility_packet mz_board;
+static bt_level mz_stack[1];
+static int16_t mz_idParts[ETERN_PARTS + 1][PART_SIZES];
+static char mz_dir[256];
+static struct part mz_cand[1];
+static struct array_part mz_list;
+
+/* Définis plus bas (section 4×4) ; déclarés ici pour le test de matérialisation. */
+static int es_has_solution_file(const char *dir);
+static void es_unlink_solutions(const char *dir);
+
+static void mz_child_sibling_solution(void)
+{
+    if (chdir(mz_dir) != 0) exit(97);
+    stop_on_solution = 0;
+    struct possibility_packet out[4];
+    int new_next_s[1];
+    int n = bt_materialize_pending(&mz_client, &mz_board, mz_stack, 0,
+                                   ETERN_PARTS - 1, mz_idParts, out, 4, new_next_s);
+    if (n != 0) exit(50);                       /* la solution n'est pas matérialisée */
+    if (new_next_s[0] != 1) exit(51);           /* mais le candidat est consommé */
+    if (!es_has_solution_file(".")) exit(52);   /* et elle a été enregistrée */
+    exit(42); /* exit() (pas _exit) : flush de la couverture du fils */
+}
+
+TEST bt_materialize_sibling_solution_records_and_continues(void)
+{
+    ensure_counters();
+
+    memset(&mz_client, 0, sizeof mz_client);
+    mz_client.compteur = 0;
+    mz_client.map_part = make_free_map();
+    mz_client.all_rotate_part = make_small_parts();
+
+    /* Plateau « presque complet » : grille d'indices 0 (valide pour
+     * make_small_parts), seule la dernière case du parcours reste à décider. */
+    memset(&mz_board, 0, sizeof mz_board);
+    mz_board.alloc = ETERN_PARTS - 1;
+
+    memset(&mz_cand[0], 0, sizeof mz_cand[0]);
+    mz_cand[0].id = 6;                          /* pièce libre : frère matérialisable */
+    mz_list.size = 1; mz_list.parts = mz_cand;
+    mz_stack[0].search = &mz_list; mz_stack[0].next_s = 0; mz_stack[0].placed_pos = -1;
+
+    fill_idparts(mz_idParts);
+
+    strcpy(mz_dir, "/tmp/etii_mz_sol_XXXXXX");
+    ASSERT(mkdtemp(mz_dir) != NULL);
+
+    pid_t pid = 0;
+    int code = run_in_fork(mz_child_sibling_solution, &pid);
+
+    es_unlink_solutions(mz_dir);
+    rmdir(mz_dir);
+
+    ASSERT_EQ_FMT(42, code, "%d");
+    PASS();
+}
+
 /* search_packet_backtracking : un REQUEST_STOP dès la racine renvoie tout le
  * travail (ici : juste le paquet du chemin courant) au serveur local et sort
  * avec le code « arrêt demandé » (1). Couvre la branche REQUEST_STOP + bt_flush. */
@@ -662,6 +1109,131 @@ TEST search_backtracking_stop_flushes_and_returns_one(void)
 
     ASSERT_EQ_FMT(1, rc, "%d");                  /* arrêt demandé */
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");    /* le chemin courant renvoyé */
+
+    drain_local();
+    PASS();
+}
+
+/* search_packet_backtracking : des cases PRÉ-REMPLIES en tête de parcours créent
+ * des niveaux sans décision (grid != -2), puis une case morte (map vide) fait
+ * remonter le backtracking à travers eux jusqu'à l'épuisement (retour 0).
+ * Couvre aussi les deux côtés de la mise à jour de max_result sur case remplie. */
+TEST search_backtracking_prefilled_cells_no_decision(void)
+{
+    drain_local();
+    ensure_counters();
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_dead_map();          /* les cases vides sont mortes */
+    client.all_rotate_part = make_small_parts();
+
+    struct possibility_packet root;
+    make_empty_board(&root);
+    root.grid[dirx[0]][diry[0]] = 3;            /* pièce 4 pré-placée */
+    root.grid[dirx[1]][diry[1]] = 4;            /* pièce 5 pré-placée */
+    set_face_used(root.b_faceused, 3, 1);
+    set_face_used(root.b_faceused, 4, 1);
+    root.alloc = 0;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    int saved_req = request;
+    uint16_t saved_max = max_result;
+    request = REQUEST_CONTINUE;
+    max_result = 1;   /* case 1 : 1 > 1 faux ; case 2 : 2 > 1 vrai */
+    int rc = search_packet_backtracking(&client, &root, idParts);
+    request = saved_req;
+    max_result = saved_max;
+
+    ASSERT_EQ_FMT(0, rc, "%d");                 /* sous-arbre épuisé */
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");  /* rien délégué */
+    PASS();
+}
+
+/* search_packet_backtracking : exploration réelle avec placements, élagage et
+ * retours arrière. Map uniforme [0, 6, 7] : deux pièces réelles seulement, donc
+ * l'arbre s'épuise en quelques nœuds — chaque niveau revisite un placement
+ * (annulation L659), saute le trou id 0 et les pièces déjà utilisées. */
+TEST search_backtracking_explores_and_exhausts(void)
+{
+    drain_local();
+    ensure_counters();
+
+    static struct part cand[3];
+    memset(cand, 0, sizeof cand);
+    cand[0].id = 0; cand[1].id = 6; cand[2].id = 7;
+    static struct array_part list;
+    list.size = 3; list.parts = cand;
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_uniform_map(&list);
+    client.all_rotate_part = make_small_parts();
+
+    struct possibility_packet root;
+    make_empty_board(&root);
+    root.alloc = 0;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    unsigned long long nodes_before = counters[0];
+    int saved_req = request;
+    uint16_t saved_max = max_result;
+    request = REQUEST_CONTINUE;
+    max_result = 0;   /* les placements réels font progresser max_result */
+    int rc = search_packet_backtracking(&client, &root, idParts);
+    request = saved_req;
+    max_result = saved_max;
+
+    ASSERT_EQ_FMT(0, rc, "%d");                 /* arbre entièrement exploré */
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");  /* jamais délégué (trop petit) */
+    ASSERT(counters[0] > nodes_before);         /* des nœuds ont bien été visités */
+    PASS();
+}
+
+/* search_packet_backtracking : REQUEST_PAUSE fait patienter la boucle, puis un
+ * REQUEST_STOP (posé par un thread auxiliaire) déclenche le flush et la sortie. */
+static void *es_flip_pause_to_stop(void *arg)
+{
+    (void)arg;
+    usleep(20000);
+    request = REQUEST_STOP;
+    return NULL;
+}
+
+TEST search_backtracking_pause_waits_then_stops(void)
+{
+    drain_local();
+    ensure_counters();
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_dead_map();
+    client.all_rotate_part = make_small_parts();
+
+    struct possibility_packet root;
+    make_empty_board(&root);
+    root.alloc = 0;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    int saved_req = request;
+    request = REQUEST_PAUSE;
+    pthread_t th;
+    pthread_create(&th, NULL, es_flip_pause_to_stop, NULL);
+    int rc = search_packet_backtracking(&client, &root, idParts);
+    pthread_join(th, NULL);
+    request = saved_req;
+
+    ASSERT_EQ_FMT(1, rc, "%d");                 /* arrêt demandé après la pause */
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");   /* chemin courant renvoyé */
 
     drain_local();
     PASS();
@@ -740,25 +1312,26 @@ static int16_t es_idParts[ETERN_PARTS + 1][PART_SIZES];
 static char es_solution_dir[256];
 
 /* Fils : explore tout l'arbre (stop_on_solution = 0). record_solution NE sort
- * pas ; la recherche revient avec 0 (sous-arbre épuisé). */
+ * pas ; la recherche revient avec 0 (sous-arbre épuisé). exit() (pas _exit) :
+ * la couverture du fils est flushée à la sortie. */
 static void es_child_full_explore(void)
 {
-    if (chdir(es_solution_dir) != 0) _exit(97);
+    if (chdir(es_solution_dir) != 0) exit(97);
     stop_on_solution = 0;
     request = REQUEST_CONTINUE;
     int rc = search_packet_backtracking(&es_client, &es_root, es_idParts);
-    _exit(rc == 0 ? 0 : 3);
+    exit(rc == 0 ? 0 : 3);
 }
 
 /* Fils : stop_on_solution = 1. La 1re solution déclenche record_solution ->
- * exit(EXIT_SUCCESS) : on ne revient jamais au _exit(99) ci-dessous. */
+ * exit(EXIT_SUCCESS) : on ne revient jamais au exit(99) ci-dessous. */
 static void es_child_stop_on_solution(void)
 {
-    if (chdir(es_solution_dir) != 0) _exit(97);
+    if (chdir(es_solution_dir) != 0) exit(97);
     stop_on_solution = 1;
     request = REQUEST_CONTINUE;
     search_packet_backtracking(&es_client, &es_root, es_idParts);
-    _exit(99); /* solution non trouvée / pas d'exit : échec */
+    exit(99); /* solution non trouvée / pas d'exit : échec */
 }
 
 /* Prépare es_client / es_root / es_idParts depuis pieces16.csv. */
@@ -855,6 +1428,198 @@ TEST requeue_unprocessed_packets_routes_tail_locally(void)
     requeue_unprocessed_packets(&client, 5);       /* from >= size -> no-op */
     ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
 
+    drain_local();
+    PASS();
+}
+
+/* requeue_unprocessed_packets : échec d'envoi -> log, paquets remis au stock
+ * local par put_to_server (aucune perte). */
+TEST requeue_error_reputs_locally(void)
+{
+    drain_local();
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    int fds[2]; pthread_t srv;
+    es_attach_failing_server(&client, fds, &srv);
+
+    struct possibility_packet pkts[5];
+    memset(pkts, 0, sizeof pkts);
+    array_possibility_packet aposs = { .size = 5, .possibilities = pkts };
+    client.aposs = &aposs;
+
+    es_silence_std();
+    requeue_unprocessed_packets(&client, 2);       /* [2..5) = 3 paquets */
+    es_restore_std();
+
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");     /* remis en local malgré l'échec */
+
+    es_detach_failing_server(&client, fds, &srv);
+    drain_local();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * Boucles d'attente de travail (works/aposs) : un thread auxiliaire alimente le
+ * client par étapes (works=1 d'abord, aposs ensuite), ce qui exerce chaque
+ * sous-condition de l'attente sous REQUEST_CONTINUE.
+ * ------------------------------------------------------------------------ */
+
+static void *es_feed_after_delay(void *arg)
+{
+    client_possibility_t *cp = arg;
+    usleep(15000);
+    request = REQUEST_CONTINUE;          /* l'attente a d'abord tourné en PAUSE */
+    usleep(15000);
+    pthread_mutex_lock(&cp->works_mutex);
+    cp->works = 1;                       /* aposs encore NULL : l'attente continue */
+    pthread_mutex_unlock(&cp->works_mutex);
+    usleep(15000);
+    array_possibility_packet *a = malloc(sizeof *a);
+    a->size = 0;                         /* lot vide : rien à traiter */
+    a->possibilities = malloc(sizeof(struct possibility_packet));
+    pthread_mutex_lock(&cp->works_mutex);
+    cp->aposs = a;
+    pthread_mutex_unlock(&cp->works_mutex);
+    return NULL;
+}
+
+TEST autosearch_step_waits_until_fed(void)
+{
+    drain_local();
+    ensure_counters();
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    pthread_mutex_init(&client.works_mutex, NULL);
+    /* works == 0 et aposs == NULL : l'attente tourne jusqu'à l'alimentation */
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    init_id_parts(idParts);
+
+    int saved = request;
+    request = REQUEST_PAUSE;   /* l'attente tolère la pause ; le feeder repasse en CONTINUE */
+    pthread_t th;
+    pthread_create(&th, NULL, es_feed_after_delay, &client);
+    int cont = autosearch_step(&client, idParts);
+    pthread_join(th, NULL);
+    request = saved;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT(client.aposs == NULL);                  /* cycle nettoyé */
+    ASSERT_EQ_FMT(0, (int)client.works, "%d");
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
+TEST autoprune_step_waits_until_fed(void)
+{
+    drain_local();
+    ensure_counters();
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    pthread_mutex_init(&client.works_mutex, NULL);
+
+    int saved = request;
+    request = REQUEST_PAUSE;   /* même scénario : pause pendant l'attente puis reprise */
+    pthread_t th;
+    pthread_create(&th, NULL, es_feed_after_delay, &client);
+    int cont = autoprune_step(&client);
+    pthread_join(th, NULL);
+    request = saved;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT(client.aposs == NULL);
+    ASSERT_EQ_FMT(0, (int)client.works, "%d");
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * Enveloppes de thread : un premier tour complet (step -> 1) puis un
+ * REQUEST_STOP posé par un thread auxiliaire termine la boucle au tour suivant.
+ * Complète les tests « arrêt immédiat » qui ne prenaient jamais le corps du while.
+ * ------------------------------------------------------------------------ */
+
+static void *es_stop_after_delay(void *arg)
+{
+    (void)arg;
+    usleep(40000);
+    request = REQUEST_STOP;
+    return NULL;
+}
+
+TEST autosearch_loops_once_then_stops(void)
+{
+    drain_local();
+    ensure_counters();
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    pthread_mutex_init(&client.works_mutex, NULL);
+    pthread_mutex_init(&client.socket_mutex, NULL);
+    client.socket_id = -1;
+    client.works = 1;
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 0;
+    aposs->possibilities = malloc(sizeof(struct possibility_packet));
+    client.aposs = aposs;                /* 1er tour : lot vide -> step renvoie 1 */
+
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    pthread_t th;
+    pthread_create(&th, NULL, es_stop_after_delay, NULL);
+    void *ret = autosearch(&client);
+    pthread_join(th, NULL);
+    request = saved;
+
+    ASSERT_EQ(NULL, ret);
+    ASSERT(client.aposs == NULL);
+
+    pthread_mutex_destroy(&client.works_mutex);
+    pthread_mutex_destroy(&client.socket_mutex);
+    drain_local();
+    PASS();
+}
+
+TEST autoprune_loops_once_then_stops(void)
+{
+    drain_local();
+    ensure_counters();
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    pthread_mutex_init(&client.works_mutex, NULL);
+    pthread_mutex_init(&client.socket_mutex, NULL);
+    client.socket_id = -1;
+    client.works = 1;
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 0;
+    aposs->possibilities = malloc(sizeof(struct possibility_packet));
+    client.aposs = aposs;
+
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    pthread_t th;
+    pthread_create(&th, NULL, es_stop_after_delay, NULL);
+    void *ret = autoprune(&client);
+    pthread_join(th, NULL);
+    request = saved;
+
+    ASSERT_EQ(NULL, ret);
+    ASSERT(client.aposs == NULL);
+
+    pthread_mutex_destroy(&client.works_mutex);
+    pthread_mutex_destroy(&client.socket_mutex);
     drain_local();
     PASS();
 }
@@ -1044,6 +1809,158 @@ TEST autoprune_step_keeps_live_packet(void)
     PASS();
 }
 
+/* REQUEST_PAUSE au milieu du lot : la boucle patiente (usleep) puis reprend le
+ * traitement quand un thread auxiliaire repasse en REQUEST_CONTINUE. */
+static void *es_flip_pause_to_continue(void *arg)
+{
+    (void)arg;
+    usleep(20000);
+    request = REQUEST_CONTINUE;
+    return NULL;
+}
+
+TEST autoprune_step_pauses_then_resumes(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 1;
+    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
+    make_empty_board(&aposs->possibilities[0]);
+    client.aposs = aposs;
+
+    int saved = request;
+    request = REQUEST_PAUSE;              /* le lot attend la reprise */
+    pthread_t th;
+    pthread_create(&th, NULL, es_flip_pause_to_continue, NULL);
+    int cont = autoprune_step(&client);
+    pthread_join(th, NULL);
+    request = saved;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* le paquet a bien été traité après la pause */
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
+/* Paquet MORT non vérifié : éliminé du stock (pruner_removed), rien renvoyé. */
+TEST autoprune_step_removes_dead_packet(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_dead_map();    /* aucune case n'a de candidat */
+    client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 1;
+    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
+    make_empty_board(&aposs->possibilities[0]);
+    client.aposs = aposs;
+
+    unsigned long long removed_before = pruner_removed;
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    int cont = autoprune_step(&client);
+    request = saved;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");                 /* éliminé */
+    ASSERT_EQ_FMT(removed_before + 1, pruner_removed, "%llu");
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
+/* Paquet MORT mais déjà marqué `checked` : le verdict antérieur prime, il est
+ * renvoyé au stock (court-circuit work.checked || has_next). */
+TEST autoprune_step_keeps_checked_dead_packet(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_dead_map();
+    client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 1;
+    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
+    make_empty_board(&aposs->possibilities[0]);
+    aposs->possibilities[0].checked = 1;  /* déjà vérifié : conservé tel quel */
+    client.aposs = aposs;
+
+    unsigned long long checked_before = pruner_checked;
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    int cont = autoprune_step(&client);
+    request = saved;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");                 /* renvoyé au stock */
+    ASSERT_EQ_FMT(checked_before + 1, pruner_checked, "%llu");
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
+/* Échec d'envoi du paquet vivant : log + remise en local par put_to_server. */
+TEST autoprune_step_add_error_reputs_locally(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    int fds[2]; pthread_t srv;
+    es_attach_failing_server(&client, fds, &srv);
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 1;
+    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
+    make_empty_board(&aposs->possibilities[0]);
+    client.aposs = aposs;
+
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    es_silence_std();
+    int cont = autoprune_step(&client);
+    es_restore_std();
+    request = saved;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* remis en local malgré l'échec */
+
+    es_detach_failing_server(&client, fds, &srv);
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
 /* --------------------------------------------------------------------------
  * autoprune_step : plateau complet dans le lot (solution trouvée par le pruner).
  *
@@ -1083,25 +2000,25 @@ static void ap_setup_complete_batch(void)
    EXIT_SUCCESS avant tout cela (le _exit(42) n'était jamais atteint). */
 static void ap_child_solution_continue(void)
 {
-    if (chdir(ap_solution_dir) != 0) _exit(97);
+    if (chdir(ap_solution_dir) != 0) exit(97);
     stop_on_solution = 0;
     request = REQUEST_CONTINUE;
     int cont = autoprune_step(&ap_client);
-    if (cont != 1) _exit(43);
-    if (datas_size() != 0ULL) _exit(44);            /* pas de remise en stock */
-    if (!es_has_solution_file(".")) _exit(45);      /* solution enregistrée */
-    _exit(42);
+    if (cont != 1) exit(43);
+    if (datas_size() != 0ULL) exit(44);             /* pas de remise en stock */
+    if (!es_has_solution_file(".")) exit(45);       /* solution enregistrée */
+    exit(42); /* exit() (pas _exit) : flush de la couverture du fils */
 }
 
 /* Fils : stop_on_solution = 1. record_solution doit sortir EXIT_SUCCESS après
-   l'enregistrement ; atteindre le _exit(99) signifierait « pas d'arrêt ». */
+   l'enregistrement ; atteindre le exit(99) signifierait « pas d'arrêt ». */
 static void ap_child_solution_stop(void)
 {
-    if (chdir(ap_solution_dir) != 0) _exit(97);
+    if (chdir(ap_solution_dir) != 0) exit(97);
     stop_on_solution = 1;
     request = REQUEST_CONTINUE;
     autoprune_step(&ap_client);
-    _exit(99);
+    exit(99);
 }
 
 /* Sans --stop-on-solution : le pruner survit à une solution et continue. */
@@ -1232,26 +2149,51 @@ SUITE(etii_search_suite)
     RUN_TEST(delegate_noop_below_threshold);
     RUN_TEST(delegate_moves_excess_to_local_pool);
     RUN_TEST(delegate_big_table_moves_excess);
+    RUN_TEST(delegate_big_table_noop_below_threshold);
+    RUN_TEST(delegate_file_error_reputs_locally);
+    RUN_TEST(delegate_big_table_error_reputs_to_table);
     RUN_TEST(bt_init_constraints_empty_board);
     RUN_TEST(bt_propagate_matches_full_recompute);
     RUN_TEST(bt_propagate_covers_border_guards);
     RUN_TEST(bt_count_pending_counts_remaining_free);
+    RUN_TEST(bt_count_pending_skips_no_decision_and_zero_id);
 #if FORWARD_CHECK_K > 0
     RUN_TEST(bt_forward_check_detects_dead_cells);
+    RUN_TEST(bt_forward_check_skips_prefilled_and_zero_id);
 #endif
     RUN_TEST(bt_materialize_pending_orders_deepest_first);
     RUN_TEST(bt_materialize_pending_respects_max_out);
+    RUN_TEST(bt_materialize_skips_no_decision_level_and_zero_id);
+#if FORWARD_CHECK_K > 0
+    RUN_TEST(bt_materialize_dead_map_produces_nothing);
+    RUN_TEST(bt_delegate_dead_map_sends_nothing);
+#endif
+    RUN_TEST(bt_materialize_sibling_solution_records_and_continues);
     RUN_TEST(bt_delegate_noop_below_threshold);
     RUN_TEST(bt_delegate_moves_excess_to_local);
     RUN_TEST(bt_delegate_reuses_and_grows_buffer);
+    RUN_TEST(bt_delegate_error_keeps_stack);
     RUN_TEST(bt_flush_pending_sends_all_plus_current);
+    RUN_TEST(bt_flush_error_reputs_locally);
     RUN_TEST(search_backtracking_stop_flushes_and_returns_one);
+    RUN_TEST(search_backtracking_prefilled_cells_no_decision);
+    RUN_TEST(search_backtracking_explores_and_exhausts);
+    RUN_TEST(search_backtracking_pause_waits_then_stops);
     RUN_TEST(requeue_unprocessed_packets_routes_tail_locally);
+    RUN_TEST(requeue_error_reputs_locally);
     RUN_TEST(autosearch_step_stop_requeues_and_returns_zero);
     RUN_TEST(autosearch_step_continue_returns_one);
+    RUN_TEST(autosearch_step_waits_until_fed);
+    RUN_TEST(autoprune_step_waits_until_fed);
+    RUN_TEST(autosearch_loops_once_then_stops);
+    RUN_TEST(autoprune_loops_once_then_stops);
     RUN_TEST(autoprune_step_stop_requeues_all_and_returns_zero);
     RUN_TEST(autoprune_step_continue_empty_returns_one);
     RUN_TEST(autoprune_step_keeps_live_packet);
+    RUN_TEST(autoprune_step_pauses_then_resumes);
+    RUN_TEST(autoprune_step_removes_dead_packet);
+    RUN_TEST(autoprune_step_keeps_checked_dead_packet);
+    RUN_TEST(autoprune_step_add_error_reputs_locally);
     RUN_TEST(autoprune_step_complete_board_records_solution_and_continues);
     RUN_TEST(autoprune_step_complete_board_stop_on_solution_exits);
 #if ETERN_PARTS == 16
