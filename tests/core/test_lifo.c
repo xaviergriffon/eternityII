@@ -349,6 +349,33 @@ TEST big_table_free_big_table_heap(void)
     PASS();
 }
 
+/* free_big_table sur une table dont l'allocation initiale a échoué (état
+ * documenté d'un init_big_table() en échec : value = NULL). malloc() seul ne
+ * garantit PAS value == NULL (mémoire non initialisée) : on simule donc
+ * explicitement cet état plutôt que de compter sur le hasard du tas. */
+TEST big_table_free_empty_big_table_heap(void)
+{
+    big_table *t = malloc(sizeof(big_table));
+    t->value = NULL;
+    free_big_table(t); /* doit tout libérer sans planter */
+    PASS();
+}
+
+/* put_big_table sur une table dans ce même état (value == NULL) : elle doit
+ * retenter une allocation initiale avant d'insérer (cf. le contrat documenté
+ * de put_big_table dans lifo.h). */
+TEST big_table_free_non_init_bit_table_heap(void) {
+    big_table *t = malloc(sizeof(big_table));
+    t->value = NULL;
+    t->size = 0;
+    t->realsize = 0;
+    t->sizeofvalue = sizeof(int);
+    t->incrementSize = 1;
+    for (int i = 0; i < 5; i++) put_big_table(t, &i);
+    free_big_table(t); /* doit tout libérer sans planter */
+    PASS();
+}
+
 /* Contrat de retour de put_big_table() : succès nominal -> pointeur non-NULL
  * vers la copie insérée, size incrémenté, et agrandissement transparent une
  * fois realsize atteint (realsize double). Le pointeur retourné pointe bien
@@ -402,6 +429,18 @@ TEST big_table_init_state_is_consistent(void)
     ASSERT_EQ_FMT(0ULL, (unsigned long long)t.size, "%llu");
     ASSERT_EQ_FMT(8ULL, (unsigned long long)t.realsize, "%llu");
     ASSERT_EQ_FMT(8, t.incrementSize, "%d");
+    clear_big_table(&t);
+    PASS();
+}
+
+/* clear_big_table sur une table à l'état "échec d'allocation initiale"
+ * (value == NULL) : no-op sûr. Une variable locale non initialisée ne
+ * garantit PAS value == NULL (mémoire de pile indéterminée) : on l'initialise
+ * explicitement plutôt que de compter sur le hasard. */
+TEST big_table_clear_empty(void)
+{
+    big_table t;
+    t.value = NULL;
     clear_big_table(&t);
     PASS();
 }
@@ -540,6 +579,9 @@ SUITE(lifo_suite)
     RUN_TEST(file_put_returns_one_on_success);
     RUN_TEST(file_move_targets_non_extremity);
     RUN_TEST(big_table_free_big_table_heap);
+    RUN_TEST(big_table_free_empty_big_table_heap);
+    RUN_TEST(big_table_free_non_init_bit_table_heap);
+    RUN_TEST(big_table_clear_empty);
     RUN_TEST(file_remove_element_removes_middle);
     RUN_TEST(big_table_put_returns_non_null_and_grows);
     RUN_TEST(big_table_init_state_is_consistent);
