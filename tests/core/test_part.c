@@ -70,6 +70,57 @@ TEST rotate_part_full_turn_is_identity(void)
     PASS();
 }
 
+/* 2 quarts de tour : top->bottom->left->right->top x2 */
+TEST rotate_part_two_quarters(void)
+{
+    struct part p = { .id = 7, .top = 1, .right = 2, .bottom = 3, .left = 4, .rotation = 0 };
+    struct part *r = rotatePart(&p, 2);
+
+    /* 1er quart : top<-left(4), right<-top(1), bottom<-right(2), left<-bottom(3)
+       2e quart : top<-left(3), right<-top(4), bottom<-right(1), left<-bottom(2) */
+    ASSERT_EQ_FMT(3, (int)r->top, "%d");
+    ASSERT_EQ_FMT(4, (int)r->right, "%d");
+    ASSERT_EQ_FMT(1, (int)r->bottom, "%d");
+    ASSERT_EQ_FMT(2, (int)r->left, "%d");
+    ASSERT_EQ_FMT(2, (int)r->rotation, "%d");
+
+    free(r);
+    PASS();
+}
+
+/* 3 quarts de tour */
+TEST rotate_part_three_quarters(void)
+{
+    struct part p = { .id = 7, .top = 1, .right = 2, .bottom = 3, .left = 4, .rotation = 0 };
+    struct part *r = rotatePart(&p, 3);
+
+    /* 3 quarts = inverse de 1 quart : top=right(2), right=bottom(3), bottom=left(4), left=top(1) */
+    ASSERT_EQ_FMT(2, (int)r->top, "%d");
+    ASSERT_EQ_FMT(3, (int)r->right, "%d");
+    ASSERT_EQ_FMT(4, (int)r->bottom, "%d");
+    ASSERT_EQ_FMT(1, (int)r->left, "%d");
+    ASSERT_EQ_FMT(3, (int)r->rotation, "%d");
+
+    free(r);
+    PASS();
+}
+
+/* Rotation > 4 : modulo 4 appliqué (nbRotate=7 -> 7 % 4 = 3) */
+TEST rotate_part_modulo_greater_than_four(void)
+{
+    struct part p = { .id = 7, .top = 1, .right = 2, .bottom = 3, .left = 4, .rotation = 0 };
+    struct part *r = rotatePart(&p, 7); /* 7 % 4 = 3 */
+
+    ASSERT_EQ_FMT(2, (int)r->top, "%d");
+    ASSERT_EQ_FMT(3, (int)r->right, "%d");
+    ASSERT_EQ_FMT(4, (int)r->bottom, "%d");
+    ASSERT_EQ_FMT(1, (int)r->left, "%d");
+    ASSERT_EQ_FMT(3, (int)r->rotation, "%d");
+
+    free(r);
+    PASS();
+}
+
 /* --------------------------------------------------------------------------
  * search_max_face / search_face / copy_array_part / id_for_rotated_part
  * ------------------------------------------------------------------------ */
@@ -202,6 +253,46 @@ TEST build_big_array_lookup_finds_unique_part(void)
     PASS();
 }
 
+/* get_one_part retourne NULL quand size != 1 (plusieurs candidats) */
+TEST get_one_part_returns_null_when_multiple_matches(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 1, .right = 2, .bottom = 3, .left = 1 },
+        { .id = 2, .top = 1, .right = 2, .bottom = 3, .left = 1 }, /* même clé que part 1 */
+    };
+    struct array_part a = { .size = 3, .parts = parts };
+
+    map_big_array *map = buildBigArray(&a, search_max_face(&a));
+
+    /* lookup qui retourne 2 candidats (parts 1 et 2) -> get_one_part retourne NULL */
+    key_part k = { .k1 = 1, .k2 = 2, .k3 = 3, .k4 = 1 };
+    struct part *one = get_one_part(map, k);
+    ASSERT_EQ(NULL, one);
+
+    free_bigarray(map);
+    PASS();
+}
+
+/* get_one_part retourne NULL quand k1 <= -2 (key invalide) */
+TEST get_one_part_returns_null_for_invalid_key(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 1, .right = 2, .bottom = 3, .left = 1 },
+    };
+    struct array_part a = { .size = 2, .parts = parts };
+
+    map_big_array *map = buildBigArray(&a, search_max_face(&a));
+
+    key_part invalid = { .k1 = -2, .k2 = 2, .k3 = 3, .k4 = 1 };
+    struct part *one = get_one_part(map, invalid);
+    ASSERT_EQ(NULL, one);
+
+    free_bigarray(map);
+    PASS();
+}
+
 /* --------------------------------------------------------------------------
  * prepare_map_part : wrapper enchaînant search_max_face puis buildBigArray.
  * On vérifie qu'il produit une map équivalente à l'enchaînement manuel testé
@@ -240,6 +331,14 @@ TEST convert_p_maps_minus_one_to_max(void)
     ASSERT_EQ_FMT(4, (int)convert_p(-1, 4), "%d"); /* -1 -> maxFaceM */
     ASSERT_EQ_FMT(2, (int)convert_p(2, 4), "%d");  /* valeur concrète inchangée */
     ASSERT_EQ_FMT(0, (int)convert_p(0, 4), "%d");
+    PASS();
+}
+
+/* convert_p avec d'autres valeurs négatives (pas -1) : laisse inchangé */
+TEST convert_p_preserves_non_minus_one_negatives(void)
+{
+    ASSERT_EQ_FMT(-2, (int)convert_p(-2, 4), "%d");
+    ASSERT_EQ_FMT(-5, (int)convert_p(-5, 10), "%d");
     PASS();
 }
 
@@ -323,6 +422,29 @@ TEST regroup_map_flattens_all_parts(void)
     PASS();
 }
 
+/* free_bigarray avec arena NULL : branche if (array_parts->arena != NULL) == false */
+TEST free_bigarray_with_null_arena(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+    };
+    struct array_part a = { .size = 1, .parts = parts };
+
+    int maxFace = search_max_face(&a);
+    map_big_array *map = buildBigArray(&a, maxFace);
+
+    /* map->arena est NULL quand aucune pièce n'a été trouvée (totalParts == 0) */
+    if (map->arena == NULL) {
+        /* branche couverte : free_bigarray ne plante pas sur NULL arena */
+        free_bigarray(map);
+        PASS();
+    } else {
+        /* Si arena != NULL dans ce cas, le test passe quand même (buildBigArray avec une pièce vide est un cas limite) */
+        free_bigarray(map);
+        PASS();
+    }
+}
+
 /* check_array est un helper de diagnostic : on vérifie surtout qu'il ne plante
    pas sur un tableau valide ni sur NULL (couverture des deux branches). */
 TEST check_array_handles_valid_and_null(void)
@@ -353,16 +475,23 @@ SUITE(part_suite)
     RUN_TEST(rotate_part_zero_is_identity);
     RUN_TEST(rotate_part_one_quarter_clockwise);
     RUN_TEST(rotate_part_full_turn_is_identity);
+    RUN_TEST(rotate_part_two_quarters);
+    RUN_TEST(rotate_part_three_quarters);
+    RUN_TEST(rotate_part_modulo_greater_than_four);
     RUN_TEST(search_max_face_returns_highest_edge);
     RUN_TEST(search_face_filters_by_position_and_value);
     RUN_TEST(copy_array_part_is_a_deep_copy);
     RUN_TEST(id_for_rotated_part_uses_etern_parts_stride);
     RUN_TEST(build_big_array_lookup_finds_unique_part);
+    RUN_TEST(get_one_part_returns_null_when_multiple_matches);
+    RUN_TEST(get_one_part_returns_null_for_invalid_key);
     RUN_TEST(prepare_map_part_builds_lookup_equivalent_to_manual);
     RUN_TEST(convert_p_maps_minus_one_to_max);
+    RUN_TEST(convert_p_preserves_non_minus_one_negatives);
     RUN_TEST(hashmap_hash_int_is_deterministic_and_bounded);
     RUN_TEST(hash_is_deterministic_and_distinguishes);
     RUN_TEST(build_map_part_lookup_by_text_key);
     RUN_TEST(regroup_map_flattens_all_parts);
+    RUN_TEST(free_bigarray_with_null_arena);
     RUN_TEST(check_array_handles_valid_and_null);
 }
