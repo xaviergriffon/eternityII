@@ -421,6 +421,108 @@ TEST big_table_init_state_is_consistent(void)
  * testent désormais ce retour et se dégradent proprement (log_error + arrêt
  * de l'expansion / perte contrôlée) plutôt que de déréférencer NULL. */
 
+/* scroll : branche size!=0 mais end==NULL (état incohérent, jamais produit par
+ * l'API publique mais couvre le garde-fou `size == 0 || end == NULL`). */
+TEST file_scroll_inconsistent_state_returns_zero(void)
+{
+    File f;
+    init_file(&f, sizeof(int));
+    f.size = 1; /* incohérent : end reste NULL */
+
+    int v = 99;
+    ASSERT_EQ_FMT(0, scroll(&f, &v), "%d");
+    ASSERT_EQ_FMT(99, v, "%d"); /* inchangé */
+    PASS();
+}
+
+/* extract_element(NULL, …) : aucune File à mettre à jour, mais le recâblage
+ * des voisins doit avoir lieu quel que soit le NULL. Testé sur l'élément de
+ * TÊTE (previous == NULL, ligne 148) puis de QUEUE (next == NULL, ligne 157). */
+TEST file_extract_element_null_suite_detaches_head(void)
+{
+    Element e1, e2;
+    int v1 = 1, v2 = 2;
+    e1.value = &v1; e1.previous = NULL; e1.next = &e2;
+    e2.value = &v2; e2.previous = &e1;  e2.next = NULL;
+
+    extract_element(NULL, &e1); /* e1 est en tête */
+
+    ASSERT_EQ(NULL, e1.previous);
+    ASSERT_EQ(NULL, e1.next);
+    ASSERT_EQ(NULL, e2.previous); /* e2 devient tête, plus de précédent */
+    PASS();
+}
+
+TEST file_extract_element_null_suite_detaches_tail(void)
+{
+    Element e1, e2;
+    int v1 = 1, v2 = 2;
+    e1.value = &v1; e1.previous = NULL; e1.next = &e2;
+    e2.value = &v2; e2.previous = &e1;  e2.next = NULL;
+
+    extract_element(NULL, &e2); /* e2 est en queue */
+
+    ASSERT_EQ(NULL, e2.previous);
+    ASSERT_EQ(NULL, e2.next);
+    ASSERT_EQ(NULL, e1.next); /* e1 devient queue, plus de suivant */
+    PASS();
+}
+
+/* move_before(NULL, …) avec une cible en TÊTE de sa propre liste (ligne 187) :
+ * aucune File à mettre à jour (start/end restent volontairement non
+ * synchronisés par la fonction elle-même, comme documenté), mais le
+ * recâblage element/target doit réussir. On vérifie directement les
+ * pointeurs previous/next plutôt que de rejouer via scroll_fifo (qui
+ * dépend, lui, de File.start/end à jour). */
+TEST file_move_before_null_suite_target_is_head(void)
+{
+    File f;
+    init_file(&f, sizeof(int));
+    for (int i = 1; i <= 3; i++) put(&f, &i);
+    Element *e1 = f.start; /* tête : target->previous == NULL */
+    Element *e2 = e1->next;
+    Element *e3 = f.end;
+
+    move_before(NULL, e3, e1); /* déplace 3 devant 1 : ordre réel e3,e1,e2 */
+
+    ASSERT_EQ(NULL, e3->previous);   /* e3 est maintenant en tête */
+    ASSERT_EQ(e1, e3->next);
+    ASSERT_EQ(e3, e1->previous);
+    ASSERT_EQ(e2, e1->next);
+    ASSERT_EQ(e1, e2->previous);
+    ASSERT_EQ(NULL, e2->next);       /* e2 reste en queue */
+
+    free(e1->value); free(e1);
+    free(e2->value); free(e2);
+    free(e3->value); free(e3);
+    PASS();
+}
+
+/* move_after(NULL, …) avec une cible en QUEUE de sa propre liste (ligne 219). */
+TEST file_move_after_null_suite_target_is_tail(void)
+{
+    File f;
+    init_file(&f, sizeof(int));
+    for (int i = 1; i <= 3; i++) put(&f, &i);
+    Element *e1 = f.start;
+    Element *e2 = e1->next;
+    Element *e3 = f.end; /* queue : target->next == NULL */
+
+    move_after(NULL, e1, e3); /* déplace 1 après 3 : ordre réel e2,e3,e1 */
+
+    ASSERT_EQ(NULL, e2->previous);   /* e2 est maintenant en tête */
+    ASSERT_EQ(e3, e2->next);
+    ASSERT_EQ(e2, e3->previous);
+    ASSERT_EQ(e1, e3->next);
+    ASSERT_EQ(e3, e1->previous);
+    ASSERT_EQ(NULL, e1->next);       /* e1 est maintenant en queue */
+
+    free(e1->value); free(e1);
+    free(e2->value); free(e2);
+    free(e3->value); free(e3);
+    PASS();
+}
+
 SUITE(lifo_suite)
 {
     RUN_TEST(file_put_then_scroll_is_lifo);
@@ -441,4 +543,9 @@ SUITE(lifo_suite)
     RUN_TEST(file_remove_element_removes_middle);
     RUN_TEST(big_table_put_returns_non_null_and_grows);
     RUN_TEST(big_table_init_state_is_consistent);
+    RUN_TEST(file_scroll_inconsistent_state_returns_zero);
+    RUN_TEST(file_extract_element_null_suite_detaches_head);
+    RUN_TEST(file_extract_element_null_suite_detaches_tail);
+    RUN_TEST(file_move_before_null_suite_target_is_head);
+    RUN_TEST(file_move_after_null_suite_target_is_tail);
 }
