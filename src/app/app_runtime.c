@@ -55,6 +55,46 @@ int init_counters(void)
 	return 0;
 }
 
+int parse_positive_int_or_default(const char *arg, int fallback, int *out_was_invalid)
+{
+	if (out_was_invalid != NULL) {
+		*out_was_invalid = 0;
+	}
+	if (arg == NULL) {
+		return fallback;
+	}
+	int n = atoi(arg);
+	if (n > 0) {
+		return n;
+	}
+	if (out_was_invalid != NULL) {
+		*out_was_invalid = 1;
+	}
+	return fallback;
+}
+
+int parse_tcpserver_thread_arg(const char *arg, int default_nb_threads, int *out_nb_threads)
+{
+	if (arg == NULL) {
+		*out_nb_threads = default_nb_threads;
+		return TCPSERVER_ARG_AS_COUNT;
+	}
+	int n = atoi(arg);
+	char c0 = arg[0];
+	int looks_numeric = (c0 == '+' || c0 == '-' || (c0 >= '0' && c0 <= '9'));
+	if (n > 0) {
+		*out_nb_threads = n;
+		return TCPSERVER_ARG_AS_COUNT;
+	}
+	*out_nb_threads = default_nb_threads;
+	if (looks_numeric) {
+		/* Nombre fourni mais non valide (0 ou négatif) : on garde le défaut. */
+		return TCPSERVER_ARG_INVALID_COUNT;
+	}
+	/* Pas un nombre : traité comme le fichier de pièces, nombre de threads inchangé. */
+	return TCPSERVER_ARG_AS_FILENAME;
+}
+
 /** @brief Gestionnaire de signal no-op (utilisé pour SIGPIPE). */
 void signal_ignored(int sig) {
     (void)sig;

@@ -249,6 +249,123 @@ TEST configure_child_signals_installs_sigint(void)
     PASS();
 }
 
+/* ==================== Parsing d'arguments CLI (main.c) ===================== */
+
+/* ---------- parse_positive_int_or_default -------------------------------- */
+
+TEST parse_positive_int_absent_arg_uses_fallback(void)
+{
+    int invalid = -1;
+    ASSERT_EQ_FMT(7, parse_positive_int_or_default(NULL, 7, &invalid), "%d");
+    ASSERT_EQ_FMT(0, invalid, "%d"); /* absent != invalide */
+    PASS();
+}
+
+TEST parse_positive_int_valid_arg_returns_parsed_value(void)
+{
+    int invalid = -1;
+    ASSERT_EQ_FMT(42, parse_positive_int_or_default("42", 7, &invalid), "%d");
+    ASSERT_EQ_FMT(0, invalid, "%d");
+    PASS();
+}
+
+TEST parse_positive_int_zero_or_negative_is_invalid(void)
+{
+    int invalid = 0;
+    ASSERT_EQ_FMT(7, parse_positive_int_or_default("0", 7, &invalid), "%d");
+    ASSERT_EQ_FMT(1, invalid, "%d");
+
+    invalid = 0;
+    ASSERT_EQ_FMT(7, parse_positive_int_or_default("-5", 7, &invalid), "%d");
+    ASSERT_EQ_FMT(1, invalid, "%d");
+    PASS();
+}
+
+TEST parse_positive_int_non_numeric_is_invalid(void)
+{
+    int invalid = 0;
+    ASSERT_EQ_FMT(7, parse_positive_int_or_default("abc", 7, &invalid), "%d");
+    ASSERT_EQ_FMT(1, invalid, "%d");
+    PASS();
+}
+
+/* out_was_invalid == NULL accepté (appelant qui ne veut pas distinguer). */
+TEST parse_positive_int_null_out_param_is_safe(void)
+{
+    ASSERT_EQ_FMT(7, parse_positive_int_or_default("bad", 7, NULL), "%d");
+    ASSERT_EQ_FMT(9, parse_positive_int_or_default("9", 7, NULL), "%d");
+    PASS();
+}
+
+/* ---------- parse_tcpserver_thread_arg ------------------------------------ */
+
+TEST tcpserver_arg_absent_keeps_default(void)
+{
+    int nb = -1;
+    int r = parse_tcpserver_thread_arg(NULL, 80, &nb);
+    ASSERT_EQ_FMT(TCPSERVER_ARG_AS_COUNT, r, "%d");
+    ASSERT_EQ_FMT(80, nb, "%d");
+    PASS();
+}
+
+TEST tcpserver_arg_valid_number_sets_count(void)
+{
+    int nb = -1;
+    int r = parse_tcpserver_thread_arg("40", 80, &nb);
+    ASSERT_EQ_FMT(TCPSERVER_ARG_AS_COUNT, r, "%d");
+    ASSERT_EQ_FMT(40, nb, "%d");
+    PASS();
+}
+
+TEST tcpserver_arg_zero_is_invalid_count_keeps_default(void)
+{
+    int nb = -1;
+    int r = parse_tcpserver_thread_arg("0", 80, &nb);
+    ASSERT_EQ_FMT(TCPSERVER_ARG_INVALID_COUNT, r, "%d");
+    ASSERT_EQ_FMT(80, nb, "%d");
+    PASS();
+}
+
+TEST tcpserver_arg_negative_is_invalid_count_keeps_default(void)
+{
+    int nb = -1;
+    int r = parse_tcpserver_thread_arg("-3", 80, &nb);
+    ASSERT_EQ_FMT(TCPSERVER_ARG_INVALID_COUNT, r, "%d");
+    ASSERT_EQ_FMT(80, nb, "%d");
+    PASS();
+}
+
+/* Ne ressemble pas à un nombre (ne commence ni par un chiffre, ni +/-) :
+ * traité comme le fichier de pièces, nombre de threads inchangé. */
+TEST tcpserver_arg_filename_is_detected(void)
+{
+    int nb = -1;
+    int r = parse_tcpserver_thread_arg("data/pieces16.csv", 80, &nb);
+    ASSERT_EQ_FMT(TCPSERVER_ARG_AS_FILENAME, r, "%d");
+    ASSERT_EQ_FMT(80, nb, "%d");
+    PASS();
+}
+
+/* Chaîne vide : premier caractère '\0', ne ressemble à rien de numérique ->
+ * traitée comme un fichier (cas limite du même mécanisme). */
+TEST tcpserver_arg_empty_string_is_filename(void)
+{
+    int nb = -1;
+    int r = parse_tcpserver_thread_arg("", 80, &nb);
+    ASSERT_EQ_FMT(TCPSERVER_ARG_AS_FILENAME, r, "%d");
+    ASSERT_EQ_FMT(80, nb, "%d");
+    PASS();
+}
+
+TEST tcpserver_arg_plus_prefixed_number_is_count(void)
+{
+    int nb = -1;
+    int r = parse_tcpserver_thread_arg("+12", 80, &nb);
+    ASSERT_EQ_FMT(TCPSERVER_ARG_AS_COUNT, r, "%d");
+    ASSERT_EQ_FMT(12, nb, "%d");
+    PASS();
+}
+
 SUITE(app_runtime_suite)
 {
     RUN_TEST(init_counters_allocates_zeroed);
@@ -262,4 +379,18 @@ SUITE(app_runtime_suite)
     RUN_TEST(init_sigchld_sigaction_installs_handler);
     RUN_TEST(init_signals_installs_handlers);
     RUN_TEST(configure_child_signals_installs_sigint);
+
+    RUN_TEST(parse_positive_int_absent_arg_uses_fallback);
+    RUN_TEST(parse_positive_int_valid_arg_returns_parsed_value);
+    RUN_TEST(parse_positive_int_zero_or_negative_is_invalid);
+    RUN_TEST(parse_positive_int_non_numeric_is_invalid);
+    RUN_TEST(parse_positive_int_null_out_param_is_safe);
+
+    RUN_TEST(tcpserver_arg_absent_keeps_default);
+    RUN_TEST(tcpserver_arg_valid_number_sets_count);
+    RUN_TEST(tcpserver_arg_zero_is_invalid_count_keeps_default);
+    RUN_TEST(tcpserver_arg_negative_is_invalid_count_keeps_default);
+    RUN_TEST(tcpserver_arg_filename_is_detected);
+    RUN_TEST(tcpserver_arg_empty_string_is_filename);
+    RUN_TEST(tcpserver_arg_plus_prefixed_number_is_count);
 }
