@@ -1418,10 +1418,8 @@ TEST search_light_completes_board_skips_forward_check(void)
     struct array_part rp = { .size = 2, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
-    struct possibility_packet *p = new_zeroed_packet();
-    for (int x = 0; x < ETERN_SIZE; x++)
-        for (int y = 0; y < ETERN_SIZE; y++)
-            p->grid[x][y] = -2;
+    struct possibility_packet *p = new_zeroed_packet(); /* grid=0 partout : index bouchon valide pour log_solution */
+    p->grid[dirx[ETERN_PARTS - 1]][diry[ETERN_PARTS - 1]] = -2; /* seule case vide : la dernière */
     p->alloc = ETERN_PARTS - 1;
     p->x = dirx[ETERN_PARTS - 1];
     p->y = diry[ETERN_PARTS - 1];
@@ -1786,10 +1784,8 @@ TEST search_big_table_new_cell_completes_board_skips_forward_check(void)
     struct array_part rp = { .size = 2, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
-    struct possibility_packet *p = new_zeroed_packet();
-    for (int x = 0; x < ETERN_SIZE; x++)
-        for (int y = 0; y < ETERN_SIZE; y++)
-            p->grid[x][y] = -2;
+    struct possibility_packet *p = new_zeroed_packet(); /* grid=0 partout : index bouchon valide pour log_solution */
+    p->grid[dirx[ETERN_PARTS - 1]][diry[ETERN_PARTS - 1]] = -2; /* seule case vide : la dernière */
     p->alloc = ETERN_PARTS - 1;
     p->x = dirx[ETERN_PARTS - 1];
     p->y = diry[ETERN_PARTS - 1];
