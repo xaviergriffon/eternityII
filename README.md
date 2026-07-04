@@ -268,13 +268,16 @@ Les évènements notables sont affichés dans une bande fixe en bas de la consol
 │  commande : _                    │
 ```
 
-Trois évènements sont actuellement câblés :
+Les évènements suivants sont câblés :
 
 | Évènement | Source |
 |---|---|
 | `new record: N pieces placed` | Détecté à chaque tick du checker (10 s) quand `max_result` augmente |
 | `request unfulfilled: all threads busy` | Côté serveur, quand un nouveau client se connecte mais aucun thread libre |
 | `SOLUTION FOUND! (N pieces) - saved to ./solution_<pid>` | Émis depuis `checkIfResultFound` quand les 256 pièces sont placées |
+| `nouveau client connecté` | Côté serveur, à chaque connexion TCP acceptée |
+| `client déconnecté (…)` | Côté serveur, en fin de session : `fin de session` (propre), `connexion perdue` (brutale) ou `protocole interrompu` |
+| `client rejeté : version …` | Côté serveur, quand le handshake de version échoue (version incompatible ou requête sans handshake valide) |
 
 Tout évènement est **horodaté et écrit dans `events.log`** (en plus de l'affichage dans la zone), ce qui te permet de garder une trace persistante hors session :
 
@@ -379,4 +382,3 @@ Le répertoire [`docs/`](docs/) rassemble les notes détaillées sur l'architect
 ## TODO
 
 - Persister l'historique des commandes entre sessions (fichier `.eternityII_history`)
-- Élargir la liste des évènements câblés (déconnexions client, erreurs de protocole, …)

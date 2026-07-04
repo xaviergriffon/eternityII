@@ -150,6 +150,18 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                                  int *version_supported);
 
 /**
+ * @brief Libellé (haut niveau) de la cause de fin de session d'un client.
+ *
+ * Fonction pure : classe la dernière instruction observée par la boucle de
+ * `communicate_with_client` (INST_END → « fin de session », -1 → « connexion
+ * perdue », sinon → « protocole interrompu ») pour le flux d'évènements.
+ *
+ * @param last_instruction  Dernière instruction reçue par la boucle.
+ * @return Chaîne statique décrivant la cause.
+ */
+const char *client_disconnect_reason(int8_t last_instruction);
+
+/**
  * @brief Décide si la sauvegarde automatique périodique doit avoir lieu ce tour
  *        (logique de cadence extraite de la boucle `check_server`).
  *

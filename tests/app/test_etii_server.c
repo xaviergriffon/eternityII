@@ -410,6 +410,17 @@ TEST step_unsupported_version_stops(void)
     PASS();
 }
 
+/* Libellé de la cause de déconnexion (fonction pure, flux d'évènements). */
+TEST disconnect_reason_classifies_last_instruction(void)
+{
+    ASSERT_STR_EQ("fin de session", client_disconnect_reason(INST_END));
+    ASSERT_STR_EQ("connexion perdue", client_disconnect_reason(-1));
+    /* Toute autre instruction (step ayant demandé l'arrêt) → protocole interrompu. */
+    ASSERT_STR_EQ("protocole interrompu", client_disconnect_reason(INST_GET));
+    ASSERT_STR_EQ("protocole interrompu", client_disconnect_reason((int8_t)99));
+    PASS();
+}
+
 /* Handshake de version réussi : version_supported passe à 1, on continue. */
 TEST step_check_version_ok(void)
 {
@@ -1119,6 +1130,7 @@ SUITE(etii_server_suite)
 
     RUN_TEST(step_test_connected_pings_back);
     RUN_TEST(step_unsupported_version_stops);
+    RUN_TEST(disconnect_reason_classifies_last_instruction);
     RUN_TEST(step_check_version_ok);
     RUN_TEST(step_unknown_instruction_stops);
     RUN_TEST(step_add_stores_possibility);
