@@ -714,6 +714,7 @@ TEST check_client_threads_step_basic_report(void)
 
     struct client_statistics fs[1];
     memset(fs, 0, sizeof fs);
+    fs[0].pruner_cells_per_second = 7; /* débit prunage remonté par le fork */
     NB_THREADS = 1;
     fork_statistics = fs;
     max_result = 10;
@@ -726,6 +727,9 @@ TEST check_client_threads_step_basic_report(void)
     ASSERT(report != NULL);
     ASSERT(strstr(report, "Thread queues") != NULL);
     ASSERT(strstr(report, "active thread/s") != NULL);
+    /* Indice cumulé + part du prunage (agrégée depuis fork_statistics) */
+    ASSERT(strstr(report, "études/s (recherche+prunage)") != NULL);
+    ASSERT(strstr(report, "dont prunage/s :7") != NULL);
     ASSERT_EQ_FMT(10, last_record, "%d"); /* pas de nouveau record */
     free(report);
 

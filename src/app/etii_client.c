@@ -614,10 +614,12 @@ void check_client_threads_step(int *last_record)
         unsigned long long prc = pruner_checked;
         unsigned long long prr = pruner_removed;
         unsigned long long prcells = pruner_cells_studied;
+        unsigned long long prune_bys = 0;
         for (f = 0; f < NB_THREADS; f++) {
             prc += fork_statistics[f].pruner_checked;
             prr += fork_statistics[f].pruner_removed;
             prcells += fork_statistics[f].pruner_cells_studied;
+            prune_bys += fork_statistics[f].pruner_cells_per_second;
         }
         if (prc + prr > 0) {
             char *prtemp = calloc(200, sizeof(char));
@@ -627,9 +629,15 @@ void check_client_threads_step(int *last_record)
             free(prtemp);
         }
 
+        // Indice cumulé « études/s » : le compteur de coups crédite déjà les
+        // études de prunage case par case (autoprune_step, rmnonext), donc
+        // `bys` cumule recherche + prunage ; la ligne dédiée rend l'indice
+        // explicite et « dont prunage/s » en isole la part.
         char *temp = calloc(1000, sizeof(char));
-        sprintf(temp, "active thread/s :%lli\npossibility in stock :%lli (analysed:%llu)\nmax search by sec : %lli\nmax stock by thread : %i\nmax result :%i\n",
+        sprintf(temp, "active thread/s :%lli\nétudes/s (recherche+prunage) :%llu\ndont prunage/s :%llu\npossibility in stock :%lli (analysed:%llu)\nmax search by sec : %lli\nmax stock by thread : %i\nmax result :%i\n",
             bys,
+            (unsigned long long)bys,
+            prune_bys,
             fork_possibility_stock,
             fork_analysed_stock,
             max_search_by_sec, max_stock_by_thread, max_result);
