@@ -1692,17 +1692,24 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
 {
     lock_all_file();
     int fp;
+    // Statistique : chaque case examinée par l'élagage compte comme un coup
+    // (même unité que la recherche), avec un minimum d'un coup par possibilité
+    // (plateau déjà complet : le balayage ne fait rien). Cumulé localement puis
+    // crédité en une fois après la boucle.
+    unsigned long long total_cells = 0;
 	// Seul le pool non vérifié est élagué : une possibilité vérifiée (checked == 1)
 	// a déjà été confirmée vivante par un pruner, elle a donc forcément une suite.
 	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
 	{
 		Element *currElement = file_possibility[fp].file.start;
-        
+
 		while (currElement != NULL)
 		{
             Element *nextElement = NULL;
 			struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-            int has_next = possibility_all_has_a_next(possibility, mapParts, all_rotate_part);
+            unsigned int cells_studied = 0;
+            int has_next = possibility_all_has_a_next_counted(possibility, mapParts, all_rotate_part, &cells_studied);
+            total_cells += (cells_studied > 0) ? cells_studied : 1;
             int is_solution = (possibility->alloc >= ETERN_PARTS);
 
             if (is_solution) {
@@ -1768,6 +1775,16 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
 		}
 	}
     unlock_all_file();
+    // Crédit des études : cumul dédié au pruning + compteur de débit. rmnonext
+    // tourne dans le thread console (client) ou le thread d'élagage auto
+    // (serveur, uniquement quand aucun client n'est actif) qui n'ont pas de
+    // slot propre dans `counters` : on crédite le slot 0 (les slots sont de
+    // toute façon sommés pour le débit). `counters` peut être NULL hors
+    // bootstrap complet (tests unitaires).
+    pruner_cells_studied += total_cells;
+    if (counters != NULL) {
+        counters[0] += total_cells;
+    }
     return 0;
 }
 

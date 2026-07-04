@@ -763,8 +763,12 @@ TEST remove_no_next_prunes_dead_packets(void)
     add_possibility(NULL, &arr);
     ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
 
+    unsigned long long cells_before = pruner_cells_studied;
     remove_possibilities_with_no_next(map, &rp);
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* l'impasse a été retirée */
+    /* Études créditées : pks[0] balaie les ETERN_PARTS cases (grille pleine,
+       jamais d'impasse), pks[1] s'arrête à la 1re case (morte) -> +1. */
+    ASSERT_EQ_FMT(cells_before + ETERN_PARTS + 1, pruner_cells_studied, "%llu");
 
     free_bigarray(map);
     drain_all();
@@ -795,11 +799,15 @@ TEST remove_no_next_handles_complete_solution(void)
     int saved_sos = stop_on_solution;
     stop_on_solution = 0;
 
+    unsigned long long cells_before = pruner_cells_studied;
     silence_std();
     remove_possibilities_with_no_next(map, &rp);
     restore_std();
 
     stop_on_solution = saved_sos;
+
+    /* Plateau complet : balayage vide -> crédit forfaitaire d'un coup. */
+    ASSERT_EQ_FMT(cells_before + 1, pruner_cells_studied, "%llu");
 
     /* Le packet complet doit avoir été retiré (traité comme solution, non redistributé) */
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
