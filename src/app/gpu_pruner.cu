@@ -128,9 +128,9 @@ __device__ static void dev_what_search_in_grid_to_key(const struct part *parts,
  *
  * Reproduit `possibility_all_has_a_next` : parcourt les cases de `alloc` à
  * ETERN_PARTS suivant `dirx/diry`, contrôle qu'au moins une pièce candidate
- * reste posable, place les pièces forcées (bucket de taille 1), honore les
- * mêmes sorties anticipées (case « toute libre » → vivant ; bucket vide →
- * mort). En cas de complétion (`alloc == ETERN_PARTS`), met à jour `alloc` :
+ * reste posable, place les pièces forcées (bucket de taille 1) et ne sort
+ * en anticipé que sur bucket vide (case morte) — une case « toute libre »
+ * poursuit le balayage, comme côté CPU. En cas de complétion (`alloc == ETERN_PARTS`), met à jour `alloc` :
  * l'hôte détectera la solution (le device ne peut pas `exit()`).
  */
 __global__ void prune_kernel(struct possibility_packet *pk, uint8_t *alive, int n, GpuMap map)
@@ -181,8 +181,11 @@ __global__ void prune_kernel(struct possibility_packet *pk, uint8_t *alive, int 
                     break;
                 }
             } else {
+                /* Case non contrainte (les 4 clés valent all_face) : satisfiable
+                 * par construction, mais ne PAS interrompre le balayage — une case
+                 * plus loin dans directions[] peut être contrainte et sans issue
+                 * (même règle que possibility_all_has_a_next côté CPU, cf. #101). */
                 result = 1;
-                break;
             }
         } else {
             result = 1;
