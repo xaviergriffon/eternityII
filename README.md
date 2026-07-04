@@ -92,6 +92,8 @@ LD_LIBRARY_PATH=/usr/local/cuda/lib64 ./eternityII gpupruner localhost 4
 
 Le mode `VERIFY=1` n'est utile que pour valider la parité GPU/CPU ; en production, laisser `VERIFY=0` (le code de vérification est alors entièrement exclu du binaire).
 
+> Documentation détaillée : [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) (pré-requis, flux et avantages du mode GPU).
+
 ## Tests et couverture
 
 Des tests unitaires couvrent les modules à logique pure (`src/core/lifo.c`, `src/core/part.c`, `src/core/readdata.c`), basés sur [greatest](https://github.com/silentbicycle/greatest) — un framework C *single-header* vendoré dans `tests/`, **sans dépendance externe** à installer.
@@ -363,6 +365,16 @@ Ces fichiers permettent de reprendre une recherche interrompue avec la commande 
 |---|---|
 | `events.log` | Journal des évènements horodatés (nouveaux records, solutions, etc.). Append-only. |
 | `solution_<pid>` | Plateau sérialisé quand une solution complète est trouvée (déclenche aussi un évènement). |
+
+## Documentation
+
+Le répertoire [`docs/`](docs/) rassemble les notes détaillées sur l'architecture et les protocoles :
+
+| Document | Contenu |
+|---|---|
+| [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences typiques, comportement en cas de panne. |
+| [docs/autosearch_step.md](docs/autosearch_step.md) | Flux de recherche (`autosearch_step`) et gestion mémoire d'un thread de recherche. |
+| [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (mode `gpupruner`) : pré-requis de compilation et d'exécution, flux CUDA, avantages. |
 
 ## TODO
 
