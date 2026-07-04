@@ -29,6 +29,8 @@ struct client_statistics {
     unsigned long long pruner_removed;
     /** Cumul des cases étudiées par un client pruner (0 en mode recherche). */
     unsigned long long pruner_cells_studied;
+    /** Débit des cases étudiées au prunage (moyenne glissante 5 s, comme shots_per_second). */
+    unsigned long long pruner_cells_per_second;
 } __attribute__((__packed__));
 
 

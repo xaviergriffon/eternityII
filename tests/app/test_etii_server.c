@@ -879,6 +879,9 @@ TEST check_server_step_reports_basic_stats(void)
     ASSERT(report != NULL);
     ASSERT(strstr(report, "File queues") != NULL);
     ASSERT(strstr(report, "active thread last") != NULL);
+    /* Indice cumulé + part du prunage (delta de pruner_cells_studied) */
+    ASSERT(strstr(report, "études/s (recherche+prunage)") != NULL);
+    ASSERT(strstr(report, "dont prunage/s") != NULL);
     free(report);
     ASSERT_EQ_FMT(10, last_record, "%d");   /* pas de nouveau record */
     ASSERT_EQ_FMT(1, lastBack, "%d");       /* sous le seuil : incrémenté */

@@ -326,12 +326,16 @@ void *fork_checker(void *param) {
 
     // TPS tests per second (5 secondes)
     unsigned long long oldSPS[5];
+    // Débit des études de prunage : même fenêtre glissante, sur pruner_cells_studied
+    unsigned long long oldPPS[5];
     for (int c = 0; c < 5; c++) {
         oldSPS[c] = 0;
+        oldPPS[c] = 0;
     }
     int s = 0;
     int t;
     unsigned long long last_counter = 0;
+    unsigned long long last_prune_cells = 0;
     struct client_statistics *statistic = calloc(1, sizeof(struct client_statistics));
 	while(request != REQUEST_STOP && fork_checker_socket_id > 0) {
         unsigned long long counter = 0;
@@ -349,6 +353,19 @@ void *fork_checker(void *param) {
         }
         last_counter = counter;
         oldSPS[s] = sps;
+
+        // Même mécanique pour le débit des études de prunage
+        unsigned long long prune_cells = pruner_cells_studied;
+        unsigned long long pps = 0;
+        if (prune_cells >= last_prune_cells) {
+            pps = prune_cells - last_prune_cells;
+        } else {
+            // le compteur a fait un tour
+            pps = ((pps - 1) - last_prune_cells) + prune_cells;
+        }
+        last_prune_cells = prune_cells;
+        oldPPS[s] = pps;
+
         s++;
         if (s >= 5) {
             s = 0;
@@ -369,6 +386,20 @@ void *fork_checker(void *param) {
             sps = 0;
         }
         statistic->shots_per_second = sps;
+
+        int mp = 0;
+        for (int i = 0; i < 5; i++) {
+            if (oldPPS[i] > 0) {
+                mp++;
+                pps += oldPPS[i];
+            }
+        }
+        if (mp > 0) {
+            pps = pps / mp;
+        } else {
+            pps = 0;
+        }
+        statistic->pruner_cells_per_second = pps;
 
         int analyses_in_stock = 0;
         for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
