@@ -198,15 +198,28 @@ extern volatile unsigned long long pruner_checked;
 extern volatile unsigned long long pruner_removed;
 
 /**
- * @brief Cumul des cases étudiées par ce processus pruner.
+ * @brief Cumul des cases étudiées par les contrôles de possibilité du prunage.
  *
- * Chaque contrôle d'une possibilité (`possibility_all_has_a_next`) balaie
- * plusieurs cases du plateau : ce cumul compte chacune de ces études de case,
- * la même unité que le compteur de coups de la recherche (`counters`), qui
- * inclut désormais ces études. Permet de distinguer, dans le débit global,
- * la part venant du pruner de celle de la recherche.
+ * Chaque contrôle d'une possibilité (`possibility_all_has_a_next`, client
+ * pruner ou élagage `rmnonext`) balaie plusieurs cases du plateau : ce cumul
+ * compte chacune de ces études de case — la même unité qu'un coup de la
+ * recherche, mais dans un flux DISJOINT de `counters` (pas de double compte).
+ * Avec `fc_cells_studied`, il alimente le débit « dont prunage/s » et
+ * l'indice « études/s (recherche+prunage) » des rapports `check`.
  */
 extern volatile unsigned long long pruner_cells_studied;
+
+/**
+ * @brief Cumul des cases inspectées par le forward-checking.
+ *
+ * Chaque appel à `forward_check_next_k` / `bt_forward_check` inspecte jusqu'à
+ * `FORWARD_CHECK_K` cases : ce cumul compte chaque case réellement inspectée
+ * (cases déjà remplies sautées non comptées). Même unité qu'un coup de la
+ * recherche, flux disjoint de `counters`. Reste à 0 quand
+ * `FORWARD_CHECK_K == 0`. Incrémenté par ajout atomique (boucle chaude
+ * multi-thread), comme `fc_attempts`.
+ */
+extern volatile unsigned long long fc_cells_studied;
 
 extern unsigned long long *counters;
 extern unsigned long long *lastfilesize;

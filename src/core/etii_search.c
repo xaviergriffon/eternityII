@@ -184,6 +184,10 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         end = ETERN_PARTS;
     }
 
+    // Cases réellement inspectées (statistique « études de prunage ») :
+    // cumulées localement, un seul ajout atomique par appel (boucle chaude).
+    unsigned int cells = 0;
+
     for (int c = alloc; c < end; c++) {
         int8_t x = dirx[c];
         int8_t y = diry[c];
@@ -192,11 +196,13 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         if (board->grid[x][y] != -2) {
             continue;
         }
+        cells++;
 
         struct array_part *search = get_parts_bigarray_with_key(mapParts, &constraints[x][y]);
         if (search->size == 0) {
             // case morte : aucune pièce candidate
             __atomic_fetch_add(&fc_pruned_at[c - alloc + 1], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
             return 0;
         }
 
@@ -211,10 +217,12 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         if (!found) {
             // case morte : toutes les pièces candidates sont déjà utilisées
             __atomic_fetch_add(&fc_pruned_at[c - alloc + 1], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
             return 0;
         }
     }
 
+    __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
     return 1;
 }
 #endif // FORWARD_CHECK_K > 0
@@ -933,19 +941,16 @@ static int autoprune_step(client_possibility_t *client)
         // Copie de travail : l'original doit rester intact pour l'acquittement
         struct possibility_packet work;
         memcpy(&work, &client->aposs->possibilities[a], sizeof(work));
-        // Statistique : chaque case examinée par le contrôle compte comme un
-        // coup (même unité que la recherche), avec un minimum d'un coup par
-        // possibilité (plateau déjà complet : le balayage ne fait rien).
-        // `pruner_cells_studied` cumule la même quantité pour distinguer,
-        // dans le débit global, la part venant du pruner.
+        // Statistique possibilité étudiée (compteur de coups : une par
+        // possibilité, sémantique historique). Les cases examinées par le
+        // contrôle alimentent le flux DISJOINT `pruner_cells_studied`
+        // (« dont prunage/s » et « études/s » des rapports check), avec un
+        // minimum d'une case par possibilité (plateau déjà complet : le
+        // balayage ne fait rien).
+        counters[client->compteur]++;
         unsigned int cells_studied = 0;
         int has_next = possibility_all_has_a_next_counted(&work, client->map_part, client->all_rotate_part, &cells_studied);
-        if (cells_studied == 0)
-        {
-            cells_studied = 1;
-        }
-        counters[client->compteur] += cells_studied;
-        pruner_cells_studied += cells_studied;
+        pruner_cells_studied += (cells_studied > 0) ? cells_studied : 1;
         if (work.alloc >= ETERN_PARTS)
         {
             // Plateau complété par les placements forcés du contrôle : solution.
@@ -1106,15 +1111,17 @@ void *autoprune_gpu (void *userdata)
             if (request != REQUEST_STOP)
             {
                 int n = client->aposs->size;
+                // Statistique : tout le lot est étudié (une par possibilité)
+                counters[client->compteur] += n;
 
                 // Lot de taille configurable (jusqu'à pruner_batch_size, borné par
                 // PRUNER_BATCH_MAX) : verdicts vivant/mort alloués selon n, pas une
                 // taille fixe (l'ancien tableau pile PRUNER_BATCH_SIZE débordait dès
                 // qu'un lot dépassait 100).
                 uint8_t *alive = malloc((size_t)n * sizeof(uint8_t));
-                // Cases examinées par paquet, remontées par le kernel : chaque
-                // case compte comme un coup (même unité que la recherche).
-                // NULL toléré : le comptage retombe alors sur 1 coup par paquet.
+                // Cases examinées par paquet, remontées par le kernel : une étude
+                // de prunage par case (flux `pruner_cells_studied`).
+                // NULL toléré : le comptage retombe alors sur 1 case par paquet.
                 uint32_t *cells = malloc((size_t)n * sizeof(uint32_t));
                 if (alive == NULL)
                 {
@@ -1135,16 +1142,17 @@ void *autoprune_gpu (void *userdata)
 
                 gpu_pruner_check_batch(client->aposs->possibilities, n, alive, cells);
 
-                // Statistique : chaque case examinée compte comme un coup, avec
-                // un minimum d'un coup par paquet (court-circuit `checked`,
-                // échec kernel ou allocation `cells` impossible).
+                // Statistique : les cases examinées alimentent le flux DISJOINT
+                // `pruner_cells_studied` (« dont prunage/s » des rapports check),
+                // avec un minimum d'une case par paquet (court-circuit `checked`,
+                // échec kernel ou allocation `cells` impossible). Le compteur de
+                // coups garde sa sémantique historique : une par possibilité.
                 unsigned long long batch_cells = 0;
                 for (int a = 0; a < n; a++)
                 {
                     unsigned long long c = (cells != NULL && cells[a] > 0) ? cells[a] : 1;
                     batch_cells += c;
                 }
-                counters[client->compteur] += batch_cells;
                 pruner_cells_studied += batch_cells;
 
 #ifdef GPU_PRUNER_VERIFY

@@ -847,6 +847,9 @@ int forward_check_next_k(struct possibility_packet *possibility, map_big_array *
 
     int8_t all_face = mapParts->sizearrayM;
     key_part wsearch;
+    // Cases réellement inspectées (statistique « études de prunage ») :
+    // cumulées localement, un seul ajout atomique par appel (boucle chaude).
+    unsigned int cells = 0;
 
     for (int c = alloc; c < end; c++) {
         int8_t x = dirx[c];
@@ -856,6 +859,7 @@ int forward_check_next_k(struct possibility_packet *possibility, map_big_array *
         if (possibility->grid[x][y] != -2) {
             continue;
         }
+        cells++;
 
         what_search_in_grid_to_key(all_rotate_part, possibility, x, y, &wsearch, all_face);
 
@@ -863,6 +867,7 @@ int forward_check_next_k(struct possibility_packet *possibility, map_big_array *
         if (search == NULL || search->size == 0) {
             // case morte : aucune pièce candidate
             __atomic_fetch_add(&fc_pruned_at[c - alloc + 1], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
             return 0;
         }
 
@@ -879,10 +884,12 @@ int forward_check_next_k(struct possibility_packet *possibility, map_big_array *
         if (!found) {
             // case morte : toutes les pièces candidates sont déjà utilisées
             __atomic_fetch_add(&fc_pruned_at[c - alloc + 1], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
             return 0;
         }
     }
 
+    __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
     return 1;
 }
 #endif // FORWARD_CHECK_K > 0

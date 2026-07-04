@@ -629,14 +629,14 @@ void check_client_threads_step(int *last_record)
             free(prtemp);
         }
 
-        // Indice cumulé « études/s » : le compteur de coups crédite déjà les
-        // études de prunage case par case (autoprune_step, rmnonext), donc
-        // `bys` cumule recherche + prunage ; la ligne dédiée rend l'indice
-        // explicite et « dont prunage/s » en isole la part.
+        // Indice cumulé « études/s » : somme de deux flux DISJOINTS — les coups
+        // (`bys`, recherche / possibilités pruner) et les études de prunage
+        // case par case (`prune_bys` : forward-check + pruner + rmnonext).
+        // « dont prunage/s » en isole la part prunage.
         char *temp = calloc(1000, sizeof(char));
         sprintf(temp, "active thread/s :%lli\nétudes/s (recherche+prunage) :%llu\ndont prunage/s :%llu\npossibility in stock :%lli (analysed:%llu)\nmax search by sec : %lli\nmax stock by thread : %i\nmax result :%i\n",
             bys,
-            (unsigned long long)bys,
+            (unsigned long long)bys + prune_bys,
             prune_bys,
             fork_possibility_stock,
             fork_analysed_stock,

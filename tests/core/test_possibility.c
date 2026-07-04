@@ -1462,7 +1462,11 @@ TEST forward_check_detects_dead_cell(void)
             p->grid[x][y] = -2;
     p->alloc = 0; /* la fenêtre commence à la case directions[0] = (0,0) */
 
+    unsigned long long fc_cells_before = fc_cells_studied;
     ASSERT_EQ_FMT(0, forward_check_next_k(p, map, &rp), "%d");
+    /* Une seule case inspectée (morte dès la première) créditée au flux
+       « études de prunage » (dont prunage/s des rapports check). */
+    ASSERT_EQ_FMT(fc_cells_before + 1, fc_cells_studied, "%llu");
 
     free_bigarray(map);
     free(p);
@@ -1480,7 +1484,10 @@ TEST forward_check_passes_when_cells_filled(void)
     struct possibility_packet *p = new_zeroed_packet();
     p->alloc = 0;
 
+    unsigned long long fc_cells_before = fc_cells_studied;
     ASSERT_EQ_FMT(1, forward_check_next_k(p, map, &rp), "%d");
+    /* Cases remplies sautées : aucune étude de prunage créditée. */
+    ASSERT_EQ_FMT(fc_cells_before, fc_cells_studied, "%llu");
 
     free_bigarray(map);
     free(p);

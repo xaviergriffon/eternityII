@@ -93,6 +93,8 @@ volatile unsigned long long pruner_removed = 0;
 
 volatile unsigned long long pruner_cells_studied = 0;
 
+volatile unsigned long long fc_cells_studied = 0;
+
 unsigned long long *counters = NULL;
 
 struct client_statistics *fork_statistics = NULL;
