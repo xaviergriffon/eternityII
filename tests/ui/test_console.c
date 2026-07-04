@@ -19,6 +19,7 @@
 #include "ui/console.h"
 #include "app/static_variables.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -175,8 +176,38 @@ TEST run_console_thread_returns_on_eof(void)
 
 SUITE(console_suite)
 {
+    /* console() persiste désormais l'historique dans $HOME/.eternityII_history
+       (repli ./ sans HOME). Ces tests exécutent console() en fils ET, pour
+       run_console_thread_returns_on_eof, dans un thread du process de test
+       courant : on isole donc HOME dans un répertoire temporaire jetable pour
+       ne JAMAIS lire/écrire le HOME réel ni le dépôt. */
+    char home_tmpl[] = "/tmp/etii_home_XXXXXX";
+    char *sandbox_home = mkdtemp(home_tmpl);
+    char *saved_home = getenv("HOME");
+    char saved_home_copy[4096] = {0};
+    if (saved_home != NULL) {
+        strncpy(saved_home_copy, saved_home, sizeof saved_home_copy - 1);
+    }
+    if (sandbox_home != NULL) {
+        setenv("HOME", sandbox_home, 1);
+    }
+
     RUN_TEST(console_reads_exit_command_and_exits);
     RUN_TEST(console_returns_on_eof_without_spinning);
     RUN_TEST(console_raw_mode_over_pty_reads_command);
     RUN_TEST(run_console_thread_returns_on_eof);
+
+    /* Nettoyage : supprime le fichier d'historique éventuellement écrit dans le
+       HOME jeté puis le répertoire, et restaure le HOME d'origine. */
+    if (sandbox_home != NULL) {
+        char hist[4160];
+        snprintf(hist, sizeof hist, "%s/.eternityII_history", sandbox_home);
+        remove(hist);
+        rmdir(sandbox_home);
+    }
+    if (saved_home != NULL) {
+        setenv("HOME", saved_home_copy, 1);
+    } else {
+        unsetenv("HOME");
+    }
 }

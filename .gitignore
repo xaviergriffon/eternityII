@@ -10,6 +10,7 @@ build/
 *.back
 *.log
 solution_*
+.eternityII_history
 tests/run_tests
 tests/run_tests.dSYM/
 tests/run_tests_16

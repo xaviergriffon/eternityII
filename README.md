@@ -302,6 +302,8 @@ Les 100 dernières commandes saisies sont conservées en mémoire pour la sessio
 
 L'historique fonctionne dans les deux builds. En ANSI, le terminal est basculé en mode non-canonique (`tcsetattr`) le temps de la session pour permettre l'interception des séquences `\033[A` / `\033[B`. Le mode initial est restauré automatiquement à la sortie. Si stdin n'est pas un TTY (sortie redirigée), le programme retombe sur la lecture ligne-par-ligne classique.
 
+L'historique est **persisté entre sessions** dans `~/.eternityII_history` (repli sur `./.eternityII_history` si `$HOME` est absent). Il est chargé au démarrage de la console — l'absence du fichier au premier lancement n'est pas une erreur — et réécrit à la sortie propre (commande `exit` ou fin de stdin) dans les deux builds. L'écriture est atomique (fichier temporaire `.tmp` + `rename`) pour ne jamais corrompre l'historique existant si l'écriture échoue.
+
 ### Interface ncurses (optionnelle, `make NCURSES=1`)
 
 Le build `NCURSES=1` remplace l'affichage ANSI par une vraie interface ncurses à quatre zones :
@@ -381,4 +383,4 @@ Le répertoire [`docs/`](docs/) rassemble les notes détaillées sur l'architect
 
 ## TODO
 
-- Persister l'historique des commandes entre sessions (fichier `.eternityII_history`)
+- Élargir la liste des évènements câblés (déconnexions client, erreurs de protocole, …)

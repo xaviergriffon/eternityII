@@ -21,4 +21,24 @@ const char *history_get(int index);
 /** @brief Nombre actuel d'entrées dans l'historique (≤ HISTORY_MAX). */
 int history_size(void);
 
+#include <stddef.h>
+
+/** @brief Construit le chemin par défaut du fichier d'historique persistant
+ *         (`$HOME/.eternityII_history`, repli sur `./.eternityII_history` si
+ *         HOME est absent) dans @p buf de taille @p size.
+ *  @return @p buf en cas de succès, NULL si @p buf est NULL, @p size nulle ou
+ *          si le chemin ne tient pas dans le tampon. */
+char *history_default_path(char *buf, size_t size);
+
+/** @brief Charge l'historique depuis @p path, ligne par ligne, dans l'ordre
+ *         chronologique (plus ancienne en premier). Respecte HISTORY_MAX et la
+ *         dédup via history_add. L'absence du fichier n'est pas une erreur. */
+void history_load(const char *path);
+
+/** @brief Écrit l'historique dans @p path, une commande par ligne, dans l'ordre
+ *         chronologique (plus ancienne en premier). Écriture atomique
+ *         (fichier temporaire + rename) pour ne pas corrompre l'existant.
+ *  @return 0 en cas de succès, -1 en cas d'échec (journalisé via log_error). */
+int history_save(const char *path);
+
 #endif /* command_history_h */
