@@ -1804,10 +1804,11 @@ TEST autoprune_step_keeps_live_packet(void)
     ASSERT(client.aposs == NULL);
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");                 /* vivant renvoyé en local */
     ASSERT_EQ_FMT(checked_before + 1, pruner_checked, "%llu"); /* compteur incrémenté */
-    /* Plateau vide + map libre : le contrôle balaie les ETERN_PARTS cases, et
-       chaque case étudiée compte comme un coup (même unité que la recherche),
-       créditée au compteur de débit ET au cumul dédié au pruner. */
-    ASSERT_EQ_FMT(counter_before + ETERN_PARTS, counters[0], "%llu");
+    /* Compteur de coups : une possibilité étudiée (sémantique historique).
+       Plateau vide + map libre : le contrôle balaie les ETERN_PARTS cases,
+       toutes créditées au flux disjoint `pruner_cells_studied` (« dont
+       prunage/s » des rapports check). */
+    ASSERT_EQ_FMT(counter_before + 1, counters[0], "%llu");
     ASSERT_EQ_FMT(cells_before + ETERN_PARTS, pruner_cells_studied, "%llu");
 
     pthread_mutex_destroy(&client.works_mutex);

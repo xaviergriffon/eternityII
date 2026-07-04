@@ -354,8 +354,11 @@ void *fork_checker(void *param) {
         last_counter = counter;
         oldSPS[s] = sps;
 
-        // Même mécanique pour le débit des études de prunage
-        unsigned long long prune_cells = pruner_cells_studied;
+        // Même mécanique pour le débit des études de prunage : cumul des cases
+        // étudiées par les contrôles de possibilité (pruner, rmnonext) ET par
+        // le forward-checking de la recherche — flux disjoint de `counters`.
+        unsigned long long prune_cells = pruner_cells_studied
+            + __atomic_load_n(&fc_cells_studied, __ATOMIC_RELAXED);
         unsigned long long pps = 0;
         if (prune_cells >= last_prune_cells) {
             pps = prune_cells - last_prune_cells;

@@ -1775,16 +1775,9 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
 		}
 	}
     unlock_all_file();
-    // Crédit des études : cumul dédié au pruning + compteur de débit. rmnonext
-    // tourne dans le thread console (client) ou le thread d'élagage auto
-    // (serveur, uniquement quand aucun client n'est actif) qui n'ont pas de
-    // slot propre dans `counters` : on crédite le slot 0 (les slots sont de
-    // toute façon sommés pour le débit). `counters` peut être NULL hors
-    // bootstrap complet (tests unitaires).
+    // Crédit des études dans le flux de prunage (« dont prunage/s » et
+    // « études/s » des rapports check) — flux disjoint des compteurs de coups.
     pruner_cells_studied += total_cells;
-    if (counters != NULL) {
-        counters[0] += total_cells;
-    }
     return 0;
 }
 

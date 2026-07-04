@@ -727,8 +727,8 @@ TEST check_client_threads_step_basic_report(void)
     ASSERT(report != NULL);
     ASSERT(strstr(report, "Thread queues") != NULL);
     ASSERT(strstr(report, "active thread/s") != NULL);
-    /* Indice cumulé + part du prunage (agrégée depuis fork_statistics) */
-    ASSERT(strstr(report, "études/s (recherche+prunage)") != NULL);
+    /* Indice cumulé = coups (0 ici) + prunage (7), part prunage isolée */
+    ASSERT(strstr(report, "études/s (recherche+prunage) :7") != NULL);
     ASSERT(strstr(report, "dont prunage/s :7") != NULL);
     ASSERT_EQ_FMT(10, last_record, "%d"); /* pas de nouveau record */
     free(report);

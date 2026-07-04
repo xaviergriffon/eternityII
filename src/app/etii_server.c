@@ -188,10 +188,10 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
 
     unsigned long long bys = currentactive / sleep_time;
 
-    // Indice cumulé « études/s » : les counters crédités par les requêtes ET
-    // par les cases étudiées de l'élagage rmnonext (counters[0]) alimentent
-    // déjà bys ; « dont prunage/s » isole la part de l'élagage via le delta de
-    // pruner_cells_studied depuis le tour précédent.
+    // Indice cumulé « études/s » : somme de deux flux DISJOINTS — les requêtes
+    // servies (`bys`) et les études de prunage case par case (élagage rmnonext,
+    // delta de pruner_cells_studied depuis le tour précédent). « dont
+    // prunage/s » isole la part de l'élagage.
     static unsigned long long last_prune_cells = 0;
     unsigned long long prune_cells_now = pruner_cells_studied;
     unsigned long long prune_bys = (prune_cells_now - last_prune_cells) / sleep_time;
@@ -200,7 +200,7 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
     int activeThread = get_active_threads(thread_params);
 
     char *temp = calloc(1000, sizeof(char));
-    sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\nétudes/s (recherche+prunage) :%llu\ndont prunage/s :%llu\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,(unsigned long long)bys,prune_bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,non_null_possibilities, max_result, activeThread);
+    sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\nétudes/s (recherche+prunage) :%llu\ndont prunage/s :%llu\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,(unsigned long long)bys + prune_bys,prune_bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,non_null_possibilities, max_result, activeThread);
     strcat(report, temp);
     free(temp);
 
