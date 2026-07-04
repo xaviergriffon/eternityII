@@ -316,6 +316,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 *version_supported = 1;
             } else {
                 log_error("Version of client unsupported\n");
+                log_event("client rejeté : version %i incompatible (serveur %i)", client_version, version);
                 send_instruction(client->socket_id, INST_UNSUPPORTED_VERSION);
             }
         } else if(instruction == INST_GET && *version_supported == 1)
@@ -576,6 +577,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             send_instruction(client->socket_id, INST_TEST_CONNECTED);
         } else if (*version_supported == 0) {
             log_error("Version of client unsupported\n");
+            log_event("client rejeté : requête sans handshake de version valide");
             send_instruction(client->socket_id, INST_UNSUPPORTED_VERSION);
             return 0;
         } else
@@ -603,6 +605,27 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
  * @param userdata Pointeur vers le `client_t` du thread.
  * @return         NULL.
  */
+/**
+ * @brief Libellé (haut niveau) de la cause de fin de session d'un client.
+ *
+ * Fonction pure : classe la dernière instruction observée par la boucle de
+ * `communicate_with_client` en un motif lisible pour le flux d'évènements.
+ *
+ * @param last_instruction  Dernière instruction reçue (INST_END, -1, ou l'inst.
+ *                          courante quand un `step` a demandé l'arrêt).
+ * @return Chaîne statique décrivant la cause.
+ */
+const char *client_disconnect_reason(int8_t last_instruction)
+{
+    if (last_instruction == INST_END) {
+        return "fin de session";
+    }
+    if (last_instruction == -1) {
+        return "connexion perdue";
+    }
+    return "protocole interrompu";
+}
+
 void *communicate_with_client (void *userdata)
 {
     client_t *client = userdata;
@@ -625,6 +648,7 @@ void *communicate_with_client (void *userdata)
 
         instruction = recv_instruction(client->socket_id);
     }
+    log_event("client déconnecté (%s)", client_disconnect_reason(instruction));
     if(lastPossibilityPacketSend != NULL)
     {
         // À la déconnexion (propre OU non), la dernière possibilité servie au
@@ -821,7 +845,8 @@ void runserver(const char* file)
         // Timeout sur les sessions
         setsockopt(client_id, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(struct timeval));
         setsockopt(client_id, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(struct timeval));
-        
+        log_event("nouveau client connecté");
+
         thread_id = -1;
         int busy_logged = 0; /* « all threads busy » : journalisé une seule fois par épisode d'attente */
         while (thread_id == -1) {
