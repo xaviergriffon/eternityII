@@ -7,12 +7,37 @@
 
 #include "ui/logger.h"
 #include "ui/command_lines.h"
+#include "ui/command_history.h"
 
 #define EXIT_CMD "exit"
 
+/* Persistance de l'historique des commandes entre sessions.
+   history_persist_atexit() est enregistré via atexit() au démarrage de la
+   console : il couvre la sortie propre par la commande `exit` (qui appelle
+   exit()) dans les deux builds. Le chemin est mémorisé au chargement pour être
+   réutilisé à la sauvegarde. */
+static char history_path_buf[1200];
+static int  history_path_ready = 0;
+
+static void history_persist_atexit(void)
+{
+    if (history_path_ready) {
+        history_save(history_path_buf);
+    }
+}
+
+/** @brief Charge l'historique persistant et arme la sauvegarde à la sortie. */
+static void history_persist_init(void)
+{
+    if (history_default_path(history_path_buf, sizeof history_path_buf) != NULL) {
+        history_path_ready = 1;
+        history_load(history_path_buf);
+        atexit(history_persist_atexit);
+    }
+}
+
 #ifndef USE_NCURSES
 #include <termios.h>
-#include "ui/command_history.h"
 
 /* ------------------------------------------------------------------------- */
 /*  Mode raw + édition de ligne avec historique (flèches ↑ / ↓)              */
@@ -252,6 +277,7 @@ void * console(void *param)
 {
     (void)param;
     status_zone_init();
+    history_persist_init();
 #ifdef USE_NCURSES
     nc_console_loop();
     exit(EXIT_SUCCESS);
@@ -272,6 +298,11 @@ void * console(void *param)
         }
         do_command_line(buffer);
         free(buffer);
+    }
+    /* Sortie propre par fin de stdin (Ctrl-D, pipe fermé) : le thread s'arrête
+       sans passer par exit(), on persiste donc l'historique explicitement. */
+    if (history_path_ready) {
+        history_save(history_path_buf);
     }
     log_info("console : fin de l'entrée standard — console interactive arrêtée (le traitement continue)\n");
     return NULL;
