@@ -133,10 +133,16 @@ TEST default_path_uses_home_then_cwd(void)
     ASSERT_EQ(buf, history_default_path(buf, sizeof buf));
     ASSERT_STR_EQ("./.eternityII_history", buf);
 
-    /* Tampon trop petit → NULL, pas de chemin tronqué. */
+    /* HOME défini mais vide → traité comme absent (repli sur le CWD). */
+    setenv("HOME", "", 1);
+    ASSERT_EQ(buf, history_default_path(buf, sizeof buf));
+    ASSERT_STR_EQ("./.eternityII_history", buf);
+
+    /* Entrées invalides → NULL, pas de chemin tronqué. */
     setenv("HOME", "/home/tester", 1);
-    ASSERT_EQ(NULL, history_default_path(buf, 4));
-    ASSERT_EQ(NULL, history_default_path(NULL, sizeof buf));
+    ASSERT_EQ(NULL, history_default_path(buf, 4));   /* tampon trop petit */
+    ASSERT_EQ(NULL, history_default_path(buf, 0));    /* taille nulle       */
+    ASSERT_EQ(NULL, history_default_path(NULL, sizeof buf)); /* buf NULL    */
 
     if (orig_home != NULL) {
         setenv("HOME", orig_home_copy, 1);
@@ -256,6 +262,47 @@ TEST save_then_load_round_trip(void)
     PASS();
 }
 
+/* save renvoie -1 sans crasher sur les entrées/chemins invalides. */
+TEST save_reports_failure_on_bad_paths(void)
+{
+    /* Chemin NULL. */
+    ASSERT_EQ(-1, history_save(NULL));
+
+    /* Répertoire cible inexistant → fopen du fichier .tmp échoue. */
+    ASSERT_EQ(-1, history_save("/no_such_dir_4242/etii_hist"));
+
+    /* Chemin trop long pour le tampon temporaire interne (« %s.tmp ») → -1. */
+    char longpath[1400];
+    memset(longpath, 'a', sizeof longpath - 1);
+    longpath[sizeof longpath - 1] = '\0';
+    ASSERT_EQ(-1, history_save(longpath));
+    PASS();
+}
+
+/* load tolère les fins de ligne Windows (\r\n) : le \r est retiré. */
+TEST load_strips_crlf_line_endings(void)
+{
+    char path[512];
+    ASSERT_EQ(0, make_temp_path(path, sizeof path));
+
+    FILE *f = fopen(path, "wb");
+    ASSERT(f != NULL);
+    /* >HISTORY_MAX lignes distinctes en CRLF pour remplacer tout le ring. */
+    for (int i = 0; i < HISTORY_MAX + 5; i++) {
+        fprintf(f, "crlf%d\r\n", i);
+    }
+    fclose(f);
+
+    history_load(path);
+    remove(path);
+
+    /* Le \r ne doit pas subsister dans l'entrée la plus récente. */
+    char expected[32];
+    snprintf(expected, sizeof expected, "crlf%d", HISTORY_MAX + 5 - 1);
+    ASSERT_STR_EQ(expected, history_get(0));
+    PASS();
+}
+
 SUITE(command_history_suite)
 {
     RUN_TEST(add_ignores_null_and_empty);
@@ -269,4 +316,6 @@ SUITE(command_history_suite)
     RUN_TEST(save_writes_chronological_order);
     RUN_TEST(load_respects_order_dedup_and_cap);
     RUN_TEST(save_then_load_round_trip);
+    RUN_TEST(save_reports_failure_on_bad_paths);
+    RUN_TEST(load_strips_crlf_line_endings);
 }
