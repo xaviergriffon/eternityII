@@ -380,7 +380,3 @@ Le répertoire [`docs/`](docs/) rassemble les notes détaillées sur l'architect
 | [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences typiques, comportement en cas de panne. |
 | [docs/autosearch_step.md](docs/autosearch_step.md) | Flux de recherche (`autosearch_step`) et gestion mémoire d'un thread de recherche. |
 | [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (mode `gpupruner`) : pré-requis de compilation et d'exécution, flux CUDA, avantages. |
-
-## TODO
-
-- Élargir la liste des évènements câblés (déconnexions client, erreurs de protocole, …)
