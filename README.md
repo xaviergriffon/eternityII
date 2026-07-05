@@ -9,7 +9,7 @@ Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisa
 ## Architecture
 
 ```
-┌─────────────────────┐        TCP        ┌─────────────────────────────┐
+┌─────────────────────┐        TCP         ┌─────────────────────────────┐
 │      Serveur        │◄──────────────────►│  Client (processus parent)  │
 │   (distribue les    │                    │  ┌──────────┬──────────┐    │
 │   possibilités)     │                    │  │ fork #1  │ fork #2  │... │
