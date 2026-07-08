@@ -943,6 +943,21 @@ TEST feed_thread_aposs_normal_cadence_when_threads_busy(void)
     PASS();
 }
 
+/* Enveloppe de thread check_client_threads : REQUEST_STOP prépositionné, la
+ * boucle (while(request != REQUEST_STOP), refactor P8) ne s'exécute jamais —
+ * appel direct sûr, le corps est couvert via check_client_threads_step. */
+TEST check_client_threads_stops_immediately_on_request_stop(void)
+{
+    int saved_req = request;
+    request = REQUEST_STOP;
+
+    void *ret = check_client_threads(NULL);
+    ASSERT_EQ(NULL, ret);
+
+    request = saved_req;
+    PASS();
+}
+
 /* ---------- run_mono_client (smoke, mode local) ---------------------------- */
 /*
  * REQUEST_STOP prépositionné : autosearch/autoprune reviennent au premier tour,
@@ -1053,6 +1068,7 @@ SUITE(etii_client_suite)
     RUN_TEST(check_client_threads_step_reports_forward_check_and_pruner);
 #endif
     RUN_TEST(check_client_threads_step_shows_numeric_limit);
+    RUN_TEST(check_client_threads_stops_immediately_on_request_stop);
 
     RUN_TEST(run_mono_client_search_stops_immediately);
     RUN_TEST(run_mono_client_pruner_stops_immediately);
