@@ -55,14 +55,6 @@ typedef struct
 } client_possibility_t;
 
 /**
- * @brief Lance un client en mode multi-thread
- * 
- * Le nombre de thread est en fonction de la variable globale NB_THREADS.
- * 
- * @param[in] file fichier contenant la définition des pieces
- */
-void runThreadClient(const char *file);
-/**
  * @brief Lance un client en mono-thread
  * 
  * @param file fichier contenant la définition des pieces
@@ -100,7 +92,7 @@ useconds_t next_no_work_sleep(useconds_t current);
 /**
  * @brief Initialise les champs d'une structure `client_possibility_t`.
  *
- * Factorise l'initialisation commune à `runThreadClient` et `run_mono_client`.
+ * Initialisation du contexte d'un thread de recherche (`run_mono_client`).
  * L'appelant fournit les tableaux de pièces et la map déjà construits ; cette
  * fonction ne fait aucun appel réseau ni appel système autre que `time()` et
  * `times()`.
