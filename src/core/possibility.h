@@ -191,6 +191,11 @@ int possibility_all_has_a_next_counted(struct possibility_packet *possibility, m
  * cases de parcours ont encore au moins un candidat disponible. Si l'une est
  * morte, la branche est abandonnée.
  *
+ * Version sans cache (recalcule chaque clé), réservée aux chemins froids ;
+ * le hot path du backtracking utilise `bt_forward_check` (etii_search.c),
+ * qui lit le cache de contraintes incrémental. Voir le commentaire détaillé
+ * dans possibility.c.
+ *
  * @param possibility     Paquet courant (après placement de la pièce candidate).
  * @param mapParts        Tableau 4D de lookup.
  * @param all_rotate_part Tableau de toutes les rotations.
