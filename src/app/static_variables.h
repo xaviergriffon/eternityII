@@ -34,6 +34,11 @@
 // exécutés par le thread de recherche : sa fréquence doit être bornée en temps,
 // pas en nombre de nœuds explorés (sinon elle croît avec la vitesse du moteur).
 #define DELEGATE_MIN_INTERVAL_MS 500
+// Nombre de nœuds explorés entre deux consultations de l'horloge par la boucle
+// chaude de backtracking (search_packet_backtracking). Un clock_gettime par
+// nœud coûterait plus cher que le nœud lui-même : on n'évalue la fenêtre
+// DELEGATE_MIN_INTERVAL_MS qu'une fois tous les N nœuds.
+#define DELEGATE_CHECK_INTERVAL_NODES 1000000
 // Nombre de possibilités demandées au serveur par requête d'un client pruner
 // (valeur PAR DÉFAUT de `pruner_batch_size`). Le contrôle d'une possibilité est
 // rapide : sans lot, l'aller-retour TCP dominerait le coût.

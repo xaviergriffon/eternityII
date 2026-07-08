@@ -602,8 +602,13 @@ static int search_packet_backtracking(client_possibility_t *client,
             return 1;
         }
 
+        // Volontairement == et non % : noCheckDelegate n'est écrit qu'ici (+1
+        // puis remise à zéro au seuil), il ne peut donc jamais sauter par-dessus
+        // le seuil. Les chemins qui esquivent cet incrément (continue sur
+        // REQUEST_PAUSE, goto backtrack après une solution) ne font que retarder
+        // son atteinte.
         noCheckDelegate++;
-        if (noCheckDelegate == 1000000) {
+        if (noCheckDelegate == DELEGATE_CHECK_INTERVAL_NODES) {
             noCheckDelegate = 0;
             // La fréquence de délégation est bornée en temps et non en nombre de
             // nœuds : une délégation = jusqu'à max_stock_by_thread aller-retours
