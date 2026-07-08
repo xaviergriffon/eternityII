@@ -34,6 +34,7 @@ void *communicate_with_client(void *userdata);
 void create_server_thread(client_t *thread_params, int i);
 void lock_all_file(void);                 /* maintenance datamanager (cf. test_datamanager.c) */
 void unlock_all_file(void);
+void *rmnonext_thread(void *param);       /* thread interne à etii_server.c */
 
 /* Vide le pool local du datamanager (état global partagé entre suites). */
 static void dm_drain_all(void)
@@ -1602,6 +1603,236 @@ TEST create_server_thread_recreates_tid_on_second_call(void)
     PASS();
 }
 
+/* ---------- init_server_thread_pool --------------------------------------- */
+
+/* Alloue thread_params/fileUpdates (globales) et initialise chaque slot vide.
+ * Les globales sont sauvegardées/restaurées : elles sont partagées entre suites. */
+TEST init_pool_initializes_all_slots(void)
+{
+    client_t *saved_tp = thread_params;
+    unsigned long long *saved_fu = fileUpdates;
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 3;
+
+    struct array_part rp = { .size = 0, .parts = NULL };   /* juste un pointeur partagé */
+    init_server_thread_pool(&rp);
+
+    ASSERT(thread_params != NULL);
+    ASSERT(fileUpdates != NULL);
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ_FMT(0, thread_params[i].exist, "%d");
+        ASSERT_EQ_FMT(-1, thread_params[i].socket_id, "%d");
+        ASSERT_EQ(NULL, thread_params[i].tid);
+        ASSERT_EQ_FMT(i, thread_params[i].compteur, "%d");
+        ASSERT_EQ(&rp, thread_params[i].rotate_parts);
+        ASSERT_EQ_FMT(0ULL, fileUpdates[i], "%llu");
+    }
+
+    free(thread_params);
+    free(fileUpdates);
+    thread_params = saved_tp;
+    fileUpdates = saved_fu;
+    NB_THREADS = saved_nb;
+    PASS();
+}
+
+/* ---------- configure_client_socket ---------------------------------------- */
+
+/* Les timeouts de session (réception ET envoi) valent tcp_timeout secondes. */
+TEST configure_client_socket_sets_timeouts(void)
+{
+    int saved_timeout = tcp_timeout;
+    tcp_timeout = 7;
+
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    configure_client_socket(sv[0]);
+    tcp_timeout = saved_timeout;
+
+    struct timeval tv;
+    socklen_t len = sizeof tv;
+    memset(&tv, 0, sizeof tv);
+    ASSERT_EQ(0, getsockopt(sv[0], SOL_SOCKET, SO_RCVTIMEO, &tv, &len));
+    ASSERT_EQ_FMT(7L, (long)tv.tv_sec, "%ld");
+    memset(&tv, 0, sizeof tv);
+    len = sizeof tv;
+    ASSERT_EQ(0, getsockopt(sv[0], SOL_SOCKET, SO_SNDTIMEO, &tv, &len));
+    ASSERT_EQ_FMT(7L, (long)tv.tv_sec, "%ld");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* ---------- try_assign_client_slot ----------------------------------------- */
+
+/* Un thread libre (exist, en attente de socket) : affectation directe, sans
+ * régénération (aucun slot vide). Chemin pur — pas d'I/O sur le client_id. */
+TEST try_assign_free_slot_direct(void)
+{
+    client_t *saved_tp = thread_params;
+    int saved_nb = NB_THREADS;
+
+    client_t slots[2];
+    memset(slots, 0, sizeof slots);
+    slots[0].exist = 1; slots[0].socket_id = 8;    /* occupé */
+    slots[1].exist = 1; slots[1].socket_id = -1;   /* libre */
+    thread_params = slots;
+    NB_THREADS = 2;
+
+    int busy_logged = 0;
+    int id = try_assign_client_slot(42, &busy_logged);
+
+    ASSERT_EQ_FMT(1, id, "%d");
+    ASSERT_EQ_FMT(42, slots[1].socket_id, "%d");
+    ASSERT_EQ_FMT(0, busy_logged, "%d");
+
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    PASS();
+}
+
+/* Aucun thread libre mais un slot vide : le slot est régénéré
+ * (create_server_thread réel) et le client lui est affecté directement. */
+TEST try_assign_regenerates_empty_slot(void)
+{
+    client_t *saved_tp = thread_params;
+    int saved_nb = NB_THREADS;
+
+    client_t slots[1];
+    memset(slots, 0, sizeof slots);                /* exist=0 : slot vide */
+    thread_params = slots;
+    NB_THREADS = 1;
+
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    close(sv[1]);                                  /* pair fermé -> session EOF immédiate */
+
+    int busy_logged = 0;
+    int id = try_assign_client_slot(sv[0], &busy_logged);
+
+    ASSERT_EQ_FMT(0, id, "%d");
+    ASSERT_EQ_FMT(1, slots[0].exist, "%d");
+    ASSERT_EQ_FMT(sv[0], slots[0].socket_id, "%d");
+
+    /* La session se vide immédiatement (EOF) : le thread ferme le socket et
+     * libère le slot — on attend sa fin avant de rendre la fixture. */
+    for (int i = 0; i < 200 && slots[0].exist != 0; i++) usleep(10000);
+    ASSERT_EQ_FMT(0, slots[0].exist, "%d");
+    free(slots[0].tid);                            /* thread détaché terminé */
+
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    PASS();
+}
+
+/* Tout est occupé, aucun slot régénérable : -1, épisode journalisé UNE fois
+ * (le second tour n'ajoute pas d'évènement), puis cession du CPU. */
+TEST try_assign_all_busy_logs_once(void)
+{
+    client_t *saved_tp = thread_params;
+    int saved_nb = NB_THREADS;
+
+    client_t slots[1];
+    memset(slots, 0, sizeof slots);
+    slots[0].exist = 1; slots[0].socket_id = 9;    /* occupé */
+    thread_params = slots;
+    NB_THREADS = 1;
+
+    unlink("events.log");
+    int busy_logged = 0;
+    ASSERT_EQ_FMT(-1, try_assign_client_slot(42, &busy_logged), "%d");
+    ASSERT_EQ_FMT(1, busy_logged, "%d");
+    ASSERT_EQ_FMT(-1, try_assign_client_slot(42, &busy_logged), "%d");   /* déjà journalisé */
+    ASSERT_EQ_FMT(1, busy_logged, "%d");
+    ASSERT_EQ_FMT(9, slots[0].socket_id, "%d");    /* fixture intacte */
+    unlink("events.log");
+
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    PASS();
+}
+
+/* ---------- rmnonext_pass / rmnonext_thread -------------------------------- */
+
+/* Aucun client connecté : la passe élague les impasses du stock (même fixture
+ * que remove_no_next_prunes_dead_packets dans test_datamanager.c). */
+TEST rmnonext_pass_prunes_when_idle(void)
+{
+    dm_drain_all();
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;                          /* get_active_threads -> 0 */
+
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet pks[2];
+    memset(pks, 0, sizeof pks);
+    pks[1].grid[dirx[0]][diry[0]] = -2;            /* impasse : (0,0,0,0) sans candidat */
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+
+    rmnonext_pass(map, &rp);
+
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");     /* l'impasse a été retirée */
+
+    free_bigarray(map);
+    thread_params = saved_tp;
+    dm_drain_all();
+    PASS();
+}
+
+/* Un client connecté : l'élagage est suspendu (les files sont en cours
+ * d'alimentation), le stock reste intact. */
+TEST rmnonext_pass_skips_when_client_active(void)
+{
+    dm_drain_all();
+    client_t *saved_tp = thread_params;
+    int saved_nb = NB_THREADS;
+
+    client_t slots[1];
+    memset(slots, 0, sizeof slots);
+    slots[0].exist = 1; slots[0].socket_id = 5;    /* client connecté */
+    thread_params = slots;
+    NB_THREADS = 1;
+
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet pks[2];
+    memset(pks, 0, sizeof pks);
+    pks[1].grid[dirx[0]][diry[0]] = -2;            /* impasse, mais pas d'élagage */
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    rmnonext_pass(map, &rp);
+
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");     /* rien retiré */
+
+    free_bigarray(map);
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    dm_drain_all();
+    PASS();
+}
+
+/* Enveloppe de thread : REQUEST_STOP prépositionné, la boucle ne s'exécute
+ * jamais — construction (read_parts sur le fichier par défaut du build) et
+ * libération des structures sont exercées. */
+TEST rmnonext_thread_stops_immediately_on_request_stop(void)
+{
+    int saved_req = request;
+    request = REQUEST_STOP;
+
+    void *ret = rmnonext_thread(NULL);
+    ASSERT_EQ(NULL, ret);
+
+    request = saved_req;
+    PASS();
+}
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_server_suite)
@@ -1680,4 +1911,13 @@ SUITE(etii_server_suite)
     RUN_TEST(communicate_with_client_stops_on_protocol_error);
 
     RUN_TEST(create_server_thread_recreates_tid_on_second_call);
+
+    RUN_TEST(init_pool_initializes_all_slots);
+    RUN_TEST(configure_client_socket_sets_timeouts);
+    RUN_TEST(try_assign_free_slot_direct);
+    RUN_TEST(try_assign_regenerates_empty_slot);
+    RUN_TEST(try_assign_all_busy_logs_once);
+    RUN_TEST(rmnonext_pass_prunes_when_idle);
+    RUN_TEST(rmnonext_pass_skips_when_client_active);
+    RUN_TEST(rmnonext_thread_stops_immediately_on_request_stop);
 }
