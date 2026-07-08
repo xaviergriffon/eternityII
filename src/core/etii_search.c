@@ -50,46 +50,6 @@ void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibil
 }
 
 /**
- * @brief Délègue au serveur les possibilités excédant `max_stock_by_thread` dans un `big_table`.
- *
- * Variante de `checkAndDelegatePossibilitiesIfNeeded` utilisant un `big_table`
- * au lieu d'une `File`.
- *
- * @param client_possibility Contexte du thread client.
- * @param bt                 Table de grande capacité dont on contrôle la taille.
- */
-void checkAndDelegatePossibilitiesIfNeeded_with_big_table(client_possibility_t *client_possibility, big_table *bt) {
-    if(bt->size > (unsigned long long)max_stock_by_thread)
-    {
-        array_possibility_packet *aposs = malloc(sizeof(array_possibility_packet));
-        unsigned long long remains = bt->size - max_stock_by_thread;
-        aposs->possibilities = malloc(sizeof(struct possibility_packet) * (max_stock_by_thread));
-        aposs->size = 0;
-        while(bt->size > remains)
-        {
-            scroll_big_table(bt, &aposs->possibilities[aposs->size]);
-
-            aposs->size++;
-        }
-        if(add_possibility(client_possibility, aposs))
-        {
-            log_error("error on add_possibility — remise en table locale\n");
-            for(int i = aposs->size - 1; i >= 0; i--) {
-                if (put_big_table(bt, &aposs->possibilities[i]) == NULL) {
-                    // OOM : bt inchangée (contrat put_big_table). Les possibilités
-                    // restantes de aposs sont perdues (dégradation propre plutôt
-                    // qu'un crash sur déréférencement NULL) ; on l'indique.
-                    log_error("put_big_table a échoué (OOM) lors de la remise en table locale — %d possibilité(s) perdue(s)\n",
-                              i + 1);
-                    break;
-                }
-            }
-        }
-        free_array_possibility_packet(aposs);
-    }
-}
-
-/**
  * @brief Niveau de la pile de décisions du backtracking in-place.
  *
  * Chaque case du parcours `directions[]` explorée depuis le paquet racine
@@ -435,7 +395,7 @@ static int bt_ensure_delegate_buf(client_possibility_t *client, int capacity)
 /**
  * @brief Délègue au serveur une partie du stock implicite si celui-ci dépasse `max_stock_by_thread`.
  *
- * Équivalent backtracking de `checkAndDelegatePossibilitiesIfNeeded_with_big_table` :
+ * Équivalent backtracking de `checkAndDelegatePossibilitiesIfNeeded` :
  * le stock est compté dans la pile de décisions, et au plus `max_stock_by_thread`
  * frères non explorés (les moins profonds) sont matérialisés puis envoyés.
  * Les niveaux délégués ne sont marqués consommés qu'après un envoi réussi.

@@ -1,5 +1,5 @@
 /*
- * Tests unitaires du module lifo.c (File chaînée + big_table dynamique).
+ * Tests unitaires du module lifo.c (File chaînée).
  *
  * lifo.c est totalement autonome (aucune dépendance autre que la libc), c'est
  * donc le module idéal pour valider la chaîne de test de bout en bout.
@@ -205,55 +205,6 @@ TEST file_free_file_releases_heap_allocated_file(void)
     PASS();
 }
 
-/* --------------------------------------------------------------------------
- * big_table (tableau dynamique à plat qui double de capacité au besoin)
- * ------------------------------------------------------------------------ */
-
-/* put_big_table déclenche au moins un redimensionnement et préserve les valeurs ;
- * scroll_big_table les ressort en LIFO. */
-TEST big_table_grows_and_preserves_values(void)
-{
-    big_table t;
-    init_big_table(&t, 2, sizeof(int)); /* capacité initiale = 2 */
-
-    for (int i = 0; i < 5; i++) {
-        put_big_table(&t, &i); /* force 2 -> 4 -> 8 */
-    }
-    ASSERT(t.size == 5);
-    ASSERT(t.realsize >= 5); /* a bien grandi */
-
-    int v;
-    for (int expected = 4; expected >= 0; expected--) {
-        ASSERT_EQ_FMT(1, scroll_big_table(&t, &v), "%d");
-        ASSERT_EQ_FMT(expected, v, "%d");
-    }
-    ASSERT_EQ_FMT(0, scroll_big_table(&t, &v), "%d");
-
-    clear_big_table(&t); /* table sur la pile : libère seulement le buffer interne */
-    PASS();
-}
-
-/* scroll_big_table_cache renvoie un pointeur direct vers le dernier élément
-   (LIFO) sans copie, et décrémente la taille logique. */
-TEST big_table_scroll_cache_returns_internal_pointer(void)
-{
-    big_table t;
-    init_big_table(&t, 4, sizeof(int));
-    for (int i = 0; i < 3; i++) put_big_table(&t, &i); /* 0,1,2 */
-
-    int *p = (int *)scroll_big_table_cache(&t);
-    ASSERT(p != NULL);
-    ASSERT_EQ_FMT(2, *p, "%d");
-    ASSERT_EQ_FMT(2ULL, (unsigned long long)t.size, "%llu");
-
-    /* big_table vidée jusqu'au bout puis re-vide -> NULL. */
-    scroll_big_table_cache(&t);
-    scroll_big_table_cache(&t);
-    ASSERT_EQ(NULL, scroll_big_table_cache(&t));
-
-    clear_big_table(&t);
-    PASS();
-}
 
 /* put refuse une valeur de taille nulle (sizeofvalue <= 0) -> 0. */
 TEST file_put_rejects_zero_sizeofvalue(void)
@@ -338,127 +289,6 @@ TEST file_remove_element_removes_middle(void)
     scroll(&f, &v); ASSERT_EQ_FMT(1, v, "%d");
     PASS();
 }
-
-/* free_big_table libère un big_table alloué sur le tas (structure + buffer). */
-TEST big_table_free_big_table_heap(void)
-{
-    big_table *t = malloc(sizeof(big_table));
-    init_big_table(t, 2, sizeof(int));
-    for (int i = 0; i < 5; i++) put_big_table(t, &i);
-    free_big_table(t); /* doit tout libérer sans planter */
-    PASS();
-}
-
-/* free_big_table sur une table dont l'allocation initiale a échoué (état
- * documenté d'un init_big_table() en échec : value = NULL). malloc() seul ne
- * garantit PAS value == NULL (mémoire non initialisée) : on simule donc
- * explicitement cet état plutôt que de compter sur le hasard du tas. */
-TEST big_table_free_empty_big_table_heap(void)
-{
-    big_table *t = malloc(sizeof(big_table));
-    t->value = NULL;
-    free_big_table(t); /* doit tout libérer sans planter */
-    PASS();
-}
-
-/* put_big_table sur une table dans ce même état (value == NULL) : elle doit
- * retenter une allocation initiale avant d'insérer (cf. le contrat documenté
- * de put_big_table dans lifo.h). */
-TEST big_table_free_non_init_bit_table_heap(void) {
-    big_table *t = malloc(sizeof(big_table));
-    t->value = NULL;
-    t->size = 0;
-    t->realsize = 0;
-    t->sizeofvalue = sizeof(int);
-    t->incrementSize = 1;
-    for (int i = 0; i < 5; i++) put_big_table(t, &i);
-    free_big_table(t); /* doit tout libérer sans planter */
-    PASS();
-}
-
-/* Contrat de retour de put_big_table() : succès nominal -> pointeur non-NULL
- * vers la copie insérée, size incrémenté, et agrandissement transparent une
- * fois realsize atteint (realsize double). Le pointeur retourné pointe bien
- * dans le buffer courant de la table (cohérent avec big_table_value). */
-TEST big_table_put_returns_non_null_and_grows(void)
-{
-    big_table t;
-    init_big_table(&t, 2, sizeof(int)); /* capacité initiale = 2 */
-    ASSERT(t.value != NULL);
-    ASSERT_EQ_FMT(2ULL, (unsigned long long)t.realsize, "%llu");
-    ASSERT_EQ_FMT(0ULL, (unsigned long long)t.size, "%llu");
-
-    int a = 10;
-    void *p1 = put_big_table(&t, &a);
-    ASSERT(p1 != NULL);
-    ASSERT_EQ_FMT(10, *(int *)p1, "%d");
-    ASSERT_EQ_FMT(1ULL, (unsigned long long)t.size, "%llu");
-    ASSERT_EQ_FMT(2ULL, (unsigned long long)t.realsize, "%llu"); /* pas encore plein */
-
-    int b = 20;
-    void *p2 = put_big_table(&t, &b); /* remplit la capacité initiale (size == realsize) */
-    ASSERT(p2 != NULL);
-    ASSERT_EQ_FMT(2ULL, (unsigned long long)t.size, "%llu");
-    ASSERT_EQ_FMT(2ULL, (unsigned long long)t.realsize, "%llu");
-
-    int c = 30;
-    void *p3 = put_big_table(&t, &c); /* déclenche l'agrandissement (2 -> 4) */
-    ASSERT(p3 != NULL);
-    ASSERT_EQ_FMT(30, *(int *)p3, "%d");
-    ASSERT_EQ_FMT(3ULL, (unsigned long long)t.size, "%llu");
-    ASSERT(t.realsize >= 3ULL); /* a bien grandi (doublement : 4) */
-    ASSERT_EQ_FMT(4ULL, (unsigned long long)t.realsize, "%llu");
-
-    /* Les valeurs précédemment insérées survivent au redimensionnement. */
-    int v;
-    ASSERT_EQ_FMT(1, scroll_big_table(&t, &v), "%d"); ASSERT_EQ_FMT(30, v, "%d");
-    ASSERT_EQ_FMT(1, scroll_big_table(&t, &v), "%d"); ASSERT_EQ_FMT(20, v, "%d");
-    ASSERT_EQ_FMT(1, scroll_big_table(&t, &v), "%d"); ASSERT_EQ_FMT(10, v, "%d");
-
-    clear_big_table(&t);
-    PASS();
-}
-
-/* Cohérence size/realsize juste après init_big_table : realsize == incrementSize
- * demandé, size == 0, value non-NULL (allocation nominale, pas d'OOM). */
-TEST big_table_init_state_is_consistent(void)
-{
-    big_table t;
-    init_big_table(&t, 8, sizeof(double));
-    ASSERT(t.value != NULL);
-    ASSERT_EQ_FMT(0ULL, (unsigned long long)t.size, "%llu");
-    ASSERT_EQ_FMT(8ULL, (unsigned long long)t.realsize, "%llu");
-    ASSERT_EQ_FMT(8, t.incrementSize, "%d");
-    clear_big_table(&t);
-    PASS();
-}
-
-/* clear_big_table sur une table à l'état "échec d'allocation initiale"
- * (value == NULL) : no-op sûr. Une variable locale non initialisée ne
- * garantit PAS value == NULL (mémoire de pile indéterminée) : on l'initialise
- * explicitement plutôt que de compter sur le hasard. */
-TEST big_table_clear_empty(void)
-{
-    big_table t;
-    t.value = NULL;
-    clear_big_table(&t);
-    PASS();
-}
-
-/* NOTE OOM (malloc réel indisponible/non simulable proprement en test unitaire
- * portable, sans mocker malloc()) : init_big_table() et put_big_table() sont
- * durcis contre un échec d'allocation --
- *   - init_big_table() sur malloc() == NULL laisse la table dans un état sûr
- *     et détectable : value = NULL, size = 0, realsize = 0.
- *   - put_big_table() applique le contrat documenté dans lifo.h : « NULL =
- *     échec, table inchangée ». Si table->value est NULL (table issue d'un
- *     init_big_table() qui avait échoué), elle retente une allocation
- *     initiale ; si l'agrandissement échoue, l'ancien buffer et size/realsize
- *     restent intacts et la fonction retourne NULL sans rien modifier.
- * Les appelants (core/possibility.c: search_possiblity_light_with_big_table,
- * core/etii_search.c: checkAndDelegatePossibilitiesIfNeeded_with_big_table)
- * testent désormais ce retour et se dégradent proprement (log_error + arrêt
- * de l'expansion / perte contrôlée) plutôt que de déréférencer NULL. */
 
 /* scroll : branche size!=0 mais end==NULL (état incohérent, jamais produit par
  * l'API publique mais couvre le garde-fou `size == 0 || end == NULL`). */
@@ -673,18 +503,10 @@ SUITE(lifo_suite)
     RUN_TEST(file_move_ignores_null_args);
     RUN_TEST(file_extract_element_detaches_middle);
     RUN_TEST(file_free_file_releases_heap_allocated_file);
-    RUN_TEST(big_table_grows_and_preserves_values);
-    RUN_TEST(big_table_scroll_cache_returns_internal_pointer);
     RUN_TEST(file_put_rejects_zero_sizeofvalue);
     RUN_TEST(file_put_returns_one_on_success);
     RUN_TEST(file_move_targets_non_extremity);
-    RUN_TEST(big_table_free_big_table_heap);
-    RUN_TEST(big_table_free_empty_big_table_heap);
-    RUN_TEST(big_table_free_non_init_bit_table_heap);
-    RUN_TEST(big_table_clear_empty);
     RUN_TEST(file_remove_element_removes_middle);
-    RUN_TEST(big_table_put_returns_non_null_and_grows);
-    RUN_TEST(big_table_init_state_is_consistent);
     RUN_TEST(file_scroll_inconsistent_state_returns_zero);
     RUN_TEST(file_extract_element_null_suite_detaches_head);
     RUN_TEST(file_extract_element_null_suite_detaches_tail);
