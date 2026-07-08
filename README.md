@@ -100,6 +100,7 @@ Des tests unitaires couvrent les modules à logique pure (`src/core/lifo.c`, `sr
 
 ```sh
 make test            # compile et lance la suite (code de sortie non nul si échec)
+make test-docker     # rejoue les jobs de test CI dans un conteneur Linux (nécessite Docker)
 make coverage        # idem + rapport de couverture par module (gcov)
 make coverage-report # rapports gcovr : Cobertura XML + HTML + résumé Markdown
 ```
@@ -114,6 +115,10 @@ make coverage-report # rapports gcovr : Cobertura XML + HTML + résumé Markdown
 ```
 
 Le détail ligne par ligne est dans `tests/coverage/<module>.c.gcov` (lignes jamais exécutées marquées `#####`). `make coverage-report` produit en plus, via [gcovr](https://gcovr.com), un rapport HTML navigable, un Cobertura XML (consommé par Codecov) et un résumé Markdown. Voir [tests/README.md](tests/README.md) pour ajouter un test ou générer ces rapports.
+
+### Tests sous Linux via Docker (`make test-docker`)
+
+Si [Docker](https://www.docker.com) est installé, `make test-docker` rejoue en local les jobs de test de la CI dans un conteneur **identique au runner GitHub** (image [tests/docker/Dockerfile](tests/docker/Dockerfile), épinglée sur `ubuntu:24.04` avec gcc/make/gcov et gcovr) : build `WERROR=1`, tests unitaires, passe AddressSanitizer et test d'intégration client/serveur. C'est le moyen de détecter **avant de pousser** les écarts entre macOS/clang et Linux/gcc (diagnostics `-Werror` plus stricts, over-reads vus par ASan sous Linux seulement, glibc vs libSystem). Le dépôt est monté en lecture seule et copié dans le conteneur : les artefacts Linux ne se mélangent jamais à ceux du poste hôte. La séquence est surchargeable pour rejouer un seul job : `make test-docker DOCKER_TEST_CMD="make test ASAN=1"`.
 
 ## Intégration continue
 
