@@ -269,6 +269,44 @@ TEST control_step_high_rate_pauses(void)
     PASS();
 }
 
+/* counters[t] < lastCheck[t] : le compteur (non signé) a rebouclé — la branche
+ * de rattrapage calcule le delta modulo 2^64 au lieu d'un delta négatif. */
+TEST control_step_counter_wraparound(void)
+{
+    int saved_req = request;
+    unsigned long long saved_max = max_search_by_sec;
+    int saved_nb = NB_THREADS;
+    unsigned long long *saved_counters = counters;
+
+    NB_THREADS = 1;
+    max_search_by_sec = 1000000000ULL;
+    unsigned long long my_counters[1] = { 4ULL };    /* reparti de ~0 après le tour */
+    counters = my_counters;
+
+    array_possibility_packet dummy = { .size = 1, .possibilities = NULL };
+    client_possibility_t tp[1];
+    memset(tp, 0, sizeof tp);
+    tp[0].works = 1;
+    tp[0].aposs = &dummy;
+
+    unsigned long long lastCheck[1] = { ~0ULL - 5 }; /* proche du max avant rebouclage */
+    unsigned long long oneSecond = 0;
+    int nbCheck = 1;
+    request = REQUEST_CONTINUE;
+
+    control_step(tp, lastCheck, &oneSecond, &nbCheck);
+
+    ASSERT_EQ_FMT(4ULL, lastCheck[0], "%llu");       /* compteur re-mémorisé */
+    /* Formule de rattrapage : (~0ULL - lastCheck) + counter = 5 + 4. */
+    ASSERT_EQ_FMT(9ULL, oneSecond, "%llu");
+
+    request = saved_req;
+    max_search_by_sec = saved_max;
+    NB_THREADS = saved_nb;
+    counters = saved_counters;
+    PASS();
+}
+
 /* Débit estimé sous la limite : PAUSE -> CONTINUE. */
 TEST control_step_low_rate_resumes(void)
 {
@@ -986,6 +1024,7 @@ SUITE(etii_client_suite)
 
     RUN_TEST(control_step_unlimited_leaves_request);
     RUN_TEST(control_step_high_rate_pauses);
+    RUN_TEST(control_step_counter_wraparound);
     RUN_TEST(control_step_low_rate_resumes);
     RUN_TEST(control_step_idle_thread_resumes);
     RUN_TEST(control_step_window_resets_after_1000);
