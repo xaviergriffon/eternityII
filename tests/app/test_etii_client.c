@@ -809,6 +809,158 @@ TEST check_client_threads_step_reports_forward_check_and_pruner(void)
 }
 #endif /* FORWARD_CHECK_K > 0 */
 
+/* Bandeau log_status avec limite active : max_search_by_sec > 0 emprunte la
+ * branche qui formate la limite en nombre (l'autre branche « - » est déjà
+ * couverte par check_client_threads_step_basic_report). */
+TEST check_client_threads_step_shows_numeric_limit(void)
+{
+    int saved_nb = NB_THREADS;
+    uint16_t saved_mr = max_result;
+    struct client_statistics *saved_fs = fork_statistics;
+    unsigned long long saved_msbs = max_search_by_sec;
+
+    struct client_statistics fs[1];
+    memset(fs, 0, sizeof fs);
+    NB_THREADS = 1;
+    fork_statistics = fs;
+    max_result = 10;
+    max_search_by_sec = 500;
+
+    int last_record = (int)max_result;
+    check_client_threads_step(&last_record);
+    ASSERT_EQ_FMT(10, last_record, "%d");
+
+    fork_statistics = saved_fs;
+    NB_THREADS = saved_nb;
+    max_result = saved_mr;
+    max_search_by_sec = saved_msbs;
+    PASS();
+}
+
+/* ---------- control_thread / feed_thread_aposs : un tour réel de boucle ---- */
+
+static void *ec_stop_after_delay(void *arg)
+{
+    (void)arg;
+    usleep(20000);
+    request = REQUEST_STOP;
+    return NULL;
+}
+
+/* REQUEST_CONTINUE puis STOP posé par un thread auxiliaire : le corps du while
+ * (control_step + usleep) est pris au moins une fois — complète le test
+ * « arrêt immédiat » qui ne l'exerçait jamais. max_search_by_sec = 0 : le tour
+ * se réduit à la fenêtre nbCheck, sans lire counters. */
+TEST control_thread_loops_once_then_stops(void)
+{
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    unsigned long long saved_msbs = max_search_by_sec;
+    NB_THREADS = 1;
+    max_search_by_sec = 0;
+
+    client_possibility_t cp;
+    init_test_client(&cp, 0);
+
+    request = REQUEST_CONTINUE;
+    pthread_t stopper;
+    pthread_create(&stopper, NULL, ec_stop_after_delay, NULL);
+    void *ret = control_thread(&cp);
+    pthread_join(stopper, NULL);
+
+    ASSERT_EQ(NULL, ret);
+
+    destroy_test_client(&cp);
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    max_search_by_sec = saved_msbs;
+    PASS();
+}
+
+/* Thread occupé (works=1, pas de socket) : personne ne réclame de travail, la
+ * boucle prend la branche « cadence normale » (remise à zéro du back-off) au
+ * lieu de la pause adaptative. */
+TEST feed_thread_aposs_normal_cadence_when_threads_busy(void)
+{
+    dm_drain_local();
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+
+    client_possibility_t cp;
+    init_test_client(&cp, 1);      /* works=1 : n'a pas besoin de travail */
+
+    request = REQUEST_CONTINUE;
+    pthread_t stopper;
+    pthread_create(&stopper, NULL, ec_stop_after_delay, NULL);
+    void *ret = feed_thread_aposs(&cp);
+    pthread_join(stopper, NULL);
+
+    ASSERT_EQ(NULL, ret);
+
+    destroy_test_client(&cp);
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    dm_drain_local();
+    PASS();
+}
+
+/* ---------- run_mono_client (smoke, mode local) ---------------------------- */
+/*
+ * REQUEST_STOP prépositionné : autosearch/autoprune reviennent au premier tour,
+ * les threads d'alimentation et de contrôle se terminent immédiatement, les
+ * joins aboutissent. Exerce toute l'orchestration (read_parts sur le fichier de
+ * pièces par défaut du build courant, construction map/rotations, joins, bloc
+ * de fermeture socket). Les structures ne sont pas libérées par run_mono_client
+ * (le process de production sort juste après) : toléré ici, comme en CI ASan
+ * (detect_leaks=0).
+ */
+
+/* counters/lastfilesize sont lus/écrits par la pile de recherche : on les
+ * alloue une fois pour toutes, assez grands pour tous les NB_THREADS des tests. */
+static void ensure_counters(void)
+{
+    if (counters == NULL)     counters     = calloc(64, sizeof(*counters));
+    if (lastfilesize == NULL) lastfilesize = calloc(64, sizeof(*lastfilesize));
+}
+
+TEST run_mono_client_search_stops_immediately(void)
+{
+    dm_drain_local();
+    ensure_counters();
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    request = REQUEST_STOP;
+
+    run_mono_client(parts_files);
+
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    dm_drain_local();
+    PASS();
+}
+
+TEST run_mono_client_pruner_stops_immediately(void)
+{
+    dm_drain_local();
+    ensure_counters();
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    int saved_pruner = pruner_mode;
+    NB_THREADS = 1;
+    request = REQUEST_STOP;
+    pruner_mode = 1;
+
+    run_mono_client(parts_files);
+
+    pruner_mode = saved_pruner;
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    dm_drain_local();
+    PASS();
+}
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_client_suite)
@@ -850,13 +1002,19 @@ SUITE(etii_client_suite)
     RUN_TEST(control_thread_nb_threads_zero_returns_null);
     RUN_TEST(control_thread_stop_returns_null_without_looping);
     RUN_TEST(build_control_thread_runs_and_joins);
+    RUN_TEST(control_thread_loops_once_then_stops);
 
     RUN_TEST(feed_thread_aposs_stop_returns_null_without_looping);
     RUN_TEST(feed_thread_aposs_backs_off_when_no_work_available);
+    RUN_TEST(feed_thread_aposs_normal_cadence_when_threads_busy);
 
     RUN_TEST(check_client_threads_step_basic_report);
     RUN_TEST(check_client_threads_step_detects_new_record);
 #if FORWARD_CHECK_K > 0
     RUN_TEST(check_client_threads_step_reports_forward_check_and_pruner);
 #endif
+    RUN_TEST(check_client_threads_step_shows_numeric_limit);
+
+    RUN_TEST(run_mono_client_search_stops_immediately);
+    RUN_TEST(run_mono_client_pruner_stops_immediately);
 }
