@@ -180,4 +180,54 @@ const char *client_disconnect_reason(int8_t last_instruction);
 int should_autobackup(int *lastBack, unsigned long long *lastBackupUpdates,
                       unsigned long long currentUpdates);
 
+/**
+ * @brief Une passe d'élagage automatique (corps de boucle de `rmnonext_thread`,
+ *        extrait pour être testable hors thread).
+ *
+ * Élague le datamanager (`remove_possibilities_with_no_next`) uniquement si
+ * aucun client n'est connecté (`get_active_threads(thread_params) <= 0`) :
+ * l'élagage verrouille les files, il est suspendu tant qu'elles sont en cours
+ * d'alimentation.
+ *
+ * @param map_parts   Map de lookup des pièces.
+ * @param rotateParts Pièces en rotation.
+ */
+void rmnonext_pass(map_big_array *map_parts, struct array_part *rotateParts);
+
+/**
+ * @brief Alloue et initialise le pool de threads de communication du serveur
+ *        (extrait de `runserver` pour être testable hors boucle accept).
+ *
+ * Positionne les globales `thread_params` (un `client_t` par thread, slots
+ * vides : exist=0, socket=-1, compteur=i) et `fileUpdates` (à zéro),
+ * dimensionnées sur `NB_THREADS`.
+ *
+ * @param rotateParts Pièces en rotation, partagées par tous les slots
+ *                    (sérialisation CSV des solutions).
+ */
+void init_server_thread_pool(struct array_part *rotateParts);
+
+/**
+ * @brief Applique les timeouts de session (`tcp_timeout`, réception et envoi)
+ *        au socket d'un client fraîchement accepté (extrait de `runserver`).
+ *
+ * @param client_id Socket du client.
+ */
+void configure_client_socket(int client_id);
+
+/**
+ * @brief Tente d'affecter un client accepté à un slot du pool (un tour de la
+ *        boucle d'affectation de `runserver`, extrait pour être testable).
+ *
+ * Cherche un thread libre ; régénère au plus un slot vide par tour
+ * (`create_server_thread`) et l'affecte si le client ne l'a pas encore été.
+ * Si tout est occupé, journalise « all threads busy » une fois par épisode
+ * (`*busy_logged`) puis cède le CPU.
+ *
+ * @param client_id   Socket du client accepté.
+ * @param busy_logged In/out : 1 si l'épisode d'attente a déjà été journalisé.
+ * @return L'indice du slot affecté, ou -1 (l'appelant réessaie).
+ */
+int try_assign_client_slot(int client_id, int *busy_logged);
+
 #endif /* etii_server_h */
