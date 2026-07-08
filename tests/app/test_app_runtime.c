@@ -690,6 +690,37 @@ TEST server_tcp_updates_stats_and_handles_event_and_unknown_type(void)
     ASSERT(seen_event);
     unlink("events.log");
 
+    /* Types IPC_MSG_LOG_* (relais des logs des enfants vers le parent) et
+     * datagramme VIDE (numBytes == 0 -> ignoré) : verbeux, on coupe
+     * stdout+stderr le temps de l'envoi. */
+    fflush(NULL);
+    int s1 = dup(1), s2 = dup(2);
+    int dn = open("/dev/null", O_WRONLY);
+    if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); close(dn); }
+    {
+        char logbuf[8];
+        const int8_t log_types[] = { IPC_MSG_LOG_INFO, IPC_MSG_LOG_ERROR,
+                                     IPC_MSG_LOG_DEBUG, IPC_MSG_LOG_CONSOLE };
+        for (size_t lt = 0; lt < sizeof log_types; lt++) {
+            logbuf[0] = (char)log_types[lt];
+            memcpy(logbuf + 1, "x\n", 2);
+            sendto(child_fd, logbuf, 3, 0,
+                   (struct sockaddr *)server_addr, sizeof(struct sockaddr_un));
+        }
+        sendto(child_fd, logbuf, 0, 0,   /* datagramme vide */
+               (struct sockaddr *)server_addr, sizeof(struct sockaddr_un));
+    }
+    /* La boucle a survécu à tout le lot : un second STATS est encore traité
+     * (les datagrammes UDP locaux sont servis dans l'ordre). */
+    msg.stat.shots_per_second = 777;
+    sendto(child_fd, &msg, sizeof msg, 0,
+           (struct sockaddr *)server_addr, sizeof(struct sockaddr_un));
+    for (int i = 0; i < 100 && fork_statistics[0].shots_per_second != 777; i++) usleep(10000);
+    fflush(NULL);
+    dup2(s1, 1); dup2(s2, 2);
+    close(s1); close(s2);
+    ASSERT_EQ_FMT(777ULL, fork_statistics[0].shots_per_second, "%llu");
+
     /* Type inconnu (branche default) : ne doit pas planter. */
     char unk[2] = { (char)0x7f, 0 };
     sendto(child_fd, unk, 1, 0, (struct sockaddr *)server_addr, sizeof(struct sockaddr_un));
@@ -727,6 +758,10 @@ TEST fork_udp_delegates_command_then_stops(void)
     struct sockaddr_un *addr = build_sockaddr(sock_path);
     int fd = build_udp_local_socket(addr);
     ASSERT(fd >= 0);
+    /* Timeout court : recvfrom expirera au moins une fois avant la commande,
+     * exerçant la branche d'erreur (numBytes == -1 hors REQUEST_STOP). */
+    struct timeval short_tv = { .tv_sec = 0, .tv_usec = 100000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &short_tv, sizeof short_tv);
 
     /* Émetteur : un second socket DGRAM anonyme suffit pour sendto(). */
     int sender = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -738,12 +773,15 @@ TEST fork_udp_delegates_command_then_stops(void)
     pthread_t tid;
     ASSERT_EQ_FMT(0, pthread_create(&tid, NULL, fork_udp, &fd), "%d");
 
-    /* do_command_line("help") est verbeux : coupe stdout+stderr le temps du
-     * test (mute_fd/unmute_fd ne gèrent qu'un seul fd à la fois). */
+    /* do_command_line("help") et log_errno (timeout, 1er au plus tôt à +100ms)
+     * sont verbeux : coupe stdout+stderr le temps du thread (mute_fd/unmute_fd
+     * ne gèrent qu'un seul fd à la fois). */
     fflush(NULL);
     int s1 = dup(1), s2 = dup(2);
     int dn = open("/dev/null", O_WRONLY);
     if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); close(dn); }
+
+    usleep(300000); /* >= 1 timeout de réception -> branche d'erreur prise */
 
     char cmd[] = "help";
     sendto(sender, cmd, strlen(cmd), 0, (struct sockaddr *)addr, sizeof(struct sockaddr_un));
@@ -806,6 +844,35 @@ TEST fork_checker_sends_stats_to_parent(void)
     ASSERT(n > 0);
     ASSERT_EQ_FMT((int)IPC_MSG_STATS, (int)buf[0], "%d");
 
+    /* 2e itération : de l'activité (compteur + cases étudiées) -> sps/pps > 0,
+     * la moyenne glissante sur 5s emprunte ses branches m > 0 / mp > 0. */
+    unsigned long long saved_prcells = pruner_cells_studied;
+    ctr_buf[0] = 1000;
+    pruner_cells_studied = 1000;
+    struct client_statistics got;
+    memset(&got, 0, sizeof got);
+    for (int tour = 0; tour < 5 && got.shots_per_second == 0; tour++) {
+        n = recvfrom(parent_fd, buf, sizeof buf, 0, NULL, NULL);
+        ASSERT(n == (ssize_t)sizeof buf);
+        memcpy(&got, buf + 1, sizeof got);
+    }
+    ASSERT(got.shots_per_second > 0);
+    ASSERT(got.pruner_cells_per_second > 0);
+
+    /* 3e itération : compteurs qui RECULENT (< dernier relevé) -> branches de
+     * rattrapage « le compteur a fait un tour » (sps et pps). Les valeurs
+     * calculées sont énormes (delta modulo 2^64) : on ne vérifie que
+     * l'exécution, pas la moyenne. */
+    ctr_buf[0] = 1;
+    pruner_cells_studied = 1;
+    /* 2 lectures : la 1re peut être un datagramme déjà en tampon, calculé
+     * avant l'écriture ci-dessus ; la 2e a forcément échantillonné après. */
+    for (int tour = 0; tour < 2; tour++) {
+        n = recvfrom(parent_fd, buf, sizeof buf, 0, NULL, NULL);
+        ASSERT(n == (ssize_t)sizeof buf);
+    }
+    pruner_cells_studied = saved_prcells;
+
     /* Arrêt propre : REQUEST_STOP fait sortir fork_checker au prochain tour
      * (borné par son sleep(1) interne) ; on débloque en plus le fork_udp
      * qu'il a démarré (etii_fork.<pid>), sinon il resterait bloqué sur
@@ -831,6 +898,227 @@ TEST fork_checker_sends_stats_to_parent(void)
     unlink(parent_path);
     unlink(child_sock_path);
     free(parent_addr);
+    PASS();
+}
+
+/* ---------- run_server_thread / run_fork_checker (wrappers détachés) -------- */
+/*
+ * Les threads sont DÉTACHÉS : pas de pthread_join possible. On prouve leur
+ * démarrage par un effet observable (stats mises à jour / datagramme reçu),
+ * on arrête par REQUEST_STOP + datagramme de réveil, puis on attend assez
+ * longtemps pour que le thread ait constaté l'arrêt AVANT de restaurer les
+ * globales qu'il lit (les tampons câblés sont file-static, jamais libérés :
+ * aucun accès à de la mémoire morte même si l'attente était trop courte).
+ */
+
+static unsigned long long g_det_ctr[1];
+static unsigned long long g_det_lfs[1];
+static struct client_statistics g_det_fs[1];
+static char *g_det_forkid[1];
+
+/* run_server_thread : le server_tcp détaché reçoit un IPC_MSG_STATS et met à
+ * jour fork_statistics[0]. */
+TEST run_server_thread_receives_stats(void)
+{
+    char server_path[] = "/tmp/etii_ar_rst_XXXXXX";
+    char child_path[]  = "/tmp/etii_ar_rstc_XXXXXX";
+    int sfd = mkstemp(server_path); ASSERT(sfd >= 0); close(sfd); unlink(server_path);
+    int cfd = mkstemp(child_path);  ASSERT(cfd >= 0); close(cfd); unlink(child_path);
+
+    struct sockaddr_un *server_addr = build_sockaddr(server_path);
+    static int server_fd;                     /* lu par le thread détaché */
+    server_fd = build_udp_local_socket(server_addr);
+    ASSERT(server_fd >= 0);
+    struct sockaddr_un *child_addr = build_sockaddr(child_path);
+    int child_fd = build_udp_local_socket(child_addr);
+    ASSERT(child_fd >= 0);
+
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    char **saved_forkid = forkId;
+    struct client_statistics *saved_fs = fork_statistics;
+
+    request = REQUEST_CONTINUE;
+    NB_THREADS = 1;
+    g_det_forkid[0] = (char *)child_path;
+    forkId = g_det_forkid;
+    memset(g_det_fs, 0, sizeof g_det_fs);
+    fork_statistics = g_det_fs;
+
+    mute_fd(1);                               /* run_server_thread logue le socket */
+    run_server_thread(&server_fd);
+    unmute_fd();
+
+    struct { int8_t type; struct client_statistics stat; } __attribute__((packed)) msg;
+    memset(&msg, 0, sizeof msg);
+    msg.type = IPC_MSG_STATS;
+    msg.stat.shots_per_second = 31337;
+    sendto(child_fd, &msg, sizeof msg, 0,
+           (struct sockaddr *)server_addr, sizeof(struct sockaddr_un));
+    for (int i = 0; i < 100 && g_det_fs[0].shots_per_second == 0; i++) usleep(10000);
+    ASSERT_EQ_FMT(31337ULL, g_det_fs[0].shots_per_second, "%llu");
+
+    /* Arrêt : STOP + datagramme de réveil, puis délai avant restauration. */
+    request = REQUEST_STOP;
+    char unk[1] = { 0x7f };
+    sendto(child_fd, unk, 1, 0, (struct sockaddr *)server_addr, sizeof(struct sockaddr_un));
+    usleep(200000);
+
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    forkId = saved_forkid;
+    fork_statistics = saved_fs;
+    close(server_fd);
+    close(child_fd);
+    unlink(server_path);
+    unlink(child_path);
+    free(server_addr);
+    free(child_addr);
+    PASS();
+}
+
+/* run_fork_checker : le fork_checker détaché construit son socket
+ * etii_fork.<pid>, démarre son fork_udp interne, et envoie ses stats au
+ * parent. Même chorégraphie d'arrêt que fork_checker_sends_stats_to_parent
+ * (réveil du fork_udp interne), avec en plus un délai final couvrant le
+ * sleep(1) du fork_checker détaché. */
+TEST run_fork_checker_sends_stats(void)
+{
+    char parent_path[] = "/tmp/etii_ar_rfc_XXXXXX";
+    int pfd = mkstemp(parent_path); ASSERT(pfd >= 0); close(pfd); unlink(parent_path);
+
+    static struct sockaddr_un *parent_addr;   /* lu par le thread détaché */
+    parent_addr = build_sockaddr(parent_path);
+    int parent_fd = build_udp_local_socket(parent_addr);
+    ASSERT(parent_fd >= 0);
+    set_recv_timeout_ar(parent_fd, 3);
+
+    char child_sock_path[64];
+    snprintf(child_sock_path, sizeof child_sock_path, "etii_fork.%d", (int)getpid());
+    unlink(child_sock_path);
+
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    unsigned long long *saved_counters = counters;
+    unsigned long long *saved_lastfilesize = lastfilesize;
+    request = REQUEST_CONTINUE;
+    NB_THREADS = 1;
+    g_det_ctr[0] = 0;
+    g_det_lfs[0] = 0;
+    counters = g_det_ctr;
+    lastfilesize = g_det_lfs;
+
+    mute_fd(1);                               /* fork_checker logue son socket */
+    ASSERT_EQ_FMT(0, run_fork_checker(parent_addr), "%d");
+
+    char buf[1 + sizeof(struct client_statistics)];
+    ssize_t n = recvfrom(parent_fd, buf, sizeof buf, 0, NULL, NULL);
+    unmute_fd();
+    ASSERT(n > 0);
+    ASSERT_EQ_FMT((int)IPC_MSG_STATS, (int)buf[0], "%d");
+
+    /* Arrêt : STOP, réveil du fork_udp interne, puis délai > sleep(1) pour que
+     * le fork_checker détaché constate l'arrêt avant la restauration. */
+    request = REQUEST_STOP;
+    int sender = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (sender >= 0) {
+        struct sockaddr_un *child_addr = build_sockaddr(child_sock_path);
+        char wake[] = "help";
+        sendto(sender, wake, strlen(wake), 0, (struct sockaddr *)child_addr, sizeof(struct sockaddr_un));
+        free(child_addr);
+        close(sender);
+    }
+    sleep(2);
+
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    counters = saved_counters;
+    lastfilesize = saved_lastfilesize;
+    close(parent_fd);
+    unlink(parent_path);
+    unlink(child_sock_path);
+    free(parent_addr);
+    PASS();
+}
+
+/* ---------- signal_end_handler : propagation aux enfants -------------------- */
+
+/* Le parent (parent_pid == getpid(), mode client) propage le signal d'arrêt à
+ * chaque enfant enregistré dans childrens_pid : un vrai fils dormeur doit être
+ * terminé par SIGTERM. */
+TEST signal_end_handler_kills_registered_children(void)
+{
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    int saved_server = server;
+    int saved_parent = parent_pid;
+    pid_t *saved_children = childrens_pid;
+
+    pid_t child = fork();
+    ASSERT(child >= 0);
+    if (child == 0) {
+        for (;;) { sleep(10); }               /* tué par le SIGTERM propagé */
+    }
+
+    pid_t kids[1] = { child };
+    childrens_pid = kids;
+    NB_THREADS = 1;
+    server = 0;                                /* pas de exit(0) */
+    parent_pid = getpid();
+    request = REQUEST_CONTINUE;
+
+    signal_end_handler(SIGTERM);
+
+    ASSERT_EQ_FMT(REQUEST_STOP, request, "%d");
+    int status = 0;
+    ASSERT_EQ(child, waitpid(child, &status, 0));
+    ASSERT(WIFSIGNALED(status));
+    ASSERT_EQ_FMT(SIGTERM, WTERMSIG(status), "%d");
+
+    childrens_pid = saved_children;
+    NB_THREADS = saved_nb;
+    server = saved_server;
+    parent_pid = saved_parent;
+    request = saved_req;
+    PASS();
+}
+
+/* ---------- wait_child : reprise sur EINTR ---------------------------------- */
+
+static void alarm_noop_handler(int sig) { (void)sig; }
+
+/* Un signal sans SA_RESTART (ex. SIGWINCH de ncurses en production) interrompt
+ * wait() avec EINTR : wait_child doit RETENTER, pas sortir — sinon le parent
+ * abandonnerait des enfants vivants. Le fils dort plus longtemps que l'alarme,
+ * garantissant l'ordre EINTR puis récolte puis ECHILD. */
+TEST wait_child_retries_on_eintr(void)
+{
+    struct sigaction sa, old_sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = alarm_noop_handler;
+    sa.sa_flags = 0;                           /* PAS de SA_RESTART : wait -> EINTR */
+    sigemptyset(&sa.sa_mask);
+    ASSERT_EQ(0, sigaction(SIGALRM, &sa, &old_sa));
+
+    pid_t child = fork();
+    ASSERT(child >= 0);
+    if (child == 0) {
+        usleep(400000);
+        exit(0);                               /* exit() : flush gcov du fils */
+    }
+
+    struct itimerval it;
+    memset(&it, 0, sizeof it);
+    it.it_value.tv_usec = 100000;              /* alarme unique à +100ms */
+    ASSERT_EQ(0, setitimer(ITIMER_REAL, &it, NULL));
+
+    mute_fd(1);                                /* wait_child logue début/fin */
+    wait_child();                              /* EINTR -> retente -> récolte -> ECHILD */
+    unmute_fd();
+
+    sigaction(SIGALRM, &old_sa, NULL);
+    /* Le fils a bien été récolté par wait_child : plus rien à attendre. */
+    ASSERT_EQ(-1, waitpid(child, NULL, 0));
     PASS();
 }
 
@@ -878,4 +1166,9 @@ SUITE(app_runtime_suite)
     RUN_TEST(server_tcp_updates_stats_and_handles_event_and_unknown_type);
     RUN_TEST(fork_udp_delegates_command_then_stops);
     RUN_TEST(fork_checker_sends_stats_to_parent);
+
+    RUN_TEST(run_server_thread_receives_stats);
+    RUN_TEST(run_fork_checker_sends_stats);
+    RUN_TEST(signal_end_handler_kills_registered_children);
+    RUN_TEST(wait_child_retries_on_eintr);
 }
