@@ -240,6 +240,30 @@ test-integration:
 		rc=$$?; rm -f ./$(INTEGRATION_BIN); exit $$rc
 
 # ---------------------------------------------------------------------------
+# Tests dans un conteneur Linux identique à la CI (`make test-docker`).
+#
+# Reproduit EN LOCAL l'environnement du workflow GitHub (Ubuntu + gcc + gcovr,
+# image tests/docker/Dockerfile) : les écarts macOS/clang vs Linux/gcc
+# (diagnostics -Werror, ASan, glibc, gcov) se voient AVANT le push. Le repo est
+# monté en lecture seule sur /src puis copié dans /work (système de fichiers du
+# conteneur) : les artefacts Linux (.o ELF, binaires) ne polluent jamais le
+# répertoire de travail macOS, et réciproquement (`make clean` purge la copie).
+# La séquence par défaut rejoue les jobs de test de la CI ; surchargeable :
+#   make test-docker DOCKER_TEST_CMD="make test ASAN=1"
+# ---------------------------------------------------------------------------
+DOCKER          ?= docker
+DOCKER_IMAGE    ?= eternityii-ci
+DOCKER_TEST_CMD ?= make WERROR=1 && make test && make test ASAN=1 && make test-integration
+.PHONY: test-docker
+test-docker:
+	$(DOCKER) build -t $(DOCKER_IMAGE) tests/docker
+	$(DOCKER) run --rm \
+		-v "$(CURDIR):/src:ro" \
+		-e ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
+		$(DOCKER_IMAGE) \
+		bash -ce 'cp -R /src/. /work && make clean && $(DOCKER_TEST_CMD)'
+
+# ---------------------------------------------------------------------------
 # Couverture de code (gcov, intégré à gcc/clang — aucune install requise).
 #
 # Deux passes d'instrumentation (--coverage = -fprofile-arcs -ftest-coverage,
