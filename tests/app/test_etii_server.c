@@ -16,6 +16,8 @@
 #include "core/possibility.h"
 #include "net/etii_protocol.h"      /* INST_*, send_instruction, recv_instruction, *_all */
 
+#include "fork_assert.h"
+
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -23,11 +25,15 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <pthread.h>
+#include <limits.h>
+#include <signal.h>
 
 extern unsigned long long *fileUpdates;   /* global défini dans etii_server.c */
 extern client_t *thread_params;           /* global défini dans etii_server.c */
 void *communicate_with_client(void *userdata);
 void create_server_thread(client_t *thread_params, int i);
+void lock_all_file(void);                 /* maintenance datamanager (cf. test_datamanager.c) */
+void unlock_all_file(void);
 
 /* Vide le pool local du datamanager (état global partagé entre suites). */
 static void dm_drain_all(void)
@@ -796,6 +802,420 @@ TEST step_solution_incomplete_stops(void)
     PASS();
 }
 
+/* INST_CHECK_VERSION : version du client jamais reçue (pair fermé) — flux
+ * irrécupérable, la session se clôt sans réponse. */
+TEST step_check_version_recv_fail_stops(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 0;
+
+    close(sv[1]);                  /* EOF avant l'envoi de la version */
+
+    int cont = communicate_with_client_step(&client, INST_CHECK_VERSION, &last, &vsupp);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+    ASSERT_EQ_FMT(0, vsupp, "%d");
+
+    close(sv[0]);
+    PASS();
+}
+
+/* INST_CHECK_VERSION : version différente — client rejeté (INST_UNSUPPORTED_VERSION)
+ * mais la session continue (le client décide de raccrocher). */
+TEST step_check_version_mismatch_rejects(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 0;
+
+    int cv = version + 1;          /* version incompatible */
+    ASSERT_EQ((ssize_t)sizeof(int), write(sv[1], &cv, sizeof(int)));
+
+    int cont = communicate_with_client_step(&client, INST_CHECK_VERSION, &last, &vsupp);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(0, vsupp, "%d");   /* handshake NON validé */
+    ASSERT_EQ_FMT((int)INST_UNSUPPORTED_VERSION, (int)recv_instruction(sv[1]), "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Deux INST_GET consécutifs : le lot précédent (*lastSent) est libéré avant de
+ * servir le suivant — c'est la branche free du début du handler. */
+TEST step_second_get_frees_previous_batch(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    struct possibility_packet pks[2];
+    memset(pks, 0, sizeof pks);
+    pks[0].alloc = 1;
+    pks[1].alloc = 2;
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    for (int round = 0; round < 2; round++) {
+        int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp);
+        ASSERT_EQ_FMT(1, cont, "%d");
+        int32_t k = 0;
+        ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
+        ASSERT_EQ_FMT(1, (int)k, "%d");
+        struct possibility_packet got;
+        ASSERT_EQ((long)sizeof got, recv_all(sv[1], &got, sizeof got));
+        remove_possibility_analysed(&got, -1);       /* acquitte pour ne pas polluer */
+    }
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    unwire_counters();
+    if (last) free_array_possibility_packet(last);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_GET_TO_CHECK avec du stock non vérifié : la possibilité est servie et
+ * passée « en analyse » ; un second appel libère le lot précédent. */
+TEST step_get_to_check_serves_possibility(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    struct possibility_packet pks[2];
+    memset(pks, 0, sizeof pks);
+    pks[0].alloc = 3;
+    pks[1].alloc = 4;
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    for (int round = 0; round < 2; round++) {        /* 2e tour : libère lastSent */
+        int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK, &last, &vsupp);
+        ASSERT_EQ_FMT(1, cont, "%d");
+        int32_t k = 0;
+        ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
+        ASSERT_EQ_FMT(1, (int)k, "%d");
+        struct possibility_packet got;
+        ASSERT_EQ((long)sizeof got, recv_all(sv[1], &got, sizeof got));
+        remove_possibility_analysed(&got, -1);
+    }
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");        /* pool vidé */
+
+    unwire_counters();
+    if (last) free_array_possibility_packet(last);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_GET_TO_CHECK_BATCH : compte demandé jamais reçu (pair fermé) — arrêt. */
+TEST step_get_to_check_batch_count_not_received_stops(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    close(sv[1]);                  /* EOF avant l'envoi du compte */
+
+    int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK_BATCH, &last, &vsupp);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+
+    close(sv[0]);
+    PASS();
+}
+
+/* INST_GET_TO_CHECK_BATCH avec du stock : les K disponibles sont servis en un
+ * bloc contigu (K < N demandé) ; un second appel libère le lot précédent. */
+TEST step_get_to_check_batch_serves_batch(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    struct possibility_packet pks[2];
+    memset(pks, 0, sizeof pks);
+    pks[0].alloc = 5;
+    pks[1].alloc = 6;
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    int32_t requested = 5;
+    ASSERT_EQ((long)sizeof requested, send_all(sv[1], &requested, sizeof requested));
+    int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK_BATCH, &last, &vsupp);
+    ASSERT_EQ_FMT(1, cont, "%d");
+
+    int32_t k = 0;
+    ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
+    ASSERT_EQ_FMT(2, (int)k, "%d");
+    struct possibility_packet got[2];
+    ASSERT_EQ((long)sizeof got, recv_all(sv[1], got, sizeof got));
+    remove_possibility_analysed(&got[0], -1);
+    remove_possibility_analysed(&got[1], -1);
+
+    /* Second lot sur pool vide : libère le lastSent précédent, renvoie K == 0. */
+    ASSERT_EQ((long)sizeof requested, send_all(sv[1], &requested, sizeof requested));
+    cont = communicate_with_client_step(&client, INST_GET_TO_CHECK_BATCH, &last, &vsupp);
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
+    ASSERT_EQ_FMT(0, (int)k, "%d");
+
+    unwire_counters();
+    if (last) free_array_possibility_packet(last);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_ADD : paquet incomplet (fragment puis EOF) — flux mort, arrêt. */
+TEST step_add_short_recv_stops(void)
+{
+    dm_drain_all();
+    wire_counters();
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.compteur = 0;
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    char fragment[8];
+    memset(fragment, 0, sizeof fragment);
+    ASSERT_EQ((ssize_t)sizeof fragment, write(sv[1], fragment, sizeof fragment));
+    close(sv[1]);
+
+    int cont = communicate_with_client_step(&client, INST_ADD, &last, &vsupp);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* rien ajouté au stock */
+
+    unwire_counters();
+    close(sv[0]);
+    PASS();
+}
+
+/* INST_POSSIBILITY_ANALYSED sur une possibilité jamais servie : le retrait
+ * échoue, le serveur répond INST_ERROR mais la session continue. */
+TEST step_analysed_not_removed_sends_error(void)
+{
+    dm_drain_all();
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 11;                /* jamais passée « en analyse » */
+    ASSERT_EQ((long)sizeof pkt, send_all(sv[1], &pkt, sizeof pkt));
+
+    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED, &last, &vsupp);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT((int)INST_ERROR, (int)recv_instruction(sv[1]), "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_POSSIBILITY_ANALYSED : paquet incomplet (fragment puis EOF) — arrêt. */
+TEST step_analysed_short_recv_stops(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    char fragment[8];
+    memset(fragment, 0, sizeof fragment);
+    ASSERT_EQ((ssize_t)sizeof fragment, write(sv[1], fragment, sizeof fragment));
+    close(sv[1]);
+
+    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED, &last, &vsupp);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+
+    close(sv[0]);
+    PASS();
+}
+
+/* INST_POSSIBILITY_ANALYSED_BATCH : lot annoncé de 2 mais un seul paquet reçu
+ * avant EOF — INST_ERROR puis arrêt de la session. */
+TEST step_analysed_batch_incomplete_packet_stops(void)
+{
+    dm_drain_all();
+    /* Le serveur répond INST_ERROR sur un pair déjà fermé : sans cela le
+     * SIGPIPE résultant tuerait le runner (la production l'ignore aussi). */
+    signal(SIGPIPE, SIG_IGN);
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 12;
+    add_possibility_analysed(&pkt, -1);
+
+    int32_t m = 2;
+    ASSERT_EQ((long)sizeof m, send_all(sv[1], &m, sizeof m));
+    ASSERT_EQ((long)sizeof pkt, send_all(sv[1], &pkt, sizeof pkt));
+    close(sv[1]);                  /* le 2e paquet ne viendra jamais */
+
+    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED_BATCH, &last, &vsupp);
+
+    ASSERT_EQ_FMT(0, cont, "%d");  /* INST_ERROR envoyé puis arrêt (pair fermé : non relu) */
+
+    close(sv[0]);
+    PASS();
+}
+
+/* ---------- INST_SOLUTION + --stop-on-solution (chemin d'arrêt serveur) --- */
+/*
+ * Ce chemin appelle exit(EXIT_SUCCESS) après avoir sauvegardé le stock : on
+ * l'exécute via fork_assert. Le fils bascule dans un répertoire temporaire créé
+ * PAR LE PARENT (transmis par global copié au fork) pour qu'aucun fichier
+ * (.back, solution_server_*, events.log) ne pollue le dépôt, et le parent
+ * vérifie ensuite les artefacts dans ce répertoire.
+ */
+static char g_sol_dir[PATH_MAX];
+static int g_sol_maintenance = 0;   /* 1 : simule une maintenance en cours */
+
+static void fork_solution_stop_server(void)
+{
+    if (chdir(g_sol_dir) != 0) exit(9);
+    stop_on_solution = 1;
+    if (g_sol_maintenance) {
+        lock_all_file();           /* backup() renverra BACKUP_SKIPPED_MAINTENANCE */
+    }
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) exit(8);
+    struct possibility_packet sol;
+    memset(&sol, 0, sizeof sol);
+    sol.alloc = ETERN_PARTS;
+    if (send_all(sv[1], &sol, sizeof sol) != (long)sizeof sol) exit(7);
+
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+    communicate_with_client_step(&client, INST_SOLUTION, &last, &vsupp);
+    exit(6);                       /* le step aurait dû exit(EXIT_SUCCESS) */
+}
+
+/* Nettoie les artefacts du fils dans g_sol_dir puis supprime le répertoire. */
+static void cleanup_sol_dir(pid_t child)
+{
+    char path[PATH_MAX + 64];
+    snprintf(path, sizeof path, "%s/eternityII.back", g_sol_dir);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/eternityII-in_analyse.back", g_sol_dir);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/solution_server_%i_0.csv", g_sol_dir, (int)child);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/events.log", g_sol_dir);
+    unlink(path);
+    rmdir(g_sol_dir);
+}
+
+/* Solution reçue avec --stop-on-solution : le serveur sauvegarde la solution et
+ * son stock (noms par défaut de restore) puis s'arrête avec EXIT_SUCCESS. */
+TEST step_solution_stop_on_solution_backs_up_and_exits(void)
+{
+    strcpy(g_sol_dir, "/tmp/etii_sol_XXXXXX");
+    ASSERT(mkdtemp(g_sol_dir) != NULL);
+    g_sol_maintenance = 0;
+
+    pid_t child = -1;
+    int code = run_in_fork(fork_solution_stop_server, &child);
+    ASSERT_EQ_FMT(0, code, "%d");   /* exit(EXIT_SUCCESS) du step */
+
+    char path[PATH_MAX + 64];
+    snprintf(path, sizeof path, "%s/solution_server_%i_0.csv", g_sol_dir, (int)child);
+    ASSERT_EQ_FMT(0, access(path, F_OK), "%d");
+    snprintf(path, sizeof path, "%s/eternityII.back", g_sol_dir);
+    ASSERT_EQ_FMT(0, access(path, F_OK), "%d");
+    snprintf(path, sizeof path, "%s/eternityII-in_analyse.back", g_sol_dir);
+    ASSERT_EQ_FMT(0, access(path, F_OK), "%d");
+
+    cleanup_sol_dir(child);
+    PASS();
+}
+
+/* Même chemin pendant une maintenance : les backups sont sautés (journalisés)
+ * mais l'arrêt reste propre — la solution, elle, est bien sauvegardée. */
+TEST step_solution_stop_during_maintenance_still_exits(void)
+{
+    strcpy(g_sol_dir, "/tmp/etii_sol_XXXXXX");
+    ASSERT(mkdtemp(g_sol_dir) != NULL);
+    g_sol_maintenance = 1;
+
+    pid_t child = -1;
+    int code = run_in_fork(fork_solution_stop_server, &child);
+    g_sol_maintenance = 0;
+    ASSERT_EQ_FMT(0, code, "%d");
+
+    char path[PATH_MAX + 64];
+    snprintf(path, sizeof path, "%s/solution_server_%i_0.csv", g_sol_dir, (int)child);
+    ASSERT_EQ_FMT(0, access(path, F_OK), "%d");
+    snprintf(path, sizeof path, "%s/eternityII.back", g_sol_dir);
+    ASSERT(access(path, F_OK) != 0);             /* backup sauté */
+
+    cleanup_sol_dir(child);
+    PASS();
+}
+
 /* ---------- should_autobackup -------------------------------------------- */
 /*
  * Cadence de la sauvegarde automatique : tous les 6 tours ET seulement si le
@@ -946,6 +1366,40 @@ TEST check_server_step_detects_record_and_autobackups(void)
     PASS();
 }
 
+/* Seuil d'autobackup atteint pendant une maintenance : should_autobackup
+ * déclenche (compteur remis à 0) mais backup()/backup_analysed() renvoient
+ * BACKUP_SKIPPED_MAINTENANCE — journalisé, aucun fichier écrit. */
+TEST check_server_step_autobackup_skipped_during_maintenance(void)
+{
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+
+    unlink("./temp.back");
+    unlink("./temp_analysed.back");
+    fileUpdates[0] = 3;            /* != lastBackupUpd(0) -> déclenchement au seuil */
+
+    unsigned long long lastactive = 0, lastBackupUpd = 0;
+    int lastBack = 6;              /* seuil atteint */
+    int last_record = (int)max_result;   /* pas de nouveau record */
+    lock_all_file();               /* maintenance en cours */
+    check_server_step(&lastactive, &lastBackupUpd, &lastBack, &last_record, 10);
+    unlock_all_file();
+
+    ASSERT_EQ_FMT(0, lastBack, "%d");             /* cadence consommée */
+    ASSERT(access("./temp.back", F_OK) != 0);     /* mais aucun backup écrit */
+    ASSERT(access("./temp_analysed.back", F_OK) != 0);
+
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
 /* ---------- communicate_with_client (wrapper complet) -------------------- */
 /*
  * communicate_with_client boucle sur communicate_with_client_step (déjà testée
@@ -1054,6 +1508,45 @@ TEST communicate_with_client_disconnect_requeues_pending_get(void)
     PASS();
 }
 
+/* Handshake puis instruction inconnue : le step demande l'arrêt (break de la
+ * boucle) — la session se clôt côté serveur sans attendre INST_END. */
+static void *mini_srv_handshake_then_bad_instruction(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b = INST_CHECK_VERSION;
+    send(fd, &b, 1, 0);
+    int v = version;
+    send(fd, &v, sizeof v, 0);
+    int8_t resp = 0;
+    recv(fd, &resp, 1, 0);                          /* INST_SUPPORTED_VERSION */
+    b = 99;                                         /* instruction inconnue */
+    send(fd, &b, 1, 0);
+    return NULL;
+}
+
+TEST communicate_with_client_stops_on_protocol_error(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    client.exist = 1;
+    client.compteur = 0;
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_handshake_then_bad_instruction, &sv[1]);
+
+    void *ret = communicate_with_client(&client);
+    ASSERT_EQ(NULL, ret);
+    ASSERT_EQ_FMT(-1, client.socket_id, "%d");
+    ASSERT_EQ_FMT(0, client.exist, "%d");
+
+    pthread_join(srv, NULL);
+    close(sv[1]);
+    PASS();
+}
+
 /* ---------- create_server_thread ----------------------------------------- */
 /*
  * Exerce les deux branches (tid == NULL / tid != NULL, libéré puis recréé) et,
@@ -1144,6 +1637,19 @@ SUITE(etii_server_suite)
     RUN_TEST(step_analysed_batch_out_of_bounds_stops);
     RUN_TEST(step_solution_incomplete_stops);
 
+    RUN_TEST(step_check_version_recv_fail_stops);
+    RUN_TEST(step_check_version_mismatch_rejects);
+    RUN_TEST(step_second_get_frees_previous_batch);
+    RUN_TEST(step_get_to_check_serves_possibility);
+    RUN_TEST(step_get_to_check_batch_count_not_received_stops);
+    RUN_TEST(step_get_to_check_batch_serves_batch);
+    RUN_TEST(step_add_short_recv_stops);
+    RUN_TEST(step_analysed_not_removed_sends_error);
+    RUN_TEST(step_analysed_short_recv_stops);
+    RUN_TEST(step_analysed_batch_incomplete_packet_stops);
+    RUN_TEST(step_solution_stop_on_solution_backs_up_and_exits);
+    RUN_TEST(step_solution_stop_during_maintenance_still_exits);
+
     RUN_TEST(autobackup_increments_below_threshold);
     RUN_TEST(autobackup_fires_at_threshold_when_changed);
     RUN_TEST(autobackup_skips_at_threshold_when_unchanged);
@@ -1151,9 +1657,11 @@ SUITE(etii_server_suite)
 
     RUN_TEST(check_server_step_reports_basic_stats);
     RUN_TEST(check_server_step_detects_record_and_autobackups);
+    RUN_TEST(check_server_step_autobackup_skipped_during_maintenance);
 
     RUN_TEST(communicate_with_client_full_session_ends_cleanly);
     RUN_TEST(communicate_with_client_disconnect_requeues_pending_get);
+    RUN_TEST(communicate_with_client_stops_on_protocol_error);
 
     RUN_TEST(create_server_thread_recreates_tid_on_second_call);
 }
