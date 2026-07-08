@@ -167,7 +167,12 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
  * @brief Forward-checking de la boucle chaude, basé sur le cache de contraintes.
  *
  * Même sémantique que `forward_check_next_k` (possibility.c) mais sans recalcul
- * de clé : la clé de chaque case inspectée est lue directement dans le cache.
+ * de clé : la clé de chaque case inspectée est lue directement dans le cache
+ * `constraints[][]` maintenu par `bt_propagate_place`/`bt_propagate_undo`.
+ * C'est LA version du hot path (`search_packet_backtracking`) ; la variante
+ * sans cache `forward_check_next_k` ne sert que les chemins froids
+ * (`bt_materialize_pending`, throttlé, et les tests) — tout nouveau code de la
+ * boucle chaude doit passer par ici.
  *
  * @param constraints Cache de contraintes maintenu par le backtracking.
  * @param board       Plateau courant (grille + masque des pièces utilisées).

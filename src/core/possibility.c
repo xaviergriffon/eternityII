@@ -831,6 +831,15 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
  * mortes avant qu'elles soient empilées dans le `big_table`, sans changer l'ordre
  * statique du parcours `directions[]`.
  *
+ * ⚠ Version SANS cache — chemins froids uniquement. Chaque case inspectée
+ * recalcule sa clé de contraintes via `what_search_in_grid_to_key`. Ses seuls
+ * appelants sont `search_possiblity_light_with_big_table` (exercée uniquement
+ * par les tests) et `bt_materialize_pending` (etii_search.c, délégation
+ * throttlée par `DELEGATE_MIN_INTERVAL_MS`). Le moteur de backtracking chaud
+ * (`search_packet_backtracking`) utilise `bt_forward_check` (etii_search.c),
+ * même sémantique mais qui lit la clé dans le cache `constraints[][]` maintenu
+ * incrémentalement — ne PAS brancher la présente version sur un hot path.
+ *
  * Note : entièrement supprimée à la compilation quand `FORWARD_CHECK_K == 0`
  * (debit brut strictement identique au code d'origine).
  *
@@ -899,7 +908,9 @@ int forward_check_next_k(struct possibility_packet *possibility, map_big_array *
  *
  * Variante de `search_possiblity_light` utilisant un `big_table` comme structure
  * de résultat. Plus performante car évite les allocations individuelles de la `File`.
- * C'est cette version qui est utilisée dans la boucle principale de `autosearch`.
+ * Historiquement au cœur de la boucle principale de `autosearch` ; depuis le
+ * passage au backtracking in-place (`search_packet_backtracking`, etii_search.c)
+ * elle n'a plus d'appelant en production et n'est exercée que par les tests.
  *
  * @param result       Tableau dynamique de destination des nouveaux paquets.
  * @param key          Clé de recherche pour la case courante.
