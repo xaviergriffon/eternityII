@@ -20,6 +20,7 @@
 #include "app/app_runtime.h"
 #include "app/static_variables.h"
 #include "app/etii_client.h"
+#include "app/etii_server.h"
 #include "app/etii_statistic.h"
 #include "core/datamanager.h"
 #include "net/local_socket.h"
@@ -102,6 +103,104 @@ int parse_tcpserver_thread_arg(const char *arg, int default_nb_threads, int *out
 	}
 	/* Pas un nombre : traité comme le fichier de pièces, nombre de threads inchangé. */
 	return TCPSERVER_ARG_AS_FILENAME;
+}
+
+const char *parse_tcpclient_args(int argc, const char *argv[])
+{
+    NB_THREADS = 1;
+    const char *serverIp = "localhost";
+    if (argc >= 3) {
+        serverIp = argv[2];
+    }
+    if (argc >= 4) {
+        int was_invalid = 0;
+        NB_THREADS = parse_positive_int_or_default(argv[3], 1, &was_invalid);
+        if (was_invalid) {
+            // Un nombre de threads <= 0 (ou non numérique) donnerait 0 process de
+            // travail : le client ne ferait rien. On retombe sur 1.
+            log_error("nombre de threads invalide (\"%s\") — 1 thread par défaut\n", argv[3]);
+        }
+    }
+    if (argc >= 5) {
+        if (pruner_mode) {
+            // tcppruner [serveur] [nb_threads] [pieces.csv] [batch] : pas de stock local
+            parts_files = (char *)(argv[4]);
+        } else {
+            max_stock_by_thread = atoi(argv[4]);
+        }
+    }
+    if (pruner_mode && argc >= 6) {
+        // Taille du lot d'échange pruner (configurable au démarrage). Bornée pour
+        // maîtriser la mémoire du pruner et les tampons GPU.
+        pruner_batch_size = atoi(argv[5]);
+        if (pruner_batch_size < 1) {
+            pruner_batch_size = 1;
+        }
+        if (pruner_batch_size > PRUNER_BATCH_MAX) {
+            pruner_batch_size = PRUNER_BATCH_MAX;
+        }
+    }
+    // argv[5] = pieces.csv pour un client de recherche. Pour un pruner, argv[5]
+    // est la taille de lot (cf. plus haut) et le fichier de pièces reste argv[4].
+    if (!pruner_mode && argc >= 6) {
+        parts_files = (char *)(argv[5]);
+    }
+#ifdef DEBUG_IN_MONO_PROCESS
+    NB_THREADS = 1;
+#endif
+    return serverIp;
+}
+
+void backup_failed_exit(void)
+{
+	// Comme on est en mode client, on ne devrait plus rien avoir dans les files
+	// si c'est le cas, il s'agit d'une erreur
+	if (datas_size() > 0) {
+		char *def_file = malloc(sizeof(char) * 50);
+        sprintf(def_file, "./failed_exit_eternityII_%i.back", getpid());
+        char *def_analyse_file = malloc(sizeof(char) * 60);
+        sprintf(def_analyse_file, "./failed_exit_eternityII-in_analyse_%i.back", getpid());
+		backup(def_file);
+        backup_analysed(def_analyse_file);
+        free(def_file);
+        free(def_analyse_file);
+	}
+}
+
+/**
+ * @brief Initialise le thread chargé de faire les statistiques.
+ *
+ * @param server 1 si le thread est pour le serveur, 0 pour le client.
+ */
+int run_checker(int server)
+{
+	pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
+	pthread_attr_init(thread_attributes);
+	pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
+	pthread_t thread;
+	/* Création du thread */
+
+	void *method= NULL;
+	if(server == 1)
+	{
+		method = check_server;
+	} else
+	{
+		method = check_client_threads;
+	}
+
+	if(0 != pthread_create(&thread, NULL, method, NULL))
+	{
+		// Non fatal : sous forte pression de ressources (trop de threads/process
+		// demandés), on poursuit sans thread de statistiques plutôt que de
+		// planter l'application.
+		log_error("run_checker : pthread_create a échoué — pas de thread de statistiques\n");
+		free(thread_attributes);
+		return -1;
+	}
+	pthread_attr_destroy(thread_attributes);
+	free(thread_attributes);
+	return 0;
 }
 
 /** @brief Gestionnaire de signal no-op (utilisé pour SIGPIPE). */

@@ -93,6 +93,50 @@ enum {
 };
 int parse_tcpserver_thread_arg(const char *arg, int default_nb_threads, int *out_nb_threads);
 
+/**
+ * @brief Parse les arguments positionnels de `tcpclient` / `tcppruner` / `gpupruner`.
+ *
+ * Usage : `tcpclient [serveur] [nb_threads] [max_stock] [pieces.csv]`
+ *         `tcppruner [serveur] [nb_threads] [pieces.csv] [batch]`
+ * Le sens d'argv[4]/argv[5] dépend donc de `pruner_mode` (lu, jamais écrit ici) :
+ * pour un pruner, argv[4] est le fichier de pièces et argv[5] la taille de lot
+ * (bornée à [1, PRUNER_BATCH_MAX]) ; pour un client de recherche, argv[4] est le
+ * stock max par thread et argv[5] le fichier de pièces. Positionne les globales
+ * `NB_THREADS`, `max_stock_by_thread`, `pruner_batch_size`, `parts_files`.
+ * Extrait de `handle_tcpclient` (main.c) pour être testable.
+ *
+ * @param argc Nombre d'arguments (après retrait des options par parse_cli_options).
+ * @param argv Arguments (argv[1] = mode, déjà consommé par l'appelant).
+ * @return     L'adresse du serveur (argv[2], ou "localhost" si absente).
+ */
+const char *parse_tcpclient_args(int argc, const char *argv[]);
+
+/* ---- Fin de vie du client ---- */
+
+/**
+ * @brief Sauvegarde de secours à la sortie d'un client (extrait de `run_client`).
+ *
+ * En mode client, les files locales doivent être vides au retour de
+ * `run_mono_client` : s'il reste du stock (`datas_size() > 0`), c'est une
+ * anomalie — on le sauvegarde dans `./failed_exit_eternityII_<pid>.back` (+
+ * variante `-in_analyse`) pour ne rien perdre. No-op si les files sont vides.
+ */
+void backup_failed_exit(void);
+
+/* ---- Threads de statistiques ---- */
+
+/**
+ * @brief Démarre le thread de statistiques (détaché) : `check_server` en mode
+ *        serveur (server == 1), `check_client_threads` sinon.
+ *
+ * Non fatal : sous forte pression de ressources, un échec de création laisse
+ * l'application tourner sans thread de statistiques.
+ *
+ * @param server 1 pour le serveur, 0 pour un client.
+ * @return 0 si le thread a démarré, -1 sinon.
+ */
+int run_checker(int server);
+
 /* ---- IPC parent<->enfants (sockets Unix UDP locales) ---- */
 
 /**

@@ -608,7 +608,10 @@ void *check_client_threads(void *param)
     (void)param;
     int sleep_time = 10;
     int last_record = max_result;
-    while(1)
+    // Comme les autres threads (feed, control, …) : la boucle s'arrête sur
+    // REQUEST_STOP — en production celui-ci n'arrive qu'à l'arrêt du processus,
+    // le comportement est donc inchangé (et le thread testable).
+    while(request != REQUEST_STOP)
     {
         check_client_threads_step(&last_record);
         sleep(sleep_time);

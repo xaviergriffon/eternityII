@@ -242,7 +242,10 @@ void *check_server(void *param)
     int sleep_time = 10;
     int lastBack = 0;
     int last_record = max_result;
-    while(1)
+    // Comme les autres threads (rmnonext, server_tcp, …) : la boucle s'arrête
+    // sur REQUEST_STOP — en production celui-ci n'arrive qu'à l'arrêt du
+    // processus, le comportement est donc inchangé (et le thread testable).
+    while(request != REQUEST_STOP)
     {
         check_server_step(&lastactive, &lastClientsFileUpdateBackup, &lastBack, &last_record, sleep_time);
         sleep(sleep_time);
