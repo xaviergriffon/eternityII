@@ -1400,6 +1400,21 @@ TEST check_server_step_autobackup_skipped_during_maintenance(void)
     PASS();
 }
 
+/* Enveloppe de thread check_server : REQUEST_STOP prépositionné, la boucle
+ * (while(request != REQUEST_STOP), refactor P8) ne s'exécute jamais — appel
+ * direct sûr, le corps (step + sleep) est couvert via check_server_step. */
+TEST check_server_stops_immediately_on_request_stop(void)
+{
+    int saved_req = request;
+    request = REQUEST_STOP;
+
+    void *ret = check_server(NULL);
+    ASSERT_EQ(NULL, ret);
+
+    request = saved_req;
+    PASS();
+}
+
 /* ---------- communicate_with_client (wrapper complet) -------------------- */
 /*
  * communicate_with_client boucle sur communicate_with_client_step (déjà testée
@@ -1658,6 +1673,7 @@ SUITE(etii_server_suite)
     RUN_TEST(check_server_step_reports_basic_stats);
     RUN_TEST(check_server_step_detects_record_and_autobackups);
     RUN_TEST(check_server_step_autobackup_skipped_during_maintenance);
+    RUN_TEST(check_server_stops_immediately_on_request_stop);
 
     RUN_TEST(communicate_with_client_full_session_ends_cleanly);
     RUN_TEST(communicate_with_client_disconnect_requeues_pending_get);

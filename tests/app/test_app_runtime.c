@@ -18,6 +18,8 @@
 #include "app/app_runtime.h"
 #include "app/static_variables.h"
 #include "app/etii_statistic.h"
+#include "core/datamanager.h"
+#include "core/possibility.h"
 #include "net/local_socket.h"
 #include "net/ipc_protocol.h"
 
@@ -371,6 +373,230 @@ TEST tcpserver_arg_plus_prefixed_number_is_count(void)
     PASS();
 }
 
+/* ---------- parse_tcpclient_args ------------------------------------------ */
+/*
+ * Le sens des arguments positionnels dépend de pruner_mode (lu, jamais écrit) :
+ *   tcpclient [serveur] [nb_threads] [max_stock] [pieces.csv]
+ *   tcppruner [serveur] [nb_threads] [pieces.csv] [batch]
+ * Chaque test sauvegarde/restaure les globales positionnées (NB_THREADS,
+ * max_stock_by_thread, pruner_batch_size, parts_files) et pruner_mode.
+ */
+
+static int g_saved_nb_threads;
+static int g_saved_max_stock;
+static int g_saved_batch;
+static char *g_saved_parts_files;
+static int g_saved_pruner_mode;
+
+static void save_client_args_globals(void)
+{
+    g_saved_nb_threads  = NB_THREADS;
+    g_saved_max_stock   = max_stock_by_thread;
+    g_saved_batch       = pruner_batch_size;
+    g_saved_parts_files = parts_files;
+    g_saved_pruner_mode = pruner_mode;
+}
+
+static void restore_client_args_globals(void)
+{
+    NB_THREADS          = g_saved_nb_threads;
+    max_stock_by_thread = g_saved_max_stock;
+    pruner_batch_size   = g_saved_batch;
+    parts_files         = g_saved_parts_files;
+    pruner_mode         = g_saved_pruner_mode;
+}
+
+/* Aucun argument optionnel : localhost, 1 thread, rien d'autre touché. */
+TEST tcpclient_args_defaults(void)
+{
+    save_client_args_globals();
+    pruner_mode = 0;
+    const char *argv[] = { "prog", "tcpclient" };
+
+    const char *ip = parse_tcpclient_args(2, argv);
+
+    ASSERT_STR_EQ("localhost", ip);
+    ASSERT_EQ_FMT(1, NB_THREADS, "%d");
+    ASSERT_EQ_FMT(g_saved_max_stock, max_stock_by_thread, "%d");
+    ASSERT_EQ(g_saved_parts_files, parts_files);
+
+    restore_client_args_globals();
+    PASS();
+}
+
+/* Serveur + nombre de threads valide. */
+TEST tcpclient_args_server_and_threads(void)
+{
+    save_client_args_globals();
+    pruner_mode = 0;
+    const char *argv[] = { "prog", "tcpclient", "monserveur", "4" };
+
+    const char *ip = parse_tcpclient_args(4, argv);
+
+    ASSERT_STR_EQ("monserveur", ip);
+    ASSERT_EQ_FMT(4, NB_THREADS, "%d");
+
+    restore_client_args_globals();
+    PASS();
+}
+
+/* Nombre de threads invalide : repli sur 1 (log_error, silencié). */
+TEST tcpclient_args_invalid_threads_falls_back(void)
+{
+    save_client_args_globals();
+    pruner_mode = 0;
+    const char *argv[] = { "prog", "tcpclient", "srv", "zero" };
+
+    mute_fd(2);
+    const char *ip = parse_tcpclient_args(4, argv);
+    unmute_fd();
+
+    ASSERT_STR_EQ("srv", ip);
+    ASSERT_EQ_FMT(1, NB_THREADS, "%d");
+
+    restore_client_args_globals();
+    PASS();
+}
+
+/* Client de recherche : argv[4] = stock max par thread, argv[5] = fichier. */
+TEST tcpclient_args_search_client_stock_and_file(void)
+{
+    save_client_args_globals();
+    pruner_mode = 0;
+    const char *argv[] = { "prog", "tcpclient", "srv", "2", "500", "./mes_pieces.csv" };
+
+    parse_tcpclient_args(6, argv);
+
+    ASSERT_EQ_FMT(2, NB_THREADS, "%d");
+    ASSERT_EQ_FMT(500, max_stock_by_thread, "%d");
+    ASSERT_STR_EQ("./mes_pieces.csv", parts_files);
+    ASSERT_EQ_FMT(g_saved_batch, pruner_batch_size, "%d");   /* pas un pruner */
+
+    restore_client_args_globals();
+    PASS();
+}
+
+/* Pruner : argv[4] = fichier de pièces, argv[5] = taille de lot. */
+TEST tcpclient_args_pruner_file_and_batch(void)
+{
+    save_client_args_globals();
+    pruner_mode = 1;
+    const char *argv[] = { "prog", "tcppruner", "srv", "3", "./mes_pieces.csv", "100" };
+
+    parse_tcpclient_args(6, argv);
+
+    ASSERT_EQ_FMT(3, NB_THREADS, "%d");
+    ASSERT_STR_EQ("./mes_pieces.csv", parts_files);
+    ASSERT_EQ_FMT(100, pruner_batch_size, "%d");
+    ASSERT_EQ_FMT(g_saved_max_stock, max_stock_by_thread, "%d");   /* pas de stock local */
+
+    restore_client_args_globals();
+    PASS();
+}
+
+/* Taille de lot pruner bornée des deux côtés : [1, PRUNER_BATCH_MAX]. */
+TEST tcpclient_args_pruner_batch_is_clamped(void)
+{
+    save_client_args_globals();
+    pruner_mode = 1;
+
+    const char *argv_low[] = { "prog", "tcppruner", "srv", "1", "./p.csv", "0" };
+    parse_tcpclient_args(6, argv_low);
+    ASSERT_EQ_FMT(1, pruner_batch_size, "%d");
+
+    const char *argv_high[] = { "prog", "tcppruner", "srv", "1", "./p.csv", "99999999" };
+    parse_tcpclient_args(6, argv_high);
+    ASSERT_EQ_FMT(PRUNER_BATCH_MAX, pruner_batch_size, "%d");
+
+    restore_client_args_globals();
+    PASS();
+}
+
+/* ---------- backup_failed_exit -------------------------------------------- */
+
+/* Files vides : aucun fichier de secours créé. */
+TEST backup_failed_exit_empty_is_noop(void)
+{
+    char path[80], path_an[96];
+    snprintf(path, sizeof path, "./failed_exit_eternityII_%i.back", (int)getpid());
+    snprintf(path_an, sizeof path_an, "./failed_exit_eternityII-in_analyse_%i.back", (int)getpid());
+    unlink(path);
+    unlink(path_an);
+
+    while (datas_size() > 0) {   /* état partagé entre suites */
+        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        free_array_possibility_packet(r);
+    }
+
+    backup_failed_exit();
+
+    ASSERT(access(path, F_OK) != 0);
+    ASSERT(access(path_an, F_OK) != 0);
+    PASS();
+}
+
+/* Du stock résiduel (anomalie en mode client) : les deux fichiers de secours
+ * nommés d'après le pid sont écrits. */
+TEST backup_failed_exit_saves_leftover_stock(void)
+{
+    char path[80], path_an[96];
+    snprintf(path, sizeof path, "./failed_exit_eternityII_%i.back", (int)getpid());
+    snprintf(path_an, sizeof path_an, "./failed_exit_eternityII-in_analyse_%i.back", (int)getpid());
+    unlink(path);
+    unlink(path_an);
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 5;
+    array_possibility_packet arr = { .size = 1, .possibilities = &pkt };
+    add_possibility(NULL, &arr);
+
+    backup_failed_exit();
+
+    ASSERT_EQ_FMT(0, access(path, F_OK), "%d");
+    ASSERT_EQ_FMT(0, access(path_an, F_OK), "%d");
+
+    unlink(path);
+    unlink(path_an);
+    while (datas_size() > 0) {
+        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        free_array_possibility_packet(r);
+    }
+    PASS();
+}
+
+/* ---------- run_checker ---------------------------------------------------- */
+/*
+ * REQUEST_STOP prépositionné : le thread détaché (check_server ou
+ * check_client_threads, refactorés en while(request != REQUEST_STOP)) sort dès
+ * son premier test de boucle. Un thread détaché ne se joint pas : on laisse un
+ * délai large avant de restaurer request, pour qu'il ait évalué sa condition.
+ */
+
+TEST run_checker_client_starts_and_stops(void)
+{
+    int saved_req = request;
+    request = REQUEST_STOP;
+
+    ASSERT_EQ_FMT(0, run_checker(0), "%d");
+    usleep(200000);                 /* laisse le thread détaché sortir */
+
+    request = saved_req;
+    PASS();
+}
+
+TEST run_checker_server_starts_and_stops(void)
+{
+    int saved_req = request;
+    request = REQUEST_STOP;
+
+    ASSERT_EQ_FMT(0, run_checker(1), "%d");
+    usleep(200000);
+
+    request = saved_req;
+    PASS();
+}
+
 /* ==================== IPC parent<->enfants (sockets Unix UDP) ==================
  *
  * fork_checker / server_tcp / fork_udp bouclent sur recvfrom()/sleep() jusqu'à
@@ -635,6 +861,19 @@ SUITE(app_runtime_suite)
     RUN_TEST(tcpserver_arg_filename_is_detected);
     RUN_TEST(tcpserver_arg_empty_string_is_filename);
     RUN_TEST(tcpserver_arg_plus_prefixed_number_is_count);
+
+    RUN_TEST(tcpclient_args_defaults);
+    RUN_TEST(tcpclient_args_server_and_threads);
+    RUN_TEST(tcpclient_args_invalid_threads_falls_back);
+    RUN_TEST(tcpclient_args_search_client_stock_and_file);
+    RUN_TEST(tcpclient_args_pruner_file_and_batch);
+    RUN_TEST(tcpclient_args_pruner_batch_is_clamped);
+
+    RUN_TEST(backup_failed_exit_empty_is_noop);
+    RUN_TEST(backup_failed_exit_saves_leftover_stock);
+
+    RUN_TEST(run_checker_client_starts_and_stops);
+    RUN_TEST(run_checker_server_starts_and_stops);
 
     RUN_TEST(server_tcp_updates_stats_and_handles_event_and_unknown_type);
     RUN_TEST(fork_udp_delegates_command_then_stops);
