@@ -405,6 +405,30 @@ TEST check_possibility_neighbor_mismatch_is_minus_nine(void)
  * alloc=5.
  * ------------------------------------------------------------------------ */
 
+/* Pièce en (0,0) dont la face LEFT != bord (0) : seule la branche LEFT échoue
+ * (top=0 passe le check TOP, les voisins droite/bas sont vides). NB : la forme
+ * « voisin gauche posé mais incompatible » est inatteignable — le check RIGHT
+ * du voisin (comparaison symétrique, indice de parcours plus petit) court-
+ * circuite toujours avant ; seule la variante bord de plateau prend la branche. */
+TEST check_possibility_left_border_mismatch_is_minus_nine(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 0, .bottom = 0, .left = 7 }, /* left=7 != bord */
+    };
+    struct array_part rp = { .size = 2, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->alloc = 1;
+    set_face_used(p->b_faceused, 0, 1);
+    p->grid[0][0] = 1; /* bord gauche attendu = 0, la pièce annonce left = 7 */
+    ASSERT_EQ_FMT(-9, check_possibility(p, &rp), "%d");
+    free(p);
+    PASS();
+}
+
 /* Chaîne verticale (0,0)-(0,3) + (1,0) entièrement cohérente -> 0. */
 TEST check_possibility_consistent_interior_neighbors_is_zero(void)
 {
@@ -2171,6 +2195,7 @@ SUITE(possibility_suite)
     RUN_TEST(check_possibility_grid_value_too_large_is_minus_seven);
     RUN_TEST(check_possibility_border_mismatch_is_minus_nine);
     RUN_TEST(check_possibility_neighbor_mismatch_is_minus_nine);
+    RUN_TEST(check_possibility_left_border_mismatch_is_minus_nine);
     RUN_TEST(check_possibility_consistent_interior_neighbors_is_zero);
     RUN_TEST(check_possibility_bottom_mismatch_is_minus_nine);
     RUN_TEST(check_possibility_left_mismatch_is_minus_nine);

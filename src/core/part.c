@@ -308,7 +308,9 @@ int put_part(struct map_part *map, unsigned int key_int, char *key, struct array
 	int l = key_int % map->size;
 	int first = l;
 	int r = 0;
-	while (map->elements[l].key_int != 0 && l < map->sizemap)
+	/* Borne d'abord, lecture ensuite : l'ancien ordre lisait elements[sizemap]
+	 * (hors bornes) quand la sonde atteignait la fin de la table pleine. */
+	while (l < map->sizemap && map->elements[l].key_int != 0)
 	{
 		r++;
 		l++;

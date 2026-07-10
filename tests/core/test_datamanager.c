@@ -2757,6 +2757,264 @@ TEST sort_large_shuffled_stock_both_directions(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * Contention : boucles trylock (wraparound de file + usleep)
+ *
+ * En mono-thread les trylock réussissent toujours : les branches « un tour
+ * complet sans verrou -> usleep » restaient mortes. On les prend de façon
+ * déterministe : le test tient lock_all_file[_analysed]() pendant qu'un thread
+ * exécute l'opération (qui boucle sans retour anticipé), puis relâche après un
+ * délai — l'opération aboutit alors et le thread se joint.
+ * ------------------------------------------------------------------------ */
+
+void lock_all_file_analysed(void);
+void unlock_all_file_analysed(void);
+
+static void *th_add_possibility(void *arg)
+{
+    (void)arg;
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 3;
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    add_possibility(NULL, &arr);
+    return NULL;
+}
+
+TEST add_possibility_spins_until_lock_released(void)
+{
+    drain_all();
+    lock_all_file();
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, th_add_possibility, NULL));
+    usleep(60000);              /* laisse la boucle trylock faire > 1 tour complet */
+    unlock_all_file();
+    pthread_join(th, NULL);
+
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+static array_possibility_packet *g_cont_result;
+static void *th_get_possibility(void *arg)
+{
+    (void)arg;
+    g_cont_result = get_last_possibility(NULL, 1);
+    return NULL;
+}
+
+TEST get_last_possibility_spins_until_lock_released(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 5;
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    add_possibility(NULL, &arr);
+
+    lock_all_file();
+    g_cont_result = NULL;
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, th_get_possibility, NULL));
+    usleep(60000);
+    unlock_all_file();
+    pthread_join(th, NULL);
+
+    ASSERT(g_cont_result != NULL);
+    ASSERT_EQ_FMT(1, g_cont_result->size, "%d");
+    free_array_possibility_packet(g_cont_result);
+    drain_all();
+    PASS();
+}
+
+static void *th_add_analysed_any_file(void *arg)
+{
+    (void)arg;
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 6;
+    add_possibility_analysed(&pk, -1);   /* thread < 0 : wraparound de file */
+    return NULL;
+}
+
+static void *th_add_analysed_fixed_file(void *arg)
+{
+    (void)arg;
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 7;
+    add_possibility_analysed(&pk, 2);    /* thread fixe : retente la même file */
+    return NULL;
+}
+
+TEST add_possibility_analysed_spins_both_modes(void)
+{
+    drain_all();
+    lock_all_file_analysed();
+    pthread_t th_any, th_fixed;
+    ASSERT_EQ(0, pthread_create(&th_any, NULL, th_add_analysed_any_file, NULL));
+    ASSERT_EQ(0, pthread_create(&th_fixed, NULL, th_add_analysed_fixed_file, NULL));
+    usleep(60000);
+    unlock_all_file_analysed();
+    pthread_join(th_any, NULL);
+    pthread_join(th_fixed, NULL);
+
+    ASSERT_EQ_FMT(2ULL, analysed_total(), "%llu");
+    drain_all();
+    PASS();
+}
+
+static int g_cont_remove_rc = -99;
+static void *th_remove_analysed(void *arg)
+{
+    (void)arg;
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 8;
+    g_cont_remove_rc = remove_possibility_analysed(&pk, -1);
+    return NULL;
+}
+
+TEST remove_possibility_analysed_spins_until_lock_released(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 8;
+    add_possibility_analysed(&pk, 1);
+
+    lock_all_file_analysed();
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, th_remove_analysed, NULL));
+    usleep(60000);
+    unlock_all_file_analysed();
+    pthread_join(th, NULL);
+
+    ASSERT_EQ_FMT(0, g_cont_remove_rc, "%d");    /* trouvée et retirée */
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+    drain_all();
+    PASS();
+}
+
+static void *th_restock_analysed(void *arg)
+{
+    (void)arg;
+    restock_analysed();
+    return NULL;
+}
+
+/* restock_analysed draine le pool analysed (libre) puis réinjecte dans le stock
+ * principal via trylock : on ne verrouille QUE les files du stock -> la boucle
+ * de réinjection tourne (dest suivant + usleep) jusqu'au déverrouillage. */
+TEST restock_analysed_spins_until_stock_unlocked(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 9;
+    add_possibility_analysed(&pk, 0);
+
+    silence_std();               /* restock_analysed journalise sa progression */
+    lock_all_file();
+    pthread_t th;
+    int created = pthread_create(&th, NULL, th_restock_analysed, NULL);
+    usleep(60000);
+    unlock_all_file();
+    if (created == 0) pthread_join(th, NULL);
+    restore_std();
+    ASSERT_EQ_FMT(0, created, "%d");
+
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * Index du pool analysed : chaînes de collision
+ *
+ * L'index a 8191 buckets par file : insérer nettement plus de possibilités
+ * DISTINCTES dans une même file garantit (pigeonhole) des buckets à >= 2
+ * nœuds. Les retraits parcourent alors les chaînes (tête ET milieu de chaîne),
+ * branches jamais prises avec les petits volumes des autres tests.
+ * ------------------------------------------------------------------------ */
+TEST analysed_index_walks_collision_chains(void)
+{
+    drain_all();
+    enum { NCOLL = 9000 };       /* > 8191 buckets -> collisions garanties */
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    for (int i = 0; i < NCOLL; i++) {
+        pk.alloc = (uint16_t)i;
+        pk.grid[dirx[0]][diry[0]] = (int16_t)(i + 1);   /* contenus distincts */
+        add_possibility_analysed(&pk, 0);
+    }
+    ASSERT_EQ_FMT((unsigned long long)NCOLL, file_analysed_size(0), "%llu");
+
+    int failed = 0;
+    for (int i = 0; i < NCOLL; i++) {
+        pk.alloc = (uint16_t)i;
+        pk.grid[dirx[0]][diry[0]] = (int16_t)(i + 1);
+        if (remove_possibility_analysed(&pk, 0) != 0) failed++;
+    }
+    ASSERT_EQ_FMT(0, failed, "%d");
+    ASSERT_EQ_FMT(0ULL, file_analysed_size(0), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* check_duplicate : le stock est réparti sur plusieurs files (split_datas) et
+ * assez fourni pour que le partitionnement entre threads fasse avancer son
+ * curseur d'une file à la suivante (fp++/position=0) — en plus de la
+ * comparaison croisée inter-files qui détecte le doublon. */
+TEST check_duplicate_detects_identical_packets_across_files(void)
+{
+    drain_all();
+    enum { NDUP = 24 };
+    struct possibility_packet pks[NDUP];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < NDUP; i++) {
+        pks[i].alloc = 2;
+        /* 22 contenus distincts + 1 paire identique (i == 0 et i == 1). */
+        pks[i].grid[dirx[0]][diry[0]] = (int16_t)(i == 1 ? 1 : i + 1);
+    }
+    array_possibility_packet arr = { .size = NDUP, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas();               /* redistribue le stock sur plusieurs files */
+    int rc = check_duplicate();
+    restore_std();
+    ASSERT_EQ_FMT(-1, rc, "%d");
+
+    drain_all();
+    PASS();
+}
+
+/* check_duplicate : deux possibilités STRICTEMENT identiques dans le stock ->
+ * le doublon est détecté (branche « equals » + compteur d'erreurs) et la
+ * fonction renvoie -1. */
+TEST check_duplicate_detects_identical_packets(void)
+{
+    drain_all();
+    struct possibility_packet pks[2];
+    memset(pks, 0, sizeof pks);
+    pks[0].alloc = 2;
+    pks[0].grid[dirx[0]][diry[0]] = 5;
+    pks[1] = pks[0];             /* copie parfaite : doublon */
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_duplicate();
+    restore_std();
+    ASSERT_EQ_FMT(-1, rc, "%d");
+
+    drain_all();
+    PASS();
+}
+
 SUITE(datamanager_suite)
 {
     RUN_TEST(server_ip_round_trip);
@@ -2815,6 +3073,15 @@ SUITE(datamanager_suite)
     RUN_TEST(regroup_split_nolock_preserve_count);
     RUN_TEST(check_duplicate_empty_stock_returns_immediately);
     RUN_TEST(check_duplicate_small_stock_no_error);
+    RUN_TEST(check_duplicate_detects_identical_packets);
+    RUN_TEST(check_duplicate_detects_identical_packets_across_files);
+
+    RUN_TEST(add_possibility_spins_until_lock_released);
+    RUN_TEST(get_last_possibility_spins_until_lock_released);
+    RUN_TEST(add_possibility_analysed_spins_both_modes);
+    RUN_TEST(remove_possibility_analysed_spins_until_lock_released);
+    RUN_TEST(restock_analysed_spins_until_stock_unlocked);
+    RUN_TEST(analysed_index_walks_collision_chains);
     RUN_TEST(import_json_loads_single_possibility);
     RUN_TEST(print_duplicate_activity_aggregates_counters);
     RUN_TEST(add_possibility_null_and_mixed_routing);
