@@ -12,6 +12,7 @@
  * (éventuellement depuis des globaux de fichier positionnés avant l'appel,
  * fork() copiant la mémoire du parent).
  */
+#include <stdlib.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -40,7 +41,11 @@ static inline int run_in_fork(void (*fn)(void), pid_t *out_pid)
             if (devnull > 2) close(devnull);
         }
         fn();
-        _exit(0); /* fn était censée exit() ; si elle revient, succès */
+        /* fn était censée exit() ; si elle revient, succès. exit() et non
+         * _exit() : _exit saute le hook de flush gcov/llvm-cov, et tout ce que
+         * le fils a exécuté avant de revenir normalement disparaissait de la
+         * couverture (ex. la boucle nominale de first_possibility). */
+        exit(0);
     }
     if (out_pid != NULL) {
         *out_pid = pid;

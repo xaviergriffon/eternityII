@@ -8,11 +8,15 @@
  * ETERN_PARTS et se testent donc avec un petit jeu de pièces arbitraire.
  */
 #include "greatest.h"
+#include "fork_assert.h"
 #include "core/part.h"
 #include "app/static_variables.h" /* ETERN_PARTS */
 
+#include <stdlib.h>
+
 /* Fonctions publiques non déclarées dans part.h : prototypes locaux. */
 int8_t          convert_p(int8_t p, int maxFaceM);
+int put_part(struct map_part *map, unsigned int key_int, char *key, struct array_part *apart);
 unsigned long   hashmap_hash_int(unsigned long key);
 unsigned int    hash(char *str);
 struct array_part *get_parts(struct map_part *map, char *key);
@@ -470,6 +474,46 @@ TEST check_array_handles_valid_and_null(void)
     PASS();
 }
 
+/* put_part : la sonde linéaire atteint la fin de la table (« map trop
+ * petite ») -> exit(EXIT_FAILURE). Exécuté via fork_assert : deux clés qui
+ * hachent sur le dernier slot ; la seconde sonde au-delà de sizemap. */
+static void child_put_part_overflow(void)
+{
+    struct map_part map;
+    map.size = 2;
+    map.sizemap = 2;
+    map.elements = calloc(2, sizeof(struct map_part_element));
+    struct part parts[] = { { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part apart = { .size = 1, .parts = parts };
+    put_part(&map, 3, "k1", &apart);   /* 3 % 2 = 1 -> dernier slot occupé */
+    put_part(&map, 5, "k2", &apart);   /* même slot -> sonde -> l == sizemap -> exit */
+    exit(0);                            /* ne doit jamais être atteint */
+}
+
+TEST put_part_exits_when_map_full(void)
+{
+    ASSERT_EQ_FMT(EXIT_FAILURE, run_in_fork(child_put_part_overflow, NULL), "%d");
+    PASS();
+}
+
+/* regroup_map sur une map sans aucune pièce : nbparts == 0 -> le tableau
+ * `parts` est libéré et mis à NULL (branche jamais prise avec des maps
+ * peuplées). */
+TEST regroup_map_empty_map_frees_parts(void)
+{
+    struct array_part a = { .size = 0, .parts = NULL };
+    map_big_array *map = buildBigArray(&a, search_max_face(&a));
+
+    struct map_in_one *one = regroup_map(map);
+    ASSERT(one != NULL);
+    ASSERT_EQ_FMT(0, one->nbparts, "%d");
+    ASSERT_EQ(NULL, one->parts);
+
+    free_map_in_one(one);
+    free_bigarray(map);
+    PASS();
+}
+
 SUITE(part_suite)
 {
     RUN_TEST(rotate_part_zero_is_identity);
@@ -492,6 +536,8 @@ SUITE(part_suite)
     RUN_TEST(hash_is_deterministic_and_distinguishes);
     RUN_TEST(build_map_part_lookup_by_text_key);
     RUN_TEST(regroup_map_flattens_all_parts);
+    RUN_TEST(regroup_map_empty_map_frees_parts);
+    RUN_TEST(put_part_exits_when_map_full);
     RUN_TEST(free_bigarray_with_null_arena);
     RUN_TEST(check_array_handles_valid_and_null);
 }

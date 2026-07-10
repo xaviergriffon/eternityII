@@ -405,6 +405,33 @@ TEST check_possibility_neighbor_mismatch_is_minus_nine(void)
  * alloc=5.
  * ------------------------------------------------------------------------ */
 
+/* Voisin GAUCHE déjà posé mais incompatible (Q.left != P.right) : la case (1,0)
+ * du parcours column-major échoue sur la branche LEFT (les tests -9 existants
+ * n'exercent que TOP-bord et RIGHT). */
+TEST check_possibility_left_neighbor_mismatch_is_minus_nine(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 11, .bottom = 21, .left = 0 },
+        { .id = 2, .top = 21, .right = 12, .bottom = 22, .left = 0 },
+        { .id = 3, .top = 22, .right = 13, .bottom = 23, .left = 0 },
+        { .id = 4, .top = 23, .right = 14, .bottom = 0,  .left = 0 },
+        { .id = 5, .top = 0,  .right = 0,  .bottom = 0,  .left = 99 }, /* 99 != 11 */
+    };
+    struct array_part rp = { .size = 6, .parts = parts };
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+    p->alloc = 5;
+    for (int id = 1; id <= 5; id++) set_face_used(p->b_faceused, id - 1, 1);
+    p->grid[0][0] = 1; p->grid[0][1] = 2; p->grid[0][2] = 3; p->grid[0][3] = 4;
+    p->grid[1][0] = 5; /* left attendu = P1.right (11), la pièce annonce 99 */
+    ASSERT_EQ_FMT(-9, check_possibility(p, &rp), "%d");
+    free(p);
+    PASS();
+}
+
 /* Chaîne verticale (0,0)-(0,3) + (1,0) entièrement cohérente -> 0. */
 TEST check_possibility_consistent_interior_neighbors_is_zero(void)
 {
@@ -2171,6 +2198,7 @@ SUITE(possibility_suite)
     RUN_TEST(check_possibility_grid_value_too_large_is_minus_seven);
     RUN_TEST(check_possibility_border_mismatch_is_minus_nine);
     RUN_TEST(check_possibility_neighbor_mismatch_is_minus_nine);
+    RUN_TEST(check_possibility_left_neighbor_mismatch_is_minus_nine);
     RUN_TEST(check_possibility_consistent_interior_neighbors_is_zero);
     RUN_TEST(check_possibility_bottom_mismatch_is_minus_nine);
     RUN_TEST(check_possibility_left_mismatch_is_minus_nine);
