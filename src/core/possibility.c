@@ -740,7 +740,7 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
                 // candidat. La copie est intrinsèque : chaque pièce posée engendre un
                 // état de plateau distinct empilé pour exploration ultérieure (appel
                 // non récursif, une expansion par position). Les malloc sont déjà
-                // évités (cache d'Element ici, arène doublante côté big_table).
+                // évités (cache d'Element de la File).
                 // Optimisation possible si le profiling le confirme : remplacer ce
                 // memcpy par un système de delta (n'enregistrer que la case modifiée).
                 if (!put_possibility(result, currPossibility)) {
@@ -826,15 +826,12 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
  * disponible (toutes utilisées, ou aucun résultat dans la map), la branche est
  * sans issue et la fonction retourne 0.
  *
- * Cette vérification est appelée juste après chaque placement dans
- * `search_possiblity_light_with_big_table` : elle permet d'élaguer des branches
- * mortes avant qu'elles soient empilées dans le `big_table`, sans changer l'ordre
- * statique du parcours `directions[]`.
+ * Cette vérification élague des branches mortes juste après un placement,
+ * sans changer l'ordre statique du parcours `directions[]`.
  *
  * ⚠ Version SANS cache — chemins froids uniquement. Chaque case inspectée
- * recalcule sa clé de contraintes via `what_search_in_grid_to_key`. Ses seuls
- * appelants sont `search_possiblity_light_with_big_table` (exercée uniquement
- * par les tests) et `bt_materialize_pending` (etii_search.c, délégation
+ * recalcule sa clé de contraintes via `what_search_in_grid_to_key`. Son seul
+ * appelant est `bt_materialize_pending` (etii_search.c, délégation
  * throttlée par `DELEGATE_MIN_INTERVAL_MS`). Le moteur de backtracking chaud
  * (`search_packet_backtracking`) utilise `bt_forward_check` (etii_search.c),
  * même sémantique mais qui lit la clé dans le cache `constraints[][]` maintenu
@@ -902,206 +899,6 @@ int forward_check_next_k(struct possibility_packet *possibility, map_big_array *
     return 1;
 }
 #endif // FORWARD_CHECK_K > 0
-
-/**
- * @brief Développe un paquet en ajoutant une pièce à la case courante (version big_table).
- *
- * Variante de `search_possiblity_light` utilisant un `big_table` comme structure
- * de résultat. Plus performante car évite les allocations individuelles de la `File`.
- * Historiquement au cœur de la boucle principale de `autosearch` ; depuis le
- * passage au backtracking in-place (`search_packet_backtracking`, etii_search.c)
- * elle n'a plus d'appelant en production et n'est exercée que par les tests.
- *
- * @param result       Tableau dynamique de destination des nouveaux paquets.
- * @param key          Clé de recherche pour la case courante.
- * @param possiblity   Paquet source à développer.
- * @param mapParts     Tableau 4D de lookup.
- * @param all_rotate_part Tableau de toutes les rotations.
- * @param idParts      Table de pré-calcul des indices de rotation [id][rotation].
- * @return             Nombre de pièces allouées (`alloc`) dans le paquet produit, ou 0.
- */
-int search_possiblity_light_with_big_table(big_table *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4])
-{
-    uint8_t x;
-    uint8_t y;
-    
-    // initialisation
-    x = possiblity->x;
-    y = possiblity->y;
-
-    uint16_t incAlloc = possiblity->alloc + 1;
-    // incAlloc == ETERN_PARTS : la pièce posée complète le plateau, il n'y a pas
-    // de case suivante. dirx[]/diry[] n'ont que ETERN_PARTS entrées (0..ETERN_PARTS-1) ;
-    // les lire à cet indice serait un débordement (détecté par ASan). checkIfResultFound
-    // (appelé en fin de fonction) sort le processus avant que x/y ne soient réutilisés :
-    // la valeur ici est un pur bouchon, jamais exploité.
-    uint8_t nX = (incAlloc < ETERN_PARTS) ? dirx[incAlloc] : 0;
-    uint8_t nY = (incAlloc < ETERN_PARTS) ? diry[incAlloc] : 0;
-    int lastId =-1;
-#if FORWARD_CHECK_K > 0
-    // Nombre de branches effectivement empilées dans `result` (i.e. ayant passé le
-    // forward-checking). Utilisé pour ne pas faussement bumper `max_result` quand
-    // toutes les pièces candidates sont rejetées par le forward-check.
-    int pushed = 0;
-#endif
-
-    struct possibility_packet *currPossibility = possiblity;
-
-    // On vérifie si la possibilité à cette position n'est toujours pas connu.
-    if(currPossibility->grid[x][y] == -2) {
-
-        // get_parts_bigarray_with_key est zero-copy : elle renvoie un pointeur
-        // direct dans la map 4D (&map->flat[...]) et la boucle lit .id/.rotation
-        // sur place — aucune copie à éviter ici. Remplacer array_part par un
-        // simple tableau d'id imposerait une seconde structure parallèle dans la
-        // map pour un gain (densité de cache line) purement théorique et non
-        // mesuré : non retenu.
-        // liste des pieces répondant à la recherche (key)
-        struct array_part *search = get_parts_bigarray_with_key(mapParts, key);
-        for(int s=0; s< search->size; s++)
-        {
-            // bouchon id = 0 de la map (faces nulles) : pas une pièce
-            if(search->parts[s].id == 0)
-            {
-                continue;
-            }
-            // Position de la pieces dans faceused
-            int position = search->parts[s].id -1;
-            // Si la piece n'est pas déjà utilisée dans la suite de possibilité, on a donc une possiblité supplémentaire
-            if(!is_face_used(currPossibility->b_faceused, position))
-            {
-
-                // On ajoute la définition d'une possibilité dans la suite.
-                // effectue une copie dans le end->value
-                // put_big_table recopie le possibility_packet entier (~540 o) par
-                // candidat. La copie est intrinsèque : chaque pièce posée engendre un
-                // état de plateau distinct empilé pour exploration ultérieure (appel
-                // non récursif, une expansion par position). L'arène est déjà
-                // pré-allouée : put_big_table ne malloc qu'au doublement.
-                // Optimisation possible si le profiling le confirme : remplacer ce
-                // memcpy par un système de delta (n'enregistrer que la case modifiée).
-
-                // On se place à la fin de la suite qui correspond à la nouvelle définition
-                struct possibility_packet *pushedPossibility = put_big_table(result, currPossibility);
-                if (pushedPossibility == NULL) {
-                    // OOM : la table n'a pas été modifiée (contrat put_big_table).
-                    // On arrête d'explorer de nouvelles branches pour cette case ;
-                    // les possibilités déjà empilées restent valides.
-                    log_error("search_possiblity_light_with_big_table: put_big_table a échoué (OOM) — arrêt de l'expansion\n");
-                    break;
-                }
-                currPossibility = pushedPossibility;
-                // Dans le cas où on a déjà généré une possiblité, on libère la piece qui avait été utilisée avant de généré un nouveau jeu
-                if(lastId>0) {
-                    set_face_used(currPossibility->b_faceused, lastId - 1, 0);
-                }
-                // On place la piece
-                currPossibility->grid[x][y] = idParts[search->parts[s].id][search->parts[s].rotation];
-                // statistique du nombre de piece placée
-                currPossibility->alloc = incAlloc;
-
-                currPossibility->x = nX;
-                currPossibility->y = nY;
-                // On indique que la piece est utilisée
-                set_face_used(currPossibility->b_faceused, position, 1);
-                // identifiant de la dernière piece utilisée
-
-                lastId = search->parts[s].id;
-
-#ifdef DEBUG_CHECK_POSSIBILITY
-                int analyse = check_possibility(currPossibility, all_rotate_part);
-                if (analyse < 0)
-                {
-                    log_error("possibility error : %i\n",analyse);
-                    log_error(" ---");
-                    print_possibility_packet(currPossibility);
-                }
-#endif // DEBUG_CHECK_POSSIBILITY
-                // si toutes les pieces sont placées alors on n'entrera pas dasn le if !faceused et sortira donc
-
-#if FORWARD_CHECK_K > 0
-                // Forward-checking : on inspecte les FORWARD_CHECK_K prochaines cases
-                // pour détecter une impasse immédiate. Si une case n'a déjà plus de
-                // pièce candidate, on dépile cette branche sans la pousser dans la file.
-                // `lastId` et `currPossibility` restent valides : la prochaine itération
-                // réutilisera le même slot via `put_big_table` (memcpy sur soi) et
-                // appliquera correctement l'undo de la pièce courante via lastId.
-                if (incAlloc < ETERN_PARTS) {
-                    __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
-                    if (!forward_check_next_k(currPossibility, mapParts, all_rotate_part)) {
-                        // dépile la branche (le slot mémoire est conservé pour réutilisation
-                        // par le prochain put_big_table)
-                        result->size--;
-                        __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
-                    } else {
-                        pushed++;
-                    }
-                } else {
-                    pushed++;
-                }
-#endif // FORWARD_CHECK_K > 0
-            }
-        }
-    } else {
-        // ?? à quoi correspond % 256 : l'identifiant de la piece (reste division par 256)
-        //lastId = currPossibility->grid[x][y] % 256;
-        lastId = 1;// pour indiquer qu'on a trouvé qqc
-
-        // On remet la possibilté dans la suite car elle ne doit pas être résolu sinon on aurait arreter
-        // On poursuit sur le slot écrit dans la table : quand le paquet source
-        // n'est pas déjà ce slot (pas d'aliasing), muter l'original laisserait
-        // le slot avec alloc/x/y périmés
-        struct possibility_packet *pushedPossibility = put_big_table(result, currPossibility);
-        if (pushedPossibility == NULL) {
-            // OOM : la table n'a pas été modifiée (contrat put_big_table). On ne
-            // peut pas remettre cette possibilité en jeu ; elle est simplement
-            // perdue pour cette branche, sans corrompre la table existante.
-            log_error("search_possiblity_light_with_big_table: put_big_table a échoué (OOM) — possibilité perdue\n");
-            return 0;
-        }
-        currPossibility = pushedPossibility;
-        currPossibility->alloc = incAlloc;
-
-        currPossibility->x = nX;
-        currPossibility->y = nY;
-#if FORWARD_CHECK_K > 0
-        pushed = 1;
-#endif
-
-#ifdef DEBUG_CHECK_POSSIBILITY
-        int analyse = check_possibility(currPossibility, all_rotate_part);
-        if (analyse < 0)
-        {
-            log_error("possibility error : %i\n",analyse);
-            log_error(" ---");
-            print_possibility_packet(currPossibility);
-        }
-#endif // DEBUG_CHECK_POSSIBILITY
-#if FORWARD_CHECK_K > 0
-        // Forward-checking sur la cellule déjà pré-remplie : même logique que dans
-        // la branche principale.
-        if (incAlloc < ETERN_PARTS) {
-            __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
-            if (!forward_check_next_k(currPossibility, mapParts, all_rotate_part)) {
-                result->size--;
-                pushed = 0;
-                __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
-            }
-        }
-#endif // FORWARD_CHECK_K > 0
-    }
-
-    // On a au moins placé une piece (et passé le forward-checking si activé)
-#if FORWARD_CHECK_K > 0
-    if (pushed > 0) {
-#else
-    if (lastId > -1) {
-#endif
-        checkIfResultFound(currPossibility, all_rotate_part);
-        return incAlloc;
-    }
-    return 0;
-}
 
 /**
  * @brief Valide l'intégrité d'un `possibility_packet`.

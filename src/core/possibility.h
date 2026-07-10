@@ -243,22 +243,6 @@ int put_possibility(File *suite, struct possibility_packet *value);
 int search_possiblity_light(File *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4]);
 
 /**
- * @brief Développe un paquet en générant tous les successeurs valides (version optimisée, sortie `big_table`).
- *
- * Identique à `search_possiblity_light` mais utilise un `big_table` comme
- * tampon de résultat pour réduire les allocations dynamiques.
- *
- * @param result          Tableau dynamique de destination.
- * @param key             Clé de recherche pour la case courante (pré-calculée).
- * @param possiblity      Paquet source à développer.
- * @param mapParts        Tableau 4D de lookup.
- * @param all_rotate_part Tableau de toutes les rotations.
- * @param idParts         Table de pré-calcul des indices de rotation [id][rotation].
- * @return                Nombre de pièces dans le meilleur paquet produit, ou 0 si aucune.
- */
-int search_possiblity_light_with_big_table(big_table *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4]);
-
-/**
  * @brief Affiche un `possibility_packet` au format JSON dans les logs.
  *
  * Format : `{"alloc": N, "x": X, "y": Y, "grid": [[...], ...]}`.

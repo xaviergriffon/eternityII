@@ -4,7 +4,7 @@
  * Ce fichier inclut directement l'unité de compilation `core/etii_search.c`
  * (et non son seul en-tête). Deux raisons :
  *   1. Il expose les fonctions globales mais non déclarées dans etii_search.h
- *      (checkAndDelegatePossibilitiesIfNeeded[_with_big_table]).
+ *      (checkAndDelegatePossibilitiesIfNeeded).
  *   2. Surtout, il rend testables les helpers `static` de la boucle chaude de
  *      backtracking (bt_init_constraints, bt_propagate_place/undo,
  *      bt_count_pending, bt_forward_check) — autrement inatteignables.
@@ -26,7 +26,7 @@
 #include "core/etii_search.c"
 
 #include "app/etii_client.h"       /* client_possibility_t */
-#include "core/lifo.h"             /* File, big_table */
+#include "core/lifo.h"             /* File */
 #include "core/datamanager.h"      /* datas_size, get_last_possibility */
 #include "core/possibility.h"
 #include "core/part.h"             /* prepare_map_part, rotate_all_parts */
@@ -47,7 +47,7 @@
 #include <dirent.h>
 
 /* ======================================================================
- * checkAndDelegatePossibilitiesIfNeeded(_with_big_table)
+ * checkAndDelegatePossibilitiesIfNeeded
  *
  * Délègue au serveur les possibilités au-delà de max_stock_by_thread. En
  * l'absence de serveur (server_ip == NULL), add_possibility route vers le
@@ -106,48 +106,6 @@ TEST delegate_moves_excess_to_local_pool(void)
     PASS();
 }
 
-/* Variante big_table : même logique de délégation. */
-TEST delegate_big_table_moves_excess(void)
-{
-    drain_local();
-    max_stock_by_thread = 2;
-
-    big_table bt;
-    init_big_table(&bt, 4, sizeof(struct possibility_packet));
-    struct possibility_packet pk;
-    memset(&pk, 0, sizeof(pk));
-    for (int i = 0; i < 5; i++) { pk.alloc = (uint16_t)i; put_big_table(&bt, &pk); }
-
-    checkAndDelegatePossibilitiesIfNeeded_with_big_table(NULL, &bt);
-
-    ASSERT_EQ_FMT(3ULL, (unsigned long long)bt.size, "%llu");
-    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
-
-    clear_big_table(&bt);
-    drain_local();
-    PASS();
-}
-
-/* Variante big_table sous le seuil : aucune délégation (côté « noop » du garde). */
-TEST delegate_big_table_noop_below_threshold(void)
-{
-    drain_local();
-    max_stock_by_thread = 10;
-
-    big_table bt;
-    init_big_table(&bt, 4, sizeof(struct possibility_packet));
-    struct possibility_packet pk;
-    memset(&pk, 0, sizeof(pk));
-    for (int i = 0; i < 3; i++) { pk.alloc = (uint16_t)i; put_big_table(&bt, &pk); }
-
-    checkAndDelegatePossibilitiesIfNeeded_with_big_table(NULL, &bt);
-
-    ASSERT_EQ_FMT(3ULL, (unsigned long long)bt.size, "%llu"); /* inchangé */
-    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");                /* rien délégué */
-
-    clear_big_table(&bt);
-    PASS();
-}
 
 /* ======================================================================
  * Échec d'envoi au serveur (add_possibility != 0).
@@ -253,36 +211,6 @@ TEST delegate_file_error_reputs_locally(void)
     PASS();
 }
 
-/* Variante big_table : en plus de la remise en local par put_to_server, l'échec
- * déclenche la remise en table locale (put_big_table) des paquets extraits. */
-TEST delegate_big_table_error_reputs_to_table(void)
-{
-    drain_local();
-    max_stock_by_thread = 2;
-
-    client_possibility_t cp;
-    memset(&cp, 0, sizeof cp);
-    int fds[2]; pthread_t srv;
-    es_attach_failing_server(&cp, fds, &srv);
-
-    big_table bt;
-    init_big_table(&bt, 8, sizeof(struct possibility_packet));
-    struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    for (int i = 0; i < 5; i++) { pk.alloc = (uint16_t)i; put_big_table(&bt, &pk); }
-
-    es_silence_std();
-    checkAndDelegatePossibilitiesIfNeeded_with_big_table(&cp, &bt);
-    es_restore_std();
-
-    /* Échec : les 2 paquets extraits sont remis dans la table locale (5 au total). */
-    ASSERT_EQ_FMT(5ULL, (unsigned long long)bt.size, "%llu");
-
-    es_detach_failing_server(&cp, fds, &srv);
-    clear_big_table(&bt);
-    drain_local();
-    PASS();
-}
 
 /* ======================================================================
  * Helpers de backtracking (static dans etii_search.c).
@@ -2156,10 +2084,7 @@ SUITE(etii_search_suite)
 {
     RUN_TEST(delegate_noop_below_threshold);
     RUN_TEST(delegate_moves_excess_to_local_pool);
-    RUN_TEST(delegate_big_table_moves_excess);
-    RUN_TEST(delegate_big_table_noop_below_threshold);
     RUN_TEST(delegate_file_error_reputs_locally);
-    RUN_TEST(delegate_big_table_error_reputs_to_table);
     RUN_TEST(bt_init_constraints_empty_board);
     RUN_TEST(bt_propagate_matches_full_recompute);
     RUN_TEST(bt_propagate_covers_border_guards);
