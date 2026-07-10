@@ -2964,6 +2964,32 @@ TEST analysed_index_walks_collision_chains(void)
     PASS();
 }
 
+/* check_duplicate : le doublon est réparti sur DEUX files (split_datas après
+ * insertion) -> la comparaison croisée inter-files et l'avancée de curseur en
+ * fin de file (fp++/position=0) sont exercées, en plus de la branche « equals »
+ * cross-file. */
+TEST check_duplicate_detects_identical_packets_across_files(void)
+{
+    drain_all();
+    struct possibility_packet pks[4];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < 4; i++) {
+        pks[i].alloc = 2;
+        pks[i].grid[dirx[0]][diry[0]] = (int16_t)((i % 2) + 1); /* 2 paires identiques */
+    }
+    array_possibility_packet arr = { .size = 4, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas();               /* redistribue le stock sur plusieurs files */
+    int rc = check_duplicate();
+    restore_std();
+    ASSERT_EQ_FMT(-1, rc, "%d");
+
+    drain_all();
+    PASS();
+}
+
 /* check_duplicate : deux possibilités STRICTEMENT identiques dans le stock ->
  * le doublon est détecté (branche « equals » + compteur d'erreurs) et la
  * fonction renvoie -1. */
@@ -3046,6 +3072,7 @@ SUITE(datamanager_suite)
     RUN_TEST(check_duplicate_empty_stock_returns_immediately);
     RUN_TEST(check_duplicate_small_stock_no_error);
     RUN_TEST(check_duplicate_detects_identical_packets);
+    RUN_TEST(check_duplicate_detects_identical_packets_across_files);
 
     RUN_TEST(add_possibility_spins_until_lock_released);
     RUN_TEST(get_last_possibility_spins_until_lock_released);
