@@ -119,6 +119,20 @@ void lastcheck_publish(char *new_report) {
     pthread_mutex_unlock(&lastcheck_mutex);
 }
 
+/**
+ * @brief Voir la doc dans static_variables.h.
+ */
+int request_is_pause(int r) {
+    return r == REQUEST_PAUSE || r == REQUEST_ADMIN_PAUSE;
+}
+
+/**
+ * @brief Voir la doc dans static_variables.h.
+ */
+int request_keeps_running(int r) {
+    return r != REQUEST_STOP;
+}
+
 // TODO : deplacer dans un parametre ?
 #if ETERN_PARTS == 256
 char* parts_files = "./data/pieces.csv";

@@ -782,6 +782,108 @@ TEST exit_interpreter_client_with_children_array_exits(void)
     PASS();
 }
 
+/* ---------- admin_pause_transition (pure) -------------------------------- */
+/*
+ * Fonction pure extraite de pause_interpreter/resume_interpreter : couvre
+ * toutes les combinaisons état courant x demande (pause/resume), sans passer
+ * par le global `request` ni par le dispatch de commande.
+ */
+
+/* Demande de pause (want_pause=1) : CONTINUE et PAUSE basculent vers
+   ADMIN_PAUSE ; ADMIN_PAUSE et STOP sont inchangés (no-op). */
+TEST admin_pause_transition_pause_request(void)
+{
+    ASSERT_EQ_FMT(REQUEST_ADMIN_PAUSE, admin_pause_transition(REQUEST_CONTINUE, 1), "%d");
+    ASSERT_EQ_FMT(REQUEST_ADMIN_PAUSE, admin_pause_transition(REQUEST_PAUSE, 1), "%d");
+    ASSERT_EQ_FMT(REQUEST_ADMIN_PAUSE, admin_pause_transition(REQUEST_ADMIN_PAUSE, 1), "%d");
+    ASSERT_EQ_FMT(REQUEST_STOP, admin_pause_transition(REQUEST_STOP, 1), "%d");
+    PASS();
+}
+
+/* Demande de reprise (want_pause=0) : seul ADMIN_PAUSE bascule vers CONTINUE ;
+   REQUEST_PAUSE (régulation de débit) n'est PAS de son ressort -> inchangé. */
+TEST admin_pause_transition_resume_request(void)
+{
+    ASSERT_EQ_FMT(REQUEST_CONTINUE, admin_pause_transition(REQUEST_ADMIN_PAUSE, 0), "%d");
+    ASSERT_EQ_FMT(REQUEST_CONTINUE, admin_pause_transition(REQUEST_CONTINUE, 0), "%d");
+    ASSERT_EQ_FMT(REQUEST_PAUSE, admin_pause_transition(REQUEST_PAUSE, 0), "%d");
+    ASSERT_EQ_FMT(REQUEST_STOP, admin_pause_transition(REQUEST_STOP, 0), "%d");
+    PASS();
+}
+
+/* ---------- pause / resume interpreters (globals) ------------------------ */
+
+/* `pause` depuis REQUEST_CONTINUE : bascule en pause admin. */
+TEST do_command_line_pause_sets_admin_pause(void)
+{
+    int saved_req = request;
+    request = REQUEST_CONTINUE;
+
+    char cmd[] = "pause";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    ASSERT_EQ_FMT(REQUEST_ADMIN_PAUSE, request, "%d");
+
+    request = saved_req;
+    PASS();
+}
+
+/* `pause` depuis REQUEST_ADMIN_PAUSE : no-op (reste en pause admin). */
+TEST do_command_line_pause_is_idempotent(void)
+{
+    int saved_req = request;
+    request = REQUEST_ADMIN_PAUSE;
+
+    char cmd[] = "pause";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    ASSERT_EQ_FMT(REQUEST_ADMIN_PAUSE, request, "%d");
+
+    request = saved_req;
+    PASS();
+}
+
+/* `pause` pendant un arrêt en cours (REQUEST_STOP) : n'interfère pas. */
+TEST do_command_line_pause_noop_on_stop(void)
+{
+    int saved_req = request;
+    request = REQUEST_STOP;
+
+    char cmd[] = "pause";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    ASSERT_EQ_FMT(REQUEST_STOP, request, "%d");
+
+    request = saved_req;
+    PASS();
+}
+
+/* `resume` depuis REQUEST_ADMIN_PAUSE : reprise (-> REQUEST_CONTINUE). */
+TEST do_command_line_resume_clears_admin_pause(void)
+{
+    int saved_req = request;
+    request = REQUEST_ADMIN_PAUSE;
+
+    char cmd[] = "resume";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    ASSERT_EQ_FMT(REQUEST_CONTINUE, request, "%d");
+
+    request = saved_req;
+    PASS();
+}
+
+/* `resume` en dehors d'une pause admin (ex. REQUEST_PAUSE, régulation de débit)
+   : no-op, ne doit surtout pas interférer avec le régulateur. */
+TEST do_command_line_resume_noop_outside_admin_pause(void)
+{
+    int saved_req = request;
+    request = REQUEST_PAUSE;
+
+    char cmd[] = "resume";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    ASSERT_EQ_FMT(REQUEST_PAUSE, request, "%d");
+
+    request = saved_req;
+    PASS();
+}
+
 SUITE(command_lines_suite)
 {
     RUN_TEST(do_command_line_handles_empty_input);
@@ -823,4 +925,12 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_restore_when_not_running);
     RUN_TEST(do_command_line_restore_fails_on_missing_file);
     RUN_TEST(exit_interpreter_client_with_children_array_exits);
+
+    RUN_TEST(admin_pause_transition_pause_request);
+    RUN_TEST(admin_pause_transition_resume_request);
+    RUN_TEST(do_command_line_pause_sets_admin_pause);
+    RUN_TEST(do_command_line_pause_is_idempotent);
+    RUN_TEST(do_command_line_pause_noop_on_stop);
+    RUN_TEST(do_command_line_resume_clears_admin_pause);
+    RUN_TEST(do_command_line_resume_noop_outside_admin_pause);
 }

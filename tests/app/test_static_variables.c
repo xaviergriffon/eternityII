@@ -123,6 +123,29 @@ TEST expand_level_coexists_with_stop_on_solution(void)
     PASS();
 }
 
+/* request_is_pause : vrai pour REQUEST_PAUSE et REQUEST_ADMIN_PAUSE, faux sinon.
+   Régression visée : REQUEST_ADMIN_PAUSE doit être reconnue comme une pause par
+   les boucles chaudes (usleep + continue) au même titre que REQUEST_PAUSE, sans
+   pour autant être confondue avec elle par le régulateur de débit. */
+TEST request_is_pause_covers_both_pause_values(void)
+{
+    ASSERT_EQ_FMT(0, request_is_pause(REQUEST_STOP), "%d");
+    ASSERT_EQ_FMT(0, request_is_pause(REQUEST_CONTINUE), "%d");
+    ASSERT_EQ_FMT(1, request_is_pause(REQUEST_PAUSE), "%d");
+    ASSERT_EQ_FMT(1, request_is_pause(REQUEST_ADMIN_PAUSE), "%d");
+    PASS();
+}
+
+/* request_keeps_running : vrai pour tout sauf REQUEST_STOP. */
+TEST request_keeps_running_is_false_only_on_stop(void)
+{
+    ASSERT_EQ_FMT(0, request_keeps_running(REQUEST_STOP), "%d");
+    ASSERT_EQ_FMT(1, request_keeps_running(REQUEST_CONTINUE), "%d");
+    ASSERT_EQ_FMT(1, request_keeps_running(REQUEST_PAUSE), "%d");
+    ASSERT_EQ_FMT(1, request_keeps_running(REQUEST_ADMIN_PAUSE), "%d");
+    PASS();
+}
+
 SUITE(static_variables_suite)
 {
     RUN_TEST(flag_absent_leaves_argv_and_flag_untouched);
@@ -132,4 +155,6 @@ SUITE(static_variables_suite)
     RUN_TEST(expand_level_without_value_is_ignored);
     RUN_TEST(expand_level_negative_clamped_to_zero);
     RUN_TEST(expand_level_coexists_with_stop_on_solution);
+    RUN_TEST(request_is_pause_covers_both_pause_values);
+    RUN_TEST(request_keeps_running_is_false_only_on_stop);
 }

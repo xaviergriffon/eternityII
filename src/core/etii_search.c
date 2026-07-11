@@ -598,7 +598,7 @@ static int search_packet_backtracking(client_possibility_t *client,
         }
 
         if (request != REQUEST_CONTINUE) {
-            if (request == REQUEST_PAUSE) {
+            if (request_is_pause(request)) {
                 usleep(MICRO_SHORT_SLEEP);
                 continue;
             }
@@ -823,7 +823,7 @@ static int autosearch_step(client_possibility_t *client,
     works_snapshot = client->works;
     aposs_snapshot = client->aposs;
     pthread_mutex_unlock(&client->works_mutex);
-    while ((works_snapshot == 0 || aposs_snapshot == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+    while ((works_snapshot == 0 || aposs_snapshot == NULL) && request_keeps_running(request))
     {
         usleep(MICRO_SLEEP);
         pthread_mutex_lock(&client->works_mutex);
@@ -936,7 +936,7 @@ static int autoprune_step(client_possibility_t *client)
     works_snapshot = client->works;
     aposs_snapshot = client->aposs;
     pthread_mutex_unlock(&client->works_mutex);
-    while ((works_snapshot == 0 || aposs_snapshot == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+    while ((works_snapshot == 0 || aposs_snapshot == NULL) && request_keeps_running(request))
     {
         usleep(MICRO_SLEEP);
         pthread_mutex_lock(&client->works_mutex);
@@ -948,7 +948,7 @@ static int autoprune_step(client_possibility_t *client)
     int a = 0;
     while (client->aposs != NULL && a < client->aposs->size && request != REQUEST_STOP)
     {
-        if (request == REQUEST_PAUSE)
+        if (request_is_pause(request))
         {
             usleep(MICRO_SHORT_SLEEP);
             continue;
@@ -1105,7 +1105,7 @@ void *autoprune_gpu (void *userdata)
         works_snapshot = client->works;
         aposs_snapshot = client->aposs;
         pthread_mutex_unlock(&client->works_mutex);
-        while ((works_snapshot == 0 || aposs_snapshot == NULL) && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+        while ((works_snapshot == 0 || aposs_snapshot == NULL) && request_keeps_running(request))
         {
             usleep(MICRO_SLEEP);
             pthread_mutex_lock(&client->works_mutex);
@@ -1118,7 +1118,7 @@ void *autoprune_gpu (void *userdata)
         if (client->aposs != NULL && request != REQUEST_STOP)
         {
             // Respect d'une éventuelle limitation de débit
-            while (request == REQUEST_PAUSE)
+            while (request_is_pause(request))
             {
                 usleep(MICRO_SHORT_SLEEP);
             }
