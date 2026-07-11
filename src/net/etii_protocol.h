@@ -42,6 +42,11 @@
 /// (0 = stock suffisant). Émise par le thread d'alimentation du client à la
 /// place du keepalive : elle sert aussi de preuve d'activité de la session.
 #define INST_NEED_WORK 15
+/// Annonce d'un canal de contrôle (v9). Un client (le processus PARENT, pas
+/// les forks de recherche) s'annonce comme canal de contrôle après le
+/// handshake de version. Ouvre une session où le SERVEUR devient l'initiateur
+/// des échanges suivants (cf. control_protocol.h).
+#define INST_CONTROL_HELLO 16
 /**
  * @}
  */
