@@ -928,6 +928,14 @@ void runserver(const char* file)
     map_big_array *map_parts = prepare_map_part(rotateParts);
     free_array_part(apart);
     first_possibility(map_parts, rotateParts);
+    // Expansion du stock au démarrage (option --expand-level) : développe la
+    // genèse en de nombreuses possibilités distribuables tant que la map est
+    // vivante, pour que les clients trouvent tous du travail dès la connexion
+    // (anti-famine du démarrage). No-op si expand_min_level == 0.
+    if (expand_min_level > 0) {
+        log_event("expansion du stock au démarrage : niveau visé %i", expand_min_level);
+        expand_datas_to_level(expand_min_level, map_parts, rotateParts);
+    }
     free_bigarray(map_parts);
     /* rotateParts reste en vie : les threads TCP l'utilisent pour sérialiser
      * les solutions en CSV avec les couleurs de bord. Libéré en fin de runserver. */

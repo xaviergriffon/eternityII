@@ -1685,6 +1685,103 @@ int regroup_datas(void)
 	return 0;
 }
 
+int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part)
+{
+    if (target_level <= 0) {
+        return 0;
+    }
+
+    // Table d'indices de rotation attendue par search_possiblity_light. Dimension
+    // ETERN_PARTS+1 : les identifiants de pièces vont de 1 à ETERN_PARTS et
+    // servent d'indice (idParts[id]) — un tableau [ETERN_PARTS][4] déborderait à
+    // id == ETERN_PARTS (même dimensionnement que first_possibility).
+    int16_t idParts[ETERN_PARTS + 1][4];
+    for (int p = 0; p <= ETERN_PARTS; p++) {
+        for (int r = 0; r < 4; r++) {
+            idParts[p][r] = (int16_t)(p + ETERN_PARTS * r);
+        }
+    }
+
+    int rounds = 0;
+    int cap_reached = 0;
+    while (rounds < EXPAND_MAX_LEVELS && !cap_reached) {
+        // 1. Draine tout le pool non vérifié dans une file de travail. L'expansion
+        //    tourne au démarrage du serveur, mono-thread (aucun thread TCP ni
+        //    rmnonext lancé) : le verrou est pris par cohérence, sans contention.
+        //    Le pool est vide après ce drainage ; on le reconstruit ci-dessous.
+        File work;
+        init_file(&work, sizeof(struct possibility_packet));
+        lock_all_file();
+        for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++) {
+            struct possibility_packet drained;
+            while (scroll(&file_possibility[fp].file, &drained)) {
+                put(&work, &drained);
+            }
+        }
+        unlock_all_file();
+
+        // 2. Développe d'un niveau chaque possibilité sous le niveau cible ;
+        //    réinjecte inchangées celles qui l'ont déjà atteint. Une possibilité
+        //    sans successeur (branche morte) disparaît — élagage gratuit.
+        //
+        //    Plafond en NOMBRE (garde-fou principal) : le facteur de branchement
+        //    est inconnu et une seule passe peut exploser (des dizaines de
+        //    milliers × le branchement). On compte donc le stock reconstruit et,
+        //    dès `EXPAND_MAX_STOCK` franchi, on cesse d'approfondir : le reste du
+        //    travail est réinjecté tel quel (possibilités valides, niveau moindre).
+        //    Le stock est déjà largement suffisant pour nourrir les clients.
+        unsigned long long produced = 0;
+        int expanded_any = 0;
+        struct possibility_packet pkt;
+        while (scroll(&work, &pkt)) {
+            int deep_enough = (pkt.alloc >= (uint16_t)target_level);
+            if (deep_enough || cap_reached) {
+                array_possibility_packet *single = build_single_array_possibility_packet(&pkt);
+                add_possibility(NULL, single);
+                free_array_possibility_packet(single);
+                produced++;
+                continue;
+            }
+            expanded_any = 1;
+            key_part key;
+            what_search_to_key(all_rotate_part, &pkt, &key, mapParts->sizearrayM);
+            File children;
+            init_file(&children, sizeof(struct possibility_packet));
+            search_possiblity_light(&children, &key, &pkt, mapParts, all_rotate_part, idParts);
+            // `children` est sur la PILE : la vidange par scroll libère chaque
+            // Element ; pas de free_file (qui ferait free() de la structure pile).
+            struct possibility_packet child;
+            while (scroll(&children, &child)) {
+                array_possibility_packet *single = build_single_array_possibility_packet(&child);
+                add_possibility(NULL, single);
+                free_array_possibility_packet(single);
+                produced++;
+            }
+            if (produced >= (unsigned long long)EXPAND_MAX_STOCK) {
+                cap_reached = 1; // le reste de `work` sera réinjecté tel quel
+            }
+        }
+        // `work` est entièrement vidé par la boucle scroll ci-dessus (Elements
+        // libérés au fil de l'eau) ; comme `children`, structure pile, pas de
+        // free_file.
+
+        if (cap_reached) {
+            log_event("expansion : plafond de stock atteint (%llu ≥ %d) — arrêt de l'approfondissement",
+                      produced, EXPAND_MAX_STOCK);
+        }
+        if (!expanded_any) {
+            break; // tout le stock a atteint le niveau cible : rien de plus à faire
+        }
+        rounds++;
+    }
+
+    log_event("expansion terminée : %llu possibilités en stock (%d passe(s), niveau visé %d)",
+              datas_size(), rounds, target_level);
+    log_info("expansion : %llu possibilités en stock après %d passe(s) (niveau visé %d)\n",
+             datas_size(), rounds, target_level);
+    return rounds;
+}
+
 // Test qu'une seule fois de placer. On peut donc trouver des possibilités avec suite mais en ayant placé les cases ayant
 // qu'une seule possibilité, au tir suivant la possibilité peut avoir aucune suite car des pieces placées (1 seule poss) ont
 // pu éléminer une case à plusieurs possiblités.
