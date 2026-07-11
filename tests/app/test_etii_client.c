@@ -399,6 +399,55 @@ TEST control_step_window_resets_after_1000(void)
     PASS();
 }
 
+/* Régression : REQUEST_ADMIN_PAUSE est une pause OPÉRATEUR (commande console
+ * `pause`/`resume`), distincte de REQUEST_PAUSE (régulation de débit). Le
+ * régulateur control_step ne doit JAMAIS la lever automatiquement — ni via la
+ * branche "thread inactif" (qui lève REQUEST_PAUSE -> REQUEST_CONTINUE), ni via
+ * la branche "débit sous la limite", ni via le reset de fenêtre des 1000 tours.
+ * Sans cette garantie, la pause admin serait annulée dès le prochain tour de
+ * control_thread, la rendant inutilisable. */
+TEST control_step_does_not_touch_admin_pause(void)
+{
+    int saved_req = request;
+    unsigned long long saved_max = max_search_by_sec;
+    int saved_nb = NB_THREADS;
+    unsigned long long *saved_counters = counters;
+
+    NB_THREADS = 1;
+    max_search_by_sec = 1;
+    unsigned long long my_counters[1] = { 0ULL };
+    counters = my_counters;
+
+    client_possibility_t tp[1];
+    memset(tp, 0, sizeof tp);
+    tp[0].works = 0;                 /* thread inactif : chemin le plus agressif */
+    tp[0].aposs = NULL;
+
+    unsigned long long lastCheck[1] = { 0ULL };
+    unsigned long long oneSecond = 0;
+    int nbCheck = 0;
+    request = REQUEST_ADMIN_PAUSE;
+
+    control_step(tp, lastCheck, &oneSecond, &nbCheck);
+    ASSERT_EQ_FMT(REQUEST_ADMIN_PAUSE, request, "%d");
+
+    /* Idem sur le reset de fenêtre (nbCheck > 1000) : max_search_by_sec remis à
+       0 pour isoler ce bloc, comme control_step_window_resets_after_1000 —
+       sinon le bloc de régulation ci-dessus déréférencerait thread_params=NULL. */
+    request = REQUEST_ADMIN_PAUSE;
+    max_search_by_sec = 0;
+    oneSecond = 5;
+    nbCheck = 1001;
+    control_step(NULL, NULL, &oneSecond, &nbCheck);
+    ASSERT_EQ_FMT(REQUEST_ADMIN_PAUSE, request, "%d");
+
+    request = saved_req;
+    max_search_by_sec = saved_max;
+    NB_THREADS = saved_nb;
+    counters = saved_counters;
+    PASS();
+}
+
 /* ---------- feed_one_thread ---------------------------------------------- */
 /*
  * feed_one_thread alimente un thread en mode local (server_ip == NULL par
@@ -1055,6 +1104,7 @@ SUITE(etii_client_suite)
     RUN_TEST(control_step_low_rate_resumes);
     RUN_TEST(control_step_idle_thread_resumes);
     RUN_TEST(control_step_window_resets_after_1000);
+    RUN_TEST(control_step_does_not_touch_admin_pause);
 
     RUN_TEST(feed_one_thread_not_continue_is_noop);
     RUN_TEST(feed_one_thread_gets_work);

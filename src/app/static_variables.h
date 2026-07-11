@@ -84,6 +84,16 @@
 #define REQUEST_STOP 1
 #define REQUEST_CONTINUE 0
 #define REQUEST_PAUSE 2
+// Pause « administrative », déclenchée par la commande console `pause` (et,
+// plus tard, un canal de contrôle distant) — PAR OPPOSITION à REQUEST_PAUSE,
+// posée puis levée automatiquement par le régulateur de débit (`control_step`,
+// src/app/etii_client.c) dès que le débit repasse sous `max_search_by_sec` ou
+// qu'un thread devient inactif. Si l'on réutilisait REQUEST_PAUSE pour une
+// pause opérateur, ce même mécanisme de régulation la lèverait involontairement
+// dès le tour suivant. REQUEST_ADMIN_PAUSE n'est donc jamais touchée par
+// `control_step` (comparaisons strictes à REQUEST_PAUSE) : seule la commande
+// console `resume` (ou son équivalent distant futur) peut la lever.
+#define REQUEST_ADMIN_PAUSE 3
 
 #define DEFAULT_TCP_TIMEOUT 10
 
@@ -315,6 +325,32 @@ extern pthread_mutex_t lastcheck_mutex;
  * @param new_report Nouveau buffer à publier (peut être NULL).
  */
 void lastcheck_publish(char *new_report);
+
+/**
+ * @brief Vrai si `r` est l'une des deux valeurs de pause (régulation OU admin).
+ *
+ * Regroupe `REQUEST_PAUSE` et `REQUEST_ADMIN_PAUSE` : les boucles chaudes qui
+ * doivent juste attendre (usleep + continue) sans traiter cela comme un arrêt
+ * n'ont pas à connaître la distinction entre les deux origines de pause.
+ *
+ * @param r Valeur de `request` à tester.
+ * @return  1 si `r == REQUEST_PAUSE || r == REQUEST_ADMIN_PAUSE`, 0 sinon.
+ */
+int request_is_pause(int r);
+
+/**
+ * @brief Vrai si `r` ne signale pas un arrêt (`REQUEST_STOP`).
+ *
+ * Regroupe l'idée « on continue de tourner », que ce soit en fonctionnement
+ * normal (`REQUEST_CONTINUE`), en pause de régulation (`REQUEST_PAUSE`) ou en
+ * pause administrative (`REQUEST_ADMIN_PAUSE`) : seules les boucles d'attente
+ * de travail doivent rester actives dans ces trois cas et se terminer sur
+ * `REQUEST_STOP`.
+ *
+ * @param r Valeur de `request` à tester.
+ * @return  1 si `r != REQUEST_STOP`, 0 sinon.
+ */
+int request_keeps_running(int r);
 
 // TODO : deplacer dans un parametre ?
 extern char* parts_files;

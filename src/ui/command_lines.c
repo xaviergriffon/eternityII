@@ -12,7 +12,7 @@
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
-#define NB_COMMANDS 28
+#define NB_COMMANDS 30
 
 /**
  * @brief Définition d'une commande prise en charge
@@ -55,6 +55,8 @@ int restockanalysed_interpreter(void);
 int min_interpreter(void);
 int help_interpreter(void);
 int statistic_interpreter(void);
+int pause_interpreter(void);
+int resume_interpreter(void);
 
 /**
  * @brief Commandes prises en charge.
@@ -87,7 +89,9 @@ static command_description commands[NB_COMMANDS] = {
     {"restockanalysed", restockanalysed_interpreter, 0},
     {"statistic", statistic_interpreter, 0},
     {"min", min_interpreter, 1},
-    {"help", help_interpreter, 0}
+    {"help", help_interpreter, 0},
+    {"pause", pause_interpreter, 1},
+    {"resume", resume_interpreter, 1}
 };
 
 /** @brief Interpréteur de la commande `sorta` : tri ascendant des possibilités. */
@@ -443,6 +447,65 @@ int expand_interpreter(void) {
     free_array_part(rotateParts);
     free_array_part(apart);
 
+    return 0;
+}
+
+/**
+ * @brief Voir la doc dans command_lines.h.
+ */
+int admin_pause_transition(int current, int want_pause) {
+    if (want_pause) {
+        if (current == REQUEST_CONTINUE || current == REQUEST_PAUSE) {
+            return REQUEST_ADMIN_PAUSE;
+        }
+        // Déjà en pause admin, ou en arrêt : inchangé.
+        return current;
+    }
+    if (current == REQUEST_ADMIN_PAUSE) {
+        return REQUEST_CONTINUE;
+    }
+    // Pas en pause admin (continue, pause de régulation, ou arrêt) : inchangé.
+    return current;
+}
+
+/**
+ * @brief Interpréteur de `pause` : pose une pause administrative (`REQUEST_ADMIN_PAUSE`).
+ *
+ * Contrairement à `REQUEST_PAUSE` (régulation de débit, levée automatiquement
+ * par `control_step`), cette pause ne peut être levée que par la commande
+ * `resume` — cf. la note dans static_variables.h. No-op si déjà en pause admin
+ * ou si le processus est en cours d'arrêt (`REQUEST_STOP`).
+ */
+int pause_interpreter(void) {
+    int previous = request;
+    int updated = admin_pause_transition(previous, 1);
+    request = updated;
+    if (updated == REQUEST_ADMIN_PAUSE && previous != REQUEST_ADMIN_PAUSE) {
+        log_event("pause administrative demandée : recherche mise en pause\n");
+    } else if (previous == REQUEST_ADMIN_PAUSE) {
+        log_info("pause : déjà en pause administrative\n");
+    } else {
+        log_error("pause : impossible (arrêt en cours)\n");
+    }
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `resume` : lève une pause administrative (`REQUEST_ADMIN_PAUSE`).
+ *
+ * No-op si le processus n'est pas en pause administrative (par ex. déjà en
+ * fonctionnement normal, ou en pause de régulation de débit — laissée à
+ * `control_step`).
+ */
+int resume_interpreter(void) {
+    int previous = request;
+    int updated = admin_pause_transition(previous, 0);
+    request = updated;
+    if (updated == REQUEST_CONTINUE && previous == REQUEST_ADMIN_PAUSE) {
+        log_event("pause administrative levée : reprise de la recherche\n");
+    } else {
+        log_info("resume : pas de pause administrative en cours\n");
+    }
     return 0;
 }
 

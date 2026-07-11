@@ -167,7 +167,7 @@ void *feed_thread_aposs(void *param) {
     // Pause courante quand le serveur n'a rien à fournir (0 = pas de back-off
     // en cours, on utilise alors la cadence normale THREAD_MICRO_SLEEP).
     useconds_t no_work_sleep = 0;
-    while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
+    while (request_keeps_running(request)) {
         int needed_work = 0; // threads ayant demandé du travail ce tour
         int got_work = 0;    // threads ayant effectivement reçu du travail
         for(int i = 0; i < NB_THREADS; i++)
@@ -187,7 +187,7 @@ void *feed_thread_aposs(void *param) {
             // Découpage en tranches pour que REQUEST_STOP interrompe le back-off
             // sans attendre la totalité de no_work_sleep (jusqu'à 500 ms).
             useconds_t remaining = no_work_sleep;
-            while (remaining > 0 && (request == REQUEST_CONTINUE || request == REQUEST_PAUSE))
+            while (remaining > 0 && request_keeps_running(request))
             {
                 useconds_t step = remaining < THREAD_MICRO_SLEEP ? remaining : THREAD_MICRO_SLEEP;
                 usleep(step);
