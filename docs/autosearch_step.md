@@ -2,7 +2,7 @@
 
 ## Vue d'ensemble
 
-`autosearch` ([src/core/etii_search.c:797](../src/core/etii_search.c)) est un pthread lancé par `runThreadClient` ou `run_mono_client`. Il boucle indéfiniment en appelant `autosearch_step`, qui constitue **un cycle complet de travail** : attente d'un lot de possibilités → exploration par backtracking → délégation / renvoi → acquittement.
+`autosearch` ([src/core/etii_search.c:889](../src/core/etii_search.c)) est un pthread lancé par `runThreadClient` ou `run_mono_client`. Il boucle indéfiniment en appelant `autosearch_step`, qui constitue **un cycle complet de travail** : attente d'un lot de possibilités → exploration par backtracking → délégation / renvoi → acquittement.
 
 ```
 autosearch()
@@ -124,13 +124,26 @@ Toutes les **1 000 000 itérations**, si au moins 500 ms se sont écoulées depu
 bt_count_pending(board, stack, top)
    │  compte les frères non encore explorés dans la pile
    ▼
-si pending > max_stock_by_thread :
-   bt_materialize_pending()     ← reconstruit max_stock_by_thread paquets
+quota = bt_delegation_quota(pending, max_stock_by_thread, server_hunger)
+   │  pending > max_stock_by_thread → max_stock_by_thread   (règle historique)
+   │  sinon, si le serveur a faim   → min(faim, pending/2)  (délégation anticipée, v8)
+   │  sinon                          → 0 (aucun envoi)
+   ▼
+si quota > 0 :
+   bt_materialize_pending()     ← reconstruit quota paquets
    add_possibility(client, aposs)   TCP INST_ADD → serveur
    stack[i].next_s = new_next_s[i] ← marque les niveaux délégués
+   server_hunger -= envoyés         (si délégation anticipée)
 ```
 
 Les niveaux sont matérialisés **du plus profond vers la racine** (petites unités de travail en priorité, cohérent avec l'ordre LIFO historique). La mise à jour de `next_s` n'a lieu qu'après un envoi **réussi** : en cas d'échec, le travail reste local.
+
+`server_hunger` est la **faim du serveur** publiée par le thread d'alimentation
+(sonde `INST_NEED_WORK` toutes les ~2 s, protocole v8 — voir
+[echanges_client_serveur.md](echanges_client_serveur.md)) : elle autorise une
+délégation *sous* le seuil quand le stock serveur ne suffit plus à nourrir les autres
+clients (famine du démarrage). Le thread ne cède jamais le chemin courant ni son
+dernier frère (`pending < 2` → quota 0), et au plus la moitié de son stock implicite.
 
 ### 1.6 Solution trouvée
 
@@ -235,11 +248,16 @@ client->aposs = NULL;
 
 #### Délégation : `bt_delegate_if_needed`
 
+Pas de malloc/free par appel : le conteneur `array_possibility_packet` (8 octets)
+vit sur la pile, et les paquets matérialisés sont écrits dans le **buffer
+pré-alloué du thread** (`client->delegate_buf`), dimensionné au quota demandé et
+réutilisé d'une délégation à l'autre (`bt_ensure_delegate_buf` ne `realloc` que si
+la capacité doit grandir). Libéré une seule fois, à la sortie d'`autosearch`.
+
 ```
-malloc(sizeof(array_possibility_packet))
-malloc(sizeof(possibility_packet) * max_stock_by_thread)
-// ↓ après add_possibility()
-free_array_possibility_packet(aposs)              // libération immédiate
+bt_ensure_delegate_buf(client, quota)   // realloc uniquement si capacité < quota
+array_possibility_packet aposs = { .possibilities = client->delegate_buf }  // pile
+// add_possibility() copie les paquets : le buffer reste réutilisable
 ```
 
 #### Renvoi sur arrêt : `bt_flush_pending`
@@ -301,8 +319,8 @@ client->aposs = aposs                        ← transfert de propriété
   ▼ (thread recherche)
 board = copy of aposs->possibilities[a]      ← memcpy sur pile (stack)
   │  boucle de backtracking modifie board
-  │  délégation → memcpy vers aposs2->possibilities[] ← malloc temporaire
-  │                → add_possibility() → free(aposs2)
+  │  délégation → memcpy vers client->delegate_buf[]  ← buffer pré-alloué réutilisé
+  │                → add_possibility() (copie ; le buffer reste au thread)
   ▼
 free_array_possibility_packet(client->aposs) ← free (fin autosearch_step)
 client->aposs = NULL
@@ -326,6 +344,7 @@ autosearch_step()
 │           ├─ [REQUEST_PAUSE]         → usleep(10µs) continue
 │           ├─ [REQUEST_STOP]          → bt_flush_pending() + return 1
 │           ├─ [toutes les 1M iter]    → bt_delegate_if_needed() → TCP INST_ADD
+│           │     (seuil dépassé, OU faim serveur publiée par la sonde INST_NEED_WORK — v8)
 │           │
 │           ├─ AVANCER (haut du for) :
 │           │   ├─ depth = start_depth + top + 1

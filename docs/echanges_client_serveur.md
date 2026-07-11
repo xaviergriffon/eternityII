@@ -29,6 +29,7 @@ flowchart LR
         A --- B
     end
     C1[Client recherche<br/>tcpclient] -- "INST_GET / INST_ADD" --> Q
+    C1 -. "INST_NEED_WORK (sonde de faim, v8)" .-> Q
     C2[Client recherche 2] -- "INST_GET / INST_ADD" --> Q
     P[Pruner<br/>tcppruner / gpupruner] -- "GET_TO_CHECK_BATCH /<br/>ANALYSED_BATCH" --> A
     C1 -- "INST_SOLUTION" --> Serveur
@@ -57,6 +58,7 @@ réassemblent les envois TCP partiels (voir [Robustesse](#comportement-en-cas-de
 | `INST_GET_TO_CHECK` | 12 | pruner → serveur | Demande une possibilité non vérifiée (réponse : `int32` K + K paquets) |
 | `INST_GET_TO_CHECK_BATCH` | 13 | pruner → serveur | Demande jusqu'à N possibilités en un aller-retour (`int32` N → `int32` K + K paquets) |
 | `INST_POSSIBILITY_ANALYSED_BATCH` | 14 | pruner → serveur | Signale M possibilités analysées (`int32` M + M paquets → un seul `INST_CONSIDERED`) |
+| `INST_NEED_WORK` | 15 | client → serveur | Sonde de faim (v8) : réponse `int32` N = nombre de possibilités que le serveur souhaiterait recevoir (0 = stock suffisant). Tient lieu de keepalive et pilote la [délégation anticipée](#gestion-de-charge) |
 
 Toute évolution du format « fil » impose d'incrémenter `VERSION` : le handshake exige
 une correspondance exacte.
@@ -94,7 +96,11 @@ sequenceDiagram
     C->>S: INST_GET
     S-->>C: int32 K (0 ou 1) + K possibilités
     Note over C: exploration locale (autosearch),<br/>le stock local grossit
-    loop tant que stock local > max_stock_by_thread
+    loop toutes les ~2 s (thread d'alimentation)
+        C->>S: INST_NEED_WORK
+        S-->>C: int32 faim (0 = rassasié)
+    end
+    loop stock local > max_stock_by_thread,<br/>OU serveur affamé (délégation anticipée)
         C->>S: INST_ADD + possibilité
         S-->>C: INST_CONSIDERED
     end
@@ -140,15 +146,34 @@ n'est **pas** partagée entre les workers : chaque contexte de recherche
 (`client_possibility_t`, `src/app/etii_client.h`) possède son propre `socket_id`,
 ouvert à la demande par `check_and_connect_to_server`. Un serveur avec N clients ×
 M threads voit donc jusqu'à N×M connexions. Au sein d'un contexte, le socket est en
-revanche partagé entre le thread de travail et le thread keepalive : le mutex
-`socket_mutex` sérialise leurs échanges pour qu'une séquence
-`send_instruction + send + recv ack` ne soit jamais entrelacée avec un ping.
+revanche partagé entre le thread de travail et le thread d'alimentation (qui émet la
+sonde de faim / keepalive) : le mutex `socket_mutex` sérialise leurs échanges pour
+qu'une séquence `send_instruction + send + recv ack` ne soit jamais entrelacée avec
+une sonde.
 
 **Côté client — seuil de stock local.** Chaque thread de recherche garde au plus
-`max_stock_by_thread` possibilités en local (3ᵉ argument de `tcpclient`). Dès que sa
-file ou son `big_table` dépasse ce seuil, l'excédent est délégué au serveur via des
-`INST_ADD` (voir `src/core/etii_search.c`). Le client reste ainsi autonome (peu
-d'allers-retours tant qu'il a du travail) tout en alimentant le stock global.
+`max_stock_by_thread` possibilités en local (3ᵉ argument de `tcpclient`). Dès que son
+stock implicite (les frères non explorés de sa pile de backtracking) dépasse ce seuil,
+l'excédent est délégué au serveur via des `INST_ADD` (voir `src/core/etii_search.c`).
+Le client reste ainsi autonome (peu d'allers-retours tant qu'il a du travail) tout en
+alimentant le stock global.
+
+**Sonde de faim et délégation anticipée (v8).** Le seuil seul laissait le serveur
+affamé au démarrage : le paquet genèse part chez un premier thread dont le stock
+implicite reste longtemps sous `max_stock_by_thread` — il ne délègue rien, pendant que
+tous les autres clients reçoivent K=0 et reculent en back-off. Depuis la v8, le thread
+d'alimentation du client sonde le serveur (`INST_NEED_WORK`, toutes les
+`min(tcp_timeout/2, NEED_WORK_POLL_INTERVAL_S)` secondes, pour chaque thread occupé
+disposant d'un socket) ; le serveur répond sa **faim** (`compute_server_hunger`,
+`src/app/etii_server.c`) : le manque de stock distribuable par rapport à la cible
+`SERVER_HUNGER_PER_CLIENT × sessions connectées`, plafonné à `SERVER_HUNGER_CAP`. La
+faim est publiée dans la globale atomique `server_hunger` ; les threads de recherche la
+lisent dans leur bloc de délégation déjà throttlé (1 M nœuds ET 500 ms) et, si elle est
+positive, cèdent `min(faim, pending/2)` frères même sous le seuil
+(`bt_delegation_quota`, `src/core/etii_search.c`) — jamais le chemin courant ni le
+dernier frère. La faim est décrémentée du nombre envoyé, jusqu'à la prochaine sonde.
+Coût pour la boucle chaude de recherche : aucun (une lecture atomique au plus 2×/s,
+dans un bloc déjà exécuté à cette cadence).
 
 **Côté serveur — files multiples.** Le serveur répartit les possibilités sur
 `NB_FILE_POSSIBILITY` (10) files protégées chacune par un mutex
@@ -181,11 +206,15 @@ la charge accumulée survit à un redémarrage.
   client ne reste jamais bloqué indéfiniment sur un serveur muet.
 - **Keepalive.** Un worker occupé sur son stock local peut ne rien envoyer pendant
   longtemps ; côté serveur, `tcp_timeout` d'inactivité fermerait la connexion
-  (Broken pipe). Un thread keepalive émet donc `INST_TEST_CONNECTED` toutes les
-  `tcp_timeout/2` secondes pendant les périodes d'inactivité ; le serveur répond la
-  même instruction. Cela distingue « client silencieux mais vivant » de « client mort ».
-- **Détection côté client.** Si le keepalive ou un échange échoue, le client détecte la
-  perte au plus tard après `tcp_timeout` et passe en reconnexion.
+  (Broken pipe). Le thread d'alimentation émet donc la sonde de faim `INST_NEED_WORK`
+  (toutes les `min(tcp_timeout/2, 2 s)` pendant les périodes d'inactivité) : l'échange
+  réussi prouve la session vivante, et sa réponse pilote la délégation anticipée.
+  Cela distingue « client silencieux mais vivant » de « client mort ».
+  `INST_TEST_CONNECTED` reste utilisé pour les contrôles ponctuels de connexion
+  (`is_connected`, avant de réutiliser un socket existant).
+- **Détection côté client.** Si la sonde ou un échange échoue, le client détecte la
+  perte au plus tard après `tcp_timeout`, oublie le socket et remet la faim à zéro
+  (pas de délégation sur une information morte), puis passe en reconnexion.
 
 ### Connexion impossible / reconnexion
 
