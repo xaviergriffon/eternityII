@@ -116,6 +116,53 @@ TEST is_connected_false_on_end(void)
     PASS();
 }
 
+/* poll_server_hunger : envoie INST_NEED_WORK et lit la faim (int32) répondue
+ * par le serveur. Réponse pré-chargée sur le pair (comme les tests is_connected). */
+TEST poll_server_hunger_reads_reply(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    int32_t reply = 42;
+    ASSERT_EQ((long)sizeof(reply), send_all(sv[1], &reply, sizeof(reply)));
+
+    ASSERT_EQ_FMT(42, poll_server_hunger(sv[0]), "%d");
+    /* Le pair a bien reçu l'instruction de sonde. */
+    ASSERT_EQ_FMT((int)INST_NEED_WORK, (int)recv_instruction(sv[1]), "%d");
+
+    close(sv[0]);
+    close(sv[1]);
+    PASS();
+}
+
+/* poll_server_hunger == -1 quand le pair est fermé (le socket est alors fermé
+ * par la sonde elle-même, comme is_connected). */
+TEST poll_server_hunger_fails_on_peer_close(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+    close(sv[1]); /* pair fermé -> send ou recv échoue */
+
+    ASSERT_EQ_FMT(-1, poll_server_hunger(sv[0]), "%d");
+    /* sv[0] fermé par poll_server_hunger dans ce chemin. */
+    PASS();
+}
+
+/* poll_server_hunger == -1 sur une réponse négative (protocole corrompu). */
+TEST poll_server_hunger_rejects_negative_reply(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    int32_t reply = -7;
+    ASSERT_EQ((long)sizeof(reply), send_all(sv[1], &reply, sizeof(reply)));
+
+    ASSERT_EQ_FMT(-1, poll_server_hunger(sv[0]), "%d");
+    /* sv[0] fermé par la sonde. */
+    close(sv[1]);
+    PASS();
+}
+
 /* close_socket émet INST_END au pair avant de fermer : le pair le reçoit. */
 TEST close_socket_sends_end_before_closing(void)
 {
@@ -243,6 +290,9 @@ SUITE(etii_protocol_suite)
     RUN_TEST(is_connected_true_when_peer_echoes);
     RUN_TEST(is_connected_false_on_end);
     RUN_TEST(close_socket_sends_end_before_closing);
+    RUN_TEST(poll_server_hunger_reads_reply);
+    RUN_TEST(poll_server_hunger_fails_on_peer_close);
+    RUN_TEST(poll_server_hunger_rejects_negative_reply);
     RUN_TEST(handshake_verdict_distinguishes_outcomes);
     RUN_TEST(send_instruction_error_on_broken_socket);
     RUN_TEST(is_connected_false_when_send_fails);

@@ -179,6 +179,31 @@ int is_connected(int socket_id) {
 	return 1;
 }
 
+int32_t poll_server_hunger(int socket_id) {
+	long result = send_instruction(socket_id, INST_NEED_WORK);
+	if (result <= 0) {
+		log_info("socket deconnected s\n");
+#ifdef DEBUG_SOCKET
+		opened_tcp--;
+#endif // DEBUG_SOCKET
+		shutdown(socket_id, 2);
+		close(socket_id);
+		return -1;
+	}
+	int32_t hunger = 0;
+	if (recv_all(socket_id, &hunger, sizeof(hunger)) != (long)sizeof(hunger)
+	    || hunger < 0) {
+		log_error("Error on need work poll\n");
+#ifdef DEBUG_SOCKET
+		opened_tcp--;
+#endif // DEBUG_SOCKET
+		shutdown(socket_id, 2);
+		close(socket_id);
+		return -1;
+	}
+	return hunger;
+}
+
 /**
  * @brief Ferme proprement un socket TCP en envoyant `INST_END` au préalable.
  * @param socket_id Descripteur du socket à fermer.

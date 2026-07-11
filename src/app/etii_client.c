@@ -124,22 +124,34 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
     }
     else if (client_possibility->socket_id != -1)
     {
-        // Keepalive : un worker occupé sur son stock local ne parle pas
-        // au serveur. Sans ping, le serveur ferme la session après
-        // tcp_timeout secondes d'inactivité (SO_RCVTIMEO) → Broken pipe
-        // à la prochaine I/O. On pingue donc avant l'échéance.
+        // Sonde de faim + keepalive : un worker occupé sur son stock local ne
+        // parle pas au serveur. Sans échange, le serveur ferme la session après
+        // tcp_timeout secondes d'inactivité (SO_RCVTIMEO) → Broken pipe à la
+        // prochaine I/O. On sonde donc la faim du serveur (INST_NEED_WORK)
+        // avant l'échéance : l'échange prouve la session vivante ET rapporte
+        // combien de possibilités le serveur voudrait recevoir — publié dans
+        // `server_hunger` pour déclencher la délégation anticipée des threads
+        // de recherche (bt_delegate_if_needed).
         time_t now = time(NULL);
         int interval = (tcp_timeout > 2) ? (tcp_timeout / 2) : 1;
+        if (interval > NEED_WORK_POLL_INTERVAL_S)
+        {
+            interval = NEED_WORK_POLL_INTERVAL_S;
+        }
         if (now - client_possibility->last_socket_activity >= interval)
         {
             pthread_mutex_lock(&client_possibility->socket_mutex);
             if (client_possibility->socket_id != -1) {
-                if (is_connected(client_possibility->socket_id)) {
+                int32_t hunger = poll_server_hunger(client_possibility->socket_id);
+                if (hunger >= 0) {
                     client_possibility->last_socket_activity = now;
+                    __atomic_store_n(&server_hunger, (int)hunger, __ATOMIC_RELAXED);
                 } else {
-                    // Déjà fermée : on oublie le socket, il sera rouvert
-                    // au prochain besoin de travail.
+                    // Connexion rompue (socket fermé par la sonde) : on oublie
+                    // le socket, il sera rouvert au prochain besoin de travail.
+                    // Faim remise à zéro : ne pas déléguer sur une info morte.
                     client_possibility->socket_id = -1;
+                    __atomic_store_n(&server_hunger, 0, __ATOMIC_RELAXED);
                 }
             }
             pthread_mutex_unlock(&client_possibility->socket_mutex);

@@ -749,6 +749,69 @@ TEST bt_delegate_reuses_and_grows_buffer(void)
     PASS();
 }
 
+/* bt_delegation_quota : au-dessus du seuil, règle historique — max_stock cédés,
+ * que le serveur ait faim ou non. */
+TEST delegation_quota_above_threshold_ignores_hunger(void)
+{
+    ASSERT_EQ_FMT(10, bt_delegation_quota(11ULL, 10, 0), "%d");
+    ASSERT_EQ_FMT(10, bt_delegation_quota(11ULL, 10, 500), "%d");
+    ASSERT_EQ_FMT(10, bt_delegation_quota(1000ULL, 10, -3), "%d");
+    PASS();
+}
+
+/* bt_delegation_quota : sous le seuil, aucune délégation sans faim (0 ou
+ * négative), ni quand il ne reste qu'un frère (le thread ne se vide pas). */
+TEST delegation_quota_below_threshold_needs_hunger(void)
+{
+    ASSERT_EQ_FMT(0, bt_delegation_quota(3ULL, 10, 0), "%d");
+    ASSERT_EQ_FMT(0, bt_delegation_quota(3ULL, 10, -1), "%d");
+    ASSERT_EQ_FMT(0, bt_delegation_quota(0ULL, 10, 5), "%d");
+    ASSERT_EQ_FMT(0, bt_delegation_quota(1ULL, 10, 5), "%d");
+    PASS();
+}
+
+/* bt_delegation_quota : délégation anticipée = min(faim, pending/2). */
+TEST delegation_quota_anticipates_capped_at_half(void)
+{
+    ASSERT_EQ_FMT(3, bt_delegation_quota(10ULL, 300, 3), "%d");   /* faim < moitié */
+    ASSERT_EQ_FMT(5, bt_delegation_quota(10ULL, 300, 50), "%d");  /* moitié < faim */
+    ASSERT_EQ_FMT(1, bt_delegation_quota(2ULL, 300, 50), "%d");   /* moitié = 1     */
+    ASSERT_EQ_FMT(1, bt_delegation_quota(3ULL, 300, 1), "%d");
+    PASS();
+}
+
+/* bt_delegate_if_needed : stock sous le seuil MAIS serveur affamé
+ * (server_hunger > 0) -> délégation anticipée d'au plus pending/2, pile
+ * avancée, faim décrémentée du nombre envoyé. */
+TEST bt_delegate_hunger_moves_below_threshold(void)
+{
+    drain_local();
+    ensure_counters();
+    max_stock_by_thread = 10;                 /* pending (3) sous le seuil */
+    __atomic_store_n(&server_hunger, 1, __ATOMIC_RELAXED);
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts);
+
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");           /* 1 possibilité cédée   */
+    ASSERT_EQ_FMT(2, stack[1].next_s, "%d");             /* niveau profond avancé */
+    ASSERT_EQ_FMT(2ULL, lastfilesize[0], "%llu");        /* 3 - 1 restant local   */
+    /* Faim consommée : 1 - 1 = 0. */
+    ASSERT_EQ_FMT(0, __atomic_load_n(&server_hunger, __ATOMIC_RELAXED), "%d");
+
+    if (client.delegate_buf != NULL) free(client.delegate_buf);
+    __atomic_store_n(&server_hunger, 0, __ATOMIC_RELAXED);
+    drain_local();
+    PASS();
+}
+
 /* bt_flush_pending : renvoie TOUS les frères (3) + le paquet du chemin courant. */
 TEST bt_flush_pending_sends_all_plus_current(void)
 {
@@ -2106,6 +2169,10 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_delegate_moves_excess_to_local);
     RUN_TEST(bt_delegate_reuses_and_grows_buffer);
     RUN_TEST(bt_delegate_error_keeps_stack);
+    RUN_TEST(delegation_quota_above_threshold_ignores_hunger);
+    RUN_TEST(delegation_quota_below_threshold_needs_hunger);
+    RUN_TEST(delegation_quota_anticipates_capped_at_half);
+    RUN_TEST(bt_delegate_hunger_moves_below_threshold);
     RUN_TEST(bt_flush_pending_sends_all_plus_current);
     RUN_TEST(bt_flush_error_reputs_locally);
     RUN_TEST(search_backtracking_stop_flushes_and_returns_one);

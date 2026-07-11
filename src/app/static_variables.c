@@ -151,6 +151,9 @@ unsigned long long max_search_by_sec = 0;
 
 int max_stock_by_thread = MAX_STOCK_BY_THREAD;
 
+// Faim du serveur (réponse INST_NEED_WORK), accès via __atomic_* uniquement.
+int server_hunger = 0;
+
 int communication_in_progress = 0;
 
 #ifdef DEBUG_SOCKET

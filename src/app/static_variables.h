@@ -11,7 +11,10 @@
 // v7 : réponse GET unitaire cadrée (int32 K + K paquets, send_all/recv_all)
 // au lieu du send()/recv() brut discriminé par la longueur (INST_NULL 1 octet
 // vs paquet ~520 octets) — une lecture TCP partielle désynchronisait le flux.
-#define VERSION 7
+// v8 : INST_NEED_WORK (sonde de faim du serveur, réponse int32) — permet la
+// délégation anticipée quand le stock serveur ne suffit plus à nourrir les
+// autres clients (famine du démarrage).
+#define VERSION 8
 
 #define NB_CONNECTIONS_PER_THREAD 1
 // Temps d'attente de 100 microsecondes
@@ -28,6 +31,19 @@
 // travail est obtenu. Bornes en microsecondes.
 #define NO_WORK_SLEEP_START 50000    // 50 ms : première pause après un cycle à vide
 #define NO_WORK_SLEEP_MAX  500000    // 0,5 s : plafond (sous la limite usleep POSIX de 1 s)
+// Cadence (secondes) de la sonde de faim du serveur (INST_NEED_WORK) émise par
+// le thread d'alimentation pour chaque thread occupé disposant d'un socket.
+// Elle remplace le keepalive INST_TEST_CONNECTED (un échange réussi prouve la
+// session vivante) : l'intervalle effectif est min(tcp_timeout/2, cette valeur).
+#define NEED_WORK_POLL_INTERVAL_S 2
+// Faim du serveur par client actif : le serveur vise un stock d'au moins
+// SERVER_HUNGER_PER_CLIENT × sessions connectées (marge pour que chaque GET
+// trouve une possibilité), et publie le manque via INST_NEED_WORK.
+#define SERVER_HUNGER_PER_CLIENT 2
+// Plafond de la faim annoncée par le serveur : borne la matérialisation et
+// l'envoi demandés aux clients occupés (chaque thread cède déjà au plus la
+// moitié de son stock implicite, mais tous peuvent répondre en même temps).
+#define SERVER_HUNGER_CAP 1000
 #define MAX_STOCK_BY_THREAD 300
 // Intervalle minimal entre deux délégations de possibilités au serveur (ms).
 // Une délégation coûte jusqu'à max_stock_by_thread aller-retours TCP synchrones
@@ -301,6 +317,12 @@ extern int SERVER_PORT;
 extern unsigned long long max_search_by_sec;
 
 extern int max_stock_by_thread;
+
+// Dernière faim du serveur connue du processus (réponse INST_NEED_WORK) :
+// écrite par le thread d'alimentation (sonde), lue par les threads de recherche
+// dans le bloc throttlé de délégation, décrémentée après une délégation
+// anticipée. Toujours via __atomic_* (accès inter-threads sans mutex).
+extern int server_hunger;
 
 extern int communication_in_progress;
 

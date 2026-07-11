@@ -397,6 +397,71 @@ TEST step_test_connected_pings_back(void)
     PASS();
 }
 
+/* compute_server_hunger (fonction pure) : cible = 2 × clients actifs,
+ * faim = manque par rapport à la cible, plafonnée à SERVER_HUNGER_CAP. */
+TEST compute_server_hunger_targets_two_per_client(void)
+{
+    /* Aucun client : pas de faim, quel que soit le stock. */
+    ASSERT_EQ_FMT(0, compute_server_hunger(0ULL, 0), "%d");
+    ASSERT_EQ_FMT(0, compute_server_hunger(0ULL, -1), "%d");
+    /* Stock au niveau ou au-dessus de la cible : rassasié. */
+    ASSERT_EQ_FMT(0, compute_server_hunger(2ULL, 1), "%d");
+    ASSERT_EQ_FMT(0, compute_server_hunger(100ULL, 8), "%d");
+    /* Manque = cible - stock. */
+    ASSERT_EQ_FMT(2, compute_server_hunger(0ULL, 1), "%d");
+    ASSERT_EQ_FMT(16, compute_server_hunger(0ULL, 8), "%d");
+    ASSERT_EQ_FMT(6, compute_server_hunger(10ULL, 8), "%d");
+    /* Plafond SERVER_HUNGER_CAP. */
+    ASSERT_EQ_FMT((int)SERVER_HUNGER_CAP, compute_server_hunger(0ULL, SERVER_HUNGER_CAP), "%d");
+    PASS();
+}
+
+/* INST_NEED_WORK (v8) : après handshake, le serveur répond sa faim (int32 ≥ 0),
+ * cohérente avec compute_server_hunger sur son état courant, et on continue. */
+TEST step_need_work_replies_hunger(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;                 /* handshake déjà réalisé */
+
+    int32_t expected = compute_server_hunger(datas_size(), get_active_threads(thread_params));
+
+    int cont = communicate_with_client_step(&client, INST_NEED_WORK, &last, &vsupp);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    int32_t hunger = -1;
+    ASSERT_EQ((long)sizeof(hunger), recv_all(sv[1], &hunger, sizeof(hunger)));
+    ASSERT(hunger >= 0);
+    ASSERT_EQ_FMT(expected, hunger, "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* INST_NEED_WORK sans handshake de version : refus + arrêt, comme INST_GET. */
+TEST step_need_work_requires_version(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 0;
+
+    int cont = communicate_with_client_step(&client, INST_NEED_WORK, &last, &vsupp);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+    ASSERT_EQ_FMT((int)INST_UNSUPPORTED_VERSION, (int)recv_instruction(sv[1]), "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
 /* Instruction métier sans handshake de version : refus + arrêt. */
 TEST step_unsupported_version_stops(void)
 {
@@ -1868,6 +1933,9 @@ SUITE(etii_server_suite)
     RUN_TEST(requeue_mixed_batch_returns_only_unacked);
 
     RUN_TEST(step_test_connected_pings_back);
+    RUN_TEST(compute_server_hunger_targets_two_per_client);
+    RUN_TEST(step_need_work_replies_hunger);
+    RUN_TEST(step_need_work_requires_version);
     RUN_TEST(step_unsupported_version_stops);
     RUN_TEST(disconnect_reason_classifies_last_instruction);
     RUN_TEST(step_check_version_ok);
