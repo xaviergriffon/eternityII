@@ -14,7 +14,11 @@
 // v8 : INST_NEED_WORK (sonde de faim du serveur, réponse int32) — permet la
 // délégation anticipée quand le stock serveur ne suffit plus à nourrir les
 // autres clients (famine du démarrage).
-#define VERSION 8
+// v9 : INST_CONTROL_HELLO — un canal de contrôle TCP dédié où le serveur
+// devient l'initiateur, transportant des trames cadrées CTRL_* (cf.
+// control_protocol.h). N'affecte pas le protocole de travail existant
+// (GET/ADD/ANALYSED), qui reste inchangé.
+#define VERSION 9
 
 #define NB_CONNECTIONS_PER_THREAD 1
 // Temps d'attente de 100 microsecondes

@@ -1,0 +1,187 @@
+/**
+ * @file control_protocol.h
+ * @brief Codec du futur canal de contrôle (connexion TCP additionnelle,
+ *        SERVEUR initiateur) : constantes de trame + (dé)sérialisation pure.
+ *
+ * Ce module est autonome : il ne branche ni le serveur ni le client sur le
+ * canal de contrôle (ce sera l'objet de PR ultérieures). Il livre :
+ *  - le format de trame générique CTRL_* (cmd + len + payload), envoyé/reçu
+ *    exclusivement via `send_all`/`recv_all` (etii_protocol.h) — jamais un
+ *    `send`/`recv` brut, qui peut ne transférer qu'une partie du message et
+ *    désynchroniser tout le flux (cf. etii_protocol.h) ;
+ *  - deux structures de payload à champs explicites de largeur fixe
+ *    (`control_hello_t`, `control_stats_t`) et leurs encodeurs/décodeurs purs
+ *    (sans I/O, testables sans socket) ;
+ *  - `control_command_allowed`, la liste blanche des commandes console
+ *    déclenchables à distance via CTRL_COMMAND.
+ *
+ * Pourquoi pas `packet`/`possibility_packet` : ceux-ci transportent un seul
+ * type de charge utile (`possibility_packet`, structure `packed` mais avec du
+ * padding caché malgré `packed` — ne JAMAIS memcmp/hash le struct brut, ne
+ * JAMAIS le poser sur le fil sans passer par des champs explicites). Le canal
+ * de contrôle doit transporter des messages hétérogènes de tailles variables
+ * (hello, stats agrégées, ligne de commande texte) : il lui faut son propre
+ * format cadré générique.
+ *
+ * Limite connue (partagée avec le reste du protocole existant, qui envoie
+ * déjà des `int32` bruts sans `htonl`) : l'encodage est l'ordre d'octets
+ * natif de la machine — machines homogènes supposées, pas d'interopérabilité
+ * big-endian/little-endian garantie.
+ */
+#ifndef eternityII_control_protocol_h
+#define eternityII_control_protocol_h
+
+#include <stdint.h>
+
+/**
+ * @defgroup ControlCommands Commandes de trame du canal de contrôle
+ * @{
+ */
+/// Ping simple (vivacité de la session de contrôle).
+#define CTRL_PING 1
+/// Acquittement générique.
+#define CTRL_ACK 2
+/// Demande de statistiques agrégées au client.
+#define CTRL_GET_STATS 3
+/// Réponse contenant des statistiques agrégées (`control_stats_t`).
+#define CTRL_STATS 4
+/// Commande console à exécuter à distance (payload = ligne de commande texte).
+#define CTRL_COMMAND 5
+/// Résultat de l'exécution d'une commande à distance.
+#define CTRL_RESULT 6
+/**
+ * @}
+ */
+
+/// Borne de sécurité sur la taille d'un payload de trame de contrôle, alignée
+/// sur `IPC_LINE_MAX` (src/net/ipc_protocol.h, 4000) : même ordre de grandeur
+/// que les lignes de commande échangées en IPC parent/enfant.
+#define CTRL_PAYLOAD_MAX 4000
+
+/**
+ * @brief Envoie une trame de contrôle : `uint8_t cmd` + `int32_t len` +
+ *        `len` octets de payload, intégralement via `send_all`.
+ *
+ * @param socket_id Descripteur du socket connecté.
+ * @param cmd       Commande de trame (cf. @ref ControlCommands).
+ * @param payload   Tampon du payload, peut être `NULL` si `len == 0`.
+ * @param len       Nombre d'octets de payload (0 si aucun).
+ * @return          0 si la trame a été intégralement envoyée, -1 sinon.
+ */
+int ctrl_send_frame(int socket_id, uint8_t cmd, const void *payload, int32_t len);
+
+/**
+ * @brief Reçoit une trame de contrôle : `uint8_t cmd` + `int32_t len` puis
+ *        `len` octets de payload, intégralement via `recv_all`.
+ *
+ * Alloue `*out_payload` (à libérer par l'appelant) uniquement si `len > 0` ;
+ * `*out_payload` vaut `NULL` si `len == 0`. Une longueur hors borne
+ * (`len < 0` ou `len > CTRL_PAYLOAD_MAX`) est rejetée SANS tentative
+ * d'allocation, pour ne jamais réagir à une taille absurde reçue d'un pair
+ * corrompu ou malveillant.
+ *
+ * @param socket_id   Descripteur du socket connecté.
+ * @param out_payload Reçoit l'adresse du payload alloué (ou `NULL`).
+ * @param out_len     Reçoit la longueur du payload reçu.
+ * @return             La commande reçue (>= 0), ou -1 en cas d'erreur, de
+ *                     flux mort, ou de longueur hors borne.
+ */
+int ctrl_recv_frame(int socket_id, void **out_payload, int32_t *out_len);
+
+/// Taille sur le fil de `control_hello_t` (champs explicites de largeur fixe).
+#define CONTROL_HELLO_WIRE_SIZE (4 + 4 + 1)
+
+/**
+ * @brief Annonce d'un client se déclarant canal de contrôle (payload de
+ *        CTRL_* futur / INST_CONTROL_HELLO).
+ */
+typedef struct {
+    /// PID du processus parent qui s'annonce.
+    int32_t pid;
+    /// Nombre de forks de recherche gérés par ce parent.
+    int32_t nb_forks;
+    /// Mode du client : 0 = recherche, 1 = pruner, 2 = pruner GPU.
+    uint8_t mode;
+} control_hello_t;
+
+/**
+ * @brief Sérialise `hello` dans `buf` (champ par champ, pas de memcpy du
+ *        struct entier — le padding caché fausserait la taille sur le fil).
+ *
+ * @param hello Structure source.
+ * @param buf   Tampon destination, au moins `CONTROL_HELLO_WIRE_SIZE` octets.
+ * @return      Le nombre d'octets écrits (`CONTROL_HELLO_WIRE_SIZE`).
+ */
+int32_t control_hello_encode(const control_hello_t *hello, uint8_t *buf);
+
+/**
+ * @brief Désérialise `control_hello_t` depuis `buf`.
+ *
+ * @param buf Tampon source.
+ * @param len Nombre d'octets disponibles dans `buf`.
+ * @param out Structure destination.
+ * @return    0 si OK, -1 si `len < CONTROL_HELLO_WIRE_SIZE`.
+ */
+int control_hello_decode(const uint8_t *buf, int32_t len, control_hello_t *out);
+
+/// Taille sur le fil de `control_stats_t` (6 champs `uint64_t`).
+#define CONTROL_STATS_WIRE_SIZE (8 * 6)
+
+/**
+ * @brief Statistiques agrégées d'un client, transportées en réponse à
+ *        CTRL_GET_STATS (payload de CTRL_STATS).
+ */
+typedef struct {
+    /// Débit de recherche courant (essais/seconde).
+    uint64_t shots_per_second;
+    /// Nombre de possibilités en stock local.
+    uint64_t possibility_stock;
+    /// Nombre de possibilités analysées en stock local.
+    uint64_t analysed_stock;
+    /// Meilleur résultat (nombre de cases placées) atteint.
+    uint64_t max_result;
+    /// Nombre de possibilités vérifiées par le pruner (0 hors mode pruner).
+    uint64_t pruner_checked;
+    /// Nombre de possibilités éliminées par le pruner (0 hors mode pruner).
+    uint64_t pruner_removed;
+} control_stats_t;
+
+/**
+ * @brief Sérialise `stats` dans `buf` (champ par champ, largeur fixe).
+ *
+ * @param stats Structure source.
+ * @param buf   Tampon destination, au moins `CONTROL_STATS_WIRE_SIZE` octets.
+ * @return      Le nombre d'octets écrits (`CONTROL_STATS_WIRE_SIZE`).
+ */
+int32_t control_stats_encode(const control_stats_t *stats, uint8_t *buf);
+
+/**
+ * @brief Désérialise `control_stats_t` depuis `buf`.
+ *
+ * @param buf Tampon source.
+ * @param len Nombre d'octets disponibles dans `buf`.
+ * @param out Structure destination.
+ * @return    0 si OK, -1 si `len < CONTROL_STATS_WIRE_SIZE`.
+ */
+int control_stats_decode(const uint8_t *buf, int32_t len, control_stats_t *out);
+
+/**
+ * @brief Liste blanche des commandes console déclenchables à distance via
+ *        CTRL_COMMAND (fonction pure, cœur-métier, sans dépendance réseau).
+ *
+ * Compare uniquement le premier mot de `command_name` (avant un éventuel
+ * espace/argument) aux commandes autorisées : "pause", "resume", "limit",
+ * "maxStockByThread", "prunerBatch". Tout le reste — dont "exit", "restore",
+ * "import" — est refusé.
+ *
+ * @param command_name Nom (ou ligne complète) de la commande à vérifier.
+ *                      `NULL` est géré explicitement (retourne 0, jamais de
+ *                      déréférencement) : une trame CTRL_COMMAND corrompue ou
+ *                      un appelant qui n'a pas encore de ligne ne doivent pas
+ *                      pouvoir crasher ce garde-fou.
+ * @return              1 si la commande est autorisée à distance, 0 sinon
+ *                      (y compris pour `command_name == NULL` ou vide).
+ */
+int control_command_allowed(const char *command_name);
+
+#endif

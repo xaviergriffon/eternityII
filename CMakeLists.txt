@@ -100,6 +100,7 @@ set(PROD_SRCS
     src/core/datamanager.c
     src/core/possibility.c
     src/net/etii_protocol.c
+    src/net/control_protocol.c
     src/app/etii_client.c
     src/app/etii_server.c
     src/app/app_runtime.c
@@ -182,6 +183,7 @@ set(TEST_MODULES
     src/ui/command_match.c
     src/core/possibility.c
     src/net/etii_protocol.c
+    src/net/control_protocol.c
     src/core/datamanager.c
     src/net/local_socket.c
     src/net/tcpclient.c
@@ -203,6 +205,7 @@ set(TEST_SUITES_COMMON
     tests/core/test_etii_search.c
     tests/core/test_datamanager.c
     tests/net/test_etii_protocol.c
+    tests/net/test_control_protocol.c
     tests/net/test_local_socket.c
     tests/net/test_tcp.c
     tests/ui/test_command_history.c
