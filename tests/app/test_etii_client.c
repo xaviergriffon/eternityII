@@ -527,14 +527,16 @@ TEST feed_one_thread_busy_no_socket_noop(void)
 }
 
 /* Thread occupé (works=1) AVEC un socket ouvert : au-delà de l'intervalle
- * d'inactivité, feed_one_thread émet un keepalive (is_connected). Socket vivant
- * -> l'horodatage d'activité est rafraîchi, le socket est conservé (ligne 138).
- * On simule le serveur via un socketpair : sv[1] pré-charge l'écho attendu, que
- * is_connected(sv[0]) relira. */
+ * d'inactivité, feed_one_thread sonde la faim du serveur (poll_server_hunger,
+ * INST_NEED_WORK — la sonde tient lieu de keepalive). Socket vivant ->
+ * l'horodatage d'activité est rafraîchi, le socket conservé, et la faim reçue
+ * publiée dans `server_hunger`. On simule le serveur via un socketpair : sv[1]
+ * pré-charge la réponse int32 que poll_server_hunger(sv[0]) relira. */
 TEST feed_one_thread_keepalive_refreshes_alive_socket(void)
 {
     int saved_req = request;
     request = REQUEST_CONTINUE;
+    __atomic_store_n(&server_hunger, 0, __ATOMIC_RELAXED);
 
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) FAILm("socketpair");
@@ -542,10 +544,11 @@ TEST feed_one_thread_keepalive_refreshes_alive_socket(void)
     client_possibility_t client[1];
     init_test_client(&client[0], 1);        /* works = 1 : occupé */
     client[0].socket_id = sv[0];
-    client[0].last_socket_activity = 0;     /* intervalle keepalive forcément écoulé */
+    client[0].last_socket_activity = 0;     /* intervalle de sonde forcément écoulé */
 
-    /* Réponse du serveur pré-chargée : is_connected(sv[0]) lira INST_TEST_CONNECTED. */
-    send_instruction(sv[1], INST_TEST_CONNECTED);
+    /* Réponse du serveur pré-chargée : faim = 5. */
+    int32_t hunger = 5;
+    if (send_all(sv[1], &hunger, sizeof(hunger)) != (long)sizeof(hunger)) FAILm("send_all");
 
     int needed = 0, got = 0;
     feed_one_thread(client, 0, &needed, &got);
@@ -554,26 +557,33 @@ TEST feed_one_thread_keepalive_refreshes_alive_socket(void)
     ASSERT_EQ_FMT(0, got, "%d");
     ASSERT_EQ_FMT(sv[0], client[0].socket_id, "%d"); /* socket conservé (vivant)     */
     ASSERT(client[0].last_socket_activity != 0);     /* activité rafraîchie à `now`  */
+    /* Faim publiée pour la délégation anticipée des threads de recherche. */
+    ASSERT_EQ_FMT(5, __atomic_load_n(&server_hunger, __ATOMIC_RELAXED), "%d");
+    /* Le pair a bien reçu l'instruction de sonde. */
+    ASSERT_EQ_FMT((int)INST_NEED_WORK, (int)recv_instruction(sv[1]), "%d");
 
     close(sv[0]);
     close(sv[1]);
     destroy_test_client(&client[0]);
+    __atomic_store_n(&server_hunger, 0, __ATOMIC_RELAXED);
     request = saved_req;
     PASS();
 }
 
-/* Même situation, mais le socket est mort (pair fermé) : is_connected échoue,
- * feed_one_thread oublie le socket (socket_id = -1, ligne 142) — il sera rouvert
- * au prochain besoin de travail. is_connected ferme sv[0] lui-même. */
+/* Même situation, mais le socket est mort (pair fermé) : la sonde échoue,
+ * feed_one_thread oublie le socket (socket_id = -1) — il sera rouvert au
+ * prochain besoin de travail — et remet la faim à zéro (info morte).
+ * poll_server_hunger ferme sv[0] lui-même. */
 TEST feed_one_thread_keepalive_drops_dead_socket(void)
 {
     int saved_req = request;
     request = REQUEST_CONTINUE;
     signal(SIGPIPE, SIG_IGN); /* send sur pair fermé -> EPIPE, pas de signal fatal */
+    __atomic_store_n(&server_hunger, 9, __ATOMIC_RELAXED); /* faim périmée à effacer */
 
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) FAILm("socketpair");
-    close(sv[1]);             /* pair fermé -> is_connected échoue et ferme sv[0] */
+    close(sv[1]);             /* pair fermé -> la sonde échoue et ferme sv[0] */
 
     client_possibility_t client[1];
     init_test_client(&client[0], 1);
@@ -586,8 +596,10 @@ TEST feed_one_thread_keepalive_drops_dead_socket(void)
     ASSERT_EQ_FMT(0, needed, "%d");
     ASSERT_EQ_FMT(0, got, "%d");
     ASSERT_EQ_FMT(-1, client[0].socket_id, "%d"); /* socket oublié */
+    /* Faim remise à zéro : pas de délégation sur une connexion morte. */
+    ASSERT_EQ_FMT(0, __atomic_load_n(&server_hunger, __ATOMIC_RELAXED), "%d");
 
-    /* sv[0] fermé par is_connected, sv[1] déjà fermé : rien à fermer ici. */
+    /* sv[0] fermé par poll_server_hunger, sv[1] déjà fermé : rien à fermer ici. */
     destroy_test_client(&client[0]);
     request = saved_req;
     PASS();

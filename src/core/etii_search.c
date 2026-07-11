@@ -363,6 +363,38 @@ static int bt_materialize_pending(client_possibility_t *client,
 }
 
 /**
+ * @brief Quota de délégation d'un thread de recherche (fonction pure).
+ *
+ * Deux régimes :
+ * - au-dessus du seuil (`pending > max_stock`) : règle historique, on cède
+ *   `max_stock` paquets, quelle que soit la faim ;
+ * - sous le seuil : délégation ANTICIPÉE uniquement si le serveur a faim
+ *   (`hunger > 0`, publié par la sonde INST_NEED_WORK du thread
+ *   d'alimentation). On cède alors au plus la moitié du stock implicite
+ *   (jamais le chemin courant), borné par la faim — un thread presque à sec
+ *   ne se vide pas pour un serveur affamé.
+ *
+ * @param pending   Stock implicite du thread (frères non explorés).
+ * @param max_stock Seuil de délégation (`max_stock_by_thread`).
+ * @param hunger    Faim du serveur (≤ 0 = rassasié ou inconnue).
+ * @return          Nombre de paquets à céder (0 = aucune délégation).
+ */
+static int bt_delegation_quota(unsigned long long pending, int max_stock, int hunger)
+{
+    if (pending > (unsigned long long)max_stock) {
+        return max_stock;
+    }
+    if (hunger <= 0 || pending < 2) {
+        return 0;
+    }
+    unsigned long long half = pending / 2;
+    if ((unsigned long long)hunger < half) {
+        return hunger;
+    }
+    return (int)half;
+}
+
+/**
  * @brief Garantit que le buffer de délégation pré-alloué du thread peut contenir
  *        `capacity` paquets.
  *
@@ -393,12 +425,15 @@ static int bt_ensure_delegate_buf(client_possibility_t *client, int capacity)
 }
 
 /**
- * @brief Délègue au serveur une partie du stock implicite si celui-ci dépasse `max_stock_by_thread`.
+ * @brief Délègue au serveur une partie du stock implicite si celui-ci dépasse
+ *        `max_stock_by_thread` — ou, depuis la v8, si le serveur a faim
+ *        (`server_hunger` > 0 : délégation anticipée sous le seuil).
  *
  * Équivalent backtracking de `checkAndDelegatePossibilitiesIfNeeded` :
- * le stock est compté dans la pile de décisions, et au plus `max_stock_by_thread`
- * frères non explorés (les moins profonds) sont matérialisés puis envoyés.
- * Les niveaux délégués ne sont marqués consommés qu'après un envoi réussi.
+ * le stock est compté dans la pile de décisions, et au plus
+ * `bt_delegation_quota(...)` frères non explorés (les moins profonds) sont
+ * matérialisés puis envoyés. Les niveaux délégués ne sont marqués consommés
+ * qu'après un envoi réussi ; la faim est alors décrémentée du nombre envoyé.
  *
  * Le tableau de paquets matérialisés est écrit dans le buffer pré-alloué du
  * thread (`client->delegate_buf`) plutôt que dans un bloc malloc/free à chaque
@@ -421,11 +456,15 @@ static void bt_delegate_if_needed(client_possibility_t *client,
     unsigned long long pending = bt_count_pending(board, stack, top);
     // Statistique du nombre de possibilités en étude
     lastfilesize[client->compteur] = pending;
-    if (pending <= (unsigned long long)max_stock_by_thread) {
+    // Faim du serveur publiée par la sonde INST_NEED_WORK du thread
+    // d'alimentation : autorise une délégation anticipée sous le seuil.
+    int hunger = __atomic_load_n(&server_hunger, __ATOMIC_RELAXED);
+    int quota = bt_delegation_quota(pending, max_stock_by_thread, hunger);
+    if (quota <= 0) {
         return;
     }
 
-    if (bt_ensure_delegate_buf(client, max_stock_by_thread) != 0) {
+    if (bt_ensure_delegate_buf(client, quota) != 0) {
         // Échec d'allocation : on saute cette délégation, le travail reste local
         log_error("error on delegate buffer allocation\n");
         return;
@@ -434,7 +473,7 @@ static void bt_delegate_if_needed(client_possibility_t *client,
     int new_next_s[ETERN_PARTS];
     aposs.size = bt_materialize_pending(client, board, stack, top, start_depth,
                                         idParts, aposs.possibilities,
-                                        max_stock_by_thread, new_next_s);
+                                        quota, new_next_s);
     if (aposs.size > 0) {
         if (add_possibility(client, &aposs)) {
             // Échec d'envoi : la pile n'est pas marquée, le travail reste local
@@ -444,6 +483,12 @@ static void bt_delegate_if_needed(client_possibility_t *client,
                 stack[i].next_s = new_next_s[i];
             }
             lastfilesize[client->compteur] = pending - aposs.size;
+            if (hunger > 0) {
+                // Faim consommée localement : évite que tous les threads du
+                // processus cèdent pour la même annonce avant la prochaine
+                // sonde (qui republiera la valeur fraîche du serveur).
+                __atomic_fetch_sub(&server_hunger, (int)aposs.size, __ATOMIC_RELAXED);
+            }
         }
     }
 }

@@ -36,6 +36,12 @@
 /// envoie l'instruction, un `int32` M, puis M paquets contigus. Le serveur
 /// répond un unique INST_CONSIDERED.
 #define INST_POSSIBILITY_ANALYSED_BATCH 14
+/// Sonde de « faim » du serveur (v8). Le client envoie l'instruction seule ;
+/// le serveur répond un `int32` N ≥ 0 : le nombre de possibilités qu'il
+/// souhaiterait recevoir pour ne pas laisser d'autres clients sans travail
+/// (0 = stock suffisant). Émise par le thread d'alimentation du client à la
+/// place du keepalive : elle sert aussi de preuve d'activité de la session.
+#define INST_NEED_WORK 15
 /**
  * @}
  */
@@ -131,6 +137,21 @@ long send_all(int socket_id, const void *buf, size_t len);
  * @return int 1 si connecté et sinon 0
  */
 int is_connected(int socket_id);
+
+/**
+ * @brief Interroge le serveur sur sa « faim » (INST_NEED_WORK).
+ *
+ * Envoie l'instruction puis lit la réponse `int32` : le nombre de possibilités
+ * que le serveur souhaiterait recevoir (0 = stock suffisant). Tient lieu de
+ * keepalive : un échange réussi prouve la session vivante. En cas d'échec
+ * d'envoi ou de réception, le socket est fermé (shutdown + close), comme le
+ * fait `is_connected`.
+ *
+ * @param socket_id Descripteur du socket connecté.
+ * @return          La faim du serveur (≥ 0), ou -1 si la connexion est rompue
+ *                  (le socket est alors fermé).
+ */
+int32_t poll_server_hunger(int socket_id);
 
 /**
  * @brief Fermeture de la connection

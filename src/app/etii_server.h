@@ -74,6 +74,22 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
 int32_t clamp_pruner_batch(int32_t requested);
 
 /**
+ * @brief Calcule la « faim » du serveur : le nombre de possibilités qu'il
+ *        souhaiterait recevoir des clients occupés (réponse à INST_NEED_WORK).
+ *
+ * Fonction pure : le serveur vise un stock d'au moins
+ * `SERVER_HUNGER_PER_CLIENT × active_clients` (chaque session connectée doit
+ * pouvoir être servie au prochain GET, avec marge). La faim est le manque par
+ * rapport à cette cible, plafonné à `SERVER_HUNGER_CAP` (tous les threads
+ * occupés du réseau peuvent répondre en même temps).
+ *
+ * @param stock          Taille du stock distribuable (non vérifié + vérifié).
+ * @param active_clients Nombre de sessions client connectées.
+ * @return               Faim (0 = stock suffisant), toujours dans [0, SERVER_HUNGER_CAP].
+ */
+int32_t compute_server_hunger(unsigned long long stock, int active_clients);
+
+/**
  * @brief Cherche un slot de thread serveur occupé mais en attente de client.
  *
  * Un slot « libre » vérifie `exist != 0 && socket_id == -1`.

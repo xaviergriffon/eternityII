@@ -29,6 +29,21 @@ int32_t clamp_pruner_batch(int32_t requested) {
     return requested;
 }
 
+int32_t compute_server_hunger(unsigned long long stock, int active_clients) {
+    if (active_clients < 1) {
+        return 0;
+    }
+    unsigned long long target = (unsigned long long)active_clients * SERVER_HUNGER_PER_CLIENT;
+    if (stock >= target) {
+        return 0;
+    }
+    unsigned long long missing = target - stock;
+    if (missing > SERVER_HUNGER_CAP) {
+        return SERVER_HUNGER_CAP;
+    }
+    return (int32_t)missing;
+}
+
 int find_free_thread_slot(client_t *threads, int nb) {
     for (int t = 0; t < nb; t++) {
         if (threads[t].exist != 0 && threads[t].socket_id == -1) return t;
@@ -575,6 +590,16 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 log_error("réception de la solution incomplète\n");
                 free(sol);
                 return 0;
+            }
+        } else if (instruction == INST_NEED_WORK && *version_supported == 1) {
+            // Sonde de faim (v8) : le client demande combien de possibilités le
+            // serveur souhaiterait recevoir pour nourrir les autres sessions.
+            // Sert aussi de keepalive (échange = preuve d'activité).
+            int32_t hunger = compute_server_hunger(datas_size(),
+                                                   get_active_threads(thread_params));
+            if (send_all(client->socket_id, &hunger, sizeof(hunger)) != (long)sizeof(hunger))
+            {
+                log_errno("Erreur d'envoi (need work) => ");
             }
         } else if (instruction == INST_TEST_CONNECTED) {
             send_instruction(client->socket_id, INST_TEST_CONNECTED);
