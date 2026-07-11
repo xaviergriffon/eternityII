@@ -103,6 +103,7 @@ set(PROD_SRCS
     src/net/control_protocol.c
     src/app/etii_client.c
     src/app/etii_server.c
+    src/app/etii_control.c
     src/app/app_runtime.c
     src/core/etii_search.c
     src/ui/command_lines.c
@@ -194,6 +195,7 @@ set(TEST_MODULES
     src/ui/logger.c
     src/app/static_variables.c
     src/app/app_runtime.c
+    src/app/etii_control.c
 )
 
 # Suites communes (ETERN_PARTS-agnostiques, jouées en 16 ET 256)
@@ -215,6 +217,7 @@ set(TEST_SUITES_COMMON
     tests/ui/test_logger.c
     tests/app/test_static_variables.c
     tests/app/test_app_runtime.c
+    tests/app/test_etii_control.c
 )
 
 # Options de compilation pour les tests (-O2 -g, distinct du release -Ofast)
@@ -277,8 +280,10 @@ add_executable(eternityII16 EXCLUDE_FROM_ALL
     src/core/datamanager.c
     src/core/possibility.c
     src/net/etii_protocol.c
+    src/net/control_protocol.c
     src/app/etii_client.c
     src/app/etii_server.c
+    src/app/etii_control.c
     src/app/app_runtime.c
     src/core/etii_search.c
     src/ui/command_lines.c
