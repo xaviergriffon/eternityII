@@ -63,6 +63,23 @@
 // Plafonne la mémoire d'un échange par lot (côté serveur comme pruner) et la
 // taille des tampons GPU managés. 65536 × ~0,5 Ko ≈ 36 Mo.
 #define PRUNER_BATCH_MAX 65536
+// Expansion du stock au démarrage du serveur (option `--expand-level`, commande
+// console `expand`). Le serveur développe lui-même les possibilités du stock
+// (une pièce candidate par case suivante) jusqu'à ce que leur curseur `alloc`
+// atteigne le niveau demandé, ce qui transforme le paquet genèse en des
+// milliers de possibilités distribuables — supprimant la famine du démarrage où
+// un seul client détient tout l'arbre pendant que le serveur n'a rien à servir.
+// L'impact client est nul (calcul purement serveur, avant toute connexion).
+//
+// EXPAND_MAX_LEVELS : nombre maximal de passes d'expansion, quelle que soit la
+// consigne de niveau — garde-fou en PROFONDEUR pour ne pas mettre le serveur au
+// travail trop longtemps.
+#define EXPAND_MAX_LEVELS 4
+// EXPAND_MAX_STOCK : plafond de sécurité en NOMBRE de possibilités. Le facteur
+// de branchement du puzzle étant inconnu et variable, la seule borne en
+// profondeur ne borne pas le travail réel ; on arrête donc l'expansion entre
+// deux passes dès que le stock dépasse ce seuil. ~100000 × ~0,5 Ko ≈ 54 Mo.
+#define EXPAND_MAX_STOCK 100000
 
 #define REQUEST_STOP 1
 #define REQUEST_CONTINUE 0
@@ -189,6 +206,18 @@ extern int pruner_mode;
  * Lue dans `main()` AVANT tout fork → héritée par les processus enfants.
  */
 extern int stop_on_solution;
+
+/**
+ * @brief Niveau de curseur (`alloc`) minimal visé par l'expansion du stock au
+ *        démarrage du serveur (option CLI `--expand-level <n>`).
+ *
+ * 0 (défaut) : pas d'expansion. Sinon, `runserver` développe le stock genèse
+ * jusqu'à ce que chaque possibilité atteigne ce niveau, borné par
+ * `EXPAND_MAX_LEVELS` passes et `EXPAND_MAX_STOCK` possibilités. Lu côté serveur
+ * uniquement (les autres modes l'ignorent). Position-indépendant, retiré d'argv
+ * par `parse_cli_options` avant le parsing positionnel.
+ */
+extern int expand_min_level;
 
 /**
  * @brief Nombre de possibilités qu'un client pruner demande/acquitte par lot.

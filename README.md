@@ -137,19 +137,31 @@ Le toolkit CUDA est installé sur le runner (action `Jimver/cuda-toolkit`) pour 
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII tcpserver [nb_threads] [fichier_pieces.csv]
+./eternityII tcpserver [nb_threads] [--expand-level N] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
 |---|---|---|
 | `nb_threads` | 80 | Nombre de connexions clients simultanées |
+| `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'au niveau de curseur `N` (anti-famine, voir ci-dessous) |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
 
 Exemple :
 ```sh
 ./eternityII tcpserver 80
 ./eternityII tcpserver 80 data/pieces.csv
+./eternityII tcpserver 80 --expand-level 4 data/pieces.csv
 ```
+
+#### Expansion du stock au démarrage (`--expand-level`, anti-famine)
+
+Au démarrage, le serveur ne détient que le paquet *genèse* et ses tout premiers enfants. Le premier client qui se connecte récupère cet unique arbre et le garde en local ; le serveur se retrouve sans rien à distribuer aux autres clients, qui tournent à vide — c'est la **famine du démarrage**.
+
+L'option `--expand-level N` (position-indépendante, retirée d'argv avant l'analyse positionnelle) demande au serveur de **développer lui-même son stock** avant toute connexion : il place une pièce candidate sur la case suivante de chaque possibilité jusqu'à ce que leur curseur `alloc` atteigne le niveau `N`. Le paquet genèse devient ainsi des milliers de possibilités distribuables. C'est un calcul **purement serveur, sans aucun impact client**.
+
+L'expansion est bornée sur deux axes (dans [src/app/static_variables.h](src/app/static_variables.h)) : `EXPAND_MAX_LEVELS` (4) plafonne le nombre de passes quelle que soit la consigne — garde-fou en *profondeur* — et `EXPAND_MAX_STOCK` (100000) plafonne le *nombre* de possibilités entre passes ; comme le facteur de branchement est inconnu et qu'une seule passe peut exploser, ce plafond en nombre est le vrai garde-fou de temps et de mémoire. Sur le puzzle 256 le branchement mesuré est ≈11×/niveau (niveau 3 → ~500 possibilités, niveau 4 → ~5300, niveau 5 → ~56000) : **le niveau 3–4 est le point idéal** — de quoi remplir le stock local de tous les clients avec réserve, en bien moins d'une seconde. La même opération est disponible à chaud via la commande interactive `expand N` (utile si le stock distribuable se raréfie en cours de recherche).
+
+> Cette expansion est le pendant *serveur* de la délégation anticipée côté *client* (sonde de faim `INST_NEED_WORK`, VERSION 8) décrite dans [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md).
 
 ### Mode client
 
@@ -234,6 +246,7 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard. Tape
 | `split` | Répartit les possibilités entre les 10 files |
 | `regroup` | Regroupe toutes les files en une seule |
 | `rmnonext` | Supprime les possibilités sans continuation possible (élagage) |
+| `expand N` | Développe le stock jusqu'au niveau de curseur `N` (anti-famine, borné à 4 passes / `EXPAND_MAX_STOCK` possibilités) |
 | `min` | Affiche le niveau minimum dans les files |
 | `statistic` | Affiche des statistiques sur le contenu des files |
 | `loadjson` | Importe une possibilité depuis une chaîne JSON (équivalent de `import` pour le format JSON) |

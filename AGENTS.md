@@ -42,6 +42,8 @@ The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` inste
 ```sh
 # Start the server (distributes possibilities to clients)
 ./eternityII tcpserver [nb_threads] [data/pieces.csv]
+# …with startup stock expansion (anti-starvation): pre-expand to cursor level 4
+./eternityII tcpserver [nb_threads] --expand-level 4 [data/pieces.csv]
 
 # Start a client (does the search)
 ./eternityII tcpclient [server_host] [nb_threads] [max_stock_per_thread] [data/pieces.csv]
@@ -56,6 +58,8 @@ The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` inste
 ```
 
 **`--stop-on-solution`** (optional, accepted in any position by any mode, stripped from argv before the positional parse): stop at the **first** solution. A search process that finds one exits; a server that receives one backs up its queues and stops. **Default (flag absent): keep going** — the search process backtracks to look for more solutions and the server stays in service so clients keep exploring. Read in `main()` *before* any fork (global `stop_on_solution`), so forked search children inherit it. Each solution is saved to a **unique** file (`./solution_<pid>_<seq>` client-side, `./solution_server_<pid>_<seq>` server-side) — multiple solutions never overwrite one another.
+
+**`--expand-level <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only). At startup, after seeding the genesis possibility, the server **expands its own stock** — placing a candidate piece on the next cell of each possibility (via `search_possiblity_light`) — until every possibility's cursor `alloc` reaches level `n`. This turns the lone genesis packet into thousands of distributable possibilities, curing the **startup starvation** where the first client to connect grabs the whole tree and the server has nothing to hand the others (the complement, from the client side, is the v8 `INST_NEED_WORK` anticipatory delegation). It is a pure server-side computation done before any client connects, so **client-side impact is nil**. Bounded on two axes (`src/app/static_variables.h`): `EXPAND_MAX_LEVELS` (4) caps the number of passes regardless of `n` — a *depth* guard so the server doesn't work too long — and `EXPAND_MAX_STOCK` (100000) caps the *count* between passes, the real safeguard since the branching factor is unknown and one pass can explode. Measured branching on the 256-puzzle is ≈11×/level (level 2 → ~45 possibilities, level 3 → ~495, level 4 → ~5300, level 5 → ~56000); **level 3–4 is the practical sweet spot** — enough to fill every client's local stock with reserve, in well under a second. The same routine (`expand_datas_to_level`, `src/core/datamanager.c`) is also reachable at runtime via the **`expand <n>` console command** (rebuilds the map like `rmnonext`), useful when the distributable stock has run low mid-run.
 
 Puzzle definitions live in `data/`: `data/pieces.csv` (256-piece puzzle) and the 16-piece variant `data/pieces16.csv`. The code's built-in default (`parts_files` in `src/app/static_variables.c`) now points at `./data/pieces.csv` (or `./data/pieces16.csv` for the 16-piece build), so running from the repo root works without an explicit path argument.
 

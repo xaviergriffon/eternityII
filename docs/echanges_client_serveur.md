@@ -175,6 +175,20 @@ dernier frère. La faim est décrémentée du nombre envoyé, jusqu'à la procha
 Coût pour la boucle chaude de recherche : aucun (une lecture atomique au plus 2×/s,
 dans un bloc déjà exécuté à cette cadence).
 
+**Expansion du stock au démarrage (`--expand-level`, pendant serveur).** La sonde de
+faim ci-dessus traite la famine du démarrage *côté client* ; le serveur peut aussi la
+prévenir *à la source*. Avec l'option `--expand-level N`, juste après avoir semé le
+paquet genèse et avant toute connexion, le serveur **développe lui-même son stock**
+(`expand_datas_to_level`, `src/core/datamanager.c`) : il place une pièce candidate sur
+la case suivante de chaque possibilité jusqu'à ce que leur curseur `alloc` atteigne le
+niveau `N`, transformant le paquet genèse en des milliers de possibilités
+distribuables. Chaque client trouve alors du travail dès sa connexion. C'est un calcul
+purement serveur (aucun échange, aucun impact client), borné en profondeur
+(`EXPAND_MAX_LEVELS`, 4 passes) et en nombre (`EXPAND_MAX_STOCK`, plafond entre passes —
+le vrai garde-fou, le facteur de branchement étant inconnu). La même opération est
+disponible à chaud via la commande console `expand N`. Voir le
+[README](../README.md#mode-serveur) pour les niveaux recommandés (3–4).
+
 **Côté serveur — files multiples.** Le serveur répartit les possibilités sur
 `NB_FILE_POSSIBILITY` (10) files protégées chacune par un mutex
 (`src/core/datamanager.c`) : plusieurs threads serveur peuvent servir des clients en

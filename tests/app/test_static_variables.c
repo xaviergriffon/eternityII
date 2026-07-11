@@ -61,9 +61,75 @@ TEST flag_in_the_middle_does_not_shift_positional_args(void)
     PASS();
 }
 
+/* --expand-level <n> : option VALUÉE. Les DEUX tokens (option + valeur) sont
+   retirés d'argv, le niveau atterrit dans expand_min_level, et les arguments
+   positionnels du mode restent intacts. */
+TEST expand_level_strips_option_and_value_sets_global(void)
+{
+    expand_min_level = 0;
+    stop_on_solution = 0;
+    const char *argv[] = {"prog", "tcpserver", "--expand-level", "4", "8", "data/pieces.csv"};
+    int argc = parse_cli_options(6, argv);
+
+    ASSERT_EQ_FMT(4, argc, "%d");              /* option + valeur retirées (6 → 4) */
+    ASSERT_EQ_FMT(4, expand_min_level, "%d");
+    ASSERT_STR_EQ("tcpserver", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);               /* nb_threads non décalé */
+    ASSERT_STR_EQ("data/pieces.csv", argv[3]);
+    PASS();
+}
+
+/* Valeur absente (option en dernière position) : ignorée sans lire hors argv,
+   expand_min_level reste à 0, l'option est tout de même consommée. */
+TEST expand_level_without_value_is_ignored(void)
+{
+    expand_min_level = 0;
+    const char *argv[] = {"prog", "tcpserver", "--expand-level"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");              /* seul le token option est retiré */
+    ASSERT_EQ_FMT(0, expand_min_level, "%d");
+    ASSERT_STR_EQ("tcpserver", argv[1]);
+    PASS();
+}
+
+/* Valeur négative : bornée à 0 (pas d'expansion), plutôt qu'un niveau absurde. */
+TEST expand_level_negative_clamped_to_zero(void)
+{
+    expand_min_level = 7;                        /* valeur résiduelle à écraser */
+    const char *argv[] = {"prog", "tcpserver", "--expand-level", "-3"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(0, expand_min_level, "%d");
+    PASS();
+}
+
+/* Coexistence avec --stop-on-solution : les deux options position-indépendantes
+   sont reconnues et retirées, la valeur de --expand-level est bien consommée
+   (pas prise pour --stop-on-solution ni pour un argument positionnel). */
+TEST expand_level_coexists_with_stop_on_solution(void)
+{
+    expand_min_level = 0;
+    stop_on_solution = 0;
+    const char *argv[] = {"prog", "--expand-level", "3", "tcpserver", "8", "--stop-on-solution"};
+    int argc = parse_cli_options(6, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");              /* 6 - 2 (expand+val) - 1 (stop) */
+    ASSERT_EQ_FMT(3, expand_min_level, "%d");
+    ASSERT_EQ_FMT(1, stop_on_solution, "%d");
+    ASSERT_STR_EQ("tcpserver", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);
+    PASS();
+}
+
 SUITE(static_variables_suite)
 {
     RUN_TEST(flag_absent_leaves_argv_and_flag_untouched);
     RUN_TEST(flag_at_end_is_stripped_and_sets_global);
     RUN_TEST(flag_in_the_middle_does_not_shift_positional_args);
+    RUN_TEST(expand_level_strips_option_and_value_sets_global);
+    RUN_TEST(expand_level_without_value_is_ignored);
+    RUN_TEST(expand_level_negative_clamped_to_zero);
+    RUN_TEST(expand_level_coexists_with_stop_on_solution);
 }

@@ -334,4 +334,32 @@ int search_min_datas(void);
  * @return                 Nombre de possibilités supprimées.
  */
 int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part *all_rotate_part);
+
+/**
+ * @brief Développe le stock du serveur jusqu'à un niveau de curseur cible.
+ *
+ * Transforme un stock maigre (typiquement le paquet genèse et ses premiers
+ * enfants) en de nombreuses possibilités distribuables, en développant chaque
+ * possibilité case par case (une pièce candidate par successeur, via
+ * `search_possiblity_light`) jusqu'à ce que son curseur `alloc` atteigne
+ * `target_level`. But : supprimer la famine du démarrage, où un seul client
+ * retient tout l'arbre pendant que le serveur n'a rien à servir aux autres.
+ * Calcul purement serveur (avant toute connexion) : impact client nul.
+ *
+ * Bornée sur deux axes pour ne pas mettre le serveur au travail trop longtemps :
+ *  - `EXPAND_MAX_LEVELS` passes maximum (borne en profondeur), quelle que soit
+ *    la consigne `target_level` ;
+ *  - `EXPAND_MAX_STOCK` possibilités (borne en nombre, contrôlée entre passes) —
+ *    garde-fou contre un facteur de branchement élevé.
+ *
+ * Les branches mortes (aucun successeur) sont élaguées au passage. À appeler
+ * pendant que la `map_big_array` est encore vivante (dans `runserver`, avant
+ * `free_bigarray`, ou après reconstruction pour la commande console `expand`).
+ *
+ * @param target_level    Niveau de curseur `alloc` minimal visé (≤ 0 : no-op).
+ * @param mapParts        Tableau 4D de lookup.
+ * @param all_rotate_part Tableau de toutes les rotations.
+ * @return                Nombre de passes d'expansion réellement effectuées.
+ */
+int expand_datas_to_level(int target_level, map_big_array *mapParts, struct array_part *all_rotate_part);
 #endif

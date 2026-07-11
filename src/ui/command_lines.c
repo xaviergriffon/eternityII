@@ -12,7 +12,7 @@
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
-#define NB_COMMANDS 27
+#define NB_COMMANDS 28
 
 /**
  * @brief Définition d'une commande prise en charge
@@ -49,6 +49,7 @@ int printfile_interpreter(void);
 int checkfile_interpreter(void);
 int checkdirections_interpreter(void);
 int rmnonext_interpreter(void);
+int expand_interpreter(void);
 int printanalysed_interpreter(void);
 int restockanalysed_interpreter(void);
 int min_interpreter(void);
@@ -81,6 +82,7 @@ static command_description commands[NB_COMMANDS] = {
     {"checkfile", checkfile_interpreter, 0},
     {"checkdirections", checkdirections_interpreter, 0},
     {"rmnonext", rmnonext_interpreter, 1},
+    {"expand", expand_interpreter, 0},
     {"printanalysed", printanalysed_interpreter, 1},
     {"restockanalysed", restockanalysed_interpreter, 0},
     {"statistic", statistic_interpreter, 0},
@@ -402,14 +404,45 @@ int checkdirections_interpreter(void) {
 /** @brief Interpréteur de `rmnonext` : supprime les possibilités sans continuation valide. */
 int rmnonext_interpreter(void) {
     struct array_part *apart= read_parts(parts_files);
-    
+
     struct array_part *rotateParts = rotate_all_parts(apart);
     map_big_array *map_parts = prepare_map_part(rotateParts);
     remove_possibilities_with_no_next(map_parts, rotateParts);
     free_bigarray(map_parts);
     free_array_part(rotateParts);
     free_array_part(apart);
-    
+
+    return 0;
+}
+
+/**
+ * @brief Commande `expand <niveau>` : développe le stock du serveur jusqu'au
+ *        niveau de curseur demandé (anti-famine, cf. expand_datas_to_level).
+ *
+ * Reconstruit la map depuis `parts_files` (comme `rmnonext` : le serveur libère
+ * la sienne après l'expansion de démarrage), la passe à `expand_datas_to_level`,
+ * puis libère tout. Utile à chaud quand le stock distribuable s'est raréfié.
+ */
+int expand_interpreter(void) {
+    char *arguments = strtok(NULL, " ");
+    if (arguments == NULL) {
+        log_error("expand : niveau manquant (usage : expand <niveau>)\n");
+        return -1;
+    }
+    int level = atoi(arguments);
+    if (level <= 0) {
+        log_error("expand : niveau invalide (\"%s\") — attendu un entier > 0\n", arguments);
+        return -1;
+    }
+
+    struct array_part *apart = read_parts(parts_files);
+    struct array_part *rotateParts = rotate_all_parts(apart);
+    map_big_array *map_parts = prepare_map_part(rotateParts);
+    expand_datas_to_level(level, map_parts, rotateParts);
+    free_bigarray(map_parts);
+    free_array_part(rotateParts);
+    free_array_part(apart);
+
     return 0;
 }
 
