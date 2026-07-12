@@ -27,17 +27,24 @@
 #define MICRO_SHORT_SLEEP 10
 // Temps d'attente pour les boucles de threads
 #define THREAD_MICRO_SLEEP 10000
-// Cadence de la boucle d'attente active en pause (REQUEST_PAUSE /
-// REQUEST_ADMIN_PAUSE) dans la boucle chaude de recherche (etii_search.c :
+// Cadence de la boucle d'attente active en pause de RÉGULATION (REQUEST_PAUSE,
+// control_step) dans la boucle chaude de recherche (etii_search.c :
 // search_packet_backtracking, autoprune_step, autoprune_gpu). Utilisait
 // MICRO_SHORT_SLEEP (10 µs) : correct pour espacer des itérations de calcul,
 // mais appliqué à une pure attente de reprise, ça revient à ~100 000
 // réveils/s/thread (chaque usleep() est un aller-retour noyau) rien que pour
 // relire `request` — un thread en pause sature un cœur pour ne rien faire.
-// 10 ms suffit largement (latence de reprise imperceptible pour une pause
-// pilotée par un humain ou un canal de contrôle) tout en ramenant la charge à
-// ~100 réveils/s/thread.
+// Reste volontairement court (10 ms) : cette pause est réévaluée à chaque tour
+// de control_step selon le débit mesuré, une attente plus longue fausserait
+// cette mesure. Voir ADMIN_PAUSE_POLL_SLEEP_US pour la pause administrative,
+// où la précision ne compte pas.
 #define PAUSE_POLL_SLEEP_US 10000
+// Cadence de la même boucle d'attente, mais pour une pause ADMINISTRATIVE
+// (REQUEST_ADMIN_PAUSE, manuelle ou distante via le canal de contrôle) :
+// durée arbitraire (peut être longue), aucune mesure de débit n'en dépend —
+// on peut donc se permettre une attente bien plus grossière pour réduire
+// encore la charge CPU (2 réveils/s/thread au lieu de 100).
+#define ADMIN_PAUSE_POLL_SLEEP_US 500000
 // Back-off du thread d'alimentation quand le serveur n'a AUCUNE possibilité à
 // fournir (stock épuisé, ou serveur saturé qui ne répond pas au handshake) : au
 // lieu de redemander toutes les THREAD_MICRO_SLEEP (≈ 100 req/s/thread, ce qui
@@ -353,16 +360,25 @@ extern pthread_mutex_t lastcheck_mutex;
 void lastcheck_publish(char *new_report);
 
 /**
- * @brief Vrai si `r` est l'une des deux valeurs de pause (régulation OU admin).
+ * @brief Durée (µs) à attendre si `r` est l'une des deux valeurs de pause, 0 sinon.
  *
  * Regroupe `REQUEST_PAUSE` et `REQUEST_ADMIN_PAUSE` : les boucles chaudes qui
  * doivent juste attendre (usleep + continue) sans traiter cela comme un arrêt
- * n'ont pas à connaître la distinction entre les deux origines de pause.
+ * n'ont pas à connaître la distinction entre les deux origines de pause — mais
+ * l'objectif de chacune diffère, d'où deux durées distinctes plutôt qu'un
+ * simple booléen :
+ * - `REQUEST_PAUSE` (régulation de débit, `control_step`) doit rester précis :
+ *   une attente trop longue fausserait la mesure de débit que ce même
+ *   mécanisme réévalue à chaque tour. `PAUSE_POLL_SLEEP_US` (10 ms).
+ * - `REQUEST_ADMIN_PAUSE` (pause manuelle/distante, durée arbitraire, parfois
+ *   longue) n'a aucune contrainte de précision : on peut attendre bien plus
+ *   longtemps pour économiser du CPU. `ADMIN_PAUSE_POLL_SLEEP_US` (500 ms).
  *
  * @param r Valeur de `request` à tester.
- * @return  1 si `r == REQUEST_PAUSE || r == REQUEST_ADMIN_PAUSE`, 0 sinon.
+ * @return  `PAUSE_POLL_SLEEP_US` si `r == REQUEST_PAUSE`,
+ *          `ADMIN_PAUSE_POLL_SLEEP_US` si `r == REQUEST_ADMIN_PAUSE`, 0 sinon.
  */
-int request_is_pause(int r);
+useconds_t request_is_pause(int r);
 
 /**
  * @brief Vrai si `r` ne signale pas un arrêt (`REQUEST_STOP`).

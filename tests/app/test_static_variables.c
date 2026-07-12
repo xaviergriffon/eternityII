@@ -166,16 +166,19 @@ TEST http_port_out_of_range_values_are_ignored(void)
     PASS();
 }
 
-/* request_is_pause : vrai pour REQUEST_PAUSE et REQUEST_ADMIN_PAUSE, faux sinon.
-   Régression visée : REQUEST_ADMIN_PAUSE doit être reconnue comme une pause par
-   les boucles chaudes (usleep + continue) au même titre que REQUEST_PAUSE, sans
-   pour autant être confondue avec elle par le régulateur de débit. */
+/* request_is_pause : renvoie la durée d'attente (µs) propre à chaque origine
+   de pause, 0 sinon. Régression visée : REQUEST_ADMIN_PAUSE doit être reconnue
+   comme une pause par les boucles chaudes (usleep + continue) au même titre
+   que REQUEST_PAUSE, mais avec une durée bien plus longue (pas de contrainte
+   de précision sur une pause manuelle/distante, à l'inverse de la régulation
+   de débit de REQUEST_PAUSE qui doit rester fine). */
 TEST request_is_pause_covers_both_pause_values(void)
 {
-    ASSERT_EQ_FMT(0, request_is_pause(REQUEST_STOP), "%d");
-    ASSERT_EQ_FMT(0, request_is_pause(REQUEST_CONTINUE), "%d");
-    ASSERT_EQ_FMT(1, request_is_pause(REQUEST_PAUSE), "%d");
-    ASSERT_EQ_FMT(1, request_is_pause(REQUEST_ADMIN_PAUSE), "%d");
+    ASSERT_EQ_FMT(0, (int)request_is_pause(REQUEST_STOP), "%d");
+    ASSERT_EQ_FMT(0, (int)request_is_pause(REQUEST_CONTINUE), "%d");
+    ASSERT_EQ_FMT((int)PAUSE_POLL_SLEEP_US, (int)request_is_pause(REQUEST_PAUSE), "%d");
+    ASSERT_EQ_FMT((int)ADMIN_PAUSE_POLL_SLEEP_US, (int)request_is_pause(REQUEST_ADMIN_PAUSE), "%d");
+    ASSERT(request_is_pause(REQUEST_ADMIN_PAUSE) > request_is_pause(REQUEST_PAUSE));
     PASS();
 }
 
