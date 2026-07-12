@@ -67,7 +67,17 @@ echo "  travail : $WORK  (timeout ${TIMEOUT}s)"
 # --stop-on-solution : le serveur s'arrête à la 1re solution (et sauvegarde son
 # stock), ce qui donne au test un point de terminaison déterministe. Sans ce
 # drapeau, le défaut est de continuer à tourner — voir AGENTS.md.
-"$BIN" tcpserver 1 "$DATA" --stop-on-solution </dev/null >server.log 2>&1 &
+#
+# 2 threads (et non 1) : le processus PARENT du client ouvre, EN PLUS de la
+# connexion de travail de son unique fork de recherche, sa propre connexion de
+# canal de contrôle (INST_CONTROL_HELLO, v9) — cf. AGENTS.md, section canal de
+# contrôle. Cette session de contrôle occupe elle aussi un slot du pool
+# NB_THREADS du serveur (même pool que les connexions de travail, pas de pool
+# dédié) et le garde tant que le client tourne. Avec 1 seul thread serveur, la
+# session de contrôle gagnait systématiquement la course de connexion et
+# affamait pour toujours le fork de recherche ("all threads busy" en boucle) —
+# le serveur ne recevait jamais la solution et le test expirait au timeout.
+"$BIN" tcpserver 2 "$DATA" --stop-on-solution </dev/null >server.log 2>&1 &
 SRV_PID=$!
 sleep 1   # laisse le serveur écouter (le client a de toute façon un back-off)
 
