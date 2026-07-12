@@ -23,6 +23,7 @@
 #include <sys/socket.h>
 #include <signal.h>
 #include <unistd.h>
+#include <time.h>
 
 /* Helpers internes de etii_client.c non exposés dans etii_client.h. */
 void *control_thread(void *param);
@@ -1050,6 +1051,49 @@ TEST control_thread_survives_admin_pause(void)
     PASS();
 }
 
+/* En pause admin, control_thread doit ralentir sa cadence de tick (500 ms,
+ * ADMIN_PAUSE_POLL_SLEEP_US) au lieu des 1 ms habituels : rien à réguler
+ * pendant une pause administrative (aucune recherche en cours), donc pas
+ * besoin de la précision de control_step. On le vérifie en mesurant le temps
+ * écoulé avant que le thread auxiliaire (délai de 20 ms) ne pose REQUEST_STOP
+ * et que la boucle s'arrête : avec la cadence rapide (1 ms) ce serait ~20 ms
+ * (cf. control_thread_loops_once_then_stops), avec la cadence lente c'est le
+ * temps d'un seul tick usleep (jusqu'à 500 ms) qui domine. */
+TEST control_thread_admin_pause_uses_slow_cadence(void)
+{
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    unsigned long long saved_msbs = max_search_by_sec;
+    NB_THREADS = 1;
+    max_search_by_sec = 0;
+
+    client_possibility_t cp;
+    init_test_client(&cp, 0);
+
+    request = REQUEST_ADMIN_PAUSE;
+    pthread_t stopper;
+    pthread_create(&stopper, NULL, ec_stop_after_delay, NULL);
+
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    void *ret = control_thread(&cp);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    pthread_join(stopper, NULL);
+
+    ASSERT_EQ(NULL, ret);
+    long elapsed_ms = (end.tv_sec - start.tv_sec) * 1000
+                     + (end.tv_nsec - start.tv_nsec) / 1000000;
+    /* Bien au-delà des ~20 ms de la cadence rapide : preuve que le tick lent a
+       été utilisé (borne haute large pour tolérer un CI chargé). */
+    ASSERT(elapsed_ms >= 100);
+
+    destroy_test_client(&cp);
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    max_search_by_sec = saved_msbs;
+    PASS();
+}
+
 /* Thread occupé (works=1, pas de socket) : personne ne réclame de travail, la
  * boucle prend la branche « cadence normale » (remise à zéro du back-off) au
  * lieu de la pause adaptative. */
@@ -1195,6 +1239,7 @@ SUITE(etii_client_suite)
     RUN_TEST(build_control_thread_runs_and_joins);
     RUN_TEST(control_thread_loops_once_then_stops);
     RUN_TEST(control_thread_survives_admin_pause);
+    RUN_TEST(control_thread_admin_pause_uses_slow_cadence);
 
     RUN_TEST(feed_thread_aposs_stop_returns_null_without_looping);
     RUN_TEST(feed_thread_aposs_backs_off_when_no_work_available);

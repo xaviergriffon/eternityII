@@ -323,6 +323,10 @@ void control_step(client_possibility_t *thread_params,
  * administrative distante, `REQUEST_ADMIN_PAUSE`) et ne s'arrête qu'à
  * `REQUEST_STOP` : sortir aussi sur `REQUEST_ADMIN_PAUSE` ferait mourir ce
  * thread pendant la pause, et au `resume` plus rien ne réapplique `limit`.
+ * Cadence de la boucle : 1 ms tant que la régulation reste pertinente
+ * (REQUEST_CONTINUE/REQUEST_PAUSE, où `control_step` doit rester précis),
+ * `ADMIN_PAUSE_POLL_SLEEP_US` (500 ms) pendant `REQUEST_ADMIN_PAUSE` — aucune
+ * recherche ne tourne alors, donc rien à réguler ni à mesurer précisément.
  *
  * @param param Tableau de `client_possibility_t` (un par thread de recherche).
  * @return      NULL.
@@ -347,8 +351,11 @@ void *control_thread(void *param) {
     int nbCheck = 0;
     while (request_keeps_running(request)) {
         control_step(thread_params, lastCheck, oneSecond, &nbCheck);
-        // La priorité est au traitement lors on effectue des controles espacés.
-        usleep(1000);
+        // Cadence fine (1 ms) tant que la régulation de débit est pertinente
+        // (REQUEST_CONTINUE/REQUEST_PAUSE) ; en pause admin, rien à réguler
+        // (aucune recherche en cours) donc on peut se permettre la même
+        // cadence large que les boucles chaudes de etii_search.c.
+        usleep(request == REQUEST_ADMIN_PAUSE ? ADMIN_PAUSE_POLL_SLEEP_US : 1000);
     }
 #ifdef DEBUG_THREAD
     log_info("END control thread %i\n", getpid());
