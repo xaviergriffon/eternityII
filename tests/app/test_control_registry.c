@@ -245,6 +245,79 @@ TEST snapshot_respects_max_capacity(void)
     PASS();
 }
 
+/* ---------- record_stats ----------------------------------------------------*/
+
+TEST snapshot_has_stats_false_before_any_record(void)
+{
+    control_hello_t h = make_hello(1, 1, 0);
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+
+    control_session_info_t infos[MAX_CONTROL_SESSIONS];
+    int n = control_registry_snapshot(infos, MAX_CONTROL_SESSIONS);
+    ASSERT_EQ(1, n);
+    ASSERT_EQ(0, infos[0].has_stats);
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST record_stats_reflected_in_snapshot(void)
+{
+    control_hello_t h = make_hello(1, 1, 0);
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+
+    control_stats_t stats = {
+        .shots_per_second = 42, .possibility_stock = 7, .analysed_stock = 3,
+        .max_result = 128, .pruner_checked = 9, .pruner_removed = 1
+    };
+    control_registry_record_stats(idx, &stats);
+
+    control_session_info_t infos[MAX_CONTROL_SESSIONS];
+    int n = control_registry_snapshot(infos, MAX_CONTROL_SESSIONS);
+    ASSERT_EQ(1, n);
+    ASSERT_EQ(1, infos[0].has_stats);
+    ASSERT_EQ(42, (int)infos[0].stats.shots_per_second);
+    ASSERT_EQ(128, (int)infos[0].stats.max_result);
+    ASSERT_EQ(1, (int)infos[0].stats.pruner_removed);
+    ASSERT(infos[0].stats_time > 0);
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST record_stats_invalid_index_or_null_is_noop(void)
+{
+    control_stats_t stats = {0};
+    control_registry_record_stats(-1, &stats);
+    control_registry_record_stats(MAX_CONTROL_SESSIONS, &stats);
+    control_registry_record_stats(0, NULL);
+    PASS(); /* ne doit pas planter */
+}
+
+TEST unregister_then_register_clears_stale_stats(void)
+{
+    control_hello_t h = make_hello(1, 1, 0);
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+
+    control_stats_t stats = { .shots_per_second = 999 };
+    control_registry_record_stats(idx, &stats);
+    control_registry_unregister(idx);
+
+    int idx2 = control_registry_register(2, &h);
+    ASSERT_EQ(idx, idx2); /* même slot réutilisé */
+
+    control_session_info_t infos[MAX_CONTROL_SESSIONS];
+    int n = control_registry_snapshot(infos, MAX_CONTROL_SESSIONS);
+    ASSERT_EQ(1, n);
+    ASSERT_EQ(0, infos[0].has_stats);
+
+    control_registry_unregister(idx2);
+    PASS();
+}
+
 /* ---------- broadcast ------------------------------------------------------*/
 
 TEST broadcast_command_reaches_all_active_sessions(void)
@@ -467,6 +540,11 @@ SUITE(control_registry_suite)
     RUN_TEST(snapshot_reflects_registered_hello);
     RUN_TEST(snapshot_null_or_zero_max_returns_zero);
     RUN_TEST(snapshot_respects_max_capacity);
+
+    RUN_TEST(snapshot_has_stats_false_before_any_record);
+    RUN_TEST(record_stats_reflected_in_snapshot);
+    RUN_TEST(record_stats_invalid_index_or_null_is_noop);
+    RUN_TEST(unregister_then_register_clears_stale_stats);
 
     RUN_TEST(broadcast_command_reaches_all_active_sessions);
     RUN_TEST(broadcast_get_stats_reaches_all_active_sessions);

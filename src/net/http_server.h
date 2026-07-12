@@ -66,4 +66,16 @@ void http_stats_collect(http_stats_view_t *out);
  */
 void http_status_collect(http_status_view_t *out);
 
+/**
+ * @brief Construit un instantané des sessions de contrôle actives (canal
+ *        `INST_CONTROL_HELLO`, v9) pour `GET /api/v1/clients`, via
+ *        `control_registry_snapshot` (src/app/control_registry.h) — même
+ *        source que la commande console `clients`.
+ *
+ * @param out Tableau destination (au moins `max` entrées).
+ * @param max Capacité de `out`.
+ * @return    Nombre d'entrées effectivement copiées.
+ */
+int http_clients_collect(http_client_info_t *out, int max);
+
 #endif /* eternityII_http_server_h */

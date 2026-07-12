@@ -272,15 +272,21 @@ pilote quelques commandes admin — sans avoir à implémenter le protocole bina
 - Écoute en **boucle locale uniquement** (`127.0.0.1`), jamais exposée hors machine ;
   aucune authentification (réseau de confiance / tunnel explicite pour un accès
   distant).
-- Trois routes : `GET /api/v1/stats` (télémétrie), `GET /api/v1/status` (état et
+- Cinq routes : `GET /api/v1/stats` (télémétrie), `GET /api/v1/status` (état et
   configuration), `POST /api/v1/command` (commandes admin, filtrées par la **même
   liste blanche** que le canal de contrôle : `pause`, `resume`, `limit`,
-  `maxStockByThread`, `prunerBatch` — jamais `exit`/`restore`/`import`).
+  `maxStockByThread`, `prunerBatch` — jamais `exit`/`restore`/`import`),
+  `GET /api/v1/clients` (liste des clients connectés via le
+  [canal de contrôle](#canal-de-contrôle-v9), stats par client incluses si déjà
+  collectées) et `POST /api/v1/clients/stats` (déclenche une collecte auprès de tous
+  les clients — équivalent HTTP de la commande console `clientsStats`).
 
 ```sh
 curl http://127.0.0.1:8080/api/v1/stats
 curl http://127.0.0.1:8080/api/v1/status
 curl -X POST -d '{"command":"pause"}' http://127.0.0.1:8080/api/v1/command
+curl http://127.0.0.1:8080/api/v1/clients
+curl -X POST http://127.0.0.1:8080/api/v1/clients/stats
 ```
 
 > Documentation détaillée (schémas JSON complets, codes d'erreur, séquences,
@@ -330,7 +336,7 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard. Tape
 | `pause` | Pause administrative de la recherche (`REQUEST_ADMIN_PAUSE`) — distincte de la pause de régulation de débit interne (`limit`), ne se lève que par `resume` ; diffuse aussi `CTRL_COMMAND "pause"` à tous les clients connectés (utile côté serveur, qui n'a pas de recherche locale à mettre en pause), et persiste l'état pour les clients qui se connecteront après |
 | `resume` | Lève une pause administrative posée par `pause` ; diffuse aussi `CTRL_COMMAND "resume"` à tous les clients connectés et efface l'état persisté |
 | `clients` *(serveur)* | Liste les sessions de [canal de contrôle](#canal-de-contrôle-v9) actives (pid, forks, mode, dernière activité) |
-| `clientsStats` *(serveur)* | Demande les statistiques agrégées de chaque client connecté via son canal de contrôle |
+| `clientsStats` *(serveur)* | Demande les statistiques agrégées de chaque client connecté via son canal de contrôle (équivalent de `POST /api/v1/clients/stats` sur l'[API HTTP](#api-http-rest-admin)) |
 | `clientsCmd <ligne>` *(serveur)* | Pousse `<ligne>` à distance à tous les clients connectés (filtrée par une liste blanche : `pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`) |
 
 Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`, `rmnonext`, `limit`, `maxStockByThread`, `prunerBatch`, `min`, `printanalysed`, `pause`, `resume`) sont automatiquement retransmises à tous les processus fils via socket Unix. Les commandes `clients*` sont **serveur uniquement** : elles agissent sur le [canal de contrôle](#canal-de-contrôle-v9) distant, pas sur des process fils locaux.

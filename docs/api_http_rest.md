@@ -11,9 +11,10 @@ réservé aux processus client eternityII).
 Le code correspondant vit dans :
 
 - [src/net/http_codec.h](../src/net/http_codec.h) / [http_codec.c](../src/net/http_codec.c) — parsing HTTP/1.1, routage, formatage JSON : fonctions pures, sans socket ;
-- [src/net/http_server.h](../src/net/http_server.h) / [http_server.c](../src/net/http_server.c) — écouteur réseau (thread détaché, boucle accept) ;
+- [src/net/http_server.h](../src/net/http_server.h) / [http_server.c](../src/net/http_server.c) — écouteur réseau (thread détaché, boucle accept), et les fonctions `http_*_collect` qui alimentent les vues JSON à partir de l'état serveur/registre vivant ;
 - [src/ui/command_lines.c](../src/ui/command_lines.c) (`admin_apply_remote_command`) — exécution des commandes admin, réentrante ;
-- [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_allowed`) — liste blanche des commandes, **partagée** avec le canal de contrôle binaire.
+- [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_allowed`) — liste blanche des commandes, **partagée** avec le canal de contrôle binaire ;
+- [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) (`control_registry_snapshot`, `control_registry_record_stats`, `control_registry_broadcast_get_stats`) — registre des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), source de `GET /api/v1/clients` et `POST /api/v1/clients/stats`.
 
 ## Activation
 
@@ -207,6 +208,92 @@ une saisie sur la console interactive, ou à une commande poussée via le
 [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), ne corrompt
 jamais le découpage de l'autre.
 
+### GET /api/v1/clients
+
+Instantané des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9)
+actives — l'équivalent HTTP de la commande console `clients`, statistiques par client
+comprises (équivalent de `clientsStats`, voir plus bas).
+
+```json
+{
+  "clients": [
+    {
+      "pid": 4242,
+      "forks": 4,
+      "mode": "search",
+      "last_activity": 1730000000,
+      "stats": null
+    },
+    {
+      "pid": 5555,
+      "forks": 1,
+      "mode": "pruner",
+      "last_activity": 1730000042,
+      "stats": {
+        "shots_per_second": 12345,
+        "possibility_stock": 300,
+        "analysed_stock": 12,
+        "max_result": 180,
+        "pruner_checked": 900,
+        "pruner_removed": 40,
+        "stats_time": 1730000040
+      }
+    }
+  ]
+}
+```
+
+| Champ | Type | Sens |
+|---|---|---|
+| `clients` | tableau | Une entrée par session de canal de contrôle active (`control_registry_snapshot`) — **tableau vide** si aucun client n'est connecté, jamais une erreur |
+| `pid` | entier | PID du processus **parent** du client (jamais un fork de recherche, cf. canal de contrôle) |
+| `forks` | entier ≥ 0 | Nombre de processus de recherche forkés par ce client |
+| `mode` | chaîne | `search` (client de recherche), `pruner` (élagage CPU), `gpu_pruner` (élagage GPU), ou `unknown` (valeur de repli, ne devrait pas apparaître en usage normal) |
+| `last_activity` | entier | Horodatage Unix (secondes) du dernier échange observé sur cette session (hello, commande acquittée, ping/ack, ou stats reçues) |
+| `stats` | objet ou `null` | `null` tant qu'aucun `CTRL_GET_STATS` n'a encore abouti pour cette session ; sinon un instantané **mis en cache** (voir ci-dessous) |
+| `stats.shots_per_second` / `.possibility_stock` / `.analysed_stock` / `.max_result` / `.pruner_checked` / `.pruner_removed` | entier ≥ 0 | Mêmes champs que `control_stats_t` du canal de contrôle (voir [échanges client/serveur](echanges_client_serveur.md#canal-de-contrôle-v9)) — agrégés côté client sur tous ses forks |
+| `stats.stats_time` | entier | Horodatage Unix (secondes) auquel **cette réponse précise** a été reçue — peut être ancien si le client n'a pas été re-sondé depuis (voir `POST /api/v1/clients/stats` ci-dessous) |
+
+**`stats` est un instantané en cache, pas une lecture en direct.** Une session de
+canal de contrôle échange avec le serveur sur son propre thread dédié, indépendant du
+thread unique de l'API HTTP (voir [Modèle réseau](#modèle-réseau)) : ce GET ne
+déclenche **aucun** aller-retour réseau vers les clients, il relit simplement la
+dernière réponse `CTRL_STATS` mise en cache par `control_registry_record_stats`
+(`src/app/control_registry.c`). Pour rafraîchir ce cache avant de lire, voir
+`POST /api/v1/clients/stats`.
+
+### POST /api/v1/clients/stats
+
+Déclenche une collecte de statistiques auprès de tous les clients connectés —
+l'équivalent HTTP de la commande console `clientsStats`.
+
+**Requête :** aucun corps requis.
+
+**Réponse :**
+
+```json
+{ "result": "ok", "requested": 3 }
+```
+
+| Champ | Type | Sens |
+|---|---|---|
+| `result` | chaîne | Toujours `"ok"` (code `200`) |
+| `requested` | entier ≥ 0 | Nombre de sessions de canal de contrôle actives auxquelles `CTRL_GET_STATS` vient d'être diffusé (`control_registry_broadcast_get_stats`) |
+
+**« Fire-and-forget », par nécessité.** Cette route répond **dès que la demande est
+posée** dans la file de chaque session, **sans attendre** les réponses — exactement
+comme la commande console `clientsStats`. Ce n'est pas une simplification arbitraire :
+le thread HTTP est **unique** et sert les requêtes **séquentiellement** (voir
+[Modèle réseau](#modèle-réseau)), alors que chaque réponse `CTRL_STATS` arrive de
+façon asynchrone sur le thread de sa propre session ; le faire attendre bloquerait
+l'API entière derrière le client le plus lent (voire un client mort qui ne répondra
+jamais). En pratique, chaque session se réveille **immédiatement** sur la commande
+postée (signal de `pthread_cond_t`, pas d'attente du prochain ping), donc
+l'aller-retour est typiquement de l'ordre de la milliseconde à la seconde — mais rien
+ne le garantit formellement pour un client lent ou en cours de déconnexion. Séquence
+d'usage typique : `POST /api/v1/clients/stats` puis, un court instant après,
+`GET /api/v1/clients` pour lire les `stats` rafraîchies.
+
 ## Séquences typiques
 
 ### Polling de télémétrie
@@ -248,6 +335,33 @@ sequenceDiagram
     Note over S: le serveur continue de tourner —<br/>la liste blanche est vérifiée AVANT toute exécution
 ```
 
+### Détail par client (`clients` / `clientsStats`)
+
+```mermaid
+sequenceDiagram
+    participant App as Application tierce
+    participant S as Serveur (thread HTTP)
+    participant R as control_registry (cache)
+    participant C as Client (session de contrôle)
+
+    App->>S: GET /api/v1/clients
+    S->>R: control_registry_snapshot()
+    R-->>S: pid/forks/mode/last_activity + stats en cache (peut être null)
+    S-->>App: 200 {"clients":[...]}
+
+    App->>S: POST /api/v1/clients/stats
+    S->>R: control_registry_broadcast_get_stats()
+    R-->>S: N sessions sollicitées
+    S-->>App: 200 {"result":"ok","requested":N}
+    Note over R,C: en parallèle, sur le thread de CHAQUE session :<br/>CTRL_GET_STATS -> CTRL_STATS -> control_registry_record_stats()
+
+    Note over App: … court instant plus tard …
+    App->>S: GET /api/v1/clients
+    S->>R: control_registry_snapshot()
+    R-->>S: stats désormais rafraîchies
+    S-->>App: 200 {"clients":[{ "stats": {...} }, ...]}
+```
+
 ## Exemples d'implémentation client
 
 ### curl
@@ -256,12 +370,15 @@ sequenceDiagram
 curl http://127.0.0.1:8080/api/v1/stats
 curl http://127.0.0.1:8080/api/v1/status
 curl -X POST -d '{"command":"limit 1000"}' http://127.0.0.1:8080/api/v1/command
+curl http://127.0.0.1:8080/api/v1/clients
+curl -X POST http://127.0.0.1:8080/api/v1/clients/stats   # puis relire /clients pour les stats rafraîchies
 ```
 
 ### Python (bibliothèque standard, sans dépendance)
 
 ```python
 import json
+import time
 import urllib.request
 
 BASE = "http://127.0.0.1:8080/api/v1"
@@ -279,8 +396,21 @@ def send_command(command):
     except urllib.error.HTTPError as e:
         return e.code, json.load(e)
 
+def get_clients():
+    with urllib.request.urlopen(f"{BASE}/clients", timeout=5) as r:
+        return json.load(r)["clients"]
+
+def refresh_clients_stats():
+    req = urllib.request.Request(f"{BASE}/clients/stats", data=b"", method="POST")
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.load(r)
+
 print(get_stats())
 print(send_command("pause"))
+
+refresh_clients_stats()
+time.sleep(0.5)  # laisse le temps aux sessions de répondre (typiquement sub-seconde)
+print(get_clients())
 ```
 
 ### Notes générales pour tout langage

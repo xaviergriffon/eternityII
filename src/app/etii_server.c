@@ -775,6 +775,7 @@ int control_session_step(client_t *client, int session_index, int timeout_ms)
                 log_error("session de contrôle : décodage CTRL_STATS échoué\n");
                 return 0;
             }
+            control_registry_record_stats(session_index, &stats);
             log_info("stats client : coups/s=%llu stock=%llu analyse=%llu record=%llu pruner_checked=%llu pruner_removed=%llu\n",
                       (unsigned long long)stats.shots_per_second,
                       (unsigned long long)stats.possibility_stock,

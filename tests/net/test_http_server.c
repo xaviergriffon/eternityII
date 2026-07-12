@@ -10,6 +10,7 @@
  */
 #include "greatest.h"
 #include "net/http_server.h"
+#include "app/control_registry.h"
 #include "app/static_variables.h"
 
 #include <sys/socket.h>
@@ -88,6 +89,123 @@ TEST http_server_get_status_returns_200(void)
     ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
     ASSERT(strstr(resp, "\"state\"") != NULL);
     ASSERT(strstr(resp, "\"version\"") != NULL);
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* GET /api/v1/clients -> 200, tableau vide (aucune session de contrôle active en test). */
+TEST http_server_get_clients_returns_200_empty(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    const char req[] = "GET /api/v1/clients HTTP/1.1\r\nHost: x\r\n\r\n";
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
+    ASSERT(strstr(resp, "{\"clients\":[]}") != NULL);
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* GET /api/v1/clients reflète les statistiques mises en cache par
+   control_registry_record_stats (round-trip HTTP -> registre -> HTTP, sans
+   passer par le réseau du canal de contrôle lui-même). */
+TEST http_server_get_clients_reflects_recorded_stats(void)
+{
+    control_hello_t hello = { .pid = 4242, .nb_forks = 3, .mode = 1 };
+    int idx = control_registry_register(-1, &hello);
+    ASSERT(idx >= 0);
+
+    control_stats_t stats = {
+        .shots_per_second = 999, .possibility_stock = 5, .analysed_stock = 2,
+        .max_result = 100, .pruner_checked = 8, .pruner_removed = 1
+    };
+    control_registry_record_stats(idx, &stats);
+
+    int sv[2];
+    MAKE_PAIR(sv);
+    const char req[] = "GET /api/v1/clients HTTP/1.1\r\nHost: x\r\n\r\n";
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
+    ASSERT(strstr(resp, "\"pid\":4242") != NULL);
+    ASSERT(strstr(resp, "\"mode\":\"pruner\"") != NULL);
+    ASSERT(strstr(resp, "\"shots_per_second\":999") != NULL);
+    ASSERT(strstr(resp, "\"pruner_removed\":1") != NULL);
+
+    control_registry_unregister(idx);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* POST /api/v1/clients/stats -> 200, "requested" reflète le nombre de sessions actives. */
+TEST http_server_post_clients_stats_returns_200(void)
+{
+    control_hello_t hello = { .pid = 5555, .nb_forks = 1, .mode = 0 };
+    int idx = control_registry_register(-1, &hello);
+    ASSERT(idx >= 0);
+
+    int sv[2];
+    MAKE_PAIR(sv);
+    const char req[] = "POST /api/v1/clients/stats HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
+    ASSERT(strstr(resp, "\"requested\":1") != NULL);
+
+    control_registry_unregister(idx);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* GET /api/v1/clients/stats -> 405 (route connue, méthode non supportée). */
+TEST http_server_get_clients_stats_returns_405(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    const char req[] = "GET /api/v1/clients/stats HTTP/1.1\r\nHost: x\r\n\r\n";
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 405") == resp);
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* POST /api/v1/clients -> 405 (route connue, méthode non supportée). */
+TEST http_server_post_clients_returns_405(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    const char req[] = "POST /api/v1/clients HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 405") == resp);
 
     close(sv[0]); close(sv[1]);
     PASS();
@@ -266,6 +384,11 @@ SUITE(http_server_suite)
 {
     RUN_TEST(http_server_get_stats_returns_200);
     RUN_TEST(http_server_get_status_returns_200);
+    RUN_TEST(http_server_get_clients_returns_200_empty);
+    RUN_TEST(http_server_get_clients_reflects_recorded_stats);
+    RUN_TEST(http_server_post_clients_stats_returns_200);
+    RUN_TEST(http_server_get_clients_stats_returns_405);
+    RUN_TEST(http_server_post_clients_returns_405);
     RUN_TEST(http_server_unknown_path_returns_404);
     RUN_TEST(http_server_wrong_method_returns_405);
     RUN_TEST(http_server_oversized_request_returns_413);
