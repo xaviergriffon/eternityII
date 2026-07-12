@@ -101,6 +101,7 @@ set(PROD_SRCS
     src/core/possibility.c
     src/net/etii_protocol.c
     src/net/control_protocol.c
+    src/net/http_codec.c
     src/app/etii_client.c
     src/app/etii_server.c
     src/app/etii_control.c
@@ -186,6 +187,7 @@ set(TEST_MODULES
     src/core/possibility.c
     src/net/etii_protocol.c
     src/net/control_protocol.c
+    src/net/http_codec.c
     src/core/datamanager.c
     src/net/local_socket.c
     src/net/tcpclient.c
@@ -209,6 +211,7 @@ set(TEST_SUITES_COMMON
     tests/core/test_datamanager.c
     tests/net/test_etii_protocol.c
     tests/net/test_control_protocol.c
+    tests/net/test_http_codec.c
     tests/net/test_local_socket.c
     tests/net/test_tcp.c
     tests/ui/test_command_history.c
@@ -282,6 +285,7 @@ add_executable(eternityII16 EXCLUDE_FROM_ALL
     src/core/possibility.c
     src/net/etii_protocol.c
     src/net/control_protocol.c
+    src/net/http_codec.c
     src/app/etii_client.c
     src/app/etii_server.c
     src/app/etii_control.c

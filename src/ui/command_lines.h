@@ -38,4 +38,45 @@ int do_command_line(char *command);
  * @return            Le nouvel état de `request` (peut être égal à `current`).
  */
 int admin_pause_transition(int current, int want_pause);
+
+/**
+ * @brief Borne une valeur de taille de lot pruner à [1, PRUNER_BATCH_MAX].
+ *
+ * Extrait de `pruner_batch_interpreter` pour être réutilisé par
+ * `admin_apply_remote_command` sans dupliquer les bornes.
+ *
+ * @param v Valeur brute demandée.
+ * @return  `v` borné à [1, PRUNER_BATCH_MAX].
+ */
+int pruner_batch_clamp(int v);
+
+/// `admin_apply_remote_command` a appliqué la commande avec succès.
+#define ADMIN_CMD_OK 0
+/// Commande reconnue mais arguments manquants/invalides.
+#define ADMIN_CMD_BAD_ARGS (-1)
+/// Commande absente de la liste blanche `control_command_allowed`.
+#define ADMIN_CMD_FORBIDDEN (-2)
+
+/**
+ * @brief Applique une commande admin distante (whitelistée) directement sur
+ *        l'état serveur, sans passer par `do_command_line`.
+ *
+ * `do_command_line` (et tous ses interpréteurs) tokenise via `strtok`, qui
+ * utilise un curseur global non réentrant : un appel concurrent depuis un
+ * thread HTTP (ou tout autre appelant asynchrone) pendant que le thread
+ * console ou le canal de contrôle tokenise déjà une ligne corromprait les
+ * deux découpages. Cette fonction relit `line` avec `strtok_r` (curseur
+ * local) et applique directement les quelques commandes admin sûres, sans
+ * toucher à l'état global de `strtok`.
+ *
+ * Ne couvre que les commandes acceptées par `control_command_allowed`
+ * (control_protocol.h) : `pause`, `resume`, `limit <n>`,
+ * `maxStockByThread <n>`, `prunerBatch <n>`. Toute autre commande (dont
+ * `exit`, `restore`, `import`) est refusée avant même d'être tokenisée.
+ *
+ * @param line Ligne de commande complète (ex. "limit 1000"), non modifiée.
+ * @return     `ADMIN_CMD_OK`, `ADMIN_CMD_FORBIDDEN` (hors liste blanche) ou
+ *             `ADMIN_CMD_BAD_ARGS` (commande reconnue, argument manquant/invalide).
+ */
+int admin_apply_remote_command(const char *line);
 #endif /* command_lines_h */

@@ -134,6 +134,19 @@ int max_stock_by_thread_interpreter(void) {
 }
 
 /**
+ * @brief Voir la doc dans command_lines.h.
+ */
+int pruner_batch_clamp(int v) {
+    if (v < 1) {
+        return 1;
+    }
+    if (v > PRUNER_BATCH_MAX) {
+        return PRUNER_BATCH_MAX;
+    }
+    return v;
+}
+
+/**
  * @brief Interpréteur de `prunerBatch <n>` : fixe la taille de lot d'échange du
  *        pruner (nombre de possibilités demandées/acquittées par aller-retour).
  *
@@ -143,14 +156,7 @@ int max_stock_by_thread_interpreter(void) {
 int pruner_batch_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments != NULL) {
-        int v = atoi(arguments);
-        if (v < 1) {
-            v = 1;
-        }
-        if (v > PRUNER_BATCH_MAX) {
-            v = PRUNER_BATCH_MAX;
-        }
-        pruner_batch_size = v;
+        pruner_batch_size = pruner_batch_clamp(atoi(arguments));
         return 0;
     }
     return -1;
@@ -519,6 +525,45 @@ int resume_interpreter(void) {
         log_info("resume : pas de pause administrative en cours\n");
     }
     return 0;
+}
+
+/**
+ * @brief Voir la doc dans command_lines.h.
+ */
+int admin_apply_remote_command(const char *line) {
+    if (!control_command_allowed(line)) {
+        return ADMIN_CMD_FORBIDDEN;
+    }
+
+    size_t length = strlen(line) + 1;
+    char *copy = malloc(sizeof(char) * length);
+    memcpy(copy, line, length);
+
+    char *save = NULL;
+    char *word = strtok_r(copy, " ", &save);
+    int result = ADMIN_CMD_BAD_ARGS;
+    if (word != NULL) {
+        char *arg = strtok_r(NULL, " ", &save);
+        if (strcmp(word, "pause") == 0) {
+            request = admin_pause_transition(request, 1);
+            result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "resume") == 0) {
+            request = admin_pause_transition(request, 0);
+            result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "limit") == 0 && arg != NULL) {
+            max_search_by_sec = atoi(arg);
+            result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "maxStockByThread") == 0 && arg != NULL) {
+            max_stock_by_thread = atoi(arg);
+            result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "prunerBatch") == 0 && arg != NULL) {
+            pruner_batch_size = pruner_batch_clamp(atoi(arg));
+            result = ADMIN_CMD_OK;
+        }
+    }
+
+    free(copy);
+    return result;
 }
 
 /**
