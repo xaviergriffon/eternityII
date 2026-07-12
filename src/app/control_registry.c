@@ -28,6 +28,10 @@ typedef struct {
     int head;   /* indice du prochain élément à dépiler */
     int count;  /* nombre d'éléments en file */
 
+    int has_stats;
+    control_stats_t stats;
+    time_t stats_time;
+
     pthread_mutex_t mutex;
     pthread_cond_t cond;
 } control_session_t;
@@ -72,6 +76,7 @@ static void registry_init_once(void)
         g_sessions[i].socket_id = -1;
         g_sessions[i].head = 0;
         g_sessions[i].count = 0;
+        g_sessions[i].has_stats = 0;
     }
 }
 
@@ -99,6 +104,7 @@ int control_registry_register(int socket_id, const control_hello_t *hello)
         s->last_activity = time(NULL);
         s->head = 0;
         s->count = 0;
+        s->has_stats = 0;
         if (g_desired_pause_state) {
             /* Pré-poste "pause" dans la file toute neuve, pour que le tout
              * premier `control_session_step` de cette session l'exécute avant
@@ -128,6 +134,7 @@ void control_registry_unregister(int index)
     s->socket_id = -1;
     s->head = 0;
     s->count = 0;
+    s->has_stats = 0;
     pthread_mutex_unlock(&s->mutex);
     pthread_mutex_unlock(&g_registry_mutex);
 }
@@ -262,12 +269,31 @@ int control_registry_snapshot(control_session_info_t *out, int max)
             out[n].nb_forks = s->hello.nb_forks;
             out[n].mode = s->hello.mode;
             out[n].last_activity = s->last_activity;
+            out[n].has_stats = s->has_stats;
+            out[n].stats = s->stats;
+            out[n].stats_time = s->stats_time;
             n++;
         }
         pthread_mutex_unlock(&s->mutex);
     }
     pthread_mutex_unlock(&g_registry_mutex);
     return n;
+}
+
+void control_registry_record_stats(int index, const control_stats_t *stats)
+{
+    pthread_once(&g_init_once, registry_init_once);
+    if (index < 0 || index >= MAX_CONTROL_SESSIONS || stats == NULL) {
+        return;
+    }
+    control_session_t *s = &g_sessions[index];
+    pthread_mutex_lock(&s->mutex);
+    if (s->in_use) {
+        s->stats = *stats;
+        s->stats_time = time(NULL);
+        s->has_stats = 1;
+    }
+    pthread_mutex_unlock(&s->mutex);
 }
 
 int control_registry_broadcast_command(uint8_t cmd, const char *command_line)

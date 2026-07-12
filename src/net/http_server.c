@@ -3,12 +3,14 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "app/control_registry.h"
 #include "app/etii_server.h"
 #include "app/static_variables.h"
 #include "core/datamanager.h"
@@ -111,6 +113,31 @@ void http_status_collect(http_status_view_t *out)
     out->pruner_batch = pruner_batch_size;
 }
 
+int http_clients_collect(http_client_info_t *out, int max)
+{
+    if (out == NULL || max <= 0) {
+        return 0;
+    }
+    control_session_info_t infos[MAX_CONTROL_SESSIONS];
+    int cap = (max < MAX_CONTROL_SESSIONS) ? max : MAX_CONTROL_SESSIONS;
+    int n = control_registry_snapshot(infos, cap);
+    for (int i = 0; i < n; i++) {
+        out[i].pid = infos[i].pid;
+        out[i].nb_forks = infos[i].nb_forks;
+        out[i].mode = infos[i].mode;
+        out[i].last_activity = (long long)infos[i].last_activity;
+        out[i].has_stats = infos[i].has_stats;
+        out[i].stats_shots_per_second = (unsigned long long)infos[i].stats.shots_per_second;
+        out[i].stats_possibility_stock = (unsigned long long)infos[i].stats.possibility_stock;
+        out[i].stats_analysed_stock = (unsigned long long)infos[i].stats.analysed_stock;
+        out[i].stats_max_result = (unsigned long long)infos[i].stats.max_result;
+        out[i].stats_pruner_checked = (unsigned long long)infos[i].stats.pruner_checked;
+        out[i].stats_pruner_removed = (unsigned long long)infos[i].stats.pruner_removed;
+        out[i].stats_time = (long long)infos[i].stats_time;
+    }
+    return n;
+}
+
 /** @brief Formate et envoie une réponse ; ignore un échec d'envoi (client déjà parti). */
 static void send_response(int socket_id, int status, const char *json_body)
 {
@@ -192,6 +219,26 @@ int handle_http_connection(int socket_id)
         case HTTP_ROUTE_COMMAND:
             handle_command_route(socket_id, &req);
             break;
+        case HTTP_ROUTE_CLIENTS: {
+            http_client_info_t infos[MAX_CONTROL_SESSIONS];
+            int n = http_clients_collect(infos, MAX_CONTROL_SESSIONS);
+            if (http_json_format_clients(json, sizeof(json), infos, n) > 0) {
+                send_response(socket_id, 200, json);
+            } else {
+                send_response(socket_id, 500, "{\"error\":\"internal\"}");
+            }
+            break;
+        }
+        case HTTP_ROUTE_CLIENTS_STATS: {
+            int n = control_registry_broadcast_get_stats();
+            int written = snprintf(json, sizeof(json), "{\"result\":\"ok\",\"requested\":%d}", n);
+            if (written > 0 && (size_t)written < sizeof(json)) {
+                send_response(socket_id, 200, json);
+            } else {
+                send_response(socket_id, 500, "{\"error\":\"internal\"}");
+            }
+            break;
+        }
         case HTTP_ROUTE_NOT_FOUND:
             send_response(socket_id, 404, "{\"error\":\"not found\"}");
             break;

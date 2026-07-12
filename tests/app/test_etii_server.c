@@ -2171,6 +2171,15 @@ TEST control_session_step_get_stats_round_trip(void)
 
     ASSERT_EQ_FMT(1, cont, "%d");
 
+    /* control_session_step doit mettre en cache les stats décodées (pour
+       GET /api/v1/clients de l'API HTTP admin, cf. control_registry_record_stats). */
+    control_session_info_t infos[MAX_CONTROL_SESSIONS];
+    int n = control_registry_snapshot(infos, MAX_CONTROL_SESSIONS);
+    ASSERT_EQ(1, n);
+    ASSERT_EQ(1, infos[0].has_stats);
+    ASSERT_EQ(10, (int)infos[0].stats.shots_per_second);
+    ASSERT_EQ(30, (int)infos[0].stats.max_result);
+
     control_registry_unregister(idx);
     close(sv[0]); close(sv[1]);
     PASS();

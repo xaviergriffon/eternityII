@@ -79,11 +79,13 @@ http_parse_result_t http_request_parse(const char *buf, int32_t len, http_reques
  * @brief Route logique résolue à partir de la méthode et du chemin.
  */
 typedef enum {
-    HTTP_ROUTE_STATS,       ///< GET /api/v1/stats
-    HTTP_ROUTE_STATUS,      ///< GET /api/v1/status
-    HTTP_ROUTE_COMMAND,     ///< POST /api/v1/command
-    HTTP_ROUTE_NOT_FOUND,   ///< Chemin inconnu (404)
-    HTTP_ROUTE_BAD_METHOD   ///< Chemin connu, méthode non supportée (405)
+    HTTP_ROUTE_STATS,         ///< GET /api/v1/stats
+    HTTP_ROUTE_STATUS,        ///< GET /api/v1/status
+    HTTP_ROUTE_COMMAND,       ///< POST /api/v1/command
+    HTTP_ROUTE_CLIENTS,       ///< GET /api/v1/clients
+    HTTP_ROUTE_CLIENTS_STATS, ///< POST /api/v1/clients/stats
+    HTTP_ROUTE_NOT_FOUND,     ///< Chemin inconnu (404)
+    HTTP_ROUTE_BAD_METHOD     ///< Chemin connu, méthode non supportée (405)
 } http_route_t;
 
 /**
@@ -174,5 +176,55 @@ int http_json_format_stats(char *buf, size_t size, const http_stats_view_t *view
  * @return Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
  */
 int http_json_format_status(char *buf, size_t size, const http_status_view_t *view);
+
+/**
+ * @brief Vue en lecture d'une session de contrôle active (canal
+ *        `INST_CONTROL_HELLO`, v9), pour `GET /api/v1/clients`. Remplie par
+ *        `http_clients_collect` (src/net/http_server.h) à partir de
+ *        `control_registry_snapshot` (src/app/control_registry.h) — ce struct
+ *        évite à `http_codec.h`, pur et sans dépendance `app/`, de connaître
+ *        `control_session_info_t`.
+ */
+typedef struct {
+    /// PID du processus parent qui a envoyé le hello.
+    int32_t pid;
+    /// Nombre de forks de recherche gérés par ce parent.
+    int32_t nb_forks;
+    /// Mode du client : 0 = recherche, 1 = pruner, 2 = pruner GPU.
+    uint8_t mode;
+    /// Horodatage Unix (secondes) de la dernière activité observée.
+    long long last_activity;
+    /// 1 si les champs `stats_*`/`stats_time` sont valides (un `CTRL_STATS` a
+    /// déjà été reçu pour cette session, via `POST /api/v1/clients/stats` ou la
+    /// console `clientsStats`), 0 sinon (aucune donnée encore récoltée).
+    int has_stats;
+    /// Débit de recherche courant (essais/seconde) au moment de `stats_time`.
+    unsigned long long stats_shots_per_second;
+    /// Nombre de possibilités en stock local au moment de `stats_time`.
+    unsigned long long stats_possibility_stock;
+    /// Nombre de possibilités analysées en stock local au moment de `stats_time`.
+    unsigned long long stats_analysed_stock;
+    /// Meilleur résultat (nombre de cases placées) au moment de `stats_time`.
+    unsigned long long stats_max_result;
+    /// Nombre de possibilités vérifiées par le pruner (0 hors mode pruner).
+    unsigned long long stats_pruner_checked;
+    /// Nombre de possibilités éliminées par le pruner (0 hors mode pruner).
+    unsigned long long stats_pruner_removed;
+    /// Horodatage Unix (secondes) de la réception des statistiques ci-dessus
+    /// (valide seulement si `has_stats`).
+    long long stats_time;
+} http_client_info_t;
+
+/**
+ * @brief Sérialise un tableau de sessions de contrôle actives en JSON dans `buf`
+ *        (cf. schéma documenté dans AGENTS.md).
+ *
+ * @param buf    Tampon destination.
+ * @param size   Taille de `buf`.
+ * @param infos  Tableau de sessions (peut être vide si `count == 0`).
+ * @param count  Nombre d'entrées valides dans `infos`.
+ * @return       Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
+ */
+int http_json_format_clients(char *buf, size_t size, const http_client_info_t *infos, int count);
 
 #endif /* eternityII_http_codec_h */

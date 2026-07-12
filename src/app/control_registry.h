@@ -51,6 +51,14 @@ typedef struct {
     uint8_t mode;
     /// Dernière activité observée (dernier hello, post ou touch).
     time_t last_activity;
+    /// 1 si `stats`/`stats_time` proviennent d'un `CTRL_STATS` déjà reçu
+    /// (cf. `control_registry_record_stats`), 0 si aucune statistique n'a
+    /// encore été récoltée pour cette session (ex. juste après le hello).
+    int has_stats;
+    /// Dernières statistiques agrégées reçues (valides seulement si `has_stats`).
+    control_stats_t stats;
+    /// Horodatage Unix de la réception de `stats` (valide seulement si `has_stats`).
+    time_t stats_time;
 } control_session_info_t;
 
 /**
@@ -122,6 +130,19 @@ void control_registry_touch(int index);
  * @brief Nombre de sessions de contrôle actuellement enregistrées.
  */
 int control_registry_count(void);
+
+/**
+ * @brief Met en cache les dernières statistiques reçues (`CTRL_STATS`) pour la
+ *        session `index`, pour qu'un lecteur synchrone (ex. `GET /api/v1/clients`
+ *        de l'API HTTP admin) puisse les relire sans attendre un aller-retour
+ *        réseau. Appelée par `control_session_step` (`src/app/etii_server.c`)
+ *        juste après un décodage `CTRL_STATS` réussi.
+ *
+ * @param index Indice de la session. No-op si hors bornes ou session inactive.
+ * @param stats Statistiques décodées à mettre en cache (copiées, jamais NULL
+ *              attendu de l'appelant).
+ */
+void control_registry_record_stats(int index, const control_stats_t *stats);
 
 /**
  * @brief Recopie un instantané des sessions actives dans `out` (au plus `max`

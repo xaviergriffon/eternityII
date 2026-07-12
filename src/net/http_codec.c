@@ -169,6 +169,12 @@ http_route_t http_route_resolve(const char *method, const char *path)
     if (strcmp(path, "/api/v1/command") == 0) {
         return (strcmp(method, "POST") == 0) ? HTTP_ROUTE_COMMAND : HTTP_ROUTE_BAD_METHOD;
     }
+    if (strcmp(path, "/api/v1/clients") == 0) {
+        return (strcmp(method, "GET") == 0) ? HTTP_ROUTE_CLIENTS : HTTP_ROUTE_BAD_METHOD;
+    }
+    if (strcmp(path, "/api/v1/clients/stats") == 0) {
+        return (strcmp(method, "POST") == 0) ? HTTP_ROUTE_CLIENTS_STATS : HTTP_ROUTE_BAD_METHOD;
+    }
     return HTTP_ROUTE_NOT_FOUND;
 }
 
@@ -292,6 +298,71 @@ int http_json_format_stats(char *buf, size_t size, const http_stats_view_t *view
             "%s{\"file\":%d,\"unchecked\":%llu,\"checked\":%llu,\"analysed\":%llu}",
             (i == 0) ? "" : ",", i,
             view->queue_unchecked[i], view->queue_checked[i], view->queue_analysed[i]);
+        if (written < 0 || (size_t)written >= size - offset) {
+            return -1;
+        }
+        offset += (size_t)written;
+    }
+
+    written = snprintf(buf + offset, size - offset, "]}");
+    if (written < 0 || (size_t)written >= size - offset) {
+        return -1;
+    }
+    offset += (size_t)written;
+
+    return (int)offset;
+}
+
+/** @brief Libellé du mode d'un client de contrôle (0/1/2, cf. control_hello_t.mode). */
+static const char *client_mode_label(uint8_t mode)
+{
+    switch (mode) {
+        case 0:  return "search";
+        case 1:  return "pruner";
+        case 2:  return "gpu_pruner";
+        default: return "unknown";
+    }
+}
+
+int http_json_format_clients(char *buf, size_t size, const http_client_info_t *infos, int count)
+{
+    if (buf == NULL || size == 0 || (infos == NULL && count > 0) || count < 0) {
+        return -1;
+    }
+
+    size_t offset = 0;
+    int written = snprintf(buf + offset, size - offset, "{\"clients\":[");
+    if (written < 0 || (size_t)written >= size - offset) {
+        return -1;
+    }
+    offset += (size_t)written;
+
+    for (int i = 0; i < count; i++) {
+        written = snprintf(buf + offset, size - offset,
+            "%s{\"pid\":%d,\"forks\":%d,\"mode\":\"%s\",\"last_activity\":%lld,\"stats\":",
+            (i == 0) ? "" : ",", infos[i].pid, infos[i].nb_forks,
+            client_mode_label(infos[i].mode), infos[i].last_activity);
+        if (written < 0 || (size_t)written >= size - offset) {
+            return -1;
+        }
+        offset += (size_t)written;
+
+        if (infos[i].has_stats) {
+            written = snprintf(buf + offset, size - offset,
+                "{\"shots_per_second\":%llu,\"possibility_stock\":%llu,\"analysed_stock\":%llu,"
+                "\"max_result\":%llu,\"pruner_checked\":%llu,\"pruner_removed\":%llu,\"stats_time\":%lld}",
+                infos[i].stats_shots_per_second, infos[i].stats_possibility_stock,
+                infos[i].stats_analysed_stock, infos[i].stats_max_result,
+                infos[i].stats_pruner_checked, infos[i].stats_pruner_removed, infos[i].stats_time);
+        } else {
+            written = snprintf(buf + offset, size - offset, "null");
+        }
+        if (written < 0 || (size_t)written >= size - offset) {
+            return -1;
+        }
+        offset += (size_t)written;
+
+        written = snprintf(buf + offset, size - offset, "}");
         if (written < 0 || (size_t)written >= size - offset) {
             return -1;
         }
