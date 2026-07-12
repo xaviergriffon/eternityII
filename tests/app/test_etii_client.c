@@ -976,6 +976,41 @@ TEST control_thread_loops_once_then_stops(void)
     PASS();
 }
 
+/* REQUEST_ADMIN_PAUSE dès l'entrée : control_thread doit continuer à tourner
+ * (et donc réappliquer `limit` dès le resume) au lieu de sortir immédiatement.
+ * Avant le correctif, la condition de boucle `request == REQUEST_CONTINUE ||
+ * request == REQUEST_PAUSE` ne couvrait pas REQUEST_ADMIN_PAUSE : une pause
+ * distante (canal de contrôle serveur -> client) terminait le thread pour de
+ * bon, et le resume qui suivait ne relançait rien — la limite de débit restait
+ * durablement sans effet. On vérifie ici que le corps de boucle est bien
+ * exécuté (via le thread auxiliaire qui pose REQUEST_STOP après un délai),
+ * ce qui n'aurait jamais lieu avec l'ancienne condition. */
+TEST control_thread_survives_admin_pause(void)
+{
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    unsigned long long saved_msbs = max_search_by_sec;
+    NB_THREADS = 1;
+    max_search_by_sec = 0;
+
+    client_possibility_t cp;
+    init_test_client(&cp, 0);
+
+    request = REQUEST_ADMIN_PAUSE;
+    pthread_t stopper;
+    pthread_create(&stopper, NULL, ec_stop_after_delay, NULL);
+    void *ret = control_thread(&cp);
+    pthread_join(stopper, NULL);
+
+    ASSERT_EQ(NULL, ret);
+
+    destroy_test_client(&cp);
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    max_search_by_sec = saved_msbs;
+    PASS();
+}
+
 /* Thread occupé (works=1, pas de socket) : personne ne réclame de travail, la
  * boucle prend la branche « cadence normale » (remise à zéro du back-off) au
  * lieu de la pause adaptative. */
@@ -1119,6 +1154,7 @@ SUITE(etii_client_suite)
     RUN_TEST(control_thread_stop_returns_null_without_looping);
     RUN_TEST(build_control_thread_runs_and_joins);
     RUN_TEST(control_thread_loops_once_then_stops);
+    RUN_TEST(control_thread_survives_admin_pause);
 
     RUN_TEST(feed_thread_aposs_stop_returns_null_without_looping);
     RUN_TEST(feed_thread_aposs_backs_off_when_no_work_available);
