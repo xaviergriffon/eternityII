@@ -14,7 +14,7 @@
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
-#define NB_COMMANDS 35
+#define NB_COMMANDS 33
 
 /**
  * @brief Définition d'une commande prise en charge
@@ -62,8 +62,6 @@ int resume_interpreter(void);
 int clients_interpreter(void);
 int clients_stats_interpreter(void);
 int clients_cmd_interpreter(void);
-int clients_pause_interpreter(void);
-int clients_resume_interpreter(void);
 
 /**
  * @brief Commandes prises en charge.
@@ -101,9 +99,7 @@ static command_description commands[NB_COMMANDS] = {
     {"resume", resume_interpreter, 1},
     {"clients", clients_interpreter, 0},
     {"clientsStats", clients_stats_interpreter, 0},
-    {"clientsCmd", clients_cmd_interpreter, 0},
-    {"clientsPause", clients_pause_interpreter, 0},
-    {"clientsResume", clients_resume_interpreter, 0}
+    {"clientsCmd", clients_cmd_interpreter, 0}
 };
 
 /** @brief Interpréteur de la commande `sorta` : tri ascendant des possibilités. */
@@ -487,12 +483,24 @@ int admin_pause_transition(int current, int want_pause) {
 }
 
 /**
- * @brief Interpréteur de `pause` : pose une pause administrative (`REQUEST_ADMIN_PAUSE`).
+ * @brief Interpréteur de `pause` : pose une pause administrative (`REQUEST_ADMIN_PAUSE`)
+ *        ET diffuse `CTRL_COMMAND "pause"` à toutes les sessions de contrôle actives.
  *
  * Contrairement à `REQUEST_PAUSE` (régulation de débit, levée automatiquement
  * par `control_step`), cette pause ne peut être levée que par la commande
- * `resume` — cf. la note dans static_variables.h. No-op si déjà en pause admin
- * ou si le processus est en cours d'arrêt (`REQUEST_STOP`).
+ * `resume` — cf. la note dans static_variables.h. No-op côté local si déjà en
+ * pause admin ou si le processus est en cours d'arrêt (`REQUEST_STOP`).
+ *
+ * Le volet diffusion (`control_registry_broadcast_command`) est ce qui rend
+ * cette commande utile sur le SERVEUR : celui-ci ne lance jamais lui-même de
+ * recherche (`request` n'y est jamais consulté par `autosearch`), donc une
+ * pause purement locale y serait un no-op. En diffusant systématiquement —
+ * sans distinguer serveur/client — la commande reste correcte des deux côtés :
+ * sur un client, `control_registry` est toujours vide (rempli uniquement côté
+ * serveur par `INST_CONTROL_HELLO`), donc la diffusion y est un no-op
+ * silencieux (`n == 0`). Ancien comportement de `clientsPause`, désormais
+ * fusionné ici (y compris la persistance de l'état désiré pour les futurs
+ * clients, `control_registry_desired_pause_state`).
  */
 int pause_interpreter(void) {
     int previous = request;
@@ -505,15 +513,21 @@ int pause_interpreter(void) {
     } else {
         log_error("pause : impossible (arrêt en cours)\n");
     }
+    int n = control_registry_broadcast_command(CTRL_COMMAND, "pause");
+    if (n > 0) {
+        log_info("pause : diffusée à %d session(s) client(s)\n", n);
+    }
     return 0;
 }
 
 /**
- * @brief Interpréteur de `resume` : lève une pause administrative (`REQUEST_ADMIN_PAUSE`).
+ * @brief Interpréteur de `resume` : lève une pause administrative (`REQUEST_ADMIN_PAUSE`)
+ *        ET diffuse `CTRL_COMMAND "resume"` à toutes les sessions de contrôle actives.
  *
- * No-op si le processus n'est pas en pause administrative (par ex. déjà en
- * fonctionnement normal, ou en pause de régulation de débit — laissée à
- * `control_step`).
+ * No-op côté local si le processus n'est pas en pause administrative (par ex.
+ * déjà en fonctionnement normal, ou en pause de régulation de débit — laissée
+ * à `control_step`). Voir `pause_interpreter` pour le volet diffusion, fusionné
+ * depuis l'ancien `clientsResume`.
  */
 int resume_interpreter(void) {
     int previous = request;
@@ -523,6 +537,10 @@ int resume_interpreter(void) {
         log_event("pause administrative levée : reprise de la recherche\n");
     } else {
         log_info("resume : pas de pause administrative en cours\n");
+    }
+    int n = control_registry_broadcast_command(CTRL_COMMAND, "resume");
+    if (n > 0) {
+        log_info("resume : diffusée à %d session(s) client(s)\n", n);
     }
     return 0;
 }
@@ -546,9 +564,11 @@ int admin_apply_remote_command(const char *line) {
         char *arg = strtok_r(NULL, " ", &save);
         if (strcmp(word, "pause") == 0) {
             request = admin_pause_transition(request, 1);
+            control_registry_broadcast_command(CTRL_COMMAND, "pause");
             result = ADMIN_CMD_OK;
         } else if (strcmp(word, "resume") == 0) {
             request = admin_pause_transition(request, 0);
+            control_registry_broadcast_command(CTRL_COMMAND, "resume");
             result = ADMIN_CMD_OK;
         } else if (strcmp(word, "limit") == 0 && arg != NULL) {
             max_search_by_sec = atoi(arg);
@@ -626,20 +646,6 @@ int clients_cmd_interpreter(void) {
     }
     int n = control_registry_broadcast_command(CTRL_COMMAND, rest);
     log_info("clientsCmd : \"%s\" diffusée à %d session(s)\n", rest, n);
-    return 0;
-}
-
-/** @brief Interpréteur de `clientsPause` : sucre pour `clientsCmd pause`. */
-int clients_pause_interpreter(void) {
-    int n = control_registry_broadcast_command(CTRL_COMMAND, "pause");
-    log_info("clientsPause : diffusée à %d session(s)\n", n);
-    return 0;
-}
-
-/** @brief Interpréteur de `clientsResume` : sucre pour `clientsCmd resume`. */
-int clients_resume_interpreter(void) {
-    int n = control_registry_broadcast_command(CTRL_COMMAND, "resume");
-    log_info("clientsResume : diffusée à %d session(s)\n", n);
     return 0;
 }
 

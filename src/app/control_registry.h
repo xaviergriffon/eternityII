@@ -10,7 +10,8 @@
  * pool `client_t` : il ne gère aucune socket, seulement l'état "session de
  * contrôle" associé — pid annoncé, mode, et une petite file de commandes en
  * attente pour le thread de session (posées par la console via les commandes
- * `clientsCmd`/`clientsStats`/`clientsPause`/`clientsResume`, dépilées par
+ * `clientsCmd`/`clientsStats`, et par `pause`/`resume` qui diffusent
+ * systématiquement à ce registre en plus de leur effet local, dépilées par
  * `run_control_session`/`control_session_step`).
  *
  * Conçu pour être testable sans thread réseau : la logique de file/registre
@@ -135,7 +136,14 @@ int control_registry_snapshot(control_session_info_t *out, int max);
 
 /**
  * @brief Poste `cmd`/`command_line` à TOUTES les sessions actives (pour
- *        `clientsCmd`/`clientsPause`/`clientsResume`).
+ *        `clientsCmd`, et pour `pause`/`resume` qui diffusent systématiquement,
+ *        cf. `pause_interpreter`/`resume_interpreter` dans `command_lines.c`).
+ *
+ * Si `cmd` vaut `CTRL_COMMAND` et que le premier mot de `command_line` est
+ * `"pause"` ou `"resume"`, l'état de pause désiré du registre (cf.
+ * `control_registry_desired_pause_state`) est mis à jour en conséquence, AVANT
+ * la diffusion — ainsi tout client qui se connecte APRÈS cet appel démarre
+ * automatiquement dans le même état, sans qu'il faille rejouer la commande.
  *
  * @return Nombre de sessions auxquelles la commande a bien été postée.
  */
@@ -148,5 +156,18 @@ int control_registry_broadcast_command(uint8_t cmd, const char *command_line);
  * @return Nombre de sessions sollicitées.
  */
 int control_registry_broadcast_get_stats(void);
+
+/**
+ * @brief État de pause désiré courant du registre : 0 = résumé (défaut),
+ *        1 = en pause. Mis à jour par `control_registry_broadcast_command`
+ *        lors d'un `pause`/`resume` console (ou `clientsCmd pause|resume`
+ *        équivalent), et appliqué par `control_registry_register` à toute
+ *        nouvelle session enregistrée (une commande `CTRL_COMMAND "pause"` est
+ *        pré-postée dans sa file avant même le premier `CTRL_PING`).
+ *
+ * Exposé principalement pour les tests ; la console/`etii_server.c` n'ont pas
+ * besoin de le consulter directement.
+ */
+int control_registry_desired_pause_state(void);
 
 #endif /* eternityII_control_registry_h */

@@ -49,7 +49,7 @@ ci-dessus (pas de lien statique : ils lancent de vrais processus `tcpserver`/
 [README principal](../README.md#tests-et-couverture)) :
 
 - `run_solution_16.sh` — round-trip complet de la solution (16 pièces, `--stop-on-solution`).
-- `run_control_channel.sh` — round-trip du [canal de contrôle](../docs/echanges_client_serveur.md#canal-de-contrôle-v9) (`clientsStats`/`clientsPause`/`clientsResume`, piloté via une FIFO sur la console serveur).
+- `run_control_channel.sh` — round-trip du [canal de contrôle](../docs/echanges_client_serveur.md#canal-de-contrôle-v9) (`clientsStats`/`pause`/`resume`, piloté via une FIFO sur la console serveur).
 
 Chacun tourne dans un répertoire `mktemp -d` isolé avec un timeout borné.
 

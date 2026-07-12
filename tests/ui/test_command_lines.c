@@ -14,6 +14,7 @@
 #include "fork_assert.h"
 #include "ui/command_lines.h"
 #include "app/static_variables.h"
+#include "app/control_registry.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
 
@@ -884,6 +885,38 @@ TEST do_command_line_resume_noop_outside_admin_pause(void)
     PASS();
 }
 
+/* `pause`/`resume` console diffusent aussi CTRL_COMMAND aux sessions de
+ * contrôle actives (fusion de l'ancien `clientsPause`/`clientsResume`) : le
+ * serveur ne lance jamais sa propre recherche (`request` n'y est jamais
+ * consulté), donc une pause purement locale y serait un no-op ; c'est cette
+ * diffusion qui rend `pause` utile côté serveur. */
+TEST do_command_line_pause_broadcasts_to_control_sessions(void)
+{
+    int saved_req = request;
+    request = REQUEST_CONTINUE;
+
+    control_hello_t h = { .pid = 999, .nb_forks = 1, .mode = 0 };
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+
+    char cmd[] = "pause";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+
+    uint8_t out_cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx, &out_cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)out_cmd);
+    ASSERT_STR_EQ("pause", line);
+    ASSERT_EQ(1, control_registry_desired_pause_state());
+
+    /* Nettoyage : remet le registre dans un état neutre pour les tests suivants. */
+    char resume_cmd[] = "resume";
+    run_command_quiet(resume_cmd);
+    control_registry_unregister(idx);
+    request = saved_req;
+    PASS();
+}
+
 /* ---------- pruner_batch_clamp (pure) ------------------------------------ */
 /*
  * Fonction pure extraite de pruner_batch_interpreter : bornes [1, PRUNER_BATCH_MAX],
@@ -920,6 +953,42 @@ TEST admin_apply_remote_command_pause_resume(void)
     ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("resume"), "%d");
     ASSERT_EQ_FMT(REQUEST_CONTINUE, request, "%d");
 
+    request = saved_req;
+    PASS();
+}
+
+/* Bug rapporté : une commande "pause"/"resume" passée via l'API HTTP admin
+ * (POST /api/v1/command -> admin_apply_remote_command, cf. http_server.c) ne
+ * mettait à jour que l'état LOCAL du serveur (jamais consulté par sa propre
+ * recherche, qu'il ne lance pas) sans jamais atteindre les clients connectés
+ * — contrairement à la même commande tapée sur la console (pause_interpreter/
+ * resume_interpreter, qui diffusent via control_registry_broadcast_command).
+ * Ce test verrouille la parité entre les deux chemins d'entrée. */
+TEST admin_apply_remote_command_pause_broadcasts_to_control_sessions(void)
+{
+    int saved_req = request;
+    request = REQUEST_CONTINUE;
+
+    control_hello_t h = { .pid = 998, .nb_forks = 1, .mode = 0 };
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("pause"), "%d");
+
+    uint8_t out_cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx, &out_cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)out_cmd);
+    ASSERT_STR_EQ("pause", line);
+    ASSERT_EQ(1, control_registry_desired_pause_state());
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("resume"), "%d");
+    ASSERT_EQ(0, control_registry_wait_command(idx, &out_cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)out_cmd);
+    ASSERT_STR_EQ("resume", line);
+    ASSERT_EQ(0, control_registry_desired_pause_state());
+
+    control_registry_unregister(idx);
     request = saved_req;
     PASS();
 }
@@ -1056,9 +1125,11 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_pause_noop_on_stop);
     RUN_TEST(do_command_line_resume_clears_admin_pause);
     RUN_TEST(do_command_line_resume_noop_outside_admin_pause);
+    RUN_TEST(do_command_line_pause_broadcasts_to_control_sessions);
 
     RUN_TEST(pruner_batch_clamp_bounds);
     RUN_TEST(admin_apply_remote_command_pause_resume);
+    RUN_TEST(admin_apply_remote_command_pause_broadcasts_to_control_sessions);
     RUN_TEST(admin_apply_remote_command_limit_sets_global);
     RUN_TEST(admin_apply_remote_command_max_stock_sets_global);
     RUN_TEST(admin_apply_remote_command_pruner_batch_is_clamped);

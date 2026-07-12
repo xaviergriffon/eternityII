@@ -111,7 +111,7 @@ scripts (`tests/integration/`) : `run_solution_16.sh` (serveur + client
 `--stop-on-solution`, vérifie que les deux côtés voient la solution) puis
 `run_control_channel.sh` (serveur + client sans arrêt automatique, pilote le
 [canal de contrôle](#canal-de-contrôle-v9) depuis la console serveur et vérifie le
-round-trip `clientsStats`/`clientsPause`/`clientsResume` dans les deux journaux). Chacun
+round-trip `clientsStats`/`pause`/`resume` dans les deux journaux). Chacun
 tourne dans un répertoire temporaire isolé avec un timeout borné.
 
 `make test` produit un binaire isolé (`tests/run_tests`) qui ne lie **que** les modules testés et leurs dépendances — `src/app/main.c` n'est jamais inclus. `make coverage` recompile en mode instrumenté et affiche le pourcentage de lignes couvertes :
@@ -242,7 +242,8 @@ courantes du client ou lui pousser une commande (`pause`, `resume`, `limit`, …
 jamais toucher aux threads de recherche du client.
 
 Ça se pilote entièrement depuis la console du **serveur**, avec les commandes
-`clients`, `clientsStats`, `clientsCmd`, `clientsPause`, `clientsResume` (voir
+`clients`, `clientsStats`, `clientsCmd`, ainsi que `pause`/`resume` qui, sur le
+serveur, diffusent la commande à tous les clients connectés (voir
 [Commandes interactives](#commandes-interactives)).
 
 > ⚠️ **Dimensionnement de `NB_THREADS`** : cette connexion de contrôle occupe un slot
@@ -326,12 +327,11 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard. Tape
 | `limit N` | Limite la vitesse de recherche à `N` essais/seconde (0 = illimité) |
 | `maxStockByThread N` | Ajuste le stock max par thread à la volée |
 | `prunerBatch N` | Ajuste la taille de lot d'échange du pruner à la volée (borné à [1, 65536]) |
-| `pause` | Pause administrative de la recherche (`REQUEST_ADMIN_PAUSE`) — distincte de la pause de régulation de débit interne (`limit`), ne se lève que par `resume` |
-| `resume` | Lève une pause administrative posée par `pause` |
+| `pause` | Pause administrative de la recherche (`REQUEST_ADMIN_PAUSE`) — distincte de la pause de régulation de débit interne (`limit`), ne se lève que par `resume` ; diffuse aussi `CTRL_COMMAND "pause"` à tous les clients connectés (utile côté serveur, qui n'a pas de recherche locale à mettre en pause), et persiste l'état pour les clients qui se connecteront après |
+| `resume` | Lève une pause administrative posée par `pause` ; diffuse aussi `CTRL_COMMAND "resume"` à tous les clients connectés et efface l'état persisté |
 | `clients` *(serveur)* | Liste les sessions de [canal de contrôle](#canal-de-contrôle-v9) actives (pid, forks, mode, dernière activité) |
 | `clientsStats` *(serveur)* | Demande les statistiques agrégées de chaque client connecté via son canal de contrôle |
 | `clientsCmd <ligne>` *(serveur)* | Pousse `<ligne>` à distance à tous les clients connectés (filtrée par une liste blanche : `pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`) |
-| `clientsPause` / `clientsResume` *(serveur)* | Sucre pour `clientsCmd pause` / `clientsCmd resume` |
 
 Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`, `rmnonext`, `limit`, `maxStockByThread`, `prunerBatch`, `min`, `printanalysed`, `pause`, `resume`) sont automatiquement retransmises à tous les processus fils via socket Unix. Les commandes `clients*` sont **serveur uniquement** : elles agissent sur le [canal de contrôle](#canal-de-contrôle-v9) distant, pas sur des process fils locaux.
 
@@ -369,7 +369,7 @@ Les évènements suivants sont câblés :
 | `client rejeté : version …` | Côté serveur, quand le handshake de version échoue (version incompatible ou requête sans handshake valide) |
 | `session de contrôle enregistrée (pid=…) -> slot N` | Côté serveur, quand un client annonce son [canal de contrôle](#canal-de-contrôle-v9) (`INST_CONTROL_HELLO`) |
 | `session de contrôle déconnectée (slot N)` | Côté serveur, à la fin d'une session de canal de contrôle |
-| `commande distante "…" exécutée (code retour N)` | Côté serveur, après qu'une commande `clientsCmd`/`clientsPause`/`clientsResume` a été acquittée par le client |
+| `commande distante "…" exécutée (code retour N)` | Côté serveur, après qu'une commande `clientsCmd` ou `pause`/`resume` (diffusion) a été acquittée par le client |
 
 Tout évènement est **horodaté et écrit dans `events.log`** (en plus de l'affichage dans la zone), ce qui te permet de garder une trace persistante hors session :
 

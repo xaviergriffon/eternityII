@@ -8,9 +8,11 @@
 # non — cf. AGENTS.md) pour avoir tout le temps voulu de piloter le canal de
 # contrôle. Le processus PARENT du client ouvre, en plus de la connexion de
 # travail de son fork de recherche, sa propre connexion de canal de contrôle ;
-# le serveur pilote ce canal via ses commandes console `clientsStats` /
-# `clientsPause` / `clientsResume`, et on vérifie le round-trip complet à
-# travers les logs des DEUX côtés :
+# le serveur pilote ce canal via sa commande console `clientsStats` et via
+# `pause`/`resume` (qui diffusent désormais systématiquement `CTRL_COMMAND`
+# aux sessions actives, en plus de leur effet local — l'ancien
+# `clientsPause`/`clientsResume` a été fusionné dedans, cf. AGENTS.md), et on
+# vérifie le round-trip complet à travers les logs des DEUX côtés :
 #
 #   console serveur -> CTRL_COMMAND/CTRL_GET_STATS -> canal de contrôle client
 #   -> do_command_line (côté client) -> CTRL_RESULT/CTRL_STATS -> console serveur
@@ -129,19 +131,19 @@ echo "clientsStats" >&3
 wait_for_log server.log "stats client :" "$TIMEOUT"
 check $? "clientsStats : statistiques agrégées reçues (server.log)"
 
-# --- 3. clientsPause : round-trip CTRL_COMMAND "pause" ----------------------
-echo "clientsPause" >&3
+# --- 3. pause (console serveur) : round-trip CTRL_COMMAND "pause" -----------
+echo "pause" >&3
 wait_for_log server.log 'commande distante "pause" exécutée \(code retour 0\)' "$TIMEOUT"
-check $? "clientsPause : commande acquittée avec succès (server.log)"
+check $? "pause : commande diffusée et acquittée avec succès (server.log)"
 wait_for_log client.log "pause administrative demandée" "$TIMEOUT"
-check $? "clientsPause : pause administrative appliquée côté client (client.log)"
+check $? "pause : pause administrative appliquée côté client (client.log)"
 
-# --- 4. clientsResume : round-trip CTRL_COMMAND "resume" --------------------
-echo "clientsResume" >&3
+# --- 4. resume (console serveur) : round-trip CTRL_COMMAND "resume" ---------
+echo "resume" >&3
 wait_for_log server.log 'commande distante "resume" exécutée \(code retour 0\)' "$TIMEOUT"
-check $? "clientsResume : commande acquittée avec succès (server.log)"
+check $? "resume : commande diffusée et acquittée avec succès (server.log)"
 wait_for_log client.log "pause administrative levée" "$TIMEOUT"
-check $? "clientsResume : pause administrative levée côté client (client.log)"
+check $? "resume : pause administrative levée côté client (client.log)"
 
 # --- 5. Arrêt déterministe des deux processus via leur propre console -------
 echo "exit" >&4
