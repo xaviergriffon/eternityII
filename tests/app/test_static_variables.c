@@ -123,6 +123,49 @@ TEST expand_level_coexists_with_stop_on_solution(void)
     PASS();
 }
 
+/* --http-port <n> : option VALUÉE, même schéma que --expand-level. Valeur dans
+   [1, 65535] : les deux tokens sont retirés d'argv, HTTP_PORT est fixé. */
+TEST http_port_strips_option_and_value_sets_global(void)
+{
+    HTTP_PORT = 0;
+    const char *argv[] = {"prog", "tcpserver", "--http-port", "8080", "data/pieces.csv"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(8080, HTTP_PORT, "%d");
+    ASSERT_STR_EQ("tcpserver", argv[1]);
+    ASSERT_STR_EQ("data/pieces.csv", argv[2]);
+    PASS();
+}
+
+/* Valeur absente (dernière position) : ignorée, HTTP_PORT reste à 0 (désactivée). */
+TEST http_port_without_value_is_ignored(void)
+{
+    HTTP_PORT = 0;
+    const char *argv[] = {"prog", "tcpserver", "--http-port"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(0, HTTP_PORT, "%d");
+    PASS();
+}
+
+/* Valeurs hors [1, 65535] ("abc", "0", "-1", "70000") : toutes ignorées,
+   HTTP_PORT reste à 0 — jamais un port au hasard ou hors plage. */
+TEST http_port_out_of_range_values_are_ignored(void)
+{
+    const char *bad_values[] = {"abc", "0", "-1", "70000"};
+    for (size_t i = 0; i < sizeof(bad_values) / sizeof(bad_values[0]); i++) {
+        HTTP_PORT = 0;
+        const char *argv[] = {"prog", "tcpserver", "--http-port", bad_values[i]};
+        int argc = parse_cli_options(4, argv);
+
+        ASSERT_EQ_FMT(2, argc, "%d");
+        ASSERT_EQ_FMT(0, HTTP_PORT, "%d");
+    }
+    PASS();
+}
+
 /* request_is_pause : vrai pour REQUEST_PAUSE et REQUEST_ADMIN_PAUSE, faux sinon.
    Régression visée : REQUEST_ADMIN_PAUSE doit être reconnue comme une pause par
    les boucles chaudes (usleep + continue) au même titre que REQUEST_PAUSE, sans
@@ -155,6 +198,9 @@ SUITE(static_variables_suite)
     RUN_TEST(expand_level_without_value_is_ignored);
     RUN_TEST(expand_level_negative_clamped_to_zero);
     RUN_TEST(expand_level_coexists_with_stop_on_solution);
+    RUN_TEST(http_port_strips_option_and_value_sets_global);
+    RUN_TEST(http_port_without_value_is_ignored);
+    RUN_TEST(http_port_out_of_range_values_are_ignored);
     RUN_TEST(request_is_pause_covers_both_pause_values);
     RUN_TEST(request_keeps_running_is_false_only_on_stop);
 }

@@ -86,9 +86,50 @@ TEST server_bind_fails_exits(void)
     PASS();
 }
 
+/* create_tcp_server_bound : succès sur loopback, port éphémère, jamais exit. */
+TEST server_bound_listens_on_loopback(void)
+{
+    int listen_fd = create_tcp_server_bound(INADDR_LOOPBACK, 0, 5);
+    ASSERT(listen_fd >= 0);
+
+    struct sockaddr_in addr;
+    socklen_t len = sizeof(addr);
+    ASSERT_EQ_FMT(0, getsockname(listen_fd, (struct sockaddr *)&addr, &len), "%d");
+    ASSERT_EQ_FMT((int32_t)htonl(INADDR_LOOPBACK), (int32_t)addr.sin_addr.s_addr, "%d");
+
+    close(listen_fd);
+    PASS();
+}
+
+/* Port déjà occupé : create_tcp_server_bound renvoie -1 SANS jamais appeler
+ * exit (contrairement à create_tcp_server) — testable directement, sans fork. */
+TEST server_bound_bind_failure_returns_minus_one(void)
+{
+    int blocker = socket(PF_INET, SOCK_STREAM, 0);
+    ASSERT(blocker >= 0);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = 0;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    ASSERT_EQ_FMT(0, bind(blocker, (struct sockaddr *)&addr, sizeof(addr)), "%d");
+    ASSERT_EQ_FMT(0, listen(blocker, 1), "%d");
+    socklen_t len = sizeof(addr);
+    getsockname(blocker, (struct sockaddr *)&addr, &len);
+    int blocked_port = ntohs(addr.sin_port);
+
+    int result = create_tcp_server_bound(INADDR_ANY, blocked_port, 1);
+    ASSERT_EQ_FMT(-1, result, "%d");
+
+    close(blocker);
+    PASS();
+}
+
 SUITE(tcp_suite)
 {
     RUN_TEST(server_listens_and_client_connects);
     RUN_TEST(client_unresolvable_host_returns_minus_one);
     RUN_TEST(server_bind_fails_exits);
+    RUN_TEST(server_bound_listens_on_loopback);
+    RUN_TEST(server_bound_bind_failure_returns_minus_one);
 }

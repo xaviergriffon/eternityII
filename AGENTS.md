@@ -44,6 +44,8 @@ The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` inste
 ./eternityII tcpserver [nb_threads] [data/pieces.csv]
 # …with startup stock expansion (anti-starvation): pre-expand to cursor level 4
 ./eternityII tcpserver [nb_threads] --expand-level 4 [data/pieces.csv]
+# …with the HTTP REST admin API enabled on 127.0.0.1:8080
+./eternityII tcpserver [nb_threads] --http-port 8080 [data/pieces.csv]
 
 # Start a client (does the search)
 ./eternityII tcpclient [server_host] [nb_threads] [max_stock_per_thread] [data/pieces.csv]
@@ -60,6 +62,30 @@ The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` inste
 **`--stop-on-solution`** (optional, accepted in any position by any mode, stripped from argv before the positional parse): stop at the **first** solution. A search process that finds one exits; a server that receives one backs up its queues and stops. **Default (flag absent): keep going** — the search process backtracks to look for more solutions and the server stays in service so clients keep exploring. Read in `main()` *before* any fork (global `stop_on_solution`), so forked search children inherit it. Each solution is saved to a **unique** file (`./solution_<pid>_<seq>` client-side, `./solution_server_<pid>_<seq>` server-side) — multiple solutions never overwrite one another.
 
 **`--expand-level <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only). At startup, after seeding the genesis possibility, the server **expands its own stock** — placing a candidate piece on the next cell of each possibility (via `search_possiblity_light`) — until every possibility's cursor `alloc` reaches level `n`. This turns the lone genesis packet into thousands of distributable possibilities, curing the **startup starvation** where the first client to connect grabs the whole tree and the server has nothing to hand the others (the complement, from the client side, is the v8 `INST_NEED_WORK` anticipatory delegation). It is a pure server-side computation done before any client connects, so **client-side impact is nil**. Bounded on two axes (`src/app/static_variables.h`): `EXPAND_MAX_LEVELS` (4) caps the number of passes regardless of `n` — a *depth* guard so the server doesn't work too long — and `EXPAND_MAX_STOCK` (100000) caps the *count* between passes, the real safeguard since the branching factor is unknown and one pass can explode. Measured branching on the 256-puzzle is ≈11×/level (level 2 → ~45 possibilities, level 3 → ~495, level 4 → ~5300, level 5 → ~56000); **level 3–4 is the practical sweet spot** — enough to fill every client's local stock with reserve, in well under a second. The same routine (`expand_datas_to_level`, `src/core/datamanager.c`) is also reachable at runtime via the **`expand <n>` console command** (rebuilds the map like `rmnonext`), useful when the distributable stock has run low mid-run.
+
+### HTTP REST admin API
+
+**`--http-port <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only, `n` in `[1, 65535]`). Starts a minimal HTTP/1.1 admin API on **`127.0.0.1:<n>`** — loopback only, never `INADDR_ANY`, so it is never reachable off the machine by default (use an SSH tunnel or a reverse proxy for remote access). **Absent by default** (`HTTP_PORT` global defaults to 0): no extra socket is opened unless explicitly requested. Lets an external HTTP application (written in any language) read server telemetry and drive a few whitelisted admin actions without speaking the binary `packet`/`control_protocol` wire formats.
+
+Implementation is hand-rolled and dependency-free by design (`src/net/http_codec.{h,c}` for the pure parsing/JSON layer, `src/net/http_server.{h,c}` for the socket/thread shell) — no HTTP or JSON library is vendored, matching the project's "compilable everywhere with minimal dependencies" goal. One connection is served at a time (sequential `accept()` loop on a single detached thread, `Connection: close`, 5s I/O timeout, 8 KiB request cap → `413` beyond that) — this is an occasional admin API, not a production web server. **No bump of `VERSION`**: the HTTP port is a completely separate listening socket from `SERVER_PORT`, so the existing binary protocol (packet/control_protocol handshake) is untouched.
+
+Endpoints (all under `/api/v1`, JSON in/out):
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/v1/stats` | — | `{"shots_per_second","possibility_stock","checked_stock","analysed_stock","max_result","active_threads","pruner_checked","pruner_removed","queues":[{"file","unchecked","checked","analysed"}, …]}` |
+| GET | `/api/v1/status` | — | `{"state","uptime_seconds","version","limit","max_stock_by_thread","pruner_batch"}` (`state` ∈ `running`/`admin_pause`/`regulation_pause`/`stopping`) |
+| POST | `/api/v1/command` | `{"command":"limit 1000"}` | `{"result":"ok"}` (200), or an error body with 400 (missing/invalid args), 403 (not whitelisted), 404 (unknown path), or 405 (wrong method) |
+
+`POST /api/v1/command` only accepts the same whitelist as the binary control channel's `CTRL_COMMAND` (`control_command_allowed`, `src/net/control_protocol.c`): `pause`, `resume`, `limit <n>`, `maxStockByThread <n>`, `prunerBatch <n>` — never `exit`/`restore`/`import`. Execution goes through **`admin_apply_remote_command`** (`src/ui/command_lines.c`), a `strtok_r`-based reentrant sibling of `do_command_line` — deliberately *not* `do_command_line` itself, since that function tokenizes via the process-global (non-reentrant) `strtok`, which a concurrent caller (HTTP thread, console thread, control-channel thread) could corrupt mid-parse.
+
+```sh
+./eternityII tcpserver 4 --http-port 8080 data/pieces.csv
+curl http://127.0.0.1:8080/api/v1/stats
+curl http://127.0.0.1:8080/api/v1/status
+curl -X POST -d '{"command":"pause"}' http://127.0.0.1:8080/api/v1/command
+curl -X POST -d '{"command":"exit"}'  http://127.0.0.1:8080/api/v1/command   # -> 403, refused
+```
 
 Puzzle definitions live in `data/`: `data/pieces.csv` (256-piece puzzle) and the 16-piece variant `data/pieces16.csv`. The code's built-in default (`parts_files` in `src/app/static_variables.c`) now points at `./data/pieces.csv` (or `./data/pieces16.csv` for the 16-piece build), so running from the repo root works without an explicit path argument.
 

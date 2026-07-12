@@ -122,6 +122,15 @@ int find_empty_thread_slot(client_t *threads, int nb);
 int get_active_threads(client_t *thread_params);
 
 /**
+ * @brief Enrobe `get_active_threads(thread_params)` sur la globale du module,
+ *        pour un appelant externe (ex. `src/net/http_server.c`) qui n'a pas à
+ *        connaître/manipuler directement le pool de threads serveur.
+ *
+ * @return Nombre de slots connectés (0 avant `init_server_thread_pool`).
+ */
+int server_active_client_count(void);
+
+/**
  * @brief Construit le tableau « File queues » du rapport serveur (une ligne par
  *        file + Total) dans une chaîne allouée ; renvoie les totaux par pool via
  *        les out-params (NULL accepté). À libérer par l'appelant.

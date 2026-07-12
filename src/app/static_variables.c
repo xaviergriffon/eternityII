@@ -163,6 +163,10 @@ char **forkId = NULL;
 
 int SERVER_PORT = 2020;
 
+int HTTP_PORT = 0;
+
+volatile unsigned long long server_shots_per_second = 0;
+
 unsigned long long max_search_by_sec = 0;
 
 int max_stock_by_thread = MAX_STOCK_BY_THREAD;
@@ -199,6 +203,17 @@ int parse_cli_options(int argc, const char *argv[])
                 expand_min_level = atoi(argv[r + 1]);
                 if (expand_min_level < 0) {
                     expand_min_level = 0;
+                }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--http-port") == 0) {
+            // Option valuée, même schéma que --expand-level. Valeur absente,
+            // non numérique ou hors [1, 65535] : option ignorée, HTTP_PORT
+            // reste à 0 (API désactivée) plutôt que d'ouvrir un port au hasard.
+            if (r + 1 < argc) {
+                int port = atoi(argv[r + 1]);
+                if (port >= 1 && port <= 65535) {
+                    HTTP_PORT = port;
                 }
                 r++; // consomme aussi la valeur
             }
