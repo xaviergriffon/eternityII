@@ -394,6 +394,28 @@ extern int *main_socket_id;
 
 extern int SERVER_PORT;
 
+/**
+ * @brief Port TCP de l'API REST admin (option CLI `--http-port <n>`).
+ *
+ * 0 (défaut) : API désactivée, aucun socket supplémentaire n'est ouvert.
+ * Sinon, `runserver` démarre un écouteur HTTP dédié sur ce port, lié à
+ * `127.0.0.1` uniquement (pas d'exposition réseau par défaut — cf.
+ * `src/net/http_server.h`). Lu côté serveur uniquement. Position-indépendant,
+ * retiré d'argv par `parse_cli_options` avant le parsing positionnel.
+ */
+extern int HTTP_PORT;
+
+/**
+ * @brief Débit de recherche courant du serveur (essais/seconde), publié
+ *        toutes les 10 s par `check_server_step` (src/app/etii_server.c).
+ *
+ * Lecture par l'API REST (`GET /api/v1/stats`) sans verrou : une lecture
+ * concurrente à la publication peut voir une valeur en cours d'écriture d'au
+ * plus quelques dizaines de millisecondes de retard, sans conséquence pour un
+ * indicateur de télémétrie.
+ */
+extern volatile unsigned long long server_shots_per_second;
+
 extern unsigned long long max_search_by_sec;
 
 extern int max_stock_by_thread;
@@ -421,7 +443,9 @@ extern int server_rmnonext_timing;
 /**
  * @brief Extrait les options globales de `argv` et les retire du tableau.
  *
- * Reconnaît `--stop-on-solution` (positionne `stop_on_solution`). Compacte
+ * Reconnaît `--stop-on-solution`, `--expand-level <n>` et `--http-port <n>`
+ * (positionne respectivement `stop_on_solution`, `expand_min_level` et
+ * `HTTP_PORT`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.
  *

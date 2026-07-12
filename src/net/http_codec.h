@@ -1,0 +1,178 @@
+/**
+ * @file http_codec.h
+ * @brief Codec HTTP/1.1 minimal de l'API REST admin du serveur (parsing de
+ *        requête, routage, formatage de réponse et de JSON) — fonctions
+ *        pures, sans socket ni allocation, testables sans réseau.
+ *
+ * Sous-ensemble volontairement restreint : ligne de requête + en-têtes +
+ * corps optionnel borné par `Content-Length`. Pas de chunked-encoding, pas de
+ * keep-alive, pas de query string. Chaque connexion sert une seule requête
+ * (`Connection: close`), cf. `src/net/http_server.h` pour la boucle réseau.
+ *
+ * Même esprit que `net/control_protocol.h` : zéro dépendance externe, JSON
+ * généré par `snprintf` dans un tampon fourni par l'appelant (jamais
+ * d'allocation dans le chemin de réponse).
+ */
+#ifndef eternityII_http_codec_h
+#define eternityII_http_codec_h
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "core/datamanager.h"
+
+/// Taille maximale d'une requête acceptée (ligne + en-têtes + corps), au-delà
+/// de laquelle la connexion est refusée (413) plutôt que de croître sans borne.
+#define HTTP_REQUEST_MAX 8192
+/// Taille du tampon de formatage de réponse fourni par l'appelant.
+#define HTTP_RESPONSE_MAX 8192
+/// Longueur maximale (avec terminateur) de la méthode HTTP acceptée.
+#define HTTP_METHOD_MAX 8
+/// Longueur maximale (avec terminateur) du chemin de la requête accepté.
+#define HTTP_PATH_MAX 128
+
+/**
+ * @brief Requête HTTP parsée : méthode, chemin, et vue sur le corps (pas de
+ *        copie — `body` pointe dans le tampon source fourni à `http_request_parse`).
+ */
+typedef struct {
+    /// Méthode HTTP ("GET", "POST", ...), toujours terminée par NUL.
+    char method[HTTP_METHOD_MAX];
+    /// Chemin de la requête ("/api/v1/stats"), toujours terminé par NUL.
+    char path[HTTP_PATH_MAX];
+    /// Valeur de l'en-tête `Content-Length`, ou 0 si absent.
+    int32_t content_length;
+    /// Pointeur vers le corps dans le tampon source (NULL si `content_length == 0`).
+    const char *body;
+    /// Nombre d'octets de corps effectivement disponibles (== content_length si complet).
+    int32_t body_len;
+} http_request_t;
+
+/**
+ * @brief Résultat du parsing d'une requête HTTP.
+ */
+typedef enum {
+    /// Requête complète et valide : `out` est renseigné.
+    HTTP_PARSE_OK = 0,
+    /// Requête incomplète (en-têtes ou corps pas encore intégralement reçus) :
+    /// l'appelant doit continuer à lire le socket et rappeler avec plus de données.
+    HTTP_PARSE_NEED_MORE,
+    /// Requête malformée (ligne de requête invalide, en-tête `Content-Length`
+    /// non numérique/négatif, jeton méthode/chemin trop long).
+    HTTP_PARSE_BAD,
+    /// Requête (ou `Content-Length` annoncé) dépassant `HTTP_REQUEST_MAX`.
+    HTTP_PARSE_TOO_LARGE
+} http_parse_result_t;
+
+/**
+ * @brief Parse une requête HTTP/1.1 depuis un tampon brut.
+ *
+ * @param buf Tampon source (pas nécessairement terminé par NUL).
+ * @param len Nombre d'octets valides dans `buf` (0 <= len <= HTTP_REQUEST_MAX
+ *            attendu de l'appelant ; une valeur plus grande renvoie TOO_LARGE).
+ * @param out Requête parsée en sortie (uniquement si HTTP_PARSE_OK est renvoyé).
+ * @return    Le résultat du parsing (cf. `http_parse_result_t`).
+ */
+http_parse_result_t http_request_parse(const char *buf, int32_t len, http_request_t *out);
+
+/**
+ * @brief Route logique résolue à partir de la méthode et du chemin.
+ */
+typedef enum {
+    HTTP_ROUTE_STATS,       ///< GET /api/v1/stats
+    HTTP_ROUTE_STATUS,      ///< GET /api/v1/status
+    HTTP_ROUTE_COMMAND,     ///< POST /api/v1/command
+    HTTP_ROUTE_NOT_FOUND,   ///< Chemin inconnu (404)
+    HTTP_ROUTE_BAD_METHOD   ///< Chemin connu, méthode non supportée (405)
+} http_route_t;
+
+/**
+ * @brief Résout la route logique pour une méthode et un chemin donnés.
+ *
+ * @param method Méthode HTTP ("GET", "POST", ...).
+ * @param path   Chemin de la requête ("/api/v1/stats").
+ * @return       La route résolue (jamais d'ambiguïté : un chemin connu avec
+ *               la mauvaise méthode renvoie HTTP_ROUTE_BAD_METHOD, jamais NOT_FOUND).
+ */
+http_route_t http_route_resolve(const char *method, const char *path);
+
+/**
+ * @brief Formate une réponse HTTP/1.1 complète (ligne de statut + en-têtes
+ *        fixes + corps) dans `buf`.
+ *
+ * @param buf       Tampon destination.
+ * @param size      Taille de `buf`.
+ * @param status    Code de statut HTTP (200, 400, 403, 404, 405, 413).
+ * @param json_body Corps JSON (chaîne terminée par NUL), ou NULL/"" pour un corps vide.
+ * @return           Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
+ */
+int http_response_format(char *buf, size_t size, int status, const char *json_body);
+
+/**
+ * @brief Extrait la valeur d'une clé JSON de type chaîne dans un objet JSON plat.
+ *
+ * Extracteur minimal, volontairement non conforme à la norme JSON complète :
+ * ne gère aucun échappement (`\"`, `\\`, `\uXXXX`, ...) et REJETTE (retourne
+ * -1) toute valeur qui en contient, plutôt que de la mal interpréter. Les
+ * commandes admin whitelistées (`control_command_allowed`) sont toutes en
+ * `[A-Za-z0-9 ]`, donc ce sous-ensemble suffit à l'usage réel de l'API.
+ *
+ * @param body     Corps JSON source (pas nécessairement terminé par NUL).
+ * @param len      Nombre d'octets valides dans `body`.
+ * @param key      Nom de la clé recherchée (sans les guillemets).
+ * @param out      Tampon destination, rempli et terminé par NUL en cas de succès.
+ * @param out_size Taille de `out`.
+ * @return         Longueur de la valeur extraite (>= 0), ou -1 si la clé est
+ *                 absente, la valeur non-chaîne/mal formée/tronquée, ou `out` trop petit.
+ */
+int http_json_extract_string(const char *body, int32_t len, const char *key, char *out, size_t out_size);
+
+/**
+ * @brief Vue en lecture des statistiques serveur à sérialiser en JSON par
+ *        `http_json_format_stats`. Remplie par `http_stats_collect`
+ *        (src/net/http_server.h) à partir des globaux/accesseurs datamanager.
+ */
+typedef struct {
+    unsigned long long shots_per_second;
+    unsigned long long possibility_stock;
+    unsigned long long checked_stock;
+    unsigned long long analysed_stock;
+    unsigned long long max_result;
+    unsigned long long active_threads;
+    unsigned long long pruner_checked;
+    unsigned long long pruner_removed;
+    /// Tailles par file (index 0..NB_FILE_POSSIBILITY-1), pool non vérifié.
+    unsigned long long queue_unchecked[NB_FILE_POSSIBILITY];
+    /// Tailles par file, pool vérifié.
+    unsigned long long queue_checked[NB_FILE_POSSIBILITY];
+    /// Tailles par file, pool analysé.
+    unsigned long long queue_analysed[NB_FILE_POSSIBILITY];
+} http_stats_view_t;
+
+/**
+ * @brief Vue en lecture de l'état serveur à sérialiser en JSON par
+ *        `http_json_format_status`. Remplie par `http_status_collect`.
+ */
+typedef struct {
+    /// Libellé d'état ("running", "admin_pause", "regulation_pause", "stopping").
+    const char *state;
+    long uptime_seconds;
+    int version;
+    unsigned long long limit;
+    int max_stock_by_thread;
+    int pruner_batch;
+} http_status_view_t;
+
+/**
+ * @brief Sérialise `view` en JSON dans `buf` (cf. schéma documenté dans AGENTS.md).
+ * @return Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
+ */
+int http_json_format_stats(char *buf, size_t size, const http_stats_view_t *view);
+
+/**
+ * @brief Sérialise `view` en JSON dans `buf` (cf. schéma documenté dans AGENTS.md).
+ * @return Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
+ */
+int http_json_format_status(char *buf, size_t size, const http_status_view_t *view);
+
+#endif /* eternityII_http_codec_h */

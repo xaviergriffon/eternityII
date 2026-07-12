@@ -17,6 +17,8 @@ SUITE_EXTERN(command_history_suite);
 SUITE_EXTERN(possibility_suite);
 SUITE_EXTERN(etii_protocol_suite);
 SUITE_EXTERN(control_protocol_suite);
+SUITE_EXTERN(http_codec_suite);
+SUITE_EXTERN(http_server_suite);
 SUITE_EXTERN(command_match_suite);
 SUITE_EXTERN(datamanager_suite);
 SUITE_EXTERN(local_socket_suite);
@@ -48,6 +50,8 @@ int main(int argc, char **argv)
     RUN_SUITE(possibility_suite);
     RUN_SUITE(etii_protocol_suite);
     RUN_SUITE(control_protocol_suite);
+    RUN_SUITE(http_codec_suite);
+    RUN_SUITE(http_server_suite);
     RUN_SUITE(command_match_suite);
     RUN_SUITE(datamanager_suite);
     RUN_SUITE(local_socket_suite);

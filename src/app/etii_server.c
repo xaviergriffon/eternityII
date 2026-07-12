@@ -19,6 +19,7 @@
 #include "core/part.h"
 #include "core/readdata.h"
 #include "net/tcpserver.h"
+#include "net/http_server.h"
 
 client_t *thread_params = NULL;
 
@@ -79,6 +80,13 @@ int get_active_threads(client_t *thread_params) {
     }
     
     return activeThread;
+}
+
+/**
+ * @brief Voir la doc dans etii_server.h.
+ */
+int server_active_client_count(void) {
+    return get_active_threads(thread_params);
 }
 
 /**
@@ -213,6 +221,11 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
     unsigned long long prune_cells_now = pruner_cells_studied;
     unsigned long long prune_bys = (prune_cells_now - last_prune_cells) / sleep_time;
     last_prune_cells = prune_cells_now;
+
+    // Publié pour l'API REST (GET /api/v1/stats) : même indicateur « coups/s »
+    // que le bandeau log_status ci-dessous (bys seul, pas bys+prune_bys), lu
+    // sans verrou (cf. static_variables.h).
+    server_shots_per_second = bys;
 
     int activeThread = get_active_threads(thread_params);
 
@@ -1145,6 +1158,13 @@ void runserver(const char* file)
     create_rmnonext_thread();
 
     init_server_thread_pool(rotateParts);
+
+    // API HTTP REST admin (option --http-port) : désactivée par défaut
+    // (HTTP_PORT == 0). Démarrage fatal en cas d'échec car --http-port est
+    // une demande explicite de l'utilisateur (port déjà pris, par exemple).
+    if (HTTP_PORT > 0 && http_server_start(HTTP_PORT) != 0) {
+        exit(EXIT_FAILURE);
+    }
 
     int socket_id = create_tcp_server(SERVER_PORT, NB_THREADS);
     while (request != REQUEST_STOP) {

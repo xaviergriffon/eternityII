@@ -884,6 +884,129 @@ TEST do_command_line_resume_noop_outside_admin_pause(void)
     PASS();
 }
 
+/* ---------- pruner_batch_clamp (pure) ------------------------------------ */
+/*
+ * Fonction pure extraite de pruner_batch_interpreter : bornes [1, PRUNER_BATCH_MAX],
+ * réutilisée par admin_apply_remote_command.
+ */
+TEST pruner_batch_clamp_bounds(void)
+{
+    ASSERT_EQ_FMT(1, pruner_batch_clamp(0), "%d");
+    ASSERT_EQ_FMT(1, pruner_batch_clamp(-5), "%d");
+    ASSERT_EQ_FMT(8, pruner_batch_clamp(8), "%d");
+    ASSERT_EQ_FMT(PRUNER_BATCH_MAX, pruner_batch_clamp(999999999), "%d");
+    ASSERT_EQ_FMT(PRUNER_BATCH_MAX, pruner_batch_clamp(PRUNER_BATCH_MAX), "%d");
+    PASS();
+}
+
+/* ---------- admin_apply_remote_command ------------------------------------ */
+/*
+ * Chemin d'exécution réentrant (strtok_r) destiné à un appelant concurrent
+ * (ex. thread HTTP) — jamais do_command_line/strtok. On vérifie : les 5
+ * commandes whitelistées appliquent bien le bon effet, une commande hors
+ * liste blanche est rejetée AVANT toute tokenisation, les arguments manquants
+ * sont détectés, et un appel au milieu d'une séquence strtok() externe ne la
+ * perturbe pas (preuve de la réentrance).
+ */
+
+TEST admin_apply_remote_command_pause_resume(void)
+{
+    int saved_req = request;
+
+    request = REQUEST_CONTINUE;
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("pause"), "%d");
+    ASSERT_EQ_FMT(REQUEST_ADMIN_PAUSE, request, "%d");
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("resume"), "%d");
+    ASSERT_EQ_FMT(REQUEST_CONTINUE, request, "%d");
+
+    request = saved_req;
+    PASS();
+}
+
+TEST admin_apply_remote_command_limit_sets_global(void)
+{
+    unsigned long long saved = max_search_by_sec;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("limit 500"), "%d");
+    ASSERT_EQ_FMT(500ULL, max_search_by_sec, "%llu");
+
+    max_search_by_sec = saved;
+    PASS();
+}
+
+TEST admin_apply_remote_command_max_stock_sets_global(void)
+{
+    int saved = max_stock_by_thread;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("maxStockByThread 42"), "%d");
+    ASSERT_EQ_FMT(42, max_stock_by_thread, "%d");
+
+    max_stock_by_thread = saved;
+    PASS();
+}
+
+TEST admin_apply_remote_command_pruner_batch_is_clamped(void)
+{
+    int saved = pruner_batch_size;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("prunerBatch 999999999"), "%d");
+    ASSERT_EQ_FMT(PRUNER_BATCH_MAX, pruner_batch_size, "%d");
+
+    pruner_batch_size = saved;
+    PASS();
+}
+
+TEST admin_apply_remote_command_rejects_forbidden(void)
+{
+    int saved_req = request;
+    request = REQUEST_CONTINUE;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("exit"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("restore"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("import"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command(NULL), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command(""), "%d");
+    /* état inchangé : rien n'a été tokenisé ni appliqué */
+    ASSERT_EQ_FMT(REQUEST_CONTINUE, request, "%d");
+
+    request = saved_req;
+    PASS();
+}
+
+TEST admin_apply_remote_command_bad_args(void)
+{
+    unsigned long long saved = max_search_by_sec;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("limit"), "%d");
+    ASSERT_EQ_FMT(saved, max_search_by_sec, "%llu");
+
+    max_search_by_sec = saved;
+    PASS();
+}
+
+/* Réentrance : un appel au milieu d'une séquence strtok() externe ne doit pas
+   perturber le curseur global de cette séquence (do_command_line en dépend). */
+TEST admin_apply_remote_command_does_not_disturb_external_strtok(void)
+{
+    unsigned long long saved = max_search_by_sec;
+
+    char outer[] = "alpha beta gamma";
+    char *first = strtok(outer, " ");
+    ASSERT(first != NULL);
+    ASSERT_STR_EQ("alpha", first);
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("limit 77"), "%d");
+    ASSERT_EQ_FMT(77ULL, max_search_by_sec, "%llu");
+
+    char *second = strtok(NULL, " ");
+    ASSERT(second != NULL);
+    ASSERT_STR_EQ("beta", second);
+
+    max_search_by_sec = saved;
+    PASS();
+}
+
 SUITE(command_lines_suite)
 {
     RUN_TEST(do_command_line_handles_empty_input);
@@ -933,4 +1056,13 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_pause_noop_on_stop);
     RUN_TEST(do_command_line_resume_clears_admin_pause);
     RUN_TEST(do_command_line_resume_noop_outside_admin_pause);
+
+    RUN_TEST(pruner_batch_clamp_bounds);
+    RUN_TEST(admin_apply_remote_command_pause_resume);
+    RUN_TEST(admin_apply_remote_command_limit_sets_global);
+    RUN_TEST(admin_apply_remote_command_max_stock_sets_global);
+    RUN_TEST(admin_apply_remote_command_pruner_batch_is_clamped);
+    RUN_TEST(admin_apply_remote_command_rejects_forbidden);
+    RUN_TEST(admin_apply_remote_command_bad_args);
+    RUN_TEST(admin_apply_remote_command_does_not_disturb_external_strtok);
 }
