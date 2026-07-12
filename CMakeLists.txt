@@ -305,9 +305,14 @@ add_custom_target(test-integration
             "DATA=${CMAKE_CURRENT_SOURCE_DIR}/data/pieces16.csv"
             "TIMEOUT=${INTEGRATION_TIMEOUT}"
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run_solution_16.sh
+    COMMAND ${CMAKE_COMMAND} -E env
+            "BIN=$<TARGET_FILE:eternityII16>"
+            "DATA=${CMAKE_CURRENT_SOURCE_DIR}/data/pieces16.csv"
+            "TIMEOUT=${INTEGRATION_TIMEOUT}"
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run_control_channel.sh
     DEPENDS eternityII16
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-    COMMENT "Test d'intégration bout-en-bout (puzzle 16 pièces)"
+    COMMENT "Test d'intégration bout-en-bout (puzzle 16 pièces) : solution + canal de contrôle"
     VERBATIM
 )
 

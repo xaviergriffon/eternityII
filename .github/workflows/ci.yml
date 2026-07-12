@@ -121,11 +121,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Scénario bout-en-bout : compile un binaire ETERN_PARTS=16, lance
-      # serveur + client. Le client résout le 4×4 et signale la solution
-      # (INST_SOLUTION) ; le serveur l'affiche, sauvegarde son stock (.back) et
-      # s'arrête. Le script vérifie que LES DEUX côtés ont le résultat, avec un
-      # timeout borné (jamais bloquant). pkill/mktemp/bash sont préinstallés.
+      # Deux scénarios bout-en-bout, sur un même binaire ETERN_PARTS=16 :
+      #  - run_solution_16.sh : serveur + client --stop-on-solution ; le client
+      #    résout le 4×4 et signale la solution (INST_SOLUTION), le serveur
+      #    l'affiche, sauvegarde son stock (.back) et s'arrête. Vérifie que LES
+      #    DEUX côtés ont le résultat.
+      #  - run_control_channel.sh : serveur + client SANS --stop-on-solution ;
+      #    pilote le canal de contrôle v9 (clientsStats/clientsPause/
+      #    clientsResume) depuis la console serveur et vérifie le round-trip
+      #    complet dans les deux logs, puis arrêt propre via `exit`.
+      # Chacun a un timeout borné (jamais bloquant). pkill/mktemp/bash préinstallés.
       - name: make test-integration
         run: make test-integration
 
