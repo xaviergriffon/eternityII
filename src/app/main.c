@@ -16,6 +16,7 @@
 #include "core/readdata.h"
 #include "app/etii_client.h"
 #include "app/etii_server.h"
+#include "app/etii_control.h"
 #include "app/app_runtime.h"
 #include "net/local_socket.h"
 #include "ui/command_lines.h"
@@ -227,6 +228,10 @@ void handle_tcpclient(int argc, const char *argv[]) {
         }
         run_checker(0);
         run_console(0);
+        // Canal de contrôle (v9) : connexion TCP additionnelle dédiée où le
+        // serveur devient l'initiateur des échanges. Non fatal comme les
+        // threads ci-dessus si la création échoue (cf. start_control_channel).
+        start_control_channel(serverIp, created);
 
         wait_child();
         close(*socket_id);

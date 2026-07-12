@@ -114,6 +114,7 @@ OBJS := \
 	$(BUILD_DIR)/net/control_protocol.o \
 	$(BUILD_DIR)/app/etii_client.o \
 	$(BUILD_DIR)/app/etii_server.o \
+	$(BUILD_DIR)/app/etii_control.o \
 	$(BUILD_DIR)/app/control_registry.o \
 	$(BUILD_DIR)/app/app_runtime.o \
 	$(BUILD_DIR)/core/etii_search.o \
@@ -170,7 +171,7 @@ TEST_SUITES_COMMON := \
                 tests/net/test_etii_protocol.c tests/net/test_control_protocol.c tests/net/test_local_socket.c tests/net/test_tcp.c \
                 tests/ui/test_command_history.c tests/ui/test_command_match.c tests/ui/test_command_lines.c tests/ui/test_console.c tests/ui/test_logger.c \
                 tests/app/test_static_variables.c \
-                tests/app/test_etii_client.c tests/app/test_etii_server.c tests/app/test_app_runtime.c \
+                tests/app/test_etii_client.c tests/app/test_etii_server.c tests/app/test_app_runtime.c tests/app/test_etii_control.c \
                 tests/app/test_control_registry.c
 TEST_SOLUTION16 := tests/core/test_solution16.c
 # Jeu 256 (secondaire) : runner + suites communes. Jeu 16 (principal) : + solution16.
@@ -192,7 +193,7 @@ $(SOLUTION16_H): $(SOLUTION16_JSON) $(GEN_SOLUTION16)
 # tests/core/test_etii_search.c l'inclut directement (#include "core/etii_search.c")
 # pour tester ses helpers static ; le compiler aussi ici provoquerait des doubles
 # symboles au link. Ce test est donc l'unique fournisseur des symboles etii_search.
-TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/command_history.c src/ui/command_match.c src/core/possibility.c src/net/etii_protocol.c src/net/control_protocol.c src/core/datamanager.c src/net/local_socket.c src/net/tcpclient.c src/net/tcpserver.c src/ui/command_lines.c src/ui/console.c src/ui/logger.c src/app/static_variables.c src/app/etii_client.c src/app/etii_server.c src/app/control_registry.c src/app/app_runtime.c
+TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/command_history.c src/ui/command_match.c src/core/possibility.c src/net/etii_protocol.c src/net/control_protocol.c src/core/datamanager.c src/net/local_socket.c src/net/tcpclient.c src/net/tcpserver.c src/ui/command_lines.c src/ui/console.c src/ui/logger.c src/app/static_variables.c src/app/etii_client.c src/app/etii_server.c src/app/control_registry.c src/app/app_runtime.c src/app/etii_control.c
 # -Isrc : en-têtes de prod en "domaine/x.h". -Itests : greatest.h / fork_assert.h
 # (harnais partagé à la racine de tests/, alors que les suites sont en sous-dossiers).
 TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -Isrc -Itests
