@@ -341,7 +341,10 @@ autosearch_step()
 │       ├─ bt_init_constraints()       init cache couleurs (pile)
 │       └─ BOUCLE PRINCIPALE :
 │           ├─ [depth == ETERN_PARTS]  → record_solution() → TCP INST_SOLUTION
-│           ├─ [REQUEST_PAUSE]         → usleep(10µs) continue
+│           ├─ [REQUEST_PAUSE ou REQUEST_ADMIN_PAUSE] → usleep(10µs) continue
+│           │     (pause de régulation de débit OU pause administrative — `pause`/
+│           │      `resume`, locale ou via le canal de contrôle v9, cf.
+│           │      docs/echanges_client_serveur.md)
 │           ├─ [REQUEST_STOP]          → bt_flush_pending() + return 1
 │           ├─ [toutes les 1M iter]    → bt_delegate_if_needed() → TCP INST_ADD
 │           │     (seuil dépassé, OU faim serveur publiée par la sonde INST_NEED_WORK — v8)

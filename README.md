@@ -31,9 +31,9 @@ Le code est rangé sous `src/`, réparti en quatre domaines ; les `#include` son
 | Répertoire | Domaine |
 |---|---|
 | `src/core/` | Logique du puzzle, structures de données et moteur de recherche (`part`, `readdata`, `possibility`, `lifo`, `etii_search`, `datamanager`, …) |
-| `src/net/`  | Protocole TCP, sockets et IPC parent↔enfant (`etii_protocol`, `tcpclient`, `tcpserver`, `local_socket`, `ipc_protocol`) |
+| `src/net/`  | Protocole TCP, sockets et IPC parent↔enfant (`etii_protocol`, `control_protocol`, `tcpclient`, `tcpserver`, `local_socket`, `ipc_protocol`) |
 | `src/ui/`   | Journalisation, console et commandes (`logger`, `logger_ncurses`, `console`, `command_lines`, `command_match`, `command_history`) |
-| `src/app/`  | Point d'entrée, rôles client/serveur, signaux, état global et GPU (`main`, `etii_client`, `etii_server`, `app_runtime`, `static_variables`, `gpu_pruner`) |
+| `src/app/`  | Point d'entrée, rôles client/serveur, signaux, état global et GPU (`main`, `etii_client`, `etii_server`, `etii_control`, `control_registry`, `app_runtime`, `static_variables`, `gpu_pruner`) |
 
 Les données du puzzle sont dans `data/` (`pieces.csv`, `pieces16.csv`) et les objets de compilation dans `build/` (miroir de `src/`, ignoré par git).
 
@@ -100,10 +100,19 @@ Des tests unitaires couvrent les modules à logique pure (`src/core/lifo.c`, `sr
 
 ```sh
 make test            # compile et lance la suite (code de sortie non nul si échec)
+make test-integration # scénarios bout-en-bout 16 pièces : solution client/serveur + canal de contrôle
 make test-docker     # rejoue les jobs de test CI dans un conteneur Linux (nécessite Docker)
 make coverage        # idem + rapport de couverture par module (gcov)
 make coverage-report # rapports gcovr : Cobertura XML + HTML + résumé Markdown
 ```
+
+`make test-integration` compile un binaire dédié (`ETERN_PARTS=16`) et enchaîne deux
+scripts (`tests/integration/`) : `run_solution_16.sh` (serveur + client
+`--stop-on-solution`, vérifie que les deux côtés voient la solution) puis
+`run_control_channel.sh` (serveur + client sans arrêt automatique, pilote le
+[canal de contrôle](#canal-de-contrôle-v9) depuis la console serveur et vérifie le
+round-trip `clientsStats`/`clientsPause`/`clientsResume` dans les deux journaux). Chacun
+tourne dans un répertoire temporaire isolé avec un timeout borné.
 
 `make test` produit un binaire isolé (`tests/run_tests`) qui ne lie **que** les modules testés et leurs dépendances — `src/app/main.c` n'est jamais inclus. `make coverage` recompile en mode instrumenté et affiche le pourcentage de lignes couvertes :
 
@@ -220,6 +229,30 @@ Exemples :
 
 > ⚠️ **Compatibilité protocole** : cet échange par lots fait passer la `VERSION` du protocole de 5 à 6. Le handshake exige une égalité stricte des versions — **tous les nœuds (serveur, clients, pruners) doivent être recompilés ensemble** ; un binaire VERSION 6 ne dialogue pas avec un VERSION 5.
 
+### Canal de contrôle (v9)
+
+En plus du protocole de travail (GET/ADD/…, toujours initié par le client), chaque
+processus client (`tcpclient`/`tcppruner`/`gpupruner`) ouvre automatiquement une
+**seconde connexion TCP dédiée** vers le serveur — sans rien à faire côté ligne de
+commande. Sur cette connexion, une fois la session annoncée (`INST_CONTROL_HELLO`),
+c'est le **serveur** qui prend l'initiative : il peut demander les statistiques
+courantes du client ou lui pousser une commande (`pause`, `resume`, `limit`, …), sans
+jamais toucher aux threads de recherche du client.
+
+Ça se pilote entièrement depuis la console du **serveur**, avec les commandes
+`clients`, `clientsStats`, `clientsCmd`, `clientsPause`, `clientsResume` (voir
+[Commandes interactives](#commandes-interactives)).
+
+> ⚠️ **Dimensionnement de `NB_THREADS`** : cette connexion de contrôle occupe un slot
+> du même pool que les connexions de travail (`nb_threads`, 1ᵉʳ argument de
+> `tcpserver`). Chaque processus client connecté consomme donc **un slot de plus**
+> que ses seuls threads de recherche. Le défaut (80) laisse une large marge, mais un
+> serveur dimensionné au plus juste doit compter (connexions de travail simultanées)
+> **+** (processus clients connectés), pas seulement le premier terme.
+
+> Documentation détaillée (format de trame, séquences, liste blanche des commandes
+> à distance) : [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md#canal-de-contrôle-v9).
+
 ### Mode test (autonome)
 
 Exécute la recherche localement sans serveur. Utile pour valider la configuration ou déboguer.
@@ -261,8 +294,14 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard. Tape
 | `limit N` | Limite la vitesse de recherche à `N` essais/seconde (0 = illimité) |
 | `maxStockByThread N` | Ajuste le stock max par thread à la volée |
 | `prunerBatch N` | Ajuste la taille de lot d'échange du pruner à la volée (borné à [1, 65536]) |
+| `pause` | Pause administrative de la recherche (`REQUEST_ADMIN_PAUSE`) — distincte de la pause de régulation de débit interne (`limit`), ne se lève que par `resume` |
+| `resume` | Lève une pause administrative posée par `pause` |
+| `clients` *(serveur)* | Liste les sessions de [canal de contrôle](#canal-de-contrôle-v9) actives (pid, forks, mode, dernière activité) |
+| `clientsStats` *(serveur)* | Demande les statistiques agrégées de chaque client connecté via son canal de contrôle |
+| `clientsCmd <ligne>` *(serveur)* | Pousse `<ligne>` à distance à tous les clients connectés (filtrée par une liste blanche : `pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`) |
+| `clientsPause` / `clientsResume` *(serveur)* | Sucre pour `clientsCmd pause` / `clientsCmd resume` |
 
-Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`, `rmnonext`, `limit`, `maxStockByThread`, `prunerBatch`, `min`, `printanalysed`) sont automatiquement retransmises à tous les processus fils via socket Unix.
+Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`, `rmnonext`, `limit`, `maxStockByThread`, `prunerBatch`, `min`, `printanalysed`, `pause`, `resume`) sont automatiquement retransmises à tous les processus fils via socket Unix. Les commandes `clients*` sont **serveur uniquement** : elles agissent sur le [canal de contrôle](#canal-de-contrôle-v9) distant, pas sur des process fils locaux.
 
 ## Interface interactive
 
@@ -296,6 +335,9 @@ Les évènements suivants sont câblés :
 | `nouveau client connecté` | Côté serveur, à chaque connexion TCP acceptée |
 | `client déconnecté (…)` | Côté serveur, en fin de session : `fin de session` (propre), `connexion perdue` (brutale) ou `protocole interrompu` |
 | `client rejeté : version …` | Côté serveur, quand le handshake de version échoue (version incompatible ou requête sans handshake valide) |
+| `session de contrôle enregistrée (pid=…) -> slot N` | Côté serveur, quand un client annonce son [canal de contrôle](#canal-de-contrôle-v9) (`INST_CONTROL_HELLO`) |
+| `session de contrôle déconnectée (slot N)` | Côté serveur, à la fin d'une session de canal de contrôle |
+| `commande distante "…" exécutée (code retour N)` | Côté serveur, après qu'une commande `clientsCmd`/`clientsPause`/`clientsResume` a été acquittée par le client |
 
 Tout évènement est **horodaté et écrit dans `events.log`** (en plus de l'affichage dans la zone), ce qui te permet de garder une trace persistante hors session :
 
@@ -395,6 +437,6 @@ Le répertoire [`docs/`](docs/) rassemble les notes détaillées sur l'architect
 
 | Document | Contenu |
 |---|---|
-| [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences typiques, comportement en cas de panne. |
+| [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences typiques, comportement en cas de panne, et le [canal de contrôle](docs/echanges_client_serveur.md#canal-de-contrôle-v9) (v9). |
 | [docs/autosearch_step.md](docs/autosearch_step.md) | Flux de recherche (`autosearch_step`) et gestion mémoire d'un thread de recherche. |
 | [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (mode `gpupruner`) : pré-requis de compilation et d'exécution, flux CUDA, avantages. |
