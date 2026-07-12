@@ -103,6 +103,7 @@ set(PROD_SRCS
     src/net/control_protocol.c
     src/app/etii_client.c
     src/app/etii_server.c
+    src/app/control_registry.c
     src/app/app_runtime.c
     src/core/etii_search.c
     src/ui/command_lines.c
@@ -279,6 +280,7 @@ add_executable(eternityII16 EXCLUDE_FROM_ALL
     src/net/etii_protocol.c
     src/app/etii_client.c
     src/app/etii_server.c
+    src/app/control_registry.c
     src/app/app_runtime.c
     src/core/etii_search.c
     src/ui/command_lines.c

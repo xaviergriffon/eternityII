@@ -155,15 +155,73 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent);
  * stock à la déconnexion ; `*version_supported` porte l'état du handshake d'un
  * tour à l'autre.
  *
+ * `out_control_session_index` est un pur OUT-param (pas d'état d'un tour à
+ * l'autre, contrairement aux deux précédents) : la fonction y écrit
+ * systématiquement -1 en entrée de traitement, SAUF quand l'instruction est
+ * `INST_CONTROL_HELLO` et que l'enregistrement dans `control_registry` réussit,
+ * auquel cas elle y écrit l'indice de session obtenu. L'appelant
+ * (`communicate_with_client`) doit tester cette valeur après CHAQUE appel : un
+ * indice ≥ 0 signifie que la session vient de basculer en canal de contrôle et
+ * que l'appelant doit quitter la boucle normale recv_instruction/
+ * communicate_with_client_step pour entrer dans `run_control_session` — qui
+ * gère alors seule l'épilogue (fermeture socket incluse), sans jamais
+ * repasser par la boucle habituelle (piège du double-close à éviter).
+ *
  * @param client            Contexte du thread (socket_id, compteur, rotate_parts).
  * @param instruction        Instruction reçue à traiter.
  * @param lastSent           In/out : dernier lot envoyé (libéré/réaffecté ici).
  * @param version_supported  In/out : 1 si le handshake de version a réussi.
+ * @param out_control_session_index Out : -1 sauf bascule réussie en session de
+ *                          contrôle (voir ci-dessus). `NULL` accepté (ignoré).
  * @return 1 pour poursuivre la boucle, 0 pour s'arrêter.
  */
 int communicate_with_client_step(client_t *client, int8_t instruction,
                                  array_possibility_packet **lastSent,
-                                 int *version_supported);
+                                 int *version_supported,
+                                 int *out_control_session_index);
+
+/**
+ * @brief Boucle de session de contrôle : le SERVEUR devient l'initiateur des
+ *        échanges (`CTRL_PING`/`CTRL_GET_STATS`/`CTRL_COMMAND`) sur une session
+ *        déjà enregistrée dans `control_registry` (après `INST_CONTROL_HELLO`).
+ *
+ * Tant que `request != REQUEST_STOP` et que la session reste vivante, répète
+ * `control_session_step`. En sortie de boucle (normale ou erreur), désenregistre
+ * la session (`control_registry_unregister`), ferme le socket (même épilogue
+ * que `communicate_with_client` : shutdown + close + `client->socket_id = -1` +
+ * `client->exist = 0`) et journalise via `log_event`. Ne fait JAMAIS double
+ * emploi avec l'épilogue de `communicate_with_client` : c'est cette fonction,
+ * et uniquement elle, qui ferme le socket dans ce cas (cf. contrat de
+ * `communicate_with_client_step` ci-dessus).
+ *
+ * @param client        Contexte du thread (même slot que la session de travail).
+ * @param session_index Indice de session renvoyé par `communicate_with_client_step`.
+ */
+void run_control_session(client_t *client, int session_index);
+
+/**
+ * @brief Un tour de la boucle de session de contrôle (extrait de
+ *        `run_control_session` pour être testable par socketpair, même patron
+ *        que `communicate_with_client_step`).
+ *
+ * 1. Attend une commande postée pour `session_index` via
+ *    `control_registry_wait_command` (borné à `timeout_ms`).
+ * 2. Si une commande est dépilée : `CTRL_COMMAND` l'envoie au client et
+ *    attend `CTRL_RESULT` (journalisé) ; `CTRL_GET_STATS` envoie la demande et
+ *    attend `CTRL_STATS` (journalisé, décodé via `control_stats_decode`). Tout
+ *    échec d'envoi/réception (codec renvoie -1) est traité comme une session
+ *    morte.
+ * 3. Sinon (timeout) : envoie `CTRL_PING`, attend `CTRL_ACK` — échec = session
+ *    morte.
+ *
+ * @param client        Contexte du thread (socket_id).
+ * @param session_index Indice de la session dans `control_registry`.
+ * @param timeout_ms     Délai d'attente d'une commande postée (cf.
+ *                      `run_control_session` pour le calcul à partir de
+ *                      `tcp_timeout`).
+ * @return 1 pour poursuivre la boucle, 0 pour arrêter (session morte).
+ */
+int control_session_step(client_t *client, int session_index, int timeout_ms);
 
 /**
  * @brief Libellé (haut niveau) de la cause de fin de session d'un client.

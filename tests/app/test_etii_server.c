@@ -12,6 +12,8 @@
 #include "greatest.h"
 #include "app/etii_server.h"
 #include "app/static_variables.h"   /* counters, version */
+#include "app/control_registry.h"  /* sessions de contrôle : INST_CONTROL_HELLO, control_session_step */
+#include "net/control_protocol.h"  /* CTRL_*, control_hello_encode, ctrl_send_frame/ctrl_recv_frame */
 #include "core/datamanager.h"
 #include "core/possibility.h"
 #include "net/etii_protocol.h"      /* INST_*, send_instruction, recv_instruction, *_all */
@@ -388,7 +390,7 @@ TEST step_test_connected_pings_back(void)
     array_possibility_packet *last = NULL;
     int vsupp = 0;
 
-    int cont = communicate_with_client_step(&client, INST_TEST_CONNECTED, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_TEST_CONNECTED, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT_EQ_FMT((int)INST_TEST_CONNECTED, (int)recv_instruction(sv[1]), "%d");
@@ -430,7 +432,7 @@ TEST step_need_work_replies_hunger(void)
 
     int32_t expected = compute_server_hunger(datas_size(), get_active_threads(thread_params));
 
-    int cont = communicate_with_client_step(&client, INST_NEED_WORK, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_NEED_WORK, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(1, cont, "%d");
     int32_t hunger = -1;
@@ -453,7 +455,7 @@ TEST step_need_work_requires_version(void)
     array_possibility_packet *last = NULL;
     int vsupp = 0;
 
-    int cont = communicate_with_client_step(&client, INST_NEED_WORK, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_NEED_WORK, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(0, cont, "%d");
     ASSERT_EQ_FMT((int)INST_UNSUPPORTED_VERSION, (int)recv_instruction(sv[1]), "%d");
@@ -473,7 +475,7 @@ TEST step_unsupported_version_stops(void)
     array_possibility_packet *last = NULL;
     int vsupp = 0;                 /* handshake jamais réalisé */
 
-    int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(0, cont, "%d");  /* ancien break */
     ASSERT_EQ_FMT((int)INST_UNSUPPORTED_VERSION, (int)recv_instruction(sv[1]), "%d");
@@ -507,7 +509,7 @@ TEST step_check_version_ok(void)
     int cv = version;              /* envoie exactement la version serveur */
     ASSERT_EQ((ssize_t)sizeof(int), write(sv[1], &cv, sizeof(int)));
 
-    int cont = communicate_with_client_step(&client, INST_CHECK_VERSION, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_CHECK_VERSION, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT_EQ_FMT(1, vsupp, "%d");
@@ -528,7 +530,7 @@ TEST step_unknown_instruction_stops(void)
     array_possibility_packet *last = NULL;
     int vsupp = 1;
 
-    int cont = communicate_with_client_step(&client, (int8_t)99, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, (int8_t)99, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(0, cont, "%d");
 
@@ -556,7 +558,7 @@ TEST step_add_stores_possibility(void)
     pkt.alloc = 3;
     ASSERT_EQ((ssize_t)sizeof pkt, write(sv[1], &pkt, sizeof pkt));
 
-    int cont = communicate_with_client_step(&client, INST_ADD, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_ADD, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT_EQ_FMT((int)INST_CONSIDERED, (int)recv_instruction(sv[1]), "%d");
@@ -607,7 +609,7 @@ TEST step_add_reassembles_fragmented_packet(void)
     pthread_t writer;
     ASSERT_EQ(0, pthread_create(&writer, NULL, frag_writer, &wa));
 
-    int cont = communicate_with_client_step(&client, INST_ADD, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_ADD, &last, &vsupp, NULL);
     pthread_join(writer, NULL);
 
     ASSERT_EQ_FMT(1, cont, "%d");
@@ -635,7 +637,7 @@ TEST step_get_empty_sends_zero_count(void)
     array_possibility_packet *last = NULL;
     int vsupp = 1;
 
-    int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(1, cont, "%d");
     int32_t k = -1;
@@ -674,7 +676,7 @@ TEST step_get_serves_possibility(void)
     array_possibility_packet *last = NULL;
     int vsupp = 1;
 
-    int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp, NULL);
     ASSERT_EQ_FMT(1, cont, "%d");
 
     /* Trame VERSION 7 : compte K puis le bloc de K paquets. */
@@ -714,7 +716,7 @@ TEST step_possibility_analysed_acks(void)
     add_possibility_analysed(&pkt, -1);
     ASSERT_EQ((long)sizeof pkt, send_all(sv[1], &pkt, sizeof pkt));
 
-    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT_EQ_FMT((int)INST_CONSIDERED, (int)recv_instruction(sv[1]), "%d");
@@ -738,7 +740,7 @@ TEST step_get_to_check_empty_sends_zero_count(void)
     array_possibility_packet *last = NULL;
     int vsupp = 1;
 
-    int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(1, cont, "%d");
     int32_t k = -1;
@@ -769,7 +771,7 @@ TEST step_get_to_check_batch_empty_returns_zero(void)
     int32_t requested = 5;
     ASSERT_EQ((long)sizeof requested, send_all(sv[1], &requested, sizeof requested));
 
-    int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK_BATCH, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK_BATCH, &last, &vsupp, NULL);
     ASSERT_EQ_FMT(1, cont, "%d");
 
     int32_t k = -1;
@@ -807,7 +809,7 @@ TEST step_analysed_batch_acks(void)
     ASSERT_EQ((long)sizeof m, send_all(sv[1], &m, sizeof m));
     ASSERT_EQ((long)sizeof pkts, send_all(sv[1], pkts, sizeof pkts));
 
-    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED_BATCH, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED_BATCH, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT_EQ_FMT((int)INST_CONSIDERED, (int)recv_instruction(sv[1]), "%d");
@@ -831,7 +833,7 @@ TEST step_analysed_batch_out_of_bounds_stops(void)
     int32_t m = PRUNER_BATCH_MAX + 1;
     ASSERT_EQ((long)sizeof m, send_all(sv[1], &m, sizeof m));
 
-    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED_BATCH, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED_BATCH, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(0, cont, "%d");   /* ancien break, aucun INST_CONSIDERED */
 
@@ -860,7 +862,7 @@ TEST step_solution_incomplete_stops(void)
     ASSERT_EQ((ssize_t)sizeof fragment, write(sv[1], fragment, sizeof fragment));
     close(sv[1]);
 
-    int cont = communicate_with_client_step(&client, INST_SOLUTION, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_SOLUTION, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(0, cont, "%d");
 
@@ -882,7 +884,7 @@ TEST step_check_version_recv_fail_stops(void)
 
     close(sv[1]);                  /* EOF avant l'envoi de la version */
 
-    int cont = communicate_with_client_step(&client, INST_CHECK_VERSION, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_CHECK_VERSION, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(0, cont, "%d");
     ASSERT_EQ_FMT(0, vsupp, "%d");
@@ -906,7 +908,7 @@ TEST step_check_version_mismatch_rejects(void)
     int cv = version + 1;          /* version incompatible */
     ASSERT_EQ((ssize_t)sizeof(int), write(sv[1], &cv, sizeof(int)));
 
-    int cont = communicate_with_client_step(&client, INST_CHECK_VERSION, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_CHECK_VERSION, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT_EQ_FMT(0, vsupp, "%d");   /* handshake NON validé */
@@ -941,7 +943,7 @@ TEST step_second_get_frees_previous_batch(void)
     int vsupp = 1;
 
     for (int round = 0; round < 2; round++) {
-        int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp);
+        int cont = communicate_with_client_step(&client, INST_GET, &last, &vsupp, NULL);
         ASSERT_EQ_FMT(1, cont, "%d");
         int32_t k = 0;
         ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
@@ -982,7 +984,7 @@ TEST step_get_to_check_serves_possibility(void)
     int vsupp = 1;
 
     for (int round = 0; round < 2; round++) {        /* 2e tour : libère lastSent */
-        int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK, &last, &vsupp);
+        int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK, &last, &vsupp, NULL);
         ASSERT_EQ_FMT(1, cont, "%d");
         int32_t k = 0;
         ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
@@ -1012,7 +1014,7 @@ TEST step_get_to_check_batch_count_not_received_stops(void)
 
     close(sv[1]);                  /* EOF avant l'envoi du compte */
 
-    int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK_BATCH, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK_BATCH, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(0, cont, "%d");
 
@@ -1045,7 +1047,7 @@ TEST step_get_to_check_batch_serves_batch(void)
 
     int32_t requested = 5;
     ASSERT_EQ((long)sizeof requested, send_all(sv[1], &requested, sizeof requested));
-    int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK_BATCH, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_GET_TO_CHECK_BATCH, &last, &vsupp, NULL);
     ASSERT_EQ_FMT(1, cont, "%d");
 
     int32_t k = 0;
@@ -1058,7 +1060,7 @@ TEST step_get_to_check_batch_serves_batch(void)
 
     /* Second lot sur pool vide : libère le lastSent précédent, renvoie K == 0. */
     ASSERT_EQ((long)sizeof requested, send_all(sv[1], &requested, sizeof requested));
-    cont = communicate_with_client_step(&client, INST_GET_TO_CHECK_BATCH, &last, &vsupp);
+    cont = communicate_with_client_step(&client, INST_GET_TO_CHECK_BATCH, &last, &vsupp, NULL);
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
     ASSERT_EQ_FMT(0, (int)k, "%d");
@@ -1089,7 +1091,7 @@ TEST step_add_short_recv_stops(void)
     ASSERT_EQ((ssize_t)sizeof fragment, write(sv[1], fragment, sizeof fragment));
     close(sv[1]);
 
-    int cont = communicate_with_client_step(&client, INST_ADD, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_ADD, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(0, cont, "%d");
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* rien ajouté au stock */
@@ -1118,7 +1120,7 @@ TEST step_analysed_not_removed_sends_error(void)
     pkt.alloc = 11;                /* jamais passée « en analyse » */
     ASSERT_EQ((long)sizeof pkt, send_all(sv[1], &pkt, sizeof pkt));
 
-    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT_EQ_FMT((int)INST_ERROR, (int)recv_instruction(sv[1]), "%d");
@@ -1143,7 +1145,7 @@ TEST step_analysed_short_recv_stops(void)
     ASSERT_EQ((ssize_t)sizeof fragment, write(sv[1], fragment, sizeof fragment));
     close(sv[1]);
 
-    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(0, cont, "%d");
 
@@ -1178,7 +1180,7 @@ TEST step_analysed_batch_incomplete_packet_stops(void)
     ASSERT_EQ((long)sizeof pkt, send_all(sv[1], &pkt, sizeof pkt));
     close(sv[1]);                  /* le 2e paquet ne viendra jamais */
 
-    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED_BATCH, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED_BATCH, &last, &vsupp, NULL);
 
     ASSERT_EQ_FMT(0, cont, "%d");  /* INST_ERROR envoyé puis arrêt (pair fermé : non relu) */
 
@@ -1216,7 +1218,7 @@ static void fork_solution_stop_server(void)
     client.socket_id = sv[0];
     array_possibility_packet *last = NULL;
     int vsupp = 1;
-    communicate_with_client_step(&client, INST_SOLUTION, &last, &vsupp);
+    communicate_with_client_step(&client, INST_SOLUTION, &last, &vsupp, NULL);
     exit(6);                       /* le step aurait dû exit(EXIT_SUCCESS) */
 }
 
@@ -1898,6 +1900,348 @@ TEST rmnonext_thread_stops_immediately_on_request_stop(void)
     PASS();
 }
 
+/* ---------- INST_CONTROL_HELLO (bascule en session de contrôle) --------- */
+/*
+ * Ces tests exercent le contrat de communicate_with_client_step pour
+ * INST_CONTROL_HELLO : un socketpair joue le rôle du canal, control_registry
+ * étant le vrai registre global (pas de mock). Chaque test désenregistre la
+ * session qu'il a créée pour ne pas fausser un test suivant (ex. le test
+ * « registre plein »).
+ */
+
+static void send_control_hello(int fd, int32_t pid, int32_t nb_forks, uint8_t mode)
+{
+    control_hello_t hello = { .pid = pid, .nb_forks = nb_forks, .mode = mode };
+    uint8_t buf[CONTROL_HELLO_WIRE_SIZE];
+    int32_t len = control_hello_encode(&hello, buf);
+    send_all(fd, &len, sizeof(len));
+    send_all(fd, buf, (size_t)len);
+}
+
+TEST step_control_hello_switches_session(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+    int out_idx = -1;
+
+    send_control_hello(sv[1], 4242, 7, 1);
+
+    int cont = communicate_with_client_step(&client, INST_CONTROL_HELLO, &last, &vsupp, &out_idx);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT(out_idx >= 0);
+
+    control_session_info_t infos[MAX_CONTROL_SESSIONS];
+    int n = control_registry_snapshot(infos, MAX_CONTROL_SESSIONS);
+    int found = 0;
+    for (int i = 0; i < n; i++) {
+        if (infos[i].pid == 4242 && infos[i].nb_forks == 7 && infos[i].mode == 1) {
+            found = 1;
+        }
+    }
+    ASSERT(found);
+
+    control_registry_unregister(out_idx);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Sans out-param (NULL accepté) : la bascule reste opérée dans le registre
+   (la session existe), mais l'appelant qui ignore le paramètre n'en est pas
+   informé — comportement attendu pour un appelant qui ne gère pas le canal. */
+TEST step_control_hello_out_param_null_is_accepted(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+
+    int before = control_registry_count();
+    ASSERT_EQ(0, before);   /* registre vide en entrée : condition du nettoyage ci-dessous */
+    send_control_hello(sv[1], 1, 1, 0);
+
+    int cont = communicate_with_client_step(&client, INST_CONTROL_HELLO, &last, &vsupp, NULL);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ(1, control_registry_count());
+
+    /* Le out-param est NULL : impossible de récupérer l'indice enregistré
+       directement. Comme le registre était vide en entrée, un balayage complet
+       retrouve et libère à coup sûr le (seul) slot occupé — sans risque
+       d'interférer avec un autre test de la suite. */
+    for (int i = 0; i < MAX_CONTROL_SESSIONS; i++) {
+        control_registry_unregister(i);
+    }
+    ASSERT_EQ(0, control_registry_count());
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+TEST step_control_hello_requires_version(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 0;             /* handshake jamais réalisé */
+    int out_idx = -1;
+
+    int cont = communicate_with_client_step(&client, INST_CONTROL_HELLO, &last, &vsupp, &out_idx);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+    ASSERT_EQ_FMT(-1, out_idx, "%d");
+    ASSERT_EQ_FMT((int)INST_UNSUPPORTED_VERSION, (int)recv_instruction(sv[1]), "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+TEST step_control_hello_bad_length_stops(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+    int out_idx = -1;
+
+    int32_t bad_len = CTRL_PAYLOAD_MAX + 1;
+    ASSERT_EQ((long)sizeof bad_len, send_all(sv[1], &bad_len, sizeof bad_len));
+
+    int cont = communicate_with_client_step(&client, INST_CONTROL_HELLO, &last, &vsupp, &out_idx);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+    ASSERT_EQ_FMT(-1, out_idx, "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+TEST step_control_hello_registry_full_stops(void)
+{
+    /* Remplit le registre pour forcer l'échec d'enregistrement. */
+    control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
+    int idxs[MAX_CONTROL_SESSIONS];
+    int filled = 0;
+    while (filled < MAX_CONTROL_SESSIONS) {
+        int idx = control_registry_register(1000 + filled, &h);
+        if (idx < 0) break;
+        idxs[filled++] = idx;
+    }
+    ASSERT_EQ(MAX_CONTROL_SESSIONS, filled);
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    array_possibility_packet *last = NULL;
+    int vsupp = 1;
+    int out_idx = -1;
+
+    send_control_hello(sv[1], 5, 5, 0);
+
+    int cont = communicate_with_client_step(&client, INST_CONTROL_HELLO, &last, &vsupp, &out_idx);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+    ASSERT_EQ_FMT(-1, out_idx, "%d");
+
+    for (int i = 0; i < filled; i++) {
+        control_registry_unregister(idxs[i]);
+    }
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* ---------- control_session_step (le SERVEUR initie l'échange) ---------- */
+/*
+ * Le test joue le rôle du CLIENT en face de control_session_step : il lit ce
+ * que le serveur envoie via ctrl_recv_frame et répond via ctrl_send_frame,
+ * exactement comme le fera la PR4 côté client (non implémentée ici).
+ */
+
+/* Argument passé au thread jouant le client en face de control_session_step. */
+struct ctrl_peer_arg {
+    int fd;
+    int expect_cmd;          /* CTRL_COMMAND ou CTRL_GET_STATS ou CTRL_PING */
+    const char *expect_line; /* pour CTRL_COMMAND : ligne attendue (NULL si N/A) */
+    int reply_cmd;           /* CTRL_RESULT / CTRL_STATS / CTRL_ACK */
+    int32_t reply_retcode;   /* pour CTRL_RESULT */
+};
+
+static void *ctrl_peer_thread(void *arg)
+{
+    struct ctrl_peer_arg *a = arg;
+    void *payload = NULL;
+    int32_t plen = 0;
+    int rcmd = ctrl_recv_frame(a->fd, &payload, &plen);
+    if (rcmd == a->expect_cmd) {
+        if (a->expect_line != NULL) {
+            char got[256];
+            int copy = plen < (int32_t)sizeof(got) - 1 ? plen : (int32_t)sizeof(got) - 1;
+            memcpy(got, payload, (size_t)copy);
+            got[copy] = '\0';
+            if (strcmp(got, a->expect_line) != 0) {
+                free(payload);
+                return NULL; /* n'envoie pas la réponse : le test verra l'échec via cont==0 */
+            }
+        }
+        free(payload);
+        if (a->reply_cmd == CTRL_RESULT) {
+            ctrl_send_frame(a->fd, CTRL_RESULT, &a->reply_retcode, sizeof(a->reply_retcode));
+        } else if (a->reply_cmd == CTRL_STATS) {
+            control_stats_t stats = { .shots_per_second = 10, .possibility_stock = 20,
+                                       .analysed_stock = 5, .max_result = 30,
+                                       .pruner_checked = 1, .pruner_removed = 2 };
+            uint8_t buf[CONTROL_STATS_WIRE_SIZE];
+            control_stats_encode(&stats, buf);
+            ctrl_send_frame(a->fd, CTRL_STATS, buf, CONTROL_STATS_WIRE_SIZE);
+        } else if (a->reply_cmd == CTRL_ACK) {
+            ctrl_send_frame(a->fd, CTRL_ACK, NULL, 0);
+        }
+    } else {
+        free(payload);
+    }
+    return NULL;
+}
+
+TEST control_session_step_command_round_trip(void)
+{
+    control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+    ASSERT_EQ(0, control_registry_post_command(idx, CTRL_COMMAND, "pause"));
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+
+    struct ctrl_peer_arg arg = { .fd = sv[1], .expect_cmd = CTRL_COMMAND,
+                                  .expect_line = "pause", .reply_cmd = CTRL_RESULT,
+                                  .reply_retcode = 0 };
+    pthread_t t;
+    ASSERT_EQ(0, pthread_create(&t, NULL, ctrl_peer_thread, &arg));
+
+    int cont = control_session_step(&client, idx, 2000);
+    pthread_join(t, NULL);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+
+    control_registry_unregister(idx);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+TEST control_session_step_get_stats_round_trip(void)
+{
+    control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+    ASSERT_EQ(0, control_registry_post_command(idx, CTRL_GET_STATS, NULL));
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+
+    struct ctrl_peer_arg arg = { .fd = sv[1], .expect_cmd = CTRL_GET_STATS,
+                                  .expect_line = NULL, .reply_cmd = CTRL_STATS,
+                                  .reply_retcode = 0 };
+    pthread_t t;
+    ASSERT_EQ(0, pthread_create(&t, NULL, ctrl_peer_thread, &arg));
+
+    int cont = control_session_step(&client, idx, 2000);
+    pthread_join(t, NULL);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+
+    control_registry_unregister(idx);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+TEST control_session_step_timeout_pings_and_continues(void)
+{
+    control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+    /* Aucune commande postée : le tour doit expirer et déclencher un ping. */
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+
+    struct ctrl_peer_arg arg = { .fd = sv[1], .expect_cmd = CTRL_PING,
+                                  .expect_line = NULL, .reply_cmd = CTRL_ACK,
+                                  .reply_retcode = 0 };
+    pthread_t t;
+    ASSERT_EQ(0, pthread_create(&t, NULL, ctrl_peer_thread, &arg));
+
+    int cont = control_session_step(&client, idx, 50 /* ms : timeout court */);
+    pthread_join(t, NULL);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+
+    control_registry_unregister(idx);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+TEST control_session_step_ping_without_ack_stops(void)
+{
+    control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+    close(sv[1]);              /* pair mort : ni ping reçu ni ack possible */
+
+    int cont = control_session_step(&client, idx, 50);
+
+    ASSERT_EQ_FMT(0, cont, "%d");
+
+    control_registry_unregister(idx);
+    close(sv[0]);
+    PASS();
+}
+
+TEST control_session_step_invalid_index_stops(void)
+{
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+
+    int cont = control_session_step(&client, -1, 50);
+    ASSERT_EQ_FMT(0, cont, "%d");
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
 /* ---------- suite --------------------------------------------------------- */
 
 SUITE(etii_server_suite)
@@ -1988,4 +2332,16 @@ SUITE(etii_server_suite)
     RUN_TEST(rmnonext_pass_prunes_when_idle);
     RUN_TEST(rmnonext_pass_skips_when_client_active);
     RUN_TEST(rmnonext_thread_stops_immediately_on_request_stop);
+
+    RUN_TEST(step_control_hello_switches_session);
+    RUN_TEST(step_control_hello_out_param_null_is_accepted);
+    RUN_TEST(step_control_hello_requires_version);
+    RUN_TEST(step_control_hello_bad_length_stops);
+    RUN_TEST(step_control_hello_registry_full_stops);
+
+    RUN_TEST(control_session_step_command_round_trip);
+    RUN_TEST(control_session_step_get_stats_round_trip);
+    RUN_TEST(control_session_step_timeout_pings_and_continues);
+    RUN_TEST(control_session_step_ping_without_ack_stops);
+    RUN_TEST(control_session_step_invalid_index_stops);
 }

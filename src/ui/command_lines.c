@@ -9,10 +9,12 @@
 #include "core/readdata.h"
 #include "ui/command_match.h"
 #include "app/static_variables.h"
+#include "app/control_registry.h"
+#include "net/control_protocol.h"
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
-#define NB_COMMANDS 30
+#define NB_COMMANDS 35
 
 /**
  * @brief Définition d'une commande prise en charge
@@ -57,6 +59,11 @@ int help_interpreter(void);
 int statistic_interpreter(void);
 int pause_interpreter(void);
 int resume_interpreter(void);
+int clients_interpreter(void);
+int clients_stats_interpreter(void);
+int clients_cmd_interpreter(void);
+int clients_pause_interpreter(void);
+int clients_resume_interpreter(void);
 
 /**
  * @brief Commandes prises en charge.
@@ -91,7 +98,12 @@ static command_description commands[NB_COMMANDS] = {
     {"min", min_interpreter, 1},
     {"help", help_interpreter, 0},
     {"pause", pause_interpreter, 1},
-    {"resume", resume_interpreter, 1}
+    {"resume", resume_interpreter, 1},
+    {"clients", clients_interpreter, 0},
+    {"clientsStats", clients_stats_interpreter, 0},
+    {"clientsCmd", clients_cmd_interpreter, 0},
+    {"clientsPause", clients_pause_interpreter, 0},
+    {"clientsResume", clients_resume_interpreter, 0}
 };
 
 /** @brief Interpréteur de la commande `sorta` : tri ascendant des possibilités. */
@@ -506,6 +518,83 @@ int resume_interpreter(void) {
     } else {
         log_info("resume : pas de pause administrative en cours\n");
     }
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `clients` : liste les sessions de contrôle actives
+ *        (canal `INST_CONTROL_HELLO`, v9) via `control_registry_snapshot`.
+ *
+ * Commande SERVEUR pure (send_to_childs = 0) : les process forkés du client
+ * ne connaissent pas ce registre.
+ */
+int clients_interpreter(void) {
+    control_session_info_t infos[MAX_CONTROL_SESSIONS];
+    int n = control_registry_snapshot(infos, MAX_CONTROL_SESSIONS);
+    if (n == 0) {
+        log_info("clients : aucune session de contrôle active\n");
+        return 0;
+    }
+    log_info("clients : %d session(s) de contrôle active(s)\n", n);
+    for (int i = 0; i < n; i++) {
+        log_info("  pid=%d  mode=%u  forks=%d  derniere activite=%lld\n",
+                  infos[i].pid, (unsigned)infos[i].mode, infos[i].nb_forks,
+                  (long long)infos[i].last_activity);
+    }
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `clientsStats` : demande les statistiques agrégées
+ *        (`CTRL_GET_STATS`) à toutes les sessions de contrôle actives.
+ */
+int clients_stats_interpreter(void) {
+    int n = control_registry_broadcast_get_stats();
+    log_info("clientsStats : demande envoyée à %d session(s)\n", n);
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `clientsCmd <ligne...>` : diffuse une commande console
+ *        à distance (`CTRL_COMMAND`) à toutes les sessions de contrôle actives.
+ *
+ * `<ligne...>` est reprise TELLE QUELLE après le premier mot (pas retokenisée :
+ * elle peut contenir plusieurs arguments, ex. "limit 500"). Avant diffusion,
+ * son premier mot est vérifié par `control_command_allowed` (liste blanche
+ * définie dans control_protocol.h) : une commande non autorisée est refusée
+ * SANS être diffusée.
+ */
+int clients_cmd_interpreter(void) {
+    char *rest = strtok(NULL, "");
+    if (rest != NULL) {
+        while (*rest == ' ') {
+            rest++;
+        }
+    }
+    if (rest == NULL || *rest == '\0') {
+        log_error("clientsCmd : ligne de commande manquante (usage : clientsCmd <commande>)\n");
+        return -1;
+    }
+    if (!control_command_allowed(rest)) {
+        log_error("clientsCmd : commande non autorisée à distance : \"%s\"\n", rest);
+        return -1;
+    }
+    int n = control_registry_broadcast_command(CTRL_COMMAND, rest);
+    log_info("clientsCmd : \"%s\" diffusée à %d session(s)\n", rest, n);
+    return 0;
+}
+
+/** @brief Interpréteur de `clientsPause` : sucre pour `clientsCmd pause`. */
+int clients_pause_interpreter(void) {
+    int n = control_registry_broadcast_command(CTRL_COMMAND, "pause");
+    log_info("clientsPause : diffusée à %d session(s)\n", n);
+    return 0;
+}
+
+/** @brief Interpréteur de `clientsResume` : sucre pour `clientsCmd resume`. */
+int clients_resume_interpreter(void) {
+    int n = control_registry_broadcast_command(CTRL_COMMAND, "resume");
+    log_info("clientsResume : diffusée à %d session(s)\n", n);
     return 0;
 }
 

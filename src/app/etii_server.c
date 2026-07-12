@@ -12,6 +12,8 @@
 #include "ui/logger.h"
 #include "app/static_variables.h"
 #include "net/etii_protocol.h"
+#include "net/control_protocol.h"
+#include "app/control_registry.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
 #include "core/part.h"
@@ -320,8 +322,12 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent)
  */
 int communicate_with_client_step(client_t *client, int8_t instruction,
                                  array_possibility_packet **lastSent,
-                                 int *version_supported)
+                                 int *version_supported,
+                                 int *out_control_session_index)
 {
+        if (out_control_session_index != NULL) {
+            *out_control_session_index = -1;
+        }
         if (instruction == INST_CHECK_VERSION) {
             int client_version = -1;
             long ssize = recv_all(client->socket_id, &client_version, sizeof(int));
@@ -601,6 +607,43 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             {
                 log_errno("Erreur d'envoi (need work) => ");
             }
+        } else if (instruction == INST_CONTROL_HELLO && *version_supported == 1) {
+            // Annonce d'un canal de contrôle (v9) : le client (processus
+            // parent) envoie un int32 de longueur puis le payload hello
+            // cadré (control_hello_encode). On enregistre la session dans
+            // control_registry et on signale la bascule à l'appelant via
+            // out_control_session_index (cf. contrat dans etii_server.h) :
+            // c'est run_control_session, pas cette boucle, qui gèrera la
+            // suite (et l'épilogue socket) de cette connexion.
+            int32_t len = 0;
+            if (recv_all(client->socket_id, &len, sizeof(len)) != (long)sizeof(len)) {
+                log_error("control hello : longueur non reçue\n");
+                return 0;
+            }
+            if (len < 0 || len > CTRL_PAYLOAD_MAX) {
+                log_error("control hello : longueur hors borne (%d)\n", len);
+                return 0;
+            }
+            uint8_t buf[CTRL_PAYLOAD_MAX];
+            if (len > 0 && recv_all(client->socket_id, buf, (size_t)len) != (long)len) {
+                log_error("control hello : payload incomplet\n");
+                return 0;
+            }
+            control_hello_t hello;
+            if (control_hello_decode(buf, len, &hello) != 0) {
+                log_error("control hello : décodage échoué\n");
+                return 0;
+            }
+            int idx = control_registry_register(client->socket_id, &hello);
+            if (idx < 0) {
+                log_error("control hello : registre de sessions de contrôle plein, session refusée\n");
+                return 0;
+            }
+            log_event("session de contrôle enregistrée (pid=%d, forks=%d, mode=%u) -> slot %d",
+                      hello.pid, hello.nb_forks, (unsigned)hello.mode, idx);
+            if (out_control_session_index != NULL) {
+                *out_control_session_index = idx;
+            }
         } else if (instruction == INST_TEST_CONNECTED) {
             send_instruction(client->socket_id, INST_TEST_CONNECTED);
         } else if (*version_supported == 0) {
@@ -654,6 +697,143 @@ const char *client_disconnect_reason(int8_t last_instruction)
     return "protocole interrompu";
 }
 
+/**
+ * @brief Un tour de la boucle de session de contrôle (voir etii_server.h pour
+ *        le contrat complet).
+ *
+ * Le timeout de l'attente d'une commande postée est celui passé par l'appelant
+ * (`run_control_session` le dérive de `tcp_timeout`, cf. sa doc) : rester sous
+ * le `SO_RCVTIMEO` déjà posé sur le socket (configure_client_socket) pour ne
+ * jamais laisser le pair croire la session morte pendant qu'on attend une
+ * commande côté serveur.
+ */
+int control_session_step(client_t *client, int session_index, int timeout_ms)
+{
+    uint8_t cmd = 0;
+    char line[CONTROL_COMMAND_LINE_MAX];
+    int wr = control_registry_wait_command(session_index, &cmd, line, sizeof(line), timeout_ms);
+
+    if (wr < 0) {
+        // Session désenregistrée entre-temps (ou indice invalide) : rien à
+        // faire côté réseau, la session est de toute façon morte.
+        return 0;
+    }
+
+    if (wr == 0) {
+        // Une commande a été postée pour cette session (console serveur).
+        if (cmd == CTRL_COMMAND) {
+            if (ctrl_send_frame(client->socket_id, CTRL_COMMAND, line, (int32_t)strlen(line)) != 0) {
+                log_error("session de contrôle : échec d'envoi de CTRL_COMMAND\n");
+                return 0;
+            }
+            void *payload = NULL;
+            int32_t plen = 0;
+            int rcmd = ctrl_recv_frame(client->socket_id, &payload, &plen);
+            if (rcmd != CTRL_RESULT) {
+                log_error("session de contrôle : réponse CTRL_RESULT attendue, reçu %d\n", rcmd);
+                free(payload);
+                return 0;
+            }
+            int32_t retcode = -1;
+            if (plen >= (int32_t)sizeof(retcode) && payload != NULL) {
+                memcpy(&retcode, payload, sizeof(retcode));
+            }
+            free(payload);
+            log_event("commande distante \"%s\" exécutée (code retour %d)", line, retcode);
+            control_registry_touch(session_index);
+        } else if (cmd == CTRL_GET_STATS) {
+            if (ctrl_send_frame(client->socket_id, CTRL_GET_STATS, NULL, 0) != 0) {
+                log_error("session de contrôle : échec d'envoi de CTRL_GET_STATS\n");
+                return 0;
+            }
+            void *payload = NULL;
+            int32_t plen = 0;
+            int rcmd = ctrl_recv_frame(client->socket_id, &payload, &plen);
+            if (rcmd != CTRL_STATS) {
+                log_error("session de contrôle : réponse CTRL_STATS attendue, reçu %d\n", rcmd);
+                free(payload);
+                return 0;
+            }
+            control_stats_t stats;
+            memset(&stats, 0, sizeof(stats));
+            int decoded = (payload != NULL) ? control_stats_decode(payload, plen, &stats) : -1;
+            free(payload);
+            if (decoded != 0) {
+                log_error("session de contrôle : décodage CTRL_STATS échoué\n");
+                return 0;
+            }
+            log_info("stats client : coups/s=%llu stock=%llu analyse=%llu record=%llu pruner_checked=%llu pruner_removed=%llu\n",
+                      (unsigned long long)stats.shots_per_second,
+                      (unsigned long long)stats.possibility_stock,
+                      (unsigned long long)stats.analysed_stock,
+                      (unsigned long long)stats.max_result,
+                      (unsigned long long)stats.pruner_checked,
+                      (unsigned long long)stats.pruner_removed);
+            control_registry_touch(session_index);
+        } else {
+            log_error("session de contrôle : commande interne inconnue (%u)\n", (unsigned)cmd);
+        }
+        return 1;
+    }
+
+    // wr == 1 : timeout, aucune commande en attente — keepalive ping/pong,
+    // borné par le SO_RCVTIMEO déjà posé sur le socket.
+    if (ctrl_send_frame(client->socket_id, CTRL_PING, NULL, 0) != 0) {
+        log_error("session de contrôle : échec d'envoi de CTRL_PING\n");
+        return 0;
+    }
+    void *payload = NULL;
+    int32_t plen = 0;
+    int rcmd = ctrl_recv_frame(client->socket_id, &payload, &plen);
+    free(payload);
+    if (rcmd != CTRL_ACK) {
+        log_error("session de contrôle : CTRL_ACK attendu, reçu %d\n", rcmd);
+        return 0;
+    }
+    control_registry_touch(session_index);
+    return 1;
+}
+
+/**
+ * @brief Boucle de session de contrôle (voir etii_server.h pour le contrat).
+ */
+void run_control_session(client_t *client, int session_index)
+{
+    // Cadence de l'attente d'une commande postée : on reste sous le
+    // SO_RCVTIMEO du socket (tcp_timeout, secondes) pour ne jamais laisser le
+    // pair croire la session morte, plafonné à 2 s pour rester réactif.
+    int timeout_ms = tcp_timeout * 500;
+    if (timeout_ms > 2000) {
+        timeout_ms = 2000;
+    }
+    if (timeout_ms < 1) {
+        timeout_ms = 1;
+    }
+
+    while (request != REQUEST_STOP) {
+        if (!control_session_step(client, session_index, timeout_ms)) {
+            break;
+        }
+    }
+
+    control_registry_unregister(session_index);
+    log_event("session de contrôle déconnectée (slot %d)", session_index);
+
+    shutdown(client->socket_id, 2);
+    int err = closesocket(client->socket_id);
+#ifdef DEBUG_SOCKET
+    opened_tcp--;
+#endif // DEBUG_SOCKET
+    if (0 != err) {
+        log_error("erreur close (session de contrôle) :%i\n", err);
+    }
+
+    usleep(THREAD_MICRO_SLEEP);
+
+    client->socket_id = -1;
+    client->exist = 0;
+}
+
 void *communicate_with_client (void *userdata)
 {
     client_t *client = userdata;
@@ -666,12 +846,33 @@ void *communicate_with_client (void *userdata)
 
     array_possibility_packet *lastPossibilityPacketSend = NULL;
     int version_supported = 0;
+    int control_session_index = -1;
     while(instruction != -1 && instruction != INST_END)
     {
         if (!communicate_with_client_step(client, instruction,
-                                          &lastPossibilityPacketSend, &version_supported))
+                                          &lastPossibilityPacketSend, &version_supported,
+                                          &control_session_index))
         {
             break;
+        }
+
+        if (control_session_index >= 0)
+        {
+            // Bascule en canal de contrôle (INST_CONTROL_HELLO traité avec
+            // succès) : run_control_session gère seule la suite ET l'épilogue
+            // de cette connexion (fermeture socket incluse) — on ne doit PAS
+            // continuer la boucle normale ni refermer le socket ici, sous
+            // peine de double-close.
+            if (lastPossibilityPacketSend != NULL) {
+                // Aucune possibilité n'a pu être en cours d'envoi à ce stade
+                // (INST_CONTROL_HELLO ne sert pas de possibilités), mais par
+                // sécurité on applique le même traitement qu'à la déconnexion
+                // normale avant de lâcher la main à la session de contrôle.
+                requeue_last_sent_possibility(lastPossibilityPacketSend);
+                free_array_possibility_packet(lastPossibilityPacketSend);
+            }
+            run_control_session(client, control_session_index);
+            return NULL;
         }
 
         instruction = recv_instruction(client->socket_id);
