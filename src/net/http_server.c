@@ -133,6 +133,7 @@ int http_clients_collect(http_client_info_t *out, int max)
         out[i].stats_max_result = (unsigned long long)infos[i].stats.max_result;
         out[i].stats_pruner_checked = (unsigned long long)infos[i].stats.pruner_checked;
         out[i].stats_pruner_removed = (unsigned long long)infos[i].stats.pruner_removed;
+        out[i].stats_pruner_cells_per_second = (unsigned long long)infos[i].stats.pruner_cells_per_second;
         out[i].stats_time = (long long)infos[i].stats_time;
     }
     return n;

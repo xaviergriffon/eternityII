@@ -45,6 +45,7 @@ void control_channel_build_stats(control_stats_t *out)
         out->analysed_stock += fork_statistics[f].analyses_in_stock;
         out->pruner_checked += fork_statistics[f].pruner_checked;
         out->pruner_removed += fork_statistics[f].pruner_removed;
+        out->pruner_cells_per_second += fork_statistics[f].pruner_cells_per_second;
         if (fork_statistics[f].max_result > out->max_result) {
             out->max_result = fork_statistics[f].max_result;
         }

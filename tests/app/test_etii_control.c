@@ -58,9 +58,11 @@ TEST control_channel_get_stats_replies_aggregated_stats(void)
     fs[0].shots_per_second = 100; fs[0].possibilities_in_stock = 10;
     fs[0].analyses_in_stock = 1;  fs[0].max_result = 20;
     fs[0].pruner_checked = 5;     fs[0].pruner_removed = 2;
+    fs[0].pruner_cells_per_second = 30;
     fs[1].shots_per_second = 200; fs[1].possibilities_in_stock = 30;
     fs[1].analyses_in_stock = 3;  fs[1].max_result = 40;
     fs[1].pruner_checked = 7;     fs[1].pruner_removed = 1;
+    fs[1].pruner_cells_per_second = 15;
     NB_THREADS = 2;
     fork_statistics = fs;
     max_result = 0;
@@ -92,6 +94,7 @@ TEST control_channel_get_stats_replies_aggregated_stats(void)
     ASSERT_EQ_FMT((unsigned long long)40, (unsigned long long)stats.max_result, "%llu");
     ASSERT_EQ_FMT((unsigned long long)12, (unsigned long long)stats.pruner_checked, "%llu");
     ASSERT_EQ_FMT((unsigned long long)3, (unsigned long long)stats.pruner_removed, "%llu");
+    ASSERT_EQ_FMT((unsigned long long)45, (unsigned long long)stats.pruner_cells_per_second, "%llu");
 
     close(sv[0]); close(sv[1]);
     PASS();

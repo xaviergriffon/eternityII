@@ -124,8 +124,8 @@ int32_t control_hello_encode(const control_hello_t *hello, uint8_t *buf);
  */
 int control_hello_decode(const uint8_t *buf, int32_t len, control_hello_t *out);
 
-/// Taille sur le fil de `control_stats_t` (6 champs `uint64_t`).
-#define CONTROL_STATS_WIRE_SIZE (8 * 6)
+/// Taille sur le fil de `control_stats_t` (7 champs `uint64_t`).
+#define CONTROL_STATS_WIRE_SIZE (8 * 7)
 
 /**
  * @brief Statistiques agrégées d'un client, transportées en réponse à
@@ -144,6 +144,10 @@ typedef struct {
     uint64_t pruner_checked;
     /// Nombre de possibilités éliminées par le pruner (0 hors mode pruner).
     uint64_t pruner_removed;
+    /// Débit de prunage courant (cases étudiées/seconde), même moyenne
+    /// glissante 5s que `pruner_cells_per_second` (etii_statistic.h) — le
+    /// pendant « coups/s » du pruner (0 hors mode pruner).
+    uint64_t pruner_cells_per_second;
 } control_stats_t;
 
 /**

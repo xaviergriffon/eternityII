@@ -210,6 +210,9 @@ typedef struct {
     unsigned long long stats_pruner_checked;
     /// Nombre de possibilités éliminées par le pruner (0 hors mode pruner).
     unsigned long long stats_pruner_removed;
+    /// Débit de prunage courant (cases étudiées/seconde), pendant « coups/s »
+    /// du pruner (0 hors mode pruner).
+    unsigned long long stats_pruner_cells_per_second;
     /// Horodatage Unix (secondes) de la réception des statistiques ci-dessus
     /// (valide seulement si `has_stats`).
     long long stats_time;

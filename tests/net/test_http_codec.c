@@ -346,6 +346,7 @@ TEST http_json_format_clients_golden(void)
     infos[1].stats_max_result = 200;
     infos[1].stats_pruner_checked = 7;
     infos[1].stats_pruner_removed = 2;
+    infos[1].stats_pruner_cells_per_second = 55;
     infos[1].stats_time = 1700000040;
 
     char buf[512];
@@ -357,7 +358,8 @@ TEST http_json_format_clients_golden(void)
         "{\"pid\":111,\"forks\":4,\"mode\":\"search\",\"last_activity\":1700000000,\"stats\":null},"
         "{\"pid\":222,\"forks\":0,\"mode\":\"gpu_pruner\",\"last_activity\":1700000042,"
         "\"stats\":{\"shots_per_second\":12345,\"possibility_stock\":10,\"analysed_stock\":3,"
-        "\"max_result\":200,\"pruner_checked\":7,\"pruner_removed\":2,\"stats_time\":1700000040}}"
+        "\"max_result\":200,\"pruner_checked\":7,\"pruner_removed\":2,"
+        "\"pruner_cells_per_second\":55,\"stats_time\":1700000040}}"
         "]}",
         buf);
     PASS();
