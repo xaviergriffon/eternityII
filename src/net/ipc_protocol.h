@@ -25,6 +25,11 @@
 #define IPC_MSG_LOG_DEBUG    ((int8_t)4)  /* idem                               */
 #define IPC_MSG_LOG_CONSOLE  ((int8_t)5)  /* idem (sortie interactive)          */
 #define IPC_MSG_EVENT        ((int8_t)6)  /* idem, sans horodatage (parent l'ajoute) */
+/* suivi d'un struct possibility_packet brut (représentation du plateau) :
+ * émis par fork_checker UNIQUEMENT quand ce fork bat son propre record local
+ * (best_board_try_record sur g_search_best_board renvoie 1), jamais à chaque
+ * tour comme IPC_MSG_STATS — cf. core/best_board.h. */
+#define IPC_MSG_BEST_BOARD   ((int8_t)7)
 
 /* Taille maximale du payload texte (hors octet de type). */
 #define IPC_LINE_MAX 4000

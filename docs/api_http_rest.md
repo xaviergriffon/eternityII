@@ -14,7 +14,8 @@ Le code correspondant vit dans :
 - [src/net/http_server.h](../src/net/http_server.h) / [http_server.c](../src/net/http_server.c) — écouteur réseau (thread détaché, boucle accept), et les fonctions `http_*_collect` qui alimentent les vues JSON à partir de l'état serveur/registre vivant ;
 - [src/ui/command_lines.c](../src/ui/command_lines.c) (`admin_apply_remote_command`) — exécution des commandes admin, réentrante ;
 - [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_allowed`) — liste blanche des commandes, **partagée** avec le canal de contrôle binaire ;
-- [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) (`control_registry_snapshot`, `control_registry_record_stats`, `control_registry_broadcast_get_stats`) — registre des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), source de `GET /api/v1/clients` et `POST /api/v1/clients/stats`.
+- [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) (`control_registry_snapshot`, `control_registry_record_stats`, `control_registry_broadcast_get_stats`) — registre des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), source de `GET /api/v1/clients` et `POST /api/v1/clients/stats` ;
+- [src/core/best_board.h](../src/core/best_board.h) / [best_board.c](../src/core/best_board.c) (`g_server_best_board`) — représentation du meilleur plateau connu, source de `GET /api/v1/best-board`.
 
 ## Activation
 
@@ -294,6 +295,44 @@ l'aller-retour est typiquement de l'ordre de la milliseconde à la seconde — m
 ne le garantit formellement pour un client lent ou en cours de déconnexion. Séquence
 d'usage typique : `POST /api/v1/clients/stats` puis, un court instant après,
 `GET /api/v1/clients` pour lire les `stats` rafraîchies.
+
+### GET /api/v1/best-board
+
+Représentation complète (pas seulement le compte) du meilleur plateau connu du
+serveur — agrégat `g_server_best_board` ([src/core/best_board.h](../src/core/best_board.h)),
+alimenté par sa propre genèse et par les clients connectés (via
+`CTRL_GET_BEST_BOARD`/`CTRL_BEST_BOARD` sur le [canal de contrôle](echanges_client_serveur.md#meilleur-plateau-connu-ctrl_get_best_boardctrl_best_board-v10)).
+Requête **dédiée**, volontairement absente de `GET /api/v1/stats` : la grille (256
+cases) est un ordre de grandeur plus grosse qu'un compteur, un consommateur qui ne
+s'intéresse qu'au débit ne doit pas la payer à chaque poll.
+
+**Requête :** aucun corps.
+
+**Réponse (un plateau déjà enregistré) :**
+
+```json
+{
+  "has_board": true,
+  "alloc": 187,
+  "grid": [[-2, 134, ...], [...], ...]
+}
+```
+
+**Réponse (aucun record depuis le démarrage/restore) :**
+
+```json
+{ "has_board": false }
+```
+
+| Champ | Type | Sens |
+|---|---|---|
+| `has_board` | booléen | `false` si le serveur n'a encore aucun plateau enregistré (juste après démarrage, sans `restore`) — `alloc`/`grid` absents dans ce cas |
+| `alloc` | entier | Nombre de pièces placées de ce plateau |
+| `grid` | tableau 2D | `grid[x][y]` : indice de rotation de la pièce placée (encodage interne, cf. `id_for_rotated_part`), `-2` si la case est vide |
+
+Cette lecture est **synchrone et locale** : comme `GET /api/v1/stats`, elle ne
+déclenche aucun aller-retour réseau vers les clients, elle relit l'agrégat déjà
+maintenu par le serveur.
 
 ## Séquences typiques
 

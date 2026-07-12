@@ -134,7 +134,7 @@ Le lot est borné par `pruner_batch_size` (4ᵉ argument CLI ou commande console
 et divise le nombre d'allers-retours réseau par rapport au mode unitaire
 (`INST_GET_TO_CHECK` / `INST_POSSIBILITY_ANALYSED`, conservé pour compatibilité).
 
-## Canal de contrôle (v9)
+## Canal de contrôle (v9, étendu en v10)
 
 Au-dessus du protocole de travail décrit ci-dessus (toujours initié par le client :
 GET/ADD/ANALYSED/…), une **seconde connexion TCP indépendante par processus client**
@@ -147,7 +147,8 @@ Le code correspondant vit dans :
 - [src/net/control_protocol.h](../src/net/control_protocol.h) / [control_protocol.c](../src/net/control_protocol.c) — codec des trames `CTRL_*`, structures `control_hello_t`/`control_stats_t`, liste blanche `control_command_allowed` ;
 - [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) — registre serveur des sessions de contrôle actives ;
 - [src/app/etii_control.h](../src/app/etii_control.h) / [etii_control.c](../src/app/etii_control.c) — thread client (processus **parent** uniquement) ;
-- [src/app/etii_server.c](../src/app/etii_server.c) (`run_control_session`/`control_session_step`) — boucle serveur du canal.
+- [src/app/etii_server.c](../src/app/etii_server.c) (`run_control_session`/`control_session_step`) — boucle serveur du canal ;
+- [src/core/best_board.h](../src/core/best_board.h) / [best_board.c](../src/core/best_board.c) — mémorisation « premier à dépasser gagne » de la représentation du meilleur plateau, aux trois échelles fork/parent/serveur (v10).
 
 ### Qui l'ouvre, et pourquoi ça ne coûte rien à la recherche
 
@@ -200,6 +201,33 @@ est rejetée sans tentative d'allocation.
 | `CTRL_PING` / `CTRL_ACK` | 1 / 2 | Keepalive émis par le serveur quand aucune commande n'est en attente |
 | `CTRL_GET_STATS` / `CTRL_STATS` | 3 / 4 | Demande de statistiques agrégées ; réponse `control_stats_t` (coups/s, stock, analysé, `max_result`, pruner vérifiées/éliminées, cases prunées/s) |
 | `CTRL_COMMAND` / `CTRL_RESULT` | 5 / 6 | Commande console poussée en texte ; réponse = code retour `int32` de `do_command_line()` |
+| `CTRL_GET_BEST_BOARD` / `CTRL_BEST_BOARD` | 7 / 8 | *(v10)* Demande la représentation complète du meilleur plateau connu du client (agrégat de ses forks) ; réponse = `uint8_t valid` puis, si `valid`, `sizeof(struct possibility_packet)` octets bruts (même convention que le protocole de travail GET/ADD : struct copié tel quel, round-trip valide sur le même build) |
+
+### Meilleur plateau connu (`CTRL_GET_BEST_BOARD`/`CTRL_BEST_BOARD`, v10)
+
+Les statistiques (`max_result`/`control_stats_t.max_result`) n'exposent que le
+**nombre** de pièces placées au record — jamais l'agencement qui l'a produit, qui
+continue d'être muté par le backtracking immédiatement après. `core/best_board.h`
+comble ce manque avec une primitive « on ne garde que la première représentation qui
+dépasse strictement le record déjà connu », réutilisée à trois échelles :
+
+1. **Fork de recherche** (`g_search_best_board`) : mise à jour directement dans la
+   boucle chaude (`etii_search.c`), en même temps que `max_result`.
+2. **Processus parent client** (`g_client_aggregate_best_board`) : un fork qui bat
+   son propre record envoie sa représentation au parent par IPC
+   (`IPC_MSG_BEST_BOARD`, `src/net/ipc_protocol.h`) — jamais à chaque tour, seulement
+   sur record, contrairement à `IPC_MSG_STATS`.
+3. **Serveur** (`g_server_best_board`) : dans `control_session_step`
+   (`src/app/etii_server.c`), juste après avoir décodé un `CTRL_STATS`, si le
+   `max_result` rapporté dépasse le meilleur déjà connu du serveur, celui-ci envoie
+   immédiatement `CTRL_GET_BEST_BOARD` **sur la même connexion** et attend
+   `CTRL_BEST_BOARD` avant de rendre la main — c'est le serveur qui demande,
+   uniquement quand il en a besoin, jamais le client qui pousse spontanément.
+
+Le serveur applique la même règle « premier à dépasser gagne » à sa propre agrégation
+(`best_board_try_record`), qu'il persiste avec le reste du stock (autobackup,
+`eternityII-best_board.back`/`temp-best_board.back`) et expose via
+[`GET /api/v1/best-board`](api_http_rest.md).
 
 ### Double vérification de la liste blanche
 

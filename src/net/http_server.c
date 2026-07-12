@@ -14,6 +14,7 @@
 #include "app/etii_server.h"
 #include "app/static_variables.h"
 #include "core/datamanager.h"
+#include "core/best_board.h"
 #include "net/etii_protocol.h"
 #include "net/tcpserver.h"
 #include "ui/command_lines.h"
@@ -139,6 +140,18 @@ int http_clients_collect(http_client_info_t *out, int max)
     return n;
 }
 
+void http_best_board_collect(http_best_board_view_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    struct possibility_packet board;
+    uint16_t alloc = 0;
+    out->has_board = best_board_get(&g_server_best_board, &board, &alloc) ? 1 : 0;
+    if (out->has_board) {
+        out->alloc = alloc;
+        memcpy(out->grid, board.grid, sizeof(out->grid));
+    }
+}
+
 /** @brief Formate et envoie une réponse ; ignore un échec d'envoi (client déjà parti). */
 static void send_response(int socket_id, int status, const char *json_body)
 {
@@ -234,6 +247,16 @@ int handle_http_connection(int socket_id)
             int n = control_registry_broadcast_get_stats();
             int written = snprintf(json, sizeof(json), "{\"result\":\"ok\",\"requested\":%d}", n);
             if (written > 0 && (size_t)written < sizeof(json)) {
+                send_response(socket_id, 200, json);
+            } else {
+                send_response(socket_id, 500, "{\"error\":\"internal\"}");
+            }
+            break;
+        }
+        case HTTP_ROUTE_BEST_BOARD: {
+            http_best_board_view_t view;
+            http_best_board_collect(&view);
+            if (http_json_format_best_board(json, sizeof(json), &view) > 0) {
                 send_response(socket_id, 200, json);
             } else {
                 send_response(socket_id, 500, "{\"error\":\"internal\"}");

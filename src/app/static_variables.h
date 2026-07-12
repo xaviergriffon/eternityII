@@ -18,7 +18,11 @@
 // devient l'initiateur, transportant des trames cadrées CTRL_* (cf.
 // control_protocol.h). N'affecte pas le protocole de travail existant
 // (GET/ADD/ANALYSED), qui reste inchangé.
-#define VERSION 9
+// v10 : CTRL_GET_BEST_BOARD / CTRL_BEST_BOARD — nouvelles trames du canal de
+// contrôle v9, permettant au serveur de tirer la représentation complète
+// (pas seulement le compte) du meilleur plateau connu d'un client quand
+// celui-ci rapporte un nouveau record via CTRL_STATS (cf. core/best_board.h).
+#define VERSION 10
 
 #define NB_CONNECTIONS_PER_THREAD 1
 // Temps d'attente de 100 microsecondes

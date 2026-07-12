@@ -12,7 +12,7 @@ Sources live under `src/`, split into four domains. Includes are **explicit and 
 
 | Directory | Domain | Modules |
 |---|---|---|
-| `src/core/` | Puzzle logic & data structures + search engine | `part` `readdata` `possibility` `lifo` `packed`(h) `etii_search` `datamanager` |
+| `src/core/` | Puzzle logic & data structures + search engine | `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `etii_search` `datamanager` |
 | `src/net/`  | TCP protocol & sockets, parent↔child IPC | `etii_protocol` `control_protocol` `tcpclient` `tcpserver` `local_socket` `ipc_protocol`(h) |
 | `src/ui/`   | Logging, console, command handling | `logger` `logger_ncurses`(c) `console` `command_lines` `command_match` `command_history` |
 | `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_control` `control_registry` `app_runtime` `etii_statistic`(h) `static_variables` `gpu_pruner`(.cu/.h) |
@@ -78,6 +78,7 @@ Endpoints (all under `/api/v1`, JSON in/out):
 | POST | `/api/v1/command` | `{"command":"limit 1000"}` | `{"result":"ok"}` (200), or an error body with 400 (missing/invalid args), 403 (not whitelisted), 404 (unknown path), or 405 (wrong method) |
 | GET | `/api/v1/clients` | — | `{"clients":[{"pid","forks","mode","last_activity","stats"}, …]}` — one entry per active control-channel session (`control_registry_snapshot`, same source as the console `clients` command); `mode` ∈ `search`/`pruner`/`gpu_pruner`/`unknown`, `last_activity` is a Unix epoch (seconds); empty array if no client is connected. `stats` is `null` until a `CTRL_GET_STATS` round-trip has completed at least once for that session, otherwise `{"shots_per_second","possibility_stock","analysed_stock","max_result","pruner_checked","pruner_removed","pruner_cells_per_second","stats_time"}` (cached snapshot, `stats_time` = Unix epoch of that reply — can be stale if the client hasn't been re-polled). |
 | POST | `/api/v1/clients/stats` | — | `{"result":"ok","requested":N}` — HTTP equivalent of the console `clientsStats` command: broadcasts `CTRL_GET_STATS` to the `N` active control sessions and returns immediately (fire-and-forget, like its console counterpart). Replies land asynchronously on each session's own control thread and are cached in `control_registry` (`control_registry_record_stats`); poll `GET /api/v1/clients` shortly after (sessions wake immediately on the posted command, so the round-trip is typically sub-second) to read the refreshed `stats`. |
+| GET | `/api/v1/best-board` | — | `{"has_board","alloc","grid"}` — full representation (not just the piece count) of the best board known to the server (`g_server_best_board`, `src/core/best_board.h`). `has_board` is `false` until at least one board has been recorded (fresh start, no `restore`); otherwise `alloc` (piece count) and `grid` (`grid[x][y]`, rotated piece index or `-2` for empty) are populated. A **dedicated** request, deliberately absent from `/api/v1/stats` — the 256-cell grid is an order of magnitude bigger than a counter, a consumer that only cares about throughput shouldn't pay for it on every poll. Synchronous local read (no network round-trip to clients), like `/api/v1/stats`. |
 
 `POST /api/v1/command` only accepts the same whitelist as the binary control channel's `CTRL_COMMAND` (`control_command_allowed`, `src/net/control_protocol.c`): `pause`, `resume`, `limit <n>`, `maxStockByThread <n>`, `prunerBatch <n>` — never `exit`/`restore`/`import`. Execution goes through **`admin_apply_remote_command`** (`src/ui/command_lines.c`), a `strtok_r`-based reentrant sibling of `do_command_line` — deliberately *not* `do_command_line` itself, since that function tokenizes via the process-global (non-reentrant) `strtok`, which a concurrent caller (HTTP thread, console thread, control-channel thread) could corrupt mid-parse. Like their console counterparts, the `pause`/`resume` branches also call `control_registry_broadcast_command` (not `strtok`-based, safe to call from this reentrant path) — otherwise a `pause` issued over HTTP would only flip the server's own (unused) `request` and never reach connected clients.
 
@@ -91,6 +92,7 @@ curl http://127.0.0.1:8080/api/v1/clients
 curl -X POST http://127.0.0.1:8080/api/v1/clients/stats   # -> {"result":"ok","requested":N}, then GET /clients for fresh "stats"
 curl -X POST -d '{"command":"pause"}' http://127.0.0.1:8080/api/v1/command
 curl -X POST -d '{"command":"exit"}'  http://127.0.0.1:8080/api/v1/command   # -> 403, refused
+curl http://127.0.0.1:8080/api/v1/best-board
 ```
 
 Puzzle definitions live in `data/`: `data/pieces.csv` (256-piece puzzle) and the 16-piece variant `data/pieces16.csv`. The code's built-in default (`parts_files` in `src/app/static_variables.c`) now points at `./data/pieces.csv` (or `./data/pieces16.csv` for the 16-piece build), so running from the repo root works without an explicit path argument.
@@ -160,7 +162,7 @@ The protocol uses fixed-size `packet` structs containing an `instruction` byte a
 
 A pruner exchanges with the server in batches of `pruner_batch_size` (configurable via the 4th `tcppruner`/`gpupruner` CLI arg, or the `prunerBatch <n>` console command, capped at `PRUNER_BATCH_MAX`), bounding its memory. **Every** `possibility_packet` transfer (unit GET/ADD/ANALYSED paths included, since v7) goes through `recv_all`/`send_all` (etii_protocol.c), which reassemble partial TCP transfers — a raw one-shot `send()`/`recv()` of a ~520-byte packet can transfer only part of it and desynchronise the whole connection stream. Bumping the wire format requires bumping `VERSION` (exact-match handshake).
 
-### Control Channel (v9)
+### Control Channel (v9, extended in v10)
 
 Beyond the work protocol above (client-initiated: GET/ADD/ANALYSED/…), a **second, independent TCP connection per client process** lets the SERVER pilot a running client — request its live statistics, or push a console command (`pause`, `resume`, `limit`, …) — without touching the search threads at all.
 
@@ -175,6 +177,9 @@ Beyond the work protocol above (client-initiated: GET/ADD/ANALYSED/…), a **sec
 | `CTRL_PING` / `CTRL_ACK` | 1 / 2 | Keepalive, sent by the server when no command is pending (bounded by `tcp_timeout`, same `SO_RCVTIMEO` as the work protocol). |
 | `CTRL_GET_STATS` / `CTRL_STATS` | 3 / 4 | Server asks for the client's aggregated statistics; `control_stats_t` (shots/s, possibility/analysed stock, `max_result`, pruner checked/removed, pruner cells/s — summed across `fork_statistics[]`, the same source `build_thread_queues_table` uses for the console report) comes back. `pruner_cells_per_second` is the pruner's throughput analog to `shots_per_second` — the rate of cells studied by pruning (rmnonext/forward-check), 0 outside pruner mode. |
 | `CTRL_COMMAND` / `CTRL_RESULT` | 5 / 6 | Server pushes a console command line (text payload); the client executes it via `do_command_line()` (which already propagates to search forks via the existing `send_command_to_childs` IPC for commands flagged `send_to_childs = 1`) and returns an `int32` result code. |
+| `CTRL_GET_BEST_BOARD` / `CTRL_BEST_BOARD` | 7 / 8 | *(v10)* Server asks for the full representation (not just the count) of the best board known to the client (its forks' aggregate, `g_client_aggregate_best_board`); reply payload = `uint8_t valid` then, if `valid`, `sizeof(struct possibility_packet)` raw bytes (same convention as the work protocol's GET/ADD: struct copied as-is on the wire, valid for a same-build round-trip). Sent by `control_session_step` right after decoding a `CTRL_STATS` reply whose `max_result` exceeds the server's own best-known record — never unconditionally. |
+
+**Best board known (`CTRL_GET_BEST_BOARD`/`CTRL_BEST_BOARD`, v10, `src/core/best_board.h`).** Statistics (`max_result`/`control_stats_t.max_result`) only ever exposed the piece *count* at the record — never the board layout that produced it, since the backtracking board keeps mutating right after. `best_board_t` (mutex-protected, "only the first strictly-greater record wins", never overwritten by a tie) is reused at three independent scopes, none aware of the others: a search fork (`g_search_best_board`, updated in `etii_search.c`'s hot loop alongside `max_result`), the client PARENT process (`g_client_aggregate_best_board`, populated by `IPC_MSG_BEST_BOARD` — sent by a fork over the same Unix-domain socket as `IPC_MSG_STATS`, but only on a genuine local record, not every second), and the server (`g_server_best_board`, populated by its own genesis and by clients — pulled via `CTRL_GET_BEST_BOARD` the moment `control_session_step` sees a `CTRL_STATS.max_result` beat it, on the SAME connection, before returning to the ping loop). The server persists its aggregate alongside the rest of the stock (`best_board_save`/`best_board_load`, `./eternityII-best_board.back` / `./temp-best_board.back`, hooked into the same autobackup/stop-on-solution/`restore` call sites as `backup()`/`backup_analysed()`) and exposes it over `GET /api/v1/best-board` — a dedicated HTTP route, never folded into `/api/v1/stats`.
 
 **Two independent whitelist checks, not one.** Only a short list of console commands can be triggered remotely (`control_command_allowed`, `src/net/control_protocol.h`): `pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch` — never `exit`, `restore`, `import`, or anything destructive. This is checked **twice**, independently: server-side in the `clientsCmd` console interpreter (refuses to even broadcast a disallowed line) and, defense-in-depth, client-side again in `control_channel_handle_frame` (`src/app/etii_control.c`) before calling `do_command_line` — the client never trusts a `CTRL_COMMAND` payload just because it arrived on this socket.
 
@@ -212,12 +217,13 @@ Beyond the work protocol above (client-initiated: GET/ADD/ANALYSED/…), a **sec
 | `src/app/main.c` | Entry point; dispatches to server/client/test modes; manages fork lifecycle (signal handlers & runtime bootstrap live in `app_runtime.c`) |
 | `src/app/app_runtime.c` | Process plumbing extracted from `main.c` to be unit-testable: signal handlers/installers (`signal_end_handler`, `sigchld_handler`, `init_signals`, `configure_child_signals`, `wait_child`, …) and runtime bootstrap (`init_counters`, `init_childs`, `failed_arg`) |
 | `src/core/possibility.c` | Core search logic: generating, checking, and stepping through board possibilities |
+| `src/core/best_board.c` | `best_board_t`: mutex-protected "first strictly-greater record wins" board recorder, reused at three scopes (fork-local, client-parent aggregate, server aggregate) — see *Control Channel* below and `GET /api/v1/best-board` |
 | `src/core/etii_search.c` | `autosearch()` — the inner search loop run by each thread |
 | `src/app/etii_client.c` | Client orchestration: spawns search threads, manages their lifecycle |
 | `src/app/etii_server.c` | Server: accepts TCP connections, distributes/collects possibilities; also hosts `run_control_session`/`control_session_step` (control-channel sessions, see *Control Channel*) |
 | `src/app/etii_control.c` | Client-side control channel: `run_control_channel` (parent-only thread, reconnect/back-off, hello, service loop) and `control_channel_handle_frame` (testable per-frame handler, defense-in-depth whitelist check) |
 | `src/app/control_registry.c` | Server-side registry of active control sessions: hello info + per-session bounded command queue (mutex + `pthread_cond_t`) + cached last `CTRL_STATS` reply (`control_registry_record_stats`), independent of the `client_t` socket pool |
-| `src/net/http_codec.c` | Pure HTTP/1.1 admin API layer: request parsing, route resolution, response/JSON formatting (`http_json_format_stats/status/clients`) — no socket, no allocation |
+| `src/net/http_codec.c` | Pure HTTP/1.1 admin API layer: request parsing, route resolution, response/JSON formatting (`http_json_format_stats/status/clients/best_board`) — no socket, no allocation |
 | `src/net/http_server.c` | Socket/thread shell of the admin API: `accept()` loop, per-request dispatch (`handle_http_connection`), and the `http_*_collect` functions that pull live server/registry state into the `http_codec.h` view structs |
 | `src/core/datamanager.c` | 10 mutex-protected possibility queues; backup/restore to `.back` files |
 | `src/core/part.c` | Piece rotation, map building (`prepare_map_part`), face lookups |
@@ -231,7 +237,7 @@ Beyond the work protocol above (client-initiated: GET/ADD/ANALYSED/…), a **sec
 | `src/ui/command_history.c` | In-session command history (↑/↓ recall, 100-entry ring, dedup) |
 | `src/ui/logger.c` | Thread-safe `log_info/log_debug/log_error/log_console/log_event/log_status` — ANSI build |
 | `src/ui/logger_ncurses.c` | Ncurses variant of logger (compiled instead of `src/ui/logger.c` when `NCURSES=1`); 4-pane layout: output pad, stats banner, events, input |
-| `src/net/ipc_protocol.h` | Structs for parent↔child Unix socket messages (stats, log forwarding) |
+| `src/net/ipc_protocol.h` | Structs for parent↔child Unix socket messages (stats, log forwarding, best-board-on-record) |
 | `src/app/etii_statistic.h` | `client_statistics` struct sent by child processes to parent every second |
 | `src/app/static_variables.c` | All global state (counters, flags, pids, socket handles) |
 | `src/app/gpu_pruner.cu` | CUDA batch pruner kernel (compiled only with `CUDA=1`) |

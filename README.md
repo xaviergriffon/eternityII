@@ -20,7 +20,7 @@ Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisa
 - Le **serveur** maintient une liste de positions de plateau (« possibilités ») à explorer et les distribue aux clients.
 - Chaque **client** fork `N` processus enfants. Chaque enfant se connecte au serveur, récupère des possibilités, les explore, puis renvoie les nouvelles positions découvertes.
 - Les processus enfants communiquent avec leur parent via des **sockets Unix UDP locaux** (`etii_fork.<pid>`) pour :
-  - remonter les statistiques en temps réel (`shots/sec`, possibilités en stock, `max_result`) ;
+  - remonter les statistiques en temps réel (`shots/sec`, possibilités en stock, `max_result`) — et, uniquement quand un fork bat son propre record, la **représentation complète** du plateau à ce moment (pas seulement le compte, cf. [Canal de contrôle](#canal-de-contrôle-v9) et [src/core/best_board.h](src/core/best_board.h)) ;
   - **router leurs logs** (`log_info`, `log_error`, `log_event`, …) au parent — qui possède la seule console, ce qui évite tout entrelacement dans le terminal et permet le bon fonctionnement de l'interface ncurses (voir [src/net/ipc_protocol.h](src/net/ipc_protocol.h)).
 - Un seul client peut aussi fonctionner en mode **autonome** (`test`) sans serveur, utile pour des tests rapides.
 
@@ -30,7 +30,7 @@ Le code est rangé sous `src/`, réparti en quatre domaines ; les `#include` son
 
 | Répertoire | Domaine |
 |---|---|
-| `src/core/` | Logique du puzzle, structures de données et moteur de recherche (`part`, `readdata`, `possibility`, `lifo`, `etii_search`, `datamanager`, …) |
+| `src/core/` | Logique du puzzle, structures de données et moteur de recherche (`part`, `readdata`, `possibility`, `best_board`, `lifo`, `etii_search`, `datamanager`, …) |
 | `src/net/`  | Protocole TCP, sockets et IPC parent↔enfant (`etii_protocol`, `control_protocol`, `tcpclient`, `tcpserver`, `local_socket`, `ipc_protocol`) |
 | `src/ui/`   | Journalisation, console et commandes (`logger`, `logger_ncurses`, `console`, `command_lines`, `command_match`, `command_history`) |
 | `src/app/`  | Point d'entrée, rôles client/serveur, signaux, état global et GPU (`main`, `etii_client`, `etii_server`, `etii_control`, `control_registry`, `app_runtime`, `static_variables`, `gpu_pruner`) |
@@ -253,6 +253,18 @@ serveur, diffusent la commande à tous les clients connectés (voir
 > serveur dimensionné au plus juste doit compter (connexions de travail simultanées)
 > **+** (processus clients connectés), pas seulement le premier terme.
 
+**Meilleur plateau connu (`CTRL_GET_BEST_BOARD` / `CTRL_BEST_BOARD`, v10)** : quand un
+`CTRL_STATS` révèle qu'un client rapporte un `max_result` supérieur au meilleur déjà
+connu du serveur, celui-ci tire — sur la **même connexion**, avant de repasser en
+attente — la représentation complète du plateau correspondant (pas seulement le
+compte). Le serveur ne conserve que la **première** représentation qui dépasse
+strictement son record courant (une nouvelle à égalité n'écrase jamais la
+précédente) ; côté client, seule la première représentation qui dépasse le record
+*local* d'un fork de recherche est propagée à son processus parent. Voir
+[src/core/best_board.h](src/core/best_board.h) pour la primitive partagée par les
+trois échelles (fork, parent client, serveur) et
+[GET /api/v1/best-board](#api-http-rest-admin) pour la consulter en HTTP.
+
 > Documentation détaillée (format de trame, séquences, liste blanche des commandes
 > à distance) : [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md#canal-de-contrôle-v9).
 
@@ -272,14 +284,18 @@ pilote quelques commandes admin — sans avoir à implémenter le protocole bina
 - Écoute en **boucle locale uniquement** (`127.0.0.1`), jamais exposée hors machine ;
   aucune authentification (réseau de confiance / tunnel explicite pour un accès
   distant).
-- Cinq routes : `GET /api/v1/stats` (télémétrie), `GET /api/v1/status` (état et
+- Six routes : `GET /api/v1/stats` (télémétrie), `GET /api/v1/status` (état et
   configuration), `POST /api/v1/command` (commandes admin, filtrées par la **même
   liste blanche** que le canal de contrôle : `pause`, `resume`, `limit`,
   `maxStockByThread`, `prunerBatch` — jamais `exit`/`restore`/`import`),
   `GET /api/v1/clients` (liste des clients connectés via le
   [canal de contrôle](#canal-de-contrôle-v9), stats par client incluses si déjà
-  collectées) et `POST /api/v1/clients/stats` (déclenche une collecte auprès de tous
-  les clients — équivalent HTTP de la commande console `clientsStats`).
+  collectées), `POST /api/v1/clients/stats` (déclenche une collecte auprès de tous
+  les clients — équivalent HTTP de la commande console `clientsStats`) et
+  `GET /api/v1/best-board` (représentation complète du meilleur plateau connu du
+  serveur — requête **dédiée**, volontairement absente de `/api/v1/stats` : c'est
+  un ordre de grandeur plus gros qu'un compteur, un consommateur qui ne s'intéresse
+  qu'au débit ne doit pas la payer à chaque poll).
 
 ```sh
 curl http://127.0.0.1:8080/api/v1/stats
@@ -287,6 +303,7 @@ curl http://127.0.0.1:8080/api/v1/status
 curl -X POST -d '{"command":"pause"}' http://127.0.0.1:8080/api/v1/command
 curl http://127.0.0.1:8080/api/v1/clients
 curl -X POST http://127.0.0.1:8080/api/v1/clients/stats
+curl http://127.0.0.1:8080/api/v1/best-board
 ```
 
 > Documentation détaillée (schémas JSON complets, codes d'erreur, séquences,
@@ -459,6 +476,7 @@ Le programme sérialise ses files de possibilités dans des fichiers binaires `.
 | `eternityII-in_analyse.back` | Possibilités actuellement distribuées aux clients |
 | `eternityII.back_<pid>` | Sauvegarde propre à un processus client |
 | `failed_exit_eternityII_<pid>.back` | Possibilités non vidées à l'arrêt anormal d'un client |
+| `eternityII-best_board.back` / `temp-best_board.back` | Représentation complète du meilleur plateau connu du serveur (`g_server_best_board`, [src/core/best_board.h](src/core/best_board.h)) — sauvegardé aux mêmes instants que les fichiers ci-dessus (autobackup, arrêt sur solution) |
 
 Ces fichiers permettent de reprendre une recherche interrompue avec la commande `restore`.
 

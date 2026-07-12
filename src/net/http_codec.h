@@ -84,6 +84,7 @@ typedef enum {
     HTTP_ROUTE_COMMAND,       ///< POST /api/v1/command
     HTTP_ROUTE_CLIENTS,       ///< GET /api/v1/clients
     HTTP_ROUTE_CLIENTS_STATS, ///< POST /api/v1/clients/stats
+    HTTP_ROUTE_BEST_BOARD,    ///< GET /api/v1/best-board
     HTTP_ROUTE_NOT_FOUND,     ///< Chemin inconnu (404)
     HTTP_ROUTE_BAD_METHOD     ///< Chemin connu, méthode non supportée (405)
 } http_route_t;
@@ -229,5 +230,32 @@ typedef struct {
  * @return       Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
  */
 int http_json_format_clients(char *buf, size_t size, const http_client_info_t *infos, int count);
+
+/**
+ * @brief Vue en lecture du meilleur plateau connu du serveur (agrégat
+ * `g_server_best_board`, cf. `core/best_board.h`), à sérialiser en JSON par
+ * `http_json_format_best_board`. Remplie par `http_best_board_collect`
+ * (src/net/http_server.h). Volontairement une requête DÉDIÉE, pas un champ
+ * de `GET /api/v1/stats` : la représentation complète (256 cases) est un
+ * ordre de grandeur plus grosse qu'un compteur, un consommateur qui ne
+ * s'intéresse qu'au débit ne doit pas la payer à chaque poll.
+ */
+typedef struct {
+    /// 1 si un plateau a déjà été enregistré (aucun record avant le premier
+    /// placement n'existe : `alloc`/`grid` ne sont valides que si `has_board`).
+    int has_board;
+    /// Nombre de pièces placées de ce plateau.
+    unsigned alloc;
+    /// Grille : `grid[x][y]` encode l'indice de rotation de la pièce placée
+    /// (cf. `id_for_rotated_part`), -2 si la case est vide (ne devrait pas
+    /// arriver au-delà de `alloc`, mais reflète le paquet tel quel).
+    int16_t grid[ETERN_SIZE][ETERN_SIZE];
+} http_best_board_view_t;
+
+/**
+ * @brief Sérialise `view` en JSON dans `buf` (cf. schéma documenté dans AGENTS.md).
+ * @return Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
+ */
+int http_json_format_best_board(char *buf, size_t size, const http_best_board_view_t *view);
 
 #endif /* eternityII_http_codec_h */

@@ -99,6 +99,7 @@ set(PROD_SRCS
     src/core/readdata.c
     src/core/datamanager.c
     src/core/possibility.c
+    src/core/best_board.c
     src/net/etii_protocol.c
     src/net/control_protocol.c
     src/net/http_codec.c
@@ -186,6 +187,7 @@ set(TEST_MODULES
     src/ui/command_history.c
     src/ui/command_match.c
     src/core/possibility.c
+    src/core/best_board.c
     src/net/etii_protocol.c
     src/net/control_protocol.c
     src/net/http_codec.c
@@ -286,6 +288,7 @@ add_executable(eternityII16 EXCLUDE_FROM_ALL
     src/core/readdata.c
     src/core/datamanager.c
     src/core/possibility.c
+    src/core/best_board.c
     src/net/etii_protocol.c
     src/net/control_protocol.c
     src/net/http_codec.c

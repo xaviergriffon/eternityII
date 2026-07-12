@@ -16,6 +16,7 @@
 #include "net/control_protocol.h"  /* CTRL_*, control_hello_encode, ctrl_send_frame/ctrl_recv_frame */
 #include "core/datamanager.h"
 #include "core/possibility.h"
+#include "core/best_board.h"
 #include "net/etii_protocol.h"      /* INST_*, send_instruction, recv_instruction, *_all */
 
 #include "fork_assert.h"
@@ -2109,6 +2110,21 @@ static void *ctrl_peer_thread(void *arg)
             uint8_t buf[CONTROL_STATS_WIRE_SIZE];
             control_stats_encode(&stats, buf);
             ctrl_send_frame(a->fd, CTRL_STATS, buf, CONTROL_STATS_WIRE_SIZE);
+            // Le max_result rapporté ci-dessus (30) peut dépasser le meilleur
+            // déjà connu du serveur (g_server_best_board, un global process-wide
+            // que d'autres suites peuvent avoir déjà fait progresser) :
+            // control_session_step tire alors CTRL_GET_BEST_BOARD sur CETTE
+            // MÊME connexion avant de rendre la main. On répond systématiquement
+            // "aucun plateau" (valid=0) : ce test ne porte pas sur cette
+            // représentation, seulement sur le round-trip stats existant.
+            void *payload2 = NULL;
+            int32_t plen2 = 0;
+            int rcmd2 = ctrl_recv_frame(a->fd, &payload2, &plen2);
+            free(payload2);
+            if (rcmd2 == CTRL_GET_BEST_BOARD) {
+                uint8_t novalid = 0;
+                ctrl_send_frame(a->fd, CTRL_BEST_BOARD, &novalid, sizeof(novalid));
+            }
         } else if (a->reply_cmd == CTRL_ACK) {
             ctrl_send_frame(a->fd, CTRL_ACK, NULL, 0);
         }
@@ -2149,6 +2165,12 @@ TEST control_session_step_command_round_trip(void)
 
 TEST control_session_step_get_stats_round_trip(void)
 {
+    // g_server_best_board est un global process-wide (cf. core/best_board.h) :
+    // réinitialisé pour que le max_result=30 renvoyé par ctrl_peer_thread ci-
+    // dessous déclenche DÉTERMINISTEMENT le suivi CTRL_GET_BEST_BOARD de
+    // control_session_step, quel que soit ce qu'une autre suite y a déjà écrit.
+    best_board_init(&g_server_best_board);
+
     control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
     int idx = control_registry_register(1, &h);
     ASSERT(idx >= 0);

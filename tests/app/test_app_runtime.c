@@ -20,6 +20,7 @@
 #include "app/etii_statistic.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
+#include "core/best_board.h"
 #include "net/local_socket.h"
 #include "net/ipc_protocol.h"
 
@@ -833,6 +834,12 @@ TEST fork_checker_sends_stats_to_parent(void)
     unsigned long long ctr_buf[1] = {0}, lfs_buf[1] = {0};
     counters = ctr_buf;
     lastfilesize = lfs_buf;
+    // g_search_best_board est un global process-wide (cf. core/best_board.h) :
+    // une suite précédente (recherche/genèse) a pu déjà y écrire un record, ce
+    // qui ferait émettre un second datagramme IPC_MSG_BEST_BOARD (taille
+    // différente) que ce test ne connaît pas — réinitialisé pour garder les
+    // lectures ci-dessous strictement sur IPC_MSG_STATS.
+    best_board_init(&g_search_best_board);
 
     pthread_t tid;
     ASSERT_EQ_FMT(0, pthread_create(&tid, NULL, fork_checker, parent_addr), "%d");

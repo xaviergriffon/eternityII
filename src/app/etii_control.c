@@ -14,6 +14,7 @@
 #include "net/tcpclient.h"
 #include "ui/command_lines.h"
 #include "ui/logger.h"
+#include "core/best_board.h"
 
 /**
  * @brief Longueur maximale (avec le nul terminal) d'une ligne de commande
@@ -67,6 +68,22 @@ int control_channel_handle_frame(int socket_id, uint8_t cmd, const void *payload
         uint8_t buf[CONTROL_STATS_WIRE_SIZE];
         int32_t wlen = control_stats_encode(&stats, buf);
         return ctrl_send_frame(socket_id, CTRL_STATS, buf, wlen);
+    }
+
+    case CTRL_GET_BEST_BOARD: {
+        // Agrégat de ce PROCESS PARENT sur ses forks (g_client_aggregate_best_board,
+        // alimenté par IPC_MSG_BEST_BOARD) — jamais g_search_best_board, qui ne
+        // reflète que ce process lui-même (vide côté parent, non forké).
+        uint8_t payload[1 + sizeof(struct possibility_packet)];
+        struct possibility_packet board;
+        uint8_t valid = best_board_get(&g_client_aggregate_best_board, &board, NULL) ? 1 : 0;
+        payload[0] = valid;
+        int32_t plen = 1;
+        if (valid) {
+            memcpy(payload + 1, &board, sizeof(board));
+            plen = (int32_t)sizeof(payload);
+        }
+        return ctrl_send_frame(socket_id, CTRL_BEST_BOARD, payload, plen);
     }
 
     case CTRL_COMMAND: {
