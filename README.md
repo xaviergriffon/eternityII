@@ -146,13 +146,14 @@ Le toolkit CUDA est installé sur le runner (action `Jimver/cuda-toolkit`) pour 
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII tcpserver [nb_threads] [--expand-level N] [fichier_pieces.csv]
+./eternityII tcpserver [nb_threads] [--expand-level N] [--http-port N] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
 |---|---|---|
 | `nb_threads` | 80 | Nombre de connexions clients simultanées |
 | `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'au niveau de curseur `N` (anti-famine, voir ci-dessous) |
+| `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](#api-http-rest-admin) sur `127.0.0.1:N` (désactivée par défaut) |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
 
 Exemple :
@@ -160,6 +161,7 @@ Exemple :
 ./eternityII tcpserver 80
 ./eternityII tcpserver 80 data/pieces.csv
 ./eternityII tcpserver 80 --expand-level 4 data/pieces.csv
+./eternityII tcpserver 80 --http-port 8080 data/pieces.csv
 ```
 
 #### Expansion du stock au démarrage (`--expand-level`, anti-famine)
@@ -252,6 +254,36 @@ jamais toucher aux threads de recherche du client.
 
 > Documentation détaillée (format de trame, séquences, liste blanche des commandes
 > à distance) : [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md#canal-de-contrôle-v9).
+
+### API HTTP REST (admin)
+
+En plus du protocole binaire et du canal de contrôle ci-dessus (réservés aux
+processus eternityII), le serveur peut exposer une **API HTTP REST** en JSON pour
+qu'une application tierce, écrite dans n'importe quel langage, lise sa télémétrie et
+pilote quelques commandes admin — sans avoir à implémenter le protocole binaire.
+
+**Désactivée par défaut**, à activer explicitement :
+
+```sh
+./eternityII tcpserver 4 --http-port 8080 data/pieces.csv
+```
+
+- Écoute en **boucle locale uniquement** (`127.0.0.1`), jamais exposée hors machine ;
+  aucune authentification (réseau de confiance / tunnel explicite pour un accès
+  distant).
+- Trois routes : `GET /api/v1/stats` (télémétrie), `GET /api/v1/status` (état et
+  configuration), `POST /api/v1/command` (commandes admin, filtrées par la **même
+  liste blanche** que le canal de contrôle : `pause`, `resume`, `limit`,
+  `maxStockByThread`, `prunerBatch` — jamais `exit`/`restore`/`import`).
+
+```sh
+curl http://127.0.0.1:8080/api/v1/stats
+curl http://127.0.0.1:8080/api/v1/status
+curl -X POST -d '{"command":"pause"}' http://127.0.0.1:8080/api/v1/command
+```
+
+> Documentation détaillée (schémas JSON complets, codes d'erreur, séquences,
+> exemples d'implémentation client) : [docs/api_http_rest.md](docs/api_http_rest.md).
 
 ### Mode test (autonome)
 
@@ -438,5 +470,6 @@ Le répertoire [`docs/`](docs/) rassemble les notes détaillées sur l'architect
 | Document | Contenu |
 |---|---|
 | [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences typiques, comportement en cas de panne, et le [canal de contrôle](docs/echanges_client_serveur.md#canal-de-contrôle-v9) (v9). |
+| [docs/api_http_rest.md](docs/api_http_rest.md) | [API HTTP REST admin](#api-http-rest-admin) (`--http-port`) : schémas JSON complets, codes d'erreur, séquences, exemples d'implémentation client (curl, Python). |
 | [docs/autosearch_step.md](docs/autosearch_step.md) | Flux de recherche (`autosearch_step`) et gestion mémoire d'un thread de recherche. |
 | [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (mode `gpupruner`) : pré-requis de compilation et d'exécution, flux CUDA, avantages. |
