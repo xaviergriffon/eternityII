@@ -68,13 +68,18 @@ int find_fork_index(const char *sun_path, char **forkIds, int nb) {
  *        de `feed_thread_aposs`).
  *
  * Extrait du corps de boucle pour être testable hors thread (en mode local,
- * `server_ip == NULL`, les échanges passent par le datamanager). Ne fait rien si
- * `request != REQUEST_CONTINUE`. Si le thread `i` n'a plus de travail
- * (`works == 0`), draine son « en analyse » puis tente d'obtenir une (ou un lot
- * de) possibilité(s) ; s'il en reçoit, les empile et passe `works = 1`. Sinon,
- * s'il a un socket ouvert, émet un keepalive avant le timeout serveur. Les
- * compteurs `*needed_work` / `*got_work` (threads ayant demandé / reçu du
- * travail) sont incrémentés en place pour piloter le back-off de l'appelant.
+ * `server_ip == NULL`, les échanges passent par le datamanager). Ne fait rien du
+ * tout si `request == REQUEST_STOP`. En pause (`REQUEST_PAUSE`/
+ * `REQUEST_ADMIN_PAUSE`), ne réclame PAS de nouveau travail, mais le keepalive
+ * ci-dessous continue de tourner — sans lui, une pause plus longue que
+ * `tcp_timeout` laisserait le serveur fermer le socket (SO_RCVTIMEO) sans que le
+ * client ne le sache. Si le thread `i` n'a plus de travail (`works == 0`) ET que
+ * `request == REQUEST_CONTINUE`, draine son « en analyse » puis tente d'obtenir
+ * une (ou un lot de) possibilité(s) ; s'il en reçoit, les empile et passe
+ * `works = 1`. Sinon, s'il a un socket ouvert, émet un keepalive avant le
+ * timeout serveur. Les compteurs `*needed_work` / `*got_work` (threads ayant
+ * demandé / reçu du travail) sont incrémentés en place pour piloter le back-off
+ * de l'appelant.
  *
  * @param thread_params Tableau des contextes de threads de recherche.
  * @param i             Indice du thread à alimenter.
@@ -84,7 +89,7 @@ int find_fork_index(const char *sun_path, char **forkIds, int nb) {
 void feed_one_thread(client_possibility_t *thread_params, int i,
                      int *needed_work, int *got_work)
 {
-    if (request != REQUEST_CONTINUE)
+    if (request == REQUEST_STOP)
     {
         return;
     }
@@ -94,7 +99,13 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
     // pendant la durée des échanges TCP (send_possibility_analysed /
     // get_last_possibility peuvent attendre le serveur).
     pthread_mutex_lock(&thread_params[i].works_mutex);
-    int need_work = (client_possibility->works == 0);
+    // En pause (régulation ou admin), ne PAS réclamer de nouveau travail — mais
+    // le bloc keepalive/sonde de faim ci-dessous doit continuer à tourner : sans
+    // lui, un socket resté silencieux plus longtemps que tcp_timeout (pause admin
+    // prolongée) est fermé par le serveur (SO_RCVTIMEO) sans que le client ne le
+    // sache, et la reprise échoue sur ce socket mort ("Error on need work poll",
+    // cf. poll_server_hunger) avant de se reconnecter tout seul.
+    int need_work = (client_possibility->works == 0) && (request == REQUEST_CONTINUE);
     pthread_mutex_unlock(&thread_params[i].works_mutex);
 
     if(need_work)

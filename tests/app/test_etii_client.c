@@ -473,7 +473,7 @@ static void destroy_test_client(client_possibility_t *c)
     pthread_mutex_destroy(&c->socket_mutex);
 }
 
-/* request != REQUEST_CONTINUE : la fonction ne touche à rien. */
+/* request == REQUEST_STOP : la fonction ne touche à rien. */
 TEST feed_one_thread_not_continue_is_noop(void)
 {
     int saved_req = request;
@@ -489,6 +489,45 @@ TEST feed_one_thread_not_continue_is_noop(void)
     ASSERT_EQ_FMT(0, got, "%d");
 
     destroy_test_client(&client[0]);
+    request = saved_req;
+    PASS();
+}
+
+/* En pause (admin ou régulation), un thread sans travail (works == 0) ne doit
+ * PAS réclamer de nouvelle possibilité au serveur — mais s'il a un socket
+ * ouvert, le keepalive doit quand même tourner : sinon une pause plus longue
+ * que tcp_timeout laisse le serveur fermer le socket sans que le client ne le
+ * sache, d'où l'erreur observée à la reprise ("Error on need work poll",
+ * poll_server_hunger sur un socket déjà mort côté serveur). */
+TEST feed_one_thread_admin_pause_keeps_socket_alive(void)
+{
+    int saved_req = request;
+    request = REQUEST_ADMIN_PAUSE;
+    __atomic_store_n(&server_hunger, 0, __ATOMIC_RELAXED);
+
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) FAILm("socketpair");
+
+    client_possibility_t client[1];
+    init_test_client(&client[0], 0);   /* works = 0 : sans travail */
+    client[0].socket_id = sv[0];
+    client[0].last_socket_activity = 0; /* intervalle de sonde forcément écoulé */
+
+    int32_t hunger = 3;
+    if (send_all(sv[1], &hunger, sizeof(hunger)) != (long)sizeof(hunger)) FAILm("send_all");
+
+    int needed = 0, got = 0;
+    feed_one_thread(client, 0, &needed, &got);
+
+    ASSERT_EQ_FMT(0, needed, "%d");                  /* pas de demande de travail */
+    ASSERT_EQ_FMT(0, got, "%d");
+    ASSERT_EQ_FMT(sv[0], client[0].socket_id, "%d"); /* socket conservé (keepalive) */
+    ASSERT_EQ_FMT((int)INST_NEED_WORK, (int)recv_instruction(sv[1]), "%d");
+
+    close(sv[0]);
+    close(sv[1]);
+    destroy_test_client(&client[0]);
+    __atomic_store_n(&server_hunger, 0, __ATOMIC_RELAXED);
     request = saved_req;
     PASS();
 }
@@ -1142,6 +1181,7 @@ SUITE(etii_client_suite)
     RUN_TEST(control_step_does_not_touch_admin_pause);
 
     RUN_TEST(feed_one_thread_not_continue_is_noop);
+    RUN_TEST(feed_one_thread_admin_pause_keeps_socket_alive);
     RUN_TEST(feed_one_thread_gets_work);
     RUN_TEST(feed_one_thread_no_work_available);
     RUN_TEST(feed_one_thread_busy_no_socket_noop);
