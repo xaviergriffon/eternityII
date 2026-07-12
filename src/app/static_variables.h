@@ -27,6 +27,17 @@
 #define MICRO_SHORT_SLEEP 10
 // Temps d'attente pour les boucles de threads
 #define THREAD_MICRO_SLEEP 10000
+// Cadence de la boucle d'attente active en pause (REQUEST_PAUSE /
+// REQUEST_ADMIN_PAUSE) dans la boucle chaude de recherche (etii_search.c :
+// search_packet_backtracking, autoprune_step, autoprune_gpu). Utilisait
+// MICRO_SHORT_SLEEP (10 µs) : correct pour espacer des itérations de calcul,
+// mais appliqué à une pure attente de reprise, ça revient à ~100 000
+// réveils/s/thread (chaque usleep() est un aller-retour noyau) rien que pour
+// relire `request` — un thread en pause sature un cœur pour ne rien faire.
+// 10 ms suffit largement (latence de reprise imperceptible pour une pause
+// pilotée par un humain ou un canal de contrôle) tout en ramenant la charge à
+// ~100 réveils/s/thread.
+#define PAUSE_POLL_SLEEP_US 10000
 // Back-off du thread d'alimentation quand le serveur n'a AUCUNE possibilité à
 // fournir (stock épuisé, ou serveur saturé qui ne répond pas au handshake) : au
 // lieu de redemander toutes les THREAD_MICRO_SLEEP (≈ 100 req/s/thread, ce qui

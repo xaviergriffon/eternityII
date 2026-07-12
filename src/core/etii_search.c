@@ -599,7 +599,7 @@ static int search_packet_backtracking(client_possibility_t *client,
 
         if (request != REQUEST_CONTINUE) {
             if (request_is_pause(request)) {
-                usleep(MICRO_SHORT_SLEEP);
+                usleep(PAUSE_POLL_SLEEP_US);
                 continue;
             }
             // REQUEST_STOP : renvoi du travail restant au serveur
@@ -950,7 +950,7 @@ static int autoprune_step(client_possibility_t *client)
     {
         if (request_is_pause(request))
         {
-            usleep(MICRO_SHORT_SLEEP);
+            usleep(PAUSE_POLL_SLEEP_US);
             continue;
         }
         // Copie de travail : l'original doit rester intact pour l'acquittement
@@ -1120,7 +1120,7 @@ void *autoprune_gpu (void *userdata)
             // Respect d'une éventuelle limitation de débit
             while (request_is_pause(request))
             {
-                usleep(MICRO_SHORT_SLEEP);
+                usleep(PAUSE_POLL_SLEEP_US);
             }
 
             if (request != REQUEST_STOP)
