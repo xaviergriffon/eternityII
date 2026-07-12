@@ -776,13 +776,14 @@ int control_session_step(client_t *client, int session_index, int timeout_ms)
                 return 0;
             }
             control_registry_record_stats(session_index, &stats);
-            log_info("stats client : coups/s=%llu stock=%llu analyse=%llu record=%llu pruner_checked=%llu pruner_removed=%llu\n",
+            log_info("stats client : coups/s=%llu stock=%llu analyse=%llu record=%llu pruner_checked=%llu pruner_removed=%llu pruner_cases/s=%llu\n",
                       (unsigned long long)stats.shots_per_second,
                       (unsigned long long)stats.possibility_stock,
                       (unsigned long long)stats.analysed_stock,
                       (unsigned long long)stats.max_result,
                       (unsigned long long)stats.pruner_checked,
-                      (unsigned long long)stats.pruner_removed);
+                      (unsigned long long)stats.pruner_removed,
+                      (unsigned long long)stats.pruner_cells_per_second);
             control_registry_touch(session_index);
         } else {
             log_error("session de contrôle : commande interne inconnue (%u)\n", (unsigned)cmd);

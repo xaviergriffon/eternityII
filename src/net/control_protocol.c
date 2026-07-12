@@ -109,6 +109,8 @@ int32_t control_stats_encode(const control_stats_t *stats, uint8_t *buf)
 	off += (int32_t)sizeof(stats->pruner_checked);
 	memcpy(buf + off, &stats->pruner_removed, sizeof(stats->pruner_removed));
 	off += (int32_t)sizeof(stats->pruner_removed);
+	memcpy(buf + off, &stats->pruner_cells_per_second, sizeof(stats->pruner_cells_per_second));
+	off += (int32_t)sizeof(stats->pruner_cells_per_second);
 	return off;
 }
 
@@ -130,6 +132,8 @@ int control_stats_decode(const uint8_t *buf, int32_t len, control_stats_t *out)
 	off += (int32_t)sizeof(out->pruner_checked);
 	memcpy(&out->pruner_removed, buf + off, sizeof(out->pruner_removed));
 	off += (int32_t)sizeof(out->pruner_removed);
+	memcpy(&out->pruner_cells_per_second, buf + off, sizeof(out->pruner_cells_per_second));
+	off += (int32_t)sizeof(out->pruner_cells_per_second);
 	return 0;
 }
 

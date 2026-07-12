@@ -189,6 +189,7 @@ TEST control_stats_round_trip(void)
         .max_result = 250ULL,
         .pruner_checked = 999ULL,
         .pruner_removed = 111ULL,
+        .pruner_cells_per_second = 555ULL,
     };
     uint8_t buf[CONTROL_STATS_WIRE_SIZE];
 
@@ -203,6 +204,7 @@ TEST control_stats_round_trip(void)
     ASSERT_EQ_FMT((int)stats.max_result, (int)out.max_result, "%d");
     ASSERT_EQ_FMT((int)stats.pruner_checked, (int)out.pruner_checked, "%d");
     ASSERT_EQ_FMT((int)stats.pruner_removed, (int)out.pruner_removed, "%d");
+    ASSERT_EQ_FMT((int)stats.pruner_cells_per_second, (int)out.pruner_cells_per_second, "%d");
     PASS();
 }
 

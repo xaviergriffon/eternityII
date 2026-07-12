@@ -236,6 +236,7 @@ comprises (équivalent de `clientsStats`, voir plus bas).
         "max_result": 180,
         "pruner_checked": 900,
         "pruner_removed": 40,
+        "pruner_cells_per_second": 320,
         "stats_time": 1730000040
       }
     }
@@ -251,7 +252,7 @@ comprises (équivalent de `clientsStats`, voir plus bas).
 | `mode` | chaîne | `search` (client de recherche), `pruner` (élagage CPU), `gpu_pruner` (élagage GPU), ou `unknown` (valeur de repli, ne devrait pas apparaître en usage normal) |
 | `last_activity` | entier | Horodatage Unix (secondes) du dernier échange observé sur cette session (hello, commande acquittée, ping/ack, ou stats reçues) |
 | `stats` | objet ou `null` | `null` tant qu'aucun `CTRL_GET_STATS` n'a encore abouti pour cette session ; sinon un instantané **mis en cache** (voir ci-dessous) |
-| `stats.shots_per_second` / `.possibility_stock` / `.analysed_stock` / `.max_result` / `.pruner_checked` / `.pruner_removed` | entier ≥ 0 | Mêmes champs que `control_stats_t` du canal de contrôle (voir [échanges client/serveur](echanges_client_serveur.md#canal-de-contrôle-v9)) — agrégés côté client sur tous ses forks |
+| `stats.shots_per_second` / `.possibility_stock` / `.analysed_stock` / `.max_result` / `.pruner_checked` / `.pruner_removed` / `.pruner_cells_per_second` | entier ≥ 0 | Mêmes champs que `control_stats_t` du canal de contrôle (voir [échanges client/serveur](echanges_client_serveur.md#canal-de-contrôle-v9)) — agrégés côté client sur tous ses forks. `pruner_cells_per_second` est le pendant « coups/s » du pruner (débit de cases étudiées/seconde), 0 hors mode pruner |
 | `stats.stats_time` | entier | Horodatage Unix (secondes) auquel **cette réponse précise** a été reçue — peut être ancien si le client n'a pas été re-sondé depuis (voir `POST /api/v1/clients/stats` ci-dessous) |
 
 **`stats` est un instantané en cache, pas une lecture en direct.** Une session de

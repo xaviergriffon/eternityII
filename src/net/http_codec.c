@@ -350,10 +350,12 @@ int http_json_format_clients(char *buf, size_t size, const http_client_info_t *i
         if (infos[i].has_stats) {
             written = snprintf(buf + offset, size - offset,
                 "{\"shots_per_second\":%llu,\"possibility_stock\":%llu,\"analysed_stock\":%llu,"
-                "\"max_result\":%llu,\"pruner_checked\":%llu,\"pruner_removed\":%llu,\"stats_time\":%lld}",
+                "\"max_result\":%llu,\"pruner_checked\":%llu,\"pruner_removed\":%llu,"
+                "\"pruner_cells_per_second\":%llu,\"stats_time\":%lld}",
                 infos[i].stats_shots_per_second, infos[i].stats_possibility_stock,
                 infos[i].stats_analysed_stock, infos[i].stats_max_result,
-                infos[i].stats_pruner_checked, infos[i].stats_pruner_removed, infos[i].stats_time);
+                infos[i].stats_pruner_checked, infos[i].stats_pruner_removed,
+                infos[i].stats_pruner_cells_per_second, infos[i].stats_time);
         } else {
             written = snprintf(buf + offset, size - offset, "null");
         }
