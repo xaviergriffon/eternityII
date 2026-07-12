@@ -377,7 +377,7 @@ static void child_solution_stop(void)
     stop_on_solution = 1;
     array_possibility_packet *last = NULL;
     int vsupp = 1;
-    communicate_with_client_step(&g_sol_client, INST_SOLUTION, &last, &vsupp);
+    communicate_with_client_step(&g_sol_client, INST_SOLUTION, &last, &vsupp, NULL);
     /* La branche gagnante quitte par exit() : un retour ici est une anomalie. */
     _exit(42);
 }
@@ -413,7 +413,7 @@ TEST solution_step_no_stop_acks_and_continues(void)
 
     /* Confine ./solution_server_*.csv dans le répertoire temporaire. */
     ASSERT_EQ(0, chdir(g_solution_dir));
-    int cont = communicate_with_client_step(&client, INST_SOLUTION, &last, &vsupp);
+    int cont = communicate_with_client_step(&client, INST_SOLUTION, &last, &vsupp, NULL);
     int8_t ack = recv_instruction(sv[0]);
     ASSERT_EQ(0, chdir(cwd));   /* restaure le CWD AVANT assertions/cleanup */
 

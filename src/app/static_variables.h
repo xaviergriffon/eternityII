@@ -85,6 +85,17 @@
 // deux passes dès que le stock dépasse ce seuil. ~100000 × ~0,5 Ko ≈ 54 Mo.
 #define EXPAND_MAX_STOCK 100000
 
+// Nombre maximal de sessions de contrôle (canal INST_CONTROL_HELLO, cf.
+// control_registry.h) suivies simultanément par le serveur. Une session de
+// contrôle réutilise un slot déjà présent du pool `client_t` (même connexion
+// TCP acceptée, juste un comportement différent après le hello) — ce registre
+// ne dimensionne donc PAS de nouvelles sockets, seulement l'état "session de
+// contrôle" associé. 64 est large au regard du nombre de PROCESS parents
+// client réellement déployés (un par machine/process, pas un par thread de
+// recherche) : NB_THREADS peut être bien plus grand, la borne du registre est
+// donc volontairement indépendante et fixe plutôt qu'indexée sur NB_THREADS.
+#define MAX_CONTROL_SESSIONS 64
+
 #define REQUEST_STOP 1
 #define REQUEST_CONTINUE 0
 #define REQUEST_PAUSE 2
