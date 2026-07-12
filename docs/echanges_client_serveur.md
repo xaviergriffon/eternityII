@@ -3,13 +3,17 @@
 Ce document décrit le protocole TCP qui relie le serveur (`tcpserver`) aux différents
 clients (`tcpclient`, `tcppruner`, `gpupruner`) : les instructions échangées, la gestion
 de charge, les séquences de communication typiques et le comportement en cas de panne.
+Il couvre aussi (depuis la v9) le [canal de contrôle](#canal-de-contrôle-v9), une
+connexion TCP séparée où le **serveur** devient l'initiateur pour piloter un client à
+distance (statistiques, pause/reprise, …).
 
 Le code correspondant vit principalement dans :
 
-- [src/net/etii_protocol.h](../src/net/etii_protocol.h) / [etii_protocol.c](../src/net/etii_protocol.c) — instructions, `send_all`/`recv_all`, handshake ;
+- [src/net/etii_protocol.h](../src/net/etii_protocol.h) / [etii_protocol.c](../src/net/etii_protocol.c) — instructions du protocole de travail, `send_all`/`recv_all`, handshake ;
 - [src/net/tcpclient.c](../src/net/tcpclient.c) / [tcpserver.c](../src/net/tcpserver.c) — sockets et timeouts ;
 - [src/core/datamanager.c](../src/core/datamanager.c) — files de possibilités côté serveur et échanges côté client ;
-- [src/app/etii_server.c](../src/app/etii_server.c) / [etii_client.c](../src/app/etii_client.c) — boucles de traitement.
+- [src/app/etii_server.c](../src/app/etii_server.c) / [etii_client.c](../src/app/etii_client.c) — boucles de traitement du protocole de travail ;
+- [src/net/control_protocol.h](../src/net/control_protocol.h) / [src/app/etii_control.c](../src/app/etii_control.c) / [src/app/control_registry.c](../src/app/control_registry.c) — canal de contrôle (v9), détaillé plus bas.
 
 ## Vue d'ensemble
 
@@ -59,6 +63,7 @@ réassemblent les envois TCP partiels (voir [Robustesse](#comportement-en-cas-de
 | `INST_GET_TO_CHECK_BATCH` | 13 | pruner → serveur | Demande jusqu'à N possibilités en un aller-retour (`int32` N → `int32` K + K paquets) |
 | `INST_POSSIBILITY_ANALYSED_BATCH` | 14 | pruner → serveur | Signale M possibilités analysées (`int32` M + M paquets → un seul `INST_CONSIDERED`) |
 | `INST_NEED_WORK` | 15 | client → serveur | Sonde de faim (v8) : réponse `int32` N = nombre de possibilités que le serveur souhaiterait recevoir (0 = stock suffisant). Tient lieu de keepalive et pilote la [délégation anticipée](#gestion-de-charge) |
+| `INST_CONTROL_HELLO` | 16 | client → serveur | Annonce (v9) : le processus **parent** du client (jamais un fork) ouvre une connexion TCP dédiée et bascule cette session en [canal de contrôle](#canal-de-contrôle-v9), où les rôles s'inversent |
 
 Toute évolution du format « fil » impose d'incrémenter `VERSION` : le handshake exige
 une correspondance exacte.
@@ -128,6 +133,107 @@ Le lot est borné par `pruner_batch_size` (4ᵉ argument CLI ou commande console
 `prunerBatch <n>`, plafonné à `PRUNER_BATCH_MAX`), ce qui borne la mémoire du pruner
 et divise le nombre d'allers-retours réseau par rapport au mode unitaire
 (`INST_GET_TO_CHECK` / `INST_POSSIBILITY_ANALYSED`, conservé pour compatibilité).
+
+## Canal de contrôle (v9)
+
+Au-dessus du protocole de travail décrit ci-dessus (toujours initié par le client :
+GET/ADD/ANALYSED/…), une **seconde connexion TCP indépendante par processus client**
+permet au **serveur** de piloter un client en cours d'exécution — demander ses
+statistiques en direct, ou lui pousser une commande console (`pause`, `resume`,
+`limit`, …) — sans jamais toucher aux threads de recherche.
+
+Le code correspondant vit dans :
+
+- [src/net/control_protocol.h](../src/net/control_protocol.h) / [control_protocol.c](../src/net/control_protocol.c) — codec des trames `CTRL_*`, structures `control_hello_t`/`control_stats_t`, liste blanche `control_command_allowed` ;
+- [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) — registre serveur des sessions de contrôle actives ;
+- [src/app/etii_control.h](../src/app/etii_control.h) / [etii_control.c](../src/app/etii_control.c) — thread client (processus **parent** uniquement) ;
+- [src/app/etii_server.c](../src/app/etii_server.c) (`run_control_session`/`control_session_step`) — boucle serveur du canal.
+
+### Qui l'ouvre, et pourquoi ça ne coûte rien à la recherche
+
+Seul le processus **parent** du client (celui qui fork les threads de recherche,
+jamais un fork lui-même) ouvre cette connexion — une par *processus* client, pas par
+fork. Elle tourne sur son propre thread détaché (`run_control_channel`), entièrement
+séparé des threads de recherche, du thread d'alimentation du protocole de travail et
+des threads de statistiques/console. La seule chose que paie la boucle chaude de
+recherche est la lecture (déjà existante) de la globale `request` à chaque nœud — rien
+n'a été ajouté à cette boucle pour le canal de contrôle en tant que tel.
+
+### Inversion des rôles
+
+Après le handshake de version habituel, le client envoie `INST_CONTROL_HELLO` (pid,
+nombre de forks, mode — `control_hello_t`) puis les rôles s'inversent : c'est
+désormais le **serveur** qui prend l'initiative des échanges sur cette connexion.
+
+```mermaid
+sequenceDiagram
+    participant Cp as Client (processus parent)
+    participant S as Serveur
+    Cp->>S: INST_CHECK_VERSION + version
+    S-->>Cp: INST_SUPPORTED_VERSION
+    Cp->>S: INST_CONTROL_HELLO + control_hello_t (pid, forks, mode)
+    Note over S: session enregistrée dans control_registry<br/>(même slot NB_THREADS qu'une session de travail)
+    loop tant que la session est active
+        alt commande console en attente (clientsCmd/clientsStats/…)
+            S->>Cp: CTRL_COMMAND <ligne> (ou CTRL_GET_STATS)
+            Note over Cp: control_command_allowed() revérifié<br/>côté client avant exécution (défense en profondeur)
+            Cp-->>S: CTRL_RESULT <code> (ou CTRL_STATS)
+        else rien en attente (timeout)
+            S->>Cp: CTRL_PING
+            Cp-->>S: CTRL_ACK
+        end
+    end
+```
+
+### Format de trame
+
+Un codec autonome, volontairement distinct de `packet`/`possibility_packet` (qui ne
+transporte qu'un seul type de charge utile, et dont le struct `packed` garde du
+padding caché — ne jamais le poser sur le fil sans passer par des champs explicites).
+Chaque trame est `uint8_t cmd` + `int32_t len` + `len` octets de payload, toujours via
+`send_all`/`recv_all` — jamais un `send`/`recv` brut, pour la même raison que le
+protocole de travail. Une longueur hors borne (`< 0` ou `> CTRL_PAYLOAD_MAX` = 4000)
+est rejetée sans tentative d'allocation.
+
+| Commande `CTRL_*` | Valeur | Sens |
+|---|---|---|
+| `CTRL_PING` / `CTRL_ACK` | 1 / 2 | Keepalive émis par le serveur quand aucune commande n'est en attente |
+| `CTRL_GET_STATS` / `CTRL_STATS` | 3 / 4 | Demande de statistiques agrégées ; réponse `control_stats_t` (coups/s, stock, analysé, `max_result`, pruner vérifiées/éliminées) |
+| `CTRL_COMMAND` / `CTRL_RESULT` | 5 / 6 | Commande console poussée en texte ; réponse = code retour `int32` de `do_command_line()` |
+
+### Double vérification de la liste blanche
+
+Seules quelques commandes console sont déclenchables à distance
+(`control_command_allowed`) : `pause`, `resume`, `limit`, `maxStockByThread`,
+`prunerBatch` — jamais `exit`, `restore`, `import`, ni rien de destructeur. Cette
+vérification est faite **deux fois indépendamment** : côté serveur dans l'interpréteur
+de `clientsCmd` (qui refuse même de diffuser une ligne interdite), et, en défense en
+profondeur, côté client dans `control_channel_handle_frame` avant tout appel à
+`do_command_line` — le client ne fait jamais confiance à ce qui arrive sur ce socket
+au seul motif que ça y arrive.
+
+### Impact sur le dimensionnement du serveur
+
+Une session de contrôle **partage le même pool `client_t[NB_THREADS]`** qu'une
+session de travail classique — pas de pool de sockets séparé, seulement un registre
+d'état indépendant (`control_registry`, 64 sessions max). Chaque processus client
+consomme donc désormais **un slot serveur de plus** que le nombre de ses forks de
+recherche. Avec un `NB_THREADS` serveur trop petit, la session de contrôle peut affamer
+indéfiniment une session de travail (`request unfulfilled: all threads busy`) — c'est
+la valeur par défaut (80) qui laisse une marge confortable en usage normal ; un
+déploiement contraint doit dimensionner `NB_THREADS` pour (connexions de travail
+simultanées) + (processus clients connectés), pas seulement le premier terme.
+
+### Commandes console associées
+
+Voir le [README](../README.md#commandes-interactives) pour la liste complète ; côté
+serveur uniquement : `clients` (liste les sessions actives), `clientsStats` (diffuse
+`CTRL_GET_STATS`), `clientsCmd <ligne>` (diffuse `CTRL_COMMAND`, filtré par la liste
+blanche), `clientsPause`/`clientsResume` (sucre pour `clientsCmd pause`/`resume`).
+Côté client (local ou déclenché à distance) : `pause`/`resume`, qui posent/lèvent
+`REQUEST_ADMIN_PAUSE` — un état distinct de la pause de régulation de débit
+(`REQUEST_PAUSE`, auto-levée par le régulateur), pour qu'une pause administrative ne
+disparaisse jamais toute seule au tour suivant.
 
 ## Gestion de charge
 

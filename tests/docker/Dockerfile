@@ -15,7 +15,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # python3         : gen_solution16.py (fixture des tests) et
 #                   coverage_by_domain.py.
 # pipx + ca-certificates : installation de gcovr comme en CI (`pipx install`).
-# procps          : pkill, requis par tests/integration/run_solution_16.sh.
+# procps          : pkill, requis par tests/integration/run_solution_16.sh
+#                   et tests/integration/run_control_channel.sh.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         python3 \

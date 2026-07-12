@@ -32,13 +32,26 @@ partagé reste à la racine de `tests/`.
 |---|---|
 | `tests/test_main.c` | Point d'entrée unique du runner (enregistre toutes les suites). |
 | `tests/greatest.h`, `tests/fork_assert.h` | Framework greatest + helper d'assertions par `fork()`. |
-| `tests/core/` | Suites des modules `src/core/` (`test_lifo`, `test_part`, `test_readdata`, `test_possibility`, `test_etii_search`, `test_datamanager`). |
-| `tests/net/` | Suites des modules `src/net/` (`test_etii_protocol`, `test_local_socket`, `test_tcp`). |
+| `tests/core/` | Suites des modules `src/core/` (`test_lifo`, `test_part`, `test_readdata`, `test_possibility`, `test_etii_search`, `test_datamanager`, `test_solution16`). |
+| `tests/net/` | Suites des modules `src/net/` (`test_etii_protocol`, `test_control_protocol` — codec du [canal de contrôle](../docs/echanges_client_serveur.md#canal-de-contrôle-v9), `test_local_socket`, `test_tcp`). |
 | `tests/ui/` | Suites des modules `src/ui/` (`test_command_history`, `test_command_match`, `test_command_lines`, `test_console`, `test_logger`). |
+| `tests/app/` | Suites des modules `src/app/` (`test_static_variables`, `test_app_runtime`, `test_etii_client`, `test_etii_server`, `test_control_registry` — registre serveur du canal de contrôle, `test_etii_control` — thread client du canal de contrôle). |
 
 Chaque `test_<module>.c` inclut ses en-têtes de production en forme qualifiée
 (`#include "core/part.h"`, résolu via `-Isrc`) et le harnais en forme courte
 (`#include "greatest.h"`, résolu via `-Itests`).
+
+## Tests d'intégration bout-en-bout
+
+`tests/integration/` contient des scripts shell séparés de la suite `greatest`
+ci-dessus (pas de lien statique : ils lancent de vrais processus `tcpserver`/
+`tcpclient` sur `localhost`). Lancés ensemble via `make test-integration` (voir le
+[README principal](../README.md#tests-et-couverture)) :
+
+- `run_solution_16.sh` — round-trip complet de la solution (16 pièces, `--stop-on-solution`).
+- `run_control_channel.sh` — round-trip du [canal de contrôle](../docs/echanges_client_serveur.md#canal-de-contrôle-v9) (`clientsStats`/`clientsPause`/`clientsResume`, piloté via une FIFO sur la console serveur).
+
+Chacun tourne dans un répertoire `mktemp -d` isolé avec un timeout borné.
 
 ## Conventions et limites
 

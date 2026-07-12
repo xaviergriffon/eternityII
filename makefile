@@ -228,11 +228,15 @@ test-256:
 # Test d'intégration client/serveur (bout-en-bout) sur le puzzle 16 pièces.
 #
 # Compile un binaire dédié ETERN_PARTS=16 (le release nettoie build/ derrière
-# lui : pas d'objets parasites pour un `make` 256 ultérieur), puis lance le
-# scénario serveur+client de tests/integration/. Le client résout le 4×4,
-# signale la solution ; le serveur l'affiche, sauvegarde son stock et s'arrête.
-# Le script vérifie que les DEUX côtés ont le résultat, avec un timeout borné.
-# INTEGRATION_TIMEOUT (défaut 60s) surcharge le délai max.
+# lui : pas d'objets parasites pour un `make` 256 ultérieur), puis lance les
+# deux scénarios serveur+client de tests/integration/ sur ce même binaire :
+#   - run_solution_16.sh : le client résout le 4×4, signale la solution ; le
+#     serveur l'affiche, sauvegarde son stock et s'arrête (--stop-on-solution).
+#   - run_control_channel.sh : sans --stop-on-solution (les deux processus
+#     restent vivants), vérifie le round-trip complet du canal de contrôle v9
+#     (clientsStats/clientsPause/clientsResume) puis l'arrêt propre via `exit`.
+# Chaque script vérifie son scénario avec un timeout borné.
+# INTEGRATION_TIMEOUT (défaut 60s) surcharge le délai max de CHAQUE script.
 # ---------------------------------------------------------------------------
 INTEGRATION_BIN     := eternityII16
 INTEGRATION_TIMEOUT ?= 60
@@ -241,7 +245,13 @@ test-integration:
 	$(MAKE) CPPFLAGS="-DETERN_PARTS=16" EXECUTABLE=$(INTEGRATION_BIN)
 	BIN=./$(INTEGRATION_BIN) DATA=data/pieces16.csv TIMEOUT=$(INTEGRATION_TIMEOUT) \
 		bash tests/integration/run_solution_16.sh; \
-		rc=$$?; rm -f ./$(INTEGRATION_BIN); exit $$rc
+		rc=$$?; \
+		if [ $$rc -eq 0 ]; then \
+			BIN=./$(INTEGRATION_BIN) DATA=data/pieces16.csv TIMEOUT=$(INTEGRATION_TIMEOUT) \
+				bash tests/integration/run_control_channel.sh; \
+			rc=$$?; \
+		fi; \
+		rm -f ./$(INTEGRATION_BIN); exit $$rc
 
 # ---------------------------------------------------------------------------
 # Tests dans un conteneur Linux identique à la CI (`make test-docker`).
