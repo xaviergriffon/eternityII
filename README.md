@@ -469,6 +469,10 @@ Ces fichiers permettent de reprendre une recherche interrompue avec la commande 
 | `events.log` | Journal des évènements horodatés (nouveaux records, solutions, etc.). Append-only. |
 | `solution_<pid>` | Plateau sérialisé quand une solution complète est trouvée (déclenche aussi un évènement). |
 
+## Limitations connues
+
+- **Cadence d'attente figée quand le serveur n'a rien à fournir.** Un thread de recherche ou de pruner sans travail assigné (`works == 0`) attend en boucle avec une cadence fixe de 100 µs (`MICRO_SLEEP`, `autosearch_step`/`autoprune_step`/`autoprune_gpu` dans `src/core/etii_search.c`), qu'il s'agisse d'une pénurie momentanée ou d'un épuisement durable du stock serveur. C'est typiquement le cas d'un `tcppruner` une fois que **toutes** les possibilités ont été vérifiées : le serveur n'a plus rien à distribuer, mais chaque thread continue de sonder à cadence rapide indéfiniment, consommant du CPU pour rien. Une piste serait d'appliquer à cette boucle un back-off progressif similaire à celui déjà en place côté thread d'alimentation (`feed_thread_aposs`, `NO_WORK_SLEEP_START`/`NO_WORK_SLEEP_MAX` dans `src/app/static_variables.h`), afin de distinguer une pénurie ponctuelle d'un épuisement long/définitif — par opposition aux pauses (régulation `REQUEST_PAUSE` / admin `REQUEST_ADMIN_PAUSE`), qui bénéficient déjà chacune d'une cadence dédiée (`PAUSE_POLL_SLEEP_US` / `ADMIN_PAUSE_POLL_SLEEP_US`).
+
 ## Documentation
 
 Le répertoire [`docs/`](docs/) rassemble les notes détaillées sur l'architecture et les protocoles :

@@ -122,8 +122,10 @@ void lastcheck_publish(char *new_report) {
 /**
  * @brief Voir la doc dans static_variables.h.
  */
-int request_is_pause(int r) {
-    return r == REQUEST_PAUSE || r == REQUEST_ADMIN_PAUSE;
+useconds_t request_is_pause(int r) {
+    if (r == REQUEST_PAUSE) return PAUSE_POLL_SLEEP_US;
+    if (r == REQUEST_ADMIN_PAUSE) return ADMIN_PAUSE_POLL_SLEEP_US;
+    return 0;
 }
 
 /**

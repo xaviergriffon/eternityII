@@ -598,8 +598,9 @@ static int search_packet_backtracking(client_possibility_t *client,
         }
 
         if (request != REQUEST_CONTINUE) {
-            if (request_is_pause(request)) {
-                usleep(MICRO_SHORT_SLEEP);
+            useconds_t pause_us = request_is_pause(request);
+            if (pause_us > 0) {
+                usleep(pause_us);
                 continue;
             }
             // REQUEST_STOP : renvoi du travail restant au serveur
@@ -948,9 +949,10 @@ static int autoprune_step(client_possibility_t *client)
     int a = 0;
     while (client->aposs != NULL && a < client->aposs->size && request != REQUEST_STOP)
     {
-        if (request_is_pause(request))
+        useconds_t pause_us = request_is_pause(request);
+        if (pause_us > 0)
         {
-            usleep(MICRO_SHORT_SLEEP);
+            usleep(pause_us);
             continue;
         }
         // Copie de travail : l'original doit rester intact pour l'acquittement
@@ -1118,9 +1120,10 @@ void *autoprune_gpu (void *userdata)
         if (client->aposs != NULL && request != REQUEST_STOP)
         {
             // Respect d'une éventuelle limitation de débit
-            while (request_is_pause(request))
+            useconds_t pause_us;
+            while ((pause_us = request_is_pause(request)) > 0)
             {
-                usleep(MICRO_SHORT_SLEEP);
+                usleep(pause_us);
             }
 
             if (request != REQUEST_STOP)

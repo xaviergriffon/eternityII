@@ -68,13 +68,18 @@ int find_fork_index(const char *sun_path, char **forkIds, int nb) {
  *        de `feed_thread_aposs`).
  *
  * Extrait du corps de boucle pour être testable hors thread (en mode local,
- * `server_ip == NULL`, les échanges passent par le datamanager). Ne fait rien si
- * `request != REQUEST_CONTINUE`. Si le thread `i` n'a plus de travail
- * (`works == 0`), draine son « en analyse » puis tente d'obtenir une (ou un lot
- * de) possibilité(s) ; s'il en reçoit, les empile et passe `works = 1`. Sinon,
- * s'il a un socket ouvert, émet un keepalive avant le timeout serveur. Les
- * compteurs `*needed_work` / `*got_work` (threads ayant demandé / reçu du
- * travail) sont incrémentés en place pour piloter le back-off de l'appelant.
+ * `server_ip == NULL`, les échanges passent par le datamanager). Ne fait rien du
+ * tout si `request == REQUEST_STOP`. En pause (`REQUEST_PAUSE`/
+ * `REQUEST_ADMIN_PAUSE`), ne réclame PAS de nouveau travail, mais le keepalive
+ * ci-dessous continue de tourner — sans lui, une pause plus longue que
+ * `tcp_timeout` laisserait le serveur fermer le socket (SO_RCVTIMEO) sans que le
+ * client ne le sache. Si le thread `i` n'a plus de travail (`works == 0`) ET que
+ * `request == REQUEST_CONTINUE`, draine son « en analyse » puis tente d'obtenir
+ * une (ou un lot de) possibilité(s) ; s'il en reçoit, les empile et passe
+ * `works = 1`. Sinon, s'il a un socket ouvert, émet un keepalive avant le
+ * timeout serveur. Les compteurs `*needed_work` / `*got_work` (threads ayant
+ * demandé / reçu du travail) sont incrémentés en place pour piloter le back-off
+ * de l'appelant.
  *
  * @param thread_params Tableau des contextes de threads de recherche.
  * @param i             Indice du thread à alimenter.
@@ -84,7 +89,7 @@ int find_fork_index(const char *sun_path, char **forkIds, int nb) {
 void feed_one_thread(client_possibility_t *thread_params, int i,
                      int *needed_work, int *got_work)
 {
-    if (request != REQUEST_CONTINUE)
+    if (request == REQUEST_STOP)
     {
         return;
     }
@@ -94,7 +99,13 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
     // pendant la durée des échanges TCP (send_possibility_analysed /
     // get_last_possibility peuvent attendre le serveur).
     pthread_mutex_lock(&thread_params[i].works_mutex);
-    int need_work = (client_possibility->works == 0);
+    // En pause (régulation ou admin), ne PAS réclamer de nouveau travail — mais
+    // le bloc keepalive/sonde de faim ci-dessous doit continuer à tourner : sans
+    // lui, un socket resté silencieux plus longtemps que tcp_timeout (pause admin
+    // prolongée) est fermé par le serveur (SO_RCVTIMEO) sans que le client ne le
+    // sache, et la reprise échoue sur ce socket mort ("Error on need work poll",
+    // cf. poll_server_hunger) avant de se reconnecter tout seul.
+    int need_work = (client_possibility->works == 0) && (request == REQUEST_CONTINUE);
     pthread_mutex_unlock(&thread_params[i].works_mutex);
 
     if(need_work)
@@ -308,6 +319,15 @@ void control_step(client_possibility_t *thread_params,
  * les threads de recherche. Reprend dès que le débit redescend sous la limite.
  * Ne fait rien si `max_search_by_sec == 0` (mode illimité).
  *
+ * Tourne tant que `request_keeps_running(request)` (donc survit à une pause
+ * administrative distante, `REQUEST_ADMIN_PAUSE`) et ne s'arrête qu'à
+ * `REQUEST_STOP` : sortir aussi sur `REQUEST_ADMIN_PAUSE` ferait mourir ce
+ * thread pendant la pause, et au `resume` plus rien ne réapplique `limit`.
+ * Cadence de la boucle : 1 ms tant que la régulation reste pertinente
+ * (REQUEST_CONTINUE/REQUEST_PAUSE, où `control_step` doit rester précis),
+ * `ADMIN_PAUSE_POLL_SLEEP_US` (500 ms) pendant `REQUEST_ADMIN_PAUSE` — aucune
+ * recherche ne tourne alors, donc rien à réguler ni à mesurer précisément.
+ *
  * @param param Tableau de `client_possibility_t` (un par thread de recherche).
  * @return      NULL.
  */
@@ -329,10 +349,13 @@ void *control_thread(void *param) {
     unsigned long long *oneSecond = malloc(sizeof(unsigned long long));
     *oneSecond = 0;
     int nbCheck = 0;
-    while (request == REQUEST_CONTINUE || request == REQUEST_PAUSE) {
+    while (request_keeps_running(request)) {
         control_step(thread_params, lastCheck, oneSecond, &nbCheck);
-        // La priorité est au traitement lors on effectue des controles espacés.
-        usleep(1000);
+        // Cadence fine (1 ms) tant que la régulation de débit est pertinente
+        // (REQUEST_CONTINUE/REQUEST_PAUSE) ; en pause admin, rien à réguler
+        // (aucune recherche en cours) donc on peut se permettre la même
+        // cadence large que les boucles chaudes de etii_search.c.
+        usleep(request == REQUEST_ADMIN_PAUSE ? ADMIN_PAUSE_POLL_SLEEP_US : 1000);
     }
 #ifdef DEBUG_THREAD
     log_info("END control thread %i\n", getpid());
