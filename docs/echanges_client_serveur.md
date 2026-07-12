@@ -229,11 +229,17 @@ simultanées) + (processus clients connectés), pas seulement le premier terme.
 Voir le [README](../README.md#commandes-interactives) pour la liste complète ; côté
 serveur uniquement : `clients` (liste les sessions actives), `clientsStats` (diffuse
 `CTRL_GET_STATS`), `clientsCmd <ligne>` (diffuse `CTRL_COMMAND`, filtré par la liste
-blanche), `clientsPause`/`clientsResume` (sucre pour `clientsCmd pause`/`resume`).
-Côté client (local ou déclenché à distance) : `pause`/`resume`, qui posent/lèvent
-`REQUEST_ADMIN_PAUSE` — un état distinct de la pause de régulation de débit
-(`REQUEST_PAUSE`, auto-levée par le régulateur), pour qu'une pause administrative ne
-disparaisse jamais toute seule au tour suivant.
+blanche). `pause`/`resume` posent/lèvent localement `REQUEST_ADMIN_PAUSE` — un état
+distinct de la pause de régulation de débit (`REQUEST_PAUSE`, auto-levée par le
+régulateur), pour qu'une pause administrative ne disparaisse jamais toute seule au
+tour suivant — **et** diffusent systématiquement `CTRL_COMMAND "pause"`/`"resume"` à
+toutes les sessions de contrôle actives (fusion de l'ancien `clientsPause`/
+`clientsResume`) : sur le serveur, où `request` n'a aucun effet local (aucune
+recherche n'y tourne), c'est cette diffusion qui rend la commande utile ; sur un
+client, `control_registry` est toujours vide, donc la diffusion y est un no-op
+silencieux. L'état de pause désiré (`control_registry_desired_pause_state`) est
+persisté : un client qui se connecte APRÈS un `pause` serveur démarre lui aussi en
+pause, sans qu'il faille rejouer la commande.
 
 ## Gestion de charge
 

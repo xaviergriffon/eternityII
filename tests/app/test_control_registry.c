@@ -301,6 +301,81 @@ TEST broadcast_with_no_active_session_returns_zero(void)
     PASS();
 }
 
+/* ---------- état de pause "désiré" persistant ------------------------------
+ *
+ * Reproduit la demande : après un `pause` console (côté serveur, diffusé via
+ * `control_registry_broadcast_command`), tout NOUVEAU client qui se connecte
+ * doit démarrer en pause lui aussi, sans commande rejouée. Chaque test remet
+ * l'état à "résumé" (broadcast "resume") avant de rendre la main : le
+ * registre est global au process de test, un état "en pause" qui fuiterait
+ * fausserait silencieusement les tests suivants.
+ */
+
+TEST desired_pause_state_defaults_to_resumed(void)
+{
+    ASSERT_EQ(0, control_registry_desired_pause_state());
+    PASS();
+}
+
+TEST broadcast_pause_sets_desired_state_for_future_registrations(void)
+{
+    ASSERT_EQ(0, control_registry_desired_pause_state());
+
+    control_registry_broadcast_command(CTRL_COMMAND, "pause");
+    ASSERT_EQ(1, control_registry_desired_pause_state());
+
+    /* Une session enregistrée APRÈS le broadcast "pause" doit trouver la
+       commande déjà dans sa file, sans qu'elle ait été postée explicitement. */
+    control_hello_t h = make_hello(42, 2, 0);
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+
+    uint8_t cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx, &cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)cmd);
+    ASSERT_STR_EQ("pause", line);
+
+    control_registry_unregister(idx);
+    control_registry_broadcast_command(CTRL_COMMAND, "resume");
+    ASSERT_EQ(0, control_registry_desired_pause_state());
+    PASS();
+}
+
+TEST broadcast_resume_clears_desired_state_for_future_registrations(void)
+{
+    control_registry_broadcast_command(CTRL_COMMAND, "pause");
+    ASSERT_EQ(1, control_registry_desired_pause_state());
+
+    control_registry_broadcast_command(CTRL_COMMAND, "resume");
+    ASSERT_EQ(0, control_registry_desired_pause_state());
+
+    /* Une session enregistrée APRÈS le broadcast "resume" ne doit trouver
+       aucune commande en attente : elle démarre normalement, comme un client
+       qui n'aurait jamais connu de pause diffusée. */
+    control_hello_t h = make_hello(43, 1, 0);
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+
+    uint8_t cmd = 0;
+    ASSERT_EQ(1, control_registry_wait_command(idx, &cmd, NULL, 0, 100)); /* timeout : rien en file */
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST clients_cmd_pause_resume_also_update_desired_state(void)
+{
+    /* `clientsCmd pause`/`clientsCmd resume` (chemin générique, toujours
+       présent) doivent avoir le même effet que `pause`/`resume` console. */
+    control_registry_broadcast_command(CTRL_COMMAND, "pause");
+    ASSERT_EQ(1, control_registry_desired_pause_state());
+
+    control_registry_broadcast_command(CTRL_COMMAND, "resume");
+    ASSERT_EQ(0, control_registry_desired_pause_state());
+    PASS();
+}
+
 /* ---------- touch ---------------------------------------------------------*/
 
 TEST touch_updates_last_activity(void)
@@ -396,6 +471,11 @@ SUITE(control_registry_suite)
     RUN_TEST(broadcast_command_reaches_all_active_sessions);
     RUN_TEST(broadcast_get_stats_reaches_all_active_sessions);
     RUN_TEST(broadcast_with_no_active_session_returns_zero);
+
+    RUN_TEST(desired_pause_state_defaults_to_resumed);
+    RUN_TEST(broadcast_pause_sets_desired_state_for_future_registrations);
+    RUN_TEST(broadcast_resume_clears_desired_state_for_future_registrations);
+    RUN_TEST(clients_cmd_pause_resume_also_update_desired_state);
 
     RUN_TEST(touch_updates_last_activity);
     RUN_TEST(touch_out_of_range_is_noop);

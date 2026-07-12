@@ -40,6 +40,27 @@ static control_session_t g_sessions[MAX_CONTROL_SESSIONS];
  * autres sessions. */
 static pthread_mutex_t g_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* État de pause "désiré" pour tout client qui se connectera APRÈS un
+ * `pause`/`resume` console : mis à jour dans
+ * `control_registry_broadcast_command` et appliqué à l'enregistrement d'une
+ * nouvelle session (`control_registry_register`), pour qu'un client démarrant
+ * après-coup n'ait pas besoin d'une commande ré-émise manuellement. Protégé
+ * par g_registry_mutex, comme le reste des parcours globaux du registre. */
+static int g_desired_pause_state = 0; /* 0 = résumé (défaut), 1 = en pause */
+
+/* Compare le premier mot de `command_line` (délimité par un espace ou la fin
+ * de chaîne) à `word`, sans retokeniser (même convention que
+ * `control_command_allowed`, control_protocol.c). */
+static int command_line_first_word_is(const char *command_line, const char *word)
+{
+    if (command_line == NULL) {
+        return 0;
+    }
+    size_t len = strlen(word);
+    return strncmp(command_line, word, len) == 0 &&
+           (command_line[len] == '\0' || command_line[len] == ' ');
+}
+
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
 
 static void registry_init_once(void)
@@ -78,6 +99,16 @@ int control_registry_register(int socket_id, const control_hello_t *hello)
         s->last_activity = time(NULL);
         s->head = 0;
         s->count = 0;
+        if (g_desired_pause_state) {
+            /* Pré-poste "pause" dans la file toute neuve, pour que le tout
+             * premier `control_session_step` de cette session l'exécute avant
+             * même le premier CTRL_PING — le client rejoint dans le même état
+             * que les sessions déjà actives, sans commande console à rejouer. */
+            s->queue[0].cmd = CTRL_COMMAND;
+            strncpy(s->queue[0].command_line, "pause", CONTROL_COMMAND_LINE_MAX - 1);
+            s->queue[0].command_line[CONTROL_COMMAND_LINE_MAX - 1] = '\0';
+            s->count = 1;
+        }
         pthread_mutex_unlock(&s->mutex);
     }
     pthread_mutex_unlock(&g_registry_mutex);
@@ -244,6 +275,13 @@ int control_registry_broadcast_command(uint8_t cmd, const char *command_line)
     pthread_once(&g_init_once, registry_init_once);
     int n = 0;
     pthread_mutex_lock(&g_registry_mutex);
+    if (cmd == CTRL_COMMAND) {
+        if (command_line_first_word_is(command_line, "pause")) {
+            g_desired_pause_state = 1;
+        } else if (command_line_first_word_is(command_line, "resume")) {
+            g_desired_pause_state = 0;
+        }
+    }
     for (int i = 0; i < MAX_CONTROL_SESSIONS; i++) {
         if (g_sessions[i].in_use) {
             if (control_registry_post_command(i, cmd, command_line) == 0) {
@@ -258,4 +296,14 @@ int control_registry_broadcast_command(uint8_t cmd, const char *command_line)
 int control_registry_broadcast_get_stats(void)
 {
     return control_registry_broadcast_command(CTRL_GET_STATS, NULL);
+}
+
+int control_registry_desired_pause_state(void)
+{
+    pthread_once(&g_init_once, registry_init_once);
+    int state;
+    pthread_mutex_lock(&g_registry_mutex);
+    state = g_desired_pause_state;
+    pthread_mutex_unlock(&g_registry_mutex);
+    return state;
 }

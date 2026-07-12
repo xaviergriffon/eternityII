@@ -74,6 +74,14 @@ int pruner_batch_clamp(int v);
  * `maxStockByThread <n>`, `prunerBatch <n>`. Toute autre commande (dont
  * `exit`, `restore`, `import`) est refusée avant même d'être tokenisée.
  *
+ * `pause`/`resume`, comme leurs pendants console (`pause_interpreter`/
+ * `resume_interpreter`), diffusent aussi `CTRL_COMMAND` à toutes les sessions
+ * de contrôle actives (`control_registry_broadcast_command`) — sans quoi une
+ * pause déclenchée via l'API HTTP admin (`--http-port`, POST
+ * `/api/v1/command`) ne mettrait en pause QUE l'état local du serveur (jamais
+ * consulté par sa propre boucle de recherche, qu'il ne lance pas) sans jamais
+ * atteindre les clients connectés.
+ *
  * @param line Ligne de commande complète (ex. "limit 1000"), non modifiée.
  * @return     `ADMIN_CMD_OK`, `ADMIN_CMD_FORBIDDEN` (hors liste blanche) ou
  *             `ADMIN_CMD_BAD_ARGS` (commande reconnue, argument manquant/invalide).
