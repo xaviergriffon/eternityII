@@ -24,6 +24,8 @@
 
 client_t *thread_params = NULL;
 
+struct array_part *g_server_rotate_parts = NULL;
+
 // Nombre de modification des files par client
 unsigned long long *fileUpdates = NULL;
 
@@ -1195,6 +1197,9 @@ void runserver(const char* file)
     free_bigarray(map_parts);
     /* rotateParts reste en vie : les threads TCP l'utilisent pour sérialiser
      * les solutions en CSV avec les couleurs de bord. Libéré en fin de runserver. */
+    // Même table, exposée en globale pour que l'API HTTP (src/net/http_server.c)
+    // décode grid[x][y] en pièce réelle sans dupliquer la lecture du CSV.
+    g_server_rotate_parts = rotateParts;
 
     // Demarrage d'un thread de nettoyage des possibilités sans suite
     create_rmnonext_thread();
@@ -1239,5 +1244,6 @@ void runserver(const char* file)
             thread_id = try_assign_client_slot(client_id, &busy_logged);
         }
     }
+    g_server_rotate_parts = NULL;
     free_array_part(rotateParts);
 }

@@ -435,8 +435,15 @@ int http_json_format_best_board(char *buf, size_t size, const http_best_board_vi
         offset += (size_t)written;
 
         for (int x = 0; x < ETERN_SIZE; x++) {
-            written = snprintf(buf + offset, size - offset,
-                "%s%d", (x == 0) ? "" : ",", view->grid[x][y]);
+            const http_best_board_cell_t *cell = &view->grid[x][y];
+            if (cell->id < 0) {
+                written = snprintf(buf + offset, size - offset, "%snull", (x == 0) ? "" : ",");
+            } else {
+                written = snprintf(buf + offset, size - offset,
+                    "%s{\"id\":%d,\"rotation\":%d,\"top\":%d,\"right\":%d,\"bottom\":%d,\"left\":%d}",
+                    (x == 0) ? "" : ",", cell->id, cell->rotation,
+                    cell->top, cell->right, cell->bottom, cell->left);
+            }
             if (written < 0 || (size_t)written >= size - offset) {
                 return -1;
             }

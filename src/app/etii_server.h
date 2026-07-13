@@ -131,6 +131,22 @@ int get_active_threads(client_t *thread_params);
 int server_active_client_count(void);
 
 /**
+ * @brief Table complète des pièces + toutes leurs rotations, construite par
+ *        `runserver` (`rotate_all_parts`) et déjà partagée avec chaque
+ *        `client_t.rotate_parts` pour sérialiser les solutions en CSV.
+ *        Exposée en globale pour que `src/net/http_server.c` puisse décoder
+ *        `possibility_packet.grid[x][y]` (indice `id + ETERN_PARTS*rotation`,
+ *        cf. `id_for_rotated_part`) en pièce réelle (id, rotation, couleurs)
+ *        pour `GET /api/v1/best-board`, sans dupliquer la lecture du CSV.
+ *
+ *        NULL avant que `runserver` ait construit la table (mode client/test,
+ *        ou tout appelant avant le tout début de `runserver`) et remis à NULL
+ *        après sa libération en fin de `runserver` — un appelant DOIT vérifier
+ *        NULL avant de déréférencer.
+ */
+extern struct array_part *g_server_rotate_parts;
+
+/**
  * @brief Construit le tableau « File queues » du rapport serveur (une ligne par
  *        file + Total) dans une chaîne allouée ; renvoie les totaux par pool via
  *        les out-params (NULL accepté). À libérer par l'appelant.

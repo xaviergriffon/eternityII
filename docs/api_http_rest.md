@@ -314,7 +314,11 @@ s'intéresse qu'au débit ne doit pas la payer à chaque poll.
 {
   "has_board": true,
   "alloc": 187,
-  "grid": [[-2, 134, ...], [...], ...]
+  "grid": [
+    [ {"id": 4, "rotation": 1, "top": 0, "right": 19, "bottom": 21, "left": 0}, null, ... ],
+    [ null, null, ... ],
+    ...
+  ]
 }
 ```
 
@@ -328,7 +332,18 @@ s'intéresse qu'au débit ne doit pas la payer à chaque poll.
 |---|---|---|
 | `has_board` | booléen | `false` si le serveur n'a encore aucun plateau enregistré (juste après démarrage, sans `restore`) — `alloc`/`grid` absents dans ce cas |
 | `alloc` | entier | Nombre de pièces placées de ce plateau |
-| `grid` | tableau 2D | `grid[x][y]` : indice de rotation de la pièce placée (encodage interne, cf. `id_for_rotated_part`), `-2` si la case est vide |
+| `grid` | tableau 2D | `grid[x][y]` : `null` si la case est vide, sinon la description de la pièce réellement posée — **jamais** l'indice brut interne (`id + ETERN_PARTS*rotation`, cf. `id_for_rotated_part`) |
+| `grid[x][y].id` | entier | Identifiant réel de la pièce (celui du fichier `pieces.csv`) |
+| `grid[x][y].rotation` | entier (0-3) | Rotation appliquée à la pièce dans cette orientation |
+| `grid[x][y].top`/`.right`/`.bottom`/`.left` | entier | Couleurs des 4 bords de la pièce **dans son orientation posée** (motifs à faire correspondre avec les cases voisines) |
+
+La décodage passe par `g_server_rotate_parts` (`src/app/etii_server.c`), la
+même table de rotations construite par `runserver` et déjà partagée avec
+chaque `client_t.rotate_parts` pour sérialiser les solutions en CSV — pas de
+lecture supplémentaire du fichier de pièces. Si cette table n'est pas encore
+disponible (fenêtre très étroite entre le tout début de `runserver` et la fin
+de la construction), la réponse retombe sur `id`/`rotation` seuls (décodés de
+l'indice brut) avec les 4 couleurs à `-1`, plutôt que de planter ou de bloquer.
 
 Cette lecture est **synchrone et locale** : comme `GET /api/v1/stats`, elle ne
 déclenche aucun aller-retour réseau vers les clients, elle relit l'agrégat déjà

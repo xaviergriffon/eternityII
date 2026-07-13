@@ -140,15 +140,53 @@ int http_clients_collect(http_client_info_t *out, int max)
     return n;
 }
 
+/**
+ * @brief Décode `board.grid[x][y]` (indice `id + ETERN_PARTS*rotation`, cf.
+ * `id_for_rotated_part`) en description de pièce, via `g_server_rotate_parts`
+ * (`src/app/etii_server.c`). Même décodage que `save_solution_csv`
+ * (`src/core/possibility.c`), avec le même repli sans couleurs si la table
+ * n'est pas (encore) disponible.
+ */
+static void decode_best_board_cell(int16_t idx, http_best_board_cell_t *out)
+{
+    if (idx < 0) {
+        out->id = -1;
+        return;
+    }
+    if (g_server_rotate_parts != NULL && idx < g_server_rotate_parts->size) {
+        const struct part *p = &g_server_rotate_parts->parts[idx];
+        out->id = p->id;
+        out->rotation = p->rotation;
+        out->top = p->top;
+        out->right = p->right;
+        out->bottom = p->bottom;
+        out->left = p->left;
+        return;
+    }
+    // Repli : table indisponible (ex. entre le démarrage et la fin de
+    // rotate_all_parts), pas de couleurs. Même formule que save_solution_csv.
+    out->id = (int16_t)(idx % ETERN_PARTS);
+    out->rotation = (int8_t)(idx / ETERN_PARTS);
+    out->top = -1;
+    out->right = -1;
+    out->bottom = -1;
+    out->left = -1;
+}
+
 void http_best_board_collect(http_best_board_view_t *out)
 {
     memset(out, 0, sizeof(*out));
     struct possibility_packet board;
     uint16_t alloc = 0;
     out->has_board = best_board_get(&g_server_best_board, &board, &alloc) ? 1 : 0;
-    if (out->has_board) {
-        out->alloc = alloc;
-        memcpy(out->grid, board.grid, sizeof(out->grid));
+    if (!out->has_board) {
+        return;
+    }
+    out->alloc = alloc;
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            decode_best_board_cell(board.grid[x][y], &out->grid[x][y]);
+        }
     }
 }
 

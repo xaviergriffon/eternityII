@@ -24,8 +24,12 @@
 /// Taille maximale d'une requête acceptée (ligne + en-têtes + corps), au-delà
 /// de laquelle la connexion est refusée (413) plutôt que de croître sans borne.
 #define HTTP_REQUEST_MAX 8192
-/// Taille du tampon de formatage de réponse fourni par l'appelant.
-#define HTTP_RESPONSE_MAX 8192
+/// Taille du tampon de formatage de réponse fourni par l'appelant. Dimensionné
+/// pour le plus gros corps produit : `GET /api/v1/best-board` sérialise jusqu'à
+/// ETERN_PARTS cases, chacune avec la description complète de la pièce posée
+/// (id, rotation, 4 couleurs de bord) — un ordre de grandeur plus gros que les
+/// autres routes (compteurs seuls).
+#define HTTP_RESPONSE_MAX 32768
 /// Longueur maximale (avec terminateur) de la méthode HTTP acceptée.
 #define HTTP_METHOD_MAX 8
 /// Longueur maximale (avec terminateur) du chemin de la requête accepté.
@@ -240,16 +244,36 @@ int http_json_format_clients(char *buf, size_t size, const http_client_info_t *i
  * ordre de grandeur plus grosse qu'un compteur, un consommateur qui ne
  * s'intéresse qu'au débit ne doit pas la payer à chaque poll.
  */
+/**
+ * @brief Description d'une case de `http_best_board_view_t.grid` : la pièce
+ * réellement posée (id, rotation, 4 couleurs de bord) — jamais le simple
+ * indice brut encodé dans `possibility_packet.grid` (`id + ETERN_PARTS*rotation`,
+ * cf. `id_for_rotated_part`), qui ne dit rien de la pièce sans la table des
+ * rotations pour le décoder. Même décodage que `save_solution_csv`
+ * (`src/core/possibility.c`), la référence existante pour ce calcul.
+ */
+typedef struct {
+    /// -1 si la case est vide (ne devrait pas arriver au-delà de `alloc`, mais
+    /// reflète le paquet tel quel) ; sinon l'identifiant réel de la pièce.
+    int16_t id;
+    /// Rotation appliquée (0-3), valide seulement si `id >= 0`.
+    int8_t rotation;
+    /// Couleurs des 4 bords de la pièce dans son orientation posée (motifs à
+    /// faire correspondre avec les cases voisines), valides seulement si `id >= 0`.
+    int8_t top;
+    int8_t right;
+    int8_t bottom;
+    int8_t left;
+} http_best_board_cell_t;
+
 typedef struct {
     /// 1 si un plateau a déjà été enregistré (aucun record avant le premier
     /// placement n'existe : `alloc`/`grid` ne sont valides que si `has_board`).
     int has_board;
     /// Nombre de pièces placées de ce plateau.
     unsigned alloc;
-    /// Grille : `grid[x][y]` encode l'indice de rotation de la pièce placée
-    /// (cf. `id_for_rotated_part`), -2 si la case est vide (ne devrait pas
-    /// arriver au-delà de `alloc`, mais reflète le paquet tel quel).
-    int16_t grid[ETERN_SIZE][ETERN_SIZE];
+    /// Grille de descriptions de pièces : `grid[x][y]`, cf. `http_best_board_cell_t`.
+    http_best_board_cell_t grid[ETERN_SIZE][ETERN_SIZE];
 } http_best_board_view_t;
 
 /**
