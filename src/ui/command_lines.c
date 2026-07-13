@@ -199,6 +199,7 @@ int backup_interpreter(void) {
     log_info("start backup\n");
     char *def_file = DEF_FILE;
     char *def_analyse_file = DEF_ANALYSE_FILE;
+    char *def_best_board_file = DEF_BEST_BOARD_FILE;
     int isServer = server;
     if (isServer == 0) {
         char *temp = malloc(sizeof(char) *(strlen(def_file) + 11));
@@ -207,6 +208,9 @@ int backup_interpreter(void) {
         temp = malloc(sizeof(char) * (strlen(def_analyse_file)+ 11));
         sprintf(temp, "%s_%i", def_analyse_file, getpid());
         def_analyse_file = temp;
+        temp = malloc(sizeof(char) * (strlen(def_best_board_file)+ 11));
+        sprintf(temp, "%s_%i", def_best_board_file, getpid());
+        def_best_board_file = temp;
     }
     int rb = backup(def_file);
     if (rb == BACKUP_SKIPPED_MAINTENANCE) {
@@ -220,10 +224,18 @@ int backup_interpreter(void) {
     } else if (rba != BACKUP_OK) {
         log_info("backup de %s échoué\n", def_analyse_file);
     }
+    // Représentation du meilleur plateau connu (pas seulement max_result) :
+    // même commande console, fichier dédié (cf. core/best_board.h). Absent des
+    // codes BACKUP_SKIPPED_MAINTENANCE/BACKUP_OK (best_board_save n'a pas de
+    // section « maintenance » à sauter, cf. best_board.c) : 0 = succès.
+    if (best_board_save(&g_server_best_board, def_best_board_file) != 0) {
+        log_info("backup de %s échoué\n", def_best_board_file);
+    }
     log_info("backup ended\n");
     if (isServer == 0) {
         free(def_file);
         free(def_analyse_file);
+        free(def_best_board_file);
     }
     return 0;
 }

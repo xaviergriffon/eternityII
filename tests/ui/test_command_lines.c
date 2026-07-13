@@ -17,6 +17,7 @@
 #include "app/control_registry.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
+#include "core/best_board.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -410,16 +411,34 @@ TEST do_command_line_backup_restore_import_round_trip(void)
     int allocs[] = { 1, 2, 3, 4 };
     dm_add(allocs, 4);
 
+    // Régression : backup_interpreter oubliait d'écrire ce fichier (best_board_save
+    // n'était branché que sur l'autobackup périodique et l'arrêt sur solution,
+    // jamais sur la commande console `backup`) — restore échouait ensuite avec
+    // "aucun plateau record connu" faute de fichier. On force un enregistrement
+    // pour que le round-trip ait quelque chose à sauvegarder/restaurer.
+    best_board_init(&g_server_best_board);
+    struct possibility_packet board;
+    memset(&board, 0, sizeof(board));
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            board.grid[x][y] = -2;
+        }
+    }
+    best_board_try_record(&g_server_best_board, &board, 4);
+
     char backup[] = "backup";
     int r_backup = run_command_quiet(backup);
     int back_exists = access("./eternityII.back", F_OK) == 0;
     int an_exists   = access("./eternityII-in_analyse.back", F_OK) == 0;
+    int bb_exists   = access("./eternityII-best_board.back", F_OK) == 0;
 
     dm_drain();
     unsigned long long after_drain = datas_size();
+    best_board_init(&g_server_best_board); /* efface l'enregistrement en mémoire */
     char restore[] = "restore";
     int r_restore = run_command_quiet(restore);
     unsigned long long after_restore = datas_size();
+    uint16_t restored_alloc = best_board_result(&g_server_best_board);
 
     char import[] = "import";
     int r_import = run_command_quiet(import);
@@ -427,8 +446,10 @@ TEST do_command_line_backup_restore_import_round_trip(void)
 
     /* --- nettoyage avant toute assertion --- */
     dm_drain();
+    best_board_init(&g_server_best_board);
     unlink("./eternityII.back");
     unlink("./eternityII-in_analyse.back");
+    unlink("./eternityII-best_board.back");
     if (chdir(saved_cwd) != 0) { /* best-effort : rien de mieux à faire ici */ }
     rmdir(dir);
     server = saved_server;
@@ -436,9 +457,11 @@ TEST do_command_line_backup_restore_import_round_trip(void)
     ASSERT_EQ_FMT(0, r_backup, "%d");
     ASSERT(back_exists);
     ASSERT(an_exists);
+    ASSERT(bb_exists);
     ASSERT_EQ_FMT(0ULL, after_drain, "%llu");
     ASSERT_EQ_FMT(0, r_restore, "%d");
     ASSERT_EQ_FMT(4ULL, after_restore, "%llu");  /* les 4 possibilités sont revenues */
+    ASSERT_EQ_FMT(4, (int)restored_alloc, "%d"); /* le plateau record est revenu aussi */
     ASSERT_EQ_FMT(0, r_import, "%d");
     ASSERT_EQ_FMT(8ULL, after_import, "%llu");   /* import ajoute par-dessus -> 4 + 4 */
     PASS();
@@ -536,15 +559,18 @@ TEST do_command_line_backup_client_mode_appends_pid(void)
     char backup[] = "backup";
     int r_backup = run_command_quiet(backup);
 
-    char expected_file[64], expected_analyse[64];
+    char expected_file[64], expected_analyse[64], expected_best_board[64];
     snprintf(expected_file, sizeof expected_file, "./eternityII.back_%i", (int)getpid());
     snprintf(expected_analyse, sizeof expected_analyse, "./eternityII-in_analyse.back_%i", (int)getpid());
+    snprintf(expected_best_board, sizeof expected_best_board, "./eternityII-best_board.back_%i", (int)getpid());
     int file_exists = access(expected_file, F_OK) == 0;
     int analyse_exists = access(expected_analyse, F_OK) == 0;
+    int best_board_exists = access(expected_best_board, F_OK) == 0;
 
     dm_drain();
     unlink(expected_file);
     unlink(expected_analyse);
+    unlink(expected_best_board);
     if (chdir(saved_cwd) != 0) { /* best-effort */ }
     rmdir(dir);
     server = saved_server;
@@ -552,6 +578,7 @@ TEST do_command_line_backup_client_mode_appends_pid(void)
     ASSERT_EQ_FMT(0, r_backup, "%d");
     ASSERT(file_exists);
     ASSERT(analyse_exists);
+    ASSERT(best_board_exists);
     PASS();
 }
 
