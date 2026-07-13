@@ -11,9 +11,11 @@
 #include "app/static_variables.h"
 #include "app/control_registry.h"
 #include "net/control_protocol.h"
+#include "core/best_board.h"
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
+#define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define NB_COMMANDS 33
 
 /**
@@ -313,6 +315,12 @@ int restore_interpreter(void) {
     } else if (restore_analysed(def_analyse_file) != 0) {
         log_error("restore analysed impossible (%s) : files analysées conservées\n", def_analyse_file);
         result = -1;
+    }
+    // Non bloquant : un backup plus ancien peut ne pas avoir ce fichier (feature
+    // ajoutée après coup) — le stock/analysed restaurés ci-dessus restent valides
+    // sans lui, seule la représentation du meilleur plateau reste vide.
+    if (result == 0 && best_board_load(&g_server_best_board, DEF_BEST_BOARD_FILE) != 0) {
+        log_error("restore best board impossible (%s) : aucun plateau record connu\n", DEF_BEST_BOARD_FILE);
     }
 
     // On ne reprend que si aucun arrêt n'a été demandé entre-temps

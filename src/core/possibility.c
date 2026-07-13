@@ -8,6 +8,7 @@
 #include "app/static_variables.h"
 #include "core/datamanager.h"
 #include "core/readdata.h"
+#include "core/best_board.h"
 
 // set_face_used / is_face_used : désormais static inline dans possibility.h
 // (appelées pour chaque candidat de la boucle chaude de recherche).
@@ -1307,6 +1308,11 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
             }
             log_info("max result:%i\n",max_result);
         }
+        // Genèse : seule étape de possibility.c produisant un plateau concret
+        // (celui de search_possiblity_light ci-dessus n'en a pas un dédié).
+        // Toujours appelé (best_board_try_record gate lui-même sur >) : côté
+        // serveur, first_possibility est la seule source locale du record.
+        best_board_try_record(&g_server_best_board, packet, packet->alloc);
         array_possibility_packet *aposs2 = build_single_array_possibility_packet(packet);
         if(add_possibility(NULL, aposs2))
         {

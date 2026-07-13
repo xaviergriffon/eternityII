@@ -9,6 +9,7 @@
 #include "app/etii_client.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
+#include "core/best_board.h"
 
 #ifdef WITH_CUDA
 #include "app/gpu_pruner.h"
@@ -644,6 +645,7 @@ static int search_packet_backtracking(client_possibility_t *client,
             counters[client->compteur]++;
             if (depth + 1 > max_result) {
                 max_result = depth + 1;
+                best_board_try_record(&g_search_best_board, &board, (uint16_t)(depth + 1));
             }
             continue;
         }
@@ -740,6 +742,7 @@ backtrack:;
         counters[client->compteur]++;
         if (board.alloc > max_result) {
             max_result = board.alloc;
+            best_board_try_record(&g_search_best_board, &board, board.alloc);
 #ifdef DEBUG_CHECK_POSSIBILITY
             log_info("max result:%i\n", max_result);
 #endif // DEBUG_CHECK_POSSIBILITY

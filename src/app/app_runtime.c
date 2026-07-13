@@ -23,6 +23,7 @@
 #include "app/etii_server.h"
 #include "app/etii_statistic.h"
 #include "core/datamanager.h"
+#include "core/best_board.h"
 #include "net/local_socket.h"
 #include "net/ipc_protocol.h"
 #include "ui/command_lines.h"
@@ -542,6 +543,26 @@ void *fork_checker(void *param) {
 #else
         ;
 #endif // DEBUG_LOCAL_SOCKET
+
+        // Représentation du meilleur plateau LOCAL à ce fork : envoyée en plus
+        // des stats, mais UNIQUEMENT quand ce fork bat son propre record
+        // (jamais à chaque tour, contrairement à IPC_MSG_STATS ci-dessus) —
+        // cf. core/best_board.h. `last_sent_best_board` est statique au thread :
+        // un fork ne renvoie donc le plateau qu'une seule fois par record.
+        {
+            static uint16_t last_sent_best_board = 0;
+            struct possibility_packet local_board;
+            uint16_t local_alloc = 0;
+            if (best_board_get(&g_search_best_board, &local_board, &local_alloc)
+                && local_alloc > last_sent_best_board) {
+                char boardbuf[1 + sizeof(struct possibility_packet)];
+                boardbuf[0] = IPC_MSG_BEST_BOARD;
+                memcpy(boardbuf + 1, &local_board, sizeof(local_board));
+                sendto(fork_checker_socket_id, boardbuf, sizeof boardbuf, MSG_DONTWAIT,
+                       (struct sockaddr *) main_addr, sizeof(struct sockaddr_un));
+                last_sent_best_board = local_alloc;
+            }
+        }
 		sleep(1);
 	}
     free(statistic);
@@ -631,6 +652,19 @@ void *server_tcp(void *param) {
                         memcpy(&fork_statistics[cpt], buf + 1,
                                sizeof(struct client_statistics));
                     }
+                }
+                break;
+
+            case IPC_MSG_BEST_BOARD:
+                if (numBytes >= (ssize_t)(1 + sizeof(struct possibility_packet))) {
+                    struct possibility_packet board;
+                    memcpy(&board, buf + 1, sizeof(board));
+                    // Agrégat du process PARENT sur ses forks : même règle
+                    // « premier à dépasser gagne » que g_search_best_board
+                    // côté fork (cf. core/best_board.h). C'est cette instance
+                    // que le canal de contrôle sert en réponse à
+                    // CTRL_GET_BEST_BOARD (etii_control.c).
+                    best_board_try_record(&g_client_aggregate_best_board, &board, board.alloc);
                 }
                 break;
 

@@ -49,6 +49,21 @@
 #define CTRL_COMMAND 5
 /// Résultat de l'exécution d'une commande à distance.
 #define CTRL_RESULT 6
+/// Demande la représentation du meilleur plateau connu du client (agrégat de
+/// ses forks, `g_client_aggregate_best_board`, cf. `core/best_board.h`).
+/// Émise par `control_session_step` (etii_server.c) uniquement quand un
+/// `CTRL_STATS` reçu juste avant rapporte un `max_result` supérieur au
+/// meilleur déjà connu du serveur — pas à chaque tour.
+#define CTRL_GET_BEST_BOARD 7
+/// Réponse à `CTRL_GET_BEST_BOARD` : payload = `uint8_t valid` puis, si
+/// `valid != 0`, `sizeof(struct possibility_packet)` octets bruts (même
+/// convention que le protocole de travail INST_GET/INST_ADD : struct copié
+/// tel quel sur le fil, round-trip valide sur le même build — jamais de
+/// comparaison par égalité sur ces octets, cf. la mise en garde sur le
+/// padding caché de `possibility_packet` malgré `packed`). `valid == 0` :
+/// le client n'a encore aucun enregistrement (cas normal juste après
+/// démarrage, avant le premier record local).
+#define CTRL_BEST_BOARD 8
 /**
  * @}
  */

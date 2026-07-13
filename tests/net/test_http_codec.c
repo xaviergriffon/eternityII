@@ -407,6 +407,81 @@ TEST http_json_format_clients_buffer_too_small_fails(void)
     PASS();
 }
 
+/* ---------- http_json_format_best_board ------------------------------------ */
+
+TEST http_json_format_best_board_no_record_is_false(void)
+{
+    http_best_board_view_t view;
+    memset(&view, 0, sizeof(view));
+    view.has_board = 0;
+
+    char buf[64];
+    int n = http_json_format_best_board(buf, sizeof(buf), &view);
+    ASSERT(n > 0);
+    ASSERT_STR_EQ("{\"has_board\":false}", buf);
+    PASS();
+}
+
+/* La grille expose la DESCRIPTION de la pièce (id, rotation, couleurs), pas
+   l'indice brut encodé dans possibility_packet.grid — demande explicite : on
+   doit pouvoir connaître l'id de la pièce, ses motifs et sa rotation sans
+   avoir à décoder soi-même l'indexation interne. */
+TEST http_json_format_best_board_golden(void)
+{
+    http_best_board_view_t view;
+    memset(&view, 0, sizeof(view));
+    view.has_board = 1;
+    view.alloc = 187;
+    /* Toutes les cases sont vides par défaut (id=-1), comme le produit
+       http_best_board_collect — un id=0 par défaut (memset) serait une pièce
+       valide à tort et gonflerait artificiellement le JSON attendu. */
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            view.grid[x][y].id = -1;
+        }
+    }
+    view.grid[0][0].id = 139;
+    view.grid[0][0].rotation = 2;
+    view.grid[0][0].top = 2;
+    view.grid[0][0].right = 15;
+    view.grid[0][0].bottom = 15;
+    view.grid[0][0].left = 3;
+
+    char buf[8192];
+    int n = http_json_format_best_board(buf, sizeof(buf), &view);
+    ASSERT(n > 0);
+    ASSERT(strstr(buf, "\"has_board\":true") != NULL);
+    ASSERT(strstr(buf, "\"alloc\":187") != NULL);
+    ASSERT(strstr(buf, "{\"id\":139,\"rotation\":2,\"top\":2,\"right\":15,\"bottom\":15,\"left\":3}") != NULL);
+    ASSERT(strstr(buf, "null") != NULL);
+    ASSERT(strstr(buf, "]}") != NULL); /* grille bien refermée */
+    PASS();
+}
+
+TEST http_json_format_best_board_buffer_too_small_fails(void)
+{
+    http_best_board_view_t view;
+    memset(&view, 0, sizeof(view));
+    view.has_board = 1;
+    view.grid[0][0].id = 1;
+
+    char buf[8];
+    int n = http_json_format_best_board(buf, sizeof(buf), &view);
+    ASSERT_EQ_FMT(-1, n, "%d");
+    PASS();
+}
+
+TEST http_json_format_best_board_null_args_fail(void)
+{
+    http_best_board_view_t view;
+    memset(&view, 0, sizeof(view));
+    char buf[64];
+    ASSERT_EQ_FMT(-1, http_json_format_best_board(NULL, sizeof(buf), &view), "%d");
+    ASSERT_EQ_FMT(-1, http_json_format_best_board(buf, sizeof(buf), NULL), "%d");
+    ASSERT_EQ_FMT(-1, http_json_format_best_board(buf, 0, &view), "%d");
+    PASS();
+}
+
 TEST http_json_format_status_null_state_fails(void)
 {
     http_status_view_t view;
@@ -435,6 +510,11 @@ SUITE(http_codec_suite)
     RUN_TEST(http_request_parse_huge_content_length_is_too_large);
     RUN_TEST(http_request_parse_oversized_without_terminator_is_too_large);
     RUN_TEST(http_request_parse_rejects_invalid_arguments);
+
+    RUN_TEST(http_json_format_best_board_no_record_is_false);
+    RUN_TEST(http_json_format_best_board_golden);
+    RUN_TEST(http_json_format_best_board_buffer_too_small_fails);
+    RUN_TEST(http_json_format_best_board_null_args_fail);
 
     RUN_TEST(http_route_resolve_known_routes);
     RUN_TEST(http_route_resolve_not_found);

@@ -16,12 +16,15 @@
 #include "app/control_registry.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
+#include "core/best_board.h"
 #include "core/part.h"
 #include "core/readdata.h"
 #include "net/tcpserver.h"
 #include "net/http_server.h"
 
 client_t *thread_params = NULL;
+
+struct array_part *g_server_rotate_parts = NULL;
 
 // Nombre de modification des files par client
 unsigned long long *fileUpdates = NULL;
@@ -260,6 +263,11 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
             log_error("autobackup : sauté (maintenance en cours) sur ./temp_analysed.back\n");
         } else if (rba != BACKUP_OK) {
             log_error("autobackup : échec sur ./temp_analysed.back\n");
+        }
+        // Représentation du meilleur plateau connu (pas seulement max_result) :
+        // même cadence que le reste du stock, fichier dédié (cf. core/best_board.h).
+        if (best_board_save(&g_server_best_board, "./temp-best_board.back") != 0) {
+            log_error("autobackup : échec sur ./temp-best_board.back\n");
         }
     }
 }
@@ -593,6 +601,9 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                         } else if (rba != BACKUP_OK) {
                             log_error("arrêt sur solution : échec du backup sur ./eternityII-in_analyse.back\n");
                         }
+                        if (best_board_save(&g_server_best_board, "./eternityII-best_board.back") != 0) {
+                            log_error("arrêt sur solution : échec du backup sur ./eternityII-best_board.back\n");
+                        }
                         log_event("serveur arrêté suite à la solution (stock sauvegardé)");
                         log_info("serveur arrêté suite à la solution — stock sauvegardé\n");
                         flush_info();
@@ -785,6 +796,37 @@ int control_session_step(client_t *client, int session_index, int timeout_ms)
                       (unsigned long long)stats.pruner_removed,
                       (unsigned long long)stats.pruner_cells_per_second);
             control_registry_touch(session_index);
+
+            // Le client rapporte un record supérieur à celui déjà connu du
+            // serveur : on tire sa représentation (pas seulement le compte),
+            // sur CETTE MÊME connexion, avant de repasser en attente de la
+            // prochaine commande — c'est le serveur qui demande, uniquement
+            // quand il en a besoin (jamais à chaque CTRL_STATS).
+            if (stats.max_result > (unsigned long long)best_board_result(&g_server_best_board)) {
+                if (ctrl_send_frame(client->socket_id, CTRL_GET_BEST_BOARD, NULL, 0) != 0) {
+                    log_error("session de contrôle : échec d'envoi de CTRL_GET_BEST_BOARD\n");
+                    return 0;
+                }
+                void *bpayload = NULL;
+                int32_t blen = 0;
+                int brcmd = ctrl_recv_frame(client->socket_id, &bpayload, &blen);
+                if (brcmd != CTRL_BEST_BOARD) {
+                    log_error("session de contrôle : réponse CTRL_BEST_BOARD attendue, reçu %d\n", brcmd);
+                    free(bpayload);
+                    return 0;
+                }
+                if (bpayload != NULL && blen == (int32_t)(1 + sizeof(struct possibility_packet))
+                    && ((uint8_t *)bpayload)[0] != 0) {
+                    struct possibility_packet board;
+                    memcpy(&board, (uint8_t *)bpayload + 1, sizeof(board));
+                    if (best_board_try_record(&g_server_best_board, &board, board.alloc)) {
+                        log_event("nouveau plateau record reçu d'un client (%u pièces)",
+                                  (unsigned)board.alloc);
+                    }
+                }
+                free(bpayload);
+                control_registry_touch(session_index);
+            }
         } else {
             log_error("session de contrôle : commande interne inconnue (%u)\n", (unsigned)cmd);
         }
@@ -1155,6 +1197,9 @@ void runserver(const char* file)
     free_bigarray(map_parts);
     /* rotateParts reste en vie : les threads TCP l'utilisent pour sérialiser
      * les solutions en CSV avec les couleurs de bord. Libéré en fin de runserver. */
+    // Même table, exposée en globale pour que l'API HTTP (src/net/http_server.c)
+    // décode grid[x][y] en pièce réelle sans dupliquer la lecture du CSV.
+    g_server_rotate_parts = rotateParts;
 
     // Demarrage d'un thread de nettoyage des possibilités sans suite
     create_rmnonext_thread();
@@ -1199,5 +1244,6 @@ void runserver(const char* file)
             thread_id = try_assign_client_slot(client_id, &busy_logged);
         }
     }
+    g_server_rotate_parts = NULL;
     free_array_part(rotateParts);
 }

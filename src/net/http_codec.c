@@ -175,6 +175,9 @@ http_route_t http_route_resolve(const char *method, const char *path)
     if (strcmp(path, "/api/v1/clients/stats") == 0) {
         return (strcmp(method, "POST") == 0) ? HTTP_ROUTE_CLIENTS_STATS : HTTP_ROUTE_BAD_METHOD;
     }
+    if (strcmp(path, "/api/v1/best-board") == 0) {
+        return (strcmp(method, "GET") == 0) ? HTTP_ROUTE_BEST_BOARD : HTTP_ROUTE_BAD_METHOD;
+    }
     return HTTP_ROUTE_NOT_FOUND;
 }
 
@@ -400,4 +403,65 @@ int http_json_format_status(char *buf, size_t size, const http_status_view_t *vi
         return -1;
     }
     return written;
+}
+
+int http_json_format_best_board(char *buf, size_t size, const http_best_board_view_t *view)
+{
+    if (buf == NULL || size == 0 || view == NULL) {
+        return -1;
+    }
+
+    if (!view->has_board) {
+        int written = snprintf(buf, size, "{\"has_board\":false}");
+        if (written < 0 || (size_t)written >= size) {
+            return -1;
+        }
+        return written;
+    }
+
+    size_t offset = 0;
+    int written = snprintf(buf + offset, size - offset,
+        "{\"has_board\":true,\"alloc\":%u,\"grid\":[", view->alloc);
+    if (written < 0 || (size_t)written >= size - offset) {
+        return -1;
+    }
+    offset += (size_t)written;
+
+    for (int y = 0; y < ETERN_SIZE; y++) {
+        written = snprintf(buf + offset, size - offset, "%s[", (y == 0) ? "" : ",");
+        if (written < 0 || (size_t)written >= size - offset) {
+            return -1;
+        }
+        offset += (size_t)written;
+
+        for (int x = 0; x < ETERN_SIZE; x++) {
+            const http_best_board_cell_t *cell = &view->grid[x][y];
+            if (cell->id < 0) {
+                written = snprintf(buf + offset, size - offset, "%snull", (x == 0) ? "" : ",");
+            } else {
+                written = snprintf(buf + offset, size - offset,
+                    "%s{\"id\":%d,\"rotation\":%d,\"top\":%d,\"right\":%d,\"bottom\":%d,\"left\":%d}",
+                    (x == 0) ? "" : ",", cell->id, cell->rotation,
+                    cell->top, cell->right, cell->bottom, cell->left);
+            }
+            if (written < 0 || (size_t)written >= size - offset) {
+                return -1;
+            }
+            offset += (size_t)written;
+        }
+
+        written = snprintf(buf + offset, size - offset, "]");
+        if (written < 0 || (size_t)written >= size - offset) {
+            return -1;
+        }
+        offset += (size_t)written;
+    }
+
+    written = snprintf(buf + offset, size - offset, "]}");
+    if (written < 0 || (size_t)written >= size - offset) {
+        return -1;
+    }
+    offset += (size_t)written;
+
+    return (int)offset;
 }

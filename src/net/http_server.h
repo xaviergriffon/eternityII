@@ -78,4 +78,13 @@ void http_status_collect(http_status_view_t *out);
  */
 int http_clients_collect(http_client_info_t *out, int max);
 
+/**
+ * @brief Construit un instantané du meilleur plateau connu du serveur
+ *        (`g_server_best_board`, cf. `core/best_board.h`) pour
+ *        `GET /api/v1/best-board`.
+ *
+ * @param out Vue à remplir (jamais NULL, appelant garanti).
+ */
+void http_best_board_collect(http_best_board_view_t *out);
+
 #endif /* eternityII_http_server_h */
