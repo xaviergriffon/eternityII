@@ -522,7 +522,12 @@ void check_client_threads_step(int *last_record)
     // ce qui réduit la section critique au seul échange de pointeur (voir
     // static_variables.h pour le détail de la race corrigée).
     size_t table_size = 256 + (size_t)NB_THREADS * 80;
-    size_t lastcheck_size = table_size + 4096;
+    // La ligne forward-check (voir plus bas) ajoute jusqu'à ~24 octets par
+    // valeur de distance 1..FORWARD_CHECK_K : avec le défaut (4096) le fixe
+    // suffit large mais un FORWARD_CHECK_K élevé (ex. 250, via -D) le ferait
+    // déborder comme fctemp ci-dessous — même correctif, même raison.
+    size_t fc_margin = 256 + (size_t)FORWARD_CHECK_K * 24;
+    size_t lastcheck_size = table_size + 4096 + fc_margin;
     char *report = calloc(lastcheck_size, sizeof(char));
 
         // Côté client, le travail tourne dans les processus fork (mémoire séparée
@@ -555,7 +560,12 @@ void check_client_threads_step(int *last_record)
             }
         }
         if (fca > 0) {
-            char *fctemp = calloc(1000, sizeof(char));
+            // Buffer dimensionné sur FORWARD_CHECK_K : la boucle ci-dessous ajoute
+            // une entrée " d%d:%.1f%%" (jusqu'à ~12 octets) par distance 1..K.
+            // Un buffer fixe (comme l'ancien calloc(1000, ...)) débordait le tas
+            // dès que FORWARD_CHECK_K dépassait la grosse centaine d'unités.
+            size_t fctemp_size = 256 + (size_t)FORWARD_CHECK_K * 24;
+            char *fctemp = calloc(fctemp_size, sizeof(char));
             int fcoff = sprintf(fctemp, "forward-check K=%d : pruned %llu/%llu (%.2f%%), par distance :",
                                 FORWARD_CHECK_K, fcp, fca, 100.0 * (double)fcp / (double)fca);
             for (int j = 1; j <= FORWARD_CHECK_K; j++) {
