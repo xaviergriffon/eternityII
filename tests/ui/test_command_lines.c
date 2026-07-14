@@ -104,6 +104,104 @@ TEST do_command_line_help_runs(void)
     PASS();
 }
 
+/* help <commande> / help <catégorie> : sujets connus -> 0 ; inconnu -> -1
+   (avec ou sans suggestion de typo). */
+TEST do_command_line_help_with_topic(void)
+{
+    char cmd_command[] = "help limit";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd_command), "%d");
+
+    char cmd_alias[] = "help quit"; /* alias résolu vers exit */
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd_alias), "%d");
+
+    char cmd_category[] = "help stock";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd_category), "%d");
+
+    char cmd_near[] = "help limti"; /* proche de "limit" -> suggestion émise */
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd_near), "%d");
+
+    char cmd_far[] = "help zzzzzzzzz"; /* trop loin -> aucune suggestion */
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd_far), "%d");
+    PASS();
+}
+
+/* help_format_general (pure) : contient les titres de catégories, l'usage des
+   commandes à arguments et les alias des entrées canoniques. */
+TEST help_format_general_lists_categories_and_aliases(void)
+{
+    char out[16384];
+    ASSERT_EQ_FMT(0, help_format_general(out, sizeof out), "%d");
+    ASSERT(strstr(out, "Recherche & régulation") != NULL);
+    ASSERT(strstr(out, "Pilotage des clients (serveur)") != NULL);
+    ASSERT(strstr(out, "limit <n>") != NULL);            /* usage affiché, pas le nom nu */
+    ASSERT(strstr(out, "(alias : quit)") != NULL);       /* alias rattaché à exit */
+    ASSERT(strstr(out, "[serveur]") != NULL);            /* marqueur des commandes serveur */
+    PASS();
+}
+
+/* help_format_topic (pure) : détail d'une commande (usage, portée, propagation,
+   complément), section d'une catégorie, -1 sur sujet inconnu. */
+TEST help_format_topic_command_and_category(void)
+{
+    char out[16384];
+
+    ASSERT_EQ_FMT(0, help_format_topic("expand", out, sizeof out), "%d");
+    ASSERT(strstr(out, "expand <niveau>") != NULL);
+    ASSERT(strstr(out, "propagation") != NULL);
+    ASSERT(strstr(out, "EXPAND_MAX_LEVELS") != NULL);    /* le complément est affiché */
+
+    ASSERT_EQ_FMT(0, help_format_topic("clients", out, sizeof out), "%d");
+    ASSERT(strstr(out, "serveur uniquement") != NULL);
+
+    /* mot-clé de catégorie : n'affiche que sa section */
+    ASSERT_EQ_FMT(0, help_format_topic("sauvegarde", out, sizeof out), "%d");
+    ASSERT(strstr(out, "backup") != NULL);
+    ASSERT(strstr(out, "Recherche & régulation") == NULL);
+
+    ASSERT_EQ_FMT(-1, help_format_topic("nonexistent", out, sizeof out), "%d");
+    ASSERT_EQ_FMT(-1, help_format_topic(NULL, out, sizeof out), "%d");
+    PASS();
+}
+
+/* command_canonical_name (pure) : alias -> canonique, casse ignorée, NULL sûr. */
+TEST command_canonical_name_resolves_aliases_and_case(void)
+{
+    ASSERT_STR_EQ("exit", command_canonical_name("quit"));
+    ASSERT_STR_EQ("help", command_canonical_name("?"));
+    ASSERT_STR_EQ("statistic", command_canonical_name("stats"));
+    ASSERT_STR_EQ("rmnonext", command_canonical_name("prune"));
+    ASSERT_STR_EQ("sorta", command_canonical_name("sortAsc"));
+    ASSERT_STR_EQ("sortd", command_canonical_name("sortDesc"));
+    ASSERT_STR_EQ("maxStockByThread", command_canonical_name("MAXSTOCKBYTHREAD"));
+    ASSERT_STR_EQ("limit", command_canonical_name("limit"));
+    ASSERT_EQ(NULL, command_canonical_name("nonexistent"));
+    ASSERT_EQ(NULL, command_canonical_name(NULL));
+    PASS();
+}
+
+/* do_command_line : la casse est ignorée et un alias exécute bien l'entrée
+   canonique (LIMIT/sortAsc fixent et trient comme limit/sorta). */
+TEST do_command_line_case_insensitive_and_alias_dispatch(void)
+{
+    unsigned long long saved = max_search_by_sec;
+    char upper[] = "LIMIT 1234";
+    ASSERT_EQ_FMT(0, run_command_quiet(upper), "%d");
+    ASSERT_EQ_FMT(1234ULL, max_search_by_sec, "%llu");
+    max_search_by_sec = saved;
+
+    char alias[] = "sortAsc"; /* alias de sorta, stock vide : tri sans effet */
+    ASSERT_EQ_FMT(0, run_command_quiet(alias), "%d");
+    PASS();
+}
+
+/* expand sans argument : CMD_ERR_USAGE -> rappel d'usage automatique, -1 rendu. */
+TEST do_command_line_expand_requires_arg(void)
+{
+    char cmd[] = "expand";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+    PASS();
+}
+
 /* maxStockByThread <n> : fixe le global correspondant. */
 TEST do_command_line_max_stock_sets_global(void)
 {
@@ -1108,6 +1206,12 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_handles_empty_input);
     RUN_TEST(do_command_line_unknown_returns_error);
     RUN_TEST(do_command_line_help_runs);
+    RUN_TEST(do_command_line_help_with_topic);
+    RUN_TEST(help_format_general_lists_categories_and_aliases);
+    RUN_TEST(help_format_topic_command_and_category);
+    RUN_TEST(command_canonical_name_resolves_aliases_and_case);
+    RUN_TEST(do_command_line_case_insensitive_and_alias_dispatch);
+    RUN_TEST(do_command_line_expand_requires_arg);
     RUN_TEST(do_command_line_max_stock_sets_global);
     RUN_TEST(do_command_line_max_stock_requires_arg);
     RUN_TEST(do_command_line_pruner_batch_is_clamped);

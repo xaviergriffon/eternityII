@@ -1,9 +1,23 @@
 # Console interactive
 
 Une fois lancé (quel que soit le mode), le programme écoute des commandes sur
-l'entrée standard. Taper `help` pour la liste complète. En cas de faute de frappe, le
-programme propose automatiquement la commande la plus proche
-(`vouliez-vous dire "sortd" ?`).
+l'entrée standard. En cas de faute de frappe, le programme propose automatiquement
+la commande la plus proche (`vouliez-vous dire "sortd" ?`).
+
+## Aide intégrée
+
+- `help` — liste toutes les commandes **groupées par catégorie**, avec leur syntaxe
+  et un résumé d'une ligne.
+- `help <commande>` — détail d'une commande : usage, catégorie, portée
+  (serveur/client), propagation aux processus fils, et complément d'explication.
+- `help <catégorie>` — n'affiche que la section demandée : `general`, `recherche`,
+  `stock`, `sauvegarde`, `diagnostic` ou `clients`.
+
+Les noms de commandes sont **insensibles à la casse** (`maxstockbythread` fonctionne)
+et quelques **alias** sont acceptés : `?` (help), `quit` (exit), `stats` (statistic),
+`prune` (rmnonext), `sortAsc` (sorta), `sortDesc` (sortd). Une commande appelée avec
+un argument manquant affiche automatiquement son rappel d'usage
+(`usage : limit <n> — …`) au lieu d'échouer en silence.
 
 Le code correspondant vit dans [src/ui/console.c](../src/ui/console.c),
 [src/ui/command_lines.c](../src/ui/command_lines.c) (interpréteurs),
@@ -14,37 +28,67 @@ Le code correspondant vit dans [src/ui/console.c](../src/ui/console.c),
 
 ## Commandes
 
+Les commandes sont présentées ici par catégorie, comme dans `help`.
+
+### Général
+
 | Commande | Description |
 |---|---|
-| `help` | Affiche la liste des commandes |
-| `backup` | Sauvegarde les files de possibilités dans `eternityII.back` et `eternityII-in_analyse.back` |
-| `restore` | Restaure les files depuis les fichiers `.back` |
-| `import` | Importe des possibilités depuis les fichiers `.back` dans les files courantes |
-| `exit` | Arrête proprement le programme (sauvegarde automatique) |
-| `check` | Affiche le dernier état analysé |
-| `sorta` | Trie les possibilités par ordre croissant (moins avancées en premier) |
-| `sortd [n]` | Trie par ordre décroissant (plus avancées en premier) ; `n` pour une file spécifique |
+| `help [commande\|catégorie]` | Affiche l'aide générale, le détail d'une commande, ou une seule catégorie (alias : `?`) |
+| `exit` | Arrête proprement le programme (alias : `quit`) |
+
+### Recherche & régulation
+
+| Commande | Description |
+|---|---|
+| `pause` | Pause administrative de la recherche (`REQUEST_ADMIN_PAUSE`) — distincte de la pause de régulation de débit interne (`limit`), ne se lève que par `resume` ; diffuse aussi `CTRL_COMMAND "pause"` à tous les clients connectés (utile côté serveur, qui n'a pas de recherche locale à mettre en pause), et persiste l'état pour les clients qui se connecteront après |
+| `resume` | Lève une pause administrative posée par `pause` ; diffuse aussi `CTRL_COMMAND "resume"` à tous les clients connectés et efface l'état persisté |
+| `limit N` | Limite la vitesse de recherche à `N` essais/seconde (0 = illimité) |
+| `maxStockByThread N` | Ajuste le stock max par thread à la volée |
+| `prunerBatch N` | Ajuste la taille de lot d'échange du pruner à la volée (borné à [1, 65536]) |
+
+### Stock & files
+
+| Commande | Description |
+|---|---|
+| `sorta` | Trie les possibilités par ordre croissant (moins avancées en premier ; alias : `sortAsc`) |
+| `sortd [n]` | Trie par ordre décroissant (plus avancées en premier) ; `n` pour une file spécifique (alias : `sortDesc`) |
 | `sortdm` | Trie toutes les files en parallèle |
 | `split` | Répartit les possibilités entre les 10 files |
 | `regroup` | Regroupe toutes les files en une seule |
-| `rmnonext` | Supprime les possibilités sans continuation possible (élagage) |
+| `rmnonext` | Supprime les possibilités sans continuation possible (élagage ; alias : `prune`) |
 | `expand N` | Développe le stock jusqu'au niveau de curseur `N` ([anti-famine](utilisation.md#expansion-du-stock-au-démarrage---expand-level-anti-famine), borné à 4 passes / `EXPAND_MAX_STOCK` possibilités) |
+| `restockanalysed` | Remet les possibilités en cours d'analyse dans le stock |
 | `min` | Affiche le niveau minimum dans les files |
-| `statistic` | Affiche des statistiques sur le contenu des files |
+
+### Sauvegarde & restauration
+
+| Commande | Description |
+|---|---|
+| `backup` | Sauvegarde les files de possibilités dans `eternityII.back` et `eternityII-in_analyse.back` |
+| `restore [fichier [fichier_analyse]]` | Restaure les files depuis les fichiers `.back` (remplace le stock) |
+| `import` | Importe des possibilités depuis les fichiers `.back` dans les files courantes |
 | `loadjson` | Importe une possibilité depuis une chaîne JSON (équivalent de `import` pour le format JSON) |
+
+### Diagnostic & vérification
+
+| Commande | Description |
+|---|---|
+| `check` | Affiche le dernier état analysé |
+| `print` | Affiche toutes les files au format JSON |
+| `printfile N` | Affiche le contenu de la file numéro `N` |
+| `printanalysed` | Affiche les possibilités en cours d'analyse |
+| `statistic` | Affiche des statistiques sur le contenu des files (alias : `stats`) |
 | `checkdatas` | Vérifie l'intégrité des possibilités |
 | `checkduplicate` | Recherche les doublons dans les files |
 | `checkfiles` | Vérifie l'intégrité de toutes les files |
 | `checkfile N` | Vérifie la file numéro `N` |
 | `checkdirections` | Vérifie la cohérence des directions de parcours |
-| `print` | Affiche toutes les files au format JSON |
-| `printfile N` | Affiche le contenu de la file numéro `N` |
-| `printanalysed` | Affiche les possibilités en cours d'analyse |
-| `limit N` | Limite la vitesse de recherche à `N` essais/seconde (0 = illimité) |
-| `maxStockByThread N` | Ajuste le stock max par thread à la volée |
-| `prunerBatch N` | Ajuste la taille de lot d'échange du pruner à la volée (borné à [1, 65536]) |
-| `pause` | Pause administrative de la recherche (`REQUEST_ADMIN_PAUSE`) — distincte de la pause de régulation de débit interne (`limit`), ne se lève que par `resume` ; diffuse aussi `CTRL_COMMAND "pause"` à tous les clients connectés (utile côté serveur, qui n'a pas de recherche locale à mettre en pause), et persiste l'état pour les clients qui se connecteront après |
-| `resume` | Lève une pause administrative posée par `pause` ; diffuse aussi `CTRL_COMMAND "resume"` à tous les clients connectés et efface l'état persisté |
+
+### Pilotage des clients (serveur)
+
+| Commande | Description |
+|---|---|
 | `clients` *(serveur)* | Liste les sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) actives (pid, forks, mode, dernière activité) |
 | `clientsStats` *(serveur)* | Demande les statistiques agrégées de chaque client connecté via son canal de contrôle (équivalent de `POST /api/v1/clients/stats` sur l'[API HTTP](api_http_rest.md)) |
 | `clientsCmd <ligne>` *(serveur)* | Pousse `<ligne>` à distance à tous les clients connectés (filtrée par une liste blanche : `pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`) |

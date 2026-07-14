@@ -233,7 +233,7 @@ Beyond the work protocol above (client-initiated: GET/ADD/ANALYSED/…), a **sec
 | `src/net/tcpclient.c` / `src/net/tcpserver.c` | Low-level TCP socket setup |
 | `src/net/local_socket.c` | Unix domain UDP sockets for parent↔child IPC |
 | `src/core/lifo.c` | Queue (`File`) and flat array (`big_table`) data structures |
-| `src/ui/console.c` / `src/ui/command_lines.c` | Interactive command parsing from stdin; Levenshtein-based typo suggestion for unknown commands |
+| `src/ui/console.c` / `src/ui/command_lines.c` | Interactive command parsing from stdin; Levenshtein-based typo suggestion for unknown commands. The `commands[]` table carries help metadata (category, usage, summary, details, aliases) — single source of truth for the categorized `help` / `help <topic>` output and the automatic usage recall (`CMD_ERR_USAGE`); command names are case-insensitive |
 | `src/ui/command_history.c` | In-session command history (↑/↓ recall, 100-entry ring, dedup) |
 | `src/ui/logger.c` | Thread-safe `log_info/log_debug/log_error/log_console/log_event/log_status` — ANSI build |
 | `src/ui/logger_ncurses.c` | Ncurses variant of logger (compiled instead of `src/ui/logger.c` when `NCURSES=1`); 4-pane layout: output pad, stats banner, events, input |
