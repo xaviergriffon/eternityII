@@ -7,6 +7,8 @@
  */
 #include "greatest.h"
 #include "net/local_socket.h"
+#include "net/ipc_protocol.h"
+#include "core/possibility.h"
 #include "app/static_variables.h"
 
 #include <stdlib.h>
@@ -210,6 +212,68 @@ TEST build_udp_local_socket_does_not_leak_fd_on_bind_failure(void)
     PASS();
 }
 
+/* ipc_max_datagram : couvre chacun des trois types de message IPC. */
+TEST ipc_max_datagram_covers_all_message_types(void)
+{
+    size_t max_dgram = ipc_max_datagram();
+    ASSERT(max_dgram >= 1 + sizeof(struct client_statistics));   /* IPC_MSG_STATS */
+    ASSERT(max_dgram >= 1 + sizeof(struct possibility_packet));  /* IPC_MSG_BEST_BOARD */
+    ASSERT(max_dgram >= 1 + IPC_LINE_MAX + 1);                   /* IPC_MSG_LOG_* */
+    PASS();
+}
+
+/* Régression macOS : un datagramme IPC de taille maximale doit passer entre
+ * deux sockets construits par build_udp_local_socket. Sans SO_SNDBUF relevé,
+ * macOS limite un datagramme AF_UNIX à net.local.dgram.maxdgram (2048 par
+ * défaut) : l'envoi échoue en EMSGSIZE — silencieusement dans run_checker,
+ * donc le parent ne reçoit plus AUCUNE statistique des forks (stats/records
+ * muets, l'application semble « ne rien faire »). Déclenché dès que
+ * sizeof(struct client_statistics) dépasse 2047 (ex. FC_STAT_MAX_K=256 pour
+ * accompagner un FORWARD_CHECK_K élevé) — et déjà latent pour les lignes de
+ * log proches d'IPC_LINE_MAX (4000 > 2048), même en configuration par défaut. */
+TEST build_udp_local_socket_allows_max_ipc_datagram(void)
+{
+    const char *rx_path = "/tmp/etii_lsock_maxdgram_rx";
+    const char *tx_path = "/tmp/etii_lsock_maxdgram_tx";
+
+    struct sockaddr_un *rx_addr = build_sockaddr(rx_path);
+    int rx_fd = build_udp_local_socket(rx_addr);
+    ASSERT(rx_fd >= 0);
+
+    struct sockaddr_un *tx_addr = build_sockaddr(tx_path);
+    int tx_fd = build_udp_local_socket(tx_addr);
+    ASSERT(tx_fd >= 0);
+
+    /* recv borné dans le temps : si l'envoi échoue, on ne bloque pas le runner. */
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(rx_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    size_t max_dgram = ipc_max_datagram();
+    char *payload = malloc(max_dgram);
+    ASSERT(payload != NULL);
+    memset(payload, 0x5a, max_dgram);
+
+    ssize_t sent = sendto(tx_fd, payload, max_dgram, 0,
+                          (struct sockaddr *)rx_addr, sizeof(struct sockaddr_un));
+    ASSERT_EQ_FMT((long)max_dgram, (long)sent, "%ld");
+
+    char *rxbuf = malloc(max_dgram);
+    ASSERT(rxbuf != NULL);
+    ssize_t received = recvfrom(rx_fd, rxbuf, max_dgram, 0, NULL, NULL);
+    ASSERT_EQ_FMT((long)max_dgram, (long)received, "%ld");
+    ASSERT_EQ_FMT(0, memcmp(payload, rxbuf, max_dgram), "%d");
+
+    free(payload);
+    free(rxbuf);
+    close(rx_fd);
+    close(tx_fd);
+    unlink(rx_path);
+    unlink(tx_path);
+    free(rx_addr);
+    free(tx_addr);
+    PASS();
+}
+
 SUITE(local_socket_suite)
 {
     RUN_TEST(build_sockaddr_sets_family_and_path);
@@ -219,4 +283,6 @@ SUITE(local_socket_suite)
     RUN_TEST(build_udp_local_socket_bind_fails);
     RUN_TEST(send_command_to_childs_sendto_fails);
     RUN_TEST(build_udp_local_socket_does_not_leak_fd_on_bind_failure);
+    RUN_TEST(ipc_max_datagram_covers_all_message_types);
+    RUN_TEST(build_udp_local_socket_allows_max_ipc_datagram);
 }
