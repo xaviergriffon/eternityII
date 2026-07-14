@@ -18,7 +18,7 @@
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
-#define NB_COMMANDS 39
+#define NB_COMMANDS 42
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -146,24 +146,24 @@ static command_description commands[NB_COMMANDS] = {
      "fixe la taille de lot d'échange du pruner",
      "Bornée à [1, PRUNER_BATCH_MAX] pour maîtriser la mémoire du pruner et les tampons GPU.", NULL},
 
-    {"sorta", sort_ascending_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
+    {"sortAsc", sort_ascending_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
      "trie le stock par ordre croissant (moins avancées d'abord)", NULL, NULL},
-    {"sortd", sort_descending_interpreter, 0, CMD_CAT_STOCK, 0, "sortd [n]",
+    {"sortDesc", sort_descending_interpreter, 0, CMD_CAT_STOCK, 0, "sortDesc [n]",
      "trie par ordre décroissant, toutes les files ou la file <n>", NULL, NULL},
-    {"sortdm", sortdm_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
+    {"sortDescMulti", sortdm_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
      "trie toutes les files en parallèle (multi-thread)", NULL, NULL},
     {"split", split_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
      "répartit les possibilités entre les différentes files", NULL, NULL},
     {"regroup", regroup_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
      "regroupe toutes les possibilités dans une seule file", NULL, NULL},
-    {"rmnonext", rmnonext_interpreter, 1, CMD_CAT_STOCK, 0, NULL,
+    {"removeNoNext", rmnonext_interpreter, 1, CMD_CAT_STOCK, 0, NULL,
      "supprime les possibilités sans continuation possible (élagage)", NULL, NULL},
     {"expand", expand_interpreter, 0, CMD_CAT_STOCK, 0, "expand <niveau>",
      "développe le stock jusqu'au niveau de curseur <niveau> (anti-famine)",
      "Place une pièce candidate sur la case suivante de chaque possibilité, jusqu'au niveau\n"
      "demandé — utile côté serveur quand le stock distribuable s'est raréfié. Borné en\n"
      "profondeur (EXPAND_MAX_LEVELS) et en volume (EXPAND_MAX_STOCK) ; niveau 3-4 recommandé.", NULL},
-    {"restockanalysed", restockanalysed_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
+    {"restockAnalysed", restockanalysed_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
      "remet les possibilités en cours d'analyse dans le stock", NULL, NULL},
     {"min", min_interpreter, 1, CMD_CAT_STOCK, 0, NULL,
      "affiche le niveau minimal de pièces placées dans les files", NULL, NULL},
@@ -179,54 +179,60 @@ static command_description commands[NB_COMMANDS] = {
     {"import", import_interpreter, 0, CMD_CAT_BACKUP, 0, NULL,
      "importe les fichiers .back en plus du stock courant",
      "Contrairement à « restore », le stock courant n'est pas vidé.", NULL},
-    {"loadjson", loadjson_interpreter, 0, CMD_CAT_BACKUP, 0, NULL,
+    {"loadJson", loadjson_interpreter, 0, CMD_CAT_BACKUP, 0, NULL,
      "importe une possibilité depuis une chaîne JSON", NULL, NULL},
 
     {"check", check_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
      "réaffiche le dernier rapport de statistiques en place", NULL, NULL},
     {"print", print_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
      "affiche l'état du data manager (files, tailles)", NULL, NULL},
-    {"printfile", printfile_interpreter, 0, CMD_CAT_DIAG, 0, "printfile <n>",
+    {"printFile", printfile_interpreter, 0, CMD_CAT_DIAG, 0, "printFile <n>",
      "affiche le contenu de la file numéro <n>", NULL, NULL},
-    {"printanalysed", printanalysed_interpreter, 1, CMD_CAT_DIAG, 0, NULL,
+    {"printAnalysed", printanalysed_interpreter, 1, CMD_CAT_DIAG, 0, NULL,
      "affiche les possibilités en cours d'analyse", NULL, NULL},
     {"statistic", statistic_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
      "affiche des statistiques détaillées sur le contenu des files", NULL, NULL},
-    {"checkdatas", checkdatas_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
+    {"checkDatas", checkdatas_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
      "vérifie l'intégrité des possibilités stockées", NULL, NULL},
-    {"checkduplicate", check_duplicate_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
+    {"checkDuplicate", check_duplicate_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
      "recherche les doublons dans les files", NULL, NULL},
-    {"checkfiles", checkfiles_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
+    {"checkFiles", checkfiles_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
      "vérifie l'intégrité de toutes les files", NULL, NULL},
-    {"checkfile", checkfile_interpreter, 0, CMD_CAT_DIAG, 0, "checkfile <n>",
+    {"checkFile", checkfile_interpreter, 0, CMD_CAT_DIAG, 0, "checkFile <n>",
      "vérifie l'intégrité de la file numéro <n>", NULL, NULL},
-    {"checkdirections", checkdirections_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
+    {"checkDirections", checkdirections_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
      "vérifie la cohérence du tableau de parcours", NULL, NULL},
 
     {"clients", clients_interpreter, 0, CMD_CAT_CLIENTS, 1, NULL,
      "liste les sessions de contrôle actives (pid, mode, forks)", NULL, NULL},
     {"clientsStats", clients_stats_interpreter, 0, CMD_CAT_CLIENTS, 1, NULL,
      "demande leurs statistiques à tous les clients connectés", NULL, NULL},
-    {"clientsCmd", clients_cmd_interpreter, 0, CMD_CAT_CLIENTS, 1, "clientsCmd <commande...>",
+    {"clientsCommand", clients_cmd_interpreter, 0, CMD_CAT_CLIENTS, 1, "clientsCommand <commande...>",
      "pousse une commande à tous les clients connectés",
      "Liste blanche : pause, resume, limit, maxStockByThread, prunerBatch.\n"
      "Toute autre commande est refusée sans être diffusée.", NULL},
 
-    /* Alias : résolus vers l'entrée canonique par find_command. */
+    /* Alias : résolus vers l'entrée canonique par find_command. Les noms
+       historiques abrégés (sorta, rmnonext, …) restent acceptés ici ; les
+       anciens noms tout-minuscule (printfile, checkdatas, …) n'ont pas besoin
+       d'alias, la correspondance ignorant déjà la casse. */
     {"?", NULL, 0, CMD_CAT_GENERAL, 0, NULL, NULL, NULL, "help"},
     {"quit", NULL, 0, CMD_CAT_GENERAL, 0, NULL, NULL, NULL, "exit"},
     {"stats", NULL, 0, CMD_CAT_DIAG, 0, NULL, NULL, NULL, "statistic"},
-    {"prune", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "rmnonext"},
-    {"sortAsc", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sorta"},
-    {"sortDesc", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortd"}
+    {"sorta", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortAsc"},
+    {"sortd", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortDesc"},
+    {"sortdm", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortDescMulti"},
+    {"rmnonext", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "removeNoNext"},
+    {"prune", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "removeNoNext"},
+    {"clientsCmd", NULL, 0, CMD_CAT_CLIENTS, 1, NULL, NULL, NULL, "clientsCommand"}
 };
 
-/** @brief Interpréteur de la commande `sorta` : tri ascendant des possibilités. */
+/** @brief Interpréteur de la commande `sortAsc` (alias `sorta`) : tri ascendant des possibilités. */
 int sort_ascending_interpreter(void) {
     return sort_ascending();
 }
 
-/** @brief Interpréteur de la commande `sortd [n_file]` : tri descendant, optionnellement sur un seul fichier. */
+/** @brief Interpréteur de la commande `sortDesc [n_file]` (alias `sortd`) : tri descendant, optionnellement sur un seul fichier. */
 int sort_descending_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments == NULL) {
@@ -475,7 +481,7 @@ int import_interpreter(void) {
     return 0;
 }
 
-/** @brief Interpréteur de `loadjson` : importe une possibilité depuis une chaîne JSON (stdin/clipboard). */
+/** @brief Interpréteur de `loadJson` : importe une possibilité depuis une chaîne JSON (stdin/clipboard). */
 int loadjson_interpreter(void) {
     log_info("load from json\n");
     import_json();
@@ -489,7 +495,7 @@ int print_interpreter(void) {
     return printdatamanager();
 }
 
-/** @brief Interpréteur de `sortdm` : tri descendant multi-threadé des fichiers de possibilités. */
+/** @brief Interpréteur de `sortDescMulti` (alias `sortdm`) : tri descendant multi-threadé des fichiers de possibilités. */
 int sortdm_interpreter(void) {
     return sort_descending_mthread();
 }
@@ -504,12 +510,12 @@ int regroup_interpreter(void) {
     return regroup_datas();
 }
 
-/** @brief Interpréteur de `checkdatas` : vérifie la cohérence des possibilités stockées. */
+/** @brief Interpréteur de `checkDatas` : vérifie la cohérence des possibilités stockées. */
 int checkdatas_interpreter(void) {
     return check_datas();
 }
 
-/** @brief Interpréteur de `checkduplicate` : recherche et supprime les doublons dans les files. */
+/** @brief Interpréteur de `checkDuplicate` : recherche et supprime les doublons dans les files. */
 int check_duplicate_interpreter(void) {
     return check_duplicate();
 }
@@ -518,12 +524,12 @@ int statistic_interpreter(void) {
     return statistic_datas();
 }
 
-/** @brief Interpréteur de `checkfiles` : vérifie la cohérence de toutes les files de possibilités. */
+/** @brief Interpréteur de `checkFiles` : vérifie la cohérence de toutes les files de possibilités. */
 int checkfiles_interpreter(void) {
     return check_files();
 }
 
-/** @brief Interpréteur de `printfile <n>` : affiche le contenu du fichier de possibilités numéro n. */
+/** @brief Interpréteur de `printFile <n>` : affiche le contenu du fichier de possibilités numéro n. */
 int printfile_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments != NULL) {
@@ -533,7 +539,7 @@ int printfile_interpreter(void) {
     return CMD_ERR_USAGE;
 }
 
-/** @brief Interpréteur de `checkfile <n>` : vérifie la cohérence du fichier de possibilités numéro n. */
+/** @brief Interpréteur de `checkFile <n>` : vérifie la cohérence du fichier de possibilités numéro n. */
 int checkfile_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments != NULL) {
@@ -543,7 +549,7 @@ int checkfile_interpreter(void) {
     return CMD_ERR_USAGE;
 }
 
-/** @brief Interpréteur de `checkdirections` : vérifie la cohérence du tableau de traversée `directions`. */
+/** @brief Interpréteur de `checkDirections` : vérifie la cohérence du tableau de traversée `directions`. */
 int checkdirections_interpreter(void) {
     if(test_directions() == 0)
     {
@@ -556,7 +562,7 @@ int checkdirections_interpreter(void) {
     return 0;
 }
 
-/** @brief Interpréteur de `rmnonext` : supprime les possibilités sans continuation valide. */
+/** @brief Interpréteur de `removeNoNext` (alias `rmnonext`, `prune`) : supprime les possibilités sans continuation valide. */
 int rmnonext_interpreter(void) {
     struct array_part *apart= read_parts(parts_files);
 
@@ -574,7 +580,7 @@ int rmnonext_interpreter(void) {
  * @brief Commande `expand <niveau>` : développe le stock du serveur jusqu'au
  *        niveau de curseur demandé (anti-famine, cf. expand_datas_to_level).
  *
- * Reconstruit la map depuis `parts_files` (comme `rmnonext` : le serveur libère
+ * Reconstruit la map depuis `parts_files` (comme `removeNoNext` : le serveur libère
  * la sienne après l'expansion de démarrage), la passe à `expand_datas_to_level`,
  * puis libère tout. Utile à chaud quand le stock distribuable s'est raréfié.
  */
@@ -756,7 +762,7 @@ int clients_stats_interpreter(void) {
 }
 
 /**
- * @brief Interpréteur de `clientsCmd <ligne...>` : diffuse une commande console
+ * @brief Interpréteur de `clientsCommand <ligne...>` (alias `clientsCmd`) : diffuse une commande console
  *        à distance (`CTRL_COMMAND`) à toutes les sessions de contrôle actives.
  *
  * `<ligne...>` est reprise TELLE QUELLE après le premier mot (pas retokenisée :
@@ -776,20 +782,20 @@ int clients_cmd_interpreter(void) {
         return CMD_ERR_USAGE;
     }
     if (!control_command_allowed(rest)) {
-        log_error("clientsCmd : commande non autorisée à distance : \"%s\"\n", rest);
+        log_error("clientsCommand : commande non autorisée à distance (liste blanche : pause, resume, limit, maxStockByThread, prunerBatch) : \"%s\"\n", rest);
         return -1;
     }
     int n = control_registry_broadcast_command(CTRL_COMMAND, rest);
-    log_info("clientsCmd : \"%s\" diffusée à %d session(s)\n", rest, n);
+    log_info("clientsCommand : \"%s\" diffusée à %d session(s)\n", rest, n);
     return 0;
 }
 
-/** @brief Interpréteur de `printanalysed` : affiche les possibilités en cours d'analyse. */
+/** @brief Interpréteur de `printAnalysed` : affiche les possibilités en cours d'analyse. */
 int printanalysed_interpreter(void) {
     return print_all_file_analysed();
 }
 
-/** @brief Interpréteur de `restockanalysed` : remet les possibilités en cours d'analyse dans le stock. */
+/** @brief Interpréteur de `restockAnalysed` : remet les possibilités en cours d'analyse dans le stock. */
 int restockanalysed_interpreter(void) {
     return restock_analysed();
 }

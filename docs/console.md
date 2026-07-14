@@ -2,7 +2,7 @@
 
 Une fois lancé (quel que soit le mode), le programme écoute des commandes sur
 l'entrée standard. En cas de faute de frappe, le programme propose automatiquement
-la commande la plus proche (`vouliez-vous dire "sortd" ?`).
+la commande la plus proche (`vouliez-vous dire "sortDesc" ?`).
 
 ## Aide intégrée
 
@@ -13,11 +13,13 @@ la commande la plus proche (`vouliez-vous dire "sortd" ?`).
 - `help <catégorie>` — n'affiche que la section demandée : `general`, `recherche`,
   `stock`, `sauvegarde`, `diagnostic` ou `clients`.
 
-Les noms de commandes sont **insensibles à la casse** (`maxstockbythread` fonctionne)
-et quelques **alias** sont acceptés : `?` (help), `quit` (exit), `stats` (statistic),
-`prune` (rmnonext), `sortAsc` (sorta), `sortDesc` (sortd). Une commande appelée avec
-un argument manquant affiche automatiquement son rappel d'usage
-(`usage : limit <n> — …`) au lieu d'échouer en silence.
+Les noms canoniques sont en **camelCase complet** (`sortAsc`, `removeNoNext`,
+`clientsCommand`, …) et **insensibles à la casse** (`maxstockbythread` fonctionne).
+Les noms historiques abrégés restent acceptés comme **alias** : `sorta` (sortAsc),
+`sortd` (sortDesc), `sortdm` (sortDescMulti), `rmnonext` et `prune` (removeNoNext),
+`clientsCmd` (clientsCommand), plus `?` (help), `quit` (exit), `stats` (statistic).
+Une commande appelée avec un argument manquant affiche automatiquement son rappel
+d'usage (`usage : limit <n> — …`) au lieu d'échouer en silence.
 
 Le code correspondant vit dans [src/ui/console.c](../src/ui/console.c),
 [src/ui/command_lines.c](../src/ui/command_lines.c) (interpréteurs),
@@ -51,14 +53,14 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 
 | Commande | Description |
 |---|---|
-| `sorta` | Trie les possibilités par ordre croissant (moins avancées en premier ; alias : `sortAsc`) |
-| `sortd [n]` | Trie par ordre décroissant (plus avancées en premier) ; `n` pour une file spécifique (alias : `sortDesc`) |
-| `sortdm` | Trie toutes les files en parallèle |
+| `sortAsc` | Trie les possibilités par ordre croissant (moins avancées en premier ; alias : `sorta`) |
+| `sortDesc [n]` | Trie par ordre décroissant (plus avancées en premier) ; `n` pour une file spécifique (alias : `sortd`) |
+| `sortDescMulti` | Trie toutes les files en parallèle (alias : `sortdm`) |
 | `split` | Répartit les possibilités entre les 10 files |
 | `regroup` | Regroupe toutes les files en une seule |
-| `rmnonext` | Supprime les possibilités sans continuation possible (élagage ; alias : `prune`) |
+| `removeNoNext` | Supprime les possibilités sans continuation possible (élagage ; alias : `rmnonext`, `prune`) |
 | `expand N` | Développe le stock jusqu'au niveau de curseur `N` ([anti-famine](utilisation.md#expansion-du-stock-au-démarrage---expand-level-anti-famine), borné à 4 passes / `EXPAND_MAX_STOCK` possibilités) |
-| `restockanalysed` | Remet les possibilités en cours d'analyse dans le stock |
+| `restockAnalysed` | Remet les possibilités en cours d'analyse dans le stock |
 | `min` | Affiche le niveau minimum dans les files |
 
 ### Sauvegarde & restauration
@@ -68,7 +70,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `backup` | Sauvegarde les files de possibilités dans `eternityII.back` et `eternityII-in_analyse.back` |
 | `restore [fichier [fichier_analyse]]` | Restaure les files depuis les fichiers `.back` (remplace le stock) |
 | `import` | Importe des possibilités depuis les fichiers `.back` dans les files courantes |
-| `loadjson` | Importe une possibilité depuis une chaîne JSON (équivalent de `import` pour le format JSON) |
+| `loadJson` | Importe une possibilité depuis une chaîne JSON (équivalent de `import` pour le format JSON) |
 
 ### Diagnostic & vérification
 
@@ -76,14 +78,14 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 |---|---|
 | `check` | Affiche le dernier état analysé |
 | `print` | Affiche toutes les files au format JSON |
-| `printfile N` | Affiche le contenu de la file numéro `N` |
-| `printanalysed` | Affiche les possibilités en cours d'analyse |
+| `printFile N` | Affiche le contenu de la file numéro `N` |
+| `printAnalysed` | Affiche les possibilités en cours d'analyse |
 | `statistic` | Affiche des statistiques sur le contenu des files (alias : `stats`) |
-| `checkdatas` | Vérifie l'intégrité des possibilités |
-| `checkduplicate` | Recherche les doublons dans les files |
-| `checkfiles` | Vérifie l'intégrité de toutes les files |
-| `checkfile N` | Vérifie la file numéro `N` |
-| `checkdirections` | Vérifie la cohérence des directions de parcours |
+| `checkDatas` | Vérifie l'intégrité des possibilités |
+| `checkDuplicate` | Recherche les doublons dans les files |
+| `checkFiles` | Vérifie l'intégrité de toutes les files |
+| `checkFile N` | Vérifie la file numéro `N` |
+| `checkDirections` | Vérifie la cohérence des directions de parcours |
 
 ### Pilotage des clients (serveur)
 
@@ -91,10 +93,10 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 |---|---|
 | `clients` *(serveur)* | Liste les sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) actives (pid, forks, mode, dernière activité) |
 | `clientsStats` *(serveur)* | Demande les statistiques agrégées de chaque client connecté via son canal de contrôle (équivalent de `POST /api/v1/clients/stats` sur l'[API HTTP](api_http_rest.md)) |
-| `clientsCmd <ligne>` *(serveur)* | Pousse `<ligne>` à distance à tous les clients connectés (filtrée par une liste blanche : `pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`) |
+| `clientsCommand <ligne>` *(serveur)* | Pousse `<ligne>` à distance à tous les clients connectés (filtrée par une liste blanche : `pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch` ; alias : `clientsCmd`) |
 
 Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`,
-`rmnonext`, `limit`, `maxStockByThread`, `prunerBatch`, `min`, `printanalysed`,
+`removeNoNext`, `limit`, `maxStockByThread`, `prunerBatch`, `min`, `printAnalysed`,
 `pause`, `resume`) sont automatiquement retransmises à tous les processus fils via
 socket Unix. Les commandes `clients*` sont **serveur uniquement** : elles agissent sur
 le [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) distant, pas
@@ -133,7 +135,7 @@ Les évènements suivants sont câblés :
 | `client rejeté : version …` | Côté serveur, quand le handshake de version échoue (version incompatible ou requête sans handshake valide) |
 | `session de contrôle enregistrée (pid=…) -> slot N` | Côté serveur, quand un client annonce son [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) (`INST_CONTROL_HELLO`) |
 | `session de contrôle déconnectée (slot N)` | Côté serveur, à la fin d'une session de canal de contrôle |
-| `commande distante "…" exécutée (code retour N)` | Côté serveur, après qu'une commande `clientsCmd` ou `pause`/`resume` (diffusion) a été acquittée par le client |
+| `commande distante "…" exécutée (code retour N)` | Côté serveur, après qu'une commande `clientsCommand` ou `pause`/`resume` (diffusion) a été acquittée par le client |
 
 Tout évènement est **horodaté et écrit dans `events.log`** (en plus de l'affichage
 dans la zone), ce qui permet de garder une trace persistante hors session :

@@ -163,15 +163,23 @@ TEST help_format_topic_command_and_category(void)
     PASS();
 }
 
-/* command_canonical_name (pure) : alias -> canonique, casse ignorée, NULL sûr. */
+/* command_canonical_name (pure) : les noms canoniques sont les formes camelCase
+   complètes, les noms historiques abrégés sont des alias ; casse ignorée, NULL sûr. */
 TEST command_canonical_name_resolves_aliases_and_case(void)
 {
     ASSERT_STR_EQ("exit", command_canonical_name("quit"));
     ASSERT_STR_EQ("help", command_canonical_name("?"));
     ASSERT_STR_EQ("statistic", command_canonical_name("stats"));
-    ASSERT_STR_EQ("rmnonext", command_canonical_name("prune"));
-    ASSERT_STR_EQ("sorta", command_canonical_name("sortAsc"));
-    ASSERT_STR_EQ("sortd", command_canonical_name("sortDesc"));
+    ASSERT_STR_EQ("sortAsc", command_canonical_name("sorta"));
+    ASSERT_STR_EQ("sortDesc", command_canonical_name("sortd"));
+    ASSERT_STR_EQ("sortDescMulti", command_canonical_name("sortdm"));
+    ASSERT_STR_EQ("removeNoNext", command_canonical_name("rmnonext"));
+    ASSERT_STR_EQ("removeNoNext", command_canonical_name("prune"));
+    ASSERT_STR_EQ("clientsCommand", command_canonical_name("clientsCmd"));
+    /* Les anciens noms tout-minuscule restent couverts par la casse ignorée. */
+    ASSERT_STR_EQ("printFile", command_canonical_name("printfile"));
+    ASSERT_STR_EQ("checkDatas", command_canonical_name("checkdatas"));
+    ASSERT_STR_EQ("loadJson", command_canonical_name("loadjson"));
     ASSERT_STR_EQ("maxStockByThread", command_canonical_name("MAXSTOCKBYTHREAD"));
     ASSERT_STR_EQ("limit", command_canonical_name("limit"));
     ASSERT_EQ(NULL, command_canonical_name("nonexistent"));
@@ -189,7 +197,7 @@ TEST do_command_line_case_insensitive_and_alias_dispatch(void)
     ASSERT_EQ_FMT(1234ULL, max_search_by_sec, "%llu");
     max_search_by_sec = saved;
 
-    char alias[] = "sortAsc"; /* alias de sorta, stock vide : tri sans effet */
+    char alias[] = "sorta"; /* alias historique de sortAsc, stock vide : tri sans effet */
     ASSERT_EQ_FMT(0, run_command_quiet(alias), "%d");
     PASS();
 }
