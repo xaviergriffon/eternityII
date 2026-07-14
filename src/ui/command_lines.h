@@ -8,6 +8,17 @@
 #include <stdio.h>
 
 /**
+ * @brief Code retour d'interpréteur : argument manquant ou invalide.
+ *
+ * Quand un interpréteur le renvoie, `do_command_line` affiche automatiquement
+ * le rappel d'usage déclaré dans la table des commandes (`usage : limit <n> — …`)
+ * puis retourne -1 à son appelant — le contrat externe de `do_command_line`
+ * (0 succès / -1 échec) est inchangé. Distinct de -1 pour que seuls les échecs
+ * d'arguments déclenchent ce rappel, pas les erreurs d'exécution.
+ */
+#define CMD_ERR_USAGE (-3)
+
+/**
  * @brief Execute la commande au format texte.
  *
  * @param[in] command instruction au format texte.
@@ -87,4 +98,39 @@ int pruner_batch_clamp(int v);
  *             `ADMIN_CMD_BAD_ARGS` (commande reconnue, argument manquant/invalide).
  */
 int admin_apply_remote_command(const char *line);
+
+/**
+ * @brief Résout un nom de commande (alias inclus, casse ignorée) vers son nom canonique.
+ *
+ * Extrait pour être testable sans passer par `do_command_line` : la résolution
+ * d'alias et l'insensibilité à la casse sont de la logique pure sur la table
+ * des commandes.
+ *
+ * @param name Nom saisi (ex. "quit", "MAXSTOCKBYTHREAD").
+ * @return     Nom canonique (ex. "exit", "maxStockByThread"), ou NULL si inconnu.
+ */
+const char *command_canonical_name(const char *name);
+
+/**
+ * @brief Formate l'aide générale : commandes groupées par catégorie, une ligne
+ *        `usage  résumé` par commande, alias entre parenthèses.
+ *
+ * @param out      Tampon de sortie (toujours terminé par '\0', tronqué si trop petit).
+ * @param out_size Taille du tampon.
+ * @return         0 (toujours).
+ */
+int help_format_general(char *out, size_t out_size);
+
+/**
+ * @brief Formate l'aide d'un sujet : une commande (détail complet — usage,
+ *        catégorie, portée, propagation aux fils, complément) ou une catégorie
+ *        (sa section de l'aide générale).
+ *
+ * @param topic    Nom de commande (alias/casse acceptés) ou mot-clé de catégorie
+ *                 (`general`, `recherche`, `stock`, `sauvegarde`, `diagnostic`, `clients`).
+ * @param out      Tampon de sortie (toujours terminé par '\0', tronqué si trop petit).
+ * @param out_size Taille du tampon.
+ * @return         0 si le sujet est connu, -1 sinon (tampon vide).
+ */
+int help_format_topic(const char *topic, char *out, size_t out_size);
 #endif /* command_lines_h */

@@ -160,7 +160,7 @@ Chaque processus client ouvre automatiquement une seconde connexion TCP vers le
 serveur, sur laquelle le **serveur** devient l'initiateur : demande de statistiques,
 poussée de commandes (`pause`, `resume`, `limit`, …), récupération du meilleur plateau
 connu. Ça se pilote depuis la console du serveur (`clients`, `clientsStats`,
-`clientsCmd`, `pause`/`resume` — voir [Console interactive](console.md)) ou via
+`clientsCommand`, `pause`/`resume` — voir [Console interactive](console.md)) ou via
 l'[API HTTP REST admin](api_http_rest.md) (`--http-port`). Détails du protocole :
 [Canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9).
 
