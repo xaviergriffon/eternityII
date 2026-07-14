@@ -131,6 +131,86 @@ TEST failed_arg_prints_usage(void)
     PASS();
 }
 
+/* ============================== Aide CLI ================================== */
+
+/* format_cli_help : l'aide générale liste TOUS les sujets de la table (chaque
+   mode ET chaque option), dans un tampon assez grand pour ne rien tronquer. */
+TEST cli_help_general_lists_every_topic(void)
+{
+    char buf[4096];
+    int len = format_cli_help(buf, sizeof buf);
+    ASSERT(len > 0);
+    ASSERT(len < (int)sizeof buf - 1); /* non tronquée */
+
+    int count = 0;
+    const cli_help_topic_t *topics = cli_help_topics(&count);
+    ASSERT(count > 0);
+    for (int i = 0; i < count; i++) {
+        ASSERT(strstr(buf, topics[i].usage) != NULL);
+        ASSERT(strstr(buf, topics[i].summary) != NULL);
+    }
+    PASS();
+}
+
+/* cli_help_find_topic : insensible à la casse et aux tirets de tête ; NULL et
+   sujet inconnu renvoient NULL. */
+TEST cli_help_find_topic_matches_flexibly(void)
+{
+    const cli_help_topic_t *t = cli_help_find_topic("tcpserver");
+    ASSERT(t != NULL);
+    ASSERT_STR_EQ("tcpserver", t->name);
+
+    ASSERT_EQ(t, cli_help_find_topic("TCPServer"));      /* casse ignorée */
+    t = cli_help_find_topic("http-port");                 /* tirets de tête facultatifs */
+    ASSERT(t != NULL);
+    ASSERT_STR_EQ("--http-port", t->name);
+    ASSERT_EQ(t, cli_help_find_topic("--http-port"));
+
+    ASSERT_EQ(NULL, cli_help_find_topic("zorglub"));
+    ASSERT_EQ(NULL, cli_help_find_topic(NULL));
+    PASS();
+}
+
+/* format_cli_help_topic : usage + résumé + détails pour un sujet connu ;
+   -1 pour un sujet inconnu (tampon non modifié). */
+TEST cli_help_topic_formats_known_and_rejects_unknown(void)
+{
+    char buf[4096] = "sentinelle";
+    int len = format_cli_help_topic("tcppruner", buf, sizeof buf);
+    ASSERT(len > 0);
+    ASSERT(strstr(buf, "tcppruner [serveur]") != NULL);
+    ASSERT(strstr(buf, "PRUNER_BATCH_MAX") != NULL); /* les détails sont inclus */
+
+    strcpy(buf, "sentinelle");
+    ASSERT_EQ_FMT(-1, format_cli_help_topic("zorglub", buf, sizeof buf), "%d");
+    ASSERT_STR_EQ("sentinelle", buf); /* inconnu : buf non modifié */
+    PASS();
+}
+
+/* Troncature : un tampon trop petit est rempli sans débordement et reste
+   terminé par un nul. */
+TEST cli_help_truncates_safely_in_small_buffer(void)
+{
+    char buf[32];
+    memset(buf, 'X', sizeof buf);
+    int len = format_cli_help(buf, sizeof buf);
+    ASSERT(len <= (int)sizeof buf - 1);
+    ASSERT_EQ_FMT((int)strlen(buf), len, "%d");
+    PASS();
+}
+
+/* print_cli_help_topic : 0 et affichage pour un sujet connu, -1 sinon. */
+TEST print_cli_help_topic_returns_status(void)
+{
+    mute_fd(1); /* log_console écrit sur stdout */
+    int ok = print_cli_help_topic("test");
+    int ko = print_cli_help_topic("zorglub");
+    unmute_fd();
+    ASSERT_EQ_FMT(0, ok, "%d");
+    ASSERT_EQ_FMT(-1, ko, "%d");
+    PASS();
+}
+
 /* ================================ Signaux ================================= */
 
 /* signal_ignored : no-op (handler SIGPIPE). */
@@ -1134,6 +1214,11 @@ SUITE(app_runtime_suite)
     RUN_TEST(init_counters_allocates_zeroed);
     RUN_TEST(init_childs_initializes_contexts);
     RUN_TEST(failed_arg_prints_usage);
+    RUN_TEST(cli_help_general_lists_every_topic);
+    RUN_TEST(cli_help_find_topic_matches_flexibly);
+    RUN_TEST(cli_help_topic_formats_known_and_rejects_unknown);
+    RUN_TEST(cli_help_truncates_safely_in_small_buffer);
+    RUN_TEST(print_cli_help_topic_returns_status);
     RUN_TEST(signal_ignored_is_noop);
     RUN_TEST(signal_end_handler_sets_request_stop);
     RUN_TEST(signal_end_handler_server_calls_exit);

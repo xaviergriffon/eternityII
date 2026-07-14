@@ -5,6 +5,23 @@ les fichiers manipulés (pièces, sauvegardes, solutions) et les limitations con
 Les commandes interactives disponibles une fois le programme lancé sont décrites dans
 [Console interactive](console.md).
 
+## Aide en ligne de commande
+
+Le binaire embarque sa propre aide, sans avoir à consulter cette documentation :
+
+```sh
+./eternityII --help            # aide générale : usage, modes, options (alias : -h)
+./eternityII help              # équivalent de --help
+./eternityII help tcpserver    # détail d'un mode
+./eternityII help http-port    # détail d'une option (tirets de tête facultatifs)
+```
+
+`--help`/`-h` sont acceptées à n'importe quelle position, par tous les modes :
+l'aide est affichée puis le programme sort en succès, avant toute initialisation.
+Les noms de sujets sont insensibles à la casse ; un sujet inconnu affiche une
+erreur puis l'aide générale (sortie en échec). Des arguments invalides au
+lancement affichent la même aide générale sur la sortie d'erreur.
+
 ## Mode serveur
 
 Lance le serveur qui distribue les possibilités aux clients.

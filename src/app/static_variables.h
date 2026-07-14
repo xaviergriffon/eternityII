@@ -255,6 +255,15 @@ extern int pruner_mode;
 extern int stop_on_solution;
 
 /**
+ * @brief 1 si l'aide CLI a été demandée (option `--help` / `-h`).
+ *
+ * Position-indépendante comme `--stop-on-solution` : retirée d'argv par
+ * `parse_cli_options`. Lue dans `main()` avant le dispatch des modes : l'aide
+ * générale est affichée puis le programme sort avec EXIT_SUCCESS.
+ */
+extern int help_requested;
+
+/**
  * @brief Niveau de curseur (`alloc`) minimal visé par l'expansion du stock au
  *        démarrage du serveur (option CLI `--expand-level <n>`).
  *
@@ -474,9 +483,9 @@ extern int server_rmnonext_timing;
 /**
  * @brief Extrait les options globales de `argv` et les retire du tableau.
  *
- * Reconnaît `--stop-on-solution`, `--expand-level <n>` et `--http-port <n>`
- * (positionne respectivement `stop_on_solution`, `expand_min_level` et
- * `HTTP_PORT`). Compacte
+ * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--http-port <n>` et
+ * `--help`/`-h` (positionne respectivement `stop_on_solution`,
+ * `expand_min_level`, `HTTP_PORT` et `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.
  *

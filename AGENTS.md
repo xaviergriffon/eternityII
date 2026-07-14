@@ -57,7 +57,13 @@ The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` inste
 
 # Self-contained test/auto mode (no server needed)
 ./eternityII test [data/pieces.csv]
+
+# Built-in CLI help: general help, or per-topic detail (mode or option)
+./eternityII --help          # position-independent, also -h; exits with success
+./eternityII help tcpserver  # topic names are case-insensitive; leading dashes optional
 ```
+
+**CLI help system** (`--help`/`-h` anywhere in argv, or the `help [topic]` mode): the single source of truth is the `cli_topics[]` table in `src/app/app_runtime.c` (mirroring the console's `commands[]` design) — general help (`format_cli_help`), per-topic help (`format_cli_help_topic`), and the invalid-arguments message (`failed_arg`) all derive from it. **Adding a mode or a global option ⇒ add its entry to that table.** An unknown `help <topic>` prints an error plus the general help and exits with failure (so a typo is never a silent success); `gpupruner` is always listed (with a "CUDA=1 build only" note) even in non-CUDA builds, so users can discover it exists.
 
 **`--stop-on-solution`** (optional, accepted in any position by any mode, stripped from argv before the positional parse): stop at the **first** solution. A search process that finds one exits; a server that receives one backs up its queues and stops. **Default (flag absent): keep going** — the search process backtracks to look for more solutions and the server stays in service so clients keep exploring. Read in `main()` *before* any fork (global `stop_on_solution`), so forked search children inherit it. Each solution is saved to a **unique** file (`./solution_<pid>_<seq>` client-side, `./solution_server_<pid>_<seq>` server-side) — multiple solutions never overwrite one another.
 

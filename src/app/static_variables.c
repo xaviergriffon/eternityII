@@ -81,6 +81,8 @@ int pruner_mode = 0;
 
 int stop_on_solution = 0;
 
+int help_requested = 0;
+
 int expand_min_level = 0;
 
 int pruner_batch_size = PRUNER_BATCH_SIZE;
@@ -196,6 +198,10 @@ int parse_cli_options(int argc, const char *argv[])
     for (int r = 0; r < argc; r++) {
         if (strcmp(argv[r], "--stop-on-solution") == 0) {
             stop_on_solution = 1;
+        } else if (strcmp(argv[r], "--help") == 0 || strcmp(argv[r], "-h") == 0) {
+            // Aide CLI : le flag est lu dans main() avant le dispatch des modes
+            // (affichage de l'aide générale puis EXIT_SUCCESS).
+            help_requested = 1;
         } else if (strcmp(argv[r], "--expand-level") == 0) {
             // Option valuée : le niveau suit dans l'argument suivant. Les deux
             // tokens sont retirés d'argv (non recopiés) pour ne pas perturber le
