@@ -166,6 +166,36 @@ TEST http_port_out_of_range_values_are_ignored(void)
     PASS();
 }
 
+/* --help / -h : position-indépendantes comme --stop-on-solution — retirées
+   d'argv, help_requested positionné, arguments positionnels intacts. */
+TEST help_flag_is_stripped_and_sets_global(void)
+{
+    const char *flags[] = {"--help", "-h"};
+    for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
+        help_requested = 0;
+        const char *argv[] = {"prog", "tcpserver", flags[i], "8"};
+        int argc = parse_cli_options(4, argv);
+
+        ASSERT_EQ_FMT(3, argc, "%d");
+        ASSERT_EQ_FMT(1, help_requested, "%d");
+        ASSERT_STR_EQ("tcpserver", argv[1]);
+        ASSERT_STR_EQ("8", argv[2]);
+    }
+    PASS();
+}
+
+/* Sans --help ni -h, le drapeau reste à 0 ("help" positionnel = mode, pas option). */
+TEST help_flag_absent_leaves_global_untouched(void)
+{
+    help_requested = 0;
+    const char *argv[] = {"prog", "help", "tcpserver"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(0, help_requested, "%d");
+    PASS();
+}
+
 /* request_is_pause : renvoie la durée d'attente (µs) propre à chaque origine
    de pause, 0 sinon. Régression visée : REQUEST_ADMIN_PAUSE doit être reconnue
    comme une pause par les boucles chaudes (usleep + continue) au même titre
@@ -204,6 +234,8 @@ SUITE(static_variables_suite)
     RUN_TEST(http_port_strips_option_and_value_sets_global);
     RUN_TEST(http_port_without_value_is_ignored);
     RUN_TEST(http_port_out_of_range_values_are_ignored);
+    RUN_TEST(help_flag_is_stripped_and_sets_global);
+    RUN_TEST(help_flag_absent_leaves_global_untouched);
     RUN_TEST(request_is_pause_covers_both_pause_values);
     RUN_TEST(request_keeps_running_is_false_only_on_stop);
 }

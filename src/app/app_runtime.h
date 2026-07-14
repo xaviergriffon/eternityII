@@ -1,6 +1,7 @@
 #ifndef app_runtime_h
 #define app_runtime_h
 
+#include <stddef.h>
 #include <sys/types.h>
 #include <sys/un.h>
 
@@ -47,8 +48,61 @@ int  init_counters(void);
 /** @brief Alloue/initialise les contextes des processus enfants (pids, forkId, stats). */
 void init_childs(void);
 
-/** @brief Affiche le message d'usage (arguments invalides). */
+/** @brief Affiche le message d'usage (arguments invalides) : aide générale sur
+ *         stderr via `log_error` — même source de vérité que `--help`. */
 void failed_arg(void);
+
+/* ---- Aide CLI (`--help` / `-h`, mode `help [sujet]`) ---- */
+
+/**
+ * @brief Un sujet d'aide CLI : un mode d'exécution ou une option globale.
+ *
+ * Source unique de vérité de l'aide en ligne de commande, sur le modèle de la
+ * table `commands[]` de la console (ui/command_lines.c) : l'aide générale
+ * (`format_cli_help`), l'aide par sujet (`format_cli_help_topic`) et le message
+ * d'erreur d'arguments (`failed_arg`) sont tous dérivés de cette table.
+ */
+typedef struct cli_help_topic {
+	const char *name;    /**< Nom canonique : mode (`tcpserver`) ou option (`--http-port`). */
+	const char *usage;   /**< Ligne d'usage complète (arguments entre crochets = optionnels). */
+	const char *summary; /**< Résumé d'une ligne, affiché dans l'aide générale. */
+	const char *details; /**< Complément affiché par `help <sujet>` (NULL accepté). */
+} cli_help_topic_t;
+
+/**
+ * @brief Renvoie la table des sujets d'aide CLI.
+ * @param out_count Sortie : nombre de sujets (NULL accepté).
+ * @return Tableau statique, jamais NULL.
+ */
+const cli_help_topic_t *cli_help_topics(int *out_count);
+
+/**
+ * @brief Cherche un sujet d'aide par nom, insensible à la casse et aux tirets
+ *        de tête (`help http-port` == `help --http-port`).
+ * @return Le sujet trouvé, ou NULL si inconnu.
+ */
+const cli_help_topic_t *cli_help_find_topic(const char *name);
+
+/**
+ * @brief Formate l'aide générale (usage global, modes, options) dans `buf`.
+ * @return La longueur écrite (tronquée à `bufsz - 1`).
+ */
+int format_cli_help(char *buf, size_t bufsz);
+
+/**
+ * @brief Formate l'aide détaillée d'un sujet (usage, résumé, complément).
+ * @return La longueur écrite, ou -1 si le sujet est inconnu (buf non modifié).
+ */
+int format_cli_help_topic(const char *name, char *buf, size_t bufsz);
+
+/** @brief Affiche l'aide générale sur la sortie standard (`log_console`). */
+void print_cli_help(void);
+
+/**
+ * @brief Affiche l'aide d'un sujet sur la sortie standard.
+ * @return 0 si le sujet est connu, -1 sinon (rien n'est affiché).
+ */
+int print_cli_help_topic(const char *name);
 
 /* ---- Parsing d'arguments CLI (main.c) ---- */
 

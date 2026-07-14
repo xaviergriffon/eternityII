@@ -47,6 +47,12 @@ int main(int argc, const char *argv[]) {
     // fork → héritées par les process de recherche enfants. Logique extraite
     // (testée unitairement, cf. tests/app/test_static_variables.c).
     argc = parse_cli_options(argc, argv);
+    if (help_requested) {
+        // --help / -h (n'importe où) : aide générale puis sortie en succès,
+        // avant toute initialisation (aucun fork, thread ni socket).
+        print_cli_help();
+        exit(EXIT_SUCCESS);
+    }
     if (stop_on_solution) {
         log_info("option : arrêt à la première solution activé (--stop-on-solution)\n");
     }
@@ -75,6 +81,19 @@ int main(int argc, const char *argv[]) {
             gpu_pruner_mode = 1;
             handle_tcpclient(argc, argv);
 #endif // WITH_CUDA
+        } else if (strcmp("help", argv[1]) == 0) {
+            // help [sujet] : aide générale, ou détail d'un mode/option. Un
+            // sujet inconnu est une erreur d'argument (rappel de l'aide via
+            // failed_arg) pour ne pas sortir en succès sur une faute de frappe.
+            if (argc > 2) {
+                if (print_cli_help_topic(argv[2]) != 0) {
+                    log_error("sujet d'aide inconnu : \"%s\"\n", argv[2]);
+                    failed_arg();
+                    exit(EXIT_FAILURE);
+                }
+            } else {
+                print_cli_help();
+            }
         } else if (strcmp("test", argv[1]) == 0) {
             char* file = parts_files;
             if (argc > 2) {

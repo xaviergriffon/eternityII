@@ -4,9 +4,11 @@
  * unitairement. Voir app_runtime.h. Le comportement est strictement identique à
  * l'original : les corps ont été déplacés verbatim depuis main.c.
  */
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stddef.h>
 #include <signal.h>
 #include <errno.h>
@@ -29,18 +31,204 @@
 #include "ui/command_lines.h"
 #include "ui/logger.h"
 
+/* ============================== Aide CLI ================================== */
+
+/*
+ * Source unique de vérité de l'aide en ligne de commande (cf. app_runtime.h) :
+ * les modes d'abord, les options globales ensuite — l'aide générale préserve
+ * cet ordre. `gpupruner` est toujours listé (avec la mention CUDA=1) plutôt
+ * que caché hors WITH_CUDA : l'utilisateur d'un build CPU doit pouvoir
+ * découvrir que le mode existe et comment l'obtenir.
+ */
+static const cli_help_topic_t cli_topics[] = {
+	{ "tcpserver",
+	  "tcpserver [nb_threads] [pieces.csv]",
+	  "Serveur : distribue les possibilités aux clients connectés.",
+	  "nb_threads (défaut 80) : connexions simultanées servies — dimensionner pour\n"
+	  "les connexions de travail PLUS une connexion de contrôle par machine cliente.\n"
+	  "Options utiles : --expand-level <n> (pré-expansion anti-famine du stock au\n"
+	  "démarrage), --http-port <n> (API REST d'administration sur 127.0.0.1)." },
+	{ "tcpclient",
+	  "tcpclient [serveur] [nb_threads] [max_stock] [pieces.csv]",
+	  "Client de recherche : explore l'arbre et renvoie ses résultats au serveur.",
+	  "serveur (défaut localhost) : hôte du serveur. nb_threads (défaut 1) :\n"
+	  "processus de recherche forkés. max_stock : possibilités conservées\n"
+	  "localement par processus avant délégation au serveur." },
+	{ "tcppruner",
+	  "tcppruner [serveur] [nb_threads] [pieces.csv] [batch]",
+	  "Client pruner : valide par lots les possibilités non vérifiées du serveur.",
+	  "batch : taille du lot d'échange avec le serveur (borné à PRUNER_BATCH_MAX ;\n"
+	  "modifiable en cours d'exécution via la commande console prunerBatch <n>)." },
+	{ "gpupruner",
+	  "gpupruner [serveur] [nb_threads] [pieces.csv] [batch]",
+	  "Pruner GPU : comme tcppruner, lot contrôlé sur le GPU (build CUDA=1 uniquement).",
+	  "Mêmes arguments que tcppruner. Nécessite un binaire compilé avec\n"
+	  "make CUDA=1 et un GPU NVIDIA (sinon le mode est absent du binaire)." },
+	{ "test",
+	  "test [pieces.csv]",
+	  "Mode autonome : recherche locale mono-processus, sans serveur.",
+	  "Génère lui-même ses premières possibilités depuis le fichier de pièces\n"
+	  "(défaut ./data/pieces.csv) — aucun serveur nécessaire." },
+	{ "help",
+	  "help [sujet]",
+	  "Affiche cette aide, ou le détail d'un mode/option (ex. help tcpserver).",
+	  "Sans argument : aide générale (équivalent de --help). Avec un sujet : le\n"
+	  "détail d'un mode ou d'une option (les tirets de tête sont facultatifs :\n"
+	  "help http-port == help --http-port)." },
+	{ "--stop-on-solution",
+	  "--stop-on-solution",
+	  "S'arrêter à la première solution trouvée (défaut : continuer la recherche).",
+	  "Acceptée à n'importe quelle position, par tous les modes. Absente : le\n"
+	  "processus de recherche backtrack après une solution pour en chercher\n"
+	  "d'autres et le serveur reste en service. Chaque solution est sauvegardée\n"
+	  "dans un fichier unique (jamais écrasée)." },
+	{ "--expand-level",
+	  "--expand-level <n>",
+	  "Serveur : pré-expansion du stock au démarrage jusqu'au niveau de curseur n.",
+	  "Transforme la possibilité genèse en milliers de possibilités distribuables\n"
+	  "avant l'arrivée des clients (anti-famine). Niveau 3-4 conseillé ; borné par\n"
+	  "EXPAND_MAX_LEVELS et EXPAND_MAX_STOCK. Ignorée par les autres modes." },
+	{ "--http-port",
+	  "--http-port <n>",
+	  "Serveur : API REST d'administration sur 127.0.0.1:<n> (désactivée par défaut).",
+	  "Boucle locale uniquement (jamais exposée sur le réseau). Endpoints sous\n"
+	  "/api/v1 : stats, status, clients, best-board, command (commandes de la\n"
+	  "liste blanche seulement : pause, resume, limit, ...)." },
+	{ "--help",
+	  "--help | -h",
+	  "Affiche l'aide générale puis quitte.",
+	  "Acceptée à n'importe quelle position, par tous les modes." },
+};
+
+const cli_help_topic_t *cli_help_topics(int *out_count)
+{
+	if (out_count != NULL) {
+		*out_count = (int)(sizeof(cli_topics) / sizeof(cli_topics[0]));
+	}
+	return cli_topics;
+}
+
+/** @brief Saute les tirets de tête d'un nom de sujet (`--http-port` → `http-port`). */
+static const char *cli_topic_strip_dashes(const char *name)
+{
+	while (*name == '-') {
+		name++;
+	}
+	return name;
+}
+
+const cli_help_topic_t *cli_help_find_topic(const char *name)
+{
+	if (name == NULL) {
+		return NULL;
+	}
+	const char *wanted = cli_topic_strip_dashes(name);
+	int count = 0;
+	const cli_help_topic_t *topics = cli_help_topics(&count);
+	for (int i = 0; i < count; i++) {
+		if (strcasecmp(cli_topic_strip_dashes(topics[i].name), wanted) == 0) {
+			return &topics[i];
+		}
+	}
+	return NULL;
+}
+
+/** @brief Ajoute du texte formaté à `buf` sans jamais déborder (accumulateur snprintf). */
+static void cli_help_append(char *buf, size_t bufsz, size_t *len, const char *format, ...)
+{
+	if (*len >= bufsz) {
+		return;
+	}
+	va_list args;
+	va_start(args, format);
+	int n = vsnprintf(buf + *len, bufsz - *len, format, args);
+	va_end(args);
+	if (n > 0) {
+		*len += (size_t)n;
+		if (*len > bufsz - 1) {
+			*len = bufsz - 1;
+		}
+	}
+}
+
+int format_cli_help(char *buf, size_t bufsz)
+{
+	if (buf == NULL || bufsz == 0) {
+		return 0;
+	}
+	buf[0] = '\0';
+	size_t len = 0;
+	cli_help_append(buf, bufsz, &len,
+	                "eternityII — solveur distribué du puzzle Eternity II\n\n"
+	                "Usage : ./eternityII <mode> [arguments] [options]\n\nModes :\n");
+	int count = 0;
+	const cli_help_topic_t *topics = cli_help_topics(&count);
+	for (int i = 0; i < count; i++) {
+		if (topics[i].name[0] == '-') {
+			continue;
+		}
+		cli_help_append(buf, bufsz, &len, "  %-58s %s\n", topics[i].usage, topics[i].summary);
+	}
+	cli_help_append(buf, bufsz, &len,
+	                "\nOptions (position-indépendantes, retirées avant le parsing des modes) :\n");
+	for (int i = 0; i < count; i++) {
+		if (topics[i].name[0] != '-') {
+			continue;
+		}
+		cli_help_append(buf, bufsz, &len, "  %-58s %s\n", topics[i].usage, topics[i].summary);
+	}
+	cli_help_append(buf, bufsz, &len,
+	                "\n./eternityII help <sujet> détaille un mode ou une option.\n");
+	return (int)len;
+}
+
+int format_cli_help_topic(const char *name, char *buf, size_t bufsz)
+{
+	const cli_help_topic_t *topic = cli_help_find_topic(name);
+	if (topic == NULL || buf == NULL || bufsz == 0) {
+		return -1;
+	}
+	buf[0] = '\0';
+	size_t len = 0;
+	cli_help_append(buf, bufsz, &len, "usage : %s\n%s\n", topic->usage, topic->summary);
+	if (topic->details != NULL) {
+		cli_help_append(buf, bufsz, &len, "\n%s\n", topic->details);
+	}
+	return (int)len;
+}
+
+/* Taille suffisante pour l'aide générale complète (la plus longue des sorties). */
+#define CLI_HELP_BUF_SIZE 4096
+
+void print_cli_help(void)
+{
+	char buf[CLI_HELP_BUF_SIZE];
+	format_cli_help(buf, sizeof buf);
+	log_console("%s", buf);
+	flush_console();
+}
+
+int print_cli_help_topic(const char *name)
+{
+	char buf[CLI_HELP_BUF_SIZE];
+	if (format_cli_help_topic(name, buf, sizeof buf) < 0) {
+		return -1;
+	}
+	log_console("%s", buf);
+	flush_console();
+	return 0;
+}
+
 /**
  * @brief Affiche un message d'erreur indiquant que les arguments sont incorrects.
+ *
+ * Réutilise l'aide générale (même table `cli_topics` que `--help`) sur stderr.
  */
 void failed_arg(void)
 {
-	log_error("Indiquer parametre suivant :\ntcpserver [nombre de threads] [pieces.csv]\ntcpclient [serveur] [nb_threads] [max_stock] [pieces.csv]\ntcppruner [serveur] [nb_threads] [pieces.csv]\n"
-#ifdef WITH_CUDA
-	          "gpupruner [serveur] [nb_threads] [pieces.csv]\n"
-#endif // WITH_CUDA
-	          "Option (n'importe où) : --stop-on-solution "
-	          "(s'arrêter à la 1re solution ; défaut : continuer)\n"
-	);
+	char buf[CLI_HELP_BUF_SIZE];
+	format_cli_help(buf, sizeof buf);
+	log_error("arguments invalides.\n%s", buf);
 }
 /**
  * @brief Initialise les compteurs utilisés dans le programme.
