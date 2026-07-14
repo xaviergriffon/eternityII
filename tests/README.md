@@ -46,7 +46,7 @@ Chaque `test_<module>.c` inclut ses en-têtes de production en forme qualifiée
 `tests/integration/` contient des scripts shell séparés de la suite `greatest`
 ci-dessus (pas de lien statique : ils lancent de vrais processus `tcpserver`/
 `tcpclient` sur `localhost`). Lancés ensemble via `make test-integration` (voir le
-[README principal](../README.md#tests-et-couverture)) :
+[Tests et CI](../docs/tests_et_ci.md)) :
 
 - `run_solution_16.sh` — round-trip complet de la solution (16 pièces, `--stop-on-solution`).
 - `run_control_channel.sh` — round-trip du [canal de contrôle](../docs/echanges_client_serveur.md#canal-de-contrôle-v9) (`clientsStats`/`pause`/`resume`, piloté via une FIFO sur la console serveur).

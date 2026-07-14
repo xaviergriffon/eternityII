@@ -254,7 +254,7 @@ simultanées) + (processus clients connectés), pas seulement le premier terme.
 
 ### Commandes console associées
 
-Voir le [README](../README.md#commandes-interactives) pour la liste complète ; côté
+Voir la [console interactive](console.md#commandes) pour la liste complète ; côté
 serveur uniquement : `clients` (liste les sessions actives), `clientsStats` (diffuse
 `CTRL_GET_STATS`), `clientsCmd <ligne>` (diffuse `CTRL_COMMAND`, filtré par la liste
 blanche). `pause`/`resume` posent/lèvent localement `REQUEST_ADMIN_PAUSE` — un état
@@ -327,7 +327,8 @@ purement serveur (aucun échange, aucun impact client), borné en profondeur
 (`EXPAND_MAX_LEVELS`, 4 passes) et en nombre (`EXPAND_MAX_STOCK`, plafond entre passes —
 le vrai garde-fou, le facteur de branchement étant inconnu). La même opération est
 disponible à chaud via la commande console `expand N`. Voir le
-[README](../README.md#mode-serveur) pour les niveaux recommandés (3–4).
+[mode serveur](utilisation.md#expansion-du-stock-au-démarrage---expand-level-anti-famine)
+pour les niveaux recommandés (3–4).
 
 **Côté serveur — files multiples.** Le serveur répartit les possibilités sur
 `NB_FILE_POSSIBILITY` (10) files protégées chacune par un mutex

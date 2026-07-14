@@ -17,487 +17,78 @@ Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisa
                                            └─────────────────────────────┘
 ```
 
-- Le **serveur** maintient une liste de positions de plateau (« possibilités ») à explorer et les distribue aux clients.
-- Chaque **client** fork `N` processus enfants. Chaque enfant se connecte au serveur, récupère des possibilités, les explore, puis renvoie les nouvelles positions découvertes.
-- Les processus enfants communiquent avec leur parent via des **sockets Unix UDP locaux** (`etii_fork.<pid>`) pour :
-  - remonter les statistiques en temps réel (`shots/sec`, possibilités en stock, `max_result`) — et, uniquement quand un fork bat son propre record, la **représentation complète** du plateau à ce moment (pas seulement le compte, cf. [Canal de contrôle](#canal-de-contrôle-v9) et [src/core/best_board.h](src/core/best_board.h)) ;
-  - **router leurs logs** (`log_info`, `log_error`, `log_event`, …) au parent — qui possède la seule console, ce qui évite tout entrelacement dans le terminal et permet le bon fonctionnement de l'interface ncurses (voir [src/net/ipc_protocol.h](src/net/ipc_protocol.h)).
-- Un seul client peut aussi fonctionner en mode **autonome** (`test`) sans serveur, utile pour des tests rapides.
+- Le **serveur** maintient le stock de positions de plateau (« possibilités ») à explorer et les distribue aux clients.
+- Chaque **client** forke `N` processus de recherche ; des **pruners** (CPU ou GPU) vérifient en parallèle les possibilités et élaguent les branches mortes.
+- Le serveur peut **piloter les clients à distance** (statistiques, pause/reprise) via un canal de contrôle dédié, et exposer une **API HTTP REST** pour la supervision.
+- Un client peut aussi tourner en mode **autonome** (`test`), sans serveur.
 
-### Structure des sources
-
-Le code est rangé sous `src/`, réparti en quatre domaines ; les `#include` sont explicites et qualifiés par domaine (`#include "core/part.h"`), résolus via `-Isrc`.
-
-| Répertoire | Domaine |
-|---|---|
-| `src/core/` | Logique du puzzle, structures de données et moteur de recherche (`part`, `readdata`, `possibility`, `best_board`, `lifo`, `etii_search`, `datamanager`, …) |
-| `src/net/`  | Protocole TCP, sockets et IPC parent↔enfant (`etii_protocol`, `control_protocol`, `tcpclient`, `tcpserver`, `local_socket`, `ipc_protocol`) |
-| `src/ui/`   | Journalisation, console et commandes (`logger`, `logger_ncurses`, `console`, `command_lines`, `command_match`, `command_history`) |
-| `src/app/`  | Point d'entrée, rôles client/serveur, signaux, état global et GPU (`main`, `etii_client`, `etii_server`, `etii_control`, `control_registry`, `app_runtime`, `static_variables`, `gpu_pruner`) |
-
-Les données du puzzle sont dans `data/` (`pieces.csv`, `pieces16.csv`) et les objets de compilation dans `build/` (miroir de `src/`, ignoré par git).
+> Détails (modèle de processus/threads, IPC parent↔enfants, structure des sources) : [docs/architecture.md](docs/architecture.md).
 
 ## Compilation
 
 ```sh
-make                          # Build de production (ANSI, sans dépendance) → ./eternityII
-make DEBUG=1                  # Build debug (symboles -g, conservation des .o)
-make NCURSES=1                # Build avec interface ncurses (liée à -lncurses)
-make CUDA=1                   # Build avec pruner GPU CUDA (mode `gpupruner`)
-make EXECUTABLE=monBinaire    # Nom de sortie personnalisé
-make clean                    # Supprime les binaires et objets
+make                # Build de production (ANSI, sans dépendance) → ./eternityII
+make NCURSES=1      # Interface ncurses (optionnelle)
+make CUDA=1         # Pruner GPU CUDA (Linux/NVIDIA, mode `gpupruner`)
+make clean          # Supprime les binaires et objets
 ```
 
-Prérequis : `gcc`, `make`, pthreads (disponibles en standard sur macOS et Linux). L'option `NCURSES=1` est facultative et nécessite ncurses (présent par défaut sur macOS et la plupart des distributions Linux) ; sans elle, le programme compile et tourne avec une interface texte ANSI pure, sans dépendance externe.
+Prérequis : `gcc`, `make`, pthreads (disponibles en standard sur macOS et Linux).
 
-### Compilation CUDA (pruner GPU, optionnel)
-
-Le build `CUDA=1` active un **pruner GPU** (mode d'exécution `gpupruner`) : même plomberie réseau que `tcppruner`, mais le contrôle de chaque lot de possibilités est exécuté sur le GPU (`src/app/gpu_pruner.cu` / `src/app/gpu_pruner.h`, dont le kernel calque la fonction CPU `possibility_all_has_a_next`). La cible matérielle est une carte **NVIDIA** ; le code a été validé sur **Jetson Orin Nano**, dont la mémoire unifiée permet l'usage de `cudaMallocManaged` en zero-copy.
-
-> **Plateforme** : Linux/NVIDIA uniquement. macOS (Darwin) n'est **pas** supporté pour ce mode (pas de `nvcc`, pas de runtime CUDA). Le build par défaut (`make`, sans `CUDA=1`) reste strictement identique au binaire classique : tout le code GPU est encadré par `#ifdef WITH_CUDA`, aucun `.cu` n'est compilé et le runtime CUDA n'est pas lié.
-
-**Prérequis :**
-
-- Un **GPU NVIDIA** compatible CUDA et ses pilotes.
-- Le **toolkit CUDA** (`nvcc` + runtime `libcudart`). Installé par défaut sous `/usr/local/cuda` (surchargeable via `CUDA_PATH`).
-- Une **architecture GPU** (`NVCC_ARCH`) correspondant à la carte (Jetson Orin Nano = `sm_87`, défaut).
-
-**Commandes :**
-
-```sh
-make CUDA=1                              # Active gpupruner (ajoute -DWITH_CUDA,
-                                         #   compile gpu_pruner.cu avec nvcc,
-                                         #   lie -lcudart -lstdc++)
-make CUDA=1 VERIFY=1                     # Build de vérification croisée : rejoue le
-                                         #   contrôle CPU pour chaque lot et logue
-                                         #   toute divergence GPU/CPU (parité stricte)
-```
-
-**Variables surchargeables :**
-
-| Variable | Défaut | Description |
-|---|---|---|
-| `NVCC` | `nvcc` | Chemin du compilateur CUDA (doit être dans le `PATH`, sinon échec explicite) |
-| `CUDA_PATH` | `/usr/local/cuda` | Racine du toolkit CUDA (pour `-L$(CUDA_PATH)/lib64`) |
-| `NVCC_ARCH` | `sm_87` | Architecture GPU cible (Orin Nano = `sm_87`) |
-| `NVCCFLAGS` | `-O3 -arch=$(NVCC_ARCH)` | Drapeaux passés à `nvcc` (avec `WERROR=1`, le Makefile y ajoute `-Werror all-warnings` : tout warning nvcc devient une erreur, comme `-Werror` côté gcc) |
-
-**Note Jetson** : sur Jetson Orin Nano, `nvcc` n'est pas dans le `PATH` par défaut. Indiquer son chemin explicitement, et exporter le runtime CUDA à l'exécution :
-
-```sh
-make CUDA=1 NVCC=/usr/local/cuda/bin/nvcc
-# puis à l'exécution :
-LD_LIBRARY_PATH=/usr/local/cuda/lib64 ./eternityII gpupruner localhost 4
-```
-
-Le mode `VERIFY=1` n'est utile que pour valider la parité GPU/CPU ; en production, laisser `VERIFY=0` (le code de vérification est alors entièrement exclu du binaire).
-
-> Documentation détaillée : [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) (pré-requis, flux et avantages du mode GPU).
-
-## Tests et couverture
-
-Des tests unitaires couvrent les modules à logique pure (`src/core/lifo.c`, `src/core/part.c`, `src/core/readdata.c`), basés sur [greatest](https://github.com/silentbicycle/greatest) — un framework C *single-header* vendoré dans `tests/`, **sans dépendance externe** à installer.
-
-```sh
-make test            # compile et lance la suite (code de sortie non nul si échec)
-make test-integration # scénarios bout-en-bout 16 pièces : solution client/serveur + canal de contrôle
-make test-docker     # rejoue les jobs de test CI dans un conteneur Linux (nécessite Docker)
-make coverage        # idem + rapport de couverture par module (gcov)
-make coverage-report # rapports gcovr : Cobertura XML + HTML + résumé Markdown
-```
-
-`make test-integration` compile un binaire dédié (`ETERN_PARTS=16`) et enchaîne deux
-scripts (`tests/integration/`) : `run_solution_16.sh` (serveur + client
-`--stop-on-solution`, vérifie que les deux côtés voient la solution) puis
-`run_control_channel.sh` (serveur + client sans arrêt automatique, pilote le
-[canal de contrôle](#canal-de-contrôle-v9) depuis la console serveur et vérifie le
-round-trip `clientsStats`/`pause`/`resume` dans les deux journaux). Chacun
-tourne dans un répertoire temporaire isolé avec un timeout borné.
-
-`make test` produit un binaire isolé (`tests/run_tests`) qui ne lie **que** les modules testés et leurs dépendances — `src/app/main.c` n'est jamais inclus. `make coverage` recompile en mode instrumenté et affiche le pourcentage de lignes couvertes :
-
-```
-===== Couverture de code (tout le code de production) =====
-  src/core/lifo.c        Lines executed:48.29% of 234
-  src/core/part.c        Lines executed:50.77% of 388
-  src/core/readdata.c    Lines executed:18.75% of 192
-```
-
-Le détail ligne par ligne est dans `tests/coverage/<module>.c.gcov` (lignes jamais exécutées marquées `#####`). `make coverage-report` produit en plus, via [gcovr](https://gcovr.com), un rapport HTML navigable, un Cobertura XML (consommé par Codecov) et un résumé Markdown. Voir [tests/README.md](tests/README.md) pour ajouter un test ou générer ces rapports.
-
-### Tests sous Linux via Docker (`make test-docker`)
-
-Si [Docker](https://www.docker.com) est installé, `make test-docker` rejoue en local les jobs de test de la CI dans un conteneur **identique au runner GitHub** (image [tests/docker/Dockerfile](tests/docker/Dockerfile), épinglée sur `ubuntu:24.04` avec gcc/make/gcov et gcovr) : build `WERROR=1`, tests unitaires, passe AddressSanitizer et test d'intégration client/serveur. C'est le moyen de détecter **avant de pousser** les écarts entre macOS/clang et Linux/gcc (diagnostics `-Werror` plus stricts, over-reads vus par ASan sous Linux seulement, glibc vs libSystem). Le dépôt est monté en lecture seule et copié dans le conteneur : les artefacts Linux ne se mélangent jamais à ceux du poste hôte. La séquence est surchargeable pour rejouer un seul job : `make test-docker DOCKER_TEST_CMD="make test ASAN=1"`.
-
-## Intégration continue
-
-À chaque push et pull request, [GitHub Actions](.github/workflows/ci.yml) :
-
-- compile le build de production (`make WERROR=1`), lance les tests unitaires (`make test`) et les rapports de couverture (`make coverage-report`, via gcovr) ;
-- publie la couverture : envoi à Codecov (Cobertura), commentaire de couverture sur la PR + récapitulatif du run (Job Summary), et rapport HTML en artefact téléchargeable ;
-- **compile toutes les combinaisons du code**, chacune avec `WERROR=1` (tout warning bloque la CI), pour qu'aucun chemin compilé sous condition ne se désynchronise en silence : la variante ncurses (`make NCURSES=1`), la variante CUDA (`make CUDA=1` puis `make CUDA=1 VERIFY=1`), un build activant **tous** les flags `DEBUG_*` de [src/app/static_variables.h](src/app/static_variables.h) à la fois, et les configurations alternatives `ETERN_PARTS=16` (plateau 4×4) et `FORWARD_CHECK_K=0` (forward-checking retiré). Toutes pilotées via `CPPFLAGS` (`-D…`), sans toucher la source — ces deux `#define` sont guardés par `#ifndef` pour être surchargeables.
-
-Le toolkit CUDA est installé sur le runner (action `Jimver/cuda-toolkit`) pour la **compilation** seule : les runners GitHub n'ayant pas de GPU NVIDIA, le binaire CUDA n'est pas exécuté (la validation fonctionnelle se fait sur Jetson). Il en va de même pour les autres variantes : ce sont des contrôles de compilation/édition de liens, pas des exécutions.
+> Détails (options `DEBUG`/`WERROR`/`ASAN`, configuration du puzzle `ETERN_PARTS`/`FORWARD_CHECK_K`, drapeaux de debug) : [docs/compilation.md](docs/compilation.md) — build CUDA : [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md).
 
 ## Utilisation
 
-### Mode serveur
-
-Lance le serveur qui distribue les possibilités aux clients.
-
 ```sh
-./eternityII tcpserver [nb_threads] [--expand-level N] [--http-port N] [fichier_pieces.csv]
-```
-
-| Paramètre | Défaut | Description |
-|---|---|---|
-| `nb_threads` | 80 | Nombre de connexions clients simultanées |
-| `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'au niveau de curseur `N` (anti-famine, voir ci-dessous) |
-| `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](#api-http-rest-admin) sur `127.0.0.1:N` (désactivée par défaut) |
-| `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
-
-Exemple :
-```sh
-./eternityII tcpserver 80
-./eternityII tcpserver 80 data/pieces.csv
+# Serveur (distribue les possibilités ; --expand-level évite la famine du démarrage)
 ./eternityII tcpserver 80 --expand-level 4 data/pieces.csv
-./eternityII tcpserver 80 --http-port 8080 data/pieces.csv
+
+# Client de recherche (N processus en parallèle)
+./eternityII tcpclient localhost 4
+
+# Pruner (élague les branches mortes ; gpupruner avec un build CUDA=1)
+./eternityII tcppruner localhost 4
+
+# Mode autonome, sans serveur
+./eternityII test
 ```
 
-#### Expansion du stock au démarrage (`--expand-level`, anti-famine)
+Options transverses : `--stop-on-solution` (s'arrêter à la première solution ; par défaut la recherche continue) et, côté serveur, `--http-port N` pour activer l'API HTTP REST admin sur `127.0.0.1:N`.
 
-Au démarrage, le serveur ne détient que le paquet *genèse* et ses tout premiers enfants. Le premier client qui se connecte récupère cet unique arbre et le garde en local ; le serveur se retrouve sans rien à distribuer aux autres clients, qui tournent à vide — c'est la **famine du démarrage**.
+> Détails (paramètres et défauts de chaque mode, expansion anti-famine, échange par lots des pruners, format du fichier de pièces, fichiers générés `.back`/`solution_*`/`events.log`, limitations connues) : [docs/utilisation.md](docs/utilisation.md).
 
-L'option `--expand-level N` (position-indépendante, retirée d'argv avant l'analyse positionnelle) demande au serveur de **développer lui-même son stock** avant toute connexion : il place une pièce candidate sur la case suivante de chaque possibilité jusqu'à ce que leur curseur `alloc` atteigne le niveau `N`. Le paquet genèse devient ainsi des milliers de possibilités distribuables. C'est un calcul **purement serveur, sans aucun impact client**.
+## Console interactive
 
-L'expansion est bornée sur deux axes (dans [src/app/static_variables.h](src/app/static_variables.h)) : `EXPAND_MAX_LEVELS` (4) plafonne le nombre de passes quelle que soit la consigne — garde-fou en *profondeur* — et `EXPAND_MAX_STOCK` (100000) plafonne le *nombre* de possibilités entre passes ; comme le facteur de branchement est inconnu et qu'une seule passe peut exploser, ce plafond en nombre est le vrai garde-fou de temps et de mémoire. Sur le puzzle 256 le branchement mesuré est ≈11×/niveau (niveau 3 → ~500 possibilités, niveau 4 → ~5300, niveau 5 → ~56000) : **le niveau 3–4 est le point idéal** — de quoi remplir le stock local de tous les clients avec réserve, en bien moins d'une seconde. La même opération est disponible à chaud via la commande interactive `expand N` (utile si le stock distribuable se raréfie en cours de recherche).
+Une fois lancé, le programme écoute des commandes sur l'entrée standard (`help` pour la liste) : sauvegarde/restauration du stock (`backup`, `restore`), tri et élagage des files (`sortd`, `rmnonext`, `expand`), régulation (`limit`, `pause`/`resume`), et pilotage des clients connectés depuis le serveur (`clients`, `clientsStats`, `clientsCmd`). Les évènements notables (records, solutions, connexions) sont affichés dans une zone dédiée et journalisés dans `events.log` ; l'historique des commandes (↑/↓) est persisté entre sessions.
 
-> Cette expansion est le pendant *serveur* de la délégation anticipée côté *client* (sonde de faim `INST_NEED_WORK`, VERSION 8) décrite dans [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md).
+> Détails (table complète des commandes, zone Events, historique, interface ncurses) : [docs/console.md](docs/console.md).
 
-### Mode client
-
-Se connecte à un serveur et lance `N` processus de recherche en parallèle.
+## Tests et intégration continue
 
 ```sh
-./eternityII tcpclient [serveur] [nb_threads] [max_stock_par_thread] [fichier_pieces.csv]
+make test             # tests unitaires (framework greatest, vendoré)
+make test-integration # scénarios bout-en-bout client/serveur (16 pièces)
+make test-docker      # rejoue les jobs de test CI dans un conteneur Linux
+make coverage-report  # rapports de couverture gcovr (XML + HTML + Markdown)
 ```
 
-| Paramètre | Défaut | Description |
-|---|---|---|
-| `serveur` | `localhost` | Adresse IP ou nom d'hôte du serveur |
-| `nb_threads` | 1 | Nombre de processus de recherche à forker |
-| `max_stock_par_thread` | 300 | Nombre max de possibilités stockées par thread avant d'en renvoyer au serveur |
-| `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
+La CI GitHub Actions compile **toutes les combinaisons du code** avec `WERROR=1`, lance les tests unitaires et d'intégration, et publie la couverture sur Codecov.
 
-Exemples :
-```sh
-./eternityII tcpclient localhost
-./eternityII tcpclient 192.168.1.10 8
-./eternityII tcpclient localhost 4 300 data/pieces.csv
-```
-
-### Mode pruner (élagage)
-
-Un **pruner** réutilise la même plomberie réseau qu'un client, mais au lieu d'explorer il demande au serveur des possibilités *à vérifier* et élague celles qui n'ont aucune continuation possible. Deux variantes :
-
-```sh
-./eternityII tcppruner [serveur] [nb_threads] [fichier_pieces.csv] [taille_lot]   # élagage CPU
-./eternityII gpupruner [serveur] [nb_threads] [fichier_pieces.csv] [taille_lot]   # élagage GPU (build CUDA=1)
-```
-
-| Paramètre | Défaut | Description |
-|---|---|---|
-| `serveur` | `localhost` | Adresse IP ou nom d'hôte du serveur |
-| `nb_threads` | 1 | Nombre de processus de vérification à forker |
-| `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
-| `taille_lot` | 100 | Nombre de possibilités échangées par aller-retour TCP (borné à 65536) |
-
-> Le mode `gpupruner` n'est disponible que si le binaire a été compilé avec `make CUDA=1` (voir [Compilation CUDA](#compilation-cuda-pruner-gpu-optionnel)). Sur Jetson, penser à `LD_LIBRARY_PATH=/usr/local/cuda/lib64`.
-
-#### Échange par lots
-
-Le contrôle d'une possibilité est très rapide : sans lot, l'aller-retour TCP (une requête `GET` puis un acquittement par possibilité) plafonne le débit réseau et affame le GPU. Le pruner échange donc avec le serveur **par lots** : il demande jusqu'à `taille_lot` possibilités en un seul aller-retour et acquitte de même le lot analysé.
-
-La taille de lot **borne la mémoire** détenue par le pruner (il ne reçoit/acquitte jamais plus que ce lot) et dimensionne les tampons GPU (un lot = un lancement de kernel sur tous les SM). Elle se règle :
-
-- **au démarrage** : 4ᵉ argument de `tcppruner` / `gpupruner` (`taille_lot`) ;
-- **à l'exécution** : commande interactive `prunerBatch <n>` (propagée aux process enfants).
-
-Exemples :
-```sh
-./eternityII tcppruner localhost 4 data/pieces.csv 500     # lots de 500 (CPU)
-./eternityII gpupruner localhost 1 data/pieces.csv 4096    # lots de 4096 (GPU)
-```
-
-> ⚠️ **Compatibilité protocole** : cet échange par lots fait passer la `VERSION` du protocole de 5 à 6. Le handshake exige une égalité stricte des versions — **tous les nœuds (serveur, clients, pruners) doivent être recompilés ensemble** ; un binaire VERSION 6 ne dialogue pas avec un VERSION 5.
-
-### Canal de contrôle (v9)
-
-En plus du protocole de travail (GET/ADD/…, toujours initié par le client), chaque
-processus client (`tcpclient`/`tcppruner`/`gpupruner`) ouvre automatiquement une
-**seconde connexion TCP dédiée** vers le serveur — sans rien à faire côté ligne de
-commande. Sur cette connexion, une fois la session annoncée (`INST_CONTROL_HELLO`),
-c'est le **serveur** qui prend l'initiative : il peut demander les statistiques
-courantes du client ou lui pousser une commande (`pause`, `resume`, `limit`, …), sans
-jamais toucher aux threads de recherche du client.
-
-Ça se pilote entièrement depuis la console du **serveur**, avec les commandes
-`clients`, `clientsStats`, `clientsCmd`, ainsi que `pause`/`resume` qui, sur le
-serveur, diffusent la commande à tous les clients connectés (voir
-[Commandes interactives](#commandes-interactives)).
-
-> ⚠️ **Dimensionnement de `NB_THREADS`** : cette connexion de contrôle occupe un slot
-> du même pool que les connexions de travail (`nb_threads`, 1ᵉʳ argument de
-> `tcpserver`). Chaque processus client connecté consomme donc **un slot de plus**
-> que ses seuls threads de recherche. Le défaut (80) laisse une large marge, mais un
-> serveur dimensionné au plus juste doit compter (connexions de travail simultanées)
-> **+** (processus clients connectés), pas seulement le premier terme.
-
-**Meilleur plateau connu (`CTRL_GET_BEST_BOARD` / `CTRL_BEST_BOARD`, v10)** : quand un
-`CTRL_STATS` révèle qu'un client rapporte un `max_result` supérieur au meilleur déjà
-connu du serveur, celui-ci tire — sur la **même connexion**, avant de repasser en
-attente — la représentation complète du plateau correspondant (pas seulement le
-compte). Le serveur ne conserve que la **première** représentation qui dépasse
-strictement son record courant (une nouvelle à égalité n'écrase jamais la
-précédente) ; côté client, seule la première représentation qui dépasse le record
-*local* d'un fork de recherche est propagée à son processus parent. Voir
-[src/core/best_board.h](src/core/best_board.h) pour la primitive partagée par les
-trois échelles (fork, parent client, serveur) et
-[GET /api/v1/best-board](#api-http-rest-admin) pour la consulter en HTTP.
-
-> Documentation détaillée (format de trame, séquences, liste blanche des commandes
-> à distance) : [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md#canal-de-contrôle-v9).
-
-### API HTTP REST (admin)
-
-En plus du protocole binaire et du canal de contrôle ci-dessus (réservés aux
-processus eternityII), le serveur peut exposer une **API HTTP REST** en JSON pour
-qu'une application tierce, écrite dans n'importe quel langage, lise sa télémétrie et
-pilote quelques commandes admin — sans avoir à implémenter le protocole binaire.
-
-**Désactivée par défaut**, à activer explicitement :
-
-```sh
-./eternityII tcpserver 4 --http-port 8080 data/pieces.csv
-```
-
-- Écoute en **boucle locale uniquement** (`127.0.0.1`), jamais exposée hors machine ;
-  aucune authentification (réseau de confiance / tunnel explicite pour un accès
-  distant).
-- Six routes : `GET /api/v1/stats` (télémétrie), `GET /api/v1/status` (état et
-  configuration), `POST /api/v1/command` (commandes admin, filtrées par la **même
-  liste blanche** que le canal de contrôle : `pause`, `resume`, `limit`,
-  `maxStockByThread`, `prunerBatch` — jamais `exit`/`restore`/`import`),
-  `GET /api/v1/clients` (liste des clients connectés via le
-  [canal de contrôle](#canal-de-contrôle-v9), stats par client incluses si déjà
-  collectées), `POST /api/v1/clients/stats` (déclenche une collecte auprès de tous
-  les clients — équivalent HTTP de la commande console `clientsStats`) et
-  `GET /api/v1/best-board` (représentation complète du meilleur plateau connu du
-  serveur — requête **dédiée**, volontairement absente de `/api/v1/stats` : c'est
-  un ordre de grandeur plus gros qu'un compteur, un consommateur qui ne s'intéresse
-  qu'au débit ne doit pas la payer à chaque poll).
-
-```sh
-curl http://127.0.0.1:8080/api/v1/stats
-curl http://127.0.0.1:8080/api/v1/status
-curl -X POST -d '{"command":"pause"}' http://127.0.0.1:8080/api/v1/command
-curl http://127.0.0.1:8080/api/v1/clients
-curl -X POST http://127.0.0.1:8080/api/v1/clients/stats
-curl http://127.0.0.1:8080/api/v1/best-board
-```
-
-> Documentation détaillée (schémas JSON complets, codes d'erreur, séquences,
-> exemples d'implémentation client) : [docs/api_http_rest.md](docs/api_http_rest.md).
-
-### Mode test (autonome)
-
-Exécute la recherche localement sans serveur. Utile pour valider la configuration ou déboguer.
-
-```sh
-./eternityII test [fichier_pieces.csv]
-```
-
-## Commandes interactives
-
-Une fois lancé, le programme écoute des commandes sur l'entrée standard. Taper `help` pour la liste complète. En cas de faute de frappe, le programme propose automatiquement la commande la plus proche (`vouliez-vous dire "sortd" ?`).
-
-| Commande | Description |
-|---|---|
-| `help` | Affiche la liste des commandes |
-| `backup` | Sauvegarde les files de possibilités dans `eternityII.back` et `eternityII-in_analyse.back` |
-| `restore` | Restaure les files depuis les fichiers `.back` |
-| `import` | Importe des possibilités depuis les fichiers `.back` dans les files courantes |
-| `exit` | Arrête proprement le programme (sauvegarde automatique) |
-| `check` | Affiche le dernier état analysé |
-| `sorta` | Trie les possibilités par ordre croissant (moins avancées en premier) |
-| `sortd [n]` | Trie par ordre décroissant (plus avancées en premier) ; `n` pour une file spécifique |
-| `sortdm` | Trie toutes les files en parallèle |
-| `split` | Répartit les possibilités entre les 10 files |
-| `regroup` | Regroupe toutes les files en une seule |
-| `rmnonext` | Supprime les possibilités sans continuation possible (élagage) |
-| `expand N` | Développe le stock jusqu'au niveau de curseur `N` (anti-famine, borné à 4 passes / `EXPAND_MAX_STOCK` possibilités) |
-| `min` | Affiche le niveau minimum dans les files |
-| `statistic` | Affiche des statistiques sur le contenu des files |
-| `loadjson` | Importe une possibilité depuis une chaîne JSON (équivalent de `import` pour le format JSON) |
-| `checkdatas` | Vérifie l'intégrité des possibilités |
-| `checkduplicate` | Recherche les doublons dans les files |
-| `checkfiles` | Vérifie l'intégrité de toutes les files |
-| `checkfile N` | Vérifie la file numéro `N` |
-| `checkdirections` | Vérifie la cohérence des directions de parcours |
-| `print` | Affiche toutes les files au format JSON |
-| `printfile N` | Affiche le contenu de la file numéro `N` |
-| `printanalysed` | Affiche les possibilités en cours d'analyse |
-| `limit N` | Limite la vitesse de recherche à `N` essais/seconde (0 = illimité) |
-| `maxStockByThread N` | Ajuste le stock max par thread à la volée |
-| `prunerBatch N` | Ajuste la taille de lot d'échange du pruner à la volée (borné à [1, 65536]) |
-| `pause` | Pause administrative de la recherche (`REQUEST_ADMIN_PAUSE`) — distincte de la pause de régulation de débit interne (`limit`), ne se lève que par `resume` ; diffuse aussi `CTRL_COMMAND "pause"` à tous les clients connectés (utile côté serveur, qui n'a pas de recherche locale à mettre en pause), et persiste l'état pour les clients qui se connecteront après |
-| `resume` | Lève une pause administrative posée par `pause` ; diffuse aussi `CTRL_COMMAND "resume"` à tous les clients connectés et efface l'état persisté |
-| `clients` *(serveur)* | Liste les sessions de [canal de contrôle](#canal-de-contrôle-v9) actives (pid, forks, mode, dernière activité) |
-| `clientsStats` *(serveur)* | Demande les statistiques agrégées de chaque client connecté via son canal de contrôle (équivalent de `POST /api/v1/clients/stats` sur l'[API HTTP](#api-http-rest-admin)) |
-| `clientsCmd <ligne>` *(serveur)* | Pousse `<ligne>` à distance à tous les clients connectés (filtrée par une liste blanche : `pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`) |
-
-Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`, `rmnonext`, `limit`, `maxStockByThread`, `prunerBatch`, `min`, `printanalysed`, `pause`, `resume`) sont automatiquement retransmises à tous les processus fils via socket Unix. Les commandes `clients*` sont **serveur uniquement** : elles agissent sur le [canal de contrôle](#canal-de-contrôle-v9) distant, pas sur des process fils locaux.
-
-## Interface interactive
-
-### Zone Events (en bas de l'écran)
-
-Les évènements notables sont affichés dans une bande fixe en bas de la console, juste au-dessus du prompt :
-
-```
-┌──────────────────────────────────┐
-│  Sortie des commandes, logs…     │
-│  …                               │
-│  commande : check                │
-│  file:0 stock:0                  │
-│  …                               │
-├──────────────────────────────────┤
-│  Events                          │  ← bande inversée, fixe
-│  [21:29:30] new record: 65 …     │
-│  [21:30:15] SOLUTION FOUND! …    │
-│  …                               │
-└──────────────────────────────────┘
-│  commande : _                    │
-```
-
-Les évènements suivants sont câblés :
-
-| Évènement | Source |
-|---|---|
-| `new record: N pieces placed` | Détecté à chaque tick du checker (10 s) quand `max_result` augmente |
-| `request unfulfilled: all threads busy` | Côté serveur, quand un nouveau client se connecte mais aucun thread libre |
-| `SOLUTION FOUND! (N pieces) - saved to ./solution_<pid>` | Émis depuis `checkIfResultFound` quand les 256 pièces sont placées |
-| `nouveau client connecté` | Côté serveur, à chaque connexion TCP acceptée |
-| `client déconnecté (…)` | Côté serveur, en fin de session : `fin de session` (propre), `connexion perdue` (brutale) ou `protocole interrompu` |
-| `client rejeté : version …` | Côté serveur, quand le handshake de version échoue (version incompatible ou requête sans handshake valide) |
-| `session de contrôle enregistrée (pid=…) -> slot N` | Côté serveur, quand un client annonce son [canal de contrôle](#canal-de-contrôle-v9) (`INST_CONTROL_HELLO`) |
-| `session de contrôle déconnectée (slot N)` | Côté serveur, à la fin d'une session de canal de contrôle |
-| `commande distante "…" exécutée (code retour N)` | Côté serveur, après qu'une commande `clientsCmd` ou `pause`/`resume` (diffusion) a été acquittée par le client |
-
-Tout évènement est **horodaté et écrit dans `events.log`** (en plus de l'affichage dans la zone), ce qui te permet de garder une trace persistante hors session :
-
-```sh
-tail -f events.log
-```
-
-### Réaffichage en place de `check`
-
-La commande `check` réécrit son rapport au même endroit au lieu de défiler, pour éviter l'effet « scroll continu » quand on la tape plusieurs fois. La région de défilement ANSI commence en haut de l'écran, donc les sorties longues (par ex. `statistic`, `print`) restent capturées par le **scrollback natif du terminal** (molette, Cmd+↑).
-
-### Historique des commandes (flèches ↑ / ↓)
-
-Les 100 dernières commandes saisies sont conservées en mémoire pour la session. Les touches ↑ et ↓ rappellent les commandes précédentes (comme dans bash) :
-
-| Touche | Effet |
-|---|---|
-| ↑ | Rappelle la commande précédente (la première pression mémorise la saisie en cours pour pouvoir y revenir) |
-| ↓ | Avance vers les commandes plus récentes ; revient à la saisie en cours en bas |
-| Entrée | Exécute la commande et l'ajoute à l'historique (dédoublonnage si identique à la précédente) |
-| Backspace | Efface le dernier caractère |
-
-L'historique fonctionne dans les deux builds. En ANSI, le terminal est basculé en mode non-canonique (`tcsetattr`) le temps de la session pour permettre l'interception des séquences `\033[A` / `\033[B`. Le mode initial est restauré automatiquement à la sortie. Si stdin n'est pas un TTY (sortie redirigée), le programme retombe sur la lecture ligne-par-ligne classique.
-
-L'historique est **persisté entre sessions** dans `~/.eternityII_history` (repli sur `./.eternityII_history` si `$HOME` est absent). Il est chargé au démarrage de la console — l'absence du fichier au premier lancement n'est pas une erreur — et réécrit à la sortie propre (commande `exit` ou fin de stdin) dans les deux builds. L'écriture est atomique (fichier temporaire `.tmp` + `rename`) pour ne jamais corrompre l'historique existant si l'écriture échoue.
-
-### Interface ncurses (optionnelle, `make NCURSES=1`)
-
-Le build `NCURSES=1` remplace l'affichage ANSI par une vraie interface ncurses à quatre zones :
-
-```
-┌────────────────────────────────────┐
-│  output_pad (scrollable, 3000 l.)  │
-│  …                                 │
-├────────────────────────────────────┤
-│  coups/s:… stock:… record:…        │  ← bandeau stats live (vidéo inverse)
-├────────────────────────────────────┤
-│  Events  [+47 sous la vue]         │
-│  …                                 │
-├────────────────────────────────────┤
-│  commande : _                      │
-└────────────────────────────────────┘
-```
-
-Le **bandeau de stats** (mis à jour en continu par le thread checker) affiche : `coups/s`, `stock`, `analyse`, `record` et `limite`. Il est rafraîchi via `log_status()` et ne perturbe pas le défilement du pad de sortie.
-
-Touches de navigation dans l'historique :
-
-| Touche | Effet |
-|---|---|
-| `PgUp` / `PgDn` | Remonte / descend d'une page |
-| `Home` / `End` | Tout en haut / tout en bas |
-| `Entrée` | Réactive le suivi automatique du bas |
-
-Quand on n'est pas en bas, le titre de la zone Events affiche le nombre de lignes cachées (`[+N sous la vue — PgDn/End pour revenir]`).
-
-Le build par défaut (sans `NCURSES=1`) reste 100 % fonctionnel et **sans aucune dépendance** sur ncurses.
-
-## Format du fichier de pièces
-
-```
-ntiles: 256
-<id> <top> <right> <bottom> <left>
-...
-```
-
-- Chaque pièce est définie par son identifiant et les 4 couleurs de ses bords (entiers).
-- La valeur `0` représente la bordure grise (bord du puzzle).
-- Le fichier `data/pieces.csv` contient les 256 pièces officielles du puzzle 16×16.
-- Le fichier `data/pieces16.csv` contient 16 pièces pour un puzzle 4×4 (tests rapides).
-
-## Fichiers générés
-
-### Sauvegardes (`.back`)
-
-Le programme sérialise ses files de possibilités dans des fichiers binaires `.back` :
-
-| Fichier | Contenu |
-|---|---|
-| `eternityII.back` | Files de possibilités en attente d'exploration (serveur) |
-| `eternityII-in_analyse.back` | Possibilités actuellement distribuées aux clients |
-| `eternityII.back_<pid>` | Sauvegarde propre à un processus client |
-| `failed_exit_eternityII_<pid>.back` | Possibilités non vidées à l'arrêt anormal d'un client |
-| `eternityII-best_board.back` / `temp-best_board.back` | Représentation complète du meilleur plateau connu du serveur (`g_server_best_board`, [src/core/best_board.h](src/core/best_board.h)) — sauvegardé aux mêmes instants que les fichiers ci-dessus (autobackup, arrêt sur solution) |
-
-Ces fichiers permettent de reprendre une recherche interrompue avec la commande `restore`.
-
-### Journal et solutions
-
-| Fichier | Contenu |
-|---|---|
-| `events.log` | Journal des évènements horodatés (nouveaux records, solutions, etc.). Append-only. |
-| `solution_<pid>` | Plateau sérialisé quand une solution complète est trouvée (déclenche aussi un évènement). |
-
-## Limitations connues
-
-- **Cadence d'attente figée quand le serveur n'a rien à fournir.** Un thread de recherche ou de pruner sans travail assigné (`works == 0`) attend en boucle avec une cadence fixe de 100 µs (`MICRO_SLEEP`, `autosearch_step`/`autoprune_step`/`autoprune_gpu` dans `src/core/etii_search.c`), qu'il s'agisse d'une pénurie momentanée ou d'un épuisement durable du stock serveur. C'est typiquement le cas d'un `tcppruner` une fois que **toutes** les possibilités ont été vérifiées : le serveur n'a plus rien à distribuer, mais chaque thread continue de sonder à cadence rapide indéfiniment, consommant du CPU pour rien. Une piste serait d'appliquer à cette boucle un back-off progressif similaire à celui déjà en place côté thread d'alimentation (`feed_thread_aposs`, `NO_WORK_SLEEP_START`/`NO_WORK_SLEEP_MAX` dans `src/app/static_variables.h`), afin de distinguer une pénurie ponctuelle d'un épuisement long/définitif — par opposition aux pauses (régulation `REQUEST_PAUSE` / admin `REQUEST_ADMIN_PAUSE`), qui bénéficient déjà chacune d'une cadence dédiée (`PAUSE_POLL_SLEEP_US` / `ADMIN_PAUSE_POLL_SLEEP_US`).
+> Détails (scripts d'intégration, Docker, couverture, matrice CI) : [docs/tests_et_ci.md](docs/tests_et_ci.md) — conventions d'écriture des tests : [tests/README.md](tests/README.md).
 
 ## Documentation
 
-Le répertoire [`docs/`](docs/) rassemble les notes détaillées sur l'architecture et les protocoles :
+Le répertoire [`docs/`](docs/) rassemble la documentation détaillée :
 
 | Document | Contenu |
 |---|---|
-| [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences typiques, comportement en cas de panne, et le [canal de contrôle](docs/echanges_client_serveur.md#canal-de-contrôle-v9) (v9). |
-| [docs/api_http_rest.md](docs/api_http_rest.md) | [API HTTP REST admin](#api-http-rest-admin) (`--http-port`) : schémas JSON complets, codes d'erreur, séquences, exemples d'implémentation client (curl, Python). |
+| [docs/architecture.md](docs/architecture.md) | Architecture d'ensemble : processus/threads, IPC parent↔enfants, structure des sources. |
+| [docs/compilation.md](docs/compilation.md) | Options de build, prérequis, configuration du puzzle, drapeaux de debug. |
+| [docs/utilisation.md](docs/utilisation.md) | Modes d'exécution et leurs paramètres, fichiers manipulés, limitations connues. |
+| [docs/console.md](docs/console.md) | Commandes interactives, zone Events, historique, interface ncurses. |
+| [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences, pannes, et le [canal de contrôle](docs/echanges_client_serveur.md#canal-de-contrôle-v9) (v9). |
+| [docs/api_http_rest.md](docs/api_http_rest.md) | API HTTP REST admin (`--http-port`) : schémas JSON complets, codes d'erreur, exemples client (curl, Python). |
 | [docs/autosearch_step.md](docs/autosearch_step.md) | Flux de recherche (`autosearch_step`) et gestion mémoire d'un thread de recherche. |
-| [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (mode `gpupruner`) : pré-requis de compilation et d'exécution, flux CUDA, avantages. |
+| [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (mode `gpupruner`) : prérequis de compilation et d'exécution, flux CUDA, avantages. |
+| [docs/tests_et_ci.md](docs/tests_et_ci.md) | Cibles de test, intégration bout-en-bout, Docker, couverture, CI. |
+| [tests/README.md](tests/README.md) | Organisation des suites unitaires, conventions, ajout d'un test. |
