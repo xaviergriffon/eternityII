@@ -63,7 +63,7 @@ void failed_arg(void);
  * d'erreur d'arguments (`failed_arg`) sont tous dérivés de cette table.
  */
 typedef struct cli_help_topic {
-	const char *name;    /**< Nom canonique : mode (`tcpserver`) ou option (`--http-port`). */
+	const char *name;    /**< Nom canonique : mode (`server`) ou option (`--http-port`). */
 	const char *usage;   /**< Ligne d'usage complète (arguments entre crochets = optionnels). */
 	const char *summary; /**< Résumé d'une ligne, affiché dans l'aide générale. */
 	const char *details; /**< Complément affiché par `help <sujet>` (NULL accepté). */
@@ -109,7 +109,7 @@ int print_cli_help_topic(const char *name);
 /**
  * @brief Parse un entier positif optionnel avec repli explicite.
  *
- * Extrait de `handle_tcpclient` (parsing du nombre de threads, argv[3]) pour
+ * Extrait de `handle_client` (parsing du nombre de threads, argv[3]) pour
  * être testable hors de main.c (non linké dans le binaire de test).
  *
  * @param arg             Chaîne à parser (ex. argv[i]), ou NULL si absente.
@@ -122,48 +122,48 @@ int print_cli_help_topic(const char *name);
 int parse_positive_int_or_default(const char *arg, int fallback, int *out_was_invalid);
 
 /**
- * @brief Classifie et interprète l'argument optionnel « nb_threads » de `tcpserver`.
+ * @brief Classifie et interprète l'argument optionnel « nb_threads » de `server`.
  *
- * Usage : `tcpserver [nb_threads] [pieces.csv]` — le premier argument DOIT être
- * un nombre de threads, pas un fichier ; une erreur fréquente ("tcpserver
+ * Usage : `server [nb_threads] [pieces.csv]` — le premier argument DOIT être
+ * un nombre de threads, pas un fichier ; une erreur fréquente ("server
  * data/pieces16.csv") donnerait sinon `atoi(chemin) == 0` → serveur démarré
  * avec 0 thread de communication (accepte les connexions mais ne les sert
- * jamais). Extrait de `handle_tcpserver` pour être testable hors de main.c.
+ * jamais). Extrait de `handle_server` pour être testable hors de main.c.
  *
  * @param arg                 argv[2], ou NULL si absent.
  * @param default_nb_threads   Valeur affectée à `*out_nb_threads` si `arg` est
  *                              absent, ou numérique mais invalide (<= 0).
  * @param out_nb_threads       Sortie : nombre de threads retenu.
- * @return TCPSERVER_ARG_AS_COUNT (0) si `arg` est absent ou interprété comme un
- *         compte de threads valide ; TCPSERVER_ARG_INVALID_COUNT (1) si `arg`
+ * @return SERVER_ARG_AS_COUNT (0) si `arg` est absent ou interprété comme un
+ *         compte de threads valide ; SERVER_ARG_INVALID_COUNT (1) si `arg`
  *         ressemble à un nombre mais est invalide (<= 0, repli appliqué) ;
- *         TCPSERVER_ARG_AS_FILENAME (2) si `arg` ne ressemble pas à un nombre
+ *         SERVER_ARG_AS_FILENAME (2) si `arg` ne ressemble pas à un nombre
  *         (traité comme le fichier de pièces).
  */
 enum {
-	TCPSERVER_ARG_AS_COUNT = 0,
-	TCPSERVER_ARG_INVALID_COUNT = 1,
-	TCPSERVER_ARG_AS_FILENAME = 2,
+	SERVER_ARG_AS_COUNT = 0,
+	SERVER_ARG_INVALID_COUNT = 1,
+	SERVER_ARG_AS_FILENAME = 2,
 };
-int parse_tcpserver_thread_arg(const char *arg, int default_nb_threads, int *out_nb_threads);
+int parse_server_thread_arg(const char *arg, int default_nb_threads, int *out_nb_threads);
 
 /**
- * @brief Parse les arguments positionnels de `tcpclient` / `tcppruner` / `gpupruner`.
+ * @brief Parse les arguments positionnels de `client` / `pruner`.
  *
- * Usage : `tcpclient [serveur] [nb_threads] [max_stock] [pieces.csv]`
- *         `tcppruner [serveur] [nb_threads] [pieces.csv] [batch]`
+ * Usage : `client [serveur] [nb_threads] [max_stock] [pieces.csv]`
+ *         `pruner [serveur] [nb_threads] [pieces.csv] [batch]`
  * Le sens d'argv[4]/argv[5] dépend donc de `pruner_mode` (lu, jamais écrit ici) :
  * pour un pruner, argv[4] est le fichier de pièces et argv[5] la taille de lot
  * (bornée à [1, PRUNER_BATCH_MAX]) ; pour un client de recherche, argv[4] est le
  * stock max par thread et argv[5] le fichier de pièces. Positionne les globales
  * `NB_THREADS`, `max_stock_by_thread`, `pruner_batch_size`, `parts_files`.
- * Extrait de `handle_tcpclient` (main.c) pour être testable.
+ * Extrait de `handle_client` (main.c) pour être testable.
  *
  * @param argc Nombre d'arguments (après retrait des options par parse_cli_options).
  * @param argv Arguments (argv[1] = mode, déjà consommé par l'appelant).
  * @return     L'adresse du serveur (argv[2], ou "localhost" si absente).
  */
-const char *parse_tcpclient_args(int argc, const char *argv[]);
+const char *parse_client_args(int argc, const char *argv[]);
 
 /* ---- Fin de vie du client ---- */
 

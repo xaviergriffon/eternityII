@@ -1,6 +1,6 @@
 # API HTTP REST admin
 
-Ce document décrit l'API HTTP REST exposée par le serveur (`tcpserver`) quand il est
+Ce document décrit l'API HTTP REST exposée par le serveur (`server`) quand il est
 lancé avec l'option `--http-port <n>` : une interface texte (JSON sur HTTP/1.1),
 pensée pour qu'une application tierce — dans **n'importe quel langage** — puisse lire
 la télémétrie et piloter quelques commandes admin **sans parler le protocole binaire**
@@ -22,7 +22,7 @@ Le code correspondant vit dans :
 Désactivée par défaut. À activer explicitement au démarrage du serveur :
 
 ```sh
-./eternityII tcpserver 4 --http-port 8080 data/pieces.csv
+./eternityII server 4 --http-port 8080 data/pieces.csv
 ```
 
 `--http-port` est une option position-indépendante (comme `--expand-level`), retirée

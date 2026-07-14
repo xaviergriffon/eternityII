@@ -81,6 +81,8 @@ int pruner_mode = 0;
 
 int stop_on_solution = 0;
 
+int gpu_requested = 0;
+
 int help_requested = 0;
 
 int expand_min_level = 0;
@@ -198,6 +200,10 @@ int parse_cli_options(int argc, const char *argv[])
     for (int r = 0; r < argc; r++) {
         if (strcmp(argv[r], "--stop-on-solution") == 0) {
             stop_on_solution = 1;
+        } else if (strcmp(argv[r], "--gpu") == 0) {
+            // Exécution GPU du pruner : le flag est interprété par le mode
+            // `pruner` dans main() (erreur explicite sur un build sans CUDA).
+            gpu_requested = 1;
         } else if (strcmp(argv[r], "--help") == 0 || strcmp(argv[r], "-h") == 0) {
             // Aide CLI : le flag est lu dans main() avant le dispatch des modes
             // (affichage de l'aide générale puis EXIT_SUCCESS).

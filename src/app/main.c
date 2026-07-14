@@ -24,8 +24,8 @@
 #include "ui/logger.h"
 #include "net/ipc_protocol.h"
 
-void handle_tcpclient(int argc, const char *argv[]);
-void handle_tcpserver(int argc, const char *argv[]);
+void handle_client(int argc, const char *argv[]);
+void handle_server(int argc, const char *argv[]);
 void handle_test(const char *arg);
 
 /**
@@ -64,23 +64,28 @@ int main(int argc, const char *argv[]) {
         // (cf. static_variables.h).
         lastcheck_publish(calloc(2000, sizeof(char)));
 
-        if (strcmp("tcpclient", argv[1]) == 0) {
-            handle_tcpclient(argc, argv);
-        } else if (strcmp("tcppruner", argv[1]) == 0) {
+        if (strcmp("client", argv[1]) == 0) {
+            handle_client(argc, argv);
+        } else if (strcmp("pruner", argv[1]) == 0) {
             // Client pruner : même plomberie que le client de recherche, mais les
             // threads exécutent autoprune et demandent du travail à vérifier
             pruner_mode = 1;
-            handle_tcpclient(argc, argv);
-        } else if (strcmp("tcpserver", argv[1]) == 0) {
-            handle_tcpserver(argc, argv);
+            if (gpu_requested) {
 #ifdef WITH_CUDA
-        } else if (strcmp("gpupruner", argv[1]) == 0) {
-            // Pruner GPU : même plomberie que tcppruner, mais le contrôle des
-            // lots est exécuté sur le GPU (cf. gpu_pruner.cu / autoprune_gpu).
-            pruner_mode = 1;
-            gpu_pruner_mode = 1;
-            handle_tcpclient(argc, argv);
+                // --gpu : le contrôle des lots est exécuté sur le GPU
+                // (cf. gpu_pruner.cu / autoprune_gpu).
+                gpu_pruner_mode = 1;
+#else
+                // Erreur explicite plutôt qu'un repli CPU silencieux : l'
+                // utilisateur qui demande le GPU doit savoir qu'il ne l'a pas.
+                log_error("--gpu : ce binaire est compilé sans CUDA — "
+                          "recompiler avec make CUDA=1\n");
+                exit(EXIT_FAILURE);
 #endif // WITH_CUDA
+            }
+            handle_client(argc, argv);
+        } else if (strcmp("server", argv[1]) == 0) {
+            handle_server(argc, argv);
         } else if (strcmp("help", argv[1]) == 0) {
             // help [sujet] : aide générale, ou détail d'un mode/option. Un
             // sujet inconnu est une erreur d'argument (rappel de l'aide via
@@ -123,11 +128,11 @@ void run_client(const char *hostname, const char *file);
  * @param argc Le nombre d'arguments de la ligne de commande.
  * @param argv Un tableau de chaînes terminées par un caractère nul représentant les arguments de la ligne de commande.
  */
-void handle_tcpclient(int argc, const char *argv[]) {
+void handle_client(int argc, const char *argv[]) {
     log_info("client\n");
     // Parsing positionnel (dépendant de pruner_mode) extrait dans app_runtime.c
-    // pour être testable — cf. parse_tcpclient_args.
-    const char *serverIp = parse_tcpclient_args(argc, argv);
+    // pour être testable — cf. parse_client_args.
+    const char *serverIp = parse_client_args(argc, argv);
     init_childs();
     init_counters();
     init_signals();
@@ -271,35 +276,35 @@ void handle_tcpclient(int argc, const char *argv[]) {
  * @param argc Le nombre d'arguments de la ligne de commande.
  * @param argv Un tableau de chaînes terminées par un caractère nul représentant les arguments de la ligne de commande.
  */
-void handle_tcpserver(int argc, const char *argv[]) {
+void handle_server(int argc, const char *argv[]) {
     log_info("server\n");
     server = 1;
     NB_THREADS = 80;
-    // Usage : tcpserver [nb_threads] [pieces.csv]. Le 1er argument est le NOMBRE
-    // DE THREADS, pas le fichier. Erreur fréquente : « tcpserver data/pieces16.csv »
+    // Usage : server [nb_threads] [pieces.csv]. Le 1er argument est le NOMBRE
+    // DE THREADS, pas le fichier. Erreur fréquente : « server data/pieces16.csv »
     // → atoi(chemin) == 0 → serveur démarré avec 0 thread de communication : il
     // accepte les connexions mais ne les sert JAMAIS (stock figé, client inactif).
     // On valide donc l'argument et on récupère le cas du fichier passé à sa place.
     int file_arg = -1; // indice de l'argument « fichier de pièces », si fourni
     if (argc >= 3) {
         log_info("arg 2 : %s\n", argv[2]);
-        switch (parse_tcpserver_thread_arg(argv[2], NB_THREADS, &NB_THREADS)) {
-        case TCPSERVER_ARG_AS_FILENAME:
+        switch (parse_server_thread_arg(argv[2], NB_THREADS, &NB_THREADS)) {
+        case SERVER_ARG_AS_FILENAME:
             // Pas un nombre : l'utilisateur a probablement passé le fichier ici.
             // On garde le nombre de threads par défaut et on traite cet argument
             // comme le fichier de pièces (sinon : serveur muet à 0 thread).
             log_error("1er argument (\"%s\") interprété comme fichier de pièces ; "
                       "le nombre de threads attendu à cette position est absent — "
-                      "%i threads par défaut. Usage : tcpserver [nb_threads] [pieces.csv]\n",
+                      "%i threads par défaut. Usage : server [nb_threads] [pieces.csv]\n",
                       argv[2], NB_THREADS);
             file_arg = 2;
             break;
-        case TCPSERVER_ARG_INVALID_COUNT:
+        case SERVER_ARG_INVALID_COUNT:
             // Nombre fourni mais non valide (0 ou négatif) : on garde le défaut.
             log_error("nombre de threads invalide (\"%s\") — %i threads par défaut\n", argv[2], NB_THREADS);
             if (argc >= 4) file_arg = 3;
             break;
-        default: // TCPSERVER_ARG_AS_COUNT
+        default: // SERVER_ARG_AS_COUNT
             if (argc >= 4) file_arg = 3;
             break;
         }

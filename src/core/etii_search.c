@@ -1032,7 +1032,7 @@ static int autoprune_step(client_possibility_t *client)
 }
 
 /**
- * @brief Thread de vérification d'un client pruner (mode `tcppruner`).
+ * @brief Thread de vérification d'un client pruner (mode `pruner`).
  *
  * Consomme les `possibility_packet` non vérifiées fournies par le serveur
  * (INST_GET_TO_CHECK, par lots de PRUNER_BATCH_SIZE). Pour chacune, contrôle
@@ -1072,7 +1072,7 @@ void *autoprune (void *userdata)
 
 #ifdef WITH_CUDA
 /**
- * @brief Thread de vérification d'un client pruner GPU (mode `gpupruner`).
+ * @brief Thread de vérification d'un client pruner GPU (option `--gpu` du mode `pruner`).
  *
  * Variante de `autoprune` (etii_search.c) : au lieu de contrôler chaque paquet
  * individuellement via `possibility_all_has_a_next`, tout le lot

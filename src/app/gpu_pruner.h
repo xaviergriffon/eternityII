@@ -1,6 +1,6 @@
 /**
  * @file gpu_pruner.h
- * @brief Interface C du pruner GPU (mode `gpupruner`, build CUDA uniquement).
+ * @brief Interface C du pruner GPU (option `--gpu` du mode `pruner`, build CUDA uniquement).
  *
  * Tout le code CUDA vit dans `gpu_pruner.cu`. Cet en-tête expose une interface
  * minimale, en `extern "C"`, consommée par la boucle pruner GPU (`autoprune_gpu`

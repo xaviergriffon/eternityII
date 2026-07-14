@@ -102,7 +102,7 @@ wait_for_log() {
 # de contrôle de son parent (même pool NB_THREADS, cf. control_registry.h).
 mkfifo srv_in cli_in
 
-"$BIN" tcpserver 2 "$DATA" <srv_in >server.log 2>&1 &
+"$BIN" server 2 "$DATA" <srv_in >server.log 2>&1 &
 SRV_PID=$!
 # Ouvre le bout écriture APRÈS avoir lancé le lecteur en tâche de fond : sinon
 # l'ouverture bloquante d'une FIFO en lecture (côté serveur) et en écriture
@@ -113,7 +113,7 @@ sleep 1   # laisse le serveur écouter (le client a de toute façon un back-off)
 # PAS de --stop-on-solution : les deux processus restent vivants tout le temps
 # nécessaire au pilotage du canal de contrôle, indépendamment de la vitesse de
 # résolution du 4×4 (quasi instantanée) — cf. AGENTS.md.
-"$BIN" tcpclient 127.0.0.1 1 1000 "$DATA" <cli_in >client.log 2>&1 &
+"$BIN" client 127.0.0.1 1 1000 "$DATA" <cli_in >client.log 2>&1 &
 CLI_PID=$!
 exec 4>cli_in
 

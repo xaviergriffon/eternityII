@@ -44,8 +44,8 @@ Chaque `test_<module>.c` inclut ses en-têtes de production en forme qualifiée
 ## Tests d'intégration bout-en-bout
 
 `tests/integration/` contient des scripts shell séparés de la suite `greatest`
-ci-dessus (pas de lien statique : ils lancent de vrais processus `tcpserver`/
-`tcpclient` sur `localhost`). Lancés ensemble via `make test-integration` (voir le
+ci-dessus (pas de lien statique : ils lancent de vrais processus `server`/
+`client` sur `localhost`). Lancés ensemble via `make test-integration` (voir le
 [Tests et CI](../docs/tests_et_ci.md)) :
 
 - `run_solution_16.sh` — round-trip complet de la solution (16 pièces, `--stop-on-solution`).

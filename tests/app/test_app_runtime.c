@@ -127,7 +127,7 @@ TEST failed_arg_prints_usage(void)
     (void)n;
     close(fd); unlink(path);
 
-    ASSERT(strstr(buf, "tcpserver") != NULL); /* l'usage liste les modes */
+    ASSERT(strstr(buf, "server") != NULL); /* l'usage liste les modes */
     PASS();
 }
 
@@ -156,11 +156,11 @@ TEST cli_help_general_lists_every_topic(void)
    sujet inconnu renvoient NULL. */
 TEST cli_help_find_topic_matches_flexibly(void)
 {
-    const cli_help_topic_t *t = cli_help_find_topic("tcpserver");
+    const cli_help_topic_t *t = cli_help_find_topic("server");
     ASSERT(t != NULL);
-    ASSERT_STR_EQ("tcpserver", t->name);
+    ASSERT_STR_EQ("server", t->name);
 
-    ASSERT_EQ(t, cli_help_find_topic("TCPServer"));      /* casse ignorée */
+    ASSERT_EQ(t, cli_help_find_topic("SerVer"));         /* casse ignorée */
     t = cli_help_find_topic("http-port");                 /* tirets de tête facultatifs */
     ASSERT(t != NULL);
     ASSERT_STR_EQ("--http-port", t->name);
@@ -176,9 +176,9 @@ TEST cli_help_find_topic_matches_flexibly(void)
 TEST cli_help_topic_formats_known_and_rejects_unknown(void)
 {
     char buf[4096] = "sentinelle";
-    int len = format_cli_help_topic("tcppruner", buf, sizeof buf);
+    int len = format_cli_help_topic("pruner", buf, sizeof buf);
     ASSERT(len > 0);
-    ASSERT(strstr(buf, "tcppruner [serveur]") != NULL);
+    ASSERT(strstr(buf, "pruner [serveur]") != NULL);
     ASSERT(strstr(buf, "PRUNER_BATCH_MAX") != NULL); /* les détails sont inclus */
 
     strcpy(buf, "sentinelle");
@@ -385,80 +385,80 @@ TEST parse_positive_int_null_out_param_is_safe(void)
     PASS();
 }
 
-/* ---------- parse_tcpserver_thread_arg ------------------------------------ */
+/* ---------- parse_server_thread_arg ------------------------------------ */
 
-TEST tcpserver_arg_absent_keeps_default(void)
+TEST server_arg_absent_keeps_default(void)
 {
     int nb = -1;
-    int r = parse_tcpserver_thread_arg(NULL, 80, &nb);
-    ASSERT_EQ_FMT(TCPSERVER_ARG_AS_COUNT, r, "%d");
+    int r = parse_server_thread_arg(NULL, 80, &nb);
+    ASSERT_EQ_FMT(SERVER_ARG_AS_COUNT, r, "%d");
     ASSERT_EQ_FMT(80, nb, "%d");
     PASS();
 }
 
-TEST tcpserver_arg_valid_number_sets_count(void)
+TEST server_arg_valid_number_sets_count(void)
 {
     int nb = -1;
-    int r = parse_tcpserver_thread_arg("40", 80, &nb);
-    ASSERT_EQ_FMT(TCPSERVER_ARG_AS_COUNT, r, "%d");
+    int r = parse_server_thread_arg("40", 80, &nb);
+    ASSERT_EQ_FMT(SERVER_ARG_AS_COUNT, r, "%d");
     ASSERT_EQ_FMT(40, nb, "%d");
     PASS();
 }
 
-TEST tcpserver_arg_zero_is_invalid_count_keeps_default(void)
+TEST server_arg_zero_is_invalid_count_keeps_default(void)
 {
     int nb = -1;
-    int r = parse_tcpserver_thread_arg("0", 80, &nb);
-    ASSERT_EQ_FMT(TCPSERVER_ARG_INVALID_COUNT, r, "%d");
+    int r = parse_server_thread_arg("0", 80, &nb);
+    ASSERT_EQ_FMT(SERVER_ARG_INVALID_COUNT, r, "%d");
     ASSERT_EQ_FMT(80, nb, "%d");
     PASS();
 }
 
-TEST tcpserver_arg_negative_is_invalid_count_keeps_default(void)
+TEST server_arg_negative_is_invalid_count_keeps_default(void)
 {
     int nb = -1;
-    int r = parse_tcpserver_thread_arg("-3", 80, &nb);
-    ASSERT_EQ_FMT(TCPSERVER_ARG_INVALID_COUNT, r, "%d");
+    int r = parse_server_thread_arg("-3", 80, &nb);
+    ASSERT_EQ_FMT(SERVER_ARG_INVALID_COUNT, r, "%d");
     ASSERT_EQ_FMT(80, nb, "%d");
     PASS();
 }
 
 /* Ne ressemble pas à un nombre (ne commence ni par un chiffre, ni +/-) :
  * traité comme le fichier de pièces, nombre de threads inchangé. */
-TEST tcpserver_arg_filename_is_detected(void)
+TEST server_arg_filename_is_detected(void)
 {
     int nb = -1;
-    int r = parse_tcpserver_thread_arg("data/pieces16.csv", 80, &nb);
-    ASSERT_EQ_FMT(TCPSERVER_ARG_AS_FILENAME, r, "%d");
+    int r = parse_server_thread_arg("data/pieces16.csv", 80, &nb);
+    ASSERT_EQ_FMT(SERVER_ARG_AS_FILENAME, r, "%d");
     ASSERT_EQ_FMT(80, nb, "%d");
     PASS();
 }
 
 /* Chaîne vide : premier caractère '\0', ne ressemble à rien de numérique ->
  * traitée comme un fichier (cas limite du même mécanisme). */
-TEST tcpserver_arg_empty_string_is_filename(void)
+TEST server_arg_empty_string_is_filename(void)
 {
     int nb = -1;
-    int r = parse_tcpserver_thread_arg("", 80, &nb);
-    ASSERT_EQ_FMT(TCPSERVER_ARG_AS_FILENAME, r, "%d");
+    int r = parse_server_thread_arg("", 80, &nb);
+    ASSERT_EQ_FMT(SERVER_ARG_AS_FILENAME, r, "%d");
     ASSERT_EQ_FMT(80, nb, "%d");
     PASS();
 }
 
-TEST tcpserver_arg_plus_prefixed_number_is_count(void)
+TEST server_arg_plus_prefixed_number_is_count(void)
 {
     int nb = -1;
-    int r = parse_tcpserver_thread_arg("+12", 80, &nb);
-    ASSERT_EQ_FMT(TCPSERVER_ARG_AS_COUNT, r, "%d");
+    int r = parse_server_thread_arg("+12", 80, &nb);
+    ASSERT_EQ_FMT(SERVER_ARG_AS_COUNT, r, "%d");
     ASSERT_EQ_FMT(12, nb, "%d");
     PASS();
 }
 
-/* ---------- parse_tcpclient_args ------------------------------------------ */
+/* ---------- parse_client_args ------------------------------------------ */
 /*
  * Le sens des arguments positionnels dépend de pruner_mode (lu, jamais écrit) :
- *   tcpclient [serveur] [nb_threads] [max_stock] [pieces.csv]
- *   tcppruner [serveur] [nb_threads] [pieces.csv] [batch]
+ *   client [serveur] [nb_threads] [max_stock] [pieces.csv]
+ *   pruner [serveur] [nb_threads] [pieces.csv] [batch]
  * Chaque test sauvegarde/restaure les globales positionnées (NB_THREADS,
  * max_stock_by_thread, pruner_batch_size, parts_files) et pruner_mode.
  */
@@ -488,13 +488,13 @@ static void restore_client_args_globals(void)
 }
 
 /* Aucun argument optionnel : localhost, 1 thread, rien d'autre touché. */
-TEST tcpclient_args_defaults(void)
+TEST client_args_defaults(void)
 {
     save_client_args_globals();
     pruner_mode = 0;
-    const char *argv[] = { "prog", "tcpclient" };
+    const char *argv[] = { "prog", "client" };
 
-    const char *ip = parse_tcpclient_args(2, argv);
+    const char *ip = parse_client_args(2, argv);
 
     ASSERT_STR_EQ("localhost", ip);
     ASSERT_EQ_FMT(1, NB_THREADS, "%d");
@@ -506,13 +506,13 @@ TEST tcpclient_args_defaults(void)
 }
 
 /* Serveur + nombre de threads valide. */
-TEST tcpclient_args_server_and_threads(void)
+TEST client_args_server_and_threads(void)
 {
     save_client_args_globals();
     pruner_mode = 0;
-    const char *argv[] = { "prog", "tcpclient", "monserveur", "4" };
+    const char *argv[] = { "prog", "client", "monserveur", "4" };
 
-    const char *ip = parse_tcpclient_args(4, argv);
+    const char *ip = parse_client_args(4, argv);
 
     ASSERT_STR_EQ("monserveur", ip);
     ASSERT_EQ_FMT(4, NB_THREADS, "%d");
@@ -522,14 +522,14 @@ TEST tcpclient_args_server_and_threads(void)
 }
 
 /* Nombre de threads invalide : repli sur 1 (log_error, silencié). */
-TEST tcpclient_args_invalid_threads_falls_back(void)
+TEST client_args_invalid_threads_falls_back(void)
 {
     save_client_args_globals();
     pruner_mode = 0;
-    const char *argv[] = { "prog", "tcpclient", "srv", "zero" };
+    const char *argv[] = { "prog", "client", "srv", "zero" };
 
     mute_fd(2);
-    const char *ip = parse_tcpclient_args(4, argv);
+    const char *ip = parse_client_args(4, argv);
     unmute_fd();
 
     ASSERT_STR_EQ("srv", ip);
@@ -540,13 +540,13 @@ TEST tcpclient_args_invalid_threads_falls_back(void)
 }
 
 /* Client de recherche : argv[4] = stock max par thread, argv[5] = fichier. */
-TEST tcpclient_args_search_client_stock_and_file(void)
+TEST client_args_search_client_stock_and_file(void)
 {
     save_client_args_globals();
     pruner_mode = 0;
-    const char *argv[] = { "prog", "tcpclient", "srv", "2", "500", "./mes_pieces.csv" };
+    const char *argv[] = { "prog", "client", "srv", "2", "500", "./mes_pieces.csv" };
 
-    parse_tcpclient_args(6, argv);
+    parse_client_args(6, argv);
 
     ASSERT_EQ_FMT(2, NB_THREADS, "%d");
     ASSERT_EQ_FMT(500, max_stock_by_thread, "%d");
@@ -558,13 +558,13 @@ TEST tcpclient_args_search_client_stock_and_file(void)
 }
 
 /* Pruner : argv[4] = fichier de pièces, argv[5] = taille de lot. */
-TEST tcpclient_args_pruner_file_and_batch(void)
+TEST client_args_pruner_file_and_batch(void)
 {
     save_client_args_globals();
     pruner_mode = 1;
-    const char *argv[] = { "prog", "tcppruner", "srv", "3", "./mes_pieces.csv", "100" };
+    const char *argv[] = { "prog", "pruner", "srv", "3", "./mes_pieces.csv", "100" };
 
-    parse_tcpclient_args(6, argv);
+    parse_client_args(6, argv);
 
     ASSERT_EQ_FMT(3, NB_THREADS, "%d");
     ASSERT_STR_EQ("./mes_pieces.csv", parts_files);
@@ -576,17 +576,17 @@ TEST tcpclient_args_pruner_file_and_batch(void)
 }
 
 /* Taille de lot pruner bornée des deux côtés : [1, PRUNER_BATCH_MAX]. */
-TEST tcpclient_args_pruner_batch_is_clamped(void)
+TEST client_args_pruner_batch_is_clamped(void)
 {
     save_client_args_globals();
     pruner_mode = 1;
 
-    const char *argv_low[] = { "prog", "tcppruner", "srv", "1", "./p.csv", "0" };
-    parse_tcpclient_args(6, argv_low);
+    const char *argv_low[] = { "prog", "pruner", "srv", "1", "./p.csv", "0" };
+    parse_client_args(6, argv_low);
     ASSERT_EQ_FMT(1, pruner_batch_size, "%d");
 
-    const char *argv_high[] = { "prog", "tcppruner", "srv", "1", "./p.csv", "99999999" };
-    parse_tcpclient_args(6, argv_high);
+    const char *argv_high[] = { "prog", "pruner", "srv", "1", "./p.csv", "99999999" };
+    parse_client_args(6, argv_high);
     ASSERT_EQ_FMT(PRUNER_BATCH_MAX, pruner_batch_size, "%d");
 
     restore_client_args_globals();
@@ -1234,20 +1234,20 @@ SUITE(app_runtime_suite)
     RUN_TEST(parse_positive_int_non_numeric_is_invalid);
     RUN_TEST(parse_positive_int_null_out_param_is_safe);
 
-    RUN_TEST(tcpserver_arg_absent_keeps_default);
-    RUN_TEST(tcpserver_arg_valid_number_sets_count);
-    RUN_TEST(tcpserver_arg_zero_is_invalid_count_keeps_default);
-    RUN_TEST(tcpserver_arg_negative_is_invalid_count_keeps_default);
-    RUN_TEST(tcpserver_arg_filename_is_detected);
-    RUN_TEST(tcpserver_arg_empty_string_is_filename);
-    RUN_TEST(tcpserver_arg_plus_prefixed_number_is_count);
+    RUN_TEST(server_arg_absent_keeps_default);
+    RUN_TEST(server_arg_valid_number_sets_count);
+    RUN_TEST(server_arg_zero_is_invalid_count_keeps_default);
+    RUN_TEST(server_arg_negative_is_invalid_count_keeps_default);
+    RUN_TEST(server_arg_filename_is_detected);
+    RUN_TEST(server_arg_empty_string_is_filename);
+    RUN_TEST(server_arg_plus_prefixed_number_is_count);
 
-    RUN_TEST(tcpclient_args_defaults);
-    RUN_TEST(tcpclient_args_server_and_threads);
-    RUN_TEST(tcpclient_args_invalid_threads_falls_back);
-    RUN_TEST(tcpclient_args_search_client_stock_and_file);
-    RUN_TEST(tcpclient_args_pruner_file_and_batch);
-    RUN_TEST(tcpclient_args_pruner_batch_is_clamped);
+    RUN_TEST(client_args_defaults);
+    RUN_TEST(client_args_server_and_threads);
+    RUN_TEST(client_args_invalid_threads_falls_back);
+    RUN_TEST(client_args_search_client_stock_and_file);
+    RUN_TEST(client_args_pruner_file_and_batch);
+    RUN_TEST(client_args_pruner_batch_is_clamped);
 
     RUN_TEST(backup_failed_exit_empty_is_noop);
     RUN_TEST(backup_failed_exit_saves_leftover_stock);

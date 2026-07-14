@@ -77,11 +77,11 @@ echo "  travail : $WORK  (timeout ${TIMEOUT}s)"
 # session de contrôle gagnait systématiquement la course de connexion et
 # affamait pour toujours le fork de recherche ("all threads busy" en boucle) —
 # le serveur ne recevait jamais la solution et le test expirait au timeout.
-"$BIN" tcpserver 2 "$DATA" --stop-on-solution </dev/null >server.log 2>&1 &
+"$BIN" server 2 "$DATA" --stop-on-solution </dev/null >server.log 2>&1 &
 SRV_PID=$!
 sleep 1   # laisse le serveur écouter (le client a de toute façon un back-off)
 
-"$BIN" tcpclient 127.0.0.1 1 1000 "$DATA" --stop-on-solution </dev/null >client.log 2>&1 &
+"$BIN" client 127.0.0.1 1 1000 "$DATA" --stop-on-solution </dev/null >client.log 2>&1 &
 CLI_PID=$!
 
 # --- Attente bornée de l'arrêt du serveur (il s'arrête sur solution) --------

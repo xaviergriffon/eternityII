@@ -14,7 +14,7 @@ Le build par défaut ne dépend d'**aucune bibliothèque externe**.
 make                          # Build de production (ANSI, sans dépendance) → ./eternityII
 make DEBUG=1                  # Build debug (symboles -g, conservation des .o)
 make NCURSES=1                # Build avec interface ncurses (liée à -lncurses)
-make CUDA=1                   # Build avec pruner GPU CUDA (mode `gpupruner`)
+make CUDA=1                   # Build avec pruner GPU CUDA (option `--gpu` du mode `pruner`)
 make WERROR=1                 # Tout warning devient une erreur (mode CI)
 make ASAN=1                   # Build instrumenté AddressSanitizer
 make EXECUTABLE=monBinaire    # Nom de sortie personnalisé
@@ -25,7 +25,7 @@ make clean                    # Supprime les binaires et objets
   et la plupart des distributions Linux) ; il remplace `src/ui/logger.c` par
   `src/ui/logger_ncurses.c` (voir [Console interactive](console.md#interface-ncurses-optionnelle-make-ncurses1)).
   Sans lui, le programme compile et tourne avec une interface texte ANSI pure.
-- **`CUDA=1`** active le mode `gpupruner` (Linux/NVIDIA uniquement) ; prérequis,
+- **`CUDA=1`** active l'option `--gpu` du mode `pruner` (Linux/NVIDIA uniquement) ; prérequis,
   variables (`NVCC`, `CUDA_PATH`, `NVCC_ARCH`, `NVCCFLAGS`), mode de vérification
   croisée `VERIFY=1` et notes Jetson sont détaillés dans
   [Pruner GPU (CUDA)](pruner_gpu_cuda.md#pré-requis). Sans `CUDA=1`, le binaire est
@@ -84,6 +84,6 @@ Un nouveau `.c` se range sous le bon `src/<domaine>/` (voir la
 
 ## Voir aussi
 
-- [Pruner GPU (CUDA)](pruner_gpu_cuda.md) — build et exécution du mode `gpupruner`.
+- [Pruner GPU (CUDA)](pruner_gpu_cuda.md) — build et exécution du pruner GPU (`pruner --gpu`).
 - [Tests et CI](tests_et_ci.md) — cibles de test, couverture, rejeu de la CI en local.
 - [Utilisation](utilisation.md) — lancer le binaire produit.

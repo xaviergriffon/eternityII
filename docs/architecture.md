@@ -16,12 +16,12 @@ sources. Le protocole TCP entre serveur et clients est détaillé dans
                                            └─────────────────────────────┘
 ```
 
-- Le **serveur** (`tcpserver`) maintient le stock global de positions de plateau
+- Le **serveur** (`server`) maintient le stock global de positions de plateau
   (« possibilités », `struct possibility_packet`) à explorer, réparties en files
   protégées par mutex ([src/core/datamanager.c](../src/core/datamanager.c)), et les
   distribue aux clients. Il peut sauvegarder/restaurer ce stock dans des fichiers
   `.back` (voir [Utilisation — fichiers générés](utilisation.md#fichiers-générés)).
-- Chaque **client** (`tcpclient`, `tcppruner`, `gpupruner`) forke `N` processus
+- Chaque **client** (`client`, `pruner`, `pruner --gpu`) forke `N` processus
   enfants. Chaque enfant se connecte au serveur, récupère des possibilités, les
   explore (ou les vérifie, en mode pruner), puis renvoie les nouvelles positions
   découvertes.

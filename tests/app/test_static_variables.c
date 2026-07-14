@@ -4,7 +4,7 @@
  *
  * Régression visée : l'option --stop-on-solution doit être reconnue à n'importe
  * quelle position, positionner le drapeau global, et être RETIRÉE de argv sans
- * abîmer les arguments positionnels des modes (tcpserver/tcpclient/…). Une
+ * abîmer les arguments positionnels des modes (server/client/…). Une
  * erreur ici décalerait les arguments (nb_threads lu sur le mauvais token, etc.).
  */
 #include "greatest.h"
@@ -18,12 +18,12 @@
 TEST flag_absent_leaves_argv_and_flag_untouched(void)
 {
     stop_on_solution = 0;
-    const char *argv[] = {"prog", "tcpserver", "1", "data/pieces16.csv"};
+    const char *argv[] = {"prog", "server", "1", "data/pieces16.csv"};
     int argc = parse_cli_options(4, argv);
 
     ASSERT_EQ_FMT(4, argc, "%d");
     ASSERT_EQ_FMT(0, stop_on_solution, "%d");
-    ASSERT_STR_EQ("tcpserver", argv[1]);
+    ASSERT_STR_EQ("server", argv[1]);
     ASSERT_STR_EQ("1", argv[2]);
     ASSERT_STR_EQ("data/pieces16.csv", argv[3]);
     PASS();
@@ -32,13 +32,13 @@ TEST flag_absent_leaves_argv_and_flag_untouched(void)
 TEST flag_at_end_is_stripped_and_sets_global(void)
 {
     stop_on_solution = 0;
-    const char *argv[] = {"prog", "tcpserver", "1", "data/pieces16.csv", "--stop-on-solution"};
+    const char *argv[] = {"prog", "server", "1", "data/pieces16.csv", "--stop-on-solution"};
     int argc = parse_cli_options(5, argv);
 
     ASSERT_EQ_FMT(4, argc, "%d");          /* l'option a été retirée */
     ASSERT_EQ_FMT(1, stop_on_solution, "%d");
     /* Les arguments positionnels restent intacts et dans l'ordre. */
-    ASSERT_STR_EQ("tcpserver", argv[1]);
+    ASSERT_STR_EQ("server", argv[1]);
     ASSERT_STR_EQ("1", argv[2]);
     ASSERT_STR_EQ("data/pieces16.csv", argv[3]);
     PASS();
@@ -47,14 +47,14 @@ TEST flag_at_end_is_stripped_and_sets_global(void)
 TEST flag_in_the_middle_does_not_shift_positional_args(void)
 {
     stop_on_solution = 0;
-    const char *argv[] = {"prog", "tcpclient", "--stop-on-solution", "localhost", "2", "1000"};
+    const char *argv[] = {"prog", "client", "--stop-on-solution", "localhost", "2", "1000"};
     int argc = parse_cli_options(6, argv);
 
     ASSERT_EQ_FMT(5, argc, "%d");
     ASSERT_EQ_FMT(1, stop_on_solution, "%d");
     /* localhost/2/1000 doivent se retrouver compactés derrière le mode, sans
        trou laissé par l'option supprimée. */
-    ASSERT_STR_EQ("tcpclient", argv[1]);
+    ASSERT_STR_EQ("client", argv[1]);
     ASSERT_STR_EQ("localhost", argv[2]);
     ASSERT_STR_EQ("2", argv[3]);
     ASSERT_STR_EQ("1000", argv[4]);
@@ -68,12 +68,12 @@ TEST expand_level_strips_option_and_value_sets_global(void)
 {
     expand_min_level = 0;
     stop_on_solution = 0;
-    const char *argv[] = {"prog", "tcpserver", "--expand-level", "4", "8", "data/pieces.csv"};
+    const char *argv[] = {"prog", "server", "--expand-level", "4", "8", "data/pieces.csv"};
     int argc = parse_cli_options(6, argv);
 
     ASSERT_EQ_FMT(4, argc, "%d");              /* option + valeur retirées (6 → 4) */
     ASSERT_EQ_FMT(4, expand_min_level, "%d");
-    ASSERT_STR_EQ("tcpserver", argv[1]);
+    ASSERT_STR_EQ("server", argv[1]);
     ASSERT_STR_EQ("8", argv[2]);               /* nb_threads non décalé */
     ASSERT_STR_EQ("data/pieces.csv", argv[3]);
     PASS();
@@ -84,12 +84,12 @@ TEST expand_level_strips_option_and_value_sets_global(void)
 TEST expand_level_without_value_is_ignored(void)
 {
     expand_min_level = 0;
-    const char *argv[] = {"prog", "tcpserver", "--expand-level"};
+    const char *argv[] = {"prog", "server", "--expand-level"};
     int argc = parse_cli_options(3, argv);
 
     ASSERT_EQ_FMT(2, argc, "%d");              /* seul le token option est retiré */
     ASSERT_EQ_FMT(0, expand_min_level, "%d");
-    ASSERT_STR_EQ("tcpserver", argv[1]);
+    ASSERT_STR_EQ("server", argv[1]);
     PASS();
 }
 
@@ -97,7 +97,7 @@ TEST expand_level_without_value_is_ignored(void)
 TEST expand_level_negative_clamped_to_zero(void)
 {
     expand_min_level = 7;                        /* valeur résiduelle à écraser */
-    const char *argv[] = {"prog", "tcpserver", "--expand-level", "-3"};
+    const char *argv[] = {"prog", "server", "--expand-level", "-3"};
     int argc = parse_cli_options(4, argv);
 
     ASSERT_EQ_FMT(2, argc, "%d");
@@ -112,13 +112,13 @@ TEST expand_level_coexists_with_stop_on_solution(void)
 {
     expand_min_level = 0;
     stop_on_solution = 0;
-    const char *argv[] = {"prog", "--expand-level", "3", "tcpserver", "8", "--stop-on-solution"};
+    const char *argv[] = {"prog", "--expand-level", "3", "server", "8", "--stop-on-solution"};
     int argc = parse_cli_options(6, argv);
 
     ASSERT_EQ_FMT(3, argc, "%d");              /* 6 - 2 (expand+val) - 1 (stop) */
     ASSERT_EQ_FMT(3, expand_min_level, "%d");
     ASSERT_EQ_FMT(1, stop_on_solution, "%d");
-    ASSERT_STR_EQ("tcpserver", argv[1]);
+    ASSERT_STR_EQ("server", argv[1]);
     ASSERT_STR_EQ("8", argv[2]);
     PASS();
 }
@@ -128,12 +128,12 @@ TEST expand_level_coexists_with_stop_on_solution(void)
 TEST http_port_strips_option_and_value_sets_global(void)
 {
     HTTP_PORT = 0;
-    const char *argv[] = {"prog", "tcpserver", "--http-port", "8080", "data/pieces.csv"};
+    const char *argv[] = {"prog", "server", "--http-port", "8080", "data/pieces.csv"};
     int argc = parse_cli_options(5, argv);
 
     ASSERT_EQ_FMT(3, argc, "%d");
     ASSERT_EQ_FMT(8080, HTTP_PORT, "%d");
-    ASSERT_STR_EQ("tcpserver", argv[1]);
+    ASSERT_STR_EQ("server", argv[1]);
     ASSERT_STR_EQ("data/pieces.csv", argv[2]);
     PASS();
 }
@@ -142,7 +142,7 @@ TEST http_port_strips_option_and_value_sets_global(void)
 TEST http_port_without_value_is_ignored(void)
 {
     HTTP_PORT = 0;
-    const char *argv[] = {"prog", "tcpserver", "--http-port"};
+    const char *argv[] = {"prog", "server", "--http-port"};
     int argc = parse_cli_options(3, argv);
 
     ASSERT_EQ_FMT(2, argc, "%d");
@@ -157,12 +157,41 @@ TEST http_port_out_of_range_values_are_ignored(void)
     const char *bad_values[] = {"abc", "0", "-1", "70000"};
     for (size_t i = 0; i < sizeof(bad_values) / sizeof(bad_values[0]); i++) {
         HTTP_PORT = 0;
-        const char *argv[] = {"prog", "tcpserver", "--http-port", bad_values[i]};
+        const char *argv[] = {"prog", "server", "--http-port", bad_values[i]};
         int argc = parse_cli_options(4, argv);
 
         ASSERT_EQ_FMT(2, argc, "%d");
         ASSERT_EQ_FMT(0, HTTP_PORT, "%d");
     }
+    PASS();
+}
+
+/* --gpu : position-indépendante — retirée d'argv, gpu_requested positionné,
+   arguments positionnels du pruner intacts (l'interprétation CUDA/non-CUDA se
+   fait dans main(), pas ici). */
+TEST gpu_flag_is_stripped_and_sets_global(void)
+{
+    gpu_requested = 0;
+    const char *argv[] = {"prog", "pruner", "--gpu", "localhost", "2"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(4, argc, "%d");
+    ASSERT_EQ_FMT(1, gpu_requested, "%d");
+    ASSERT_STR_EQ("pruner", argv[1]);
+    ASSERT_STR_EQ("localhost", argv[2]);
+    ASSERT_STR_EQ("2", argv[3]);
+    PASS();
+}
+
+/* Sans --gpu, le drapeau reste à 0. */
+TEST gpu_flag_absent_leaves_global_untouched(void)
+{
+    gpu_requested = 0;
+    const char *argv[] = {"prog", "pruner", "localhost"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(0, gpu_requested, "%d");
     PASS();
 }
 
@@ -173,12 +202,12 @@ TEST help_flag_is_stripped_and_sets_global(void)
     const char *flags[] = {"--help", "-h"};
     for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
         help_requested = 0;
-        const char *argv[] = {"prog", "tcpserver", flags[i], "8"};
+        const char *argv[] = {"prog", "server", flags[i], "8"};
         int argc = parse_cli_options(4, argv);
 
         ASSERT_EQ_FMT(3, argc, "%d");
         ASSERT_EQ_FMT(1, help_requested, "%d");
-        ASSERT_STR_EQ("tcpserver", argv[1]);
+        ASSERT_STR_EQ("server", argv[1]);
         ASSERT_STR_EQ("8", argv[2]);
     }
     PASS();
@@ -188,7 +217,7 @@ TEST help_flag_is_stripped_and_sets_global(void)
 TEST help_flag_absent_leaves_global_untouched(void)
 {
     help_requested = 0;
-    const char *argv[] = {"prog", "help", "tcpserver"};
+    const char *argv[] = {"prog", "help", "server"};
     int argc = parse_cli_options(3, argv);
 
     ASSERT_EQ_FMT(3, argc, "%d");
@@ -234,6 +263,8 @@ SUITE(static_variables_suite)
     RUN_TEST(http_port_strips_option_and_value_sets_global);
     RUN_TEST(http_port_without_value_is_ignored);
     RUN_TEST(http_port_out_of_range_values_are_ignored);
+    RUN_TEST(gpu_flag_is_stripped_and_sets_global);
+    RUN_TEST(gpu_flag_absent_leaves_global_untouched);
     RUN_TEST(help_flag_is_stripped_and_sets_global);
     RUN_TEST(help_flag_absent_leaves_global_untouched);
     RUN_TEST(request_is_pause_covers_both_pause_values);

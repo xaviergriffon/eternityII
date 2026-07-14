@@ -1,7 +1,7 @@
 # Pruner GPU (CUDA)
 
-Ce document décrit le mode **`gpupruner`** : un client pruner dont le contrôle des
-possibilités est exécuté sur le GPU via CUDA, au lieu du CPU (`tcppruner`). Il couvre
+Ce document décrit le mode **`pruner --gpu`** : un client pruner dont le contrôle des
+possibilités est exécuté sur le GPU via CUDA, au lieu du CPU (`pruner` seul). Il couvre
 les **pré-requis de compilation et d'exécution**, le **flux** de données, et les
 **avantages** de ce mode.
 
@@ -10,12 +10,12 @@ Le code correspondant vit dans :
 - [src/app/gpu_pruner.cu](../src/app/gpu_pruner.cu) / [gpu_pruner.h](../src/app/gpu_pruner.h) — kernel CUDA + interface C ;
 - [src/core/etii_search.c](../src/core/etii_search.c) — `autoprune_gpu`, la boucle de vérification du thread ;
 - [src/app/etii_client.c](../src/app/etii_client.c) — bascule `gpu_pruner_mode` (init/shutdown du contexte GPU) ;
-- [src/app/main.c](../src/app/main.c) — dispatch du mode `gpupruner` ;
+- [src/app/main.c](../src/app/main.c) — dispatch de l'option `--gpu` du mode `pruner` ;
 - [Makefile](../Makefile) — switch `CUDA=1` / `VERIFY=1`.
 
 Le pruner GPU **n'est qu'une accélération** : le contrôle réalisé est strictement
 équivalent à `possibility_all_has_a_next` (CPU), qui reste l'implémentation de
-référence. Le protocole client/serveur est identique à `tcppruner` — voir
+référence. Le protocole client/serveur est identique au pruner CPU — voir
 [Échanges client / serveur](echanges_client_serveur.md).
 
 ## Vue d'ensemble
@@ -27,14 +27,14 @@ encore au moins une pièce candidate (forward-check), puis :
 - **branche morte** → éliminée (`pruner_removed`), elle ne reviendra jamais dans le stock ;
 - **branche vivante** → renvoyée marquée `checked = 1` (servie en priorité aux clients de recherche), avec les pièces forcées (cases à candidat unique) déjà placées.
 
-Là où `tcppruner` contrôle les paquets **un par un** sur le CPU, `gpupruner`
+Là où le pruner CPU contrôle les paquets **un par un**, `pruner --gpu`
 soumet **tout le lot** au GPU en un seul appel (`gpu_pruner_check_batch`) : un thread
 GPU par possibilité, tous exécutés en parallèle sur les multiprocesseurs.
 
 ```mermaid
 flowchart LR
     S[Serveur<br/>pool « analysed »] -- "GET_TO_CHECK_BATCH<br/>(lot de N)" --> T
-    subgraph Processus gpupruner
+    subgraph Processus pruner --gpu
         T[Thread autoprune_gpu] -- "memcpy lot → managed" --> K[Kernel prune_kernel<br/>1 thread / possibilité]
         K -- "alive[] + paquets mutés + cells[]" --> T
     end
@@ -67,7 +67,7 @@ make CUDA=1 VERIFY=1
 ```
 
 Sans `CUDA=1`, aucun `.cu` n'est compilé, `-DWITH_CUDA` est absent et le binaire est
-**strictement identique** au build classique (le mode `gpupruner` n'existe alors pas).
+**strictement identique** au build classique (l'option `--gpu` produit alors une erreur explicite au lancement).
 `VERIFY=1` (`-DGPU_PRUNER_VERIFY`) rejoue le contrôle CPU pour chaque lot et logue toute
 divergence (verdict vivant/mort ou contenu muté) — c'est un filet de mise au point, à
 laisser à `VERIFY=0` en production.
@@ -82,12 +82,12 @@ laisser à `VERIFY=0` en production.
 |---|---|
 | **GPU CUDA présent** | `gpu_pruner_init` échoue proprement (abandon du processus) si aucun GPU n'est détecté. |
 | **Mémoire unifiée recommandée** | Cible : SoC où GPU et CPU partagent la même DRAM (`integrated == 1`). Les buffers sont alloués en mémoire *managed* (`cudaMallocManaged`) → chemin **zéro-copie**, sans transfert PCIe. Sur GPU discret le code fonctionne mais la mémoire managed est migrée à la demande (perf. dégradée). |
-| **Un serveur atteignable** | Même rôle que `tcppruner` : le pruner GPU est un client. |
+| **Un serveur atteignable** | Même rôle que le pruner CPU : le pruner GPU est un client. |
 | **Profil énergie/horloges** (Jetson, recommandé) | `sudo nvpmodel -m 0 && sudo jetson_clocks` pour le débit maximal. |
 
 ```sh
-# Pruner GPU : mêmes arguments que tcppruner
-./eternityII gpupruner [serveur] [nb_threads] [data/pieces.csv] [batch_size]
+# Pruner GPU : mêmes arguments que le pruner CPU, plus --gpu
+./eternityII pruner --gpu [serveur] [nb_threads] [data/pieces.csv] [batch_size]
 ```
 
 Le 4ᵉ argument (ou la commande console `prunerBatch <n>`, bornée par `PRUNER_BATCH_MAX`)

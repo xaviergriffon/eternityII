@@ -29,7 +29,7 @@ Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisa
 ```sh
 make                # Build de production (ANSI, sans dépendance) → ./eternityII
 make NCURSES=1      # Interface ncurses (optionnelle)
-make CUDA=1         # Pruner GPU CUDA (Linux/NVIDIA, mode `gpupruner`)
+make CUDA=1         # Pruner GPU CUDA (Linux/NVIDIA, option `--gpu` du mode `pruner`)
 make clean          # Supprime les binaires et objets
 ```
 
@@ -41,13 +41,13 @@ Prérequis : `gcc`, `make`, pthreads (disponibles en standard sur macOS et Linux
 
 ```sh
 # Serveur (distribue les possibilités ; --expand-level évite la famine du démarrage)
-./eternityII tcpserver 80 --expand-level 4 data/pieces.csv
+./eternityII server 80 --expand-level 4 data/pieces.csv
 
 # Client de recherche (N processus en parallèle)
-./eternityII tcpclient localhost 4
+./eternityII client localhost 4
 
-# Pruner (élague les branches mortes ; gpupruner avec un build CUDA=1)
-./eternityII tcppruner localhost 4
+# Pruner (élague les branches mortes ; --gpu pour le GPU avec un build CUDA=1)
+./eternityII pruner localhost 4
 
 # Mode autonome, sans serveur
 ./eternityII test
@@ -89,6 +89,6 @@ Le répertoire [`docs/`](docs/) rassemble la documentation détaillée :
 | [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences, pannes, et le [canal de contrôle](docs/echanges_client_serveur.md#canal-de-contrôle-v9) (v9). |
 | [docs/api_http_rest.md](docs/api_http_rest.md) | API HTTP REST admin (`--http-port`) : schémas JSON complets, codes d'erreur, exemples client (curl, Python). |
 | [docs/autosearch_step.md](docs/autosearch_step.md) | Flux de recherche (`autosearch_step`) et gestion mémoire d'un thread de recherche. |
-| [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (mode `gpupruner`) : prérequis de compilation et d'exécution, flux CUDA, avantages. |
+| [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (`pruner --gpu`) : prérequis de compilation et d'exécution, flux CUDA, avantages. |
 | [docs/tests_et_ci.md](docs/tests_et_ci.md) | Cibles de test, intégration bout-en-bout, Docker, couverture, CI. |
 | [tests/README.md](tests/README.md) | Organisation des suites unitaires, conventions, ajout d'un test. |

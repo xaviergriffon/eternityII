@@ -233,7 +233,7 @@ extern uint8_t diry[ETERN_PARTS];
 extern int NB_THREADS;
 
 /**
- * @brief 1 si le processus est un client pruner (mode `tcppruner`).
+ * @brief 1 si le processus est un client pruner (mode `pruner`).
  *
  * Un client pruner ne cherche pas : il demande au serveur des possibilités non
  * vérifiées (INST_GET_TO_CHECK), contrôle que toutes leurs cases vides ont
@@ -253,6 +253,17 @@ extern int pruner_mode;
  * Lue dans `main()` AVANT tout fork → héritée par les processus enfants.
  */
 extern int stop_on_solution;
+
+/**
+ * @brief 1 si l'exécution GPU du pruner a été demandée (option `--gpu`).
+ *
+ * Position-indépendante, retirée d'argv par `parse_cli_options`. Lue dans
+ * `main()` par le mode `pruner` uniquement (les autres modes l'ignorent, comme
+ * `--expand-level` hors serveur) : sur un build CUDA elle active
+ * `gpu_pruner_mode` ; sur un build sans CUDA elle produit une erreur explicite
+ * (plutôt qu'un mode silencieusement absent).
+ */
+extern int gpu_requested;
 
 /**
  * @brief 1 si l'aide CLI a été demandée (option `--help` / `-h`).
@@ -278,7 +289,7 @@ extern int expand_min_level;
 /**
  * @brief Nombre de possibilités qu'un client pruner demande/acquitte par lot.
  *
- * Configurable au démarrage (argument CLI de `tcppruner`/`gpupruner`) et à
+ * Configurable au démarrage (argument CLI du mode `pruner`) et à
  * l'exécution via la commande `prunerBatch <n>` (propagée aux process enfants).
  * Borne la mémoire de l'échange : le pruner ne détient jamais plus que ce lot,
  * la capacité mémoire n'a donc pas à être supposée illimitée. Défaut
@@ -288,9 +299,9 @@ extern int pruner_batch_size;
 
 #ifdef WITH_CUDA
 /**
- * @brief 1 si le processus est un client pruner GPU (mode `gpupruner`).
+ * @brief 1 si le processus est un client pruner GPU (option `--gpu` du mode `pruner`).
  *
- * Implique `pruner_mode == 1` (même plomberie réseau que `tcppruner`) mais le
+ * Implique `pruner_mode == 1` (même plomberie réseau que le pruner CPU) mais le
  * contrôle des lots est délégué au GPU via `gpu_pruner_check_batch`. N'existe que
  * dans les builds CUDA (`make CUDA=1`).
  */
@@ -483,9 +494,9 @@ extern int server_rmnonext_timing;
 /**
  * @brief Extrait les options globales de `argv` et les retire du tableau.
  *
- * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--http-port <n>` et
- * `--help`/`-h` (positionne respectivement `stop_on_solution`,
- * `expand_min_level`, `HTTP_PORT` et `help_requested`). Compacte
+ * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--http-port <n>`,
+ * `--gpu` et `--help`/`-h` (positionne respectivement `stop_on_solution`,
+ * `expand_min_level`, `HTTP_PORT`, `gpu_requested` et `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.
  *

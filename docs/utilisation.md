@@ -12,7 +12,7 @@ Le binaire embarque sa propre aide, sans avoir à consulter cette documentation 
 ```sh
 ./eternityII --help            # aide générale : usage, modes, options (alias : -h)
 ./eternityII help              # équivalent de --help
-./eternityII help tcpserver    # détail d'un mode
+./eternityII help server    # détail d'un mode
 ./eternityII help http-port    # détail d'une option (tirets de tête facultatifs)
 ```
 
@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII tcpserver [nb_threads] [--expand-level N] [--http-port N] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--http-port N] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -39,10 +39,10 @@ Lance le serveur qui distribue les possibilités aux clients.
 
 Exemples :
 ```sh
-./eternityII tcpserver 80
-./eternityII tcpserver 80 data/pieces.csv
-./eternityII tcpserver 80 --expand-level 4 data/pieces.csv
-./eternityII tcpserver 80 --http-port 8080 data/pieces.csv
+./eternityII server 80
+./eternityII server 80 data/pieces.csv
+./eternityII server 80 --expand-level 4 data/pieces.csv
+./eternityII server 80 --http-port 8080 data/pieces.csv
 ```
 
 > ⚠️ **Dimensionnement de `nb_threads`** : chaque processus client connecté ouvre,
@@ -87,7 +87,7 @@ distribuable se raréfie en cours de recherche).
 Se connecte à un serveur et lance `N` processus de recherche en parallèle.
 
 ```sh
-./eternityII tcpclient [serveur] [nb_threads] [max_stock_par_thread] [fichier_pieces.csv]
+./eternityII client [serveur] [nb_threads] [max_stock_par_thread] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -99,9 +99,9 @@ Se connecte à un serveur et lance `N` processus de recherche en parallèle.
 
 Exemples :
 ```sh
-./eternityII tcpclient localhost
-./eternityII tcpclient 192.168.1.10 8
-./eternityII tcpclient localhost 4 300 data/pieces.csv
+./eternityII client localhost
+./eternityII client 192.168.1.10 8
+./eternityII client localhost 4 300 data/pieces.csv
 ```
 
 ## Mode pruner (élagage)
@@ -111,8 +111,8 @@ il demande au serveur des possibilités *à vérifier* et élague celles qui n'o
 continuation possible. Deux variantes :
 
 ```sh
-./eternityII tcppruner [serveur] [nb_threads] [fichier_pieces.csv] [taille_lot]   # élagage CPU
-./eternityII gpupruner [serveur] [nb_threads] [fichier_pieces.csv] [taille_lot]   # élagage GPU (build CUDA=1)
+./eternityII pruner [serveur] [nb_threads] [fichier_pieces.csv] [taille_lot]   # élagage CPU
+./eternityII pruner --gpu [serveur] [nb_threads] [fichier_pieces.csv] [taille_lot]   # élagage GPU (build CUDA=1)
 ```
 
 | Paramètre | Défaut | Description |
@@ -122,8 +122,9 @@ continuation possible. Deux variantes :
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
 | `taille_lot` | 100 | Nombre de possibilités échangées par aller-retour TCP (borné à 65536) |
 
-> Le mode `gpupruner` n'est disponible que si le binaire a été compilé avec
-> `make CUDA=1` (voir [Pruner GPU (CUDA)](pruner_gpu_cuda.md)). Sur Jetson, penser à
+> L'option `--gpu` exige un binaire compilé avec `make CUDA=1` (voir
+> [Pruner GPU (CUDA)](pruner_gpu_cuda.md)) — sinon le lancement échoue avec une
+> erreur explicite (pas de repli CPU silencieux). Sur Jetson, penser à
 > `LD_LIBRARY_PATH=/usr/local/cuda/lib64`.
 
 ### Échange par lots
@@ -137,13 +138,13 @@ La taille de lot **borne la mémoire** détenue par le pruner (il ne reçoit/acq
 jamais plus que ce lot) et dimensionne les tampons GPU (un lot = un lancement de
 kernel sur tous les SM). Elle se règle :
 
-- **au démarrage** : 4ᵉ argument de `tcppruner` / `gpupruner` (`taille_lot`) ;
+- **au démarrage** : 4ᵉ argument de `pruner` / `pruner --gpu` (`taille_lot`) ;
 - **à l'exécution** : commande interactive `prunerBatch <n>` (propagée aux process enfants).
 
 Exemples :
 ```sh
-./eternityII tcppruner localhost 4 data/pieces.csv 500     # lots de 500 (CPU)
-./eternityII gpupruner localhost 1 data/pieces.csv 4096    # lots de 4096 (GPU)
+./eternityII pruner localhost 4 data/pieces.csv 500     # lots de 500 (CPU)
+./eternityII pruner --gpu localhost 1 data/pieces.csv 4096    # lots de 4096 (GPU)
 ```
 
 > ⚠️ **Compatibilité protocole** : le handshake exige une égalité stricte des
@@ -226,7 +227,7 @@ Ces fichiers permettent de reprendre une recherche interrompue avec la commande
   cadence fixe de 100 µs (`MICRO_SLEEP`, `autosearch_step`/`autoprune_step`/
   `autoprune_gpu` dans [src/core/etii_search.c](../src/core/etii_search.c)), qu'il
   s'agisse d'une pénurie momentanée ou d'un épuisement durable du stock serveur. C'est
-  typiquement le cas d'un `tcppruner` une fois que **toutes** les possibilités ont été
+  typiquement le cas d'un `pruner` une fois que **toutes** les possibilités ont été
   vérifiées : le serveur n'a plus rien à distribuer, mais chaque thread continue de
   sonder à cadence rapide indéfiniment, consommant du CPU pour rien. Une piste serait
   d'appliquer à cette boucle un back-off progressif similaire à celui déjà en place
@@ -242,4 +243,4 @@ Ces fichiers permettent de reprendre une recherche interrompue avec la commande
 - [Console interactive](console.md) — commandes interactives et interface.
 - [Échanges client / serveur](echanges_client_serveur.md) — protocole TCP et canal de contrôle.
 - [API HTTP REST admin](api_http_rest.md) — télémétrie et pilotage HTTP du serveur.
-- [Pruner GPU (CUDA)](pruner_gpu_cuda.md) — mode `gpupruner` en détail.
+- [Pruner GPU (CUDA)](pruner_gpu_cuda.md) — mode `pruner --gpu` en détail.

@@ -59,7 +59,7 @@ else
     NCURSES_LIB :=
 endif
 
-# Active le pruner GPU optionnel (mode `gpupruner`). Sans CUDA=1 : aucun .cu
+# Active le pruner GPU optionnel (option `--gpu` du mode `pruner`). Sans CUDA=1 : aucun .cu
 # compilé, -DWITH_CUDA absent, binaire strictement identique au build classique.
 # Avec CUDA=1 : compile gpu_pruner.cu avec nvcc et lie le runtime CUDA. Calqué
 # sur le switch NCURSES ci-dessus. Cible : Linux/Jetson (NVIDIA) — pas Darwin.

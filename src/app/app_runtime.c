@@ -36,34 +36,30 @@
 /*
  * Source unique de vérité de l'aide en ligne de commande (cf. app_runtime.h) :
  * les modes d'abord, les options globales ensuite — l'aide générale préserve
- * cet ordre. `gpupruner` est toujours listé (avec la mention CUDA=1) plutôt
- * que caché hors WITH_CUDA : l'utilisateur d'un build CPU doit pouvoir
- * découvrir que le mode existe et comment l'obtenir.
+ * cet ordre. `--gpu` est toujours listée (avec la mention CUDA=1) même sur un
+ * build CPU : l'utilisateur doit pouvoir découvrir que l'exécution GPU existe
+ * et comment l'obtenir (le mode pruner produit alors une erreur explicite).
  */
 static const cli_help_topic_t cli_topics[] = {
-	{ "tcpserver",
-	  "tcpserver [nb_threads] [pieces.csv]",
+	{ "server",
+	  "server [nb_threads] [pieces.csv]",
 	  "Serveur : distribue les possibilités aux clients connectés.",
 	  "nb_threads (défaut 80) : connexions simultanées servies — dimensionner pour\n"
 	  "les connexions de travail PLUS une connexion de contrôle par machine cliente.\n"
 	  "Options utiles : --expand-level <n> (pré-expansion anti-famine du stock au\n"
 	  "démarrage), --http-port <n> (API REST d'administration sur 127.0.0.1)." },
-	{ "tcpclient",
-	  "tcpclient [serveur] [nb_threads] [max_stock] [pieces.csv]",
+	{ "client",
+	  "client [serveur] [nb_threads] [max_stock] [pieces.csv]",
 	  "Client de recherche : explore l'arbre et renvoie ses résultats au serveur.",
 	  "serveur (défaut localhost) : hôte du serveur. nb_threads (défaut 1) :\n"
 	  "processus de recherche forkés. max_stock : possibilités conservées\n"
 	  "localement par processus avant délégation au serveur." },
-	{ "tcppruner",
-	  "tcppruner [serveur] [nb_threads] [pieces.csv] [batch]",
+	{ "pruner",
+	  "pruner [serveur] [nb_threads] [pieces.csv] [batch]",
 	  "Client pruner : valide par lots les possibilités non vérifiées du serveur.",
 	  "batch : taille du lot d'échange avec le serveur (borné à PRUNER_BATCH_MAX ;\n"
-	  "modifiable en cours d'exécution via la commande console prunerBatch <n>)." },
-	{ "gpupruner",
-	  "gpupruner [serveur] [nb_threads] [pieces.csv] [batch]",
-	  "Pruner GPU : comme tcppruner, lot contrôlé sur le GPU (build CUDA=1 uniquement).",
-	  "Mêmes arguments que tcppruner. Nécessite un binaire compilé avec\n"
-	  "make CUDA=1 et un GPU NVIDIA (sinon le mode est absent du binaire)." },
+	  "modifiable en cours d'exécution via la commande console prunerBatch <n>).\n"
+	  "Avec --gpu, le contrôle des lots est exécuté sur le GPU (build CUDA=1)." },
 	{ "test",
 	  "test [pieces.csv]",
 	  "Mode autonome : recherche locale mono-processus, sans serveur.",
@@ -71,7 +67,7 @@ static const cli_help_topic_t cli_topics[] = {
 	  "(défaut ./data/pieces.csv) — aucun serveur nécessaire." },
 	{ "help",
 	  "help [sujet]",
-	  "Affiche cette aide, ou le détail d'un mode/option (ex. help tcpserver).",
+	  "Affiche cette aide, ou le détail d'un mode/option (ex. help server).",
 	  "Sans argument : aide générale (équivalent de --help). Avec un sujet : le\n"
 	  "détail d'un mode ou d'une option (les tirets de tête sont facultatifs :\n"
 	  "help http-port == help --http-port)." },
@@ -94,6 +90,12 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Boucle locale uniquement (jamais exposée sur le réseau). Endpoints sous\n"
 	  "/api/v1 : stats, status, clients, best-board, command (commandes de la\n"
 	  "liste blanche seulement : pause, resume, limit, ...)." },
+	{ "--gpu",
+	  "--gpu",
+	  "Pruner : exécute le contrôle des lots sur le GPU (build CUDA=1 uniquement).",
+	  "Interprétée par le mode pruner uniquement (ignorée par les autres modes).\n"
+	  "Sur un binaire compilé sans CUDA : erreur explicite au lancement plutôt\n"
+	  "qu'un repli CPU silencieux — recompiler avec make CUDA=1 (GPU NVIDIA)." },
 	{ "--help",
 	  "--help | -h",
 	  "Affiche l'aide générale puis quitte.",
@@ -272,29 +274,29 @@ int parse_positive_int_or_default(const char *arg, int fallback, int *out_was_in
 	return fallback;
 }
 
-int parse_tcpserver_thread_arg(const char *arg, int default_nb_threads, int *out_nb_threads)
+int parse_server_thread_arg(const char *arg, int default_nb_threads, int *out_nb_threads)
 {
 	if (arg == NULL) {
 		*out_nb_threads = default_nb_threads;
-		return TCPSERVER_ARG_AS_COUNT;
+		return SERVER_ARG_AS_COUNT;
 	}
 	int n = atoi(arg);
 	char c0 = arg[0];
 	int looks_numeric = (c0 == '+' || c0 == '-' || (c0 >= '0' && c0 <= '9'));
 	if (n > 0) {
 		*out_nb_threads = n;
-		return TCPSERVER_ARG_AS_COUNT;
+		return SERVER_ARG_AS_COUNT;
 	}
 	*out_nb_threads = default_nb_threads;
 	if (looks_numeric) {
 		/* Nombre fourni mais non valide (0 ou négatif) : on garde le défaut. */
-		return TCPSERVER_ARG_INVALID_COUNT;
+		return SERVER_ARG_INVALID_COUNT;
 	}
 	/* Pas un nombre : traité comme le fichier de pièces, nombre de threads inchangé. */
-	return TCPSERVER_ARG_AS_FILENAME;
+	return SERVER_ARG_AS_FILENAME;
 }
 
-const char *parse_tcpclient_args(int argc, const char *argv[])
+const char *parse_client_args(int argc, const char *argv[])
 {
     NB_THREADS = 1;
     const char *serverIp = "localhost";
@@ -312,7 +314,7 @@ const char *parse_tcpclient_args(int argc, const char *argv[])
     }
     if (argc >= 5) {
         if (pruner_mode) {
-            // tcppruner [serveur] [nb_threads] [pieces.csv] [batch] : pas de stock local
+            // pruner [serveur] [nb_threads] [pieces.csv] [batch] : pas de stock local
             parts_files = (char *)(argv[4]);
         } else {
             max_stock_by_thread = atoi(argv[4]);

@@ -41,29 +41,29 @@ The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` inste
 
 ```sh
 # Start the server (distributes possibilities to clients)
-./eternityII tcpserver [nb_threads] [data/pieces.csv]
+./eternityII server [nb_threads] [data/pieces.csv]
 # …with startup stock expansion (anti-starvation): pre-expand to cursor level 4
-./eternityII tcpserver [nb_threads] --expand-level 4 [data/pieces.csv]
+./eternityII server [nb_threads] --expand-level 4 [data/pieces.csv]
 # …with the HTTP REST admin API enabled on 127.0.0.1:8080
-./eternityII tcpserver [nb_threads] --http-port 8080 [data/pieces.csv]
+./eternityII server [nb_threads] --http-port 8080 [data/pieces.csv]
 
 # Start a client (does the search)
-./eternityII tcpclient [server_host] [nb_threads] [max_stock_per_thread] [data/pieces.csv]
+./eternityII client [server_host] [nb_threads] [max_stock_per_thread] [data/pieces.csv]
 
 # Start a pruner client (validates unchecked possibilities, batched exchange)
-./eternityII tcppruner [server_host] [nb_threads] [data/pieces.csv] [batch_size]
+./eternityII pruner [server_host] [nb_threads] [data/pieces.csv] [batch_size]
 # GPU pruner (CUDA build only): same args, batch checked on the GPU
-./eternityII gpupruner [server_host] [nb_threads] [data/pieces.csv] [batch_size]
+./eternityII pruner --gpu [server_host] [nb_threads] [data/pieces.csv] [batch_size]
 
 # Self-contained test/auto mode (no server needed)
 ./eternityII test [data/pieces.csv]
 
 # Built-in CLI help: general help, or per-topic detail (mode or option)
 ./eternityII --help          # position-independent, also -h; exits with success
-./eternityII help tcpserver  # topic names are case-insensitive; leading dashes optional
+./eternityII help server  # topic names are case-insensitive; leading dashes optional
 ```
 
-**CLI help system** (`--help`/`-h` anywhere in argv, or the `help [topic]` mode): the single source of truth is the `cli_topics[]` table in `src/app/app_runtime.c` (mirroring the console's `commands[]` design) — general help (`format_cli_help`), per-topic help (`format_cli_help_topic`), and the invalid-arguments message (`failed_arg`) all derive from it. **Adding a mode or a global option ⇒ add its entry to that table.** An unknown `help <topic>` prints an error plus the general help and exits with failure (so a typo is never a silent success); `gpupruner` is always listed (with a "CUDA=1 build only" note) even in non-CUDA builds, so users can discover it exists.
+**CLI help system** (`--help`/`-h` anywhere in argv, or the `help [topic]` mode): the single source of truth is the `cli_topics[]` table in `src/app/app_runtime.c` (mirroring the console's `commands[]` design) — general help (`format_cli_help`), per-topic help (`format_cli_help_topic`), and the invalid-arguments message (`failed_arg`) all derive from it. **Adding a mode or a global option ⇒ add its entry to that table.** An unknown `help <topic>` prints an error plus the general help and exits with failure (so a typo is never a silent success); the `--gpu` option is always listed (with a "CUDA=1 build only" note) even in non-CUDA builds, so users can discover GPU pruning exists (a non-CUDA binary given `--gpu` fails with an explicit error instead of silently falling back to CPU).
 
 **`--stop-on-solution`** (optional, accepted in any position by any mode, stripped from argv before the positional parse): stop at the **first** solution. A search process that finds one exits; a server that receives one backs up its queues and stops. **Default (flag absent): keep going** — the search process backtracks to look for more solutions and the server stays in service so clients keep exploring. Read in `main()` *before* any fork (global `stop_on_solution`), so forked search children inherit it. Each solution is saved to a **unique** file (`./solution_<pid>_<seq>` client-side, `./solution_server_<pid>_<seq>` server-side) — multiple solutions never overwrite one another.
 
@@ -91,7 +91,7 @@ Endpoints (all under `/api/v1`, JSON in/out):
 **`GET /api/v1/clients` and `POST /api/v1/clients/stats`** are the HTTP counterparts of the console `clients`/`clientsStats` commands (see *Control Channel* below), split across two endpoints because of an inherent async/sync mismatch: the HTTP server serves one connection at a time on a single thread and must answer within its 5s I/O timeout, but a `CTRL_GET_STATS` reply lands asynchronously on that session's own dedicated control thread — there is no way to block the HTTP thread on "wait for these N sessions to answer" without risking it hanging past its timeout if a client is slow or gone. So the read path (`GET /api/v1/clients`, via `http_clients_collect` → `control_registry_snapshot`) is a synchronous, non-blocking read of whatever `control_registry_record_stats` last cached, and the refresh path (`POST /api/v1/clients/stats`, via `control_registry_broadcast_get_stats`) is fire-and-forget, exactly like the console command it mirrors — it returns as soon as the request is queued, not once every client has replied. In practice the two are used as a pair: `POST` to trigger a refresh, then `GET` shortly after (each session's control thread wakes immediately on the posted command via its `pthread_cond_t`, so the round-trip is typically sub-second, but nothing enforces that — a slow or stalled client just leaves its cached `stats` stale rather than blocking the poller).
 
 ```sh
-./eternityII tcpserver 4 --http-port 8080 data/pieces.csv
+./eternityII server 4 --http-port 8080 data/pieces.csv
 curl http://127.0.0.1:8080/api/v1/stats
 curl http://127.0.0.1:8080/api/v1/status
 curl http://127.0.0.1:8080/api/v1/clients
@@ -166,7 +166,7 @@ The protocol uses fixed-size `packet` structs containing an `instruction` byte a
 | `INST_NEED_WORK` | 15 | Hunger probe (since v8): client asks how many possibilities the server would like to receive (response: `int32` N ≥ 0, `compute_server_hunger`). Sent by the client's feed thread in place of the keepalive; a positive N enables *anticipatory delegation* — busy search threads cede up to half their implicit stock (`bt_delegation_quota`) even below `max_stock_by_thread`, fixing the startup starvation where one client holds the whole tree while the server has nothing to serve. |
 | `INST_CONTROL_HELLO` | 16 | Control-channel announcement (since v9): the client's PARENT process (never a search fork) sends this on a SEPARATE TCP connection, immediately after the version handshake, to switch that connection into control-channel mode — see *Control Channel* below. |
 
-A pruner exchanges with the server in batches of `pruner_batch_size` (configurable via the 4th `tcppruner`/`gpupruner` CLI arg, or the `prunerBatch <n>` console command, capped at `PRUNER_BATCH_MAX`), bounding its memory. **Every** `possibility_packet` transfer (unit GET/ADD/ANALYSED paths included, since v7) goes through `recv_all`/`send_all` (etii_protocol.c), which reassemble partial TCP transfers — a raw one-shot `send()`/`recv()` of a ~520-byte packet can transfer only part of it and desynchronise the whole connection stream. Bumping the wire format requires bumping `VERSION` (exact-match handshake).
+A pruner exchanges with the server in batches of `pruner_batch_size` (configurable via the 4th `pruner` CLI arg, or the `prunerBatch <n>` console command, capped at `PRUNER_BATCH_MAX`), bounding its memory. **Every** `possibility_packet` transfer (unit GET/ADD/ANALYSED paths included, since v7) goes through `recv_all`/`send_all` (etii_protocol.c), which reassemble partial TCP transfers — a raw one-shot `send()`/`recv()` of a ~520-byte packet can transfer only part of it and desynchronise the whole connection stream. Bumping the wire format requires bumping `VERSION` (exact-match handshake).
 
 ### Control Channel (v9, extended in v10)
 

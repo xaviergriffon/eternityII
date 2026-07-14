@@ -14,7 +14,7 @@
 void *autosearch (void *userdata);
 
 /**
- * @brief Thread de vérification d'un client pruner (mode `tcppruner`).
+ * @brief Thread de vérification d'un client pruner (mode `pruner`).
  *
  * @param userdata contexte du thread client (type attendu : client_possibility_t)
  * @return void* null.
@@ -23,7 +23,7 @@ void *autoprune (void *userdata);
 
 #ifdef WITH_CUDA
 /**
- * @brief Variante GPU de `autoprune` (mode `gpupruner`, build CUDA uniquement).
+ * @brief Variante GPU de `autoprune` (option `--gpu` du mode `pruner`, build CUDA uniquement).
  *
  * Même flux que `autoprune`, mais la boucle « pour chaque paquet :
  * possibility_all_has_a_next » est remplacée par un unique

@@ -1,7 +1,7 @@
 # Échanges client / serveur
 
-Ce document décrit le protocole TCP qui relie le serveur (`tcpserver`) aux différents
-clients (`tcpclient`, `tcppruner`, `gpupruner`) : les instructions échangées, la gestion
+Ce document décrit le protocole TCP qui relie le serveur (`server`) aux différents
+clients (`client`, `pruner`, `pruner --gpu`) : les instructions échangées, la gestion
 de charge, les séquences de communication typiques et le comportement en cas de panne.
 Il couvre aussi (depuis la v9) le [canal de contrôle](#canal-de-contrôle-v9), une
 connexion TCP séparée où le **serveur** devient l'initiateur pour piloter un client à
@@ -10,7 +10,7 @@ distance (statistiques, pause/reprise, …).
 Le code correspondant vit principalement dans :
 
 - [src/net/etii_protocol.h](../src/net/etii_protocol.h) / [etii_protocol.c](../src/net/etii_protocol.c) — instructions du protocole de travail, `send_all`/`recv_all`, handshake ;
-- [src/net/tcpclient.c](../src/net/tcpclient.c) / [tcpserver.c](../src/net/tcpserver.c) — sockets et timeouts ;
+- [src/net/client.c](../src/net/client.c) / [server.c](../src/net/server.c) — sockets et timeouts ;
 - [src/core/datamanager.c](../src/core/datamanager.c) — files de possibilités côté serveur et échanges côté client ;
 - [src/app/etii_server.c](../src/app/etii_server.c) / [etii_client.c](../src/app/etii_client.c) — boucles de traitement du protocole de travail ;
 - [src/net/control_protocol.h](../src/net/control_protocol.h) / [src/app/etii_control.c](../src/app/etii_control.c) / [src/app/control_registry.c](../src/app/control_registry.c) — canal de contrôle (v9), détaillé plus bas.
@@ -32,10 +32,10 @@ flowchart LR
         Q --- B
         A --- B
     end
-    C1[Client recherche<br/>tcpclient] -- "INST_GET / INST_ADD" --> Q
+    C1[Client recherche<br/>client] -- "INST_GET / INST_ADD" --> Q
     C1 -. "INST_NEED_WORK (sonde de faim, v8)" .-> Q
     C2[Client recherche 2] -- "INST_GET / INST_ADD" --> Q
-    P[Pruner<br/>tcppruner / gpupruner] -- "GET_TO_CHECK_BATCH /<br/>ANALYSED_BATCH" --> A
+    P[Pruner<br/>pruner / pruner --gpu] -- "GET_TO_CHECK_BATCH /<br/>ANALYSED_BATCH" --> A
     C1 -- "INST_SOLUTION" --> Serveur
 ```
 
@@ -124,7 +124,7 @@ sequenceDiagram
     participant S as Serveur
     P->>S: INST_GET_TO_CHECK_BATCH + int32 N
     S-->>P: int32 K (0..N) + K possibilités
-    Note over P: forward-check du lot<br/>(kernel CUDA en mode gpupruner)
+    Note over P: forward-check du lot<br/>(kernel CUDA en mode pruner --gpu)
     P->>S: INST_POSSIBILITY_ANALYSED_BATCH + int32 M + M possibilités
     S-->>P: INST_CONSIDERED (unique pour tout le lot)
 ```
@@ -272,7 +272,7 @@ pause, sans qu'il faille rejouer la commande.
 ## Gestion de charge
 
 **Côté serveur — connexions simultanées configurables.** Le nombre de clients servis
-en parallèle est le 1ᵉʳ argument de démarrage : `./eternityII tcpserver [nb_threads]`
+en parallèle est le 1ᵉʳ argument de démarrage : `./eternityII server [nb_threads]`
 (80 par défaut). Il dimensionne le pool de threads de communication — un thread par
 connexion active — et sert aussi de backlog à `listen()`. Les slots sont créés
 paresseusement : un client accepté est affecté à un slot libre, sinon un nouveau
@@ -292,7 +292,7 @@ qu'une séquence `send_instruction + send + recv ack` ne soit jamais entrelacée
 une sonde.
 
 **Côté client — seuil de stock local.** Chaque thread de recherche garde au plus
-`max_stock_by_thread` possibilités en local (3ᵉ argument de `tcpclient`). Dès que son
+`max_stock_by_thread` possibilités en local (3ᵉ argument de `client`). Dès que son
 stock implicite (les frères non explorés de sa pile de backtracking) dépasse ce seuil,
 l'excédent est délégué au serveur via des `INST_ADD` (voir `src/core/etii_search.c`).
 Le client reste ainsi autonome (peu d'allers-retours tant qu'il a du travail) tout en
@@ -356,7 +356,7 @@ la charge accumulée survit à un redémarrage.
 ### Serveur qui ne répond plus
 
 - **Timeouts socket.** Le client arme `SO_RCVTIMEO`/`SO_SNDTIMEO` à `tcp_timeout`
-  secondes sur sa socket (`src/net/tcpclient.c`). Un `recv` qui expire fait renvoyer
+  secondes sur sa socket (`src/net/client.c`). Un `recv` qui expire fait renvoyer
   `INST_END` par `recv_instruction` (errno `EAGAIN`/`EWOULDBLOCK`/`ETIMEDOUT`) : le
   client ne reste jamais bloqué indéfiniment sur un serveur muet.
 - **Keepalive.** Un worker occupé sur son stock local peut ne rien envoyer pendant
