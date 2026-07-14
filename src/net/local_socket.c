@@ -11,6 +11,31 @@
 
 #include "ui/logger.h"
 #include "app/static_variables.h"
+#include "net/ipc_protocol.h"
+#include "core/possibility.h"
+
+/**
+ * @brief Taille du plus gros datagramme IPC parent<->fork (octet de type compris).
+ *
+ * Le maximum des trois familles de messages d'ipc_protocol.h :
+ *   - IPC_MSG_STATS      : 1 + sizeof(struct client_statistics) — croît avec
+ *                          FC_STAT_MAX_K (2130 octets à FC_STAT_MAX_K=256) ;
+ *   - IPC_MSG_BEST_BOARD : 1 + sizeof(struct possibility_packet) ;
+ *   - IPC_MSG_LOG_*      : 1 + IPC_LINE_MAX + 1 (cf. logger.c).
+ *
+ * @return Taille maximale en octets d'un datagramme IPC.
+ */
+size_t ipc_max_datagram(void)
+{
+    size_t sz = 1 + sizeof(struct client_statistics);
+    if (sz < 1 + sizeof(struct possibility_packet)) {
+        sz = 1 + sizeof(struct possibility_packet);
+    }
+    if (sz < (size_t)(1 + IPC_LINE_MAX + 1)) {
+        sz = (size_t)(1 + IPC_LINE_MAX + 1);
+    }
+    return sz;
+}
 
 /**
  * @brief Alloue et initialise une structure `sockaddr_un` pour un socket Unix.
@@ -56,6 +81,26 @@ int build_udp_local_socket(struct sockaddr_un *svaddr) {
     if (socket_id == -1) {
         log_errno("Error on socket for %s => ", svaddr->sun_path);
         return -1;
+    }
+
+    /* macOS limite un datagramme AF_UNIX à net.local.dgram.maxdgram (2048
+       octets par défaut) : tout message IPC plus gros échoue en EMSGSIZE —
+       or IPC_MSG_STATS dépasse ce seuil dès que FC_STAT_MAX_K est relevé
+       (ex. 256 pour accompagner un FORWARD_CHECK_K élevé), et les lignes de
+       log proches d'IPC_LINE_MAX (4000) le dépassent déjà. Relever SO_SNDBUF
+       lève cette limite par socket. Côté réception, le défaut (recvspace
+       4096) ne met en file qu'un seul gros datagramme : SO_RCVBUF est
+       dimensionné pour absorber une rafale (stats de tous les forks à la
+       même seconde + logs). Sous Linux les défauts (~200 Ko) couvrent déjà
+       ces tailles, l'appel est alors sans effet utile mais inoffensif.
+       Échec non bloquant : on logue et on continue avec les défauts. */
+    int sndbuf = (int)(2 * ipc_max_datagram());
+    int rcvbuf = (int)(16 * ipc_max_datagram());
+    if (setsockopt(socket_id, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) == -1) {
+        log_errno("Error on setsockopt SO_SNDBUF for %s => ", svaddr->sun_path);
+    }
+    if (setsockopt(socket_id, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) == -1) {
+        log_errno("Error on setsockopt SO_RCVBUF for %s => ", svaddr->sun_path);
     }
 
     if (remove(svaddr->sun_path) == -1 && errno != ENOENT) {

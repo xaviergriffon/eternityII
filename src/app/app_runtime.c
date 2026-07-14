@@ -530,19 +530,27 @@ void *fork_checker(void *param) {
         char ipcbuf[1 + sizeof(struct client_statistics)];
         ipcbuf[0] = IPC_MSG_STATS;
         memcpy(ipcbuf + 1, statistic, sizeof(struct client_statistics));
+        if (sendto(fork_checker_socket_id, ipcbuf, sizeof ipcbuf, MSG_DONTWAIT,
+                   (struct sockaddr *) main_addr, sizeof(struct sockaddr_un))
+            != (ssize_t)sizeof ipcbuf) {
+            /* Échec visible UNE fois par processus (pas à chaque seconde) :
+               un envoi de stats qui échoue en continu (ex. EMSGSIZE quand le
+               datagramme dépassait la limite AF_UNIX de macOS, avant que
+               build_udp_local_socket ne relève SO_SNDBUF) rendait le parent
+               aveugle — aucune stat, aucun record — sans aucune trace hors
+               DEBUG_LOCAL_SOCKET. Un message court passe toujours (les
+               limites en jeu dépassent largement une ligne de log). */
+            static int stats_send_warned = 0;
+            if (!stats_send_warned) {
+                stats_send_warned = 1;
+                log_error("stats IPC : sendto de %zu octets vers %s a échoué : %s "
+                          "— le parent ne recevra pas les statistiques de ce fork\n",
+                          sizeof ipcbuf, main_addr->sun_path, strerror(errno));
+            }
 #ifdef DEBUG_LOCAL_SOCKET
-        if(
-#endif // DEBUG_LOCAL_SOCKET
-
-		sendto(fork_checker_socket_id, ipcbuf, sizeof ipcbuf, MSG_DONTWAIT, (struct sockaddr *) main_addr,
-                               sizeof(struct sockaddr_un))
-#ifdef DEBUG_LOCAL_SOCKET
-           != (ssize_t)sizeof ipcbuf ) {
             log_debug("fork_checker cl %d error %i sendto : %s\n", getpid(), errno, strerror(errno));
-        }
-#else
-        ;
 #endif // DEBUG_LOCAL_SOCKET
+        }
 
         // Représentation du meilleur plateau LOCAL à ce fork : envoyée en plus
         // des stats, mais UNIQUEMENT quand ce fork bat son propre record
@@ -599,10 +607,10 @@ void *server_tcp(void *param) {
     ssize_t numBytes;
     socklen_t len = sizeof(struct sockaddr_un);
 
-    /* Tampon dimensionné pour le plus gros message attendu :
-       1 octet de type + max(struct client_statistics, IPC_LINE_MAX+1). */
-    size_t bufsz = 1 + sizeof(struct client_statistics);
-    if (bufsz < 1 + IPC_LINE_MAX + 1) bufsz = 1 + IPC_LINE_MAX + 1;
+    /* Tampon dimensionné pour le plus gros message attendu (stats, plateau
+       record, ligne de log) — même source de vérité que les tampons socket
+       de build_udp_local_socket. */
+    size_t bufsz = ipc_max_datagram();
     char *buf = malloc(bufsz);
 
     while (request != REQUEST_STOP) {
