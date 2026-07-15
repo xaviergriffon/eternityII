@@ -297,9 +297,10 @@ TEST log_routes_each_type_to_parent(void)
 /*
  * Ligne de saisie protégée (console_input_render / console_input_end) :
  * - render publie et affiche la ligne (efface la ligne courante puis réécrit
- *   prompt + saisie) ;
+ *   prompt + saisie), et repositionne le curseur terminal (\033[<n>G) sur la
+ *   position demandée (édition au milieu de la ligne : ←/→, Home/End...) ;
  * - tant que la saisie est active, un log terminé par '\n' efface la ligne,
- *   s'écrit, puis la redessine en dessous ;
+ *   s'écrit, puis la redessine en dessous (curseur repositionné aussi) ;
  * - un log SANS '\n' final (bloc partiel) ne redessine pas la ligne ;
  * - end imprime le saut de ligne et lève la protection (les logs suivants
  *   redeviennent bruts, sans séquence d'effacement).
@@ -308,11 +309,15 @@ TEST console_input_line_survives_async_logs(void)
 {
     char out[512];
 
-    CAPTURE(1, stdout, console_input_render("commande :", "che"), out);
+    /* Curseur en fin de ligne ("che", 3 caractères) : colonne 1 (prompt) +
+       10 ("commande :") + 3 = 14 -> \033[14G. */
+    CAPTURE(1, stdout, console_input_render("commande :", "che", 3), out);
     ASSERT(strstr(out, "\r\033[K") != NULL);
     ASSERT(strstr(out, "commande :che") != NULL);
+    ASSERT(strstr(out, "\033[14G") != NULL);
 
-    /* Log complet (avec '\n') : effacement, log, puis redessin de la saisie. */
+    /* Log complet (avec '\n') : effacement, log, puis redessin de la saisie
+       (curseur repositionné après le redessin). */
     CAPTURE(1, stdout, log_info("stat: %d coups/s\n", 42), out);
     char *erase = strstr(out, "\r\033[K");
     ASSERT(erase != NULL);
@@ -320,8 +325,11 @@ TEST console_input_line_survives_async_logs(void)
     ASSERT(text != NULL);
     char *redraw = strstr(out, "commande :che");
     ASSERT(redraw != NULL);
+    char *cursor = strstr(out, "\033[14G");
+    ASSERT(cursor != NULL);
     ASSERT(erase < text);            /* effacement AVANT le log            */
     ASSERT(text < redraw);           /* redessin APRÈS le log              */
+    ASSERT(redraw < cursor);         /* repositionnement APRÈS le redessin */
 
     /* Bloc partiel (sans '\n') : pas de redessin de la saisie. */
     CAPTURE(1, stdout, log_info("partiel"), out);
@@ -335,6 +343,34 @@ TEST console_input_line_survives_async_logs(void)
     ASSERT(strstr(out, "apres\n") != NULL);
     ASSERT(strstr(out, "\r\033[K") == NULL);
     ASSERT(strstr(out, "commande :") == NULL);
+    PASS();
+}
+
+/* Curseur au MILIEU de la ligne ("che" avec cursor=1, entre 'c' et 'h') :
+   colonne 1 + 10 (prompt) + 1 = 12 -> \033[12G, distinct de la fin de ligne. */
+TEST console_input_render_positions_cursor_mid_line(void)
+{
+    char out[256];
+    CAPTURE(1, stdout, console_input_render("commande :", "che", 1), out);
+    ASSERT(strstr(out, "commande :che") != NULL);
+    ASSERT(strstr(out, "\033[12G") != NULL);
+    ASSERT(strstr(out, "\033[14G") == NULL); /* pas la colonne de fin de ligne */
+    console_input_end();
+    PASS();
+}
+
+/* cursor négatif ou hors bornes (ligne tronquée par le tampon interne) :
+   pas de débordement, colonne bornée à la longueur réellement écrite. */
+TEST console_input_render_clamps_cursor_bounds(void)
+{
+    char out[256];
+    CAPTURE(1, stdout, console_input_render("p:", "ab", -5), out);
+    ASSERT(strstr(out, "\033[3G") != NULL); /* borné à 0 -> colonne = strlen("p:")+1 */
+    console_input_end();
+
+    CAPTURE(1, stdout, console_input_render("p:", "ab", 999), out);
+    ASSERT(strstr(out, "\033[5G") != NULL); /* borné à strlen("ab")=2 -> colonne 5 */
+    console_input_end();
     PASS();
 }
 
@@ -367,7 +403,7 @@ TEST log_error_during_input_goes_to_stderr(void)
     char out[256];
     char devnull[256];
     /* Active la saisie en jetant l'affichage stdout de render. */
-    CAPTURE(1, stdout, console_input_render("commande :", "x"), devnull);
+    CAPTURE(1, stdout, console_input_render("commande :", "x", 1), devnull);
     CAPTURE(2, stderr, log_error("err-%d\n", 3), out);
     /* Lève la protection avant les assertions (état global partagé). */
     CAPTURE(1, stdout, console_input_end(), devnull);
@@ -446,6 +482,8 @@ SUITE(logger_suite)
     RUN_TEST(log_routes_to_parent_over_udp_socket);
     RUN_TEST(log_routes_each_type_to_parent);
     RUN_TEST(console_input_line_survives_async_logs);
+    RUN_TEST(console_input_render_positions_cursor_mid_line);
+    RUN_TEST(console_input_render_clamps_cursor_bounds);
     RUN_TEST(console_pager_noop_without_tty);
     RUN_TEST(console_input_end_without_render_is_noop);
     RUN_TEST(log_error_during_input_goes_to_stderr);

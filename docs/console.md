@@ -197,6 +197,29 @@ log terminé par un saut de ligne efface la ligne en cours, s'affiche, puis la
 ligne `commande : …` est **redessinée en dessous** avec la saisie intacte. (En
 ncurses le problème ne se posait pas : la saisie vit dans une fenêtre dédiée.)
 
+## Édition de la ligne de saisie
+
+Les deux builds partagent désormais la même logique d'édition (module
+`src/ui/line_edit.c`, sans dépendance d'affichage) : le curseur peut se déplacer
+n'importe où dans la ligne, pas seulement en être ajouté/retiré en fin.
+
+| Touche | Effet |
+|---|---|
+| ← / → | Déplace le curseur d'un caractère (gauche / droite) |
+| Home / Ctrl-A | Curseur en début de ligne |
+| End / Ctrl-E | Curseur en fin de ligne |
+| Backspace | Efface le caractère **avant** le curseur |
+| Suppr (Delete) | Efface le caractère **sous** le curseur |
+| Ctrl-U | Efface toute la ligne |
+| Ctrl-W | Efface le mot précédant le curseur (comme readline/bash) |
+| Entrée | Exécute la commande et l'ajoute à l'historique (dédoublonnage si identique à la précédente) |
+| Ctrl-L | Efface l'écran (comme la commande `clear`) et redessine la saisie en cours |
+
+> En ncurses, `Home`/`End` restent réservées au **scroll du pad de sortie**
+> (voir plus bas) : utilisez `Ctrl-A`/`Ctrl-E` pour le début/fin de la ligne de
+> saisie dans ce build. En ANSI, `Home`/`End`/`Ctrl-A`/`Ctrl-E` sont
+> équivalentes (aucun autre usage de ces touches).
+
 ## Historique des commandes (flèches ↑ / ↓)
 
 Les 100 dernières commandes saisies sont conservées en mémoire pour la session. Les
@@ -206,9 +229,6 @@ touches ↑ et ↓ rappellent les commandes précédentes (comme dans bash) :
 |---|---|
 | ↑ | Rappelle la commande précédente (la première pression mémorise la saisie en cours pour pouvoir y revenir) |
 | ↓ | Avance vers les commandes plus récentes ; revient à la saisie en cours en bas |
-| Entrée | Exécute la commande et l'ajoute à l'historique (dédoublonnage si identique à la précédente) |
-| Backspace | Efface le dernier caractère |
-| Ctrl-L | Efface l'écran (comme la commande `clear`) et redessine la saisie en cours |
 
 L'historique fonctionne dans les deux builds. En ANSI, le terminal est basculé en
 mode non-canonique (`tcsetattr`) le temps de la session pour permettre l'interception

@@ -113,6 +113,7 @@ set(PROD_SRCS
     src/ui/command_lines.c
     src/ui/command_match.c
     src/ui/command_history.c
+    src/ui/line_edit.c
     src/ui/console.c
 )
 
@@ -185,6 +186,7 @@ set(TEST_MODULES
     src/core/part.c
     src/core/readdata.c
     src/ui/command_history.c
+    src/ui/line_edit.c
     src/ui/command_match.c
     src/core/possibility.c
     src/core/best_board.c
@@ -220,6 +222,7 @@ set(TEST_SUITES_COMMON
     tests/net/test_local_socket.c
     tests/net/test_tcp.c
     tests/ui/test_command_history.c
+    tests/ui/test_line_edit.c
     tests/ui/test_command_match.c
     tests/ui/test_command_lines.c
     tests/ui/test_console.c
@@ -302,6 +305,7 @@ add_executable(eternityII16 EXCLUDE_FROM_ALL
     src/ui/command_lines.c
     src/ui/command_match.c
     src/ui/command_history.c
+    src/ui/line_edit.c
     src/ui/console.c
     src/app/main.c
 )

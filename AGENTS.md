@@ -14,7 +14,7 @@ Sources live under `src/`, split into four domains. Includes are **explicit and 
 |---|---|---|
 | `src/core/` | Puzzle logic & data structures + search engine | `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `etii_search` `datamanager` |
 | `src/net/`  | TCP protocol & sockets, parent↔child IPC | `etii_protocol` `control_protocol` `tcpclient` `tcpserver` `local_socket` `ipc_protocol`(h) |
-| `src/ui/`   | Logging, console, command handling | `logger` `logger_ncurses`(c) `console` `command_lines` `command_match` `command_history` |
+| `src/ui/`   | Logging, console, command handling | `logger` `logger_ncurses`(c) `console` `command_lines` `command_match` `command_history` `line_edit` |
 | `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_control` `control_registry` `app_runtime` `etii_statistic`(h) `static_variables` `gpu_pruner`(.cu/.h) |
 
 Other top-level dirs: `data/` (puzzle definitions `pieces.csv`, `pieces16.csv`), `build/` (compilation objects, mirrors `src/`, gitignored), `tests/` (unit tests). Adding a `.c` means dropping it under the right `src/<domain>/` and adding its `build/<domain>/<name>.o` to the `OBJS` list (and to `add_executable` in `CMakeLists.txt`).
@@ -241,6 +241,7 @@ Beyond the work protocol above (client-initiated: GET/ADD/ANALYSED/…), a **sec
 | `src/core/lifo.c` | Queue (`File`) and flat array (`big_table`) data structures |
 | `src/ui/console.c` / `src/ui/command_lines.c` | Interactive command parsing from stdin; Levenshtein-based typo suggestion for unknown commands. The `commands[]` table carries help metadata (category, usage, summary, details, aliases) — single source of truth for the categorized `help` / `help <topic>` output and the automatic usage recall (`CMD_ERR_USAGE`); command names are case-insensitive |
 | `src/ui/command_history.c` | In-session command history (↑/↓ recall, 100-entry ring, dedup) |
+| `src/ui/line_edit.c` | I/O-free line-editing core shared by both consoles (cursor motion, backspace/delete, Ctrl-U/W, history recall with draft save/restore) — each frontend (`console.c` raw-mode reader, `logger_ncurses.c` input window) translates its raw input into abstract keys and redraws from the resulting state; directly unit-testable without a PTY or fork |
 | `src/ui/logger.c` | Thread-safe `log_info/log_debug/log_error/log_console/log_event/log_status` — ANSI build |
 | `src/ui/logger_ncurses.c` | Ncurses variant of logger (compiled instead of `src/ui/logger.c` when `NCURSES=1`); 4-pane layout: output pad, stats banner, events, input |
 | `src/net/ipc_protocol.h` | Structs for parent↔child Unix socket messages (stats, log forwarding, best-board-on-record) |

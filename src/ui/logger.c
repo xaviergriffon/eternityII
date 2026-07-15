@@ -54,6 +54,20 @@ static int zone_rows = 0;    /* hauteur du terminal au dernier réglage         
 #define INPUT_SNAPSHOT_MAX 1200
 static int  input_active = 0;
 static char input_snapshot[INPUT_SNAPSHOT_MAX];
+/* Colonne terminal (1-based) où repositionner le curseur après un redessin de
+   la ligne de saisie — prompt inclus. Calculée par console_input_render à
+   partir de sa position dans la ligne éditée (0..strlen(line)). */
+static int  input_cursor_col = 1;
+
+/** @brief Repositionne le curseur terminal en colonne input_cursor_col
+ *         (colonne absolue \033[<n>G, indépendante de la longueur déjà
+ *         écrite). Appelant sous output_mutex, input_active vrai. */
+static void reposition_input_cursor_locked(void)
+{
+    char buf[24];
+    snprintf(buf, sizeof buf, "\033[%dG", input_cursor_col);
+    fputs(buf, stdout);
+}
 
 static void redraw_event_zone_locked(void); /* appelant détient output_mutex    */
 
@@ -87,6 +101,7 @@ static void write_stream_locked(FILE *stream, const char *buf)
     if (input_active && len > 0 && buf[len - 1] == '\n') {
         if (stream != stdout) fflush(stream);
         fputs(input_snapshot, stdout);
+        reposition_input_cursor_locked();
         fflush(stdout);
     }
 }
@@ -478,14 +493,23 @@ void log_event(const char *format, ...)
 /*  Ligne de saisie interactive (voir logger.h)                              */
 /* ------------------------------------------------------------------------- */
 
-void console_input_render(const char *prompt, const char *line)
+void console_input_render(const char *prompt, const char *line, int cursor)
 {
     pthread_mutex_lock(&output_mutex);
+    size_t plen = prompt != NULL ? strlen(prompt) : 0;
     snprintf(input_snapshot, sizeof input_snapshot, "%s%s",
              prompt != NULL ? prompt : "", line != NULL ? line : "");
+    if (cursor < 0) cursor = 0;
+    /* Colonne 1-based = 1 + (nb de caractères avant le curseur). Borne à la
+       longueur réellement écrite (snprintf peut avoir tronqué). */
+    size_t written = strlen(input_snapshot);
+    size_t before_cursor = plen + (size_t)cursor;
+    if (before_cursor > written) before_cursor = written;
+    input_cursor_col = (int)before_cursor + 1;
     input_active = 1;
     fputs("\r\033[K", stdout);
     fputs(input_snapshot, stdout);
+    reposition_input_cursor_locked();
     fflush(stdout);
     pthread_mutex_unlock(&output_mutex);
 }
