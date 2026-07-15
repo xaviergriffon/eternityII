@@ -338,6 +338,19 @@ TEST console_input_line_survives_async_logs(void)
     PASS();
 }
 
+/* console_pager_begin hors terminal (stdin/stdout redirigés) : early-return,
+   aucune pagination — les logs restent bruts et console_pager_end est sûr. */
+TEST console_pager_noop_without_tty(void)
+{
+    char out[256];
+    /* Sous CAPTURE, stdout est redirigé -> isatty faux -> begin early-return. */
+    CAPTURE(1, stdout, (console_pager_begin(), log_info("libre-%d\n", 8)), out);
+    console_pager_end();
+    ASSERT(strstr(out, "libre-8") != NULL);
+    ASSERT(strstr(out, "--Suite--") == NULL);
+    PASS();
+}
+
 /* console_input_end est idempotent : sans saisie active, aucune sortie. */
 TEST console_input_end_without_render_is_noop(void)
 {
@@ -433,6 +446,7 @@ SUITE(logger_suite)
     RUN_TEST(log_routes_to_parent_over_udp_socket);
     RUN_TEST(log_routes_each_type_to_parent);
     RUN_TEST(console_input_line_survives_async_logs);
+    RUN_TEST(console_pager_noop_without_tty);
     RUN_TEST(console_input_end_without_render_is_noop);
     RUN_TEST(log_error_during_input_goes_to_stderr);
     RUN_TEST(status_zone_lifecycle_over_pty);

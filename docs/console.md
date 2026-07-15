@@ -159,6 +159,36 @@ L'effacement est explicite, via la commande `clear` (alias `cls`) ou le raccourc
 - **Mode ncurses** : la vue devient blanche mais le pad de sortie est conservé —
   `PgUp`/`Home` permettent de revenir sur tout l'historique (3000 lignes).
 
+## Pagination des sorties longues : « --Suite-- » (mode ANSI)
+
+En mode ANSI interactif (stdin **et** stdout sont des terminaux), la sortie de
+chaque commande est **paginée** : dès qu'une page d'écran est remplie, l'affichage
+marque une pause sur une invite en vidéo inverse :
+
+```
+--Suite-- (espace : page, entrée : ligne, q : dérouler)
+```
+
+| Touche | Effet |
+|---|---|
+| Espace (ou toute autre touche) | Affiche la page suivante |
+| Entrée | Avance d'une seule ligne |
+| `q` | Déroule le reste de la sortie sans pause (**rien n'est supprimé**) |
+
+Plus besoin de compter sur le seul scrollback pour lire un `help`, `statistic`
+ou `print` : la sortie attend le lecteur. Points de conception :
+
+- **Seule la commande en cours est paginée.** Les logs des autres threads
+  (statistiques, événements relayés des processus de recherche) ne sont ni
+  paginés ni retenus : le verrou d'affichage est relâché pendant l'attente
+  d'une touche, l'affichage asynchrone reste vivant et le serveur continue de
+  servir ses clients pendant qu'un opérateur lit une page.
+- La pagination est **automatiquement inactive** hors terminal (console pilotée
+  par pipe ou redirection — les scripts d'intégration ne voient jamais de
+  pause), en fallback cooked, et sur un écran de moins de ~4 lignes utiles.
+- En ncurses la question ne se pose pas : le pad + `PgUp`/`PgDn`/molette
+  permettent de relire la sortie a posteriori.
+
 ## Ligne de saisie protégée des logs asynchrones (mode ANSI)
 
 Pendant la frappe, les logs asynchrones (thread de statistiques, événements
@@ -222,8 +252,15 @@ Touches de navigation dans l'historique :
 |---|---|
 | `PgUp` / `PgDn` | Remonte / descend d'une page |
 | `Home` / `End` | Tout en haut / tout en bas |
+| Molette souris | Remonte / descend de 3 lignes (descendre jusqu'en bas réactive le suivi automatique) |
 | `Entrée` | Réactive le suivi automatique du bas |
 | `Ctrl-L` | Efface la vue (comme `clear`) — l'historique du pad reste accessible via `PgUp` |
+
+> Souris activée oblige : le terminal intercepte les clics, la **sélection de
+> texte** se fait alors avec `Maj` enfoncé (comportement standard des
+> applications plein écran). La profondeur d'historique du pad (3000 lignes par
+> défaut) est surchargeable à la compilation :
+> `make NCURSES=1 CPPFLAGS="-DOUTPUT_PAD_LINES=10000"`.
 
 Quand on n'est pas en bas, le titre de la zone Events affiche le nombre de lignes
 cachées (`[+N sous la vue — PgDn/End pour revenir]`).

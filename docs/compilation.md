@@ -50,6 +50,7 @@ Ces `#define` sont gardés par `#ifndef`, donc surchargeables sans toucher la so
 ```sh
 make CPPFLAGS="-DETERN_PARTS=16"        # plateau 4×4 (c'est ainsi que la CI le compile)
 make CPPFLAGS="-DFORWARD_CHECK_K=0"     # forward-checking retiré
+make NCURSES=1 CPPFLAGS="-DOUTPUT_PAD_LINES=10000"  # profondeur d'historique du pad ncurses (défaut 3000)
 ```
 
 Changer `ETERN_PARTS` nécessite un rebuild complet (`make clean` d'abord).

@@ -64,8 +64,15 @@
 #define STATUS_MSG_MAX   512
 
 /* Taille du pad de sortie : nombre maximum de lignes d'historique
-   conservées. ~3000 lignes × ~200 cols × ~8 octets ≈ 5 Mo. */
+   conservées. ~3000 lignes × ~200 cols × ~8 octets ≈ 5 Mo. Surchargeable à la
+   compilation (make NCURSES=1 CPPFLAGS="-DOUTPUT_PAD_LINES=10000"), même
+   convention que ETERN_PARTS / FORWARD_CHECK_K. */
+#ifndef OUTPUT_PAD_LINES
 #define OUTPUT_PAD_LINES 3000
+#endif
+
+/* Pas de défilement de la molette souris (lignes par cran). */
+#define MOUSE_WHEEL_STEP 3
 
 /* Sérialise toutes les écritures ncurses : la lib n'est pas thread-safe. */
 static pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -618,6 +625,16 @@ void status_zone_init(void)
     intrflush(stdscr, FALSE);
     keypad(stdscr, TRUE);
     curs_set(1);
+    /* Molette souris : scroll du pad de sortie (BUTTON4 = molette haut ;
+       BUTTON5 = molette bas, absent des très vieux ncurses ABI 5 → gardé par
+       #ifdef). NB : activer la souris fait intercepter les clics par le
+       terminal — la sélection de texte demande alors Maj+clic (comportement
+       standard des applications plein écran avec souris). */
+#ifdef BUTTON5_PRESSED
+    mousemask(BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
+#else
+    mousemask(BUTTON4_PRESSED, NULL);
+#endif
     nc_setup_layout_locked();
     nc_active = 1;
     nc_draw_status_locked();
@@ -686,6 +703,16 @@ void console_input_render(const char *prompt, const char *line)
 }
 
 void console_input_end(void)
+{
+}
+
+/* Pagination « --Suite-- » : spécifique au mode ANSI (voir logger.h). En
+   ncurses le pad + PgUp/PgDn/molette couvrent déjà le besoin — no-ops. */
+void console_pager_begin(void)
+{
+}
+
+void console_pager_end(void)
 {
 }
 
@@ -797,6 +824,32 @@ void nc_console_loop(void)
         if (ch == 12) {                     /* Ctrl-L : efface la vue (l'historique
                                                du pad reste accessible via PgUp) */
             clear_console();
+            continue;
+        }
+
+        if (ch == KEY_MOUSE) {              /* molette : scroll du pad          */
+            MEVENT ev;
+            if (getmouse(&ev) == OK) {
+                pthread_mutex_lock(&output_mutex);
+                if (ev.bstate & BUTTON4_PRESSED) {          /* molette haut  */
+                    pad_view_top = (pad_view_top >= MOUSE_WHEEL_STEP)
+                                 ? (pad_view_top - MOUSE_WHEEL_STEP) : 0;
+                    auto_stick = 0;
+                }
+#ifdef BUTTON5_PRESSED
+                else if (ev.bstate & BUTTON5_PRESSED) {     /* molette bas   */
+                    int max_top = pad_max_view_top(output_screen_h);
+                    pad_view_top += MOUSE_WHEEL_STEP;
+                    if (pad_view_top >= max_top) {
+                        pad_view_top = max_top;
+                        auto_stick = 1;
+                    }
+                }
+#endif
+                nc_refresh_pad_locked();
+                nc_draw_events_locked();
+                pthread_mutex_unlock(&output_mutex);
+            }
             continue;
         }
 

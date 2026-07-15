@@ -24,6 +24,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 
@@ -153,6 +154,84 @@ TEST console_raw_mode_over_pty_reads_command(void)
 }
 
 /*
+ * Pager « --Suite-- » sur un VRAI terminal : la pagination ne s'active que si
+ * stdin ET stdout sont des TTY et que la hauteur est connue — on branche donc
+ * les deux sur l'esclave d'un PTY (12 rangées via TIOCSWINSZ → page de 4
+ * lignes une fois la zone Events réservée). La sortie de `help` dépasse
+ * largement une page : la première pause « --Suite-- » doit apparaître, le
+ * « q » envoyé ensuite déroule le reste sans pause, puis `exit` termine
+ * proprement. Si le pager ne s'engage pas, « q » devient une commande inconnue
+ * (inoffensive) et le test échoue sur l'absence du marqueur --Suite--.
+ */
+TEST console_pager_paginates_long_output_over_pty(void)
+{
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    ASSERT(master >= 0);
+    ASSERT_EQ_FMT(0, grantpt(master), "%d");
+    ASSERT_EQ_FMT(0, unlockpt(master), "%d");
+    char *slave_name = ptsname(master);
+    ASSERT(slave_name != NULL);
+    int slave = open(slave_name, O_RDWR | O_NOCTTY);
+    ASSERT(slave >= 0);
+
+    /* Petit terminal : 12 rangées -> zone Events active (12 > 8) et page de
+       12 - 7 (zone) - 1 (invite --Suite--) = 4 lignes (>= 3, le minimum sous
+       lequel la pagination se désactive) -> pagination certaine sur `help`. */
+    struct winsize ws = { .ws_row = 12, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
+    ioctl(slave, TIOCSWINSZ, &ws);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Enfant : stdin ET stdout = esclave PTY (pager actif), stderr muet. */
+        close(master);
+        dup2(slave, 0);
+        dup2(slave, 1);
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0) { dup2(dn, 2); if (dn > 2) close(dn); }
+        if (slave > 2) close(slave);
+        server = 1;        /* exit_interpreter -> exit(EXIT_SUCCESS) direct */
+        alarm(10);         /* garde-fou : pause --Suite-- jamais servie = blocage */
+        console(NULL);
+        _exit(123);        /* non atteint (sortie via la commande exit) */
+    }
+
+    ASSERT(pid > 0);
+    close(slave);
+
+    /* "help\n" -> sortie longue -> pause ; "q" -> déroule le reste ; "\n" ->
+       commande vide (inoffensive) ; "exit\n" -> sortie propre. */
+    const char seq[] = "help\nq\nexit\n";
+    ssize_t w = write(master, seq, sizeof(seq) - 1);
+    ASSERT_EQ_FMT((int)(sizeof(seq) - 1), (int)w, "%d");
+
+    /* Draine l'affichage jusqu'à EOF/EIO (mort de l'enfant) en gardant les
+       64 premiers Ko pour l'assertion. */
+    static char out[65536];
+    size_t used = 0;
+    char drainbuf[4096];
+    ssize_t n;
+    while ((n = read(master, drainbuf, sizeof drainbuf)) > 0) {
+        if (used < sizeof out - 1) {
+            size_t keep = (size_t)n;
+            if (keep > sizeof out - 1 - used) keep = sizeof out - 1 - used;
+            memcpy(out + used, drainbuf, keep);
+            used += keep;
+        }
+    }
+    out[used] = '\0';
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    close(master);
+
+    ASSERT(WIFEXITED(status));               /* sortie propre (pas tué par SIGALRM) */
+    ASSERT_EQ_FMT(0, WEXITSTATUS(status), "%d");
+    ASSERT(strstr(out, "--Suite--") != NULL);   /* la pause du pager a eu lieu   */
+    ASSERT(strstr(out, "clientsCommand") != NULL); /* fin de l'aide déroulée par q */
+    PASS();
+}
+
+/*
  * run_console() démarre un thread pthread DÉTACHÉ (pas un fork) : rien à
  * flusher côté couverture de code, pas de fork() à gérer — on redirige juste
  * le stdin DU PROCESS de test courant vers /dev/null pour que le thread
@@ -197,6 +276,7 @@ SUITE(console_suite)
     RUN_TEST(console_reads_exit_command_and_exits);
     RUN_TEST(console_returns_on_eof_without_spinning);
     RUN_TEST(console_raw_mode_over_pty_reads_command);
+    RUN_TEST(console_pager_paginates_long_output_over_pty);
     RUN_TEST(run_console_thread_returns_on_eof);
 
     /* Nettoyage : supprime le fichier d'historique éventuellement écrit dans le

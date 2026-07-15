@@ -57,6 +57,15 @@ static char input_snapshot[INPUT_SNAPSHOT_MAX];
 
 static void redraw_event_zone_locked(void); /* appelant détient output_mutex    */
 
+/* Pagination de la sortie des commandes console (voir console_pager_begin,
+   logger.h). L'état n'est modifié que par le thread console (propriétaire) et
+   lu sous output_mutex par les écrivains. */
+static int       pager_engaged = 0;  /* 1 entre pager_begin et pager_end        */
+static pthread_t pager_owner;        /* seul ce thread est paginé               */
+static int       pager_page = 0;     /* lignes par page                         */
+static int       pager_budget = 0;   /* lignes restantes avant la pause         */
+static int       pager_snooze = 0;   /* 1 : « q » — dérouler le reste sans pause */
+
 /**
  * @brief Écrit un bloc de log sur `stream` en préservant la ligne de saisie.
  *
@@ -80,6 +89,75 @@ static void write_stream_locked(FILE *stream, const char *buf)
         fputs(input_snapshot, stdout);
         fflush(stdout);
     }
+}
+
+/**
+ * @brief Pause de pagination : affiche « --Suite-- », attend une touche.
+ *
+ * Le verrou `output_mutex` (détenu à l'appel) est RELÂCHÉ pendant l'attente de
+ * la touche : les logs des autres threads continuent de s'afficher, seule la
+ * commande paginée est suspendue. Espace (ou toute autre touche) : page
+ * suivante ; entrée : une ligne ; q ou fin d'entrée : dérouler le reste sans
+ * pause (rien n'est supprimé). Rend la main avec le verrou repris.
+ */
+static void pager_wait_locked(void)
+{
+    fputs("\033[7m--Suite-- (espace : page, entrée : ligne, q : dérouler)\033[0m", stdout);
+    fflush(stdout);
+    pthread_mutex_unlock(&output_mutex);
+    int c = fgetc(stdin);
+    pthread_mutex_lock(&output_mutex);
+    fputs("\r\033[K", stdout);
+    fflush(stdout);
+    if (c == 'q' || c == 'Q' || c == EOF) {
+        pager_snooze = 1;
+    } else if (c == '\n' || c == '\r') {
+        pager_budget = 1;
+    } else {
+        pager_budget = pager_page;
+    }
+}
+
+/**
+ * @brief Écrit `buf` ligne par ligne en marquant une pause à chaque page pleine.
+ *        Appelant sous `output_mutex` (relâché/repris pendant les pauses).
+ */
+static void write_paged_locked(FILE *stream, const char *buf)
+{
+    const char *p = buf;
+    while (*p != '\0') {
+        if (pager_snooze) {
+            fputs(p, stream);   /* « q » : le reste défile sans pause         */
+            return;
+        }
+        const char *nl = strchr(p, '\n');
+        size_t chunk = (nl != NULL) ? (size_t)(nl - p + 1) : strlen(p);
+        fwrite(p, 1, chunk, stream);
+        p += chunk;
+        if (nl != NULL && --pager_budget <= 0) {
+            if (stream != stdout) fflush(stream);
+            pager_wait_locked();
+        }
+    }
+}
+
+/**
+ * @brief Point d'entrée commun des écritures de log : prend le verrou et route
+ *        vers l'écriture paginée (thread console pendant une commande) ou
+ *        l'écriture directe protégeant la ligne de saisie.
+ */
+static void write_output(FILE *stream, const char *buf, int do_flush)
+{
+    pthread_mutex_lock(&output_mutex);
+    if (pager_engaged && pthread_equal(pager_owner, pthread_self())) {
+        write_paged_locked(stream, buf);
+    } else {
+        write_stream_locked(stream, buf);
+    }
+    if (do_flush) {
+        fflush(stream);
+    }
+    pthread_mutex_unlock(&output_mutex);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -154,10 +232,7 @@ void log_errno(const char *format, ...)
         log_send_to_parent(IPC_MSG_LOG_ERROR, buf);
         return;
     }
-    pthread_mutex_lock(&output_mutex);
-    write_stream_locked(stderr, buf);
-    fflush(stderr);
-    pthread_mutex_unlock(&output_mutex);
+    write_output(stderr, buf, 1);
 }
 
 /**
@@ -175,10 +250,7 @@ void log_error(const char *format, ...)
         log_send_to_parent(IPC_MSG_LOG_ERROR, buf);
         return;
     }
-    pthread_mutex_lock(&output_mutex);
-    write_stream_locked(stderr, buf);
-    fflush(stderr);
-    pthread_mutex_unlock(&output_mutex);
+    write_output(stderr, buf, 1);
 }
 
 /**
@@ -215,9 +287,7 @@ void log_info(const char *format, ...)
         log_send_to_parent(IPC_MSG_LOG_INFO, buf);
         return;
     }
-    pthread_mutex_lock(&output_mutex);
-    write_stream_locked(stdout, buf);
-    pthread_mutex_unlock(&output_mutex);
+    write_output(stdout, buf, 0);
 }
 
 /**
@@ -235,9 +305,7 @@ void log_debug(const char *format, ...)
         log_send_to_parent(IPC_MSG_LOG_DEBUG, buf);
         return;
     }
-    pthread_mutex_lock(&output_mutex);
-    write_stream_locked(stdout, buf);
-    pthread_mutex_unlock(&output_mutex);
+    write_output(stdout, buf, 0);
 }
 
 /**
@@ -255,10 +323,7 @@ void log_console(const char *format, ...)
         log_send_to_parent(IPC_MSG_LOG_CONSOLE, buf);
         return;
     }
-    pthread_mutex_lock(&output_mutex);
-    write_stream_locked(stdout, buf);
-    fflush(stdout);
-    pthread_mutex_unlock(&output_mutex);
+    write_output(stdout, buf, 1);
 }
 
 /** @brief Vide le tampon de sortie standard (pour `log_console`). */
@@ -433,6 +498,37 @@ void console_input_end(void)
         fputs("\n", stdout);
         fflush(stdout);
     }
+    pthread_mutex_unlock(&output_mutex);
+}
+
+void console_pager_begin(void)
+{
+    /* La pause lit une touche sur stdin et l'affichage cible un écran : les
+       deux doivent être des terminaux (sinon : sortie redirigée, tests,
+       console pilotée par pipe — aucune pagination). */
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        return;
+    }
+    int rows = query_terminal_rows();
+    /* Hauteur utile : la région de défilement si la zone fixe est installée,
+       tout l'écran sinon ; moins 1 ligne pour l'invite « --Suite-- ». */
+    int page = (zone_active ? zone_rows - ZONE_RESERVED : rows) - 1;
+    if (page < 3) {
+        return;         /* écran trop petit : pagination plus gênante qu'utile */
+    }
+    pthread_mutex_lock(&output_mutex);
+    pager_engaged = 1;
+    pager_owner   = pthread_self();
+    pager_page    = page;
+    pager_budget  = page;
+    pager_snooze  = 0;
+    pthread_mutex_unlock(&output_mutex);
+}
+
+void console_pager_end(void)
+{
+    pthread_mutex_lock(&output_mutex);
+    pager_engaged = 0;
     pthread_mutex_unlock(&output_mutex);
 }
 

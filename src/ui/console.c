@@ -274,10 +274,11 @@ static char *getcmdline_raw(void)
  * @return Chaîne malloc'ée (à libérer par l'appelant), ou NULL sur fin
  *         d'entrée / erreur d'alloc.
  */
+static int raw_attempted = 0;
+static int raw_ok = 0;
+
 static char *getcmdline(void)
 {
-    static int raw_attempted = 0;
-    static int raw_ok = 0;
     if (!raw_attempted) {
         raw_attempted = 1;
         raw_ok = (try_enable_raw_mode() == 0);
@@ -324,7 +325,16 @@ void * console(void *param)
                donc de la boucle de saisie et le thread console s'arrête. */
             break;
         }
+        /* Pagination de la sortie de la commande (mode raw seulement : la
+           pause « --Suite-- » lit une touche caractère par caractère). Les
+           logs des autres threads ne sont ni paginés ni retenus. */
+        if (raw_ok) {
+            console_pager_begin();
+        }
         do_command_line(buffer);
+        if (raw_ok) {
+            console_pager_end();
+        }
         free(buffer);
     }
     /* Sortie propre par fin de stdin (Ctrl-D, pipe fermé) : le thread s'arrête
