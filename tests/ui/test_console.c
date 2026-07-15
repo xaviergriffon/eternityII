@@ -134,10 +134,12 @@ TEST console_raw_mode_over_pty_reads_command(void)
          "\033[A"        flèche ↑  -> rappelle "help" (ESC '[' 'A' + historique)
          "\033[B"        flèche ↓  -> revient au brouillon vide (ESC '[' 'B')
          "zz\177\177"    deux frappes puis deux backspaces (0x7f) -> ligne vidée
+         "\014"          Ctrl-L    -> clear_console (no-op : stdout non-tty)
+                         + redessin de la ligne de saisie en cours
          "exit\n"        commande finale -> exit(EXIT_SUCCESS) en mode serveur
        L'entrée est entièrement bufferisée par stdio dès la première lecture, donc
        le déroulé est déterministe quel que soit l'ordonnancement. */
-    const char seq[] = "help\n\033[A\033[Bzz\177\177exit\n";
+    const char seq[] = "help\n\033[A\033[Bzz\177\177\014exit\n";
     ssize_t w = write(master, seq, sizeof(seq) - 1);
     ASSERT_EQ_FMT((int)(sizeof(seq) - 1), (int)w, "%d");
 

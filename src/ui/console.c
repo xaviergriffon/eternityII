@@ -132,10 +132,20 @@ static char *getcmdline_cooked(void)
     return linep;
 }
 
+/* Prompt de la console interactive (partagé entre le rendu initial et les
+   redessins de ligne via console_input_render). */
+#define CONSOLE_PROMPT "commande :"
+
 /**
- * @brief Lecture en mode raw : on lit caractère par caractère, on écho
- *        manuellement, on gère le backspace et les flèches ↑ / ↓ pour
+ * @brief Lecture en mode raw : on lit caractère par caractère, on gère le
+ *        backspace, Ctrl-L (effacement d'écran) et les flèches ↑ / ↓ pour
  *        rappeler les commandes précédentes.
+ *
+ * La ligne de saisie n'est plus échoée caractère par caractère : chaque frappe
+ * repasse par console_input_render (logger.c), qui publie la ligne courante
+ * auprès du logger. Les logs asynchrones (thread de statistiques, événements
+ * relayés des forks) peuvent ainsi effacer la ligne, s'écrire, puis la
+ * redessiner en dessous — la saisie en cours n'est plus corrompue.
  */
 static char *getcmdline_raw(void)
 {
@@ -150,19 +160,21 @@ static char *getcmdline_raw(void)
 
     buf[0] = '\0';
     draft[0] = '\0';
+    console_input_render(CONSOLE_PROMPT, buf);
 
     while (1) {
         int c = fgetc(stdin);
         if (c == EOF) {
             /* Fin d'entrée (Ctrl-D sur un TTY, ou stdin refermé) : on renvoie
                NULL pour que la console s'arrête proprement, au lieu de boucler
-               sur une saisie vide. */
+               sur une saisie vide. La protection de la ligne est levée. */
+            console_input_end();
             return NULL;
         }
 
         if (c == '\n' || c == '\r') {
             buf[len] = '\0';
-            log_console("\n");          /* mimique l'écho terminal de Entrée  */
+            console_input_end();        /* écho de Entrée + fin de protection */
             history_add(buf);
             char *r = malloc(len + 1);
             if (r) memcpy(r, buf, len + 1);
@@ -175,8 +187,16 @@ static char *getcmdline_raw(void)
             if (len > 0) {
                 len--;
                 buf[len] = '\0';
-                log_console("\b \b"); /* recule, efface, recule à nouveau     */
+                console_input_render(CONSOLE_PROMPT, buf);
             }
+            continue;
+        }
+
+        /* Ctrl-L : efface l'écran (le contenu part dans le scrollback natif)
+           puis redessine la ligne de saisie en cours. */
+        if (c == 0x0c) {
+            clear_console();
+            console_input_render(CONSOLE_PROMPT, buf);
             continue;
         }
 
@@ -205,8 +225,7 @@ static char *getcmdline_raw(void)
                 memcpy(buf, h, hlen);
                 buf[hlen] = '\0';
                 len = hlen;
-                /* Redessine la ligne entière (prompt + contenu). */
-                log_console("\r\033[Kcommande :%s", buf);
+                console_input_render(CONSOLE_PROMPT, buf);
                 continue;
             }
 
@@ -226,7 +245,7 @@ static char *getcmdline_raw(void)
                     buf[hlen] = '\0';
                     len = hlen;
                 }
-                log_console("\r\033[Kcommande :%s", buf);
+                console_input_render(CONSOLE_PROMPT, buf);
                 continue;
             }
 
@@ -234,11 +253,11 @@ static char *getcmdline_raw(void)
             continue;
         }
 
-        /* Caractère imprimable : ajout au tampon et écho. */
+        /* Caractère imprimable : ajout au tampon et redessin de la ligne. */
         if (c >= 32 && c < 127 && len + 1 < BUFSZ) {
             buf[len++] = (char)c;
             buf[len] = '\0';
-            log_console("%c", c);
+            console_input_render(CONSOLE_PROMPT, buf);
         }
         /* Tout autre caractère de contrôle est ignoré. */
     }
@@ -248,7 +267,12 @@ static char *getcmdline_raw(void)
  * @brief Lit une commande depuis stdin avec gestion des flèches ↑/↓ pour
  *        l'historique (en mode raw si possible, sinon fallback ligne-par-ligne).
  *
- * @return Chaîne malloc'ée (à libérer par l'appelant), ou NULL sur erreur d'alloc.
+ * Le prompt est géré ici : le chemin raw affiche et met à jour la ligne de
+ * saisie via console_input_render ; le fallback cooked garde l'affichage
+ * historique (prompt avant lecture, saut de ligne après).
+ *
+ * @return Chaîne malloc'ée (à libérer par l'appelant), ou NULL sur fin
+ *         d'entrée / erreur d'alloc.
  */
 static char *getcmdline(void)
 {
@@ -258,7 +282,13 @@ static char *getcmdline(void)
         raw_attempted = 1;
         raw_ok = (try_enable_raw_mode() == 0);
     }
-    return raw_ok ? getcmdline_raw() : getcmdline_cooked();
+    if (raw_ok) {
+        return getcmdline_raw();
+    }
+    log_console(CONSOLE_PROMPT);
+    char *line = getcmdline_cooked();
+    log_console("\n");
+    return line;
 }
 #endif /* !USE_NCURSES */
 
@@ -284,9 +314,7 @@ void * console(void *param)
 #else
     for (;;)
     {
-        log_console("commande :");
         char *buffer = getcmdline();
-        log_console("\n");
         if (buffer == NULL)
         {
             /* Fin de l'entrée standard (stdin épuisé/fermé : /dev/null, pipe,

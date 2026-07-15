@@ -38,6 +38,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 |---|---|
 | `help [commande\|catégorie]` | Affiche l'aide générale, le détail d'une commande, ou une seule catégorie (alias : `?`) |
 | `exit` | Arrête proprement le programme (alias : `quit`) |
+| `clear` | Efface l'écran sans perdre le contenu — poussé dans le scrollback natif en ANSI, accessible via `PgUp` en ncurses (alias : `cls` ; raccourci : `Ctrl-L`) |
 
 ### Recherche & régulation
 
@@ -76,7 +77,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 
 | Commande | Description |
 |---|---|
-| `check` | Affiche le dernier état analysé |
+| `check` | Affiche le dernier rapport de statistiques (n'efface plus l'écran — utiliser `clear`) |
 | `print` | Affiche toutes les files au format JSON |
 | `printFile N` | Affiche le contenu de la file numéro `N` |
 | `printAnalysed` | Affiche les possibilités en cours d'analyse |
@@ -144,13 +145,27 @@ dans la zone), ce qui permet de garder une trace persistante hors session :
 tail -f events.log
 ```
 
-## Réaffichage en place de `check`
+## Effacement de l'écran : la commande `clear` (Ctrl-L)
 
-La commande `check` réécrit son rapport au même endroit au lieu de défiler, pour
-éviter l'effet « scroll continu » quand on la tape plusieurs fois. La région de
-défilement ANSI commence en haut de l'écran, donc les sorties longues (par ex.
-`statistic`, `print`) restent capturées par le **scrollback natif du terminal**
-(molette, Cmd+↑).
+La politique d'affichage est uniforme : **aucune commande n'efface l'écran
+implicitement** — toutes les sorties (y compris `check`) défilent normalement.
+L'effacement est explicite, via la commande `clear` (alias `cls`) ou le raccourci
+`Ctrl-L`, et **ne détruit jamais le contenu** :
+
+- **Mode ANSI** : le contenu visible est poussé dans le **scrollback natif du
+  terminal** (molette, Cmd+↑), exactement comme les lignes qui défilent
+  naturellement — la région de défilement ANSI commence en haut de l'écran, donc
+  les sorties longues (`statistic`, `print`, …) y restent aussi capturées.
+- **Mode ncurses** : la vue devient blanche mais le pad de sortie est conservé —
+  `PgUp`/`Home` permettent de revenir sur tout l'historique (3000 lignes).
+
+## Ligne de saisie protégée des logs asynchrones (mode ANSI)
+
+Pendant la frappe, les logs asynchrones (thread de statistiques, événements
+relayés des processus de recherche) n'écrasent plus la ligne de saisie : chaque
+log terminé par un saut de ligne efface la ligne en cours, s'affiche, puis la
+ligne `commande : …` est **redessinée en dessous** avec la saisie intacte. (En
+ncurses le problème ne se posait pas : la saisie vit dans une fenêtre dédiée.)
 
 ## Historique des commandes (flèches ↑ / ↓)
 
@@ -163,6 +178,7 @@ touches ↑ et ↓ rappellent les commandes précédentes (comme dans bash) :
 | ↓ | Avance vers les commandes plus récentes ; revient à la saisie en cours en bas |
 | Entrée | Exécute la commande et l'ajoute à l'historique (dédoublonnage si identique à la précédente) |
 | Backspace | Efface le dernier caractère |
+| Ctrl-L | Efface l'écran (comme la commande `clear`) et redessine la saisie en cours |
 
 L'historique fonctionne dans les deux builds. En ANSI, le terminal est basculé en
 mode non-canonique (`tcsetattr`) le temps de la session pour permettre l'interception
@@ -207,6 +223,7 @@ Touches de navigation dans l'historique :
 | `PgUp` / `PgDn` | Remonte / descend d'une page |
 | `Home` / `End` | Tout en haut / tout en bas |
 | `Entrée` | Réactive le suivi automatique du bas |
+| `Ctrl-L` | Efface la vue (comme `clear`) — l'historique du pad reste accessible via `PgUp` |
 
 Quand on n'est pas en bas, le titre de la zone Events affiche le nombre de lignes
 cachées (`[+N sous la vue — PgDn/End pour revenir]`).

@@ -295,6 +295,74 @@ TEST log_routes_each_type_to_parent(void)
 }
 
 /*
+ * Ligne de saisie protégée (console_input_render / console_input_end) :
+ * - render publie et affiche la ligne (efface la ligne courante puis réécrit
+ *   prompt + saisie) ;
+ * - tant que la saisie est active, un log terminé par '\n' efface la ligne,
+ *   s'écrit, puis la redessine en dessous ;
+ * - un log SANS '\n' final (bloc partiel) ne redessine pas la ligne ;
+ * - end imprime le saut de ligne et lève la protection (les logs suivants
+ *   redeviennent bruts, sans séquence d'effacement).
+ */
+TEST console_input_line_survives_async_logs(void)
+{
+    char out[512];
+
+    CAPTURE(1, stdout, console_input_render("commande :", "che"), out);
+    ASSERT(strstr(out, "\r\033[K") != NULL);
+    ASSERT(strstr(out, "commande :che") != NULL);
+
+    /* Log complet (avec '\n') : effacement, log, puis redessin de la saisie. */
+    CAPTURE(1, stdout, log_info("stat: %d coups/s\n", 42), out);
+    char *erase = strstr(out, "\r\033[K");
+    ASSERT(erase != NULL);
+    char *text = strstr(out, "stat: 42 coups/s\n");
+    ASSERT(text != NULL);
+    char *redraw = strstr(out, "commande :che");
+    ASSERT(redraw != NULL);
+    ASSERT(erase < text);            /* effacement AVANT le log            */
+    ASSERT(text < redraw);           /* redessin APRÈS le log              */
+
+    /* Bloc partiel (sans '\n') : pas de redessin de la saisie. */
+    CAPTURE(1, stdout, log_info("partiel"), out);
+    ASSERT(strstr(out, "partiel") != NULL);
+    ASSERT(strstr(out, "commande :che") == NULL);
+
+    /* Fin de saisie : saut de ligne, puis plus aucune protection. */
+    CAPTURE(1, stdout, console_input_end(), out);
+    ASSERT(strstr(out, "\n") != NULL);
+    CAPTURE(1, stdout, log_info("apres\n"), out);
+    ASSERT(strstr(out, "apres\n") != NULL);
+    ASSERT(strstr(out, "\r\033[K") == NULL);
+    ASSERT(strstr(out, "commande :") == NULL);
+    PASS();
+}
+
+/* console_input_end est idempotent : sans saisie active, aucune sortie. */
+TEST console_input_end_without_render_is_noop(void)
+{
+    char out[64];
+    CAPTURE(1, stdout, console_input_end(), out);
+    ASSERT_EQ_FMT(0, (int)strlen(out), "%d");
+    PASS();
+}
+
+/* log_error pendant une saisie active : le message part bien sur stderr
+   (l'effacement et le redessin, eux, vont sur stdout). */
+TEST log_error_during_input_goes_to_stderr(void)
+{
+    char out[256];
+    char devnull[256];
+    /* Active la saisie en jetant l'affichage stdout de render. */
+    CAPTURE(1, stdout, console_input_render("commande :", "x"), devnull);
+    CAPTURE(2, stderr, log_error("err-%d\n", 3), out);
+    /* Lève la protection avant les assertions (état global partagé). */
+    CAPTURE(1, stdout, console_input_end(), devnull);
+    ASSERT(strstr(out, "err-3") != NULL);
+    PASS();
+}
+
+/*
  * Cycle de vie de la zone fixe ANSI sur un VRAI terminal (pseudo-terminal).
  * Les fonctions de zone (status_zone_init/teardown, clear_console, et le thread
  * event_zone_loop + query_terminal_rows / redraw_event_zone_locked) sont gardées
@@ -364,5 +432,8 @@ SUITE(logger_suite)
     RUN_TEST(flush_and_zone_helpers_run);
     RUN_TEST(log_routes_to_parent_over_udp_socket);
     RUN_TEST(log_routes_each_type_to_parent);
+    RUN_TEST(console_input_line_survives_async_logs);
+    RUN_TEST(console_input_end_without_render_is_noop);
+    RUN_TEST(log_error_during_input_goes_to_stderr);
     RUN_TEST(status_zone_lifecycle_over_pty);
 }

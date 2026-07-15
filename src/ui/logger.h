@@ -58,8 +58,32 @@ void flush_debug(void);
 void flush_error(void);
 /** @brief Vide le tampon de sortie standard (pour `log_info`). */
 void flush_info(void);
-/** @brief Efface le contenu affiché par la console interactive. */
+/**
+ * @brief Efface l'écran de la console interactive sans détruire l'historique.
+ *
+ * En mode ANSI, le contenu visible est poussé dans le scrollback natif du
+ * terminal (molette / Cmd+↑) au lieu d'être effacé. En mode ncurses, la vue
+ * devient blanche mais le pad de sortie est conservé (PgUp pour y revenir).
+ * Appelée par la commande `clear` et le raccourci Ctrl-L.
+ */
 void clear_console(void);
+
+/**
+ * @brief Publie la ligne de saisie interactive courante (prompt + saisie) et la redessine.
+ *
+ * Mode ANSI uniquement (no-op en ncurses, qui a sa propre fenêtre de saisie).
+ * Tant qu'une saisie est active, chaque écriture de log terminée par un saut de
+ * ligne efface la ligne de saisie, écrit le log, puis la redessine en dessous —
+ * les logs asynchrones (thread de statistiques, événements relayés des forks)
+ * ne corrompent plus la ligne en cours de frappe.
+ */
+void console_input_render(const char *prompt, const char *line);
+
+/**
+ * @brief Termine la saisie interactive (Entrée) : imprime le saut de ligne et
+ *        cesse de protéger/redessiner la ligne de saisie.
+ */
+void console_input_end(void);
 /** @brief Installe la zone d'affichage fixe (région de défilement ANSI). À appeler depuis le thread console. */
 void status_zone_init(void);
 /** @brief Restaure le terminal (région de défilement complète). Enregistré via atexit par status_zone_init. */

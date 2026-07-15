@@ -18,7 +18,7 @@
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
-#define NB_COMMANDS 42
+#define NB_COMMANDS 44
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -107,6 +107,7 @@ int printanalysed_interpreter(void);
 int restockanalysed_interpreter(void);
 int min_interpreter(void);
 int help_interpreter(void);
+int clear_interpreter(void);
 int statistic_interpreter(void);
 int pause_interpreter(void);
 int resume_interpreter(void);
@@ -128,6 +129,11 @@ static command_description commands[NB_COMMANDS] = {
     {"exit", exit_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
      "arrête proprement le programme",
      "En mode client, attend la fin de tous les processus de recherche avant de quitter.", NULL},
+    {"clear", clear_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
+     "efface l'écran de la console (raccourci : Ctrl-L)",
+     "Aucune autre commande n'efface l'écran : l'affichage ne défile que par les sorties.\n"
+     "Le contenu n'est pas perdu : en mode ANSI il part dans le scrollback natif du\n"
+     "terminal (molette / Cmd+↑), en mode ncurses il reste accessible via PgUp.", NULL},
 
     {"pause", pause_interpreter, 1, CMD_CAT_SEARCH, 0, NULL,
      "met la recherche en pause administrative (locale + clients connectés)",
@@ -183,7 +189,7 @@ static command_description commands[NB_COMMANDS] = {
      "importe une possibilité depuis une chaîne JSON", NULL, NULL},
 
     {"check", check_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
-     "réaffiche le dernier rapport de statistiques en place", NULL, NULL},
+     "affiche le dernier rapport de statistiques", NULL, NULL},
     {"print", print_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
      "affiche l'état du data manager (files, tailles)", NULL, NULL},
     {"printFile", printfile_interpreter, 0, CMD_CAT_DIAG, 0, "printFile <n>",
@@ -218,6 +224,7 @@ static command_description commands[NB_COMMANDS] = {
        d'alias, la correspondance ignorant déjà la casse. */
     {"?", NULL, 0, CMD_CAT_GENERAL, 0, NULL, NULL, NULL, "help"},
     {"quit", NULL, 0, CMD_CAT_GENERAL, 0, NULL, NULL, NULL, "exit"},
+    {"cls", NULL, 0, CMD_CAT_GENERAL, 0, NULL, NULL, NULL, "clear"},
     {"stats", NULL, 0, CMD_CAT_DIAG, 0, NULL, NULL, NULL, "statistic"},
     {"sorta", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortAsc"},
     {"sortd", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortDesc"},
@@ -295,7 +302,7 @@ int limit_interpreter(void) {
 }
 
 /**
- * @brief Interpréteur de `check` : réaffiche le rapport de statistiques `lastcheck` en place (sans défilement).
+ * @brief Interpréteur de `check` : affiche le dernier rapport de statistiques `lastcheck`.
  *
  * `lastcheck` est republié toutes les 10 secondes par un thread de
  * statistiques (`check_server`/`check_client_threads`, via
@@ -305,15 +312,23 @@ int limit_interpreter(void) {
  * une fois le verrou relâché : sans cela, une lecture concurrente au swap
  * pointeur/free pourrait déréférencer un buffer déjà libéré (use-after-free)
  * ou encore en cours de remplissage.
+ *
+ * N'efface plus l'écran : l'effacement est réservé à la commande `clear`
+ * (aucune commande ne doit effacer implicitement — politique d'affichage).
  */
 int check_interpreter(void) {
     pthread_mutex_lock(&lastcheck_mutex);
     char *report_copy = lastcheck != NULL ? strdup(lastcheck) : NULL;
     pthread_mutex_unlock(&lastcheck_mutex);
 
-    clear_console();
     log_info("%s\n", report_copy != NULL ? report_copy : "");
     free(report_copy);
+    return 0;
+}
+
+/** @brief Interpréteur de `clear` (alias `cls`, raccourci Ctrl-L) : efface l'écran, le contenu reste dans le scrollback (ANSI) ou le pad (ncurses). */
+int clear_interpreter(void) {
+    clear_console();
     return 0;
 }
 
