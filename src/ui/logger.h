@@ -84,6 +84,23 @@ void console_input_render(const char *prompt, const char *line);
  *        cesse de protéger/redessiner la ligne de saisie.
  */
 void console_input_end(void);
+
+/**
+ * @brief Active la pagination de la sortie pour la commande console qui démarre.
+ *
+ * Mode ANSI uniquement (no-op en ncurses, où le pad + PgUp couvrent le besoin).
+ * À appeler depuis le thread console juste avant do_command_line : les écritures
+ * de CE thread marquent une pause « --Suite-- » chaque fois qu'une page d'écran
+ * est remplie (espace : page suivante, entrée : ligne suivante, q : dérouler la
+ * suite sans pause — rien n'est jamais supprimé). Les logs des AUTRES threads ne
+ * sont ni paginés ni retenus : le verrou d'affichage est relâché pendant
+ * l'attente d'une touche, l'affichage asynchrone reste vivant. Sans effet si
+ * stdin/stdout ne sont pas des terminaux ou si l'écran est trop petit.
+ */
+void console_pager_begin(void);
+
+/** @brief Désactive la pagination (fin de la commande console). */
+void console_pager_end(void);
 /** @brief Installe la zone d'affichage fixe (région de défilement ANSI). À appeler depuis le thread console. */
 void status_zone_init(void);
 /** @brief Restaure le terminal (région de défilement complète). Enregistré via atexit par status_zone_init. */

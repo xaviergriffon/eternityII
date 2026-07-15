@@ -64,8 +64,15 @@
 #define STATUS_MSG_MAX   512
 
 /* Taille du pad de sortie : nombre maximum de lignes d'historique
-   conservées. ~3000 lignes × ~200 cols × ~8 octets ≈ 5 Mo. */
+   conservées. ~3000 lignes × ~200 cols × ~8 octets ≈ 5 Mo. Surchargeable à la
+   compilation (make NCURSES=1 CPPFLAGS="-DOUTPUT_PAD_LINES=10000"), même
+   convention que ETERN_PARTS / FORWARD_CHECK_K. */
+#ifndef OUTPUT_PAD_LINES
 #define OUTPUT_PAD_LINES 3000
+#endif
+
+/* Pas de défilement de la molette souris (lignes par cran). */
+#define MOUSE_WHEEL_STEP 3
 
 /* Sérialise toutes les écritures ncurses : la lib n'est pas thread-safe. */
 static pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -618,6 +625,22 @@ void status_zone_init(void)
     intrflush(stdscr, FALSE);
     keypad(stdscr, TRUE);
     curs_set(1);
+    /* Molette souris : scroll du pad de sortie. BUTTON4 = molette haut dans
+       tous les cas. Molette bas : BUTTON5 n'existe qu'avec le protocole souris
+       v2 (ncurses ABI 6) ; en v1 (ncurses ABI 5 — le ncurses système de macOS)
+       le bouton 5 n'a pas de bit dans le bstate et l'événement molette-bas est
+       délivré avec le bit REPORT_MOUSE_POSITION (constaté empiriquement : sans
+       ce bit dans le masque, l'événement est filtré et getmouse rend ERR). Le
+       protocole terminal reste le mode « clics seuls » (1000), donc demander
+       REPORT_MOUSE_POSITION en v1 ne déclenche aucun flot d'événements de
+       déplacement. NB : activer la souris fait intercepter les clics par le
+       terminal — la sélection de texte demande alors Maj+clic (comportement
+       standard des applications plein écran avec souris). */
+#if NCURSES_MOUSE_VERSION > 1
+    mousemask(BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
+#else
+    mousemask(BUTTON4_PRESSED | REPORT_MOUSE_POSITION, NULL);
+#endif
     nc_setup_layout_locked();
     nc_active = 1;
     nc_draw_status_locked();
@@ -686,6 +709,16 @@ void console_input_render(const char *prompt, const char *line)
 }
 
 void console_input_end(void)
+{
+}
+
+/* Pagination « --Suite-- » : spécifique au mode ANSI (voir logger.h). En
+   ncurses le pad + PgUp/PgDn/molette couvrent déjà le besoin — no-ops. */
+void console_pager_begin(void)
+{
+}
+
+void console_pager_end(void)
 {
 }
 
@@ -797,6 +830,36 @@ void nc_console_loop(void)
         if (ch == 12) {                     /* Ctrl-L : efface la vue (l'historique
                                                du pad reste accessible via PgUp) */
             clear_console();
+            continue;
+        }
+
+        if (ch == KEY_MOUSE) {              /* molette : scroll du pad          */
+            MEVENT ev;
+            if (getmouse(&ev) == OK) {
+                pthread_mutex_lock(&output_mutex);
+                if (ev.bstate & BUTTON4_PRESSED) {          /* molette haut  */
+                    pad_view_top = (pad_view_top >= MOUSE_WHEEL_STEP)
+                                 ? (pad_view_top - MOUSE_WHEEL_STEP) : 0;
+                    auto_stick = 0;
+                }
+                /* Molette bas : BUTTON5 en protocole v2, REPORT_MOUSE_POSITION
+                   en v1 (voir le commentaire du mousemask dans status_zone_init). */
+#if NCURSES_MOUSE_VERSION > 1
+                else if (ev.bstate & BUTTON5_PRESSED) {     /* molette bas   */
+#else
+                else if (ev.bstate & REPORT_MOUSE_POSITION) {
+#endif
+                    int max_top = pad_max_view_top(output_screen_h);
+                    pad_view_top += MOUSE_WHEEL_STEP;
+                    if (pad_view_top >= max_top) {
+                        pad_view_top = max_top;
+                        auto_stick = 1;
+                    }
+                }
+                nc_refresh_pad_locked();
+                nc_draw_events_locked();
+                pthread_mutex_unlock(&output_mutex);
+            }
             continue;
         }
 
