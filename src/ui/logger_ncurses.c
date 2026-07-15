@@ -625,15 +625,21 @@ void status_zone_init(void)
     intrflush(stdscr, FALSE);
     keypad(stdscr, TRUE);
     curs_set(1);
-    /* Molette souris : scroll du pad de sortie (BUTTON4 = molette haut ;
-       BUTTON5 = molette bas, absent des très vieux ncurses ABI 5 → gardé par
-       #ifdef). NB : activer la souris fait intercepter les clics par le
+    /* Molette souris : scroll du pad de sortie. BUTTON4 = molette haut dans
+       tous les cas. Molette bas : BUTTON5 n'existe qu'avec le protocole souris
+       v2 (ncurses ABI 6) ; en v1 (ncurses ABI 5 — le ncurses système de macOS)
+       le bouton 5 n'a pas de bit dans le bstate et l'événement molette-bas est
+       délivré avec le bit REPORT_MOUSE_POSITION (constaté empiriquement : sans
+       ce bit dans le masque, l'événement est filtré et getmouse rend ERR). Le
+       protocole terminal reste le mode « clics seuls » (1000), donc demander
+       REPORT_MOUSE_POSITION en v1 ne déclenche aucun flot d'événements de
+       déplacement. NB : activer la souris fait intercepter les clics par le
        terminal — la sélection de texte demande alors Maj+clic (comportement
        standard des applications plein écran avec souris). */
-#ifdef BUTTON5_PRESSED
+#if NCURSES_MOUSE_VERSION > 1
     mousemask(BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
 #else
-    mousemask(BUTTON4_PRESSED, NULL);
+    mousemask(BUTTON4_PRESSED | REPORT_MOUSE_POSITION, NULL);
 #endif
     nc_setup_layout_locked();
     nc_active = 1;
@@ -836,8 +842,13 @@ void nc_console_loop(void)
                                  ? (pad_view_top - MOUSE_WHEEL_STEP) : 0;
                     auto_stick = 0;
                 }
-#ifdef BUTTON5_PRESSED
+                /* Molette bas : BUTTON5 en protocole v2, REPORT_MOUSE_POSITION
+                   en v1 (voir le commentaire du mousemask dans status_zone_init). */
+#if NCURSES_MOUSE_VERSION > 1
                 else if (ev.bstate & BUTTON5_PRESSED) {     /* molette bas   */
+#else
+                else if (ev.bstate & REPORT_MOUSE_POSITION) {
+#endif
                     int max_top = pad_max_view_top(output_screen_h);
                     pad_view_top += MOUSE_WHEEL_STEP;
                     if (pad_view_top >= max_top) {
@@ -845,7 +856,6 @@ void nc_console_loop(void)
                         auto_stick = 1;
                     }
                 }
-#endif
                 nc_refresh_pad_locked();
                 nc_draw_events_locked();
                 pthread_mutex_unlock(&output_mutex);
