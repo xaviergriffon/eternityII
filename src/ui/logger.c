@@ -48,7 +48,39 @@ static pthread_mutex_t event_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int zone_active = 0;  /* 1 si la zone fixe ANSI est installée            */
 static int zone_rows = 0;    /* hauteur du terminal au dernier réglage          */
 
+/* Ligne de saisie interactive (prompt + saisie en cours), protégée par
+   output_mutex. Tant que input_active vaut 1, les écritures de log terminées
+   par '\n' effacent la ligne, écrivent le log puis la redessinent en dessous. */
+#define INPUT_SNAPSHOT_MAX 1200
+static int  input_active = 0;
+static char input_snapshot[INPUT_SNAPSHOT_MAX];
+
 static void redraw_event_zone_locked(void); /* appelant détient output_mutex    */
+
+/**
+ * @brief Écrit un bloc de log sur `stream` en préservant la ligne de saisie.
+ *
+ * Si une saisie interactive est active : efface la ligne (`\r\033[K`), écrit le
+ * bloc, puis redessine la ligne de saisie — uniquement si le bloc se termine
+ * par un saut de ligne (un bloc partiel sera complété par les écritures
+ * suivantes, la ligne de saisie reviendra à ce moment-là). Les flush croisés
+ * stdout/stderr garantissent l'ordre d'affichage quand les deux flux pointent
+ * vers le même terminal. L'appelant doit détenir `output_mutex`.
+ */
+static void write_stream_locked(FILE *stream, const char *buf)
+{
+    size_t len = strlen(buf);
+    if (input_active) {
+        fputs("\r\033[K", stdout);
+        if (stream != stdout) fflush(stdout);
+    }
+    fputs(buf, stream);
+    if (input_active && len > 0 && buf[len - 1] == '\n') {
+        if (stream != stdout) fflush(stream);
+        fputs(input_snapshot, stdout);
+        fflush(stdout);
+    }
+}
 
 /* ------------------------------------------------------------------------- */
 /*  IPC : routage des logs des enfants forkés vers le parent                 */
@@ -123,7 +155,7 @@ void log_errno(const char *format, ...)
         return;
     }
     pthread_mutex_lock(&output_mutex);
-    fputs(buf, stderr);
+    write_stream_locked(stderr, buf);
     fflush(stderr);
     pthread_mutex_unlock(&output_mutex);
 }
@@ -144,7 +176,7 @@ void log_error(const char *format, ...)
         return;
     }
     pthread_mutex_lock(&output_mutex);
-    fputs(buf, stderr);
+    write_stream_locked(stderr, buf);
     fflush(stderr);
     pthread_mutex_unlock(&output_mutex);
 }
@@ -184,7 +216,7 @@ void log_info(const char *format, ...)
         return;
     }
     pthread_mutex_lock(&output_mutex);
-    fputs(buf, stdout);
+    write_stream_locked(stdout, buf);
     pthread_mutex_unlock(&output_mutex);
 }
 
@@ -204,7 +236,7 @@ void log_debug(const char *format, ...)
         return;
     }
     pthread_mutex_lock(&output_mutex);
-    fputs(buf, stdout);
+    write_stream_locked(stdout, buf);
     pthread_mutex_unlock(&output_mutex);
 }
 
@@ -224,7 +256,7 @@ void log_console(const char *format, ...)
         return;
     }
     pthread_mutex_lock(&output_mutex);
-    fputs(buf, stdout);
+    write_stream_locked(stdout, buf);
     fflush(stdout);
     pthread_mutex_unlock(&output_mutex);
 }
@@ -367,8 +399,38 @@ void log_event(const char *format, ...)
     if (zone_active) {
         redraw_event_zone_locked();
     } else {
-        /* Pas de zone fixe (sortie non interactive) : impression classique. */
-        fprintf(stdout, "%s\n", line);
+        /* Pas de zone fixe (sortie non interactive) : impression classique,
+           via le helper pour préserver une éventuelle ligne de saisie. */
+        char out[EVENT_MSG_MAX + 2];
+        snprintf(out, sizeof out, "%s\n", line);
+        write_stream_locked(stdout, out);
+        fflush(stdout);
+    }
+    pthread_mutex_unlock(&output_mutex);
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Ligne de saisie interactive (voir logger.h)                              */
+/* ------------------------------------------------------------------------- */
+
+void console_input_render(const char *prompt, const char *line)
+{
+    pthread_mutex_lock(&output_mutex);
+    snprintf(input_snapshot, sizeof input_snapshot, "%s%s",
+             prompt != NULL ? prompt : "", line != NULL ? line : "");
+    input_active = 1;
+    fputs("\r\033[K", stdout);
+    fputs(input_snapshot, stdout);
+    fflush(stdout);
+    pthread_mutex_unlock(&output_mutex);
+}
+
+void console_input_end(void)
+{
+    pthread_mutex_lock(&output_mutex);
+    if (input_active) {
+        input_active = 0;
+        fputs("\n", stdout);
         fflush(stdout);
     }
     pthread_mutex_unlock(&output_mutex);
@@ -461,11 +523,14 @@ void status_zone_teardown(void)
 }
 
 /**
- * @brief Efface la zone interactive et y replace le curseur (réaffichage en place).
+ * @brief Efface la zone interactive en préservant le contenu dans le scrollback.
  *
- * Quand la zone fixe est active, n'efface que la région de défilement (au-dessus
- * de la zone des événements) et redessine la zone (elle est inchangée mais on la
- * réécrit pour la cohérence). Sinon, efface tout l'écran. Sans effet hors terminal.
+ * Quand la zone fixe est active, le contenu de la région de défilement n'est pas
+ * détruit : depuis le bas de la région, chaque saut de ligne fait défiler la
+ * région d'une ligne vers le haut, et les lignes sorties par le haut partent
+ * dans le scrollback natif du terminal (molette / Cmd+↑) — même mécanisme que le
+ * défilement normal. Le curseur revient ensuite en haut de la région. Sans zone
+ * fixe, efface tout l'écran. Sans effet hors terminal.
  */
 void clear_console(void)
 {
@@ -475,13 +540,13 @@ void clear_console(void)
     pthread_mutex_lock(&output_mutex);
     if (zone_active) {
         int region_bottom = zone_rows - ZONE_RESERVED;
-        /* Assez large pour "\033[<int>;1H\033[K" quel que soit le nombre de
-           chiffres de r (un int → 11 chiffres max) : évite -Wformat-truncation. */
+        /* Assez large pour "\033[<int>;1H" quel que soit le nombre de chiffres
+           (un int → 11 chiffres max) : évite -Wformat-truncation. */
         char buf[32];
-        /* Efface ligne par ligne la région de défilement (sans toucher la zone). */
-        for (int r = 1; r <= region_bottom; r++) {
-            snprintf(buf, sizeof buf, "\033[%d;1H\033[K", r);
-            fputs(buf, stdout);
+        snprintf(buf, sizeof buf, "\033[%d;1H", region_bottom);
+        fputs(buf, stdout);                /* curseur en bas de la région        */
+        for (int r = 0; r < region_bottom; r++) {
+            fputc('\n', stdout);           /* pousse une ligne dans le scrollback */
         }
         /* Curseur en haut de la région ; la sortie qui suivra remplira de haut en bas. */
         fputs("\033[1;1H", stdout);

@@ -125,6 +125,25 @@ TEST do_command_line_help_with_topic(void)
     PASS();
 }
 
+/* clear (alias cls) : efface l'écran via clear_console — no-op ici (sortie
+   redirigée -> non-tty -> early-return) — et retourne 0. L'alias résout vers
+   l'entrée canonique et l'aide documente le raccourci Ctrl-L. */
+TEST do_command_line_clear_runs(void)
+{
+    char cmd[] = "clear";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+
+    char alias[] = "cls";
+    ASSERT_EQ_FMT(0, run_command_quiet(alias), "%d");
+    ASSERT_STR_EQ("clear", command_canonical_name("cls"));
+
+    char out[16384];
+    ASSERT_EQ_FMT(0, help_format_topic("clear", out, sizeof out), "%d");
+    ASSERT(strstr(out, "Ctrl-L") != NULL);
+    ASSERT(strstr(out, "scrollback") != NULL);
+    PASS();
+}
+
 /* help_format_general (pure) : contient les titres de catégories, l'usage des
    commandes à arguments et les alias des entrées canoniques. */
 TEST help_format_general_lists_categories_and_aliases(void)
@@ -1215,6 +1234,7 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_unknown_returns_error);
     RUN_TEST(do_command_line_help_runs);
     RUN_TEST(do_command_line_help_with_topic);
+    RUN_TEST(do_command_line_clear_runs);
     RUN_TEST(help_format_general_lists_categories_and_aliases);
     RUN_TEST(help_format_topic_command_and_category);
     RUN_TEST(command_canonical_name_resolves_aliases_and_case);

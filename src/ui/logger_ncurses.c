@@ -646,18 +646,47 @@ void status_zone_teardown(void)
     pthread_mutex_unlock(&output_mutex);
 }
 
+/**
+ * @brief Efface la vue de sortie SANS détruire l'historique du pad.
+ *
+ * Avance le curseur du pad d'un écran complet de lignes vides : la vue devient
+ * blanche (comme `clear` dans un shell) mais tout le contenu antérieur reste
+ * accessible via PgUp/Home — contrairement à l'ancien werase() qui détruisait
+ * les OUTPUT_PAD_LINES lignes d'historique.
+ */
 void clear_console(void)
 {
     pthread_mutex_lock(&output_mutex);
     if (nc_active && output_pad) {
-        werase(output_pad);
-        wmove(output_pad, 0, 0);   /* curseur en haut, prêt à réécrire        */
-        pad_view_top = 0;
+        int y, x;
+        getyx(output_pad, y, x);
+        (void)y;
+        if (x > 0) {
+            waddch(output_pad, '\n');  /* termine la ligne en cours            */
+        }
+        int h = output_screen_h > 0 ? output_screen_h : 1;
+        for (int i = 1; i < h; i++) {
+            waddch(output_pad, '\n');  /* un écran de lignes vides             */
+        }
+        pad_view_top = pad_max_view_top(output_screen_h);
         auto_stick = 1;
         nc_refresh_pad_locked();
-        nc_draw_events_locked();   /* met à jour l'indicateur de scroll       */
+        nc_draw_events_locked();       /* met à jour l'indicateur de scroll    */
     }
     pthread_mutex_unlock(&output_mutex);
+}
+
+/* Ligne de saisie interactive : spécifique au mode ANSI (voir logger.h). En
+   ncurses la saisie vit dans input_win, redessinée par nc_draw_input_locked —
+   ces deux fonctions sont des no-ops conservés pour l'interface commune. */
+void console_input_render(const char *prompt, const char *line)
+{
+    (void)prompt;
+    (void)line;
+}
+
+void console_input_end(void)
+{
 }
 
 /* ------------------------------------------------------------------------- */
@@ -764,6 +793,12 @@ void nc_console_loop(void)
             continue;
         }
         /* --- Fin scroll --- */
+
+        if (ch == 12) {                     /* Ctrl-L : efface la vue (l'historique
+                                               du pad reste accessible via PgUp) */
+            clear_console();
+            continue;
+        }
 
         /* --- Navigation dans l'historique des commandes (↑ / ↓) --- */
         if (ch == KEY_UP) {
