@@ -8,6 +8,7 @@
 #include "ui/logger.h"
 #include "ui/command_lines.h"
 #include "ui/command_history.h"
+#include "ui/line_edit.h"
 
 #define EXIT_CMD "exit"
 
@@ -137,30 +138,23 @@ static char *getcmdline_cooked(void)
 #define CONSOLE_PROMPT "commande :"
 
 /**
- * @brief Lecture en mode raw : on lit caractère par caractère, on gère le
- *        backspace, Ctrl-L (effacement d'écran) et les flèches ↑ / ↓ pour
- *        rappeler les commandes précédentes.
+ * @brief Lecture en mode raw : on lit caractère par caractère et on délègue
+ *        toute la logique d'édition (curseur, backspace, historique, Ctrl-A/
+ *        E/U/W, ←/→, Home/End) au module commun ui/line_edit.c — partagé
+ *        avec la variante ncurses (nc_console_loop, logger_ncurses.c).
  *
- * La ligne de saisie n'est plus échoée caractère par caractère : chaque frappe
- * repasse par console_input_render (logger.c), qui publie la ligne courante
- * auprès du logger. Les logs asynchrones (thread de statistiques, événements
- * relayés des forks) peuvent ainsi effacer la ligne, s'écrire, puis la
- * redessiner en dessous — la saisie en cours n'est plus corrompue.
+ * La ligne de saisie n'est plus échoée caractère par caractère : chaque touche
+ * traitée repasse par console_input_render (logger.c), qui publie la ligne et
+ * la position du curseur auprès du logger. Les logs asynchrones (thread de
+ * statistiques, événements relayés des forks) peuvent ainsi effacer la ligne,
+ * s'écrire, puis la redessiner en dessous — la saisie en cours n'est plus
+ * corrompue.
  */
 static char *getcmdline_raw(void)
 {
-    enum { BUFSZ = 1024 };
-    char buf[BUFSZ];
-    int  len = 0;
-    char draft[BUFSZ];
-    int  draft_len = 0;
-    /* -1 = on édite la saisie courante (draft) ; sinon index dans l'historique
-       (0 = commande la plus récente). */
-    int  hist_cursor = -1;
-
-    buf[0] = '\0';
-    draft[0] = '\0';
-    console_input_render(CONSOLE_PROMPT, buf);
+    line_edit_t le;
+    line_edit_reset(&le);
+    console_input_render(CONSOLE_PROMPT, line_edit_text(&le), line_edit_cursor(&le));
 
     while (1) {
         int c = fgetc(stdin);
@@ -173,93 +167,57 @@ static char *getcmdline_raw(void)
         }
 
         if (c == '\n' || c == '\r') {
-            buf[len] = '\0';
             console_input_end();        /* écho de Entrée + fin de protection */
-            history_add(buf);
+            history_add(line_edit_text(&le));
+            int len = le.len;
             char *r = malloc(len + 1);
-            if (r) memcpy(r, buf, len + 1);
+            if (r) memcpy(r, le.buf, len + 1);
             return r;
-        }
-
-        /* Backspace (0x7f = DEL renvoyé par la touche Backspace sur la plupart
-           des terminaux ; 0x08 = ^H sur d'autres). */
-        if (c == 0x7f || c == 0x08) {
-            if (len > 0) {
-                len--;
-                buf[len] = '\0';
-                console_input_render(CONSOLE_PROMPT, buf);
-            }
-            continue;
         }
 
         /* Ctrl-L : efface l'écran (le contenu part dans le scrollback natif)
            puis redessine la ligne de saisie en cours. */
         if (c == 0x0c) {
             clear_console();
-            console_input_render(CONSOLE_PROMPT, buf);
+            console_input_render(CONSOLE_PROMPT, line_edit_text(&le), line_edit_cursor(&le));
             continue;
         }
 
-        /* Séquence d'échappement : ESC + '[' + lettre. */
-        if (c == 0x1b) {
+        line_edit_key key;
+        int ch = c;
+        switch (c) {
+        case 0x7f: case 0x08: key = LE_KEY_BACKSPACE; break;  /* DEL / ^H     */
+        case 0x01: key = LE_KEY_HOME;      break;             /* Ctrl-A       */
+        case 0x05: key = LE_KEY_END;       break;             /* Ctrl-E       */
+        case 0x15: key = LE_KEY_KILL_LINE; break;             /* Ctrl-U       */
+        case 0x17: key = LE_KEY_KILL_WORD; break;             /* Ctrl-W       */
+        case 0x1b: {                                          /* ESC [ ...    */
             int c2 = fgetc(stdin);
             if (c2 != '[') continue;
             int c3 = fgetc(stdin);
-
-            if (c3 == 'A') {                /* ↑ — commande précédente       */
-                if (history_size() == 0) continue;
-                if (hist_cursor == -1) {
-                    /* Sauvegarde la saisie courante avant d'entrer dans l'histo */
-                    memcpy(draft, buf, len);
-                    draft_len = len;
-                    hist_cursor = 0;
-                } else if (hist_cursor + 1 < history_size()) {
-                    hist_cursor++;
-                } else {
-                    continue;               /* déjà sur la plus ancienne     */
-                }
-                const char *h = history_get(hist_cursor);
-                if (h == NULL) continue;
-                int hlen = (int)strlen(h);
-                if (hlen >= BUFSZ) hlen = BUFSZ - 1;
-                memcpy(buf, h, hlen);
-                buf[hlen] = '\0';
-                len = hlen;
-                console_input_render(CONSOLE_PROMPT, buf);
-                continue;
+            if (c3 == 'A') { key = LE_KEY_HISTORY_PREV; break; }
+            if (c3 == 'B') { key = LE_KEY_HISTORY_NEXT; break; }
+            if (c3 == 'C') { key = LE_KEY_RIGHT; break; }
+            if (c3 == 'D') { key = LE_KEY_LEFT;  break; }
+            if (c3 == 'H') { key = LE_KEY_HOME;  break; }
+            if (c3 == 'F') { key = LE_KEY_END;   break; }
+            if (c3 == '3') {                    /* Delete : ESC [ 3 ~        */
+                int c4 = fgetc(stdin);
+                if (c4 != '~') continue;
+                key = LE_KEY_DELETE;
+                break;
             }
-
-            if (c3 == 'B') {                /* ↓ — commande suivante         */
-                if (hist_cursor < 0) continue; /* déjà sur le draft          */
-                hist_cursor--;
-                if (hist_cursor < 0) {
-                    memcpy(buf, draft, draft_len);
-                    buf[draft_len] = '\0';
-                    len = draft_len;
-                } else {
-                    const char *h = history_get(hist_cursor);
-                    if (h == NULL) continue;
-                    int hlen = (int)strlen(h);
-                    if (hlen >= BUFSZ) hlen = BUFSZ - 1;
-                    memcpy(buf, h, hlen);
-                    buf[hlen] = '\0';
-                    len = hlen;
-                }
-                console_input_render(CONSOLE_PROMPT, buf);
-                continue;
-            }
-
-            /* Autres séquences (←, →, F1…) : ignorées pour l'instant. */
+            /* Autres séquences (F1…) : ignorées pour l'instant. */
             continue;
         }
-
-        /* Caractère imprimable : ajout au tampon et redessin de la ligne. */
-        if (c >= 32 && c < 127 && len + 1 < BUFSZ) {
-            buf[len++] = (char)c;
-            buf[len] = '\0';
-            console_input_render(CONSOLE_PROMPT, buf);
+        default:
+            if (c >= 32 && c < 127) { key = LE_KEY_CHAR; break; }
+            continue; /* autre caractère de contrôle : ignoré */
         }
-        /* Tout autre caractère de contrôle est ignoré. */
+
+        if (line_edit_feed(&le, key, ch)) {
+            console_input_render(CONSOLE_PROMPT, line_edit_text(&le), line_edit_cursor(&le));
+        }
     }
 }
 

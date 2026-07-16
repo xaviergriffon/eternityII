@@ -76,8 +76,15 @@ void clear_console(void);
  * ligne efface la ligne de saisie, écrit le log, puis la redessine en dessous —
  * les logs asynchrones (thread de statistiques, événements relayés des forks)
  * ne corrompent plus la ligne en cours de frappe.
+ *
+ * @param prompt Invite affichée avant la ligne (ex. "commande :").
+ * @param line   Contenu courant de la ligne éditée.
+ * @param cursor Position du curseur dans @p line (0..strlen(line)) : le
+ *               curseur terminal est repositionné en conséquence après le
+ *               redessin, pour permettre l'édition au milieu de la ligne
+ *               (←/→, Home/End...).
  */
-void console_input_render(const char *prompt, const char *line);
+void console_input_render(const char *prompt, const char *line, int cursor);
 
 /**
  * @brief Termine la saisie interactive (Entrée) : imprime le saut de ligne et
