@@ -416,6 +416,211 @@ TEST do_command_line_printfile_requires_arg(void)
     PASS();
 }
 
+/* ---------- Export console vers fichier (P5) ------------------------------
+ * `print [fichier]` / `printFile <n> [fichier]` / `printAnalysed [fichier]`
+ * écrivent le dump JSON dans un fichier au lieu de la console quand
+ * l'argument optionnel est fourni. */
+
+/* print <fichier> : exporte tout le data manager, contenu JSON présent. */
+TEST do_command_line_print_exports_to_file(void)
+{
+    dm_drain();
+    int allocs[] = { 21, 34 };
+    dm_add(allocs, 2);
+
+    char path[] = "/tmp/etii_cmd_print_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    char cmd[128];
+    snprintf(cmd, sizeof cmd, "print %s", path);
+    int r = run_command_quiet(cmd);
+
+    FILE *f = fopen(path, "r");
+    ASSERT(f != NULL);
+    char buf[8192] = {0};
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    unlink(path);
+    (void)n;
+
+    dm_drain();
+    ASSERT_EQ_FMT(0, r, "%d");
+    ASSERT(strstr(buf, "\"alloc\": 21") != NULL);
+    ASSERT(strstr(buf, "\"alloc\": 34") != NULL);
+    PASS();
+}
+
+/* printFile <n> sans [fichier] : comportement console inchangé (0, pas de
+   fichier créé). Couvre la non-régression du chemin historique. */
+TEST do_command_line_printfile_without_path_still_prints_to_console(void)
+{
+    dm_drain();
+    char cmd[] = "printfile 0";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    dm_drain();
+    PASS();
+}
+
+/* printFile <n> <fichier> : exporte la file <n> au format JSON. */
+TEST do_command_line_printfile_exports_to_file(void)
+{
+    dm_drain();
+    int allocs[] = { 12, 13, 14 };
+    dm_add(allocs, 3);
+
+    char path[] = "/tmp/etii_cmd_printfile_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    /* Peu importe la file effectivement peuplée par add_possibility (routage
+       interne non déterministe depuis les tests) : on exporte les 10 files
+       et on vérifie qu'AU MOINS UN export contient le contenu attendu. */
+    int found = 0;
+    for (int fp = 0; fp < 10 && !found; fp++) {
+        char cmd[128];
+        snprintf(cmd, sizeof cmd, "printfile %d %s", fp, path);
+        int r = run_command_quiet(cmd);
+        ASSERT_EQ_FMT(0, r, "%d");
+
+        FILE *f = fopen(path, "r");
+        ASSERT(f != NULL);
+        char buf[8192] = {0};
+        size_t n = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        (void)n;
+        if (strstr(buf, "\"alloc\": 12") != NULL) {
+            found = 1;
+        }
+    }
+    unlink(path);
+    dm_drain();
+    ASSERT(found);
+    PASS();
+}
+
+/* printAnalysed <fichier> en mode SERVEUR (server=1) : pas de forks de
+   recherche -> le chemin est utilisé TEL QUEL, sans suffixe de pid. */
+TEST do_command_line_printanalysed_exports_without_pid_suffix_on_server(void)
+{
+    dm_drain();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 91;
+    add_possibility_analysed(&pk, 0);
+
+    int saved_server = server;
+    server = 1;
+
+    char path[] = "/tmp/etii_cmd_pa_srv_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    char cmd[128];
+    snprintf(cmd, sizeof cmd, "printanalysed %s", path);
+    int r = run_command_quiet(cmd);
+    server = saved_server;
+
+    FILE *f = fopen(path, "r");
+    ASSERT(f != NULL); /* le chemin exact existe : pas de suffixe côté serveur */
+    char buf[4096] = {0};
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    unlink(path);
+    (void)n;
+
+    dm_drain();
+    ASSERT_EQ_FMT(0, r, "%d");
+    ASSERT(strstr(buf, "\"alloc\": 91") != NULL);
+    PASS();
+}
+
+/*
+ * printAnalysed <fichier> en mode CLIENT (server=0) : cette commande a
+ * send_to_childs=1 (voir command_lines.c) — le TEXTE de la commande, argument
+ * fichier compris, est rejoué tel quel par chaque process (parent + forks de
+ * recherche, cf. send_command_to_childs). Sans précaution, tous écriraient
+ * dans LE MÊME fichier en concurrence. printanalysed_interpreter suffixe donc
+ * le chemin par le pid courant (même convention que backup_interpreter) :
+ * on vérifie que le fichier suffixé existe ET que le chemin NU (sans
+ * suffixe) n'a PAS été créé.
+ */
+TEST do_command_line_printanalysed_exports_with_pid_suffix_on_client(void)
+{
+    dm_drain();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 92;
+    add_possibility_analysed(&pk, 0);
+
+    int saved_server = server;
+    server = 0;
+
+    char path[] = "/tmp/etii_cmd_pa_cli_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    unlink(path); /* on ne veut que le nom, pas le fichier vide créé par mkstemp */
+
+    char cmd[160];
+    snprintf(cmd, sizeof cmd, "printanalysed %s", path);
+    int r = run_command_quiet(cmd);
+    server = saved_server;
+
+    char expected_suffixed[192];
+    snprintf(expected_suffixed, sizeof expected_suffixed, "%s_%i", path, (int)getpid());
+
+    int bare_exists = access(path, F_OK) == 0;
+    int suffixed_exists = access(expected_suffixed, F_OK) == 0;
+
+    FILE *f = suffixed_exists ? fopen(expected_suffixed, "r") : NULL;
+    char buf[4096] = {0};
+    if (f != NULL) {
+        size_t n = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        (void)n;
+    }
+    unlink(path);
+    unlink(expected_suffixed);
+
+    dm_drain();
+    ASSERT_EQ_FMT(0, r, "%d");
+    ASSERT_FALSEm("le chemin nu ne doit PAS être créé en mode client", bare_exists);
+    ASSERT(suffixed_exists);
+    ASSERT(strstr(buf, "\"alloc\": 92") != NULL);
+    PASS();
+}
+
+/* print vers un répertoire non inscriptible : fopen échoue -> -1, sans crash. */
+TEST do_command_line_print_fails_on_unwritable_dir(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_prw_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+    if (chmod(dir, 0444) != 0) {
+        chdir(saved_cwd); rmdir(dir);
+        SKIPm("chmod non supporté sur cet environnement");
+    }
+
+    char cmd[] = "print ./out.json";
+    int r = run_command_quiet(cmd);
+
+    chmod(dir, 0755);
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+
+    ASSERT_EQ_FMT(-1, r, "%d");
+    PASS();
+}
+
 /* checkfiles / checkfile <n> : intégrité des files -> 0 sur un stock cohérent. */
 TEST do_command_line_checkfiles_runs(void)
 {
@@ -1252,6 +1457,12 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_split_regroup_runs);
     RUN_TEST(do_command_line_inspect_commands_run);
     RUN_TEST(do_command_line_printfile_requires_arg);
+    RUN_TEST(do_command_line_print_exports_to_file);
+    RUN_TEST(do_command_line_printfile_without_path_still_prints_to_console);
+    RUN_TEST(do_command_line_printfile_exports_to_file);
+    RUN_TEST(do_command_line_printanalysed_exports_without_pid_suffix_on_server);
+    RUN_TEST(do_command_line_printanalysed_exports_with_pid_suffix_on_client);
+    RUN_TEST(do_command_line_print_fails_on_unwritable_dir);
     RUN_TEST(do_command_line_checkfiles_runs);
     RUN_TEST(do_command_line_checkfile_requires_arg);
     RUN_TEST(do_command_line_checkdirections_runs);

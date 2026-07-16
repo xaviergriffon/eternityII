@@ -78,9 +78,9 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | Commande | Description |
 |---|---|
 | `check` | Affiche le dernier rapport de statistiques (n'efface plus l'écran — utiliser `clear`) |
-| `print` | Affiche toutes les files au format JSON |
-| `printFile N` | Affiche le contenu de la file numéro `N` |
-| `printAnalysed` | Affiche les possibilités en cours d'analyse |
+| `print [fichier]` | Affiche toutes les files au format JSON, ou les exporte dans `fichier` |
+| `printFile N [fichier]` | Affiche le contenu de la file numéro `N`, ou l'exporte dans `fichier` |
+| `printAnalysed [fichier]` | Affiche les possibilités en cours d'analyse, ou les exporte dans `fichier` |
 | `statistic` | Affiche des statistiques sur le contenu des files (alias : `stats`) |
 | `checkDatas` | Vérifie l'intégrité des possibilités |
 | `checkDuplicate` | Recherche les doublons dans les files |
@@ -188,6 +188,38 @@ ou `print` : la sortie attend le lecteur. Points de conception :
   pause), en fallback cooked, et sur un écran de moins de ~4 lignes utiles.
 - En ncurses la question ne se pose pas : le pad + `PgUp`/`PgDn`/molette
   permettent de relire la sortie a posteriori.
+
+## Export vers fichier des sorties massives (`print`/`printFile`/`printAnalysed`)
+
+`print`, `printFile <n>` et `printAnalysed` acceptent un **argument fichier
+optionnel** : au lieu d'afficher le dump JSON dans la console, il est écrit dans
+ce fichier.
+
+```sh
+print ./dump.json                  # tout le data manager
+printFile 3 ./file3.json           # une seule file
+printAnalysed ./analysed.json      # possibilités en cours d'analyse
+```
+
+Sans argument, le comportement historique (affichage console, désormais
+paginé en ANSI) est inchangé. Avec un fichier, une ligne de confirmation
+résume l'export : `print : export : N possibilités écrites dans ./dump.json`.
+
+Cette variante existait déjà indirectement via la pagination (`--Suite--`) et
+le pad ncurses, mais un gros stock (des dizaines de milliers de possibilités
+sur le puzzle 256) dépasse vite les 3000 lignes du pad ncurses, qui déborde
+alors **silencieusement** par le haut ; l'export règle le problème d'un coup et
+produit en prime un artefact **greppable** (`grep '"alloc": 42' dump.json`).
+
+> **`printAnalysed <fichier>` en mode client** : cette commande est propagée
+> aux processus fils de recherche (comme `backup`, `limit`, …) — le texte de
+> la commande, argument fichier compris, est rejoué **tel quel** par le parent
+> ET par chaque fork. Sans précaution, tous écriraient dans le même fichier en
+> concurrence. Le nom est donc **automatiquement suffixé du pid** en mode
+> client (`./analysed.json_12345`), exactement comme `backup` suffixe déjà
+> `eternityII.back`. Côté serveur (pas de forks de recherche), le chemin est
+> utilisé tel quel. `print`/`printFile` ne sont pas concernées : elles ne sont
+> jamais propagées aux fils.
 
 ## Ligne de saisie protégée des logs asynchrones (mode ANSI)
 

@@ -203,11 +203,31 @@ int import_json(void);
 int printdatamanager(void);
 /**
  * @brief Affiche dans la console les possibilités, au format JSON, contenu dans une file
- * 
+ *
  * @param fp numéro de la file à afficher
  * @return 0 si OK ou -1 en cas d'erreur
  */
 int print_file(int fp);
+
+/**
+ * @brief Variante fichier de printdatamanager : exporte toutes les files au
+ *        format JSON dans @p out au lieu des logs (commande console
+ *        `print [fichier]`).
+ * @param out   Flux ouvert en écriture (ouverture/fermeture à la charge de l'appelant).
+ * @param count Décompte cumulé des possibilités écrites, NULL si inutile.
+ * @return      0 en cas de succès, -1 si une écriture a échoué (export interrompu).
+ */
+int fprint_datamanager(FILE *out, size_t *count);
+
+/**
+ * @brief Variante fichier de print_file : exporte la file `fp` au format
+ *        JSON dans @p out (commande console `printFile <n> [fichier]`).
+ * @param out   Flux ouvert en écriture.
+ * @param fp    Numéro de la file à exporter.
+ * @param count Accumulateur du nombre de possibilités écrites, NULL si inutile.
+ * @return      0 en cas de succès, -1 dès la première écriture en échec.
+ */
+int fprint_file(FILE *out, int fp, size_t *count);
 
 /**
  * @brief Affiche au format JSON les possibilités en cours d'analyse dans la file `fp`.
@@ -216,8 +236,27 @@ int print_file(int fp);
  */
 int print_file_analysed(int fp);
 
+/**
+ * @brief Variante fichier de print_file_analysed (commande console
+ *        `printAnalysed [fichier]`, cette fonction traite une seule file).
+ * @param out   Flux ouvert en écriture.
+ * @param fp    Numéro de la file d'analyse à exporter.
+ * @param count Accumulateur du nombre de possibilités écrites, NULL si inutile.
+ * @return      0 en cas de succès, -1 dès la première écriture en échec.
+ */
+int fprint_file_analysed(FILE *out, int fp, size_t *count);
+
 /** @brief Affiche au format JSON toutes les files d'analyse en cours. */
 int print_all_file_analysed(void);
+
+/**
+ * @brief Variante fichier de print_all_file_analysed : exporte toutes les
+ *        files d'analyse dans @p out (commande console `printAnalysed [fichier]`).
+ * @param out   Flux ouvert en écriture.
+ * @param count Décompte cumulé des possibilités écrites, NULL si inutile.
+ * @return      0 en cas de succès, -1 si une file a échoué à s'écrire.
+ */
+int fprint_all_file_analysed(FILE *out, size_t *count);
 
 /**
  * @brief Remet dans le stock toutes les possibilités en cours d'analyse.
