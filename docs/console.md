@@ -103,10 +103,21 @@ socket Unix. Les commandes `clients*` sont **serveur uniquement** : elles agisse
 le [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) distant, pas
 sur des process fils locaux.
 
+## Bandeau de stats live (mode ANSI)
+
+Comme en ncurses, une ligne fixe en vidéo inverse, juste au-dessus de la zone
+Events, affiche en continu les statistiques du thread checker (`coups/s`,
+`stock`, `analyse`, `record`, …) — même mécanisme de région fixe que la zone
+Events (`redraw_status_zone_locked`, `src/ui/logger.c`), rafraîchi via
+`log_status()` sans perturber la région de défilement ni la ligne de saisie.
+Avant le premier rapport, la ligne affiche un message d'attente. Sur un
+terminal trop petit pour réserver la zone (ou sortie non interactive), le
+bandeau est simplement absent — `check` reste la voie de consultation.
+
 ## Zone Events (en bas de l'écran)
 
 Les évènements notables sont affichés dans une bande fixe en bas de la console, juste
-au-dessus du prompt :
+au-dessus du prompt, sous le bandeau de stats :
 
 ```
 ┌──────────────────────────────────┐
@@ -115,6 +126,8 @@ au-dessus du prompt :
 │  commande : check                │
 │  file:0 stock:0                  │
 │  …                               │
+├──────────────────────────────────┤
+│  coups/s:… stock:… record:…      │  ← bandeau de stats, fixe (vidéo inverse)
 ├──────────────────────────────────┤
 │  Events                          │  ← bande inversée, fixe
 │  [21:29:30] new record: 65 …     │
@@ -319,6 +332,28 @@ cachées (`[+N sous la vue — PgDn/End pour revenir]`).
 
 Le build par défaut (sans `NCURSES=1`) reste 100 % fonctionnel et **sans aucune
 dépendance** sur ncurses.
+
+## `log_error` : stderr en ANSI, pad de sortie en ncurses (divergence assumée)
+
+Contrairement au reste de l'interface publique de `logger.h`/`logger_ncurses.c`,
+`log_error`/`log_errno` n'ont **pas** le même flux de destination selon le build,
+et ce n'est **pas un oubli** :
+
+- **ANSI** écrit sur le vrai **stderr** du processus — `2>err.log` capture
+  effectivement les erreurs séparément de la sortie normale, comme n'importe
+  quel programme Unix classique.
+- **ncurses** écrit dans le **pad de sortie** (comme `log_info`), pas sur un
+  stderr réel. Impossible de faire autrement : dès que `initscr()` a pris le
+  contrôle de l'écran, toute écriture brute sur stdout/stderr casserait
+  l'affichage géré par curses (sauf redirection vers un fichier — mais alors
+  l'erreur n'apparaîtrait plus du tout à l'écran, ce qui est pire pour un usage
+  interactif). Rendre les erreurs visibles dans le pad, au même endroit que le
+  reste du flux, est le compromis le moins mauvais pour ce mode.
+
+Une redirection `2>err.log` ne se comporte donc pas pareil selon le build : elle
+capture les erreurs en ANSI, mais reste vide en ncurses (tout part dans le pad,
+sur stdout). C'est un choix délibéré plutôt qu'une incohérence à corriger — les
+deux modes n'ont pas le même degré de liberté vis-à-vis du terminal.
 
 ## Voir aussi
 

@@ -121,11 +121,44 @@ TEST fatal_error_logs_then_exits_failure(void)
     PASS();
 }
 
-/* log_status est un no-op en mode ANSI : aucune sortie. */
-TEST log_status_is_noop(void)
+/* log_status : sans zone fixe installée (sortie redirigée -> non-tty), le
+   message est mémorisé mais sans effet visible — `check` reste la voie de
+   consultation. Le rendu réel du bandeau (zone fixe active) est couvert sur
+   un vrai PTY par status_zone_lifecycle_over_pty ci-dessous. */
+TEST log_status_no_visible_output_without_zone(void)
 {
     char out[64];
     CAPTURE(1, stdout, log_status("ignored %d", 1), out);
+    ASSERT_EQ_FMT(0, (int)strlen(out), "%d");
+    PASS();
+}
+
+/* log_status routée vers le parent (enfant forké) : aucun bandeau à mettre à
+   jour côté fork, retour immédiat sans effet de bord. Complète la couverture
+   du routage IPC (déjà exercé pour log_info/error/debug/console/event) pour
+   la branche restée morte dans log_status. */
+TEST log_status_noop_when_routed_to_parent(void)
+{
+    pid_t saved_parent = parent_pid;
+    int   saved_sock   = fork_checker_socket_id;
+    struct sockaddr_un *saved_addr = main_addr;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    parent_pid = getpid() + 1;
+    /* > 0 pour satisfaire log_should_route_to_parent(), mais jamais utilisé
+       comme fd réel : la branche routée de log_status() retourne avant tout
+       sendto() (rien à envoyer, un fork n'a pas de bandeau à mettre à jour). */
+    fork_checker_socket_id = 99999;
+    main_addr = &addr;
+
+    char out[64];
+    CAPTURE(1, stdout, log_status("ignored %d", 2), out);
+
+    parent_pid = saved_parent;
+    fork_checker_socket_id = saved_sock;
+    main_addr = saved_addr;
+
     ASSERT_EQ_FMT(0, (int)strlen(out), "%d");
     PASS();
 }
@@ -420,9 +453,17 @@ TEST log_error_during_input_goes_to_stderr(void)
  * via TIOCSWINSZ) pour isoler du runner le thread détaché, l'atexit et les
  * séquences ANSI. Le fils sort par exit(0) — et non _exit — afin que gcov écrive
  * sa couverture ; alarm() est un garde-fou anti-blocage.
+ *
+ * Couvre aussi le bandeau de stats live (redraw_status_zone_locked) : un appel
+ * à log_status() doit produire une bande en vidéo inverse (`\033[7m`)
+ * contenant le texte fourni, écrite dans le flux capturé côté parent.
  */
 TEST status_zone_lifecycle_over_pty(void)
 {
+    char path[64];
+    snprintf(path, sizeof path, "/tmp/etii_zone_pty_%d.txt", (int)getpid());
+    unlink(path);
+
     int master = posix_openpt(O_RDWR | O_NOCTTY);
     ASSERT(master >= 0);
     ASSERT_EQ_FMT(0, grantpt(master), "%d");
@@ -432,7 +473,8 @@ TEST status_zone_lifecycle_over_pty(void)
     int slave = open(slave_name, O_RDWR | O_NOCTTY);
     ASSERT(slave >= 0);
 
-    /* Fenêtre assez haute pour réserver la zone (rows > ZONE_RESERVED+1 == 8). */
+    /* Fenêtre assez haute pour réserver la zone (rows > ZONE_RESERVED+1 == 9
+       depuis l'ajout du bandeau de stats : 1 stats + 1 titre + 6 événements). */
     struct winsize ws = { .ws_row = 40, .ws_col = 120, .ws_xpixel = 0, .ws_ypixel = 0 };
     ioctl(slave, TIOCSWINSZ, &ws);
 
@@ -447,6 +489,7 @@ TEST status_zone_lifecycle_over_pty(void)
         alarm(5);                       /* garde-fou : write PTY / thread détaché */
         status_zone_init();             /* isatty✓, query_terminal_rows✓, zone_active=1, thread */
         usleep(50000);                  /* laisse event_zone_loop faire une itération (puis sleep) */
+        log_status("coups/s: %d", 4242); /* déclenche redraw_status_zone_locked */
         log_event("ZONE EVENT %d", 7);  /* déclenche redraw_event_zone_locked */
         clear_console();                /* branche zone_active (efface la région) */
         status_zone_teardown();         /* zone_active=0 -> event_zone_loop sortira */
@@ -455,17 +498,35 @@ TEST status_zone_lifecycle_over_pty(void)
 
     ASSERT(pid > 0);
     close(slave);
-    /* Draine l'affichage ANSI jusqu'à ce que l'enfant ferme l'esclave (sortie) :
-       évite tout blocage d'écriture côté enfant, se termine sur EOF/EIO du maître. */
+    /* Draine l'affichage ANSI dans un fichier (pour l'assertion ci-dessous)
+       jusqu'à ce que l'enfant ferme l'esclave (sortie) : évite tout blocage
+       d'écriture côté enfant, se termine sur EOF/EIO du maître. */
+    int out_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    ASSERT(out_fd >= 0);
     char drainbuf[4096];
-    while (read(master, drainbuf, sizeof drainbuf) > 0) { /* jeter */ }
+    ssize_t n;
+    while ((n = read(master, drainbuf, sizeof drainbuf)) > 0) {
+        ssize_t w = write(out_fd, drainbuf, (size_t)n);
+        (void)w;
+    }
+    close(out_fd);
     int status = 0;
     waitpid(pid, &status, 0);
     close(master);
     unlink("events.log");               /* log_event a écrit dans le CWD */
 
+    char captured[8192] = {0};
+    FILE *f = fopen(path, "r");
+    ASSERT(f != NULL);
+    size_t rn = fread(captured, 1, sizeof captured - 1, f);
+    fclose(f);
+    unlink(path);
+    (void)rn;
+
     ASSERT(WIFEXITED(status));           /* sortie propre (pas tué par SIGALRM) */
     ASSERT_EQ_FMT(0, WEXITSTATUS(status), "%d");
+    ASSERT(strstr(captured, "\033[7m") != NULL);         /* vidéo inverse du bandeau */
+    ASSERT(strstr(captured, "coups/s: 4242") != NULL);   /* contenu du bandeau        */
     PASS();
 }
 
@@ -476,7 +537,8 @@ SUITE(logger_suite)
     RUN_TEST(log_error_to_stderr);
     RUN_TEST(fatal_error_logs_then_exits_failure);
     RUN_TEST(log_errno_appends_strerror);
-    RUN_TEST(log_status_is_noop);
+    RUN_TEST(log_status_no_visible_output_without_zone);
+    RUN_TEST(log_status_noop_when_routed_to_parent);
     RUN_TEST(log_event_prints_and_logs);
     RUN_TEST(flush_and_zone_helpers_run);
     RUN_TEST(log_routes_to_parent_over_udp_socket);
