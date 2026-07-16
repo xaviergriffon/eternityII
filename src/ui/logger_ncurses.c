@@ -46,6 +46,7 @@
 #include "ui/logger.h"
 #include "ui/command_lines.h"
 #include "ui/command_history.h"
+#include "ui/line_edit.h"
 #include "app/static_variables.h"
 #include "net/ipc_protocol.h"
 
@@ -101,11 +102,12 @@ static int output_screen_h = 0;    /* hauteur visible de la zone de sortie    */
 static int pad_view_top    = 0;    /* index dans le pad de la ligne du haut   */
 static int auto_stick      = 1;    /* 1 = la vue suit le bas du pad           */
 
-/* Tampon de saisie courante (partagé entre nc_console_loop et l'affichage). */
+/* Saisie courante (partagée entre nc_console_loop et l'affichage). La logique
+   d'édition (curseur, historique, Ctrl-A/E/U/W...) vit dans ui/line_edit.c,
+   module commun avec la variante ANSI (console.c) : ce fichier ne fait plus
+   que traduire les touches ncurses en touches abstraites et dessiner l'état. */
 #define INPUT_PROMPT "commande : "
-#define INPUT_BUFSZ  1024
-static char input_buf[INPUT_BUFSZ];
-static int  input_len = 0;
+static line_edit_t input_le;
 
 static void nc_draw_events_locked(void);
 static void nc_draw_input_locked(void);
@@ -346,6 +348,14 @@ static void nc_draw_events_locked(void)
     doupdate();
 }
 
+/**
+ * @brief Dessine la ligne de saisie et positionne le curseur ncurses.
+ *
+ * Le curseur du module line_edit peut être n'importe où dans la ligne (pas
+ * seulement en fin) : la fenêtre visible [start, start+show_len) est calculée
+ * pour toujours contenir le curseur, en faisant défiler horizontalement si la
+ * ligne dépasse la largeur disponible (même principe que readline/bash).
+ */
 static void nc_draw_input_locked(void)
 {
     if (!nc_active || !input_win) return;
@@ -357,13 +367,19 @@ static void nc_draw_input_locked(void)
     int promlen = (int)strlen(INPUT_PROMPT);
     int avail = cols - promlen - 1;
     if (avail < 0) avail = 0;
-    int show_len = input_len > avail ? avail : input_len;
-    int start = input_len - show_len;
+
+    int len    = input_le.len;
+    int cursor = input_le.cursor;
+    int start  = cursor - avail;
     if (start < 0) start = 0;
+    int show_len = len - start;
+    if (show_len > avail) show_len = avail;
+    if (show_len < 0) show_len = 0;
+
     if (show_len > 0) {
-        waddnstr(input_win, input_buf + start, show_len);
+        waddnstr(input_win, input_le.buf + start, show_len);
     }
-    wmove(input_win, 0, promlen + show_len);
+    wmove(input_win, 0, promlen + (cursor - start));
     wrefresh(input_win);
 }
 
@@ -702,10 +718,11 @@ void clear_console(void)
 /* Ligne de saisie interactive : spécifique au mode ANSI (voir logger.h). En
    ncurses la saisie vit dans input_win, redessinée par nc_draw_input_locked —
    ces deux fonctions sont des no-ops conservés pour l'interface commune. */
-void console_input_render(const char *prompt, const char *line)
+void console_input_render(const char *prompt, const char *line, int cursor)
 {
     (void)prompt;
     (void)line;
+    (void)cursor;
 }
 
 void console_input_end(void)
@@ -728,14 +745,7 @@ void console_pager_end(void)
 
 void nc_console_loop(void)
 {
-    input_len = 0;
-    input_buf[0] = '\0';
-
-    /* État de navigation dans l'historique. hist_cursor = -1 → on édite le
-       draft courant ; sinon index dans l'historique (0 = plus récente). */
-    char draft_buf[INPUT_BUFSZ];
-    int  draft_len = 0;
-    int  hist_cursor = -1;
+    line_edit_reset(&input_le);
 
     pthread_mutex_lock(&output_mutex);
     nc_draw_input_locked();
@@ -863,65 +873,16 @@ void nc_console_loop(void)
             continue;
         }
 
-        /* --- Navigation dans l'historique des commandes (↑ / ↓) --- */
-        if (ch == KEY_UP) {
-            if (history_size() > 0) {
-                if (hist_cursor == -1) {
-                    /* On entre dans l'historique : on sauvegarde la saisie
-                       en cours pour pouvoir y revenir avec ↓. */
-                    memcpy(draft_buf, input_buf, input_len);
-                    draft_buf[input_len] = '\0';
-                    draft_len = input_len;
-                    hist_cursor = 0;
-                } else if (hist_cursor + 1 < history_size()) {
-                    hist_cursor++;
-                } else {
-                    continue; /* déjà sur la plus ancienne */
-                }
-                const char *h = history_get(hist_cursor);
-                if (h != NULL) {
-                    int hlen = (int)strlen(h);
-                    if (hlen >= (int)sizeof input_buf) hlen = (int)sizeof input_buf - 1;
-                    memcpy(input_buf, h, hlen);
-                    input_buf[hlen] = '\0';
-                    input_len = hlen;
-                    input_dirty = 1;
-                }
-            }
-            continue;
-        }
-        if (ch == KEY_DOWN) {
-            if (hist_cursor < 0) continue; /* déjà sur le draft */
-            hist_cursor--;
-            if (hist_cursor < 0) {
-                memcpy(input_buf, draft_buf, draft_len);
-                input_buf[draft_len] = '\0';
-                input_len = draft_len;
-            } else {
-                const char *h = history_get(hist_cursor);
-                if (h != NULL) {
-                    int hlen = (int)strlen(h);
-                    if (hlen >= (int)sizeof input_buf) hlen = (int)sizeof input_buf - 1;
-                    memcpy(input_buf, h, hlen);
-                    input_buf[hlen] = '\0';
-                    input_len = hlen;
-                }
-            }
-            input_dirty = 1;
-            continue;
-        }
-        /* --- Fin navigation historique --- */
-
         if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
-            input_buf[input_len] = '\0';
+            /* Ajoute à l'historique (dédoublonné) et réinitialise la
+               navigation historique (mais pas le tampon : on en a encore
+               besoin pour l'écho ci-dessous). */
+            history_add(line_edit_text(&input_le));
+            input_le.hist_cursor = -1;
+            input_le.draft_len   = 0;
 
-            /* Ajoute à l'historique (dédoublonné) et réinitialise le curseur. */
-            history_add(input_buf);
-            hist_cursor = -1;
-            draft_len = 0;
-
-            char echo[INPUT_BUFSZ + 32];
-            snprintf(echo, sizeof echo, "commande : %s\n", input_buf);
+            char echo[LINE_EDIT_BUFSZ + 32];
+            snprintf(echo, sizeof echo, "commande : %s\n", line_edit_text(&input_le));
             pthread_mutex_lock(&output_mutex);
             /* Taper Entrée réactive l'auto-suivi : on veut voir la sortie
                de la commande qu'on vient d'exécuter. */
@@ -929,9 +890,8 @@ void nc_console_loop(void)
             nc_write_output_locked(echo);
             pthread_mutex_unlock(&output_mutex);
 
-            char *copy = strdup(input_buf);
-            input_len = 0;
-            input_buf[0] = '\0';
+            char *copy = strdup(line_edit_text(&input_le));
+            line_edit_reset(&input_le);
             input_dirty = 1;
             if (copy) {
                 do_command_line(copy);
@@ -940,21 +900,33 @@ void nc_console_loop(void)
             continue;
         }
 
-        if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (input_len > 0) {
-                input_len--;
-                input_buf[input_len] = '\0';
-                input_dirty = 1;
-            }
-            continue;
+        /* --- Édition de la ligne : déléguée au module commun line_edit.c
+           (curseur, backspace, delete, historique, Ctrl-A/E/U/W...), partagé
+           avec la variante ANSI (getcmdline_raw, console.c). --- */
+        /* NB : KEY_HOME/KEY_END sont déjà interceptées plus haut pour le
+           scroll du pad de sortie (cf. docs/console.md) ; Ctrl-A/Ctrl-E
+           couvrent donc le début/fin de LIGNE ici, sans ambiguïté de touche. */
+        line_edit_key key;
+        int fed_ch = ch;
+        switch (ch) {
+        case KEY_LEFT:      key = LE_KEY_LEFT;         break;
+        case KEY_RIGHT:     key = LE_KEY_RIGHT;        break;
+        case KEY_DC:        key = LE_KEY_DELETE;       break; /* Suppr        */
+        case KEY_BACKSPACE: case 127: case 8:
+                            key = LE_KEY_BACKSPACE;    break;
+        case 0x01:          key = LE_KEY_HOME;         break; /* Ctrl-A       */
+        case 0x05:          key = LE_KEY_END;          break; /* Ctrl-E       */
+        case 0x15:          key = LE_KEY_KILL_LINE;    break; /* Ctrl-U       */
+        case 0x17:          key = LE_KEY_KILL_WORD;    break; /* Ctrl-W       */
+        case KEY_UP:        key = LE_KEY_HISTORY_PREV; break;
+        case KEY_DOWN:      key = LE_KEY_HISTORY_NEXT; break;
+        default:
+            if (ch >= 32 && ch < 127) { key = LE_KEY_CHAR; break; }
+            continue; /* touche non gérée : ignorée */
         }
 
-        if (ch >= 32 && ch < 127 && input_len + 1 < (int)sizeof input_buf) {
-            input_buf[input_len++] = (char)ch;
-            input_buf[input_len] = '\0';
+        if (line_edit_feed(&input_le, key, fed_ch)) {
             input_dirty = 1;
-            continue;
         }
-        /* Autres touches : ignorées. */
     }
 }
