@@ -17,12 +17,13 @@
 #define LOG_LINE_MAX 4096
 
 /* ------------------------------------------------------------------------- */
-/*  Zone d'affichage fixe (événements) + journal fichier                     */
+/*  Zone d'affichage fixe (stats + événements) + journal fichier             */
 /*                                                                            */
-/*  Layout :                                                                  */
+/*  Layout (même empilement que la variante ncurses, logger_ncurses.c) :     */
 /*    rangées 1 .. zone_rows - ZONE_RESERVED       → région de défilement     */
 /*                                                   (output des commandes,   */
 /*                                                    prompt en bas)          */
+/*    rangée  zone_rows - ZONE_RESERVED            → bandeau de stats live    */
 /*    rangée  zone_rows - ZONE_RESERVED + 1        → titre « Events »         */
 /*    rangées zone_rows - EVENT_ZONE_LINES + 1 ..  → derniers événements      */
 /*            zone_rows                                                       */
@@ -34,7 +35,10 @@
 #define EVENT_ZONE_LINES 6           /* nombre d'événements affichés dans la zone */
 #define EVENT_MSG_MAX    200         /* taille max d'un message (avec horodatage)  */
 #define EVENT_LOG_FILE   "events.log"
-#define ZONE_RESERVED    (EVENT_ZONE_LINES + 1) /* +1 pour la ligne de titre        */
+#define STATS_ZONE_LINES 1           /* bandeau de stats live : une seule ligne    */
+#define STATUS_MSG_MAX   512
+/* +1 pour la ligne de titre « Events », +STATS_ZONE_LINES pour le bandeau de stats. */
+#define ZONE_RESERVED    (STATS_ZONE_LINES + EVENT_ZONE_LINES + 1)
 
 /* Sérialise toutes les écritures sur le terminal (logs + redessin de la zone). */
 static pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -47,6 +51,11 @@ static pthread_mutex_t event_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int zone_active = 0;  /* 1 si la zone fixe ANSI est installée            */
 static int zone_rows = 0;    /* hauteur du terminal au dernier réglage          */
+static int zone_cols = 0;    /* largeur du terminal au dernier réglage          */
+
+/* Dernier texte du bandeau de stats (protégé par output_mutex, comme le reste
+   de la zone fixe). Même message d'attente par défaut que logger_ncurses.c. */
+static char status_buf[STATUS_MSG_MAX] = " stats : en attente du premier rapport... ";
 
 /* Ligne de saisie interactive (prompt + saisie en cours), protégée par
    output_mutex. Tant que input_active vaut 1, les écritures de log terminées
@@ -69,7 +78,8 @@ static void reposition_input_cursor_locked(void)
     fputs(buf, stdout);
 }
 
-static void redraw_event_zone_locked(void); /* appelant détient output_mutex    */
+static void redraw_event_zone_locked(void);  /* appelant détient output_mutex   */
+static void redraw_status_zone_locked(void); /* appelant détient output_mutex   */
 
 /* Pagination de la sortie des commandes console (voir console_pager_begin,
    logger.h). L'état n'est modifié que par le thread console (propriétaire) et
@@ -223,6 +233,20 @@ static int query_terminal_rows(void)
         return ws.ws_row;
     }
     return 0;
+}
+
+/**
+ * @brief Renvoie la largeur du terminal (colonnes), ou 80 si indéterminable —
+ *        repli raisonnable pour ne jamais tronquer le bandeau de stats sur une
+ *        largeur nulle.
+ */
+static int query_terminal_cols(void)
+{
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+        return ws.ws_col;
+    }
+    return 80;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -412,16 +436,68 @@ static void redraw_event_zone_locked(void)
 }
 
 /**
- * @brief Bandeau de statistiques « live » : sans objet en mode ANSI.
+ * @brief Redessine le bandeau de stats live (vidéo inverse, pleine largeur),
+ *        juste au-dessus du titre « Events » — même empilement que la
+ *        variante ncurses (stats_win au-dessus de events_win). L'appelant
+ *        doit détenir `output_mutex` ; sauvegarde/restaure le curseur comme
+ *        redraw_event_zone_locked pour ne jamais perturber la région de
+ *        défilement ni la ligne de saisie en cours.
+ */
+static void redraw_status_zone_locked(void)
+{
+    if (!zone_active) {
+        return;
+    }
+
+    int stats_row = zone_rows - ZONE_RESERVED; /* juste au-dessus du titre Events */
+    char buf[32];
+
+    fputs("\0337", stdout);                            /* sauvegarde curseur (DECSC) */
+    snprintf(buf, sizeof buf, "\033[%d;1H", stats_row);
+    fputs(buf, stdout);
+    fputs("\033[7m", stdout);                          /* vidéo inverse              */
+    fputs(status_buf, stdout);
+    int len = (int)strlen(status_buf);
+    int cols = zone_cols > 0 ? zone_cols : 80;
+    for (int c = len; c < cols; c++) {
+        fputc(' ', stdout);                            /* complète la bande jusqu'au bord */
+    }
+    fputs("\033[0m", stdout);
+    fputs("\0338", stdout);                            /* restaure curseur (DECRC)   */
+    fflush(stdout);
+}
+
+/**
+ * @brief Met à jour le bandeau de statistiques « live » (vitesse, stock, record…).
  *
- * Le mode ANSI ne réserve pas de ligne d'état dédiée (seule la zone Events est
- * fixe). Les statistiques agrégées restent consultables via la commande `check`.
- * Cette fonction existe pour préserver l'interface commune avec la variante
- * ncurses (`logger_ncurses.c`).
+ * Mode ANSI : réserve désormais une ligne d'état dédiée, juste au-dessus de la
+ * zone Events (même empilement que la variante ncurses) — voir
+ * redraw_status_zone_locked. Sans zone fixe installée (sortie non interactive,
+ * terminal trop petit), le message est simplement mémorisé sans effet visible
+ * : `check` reste la voie de consultation des statistiques dans ce cas.
  */
 void log_status(const char *format, ...)
 {
-    (void)format;
+    char buf[STATUS_MSG_MAX];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buf, sizeof buf, format, args);
+    va_end(args);
+
+    /* Le thread checker qui appelle log_status() tourne dans le parent ; il n'y
+       a pas de routage IPC à faire. Si un enfant forké appelait malgré tout,
+       on ignore (il n'a pas de bandeau à mettre à jour). */
+    if (log_should_route_to_parent()) {
+        return;
+    }
+
+    pthread_mutex_lock(&output_mutex);
+    strncpy(status_buf, buf, sizeof status_buf - 1);
+    status_buf[sizeof status_buf - 1] = '\0';
+    if (zone_active) {
+        redraw_status_zone_locked();
+    }
+    pthread_mutex_unlock(&output_mutex);
 }
 
 void log_event(const char *format, ...)
@@ -575,6 +651,7 @@ static void *event_zone_loop(void *arg)
         if (zone_active) {
             if (rows > ZONE_RESERVED + 1 && rows != zone_rows) {
                 zone_rows = rows;
+                zone_cols = query_terminal_cols();
                 int region_bottom = zone_rows - ZONE_RESERVED;
                 char buf[32];
                 snprintf(buf, sizeof buf, "\033[1;%dr", region_bottom);
@@ -583,6 +660,7 @@ static void *event_zone_loop(void *arg)
                 fputs(buf, stdout);              /* curseur en bas de la région   */
                 fflush(stdout);
             }
+            redraw_status_zone_locked();
             redraw_event_zone_locked();
         }
         pthread_mutex_unlock(&output_mutex);
@@ -603,6 +681,7 @@ void status_zone_init(void)
 
     pthread_mutex_lock(&output_mutex);
     zone_rows = rows;
+    zone_cols = query_terminal_cols();
     int region_bottom = zone_rows - ZONE_RESERVED;
     char buf[32];
     fputs("\033[2J", stdout);                          /* efface tout l'écran          */
@@ -611,6 +690,7 @@ void status_zone_init(void)
     snprintf(buf, sizeof buf, "\033[%d;1H", region_bottom);
     fputs(buf, stdout);                                /* curseur en bas de la région  */
     zone_active = 1;
+    redraw_status_zone_locked();
     redraw_event_zone_locked();
     fflush(stdout);
     pthread_mutex_unlock(&output_mutex);
