@@ -1591,10 +1591,70 @@ int printdatamanager(void)
 	{
 		print_file(fp);
 	}
-	
+
 	unlock_all_file();
-	
+
 	return 0;
+}
+
+/**
+ * @brief Variante fichier de print_file (voir datamanager.h) : écrit dans
+ *        @p out plutôt que dans les logs, en comptant les possibilités écrites.
+ *
+ * Même absence de verrouillage que print_file (le verrouillage, quand il a
+ * lieu, est à la charge de l'appelant — voir fprint_datamanager).
+ *
+ * @param out   Flux ouvert en écriture.
+ * @param fp    Numéro de la file à exporter.
+ * @param count Accumulateur du nombre de possibilités écrites (non remis à
+ *              zéro : permet à l'appelant de cumuler sur plusieurs files).
+ *              NULL si l'appelant ne veut pas ce décompte.
+ * @return      0 en cas de succès, -1 dès la première écriture en échec
+ *              (le fichier peut alors être incomplet).
+ */
+int fprint_file(FILE *out, int fp, size_t *count)
+{
+    File *pools[2] = { &file_possibility[fp].file, &file_possibility_checked[fp].file };
+    for (int p = 0; p < 2; p++)
+    {
+        Element *currElement = pools[p]->start;
+        while(currElement != NULL)
+        {
+            if(currElement->value != NULL)
+            {
+                struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+                if (fprint_possibility_packet(out, possibility) != 0) {
+                    return -1;
+                }
+                if (count != NULL) (*count)++;
+            }
+            currElement = currElement->next;
+        }
+    }
+    return 0;
+}
+
+/**
+ * @brief Variante fichier de printdatamanager (voir datamanager.h) : exporte
+ *        toutes les files vers @p out au lieu des logs.
+ * @param out   Flux ouvert en écriture.
+ * @param count Décompte cumulé des possibilités écrites (NULL si inutile).
+ * @return      0 en cas de succès, -1 si une file a échoué à s'écrire (export
+ *              alors interrompu, le fichier peut être incomplet).
+ */
+int fprint_datamanager(FILE *out, size_t *count)
+{
+	lock_all_file();
+	int rc = 0;
+	for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		if (fprint_file(out, fp, count) != 0) {
+			rc = -1;
+			break;
+		}
+	}
+	unlock_all_file();
+	return rc;
 }
 
 int print_file_analysed(int fp)
@@ -1615,6 +1675,31 @@ int print_file_analysed(int fp)
     return 0;
 }
 
+/**
+ * @brief Variante fichier de print_file_analysed (voir datamanager.h).
+ * @param out   Flux ouvert en écriture.
+ * @param fp    Numéro de la file d'analyse à exporter.
+ * @param count Accumulateur du nombre de possibilités écrites (NULL si inutile).
+ * @return      0 en cas de succès, -1 dès la première écriture en échec.
+ */
+int fprint_file_analysed(FILE *out, int fp, size_t *count)
+{
+    Element *currElement = file_possibility_analysed[fp].file.start;
+    while(currElement != NULL)
+    {
+        if(currElement->value != NULL)
+        {
+            struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+            if (fprint_possibility_packet(out, possibility) != 0) {
+                return -1;
+            }
+            if (count != NULL) (*count)++;
+        }
+        currElement = currElement->next;
+    }
+    return 0;
+}
+
 int print_all_file_analysed(void)
 {
 	lock_all_file_analysed();
@@ -1623,10 +1708,31 @@ int print_all_file_analysed(void)
 	{
 		print_file_analysed(fp);
 	}
-	
+
 	unlock_all_file_analysed();
-	
+
 	return 0;
+}
+
+/**
+ * @brief Variante fichier de print_all_file_analysed (voir datamanager.h).
+ * @param out   Flux ouvert en écriture.
+ * @param count Décompte cumulé des possibilités écrites (NULL si inutile).
+ * @return      0 en cas de succès, -1 si une file a échoué à s'écrire.
+ */
+int fprint_all_file_analysed(FILE *out, size_t *count)
+{
+	lock_all_file_analysed();
+	int rc = 0;
+	for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		if (fprint_file_analysed(out, fp, count) != 0) {
+			rc = -1;
+			break;
+		}
+	}
+	unlock_all_file_analysed();
+	return rc;
 }
 
 /**

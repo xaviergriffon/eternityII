@@ -2597,6 +2597,187 @@ TEST print_all_file_analysed_lists_packets(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * Export console vers fichier (P5) : fprint_datamanager / fprint_file /
+ * fprint_file_analysed / fprint_all_file_analysed — commandes console
+ * `print`/`printFile`/`printAnalysed [fichier]`.
+ * ------------------------------------------------------------------------ */
+
+/* fprint_datamanager écrit toutes les possibilités du stock (routées par
+   add_possibility sur des files internes non déterministes depuis les tests)
+   dans un fichier au lieu des logs : le compte retourné doit correspondre au
+   nombre ajouté, et fprint_file, appelé sur CHAQUE file individuellement,
+   doit répartir exactement ce même total (aucune possibilité perdue ni
+   dupliquée par la variante « une file à la fois »). */
+TEST fprint_datamanager_writes_all_possibilities_to_file(void)
+{
+    drain_all();
+    int allocs[] = { 11, 22, 33, 44 };
+    add_packets(allocs, 4);
+
+    char path[] = "/tmp/etii_fprintdm_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    FILE *out = fopen(path, "w");
+    ASSERT(out != NULL);
+
+    size_t count = 0;
+    ASSERT_EQ_FMT(0, fprint_datamanager(out, &count), "%d");
+    fclose(out);
+    ASSERT_EQ_FMT(4ULL, (unsigned long long)count, "%llu");
+
+    FILE *in = fopen(path, "r");
+    ASSERT(in != NULL);
+    char buf[16384] = {0};
+    size_t n = fread(buf, 1, sizeof buf - 1, in);
+    fclose(in);
+    unlink(path);
+    (void)n;
+    ASSERT(strstr(buf, "\"alloc\": 11") != NULL);
+    ASSERT(strstr(buf, "\"alloc\": 22") != NULL);
+    ASSERT(strstr(buf, "\"alloc\": 33") != NULL);
+    ASSERT(strstr(buf, "\"alloc\": 44") != NULL);
+
+    /* fprint_file sur chaque file individuellement : le total cumulé doit
+       redonner exactement 4 (couverture complète, pas de double-compte). */
+    size_t per_file_total = 0;
+    for (int fp = 0; fp < 10; fp++) {
+        FILE *devnull = fopen("/dev/null", "w");
+        ASSERT(devnull != NULL);
+        ASSERT_EQ_FMT(0, fprint_file(devnull, fp, &per_file_total), "%d");
+        fclose(devnull);
+    }
+    ASSERT_EQ_FMT(4ULL, (unsigned long long)per_file_total, "%llu");
+
+    drain_all();
+    PASS();
+}
+
+/* fprint_file_analysed ne doit exporter QUE la file demandée (sélectivité) :
+   deux paquets d'alloc distincts placés dans deux files différentes, seul
+   celui de la file interrogée doit apparaître dans l'export. */
+TEST fprint_file_analysed_exports_only_requested_file(void)
+{
+    drain_all();
+    struct possibility_packet pk0;
+    memset(&pk0, 0, sizeof pk0);
+    pk0.alloc = 55;
+    add_possibility_analysed(&pk0, 0);
+
+    struct possibility_packet pk1;
+    memset(&pk1, 0, sizeof pk1);
+    pk1.alloc = 66;
+    add_possibility_analysed(&pk1, 1);
+
+    char path[] = "/tmp/etii_fprintfa_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    FILE *out = fopen(path, "w");
+    ASSERT(out != NULL);
+
+    size_t count = 0;
+    ASSERT_EQ_FMT(0, fprint_file_analysed(out, 0, &count), "%d");
+    fclose(out);
+    ASSERT_EQ_FMT(1ULL, (unsigned long long)count, "%llu");
+
+    FILE *in = fopen(path, "r");
+    ASSERT(in != NULL);
+    char buf[4096] = {0};
+    size_t n = fread(buf, 1, sizeof buf - 1, in);
+    fclose(in);
+    unlink(path);
+    (void)n;
+    ASSERT(strstr(buf, "\"alloc\": 55") != NULL);
+    ASSERT(strstr(buf, "\"alloc\": 66") == NULL); /* pas la file 1 */
+
+    drain_all();
+    PASS();
+}
+
+/* fprint_all_file_analysed agrège TOUTES les files d'analyse dans un seul
+   export (pendant du print_all_file_analysed console, mais vers fichier). */
+TEST fprint_all_file_analysed_aggregates_every_file(void)
+{
+    drain_all();
+    struct possibility_packet pk0;
+    memset(&pk0, 0, sizeof pk0);
+    pk0.alloc = 77;
+    add_possibility_analysed(&pk0, 0);
+
+    struct possibility_packet pk1;
+    memset(&pk1, 0, sizeof pk1);
+    pk1.alloc = 88;
+    add_possibility_analysed(&pk1, 1);
+
+    char path[] = "/tmp/etii_fprintall_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    FILE *out = fopen(path, "w");
+    ASSERT(out != NULL);
+
+    size_t count = 0;
+    ASSERT_EQ_FMT(0, fprint_all_file_analysed(out, &count), "%d");
+    fclose(out);
+    ASSERT_EQ_FMT(2ULL, (unsigned long long)count, "%llu");
+
+    FILE *in = fopen(path, "r");
+    ASSERT(in != NULL);
+    char buf[4096] = {0};
+    size_t n = fread(buf, 1, sizeof buf - 1, in);
+    fclose(in);
+    unlink(path);
+    (void)n;
+    ASSERT(strstr(buf, "\"alloc\": 77") != NULL);
+    ASSERT(strstr(buf, "\"alloc\": 88") != NULL);
+
+    drain_all();
+    PASS();
+}
+
+/* Décompte cumulatif : count n'est PAS remis à zéro par les fonctions
+   d'export, pour permettre à l'appelant de cumuler sur plusieurs appels
+   (ex. : boucle sur toutes les files du data manager). Un compteur non nul
+   au départ doit être incrémenté, pas écrasé. */
+TEST fprint_file_analysed_count_accumulates_across_calls(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 99;
+    add_possibility_analysed(&pk, 0);
+
+    FILE *devnull = fopen("/dev/null", "w");
+    ASSERT(devnull != NULL);
+    size_t count = 5; /* préexistant : ne doit pas être écrasé */
+    ASSERT_EQ_FMT(0, fprint_file_analysed(devnull, 0, &count), "%d");
+    fclose(devnull);
+    ASSERT_EQ_FMT(6ULL, (unsigned long long)count, "%llu"); /* 5 + 1 nouveau */
+
+    drain_all();
+    PASS();
+}
+
+/* count == NULL est accepté (l'appelant ne s'intéresse pas au décompte). */
+TEST fprint_file_analysed_accepts_null_count(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 1;
+    add_possibility_analysed(&pk, 0);
+
+    FILE *devnull = fopen("/dev/null", "w");
+    ASSERT(devnull != NULL);
+    ASSERT_EQ_FMT(0, fprint_file_analysed(devnull, 0, NULL), "%d");
+    fclose(devnull);
+
+    drain_all();
+    PASS();
+}
+
 /* rmnonext : impasse EN TÊTE de file (previous NULL, next non NULL) — le
  * chaînage start/next->previous est recousu correctement. */
 TEST remove_no_next_removes_dead_packet_at_head(void)
@@ -3238,6 +3419,11 @@ SUITE(datamanager_suite)
     RUN_TEST(restore_sanitizes_legacy_checked_flag);
     RUN_TEST(import_json_drains_existing_stock);
     RUN_TEST(print_all_file_analysed_lists_packets);
+    RUN_TEST(fprint_datamanager_writes_all_possibilities_to_file);
+    RUN_TEST(fprint_file_analysed_exports_only_requested_file);
+    RUN_TEST(fprint_all_file_analysed_aggregates_every_file);
+    RUN_TEST(fprint_file_analysed_count_accumulates_across_calls);
+    RUN_TEST(fprint_file_analysed_accepts_null_count);
     RUN_TEST(remove_no_next_removes_dead_packet_at_head);
     RUN_TEST(rmnonext_solution_with_stop_on_solution_exits);
     RUN_TEST(check_duplicate_flags_duplicates_and_origins);

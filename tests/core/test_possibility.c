@@ -741,6 +741,68 @@ TEST save_possibility_unwritable_exits(void)
 }
 
 /* --------------------------------------------------------------------------
+ * fprint_possibility_packet : export JSON vers un fichier arbitraire (P5,
+ * commandes console `print`/`printFile`/`printAnalysed [fichier]`)
+ * ------------------------------------------------------------------------ */
+
+/* Écrit un paquet dans un fichier temporaire et vérifie le format JSON
+   attendu (mêmes champs que print_possibility_packet, destination différente). */
+TEST fprint_possibility_packet_writes_json(void)
+{
+    char path[] = "/tmp/etii_fprint_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = 7;
+    p->x = 3;
+    p->y = 4;
+
+    FILE *out = fopen(path, "w");
+    ASSERT(out != NULL);
+    ASSERT_EQ_FMT(0, fprint_possibility_packet(out, p), "%d");
+    fclose(out);
+
+    FILE *in = fopen(path, "r");
+    ASSERT(in != NULL);
+    char buf[8192] = {0};
+    size_t n = fread(buf, 1, sizeof buf - 1, in);
+    fclose(in);
+    unlink(path);
+    (void)n;
+
+    ASSERT(strstr(buf, "\"alloc\": 7") != NULL);
+    ASSERT(strstr(buf, "\"x\": 3") != NULL);
+    ASSERT(strstr(buf, "\"y\": 4") != NULL);
+    ASSERT(strstr(buf, "\"grid\": [[") != NULL);
+
+    free(p);
+    PASS();
+}
+
+/* Flux déjà fermé (ou en lecture seule) -> fprintf échoue -> -1, sans crash. */
+TEST fprint_possibility_packet_reports_write_failure(void)
+{
+    char path[] = "/tmp/etii_fprint_ro_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = 1;
+
+    FILE *ro = fopen(path, "r"); /* ouvert en LECTURE seule : écrire échoue */
+    ASSERT(ro != NULL);
+    ASSERT_EQ_FMT(-1, fprint_possibility_packet(ro, p), "%d");
+    fclose(ro);
+    unlink(path);
+
+    free(p);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
  * save_solution_csv : sérialisation CSV
  * ------------------------------------------------------------------------ */
 
@@ -2209,6 +2271,8 @@ SUITE(possibility_suite)
     RUN_TEST(normalize_full_board_is_conforming);
     RUN_TEST(save_possibility_writes_packet_to_file);
     RUN_TEST(save_possibility_unwritable_exits);
+    RUN_TEST(fprint_possibility_packet_writes_json);
+    RUN_TEST(fprint_possibility_packet_reports_write_failure);
     RUN_TEST(save_solution_csv_writes_header_and_rows);
     RUN_TEST(save_solution_csv_null_parts_writes_minus_one_faces);
     RUN_TEST(save_solution_csv_unwritable_returns_minus_one);

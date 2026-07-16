@@ -1,4 +1,5 @@
 #include "ui/command_lines.h"
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
@@ -190,12 +191,19 @@ static command_description commands[NB_COMMANDS] = {
 
     {"check", check_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
      "affiche le dernier rapport de statistiques", NULL, NULL},
-    {"print", print_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
-     "affiche l'état du data manager (files, tailles)", NULL, NULL},
-    {"printFile", printfile_interpreter, 0, CMD_CAT_DIAG, 0, "printFile <n>",
-     "affiche le contenu de la file numéro <n>", NULL, NULL},
-    {"printAnalysed", printanalysed_interpreter, 1, CMD_CAT_DIAG, 0, NULL,
-     "affiche les possibilités en cours d'analyse", NULL, NULL},
+    {"print", print_interpreter, 0, CMD_CAT_DIAG, 0, "print [fichier]",
+     "affiche l'état du data manager (files, tailles)",
+     "Avec [fichier] : exporte le dump JSON complet dans ce fichier au lieu de la\n"
+     "console (évite qu'un gros stock ne déborde le pad de sortie en ncurses).", NULL},
+    {"printFile", printfile_interpreter, 0, CMD_CAT_DIAG, 0, "printFile <n> [fichier]",
+     "affiche le contenu de la file numéro <n>",
+     "Avec [fichier] : exporte cette file au format JSON dans ce fichier au lieu de\n"
+     "la console.", NULL},
+    {"printAnalysed", printanalysed_interpreter, 1, CMD_CAT_DIAG, 0, "printAnalysed [fichier]",
+     "affiche les possibilités en cours d'analyse",
+     "Avec [fichier] : exporte le dump JSON complet dans ce fichier au lieu de la\n"
+     "console. Propagée aux process fils : en mode client, le nom est suffixé du\n"
+     "pid (comme « backup ») pour que chaque process écrive dans son propre fichier.", NULL},
     {"statistic", statistic_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
      "affiche des statistiques détaillées sur le contenu des files", NULL, NULL},
     {"checkDatas", checkdatas_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
@@ -505,9 +513,52 @@ int loadjson_interpreter(void) {
     return 0;
 }
 
-/** @brief Interpréteur de `print` : affiche l'état du data manager (files, tailles). */
+/**
+ * @brief Ouvre @p path en écriture pour un export console ; journalise un
+ *        message homogène et clair en cas d'échec (le fichier n'existe pas
+ *        forcément, le répertoire parent peut être en lecture seule, etc.).
+ */
+static FILE *open_export_file(const char *cmd, const char *path)
+{
+    FILE *out = fopen(path, "w");
+    if (out == NULL) {
+        log_error("%s : impossible d'ouvrir « %s » en écriture\n", cmd, path);
+    }
+    return out;
+}
+
+/**
+ * @brief Referme un export ouvert par open_export_file et journalise le
+ *        résultat : décompte des possibilités écrites en cas de succès,
+ *        message d'erreur homogène sinon (export alors incomplet).
+ */
+static void close_export_file(const char *cmd, const char *path, FILE *out, int rc, size_t count)
+{
+    fclose(out);
+    if (rc == 0) {
+        log_info("%s : export : %zu possibilité%s écrite%s dans %s\n",
+                  cmd, count, count != 1 ? "s" : "", count != 1 ? "s" : "", path);
+    } else {
+        log_error("%s : échec de l'écriture dans « %s » (export incomplet)\n", cmd, path);
+    }
+}
+
+/**
+ * @brief Interpréteur de `print [fichier]` : affiche l'état du data manager
+ *        (files, tailles), ou exporte le dump JSON complet dans [fichier]
+ *        si l'argument est fourni.
+ */
 int print_interpreter(void) {
-    return printdatamanager();
+    char *path = strtok(NULL, " ");
+    if (path == NULL) {
+        return printdatamanager();
+    }
+    FILE *out = open_export_file("print", path);
+    if (out == NULL) return -1;
+    size_t count = 0;
+    int rc = fprint_datamanager(out, &count);
+    close_export_file("print", path, out, rc, count);
+    return rc;
 }
 
 /** @brief Interpréteur de `sortDescMulti` (alias `sortdm`) : tri descendant multi-threadé des fichiers de possibilités. */
@@ -544,14 +595,27 @@ int checkfiles_interpreter(void) {
     return check_files();
 }
 
-/** @brief Interpréteur de `printFile <n>` : affiche le contenu du fichier de possibilités numéro n. */
+/**
+ * @brief Interpréteur de `printFile <n> [fichier]` : affiche le contenu de la
+ *        file de possibilités numéro <n>, ou l'exporte en JSON dans [fichier]
+ *        si l'argument est fourni. <n> reste obligatoire.
+ */
 int printfile_interpreter(void) {
     char *arguments = strtok(NULL, " ");
-    if (arguments != NULL) {
-        return print_file(atoi(arguments));
+    if (arguments == NULL) {
+        return CMD_ERR_USAGE;
     }
-
-    return CMD_ERR_USAGE;
+    int n = atoi(arguments);
+    char *path = strtok(NULL, " ");
+    if (path == NULL) {
+        return print_file(n);
+    }
+    FILE *out = open_export_file("printFile", path);
+    if (out == NULL) return -1;
+    size_t count = 0;
+    int rc = fprint_file(out, n, &count);
+    close_export_file("printFile", path, out, rc, count);
+    return rc;
 }
 
 /** @brief Interpréteur de `checkFile <n>` : vérifie la cohérence du fichier de possibilités numéro n. */
@@ -805,9 +869,49 @@ int clients_cmd_interpreter(void) {
     return 0;
 }
 
-/** @brief Interpréteur de `printAnalysed` : affiche les possibilités en cours d'analyse. */
+/**
+ * @brief Interpréteur de `printAnalysed [fichier]` : affiche les possibilités
+ *        en cours d'analyse, ou les exporte en JSON dans [fichier] si
+ *        l'argument est fourni.
+ *
+ * `printAnalysed` est propagée aux process fils (send_to_childs = 1,
+ * `send_command_to_childs`) : le TEXTE de la commande, [fichier] compris, est
+ * rejoué tel quel par le parent ET par chaque fork de recherche — des
+ * processus séparés. Sans précaution, tous écriraient dans LE MÊME fichier en
+ * concurrence (écritures entrelacées / clobbering). On suffixe donc le chemin
+ * par le pid en mode client — même convention que `backup_interpreter` pour
+ * DEF_FILE/DEF_ANALYSE_FILE — pour que chaque process écrive dans son propre
+ * fichier. Le serveur ne force aucun processus de recherche, donc pas de
+ * collision possible côté serveur : chemin utilisé tel quel.
+ */
 int printanalysed_interpreter(void) {
-    return print_all_file_analysed();
+    char *path = strtok(NULL, " ");
+    if (path == NULL) {
+        return print_all_file_analysed();
+    }
+
+    char *final_path = path;
+    char *suffixed = NULL;
+    if (server == 0) {
+        suffixed = malloc(strlen(path) + 11);
+        if (suffixed == NULL) {
+            log_error("printAnalysed : allocation échouée pour le suffixe de pid\n");
+            return -1;
+        }
+        sprintf(suffixed, "%s_%i", path, getpid());
+        final_path = suffixed;
+    }
+
+    FILE *out = open_export_file("printAnalysed", final_path);
+    if (out == NULL) {
+        free(suffixed);
+        return -1;
+    }
+    size_t count = 0;
+    int rc = fprint_all_file_analysed(out, &count);
+    close_export_file("printAnalysed", final_path, out, rc, count);
+    free(suffixed);
+    return rc;
 }
 
 /** @brief Interpréteur de `restockAnalysed` : remet les possibilités en cours d'analyse dans le stock. */

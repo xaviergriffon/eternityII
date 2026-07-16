@@ -1091,14 +1091,18 @@ int normalize_possibility_packet(struct possibility_packet *packet)
 }
 
 /**
- * @brief Affiche un `possibility_packet` au format JSON dans les logs.
+ * @brief Construit la représentation JSON de la grille d'un `possibility_packet`.
  *
- * Format : `{"alloc": N, "x": X, "y": Y, "grid": [[...], ...]}`.
+ * Partagée par print_possibility_packet (destination : les logs) et
+ * fprint_possibility_packet (destination : un fichier arbitraire, pour
+ * l'export console `print`/`printFile [fichier]`) : même format, deux sorties.
  *
- * @param packet Paquet à afficher.
- * @return       0.
+ * @param packet Paquet dont la grille doit être sérialisée.
+ * @return       Chaîne malloc'ée (à libérer par l'appelant), jamais NULL
+ *               (fatal_error en cas d'échec d'allocation, comme le reste du
+ *               module).
  */
-int print_possibility_packet(struct possibility_packet *packet)
+static char *build_grid_json(struct possibility_packet *packet)
 {
 	// grid[x][y] est un int16_t : la case peut contenir un id de pièce TOURNÉ,
 	// codé id + ETERN_PARTS*rotation (cf. id_for_rotated_part), donc jusqu'à
@@ -1116,7 +1120,7 @@ int print_possibility_packet(struct possibility_packet *packet)
 
 	char *grid = malloc(sizeof(char) * grid_budget);
 	if (grid == NULL) {
-		fatal_error("print_possibility_packet: malloc failed (%zu bytes)\n", grid_budget);
+		fatal_error("build_grid_json: malloc failed (%zu bytes)\n", grid_budget);
 	}
 	int c = 0;
 	grid[c++] = '[';
@@ -1143,6 +1147,20 @@ int print_possibility_packet(struct possibility_packet *packet)
 	}
 	grid[c++] = ']';
 	grid[c++] = '\0';
+	return grid;
+}
+
+/**
+ * @brief Affiche un `possibility_packet` au format JSON dans les logs.
+ *
+ * Format : `{"alloc": N, "x": X, "y": Y, "grid": [[...], ...]}`.
+ *
+ * @param packet Paquet à afficher.
+ * @return       0.
+ */
+int print_possibility_packet(struct possibility_packet *packet)
+{
+	char *grid = build_grid_json(packet);
 	log_info("{\"alloc\": %i, \"x\": %i, \"y\": %i, \"grid\": ", packet->alloc, packet->x, packet->y);
     log_info("%s", grid);
     log_info("}\n");
@@ -1150,6 +1168,32 @@ int print_possibility_packet(struct possibility_packet *packet)
 	free(grid);
 
 	return 0;
+}
+
+/**
+ * @brief Écrit un `possibility_packet` au format JSON dans un fichier arbitraire.
+ *
+ * Même format que print_possibility_packet (destinée aux logs), utilisée par
+ * l'export console `print`/`printFile`/`printAnalysed [fichier]` pour éviter
+ * qu'un gros stock ne déborde silencieusement le pad de sortie ncurses ou ne
+ * défile hors de portée en ANSI.
+ *
+ * @param out    Flux ouvert en écriture (l'appelant garde la responsabilité
+ *               de l'ouvrir et de le refermer).
+ * @param packet Paquet à écrire.
+ * @return       0 en cas de succès, -1 si une écriture a échoué (ex. : disque
+ *               plein) — l'appelant doit alors considérer le fichier incomplet.
+ */
+int fprint_possibility_packet(FILE *out, struct possibility_packet *packet)
+{
+	char *grid = build_grid_json(packet);
+	int rc = 0;
+	if (fprintf(out, "{\"alloc\": %i, \"x\": %i, \"y\": %i, \"grid\": %s}\n",
+	            packet->alloc, packet->x, packet->y, grid) < 0) {
+		rc = -1;
+	}
+	free(grid);
+	return rc;
 }
 
 /**

@@ -2,6 +2,7 @@
 #define eternityII_possibility_h
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "core/part.h"
 #include "core/lifo.h"
@@ -251,6 +252,18 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
  * @return       0.
  */
 int print_possibility_packet(struct possibility_packet *packet);
+
+/**
+ * @brief Écrit un `possibility_packet` au format JSON dans un fichier arbitraire.
+ *
+ * Même format que print_possibility_packet ; utilisée pour l'export console
+ * (`print`/`printFile`/`printAnalysed [fichier]`) plutôt que l'affichage.
+ *
+ * @param out    Flux ouvert en écriture (ouverture/fermeture à la charge de l'appelant).
+ * @param packet Paquet à écrire.
+ * @return       0 en cas de succès, -1 si une écriture a échoué.
+ */
+int fprint_possibility_packet(FILE *out, struct possibility_packet *packet);
 
 /**
  * @brief Sérialise un `possibility_packet` dans un fichier binaire.
