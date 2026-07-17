@@ -232,81 +232,104 @@ TEST check_possibility_valid_genesis_is_zero(void)
  * check_possibility : voisins TOP/LEFT non encore posés (grid == -2), au sein
  * de la boucle de cohérence (p < alloc). Cas symétrique de
  * check_possibility_consistent_interior_neighbors_is_zero (build 16, RIGHT et
- * BOTTOM) : sous la traversée en spirale du build 256 (directions[] part du
- * bord haut, longe le bord droit puis entame le bord bas), le voisin GAUCHE
- * d'une case du bord droit et le voisin HAUT de la 1re case du bord bas ne
- * sont pas encore posés quand alloc s'arrête juste après -- alors qu'un
- * parcours colonne-par-colonne (build 16) ne peut JAMAIS produire cette
- * configuration (TOP/LEFT y précèdent toujours la case courante dans l'ordre
- * de parcours). Construction : les 16 cases du bord haut (indices 0-15) + les
- * 15 cases du bord droit (indices 16-30) + la 1re case du bord bas (indice 31,
- * (14,15)) sont posées avec des couleurs de bord cohérentes ; alloc=32.
- *   - indice 16-30 (bord droit, x=15) : voisin GAUCHE (14,y) jamais posé -> -1.
- *   - indice 31 = (14,15) : voisin HAUT (14,14) jamais posé (2e anneau de la
- *     spirale, bien après l'indice 31) -> -1.
+ * BOTTOM) : sous le nouveau parcours du build 256 (directions[]/dirx[]/diry[],
+ * app/static_variables.c), les 23 premiers indices (p=0..22) visitent (0,0)
+ * puis longent le bord haut jusqu'à (15,0), avec trois courtes incursions
+ * verticales en (2,*), (13,*) et (15,*) et un dernier saut en (14,2) -- sans
+ * jamais visiter (14,1) avant l'indice 23 (exclu par alloc=23). Cela reproduit
+ * les deux cas symétriques recherchés :
+ *   - p=3 = (2,1) : voisin GAUCHE (1,1) jamais posé (hors de ce parcours) -> -1.
+ *   - p=22 = (14,2) : voisin HAUT (14,1) posé plus tard (indice 23, exclu par
+ *     alloc=23) -> -1.
  * Résultat attendu : 0 (aucune incohérence, les -1 court-circuitent la
  * comparaison).
  */
 TEST check_possibility_top_left_empty_neighbors_is_zero(void)
 {
-    struct part parts[33];
+    /* parts[1..23] correspondent aux 23 premières cases du parcours (indices
+       0..22 de dirx[]/diry[]), dans l'ordre. parts[0] est un bouchon inutilisé. */
+    struct part parts[24];
     memset(parts, 0, sizeof(parts));
-    for (int i = 0; i <= 32; i++) parts[i].id = i;
+    for (int i = 0; i <= 23; i++) parts[i].id = i;
 
     int color = 100;
-    /* Bord haut (indices 0-15, cases (0,0)..(15,0), valeurs de grille 1..16) :
-       TOP = bord (0) pour toutes ; chaîne RIGHT/LEFT entre voisins successifs. */
-    for (int i = 1; i <= 16; i++) parts[i].top = 0;
-    parts[1].left = 0; /* bord gauche du plateau */
-    for (int x = 0; x <= 14; x++) {
-        int link = color++;
-        parts[x + 1].right = (int8_t)link;
-        parts[x + 2].left = (int8_t)link;
-    }
-    parts[16].right = 0; /* coin (15,0) : bord droit */
+    int L[15];
+    for (int i = 0; i < 15; i++) L[i] = color++;
+    int V2a = color++, V2b = color++;
+    int V13a = color++, V13b = color++;
+    int V15a = color++, V15b = color++;
+    int W1 = color++, W2 = color++;
 
-    /* Bord droit (indices 16-30, cases (15,1)..(15,15), valeurs 17..31) :
-       RIGHT = bord (0) pour toutes ; chaîne TOP/BOTTOM verticale. */
-    for (int i = 17; i <= 31; i++) parts[i].right = 0;
-    {
-        int link0 = color++;
-        parts[16].bottom = (int8_t)link0; /* (15,0) -> (15,1) */
-        parts[17].top = (int8_t)link0;
-    }
-    for (int y = 1; y <= 14; y++) {
-        int idx_y = 16 + y;      /* gridval de (15,y)   */
-        int idx_y1 = 17 + y;     /* gridval de (15,y+1) */
-        int link = color++;
-        parts[idx_y].bottom = (int8_t)link;
-        parts[idx_y1].top = (int8_t)link;
-    }
-    parts[31].bottom = 0; /* coin (15,15) : bord bas */
+    /* Chaîne horizontale du bord haut (0,0)..(15,0) -> gridvals 1,2,3,6,7,8,9,
+       10,11,12,13,14,15,16,19,20 (les gridvals 4,5,17,18,21..23 sont les
+       incursions verticales / le saut final, hors de cette chaîne). */
+    parts[1].top = 0; parts[1].left = 0; parts[1].right = (int8_t)L[0];               /* (0,0) */
+    parts[2].top = 0; parts[2].left = (int8_t)L[0]; parts[2].right = (int8_t)L[1];    /* (1,0) */
+    parts[3].top = 0; parts[3].left = (int8_t)L[1]; parts[3].right = (int8_t)L[2];    /* (2,0) */
+    parts[3].bottom = (int8_t)V2a;
+    parts[4].top = (int8_t)V2a; parts[4].bottom = (int8_t)V2b;                        /* (2,1) */
+    parts[5].top = (int8_t)V2b;                                                        /* (2,2) */
+    parts[6].top = 0; parts[6].left = (int8_t)L[2]; parts[6].right = (int8_t)L[3];    /* (3,0) */
+    parts[7].top = 0; parts[7].left = (int8_t)L[3]; parts[7].right = (int8_t)L[4];    /* (4,0) */
+    parts[8].top = 0; parts[8].left = (int8_t)L[4]; parts[8].right = (int8_t)L[5];    /* (5,0) */
+    parts[9].top = 0; parts[9].left = (int8_t)L[5]; parts[9].right = (int8_t)L[6];    /* (6,0) */
+    parts[10].top = 0; parts[10].left = (int8_t)L[6]; parts[10].right = (int8_t)L[7]; /* (7,0) */
+    parts[11].top = 0; parts[11].left = (int8_t)L[7]; parts[11].right = (int8_t)L[8]; /* (8,0) */
+    parts[12].top = 0; parts[12].left = (int8_t)L[8]; parts[12].right = (int8_t)L[9]; /* (9,0) */
+    parts[13].top = 0; parts[13].left = (int8_t)L[9]; parts[13].right = (int8_t)L[10]; /* (10,0) */
+    parts[14].top = 0; parts[14].left = (int8_t)L[10]; parts[14].right = (int8_t)L[11]; /* (11,0) */
+    parts[15].top = 0; parts[15].left = (int8_t)L[11]; parts[15].right = (int8_t)L[12]; /* (12,0) */
+    parts[16].top = 0; parts[16].left = (int8_t)L[12]; parts[16].right = (int8_t)L[13]; /* (13,0) */
+    parts[16].bottom = (int8_t)V13a;
+    parts[17].top = (int8_t)V13a; parts[17].bottom = (int8_t)V13b;                     /* (13,1) */
+    parts[18].top = (int8_t)V13b; parts[18].right = (int8_t)W1;                        /* (13,2) */
+    parts[19].top = 0; parts[19].left = (int8_t)L[13]; parts[19].right = (int8_t)L[14]; /* (14,0) */
+    parts[20].top = 0; parts[20].left = (int8_t)L[14]; parts[20].right = 0;            /* (15,0) : coin bord droit */
+    parts[20].bottom = (int8_t)V15a;
+    parts[21].top = (int8_t)V15a; parts[21].right = 0; parts[21].bottom = (int8_t)V15b; /* (15,1) */
+    parts[22].top = (int8_t)V15b; parts[22].right = 0; parts[22].left = (int8_t)W2;    /* (15,2) */
+    parts[23].left = (int8_t)W1; parts[23].right = (int8_t)W2;                         /* (14,2) : TOP (14,1) non posé -> -1 */
 
-    /* 1re case du bord bas : indice 31, cellule (14,15), gridval = 32.
-       RIGHT relie (15,15)=gridval31 ; BOTTOM = bord (0). TOP et LEFT restent à
-       0 (voisins (14,14) et (13,15) jamais posés -> branches -1, aucune
-       contrainte). */
-    {
-        int linkB = color++;
-        parts[31].left = (int8_t)linkB;
-        parts[32].right = (int8_t)linkB;
-    }
-    parts[32].bottom = 0;
-
-    struct array_part rp = { .size = 33, .parts = parts };
+    struct array_part rp = { .size = 24, .parts = parts };
 
     struct possibility_packet *p = new_zeroed_packet();
     for (int x = 0; x < ETERN_SIZE; x++)
         for (int y = 0; y < ETERN_SIZE; y++)
             p->grid[x][y] = -2;
 
-    for (int x = 0; x <= 15; x++) p->grid[x][0] = (int16_t)(x + 1);      /* bord haut */
-    for (int y = 1; y <= 15; y++) p->grid[15][y] = (int16_t)(16 + y);    /* bord droit */
-    p->grid[14][15] = 32;                                                /* (14,15)   */
-    p->grid[7][8] = id_for_rotated_part(139, 2);                         /* ancrage genèse */
+    p->grid[0][0] = 1;
+    p->grid[1][0] = 2;
+    p->grid[2][0] = 3;
+    p->grid[2][1] = 4;
+    p->grid[2][2] = 5;
+    p->grid[3][0] = 6;
+    p->grid[4][0] = 7;
+    p->grid[5][0] = 8;
+    p->grid[6][0] = 9;
+    p->grid[7][0] = 10;
+    p->grid[8][0] = 11;
+    p->grid[9][0] = 12;
+    p->grid[10][0] = 13;
+    p->grid[11][0] = 14;
+    p->grid[12][0] = 15;
+    p->grid[13][0] = 16;
+    p->grid[13][1] = 17;
+    p->grid[13][2] = 18;
+    p->grid[14][0] = 19;
+    p->grid[15][0] = 20;
+    p->grid[15][1] = 21;
+    p->grid[15][2] = 22;
+    p->grid[14][2] = 23;
+    p->grid[7][8] = id_for_rotated_part(139, 2); /* ancrage genèse */
 
-    p->alloc = 32;
-    for (int id = 1; id <= 32; id++) set_face_used(p->b_faceused, id - 1, 1);
+    p->alloc = 23;
+    ASSERT_EQ_FMT((int8_t)2, dirx[3], "%d");
+    ASSERT_EQ_FMT((int8_t)1, diry[3], "%d");
+    ASSERT_EQ_FMT((int8_t)14, dirx[22], "%d");
+    ASSERT_EQ_FMT((int8_t)2, diry[22], "%d");
+    ASSERT_EQ_FMT((int8_t)14, dirx[23], "%d");
+    ASSERT_EQ_FMT((int8_t)1, diry[23], "%d");
+    for (int id = 1; id <= 23; id++) set_face_used(p->b_faceused, id - 1, 1);
 
     ASSERT_EQ_FMT(0, check_possibility(p, &rp), "%d");
 
@@ -1945,15 +1968,15 @@ TEST all_has_a_next_counted_complete_board_counts_zero(void)
  * `directions[]` -- alors qu'une case plus loin peut être morte (voisins posés
  * dont la combinaison de bords ne correspond à aucune pièce). Ce test
  * construit exactement ce plateau :
- *   - c=60 -> (dirx[60],diry[60]) = (1,14) : case intérieure, 4 voisins vides
+ *   - c=23 -> (dirx[23],diry[23]) = (14,1) : case intérieure, 4 voisins vides
  *     -> clé (all_face,all_face,all_face,all_face), satisfiable par
  *     construction (le compartiment "toute face" contient toutes les pièces).
- *   - c=67 -> (dirx[67],diry[67]) = (13,13) : case intérieure entourée de 4
+ *   - c=40 -> (dirx[40],diry[40]) = (13,13) : case intérieure entourée de 4
  *     pièces déjà posées dont la combinaison de bords ne correspond à AUCUNE
  *     pièce du jeu -> impasse.
- * (1,14) et (13,13) n'ont aucun voisin en commun : le premier reste bien
+ * (14,1) et (13,13) n'ont aucun voisin en commun : le premier reste bien
  * totalement non contraint quels que soient les voisins placés autour du
- * second. L'ancien code (break) renvoie 1 sans jamais atteindre c=67 ; le
+ * second. L'ancien code (break) renvoie 1 sans jamais atteindre c=40 ; le
  * nouveau code doit poursuivre le balayage et renvoyer 0. */
 TEST all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell(void)
 {
@@ -1982,13 +2005,13 @@ TEST all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell(void)
     p->grid[13][14] = 4;
     p->grid[12][13] = 5;
 
-    /* Démarre le balayage à c=60 = (1,14), la première case intérieure du
-     * parcours, non contrainte. c=67 = (13,13) est atteinte plus loin. */
-    p->alloc = 60;
-    ASSERT_EQ_FMT((int8_t)1, dirx[60], "%d");
-    ASSERT_EQ_FMT((int8_t)14, diry[60], "%d");
-    ASSERT_EQ_FMT((int8_t)13, dirx[67], "%d");
-    ASSERT_EQ_FMT((int8_t)13, diry[67], "%d");
+    /* Démarre le balayage à c=23 = (14,1), une case non contrainte du
+     * parcours. c=40 = (13,13) est atteinte plus loin. */
+    p->alloc = 23;
+    ASSERT_EQ_FMT((int8_t)14, dirx[23], "%d");
+    ASSERT_EQ_FMT((int8_t)1, diry[23], "%d");
+    ASSERT_EQ_FMT((int8_t)13, dirx[40], "%d");
+    ASSERT_EQ_FMT((int8_t)13, diry[40], "%d");
 
     ASSERT_EQ_FMT(0, possibility_all_has_a_next(p, map, &rp), "%d");
 

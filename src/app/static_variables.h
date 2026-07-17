@@ -22,7 +22,13 @@
 // contrôle v9, permettant au serveur de tirer la représentation complète
 // (pas seulement le compte) du meilleur plateau connu d'un client quand
 // celui-ci rapporte un nouveau record via CTRL_STATS (cf. core/best_board.h).
-#define VERSION 10
+// v11 : nouveau parcours de plateau (directions[]/dirx[]/diry[] en 256,
+// app/static_variables.c) pensé pour éliminer des possibilités plus tôt dans
+// la recherche. Un possibility_packet échangé entre un client v10 et un
+// serveur v11 (ou l'inverse) désignerait des cases différentes pour le même
+// indice de curseur (alloc) — bump de version pour forcer tous les clients
+// à se resynchroniser sur le nouveau parcours plutôt que corrompre le board.
+#define VERSION 11
 
 #define NB_CONNECTIONS_PER_THREAD 1
 // Temps d'attente de 100 microsecondes
