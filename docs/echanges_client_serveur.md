@@ -66,7 +66,12 @@ réassemblent les envois TCP partiels (voir [Robustesse](#comportement-en-cas-de
 | `INST_CONTROL_HELLO` | 16 | client → serveur | Annonce (v9) : le processus **parent** du client (jamais un fork) ouvre une connexion TCP dédiée et bascule cette session en [canal de contrôle](#canal-de-contrôle-v9), où les rôles s'inversent |
 
 Toute évolution du format « fil » impose d'incrémenter `VERSION` : le handshake exige
-une correspondance exacte.
+une correspondance exacte. La v11 bump ainsi `VERSION` sans ajouter de nouvelle
+instruction : le nouveau parcours de plateau (`directions[]`/`dirx[]`/`diry[]`,
+`src/app/static_variables.c`, pensé pour éliminer des possibilités plus tôt dans la
+recherche) fait qu'un même indice de curseur (`alloc`) désigne une case différente
+qu'en v10 — un `possibility_packet` échangé entre versions désynchroniserait
+silencieusement le board plutôt que de planter, d'où le refus explicite au handshake.
 
 ### Handshake de version
 
