@@ -797,6 +797,72 @@ TEST do_command_line_backup_restore_import_round_trip(void)
     PASS();
 }
 
+/* Régression : après un restore, max_result (score affiché en console/HTTP)
+ * doit refléter le meilleur plateau connu (g_server_best_board), pas
+ * seulement la profondeur maximale du stock de possibilités réimporté. Ici le
+ * stock ne contient que des allocs <= 2, mais le plateau record sauvegardé a
+ * alloc=9 -> max_result doit remonter à 9 après restore, pas rester à 2. */
+TEST do_command_line_restore_syncs_max_result_from_best_board(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_bkr_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+    int saved_server = server;
+    server = 1;
+    uint16_t saved_max_result = max_result;
+
+    // file_possibility_analysed est un pool global partagé avec les autres tests
+    // de la suite (dm_drain ne vide que le stock principal) : on le rapatrie dans
+    // le stock puis on vide le tout, pour ne pas hériter d'un alloc résiduel
+    // (ex. do_command_line_printanalysed_exports_with_pid_suffix_on_client, alloc=92)
+    // qui fausserait le résultat attendu du restore ci-dessous.
+    char restock[] = "restockAnalysed";
+    run_command_quiet(restock);
+    dm_drain();
+    int allocs[] = { 1, 2 };
+    dm_add(allocs, 2);
+
+    best_board_init(&g_server_best_board);
+    struct possibility_packet board;
+    memset(&board, 0, sizeof(board));
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            board.grid[x][y] = -2;
+        }
+    }
+    best_board_try_record(&g_server_best_board, &board, 9);
+
+    char backup[] = "backup";
+    int r_backup = run_command_quiet(backup);
+
+    dm_drain();
+    max_result = 0; /* simule un redémarrage : compteur en mémoire remis à zéro */
+    best_board_init(&g_server_best_board);
+    char restore[] = "restore";
+    int r_restore = run_command_quiet(restore);
+    uint16_t result_after_restore = max_result;
+
+    dm_drain();
+    best_board_init(&g_server_best_board);
+    unlink("./eternityII.back");
+    unlink("./eternityII-in_analyse.back");
+    unlink("./eternityII-best_board.back");
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+    server = saved_server;
+    max_result = saved_max_result;
+
+    ASSERT_EQ_FMT(0, r_backup, "%d");
+    ASSERT_EQ_FMT(0, r_restore, "%d");
+    ASSERT_EQ_FMT(9, (int)result_after_restore, "%d");
+    PASS();
+}
+
 /* ---------- exit_interpreter --------------------------------------------- */
 /*
  * exit_interpreter appelle exit() dans deux cas (mode serveur ; mode client
@@ -1472,6 +1538,7 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_loadjson_runs);
     RUN_TEST(do_command_line_rmnonext_runs);
     RUN_TEST(do_command_line_backup_restore_import_round_trip);
+    RUN_TEST(do_command_line_restore_syncs_max_result_from_best_board);
 
     RUN_TEST(exit_interpreter_server_mode_exits_immediately);
     RUN_TEST(exit_interpreter_client_parent_no_children_exits);
