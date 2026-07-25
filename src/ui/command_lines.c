@@ -477,8 +477,19 @@ int restore_interpreter(void) {
     // Non bloquant : un backup plus ancien peut ne pas avoir ce fichier (feature
     // ajoutée après coup) — le stock/analysed restaurés ci-dessus restent valides
     // sans lui, seule la représentation du meilleur plateau reste vide.
-    if (result == 0 && best_board_load(&g_server_best_board, DEF_BEST_BOARD_FILE) != 0) {
-        log_error("restore best board impossible (%s) : aucun plateau record connu\n", DEF_BEST_BOARD_FILE);
+    if (result == 0) {
+        if (best_board_load(&g_server_best_board, DEF_BEST_BOARD_FILE) != 0) {
+            log_error("restore best board impossible (%s) : aucun plateau record connu\n", DEF_BEST_BOARD_FILE);
+        } else {
+            // Le stock restauré ne reflète que la profondeur du curseur des
+            // possibilités en attente, pas le meilleur plateau jamais atteint :
+            // sans cette resynchronisation, max_result affiché reste sous-évalué
+            // par rapport au vrai record connu du serveur.
+            uint16_t recorded = best_board_result(&g_server_best_board);
+            if (recorded > max_result) {
+                max_result = recorded;
+            }
+        }
     }
 
     // On ne reprend que si aucun arrêt n'a été demandé entre-temps
