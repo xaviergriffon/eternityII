@@ -57,6 +57,16 @@ int main(int argc, const char *argv[]) {
         log_info("option : arrêt à la première solution activé (--stop-on-solution)\n");
     }
 
+    // ETII_BENCH_NODES : variable d'environnement (pas d'option CLI, hors du
+    // chemin de production) activant le banc de mesure — voir static_variables.h
+    // et tests/bench/bench_search.sh. Lue une seule fois ici, avant tout fork,
+    // comme les options CLI ci-dessus.
+    bench_target_nodes = bench_parse_nodes_env(getenv("ETII_BENCH_NODES"));
+    if (bench_target_nodes > 0) {
+        log_info("banc de mesure : arrêt demandé après %llu nœuds (ETII_BENCH_NODES)\n",
+                  bench_target_nodes);
+    }
+
     if (argc >= 2 && argv[1] != NULL) {
         // Initialisation avant tout fork/thread de statistiques : pas de
         // concurrence possible ici, mais on passe par lastcheck_publish()
@@ -332,7 +342,10 @@ void run_auto(const char *file);
  */
 void handle_test(const char *file) {
     NB_THREADS = 1;
-    max_search_by_sec = 100000;
+    // Le mode test bride par défaut à 100000 coups/s (usage interactif). Le
+    // banc de mesure (ETII_BENCH_NODES) veut le débit brut de la machine —
+    // pas de bridage artificiel dans ce cas.
+    max_search_by_sec = bench_target_nodes > 0 ? 0 : 100000;
     init_childs();
     init_counters();
     run_checker(0);

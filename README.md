@@ -69,11 +69,14 @@ make test             # tests unitaires (framework greatest, vendoré)
 make test-integration # scénarios bout-en-bout client/serveur (16 pièces)
 make test-docker      # rejoue les jobs de test CI dans un conteneur Linux
 make coverage-report  # rapports de couverture gcovr (XML + HTML + Markdown)
+
+# Banc de mesure du débit de la boucle de recherche (préalable à toute optimisation)
+tests/bench/bench_search.sh --nodes 5000000 --reps 5
 ```
 
 La CI GitHub Actions compile **toutes les combinaisons du code** avec `WERROR=1`, lance les tests unitaires et d'intégration, et publie la couverture sur Codecov.
 
-> Détails (scripts d'intégration, Docker, couverture, matrice CI) : [docs/tests_et_ci.md](docs/tests_et_ci.md) — conventions d'écriture des tests : [tests/README.md](tests/README.md).
+> Détails (scripts d'intégration, Docker, couverture, matrice CI, banc de mesure `ETII_BENCH_NODES`) : [docs/tests_et_ci.md](docs/tests_et_ci.md) — conventions d'écriture des tests : [tests/README.md](tests/README.md).
 
 ## Documentation
 
@@ -89,5 +92,5 @@ Le répertoire [`docs/`](docs/) rassemble la documentation détaillée :
 | [docs/api_http_rest.md](docs/api_http_rest.md) | API HTTP REST admin (`--http-port`) : schémas JSON complets, codes d'erreur, exemples client (curl, Python). |
 | [docs/autosearch_step.md](docs/autosearch_step.md) | Flux de recherche (`autosearch_step`) et gestion mémoire d'un thread de recherche. |
 | [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (`pruner --gpu`) : prérequis de compilation et d'exécution, flux CUDA, avantages. |
-| [docs/tests_et_ci.md](docs/tests_et_ci.md) | Cibles de test, intégration bout-en-bout, Docker, couverture, CI. |
+| [docs/tests_et_ci.md](docs/tests_et_ci.md) | Cibles de test, intégration bout-en-bout, Docker, couverture, CI, banc de mesure du débit de recherche. |
 | [tests/README.md](tests/README.md) | Organisation des suites unitaires, conventions, ajout d'un test. |

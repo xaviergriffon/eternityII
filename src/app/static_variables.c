@@ -156,6 +156,26 @@ int server = 0;
 
 int server_rmnonext_timing = 30;
 
+unsigned long long bench_target_nodes = 0;
+
+unsigned long long bench_parse_nodes_env(const char *env_value)
+{
+    if (env_value == NULL || env_value[0] == '\0') {
+        return 0;
+    }
+    char *end = NULL;
+    unsigned long long value = strtoull(env_value, &end, 10);
+    if (end == env_value) {
+        return 0; // pas un nombre
+    }
+    return value;
+}
+
+int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_done)
+{
+    return target_nodes > 0 && nodes_done >= target_nodes;
+}
+
 int parse_cli_options(int argc, const char *argv[])
 {
     int w = 0;

@@ -498,6 +498,49 @@ extern int server;
 extern int server_rmnonext_timing;
 
 /**
+ * @brief Nombre de nœuds cible du banc de mesure (variable d'environnement
+ *        `ETII_BENCH_NODES`), 0 = désactivé.
+ *
+ * Lue une seule fois au démarrage (`bench_parse_nodes_env`, appelée dans
+ * `main()` avant tout fork) depuis l'environnement plutôt qu'une option CLI :
+ * hors du chemin de production, elle n'a donc pas besoin d'entrée dans
+ * `cli_topics[]`. Un critère d'arrêt par nombre de nœuds est bien moins bruité
+ * qu'un arrêt par durée — en mode `test` la recherche est déterministe, donc à
+ * N fixé le travail exploré est strictement identique d'un run à l'autre.
+ * Consommée uniquement par `check_client_threads` / `check_client_threads_step`
+ * (src/app/etii_client.c), qui échantillonnent déjà `counters[]` : AUCUN coût
+ * n'est ajouté à la boucle chaude de `autosearch()` (src/core/etii_search.c).
+ * Voir `tests/bench/bench_search.sh`.
+ */
+extern unsigned long long bench_target_nodes;
+
+/**
+ * @brief Parse la variable d'environnement `ETII_BENCH_NODES` en nombre de
+ *        nœuds cible. Fonction pure et testable : ne lit pas l'environnement
+ *        elle-même, reçoit la valeur déjà récupérée par `getenv()`.
+ *
+ * @param env_value Valeur de la variable d'environnement, ou NULL si absente.
+ * @return Le nombre de nœuds cible (0 si absente, vide, ou non numérique).
+ */
+unsigned long long bench_parse_nodes_env(const char *env_value);
+
+/**
+ * @brief Décide si le banc de mesure doit demander l'arrêt de la recherche.
+ *
+ * Fonction pure et testable, séparée du sondage réel (`check_client_threads`)
+ * pour pouvoir être testée sans thread ni process de recherche. Un léger
+ * dépassement de `target_nodes` est attendu et acceptable : l'appelant
+ * échantillonne périodiquement plutôt que de tester à chaque nœud — c'est
+ * `nodes_done`, la valeur réellement atteinte, que le banc doit reporter,
+ * jamais `target_nodes`.
+ *
+ * @param target_nodes Nombre de nœuds visé (0 = banc désactivé, ne s'arrête jamais).
+ * @param nodes_done   Nombre de nœuds effectivement visités jusqu'ici.
+ * @return 1 si l'arrêt doit être demandé, 0 sinon.
+ */
+int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_done);
+
+/**
  * @brief Extrait les options globales de `argv` et les retire du tableau.
  *
  * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--http-port <n>`,
