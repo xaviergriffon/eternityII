@@ -16,6 +16,64 @@
 #include "app/gpu_pruner.h"
 #endif // WITH_CUDA
 
+/**
+ * Pièces de recherche construites par le processus PARENT avant sa boucle de
+ * fork() (cf. handle_client, src/app/main.c) : les process enfants en héritent
+ * par copy-on-write au lieu d'en construire chacun une copie privée.
+ *
+ * NULL tant que personne n'a appelé `set_inherited_search_parts` — c'est le cas
+ * du mode `test` (`run_auto`, aucun fork) et de tout appelant isolé de
+ * `run_mono_client` : celui-ci construit alors les siennes et en devient
+ * propriétaire. Une seule variable de décision, donc une seule logique de
+ * libération (cf. `acquire_search_parts`).
+ */
+static search_parts_t inherited_search_parts = { NULL, NULL };
+
+void build_search_parts(search_parts_t *out, const char *file)
+{
+    struct array_part *apart = read_parts(file);
+    out->rotate_parts = rotate_all_parts(apart);
+    // rotate_all_parts recopie les pièces (memcpy) : le tableau d'origine n'est
+    // plus référencé une fois les rotations construites.
+    free_array_part(apart);
+    out->map = prepare_map_part(out->rotate_parts);
+}
+
+void free_search_parts(search_parts_t *parts)
+{
+    if (parts == NULL) {
+        return;
+    }
+    if (parts->map != NULL) {
+        free_bigarray(parts->map);
+        parts->map = NULL;
+    }
+    if (parts->rotate_parts != NULL) {
+        free_array_part(parts->rotate_parts);
+        parts->rotate_parts = NULL;
+    }
+}
+
+void set_inherited_search_parts(const search_parts_t *parts)
+{
+    if (parts == NULL) {
+        inherited_search_parts.rotate_parts = NULL;
+        inherited_search_parts.map = NULL;
+    } else {
+        inherited_search_parts = *parts;
+    }
+}
+
+int acquire_search_parts(search_parts_t *out, const char *file)
+{
+    if (inherited_search_parts.map != NULL && inherited_search_parts.rotate_parts != NULL) {
+        *out = inherited_search_parts;
+        return 0; // propriété du parent : surtout ne rien libérer ici
+    }
+    build_search_parts(out, file);
+    return 1;
+}
+
 useconds_t next_no_work_sleep(useconds_t current) {
     if (current == 0) return NO_WORK_SLEEP_START;
     if (current >= NO_WORK_SLEEP_MAX) return NO_WORK_SLEEP_MAX;
@@ -405,11 +463,13 @@ void run_mono_client(const char *file)
 {
     client_possibility_t *thread_params = malloc(sizeof(*thread_params));
 
-    struct array_part *apart = read_parts(file);
-    struct array_part *rotateParts = rotate_all_parts(apart);
-    map_big_array *map = prepare_map_part(rotateParts);
-    init_client_possibility(thread_params, rotateParts, map, 0, 0, getpid());
-    free_array_part(apart);
+    // Map héritée du parent (client forké) ou construite localement (mode
+    // `test`) — cf. acquire_search_parts. `owns_parts` porte à lui seul la
+    // décision de libération en fin de fonction : un fork ne libère JAMAIS la
+    // map de son parent (elle lui survit et est partagée par ses frères).
+    search_parts_t parts;
+    int owns_parts = acquire_search_parts(&parts, file);
+    init_client_possibility(thread_params, parts.rotate_parts, parts.map, 0, 0, getpid());
 
     pthread_t feed_tid = build_feed_thread(thread_params);
     pthread_t control_tid = build_control_thread(thread_params);
@@ -447,6 +507,13 @@ void run_mono_client(const char *file)
         close_socket(thread_params->socket_id);
     }
     pthread_mutex_unlock(&thread_params->socket_mutex);
+
+    if (owns_parts) {
+        // Map construite ici : plus personne ne la lit (threads auxiliaires
+        // joints, recherche terminée). Une map héritée, elle, appartient au
+        // parent qui la libère après wait_child().
+        free_search_parts(&parts);
+    }
 }
 
 /**
