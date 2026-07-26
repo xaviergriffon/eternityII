@@ -147,6 +147,19 @@ void handle_client(int argc, const char *argv[]) {
     init_counters();
     init_signals();
 
+    // Map de lookup construite ICI, une seule fois, AVANT la boucle de fork() :
+    // elle n'est plus jamais écrite ensuite, donc les process de recherche
+    // l'héritent en copy-on-write et se partagent physiquement UNE copie au
+    // lieu d'en construire chacun la leur (5,06 Mo de `flat` + 1,27 Mo d'index
+    // compact + 0,11 Mo d'arène par process). Le parent en reste propriétaire :
+    // il est le seul à la libérer, après wait_child().
+    // Fait avant la création de la socket locale : un fichier de pièces
+    // illisible fait sortir read_parts, autant que ce soit avant d'avoir laissé
+    // une socket `etii_main.<pid>` derrière nous.
+    search_parts_t shared_parts;
+    build_search_parts(&shared_parts, parts_files);
+    set_inherited_search_parts(&shared_parts);
+
     char socket_main[50];
     sprintf(socket_main, "etii_main.%d", getpid());
     main_addr = build_sockaddr(socket_main);
@@ -157,18 +170,6 @@ void handle_client(int argc, const char *argv[]) {
     main_socket_id = socket_id;
 
     init_sigchld_sigaction();
-
-    // Map de lookup construite ICI, une seule fois, AVANT la boucle de fork() :
-    // elle n'est plus jamais écrite ensuite, donc les process de recherche
-    // l'héritent en copy-on-write et se partagent physiquement UNE copie au
-    // lieu d'en construire chacun la leur (5,06 Mo de `flat` + 1,27 Mo d'index
-    // compact + 0,11 Mo d'arène par process — soit, à 16 workers, ~99 Mo de
-    // pages distinctes se disputant le L3 au lieu de ~6,6 Mo partagés).
-    // Compatible avec la contrainte ci-dessous : on est encore mono-thread.
-    // Le parent en reste propriétaire (libération après wait_child()).
-    search_parts_t shared_parts;
-    build_search_parts(&shared_parts, parts_files);
-    set_inherited_search_parts(&shared_parts);
 
     // Les tampons stdio sont hérités TELS QUELS par fork() : ce qui n'a pas été
     // écrit sur le flux ici (stdout redirigé vers un fichier = tampon par blocs)
