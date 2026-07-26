@@ -514,6 +514,178 @@ TEST regroup_map_empty_map_frees_parts(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * Index compact `packed` : map_bucket_packed / map_packed_fits
+ *
+ * `packed` est une SECONDE REPRÉSENTATION de `flat`, plus dense, lue par la
+ * boucle chaude du forward-checking. Le contrat, et donc l'objet de ces tests,
+ * est l'équivalence STRICTE des deux représentations : si elle tient pour
+ * toutes les clés, la sémantique de recherche ne peut pas avoir bougé.
+ * ------------------------------------------------------------------------ */
+
+/* Jeu de pièces varié (bords 1..4) : produit à la fois des compartiments vides,
+ * des compartiments à une pièce et un gros compartiment (celui tout-joker). */
+static struct array_part *make_varied_parts(void)
+{
+    static struct part parts[] = {
+        { .id = 0 },                                              /* bouchon bordure */
+        { .id = 1, .top = 1, .right = 2, .bottom = 3, .left = 4 },
+        { .id = 2, .top = 2, .right = 3, .bottom = 4, .left = 1 },
+        { .id = 3, .top = 3, .right = 4, .bottom = 1, .left = 2 },
+        { .id = 4, .top = 4, .right = 1, .bottom = 2, .left = 3 },
+        { .id = 5, .top = 1, .right = 2, .bottom = 3, .left = 4 }, /* doublon de 1 */
+        { .id = 6, .top = 2, .right = 2, .bottom = 2, .left = 2 },
+    };
+    static struct array_part a = { .size = 7, .parts = parts };
+    return &a;
+}
+
+/* Équivalence exhaustive : pour CHAQUE clé de la map, `map_bucket_packed` et
+ * `get_parts_bigarray_with_key` renvoient la même taille et la même liste. */
+TEST packed_index_matches_flat_for_every_key(void)
+{
+    map_big_array *map = prepare_map_part(make_varied_parts());
+    ASSERT(map->packed != NULL); /* le jeu tient largement dans les 16 bits */
+
+    int m = map->sizearray;
+    long checked = 0, non_empty = 0;
+    for (int k1 = 0; k1 < m; k1++)
+        for (int k2 = 0; k2 < m; k2++)
+            for (int k3 = 0; k3 < m; k3++)
+                for (int k4 = 0; k4 < m; k4++) {
+                    key_part key = { .k1 = (int8_t)k1, .k2 = (int8_t)k2,
+                                     .k3 = (int8_t)k3, .k4 = (int8_t)k4 };
+                    struct array_part *ref = get_parts_bigarray_with_key(map, &key);
+                    map_bucket got = map_bucket_packed(map, &key);
+
+                    ASSERT_EQ_FMT(ref->size, got.size, "%d");
+                    if (ref->size > 0) {
+                        /* Les deux vues désignent la MÊME zone de l'arène. */
+                        ASSERT_EQ(ref->parts, got.parts);
+                        for (int s = 0; s < ref->size; s++) {
+                            ASSERT_EQ_FMT((int)ref->parts[s].id, (int)got.parts[s].id, "%d");
+                            ASSERT_EQ_FMT((int)ref->parts[s].rotation, (int)got.parts[s].rotation, "%d");
+                            ASSERT_EQ_FMT((int)ref->parts[s].top, (int)got.parts[s].top, "%d");
+                            ASSERT_EQ_FMT((int)ref->parts[s].right, (int)got.parts[s].right, "%d");
+                            ASSERT_EQ_FMT((int)ref->parts[s].bottom, (int)got.parts[s].bottom, "%d");
+                            ASSERT_EQ_FMT((int)ref->parts[s].left, (int)got.parts[s].left, "%d");
+                        }
+                        non_empty++;
+                    }
+                    checked++;
+                }
+
+    /* Le balayage a bien vu les deux natures de compartiment. */
+    ASSERT_EQ_FMT((long)(m * m * m * m), checked, "%ld");
+    ASSERT(non_empty > 0);
+    ASSERT(non_empty < checked); /* il existe aussi des compartiments vides */
+
+    free_bigarray(map);
+    PASS();
+}
+
+/* Cas limites : compartiment vide (taille 0) et plus gros compartiment
+ * (celui de la clé tout-joker, qui contient toutes les rotations). */
+TEST packed_index_handles_empty_and_largest_bucket(void)
+{
+    map_big_array *map = prepare_map_part(make_varied_parts());
+    ASSERT(map->packed != NULL);
+
+    int all = map->sizearrayM; /* indice « toute face » */
+
+    /* (a) compartiment vide : la clé (1,1,1,1) n'a aucune pièce (bords tous
+     *     différents dans la fixture, hors pièce 6 qui est en 2,2,2,2). */
+    key_part empty_key = { .k1 = 1, .k2 = 1, .k3 = 1, .k4 = 1 };
+    ASSERT_EQ_FMT(0, get_parts_bigarray_with_key(map, &empty_key)->size, "%d");
+    ASSERT_EQ_FMT(0, map_bucket_packed(map, &empty_key).size, "%d");
+
+    /* (b) plus gros compartiment : la clé tout-joker. Aucun autre compartiment
+     *     ne peut être plus gros, puisqu'aucune contrainte ne le filtre. */
+    key_part wild = { .k1 = (int8_t)all, .k2 = (int8_t)all,
+                      .k3 = (int8_t)all, .k4 = (int8_t)all };
+    struct array_part *ref = get_parts_bigarray_with_key(map, &wild);
+    map_bucket got = map_bucket_packed(map, &wild);
+    ASSERT(ref->size > 1);
+    ASSERT_EQ_FMT(ref->size, got.size, "%d");
+    ASSERT_EQ(ref->parts, got.parts);
+
+    int m = map->sizearray;
+    for (int k1 = 0; k1 < m; k1++)
+        for (int k2 = 0; k2 < m; k2++)
+            for (int k3 = 0; k3 < m; k3++)
+                for (int k4 = 0; k4 < m; k4++) {
+                    key_part key = { .k1 = (int8_t)k1, .k2 = (int8_t)k2,
+                                     .k3 = (int8_t)k3, .k4 = (int8_t)k4 };
+                    ASSERT(map_bucket_packed(map, &key).size <= ref->size);
+                }
+
+    free_bigarray(map);
+    PASS();
+}
+
+/* Sans index compact (map bâtie à la main, ou capacité dépassée), le lecteur
+ * retombe sur `flat` et renvoie exactement la même chose. */
+TEST packed_index_falls_back_to_flat_when_absent(void)
+{
+    map_big_array *map = prepare_map_part(make_varied_parts());
+    ASSERT(map->packed != NULL);
+
+    key_part wild = { .k1 = (int8_t)map->sizearrayM, .k2 = (int8_t)map->sizearrayM,
+                      .k3 = (int8_t)map->sizearrayM, .k4 = (int8_t)map->sizearrayM };
+    map_bucket with_index = map_bucket_packed(map, &wild);
+
+    /* On neutralise l'index : le repli doit donner le même résultat. */
+    uint32_t *saved = map->packed;
+    map->packed = NULL;
+    map_bucket without_index = map_bucket_packed(map, &wild);
+    map->packed = saved;
+
+    ASSERT_EQ_FMT(with_index.size, without_index.size, "%d");
+    ASSERT_EQ(with_index.parts, without_index.parts);
+
+    free_bigarray(map);
+    PASS();
+}
+
+/* map_packed_fits : détection du dépassement de capacité des champs 16 bits.
+ * Un puzzle dont l'arène ou le plus gros compartiment dépasserait 65535 doit
+ * être détecté à la construction — jamais tronqué silencieusement. */
+TEST map_packed_fits_detects_capacity_overflow(void)
+{
+    /* Cas réels du projet : les deux tailles de puzzle tiennent très largement. */
+    ASSERT_EQ_FMT(1, map_packed_fits(14401, 784), "%d");  /* puzzle 256 */
+    ASSERT_EQ_FMT(1, map_packed_fits(577, 16), "%d");     /* puzzle 16 */
+
+    /* Arène vide. */
+    ASSERT_EQ_FMT(1, map_packed_fits(0, 0), "%d");
+
+    /* Bornes exactes. */
+    ASSERT_EQ_FMT(1, map_packed_fits(65535, 65535), "%d");
+    ASSERT_EQ_FMT(0, map_packed_fits(65536, 1), "%d");     /* offset non représentable */
+    ASSERT_EQ_FMT(0, map_packed_fits(65535, 65536), "%d"); /* taille non représentable */
+    ASSERT_EQ_FMT(0, map_packed_fits(1000000, 1000), "%d");
+
+    PASS();
+}
+
+/* Une map dont l'arène est vide n'a pas d'index compact : l'invariant
+ * « packed != NULL implique arena != NULL » est préservé, et la lecture
+ * retombe sur `flat` sans déréférencer une arène inexistante. */
+TEST packed_index_absent_when_arena_empty(void)
+{
+    struct array_part a = { .size = 0, .parts = NULL };
+    map_big_array *map = buildBigArray(&a, search_max_face(&a));
+
+    if (map->arena == NULL) {
+        ASSERT_EQ(NULL, map->packed);
+    }
+    key_part k = { .k1 = 0, .k2 = 0, .k3 = 0, .k4 = 0 };
+    ASSERT_EQ_FMT(0, map_bucket_packed(map, &k).size, "%d");
+
+    free_bigarray(map);
+    PASS();
+}
+
 SUITE(part_suite)
 {
     RUN_TEST(rotate_part_zero_is_identity);
@@ -540,4 +712,9 @@ SUITE(part_suite)
     RUN_TEST(put_part_exits_when_map_full);
     RUN_TEST(free_bigarray_with_null_arena);
     RUN_TEST(check_array_handles_valid_and_null);
+    RUN_TEST(packed_index_matches_flat_for_every_key);
+    RUN_TEST(packed_index_handles_empty_and_largest_bucket);
+    RUN_TEST(packed_index_falls_back_to_flat_when_absent);
+    RUN_TEST(map_packed_fits_detects_capacity_overflow);
+    RUN_TEST(packed_index_absent_when_arena_empty);
 }

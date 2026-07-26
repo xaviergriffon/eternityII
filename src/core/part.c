@@ -422,6 +422,70 @@ void check_array(struct array_part *apart)
 	log_info("check_array end\n");
 }
 
+int map_packed_fits(unsigned long long total_parts, unsigned long long max_bucket)
+{
+	// Les offsets vont de 0 à total_parts - 1 : c'est bien total_parts (et non
+	// total_parts - 1) qu'on borne, pour rester juste quand l'arène est vide.
+	return (total_parts <= MAP_PACKED_FIELD_MAX && max_bucket <= MAP_PACKED_FIELD_MAX) ? 1 : 0;
+}
+
+/**
+ * @brief Construit l'index compact `{offset:16 | size:16}` d'une map compactée.
+ *
+ * À appeler APRÈS le compactage de `flat` dans `arena` : chaque `flat[i].parts`
+ * doit déjà pointer dans l'arène, sans quoi l'offset serait dénué de sens.
+ * L'index est purement redondant : il ne change aucune donnée, il en propose
+ * une seconde représentation 3,8× plus dense pour la boucle chaude.
+ *
+ * @param map         Map dont `flat`/`arena` sont déjà compactés.
+ * @param nbKeys      Nombre de compartiments (`sizearray^4`).
+ * @param totalParts  Nombre de pièces dans l'arène.
+ * @return            Index alloué, ou NULL si la capacité 16 bits est dépassée,
+ *                    si l'arène est vide, ou si l'allocation échoue — les
+ *                    lecteurs retombent alors sur `flat` (jamais de troncature).
+ */
+static uint32_t *build_packed_index(map_big_array *map, unsigned long long nbKeys,
+                                    unsigned long long totalParts)
+{
+	// Invariant packed != NULL => arena != NULL : sans arène, pas d'index.
+	if (map->arena == NULL)
+	{
+		return NULL;
+	}
+
+	unsigned long long maxBucket = 0;
+	for (unsigned long long idx = 0; idx < nbKeys; idx++)
+	{
+		if ((unsigned long long)map->flat[idx].size > maxBucket)
+		{
+			maxBucket = (unsigned long long)map->flat[idx].size;
+		}
+	}
+
+	if (!map_packed_fits(totalParts, maxBucket))
+	{
+		// Puzzle hors gabarit : on renonce à l'index plutôt que de tronquer.
+		log_info("index compact non construit : %llu pièces / plus gros compartiment %llu"
+		         " dépassent la capacité 16 bits (%u)\n",
+		         totalParts, maxBucket, MAP_PACKED_FIELD_MAX);
+		return NULL;
+	}
+
+	uint32_t *packed = malloc(sizeof(uint32_t) * nbKeys);
+	if (packed == NULL)
+	{
+		return NULL;
+	}
+	for (unsigned long long idx = 0; idx < nbKeys; idx++)
+	{
+		const struct array_part *entry = &map->flat[idx];
+		// Compartiment vide : offset 0 (jamais déréférencé puisque size == 0).
+		uint32_t offset = entry->size > 0 ? (uint32_t)(entry->parts - map->arena) : 0u;
+		packed[idx] = (offset << 16) | (uint32_t)entry->size;
+	}
+	return packed;
+}
+
 /**
  * @brief Construit la structure de lookup 4D indexée par (top, right, bottom, left).
  *
@@ -532,6 +596,7 @@ map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 			entry->parts = NULL;
 		}
 	}
+	result->packed = build_packed_index(result, nbKeys, totalParts);
 #ifdef DEBUG_CHECK_POSSIBILITY
 	log_info("max array:%i\n", maxarray);
 #endif // DEBUG_CHECK_POSSIBILITY
@@ -659,6 +724,10 @@ int free_bigarray(map_big_array *array_parts)
 	if (array_parts->arena != NULL)
 	{
 		free(array_parts->arena);
+	}
+	if (array_parts->packed != NULL)
+	{
+		free(array_parts->packed);
 	}
 	free(array_parts->flat);
 	free(array_parts);
