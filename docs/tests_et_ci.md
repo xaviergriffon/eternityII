@@ -206,6 +206,38 @@ volontairement à plat (pas d'objets imbriqués) pour rester parsable avec
 `grep`/`sed`/`awk` seuls, sans dépendance à `jq` ou Python — dans le même esprit
 que le reste du projet (voir l'API HTTP REST, dépendance-free par choix).
 
+### Validation du temps mesuré (bogue d'arrondi de bash)
+
+Le temps de chaque run vient de `time` avec `TIMEFORMAT='%R'`. **Bash lui-même
+peut y imprimer une valeur malformée** : `timeval_to_secs` (`execute_cmd.c`)
+convertit les µs en ms avec arrondi mais **sans propager la retenue vers les
+secondes**, si bien qu'à partir de 999500 µs la fraction vaut 1000 ; `mkfmt`
+imprime ensuite chaque chiffre par `(fraction / 100) + '0'`, soit 10 + `'0'` =
+`:`. Un run de 2,9997 s est donc rapporté `2.:00` au lieu de `3.000` (reproduit
+sur bash 5.3, fenêtre de 500 µs par seconde ≈ 0,05 % des runs).
+
+Les conséquences ne sont pas proportionnelles à la rareté du cas : `awk` lit
+`2.:00` comme 2.0, le débit du run est surestimé de 50 % (10,0 M nœuds/s au lieu
+de 6,7 M), cette valeur devient le `nodes_per_sec_max` du rapport et gonfle
+l'écart-type relatif (17,55 % au lieu de ~1,6 %) — et le JSON produit
+(`"elapsed_sec":2.:00`) n'est plus parsable. La médiane absorbe l'incident à
+`--reps 5`, plus forcément à `--reps 3`.
+
+Le banc valide donc le temps avant de l'utiliser (`bench_parse_elapsed`,
+`tests/bench/bench_lib.sh`) : décimal strict et strictement positif — un simple
+test de non-vacuité laissait passer `2.:00`. Quand la valeur est refusée, le run
+est **rejoué** (`bench_retry_valid_time`, 3 tentatives, chaque rejeu étant
+journalisé) plutôt que comptabilisé : la cause dépend de la durée mesurée à
+500 µs près, donc une nouvelle exécution retombe presque certainement sur une
+valeur correcte. Si les 3 tentatives échouent — cause systématique plutôt que
+fortuite : message du shell atterrissant dans le fichier de temps, `TIMEFORMAT`
+écrasé, `time` externe au lieu du mot-clé — le banc s'arrête avec un code
+d'erreur et ne publie aucun rapport, plutôt que de rapporter un débit faux.
+
+Ces deux fonctions sont pures et couvertes par `tests/bench/test_bench_parse.sh`
+(lancé par `make test`, cible `test-bench`) — même démarche que pour
+`bench_should_stop` côté C.
+
 ## Voir aussi
 
 - [tests/README.md](../tests/README.md) — organisation des suites, conventions, ajout d'un test.

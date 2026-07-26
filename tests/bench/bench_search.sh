@@ -24,6 +24,9 @@ export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# Fonctions pures partagées avec tests/bench/test_bench_parse.sh
+# (validation du temps écoulé — voir bench_parse_elapsed).
+. "$SCRIPT_DIR/bench_lib.sh"
 cd "$REPO_ROOT"
 
 NODES=5000000
@@ -131,7 +134,7 @@ fi
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/bench_search.XXXXXX")
 trap 'rm -rf "$WORKDIR"' EXIT
 
-# Écrit dans $1 le temps réel (secondes) et dans $2 la sortie du run.
+# Écrit dans $1 la sortie du run et dans $2 le temps réel (secondes).
 run_once() {
     local outlog="$1" timefile="$2"
     TIMEFORMAT='%R'
@@ -142,6 +145,38 @@ run_once() {
         { time env ETII_BENCH_NODES="$NODES" ./eternityII test "$PIECES" \
             < /dev/null > "$outlog" 2>&1 ; } 2> "$timefile"
     fi
+}
+
+# Nombre de tentatives avant d'abandonner un run dont `time` n'a pas produit un
+# temps exploitable — voir bench_retry_valid_time (bench_lib.sh).
+TIME_MAX_ATTEMPTS=3
+
+# Doublure de run_once attendue par bench_retry_valid_time : exécute le run puis
+# écrit le temps BRUT sur sa sortie standard. Les chemins passent par des
+# variables plutôt que par des arguments, la fonction étant appelée par nom.
+RUN_OUTLOG=""
+RUN_TIMEFILE=""
+run_once_emit_time() {
+    local rc=0
+    # `|| rc=$?` neutralise le `set -e` : un solveur qui échoue doit être
+    # DIAGNOSTIQUÉ, pas confondu avec un temps illisible. `time` a de toute façon
+    # écrit sa mesure, donc la validation passera et c'est le contrôle de
+    # nodes_reached, juste après, qui arrêtera le banc avec le bon message.
+    run_once "$RUN_OUTLOG" "$RUN_TIMEFILE" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        log "  le solveur s'est terminé en erreur (code $rc) — voir $RUN_OUTLOG"
+    fi
+    cat "$RUN_TIMEFILE"
+}
+
+# Exécute un run et écrit sur stdout son temps écoulé VALIDÉ (secondes),
+# en rejouant le run si `time` a produit une valeur illisible.
+# Renvoie 1 après TIME_MAX_ATTEMPTS tentatives : mieux vaut faire échouer le
+# banc que publier un débit faux.
+run_once_validated() {
+    RUN_OUTLOG="$1"
+    RUN_TIMEFILE="$2"
+    bench_retry_valid_time "$TIME_MAX_ATTEMPTS" log "$3" run_once_emit_time
 }
 
 extract_field() {
@@ -179,12 +214,18 @@ for ((i = 1; i <= REPS; i++)); do
     log "Run $i/$REPS..."
     outlog="$WORKDIR/run_$i.log"
     timefile="$WORKDIR/run_$i.time"
-    run_once "$outlog" "$timefile"
+    if ! elapsed=$(run_once_validated "$outlog" "$timefile" "run $i"); then
+        # On garde le répertoire de travail : le fichier de temps est la pièce
+        # à conviction (le temps y est brut, avant toute normalisation).
+        trap - EXIT
+        exit 1
+    fi
 
     nodes_reached=$(extract_nodes_reached "$outlog")
-    elapsed=$(tr -d '[:space:]' < "$timefile")
-    if [[ -z "$nodes_reached" || -z "$elapsed" ]]; then
-        log "run $i : cible non atteinte ou temps non mesuré — voir $outlog"
+    if [[ -z "$nodes_reached" ]]; then
+        log "run $i : cible de $NODES nœuds non atteinte — voir $outlog" \
+            "(conservé pour diagnostic)"
+        trap - EXIT
         exit 1
     fi
 
