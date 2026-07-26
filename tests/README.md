@@ -53,6 +53,25 @@ ci-dessus (pas de lien statique : ils lancent de vrais processus `server`/
 
 Chacun tourne dans un répertoire `mktemp -d` isolé avec un timeout borné.
 
+## Tests du banc de mesure
+
+`tests/bench/bench_lib.sh` isole les fonctions **pures** du banc de mesure
+(`bench_search.sh`, voir [Tests et CI](../docs/tests_et_ci.md#banc-de-mesure-du-débit-de-recherche-testsbenchbench_searchsh))
+: validation du temps écoulé rendu par `time`, et boucle de rejeu quand il est
+illisible. `tests/bench/test_bench_parse.sh` les couvre sans rien compiler ni
+lancer, et tourne dans `make test` (cible `test-bench`) — c'est la version shell
+de la même règle que côté C : la logique à verrouiller est extraite dans une
+fonction sans effet de bord plutôt que noyée dans un script qui compile et
+mesure.
+
+Motivation : bash peut imprimer un temps **malformé**. `timeval_to_secs`
+(`execute_cmd.c`) arrondit les µs en ms sans propager la retenue vers les
+secondes ; dès 999500 µs la fraction vaut 1000, et `mkfmt` imprime ses chiffres
+par `(fraction / 100) + '0'`, soit 10 + '0' = `:`. Un run de 2,9997 s ressort
+donc en `2.:00` au lieu de `3.000`, qu'`awk` lit comme 2.0 — débit surestimé de
+50 %, min/max et écart-type du rapport faussés, JSON invalide. Le banc ne
+testait auparavant que la non-vacuité de la valeur.
+
 ## Conventions et limites
 
 - **Fixtures construites à la main** plutôt que via `rotate_all_parts` /

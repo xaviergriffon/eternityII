@@ -215,8 +215,8 @@ endif
 
 # `make test` = gate complet : binaire PRINCIPAL 16 (suites communes + solution16)
 # puis binaire SECONDAIRE 256 (suites communes, chemins gardés #if ETERN_PARTS==256).
-.PHONY: test test-16 test-256
-test: test-16 test-256
+.PHONY: test test-16 test-256 test-bench
+test: test-16 test-256 test-bench
 
 # Binaire principal : ETERN_PARTS=16, où un plateau plein est exploitable.
 test-16: $(SOLUTION16_H)
@@ -227,6 +227,12 @@ test-16: $(SOLUTION16_H)
 test-256:
 	gcc $(TEST_CFLAGS) $(TEST_SANFLAGS) -pthread -o $(TEST_BIN) $(TEST_SRCS) $(TEST_MODULES) -lm
 	./$(TEST_BIN)
+
+# Fonctions pures du banc de mesure (tests/bench/bench_lib.sh) : pas de C, donc
+# hors des suites greatest, mais rattaché à `make test` pour tourner partout où
+# elles tournent (CI, make test-docker). Ni compilation ni process lancé.
+test-bench:
+	bash tests/bench/test_bench_parse.sh
 
 # ---------------------------------------------------------------------------
 # Test d'intégration client/serveur (bout-en-bout) sur le puzzle 16 pièces.
