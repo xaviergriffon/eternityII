@@ -60,6 +60,36 @@ Cette fonction ne calcule rien et n'alloue rien. Elle retourne un **pointeur dir
 
 `stack[top].search` est ainsi le **curseur vers la liste de candidats** de ce niveau — il ne change jamais tant qu'on est à ce niveau.
 
+### 1.3 bis `map_bucket_packed` : l'index compact du forward-checking
+
+La map expose **deux représentations des mêmes données**, et le chemin chaud ne lit pas la même que les autres :
+
+| Représentation | Contenu | Taille (puzzle 256) | Lue par |
+|---|---|---|---|
+| `flat` | `sizearray^4` × `struct array_part` (16 o : une taille + un pointeur) | **5,06 Mo** | `get_parts_bigarray*` — lookup de placement (§1.3) et tous les autres appelants |
+| `packed` | `sizearray^4` × `uint32_t` : `{offset:16 \| size:16}`, offset relatif à `arena` | **1,27 Mo** | `map_bucket_packed` — uniquement `bt_forward_check` |
+
+**Pourquoi.** Sur le puzzle 256, la map compte 331 776 compartiments dont **6 254 non vides (1,9 %)** ; les données utiles (`arena`, 14 401 pièces = 0,11 Mo) tiennent confortablement en L2. Autrement dit, **98 % des 5 Mo balayés par la boucle chaude sont du vide**. Or `bt_forward_check` est appelé une fois par candidat posé et fait jusqu'à `FORWARD_CHECK_K` (6) itérations, chacune un accès aléatoire dans ces 5 Mo — le plus souvent pour ne lire qu'un compteur de 4 octets. En ramenant le compartiment à un `uint32_t`, une ligne de cache rapporte **16 compartiments au lieu de 4**.
+
+**Gain mesuré** (`tests/bench/bench_search.sh`, puzzle 256, i9-9880H, médianes) :
+
+| Configuration | Avant | Après | Delta |
+|---|---|---|---|
+| 1 worker (20 M nœuds × 7) | 6 112 645 nœuds/s | 6 747 789 nœuds/s | **+10,4 %** |
+| 8 workers concurrents | 39,7 M nœuds/s cumulés | 43,7 M nœuds/s | **+10,1 %** |
+| 16 workers concurrents | 41,9 M nœuds/s cumulés | 53,8 M nœuds/s | **+28,6 %** |
+
+L'écart se creuse avec le nombre de workers : chaque processus de recherche a **sa propre copie** de la map, et 16 × 1,27 Mo tient dans les 16 Mo de L3 de la machine là où 16 × 5,06 Mo ne tient pas.
+
+**Invariant.** `packed` est **purement redondant** : `map_bucket_packed` renvoie exactement la même taille et la même liste de pièces que `get_parts_bigarray_with_key`, pour **toute** clé. C'est un changement de représentation, jamais de sémantique — les nœuds explorés et leur ordre sont inchangés (le taux d'élagage rapporté par le banc reste identique à la 4ᵉ décimale : 45,7099 %). Le test `packed_index_matches_flat_for_every_key` (`tests/core/test_part.c`) balaie **toutes** les clés d'une map réelle pour verrouiller cette équivalence, et `bt_forward_check_same_verdict_with_and_without_packed_index` (`tests/core/test_etii_search.c`) la vérifie à travers la fonction chaude elle-même, en neutralisant l'index pour comparer les deux verdicts.
+
+**Absence d'index (`packed == NULL`) : un état normal, pas une erreur.** `map_bucket_packed` retombe alors sur `flat` et renvoie la même chose. Ce repli couvre deux cas :
+
+- une `map_big_array` **bâtie à la main** (fixtures de tests), qui n'a ni arène ni index ;
+- un **dépassement de capacité** : les offsets et les tailles tiennent sur 16 bits (puzzle 256 : arène de 14 401 pièces, plus gros compartiment de 784 — très loin des 65 535). Si un autre jeu de pièces dépassait cette borne, `build_packed_index` (`src/core/part.c`) **renonce à construire l'index** au lieu de tronquer silencieusement, journalise la raison, et la recherche continue via `flat`. La décision est isolée dans `map_packed_fits`, testée aux bornes exactes 65535/65536.
+
+**Variante évaluée et écartée.** Un **bitmap d'occupation** (41 Ko, 1 bit par compartiment, entièrement résident en L1/L2) a été implémenté et mesuré par-dessus l'index compact, pour ne payer qu'une lecture minuscule sur le test « compartiment vide ». Résultat : **−4 %**, donc abandonné. Le forward-check réussit ~54 % du temps, si bien que la majorité des cases inspectées tombent sur un compartiment **non vide** — et paient alors *deux* accès aléatoires (bitmap puis `packed`) au lieu d'un seul.
+
 ### 1.4 Exploration d'un niveau : un candidat à la fois
 
 Une idée clé : **on ne génère pas tous les successeurs de la case courante**. On prend le premier candidat valide, on descend d'un niveau, et on reviendra aux candidats suivants seulement si le sous-arbre en dessous est épuisé.
@@ -363,6 +393,7 @@ autosearch_step()
 │               │   ├─ id==0 ou pièce déjà utilisée → continue (pas compté)
 │               │   ├─ placer la pièce (grid, faceused, propagate)
 │               │   ├─ [FORWARD_CHECK_K > 0] bt_forward_check()
+│               │   │   ├─ lookups via map_bucket_packed (index compact, §1.3 bis)
 │               │   │   └─ branche morte → undo, fc_pruned++, continue (pas compté)
 │               │   └─ next_s = s+1, placed_pos = id-1, placed=1 → break
 │               ├─ placed ? → break du while → counters++ → retour haut du for

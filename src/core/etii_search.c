@@ -164,8 +164,12 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         }
         cells++;
 
-        struct array_part *search = get_parts_bigarray_with_key(mapParts, &constraints[x][y]);
-        if (search->size == 0) {
+        // Lookup via l'index COMPACT (`packed`) et non `flat` : à ce stade la
+        // très grande majorité des accès ne sert qu'à lire une taille, et
+        // `packed` divise par ~3,8 le volume balayé (cf. map_bucket_packed).
+        // Résultat rigoureusement identique à get_parts_bigarray_with_key.
+        map_bucket search = map_bucket_packed(mapParts, &constraints[x][y]);
+        if (search.size == 0) {
             // case morte : aucune pièce candidate
             __atomic_fetch_add(&fc_pruned_at[c - alloc + 1], 1, __ATOMIC_RELAXED);
             __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
@@ -174,8 +178,8 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
 
         // Vérifier qu'au moins une pièce candidate n'est pas déjà utilisée ailleurs
         int found = 0;
-        for (int s = 0; s < search->size; s++) {
-            if (search->parts[s].id != 0 && !BOARD_FACE_USED(board, search->parts[s].id - 1)) {
+        for (int s = 0; s < search.size; s++) {
+            if (search.parts[s].id != 0 && !BOARD_FACE_USED(board, search.parts[s].id - 1)) {
                 found = 1;
                 break;
             }

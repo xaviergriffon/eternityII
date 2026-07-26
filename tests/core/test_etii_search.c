@@ -462,6 +462,70 @@ TEST bt_forward_check_skips_prefilled_and_zero_id(void)
 
     PASS();
 }
+
+/* bt_forward_check lit la map via l'index COMPACT (map_bucket_packed) et non
+ * via `flat`. Sur une map RÉELLE (bâtie par buildBigArray, donc pourvue de son
+ * index — les fixtures faites main ci-dessus exercent, elles, le repli), les
+ * deux représentations doivent conduire au MÊME verdict pour chaque fenêtre :
+ * c'est l'invariant « même élagage, donc mêmes nœuds explorés ». */
+TEST bt_forward_check_same_verdict_with_and_without_packed_index(void)
+{
+    /* Jeu couvrant les trois natures de case du plateau : coin (deux bords de
+     * grille), bordure (un seul) et intérieur (aucun). Toutes les faces non
+     * nulles valent 1, si bien que n'importe quelle case VIDE a un candidat —
+     * sans quoi, sur un plateau 4×4 (ETERN_PARTS=16) où toutes les cases sont
+     * des bordures, le forward-check serait mort partout. */
+    static struct part parts[] = {
+        { .id = 0 },                                              /* bouchon bordure */
+        { .id = 1, .top = 0, .right = 1, .bottom = 1, .left = 0 }, /* coin haut-gauche */
+        { .id = 2, .top = 0, .right = 0, .bottom = 1, .left = 1 }, /* coin haut-droit */
+        { .id = 3, .top = 1, .right = 0, .bottom = 0, .left = 1 }, /* coin bas-droit */
+        { .id = 4, .top = 1, .right = 1, .bottom = 0, .left = 0 }, /* coin bas-gauche */
+        { .id = 5, .top = 0, .right = 1, .bottom = 1, .left = 1 }, /* bordure haute */
+        { .id = 6, .top = 1, .right = 0, .bottom = 1, .left = 1 }, /* bordure droite */
+        { .id = 7, .top = 1, .right = 1, .bottom = 0, .left = 1 }, /* bordure basse */
+        { .id = 8, .top = 1, .right = 1, .bottom = 1, .left = 0 }, /* bordure gauche */
+        { .id = 9, .top = 1, .right = 1, .bottom = 1, .left = 1 }, /* intérieur */
+    };
+    static struct array_part a = { .size = 10, .parts = parts };
+    const int nb_ids = 9;
+
+    map_big_array *map = prepare_map_part(&a);
+    ASSERT(map->packed != NULL);
+
+    struct possibility_packet board;
+    make_empty_board(&board);
+
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, &a, (int8_t)map->sizearrayM);
+
+    /* Chaque fenêtre est évaluée deux fois : avec l'index compact, puis en le
+     * neutralisant pour forcer la lecture de `flat`. Les deux verdicts doivent
+     * coïncider — c'est l'invariant « même élagage ». On balaie d'abord toutes
+     * les pièces libres (verdict vivant), puis toutes utilisées (case morte). */
+    int seen_alive = 0, seen_dead = 0;
+    for (int phase = 0; phase < 2; phase++) {
+        if (phase == 1) {
+            for (int id = 1; id <= nb_ids; id++) set_face_used(board.b_faceused, id - 1, 1);
+        }
+        for (int alloc = 0; alloc < 4 && alloc < ETERN_PARTS; alloc++) {
+            int with_index = bt_forward_check(C, &board, map, alloc);
+
+            uint32_t *saved = map->packed;
+            map->packed = NULL; /* force le repli sur `flat` */
+            int without_index = bt_forward_check(C, &board, map, alloc);
+            map->packed = saved;
+
+            ASSERT_EQ_FMT(without_index, with_index, "%d");
+            if (with_index) seen_alive = 1; else seen_dead = 1;
+        }
+    }
+    ASSERT(seen_alive);
+    ASSERT(seen_dead);
+
+    free_bigarray(map);
+    PASS();
+}
 #endif /* FORWARD_CHECK_K > 0 */
 
 /* bt_count_pending : un niveau sans décision (case pré-remplie : search == NULL,
@@ -2156,6 +2220,7 @@ SUITE(etii_search_suite)
 #if FORWARD_CHECK_K > 0
     RUN_TEST(bt_forward_check_detects_dead_cells);
     RUN_TEST(bt_forward_check_skips_prefilled_and_zero_id);
+    RUN_TEST(bt_forward_check_same_verdict_with_and_without_packed_index);
 #endif
     RUN_TEST(bt_materialize_pending_orders_deepest_first);
     RUN_TEST(bt_materialize_pending_respects_max_out);

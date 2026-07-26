@@ -1,6 +1,7 @@
 #ifndef eternityII_part_h
 #define eternityII_part_h
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define PART_NONE -1
@@ -53,6 +54,13 @@ struct map_in_one
 };
 
 /**
+ * @brief Valeur maximale représentable sur les 16 bits d'un champ de `packed`.
+ *
+ * Borne à la fois l'offset d'un compartiment dans l'arène et sa taille.
+ */
+#define MAP_PACKED_FIELD_MAX 65535u
+
+/**
  * @brief Table de lookup à plat des pièces par contraintes de bord.
  *
  * Remplace l'ancien tableau 4D de pointeurs (4 déréférencements en cascade)
@@ -60,6 +68,14 @@ struct map_in_one
  * `((k1*M + k2)*M + k3)*M + k4`. Les listes de candidats elles-mêmes sont
  * compactées bout à bout dans `arena` : un lookup = un calcul d'indice
  * + une lecture, et chaque liste est contiguë en mémoire.
+ *
+ * `packed` est un INDEX COMPACT redondant sur `flat`, destiné au seul chemin
+ * chaud du forward-checking : mêmes `sizearray^4` compartiments, mais réduits
+ * à un `uint32_t` `{offset:16 | size:16}` (offset dans `arena`) au lieu d'un
+ * `struct array_part` de 16 octets. Sur le puzzle 256 cela ramène la table
+ * balayée par la boucle chaude de 5,06 Mo à 1,33 Mo (une ligne de cache
+ * couvre 16 compartiments au lieu de 4) — or 98 % de ces compartiments sont
+ * vides et ne sont lus que pour tester un compteur.
  */
 typedef struct
 {
@@ -69,7 +85,29 @@ typedef struct
 	struct array_part *flat;
 	/** Toutes les listes de candidats bout à bout. */
 	struct part *arena;
+	/**
+	 * Index compact `{offset:16 | size:16}` de `sizearray^4` entrées, offset
+	 * relatif à `arena`. NULL si l'index n'a pas pu être construit (map bâtie
+	 * à la main, ou capacité 16 bits dépassée — cf. `map_packed_fits`) ; les
+	 * lecteurs retombent alors sur `flat`, cf. `map_bucket_packed`.
+	 * Invariant : `packed != NULL` implique `arena != NULL`.
+	 */
+	uint32_t *packed;
 } map_big_array;
+
+/**
+ * @brief Vue d'un compartiment de candidats, indépendante de sa représentation.
+ *
+ * Retournée par `map_bucket_packed`, qui sait la produire aussi bien depuis
+ * l'index compact que depuis `flat`.
+ */
+typedef struct
+{
+	/** Première pièce candidate (ne pas libérer) ; non déréférençable si `size == 0`. */
+	const struct part *parts;
+	/** Nombre de pièces candidates. */
+	int size;
+} map_bucket;
 
 struct map_part_element
 {
@@ -207,6 +245,64 @@ static inline struct array_part *get_parts_bigarray_with_key(map_big_array *map,
 	int m = map->sizearray;
 	return &map->flat[(((int)key->k1 * m + key->k2) * m + key->k3) * m + key->k4];
 }
+
+/**
+ * @brief Retourne le compartiment de candidats d'une clé via l'index compact.
+ *
+ * Variante « boucle chaude » de `get_parts_bigarray_with_key` : lit l'index
+ * compact `packed` (4 octets par compartiment) plutôt que `flat` (16 octets),
+ * ce qui divise par ~3,8 le volume balayé par le forward-checking.
+ *
+ * Le résultat est STRICTEMENT identique à celui de `get_parts_bigarray_with_key`
+ * pour toute clé (même taille, même liste de pièces) — c'est un changement de
+ * représentation, jamais de sémantique.
+ *
+ * Repli : si la map n'a pas d'index compact (`packed == NULL` — map bâtie à la
+ * main dans un test, ou capacité 16 bits dépassée à la construction), la
+ * lecture se fait dans `flat`. Le test est une simple lecture d'un pointeur
+ * chaud dont l'issue est constante pour toute la durée du processus : il est
+ * parfaitement prédit et ne coûte rien face à un défaut de cache évité.
+ *
+ * @param map Table de lookup pré-calculée.
+ * @param key Clé de recherche (k1=top, k2=right, k3=bottom, k4=left).
+ * @return    Vue du compartiment (appartient à la map, ne pas libérer).
+ */
+static inline map_bucket map_bucket_packed(const map_big_array *map, const key_part *key)
+{
+	int m = map->sizearray;
+	size_t idx = (size_t)((((int)key->k1 * m + key->k2) * m + key->k3) * m + key->k4);
+	map_bucket bucket;
+	if (map->packed != NULL)
+	{
+		uint32_t entry = map->packed[idx];
+		// arena != NULL est garanti dès que packed != NULL, et offset vaut 0
+		// pour un compartiment vide : l'arithmétique de pointeur reste valide.
+		bucket.parts = map->arena + (entry >> 16);
+		bucket.size = (int)(entry & MAP_PACKED_FIELD_MAX);
+	}
+	else
+	{
+		const struct array_part *entry = &map->flat[idx];
+		bucket.parts = entry->parts;
+		bucket.size = entry->size;
+	}
+	return bucket;
+}
+
+/**
+ * @brief Indique si une arène tient dans les champs 16 bits de l'index compact.
+ *
+ * Les offsets utilisés vont de 0 à `total_parts - 1` et les tailles de
+ * compartiment jusqu'à `max_bucket` : les deux doivent tenir sur 16 bits.
+ * Un puzzle plus gros que celui d'Eternity II pourrait dépasser cette borne —
+ * dans ce cas l'index n'est PAS construit (jamais tronqué silencieusement) et
+ * les lecteurs retombent sur `flat`.
+ *
+ * @param total_parts Nombre total de pièces dans l'arène (somme des tailles).
+ * @param max_bucket  Taille du plus gros compartiment.
+ * @return            1 si l'index compact est représentable, 0 sinon.
+ */
+int map_packed_fits(unsigned long long total_parts, unsigned long long max_bucket);
 
 /**
  * @brief Aplatit le tableau 4D en une structure linéaire `map_in_one`.
