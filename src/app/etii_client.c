@@ -641,9 +641,57 @@ void check_client_threads_step(int *last_record)
 }
 
 /**
+ * @brief Somme `counters[0..NB_THREADS-1]` : nombre de nœuds visités par ce
+ *        processus depuis son démarrage (recherche mono-process du mode
+ *        `test`/`DEBUG_IN_MONO_PROCESS`, ou un fork de recherche).
+ *
+ * Glue non pure (lit les globales `counters`/`NB_THREADS`) autour de la
+ * décision pure `bench_should_stop` (static_variables.h) — c'est cette
+ * dernière qui est couverte par les tests unitaires.
+ */
+static unsigned long long bench_nodes_done(void)
+{
+    unsigned long long nodes_done = 0;
+    for (int t = 0; t < NB_THREADS; t++) {
+        nodes_done += counters[t];
+    }
+    return nodes_done;
+}
+
+/**
+ * @brief Sonde le banc de mesure (`bench_target_nodes`) et demande l'arrêt de
+ *        la recherche (`REQUEST_STOP`) dès que la cible est atteinte.
+ *
+ * No-op si le banc est désactivé (`bench_target_nodes == 0`, cas par défaut).
+ * Journalise le nombre de nœuds RÉELLEMENT atteint (toujours >= la cible, un
+ * léger dépassement est attendu — voir `bench_should_stop`) pour que
+ * `tests/bench/bench_search.sh` puisse le relire au lieu de supposer que la
+ * cible a été atteinte exactement.
+ */
+static void bench_poll_and_maybe_stop(void)
+{
+    if (bench_target_nodes == 0) {
+        return;
+    }
+    unsigned long long nodes_done = bench_nodes_done();
+    if (bench_should_stop(bench_target_nodes, nodes_done)) {
+        log_info("ETII_BENCH nodes_reached=%llu target=%llu\n", nodes_done, bench_target_nodes);
+        request = REQUEST_STOP;
+    }
+}
+
+/**
  * @brief Thread de statistiques du client (lancé par `run_checker`).
  *
  * Toutes les 10 secondes, appelle `check_client_threads_step` puis dort.
+ *
+ * Quand le banc de mesure est actif (`bench_target_nodes > 0`), la pause de
+ * 10 s est remplacée par un sondage rapproché de `counters[]` (20 ms) :
+ * mesurer le temps nécessaire à N nœuds avec une granularité de 10 s
+ * introduirait un dépassement bien plus grand que ce que la mesure est censée
+ * détecter. Ce coût additionnel reste entièrement hors production — la boucle
+ * chaude de `autosearch()` n'est jamais touchée, seul ce thread dédié sonde
+ * plus souvent, et uniquement quand `ETII_BENCH_NODES` est positionnée.
  *
  * @param param Non utilisé.
  * @return      NULL (boucle infinie).
@@ -659,7 +707,23 @@ void *check_client_threads(void *param)
     while(request != REQUEST_STOP)
     {
         check_client_threads_step(&last_record);
-        sleep(sleep_time);
+        if (request == REQUEST_STOP) {
+            break;
+        }
+        if (bench_target_nodes > 0) {
+            // 1 ms : assez fin pour que le dépassement de la cible (inévitable —
+            // aucun test n'est ajouté à la boucle chaude, cf. bench_should_stop)
+            // reste une fraction négligeable de bench_target_nodes, y compris à
+            // plusieurs millions de nœuds/s.
+            const useconds_t poll_interval_us = 1000; // 1 ms
+            int ticks = (sleep_time * 1000000) / (int)poll_interval_us;
+            for (int i = 0; i < ticks && request != REQUEST_STOP; i++) {
+                usleep(poll_interval_us);
+                bench_poll_and_maybe_stop();
+            }
+        } else {
+            sleep(sleep_time);
+        }
     }
 
     return NULL;

@@ -251,6 +251,56 @@ TEST request_keeps_running_is_false_only_on_stop(void)
     PASS();
 }
 
+/* bench_parse_nodes_env : variable ETII_BENCH_NODES du banc de mesure
+   (tests/bench/bench_search.sh). Absente/vide/non numérique -> 0 (banc
+   désactivé) plutôt qu'un comportement surprenant sur une valeur malformée. */
+TEST bench_parse_nodes_env_absent_or_empty_returns_zero(void)
+{
+    ASSERT_EQ_FMT(0ULL, bench_parse_nodes_env(NULL), "%llu");
+    ASSERT_EQ_FMT(0ULL, bench_parse_nodes_env(""), "%llu");
+    PASS();
+}
+
+TEST bench_parse_nodes_env_non_numeric_returns_zero(void)
+{
+    ASSERT_EQ_FMT(0ULL, bench_parse_nodes_env("abc"), "%llu");
+    ASSERT_EQ_FMT(0ULL, bench_parse_nodes_env("--5"), "%llu");
+    PASS();
+}
+
+TEST bench_parse_nodes_env_valid_decimal_is_parsed(void)
+{
+    ASSERT_EQ_FMT(2000000ULL, bench_parse_nodes_env("2000000"), "%llu");
+    ASSERT_EQ_FMT(0ULL, bench_parse_nodes_env("0"), "%llu");
+    PASS();
+}
+
+/* bench_should_stop : décision pure consommée par check_client_threads
+   (src/app/etii_client.c). Cible 0 = banc désactivé : ne s'arrête jamais,
+   quel que soit le nombre de nœuds déjà visités. */
+TEST bench_should_stop_disabled_when_target_is_zero(void)
+{
+    ASSERT_EQ_FMT(0, bench_should_stop(0, 0), "%d");
+    ASSERT_EQ_FMT(0, bench_should_stop(0, 1000000), "%d");
+    PASS();
+}
+
+TEST bench_should_stop_false_while_below_target(void)
+{
+    ASSERT_EQ_FMT(0, bench_should_stop(1000, 999), "%d");
+    PASS();
+}
+
+/* Egalité exacte ET dépassement doivent tous deux déclencher l'arrêt : le
+   sondage périodique de check_client_threads observe rarement la valeur
+   exacte de la cible. */
+TEST bench_should_stop_true_at_or_above_target(void)
+{
+    ASSERT_EQ_FMT(1, bench_should_stop(1000, 1000), "%d");
+    ASSERT_EQ_FMT(1, bench_should_stop(1000, 1500), "%d");
+    PASS();
+}
+
 SUITE(static_variables_suite)
 {
     RUN_TEST(flag_absent_leaves_argv_and_flag_untouched);
@@ -269,4 +319,10 @@ SUITE(static_variables_suite)
     RUN_TEST(help_flag_absent_leaves_global_untouched);
     RUN_TEST(request_is_pause_covers_both_pause_values);
     RUN_TEST(request_keeps_running_is_false_only_on_stop);
+    RUN_TEST(bench_parse_nodes_env_absent_or_empty_returns_zero);
+    RUN_TEST(bench_parse_nodes_env_non_numeric_returns_zero);
+    RUN_TEST(bench_parse_nodes_env_valid_decimal_is_parsed);
+    RUN_TEST(bench_should_stop_disabled_when_target_is_zero);
+    RUN_TEST(bench_should_stop_false_while_below_target);
+    RUN_TEST(bench_should_stop_true_at_or_above_target);
 }
