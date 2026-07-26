@@ -144,9 +144,13 @@ run_once() {
     fi
 }
 
-extract_nodes_reached() {
-    grep -a -o 'nodes_reached=[0-9]*' "$1" | tail -1 | cut -d= -f2
+extract_field() {
+    # $1 = fichier de log, $2 = nom du champ ("nodes_reached", "fc_attempts", ...)
+    # dans la ligne "ETII_BENCH key=val key=val ..." (src/app/etii_client.c).
+    grep -a -o "$2=[0-9]*" "$1" | tail -1 | cut -d= -f2
 }
+
+extract_nodes_reached() { extract_field "$1" nodes_reached; }
 
 # --- Chauffe (non comptée) --------------------------------------------------
 
@@ -164,9 +168,12 @@ fi
 
 rates_file="$WORKDIR/rates"
 nodes_file="$WORKDIR/nodes"
+fc_rate_file="$WORKDIR/fc_rates"
 : > "$rates_file"
 : > "$nodes_file"
+: > "$fc_rate_file"
 runs_json="[]"
+have_fc=0
 
 for ((i = 1; i <= REPS; i++)); do
     log "Run $i/$REPS..."
@@ -185,14 +192,31 @@ for ((i = 1; i <= REPS; i++)); do
     echo "$rate" >> "$rates_file"
     echo "$nodes_reached" >> "$nodes_file"
 
-    run_entry=$(printf '{"run":%d,"nodes_reached":%s,"elapsed_sec":%s,"nodes_per_sec":%s}' \
-        "$i" "$nodes_reached" "$elapsed" "$rate")
+    # Élagage INLINE par forward-check dans autosearch() (bt_forward_check,
+    # src/core/etii_search.c) — absent des logs si le binaire est compilé avec
+    # FORWARD_CHECK_K=0. Coût déjà inclus dans nodes/s ci-dessus ; ces champs
+    # ne servent qu'à isoler le TAUX d'élagage (utile pour distinguer un gain de
+    # débit dû à une boucle plus rapide d'un gain dû à un élagage différent).
+    # Sans rapport avec le mode `pruner` séparé (réseau), non couvert par ce banc.
+    fc_attempts=$(extract_field "$outlog" fc_attempts)
+    fc_pruned=$(extract_field "$outlog" fc_pruned)
+    fc_json=""
+    if [[ -n "$fc_attempts" && -n "$fc_pruned" ]]; then
+        have_fc=1
+        fc_rate=$(awk -v a="$fc_attempts" -v p="$fc_pruned" 'BEGIN { printf "%.4f", (a > 0) ? p / a * 100 : 0 }')
+        echo "$fc_rate" >> "$fc_rate_file"
+        fc_json=$(printf ',"fc_attempts":%s,"fc_pruned":%s,"fc_prune_rate_pct":%s' \
+            "$fc_attempts" "$fc_pruned" "$fc_rate")
+    fi
+
+    run_entry=$(printf '{"run":%d,"nodes_reached":%s,"elapsed_sec":%s,"nodes_per_sec":%s%s}' \
+        "$i" "$nodes_reached" "$elapsed" "$rate" "$fc_json")
     if [[ "$runs_json" == "[]" ]]; then
         runs_json="[$run_entry]"
     else
         runs_json="${runs_json%]},${run_entry}]"
     fi
-    log "  nodes_reached=$nodes_reached elapsed=${elapsed}s nodes/s=$rate"
+    log "  nodes_reached=$nodes_reached elapsed=${elapsed}s nodes/s=$rate${fc_json:+ fc_prune_rate=${fc_rate}%}"
 done
 
 # --- Statistiques (médiane/min/max/écart-type relatif) ---------------------
@@ -223,6 +247,15 @@ read -r nodes_med nodes_min nodes_max nodes_sd nodes_relsd < <(compute_stats < "
 nodes_all_equal="true"
 if [[ "$nodes_min" != "$nodes_max" ]]; then
     nodes_all_equal="false"
+fi
+
+fc_json_fields=""
+fc_summary_line=""
+if [[ $have_fc -eq 1 ]]; then
+    read -r fc_rate_med fc_rate_min fc_rate_max _ _ < <(compute_stats < "$fc_rate_file")
+    fc_json_fields=$(printf ',\n  "fc_prune_rate_pct_median": %s,\n  "fc_prune_rate_pct_min": %s,\n  "fc_prune_rate_pct_max": %s' \
+        "$fc_rate_med" "$fc_rate_min" "$fc_rate_max")
+    fc_summary_line="taux d'élagage forward-check : médiane=${fc_rate_med}% min=${fc_rate_min}% max=${fc_rate_max}%"
 fi
 
 # --- Rapport JSON ------------------------------------------------------------
@@ -258,7 +291,7 @@ report_file="$WORKDIR/report.json"
     printf '  "nodes_reached_median": %s,\n' "$nodes_med"
     printf '  "nodes_reached_min": %s,\n' "$nodes_min"
     printf '  "nodes_reached_max": %s,\n' "$nodes_max"
-    printf '  "nodes_reached_all_equal": %s\n' "$nodes_all_equal"
+    printf '  "nodes_reached_all_equal": %s%s\n' "$nodes_all_equal" "$fc_json_fields"
     printf '}\n'
 } > "$report_file"
 
@@ -281,6 +314,11 @@ printf 'nœuds/s : médiane=%s min=%s max=%s écart-type relatif=%.2f%%\n' \
 if awk -v r="$rate_relsd" 'BEGIN { exit !(r > 5.0) }'; then
     log "ATTENTION : écart-type relatif > 5 % — mesure bruitée, les conclusions sont peu fiables"
     log "            (relancez sur une machine moins chargée, ou augmentez --reps/--nodes)"
+fi
+if [[ -n "$fc_summary_line" ]]; then
+    log "$fc_summary_line"
+else
+    log "élagage forward-check : absent des logs (binaire compilé avec FORWARD_CHECK_K=0 ?)"
 fi
 
 if [[ -n "$BASELINE" ]]; then
@@ -305,6 +343,12 @@ if [[ -n "$BASELINE" ]]; then
         if [[ "$base_nodes_target" != "$NODES" ]]; then
             log "note : la cible de nœuds diffère (baseline=$base_nodes_target, actuel=$NODES)" \
                 "— le débit (nœuds/s) reste comparable, pas le nombre brut de nœuds atteints."
+        fi
+
+        base_fc_rate=$(json_field "$BASELINE" fc_prune_rate_pct_median)
+        if [[ -n "$base_fc_rate" && -n "$fc_summary_line" ]]; then
+            log "taux d'élagage forward-check médian : baseline=${base_fc_rate}%  actuel=${fc_rate_med}%" \
+                "— un écart signale un changement de comportement de l'élagage, pas seulement de débit."
         fi
     fi
 fi

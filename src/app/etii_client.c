@@ -667,6 +667,17 @@ static unsigned long long bench_nodes_done(void)
  * léger dépassement est attendu — voir `bench_should_stop`) pour que
  * `tests/bench/bench_search.sh` puisse le relire au lieu de supposer que la
  * cible a été atteinte exactement.
+ *
+ * Journalise aussi `fc_attempts`/`fc_pruned` (élagage par forward-check,
+ * `bt_forward_check` dans `src/core/etii_search.c`) quand `FORWARD_CHECK_K >
+ * 0` : c'est un pruning INLINE dans la boucle chaude d'`autosearch()` (pas le
+ * process `pruner` séparé, qui a son propre chemin réseau et n'est pas
+ * couvert par ce banc), donc son coût est déjà entièrement inclus dans
+ * `nodes_reached`/temps mesuré — ces deux compteurs servent uniquement à
+ * reporter le TAUX d'élagage, pour distinguer un gain de débit dû à une
+ * boucle plus rapide d'un gain dû à un forward-check qui élague différemment.
+ * Lecture atomique comme dans `check_client_threads_step`, pas de nouveau
+ * verrou ni coût ajouté à `bt_forward_check` lui-même.
  */
 static void bench_poll_and_maybe_stop(void)
 {
@@ -675,7 +686,14 @@ static void bench_poll_and_maybe_stop(void)
     }
     unsigned long long nodes_done = bench_nodes_done();
     if (bench_should_stop(bench_target_nodes, nodes_done)) {
+#if FORWARD_CHECK_K > 0
+        unsigned long long fca = __atomic_load_n(&fc_attempts, __ATOMIC_RELAXED);
+        unsigned long long fcp = __atomic_load_n(&fc_pruned, __ATOMIC_RELAXED);
+        log_info("ETII_BENCH nodes_reached=%llu target=%llu fc_attempts=%llu fc_pruned=%llu\n",
+                  nodes_done, bench_target_nodes, fca, fcp);
+#else
         log_info("ETII_BENCH nodes_reached=%llu target=%llu\n", nodes_done, bench_target_nodes);
+#endif
         request = REQUEST_STOP;
     }
 }
@@ -686,7 +704,7 @@ static void bench_poll_and_maybe_stop(void)
  * Toutes les 10 secondes, appelle `check_client_threads_step` puis dort.
  *
  * Quand le banc de mesure est actif (`bench_target_nodes > 0`), la pause de
- * 10 s est remplacée par un sondage rapproché de `counters[]` (20 ms) :
+ * 10 s est remplacée par un sondage rapproché de `counters[]` (1 ms) :
  * mesurer le temps nécessaire à N nœuds avec une granularité de 10 s
  * introduirait un dépassement bien plus grand que ce que la mesure est censée
  * détecter. Ce coût additionnel reste entièrement hors production — la boucle

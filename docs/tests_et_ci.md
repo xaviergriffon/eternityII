@@ -150,6 +150,28 @@ d'environnement (`bench_parse_nodes_env`) sont des fonctions pures
 (`src/app/static_variables.h`/`.c`), testées unitairement dans
 `tests/app/test_static_variables.c`.
 
+### Élagage forward-check inline
+
+`autosearch()` élague aussi ses branches en ligne, sans réseau : à chaque
+placement candidat, `bt_forward_check` (`src/core/etii_search.c`) teste les
+`FORWARD_CHECK_K` cases suivantes (défaut 6) avant de s'engager plus loin. Ce
+mécanisme est distinct du process `pruner` séparé (qui vérifie des
+possibilités reçues du serveur par lots réseau) — il n'est pas couvert par ce
+banc et n'a pas besoin de l'être : son coût est entièrement inclus dans le
+temps mesuré, puisqu'il s'exécute dans la même boucle chaude.
+
+Le banc journalise en plus, sur la même ligne `ETII_BENCH`, `fc_attempts` et
+`fc_pruned` (lus par `bench_poll_and_maybe_stop`, `src/app/etii_client.c`, via
+`__atomic_load_n` — pas de nouveau coût dans `bt_forward_check` lui-même). Le
+script en tire un **taux d'élagage** (`fc_pruned / fc_attempts`), rapporté en
+plus du débit dans le JSON (`fc_prune_rate_pct_median`/`_min`/`_max`) et dans
+la comparaison `--baseline`. C'est un second garde-fou, complémentaire du
+débit : un changement de mise en page mémoire peut accélérer la boucle sans
+changer le comportement de l'élagage (taux stable), ou au contraire modifier
+l'ordre d'exploration et donc le taux — un signal que le changement n'est pas
+sémantiquement neutre. Absent des logs (et donc du rapport) sur un build
+`FORWARD_CHECK_K=0`.
+
 ### Le script
 
 ```sh
