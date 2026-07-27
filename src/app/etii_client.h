@@ -55,8 +55,71 @@ typedef struct
 } client_possibility_t;
 
 /**
+ * @brief Pièces de recherche : tableau des rotations + map de lookup 4D.
+ *
+ * Les deux vont toujours ensemble (la map pointe sur les mêmes pièces) et ont
+ * la même durée de vie ; les réunir permet de n'avoir qu'UN seul propriétaire
+ * à suivre, qu'elles soient héritées du process parent ou construites
+ * localement (cf. `acquire_search_parts`).
+ */
+typedef struct
+{
+    /// Toutes les rotations de toutes les pièces (`rotate_all_parts`).
+    struct array_part *rotate_parts;
+    /// Map de lookup (top, right, bottom, left) -> pièces (`prepare_map_part`).
+    map_big_array *map;
+} search_parts_t;
+
+/**
+ * @brief Construit les pièces de recherche à partir du fichier CSV de pièces.
+ *
+ * Enchaîne `read_parts` -> `rotate_all_parts` -> `prepare_map_part` et libère
+ * le tableau intermédiaire. Comme `read_parts`, quitte le process si le fichier
+ * est illisible ou mal formé.
+ *
+ * @param out  Structure à remplir (les deux champs sont écrits).
+ * @param file Chemin du fichier CSV de définition des pièces.
+ */
+void build_search_parts(search_parts_t *out, const char *file);
+
+/**
+ * @brief Libère des pièces de recherche et remet les champs à NULL.
+ *
+ * Tolère `NULL` et les champs déjà NULL (donc idempotent : appelable deux fois
+ * sans double libération).
+ *
+ * @param parts Structure à libérer (peut être NULL).
+ */
+void free_search_parts(search_parts_t *parts);
+
+/**
+ * @brief Publie les pièces que les process enfants doivent réutiliser.
+ *
+ * Appelé par le process PARENT du client AVANT sa boucle de `fork()`
+ * (`handle_client`, src/app/main.c) : la map n'étant plus jamais écrite après
+ * sa construction, les enfants la partagent physiquement par copy-on-write au
+ * lieu d'en construire chacun une copie privée (5,06 Mo de `flat` + 1,27 Mo
+ * d'index compact + 0,11 Mo d'arène par process). Le parent reste
+ * propriétaire : il est le seul à appeler `free_search_parts` dessus.
+ *
+ * @param parts Pièces à publier, ou NULL pour effacer la publication.
+ */
+void set_inherited_search_parts(const search_parts_t *parts);
+
+/**
+ * @brief Récupère les pièces de recherche à utiliser : héritées ou construites.
+ *
+ * @param out  Structure à remplir.
+ * @param file Fichier CSV utilisé si aucune map n'a été publiée par le parent.
+ * @return     0 si les pièces sont HÉRITÉES (ne rien libérer : elles
+ *             appartiennent au process parent), 1 si elles viennent d'être
+ *             construites (l'appelant doit appeler `free_search_parts`).
+ */
+int acquire_search_parts(search_parts_t *out, const char *file);
+
+/**
  * @brief Lance un client en mono-thread
- * 
+ *
  * @param file fichier contenant la définition des pieces
  */
 void run_mono_client(const char *file);

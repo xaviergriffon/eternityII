@@ -1143,9 +1143,10 @@ TEST check_client_threads_stops_immediately_on_request_stop(void)
  * les threads d'alimentation et de contrôle se terminent immédiatement, les
  * joins aboutissent. Exerce toute l'orchestration (read_parts sur le fichier de
  * pièces par défaut du build courant, construction map/rotations, joins, bloc
- * de fermeture socket). Les structures ne sont pas libérées par run_mono_client
- * (le process de production sort juste après) : toléré ici, comme en CI ASan
- * (detect_leaks=0).
+ * de fermeture socket). La map construite localement EST libérée en fin de
+ * run_mono_client (cf. acquire_search_parts) ; le contexte client lui-même ne
+ * l'est pas (le process de production sort juste après) : toléré ici, comme en
+ * CI ASan (detect_leaks=0).
  */
 
 /* counters/lastfilesize sont lus/écrits par la pile de recherche : on les
@@ -1187,6 +1188,140 @@ TEST run_mono_client_pruner_stops_immediately(void)
     run_mono_client(parts_files);
 
     pruner_mode = saved_pruner;
+    request = saved_req;
+    NB_THREADS = saved_nb;
+    dm_drain_local();
+    PASS();
+}
+
+/* ---------- pièces de recherche partagées (map héritée du parent) ---------- */
+/*
+ * La map de lookup est construite UNE fois par le process parent avant sa
+ * boucle de fork() : les process de recherche l'héritent en copy-on-write au
+ * lieu d'en construire chacun une copie privée. Le point délicat est la
+ * PROPRIÉTÉ — un fork qui libérerait la map de son parent la retirerait à ses
+ * frères — d'où ces tests sur le contrat d'acquire_search_parts.
+ */
+
+/* Le fichier de pièces du build courant est-il lisible depuis le CWD ? */
+static int parts_file_available(void)
+{
+    FILE *f = fopen(parts_files, "r");
+    if (f == NULL) {
+        return 0;
+    }
+    fclose(f);
+    return 1;
+}
+
+TEST acquire_search_parts_builds_and_owns_when_nothing_published(void)
+{
+    if (!parts_file_available()) {
+        SKIPm("fichier de pièces absent du répertoire courant");
+    }
+    set_inherited_search_parts(NULL);
+
+    search_parts_t parts;
+    int owned = acquire_search_parts(&parts, parts_files);
+
+    ASSERT_EQ(1, owned); /* construites ici -> à libérer ici */
+    ASSERT(parts.map != NULL);
+    ASSERT(parts.rotate_parts != NULL);
+    /* rotate_all_parts : 4 rotations par pièce + le bouchon d'indice 0. */
+    ASSERT_EQ(ETERN_PARTS * 4 + 1, parts.rotate_parts->size);
+
+    free_search_parts(&parts);
+    ASSERT_EQ(NULL, parts.map);
+    ASSERT_EQ(NULL, parts.rotate_parts);
+    PASS();
+}
+
+TEST acquire_search_parts_reuses_published_parts(void)
+{
+    /* Pointeurs factices : acquire_search_parts ne doit RIEN déréférencer,
+       seulement transmettre. */
+    search_parts_t published;
+    published.rotate_parts = (struct array_part *)0x1;
+    published.map = (map_big_array *)0x2;
+    set_inherited_search_parts(&published);
+
+    search_parts_t parts;
+    int owned = acquire_search_parts(&parts, "/inexistant.csv");
+
+    ASSERT_EQ(0, owned); /* hérité -> l'appelant ne libère pas */
+    ASSERT_EQ(published.rotate_parts, parts.rotate_parts);
+    ASSERT_EQ(published.map, parts.map);
+
+    set_inherited_search_parts(NULL);
+    PASS();
+}
+
+TEST acquire_search_parts_builds_again_after_publication_cleared(void)
+{
+    if (!parts_file_available()) {
+        SKIPm("fichier de pièces absent du répertoire courant");
+    }
+    search_parts_t published;
+    published.rotate_parts = (struct array_part *)0x1;
+    published.map = (map_big_array *)0x2;
+    set_inherited_search_parts(&published);
+    set_inherited_search_parts(NULL);
+
+    search_parts_t parts;
+    ASSERT_EQ(1, acquire_search_parts(&parts, parts_files));
+    ASSERT(parts.map != NULL);
+    free_search_parts(&parts);
+    PASS();
+}
+
+TEST free_search_parts_is_null_safe_and_idempotent(void)
+{
+    free_search_parts(NULL); /* ne doit pas planter */
+
+    search_parts_t parts;
+    parts.rotate_parts = NULL;
+    parts.map = NULL;
+    free_search_parts(&parts);
+    free_search_parts(&parts); /* pas de double libération */
+    ASSERT_EQ(NULL, parts.map);
+    PASS();
+}
+
+/*
+ * Régression : un process de recherche ne doit JAMAIS libérer la map publiée
+ * par son parent (elle survit au fork et est partagée par tous ses frères).
+ * On publie une vraie map, on exécute run_mono_client, puis on relit la map :
+ * sous ASan, une libération fautive se manifeste ici en use-after-free.
+ */
+TEST run_mono_client_does_not_free_published_parts(void)
+{
+    if (!parts_file_available()) {
+        SKIPm("fichier de pièces absent du répertoire courant");
+    }
+    dm_drain_local();
+    ensure_counters();
+    int saved_req = request;
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    request = REQUEST_STOP;
+
+    search_parts_t published;
+    build_search_parts(&published, parts_files);
+    int expected_size = published.rotate_parts->size;
+    int expected_sizearray = published.map->sizearray;
+    set_inherited_search_parts(&published);
+
+    run_mono_client(parts_files);
+
+    /* Toujours intactes et exploitables après le passage du « fork ». */
+    ASSERT_EQ(expected_size, published.rotate_parts->size);
+    ASSERT_EQ(expected_sizearray, published.map->sizearray);
+    int8_t key[4] = {0, 0, 0, 0};
+    struct array_part *bucket = get_parts_bigarray(published.map, key);
+    ASSERT(bucket != NULL);
+
+    set_inherited_search_parts(NULL);
+    free_search_parts(&published);
     request = saved_req;
     NB_THREADS = saved_nb;
     dm_drain_local();
@@ -1253,6 +1388,12 @@ SUITE(etii_client_suite)
     RUN_TEST(check_client_threads_step_shows_numeric_limit);
     RUN_TEST(check_client_threads_stops_immediately_on_request_stop);
 
+    RUN_TEST(acquire_search_parts_builds_and_owns_when_nothing_published);
+    RUN_TEST(acquire_search_parts_reuses_published_parts);
+    RUN_TEST(acquire_search_parts_builds_again_after_publication_cleared);
+    RUN_TEST(free_search_parts_is_null_safe_and_idempotent);
+
     RUN_TEST(run_mono_client_search_stops_immediately);
     RUN_TEST(run_mono_client_pruner_stops_immediately);
+    RUN_TEST(run_mono_client_does_not_free_published_parts);
 }
