@@ -79,7 +79,9 @@ La map expose **deux représentations des mêmes données**, et le chemin chaud 
 | 8 workers concurrents | 39,7 M nœuds/s cumulés | 43,7 M nœuds/s | **+10,1 %** |
 | 16 workers concurrents | 41,9 M nœuds/s cumulés | 53,8 M nœuds/s | **+28,6 %** |
 
-L'écart se creuse avec le nombre de workers : chaque processus de recherche a **sa propre copie** de la map, et 16 × 1,27 Mo tient dans les 16 Mo de L3 de la machine là où 16 × 5,06 Mo ne tient pas.
+L'écart se creuse avec le nombre de workers : dans cette mesure, chaque worker est un **processus indépendant** (`bench_search.sh` lance N fois le mode `test`) et a donc **sa propre copie** de la map — 16 × 1,27 Mo tient dans les 16 Mo de L3 de la machine là où 16 × 5,06 Mo ne tient pas.
+
+> En **mode client**, ce n'est plus le cas : les processus de recherche sont des `fork()` d'un même parent, qui construit la map avant de forker ; ils s'en partagent physiquement **une seule copie** en copy-on-write (voir [Architecture — map de lookup partagée](architecture.md#map-de-lookup-partagée-entre-les-processus-de-recherche)). L'index compact reste utile pour autant : il réduit la taille du jeu de travail lu par le forward-check, partagé ou non.
 
 **Invariant.** `packed` est **purement redondant** : `map_bucket_packed` renvoie exactement la même taille et la même liste de pièces que `get_parts_bigarray_with_key`, pour **toute** clé. C'est un changement de représentation, jamais de sémantique — les nœuds explorés et leur ordre sont inchangés (le taux d'élagage rapporté par le banc reste identique à la 4ᵉ décimale : 45,7099 %). Le test `packed_index_matches_flat_for_every_key` (`tests/core/test_part.c`) balaie **toutes** les clés d'une map réelle pour verrouiller cette équivalence, et `bt_forward_check_same_verdict_with_and_without_packed_index` (`tests/core/test_etii_search.c`) la vérifie à travers la fonction chaude elle-même, en neutralisant l'index pour comparer les deux verdicts.
 

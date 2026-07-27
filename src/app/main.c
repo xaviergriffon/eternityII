@@ -147,6 +147,19 @@ void handle_client(int argc, const char *argv[]) {
     init_counters();
     init_signals();
 
+    // Map de lookup construite ICI, une seule fois, AVANT la boucle de fork() :
+    // elle n'est plus jamais écrite ensuite, donc les process de recherche
+    // l'héritent en copy-on-write et se partagent physiquement UNE copie au
+    // lieu d'en construire chacun la leur (5,06 Mo de `flat` + 1,27 Mo d'index
+    // compact + 0,11 Mo d'arène par process). Le parent en reste propriétaire :
+    // il est le seul à la libérer, après wait_child().
+    // Fait avant la création de la socket locale : un fichier de pièces
+    // illisible fait sortir read_parts, autant que ce soit avant d'avoir laissé
+    // une socket `etii_main.<pid>` derrière nous.
+    search_parts_t shared_parts;
+    build_search_parts(&shared_parts, parts_files);
+    set_inherited_search_parts(&shared_parts);
+
     char socket_main[50];
     sprintf(socket_main, "etii_main.%d", getpid());
     main_addr = build_sockaddr(socket_main);
@@ -157,6 +170,13 @@ void handle_client(int argc, const char *argv[]) {
     main_socket_id = socket_id;
 
     init_sigchld_sigaction();
+
+    // Les tampons stdio sont hérités TELS QUELS par fork() : ce qui n'a pas été
+    // écrit sur le flux ici (stdout redirigé vers un fichier = tampon par blocs)
+    // serait ré-émis par CHACUN des enfants à sa sortie, dupliquant N fois tout
+    // le journal de démarrage. On vide donc les flux juste avant la boucle —
+    // encore mono-thread, donc aucun verrou stdio ne peut être pris ailleurs.
+    fflush(NULL);
 
     // IMPORTANT : aucun thread du parent (console, checker, réception stats) ne
     // doit tourner pendant la boucle de fork(). Sinon, si l'un d'eux détient le
@@ -245,6 +265,8 @@ void handle_client(int argc, const char *argv[]) {
             close(*socket_id);
             remove(main_addr->sun_path);
             free(main_addr);
+            set_inherited_search_parts(NULL);
+            free_search_parts(&shared_parts);
             return;
         }
         if (fork_error > 0) {
@@ -274,6 +296,10 @@ void handle_client(int argc, const char *argv[]) {
         flush_debug();
 #endif // DEBUG_LOCAL_SOCKET
         remove(main_addr->sun_path);
+        // Tous les process de recherche sont terminés (wait_child) : plus
+        // personne ne lit la map partagée, le propriétaire peut la libérer.
+        set_inherited_search_parts(NULL);
+        free_search_parts(&shared_parts);
     }
     free(main_addr);
 }
@@ -384,15 +410,14 @@ void run_client(const char *hostname, const char *file)
  */
 void run_auto(const char *file)
 {
-	struct array_part *apart= read_parts(file);
-	struct array_part *rotateParts = rotate_all_parts(apart);
-	// On prépare les premières possiblitées en local
-	map_big_array *map_parts = prepare_map_part(rotateParts);
-	first_possibility(map_parts, rotateParts);
-	free_bigarray(map_parts);
-	free_array_part(rotateParts);
-	free_array_part(apart);
-	
+	// On prépare les premières possiblitées en local. Aucun fork dans ce mode :
+	// rien n'est publié via set_inherited_search_parts, et run_mono_client
+	// construira donc (et libérera) les siennes, comme avant.
+	search_parts_t parts;
+	build_search_parts(&parts, file);
+	first_possibility(parts.map, parts.rotate_parts);
+	free_search_parts(&parts);
+
 	run_mono_client(file);
 }
 
