@@ -83,6 +83,33 @@ séquence est surchargeable pour rejouer un seul job :
 make test-docker DOCKER_TEST_CMD="make test ASAN=1"
 ```
 
+### Le conteneur tourne en root : tests sautés
+
+Une différence subsiste volontairement avec la CI : le conteneur exécute les tests
+**en root**, là où le runner GitHub tourne sous l'utilisateur non privilégié
+`runner`. Or root outrepasse les bits de permission (`CAP_DAC_OVERRIDE` sous Linux) :
+les tests qui posent un `chmod(dir, 0444)` pour vérifier qu'une écriture **échoue**
+voient au contraire leur `fopen()` réussir, et l'assertion tombe. C'est le cas de
+`do_command_line_print_fails_on_unwritable_dir` et de
+`do_command_line_backup_fails_on_unwritable_dir`
+([tests/ui/test_command_lines.c](../tests/ui/test_command_lines.c)) — le premier
+faisait échouer `make test-docker` en permanence, masquant les vrais échecs que
+cette cible sert justement à révéler.
+
+Ces deux tests commencent donc par `SKIP_IF_ROOT()`, qui les saute via `SKIPm` quand
+`geteuid() == 0` — même logique que le `SKIPm("chmod non supporté sur cet
+environnement")` déjà présent en cas d'échec du `chmod` lui-même : quand le postulat
+de permission ne tient pas, le test n'a rien à prouver. Sous `make test-docker` ils
+apparaissent donc en `skipped` (et non en `failed`) ; sur le poste hôte comme en CI,
+tous deux s'exécutent normalement.
+
+L'alternative — faire tourner le conteneur sous un utilisateur non-root (`USER` dans
+le Dockerfile, ou `--user` dans la cible `test-docker`) — rapprocherait le conteneur
+de la CI et **exécuterait** réellement ces tests, mais au prix d'une divergence de
+propriétaire entre la copie `/work` et l'utilisateur du build. Le garde-fou dans le
+test reste par ailleurs utile en soi : il protège tout environnement root, conteneur
+maison compris.
+
 ## Intégration continue
 
 À chaque push et pull request, [GitHub Actions](../.github/workflows/ci.yml) :

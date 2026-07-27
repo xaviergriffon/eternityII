@@ -594,9 +594,26 @@ TEST do_command_line_printanalysed_exports_with_pid_suffix_on_client(void)
     PASS();
 }
 
+/* Les tests « répertoire non inscriptible » ci-dessous reposent sur le fait
+ * qu'un chmod(dir, 0444) interdise réellement d'y créer un fichier. root
+ * outrepasse les bits de permission (CAP_DAC_OVERRIDE sous Linux) : fopen() en
+ * écriture y réussit malgré le 0444, l'échec attendu ne se produit jamais et
+ * l'assertion tombe. C'est exactement le cas sous `make test-docker`, dont le
+ * conteneur tourne en root ; la CI GitHub, elle, tourne sous l'utilisateur
+ * `runner` et exécute donc bien ces tests. On les saute explicitement quand le
+ * postulat de la permission ne tient pas — même logique que le SKIPm sur un
+ * chmod() non supporté. */
+#define SKIP_IF_ROOT()                                                        \
+    do {                                                                      \
+        if (geteuid() == 0)                                                   \
+            SKIPm("root outrepasse les permissions : chmod 0444 sans effet"); \
+    } while (0)
+
 /* print vers un répertoire non inscriptible : fopen échoue -> -1, sans crash. */
 TEST do_command_line_print_fails_on_unwritable_dir(void)
 {
+    SKIP_IF_ROOT();
+
     char saved_cwd[4096];
     const char *got = getcwd(saved_cwd, sizeof saved_cwd);
     char tmpl[] = "/tmp/etii_prw_XXXXXX";
@@ -1113,6 +1130,13 @@ TEST do_command_line_backup_skipped_when_maintenance(void)
  * (L192 branche vraie, L198 branche vraie). */
 TEST do_command_line_backup_fails_on_unwritable_dir(void)
 {
+    /* Sous root, backup() réussirait : la branche BACKUP_ERROR visée ne serait
+     * pas prise (et les .back écrits feraient échouer le rmdir final). Le
+     * résultat asserté vaut 0 dans les deux cas, donc le test ne rougirait pas
+     * — raison de plus pour le sauter explicitement plutôt que de le laisser
+     * passer à vide. */
+    SKIP_IF_ROOT();
+
     char saved_cwd[4096];
     const char *got = getcwd(saved_cwd, sizeof saved_cwd);
     char tmpl[] = "/tmp/etii_bkw_XXXXXX";
