@@ -54,17 +54,44 @@ void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibil
  * @brief Niveau de la pile de décisions du backtracking in-place.
  *
  * Chaque case du parcours `directions[]` explorée depuis le paquet racine
- * occupe un niveau de pile. Un niveau mémorise uniquement la liste de candidats
- * de la map (pointeur stable, la map est en lecture seule pendant la recherche)
- * et la position de reprise : le plateau lui-même est partagé et modifié en place.
+ * occupe un niveau de pile. Un niveau mémorise uniquement le compartiment de
+ * candidats de la map (vue par valeur : pointeur + taille, tous deux stables
+ * puisque la map est en lecture seule pendant la recherche) et la position de
+ * reprise : le plateau lui-même est partagé et modifié en place.
+ *
+ * Le compartiment est stocké par VALEUR (`map_bucket`, 16 octets) et non plus
+ * par pointeur sur `flat` (8 octets) : `stack[ETERN_PARTS]` passe donc de 4 Ko
+ * à 6 Ko de pile C automatique, ce qui est sans effet à côté des 3,7 Mo que le
+ * chemin chaud cesse de balayer.
  */
 typedef struct {
-    /** Liste des candidats pour cette case (NULL = case pré-remplie, aucune décision). */
-    struct array_part *search;
+    /**
+     * Compartiment de candidats de cette case, lu via l'index COMPACT (`packed`)
+     * et non `flat` — cf. `map_bucket_packed`. N'a de sens que si `has_bucket`.
+     */
+    map_bucket search;
     /** Prochain indice de candidat à essayer dans `search` lors d'un retour sur ce niveau. */
     int next_s;
     /** Indice faceused (id-1) de la pièce actuellement placée à ce niveau, -1 si aucune. */
     int16_t placed_pos;
+    /**
+     * 1 = case à décider (`search` renseigné) ; 0 = case pré-remplie par le
+     * paquet racine, niveau sans décision.
+     *
+     * Cette sentinelle EXPLICITE remplace l'ancien `search == NULL` : `map_bucket`
+     * est une structure par valeur dont le champ `parts` vaut `arena + 0` pour un
+     * compartiment vide — il n'est jamais NULL, la sentinelle par pointeur ne
+     * survivait donc pas au changement de représentation.
+     *
+     * Elle reste distincte de « compartiment vide » (`search.size == 0`, impasse)
+     * bien que les trois lecteurs de la pile (`bt_count_pending`,
+     * `bt_materialize_pending` et la boucle de backtracking) traitent aujourd'hui
+     * les deux états de la même façon : ce sont deux faits sémantiquement
+     * différents, et seul le producteur (boucle chaude) les distingue vraiment —
+     * une case pré-remplie fait `continue` (nœud compté, `max_result` mis à jour)
+     * là où un compartiment vide fait remonter le backtracking.
+     */
+    int8_t has_bucket;
 } bt_level;
 
 /**
@@ -205,6 +232,8 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
  * profonds annulés sur une copie de travail). C'est l'équivalent du `bt.size`
  * de l'ancienne file : le stock local implicite du thread.
  *
+ * Un niveau sans décision (case pré-remplie, `has_bucket == 0`) ne compte rien.
+ *
  * @param board Plateau courant (non modifié).
  * @param stack Pile de décisions.
  * @param top   Indice du dernier niveau occupé (-1 si pile vide).
@@ -225,9 +254,9 @@ static unsigned long long bt_count_pending(const struct possibility_packet *boar
     unsigned long long pending = 0;
     for (int i = 0; i <= top; i++) {
         const bt_level *lvl = &stack[i];
-        if (lvl->search != NULL) {
-            for (int s = lvl->next_s; s < lvl->search->size; s++) {
-                int16_t id = lvl->search->parts[s].id;
+        if (lvl->has_bucket) {
+            for (int s = lvl->next_s; s < lvl->search.size; s++) {
+                int16_t id = lvl->search.parts[s].id;
                 if (id != 0 && !BOARD_FACE_USED(&scratch, id - 1)) {
                     pending++;
                 }
@@ -315,12 +344,12 @@ static int bt_materialize_pending(client_possibility_t *client,
             scratch.grid[dirx[d]][diry[d]] = -2;
             BOARD_SET_FACE(&scratch, lvl->placed_pos, 0);
         }
-        if (lvl->search != NULL) {
+        if (lvl->has_bucket) {
             uint8_t cx = dirx[d];
             uint8_t cy = diry[d];
             int s = lvl->next_s;
-            for (; s < lvl->search->size && count < max_out; s++) {
-                struct part *cand = &lvl->search->parts[s];
+            for (; s < lvl->search.size && count < max_out; s++) {
+                const struct part *cand = &lvl->search.parts[s];
                 if (cand->id == 0) {
                     continue;
                 }
@@ -645,7 +674,12 @@ static int search_packet_backtracking(client_possibility_t *client,
 
         if (board.grid[x][y] != -2) {
             // Case déjà remplie (indice du paquet d'origine) : niveau sans décision
-            stack[top].search = NULL;
+            stack[top].has_bucket = 0;
+            // Compartiment neutralisé : jamais lu (has_bucket == 0), mais un
+            // reliquat du niveau précédent serait un piège si un lecteur oubliait
+            // la sentinelle — size == 0 le rendrait alors inoffensif.
+            stack[top].search.parts = NULL;
+            stack[top].search.size = 0;
             counters[client->compteur]++;
             if (depth + 1 > max_result) {
                 max_result = depth + 1;
@@ -671,7 +705,14 @@ static int search_packet_backtracking(client_possibility_t *client,
             }
         }
 #endif // DEBUG_CHECK_POSSIBILITY
-        stack[top].search = get_parts_bigarray_with_key(client->map_part, &constraints[x][y]);
+        // Lookup de placement via l'index COMPACT (`packed`) et non `flat` :
+        // c'est le SEPTIÈME et dernier accès par nœud à la map, les six autres
+        // (forward-checking) étant déjà passés à `packed`. `flat` (5,06 Mo)
+        // disparaît ainsi du chemin chaud, dont le jeu de travail partagé tombe
+        // à `packed` + `arena` (1,38 Mo). Résultat rigoureusement identique à
+        // get_parts_bigarray_with_key (cf. packed_index_matches_flat_for_every_key).
+        stack[top].search = map_bucket_packed(client->map_part, &constraints[x][y]);
+        stack[top].has_bucket = 1;
 
 backtrack:;
         // Place le prochain candidat du niveau courant, sinon remonte (backtrack).
@@ -693,8 +734,8 @@ backtrack:;
                 lvl->placed_pos = -1;
             }
 
-            if (lvl->search != NULL) {
-                struct array_part *search = lvl->search;
+            if (lvl->has_bucket) {
+                const map_bucket *search = &lvl->search;
                 for (int s = lvl->next_s; s < search->size; s++) {
                     if (search->parts[s].id == 0) {
                         continue;
