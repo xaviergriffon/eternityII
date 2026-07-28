@@ -353,6 +353,35 @@ TEST bt_propagate_covers_border_guards(void)
 }
 
 /*
+ * Renseignement d'un niveau de pile.
+ *
+ * `bt_level.search` est un `map_bucket` (vue par valeur : pointeur + taille),
+ * et la distinction « case à décider » / « case pré-remplie » est portée par la
+ * sentinelle EXPLICITE `has_bucket` — `map_bucket.parts` n'étant jamais NULL
+ * pour un compartiment issu de l'index compact, l'ancien `search == NULL` ne
+ * pouvait plus jouer ce rôle. Les fixtures passent par ces deux helpers pour
+ * que le choix de la sentinelle reste à un seul endroit.
+ */
+static void set_level(bt_level *lvl, const struct array_part *list, int next_s, int16_t placed_pos)
+{
+    lvl->search.parts = list->parts;
+    lvl->search.size  = list->size;
+    lvl->has_bucket   = 1;
+    lvl->next_s       = next_s;
+    lvl->placed_pos   = placed_pos;
+}
+
+/* Niveau sans décision : case déjà remplie par le paquet racine. */
+static void set_level_no_decision(bt_level *lvl)
+{
+    lvl->search.parts = NULL;
+    lvl->search.size  = 0;
+    lvl->has_bucket   = 0;
+    lvl->next_s       = 0;
+    lvl->placed_pos   = -1;
+}
+
+/*
  * bt_count_pending : compte, pour chaque niveau de la pile, les candidats
  * restants (indice >= next_s) dont la pièce est libre dans l'état « racine ».
  * Pile : niveau 0 = [1,2,3] pièce 1 posée (next_s=1) ; niveau 1 = [4,5] pièce 4
@@ -370,8 +399,8 @@ TEST bt_count_pending_counts_remaining_free(void)
     struct array_part list_b = { .size = 2, .parts = cand_b };
 
     bt_level stack[2];
-    stack[0].search = &list_a; stack[0].next_s = 1; stack[0].placed_pos = 0; /* id 1 */
-    stack[1].search = &list_b; stack[1].next_s = 1; stack[1].placed_pos = 3; /* id 4 */
+    set_level(&stack[0], &list_a, 1, 0); /* id 1 */
+    set_level(&stack[1], &list_b, 1, 3); /* id 4 */
 
     struct possibility_packet board;
     make_empty_board(&board);
@@ -528,7 +557,7 @@ TEST bt_forward_check_same_verdict_with_and_without_packed_index(void)
 }
 #endif /* FORWARD_CHECK_K > 0 */
 
-/* bt_count_pending : un niveau sans décision (case pré-remplie : search == NULL,
+/* bt_count_pending : un niveau sans décision (case pré-remplie : has_bucket == 0,
  * placed_pos == -1) ne compte rien, et un candidat id 0 (trou de map) est ignoré. */
 TEST bt_count_pending_skips_no_decision_and_zero_id(void)
 {
@@ -537,9 +566,9 @@ TEST bt_count_pending_skips_no_decision_and_zero_id(void)
 
     bt_level stack[2];
     /* niveau 0 : case pré-remplie -> ni candidats ni placement */
-    stack[0].search = NULL;  stack[0].next_s = 0; stack[0].placed_pos = -1;
+    set_level_no_decision(&stack[0]);
     /* niveau 1 : id 0 ignoré, ids 2 et 3 libres */
-    stack[1].search = &list; stack[1].next_s = 0; stack[1].placed_pos = -1;
+    set_level(&stack[1], &list, 0, -1);
 
     struct possibility_packet board;
     make_empty_board(&board);
@@ -644,8 +673,8 @@ static int build_two_level_fixture(struct possibility_packet *board, bt_level st
     set_face_used(board->b_faceused, 3, 1); /* pièce 4 */
     board->alloc = 2;
 
-    stack[0].search = &lvl0_list; stack[0].next_s = 1; stack[0].placed_pos = 0; /* pièce 1 */
-    stack[1].search = &lvl1_list; stack[1].next_s = 1; stack[1].placed_pos = 3; /* pièce 4 */
+    set_level(&stack[0], &lvl0_list, 1, 0); /* pièce 1 */
+    set_level(&stack[1], &lvl1_list, 1, 3); /* pièce 4 */
 
     memset(client, 0, sizeof(*client));
     client->compteur = 0;
@@ -900,7 +929,7 @@ TEST bt_flush_pending_sends_all_plus_current(void)
 }
 
 /* bt_materialize_pending : un niveau sans décision (case pré-remplie :
- * search == NULL, placed_pos == -1) est traversé sans rien produire, et un
+ * has_bucket == 0, placed_pos == -1) est traversé sans rien produire, et un
  * candidat id 0 (trou de map) est consommé sans être matérialisé. */
 TEST bt_materialize_skips_no_decision_level_and_zero_id(void)
 {
@@ -922,8 +951,8 @@ TEST bt_materialize_skips_no_decision_level_and_zero_id(void)
     board.alloc = 2;
 
     bt_level stack[2];
-    stack[0].search = NULL;  stack[0].next_s = 0; stack[0].placed_pos = -1;
-    stack[1].search = &list; stack[1].next_s = 1; stack[1].placed_pos = 5;
+    set_level_no_decision(&stack[0]);
+    set_level(&stack[1], &list, 1, 5);
 
     client_possibility_t client;
     memset(&client, 0, sizeof client);
@@ -1119,7 +1148,7 @@ TEST bt_materialize_sibling_solution_records_and_continues(void)
     memset(&mz_cand[0], 0, sizeof mz_cand[0]);
     mz_cand[0].id = 6;                          /* pièce libre : frère matérialisable */
     mz_list.size = 1; mz_list.parts = mz_cand;
-    mz_stack[0].search = &mz_list; mz_stack[0].next_s = 0; mz_stack[0].placed_pos = -1;
+    set_level(&mz_stack[0], &mz_list, 0, -1);
 
     fill_idparts(mz_idParts);
 
@@ -1205,6 +1234,269 @@ TEST search_backtracking_prefilled_cells_no_decision(void)
 
     ASSERT_EQ_FMT(0, rc, "%d");                 /* sous-arbre épuisé */
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");  /* rien délégué */
+    PASS();
+}
+
+/*
+ * SENTINELLE de niveau sans décision (`bt_level.has_bucket`).
+ *
+ * Le lookup de placement lit le compartiment via `map_bucket_packed`, dont le
+ * champ `parts` n'est JAMAIS NULL (il vaut `arena + 0` pour un compartiment
+ * vide) : « case pré-remplie » ne peut donc plus se coder par `search == NULL`.
+ * Ce test verrouille le comportement attendu de la sentinelle explicite qui l'a
+ * remplacée, en comparant deux parcours identiques à un détail près : le
+ * plateau racine du second a sa PREMIÈRE case du parcours déjà remplie.
+ *
+ * Une case pré-remplie doit produire un niveau TRAVERSÉ (un nœud compté,
+ * `max_result` avancé d'un cran, puis exploration du reste de l'arbre) et non
+ * une impasse. Le sous-arbre exploré étant par ailleurs le même, le parcours
+ * pré-rempli doit valoir exactement « parcours nu + 1 nœud » et
+ * « max_result + 1 » — invariant vrai avec comme sans forward-checking.
+ *
+ * Ces deux valeurs sont les témoins des deux façons de casser la sentinelle :
+ * oublier `has_bucket = 0` sur la case pré-remplie ferait explorer le
+ * compartiment résiduel du niveau précédent (nœuds en trop), et oublier
+ * `has_bucket = 1` sur une case à décider ferait remonter le backtracking
+ * immédiatement (aucun placement, donc aucun nœud au-delà de la racine).
+ */
+static unsigned long long es_run_backtracking(int prefill_first_cell, uint16_t *max_out)
+{
+    /* Map uniforme [6, 7] : deux pièces réelles, toujours les mêmes candidats
+     * quelle que soit la case -> l'arbre est minuscule et déterministe. */
+    static struct part cand[2];
+    memset(cand, 0, sizeof cand);
+    cand[0].id = 6; cand[1].id = 7;
+    static struct array_part list;
+    list.size = 2; list.parts = cand;
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_uniform_map(&list);
+    client.all_rotate_part = make_small_parts();
+
+    struct possibility_packet root;
+    make_empty_board(&root);
+    if (prefill_first_cell) {
+        root.grid[dirx[0]][diry[0]] = 3;          /* pièce id 4 pré-placée */
+        set_face_used(root.b_faceused, 3, 1);
+    }
+    root.alloc = 0;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    unsigned long long before = counters[0];
+    int saved_req = request;
+    uint16_t saved_max = max_result;
+    request = REQUEST_CONTINUE;
+    max_result = 0;
+    int rc = search_packet_backtracking(&client, &root, idParts);
+    *max_out = max_result;
+    request = saved_req;
+    max_result = saved_max;
+
+    /* rc encodé dans le retour : 0 attendu (sous-arbre épuisé) ; on le remonte
+     * via une valeur aberrante pour que l'appelant puisse l'asserter. */
+    if (rc != 0) {
+        return (unsigned long long)-1;
+    }
+    return counters[0] - before;
+}
+
+/*
+ * ÉQUIVALENCE DE REPRÉSENTATION SUR LE CHEMIN DE PLACEMENT.
+ *
+ * Pendant du test `bt_forward_check_same_verdict_with_and_without_packed_index`
+ * ci-dessus, mais pour le SEPTIÈME accès par nœud : le lookup de placement
+ * (`stack[top].search`), qui lit lui aussi l'index compact depuis cette version.
+ *
+ * Sur une map RÉELLE (bâtie par `prepare_map_part`, donc pourvue de son index),
+ * on explore DEUX FOIS le même sous-arbre : une fois via `packed`, une fois en
+ * neutralisant l'index pour forcer le repli sur `flat`. Le parcours doit être
+ * rigoureusement identique — mêmes nœuds, même `max_result`, mêmes statistiques
+ * d'élagage. C'est la vérification déterministe de l'invariant « changement de
+ * représentation, jamais de comportement » : le banc de mesure ne peut en donner
+ * qu'une image statistique (son critère d'arrêt par nombre de nœuds dépasse la
+ * cible d'un delta variable d'un run à l'autre).
+ *
+ * Elle couvre du même coup le repli `packed == NULL` sur le chemin de placement,
+ * jusqu'ici seulement exercé par les fixtures de map faites à la main.
+ */
+typedef struct {
+    unsigned long long nodes;
+    unsigned long long fc_attempts_delta;
+    unsigned long long fc_pruned_delta;
+    unsigned long long stock;
+    uint16_t max_result;
+    int rc;
+} es_traversal;
+
+static es_traversal es_traverse(map_big_array *map, struct array_part *parts)
+{
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = map;
+    client.all_rotate_part = parts;
+
+    struct possibility_packet root;
+    make_empty_board(&root);
+    root.alloc = 0;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    unsigned long long n0 = counters[0];
+    unsigned long long a0 = fc_attempts;
+    unsigned long long p0 = fc_pruned;
+    int saved_req = request;
+    uint16_t saved_max = max_result;
+    request = REQUEST_CONTINUE;
+    max_result = 0;
+
+    es_traversal t;
+    t.rc = search_packet_backtracking(&client, &root, idParts);
+    t.max_result = max_result;
+
+    request = saved_req;
+    max_result = saved_max;
+
+    t.nodes = counters[0] - n0;
+    t.fc_attempts_delta = fc_attempts - a0;
+    t.fc_pruned_delta = fc_pruned - p0;
+    t.stock = datas_size();
+    return t;
+}
+
+TEST search_backtracking_same_traversal_with_and_without_packed_index(void)
+{
+    drain_local();
+    ensure_counters();
+
+    /*
+     * Mini-puzzle jouable : 4 coins, `eps` pièces par type de bordure et 3 pièces
+     * d'intérieur — de quoi remplir les premières cases du parcours et explorer
+     * un vrai arbre (quelques milliers de nœuds en 16x16, ~150 en 4x4).
+     *
+     * DEUX BORNES à ne pas franchir, toutes deux fonction de ETERN_PARTS :
+     *   - les identifiants doivent rester <= ETERN_PARTS. `idParts` n'a que
+     *     ETERN_PARTS+1 lignes et `b_faceused` que ETERN_PARTS bits : un id
+     *     au-delà déborde les deux. Invisible sous macOS/clang, diagnostiqué par
+     *     ASan sous Linux (`make test-docker`) — c'est exactement ce qui est
+     *     arrivé ici avec un jeu de 31 pièces sur la passe ETERN_PARTS=16 ;
+     *   - il faut MOINS de pièces d'intérieur que le plateau n'a de cases
+     *     intérieures (4 en 4x4), sans quoi le plateau devient complétable et le
+     *     test déclencherait `record_solution` — et son fichier solution_* — au
+     *     milieu de la suite unitaire.
+     * D'où `eps` = 6 en 16x16 (31 pièces réelles) et 2 en 4x4 (15 pièces pour
+     * 16 cases). `.size` compte EXACTEMENT les entrées renseignées.
+     */
+    static struct part parts[32];
+    static struct array_part a;
+    const int eps = (ETERN_PARTS >= 32) ? 6 : 2;
+    {
+        int n = 0;
+        memset(parts, 0, sizeof parts);
+        parts[n++].id = 0;                       /* bouchon */
+        /* 4 coins : deux bords de grille adjacents. */
+        const int8_t corner[4][4] = { /* top,right,bottom,left */
+            {0,1,1,0}, {0,0,1,1}, {1,0,0,1}, {1,1,0,0}
+        };
+        for (int c = 0; c < 4; c++) {
+            parts[n].id = (int16_t)n;
+            parts[n].top = corner[c][0]; parts[n].right = corner[c][1];
+            parts[n].bottom = corner[c][2]; parts[n].left = corner[c][3];
+            n++;
+        }
+        /* `eps` pièces par type de bordure (un seul bord de grille). */
+        const int8_t edge[4][4] = {
+            {0,1,1,1}, {1,0,1,1}, {1,1,0,1}, {1,1,1,0}
+        };
+        for (int e = 0; e < 4; e++) {
+            for (int k = 0; k < eps; k++) {
+                parts[n].id = (int16_t)n;
+                parts[n].top = edge[e][0]; parts[n].right = edge[e][1];
+                parts[n].bottom = edge[e][2]; parts[n].left = edge[e][3];
+                n++;
+            }
+        }
+        /* 3 pièces d'intérieur (aucun bord de grille) : une de moins que les 4
+         * cases intérieures d'un 4x4, donc jamais de plateau complet. */
+        for (int i = 0; i < 3; i++) {
+            parts[n].id = (int16_t)n;
+            parts[n].top = 1; parts[n].right = 1; parts[n].bottom = 1; parts[n].left = 1;
+            n++;
+        }
+        a.size = n;
+        a.parts = parts;
+        /* Garde-fou explicite : aucun id ne doit dépasser ETERN_PARTS. */
+        ASSERT(parts[n - 1].id <= ETERN_PARTS);
+    }
+
+    map_big_array *map = prepare_map_part(&a);
+    ASSERT(map->packed != NULL);
+
+    /* Parcours 1 : index compact (le chemin de production). */
+    es_traversal with = es_traverse(map, &a);
+    drain_local();
+
+    /* Parcours 2 : index neutralisé -> repli sur `flat`. */
+    uint32_t *saved = map->packed;
+    map->packed = NULL;
+    es_traversal without = es_traverse(map, &a);
+    map->packed = saved;
+    drain_local();
+
+    /* Le sous-arbre est bien exploré (sinon la comparaison serait vide). */
+    ASSERT(with.nodes > 100ULL);    /* ~7500 nœuds en 16x16, ~150 en 4x4 */
+    ASSERT(with.max_result > 4);    /* et une profondeur réelle atteinte */
+
+    ASSERT_EQ_FMT(without.rc, with.rc, "%d");
+    ASSERT_EQ_FMT(without.nodes, with.nodes, "%llu");
+    ASSERT_EQ_FMT((int)without.max_result, (int)with.max_result, "%d");
+    ASSERT_EQ_FMT(without.fc_attempts_delta, with.fc_attempts_delta, "%llu");
+    ASSERT_EQ_FMT(without.fc_pruned_delta, with.fc_pruned_delta, "%llu");
+    ASSERT_EQ_FMT(without.stock, with.stock, "%llu");
+
+    free_bigarray(map);
+    PASS();
+}
+
+TEST search_backtracking_prefilled_level_is_traversed_not_dead_end(void)
+{
+    drain_local();
+    ensure_counters();
+
+    uint16_t max_plain = 0, max_prefilled = 0;
+    unsigned long long nodes_plain = es_run_backtracking(0, &max_plain);
+    unsigned long long nodes_prefilled = es_run_backtracking(1, &max_prefilled);
+
+    /* Les deux parcours vont au bout (pas de REQUEST_STOP) et ne délèguent rien. */
+    ASSERT(nodes_plain != (unsigned long long)-1);
+    ASSERT(nodes_prefilled != (unsigned long long)-1);
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    /* Le niveau sans décision est bien TRAVERSÉ : il ajoute son propre nœud et
+     * décale le sous-arbre d'un cran, sans rien changer à ce qui est exploré. */
+    ASSERT_EQ_FMT(nodes_plain + 1ULL, nodes_prefilled, "%llu");
+    ASSERT_EQ_FMT((int)max_plain + 1, (int)max_prefilled, "%d");
+
+    /* Et il ne court-circuite pas l'exploration : deux placements réels de part
+     * et d'autre (pièces 6 et 7 en alternance à la racine du sous-arbre). */
+    ASSERT(nodes_plain >= 3ULL);
+
+#if FORWARD_CHECK_K > 0
+    /* Comptes absolus (le forward-checking élague le niveau du dessous dès que
+     * les deux pièces sont posées) : racine + 2 placements, +1 si pré-remplie. */
+    ASSERT_EQ_FMT(3ULL, nodes_plain, "%llu");
+    ASSERT_EQ_FMT(4ULL, nodes_prefilled, "%llu");
+#else
+    /* Sans forward-checking, un niveau supplémentaire est visité avant l'impasse. */
+    ASSERT_EQ_FMT(5ULL, nodes_plain, "%llu");
+    ASSERT_EQ_FMT(6ULL, nodes_prefilled, "%llu");
+#endif /* FORWARD_CHECK_K > 0 */
+
     PASS();
 }
 
@@ -2242,6 +2534,8 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_flush_error_reputs_locally);
     RUN_TEST(search_backtracking_stop_flushes_and_returns_one);
     RUN_TEST(search_backtracking_prefilled_cells_no_decision);
+    RUN_TEST(search_backtracking_same_traversal_with_and_without_packed_index);
+    RUN_TEST(search_backtracking_prefilled_level_is_traversed_not_dead_end);
     RUN_TEST(search_backtracking_explores_and_exhausts);
     RUN_TEST(search_backtracking_pause_waits_then_stops);
     RUN_TEST(requeue_unprocessed_packets_routes_tail_locally);

@@ -77,6 +77,22 @@ testait auparavant que la non-vacuité de la valeur.
 - **Fixtures construites à la main** plutôt que via `rotate_all_parts` /
   `pieces.csv` : les tests restent indépendants de `ETERN_PARTS` (256/16) et de
   la présence d'un fichier de pièces dans le répertoire courant.
+- **Les identifiants de pièce d'une fixture doivent rester ≤ `ETERN_PARTS`.**
+  Indépendance ne veut pas dire immunité : dès qu'une fixture est *jouée* par le
+  moteur (et pas seulement lue), ses ids indexent `idParts[ETERN_PARTS + 1][…]`
+  et le masque `b_faceused` (`ETERN_PARTS` bits). Un jeu de 31 pièces passe donc
+  en 16×16 mais **déborde la pile en 4×4** — sans aucun symptôme sous
+  macOS/clang, et diagnostiqué seulement par ASan sous Linux
+  (`make test-docker`). Si la fixture doit être plus riche, faire dépendre sa
+  taille de `ETERN_PARTS` (voir
+  `search_backtracking_same_traversal_with_and_without_packed_index`,
+  `tests/core/test_etii_search.c`). Même famille de piège que le `.size` d'un
+  `array_part`, qui doit compter **exactement** les entrées renseignées.
+- **Une fixture jouée par le moteur ne doit pas pouvoir compléter le plateau**,
+  sauf si c'est le sujet du test : `record_solution` écrirait un fichier
+  `solution_*` dans le répertoire courant au milieu de la suite. Le plus simple
+  est de fournir moins de pièces d'un type que le plateau n'a de cases
+  correspondantes.
 - **Chemins d'erreur non testés là où le code appelle `exit()`** (ex. fichier
   CSV absent dans `read_parts`) : greatest tournant dans un seul processus, un
   `exit()` tuerait tout le runner. Tester ces cas demanderait d'isoler chaque
