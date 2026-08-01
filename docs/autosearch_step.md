@@ -50,37 +50,28 @@ search_packet_backtracking(client, &client->aposs->possibilities[a], idParts)
 
 Le paquet est **copié sur la pile** (`memcpy(&board, root, …)`) ; l'original dans `aposs` n'est jamais modifié (nécessaire pour l'acquittement et le renvoi éventuel).
 
-### 1.3 `map_bucket_packed` : un indice, pas un calcul
+### 1.3 `get_parts_bigarray_with_key` : un pointeur, pas un calcul
 
 ```c
-stack[top].search = map_bucket_packed(client->map_part, &constraints[x][y]);
-stack[top].has_bucket = 1;
+stack[top].search = get_parts_bigarray_with_key(map_part, &constraints[x][y]);
 ```
 
-Cette fonction ne calcule rien et n'alloue rien : un calcul d'indice, une lecture de 4 octets dans l'index compact (§1.3 bis) et une addition de pointeur dans l'arène. Elle retourne une **vue par valeur** (`map_bucket` = `{const struct part *parts; int size;}`) sur la liste de candidats de la case, dans la map 4D pré-construite au démarrage (`map_big_array`). Cette liste est en lecture seule et partagée entre tous les niveaux de la pile.
+Cette fonction ne calcule rien et n'alloue rien. Elle retourne un **pointeur direct** dans la map 4D pré-construite au démarrage (`map_big_array`), indexée par la clé `(top, right, bottom, left)` de la case courante. Le tableau `search->parts[]` pointé est en lecture seule et partagé entre tous les niveaux de la pile.
 
 `stack[top].search` est ainsi le **curseur vers la liste de candidats** de ce niveau — il ne change jamais tant qu'on est à ce niveau.
 
-**Pourquoi une vue par valeur, et non plus le `struct array_part *` de `get_parts_bigarray_with_key`.** C'est ce qui sort `flat` du chemin chaud : voir §1.3 bis. Le compartiment étant désormais stocké dans le niveau (16 octets au lieu d'un pointeur de 8), `bt_level stack[ETERN_PARTS]` passe de 4 Ko à 6 Ko de pile C automatique — sans commune mesure avec les 3,7 Mo que la boucle chaude cesse de balayer.
+### 1.3 bis `map_bucket_packed` : l'index compact du forward-checking
 
-**Conséquence : la sentinelle « niveau sans décision ».** Une case déjà remplie par le paquet racine (`board.grid[x][y] != -2`) ouvre un niveau qui n'a aucun candidat à essayer. Elle se codait par `stack[top].search = NULL` ; mais `map_bucket.parts` vaut `arena + 0` pour un compartiment vide et n'est **jamais NULL**, si bien que la sentinelle par pointeur ne survit pas au changement de représentation. Elle est remplacée par un champ explicite `bt_level.has_bucket`, testé par les trois lecteurs de la pile (`bt_count_pending`, `bt_materialize_pending` et la boucle de backtracking elle-même).
-
-Cette sentinelle reste **distincte** de « compartiment vide » (`search.size == 0`, c'est-à-dire une impasse), bien que les trois lecteurs traitent aujourd'hui les deux états de la même façon : ce sont deux faits sémantiquement différents, et c'est le **producteur** qui les sépare — une case pré-remplie fait `continue` (nœud compté, `max_result` avancé d'un cran) là où un compartiment vide fait remonter le backtracking. Le test `search_backtracking_prefilled_level_is_traversed_not_dead_end` (`tests/core/test_etii_search.c`) verrouille ce comportement en comparant deux parcours identiques à un détail près : le second a sa première case déjà remplie, et doit valoir exactement « premier parcours + 1 nœud » et « `max_result` + 1 ».
-
-### 1.3 bis L'index compact `packed`, et la disparition de `flat` du chemin chaud
-
-La map expose **deux représentations des mêmes données**, et le chemin chaud ne lit plus que la seconde :
+La map expose **deux représentations des mêmes données**, et le chemin chaud ne lit pas la même que les autres :
 
 | Représentation | Contenu | Taille (puzzle 256) | Lue par |
 |---|---|---|---|
-| `flat` | `sizearray^4` × `struct array_part` (16 o : une taille + un pointeur) | **5,06 Mo** | `get_parts_bigarray*` — tous les appelants HORS boucle chaude (`possibility.c`, `get_one_part`, `regroup_map`, le pruner GPU) et le repli de `map_bucket_packed` |
-| `packed` | `sizearray^4` × `uint32_t` : `{offset:16 \| size:16}`, offset relatif à `arena` | **1,27 Mo** | `map_bucket_packed` — **les 7 accès par nœud de la boucle chaude** : le forward-check (§2, jusqu'à 6) et le lookup de placement (§1.3, 1) |
+| `flat` | `sizearray^4` × `struct array_part` (16 o : une taille + un pointeur) | **5,06 Mo** | `get_parts_bigarray*` — lookup de placement (§1.3) et tous les autres appelants |
+| `packed` | `sizearray^4` × `uint32_t` : `{offset:16 \| size:16}`, offset relatif à `arena` | **1,27 Mo** | `map_bucket_packed` — uniquement `bt_forward_check` |
 
 **Pourquoi.** Sur le puzzle 256, la map compte 331 776 compartiments dont **6 254 non vides (1,9 %)** ; les données utiles (`arena`, 14 401 pièces = 0,11 Mo) tiennent confortablement en L2. Autrement dit, **98 % des 5 Mo balayés par la boucle chaude sont du vide**. Or `bt_forward_check` est appelé une fois par candidat posé et fait jusqu'à `FORWARD_CHECK_K` (6) itérations, chacune un accès aléatoire dans ces 5 Mo — le plus souvent pour ne lire qu'un compteur de 4 octets. En ramenant le compartiment à un `uint32_t`, une ligne de cache rapporte **16 compartiments au lieu de 4**.
 
-**Deux étapes.** L'index a d'abord été introduit pour le seul forward-check (6 accès sur 7) ; le lookup de placement, lui, continuait de lire `flat` — un unique accès par nœud, mais qui suffisait à garder les 5,06 Mo de `flat` **dans le jeu de travail**. Le passer lui aussi à `map_bucket_packed` fait tomber le jeu de travail **partagé** de la boucle chaude de `packed + arena + flat` = **6,44 Mo** à `packed + arena` = **1,38 Mo** (−79 %). Voir « Gain mesuré » ci-dessous : sur une machine à grand L3, ce second pas ne rapporte **rien en débit** — c'est un gain de *jeu de travail*, pas de latence.
-
-**Gain mesuré — 1ʳᵉ étape, le forward-check** (`tests/bench/bench_search.sh`, puzzle 256, i9-9880H, médianes) :
+**Gain mesuré** (`tests/bench/bench_search.sh`, puzzle 256, i9-9880H, médianes) :
 
 | Configuration | Avant | Après | Delta |
 |---|---|---|---|
@@ -90,32 +81,13 @@ La map expose **deux représentations des mêmes données**, et le chemin chaud 
 
 L'écart se creuse avec le nombre de workers : dans cette mesure, chaque worker est un **processus indépendant** (`bench_search.sh` lance N fois le mode `test`) et a donc **sa propre copie** de la map — 16 × 1,27 Mo tient dans les 16 Mo de L3 de la machine là où 16 × 5,06 Mo ne tient pas.
 
-> En **mode client**, ce n'est plus le cas : les processus de recherche sont des `fork()` d'un même parent, qui construit la map avant de forker ; ils s'en partagent physiquement **une seule copie** en copy-on-write (voir [Architecture — map de lookup partagée](architecture.md#map-de-lookup-partagée-entre-les-processus-de-recherche)).
+> En **mode client**, ce n'est plus le cas : les processus de recherche sont des `fork()` d'un même parent, qui construit la map avant de forker ; ils s'en partagent physiquement **une seule copie** en copy-on-write (voir [Architecture — map de lookup partagée](architecture.md#map-de-lookup-partagée-entre-les-processus-de-recherche)). L'index compact reste utile pour autant : il réduit la taille du jeu de travail lu par le forward-check, partagé ou non.
 
-**Gain mesuré — 2ᵈᵉ étape, le lookup de placement : AUCUN.** Le passage du 7ᵉ accès à `packed` a été mesuré sur la même machine (i9-9880H, 8 cœurs physiques, **L3 de 16 Mo**), en A/B **apparié à ordre alterné** (ABBA) — la machine dérive d'environ −15 %/h en charge soutenue, ce qui pénaliserait sinon systématiquement le binaire joué en second :
-
-| Configuration | Protocole | Résultat (`packed` / référence) |
-|---|---|---|
-| 1 worker | mode `test`, 20 M nœuds, 6 paires appariées | **−0,9 %**, IC 95 % **[−3,8 %, +2,0 %]** |
-| 16 forks (client + serveur réels) | coups/s agrégés via `GET /api/v1/clients`, 12 paires appariées | **−0,7 %**, IC 95 % **[−3,5 %, +2,2 %]** |
-
-Autrement dit : **aucun effet détectable, dans un sens comme dans l'autre**, la mesure ne pouvant de toute façon pas trancher en deçà de ±3 %. Ce n'est pas une surprise, c'est le résultat attendu sur *cette* machine — et la raison tient en une ligne : **depuis le partage COW de la map entre forks, le jeu de travail de la boucle chaude était déjà de 6,44 Mo au total, pas 16 × 6,44 Mo.** Il tenait donc déjà dans les 16 Mo de L3 : il n'y avait aucune latence à récupérer. Le premier pas (forward-check) avait été mesuré, lui, avant ce partage, sur des processus indépendants — d'où ses +29 %.
-
-**Ce que ce second pas apporte réellement**, et comment le vendre : le jeu de travail **partagé** de la boucle chaude passe de 6,44 Mo à **1,38 Mo (−79 %)**. C'est une réduction d'empreinte, **pas une optimisation de latence**. Elle ne se paiera en débit que sur une cible **dense** — beaucoup de cœurs, de l'ordre de 2 Mo de L3 par cœur — où 6,44 Mo ne tiennent pas dans la part de cache d'un cœur alors que 1,38 Mo y tiennent. **Sur une telle machine, remesurer avant de conclure quoi que ce soit.**
-
-**Invariant.** `packed` est **purement redondant** : `map_bucket_packed` renvoie exactement la même taille et la même liste de pièces que `get_parts_bigarray_with_key`, pour **toute** clé. C'est un changement de représentation, jamais de sémantique — les nœuds explorés et leur ordre sont inchangés. Trois tests verrouillent cette équivalence, du plus général au plus proche du chemin de production (`tests/core/`) :
-
-| Test | Ce qu'il verrouille |
-|---|---|
-| `packed_index_matches_flat_for_every_key` (`test_part.c`) | La représentation elle-même : balayage de **toutes** les clés d'une map réelle, même taille et même liste de pièces des deux côtés. |
-| `bt_forward_check_same_verdict_with_and_without_packed_index` (`test_etii_search.c`) | Le **verdict** du forward-check, à travers la fonction chaude, index neutralisé ou non. |
-| `search_backtracking_same_traversal_with_and_without_packed_index` (`test_etii_search.c`) | Le **parcours complet** : `search_packet_backtracking` explore deux fois le même sous-arbre (quelques milliers de nœuds), une fois via `packed`, une fois avec `map->packed = NULL` pour forcer le repli sur `flat`, et doit produire les mêmes nœuds, le même `max_result` et les mêmes statistiques d'élagage. |
-
-Ce dernier test est la vérification **déterministe** de l'invariant : le banc de mesure n'en donne qu'une image statistique, son critère d'arrêt par nombre de nœuds dépassant la cible d'un delta variable d'un run à l'autre (le taux d'élagage rapporté oscille dans une fourchette de ±0,0004 point de pourcentage pour cette seule raison, sur un code par ailleurs identique).
+**Invariant.** `packed` est **purement redondant** : `map_bucket_packed` renvoie exactement la même taille et la même liste de pièces que `get_parts_bigarray_with_key`, pour **toute** clé. C'est un changement de représentation, jamais de sémantique — les nœuds explorés et leur ordre sont inchangés (le taux d'élagage rapporté par le banc reste identique à la 4ᵉ décimale : 45,7099 %). Le test `packed_index_matches_flat_for_every_key` (`tests/core/test_part.c`) balaie **toutes** les clés d'une map réelle pour verrouiller cette équivalence, et `bt_forward_check_same_verdict_with_and_without_packed_index` (`tests/core/test_etii_search.c`) la vérifie à travers la fonction chaude elle-même, en neutralisant l'index pour comparer les deux verdicts.
 
 **Absence d'index (`packed == NULL`) : un état normal, pas une erreur.** `map_bucket_packed` retombe alors sur `flat` et renvoie la même chose. Ce repli couvre deux cas :
 
-- une `map_big_array` **bâtie à la main** (fixtures de tests), qui n'a ni arène ni index — cinq fixtures du dépôt sont dans ce cas et exercent donc le repli sur les deux chemins (forward-check **et** placement) sans une ligne de code de test dédiée ;
+- une `map_big_array` **bâtie à la main** (fixtures de tests), qui n'a ni arène ni index ;
 - un **dépassement de capacité** : les offsets et les tailles tiennent sur 16 bits (puzzle 256 : arène de 14 401 pièces, plus gros compartiment de 784 — très loin des 65 535). Si un autre jeu de pièces dépassait cette borne, `build_packed_index` (`src/core/part.c`) **renonce à construire l'index** au lieu de tronquer silencieusement, journalise la raison, et la recherche continue via `flat`. La décision est isolée dans `map_packed_fits`, testée aux bornes exactes 65535/65536.
 
 **Variante évaluée et écartée.** Un **bitmap d'occupation** (41 Ko, 1 bit par compartiment, entièrement résident en L1/L2) a été implémenté et mesuré par-dessus l'index compact, pour ne payer qu'une lecture minuscule sur le test « compartiment vide ». Résultat : **−4 %**, donc abandonné. Le forward-check réussit ~54 % du temps, si bien que la majorité des cases inspectées tombent sur un compartiment **non vide** — et paient alors *deux* accès aléatoires (bitmap puis `packed`) au lieu d'un seul.

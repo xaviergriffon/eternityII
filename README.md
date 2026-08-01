@@ -21,7 +21,7 @@ Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisa
 - Chaque **client** forke `N` processus de recherche ; des **pruners** (CPU ou GPU) vérifient en parallèle les possibilités et élaguent les branches mortes.
 - Le serveur peut **piloter les clients à distance** (statistiques, pause/reprise) via un canal de contrôle dédié, et exposer une **API HTTP REST** pour la supervision.
 - Un client peut aussi tourner en mode **autonome** (`test`), sans serveur.
-- La boucle de recherche lit sa table de candidats via un **index compact** (4 octets par compartiment au lieu de 16), pour la **totalité** de ses 7 accès par nœud : **+10 % de nœuds/s** sur un worker et **+29 %** sur 16 processus indépendants pour le forward-checking (6 accès), puis, pour le lookup de placement (le 7ᵉ), **aucun gain de débit mesurable** mais un jeu de travail qui tombe de 6,44 Mo à **1,38 Mo** — bénéfice attendu seulement sur une machine dense (~2 Mo de L3 par cœur).
+- La boucle de recherche lit sa table de candidats via un **index compact** (4 octets par compartiment au lieu de 16), qui divise par 3,8 le volume balayé par le forward-checking : **+10 % de nœuds/s** sur un worker, **+29 %** sur 16 workers concurrents.
 - Cette table étant en lecture seule une fois construite, le parent la construit **avant de forker** : les processus de recherche s'en partagent **une seule copie** (copy-on-write) au lieu d'en fabriquer chacun la leur — **−90 % d'empreinte mémoire** à 16 workers (111 → 11 Mo de `Pss`), pour un débit inchangé.
 
 > Détails (modèle de processus/threads, IPC parent↔enfants, structure des sources) : [docs/architecture.md](docs/architecture.md).

@@ -52,8 +52,7 @@ sources. Le protocole TCP entre serveur et clients est détaillé dans
 
 La table de candidats (`map_big_array` : `flat` 5,06 Mo + index compact `packed`
 1,27 Mo + arène 0,11 Mo sur le puzzle 256, voir
-[autosearch_step §1.3 bis](autosearch_step.md#13-bis-lindex-compact-packed-et-la-disparition-de-flat-du-chemin-chaud) —
-la boucle chaude, elle, ne lit plus que `packed` + arène, soit 1,38 Mo)
+[autosearch_step §1.3 bis](autosearch_step.md#13-bis-map_bucket_packed--lindex-compact-du-forward-checking))
 est **construite une seule fois par le processus parent**, avant sa boucle de
 `fork()` ([src/app/main.c](../src/app/main.c), `handle_client`), puis publiée via
 `set_inherited_search_parts` ([src/app/etii_client.c](../src/app/etii_client.c)).
