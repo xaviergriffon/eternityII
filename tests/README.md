@@ -84,9 +84,12 @@ testait auparavant que la non-vacuité de la valeur.
   en 16×16 mais **déborde la pile en 4×4** — sans aucun symptôme sous
   macOS/clang, et diagnostiqué seulement par ASan sous Linux
   (`make test-docker`). Si la fixture doit être plus riche, faire dépendre sa
-  taille de `ETERN_PARTS` (voir
-  `search_backtracking_same_traversal_with_and_without_packed_index`,
-  `tests/core/test_etii_search.c`). Même famille de piège que le `.size` d'un
+  taille de `ETERN_PARTS`, ou garder le test derrière un `#if ETERN_PARTS == 256`
+  (ex. `check_possibility_missing_genesis_anchor_is_minus_six`,
+  `tests/core/test_possibility.c`) ; pour une fixture pensée d'emblée pour les
+  deux tailles de plateau, voir
+  `bt_forward_check_same_verdict_with_and_without_packed_index`
+  (`tests/core/test_etii_search.c`). Même famille de piège que le `.size` d'un
   `array_part`, qui doit compter **exactement** les entrées renseignées.
 - **Une fixture jouée par le moteur ne doit pas pouvoir compléter le plateau**,
   sauf si c'est le sujet du test : `record_solution` écrirait un fichier
