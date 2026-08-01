@@ -92,6 +92,19 @@ L'écart se creuse avec le nombre de workers : dans cette mesure, chaque worker 
 
 **Variante évaluée et écartée.** Un **bitmap d'occupation** (41 Ko, 1 bit par compartiment, entièrement résident en L1/L2) a été implémenté et mesuré par-dessus l'index compact, pour ne payer qu'une lecture minuscule sur le test « compartiment vide ». Résultat : **−4 %**, donc abandonné. Le forward-check réussit ~54 % du temps, si bien que la majorité des cases inspectées tombent sur un compartiment **non vide** — et paient alors *deux* accès aléatoires (bitmap puis `packed`) au lieu d'un seul.
 
+**Seconde variante évaluée et écartée : le lookup de placement via `packed`.** Le septième et dernier accès à la map par nœud — celui du placement (`stack[top].search`) — est resté sur `flat`. Le convertir lui aussi à `map_bucket_packed` a été implémenté, mesuré, puis **reverté** (PR #161, annulée par `revert/placement-lookup-packed`). L'idée était bonne sur le papier : `flat` quittait entièrement le chemin chaud et le jeu de travail partagé de la boucle tombait de 6,44 Mo (`packed` + arène + `flat`) à 1,38 Mo, soit **−79 %**. Le gain mesuré est **nul** : sur i9-9880H en A/B apparié à ordre alterné, **1 worker −0,9 %** (IC 95 % [−3,8 %, +2,0 %]) et **16 forks −0,7 %** (IC [−3,5 %, +2,2 %]).
+
+`perf stat` sur un Pentium G2020 (Ivy Bridge, 2 cœurs, 256 Ko de L2 par cœur, 3 Mo de L3) explique pourquoi, et **le chiffre décisif est absolu, pas relatif**. Sur un run de 4,64 s à 2,9 GHz, soit ≈ 13,4 milliards de cycles :
+
+| Compteur | Valeur | Coût estimé | Part du run |
+|---|---|---|---|
+| `L1-dcache-load-misses` | 2,92 M | ≈ 35 M cycles (à ~12 cy) | 0,26 % |
+| `cache-misses` (→ DRAM) | 265 k | ≈ 53 M cycles (à ~200 cy) | 0,40 % |
+
+**Toute la hiérarchie mémoire pèse moins de 0,7 % du temps d'exécution.** Soit ≈ **0,2 défaut L1 par nœud, pour 7 lookups par nœud** : le sous-ensemble réellement chaud de la map est assez petit pour tenir en L1 (32 Ko). Réduire la *table* de 5,06 à 1,27 Mo ne peut donc rien rapporter, sur aucune hiérarchie de cache — gros L2 ou petit, beaucoup de cœurs ou peu. La version convertie mesure même légèrement moins bien (défauts LLC +49 %, défauts L1 +18 %, temps +3,3 % — runs uniques, non répétés) ; comme l'écart de cache ne représente que ~0,24 % du temps, cette régression n'est pas d'origine mémoire : le suspect est le `map_bucket` de 16 octets copié **par valeur** dans `stack[top]` à chaque nœud, là où l'ancien code écrivait un pointeur de 8 octets, plus 2 Ko de pile C automatique.
+
+> **À lire comme une seule histoire avant de rouvrir ce chantier.** Le +28,6 % de l'index compact (tableau ci-dessus) a été mesuré sur 16 **processus indépendants**, chacun avec sa copie privée : la pression venait de la **duplication** (16 × 5,06 Mo contre 16 × 1,27 Mo), pas de la taille de la table. Le partage en copy-on-write l'a supprimée à la racine — une seule copie de 6,44 Mo pour toute la machine, déjà résidente en cache. La conversion du lookup de placement optimisait donc un jeu de travail qui n'était plus sous pression, et l'a mesuré. **La boucle de recherche est bornée par le calcul et les branchements, pas par la mémoire** : toute future optimisation de jeu de travail sur cette boucle doit être précédée d'un `perf stat` démontrant que la hiérarchie mémoire pèse une fraction non négligeable du temps. Ce n'est pas le cas aujourd'hui. Corollaire pour le dimensionnement matériel : **la taille du cache n'est pas un critère de choix pour ce programme** — maximiser le nombre de cœurs entiers, l'IPC par cœur et la qualité de la prédiction de branchement.
+
 ### 1.4 Exploration d'un niveau : un candidat à la fois
 
 Une idée clé : **on ne génère pas tous les successeurs de la case courante**. On prend le premier candidat valide, on descend d'un niveau, et on reviendra aux candidats suivants seulement si le sous-arbre en dessous est épuisé.
