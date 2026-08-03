@@ -195,6 +195,33 @@ TEST gpu_flag_absent_leaves_global_untouched(void)
     PASS();
 }
 
+/* --headless : position-indépendante — retirée d'argv, headless_mode
+   positionné, arguments positionnels intacts. */
+TEST headless_flag_is_stripped_and_sets_global(void)
+{
+    headless_mode = 0;
+    const char *argv[] = {"prog", "server", "--headless", "8"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(1, headless_mode, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);
+    PASS();
+}
+
+/* Sans --headless, le drapeau reste à 0. */
+TEST headless_flag_absent_leaves_global_untouched(void)
+{
+    headless_mode = 0;
+    const char *argv[] = {"prog", "client", "localhost"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(0, headless_mode, "%d");
+    PASS();
+}
+
 /* --help / -h : position-indépendantes comme --stop-on-solution — retirées
    d'argv, help_requested positionné, arguments positionnels intacts. */
 TEST help_flag_is_stripped_and_sets_global(void)
@@ -315,6 +342,8 @@ SUITE(static_variables_suite)
     RUN_TEST(http_port_out_of_range_values_are_ignored);
     RUN_TEST(gpu_flag_is_stripped_and_sets_global);
     RUN_TEST(gpu_flag_absent_leaves_global_untouched);
+    RUN_TEST(headless_flag_is_stripped_and_sets_global);
+    RUN_TEST(headless_flag_absent_leaves_global_untouched);
     RUN_TEST(help_flag_is_stripped_and_sets_global);
     RUN_TEST(help_flag_absent_leaves_global_untouched);
     RUN_TEST(request_is_pause_covers_both_pause_values);

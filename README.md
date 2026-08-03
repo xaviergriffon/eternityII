@@ -55,7 +55,7 @@ Prérequis : `gcc`, `make`, pthreads (disponibles en standard sur macOS et Linux
 ./eternityII test
 ```
 
-Options transverses : `--stop-on-solution` (s'arrêter à la première solution ; par défaut la recherche continue) et, côté serveur, `--http-port N` pour activer l'API HTTP REST admin sur `127.0.0.1:N`. L'aide intégrée est accessible via `./eternityII --help` (aide générale) et `./eternityII help <sujet>` (détail d'un mode ou d'une option).
+Options transverses : `--stop-on-solution` (s'arrêter à la première solution ; par défaut la recherche continue), `--headless` (pas de console interactive — utile en service systemd) et, côté serveur, `--http-port N` pour activer l'API HTTP REST admin sur `127.0.0.1:N`. L'aide intégrée est accessible via `./eternityII --help` (aide générale) et `./eternityII help <sujet>` (détail d'un mode ou d'une option).
 
 > Détails (paramètres et défauts de chaque mode, expansion anti-famine, échange par lots des pruners, format du fichier de pièces, fichiers générés `.back`/`solution_*`/`events.log`, limitations connues) : [docs/utilisation.md](docs/utilisation.md).
 

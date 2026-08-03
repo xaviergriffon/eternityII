@@ -96,6 +96,14 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Interprétée par le mode pruner uniquement (ignorée par les autres modes).\n"
 	  "Sur un binaire compilé sans CUDA : erreur explicite au lancement plutôt\n"
 	  "qu'un repli CPU silencieux — recompiler avec make CUDA=1 (GPU NVIDIA)." },
+	{ "--headless",
+	  "--headless",
+	  "N'exécute pas la console interactive (lecture de stdin) — pensé pour un service.",
+	  "Acceptée à n'importe quelle position, par tous les modes (server, client,\n"
+	  "pruner, test). Utile sous systemd (StandardInput=null) : sans ce flag, la\n"
+	  "console se termine déjà proprement sur EOF immédiat, mais démarre et meurt\n"
+	  "inutilement à chaque lancement. Les logs restent inchangés dans les deux\n"
+	  "cas — aucun code ANSI n'est émis quand stdout n'est pas un TTY." },
 	{ "--help",
 	  "--help | -h",
 	  "Affiche l'aide générale puis quitte.",

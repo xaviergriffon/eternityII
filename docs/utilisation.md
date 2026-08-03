@@ -172,6 +172,33 @@ service. Chaque solution est enregistrée dans un fichier **unique**
 (`./solution_<pid>_<seq>` côté client, `./solution_server_<pid>_<seq>` côté serveur) —
 plusieurs solutions ne s'écrasent jamais.
 
+## Option `--headless` (exécution en service)
+
+Acceptée par tous les modes, à n'importe quelle position, comme
+`--stop-on-solution` : empêche le démarrage de la console interactive
+(lecture de l'entrée standard). Pensée pour une exécution en service
+(systemd `StandardInput=null`, conteneur sans TTY, …).
+
+Sans ce flag, la console se termine déjà proprement dès qu'elle rencontre une
+fin de fichier immédiate sur stdin (cas `/dev/null`) — pas de blocage ni de
+plantage — mais un thread démarre puis meurt inutilement à chaque lancement.
+`--headless` évite ce détour. Les logs ne changent pas dans les deux cas :
+`logger.c` détecte que la sortie standard n'est pas un terminal
+(`isatty(STDOUT_FILENO)`) et n'émet alors jamais de codes ANSI (bannière de
+stats, zone Events, ligne d'édition) — la sortie est déjà du texte simple
+adapté à `journald` ou à un fichier de log.
+
+Exemple d'unité systemd minimale (serveur) :
+
+```ini
+[Service]
+ExecStart=/opt/eternityII/eternityII server 80 --headless /opt/eternityII/data/pieces.csv
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+```
+
 ## Canal de contrôle et pilotage à distance
 
 Chaque processus client ouvre automatiquement une seconde connexion TCP vers le
