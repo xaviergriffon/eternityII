@@ -184,7 +184,10 @@ sequenceDiagram
             S->>Cp: CTRL_COMMAND <ligne> (ou CTRL_GET_STATS)
             Note over Cp: control_command_allowed() revérifié<br/>côté client avant exécution (défense en profondeur)
             Cp-->>S: CTRL_RESULT <code> (ou CTRL_STATS)
-        else rien en attente (timeout)
+        else rien en attente, mais sondage auto dû (≥ CONTROL_AUTO_STATS_INTERVAL_SEC)
+            S->>Cp: CTRL_GET_STATS
+            Cp-->>S: CTRL_STATS
+        else rien en attente, sondage auto pas encore dû (timeout)
             S->>Cp: CTRL_PING
             Cp-->>S: CTRL_ACK
         end
@@ -204,9 +207,31 @@ est rejetée sans tentative d'allocation.
 | Commande `CTRL_*` | Valeur | Sens |
 |---|---|---|
 | `CTRL_PING` / `CTRL_ACK` | 1 / 2 | Keepalive émis par le serveur quand aucune commande n'est en attente |
-| `CTRL_GET_STATS` / `CTRL_STATS` | 3 / 4 | Demande de statistiques agrégées ; réponse `control_stats_t` (coups/s, stock, analysé, `max_result`, pruner vérifiées/éliminées, cases prunées/s) |
+| `CTRL_GET_STATS` / `CTRL_STATS` | 3 / 4 | Demande de statistiques agrégées ; réponse `control_stats_t` (coups/s, stock, analysé, `max_result`, pruner vérifiées/éliminées, cases prunées/s). Émis soit sur demande explicite (`clientsStats`/`POST /api/v1/clients/stats`), soit automatiquement au plus toutes les `CONTROL_AUTO_STATS_INTERVAL_SEC` (30 s) — voir ci-dessous |
 | `CTRL_COMMAND` / `CTRL_RESULT` | 5 / 6 | Commande console poussée en texte ; réponse = code retour `int32` de `do_command_line()` |
 | `CTRL_GET_BEST_BOARD` / `CTRL_BEST_BOARD` | 7 / 8 | *(v10)* Demande la représentation complète du meilleur plateau connu du client (agrégat de ses forks) ; réponse = `uint8_t valid` puis, si `valid`, `sizeof(struct possibility_packet)` octets bruts (même convention que le protocole de travail GET/ADD : struct copié tel quel, round-trip valide sur le même build) |
+
+### Sondage automatique des statistiques
+
+Avant cette fonctionnalité, `control_session_step` (`src/app/etii_server.c`) n'émettait
+`CTRL_GET_STATS` qu'en réponse à une commande explicitement postée (`clientsStats`
+console, ou `POST /api/v1/clients/stats` de l'API HTTP) — en son absence, la branche
+timeout n'envoyait que des `CTRL_PING`/`CTRL_ACK`. Or c'est justement la **réception**
+d'un `CTRL_STATS` qui déclenche le tirage du meilleur plateau
+(`CTRL_GET_BEST_BOARD`, cf. plus bas) quand `max_result` dépasse le record déjà connu
+du serveur : sans sondage périodique, un nouveau record côté client pouvait rester
+invisible côté serveur indéfiniment, jusqu'à ce qu'un opérateur pense à lancer
+`clientsStats` manuellement — potentiellement plusieurs minutes après son apparition.
+
+`control_registry_auto_stats_due(session_index, CONTROL_AUTO_STATS_INTERVAL_SEC)`
+(`src/app/control_registry.c`, intervalle 30 s défini dans `static_variables.h`) est
+maintenant vérifié en premier dans la branche timeout : si dû, un aller-retour
+`CTRL_GET_STATS`/`CTRL_STATS` (factorisé dans `control_session_poll_stats`, partagé
+avec le chemin de commande explicite) remplace le `CTRL_PING` de ce tour — un nouveau
+record se propage donc en au plus un intervalle, sans action opérateur. La marque
+« dernière tentative » est posée sous le mutex de la session, indépendamment de
+`stats_time` (qui ne bouge que sur un décodage réussi), pour qu'un échec transitoire ne
+déclenche pas une nouvelle tentative au tour suivant.
 
 ### Meilleur plateau connu (`CTRL_GET_BEST_BOARD`/`CTRL_BEST_BOARD`, v10)
 
