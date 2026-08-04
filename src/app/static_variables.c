@@ -49,6 +49,8 @@ int help_requested = 0;
 
 int expand_min_level = 0;
 
+int headless_mode = 0;
+
 int pruner_batch_size = PRUNER_BATCH_SIZE;
 
 #ifdef WITH_CUDA
@@ -186,6 +188,10 @@ int parse_cli_options(int argc, const char *argv[])
             // Exécution GPU du pruner : le flag est interprété par le mode
             // `pruner` dans main() (erreur explicite sur un build sans CUDA).
             gpu_requested = 1;
+        } else if (strcmp(argv[r], "--headless") == 0) {
+            // Exécution sans console interactive : le flag est lu dans main()
+            // avant chaque appel à run_console() (serveur, client, mode test).
+            headless_mode = 1;
         } else if (strcmp(argv[r], "--help") == 0 || strcmp(argv[r], "-h") == 0) {
             // Aide CLI : le flag est lu dans main() avant le dispatch des modes
             // (affichage de l'aide générale puis EXIT_SUCCESS).

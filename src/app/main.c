@@ -56,6 +56,9 @@ int main(int argc, const char *argv[]) {
     if (stop_on_solution) {
         log_info("option : arrêt à la première solution activé (--stop-on-solution)\n");
     }
+    if (headless_mode) {
+        log_info("option : console interactive désactivée (--headless)\n");
+    }
 
     // ETII_BENCH_NODES : variable d'environnement (pas d'option CLI, hors du
     // chemin de production) activant le banc de mesure — voir static_variables.h
@@ -283,7 +286,9 @@ void handle_client(int argc, const char *argv[]) {
             run_server_thread(socket_id);
         }
         run_checker(0);
-        run_console(0);
+        if (!headless_mode) {
+            run_console(0);
+        }
         // Canal de contrôle (v9) : connexion TCP additionnelle dédiée où le
         // serveur devient l'initiateur des échanges. Non fatal comme les
         // threads ci-dessus si la création échoue (cf. start_control_channel).
@@ -350,7 +355,9 @@ void handle_server(int argc, const char *argv[]) {
     init_signals();
     init_counters();
     run_checker(1);
-    run_console(1);
+    if (!headless_mode) {
+        run_console(1);
+    }
     if (file_arg >= 0) {
         parts_files = (char *)(argv[file_arg]);
     }
@@ -375,7 +382,9 @@ void handle_test(const char *file) {
     init_childs();
     init_counters();
     run_checker(0);
-    run_console(0);
+    if (!headless_mode) {
+        run_console(0);
+    }
     run_auto(file);
 }
 

@@ -293,6 +293,21 @@ extern int help_requested;
 extern int expand_min_level;
 
 /**
+ * @brief 1 si la console interactive (lecture de stdin) ne doit pas démarrer
+ *        (option CLI `--headless`).
+ *
+ * Défaut 0 : `run_console()` est démarré normalement (serveur, client, mode
+ * test). Pensé pour une exécution en service (systemd, `StandardInput=null`) :
+ * sans ce flag, le thread console se termine déjà proprement sur EOF immédiat
+ * quand stdin n'est pas un TTY, mais démarre et meurt inutilement à chaque
+ * lancement. Le journal reste inchangé dans les deux cas — `logger.c` détecte
+ * déjà `isatty(STDOUT_FILENO)` et n'émet jamais de codes ANSI hors TTY.
+ * Position-indépendant, retiré d'argv par `parse_cli_options` avant le parsing
+ * positionnel, comme `--stop-on-solution`.
+ */
+extern int headless_mode;
+
+/**
  * @brief Nombre de possibilités qu'un client pruner demande/acquitte par lot.
  *
  * Configurable au démarrage (argument CLI du mode `pruner`) et à
@@ -544,8 +559,9 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
  * @brief Extrait les options globales de `argv` et les retire du tableau.
  *
  * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--http-port <n>`,
- * `--gpu` et `--help`/`-h` (positionne respectivement `stop_on_solution`,
- * `expand_min_level`, `HTTP_PORT`, `gpu_requested` et `help_requested`). Compacte
+ * `--gpu`, `--headless` et `--help`/`-h` (positionne respectivement
+ * `stop_on_solution`, `expand_min_level`, `HTTP_PORT`, `gpu_requested`,
+ * `headless_mode` et `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.
  *
