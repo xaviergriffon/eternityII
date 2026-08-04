@@ -2207,6 +2207,46 @@ TEST control_session_step_get_stats_round_trip(void)
     PASS();
 }
 
+/* Verrouille le bug rapporté : un client annonçant un record UNIQUEMENT via
+   CTRL_STATS (jamais via INST_ADD sur le protocole de travail) doit quand
+   même faire progresser le max_result GLOBAL du serveur (logs, GET
+   /api/v1/stats) — pas seulement le cache par-session (GET /api/v1/clients)
+   ou g_server_best_board (GET /api/v1/best-board). */
+TEST control_session_step_get_stats_updates_global_max_result(void)
+{
+    best_board_init(&g_server_best_board);
+    uint16_t saved_mr = max_result;
+    max_result = 5; /* strictement sous le 30 rapporté par ctrl_peer_thread */
+
+    control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+    ASSERT_EQ(0, control_registry_post_command(idx, CTRL_GET_STATS, NULL));
+
+    int sv[2];
+    ASSERT_EQ(0, make_pair(sv));
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.socket_id = sv[0];
+
+    struct ctrl_peer_arg arg = { .fd = sv[1], .expect_cmd = CTRL_GET_STATS,
+                                  .expect_line = NULL, .reply_cmd = CTRL_STATS,
+                                  .reply_retcode = 0 };
+    pthread_t t;
+    ASSERT_EQ(0, pthread_create(&t, NULL, ctrl_peer_thread, &arg));
+
+    int cont = control_session_step(&client, idx, 2000);
+    pthread_join(t, NULL);
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(30, (int)max_result, "%d");
+
+    max_result = saved_mr;
+    control_registry_unregister(idx);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
 TEST control_session_step_timeout_pings_and_continues(void)
 {
     control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
@@ -2372,6 +2412,7 @@ SUITE(etii_server_suite)
 
     RUN_TEST(control_session_step_command_round_trip);
     RUN_TEST(control_session_step_get_stats_round_trip);
+    RUN_TEST(control_session_step_get_stats_updates_global_max_result);
     RUN_TEST(control_session_step_timeout_pings_and_continues);
     RUN_TEST(control_session_step_ping_without_ack_stops);
     RUN_TEST(control_session_step_invalid_index_stops);

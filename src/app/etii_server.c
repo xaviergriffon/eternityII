@@ -787,6 +787,17 @@ int control_session_step(client_t *client, int session_index, int timeout_ms)
                 return 0;
             }
             control_registry_record_stats(session_index, &stats);
+            // Le protocole de travail (INST_ADD/…) ne fait progresser max_result
+            // que quand ce client pousse effectivement des possibilités par cette
+            // voie ; sans cette resynchronisation, un client qui n'annonce son
+            // record QUE via CTRL_STATS ne le fait jamais apparaître dans les
+            // stats globales du serveur (logs, GET /api/v1/stats), qui restent
+            // en retard sur GET /api/v1/clients (alimenté par control_registry
+            // ci-dessus) et sur GET /api/v1/best-board (g_server_best_board,
+            // mis à jour juste plus bas).
+            if (stats.max_result > max_result) {
+                max_result = (uint16_t)stats.max_result;
+            }
             log_info("stats client : coups/s=%llu stock=%llu analyse=%llu record=%llu pruner_checked=%llu pruner_removed=%llu pruner_cases/s=%llu\n",
                       (unsigned long long)stats.shots_per_second,
                       (unsigned long long)stats.possibility_stock,
