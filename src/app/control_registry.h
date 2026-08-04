@@ -179,6 +179,27 @@ int control_registry_broadcast_command(uint8_t cmd, const char *command_line);
 int control_registry_broadcast_get_stats(void);
 
 /**
+ * @brief Indique si un sondage automatique `CTRL_GET_STATS` est dû pour la
+ *        session `index` (aucun sondage manuel `clientsStats`/HTTP n'exclut
+ *        celui-ci : les deux partagent le même but, tirer un `CTRL_STATS`
+ *        frais pour repérer un nouveau record côté client — cf.
+ *        `CONTROL_AUTO_STATS_INTERVAL_SEC`, static_variables.h).
+ *
+ * Effet de bord si le sondage est dû : marque l'instant présent comme
+ * dernière tentative, pour que l'appel suivant ne redevienne dû qu'après un
+ * nouvel `interval_sec`. Cette marque avance aussi bien sur un sondage
+ * automatique réussi qu'échoué (le prochain keepalive retentera de toute
+ * façon) — elle n'a pas besoin d'attendre un `CTRL_STATS` décodé.
+ *
+ * @param index        Indice de la session.
+ * @param interval_sec Intervalle minimal (secondes) entre deux sondages.
+ * @return              1 si le sondage est dû (et vient d'être marqué comme
+ *                      tenté), 0 sinon (trop tôt, index invalide, ou
+ *                      `interval_sec <= 0`).
+ */
+int control_registry_auto_stats_due(int index, int interval_sec);
+
+/**
  * @brief État de pause désiré courant du registre : 0 = résumé (défaut),
  *        1 = en pause. Mis à jour par `control_registry_broadcast_command`
  *        lors d'un `pause`/`resume` console (ou `clientsCmd pause|resume`

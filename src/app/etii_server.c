@@ -722,6 +722,96 @@ const char *client_disconnect_reason(int8_t last_instruction)
 }
 
 /**
+ * @brief Effectue un aller-retour CTRL_GET_STATS/CTRL_STATS sur la session de
+ *        contrôle, met à jour le registre, et tire le plateau record
+ *        (CTRL_GET_BEST_BOARD/CTRL_BEST_BOARD) si le client dépasse le record
+ *        déjà connu du serveur. Factorisé entre le déclenchement manuel
+ *        (commande `CTRL_GET_STATS` postée via `clientsStats`/l'API HTTP) et
+ *        le sondage automatique périodique (voir `control_session_step`) :
+ *        les deux ont exactement le même besoin — un `CTRL_STATS` frais pour
+ *        détecter un nouveau record côté client.
+ *
+ * @return 1 si l'échange a réussi (registre à jour), 0 en cas d'erreur réseau
+ *         ou de protocole (l'appelant doit alors clore la session).
+ */
+static int control_session_poll_stats(client_t *client, int session_index)
+{
+    if (ctrl_send_frame(client->socket_id, CTRL_GET_STATS, NULL, 0) != 0) {
+        log_error("session de contrôle : échec d'envoi de CTRL_GET_STATS\n");
+        return 0;
+    }
+    void *payload = NULL;
+    int32_t plen = 0;
+    int rcmd = ctrl_recv_frame(client->socket_id, &payload, &plen);
+    if (rcmd != CTRL_STATS) {
+        log_error("session de contrôle : réponse CTRL_STATS attendue, reçu %d\n", rcmd);
+        free(payload);
+        return 0;
+    }
+    control_stats_t stats;
+    memset(&stats, 0, sizeof(stats));
+    int decoded = (payload != NULL) ? control_stats_decode(payload, plen, &stats) : -1;
+    free(payload);
+    if (decoded != 0) {
+        log_error("session de contrôle : décodage CTRL_STATS échoué\n");
+        return 0;
+    }
+    control_registry_record_stats(session_index, &stats);
+    // Le protocole de travail (INST_ADD/…) ne fait progresser max_result
+    // que quand ce client pousse effectivement des possibilités par cette
+    // voie ; sans cette resynchronisation, un client qui n'annonce son
+    // record QUE via CTRL_STATS ne le fait jamais apparaître dans les
+    // stats globales du serveur (logs, GET /api/v1/stats), qui restent
+    // en retard sur GET /api/v1/clients (alimenté par control_registry
+    // ci-dessus) et sur GET /api/v1/best-board (g_server_best_board,
+    // mis à jour juste plus bas).
+    if (stats.max_result > max_result) {
+        max_result = (uint16_t)stats.max_result;
+    }
+    log_info("stats client : coups/s=%llu stock=%llu analyse=%llu record=%llu pruner_checked=%llu pruner_removed=%llu pruner_cases/s=%llu\n",
+              (unsigned long long)stats.shots_per_second,
+              (unsigned long long)stats.possibility_stock,
+              (unsigned long long)stats.analysed_stock,
+              (unsigned long long)stats.max_result,
+              (unsigned long long)stats.pruner_checked,
+              (unsigned long long)stats.pruner_removed,
+              (unsigned long long)stats.pruner_cells_per_second);
+    control_registry_touch(session_index);
+
+    // Le client rapporte un record supérieur à celui déjà connu du
+    // serveur : on tire sa représentation (pas seulement le compte),
+    // sur CETTE MÊME connexion, avant de repasser en attente de la
+    // prochaine commande — c'est le serveur qui demande, uniquement
+    // quand il en a besoin (jamais à chaque CTRL_STATS).
+    if (stats.max_result > (unsigned long long)best_board_result(&g_server_best_board)) {
+        if (ctrl_send_frame(client->socket_id, CTRL_GET_BEST_BOARD, NULL, 0) != 0) {
+            log_error("session de contrôle : échec d'envoi de CTRL_GET_BEST_BOARD\n");
+            return 0;
+        }
+        void *bpayload = NULL;
+        int32_t blen = 0;
+        int brcmd = ctrl_recv_frame(client->socket_id, &bpayload, &blen);
+        if (brcmd != CTRL_BEST_BOARD) {
+            log_error("session de contrôle : réponse CTRL_BEST_BOARD attendue, reçu %d\n", brcmd);
+            free(bpayload);
+            return 0;
+        }
+        if (bpayload != NULL && blen == (int32_t)(1 + sizeof(struct possibility_packet))
+            && ((uint8_t *)bpayload)[0] != 0) {
+            struct possibility_packet board;
+            memcpy(&board, (uint8_t *)bpayload + 1, sizeof(board));
+            if (best_board_try_record(&g_server_best_board, &board, board.alloc)) {
+                log_event("nouveau plateau record reçu d'un client (%u pièces)",
+                          (unsigned)board.alloc);
+            }
+        }
+        free(bpayload);
+        control_registry_touch(session_index);
+    }
+    return 1;
+}
+
+/**
  * @brief Un tour de la boucle de session de contrôle (voir etii_server.h pour
  *        le contrat complet).
  *
@@ -766,86 +856,24 @@ int control_session_step(client_t *client, int session_index, int timeout_ms)
             log_event("commande distante \"%s\" exécutée (code retour %d)", line, retcode);
             control_registry_touch(session_index);
         } else if (cmd == CTRL_GET_STATS) {
-            if (ctrl_send_frame(client->socket_id, CTRL_GET_STATS, NULL, 0) != 0) {
-                log_error("session de contrôle : échec d'envoi de CTRL_GET_STATS\n");
-                return 0;
-            }
-            void *payload = NULL;
-            int32_t plen = 0;
-            int rcmd = ctrl_recv_frame(client->socket_id, &payload, &plen);
-            if (rcmd != CTRL_STATS) {
-                log_error("session de contrôle : réponse CTRL_STATS attendue, reçu %d\n", rcmd);
-                free(payload);
-                return 0;
-            }
-            control_stats_t stats;
-            memset(&stats, 0, sizeof(stats));
-            int decoded = (payload != NULL) ? control_stats_decode(payload, plen, &stats) : -1;
-            free(payload);
-            if (decoded != 0) {
-                log_error("session de contrôle : décodage CTRL_STATS échoué\n");
-                return 0;
-            }
-            control_registry_record_stats(session_index, &stats);
-            // Le protocole de travail (INST_ADD/…) ne fait progresser max_result
-            // que quand ce client pousse effectivement des possibilités par cette
-            // voie ; sans cette resynchronisation, un client qui n'annonce son
-            // record QUE via CTRL_STATS ne le fait jamais apparaître dans les
-            // stats globales du serveur (logs, GET /api/v1/stats), qui restent
-            // en retard sur GET /api/v1/clients (alimenté par control_registry
-            // ci-dessus) et sur GET /api/v1/best-board (g_server_best_board,
-            // mis à jour juste plus bas).
-            if (stats.max_result > max_result) {
-                max_result = (uint16_t)stats.max_result;
-            }
-            log_info("stats client : coups/s=%llu stock=%llu analyse=%llu record=%llu pruner_checked=%llu pruner_removed=%llu pruner_cases/s=%llu\n",
-                      (unsigned long long)stats.shots_per_second,
-                      (unsigned long long)stats.possibility_stock,
-                      (unsigned long long)stats.analysed_stock,
-                      (unsigned long long)stats.max_result,
-                      (unsigned long long)stats.pruner_checked,
-                      (unsigned long long)stats.pruner_removed,
-                      (unsigned long long)stats.pruner_cells_per_second);
-            control_registry_touch(session_index);
-
-            // Le client rapporte un record supérieur à celui déjà connu du
-            // serveur : on tire sa représentation (pas seulement le compte),
-            // sur CETTE MÊME connexion, avant de repasser en attente de la
-            // prochaine commande — c'est le serveur qui demande, uniquement
-            // quand il en a besoin (jamais à chaque CTRL_STATS).
-            if (stats.max_result > (unsigned long long)best_board_result(&g_server_best_board)) {
-                if (ctrl_send_frame(client->socket_id, CTRL_GET_BEST_BOARD, NULL, 0) != 0) {
-                    log_error("session de contrôle : échec d'envoi de CTRL_GET_BEST_BOARD\n");
-                    return 0;
-                }
-                void *bpayload = NULL;
-                int32_t blen = 0;
-                int brcmd = ctrl_recv_frame(client->socket_id, &bpayload, &blen);
-                if (brcmd != CTRL_BEST_BOARD) {
-                    log_error("session de contrôle : réponse CTRL_BEST_BOARD attendue, reçu %d\n", brcmd);
-                    free(bpayload);
-                    return 0;
-                }
-                if (bpayload != NULL && blen == (int32_t)(1 + sizeof(struct possibility_packet))
-                    && ((uint8_t *)bpayload)[0] != 0) {
-                    struct possibility_packet board;
-                    memcpy(&board, (uint8_t *)bpayload + 1, sizeof(board));
-                    if (best_board_try_record(&g_server_best_board, &board, board.alloc)) {
-                        log_event("nouveau plateau record reçu d'un client (%u pièces)",
-                                  (unsigned)board.alloc);
-                    }
-                }
-                free(bpayload);
-                control_registry_touch(session_index);
-            }
+            return control_session_poll_stats(client, session_index);
         } else {
             log_error("session de contrôle : commande interne inconnue (%u)\n", (unsigned)cmd);
         }
         return 1;
     }
 
-    // wr == 1 : timeout, aucune commande en attente — keepalive ping/pong,
-    // borné par le SO_RCVTIMEO déjà posé sur le socket.
+    // wr == 1 : timeout, aucune commande en attente. Si le sondage
+    // automatique est dû (CONTROL_AUTO_STATS_INTERVAL_SEC), un CTRL_GET_STATS
+    // remplace le keepalive de ce tour — c'est ce qui permet à un nouveau
+    // record côté client d'être tiré côté serveur sans attendre qu'un
+    // opérateur lance `clientsStats` manuellement (cf. static_variables.h).
+    if (control_registry_auto_stats_due(session_index, CONTROL_AUTO_STATS_INTERVAL_SEC)) {
+        return control_session_poll_stats(client, session_index);
+    }
+
+    // Sinon : keepalive ping/pong, borné par le SO_RCVTIMEO déjà posé sur le
+    // socket.
     if (ctrl_send_frame(client->socket_id, CTRL_PING, NULL, 0) != 0) {
         log_error("session de contrôle : échec d'envoi de CTRL_PING\n");
         return 0;

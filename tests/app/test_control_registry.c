@@ -519,6 +519,81 @@ TEST multithread_wait_wakes_up_on_posted_command(void)
     PASS();
 }
 
+/* ---------- sondage automatique CTRL_GET_STATS -----------------------------
+ *
+ * Reproduit le bug rapporté : sans sondage périodique, un nouveau record côté
+ * client ne remonte au serveur que si un opérateur lance `clientsStats`
+ * manuellement (potentiellement plusieurs minutes après). `control_session_step`
+ * (etii_server.c) déclenche désormais un CTRL_GET_STATS automatique quand
+ * `control_registry_auto_stats_due` répond vrai ; ces tests couvrent
+ * directement cette primitive du registre (pas de socket nécessaire).
+ */
+
+TEST auto_stats_due_immediately_after_register_is_false(void)
+{
+    control_hello_t h = make_hello(1, 1, 0);
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+
+    /* Juste après le hello, le premier sondage automatique n'est pas encore
+       dû : l'intervalle se compte à partir de l'enregistrement, pas de zéro. */
+    ASSERT_EQ(0, control_registry_auto_stats_due(idx, 10));
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST auto_stats_due_after_interval_elapsed(void)
+{
+    control_hello_t h = make_hello(1, 1, 0);
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+
+    /* interval_sec <= 0 est explicitement rejeté (voir contrat). */
+    ASSERT_EQ(0, control_registry_auto_stats_due(idx, 0));
+    ASSERT_EQ(0, control_registry_auto_stats_due(idx, -1));
+
+    usleep(1100 * 1000);
+    ASSERT_EQ(1, control_registry_auto_stats_due(idx, 1));
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST auto_stats_due_marks_attempt_and_resets_window(void)
+{
+    control_hello_t h = make_hello(1, 1, 0);
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+
+    usleep(1100 * 1000);
+    ASSERT_EQ(1, control_registry_auto_stats_due(idx, 1));
+    /* La tentative vient d'être marquée : le même intervalle ne redevient pas
+       dû immédiatement après. */
+    ASSERT_EQ(0, control_registry_auto_stats_due(idx, 1));
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST auto_stats_due_invalid_index_returns_zero(void)
+{
+    ASSERT_EQ(0, control_registry_auto_stats_due(-1, 30));
+    ASSERT_EQ(0, control_registry_auto_stats_due(MAX_CONTROL_SESSIONS, 30));
+    PASS();
+}
+
+TEST auto_stats_due_on_unregistered_slot_returns_zero(void)
+{
+    control_hello_t h = make_hello(1, 1, 0);
+    int idx = control_registry_register(1, &h);
+    ASSERT(idx >= 0);
+    control_registry_unregister(idx);
+
+    ASSERT_EQ(0, control_registry_auto_stats_due(idx, 30));
+    PASS();
+}
+
 /* ---------- suite ---------------------------------------------------------*/
 
 SUITE(control_registry_suite)
@@ -557,6 +632,12 @@ SUITE(control_registry_suite)
 
     RUN_TEST(touch_updates_last_activity);
     RUN_TEST(touch_out_of_range_is_noop);
+
+    RUN_TEST(auto_stats_due_immediately_after_register_is_false);
+    RUN_TEST(auto_stats_due_after_interval_elapsed);
+    RUN_TEST(auto_stats_due_marks_attempt_and_resets_window);
+    RUN_TEST(auto_stats_due_invalid_index_returns_zero);
+    RUN_TEST(auto_stats_due_on_unregistered_slot_returns_zero);
 
     RUN_TEST(multithread_wait_wakes_up_on_posted_command);
 }

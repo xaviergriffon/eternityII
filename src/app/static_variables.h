@@ -124,6 +124,20 @@
 // donc volontairement indépendante et fixe plutôt qu'indexée sur NB_THREADS.
 #define MAX_CONTROL_SESSIONS 64
 
+// Intervalle (secondes) entre deux sondages automatiques CTRL_GET_STATS d'une
+// session de contrôle, quand aucune commande console (`clientsStats`, ou son
+// équivalent HTTP `POST /api/v1/clients/stats`) n'a été postée manuellement.
+// Sans ce sondage périodique, `control_session_step` (etii_server.c) ne fait
+// que des CTRL_PING/CTRL_ACK entre deux commandes explicites : le tirage du
+// meilleur plateau (CTRL_GET_BEST_BOARD, cf. AGENTS.md "Control Channel")
+// est déclenché par la RÉCEPTION d'un CTRL_STATS dont `max_result` dépasse le
+// record serveur connu — sans CTRL_STATS, un nouveau record côté client peut
+// donc rester invisible côté serveur indéfiniment, jusqu'à ce qu'un opérateur
+// pense à lancer `clientsStats` manuellement. 30 s garde le round-trip discret
+// (un frame de plus dans le pire cas par cycle de keepalive) tout en bornant
+// le délai de propagation d'un record à quelques dizaines de secondes.
+#define CONTROL_AUTO_STATS_INTERVAL_SEC 30
+
 #define REQUEST_STOP 1
 #define REQUEST_CONTINUE 0
 #define REQUEST_PAUSE 2

@@ -32,6 +32,11 @@ typedef struct {
     control_stats_t stats;
     time_t stats_time;
 
+    /* Dernière tentative de sondage automatique CTRL_GET_STATS (cf.
+     * control_registry_auto_stats_due), distincte de stats_time qui ne bouge
+     * que sur un CTRL_STATS effectivement décodé. */
+    time_t last_auto_poll_attempt;
+
     pthread_mutex_t mutex;
     pthread_cond_t cond;
 } control_session_t;
@@ -105,6 +110,7 @@ int control_registry_register(int socket_id, const control_hello_t *hello)
         s->head = 0;
         s->count = 0;
         s->has_stats = 0;
+        s->last_auto_poll_attempt = s->last_activity;
         if (g_desired_pause_state) {
             /* Pré-poste "pause" dans la file toute neuve, pour que le tout
              * premier `control_session_step` de cette session l'exécute avant
@@ -322,6 +328,26 @@ int control_registry_broadcast_command(uint8_t cmd, const char *command_line)
 int control_registry_broadcast_get_stats(void)
 {
     return control_registry_broadcast_command(CTRL_GET_STATS, NULL);
+}
+
+int control_registry_auto_stats_due(int index, int interval_sec)
+{
+    pthread_once(&g_init_once, registry_init_once);
+    if (index < 0 || index >= MAX_CONTROL_SESSIONS || interval_sec <= 0) {
+        return 0;
+    }
+    control_session_t *s = &g_sessions[index];
+    int due = 0;
+    pthread_mutex_lock(&s->mutex);
+    if (s->in_use) {
+        time_t now = time(NULL);
+        if (difftime(now, s->last_auto_poll_attempt) >= (double)interval_sec) {
+            s->last_auto_poll_attempt = now;
+            due = 1;
+        }
+    }
+    pthread_mutex_unlock(&s->mutex);
+    return due;
 }
 
 int control_registry_desired_pause_state(void)
