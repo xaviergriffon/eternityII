@@ -234,6 +234,25 @@ Le serveur applique la même règle « premier à dépasser gagne » à sa propr
 `eternityII-best_board.back`/`temp-best_board.back`) et expose via
 [`GET /api/v1/best-board`](api_http_rest.md).
 
+### Resynchronisation du `max_result` global du serveur sur `CTRL_STATS`
+
+Avant tout correctif, le serveur exposait **trois** indicateurs de « meilleur résultat »
+mis à jour par des chemins indépendants, sans jamais se recopier entre eux : le global
+`max_result` (logs serveur, `GET /api/v1/stats`), alimenté **uniquement** par le
+protocole de travail classique (`INST_ADD`/…, quand un client pousse effectivement ses
+possibilités) ; le cache par-session (`control_registry_record_stats`, `GET
+/api/v1/clients`), alimenté à chaque `CTRL_STATS` ; et `g_server_best_board` (`GET
+/api/v1/best-board`), alimenté seulement sur un `CTRL_STATS` qui bat le record déjà
+connu. Un client qui annonçait son record uniquement via le canal de contrôle (sans
+transfert `INST_ADD` correspondant) faisait donc progresser les deux derniers sans que
+le premier — celui affiché en logs serveur et par `/api/v1/stats` — ne bouge.
+`control_session_step` (`src/app/etii_server.c`) met désormais aussi à jour le global
+`max_result` dès qu'un `CTRL_STATS` rapporte une valeur strictement supérieure, en plus
+du cache par-session et de `g_server_best_board` — les trois vues restent cohérentes
+entre elles. Verrouillé par
+`control_session_step_get_stats_updates_global_max_result`
+(`tests/app/test_etii_server.c`).
+
 ### Double vérification de la liste blanche
 
 Seules quelques commandes console sont déclenchables à distance
