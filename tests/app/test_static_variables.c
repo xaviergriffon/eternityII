@@ -166,6 +166,36 @@ TEST http_port_out_of_range_values_are_ignored(void)
     PASS();
 }
 
+/* --http-token-file <chemin> : option VALUÉE, même schéma que --http-port.
+   Le chemin est mémorisé tel quel (pointeur dans argv), les deux tokens sont
+   retirés d'argv. Aucune I/O ici (parse_cli_options reste pur) : le
+   chargement réel est testé séparément (http_token_load, tests/net). */
+TEST http_token_file_strips_option_and_value_sets_global(void)
+{
+    HTTP_TOKEN_FILE = NULL;
+    const char *argv[] = {"prog", "server", "--http-token-file", "/etc/etii/token", "data/pieces.csv"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT(HTTP_TOKEN_FILE != NULL);
+    ASSERT_STR_EQ("/etc/etii/token", HTTP_TOKEN_FILE);
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("data/pieces.csv", argv[2]);
+    PASS();
+}
+
+/* Valeur absente (dernière position) : ignorée, HTTP_TOKEN_FILE reste NULL. */
+TEST http_token_file_without_value_is_ignored(void)
+{
+    HTTP_TOKEN_FILE = NULL;
+    const char *argv[] = {"prog", "server", "--http-token-file"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ(NULL, HTTP_TOKEN_FILE);
+    PASS();
+}
+
 /* --gpu : position-indépendante — retirée d'argv, gpu_requested positionné,
    arguments positionnels du pruner intacts (l'interprétation CUDA/non-CUDA se
    fait dans main(), pas ici). */
@@ -340,6 +370,8 @@ SUITE(static_variables_suite)
     RUN_TEST(http_port_strips_option_and_value_sets_global);
     RUN_TEST(http_port_without_value_is_ignored);
     RUN_TEST(http_port_out_of_range_values_are_ignored);
+    RUN_TEST(http_token_file_strips_option_and_value_sets_global);
+    RUN_TEST(http_token_file_without_value_is_ignored);
     RUN_TEST(gpu_flag_is_stripped_and_sets_global);
     RUN_TEST(gpu_flag_absent_leaves_global_untouched);
     RUN_TEST(headless_flag_is_stripped_and_sets_global);

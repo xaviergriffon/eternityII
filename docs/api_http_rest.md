@@ -10,10 +10,10 @@ réservé aux processus client eternityII).
 
 Le code correspondant vit dans :
 
-- [src/net/http_codec.h](../src/net/http_codec.h) / [http_codec.c](../src/net/http_codec.c) — parsing HTTP/1.1, routage, formatage JSON : fonctions pures, sans socket ;
-- [src/net/http_server.h](../src/net/http_server.h) / [http_server.c](../src/net/http_server.c) — écouteur réseau (thread détaché, boucle accept), et les fonctions `http_*_collect` qui alimentent les vues JSON à partir de l'état serveur/registre vivant ;
-- [src/ui/command_lines.c](../src/ui/command_lines.c) (`admin_apply_remote_command`) — exécution des commandes admin, réentrante ;
-- [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_allowed`) — liste blanche des commandes, **partagée** avec le canal de contrôle binaire ;
+- [src/net/http_codec.h](../src/net/http_codec.h) / [http_codec.c](../src/net/http_codec.c) — parsing HTTP/1.1 (dont l'en-tête `Authorization`), routage, formatage JSON, extraction/vérification du jeton Bearer (`http_extract_bearer_token`, `http_token_equals_constant_time`, `http_command_authorize`) : fonctions pures, sans socket ;
+- [src/net/http_server.h](../src/net/http_server.h) / [http_server.c](../src/net/http_server.c) — écouteur réseau (thread détaché, boucle accept), les fonctions `http_*_collect` qui alimentent les vues JSON à partir de l'état serveur/registre vivant, et `http_token_load` (chargement/validation du fichier jeton au démarrage) ;
+- [src/ui/command_lines.c](../src/ui/command_lines.c) (`admin_apply_remote_command`, `admin_apply_privileged_command`) — exécution des commandes admin, réentrante ;
+- [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_allowed`, `control_command_privileged`) — listes blanches des commandes ; `control_command_allowed` est **partagée** avec le canal de contrôle binaire, `control_command_privileged` (restore/backup) ne l'est **pas** (accessible uniquement via cette API, jamais via le canal de contrôle) ;
 - [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) (`control_registry_snapshot`, `control_registry_record_stats`, `control_registry_broadcast_get_stats`) — registre des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), source de `GET /api/v1/clients` et `POST /api/v1/clients/stats` ;
 - [src/core/best_board.h](../src/core/best_board.h) / [best_board.c](../src/core/best_board.c) (`g_server_best_board`) — représentation du meilleur plateau connu, source de `GET /api/v1/best-board`.
 
@@ -30,17 +30,31 @@ d'`argv` avant l'analyse positionnelle des arguments du mode. Une valeur absente
 hors de l'intervalle `[1, 65535]` est **ignorée silencieusement** (l'API reste
 désactivée) plutôt que d'ouvrir un port au hasard.
 
+Optionnellement, `--http-token-file <chemin>` active l'authentification des deux
+commandes privilégiées `restore`/`backup` (voir [Authentification](#authentification-restorebackup)
+ci-dessous) :
+
+```sh
+chmod 600 /etc/eternityii/http-token
+./eternityII server 4 --http-port 8080 --http-token-file /etc/eternityii/http-token data/pieces.csv
+```
+
 ## Posture de sécurité
 
 - **Écoute en boucle locale uniquement** (`127.0.0.1`, jamais `0.0.0.0`/`INADDR_ANY`) :
   l'API n'est **jamais** exposée hors de la machine par défaut. Un accès distant passe
   par un tunnel SSH ou un reverse-proxy explicite, à la charge de l'opérateur.
-- **Aucune authentification.** L'API est pensée pour un réseau de confiance (la
-  machine elle-même, ou un tunnel authentifié en amont) — ne jamais l'exposer
-  directement sur un réseau non maîtrisé.
+- **Authentification partielle, par défaut absente.** Sans `--http-token-file`, l'API
+  se comporte exactement comme avant cette fonctionnalité : aucune authentification,
+  pensée pour un réseau de confiance (la machine elle-même, ou un tunnel authentifié
+  en amont) — ne jamais l'exposer directement sur un réseau non maîtrisé. Avec
+  `--http-token-file`, un jeton Bearer devient nécessaire pour les deux seules
+  commandes capables de remplacer l'état du serveur (`restore`, `backup`) ; toutes les
+  autres routes et commandes restent, elles, sans authentification (voir
+  [Authentification](#authentification-restorebackup)).
 - **Liste blanche stricte des commandes** (voir [POST /api/v1/command](#post-apiv1command))
-  : `exit`, `restore`, `import` et toute autre commande destructrice sont **rejetées
-  avant même d'être interprétées**, jamais atteignables depuis cette API.
+  : `exit`, `import` et toute autre commande destructrice sont **rejetées avant même
+  d'être interprétées**, jamais atteignables depuis cette API, jeton ou non.
 - **Aucun fichier n'est servi** : pas de chemin de requête interprété comme un chemin
   disque, donc pas de risque de traversée de répertoire.
 
@@ -84,7 +98,8 @@ Connection: close
 |---|---|---|
 | `200` | OK | Requête traitée avec succès |
 | `400` | Bad Request | Requête HTTP malformée, ou `POST /api/v1/command` avec un champ `command` absent/invalide/aux arguments manquants |
-| `403` | Forbidden | Commande reconnue mais hors de la liste blanche (ex. `exit`) |
+| `401` | Unauthorized | `POST /api/v1/command` avec une commande **privilégiée** (`restore`, `backup`) sans jeton Bearer valide (absent, invalide, ou aucun jeton configuré côté serveur) — porte l'en-tête `WWW-Authenticate: Bearer` |
+| `403` | Forbidden | Commande reconnue mais hors des deux listes blanches (ex. `exit`) |
 | `404` | Not Found | Chemin inconnu |
 | `405` | Method Not Allowed | Chemin connu, mauvaise méthode HTTP (ex. `POST /api/v1/stats`) |
 | `413` | Payload Too Large | Requête (en-têtes + corps) dépassant 8 Ko |
@@ -190,24 +205,96 @@ pratique car toutes les commandes whitelistées n'utilisent que `[A-Za-z0-9 ]`.
 | `maxStockByThread <n>` | Fixe le seuil de stock local par thread |
 | `prunerBatch <n>` | Fixe la taille de lot du pruner, bornée à `[1, PRUNER_BATCH_MAX]` (65536) — une valeur hors borne est silencieusement ramenée à la borne la plus proche, pas un `400` |
 
-Toute autre commande — en particulier `exit`, `restore`, `import` — est **rejetée
-avant même d'être tokenisée**, avec `403`.
+**Commandes privilégiées** (`control_command_privileged`), **UNIQUEMENT** accessibles
+via cette route, et seulement avec un jeton Bearer valide (voir
+[Authentification](#authentification-restorebackup)) :
+
+| Commande | Effet |
+|---|---|
+| `restore [fichier [fichier_analyse]]` | Remplace le stock courant par le contenu des fichiers `.back` indiqués (défaut : `./eternityII.back` / `./eternityII-in_analyse.back`) |
+| `backup` | Sauvegarde les files courantes dans les fichiers `.back` |
+
+Toute autre commande — en particulier `exit`, `import` — est **rejetée avant même
+d'être tokenisée**, avec `403`, jeton ou non.
 
 **Réponses :**
 
 | Cas | Code | Corps |
 |---|---|---|
-| Commande whitelistée, appliquée | `200` | `{"result":"ok"}` |
-| Commande hors liste blanche | `403` | `{"error":"command not allowed"}` |
+| Commande whitelistée (standard ou privilégiée authentifiée), appliquée | `200` | `{"result":"ok"}` |
+| Commande privilégiée sans jeton valide (absent, invalide, ou aucun jeton configuré) | `401` | `{"error":"unauthorized"}` (en-tête `WWW-Authenticate: Bearer`) |
+| Commande hors des deux listes blanches | `403` | `{"error":"command not allowed"}` |
 | Champ `command` absent, vide, mal formé (JSON invalide, échappement) | `400` | `{"error":"missing or malformed \"command\" field"}` |
 | Commande reconnue mais argument manquant (ex. `"limit"` sans nombre) | `400` | `{"error":"missing or invalid argument"}` |
 
 **Exécution non bloquante pour les autres canaux.** La commande est appliquée par
-`admin_apply_remote_command` (et non par la fonction console `do_command_line`, qui
-utilise un curseur de tokenisation global non réentrant) : un appel HTTP concurrent à
-une saisie sur la console interactive, ou à une commande poussée via le
-[canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), ne corrompt
-jamais le découpage de l'autre.
+`admin_apply_remote_command` (commandes standard) ou `admin_apply_privileged_command`
+(commandes privilégiées, après authentification) — et non par la fonction console
+`do_command_line`, qui utilise un curseur de tokenisation global non réentrant : un
+appel HTTP concurrent à une saisie sur la console interactive, ou à une commande
+poussée via le [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9),
+ne corrompt jamais le découpage de l'autre.
+
+### Authentification (restore/backup)
+
+Par défaut (sans `--http-token-file`), `restore` et `backup` sont **inaccessibles**
+via cette API : `control_command_privileged` les identifie comme privilégiées, et sans
+jeton configuré côté serveur (`HTTP_ADMIN_TOKEN` vide), `http_command_authorize`
+répond toujours `401` — jamais d'exécution sans preuve d'identité, même en l'absence
+de configuration.
+
+**Activation :**
+
+```sh
+echo -n "un-secret-suffisamment-long" > /etc/eternityii/http-token
+chmod 600 /etc/eternityii/http-token
+./eternityII server 4 --http-port 8080 --http-token-file /etc/eternityii/http-token data/pieces.csv
+```
+
+- Le fichier doit être lisible du **seul propriétaire** (`mode & 0077 == 0`, même
+  exigence qu'une clé privée SSH) : un mode plus permissif fait échouer le démarrage
+  du serveur avec un message explicite, **avant** l'ouverture du port TCP.
+- Une seule ligne = le jeton ; les espaces/retours à la ligne de fin sont retirés.
+- `--http-token-file` sans `--http-port` est accepté (avertissement au démarrage,
+  jeton inutilisé) — pratique pour préparer une configuration à l'avance.
+
+**Utilisation :** ajouter l'en-tête `Authorization: Bearer <jeton>` à la requête
+`POST /api/v1/command` :
+
+```sh
+curl -X POST \
+     -H "Authorization: Bearer un-secret-suffisamment-long" \
+     -d '{"command":"restore"}' \
+     http://127.0.0.1:8080/api/v1/command
+```
+
+**Ce que l'authentification ne change PAS :**
+
+- Les commandes standard (`pause`, `resume`, `limit`, `maxStockByThread`,
+  `prunerBatch`) restent accessibles **sans** authentification, jeton configuré ou
+  non — comportement strictement inchangé.
+- Les routes `GET` (`stats`, `status`, `clients`, `best-board`) ne demandent jamais de
+  jeton.
+- Le [canal de contrôle binaire](echanges_client_serveur.md#canal-de-contrôle-v9)
+  (`CTRL_COMMAND`) reste borné à `control_command_allowed` des deux côtés : ajouter
+  `restore`/`backup` à cette API ne les rend **pas** déclenchables à distance sur un
+  client via le canal de contrôle.
+
+**Comparaison en temps constant.** Le jeton fourni est comparé au jeton configuré via
+`http_token_equals_constant_time` (XOR cumulé sur toute la longueur comparée, sans
+retour anticipé sur un mismatch de longueur), pour ne pas laisser le temps de réponse
+fuiter combien de caractères initiaux d'un jeton deviné sont corrects.
+
+**Anti-bruteforce minimal.** Un jeton **présent mais invalide** ajoute un délai
+d'environ 200 ms avant la réponse `401` (aucun délai si le jeton est simplement
+absent). Le serveur HTTP admin traite une connexion à la fois (voir
+[Modèle réseau](#modèle-réseau)) : ralentir cette unique voie séquentielle suffit à
+rendre un essai exhaustif de jetons peu pratique, sans le moindre état à maintenir
+côté serveur (pas de compteur, pas de fenêtre glissante, pas de blocage d'IP).
+
+**Journalisation.** Toute tentative sur une commande privilégiée est journalisée
+(succès via `log_info`, échec — jeton absent ou invalide — via `log_error`) ; le
+contenu du jeton lui-même n'apparaît **jamais** dans les journaux.
 
 ### GET /api/v1/clients
 
@@ -390,6 +477,20 @@ sequenceDiagram
     Note over S: le serveur continue de tourner —<br/>la liste blanche est vérifiée AVANT toute exécution
 ```
 
+### Commande privilégiée (restore) avec/sans jeton
+
+```mermaid
+sequenceDiagram
+    participant App as Application tierce
+    participant S as Serveur (--http-token-file)
+    App->>S: POST /api/v1/command {"command":"restore"}
+    Note over S: pas d'en-tête Authorization
+    S-->>App: 401 {"error":"unauthorized"}<br/>WWW-Authenticate: Bearer
+    App->>S: POST /api/v1/command {"command":"restore"}<br/>Authorization: Bearer <jeton>
+    Note over S: jeton comparé en temps constant<br/>au jeton chargé au démarrage
+    S-->>App: 200 {"result":"ok"}
+```
+
 ### Détail par client (`clients` / `clientsStats`)
 
 ```mermaid
@@ -427,6 +528,11 @@ curl http://127.0.0.1:8080/api/v1/status
 curl -X POST -d '{"command":"limit 1000"}' http://127.0.0.1:8080/api/v1/command
 curl http://127.0.0.1:8080/api/v1/clients
 curl -X POST http://127.0.0.1:8080/api/v1/clients/stats   # puis relire /clients pour les stats rafraîchies
+
+# Commandes privilégiées (serveur lancé avec --http-token-file) :
+curl -X POST -d '{"command":"restore"}' http://127.0.0.1:8080/api/v1/command        # -> 401, pas de jeton
+curl -X POST -H "Authorization: Bearer un-secret-suffisamment-long" \
+     -d '{"command":"backup"}' http://127.0.0.1:8080/api/v1/command                 # -> 200
 ```
 
 ### Python (bibliothèque standard, sans dépendance)
@@ -442,9 +548,10 @@ def get_stats():
     with urllib.request.urlopen(f"{BASE}/stats", timeout=5) as r:
         return json.load(r)
 
-def send_command(command):
+def send_command(command, token=None):
     body = json.dumps({"command": command}).encode()
-    req = urllib.request.Request(f"{BASE}/command", data=body, method="POST")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    req = urllib.request.Request(f"{BASE}/command", data=body, method="POST", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status, json.load(r)

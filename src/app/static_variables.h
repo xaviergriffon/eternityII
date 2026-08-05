@@ -492,6 +492,34 @@ extern int SERVER_PORT;
 extern int HTTP_PORT;
 
 /**
+ * @brief Chemin du fichier contenant le jeton d'authentification Bearer de
+ *        l'API HTTP admin (option CLI `--http-token-file <chemin>`).
+ *
+ * `NULL` (défaut) : aucun jeton — les commandes privilégiées (`restore`,
+ * `backup`, `control_command_privileged`) restent inaccessibles via
+ * `POST /api/v1/command` quel que soit `HTTP_PORT`. Pointeur direct dans
+ * `argv` (même convention que `parts_files`) : jamais copié, valable pour
+ * toute la durée du process. Lu une seule fois au démarrage (`main()`, avant
+ * tout fork) via `http_token_load` (`src/net/http_server.h`), qui remplit
+ * `HTTP_ADMIN_TOKEN` et fait échouer le démarrage (message explicite + exit)
+ * si le fichier est illisible ou a des permissions plus larges que
+ * propriétaire-seul (mode & 0077 != 0, comme une clé privée SSH). Position-
+ * indépendant, retiré d'argv par `parse_cli_options`.
+ */
+extern const char *HTTP_TOKEN_FILE;
+
+/// Taille de `HTTP_ADMIN_TOKEN`, terminateur NUL inclus.
+#define HTTP_ADMIN_TOKEN_MAX 256
+
+/**
+ * @brief Jeton d'authentification Bearer chargé depuis `HTTP_TOKEN_FILE` au
+ *        démarrage (`http_token_load`), chaîne vide si `--http-token-file`
+ *        n'a pas été fourni (défaut : aucune commande privilégiée accessible
+ *        via l'API HTTP, cf. `HTTP_TOKEN_FILE`). Jamais journalisé en clair.
+ */
+extern char HTTP_ADMIN_TOKEN[HTTP_ADMIN_TOKEN_MAX];
+
+/**
  * @brief Débit de recherche courant du serveur (essais/seconde), publié
  *        toutes les 10 s par `check_server_step` (src/app/etii_server.c).
  *
@@ -573,9 +601,10 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
  * @brief Extrait les options globales de `argv` et les retire du tableau.
  *
  * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--http-port <n>`,
- * `--gpu`, `--headless` et `--help`/`-h` (positionne respectivement
- * `stop_on_solution`, `expand_min_level`, `HTTP_PORT`, `gpu_requested`,
- * `headless_mode` et `help_requested`). Compacte
+ * `--http-token-file <chemin>`, `--gpu`, `--headless` et `--help`/`-h`
+ * (positionne respectivement `stop_on_solution`, `expand_min_level`,
+ * `HTTP_PORT`, `HTTP_TOKEN_FILE`, `gpu_requested`, `headless_mode` et
+ * `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.
  *

@@ -444,18 +444,18 @@ int exit_interpreter(void) {
     return 0;
 }
 
-/** @brief Interpréteur de `restore [fichier [fichier_analyse]]` : restaure les possibilités depuis les fichiers `.back`. */
-int restore_interpreter(void) {
-    char *def_file = DEF_FILE;
-    char *def_analyse_file = DEF_ANALYSE_FILE;
-    char *arguments = strtok(NULL, " ");
-    if (arguments != NULL) {
-        def_file = arguments;
-        arguments = strtok(NULL, " ");
-        if (arguments != NULL) {
-            def_analyse_file = arguments;
-        }
-    }
+/**
+ * @brief Cœur réentrant de `restore [fichier [fichier_analyse]]`, extrait de
+ *        `restore_interpreter` pour être appelable sans passer par le
+ *        curseur global `strtok` (cf. `admin_apply_privileged_command`, qui
+ *        tokenise déjà la ligne via `strtok_r` et ne doit jamais toucher à
+ *        l'état de `strtok` — même raison d'être que `admin_apply_remote_command`).
+ *
+ * @param file         Chemin du fichier de stock à restaurer.
+ * @param analyse_file Chemin du fichier de possibilités analysées à restaurer.
+ * @return             0 si la restauration a réussi, une valeur négative sinon.
+ */
+static int restore_apply(char *file, char *analyse_file) {
     log_info("start restore\n");
 
     // Suspension de la recherche pendant le remplacement du stock : sans cela,
@@ -467,11 +467,11 @@ int restore_interpreter(void) {
         usleep(THREAD_MICRO_SLEEP);
     }
 
-    int result = restore(def_file);
+    int result = restore(file);
     if (result != 0) {
-        log_error("restore impossible (%s) : stock conservé\n", def_file);
-    } else if (restore_analysed(def_analyse_file) != 0) {
-        log_error("restore analysed impossible (%s) : files analysées conservées\n", def_analyse_file);
+        log_error("restore impossible (%s) : stock conservé\n", file);
+    } else if (restore_analysed(analyse_file) != 0) {
+        log_error("restore analysed impossible (%s) : files analysées conservées\n", analyse_file);
         result = -1;
     }
     // Non bloquant : un backup plus ancien peut ne pas avoir ce fichier (feature
@@ -501,6 +501,21 @@ int restore_interpreter(void) {
         log_info("backup restore\n");
     }
     return result;
+}
+
+/** @brief Interpréteur de `restore [fichier [fichier_analyse]]` : restaure les possibilités depuis les fichiers `.back`. */
+int restore_interpreter(void) {
+    char *def_file = DEF_FILE;
+    char *def_analyse_file = DEF_ANALYSE_FILE;
+    char *arguments = strtok(NULL, " ");
+    if (arguments != NULL) {
+        def_file = arguments;
+        arguments = strtok(NULL, " ");
+        if (arguments != NULL) {
+            def_analyse_file = arguments;
+        }
+    }
+    return restore_apply(def_file, def_analyse_file);
 }
 
 /** @brief Interpréteur de `import` : importe les possibilités depuis les fichiers `.back` sans effacer les files actuelles. */
@@ -810,6 +825,54 @@ int admin_apply_remote_command(const char *line) {
             result = ADMIN_CMD_OK;
         } else if (strcmp(word, "prunerBatch") == 0 && arg != NULL) {
             pruner_batch_size = pruner_batch_clamp(atoi(arg));
+            result = ADMIN_CMD_OK;
+        }
+    }
+
+    free(copy);
+    return result;
+}
+
+/**
+ * @brief Voir la doc dans command_lines.h.
+ */
+int admin_apply_privileged_command(const char *line) {
+    if (control_command_allowed(line)) {
+        // Commande "standard" (pause/resume/limit/...) : identique, authentifiée
+        // ou non, au chemin déjà validé par admin_apply_remote_command. Pas de
+        // duplication de logique ici.
+        return admin_apply_remote_command(line);
+    }
+    if (!control_command_privileged(line)) {
+        return ADMIN_CMD_FORBIDDEN;
+    }
+
+    // À ce stade, line est reconnue par control_command_privileged (restore ou
+    // backup) : l'appelant (handle_command_route, src/net/http_server.c) a déjà
+    // vérifié le jeton Bearer AVANT cet appel — cette fonction n'authentifie rien
+    // elle-même, elle exécute une commande déjà autorisée.
+    size_t length = strlen(line) + 1;
+    char *copy = malloc(sizeof(char) * length);
+    memcpy(copy, line, length);
+
+    char *save = NULL;
+    char *word = strtok_r(copy, " ", &save);
+    int result = ADMIN_CMD_BAD_ARGS;
+    if (word != NULL) {
+        if (strcmp(word, "backup") == 0) {
+            // backup_interpreter ne prend aucun argument et n'appelle jamais
+            // strtok : réentrant tel quel (contrairement à restore_interpreter).
+            backup_interpreter();
+            result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "restore") == 0) {
+            char *file = strtok_r(NULL, " ", &save);
+            char *analyse_file = (file != NULL) ? strtok_r(NULL, " ", &save) : NULL;
+            // Comme les autres commandes admin (pause/resume/limit/...), le
+            // résultat HTTP reflète que la commande a été exécutée, pas que
+            // restore() a trouvé un fichier valide : un échec est déjà journalisé
+            // par restore_apply (log_error), au même niveau que backup_interpreter.
+            restore_apply(file != NULL ? file : DEF_FILE,
+                           analyse_file != NULL ? analyse_file : DEF_ANALYSE_FILE);
             result = ADMIN_CMD_OK;
         }
     }

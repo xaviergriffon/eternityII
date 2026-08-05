@@ -34,6 +34,10 @@
 #define HTTP_METHOD_MAX 8
 /// Longueur maximale (avec terminateur) du chemin de la requête accepté.
 #define HTTP_PATH_MAX 128
+/// Longueur maximale (avec terminateur) de l'en-tête `Authorization` accepté
+/// (ex. "Bearer " + un jeton de `HTTP_ADMIN_TOKEN_MAX` octets, cf.
+/// static_variables.h — marge incluse pour ne jamais tronquer un jeton valide).
+#define HTTP_AUTHORIZATION_MAX 320
 
 /**
  * @brief Requête HTTP parsée : méthode, chemin, et vue sur le corps (pas de
@@ -50,6 +54,11 @@ typedef struct {
     const char *body;
     /// Nombre d'octets de corps effectivement disponibles (== content_length si complet).
     int32_t body_len;
+    /// Valeur brute de l'en-tête `Authorization` (ex. "Bearer abc123"), chaîne
+    /// vide si l'en-tête est absent OU trop long pour ce tampon (traité comme
+    /// absent plutôt que tronqué silencieusement — un jeton tronqué ne doit
+    /// jamais matcher par accident). Décodée par `http_extract_bearer_token`.
+    char authorization[HTTP_AUTHORIZATION_MAX];
 } http_request_t;
 
 /**
@@ -114,6 +123,86 @@ http_route_t http_route_resolve(const char *method, const char *path);
  * @return           Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
  */
 int http_response_format(char *buf, size_t size, int status, const char *json_body);
+
+/**
+ * @brief Formate une réponse HTTP/1.1 401 Unauthorized, avec l'en-tête
+ *        `WWW-Authenticate: Bearer` requis par la RFC 7235 — la seule route
+ *        de ce codec qui a besoin d'un en-tête supplémentaire au-delà de
+ *        `http_response_format`, d'où une fonction dédiée plutôt qu'un
+ *        paramètre optionnel sur cette dernière.
+ *
+ * @param buf       Tampon destination.
+ * @param size      Taille de `buf`.
+ * @param json_body Corps JSON (chaîne terminée par NUL), ou NULL/"" pour un corps vide.
+ * @return          Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
+ */
+int http_response_format_unauthorized(char *buf, size_t size, const char *json_body);
+
+/**
+ * @brief Extrait le jeton d'un en-tête `Authorization: Bearer <jeton>`.
+ *
+ * Comparaison du schéma ("Bearer") insensible à la casse (RFC 7235 : les noms
+ * de schéma d'authentification sont insensibles à la casse), séparateur
+ * espace/tabulation(s) tolérant. Rejette (retourne -1, `out` vidé) l'absence
+ * d'en-tête, un schéma différent, un jeton vide, ou un jeton qui ne tiendrait
+ * pas dans `out` — jamais de troncature silencieuse d'un jeton.
+ *
+ * @param authorization_header Valeur brute de l'en-tête (`http_request_t.authorization`).
+ * @param out                  Tampon destination, rempli et terminé par NUL en cas de succès.
+ * @param out_size             Taille de `out`.
+ * @return                     Longueur du jeton extrait (>= 0), ou -1.
+ */
+int http_extract_bearer_token(const char *authorization_header, char *out, size_t out_size);
+
+/**
+ * @brief Compare deux chaînes en temps constant (relatif à `max_len`, pas à
+ *        leur longueur réelle) : XOR cumulé sur tout `max_len` sans early-exit,
+ *        pour ne pas laisser le temps de réponse de `POST /api/v1/command`
+ *        fuiter combien de caractères initiaux d'un jeton deviné sont corrects.
+ *
+ * Les longueurs (`strnlen` bornée à `max_len`) sont comparées via un OR
+ * accumulé dans le même drapeau que les octets, jamais par un `return`
+ * anticipé sur mismatch de longueur.
+ *
+ * @param a       Première chaîne (NUL-terminée), ou NULL (retourne 0).
+ * @param b       Seconde chaîne (NUL-terminée), ou NULL (retourne 0).
+ * @param max_len Nombre d'octets comparés (borne supérieure des deux longueurs).
+ * @return        1 si `a` et `b` sont égales, 0 sinon (y compris arguments NULL).
+ */
+int http_token_equals_constant_time(const char *a, const char *b, size_t max_len);
+
+/**
+ * @brief Décision d'autorisation pure pour `POST /api/v1/command` : combine
+ *        liste blanche standard, liste blanche privilégiée et résultat de la
+ *        vérification du jeton — sans connaître ni `control_protocol.h` ni le
+ *        jeton lui-même (calculés par l'appelant, `src/net/http_server.c`).
+ *
+ * Règles :
+ * - `is_allowed` (control_command_allowed) : toujours OK, comme avant cette
+ *   fonctionnalité — aucune régression sur les commandes déjà admises.
+ * - `is_privileged` (control_command_privileged, restore/backup) : OK
+ *   seulement si un jeton est configuré ET que `token_valid` l'atteste ;
+ *   sinon UNAUTHORIZED (401), qu'un jeton soit configuré ou non — un serveur
+ *   sans jeton configuré refuse aussi les commandes privilégiées plutôt que
+ *   de les exécuter sans aucune preuve d'identité.
+ * - Ni l'un ni l'autre : FORBIDDEN (403), comme aujourd'hui pour `exit`,
+ *   `import`, etc.
+ *
+ * @param is_allowed           Résultat de `control_command_allowed(command)`.
+ * @param is_privileged        Résultat de `control_command_privileged(command)`.
+ * @param has_configured_token 1 si le serveur a chargé un jeton au démarrage
+ *                             (`--http-token-file`), 0 sinon.
+ * @param token_valid          1 si un jeton Bearer a été fourni ET correspond
+ *                             au jeton configuré (comparaison temps constant), 0 sinon.
+ * @return                     La décision (cf. `http_cmd_auth_result_t`).
+ */
+typedef enum {
+    HTTP_CMD_AUTH_OK = 0,          ///< Commande autorisée, à exécuter.
+    HTTP_CMD_AUTH_FORBIDDEN,       ///< Hors des deux listes blanches -> 403.
+    HTTP_CMD_AUTH_UNAUTHORIZED     ///< Privilégiée, jeton absent/invalide/non configuré -> 401.
+} http_cmd_auth_result_t;
+
+http_cmd_auth_result_t http_command_authorize(int is_allowed, int is_privileged, int has_configured_token, int token_valid);
 
 /**
  * @brief Extrait la valeur d'une clé JSON de type chaîne dans un objet JSON plat.

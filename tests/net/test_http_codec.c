@@ -482,6 +482,199 @@ TEST http_json_format_best_board_null_args_fail(void)
     PASS();
 }
 
+/* ---------- Authorization header (http_request_parse) ---------------------- */
+
+TEST http_request_parse_captures_authorization_header(void)
+{
+    char req[] = "POST /api/v1/command HTTP/1.1\r\nAuthorization: Bearer abc123\r\nContent-Length: 2\r\n\r\n{}";
+    http_request_t out;
+    http_parse_result_t r = http_request_parse(req, (int32_t)strlen(req), &out);
+
+    ASSERT_EQ_FMT(HTTP_PARSE_OK, r, "%d");
+    ASSERT_STR_EQ("Bearer abc123", out.authorization);
+    PASS();
+}
+
+/* En-tête insensible à la casse ("authorization" en minuscules), comme content-length. */
+TEST http_request_parse_authorization_header_case_insensitive(void)
+{
+    char req[] = "GET /api/v1/stats HTTP/1.1\r\nauthorization: Bearer xyz\r\n\r\n";
+    http_request_t out;
+    http_parse_result_t r = http_request_parse(req, (int32_t)strlen(req), &out);
+
+    ASSERT_EQ_FMT(HTTP_PARSE_OK, r, "%d");
+    ASSERT_STR_EQ("Bearer xyz", out.authorization);
+    PASS();
+}
+
+TEST http_request_parse_missing_authorization_is_empty_string(void)
+{
+    char req[] = "GET /api/v1/stats HTTP/1.1\r\nHost: x\r\n\r\n";
+    http_request_t out;
+    http_parse_result_t r = http_request_parse(req, (int32_t)strlen(req), &out);
+
+    ASSERT_EQ_FMT(HTTP_PARSE_OK, r, "%d");
+    ASSERT_STR_EQ("", out.authorization);
+    PASS();
+}
+
+/* ---------- http_extract_bearer_token --------------------------------------- */
+
+TEST http_extract_bearer_token_nominal(void)
+{
+    char out[64];
+    int n = http_extract_bearer_token("Bearer abc123", out, sizeof(out));
+    ASSERT_EQ_FMT((int)strlen("abc123"), n, "%d");
+    ASSERT_STR_EQ("abc123", out);
+    PASS();
+}
+
+/* Schéma insensible à la casse (RFC 7235), séparateur multi-espaces toléré. */
+TEST http_extract_bearer_token_case_insensitive_scheme_and_extra_spaces(void)
+{
+    char out[64];
+    int n = http_extract_bearer_token("bearer   abc123", out, sizeof(out));
+    ASSERT_EQ_FMT((int)strlen("abc123"), n, "%d");
+    ASSERT_STR_EQ("abc123", out);
+    PASS();
+}
+
+TEST http_extract_bearer_token_missing_header_fails(void)
+{
+    char out[64];
+    int n = http_extract_bearer_token(NULL, out, sizeof(out));
+    ASSERT_EQ_FMT(-1, n, "%d");
+    ASSERT_STR_EQ("", out);
+    PASS();
+}
+
+TEST http_extract_bearer_token_empty_header_fails(void)
+{
+    char out[64];
+    int n = http_extract_bearer_token("", out, sizeof(out));
+    ASSERT_EQ_FMT(-1, n, "%d");
+    PASS();
+}
+
+TEST http_extract_bearer_token_wrong_scheme_fails(void)
+{
+    char out[64];
+    int n = http_extract_bearer_token("Basic abc123", out, sizeof(out));
+    ASSERT_EQ_FMT(-1, n, "%d");
+    PASS();
+}
+
+/* "Bearerabc" : pas de séparateur après le schéma -> rejeté. */
+TEST http_extract_bearer_token_no_separator_fails(void)
+{
+    char out[64];
+    int n = http_extract_bearer_token("Bearerabc123", out, sizeof(out));
+    ASSERT_EQ_FMT(-1, n, "%d");
+    PASS();
+}
+
+TEST http_extract_bearer_token_empty_token_fails(void)
+{
+    char out[64];
+    int n = http_extract_bearer_token("Bearer ", out, sizeof(out));
+    ASSERT_EQ_FMT(-1, n, "%d");
+    PASS();
+}
+
+/* Jeton trop long pour out : rejeté plutôt que tronqué silencieusement. */
+TEST http_extract_bearer_token_output_too_small_fails(void)
+{
+    char out[4];
+    int n = http_extract_bearer_token("Bearer abcdef", out, sizeof(out));
+    ASSERT_EQ_FMT(-1, n, "%d");
+    PASS();
+}
+
+/* ---------- http_token_equals_constant_time --------------------------------- */
+
+TEST http_token_equals_constant_time_equal_strings(void)
+{
+    ASSERT_EQ_FMT(1, http_token_equals_constant_time("secret123", "secret123", 64), "%d");
+    PASS();
+}
+
+TEST http_token_equals_constant_time_different_length(void)
+{
+    ASSERT_EQ_FMT(0, http_token_equals_constant_time("short", "muchlonger", 64), "%d");
+    PASS();
+}
+
+TEST http_token_equals_constant_time_same_length_different_content(void)
+{
+    ASSERT_EQ_FMT(0, http_token_equals_constant_time("aaaaaa", "aaaaab", 64), "%d");
+    PASS();
+}
+
+TEST http_token_equals_constant_time_null_args_are_not_equal(void)
+{
+    ASSERT_EQ_FMT(0, http_token_equals_constant_time(NULL, "x", 64), "%d");
+    ASSERT_EQ_FMT(0, http_token_equals_constant_time("x", NULL, 64), "%d");
+    ASSERT_EQ_FMT(0, http_token_equals_constant_time("x", "x", 0), "%d");
+    PASS();
+}
+
+/* ---------- http_command_authorize ------------------------------------------ */
+
+TEST http_command_authorize_allowed_is_always_ok(void)
+{
+    /* is_allowed l'emporte, quel que soit l'état du jeton. */
+    ASSERT_EQ_FMT(HTTP_CMD_AUTH_OK, http_command_authorize(1, 0, 0, 0), "%d");
+    ASSERT_EQ_FMT(HTTP_CMD_AUTH_OK, http_command_authorize(1, 0, 1, 0), "%d");
+    PASS();
+}
+
+TEST http_command_authorize_privileged_with_valid_token_is_ok(void)
+{
+    ASSERT_EQ_FMT(HTTP_CMD_AUTH_OK, http_command_authorize(0, 1, 1, 1), "%d");
+    PASS();
+}
+
+TEST http_command_authorize_privileged_without_configured_token_is_unauthorized(void)
+{
+    ASSERT_EQ_FMT(HTTP_CMD_AUTH_UNAUTHORIZED, http_command_authorize(0, 1, 0, 0), "%d");
+    PASS();
+}
+
+TEST http_command_authorize_privileged_with_invalid_token_is_unauthorized(void)
+{
+    ASSERT_EQ_FMT(HTTP_CMD_AUTH_UNAUTHORIZED, http_command_authorize(0, 1, 1, 0), "%d");
+    PASS();
+}
+
+TEST http_command_authorize_neither_is_forbidden(void)
+{
+    ASSERT_EQ_FMT(HTTP_CMD_AUTH_FORBIDDEN, http_command_authorize(0, 0, 0, 0), "%d");
+    ASSERT_EQ_FMT(HTTP_CMD_AUTH_FORBIDDEN, http_command_authorize(0, 0, 1, 1), "%d");
+    PASS();
+}
+
+/* ---------- http_response_format_unauthorized -------------------------------- */
+
+TEST http_response_format_unauthorized_includes_www_authenticate(void)
+{
+    char buf[256];
+    int written = http_response_format_unauthorized(buf, sizeof(buf), "{\"error\":\"unauthorized\"}");
+
+    ASSERT(written > 0);
+    ASSERT(strstr(buf, "HTTP/1.1 401 Unauthorized\r\n") == buf);
+    ASSERT(strstr(buf, "WWW-Authenticate: Bearer\r\n") != NULL);
+    ASSERT(strstr(buf, "\r\n\r\n{\"error\":\"unauthorized\"}") != NULL);
+    PASS();
+}
+
+TEST http_response_format_unauthorized_buffer_too_small_fails(void)
+{
+    char buf[8];
+    int written = http_response_format_unauthorized(buf, sizeof(buf), "{}");
+    ASSERT_EQ_FMT(-1, written, "%d");
+    PASS();
+}
+
 TEST http_json_format_status_null_state_fails(void)
 {
     http_status_view_t view;
@@ -539,4 +732,31 @@ SUITE(http_codec_suite)
     RUN_TEST(http_json_format_clients_empty_is_empty_array);
     RUN_TEST(http_json_format_clients_unknown_mode_label);
     RUN_TEST(http_json_format_clients_buffer_too_small_fails);
+
+    RUN_TEST(http_request_parse_captures_authorization_header);
+    RUN_TEST(http_request_parse_authorization_header_case_insensitive);
+    RUN_TEST(http_request_parse_missing_authorization_is_empty_string);
+
+    RUN_TEST(http_extract_bearer_token_nominal);
+    RUN_TEST(http_extract_bearer_token_case_insensitive_scheme_and_extra_spaces);
+    RUN_TEST(http_extract_bearer_token_missing_header_fails);
+    RUN_TEST(http_extract_bearer_token_empty_header_fails);
+    RUN_TEST(http_extract_bearer_token_wrong_scheme_fails);
+    RUN_TEST(http_extract_bearer_token_no_separator_fails);
+    RUN_TEST(http_extract_bearer_token_empty_token_fails);
+    RUN_TEST(http_extract_bearer_token_output_too_small_fails);
+
+    RUN_TEST(http_token_equals_constant_time_equal_strings);
+    RUN_TEST(http_token_equals_constant_time_different_length);
+    RUN_TEST(http_token_equals_constant_time_same_length_different_content);
+    RUN_TEST(http_token_equals_constant_time_null_args_are_not_equal);
+
+    RUN_TEST(http_command_authorize_allowed_is_always_ok);
+    RUN_TEST(http_command_authorize_privileged_with_valid_token_is_ok);
+    RUN_TEST(http_command_authorize_privileged_without_configured_token_is_unauthorized);
+    RUN_TEST(http_command_authorize_privileged_with_invalid_token_is_unauthorized);
+    RUN_TEST(http_command_authorize_neither_is_forbidden);
+
+    RUN_TEST(http_response_format_unauthorized_includes_www_authenticate);
+    RUN_TEST(http_response_format_unauthorized_buffer_too_small_fails);
 }

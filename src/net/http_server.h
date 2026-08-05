@@ -9,6 +9,17 @@
  * occasionnelle, pas un serveur web de production. Démarré uniquement si
  * `HTTP_PORT > 0` (option CLI `--http-port <n>`, cf. static_variables.h),
  * depuis `runserver` (src/app/etii_server.c).
+ *
+ * Authentification (`--http-token-file <chemin>`, `HTTP_ADMIN_TOKEN`, cf.
+ * static_variables.h) : par défaut (aucun jeton configuré), l'API reste ce
+ * qu'elle a toujours été — de confiance, sans authentification, un accès
+ * distant passe par un tunnel/reverse-proxy explicite à la charge de
+ * l'opérateur. Configurer un jeton débloque UNIQUEMENT les deux commandes
+ * privilégiées de `POST /api/v1/command` (`restore`, `backup`,
+ * `control_command_privileged`) derrière un en-tête `Authorization: Bearer
+ * <jeton>` — les autres routes (stats/status/clients/best-board) et les
+ * commandes déjà whitelistées (`control_command_allowed`) restent, comme
+ * avant, sans authentification.
  */
 #ifndef eternityII_http_server_h
 #define eternityII_http_server_h
@@ -20,9 +31,8 @@
  *        `127.0.0.1:<port>` puis lance le thread accepteur en mode détaché.
  *
  * N'expose jamais le service hors de la machine (bind loopback strict, pas
- * `INADDR_ANY`) : documenté comme API de confiance, sans authentification —
- * un accès distant passe par un tunnel/reverse-proxy explicite, à la charge
- * de l'opérateur.
+ * `INADDR_ANY`) : un accès distant passe par un tunnel/reverse-proxy explicite,
+ * à la charge de l'opérateur. Cf. la note d'authentification en tête de fichier.
  *
  * @param port Port TCP d'écoute (appelant garanti > 0 : `HTTP_PORT == 0`
  *             signifie « API désactivée », vérifié avant l'appel).
@@ -31,6 +41,31 @@
  *             être déjà utilisé). L'appelant décide de la gravité.
  */
 int http_server_start(int port);
+
+/**
+ * @brief Charge et valide le jeton d'authentification Bearer de l'API HTTP
+ *        admin depuis un fichier (`--http-token-file <chemin>`).
+ *
+ * Appelée une seule fois au démarrage, avant tout fork (`main()`), quel que
+ * soit le mode (server/client/pruner/test) — même schéma que les autres
+ * options globales. Refuse explicitement (retourne -1, message journalisé
+ * via `log_error`, jamais le contenu du jeton) :
+ *  - un fichier inaccessible (`stat`/`fopen` échoue) ;
+ *  - un fichier aux permissions plus larges que propriétaire-seul (`mode &
+ *    0077 != 0`, même exigence qu'une clé privée SSH — un jeton lisible par
+ *    d'autres comptes de la machine n'apporte aucune garantie) ;
+ *  - un fichier vide ou dont la première ligne, une fois les espaces/retours
+ *    à la ligne de fin retirés, est vide ;
+ *  - un jeton trop long pour `out_size` (`HTTP_ADMIN_TOKEN_MAX`).
+ *
+ * @param path     Chemin du fichier jeton (`HTTP_TOKEN_FILE`, non NULL garanti
+ *                 par l'appelant).
+ * @param out      Tampon destination (`HTTP_ADMIN_TOKEN`), rempli et terminé
+ *                 par NUL en cas de succès.
+ * @param out_size Taille de `out`.
+ * @return         Longueur du jeton chargé (>= 1), ou -1 en cas d'échec.
+ */
+int http_token_load(const char *path, char *out, size_t out_size);
 
 /**
  * @brief Traite une connexion HTTP déjà acceptée : lit une requête complète,

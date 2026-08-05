@@ -18,6 +18,7 @@
 #include "app/etii_server.h"
 #include "app/etii_control.h"
 #include "app/app_runtime.h"
+#include "net/http_server.h"
 #include "net/local_socket.h"
 #include "ui/command_lines.h"
 #include "app/etii_statistic.h"
@@ -58,6 +59,24 @@ int main(int argc, const char *argv[]) {
     }
     if (headless_mode) {
         log_info("option : console interactive désactivée (--headless)\n");
+    }
+    if (HTTP_TOKEN_FILE != NULL) {
+        // Chargé ici (avant tout fork), quel que soit le mode : même
+        // emplacement que les autres options globales. --http-token-file sans
+        // --http-port est accepté (le jeton ne sert alors à rien, mais rien
+        // n'empêche l'opérateur de préparer sa configuration à l'avance) —
+        // un simple avertissement, pas un échec.
+        if (HTTP_PORT <= 0) {
+            log_info("option : --http-token-file fourni sans --http-port (jeton inutilisé, API HTTP désactivée)\n");
+        }
+        if (http_token_load(HTTP_TOKEN_FILE, HTTP_ADMIN_TOKEN, sizeof(HTTP_ADMIN_TOKEN)) < 0) {
+            // Message d'erreur déjà journalisé par http_token_load (jamais le
+            // contenu du jeton). Échec de démarrage explicite : une demande
+            // d'authentification mal configurée ne doit jamais dégénérer en
+            // silence vers "API sans jeton".
+            exit(EXIT_FAILURE);
+        }
+        log_info("option : jeton d'authentification de l'API HTTP admin chargé (--http-token-file)\n");
     }
 
     // ETII_BENCH_NODES : variable d'environnement (pas d'option CLI, hors du

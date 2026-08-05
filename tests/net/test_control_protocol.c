@@ -251,6 +251,51 @@ TEST control_command_allowed_handles_null(void)
     PASS();
 }
 
+/* control_command_privileged : liste blanche disjointe de control_command_allowed
+   (restore/backup uniquement, jamais via le canal de contrôle binaire). */
+TEST control_command_privileged_accepts_whitelist(void)
+{
+    ASSERT_EQ_FMT(1, control_command_privileged("restore"), "%d");
+    ASSERT_EQ_FMT(1, control_command_privileged("backup"), "%d");
+    /* Avec argument : seul le premier mot compte. */
+    ASSERT_EQ_FMT(1, control_command_privileged("restore fichier.back"), "%d");
+    PASS();
+}
+
+TEST control_command_privileged_rejects_others(void)
+{
+    ASSERT_EQ_FMT(0, control_command_privileged("exit"), "%d");
+    ASSERT_EQ_FMT(0, control_command_privileged("import"), "%d");
+    ASSERT_EQ_FMT(0, control_command_privileged("pause"), "%d");
+    ASSERT_EQ_FMT(0, control_command_privileged(""), "%d");
+    /* Préfixe partiel non whitelisté. */
+    ASSERT_EQ_FMT(0, control_command_privileged("restored"), "%d");
+    PASS();
+}
+
+TEST control_command_privileged_handles_null(void)
+{
+    ASSERT_EQ_FMT(0, control_command_privileged(NULL), "%d");
+    PASS();
+}
+
+/* Les deux listes blanches ne se recoupent jamais. */
+TEST control_command_allowed_and_privileged_are_disjoint(void)
+{
+    static const char *const allowed_names[] = {
+        "pause", "resume", "limit", "maxStockByThread", "prunerBatch"
+    };
+    static const char *const privileged_names[] = { "restore", "backup" };
+
+    for (size_t i = 0; i < sizeof(allowed_names) / sizeof(allowed_names[0]); i++) {
+        ASSERT_EQ_FMT(0, control_command_privileged(allowed_names[i]), "%d");
+    }
+    for (size_t i = 0; i < sizeof(privileged_names) / sizeof(privileged_names[0]); i++) {
+        ASSERT_EQ_FMT(0, control_command_allowed(privileged_names[i]), "%d");
+    }
+    PASS();
+}
+
 SUITE(control_protocol_suite)
 {
     signal(SIGPIPE, SIG_IGN);
@@ -268,4 +313,8 @@ SUITE(control_protocol_suite)
     RUN_TEST(control_command_allowed_accepts_whitelist);
     RUN_TEST(control_command_allowed_rejects_others);
     RUN_TEST(control_command_allowed_handles_null);
+    RUN_TEST(control_command_privileged_accepts_whitelist);
+    RUN_TEST(control_command_privileged_rejects_others);
+    RUN_TEST(control_command_privileged_handles_null);
+    RUN_TEST(control_command_allowed_and_privileged_are_disjoint);
 }
