@@ -135,6 +135,10 @@ int SERVER_PORT = 2020;
 
 int HTTP_PORT = 0;
 
+const char *HTTP_TOKEN_FILE = NULL;
+
+char HTTP_ADMIN_TOKEN[HTTP_ADMIN_TOKEN_MAX] = "";
+
 volatile unsigned long long server_shots_per_second = 0;
 
 unsigned long long max_search_by_sec = 0;
@@ -217,6 +221,18 @@ int parse_cli_options(int argc, const char *argv[])
                 if (port >= 1 && port <= 65535) {
                     HTTP_PORT = port;
                 }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--http-token-file") == 0) {
+            // Option valuée, même schéma que --http-port. Le chemin est stocké
+            // tel quel (pointeur dans argv, jamais copié — même convention que
+            // parts_files) ; le chargement effectif (lecture + vérification des
+            // permissions) se fait plus tard dans main(), via http_token_load
+            // (src/net/http_server.h), pour rester cohérent avec le style
+            // "parse_cli_options ne fait que retirer/mémoriser les options" de
+            // cette fonction (aucune I/O ici).
+            if (r + 1 < argc) {
+                HTTP_TOKEN_FILE = argv[r + 1];
                 r++; // consomme aussi la valeur
             }
         } else {

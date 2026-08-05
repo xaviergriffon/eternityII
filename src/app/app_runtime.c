@@ -47,7 +47,8 @@ static const cli_help_topic_t cli_topics[] = {
 	  "nb_threads (défaut 80) : connexions simultanées servies — dimensionner pour\n"
 	  "les connexions de travail PLUS une connexion de contrôle par machine cliente.\n"
 	  "Options utiles : --expand-level <n> (pré-expansion anti-famine du stock au\n"
-	  "démarrage), --http-port <n> (API REST d'administration sur 127.0.0.1)." },
+	  "démarrage), --http-port <n> (API REST d'administration sur 127.0.0.1),\n"
+	  "--http-token-file <chemin> (authentifie restore/backup sur cette API)." },
 	{ "client",
 	  "client [serveur] [nb_threads] [max_stock] [pieces.csv]",
 	  "Client de recherche : explore l'arbre et renvoie ses résultats au serveur.",
@@ -89,7 +90,18 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Serveur : API REST d'administration sur 127.0.0.1:<n> (désactivée par défaut).",
 	  "Boucle locale uniquement (jamais exposée sur le réseau). Endpoints sous\n"
 	  "/api/v1 : stats, status, clients, best-board, command (commandes de la\n"
-	  "liste blanche seulement : pause, resume, limit, ...)." },
+	  "liste blanche seulement : pause, resume, limit, ... ; restore/backup avec\n"
+	  "--http-token-file, cf. help --http-token-file)." },
+	{ "--http-token-file",
+	  "--http-token-file <chemin>",
+	  "Serveur : jeton Bearer débloquant restore/backup sur POST /api/v1/command.",
+	  "Fichier lisible du seul propriétaire (chmod 600, comme une clé SSH), une\n"
+	  "ligne = le jeton. Sans cette option (défaut) : restore/backup restent\n"
+	  "inaccessibles via l'API HTTP, quel que soit --http-port. Avec elle :\n"
+	  "Authorization: Bearer <jeton> requis pour ces deux commandes UNIQUEMENT —\n"
+	  "les autres (pause, limit, ...) et les autres routes restent sans\n"
+	  "authentification, comme avant. Sans --http-port : accepté, avertissement\n"
+	  "au démarrage (jeton inutilisé)." },
 	{ "--gpu",
 	  "--gpu",
 	  "Pruner : exécute le contrôle des lots sur le GPU (build CUDA=1 uniquement).",

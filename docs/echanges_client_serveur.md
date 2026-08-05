@@ -289,6 +289,16 @@ profondeur, côté client dans `control_channel_handle_frame` avant tout appel �
 `do_command_line` — le client ne fait jamais confiance à ce qui arrive sur ce socket
 au seul motif que ça y arrive.
 
+**`restore`/`backup` restent hors de portée de ce canal, quoi qu'il arrive.**
+`control_command_privileged` (`src/net/control_protocol.c`) liste ces deux commandes
+séparément de `control_command_allowed`, et **seule** l'[API HTTP admin](api_http_rest.md#authentification-restorebackup)
+(`POST /api/v1/command`, après authentification par jeton Bearer via
+`--http-token-file`) les consulte — jamais `control_channel_handle_frame` ni
+`clientsCmd`. Élargir l'accès de l'API HTTP à ces deux commandes ne les rend donc
+**pas** déclenchables à distance sur un client par ce canal : les deux vérifications
+ci-dessus restent strictement bornées à la même liste `control_command_allowed`
+qu'avant.
+
 ### Impact sur le dimensionnement du serveur
 
 Une session de contrôle **partage le même pool `client_t[NB_THREADS]`** qu'une

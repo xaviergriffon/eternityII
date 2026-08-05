@@ -100,6 +100,32 @@ int pruner_batch_clamp(int v);
 int admin_apply_remote_command(const char *line);
 
 /**
+ * @brief Variante de `admin_apply_remote_command` qui accepte EN PLUS les
+ *        commandes PRIVILÉGIÉES (`control_command_privileged` : `restore`,
+ *        `backup`), destinée exclusivement à `POST /api/v1/command`
+ *        (`src/net/http_server.c`) APRÈS que l'appelant a authentifié la
+ *        requête par jeton Bearer (`--http-token-file`) — cette fonction
+ *        n'authentifie rien elle-même, elle suppose la décision déjà prise.
+ *
+ * Les commandes de `control_command_allowed` (pause/resume/limit/...) restent
+ * déléguées à `admin_apply_remote_command`, sans duplication de logique ni
+ * changement de comportement pour elles. Le canal de contrôle binaire
+ * (`CTRL_COMMAND`, `src/app/etii_control.c`) n'appelle JAMAIS cette fonction :
+ * il reste strictement borné à `control_command_allowed`, des deux côtés —
+ * ajouter `restore`/`backup` à l'API HTTP admin ne les rend PAS déclenchables
+ * à distance sur un client via le canal de contrôle.
+ *
+ * Comme `admin_apply_remote_command`, tokenise via `strtok_r` (curseur local)
+ * : jamais `strtok`, dont le curseur global serait corrompu par un appel
+ * concurrent (thread HTTP, console, canal de contrôle).
+ *
+ * @param line Ligne de commande complète (ex. "restore", "backup"), non modifiée.
+ * @return     `ADMIN_CMD_OK`, `ADMIN_CMD_FORBIDDEN` (hors des deux listes
+ *             blanches) ou `ADMIN_CMD_BAD_ARGS`.
+ */
+int admin_apply_privileged_command(const char *line);
+
+/**
  * @brief Résout un nom de commande (alias inclus, casse ignorée) vers son nom canonique.
  *
  * Extrait pour être testable sans passer par `do_command_line` : la résolution

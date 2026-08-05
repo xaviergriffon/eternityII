@@ -102,7 +102,24 @@ http_parse_result_t http_request_parse(const char *buf, int32_t len, http_reques
             header_line_end = headers_end;
         }
         size_t header_line_len = (size_t)(header_line_end - header_cursor);
-        if (header_name_matches(header_cursor, header_line_len, "content-length")) {
+        if (header_name_matches(header_cursor, header_line_len, "authorization")) {
+            const char *colon = memchr(header_cursor, ':', header_line_len);
+            if (colon != NULL) {
+                const char *value = colon + 1;
+                const char *value_end = header_cursor + header_line_len;
+                while (value < value_end && (*value == ' ' || *value == '\t')) {
+                    value++;
+                }
+                size_t value_len = (value < value_end) ? (size_t)(value_end - value) : 0;
+                /* Trop long pour parsed.authorization : laissé vide (traité
+                   comme absent) plutôt que tronqué silencieusement — cf. doc
+                   du champ dans http_codec.h. */
+                if (value_len > 0 && value_len < sizeof(parsed.authorization)) {
+                    memcpy(parsed.authorization, value, value_len);
+                    parsed.authorization[value_len] = '\0';
+                }
+            }
+        } else if (header_name_matches(header_cursor, header_line_len, "content-length")) {
             const char *colon = memchr(header_cursor, ':', header_line_len);
             if (colon == NULL) {
                 return HTTP_PARSE_BAD;
@@ -186,6 +203,7 @@ static const char *reason_phrase(int status)
     switch (status) {
         case 200: return "OK";
         case 400: return "Bad Request";
+        case 401: return "Unauthorized";
         case 403: return "Forbidden";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
@@ -213,6 +231,99 @@ int http_response_format(char *buf, size_t size, int status, const char *json_bo
         return -1;
     }
     return written;
+}
+
+int http_response_format_unauthorized(char *buf, size_t size, const char *json_body)
+{
+    if (buf == NULL || size == 0) {
+        return -1;
+    }
+    const char *body = (json_body != NULL) ? json_body : "";
+    size_t body_len = strlen(body);
+    int written = snprintf(buf, size,
+        "HTTP/1.1 401 %s\r\n"
+        "WWW-Authenticate: Bearer\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s",
+        reason_phrase(401), body_len, body);
+    if (written < 0 || (size_t)written >= size) {
+        return -1;
+    }
+    return written;
+}
+
+static int ascii_lower_char(char c)
+{
+    return ascii_lower((unsigned char)c);
+}
+
+int http_extract_bearer_token(const char *authorization_header, char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    if (authorization_header == NULL) {
+        return -1;
+    }
+
+    static const char scheme[] = "Bearer";
+    size_t scheme_len = strlen(scheme);
+    size_t header_len = strlen(authorization_header);
+    if (header_len <= scheme_len) {
+        return -1;
+    }
+    for (size_t i = 0; i < scheme_len; i++) {
+        if (ascii_lower_char(authorization_header[i]) != ascii_lower_char(scheme[i])) {
+            return -1;
+        }
+    }
+
+    const char *cursor = authorization_header + scheme_len;
+    if (*cursor != ' ' && *cursor != '\t') {
+        return -1; /* pas de séparateur : "Bearerxyz" n'est pas un schéma Bearer */
+    }
+    while (*cursor == ' ' || *cursor == '\t') {
+        cursor++;
+    }
+
+    size_t token_len = strlen(cursor);
+    if (token_len == 0 || token_len >= out_size) {
+        return -1;
+    }
+    memcpy(out, cursor, token_len);
+    out[token_len] = '\0';
+    return (int)token_len;
+}
+
+int http_token_equals_constant_time(const char *a, const char *b, size_t max_len)
+{
+    if (a == NULL || b == NULL || max_len == 0) {
+        return 0;
+    }
+    size_t len_a = strnlen(a, max_len);
+    size_t len_b = strnlen(b, max_len);
+    unsigned char diff = (unsigned char)(len_a != len_b);
+    for (size_t i = 0; i < max_len; i++) {
+        unsigned char ca = (i < len_a) ? (unsigned char)a[i] : 0;
+        unsigned char cb = (i < len_b) ? (unsigned char)b[i] : 0;
+        diff = (unsigned char)(diff | (ca ^ cb));
+    }
+    return diff == 0;
+}
+
+http_cmd_auth_result_t http_command_authorize(int is_allowed, int is_privileged, int has_configured_token, int token_valid)
+{
+    if (is_allowed) {
+        return HTTP_CMD_AUTH_OK;
+    }
+    if (is_privileged) {
+        return (has_configured_token && token_valid) ? HTTP_CMD_AUTH_OK : HTTP_CMD_AUTH_UNAUTHORIZED;
+    }
+    return HTTP_CMD_AUTH_FORBIDDEN;
 }
 
 int http_json_extract_string(const char *body, int32_t len, const char *key, char *out, size_t out_size)

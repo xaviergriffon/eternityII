@@ -137,17 +137,18 @@ int control_stats_decode(const uint8_t *buf, int32_t len, control_stats_t *out)
 	return 0;
 }
 
-int control_command_allowed(const char *command_name)
+/**
+ * @brief Compare le premier mot de `command_name` (avant un espace éventuel)
+ *        à une liste de commandes candidates. Cœur partagé de
+ *        `control_command_allowed` et `control_command_privileged`.
+ *
+ * @param command_name Ligne (ou nom) de commande, `NULL` géré explicitement.
+ * @param candidates    Tableau de noms de commandes candidates.
+ * @param nb_candidates Nombre d'entrées dans `candidates`.
+ * @return              1 si le premier mot correspond à l'une des candidates, 0 sinon.
+ */
+static int command_first_word_matches(const char *command_name, const char *const candidates[], size_t nb_candidates)
 {
-	static const char *const allowed[] = {
-		"pause",
-		"resume",
-		"limit",
-		"maxStockByThread",
-		"prunerBatch",
-	};
-	static const size_t nb_allowed = sizeof(allowed) / sizeof(allowed[0]);
-
 	if (command_name == NULL) {
 		return 0;
 	}
@@ -161,11 +162,36 @@ int control_command_allowed(const char *command_name)
 		return 0;
 	}
 
-	for (size_t i = 0; i < nb_allowed; i++) {
-		if (strlen(allowed[i]) == word_len
-		    && strncmp(allowed[i], command_name, word_len) == 0) {
+	for (size_t i = 0; i < nb_candidates; i++) {
+		if (strlen(candidates[i]) == word_len
+		    && strncmp(candidates[i], command_name, word_len) == 0) {
 			return 1;
 		}
 	}
 	return 0;
+}
+
+int control_command_allowed(const char *command_name)
+{
+	static const char *const allowed[] = {
+		"pause",
+		"resume",
+		"limit",
+		"maxStockByThread",
+		"prunerBatch",
+	};
+	static const size_t nb_allowed = sizeof(allowed) / sizeof(allowed[0]);
+
+	return command_first_word_matches(command_name, allowed, nb_allowed);
+}
+
+int control_command_privileged(const char *command_name)
+{
+	static const char *const privileged[] = {
+		"restore",
+		"backup",
+	};
+	static const size_t nb_privileged = sizeof(privileged) / sizeof(privileged[0]);
+
+	return command_first_word_matches(command_name, privileged, nb_privileged);
 }

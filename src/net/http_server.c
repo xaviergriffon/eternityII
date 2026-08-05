@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -15,10 +16,20 @@
 #include "app/static_variables.h"
 #include "core/datamanager.h"
 #include "core/best_board.h"
+#include "net/control_protocol.h"
 #include "net/etii_protocol.h"
 #include "net/tcpserver.h"
 #include "ui/command_lines.h"
 #include "ui/logger.h"
+
+/// Délai (microsecondes) infligé sur un jeton PRÉSENT mais invalide, avant de
+/// répondre 401 — anti-bruteforce minimal. Le serveur HTTP admin sert une
+/// connexion à la fois (accept séquentiel, cf. doc du module) : ralentir
+/// cette unique voie suffit à rendre un essai exhaustif de jetons peu
+/// pratique, sans le moindre état à maintenir (pas de compteur, pas de
+/// fenêtre glissante). Jamais infligé sur un jeton ABSENT : un client qui
+/// n'essaie même pas de s'authentifier n'a rien à décourager.
+#define HTTP_AUTH_FAIL_DELAY_US 200000
 
 /// Longueur de la file d'attente de connexions du socket d'écoute admin
 /// (usage occasionnel, pas besoin d'un backlog comparable au port de travail).
@@ -190,6 +201,61 @@ void http_best_board_collect(http_best_board_view_t *out)
     }
 }
 
+int http_token_load(const char *path, char *out, size_t out_size)
+{
+    if (path == NULL || out == NULL || out_size == 0) {
+        return -1;
+    }
+
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        log_error("--http-token-file : impossible d'accéder à \"%s\"\n", path);
+        return -1;
+    }
+    // Permissions autres que propriétaire-seul refusées (mode & 0077 != 0) :
+    // même exigence qu'une clé privée SSH. Vérifié AVANT l'ouverture, pour ne
+    // jamais lire un jeton potentiellement exposé à d'autres comptes de la
+    // machine, même en cas d'échec plus loin.
+    if ((st.st_mode & 0077) != 0) {
+        log_error("--http-token-file : permissions trop ouvertes sur \"%s\" "
+                  "(attendu propriétaire seul, ex. chmod 600)\n", path);
+        return -1;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        log_error("--http-token-file : impossible d'ouvrir \"%s\" en lecture\n", path);
+        return -1;
+    }
+    char line[HTTP_ADMIN_TOKEN_MAX + 2];
+    char *got = fgets(line, sizeof(line), f);
+    fclose(f);
+    if (got == NULL) {
+        log_error("--http-token-file : \"%s\" est vide ou illisible\n", path);
+        return -1;
+    }
+
+    // Trailing whitespace/retour à la ligne retiré (fichier généralement créé
+    // par un éditeur ou `echo`, terminé par \n).
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'
+                        || line[len - 1] == ' ' || line[len - 1] == '\t')) {
+        line[--len] = '\0';
+    }
+    if (len == 0) {
+        log_error("--http-token-file : jeton vide dans \"%s\"\n", path);
+        return -1;
+    }
+    if (len >= out_size) {
+        log_error("--http-token-file : jeton trop long dans \"%s\" (max %zu octets)\n",
+                  path, out_size - 1);
+        return -1;
+    }
+
+    memcpy(out, line, len + 1);
+    return (int)len;
+}
+
 /** @brief Formate et envoie une réponse ; ignore un échec d'envoi (client déjà parti). */
 static void send_response(int socket_id, int status, const char *json_body)
 {
@@ -200,7 +266,26 @@ static void send_response(int socket_id, int status, const char *json_body)
     }
 }
 
-/** @brief Traite POST /api/v1/command : extrait "command", l'applique via admin_apply_remote_command. */
+/** @brief Formate et envoie une réponse 401 (en-tête WWW-Authenticate inclus). */
+static void send_response_unauthorized(int socket_id, const char *json_body)
+{
+    char response[HTTP_RESPONSE_MAX];
+    int written = http_response_format_unauthorized(response, sizeof(response), json_body);
+    if (written > 0) {
+        send_all(socket_id, response, (size_t)written);
+    }
+}
+
+/**
+ * @brief Traite POST /api/v1/command : extrait "command", décide de son
+ *        autorisation (liste blanche standard, ou liste blanche privilégiée
+ *        + jeton Bearer valide), puis l'applique via `admin_apply_privileged_command`.
+ *
+ * Le jeton n'est extrait/comparé QUE si la commande est privilégiée
+ * (`control_command_privileged`) : une commande de la liste standard
+ * (`pause`, `limit`, ...) n'a jamais eu besoin d'authentification et n'en a
+ * toujours pas besoin — comportement par défaut strictement inchangé.
+ */
 static void handle_command_route(int socket_id, const http_request_t *req)
 {
     char command[HTTP_COMMAND_MAX];
@@ -210,10 +295,50 @@ static void handle_command_route(int socket_id, const http_request_t *req)
         return;
     }
 
-    int result = admin_apply_remote_command(command);
+    int is_allowed = control_command_allowed(command);
+    int is_privileged = control_command_privileged(command);
+    int has_configured_token = HTTP_ADMIN_TOKEN[0] != '\0';
+    int token_present = 0;
+    int token_valid = 0;
+
+    if (is_privileged) {
+        char token[HTTP_ADMIN_TOKEN_MAX];
+        token_present = (http_extract_bearer_token(req->authorization, token, sizeof(token)) > 0);
+        if (token_present && has_configured_token) {
+            token_valid = http_token_equals_constant_time(token, HTTP_ADMIN_TOKEN, HTTP_ADMIN_TOKEN_MAX);
+        }
+    }
+
+    http_cmd_auth_result_t decision = http_command_authorize(is_allowed, is_privileged, has_configured_token, token_valid);
+
+    if (decision == HTTP_CMD_AUTH_FORBIDDEN) {
+        send_response(socket_id, 403, "{\"error\":\"command not allowed\"}");
+        return;
+    }
+    if (decision == HTTP_CMD_AUTH_UNAUTHORIZED) {
+        if (token_present) {
+            // Jeton PRÉSENT mais invalide (ou aucun jeton configuré côté
+            // serveur) : anti-bruteforce avant de répondre. Jamais le jeton
+            // lui-même dans les logs.
+            usleep(HTTP_AUTH_FAIL_DELAY_US);
+            log_error("commande privilégiée \"%s\" refusée via l'API HTTP admin : jeton invalide\n", command);
+        } else {
+            log_error("commande privilégiée \"%s\" refusée via l'API HTTP admin : jeton absent\n", command);
+        }
+        send_response_unauthorized(socket_id, "{\"error\":\"unauthorized\"}");
+        return;
+    }
+
+    if (is_privileged) {
+        log_info("commande privilégiée \"%s\" exécutée via l'API HTTP admin\n", command);
+    }
+
+    int result = admin_apply_privileged_command(command);
     if (result == ADMIN_CMD_OK) {
         send_response(socket_id, 200, "{\"result\":\"ok\"}");
     } else if (result == ADMIN_CMD_FORBIDDEN) {
+        // Ne devrait plus se produire ici (décision déjà tranchée ci-dessus),
+        // conservé par prudence défensive plutôt que par nécessité.
         send_response(socket_id, 403, "{\"error\":\"command not allowed\"}");
     } else {
         send_response(socket_id, 400, "{\"error\":\"missing or invalid argument\"}");

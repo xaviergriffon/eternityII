@@ -1523,6 +1523,82 @@ TEST admin_apply_remote_command_does_not_disturb_external_strtok(void)
     PASS();
 }
 
+/* ---------- admin_apply_privileged_command -------------------------------- */
+/*
+ * Variante de admin_apply_remote_command destinée exclusivement à l'appelant
+ * HTTP APRÈS authentification (src/net/http_server.c) : accepte EN PLUS
+ * restore/backup (control_command_privileged). Les commandes standard
+ * (pause/limit/...) restent déléguées à admin_apply_remote_command sans
+ * changement de comportement, testé séparément ci-dessus.
+ */
+
+/* Commandes standard : comportement strictement identique à admin_apply_remote_command. */
+TEST admin_apply_privileged_command_still_handles_standard_commands(void)
+{
+    unsigned long long saved = max_search_by_sec;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("limit 321"), "%d");
+    ASSERT_EQ_FMT(321ULL, max_search_by_sec, "%llu");
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_privileged_command("limit"), "%d");
+
+    max_search_by_sec = saved;
+    PASS();
+}
+
+/* Commandes hors des DEUX listes blanches : toujours refusées. */
+TEST admin_apply_privileged_command_rejects_others(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_privileged_command("exit"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_privileged_command("import"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_privileged_command(NULL), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_privileged_command(""), "%d");
+    PASS();
+}
+
+/* backup/restore round-trip via admin_apply_privileged_command, dans un
+   répertoire temporaire isolé (même technique que
+   do_command_line_backup_restore_import_round_trip) : la commande console
+   restore_interpreter tokenise via le strtok GLOBAL, mais admin_apply_privileged_command
+   passe par restore_apply (strtok_r) sans jamais toucher à ce curseur — ce
+   test vérifie le résultat fonctionnel, pas l'implémentation. */
+TEST admin_apply_privileged_command_backup_restore_round_trip(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_priv_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+    int saved_server = server;
+    server = 1;
+
+    dm_drain();
+    int allocs[] = { 1, 2, 3 };
+    dm_add(allocs, 3);
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("backup"), "%d");
+    int back_exists = access("./eternityII.back", F_OK) == 0;
+
+    dm_drain();
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("restore"), "%d");
+    unsigned long long after_restore = datas_size();
+
+    /* --- nettoyage avant toute assertion --- */
+    dm_drain();
+    unlink("./eternityII.back");
+    unlink("./eternityII-in_analyse.back");
+    unlink("./eternityII-best_board.back");
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+    server = saved_server;
+
+    ASSERT(back_exists);
+    ASSERT(after_restore > 0);
+    PASS();
+}
+
 SUITE(command_lines_suite)
 {
     RUN_TEST(do_command_line_handles_empty_input);
@@ -1597,4 +1673,8 @@ SUITE(command_lines_suite)
     RUN_TEST(admin_apply_remote_command_rejects_forbidden);
     RUN_TEST(admin_apply_remote_command_bad_args);
     RUN_TEST(admin_apply_remote_command_does_not_disturb_external_strtok);
+
+    RUN_TEST(admin_apply_privileged_command_still_handles_standard_commands);
+    RUN_TEST(admin_apply_privileged_command_rejects_others);
+    RUN_TEST(admin_apply_privileged_command_backup_restore_round_trip);
 }

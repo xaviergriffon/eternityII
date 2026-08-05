@@ -203,4 +203,26 @@ int control_stats_decode(const uint8_t *buf, int32_t len, control_stats_t *out);
  */
 int control_command_allowed(const char *command_name);
 
+/**
+ * @brief Liste blanche des commandes PRIVILÉGIÉES déclenchables uniquement
+ *        par `POST /api/v1/command` (API REST admin, `src/net/http_server.c`)
+ *        après authentification par jeton Bearer (`--http-token-file`) —
+ *        JAMAIS via le canal de contrôle binaire (`CTRL_COMMAND`), qui reste
+ *        strictement borné à `control_command_allowed`.
+ *
+ * Ne contient que "restore" et "backup" : les deux seules commandes de
+ * `command_lines.c` capables de remplacer/écraser l'état du serveur (fichiers
+ * `.back`), donc jamais accessibles sans preuve d'identité. Toujours disjointe
+ * de `control_command_allowed` — une commande n'est jamais dans les deux
+ * listes à la fois.
+ *
+ * Même style que `control_command_allowed` : compare uniquement le premier
+ * mot de `command_name`, gère `NULL` explicitement (retourne 0).
+ *
+ * @param command_name Nom (ou ligne complète) de la commande à vérifier.
+ * @return              1 si la commande est privilégiée, 0 sinon (y compris
+ *                      pour `command_name == NULL` ou vide).
+ */
+int control_command_privileged(const char *command_name);
+
 #endif

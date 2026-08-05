@@ -17,10 +17,12 @@
 #include "core/part.h"
 
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define MAKE_PAIR(sv)                                                          \
     do {                                                                       \
@@ -349,6 +351,272 @@ TEST http_server_command_missing_field_returns_400(void)
     PASS();
 }
 
+/* ---------- POST /api/v1/command : restore/backup (privilégiées) ----------- */
+
+/* Même garde que tests/ui/test_command_lines.c : root outrepasse les bits de
+   permission (CAP_DAC_OVERRIDE), donc un chmod 0644 n'a plus l'effet attendu
+   sous `make test-docker` (conteneur root) — sauté explicitement, exécuté
+   normalement en CI GitHub (utilisateur `runner`) et sur le poste local. */
+#define SKIP_IF_ROOT()                                                        \
+    do {                                                                      \
+        if (geteuid() == 0)                                                   \
+            SKIPm("root outrepasse les permissions : chmod 0644 sans effet"); \
+    } while (0)
+
+/* Écrit `content` dans un fichier temporaire avec le mode donné ; le chemin
+   est renvoyé dans `path_out` (au moins PATH_MAX octets). Retourne 0 si tout
+   s'est bien passé, -1 sinon (l'appelant, un TEST, décide alors du FAILm —
+   cette fonction n'est pas elle-même un TEST et ne peut pas retourner
+   l'enum attendue par les macros greatest). */
+static int write_temp_token_file(char *path_out, size_t path_out_size, const char *content, mode_t mode)
+{
+    char tmpl[] = "/tmp/etii_token_XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0) {
+        return -1;
+    }
+    ssize_t written = write(fd, content, strlen(content));
+    close(fd);
+    if (written < 0 || (size_t)written != strlen(content)) {
+        unlink(tmpl);
+        return -1;
+    }
+    if (chmod(tmpl, mode) != 0) {
+        unlink(tmpl);
+        return -1;
+    }
+    snprintf(path_out, path_out_size, "%s", tmpl);
+    return 0;
+}
+
+TEST http_token_load_reads_trimmed_token(void)
+{
+    char path[64];
+    if (write_temp_token_file(path, sizeof(path), "s3cr3t\n", 0600) != 0) {
+        FAILm("setup du fichier jeton temporaire impossible");
+    }
+
+    char out[HTTP_ADMIN_TOKEN_MAX];
+    int n = http_token_load(path, out, sizeof(out));
+
+    ASSERT_EQ_FMT((int)strlen("s3cr3t"), n, "%d");
+    ASSERT_STR_EQ("s3cr3t", out);
+
+    unlink(path);
+    PASS();
+}
+
+TEST http_token_load_rejects_missing_file(void)
+{
+    char out[HTTP_ADMIN_TOKEN_MAX];
+    int n = http_token_load("/nonexistent/etii-token-file", out, sizeof(out));
+    ASSERT_EQ_FMT(-1, n, "%d");
+    PASS();
+}
+
+TEST http_token_load_rejects_open_permissions(void)
+{
+    SKIP_IF_ROOT();
+
+    char path[64];
+    if (write_temp_token_file(path, sizeof(path), "s3cr3t\n", 0644) != 0) {
+        FAILm("setup du fichier jeton temporaire impossible");
+    }
+
+    char out[HTTP_ADMIN_TOKEN_MAX];
+    int n = http_token_load(path, out, sizeof(out));
+    ASSERT_EQ_FMT(-1, n, "%d");
+
+    unlink(path);
+    PASS();
+}
+
+TEST http_token_load_rejects_empty_token(void)
+{
+    char path[64];
+    if (write_temp_token_file(path, sizeof(path), "   \n", 0600) != 0) {
+        FAILm("setup du fichier jeton temporaire impossible");
+    }
+
+    char out[HTTP_ADMIN_TOKEN_MAX];
+    int n = http_token_load(path, out, sizeof(out));
+    ASSERT_EQ_FMT(-1, n, "%d");
+
+    unlink(path);
+    PASS();
+}
+
+TEST http_token_load_rejects_token_too_long_for_output(void)
+{
+    char path[64];
+    if (write_temp_token_file(path, sizeof(path), "abcdef\n", 0600) != 0) {
+        FAILm("setup du fichier jeton temporaire impossible");
+    }
+
+    char out[4];
+    int n = http_token_load(path, out, sizeof(out));
+    ASSERT_EQ_FMT(-1, n, "%d");
+
+    unlink(path);
+    PASS();
+}
+
+TEST http_token_load_rejects_invalid_arguments(void)
+{
+    char out[HTTP_ADMIN_TOKEN_MAX];
+    ASSERT_EQ_FMT(-1, http_token_load(NULL, out, sizeof(out)), "%d");
+    ASSERT_EQ_FMT(-1, http_token_load("/tmp/x", NULL, sizeof(out)), "%d");
+    ASSERT_EQ_FMT(-1, http_token_load("/tmp/x", out, 0), "%d");
+    PASS();
+}
+
+/* Sans jeton configuré (HTTP_ADMIN_TOKEN vide, état par défaut) : restore
+   reste refusé même sans en-tête Authorization, avec 401 (pas 403 : la
+   commande EST dans la liste privilégiée, elle manque seulement de preuve
+   d'identité — cf. http_command_authorize). */
+TEST http_server_privileged_command_without_configured_token_returns_401(void)
+{
+    HTTP_ADMIN_TOKEN[0] = '\0';
+
+    int sv[2];
+    MAKE_PAIR(sv);
+    const char body[] = "{\"command\":\"restore\"}";
+    char req[256];
+    snprintf(req, sizeof(req), "POST /api/v1/command HTTP/1.1\r\nContent-Length: %d\r\n\r\n%s",
+             (int)strlen(body), body);
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 401") == resp);
+    ASSERT(strstr(resp, "WWW-Authenticate: Bearer") != NULL);
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Jeton configuré, en-tête absent -> 401. */
+TEST http_server_privileged_command_missing_bearer_header_returns_401(void)
+{
+    snprintf(HTTP_ADMIN_TOKEN, sizeof(HTTP_ADMIN_TOKEN), "%s", "correct-token");
+
+    int sv[2];
+    MAKE_PAIR(sv);
+    const char body[] = "{\"command\":\"backup\"}";
+    char req[256];
+    snprintf(req, sizeof(req), "POST /api/v1/command HTTP/1.1\r\nContent-Length: %d\r\n\r\n%s",
+             (int)strlen(body), body);
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 401") == resp);
+
+    HTTP_ADMIN_TOKEN[0] = '\0';
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Jeton configuré, en-tête présent mais invalide -> 401 (le délai anti-bruteforce
+   de 200ms ralentit ce test, ce qui reste acceptable pour une seule assertion). */
+TEST http_server_privileged_command_wrong_bearer_token_returns_401(void)
+{
+    snprintf(HTTP_ADMIN_TOKEN, sizeof(HTTP_ADMIN_TOKEN), "%s", "correct-token");
+
+    int sv[2];
+    MAKE_PAIR(sv);
+    const char body[] = "{\"command\":\"restore\"}";
+    char req[256];
+    snprintf(req, sizeof(req),
+             "POST /api/v1/command HTTP/1.1\r\nAuthorization: Bearer wrong-token\r\nContent-Length: %d\r\n\r\n%s",
+             (int)strlen(body), body);
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 401") == resp);
+
+    HTTP_ADMIN_TOKEN[0] = '\0';
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Jeton configuré, en-tête correct -> 200, backup effectivement exécuté (pas
+   seulement "accepté" : mode client — server=0 — pour que backup_interpreter
+   écrive dans un fichier suffixé par le pid, jamais ./eternityII.back, afin de
+   ne rien laisser traîner dans le répertoire du test). */
+TEST http_server_privileged_command_valid_bearer_token_returns_200(void)
+{
+    snprintf(HTTP_ADMIN_TOKEN, sizeof(HTTP_ADMIN_TOKEN), "%s", "correct-token");
+    int saved_server = server;
+    server = 0;
+
+    int sv[2];
+    MAKE_PAIR(sv);
+    const char body[] = "{\"command\":\"backup\"}";
+    char req[256];
+    snprintf(req, sizeof(req),
+             "POST /api/v1/command HTTP/1.1\r\nAuthorization: Bearer correct-token\r\nContent-Length: %d\r\n\r\n%s",
+             (int)strlen(body), body);
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
+    ASSERT(strstr(resp, "\"result\":\"ok\"") != NULL);
+
+    /* Nettoyage des fichiers .back_<pid> laissés par backup_interpreter en mode client. */
+    char suffixed[256];
+    snprintf(suffixed, sizeof(suffixed), "./eternityII.back_%i", getpid());
+    unlink(suffixed);
+    snprintf(suffixed, sizeof(suffixed), "./eternityII-in_analyse.back_%i", getpid());
+    unlink(suffixed);
+    snprintf(suffixed, sizeof(suffixed), "./eternityII-best_board.back_%i", getpid());
+    unlink(suffixed);
+
+    HTTP_ADMIN_TOKEN[0] = '\0';
+    server = saved_server;
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Une commande de la liste standard (pause) reste, elle, sans authentification
+   même lorsqu'un jeton est configuré — comportement inchangé. */
+TEST http_server_allowed_command_ignores_configured_token(void)
+{
+    snprintf(HTTP_ADMIN_TOKEN, sizeof(HTTP_ADMIN_TOKEN), "%s", "correct-token");
+    int saved_req = request;
+    request = REQUEST_CONTINUE;
+
+    int sv[2];
+    MAKE_PAIR(sv);
+    const char body[] = "{\"command\":\"pause\"}";
+    char req[256];
+    snprintf(req, sizeof(req), "POST /api/v1/command HTTP/1.1\r\nContent-Length: %d\r\n\r\n%s",
+             (int)strlen(body), body);
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
+    ASSERT_EQ_FMT(REQUEST_ADMIN_PAUSE, request, "%d");
+
+    HTTP_ADMIN_TOKEN[0] = '\0';
+    request = saved_req;
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
 /* Connexion fermée avant qu'une requête complète soit reçue -> -1, aucune réponse. */
 TEST http_server_connection_closed_before_complete_request(void)
 {
@@ -517,6 +785,17 @@ SUITE(http_server_suite)
     RUN_TEST(http_server_command_forbidden_returns_403);
     RUN_TEST(http_server_command_pause_returns_200_and_pauses);
     RUN_TEST(http_server_command_missing_field_returns_400);
+    RUN_TEST(http_token_load_reads_trimmed_token);
+    RUN_TEST(http_token_load_rejects_missing_file);
+    RUN_TEST(http_token_load_rejects_open_permissions);
+    RUN_TEST(http_token_load_rejects_empty_token);
+    RUN_TEST(http_token_load_rejects_token_too_long_for_output);
+    RUN_TEST(http_token_load_rejects_invalid_arguments);
+    RUN_TEST(http_server_privileged_command_without_configured_token_returns_401);
+    RUN_TEST(http_server_privileged_command_missing_bearer_header_returns_401);
+    RUN_TEST(http_server_privileged_command_wrong_bearer_token_returns_401);
+    RUN_TEST(http_server_privileged_command_valid_bearer_token_returns_200);
+    RUN_TEST(http_server_allowed_command_ignores_configured_token);
     RUN_TEST(http_server_connection_closed_before_complete_request);
     RUN_TEST(http_stats_and_status_collect_do_not_crash);
     RUN_TEST(http_server_get_best_board_returns_200_no_record);

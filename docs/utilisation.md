@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--http-port N] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -35,6 +35,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `nb_threads` | 80 | Nombre de connexions clients simultanées |
 | `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'au niveau de curseur `N` (anti-famine, voir ci-dessous) |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
+| `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour les commandes admin privilégiées `restore`/`backup` de l'[API HTTP](api_http_rest.md#authentification-restorebackup) — sans cette option, ces deux commandes restent inaccessibles via l'API |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
 
 Exemples :
@@ -43,6 +44,7 @@ Exemples :
 ./eternityII server 80 data/pieces.csv
 ./eternityII server 80 --expand-level 4 data/pieces.csv
 ./eternityII server 80 --http-port 8080 data/pieces.csv
+./eternityII server 80 --http-port 8080 --http-token-file /etc/eternityii/http-token data/pieces.csv
 ```
 
 > ⚠️ **Dimensionnement de `nb_threads`** : chaque processus client connecté ouvre,
