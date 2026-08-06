@@ -101,6 +101,7 @@ Le répertoire [`docs/`](docs/) rassemble la documentation détaillée :
 | [docs/console.md](docs/console.md) | Commandes interactives, zone Events, historique, interface ncurses. |
 | [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences, pannes, et le [canal de contrôle](docs/echanges_client_serveur.md#canal-de-contrôle-v9) (v9). |
 | [docs/api_http_rest.md](docs/api_http_rest.md) | API HTTP REST admin (`--http-port`) : schémas JSON complets, codes d'erreur, authentification par jeton Bearer des commandes privilégiées (`--http-token-file`), exemples client (curl, Python). |
+| [docs/identification_clients.md](docs/identification_clients.md) | **Proposition** (non implémentée) : identification unique des clients au-delà du PID — modèle d'identité, statistiques cumulées persistantes, bail à expiration sur les analyses en cours, découpage en PR. |
 | [docs/autosearch_step.md](docs/autosearch_step.md) | Flux de recherche (`autosearch_step`) et gestion mémoire d'un thread de recherche. |
 | [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (`pruner --gpu`) : prérequis de compilation et d'exécution, flux CUDA, avantages. |
 | [docs/tests_et_ci.md](docs/tests_et_ci.md) | Cibles de test, intégration bout-en-bout, Docker, couverture, CI, banc de mesure du débit de recherche. |
