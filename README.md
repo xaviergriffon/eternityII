@@ -93,6 +93,10 @@ La CI GitHub Actions compile **toutes les combinaisons du code** avec `WERROR=1`
 
 Le répertoire [`docs/`](docs/) rassemble la documentation détaillée :
 
+### État du code
+
+Ces documents décrivent le comportement **implémenté** :
+
 | Document | Contenu |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Architecture d'ensemble : processus/threads, IPC parent↔enfants, structure des sources. |
@@ -105,3 +109,14 @@ Le répertoire [`docs/`](docs/) rassemble la documentation détaillée :
 | [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (`pruner --gpu`) : prérequis de compilation et d'exécution, flux CUDA, avantages. |
 | [docs/tests_et_ci.md](docs/tests_et_ci.md) | Cibles de test, intégration bout-en-bout, Docker, couverture, CI, banc de mesure du débit de recherche. |
 | [tests/README.md](tests/README.md) | Organisation des suites unitaires, conventions, ajout d'un test. |
+
+### Conception et réflexions en cours
+
+[`docs/conception/`](docs/conception/) rassemble les documents de conception : propositions,
+arbitrages et découpages en PR **non encore implémentés**. Ils décrivent une cible, pas le
+comportement du code — voir [docs/conception/README.md](docs/conception/README.md) pour la
+convention (statut, cycle de vie).
+
+| Document | Contenu |
+|---|---|
+| [docs/conception/identification_clients.md](docs/conception/identification_clients.md) | Identification unique des clients au-delà du PID : modèle d'identité, statistiques cumulées persistantes, bail à expiration sur les analyses en cours, découpage en 7 PR. |
