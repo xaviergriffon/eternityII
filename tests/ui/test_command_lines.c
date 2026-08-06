@@ -1364,6 +1364,95 @@ TEST do_command_line_pause_broadcasts_to_control_sessions(void)
     PASS();
 }
 
+/* ---------- clientsCommand --to (adressage, PR3) --------------------------
+ *
+ * `clientsCommand [--to <cible>] <ligne...>` : sans --to, diffusion à toutes
+ * les sessions (comportement historique, déjà couvert plus haut) ; avec
+ * --to <session_no|client_uid|label>, n'atteint QUE la session désignée, en
+ * repassant par la MÊME liste blanche (`control_command_allowed`) — cf.
+ * docs/conception/identification_clients.md, section 4.4.
+ */
+
+TEST do_command_line_clientscommand_to_reaches_only_targeted_session_by_label(void)
+{
+    control_hello_t alpha = { .pid = 1, .nb_forks = 1, .identity = { .mode = 0, .label = "alpha" } };
+    control_hello_t beta = { .pid = 2, .nb_forks = 1, .identity = { .mode = 0, .label = "beta" } };
+    int idx_alpha = control_registry_register(1, "203.0.113.1", &alpha);
+    int idx_beta = control_registry_register(2, "203.0.113.2", &beta);
+    ASSERT(idx_alpha >= 0);
+    ASSERT(idx_beta >= 0);
+
+    char cmd[] = "clientsCommand --to beta limit 500";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+
+    uint8_t out_cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx_beta, &out_cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)out_cmd);
+    ASSERT_STR_EQ("limit 500", line);
+    /* "alpha" n'a rien reçu : le timeout doit expirer. */
+    ASSERT_EQ(1, control_registry_wait_command(idx_alpha, &out_cmd, NULL, 0, 100));
+
+    control_registry_unregister(idx_alpha);
+    control_registry_unregister(idx_beta);
+    PASS();
+}
+
+TEST do_command_line_clientscommand_to_reaches_only_targeted_session_by_session_no(void)
+{
+    control_hello_t h = { .pid = 3, .nb_forks = 1, .identity = { .mode = 0 } };
+    int idx = control_registry_register(1, "203.0.113.10", &h);
+    ASSERT(idx >= 0);
+
+    control_session_info_t infos[1];
+    ASSERT_EQ(1, control_registry_snapshot(infos, 1));
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "clientsCommand --to %llu pause",
+             (unsigned long long)infos[0].session_no);
+
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+
+    uint8_t out_cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx, &out_cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("pause", line);
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST do_command_line_clientscommand_to_still_enforces_whitelist(void)
+{
+    control_hello_t h = { .pid = 4, .nb_forks = 1, .identity = { .mode = 0, .label = "gamma" } };
+    int idx = control_registry_register(1, "203.0.113.10", &h);
+    ASSERT(idx >= 0);
+
+    /* "exit" reste hors liste blanche même avec une cible valide : le
+       ciblage n'élargit jamais le jeu de commandes autorisées. */
+    char cmd[] = "clientsCommand --to gamma exit";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+
+    uint8_t out_cmd = 0;
+    ASSERT_EQ(1, control_registry_wait_command(idx, &out_cmd, NULL, 0, 100)); /* rien reçu */
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST do_command_line_clientscommand_to_unknown_target_rejected(void)
+{
+    char cmd[] = "clientsCommand --to no-such-client pause";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+    PASS();
+}
+
+TEST do_command_line_clientscommand_to_missing_command_is_usage_error(void)
+{
+    char cmd[] = "clientsCommand --to alpha";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+    PASS();
+}
+
 /* ---------- pruner_batch_clamp (pure) ------------------------------------ */
 /*
  * Fonction pure extraite de pruner_batch_interpreter : bornes [1, PRUNER_BATCH_MAX],
@@ -1663,6 +1752,12 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_resume_clears_admin_pause);
     RUN_TEST(do_command_line_resume_noop_outside_admin_pause);
     RUN_TEST(do_command_line_pause_broadcasts_to_control_sessions);
+
+    RUN_TEST(do_command_line_clientscommand_to_reaches_only_targeted_session_by_label);
+    RUN_TEST(do_command_line_clientscommand_to_reaches_only_targeted_session_by_session_no);
+    RUN_TEST(do_command_line_clientscommand_to_still_enforces_whitelist);
+    RUN_TEST(do_command_line_clientscommand_to_unknown_target_rejected);
+    RUN_TEST(do_command_line_clientscommand_to_missing_command_is_usage_error);
 
     RUN_TEST(pruner_batch_clamp_bounds);
     RUN_TEST(admin_apply_remote_command_pause_resume);

@@ -311,6 +311,45 @@ séparément de `control_command_allowed`, et **seule** l'[API HTTP admin](api_h
 ci-dessus restent strictement bornées à la même liste `control_command_allowed`
 qu'avant.
 
+### Adressage des commandes (`--to`)
+
+Avant cette fonctionnalité (PR3, docs/conception/identification_clients.md),
+`clientsCmd` ne savait que **diffuser** : impossible de piloter un seul client d'un
+parc sans agir sur tous les autres en même temps. `clientsCommand [--to <cible>]
+<ligne>` (`clients_cmd_interpreter`, `src/ui/command_lines.c`) ajoute un ciblage
+optionnel — la diffusion reste le comportement par défaut sans `--to`.
+
+`<cible>` est essayée, dans cet ordre, par `control_registry_send_command_to`
+(`src/app/control_registry.c`) :
+
+1. un `session_no` décimal (identifiant de session, voir la commande `clients`) ;
+2. un `client_uid` hexadécimal (longueur exacte, voir `GET /api/v1/clients`) ;
+3. un `label` déclaré (`--name`, égalité exacte de chaîne).
+
+**`session_no` n'est pas un slot.** Le registre est indexé par un tableau de slots
+recyclés (`MAX_CONTROL_SESSIONS`), mais `session_no` et `client_uid` sont tous deux
+des identifiants **jamais réattribués** à un titulaire différent (cf. *Modèle
+d'identité*, docs/conception/identification_clients.md, section 3). Résoudre une
+cible par l'un de ces deux champs ne peut donc jamais frapper le mauvais client :
+soit la session visée existe encore sous cette même identité, soit elle a disparu
+et la commande est **refusée** comme cible inconnue/déconnectée — jamais
+silencieusement redirigée vers le nouvel occupant du même slot. `label` n'étant
+**pas** garanti unique (deux clients peuvent partager le même `--name`), une cible
+qui correspond à plusieurs sessions actives est refusée comme **ambiguë** plutôt que
+d'en choisir une arbitrairement.
+
+Le ciblage passe par **exactement** la même vérification `control_command_allowed`
+que la diffusion, appliquée **avant** toute résolution de cible : `clientsCommand
+--to <session_no> exit` est refusé exactement comme `clientsCommand exit` — cibler
+une session n'élargit jamais le jeu de commandes autorisées à distance.
+
+```
+clients                                    # liste les sessions, avec leur session_no
+clientsCommand --to 3 pause                # cible la session #3 uniquement
+clientsCommand --to jetson-1 limit 500     # cible par label déclaré
+clientsCommand limit 500                   # sans --to : diffusion (comportement historique)
+```
+
 ### Impact sur le dimensionnement du serveur
 
 Une session de contrôle **partage le même pool `client_t[NB_THREADS]`** qu'une
@@ -327,8 +366,10 @@ simultanées) + (processus clients connectés), pas seulement le premier terme.
 
 Voir la [console interactive](console.md#commandes) pour la liste complète ; côté
 serveur uniquement : `clients` (liste les sessions actives), `clientsStats` (diffuse
-`CTRL_GET_STATS`), `clientsCmd <ligne>` (diffuse `CTRL_COMMAND`, filtré par la liste
-blanche). `pause`/`resume` posent/lèvent localement `REQUEST_ADMIN_PAUSE` — un état
+`CTRL_GET_STATS`), `clientsCmd [--to <cible>] <ligne>` (pousse `CTRL_COMMAND`, filtré
+par la liste blanche, à une session précise ou, par défaut, à toutes — voir
+[Adressage des commandes](#adressage-des-commandes---to) ci-dessus).
+`pause`/`resume` posent/lèvent localement `REQUEST_ADMIN_PAUSE` — un état
 distinct de la pause de régulation de débit (`REQUEST_PAUSE`, auto-levée par le
 régulateur), pour qu'une pause administrative ne disparaisse jamais toute seule au
 tour suivant — **et** diffusent systématiquement `CTRL_COMMAND "pause"`/`"resume"` à
