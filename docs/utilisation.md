@@ -89,7 +89,7 @@ distribuable se raréfie en cours de recherche).
 Se connecte à un serveur et lance `N` processus de recherche en parallèle.
 
 ```sh
-./eternityII client [serveur] [nb_threads] [max_stock_par_thread] [fichier_pieces.csv]
+./eternityII client [--name LABEL] [--machine-uid-file CHEMIN] [serveur] [nb_threads] [max_stock_par_thread] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -98,13 +98,20 @@ Se connecte à un serveur et lance `N` processus de recherche en parallèle.
 | `nb_threads` | 1 | Nombre de processus de recherche à forker |
 | `max_stock_par_thread` | 300 | Nombre max de possibilités stockées par thread avant d'en renvoyer au serveur |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
+| `--name LABEL` | nom d'hôte | Libellé déclaré, affiché côté serveur (commande console `clients`, `GET /api/v1/clients`) — purement déclaratif, jamais vérifié |
+| `--machine-uid-file CHEMIN` | `./eternityii-machine_uid` | Fichier d'identité machine persistante (nonce hexadécimal, tiré et écrit au premier lancement) — absent/illisible : régénéré silencieusement ; répertoire non inscriptible : identité volatile pour cette exécution (la recherche continue) |
 
 Exemples :
 ```sh
 ./eternityII client localhost
 ./eternityII client 192.168.1.10 8
 ./eternityII client localhost 4 300 data/pieces.csv
+./eternityII client --name jetson-1 localhost 8
 ```
+
+> `--name`/`--machine-uid-file` s'appliquent aussi au mode `pruner` ci-dessous (même
+> plomberie d'identité). Détails du modèle (machine_uid persistant vs client_uid de
+> session vs fork_seq) : [docs/conception/identification_clients.md](conception/identification_clients.md).
 
 ## Mode pruner (élagage)
 

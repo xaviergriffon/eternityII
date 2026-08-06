@@ -47,6 +47,16 @@
 /// handshake de version. Ouvre une session où le SERVEUR devient l'initiateur
 /// des échanges suivants (cf. control_protocol.h).
 #define INST_CONTROL_HELLO 16
+/// Annonce d'identité sur la connexion de TRAVAIL (v12). Chaque fork (ou le
+/// process mono, en mode pruner comme en recherche) l'envoie UNE FOIS, juste
+/// après un handshake de version réussi, avant sa première instruction de
+/// travail (INST_GET/INST_ADD/...). Payload : un `int32` de longueur suivi
+/// d'un `client_identity_t` cadré (`client_identity_encode`, cf.
+/// net/client_identity.h) — même convention que INST_CONTROL_HELLO. Purement
+/// déclaratif et best-effort côté serveur : un échec de décodage journalise
+/// une erreur mais ne ferme PAS la connexion (à la différence d'une longueur
+/// hors borne, qui désynchroniserait le flux et doit fermer).
+#define INST_CLIENT_HELLO 17
 /**
  * @}
  */

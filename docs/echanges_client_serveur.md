@@ -64,14 +64,18 @@ réassemblent les envois TCP partiels (voir [Robustesse](#comportement-en-cas-de
 | `INST_POSSIBILITY_ANALYSED_BATCH` | 14 | pruner → serveur | Signale M possibilités analysées (`int32` M + M paquets → un seul `INST_CONSIDERED`) |
 | `INST_NEED_WORK` | 15 | client → serveur | Sonde de faim (v8) : réponse `int32` N = nombre de possibilités que le serveur souhaiterait recevoir (0 = stock suffisant). Tient lieu de keepalive et pilote la [délégation anticipée](#gestion-de-charge) |
 | `INST_CONTROL_HELLO` | 16 | client → serveur | Annonce (v9) : le processus **parent** du client (jamais un fork) ouvre une connexion TCP dédiée et bascule cette session en [canal de contrôle](#canal-de-contrôle-v9), où les rôles s'inversent |
+| `INST_CLIENT_HELLO` | 17 | client → serveur | Annonce d'identité (v12) sur la connexion de TRAVAIL : chaque fork l'envoie UNE FOIS, juste après le handshake de version, avant sa première instruction (`INST_GET`/`INST_ADD`/…) — `int32` de longueur puis un `client_identity_t` cadré (`net/client_identity.h` : `machine_uid`, `client_uid`, `fork_seq`, `mode`, `label`), même convention que `INST_CONTROL_HELLO`. Best-effort côté serveur : une longueur hors borne désynchronise le flux (fermeture), mais un contenu qui ne décode pas se contente de journaliser une erreur — cf. [docs/conception/identification_clients.md](conception/identification_clients.md) |
 
 Toute évolution du format « fil » impose d'incrémenter `VERSION` : le handshake exige
-une correspondance exacte. La v11 bump ainsi `VERSION` sans ajouter de nouvelle
+une correspondance exacte. La v11 a bumpé ainsi `VERSION` sans ajouter de nouvelle
 instruction : le nouveau parcours de plateau (`directions[]`/`dirx[]`/`diry[]`,
 `src/app/static_variables.c`, pensé pour éliminer des possibilités plus tôt dans la
 recherche) fait qu'un même indice de curseur (`alloc`) désigne une case différente
 qu'en v10 — un `possibility_packet` échangé entre versions désynchroniserait
 silencieusement le board plutôt que de planter, d'où le refus explicite au handshake.
+La v12 bump `VERSION` pour `INST_CLIENT_HELLO` ci-dessus : un serveur v11 la
+traiterait comme une instruction inconnue et fermerait la connexion, d'où le refus
+explicite au handshake plutôt qu'un désync silencieux.
 
 ### Handshake de version
 
@@ -139,7 +143,7 @@ Le lot est borné par `pruner_batch_size` (4ᵉ argument CLI ou commande console
 et divise le nombre d'allers-retours réseau par rapport au mode unitaire
 (`INST_GET_TO_CHECK` / `INST_POSSIBILITY_ANALYSED`, conservé pour compatibilité).
 
-## Canal de contrôle (v9, étendu en v10)
+## Canal de contrôle (v9, étendu en v10 et v12)
 
 Au-dessus du protocole de travail décrit ci-dessus (toujours initié par le client :
 GET/ADD/ANALYSED/…), une **seconde connexion TCP indépendante par processus client**
@@ -168,8 +172,16 @@ n'a été ajouté à cette boucle pour le canal de contrôle en tant que tel.
 ### Inversion des rôles
 
 Après le handshake de version habituel, le client envoie `INST_CONTROL_HELLO` (pid,
-nombre de forks, mode — `control_hello_t`) puis les rôles s'inversent : c'est
+nombre de forks, et depuis v12 une identité déclarée — `machine_uid`, `client_uid`,
+`mode`, `label`, avec `fork_seq` fixé à `-1` puisque ce hello représente le process
+parent dans son ensemble — `control_hello_t`) puis les rôles s'inversent : c'est
 désormais le **serveur** qui prend l'initiative des échanges sur cette connexion.
+Côté serveur, `control_registry_register` attribue en plus un `session_no` : un
+compteur monotone jamais réutilisé, même quand l'INDICE de slot du registre l'est
+après une déconnexion (cf. [docs/conception/identification_clients.md](conception/identification_clients.md),
+section 3) — c'est ce `session_no`, plus le libellé et les nonces hexadécimaux, que
+la commande console `clients` et `GET /api/v1/clients` exposent en plus des champs
+déjà existants.
 
 ```mermaid
 sequenceDiagram
@@ -177,8 +189,8 @@ sequenceDiagram
     participant S as Serveur
     Cp->>S: INST_CHECK_VERSION + version
     S-->>Cp: INST_SUPPORTED_VERSION
-    Cp->>S: INST_CONTROL_HELLO + control_hello_t (pid, forks, mode)
-    Note over S: session enregistrée dans control_registry<br/>(même slot NB_THREADS qu'une session de travail)
+    Cp->>S: INST_CONTROL_HELLO + control_hello_t (pid, forks, mode, identité v12)
+    Note over S: session enregistrée dans control_registry (session_no attribué)<br/>(même slot NB_THREADS qu'une session de travail)
     loop tant que la session est active
         alt commande console en attente (clientsCmd/clientsStats/…)
             S->>Cp: CTRL_COMMAND <ligne> (ou CTRL_GET_STATS)

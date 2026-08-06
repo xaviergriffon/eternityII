@@ -330,15 +330,20 @@ TEST http_json_format_clients_golden(void)
 {
     http_client_info_t infos[2];
     memset(&infos, 0, sizeof(infos));
+    infos[0].session_no = 1;
     infos[0].pid = 111;
     infos[0].nb_forks = 4;
     infos[0].mode = 0;
-    /* infos[0].peer_ip laissé vide par le memset : IP inconnue. */
+    /* infos[0].peer_ip/label/*_uid_hex laissés vides par le memset. */
     infos[0].last_activity = 1700000000;
     infos[0].has_stats = 0;
+    infos[1].session_no = 2;
     infos[1].pid = 222;
     infos[1].nb_forks = 0;
     infos[1].mode = 2;
+    strncpy(infos[1].label, "jetson-1", sizeof(infos[1].label) - 1);
+    strncpy(infos[1].machine_uid_hex, "0102030405060708090a0b0c0d0e0f10", sizeof(infos[1].machine_uid_hex) - 1);
+    strncpy(infos[1].client_uid_hex, "101112131415161718191a1b1c1d1e1f", sizeof(infos[1].client_uid_hex) - 1);
     strncpy(infos[1].peer_ip, "203.0.113.10", sizeof(infos[1].peer_ip) - 1);
     infos[1].last_activity = 1700000042;
     infos[1].has_stats = 1;
@@ -351,14 +356,17 @@ TEST http_json_format_clients_golden(void)
     infos[1].stats_pruner_cells_per_second = 55;
     infos[1].stats_time = 1700000040;
 
-    char buf[512];
+    char buf[768];
     int n = http_json_format_clients(buf, sizeof(buf), infos, 2);
 
     ASSERT(n > 0);
     ASSERT_STR_EQ(
         "{\"clients\":["
-        "{\"pid\":111,\"forks\":4,\"mode\":\"search\",\"ip\":\"\",\"last_activity\":1700000000,\"stats\":null},"
-        "{\"pid\":222,\"forks\":0,\"mode\":\"gpu_pruner\",\"ip\":\"203.0.113.10\",\"last_activity\":1700000042,"
+        "{\"session_no\":1,\"pid\":111,\"forks\":4,\"mode\":\"search\",\"label\":\"\","
+        "\"machine_uid\":\"\",\"client_uid\":\"\",\"ip\":\"\",\"last_activity\":1700000000,\"stats\":null},"
+        "{\"session_no\":2,\"pid\":222,\"forks\":0,\"mode\":\"gpu_pruner\",\"label\":\"jetson-1\","
+        "\"machine_uid\":\"0102030405060708090a0b0c0d0e0f10\",\"client_uid\":\"101112131415161718191a1b1c1d1e1f\","
+        "\"ip\":\"203.0.113.10\",\"last_activity\":1700000042,"
         "\"stats\":{\"shots_per_second\":12345,\"possibility_stock\":10,\"analysed_stock\":3,"
         "\"max_result\":200,\"pruner_checked\":7,\"pruner_removed\":2,"
         "\"pruner_cells_per_second\":55,\"stats_time\":1700000040}}"
@@ -386,7 +394,7 @@ TEST http_json_format_clients_unknown_mode_label(void)
     info.mode = 99;
     info.last_activity = 1;
 
-    char buf[128];
+    char buf[256];
     int n = http_json_format_clients(buf, sizeof(buf), &info, 1);
 
     ASSERT(n > 0);

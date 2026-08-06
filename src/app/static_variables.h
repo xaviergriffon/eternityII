@@ -7,6 +7,7 @@
 #include <sys/un.h>
 #include <pthread.h>
 #include "app/etii_statistic.h"
+#include "net/client_identity.h"
 
 // v7 : réponse GET unitaire cadrée (int32 K + K paquets, send_all/recv_all)
 // au lieu du send()/recv() brut discriminé par la longueur (INST_NULL 1 octet
@@ -28,7 +29,16 @@
 // serveur v11 (ou l'inverse) désignerait des cases différentes pour le même
 // indice de curseur (alloc) — bump de version pour forcer tous les clients
 // à se resynchroniser sur le nouveau parcours plutôt que corrompre le board.
-#define VERSION 11
+// v12 : identité déclarée des clients (PR2, docs/conception/identification_clients.md).
+// Nouveau INST_CLIENT_HELLO sur la connexion de TRAVAIL (net/etii_protocol.h) :
+// chaque fork l'envoie une fois, juste après le handshake de version, avec son
+// identité (machine_uid, client_uid, fork_seq, label, mode — net/client_identity.h).
+// control_hello_t (net/control_protocol.h) est étendu des mêmes champs. Bump
+// nécessaire : un serveur v11 recevrait INST_CLIENT_HELLO comme une instruction
+// inconnue (branche "else" de communicate_with_client_step) et fermerait la
+// connexion au lieu de simplement l'ignorer — l'exact-match du handshake evite
+// ce désync silencieux en le refusant explicitement à la place.
+#define VERSION 12
 
 #define NB_CONNECTIONS_PER_THREAD 1
 // Temps d'attente de 100 microsecondes
@@ -527,6 +537,42 @@ extern const char *HTTP_TOKEN_FILE;
 extern char HTTP_ADMIN_TOKEN[HTTP_ADMIN_TOKEN_MAX];
 
 /**
+ * @brief Libellé déclaré du client (option CLI `--name <label>`).
+ *
+ * `NULL` (défaut) : `init_client_identity` (src/app/app_runtime.h) retombe
+ * sur le nom d'hôte (`gethostname`). Pointeur direct dans `argv` (même
+ * convention que `parts_files`/`HTTP_TOKEN_FILE`) : jamais copié, valable
+ * pour toute la durée du process. Position-indépendant, retiré d'argv par
+ * `parse_cli_options`. Purement déclaratif (cf. docs/conception/identification_clients.md,
+ * arbitrage E) : jamais vérifié par le serveur, à la différence de `peer_ip`.
+ */
+extern const char *client_label;
+
+/**
+ * @brief Chemin du fichier d'identité machine persistante (option CLI
+ *        `--machine-uid-file <chemin>`).
+ *
+ * Défaut `"./eternityii-machine_uid"` (même répertoire que les `.back`
+ * existants). Lu/créé une seule fois au démarrage (`init_client_identity`,
+ * avant tout fork) via `machine_uid_load_or_create` (net/client_identity.h).
+ * Position-indépendant, retiré d'argv par `parse_cli_options`.
+ */
+extern const char *machine_uid_file_path;
+
+/**
+ * @brief Identité déclarée de CE process client, résolue une seule fois par
+ *        `init_client_identity` (src/app/app_runtime.h) AVANT tout fork —
+ *        chaque fork en hérite une copie identique par copy-on-write
+ *        (`machine_uid`, `client_uid`, `mode`, `label` partagés ; seul
+ *        `fork_seq` diffère, ajusté par chaque connexion au moment de
+ *        l'émission de son hello, jamais ici). `fork_seq` vaut -1 dans ce
+ *        gabarit (ni le parent ni aucun fork en particulier) : c'est au
+ *        point d'envoi (INST_CLIENT_HELLO côté fork, INST_CONTROL_HELLO côté
+ *        parent) de le fixer à sa valeur réelle sur une COPIE locale.
+ */
+extern client_identity_t g_client_identity_template;
+
+/**
  * @brief Débit de recherche courant du serveur (essais/seconde), publié
  *        toutes les 10 s par `check_server_step` (src/app/etii_server.c).
  *
@@ -608,9 +654,10 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
  * @brief Extrait les options globales de `argv` et les retire du tableau.
  *
  * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--http-port <n>`,
- * `--http-token-file <chemin>`, `--gpu`, `--headless` et `--help`/`-h`
- * (positionne respectivement `stop_on_solution`, `expand_min_level`,
- * `HTTP_PORT`, `HTTP_TOKEN_FILE`, `gpu_requested`, `headless_mode` et
+ * `--http-token-file <chemin>`, `--name <label>`, `--machine-uid-file <chemin>`,
+ * `--gpu`, `--headless` et `--help`/`-h` (positionne respectivement
+ * `stop_on_solution`, `expand_min_level`, `HTTP_PORT`, `HTTP_TOKEN_FILE`,
+ * `client_label`, `machine_uid_file_path`, `gpu_requested`, `headless_mode` et
  * `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.

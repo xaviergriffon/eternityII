@@ -306,17 +306,25 @@ comprises (équivalent de `clientsStats`, voir plus bas).
 {
   "clients": [
     {
+      "session_no": 1,
       "pid": 4242,
       "forks": 4,
       "mode": "search",
+      "label": "jetson-1",
+      "machine_uid": "0102030405060708090a0b0c0d0e0f10",
+      "client_uid": "101112131415161718191a1b1c1d1e1f",
       "ip": "192.168.1.42",
       "last_activity": 1730000000,
       "stats": null
     },
     {
+      "session_no": 2,
       "pid": 5555,
       "forks": 1,
       "mode": "pruner",
+      "label": "workstation-3",
+      "machine_uid": "aabbccddeeff00112233445566778899",
+      "client_uid": "998877665544332211ffeeddccbbaa00",
       "ip": "192.168.1.55",
       "last_activity": 1730000042,
       "stats": {
@@ -337,9 +345,12 @@ comprises (équivalent de `clientsStats`, voir plus bas).
 | Champ | Type | Sens |
 |---|---|---|
 | `clients` | tableau | Une entrée par session de canal de contrôle active (`control_registry_snapshot`) — **tableau vide** si aucun client n'est connecté, jamais une erreur |
+| `session_no` | entier | *(v12)* Identifiant de session monotone attribué par le serveur à l'enregistrement (`control_registry_register`), **jamais réutilisé** même si le slot de registre sous-jacent l'est après une déconnexion — cf. [docs/conception/identification_clients.md](conception/identification_clients.md), section 3 |
 | `pid` | entier | PID du processus **parent** du client (jamais un fork de recherche, cf. canal de contrôle) |
 | `forks` | entier ≥ 0 | Nombre de processus de recherche forkés par ce client |
 | `mode` | chaîne | `search` (client de recherche), `pruner` (élagage CPU), `gpu_pruner` (élagage GPU), ou `unknown` (valeur de repli, ne devrait pas apparaître en usage normal) |
+| `label` | chaîne | *(v12)* Libellé déclaré du client (option CLI `--name`, défaut le nom d'hôte) — affichage seul, jamais une clé. **Déclaratif et non vérifié** (à la différence de `ip`) : échappé côté serveur avant sérialisation JSON, puisqu'un client peut y placer un contenu arbitraire |
+| `machine_uid` / `client_uid` | chaîne hexadécimale | *(v12)* Nonces 128 bits encodés en hexadécimal (`net/client_identity.h`) : `machine_uid` identifie la MACHINE et survit à un redémarrage du client (persisté dans `--machine-uid-file`) ; `client_uid` identifie CETTE EXÉCUTION du process parent (tiré à chaque démarrage, jamais persisté) |
 | `ip` | chaîne | Adresse IP du pair de la connexion TCP (`accept()`, capturée par `inet_ntop` côté serveur) — contrairement aux autres champs, **non falsifiable** : le client ne la déclare pas, elle vient de la connexion réseau elle-même. Chaîne vide si, en théorie, jamais affectée (ne devrait pas arriver pour une session enregistrée) |
 | `last_activity` | entier | Horodatage Unix (secondes) du dernier échange observé sur cette session (hello, commande acquittée, ping/ack, ou stats reçues) |
 | `stats` | objet ou `null` | `null` tant qu'aucun `CTRL_GET_STATS` n'a encore abouti pour cette session ; sinon un instantané **mis en cache** (voir ci-dessous) |

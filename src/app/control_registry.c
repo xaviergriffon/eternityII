@@ -21,6 +21,7 @@ typedef struct {
 typedef struct {
     int in_use;
     int socket_id;
+    uint64_t session_no;
     char peer_ip[PEER_IP_MAX_LEN];
     control_hello_t hello;
     time_t last_activity;
@@ -49,6 +50,11 @@ static control_session_t g_sessions[MAX_CONTROL_SESSIONS];
  * une commande sur une session déjà enregistrée n'a pas besoin de bloquer les
  * autres sessions. */
 static pthread_mutex_t g_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Compteur monotone de session_no, jamais réutilisé (contrairement à l'indice
+ * de slot). Démarre à 1 (0 réservé à "non assigné") ; protégé par
+ * g_registry_mutex, déjà détenu par tout appelant de control_registry_register. */
+static uint64_t g_next_session_no = 1;
 
 /* État de pause "désiré" pour tout client qui se connectera APRÈS un
  * `pause`/`resume` console : mis à jour dans
@@ -107,6 +113,10 @@ int control_registry_register(int socket_id, const char *peer_ip, const control_
         pthread_mutex_lock(&s->mutex);
         s->in_use = 1;
         s->socket_id = socket_id;
+        // session_no : identifiant monotone, jamais réutilisé, distinct de
+        // l'indice de slot `idx` (réattribué au prochain client une fois ce
+        // slot libéré). Assigné une seule fois ici, à l'enregistrement.
+        s->session_no = g_next_session_no++;
         if (peer_ip != NULL) {
             strncpy(s->peer_ip, peer_ip, PEER_IP_MAX_LEN - 1);
             s->peer_ip[PEER_IP_MAX_LEN - 1] = '\0';
@@ -279,9 +289,20 @@ int control_registry_snapshot(control_session_info_t *out, int max)
         control_session_t *s = &g_sessions[i];
         pthread_mutex_lock(&s->mutex);
         if (s->in_use) {
+            out[n].session_no = s->session_no;
             out[n].pid = s->hello.pid;
             out[n].nb_forks = s->hello.nb_forks;
-            out[n].mode = s->hello.mode;
+            out[n].mode = s->hello.identity.mode;
+            strncpy(out[n].label, s->hello.identity.label, CLIENT_LABEL_MAX - 1);
+            out[n].label[CLIENT_LABEL_MAX - 1] = '\0';
+            if (client_identity_hex_encode(s->hello.identity.machine_uid, MACHINE_UID_BYTES,
+                                            out[n].machine_uid_hex, sizeof(out[n].machine_uid_hex)) < 0) {
+                out[n].machine_uid_hex[0] = '\0';
+            }
+            if (client_identity_hex_encode(s->hello.identity.client_uid, CLIENT_UID_BYTES,
+                                            out[n].client_uid_hex, sizeof(out[n].client_uid_hex)) < 0) {
+                out[n].client_uid_hex[0] = '\0';
+            }
             strncpy(out[n].peer_ip, s->peer_ip, PEER_IP_MAX_LEN - 1);
             out[n].peer_ip[PEER_IP_MAX_LEN - 1] = '\0';
             out[n].last_activity = s->last_activity;

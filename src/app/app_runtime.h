@@ -52,6 +52,36 @@ void init_childs(void);
  *         stderr via `log_error` — même source de vérité que `--help`. */
 void failed_arg(void);
 
+/**
+ * @brief Résout le libellé déclaré d'un client (fonction pure, testable sans
+ *        appeler `gethostname`) : priorité au libellé CLI explicite
+ *        (`--name`, cf. `client_label`), sinon repli sur `hostname_or_null`
+ *        (résultat de `gethostname`, ou `NULL` en cas d'échec), sinon `"?"`.
+ *        Toujours borné et NUL-terminé.
+ *
+ * @param cli_label       Valeur de `client_label` (peut être `NULL`).
+ * @param hostname_or_null Nom d'hôte déjà lu par l'appelant (peut être `NULL`).
+ * @param out             Tampon destination.
+ * @param out_size        Taille de `out` (`CLIENT_LABEL_MAX` typique).
+ */
+void resolve_client_label(const char *cli_label, const char *hostname_or_null,
+                           char *out, size_t out_size);
+
+/**
+ * @brief Résout l'identité déclarée de CE process client (`g_client_identity_template`,
+ *        static_variables.h) AVANT tout fork : charge/crée le `machine_uid`
+ *        persistant (`machine_uid_file_path`), tire un `client_uid` de session,
+ *        résout le mode (recherche/pruner/pruner GPU) et le libellé
+ *        (`resolve_client_label`). `fork_seq` est laissé à -1 dans le gabarit —
+ *        chaque point d'envoi (hello de travail par fork, hello de contrôle du
+ *        parent) l'ajuste sur une copie locale.
+ *
+ * Appelée une seule fois par `handle_client` (src/app/main.c), jamais en mode
+ * serveur ou test (ces modes n'ouvrent aucune connexion de travail vers un
+ * serveur, donc aucun hello n'est jamais émis).
+ */
+void init_client_identity(void);
+
 /* ---- Aide CLI (`--help` / `-h`, mode `help [sujet]`) ---- */
 
 /**

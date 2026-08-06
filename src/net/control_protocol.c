@@ -67,21 +67,28 @@ int ctrl_recv_frame(int socket_id, void **out_payload, int32_t *out_len)
 	return (int)cmd;
 }
 
-int32_t control_hello_encode(const control_hello_t *hello, uint8_t *buf)
+int32_t control_hello_encode(const control_hello_t *hello, uint8_t *buf, size_t bufsize)
 {
+	if (bufsize < 4 + 4) {
+		return -1;
+	}
 	int32_t off = 0;
 	memcpy(buf + off, &hello->pid, sizeof(hello->pid));
 	off += (int32_t)sizeof(hello->pid);
 	memcpy(buf + off, &hello->nb_forks, sizeof(hello->nb_forks));
 	off += (int32_t)sizeof(hello->nb_forks);
-	memcpy(buf + off, &hello->mode, sizeof(hello->mode));
-	off += (int32_t)sizeof(hello->mode);
+
+	int32_t identity_len = client_identity_encode(&hello->identity, buf + off, bufsize - (size_t)off);
+	if (identity_len < 0) {
+		return -1;
+	}
+	off += identity_len;
 	return off;
 }
 
 int control_hello_decode(const uint8_t *buf, int32_t len, control_hello_t *out)
 {
-	if (len < CONTROL_HELLO_WIRE_SIZE) {
+	if (len < 4 + 4) {
 		return -1;
 	}
 	int32_t off = 0;
@@ -89,8 +96,10 @@ int control_hello_decode(const uint8_t *buf, int32_t len, control_hello_t *out)
 	off += (int32_t)sizeof(out->pid);
 	memcpy(&out->nb_forks, buf + off, sizeof(out->nb_forks));
 	off += (int32_t)sizeof(out->nb_forks);
-	memcpy(&out->mode, buf + off, sizeof(out->mode));
-	off += (int32_t)sizeof(out->mode);
+
+	if (client_identity_decode(buf + off, len - off, &out->identity) != 0) {
+		return -1;
+	}
 	return 0;
 }
 

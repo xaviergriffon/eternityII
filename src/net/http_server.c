@@ -134,9 +134,16 @@ int http_clients_collect(http_client_info_t *out, int max)
     int cap = (max < MAX_CONTROL_SESSIONS) ? max : MAX_CONTROL_SESSIONS;
     int n = control_registry_snapshot(infos, cap);
     for (int i = 0; i < n; i++) {
+        out[i].session_no = (unsigned long long)infos[i].session_no;
         out[i].pid = infos[i].pid;
         out[i].nb_forks = infos[i].nb_forks;
         out[i].mode = infos[i].mode;
+        strncpy(out[i].label, infos[i].label, HTTP_CLIENT_LABEL_MAX - 1);
+        out[i].label[HTTP_CLIENT_LABEL_MAX - 1] = '\0';
+        strncpy(out[i].machine_uid_hex, infos[i].machine_uid_hex, HTTP_CLIENT_UID_HEX_MAX - 1);
+        out[i].machine_uid_hex[HTTP_CLIENT_UID_HEX_MAX - 1] = '\0';
+        strncpy(out[i].client_uid_hex, infos[i].client_uid_hex, HTTP_CLIENT_UID_HEX_MAX - 1);
+        out[i].client_uid_hex[HTTP_CLIENT_UID_HEX_MAX - 1] = '\0';
         strncpy(out[i].peer_ip, infos[i].peer_ip, HTTP_CLIENT_IP_MAX - 1);
         out[i].peer_ip[HTTP_CLIENT_IP_MAX - 1] = '\0';
         out[i].last_activity = (long long)infos[i].last_activity;

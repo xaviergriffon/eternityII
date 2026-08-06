@@ -44,12 +44,25 @@
  *        active, pour la commande console `clients` (`control_registry_snapshot`).
  */
 typedef struct {
+    /// Identifiant de session monotone, jamais réutilisé même après
+    /// `control_registry_unregister` (contrairement à l'indice de slot du
+    /// registre) — cf. docs/conception/identification_clients.md, section 3
+    /// (« session_no n'est pas un slot »). Utilisable pour un futur
+    /// adressage (`clientsCmd --to <session_no>`, PR3).
+    uint64_t session_no;
     /// PID du processus parent annoncé au hello.
     int32_t pid;
     /// Nombre de forks de recherche gérés par ce parent.
     int32_t nb_forks;
     /// Mode du client : 0 = recherche, 1 = pruner, 2 = pruner GPU.
     uint8_t mode;
+    /// Libellé déclaré (option CLI `--name`, ou nom d'hôte par défaut) —
+    /// affichage seul, jamais une clé (cf. `client_identity_t.label`).
+    char label[CLIENT_LABEL_MAX];
+    /// Nonce machine persistant, encodé en hexadécimal pour l'affichage.
+    char machine_uid_hex[2 * MACHINE_UID_BYTES + 1];
+    /// Nonce de session (process parent), encodé en hexadécimal.
+    char client_uid_hex[2 * CLIENT_UID_BYTES + 1];
     /// Adresse IP du pair de la connexion TCP (`accept()`, non falsifiable —
     /// contrairement au reste du hello, qui reste déclaratif), copiée
     /// telle quelle depuis `client_t.peer_ip` (etii_server.h) à l'enregistrement.

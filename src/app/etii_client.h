@@ -35,6 +35,15 @@ typedef struct
     int compteur;
     int max_shots_per_second;
     int id;
+    /// Rang de ce fork parmi les NB_THREADS forks de son process parent
+    /// (0..N-1), capturé AVANT que le fork ne réduise sa propre vue de
+    /// NB_THREADS à 1 (cf. handle_client, src/app/main.c). Distinct de `id`,
+    /// qui indexe LOCALEMENT `file_possibility_analysed[]` (toujours 0 après
+    /// fork : NE JAMAIS réutiliser `id` pour cet usage, cf.
+    /// send_possibility_analysed/add_possibility_analysed, src/core/datamanager.c).
+    /// Sert uniquement à peupler `client_identity_t.fork_seq` du hello envoyé
+    /// sur la connexion de travail (INST_CLIENT_HELLO, check_and_connect_to_server).
+    int fork_seq;
     pid_t pid;
     int socket_id;
     struct tms start_socket;
@@ -120,9 +129,12 @@ int acquire_search_parts(search_parts_t *out, const char *file);
 /**
  * @brief Lance un client en mono-thread
  *
- * @param file fichier contenant la définition des pieces
+ * @param file     fichier contenant la définition des pieces
+ * @param fork_seq rang de ce fork (0..N-1) parmi les forks de son process
+ *                 parent, propagé jusqu'au hello de la connexion de travail
+ *                 (INST_CLIENT_HELLO) ; 0 en mode `test` (pas de vrais forks).
  */
-void run_mono_client(const char *file);
+void run_mono_client(const char *file, int fork_seq);
 /**
  * @brief Effectue un contrôle des threads client
  * 
@@ -166,9 +178,11 @@ useconds_t next_no_work_sleep(useconds_t current);
  * @param id          Identifiant logique du thread (indice dans le pool).
  * @param compteur    Indice du compteur associé.
  * @param pid         PID du process propriétaire (0 si non utilisé).
+ * @param fork_seq    Rang de ce fork parmi les forks du process parent
+ *                    (0..N-1) — cf. `client_possibility_t.fork_seq`.
  */
 void init_client_possibility(client_possibility_t *p, struct array_part *rotateParts,
-                             map_big_array *map, int id, int compteur, pid_t pid);
+                             map_big_array *map, int id, int compteur, pid_t pid, int fork_seq);
 
 /**
  * @brief Compte le nombre de processus enfants effectivement créés.

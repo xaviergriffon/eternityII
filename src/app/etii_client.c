@@ -82,13 +82,14 @@ useconds_t next_no_work_sleep(useconds_t current) {
 }
 
 void init_client_possibility(client_possibility_t *p, struct array_part *rotateParts,
-                             map_big_array *map, int id, int compteur, pid_t pid) {
+                             map_big_array *map, int id, int compteur, pid_t pid, int fork_seq) {
     p->works = 0;
     p->aposs = NULL;
     p->all_rotate_part = rotateParts;
     p->map_part = map;
     p->tid = NULL;
     p->id = id;
+    p->fork_seq = fork_seq;
     p->pid = pid;
     p->compteur = compteur;
     p->max_shots_per_second = -1;
@@ -457,9 +458,12 @@ pthread_t build_control_thread(client_possibility_t *thread_params) {
  * client, démarre les threads d'alimentation et de contrôle, puis exécute
  * `autosearch` dans le thread courant.
  *
- * @param file Chemin du fichier CSV de définition des pièces.
+ * @param file     Chemin du fichier CSV de définition des pièces.
+ * @param fork_seq Rang de ce fork parmi les forks de son process parent
+ *                 (0..N-1), propagé jusqu'au hello de la connexion de
+ *                 travail (INST_CLIENT_HELLO) ; 0 en mode `test`.
  */
-void run_mono_client(const char *file)
+void run_mono_client(const char *file, int fork_seq)
 {
     client_possibility_t *thread_params = malloc(sizeof(*thread_params));
 
@@ -469,7 +473,7 @@ void run_mono_client(const char *file)
     // map de son parent (elle lui survit et est partagée par ses frères).
     search_parts_t parts;
     int owns_parts = acquire_search_parts(&parts, file);
-    init_client_possibility(thread_params, parts.rotate_parts, parts.map, 0, 0, getpid());
+    init_client_possibility(thread_params, parts.rotate_parts, parts.map, 0, 0, getpid(), fork_seq);
 
     pthread_t feed_tid = build_feed_thread(thread_params);
     pthread_t control_tid = build_control_thread(thread_params);

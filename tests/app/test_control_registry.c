@@ -23,9 +23,11 @@
 static control_hello_t make_hello(int32_t pid, int32_t nb_forks, uint8_t mode)
 {
     control_hello_t h;
+    memset(&h, 0, sizeof(h));
     h.pid = pid;
     h.nb_forks = nb_forks;
-    h.mode = mode;
+    h.identity.fork_seq = -1;
+    h.identity.mode = mode;
     return h;
 }
 
@@ -206,6 +208,13 @@ TEST register_beyond_capacity_returns_minus_one(void)
 TEST snapshot_reflects_registered_hello(void)
 {
     control_hello_t h = make_hello(777, 8, 2);
+    strncpy(h.identity.label, "jetson-1", CLIENT_LABEL_MAX - 1);
+    for (int i = 0; i < MACHINE_UID_BYTES; i++) {
+        h.identity.machine_uid[i] = (uint8_t)i;
+    }
+    for (int i = 0; i < CLIENT_UID_BYTES; i++) {
+        h.identity.client_uid[i] = (uint8_t)(0x10 + i);
+    }
     int idx = control_registry_register(9, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
@@ -216,8 +225,46 @@ TEST snapshot_reflects_registered_hello(void)
     ASSERT_EQ(8, infos[0].nb_forks);
     ASSERT_EQ(2, (int)infos[0].mode);
     ASSERT_STR_EQ("203.0.113.10", infos[0].peer_ip);
+    ASSERT_STR_EQ("jetson-1", infos[0].label);
+    ASSERT(infos[0].session_no > 0);
+    char expected_machine_hex[2 * MACHINE_UID_BYTES + 1];
+    client_identity_hex_encode(h.identity.machine_uid, MACHINE_UID_BYTES,
+                                expected_machine_hex, sizeof(expected_machine_hex));
+    ASSERT_STR_EQ(expected_machine_hex, infos[0].machine_uid_hex);
+    char expected_client_hex[2 * CLIENT_UID_BYTES + 1];
+    client_identity_hex_encode(h.identity.client_uid, CLIENT_UID_BYTES,
+                                expected_client_hex, sizeof(expected_client_hex));
+    ASSERT_STR_EQ(expected_client_hex, infos[0].client_uid_hex);
 
     control_registry_unregister(idx);
+    PASS();
+}
+
+/* session_no est monotone et jamais réutilisé, y compris quand un slot est
+   libéré puis réoccupé par une session différente (cf. docs/conception/
+   identification_clients.md, section 3 : « session_no n'est pas un slot »). */
+TEST session_no_is_monotonic_and_never_reused(void)
+{
+    control_hello_t h1 = make_hello(1, 1, 0);
+    int idx1 = control_registry_register(1, "203.0.113.1", &h1);
+    ASSERT(idx1 >= 0);
+    control_session_info_t infos[MAX_CONTROL_SESSIONS];
+    ASSERT_EQ(1, control_registry_snapshot(infos, MAX_CONTROL_SESSIONS));
+    uint64_t session_no_1 = infos[0].session_no;
+
+    control_registry_unregister(idx1);
+
+    control_hello_t h2 = make_hello(2, 1, 0);
+    int idx2 = control_registry_register(2, "203.0.113.2", &h2);
+    ASSERT(idx2 >= 0);
+    ASSERT_EQ(1, control_registry_snapshot(infos, MAX_CONTROL_SESSIONS));
+    uint64_t session_no_2 = infos[0].session_no;
+
+    /* Le second enregistrement a pu réutiliser le même INDICE de slot (idx1
+       libéré juste avant), mais jamais le même session_no. */
+    ASSERT(session_no_2 > session_no_1);
+
+    control_registry_unregister(idx2);
     PASS();
 }
 
@@ -632,6 +679,7 @@ SUITE(control_registry_suite)
     RUN_TEST(register_beyond_capacity_returns_minus_one);
 
     RUN_TEST(snapshot_reflects_registered_hello);
+    RUN_TEST(session_no_is_monotonic_and_never_reused);
     RUN_TEST(snapshot_null_peer_ip_stored_as_empty_string);
     RUN_TEST(snapshot_null_or_zero_max_returns_zero);
     RUN_TEST(snapshot_respects_max_capacity);

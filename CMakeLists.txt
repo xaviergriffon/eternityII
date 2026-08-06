@@ -101,6 +101,7 @@ set(PROD_SRCS
     src/core/possibility.c
     src/core/best_board.c
     src/net/etii_protocol.c
+    src/net/client_identity.c
     src/net/control_protocol.c
     src/net/http_codec.c
     src/net/http_server.c
@@ -191,6 +192,7 @@ set(TEST_MODULES
     src/core/possibility.c
     src/core/best_board.c
     src/net/etii_protocol.c
+    src/net/client_identity.c
     src/net/control_protocol.c
     src/net/http_codec.c
     src/net/http_server.c
@@ -216,6 +218,7 @@ set(TEST_SUITES_COMMON
     tests/core/test_etii_search.c
     tests/core/test_datamanager.c
     tests/net/test_etii_protocol.c
+    tests/net/test_client_identity.c
     tests/net/test_control_protocol.c
     tests/net/test_http_codec.c
     tests/net/test_http_server.c
@@ -293,6 +296,7 @@ add_executable(eternityII16 EXCLUDE_FROM_ALL
     src/core/possibility.c
     src/core/best_board.c
     src/net/etii_protocol.c
+    src/net/client_identity.c
     src/net/control_protocol.c
     src/net/http_codec.c
     src/net/http_server.c
