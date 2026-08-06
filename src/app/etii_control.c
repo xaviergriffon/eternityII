@@ -195,13 +195,21 @@ void *run_control_channel(void *param)
         control_hello_t hello;
         hello.pid = (int32_t)getpid();
         hello.nb_forks = (int32_t)nb_forks;
-#ifdef WITH_CUDA
-        hello.mode = (uint8_t)(gpu_pruner_mode ? 2 : (pruner_mode ? 1 : 0));
-#else
-        hello.mode = (uint8_t)(pruner_mode ? 1 : 0);
-#endif
-        uint8_t hello_buf[CONTROL_HELLO_WIRE_SIZE];
-        int32_t hello_len = control_hello_encode(&hello, hello_buf);
+        // Identité déclarée (v12) : ce hello représente le process PARENT
+        // dans son ensemble, jamais un fork particulier — fork_seq = -1 le
+        // distingue du hello par-fork de la connexion de travail
+        // (INST_CLIENT_HELLO, envoyé depuis check_and_connect_to_server).
+        hello.identity = g_client_identity_template;
+        hello.identity.fork_seq = -1;
+        uint8_t hello_buf[CONTROL_HELLO_WIRE_MAX_SIZE];
+        int32_t hello_len = control_hello_encode(&hello, hello_buf, sizeof(hello_buf));
+        if (hello_len < 0) {
+            log_error("canal de contrôle : encodage du hello échoué — reconnexion\n");
+            close_socket(socket_id);
+            backoff = next_no_work_sleep(backoff);
+            control_channel_backoff_sleep(backoff);
+            continue;
+        }
 
         int hello_ok = 1;
         if (send_instruction(socket_id, INST_CONTROL_HELLO) <= 0) {

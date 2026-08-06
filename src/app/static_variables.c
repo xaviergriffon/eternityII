@@ -139,6 +139,12 @@ const char *HTTP_TOKEN_FILE = NULL;
 
 char HTTP_ADMIN_TOKEN[HTTP_ADMIN_TOKEN_MAX] = "";
 
+const char *client_label = NULL;
+
+const char *machine_uid_file_path = "./eternityii-machine_uid";
+
+client_identity_t g_client_identity_template;
+
 volatile unsigned long long server_shots_per_second = 0;
 
 unsigned long long max_search_by_sec = 0;
@@ -233,6 +239,22 @@ int parse_cli_options(int argc, const char *argv[])
             // cette fonction (aucune I/O ici).
             if (r + 1 < argc) {
                 HTTP_TOKEN_FILE = argv[r + 1];
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--name") == 0) {
+            // Option valuée, même schéma que --http-token-file : pointeur
+            // direct dans argv, jamais copié. Résolue plus tard par
+            // init_client_identity (app_runtime.h), avant tout fork.
+            if (r + 1 < argc) {
+                client_label = argv[r + 1];
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--machine-uid-file") == 0) {
+            // Option valuée, même schéma. Chargement effectif (lecture/écriture
+            // du fichier) dans init_client_identity, pas ici (aucune I/O dans
+            // parse_cli_options).
+            if (r + 1 < argc) {
+                machine_uid_file_path = argv[r + 1];
                 r++; // consomme aussi la valeur
             }
         } else {

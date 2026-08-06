@@ -31,6 +31,16 @@ typedef struct
     /// `inet_ntop`), affectée avec `socket_id` dans `try_assign_client_slot`.
     /// Vide (`""`) tant qu'aucun client n'a jamais occupé ce slot.
     char peer_ip[PEER_IP_MAX_LEN];
+    /// Identité déclarée par le fork sur CETTE connexion de travail (v12,
+    /// INST_CLIENT_HELLO), valide seulement si `has_identity`. Déclarative,
+    /// jamais vérifiée (à la différence de `peer_ip`) — cf.
+    /// docs/conception/identification_clients.md.
+    client_identity_t identity;
+    /// 1 si `identity` a été renseignée par un INST_CLIENT_HELLO reçu sur
+    /// cette connexion, 0 sinon (client trop ancien, ou hello pas encore
+    /// reçu). Remis à 0 par `try_assign_client_slot` à chaque réutilisation
+    /// du slot, comme `peer_ip`.
+    int has_identity;
 } client_t;
 
 /**

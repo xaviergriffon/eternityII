@@ -218,7 +218,7 @@ static command_description commands[NB_COMMANDS] = {
      "vérifie la cohérence du tableau de parcours", NULL, NULL},
 
     {"clients", clients_interpreter, 0, CMD_CAT_CLIENTS, 1, NULL,
-     "liste les sessions de contrôle actives (pid, ip, mode, forks)", NULL, NULL},
+     "liste les sessions de contrôle actives (session_no, libellé, ip, pid, mode, forks, identité)", NULL, NULL},
     {"clientsStats", clients_stats_interpreter, 0, CMD_CAT_CLIENTS, 1, NULL,
      "demande leurs statistiques à tous les clients connectés", NULL, NULL},
     {"clientsCommand", clients_cmd_interpreter, 0, CMD_CAT_CLIENTS, 1, "clientsCommand <commande...>",
@@ -897,9 +897,12 @@ int clients_interpreter(void) {
     }
     log_info("clients : %d session(s) de contrôle active(s)\n", n);
     for (int i = 0; i < n; i++) {
-        log_info("  pid=%d  ip=%s  mode=%u  forks=%d  derniere activite=%lld\n",
-                  infos[i].pid, infos[i].peer_ip[0] != '\0' ? infos[i].peer_ip : "?",
-                  (unsigned)infos[i].mode, infos[i].nb_forks,
+        log_info("  #%llu  %s (%s)  pid=%d  mode=%u  forks=%d  machine_uid=%s  client_uid=%s  derniere activite=%lld\n",
+                  (unsigned long long)infos[i].session_no,
+                  infos[i].label[0] != '\0' ? infos[i].label : "?",
+                  infos[i].peer_ip[0] != '\0' ? infos[i].peer_ip : "?",
+                  infos[i].pid, (unsigned)infos[i].mode, infos[i].nb_forks,
+                  infos[i].machine_uid_hex, infos[i].client_uid_hex,
                   (long long)infos[i].last_activity);
     }
     return 0;

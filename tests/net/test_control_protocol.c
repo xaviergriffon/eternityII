@@ -153,29 +153,54 @@ TEST ctrl_send_frame_rejects_out_of_range_len(void)
     PASS();
 }
 
-/* control_hello_encode/decode : aller-retour fidèle. */
+/* control_hello_encode/decode : aller-retour fidèle, y compris l'identité
+   étendue (v12) — machine_uid/client_uid/fork_seq/mode/label. */
 TEST control_hello_round_trip(void)
 {
-    control_hello_t hello = { .pid = 4242, .nb_forks = 8, .mode = 1 };
-    uint8_t buf[CONTROL_HELLO_WIRE_SIZE];
+    control_hello_t hello = { .pid = 4242, .nb_forks = 8 };
+    for (int i = 0; i < MACHINE_UID_BYTES; i++) {
+        hello.identity.machine_uid[i] = (uint8_t)(i + 1);
+    }
+    for (int i = 0; i < CLIENT_UID_BYTES; i++) {
+        hello.identity.client_uid[i] = (uint8_t)(0x50 + i);
+    }
+    hello.identity.fork_seq = -1;
+    hello.identity.mode = 1;
+    strncpy(hello.identity.label, "jetson-1", CLIENT_LABEL_MAX - 1);
+    hello.identity.label[CLIENT_LABEL_MAX - 1] = '\0';
 
-    ASSERT_EQ_FMT((int32_t)CONTROL_HELLO_WIRE_SIZE, control_hello_encode(&hello, buf), "%d");
+    uint8_t buf[CONTROL_HELLO_WIRE_MAX_SIZE];
+    int32_t wlen = control_hello_encode(&hello, buf, sizeof(buf));
+    ASSERT_EQ_FMT((int32_t)(CONTROL_HELLO_WIRE_MIN_SIZE + strlen("jetson-1")), wlen, "%d");
 
     control_hello_t out;
     memset(&out, 0xAA, sizeof(out));
-    ASSERT_EQ_FMT(0, control_hello_decode(buf, sizeof(buf), &out), "%d");
+    ASSERT_EQ_FMT(0, control_hello_decode(buf, wlen, &out), "%d");
     ASSERT_EQ_FMT(hello.pid, out.pid, "%d");
     ASSERT_EQ_FMT(hello.nb_forks, out.nb_forks, "%d");
-    ASSERT_EQ_FMT((int)hello.mode, (int)out.mode, "%d");
+    ASSERT_MEM_EQ(hello.identity.machine_uid, out.identity.machine_uid, MACHINE_UID_BYTES);
+    ASSERT_MEM_EQ(hello.identity.client_uid, out.identity.client_uid, CLIENT_UID_BYTES);
+    ASSERT_EQ_FMT(hello.identity.fork_seq, out.identity.fork_seq, "%d");
+    ASSERT_EQ_FMT((int)hello.identity.mode, (int)out.identity.mode, "%d");
+    ASSERT_STR_EQ("jetson-1", out.identity.label);
+    PASS();
+}
+
+/* control_hello_encode : bufsize trop petit -> -1 proprement. */
+TEST control_hello_encode_rejects_buffer_too_small(void)
+{
+    control_hello_t hello = { .pid = 1, .nb_forks = 1 };
+    uint8_t buf[CONTROL_HELLO_WIRE_MIN_SIZE - 1];
+    ASSERT_EQ_FMT(-1, control_hello_encode(&hello, buf, sizeof(buf)), "%d");
     PASS();
 }
 
 /* control_hello_decode : buffer trop court -> -1 proprement. */
 TEST control_hello_decode_rejects_short_buffer(void)
 {
-    uint8_t buf[CONTROL_HELLO_WIRE_SIZE] = { 0 };
+    uint8_t buf[CONTROL_HELLO_WIRE_MIN_SIZE] = { 0 };
     control_hello_t out;
-    ASSERT_EQ_FMT(-1, control_hello_decode(buf, CONTROL_HELLO_WIRE_SIZE - 1, &out), "%d");
+    ASSERT_EQ_FMT(-1, control_hello_decode(buf, CONTROL_HELLO_WIRE_MIN_SIZE - 1, &out), "%d");
     PASS();
 }
 
@@ -307,6 +332,7 @@ SUITE(control_protocol_suite)
     RUN_TEST(ctrl_frame_rejects_too_large_len);
     RUN_TEST(ctrl_send_frame_rejects_out_of_range_len);
     RUN_TEST(control_hello_round_trip);
+    RUN_TEST(control_hello_encode_rejects_buffer_too_small);
     RUN_TEST(control_hello_decode_rejects_short_buffer);
     RUN_TEST(control_stats_round_trip);
     RUN_TEST(control_stats_decode_rejects_short_buffer);

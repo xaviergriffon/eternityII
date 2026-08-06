@@ -9,9 +9,10 @@
  *    exclusivement via `send_all`/`recv_all` (etii_protocol.h) — jamais un
  *    `send`/`recv` brut, qui peut ne transférer qu'une partie du message et
  *    désynchroniser tout le flux (cf. etii_protocol.h) ;
- *  - deux structures de payload à champs explicites de largeur fixe
- *    (`control_hello_t`, `control_stats_t`) et leurs encodeurs/décodeurs purs
- *    (sans I/O, testables sans socket) ;
+ *  - deux structures de payload à champs explicites (`control_hello_t`,
+ *    largeur fixe sauf son `identity.label` préfixé par sa longueur, cf.
+ *    net/client_identity.h ; `control_stats_t`, largeur fixe) et leurs
+ *    encodeurs/décodeurs purs (sans I/O, testables sans socket) ;
  *  - `control_command_allowed`, la liste blanche des commandes console
  *    déclenchables à distance via CTRL_COMMAND.
  *
@@ -31,7 +32,10 @@
 #ifndef eternityII_control_protocol_h
 #define eternityII_control_protocol_h
 
+#include <stddef.h>
 #include <stdint.h>
+
+#include "net/client_identity.h"
 
 /**
  * @defgroup ControlCommands Commandes de trame du canal de contrôle
@@ -103,31 +107,45 @@ int ctrl_send_frame(int socket_id, uint8_t cmd, const void *payload, int32_t len
  */
 int ctrl_recv_frame(int socket_id, void **out_payload, int32_t *out_len);
 
-/// Taille sur le fil de `control_hello_t` (champs explicites de largeur fixe).
-#define CONTROL_HELLO_WIRE_SIZE (4 + 4 + 1)
+/// Taille MINIMALE sur le fil de `control_hello_t` (label d'identité vide).
+/// Depuis v12, `identity.label` est de longueur variable (préfixée) : cette
+/// borne sert au test de troncature, PAS au dimensionnement d'un tampon
+/// d'émission (cf. `CONTROL_HELLO_WIRE_MAX_SIZE` pour cela).
+#define CONTROL_HELLO_WIRE_MIN_SIZE (4 + 4 + CLIENT_IDENTITY_WIRE_MIN_SIZE)
+/// Taille MAXIMALE sur le fil (label d'identité à sa longueur maximale) : à
+/// utiliser pour dimensionner tout tampon d'émission/réception.
+#define CONTROL_HELLO_WIRE_MAX_SIZE (4 + 4 + CLIENT_IDENTITY_WIRE_MAX_SIZE)
 
 /**
  * @brief Annonce d'un client se déclarant canal de contrôle (payload de
  *        CTRL_* futur / INST_CONTROL_HELLO).
+ *
+ * Étendu en v12 (docs/conception/identification_clients.md, PR2) de
+ * l'identité déclarée du client (`identity`) — `identity.fork_seq` vaut
+ * toujours -1 ici : ce hello représente le process PARENT dans son ensemble,
+ * jamais un fork particulier (cf. INST_CLIENT_HELLO, net/etii_protocol.h,
+ * pour le hello PAR FORK de la connexion de travail).
  */
 typedef struct {
     /// PID du processus parent qui s'annonce.
     int32_t pid;
     /// Nombre de forks de recherche gérés par ce parent.
     int32_t nb_forks;
-    /// Mode du client : 0 = recherche, 1 = pruner, 2 = pruner GPU.
-    uint8_t mode;
+    /// Identité déclarée (machine_uid, client_uid, fork_seq == -1, mode, label).
+    client_identity_t identity;
 } control_hello_t;
 
 /**
  * @brief Sérialise `hello` dans `buf` (champ par champ, pas de memcpy du
  *        struct entier — le padding caché fausserait la taille sur le fil).
  *
- * @param hello Structure source.
- * @param buf   Tampon destination, au moins `CONTROL_HELLO_WIRE_SIZE` octets.
- * @return      Le nombre d'octets écrits (`CONTROL_HELLO_WIRE_SIZE`).
+ * @param hello   Structure source.
+ * @param buf     Tampon destination.
+ * @param bufsize Taille de `buf` (`CONTROL_HELLO_WIRE_MAX_SIZE` recommandé).
+ * @return        Le nombre d'octets écrits, ou -1 si `buf` est trop petit
+ *                pour le `identity.label` de `hello`.
  */
-int32_t control_hello_encode(const control_hello_t *hello, uint8_t *buf);
+int32_t control_hello_encode(const control_hello_t *hello, uint8_t *buf, size_t bufsize);
 
 /**
  * @brief Désérialise `control_hello_t` depuis `buf`.
@@ -135,7 +153,8 @@ int32_t control_hello_encode(const control_hello_t *hello, uint8_t *buf);
  * @param buf Tampon source.
  * @param len Nombre d'octets disponibles dans `buf`.
  * @param out Structure destination.
- * @return    0 si OK, -1 si `len < CONTROL_HELLO_WIRE_SIZE`.
+ * @return    0 si OK, -1 si `len` est trop court pour les champs fixes ou
+ *            pour le `identity.label` qu'il annonce (cf. `client_identity_decode`).
  */
 int control_hello_decode(const uint8_t *buf, int32_t len, control_hello_t *out);
 

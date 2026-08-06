@@ -141,6 +141,27 @@ int check_and_connect_to_server(client_possibility_t *client_possibility) {
 			return -1;
 		}
 
+		// Hello d'identité (v12, INST_CLIENT_HELLO) : une fois par connexion
+		// FRAÎCHEMENT établie, juste après le handshake — jamais rejoué sur une
+		// connexion déjà en place (elle est déjà identifiée côté serveur). Best
+		// effort côté serveur (cf. etii_server.c), mais un échec d'ENVOI ici
+		// signale une connexion déjà cassée : on la referme et on laisse
+		// l'appelant réessayer avec une connexion fraîche, plutôt que de
+		// poursuivre sur un flux potentiellement désynchronisé.
+		client_identity_t identity = g_client_identity_template;
+		identity.fork_seq = client_possibility->fork_seq;
+		uint8_t identity_buf[CLIENT_IDENTITY_WIRE_MAX_SIZE];
+		int32_t identity_len = client_identity_encode(&identity, identity_buf, sizeof(identity_buf));
+		int hello_ok = identity_len >= 0
+			&& send_instruction(socket_id, INST_CLIENT_HELLO) > 0
+			&& send_all(socket_id, &identity_len, sizeof(identity_len)) == (long)sizeof(identity_len)
+			&& send_all(socket_id, identity_buf, (size_t)identity_len) == (long)identity_len;
+		if (!hello_ok) {
+			log_error("échec de l'envoi du hello d'identité — connexion abandonnée\n");
+			close_socket(socket_id);
+			return -1;
+		}
+
 		client_possibility->socket_id = socket_id;
 		times(&client_possibility->start_socket);
 	}

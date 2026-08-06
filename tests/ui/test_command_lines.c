@@ -1342,7 +1342,7 @@ TEST do_command_line_pause_broadcasts_to_control_sessions(void)
     int saved_req = request;
     request = REQUEST_CONTINUE;
 
-    control_hello_t h = { .pid = 999, .nb_forks = 1, .mode = 0 };
+    control_hello_t h = { .pid = 999, .nb_forks = 1, .identity = { .mode = 0 } };
     int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
@@ -1416,7 +1416,7 @@ TEST admin_apply_remote_command_pause_broadcasts_to_control_sessions(void)
     int saved_req = request;
     request = REQUEST_CONTINUE;
 
-    control_hello_t h = { .pid = 998, .nb_forks = 1, .mode = 0 };
+    control_hello_t h = { .pid = 998, .nb_forks = 1, .identity = { .mode = 0 } };
     int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 

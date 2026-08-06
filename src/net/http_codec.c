@@ -438,6 +438,55 @@ static const char *client_mode_label(uint8_t mode)
     }
 }
 
+/**
+ * @brief Écrit dans `out` une chaîne JSON valide (guillemets inclus) de
+ *        `in`, échappant `"`/`\` et remplaçant les caractères de contrôle
+ *        par un espace. Nécessaire car `label` (option CLI `--name`) est une
+ *        donnée DÉCLARÉE par le client — jamais vérifiée — contrairement à
+ *        `peer_ip` ou aux champs hexadécimaux (`machine_uid_hex`/`client_uid_hex`,
+ *        toujours `[0-9a-f]`) : l'embarquer tel quel casserait la structure
+ *        JSON de la réponse dès qu'il contient un `"` ou un `\`.
+ *
+ * @param in       Chaîne source, NUL-terminée.
+ * @param out      Tampon destination (toujours NUL-terminé en sortie).
+ * @param out_size Taille de `out` — tronque proprement (jamais de guillemet
+ *                 fermant manquant) si trop petit.
+ */
+static void json_escape_label(const char *in, char *out, size_t out_size)
+{
+    if (out_size == 0) {
+        return;
+    }
+    if (out_size < 3) {
+        out[0] = '\0';
+        return;
+    }
+    size_t o = 0;
+    out[o++] = '"';
+    for (size_t i = 0; in[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '"' || c == '\\') {
+            if (o + 3 >= out_size) { /* \c + guillemet fermant + NUL */
+                break;
+            }
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c < 0x20) {
+            if (o + 2 >= out_size) {
+                break;
+            }
+            out[o++] = ' ';
+        } else {
+            if (o + 2 >= out_size) {
+                break;
+            }
+            out[o++] = (char)c;
+        }
+    }
+    out[o++] = '"';
+    out[o] = '\0';
+}
+
 int http_json_format_clients(char *buf, size_t size, const http_client_info_t *infos, int count)
 {
     if (buf == NULL || size == 0 || (infos == NULL && count > 0) || count < 0) {
@@ -452,10 +501,16 @@ int http_json_format_clients(char *buf, size_t size, const http_client_info_t *i
     offset += (size_t)written;
 
     for (int i = 0; i < count; i++) {
+        char label_json[2 * HTTP_CLIENT_LABEL_MAX + 3];
+        json_escape_label(infos[i].label, label_json, sizeof(label_json));
+
         written = snprintf(buf + offset, size - offset,
-            "%s{\"pid\":%d,\"forks\":%d,\"mode\":\"%s\",\"ip\":\"%s\",\"last_activity\":%lld,\"stats\":",
-            (i == 0) ? "" : ",", infos[i].pid, infos[i].nb_forks,
-            client_mode_label(infos[i].mode), infos[i].peer_ip, infos[i].last_activity);
+            "%s{\"session_no\":%llu,\"pid\":%d,\"forks\":%d,\"mode\":\"%s\",\"label\":%s,"
+            "\"machine_uid\":\"%s\",\"client_uid\":\"%s\",\"ip\":\"%s\",\"last_activity\":%lld,\"stats\":",
+            (i == 0) ? "" : ",", infos[i].session_no, infos[i].pid, infos[i].nb_forks,
+            client_mode_label(infos[i].mode), label_json,
+            infos[i].machine_uid_hex, infos[i].client_uid_hex,
+            infos[i].peer_ip, infos[i].last_activity);
         if (written < 0 || (size_t)written >= size - offset) {
             return -1;
         }

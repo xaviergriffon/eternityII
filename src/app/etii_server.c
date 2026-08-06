@@ -665,10 +665,40 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 log_error("control hello : registre de sessions de contrôle plein, session refusée\n");
                 return 0;
             }
-            log_event("session de contrôle enregistrée (pid=%d, forks=%d, mode=%u) -> slot %d",
-                      hello.pid, hello.nb_forks, (unsigned)hello.mode, idx);
+            log_event("session de contrôle enregistrée (pid=%d, forks=%d, mode=%u, label=\"%s\") -> slot %d",
+                      hello.pid, hello.nb_forks, (unsigned)hello.identity.mode, hello.identity.label, idx);
             if (out_control_session_index != NULL) {
                 *out_control_session_index = idx;
+            }
+        } else if (instruction == INST_CLIENT_HELLO && *version_supported == 1) {
+            // Annonce d'identité sur la connexion de TRAVAIL (v12, cf.
+            // net/etii_protocol.h). Best-effort et déclaratif : une longueur
+            // hors borne désynchroniserait le flux (fermeture nécessaire,
+            // comme pour INST_CONTROL_HELLO), mais un contenu qui ne décode
+            // pas ne doit JAMAIS casser une connexion de travail — ce serait
+            // sacrifier le débit de recherche pour un champ d'affichage.
+            int32_t len = 0;
+            if (recv_all(client->socket_id, &len, sizeof(len)) != (long)sizeof(len)) {
+                log_error("client hello : longueur non reçue\n");
+                return 0;
+            }
+            if (len < 0 || len > CLIENT_IDENTITY_WIRE_MAX_SIZE) {
+                log_error("client hello : longueur hors borne (%d)\n", len);
+                return 0;
+            }
+            uint8_t buf[CLIENT_IDENTITY_WIRE_MAX_SIZE];
+            if (len > 0 && recv_all(client->socket_id, buf, (size_t)len) != (long)len) {
+                log_error("client hello : payload incomplet\n");
+                return 0;
+            }
+            if (client_identity_decode(buf, len, &client->identity) != 0) {
+                log_error("client hello : décodage échoué (connexion conservée)\n");
+            } else {
+                client->has_identity = 1;
+#ifdef DEBUG_SOCKET
+                log_event("connexion de travail identifiée (fork_seq=%d, label=\"%s\")",
+                          client->identity.fork_seq, client->identity.label);
+#endif // DEBUG_SOCKET
             }
         } else if (instruction == INST_TEST_CONNECTED) {
             send_instruction(client->socket_id, INST_TEST_CONNECTED);
@@ -1151,6 +1181,7 @@ void init_server_thread_pool(struct array_part *rotateParts)
         thread_params[i].compteur = i;
         thread_params[i].rotate_parts = rotateParts;
         thread_params[i].peer_ip[0] = '\0';
+        thread_params[i].has_identity = 0;
         fileUpdates[i] = 0;
     }
 }
@@ -1198,6 +1229,9 @@ int try_assign_client_slot(int client_id, const char *peer_ip, int *busy_logged)
             strncpy(thread_params[t].peer_ip, peer_ip, PEER_IP_MAX_LEN - 1);
             thread_params[t].peer_ip[PEER_IP_MAX_LEN - 1] = '\0';
         }
+        // Nouvelle connexion sur ce slot : toute identité laissée par
+        // l'occupant précédent doit être oubliée avant le prochain hello.
+        thread_params[t].has_identity = 0;
     }
 
     int nbCreated = 0;
@@ -1214,6 +1248,7 @@ int try_assign_client_slot(int client_id, const char *peer_ip, int *busy_logged)
                 strncpy(thread_params[e].peer_ip, peer_ip, PEER_IP_MAX_LEN - 1);
                 thread_params[e].peer_ip[PEER_IP_MAX_LEN - 1] = '\0';
             }
+            thread_params[e].has_identity = 0;
         }
         nbCreated++;
     }

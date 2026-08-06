@@ -26,6 +26,7 @@
 #include "app/etii_statistic.h"
 #include "core/datamanager.h"
 #include "core/best_board.h"
+#include "net/client_identity.h"
 #include "net/local_socket.h"
 #include "net/ipc_protocol.h"
 #include "ui/command_lines.h"
@@ -54,13 +55,16 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Client de recherche : explore l'arbre et renvoie ses résultats au serveur.",
 	  "serveur (défaut localhost) : hôte du serveur. nb_threads (défaut 1) :\n"
 	  "processus de recherche forkés. max_stock : possibilités conservées\n"
-	  "localement par processus avant délégation au serveur." },
+	  "localement par processus avant délégation au serveur.\n"
+	  "Options utiles : --name <label> (identité affichée côté serveur, défaut le\n"
+	  "nom d'hôte), --machine-uid-file <chemin> (identité machine persistante)." },
 	{ "pruner",
 	  "pruner [serveur] [nb_threads] [pieces.csv] [batch]",
 	  "Client pruner : valide par lots les possibilités non vérifiées du serveur.",
 	  "batch : taille du lot d'échange avec le serveur (borné à PRUNER_BATCH_MAX ;\n"
 	  "modifiable en cours d'exécution via la commande console prunerBatch <n>).\n"
-	  "Avec --gpu, le contrôle des lots est exécuté sur le GPU (build CUDA=1)." },
+	  "Avec --gpu, le contrôle des lots est exécuté sur le GPU (build CUDA=1).\n"
+	  "Options utiles : --name <label>, --machine-uid-file <chemin> (cf. help client)." },
 	{ "test",
 	  "test [pieces.csv]",
 	  "Mode autonome : recherche locale mono-processus, sans serveur.",
@@ -102,6 +106,20 @@ static const cli_help_topic_t cli_topics[] = {
 	  "les autres (pause, limit, ...) et les autres routes restent sans\n"
 	  "authentification, comme avant. Sans --http-port : accepté, avertissement\n"
 	  "au démarrage (jeton inutilisé)." },
+	{ "--name",
+	  "--name <label>",
+	  "Client/pruner : libellé déclaré, affiché côté serveur (défaut : nom d'hôte).",
+	  "Purement déclaratif (jamais vérifié par le serveur, à la différence de l'IP\n"
+	  "du pair) — cf. docs/conception/identification_clients.md. Visible dans la\n"
+	  "commande console `clients` et `GET /api/v1/clients`. Ignorée en mode serveur." },
+	{ "--machine-uid-file",
+	  "--machine-uid-file <chemin>",
+	  "Client/pruner : chemin de l'identité machine persistante (défaut ./eternityii-machine_uid).",
+	  "Nonce tiré au premier lancement puis relu aux suivants, pour que les\n"
+	  "statistiques cumulées d'une même machine restent corrélables après un\n"
+	  "redémarrage du client. Fichier absent/illisible : régénéré silencieusement.\n"
+	  "Répertoire non inscriptible : identité volatile pour cette exécution\n"
+	  "(avertissement), la recherche continue normalement. Ignorée en mode serveur." },
 	{ "--gpu",
 	  "--gpu",
 	  "Pruner : exécute le contrôle des lots sur le GPU (build CUDA=1 uniquement).",
@@ -564,6 +582,59 @@ void init_childs(void) {
         fork_statistics[c].possibilities_in_stock = 0;
         fork_statistics[c].shots_per_second = 0;
     }
+}
+
+void resolve_client_label(const char *cli_label, const char *hostname_or_null,
+                           char *out, size_t out_size)
+{
+	if (out == NULL || out_size == 0) {
+		return;
+	}
+	const char *source = "?";
+	if (cli_label != NULL && cli_label[0] != '\0') {
+		source = cli_label;
+	} else if (hostname_or_null != NULL && hostname_or_null[0] != '\0') {
+		source = hostname_or_null;
+	}
+	strncpy(out, source, out_size - 1);
+	out[out_size - 1] = '\0';
+}
+
+void init_client_identity(void)
+{
+	memset(&g_client_identity_template, 0, sizeof(g_client_identity_template));
+
+	machine_uid_status_t st = machine_uid_load_or_create(machine_uid_file_path,
+	                                                      g_client_identity_template.machine_uid);
+	if (st == MACHINE_UID_CREATED) {
+		log_info("identité : nouveau machine_uid généré et enregistré dans \"%s\"\n",
+		         machine_uid_file_path);
+	} else if (st == MACHINE_UID_VOLATILE) {
+		log_error("identité : impossible d'écrire le machine_uid dans \"%s\" — "
+		          "identité volatile pour cette exécution\n", machine_uid_file_path);
+	}
+
+	if (client_identity_random_bytes(g_client_identity_template.client_uid, CLIENT_UID_BYTES) != 0) {
+		log_error("identité : génération du client_uid échouée — champ laissé à zéro\n");
+	}
+
+	g_client_identity_template.fork_seq = -1;
+#ifdef WITH_CUDA
+	g_client_identity_template.mode = (uint8_t)(gpu_pruner_mode ? CLIENT_MODE_GPU_PRUNER
+	                                             : (pruner_mode ? CLIENT_MODE_PRUNER : CLIENT_MODE_SEARCH));
+#else
+	g_client_identity_template.mode = (uint8_t)(pruner_mode ? CLIENT_MODE_PRUNER : CLIENT_MODE_SEARCH);
+#endif
+
+	char hostname[CLIENT_LABEL_MAX];
+	hostname[0] = '\0';
+	const char *hostname_ptr = NULL;
+	if (gethostname(hostname, sizeof(hostname)) == 0) {
+		hostname[CLIENT_LABEL_MAX - 1] = '\0';
+		hostname_ptr = hostname;
+	}
+	resolve_client_label(client_label, hostname_ptr,
+	                      g_client_identity_template.label, CLIENT_LABEL_MAX);
 }
 
 /**

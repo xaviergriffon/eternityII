@@ -150,7 +150,7 @@ int main(int argc, const char *argv[]) {
     exit(EXIT_SUCCESS);
 }
 
-void run_client(const char *hostname, const char *file);
+void run_client(const char *hostname, const char *file, int fork_seq);
 
 /**
  * @brief Gère le client TCP.
@@ -168,6 +168,12 @@ void handle_client(int argc, const char *argv[]) {
     init_childs();
     init_counters();
     init_signals();
+
+    // Identité déclarée (v12) : résolue UNE FOIS ici, avant tout fork, pour
+    // que tous les forks héritent (copy-on-write) le même machine_uid/
+    // client_uid/label — seul fork_seq diffère, fixé par chaque connexion à
+    // l'émission de son propre hello (cf. app_runtime.h).
+    init_client_identity();
 
     // Map de lookup construite ICI, une seule fois, AVANT la boucle de fork() :
     // elle n'est plus jamais écrite ensuite, donc les process de recherche
@@ -258,7 +264,7 @@ void handle_client(int argc, const char *argv[]) {
 #endif // DEBUG_THREAD
                 NB_THREADS = 1;
                 run_fork_checker(main_addr);
-                run_client(serverIp, parts_files);
+                run_client(serverIp, parts_files, c);
 
                 if (fork_checker_socket_id > 0) {
                     close(fork_checker_socket_id);
@@ -415,13 +421,14 @@ void handle_test(const char *file) {
  *
  * @param hostname Le nom d'hôte auquel se connecter.
  * @param file Le fichier à traiter.
+ * @param fork_seq Rang de ce fork (0..N-1) parmi ceux de son process parent.
  */
-void run_client(const char *hostname, const char *file)
+void run_client(const char *hostname, const char *file, int fork_seq)
 {
 	// On indique au manager de passer par un serveur
 	set_server_ip(hostname);
 
-    run_mono_client(file);
+    run_mono_client(file, fork_seq);
 
 	// Sauvegarde de secours si les files ne sont pas vides (anomalie en mode
 	// client) — extraite dans app_runtime.c pour être testable.
@@ -446,6 +453,9 @@ void run_auto(const char *file)
 	first_possibility(parts.map, parts.rotate_parts);
 	free_search_parts(&parts);
 
-	run_mono_client(file);
+	// Mode test : mono-processus, aucun vrai fork — fork_seq n'a pas de sens
+	// ici (server_ip reste NULL, le hello de travail n'est de toute façon
+	// jamais envoyé, cf. check_and_connect_to_server).
+	run_mono_client(file, 0);
 }
 

@@ -285,13 +285,33 @@ int http_json_format_status(char *buf, size_t size, const http_status_view_t *vi
  *        évite à `http_codec.h`, pur et sans dépendance `app/`, de connaître
  *        `control_session_info_t`.
  */
+/// Longueur maximale (avec terminateur) du libellé déclaré d'un client
+/// (`http_client_info_t.label`). Valeur dupliquée de `CLIENT_LABEL_MAX`
+/// (net/client_identity.h) plutôt qu'importée : ce fichier n'a AUCUNE
+/// dépendance vers `app/` (cf. en-tête de fichier ci-dessus) — et
+/// `client_identity.h` en est volontairement une, indépendante d'`app/`.
+#define HTTP_CLIENT_LABEL_MAX 32
+/// Longueur d'un nonce (machine_uid/client_uid) encodé en hexadécimal, avec
+/// terminateur. Dupliquée de `2 * MACHINE_UID_BYTES + 1` (== `CLIENT_UID_BYTES`).
+#define HTTP_CLIENT_UID_HEX_MAX 33
+
 typedef struct {
+    /// Identifiant de session monotone, jamais réutilisé (cf.
+    /// `control_session_info_t.session_no`, app/control_registry.h).
+    unsigned long long session_no;
     /// PID du processus parent qui a envoyé le hello.
     int32_t pid;
     /// Nombre de forks de recherche gérés par ce parent.
     int32_t nb_forks;
     /// Mode du client : 0 = recherche, 1 = pruner, 2 = pruner GPU.
     uint8_t mode;
+    /// Libellé déclaré (option CLI `--name`, ou nom d'hôte par défaut) —
+    /// affichage seul, jamais une clé.
+    char label[HTTP_CLIENT_LABEL_MAX];
+    /// Nonce machine persistant, encodé en hexadécimal.
+    char machine_uid_hex[HTTP_CLIENT_UID_HEX_MAX];
+    /// Nonce de session (process parent), encodé en hexadécimal.
+    char client_uid_hex[HTTP_CLIENT_UID_HEX_MAX];
     /// Adresse IP du pair de la connexion TCP (non falsifiable, contrairement
     /// au reste du hello — cf. control_registry.h), `""` si inconnue.
     char peer_ip[HTTP_CLIENT_IP_MAX];

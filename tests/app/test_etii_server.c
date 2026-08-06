@@ -1941,9 +1941,9 @@ TEST rmnonext_thread_stops_immediately_on_request_stop(void)
 
 static void send_control_hello(int fd, int32_t pid, int32_t nb_forks, uint8_t mode)
 {
-    control_hello_t hello = { .pid = pid, .nb_forks = nb_forks, .mode = mode };
-    uint8_t buf[CONTROL_HELLO_WIRE_SIZE];
-    int32_t len = control_hello_encode(&hello, buf);
+    control_hello_t hello = { .pid = pid, .nb_forks = nb_forks, .identity = { .fork_seq = -1, .mode = mode } };
+    uint8_t buf[CONTROL_HELLO_WIRE_MAX_SIZE];
+    int32_t len = control_hello_encode(&hello, buf, sizeof(buf));
     send_all(fd, &len, sizeof(len));
     send_all(fd, buf, (size_t)len);
 }
@@ -2063,7 +2063,7 @@ TEST step_control_hello_bad_length_stops(void)
 TEST step_control_hello_registry_full_stops(void)
 {
     /* Remplit le registre pour forcer l'échec d'enregistrement. */
-    control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
+    control_hello_t h = { .pid = 1, .nb_forks = 1, .identity = { .mode = 0 } };
     int idxs[MAX_CONTROL_SESSIONS];
     int filled = 0;
     while (filled < MAX_CONTROL_SESSIONS) {
@@ -2165,7 +2165,7 @@ static void *ctrl_peer_thread(void *arg)
 
 TEST control_session_step_command_round_trip(void)
 {
-    control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
+    control_hello_t h = { .pid = 1, .nb_forks = 1, .identity = { .mode = 0 } };
     int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
     ASSERT_EQ(0, control_registry_post_command(idx, CTRL_COMMAND, "pause"));
@@ -2200,7 +2200,7 @@ TEST control_session_step_get_stats_round_trip(void)
     // control_session_step, quel que soit ce qu'une autre suite y a déjà écrit.
     best_board_init(&g_server_best_board);
 
-    control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
+    control_hello_t h = { .pid = 1, .nb_forks = 1, .identity = { .mode = 0 } };
     int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
     ASSERT_EQ(0, control_registry_post_command(idx, CTRL_GET_STATS, NULL));
@@ -2247,7 +2247,7 @@ TEST control_session_step_get_stats_updates_global_max_result(void)
     uint16_t saved_mr = max_result;
     max_result = 5; /* strictement sous le 30 rapporté par ctrl_peer_thread */
 
-    control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
+    control_hello_t h = { .pid = 1, .nb_forks = 1, .identity = { .mode = 0 } };
     int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
     ASSERT_EQ(0, control_registry_post_command(idx, CTRL_GET_STATS, NULL));
@@ -2278,7 +2278,7 @@ TEST control_session_step_get_stats_updates_global_max_result(void)
 
 TEST control_session_step_timeout_pings_and_continues(void)
 {
-    control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
+    control_hello_t h = { .pid = 1, .nb_forks = 1, .identity = { .mode = 0 } };
     int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
     /* Aucune commande postée : le tour doit expirer et déclencher un ping. */
@@ -2307,7 +2307,7 @@ TEST control_session_step_timeout_pings_and_continues(void)
 
 TEST control_session_step_ping_without_ack_stops(void)
 {
-    control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
+    control_hello_t h = { .pid = 1, .nb_forks = 1, .identity = { .mode = 0 } };
     int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 

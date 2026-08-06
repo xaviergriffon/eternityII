@@ -124,7 +124,7 @@ TEST http_server_get_clients_returns_200_empty(void)
    passer par le réseau du canal de contrôle lui-même). */
 TEST http_server_get_clients_reflects_recorded_stats(void)
 {
-    control_hello_t hello = { .pid = 4242, .nb_forks = 3, .mode = 1 };
+    control_hello_t hello = { .pid = 4242, .nb_forks = 3, .identity = { .mode = 1 } };
     int idx = control_registry_register(-1, "203.0.113.10", &hello);
     ASSERT(idx >= 0);
 
@@ -158,7 +158,7 @@ TEST http_server_get_clients_reflects_recorded_stats(void)
 /* POST /api/v1/clients/stats -> 200, "requested" reflète le nombre de sessions actives. */
 TEST http_server_post_clients_stats_returns_200(void)
 {
-    control_hello_t hello = { .pid = 5555, .nb_forks = 1, .mode = 0 };
+    control_hello_t hello = { .pid = 5555, .nb_forks = 1, .identity = { .mode = 0 } };
     int idx = control_registry_register(-1, "203.0.113.10", &hello);
     ASSERT(idx >= 0);
 

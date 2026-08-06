@@ -196,6 +196,58 @@ TEST http_token_file_without_value_is_ignored(void)
     PASS();
 }
 
+TEST name_option_strips_option_and_value_sets_global(void)
+{
+    client_label = NULL;
+    const char *argv[] = {"prog", "client", "--name", "jetson-1", "localhost", "8"};
+    int argc = parse_cli_options(6, argv);
+
+    ASSERT_EQ_FMT(4, argc, "%d");
+    ASSERT(client_label != NULL);
+    ASSERT_STR_EQ("jetson-1", client_label);
+    ASSERT_STR_EQ("client", argv[1]);
+    ASSERT_STR_EQ("localhost", argv[2]);
+    ASSERT_STR_EQ("8", argv[3]);
+    PASS();
+}
+
+/* Valeur absente (dernière position) : ignorée, client_label reste NULL. */
+TEST name_option_without_value_is_ignored(void)
+{
+    client_label = NULL;
+    const char *argv[] = {"prog", "client", "--name"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ(NULL, client_label);
+    PASS();
+}
+
+TEST machine_uid_file_option_strips_option_and_value_sets_global(void)
+{
+    machine_uid_file_path = "./eternityii-machine_uid";
+    const char *argv[] = {"prog", "client", "--machine-uid-file", "/etc/etii/machine_uid", "localhost"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_STR_EQ("/etc/etii/machine_uid", machine_uid_file_path);
+    ASSERT_STR_EQ("client", argv[1]);
+    ASSERT_STR_EQ("localhost", argv[2]);
+    PASS();
+}
+
+/* Valeur absente : ignorée, la valeur (par défaut ou déjà en place) reste inchangée. */
+TEST machine_uid_file_option_without_value_is_ignored(void)
+{
+    machine_uid_file_path = "./eternityii-machine_uid";
+    const char *argv[] = {"prog", "client", "--machine-uid-file"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_STR_EQ("./eternityii-machine_uid", machine_uid_file_path);
+    PASS();
+}
+
 /* --gpu : position-indépendante — retirée d'argv, gpu_requested positionné,
    arguments positionnels du pruner intacts (l'interprétation CUDA/non-CUDA se
    fait dans main(), pas ici). */
@@ -372,6 +424,10 @@ SUITE(static_variables_suite)
     RUN_TEST(http_port_out_of_range_values_are_ignored);
     RUN_TEST(http_token_file_strips_option_and_value_sets_global);
     RUN_TEST(http_token_file_without_value_is_ignored);
+    RUN_TEST(name_option_strips_option_and_value_sets_global);
+    RUN_TEST(name_option_without_value_is_ignored);
+    RUN_TEST(machine_uid_file_option_strips_option_and_value_sets_global);
+    RUN_TEST(machine_uid_file_option_without_value_is_ignored);
     RUN_TEST(gpu_flag_is_stripped_and_sets_global);
     RUN_TEST(gpu_flag_absent_leaves_global_untouched);
     RUN_TEST(headless_flag_is_stripped_and_sets_global);

@@ -704,7 +704,7 @@ TEST init_client_possibility_sets_fields(void)
     struct array_part rp; memset(&rp, 0, sizeof rp);
     map_big_array map; memset(&map, 0, sizeof map);
 
-    init_client_possibility(&p, &rp, &map, 3, 7, 4242);
+    init_client_possibility(&p, &rp, &map, 3, 7, 4242, 5);
 
     ASSERT_EQ_FMT(0, p.works, "%d");
     ASSERT_EQ(NULL, p.aposs);
@@ -712,6 +712,7 @@ TEST init_client_possibility_sets_fields(void)
     ASSERT_EQ(&map, p.map_part);
     ASSERT_EQ(NULL, p.tid);
     ASSERT_EQ_FMT(3, p.id, "%d");
+    ASSERT_EQ_FMT(5, p.fork_seq, "%d");
     ASSERT_EQ_FMT(4242, (int)p.pid, "%d");
     ASSERT_EQ_FMT(7, p.compteur, "%d");
     ASSERT_EQ_FMT(-1, p.max_shots_per_second, "%d");
@@ -1166,7 +1167,7 @@ TEST run_mono_client_search_stops_immediately(void)
     NB_THREADS = 1;
     request = REQUEST_STOP;
 
-    run_mono_client(parts_files);
+    run_mono_client(parts_files, 0);
 
     request = saved_req;
     NB_THREADS = saved_nb;
@@ -1185,7 +1186,7 @@ TEST run_mono_client_pruner_stops_immediately(void)
     request = REQUEST_STOP;
     pruner_mode = 1;
 
-    run_mono_client(parts_files);
+    run_mono_client(parts_files, 0);
 
     pruner_mode = saved_pruner;
     request = saved_req;
@@ -1311,7 +1312,7 @@ TEST run_mono_client_does_not_free_published_parts(void)
     int expected_sizearray = published.map->sizearray;
     set_inherited_search_parts(&published);
 
-    run_mono_client(parts_files);
+    run_mono_client(parts_files, 0);
 
     /* Toujours intactes et exploitables après le passage du « fork ». */
     ASSERT_EQ(expected_size, published.rotate_parts->size);
