@@ -1343,7 +1343,7 @@ TEST do_command_line_pause_broadcasts_to_control_sessions(void)
     request = REQUEST_CONTINUE;
 
     control_hello_t h = { .pid = 999, .nb_forks = 1, .mode = 0 };
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     char cmd[] = "pause";
@@ -1417,7 +1417,7 @@ TEST admin_apply_remote_command_pause_broadcasts_to_control_sessions(void)
     request = REQUEST_CONTINUE;
 
     control_hello_t h = { .pid = 998, .nb_forks = 1, .mode = 0 };
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("pause"), "%d");

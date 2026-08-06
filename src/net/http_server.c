@@ -137,6 +137,8 @@ int http_clients_collect(http_client_info_t *out, int max)
         out[i].pid = infos[i].pid;
         out[i].nb_forks = infos[i].nb_forks;
         out[i].mode = infos[i].mode;
+        strncpy(out[i].peer_ip, infos[i].peer_ip, HTTP_CLIENT_IP_MAX - 1);
+        out[i].peer_ip[HTTP_CLIENT_IP_MAX - 1] = '\0';
         out[i].last_activity = (long long)infos[i].last_activity;
         out[i].has_stats = infos[i].has_stats;
         out[i].stats_shots_per_second = (unsigned long long)infos[i].stats.shots_per_second;

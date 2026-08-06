@@ -38,6 +38,12 @@
 /// (ex. "Bearer " + un jeton de `HTTP_ADMIN_TOKEN_MAX` octets, cf.
 /// static_variables.h — marge incluse pour ne jamais tronquer un jeton valide).
 #define HTTP_AUTHORIZATION_MAX 320
+/// Longueur maximale (avec terminateur) de l'adresse IP du pair d'une session
+/// de contrôle (`http_client_info_t.peer_ip`), formatée côté serveur par
+/// `inet_ntop`. Valeur volontairement dupliquée de `PEER_IP_MAX_LEN`
+/// (app/static_variables.h) plutôt qu'importée : ce fichier n'a AUCUNE
+/// dépendance vers `app/` (cf. en-tête de fichier ci-dessus).
+#define HTTP_CLIENT_IP_MAX 46
 
 /**
  * @brief Requête HTTP parsée : méthode, chemin, et vue sur le corps (pas de
@@ -286,6 +292,9 @@ typedef struct {
     int32_t nb_forks;
     /// Mode du client : 0 = recherche, 1 = pruner, 2 = pruner GPU.
     uint8_t mode;
+    /// Adresse IP du pair de la connexion TCP (non falsifiable, contrairement
+    /// au reste du hello — cf. control_registry.h), `""` si inconnue.
+    char peer_ip[HTTP_CLIENT_IP_MAX];
     /// Horodatage Unix (secondes) de la dernière activité observée.
     long long last_activity;
     /// 1 si les champs `stats_*`/`stats_time` sont valides (un `CTRL_STATS` a

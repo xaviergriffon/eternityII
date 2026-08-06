@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <errno.h>
 
 #include "ui/logger.h"
@@ -658,7 +660,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 log_error("control hello : décodage échoué\n");
                 return 0;
             }
-            int idx = control_registry_register(client->socket_id, &hello);
+            int idx = control_registry_register(client->socket_id, client->peer_ip, &hello);
             if (idx < 0) {
                 log_error("control hello : registre de sessions de contrôle plein, session refusée\n");
                 return 0;
@@ -1148,6 +1150,7 @@ void init_server_thread_pool(struct array_part *rotateParts)
         thread_params[i].tid = NULL;
         thread_params[i].compteur = i;
         thread_params[i].rotate_parts = rotateParts;
+        thread_params[i].peer_ip[0] = '\0';
         fileUpdates[i] = 0;
     }
 }
@@ -1182,7 +1185,7 @@ void configure_client_socket(int client_id)
  *                    pour cet épisode d'attente.
  * @return L'indice du slot affecté, ou -1 (l'appelant réessaie).
  */
-int try_assign_client_slot(int client_id, int *busy_logged)
+int try_assign_client_slot(int client_id, const char *peer_ip, int *busy_logged)
 {
     int thread_id = -1;
     /* recherche d'un thread libre (existe mais en attente de client) */
@@ -1191,6 +1194,10 @@ int try_assign_client_slot(int client_id, int *busy_logged)
         thread_id = t;
         thread_params[t].socket_id = client_id;
         times(&thread_params[t].start_socket);
+        if (peer_ip != NULL) {
+            strncpy(thread_params[t].peer_ip, peer_ip, PEER_IP_MAX_LEN - 1);
+            thread_params[t].peer_ip[PEER_IP_MAX_LEN - 1] = '\0';
+        }
     }
 
     int nbCreated = 0;
@@ -1203,6 +1210,10 @@ int try_assign_client_slot(int client_id, int *busy_logged)
             thread_id = e;
             thread_params[e].socket_id = client_id;
             times(&thread_params[e].start_socket);
+            if (peer_ip != NULL) {
+                strncpy(thread_params[e].peer_ip, peer_ip, PEER_IP_MAX_LEN - 1);
+                thread_params[e].peer_ip[PEER_IP_MAX_LEN - 1] = '\0';
+            }
         }
         nbCreated++;
     }
@@ -1256,8 +1267,10 @@ void runserver(const char* file)
     while (request != REQUEST_STOP) {
         int client_id;
         int thread_id;
+        struct sockaddr_in peer_addr;
+        socklen_t peer_addr_len = sizeof(peer_addr);
 
-        if((client_id = accept(socket_id, NULL, 0)) < 0)
+        if((client_id = accept(socket_id, (struct sockaddr *)&peer_addr, &peer_addr_len)) < 0)
         {
             if (errno == EINTR) {
                 /* accept() interrompu par un signal (ex. SIGWINCH installé par
@@ -1275,12 +1288,16 @@ void runserver(const char* file)
             }
         }
         configure_client_socket(client_id);
-        log_event("nouveau client connecté");
+        char peer_ip[PEER_IP_MAX_LEN];
+        if (inet_ntop(AF_INET, &peer_addr.sin_addr, peer_ip, sizeof(peer_ip)) == NULL) {
+            snprintf(peer_ip, sizeof(peer_ip), "?");
+        }
+        log_event("nouveau client connecté (%s)", peer_ip);
 
         thread_id = -1;
         int busy_logged = 0; /* « all threads busy » : journalisé une seule fois par épisode d'attente */
         while (thread_id == -1) {
-            thread_id = try_assign_client_slot(client_id, &busy_logged);
+            thread_id = try_assign_client_slot(client_id, peer_ip, &busy_logged);
         }
     }
     g_server_rotate_parts = NULL;

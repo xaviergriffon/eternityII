@@ -125,7 +125,7 @@ TEST http_server_get_clients_returns_200_empty(void)
 TEST http_server_get_clients_reflects_recorded_stats(void)
 {
     control_hello_t hello = { .pid = 4242, .nb_forks = 3, .mode = 1 };
-    int idx = control_registry_register(-1, &hello);
+    int idx = control_registry_register(-1, "203.0.113.10", &hello);
     ASSERT(idx >= 0);
 
     control_stats_t stats = {
@@ -146,6 +146,7 @@ TEST http_server_get_clients_reflects_recorded_stats(void)
     ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
     ASSERT(strstr(resp, "\"pid\":4242") != NULL);
     ASSERT(strstr(resp, "\"mode\":\"pruner\"") != NULL);
+    ASSERT(strstr(resp, "\"ip\":\"203.0.113.10\"") != NULL);
     ASSERT(strstr(resp, "\"shots_per_second\":999") != NULL);
     ASSERT(strstr(resp, "\"pruner_removed\":1") != NULL);
 
@@ -158,7 +159,7 @@ TEST http_server_get_clients_reflects_recorded_stats(void)
 TEST http_server_post_clients_stats_returns_200(void)
 {
     control_hello_t hello = { .pid = 5555, .nb_forks = 1, .mode = 0 };
-    int idx = control_registry_register(-1, &hello);
+    int idx = control_registry_register(-1, "203.0.113.10", &hello);
     ASSERT(idx >= 0);
 
     int sv[2];

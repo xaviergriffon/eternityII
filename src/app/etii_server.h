@@ -27,6 +27,10 @@ typedef struct
     int compteur;
     struct tms start_socket;
     struct array_part *rotate_parts;
+    /// Adresse IP du pair de la connexion TCP courante (`accept()`, formatée par
+    /// `inet_ntop`), affectée avec `socket_id` dans `try_assign_client_slot`.
+    /// Vide (`""`) tant qu'aucun client n'a jamais occupé ce slot.
+    char peer_ip[PEER_IP_MAX_LEN];
 } client_t;
 
 /**
@@ -324,9 +328,13 @@ void configure_client_socket(int client_id);
  * (`*busy_logged`) puis cède le CPU.
  *
  * @param client_id   Socket du client accepté.
+ * @param peer_ip     Adresse IP du pair (`inet_ntop` sur le `sockaddr` renvoyé
+ *                    par `accept()`), copiée dans le slot affecté avec
+ *                    `socket_id`. `NULL` accepté (le slot garde son
+ *                    `peer_ip` précédent, ou `""` si jamais affecté).
  * @param busy_logged In/out : 1 si l'épisode d'attente a déjà été journalisé.
  * @return L'indice du slot affecté, ou -1 (l'appelant réessaie).
  */
-int try_assign_client_slot(int client_id, int *busy_logged);
+int try_assign_client_slot(int client_id, const char *peer_ip, int *busy_logged);
 
 #endif /* etii_server_h */

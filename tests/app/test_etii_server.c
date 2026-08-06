@@ -1693,6 +1693,7 @@ TEST init_pool_initializes_all_slots(void)
         ASSERT_EQ(NULL, thread_params[i].tid);
         ASSERT_EQ_FMT(i, thread_params[i].compteur, "%d");
         ASSERT_EQ(&rp, thread_params[i].rotate_parts);
+        ASSERT_STR_EQ("", thread_params[i].peer_ip);
         ASSERT_EQ_FMT(0ULL, fileUpdates[i], "%llu");
     }
 
@@ -1748,11 +1749,38 @@ TEST try_assign_free_slot_direct(void)
     NB_THREADS = 2;
 
     int busy_logged = 0;
-    int id = try_assign_client_slot(42, &busy_logged);
+    int id = try_assign_client_slot(42, "203.0.113.10", &busy_logged);
 
     ASSERT_EQ_FMT(1, id, "%d");
     ASSERT_EQ_FMT(42, slots[1].socket_id, "%d");
+    ASSERT_STR_EQ("203.0.113.10", slots[1].peer_ip);
     ASSERT_EQ_FMT(0, busy_logged, "%d");
+
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    PASS();
+}
+
+/* peer_ip == NULL : le slot affecté garde son peer_ip précédent (cf. contrat
+ * documenté dans etii_server.h) au lieu d'être écrasé par une chaîne vide. */
+TEST try_assign_null_peer_ip_keeps_previous_value(void)
+{
+    client_t *saved_tp = thread_params;
+    int saved_nb = NB_THREADS;
+
+    client_t slots[1];
+    memset(slots, 0, sizeof slots);
+    slots[0].exist = 1; slots[0].socket_id = -1;   /* libre */
+    strncpy(slots[0].peer_ip, "203.0.113.10", sizeof(slots[0].peer_ip) - 1);
+    thread_params = slots;
+    NB_THREADS = 1;
+
+    int busy_logged = 0;
+    int id = try_assign_client_slot(42, NULL, &busy_logged);
+
+    ASSERT_EQ_FMT(0, id, "%d");
+    ASSERT_EQ_FMT(42, slots[0].socket_id, "%d");
+    ASSERT_STR_EQ("203.0.113.10", slots[0].peer_ip);
 
     thread_params = saved_tp;
     NB_THREADS = saved_nb;
@@ -1776,11 +1804,12 @@ TEST try_assign_regenerates_empty_slot(void)
     close(sv[1]);                                  /* pair fermé -> session EOF immédiate */
 
     int busy_logged = 0;
-    int id = try_assign_client_slot(sv[0], &busy_logged);
+    int id = try_assign_client_slot(sv[0], "203.0.113.10", &busy_logged);
 
     ASSERT_EQ_FMT(0, id, "%d");
     ASSERT_EQ_FMT(1, slots[0].exist, "%d");
     ASSERT_EQ_FMT(sv[0], slots[0].socket_id, "%d");
+    ASSERT_STR_EQ("203.0.113.10", slots[0].peer_ip);
 
     /* La session se vide immédiatement (EOF) : le thread ferme le socket et
      * libère le slot — on attend sa fin avant de rendre la fixture. */
@@ -1808,9 +1837,9 @@ TEST try_assign_all_busy_logs_once(void)
 
     unlink("events.log");
     int busy_logged = 0;
-    ASSERT_EQ_FMT(-1, try_assign_client_slot(42, &busy_logged), "%d");
+    ASSERT_EQ_FMT(-1, try_assign_client_slot(42, "203.0.113.10", &busy_logged), "%d");
     ASSERT_EQ_FMT(1, busy_logged, "%d");
-    ASSERT_EQ_FMT(-1, try_assign_client_slot(42, &busy_logged), "%d");   /* déjà journalisé */
+    ASSERT_EQ_FMT(-1, try_assign_client_slot(42, "203.0.113.10", &busy_logged), "%d");   /* déjà journalisé */
     ASSERT_EQ_FMT(1, busy_logged, "%d");
     ASSERT_EQ_FMT(9, slots[0].socket_id, "%d");    /* fixture intacte */
     unlink("events.log");
@@ -2038,7 +2067,7 @@ TEST step_control_hello_registry_full_stops(void)
     int idxs[MAX_CONTROL_SESSIONS];
     int filled = 0;
     while (filled < MAX_CONTROL_SESSIONS) {
-        int idx = control_registry_register(1000 + filled, &h);
+        int idx = control_registry_register(1000 + filled, "203.0.113.10", &h);
         if (idx < 0) break;
         idxs[filled++] = idx;
     }
@@ -2137,7 +2166,7 @@ static void *ctrl_peer_thread(void *arg)
 TEST control_session_step_command_round_trip(void)
 {
     control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
     ASSERT_EQ(0, control_registry_post_command(idx, CTRL_COMMAND, "pause"));
 
@@ -2172,7 +2201,7 @@ TEST control_session_step_get_stats_round_trip(void)
     best_board_init(&g_server_best_board);
 
     control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
     ASSERT_EQ(0, control_registry_post_command(idx, CTRL_GET_STATS, NULL));
 
@@ -2219,7 +2248,7 @@ TEST control_session_step_get_stats_updates_global_max_result(void)
     max_result = 5; /* strictement sous le 30 rapporté par ctrl_peer_thread */
 
     control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
     ASSERT_EQ(0, control_registry_post_command(idx, CTRL_GET_STATS, NULL));
 
@@ -2250,7 +2279,7 @@ TEST control_session_step_get_stats_updates_global_max_result(void)
 TEST control_session_step_timeout_pings_and_continues(void)
 {
     control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
     /* Aucune commande postée : le tour doit expirer et déclencher un ping. */
 
@@ -2279,7 +2308,7 @@ TEST control_session_step_timeout_pings_and_continues(void)
 TEST control_session_step_ping_without_ack_stops(void)
 {
     control_hello_t h = { .pid = 1, .nb_forks = 1, .mode = 0 };
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     int sv[2];
@@ -2398,6 +2427,7 @@ SUITE(etii_server_suite)
     RUN_TEST(init_pool_initializes_all_slots);
     RUN_TEST(configure_client_socket_sets_timeouts);
     RUN_TEST(try_assign_free_slot_direct);
+    RUN_TEST(try_assign_null_peer_ip_keeps_previous_value);
     RUN_TEST(try_assign_regenerates_empty_slot);
     RUN_TEST(try_assign_all_busy_logs_once);
     RUN_TEST(rmnonext_pass_prunes_when_idle);
