@@ -17,7 +17,7 @@ Sources live under `src/`, split into four domains. Includes are **explicit and 
 | `src/ui/`   | Logging, console, command handling | `logger` `logger_ncurses`(c) `console` `command_lines` `command_match` `command_history` `line_edit` |
 | `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_control` `control_registry` `app_runtime` `etii_statistic`(h) `static_variables` `gpu_pruner`(.cu/.h) |
 
-Other top-level dirs: `data/` (puzzle definitions `pieces.csv`, `pieces16.csv`), `build/` (compilation objects, mirrors `src/`, gitignored), `tests/` (unit tests). Adding a `.c` means dropping it under the right `src/<domain>/` and adding its `build/<domain>/<name>.o` to the `OBJS` list (and to `add_executable` in `CMakeLists.txt`).
+Other top-level dirs: `data/` (puzzle definitions `pieces.csv`, `pieces16.csv`), `build/` (compilation objects, mirrors `src/`, gitignored), `tests/` (unit tests), `docs/` (reference documentation of the **implemented** behaviour) and `docs/conception/` (design proposals **not yet implemented** — a target, not the code's behaviour; see [docs/conception/README.md](docs/conception/README.md) for the status/lifecycle convention). Adding a `.c` means dropping it under the right `src/<domain>/` and adding its `build/<domain>/<name>.o` to the `OBJS` list (and to `add_executable` in `CMakeLists.txt`).
 
 ## Build Commands
 

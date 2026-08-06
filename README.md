@@ -93,6 +93,10 @@ La CI GitHub Actions compile **toutes les combinaisons du code** avec `WERROR=1`
 
 Le répertoire [`docs/`](docs/) rassemble la documentation détaillée :
 
+### État du code
+
+Ces documents décrivent le comportement **implémenté** :
+
 | Document | Contenu |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Architecture d'ensemble : processus/threads, IPC parent↔enfants, structure des sources. |
@@ -101,8 +105,18 @@ Le répertoire [`docs/`](docs/) rassemble la documentation détaillée :
 | [docs/console.md](docs/console.md) | Commandes interactives, zone Events, historique, interface ncurses. |
 | [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences, pannes, et le [canal de contrôle](docs/echanges_client_serveur.md#canal-de-contrôle-v9) (v9). |
 | [docs/api_http_rest.md](docs/api_http_rest.md) | API HTTP REST admin (`--http-port`) : schémas JSON complets, codes d'erreur, authentification par jeton Bearer des commandes privilégiées (`--http-token-file`), exemples client (curl, Python). |
-| [docs/identification_clients.md](docs/identification_clients.md) | **Proposition** (non implémentée) : identification unique des clients au-delà du PID — modèle d'identité, statistiques cumulées persistantes, bail à expiration sur les analyses en cours, découpage en PR. |
 | [docs/autosearch_step.md](docs/autosearch_step.md) | Flux de recherche (`autosearch_step`) et gestion mémoire d'un thread de recherche. |
 | [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (`pruner --gpu`) : prérequis de compilation et d'exécution, flux CUDA, avantages. |
 | [docs/tests_et_ci.md](docs/tests_et_ci.md) | Cibles de test, intégration bout-en-bout, Docker, couverture, CI, banc de mesure du débit de recherche. |
 | [tests/README.md](tests/README.md) | Organisation des suites unitaires, conventions, ajout d'un test. |
+
+### Conception et réflexions en cours
+
+[`docs/conception/`](docs/conception/) rassemble les documents de conception : propositions,
+arbitrages et découpages en PR **non encore implémentés**. Ils décrivent une cible, pas le
+comportement du code — voir [docs/conception/README.md](docs/conception/README.md) pour la
+convention (statut, cycle de vie).
+
+| Document | Contenu |
+|---|---|
+| [docs/conception/identification_clients.md](docs/conception/identification_clients.md) | Identification unique des clients au-delà du PID : modèle d'identité, statistiques cumulées persistantes, bail à expiration sur les analyses en cours, découpage en 7 PR. |

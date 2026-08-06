@@ -20,10 +20,10 @@ soutenir trois besoins qui vont au-delà du simple affichage lisible :
 ### 1.1 Ce qui tient lieu d'identité aujourd'hui
 
 Toute l'identité d'un client tient dans `control_hello_t`
-([src/net/control_protocol.h](../src/net/control_protocol.h)) : `pid`, `nb_forks`,
+([src/net/control_protocol.h](../../src/net/control_protocol.h)) : `pid`, `nb_forks`,
 `mode`. C'est ce que restituent la console `clients`
-([src/ui/command_lines.c](../src/ui/command_lines.c)) et
-`GET /api/v1/clients` ([src/net/http_codec.c](../src/net/http_codec.c)).
+([src/ui/command_lines.c](../../src/ui/command_lines.c)) et
+`GET /api/v1/clients` ([src/net/http_codec.c](../../src/net/http_codec.c)).
 
 Le PID est insuffisant sur trois plans :
 
@@ -40,7 +40,7 @@ affaire du seul canal de contrôle :
 
 - la connexion **de travail** (`INST_GET`/`INST_ADD`/…) est ouverte par **chaque fork
   de recherche** et ne déclare **rien** : après le handshake de version elle envoie
-  directement ses instructions ([src/app/etii_server.c](../src/app/etii_server.c)) ;
+  directement ses instructions ([src/app/etii_server.c](../../src/app/etii_server.c)) ;
 - la connexion **de contrôle** est ouverte par le **processus parent** uniquement, et
   elle est la **seule** à s'annoncer (`INST_CONTROL_HELLO`).
 
@@ -174,7 +174,7 @@ tourne pendant des mois accumule des entrées de machines définitivement partie
 
 - L'emplacement du propriétaire est une **table latérale**, adossée à l'index déjà
   présent : `analysed_index` / `hash_possibility_key`
-  ([src/core/datamanager.c](../src/core/datamanager.c)) indexe **déjà** les entrées en
+  ([src/core/datamanager.c](../../src/core/datamanager.c)) indexe **déjà** les entrées en
   analyse pour `remove_possibility_analysed`. Y adosser `{owner_uid, lease_deadline}`
   donne l'attribution **et** l'expiration sans toucher au format de
   `possibility_packet` ni à celui des backups.
@@ -219,7 +219,7 @@ tourne pendant des mois accumule des entrées de machines définitivement partie
   positionnelle, comme `--expand-level`/`--http-port`.
 - Option/variable pour le chemin du fichier `machine_uid`.
 - **Toute nouvelle option ⇒ entrée dans `cli_topics[]`**
-  ([src/app/app_runtime.c](../src/app/app_runtime.c)).
+  ([src/app/app_runtime.c](../../src/app/app_runtime.c)).
 
 ### 4.7 Persistance
 
