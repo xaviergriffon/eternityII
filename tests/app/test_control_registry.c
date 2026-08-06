@@ -35,7 +35,7 @@ TEST register_returns_valid_index_and_increments_count(void)
 {
     int before = control_registry_count();
     control_hello_t h = make_hello(1234, 4, 0);
-    int idx = control_registry_register(42, &h);
+    int idx = control_registry_register(42, "203.0.113.10", &h);
     ASSERT(idx >= 0);
     ASSERT_EQ(before + 1, control_registry_count());
 
@@ -47,7 +47,7 @@ TEST register_returns_valid_index_and_increments_count(void)
 TEST register_null_hello_rejected(void)
 {
     int before = control_registry_count();
-    ASSERT_EQ(-1, control_registry_register(1, NULL));
+    ASSERT_EQ(-1, control_registry_register(1, "203.0.113.10", NULL));
     ASSERT_EQ(before, control_registry_count());
     PASS();
 }
@@ -67,7 +67,7 @@ TEST unregister_out_of_range_is_noop(void)
 TEST post_then_wait_returns_posted_command_immediately(void)
 {
     control_hello_t h = make_hello(1, 0, 0);
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     ASSERT_EQ(0, control_registry_post_command(idx, CTRL_COMMAND, "pause"));
@@ -87,7 +87,7 @@ TEST post_then_wait_returns_posted_command_immediately(void)
 TEST post_command_without_line_leaves_empty_string(void)
 {
     control_hello_t h = make_hello(2, 0, 0);
-    int idx = control_registry_register(2, &h);
+    int idx = control_registry_register(2, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     ASSERT_EQ(0, control_registry_post_command(idx, CTRL_GET_STATS, NULL));
@@ -107,7 +107,7 @@ TEST post_command_without_line_leaves_empty_string(void)
 TEST wait_command_times_out_when_nothing_posted(void)
 {
     control_hello_t h = make_hello(3, 0, 0);
-    int idx = control_registry_register(3, &h);
+    int idx = control_registry_register(3, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     uint8_t cmd = 0;
@@ -132,7 +132,7 @@ TEST wait_command_on_never_registered_slot_returns_error(void)
     uint8_t cmd = 0;
     /* On prend un indice qu'on vient de libérer pour être sûr qu'il est inactif. */
     control_hello_t h = make_hello(4, 0, 0);
-    int idx = control_registry_register(4, &h);
+    int idx = control_registry_register(4, "203.0.113.10", &h);
     ASSERT(idx >= 0);
     control_registry_unregister(idx);
 
@@ -143,7 +143,7 @@ TEST wait_command_on_never_registered_slot_returns_error(void)
 TEST post_command_queue_fills_then_rejects(void)
 {
     control_hello_t h = make_hello(5, 0, 0);
-    int idx = control_registry_register(5, &h);
+    int idx = control_registry_register(5, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     for (int i = 0; i < CONTROL_SESSION_QUEUE_CAP; i++) {
@@ -182,7 +182,7 @@ TEST register_beyond_capacity_returns_minus_one(void)
        en tenant compte d'éventuelles sessions déjà actives d'un autre test —
        en pratique 0 ici puisque chaque test se nettoie). */
     for (int i = 0; i < MAX_CONTROL_SESSIONS; i++) {
-        int idx = control_registry_register(100 + i, &h);
+        int idx = control_registry_register(100 + i, "203.0.113.10", &h);
         if (idx < 0) {
             break;
         }
@@ -192,7 +192,7 @@ TEST register_beyond_capacity_returns_minus_one(void)
     ASSERT_EQ(MAX_CONTROL_SESSIONS, control_registry_count());
 
     /* Le registre est plein : un enregistrement de plus échoue. */
-    ASSERT_EQ(-1, control_registry_register(9999, &h));
+    ASSERT_EQ(-1, control_registry_register(9999, "203.0.113.10", &h));
 
     for (int i = 0; i < registered; i++) {
         control_registry_unregister(idxs[i]);
@@ -206,7 +206,7 @@ TEST register_beyond_capacity_returns_minus_one(void)
 TEST snapshot_reflects_registered_hello(void)
 {
     control_hello_t h = make_hello(777, 8, 2);
-    int idx = control_registry_register(9, &h);
+    int idx = control_registry_register(9, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     control_session_info_t infos[MAX_CONTROL_SESSIONS];
@@ -215,6 +215,25 @@ TEST snapshot_reflects_registered_hello(void)
     ASSERT_EQ(777, infos[0].pid);
     ASSERT_EQ(8, infos[0].nb_forks);
     ASSERT_EQ(2, (int)infos[0].mode);
+    ASSERT_STR_EQ("203.0.113.10", infos[0].peer_ip);
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+/* peer_ip == NULL est accepté (stocké comme "") : aucun appelant réel du
+   serveur ne le fait, mais les tests qui n'exercent que le hello n'ont pas à
+   la fournir (cf. control_registry_register, control_registry.h). */
+TEST snapshot_null_peer_ip_stored_as_empty_string(void)
+{
+    control_hello_t h = make_hello(1, 1, 0);
+    int idx = control_registry_register(1, NULL, &h);
+    ASSERT(idx >= 0);
+
+    control_session_info_t infos[MAX_CONTROL_SESSIONS];
+    int n = control_registry_snapshot(infos, MAX_CONTROL_SESSIONS);
+    ASSERT_EQ(1, n);
+    ASSERT_STR_EQ("", infos[0].peer_ip);
 
     control_registry_unregister(idx);
     PASS();
@@ -231,8 +250,8 @@ TEST snapshot_null_or_zero_max_returns_zero(void)
 TEST snapshot_respects_max_capacity(void)
 {
     control_hello_t h = make_hello(1, 1, 0);
-    int idx1 = control_registry_register(1, &h);
-    int idx2 = control_registry_register(2, &h);
+    int idx1 = control_registry_register(1, "203.0.113.10", &h);
+    int idx2 = control_registry_register(2, "203.0.113.10", &h);
     ASSERT(idx1 >= 0);
     ASSERT(idx2 >= 0);
 
@@ -250,7 +269,7 @@ TEST snapshot_respects_max_capacity(void)
 TEST snapshot_has_stats_false_before_any_record(void)
 {
     control_hello_t h = make_hello(1, 1, 0);
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     control_session_info_t infos[MAX_CONTROL_SESSIONS];
@@ -265,7 +284,7 @@ TEST snapshot_has_stats_false_before_any_record(void)
 TEST record_stats_reflected_in_snapshot(void)
 {
     control_hello_t h = make_hello(1, 1, 0);
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     control_stats_t stats = {
@@ -299,14 +318,14 @@ TEST record_stats_invalid_index_or_null_is_noop(void)
 TEST unregister_then_register_clears_stale_stats(void)
 {
     control_hello_t h = make_hello(1, 1, 0);
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     control_stats_t stats = { .shots_per_second = 999 };
     control_registry_record_stats(idx, &stats);
     control_registry_unregister(idx);
 
-    int idx2 = control_registry_register(2, &h);
+    int idx2 = control_registry_register(2, "203.0.113.10", &h);
     ASSERT_EQ(idx, idx2); /* même slot réutilisé */
 
     control_session_info_t infos[MAX_CONTROL_SESSIONS];
@@ -323,9 +342,9 @@ TEST unregister_then_register_clears_stale_stats(void)
 TEST broadcast_command_reaches_all_active_sessions(void)
 {
     control_hello_t h = make_hello(1, 1, 0);
-    int idx1 = control_registry_register(1, &h);
-    int idx2 = control_registry_register(2, &h);
-    int idx3 = control_registry_register(3, &h);
+    int idx1 = control_registry_register(1, "203.0.113.10", &h);
+    int idx2 = control_registry_register(2, "203.0.113.10", &h);
+    int idx3 = control_registry_register(3, "203.0.113.10", &h);
     ASSERT(idx1 >= 0);
     ASSERT(idx2 >= 0);
     ASSERT(idx3 >= 0);
@@ -348,8 +367,8 @@ TEST broadcast_command_reaches_all_active_sessions(void)
 TEST broadcast_get_stats_reaches_all_active_sessions(void)
 {
     control_hello_t h = make_hello(1, 1, 1);
-    int idx1 = control_registry_register(1, &h);
-    int idx2 = control_registry_register(2, &h);
+    int idx1 = control_registry_register(1, "203.0.113.10", &h);
+    int idx2 = control_registry_register(2, "203.0.113.10", &h);
     ASSERT(idx1 >= 0);
     ASSERT(idx2 >= 0);
 
@@ -400,7 +419,7 @@ TEST broadcast_pause_sets_desired_state_for_future_registrations(void)
     /* Une session enregistrée APRÈS le broadcast "pause" doit trouver la
        commande déjà dans sa file, sans qu'elle ait été postée explicitement. */
     control_hello_t h = make_hello(42, 2, 0);
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     uint8_t cmd = 0;
@@ -427,7 +446,7 @@ TEST broadcast_resume_clears_desired_state_for_future_registrations(void)
        aucune commande en attente : elle démarre normalement, comme un client
        qui n'aurait jamais connu de pause diffusée. */
     control_hello_t h = make_hello(43, 1, 0);
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     uint8_t cmd = 0;
@@ -454,7 +473,7 @@ TEST clients_cmd_pause_resume_also_update_desired_state(void)
 TEST touch_updates_last_activity(void)
 {
     control_hello_t h = make_hello(1, 1, 0);
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     control_session_info_t infos[1];
@@ -496,7 +515,7 @@ static void *poster_thread(void *arg)
 TEST multithread_wait_wakes_up_on_posted_command(void)
 {
     control_hello_t h = make_hello(1, 1, 0);
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     struct poster_arg arg = { .index = idx, .delay_ms = 100 };
@@ -532,7 +551,7 @@ TEST multithread_wait_wakes_up_on_posted_command(void)
 TEST auto_stats_due_immediately_after_register_is_false(void)
 {
     control_hello_t h = make_hello(1, 1, 0);
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     /* Juste après le hello, le premier sondage automatique n'est pas encore
@@ -546,7 +565,7 @@ TEST auto_stats_due_immediately_after_register_is_false(void)
 TEST auto_stats_due_after_interval_elapsed(void)
 {
     control_hello_t h = make_hello(1, 1, 0);
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     /* interval_sec <= 0 est explicitement rejeté (voir contrat). */
@@ -563,7 +582,7 @@ TEST auto_stats_due_after_interval_elapsed(void)
 TEST auto_stats_due_marks_attempt_and_resets_window(void)
 {
     control_hello_t h = make_hello(1, 1, 0);
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
 
     usleep(1100 * 1000);
@@ -586,7 +605,7 @@ TEST auto_stats_due_invalid_index_returns_zero(void)
 TEST auto_stats_due_on_unregistered_slot_returns_zero(void)
 {
     control_hello_t h = make_hello(1, 1, 0);
-    int idx = control_registry_register(1, &h);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
     ASSERT(idx >= 0);
     control_registry_unregister(idx);
 
@@ -613,6 +632,7 @@ SUITE(control_registry_suite)
     RUN_TEST(register_beyond_capacity_returns_minus_one);
 
     RUN_TEST(snapshot_reflects_registered_hello);
+    RUN_TEST(snapshot_null_peer_ip_stored_as_empty_string);
     RUN_TEST(snapshot_null_or_zero_max_returns_zero);
     RUN_TEST(snapshot_respects_max_capacity);
 

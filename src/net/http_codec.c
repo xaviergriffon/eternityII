@@ -453,9 +453,9 @@ int http_json_format_clients(char *buf, size_t size, const http_client_info_t *i
 
     for (int i = 0; i < count; i++) {
         written = snprintf(buf + offset, size - offset,
-            "%s{\"pid\":%d,\"forks\":%d,\"mode\":\"%s\",\"last_activity\":%lld,\"stats\":",
+            "%s{\"pid\":%d,\"forks\":%d,\"mode\":\"%s\",\"ip\":\"%s\",\"last_activity\":%lld,\"stats\":",
             (i == 0) ? "" : ",", infos[i].pid, infos[i].nb_forks,
-            client_mode_label(infos[i].mode), infos[i].last_activity);
+            client_mode_label(infos[i].mode), infos[i].peer_ip, infos[i].last_activity);
         if (written < 0 || (size_t)written >= size - offset) {
             return -1;
         }

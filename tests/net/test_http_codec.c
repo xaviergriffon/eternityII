@@ -333,11 +333,13 @@ TEST http_json_format_clients_golden(void)
     infos[0].pid = 111;
     infos[0].nb_forks = 4;
     infos[0].mode = 0;
+    /* infos[0].peer_ip laissé vide par le memset : IP inconnue. */
     infos[0].last_activity = 1700000000;
     infos[0].has_stats = 0;
     infos[1].pid = 222;
     infos[1].nb_forks = 0;
     infos[1].mode = 2;
+    strncpy(infos[1].peer_ip, "203.0.113.10", sizeof(infos[1].peer_ip) - 1);
     infos[1].last_activity = 1700000042;
     infos[1].has_stats = 1;
     infos[1].stats_shots_per_second = 12345;
@@ -355,8 +357,8 @@ TEST http_json_format_clients_golden(void)
     ASSERT(n > 0);
     ASSERT_STR_EQ(
         "{\"clients\":["
-        "{\"pid\":111,\"forks\":4,\"mode\":\"search\",\"last_activity\":1700000000,\"stats\":null},"
-        "{\"pid\":222,\"forks\":0,\"mode\":\"gpu_pruner\",\"last_activity\":1700000042,"
+        "{\"pid\":111,\"forks\":4,\"mode\":\"search\",\"ip\":\"\",\"last_activity\":1700000000,\"stats\":null},"
+        "{\"pid\":222,\"forks\":0,\"mode\":\"gpu_pruner\",\"ip\":\"203.0.113.10\",\"last_activity\":1700000042,"
         "\"stats\":{\"shots_per_second\":12345,\"possibility_stock\":10,\"analysed_stock\":3,"
         "\"max_result\":200,\"pruner_checked\":7,\"pruner_removed\":2,"
         "\"pruner_cells_per_second\":55,\"stats_time\":1700000040}}"

@@ -27,6 +27,7 @@
 #include <time.h>
 
 #include "net/control_protocol.h"
+#include "app/static_variables.h"   /* PEER_IP_MAX_LEN */
 
 /// Capacité de la file de commandes en attente d'UNE session (tableau
 /// circulaire borné). Largement suffisant : les commandes `clientsCmd`/
@@ -49,6 +50,10 @@ typedef struct {
     int32_t nb_forks;
     /// Mode du client : 0 = recherche, 1 = pruner, 2 = pruner GPU.
     uint8_t mode;
+    /// Adresse IP du pair de la connexion TCP (`accept()`, non falsifiable —
+    /// contrairement au reste du hello, qui reste déclaratif), copiée
+    /// telle quelle depuis `client_t.peer_ip` (etii_server.h) à l'enregistrement.
+    char peer_ip[PEER_IP_MAX_LEN];
     /// Dernière activité observée (dernier hello, post ou touch).
     time_t last_activity;
     /// 1 si `stats`/`stats_time` proviennent d'un `CTRL_STATS` déjà reçu
@@ -66,11 +71,15 @@ typedef struct {
  *
  * @param socket_id Socket de la session (informatif : ce registre n'agit
  *                  jamais sur la socket, c'est l'appelant qui la possède).
+ * @param peer_ip   Adresse IP du pair (`client_t.peer_ip`, etii_server.h),
+ *                  copiée dans le slot. `NULL` accepté (stocké comme `""`) —
+ *                  aucun appelant réel du serveur ne le fait, mais les tests
+ *                  qui n'exercent que le hello n'ont pas à la fournir.
  * @param hello     Hello décodé (`control_hello_decode`), copié dans le slot.
  * @return          L'indice du slot alloué (0 ≤ idx < MAX_CONTROL_SESSIONS),
  *                  ou -1 si le registre est plein ou `hello == NULL`.
  */
-int control_registry_register(int socket_id, const control_hello_t *hello);
+int control_registry_register(int socket_id, const char *peer_ip, const control_hello_t *hello);
 
 /**
  * @brief Libère le slot `index` (session terminée, propre ou brutale).

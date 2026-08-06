@@ -309,6 +309,7 @@ comprises (équivalent de `clientsStats`, voir plus bas).
       "pid": 4242,
       "forks": 4,
       "mode": "search",
+      "ip": "192.168.1.42",
       "last_activity": 1730000000,
       "stats": null
     },
@@ -316,6 +317,7 @@ comprises (équivalent de `clientsStats`, voir plus bas).
       "pid": 5555,
       "forks": 1,
       "mode": "pruner",
+      "ip": "192.168.1.55",
       "last_activity": 1730000042,
       "stats": {
         "shots_per_second": 12345,
@@ -338,6 +340,7 @@ comprises (équivalent de `clientsStats`, voir plus bas).
 | `pid` | entier | PID du processus **parent** du client (jamais un fork de recherche, cf. canal de contrôle) |
 | `forks` | entier ≥ 0 | Nombre de processus de recherche forkés par ce client |
 | `mode` | chaîne | `search` (client de recherche), `pruner` (élagage CPU), `gpu_pruner` (élagage GPU), ou `unknown` (valeur de repli, ne devrait pas apparaître en usage normal) |
+| `ip` | chaîne | Adresse IP du pair de la connexion TCP (`accept()`, capturée par `inet_ntop` côté serveur) — contrairement aux autres champs, **non falsifiable** : le client ne la déclare pas, elle vient de la connexion réseau elle-même. Chaîne vide si, en théorie, jamais affectée (ne devrait pas arriver pour une session enregistrée) |
 | `last_activity` | entier | Horodatage Unix (secondes) du dernier échange observé sur cette session (hello, commande acquittée, ping/ack, ou stats reçues) |
 | `stats` | objet ou `null` | `null` tant qu'aucun `CTRL_GET_STATS` n'a encore abouti pour cette session ; sinon un instantané **mis en cache** (voir ci-dessous) |
 | `stats.shots_per_second` / `.possibility_stock` / `.analysed_stock` / `.max_result` / `.pruner_checked` / `.pruner_removed` / `.pruner_cells_per_second` | entier ≥ 0 | Mêmes champs que `control_stats_t` du canal de contrôle (voir [échanges client/serveur](echanges_client_serveur.md#canal-de-contrôle-v9)) — agrégés côté client sur tous ses forks. `pruner_cells_per_second` est le pendant « coups/s » du pruner (débit de cases étudiées/seconde), 0 hors mode pruner |
@@ -502,7 +505,7 @@ sequenceDiagram
 
     App->>S: GET /api/v1/clients
     S->>R: control_registry_snapshot()
-    R-->>S: pid/forks/mode/last_activity + stats en cache (peut être null)
+    R-->>S: pid/forks/mode/ip/last_activity + stats en cache (peut être null)
     S-->>App: 200 {"clients":[...]}
 
     App->>S: POST /api/v1/clients/stats

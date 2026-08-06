@@ -124,6 +124,13 @@
 // donc volontairement indépendante et fixe plutôt qu'indexée sur NB_THREADS.
 #define MAX_CONTROL_SESSIONS 64
 
+// Longueur maximale (avec terminateur) de l'adresse IP du pair d'une connexion
+// TCP acceptée par le serveur (client_t.peer_ip, control_session_info_t.peer_ip),
+// formatée par inet_ntop. Vaut INET6_ADDRSTRLEN (46) : le serveur n'écoute
+// aujourd'hui qu'en IPv4 (create_tcp_server, AF_INET), mais dimensionner sur
+// l'IPv6 évite une deuxième constante le jour où ça change.
+#define PEER_IP_MAX_LEN 46
+
 // Intervalle (secondes) entre deux sondages automatiques CTRL_GET_STATS d'une
 // session de contrôle, quand aucune commande console (`clientsStats`, ou son
 // équivalent HTTP `POST /api/v1/clients/stats`) n'a été postée manuellement.

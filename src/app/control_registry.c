@@ -21,6 +21,7 @@ typedef struct {
 typedef struct {
     int in_use;
     int socket_id;
+    char peer_ip[PEER_IP_MAX_LEN];
     control_hello_t hello;
     time_t last_activity;
 
@@ -79,13 +80,14 @@ static void registry_init_once(void)
         pthread_cond_init(&g_sessions[i].cond, NULL);
         g_sessions[i].in_use = 0;
         g_sessions[i].socket_id = -1;
+        g_sessions[i].peer_ip[0] = '\0';
         g_sessions[i].head = 0;
         g_sessions[i].count = 0;
         g_sessions[i].has_stats = 0;
     }
 }
 
-int control_registry_register(int socket_id, const control_hello_t *hello)
+int control_registry_register(int socket_id, const char *peer_ip, const control_hello_t *hello)
 {
     pthread_once(&g_init_once, registry_init_once);
     if (hello == NULL) {
@@ -105,6 +107,12 @@ int control_registry_register(int socket_id, const control_hello_t *hello)
         pthread_mutex_lock(&s->mutex);
         s->in_use = 1;
         s->socket_id = socket_id;
+        if (peer_ip != NULL) {
+            strncpy(s->peer_ip, peer_ip, PEER_IP_MAX_LEN - 1);
+            s->peer_ip[PEER_IP_MAX_LEN - 1] = '\0';
+        } else {
+            s->peer_ip[0] = '\0';
+        }
         s->hello = *hello;
         s->last_activity = time(NULL);
         s->head = 0;
@@ -274,6 +282,8 @@ int control_registry_snapshot(control_session_info_t *out, int max)
             out[n].pid = s->hello.pid;
             out[n].nb_forks = s->hello.nb_forks;
             out[n].mode = s->hello.mode;
+            strncpy(out[n].peer_ip, s->peer_ip, PEER_IP_MAX_LEN - 1);
+            out[n].peer_ip[PEER_IP_MAX_LEN - 1] = '\0';
             out[n].last_activity = s->last_activity;
             out[n].has_stats = s->has_stats;
             out[n].stats = s->stats;
