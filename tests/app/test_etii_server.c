@@ -1532,13 +1532,16 @@ TEST check_server_step_autobackup_skipped_during_maintenance(void)
 
 /* Bail à expiration (PR7, docs/conception/identification_clients.md §4.3) :
  * check_server_step balaie et rend au stock les possibilités attribuées dont
- * le bail a expiré — un client mort (kill -9, coupure réseau) ne gèle plus
- * sa part indéfiniment. Contrairement à `datamanager_reclaim_expired_leases`
- * (testé sans horloge réelle dans test_datamanager.c, `now` étant un
- * paramètre), `check_server_step` lit l'horloge lui-même : ce test d'intégration
- * utilise donc un bail réellement court (1 s) et un sleep réel, comme
- * `auto_stats_due_after_interval_elapsed` (tests/app/test_control_registry.c)
- * pour une contrainte de temporisation équivalente. */
+ * le bail a expiré ET dont le propriétaire n'est plus vivant (aucune session
+ * de contrôle enregistrée pour son client_uid — ici, aucune n'est enregistrée
+ * du tout, donc "pas vivant" par construction) : un client mort (kill -9,
+ * coupure réseau) ne gèle plus sa part indéfiniment. Contrairement à
+ * `datamanager_reclaim_expired_leases` (testé sans horloge réelle dans
+ * test_datamanager.c, `now` étant un paramètre), `check_server_step` lit
+ * l'horloge lui-même : ce test d'intégration utilise donc un bail réellement
+ * court (1 s) et un sleep réel, comme `auto_stats_due_after_interval_elapsed`
+ * (tests/app/test_control_registry.c) pour une contrainte de temporisation
+ * équivalente. */
 TEST check_server_step_reclaims_expired_lease(void)
 {
     restock_analysed();     /* purge un éventuel reliquat "analysed" d'un autre test */
@@ -1575,6 +1578,62 @@ TEST check_server_step_reclaims_expired_lease(void)
     ASSERT_EQ_FMT(0ULL, count, "%llu");        /* plus attribuée : bail expiré */
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* rendue au stock non vérifié */
 
+    analysed_lease_seconds = saved_lease;
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
+/* Correctif (retour d'essais réels) : un client dont le canal de contrôle
+ * reste enregistré (donc vivant) ne doit JAMAIS voir son travail réclamé,
+ * même quand l'échéance fixe du bail (1 s ici) est largement dépassée -- rien
+ * ne garantit qu'une possibilité s'analyse en moins de `analysed_lease_seconds`.
+ * Reproduit exactement le scénario signalé : un client qui continue de donner
+ * signe de vie (ici simulé en laissant sa session de contrôle enregistrée)
+ * ne doit pas voir sa possibilité remise en stock -- ce qui créerait un
+ * double travail sur la même branche si ce client termine son analyse plus
+ * tard. */
+TEST check_server_step_does_not_reclaim_lease_of_alive_client(void)
+{
+    restock_analysed();
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 1;
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    memset(owner, 0x78, sizeof owner);
+
+    control_hello_t h = { .pid = 4242, .nb_forks = 1, .identity = { .mode = 0 } };
+    memcpy(h.identity.client_uid, owner, CLIENT_UID_BYTES);
+    int session_idx = control_registry_register(1, "203.0.113.20", &h);
+    ASSERT(session_idx >= 0);
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 34;
+    add_possibility_analysed_owned(&pk, -1, owner);
+
+    usleep(1100 * 1000);    /* le bail (1 s) est dépassé, mais le client reste "vivant" */
+
+    unsigned long long lastactive = 0, lastBackupUpd = 0;
+    int lastBack = 0;
+    int last_record = (int)max_result;
+    check_server_step(&lastactive, &lastBackupUpd, &lastBack, &last_record, 10);
+
+    unsigned long long count = 999;
+    int max_alloc = -999;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(1ULL, count, "%llu");        /* toujours attribuée : client vivant */
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu"); /* pas rendue au stock */
+
+    control_registry_unregister(session_idx);
     analysed_lease_seconds = saved_lease;
     thread_params = saved_tp;
     NB_THREADS = saved_nb;
@@ -2533,6 +2592,7 @@ SUITE(etii_server_suite)
     RUN_TEST(check_server_step_detects_record_and_autobackups);
     RUN_TEST(check_server_step_autobackup_skipped_during_maintenance);
     RUN_TEST(check_server_step_reclaims_expired_lease);
+    RUN_TEST(check_server_step_does_not_reclaim_lease_of_alive_client);
     RUN_TEST(check_server_stops_immediately_on_request_stop);
 
     RUN_TEST(communicate_with_client_full_session_ends_cleanly);

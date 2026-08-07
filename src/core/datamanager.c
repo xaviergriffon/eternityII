@@ -929,7 +929,7 @@ int analysed_lease_is_expired(time_t lease_deadline, time_t now) {
  *        `file_possibility[dest].lock` pris pendant que
  *        `file_possibility_analysed[f].lock` est tenu).
  */
-unsigned long long datamanager_reclaim_expired_leases(time_t now) {
+unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner_alive_fn owner_alive) {
 	unsigned long long reclaimed_total = 0;
 	for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
 		pthread_mutex_lock(&file_possibility_analysed[f].lock);
@@ -945,7 +945,12 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now) {
 				AnalysedIndexNode *prev = NULL;
 				while (node != NULL) {
 					AnalysedIndexNode *next = node->next;
-					if (node->has_owner && analysed_lease_is_expired(node->lease_deadline, now)) {
+					// Deux conditions requises pour réclamer (correctif PR7) :
+					// l'échéance ET l'absence de preuve de vivacité. Un client
+					// toujours vivant (owner_alive vrai) n'est JAMAIS réclamé,
+					// aussi longtemps l'analyse ait-elle mis.
+					if (node->has_owner && analysed_lease_is_expired(node->lease_deadline, now)
+					    && (owner_alive == NULL || !owner_alive(node->owner_uid))) {
 						Element *victim = node->element;
 						memcpy(&buf[n], victim->value, sizeof(struct possibility_packet));
 						n++;

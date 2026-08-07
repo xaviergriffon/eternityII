@@ -274,6 +274,29 @@ int control_registry_send_command_to(const char *target, uint8_t cmd, const char
 int control_registry_resolve_client_uid(const char *target, uint8_t out_client_uid[CLIENT_UID_BYTES]);
 
 /**
+ * @brief Indique si `client_uid` correspond à une session de contrôle
+ *        ACTUELLEMENT active (enregistrée) dans le registre.
+ *
+ * Correctif PR7 (bail à expiration, docs/conception/identification_clients.md
+ * section 4.3) : un test réel a montré qu'un bail purement temporel (échéance
+ * fixe depuis l'attribution) réclame le travail d'un client encore vivant dès
+ * qu'une possibilité met plus longtemps que `analysed_lease_seconds` à
+ * s'analyser — rien ne garantit qu'une analyse tienne dans ce budget. Cette
+ * fonction fournit le second critère utilisé par
+ * `datamanager_reclaim_expired_leases` : tant que le canal de contrôle du
+ * client reste enregistré (preuve directe qu'il est vivant — pings/pongs et
+ * `CTRL_STATS` réguliers), son travail n'est JAMAIS réclamé, quelle que soit
+ * la durée écoulée. Seule l'absence de session active (déconnexion détectée
+ * par `run_control_session`, qui appelle `control_registry_unregister`) lève
+ * cette protection.
+ *
+ * @param client_uid `client_uid` recherché (16 octets, jamais NULL).
+ * @return           1 si une session active porte ce `client_uid`, 0 sinon
+ *                   (aucune correspondance, ou `client_uid == NULL`).
+ */
+int control_registry_has_active_client(const uint8_t client_uid[CLIENT_UID_BYTES]);
+
+/**
  * @brief Indique si un sondage automatique `CTRL_GET_STATS` est dû pour la
  *        session `index` (aucun sondage manuel `clientsStats`/HTTP n'exclut
  *        celui-ci : les deux partagent le même but, tirer un `CTRL_STATS`

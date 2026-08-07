@@ -121,13 +121,46 @@ int datamanager_analysed_owned_by(const uint8_t owner_uid[CLIENT_UID_BYTES],
 int analysed_lease_is_expired(time_t lease_deadline, time_t now);
 
 /**
+ * @brief Callback de vivacité consulté par `datamanager_reclaim_expired_leases`
+ *        (PR7, correctif) : indique si le propriétaire `owner_uid` est encore
+ *        observable côté serveur (typiquement, un canal de contrôle toujours
+ *        enregistré — `control_registry_has_active_client`, `src/app/control_registry.h`).
+ *
+ * `datamanager.c` (domaine `core/`) ne dépend volontairement PAS de
+ * `control_registry.h` (domaine `app/`, serveur uniquement) : c'est
+ * l'appelant serveur (`check_server_step`, `src/app/etii_server.c`) qui
+ * fournit ce callback, gardant `datamanager_reclaim_expired_leases` testable
+ * sans faire vivre un registre de sessions de contrôle.
+ *
+ * @param owner_uid `client_uid` du propriétaire (16 octets).
+ * @return          1 si vivant (ne JAMAIS réclamer, quelle que soit l'échéance),
+ *                  0 si mort/inconnu (l'échéance du bail décide seule).
+ */
+typedef int (*analysed_owner_alive_fn)(const uint8_t owner_uid[CLIENT_UID_BYTES]);
+
+/**
  * @brief Balaie la table latérale d'attribution et remet dans le stock non
- *        vérifié toute possibilité dont le bail a expiré à `now` (PR7, bail
- *        à expiration, docs/conception/identification_clients.md section 4.3).
+ *        vérifié toute possibilité dont le bail a expiré à `now` **et** dont
+ *        le propriétaire n'est plus vivant (PR7, bail à expiration,
+ *        docs/conception/identification_clients.md section 4.3).
  *
  * Un client disparu (mort, coupure réseau) sans avoir acquitté ce qu'il tenait
  * ne gèle plus indéfiniment sa part du stock : passé `analysed_lease_seconds`
- * secondes sans acquittement, la possibilité est rendue automatiquement.
+ * secondes sans acquittement **et** sans preuve qu'il est toujours vivant, la
+ * possibilité est rendue automatiquement.
+ *
+ * **Correctif (retour d'essais réels) : l'échéance seule ne suffit pas.** Rien
+ * ne garantit qu'une possibilité s'analyse en moins de `analysed_lease_seconds`
+ * — un client occupé mais bel et bien vivant (il continue de répondre aux
+ * `CTRL_PING`/`CTRL_STATS` de son canal de contrôle) voyait donc son travail
+ * réclamé à tort dès que ce budget de temps était dépassé, sans rapport avec
+ * sa vivacité réelle. `owner_alive`, si non-NULL, est donc consulté en PLUS de
+ * l'échéance : une entrée n'est réclamée que si `analysed_lease_is_expired`
+ * ET `!owner_alive(owner_uid)` sont vrais tous les deux — tant que le canal de
+ * contrôle du client reste enregistré, son travail n'expire JAMAIS, aussi
+ * longtemps qu'une possibilité mette à s'analyser. `owner_alive == NULL`
+ * retombe sur l'échéance seule (comportement d'avant ce correctif ; pratique
+ * pour les tests qui ne veulent pas dépendre d'un registre de sessions).
  *
  * Balayage borné et périodique — jamais dans un chemin chaud — verrouillant
  * chaque `file_possibility_analysed[f]` le temps de son propre passage (comme
@@ -143,11 +176,14 @@ int analysed_lease_is_expired(time_t lease_deadline, time_t now);
  * backup — les baux ne sont pas persistés, section 4.7 du document) n'expire
  * jamais par ce mécanisme.
  *
- * @param now Horodatage de référence (injecté : jamais `time(NULL)` en
- *            interne, pour rester testable sans horloge réelle ni `sleep`).
- * @return    Nombre de possibilités rendues au stock.
+ * @param now         Horodatage de référence (injecté : jamais `time(NULL)`
+ *                    en interne, pour rester testable sans horloge réelle
+ *                    ni `sleep`).
+ * @param owner_alive Callback de vivacité, ou `NULL` pour ignorer la
+ *                    vivacité (échéance seule).
+ * @return            Nombre de possibilités rendues au stock.
  */
-unsigned long long datamanager_reclaim_expired_leases(time_t now);
+unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner_alive_fn owner_alive);
 
 /**
  * @brief Renvoie au serveur les possibilités analysées depuis les files locales.

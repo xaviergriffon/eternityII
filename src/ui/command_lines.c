@@ -257,9 +257,12 @@ static command_description commands[NB_COMMANDS] = {
      "aller-retour réseau vers le client, aucune commande poussée.", NULL},
     {"leaseDuration", lease_duration_interpreter, 0, CMD_CAT_CLIENTS, 1, "leaseDuration <n>",
      "fixe la durée (secondes) du bail à expiration des possibilités attribuées",
-     "Passé ce délai sans acquittement, une possibilité attribuée à un client\n"
-     "(clientsWork) est rendue automatiquement au stock non vérifié -- un client mort\n"
-     "(kill -9, coupure réseau, panne) ne gèle plus sa part indéfiniment. Balayage borné,\n"
+     "Passé ce délai ET si le client n'a plus de session de contrôle active (déconnexion\n"
+     "confirmée), une possibilité attribuée (clientsWork) est rendue automatiquement au\n"
+     "stock non vérifié -- un client mort (kill -9, coupure réseau, panne) ne gèle plus sa\n"
+     "part indéfiniment. Un client toujours connecté (canal de contrôle vivant) n'expire\n"
+     "JAMAIS, quelle que soit la durée d'analyse -- ce délai n'est qu'un minorant avant la\n"
+     "première vérification de vivacité, pas un budget de temps garanti. Balayage borné,\n"
      "au rythme du tour de statistiques serveur (10 s). <n> <= 0 désactive le bail (comme\n"
      "« limit 0 » pour la régulation de débit). N'affecte que les possibilités attribuées\n"
      "APRÈS ce changement ; défaut : ANALYSED_LEASE_DEFAULT_SECONDS (300 s).", NULL},

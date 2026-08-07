@@ -541,17 +541,45 @@ concurrentes sur la même entrée. Quel que soit l'ordre d'arrivée :
   (« déjà acquittée, rien à faire ») couvre donc aussi « déjà rendue par
   expiration », sans changement de code sur ce chemin existant.
 
-**Durée configurable, jamais bornée.** `analysed_lease_seconds`
+**Correctif — l'échéance seule ne suffit pas : elle est doublée d'une vérification
+de vivacité.** Un essai réel a révélé deux problèmes de la première version
+(échéance fixe seule) : (1) rien ne garantit qu'une possibilité s'analyse en moins
+de `analysed_lease_seconds` — un client occupé mais toujours vivant voyait son
+travail réclamé dès ce budget dépassé, sans rapport avec sa vivacité réelle ; (2)
+un client dont le travail est réclamé alors qu'il est encore vivant finit par
+soumettre ses résultats pour une possibilité déjà remise en stock (et
+potentiellement déjà réattribuée à un autre client) — double exploration de la
+même branche. `datamanager_reclaim_expired_leases(now, owner_alive)`
+(`src/core/datamanager.{h,c}`) prend donc un second paramètre, un callback de
+vivacité : une entrée n'est réclamée que si **les deux** conditions sont vraies —
+`analysed_lease_is_expired` **ET** `!owner_alive(owner_uid)`. `check_server_step`
+(`src/app/etii_server.c`) lui passe `owner_control_session_alive`, qui délègue à
+`control_registry_has_active_client(client_uid)` (`src/app/control_registry.{h,c}`) :
+tant que le canal de contrôle du client reste enregistré (preuve directe qu'il est
+vivant — pings/pongs et `CTRL_STATS` réguliers, voir *Canal de contrôle* ci-dessus),
+son travail n'expire **jamais**, aussi longtemps qu'une possibilité mette à
+s'analyser ; seule une déconnexion confirmée (`run_control_session` appelle
+`control_registry_unregister` à la fin de la session) lève cette protection.
+`datamanager.c` (domaine `core/`) ne dépend volontairement pas de
+`control_registry.h` (domaine `app/`, serveur uniquement) : c'est l'appelant qui
+fournit le callback (`owner_alive == NULL` retombe sur l'échéance seule — pratique
+pour les tests qui ne veulent pas faire vivre un registre de sessions), gardant le
+balayage testable en isolation.
+
+**Durée configurable — un minorant, pas un budget garanti.** `analysed_lease_seconds`
 (`src/app/static_variables.h`, défaut `ANALYSED_LEASE_DEFAULT_SECONDS` = 300 s) se
 règle à chaud via la commande console `leaseDuration <n>` — SERVEUR pure
 (`send_to_childs = 0`, le bail n'a de sens que côté serveur, seul à enregistrer une
-attribution). Dimensionnée **au-dessus** du temps qu'un client peut légitimement
-passer sur un lot, le cas majorant étant un pruner à gros `prunerBatch` (jusqu'à
-`PRUNER_BATCH_MAX` = 65536 possibilités) : un bail trop court se traduit par du
-travail dupliqué (jamais une erreur visible), donc mieux vaut le choisir large que
-juste. `<n> <= 0` désactive le bail. Un changement de durée n'affecte que les
-possibilités attribuées **après** le changement — celles déjà en cours d'analyse
-gardent l'échéance calculée à leur insertion.
+attribution). Avec la vérification de vivacité ci-dessus, cette durée n'a plus
+besoin d'être dimensionnée pour couvrir le pire cas d'analyse (un pruner à gros
+`prunerBatch`, par exemple) : elle ne sert plus qu'à borner le délai avant la
+PREMIÈRE vérification de vivacité d'une possibilité tenue par un client déjà
+déconnecté — un client réellement mort n'est de toute façon jamais protégé par
+`owner_alive`. `<n> <= 0` désactive le bail entièrement (le travail attribué n'est
+alors plus jamais rendu automatiquement, quelle que soit la vivacité). Un
+changement de durée n'affecte que les possibilités attribuées **après** le
+changement — celles déjà en cours d'analyse gardent l'échéance calculée à leur
+insertion.
 
 ```
 leaseDuration 600     # bail de 10 minutes

@@ -295,3 +295,18 @@ qu'une dépendance recherche/pruner, configurable à l'exécution via la command
 console `leaseDuration <n>` (voir [Bail à expiration des analyses en
 cours](../echanges_client_serveur.md#bail-à-expiration-des-analyses-en-cours) pour
 le détail et le raisonnement de dimensionnement).
+
+**Correctif post-implémentation (retour d'essais réels, toujours PR7) :** une
+échéance purement temporelle s'est révélée insuffisante — rien ne garantit qu'une
+possibilité s'analyse en moins de `analysed_lease_seconds`, et un client vivant
+mais occupé plus longtemps que ce budget voyait son travail réclamé à tort, avec
+pour conséquence une double exploration de la même branche quand il finissait par
+soumettre ses résultats pour une possibilité déjà réattribuée. Le bail exige donc
+désormais **deux** conditions conjointes : l'échéance dépassée **et** l'absence de
+preuve de vivacité (`control_registry_has_active_client`, côté serveur — tant que
+le canal de contrôle du client reste enregistré, son travail n'expire jamais). La
+durée configurable `leaseDuration` n'est donc plus un budget de temps garanti mais
+un simple minorant avant la première vérification de vivacité d'un client déjà
+suspecté déconnecté — voir [Bail à expiration des analyses en
+cours](../echanges_client_serveur.md#bail-à-expiration-des-analyses-en-cours) pour
+le détail.

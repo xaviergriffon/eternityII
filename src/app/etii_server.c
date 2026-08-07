@@ -169,6 +169,18 @@ int should_autobackup(int *lastBack, unsigned long long *lastBackupUpdates,
  * @return      NULL (boucle infinie).
  */
 /**
+ * @brief Callback de vivacité (`analysed_owner_alive_fn`, `core/datamanager.h`)
+ *        passé à `datamanager_reclaim_expired_leases` par `check_server_step` :
+ *        un client est vivant tant que son canal de contrôle reste enregistré
+ *        dans `control_registry` (PR7, correctif — voir le commentaire au
+ *        point d'appel dans `check_server_step`).
+ */
+static int owner_control_session_alive(const uint8_t owner_uid[CLIENT_UID_BYTES])
+{
+    return control_registry_has_active_client(owner_uid);
+}
+
+/**
  * @brief Un tour de la boucle de `check_server` (corps extrait pour être testable
  *        hors thread, comme `communicate_with_client_step`).
  *
@@ -260,8 +272,13 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
     // est lu une seule fois ici et injecté, `datamanager_reclaim_expired_leases`
     // ne consulte jamais l'horloge elle-même (testable sans horloge réelle).
     // Idempotent vis-à-vis d'un acquittement concurrent : les deux passent par
-    // le même verrou par file (cf. datamanager.h).
-    unsigned long long reclaimed_leases = datamanager_reclaim_expired_leases(time(NULL));
+    // le même verrou par file (cf. datamanager.h). `owner_control_session_alive`
+    // (ci-dessous) est le second critère, ajouté après un essai réel : un
+    // client toujours connecté sur son canal de contrôle n'est jamais réclamé,
+    // même si une possibilité met plus longtemps que `analysed_lease_seconds`
+    // à s'analyser -- ce budget de temps n'était qu'un minorant, jamais une
+    // garantie de durée d'analyse.
+    unsigned long long reclaimed_leases = datamanager_reclaim_expired_leases(time(NULL), owner_control_session_alive);
     if (reclaimed_leases > 0) {
         log_event("bail expiré : %llu possibilité(s) rendue(s) au stock (client disparu)", reclaimed_leases);
     }

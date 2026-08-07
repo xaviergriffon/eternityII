@@ -127,15 +127,20 @@
 // docs/conception/identification_clients.md §4.3) : durée par défaut, en
 // secondes, au-delà de laquelle une possibilité attribuée à un client
 // (owner_uid connu, cf. add_possibility_analysed_owned) et jamais acquittée
-// est réputée abandonnée et rendue au stock non vérifié. Dimensionnée
-// **au-dessus** du temps qu'un client peut légitimement passer sur un lot —
-// le cas majorant est un pruner à gros `prunerBatch` (jusqu'à
-// PRUNER_BATCH_MAX = 65536 possibilités : chacune est rapide à vérifier,
-// mais le lot entier, plus l'aller-retour réseau, peut malgré tout accumuler
-// plusieurs secondes). Un bail trop court se traduit par du travail dupliqué
-// (pas une erreur visible) : mieux vaut le choisir large plutôt que juste.
+// devient ÉLIGIBLE à être rendue au stock non vérifié.
+//
+// Ce n'est qu'un MINORANT, pas un budget de temps garanti : rien ne prouve
+// qu'une analyse tienne dans ce délai, donc `datamanager_reclaim_expired_leases`
+// exige EN PLUS une preuve d'absence (callback `owner_alive`, fourni côté
+// serveur par `owner_control_session_alive`/`control_registry_has_active_client`
+// — tant que le canal de contrôle du client reste enregistré, son travail
+// n'expire jamais, quelle que soit la durée depuis l'attribution). Un premier
+// essai réel avec l'échéance seule a montré qu'un client occupé mais vivant se
+// faisait réclamer son travail dès ce budget dépassé, avec pour conséquence
+// une double exploration de la même branche quand ce client finissait par
+// soumettre ses résultats pour une possibilité déjà réattribuée ailleurs.
 // Configurable à l'exécution via la commande console `leaseDuration <n>` ;
-// <n> ≤ 0 désactive le bail (même convention que `limit 0` pour la
+// <n> ≤ 0 désactive le bail entièrement (même convention que `limit 0` pour la
 // régulation de débit) — utile pour un déploiement qui préfère geler un
 // stock indéfiniment plutôt que risquer un double travail.
 #define ANALYSED_LEASE_DEFAULT_SECONDS 300

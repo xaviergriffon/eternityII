@@ -501,6 +501,27 @@ int control_registry_resolve_client_uid(const char *target, uint8_t out_client_u
     return result;
 }
 
+int control_registry_has_active_client(const uint8_t client_uid[CLIENT_UID_BYTES])
+{
+    pthread_once(&g_init_once, registry_init_once);
+    if (client_uid == NULL) {
+        return 0;
+    }
+
+    pthread_mutex_lock(&g_registry_mutex);
+    int found = 0;
+    for (int i = 0; i < MAX_CONTROL_SESSIONS && !found; i++) {
+        control_session_t *s = &g_sessions[i];
+        pthread_mutex_lock(&s->mutex);
+        if (s->in_use && memcmp(s->hello.identity.client_uid, client_uid, CLIENT_UID_BYTES) == 0) {
+            found = 1;
+        }
+        pthread_mutex_unlock(&s->mutex);
+    }
+    pthread_mutex_unlock(&g_registry_mutex);
+    return found;
+}
+
 int control_registry_auto_stats_due(int index, int interval_sec)
 {
     pthread_once(&g_init_once, registry_init_once);
