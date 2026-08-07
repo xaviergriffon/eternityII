@@ -266,8 +266,7 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
         log_event("new record: %i pieces placed", max_result);
     }
 
-    // Bail à expiration des analyses en cours (PR7,
-    // docs/conception/identification_clients.md §4.3) : passe bornée, au même
+    // Bail à expiration des analyses en cours (PR7) : passe bornée, au même
     // rythme que le reste de ce tour (10 s) -- jamais un chemin chaud. `now`
     // est lu une seule fois ici et injecté, `datamanager_reclaim_expired_leases`
     // ne consulte jamais l'horloge elle-même (testable sans horloge réelle).
@@ -302,7 +301,7 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
         if (best_board_save(&g_server_best_board, "./temp-best_board.back") != 0) {
             log_error("autobackup : échec sur ./temp-best_board.back\n");
         }
-        // Cumul par machine (PR5 de identification_clients.md) : même cadence
+        // Cumul par machine (PR5) : même cadence
         // que le reste du stock, fichier dédié (cf. app/known_clients_registry.h).
         if (known_clients_registry_save("./temp-known_clients.back") != 0) {
             log_error("autobackup : échec sur ./temp-known_clients.back\n");
@@ -366,8 +365,7 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent)
 
 /**
  * @brief Enregistre une possibilité servie comme « en cours d'analyse »,
- *        attribuée au client courant si son identité est connue (PR6,
- *        docs/conception/identification_clients.md, section 4.3).
+ *        attribuée au client courant si son identité est connue (PR6).
  *
  * Extrait des trois points de service (`INST_GET`/`INST_GET_TO_CHECK[_BATCH]`)
  * pour n'écrire cette décision qu'à un seul endroit. `client->has_identity`

@@ -115,8 +115,6 @@ Ces documents décrivent le comportement **implémenté** :
 [`docs/conception/`](docs/conception/) rassemble les documents de conception : propositions,
 arbitrages et découpages en PR **non encore implémentés**. Ils décrivent une cible, pas le
 comportement du code — voir [docs/conception/README.md](docs/conception/README.md) pour la
-convention (statut, cycle de vie).
-
-| Document | Contenu |
-|---|---|
-| [docs/conception/identification_clients.md](docs/conception/identification_clients.md) | Identification unique des clients au-delà du PID : modèle d'identité, statistiques cumulées persistantes, bail à expiration sur les analyses en cours, découpage en 7 PR. |
+convention (statut, cycle de vie) et l'historique des documents entièrement implémentés puis
+supprimés (leur contenu ayant rejoint la documentation de référence ci-dessus). Aucun document
+de conception actif au moment de la rédaction.

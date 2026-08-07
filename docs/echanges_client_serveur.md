@@ -64,7 +64,7 @@ réassemblent les envois TCP partiels (voir [Robustesse](#comportement-en-cas-de
 | `INST_POSSIBILITY_ANALYSED_BATCH` | 14 | pruner → serveur | Signale M possibilités analysées (`int32` M + M paquets → un seul `INST_CONSIDERED`) |
 | `INST_NEED_WORK` | 15 | client → serveur | Sonde de faim (v8) : réponse `int32` N = nombre de possibilités que le serveur souhaiterait recevoir (0 = stock suffisant). Tient lieu de keepalive et pilote la [délégation anticipée](#gestion-de-charge) |
 | `INST_CONTROL_HELLO` | 16 | client → serveur | Annonce (v9) : le processus **parent** du client (jamais un fork) ouvre une connexion TCP dédiée et bascule cette session en [canal de contrôle](#canal-de-contrôle-v9), où les rôles s'inversent |
-| `INST_CLIENT_HELLO` | 17 | client → serveur | Annonce d'identité (v12) sur la connexion de TRAVAIL : chaque fork l'envoie UNE FOIS, juste après le handshake de version, avant sa première instruction (`INST_GET`/`INST_ADD`/…) — `int32` de longueur puis un `client_identity_t` cadré (`net/client_identity.h` : `machine_uid`, `client_uid`, `fork_seq`, `mode`, `label`), même convention que `INST_CONTROL_HELLO`. Best-effort côté serveur : une longueur hors borne désynchronise le flux (fermeture), mais un contenu qui ne décode pas se contente de journaliser une erreur — cf. [docs/conception/identification_clients.md](conception/identification_clients.md) |
+| `INST_CLIENT_HELLO` | 17 | client → serveur | Annonce d'identité (v12) sur la connexion de TRAVAIL : chaque fork l'envoie UNE FOIS, juste après le handshake de version, avant sa première instruction (`INST_GET`/`INST_ADD`/…) — `int32` de longueur puis un `client_identity_t` cadré (`net/client_identity.h` : `machine_uid`, `client_uid`, `fork_seq`, `mode`, `label`), même convention que `INST_CONTROL_HELLO`. Best-effort côté serveur : une longueur hors borne désynchronise le flux (fermeture), mais un contenu qui ne décode pas se contente de journaliser une erreur — un champ d'affichage cosmétique ne doit jamais faire tomber une connexion de travail |
 
 Toute évolution du format « fil » impose d'incrémenter `VERSION` : le handshake exige
 une correspondance exacte. La v11 a bumpé ainsi `VERSION` sans ajouter de nouvelle
@@ -178,10 +178,9 @@ parent dans son ensemble — `control_hello_t`) puis les rôles s'inversent : c'
 désormais le **serveur** qui prend l'initiative des échanges sur cette connexion.
 Côté serveur, `control_registry_register` attribue en plus un `session_no` : un
 compteur monotone jamais réutilisé, même quand l'INDICE de slot du registre l'est
-après une déconnexion (cf. [docs/conception/identification_clients.md](conception/identification_clients.md),
-section 3) — c'est ce `session_no`, plus le libellé et les nonces hexadécimaux, que
-la commande console `clients` et `GET /api/v1/clients` exposent en plus des champs
-déjà existants.
+après une déconnexion — c'est ce `session_no`, plus le libellé et les nonces
+hexadécimaux, que la commande console `clients` et `GET /api/v1/clients` exposent
+en plus des champs déjà existants.
 
 ```mermaid
 sequenceDiagram
@@ -313,9 +312,9 @@ qu'avant.
 
 ### Adressage des commandes (`--to`)
 
-Avant cette fonctionnalité (PR3, docs/conception/identification_clients.md),
-`clientsCmd` ne savait que **diffuser** : impossible de piloter un seul client d'un
-parc sans agir sur tous les autres en même temps. `clientsCommand [--to <cible>]
+Avant cette fonctionnalité (PR3), `clientsCmd` ne savait que **diffuser** :
+impossible de piloter un seul client d'un parc sans agir sur tous les autres en
+même temps. `clientsCommand [--to <cible>]
 <ligne>` (`clients_cmd_interpreter`, `src/ui/command_lines.c`) ajoute un ciblage
 optionnel — la diffusion reste le comportement par défaut sans `--to`.
 
@@ -327,10 +326,12 @@ optionnel — la diffusion reste le comportement par défaut sans `--to`.
 3. un `label` déclaré (`--name`, égalité exacte de chaîne).
 
 **`session_no` n'est pas un slot.** Le registre est indexé par un tableau de slots
-recyclés (`MAX_CONTROL_SESSIONS`), mais `session_no` et `client_uid` sont tous deux
-des identifiants **jamais réattribués** à un titulaire différent (cf. *Modèle
-d'identité*, docs/conception/identification_clients.md, section 3). Résoudre une
-cible par l'un de ces deux champs ne peut donc jamais frapper le mauvais client :
+recyclés (`MAX_CONTROL_SESSIONS`), mais `session_no` (compteur monotone attribué une
+fois pour toutes à l'enregistrement, jamais réutilisé même quand le slot l'est) et
+`client_uid` (nonce 128 bits tiré au démarrage du processus parent, jamais réutilisé
+par construction) sont tous deux des identifiants **jamais réattribués** à un
+titulaire différent. Résoudre une cible par l'un de ces deux champs ne peut donc
+jamais frapper le mauvais client :
 soit la session visée existe encore sous cette même identité, soit elle a disparu
 et la commande est **refusée** comme cible inconnue/déconnectée — jamais
 silencieusement redirigée vers le nouvel occupant du même slot. `label` n'étant
@@ -352,17 +353,25 @@ clientsCommand limit 500                   # sans --to : diffusion (comportement
 
 ### Registre de clients connus
 
-PR4 de [docs/conception/identification_clients.md](conception/identification_clients.md)
-ajoute un **second** registre serveur, `known_clients_registry.{h,c}`
+PR4 ajoute un **second** registre serveur, `known_clients_registry.{h,c}`
 (`src/app/`), volontairement **indépendant** de `control_registry` décrit
 ci-dessus — les deux ne se recouvrent pas :
 
 | | `control_registry` | Registre de clients connus |
 |---|---|---|
-| Indexé par | slot de session (réutilisé) | `machine_uid` (clé de cumul, cf. section 3 du document de conception) |
+| Indexé par | slot de session (réutilisé) | `machine_uid` (clé de cumul) |
 | Durée de vie | la session TCP | la vie du serveur (une entrée déconnectée reste visible) |
 | Contenu | hello, file de commandes, dernier `CTRL_STATS` | totaux cumulés, première/dernière vue, statut connecté/déconnecté |
 | Rôle | piloter | mesurer |
+
+**Pourquoi `machine_uid` et non `client_uid` comme clé de cumul.** `client_uid` est un
+nonce tiré au démarrage de CHAQUE exécution du processus parent, jamais persisté :
+l'utiliser comme clé ferait qu'un simple redémarrage de client crée une entrée
+« nouvelle machine » et fragmente irrémédiablement le cumul. `machine_uid`, à
+l'inverse, est lu depuis un fichier local (`--machine-uid-file`, régénéré seulement
+s'il est absent ou illisible) et survit donc aux redémarrages du client — c'est la
+seule identité stable sur laquelle un cumul qui doit lui-même survivre à un
+redémarrage du **serveur** (voir *Persistance du cumul* ci-dessous) peut s'appuyer.
 
 `control_registry` est vidé à la déconnexion ; celui-ci ne l'est **pas** — une
 machine reste consultable, marquée déconnectée, jusqu'à ce que la borne du
@@ -434,8 +443,7 @@ Exposé par la commande console `knownClients` (voir
 
 ### Attribution des analyses en cours
 
-PR6 de [docs/conception/identification_clients.md](conception/identification_clients.md#4-impacts-par-domaine)
-répond à une question restée jusque-là sans réponse : « que travaille le client X en ce
+PR6 répond à une question restée jusque-là sans réponse : « que travaille le client X en ce
 moment ? ». Avant cette PR, chaque possibilité servie par `INST_GET`/
 `INST_GET_TO_CHECK`/`INST_GET_TO_CHECK_BATCH` était enregistrée via
 `add_possibility_analysed(&pkt, -1)` — le `-1` signifiant « aucun propriétaire », le
@@ -443,7 +451,7 @@ même appel utilisé côté client (où le paramètre vaut un index de thread, u
 différent) et par `import_analysed`/`restore_analysed` au rechargement d'un backup.
 
 **Table latérale, jamais un nouveau champ sur `possibility_packet`.** L'emplacement
-choisi (arbitrage C du document de conception) est une extension de l'index de
+choisi est une extension de l'index de
 hachage existant (`analysed_index`, `src/core/datamanager.c`) qui accélère déjà
 `remove_possibility_analysed` : chaque `AnalysedIndexNode` porte désormais un
 `owner_uid`/`has_owner` optionnel. Deux raisons d'éviter `possibility_packet` :
@@ -495,8 +503,7 @@ clientsWork jetson-1              # ou en ciblant par label déclaré
 
 ### Bail à expiration des analyses en cours
 
-PR7 de [docs/conception/identification_clients.md](conception/identification_clients.md#4-impacts-par-domaine)
-construit le pendant **écriture** de PR6 sur la même table latérale : un bail à
+PR7 construit le pendant **écriture** de PR6 sur la même table latérale : un bail à
 expiration qui rend automatiquement au stock la part d'un client qui a disparu
 (`kill -9`, coupure réseau, panne machine) sans avoir acquitté ce qu'il tenait —
 sans intervention d'un opérateur (auparavant, seule la commande console
@@ -507,9 +514,12 @@ sans intervention d'un opérateur (auparavant, seule la commande console
 la calcule à l'insertion, `time(NULL) + analysed_lease_seconds` (0 = bail
 désactivé, quand `analysed_lease_seconds <= 0` — même convention que `limit 0`
 pour la régulation de débit). Une possibilité sans propriétaire connu (client trop
-ancien, ou possibilité restaurée depuis un backup — les baux ne sont **jamais**
-persistés, cf. [Persistance](conception/identification_clients.md#47-persistance))
-n'a pas de bail et n'expire donc jamais par ce mécanisme.
+ancien, ou possibilité restaurée depuis un backup) n'a pas de bail et n'expire donc
+jamais par ce mécanisme. Les baux ne sont **jamais persistés** : au redémarrage du
+serveur, une possibilité restaurée depuis un `.back` est réputée sans propriétaire
+(comportement d'avant cette fonctionnalité) — persister un bail dont le titulaire
+(`client_uid`, propre à une exécution de processus, jamais réutilisé) est de toute
+façon déconnecté depuis longtemps n'aurait aucun sens.
 
 **Balayage borné et périodique, jamais un chemin chaud.** `datamanager_reclaim_expired_leases(now)`
 (`src/core/datamanager.{h,c}`) parcourt `analysed_index` exactement comme

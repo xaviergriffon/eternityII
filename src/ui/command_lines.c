@@ -422,7 +422,7 @@ int backup_interpreter(void) {
     if (best_board_save(&g_server_best_board, def_best_board_file) != 0) {
         log_info("backup de %s échoué\n", def_best_board_file);
     }
-    // Cumul par machine (PR5 de identification_clients.md) : même cadence que
+    // Cumul par machine (PR5) : même cadence que
     // le reste du stock, fichier dédié (cf. app/known_clients_registry.h).
     if (known_clients_registry_save(def_known_clients_file) != 0) {
         log_info("backup de %s échoué\n", def_known_clients_file);
@@ -1085,8 +1085,7 @@ int known_clients_interpreter(void) {
 
 /**
  * @brief Interpréteur de `clientsWork <cible>` : consultation « que travaille
- *        X ? » (PR6, attribution des analyses en cours,
- *        docs/conception/identification_clients.md, section 4.3).
+ *        X ? » (PR6, attribution des analyses en cours).
  *
  * `<cible>` est résolue vers un `client_uid` exactement comme `clientsCommand
  * --to` (`session_no`, `client_uid` hexadécimal, ou `label` déclaré — cf.
@@ -1131,8 +1130,7 @@ int clients_work_interpreter(void) {
 
 /**
  * @brief Interpréteur de `leaseDuration <n>` : fixe la durée (secondes) du
- *        bail à expiration des possibilités attribuées à un client (PR7,
- *        docs/conception/identification_clients.md, section 4.3).
+ *        bail à expiration des possibilités attribuées à un client (PR7).
  *
  * Purement serveur (le bail n'a de sens que côté serveur, qui seul enregistre
  * une attribution — `add_possibility_analysed_owned`) : commande SERVEUR pure

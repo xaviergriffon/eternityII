@@ -1,11 +1,9 @@
 /**
  * @file known_clients_registry.h
- * @brief Registre des clients CONNUS (cumul, PR4 de
- *        docs/conception/identification_clients.md), distinct de
+ * @brief Registre des clients CONNUS (cumul, PR4), distinct de
  *        `control_registry.h` (sessions vivantes, pilotage).
  *
- * Arbitrage D du document de conception : deux registres serveur qui ne se
- * recouvrent pas.
+ * Deux registres serveur qui ne se recouvrent pas.
  *
  * |              | `control_registry` (existant)      | ce registre (nouveau)          |
  * |--------------|-------------------------------------|---------------------------------|
@@ -20,8 +18,9 @@
  *
  * Pourquoi `machine_uid` et pas `client_uid` comme clé : `machine_uid` est le
  * SEUL identifiant qui survit au redémarrage d'un processus client (cf.
- * `client_identity.h`) — c'est la clé de cumul retenue par l'arbitrage A du
- * document de conception. `client_uid` reste la clé de SESSION : une même
+ * `client_identity.h`) — c'est donc la seule clé stable pour un cumul qui doit
+ * lui-même survivre à un redémarrage du serveur (PR5, persistance ci-dessous).
+ * `client_uid` reste la clé de SESSION : une même
  * machine peut avoir plusieurs sessions actives simultanément (ex. un client
  * de recherche et un pruner sur le même hôte), chacune suivie séparément dans
  * le petit tableau `sessions[]` d'une entrée, borné par

@@ -110,8 +110,8 @@ static const cli_help_topic_t cli_topics[] = {
 	  "--name <label>",
 	  "Client/pruner : libellé déclaré, affiché côté serveur (défaut : nom d'hôte).",
 	  "Purement déclaratif (jamais vérifié par le serveur, à la différence de l'IP\n"
-	  "du pair) — cf. docs/conception/identification_clients.md. Visible dans la\n"
-	  "commande console `clients` et `GET /api/v1/clients`. Ignorée en mode serveur." },
+	  "du pair). Visible dans la commande console `clients` et\n"
+	  "`GET /api/v1/clients`. Ignorée en mode serveur." },
 	{ "--machine-uid-file",
 	  "--machine-uid-file <chemin>",
 	  "Client/pruner : chemin de l'identité machine persistante (défaut ./eternityii-machine_uid).",

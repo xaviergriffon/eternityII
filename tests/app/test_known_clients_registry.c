@@ -1,6 +1,6 @@
 /*
  * Tests unitaires du registre de clients CONNUS (src/app/known_clients_registry.c,
- * PR4 de docs/conception/identification_clients.md).
+ * PR4).
  *
  * Comme control_registry.c, ce registre est un état GLOBAL statique — mais à
  * la différence de control_registry (vidé à chaque unregister), les entrées

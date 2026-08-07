@@ -101,6 +101,10 @@ Se connecte à un serveur et lance `N` processus de recherche en parallèle.
 | `--name LABEL` | nom d'hôte | Libellé déclaré, affiché côté serveur (commande console `clients`, `GET /api/v1/clients`) — purement déclaratif, jamais vérifié |
 | `--machine-uid-file CHEMIN` | `./eternityii-machine_uid` | Fichier d'identité machine persistante (nonce hexadécimal, tiré et écrit au premier lancement) — absent/illisible : régénéré silencieusement ; répertoire non inscriptible : identité volatile pour cette exécution (la recherche continue) |
 
+> En conteneur, monter ce fichier en volume (ou pointer `--machine-uid-file` dessus) :
+> sans ça, chaque redémarrage de conteneur régénère un `machine_uid` et fragmente le
+> cumul de statistiques par machine (`knownClients`) sur autant d'entrées « nouvelles ».
+
 Exemples :
 ```sh
 ./eternityII client localhost
@@ -110,8 +114,13 @@ Exemples :
 ```
 
 > `--name`/`--machine-uid-file` s'appliquent aussi au mode `pruner` ci-dessous (même
-> plomberie d'identité). Détails du modèle (machine_uid persistant vs client_uid de
-> session vs fork_seq) : [docs/conception/identification_clients.md](conception/identification_clients.md).
+> plomberie d'identité). Trois notions distinctes, à ne pas confondre : `machine_uid`
+> (persistant, survit aux redémarrages — clé de cumul des statistiques),
+> `client_uid` (nonce tiré à chaque démarrage du processus parent, jamais persisté —
+> identité de LA SESSION en cours), et `fork_seq` (rang du fork dans son parent,
+> `0..N-1` — rattache une connexion de travail à son processus parent). Le `label`
+> (`--name`) n'est qu'un affichage, jamais une clé : deux clients peuvent
+> légitimement partager le même.
 
 ## Mode pruner (élagage)
 

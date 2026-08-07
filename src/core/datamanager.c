@@ -419,19 +419,18 @@ int add_possibility(client_possibility_t *client_possibility, array_possibility_
 #define ANALYSED_INDEX_BUCKETS 8191
 
 /*
- * Attribution des analyses en cours (PR6, docs/conception/identification_clients.md,
- * arbitrage C / section 4.3) : `owner_uid` est le `client_uid` du client à qui
- * LE SERVEUR a servi cette possibilité (INST_GET / INST_GET_TO_CHECK[_BATCH]).
- * C'est bien la « table latérale adossée à analysed_index » visée par le
- * document : jamais un champ ajouté à `possibility_packet` (fil + backups +
- * padding caché, cf. possibility-packet-struct-padding), jamais une
- * surcharge du paramètre `thread` (déjà -1 côté serveur / index de thread
+ * Attribution des analyses en cours (PR6) : `owner_uid` est le `client_uid` du
+ * client à qui LE SERVEUR a servi cette possibilité (INST_GET /
+ * INST_GET_TO_CHECK[_BATCH]). C'est une table latérale adossée à
+ * `analysed_index`, jamais un champ ajouté à `possibility_packet` (fil +
+ * backups + padding caché, cf. possibility-packet-struct-padding), et jamais
+ * une surcharge du paramètre `thread` (déjà -1 côté serveur / index de thread
  * côté client, deux sens distincts qu'il ne faut pas empiler d'un troisième).
  * `has_owner == 0` côté client (thread >= 0, cf. add_possibility_analysed) et
  * pour toute possibilité rechargée par `import_analysed`/`restore_analysed` :
- * les baux ne sont pas persistés (section 4.7 du document), l'attribution ne
- * l'est donc pas davantage — au redémarrage, une possibilité restaurée est
- * réputée sans propriétaire, comme avant cette PR.
+ * les baux ne sont pas persistés, l'attribution ne l'est donc pas davantage —
+ * au redémarrage, une possibilité restaurée est réputée sans propriétaire,
+ * comme avant cette PR.
  */
 typedef struct AnalysedIndexNode {
 	uint64_t hash;

@@ -242,8 +242,8 @@ TEST snapshot_reflects_registered_hello(void)
 }
 
 /* session_no est monotone et jamais réutilisé, y compris quand un slot est
-   libéré puis réoccupé par une session différente (cf. docs/conception/
-   identification_clients.md, section 3 : « session_no n'est pas un slot »). */
+   libéré puis réoccupé par une session différente (« session_no n'est pas
+   un slot »). */
 TEST session_no_is_monotonic_and_never_reused(void)
 {
     control_hello_t h1 = make_hello(1, 1, 0);
@@ -445,8 +445,7 @@ TEST broadcast_with_no_active_session_returns_zero(void)
  *
  * `control_registry_send_command_to` résout `session_no` (décimal), `client_uid`
  * (hexadécimal) ou `label` vers l'unique session active correspondante, sans
- * jamais frapper le mauvais titulaire (cf. docs/conception/identification_clients.md,
- * section 3, « session_no n'est pas un slot »).
+ * jamais frapper le mauvais titulaire (« session_no n'est pas un slot »).
  */
 
 TEST send_command_to_null_target_returns_minus_one(void)
@@ -605,8 +604,7 @@ TEST send_command_to_ambiguous_label_returns_zero(void)
  *
  * `control_registry_resolve_client_uid` partage exactement les règles de
  * résolution de `control_registry_send_command_to` (voir ci-dessus), mais ne
- * poste rien : consultation « que travaille X ? » (docs/conception/
- * identification_clients.md, section 4.3).
+ * poste rien : consultation « que travaille X ? ».
  */
 
 TEST resolve_client_uid_null_target_returns_minus_one(void)

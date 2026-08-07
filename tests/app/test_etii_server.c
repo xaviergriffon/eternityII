@@ -699,7 +699,7 @@ TEST step_get_serves_possibility(void)
 
 /* --------------------------------------------------------------------------
  * record_possibility_analysed_for_client (PR6, attribution des analyses en
- * cours, docs/conception/identification_clients.md, section 4.3) : la
+ * cours) : la
  * possibilité servie n'est attribuée au client_uid déclaré QUE si son
  * identité est connue sur CETTE connexion de travail (INST_CLIENT_HELLO, v12).
  * ------------------------------------------------------------------------ */
@@ -1530,7 +1530,7 @@ TEST check_server_step_autobackup_skipped_during_maintenance(void)
     PASS();
 }
 
-/* Bail à expiration (PR7, docs/conception/identification_clients.md §4.3) :
+/* Bail à expiration (PR7) :
  * check_server_step balaie et rend au stock les possibilités attribuées dont
  * le bail a expiré ET dont le propriétaire n'est plus vivant (aucune session
  * de contrôle enregistrée pour son client_uid — ici, aucune n'est enregistrée

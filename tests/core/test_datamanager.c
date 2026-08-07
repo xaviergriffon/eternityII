@@ -3167,8 +3167,8 @@ TEST analysed_index_walks_collision_chains(void)
 }
 
 /* --------------------------------------------------------------------------
- * Attribution des analyses en cours (PR6, docs/conception/identification_clients.md,
- * section 4.3) : table latérale adossée à l'index « analysed », consultation
+ * Attribution des analyses en cours (PR6) : table latérale adossée à
+ * l'index « analysed », consultation
  * « que travaille X ? » via datamanager_analysed_owned_by.
  * ------------------------------------------------------------------------ */
 
@@ -3311,8 +3311,7 @@ TEST remove_possibility_analysed_clears_owner_attribution(void)
 }
 
 /* --------------------------------------------------------------------------
- * Bail à expiration des analyses en cours (PR7,
- * docs/conception/identification_clients.md, section 4.3) :
+ * Bail à expiration des analyses en cours (PR7) :
  * analysed_lease_is_expired (fonction pure) et
  * datamanager_reclaim_expired_leases (balayage + remise en stock).
  * ------------------------------------------------------------------------ */

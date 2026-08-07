@@ -346,7 +346,7 @@ comprises (équivalent de `clientsStats`, voir plus bas).
 | Champ | Type | Sens |
 |---|---|---|
 | `clients` | tableau | Une entrée par session de canal de contrôle active (`control_registry_snapshot`) — **tableau vide** si aucun client n'est connecté, jamais une erreur |
-| `session_no` | entier | *(v12)* Identifiant de session monotone attribué par le serveur à l'enregistrement (`control_registry_register`), **jamais réutilisé** même si le slot de registre sous-jacent l'est après une déconnexion — cf. [docs/conception/identification_clients.md](conception/identification_clients.md), section 3 |
+| `session_no` | entier | *(v12)* Identifiant de session monotone attribué par le serveur à l'enregistrement (`control_registry_register`), **jamais réutilisé** même si le slot de registre sous-jacent l'est après une déconnexion |
 | `pid` | entier | PID du processus **parent** du client (jamais un fork de recherche, cf. canal de contrôle) |
 | `forks` | entier ≥ 0 | Nombre de processus de recherche forkés par ce client |
 | `mode` | chaîne | `search` (client de recherche), `pruner` (élagage CPU), `gpu_pruner` (élagage GPU), ou `unknown` (valeur de repli, ne devrait pas apparaître en usage normal) |
@@ -453,8 +453,7 @@ maintenu par le serveur.
 
 ### GET /api/v1/known-clients
 
-*(v12, PR4 de [docs/conception/identification_clients.md](conception/identification_clients.md))*
-Instantané des machines **connues** — l'équivalent HTTP de la commande console
+*(v12, PR4)* Instantané des machines **connues** — l'équivalent HTTP de la commande console
 `knownClients` (voir [Registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus)).
 Distinct de `GET /api/v1/clients` : cette liste inclut aussi les machines
 déconnectées depuis le démarrage du serveur (jusqu'à éviction par la borne du
@@ -496,7 +495,7 @@ même client.
 | `best_max_result` | entier | Meilleur résultat (nombre de cases placées) jamais rapporté par cette machine, toutes sessions confondues — un **pic**, jamais remplacé par une valeur plus basse |
 | `cumulative_uptime_seconds` | entier ≥ 0 | Somme des durées de connexion des sessions déjà **terminées** de cette machine — n'inclut pas la durée de la session en cours tant qu'elle n'est pas close |
 
-**Cumul persisté** depuis PR5 du document de conception
+**Cumul persisté** depuis PR5
 (`./eternityII-known_clients.back`, voir
 [Registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus))
 : un redémarrage du serveur ne remet plus ce registre à zéro, sous réserve

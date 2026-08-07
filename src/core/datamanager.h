@@ -72,8 +72,7 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread);
 /**
  * @brief Comme `add_possibility_analysed`, mais enregistre en plus le
  *        `client_uid` du client à qui LE SERVEUR sert cette possibilité
- *        (PR6, docs/conception/identification_clients.md, section 4.3 :
- *        attribution des analyses en cours). Réservé au côté serveur — côté
+ *        (PR6, attribution des analyses en cours). Réservé au côté serveur — côté
  *        client, `thread` est un index de fork local, sans rapport avec
  *        cette notion d'attribution, et `add_possibility_analysed` reste
  *        l'appel à utiliser (aucune attribution enregistrée).
@@ -107,7 +106,7 @@ int datamanager_analysed_owned_by(const uint8_t owner_uid[CLIENT_UID_BYTES],
 
 /**
  * @brief Décide si un bail est expiré à l'instant `now` (PR7, bail à
- *        expiration, docs/conception/identification_clients.md section 4.3).
+ *        expiration).
  *
  * Fonction pure : ne consulte JAMAIS l'horloge réelle elle-même, `now` est
  * toujours fourni par l'appelant — ce qui la rend testable sans `sleep`.
@@ -141,8 +140,7 @@ typedef int (*analysed_owner_alive_fn)(const uint8_t owner_uid[CLIENT_UID_BYTES]
 /**
  * @brief Balaie la table latérale d'attribution et remet dans le stock non
  *        vérifié toute possibilité dont le bail a expiré à `now` **et** dont
- *        le propriétaire n'est plus vivant (PR7, bail à expiration,
- *        docs/conception/identification_clients.md section 4.3).
+ *        le propriétaire n'est plus vivant (PR7, bail à expiration).
  *
  * Un client disparu (mort, coupure réseau) sans avoir acquitté ce qu'il tenait
  * ne gèle plus indéfiniment sa part du stock : passé `analysed_lease_seconds`
