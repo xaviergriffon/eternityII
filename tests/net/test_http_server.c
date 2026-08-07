@@ -16,6 +16,7 @@
 #include "app/static_variables.h"
 #include "core/best_board.h"
 #include "core/part.h"
+#include "ui/command_lines.h"
 
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -361,9 +362,22 @@ TEST http_server_command_forbidden_returns_403(void)
     PASS();
 }
 
-/* POST /api/v1/command {"command":"pause"} -> 200, request bascule en REQUEST_ADMIN_PAUSE. */
-TEST http_server_command_pause_returns_200_and_pauses(void)
+/* ---------- POST /api/v1/command : authentification des commandes de
+ * modification (pause/resume/limit/maxStockByThread/prunerBatch/
+ * clientsCommand/clientsCmd) ---------------------------------------------
+ *
+ * Toute commande de MODIFICATION exige désormais un jeton Bearer valide,
+ * exactement comme restore/backup -- seule `clientsWork` (pure lecture)
+ * reste accessible sans authentification. Sans --http-token-file configuré
+ * (HTTP_ADMIN_TOKEN vide), ces commandes restent donc entièrement
+ * inaccessibles via cette API (401), quel que soit l'en-tête fourni.
+ */
+
+/* Sans jeton configuré : "pause" refusé avec 401 (pas 403 : la commande EST
+   whitelistée, elle manque seulement de preuve d'identité), état inchangé. */
+TEST http_server_command_pause_without_token_returns_401(void)
 {
+    HTTP_ADMIN_TOKEN[0] = '\0';
     int sv[2];
     MAKE_PAIR(sv);
     int saved_req = request;
@@ -379,10 +393,197 @@ TEST http_server_command_pause_returns_200_and_pauses(void)
     char resp[HTTP_RESPONSE_MAX];
     ssize_t n = read_response(sv[0], resp, sizeof(resp));
     ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 401") == resp);
+    ASSERT_EQ_FMT(REQUEST_CONTINUE, request, "%d");
+
+    request = saved_req;
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Jeton configuré, mauvais jeton fourni -> 401, état inchangé. */
+TEST http_server_command_pause_wrong_token_returns_401(void)
+{
+    snprintf(HTTP_ADMIN_TOKEN, sizeof(HTTP_ADMIN_TOKEN), "%s", "correct-token");
+    int sv[2];
+    MAKE_PAIR(sv);
+    int saved_req = request;
+    request = REQUEST_CONTINUE;
+
+    const char body[] = "{\"command\":\"pause\"}";
+    char req[256];
+    snprintf(req, sizeof(req),
+             "POST /api/v1/command HTTP/1.1\r\nAuthorization: Bearer wrong-token\r\nContent-Length: %d\r\n\r\n%s",
+             (int)strlen(body), body);
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 401") == resp);
+    ASSERT_EQ_FMT(REQUEST_CONTINUE, request, "%d");
+
+    HTTP_ADMIN_TOKEN[0] = '\0';
+    request = saved_req;
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Jeton configuré, jeton correct fourni -> 200, request bascule en REQUEST_ADMIN_PAUSE. */
+TEST http_server_command_pause_valid_token_returns_200_and_pauses(void)
+{
+    snprintf(HTTP_ADMIN_TOKEN, sizeof(HTTP_ADMIN_TOKEN), "%s", "correct-token");
+    int sv[2];
+    MAKE_PAIR(sv);
+    int saved_req = request;
+    request = REQUEST_CONTINUE;
+
+    const char body[] = "{\"command\":\"pause\"}";
+    char req[256];
+    snprintf(req, sizeof(req),
+             "POST /api/v1/command HTTP/1.1\r\nAuthorization: Bearer correct-token\r\nContent-Length: %d\r\n\r\n%s",
+             (int)strlen(body), body);
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
     ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
     ASSERT_EQ_FMT(REQUEST_ADMIN_PAUSE, request, "%d");
 
+    /* La commande "pause" met aussi à jour l'état désiré du registre
+       (control_registry_desired_pause_state), consulté à CHAQUE
+       control_registry_register ultérieur pour pré-remplir la file d'attente
+       d'une nouvelle session ("pause" pré-posée) -- sans ce "resume", toute
+       session enregistrée par un test suivant hériterait silencieusement
+       d'une commande "pause" en tête de file. */
+    admin_apply_remote_command("resume");
+
+    HTTP_ADMIN_TOKEN[0] = '\0';
     request = saved_req;
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Sans jeton configuré : "clientsCommand" refusé avec 401 lui aussi (c'est
+   une commande de MODIFICATION -- elle pousse "limit 500" à un client). */
+TEST http_server_command_clientscommand_without_token_returns_401(void)
+{
+    HTTP_ADMIN_TOKEN[0] = '\0';
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    control_hello_t beta = { .pid = 55, .nb_forks = 1, .identity = { .mode = 0, .label = "beta" } };
+    int idx = control_registry_register(1, "203.0.113.90", &beta);
+    ASSERT(idx >= 0);
+
+    const char body[] = "{\"command\":\"clientsCommand --to beta limit 500\"}";
+    char req[256];
+    snprintf(req, sizeof(req), "POST /api/v1/command HTTP/1.1\r\nContent-Length: %d\r\n\r\n%s",
+             (int)strlen(body), body);
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 401") == resp);
+
+    /* Rien n'a été envoyé à "beta" : le timeout doit expirer. */
+    uint8_t out_cmd = 0;
+    ASSERT_EQ(1, control_registry_wait_command(idx, &out_cmd, NULL, 0, 100));
+
+    control_registry_unregister(idx);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Jeton configuré et valide : "clientsCommand --to beta limit 500" -> 200,
+   la session "beta" reçoit CTRL_COMMAND "limit 500" (équivalent HTTP de la
+   console `clientsCmd --to`). */
+TEST http_server_command_clientscommand_to_reaches_targeted_session(void)
+{
+    snprintf(HTTP_ADMIN_TOKEN, sizeof(HTTP_ADMIN_TOKEN), "%s", "correct-token");
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    control_hello_t beta = { .pid = 55, .nb_forks = 1, .identity = { .mode = 0, .label = "beta" } };
+    int idx = control_registry_register(1, "203.0.113.90", &beta);
+    ASSERT(idx >= 0);
+
+    const char body[] = "{\"command\":\"clientsCommand --to beta limit 500\"}";
+    char req[256];
+    snprintf(req, sizeof(req),
+             "POST /api/v1/command HTTP/1.1\r\nAuthorization: Bearer correct-token\r\nContent-Length: %d\r\n\r\n%s",
+             (int)strlen(body), body);
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
+
+    uint8_t out_cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx, &out_cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)out_cmd);
+    ASSERT_STR_EQ("limit 500", line);
+
+    control_registry_unregister(idx);
+    HTTP_ADMIN_TOKEN[0] = '\0';
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* clientsWork reste la SEULE commande de la liste standard qui ignore un
+   jeton configuré, qu'il soit fourni ou non -- c'est une pure lecture. */
+TEST http_server_command_clientswork_ignores_configured_token(void)
+{
+    snprintf(HTTP_ADMIN_TOKEN, sizeof(HTTP_ADMIN_TOKEN), "%s", "correct-token");
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    const char body[] = "{\"command\":\"clientsWork no-such-client\"}";
+    char req[256];
+    snprintf(req, sizeof(req), "POST /api/v1/command HTTP/1.1\r\nContent-Length: %d\r\n\r\n%s",
+             (int)strlen(body), body);
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    /* Toujours 400 (cible inconnue), jamais 401 : aucune vérification de
+       jeton n'a lieu pour cette commande, même avec un jeton configuré. */
+    ASSERT(strstr(resp, "HTTP/1.1 400") == resp);
+
+    HTTP_ADMIN_TOKEN[0] = '\0';
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* POST /api/v1/command {"command":"clientsWork <cible inconnue>"} -> 400
+   (commande whitelistée mais argument invalide), sans authentification. */
+TEST http_server_command_clientswork_unknown_target_returns_400(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    const char body[] = "{\"command\":\"clientsWork no-such-client\"}";
+    char req[256];
+    snprintf(req, sizeof(req), "POST /api/v1/command HTTP/1.1\r\nContent-Length: %d\r\n\r\n%s",
+             (int)strlen(body), body);
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 400") == resp);
+
     close(sv[0]); close(sv[1]);
     PASS();
 }
@@ -648,35 +849,6 @@ TEST http_server_privileged_command_valid_bearer_token_returns_200(void)
     PASS();
 }
 
-/* Une commande de la liste standard (pause) reste, elle, sans authentification
-   même lorsqu'un jeton est configuré — comportement inchangé. */
-TEST http_server_allowed_command_ignores_configured_token(void)
-{
-    snprintf(HTTP_ADMIN_TOKEN, sizeof(HTTP_ADMIN_TOKEN), "%s", "correct-token");
-    int saved_req = request;
-    request = REQUEST_CONTINUE;
-
-    int sv[2];
-    MAKE_PAIR(sv);
-    const char body[] = "{\"command\":\"pause\"}";
-    char req[256];
-    snprintf(req, sizeof(req), "POST /api/v1/command HTTP/1.1\r\nContent-Length: %d\r\n\r\n%s",
-             (int)strlen(body), body);
-    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
-    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
-
-    char resp[HTTP_RESPONSE_MAX];
-    ssize_t n = read_response(sv[0], resp, sizeof(resp));
-    ASSERT(n > 0);
-    ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
-    ASSERT_EQ_FMT(REQUEST_ADMIN_PAUSE, request, "%d");
-
-    HTTP_ADMIN_TOKEN[0] = '\0';
-    request = saved_req;
-    close(sv[0]); close(sv[1]);
-    PASS();
-}
-
 /* Connexion fermée avant qu'une requête complète soit reçue -> -1, aucune réponse. */
 TEST http_server_connection_closed_before_complete_request(void)
 {
@@ -845,7 +1017,13 @@ SUITE(http_server_suite)
     RUN_TEST(http_server_wrong_method_returns_405);
     RUN_TEST(http_server_oversized_request_returns_413);
     RUN_TEST(http_server_command_forbidden_returns_403);
-    RUN_TEST(http_server_command_pause_returns_200_and_pauses);
+    RUN_TEST(http_server_command_pause_without_token_returns_401);
+    RUN_TEST(http_server_command_pause_wrong_token_returns_401);
+    RUN_TEST(http_server_command_pause_valid_token_returns_200_and_pauses);
+    RUN_TEST(http_server_command_clientscommand_without_token_returns_401);
+    RUN_TEST(http_server_command_clientscommand_to_reaches_targeted_session);
+    RUN_TEST(http_server_command_clientswork_unknown_target_returns_400);
+    RUN_TEST(http_server_command_clientswork_ignores_configured_token);
     RUN_TEST(http_server_command_missing_field_returns_400);
     RUN_TEST(http_token_load_reads_trimmed_token);
     RUN_TEST(http_token_load_rejects_missing_file);
@@ -857,7 +1035,6 @@ SUITE(http_server_suite)
     RUN_TEST(http_server_privileged_command_missing_bearer_header_returns_401);
     RUN_TEST(http_server_privileged_command_wrong_bearer_token_returns_401);
     RUN_TEST(http_server_privileged_command_valid_bearer_token_returns_200);
-    RUN_TEST(http_server_allowed_command_ignores_configured_token);
     RUN_TEST(http_server_connection_closed_before_complete_request);
     RUN_TEST(http_stats_and_status_collect_do_not_crash);
     RUN_TEST(http_server_get_best_board_returns_200_no_record);

@@ -1704,6 +1704,146 @@ TEST admin_apply_remote_command_does_not_disturb_external_strtok(void)
     PASS();
 }
 
+/* ---------- admin_apply_remote_command : clientsCommand/clientsCmd/clientsWork
+ *
+ * Mêmes commandes que la console (clients_cmd_interpreter/clients_work_interpreter),
+ * mais réentrantes (strtok_r) pour être appelables depuis l'API HTTP admin
+ * (POST /api/v1/command) sans jamais toucher au curseur global de strtok.
+ */
+
+TEST admin_apply_remote_command_clientscommand_broadcasts(void)
+{
+    control_hello_t h = { .pid = 100, .nb_forks = 1, .identity = { .mode = 0 } };
+    int idx = control_registry_register(1, "203.0.113.40", &h);
+    ASSERT(idx >= 0);
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("clientsCommand pause"), "%d");
+
+    uint8_t out_cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx, &out_cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)out_cmd);
+    ASSERT_STR_EQ("pause", line);
+
+    /* L'alias "clientsCmd" applique exactement le même comportement. */
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("clientsCmd resume"), "%d");
+    ASSERT_EQ(0, control_registry_wait_command(idx, &out_cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("resume", line);
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST admin_apply_remote_command_clientscommand_to_targets_one_session(void)
+{
+    control_hello_t alpha = { .pid = 101, .nb_forks = 1, .identity = { .mode = 0, .label = "alpha" } };
+    control_hello_t beta = { .pid = 102, .nb_forks = 1, .identity = { .mode = 0, .label = "beta" } };
+    int idx_alpha = control_registry_register(1, "203.0.113.41", &alpha);
+    int idx_beta = control_registry_register(2, "203.0.113.42", &beta);
+    ASSERT(idx_alpha >= 0);
+    ASSERT(idx_beta >= 0);
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("clientsCommand --to beta limit 500"), "%d");
+
+    uint8_t out_cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx_beta, &out_cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)out_cmd);
+    ASSERT_STR_EQ("limit 500", line);
+    /* "alpha" n'a rien reçu. */
+    ASSERT_EQ(1, control_registry_wait_command(idx_alpha, &out_cmd, NULL, 0, 100));
+
+    control_registry_unregister(idx_alpha);
+    control_registry_unregister(idx_beta);
+    PASS();
+}
+
+TEST admin_apply_remote_command_clientscommand_to_still_enforces_whitelist(void)
+{
+    control_hello_t h = { .pid = 103, .nb_forks = 1, .identity = { .mode = 0, .label = "gamma" } };
+    int idx = control_registry_register(1, "203.0.113.43", &h);
+    ASSERT(idx >= 0);
+
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("clientsCommand --to gamma exit"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("clientsCommand exit"), "%d");
+
+    uint8_t out_cmd = 0;
+    ASSERT_EQ(1, control_registry_wait_command(idx, &out_cmd, NULL, 0, 100)); /* rien reçu */
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST admin_apply_remote_command_clientscommand_to_unknown_target_is_bad_args(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("clientsCommand --to no-such-client pause"), "%d");
+    PASS();
+}
+
+TEST admin_apply_remote_command_clientscommand_missing_args(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("clientsCommand"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("clientsCommand --to alpha"), "%d");
+    PASS();
+}
+
+TEST admin_apply_remote_command_clientswork_missing_target_is_bad_args(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("clientsWork"), "%d");
+    PASS();
+}
+
+TEST admin_apply_remote_command_clientswork_unknown_target_is_bad_args(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("clientsWork no-such-client"), "%d");
+    PASS();
+}
+
+TEST admin_apply_remote_command_clientswork_reports_owned_attribution(void)
+{
+    control_hello_t h = { .pid = 104, .nb_forks = 1, .identity = { .mode = 0, .label = "zeta" } };
+    for (int i = 0; i < CLIENT_UID_BYTES; i++) {
+        h.identity.client_uid[i] = (uint8_t)(0x70 + i);
+    }
+    int idx = control_registry_register(1, "203.0.113.44", &h);
+    ASSERT(idx >= 0);
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 77;
+    add_possibility_analysed_owned(&pk, -1, h.identity.client_uid);
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("clientsWork zeta"), "%d");
+
+    /* La commande ne consomme rien : l'attribution reste lisible ensuite. */
+    unsigned long long count = 0;
+    int max_alloc = -1;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(h.identity.client_uid, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(1ULL, count, "%llu");
+    ASSERT_EQ_FMT(77, max_alloc, "%d");
+
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1), "%d");
+    control_registry_unregister(idx);
+    PASS();
+}
+
+/* Réentrance : un appel au milieu d'une séquence strtok() externe ne doit pas
+   perturber le curseur global de cette séquence. */
+TEST admin_apply_remote_command_clientscommand_does_not_disturb_external_strtok(void)
+{
+    char outer[] = "alpha beta gamma";
+    char *first = strtok(outer, " ");
+    ASSERT(first != NULL);
+    ASSERT_STR_EQ("alpha", first);
+
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("clientsWork no-such-client"), "%d");
+
+    char *second = strtok(NULL, " ");
+    ASSERT(second != NULL);
+    ASSERT_STR_EQ("beta", second);
+    PASS();
+}
+
 /* ---------- admin_apply_privileged_command -------------------------------- */
 /*
  * Variante de admin_apply_remote_command destinée exclusivement à l'appelant
@@ -1867,6 +2007,16 @@ SUITE(command_lines_suite)
     RUN_TEST(admin_apply_remote_command_rejects_forbidden);
     RUN_TEST(admin_apply_remote_command_bad_args);
     RUN_TEST(admin_apply_remote_command_does_not_disturb_external_strtok);
+
+    RUN_TEST(admin_apply_remote_command_clientscommand_broadcasts);
+    RUN_TEST(admin_apply_remote_command_clientscommand_to_targets_one_session);
+    RUN_TEST(admin_apply_remote_command_clientscommand_to_still_enforces_whitelist);
+    RUN_TEST(admin_apply_remote_command_clientscommand_to_unknown_target_is_bad_args);
+    RUN_TEST(admin_apply_remote_command_clientscommand_missing_args);
+    RUN_TEST(admin_apply_remote_command_clientswork_missing_target_is_bad_args);
+    RUN_TEST(admin_apply_remote_command_clientswork_unknown_target_is_bad_args);
+    RUN_TEST(admin_apply_remote_command_clientswork_reports_owned_attribution);
+    RUN_TEST(admin_apply_remote_command_clientscommand_does_not_disturb_external_strtok);
 
     RUN_TEST(admin_apply_privileged_command_still_handles_standard_commands);
     RUN_TEST(admin_apply_privileged_command_rejects_others);

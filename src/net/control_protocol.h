@@ -209,8 +209,19 @@ int control_stats_decode(const uint8_t *buf, int32_t len, control_stats_t *out);
  *
  * Compare uniquement le premier mot de `command_name` (avant un éventuel
  * espace/argument) aux commandes autorisées : "pause", "resume", "limit",
- * "maxStockByThread", "prunerBatch". Tout le reste — dont "exit", "restore",
- * "import" — est refusé.
+ * "maxStockByThread", "prunerBatch", "clientsCommand" (alias "clientsCmd"),
+ * "clientsWork". Tout le reste — dont "exit", "restore", "import" — est refusé.
+ *
+ * "clientsCommand"/"clientsCmd" et "clientsWork" sont des commandes SERVEUR
+ * (elles agissent sur `control_registry`, jamais sur les forks de recherche
+ * d'un client) : les admettre ici les rend exécutables via
+ * `admin_apply_remote_command` (POST /api/v1/command) sans authentification
+ * supplémentaire, exactement comme pause/resume/limit. Les autoriser aussi
+ * côté canal de contrôle (`CTRL_COMMAND`, poussé par le SERVEUR vers un
+ * client) est inoffensif par construction : sur un client, `control_registry`
+ * est toujours vide, donc leur exécution y est un no-op silencieux — même
+ * raisonnement déjà appliqué à pause/resume (cf. leurs interpréteurs dans
+ * command_lines.c).
  *
  * @param command_name Nom (ou ligne complète) de la commande à vérifier.
  *                      `NULL` est géré explicitement (retourne 0, jamais de
@@ -243,5 +254,39 @@ int control_command_allowed(const char *command_name);
  *                      pour `command_name == NULL` ou vide).
  */
 int control_command_privileged(const char *command_name);
+
+/**
+ * @brief Identifie, PARMI les commandes de `control_command_allowed`, celles
+ *        qui ne modifient AUCUN état (ni local, ni distant) — utilisé
+ *        EXCLUSIVEMENT par `POST /api/v1/command` (`src/net/http_server.c`)
+ *        pour décider si l'authentification par jeton Bearer est requise.
+ *
+ * Ne contient que "clientsWork" : une consultation pure (lit une attribution
+ * déjà enregistrée côté serveur, n'envoie jamais rien à un client). Tout le
+ * reste de `control_command_allowed` — `pause`, `resume`, `limit`,
+ * `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd` — modifie
+ * un état (local, ou distant via `CTRL_COMMAND`) et doit donc être authentifié
+ * au même titre que `restore`/`backup` quand cette commande arrive par l'API
+ * HTTP admin (voir `handle_command_route`, `src/net/http_server.c`, qui
+ * combine ce prédicat avec `control_command_allowed`/`control_command_privileged`
+ * pour décider de l'authentification — ce module n'a connaissance ni de
+ * l'API HTTP ni du jeton lui-même).
+ *
+ * N'a AUCUN effet sur le canal de contrôle binaire (`CTRL_COMMAND`) ni sur la
+ * console : ces deux chemins n'ont pas de notion d'authentification (l'un est
+ * initié par le serveur lui-même vers un client déjà connecté, l'autre suppose
+ * un accès shell déjà de confiance) et continuent de consulter uniquement
+ * `control_command_allowed`, inchangé.
+ *
+ * Même style que `control_command_allowed`/`control_command_privileged` :
+ * compare uniquement le premier mot de `command_name`, gère `NULL`
+ * explicitement (retourne 0).
+ *
+ * @param command_name Nom (ou ligne complète) de la commande à vérifier.
+ * @return              1 si la commande est un pur read de `control_command_allowed`,
+ *                      0 sinon (y compris pour `command_name == NULL` ou vide,
+ *                      ou pour une commande hors de `control_command_allowed`).
+ */
+int control_command_read_only(const char *command_name);
 
 #endif

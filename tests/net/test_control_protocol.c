@@ -308,7 +308,8 @@ TEST control_command_privileged_handles_null(void)
 TEST control_command_allowed_and_privileged_are_disjoint(void)
 {
     static const char *const allowed_names[] = {
-        "pause", "resume", "limit", "maxStockByThread", "prunerBatch"
+        "pause", "resume", "limit", "maxStockByThread", "prunerBatch",
+        "clientsCommand", "clientsCmd", "clientsWork"
     };
     static const char *const privileged_names[] = { "restore", "backup" };
 
@@ -318,6 +319,46 @@ TEST control_command_allowed_and_privileged_are_disjoint(void)
     for (size_t i = 0; i < sizeof(privileged_names) / sizeof(privileged_names[0]); i++) {
         ASSERT_EQ_FMT(0, control_command_allowed(privileged_names[i]), "%d");
     }
+    PASS();
+}
+
+/* control_command_read_only : n'identifie QUE "clientsWork" parmi les
+   commandes de control_command_allowed -- utilisé exclusivement par l'API
+   HTTP admin pour décider si l'authentification est requise (voir
+   handle_command_route, src/net/http_server.c). */
+TEST control_command_read_only_accepts_only_clientswork(void)
+{
+    ASSERT_EQ_FMT(1, control_command_read_only("clientsWork"), "%d");
+    /* Avec argument : seul le premier mot compte. */
+    ASSERT_EQ_FMT(1, control_command_read_only("clientsWork beta"), "%d");
+    PASS();
+}
+
+TEST control_command_read_only_rejects_modifying_standard_commands(void)
+{
+    ASSERT_EQ_FMT(0, control_command_read_only("pause"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("resume"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("limit"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("maxStockByThread"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("prunerBatch"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("clientsCommand"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("clientsCmd"), "%d");
+    PASS();
+}
+
+TEST control_command_read_only_rejects_others(void)
+{
+    ASSERT_EQ_FMT(0, control_command_read_only("exit"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("restore"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only(""), "%d");
+    /* Préfixe partiel non whitelisté. */
+    ASSERT_EQ_FMT(0, control_command_read_only("clientsWorker"), "%d");
+    PASS();
+}
+
+TEST control_command_read_only_handles_null(void)
+{
+    ASSERT_EQ_FMT(0, control_command_read_only(NULL), "%d");
     PASS();
 }
 
@@ -343,4 +384,8 @@ SUITE(control_protocol_suite)
     RUN_TEST(control_command_privileged_rejects_others);
     RUN_TEST(control_command_privileged_handles_null);
     RUN_TEST(control_command_allowed_and_privileged_are_disjoint);
+    RUN_TEST(control_command_read_only_accepts_only_clientswork);
+    RUN_TEST(control_command_read_only_rejects_modifying_standard_commands);
+    RUN_TEST(control_command_read_only_rejects_others);
+    RUN_TEST(control_command_read_only_handles_null);
 }

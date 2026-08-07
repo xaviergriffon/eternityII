@@ -82,8 +82,10 @@ int pruner_batch_clamp(int v);
  *
  * Ne couvre que les commandes acceptées par `control_command_allowed`
  * (control_protocol.h) : `pause`, `resume`, `limit <n>`,
- * `maxStockByThread <n>`, `prunerBatch <n>`. Toute autre commande (dont
- * `exit`, `restore`, `import`) est refusée avant même d'être tokenisée.
+ * `maxStockByThread <n>`, `prunerBatch <n>`, `clientsCommand [--to <cible>]
+ * <ligne...>` (alias `clientsCmd`), `clientsWork <cible>`. Toute autre
+ * commande (dont `exit`, `restore`, `import`) est refusée avant même d'être
+ * tokenisée.
  *
  * `pause`/`resume`, comme leurs pendants console (`pause_interpreter`/
  * `resume_interpreter`), diffusent aussi `CTRL_COMMAND` à toutes les sessions
@@ -92,6 +94,17 @@ int pruner_batch_clamp(int v);
  * `/api/v1/command`) ne mettrait en pause QUE l'état local du serveur (jamais
  * consulté par sa propre boucle de recherche, qu'il ne lance pas) sans jamais
  * atteindre les clients connectés.
+ *
+ * `clientsCommand`/`clientsCmd` et `clientsWork` sont des commandes SERVEUR
+ * (elles agissent sur `control_registry`, jamais sur les forks de recherche
+ * d'un client), appliquées par des portions réentrantes dédiées
+ * (`admin_remote_clients_command`/`admin_remote_clients_work`, statiques dans
+ * command_lines.c) — jamais par `clients_cmd_interpreter`/
+ * `clients_work_interpreter` eux-mêmes, qui tokenisent via le curseur global
+ * `strtok`. `clientsWork` ne renvoie aucune donnée dans le corps de la
+ * réponse HTTP (toujours `{"result":"ok"}` sur succès) : son résultat
+ * (nombre de possibilités attribuées, `alloc` max) n'est journalisé
+ * (`log_info`) que côté serveur.
  *
  * @param line Ligne de commande complète (ex. "limit 1000"), non modifiée.
  * @return     `ADMIN_CMD_OK`, `ADMIN_CMD_FORBIDDEN` (hors liste blanche) ou

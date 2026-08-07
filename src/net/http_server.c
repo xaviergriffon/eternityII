@@ -317,13 +317,19 @@ static void send_response_unauthorized(int socket_id, const char *json_body)
 
 /**
  * @brief Traite POST /api/v1/command : extrait "command", décide de son
- *        autorisation (liste blanche standard, ou liste blanche privilégiée
- *        + jeton Bearer valide), puis l'applique via `admin_apply_privileged_command`.
+ *        autorisation, puis l'applique via `admin_apply_privileged_command`.
  *
- * Le jeton n'est extrait/comparé QUE si la commande est privilégiée
- * (`control_command_privileged`) : une commande de la liste standard
- * (`pause`, `limit`, ...) n'a jamais eu besoin d'authentification et n'en a
- * toujours pas besoin — comportement par défaut strictement inchangé.
+ * **Toute commande de modification requiert un jeton Bearer valide** — seule
+ * exception, `clientsWork` (`control_command_read_only`), une consultation
+ * pure qui ne change aucun état. `needs_auth` combine `control_command_privileged`
+ * (restore/backup) avec les commandes de `control_command_allowed` qui ne
+ * sont PAS `control_command_read_only` (`pause`, `resume`, `limit`,
+ * `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`) : le
+ * jeton n'est extrait/comparé QUE si `needs_auth` est vrai — une commande
+ * purement lecture (`clientsWork`, ou une route `GET`) n'en a jamais eu
+ * besoin. Sans `--http-token-file` configuré, toute commande de modification
+ * reste donc inaccessible via cette API (401), quel que soit l'en-tête
+ * fourni — seule la lecture (GET, `clientsWork`) fonctionne sans jeton.
  */
 static void handle_command_route(int socket_id, const http_request_t *req)
 {
@@ -334,13 +340,15 @@ static void handle_command_route(int socket_id, const http_request_t *req)
         return;
     }
 
-    int is_allowed = control_command_allowed(command);
-    int is_privileged = control_command_privileged(command);
+    int is_standard = control_command_allowed(command);
+    int is_read_only = is_standard && control_command_read_only(command);
+    int is_unauthenticated_ok = is_read_only;
+    int needs_auth = control_command_privileged(command) || (is_standard && !is_read_only);
     int has_configured_token = HTTP_ADMIN_TOKEN[0] != '\0';
     int token_present = 0;
     int token_valid = 0;
 
-    if (is_privileged) {
+    if (needs_auth) {
         char token[HTTP_ADMIN_TOKEN_MAX];
         token_present = (http_extract_bearer_token(req->authorization, token, sizeof(token)) > 0);
         if (token_present && has_configured_token) {
@@ -348,7 +356,7 @@ static void handle_command_route(int socket_id, const http_request_t *req)
         }
     }
 
-    http_cmd_auth_result_t decision = http_command_authorize(is_allowed, is_privileged, has_configured_token, token_valid);
+    http_cmd_auth_result_t decision = http_command_authorize(is_unauthenticated_ok, needs_auth, has_configured_token, token_valid);
 
     if (decision == HTTP_CMD_AUTH_FORBIDDEN) {
         send_response(socket_id, 403, "{\"error\":\"command not allowed\"}");
@@ -360,16 +368,16 @@ static void handle_command_route(int socket_id, const http_request_t *req)
             // serveur) : anti-bruteforce avant de répondre. Jamais le jeton
             // lui-même dans les logs.
             usleep(HTTP_AUTH_FAIL_DELAY_US);
-            log_error("commande privilégiée \"%s\" refusée via l'API HTTP admin : jeton invalide\n", command);
+            log_error("commande \"%s\" (authentification requise) refusée via l'API HTTP admin : jeton invalide\n", command);
         } else {
-            log_error("commande privilégiée \"%s\" refusée via l'API HTTP admin : jeton absent\n", command);
+            log_error("commande \"%s\" (authentification requise) refusée via l'API HTTP admin : jeton absent\n", command);
         }
         send_response_unauthorized(socket_id, "{\"error\":\"unauthorized\"}");
         return;
     }
 
-    if (is_privileged) {
-        log_info("commande privilégiée \"%s\" exécutée via l'API HTTP admin\n", command);
+    if (needs_auth) {
+        log_info("commande \"%s\" (authentification requise) exécutée via l'API HTTP admin\n", command);
     }
 
     int result = admin_apply_privileged_command(command);

@@ -180,23 +180,36 @@ int http_token_equals_constant_time(const char *a, const char *b, size_t max_len
 
 /**
  * @brief Décision d'autorisation pure pour `POST /api/v1/command` : combine
- *        liste blanche standard, liste blanche privilégiée et résultat de la
- *        vérification du jeton — sans connaître ni `control_protocol.h` ni le
- *        jeton lui-même (calculés par l'appelant, `src/net/http_server.c`).
+ *        deux drapeaux calculés par l'appelant et le résultat de la
+ *        vérification du jeton — sans connaître `control_protocol.h`, ni le
+ *        jeton lui-même, ni le détail de la classification des commandes.
+ *
+ * Cette fonction ignore tout de la classification par NOM de commande : elle
+ * ne voit que deux booléens déjà tranchés par l'appelant (`src/net/http_server.c`).
+ * Depuis l'exigence « toute commande de modification doit être authentifiée »,
+ * `is_allowed` ne signifie donc plus « dans `control_command_allowed` » mais
+ * « exécutable SANS authentification » — l'appelant le calcule comme
+ * `control_command_allowed(command) && control_command_read_only(command)`
+ * (aujourd'hui : seulement `clientsWork`) — et `is_privileged` ne signifie
+ * plus seulement « dans `control_command_privileged` » (restore/backup) mais
+ * « nécessite un jeton valide » — l'appelant le calcule comme
+ * `control_command_privileged(command) || (control_command_allowed(command)
+ * && !control_command_read_only(command))`, ce qui inclut désormais aussi
+ * `pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`,
+ * `clientsCommand`/`clientsCmd`. La logique de CETTE fonction reste
+ * inchangée — seule la façon dont l'appelant peuple ses deux entrées a changé.
  *
  * Règles :
- * - `is_allowed` (control_command_allowed) : toujours OK, comme avant cette
- *   fonctionnalité — aucune régression sur les commandes déjà admises.
- * - `is_privileged` (control_command_privileged, restore/backup) : OK
- *   seulement si un jeton est configuré ET que `token_valid` l'atteste ;
- *   sinon UNAUTHORIZED (401), qu'un jeton soit configuré ou non — un serveur
- *   sans jeton configuré refuse aussi les commandes privilégiées plutôt que
- *   de les exécuter sans aucune preuve d'identité.
+ * - `is_allowed` : toujours OK, sans vérification de jeton.
+ * - `is_privileged` : OK seulement si un jeton est configuré ET que
+ *   `token_valid` l'atteste ; sinon UNAUTHORIZED (401), qu'un jeton soit
+ *   configuré ou non — un serveur sans jeton configuré refuse aussi ces
+ *   commandes plutôt que de les exécuter sans aucune preuve d'identité.
  * - Ni l'un ni l'autre : FORBIDDEN (403), comme aujourd'hui pour `exit`,
  *   `import`, etc.
  *
- * @param is_allowed           Résultat de `control_command_allowed(command)`.
- * @param is_privileged        Résultat de `control_command_privileged(command)`.
+ * @param is_allowed           Commande exécutable sans authentification (voir ci-dessus).
+ * @param is_privileged        Commande nécessitant un jeton Bearer valide (voir ci-dessus).
  * @param has_configured_token 1 si le serveur a chargé un jeton au démarrage
  *                             (`--http-token-file`), 0 sinon.
  * @param token_valid          1 si un jeton Bearer a été fourni ET correspond

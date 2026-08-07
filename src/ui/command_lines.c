@@ -854,6 +854,97 @@ int resume_interpreter(void) {
 }
 
 /**
+ * @brief Portion "clientsCommand"/"clientsCmd" [--to <cible>] <ligne...> de
+ *        `admin_apply_remote_command`, réentrante (aucun strtok global).
+ *
+ * `rest` est le reliquat de ligne laissé par `strtok_r` juste après le mot
+ * "clientsCommand"/"clientsCmd" -- toujours un pointeur dans le tampon
+ * modifiable de l'appelant, jamais retokenisé au delà de la recherche de
+ * "--to". Même format et mêmes règles que `clients_cmd_interpreter` (cf. sa
+ * documentation) : sans "--to", diffusion à toutes les sessions actives ;
+ * avec "--to <cible>", une seule session ciblée (`session_no`, `client_uid`
+ * ou `label`) ; dans les deux cas, la commande poussée est vérifiée par
+ * `control_command_allowed` avant tout envoi -- cibler une session n'élargit
+ * jamais le jeu de commandes autorisées.
+ */
+static int admin_remote_clients_command(char *rest) {
+    while (rest != NULL && *rest == ' ') {
+        rest++;
+    }
+    if (rest == NULL || *rest == '\0') {
+        return ADMIN_CMD_BAD_ARGS;
+    }
+
+    const char *target = NULL;
+    if (strncmp(rest, "--to ", 5) == 0) {
+        rest += 5;
+        while (*rest == ' ') {
+            rest++;
+        }
+        char *sep = strchr(rest, ' ');
+        if (sep == NULL) {
+            /* "--to <cible>" sans commande derrière : rien à envoyer. */
+            return ADMIN_CMD_BAD_ARGS;
+        }
+        *sep = '\0';
+        target = rest;
+        rest = sep + 1;
+        while (*rest == ' ') {
+            rest++;
+        }
+        if (*rest == '\0') {
+            return ADMIN_CMD_BAD_ARGS;
+        }
+    }
+
+    if (!control_command_allowed(rest)) {
+        return ADMIN_CMD_FORBIDDEN;
+    }
+
+    if (target != NULL) {
+        int posted = control_registry_send_command_to(target, CTRL_COMMAND, rest);
+        return (posted == 1) ? ADMIN_CMD_OK : ADMIN_CMD_BAD_ARGS;
+    }
+
+    control_registry_broadcast_command(CTRL_COMMAND, rest);
+    return ADMIN_CMD_OK;
+}
+
+/**
+ * @brief Portion "clientsWork <cible>" de `admin_apply_remote_command`,
+ *        réentrante (aucun strtok global).
+ *
+ * Lecture pure (rien n'est envoyé à un client) : résout `target` vers un
+ * `client_uid` exactement comme `clients_work_interpreter`
+ * (`control_registry_resolve_client_uid`), puis journalise l'attribution déjà
+ * enregistrée côté serveur (`datamanager_analysed_owned_by`). `POST
+ * /api/v1/command` répond uniquement `{"result":"ok"}` (pas de canal pour
+ * renvoyer une donnée dans le corps de la réponse) : comme pour `clientsStats`
+ * via cette même API, le résultat de la consultation est à lire dans les
+ * journaux du serveur.
+ */
+static int admin_remote_clients_work(char *target) {
+    if (target == NULL || *target == '\0') {
+        return ADMIN_CMD_BAD_ARGS;
+    }
+
+    uint8_t client_uid[CLIENT_UID_BYTES];
+    if (control_registry_resolve_client_uid(target, client_uid) != 1) {
+        return ADMIN_CMD_BAD_ARGS;
+    }
+
+    unsigned long long count = 0;
+    int max_alloc = -1;
+    datamanager_analysed_owned_by(client_uid, &count, &max_alloc);
+
+    char client_uid_hex[2 * CLIENT_UID_BYTES + 1];
+    client_identity_hex_encode(client_uid, CLIENT_UID_BYTES, client_uid_hex, sizeof(client_uid_hex));
+    log_info("clientsWork (API HTTP admin) : %s (client_uid=%s) : %llu possibilite(s) en cours d'analyse, alloc max=%d\n",
+              target, client_uid_hex, count, max_alloc);
+    return ADMIN_CMD_OK;
+}
+
+/**
  * @brief Voir la doc dans command_lines.h.
  */
 int admin_apply_remote_command(const char *line) {
@@ -869,24 +960,31 @@ int admin_apply_remote_command(const char *line) {
     char *word = strtok_r(copy, " ", &save);
     int result = ADMIN_CMD_BAD_ARGS;
     if (word != NULL) {
-        char *arg = strtok_r(NULL, " ", &save);
-        if (strcmp(word, "pause") == 0) {
-            request = admin_pause_transition(request, 1);
-            control_registry_broadcast_command(CTRL_COMMAND, "pause");
-            result = ADMIN_CMD_OK;
-        } else if (strcmp(word, "resume") == 0) {
-            request = admin_pause_transition(request, 0);
-            control_registry_broadcast_command(CTRL_COMMAND, "resume");
-            result = ADMIN_CMD_OK;
-        } else if (strcmp(word, "limit") == 0 && arg != NULL) {
-            max_search_by_sec = atoi(arg);
-            result = ADMIN_CMD_OK;
-        } else if (strcmp(word, "maxStockByThread") == 0 && arg != NULL) {
-            max_stock_by_thread = atoi(arg);
-            result = ADMIN_CMD_OK;
-        } else if (strcmp(word, "prunerBatch") == 0 && arg != NULL) {
-            pruner_batch_size = pruner_batch_clamp(atoi(arg));
-            result = ADMIN_CMD_OK;
+        if (strcmp(word, "clientsCommand") == 0 || strcmp(word, "clientsCmd") == 0) {
+            result = admin_remote_clients_command(save);
+        } else if (strcmp(word, "clientsWork") == 0) {
+            char *target = strtok_r(NULL, " ", &save);
+            result = admin_remote_clients_work(target);
+        } else {
+            char *arg = strtok_r(NULL, " ", &save);
+            if (strcmp(word, "pause") == 0) {
+                request = admin_pause_transition(request, 1);
+                control_registry_broadcast_command(CTRL_COMMAND, "pause");
+                result = ADMIN_CMD_OK;
+            } else if (strcmp(word, "resume") == 0) {
+                request = admin_pause_transition(request, 0);
+                control_registry_broadcast_command(CTRL_COMMAND, "resume");
+                result = ADMIN_CMD_OK;
+            } else if (strcmp(word, "limit") == 0 && arg != NULL) {
+                max_search_by_sec = atoi(arg);
+                result = ADMIN_CMD_OK;
+            } else if (strcmp(word, "maxStockByThread") == 0 && arg != NULL) {
+                max_stock_by_thread = atoi(arg);
+                result = ADMIN_CMD_OK;
+            } else if (strcmp(word, "prunerBatch") == 0 && arg != NULL) {
+                pruner_batch_size = pruner_batch_clamp(atoi(arg));
+                result = ADMIN_CMD_OK;
+            }
         }
     }
 
