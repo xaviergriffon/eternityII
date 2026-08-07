@@ -6,6 +6,7 @@
 #define eternityII_datamanager_h
 
 #include <pthread.h>
+#include <time.h>
 #include "app/etii_client.h"
 #include "core/possibility.h"
 #include "core/lifo.h"
@@ -103,6 +104,50 @@ int add_possibility_analysed_owned(struct possibility_packet *possiblity, int th
  */
 int datamanager_analysed_owned_by(const uint8_t owner_uid[CLIENT_UID_BYTES],
                                    unsigned long long *out_count, int *out_max_alloc);
+
+/**
+ * @brief Décide si un bail est expiré à l'instant `now` (PR7, bail à
+ *        expiration, docs/conception/identification_clients.md section 4.3).
+ *
+ * Fonction pure : ne consulte JAMAIS l'horloge réelle elle-même, `now` est
+ * toujours fourni par l'appelant — ce qui la rend testable sans `sleep`.
+ *
+ * @param lease_deadline Échéance du bail, telle qu'enregistrée par
+ *                        `add_possibility_analysed_owned` (0 = bail
+ *                        désactivé/non applicable : jamais expiré).
+ * @param now             Horodatage de référence.
+ * @return                1 si expiré, 0 sinon.
+ */
+int analysed_lease_is_expired(time_t lease_deadline, time_t now);
+
+/**
+ * @brief Balaie la table latérale d'attribution et remet dans le stock non
+ *        vérifié toute possibilité dont le bail a expiré à `now` (PR7, bail
+ *        à expiration, docs/conception/identification_clients.md section 4.3).
+ *
+ * Un client disparu (mort, coupure réseau) sans avoir acquitté ce qu'il tenait
+ * ne gèle plus indéfiniment sa part du stock : passé `analysed_lease_seconds`
+ * secondes sans acquittement, la possibilité est rendue automatiquement.
+ *
+ * Balayage borné et périodique — jamais dans un chemin chaud — verrouillant
+ * chaque `file_possibility_analysed[f]` le temps de son propre passage (comme
+ * `datamanager_analysed_owned_by`), jamais toutes les files à la fois. C'est
+ * précisément ce verrou par file qui rend l'opération **idempotente** vis-à-vis
+ * d'un acquittement concurrent (`remove_possibility_analysed`) : les deux
+ * passent par le même verrou, donc soit l'acquittement a déjà retiré l'entrée
+ * de l'index (rien à réclamer ici), soit c'est cette fonction qui l'a retirée
+ * en premier (un acquittement qui arrive ensuite ne trouve plus rien et
+ * renvoie « non trouvé », sans jamais dupliquer la possibilité dans le stock).
+ * N'affecte que les entrées attribuées (`has_owner`) : une possibilité sans
+ * propriétaire connu (client ancien, ou possibilité restaurée depuis un
+ * backup — les baux ne sont pas persistés, section 4.7 du document) n'expire
+ * jamais par ce mécanisme.
+ *
+ * @param now Horodatage de référence (injecté : jamais `time(NULL)` en
+ *            interne, pour rester testable sans horloge réelle ni `sleep`).
+ * @return    Nombre de possibilités rendues au stock.
+ */
+unsigned long long datamanager_reclaim_expired_leases(time_t now);
 
 /**
  * @brief Renvoie au serveur les possibilités analysées depuis les files locales.

@@ -123,6 +123,23 @@
 // deux passes dès que le stock dépasse ce seuil. ~100000 × ~0,5 Ko ≈ 54 Mo.
 #define EXPAND_MAX_STOCK 100000
 
+// Bail à expiration des analyses en cours (PR7,
+// docs/conception/identification_clients.md §4.3) : durée par défaut, en
+// secondes, au-delà de laquelle une possibilité attribuée à un client
+// (owner_uid connu, cf. add_possibility_analysed_owned) et jamais acquittée
+// est réputée abandonnée et rendue au stock non vérifié. Dimensionnée
+// **au-dessus** du temps qu'un client peut légitimement passer sur un lot —
+// le cas majorant est un pruner à gros `prunerBatch` (jusqu'à
+// PRUNER_BATCH_MAX = 65536 possibilités : chacune est rapide à vérifier,
+// mais le lot entier, plus l'aller-retour réseau, peut malgré tout accumuler
+// plusieurs secondes). Un bail trop court se traduit par du travail dupliqué
+// (pas une erreur visible) : mieux vaut le choisir large plutôt que juste.
+// Configurable à l'exécution via la commande console `leaseDuration <n>` ;
+// <n> ≤ 0 désactive le bail (même convention que `limit 0` pour la
+// régulation de débit) — utile pour un déploiement qui préfère geler un
+// stock indéfiniment plutôt que risquer un double travail.
+#define ANALYSED_LEASE_DEFAULT_SECONDS 300
+
 // Nombre maximal de sessions de contrôle (canal INST_CONTROL_HELLO, cf.
 // control_registry.h) suivies simultanément par le serveur. Une session de
 // contrôle réutilise un slot déjà présent du pool `client_t` (même connexion
@@ -386,6 +403,17 @@ extern int headless_mode;
  * `PRUNER_BATCH_SIZE`, plafonné à `PRUNER_BATCH_MAX`.
  */
 extern int pruner_batch_size;
+
+/**
+ * @brief Durée (secondes) du bail à expiration des possibilités attribuées à
+ *        un client (PR7, docs/conception/identification_clients.md §4.3).
+ *
+ * Configurable à l'exécution via la commande console `leaseDuration <n>`.
+ * Défaut `ANALYSED_LEASE_DEFAULT_SECONDS`. `<= 0` désactive le bail : les
+ * possibilités attribuées ne sont alors jamais rendues automatiquement au
+ * stock (comportement d'avant cette PR).
+ */
+extern int analysed_lease_seconds;
 
 #ifdef WITH_CUDA
 /**

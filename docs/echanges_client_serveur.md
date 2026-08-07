@@ -493,9 +493,71 @@ clientsWork 3                    # que travaille la session #3 ?
 clientsWork jetson-1              # ou en ciblant par label déclaré
 ```
 
-PR7 (non encore implémentée) construit le pendant **écriture** sur cette même
-table : un bail à expiration (`lease_deadline`) qui rend automatiquement le stock
-d'un client disparu, sans intervention d'un opérateur.
+### Bail à expiration des analyses en cours
+
+PR7 de [docs/conception/identification_clients.md](conception/identification_clients.md#4-impacts-par-domaine)
+construit le pendant **écriture** de PR6 sur la même table latérale : un bail à
+expiration qui rend automatiquement au stock la part d'un client qui a disparu
+(`kill -9`, coupure réseau, panne machine) sans avoir acquitté ce qu'il tenait —
+sans intervention d'un opérateur (auparavant, seule la commande console
+`restockAnalysed`, tout-ou-rien, pouvait débloquer la situation).
+
+**`lease_deadline`, sur le même `AnalysedIndexNode`.** Chaque nœud attribué
+(`has_owner`) porte désormais aussi une échéance : `add_possibility_analysed_owned`
+la calcule à l'insertion, `time(NULL) + analysed_lease_seconds` (0 = bail
+désactivé, quand `analysed_lease_seconds <= 0` — même convention que `limit 0`
+pour la régulation de débit). Une possibilité sans propriétaire connu (client trop
+ancien, ou possibilité restaurée depuis un backup — les baux ne sont **jamais**
+persistés, cf. [Persistance](conception/identification_clients.md#47-persistance))
+n'a pas de bail et n'expire donc jamais par ce mécanisme.
+
+**Balayage borné et périodique, jamais un chemin chaud.** `datamanager_reclaim_expired_leases(now)`
+(`src/core/datamanager.{h,c}`) parcourt `analysed_index` exactement comme
+`datamanager_analysed_owned_by` (PR6) — un verrou par file, jamais toutes les
+files à la fois — et déplace chaque nœud expiré de la `File` d'analyse vers le
+stock non vérifié (même remise en stock que `restock_analysed`, en deux temps :
+tout le travail sur l'index et la `File` sous le verrou de la file d'analyse,
+puis l'insertion dans le stock hors verrou, pour ne jamais tenir les deux verrous
+en même temps). Appelée depuis `check_server_step` au même rythme que le reste de
+ce tour (10 s, là où vivent déjà l'autobackup et la détection de nouveau record) —
+jamais dans la boucle chaude de recherche. `now` est lu **une seule fois** par
+l'appelant et injecté : `datamanager_reclaim_expired_leases` ne consulte jamais
+l'horloge elle-même, ce qui la rend testable sans `sleep` (la décision
+d'expiration, `analysed_lease_is_expired(lease_deadline, now)`, est une fonction
+pure qui prend `now` en paramètre).
+
+**Idempotence vis-à-vis d'un acquittement concurrent — le point délicat de cette
+PR.** Le balayage d'expiration et `remove_possibility_analysed` (appelé par un
+acquittement client normal, ou par `requeue_last_sent_possibility` à la
+déconnexion) prennent tous deux le verrou de la **même** file avant de toucher
+l'index : les deux opérations sont donc strictement sérialisées, jamais
+concurrentes sur la même entrée. Quel que soit l'ordre d'arrivée :
+- l'acquittement retire l'entrée en premier → le balayage suivant ne la trouve
+  plus dans l'index, ne réclame rien : pas de doublon dans le stock ;
+- le balayage retire l'entrée en premier (l'expire et la rend au stock) →
+  l'acquittement suivant ne la trouve plus (`remove_possibility_analysed` retombe
+  sur le repli par balayage linéaire, toujours vide) et renvoie « non trouvée »
+  (retour 1) — le contrat déjà utilisé par `requeue_last_sent_possibility`
+  (« déjà acquittée, rien à faire ») couvre donc aussi « déjà rendue par
+  expiration », sans changement de code sur ce chemin existant.
+
+**Durée configurable, jamais bornée.** `analysed_lease_seconds`
+(`src/app/static_variables.h`, défaut `ANALYSED_LEASE_DEFAULT_SECONDS` = 300 s) se
+règle à chaud via la commande console `leaseDuration <n>` — SERVEUR pure
+(`send_to_childs = 0`, le bail n'a de sens que côté serveur, seul à enregistrer une
+attribution). Dimensionnée **au-dessus** du temps qu'un client peut légitimement
+passer sur un lot, le cas majorant étant un pruner à gros `prunerBatch` (jusqu'à
+`PRUNER_BATCH_MAX` = 65536 possibilités) : un bail trop court se traduit par du
+travail dupliqué (jamais une erreur visible), donc mieux vaut le choisir large que
+juste. `<n> <= 0` désactive le bail. Un changement de durée n'affecte que les
+possibilités attribuées **après** le changement — celles déjà en cours d'analyse
+gardent l'échéance calculée à leur insertion.
+
+```
+leaseDuration 600     # bail de 10 minutes
+leaseDuration 0        # désactivé : plus aucune remise en stock automatique
+clientsWork jetson-1    # toujours utilisable pour observer ce qu'un client détient
+```
 
 ### Impact sur le dimensionnement du serveur
 
@@ -520,7 +582,11 @@ par la liste blanche, à une session précise ou, par défaut, à toutes — voi
 [Registre de clients connus](#registre-de-clients-connus) ci-dessus), et
 `clientsWork <cible>` (consultation en lecture seule de ce qu'un client précis
 détient dans le pool « en cours d'analyse », voir
-[Attribution des analyses en cours](#attribution-des-analyses-en-cours) ci-dessus).
+[Attribution des analyses en cours](#attribution-des-analyses-en-cours) ci-dessus),
+et `leaseDuration <n>` (fixe la durée du bail à expiration des possibilités
+attribuées, `<n> <= 0` le désactive, voir
+[Bail à expiration des analyses en cours](#bail-à-expiration-des-analyses-en-cours)
+ci-dessus).
 `pause`/`resume` posent/lèvent localement `REQUEST_ADMIN_PAUSE` — un état
 distinct de la pause de régulation de débit (`REQUEST_PAUSE`, auto-levée par le
 régulateur), pour qu'une pause administrative ne disparaisse jamais toute seule au

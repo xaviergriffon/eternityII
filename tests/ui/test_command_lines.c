@@ -279,6 +279,36 @@ TEST do_command_line_pruner_batch_requires_arg(void)
     PASS();
 }
 
+/* leaseDuration <n> : fixe analysed_lease_seconds (PR7,
+ * docs/conception/identification_clients.md, section 4.3). Pas de bornage
+ * (contrairement à prunerBatch) : <= 0 est une valeur légitime (désactive le
+ * bail, cf. commentaire de static_variables.h), donc acceptée telle quelle. */
+TEST do_command_line_lease_duration_sets_global(void)
+{
+    int saved = analysed_lease_seconds;
+
+    char ok[] = "leaseDuration 42";
+    ASSERT_EQ_FMT(0, run_command_quiet(ok), "%d");
+    ASSERT_EQ_FMT(42, analysed_lease_seconds, "%d");
+
+    char disable[] = "leaseDuration 0";
+    ASSERT_EQ_FMT(0, run_command_quiet(disable), "%d");
+    ASSERT_EQ_FMT(0, analysed_lease_seconds, "%d");
+
+    analysed_lease_seconds = saved;
+    PASS();
+}
+
+/* leaseDuration sans argument -> -1 (erreur d'interprète), global inchangé. */
+TEST do_command_line_lease_duration_requires_arg(void)
+{
+    int saved = analysed_lease_seconds;
+    char cmd[] = "leaseDuration";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+    ASSERT_EQ_FMT(saved, analysed_lease_seconds, "%d");
+    PASS();
+}
+
 /* limit <n> : fixe le débit maximum de recherche par seconde (global). */
 TEST do_command_line_limit_sets_global(void)
 {
@@ -1769,6 +1799,8 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_max_stock_requires_arg);
     RUN_TEST(do_command_line_pruner_batch_is_clamped);
     RUN_TEST(do_command_line_pruner_batch_requires_arg);
+    RUN_TEST(do_command_line_lease_duration_sets_global);
+    RUN_TEST(do_command_line_lease_duration_requires_arg);
     RUN_TEST(do_command_line_limit_sets_global);
     RUN_TEST(do_command_line_limit_requires_arg);
     RUN_TEST(do_command_line_unknown_command_typo_suggestion);

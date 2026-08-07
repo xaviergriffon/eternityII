@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <time.h>
 
 #include "ui/logger.h"
 #include "app/static_variables.h"
@@ -251,6 +252,18 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
     if (max_result > *last_record) {
         *last_record = max_result;
         log_event("new record: %i pieces placed", max_result);
+    }
+
+    // Bail à expiration des analyses en cours (PR7,
+    // docs/conception/identification_clients.md §4.3) : passe bornée, au même
+    // rythme que le reste de ce tour (10 s) -- jamais un chemin chaud. `now`
+    // est lu une seule fois ici et injecté, `datamanager_reclaim_expired_leases`
+    // ne consulte jamais l'horloge elle-même (testable sans horloge réelle).
+    // Idempotent vis-à-vis d'un acquittement concurrent : les deux passent par
+    // le même verrou par file (cf. datamanager.h).
+    unsigned long long reclaimed_leases = datamanager_reclaim_expired_leases(time(NULL));
+    if (reclaimed_leases > 0) {
+        log_event("bail expiré : %llu possibilité(s) rendue(s) au stock (client disparu)", reclaimed_leases);
     }
 
     if (should_autobackup(lastBack, lastClientsFileUpdateBackup, clientsFileUpdates))

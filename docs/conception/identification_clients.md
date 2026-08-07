@@ -1,9 +1,9 @@
 # Identification des clients — document de conception
 
-**Statut : en cours d'implémentation (PR 6/7 traitées).** Il sert de base au
-découpage en PR et fixe les arbitrages déjà tranchés, pour qu'ils n'aient pas à être
-rediscutés à chaque PR. Voir la section [5](#5-découpage-en-pr-proposé) pour l'état
-d'avancement PR par PR.
+**Statut : implémentée (7/7 PR traitées).** Il sert de base au découpage en PR et
+fixe les arbitrages déjà tranchés, pour qu'ils n'aient pas à être rediscutés à
+chaque PR. Voir la section [5](#5-découpage-en-pr-proposé) pour l'état d'avancement
+PR par PR.
 
 Objectif : remplacer le PID comme identifiant de client par un modèle capable de
 soutenir trois besoins qui vont au-delà du simple affichage lisible :
@@ -250,7 +250,7 @@ protocole **qu'une fois**.
 | **4** | **Registre de clients connus** : cumul en mémoire, statut connecté/déconnecté, exposition console + HTTP | non | 2 | ✅ traitée ([#173](https://github.com/xaviergriffon/eternityII/pull/173)) |
 | **5** | **Persistance du cumul** : nouveau `.back`, branché sur les points d'appel existants, lecture tolérante | non | 4 | ✅ traitée ([#174](https://github.com/xaviergriffon/eternityII/pull/174)) |
 | **6** | **Attribution des analyses en cours** : `{owner_uid}` dans la table latérale, consultation « que travaille X » | non | 2 | ✅ traitée ([#175](https://github.com/xaviergriffon/eternityII/pull/175)) |
-| **7** | **Bail à expiration** : `lease_deadline`, balayage borné dans `check_server_step`, remise en stock idempotente, durée configurable | non | 6 | à faire |
+| **7** | **Bail à expiration** : `lease_deadline`, balayage borné dans `check_server_step`, remise en stock idempotente, durée configurable | non | 6 | ✅ traitée |
 
 Notes de séquencement :
 
@@ -286,7 +286,12 @@ corrigé), en privilégiant l'extraction de fonctions pures :
 
 - Chemin par défaut du fichier `machine_uid`, et comportement en conteneur.
 - Borne et politique d'éviction du registre de clients connus.
-- Durée par défaut du bail, et si elle doit dépendre du mode (recherche vs pruner à gros
-  lot).
 - Faut-il conserver le PID à l'affichage une fois le `label` en place ? (avis : oui, il
   reste le seul moyen de corréler avec `ps`/`top` sur la machine concernée).
+
+Tranché en PR7 : la durée par défaut du bail est `ANALYSED_LEASE_DEFAULT_SECONDS`
+(300 s, `src/app/static_variables.h`) — une même valeur pour tous les modes plutôt
+qu'une dépendance recherche/pruner, configurable à l'exécution via la commande
+console `leaseDuration <n>` (voir [Bail à expiration des analyses en
+cours](../echanges_client_serveur.md#bail-à-expiration-des-analyses-en-cours) pour
+le détail et le raisonnement de dimensionnement).
