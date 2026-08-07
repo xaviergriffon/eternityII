@@ -3,6 +3,7 @@
 #include <string.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stdlib.h>
 
 #include "app/static_variables.h"   /* MAX_CONTROL_SESSIONS */
 
@@ -359,6 +360,84 @@ int control_registry_broadcast_command(uint8_t cmd, const char *command_line)
 int control_registry_broadcast_get_stats(void)
 {
     return control_registry_broadcast_command(CTRL_GET_STATS, NULL);
+}
+
+/* `target` est un `session_no` décimal si et seulement s'il est intégralement
+ * composé de chiffres (au moins un) : strtoull s'arrêterait silencieusement
+ * au premier caractère non numérique, ce qui accepterait à tort un label
+ * comme "3abc" comme s'il valait le session_no 3 -- vérifier `*end == '\0'`
+ * empêche cette confusion. */
+static int target_matches_session_no(const char *target, uint64_t session_no)
+{
+    if (target == NULL || target[0] == '\0') {
+        return 0;
+    }
+    char *end = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(target, &end, 10);
+    if (errno != 0 || end == target || *end != '\0') {
+        return 0;
+    }
+    return (uint64_t)v == session_no;
+}
+
+static int target_matches_client_uid(const char *target, const uint8_t *client_uid)
+{
+    if (target == NULL || strlen(target) != 2 * CLIENT_UID_BYTES) {
+        return 0;
+    }
+    uint8_t decoded[CLIENT_UID_BYTES];
+    if (client_identity_hex_decode(target, decoded, CLIENT_UID_BYTES) != 0) {
+        return 0;
+    }
+    return memcmp(decoded, client_uid, CLIENT_UID_BYTES) == 0;
+}
+
+static int target_matches_label(const char *target, const char *label)
+{
+    return target != NULL && label != NULL && strcmp(target, label) == 0;
+}
+
+int control_registry_send_command_to(const char *target, uint8_t cmd, const char *command_line)
+{
+    pthread_once(&g_init_once, registry_init_once);
+    if (target == NULL) {
+        return -1;
+    }
+
+    pthread_mutex_lock(&g_registry_mutex);
+    int matched_index = -1;
+    int nb_matches = 0;
+    for (int i = 0; i < MAX_CONTROL_SESSIONS; i++) {
+        control_session_t *s = &g_sessions[i];
+        pthread_mutex_lock(&s->mutex);
+        if (s->in_use) {
+            int hit = target_matches_session_no(target, s->session_no) ||
+                      target_matches_client_uid(target, s->hello.identity.client_uid) ||
+                      target_matches_label(target, s->hello.identity.label);
+            if (hit) {
+                nb_matches++;
+                if (nb_matches == 1) {
+                    matched_index = i;
+                }
+            }
+        }
+        pthread_mutex_unlock(&s->mutex);
+    }
+
+    int result = 0;
+    if (nb_matches == 1) {
+        /* Un seul titulaire trouvé sous cette identité : poste directement
+         * sur son slot, toujours sous g_registry_mutex (même schéma que
+         * control_registry_broadcast_command) pour qu'aucune déconnexion
+         * concurrente ne puisse réattribuer ce slot entre la résolution et
+         * l'envoi. */
+        if (control_registry_post_command(matched_index, cmd, command_line) == 0) {
+            result = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_registry_mutex);
+    return result;
 }
 
 int control_registry_auto_stats_due(int index, int interval_sec)

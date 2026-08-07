@@ -221,10 +221,19 @@ static command_description commands[NB_COMMANDS] = {
      "liste les sessions de contrôle actives (session_no, libellé, ip, pid, mode, forks, identité)", NULL, NULL},
     {"clientsStats", clients_stats_interpreter, 0, CMD_CAT_CLIENTS, 1, NULL,
      "demande leurs statistiques à tous les clients connectés", NULL, NULL},
-    {"clientsCommand", clients_cmd_interpreter, 0, CMD_CAT_CLIENTS, 1, "clientsCommand <commande...>",
-     "pousse une commande à tous les clients connectés",
+    {"clientsCommand", clients_cmd_interpreter, 0, CMD_CAT_CLIENTS, 1,
+     "clientsCommand [--to <session_no|client_uid|label>] <commande...>",
+     "pousse une commande à un client précis ou à tous les clients connectés",
      "Liste blanche : pause, resume, limit, maxStockByThread, prunerBatch.\n"
-     "Toute autre commande est refusée sans être diffusée.", NULL},
+     "Toute autre commande est refusée sans être diffusée, avec ou sans --to.\n"
+     "Sans --to : diffusion à toutes les sessions de contrôle actives (comportement\n"
+     "historique). Avec --to <cible> : n'atteint QUE la session désignée, par son\n"
+     "session_no (entier, cf. commande « clients »), son client_uid (hexadécimal\n"
+     "complet) ou son label déclaré (--name) -- la cible ne doit pas contenir\n"
+     "d'espace. Un session_no ou client_uid qui ne désigne plus aucune session\n"
+     "active (client déconnecté ou remplacé) est refusé, jamais redirigé vers un\n"
+     "autre client ; un label partagé par plusieurs sessions actives est refusé\n"
+     "comme ambigu.", NULL},
 
     /* Alias : résolus vers l'entrée canonique par find_command. Les noms
        historiques abrégés (sorta, rmnonext, …) restent acceptés ici ; les
@@ -919,14 +928,22 @@ int clients_stats_interpreter(void) {
 }
 
 /**
- * @brief Interpréteur de `clientsCommand <ligne...>` (alias `clientsCmd`) : diffuse une commande console
- *        à distance (`CTRL_COMMAND`) à toutes les sessions de contrôle actives.
+ * @brief Interpréteur de `clientsCommand [--to <cible>] <ligne...>` (alias `clientsCmd`) :
+ *        pousse une commande console à distance (`CTRL_COMMAND`), à une session de
+ *        contrôle précise (`--to`, PR3) ou, par défaut, à toutes les sessions actives.
  *
- * `<ligne...>` est reprise TELLE QUELLE après le premier mot (pas retokenisée :
- * elle peut contenir plusieurs arguments, ex. "limit 500"). Avant diffusion,
- * son premier mot est vérifié par `control_command_allowed` (liste blanche
- * définie dans control_protocol.h) : une commande non autorisée est refusée
- * SANS être diffusée.
+ * `<ligne...>` est reprise TELLE QUELLE (pas retokenisée : elle peut contenir
+ * plusieurs arguments, ex. "limit 500"). Avant tout envoi, son premier mot est
+ * vérifié par `control_command_allowed` (liste blanche définie dans
+ * control_protocol.h) : une commande non autorisée est refusée SANS être
+ * envoyée, avec ou sans `--to` -- cibler une session n'élargit jamais le jeu
+ * de commandes autorisées.
+ *
+ * `--to <cible>` doit précéder immédiatement la commande et ne doit pas
+ * contenir d'espace (un `session_no` ou un `client_uid` hexadécimal n'en
+ * contiennent jamais ; un `label` qui en contiendrait doit être ciblé
+ * autrement). La résolution (`control_registry_send_command_to`) refuse une
+ * cible inconnue/déconnectée ou ambiguë plutôt que de deviner un destinataire.
  */
 int clients_cmd_interpreter(void) {
     char *rest = strtok(NULL, "");
@@ -938,10 +955,44 @@ int clients_cmd_interpreter(void) {
     if (rest == NULL || *rest == '\0') {
         return CMD_ERR_USAGE;
     }
+
+    const char *target = NULL;
+    if (strncmp(rest, "--to ", 5) == 0) {
+        rest += 5;
+        while (*rest == ' ') {
+            rest++;
+        }
+        char *sep = strchr(rest, ' ');
+        if (sep == NULL) {
+            /* "--to <cible>" sans commande derrière : rien à envoyer. */
+            return CMD_ERR_USAGE;
+        }
+        *sep = '\0';
+        target = rest;
+        rest = sep + 1;
+        while (*rest == ' ') {
+            rest++;
+        }
+        if (*rest == '\0') {
+            return CMD_ERR_USAGE;
+        }
+    }
+
     if (!control_command_allowed(rest)) {
         log_error("clientsCommand : commande non autorisée à distance (liste blanche : pause, resume, limit, maxStockByThread, prunerBatch) : \"%s\"\n", rest);
         return -1;
     }
+
+    if (target != NULL) {
+        int posted = control_registry_send_command_to(target, CTRL_COMMAND, rest);
+        if (posted != 1) {
+            log_error("clientsCommand : cible \"%s\" introuvable, déconnectée ou ambiguë -- rien envoyé\n", target);
+            return -1;
+        }
+        log_info("clientsCommand : \"%s\" envoyée à la cible \"%s\"\n", rest, target);
+        return 0;
+    }
+
     int n = control_registry_broadcast_command(CTRL_COMMAND, rest);
     log_info("clientsCommand : \"%s\" diffusée à %d session(s)\n", rest, n);
     return 0;

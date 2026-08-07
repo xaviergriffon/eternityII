@@ -47,8 +47,8 @@ typedef struct {
     /// Identifiant de session monotone, jamais réutilisé même après
     /// `control_registry_unregister` (contrairement à l'indice de slot du
     /// registre) — cf. docs/conception/identification_clients.md, section 3
-    /// (« session_no n'est pas un slot »). Utilisable pour un futur
-    /// adressage (`clientsCmd --to <session_no>`, PR3).
+    /// (« session_no n'est pas un slot »). Clé d'adressage acceptée par
+    /// `control_registry_send_command_to` (`clientsCmd --to <session_no>`, PR3).
     uint64_t session_no;
     /// PID du processus parent annoncé au hello.
     int32_t pid;
@@ -199,6 +199,44 @@ int control_registry_broadcast_command(uint8_t cmd, const char *command_line);
  * @return Nombre de sessions sollicitées.
  */
 int control_registry_broadcast_get_stats(void);
+
+/**
+ * @brief Résout `target` vers l'unique session de contrôle active qu'il
+ *        désigne et lui poste `cmd`/`command_line` (adressage
+ *        `clientsCmd --to <cible>`, PR3).
+ *
+ * `target` est essayé, dans cet ordre, comme :
+ *  1. un `session_no` décimal (chaîne entièrement numérique) ;
+ *  2. un `client_uid` hexadécimal (longueur exacte `2*CLIENT_UID_BYTES`) ;
+ *  3. un `label` déclaré (égalité exacte de chaîne).
+ *
+ * `session_no` et `client_uid` sont tous deux des identifiants jamais
+ * réattribués à un titulaire différent (cf. `control_session_info_t.session_no`
+ * et `client_identity_t.client_uid`) : une résolution par l'un de ces deux
+ * champs ne peut donc jamais frapper le mauvais client — soit la session
+ * visée existe encore sous cette même identité (le vrai titulaire), soit elle
+ * a disparu et la cible est refusée comme inconnue, jamais silencieusement
+ * redirigée vers le nouvel occupant du même slot (cf.
+ * docs/conception/identification_clients.md, section 3, « session_no n'est
+ * pas un slot »). `label` n'étant PAS garanti unique (même section), une
+ * cible qui correspond à plusieurs sessions actives est refusée comme
+ * ambiguë plutôt que d'en choisir une arbitrairement.
+ *
+ * Ne fait AUCUNE vérification de liste blanche elle-même : l'appelant
+ * (`clients_cmd_interpreter`, command_lines.c) doit avoir déjà validé
+ * `command_line` via `control_command_allowed` avant cet appel, exactement
+ * comme pour `control_registry_broadcast_command` — cibler une session
+ * n'élargit jamais le jeu de commandes autorisées.
+ *
+ * @param target       Cible telle que saisie par l'opérateur (non NULL).
+ * @param cmd          Commande de trame (cf. `CTRL_*`, control_protocol.h).
+ * @param command_line Ligne de commande texte (cf. `control_registry_post_command`).
+ * @return             1 si la commande a été postée à exactement une session,
+ *                     0 si `target` ne désigne aucune session active ou en
+ *                     désigne plusieurs (label ambigu, ou file pleine),
+ *                     -1 si `target` est `NULL`.
+ */
+int control_registry_send_command_to(const char *target, uint8_t cmd, const char *command_line);
 
 /**
  * @brief Indique si un sondage automatique `CTRL_GET_STATS` est dû pour la

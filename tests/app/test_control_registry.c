@@ -16,6 +16,7 @@
 #include "app/control_registry.h"
 #include "app/static_variables.h"   /* MAX_CONTROL_SESSIONS */
 
+#include <stdio.h>
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -440,6 +441,166 @@ TEST broadcast_with_no_active_session_returns_zero(void)
     PASS();
 }
 
+/* ---------- adressage clientsCmd --to (PR3) --------------------------------
+ *
+ * `control_registry_send_command_to` résout `session_no` (décimal), `client_uid`
+ * (hexadécimal) ou `label` vers l'unique session active correspondante, sans
+ * jamais frapper le mauvais titulaire (cf. docs/conception/identification_clients.md,
+ * section 3, « session_no n'est pas un slot »).
+ */
+
+TEST send_command_to_null_target_returns_minus_one(void)
+{
+    ASSERT_EQ(-1, control_registry_send_command_to(NULL, CTRL_COMMAND, "pause"));
+    PASS();
+}
+
+TEST send_command_to_matches_by_session_no(void)
+{
+    control_hello_t h = make_hello(10, 1, 0);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
+    ASSERT(idx >= 0);
+
+    control_session_info_t infos[1];
+    ASSERT_EQ(1, control_registry_snapshot(infos, 1));
+    char target[32];
+    snprintf(target, sizeof(target), "%llu", (unsigned long long)infos[0].session_no);
+
+    ASSERT_EQ(1, control_registry_send_command_to(target, CTRL_COMMAND, "pause"));
+
+    uint8_t cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx, &cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)cmd);
+    ASSERT_STR_EQ("pause", line);
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST send_command_to_matches_by_client_uid_hex(void)
+{
+    control_hello_t h = make_hello(11, 1, 0);
+    for (int i = 0; i < CLIENT_UID_BYTES; i++) {
+        h.identity.client_uid[i] = (uint8_t)(0x20 + i);
+    }
+    int idx = control_registry_register(1, "203.0.113.10", &h);
+    ASSERT(idx >= 0);
+
+    char target[2 * CLIENT_UID_BYTES + 1];
+    client_identity_hex_encode(h.identity.client_uid, CLIENT_UID_BYTES, target, sizeof(target));
+
+    ASSERT_EQ(1, control_registry_send_command_to(target, CTRL_COMMAND, "resume"));
+
+    uint8_t cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx, &cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("resume", line);
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST send_command_to_matches_by_label(void)
+{
+    control_hello_t h = make_hello(12, 1, 0);
+    strncpy(h.identity.label, "jetson-1", CLIENT_LABEL_MAX - 1);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
+    ASSERT(idx >= 0);
+
+    ASSERT_EQ(1, control_registry_send_command_to("jetson-1", CTRL_COMMAND, "limit 500"));
+
+    uint8_t cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx, &cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("limit 500", line);
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST send_command_to_only_reaches_targeted_session(void)
+{
+    control_hello_t h1 = make_hello(1, 1, 0);
+    strncpy(h1.identity.label, "alpha", CLIENT_LABEL_MAX - 1);
+    control_hello_t h2 = make_hello(2, 1, 0);
+    strncpy(h2.identity.label, "beta", CLIENT_LABEL_MAX - 1);
+    int idx1 = control_registry_register(1, "203.0.113.1", &h1);
+    int idx2 = control_registry_register(2, "203.0.113.2", &h2);
+    ASSERT(idx1 >= 0);
+    ASSERT(idx2 >= 0);
+
+    ASSERT_EQ(1, control_registry_send_command_to("beta", CTRL_COMMAND, "pause"));
+
+    uint8_t cmd = 0;
+    ASSERT_EQ(0, control_registry_wait_command(idx2, &cmd, NULL, 0, 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)cmd);
+    /* idx1 ("alpha") n'a rien reçu : le timeout doit expirer. */
+    ASSERT_EQ(1, control_registry_wait_command(idx1, &cmd, NULL, 0, 100));
+
+    control_registry_unregister(idx1);
+    control_registry_unregister(idx2);
+    PASS();
+}
+
+TEST send_command_to_unknown_target_returns_zero(void)
+{
+    ASSERT_EQ(0, control_registry_send_command_to("999999", CTRL_COMMAND, "pause"));
+    ASSERT_EQ(0, control_registry_send_command_to("no-such-label", CTRL_COMMAND, "pause"));
+    PASS();
+}
+
+TEST send_command_to_stale_session_no_is_refused_not_redirected(void)
+{
+    /* Un session_no de client parti ne doit JAMAIS toucher le nouveau
+       titulaire du même slot, même si celui-ci recycle exactement le même
+       indice de slot (cf. session_no_is_monotonic_and_never_reused). */
+    control_hello_t h1 = make_hello(1, 1, 0);
+    int idx1 = control_registry_register(1, "203.0.113.1", &h1);
+    ASSERT(idx1 >= 0);
+
+    control_session_info_t infos[1];
+    ASSERT_EQ(1, control_registry_snapshot(infos, 1));
+    char stale_target[32];
+    snprintf(stale_target, sizeof(stale_target), "%llu", (unsigned long long)infos[0].session_no);
+
+    control_registry_unregister(idx1);
+
+    control_hello_t h2 = make_hello(2, 1, 0);
+    int idx2 = control_registry_register(2, "203.0.113.2", &h2);
+    ASSERT_EQ(idx1, idx2); /* même slot recyclé */
+
+    ASSERT_EQ(0, control_registry_send_command_to(stale_target, CTRL_COMMAND, "pause"));
+
+    uint8_t cmd = 0;
+    ASSERT_EQ(1, control_registry_wait_command(idx2, &cmd, NULL, 0, 100)); /* rien reçu */
+
+    control_registry_unregister(idx2);
+    PASS();
+}
+
+TEST send_command_to_ambiguous_label_returns_zero(void)
+{
+    control_hello_t h1 = make_hello(1, 1, 0);
+    strncpy(h1.identity.label, "dup", CLIENT_LABEL_MAX - 1);
+    control_hello_t h2 = make_hello(2, 1, 0);
+    strncpy(h2.identity.label, "dup", CLIENT_LABEL_MAX - 1);
+    int idx1 = control_registry_register(1, "203.0.113.1", &h1);
+    int idx2 = control_registry_register(2, "203.0.113.2", &h2);
+    ASSERT(idx1 >= 0);
+    ASSERT(idx2 >= 0);
+
+    ASSERT_EQ(0, control_registry_send_command_to("dup", CTRL_COMMAND, "pause"));
+
+    uint8_t cmd = 0;
+    ASSERT_EQ(1, control_registry_wait_command(idx1, &cmd, NULL, 0, 100));
+    ASSERT_EQ(1, control_registry_wait_command(idx2, &cmd, NULL, 0, 100));
+
+    control_registry_unregister(idx1);
+    control_registry_unregister(idx2);
+    PASS();
+}
+
 /* ---------- état de pause "désiré" persistant ------------------------------
  *
  * Reproduit la demande : après un `pause` console (côté serveur, diffusé via
@@ -692,6 +853,15 @@ SUITE(control_registry_suite)
     RUN_TEST(broadcast_command_reaches_all_active_sessions);
     RUN_TEST(broadcast_get_stats_reaches_all_active_sessions);
     RUN_TEST(broadcast_with_no_active_session_returns_zero);
+
+    RUN_TEST(send_command_to_null_target_returns_minus_one);
+    RUN_TEST(send_command_to_matches_by_session_no);
+    RUN_TEST(send_command_to_matches_by_client_uid_hex);
+    RUN_TEST(send_command_to_matches_by_label);
+    RUN_TEST(send_command_to_only_reaches_targeted_session);
+    RUN_TEST(send_command_to_unknown_target_returns_zero);
+    RUN_TEST(send_command_to_stale_session_no_is_refused_not_redirected);
+    RUN_TEST(send_command_to_ambiguous_label_returns_zero);
 
     RUN_TEST(desired_pause_state_defaults_to_resumed);
     RUN_TEST(broadcast_pause_sets_desired_state_for_future_registrations);
