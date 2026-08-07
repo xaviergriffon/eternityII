@@ -46,8 +46,7 @@
 typedef struct {
     /// Identifiant de session monotone, jamais réutilisé même après
     /// `control_registry_unregister` (contrairement à l'indice de slot du
-    /// registre) — cf. docs/conception/identification_clients.md, section 3
-    /// (« session_no n'est pas un slot »). Clé d'adressage acceptée par
+    /// registre — « session_no n'est pas un slot »). Clé d'adressage acceptée par
     /// `control_registry_send_command_to` (`clientsCmd --to <session_no>`, PR3).
     uint64_t session_no;
     /// PID du processus parent annoncé au hello.
@@ -156,7 +155,7 @@ int control_registry_count(void);
 /**
  * @brief Recopie l'identité déclarée (`client_identity_t`) annoncée au hello
  *        de la session `index` — utilisé par `known_clients_registry.h`
- *        (PR4 de docs/conception/identification_clients.md) pour retrouver
+ *        (PR4) pour retrouver
  *        `machine_uid`/`client_uid` à des points d'appel (réception de
  *        `CTRL_STATS`, déconnexion) qui ne détiennent que l'indice de session,
  *        pas le hello complet.
@@ -230,9 +229,8 @@ int control_registry_broadcast_get_stats(void);
  * champs ne peut donc jamais frapper le mauvais client — soit la session
  * visée existe encore sous cette même identité (le vrai titulaire), soit elle
  * a disparu et la cible est refusée comme inconnue, jamais silencieusement
- * redirigée vers le nouvel occupant du même slot (cf.
- * docs/conception/identification_clients.md, section 3, « session_no n'est
- * pas un slot »). `label` n'étant PAS garanti unique (même section), une
+ * redirigée vers le nouvel occupant du même slot (« session_no n'est pas un
+ * slot »). `label` n'étant PAS garanti unique, une
  * cible qui correspond à plusieurs sessions actives est refusée comme
  * ambiguë plutôt que d'en choisir une arbitrairement.
  *
@@ -257,7 +255,7 @@ int control_registry_send_command_to(const char *target, uint8_t cmd, const char
  *        active qu'il désigne, SANS poster de commande (contrairement à
  *        `control_registry_send_command_to`) — lecture pure pour la
  *        consultation « que travaille X ? » (PR6, attribution des analyses
- *        en cours, docs/conception/identification_clients.md).
+ *        en cours).
  *
  * Mêmes règles de résolution, dans le même ordre, que
  * `control_registry_send_command_to` : `session_no` décimal, puis
@@ -272,6 +270,28 @@ int control_registry_send_command_to(const char *target, uint8_t cmd, const char
  *                       désigne plusieurs (label ambigu), -1 si `target` est `NULL`.
  */
 int control_registry_resolve_client_uid(const char *target, uint8_t out_client_uid[CLIENT_UID_BYTES]);
+
+/**
+ * @brief Indique si `client_uid` correspond à une session de contrôle
+ *        ACTUELLEMENT active (enregistrée) dans le registre.
+ *
+ * Correctif PR7 (bail à expiration) : un test réel a montré qu'un bail purement temporel (échéance
+ * fixe depuis l'attribution) réclame le travail d'un client encore vivant dès
+ * qu'une possibilité met plus longtemps que `analysed_lease_seconds` à
+ * s'analyser — rien ne garantit qu'une analyse tienne dans ce budget. Cette
+ * fonction fournit le second critère utilisé par
+ * `datamanager_reclaim_expired_leases` : tant que le canal de contrôle du
+ * client reste enregistré (preuve directe qu'il est vivant — pings/pongs et
+ * `CTRL_STATS` réguliers), son travail n'est JAMAIS réclamé, quelle que soit
+ * la durée écoulée. Seule l'absence de session active (déconnexion détectée
+ * par `run_control_session`, qui appelle `control_registry_unregister`) lève
+ * cette protection.
+ *
+ * @param client_uid `client_uid` recherché (16 octets, jamais NULL).
+ * @return           1 si une session active porte ce `client_uid`, 0 sinon
+ *                   (aucune correspondance, ou `client_uid == NULL`).
+ */
+int control_registry_has_active_client(const uint8_t client_uid[CLIENT_UID_BYTES]);
 
 /**
  * @brief Indique si un sondage automatique `CTRL_GET_STATS` est dû pour la

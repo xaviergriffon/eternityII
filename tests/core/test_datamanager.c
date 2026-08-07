@@ -30,6 +30,7 @@
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <time.h>
 
 /* Helpers internes de datamanager.c non exposés dans datamanager.h. */
 int put_to_server(client_possibility_t *client_possibility, array_possibility_packet *possibilities);
@@ -3166,8 +3167,8 @@ TEST analysed_index_walks_collision_chains(void)
 }
 
 /* --------------------------------------------------------------------------
- * Attribution des analyses en cours (PR6, docs/conception/identification_clients.md,
- * section 4.3) : table latérale adossée à l'index « analysed », consultation
+ * Attribution des analyses en cours (PR6) : table latérale adossée à
+ * l'index « analysed », consultation
  * « que travaille X ? » via datamanager_analysed_owned_by.
  * ------------------------------------------------------------------------ */
 
@@ -3176,6 +3177,23 @@ static void fill_owner(uint8_t owner[CLIENT_UID_BYTES], uint8_t base)
     for (int i = 0; i < CLIENT_UID_BYTES; i++) {
         owner[i] = (uint8_t)(base + i);
     }
+}
+
+/* Callbacks de vivacité factices pour datamanager_reclaim_expired_leases (PR7,
+ * correctif) : évite toute dépendance à control_registry dans ces tests --
+ * c'est précisément ce que le callback découple (cf. datamanager.h). */
+static uint8_t g_alive_owner[CLIENT_UID_BYTES];
+static int g_alive_owner_set = 0;
+
+static int fake_owner_alive(const uint8_t owner_uid[CLIENT_UID_BYTES])
+{
+    return g_alive_owner_set && memcmp(owner_uid, g_alive_owner, CLIENT_UID_BYTES) == 0;
+}
+
+static int fake_owner_never_alive(const uint8_t owner_uid[CLIENT_UID_BYTES])
+{
+    (void)owner_uid;
+    return 0;
 }
 
 TEST add_possibility_analysed_owned_visible_via_query(void)
@@ -3288,6 +3306,295 @@ TEST remove_possibility_analysed_clears_owner_attribution(void)
     ASSERT_EQ_FMT(0ULL, count, "%llu");
     ASSERT_EQ_FMT(-1, max_alloc, "%d");
 
+    drain_all();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * Bail à expiration des analyses en cours (PR7) :
+ * analysed_lease_is_expired (fonction pure) et
+ * datamanager_reclaim_expired_leases (balayage + remise en stock).
+ * ------------------------------------------------------------------------ */
+
+/* analysed_lease_is_expired : fonction pure, jamais d'horloge réelle -- toute
+ * la fenêtre (avant/à/après l'échéance, et la sentinelle « désactivé ») est
+ * couverte sans sleep. */
+TEST analysed_lease_is_expired_pure_predicate(void)
+{
+    /* Sentinelle « bail désactivé » : jamais expiré, quel que soit `now`. */
+    ASSERT_EQ_FMT(0, analysed_lease_is_expired(0, 0), "%d");
+    ASSERT_EQ_FMT(0, analysed_lease_is_expired(0, 1000000), "%d");
+
+    /* Avant l'échéance : pas expiré. */
+    ASSERT_EQ_FMT(0, analysed_lease_is_expired(1000, 999), "%d");
+    /* Pile à l'échéance : expiré (borne inclusive, cf. contrat). */
+    ASSERT_EQ_FMT(1, analysed_lease_is_expired(1000, 1000), "%d");
+    /* Après l'échéance : expiré. */
+    ASSERT_EQ_FMT(1, analysed_lease_is_expired(1000, 1001), "%d");
+
+    PASS();
+}
+
+/* Une possibilité attribuée dont le bail est expiré est rendue au stock non
+ * vérifié, et disparaît de la consultation d'attribution (clientsWork).
+ *
+ * Comme `analysed_lease_seconds <= 0` désactive le bail (sentinelle « jamais
+ * expiré », cf. AnalysedIndexNode / commande `leaseDuration`), on ne peut pas
+ * simuler une échéance déjà passée avec une durée négative. On garde donc un
+ * bail positif à l'insertion (sa valeur exacte n'importe pas ici) et on
+ * simule le passage du temps en avançant `now` : `datamanager_reclaim_expired_leases`
+ * ne consulte JAMAIS l'horloge elle-même, `now` est le seul levier — exactement
+ * ce qui rend ce test possible sans `sleep`. */
+TEST reclaim_expired_leases_returns_owned_possibility_to_stock(void)
+{
+    drain_all();
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 60;
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x60);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 55;
+    add_possibility_analysed_owned(&pk, -1, owner);
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, NULL);
+    ASSERT_EQ_FMT(1ULL, reclaimed, "%llu");
+
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    unsigned long long count = 999;
+    int max_alloc = -999;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(0ULL, count, "%llu");
+
+    analysed_lease_seconds = saved_lease;
+    drain_all();
+    PASS();
+}
+
+/* Une possibilité attribuée dont le bail n'est PAS encore expiré reste en
+ * place (le balayage ne rend au stock que ce qui a réellement expiré). */
+TEST reclaim_expired_leases_leaves_not_yet_expired_alone(void)
+{
+    drain_all();
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 1000000; /* très large : jamais expiré dans ce test */
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x61);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 56;
+    add_possibility_analysed_owned(&pk, -1, owner);
+
+    unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL), NULL);
+    ASSERT_EQ_FMT(0ULL, reclaimed, "%llu");
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    analysed_lease_seconds = saved_lease;
+    drain_all();
+    PASS();
+}
+
+/* Une possibilité sans propriétaire connu (client ancien, ou restaurée depuis
+ * un backup) n'a pas de bail : jamais rendue par ce mécanisme, même quand
+ * `now` est loin dans le futur (aurait expiré si elle avait été attribuée). */
+TEST reclaim_expired_leases_ignores_unowned_possibilities(void)
+{
+    drain_all();
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 60;
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 57;
+    add_possibility_analysed(&pk, -1);   /* pas de owner_uid */
+
+    unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, NULL);
+    ASSERT_EQ_FMT(0ULL, reclaimed, "%llu");
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
+
+    analysed_lease_seconds = saved_lease;
+    drain_all();
+    PASS();
+}
+
+/* Idempotence vis-à-vis d'un acquittement concurrent (section 4.3, point
+ * délicat explicitement demandé par la doc) : que l'acquittement ou
+ * l'expiration gagne la course, la possibilité n'est jamais ni dupliquée dans
+ * le stock, ni source d'erreur pour l'autre chemin. */
+TEST reclaim_expired_leases_idempotent_with_prior_ack(void)
+{
+    drain_all();
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 60;
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x62);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 58;
+    add_possibility_analysed_owned(&pk, -1, owner);
+
+    /* L'acquittement client (remove_possibility_analysed) gagne la course :
+     * trouvé et retiré (retour 0). */
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1), "%d");
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+
+    /* Le balayage d'expiration arrive ensuite, avec un `now` largement au-delà
+     * de l'échéance qu'aurait eue cette possibilité si elle était toujours là :
+     * plus rien à réclamer, jamais un doublon dans le stock. */
+    unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, NULL);
+    ASSERT_EQ_FMT(0ULL, reclaimed, "%llu");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* pas de doublon */
+
+    analysed_lease_seconds = saved_lease;
+    drain_all();
+    PASS();
+}
+
+TEST reclaim_expired_leases_idempotent_with_later_ack(void)
+{
+    drain_all();
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 60;
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x63);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 59;
+    add_possibility_analysed_owned(&pk, -1, owner);
+
+    /* Le balayage d'expiration gagne la course cette fois : rendue au stock. */
+    unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, NULL);
+    ASSERT_EQ_FMT(1ULL, reclaimed, "%llu");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    /* L'acquittement arrive ensuite, trop tard : la possibilité n'est plus
+     * dans le pool analysed -- « non trouvée » (retour 1), jamais une erreur
+     * bruyante ni un retrait du stock déjà reconstitué. */
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, -1), "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");   /* toujours dans le stock, intacte */
+
+    analysed_lease_seconds = saved_lease;
+    drain_all();
+    PASS();
+}
+
+/* Plusieurs files : le balayage couvre bien NB_FILE_POSSIBILITY files, pas
+ * seulement la file 0 (thread >= 0 force la file cible à l'insertion). */
+TEST reclaim_expired_leases_covers_all_files(void)
+{
+    drain_all();
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 60;
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x64);
+    for (int f = 0; f < 10; f++) {
+        struct possibility_packet pk;
+        memset(&pk, 0, sizeof pk);
+        pk.alloc = (uint16_t)(60 + f);
+        pk.grid[dirx[0]][diry[0]] = (int16_t)(f + 1);   /* contenus distincts */
+        add_possibility_analysed_owned(&pk, f, owner);
+    }
+    ASSERT_EQ_FMT(10ULL, analysed_total(), "%llu");
+
+    unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, NULL);
+    ASSERT_EQ_FMT(10ULL, reclaimed, "%llu");
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+    ASSERT_EQ_FMT(10ULL, datas_size(), "%llu");
+
+    analysed_lease_seconds = saved_lease;
+    drain_all();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * Correctif (retour d'essais réels) : l'échéance seule ne suffit pas -- un
+ * client vivant (encore observable via owner_alive) ne doit JAMAIS voir son
+ * travail réclamé, aussi longtemps qu'une possibilité mette à s'analyser.
+ * ------------------------------------------------------------------------ */
+
+/* Échéance largement dépassée, mais owner_alive dit "vivant" : jamais réclamée. */
+TEST reclaim_expired_leases_skips_alive_owner(void)
+{
+    drain_all();
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 60;
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x65);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 70;
+    add_possibility_analysed_owned(&pk, -1, owner);
+
+    memcpy(g_alive_owner, owner, CLIENT_UID_BYTES);
+    g_alive_owner_set = 1;
+
+    unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, fake_owner_alive);
+    ASSERT_EQ_FMT(0ULL, reclaimed, "%llu");
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    g_alive_owner_set = 0;
+    analysed_lease_seconds = saved_lease;
+    drain_all();
+    PASS();
+}
+
+/* Échéance dépassée ET owner_alive dit "mort" : réclamée normalement. */
+TEST reclaim_expired_leases_reclaims_when_owner_not_alive(void)
+{
+    drain_all();
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 60;
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x66);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 71;
+    add_possibility_analysed_owned(&pk, -1, owner);
+
+    unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, fake_owner_never_alive);
+    ASSERT_EQ_FMT(1ULL, reclaimed, "%llu");
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    analysed_lease_seconds = saved_lease;
+    drain_all();
+    PASS();
+}
+
+/* Le correctif AJOUTE une condition (vivacité), il n'en retire pas
+ * (échéance) : sans échéance dépassée, jamais réclamée même si owner_alive
+ * dit "mort". */
+TEST reclaim_expired_leases_still_requires_expired_deadline_even_if_not_alive(void)
+{
+    drain_all();
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 1000000; /* jamais expiré dans ce test */
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x67);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 72;
+    add_possibility_analysed_owned(&pk, -1, owner);
+
+    unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL), fake_owner_never_alive);
+    ASSERT_EQ_FMT(0ULL, reclaimed, "%llu");
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
+
+    analysed_lease_seconds = saved_lease;
     drain_all();
     PASS();
 }
@@ -3555,6 +3862,16 @@ SUITE(datamanager_suite)
     RUN_TEST(datamanager_analysed_owned_by_tracks_max_alloc);
     RUN_TEST(datamanager_analysed_owned_by_null_args_returns_minus_one);
     RUN_TEST(remove_possibility_analysed_clears_owner_attribution);
+    RUN_TEST(analysed_lease_is_expired_pure_predicate);
+    RUN_TEST(reclaim_expired_leases_returns_owned_possibility_to_stock);
+    RUN_TEST(reclaim_expired_leases_leaves_not_yet_expired_alone);
+    RUN_TEST(reclaim_expired_leases_ignores_unowned_possibilities);
+    RUN_TEST(reclaim_expired_leases_idempotent_with_prior_ack);
+    RUN_TEST(reclaim_expired_leases_idempotent_with_later_ack);
+    RUN_TEST(reclaim_expired_leases_covers_all_files);
+    RUN_TEST(reclaim_expired_leases_skips_alive_owner);
+    RUN_TEST(reclaim_expired_leases_reclaims_when_owner_not_alive);
+    RUN_TEST(reclaim_expired_leases_still_requires_expired_deadline_even_if_not_alive);
     RUN_TEST(import_json_loads_single_possibility);
     RUN_TEST(print_duplicate_activity_aggregates_counters);
     RUN_TEST(add_possibility_null_and_mixed_routing);

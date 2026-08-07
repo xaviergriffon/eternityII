@@ -33,8 +33,7 @@ typedef struct
     char peer_ip[PEER_IP_MAX_LEN];
     /// Identité déclarée par le fork sur CETTE connexion de travail (v12,
     /// INST_CLIENT_HELLO), valide seulement si `has_identity`. Déclarative,
-    /// jamais vérifiée (à la différence de `peer_ip`) — cf.
-    /// docs/conception/identification_clients.md.
+    /// jamais vérifiée (à la différence de `peer_ip`).
     client_identity_t identity;
     /// 1 si `identity` a été renseignée par un INST_CLIENT_HELLO reçu sur
     /// cette connexion, 0 sinon (client trop ancien, ou hello pas encore
@@ -171,8 +170,7 @@ char *build_file_queues_table(unsigned long long *out_unchecked,
 
 /**
  * @brief Enregistre une possibilité servie comme « en cours d'analyse »,
- *        attribuée au client courant si son identité est connue (PR6,
- *        docs/conception/identification_clients.md).
+ *        attribuée au client courant si son identité est connue (PR6).
  *
  * Extrait des trois points de service (`INST_GET`/`INST_GET_TO_CHECK[_BATCH]`)
  * pour être testable hors thread (comme `communicate_with_client_step`) et

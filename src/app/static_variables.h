@@ -29,7 +29,7 @@
 // serveur v11 (ou l'inverse) désignerait des cases différentes pour le même
 // indice de curseur (alloc) — bump de version pour forcer tous les clients
 // à se resynchroniser sur le nouveau parcours plutôt que corrompre le board.
-// v12 : identité déclarée des clients (PR2, docs/conception/identification_clients.md).
+// v12 : identité déclarée des clients (PR2).
 // Nouveau INST_CLIENT_HELLO sur la connexion de TRAVAIL (net/etii_protocol.h) :
 // chaque fork l'envoie une fois, juste après le handshake de version, avec son
 // identité (machine_uid, client_uid, fork_seq, label, mode — net/client_identity.h).
@@ -123,6 +123,27 @@
 // deux passes dès que le stock dépasse ce seuil. ~100000 × ~0,5 Ko ≈ 54 Mo.
 #define EXPAND_MAX_STOCK 100000
 
+// Bail à expiration des analyses en cours (PR7) : durée par défaut, en
+// secondes, au-delà de laquelle une possibilité attribuée à un client
+// (owner_uid connu, cf. add_possibility_analysed_owned) et jamais acquittée
+// devient ÉLIGIBLE à être rendue au stock non vérifié.
+//
+// Ce n'est qu'un MINORANT, pas un budget de temps garanti : rien ne prouve
+// qu'une analyse tienne dans ce délai, donc `datamanager_reclaim_expired_leases`
+// exige EN PLUS une preuve d'absence (callback `owner_alive`, fourni côté
+// serveur par `owner_control_session_alive`/`control_registry_has_active_client`
+// — tant que le canal de contrôle du client reste enregistré, son travail
+// n'expire jamais, quelle que soit la durée depuis l'attribution). Un premier
+// essai réel avec l'échéance seule a montré qu'un client occupé mais vivant se
+// faisait réclamer son travail dès ce budget dépassé, avec pour conséquence
+// une double exploration de la même branche quand ce client finissait par
+// soumettre ses résultats pour une possibilité déjà réattribuée ailleurs.
+// Configurable à l'exécution via la commande console `leaseDuration <n>` ;
+// <n> ≤ 0 désactive le bail entièrement (même convention que `limit 0` pour la
+// régulation de débit) — utile pour un déploiement qui préfère geler un
+// stock indéfiniment plutôt que risquer un double travail.
+#define ANALYSED_LEASE_DEFAULT_SECONDS 300
+
 // Nombre maximal de sessions de contrôle (canal INST_CONTROL_HELLO, cf.
 // control_registry.h) suivies simultanément par le serveur. Une session de
 // contrôle réutilise un slot déjà présent du pool `client_t` (même connexion
@@ -135,8 +156,7 @@
 #define MAX_CONTROL_SESSIONS 64
 
 // Nombre maximal de MACHINES distinctes (clé `machine_uid`) suivies par le
-// registre de clients connus (`known_clients_registry.h`, PR4 de
-// docs/conception/identification_clients.md). Distinct de MAX_CONTROL_SESSIONS :
+// registre de clients connus (`known_clients_registry.h`, PR4). Distinct de MAX_CONTROL_SESSIONS :
 // ce registre survit à la déconnexion (contrairement à `control_registry`),
 // donc un parc qui tourne longtemps peut accumuler des machines vues puis
 // définitivement parties.
@@ -387,6 +407,17 @@ extern int headless_mode;
  */
 extern int pruner_batch_size;
 
+/**
+ * @brief Durée (secondes) du bail à expiration des possibilités attribuées à
+ *        un client (PR7).
+ *
+ * Configurable à l'exécution via la commande console `leaseDuration <n>`.
+ * Défaut `ANALYSED_LEASE_DEFAULT_SECONDS`. `<= 0` désactive le bail : les
+ * possibilités attribuées ne sont alors jamais rendues automatiquement au
+ * stock (comportement d'avant cette PR).
+ */
+extern int analysed_lease_seconds;
+
 #ifdef WITH_CUDA
 /**
  * @brief 1 si le processus est un client pruner GPU (option `--gpu` du mode `pruner`).
@@ -581,8 +612,8 @@ extern char HTTP_ADMIN_TOKEN[HTTP_ADMIN_TOKEN_MAX];
  * sur le nom d'hôte (`gethostname`). Pointeur direct dans `argv` (même
  * convention que `parts_files`/`HTTP_TOKEN_FILE`) : jamais copié, valable
  * pour toute la durée du process. Position-indépendant, retiré d'argv par
- * `parse_cli_options`. Purement déclaratif (cf. docs/conception/identification_clients.md,
- * arbitrage E) : jamais vérifié par le serveur, à la différence de `peer_ip`.
+ * `parse_cli_options`. Purement déclaratif : jamais vérifié par le serveur,
+ * à la différence de `peer_ip`.
  */
 extern const char *client_label;
 

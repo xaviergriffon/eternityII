@@ -27,6 +27,10 @@ survivent nulle part ailleurs.
 
 ## Documents
 
-| Document | Statut | Contenu |
+Aucun document de conception actif pour le moment.
+
+### Documents supprimés (entièrement implémentés, contenu absorbé par `docs/`)
+
+| Document | Contenu | Où trouver le comportement actuel |
 |---|---|---|
-| [identification_clients.md](identification_clients.md) | en cours d'implémentation (PR 4/7) | Identification unique des clients au-delà du PID : modèle d'identité, statistiques cumulées persistantes, bail à expiration sur les analyses en cours, découpage en 7 PR. |
+| identification_clients.md | Identification unique des clients au-delà du PID : modèle d'identité (`machine_uid`/`client_uid`/`fork_seq`/`label`/`session_no`), statistiques cumulées persistantes, bail à expiration sur les analyses en cours. 7 PR, toutes livrées. | [echanges_client_serveur.md](../echanges_client_serveur.md) (canal de contrôle, registre de clients connus, attribution et bail), [api_http_rest.md](../api_http_rest.md) (`GET /api/v1/clients`, `/known-clients`), [console.md](../console.md) (`clients`, `clientsWork`, `leaseDuration`, …), [utilisation.md](../utilisation.md) (`--name`, `--machine-uid-file`), et `AGENTS.md` (détail d'implémentation par domaine) |

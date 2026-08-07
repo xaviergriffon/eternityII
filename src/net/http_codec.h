@@ -356,8 +356,7 @@ int http_json_format_clients(char *buf, size_t size, const http_client_info_t *i
 
 /**
  * @brief Vue en lecture d'une machine connue du registre de cumul
- *        (`app/known_clients_registry.h`, PR4 de
- *        docs/conception/identification_clients.md), pour
+ *        (`app/known_clients_registry.h`, PR4), pour
  *        `GET /api/v1/known-clients`. Remplie par `http_known_clients_collect`
  *        (src/net/http_server.h) à partir de `known_clients_registry_snapshot` —
  *        même schéma de séparation que `http_client_info_t` ci-dessus : ce

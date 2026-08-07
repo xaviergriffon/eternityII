@@ -242,8 +242,8 @@ TEST snapshot_reflects_registered_hello(void)
 }
 
 /* session_no est monotone et jamais réutilisé, y compris quand un slot est
-   libéré puis réoccupé par une session différente (cf. docs/conception/
-   identification_clients.md, section 3 : « session_no n'est pas un slot »). */
+   libéré puis réoccupé par une session différente (« session_no n'est pas
+   un slot »). */
 TEST session_no_is_monotonic_and_never_reused(void)
 {
     control_hello_t h1 = make_hello(1, 1, 0);
@@ -445,8 +445,7 @@ TEST broadcast_with_no_active_session_returns_zero(void)
  *
  * `control_registry_send_command_to` résout `session_no` (décimal), `client_uid`
  * (hexadécimal) ou `label` vers l'unique session active correspondante, sans
- * jamais frapper le mauvais titulaire (cf. docs/conception/identification_clients.md,
- * section 3, « session_no n'est pas un slot »).
+ * jamais frapper le mauvais titulaire (« session_no n'est pas un slot »).
  */
 
 TEST send_command_to_null_target_returns_minus_one(void)
@@ -605,8 +604,7 @@ TEST send_command_to_ambiguous_label_returns_zero(void)
  *
  * `control_registry_resolve_client_uid` partage exactement les règles de
  * résolution de `control_registry_send_command_to` (voir ci-dessus), mais ne
- * poste rien : consultation « que travaille X ? » (docs/conception/
- * identification_clients.md, section 4.3).
+ * poste rien : consultation « que travaille X ? ».
  */
 
 TEST resolve_client_uid_null_target_returns_minus_one(void)
@@ -702,6 +700,53 @@ TEST resolve_client_uid_does_not_post_any_command(void)
     ASSERT_EQ(1, control_registry_wait_command(idx, &cmd, NULL, 0, 100)); /* timeout : rien posté */
 
     control_registry_unregister(idx);
+    PASS();
+}
+
+/* ---------- control_registry_has_active_client (PR7, correctif bail) ------
+ *
+ * Second critère de `datamanager_reclaim_expired_leases` : tant qu'une
+ * session de contrôle porte ce client_uid, le client est réputé vivant, quelle
+ * que soit la durée écoulée depuis l'attribution d'une possibilité.
+ */
+
+TEST has_active_client_true_for_registered_client_uid(void)
+{
+    control_hello_t h = make_hello(30, 1, 0);
+    memset(h.identity.client_uid, 0xAB, CLIENT_UID_BYTES);
+    int idx = control_registry_register(1, "203.0.113.30", &h);
+    ASSERT(idx >= 0);
+
+    ASSERT_EQ(1, control_registry_has_active_client(h.identity.client_uid));
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST has_active_client_false_for_unknown_client_uid(void)
+{
+    uint8_t unknown[CLIENT_UID_BYTES];
+    memset(unknown, 0xCD, CLIENT_UID_BYTES);
+    ASSERT_EQ(0, control_registry_has_active_client(unknown));
+    PASS();
+}
+
+TEST has_active_client_false_after_unregister(void)
+{
+    control_hello_t h = make_hello(31, 1, 0);
+    memset(h.identity.client_uid, 0xEF, CLIENT_UID_BYTES);
+    int idx = control_registry_register(1, "203.0.113.31", &h);
+    ASSERT(idx >= 0);
+    ASSERT_EQ(1, control_registry_has_active_client(h.identity.client_uid));
+
+    control_registry_unregister(idx);
+    ASSERT_EQ(0, control_registry_has_active_client(h.identity.client_uid));
+    PASS();
+}
+
+TEST has_active_client_null_uid_returns_zero(void)
+{
+    ASSERT_EQ(0, control_registry_has_active_client(NULL));
     PASS();
 }
 
@@ -973,6 +1018,11 @@ SUITE(control_registry_suite)
     RUN_TEST(resolve_client_uid_unknown_target_returns_zero);
     RUN_TEST(resolve_client_uid_ambiguous_label_returns_zero);
     RUN_TEST(resolve_client_uid_does_not_post_any_command);
+
+    RUN_TEST(has_active_client_true_for_registered_client_uid);
+    RUN_TEST(has_active_client_false_for_unknown_client_uid);
+    RUN_TEST(has_active_client_false_after_unregister);
+    RUN_TEST(has_active_client_null_uid_returns_zero);
 
     RUN_TEST(desired_pause_state_defaults_to_resumed);
     RUN_TEST(broadcast_pause_sets_desired_state_for_future_registrations);

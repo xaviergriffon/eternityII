@@ -16,9 +16,12 @@
  * divergent. Comme le reste du protocole (cf. control_protocol.h) : champs
  * de largeur fixe explicites, jamais un struct brut sur le fil.
  *
- * Cf. docs/conception/identification_clients.md, section 3 (« Modèle
- * d'identité ») pour la distinction machine_uid / client_uid / fork_seq /
- * label — reprise ici au niveau du fil.
+ * Quatre notions distinctes, à ne jamais fusionner en un seul champ : `machine_uid`
+ * (persistant, survit aux redémarrages — clé de cumul des statistiques),
+ * `client_uid` (nonce d'UNE exécution du process parent — identité de session,
+ * propriétaire des baux), `fork_seq` (rang d'un fork dans son parent — rattache
+ * une connexion de travail à son parent) et `label` (déclaratif, affichage seul,
+ * jamais une clé — deux clients peuvent légitimement partager le même).
  */
 #ifndef eternityII_client_identity_h
 #define eternityII_client_identity_h
@@ -45,9 +48,9 @@
 /**
  * @brief Identité déclarée d'UNE connexion (de travail ou de contrôle).
  *
- * Déclarative par nature (cf. arbitrage E, docs/conception/identification_clients.md) :
- * rien ici n'est vérifié par le serveur, à la différence de `client_t.peer_ip`
- * (dérivé de `accept()`). `fork_seq` distingue les deux hellos : -1 pour le
+ * Déclarative par nature : rien ici n'est vérifié par le serveur, à la
+ * différence de `client_t.peer_ip` (dérivé de `accept()`). `fork_seq`
+ * distingue les deux hellos : -1 pour le
  * canal de contrôle (le process PARENT, pas un fork particulier), 0..N-1
  * pour la connexion de travail d'un fork donné.
  */
@@ -152,9 +155,8 @@ typedef enum {
     MACHINE_UID_CREATED = 1,
     /// Un nouveau nonce a été tiré mais n'a PAS pu être écrit (répertoire non
     /// inscriptible, etc.) : `out` reste rempli, mais l'identité ne survivra
-    /// pas à ce process (cf. docs/conception/identification_clients.md,
-    /// section 3.1 : « l'impossibilité de cumuler ne doit jamais empêcher de
-    /// chercher »).
+    /// pas à ce process — l'impossibilité de cumuler ne doit jamais empêcher
+    /// de chercher.
     MACHINE_UID_VOLATILE = 2
 } machine_uid_status_t;
 

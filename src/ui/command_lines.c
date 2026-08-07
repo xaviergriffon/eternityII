@@ -21,7 +21,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 46
+#define NB_COMMANDS 47
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -119,6 +119,7 @@ int clients_stats_interpreter(void);
 int clients_cmd_interpreter(void);
 int known_clients_interpreter(void);
 int clients_work_interpreter(void);
+int lease_duration_interpreter(void);
 
 /**
  * @brief Commandes prises en charge (entrées canoniques puis alias).
@@ -254,6 +255,17 @@ static command_description commands[NB_COMMANDS] = {
      "déconnectée ou ambiguë). Lecture pure de l'attribution enregistrée côté serveur au\n"
      "moment où la possibilité a été servie (INST_GET/INST_GET_TO_CHECK[_BATCH]) : aucun\n"
      "aller-retour réseau vers le client, aucune commande poussée.", NULL},
+    {"leaseDuration", lease_duration_interpreter, 0, CMD_CAT_CLIENTS, 1, "leaseDuration <n>",
+     "fixe la durée (secondes) du bail à expiration des possibilités attribuées",
+     "Passé ce délai ET si le client n'a plus de session de contrôle active (déconnexion\n"
+     "confirmée), une possibilité attribuée (clientsWork) est rendue automatiquement au\n"
+     "stock non vérifié -- un client mort (kill -9, coupure réseau, panne) ne gèle plus sa\n"
+     "part indéfiniment. Un client toujours connecté (canal de contrôle vivant) n'expire\n"
+     "JAMAIS, quelle que soit la durée d'analyse -- ce délai n'est qu'un minorant avant la\n"
+     "première vérification de vivacité, pas un budget de temps garanti. Balayage borné,\n"
+     "au rythme du tour de statistiques serveur (10 s). <n> <= 0 désactive le bail (comme\n"
+     "« limit 0 » pour la régulation de débit). N'affecte que les possibilités attribuées\n"
+     "APRÈS ce changement ; défaut : ANALYSED_LEASE_DEFAULT_SECONDS (300 s).", NULL},
 
     /* Alias : résolus vers l'entrée canonique par find_command. Les noms
        historiques abrégés (sorta, rmnonext, …) restent acceptés ici ; les
@@ -410,7 +422,7 @@ int backup_interpreter(void) {
     if (best_board_save(&g_server_best_board, def_best_board_file) != 0) {
         log_info("backup de %s échoué\n", def_best_board_file);
     }
-    // Cumul par machine (PR5 de identification_clients.md) : même cadence que
+    // Cumul par machine (PR5) : même cadence que
     // le reste du stock, fichier dédié (cf. app/known_clients_registry.h).
     if (known_clients_registry_save(def_known_clients_file) != 0) {
         log_info("backup de %s échoué\n", def_known_clients_file);
@@ -1073,8 +1085,7 @@ int known_clients_interpreter(void) {
 
 /**
  * @brief Interpréteur de `clientsWork <cible>` : consultation « que travaille
- *        X ? » (PR6, attribution des analyses en cours,
- *        docs/conception/identification_clients.md, section 4.3).
+ *        X ? » (PR6, attribution des analyses en cours).
  *
  * `<cible>` est résolue vers un `client_uid` exactement comme `clientsCommand
  * --to` (`session_no`, `client_uid` hexadécimal, ou `label` déclaré — cf.
@@ -1115,6 +1126,27 @@ int clients_work_interpreter(void) {
                   target, client_uid_hex, count, max_alloc);
     }
     return 0;
+}
+
+/**
+ * @brief Interpréteur de `leaseDuration <n>` : fixe la durée (secondes) du
+ *        bail à expiration des possibilités attribuées à un client (PR7).
+ *
+ * Purement serveur (le bail n'a de sens que côté serveur, qui seul enregistre
+ * une attribution — `add_possibility_analysed_owned`) : commande SERVEUR pure
+ * (send_to_childs = 0), jamais propagée aux forks de recherche. `n <= 0`
+ * désactive le bail (même convention que `limit 0`) : les possibilités
+ * attribuées ne sont alors plus jamais rendues automatiquement au stock.
+ * N'affecte que les possibilités attribuées APRÈS ce changement — celles déjà
+ * en cours d'analyse gardent l'échéance calculée à leur insertion.
+ */
+int lease_duration_interpreter(void) {
+    char *arguments = strtok(NULL, " ");
+    if (arguments != NULL) {
+        analysed_lease_seconds = atoi(arguments);
+        return 0;
+    }
+    return CMD_ERR_USAGE;
 }
 
 /**

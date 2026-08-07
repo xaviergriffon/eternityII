@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <time.h>
 
 #include "ui/logger.h"
 #include "app/static_variables.h"
@@ -168,6 +169,18 @@ int should_autobackup(int *lastBack, unsigned long long *lastBackupUpdates,
  * @return      NULL (boucle infinie).
  */
 /**
+ * @brief Callback de vivacité (`analysed_owner_alive_fn`, `core/datamanager.h`)
+ *        passé à `datamanager_reclaim_expired_leases` par `check_server_step` :
+ *        un client est vivant tant que son canal de contrôle reste enregistré
+ *        dans `control_registry` (PR7, correctif — voir le commentaire au
+ *        point d'appel dans `check_server_step`).
+ */
+static int owner_control_session_alive(const uint8_t owner_uid[CLIENT_UID_BYTES])
+{
+    return control_registry_has_active_client(owner_uid);
+}
+
+/**
  * @brief Un tour de la boucle de `check_server` (corps extrait pour être testable
  *        hors thread, comme `communicate_with_client_step`).
  *
@@ -253,6 +266,22 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
         log_event("new record: %i pieces placed", max_result);
     }
 
+    // Bail à expiration des analyses en cours (PR7) : passe bornée, au même
+    // rythme que le reste de ce tour (10 s) -- jamais un chemin chaud. `now`
+    // est lu une seule fois ici et injecté, `datamanager_reclaim_expired_leases`
+    // ne consulte jamais l'horloge elle-même (testable sans horloge réelle).
+    // Idempotent vis-à-vis d'un acquittement concurrent : les deux passent par
+    // le même verrou par file (cf. datamanager.h). `owner_control_session_alive`
+    // (ci-dessous) est le second critère, ajouté après un essai réel : un
+    // client toujours connecté sur son canal de contrôle n'est jamais réclamé,
+    // même si une possibilité met plus longtemps que `analysed_lease_seconds`
+    // à s'analyser -- ce budget de temps n'était qu'un minorant, jamais une
+    // garantie de durée d'analyse.
+    unsigned long long reclaimed_leases = datamanager_reclaim_expired_leases(time(NULL), owner_control_session_alive);
+    if (reclaimed_leases > 0) {
+        log_event("bail expiré : %llu possibilité(s) rendue(s) au stock (client disparu)", reclaimed_leases);
+    }
+
     if (should_autobackup(lastBack, lastClientsFileUpdateBackup, clientsFileUpdates))
     {
         int rb = backup("./temp.back");
@@ -272,7 +301,7 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
         if (best_board_save(&g_server_best_board, "./temp-best_board.back") != 0) {
             log_error("autobackup : échec sur ./temp-best_board.back\n");
         }
-        // Cumul par machine (PR5 de identification_clients.md) : même cadence
+        // Cumul par machine (PR5) : même cadence
         // que le reste du stock, fichier dédié (cf. app/known_clients_registry.h).
         if (known_clients_registry_save("./temp-known_clients.back") != 0) {
             log_error("autobackup : échec sur ./temp-known_clients.back\n");
@@ -336,8 +365,7 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent)
 
 /**
  * @brief Enregistre une possibilité servie comme « en cours d'analyse »,
- *        attribuée au client courant si son identité est connue (PR6,
- *        docs/conception/identification_clients.md, section 4.3).
+ *        attribuée au client courant si son identité est connue (PR6).
  *
  * Extrait des trois points de service (`INST_GET`/`INST_GET_TO_CHECK[_BATCH]`)
  * pour n'écrire cette décision qu'à un seul endroit. `client->has_identity`

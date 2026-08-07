@@ -419,25 +419,33 @@ int add_possibility(client_possibility_t *client_possibility, array_possibility_
 #define ANALYSED_INDEX_BUCKETS 8191
 
 /*
- * Attribution des analyses en cours (PR6, docs/conception/identification_clients.md,
- * arbitrage C / section 4.3) : `owner_uid` est le `client_uid` du client à qui
- * LE SERVEUR a servi cette possibilité (INST_GET / INST_GET_TO_CHECK[_BATCH]).
- * C'est bien la « table latérale adossée à analysed_index » visée par le
- * document : jamais un champ ajouté à `possibility_packet` (fil + backups +
- * padding caché, cf. possibility-packet-struct-padding), jamais une
- * surcharge du paramètre `thread` (déjà -1 côté serveur / index de thread
+ * Attribution des analyses en cours (PR6) : `owner_uid` est le `client_uid` du
+ * client à qui LE SERVEUR a servi cette possibilité (INST_GET /
+ * INST_GET_TO_CHECK[_BATCH]). C'est une table latérale adossée à
+ * `analysed_index`, jamais un champ ajouté à `possibility_packet` (fil +
+ * backups + padding caché, cf. possibility-packet-struct-padding), et jamais
+ * une surcharge du paramètre `thread` (déjà -1 côté serveur / index de thread
  * côté client, deux sens distincts qu'il ne faut pas empiler d'un troisième).
  * `has_owner == 0` côté client (thread >= 0, cf. add_possibility_analysed) et
  * pour toute possibilité rechargée par `import_analysed`/`restore_analysed` :
- * les baux ne sont pas persistés (section 4.7 du document), l'attribution ne
- * l'est donc pas davantage — au redémarrage, une possibilité restaurée est
- * réputée sans propriétaire, comme avant cette PR.
+ * les baux ne sont pas persistés, l'attribution ne l'est donc pas davantage —
+ * au redémarrage, une possibilité restaurée est réputée sans propriétaire,
+ * comme avant cette PR.
  */
 typedef struct AnalysedIndexNode {
 	uint64_t hash;
 	Element *element;
 	uint8_t owner_uid[CLIENT_UID_BYTES];
 	int has_owner;
+	/*
+	 * Échéance du bail (PR7, section 4.3) : instant (epoch) au-delà duquel
+	 * cette possibilité, si toujours non acquittée, est réputée abandonnée
+	 * et rendue au stock par datamanager_reclaim_expired_leases(). Valide
+	 * seulement si has_owner (une possibilité sans propriétaire connu n'a pas
+	 * de bail — rien à rendre à personne). 0 = bail désactivé
+	 * (analysed_lease_seconds <= 0 au moment de l'insertion) : jamais expiré.
+	 */
+	time_t lease_deadline;
 	struct AnalysedIndexNode *next;
 } AnalysedIndexNode;
 
@@ -507,8 +515,16 @@ static void analysed_index_add(int fileidx, Element *e, const uint8_t owner_uid[
 	if (owner_uid != NULL) {
 		memcpy(node->owner_uid, owner_uid, CLIENT_UID_BYTES);
 		node->has_owner = 1;
+		// Bail (PR7) : échéance calculée MAINTENANT, à l'insertion — jamais
+		// recalculée ensuite. analysed_lease_seconds <= 0 désactive le bail
+		// (sentinelle 0, cf. analysed_lease_is_expired) : comportement
+		// d'avant cette PR, une possibilité attribuée n'expire jamais.
+		node->lease_deadline = (analysed_lease_seconds > 0)
+		                            ? (time(NULL) + analysed_lease_seconds)
+		                            : 0;
 	} else {
 		node->has_owner = 0;
+		node->lease_deadline = 0;
 	}
 	size_t bucket = node->hash % ANALYSED_INDEX_BUCKETS;
 	node->next = analysed_index[fileidx][bucket];
@@ -893,6 +909,92 @@ int datamanager_analysed_owned_by(const uint8_t owner_uid[CLIENT_UID_BYTES],
 		pthread_mutex_unlock(&file_possibility_analysed[f].lock);
 	}
 	return 0;
+}
+
+int analysed_lease_is_expired(time_t lease_deadline, time_t now) {
+	if (lease_deadline <= 0) {
+		// Sentinelle « bail désactivé/non applicable » (cf. AnalysedIndexNode) :
+		// jamais expiré.
+		return 0;
+	}
+	return now >= lease_deadline;
+}
+
+/**
+ * @brief Voir la doc dans datamanager.h. Structure calquée sur
+ *        `restock_analysed` : une passe par file, tout le travail sur l'index
+ *        et la `File` sous le verrou de CETTE file, puis remise en stock hors
+ *        verrou (même ordre de verrouillage que `restock_analysed` : jamais
+ *        `file_possibility[dest].lock` pris pendant que
+ *        `file_possibility_analysed[f].lock` est tenu).
+ */
+unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner_alive_fn owner_alive) {
+	unsigned long long reclaimed_total = 0;
+	for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+		pthread_mutex_lock(&file_possibility_analysed[f].lock);
+		File *file = &file_possibility_analysed[f].file;
+		unsigned long long capacity = file->size;
+		struct possibility_packet *buf = (capacity > 0)
+		                                      ? malloc(capacity * sizeof(struct possibility_packet))
+		                                      : NULL;
+		unsigned long long n = 0;
+		if (buf != NULL) {
+			for (size_t b = 0; b < ANALYSED_INDEX_BUCKETS; b++) {
+				AnalysedIndexNode *node = analysed_index[f][b];
+				AnalysedIndexNode *prev = NULL;
+				while (node != NULL) {
+					AnalysedIndexNode *next = node->next;
+					// Deux conditions requises pour réclamer (correctif PR7) :
+					// l'échéance ET l'absence de preuve de vivacité. Un client
+					// toujours vivant (owner_alive vrai) n'est JAMAIS réclamé,
+					// aussi longtemps l'analyse ait-elle mis.
+					if (node->has_owner && analysed_lease_is_expired(node->lease_deadline, now)
+					    && (owner_alive == NULL || !owner_alive(node->owner_uid))) {
+						Element *victim = node->element;
+						memcpy(&buf[n], victim->value, sizeof(struct possibility_packet));
+						n++;
+
+						if (prev == NULL) {
+							analysed_index[f][b] = next;
+						} else {
+							prev->next = next;
+						}
+						free(node);
+
+						// Retrait effectif de la File : après la copie ci-dessus
+						// (file_remove_element libère victim->value).
+						file_remove_element(file, victim);
+					} else {
+						prev = node;
+					}
+					node = next;
+				}
+			}
+		} else if (capacity > 0) {
+			log_error("datamanager_reclaim_expired_leases : allocation échouée (file %d, %llu possibilités) — passe sautée\n",
+			          f, capacity);
+		}
+		pthread_mutex_unlock(&file_possibility_analysed[f].lock);
+
+		for (unsigned long long i = 0; i < n; i++) {
+			int dest = 0;
+			int added = 0;
+			while (!added) {
+				if (pthread_mutex_trylock(&file_possibility[dest].lock) == 0) {
+					if (buf[i].alloc > max_result) max_result = buf[i].alloc;
+					put(&file_possibility[dest].file, &buf[i]);
+					pthread_mutex_unlock(&file_possibility[dest].lock);
+					added = 1;
+				} else {
+					dest = (dest + 1) % NB_FILE_POSSIBILITY;
+					usleep(MICRO_SLEEP);
+				}
+			}
+		}
+		free(buf);
+		reclaimed_total += n;
+	}
+	return reclaimed_total;
 }
 
 /**
