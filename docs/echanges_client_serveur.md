@@ -401,9 +401,32 @@ purement observationnel : un registre plein (toutes machines actuellement
 connectées) fait simplement renoncer au suivi d'une nouvelle machine, plutôt
 que de refuser sa connexion.
 
-Cumul en **mémoire uniquement** dans cette PR : un redémarrage du serveur
-repart de zéro. PR5 (docs/conception/identification_clients.md) ajoutera la
-persistance sur un fichier `.back` dédié, tolérante en lecture.
+**Persistance du cumul (PR5).** Un fichier `.back` dédié
+(`./eternityII-known_clients.back`, `known_clients_registry_save`/`_load`,
+`src/app/known_clients_registry.{h,c}`), branché sur les **mêmes** points
+d'appel que le reste du stock : l'autobackup périodique et
+`--stop-on-solution` côté écriture, la commande console `backup` (écriture)
+et `restore` (lecture) — jamais de chargement automatique au démarrage du
+serveur, même choix que `best_board_load`. Seuls les champs **cumulés** sont
+écrits (label/IP/mode déclarés, totaux, horodatages) — jamais l'état de
+session vivante (`nb_active_sessions`, `sessions[]`), qui n'a aucun sens après
+un redémarrage.
+
+Le chargement **fusionne**, il ne remplace pas (contrairement à `restore()`
+sur le stock de possibilités) : une machine déjà présente dans le registre en
+mémoire (une session s'est reconnectée avant que l'opérateur n'exécute
+`restore`) voit les compteurs du fichier **s'ajouter** aux siens (jamais un
+écrasement, qui ferait régresser un cumul déjà mesuré depuis le démarrage du
+serveur) ; son label/IP/mode/statut connecté restent ceux, plus récents, déjà
+en mémoire. Une machine absente du registre reçoit une nouvelle entrée
+**déconnectée**, initialisée depuis le fichier.
+
+Tolérant en lecture, comme le reste de cette fonctionnalité : un fichier
+absent, illisible, ou dont l'en-tête (`KNOWN_CLIENTS_FILE_MAGIC`) ne
+correspond pas laisse le registre en mémoire inchangé (retour -1, journalisé
+comme un avertissement non bloquant par l'appelant — même traitement que
+l'échec de `best_board_load` dans `restore_apply`) ; un fichier tronqué en
+cours d'enregistrements applique ce qui a pu être lu et réussit quand même.
 
 Exposé par la commande console `knownClients` (voir
 [console.md](console.md#pilotage-des-clients-serveur)) et par

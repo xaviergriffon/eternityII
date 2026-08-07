@@ -2,6 +2,9 @@
 
 #include <string.h>
 #include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 #include "ui/logger.h"
 
@@ -262,6 +265,167 @@ void known_clients_registry_on_disconnect(const uint8_t *machine_uid, const uint
         kc->last_seen = now;
     }
     pthread_mutex_unlock(&g_known_clients_mutex);
+}
+
+/* Remplit un enregistrement persisté à partir d'une entrée en mémoire.
+ * N'écrit QUE les champs cumulés — jamais l'état de session vivante, cf.
+ * known_client_record_t. Appelant : doit détenir le mutex (lecture seule). */
+static void fill_record_from_entry(known_client_record_t *rec, const known_client_t *kc)
+{
+    memset(rec, 0, sizeof(*rec));
+    memcpy(rec->machine_uid, kc->machine_uid, MACHINE_UID_BYTES);
+    copy_bounded_string(rec->label, sizeof(rec->label), kc->label);
+    copy_bounded_string(rec->peer_ip, sizeof(rec->peer_ip), kc->peer_ip);
+    rec->mode = kc->mode;
+    rec->nb_connections_total = (uint32_t)kc->nb_connections_total;
+    rec->first_seen = (int64_t)kc->first_seen;
+    rec->last_seen = (int64_t)kc->last_seen;
+    rec->total_pruner_checked = kc->total_pruner_checked;
+    rec->total_pruner_removed = kc->total_pruner_removed;
+    rec->best_max_result = kc->best_max_result;
+    rec->cumulative_uptime_seconds = kc->cumulative_uptime_seconds;
+}
+
+int known_clients_registry_save(const char *filename)
+{
+    pthread_once(&g_init_once, known_clients_init_once);
+    if (filename == NULL) {
+        return -1;
+    }
+
+    known_client_record_t *records = malloc(sizeof(known_client_record_t) * MAX_KNOWN_CLIENTS);
+    if (records == NULL) {
+        return -1;
+    }
+    uint32_t count = 0;
+
+    pthread_mutex_lock(&g_known_clients_mutex);
+    for (int i = 0; i < MAX_KNOWN_CLIENTS; i++) {
+        if (g_known_clients[i].in_use) {
+            fill_record_from_entry(&records[count], &g_known_clients[i]);
+            count++;
+        }
+    }
+    pthread_mutex_unlock(&g_known_clients_mutex);
+
+    // Écriture atomique : fichier temporaire puis rename, même convention que
+    // best_board_save/backup() (src/core/best_board.c, src/core/datamanager.c).
+    size_t len = strlen(filename);
+    char *tmp_filename = malloc(len + 5); // ".tmp" + '\0'
+    if (tmp_filename == NULL) {
+        free(records);
+        return -1;
+    }
+    memcpy(tmp_filename, filename, len);
+    memcpy(tmp_filename + len, ".tmp", 5);
+
+    int failed = 0;
+    FILE *f = fopen(tmp_filename, "wb");
+    if (f == NULL) {
+        failed = 1;
+    } else {
+        known_clients_file_header_t header = { KNOWN_CLIENTS_FILE_MAGIC, count };
+        if (fwrite(&header, sizeof(header), 1, f) != 1) {
+            failed = 1;
+        } else if (count > 0 && fwrite(records, sizeof(known_client_record_t), count, f) != count) {
+            failed = 1;
+        }
+        if (fclose(f) != 0) {
+            failed = 1;
+        }
+    }
+    if (!failed && rename(tmp_filename, filename) != 0) {
+        failed = 1;
+    }
+    if (failed) {
+        unlink(tmp_filename);
+    }
+    free(tmp_filename);
+    free(records);
+    return failed ? -1 : 0;
+}
+
+/* Applique un enregistrement persisté au registre en mémoire : fusion
+ * additive si la machine est déjà connue, nouvelle entrée déconnectée sinon.
+ * Voir la doc de known_clients_registry_load pour la justification. Appelant
+ * : doit détenir g_known_clients_mutex. */
+static void apply_persisted_record(const known_client_record_t *rec)
+{
+    int idx = find_machine_index(rec->machine_uid);
+    if (idx < 0) {
+        idx = allocate_machine_slot();
+        if (idx < 0) {
+            log_error("known_clients_registry : registre plein, cumul persisté ignoré pour une "
+                      "machine\n");
+            return;
+        }
+        known_client_t *kc = &g_known_clients[idx];
+        kc->in_use = 1;
+        memcpy(kc->machine_uid, rec->machine_uid, MACHINE_UID_BYTES);
+        copy_bounded_string(kc->label, sizeof(kc->label), rec->label);
+        copy_bounded_string(kc->peer_ip, sizeof(kc->peer_ip), rec->peer_ip);
+        kc->mode = rec->mode;
+        kc->nb_connections_total = (int)rec->nb_connections_total;
+        kc->first_seen = (time_t)rec->first_seen;
+        kc->last_seen = (time_t)rec->last_seen;
+        kc->total_pruner_checked = rec->total_pruner_checked;
+        kc->total_pruner_removed = rec->total_pruner_removed;
+        kc->best_max_result = rec->best_max_result;
+        kc->cumulative_uptime_seconds = rec->cumulative_uptime_seconds;
+        return;
+    }
+
+    known_client_t *kc = &g_known_clients[idx];
+    kc->nb_connections_total += (int)rec->nb_connections_total;
+    if (kc->first_seen == 0 || (time_t)rec->first_seen < kc->first_seen) {
+        kc->first_seen = (time_t)rec->first_seen;
+    }
+    if ((time_t)rec->last_seen > kc->last_seen) {
+        kc->last_seen = (time_t)rec->last_seen;
+    }
+    kc->total_pruner_checked += rec->total_pruner_checked;
+    kc->total_pruner_removed += rec->total_pruner_removed;
+    if (rec->best_max_result > kc->best_max_result) {
+        kc->best_max_result = rec->best_max_result;
+    }
+    kc->cumulative_uptime_seconds += rec->cumulative_uptime_seconds;
+    // label/peer_ip/mode/statut connecté : la valeur déjà en mémoire est plus
+    // récente qu'un fichier persisté potentiellement ancien, on ne l'écrase pas.
+}
+
+int known_clients_registry_load(const char *filename)
+{
+    pthread_once(&g_init_once, known_clients_init_once);
+    if (filename == NULL) {
+        return -1;
+    }
+
+    FILE *f = fopen(filename, "rb");
+    if (f == NULL) {
+        return -1;
+    }
+
+    known_clients_file_header_t header;
+    if (fread(&header, sizeof(header), 1, f) != 1 || header.magic != KNOWN_CLIENTS_FILE_MAGIC) {
+        fclose(f);
+        return -1;
+    }
+
+    pthread_mutex_lock(&g_known_clients_mutex);
+    known_client_record_t rec;
+    for (uint32_t i = 0; i < header.count; i++) {
+        // Fichier tronqué au milieu des enregistrements : on applique ce qui a
+        // pu être lu et on s'arrête là, plutôt que d'échouer tout le chargement
+        // — tolérance en lecture, cf. la doc de cette fonction.
+        if (fread(&rec, sizeof(rec), 1, f) != 1) {
+            break;
+        }
+        apply_persisted_record(&rec);
+    }
+    pthread_mutex_unlock(&g_known_clients_mutex);
+
+    fclose(f);
+    return 0;
 }
 
 int known_clients_registry_snapshot(known_client_info_t *out, int max)

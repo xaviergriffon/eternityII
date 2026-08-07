@@ -20,6 +20,7 @@
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
+#define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
 #define NB_COMMANDS 45
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
@@ -179,12 +180,15 @@ static command_description commands[NB_COMMANDS] = {
 
     {"backup", backup_interpreter, 1, CMD_CAT_BACKUP, 0, NULL,
      "sauvegarde les files dans les fichiers .back",
-     "Écrit ./eternityII.back, ./eternityII-in_analyse.back et ./eternityII-best_board.back\n"
-     "(noms suffixés du pid côté client).", NULL},
+     "Écrit ./eternityII.back, ./eternityII-in_analyse.back, ./eternityII-best_board.back\n"
+     "et ./eternityII-known_clients.back (noms suffixés du pid côté client).", NULL},
     {"restore", restore_interpreter, 1, CMD_CAT_BACKUP, 0, "restore [fichier [fichier_analyse]]",
      "restaure les files depuis les fichiers .back (remplace le stock)",
      "La recherche est suspendue pendant le remplacement. Sans argument :\n"
-     "./eternityII.back et ./eternityII-in_analyse.back.", NULL},
+     "./eternityII.back et ./eternityII-in_analyse.back. Le meilleur plateau connu et\n"
+     "le cumul par machine (./eternityII-best_board.back, ./eternityII-known_clients.back)\n"
+     "sont rechargés en plus, sans argument dédié ; leur absence n'empêche pas la\n"
+     "restauration du stock.", NULL},
     {"import", import_interpreter, 0, CMD_CAT_BACKUP, 0, NULL,
      "importe les fichiers .back en plus du stock courant",
      "Contrairement à « restore », le stock courant n'est pas vidé.", NULL},
@@ -241,8 +245,8 @@ static command_description commands[NB_COMMANDS] = {
      "Distinct de « clients » : cette liste survit à la déconnexion (une machine reste\n"
      "visible, marquée déconnectée) et cumule, par machine_uid, le nombre de connexions,\n"
      "le débit de prunage (checked/removed) et le meilleur résultat jamais rapportés --\n"
-     "toutes exécutions de processus confondues. Cumul en mémoire uniquement : remis à\n"
-     "zéro à chaque redémarrage du serveur (PR5 ajoutera la persistance).", NULL},
+     "toutes exécutions de processus confondues. Persisté dans ./eternityII-known_clients.back\n"
+     "(voir « backup »/« restore ») : un redémarrage du serveur ne remet pas ce cumul à zéro.", NULL},
 
     /* Alias : résolus vers l'entrée canonique par find_command. Les noms
        historiques abrégés (sorta, rmnonext, …) restent acceptés ici ; les
@@ -364,6 +368,7 @@ int backup_interpreter(void) {
     char *def_file = DEF_FILE;
     char *def_analyse_file = DEF_ANALYSE_FILE;
     char *def_best_board_file = DEF_BEST_BOARD_FILE;
+    char *def_known_clients_file = DEF_KNOWN_CLIENTS_FILE;
     int isServer = server;
     if (isServer == 0) {
         char *temp = malloc(sizeof(char) *(strlen(def_file) + 11));
@@ -375,6 +380,9 @@ int backup_interpreter(void) {
         temp = malloc(sizeof(char) * (strlen(def_best_board_file)+ 11));
         sprintf(temp, "%s_%i", def_best_board_file, getpid());
         def_best_board_file = temp;
+        temp = malloc(sizeof(char) * (strlen(def_known_clients_file)+ 11));
+        sprintf(temp, "%s_%i", def_known_clients_file, getpid());
+        def_known_clients_file = temp;
     }
     int rb = backup(def_file);
     if (rb == BACKUP_SKIPPED_MAINTENANCE) {
@@ -395,11 +403,17 @@ int backup_interpreter(void) {
     if (best_board_save(&g_server_best_board, def_best_board_file) != 0) {
         log_info("backup de %s échoué\n", def_best_board_file);
     }
+    // Cumul par machine (PR5 de identification_clients.md) : même cadence que
+    // le reste du stock, fichier dédié (cf. app/known_clients_registry.h).
+    if (known_clients_registry_save(def_known_clients_file) != 0) {
+        log_info("backup de %s échoué\n", def_known_clients_file);
+    }
     log_info("backup ended\n");
     if (isServer == 0) {
         free(def_file);
         free(def_analyse_file);
         free(def_best_board_file);
+        free(def_known_clients_file);
     }
     return 0;
 }
@@ -507,6 +521,16 @@ static int restore_apply(char *file, char *analyse_file) {
             if (recorded > max_result) {
                 max_result = recorded;
             }
+        }
+        // Même tolérance que best_board ci-dessus : un backup plus ancien peut
+        // ne pas avoir ce fichier (feature ajoutée après coup) sans que ça
+        // remette en cause la restauration du stock déjà faite. Fusion
+        // additive dans le registre en mémoire (voir la doc de
+        // known_clients_registry_load) : ne repart jamais de zéro si des
+        // clients sont déjà reconnectés au moment du restore.
+        if (known_clients_registry_load(DEF_KNOWN_CLIENTS_FILE) != 0) {
+            log_error("restore known clients impossible (%s) : cumul par machine reparti de zéro\n",
+                      DEF_KNOWN_CLIENTS_FILE);
         }
     }
 
