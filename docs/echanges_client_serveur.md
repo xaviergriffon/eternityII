@@ -366,9 +366,17 @@ ci-dessus — les deux ne se recouvrent pas :
 
 `control_registry` est vidé à la déconnexion ; celui-ci ne l'est **pas** — une
 machine reste consultable, marquée déconnectée, jusqu'à ce que la borne du
-registre (`MAX_KNOWN_CLIENTS`, 256) impose son éviction (politique LRU parmi
-les entrées **déconnectées** uniquement : une machine encore active n'est
-jamais évincée).
+registre (`MAX_KNOWN_CLIENTS = 4 * MAX_CONTROL_SESSIONS` = 256) impose son
+éviction (politique LRU parmi les entrées **déconnectées** uniquement : une
+machine encore active n'est jamais évincée). Cette borne est exprimée comme
+un **multiple** de `MAX_CONTROL_SESSIONS` plutôt qu'une constante indépendante :
+le nombre de machines **simultanément** connues ne peut de toute façon jamais
+dépasser `MAX_CONTROL_SESSIONS` (fixe, indépendant de `NB_THREADS` — voir
+*Impact sur le dimensionnement du serveur* ci-dessous), donc la seule pression
+sur `MAX_KNOWN_CLIENTS` vient du cumul dans le temps (churn), jamais du pic
+instantané — le facteur 4 documente explicitement la marge de rétention
+d'historique voulue au-delà de ce pic, et reste vrai si `MAX_CONTROL_SESSIONS`
+change un jour.
 
 **Cumul par accroissement, pas par simple remplacement.** `pruner_checked`/
 `pruner_removed` (`control_stats_t`) sont des compteurs **par processus** : ils

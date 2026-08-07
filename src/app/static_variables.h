@@ -139,11 +139,30 @@
 // docs/conception/identification_clients.md). Distinct de MAX_CONTROL_SESSIONS :
 // ce registre survit à la déconnexion (contrairement à `control_registry`),
 // donc un parc qui tourne longtemps peut accumuler des machines vues puis
-// définitivement parties. 256 est large pour un parc réel, et la politique
-// d'éviction (LRU parmi les entrées DÉCONNECTÉES, cf. le fichier .c) absorbe
-// le cas d'un parc qui dépasserait quand même la borne — jamais en évinçant
-// une machine actuellement connectée.
-#define MAX_KNOWN_CLIENTS 256
+// définitivement parties.
+//
+// Exprimé en MULTIPLE de MAX_CONTROL_SESSIONS plutôt qu'en constante magique
+// indépendante, pour deux raisons :
+//  - le nombre de machines SIMULTANÉMENT connues (`nb_active_sessions` sommé
+//    sur toutes les entrées) ne peut de toute façon jamais dépasser
+//    MAX_CONTROL_SESSIONS (chaque session de contrôle occupe un slot de CE
+//    registre-là, indépendant de NB_THREADS — voir son commentaire
+//    ci-dessus) : la seule pression possible sur CETTE borne-ci vient du
+//    CUMUL dans le temps (machines vues puis reparties), jamais du pic
+//    instantané ;
+//  - garder `MAX_KNOWN_CLIENTS` strictement AU-DESSUS de ce pic, d'un facteur
+//    explicite, documente d'un coup d'œil « combien d'historique de machines
+//    déconnectées ce registre peut encore garder au-delà du pic instantané »
+//    — et la relation entre les deux bornes reste vraie si
+//    MAX_CONTROL_SESSIONS change un jour, sans qu'il faille y repenser ici.
+//
+// Facteur 4 choisi arbitrairement comme marge confortable pour un parc réel ;
+// la politique d'éviction (LRU parmi les entrées DÉCONNECTÉES, cf. le fichier
+// .c) absorbe de toute façon le cas d'un parc qui dépasserait quand même la
+// borne — jamais en évinçant une machine actuellement connectée. Coût mémoire
+// négligeable (~200 octets/entrée, soit ~50 Ko à 256) : ce n'est pas une
+// borne de sûreté contre un débordement, seulement un choix de rétention.
+#define MAX_KNOWN_CLIENTS (4 * MAX_CONTROL_SESSIONS)
 // Nombre maximal de sessions SIMULTANÉES suivies par machine connue (ex. un
 // client de recherche et un pruner lancés en parallèle sur le même hôte,
 // chacun avec son propre `client_uid`). Volontairement petit : dépasser ce
