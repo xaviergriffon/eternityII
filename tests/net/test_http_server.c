@@ -11,6 +11,7 @@
 #include "greatest.h"
 #include "net/http_server.h"
 #include "app/control_registry.h"
+#include "app/known_clients_registry.h"
 #include "app/etii_server.h"
 #include "app/static_variables.h"
 #include "core/best_board.h"
@@ -151,6 +152,62 @@ TEST http_server_get_clients_reflects_recorded_stats(void)
     ASSERT(strstr(resp, "\"pruner_removed\":1") != NULL);
 
     control_registry_unregister(idx);
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* GET /api/v1/known-clients -> 200, tableau vide si aucune machine connue.
+   Comme known_clients_registry est un état global qui n'est jamais vidé
+   (voir test_known_clients_registry.c), on ne vérifie pas l'absence
+   d'entrées -- seulement que la route répond et produit un JSON valide. */
+TEST http_server_get_known_clients_returns_200(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    const char req[] = "GET /api/v1/known-clients HTTP/1.1\r\nHost: x\r\n\r\n";
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
+    ASSERT(strstr(resp, "\"known_clients\":[") != NULL);
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* GET /api/v1/known-clients reflète une machine enregistrée via
+   known_clients_registry_on_connect (round-trip HTTP -> registre -> HTTP). */
+TEST http_server_get_known_clients_reflects_registered_machine(void)
+{
+    client_identity_t identity;
+    memset(&identity, 0, sizeof(identity));
+    identity.machine_uid[0] = 0xAB;
+    identity.machine_uid[1] = 0xCD;
+    identity.fork_seq = -1;
+    identity.mode = 1;
+    strncpy(identity.label, "http-known-clients-test", sizeof(identity.label) - 1);
+    known_clients_registry_on_connect(&identity, "203.0.113.20");
+
+    int sv[2];
+    MAKE_PAIR(sv);
+    const char req[] = "GET /api/v1/known-clients HTTP/1.1\r\nHost: x\r\n\r\n";
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
+    ASSERT(strstr(resp, "\"label\":\"http-known-clients-test\"") != NULL);
+    ASSERT(strstr(resp, "\"ip\":\"203.0.113.20\"") != NULL);
+    ASSERT(strstr(resp, "\"mode\":\"pruner\"") != NULL);
+    ASSERT(strstr(resp, "\"connected\":true") != NULL);
+
+    known_clients_registry_on_disconnect(identity.machine_uid, identity.client_uid);
     close(sv[0]); close(sv[1]);
     PASS();
 }
@@ -777,6 +834,8 @@ SUITE(http_server_suite)
     RUN_TEST(http_server_get_status_returns_200);
     RUN_TEST(http_server_get_clients_returns_200_empty);
     RUN_TEST(http_server_get_clients_reflects_recorded_stats);
+    RUN_TEST(http_server_get_known_clients_returns_200);
+    RUN_TEST(http_server_get_known_clients_reflects_registered_machine);
     RUN_TEST(http_server_post_clients_stats_returns_200);
     RUN_TEST(http_server_get_clients_stats_returns_405);
     RUN_TEST(http_server_post_clients_returns_405);

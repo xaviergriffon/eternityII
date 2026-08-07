@@ -122,4 +122,16 @@ int http_clients_collect(http_client_info_t *out, int max);
  */
 void http_best_board_collect(http_best_board_view_t *out);
 
+/**
+ * @brief Construit un instantané des machines connues (registre de cumul,
+ *        `app/known_clients_registry.h`, PR4) pour `GET /api/v1/known-clients`,
+ *        via `known_clients_registry_snapshot` — même source que la commande
+ *        console `knownClients`.
+ *
+ * @param out Tableau destination (au moins `max` entrées).
+ * @param max Capacité de `out`.
+ * @return    Nombre d'entrées effectivement copiées.
+ */
+int http_known_clients_collect(http_known_client_info_t *out, int max);
+
 #endif /* eternityII_http_server_h */

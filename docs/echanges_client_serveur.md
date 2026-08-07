@@ -350,6 +350,57 @@ clientsCommand --to jetson-1 limit 500     # cible par label déclaré
 clientsCommand limit 500                   # sans --to : diffusion (comportement historique)
 ```
 
+### Registre de clients connus
+
+PR4 de [docs/conception/identification_clients.md](conception/identification_clients.md)
+ajoute un **second** registre serveur, `known_clients_registry.{h,c}`
+(`src/app/`), volontairement **indépendant** de `control_registry` décrit
+ci-dessus — les deux ne se recouvrent pas :
+
+| | `control_registry` | Registre de clients connus |
+|---|---|---|
+| Indexé par | slot de session (réutilisé) | `machine_uid` (clé de cumul, cf. section 3 du document de conception) |
+| Durée de vie | la session TCP | la vie du serveur (une entrée déconnectée reste visible) |
+| Contenu | hello, file de commandes, dernier `CTRL_STATS` | totaux cumulés, première/dernière vue, statut connecté/déconnecté |
+| Rôle | piloter | mesurer |
+
+`control_registry` est vidé à la déconnexion ; celui-ci ne l'est **pas** — une
+machine reste consultable, marquée déconnectée, jusqu'à ce que la borne du
+registre (`MAX_KNOWN_CLIENTS`, 256) impose son éviction (politique LRU parmi
+les entrées **déconnectées** uniquement : une machine encore active n'est
+jamais évincée).
+
+**Cumul par accroissement, pas par simple remplacement.** `pruner_checked`/
+`pruner_removed` (`control_stats_t`) sont des compteurs **par processus** : ils
+repartent de 0 à chaque redémarrage d'un client. `known_clients_registry_on_stats`
+suit donc, pour chaque session active d'une machine, la dernière valeur
+observée (`sessions[].last_pruner_checked`/`removed`), et n'ajoute au total de
+la MACHINE que l'**accroissement** depuis ce dernier relevé — jamais la valeur
+brute. `known_clients_registry_on_connect` réarme cette base à 0 pour une
+nouvelle session : un client qui redémarre continue donc de faire croître le
+cumul de sa machine au lieu de l'écraser par une valeur plus basse.
+`best_max_result` suit le même principe que `g_server_best_board` : un **pic**
+(jamais remplacé par une valeur plus basse), pas une somme.
+
+**Sessions simultanées d'une même machine.** `machine_uid` (persistant) et
+`client_uid` (par exécution de processus) ne se confondent pas : une même
+machine peut avoir plusieurs sessions actives en parallèle (ex. un client de
+recherche et un pruner sur le même hôte), chacune suivie dans un petit tableau
+borné (`KNOWN_CLIENT_MAX_SESSIONS`, 8) — dépasser cette borne dégrade
+seulement le cumul de la session surnuméraire (avertissement en log), sans
+jamais faire échouer la session réseau qui l'a déclenchée. Ce registre est
+purement observationnel : un registre plein (toutes machines actuellement
+connectées) fait simplement renoncer au suivi d'une nouvelle machine, plutôt
+que de refuser sa connexion.
+
+Cumul en **mémoire uniquement** dans cette PR : un redémarrage du serveur
+repart de zéro. PR5 (docs/conception/identification_clients.md) ajoutera la
+persistance sur un fichier `.back` dédié, tolérante en lecture.
+
+Exposé par la commande console `knownClients` (voir
+[console.md](console.md#pilotage-des-clients-serveur)) et par
+`GET /api/v1/known-clients` sur l'[API HTTP](api_http_rest.md).
+
 ### Impact sur le dimensionnement du serveur
 
 Une session de contrôle **partage le même pool `client_t[NB_THREADS]`** qu'une
@@ -368,7 +419,9 @@ Voir la [console interactive](console.md#commandes) pour la liste complète ; c�
 serveur uniquement : `clients` (liste les sessions actives), `clientsStats` (diffuse
 `CTRL_GET_STATS`), `clientsCmd [--to <cible>] <ligne>` (pousse `CTRL_COMMAND`, filtré
 par la liste blanche, à une session précise ou, par défaut, à toutes — voir
-[Adressage des commandes](#adressage-des-commandes---to) ci-dessus).
+[Adressage des commandes](#adressage-des-commandes---to) ci-dessus), et
+`knownClients` (liste les machines connues, cumul, voir
+[Registre de clients connus](#registre-de-clients-connus) ci-dessus).
 `pause`/`resume` posent/lèvent localement `REQUEST_ADMIN_PAUSE` — un état
 distinct de la pause de régulation de débit (`REQUEST_PAUSE`, auto-levée par le
 régulateur), pour qu'une pause administrative ne disparaisse jamais toute seule au

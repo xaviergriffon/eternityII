@@ -29,4 +29,4 @@ survivent nulle part ailleurs.
 
 | Document | Statut | Contenu |
 |---|---|---|
-| [identification_clients.md](identification_clients.md) | en cours d'implémentation (PR 1/7) | Identification unique des clients au-delà du PID : modèle d'identité, statistiques cumulées persistantes, bail à expiration sur les analyses en cours, découpage en 7 PR. |
+| [identification_clients.md](identification_clients.md) | en cours d'implémentation (PR 4/7) | Identification unique des clients au-delà du PID : modèle d'identité, statistiques cumulées persistantes, bail à expiration sur les analyses en cours, découpage en 7 PR. |

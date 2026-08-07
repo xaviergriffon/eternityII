@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "app/control_registry.h"
+#include "app/known_clients_registry.h"
 #include "app/etii_server.h"
 #include "app/static_variables.h"
 #include "core/datamanager.h"
@@ -156,6 +157,35 @@ int http_clients_collect(http_client_info_t *out, int max)
         out[i].stats_pruner_removed = (unsigned long long)infos[i].stats.pruner_removed;
         out[i].stats_pruner_cells_per_second = (unsigned long long)infos[i].stats.pruner_cells_per_second;
         out[i].stats_time = (long long)infos[i].stats_time;
+    }
+    return n;
+}
+
+int http_known_clients_collect(http_known_client_info_t *out, int max)
+{
+    if (out == NULL || max <= 0) {
+        return 0;
+    }
+    known_client_info_t infos[MAX_KNOWN_CLIENTS];
+    int cap = (max < MAX_KNOWN_CLIENTS) ? max : MAX_KNOWN_CLIENTS;
+    int n = known_clients_registry_snapshot(infos, cap);
+    for (int i = 0; i < n; i++) {
+        strncpy(out[i].machine_uid_hex, infos[i].machine_uid_hex, HTTP_CLIENT_UID_HEX_MAX - 1);
+        out[i].machine_uid_hex[HTTP_CLIENT_UID_HEX_MAX - 1] = '\0';
+        strncpy(out[i].label, infos[i].label, HTTP_CLIENT_LABEL_MAX - 1);
+        out[i].label[HTTP_CLIENT_LABEL_MAX - 1] = '\0';
+        strncpy(out[i].peer_ip, infos[i].peer_ip, HTTP_CLIENT_IP_MAX - 1);
+        out[i].peer_ip[HTTP_CLIENT_IP_MAX - 1] = '\0';
+        out[i].mode = infos[i].mode;
+        out[i].connected = infos[i].connected;
+        out[i].nb_active_sessions = infos[i].nb_active_sessions;
+        out[i].nb_connections_total = infos[i].nb_connections_total;
+        out[i].first_seen = (long long)infos[i].first_seen;
+        out[i].last_seen = (long long)infos[i].last_seen;
+        out[i].total_pruner_checked = (unsigned long long)infos[i].total_pruner_checked;
+        out[i].total_pruner_removed = (unsigned long long)infos[i].total_pruner_removed;
+        out[i].best_max_result = (unsigned long long)infos[i].best_max_result;
+        out[i].cumulative_uptime_seconds = (unsigned long long)infos[i].cumulative_uptime_seconds;
     }
     return n;
 }
@@ -429,6 +459,16 @@ int handle_http_connection(int socket_id)
             http_best_board_view_t view;
             http_best_board_collect(&view);
             if (http_json_format_best_board(json, sizeof(json), &view) > 0) {
+                send_response(socket_id, 200, json);
+            } else {
+                send_response(socket_id, 500, "{\"error\":\"internal\"}");
+            }
+            break;
+        }
+        case HTTP_ROUTE_KNOWN_CLIENTS: {
+            http_known_client_info_t infos[MAX_KNOWN_CLIENTS];
+            int n = http_known_clients_collect(infos, MAX_KNOWN_CLIENTS);
+            if (http_json_format_known_clients(json, sizeof(json), infos, n) > 0) {
                 send_response(socket_id, 200, json);
             } else {
                 send_response(socket_id, 500, "{\"error\":\"internal\"}");

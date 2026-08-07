@@ -134,6 +134,25 @@
 // donc volontairement indépendante et fixe plutôt qu'indexée sur NB_THREADS.
 #define MAX_CONTROL_SESSIONS 64
 
+// Nombre maximal de MACHINES distinctes (clé `machine_uid`) suivies par le
+// registre de clients connus (`known_clients_registry.h`, PR4 de
+// docs/conception/identification_clients.md). Distinct de MAX_CONTROL_SESSIONS :
+// ce registre survit à la déconnexion (contrairement à `control_registry`),
+// donc un parc qui tourne longtemps peut accumuler des machines vues puis
+// définitivement parties. 256 est large pour un parc réel, et la politique
+// d'éviction (LRU parmi les entrées DÉCONNECTÉES, cf. le fichier .c) absorbe
+// le cas d'un parc qui dépasserait quand même la borne — jamais en évinçant
+// une machine actuellement connectée.
+#define MAX_KNOWN_CLIENTS 256
+// Nombre maximal de sessions SIMULTANÉES suivies par machine connue (ex. un
+// client de recherche et un pruner lancés en parallèle sur le même hôte,
+// chacun avec son propre `client_uid`). Volontairement petit : dépasser ce
+// nombre sur une même machine est un cas marginal, et le seul effet d'un
+// dépassement est de dégrader (pas de perte) — la session surnuméraire n'est
+// simplement pas comptée dans le cumul individuel tant qu'un slot ne se
+// libère pas (cf. known_clients_registry.c).
+#define KNOWN_CLIENT_MAX_SESSIONS 8
+
 // Longueur maximale (avec terminateur) de l'adresse IP du pair d'une connexion
 // TCP acceptée par le serveur (client_t.peer_ip, control_session_info_t.peer_ip),
 // formatée par inet_ntop. Vaut INET6_ADDRSTRLEN (46) : le serveur n'écoute

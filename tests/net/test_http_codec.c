@@ -144,6 +144,7 @@ TEST http_route_resolve_known_routes(void)
     ASSERT_EQ_FMT(HTTP_ROUTE_COMMAND, http_route_resolve("POST", "/api/v1/command"), "%d");
     ASSERT_EQ_FMT(HTTP_ROUTE_CLIENTS, http_route_resolve("GET", "/api/v1/clients"), "%d");
     ASSERT_EQ_FMT(HTTP_ROUTE_CLIENTS_STATS, http_route_resolve("POST", "/api/v1/clients/stats"), "%d");
+    ASSERT_EQ_FMT(HTTP_ROUTE_KNOWN_CLIENTS, http_route_resolve("GET", "/api/v1/known-clients"), "%d");
     PASS();
 }
 
@@ -159,6 +160,7 @@ TEST http_route_resolve_bad_method(void)
     ASSERT_EQ_FMT(HTTP_ROUTE_BAD_METHOD, http_route_resolve("GET", "/api/v1/command"), "%d");
     ASSERT_EQ_FMT(HTTP_ROUTE_BAD_METHOD, http_route_resolve("POST", "/api/v1/clients"), "%d");
     ASSERT_EQ_FMT(HTTP_ROUTE_BAD_METHOD, http_route_resolve("GET", "/api/v1/clients/stats"), "%d");
+    ASSERT_EQ_FMT(HTTP_ROUTE_BAD_METHOD, http_route_resolve("POST", "/api/v1/known-clients"), "%d");
     PASS();
 }
 
@@ -413,6 +415,82 @@ TEST http_json_format_clients_buffer_too_small_fails(void)
 
     char buf[8];
     int n = http_json_format_clients(buf, sizeof(buf), &info, 1);
+    ASSERT_EQ_FMT(-1, n, "%d");
+    PASS();
+}
+
+/* ---------- http_json_format_known_clients ----------------------------------- */
+
+TEST http_json_format_known_clients_golden(void)
+{
+    http_known_client_info_t infos[2];
+    memset(&infos, 0, sizeof(infos));
+    strncpy(infos[0].machine_uid_hex, "0102030405060708090a0b0c0d0e0f10", sizeof(infos[0].machine_uid_hex) - 1);
+    /* infos[0].label/peer_ip laissés vides par le memset. */
+    infos[0].mode = 0;
+    infos[0].connected = 0;
+    infos[0].nb_active_sessions = 0;
+    infos[0].nb_connections_total = 2;
+    infos[0].first_seen = 1700000000;
+    infos[0].last_seen = 1700000100;
+    infos[0].total_pruner_checked = 0;
+    infos[0].total_pruner_removed = 0;
+    infos[0].best_max_result = 0;
+    infos[0].cumulative_uptime_seconds = 3600;
+
+    strncpy(infos[1].machine_uid_hex, "aabbccddeeff00112233445566778899", sizeof(infos[1].machine_uid_hex) - 1);
+    strncpy(infos[1].label, "jetson-1", sizeof(infos[1].label) - 1);
+    strncpy(infos[1].peer_ip, "203.0.113.10", sizeof(infos[1].peer_ip) - 1);
+    infos[1].mode = 1;
+    infos[1].connected = 1;
+    infos[1].nb_active_sessions = 1;
+    infos[1].nb_connections_total = 5;
+    infos[1].first_seen = 1700000000;
+    infos[1].last_seen = 1700000200;
+    infos[1].total_pruner_checked = 900;
+    infos[1].total_pruner_removed = 40;
+    infos[1].best_max_result = 210;
+    infos[1].cumulative_uptime_seconds = 7200;
+
+    char buf[768];
+    int n = http_json_format_known_clients(buf, sizeof(buf), infos, 2);
+
+    ASSERT(n > 0);
+    ASSERT_STR_EQ(
+        "{\"known_clients\":["
+        "{\"machine_uid\":\"0102030405060708090a0b0c0d0e0f10\",\"label\":\"\",\"ip\":\"\",\"mode\":\"search\","
+        "\"connected\":false,\"active_sessions\":0,\"connections_total\":2,"
+        "\"first_seen\":1700000000,\"last_seen\":1700000100,"
+        "\"total_pruner_checked\":0,\"total_pruner_removed\":0,"
+        "\"best_max_result\":0,\"cumulative_uptime_seconds\":3600},"
+        "{\"machine_uid\":\"aabbccddeeff00112233445566778899\",\"label\":\"jetson-1\",\"ip\":\"203.0.113.10\",\"mode\":\"pruner\","
+        "\"connected\":true,\"active_sessions\":1,\"connections_total\":5,"
+        "\"first_seen\":1700000000,\"last_seen\":1700000200,"
+        "\"total_pruner_checked\":900,\"total_pruner_removed\":40,"
+        "\"best_max_result\":210,\"cumulative_uptime_seconds\":7200}"
+        "]}",
+        buf);
+    PASS();
+}
+
+TEST http_json_format_known_clients_empty_is_empty_array(void)
+{
+    char buf[128];
+    int n = http_json_format_known_clients(buf, sizeof(buf), NULL, 0);
+
+    ASSERT(n > 0);
+    ASSERT_STR_EQ("{\"known_clients\":[]}", buf);
+    PASS();
+}
+
+TEST http_json_format_known_clients_buffer_too_small_fails(void)
+{
+    http_known_client_info_t info;
+    memset(&info, 0, sizeof(info));
+    strncpy(info.machine_uid_hex, "0102030405060708090a0b0c0d0e0f10", sizeof(info.machine_uid_hex) - 1);
+
+    char buf[8];
+    int n = http_json_format_known_clients(buf, sizeof(buf), &info, 1);
     ASSERT_EQ_FMT(-1, n, "%d");
     PASS();
 }
@@ -742,6 +820,10 @@ SUITE(http_codec_suite)
     RUN_TEST(http_json_format_clients_empty_is_empty_array);
     RUN_TEST(http_json_format_clients_unknown_mode_label);
     RUN_TEST(http_json_format_clients_buffer_too_small_fails);
+
+    RUN_TEST(http_json_format_known_clients_golden);
+    RUN_TEST(http_json_format_known_clients_empty_is_empty_array);
+    RUN_TEST(http_json_format_known_clients_buffer_too_small_fails);
 
     RUN_TEST(http_request_parse_captures_authorization_header);
     RUN_TEST(http_request_parse_authorization_header_case_insensitive);
