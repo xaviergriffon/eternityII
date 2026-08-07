@@ -596,8 +596,12 @@ void resolve_client_label(const char *cli_label, const char *hostname_or_null,
 	} else if (hostname_or_null != NULL && hostname_or_null[0] != '\0') {
 		source = hostname_or_null;
 	}
-	strncpy(out, source, out_size - 1);
-	out[out_size - 1] = '\0';
+	size_t len = strlen(source);
+	if (len >= out_size) {
+		len = out_size - 1;
+	}
+	memcpy(out, source, len);
+	out[len] = '\0';
 }
 
 void init_client_identity(void)
