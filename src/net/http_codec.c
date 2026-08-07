@@ -195,6 +195,9 @@ http_route_t http_route_resolve(const char *method, const char *path)
     if (strcmp(path, "/api/v1/best-board") == 0) {
         return (strcmp(method, "GET") == 0) ? HTTP_ROUTE_BEST_BOARD : HTTP_ROUTE_BAD_METHOD;
     }
+    if (strcmp(path, "/api/v1/known-clients") == 0) {
+        return (strcmp(method, "GET") == 0) ? HTTP_ROUTE_KNOWN_CLIENTS : HTTP_ROUTE_BAD_METHOD;
+    }
     return HTTP_ROUTE_NOT_FOUND;
 }
 
@@ -534,6 +537,50 @@ int http_json_format_clients(char *buf, size_t size, const http_client_info_t *i
         offset += (size_t)written;
 
         written = snprintf(buf + offset, size - offset, "}");
+        if (written < 0 || (size_t)written >= size - offset) {
+            return -1;
+        }
+        offset += (size_t)written;
+    }
+
+    written = snprintf(buf + offset, size - offset, "]}");
+    if (written < 0 || (size_t)written >= size - offset) {
+        return -1;
+    }
+    offset += (size_t)written;
+
+    return (int)offset;
+}
+
+int http_json_format_known_clients(char *buf, size_t size, const http_known_client_info_t *infos, int count)
+{
+    if (buf == NULL || size == 0 || (infos == NULL && count > 0) || count < 0) {
+        return -1;
+    }
+
+    size_t offset = 0;
+    int written = snprintf(buf + offset, size - offset, "{\"known_clients\":[");
+    if (written < 0 || (size_t)written >= size - offset) {
+        return -1;
+    }
+    offset += (size_t)written;
+
+    for (int i = 0; i < count; i++) {
+        char label_json[2 * HTTP_CLIENT_LABEL_MAX + 3];
+        json_escape_label(infos[i].label, label_json, sizeof(label_json));
+
+        written = snprintf(buf + offset, size - offset,
+            "%s{\"machine_uid\":\"%s\",\"label\":%s,\"ip\":\"%s\",\"mode\":\"%s\","
+            "\"connected\":%s,\"active_sessions\":%d,\"connections_total\":%d,"
+            "\"first_seen\":%lld,\"last_seen\":%lld,"
+            "\"total_pruner_checked\":%llu,\"total_pruner_removed\":%llu,"
+            "\"best_max_result\":%llu,\"cumulative_uptime_seconds\":%llu}",
+            (i == 0) ? "" : ",", infos[i].machine_uid_hex, label_json, infos[i].peer_ip,
+            client_mode_label(infos[i].mode), infos[i].connected ? "true" : "false",
+            infos[i].nb_active_sessions, infos[i].nb_connections_total,
+            infos[i].first_seen, infos[i].last_seen,
+            infos[i].total_pruner_checked, infos[i].total_pruner_removed,
+            infos[i].best_max_result, infos[i].cumulative_uptime_seconds);
         if (written < 0 || (size_t)written >= size - offset) {
             return -1;
         }

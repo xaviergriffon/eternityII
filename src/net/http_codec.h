@@ -104,6 +104,7 @@ typedef enum {
     HTTP_ROUTE_CLIENTS,       ///< GET /api/v1/clients
     HTTP_ROUTE_CLIENTS_STATS, ///< POST /api/v1/clients/stats
     HTTP_ROUTE_BEST_BOARD,    ///< GET /api/v1/best-board
+    HTTP_ROUTE_KNOWN_CLIENTS, ///< GET /api/v1/known-clients
     HTTP_ROUTE_NOT_FOUND,     ///< Chemin inconnu (404)
     HTTP_ROUTE_BAD_METHOD     ///< Chemin connu, méthode non supportée (405)
 } http_route_t;
@@ -352,6 +353,59 @@ typedef struct {
  * @return       Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
  */
 int http_json_format_clients(char *buf, size_t size, const http_client_info_t *infos, int count);
+
+/**
+ * @brief Vue en lecture d'une machine connue du registre de cumul
+ *        (`app/known_clients_registry.h`, PR4 de
+ *        docs/conception/identification_clients.md), pour
+ *        `GET /api/v1/known-clients`. Remplie par `http_known_clients_collect`
+ *        (src/net/http_server.h) à partir de `known_clients_registry_snapshot` —
+ *        même schéma de séparation que `http_client_info_t` ci-dessus : ce
+ *        fichier reste sans dépendance vers `app/`.
+ */
+typedef struct {
+    /// Nonce machine persistant, encodé en hexadécimal (clé de cumul).
+    char machine_uid_hex[HTTP_CLIENT_UID_HEX_MAX];
+    /// Dernier libellé déclaré vu pour cette machine.
+    char label[HTTP_CLIENT_LABEL_MAX];
+    /// Dernière adresse IP du pair observée pour cette machine.
+    char peer_ip[HTTP_CLIENT_IP_MAX];
+    /// Dernier mode observé (cf. `CLIENT_MODE_*`, client_identity.h).
+    uint8_t mode;
+    /// 1 si au moins une session de cette machine est actuellement active, 0
+    /// sinon (« déconnecté » : l'entrée reste visible).
+    int connected;
+    /// Nombre de sessions actuellement actives pour cette machine.
+    int nb_active_sessions;
+    /// Nombre total de connexions observées depuis le démarrage du serveur.
+    int nb_connections_total;
+    /// Horodatage Unix (secondes) de la première connexion observée.
+    long long first_seen;
+    /// Horodatage Unix (secondes) de la dernière activité observée.
+    long long last_seen;
+    /// Cumul des possibilités vérifiées par le pruner, toutes sessions
+    /// passées et en cours de cette machine confondues.
+    unsigned long long total_pruner_checked;
+    /// Cumul des possibilités éliminées par le pruner.
+    unsigned long long total_pruner_removed;
+    /// Meilleur résultat (nombre de cases placées) jamais rapporté par cette
+    /// machine, toutes sessions confondues (pic, pas une somme).
+    unsigned long long best_max_result;
+    /// Somme des durées de connexion des sessions déjà terminées (secondes).
+    unsigned long long cumulative_uptime_seconds;
+} http_known_client_info_t;
+
+/**
+ * @brief Sérialise un tableau de machines connues en JSON dans `buf` (cf.
+ *        schéma documenté dans AGENTS.md).
+ *
+ * @param buf    Tampon destination.
+ * @param size   Taille de `buf`.
+ * @param infos  Tableau de machines (peut être vide si `count == 0`).
+ * @param count  Nombre d'entrées valides dans `infos`.
+ * @return       Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
+ */
+int http_json_format_known_clients(char *buf, size_t size, const http_known_client_info_t *infos, int count);
 
 /**
  * @brief Vue en lecture du meilleur plateau connu du serveur (agrégat

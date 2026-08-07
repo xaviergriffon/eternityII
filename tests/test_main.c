@@ -34,6 +34,7 @@ SUITE_EXTERN(static_variables_suite);
 SUITE_EXTERN(etii_client_suite);
 SUITE_EXTERN(etii_server_suite);
 SUITE_EXTERN(control_registry_suite);
+SUITE_EXTERN(known_clients_registry_suite);
 SUITE_EXTERN(app_runtime_suite);
 SUITE_EXTERN(etii_control_suite);
 #if ETERN_PARTS == 16
@@ -70,6 +71,7 @@ int main(int argc, char **argv)
     RUN_SUITE(etii_client_suite);
     RUN_SUITE(etii_server_suite);
     RUN_SUITE(control_registry_suite);
+    RUN_SUITE(known_clients_registry_suite);
     RUN_SUITE(app_runtime_suite);
     RUN_SUITE(etii_control_suite);
 #if ETERN_PARTS == 16

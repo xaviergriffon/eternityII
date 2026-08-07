@@ -13,13 +13,14 @@
 #include "ui/command_match.h"
 #include "app/static_variables.h"
 #include "app/control_registry.h"
+#include "app/known_clients_registry.h"
 #include "net/control_protocol.h"
 #include "core/best_board.h"
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
-#define NB_COMMANDS 44
+#define NB_COMMANDS 45
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -115,6 +116,7 @@ int resume_interpreter(void);
 int clients_interpreter(void);
 int clients_stats_interpreter(void);
 int clients_cmd_interpreter(void);
+int known_clients_interpreter(void);
 
 /**
  * @brief Commandes prises en charge (entrées canoniques puis alias).
@@ -234,6 +236,13 @@ static command_description commands[NB_COMMANDS] = {
      "active (client déconnecté ou remplacé) est refusé, jamais redirigé vers un\n"
      "autre client ; un label partagé par plusieurs sessions actives est refusé\n"
      "comme ambigu.", NULL},
+    {"knownClients", known_clients_interpreter, 0, CMD_CAT_CLIENTS, 1, NULL,
+     "liste les machines connues (cumul, statut connecté/déconnecté)",
+     "Distinct de « clients » : cette liste survit à la déconnexion (une machine reste\n"
+     "visible, marquée déconnectée) et cumule, par machine_uid, le nombre de connexions,\n"
+     "le débit de prunage (checked/removed) et le meilleur résultat jamais rapportés --\n"
+     "toutes exécutions de processus confondues. Cumul en mémoire uniquement : remis à\n"
+     "zéro à chaque redémarrage du serveur (PR5 ajoutera la persistance).", NULL},
 
     /* Alias : résolus vers l'entrée canonique par find_command. Les noms
        historiques abrégés (sorta, rmnonext, …) restent acceptés ici ; les
@@ -995,6 +1004,39 @@ int clients_cmd_interpreter(void) {
 
     int n = control_registry_broadcast_command(CTRL_COMMAND, rest);
     log_info("clientsCommand : \"%s\" diffusée à %d session(s)\n", rest, n);
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `knownClients` : liste les machines connues du
+ *        registre de cumul (`known_clients_registry.h`, PR4).
+ *
+ * Contrairement à `clients` (sessions ACTUELLEMENT actives), cette liste
+ * inclut aussi les machines déconnectées depuis le démarrage du serveur,
+ * jusqu'à ce que la borne du registre (MAX_KNOWN_CLIENTS) impose leur
+ * éviction. Commande SERVEUR pure (send_to_childs = 0).
+ */
+int known_clients_interpreter(void) {
+    known_client_info_t infos[MAX_KNOWN_CLIENTS];
+    int n = known_clients_registry_snapshot(infos, MAX_KNOWN_CLIENTS);
+    if (n == 0) {
+        log_info("knownClients : aucune machine connue\n");
+        return 0;
+    }
+    log_info("knownClients : %d machine(s) connue(s)\n", n);
+    for (int i = 0; i < n; i++) {
+        log_info("  %s  %s (%s)  %s  sessions actives=%d  connexions=%d  "
+                  "pruner checked=%llu removed=%llu  record=%llu  derniere activite=%lld\n",
+                  infos[i].machine_uid_hex,
+                  infos[i].label[0] != '\0' ? infos[i].label : "?",
+                  infos[i].peer_ip[0] != '\0' ? infos[i].peer_ip : "?",
+                  infos[i].connected ? "connecte" : "deconnecte",
+                  infos[i].nb_active_sessions, infos[i].nb_connections_total,
+                  (unsigned long long)infos[i].total_pruner_checked,
+                  (unsigned long long)infos[i].total_pruner_removed,
+                  (unsigned long long)infos[i].best_max_result,
+                  (long long)infos[i].last_seen);
+    }
     return 0;
 }
 

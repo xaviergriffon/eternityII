@@ -154,6 +154,20 @@ void control_registry_touch(int index);
 int control_registry_count(void);
 
 /**
+ * @brief Recopie l'identité déclarée (`client_identity_t`) annoncée au hello
+ *        de la session `index` — utilisé par `known_clients_registry.h`
+ *        (PR4 de docs/conception/identification_clients.md) pour retrouver
+ *        `machine_uid`/`client_uid` à des points d'appel (réception de
+ *        `CTRL_STATS`, déconnexion) qui ne détiennent que l'indice de session,
+ *        pas le hello complet.
+ *
+ * @param index Indice de la session.
+ * @param out   Structure destination (non modifiée si la fonction échoue).
+ * @return      0 si `index` désigne une session active (`out` rempli), -1 sinon.
+ */
+int control_registry_get_identity(int index, client_identity_t *out);
+
+/**
  * @brief Met en cache les dernières statistiques reçues (`CTRL_STATS`) pour la
  *        session `index`, pour qu'un lecteur synchrone (ex. `GET /api/v1/clients`
  *        de l'API HTTP admin) puisse les relire sans attendre un aller-retour

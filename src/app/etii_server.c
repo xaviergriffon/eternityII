@@ -16,6 +16,7 @@
 #include "net/etii_protocol.h"
 #include "net/control_protocol.h"
 #include "app/control_registry.h"
+#include "app/known_clients_registry.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
 #include "core/best_board.h"
@@ -665,6 +666,11 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 log_error("control hello : registre de sessions de contrôle plein, session refusée\n");
                 return 0;
             }
+            // Registre de clients CONNUS (PR4, cumul par machine_uid) : distinct de
+            // control_registry ci-dessus, jamais vidé à la déconnexion — cf.
+            // known_clients_registry.h. Purement observationnel, ne peut jamais faire
+            // échouer cette session.
+            known_clients_registry_on_connect(&hello.identity, client->peer_ip);
             log_event("session de contrôle enregistrée (pid=%d, forks=%d, mode=%u, label=\"%s\") -> slot %d",
                       hello.pid, hello.nb_forks, (unsigned)hello.identity.mode, hello.identity.label, idx);
             if (out_control_session_index != NULL) {
@@ -789,6 +795,14 @@ static int control_session_poll_stats(client_t *client, int session_index)
         return 0;
     }
     control_registry_record_stats(session_index, &stats);
+    // Registre de clients CONNUS (PR4) : cumule cette lecture dans le total de
+    // la machine plutôt que de simplement remplacer l'instantané (rôle de
+    // control_registry ci-dessus). Résolution de l'identité par indice de
+    // session, cette fonction ne détenant que session_index.
+    client_identity_t known_identity;
+    if (control_registry_get_identity(session_index, &known_identity) == 0) {
+        known_clients_registry_on_stats(known_identity.machine_uid, known_identity.client_uid, &stats);
+    }
     // Le protocole de travail (INST_ADD/…) ne fait progresser max_result
     // que quand ce client pousse effectivement des possibilités par cette
     // voie ; sans cette resynchronisation, un client qui n'annonce son
@@ -944,6 +958,12 @@ void run_control_session(client_t *client, int session_index)
         }
     }
 
+    // Registre de clients CONNUS (PR4) : résoudre l'identité AVANT
+    // control_registry_unregister, qui efface le hello de ce slot.
+    client_identity_t known_identity;
+    if (control_registry_get_identity(session_index, &known_identity) == 0) {
+        known_clients_registry_on_disconnect(known_identity.machine_uid, known_identity.client_uid);
+    }
     control_registry_unregister(session_index);
     log_event("session de contrôle déconnectée (slot %d)", session_index);
 

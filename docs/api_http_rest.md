@@ -15,6 +15,7 @@ Le code correspondant vit dans :
 - [src/ui/command_lines.c](../src/ui/command_lines.c) (`admin_apply_remote_command`, `admin_apply_privileged_command`) — exécution des commandes admin, réentrante ;
 - [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_allowed`, `control_command_privileged`) — listes blanches des commandes ; `control_command_allowed` est **partagée** avec le canal de contrôle binaire, `control_command_privileged` (restore/backup) ne l'est **pas** (accessible uniquement via cette API, jamais via le canal de contrôle) ;
 - [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) (`control_registry_snapshot`, `control_registry_record_stats`, `control_registry_broadcast_get_stats`) — registre des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), source de `GET /api/v1/clients` et `POST /api/v1/clients/stats` ;
+- [src/app/known_clients_registry.h](../src/app/known_clients_registry.h) / [known_clients_registry.c](../src/app/known_clients_registry.c) (`known_clients_registry_snapshot`) — [registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus) (cumul par `machine_uid`, survit à la déconnexion), source de `GET /api/v1/known-clients` ;
 - [src/core/best_board.h](../src/core/best_board.h) / [best_board.c](../src/core/best_board.c) (`g_server_best_board`) — représentation du meilleur plateau connu, source de `GET /api/v1/best-board`.
 
 ## Activation
@@ -449,6 +450,56 @@ l'indice brut) avec les 4 couleurs à `-1`, plutôt que de planter ou de bloquer
 Cette lecture est **synchrone et locale** : comme `GET /api/v1/stats`, elle ne
 déclenche aucun aller-retour réseau vers les clients, elle relit l'agrégat déjà
 maintenu par le serveur.
+
+### GET /api/v1/known-clients
+
+*(v12, PR4 de [docs/conception/identification_clients.md](conception/identification_clients.md))*
+Instantané des machines **connues** — l'équivalent HTTP de la commande console
+`knownClients` (voir [Registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus)).
+Distinct de `GET /api/v1/clients` : cette liste inclut aussi les machines
+déconnectées depuis le démarrage du serveur (jusqu'à éviction par la borne du
+registre) et cumule, par `machine_uid`, plusieurs exécutions successives d'un
+même client.
+
+```json
+{
+  "known_clients": [
+    {
+      "machine_uid": "0102030405060708090a0b0c0d0e0f10",
+      "label": "jetson-1",
+      "ip": "192.168.1.42",
+      "mode": "search",
+      "connected": true,
+      "active_sessions": 1,
+      "connections_total": 3,
+      "first_seen": 1729990000,
+      "last_seen": 1730000000,
+      "total_pruner_checked": 0,
+      "total_pruner_removed": 0,
+      "best_max_result": 210,
+      "cumulative_uptime_seconds": 9000
+    }
+  ]
+}
+```
+
+| Champ | Type | Sens |
+|---|---|---|
+| `known_clients` | tableau | Une entrée par machine connue (`known_clients_registry_snapshot`) — **tableau vide** si aucune machine n'a encore été vue, jamais une erreur |
+| `machine_uid` | chaîne hexadécimale | Nonce machine persistant (`net/client_identity.h`) — clé de cumul de cette entrée, la SEULE identité qui survit à un redémarrage de processus client |
+| `label` / `ip` / `mode` | — | Dernières valeurs déclarées/observées pour cette machine (mêmes conventions que `GET /api/v1/clients` : `label` échappé côté serveur, `ip` non falsifiable) |
+| `connected` | booléen | `true` si au moins une session de cette machine est actuellement active (`active_sessions > 0`) |
+| `active_sessions` | entier ≥ 0 | Nombre de sessions **actuellement** actives pour cette machine — peut dépasser 1 (ex. un client de recherche et un pruner lancés en parallèle sur le même hôte) |
+| `connections_total` | entier | Nombre total de connexions (hellos de contrôle) observées pour cette machine depuis le démarrage du serveur |
+| `first_seen` / `last_seen` | entier | Horodatages Unix (secondes) de la première connexion et de la dernière activité observées |
+| `total_pruner_checked` / `total_pruner_removed` | entier ≥ 0 | Cumul, sur toutes les sessions passées **et** en cours de cette machine, des possibilités vérifiées/éliminées par le pruner. Calculé par **accroissement** observé à chaque `CTRL_STATS` (jamais par simple somme des valeurs instantanées) : un client qui redémarre voit son compteur par-processus repartir de 0, mais ce total continue de croître dessus au lieu d'être écrasé |
+| `best_max_result` | entier | Meilleur résultat (nombre de cases placées) jamais rapporté par cette machine, toutes sessions confondues — un **pic**, jamais remplacé par une valeur plus basse |
+| `cumulative_uptime_seconds` | entier ≥ 0 | Somme des durées de connexion des sessions déjà **terminées** de cette machine — n'inclut pas la durée de la session en cours tant qu'elle n'est pas close |
+
+**Cumul en mémoire uniquement** dans cette version : un redémarrage du serveur
+remet ce registre à zéro (la persistance est prévue en PR5 du document de
+conception). Comme `GET /api/v1/clients`, cette lecture est **synchrone et
+locale**, sans aucun aller-retour réseau vers les clients.
 
 ## Séquences typiques
 

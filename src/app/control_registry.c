@@ -318,6 +318,23 @@ int control_registry_snapshot(control_session_info_t *out, int max)
     return n;
 }
 
+int control_registry_get_identity(int index, client_identity_t *out)
+{
+    pthread_once(&g_init_once, registry_init_once);
+    if (index < 0 || index >= MAX_CONTROL_SESSIONS || out == NULL) {
+        return -1;
+    }
+    control_session_t *s = &g_sessions[index];
+    int result = -1;
+    pthread_mutex_lock(&s->mutex);
+    if (s->in_use) {
+        *out = s->hello.identity;
+        result = 0;
+    }
+    pthread_mutex_unlock(&s->mutex);
+    return result;
+}
+
 void control_registry_record_stats(int index, const control_stats_t *stats)
 {
     pthread_once(&g_init_once, registry_init_once);
