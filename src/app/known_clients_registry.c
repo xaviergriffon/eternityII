@@ -61,6 +61,26 @@ static void known_clients_init_once(void)
     memset(g_known_clients, 0, sizeof(g_known_clients));
 }
 
+/* Copie bornée, toujours NUL-terminée. Équivalent de
+ * `strncpy(out, source, out_size - 1); out[out_size - 1] = '\0';`, réécrit en
+ * strlen()+memcpy() explicite : gcc (-Wstringop-truncation, CI Linux) peut
+ * repérer, au sein de ce fichier, que `label`/`peer_ip` sont relus plus loin
+ * comme chaînes NUL-terminées et signaler l'idiome strncpy+troncature comme
+ * potentiellement non terminé — même correctif que `resolve_client_label`
+ * (src/app/app_runtime.c). */
+static void copy_bounded_string(char *out, size_t out_size, const char *source)
+{
+    if (source == NULL) {
+        source = "";
+    }
+    size_t len = strlen(source);
+    if (len >= out_size) {
+        len = out_size - 1;
+    }
+    memcpy(out, source, len);
+    out[len] = '\0';
+}
+
 /* Cherche l'entrée dont machine_uid correspond. Retourne -1 si absente.
  * Appelant : doit détenir g_known_clients_mutex. */
 static int find_machine_index(const uint8_t *machine_uid)
@@ -143,14 +163,8 @@ void known_clients_registry_on_connect(const client_identity_t *identity, const 
     }
 
     known_client_t *kc = &g_known_clients[idx];
-    strncpy(kc->label, identity->label, CLIENT_LABEL_MAX - 1);
-    kc->label[CLIENT_LABEL_MAX - 1] = '\0';
-    if (peer_ip != NULL) {
-        strncpy(kc->peer_ip, peer_ip, PEER_IP_MAX_LEN - 1);
-        kc->peer_ip[PEER_IP_MAX_LEN - 1] = '\0';
-    } else {
-        kc->peer_ip[0] = '\0';
-    }
+    copy_bounded_string(kc->label, sizeof(kc->label), identity->label);
+    copy_bounded_string(kc->peer_ip, sizeof(kc->peer_ip), peer_ip);
     kc->mode = identity->mode;
     kc->last_seen = now;
     kc->nb_connections_total++;
@@ -268,10 +282,8 @@ int known_clients_registry_snapshot(known_client_info_t *out, int max)
                                         out[n].machine_uid_hex, sizeof(out[n].machine_uid_hex)) < 0) {
             out[n].machine_uid_hex[0] = '\0';
         }
-        strncpy(out[n].label, kc->label, CLIENT_LABEL_MAX - 1);
-        out[n].label[CLIENT_LABEL_MAX - 1] = '\0';
-        strncpy(out[n].peer_ip, kc->peer_ip, PEER_IP_MAX_LEN - 1);
-        out[n].peer_ip[PEER_IP_MAX_LEN - 1] = '\0';
+        copy_bounded_string(out[n].label, sizeof(out[n].label), kc->label);
+        copy_bounded_string(out[n].peer_ip, sizeof(out[n].peer_ip), kc->peer_ip);
         out[n].mode = kc->mode;
         out[n].connected = (kc->nb_active_sessions > 0) ? 1 : 0;
         out[n].nb_active_sessions = kc->nb_active_sessions;
