@@ -1690,7 +1690,14 @@ typedef struct {
 } handshake_srv_arg_t;
 
 /* Thread mini-serveur : accepte une connexion, lit INST_CHECK_VERSION + version,
- * renvoie response.  Simule exactement ce que etii_server fait au handshake. */
+ * renvoie response.  Simule exactement ce que etii_server fait au handshake.
+ *
+ * Sur HANDSHAKE_OK, check_and_connect_to_server() enchaîne immédiatement avec
+ * INST_CLIENT_HELLO (v12, un byte d'instruction + une longueur int32 + le
+ * payload de cette longueur) : il faut le drainer ici avant de fermer, sinon
+ * le send() du client se heurte à une connexion déjà close côté serveur
+ * (ECONNRESET/EPIPE) et check_and_connect_to_server() rapporte un échec alors
+ * que le handshake lui-même a réussi. */
 static void *mini_srv_handshake(void *arg)
 {
     handshake_srv_arg_t *a = arg;
@@ -1703,6 +1710,18 @@ static void *mini_srv_handshake(void *arg)
     int ver;
     recv_exact_sv(cli_fd, &ver, sizeof(ver));      /* numéro de version */
     send(cli_fd, &a->response, 1, 0);
+    if (a->response == INST_SUPPORTED_VERSION) {
+        int8_t hello_inst;
+        recv_exact_sv(cli_fd, &hello_inst, sizeof(hello_inst));
+        int32_t hello_len = 0;
+        recv_exact_sv(cli_fd, &hello_len, sizeof(hello_len));
+        if (hello_len > 0) {
+            char discard[256];
+            if (hello_len <= (int32_t)sizeof(discard)) {
+                recv_exact_sv(cli_fd, discard, (size_t)hello_len);
+            }
+        }
+    }
     close(cli_fd);
     return NULL;
 }
