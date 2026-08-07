@@ -18,6 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <stdio.h>
 
 /* Compteur global, jamais remis à zéro : garantit un machine_uid/client_uid
  * distinct à chaque appel, sur toute la durée du binaire de test. */
@@ -369,6 +370,194 @@ TEST count_matches_snapshot_length(void)
     PASS();
 }
 
+/* ---------- persistance (save/load, PR5) -------------------------------------
+ *
+ * Comme le reste de ce fichier, chaque test utilise un machine_uid UNIQUE
+ * (next_seed()) : le registre étant global et jamais vidé, un load() sur un
+ * machine_uid déjà connu prend la branche FUSION (voir known_clients_registry_load),
+ * jamais la branche "nouvelle entrée" -- les deux sont donc testées séparément
+ * ci-dessous, la seconde en construisant le fichier .back à la main pour un
+ * machine_uid qui n'est jamais passé par on_connect() dans ce process.
+ */
+
+/* Écrit un fichier .back "à la main" (hors known_clients_registry_save), pour
+ * construire des fixtures que le registre en mémoire n'a jamais produites
+ * (machine jamais vue, en-tête corrompu, troncature). Renvoie 1 si l'écriture
+ * a réussi, 0 sinon -- pas d'ASSERT ici : cette fonction ne renvoie pas
+ * `enum greatest_test_res`, l'appelant (un TEST) fait l'assertion. */
+static int write_raw_known_clients_file(const char *path, const known_clients_file_header_t *header,
+                                         const known_client_record_t *records, uint32_t nb_written)
+{
+    FILE *f = fopen(path, "wb");
+    if (f == NULL) {
+        return 0;
+    }
+    int ok = (fwrite(header, sizeof(*header), 1, f) == 1);
+    if (ok && nb_written > 0) {
+        ok = (fwrite(records, sizeof(*records), nb_written, f) == nb_written);
+    }
+    fclose(f);
+    return ok;
+}
+
+TEST save_round_trip_merges_into_already_present_machine(void)
+{
+    client_identity_t id = make_identity(next_seed(), next_seed(), "persist-merge", CLIENT_MODE_PRUNER);
+    known_clients_registry_on_connect(&id, "203.0.113.30");
+    control_stats_t s = make_stats(100, 10, 50);
+    known_clients_registry_on_stats(id.machine_uid, id.client_uid, &s);
+    usleep(1100 * 1000);
+    known_clients_registry_on_disconnect(id.machine_uid, id.client_uid);
+
+    known_client_info_t buf[MAX_KNOWN_CLIENTS];
+    const known_client_info_t *before = snapshot_find(&id, buf, MAX_KNOWN_CLIENTS);
+    ASSERT(before != NULL);
+    uint64_t checked_before = before->total_pruner_checked;
+    uint64_t removed_before = before->total_pruner_removed;
+    int connections_before = before->nb_connections_total;
+    uint64_t uptime_before = before->cumulative_uptime_seconds;
+
+    char path[] = "/tmp/etii_known_clients_merge_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    ASSERT_EQ_FMT(0, known_clients_registry_save(path), "%d");
+    ASSERT_EQ_FMT(0, known_clients_registry_load(path), "%d");
+
+    const known_client_info_t *after = snapshot_find(&id, buf, MAX_KNOWN_CLIENTS);
+    ASSERT(after != NULL);
+    /* Fusion additive : le fichier venait d'un snapshot de CE même état, donc
+     * chaque compteur cumulé double. Le statut connecté (live) n'est pas
+     * affecté par le load : il reste celui déjà en mémoire. */
+    ASSERT_EQ((int)(2 * checked_before), (int)after->total_pruner_checked);
+    ASSERT_EQ((int)(2 * removed_before), (int)after->total_pruner_removed);
+    ASSERT_EQ(2 * connections_before, after->nb_connections_total);
+    ASSERT(after->cumulative_uptime_seconds >= 2 * uptime_before);
+    ASSERT_EQ(0, after->connected);
+
+    unlink(path);
+    PASS();
+}
+
+TEST load_creates_disconnected_entry_for_machine_never_seen_in_process(void)
+{
+    uint32_t machine_seed = next_seed();
+    known_client_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    seed_bytes(rec.machine_uid, MACHINE_UID_BYTES, machine_seed);
+    strncpy(rec.label, "from-disk", CLIENT_LABEL_MAX - 1);
+    strncpy(rec.peer_ip, "203.0.113.40", PEER_IP_MAX_LEN - 1);
+    rec.mode = CLIENT_MODE_GPU_PRUNER;
+    rec.nb_connections_total = 7;
+    rec.first_seen = 1000;
+    rec.last_seen = 2000;
+    rec.total_pruner_checked = 4242;
+    rec.total_pruner_removed = 99;
+    rec.best_max_result = 180;
+    rec.cumulative_uptime_seconds = 3600;
+
+    known_clients_file_header_t header = { KNOWN_CLIENTS_FILE_MAGIC, 1 };
+    char path[] = "/tmp/etii_known_clients_new_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    ASSERT_EQ(1, write_raw_known_clients_file(path, &header, &rec, 1));
+
+    int before = known_clients_registry_count();
+    ASSERT_EQ_FMT(0, known_clients_registry_load(path), "%d");
+    ASSERT_EQ(before + 1, known_clients_registry_count());
+
+    client_identity_t probe = make_identity(machine_seed, next_seed(), NULL, CLIENT_MODE_SEARCH);
+    known_client_info_t buf[MAX_KNOWN_CLIENTS];
+    const known_client_info_t *e = snapshot_find(&probe, buf, MAX_KNOWN_CLIENTS);
+    ASSERT(e != NULL);
+    ASSERT_STR_EQ("from-disk", e->label);
+    ASSERT_STR_EQ("203.0.113.40", e->peer_ip);
+    ASSERT_EQ((int)CLIENT_MODE_GPU_PRUNER, (int)e->mode);
+    ASSERT_EQ(0, e->connected);
+    ASSERT_EQ(0, e->nb_active_sessions);
+    ASSERT_EQ(7, e->nb_connections_total);
+    ASSERT_EQ(4242, (int)e->total_pruner_checked);
+    ASSERT_EQ(99, (int)e->total_pruner_removed);
+    ASSERT_EQ(180, (int)e->best_max_result);
+    ASSERT_EQ(3600, (int)e->cumulative_uptime_seconds);
+
+    unlink(path);
+    PASS();
+}
+
+TEST load_missing_file_returns_error_and_leaves_registry_unchanged(void)
+{
+    int before = known_clients_registry_count();
+    ASSERT_EQ_FMT(-1, known_clients_registry_load("/tmp/etii_no_such_known_clients_zzz_999"), "%d");
+    ASSERT_EQ(before, known_clients_registry_count());
+    PASS();
+}
+
+TEST load_bad_magic_returns_error_and_leaves_registry_unchanged(void)
+{
+    known_clients_file_header_t bad_header = { 0xdeadbeefu, 0 };
+    char path[] = "/tmp/etii_known_clients_badmagic_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    ASSERT_EQ(1, write_raw_known_clients_file(path, &bad_header, NULL, 0));
+
+    int before = known_clients_registry_count();
+    ASSERT_EQ_FMT(-1, known_clients_registry_load(path), "%d");
+    ASSERT_EQ(before, known_clients_registry_count());
+
+    unlink(path);
+    PASS();
+}
+
+/* Un en-tête annonçant 2 enregistrements mais dont le fichier ne contient que
+ * le premier (troncature) : le premier doit être appliqué, et l'appel doit
+ * réussir (retour 0) sans planter sur le second, manquant. */
+TEST load_truncated_records_applies_partial_and_returns_ok(void)
+{
+    uint32_t machine_seed = next_seed();
+    known_client_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    seed_bytes(rec.machine_uid, MACHINE_UID_BYTES, machine_seed);
+    strncpy(rec.label, "truncated", CLIENT_LABEL_MAX - 1);
+    rec.mode = CLIENT_MODE_SEARCH;
+    rec.nb_connections_total = 1;
+    rec.total_pruner_checked = 5;
+
+    known_clients_file_header_t header = { KNOWN_CLIENTS_FILE_MAGIC, 2 }; /* annonce 2, fournit 1 */
+    char path[] = "/tmp/etii_known_clients_trunc_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    ASSERT_EQ(1, write_raw_known_clients_file(path, &header, &rec, 1));
+
+    ASSERT_EQ_FMT(0, known_clients_registry_load(path), "%d");
+
+    client_identity_t probe = make_identity(machine_seed, next_seed(), NULL, CLIENT_MODE_SEARCH);
+    known_client_info_t buf[MAX_KNOWN_CLIENTS];
+    const known_client_info_t *e = snapshot_find(&probe, buf, MAX_KNOWN_CLIENTS);
+    ASSERT(e != NULL);
+    ASSERT_STR_EQ("truncated", e->label);
+    ASSERT_EQ(5, (int)e->total_pruner_checked);
+
+    unlink(path);
+    PASS();
+}
+
+TEST save_null_filename_returns_error(void)
+{
+    ASSERT_EQ_FMT(-1, known_clients_registry_save(NULL), "%d");
+    PASS();
+}
+
+TEST load_null_filename_returns_error(void)
+{
+    ASSERT_EQ_FMT(-1, known_clients_registry_load(NULL), "%d");
+    PASS();
+}
+
 /* ---------- éviction (registre plein) ---------------------------------------
  *
  * Placé en DERNIER : ce test amène délibérément le registre à sa capacité
@@ -437,6 +626,14 @@ SUITE(known_clients_registry_suite)
     RUN_TEST(snapshot_null_or_zero_max_returns_zero);
     RUN_TEST(snapshot_respects_max_capacity);
     RUN_TEST(count_matches_snapshot_length);
+
+    RUN_TEST(save_round_trip_merges_into_already_present_machine);
+    RUN_TEST(load_creates_disconnected_entry_for_machine_never_seen_in_process);
+    RUN_TEST(load_missing_file_returns_error_and_leaves_registry_unchanged);
+    RUN_TEST(load_bad_magic_returns_error_and_leaves_registry_unchanged);
+    RUN_TEST(load_truncated_records_applies_partial_and_returns_ok);
+    RUN_TEST(save_null_filename_returns_error);
+    RUN_TEST(load_null_filename_returns_error);
 
     RUN_TEST(registry_full_evicts_oldest_disconnected_entry_never_a_connected_one);
 }

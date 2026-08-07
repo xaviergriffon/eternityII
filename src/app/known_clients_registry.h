@@ -27,10 +27,12 @@
  * le petit tableau `sessions[]` d'une entrée, borné par
  * `KNOWN_CLIENT_MAX_SESSIONS`.
  *
- * Cumul en mémoire uniquement dans cette PR (PR5 ajoutera la persistance sur
- * un fichier `.back` dédié, tolérante en lecture) : au redémarrage du
- * serveur, ce registre repart de zéro. Ce n'est PAS un manque de fiabilité —
- * c'est le périmètre explicitement découpé par le document de conception.
+ * Persisté depuis PR5 sur un fichier `.back` dédié (`known_clients_registry_save`/
+ * `_load` ci-dessous), tolérant en lecture : un fichier absent, illisible ou
+ * d'un format inconnu fait simplement repartir le cumul de zéro, jamais
+ * échouer le démarrage du serveur. Branché sur les mêmes points d'appel que
+ * le reste du stock (autobackup, `--stop-on-solution`, commandes console
+ * `backup`/`restore` — voir `src/app/etii_server.c` et `src/ui/command_lines.c`).
  */
 #ifndef eternityII_known_clients_registry_h
 #define eternityII_known_clients_registry_h
@@ -146,6 +148,93 @@ void known_clients_registry_on_stats(const uint8_t *machine_uid, const uint8_t *
  * @param client_uid  Nonce de session (16 octets).
  */
 void known_clients_registry_on_disconnect(const uint8_t *machine_uid, const uint8_t *client_uid);
+
+/**
+ * @brief Marqueur de format du fichier `.back` de ce registre (PR5). Vérifié
+ *        en tête de fichier par `known_clients_registry_load` ; un magic
+ *        différent (fichier d'une autre nature, ou corrompu) fait échouer le
+ *        chargement — jamais un octet interprété au hasard. Pas de champ de
+ *        version séparé : ce module suit la même convention que les autres
+ *        fichiers `.back` du projet (round-trip sur le même build, jamais de
+ *        garantie de compatibilité inter-versions du code).
+ */
+#define KNOWN_CLIENTS_FILE_MAGIC 0x314c434bu /* "KCL1", little-endian */
+
+/**
+ * @brief En-tête du fichier `.back` de ce registre : magic puis nombre
+ *        d'enregistrements `known_client_record_t` qui suivent.
+ */
+typedef struct {
+    uint32_t magic;
+    uint32_t count;
+} known_clients_file_header_t;
+
+/**
+ * @brief Un enregistrement persisté : uniquement les champs CUMULÉS d'une
+ *        machine connue (jamais l'état de session vivante — `nb_active_sessions`,
+ *        `sessions[]` — qui n'a aucun sens après un redémarrage du serveur,
+ *        cf. arbitrage "les baux ne sont pas persistés" du document de
+ *        conception, section 4.7, appliqué ici par analogie).
+ *
+ * Champs de largeur fixe explicite (comme `control_protocol.h`), même si ce
+ * n'est pas un format réseau : `time_t`/`int` ont une largeur dépendante du
+ * build, écrire ces types bruts rendrait un fichier PR5 illisible par un
+ * binaire compilé différemment sur la même machine (ex. build 32 vs 64 bits).
+ */
+typedef struct {
+    uint8_t machine_uid[MACHINE_UID_BYTES];
+    char label[CLIENT_LABEL_MAX];
+    char peer_ip[PEER_IP_MAX_LEN];
+    uint8_t mode;
+    uint32_t nb_connections_total;
+    int64_t first_seen;
+    int64_t last_seen;
+    uint64_t total_pruner_checked;
+    uint64_t total_pruner_removed;
+    uint64_t best_max_result;
+    uint64_t cumulative_uptime_seconds;
+} known_client_record_t;
+
+/**
+ * @brief Sérialise les champs cumulés de toutes les machines connues dans
+ *        `filename` (écriture atomique : fichier temporaire `.tmp` puis
+ *        `rename`, comme `best_board_save`/`backup()`). Les champs de
+ *        session vivante (`nb_active_sessions`, `connected`, `sessions[]`)
+ *        ne sont pas écrits — voir `known_client_record_t`.
+ *
+ * @param filename Chemin du fichier de destination.
+ * @return         0 en cas de succès, -1 sinon (échec I/O).
+ */
+int known_clients_registry_save(const char *filename);
+
+/**
+ * @brief Charge `filename` (écrit par `known_clients_registry_save`) et
+ *        FUSIONNE chaque enregistrement dans le registre en mémoire — jamais
+ *        un remplacement complet, contrairement à `restore()`
+ *        (`src/core/datamanager.c`) sur le stock de possibilités :
+ *         - machine absente du registre (cas normal, redémarrage du
+ *           serveur) : nouvelle entrée créée, marquée déconnectée
+ *           (`nb_active_sessions = 0`), avec les totaux du fichier ;
+ *         - machine déjà présente (une session s'est reconnectée avant que
+ *           `restore` ne soit exécuté) : les compteurs cumulés du fichier
+ *           s'AJOUTENT à ceux déjà en mémoire (jamais un écrasement, qui
+ *           ferait régresser un cumul déjà mesuré depuis le démarrage du
+ *           serveur) ; `label`/`peer_ip`/`mode`/le statut connecté restent
+ *           ceux, plus récents, déjà en mémoire.
+ *
+ * Tolérant en lecture, comme documenté en tête de ce fichier : un fichier
+ * absent ou dont l'en-tête ne correspond pas à `KNOWN_CLIENTS_FILE_MAGIC`
+ * fait échouer l'appel SANS toucher au registre (retour -1) ; un fichier
+ * tronqué en cours d'enregistrements applique ceux lus jusque-là et s'arrête
+ * proprement (retour 0) — jamais de crash sur un fichier corrompu ou d'une
+ * version antérieure du format.
+ *
+ * @param filename Chemin du fichier source.
+ * @return         0 si l'en-tête a pu être lu et validé (y compris en cas de
+ *                 troncature partielle des enregistrements), -1 si le fichier
+ *                 est absent, illisible, ou d'un format inconnu.
+ */
+int known_clients_registry_load(const char *filename);
 
 /**
  * @brief Recopie un instantané des machines connues dans `out` (au plus

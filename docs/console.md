@@ -68,8 +68,8 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 
 | Commande | Description |
 |---|---|
-| `backup` | Sauvegarde les files de possibilités dans `eternityII.back` et `eternityII-in_analyse.back` |
-| `restore [fichier [fichier_analyse]]` | Restaure les files depuis les fichiers `.back` (remplace le stock) |
+| `backup` | Sauvegarde les files de possibilités dans `eternityII.back` et `eternityII-in_analyse.back`, ainsi que le meilleur plateau connu (`eternityII-best_board.back`) et le cumul par machine (`eternityII-known_clients.back`, voir [Registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus)) |
+| `restore [fichier [fichier_analyse]]` | Restaure les files depuis les fichiers `.back` (remplace le stock) ; recharge aussi, sans argument dédié, le meilleur plateau connu et le cumul par machine (absence tolérée) |
 | `import` | Importe des possibilités depuis les fichiers `.back` dans les files courantes |
 | `loadJson` | Importe une possibilité depuis une chaîne JSON (équivalent de `import` pour le format JSON) |
 
@@ -95,7 +95,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `clients` *(serveur)* | Liste les sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) actives (session_no, libellé déclaré, pid, IP du pair, mode, forks, machine_uid/client_uid, dernière activité) |
 | `clientsStats` *(serveur)* | Demande les statistiques agrégées de chaque client connecté via son canal de contrôle (équivalent de `POST /api/v1/clients/stats` sur l'[API HTTP](api_http_rest.md)) |
 | `clientsCommand [--to <session_no\|client_uid\|label>] <ligne>` *(serveur)* | Pousse `<ligne>` à distance, filtrée par la même liste blanche (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch` ; alias : `clientsCmd`). Sans `--to` : diffusion à tous les clients connectés (comportement historique). Avec `--to <cible>` : n'atteint QUE la session désignée par son `session_no` (entier, voir `clients`), son `client_uid` (hexadécimal complet) ou son `label` déclaré — jamais d'espace dans la cible. Une cible inconnue/déconnectée ou un `label` partagé par plusieurs sessions est refusé, jamais redirigé vers un autre client (voir [Adressage des commandes](echanges_client_serveur.md#adressage-des-commandes---to)) |
-| `knownClients` *(serveur)* | Liste les machines **connues** (registre de cumul, distinct de `clients` : survit à la déconnexion) — `machine_uid`, dernier libellé/IP/mode déclarés, statut connecté/déconnecté, nombre de sessions actives et de connexions cumulées, cumul pruner (checked/removed), meilleur résultat jamais rapporté, dernière activité (voir [Registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus)) |
+| `knownClients` *(serveur)* | Liste les machines **connues** (registre de cumul, distinct de `clients` : survit à la déconnexion **et**, depuis PR5, à un redémarrage du serveur via `backup`/`restore`) — `machine_uid`, dernier libellé/IP/mode déclarés, statut connecté/déconnecté, nombre de sessions actives et de connexions cumulées, cumul pruner (checked/removed), meilleur résultat jamais rapporté, dernière activité (voir [Registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus)) |
 
 Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`,
 `removeNoNext`, `limit`, `maxStockByThread`, `prunerBatch`, `min`, `printAnalysed`,

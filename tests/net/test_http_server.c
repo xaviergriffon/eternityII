@@ -639,6 +639,8 @@ TEST http_server_privileged_command_valid_bearer_token_returns_200(void)
     unlink(suffixed);
     snprintf(suffixed, sizeof(suffixed), "./eternityII-best_board.back_%i", getpid());
     unlink(suffixed);
+    snprintf(suffixed, sizeof(suffixed), "./eternityII-known_clients.back_%i", getpid());
+    unlink(suffixed);
 
     HTTP_ADMIN_TOKEN[0] = '\0';
     server = saved_server;

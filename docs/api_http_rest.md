@@ -496,9 +496,12 @@ même client.
 | `best_max_result` | entier | Meilleur résultat (nombre de cases placées) jamais rapporté par cette machine, toutes sessions confondues — un **pic**, jamais remplacé par une valeur plus basse |
 | `cumulative_uptime_seconds` | entier ≥ 0 | Somme des durées de connexion des sessions déjà **terminées** de cette machine — n'inclut pas la durée de la session en cours tant qu'elle n'est pas close |
 
-**Cumul en mémoire uniquement** dans cette version : un redémarrage du serveur
-remet ce registre à zéro (la persistance est prévue en PR5 du document de
-conception). Comme `GET /api/v1/clients`, cette lecture est **synchrone et
+**Cumul persisté** depuis PR5 du document de conception
+(`./eternityII-known_clients.back`, voir
+[Registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus))
+: un redémarrage du serveur ne remet plus ce registre à zéro, sous réserve
+d'avoir exécuté la commande console `restore` (aucun chargement automatique
+au démarrage). Comme `GET /api/v1/clients`, cette lecture est **synchrone et
 locale**, sans aucun aller-retour réseau vers les clients.
 
 ## Séquences typiques
