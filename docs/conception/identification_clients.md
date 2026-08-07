@@ -247,7 +247,7 @@ protocole **qu'une fois**.
 | **1** | **IP du pair** : `accept()` avec `sockaddr`, conservation dans `client_t`, affichage console + `GET /api/v1/clients` | non | — | ✅ traitée ([#169](https://github.com/xaviergriffon/eternityII/pull/169)) |
 | **2** | **Identité déclarée** : `machine_uid`/`client_uid`/`fork_seq`/`label`, `--name`, fichier d'identité machine, hello de travail + `control_hello_t` étendu, `session_no` serveur | **oui (12)** | 1 | ✅ traitée ([#170](https://github.com/xaviergriffon/eternityII/pull/170)) |
 | **3** | **Adressage des commandes** : `clientsCmd --to …`, résolution `session_no` → `client_uid` avec refus si le titulaire a changé | non | 2 | ✅ traitée ([#171](https://github.com/xaviergriffon/eternityII/pull/171)) |
-| **4** | **Registre de clients connus** : cumul en mémoire, statut connecté/déconnecté, exposition console + HTTP | non | 2 | ✅ traitée |
+| **4** | **Registre de clients connus** : cumul en mémoire, statut connecté/déconnecté, exposition console + HTTP | non | 2 | ✅ traitée ([#173](https://github.com/xaviergriffon/eternityII/pull/173)) |
 | **5** | **Persistance du cumul** : nouveau `.back`, branché sur les points d'appel existants, lecture tolérante | non | 4 | à faire |
 | **6** | **Attribution des analyses en cours** : `{owner_uid}` dans la table latérale, consultation « que travaille X » | non | 2 | à faire |
 | **7** | **Bail à expiration** : `lease_deadline`, balayage borné dans `check_server_step`, remise en stock idempotente, durée configurable | non | 6 | à faire |
