@@ -21,7 +21,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 45
+#define NB_COMMANDS 46
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -118,6 +118,7 @@ int clients_interpreter(void);
 int clients_stats_interpreter(void);
 int clients_cmd_interpreter(void);
 int known_clients_interpreter(void);
+int clients_work_interpreter(void);
 
 /**
  * @brief Commandes prises en charge (entrées canoniques puis alias).
@@ -247,6 +248,12 @@ static command_description commands[NB_COMMANDS] = {
      "le débit de prunage (checked/removed) et le meilleur résultat jamais rapportés --\n"
      "toutes exécutions de processus confondues. Persisté dans ./eternityII-known_clients.back\n"
      "(voir « backup »/« restore ») : un redémarrage du serveur ne remet pas ce cumul à zéro.", NULL},
+    {"clientsWork", clients_work_interpreter, 0, CMD_CAT_CLIENTS, 1, "clientsWork <session_no|client_uid|label>",
+     "affiche ce qu'un client précis détient actuellement en cours d'analyse",
+     "Résolution de la cible identique à « clientsCommand --to » (refusée si inconnue,\n"
+     "déconnectée ou ambiguë). Lecture pure de l'attribution enregistrée côté serveur au\n"
+     "moment où la possibilité a été servie (INST_GET/INST_GET_TO_CHECK[_BATCH]) : aucun\n"
+     "aller-retour réseau vers le client, aucune commande poussée.", NULL},
 
     /* Alias : résolus vers l'entrée canonique par find_command. Les noms
        historiques abrégés (sorta, rmnonext, …) restent acceptés ici ; les
@@ -1060,6 +1067,52 @@ int known_clients_interpreter(void) {
                   (unsigned long long)infos[i].total_pruner_removed,
                   (unsigned long long)infos[i].best_max_result,
                   (long long)infos[i].last_seen);
+    }
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `clientsWork <cible>` : consultation « que travaille
+ *        X ? » (PR6, attribution des analyses en cours,
+ *        docs/conception/identification_clients.md, section 4.3).
+ *
+ * `<cible>` est résolue vers un `client_uid` exactement comme `clientsCommand
+ * --to` (`session_no`, `client_uid` hexadécimal, ou `label` déclaré — cf.
+ * `control_registry_resolve_client_uid`) : une cible inconnue, déconnectée ou
+ * ambiguë (label partagé) est refusée plutôt que de deviner. Contrairement à
+ * `clientsCommand`, cette commande ne pousse rien au client : elle lit
+ * uniquement l'attribution que LE SERVEUR a lui-même enregistrée en servant
+ * ce client (`INST_GET`/`INST_GET_TO_CHECK[_BATCH]`), donc le résultat reflète
+ * le point de vue serveur, jamais un aller-retour réseau vers le client.
+ * Commande SERVEUR pure (send_to_childs = 0) : côté client, `control_registry`
+ * est toujours vide, la résolution échouerait systématiquement.
+ */
+int clients_work_interpreter(void) {
+    char *target = strtok(NULL, " ");
+    if (target == NULL || *target == '\0') {
+        return CMD_ERR_USAGE;
+    }
+
+    uint8_t client_uid[CLIENT_UID_BYTES];
+    int resolved = control_registry_resolve_client_uid(target, client_uid);
+    if (resolved != 1) {
+        log_error("clientsWork : cible \"%s\" introuvable, déconnectée ou ambiguë\n", target);
+        return -1;
+    }
+
+    unsigned long long count = 0;
+    int max_alloc = -1;
+    datamanager_analysed_owned_by(client_uid, &count, &max_alloc);
+
+    char client_uid_hex[2 * CLIENT_UID_BYTES + 1];
+    client_identity_hex_encode(client_uid, CLIENT_UID_BYTES, client_uid_hex, sizeof(client_uid_hex));
+
+    if (count == 0) {
+        log_info("clientsWork : %s (client_uid=%s) : aucune possibilité en cours d'analyse\n",
+                  target, client_uid_hex);
+    } else {
+        log_info("clientsWork : %s (client_uid=%s) : %llu possibilité(s) en cours d'analyse, alloc max=%d\n",
+                  target, client_uid_hex, count, max_alloc);
     }
     return 0;
 }

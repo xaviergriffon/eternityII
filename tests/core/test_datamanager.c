@@ -17,6 +17,7 @@
 #include "core/possibility.h"
 #include "core/part.h"
 #include "net/etii_protocol.h"
+#include "net/client_identity.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -3164,6 +3165,133 @@ TEST analysed_index_walks_collision_chains(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * Attribution des analyses en cours (PR6, docs/conception/identification_clients.md,
+ * section 4.3) : table latérale adossée à l'index « analysed », consultation
+ * « que travaille X ? » via datamanager_analysed_owned_by.
+ * ------------------------------------------------------------------------ */
+
+static void fill_owner(uint8_t owner[CLIENT_UID_BYTES], uint8_t base)
+{
+    for (int i = 0; i < CLIENT_UID_BYTES; i++) {
+        owner[i] = (uint8_t)(base + i);
+    }
+}
+
+TEST add_possibility_analysed_owned_visible_via_query(void)
+{
+    drain_all();
+    uint8_t owner_a[CLIENT_UID_BYTES], owner_b[CLIENT_UID_BYTES];
+    fill_owner(owner_a, 0x10);
+    fill_owner(owner_b, 0x80);
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 42;
+    add_possibility_analysed_owned(&pk, -1, owner_a);
+
+    unsigned long long count = 999;
+    int max_alloc = -999;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner_a, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(1ULL, count, "%llu");
+    ASSERT_EQ_FMT(42, max_alloc, "%d");
+
+    /* Un autre client_uid ne voit rien : la table latérale distingue bien
+     * les propriétaires, elle n'est pas juste « attribué ou non ». */
+    count = 999; max_alloc = -999;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner_b, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(0ULL, count, "%llu");
+    ASSERT_EQ_FMT(-1, max_alloc, "%d");
+
+    drain_all();
+    PASS();
+}
+
+TEST add_possibility_analysed_without_owner_not_counted(void)
+{
+    drain_all();
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x20);
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 5;
+    add_possibility_analysed(&pk, -1);   /* pas d'attribution (client, ou restore) */
+
+    unsigned long long count = 999;
+    int max_alloc = -999;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(0ULL, count, "%llu");
+    ASSERT_EQ_FMT(-1, max_alloc, "%d");
+
+    drain_all();
+    PASS();
+}
+
+TEST datamanager_analysed_owned_by_tracks_max_alloc(void)
+{
+    drain_all();
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x30);
+
+    int allocs[] = {12, 90, 33};
+    for (int i = 0; i < 3; i++) {
+        struct possibility_packet pk;
+        memset(&pk, 0, sizeof pk);
+        pk.alloc = (uint16_t)allocs[i];
+        pk.grid[dirx[0]][diry[0]] = (int16_t)(i + 1);   /* contenus distincts */
+        add_possibility_analysed_owned(&pk, -1, owner);
+    }
+
+    unsigned long long count = 0;
+    int max_alloc = -1;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(3ULL, count, "%llu");
+    ASSERT_EQ_FMT(90, max_alloc, "%d");
+
+    drain_all();
+    PASS();
+}
+
+TEST datamanager_analysed_owned_by_null_args_returns_minus_one(void)
+{
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x40);
+    unsigned long long count;
+    int max_alloc;
+    ASSERT_EQ_FMT(-1, datamanager_analysed_owned_by(NULL, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(-1, datamanager_analysed_owned_by(owner, NULL, &max_alloc), "%d");
+    ASSERT_EQ_FMT(-1, datamanager_analysed_owned_by(owner, &count, NULL), "%d");
+    PASS();
+}
+
+TEST remove_possibility_analysed_clears_owner_attribution(void)
+{
+    drain_all();
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x50);
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 17;
+    add_possibility_analysed_owned(&pk, -1, owner);
+
+    unsigned long long count = 0;
+    int max_alloc = -1;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(1ULL, count, "%llu");
+
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1), "%d");   /* acquittée */
+
+    count = 999; max_alloc = -999;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(0ULL, count, "%llu");
+    ASSERT_EQ_FMT(-1, max_alloc, "%d");
+
+    drain_all();
+    PASS();
+}
+
 /* check_duplicate : le stock est réparti sur plusieurs files (split_datas) et
  * assez fourni pour que le partitionnement entre threads fasse avancer son
  * curseur d'une file à la suivante (fp++/position=0) — en plus de la
@@ -3422,6 +3550,11 @@ SUITE(datamanager_suite)
     RUN_TEST(remove_possibility_analysed_spins_until_lock_released);
     RUN_TEST(restock_analysed_spins_until_stock_unlocked);
     RUN_TEST(analysed_index_walks_collision_chains);
+    RUN_TEST(add_possibility_analysed_owned_visible_via_query);
+    RUN_TEST(add_possibility_analysed_without_owner_not_counted);
+    RUN_TEST(datamanager_analysed_owned_by_tracks_max_alloc);
+    RUN_TEST(datamanager_analysed_owned_by_null_args_returns_minus_one);
+    RUN_TEST(remove_possibility_analysed_clears_owner_attribution);
     RUN_TEST(import_json_loads_single_possibility);
     RUN_TEST(print_duplicate_activity_aggregates_counters);
     RUN_TEST(add_possibility_null_and_mixed_routing);

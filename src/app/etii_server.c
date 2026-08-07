@@ -335,6 +335,29 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent)
 }
 
 /**
+ * @brief Enregistre une possibilité servie comme « en cours d'analyse »,
+ *        attribuée au client courant si son identité est connue (PR6,
+ *        docs/conception/identification_clients.md, section 4.3).
+ *
+ * Extrait des trois points de service (`INST_GET`/`INST_GET_TO_CHECK[_BATCH]`)
+ * pour n'écrire cette décision qu'à un seul endroit. `client->has_identity`
+ * dépend d'un `INST_CLIENT_HELLO` reçu sur CETTE connexion de travail (v12) :
+ * un client plus ancien, ou dont le hello n'est pas encore arrivé, sert la
+ * possibilité sans attribution — exactement le comportement d'avant cette PR.
+ *
+ * @param client      Contexte du thread serveur (identité déclarée si connue).
+ * @param possibility Paquet tout juste extrait du stock et envoyé au client.
+ */
+void record_possibility_analysed_for_client(client_t *client, struct possibility_packet *possibility)
+{
+    if (client->has_identity) {
+        add_possibility_analysed_owned(possibility, -1, client->identity.client_uid);
+    } else {
+        add_possibility_analysed(possibility, -1);
+    }
+}
+
+/**
  * @brief Traite une instruction reçue d'un client (un tour de la boucle de
  *        `communicate_with_client`).
  *
@@ -384,7 +407,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             int32_t k = (int32_t)(*lastSent)->size;
             for (int p = 0; p < k; p++)
             {
-                add_possibility_analysed(&(*lastSent)->possibilities[p], -1);
+                record_possibility_analysed_for_client(client, &(*lastSent)->possibilities[p]);
                 counters[client->compteur]++;
                 fileUpdates[client->compteur]++;
             }
@@ -416,7 +439,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             int32_t k = (int32_t)(*lastSent)->size;
             for (int p = 0; p < k; p++)
             {
-                add_possibility_analysed(&(*lastSent)->possibilities[p], -1);
+                record_possibility_analysed_for_client(client, &(*lastSent)->possibilities[p]);
                 counters[client->compteur]++;
                 fileUpdates[client->compteur]++;
             }
@@ -454,7 +477,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             int32_t k = (int32_t)(*lastSent)->size;
             for (int p = 0; p < k; p++)
             {
-                add_possibility_analysed(&(*lastSent)->possibilities[p], -1);
+                record_possibility_analysed_for_client(client, &(*lastSent)->possibilities[p]);
                 counters[client->compteur]++;
                 fileUpdates[client->compteur]++;
             }

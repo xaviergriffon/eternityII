@@ -697,6 +697,67 @@ TEST step_get_serves_possibility(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * record_possibility_analysed_for_client (PR6, attribution des analyses en
+ * cours, docs/conception/identification_clients.md, section 4.3) : la
+ * possibilité servie n'est attribuée au client_uid déclaré QUE si son
+ * identité est connue sur CETTE connexion de travail (INST_CLIENT_HELLO, v12).
+ * ------------------------------------------------------------------------ */
+
+TEST record_possibility_analysed_owns_when_identity_known(void)
+{
+    dm_drain_all();
+
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.has_identity = 1;
+    for (int i = 0; i < CLIENT_UID_BYTES; i++) {
+        client.identity.client_uid[i] = (uint8_t)(0x70 + i);
+    }
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 63;
+    record_possibility_analysed_for_client(&client, &pkt);
+
+    unsigned long long count = 0;
+    int max_alloc = -1;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(client.identity.client_uid, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(1ULL, count, "%llu");
+    ASSERT_EQ_FMT(63, max_alloc, "%d");
+
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pkt, -1), "%d");
+    dm_drain_all();
+    PASS();
+}
+
+TEST record_possibility_analysed_no_owner_when_identity_unknown(void)
+{
+    dm_drain_all();
+
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.has_identity = 0;   /* client trop ancien, ou hello pas encore reçu */
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 64;
+    record_possibility_analysed_for_client(&client, &pkt);
+
+    /* Aucun owner_uid n'a été enregistré : même un uid tout à zéro (celui,
+       non initialisé, de `client.identity`) ne doit rien trouver. */
+    uint8_t zero_uid[CLIENT_UID_BYTES];
+    memset(zero_uid, 0, sizeof zero_uid);
+    unsigned long long count = 999;
+    int max_alloc = -999;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(zero_uid, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(0ULL, count, "%llu");
+    ASSERT_EQ_FMT(-1, max_alloc, "%d");
+
+    dm_drain_all();
+    PASS();
+}
+
 /* INST_POSSIBILITY_ANALYSED : la possibilité « en analyse » est acquittée. */
 TEST step_possibility_analysed_acks(void)
 {
@@ -2388,6 +2449,8 @@ SUITE(etii_server_suite)
     RUN_TEST(step_add_reassembles_fragmented_packet);
     RUN_TEST(step_get_empty_sends_zero_count);
     RUN_TEST(step_get_serves_possibility);
+    RUN_TEST(record_possibility_analysed_owns_when_identity_known);
+    RUN_TEST(record_possibility_analysed_no_owner_when_identity_unknown);
     RUN_TEST(step_possibility_analysed_acks);
     RUN_TEST(step_get_to_check_empty_sends_zero_count);
     RUN_TEST(step_get_to_check_batch_empty_returns_zero);

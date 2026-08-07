@@ -170,6 +170,20 @@ char *build_file_queues_table(unsigned long long *out_unchecked,
                               unsigned long long *out_analysed);
 
 /**
+ * @brief Enregistre une possibilité servie comme « en cours d'analyse »,
+ *        attribuée au client courant si son identité est connue (PR6,
+ *        docs/conception/identification_clients.md).
+ *
+ * Extrait des trois points de service (`INST_GET`/`INST_GET_TO_CHECK[_BATCH]`)
+ * pour être testable hors thread (comme `communicate_with_client_step`) et
+ * pour n'écrire cette décision qu'à un seul endroit.
+ *
+ * @param client      Contexte du thread serveur (identité déclarée si connue).
+ * @param possibility Paquet tout juste extrait du stock et envoyé au client.
+ */
+void record_possibility_analysed_for_client(client_t *client, struct possibility_packet *possibility);
+
+/**
  * @brief Renvoie au stock local les possibilités servies au client mais jamais
  *        acquittées, à la déconnexion (propre ou brutale).
  *

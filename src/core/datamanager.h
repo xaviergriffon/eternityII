@@ -69,6 +69,42 @@ array_possibility_packet *get_last_possibility_tocheck(int max_result);
 int add_possibility_analysed(struct possibility_packet *possiblity, int thread);
 
 /**
+ * @brief Comme `add_possibility_analysed`, mais enregistre en plus le
+ *        `client_uid` du client à qui LE SERVEUR sert cette possibilité
+ *        (PR6, docs/conception/identification_clients.md, section 4.3 :
+ *        attribution des analyses en cours). Réservé au côté serveur — côté
+ *        client, `thread` est un index de fork local, sans rapport avec
+ *        cette notion d'attribution, et `add_possibility_analysed` reste
+ *        l'appel à utiliser (aucune attribution enregistrée).
+ *
+ * @param possiblity Paquet à enregistrer.
+ * @param thread     Index du thread (−1 = choix automatique).
+ * @param owner_uid  `client_uid` (16 octets) du client servi, jamais NULL
+ *                    (utiliser `add_possibility_analysed` sinon).
+ * @return           0.
+ */
+int add_possibility_analysed_owned(struct possibility_packet *possiblity, int thread,
+                                    const uint8_t owner_uid[CLIENT_UID_BYTES]);
+
+/**
+ * @brief Résume ce qu'un client (`client_uid`) détient actuellement dans le
+ *        pool « analysed » — consultation « que travaille X ? » (PR6).
+ *
+ * Balaye l'index latéral d'attribution adossé à `analysed_index` (jamais
+ * `possibility_packet` lui-même, cf. arbitrage C du document de conception) :
+ * une possibilité restaurée depuis un backup, ou servie côté client (jamais
+ * via `add_possibility_analysed_owned`), n'a pas de propriétaire connu et
+ * n'est donc jamais comptée ici, pour aucun `client_uid`.
+ *
+ * @param owner_uid     `client_uid` recherché (16 octets, jamais NULL).
+ * @param out_count     Out : nombre de possibilités actuellement attribuées.
+ * @param out_max_alloc Out : le plus grand `alloc` parmi elles, -1 si `*out_count == 0`.
+ * @return              0 si OK, -1 si un paramètre est NULL.
+ */
+int datamanager_analysed_owned_by(const uint8_t owner_uid[CLIENT_UID_BYTES],
+                                   unsigned long long *out_count, int *out_max_alloc);
+
+/**
  * @brief Renvoie au serveur les possibilités analysées depuis les files locales.
  *
  * Extrait les paquets de la file d'analyse et les transmet via le socket TCP
