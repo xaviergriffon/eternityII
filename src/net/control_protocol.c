@@ -188,6 +188,9 @@ int control_command_allowed(const char *command_name)
 		"limit",
 		"maxStockByThread",
 		"prunerBatch",
+		"clientsCommand",
+		"clientsCmd",
+		"clientsWork",
 	};
 	static const size_t nb_allowed = sizeof(allowed) / sizeof(allowed[0]);
 
@@ -203,4 +206,14 @@ int control_command_privileged(const char *command_name)
 	static const size_t nb_privileged = sizeof(privileged) / sizeof(privileged[0]);
 
 	return command_first_word_matches(command_name, privileged, nb_privileged);
+}
+
+int control_command_read_only(const char *command_name)
+{
+	static const char *const read_only[] = {
+		"clientsWork",
+	};
+	static const size_t nb_read_only = sizeof(read_only) / sizeof(read_only[0]);
+
+	return command_first_word_matches(command_name, read_only, nb_read_only);
 }

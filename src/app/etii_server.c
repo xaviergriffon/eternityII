@@ -1376,6 +1376,18 @@ void runserver(const char* file)
     if (HTTP_PORT > 0 && http_server_start(HTTP_PORT) != 0) {
         exit(EXIT_FAILURE);
     }
+    if (HTTP_PORT > 0 && HTTP_ADMIN_TOKEN[0] == '\0') {
+        // Toute commande de modification (pause, resume, limit,
+        // maxStockByThread, prunerBatch, clientsCommand/clientsCmd, restore,
+        // backup) exige désormais un jeton Bearer valide (cf.
+        // handle_command_route, src/net/http_server.c) : sans
+        // --http-token-file, POST /api/v1/command reste utilisable pour
+        // clientsWork (lecture pure) mais refuse toute autre commande avec
+        // 401. Un simple avertissement, pas un échec — l'API en lecture seule
+        // (GET stats/status/clients/best-board/known-clients) reste pleinement
+        // fonctionnelle.
+        log_info("API HTTP admin démarrée sans --http-token-file : les commandes de modification (pause, resume, limit, maxStockByThread, prunerBatch, clientsCommand, restore, backup) resteront inaccessibles via POST /api/v1/command (401)\n");
+    }
 
     int socket_id = create_tcp_server(SERVER_PORT, NB_THREADS);
     while (request != REQUEST_STOP) {

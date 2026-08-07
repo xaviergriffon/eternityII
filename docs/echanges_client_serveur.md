@@ -293,16 +293,32 @@ entre elles. Verrouillé par
 
 Seules quelques commandes console sont déclenchables à distance
 (`control_command_allowed`) : `pause`, `resume`, `limit`, `maxStockByThread`,
-`prunerBatch` — jamais `exit`, `restore`, `import`, ni rien de destructeur. Cette
-vérification est faite **deux fois indépendamment** : côté serveur dans l'interpréteur
-de `clientsCmd` (qui refuse même de diffuser une ligne interdite), et, en défense en
-profondeur, côté client dans `control_channel_handle_frame` avant tout appel à
-`do_command_line` — le client ne fait jamais confiance à ce qui arrive sur ce socket
-au seul motif que ça y arrive.
+`prunerBatch`, `clientsCommand` (alias `clientsCmd`), `clientsWork` — jamais `exit`,
+`restore`, `import`, ni rien de destructeur. Cette vérification est faite **deux fois
+indépendamment** : côté serveur dans l'interpréteur de `clientsCmd` (qui refuse même
+de diffuser une ligne interdite), et, en défense en profondeur, côté client dans
+`control_channel_handle_frame` avant tout appel à `do_command_line` — le client ne
+fait jamais confiance à ce qui arrive sur ce socket au seul motif que ça y arrive.
+
+**`clientsCommand`/`clientsCmd` et `clientsWork` sont des commandes SERVEUR** (elles
+agissent sur `control_registry`, jamais sur les forks de recherche d'un client) —
+les admettre dans cette même liste blanche est ce qui les rend exécutables via
+l'[API HTTP admin](api_http_rest.md#post-apiv1command) (`POST /api/v1/command` ->
+`admin_apply_remote_command`), exactement comme `pause`/`limit`/… **Sur cette API
+HTTP précisément**, `clientsCommand`/`clientsCmd` (une commande de modification :
+elle pousse `CTRL_COMMAND` à un client) exige un jeton Bearer valide — seule
+`clientsWork` (pure lecture, `control_command_read_only`) en est dispensée, voir
+[Authentification](api_http_rest.md#authentification). Cette distinction
+lecture/écriture n'existe QUE pour l'API HTTP : ni la console ni le canal de
+contrôle n'ont de notion de jeton. Les admettre côté canal de contrôle (`CTRL_COMMAND`,
+poussé par le serveur vers un client) est inoffensif par construction : sur un
+client, `control_registry` est toujours vide (rempli uniquement côté serveur par
+`INST_CONTROL_HELLO`), donc leur exécution y est un no-op silencieux — même
+raisonnement déjà appliqué à `pause`/`resume` plus haut.
 
 **`restore`/`backup` restent hors de portée de ce canal, quoi qu'il arrive.**
 `control_command_privileged` (`src/net/control_protocol.c`) liste ces deux commandes
-séparément de `control_command_allowed`, et **seule** l'[API HTTP admin](api_http_rest.md#authentification-restorebackup)
+séparément de `control_command_allowed`, et **seule** l'[API HTTP admin](api_http_rest.md#authentification)
 (`POST /api/v1/command`, après authentification par jeton Bearer via
 `--http-token-file`) les consulte — jamais `control_channel_handle_frame` ni
 `clientsCmd`. Élargir l'accès de l'API HTTP à ces deux commandes ne les rend donc
@@ -350,6 +366,17 @@ clientsCommand --to 3 pause                # cible la session #3 uniquement
 clientsCommand --to jetson-1 limit 500     # cible par label déclaré
 clientsCommand limit 500                   # sans --to : diffusion (comportement historique)
 ```
+
+Le même ciblage est disponible via l'[API HTTP admin](api_http_rest.md#post-apiv1command)
+(`POST /api/v1/command {"command":"clientsCommand --to jetson-1 limit 500"}`,
+avec un en-tête `Authorization: Bearer <jeton>` — `clientsCommand` est une commande de
+MODIFICATION sur cette API, voir [Authentification](api_http_rest.md#authentification)),
+appliqué par la portion réentrante (`strtok_r`) dédiée d'`admin_apply_remote_command`
+(`src/ui/command_lines.c`) — jamais par `clients_cmd_interpreter` lui-même, qui
+tokenise via le curseur global `strtok` et corromprait un appel HTTP concurrent à une
+saisie console ou à une trame du canal de contrôle en cours de découpage. Une cible
+inconnue/déconnectée/ambiguë y répond `400` (argument invalide), pas `403`/`401` : la
+commande elle-même reste whitelistée (et authentifiée, si un jeton valide a été fourni).
 
 ### Registre de clients connus
 

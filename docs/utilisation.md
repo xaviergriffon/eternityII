@@ -35,7 +35,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `nb_threads` | 80 | Nombre de connexions clients simultanées |
 | `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'au niveau de curseur `N` (anti-famine, voir ci-dessous) |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
-| `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour les commandes admin privilégiées `restore`/`backup` de l'[API HTTP](api_http_rest.md#authentification-restorebackup) — sans cette option, ces deux commandes restent inaccessibles via l'API |
+| `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
 
 Exemples :
