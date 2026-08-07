@@ -432,6 +432,71 @@ Exposé par la commande console `knownClients` (voir
 [console.md](console.md#pilotage-des-clients-serveur)) et par
 `GET /api/v1/known-clients` sur l'[API HTTP](api_http_rest.md).
 
+### Attribution des analyses en cours
+
+PR6 de [docs/conception/identification_clients.md](conception/identification_clients.md#4-impacts-par-domaine)
+répond à une question restée jusque-là sans réponse : « que travaille le client X en ce
+moment ? ». Avant cette PR, chaque possibilité servie par `INST_GET`/
+`INST_GET_TO_CHECK`/`INST_GET_TO_CHECK_BATCH` était enregistrée via
+`add_possibility_analysed(&pkt, -1)` — le `-1` signifiant « aucun propriétaire », le
+même appel utilisé côté client (où le paramètre vaut un index de thread, un sens
+différent) et par `import_analysed`/`restore_analysed` au rechargement d'un backup.
+
+**Table latérale, jamais un nouveau champ sur `possibility_packet`.** L'emplacement
+choisi (arbitrage C du document de conception) est une extension de l'index de
+hachage existant (`analysed_index`, `src/core/datamanager.c`) qui accélère déjà
+`remove_possibility_analysed` : chaque `AnalysedIndexNode` porte désormais un
+`owner_uid`/`has_owner` optionnel. Deux raisons d'éviter `possibility_packet` :
+cette structure circule sur le fil *et* dans les backups
+(`eternityII-in_analyse.back`), et elle comporte du padding caché malgré `packed` —
+l'élargir toucherait le format réseau, le format de persistance et toutes les
+fixtures de test d'un coup. Troisième raison, propre à ce cas : le paramètre `thread` de
+`add_possibility_analysed` porte déjà deux sens (`-1` côté serveur, un index de
+thread côté client) — y empiler un troisième (un `client_uid`) aurait rendu la
+fonction illisible.
+
+**Un seul point d'écriture.** `add_possibility_analysed_owned(possibility, thread,
+client_uid)` (`src/core/datamanager.{h,c}`) est le jumeau de
+`add_possibility_analysed` qui enregistre en plus l'attribution ; les trois points de
+service du serveur (`INST_GET`/`INST_GET_TO_CHECK`/`INST_GET_TO_CHECK_BATCH`, dans
+`communicate_with_client_step`) passent tous par une fonction unique,
+`record_possibility_analysed_for_client` (`src/app/etii_server.{h,c}`) : si
+`client->has_identity` (un `INST_CLIENT_HELLO`, v12, a été reçu sur CETTE connexion
+de travail), la possibilité est attribuée au `client_uid` déclaré ; sinon (client
+plus ancien, ou hello pas encore arrivé), elle est enregistrée sans propriétaire —
+exactement le comportement d'avant cette PR.
+
+**Consultation, en lecture pure.** `datamanager_analysed_owned_by(client_uid,
+&count, &max_alloc)` balaie `analysed_index` sur les `NB_FILE_POSSIBILITY` files,
+sous le même verrou par file que tout autre accès — un `pthread_mutex_lock`
+bloquant plutôt que le `trylock` utilisé ailleurs dans ce fichier : ce chemin de
+diagnostic veut une réponse exacte, pas céder la main. Comme l'index lui-même,
+cette table n'est **pas une source de vérité absolue** : une possibilité restaurée
+depuis un backup, ou dont le nœud d'index n'a pas pu être alloué (OOM, cas déjà
+toléré par le repli de `remove_possibility_analysed`), est simplement absente du
+compte pour n'importe quel `client_uid` — jamais une possibilité corrompue.
+
+**Résolution de cible, en lecture, sans poster de commande.** La commande console
+`clientsWork <cible>` (`clients_work_interpreter`, `src/ui/command_lines.c`) résout
+`<cible>` via `control_registry_resolve_client_uid` (`src/app/control_registry.{h,c}`),
+un jumeau **lecture seule** de `control_registry_send_command_to` (PR3, voir
+[Adressage des commandes](#adressage-des-commandes---to) ci-dessus) : mêmes trois
+étapes de résolution (`session_no` → `client_uid` hexadécimal → `label`), même refus
+d'une cible inconnue, déconnectée ou ambiguë — mais rien n'est posté dans la file de
+commandes de la session ciblée. Le résultat reflète donc uniquement ce que LE
+SERVEUR a lui-même enregistré en servant ce client, jamais un aller-retour réseau
+vers lui.
+
+```
+clients                          # liste les sessions, avec leur session_no
+clientsWork 3                    # que travaille la session #3 ?
+clientsWork jetson-1              # ou en ciblant par label déclaré
+```
+
+PR7 (non encore implémentée) construit le pendant **écriture** sur cette même
+table : un bail à expiration (`lease_deadline`) qui rend automatiquement le stock
+d'un client disparu, sans intervention d'un opérateur.
+
 ### Impact sur le dimensionnement du serveur
 
 Une session de contrôle **partage le même pool `client_t[NB_THREADS]`** qu'une
@@ -452,7 +517,10 @@ serveur uniquement : `clients` (liste les sessions actives), `clientsStats` (dif
 par la liste blanche, à une session précise ou, par défaut, à toutes — voir
 [Adressage des commandes](#adressage-des-commandes---to) ci-dessus), et
 `knownClients` (liste les machines connues, cumul, voir
-[Registre de clients connus](#registre-de-clients-connus) ci-dessus).
+[Registre de clients connus](#registre-de-clients-connus) ci-dessus), et
+`clientsWork <cible>` (consultation en lecture seule de ce qu'un client précis
+détient dans le pool « en cours d'analyse », voir
+[Attribution des analyses en cours](#attribution-des-analyses-en-cours) ci-dessus).
 `pause`/`resume` posent/lèvent localement `REQUEST_ADMIN_PAUSE` — un état
 distinct de la pause de régulation de débit (`REQUEST_PAUSE`, auto-levée par le
 régulateur), pour qu'une pause administrative ne disparaisse jamais toute seule au

@@ -253,6 +253,27 @@ int control_registry_broadcast_get_stats(void);
 int control_registry_send_command_to(const char *target, uint8_t cmd, const char *command_line);
 
 /**
+ * @brief Résout `target` vers le `client_uid` de l'unique session de contrôle
+ *        active qu'il désigne, SANS poster de commande (contrairement à
+ *        `control_registry_send_command_to`) — lecture pure pour la
+ *        consultation « que travaille X ? » (PR6, attribution des analyses
+ *        en cours, docs/conception/identification_clients.md).
+ *
+ * Mêmes règles de résolution, dans le même ordre, que
+ * `control_registry_send_command_to` : `session_no` décimal, puis
+ * `client_uid` hexadécimal complet, puis `label` déclaré (égalité exacte) --
+ * voir sa documentation pour le détail des garanties (« session_no n'est pas
+ * un slot », ambiguïté d'un `label` partagé).
+ *
+ * @param target         Cible telle que saisie par l'opérateur (non NULL).
+ * @param out_client_uid Out : rempli uniquement si le retour vaut 1.
+ * @return               1 si résolu à exactement une session (out rempli),
+ *                       0 si `target` ne désigne aucune session active ou en
+ *                       désigne plusieurs (label ambigu), -1 si `target` est `NULL`.
+ */
+int control_registry_resolve_client_uid(const char *target, uint8_t out_client_uid[CLIENT_UID_BYTES]);
+
+/**
  * @brief Indique si un sondage automatique `CTRL_GET_STATS` est dû pour la
  *        session `index` (aucun sondage manuel `clientsStats`/HTTP n'exclut
  *        celui-ci : les deux partagent le même but, tirer un `CTRL_STATS`

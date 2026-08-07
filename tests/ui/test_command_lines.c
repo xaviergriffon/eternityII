@@ -1453,6 +1453,71 @@ TEST do_command_line_clientscommand_to_missing_command_is_usage_error(void)
     PASS();
 }
 
+/* ---------- clientsWork (attribution des analyses en cours, PR6) ----------
+ *
+ * Consultation « que travaille X ? » : la cible est résolue exactement comme
+ * `clientsCommand --to` (même refus inconnu/ambigu), mais rien n'est envoyé
+ * au client -- seule l'attribution déjà enregistrée côté serveur (table
+ * latérale de datamanager.c, adossée à analysed_index) est lue. Cf.
+ * docs/conception/identification_clients.md, section 4.3.
+ */
+
+TEST do_command_line_clientswork_missing_target_is_usage_error(void)
+{
+    char cmd[] = "clientsWork";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+    PASS();
+}
+
+TEST do_command_line_clientswork_unknown_target_rejected(void)
+{
+    char cmd[] = "clientsWork no-such-client";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+    PASS();
+}
+
+TEST do_command_line_clientswork_reports_nothing_owned(void)
+{
+    control_hello_t h = { .pid = 5, .nb_forks = 1, .identity = { .mode = 0, .label = "delta" } };
+    int idx = control_registry_register(1, "203.0.113.30", &h);
+    ASSERT(idx >= 0);
+
+    char cmd[] = "clientsWork delta";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST do_command_line_clientswork_reports_owned_attribution(void)
+{
+    control_hello_t h = { .pid = 6, .nb_forks = 1, .identity = { .mode = 0, .label = "epsilon" } };
+    for (int i = 0; i < CLIENT_UID_BYTES; i++) {
+        h.identity.client_uid[i] = (uint8_t)(0x60 + i);
+    }
+    int idx = control_registry_register(1, "203.0.113.31", &h);
+    ASSERT(idx >= 0);
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 55;
+    add_possibility_analysed_owned(&pk, -1, h.identity.client_uid);
+
+    char cmd[] = "clientsWork epsilon";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+
+    /* La commande ne consomme rien : l'attribution reste lisible ensuite. */
+    unsigned long long count = 0;
+    int max_alloc = -1;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(h.identity.client_uid, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(1ULL, count, "%llu");
+    ASSERT_EQ_FMT(55, max_alloc, "%d");
+
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1), "%d");
+    control_registry_unregister(idx);
+    PASS();
+}
+
 /* ---------- pruner_batch_clamp (pure) ------------------------------------ */
 /*
  * Fonction pure extraite de pruner_batch_interpreter : bornes [1, PRUNER_BATCH_MAX],
@@ -1758,6 +1823,11 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_clientscommand_to_still_enforces_whitelist);
     RUN_TEST(do_command_line_clientscommand_to_unknown_target_rejected);
     RUN_TEST(do_command_line_clientscommand_to_missing_command_is_usage_error);
+
+    RUN_TEST(do_command_line_clientswork_missing_target_is_usage_error);
+    RUN_TEST(do_command_line_clientswork_unknown_target_rejected);
+    RUN_TEST(do_command_line_clientswork_reports_nothing_owned);
+    RUN_TEST(do_command_line_clientswork_reports_owned_attribution);
 
     RUN_TEST(pruner_batch_clamp_bounds);
     RUN_TEST(admin_apply_remote_command_pause_resume);

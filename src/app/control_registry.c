@@ -457,6 +457,50 @@ int control_registry_send_command_to(const char *target, uint8_t cmd, const char
     return result;
 }
 
+int control_registry_resolve_client_uid(const char *target, uint8_t out_client_uid[CLIENT_UID_BYTES])
+{
+    pthread_once(&g_init_once, registry_init_once);
+    if (target == NULL) {
+        return -1;
+    }
+
+    /* Même résolution que control_registry_send_command_to (session_no,
+     * client_uid, label, dans cet ordre), mais lecture pure : rien n'est
+     * posté, out_client_uid n'est rempli qu'en cas de titulaire unique. */
+    pthread_mutex_lock(&g_registry_mutex);
+    int matched_index = -1;
+    int nb_matches = 0;
+    for (int i = 0; i < MAX_CONTROL_SESSIONS; i++) {
+        control_session_t *s = &g_sessions[i];
+        pthread_mutex_lock(&s->mutex);
+        if (s->in_use) {
+            int hit = target_matches_session_no(target, s->session_no) ||
+                      target_matches_client_uid(target, s->hello.identity.client_uid) ||
+                      target_matches_label(target, s->hello.identity.label);
+            if (hit) {
+                nb_matches++;
+                if (nb_matches == 1) {
+                    matched_index = i;
+                }
+            }
+        }
+        pthread_mutex_unlock(&s->mutex);
+    }
+
+    int result = 0;
+    if (nb_matches == 1) {
+        control_session_t *s = &g_sessions[matched_index];
+        pthread_mutex_lock(&s->mutex);
+        if (s->in_use) {
+            memcpy(out_client_uid, s->hello.identity.client_uid, CLIENT_UID_BYTES);
+            result = 1;
+        }
+        pthread_mutex_unlock(&s->mutex);
+    }
+    pthread_mutex_unlock(&g_registry_mutex);
+    return result;
+}
+
 int control_registry_auto_stats_due(int index, int interval_sec)
 {
     pthread_once(&g_init_once, registry_init_once);

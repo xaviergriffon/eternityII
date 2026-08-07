@@ -601,6 +601,110 @@ TEST send_command_to_ambiguous_label_returns_zero(void)
     PASS();
 }
 
+/* ---------- résolution de cible en lecture pure (PR6) ----------------------
+ *
+ * `control_registry_resolve_client_uid` partage exactement les règles de
+ * résolution de `control_registry_send_command_to` (voir ci-dessus), mais ne
+ * poste rien : consultation « que travaille X ? » (docs/conception/
+ * identification_clients.md, section 4.3).
+ */
+
+TEST resolve_client_uid_null_target_returns_minus_one(void)
+{
+    uint8_t out[CLIENT_UID_BYTES];
+    ASSERT_EQ(-1, control_registry_resolve_client_uid(NULL, out));
+    PASS();
+}
+
+TEST resolve_client_uid_matches_by_session_no(void)
+{
+    control_hello_t h = make_hello(20, 1, 0);
+    for (int i = 0; i < CLIENT_UID_BYTES; i++) {
+        h.identity.client_uid[i] = (uint8_t)(0x40 + i);
+    }
+    int idx = control_registry_register(1, "203.0.113.20", &h);
+    ASSERT(idx >= 0);
+
+    control_session_info_t infos[1];
+    ASSERT_EQ(1, control_registry_snapshot(infos, 1));
+    char target[32];
+    snprintf(target, sizeof(target), "%llu", (unsigned long long)infos[0].session_no);
+
+    uint8_t out[CLIENT_UID_BYTES];
+    ASSERT_EQ(1, control_registry_resolve_client_uid(target, out));
+    ASSERT_EQ(0, memcmp(out, h.identity.client_uid, CLIENT_UID_BYTES));
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST resolve_client_uid_matches_by_label(void)
+{
+    control_hello_t h = make_hello(21, 1, 0);
+    strncpy(h.identity.label, "gamma", CLIENT_LABEL_MAX - 1);
+    for (int i = 0; i < CLIENT_UID_BYTES; i++) {
+        h.identity.client_uid[i] = (uint8_t)(0x50 + i);
+    }
+    int idx = control_registry_register(1, "203.0.113.21", &h);
+    ASSERT(idx >= 0);
+
+    uint8_t out[CLIENT_UID_BYTES];
+    ASSERT_EQ(1, control_registry_resolve_client_uid("gamma", out));
+    ASSERT_EQ(0, memcmp(out, h.identity.client_uid, CLIENT_UID_BYTES));
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST resolve_client_uid_unknown_target_returns_zero(void)
+{
+    uint8_t out[CLIENT_UID_BYTES];
+    ASSERT_EQ(0, control_registry_resolve_client_uid("999999", out));
+    ASSERT_EQ(0, control_registry_resolve_client_uid("no-such-label", out));
+    PASS();
+}
+
+TEST resolve_client_uid_ambiguous_label_returns_zero(void)
+{
+    control_hello_t h1 = make_hello(1, 1, 0);
+    strncpy(h1.identity.label, "dup2", CLIENT_LABEL_MAX - 1);
+    control_hello_t h2 = make_hello(2, 1, 0);
+    strncpy(h2.identity.label, "dup2", CLIENT_LABEL_MAX - 1);
+    int idx1 = control_registry_register(1, "203.0.113.1", &h1);
+    int idx2 = control_registry_register(2, "203.0.113.2", &h2);
+    ASSERT(idx1 >= 0);
+    ASSERT(idx2 >= 0);
+
+    uint8_t out[CLIENT_UID_BYTES];
+    ASSERT_EQ(0, control_registry_resolve_client_uid("dup2", out));
+
+    control_registry_unregister(idx1);
+    control_registry_unregister(idx2);
+    PASS();
+}
+
+TEST resolve_client_uid_does_not_post_any_command(void)
+{
+    /* Différence essentielle avec send_command_to : aucune commande en file. */
+    control_hello_t h = make_hello(22, 1, 0);
+    int idx = control_registry_register(1, "203.0.113.22", &h);
+    ASSERT(idx >= 0);
+
+    control_session_info_t infos[1];
+    ASSERT_EQ(1, control_registry_snapshot(infos, 1));
+    char target[32];
+    snprintf(target, sizeof(target), "%llu", (unsigned long long)infos[0].session_no);
+
+    uint8_t out[CLIENT_UID_BYTES];
+    ASSERT_EQ(1, control_registry_resolve_client_uid(target, out));
+
+    uint8_t cmd = 0;
+    ASSERT_EQ(1, control_registry_wait_command(idx, &cmd, NULL, 0, 100)); /* timeout : rien posté */
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
 /* ---------- état de pause "désiré" persistant ------------------------------
  *
  * Reproduit la demande : après un `pause` console (côté serveur, diffusé via
@@ -862,6 +966,13 @@ SUITE(control_registry_suite)
     RUN_TEST(send_command_to_unknown_target_returns_zero);
     RUN_TEST(send_command_to_stale_session_no_is_refused_not_redirected);
     RUN_TEST(send_command_to_ambiguous_label_returns_zero);
+
+    RUN_TEST(resolve_client_uid_null_target_returns_minus_one);
+    RUN_TEST(resolve_client_uid_matches_by_session_no);
+    RUN_TEST(resolve_client_uid_matches_by_label);
+    RUN_TEST(resolve_client_uid_unknown_target_returns_zero);
+    RUN_TEST(resolve_client_uid_ambiguous_label_returns_zero);
+    RUN_TEST(resolve_client_uid_does_not_post_any_command);
 
     RUN_TEST(desired_pause_state_defaults_to_resumed);
     RUN_TEST(broadcast_pause_sets_desired_state_for_future_registrations);

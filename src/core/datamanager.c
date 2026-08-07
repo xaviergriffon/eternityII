@@ -418,9 +418,26 @@ int add_possibility(client_possibility_t *client_possibility, array_possibility_
  */
 #define ANALYSED_INDEX_BUCKETS 8191
 
+/*
+ * Attribution des analyses en cours (PR6, docs/conception/identification_clients.md,
+ * arbitrage C / section 4.3) : `owner_uid` est le `client_uid` du client à qui
+ * LE SERVEUR a servi cette possibilité (INST_GET / INST_GET_TO_CHECK[_BATCH]).
+ * C'est bien la « table latérale adossée à analysed_index » visée par le
+ * document : jamais un champ ajouté à `possibility_packet` (fil + backups +
+ * padding caché, cf. possibility-packet-struct-padding), jamais une
+ * surcharge du paramètre `thread` (déjà -1 côté serveur / index de thread
+ * côté client, deux sens distincts qu'il ne faut pas empiler d'un troisième).
+ * `has_owner == 0` côté client (thread >= 0, cf. add_possibility_analysed) et
+ * pour toute possibilité rechargée par `import_analysed`/`restore_analysed` :
+ * les baux ne sont pas persistés (section 4.7 du document), l'attribution ne
+ * l'est donc pas davantage — au redémarrage, une possibilité restaurée est
+ * réputée sans propriétaire, comme avant cette PR.
+ */
 typedef struct AnalysedIndexNode {
 	uint64_t hash;
 	Element *element;
+	uint8_t owner_uid[CLIENT_UID_BYTES];
+	int has_owner;
 	struct AnalysedIndexNode *next;
 } AnalysedIndexNode;
 
@@ -470,12 +487,16 @@ static uint64_t hash_possibility_key(const struct possibility_packet *p)
  * À appeler juste après un `put()` réussi, avec `e == file->end`. En cas
  * d'échec d'allocation du nœud d'index (OOM), l'élément reste dans la file
  * mais non indexé : `remove_possibility_analysed` le retrouvera via son repli
- * sur le balayage linéaire (jamais silencieusement perdu).
+ * sur le balayage linéaire (jamais silencieusement perdu) — et
+ * `datamanager_analysed_owned_by` (PR6) ne le verra simplement pas, comme
+ * documenté sur `AnalysedIndexNode` ci-dessus.
  *
- * @param fileidx Indice de la file analysée (0..NB_FILE_POSSIBILITY-1).
- * @param e       Élément (déjà présent dans la file) à indexer.
+ * @param fileidx   Indice de la file analysée (0..NB_FILE_POSSIBILITY-1).
+ * @param e         Élément (déjà présent dans la file) à indexer.
+ * @param owner_uid `client_uid` du client servi côté serveur (PR6), ou `NULL`
+ *                  si aucune attribution n'est connue/pertinente ici.
  */
-static void analysed_index_add(int fileidx, Element *e)
+static void analysed_index_add(int fileidx, Element *e, const uint8_t owner_uid[CLIENT_UID_BYTES])
 {
 	AnalysedIndexNode *node = malloc(sizeof(AnalysedIndexNode));
 	if (node == NULL) {
@@ -483,6 +504,12 @@ static void analysed_index_add(int fileidx, Element *e)
 	}
 	node->hash = hash_possibility_key((struct possibility_packet *)e->value);
 	node->element = e;
+	if (owner_uid != NULL) {
+		memcpy(node->owner_uid, owner_uid, CLIENT_UID_BYTES);
+		node->has_owner = 1;
+	} else {
+		node->has_owner = 0;
+	}
 	size_t bucket = node->hash % ANALYSED_INDEX_BUCKETS;
 	node->next = analysed_index[fileidx][bucket];
 	analysed_index[fileidx][bucket] = node;
@@ -731,14 +758,14 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 					if (!sent_ok) {
 						log_errno("Error when send_possibility_analysed (batch) => ");
 						for (int i = 0; i < drained; i++) {
-							if (put(file, &buf[i])) analysed_index_add(thread, file->end);
+							if (put(file, &buf[i])) analysed_index_add(thread, file->end, NULL);
 						}
 						break;
 					}
 					if (recv_instruction(socket_id) != INST_CONSIDERED) {
 						log_error("batch analysed non pris en compte (%d possibilités), remise en file\n", drained);
 						for (int i = 0; i < drained; i++) {
-							if (put(file, &buf[i])) analysed_index_add(thread, file->end);
+							if (put(file, &buf[i])) analysed_index_add(thread, file->end, NULL);
 						}
 						break;
 					}
@@ -754,7 +781,8 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 }
 
 /**
- * @brief Ajoute une possibilité dans la file « analysées » du thread indiqué.
+ * @brief Corps commun de `add_possibility_analysed`/`add_possibility_analysed_owned`
+ *        (PR6) : seule la présence d'un `owner_uid` diffère entre les deux.
  *
  * Tente un trylock sur `file_possibility_analysed[thread]`. Si `thread < 0`,
  * tourne sur toutes les files jusqu'à en trouver une disponible. Met à jour
@@ -762,9 +790,13 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
  *
  * @param possiblity Paquet à enregistrer comme « en cours d'analyse ».
  * @param thread     Index du thread cible (≥ 0), ou -1 pour la première file libre.
+ * @param owner_uid  `client_uid` du client servi côté serveur, ou `NULL` (cf.
+ *                   `AnalysedIndexNode` pour les cas où l'attribution est
+ *                   sciemment absente : côté client, ou possibilité restaurée).
  * @return           0 si ajouté, -1 si toutes les files sont verrouillées.
  */
-int add_possibility_analysed(struct possibility_packet *possiblity, int thread) {
+static int add_possibility_analysed_impl(struct possibility_packet *possiblity, int thread,
+                                          const uint8_t owner_uid[CLIENT_UID_BYTES]) {
 	int addpossibility = 0;
 	int currfile = 0;
 	if (thread >=0) {
@@ -785,10 +817,10 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread) 
 				printf("alert\n");
 			}
              */
-			
+
 			File *target = &file_possibility_analysed[currfile].file;
 			if (put(target, possiblity)) {
-				analysed_index_add(currfile, target->end);
+				analysed_index_add(currfile, target->end, owner_uid);
 			}
 			addpossibility = 1;
 			pthread_mutex_unlock(&file_possibility_analysed[currfile].lock);
@@ -803,6 +835,62 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread) 
 		} else if (addpossibility == 0) {
 			usleep(MICRO_SLEEP);
 		}
+	}
+	return 0;
+}
+
+int add_possibility_analysed(struct possibility_packet *possiblity, int thread) {
+	return add_possibility_analysed_impl(possiblity, thread, NULL);
+}
+
+int add_possibility_analysed_owned(struct possibility_packet *possiblity, int thread,
+                                    const uint8_t owner_uid[CLIENT_UID_BYTES]) {
+	return add_possibility_analysed_impl(possiblity, thread, owner_uid);
+}
+
+/**
+ * @brief Balaye `analysed_index` pour résumer ce qu'un `client_uid` donné
+ *        détient actuellement (consultation « que travaille X ? », PR6).
+ *
+ * Verrouille chaque file `file_possibility_analysed[f]` (comme tout autre
+ * accès à ces files) le temps de son propre balayage — jamais toutes les
+ * files à la fois — puis la relâche avant de passer à la suivante. Ce n'est
+ * pas un chemin chaud (commande console/diagnostic), un simple
+ * `pthread_mutex_lock` bloquant est donc préférable au `trylock` utilisé
+ * ailleurs dans ce fichier : on veut une réponse exacte, pas céder la main.
+ *
+ * Ne voit que les possibilités effectivement indexées (cf. le commentaire
+ * sur `AnalysedIndexNode`) : une entrée non indexée (OOM à l'insertion, cas
+ * limite déjà toléré par `remove_possibility_analysed`) est simplement
+ * absente du compte, jamais une source d'erreur.
+ *
+ * @param owner_uid `client_uid` recherché (16 octets, jamais NULL).
+ * @param out_count Nombre de possibilités actuellement attribuées à ce client.
+ * @param out_max_alloc Le plus grand `alloc` parmi elles, ou -1 si `*out_count == 0`.
+ * @return 0 si OK, -1 si `owner_uid`/`out_count`/`out_max_alloc` est NULL.
+ */
+int datamanager_analysed_owned_by(const uint8_t owner_uid[CLIENT_UID_BYTES],
+                                   unsigned long long *out_count, int *out_max_alloc) {
+	if (owner_uid == NULL || out_count == NULL || out_max_alloc == NULL) {
+		return -1;
+	}
+	*out_count = 0;
+	*out_max_alloc = -1;
+	for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+		pthread_mutex_lock(&file_possibility_analysed[f].lock);
+		for (size_t b = 0; b < ANALYSED_INDEX_BUCKETS; b++) {
+			for (AnalysedIndexNode *node = analysed_index[f][b]; node != NULL; node = node->next) {
+				if (!node->has_owner || memcmp(node->owner_uid, owner_uid, CLIENT_UID_BYTES) != 0) {
+					continue;
+				}
+				(*out_count)++;
+				int alloc = ((struct possibility_packet *)node->element->value)->alloc;
+				if (alloc > *out_max_alloc) {
+					*out_max_alloc = alloc;
+				}
+			}
+		}
+		pthread_mutex_unlock(&file_possibility_analysed[f].lock);
 	}
 	return 0;
 }
