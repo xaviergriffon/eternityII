@@ -619,6 +619,120 @@ TEST statistic_datas_handles_full_board_alloc(void)
 }
 
 /* --------------------------------------------------------------------------
+ * datamanager_stock_distribution : histogramme par `alloc`, source de la
+ * commande console `statistic` et de GET /api/v1/stock-distribution.
+ * ------------------------------------------------------------------------ */
+
+/* Ajoute n possibilités VÉRIFIÉES (checked = 1) : put_to_local les route vers
+ * le pool dédié, pas vers le pool historique. */
+static void add_checked_packets(const int *allocs, int n)
+{
+    array_possibility_packet arr;
+    arr.size = n;
+    arr.possibilities = calloc(n, sizeof(struct possibility_packet));
+    for (int i = 0; i < n; i++) {
+        arr.possibilities[i].alloc = (uint16_t)allocs[i];
+        arr.possibilities[i].checked = 1;
+    }
+    add_possibility(NULL, &arr);
+    free(arr.possibilities);
+}
+
+/* Les trois pools sont comptés séparément, chacun sur son propre niveau. */
+TEST stock_distribution_separates_the_three_pools(void)
+{
+    drain_all();
+
+    int unchecked_allocs[] = { 3, 3, 5 };
+    add_packets(unchecked_allocs, 3);
+    int checked_allocs[] = { 3, 7 };
+    add_checked_packets(checked_allocs, 2);
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 9;
+    add_possibility_analysed(&pk, 0);
+
+    stock_distribution_t d;
+    datamanager_stock_distribution(&d);
+
+    ASSERT_EQ_FMT(2ULL, d.unchecked[3], "%llu");
+    ASSERT_EQ_FMT(1ULL, d.unchecked[5], "%llu");
+    ASSERT_EQ_FMT(1ULL, d.checked[3], "%llu");
+    ASSERT_EQ_FMT(1ULL, d.checked[7], "%llu");
+    ASSERT_EQ_FMT(1ULL, d.analysed[9], "%llu");
+
+    /* Aucun mélange entre pools sur un même niveau. */
+    ASSERT_EQ_FMT(0ULL, d.checked[5], "%llu");
+    ASSERT_EQ_FMT(0ULL, d.unchecked[7], "%llu");
+    ASSERT_EQ_FMT(0ULL, d.unchecked[9], "%llu");
+
+    ASSERT_EQ_FMT(3ULL, d.total_unchecked, "%llu");
+    ASSERT_EQ_FMT(2ULL, d.total_checked, "%llu");
+    ASSERT_EQ_FMT(1ULL, d.total_analysed, "%llu");
+
+    drain_all();
+    PASS();
+}
+
+/* Stock vide : histogramme entièrement nul, totaux nuls (pas de valeur résiduelle
+ * d'un test précédent -> la fonction remet bien `out` à zéro). */
+TEST stock_distribution_on_empty_stock_is_all_zero(void)
+{
+    drain_all();
+
+    stock_distribution_t d;
+    memset(&d, 0xFF, sizeof(d)); /* pré-salie : le memset interne doit l'écraser */
+    datamanager_stock_distribution(&d);
+
+    ASSERT_EQ_FMT(0ULL, d.total_unchecked, "%llu");
+    ASSERT_EQ_FMT(0ULL, d.total_checked, "%llu");
+    ASSERT_EQ_FMT(0ULL, d.total_analysed, "%llu");
+    for (int i = 0; i < STOCK_DISTRIBUTION_LEVELS; i++) {
+        ASSERT_EQ_FMT(0ULL, d.unchecked[i], "%llu");
+        ASSERT_EQ_FMT(0ULL, d.checked[i], "%llu");
+        ASSERT_EQ_FMT(0ULL, d.analysed[i], "%llu");
+    }
+    PASS();
+}
+
+/* Non-régression (même raison que statistic_datas_handles_full_board_alloc) :
+ * alloc == ETERN_PARTS est un niveau VALIDE, il doit être compté dans la
+ * dernière case du tableau, jamais écrit hors bornes. Probant sous ASan. */
+TEST stock_distribution_counts_full_board_alloc(void)
+{
+    drain_all();
+    int allocs[] = { ETERN_PARTS };
+    add_packets(allocs, 1);
+
+    stock_distribution_t d;
+    datamanager_stock_distribution(&d);
+
+    ASSERT_EQ_FMT(1ULL, d.unchecked[ETERN_PARTS], "%llu");
+    ASSERT_EQ_FMT(1ULL, d.total_unchecked, "%llu");
+
+    drain_all();
+    PASS();
+}
+
+/* Le total d'un pool reste cohérent avec les compteurs déjà exposés
+ * (`datas_size`), c'est-à-dire avec ce que rapporte GET /api/v1/stats. */
+TEST stock_distribution_totals_match_datas_size(void)
+{
+    drain_all();
+    int allocs[] = { 1, 2, 2, 4, 4, 4 };
+    add_packets(allocs, 6);
+
+    stock_distribution_t d;
+    datamanager_stock_distribution(&d);
+
+    ASSERT_EQ_FMT(datas_size(), d.total_unchecked + d.total_checked, "%llu");
+
+    drain_all();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
  * count_combinations : nombre de paires (x*(x-1)/2)
  * ------------------------------------------------------------------------ */
 
@@ -3813,6 +3927,10 @@ SUITE(datamanager_suite)
     RUN_TEST(sort_preserves_count);
     RUN_TEST(statistic_and_print_run);
     RUN_TEST(statistic_datas_handles_full_board_alloc);
+    RUN_TEST(stock_distribution_separates_the_three_pools);
+    RUN_TEST(stock_distribution_on_empty_stock_is_all_zero);
+    RUN_TEST(stock_distribution_counts_full_board_alloc);
+    RUN_TEST(stock_distribution_totals_match_datas_size);
     RUN_TEST(count_combinations_is_triangular);
     RUN_TEST(get_tocheck_drains_unchecked_pool);
     RUN_TEST(remove_analysed_finds_then_misses);

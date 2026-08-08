@@ -105,6 +105,7 @@ typedef enum {
     HTTP_ROUTE_CLIENTS_STATS, ///< POST /api/v1/clients/stats
     HTTP_ROUTE_BEST_BOARD,    ///< GET /api/v1/best-board
     HTTP_ROUTE_KNOWN_CLIENTS, ///< GET /api/v1/known-clients
+    HTTP_ROUTE_STOCK_DISTRIBUTION, ///< GET /api/v1/stock-distribution
     HTTP_ROUTE_NOT_FOUND,     ///< Chemin inconnu (404)
     HTTP_ROUTE_BAD_METHOD     ///< Chemin connu, méthode non supportée (405)
 } http_route_t;
@@ -290,6 +291,49 @@ int http_json_format_stats(char *buf, size_t size, const http_stats_view_t *view
  * @return Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
  */
 int http_json_format_status(char *buf, size_t size, const http_status_view_t *view);
+
+/**
+ * @brief Vue en lecture de la répartition du stock par nombre de pièces
+ *        placées (`alloc`), à sérialiser par `http_json_format_stock_distribution`.
+ *        Remplie par `http_stock_distribution_collect` (src/net/http_server.h)
+ *        à partir de `datamanager_stock_distribution` — même donnée que la
+ *        commande console `statistic`, qui elle ne fait que l'imprimer en logs.
+ *
+ * Volontairement une requête DÉDIÉE, pas des champs de `GET /api/v1/stats` :
+ * comme `best-board`, l'histogramme est un ordre de grandeur plus gros qu'un
+ * compteur et impose un parcours complet des files sous verrou — un
+ * consommateur qui ne poll que le débit ne doit pas le payer.
+ *
+ * Structurellement identique à `stock_distribution_t` (core/datamanager.h) :
+ * la duplication est assumée, c'est la même règle que `http_client_info_t` vs
+ * `control_session_info_t` — le codec expose sa propre vue et `http_server.c`
+ * fait la copie.
+ */
+typedef struct {
+    /// Répartition du pool non vérifié, indexée par `alloc` (0..ETERN_PARTS).
+    unsigned long long unchecked[STOCK_DISTRIBUTION_LEVELS];
+    /// Répartition du pool vérifié (`checked == 1`).
+    unsigned long long checked[STOCK_DISTRIBUTION_LEVELS];
+    /// Répartition du pool « en cours d'analyse ».
+    unsigned long long analysed[STOCK_DISTRIBUTION_LEVELS];
+    unsigned long long total_unchecked;
+    unsigned long long total_checked;
+    unsigned long long total_analysed;
+} http_stock_distribution_view_t;
+
+/**
+ * @brief Sérialise `view` en JSON dans `buf` (cf. schéma documenté dans AGENTS.md).
+ *
+ * **Seuls les niveaux non vides sont listés** : sur les 257 niveaux possibles
+ * (`STOCK_DISTRIBUTION_LEVELS` en build 256 pièces), un serveur réel n'en
+ * occupe qu'une poignée, et émettre les 257 lignes ferait frôler
+ * `HTTP_RESPONSE_MAX` pour ne transporter que des zéros. Un stock entièrement
+ * vide donne donc `"levels":[]` — les totaux, eux, sont toujours présents.
+ * Le tableau est trié par `alloc` croissant.
+ *
+ * @return Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
+ */
+int http_json_format_stock_distribution(char *buf, size_t size, const http_stock_distribution_view_t *view);
 
 /**
  * @brief Vue en lecture d'une session de contrôle active (canal

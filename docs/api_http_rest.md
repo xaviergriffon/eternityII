@@ -16,7 +16,8 @@ Le code correspondant vit dans :
 - [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_allowed`, `control_command_privileged`) — listes blanches des commandes ; `control_command_allowed` est **partagée** avec le canal de contrôle binaire, `control_command_privileged` (restore/backup) ne l'est **pas** (accessible uniquement via cette API, jamais via le canal de contrôle) ;
 - [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) (`control_registry_snapshot`, `control_registry_record_stats`, `control_registry_broadcast_get_stats`) — registre des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), source de `GET /api/v1/clients` et `POST /api/v1/clients/stats` ;
 - [src/app/known_clients_registry.h](../src/app/known_clients_registry.h) / [known_clients_registry.c](../src/app/known_clients_registry.c) (`known_clients_registry_snapshot`) — [registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus) (cumul par `machine_uid`, survit à la déconnexion), source de `GET /api/v1/known-clients` ;
-- [src/core/best_board.h](../src/core/best_board.h) / [best_board.c](../src/core/best_board.c) (`g_server_best_board`) — représentation du meilleur plateau connu, source de `GET /api/v1/best-board`.
+- [src/core/best_board.h](../src/core/best_board.h) / [best_board.c](../src/core/best_board.c) (`g_server_best_board`) — représentation du meilleur plateau connu, source de `GET /api/v1/best-board` ;
+- [src/core/datamanager.c](../src/core/datamanager.c) (`datamanager_stock_distribution`) — répartition du stock par `alloc`, source **partagée** de `GET /api/v1/stock-distribution` et de la commande console `statistic`.
 
 ## Activation
 
@@ -102,7 +103,7 @@ Connection: close
 |---|---|---|
 | `200` | OK | Requête traitée avec succès |
 | `400` | Bad Request | Requête HTTP malformée, ou `POST /api/v1/command` avec un champ `command` absent/invalide/aux arguments manquants |
-| `401` | Unauthorized | `POST /api/v1/command` avec une commande **privilégiée** (`restore`, `backup`) sans jeton Bearer valide (absent, invalide, ou aucun jeton configuré côté serveur) — porte l'en-tête `WWW-Authenticate: Bearer` |
+| `401` | Unauthorized | `POST /api/v1/command` avec une commande de **modification** (toutes sauf `clientsWork`, voir [Authentification](#authentification)) sans jeton Bearer valide (absent, invalide, ou aucun jeton configuré côté serveur) — porte l'en-tête `WWW-Authenticate: Bearer` |
 | `403` | Forbidden | Commande reconnue mais hors des deux listes blanches (ex. `exit`) |
 | `404` | Not Found | Chemin inconnu |
 | `405` | Method Not Allowed | Chemin connu, mauvaise méthode HTTP (ex. `POST /api/v1/stats`) |
@@ -539,6 +540,55 @@ d'avoir exécuté la commande console `restore` (aucun chargement automatique
 au démarrage). Comme `GET /api/v1/clients`, cette lecture est **synchrone et
 locale**, sans aucun aller-retour réseau vers les clients.
 
+### GET /api/v1/stock-distribution
+
+Répartition du stock par nombre de pièces déjà placées (`alloc`) — l'équivalent
+HTTP de la commande console `statistic`, qui elle ne fait qu'imprimer cet
+histogramme dans les journaux du serveur (voir [console](console.md)). Répond à
+la question « à quelle profondeur en est l'exploration ? », là où
+`GET /api/v1/stats` ne donne que des totaux et `GET /api/v1/best-board` que le
+meilleur plateau atteint.
+
+```json
+{
+  "total_unchecked": 5312,
+  "total_checked": 40,
+  "total_analysed": 12,
+  "levels": [
+    { "alloc": 3, "unchecked": 12,   "checked": 0,  "analysed": 0 },
+    { "alloc": 4, "unchecked": 5300, "checked": 40, "analysed": 12 }
+  ]
+}
+```
+
+| Champ | Type | Sens |
+|---|---|---|
+| `total_unchecked` | entier ≥ 0 | Total du pool **non vérifié** — même valeur que `possibility_stock` de `GET /api/v1/stats` |
+| `total_checked` | entier ≥ 0 | Total du pool **vérifié** (`checked_stock` de `/stats`) |
+| `total_analysed` | entier ≥ 0 | Total du pool **en cours d'analyse** (`analysed_stock` de `/stats`) |
+| `levels` | tableau | Un objet par niveau `alloc` **non vide**, trié par `alloc` croissant |
+| `levels[].alloc` | entier | Nombre de pièces placées de ces possibilités (0 à 256, ou 0 à 16 en build `ETERN_PARTS=16`) |
+| `levels[].unchecked` / `checked` / `analysed` | entier ≥ 0 | Nombre de possibilités de ce niveau dans chacun des trois pools |
+
+**Les niveaux entièrement vides sont omis.** Sur les 257 niveaux possibles, un
+serveur réel n'en occupe qu'une poignée : les émettre tous n'apporterait que des
+zéros et ferait frôler la borne de réponse de 32 Ko. Un stock entièrement vide
+donne donc `"levels": []`, jamais une erreur — les trois totaux, eux, sont
+toujours présents. Un client ne doit donc **pas** supposer que l'index d'une
+entrée dans `levels` vaut son `alloc` : lire le champ `alloc`.
+
+Contrairement à `GET /api/v1/stats` (simple lecture de compteurs déjà tenus à
+jour), cette route **parcourt toutes les files sous verrou** — c'est précisément
+pourquoi elle est une requête dédiée et non des champs supplémentaires de
+`/stats` : un consommateur qui ne poll que le débit ne doit pas payer ce
+parcours. À réserver à un usage occasionnel, pas à une boucle de polling serrée.
+
+L'instantané n'est **pas atomique entre les pools** : les deux pools de stock
+sont lus sous une famille de verrous, le pool analysé sous une autre, jamais les
+deux en même temps (discipline de verrouillage de `datamanager.c`). Une
+possibilité servie à un client pile entre les deux passes peut donc être comptée
+deux fois ou pas du tout. C'est une donnée d'observation, pas une comptabilité.
+
 ## Séquences typiques
 
 ### Polling de télémétrie
@@ -637,6 +687,7 @@ sequenceDiagram
 curl http://127.0.0.1:8080/api/v1/stats
 curl http://127.0.0.1:8080/api/v1/status
 curl http://127.0.0.1:8080/api/v1/clients
+curl http://127.0.0.1:8080/api/v1/stock-distribution      # répartition du stock par alloc (usage occasionnel)
 curl -X POST http://127.0.0.1:8080/api/v1/clients/stats   # puis relire /clients pour les stats rafraîchies
 curl -X POST -d '{"command":"clientsWork beta"}' http://127.0.0.1:8080/api/v1/command   # lecture seule -> {"result":"ok"}, résultat dans les journaux serveur
 

@@ -1002,9 +1002,85 @@ TEST http_stats_and_status_collect_do_not_crash(void)
     PASS();
 }
 
+/* ---------- GET /api/v1/stock-distribution ---------------------------------- */
+
+/* Ajoute n possibilités non vérifiées d'`alloc` donné dans le stock local. */
+static void add_stock_packets(const int *allocs, int n)
+{
+    array_possibility_packet arr;
+    arr.size = n;
+    arr.possibilities = calloc((size_t)n, sizeof(struct possibility_packet));
+    for (int i = 0; i < n; i++) {
+        arr.possibilities[i].alloc = (uint16_t)allocs[i];
+        arr.possibilities[i].checked = 0;
+    }
+    add_possibility(NULL, &arr);
+    free(arr.possibilities);
+}
+
+static void drain_stock(void)
+{
+    while (datas_size() > 0) {
+        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        free_array_possibility_packet(r);
+    }
+}
+
+/* Stock vide -> 200 avec un tableau de niveaux vide (jamais 404/500). */
+TEST http_server_get_stock_distribution_returns_200_empty(void)
+{
+    drain_stock();
+
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    const char req[] = "GET /api/v1/stock-distribution HTTP/1.1\r\nHost: x\r\n\r\n";
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
+    ASSERT(strstr(resp, "\"levels\":[]") != NULL);
+    ASSERT(strstr(resp, "\"total_unchecked\":0") != NULL);
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
+/* Le stock réellement présent se retrouve dans la réponse, au bon niveau. */
+TEST http_server_get_stock_distribution_reflects_real_stock(void)
+{
+    drain_stock();
+    int allocs[] = { 2, 2, 6 };
+    add_stock_packets(allocs, 3);
+
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    const char req[] = "GET /api/v1/stock-distribution HTTP/1.1\r\nHost: x\r\n\r\n";
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
+    ASSERT(strstr(resp, "\"total_unchecked\":3") != NULL);
+    ASSERT(strstr(resp, "{\"alloc\":2,\"unchecked\":2,\"checked\":0,\"analysed\":0}") != NULL);
+    ASSERT(strstr(resp, "{\"alloc\":6,\"unchecked\":1,\"checked\":0,\"analysed\":0}") != NULL);
+
+    close(sv[0]); close(sv[1]);
+    drain_stock();
+    PASS();
+}
+
 SUITE(http_server_suite)
 {
     RUN_TEST(http_server_get_stats_returns_200);
+    RUN_TEST(http_server_get_stock_distribution_returns_200_empty);
+    RUN_TEST(http_server_get_stock_distribution_reflects_real_stock);
     RUN_TEST(http_server_get_status_returns_200);
     RUN_TEST(http_server_get_clients_returns_200_empty);
     RUN_TEST(http_server_get_clients_reflects_recorded_stats);

@@ -2579,44 +2579,73 @@ int check_duplicate(void)
     return errors > 0 ? -1 : 0;
 }
 
-int statistic_datas(void)
+/**
+ * @brief Cumule dans `levels` la répartition par `alloc` des paquets de `file`.
+ *
+ * Un `alloc` hors bornes (paquet corrompu) est ignoré plutôt qu'écrit hors du
+ * tableau — ce parcours est de l'observation, il ne doit jamais pouvoir
+ * déborder sur une donnée douteuse.
+ *
+ * @param file   File à parcourir (verrou déjà tenu par l'appelant).
+ * @param levels Histogramme de `STOCK_DISTRIBUTION_LEVELS` entrées à incrémenter.
+ * @return       Nombre de paquets comptés (y compris ceux d'`alloc` hors bornes).
+ */
+static unsigned long long accumulate_alloc_levels(File *file, unsigned long long *levels)
 {
-    lock_all_file();
-    int count=0;
-    int fp;
-    // +1 : alloc peut valoir ETERN_PARTS (plateau complet, ex. import d'un .back
-    // complet où normalize_possibility_packet ne réduit pas alloc faute de trou).
-    int countSize[ETERN_PARTS + 1];
-    for (int i = 0; i <= ETERN_PARTS; i++) {
-        countSize[i] = 0;
-    }
-    for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+    unsigned long long count = 0;
+    Element *currElement = file->start;
+    while (currElement != NULL)
     {
-        // Les deux pools comptent : non vérifié et vérifié (checked == 1)
-        File *pools[2] = { &file_possibility[fp].file, &file_possibility_checked[fp].file };
-        for (int p = 0; p < 2; p++)
+        struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+        if (possibility != NULL)
         {
-            Element *currElement = pools[p]->start;
-            while (currElement != NULL)
+            count++;
+            if (possibility->alloc < STOCK_DISTRIBUTION_LEVELS)
             {
-                count++;
-                struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-                if (possibility != NULL)
-                {
-                    countSize[possibility->alloc]++;
-                }
-                currElement = currElement->next;
+                levels[possibility->alloc]++;
             }
         }
+        currElement = currElement->next;
     }
+    return count;
+}
 
+void datamanager_stock_distribution(stock_distribution_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+
+    // Passe 1 : les deux pools de stock (non vérifié et vérifié).
+    lock_all_file();
+    for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+    {
+        out->total_unchecked += accumulate_alloc_levels(&file_possibility[fp].file, out->unchecked);
+        out->total_checked += accumulate_alloc_levels(&file_possibility_checked[fp].file, out->checked);
+    }
     unlock_all_file();
 
-    log_info("check_datas analyses:%i\n",count);
-    for (int i = 0; i <= ETERN_PARTS; i++) {
-        log_info("%i : %i\n", i, countSize[i]);
+    // Passe 2 : le pool « en cours d'analyse », sous sa propre famille de
+    // verrous — jamais tenue en même temps que la précédente.
+    lock_all_file_analysed();
+    for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+    {
+        out->total_analysed += accumulate_alloc_levels(&file_possibility_analysed[fp].file, out->analysed);
+    }
+    unlock_all_file_analysed();
+}
 
-        countSize[i] = 0;
+int statistic_datas(void)
+{
+    stock_distribution_t distribution;
+    datamanager_stock_distribution(&distribution);
+
+    // Historiquement, cette commande ne rapporte que les deux pools de stock
+    // (le pool analysé, distribué aux clients, n'en fait pas partie).
+    log_info("check_datas analyses:%llu\n", distribution.total_unchecked + distribution.total_checked);
+    for (int i = 0; i < STOCK_DISTRIBUTION_LEVELS; i++) {
+        log_info("%i : %llu\n", i, distribution.unchecked[i] + distribution.checked[i]);
     }
     return 0;
 }

@@ -198,6 +198,9 @@ http_route_t http_route_resolve(const char *method, const char *path)
     if (strcmp(path, "/api/v1/known-clients") == 0) {
         return (strcmp(method, "GET") == 0) ? HTTP_ROUTE_KNOWN_CLIENTS : HTTP_ROUTE_BAD_METHOD;
     }
+    if (strcmp(path, "/api/v1/stock-distribution") == 0) {
+        return (strcmp(method, "GET") == 0) ? HTTP_ROUTE_STOCK_DISTRIBUTION : HTTP_ROUTE_BAD_METHOD;
+    }
     return HTTP_ROUTE_NOT_FOUND;
 }
 
@@ -419,6 +422,52 @@ int http_json_format_stats(char *buf, size_t size, const http_stats_view_t *view
             return -1;
         }
         offset += (size_t)written;
+    }
+
+    written = snprintf(buf + offset, size - offset, "]}");
+    if (written < 0 || (size_t)written >= size - offset) {
+        return -1;
+    }
+    offset += (size_t)written;
+
+    return (int)offset;
+}
+
+int http_json_format_stock_distribution(char *buf, size_t size, const http_stock_distribution_view_t *view)
+{
+    if (buf == NULL || size == 0 || view == NULL) {
+        return -1;
+    }
+
+    size_t offset = 0;
+    int written = snprintf(buf + offset, size - offset,
+        "{"
+        "\"total_unchecked\":%llu,"
+        "\"total_checked\":%llu,"
+        "\"total_analysed\":%llu,"
+        "\"levels\":[",
+        view->total_unchecked, view->total_checked, view->total_analysed);
+    if (written < 0 || (size_t)written >= size - offset) {
+        return -1;
+    }
+    offset += (size_t)written;
+
+    // Niveaux vides omis (cf. doc de la fonction) : le tableau est creux par
+    // nature, seuls quelques `alloc` sont peuplés sur un serveur réel.
+    int emitted = 0;
+    for (int level = 0; level < STOCK_DISTRIBUTION_LEVELS; level++) {
+        if (view->unchecked[level] == 0 && view->checked[level] == 0 && view->analysed[level] == 0) {
+            continue;
+        }
+        written = snprintf(buf + offset, size - offset,
+            "%s{\"alloc\":%d,\"unchecked\":%llu,\"checked\":%llu,\"analysed\":%llu}",
+            (emitted == 0) ? "" : ",", level,
+            view->unchecked[level], view->checked[level], view->analysed[level]);
+        if (written < 0 || (size_t)written >= size - offset) {
+            return -1;
+        }
+        offset += (size_t)written;
+        emitted++;
     }
 
     written = snprintf(buf + offset, size - offset, "]}");

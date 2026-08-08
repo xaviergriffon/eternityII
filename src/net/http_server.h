@@ -11,15 +11,15 @@
  * depuis `runserver` (src/app/etii_server.c).
  *
  * Authentification (`--http-token-file <chemin>`, `HTTP_ADMIN_TOKEN`, cf.
- * static_variables.h) : par défaut (aucun jeton configuré), l'API reste ce
- * qu'elle a toujours été — de confiance, sans authentification, un accès
- * distant passe par un tunnel/reverse-proxy explicite à la charge de
- * l'opérateur. Configurer un jeton débloque UNIQUEMENT les deux commandes
- * privilégiées de `POST /api/v1/command` (`restore`, `backup`,
- * `control_command_privileged`) derrière un en-tête `Authorization: Bearer
- * <jeton>` — les autres routes (stats/status/clients/best-board) et les
- * commandes déjà whitelistées (`control_command_allowed`) restent, comme
- * avant, sans authentification.
+ * static_variables.h) : par défaut (aucun jeton configuré), seule la LECTURE
+ * fonctionne — les routes `GET` et la seule commande de lecture pure de
+ * `POST /api/v1/command` (`clientsWork`, `control_command_read_only`). Toute
+ * commande de MODIFICATION (`pause`, `resume`, `limit`, `maxStockByThread`,
+ * `prunerBatch`, `clientsCommand`/`clientsCmd`, plus les privilégiées
+ * `restore`/`backup`) exige un en-tête `Authorization: Bearer <jeton>` valide,
+ * et reste donc inaccessible tant qu'aucun jeton n'est configuré. Le bind
+ * loopback reste la première barrière : un accès distant passe par un
+ * tunnel/reverse-proxy explicite, à la charge de l'opérateur.
  */
 #ifndef eternityII_http_server_h
 #define eternityII_http_server_h
@@ -100,6 +100,20 @@ void http_stats_collect(http_stats_view_t *out);
  * @param out Vue à remplir (jamais NULL, appelant garanti).
  */
 void http_status_collect(http_status_view_t *out);
+
+/**
+ * @brief Construit un instantané de la répartition du stock par `alloc` pour
+ *        `GET /api/v1/stock-distribution`, via `datamanager_stock_distribution`
+ *        (`core/datamanager.h`) — même source que la commande console `statistic`.
+ *
+ * Contrairement à `http_stats_collect` (lectures de compteurs déjà
+ * thread-safe), cet appel PARCOURT toutes les files sous verrou : coûteux à la
+ * fréquence d'un poll de télémétrie, d'où une route dédiée plutôt qu'un ajout
+ * à `GET /api/v1/stats`.
+ *
+ * @param out Vue à remplir (jamais NULL, appelant garanti).
+ */
+void http_stock_distribution_collect(http_stock_distribution_view_t *out);
 
 /**
  * @brief Construit un instantané des sessions de contrôle actives (canal
