@@ -155,14 +155,10 @@ int http_clients_collect(http_client_info_t *out, int max)
         out[i].pid = infos[i].pid;
         out[i].nb_forks = infos[i].nb_forks;
         out[i].mode = infos[i].mode;
-        strncpy(out[i].label, infos[i].label, HTTP_CLIENT_LABEL_MAX - 1);
-        out[i].label[HTTP_CLIENT_LABEL_MAX - 1] = '\0';
-        strncpy(out[i].machine_uid_hex, infos[i].machine_uid_hex, HTTP_CLIENT_UID_HEX_MAX - 1);
-        out[i].machine_uid_hex[HTTP_CLIENT_UID_HEX_MAX - 1] = '\0';
-        strncpy(out[i].client_uid_hex, infos[i].client_uid_hex, HTTP_CLIENT_UID_HEX_MAX - 1);
-        out[i].client_uid_hex[HTTP_CLIENT_UID_HEX_MAX - 1] = '\0';
-        strncpy(out[i].peer_ip, infos[i].peer_ip, HTTP_CLIENT_IP_MAX - 1);
-        out[i].peer_ip[HTTP_CLIENT_IP_MAX - 1] = '\0';
+        snprintf(out[i].label, sizeof(out[i].label), "%s", infos[i].label);
+        snprintf(out[i].machine_uid_hex, sizeof(out[i].machine_uid_hex), "%s", infos[i].machine_uid_hex);
+        snprintf(out[i].client_uid_hex, sizeof(out[i].client_uid_hex), "%s", infos[i].client_uid_hex);
+        snprintf(out[i].peer_ip, sizeof(out[i].peer_ip), "%s", infos[i].peer_ip);
         out[i].last_activity = (long long)infos[i].last_activity;
         out[i].has_stats = infos[i].has_stats;
         out[i].stats_shots_per_second = (unsigned long long)infos[i].stats.shots_per_second;
@@ -186,12 +182,9 @@ int http_known_clients_collect(http_known_client_info_t *out, int max)
     int cap = (max < MAX_KNOWN_CLIENTS) ? max : MAX_KNOWN_CLIENTS;
     int n = known_clients_registry_snapshot(infos, cap);
     for (int i = 0; i < n; i++) {
-        strncpy(out[i].machine_uid_hex, infos[i].machine_uid_hex, HTTP_CLIENT_UID_HEX_MAX - 1);
-        out[i].machine_uid_hex[HTTP_CLIENT_UID_HEX_MAX - 1] = '\0';
-        strncpy(out[i].label, infos[i].label, HTTP_CLIENT_LABEL_MAX - 1);
-        out[i].label[HTTP_CLIENT_LABEL_MAX - 1] = '\0';
-        strncpy(out[i].peer_ip, infos[i].peer_ip, HTTP_CLIENT_IP_MAX - 1);
-        out[i].peer_ip[HTTP_CLIENT_IP_MAX - 1] = '\0';
+        snprintf(out[i].machine_uid_hex, sizeof(out[i].machine_uid_hex), "%s", infos[i].machine_uid_hex);
+        snprintf(out[i].label, sizeof(out[i].label), "%s", infos[i].label);
+        snprintf(out[i].peer_ip, sizeof(out[i].peer_ip), "%s", infos[i].peer_ip);
         out[i].mode = infos[i].mode;
         out[i].connected = infos[i].connected;
         out[i].nb_active_sessions = infos[i].nb_active_sessions;
