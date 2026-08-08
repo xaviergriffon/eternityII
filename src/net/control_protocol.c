@@ -202,6 +202,11 @@ int control_command_privileged(const char *command_name)
 	static const char *const privileged[] = {
 		"restore",
 		"backup",
+		"sortAsc",
+		"sortDesc",
+		"sortDescMulti",
+		"split",
+		"regroup",
 	};
 	static const size_t nb_privileged = sizeof(privileged) / sizeof(privileged[0]);
 
