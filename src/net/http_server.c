@@ -142,6 +142,24 @@ void http_status_collect(http_status_view_t *out)
     out->pruner_batch = pruner_batch_size;
 }
 
+/* Le memcpy champ-à-champ ci-dessous suppose ces tailles identiques (voir
+ * commentaire dans http_codec.h sur la duplication délibérée des tailles) :
+ * une divergence future doit casser la compilation, pas fuiter un octet. */
+_Static_assert(sizeof(((http_client_info_t *)0)->label) == CLIENT_LABEL_MAX,
+               "http_client_info_t.label doit matcher CLIENT_LABEL_MAX");
+_Static_assert(sizeof(((http_client_info_t *)0)->machine_uid_hex) == 2 * MACHINE_UID_BYTES + 1,
+               "http_client_info_t.machine_uid_hex doit matcher 2*MACHINE_UID_BYTES+1");
+_Static_assert(sizeof(((http_client_info_t *)0)->client_uid_hex) == 2 * CLIENT_UID_BYTES + 1,
+               "http_client_info_t.client_uid_hex doit matcher 2*CLIENT_UID_BYTES+1");
+_Static_assert(sizeof(((http_client_info_t *)0)->peer_ip) == PEER_IP_MAX_LEN,
+               "http_client_info_t.peer_ip doit matcher PEER_IP_MAX_LEN");
+_Static_assert(sizeof(((http_known_client_info_t *)0)->machine_uid_hex) == 2 * MACHINE_UID_BYTES + 1,
+               "http_known_client_info_t.machine_uid_hex doit matcher 2*MACHINE_UID_BYTES+1");
+_Static_assert(sizeof(((http_known_client_info_t *)0)->label) == CLIENT_LABEL_MAX,
+               "http_known_client_info_t.label doit matcher CLIENT_LABEL_MAX");
+_Static_assert(sizeof(((http_known_client_info_t *)0)->peer_ip) == PEER_IP_MAX_LEN,
+               "http_known_client_info_t.peer_ip doit matcher PEER_IP_MAX_LEN");
+
 int http_clients_collect(http_client_info_t *out, int max)
 {
     if (out == NULL || max <= 0) {
@@ -155,14 +173,10 @@ int http_clients_collect(http_client_info_t *out, int max)
         out[i].pid = infos[i].pid;
         out[i].nb_forks = infos[i].nb_forks;
         out[i].mode = infos[i].mode;
-        strncpy(out[i].label, infos[i].label, HTTP_CLIENT_LABEL_MAX - 1);
-        out[i].label[HTTP_CLIENT_LABEL_MAX - 1] = '\0';
-        strncpy(out[i].machine_uid_hex, infos[i].machine_uid_hex, HTTP_CLIENT_UID_HEX_MAX - 1);
-        out[i].machine_uid_hex[HTTP_CLIENT_UID_HEX_MAX - 1] = '\0';
-        strncpy(out[i].client_uid_hex, infos[i].client_uid_hex, HTTP_CLIENT_UID_HEX_MAX - 1);
-        out[i].client_uid_hex[HTTP_CLIENT_UID_HEX_MAX - 1] = '\0';
-        strncpy(out[i].peer_ip, infos[i].peer_ip, HTTP_CLIENT_IP_MAX - 1);
-        out[i].peer_ip[HTTP_CLIENT_IP_MAX - 1] = '\0';
+        memcpy(out[i].label, infos[i].label, sizeof(out[i].label));
+        memcpy(out[i].machine_uid_hex, infos[i].machine_uid_hex, sizeof(out[i].machine_uid_hex));
+        memcpy(out[i].client_uid_hex, infos[i].client_uid_hex, sizeof(out[i].client_uid_hex));
+        memcpy(out[i].peer_ip, infos[i].peer_ip, sizeof(out[i].peer_ip));
         out[i].last_activity = (long long)infos[i].last_activity;
         out[i].has_stats = infos[i].has_stats;
         out[i].stats_shots_per_second = (unsigned long long)infos[i].stats.shots_per_second;
@@ -186,12 +200,9 @@ int http_known_clients_collect(http_known_client_info_t *out, int max)
     int cap = (max < MAX_KNOWN_CLIENTS) ? max : MAX_KNOWN_CLIENTS;
     int n = known_clients_registry_snapshot(infos, cap);
     for (int i = 0; i < n; i++) {
-        strncpy(out[i].machine_uid_hex, infos[i].machine_uid_hex, HTTP_CLIENT_UID_HEX_MAX - 1);
-        out[i].machine_uid_hex[HTTP_CLIENT_UID_HEX_MAX - 1] = '\0';
-        strncpy(out[i].label, infos[i].label, HTTP_CLIENT_LABEL_MAX - 1);
-        out[i].label[HTTP_CLIENT_LABEL_MAX - 1] = '\0';
-        strncpy(out[i].peer_ip, infos[i].peer_ip, HTTP_CLIENT_IP_MAX - 1);
-        out[i].peer_ip[HTTP_CLIENT_IP_MAX - 1] = '\0';
+        memcpy(out[i].machine_uid_hex, infos[i].machine_uid_hex, sizeof(out[i].machine_uid_hex));
+        memcpy(out[i].label, infos[i].label, sizeof(out[i].label));
+        memcpy(out[i].peer_ip, infos[i].peer_ip, sizeof(out[i].peer_ip));
         out[i].mode = infos[i].mode;
         out[i].connected = infos[i].connected;
         out[i].nb_active_sessions = infos[i].nb_active_sessions;

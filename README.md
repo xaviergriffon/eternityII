@@ -79,6 +79,7 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard.
 make test             # tests unitaires (framework greatest, vendoré)
 make test-integration # scénarios bout-en-bout client/serveur (16 pièces)
 make test-docker      # rejoue les jobs de test CI dans un conteneur Linux
+make test-docker-arm  # vérifie la compilation croisée ARM 64-bit (Raspberry Pi) dans le même conteneur
 make coverage-report  # rapports de couverture gcovr (XML + HTML + Markdown)
 
 # Banc de mesure du débit de la boucle de recherche (préalable à toute optimisation)
