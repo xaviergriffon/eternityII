@@ -385,7 +385,8 @@ typedef struct {
     unsigned long long stats_possibility_stock;
     /// Nombre de possibilités analysées en stock local au moment de `stats_time`.
     unsigned long long stats_analysed_stock;
-    /// Meilleur résultat (nombre de cases placées) au moment de `stats_time`.
+    /// Meilleur niveau de curseur atteint (cf. `possibility_packet.alloc`) au
+    /// moment de `stats_time`.
     unsigned long long stats_max_result;
     /// Nombre de possibilités vérifiées par le pruner (0 hors mode pruner).
     unsigned long long stats_pruner_checked;
@@ -444,7 +445,7 @@ typedef struct {
     unsigned long long total_pruner_checked;
     /// Cumul des possibilités éliminées par le pruner.
     unsigned long long total_pruner_removed;
-    /// Meilleur résultat (nombre de cases placées) jamais rapporté par cette
+    /// Meilleur niveau de curseur (cf. `possibility_packet.alloc`) jamais rapporté par cette
     /// machine, toutes sessions confondues (pic, pas une somme).
     unsigned long long best_max_result;
     /// Somme des durées de connexion des sessions déjà terminées (secondes).
@@ -498,7 +499,10 @@ typedef struct {
     /// 1 si un plateau a déjà été enregistré (aucun record avant le premier
     /// placement n'existe : `alloc`/`grid` ne sont valides que si `has_board`).
     int has_board;
-    /// Nombre de pièces placées de ce plateau.
+    /// Niveau du curseur de parcours de ce plateau. BORNE INFÉRIEURE du nombre
+    /// de pièces réellement posées : `possibility_all_has_a_next` pose les pièces
+    /// forcées sans avancer `alloc` (cf. l'invariant `faceused >= alloc` de
+    /// `check_possibility`). Compter les cases non vides de `grid` pour l'exact.
     unsigned alloc;
     /// Grille de descriptions de pièces : `grid[x][y]`, cf. `http_best_board_cell_t`.
     http_best_board_cell_t grid[ETERN_SIZE][ETERN_SIZE];

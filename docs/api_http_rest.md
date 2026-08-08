@@ -114,6 +114,31 @@ renvoie `{"result":"ok"}`. Les messages d'erreur sont informatifs mais **non
 contractuels** (ne pas faire de correspondance exacte de chaîne côté client — se fier
 au code de statut HTTP).
 
+<a id="le-champ-alloc"></a>
+### Le champ `alloc` (et `max_result`)
+
+Plusieurs routes exposent `alloc` — ou sa variante « meilleur atteint »,
+`max_result`/`best_max_result`. C'est le **niveau du curseur de parcours** : le
+nombre de cases du parcours `directions[]` déjà franchies par cette possibilité,
+de `0` (état genèse) à `ETERN_PARTS` (256, ou 16 en build `ETERN_PARTS=16`).
+
+Dans le chemin de recherche normal, avancer d'un cran revient à poser exactement
+une pièce : le niveau **est** alors le nombre de pièces posées sur le plateau, et
+les deux lectures se confondent. **Elles peuvent diverger après un passage du
+pruner** : `possibility_all_has_a_next` ([src/core/possibility.c](../src/core/possibility.c))
+pose les pièces *forcées* (les cases où une seule pièce candidate subsiste) sans
+avancer le curseur, pour que la recherche reprenne au même point. L'invariant
+vérifié par `check_possibility` est donc une inégalité, pas une égalité :
+
+```
+pièces réellement posées sur le plateau  ≥  alloc  (niveau du curseur)
+```
+
+Autrement dit, `alloc` est une **borne inférieure** du nombre de pièces posées,
+exacte dans le cas courant. Un consommateur qui veut le nombre exact de pièces
+d'un plateau doit compter les cases de `grid` qui ne valent pas `null` (voir
+[`GET /api/v1/best-board`](#get-apiv1best-board)), pas lire `alloc`.
+
 ## Endpoints
 
 ### GET /api/v1/stats
@@ -143,7 +168,7 @@ Instantané de la télémétrie serveur courante.
 | `possibility_stock` | entier ≥ 0 | Total des possibilités **non vérifiées** en stock (somme des 10 files) |
 | `checked_stock` | entier ≥ 0 | Total des possibilités **vérifiées** en attente de service |
 | `analysed_stock` | entier ≥ 0 | Total des possibilités dans le pool **en cours d'analyse** (distribuées aux pruners, pas encore acquittées) |
-| `max_result` | entier ≥ 0 | Meilleur résultat atteint (nombre de cases placées), 0 à 256 (ou 0 à 16 en build `ETERN_PARTS=16`) |
+| `max_result` | entier ≥ 0 | Meilleur niveau de curseur atteint (voir [le champ `alloc`](#le-champ-alloc)), 0 à 256 (ou 0 à 16 en build `ETERN_PARTS=16`) |
 | `active_threads` | entier ≥ 0 | Nombre de connexions clients actuellement servies (canal de travail **et** de contrôle confondus, cf. [dimensionnement](echanges_client_serveur.md#impact-sur-le-dimensionnement-du-serveur)) |
 | `pruner_checked` / `pruner_removed` | entier ≥ 0 | Toujours `0` côté serveur (ces compteurs n'existent que côté processus pruner ; conservés dans le schéma pour rester alignable avec `control_stats_t` du canal de contrôle) |
 | `queues` | tableau de 10 objets | Une entrée par file interne (`NB_FILE_POSSIBILITY`), avec ses trois compteurs par pool. L'ordre des entrées suit l'index de file (0 à 9), pas garanti trié par une autre clé |
@@ -470,7 +495,7 @@ s'intéresse qu'au débit ne doit pas la payer à chaque poll.
 | Champ | Type | Sens |
 |---|---|---|
 | `has_board` | booléen | `false` si le serveur n'a encore aucun plateau enregistré (juste après démarrage, sans `restore`) — `alloc`/`grid` absents dans ce cas |
-| `alloc` | entier | Nombre de pièces placées de ce plateau |
+| `alloc` | entier | Niveau du curseur de parcours de ce plateau (voir [le champ `alloc`](#le-champ-alloc)) — borne inférieure du nombre de pièces réellement posées, qu'on obtient en comptant les cases de `grid` qui ne valent pas `null` |
 | `grid` | tableau 2D | `grid[x][y]` : `null` si la case est vide, sinon la description de la pièce réellement posée — **jamais** l'indice brut interne (`id + ETERN_PARTS*rotation`, cf. `id_for_rotated_part`) |
 | `grid[x][y].id` | entier | Identifiant réel de la pièce (celui du fichier `pieces.csv`) |
 | `grid[x][y].rotation` | entier (0-3) | Rotation appliquée à la pièce dans cette orientation |
@@ -529,7 +554,7 @@ même client.
 | `connections_total` | entier | Nombre total de connexions (hellos de contrôle) observées pour cette machine depuis le démarrage du serveur |
 | `first_seen` / `last_seen` | entier | Horodatages Unix (secondes) de la première connexion et de la dernière activité observées |
 | `total_pruner_checked` / `total_pruner_removed` | entier ≥ 0 | Cumul, sur toutes les sessions passées **et** en cours de cette machine, des possibilités vérifiées/éliminées par le pruner. Calculé par **accroissement** observé à chaque `CTRL_STATS` (jamais par simple somme des valeurs instantanées) : un client qui redémarre voit son compteur par-processus repartir de 0, mais ce total continue de croître dessus au lieu d'être écrasé |
-| `best_max_result` | entier | Meilleur résultat (nombre de cases placées) jamais rapporté par cette machine, toutes sessions confondues — un **pic**, jamais remplacé par une valeur plus basse |
+| `best_max_result` | entier | Meilleur niveau de curseur (voir [le champ `alloc`](#le-champ-alloc)) jamais rapporté par cette machine, toutes sessions confondues — un **pic**, jamais remplacé par une valeur plus basse |
 | `cumulative_uptime_seconds` | entier ≥ 0 | Somme des durées de connexion des sessions déjà **terminées** de cette machine — n'inclut pas la durée de la session en cours tant qu'elle n'est pas close |
 
 **Cumul persisté** depuis PR5
@@ -542,7 +567,7 @@ locale**, sans aucun aller-retour réseau vers les clients.
 
 ### GET /api/v1/stock-distribution
 
-Répartition du stock par nombre de pièces déjà placées (`alloc`) — l'équivalent
+Répartition du stock par niveau de curseur de parcours (`alloc`, voir [le champ `alloc`](#le-champ-alloc)) — l'équivalent
 HTTP de la commande console `statistic`, qui elle ne fait qu'imprimer cet
 histogramme dans les journaux du serveur (voir [console](console.md)). Répond à
 la question « à quelle profondeur en est l'exploration ? », là où
@@ -567,7 +592,7 @@ meilleur plateau atteint.
 | `total_checked` | entier ≥ 0 | Total du pool **vérifié** (`checked_stock` de `/stats`) |
 | `total_analysed` | entier ≥ 0 | Total du pool **en cours d'analyse** (`analysed_stock` de `/stats`) |
 | `levels` | tableau | Un objet par niveau `alloc` **non vide**, trié par `alloc` croissant |
-| `levels[].alloc` | entier | Nombre de pièces placées de ces possibilités (0 à 256, ou 0 à 16 en build `ETERN_PARTS=16`) |
+| `levels[].alloc` | entier | Niveau du curseur de parcours de ces possibilités (voir [le champ `alloc`](#le-champ-alloc)), 0 à 256 (ou 0 à 16 en build `ETERN_PARTS=16`) |
 | `levels[].unchecked` / `checked` / `analysed` | entier ≥ 0 | Nombre de possibilités de ce niveau dans chacun des trois pools |
 
 **Les niveaux entièrement vides sont omis.** Sur les 257 niveaux possibles, un

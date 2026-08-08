@@ -448,7 +448,7 @@ int check_duplicate(void);
 #define STOCK_DISTRIBUTION_LEVELS (ETERN_PARTS + 1)
 
 /**
- * @brief Répartition du stock par nombre de pièces déjà placées (`alloc`).
+ * @brief Répartition du stock par niveau de curseur de parcours (`alloc`).
  *
  * Trois histogrammes indépendants, un par pool (non vérifié / vérifié / en
  * cours d'analyse), indexés par `alloc` (0 à `ETERN_PARTS` inclus). C'est la
