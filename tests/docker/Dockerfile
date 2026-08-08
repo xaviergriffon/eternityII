@@ -17,12 +17,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 # pipx + ca-certificates : installation de gcovr comme en CI (`pipx install`).
 # procps          : pkill, requis par tests/integration/run_solution_16.sh
 #                   et tests/integration/run_control_channel.sh.
+# crossbuild-essential-arm64 : gcc-aarch64-linux-gnu + libc6-dev-arm64-cross,
+#                   pour `make test-docker-arm` (compile-check du build ARM
+#                   64-bit d'un Raspberry Pi sans matériel ARM ni QEMU).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         python3 \
         pipx \
         ca-certificates \
         procps \
+        crossbuild-essential-arm64 \
     && rm -rf /var/lib/apt/lists/*
 
 # gcovr comme en CI (étape « Dépendance gcovr » du workflow).

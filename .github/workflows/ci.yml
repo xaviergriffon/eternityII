@@ -210,6 +210,27 @@ jobs:
           -DDEBUG_SIGNAL -DDEBUG_LOCAL_SOCKET -DDEBUG_IN_MONO_PROCESS
           -DDEBUG_COMMANDS -DDEBUG_THREAD"
 
+  arm64-build:
+    name: Build croisé ARM 64-bit (Raspberry Pi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # gcc-aarch64-linux-gnu (+ libc6-dev-arm64-cross) : compilateur et libc
+      # croisés pour aarch64, sans matériel ARM ni QEMU.
+      - name: Toolchain croisé aarch64
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      # Compile-check seul (le binaire ELF aarch64 n'est pas exécutable sur ce
+      # runner x86_64) : objectif, surfacer AVANT le push les diagnostics
+      # propres à ce couple arch/gcc — ex: -Wstringop-truncation/
+      # -Wformat-truncation, dont le calcul de taille d'objet (__builtin_object_size)
+      # sous -Ofast diffère de x86_64 (cf. commit "Remplace snprintf par memcpy
+      # pour éviter le faux positif -Wformat-truncation ARM/gcc"). WERROR=1
+      # bloque la CI sur tout warning gcc dans ce build.
+      - name: Build CC=aarch64-linux-gnu-gcc
+        run: make CC=aarch64-linux-gnu-gcc WERROR=1
+
   config-build:
     name: Build variantes de configuration
     runs-on: ubuntu-latest

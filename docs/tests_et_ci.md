@@ -11,6 +11,7 @@ fixtures, ajout d'un test) sont dans [tests/README.md](../tests/README.md).
 make test             # compile tests/ + lance la suite unitaire (code de sortie non nul si échec)
 make test-integration # scénarios bout-en-bout 16 pièces : solution client/serveur + canal de contrôle
 make test-docker      # rejoue les jobs de test CI dans un conteneur Linux (nécessite Docker)
+make test-docker-arm  # vérifie la compilation croisée ARM 64-bit (Raspberry Pi) dans le même conteneur (nécessite Docker)
 make coverage         # les deux passes (256 + 16) + résumé texte gcovr fusionné (nécessite gcovr)
 make coverage-256     # passe 256 pièces seule ; résumé gcov par module
 make coverage-report  # rapports gcovr : Cobertura XML + HTML + résumé Markdown
@@ -110,6 +111,41 @@ propriétaire entre la copie `/work` et l'utilisateur du build. Le garde-fou dan
 test reste par ailleurs utile en soi : il protège tout environnement root, conteneur
 maison compris.
 
+## Compilation croisée ARM (`make test-docker-arm`)
+
+Les diagnostics gcc ne sont pas portables d'une architecture à l'autre : un build
+propre sous macOS/clang et sous la CI x86_64/gcc peut quand même avertir sur
+ARM/gcc. `__builtin_object_size` (qui alimente `-Wstringop-truncation` et
+`-Wformat-truncation`) calcule ses bornes différemment selon l'architecture sous
+`-Ofast`, et peut retomber sur une borne pessimiste (le tableau englobant plutôt
+que le sous-objet indexé) sur une cible et pas une autre — c'est exactement ce qui
+s'est produit sur `http_known_clients_collect`/`http_clients_collect`
+([src/net/http_server.c](../src/net/http_server.c)) : `snprintf` déclenchait
+`-Wformat-truncation` sur un Raspberry Pi (aarch64) en restant muet partout
+ailleurs, corrigé en passant à `memcpy` (qui ne fait aucun raisonnement de
+longueur de chaîne) plus des `_Static_assert` verrouillant l'hypothèse de tailles
+identiques source/destination dont ce remplacement dépend.
+
+Détecter cette classe de bug ne demande ni matériel ARM ni émulation QEMU — seul
+le *compilateur* doit connaître le jeu d'instructions cible. `tests/docker/Dockerfile`
+embarque donc en plus `crossbuild-essential-arm64` (`gcc-aarch64-linux-gnu` +
+`libc6-dev-arm64-cross`), et le Makefile expose une variable `CC` (`?= gcc`,
+surchargeable) branchée uniquement sur les deux règles qui produisent l'exécutable
+de production (règle motif + édition de liens finale) — les binaires de
+test/couverture restent liés avec le gcc de l'hôte, puisqu'ils doivent encore
+*s'exécuter* localement :
+
+```sh
+make test-docker-arm                              # utilise aarch64-linux-gnu-gcc
+make test-docker-arm DOCKER_ARM_CC=<autre-gcc>     # toolchain croisé alternatif
+make test-docker-arm DOCKER_ARM_TEST_CMD="…"       # commande de remplacement
+```
+
+C'est une vérification de **compilation + édition de liens uniquement** : l'ELF
+aarch64 produit n'est pas exécutable sur le conteneur x86_64, donc ceci révèle des
+diagnostics du compilateur, pas un comportement à l'exécution — un vrai Raspberry
+Pi reste la référence pour ça.
+
 ## Intégration continue
 
 À chaque push et pull request, [GitHub Actions](../.github/workflows/ci.yml) :
@@ -124,10 +160,13 @@ maison compris.
   bloque la CI), pour qu'aucun chemin compilé sous condition ne se désynchronise en
   silence : la variante ncurses (`make NCURSES=1`), la variante CUDA (`make CUDA=1`
   puis `make CUDA=1 VERIFY=1`), un build activant **tous** les flags `DEBUG_*` de
-  [src/app/static_variables.h](../src/app/static_variables.h) à la fois, et les
-  configurations alternatives `ETERN_PARTS=16` (plateau 4×4) et `FORWARD_CHECK_K=0`
-  (forward-checking retiré). Toutes pilotées via `CPPFLAGS` (`-D…`), sans toucher la
-  source — ces `#define` sont gardés par `#ifndef` pour être surchargeables (voir
+  [src/app/static_variables.h](../src/app/static_variables.h) à la fois, la
+  compilation croisée ARM 64-bit (`make CC=aarch64-linux-gnu-gcc WERROR=1`, job
+  `arm64-build` — même principe que `make test-docker-arm` mais toolchain installée
+  directement sur le runner, sans Docker), et les configurations alternatives
+  `ETERN_PARTS=16` (plateau 4×4) et `FORWARD_CHECK_K=0` (forward-checking retiré).
+  Toutes pilotées via `CPPFLAGS` (`-D…`), sans toucher la source — ces `#define` sont
+  gardés par `#ifndef` pour être surchargeables (voir
   [Compilation](compilation.md#configuration-du-puzzle)).
 
 Le toolkit CUDA est installé sur le runner (action `Jimver/cuda-toolkit`) pour la

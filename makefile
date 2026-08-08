@@ -23,6 +23,12 @@ ifeq ($(detected_OS),Darwin)
 	OPTFLAGS := -O3 -ffast-math
 endif
 
+# Compilateur C. Surchargeable pour une compilation croisée (ex: CC=aarch64-linux-gnu-gcc
+# pour vérifier le build ARM 64-bit d'un Raspberry Pi depuis une machine x86 — voir
+# `make test-docker-arm`). N'affecte que la cible principale et sa règle motif : les
+# binaires de test/couverture restent liés avec gcc de l'hôte (ils s'exécutent localement).
+CC ?= gcc
+
 # Ajout d'une variable DEBUG pour activer ou désactiver les informations de débogage
 DEBUG ?= 0
 ifeq ($(DEBUG),1)
@@ -132,14 +138,14 @@ OBJS := \
 	$(CUDA_OBJ)
 
 $(EXECUTABLE): $(OBJS)
-	gcc -pthread -o $(EXECUTABLE) $(OBJS) ${CFLAGS} ${CPPFLAGS} $(NCURSES_LIB) $(CUDA_LIB)
+	$(CC) -pthread -o $(EXECUTABLE) $(OBJS) ${CFLAGS} ${CPPFLAGS} $(NCURSES_LIB) $(CUDA_LIB)
 	$(CLEAN_OBJS)
 
 # Règle motif : build/<domaine>/x.o à partir de src/<domaine>/x.c. -Isrc est
 # déjà dans CFLAGS. mkdir -p crée build/<domaine>/ à la volée.
 $(BUILD_DIR)/%.o: src/%.c
 	@mkdir -p $(dir $@)
-	gcc $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 # Compilation du module GPU (uniquement requis lorsque CUDA=1 ; cette règle n'est
 # jamais invoquée sans CUDA=1 car $(CUDA_OBJ) est alors vide).
@@ -288,6 +294,26 @@ test-docker:
 		-e ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
 		$(DOCKER_IMAGE) \
 		bash -ce 'cp -R /src/. /work && make clean && $(DOCKER_TEST_CMD)'
+
+# ---------------------------------------------------------------------------
+# Compilation croisée ARM 64-bit (Raspberry Pi OS 64-bit), même conteneur que
+# test-docker (crossbuild-essential-arm64 y est installé en plus). Compile ET
+# lie le binaire par défaut avec le compilateur GCC croisé aarch64-linux-gnu-gcc,
+# WERROR=1 — objectif : surfacer AVANT le push les diagnostics propres à ce
+# couple arch/gcc (ex: -Wstringop-truncation/-Wformat-truncation, dont le calcul
+# de taille d'objet diffère de x86_64 sous -Ofast) sans nécessiter de matériel
+# ARM ni QEMU. Compile-check seul : le binaire ELF aarch64 produit n'est pas
+# exécutable sur ce conteneur x86_64, à valider manuellement (Raspberry Pi).
+# ---------------------------------------------------------------------------
+DOCKER_ARM_CC      ?= aarch64-linux-gnu-gcc
+DOCKER_ARM_TEST_CMD ?= make clean && make CC=$(DOCKER_ARM_CC) WERROR=1
+.PHONY: test-docker-arm
+test-docker-arm:
+	$(DOCKER) build -t $(DOCKER_IMAGE) tests/docker
+	$(DOCKER) run --rm \
+		-v "$(CURDIR):/src:ro" \
+		$(DOCKER_IMAGE) \
+		bash -ce 'cp -R /src/. /work && $(DOCKER_ARM_TEST_CMD)'
 
 # ---------------------------------------------------------------------------
 # Couverture de code (gcov, intégré à gcc/clang — aucune install requise).
