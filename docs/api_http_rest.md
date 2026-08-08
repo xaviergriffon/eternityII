@@ -16,7 +16,8 @@ Le code correspondant vit dans :
 - [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_allowed`, `control_command_privileged`) — listes blanches des commandes ; `control_command_allowed` est **partagée** avec le canal de contrôle binaire, `control_command_privileged` (restore/backup) ne l'est **pas** (accessible uniquement via cette API, jamais via le canal de contrôle) ;
 - [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) (`control_registry_snapshot`, `control_registry_record_stats`, `control_registry_broadcast_get_stats`) — registre des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), source de `GET /api/v1/clients` et `POST /api/v1/clients/stats` ;
 - [src/app/known_clients_registry.h](../src/app/known_clients_registry.h) / [known_clients_registry.c](../src/app/known_clients_registry.c) (`known_clients_registry_snapshot`) — [registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus) (cumul par `machine_uid`, survit à la déconnexion), source de `GET /api/v1/known-clients` ;
-- [src/core/best_board.h](../src/core/best_board.h) / [best_board.c](../src/core/best_board.c) (`g_server_best_board`) — représentation du meilleur plateau connu, source de `GET /api/v1/best-board`.
+- [src/core/best_board.h](../src/core/best_board.h) / [best_board.c](../src/core/best_board.c) (`g_server_best_board`) — représentation du meilleur plateau connu, source de `GET /api/v1/best-board` ;
+- [src/core/datamanager.c](../src/core/datamanager.c) (`datamanager_stock_distribution`) — répartition du stock par `alloc`, source **partagée** de `GET /api/v1/stock-distribution` et de la commande console `statistic`.
 
 ## Activation
 
@@ -102,7 +103,7 @@ Connection: close
 |---|---|---|
 | `200` | OK | Requête traitée avec succès |
 | `400` | Bad Request | Requête HTTP malformée, ou `POST /api/v1/command` avec un champ `command` absent/invalide/aux arguments manquants |
-| `401` | Unauthorized | `POST /api/v1/command` avec une commande **privilégiée** (`restore`, `backup`) sans jeton Bearer valide (absent, invalide, ou aucun jeton configuré côté serveur) — porte l'en-tête `WWW-Authenticate: Bearer` |
+| `401` | Unauthorized | `POST /api/v1/command` avec une commande de **modification** (toutes sauf `clientsWork`, voir [Authentification](#authentification)) sans jeton Bearer valide (absent, invalide, ou aucun jeton configuré côté serveur) — porte l'en-tête `WWW-Authenticate: Bearer` |
 | `403` | Forbidden | Commande reconnue mais hors des deux listes blanches (ex. `exit`) |
 | `404` | Not Found | Chemin inconnu |
 | `405` | Method Not Allowed | Chemin connu, mauvaise méthode HTTP (ex. `POST /api/v1/stats`) |
@@ -112,6 +113,31 @@ Les corps d'erreur ont la forme `{"error":"<message>"}` ; un succès de commande
 renvoie `{"result":"ok"}`. Les messages d'erreur sont informatifs mais **non
 contractuels** (ne pas faire de correspondance exacte de chaîne côté client — se fier
 au code de statut HTTP).
+
+<a id="le-champ-alloc"></a>
+### Le champ `alloc` (et `max_result`)
+
+Plusieurs routes exposent `alloc` — ou sa variante « meilleur atteint »,
+`max_result`/`best_max_result`. C'est le **niveau du curseur de parcours** : le
+nombre de cases du parcours `directions[]` déjà franchies par cette possibilité,
+de `0` (état genèse) à `ETERN_PARTS` (256, ou 16 en build `ETERN_PARTS=16`).
+
+Dans le chemin de recherche normal, avancer d'un cran revient à poser exactement
+une pièce : le niveau **est** alors le nombre de pièces posées sur le plateau, et
+les deux lectures se confondent. **Elles peuvent diverger après un passage du
+pruner** : `possibility_all_has_a_next` ([src/core/possibility.c](../src/core/possibility.c))
+pose les pièces *forcées* (les cases où une seule pièce candidate subsiste) sans
+avancer le curseur, pour que la recherche reprenne au même point. L'invariant
+vérifié par `check_possibility` est donc une inégalité, pas une égalité :
+
+```
+pièces réellement posées sur le plateau  ≥  alloc  (niveau du curseur)
+```
+
+Autrement dit, `alloc` est une **borne inférieure** du nombre de pièces posées,
+exacte dans le cas courant. Un consommateur qui veut le nombre exact de pièces
+d'un plateau doit compter les cases de `grid` qui ne valent pas `null` (voir
+[`GET /api/v1/best-board`](#get-apiv1best-board)), pas lire `alloc`.
 
 ## Endpoints
 
@@ -142,7 +168,7 @@ Instantané de la télémétrie serveur courante.
 | `possibility_stock` | entier ≥ 0 | Total des possibilités **non vérifiées** en stock (somme des 10 files) |
 | `checked_stock` | entier ≥ 0 | Total des possibilités **vérifiées** en attente de service |
 | `analysed_stock` | entier ≥ 0 | Total des possibilités dans le pool **en cours d'analyse** (distribuées aux pruners, pas encore acquittées) |
-| `max_result` | entier ≥ 0 | Meilleur résultat atteint (nombre de cases placées), 0 à 256 (ou 0 à 16 en build `ETERN_PARTS=16`) |
+| `max_result` | entier ≥ 0 | Meilleur niveau de curseur atteint (voir [le champ `alloc`](#le-champ-alloc)), 0 à 256 (ou 0 à 16 en build `ETERN_PARTS=16`) |
 | `active_threads` | entier ≥ 0 | Nombre de connexions clients actuellement servies (canal de travail **et** de contrôle confondus, cf. [dimensionnement](echanges_client_serveur.md#impact-sur-le-dimensionnement-du-serveur)) |
 | `pruner_checked` / `pruner_removed` | entier ≥ 0 | Toujours `0` côté serveur (ces compteurs n'existent que côté processus pruner ; conservés dans le schéma pour rester alignable avec `control_stats_t` du canal de contrôle) |
 | `queues` | tableau de 10 objets | Une entrée par file interne (`NB_FILE_POSSIBILITY`), avec ses trois compteurs par pool. L'ordre des entrées suit l'index de file (0 à 9), pas garanti trié par une autre clé |
@@ -469,7 +495,7 @@ s'intéresse qu'au débit ne doit pas la payer à chaque poll.
 | Champ | Type | Sens |
 |---|---|---|
 | `has_board` | booléen | `false` si le serveur n'a encore aucun plateau enregistré (juste après démarrage, sans `restore`) — `alloc`/`grid` absents dans ce cas |
-| `alloc` | entier | Nombre de pièces placées de ce plateau |
+| `alloc` | entier | Niveau du curseur de parcours de ce plateau (voir [le champ `alloc`](#le-champ-alloc)) — borne inférieure du nombre de pièces réellement posées, qu'on obtient en comptant les cases de `grid` qui ne valent pas `null` |
 | `grid` | tableau 2D | `grid[x][y]` : `null` si la case est vide, sinon la description de la pièce réellement posée — **jamais** l'indice brut interne (`id + ETERN_PARTS*rotation`, cf. `id_for_rotated_part`) |
 | `grid[x][y].id` | entier | Identifiant réel de la pièce (celui du fichier `pieces.csv`) |
 | `grid[x][y].rotation` | entier (0-3) | Rotation appliquée à la pièce dans cette orientation |
@@ -528,7 +554,7 @@ même client.
 | `connections_total` | entier | Nombre total de connexions (hellos de contrôle) observées pour cette machine depuis le démarrage du serveur |
 | `first_seen` / `last_seen` | entier | Horodatages Unix (secondes) de la première connexion et de la dernière activité observées |
 | `total_pruner_checked` / `total_pruner_removed` | entier ≥ 0 | Cumul, sur toutes les sessions passées **et** en cours de cette machine, des possibilités vérifiées/éliminées par le pruner. Calculé par **accroissement** observé à chaque `CTRL_STATS` (jamais par simple somme des valeurs instantanées) : un client qui redémarre voit son compteur par-processus repartir de 0, mais ce total continue de croître dessus au lieu d'être écrasé |
-| `best_max_result` | entier | Meilleur résultat (nombre de cases placées) jamais rapporté par cette machine, toutes sessions confondues — un **pic**, jamais remplacé par une valeur plus basse |
+| `best_max_result` | entier | Meilleur niveau de curseur (voir [le champ `alloc`](#le-champ-alloc)) jamais rapporté par cette machine, toutes sessions confondues — un **pic**, jamais remplacé par une valeur plus basse |
 | `cumulative_uptime_seconds` | entier ≥ 0 | Somme des durées de connexion des sessions déjà **terminées** de cette machine — n'inclut pas la durée de la session en cours tant qu'elle n'est pas close |
 
 **Cumul persisté** depuis PR5
@@ -538,6 +564,55 @@ même client.
 d'avoir exécuté la commande console `restore` (aucun chargement automatique
 au démarrage). Comme `GET /api/v1/clients`, cette lecture est **synchrone et
 locale**, sans aucun aller-retour réseau vers les clients.
+
+### GET /api/v1/stock-distribution
+
+Répartition du stock par niveau de curseur de parcours (`alloc`, voir [le champ `alloc`](#le-champ-alloc)) — l'équivalent
+HTTP de la commande console `statistic`, qui elle ne fait qu'imprimer cet
+histogramme dans les journaux du serveur (voir [console](console.md)). Répond à
+la question « à quelle profondeur en est l'exploration ? », là où
+`GET /api/v1/stats` ne donne que des totaux et `GET /api/v1/best-board` que le
+meilleur plateau atteint.
+
+```json
+{
+  "total_unchecked": 5312,
+  "total_checked": 40,
+  "total_analysed": 12,
+  "levels": [
+    { "alloc": 3, "unchecked": 12,   "checked": 0,  "analysed": 0 },
+    { "alloc": 4, "unchecked": 5300, "checked": 40, "analysed": 12 }
+  ]
+}
+```
+
+| Champ | Type | Sens |
+|---|---|---|
+| `total_unchecked` | entier ≥ 0 | Total du pool **non vérifié** — même valeur que `possibility_stock` de `GET /api/v1/stats` |
+| `total_checked` | entier ≥ 0 | Total du pool **vérifié** (`checked_stock` de `/stats`) |
+| `total_analysed` | entier ≥ 0 | Total du pool **en cours d'analyse** (`analysed_stock` de `/stats`) |
+| `levels` | tableau | Un objet par niveau `alloc` **non vide**, trié par `alloc` croissant |
+| `levels[].alloc` | entier | Niveau du curseur de parcours de ces possibilités (voir [le champ `alloc`](#le-champ-alloc)), 0 à 256 (ou 0 à 16 en build `ETERN_PARTS=16`) |
+| `levels[].unchecked` / `checked` / `analysed` | entier ≥ 0 | Nombre de possibilités de ce niveau dans chacun des trois pools |
+
+**Les niveaux entièrement vides sont omis.** Sur les 257 niveaux possibles, un
+serveur réel n'en occupe qu'une poignée : les émettre tous n'apporterait que des
+zéros et ferait frôler la borne de réponse de 32 Ko. Un stock entièrement vide
+donne donc `"levels": []`, jamais une erreur — les trois totaux, eux, sont
+toujours présents. Un client ne doit donc **pas** supposer que l'index d'une
+entrée dans `levels` vaut son `alloc` : lire le champ `alloc`.
+
+Contrairement à `GET /api/v1/stats` (simple lecture de compteurs déjà tenus à
+jour), cette route **parcourt toutes les files sous verrou** — c'est précisément
+pourquoi elle est une requête dédiée et non des champs supplémentaires de
+`/stats` : un consommateur qui ne poll que le débit ne doit pas payer ce
+parcours. À réserver à un usage occasionnel, pas à une boucle de polling serrée.
+
+L'instantané n'est **pas atomique entre les pools** : les deux pools de stock
+sont lus sous une famille de verrous, le pool analysé sous une autre, jamais les
+deux en même temps (discipline de verrouillage de `datamanager.c`). Une
+possibilité servie à un client pile entre les deux passes peut donc être comptée
+deux fois ou pas du tout. C'est une donnée d'observation, pas une comptabilité.
 
 ## Séquences typiques
 
@@ -637,6 +712,7 @@ sequenceDiagram
 curl http://127.0.0.1:8080/api/v1/stats
 curl http://127.0.0.1:8080/api/v1/status
 curl http://127.0.0.1:8080/api/v1/clients
+curl http://127.0.0.1:8080/api/v1/stock-distribution      # répartition du stock par alloc (usage occasionnel)
 curl -X POST http://127.0.0.1:8080/api/v1/clients/stats   # puis relire /clients pour les stats rafraîchies
 curl -X POST -d '{"command":"clientsWork beta"}' http://127.0.0.1:8080/api/v1/command   # lecture seule -> {"result":"ok"}, résultat dans les journaux serveur
 

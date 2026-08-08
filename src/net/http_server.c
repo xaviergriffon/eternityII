@@ -105,6 +105,22 @@ void http_stats_collect(http_stats_view_t *out)
     out->analysed_stock = analysed_total;
 }
 
+void http_stock_distribution_collect(http_stock_distribution_view_t *out)
+{
+    stock_distribution_t distribution;
+    datamanager_stock_distribution(&distribution);
+
+    memset(out, 0, sizeof(*out));
+    for (int level = 0; level < STOCK_DISTRIBUTION_LEVELS; level++) {
+        out->unchecked[level] = distribution.unchecked[level];
+        out->checked[level] = distribution.checked[level];
+        out->analysed[level] = distribution.analysed[level];
+    }
+    out->total_unchecked = distribution.total_unchecked;
+    out->total_checked = distribution.total_checked;
+    out->total_analysed = distribution.total_analysed;
+}
+
 static const char *state_label(int r)
 {
     switch (r) {
@@ -477,6 +493,16 @@ int handle_http_connection(int socket_id)
             http_known_client_info_t infos[MAX_KNOWN_CLIENTS];
             int n = http_known_clients_collect(infos, MAX_KNOWN_CLIENTS);
             if (http_json_format_known_clients(json, sizeof(json), infos, n) > 0) {
+                send_response(socket_id, 200, json);
+            } else {
+                send_response(socket_id, 500, "{\"error\":\"internal\"}");
+            }
+            break;
+        }
+        case HTTP_ROUTE_STOCK_DISTRIBUTION: {
+            http_stock_distribution_view_t view;
+            http_stock_distribution_collect(&view);
+            if (http_json_format_stock_distribution(json, sizeof(json), &view) > 0) {
                 send_response(socket_id, 200, json);
             } else {
                 send_response(socket_id, 500, "{\"error\":\"internal\"}");

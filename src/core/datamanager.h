@@ -439,6 +439,57 @@ int check_datas(void);
 int check_duplicate(void);
 
 /**
+ * @brief Nombre de niveaux d'un histogramme de répartition par `alloc`.
+ *
+ * `+1` : `alloc` peut valoir `ETERN_PARTS` (plateau complet, ex. import d'un
+ * `.back` complet où `normalize_possibility_packet` ne réduit pas `alloc` faute
+ * de trou), donc les niveaux valides vont de 0 à ETERN_PARTS inclus.
+ */
+#define STOCK_DISTRIBUTION_LEVELS (ETERN_PARTS + 1)
+
+/**
+ * @brief Répartition du stock par niveau de curseur de parcours (`alloc`).
+ *
+ * Trois histogrammes indépendants, un par pool (non vérifié / vérifié / en
+ * cours d'analyse), indexés par `alloc` (0 à `ETERN_PARTS` inclus). C'est la
+ * donnée que la commande console `statistic` imprime — et que
+ * `GET /api/v1/stock-distribution` sérialise en JSON.
+ */
+typedef struct {
+    /// Nombre de possibilités du pool non vérifié ayant cet `alloc`.
+    unsigned long long unchecked[STOCK_DISTRIBUTION_LEVELS];
+    /// Nombre de possibilités du pool vérifié (`checked == 1`) ayant cet `alloc`.
+    unsigned long long checked[STOCK_DISTRIBUTION_LEVELS];
+    /// Nombre de possibilités du pool « en cours d'analyse » ayant cet `alloc`.
+    unsigned long long analysed[STOCK_DISTRIBUTION_LEVELS];
+    /// Somme de `unchecked[]` (== `possibility_stock` de `GET /api/v1/stats`).
+    unsigned long long total_unchecked;
+    /// Somme de `checked[]`.
+    unsigned long long total_checked;
+    /// Somme de `analysed[]`.
+    unsigned long long total_analysed;
+} stock_distribution_t;
+
+/**
+ * @brief Construit la répartition du stock par `alloc` (cf. `stock_distribution_t`).
+ *
+ * Deux passes de verrouillage SUCCESSIVES, jamais imbriquées : les deux pools
+ * de stock sous `lock_all_file()`, puis le pool analysé sous
+ * `lock_all_file_analysed()` — même discipline que partout ailleurs dans ce
+ * module (les deux familles de verrous ne sont jamais tenues ensemble).
+ * Conséquence assumée : l'instantané n'est pas atomique ENTRE le stock et le
+ * pool analysé, une possibilité servie pile entre les deux passes peut être
+ * comptée deux fois ou zéro fois. C'est une donnée d'observation, pas une
+ * source de vérité comptable.
+ *
+ * Verrous bloquants (pas de `trylock`) : chemin de diagnostic/console, on veut
+ * une réponse exacte, pas rendre la main.
+ *
+ * @param out Répartition à remplir (remise à zéro par la fonction ; NULL toléré, no-op).
+ */
+void datamanager_stock_distribution(stock_distribution_t *out);
+
+/**
  * @brief Affiche des statistiques sur la distribution des possibilités par `alloc`.
  * @return 0.
  */

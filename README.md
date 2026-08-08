@@ -55,7 +55,7 @@ Prérequis : `gcc`, `make`, pthreads (disponibles en standard sur macOS et Linux
 ./eternityII test
 ```
 
-Options transverses : `--stop-on-solution` (s'arrêter à la première solution ; par défaut la recherche continue), `--headless` (pas de console interactive — utile en service systemd), côté client/pruner `--name <label>` (identité affichée côté serveur, défaut le nom d'hôte) et `--machine-uid-file <chemin>` (identité machine persistante, défaut `./eternityii-machine_uid`), et côté serveur `--http-port N` pour activer l'API HTTP REST admin sur `127.0.0.1:N`, éventuellement complétée par `--http-token-file <chemin>` pour exiger un jeton Bearer sur les deux commandes admin privilégiées (`restore`, `backup`). L'aide intégrée est accessible via `./eternityII --help` (aide générale) et `./eternityII help <sujet>` (détail d'un mode ou d'une option).
+Options transverses : `--stop-on-solution` (s'arrêter à la première solution ; par défaut la recherche continue), `--headless` (pas de console interactive — utile en service systemd), côté client/pruner `--name <label>` (identité affichée côté serveur, défaut le nom d'hôte) et `--machine-uid-file <chemin>` (identité machine persistante, défaut `./eternityii-machine_uid`), et côté serveur `--http-port N` pour activer l'API HTTP REST admin sur `127.0.0.1:N`, éventuellement complétée par `--http-token-file <chemin>` pour exiger un jeton Bearer sur toutes les commandes admin de modification (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`, `restore`, `backup` — seules les lectures restent ouvertes). L'aide intégrée est accessible via `./eternityII --help` (aide générale) et `./eternityII help <sujet>` (détail d'un mode ou d'une option).
 
 > Détails (paramètres et défauts de chaque mode, expansion anti-famine, échange par lots des pruners, format du fichier de pièces, fichiers générés `.back`/`solution_*`/`events.log`, limitations connues) : [docs/utilisation.md](docs/utilisation.md).
 
@@ -104,7 +104,7 @@ Ces documents décrivent le comportement **implémenté** :
 | [docs/utilisation.md](docs/utilisation.md) | Modes d'exécution et leurs paramètres, fichiers manipulés, limitations connues. |
 | [docs/console.md](docs/console.md) | Commandes interactives, zone Events, historique, interface ncurses. |
 | [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Protocole TCP client/serveur : instructions, gestion de charge, séquences, pannes, et le [canal de contrôle](docs/echanges_client_serveur.md#canal-de-contrôle-v9) (v9). |
-| [docs/api_http_rest.md](docs/api_http_rest.md) | API HTTP REST admin (`--http-port`) : schémas JSON complets, codes d'erreur, authentification par jeton Bearer des commandes privilégiées (`--http-token-file`), exemples client (curl, Python). |
+| [docs/api_http_rest.md](docs/api_http_rest.md) | API HTTP REST admin (`--http-port`) : schémas JSON complets (télémétrie, clients, meilleur plateau, répartition du stock), codes d'erreur, authentification par jeton Bearer des commandes de modification (`--http-token-file`), exemples client (curl, Python). |
 | [docs/autosearch_step.md](docs/autosearch_step.md) | Flux de recherche (`autosearch_step`) et gestion mémoire d'un thread de recherche. |
 | [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | Pruner GPU (`pruner --gpu`) : prérequis de compilation et d'exécution, flux CUDA, avantages. |
 | [docs/tests_et_ci.md](docs/tests_et_ci.md) | Cibles de test, intégration bout-en-bout, Docker, couverture, CI, banc de mesure du débit de recherche. |

@@ -145,6 +145,7 @@ TEST http_route_resolve_known_routes(void)
     ASSERT_EQ_FMT(HTTP_ROUTE_CLIENTS, http_route_resolve("GET", "/api/v1/clients"), "%d");
     ASSERT_EQ_FMT(HTTP_ROUTE_CLIENTS_STATS, http_route_resolve("POST", "/api/v1/clients/stats"), "%d");
     ASSERT_EQ_FMT(HTTP_ROUTE_KNOWN_CLIENTS, http_route_resolve("GET", "/api/v1/known-clients"), "%d");
+    ASSERT_EQ_FMT(HTTP_ROUTE_STOCK_DISTRIBUTION, http_route_resolve("GET", "/api/v1/stock-distribution"), "%d");
     PASS();
 }
 
@@ -161,6 +162,7 @@ TEST http_route_resolve_bad_method(void)
     ASSERT_EQ_FMT(HTTP_ROUTE_BAD_METHOD, http_route_resolve("POST", "/api/v1/clients"), "%d");
     ASSERT_EQ_FMT(HTTP_ROUTE_BAD_METHOD, http_route_resolve("GET", "/api/v1/clients/stats"), "%d");
     ASSERT_EQ_FMT(HTTP_ROUTE_BAD_METHOD, http_route_resolve("POST", "/api/v1/known-clients"), "%d");
+    ASSERT_EQ_FMT(HTTP_ROUTE_BAD_METHOD, http_route_resolve("POST", "/api/v1/stock-distribution"), "%d");
     PASS();
 }
 
@@ -286,6 +288,116 @@ TEST http_json_format_stats_buffer_too_small_fails(void)
     char buf[8];
     int n = http_json_format_stats(buf, sizeof(buf), &view);
     ASSERT_EQ_FMT(-1, n, "%d");
+    PASS();
+}
+
+/* ---------- http_json_format_stock_distribution ----------------------------- */
+
+TEST http_json_format_stock_distribution_golden(void)
+{
+    http_stock_distribution_view_t view;
+    memset(&view, 0, sizeof(view));
+    view.unchecked[3] = 12;
+    view.checked[3] = 4;
+    view.analysed[3] = 1;
+    view.unchecked[5] = 7;
+    view.total_unchecked = 19;
+    view.total_checked = 4;
+    view.total_analysed = 1;
+
+    char buf[4096];
+    int n = http_json_format_stock_distribution(buf, sizeof(buf), &view);
+
+    ASSERT(n > 0);
+    ASSERT(strstr(buf, "\"total_unchecked\":19") != NULL);
+    ASSERT(strstr(buf, "\"total_checked\":4") != NULL);
+    ASSERT(strstr(buf, "\"total_analysed\":1") != NULL);
+    ASSERT(strstr(buf, "\"levels\":[{\"alloc\":3,\"unchecked\":12,\"checked\":4,\"analysed\":1},"
+                       "{\"alloc\":5,\"unchecked\":7,\"checked\":0,\"analysed\":0}]}") != NULL);
+    PASS();
+}
+
+/* Les niveaux entièrement vides sont OMIS : c'est ce qui garde la réponse
+ * petite malgré les 257 niveaux possibles (cf. doc de la fonction). */
+TEST http_json_format_stock_distribution_skips_empty_levels(void)
+{
+    http_stock_distribution_view_t view;
+    memset(&view, 0, sizeof(view));
+    view.analysed[0] = 1;              /* seul le niveau 0 est peuplé... */
+    view.unchecked[STOCK_DISTRIBUTION_LEVELS - 1] = 2; /* ...et le dernier */
+    view.total_analysed = 1;
+    view.total_unchecked = 2;
+
+    char buf[4096];
+    int n = http_json_format_stock_distribution(buf, sizeof(buf), &view);
+
+    ASSERT(n > 0);
+    int level_count = 0;
+    const char *cursor = buf;
+    while ((cursor = strstr(cursor, "\"alloc\":")) != NULL) {
+        level_count++;
+        cursor += strlen("\"alloc\":");
+    }
+    ASSERT_EQ_FMT(2, level_count, "%d");
+    PASS();
+}
+
+/* Stock vide -> tableau vide (jamais absent), totaux à zéro toujours présents. */
+TEST http_json_format_stock_distribution_empty_is_empty_array(void)
+{
+    http_stock_distribution_view_t view;
+    memset(&view, 0, sizeof(view));
+
+    char buf[512];
+    int n = http_json_format_stock_distribution(buf, sizeof(buf), &view);
+
+    ASSERT(n > 0);
+    ASSERT(strstr(buf, "\"levels\":[]}") != NULL);
+    ASSERT(strstr(buf, "\"total_unchecked\":0") != NULL);
+    PASS();
+}
+
+/* Pire cas réaliste : TOUS les niveaux peuplés, compteurs à 9 chiffres (borne
+ * pratique : un niveau ne peut pas contenir plus de possibilités que la RAM
+ * n'en héberge). Doit tenir dans HTTP_RESPONSE_MAX, sinon la route répond 500. */
+TEST http_json_format_stock_distribution_dense_fits_response_buffer(void)
+{
+    http_stock_distribution_view_t view;
+    memset(&view, 0, sizeof(view));
+    for (int i = 0; i < STOCK_DISTRIBUTION_LEVELS; i++) {
+        view.unchecked[i] = 999999999ULL;
+        view.checked[i] = 999999999ULL;
+        view.analysed[i] = 999999999ULL;
+    }
+
+    static char buf[HTTP_RESPONSE_MAX];
+    int n = http_json_format_stock_distribution(buf, sizeof(buf), &view);
+
+    ASSERT(n > 0);
+    ASSERT((size_t)n < sizeof(buf));
+    PASS();
+}
+
+TEST http_json_format_stock_distribution_buffer_too_small_fails(void)
+{
+    http_stock_distribution_view_t view;
+    memset(&view, 0, sizeof(view));
+    view.unchecked[2] = 1;
+
+    char buf[8];
+    ASSERT_EQ_FMT(-1, http_json_format_stock_distribution(buf, sizeof(buf), &view), "%d");
+    PASS();
+}
+
+TEST http_json_format_stock_distribution_null_args_fail(void)
+{
+    http_stock_distribution_view_t view;
+    memset(&view, 0, sizeof(view));
+    char buf[256];
+
+    ASSERT_EQ_FMT(-1, http_json_format_stock_distribution(NULL, sizeof(buf), &view), "%d");
+    ASSERT_EQ_FMT(-1, http_json_format_stock_distribution(buf, 0, &view), "%d");
+    ASSERT_EQ_FMT(-1, http_json_format_stock_distribution(buf, sizeof(buf), NULL), "%d");
     PASS();
 }
 
@@ -812,6 +924,12 @@ SUITE(http_codec_suite)
 
     RUN_TEST(http_json_format_stats_golden);
     RUN_TEST(http_json_format_stats_buffer_too_small_fails);
+    RUN_TEST(http_json_format_stock_distribution_golden);
+    RUN_TEST(http_json_format_stock_distribution_skips_empty_levels);
+    RUN_TEST(http_json_format_stock_distribution_empty_is_empty_array);
+    RUN_TEST(http_json_format_stock_distribution_dense_fits_response_buffer);
+    RUN_TEST(http_json_format_stock_distribution_buffer_too_small_fails);
+    RUN_TEST(http_json_format_stock_distribution_null_args_fail);
     RUN_TEST(http_json_format_status_golden);
     RUN_TEST(http_json_format_status_buffer_too_small_fails);
     RUN_TEST(http_json_format_status_null_state_fails);

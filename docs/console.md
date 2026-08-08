@@ -81,7 +81,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `print [fichier]` | Affiche toutes les files au format JSON, ou les exporte dans `fichier` |
 | `printFile N [fichier]` | Affiche le contenu de la file numéro `N`, ou l'exporte dans `fichier` |
 | `printAnalysed [fichier]` | Affiche les possibilités en cours d'analyse, ou les exporte dans `fichier` |
-| `statistic` | Affiche des statistiques sur le contenu des files (alias : `stats`) |
+| `statistic` | Affiche la répartition du stock par niveau de curseur de parcours (`alloc`, voir [le champ `alloc`](api_http_rest.md#le-champ-alloc)), pools non vérifié et vérifié confondus (alias : `stats`). Non exécutable à distance (ni canal de contrôle, ni `POST /api/v1/command`) puisqu'elle n'écrit que dans les journaux ; l'équivalent exploitable par une application tierce est [`GET /api/v1/stock-distribution`](api_http_rest.md#get-apiv1stock-distribution), qui expose la même donnée en JSON, en distinguant en plus le pool « en cours d'analyse » |
 | `checkDatas` | Vérifie l'intégrité des possibilités |
 | `checkDuplicate` | Recherche les doublons dans les files |
 | `checkFiles` | Vérifie l'intégrité de toutes les files |
