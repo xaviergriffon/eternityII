@@ -240,11 +240,16 @@ int control_command_allowed(const char *command_name);
  *        JAMAIS via le canal de contrôle binaire (`CTRL_COMMAND`), qui reste
  *        strictement borné à `control_command_allowed`.
  *
- * Ne contient que "restore" et "backup" : les deux seules commandes de
- * `command_lines.c` capables de remplacer/écraser l'état du serveur (fichiers
- * `.back`), donc jamais accessibles sans preuve d'identité. Toujours disjointe
- * de `control_command_allowed` — une commande n'est jamais dans les deux
- * listes à la fois.
+ * Contient "restore" et "backup" (les deux seules commandes de
+ * `command_lines.c` capables de remplacer/écraser l'état du serveur, fichiers
+ * `.back`) ainsi que "sortAsc", "sortDesc", "sortDescMulti", "split" et
+ * "regroup" : ces cinq dernières ne remplacent aucun fichier mais réorganisent
+ * en bloc, sous verrou, l'ensemble du stock de possibilités du serveur — un
+ * effet de bord suffisamment large (et potentiellement coûteux, `sortDescMulti`
+ * est multi-thread) pour justifier la même preuve d'identité que restore/backup
+ * plutôt que le simple niveau "standard" de `control_command_allowed`. Toujours
+ * disjointe de `control_command_allowed` — une commande n'est jamais dans les
+ * deux listes à la fois.
  *
  * Même style que `control_command_allowed` : compare uniquement le premier
  * mot de `command_name`, gère `NULL` explicitement (retourne 0).
