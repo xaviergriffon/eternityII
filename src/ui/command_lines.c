@@ -1033,6 +1033,32 @@ int admin_apply_privileged_command(const char *line) {
             restore_apply(file != NULL ? file : DEF_FILE,
                            analyse_file != NULL ? analyse_file : DEF_ANALYSE_FILE);
             result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "sortAsc") == 0) {
+            // sort_ascending()/sort_descending()/sort_descending_mthread()/
+            // split_datas()/regroup_datas() ne touchent jamais strtok : appelés
+            // directement (pas via leur *_interpreter, qui pour sortDesc lit un
+            // argument optionnel via le curseur global strtok) pour rester
+            // réentrant, même raison que backup_interpreter/restore_apply ci-dessus.
+            sort_ascending();
+            result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "sortDesc") == 0) {
+            char *arg = strtok_r(NULL, " ", &save);
+            if (arg != NULL) {
+                int n_file = atoi(arg);
+                sort_d_mono(&n_file);
+            } else {
+                sort_descending();
+            }
+            result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "sortDescMulti") == 0) {
+            sort_descending_mthread();
+            result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "split") == 0) {
+            split_datas();
+            result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "regroup") == 0) {
+            regroup_datas();
+            result = ADMIN_CMD_OK;
         }
     }
 

@@ -1920,6 +1920,58 @@ TEST admin_apply_privileged_command_backup_restore_round_trip(void)
     PASS();
 }
 
+/* sortAsc/sortDesc/sortDescMulti/split/regroup : privilégiées comme
+   restore/backup (control_command_privileged) -- refusées via le chemin
+   standard non authentifié, acceptées et appliquées via le chemin privilégié. */
+TEST admin_apply_remote_command_rejects_sort_group_split(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("sortAsc"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("sortDesc"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("sortDescMulti"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("split"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("regroup"), "%d");
+    PASS();
+}
+
+TEST admin_apply_privileged_command_split_regroup_round_trip(void)
+{
+    dm_drain();
+    int allocs[10];
+    for (int i = 0; i < 10; i++) allocs[i] = i + 1;
+    dm_add(allocs, 10);
+
+    ASSERT_EQ_FMT(10ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(10ULL, file_size(0), "%llu"); /* tout dans le pool 0 au depart */
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("split"), "%d");
+    ASSERT_EQ_FMT(10ULL, datas_size(), "%llu");
+    ASSERT(file_size(0) < 10); /* reparti sur plusieurs files */
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("regroup"), "%d");
+    ASSERT_EQ_FMT(10ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(10ULL, file_size(0), "%llu"); /* re-consolide dans le pool 0 */
+
+    dm_drain();
+    PASS();
+}
+
+TEST admin_apply_privileged_command_sorts_run(void)
+{
+    dm_drain();
+    int allocs[3] = { 3, 1, 2 };
+    dm_add(allocs, 3);
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("sortAsc"), "%d");
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("sortDesc"), "%d");
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("sortDescMulti"), "%d");
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+
+    dm_drain();
+    PASS();
+}
+
 SUITE(command_lines_suite)
 {
     RUN_TEST(do_command_line_handles_empty_input);
@@ -2021,4 +2073,7 @@ SUITE(command_lines_suite)
     RUN_TEST(admin_apply_privileged_command_still_handles_standard_commands);
     RUN_TEST(admin_apply_privileged_command_rejects_others);
     RUN_TEST(admin_apply_privileged_command_backup_restore_round_trip);
+    RUN_TEST(admin_apply_remote_command_rejects_sort_group_split);
+    RUN_TEST(admin_apply_privileged_command_split_regroup_round_trip);
+    RUN_TEST(admin_apply_privileged_command_sorts_run);
 }
