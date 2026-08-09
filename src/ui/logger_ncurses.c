@@ -48,6 +48,7 @@
 #include "ui/command_history.h"
 #include "ui/line_edit.h"
 #include "app/static_variables.h"
+#include "app/fork_gate.h"
 #include "net/ipc_protocol.h"
 
 /* ------------------------------------------------------------------------- */
@@ -538,6 +539,18 @@ void flush_debug(void)   {}
 void flush_error(void)   {}
 void flush_info(void)    {}
 
+/** @brief Prend `output_mutex` — cf. logger.h pour le contrat complet. */
+void logger_lock_output(void)
+{
+    pthread_mutex_lock(&output_mutex);
+}
+
+/** @brief Relâche `output_mutex`. */
+void logger_unlock_output(void)
+{
+    pthread_mutex_unlock(&output_mutex);
+}
+
 /* ------------------------------------------------------------------------- */
 /*  Événements : buffer + fichier + redessin                                 */
 /* ------------------------------------------------------------------------- */
@@ -753,7 +766,16 @@ void nc_console_loop(void)
 
     int input_dirty = 0;
 
+    // Enregistrement auprès du gate de quiescence (PR B de
+    // docs/conception/cycle_vie_forks.md, D2). Contrairement à la variante
+    // ANSI (console.c), cette boucle est déjà non bloquante (wgetch en mode
+    // nodelay, cf. plus bas) : un simple checkpoint en tête de boucle suffit,
+    // pas besoin de fork_gate_mark_blocked.
+    int gate_slot = fork_gate_register("console");
+
     while (1) {
+        fork_gate_checkpoint(gate_slot);
+
         /* Vérifier si un redimensionnement a été signalé par SIGWINCH. */
         if (resize_pending) {
             pthread_mutex_lock(&output_mutex);

@@ -389,6 +389,18 @@ void flush_info(void)
     fflush(stdout);
 }
 
+/** @brief Prend `output_mutex` — cf. logger.h pour le contrat complet. */
+void logger_lock_output(void)
+{
+    pthread_mutex_lock(&output_mutex);
+}
+
+/** @brief Relâche `output_mutex`. */
+void logger_unlock_output(void)
+{
+    pthread_mutex_unlock(&output_mutex);
+}
+
 /* ------------------------------------------------------------------------- */
 /*  Événements : buffer + journal + redessin                                 */
 /* ------------------------------------------------------------------------- */

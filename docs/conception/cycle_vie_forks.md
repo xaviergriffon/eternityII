@@ -1,10 +1,13 @@
 # Cycle de vie dynamique des processus fils (client)
 
-**Statut : en cours d'implémentation.** PR A livrée ([#183](https://github.com/xaviergriffon/eternityII/pull/183),
-module `client_config` — voir le découpage en PR ci-dessous pour le détail et le suivi). PR B à E restent
-des **propositions** : ce document continue de décrire une **cible**, pas le comportement actuel du code,
-sauf pour la partie couverte par PR A (chargement de `--config-file` au démarrage et commandes
-`config`/`configSave`, documentées dans `AGENTS.md`, `README.md` et `docs/console.md`).
+**Statut : en cours d'implémentation.** PR A ([#183](https://github.com/xaviergriffon/eternityII/pull/183),
+module `client_config`) et PR B (infrastructure de quiescence, `src/app/fork_gate.{h,c}`) livrées — voir le
+découpage en PR ci-dessous pour le détail et le suivi. PR C à E restent des **propositions** : ce document
+continue de décrire une **cible**, pas le comportement actuel du code, sauf pour les parties couvertes par
+PR A (chargement de `--config-file` au démarrage et commandes `config`/`configSave`, documentées dans
+`AGENTS.md`, `README.md` et `docs/console.md`) et PR B (primitives `fork_gate_*`, checkpoints câblés dans
+les quatre threads candidats, nettoyage des slots morts — comportement externe inchangé, le fork reste
+avant le démarrage des threads).
 
 ## Objectif
 
@@ -275,7 +278,7 @@ travail prêté.
 
 ## Découpage en PR
 
-**Suivi : 1/5 livrée (PR A).** Branche dédiée par PR, jamais sur `master`, messages de commit brefs et
+**Suivi : 2/5 livrées (PR A, PR B).** Branche dédiée par PR, jamais sur `master`, messages de commit brefs et
 sans signature. Chaque PR met à jour `README.md`, `AGENTS.md` et les documents de `docs/` concernés.
 
 - **PR A — `client_config`. Livrée** ([#183](https://github.com/xaviergriffon/eternityII/pull/183)).
@@ -293,10 +296,43 @@ sans signature. Chaque PR met à jour `README.md`, `AGENTS.md` et les documents 
   `[serveur]` de la table sur un client. `--config-file` reste lui aussi sans effet sur `server`
   (jamais lu par `handle_server`) : ce fichier ne concerne que `client`/`pruner`, comme prévu par
   l'arbitrage D6.
-- **PR B — Infrastructure de quiescence.** Checkpoints dans le checker, `server_tcp`, le canal de
-  contrôle et la console ; primitives `fork_gate_*` (verrou logger + `flockfile`) ; nettoyage des
-  slots morts au tick. Comportement externe inchangé — le fork reste avant le démarrage des threads.
-  Tests des primitives, `fork_assert.h` au besoin.
+- **PR B — Infrastructure de quiescence. Livrée.** Module `src/app/fork_gate.{h,c}` : table bornée
+  (`FORK_GATE_MAX_PARTICIPANTS` = 8) de participants enregistrés (`fork_gate_register`/
+  `fork_gate_unregister`), point de contrôle à chemin rapide (`fork_gate_checkpoint` — une lecture
+  atomique quand aucune quiescence n'est demandée, sinon le thread se gare sur une condvar),
+  cas particulier des threads bloqués sans verrou (`fork_gate_mark_blocked`, pour la console),
+  et `fork_gate_request_quiesce`/`fork_gate_release_quiesce` (budget par défaut 2 s — passé, la
+  demande est ANNULÉE et tout participant déjà garé est relâché : jamais de fork dans le doute, cf.
+  D2). Primitives d'E/S dédiées (`fork_gate_acquire_io_locks`/`_release_io_locks`) : verrou de sortie
+  du logger (nouveau `logger_lock_output`/`logger_unlock_output`, ajouté à `src/ui/logger.h` et
+  implémenté dans les deux variantes `logger.c`/`logger_ncurses.c`) puis `flockfile(stdout)`/
+  `flockfile(stderr)` puis `fflush(NULL)` — exposées et testées de façon autonome, aucun site de PR B
+  ne les appelle encore autour d'un vrai `fork()` (PR C/D).
+
+  Checkpoints câblés dans les quatre threads candidats à la quiescence côté client PARENT : le checker
+  (`check_client_threads`, `src/app/etii_client.c`), `server_tcp` (`src/app/app_runtime.c` — désormais
+  doté d'un `SO_RCVTIMEO` de 1 s sur son `recvfrom`, condition nécessaire pour qu'un checkpoint soit
+  jamais réévalué quand aucun fork n'envoie de statistiques), le canal de contrôle
+  (`run_control_channel`, `src/app/etii_control.c`) et la console — les deux variantes, ANSI
+  (`console()`, `src/ui/console.c`, via `fork_gate_mark_blocked` autour du `read()` bloquant de
+  `getcmdline`) et ncurses (`nc_console_loop`, `src/ui/logger_ncurses.c`, déjà non bloquante via
+  `wgetch`/`nodelay`, donc un simple checkpoint en tête de boucle suffit). Comportement externe
+  **inchangé** : rien n'appelle `fork_gate_request_quiesce` en production dans cette PR, le fork reste
+  avant le démarrage des threads (`main.c`).
+
+  Nettoyage des slots morts au tick (D3, bénéfice collatéral) : `reap_dead_child_slots`/`pid_is_alive`
+  (`src/app/app_runtime.{h,c}`) corrigent le trou où `sigchld_handler` moissonnait les zombies sans
+  jamais mettre à jour `childrens_pid[]`/`forkId[]` — un fils mort de façon inattendue (hors sortie
+  normale via `wait_child`) laissait un slot fantôme, ciblé indéfiniment par `send_command_to_childs`.
+  Prédicat de vivacité injecté (`kill(pid, 0)` en production) pour rester testable sans process réels,
+  même patron que `analysed_owner_alive_fn` (PR7 de `identification_clients.md`). Appelé à chaque tour
+  de `check_client_threads`, sur le process PARENT uniquement.
+
+  Tests : `tests/app/test_fork_gate.c` (enregistrement/table pleine, chemin rapide, quiescence
+  multi-thread avec un vrai `pthread_create` worker, timeout avec annulation, `mark_blocked`,
+  primitives d'E/S) et de nouveaux tests dans `tests/app/test_app_runtime.c`
+  (`pid_is_alive_*`/`reap_dead_child_slots_*`, technique `fork()`+`waitpid()` déjà utilisée par
+  `tests/ui/test_command_lines.c` pour obtenir un pid mort déterministe).
 - **PR C — Orchestrateur, démarrage différé et décompte de 5 s.** Module `fork_orchestrator`,
   `handle_client` restructuré (threads d'abord, boucle d'orchestration à la place de `wait_child`),
   commandes `start` et `config <clé> <valeur>` avec annulation du décompte, `nb_forks` dynamique côté

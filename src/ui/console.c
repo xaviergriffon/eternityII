@@ -9,6 +9,7 @@
 #include "ui/command_lines.h"
 #include "ui/command_history.h"
 #include "ui/line_edit.h"
+#include "app/fork_gate.h"
 
 #define EXIT_CMD "exit"
 
@@ -271,9 +272,20 @@ void * console(void *param)
     nc_console_loop();
     exit(EXIT_SUCCESS);
 #else
+    // Enregistrement auprès du gate de quiescence (PR B de
+    // docs/conception/cycle_vie_forks.md, D2) : la console est le cas
+    // particulier, bloquée dans read() (getcmdline). fork_gate_mark_blocked
+    // la déclare quiescente pour la durée du read (elle n'y détient aucun
+    // verrou) sans avoir besoin de se garer sur la condvar ; au retour, si une
+    // quiescence a été demandée entre-temps, fork_gate_checkpoint la gare
+    // pour de bon avant tout traitement.
+    int gate_slot = fork_gate_register("console");
     for (;;)
     {
+        fork_gate_mark_blocked(gate_slot, 1);
         char *buffer = getcmdline();
+        fork_gate_mark_blocked(gate_slot, 0);
+        fork_gate_checkpoint(gate_slot);
         if (buffer == NULL)
         {
             /* Fin de l'entrée standard (stdin épuisé/fermé : /dev/null, pipe,
@@ -295,6 +307,7 @@ void * console(void *param)
         }
         free(buffer);
     }
+    fork_gate_unregister(gate_slot);
     /* Sortie propre par fin de stdin (Ctrl-D, pipe fermé) : le thread s'arrête
        sans passer par exit(), on persiste donc l'historique explicitement. */
     if (history_path_ready) {

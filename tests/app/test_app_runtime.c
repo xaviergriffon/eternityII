@@ -107,6 +107,106 @@ TEST init_childs_initializes_contexts(void)
     PASS();
 }
 
+/* ---------- pid_is_alive / reap_dead_child_slots (D3 de cycle_vie_forks.md) - */
+
+/* pid_is_alive : vrai pour le process courant, faux pour un pid déjà récolté
+ * (fork()+waitpid(), même patron que fork_exit_client_with_children_array
+ * dans tests/ui/test_command_lines.c). */
+TEST pid_is_alive_detects_self_and_reaped_child(void)
+{
+    ASSERT_EQ_FMT(1, pid_is_alive(getpid()), "%d");
+
+    pid_t child = fork();
+    if (child == 0) {
+        _exit(0);
+    }
+    ASSERT(child > 0);
+    waitpid(child, NULL, 0); /* récolte -> pid maintenant disparu */
+    ASSERT_EQ_FMT(0, pid_is_alive(child), "%d");
+    PASS();
+}
+
+/* pid_is_alive(0) / pid_is_alive(-1) : jamais un pid de fils valide, traité
+ * comme mort sans même appeler kill(). */
+TEST pid_is_alive_rejects_non_positive_pid(void)
+{
+    ASSERT_EQ_FMT(0, pid_is_alive(0), "%d");
+    ASSERT_EQ_FMT(0, pid_is_alive(-1), "%d");
+    PASS();
+}
+
+static int reap_test_alive_only_100(pid_t pid)
+{
+    return pid == 100;
+}
+
+/* reap_dead_child_slots : nettoie uniquement les slots dont le pid n'est pas
+ * "vivant" au sens du prédicat injecté ; les slots déjà vides (-1) et les
+ * slots vivants sont laissés intacts. */
+TEST reap_dead_child_slots_clears_only_dead_slots(void)
+{
+    pid_t pids[3] = { 100, 200, -1 };
+    char buf0[300] = "etii_fork.100";
+    char buf1[300] = "etii_fork.200";
+    char buf2[300] = "";
+    char *forkids[3] = { buf0, buf1, buf2 };
+    struct client_statistics stats[3];
+    memset(stats, 0, sizeof stats);
+    stats[1].shots_per_second = 4242; /* doit être remis à zéro (slot mort) */
+
+    int cleaned = reap_dead_child_slots(pids, forkids, stats, 3, reap_test_alive_only_100);
+
+    ASSERT_EQ_FMT(1, cleaned, "%d");
+    /* pid 100 : vivant selon le prédicat, intact. */
+    ASSERT_EQ_FMT(100, (int)pids[0], "%d");
+    ASSERT_STR_EQ("etii_fork.100", forkids[0]);
+    /* pid 200 : mort selon le prédicat, nettoyé. */
+    ASSERT_EQ_FMT(-1, (int)pids[1], "%d");
+    ASSERT_STR_EQ("", forkids[1]);
+    ASSERT_EQ_FMT(0ULL, stats[1].shots_per_second, "%llu");
+    /* slot déjà vide : intact (jamais compté dans `cleaned`). */
+    ASSERT_EQ_FMT(-1, (int)pids[2], "%d");
+    PASS();
+}
+
+/* alive == NULL : repli sur pid_is_alive (comportement de production). */
+TEST reap_dead_child_slots_defaults_to_pid_is_alive(void)
+{
+    pid_t child = fork();
+    if (child == 0) {
+        _exit(0);
+    }
+    ASSERT(child > 0);
+    waitpid(child, NULL, 0);
+
+    pid_t pids[1] = { child };
+    char buf[300] = "etii_fork.dead";
+    char *forkids[1] = { buf };
+    struct client_statistics stats[1];
+    memset(stats, 0, sizeof stats);
+
+    int cleaned = reap_dead_child_slots(pids, forkids, stats, 1, NULL);
+
+    ASSERT_EQ_FMT(1, cleaned, "%d");
+    ASSERT_EQ_FMT(-1, (int)pids[0], "%d");
+    ASSERT_STR_EQ("", forkids[0]);
+    PASS();
+}
+
+/* Tableaux NULL ou nb <= 0 : no-op sûr (jamais de déréférencement). */
+TEST reap_dead_child_slots_tolerates_null_arrays(void)
+{
+    ASSERT_EQ_FMT(0, reap_dead_child_slots(NULL, NULL, NULL, 0, NULL), "%d");
+
+    pid_t pids[1] = { 100 };
+    char buf[300] = "";
+    char *forkids[1] = { buf };
+    struct client_statistics stats[1];
+    memset(stats, 0, sizeof stats);
+    ASSERT_EQ_FMT(0, reap_dead_child_slots(pids, forkids, stats, 0, reap_test_alive_only_100), "%d");
+    PASS();
+}
+
 /* failed_arg : écrit le message d'usage sur stderr (log_error). */
 TEST failed_arg_prints_usage(void)
 {
@@ -1213,6 +1313,11 @@ SUITE(app_runtime_suite)
 {
     RUN_TEST(init_counters_allocates_zeroed);
     RUN_TEST(init_childs_initializes_contexts);
+    RUN_TEST(pid_is_alive_detects_self_and_reaped_child);
+    RUN_TEST(pid_is_alive_rejects_non_positive_pid);
+    RUN_TEST(reap_dead_child_slots_clears_only_dead_slots);
+    RUN_TEST(reap_dead_child_slots_defaults_to_pid_is_alive);
+    RUN_TEST(reap_dead_child_slots_tolerates_null_arrays);
     RUN_TEST(failed_arg_prints_usage);
     RUN_TEST(cli_help_general_lists_every_topic);
     RUN_TEST(cli_help_find_topic_matches_flexibly);

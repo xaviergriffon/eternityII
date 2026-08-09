@@ -1,6 +1,8 @@
 #ifndef etii_statistic_h
 #define etii_statistic_h
 
+#include <stdint.h>
+
 /**
  * @brief Taille maximale de fenêtre de forward-checking supportée par les statistiques.
  *

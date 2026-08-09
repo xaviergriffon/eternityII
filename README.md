@@ -114,8 +114,8 @@ Ces documents décrivent le comportement **implémenté** :
 ### Conception et réflexions en cours
 
 [`docs/conception/`](docs/conception/) rassemble les documents de conception : propositions,
-arbitrages et découpages en PR **non encore implémentés**. Ils décrivent une cible, pas le
-comportement du code — voir [docs/conception/README.md](docs/conception/README.md) pour la
-convention (statut, cycle de vie) et l'historique des documents entièrement implémentés puis
-supprimés (leur contenu ayant rejoint la documentation de référence ci-dessus). Aucun document
-de conception actif au moment de la rédaction.
+arbitrages et découpages en PR **pas encore entièrement implémentés**. Ils décrivent une cible, pas
+le comportement du code — voir [docs/conception/README.md](docs/conception/README.md) pour la
+convention (statut, cycle de vie), la table des documents actifs et l'historique des documents
+entièrement implémentés puis supprimés (leur contenu ayant rejoint la documentation de référence
+ci-dessus).
