@@ -11,6 +11,7 @@ build/
 *.log
 solution_*
 .eternityII_history
+eternityii-machine_uid
 tests/run_tests
 tests/run_tests.dSYM/
 tests/run_tests_16
