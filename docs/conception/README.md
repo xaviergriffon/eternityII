@@ -27,7 +27,9 @@ survivent nulle part ailleurs.
 
 ## Documents
 
-Aucun document de conception actif pour le moment.
+| Document | Statut | Contenu |
+|---|---|---|
+| [cycle_vie_forks.md](cycle_vie_forks.md) | proposition | Cycle de vie dynamique des processus fils côté client : démarrage différé (pas de fork au boot), configuration en console persistée dans un fichier clé=valeur, auto-démarrage 5 s après le boot si ce fichier existe, et reconfiguration à chaud (arrêt des fils, application, re-fork) sans arrêter le process principal. Étude de faisabilité et de risques incluse, découpage en 5 PR. |
 
 ### Documents supprimés (entièrement implémentés, contenu absorbé par `docs/`)
 
