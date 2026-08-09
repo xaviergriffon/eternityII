@@ -1,6 +1,10 @@
 # Cycle de vie dynamique des processus fils (client)
 
-**Statut : proposition.** Ce document décrit une **cible**, pas le comportement actuel du code.
+**Statut : en cours d'implémentation.** PR A livrée ([#183](https://github.com/xaviergriffon/eternityII/pull/183),
+module `client_config` — voir le découpage en PR ci-dessous pour le détail et le suivi). PR B à E restent
+des **propositions** : ce document continue de décrire une **cible**, pas le comportement actuel du code,
+sauf pour la partie couverte par PR A (chargement de `--config-file` au démarrage et commandes
+`config`/`configSave`, documentées dans `AGENTS.md`, `README.md` et `docs/console.md`).
 
 ## Objectif
 
@@ -271,13 +275,24 @@ travail prêté.
 
 ## Découpage en PR
 
-Branche dédiée par PR, jamais sur `master`, messages de commit brefs et sans signature. Chaque PR met
-à jour `README.md`, `AGENTS.md` et les documents de `docs/` concernés.
+**Suivi : 1/5 livrée (PR A).** Branche dédiée par PR, jamais sur `master`, messages de commit brefs et
+sans signature. Chaque PR met à jour `README.md`, `AGENTS.md` et les documents de `docs/` concernés.
 
-- **PR A — `client_config`.** Module de parsing/écriture clé=valeur, option `--config-file` avec son
-  entrée `cli_topics[]`, lecture au démarrage appliquée aux globales (CLI > fichier), commandes
-  `config` (affichage seul) et `configSave`. Tests purs dans `tests/app/test_client_config.c`. Aucun
-  changement du cycle de vie.
+- **PR A — `client_config`. Livrée** ([#183](https://github.com/xaviergriffon/eternityII/pull/183)).
+  Module de parsing/écriture clé=valeur (`src/app/client_config.{h,c}`), option `--config-file` avec son
+  entrée `cli_topics[]`, lecture au démarrage appliquée aux globales (CLI > fichier > défauts, priorité
+  décidée en réutilisant les seuils `argc` de `parse_client_args`), commandes `config` (affichage de la
+  configuration EFFECTIVE, pas d'un instantané de démarrage) et `configSave` (écriture atomique
+  `.tmp`+`rename`). Tests dans `tests/app/test_client_config.c` et `tests/ui/test_command_lines.c`.
+  Aucun changement du cycle de vie, conformément au périmètre prévu. Un ajustement décidé pendant la
+  revue, **hors du périmètre initialement décrit ci-dessus** : `config`/`configSave` sont masquées
+  côté SERVEUR (ni listées dans `help`, ni exécutables, ni suggérées en cas de faute de frappe,
+  `command_is_client_only` dans `src/ui/command_lines.c`) — sans ce garde-fou, exécutées sur un
+  serveur, elles agiraient sur SES globales à lui (`NB_THREADS` y désigne le pool de connexions, pas un
+  nombre de forks), produisant un fichier trompeur plutôt que le no-op inoffensif des autres commandes
+  `[serveur]` de la table sur un client. `--config-file` reste lui aussi sans effet sur `server`
+  (jamais lu par `handle_server`) : ce fichier ne concerne que `client`/`pruner`, comme prévu par
+  l'arbitrage D6.
 - **PR B — Infrastructure de quiescence.** Checkpoints dans le checker, `server_tcp`, le canal de
   contrôle et la console ; primitives `fork_gate_*` (verrou logger + `flockfile`) ; nettoyage des
   slots morts au tick. Comportement externe inchangé — le fork reste avant le démarrage des threads.
