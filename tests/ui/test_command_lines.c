@@ -182,6 +182,85 @@ TEST help_format_topic_command_and_category(void)
     PASS();
 }
 
+/*
+ * config/configSave sont masquées côté SERVEUR (ni listées dans l'aide, ni
+ * exécutables) : voir command_is_client_only, command_lines.c. Exécutées
+ * côté client/pruner (server=0), elles fonctionnent normalement -- elles
+ * agiraient sinon sur les globales du SERVEUR (NB_THREADS y désigne le pool
+ * de connexions, pas un nombre de forks), ce qui serait trompeur plutôt
+ * qu'un no-op inoffensif comme les commandes `*(serveur)*` à l'inverse.
+ */
+TEST help_hides_config_commands_on_server_only(void)
+{
+    int saved_server = server;
+    char out[16384];
+
+    server = 0;
+    ASSERT_EQ_FMT(0, help_format_topic("config", out, sizeof out), "%d");
+    ASSERT_EQ_FMT(0, help_format_general(out, sizeof out), "%d");
+    ASSERT(strstr(out, "config") != NULL);
+
+    server = 1;
+    ASSERT_EQ_FMT(-1, help_format_topic("config", out, sizeof out), "%d");
+    ASSERT_EQ_FMT(-1, help_format_topic("configSave", out, sizeof out), "%d");
+    ASSERT_EQ_FMT(0, help_format_general(out, sizeof out), "%d");
+    ASSERT(strstr(out, "config") == NULL);
+    ASSERT(strstr(out, "configSave") == NULL);
+
+    server = saved_server;
+    PASS();
+}
+
+TEST do_command_line_config_is_masked_on_server_only(void)
+{
+    int saved_server = server;
+
+    server = 0;
+    char cmd_client[] = "config";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd_client), "%d");
+
+    server = 1;
+    char cmd_server[] = "config";
+    /* Masquée : traitée exactement comme une commande inconnue. */
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd_server), "%d");
+
+    server = saved_server;
+    PASS();
+}
+
+/* configSave écrit réellement un fichier : client_config_file_path est
+   redirigé vers un chemin temporaire pour ne rien laisser dans le dépôt, et
+   pour distinguer "masquée, rien écrit" de "exécutée, fichier ré-écrit". */
+TEST do_command_line_config_save_is_masked_on_server_only(void)
+{
+    int saved_server = server;
+    const char *saved_path = client_config_file_path;
+
+    char path[] = "/tmp/etii_cmd_configsave_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    client_config_file_path = path;
+
+    server = 0;
+    char cmd_client[] = "configSave";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd_client), "%d");
+    FILE *f = fopen(path, "r");
+    ASSERT(f != NULL);
+    fclose(f);
+
+    unlink(path);
+    server = 1;
+    char cmd_server[] = "configSave";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd_server), "%d");
+    FILE *f2 = fopen(path, "r");
+    ASSERT(f2 == NULL); /* masquée : rien n'a été écrit */
+
+    client_config_file_path = saved_path;
+    server = saved_server;
+    PASS();
+}
+
 /* command_canonical_name (pure) : les noms canoniques sont les formes camelCase
    complètes, les noms historiques abrégés sont des alias ; casse ignorée, NULL sûr. */
 TEST command_canonical_name_resolves_aliases_and_case(void)
@@ -1981,6 +2060,9 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_clear_runs);
     RUN_TEST(help_format_general_lists_categories_and_aliases);
     RUN_TEST(help_format_topic_command_and_category);
+    RUN_TEST(help_hides_config_commands_on_server_only);
+    RUN_TEST(do_command_line_config_is_masked_on_server_only);
+    RUN_TEST(do_command_line_config_save_is_masked_on_server_only);
     RUN_TEST(command_canonical_name_resolves_aliases_and_case);
     RUN_TEST(do_command_line_case_insensitive_and_alias_dispatch);
     RUN_TEST(do_command_line_expand_requires_arg);

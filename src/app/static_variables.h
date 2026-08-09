@@ -629,6 +629,20 @@ extern const char *client_label;
 extern const char *machine_uid_file_path;
 
 /**
+ * @brief Chemin du fichier de configuration client (option CLI
+ *        `--config-file <chemin>`).
+ *
+ * Défaut `"./eternityii-client.conf"` (même convention que les `.back` et
+ * `machine_uid_file_path`). Lu au démarrage du client/pruner (`handle_client`,
+ * src/app/main.c) via `client_config_load` (src/app/client_config.h), qui
+ * pré-remplit les valeurs par défaut des positions non fournies en ligne de
+ * commande (priorité CLI > fichier > défauts) — jamais un échec de démarrage
+ * si ce fichier est absent ou illisible. Position-indépendant, retiré d'argv
+ * par `parse_cli_options`.
+ */
+extern const char *client_config_file_path;
+
+/**
  * @brief Identité déclarée de CE process client, résolue une seule fois par
  *        `init_client_identity` (src/app/app_runtime.h) AVANT tout fork —
  *        chaque fork en hérite une copie identique par copy-on-write
@@ -724,9 +738,10 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
  *
  * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--http-port <n>`,
  * `--http-token-file <chemin>`, `--name <label>`, `--machine-uid-file <chemin>`,
- * `--gpu`, `--headless` et `--help`/`-h` (positionne respectivement
- * `stop_on_solution`, `expand_min_level`, `HTTP_PORT`, `HTTP_TOKEN_FILE`,
- * `client_label`, `machine_uid_file_path`, `gpu_requested`, `headless_mode` et
+ * `--config-file <chemin>`, `--gpu`, `--headless` et `--help`/`-h` (positionne
+ * respectivement `stop_on_solution`, `expand_min_level`, `HTTP_PORT`,
+ * `HTTP_TOKEN_FILE`, `client_label`, `machine_uid_file_path`,
+ * `client_config_file_path`, `gpu_requested`, `headless_mode` et
  * `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.

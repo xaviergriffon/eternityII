@@ -18,6 +18,7 @@
 #include "app/etii_server.h"
 #include "app/etii_control.h"
 #include "app/app_runtime.h"
+#include "app/client_config.h"
 #include "net/http_server.h"
 #include "net/local_socket.h"
 #include "ui/command_lines.h"
@@ -165,6 +166,24 @@ void handle_client(int argc, const char *argv[]) {
     // Parsing positionnel (dépendant de pruner_mode) extrait dans app_runtime.c
     // pour être testable — cf. parse_client_args.
     const char *serverIp = parse_client_args(argc, argv);
+
+    // Configuration client (PR A, docs/conception/cycle_vie_forks.md) : fichier
+    // clé=valeur optionnel (--config-file), appliqué UNIQUEMENT aux positions
+    // que la ligne de commande n'a pas déjà fournies — priorité CLI > fichier >
+    // défauts. Fait avant tout fork, comme les autres options globales. Un
+    // fichier absent n'est jamais une erreur (cf. client_config_load).
+    client_config_t startup_cfg;
+    client_config_init(&startup_cfg);
+    if (client_config_load(client_config_file_path, &startup_cfg) == CLIENT_CONFIG_LOADED) {
+        log_info("configuration : chargée depuis \"%s\"\n", client_config_file_path);
+    }
+    client_config_apply_to_globals(&startup_cfg, argc, &serverIp);
+    client_config_free(&startup_cfg);
+    // Conservé pour les commandes console `config`/`configSave`, exécutées
+    // depuis le thread console du process PARENT : serverIp n'est sinon
+    // accessible que dans la pile de cette fonction.
+    g_client_server_host = serverIp;
+
     init_childs();
     init_counters();
     init_signals();

@@ -29,7 +29,7 @@ survivent nulle part ailleurs.
 
 | Document | Statut | Contenu |
 |---|---|---|
-| [cycle_vie_forks.md](cycle_vie_forks.md) | proposition | Cycle de vie dynamique des processus fils côté client : démarrage différé (pas de fork au boot), configuration en console persistée dans un fichier clé=valeur, auto-démarrage 5 s après le boot si ce fichier existe, et reconfiguration à chaud (arrêt des fils, application, re-fork) sans arrêter le process principal. Étude de faisabilité et de risques incluse, découpage en 5 PR. |
+| [cycle_vie_forks.md](cycle_vie_forks.md) | en cours d'implémentation (1/5 PR livrée) | Cycle de vie dynamique des processus fils côté client : démarrage différé (pas de fork au boot), configuration en console persistée dans un fichier clé=valeur, auto-démarrage 5 s après le boot si ce fichier existe, et reconfiguration à chaud (arrêt des fils, application, re-fork) sans arrêter le process principal. Étude de faisabilité et de risques incluse, découpage en 5 PR. **PR A livrée** ([#183](https://github.com/xaviergriffon/eternityII/pull/183)) : module `client_config` (option `--config-file`, commandes console `config`/`configSave`) — voir `AGENTS.md`/`docs/console.md` pour le comportement actuel de cette seule partie ; PR B à E (quiescence, orchestrateur, arrêt/redémarrage à chaud, pilotage à distance) restent des propositions. |
 
 ### Documents supprimés (entièrement implémentés, contenu absorbé par `docs/`)
 

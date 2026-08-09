@@ -145,6 +145,8 @@ const char *client_label = NULL;
 
 const char *machine_uid_file_path = "./eternityii-machine_uid";
 
+const char *client_config_file_path = "./eternityii-client.conf";
+
 client_identity_t g_client_identity_template;
 
 volatile unsigned long long server_shots_per_second = 0;
@@ -257,6 +259,15 @@ int parse_cli_options(int argc, const char *argv[])
             // parse_cli_options).
             if (r + 1 < argc) {
                 machine_uid_file_path = argv[r + 1];
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--config-file") == 0) {
+            // Option valuée, même schéma. Chargement effectif (lecture, puis
+            // application aux globales) dans handle_client (src/app/main.c),
+            // via client_config_load/client_config_apply_to_globals — aucune
+            // I/O ici.
+            if (r + 1 < argc) {
+                client_config_file_path = argv[r + 1];
                 r++; // consomme aussi la valeur
             }
         } else {
