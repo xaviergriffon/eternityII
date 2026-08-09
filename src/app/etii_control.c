@@ -10,6 +10,7 @@
 
 #include "app/static_variables.h"
 #include "app/etii_client.h"
+#include "app/fork_gate.h"
 #include "net/etii_protocol.h"
 #include "net/tcpclient.h"
 #include "ui/command_lines.h"
@@ -156,8 +157,17 @@ void *run_control_channel(void *param)
     free(params);
 
     useconds_t backoff = 0;
+    // Enregistrement auprès du gate de quiescence (PR B de
+    // docs/conception/cycle_vie_forks.md, D2) : ce thread est l'un des quatre
+    // candidats à la quiescence coopérative. Le checkpoint ci-dessous est un
+    // no-op tant que rien n'appelle fork_gate_request_quiesce (PR C/D).
+    int gate_slot = fork_gate_register("control_channel");
 
     while (request_keeps_running(request)) {
+        fork_gate_checkpoint(gate_slot);
+        if (!request_keeps_running(request)) {
+            break;
+        }
         int socket_id = create_tcp_client(server_ip, SERVER_PORT);
         if (socket_id == -1) {
             backoff = next_no_work_sleep(backoff);
@@ -179,6 +189,7 @@ void *run_control_channel(void *param)
             log_error("canal de contrôle : version %i refusée par le serveur — canal arrêté\n",
                       version);
             close_socket(socket_id);
+            fork_gate_unregister(gate_slot);
             return NULL;
         }
         if (verdict == HANDSHAKE_RETRY) {
@@ -264,6 +275,7 @@ void *run_control_channel(void *param)
         }
     }
 
+    fork_gate_unregister(gate_slot);
     return NULL;
 }
 

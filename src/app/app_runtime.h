@@ -5,6 +5,8 @@
 #include <sys/types.h>
 #include <sys/un.h>
 
+#include "app/etii_statistic.h"
+
 /*
  * Fonctions « plumbing » du processus, extraites de main.c pour être testables
  * unitairement : main.c définit main() et n'est donc pas linké dans le binaire
@@ -47,6 +49,48 @@ int  init_counters(void);
 
 /** @brief Alloue/initialise les contextes des processus enfants (pids, forkId, stats). */
 void init_childs(void);
+
+/**
+ * @brief Prédicat de vivacité d'un pid par défaut (production) : `kill(pid, 0)`.
+ *
+ * `ESRCH` ⇒ mort ; tout le reste (succès, ou `EPERM` — un pid vivant possédé
+ * par un autre utilisateur, situation qui ne se produit pas ici puisque ce
+ * sont toujours nos propres enfants) ⇒ vivant. Même technique que la commande
+ * console `exit` (`src/ui/command_lines.c`).
+ */
+int pid_is_alive(pid_t pid);
+
+/** @brief Type du prédicat de vivacité injecté dans `reap_dead_child_slots`
+ *         (testabilité : un test fournit un prédicat déterministe plutôt que
+ *         de dépendre de vrais process). */
+typedef int (*child_pid_alive_fn)(pid_t pid);
+
+/**
+ * @brief Nettoie les slots de `childrens_pid`/`forkId`/`fork_statistics` dont
+ *        le process n'est plus vivant.
+ *
+ * Corrige un trou existant (cf. docs/conception/cycle_vie_forks.md, D3) :
+ * `sigchld_handler` moissonne les zombies (`waitpid`) mais ne touche jamais
+ * ces tableaux, si bien qu'un fils mort de façon inattendue laisse un slot
+ * fantôme — `forkId[]` continue de cibler une socket Unix `etii_fork.<pid>`
+ * disparue, vers laquelle `send_command_to_childs`
+ * (`src/net/local_socket.c`) continue d'émettre en pure perte. Un slot
+ * détecté mort est remis à l'état de `init_childs` : `childrens_pid[c] = -1`,
+ * `forkId[c][0] = '\0'`, `fork_statistics[c]` remis à zéro.
+ *
+ * @param childrens_pid   Tableau des pids (NULL/`nb == 0` accepté : no-op).
+ * @param forkId          Tableau des chemins de socket Unix par slot.
+ * @param fork_statistics Tableau des dernières statistiques connues par slot.
+ * @param nb              Nombre de slots (`NB_THREADS` en production).
+ * @param alive           Prédicat de vivacité. NULL accepté : repli sur
+ *                        `pid_is_alive` (comportement de production), pour
+ *                        qu'un appelant qui ne veut pas injecter de prédicat
+ *                        obtienne quand même le comportement par défaut.
+ * @return Le nombre de slots nettoyés.
+ */
+int reap_dead_child_slots(pid_t *childrens_pid, char **forkId,
+                           struct client_statistics *fork_statistics,
+                           int nb, child_pid_alive_fn alive);
 
 /** @brief Affiche le message d'usage (arguments invalides) : aide générale sur
  *         stderr via `log_error` — même source de vérité que `--help`. */

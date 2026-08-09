@@ -38,6 +38,7 @@ SUITE_EXTERN(control_registry_suite);
 SUITE_EXTERN(known_clients_registry_suite);
 SUITE_EXTERN(app_runtime_suite);
 SUITE_EXTERN(etii_control_suite);
+SUITE_EXTERN(fork_gate_suite);
 #if ETERN_PARTS == 16
 /* Suite « solution réelle » : n'existe que dans le build 4×4 (cf. test-16). */
 SUITE_EXTERN(solution16_suite);
@@ -76,6 +77,7 @@ int main(int argc, char **argv)
     RUN_SUITE(known_clients_registry_suite);
     RUN_SUITE(app_runtime_suite);
     RUN_SUITE(etii_control_suite);
+    RUN_SUITE(fork_gate_suite);
 #if ETERN_PARTS == 16
     RUN_SUITE(solution16_suite);
 #endif

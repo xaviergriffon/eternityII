@@ -11,6 +11,8 @@
 #include "core/datamanager.h"
 #include "core/etii_search.h"
 #include "net/etii_protocol.h"
+#include "app/app_runtime.h"
+#include "app/fork_gate.h"
 
 #ifdef WITH_CUDA
 #include "app/gpu_pruner.h"
@@ -790,15 +792,31 @@ void *check_client_threads(void *param)
     (void)param;
     int sleep_time = 10;
     int last_record = max_result;
+    // Enregistrement auprès du gate de quiescence (PR B de
+    // docs/conception/cycle_vie_forks.md, D2) : ce thread est l'un des quatre
+    // candidats à la quiescence coopérative (avec server_tcp, le canal de
+    // contrôle et la console). fork_gate_checkpoint ci-dessous est un no-op
+    // tant que rien n'appelle fork_gate_request_quiesce (PR C/D) — comportement
+    // observable inchangé pour l'instant.
+    int gate_slot = fork_gate_register("checker");
     // Comme les autres threads (feed, control, …) : la boucle s'arrête sur
     // REQUEST_STOP — en production celui-ci n'arrive qu'à l'arrêt du processus,
     // le comportement est donc inchangé (et le thread testable).
     while(request != REQUEST_STOP)
     {
+        fork_gate_checkpoint(gate_slot);
+        if (request == REQUEST_STOP) {
+            break;
+        }
         check_client_threads_step(&last_record);
         if (request == REQUEST_STOP) {
             break;
         }
+        // Nettoyage des slots morts (D3 de cycle_vie_forks.md) : sigchld_handler
+        // moissonne les zombies mais ne met jamais à jour childrens_pid[]/
+        // forkId[] — un fils mort de façon inattendue (hors sortie normale via
+        // wait_child) y laissait un slot fantôme indéfiniment.
+        reap_dead_child_slots(childrens_pid, forkId, fork_statistics, NB_THREADS, NULL);
         if (bench_target_nodes > 0) {
             // 1 ms : assez fin pour que le dépassement de la cible (inévitable —
             // aucun test n'est ajouté à la boucle chaude, cf. bench_should_stop)
@@ -815,5 +833,6 @@ void *check_client_threads(void *param)
         }
     }
 
+    fork_gate_unregister(gate_slot);
     return NULL;
 }

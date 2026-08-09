@@ -58,6 +58,22 @@ void flush_debug(void);
 void flush_error(void);
 /** @brief Vide le tampon de sortie standard (pour `log_info`). */
 void flush_info(void);
+
+/**
+ * @brief Prend/relâche le verrou interne qui sérialise les écritures sur le
+ *        terminal (`output_mutex`, ANSI comme ncurses).
+ *
+ * Exposé pour `src/app/fork_gate.c` (infrastructure de quiescence, PR B de
+ * `docs/conception/cycle_vie_forks.md`) : avant un `fork()`, le thread
+ * forkeur doit détenir CE verrou en plus de `flockfile(stdout)`/
+ * `flockfile(stderr)`, sans quoi un autre thread pourrait être au milieu d'un
+ * log au moment du fork et transmettre son état à l'enfant sans le thread qui
+ * le détient. Non ré-entrant, comme le `pthread_mutex_t` sous-jacent.
+ */
+void logger_lock_output(void);
+/** @brief Relâche le verrou pris par `logger_lock_output`. */
+void logger_unlock_output(void);
+
 /**
  * @brief Efface l'écran de la console interactive sans détruire l'historique.
  *

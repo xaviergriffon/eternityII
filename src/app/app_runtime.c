@@ -24,6 +24,7 @@
 #include "app/etii_client.h"
 #include "app/etii_server.h"
 #include "app/etii_statistic.h"
+#include "app/fork_gate.h"
 #include "core/datamanager.h"
 #include "core/best_board.h"
 #include "net/client_identity.h"
@@ -594,6 +595,45 @@ void init_childs(void) {
     }
 }
 
+int pid_is_alive(pid_t pid)
+{
+    if (pid <= 0) {
+        return 0;
+    }
+    if (kill(pid, 0) == 0) {
+        return 1;
+    }
+    return errno != ESRCH;
+}
+
+int reap_dead_child_slots(pid_t *childrens_pid, char **forkId,
+                          struct client_statistics *fork_statistics,
+                          int nb, child_pid_alive_fn alive)
+{
+    if (childrens_pid == NULL || forkId == NULL || fork_statistics == NULL) {
+        return 0;
+    }
+    if (alive == NULL) {
+        alive = pid_is_alive;
+    }
+    int cleaned = 0;
+    for (int c = 0; c < nb; c++) {
+        if (childrens_pid[c] <= 0) {
+            continue;
+        }
+        if (alive(childrens_pid[c])) {
+            continue;
+        }
+        childrens_pid[c] = -1;
+        if (forkId[c] != NULL) {
+            forkId[c][0] = '\0';
+        }
+        memset(&fork_statistics[c], 0, sizeof(fork_statistics[c]));
+        cleaned++;
+    }
+    return cleaned;
+}
+
 void resolve_client_label(const char *cli_label, const char *hostname_or_null,
                            char *out, size_t out_size)
 {
@@ -895,8 +935,23 @@ int run_fork_checker(struct sockaddr_un *main_addr)
 	return 0;
 }
 
+/* Borne l'attente de server_tcp sur recvfrom() (cf. fork_gate_checkpoint
+   ci-dessous) : sans timeout, un process parent sans aucun fork vivant (ou
+   entre deux tours de fork_checker, 1/s) bloquerait indéfiniment dans le
+   noyau sans jamais revoir la tête de boucle — le checkpoint de quiescence
+   (PR B de docs/conception/cycle_vie_forks.md, D2) ne serait alors observé
+   qu'au prochain datagramme reçu, pas dans un délai borné. Valeur courte :
+   ce thread ne fait rien d'autre qu'attendre, un réveil par seconde est sans
+   coût mesurable. */
+#define SERVER_TCP_RECV_TIMEOUT_SEC 1
+
 void *server_tcp(void *param) {
     int socket_id = *(int*)param;
+
+    struct timeval tv;
+    tv.tv_sec = SERVER_TCP_RECV_TIMEOUT_SEC;
+    tv.tv_usec = 0;
+    setsockopt(socket_id, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     struct sockaddr_un *claddr = malloc(sizeof(struct sockaddr_un));
     ssize_t numBytes;
@@ -908,12 +963,23 @@ void *server_tcp(void *param) {
     size_t bufsz = ipc_max_datagram();
     char *buf = malloc(bufsz);
 
+    int gate_slot = fork_gate_register("server_tcp");
+
     while (request != REQUEST_STOP) {
+        fork_gate_checkpoint(gate_slot);
+        if (request == REQUEST_STOP) {
+            break;
+        }
         len = sizeof(struct sockaddr_un);
         numBytes = recvfrom(socket_id, buf, bufsz, 0,
                             (struct sockaddr *) claddr, &len);
         if (numBytes == -1) {
             if (request != REQUEST_STOP) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    /* Timeout attendu (SO_RCVTIMEO ci-dessus) : simple
+                       retour à la tête de boucle pour revoir le checkpoint. */
+                    continue;
+                }
                 if (errno == EINTR) {
                     continue;
                 }
@@ -997,6 +1063,7 @@ void *server_tcp(void *param) {
                 break;
         }
     }
+    fork_gate_unregister(gate_slot);
     free(claddr);
     free(buf);
 
