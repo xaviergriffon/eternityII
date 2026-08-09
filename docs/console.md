@@ -39,6 +39,8 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `help [commande\|catégorie]` | Affiche l'aide générale, le détail d'une commande, ou une seule catégorie (alias : `?`) |
 | `exit` | Arrête proprement le programme (alias : `quit`) |
 | `clear` | Efface l'écran sans perdre le contenu — poussé dans le scrollback natif en ANSI, accessible via `PgUp` en ncurses (alias : `cls` ; raccourci : `Ctrl-L`) |
+| `config` *(client/pruner)* | Affiche la configuration client **effective** (`nb_forks`, `server_host`, `parts_file`, `max_stock_by_thread`, `limit`, `pruner_batch`) — reflète les globales courantes, y compris un `limit`/`maxStockByThread`/`prunerBatch` déjà exécuté depuis la console. Pas encore de configuration « en préparation » ni de décompte d'auto-démarrage (arrivent avec l'orchestrateur, voir [docs/conception/cycle_vie_forks.md](conception/cycle_vie_forks.md)) |
+| `configSave` *(client/pruner)* | Écrit la configuration effective dans le fichier de configuration (écriture atomique `.tmp` puis `rename`, comme `backup`) — défaut `./eternityii-client.conf`, option `--config-file <chemin>` |
 
 ### Recherche & régulation
 
@@ -105,6 +107,14 @@ Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`,
 socket Unix. Les commandes `clients*` sont **serveur uniquement** : elles agissent sur
 le [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) distant, pas
 sur des process fils locaux.
+
+`config` et `configSave` sont, à l'inverse, **masquées côté serveur** : ni listées
+dans `help`, ni exécutables (`commande inconnue`), ni suggérées en cas de faute de
+frappe — contrairement aux commandes `*(serveur)*` ci-dessus, exécutées sans effet
+(no-op inoffensif) sur un client, ces deux commandes agiraient sur les globales du
+*serveur* (`NB_THREADS` y désigne la taille du pool de connexions, pas un nombre de
+forks) si elles n'étaient pas bloquées, produisant un fichier de configuration
+trompeur plutôt qu'un no-op sans conséquence.
 
 ## Bandeau de stats live (mode ANSI)
 

@@ -16,12 +16,13 @@
 #include "app/known_clients_registry.h"
 #include "net/control_protocol.h"
 #include "core/best_board.h"
+#include "app/client_config.h"
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 47
+#define NB_COMMANDS 49
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -120,6 +121,8 @@ int clients_cmd_interpreter(void);
 int known_clients_interpreter(void);
 int clients_work_interpreter(void);
 int lease_duration_interpreter(void);
+int config_interpreter(void);
+int config_save_interpreter(void);
 
 /**
  * @brief Commandes prises en charge (entrées canoniques puis alias).
@@ -140,6 +143,17 @@ static command_description commands[NB_COMMANDS] = {
      "Aucune autre commande n'efface l'écran : l'affichage ne défile que par les sorties.\n"
      "Le contenu n'est pas perdu : en mode ANSI il part dans le scrollback natif du\n"
      "terminal (molette / Cmd+↑), en mode ncurses il reste accessible via PgUp.", NULL},
+    {"config", config_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
+     "affiche la configuration client effective (nb_forks, serveur, fichier de pièces, ...)",
+     "N'affiche pour l'instant que la configuration EFFECTIVE (celle réellement en\n"
+     "vigueur, issue de la ligne de commande et/ou du fichier --config-file) : la\n"
+     "notion de configuration \"en préparation\" et le décompte d'auto-démarrage\n"
+     "arrivent avec l'orchestrateur (cf. docs/conception/cycle_vie_forks.md, PR C).\n"
+     "N'annule aucun décompte.", NULL},
+    {"configSave", config_save_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
+     "écrit la configuration effective dans le fichier de configuration",
+     "Écriture atomique (.tmp puis rename, comme « backup »). Fichier par défaut\n"
+     "./eternityii-client.conf (option --config-file <chemin>).", NULL},
 
     {"pause", pause_interpreter, 1, CMD_CAT_SEARCH, 0, NULL,
      "met la recherche en pause administrative (locale + clients connectés)",
@@ -379,6 +393,48 @@ int check_interpreter(void) {
 int clear_interpreter(void) {
     clear_console();
     return 0;
+}
+
+/**
+ * @brief Interpréteur de `config` : affiche la configuration client EFFECTIVE
+ *        (celle réellement en vigueur, pas un instantané de démarrage).
+ *
+ * Voir client_config_capture_effective (src/app/client_config.h) : lit les
+ * globales courantes, donc reflète aussi un `limit`/`maxStockByThread`/
+ * `prunerBatch` déjà exécuté depuis cette même console. `server_host` est
+ * absent (non affiché) en mode serveur/test, où la notion n'a pas de sens
+ * (g_client_server_host y reste NULL).
+ */
+int config_interpreter(void) {
+    client_config_t cfg;
+    client_config_capture_effective(&cfg, g_client_server_host);
+
+    char buf[1024];
+    client_config_format(&cfg, buf, sizeof(buf));
+    log_info("config (fichier : %s) :\n%s", client_config_file_path,
+              buf[0] != '\0' ? buf : "  (aucune valeur)\n");
+
+    client_config_free(&cfg);
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `configSave` : écrit la configuration client
+ *        EFFECTIVE dans le fichier `--config-file` (écriture atomique).
+ */
+int config_save_interpreter(void) {
+    client_config_t cfg;
+    client_config_capture_effective(&cfg, g_client_server_host);
+
+    int rc = client_config_save(client_config_file_path, &cfg);
+    client_config_free(&cfg);
+
+    if (rc == 0) {
+        log_info("configSave : configuration écrite dans \"%s\"\n", client_config_file_path);
+    } else {
+        log_error("configSave : échec de l'écriture dans \"%s\"\n", client_config_file_path);
+    }
+    return rc;
 }
 
 /** @brief Interpréteur de `backup` : sauvegarde les files de possibilités dans les fichiers `.back`. */
@@ -1340,6 +1396,49 @@ int min_interpreter(void) {
  * @param instruction Nom de la commande à chercher.
  * @return            Pointeur vers la commande canonique trouvée, ou NULL si inconnue.
  */
+/**
+ * @brief `config`/`configSave` agissent sur la configuration CLIENT
+ *        (client_config.h) : exécutées côté SERVEUR, elles liraient/écriraient
+ *        les globales du serveur (sans rapport avec cette configuration, ex.
+ *        `NB_THREADS` y désigne la taille du pool de connexions, pas un
+ *        nombre de forks) — trompeur plutôt qu'un no-op inoffensif comme les
+ *        commandes `server_only` à l'inverse (`clients`, …, harmless sur un
+ *        client puisque `control_registry` y est toujours vide). D'où un
+ *        masquage explicite (ni listées, ni exécutables, ni suggérées) plutôt
+ *        qu'une simple annotation "[serveur]"/"[client]".
+ *
+ * Delibérément une liste de noms plutôt qu'un nouveau champ sur
+ * `command_description` : la table `commands[]` compte ~50 entrées toutes
+ * initialisées positionnellement (pas de désignateurs) — ajouter un champ
+ * neuf y forcerait soit à toucher chaque entrée, soit à laisser
+ * `-Wmissing-field-initializers` (actif sous `-Wextra -Werror`) se déclencher.
+ */
+static int command_is_client_only(const command_description *command) {
+    return strcmp(command->command, "config") == 0 ||
+           strcmp(command->command, "configSave") == 0;
+}
+
+/**
+ * @brief Copie dans @p out les noms de commandes VISIBLES dans le rôle
+ *        courant (masquage server-side de `config`/`configSave`, voir
+ *        `command_is_client_only`) — utilisé pour la suggestion Levenshtein
+ *        (`closest_command`), afin qu'un serveur ne suggère jamais une
+ *        commande qu'il refuserait ensuite d'exécuter.
+ *
+ * @param out Tableau de sortie, capacité NB_COMMANDS.
+ * @return    Nombre de noms écrits dans @p out.
+ */
+static int visible_command_names(const char *out[NB_COMMANDS]) {
+    int n = 0;
+    for (int c = 0; c < NB_COMMANDS; c++) {
+        if (server && command_is_client_only(&commands[c])) {
+            continue;
+        }
+        out[n++] = commands[c].command;
+    }
+    return n;
+}
+
 command_description *find_command(const char *instruction) {
     for (int c =0; c < NB_COMMANDS; c++) {
         command_description *command = &commands[c];
@@ -1424,6 +1523,10 @@ static void help_append_category(int category, char *out, size_t cap, size_t *le
         if (command->alias_of != NULL || command->category != category) {
             continue;
         }
+        if (server && command_is_client_only(command)) {
+            /* Masquée côté serveur, cf. command_is_client_only. */
+            continue;
+        }
         const char *shown = command->usage != NULL ? command->usage : command->command;
         size_t shown_length = utf8_display_length(shown);
         int padding = shown_length < 36 ? (int)(36 - shown_length) : 1;
@@ -1469,6 +1572,11 @@ int help_format_topic(const char *topic, char *out, size_t out_size) {
     }
 
     command_description *command = find_command(topic);
+    if (command != NULL && server && command_is_client_only(command)) {
+        /* Masquée côté serveur, cf. command_is_client_only : traitée comme un
+           sujet inconnu plutôt que d'en détailler l'usage. */
+        command = NULL;
+    }
     if (command != NULL) {
         help_append(out, out_size, &len, "%s — %s",
                     command->usage != NULL ? command->usage : command->command,
@@ -1506,10 +1614,8 @@ int help_interpreter(void) {
         log_info("%s", help);
     } else {
         const char *command_names[NB_COMMANDS];
-        for (int c = 0; c < NB_COMMANDS; c++) {
-            command_names[c] = commands[c].command;
-        }
-        const char *suggestion = closest_command(arg, command_names, NB_COMMANDS);
+        int n_visible = visible_command_names(command_names);
+        const char *suggestion = closest_command(arg, command_names, n_visible);
         if (suggestion != NULL) {
             log_error("help : commande ou catégorie inconnue : %s -- vouliez-vous dire \"help %s\" ?\n",
                       arg, suggestion);
@@ -1543,6 +1649,13 @@ int do_command_line(char *command) {
             return 0;
         }
         command_description *command_desc = find_command(instruction);
+        if (command_desc != NULL && server && command_is_client_only(command_desc)) {
+            /* Masquée côté serveur, cf. command_is_client_only : traitée comme
+               une commande inconnue plutôt que d'être exécutée (elle
+               agirait sur les globales du serveur, sans rapport avec la
+               configuration client qu'elle est censée afficher/écrire). */
+            command_desc = NULL;
+        }
         if (command_desc != NULL) {
             result = command_desc->interpreter();
             if (result == CMD_ERR_USAGE) {
@@ -1562,10 +1675,8 @@ int do_command_line(char *command) {
                On projette les noms de la table `commands` pour les passer au
                module d'appariement (qui ignore le type command_description). */
             const char *command_names[NB_COMMANDS];
-            for (int c = 0; c < NB_COMMANDS; c++) {
-                command_names[c] = commands[c].command;
-            }
-            const char *suggestion = closest_command(instruction, command_names, NB_COMMANDS);
+            int n_visible = visible_command_names(command_names);
+            const char *suggestion = closest_command(instruction, command_names, n_visible);
             if (suggestion != NULL) {
                 log_error("commande inconnue : %s -- vouliez-vous dire \"%s\" ? (tapez \"help\")\n",
                           instruction, suggestion);

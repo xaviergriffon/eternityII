@@ -120,6 +120,16 @@ static const cli_help_topic_t cli_topics[] = {
 	  "redémarrage du client. Fichier absent/illisible : régénéré silencieusement.\n"
 	  "Répertoire non inscriptible : identité volatile pour cette exécution\n"
 	  "(avertissement), la recherche continue normalement. Ignorée en mode serveur." },
+	{ "--config-file",
+	  "--config-file <chemin>",
+	  "Client/pruner : fichier de configuration clé=valeur (défaut ./eternityii-client.conf).",
+	  "Lu au démarrage (avant tout fork), pré-remplit les valeurs par défaut des\n"
+	  "positions non fournies en ligne de commande — priorité CLI > fichier >\n"
+	  "défauts. Clés reconnues : nb_forks, server_host, parts_file,\n"
+	  "max_stock_by_thread, limit, pruner_batch. Fichier absent ou illisible :\n"
+	  "pas une erreur (valeurs par défaut/CLI utilisées). Écrit par la commande\n"
+	  "console configSave (écriture atomique .tmp puis rename) ; affiché par\n"
+	  "la commande config." },
 	{ "--gpu",
 	  "--gpu",
 	  "Pruner : exécute le contrôle des lots sur le GPU (build CUDA=1 uniquement).",
