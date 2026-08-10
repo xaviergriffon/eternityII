@@ -71,7 +71,7 @@ typedef struct
  * à suivre, qu'elles soient héritées du process parent ou construites
  * localement (cf. `acquire_search_parts`).
  */
-typedef struct
+typedef struct search_parts
 {
     /// Toutes les rotations de toutes les pièces (`rotate_all_parts`).
     struct array_part *rotate_parts;

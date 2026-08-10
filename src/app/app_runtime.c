@@ -293,6 +293,13 @@ void failed_arg(void)
  */
 int init_counters(void)
 {
+	// free(NULL) est un no-op : sûr au premier appel (globales à zéro).
+	// Nécessaire depuis qu'un redémarrage à chaud (ORCH_APPLYING,
+	// src/app/fork_orchestrator.c) peut réappeler cette fonction après un
+	// changement de nb_forks, sans quoi chaque redémarrage fuyait l'ancien
+	// tampon.
+	free(counters);
+	free(lastfilesize);
 	counters = malloc(sizeof(unsigned long long) * NB_THREADS);
 	lastfilesize = malloc(sizeof(unsigned long long) * NB_THREADS);
 	
@@ -621,6 +628,21 @@ void ensure_childs_capacity(int needed) {
         fork_statistics[c].shots_per_second = 0;
     }
     g_childs_capacity = needed;
+}
+
+void free_childs(void) {
+    if (forkId != NULL) {
+        for (int c = 0; c < g_childs_capacity; c++) {
+            free(forkId[c]);
+        }
+    }
+    free(childrens_pid);
+    free(forkId);
+    free(fork_statistics);
+    childrens_pid = NULL;
+    forkId = NULL;
+    fork_statistics = NULL;
+    g_childs_capacity = 0;
 }
 
 int pid_is_alive(pid_t pid)

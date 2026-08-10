@@ -54,11 +54,25 @@ static void unmute_fd(void)
 
 /* ============================ Bootstrap runtime ============================ */
 
-/* init_counters : alloue counters/lastfilesize (NB_THREADS entrées) à zéro. */
+/* init_counters : alloue counters/lastfilesize (NB_THREADS entrées) à zéro.
+ *
+ * NE PAS restaurer les pointeurs `counters`/`lastfilesize` pré-existants
+ * après cet appel : depuis que `init_counters()` libère elle-même son ancien
+ * contenu avant de réallouer (cf. sa doc, nécessaire pour un redémarrage à
+ * chaud répété via `configApply` -> `orchestrator_apply_restart_config`), le
+ * pointeur sauvegardé AVANT l'appel est déjà libéré par l'appel lui-même —
+ * le restaurer ensuite réintroduit dans la globale un pointeur pendouillant,
+ * qui provoque un double-free (détecté par ASan ET par l'allocateur macOS
+ * par défaut) au prochain `init_counters()` réel exécuté ailleurs dans le
+ * process de test (reproduit précisément par
+ * `apply_restart_config_quiesces_concurrent_array_readers`,
+ * tests/app/test_fork_orchestrator.c, avant ce correctif). On libère donc
+ * simplement le résultat de CET appel et on laisse les globales à NULL —
+ * état sûr pour n'importe quel appelant suivant (`free(NULL)` est un
+ * no-op, y compris dans `init_counters()` elle-même). */
 TEST init_counters_allocates_zeroed(void)
 {
     int saved_nb = NB_THREADS;
-    unsigned long long *sc = counters, *sl = lastfilesize;
     NB_THREADS = 4;
 
     int rc = init_counters();
@@ -69,10 +83,52 @@ TEST init_counters_allocates_zeroed(void)
             if (counters[i] != 0 || lastfilesize[i] != 0) zeroed = 0;
     }
     free(counters); free(lastfilesize);
-    counters = sc; lastfilesize = sl;   /* restaure les pointeurs d'origine */
+    counters = NULL; lastfilesize = NULL;
     NB_THREADS = saved_nb;
 
     ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT(ok);
+    ASSERT(zeroed);
+    PASS();
+}
+
+/* Régression : `init_counters()` doit être sûre à appeler PLUSIEURS FOIS de
+ * suite sans double-free — c'est exactement ce qu'un redémarrage à chaud
+ * répété (`configApply` changeant `nb_forks` plusieurs fois de suite) fait
+ * en production via `orchestrator_apply_restart_config`. Avant le correctif
+ * ci-dessus (et le `free()` initial ajouté dans `init_counters()`), un second
+ * appel fuyait le premier tampon ; après le `free()` initial, il fallait
+ * s'assurer qu'aucun appelant du process ne restaure un pointeur déjà libéré
+ * entre-temps (cf. commentaire ci-dessus) — ce test couvre le cas simple
+ * (deux appels consécutifs, aucune restauration intercalée). */
+TEST init_counters_is_safe_to_call_twice_in_a_row(void)
+{
+    int saved_nb = NB_THREADS;
+    unsigned long long *saved_counters = counters;
+    unsigned long long *saved_lastfilesize = lastfilesize;
+    counters = NULL;
+    lastfilesize = NULL;
+
+    NB_THREADS = 3;
+    ASSERT_EQ_FMT(0, init_counters(), "%d");
+    ASSERT(counters != NULL);
+    ASSERT(lastfilesize != NULL);
+
+    NB_THREADS = 6; /* simule un nb_forks agrandi entre deux redémarrages */
+    ASSERT_EQ_FMT(0, init_counters(), "%d");
+    int ok = (counters != NULL && lastfilesize != NULL);
+    int zeroed = ok;
+    if (ok) {
+        for (int i = 0; i < 6; i++) {
+            if (counters[i] != 0 || lastfilesize[i] != 0) zeroed = 0;
+        }
+    }
+
+    free(counters); free(lastfilesize);
+    counters = saved_counters;
+    lastfilesize = saved_lastfilesize;
+    NB_THREADS = saved_nb;
+
     ASSERT(ok);
     ASSERT(zeroed);
     PASS();
@@ -173,6 +229,71 @@ TEST ensure_childs_capacity_is_a_no_op_when_already_covered(void)
     NB_THREADS = saved_nb;
 
     ASSERT(preserved);
+    PASS();
+}
+
+/* free_childs (PR D) : libère les trois tableaux et remet la capacité suivie
+   à 0 — symétrique d'init_childs(). Réutilisée par ORCH_APPLYING
+   (fork_orchestrator.c) quand nb_forks change, pour un shrink/regrow propre
+   plutôt qu'un simple ensure_childs_capacity (qui ne fait QUE grandir). */
+TEST free_childs_then_init_childs_resizes_cleanly(void)
+{
+    int saved_nb = NB_THREADS;
+    pid_t *spid = childrens_pid;
+    char **sfork = forkId;
+    struct client_statistics *sstat = fork_statistics;
+
+    NB_THREADS = 4;
+    init_childs();
+    childrens_pid[2] = 555;
+    strcpy(forkId[2], "etii_fork.555");
+
+    free_childs();
+    int freed_ok = (childrens_pid == NULL && forkId == NULL && fork_statistics == NULL);
+
+    NB_THREADS = 2; /* rétrécissement */
+    init_childs();
+    int ok = (childrens_pid != NULL && forkId != NULL && fork_statistics != NULL);
+    int fresh = ok;
+    if (ok) {
+        for (int i = 0; i < 2; i++) {
+            if (childrens_pid[i] != -1) fresh = 0;
+            if (forkId[i] == NULL || forkId[i][0] != '\0') fresh = 0;
+        }
+        /* ensure_childs_capacity doit repartir de la NOUVELLE capacité (2),
+           pas de l'ancienne (4) : sans la remise à zéro dans free_childs, un
+           needed <= 4 serait à tort traité comme déjà couvert. */
+        ensure_childs_capacity(4);
+        for (int i = 2; i < 4; i++) {
+            if (childrens_pid[i] != -1) fresh = 0;
+        }
+        for (int i = 0; i < 4; i++) free(forkId[i]);
+    }
+    free(childrens_pid); free(forkId); free(fork_statistics);
+    childrens_pid = spid; forkId = sfork; fork_statistics = sstat;
+    NB_THREADS = saved_nb;
+
+    ASSERT(freed_ok);
+    ASSERT(ok);
+    ASSERT(fresh);
+    PASS();
+}
+
+/* free_childs sur un état déjà libéré (NULL) est un no-op sûr — idempotente,
+   comme client_config_free. */
+TEST free_childs_tolerates_already_freed_state(void)
+{
+    pid_t *spid = childrens_pid;
+    char **sfork = forkId;
+    struct client_statistics *sstat = fork_statistics;
+
+    childrens_pid = NULL;
+    forkId = NULL;
+    fork_statistics = NULL;
+
+    free_childs(); /* ne doit pas planter */
+
+    childrens_pid = spid; forkId = sfork; fork_statistics = sstat;
     PASS();
 }
 
@@ -1381,9 +1502,12 @@ TEST wait_child_retries_on_eintr(void)
 SUITE(app_runtime_suite)
 {
     RUN_TEST(init_counters_allocates_zeroed);
+    RUN_TEST(init_counters_is_safe_to_call_twice_in_a_row);
     RUN_TEST(init_childs_initializes_contexts);
     RUN_TEST(ensure_childs_capacity_grows_and_preserves_existing_slots);
     RUN_TEST(ensure_childs_capacity_is_a_no_op_when_already_covered);
+    RUN_TEST(free_childs_then_init_childs_resizes_cleanly);
+    RUN_TEST(free_childs_tolerates_already_freed_state);
     RUN_TEST(pid_is_alive_detects_self_and_reaped_child);
     RUN_TEST(pid_is_alive_rejects_non_positive_pid);
     RUN_TEST(reap_dead_child_slots_clears_only_dead_slots);

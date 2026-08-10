@@ -1,15 +1,18 @@
 # Cycle de vie dynamique des processus fils (client)
 
 **Statut : en cours d'implémentation.** PR A ([#183](https://github.com/xaviergriffon/eternityII/pull/183),
-module `client_config`), PR B (infrastructure de quiescence, `src/app/fork_gate.{h,c}`) et PR C
-(orchestrateur de démarrage différé, `src/app/fork_orchestrator.{h,c}`) livrées — voir le découpage en PR
-ci-dessous pour le détail et le suivi. PR D et E restent des **propositions** : ce document continue de
-décrire une **cible**, pas le comportement actuel du code, sauf pour les parties couvertes par PR A
-(chargement de `--config-file` au démarrage et commandes `config`/`configSave`, documentées dans
-`AGENTS.md`, `README.md` et `docs/console.md`), PR B (primitives `fork_gate_*`, checkpoints câblés dans les
-quatre threads candidats, nettoyage des slots morts) et PR C (démarrage réellement différé : le fork
-n'a plus lieu au boot mais sur décompte de 5 s ou commande `start`/`config <clé> <valeur>` — voir
-`AGENTS.md`, `docs/console.md`, `docs/utilisation.md` pour le comportement actuel).
+module `client_config`), PR B (infrastructure de quiescence, `src/app/fork_gate.{h,c}`), PR C
+(orchestrateur de démarrage différé, `src/app/fork_orchestrator.{h,c}`) et PR D (arrêt/redémarrage à
+chaud, commandes `stopForks`/`configApply`) livrées — voir le découpage en PR ci-dessous pour le détail
+et le suivi. PR E reste une **proposition** : ce document continue de décrire une **cible**, pas le
+comportement actuel du code, sauf pour les parties couvertes par PR A (chargement de `--config-file` au
+démarrage et commandes `config`/`configSave`, documentées dans `AGENTS.md`, `README.md` et
+`docs/console.md`), PR B (primitives `fork_gate_*`, checkpoints câblés dans les quatre threads candidats,
+nettoyage des slots morts), PR C (démarrage réellement différé : le fork n'a plus lieu au boot mais sur
+décompte de 5 s ou commande `start`/`config <clé> <valeur>`) et PR D (arrêt à chaud `stopForks`,
+redémarrage à chaud `configApply` — voir `AGENTS.md`, `docs/console.md`, `docs/utilisation.md` pour le
+comportement actuel). Le pilotage à **distance** de `stopForks`/`configApply` (canal de contrôle, API
+HTTP admin) reste hors périmètre jusqu'à PR E.
 
 ## Objectif
 
@@ -280,7 +283,7 @@ travail prêté.
 
 ## Découpage en PR
 
-**Suivi : 3/5 livrées (PR A, PR B, PR C).** Branche dédiée par PR, jamais sur `master`, messages de commit brefs et
+**Suivi : 4/5 livrées (PR A, PR B, PR C, PR D).** Branche dédiée par PR, jamais sur `master`, messages de commit brefs et
 sans signature. Chaque PR met à jour `README.md`, `AGENTS.md` et les documents de `docs/` concernés.
 
 - **PR A — `client_config`. Livrée** ([#183](https://github.com/xaviergriffon/eternityII/pull/183)).
@@ -469,13 +472,86 @@ sans signature. Chaque PR met à jour `README.md`, `AGENTS.md` et les documents 
   `make test-integration`, dont `run_solution_16.sh` pilote désormais le client par FIFO (au lieu de
   `</dev/null`) pour pouvoir lui envoyer `start` ; `run_control_channel.sh` reste inchangé, ses
   vérifications ne dépendant d'aucun fork réel.
-- **PR D — Arrêt et redémarrage à chaud.** `stopForks`, `configApply`, séquence
+- **PR D — Arrêt et redémarrage à chaud. Livrée.** `stopForks`, `configApply`, séquence
   arrêt/escalade/récolte sous SIGCHLD masqué, `free_childs` et réallocation sur changement de
   `nb_forks`, reconstruction de la map sur changement de `parts_file`, réutilisation de
-  `control_channel_request_reconnect` (livrée en PR C) après le re-fork. Tests de
-  `stop_escalation_next`, `client_config_diff` et des transitions STOPPING/APPLYING (la table
-  `orchestrator_step` existe déjà depuis PR C — PR D lui donne sa vraie sémantique pour ces deux
-  événements, cf. `ORCH_ERR_UNSUPPORTED` ci-dessus).
+  `control_channel_request_reconnect` (livrée en PR C) après le re-fork. `orchestrator_step` donne enfin
+  sa vraie sémantique à `EV_STOP_FORKS`/`EV_RESTART` (table déclarée depuis PR C, `ORCH_ERR_UNSUPPORTED`
+  jusqu'ici) : `RUNNING -> STOPPING` (`stop_forks=1`) pour les deux événements — la distinction "faut-il
+  redémarrer après" n'est PAS portée par l'état pur (même convention que la deadline du décompte, cf. PR
+  C) mais mémorisée par le driver (`g_restart_after_stop`, sous le même mutex) — et tout autre état ->
+  inchangé + un nouveau code `ORCH_ERR_NOT_RUNNING`. `EV_START` accepte désormais aussi `ORCH_APPLYING`
+  comme source de spawn : c'est le MÊME chemin qui re-forke à la fin d'un `configApply` NEEDS_RESTART,
+  un seul code testé une fois.
+
+  **Écarts délibérés par rapport à ce paragraphe**, tranchés pendant l'implémentation :
+  - Masquage des signaux via `pthread_sigmask`, pas `sigprocmask` (le texte original de D2/la séquence
+    d'arrêt employait ce dernier) : dans un process multi-thread, `sigprocmask` n'a pas un comportement
+    portable garanti par POSIX (même s'il alias souvent `pthread_sigmask` sous Linux) — `pthread_sigmask`
+    est l'appel correct pour masquer SIGCHLD sur LE thread orchestrateur spécifiquement, sans toucher aux
+    autres threads du parent.
+  - La séquence d'arrêt (`orchestrator_do_stop_forks`, `src/app/fork_orchestrator.c`) traite tous les
+    slots vivants EN LOT (un seul chronomètre, un seul niveau d'escalade partagé) plutôt qu'un
+    chronomètre par slot — plus simple, et cohérent avec le fait qu'un `kill(pid, SIGINT)` est envoyé à
+    tous les slots au même instant.
+  - **Bogue trouvé en testant manuellement (invisible à `fork_orchestrator_suite`, qui ne lance jamais de
+    vrai fork ni de vraie boucle) : la condition de sortie de `fork_orchestrator_run` confondait « plus
+    aucun fork » avec « le process doit quitter ».** Avant PR D, un fork ne pouvait tomber à zéro que par
+    mort naturelle (solution + `--stop-on-solution`, crash) ou `Ctrl-C` — la condition historique
+    (`remaining_forks == 0 && (ever_running || request == REQUEST_STOP)`) était donc correcte. `stopForks`
+    introduit une TROISIÈME raison, délibérée, de tomber à zéro fork — qui ne doit JAMAIS terminer le
+    process parent (console/canal de contrôle/API HTTP doivent rester actifs, c'est tout l'objet de la
+    fonctionnalité). Corrigé par un drapeau local `forks_parked` (distinct d'`ever_running`), posé après
+    un `stopForks` réussi ou un échec de re-fork en fin de `configApply`, levé dès qu'un (re)fork réussit ;
+    condition de sortie devenue `remaining_forks == 0 && (request == REQUEST_STOP || (ever_running &&
+    !forks_parked))` — `Ctrl-C` continue de l'emporter dans tous les cas.
+  - **Second bogue, même cause (test manuel, pas de test unitaire) : `configApply` en branche HOT_ONLY ne
+    vérifiait pas qu'un fork existait.** `client_config_diff` ne regarde QUE si `nb_forks`/`server_host`/
+    `parts_file` a changé de VALEUR, sans aucune notion de vivacité des fils. Séquence reproduite :
+    `stopForks` (zéro fork), puis `config nb_forks <même valeur qu'avant>` + `configApply` — le diff
+    répond correctement `HOT_ONLY` (rien de restart-worthy n'a changé), donc l'ancienne implémentation
+    appliquait la configuration aux globales du parent et répondait "configuration à chaud appliquée,
+    aucun redémarrage nécessaire" — en ayant réellement ZÉRO fork vivant, un no-op trompeur. Corrigé en
+    vérifiant `fork_orchestrator_snapshot() == ORCH_RUNNING` EN PREMIER, avant même de calculer le diff :
+    `configApply` (comme `stopForks`) n'a de sens que contre des fils réellement en cours d'exécution.
+
+  Tests : `tests/app/test_fork_orchestrator.c` (matrice `EV_STOP_FORKS`/`EV_RESTART`/`EV_START`-depuis-
+  `APPLYING` mise à jour, seuils de `stop_escalation_next`, garde `ORCH_ERR_NOT_RUNNING` au niveau
+  `post_event`), `tests/app/test_client_config.c` (`client_config_diff` : rien de stagé, clés à chaud
+  seules, clé de redémarrage changée/inchangée, clé stagée sans valeur courante), `tests/app/test_app_runtime.c`
+  (`free_childs` rétrécit/regrandit proprement, idempotence sur état déjà libéré). Pas de test unitaire
+  du redémarrage réel (fork/signaux réels) ni du correctif de sortie de boucle — vérifiés manuellement en
+  pilotant un vrai client par FIFO (même technique que `run_solution_16.sh`) : `start` -> `stopForks` ->
+  le parent reste vivant et réactif -> `config nb_forks <n>` + `configApply` -> le re-fork a lieu et la
+  session de canal de contrôle se reconnecte avec le nouveau nombre de fils.
+
+  **Deux bogues supplémentaires trouvés après coup, rapportés par un opérateur ayant réellement exercé
+  `configApply`** (crash sous `NCURSES=1`, configuration paraissant non prise en compte en ANSI) — ni
+  l'un ni l'autre couvert par `fork_orchestrator_suite`, qui ne fork jamais réellement et n'envoie aucun
+  vrai signal :
+  1. `orchestrator_apply_restart_config` ne demandait AUCUNE quiescence avant de libérer/réallouer
+     `childrens_pid`/`forkId`/`fork_statistics` et la map de recherche partagée — contrairement à
+     l'exigence explicite de D2 pour APPLYING. Le checker, `server_tcp`, le canal de contrôle et la
+     console pouvaient donc déréférencer un pointeur en cours de libération : crash quasi systématique
+     sous `NCURSES=1` (rafraîchissement très fréquent de la bannière de stats), plus rare mais tout aussi
+     réel en ANSI. Corrigé par `fork_gate_request_quiesce`/`_release_quiesce` autour de toute la fonction,
+     qui renvoie désormais 1 (reconstruction faite) ou 0 (quiescence en échec — RIEN n'est modifié, jamais
+     de reconstruction dans le doute) ; l'appelant retombe en `WAITING_CONFIG` sur 0. Verrouillé par
+     `apply_restart_config_quiesces_concurrent_array_readers` : un thread compagnon en boucle serrée sur
+     `fork_gate_checkpoint` lit `childrens_pid[0]` à chaque tour non garé — test de CONTRAT déterministe
+     (le thread ne peut par construction pas s'exécuter pendant la quiescence), pas une mesure de timing.
+  2. `orchestrator_do_stop_forks` pouvait rester bloqué indéfiniment en `STOPPING`, même après l'escalade
+     SIGKILL. Le masquage de SIGCHLD (`pthread_sigmask`) ne porte que sur le thread orchestrateur ; les
+     autres threads du parent ne le bloquent pas, donc `sigchld_handler` peut moissonner un enfant mort
+     sur N'IMPORTE LEQUEL d'entre eux avant le `waitpid(pid, …)` ciblé de la séquence d'arrêt — qui reçoit
+     alors `-1`/`ECHILD` ("plus mon enfant"), que l'ancien code confondait avec "encore vivant" au lieu de
+     "déjà mort ailleurs". Corrigé par un nouveau prédicat pur `waitpid_target_is_reaped(résultat, pid,
+     errno)` (errno capturé par l'appelant juste après `waitpid`, jamais lu directement par le prédicat,
+     pour rester testable avec des paires synthétiques) — `ECHILD` compte désormais comme une mort.
+     Reproduit et vérifié corrigé avec la séquence exacte rapportée par l'opérateur, en ANSI (console
+     pilotée par FIFO) et sous `NCURSES=1` (`script -q`/`TERM=xterm`) : plus de crash, `config` rapporte
+     `état=RUNNING` (plus jamais bloqué en `STOPPING`) avec le nouveau `nb_forks` effectif, et le serveur
+     voit la session de canal de contrôle se reconnecter avec le compte de fils à jour.
 - **PR E — Pilotage à distance et intégration.** Listes blanches de `control_protocol.c` avec la
   défense en profondeur côté client, branches réentrantes dans `admin_apply_remote_command` (jeton
   Bearer sur l'API HTTP), script `tests/integration/run_client_lifecycle.sh` sur le patron de

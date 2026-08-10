@@ -530,6 +530,128 @@ TEST status_zone_lifecycle_over_pty(void)
     PASS();
 }
 
+/*
+ * Régression (cycle_vie_forks.md, PR D) : `status_zone_init()` (ci-dessus)
+ * est appelée UNE FOIS, dans le process PARENT, AVANT tout fork depuis PR C
+ * (démarrage différé) — `fork()` duplique donc la liste des handlers
+ * `atexit()`, si bien qu'un process de recherche fraîchement forké hérite
+ * lui aussi l'enregistrement de `status_zone_teardown`, bien qu'il ne
+ * "possède" jamais le terminal partagé. Sans `status_zone_disown_child()`,
+ * le `exit()` normal de ce fils (fin de recherche, ou sortie propre après un
+ * `stopForks`/`configApply` — jamais après un SIGKILL, qui saute `atexit` :
+ * d'où le caractère intermittent rapporté) ré-exécutait ce handler hérité et
+ * restaurait le terminal (région de défilement complète en ANSI, `endwin()`
+ * en NCURSES=1) — visible depuis le PARENT puisque le terminal est un état
+ * PARTAGÉ, pas un état par-process.
+ *
+ * Ce test simule ce scénario avec un VRAI second `fork()` (comme
+ * `orchestrator_spawn_forks`) : le process "propriétaire" du PTY installe la
+ * zone (comme le fait le parent réel), PUIS forke un "petit-fils" (comme le
+ * ferait `orchestrator_spawn_forks` pour un fils de recherche) qui appelle
+ * `status_zone_disown_child()` puis sort immédiatement — SANS jamais appeler
+ * `status_zone_teardown()` lui-même. Si le correctif fonctionne, cette
+ * sortie ne doit produire AUCUNE séquence de réinitialisation de la région de
+ * défilement (`\033[r`) sur le PTY partagé ; seule la sortie LÉGITIME du
+ * propriétaire (appelée ensuite) en produit une — le flux capturé ne doit
+ * donc contenir qu'UNE seule occurrence de `\033[r`, pas deux.
+ */
+TEST status_zone_child_process_does_not_reset_terminal_on_exit(void)
+{
+    char path[64];
+    snprintf(path, sizeof path, "/tmp/etii_zone_pty_child_%d.txt", (int)getpid());
+    unlink(path);
+
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    ASSERT(master >= 0);
+    ASSERT_EQ_FMT(0, grantpt(master), "%d");
+    ASSERT_EQ_FMT(0, unlockpt(master), "%d");
+    char *slave_name = ptsname(master);
+    ASSERT(slave_name != NULL);
+    int slave = open(slave_name, O_RDWR | O_NOCTTY);
+    ASSERT(slave >= 0);
+
+    struct winsize ws = { .ws_row = 40, .ws_col = 120, .ws_xpixel = 0, .ws_ypixel = 0 };
+    ioctl(slave, TIOCSWINSZ, &ws);
+
+    pid_t owner_pid = fork();
+    if (owner_pid == 0) {
+        /* "Parent" simulé : stdout = esclave PTY (vrai terminal). */
+        close(master);
+        dup2(slave, STDOUT_FILENO);
+        if (slave > 2) close(slave);
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0) { dup2(dn, 2); if (dn > 2) close(dn); }
+        alarm(5);
+
+        status_zone_init();      /* zone_active=1, atexit(status_zone_teardown) enregistré */
+
+        pid_t grandchild = fork(); /* simule orchestrator_spawn_forks : un "fils de recherche" */
+        if (grandchild == 0) {
+            alarm(5);
+            status_zone_disown_child();
+            exit(0);              /* déclenche l'atexit HÉRITÉ — doit être un no-op */
+        }
+        ASSERT(grandchild > 0);
+        int gc_status = 0;
+        waitpid(grandchild, &gc_status, 0);
+
+        /* Marqueur textuel : permet, côté parent du test, de distinguer sans
+           ambiguïté "avant le petit-fils" de "après le petit-fils, avant le
+           teardown légitime du propriétaire". */
+        fputs("MARKER-AFTER-GRANDCHILD\n", stdout);
+        fflush(stdout);
+
+        status_zone_teardown();   /* sortie LÉGITIME : celle-ci DOIT réinitialiser la région */
+        exit(0);
+    }
+
+    ASSERT(owner_pid > 0);
+    close(slave);
+    int out_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    ASSERT(out_fd >= 0);
+    char drainbuf[4096];
+    ssize_t n;
+    while ((n = read(master, drainbuf, sizeof drainbuf)) > 0) {
+        ssize_t w = write(out_fd, drainbuf, (size_t)n);
+        (void)w;
+    }
+    close(out_fd);
+    int status = 0;
+    waitpid(owner_pid, &status, 0);
+    close(master);
+
+    char captured[8192] = {0};
+    FILE *f = fopen(path, "r");
+    ASSERT(f != NULL);
+    size_t rn = fread(captured, 1, sizeof captured - 1, f);
+    fclose(f);
+    unlink(path);
+    (void)rn;
+
+    ASSERT(WIFEXITED(status));
+    ASSERT_EQ_FMT(0, WEXITSTATUS(status), "%d");
+
+    char *marker = strstr(captured, "MARKER-AFTER-GRANDCHILD");
+    ASSERT(marker != NULL);
+
+    /* AVANT le marqueur (donc à cause du petit-fils SEUL) : aucune trace de
+       réinitialisation de région — le correctif a bien neutralisé l'atexit
+       hérité. */
+    char before_marker[8192] = {0};
+    size_t prefix_len = (size_t)(marker - captured);
+    if (prefix_len >= sizeof before_marker) prefix_len = sizeof before_marker - 1;
+    memcpy(before_marker, captured, prefix_len);
+    before_marker[prefix_len] = '\0';
+    ASSERT(strstr(before_marker, "\033[r") == NULL);
+
+    /* APRÈS le marqueur (donc à cause du teardown LÉGITIME du propriétaire) :
+       la réinitialisation a bien lieu — la fonction elle-même n'est pas
+       cassée, seul l'héritage par le fils est neutralisé. */
+    ASSERT(strstr(marker, "\033[r") != NULL);
+
+    PASS();
+}
+
 SUITE(logger_suite)
 {
     RUN_TEST(log_info_formats_to_stdout);
@@ -550,4 +672,5 @@ SUITE(logger_suite)
     RUN_TEST(console_input_end_without_render_is_noop);
     RUN_TEST(log_error_during_input_goes_to_stderr);
     RUN_TEST(status_zone_lifecycle_over_pty);
+    RUN_TEST(status_zone_child_process_does_not_reset_terminal_on_exit);
 }

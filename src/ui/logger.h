@@ -129,6 +129,33 @@ void status_zone_init(void);
 /** @brief Restaure le terminal (région de défilement complète). Enregistré via atexit par status_zone_init. */
 void status_zone_teardown(void);
 
+/**
+ * @brief Neutralise, dans CE process, l'`atexit(status_zone_teardown)`
+ *        hérité d'un `fork()` — à appeler UNE SEULE FOIS, comme tout premier
+ *        traitement d'un process de recherche fraîchement forké (avant tout
+ *        `log_*`), jamais par le process PARENT.
+ *
+ * `status_zone_init()` (`console.c`) est appelée UNE FOIS, dans le PARENT,
+ * AVANT tout fork (démarrage différé depuis PR C de
+ * docs/conception/cycle_vie_forks.md) — `fork()` duplique donc la liste des
+ * handlers `atexit()`, si bien que chaque fils de recherche hérite lui aussi
+ * l'enregistrement de `status_zone_teardown`, bien qu'il ne "possède" jamais
+ * le terminal partagé. Sans ce garde-fou, le `exit()` normal d'un fils (fin
+ * de recherche, OU sortie propre après un `stopForks`/`configApply` — jamais
+ * après un SIGKILL, qui saute `atexit` : d'où le caractère intermittent
+ * observé) ré-exécute ce handler hérité et restaure le terminal (`endwin()`
+ * en `NCURSES=1`, région de défilement complète en ANSI) — visible depuis le
+ * PARENT puisque le terminal est un état PARTAGÉ (même descripteur hérité),
+ * pas un état par-process.
+ *
+ * Ne touche JAMAIS le terminal elle-même : elle rend seulement le handler
+ * hérité NO-OP dans CE process (écriture dans la copie COW du drapeau
+ * `zone_active`/`nc_active` du fils, sans effet sur le parent) —
+ * `status_zone_teardown()` a déjà, pour cette même raison, un garde
+ * `if (!zone_active) return;` en tête.
+ */
+void status_zone_disown_child(void);
+
 #ifdef USE_NCURSES
 /**
  * @brief Boucle interactive de la console implémentée avec ncurses.

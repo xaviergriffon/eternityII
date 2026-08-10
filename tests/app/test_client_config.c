@@ -513,6 +513,118 @@ TEST capture_effective_omits_server_host_when_absent(void)
     PASS();
 }
 
+/* ------------------------------- diff (PR D) --------------------------------- */
+
+/* Rien de stagé : toujours HOT_ONLY, même avec un current bien rempli. */
+TEST diff_nothing_staged_is_hot_only(void)
+{
+    client_config_t current;
+    client_config_init(&current);
+    current.has_nb_forks = 1;
+    current.nb_forks = 4;
+
+    client_config_t staged;
+    client_config_init(&staged);
+
+    ASSERT_EQ_FMT((int)CLIENT_CONFIG_DIFF_HOT_ONLY, (int)client_config_diff(&current, &staged), "%d");
+    PASS();
+}
+
+/* Seules des clés à chaud stagées (peu importe si elles diffèrent du
+   current) : HOT_ONLY. */
+TEST diff_only_hot_keys_staged_is_hot_only(void)
+{
+    client_config_t current;
+    client_config_init(&current);
+    current.has_max_stock_by_thread = 1;
+    current.max_stock_by_thread = 100;
+
+    client_config_t staged;
+    client_config_init(&staged);
+    staged.has_max_stock_by_thread = 1;
+    staged.max_stock_by_thread = 200;
+    staged.has_limit = 1;
+    staged.limit = 5000;
+    staged.has_pruner_batch = 1;
+    staged.pruner_batch = 64;
+
+    ASSERT_EQ_FMT((int)CLIENT_CONFIG_DIFF_HOT_ONLY, (int)client_config_diff(&current, &staged), "%d");
+    PASS();
+}
+
+/* nb_forks stagé différent du current : NEEDS_RESTART. */
+TEST diff_nb_forks_changed_needs_restart(void)
+{
+    client_config_t current;
+    client_config_init(&current);
+    current.has_nb_forks = 1;
+    current.nb_forks = 4;
+
+    client_config_t staged;
+    client_config_init(&staged);
+    staged.has_nb_forks = 1;
+    staged.nb_forks = 8;
+
+    ASSERT_EQ_FMT((int)CLIENT_CONFIG_DIFF_NEEDS_RESTART, (int)client_config_diff(&current, &staged), "%d");
+    PASS();
+}
+
+/* nb_forks stagé mais IDENTIQUE au current : HOT_ONLY — une valeur stagée
+   qui ne change rien ne doit pas coûter un redémarrage à l'opérateur, cf. la
+   doc de client_config_diff (client_config.h). */
+TEST diff_nb_forks_staged_same_value_is_hot_only(void)
+{
+    client_config_t current;
+    client_config_init(&current);
+    current.has_nb_forks = 1;
+    current.nb_forks = 4;
+
+    client_config_t staged;
+    client_config_init(&staged);
+    staged.has_nb_forks = 1;
+    staged.nb_forks = 4;
+
+    ASSERT_EQ_FMT((int)CLIENT_CONFIG_DIFF_HOT_ONLY, (int)client_config_diff(&current, &staged), "%d");
+    PASS();
+}
+
+/* server_host stagé et différent (chaînes) : NEEDS_RESTART. */
+TEST diff_server_host_changed_needs_restart(void)
+{
+    client_config_t current;
+    client_config_init(&current);
+    current.has_server_host = 1;
+    current.server_host = strdup("old.example");
+
+    client_config_t staged;
+    client_config_init(&staged);
+    staged.has_server_host = 1;
+    staged.server_host = strdup("new.example");
+
+    ASSERT_EQ_FMT((int)CLIENT_CONFIG_DIFF_NEEDS_RESTART, (int)client_config_diff(&current, &staged), "%d");
+
+    client_config_free(&current);
+    client_config_free(&staged);
+    PASS();
+}
+
+/* parts_file stagé, current absent (pas encore capturé) : NEEDS_RESTART. */
+TEST diff_parts_file_staged_with_no_current_needs_restart(void)
+{
+    client_config_t current;
+    client_config_init(&current);
+
+    client_config_t staged;
+    client_config_init(&staged);
+    staged.has_parts_file = 1;
+    staged.parts_file = strdup("data/pieces16.csv");
+
+    ASSERT_EQ_FMT((int)CLIENT_CONFIG_DIFF_NEEDS_RESTART, (int)client_config_diff(&current, &staged), "%d");
+
+    client_config_free(&staged);
+    PASS();
+}
+
 SUITE(client_config_suite)
 {
     RUN_TEST(parse_line_blank_and_comment_are_ignored);
@@ -551,4 +663,11 @@ SUITE(client_config_suite)
 
     RUN_TEST(capture_effective_reads_current_globals);
     RUN_TEST(capture_effective_omits_server_host_when_absent);
+
+    RUN_TEST(diff_nothing_staged_is_hot_only);
+    RUN_TEST(diff_only_hot_keys_staged_is_hot_only);
+    RUN_TEST(diff_nb_forks_changed_needs_restart);
+    RUN_TEST(diff_nb_forks_staged_same_value_is_hot_only);
+    RUN_TEST(diff_server_host_changed_needs_restart);
+    RUN_TEST(diff_parts_file_staged_with_no_current_needs_restart);
 }
