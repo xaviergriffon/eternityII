@@ -2,9 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <sys/wait.h>
 #include <signal.h>
-#include <errno.h>
 #include <sys/socket.h>
 
 #include "app/static_variables.h"
@@ -19,6 +17,7 @@
 #include "app/etii_control.h"
 #include "app/app_runtime.h"
 #include "app/client_config.h"
+#include "app/fork_orchestrator.h"
 #include "net/http_server.h"
 #include "net/local_socket.h"
 #include "ui/command_lines.h"
@@ -151,12 +150,12 @@ int main(int argc, const char *argv[]) {
     exit(EXIT_SUCCESS);
 }
 
-void run_client(const char *hostname, const char *file, int fork_seq);
-
 /**
  * @brief Gère le client TCP.
  *
- * Cette fonction initialise les fils, les signaux, les compteurs, les vérifications, la console, et exécute le client.
+ * Cette fonction initialise les fils, les signaux, les compteurs, les
+ * vérifications, les threads du parent, puis l'orchestrateur de démarrage
+ * différé qui décide QUAND forker.
  *
  * @param argc Le nombre d'arguments de la ligne de commande.
  * @param argv Un tableau de chaînes terminées par un caractère nul représentant les arguments de la ligne de commande.
@@ -167,16 +166,19 @@ void handle_client(int argc, const char *argv[]) {
     // pour être testable — cf. parse_client_args.
     const char *serverIp = parse_client_args(argc, argv);
 
-    // Configuration client (PR A, docs/conception/cycle_vie_forks.md) : fichier
-    // clé=valeur optionnel (--config-file), appliqué UNIQUEMENT aux positions
-    // que la ligne de commande n'a pas déjà fournies — priorité CLI > fichier >
-    // défauts. Fait avant tout fork, comme les autres options globales. Un
-    // fichier absent n'est jamais une erreur (cf. client_config_load).
+    // Configuration client : fichier clé=valeur optionnel (--config-file),
+    // appliqué UNIQUEMENT aux positions que la ligne de commande n'a pas déjà
+    // fournies — priorité CLI > fichier > défauts. Fait avant tout fork,
+    // comme les autres options globales. Un fichier absent n'est jamais une
+    // erreur (cf. client_config_load). Le statut de chargement décide aussi
+    // de l'état initial de l'orchestrateur : COUNTDOWN si un fichier a été
+    // trouvé, WAITING_CONFIG sinon.
+    // Le log de confirmation (contenu inclus) est émis par fork_orchestrator_run,
+    // juste avant le décompte — l'opérateur doit voir la configuration EFFECTIVE
+    // (après client_config_apply_to_globals), pas seulement le fichier brut.
     client_config_t startup_cfg;
     client_config_init(&startup_cfg);
-    if (client_config_load(client_config_file_path, &startup_cfg) == CLIENT_CONFIG_LOADED) {
-        log_info("configuration : chargée depuis \"%s\"\n", client_config_file_path);
-    }
+    int config_loaded_at_boot = (client_config_load(client_config_file_path, &startup_cfg) == CLIENT_CONFIG_LOADED);
     client_config_apply_to_globals(&startup_cfg, argc, &serverIp);
     client_config_free(&startup_cfg);
     // Conservé pour les commandes console `config`/`configSave`, exécutées
@@ -194,12 +196,12 @@ void handle_client(int argc, const char *argv[]) {
     // l'émission de son propre hello (cf. app_runtime.h).
     init_client_identity();
 
-    // Map de lookup construite ICI, une seule fois, AVANT la boucle de fork() :
+    // Map de lookup construite ICI, une seule fois, AVANT tout fork éventuel :
     // elle n'est plus jamais écrite ensuite, donc les process de recherche
     // l'héritent en copy-on-write et se partagent physiquement UNE copie au
     // lieu d'en construire chacun la leur (5,06 Mo de `flat` + 1,27 Mo d'index
     // compact + 0,11 Mo d'arène par process). Le parent en reste propriétaire :
-    // il est le seul à la libérer, après wait_child().
+    // il est le seul à la libérer, après le retour de fork_orchestrator_run.
     // Fait avant la création de la socket locale : un fichier de pièces
     // illisible fait sortir read_parts, autant que ce soit avant d'avoir laissé
     // une socket `etii_main.<pid>` derrière nous.
@@ -218,138 +220,56 @@ void handle_client(int argc, const char *argv[]) {
 
     init_sigchld_sigaction();
 
-    // Les tampons stdio sont hérités TELS QUELS par fork() : ce qui n'a pas été
-    // écrit sur le flux ici (stdout redirigé vers un fichier = tampon par blocs)
-    // serait ré-émis par CHACUN des enfants à sa sortie, dupliquant N fois tout
-    // le journal de démarrage. On vide donc les flux juste avant la boucle —
-    // encore mono-thread, donc aucun verrou stdio ne peut être pris ailleurs.
-    fflush(NULL);
+    // État initial de l'orchestrateur : posé ICI, pendant que le process est
+    // encore mono-thread, AVANT le lancement du moindre thread susceptible de
+    // poster un événement (console en tête). Trouvé nécessaire via des tests
+    // manuels réels (reproduit de façon fiable sous make test-docker, jamais
+    // en local) : quand cette initialisation faisait partie de
+    // fork_orchestrator_run elle-même — appelée après le lancement du thread
+    // console — un `start` tapé (ou reçu via une FIFO de test) suffisamment
+    // tôt gagnait la course contre cette même initialisation, qui écrasait
+    // alors sans condition l'état déjà avancé par la console, annulant le
+    // fork silencieusement. Cf. fork_orchestrator.h pour le détail complet.
+    fork_orchestrator_init_state(config_loaded_at_boot);
 
-    // IMPORTANT : aucun thread du parent (console, checker, réception stats) ne
-    // doit tourner pendant la boucle de fork(). Sinon, si l'un d'eux détient le
-    // verrou d'un FILE stdio (ex. la console au milieu d'un printf) au moment du
-    // fork, l'enfant hérite de ce verrou verrouillé par un thread qui n'existe
-    // pas chez lui : son premier printf se bloque alors définitivement. On reste
-    // donc mono-thread jusqu'à la fin des forks, puis on lance les threads.
-
-    pid_t child_pid = -1;
-    int fork_error = 0;
-    for (int c = 0; c < NB_THREADS; c++) {
-        if (parent_pid == getpid()) {
-#ifdef DEBUG_IN_MONO_PROCESS
-            child_pid = getpid();
-#else
-            child_pid = fork();
-#endif // DEBUG_IN_MONO_PROCESS
-            if (child_pid != 0) {
-                if (child_pid == -1) {
-                    // Échec de création de CE process : on le signale et on
-                    // poursuit avec les autres. On NE retente pas le même slot
-                    // (pas de c--) et on N'arrête PAS l'application ici : seule
-                    // l'absence TOTALE de process l'arrêtera (bilan après la
-                    // boucle). Exigence : « indiquer que les process n'ont pas
-                    // été créés, ne s'arrêter que si aucun n'a pu l'être ».
-                    log_error("fork error : process %i/%i non créé (errno=%i)\n",
-                              c + 1, NB_THREADS, errno);
-                    fork_error++;
-                    childrens_pid[c] = -1;
-                    // Ressources visiblement épuisées : inutile d'insister, on
-                    // conserve les process déjà créés et on passe à la suite.
-                    if (fork_error >= 10) {
-                        log_error("création de process interrompue après %i échecs ; "
-                                  "poursuite avec les process déjà créés\n", fork_error);
-                        break;
-                    }
-                    continue;
-                }
-#ifdef DEBUG_THREAD
-                log_info("child %i created\n", child_pid);
-#endif // DEBUG_THREAD
-                int sp_len = sprintf(forkId[c], "etii_fork.%d", child_pid);
-                forkId[c][sp_len] = '\0';
-                childrens_pid[c] = child_pid;
-                int childStatus = 0;
-                waitpid(child_pid, &childStatus, WNOHANG);
-                if (childStatus != 0) {
-                    log_error("child %i error %i\n", child_pid, childStatus);
-                    c--;
-                    continue;
-                }
-#ifndef DEBUG_IN_MONO_PROCESS
-            } else {
-#endif // DEBUG_IN_MONO_PROCESS
-#ifdef DEBUG_THREAD
-                log_info("NEW thread %i\n", getpid());
-#endif // DEBUG_THREAD
-                NB_THREADS = 1;
-                run_fork_checker(main_addr);
-                run_client(serverIp, parts_files, c);
-
-                if (fork_checker_socket_id > 0) {
-                    close(fork_checker_socket_id);
-                }
-                char socket_fork[50];
-                int socket_fork_len = sprintf(socket_fork, "etii_fork.%d", getpid());
-                socket_fork[socket_fork_len] = '\0';
-                struct sockaddr_un *fork_addr = build_sockaddr(socket_fork);
-#ifdef DEBUG_LOCAL_SOCKET
-                log_debug("remove : %s\n", fork_addr->sun_path);
-                flush_debug();
-#endif // DEBUG_LOCAL_SOCKET
-                remove(fork_addr->sun_path);
-                free(fork_addr);
-            }
-        }
+    // Les threads du parent (réception stats, checker, console, canal de
+    // contrôle) démarrent MAINTENANT — avant tout fork. Le fork lui-même est
+    // différé, décidé par l'orchestrateur (fichier de configuration ->
+    // décompte de 5 s, sinon attente d'un `start`/`config` en console) et
+    // protégé par la quiescence coopérative (`fork_gate`) puisque ces
+    // threads tournent déjà au moment où `orchestrator_spawn_forks` forke
+    // réellement (cf. src/app/fork_orchestrator.c). Le `fflush(NULL)`
+    // protecteur d'avant fork historique est désormais assuré par
+    // `fork_gate_acquire_io_locks`.
+    //
+    // Démarrages NON fatals (cf. run_server_thread / run_checker /
+    // run_console / start_control_channel) : sous forte pression de
+    // ressources, le parent tourne en mode dégradé plutôt que de planter.
+    if (*socket_id > 0) {
+        run_server_thread(socket_id);
     }
-
-    if (parent_pid == getpid()) {
-        // Bilan de création : combien de process enfants ont réellement démarré.
-        int created = count_created_forks(childrens_pid, NB_THREADS);
-        if (created == 0) {
-            // SEUL cas d'arrêt : aucun process n'a pu être créé. Rien à tuer,
-            // on libère et on sort proprement.
-            log_error("aucun process enfant n'a pu être créé — arrêt de l'application\n");
-            close(*socket_id);
-            remove(main_addr->sun_path);
-            free(main_addr);
-            set_inherited_search_parts(NULL);
-            free_search_parts(&shared_parts);
-            return;
-        }
-        if (fork_error > 0) {
-            log_info("%i/%i process créés ; %i non créés (ressources insuffisantes) — poursuite\n",
-                     created, NB_THREADS, fork_error);
-        }
-
-        // Les forks sont terminés : on peut démarrer les threads du parent. Ces
-        // démarrages sont désormais NON fatals (cf. run_server_thread /
-        // run_checker / run_console) : sous forte pression de ressources, le
-        // parent tourne en mode dégradé au lieu de planter en laissant les
-        // process enfants orphelins.
-        if (*socket_id > 0) {
-            run_server_thread(socket_id);
-        }
-        run_checker(0);
-        if (!headless_mode) {
-            run_console(0);
-        }
-        // Canal de contrôle (v9) : connexion TCP additionnelle dédiée où le
-        // serveur devient l'initiateur des échanges. Non fatal comme les
-        // threads ci-dessus si la création échoue (cf. start_control_channel).
-        start_control_channel(serverIp, created);
-
-        wait_child();
-        close(*socket_id);
-#ifdef DEBUG_LOCAL_SOCKET
-        log_debug("remove : %s\n", main_addr->sun_path);
-        flush_debug();
-#endif // DEBUG_LOCAL_SOCKET
-        remove(main_addr->sun_path);
-        // Tous les process de recherche sont terminés (wait_child) : plus
-        // personne ne lit la map partagée, le propriétaire peut la libérer.
-        set_inherited_search_parts(NULL);
-        free_search_parts(&shared_parts);
+    run_checker(0);
+    if (!headless_mode) {
+        run_console(0);
     }
+    // Canal de contrôle (v9) : connexion TCP additionnelle dédiée où le
+    // serveur devient l'initiateur des échanges. `nb_forks` est désormais
+    // relu dynamiquement depuis `g_active_forks` à chaque reconnexion — 0
+    // tant qu'aucun fork n'existe encore.
+    start_control_channel(serverIp);
+
+    fork_orchestrator_run(config_loaded_at_boot);
+
+    close(*socket_id);
+#ifdef DEBUG_LOCAL_SOCKET
+    log_debug("remove : %s\n", main_addr->sun_path);
+    flush_debug();
+#endif // DEBUG_LOCAL_SOCKET
+    remove(main_addr->sun_path);
+    // Plus aucun fork ne subsiste (contrat de fork_orchestrator_run) : plus
+    // personne ne lit la map partagée, le propriétaire peut la libérer.
+    set_inherited_search_parts(NULL);
+    free_search_parts(&shared_parts);
     free(main_addr);
 }
 

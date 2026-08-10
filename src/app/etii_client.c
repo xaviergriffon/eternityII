@@ -11,7 +11,6 @@
 #include "core/datamanager.h"
 #include "core/etii_search.h"
 #include "net/etii_protocol.h"
-#include "app/app_runtime.h"
 #include "app/fork_gate.h"
 
 #ifdef WITH_CUDA
@@ -792,12 +791,14 @@ void *check_client_threads(void *param)
     (void)param;
     int sleep_time = 10;
     int last_record = max_result;
-    // Enregistrement auprès du gate de quiescence (PR B de
-    // docs/conception/cycle_vie_forks.md, D2) : ce thread est l'un des quatre
-    // candidats à la quiescence coopérative (avec server_tcp, le canal de
-    // contrôle et la console). fork_gate_checkpoint ci-dessous est un no-op
-    // tant que rien n'appelle fork_gate_request_quiesce (PR C/D) — comportement
-    // observable inchangé pour l'instant.
+    // Enregistrement auprès du gate de quiescence coopérative : ce thread
+    // est l'un des quatre candidats (avec server_tcp, le canal de contrôle
+    // et la console) — se gare réellement dès qu'un fork à chaud est décidé
+    // par l'orchestrateur (src/app/fork_orchestrator.c).
+    //
+    // Le nettoyage des slots morts a migré dans le tick de l'orchestrateur
+    // (100 ms, bien plus réactif que les 10 s de ce thread) — cf.
+    // fork_orchestrator_run.
     int gate_slot = fork_gate_register("checker");
     // Comme les autres threads (feed, control, …) : la boucle s'arrête sur
     // REQUEST_STOP — en production celui-ci n'arrive qu'à l'arrêt du processus,
@@ -812,11 +813,6 @@ void *check_client_threads(void *param)
         if (request == REQUEST_STOP) {
             break;
         }
-        // Nettoyage des slots morts (D3 de cycle_vie_forks.md) : sigchld_handler
-        // moissonne les zombies mais ne met jamais à jour childrens_pid[]/
-        // forkId[] — un fils mort de façon inattendue (hors sortie normale via
-        // wait_child) y laissait un slot fantôme indéfiniment.
-        reap_dead_child_slots(childrens_pid, forkId, fork_statistics, NB_THREADS, NULL);
         if (bench_target_nodes > 0) {
             // 1 ms : assez fin pour que le dépassement de la cible (inévitable —
             // aucun test n'est ajouté à la boucle chaude, cf. bench_should_stop)
@@ -829,7 +825,20 @@ void *check_client_threads(void *param)
                 bench_poll_and_maybe_stop();
             }
         } else {
-            sleep(sleep_time);
+            // Découpé en tranches de 200 ms (au lieu d'un seul sleep(10)) :
+            // fork_gate_checkpoint n'est revu qu'une fois par tour de cette
+            // boucle, donc un sleep(10) monolithique laissait ce thread
+            // injoignable jusqu'à 10 s — largement au-delà du budget de
+            // fork_gate_request_quiesce (FORK_GATE_DEFAULT_TIMEOUT_MS, 2 s),
+            // ce qui faisait échouer tout fork décidé par l'orchestrateur
+            // pendant cette fenêtre. Même patron que le découpage ci-dessus
+            // pour ETII_BENCH_NODES.
+            const useconds_t poll_interval_us = 200000; // 200 ms
+            int ticks = (sleep_time * 1000000) / (int)poll_interval_us;
+            for (int i = 0; i < ticks && request != REQUEST_STOP; i++) {
+                usleep(poll_interval_us);
+                fork_gate_checkpoint(gate_slot);
+            }
         }
     }
 

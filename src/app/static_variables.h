@@ -328,6 +328,19 @@ extern uint8_t diry[ETERN_PARTS];
 extern int NB_THREADS;
 
 /**
+ * @brief Nombre de process de recherche réellement créés lors du dernier
+ *        `orchestrator_spawn_forks` (src/app/fork_orchestrator.c).
+ *
+ * Distinct de `NB_THREADS` (le nombre VISÉ, figé au démarrage) : celui-ci est
+ * le bilan RÉEL après une éventuelle pénurie de ressources
+ * (`count_created_forks`), remis à jour à chaque (re)fork. Lu par
+ * `run_control_channel` (src/app/etii_control.c) à chaque reconnexion pour
+ * annoncer un `hello.nb_forks` à jour au serveur — plus une valeur figée à la
+ * création du thread. `0` tant qu'aucun fork n'a encore eu lieu.
+ */
+extern int g_active_forks;
+
+/**
  * @brief 1 si le processus est un client pruner (mode `pruner`).
  *
  * Un client pruner ne cherche pas : il demande au serveur des possibilités non

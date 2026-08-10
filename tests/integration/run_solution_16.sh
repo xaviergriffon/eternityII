@@ -48,6 +48,7 @@ SRV_PID=""
 CLI_PID=""
 
 cleanup() {
+    exec 3>&- 2>/dev/null
     [ -n "$CLI_PID" ] && kill "$CLI_PID" 2>/dev/null
     [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null
     # Filets de sécurité : enfants forkés du client encore vivants.
@@ -81,8 +82,17 @@ echo "  travail : $WORK  (timeout ${TIMEOUT}s)"
 SRV_PID=$!
 sleep 1   # laisse le serveur écouter (le client a de toute façon un back-off)
 
-"$BIN" client 127.0.0.1 1 1000 "$DATA" --stop-on-solution </dev/null >client.log 2>&1 &
+# Sans --config-file, le client ne forke plus ses process de recherche
+# immédiatement au démarrage — il attend
+# une commande console "start" (ou un fichier de configuration + décompte de
+# 5 s). On le pilote donc via une FIFO plutôt que </dev/null (même patron que
+# run_control_channel.sh : writer FD ouvert APRÈS le lancement du lecteur en
+# tâche de fond, pour éviter le rendez-vous bloquant à l'ouverture).
+mkfifo cli_in
+"$BIN" client 127.0.0.1 1 1000 "$DATA" --stop-on-solution <cli_in >client.log 2>&1 &
 CLI_PID=$!
+exec 3>cli_in
+echo "start" >&3
 
 # --- Attente bornée de l'arrêt du serveur (il s'arrête sur solution) --------
 server_exited=0

@@ -2,18 +2,17 @@
 #define fork_gate_h
 
 /*
- * Infrastructure de quiescence coopérative (PR B de
- * docs/conception/cycle_vie_forks.md, arbitrage D2).
+ * Infrastructure de quiescence coopérative.
  *
- * Objectif final (PR C/D) : pouvoir forker de nouveaux process de recherche
- * alors que les threads du process PARENT (checker, réception IPC des forks,
- * canal de contrôle, console) tournent déjà — ce qui viole aujourd'hui la
- * règle « aucun thread du parent ne doit tourner pendant fork() »
- * (src/app/main.c:228-233) : un thread qui détient un verrou stdio/logger au
- * moment du fork le transmet verrouillé à l'enfant, qui n'a personne pour le
+ * Objectif : pouvoir forker de nouveaux process de recherche alors que les
+ * threads du process PARENT (checker, réception IPC des forks, canal de
+ * contrôle, console) tournent déjà — ce qui viole autrement la règle
+ * « aucun thread du parent ne doit tourner pendant fork() »
+ * (src/app/main.c) : un thread qui détient un verrou stdio/logger au moment
+ * du fork le transmet verrouillé à l'enfant, qui n'a personne pour le
  * relâcher (blocage définitif au premier printf/malloc).
  *
- * Solution retenue (D2-c) : chaque thread candidat s'ENREGISTRE une fois puis
+ * Solution retenue : chaque thread candidat s'ENREGISTRE une fois puis
  * appelle `fork_gate_checkpoint` en tête de chaque tour de sa boucle. Tant
  * qu'aucune quiescence n'est demandée, le retour est immédiat (une lecture
  * atomique). Quand une quiescence est demandée, le thread se GARE sur une
@@ -22,12 +21,6 @@
  * read(), ne peut pas boucler jusqu'à un checkpoint : elle est instrumentée
  * différemment via `fork_gate_mark_blocked` autour de son read bloquant (cf.
  * détail sur cette fonction).
- *
- * PR B livre ces primitives et les câble aux points de contrôle (checker,
- * server_tcp, canal de contrôle, console) SANS jamais appeler
- * `fork_gate_request_quiesce` en production : le comportement observable est
- * inchangé, le fork reste avant le démarrage des threads (cf. main.c). C'est
- * PR C/D qui utiliseront réellement ces primitives pour forker à chaud.
  */
 
 #include <stddef.h>
@@ -39,8 +32,8 @@
  */
 #define FORK_GATE_MAX_PARTICIPANTS 8
 
-/** @brief Budget par défaut d'une demande de quiescence (cf. D2 : "si la
- *         quiescence n'est pas atteinte sous ~2 s ... on refuse de forker"). */
+/** @brief Budget par défaut d'une demande de quiescence : si elle n'est pas
+ *         atteinte sous ce délai, on refuse de forker. */
 #define FORK_GATE_DEFAULT_TIMEOUT_MS 2000
 
 /** @brief Issue d'une demande de quiescence. */
@@ -93,7 +86,7 @@ void fork_gate_checkpoint(int slot);
  *        marque le participant comme BLOCKED (quiescent sans se garer sur la
  *        condvar) tant que `blocked` est vrai.
  *
- * Contrat d'usage (cf. D2, cas particulier de la console) : le thread
+ * Contrat d'usage (cas particulier de la console) : le thread
  * appelle `fork_gate_mark_blocked(slot, 1)` juste avant l'appel bloquant,
  * `fork_gate_mark_blocked(slot, 0)` juste après son retour, PUIS
  * `fork_gate_checkpoint(slot)` avant tout traitement du résultat — pour se
@@ -107,7 +100,7 @@ void fork_gate_mark_blocked(int slot, int blocked);
  *        attend qu'elle soit atteinte (PARKED ou BLOCKED), borné à
  *        `timeout_ms`.
  *
- * Un seul appelant à la fois (le futur thread orchestrateur, PR C) : cette
+ * Un seul appelant à la fois (le thread orchestrateur) : cette
  * fonction n'est pas conçue pour des demandes concurrentes.
  *
  * @return FORK_GATE_QUIESCED si tous les participants sont quiescents avant
@@ -131,18 +124,41 @@ void fork_gate_release_quiesce(void);
 int fork_gate_is_quiescing(void);
 
 /**
- * @brief Primitives d'E/S autour du `fork()` (D2) : prend le verrou de
- *        sortie du logger PUIS `flockfile(stdout)`/`flockfile(stderr)`, et
- *        vide tous les tampons stdio (`fflush(NULL)`).
+ * @brief Primitives d'E/S autour du `fork()` : prend le verrou de sortie du
+ *        logger (`logger_lock_output`) et vide `stdout`/`stderr`
+ *        (`fflush(stdout)`/`fflush(stderr)`).
+ *
+ * Deux écarts DÉLIBÉRÉS par rapport à une version initiale de cette primitive
+ * (`flockfile(stdout)`/`flockfile(stderr)` + `fflush(NULL)`), découverts au
+ * premier usage réel, en forkant réellement à chaud avec l'orchestrateur :
+ *
+ * 1. **Pas de `fflush(NULL)`** : il parcourt TOUS les `FILE*` ouverts du
+ *    process, y compris `stdin` — et le thread console détient le verrou
+ *    stdio de `stdin` pour toute la durée de son `fgetc()` bloquant,
+ *    indépendamment de `fork_gate_mark_blocked` (qui ne fait que déclarer
+ *    la quiescence au sens de CE module, sans toucher aux verrous internes
+ *    de la libc). Un opérateur simplement assis au prompt — le cas
+ *    courant — provoquait donc un interblocage systématique.
+ *
+ * 2. **Pas de `flockfile(stdout)`/`flockfile(stderr)`** : à la différence
+ *    d'un `pthread_mutex_t` "normal" (sans suivi de propriétaire, donc sûr
+ *    à déverrouiller depuis le fils), le verrou stdio récursif de
+ *    `flockfile` suit un propriétaire — et ce suivi ne survit PAS
+ *    fiablement à `fork()` sous macOS dans un process multi-thread : le
+ *    fils hérite un verrou marqué comme détenu par un thread dont
+ *    l'identité OS a changé, et son PREMIER `flockfile()` (le premier
+ *    `log_info` après le fork, par exemple) bloque alors indéfiniment.
+ *    Reproduit systématiquement (`sample(1)` montre le fils bloqué dans
+ *    `flockfile → _pthread_mutex_firstfit_lock_wait`). La quiescence
+ *    coopérative protège déjà entièrement contre le risque que
+ *    `flockfile` était censé couvrir (un AUTRE thread mi-écriture au
+ *    moment du fork) : aucun thread parké/marqué bloqué ne touche stdio,
+ *    donc `flockfile` par le thread forkeur lui-même n'apportait aucune
+ *    protection supplémentaire tout en introduisant ce risque.
  *
  * À appeler par le thread forkeur UNIQUEMENT après un
  * `fork_gate_request_quiesce` réussi, et à relâcher (`fork_gate_release_io_locks`)
- * dans le parent ET dans l'enfant juste après le `fork()` — les verrous
- * `flockfile` sont détenus par le thread forkeur, seul thread de l'enfant à
- * cet instant, donc `funlockfile` y est valide (cf. D2).
- *
- * PR B expose et teste ces primitives de façon autonome ; aucun site de PR B
- * ne les appelle encore autour d'un vrai `fork()` (PR C/D).
+ * dans le parent ET dans l'enfant juste après le `fork()`.
  */
 void fork_gate_acquire_io_locks(void);
 

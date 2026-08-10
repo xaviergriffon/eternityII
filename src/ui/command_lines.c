@@ -17,12 +17,13 @@
 #include "net/control_protocol.h"
 #include "core/best_board.h"
 #include "app/client_config.h"
+#include "app/fork_orchestrator.h"
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 49
+#define NB_COMMANDS 50
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -123,6 +124,7 @@ int clients_work_interpreter(void);
 int lease_duration_interpreter(void);
 int config_interpreter(void);
 int config_save_interpreter(void);
+int start_interpreter(void);
 
 /**
  * @brief Commandes prises en charge (entrées canoniques puis alias).
@@ -143,17 +145,28 @@ static command_description commands[NB_COMMANDS] = {
      "Aucune autre commande n'efface l'écran : l'affichage ne défile que par les sorties.\n"
      "Le contenu n'est pas perdu : en mode ANSI il part dans le scrollback natif du\n"
      "terminal (molette / Cmd+↑), en mode ncurses il reste accessible via PgUp.", NULL},
-    {"config", config_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
-     "affiche la configuration client effective (nb_forks, serveur, fichier de pièces, ...)",
-     "N'affiche pour l'instant que la configuration EFFECTIVE (celle réellement en\n"
-     "vigueur, issue de la ligne de commande et/ou du fichier --config-file) : la\n"
-     "notion de configuration \"en préparation\" et le décompte d'auto-démarrage\n"
-     "arrivent avec l'orchestrateur (cf. docs/conception/cycle_vie_forks.md, PR C).\n"
-     "N'annule aucun décompte.", NULL},
+    {"config", config_interpreter, 0, CMD_CAT_GENERAL, 0, "config [clé valeur]",
+     "affiche ou prépare la configuration (nb_forks, serveur, fichier de pièces, ...)",
+     "Sans argument : affiche l'état de l'orchestrateur (WAITING_CONFIG/COUNTDOWN/\n"
+     "CONFIGURING/RUNNING/...), la configuration EFFECTIVE (celle réellement en\n"
+     "vigueur) et la configuration EN PRÉPARATION. N'annule pas le décompte.\n"
+     "Avec <clé> <valeur> : écrit dans la configuration en préparation (clés :\n"
+     "nb_forks, server_host, parts_file, max_stock_by_thread, limit, pruner_batch)\n"
+     "et ANNULE DÉFINITIVEMENT le décompte d'auto-démarrage — `start` consomme\n"
+     "toujours la configuration EFFECTIVE, pas celle en préparation.", NULL},
     {"configSave", config_save_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
-     "écrit la configuration effective dans le fichier de configuration",
-     "Écriture atomique (.tmp puis rename, comme « backup »). Fichier par défaut\n"
+     "écrit la configuration effective (+ en préparation) dans le fichier de configuration",
+     "Écrit la configuration EFFECTIVE, avec toute valeur EN PRÉPARATION\n"
+     "(`config <clé> <valeur>`) superposée par-dessus — c'est ainsi qu'une\n"
+     "valeur préparée prend effet au prochain démarrage. Écriture atomique\n"
+     "(.tmp puis rename, comme « backup »). Fichier par défaut\n"
      "./eternityii-client.conf (option --config-file <chemin>).", NULL},
+    {"start", start_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
+     "fork immédiat des process de recherche avec la configuration effective",
+     "Sans effet si déjà en RUNNING (erreur explicite). Sinon, démarre immédiatement\n"
+     "sans attendre un éventuel décompte d'auto-démarrage (COUNTDOWN) — même chemin\n"
+     "de code que ce décompte à échéance. Consomme la configuration EFFECTIVE, pas\n"
+     "celle en préparation par `config <clé> <valeur>` (cf. commande `config`).", NULL},
 
     {"pause", pause_interpreter, 1, CMD_CAT_SEARCH, 0, NULL,
      "met la recherche en pause administrative (locale + clients connectés)",
@@ -395,26 +408,114 @@ int clear_interpreter(void) {
     return 0;
 }
 
+/** @brief Nom d'affichage d'un état d'orchestrateur (commande console `config`). */
+static const char *orch_state_name(orch_state_t s) {
+    switch (s) {
+    case ORCH_WAITING_CONFIG: return "WAITING_CONFIG";
+    case ORCH_COUNTDOWN:      return "COUNTDOWN";
+    case ORCH_CONFIGURING:    return "CONFIGURING";
+    case ORCH_RUNNING:        return "RUNNING";
+    case ORCH_STOPPING:       return "STOPPING";
+    case ORCH_APPLYING:       return "APPLYING";
+    case ORCH_EXITING:        return "EXITING";
+    }
+    return "?";
+}
+
 /**
- * @brief Interpréteur de `config` : affiche la configuration client EFFECTIVE
- *        (celle réellement en vigueur, pas un instantané de démarrage).
+ * @brief Interpréteur de `config` (sans argument) / `config <clé> <valeur>`.
  *
- * Voir client_config_capture_effective (src/app/client_config.h) : lit les
- * globales courantes, donc reflète aussi un `limit`/`maxStockByThread`/
- * `prunerBatch` déjà exécuté depuis cette même console. `server_host` est
- * absent (non affiché) en mode serveur/test, où la notion n'a pas de sens
- * (g_client_server_host y reste NULL).
+ * Sans argument : affiche l'état de l'orchestrateur (`fork_orchestrator_snapshot`),
+ * la configuration EFFECTIVE (celle réellement en vigueur — voir
+ * `client_config_capture_effective`, reflète aussi un `limit`/`maxStockByThread`/
+ * `prunerBatch` déjà exécuté depuis cette même console) et la configuration
+ * EN PRÉPARATION (`fork_orchestrator_format_staged_config`). N'annule pas le
+ * décompte.
+ *
+ * Avec deux arguments (`strtok` — même convention que `limit`/`prunerBatch` :
+ * un token par espace, pas de valeur contenant un espace) : synthétise une
+ * ligne `clé = valeur` et la délègue à `fork_orchestrator_stage_config_line`
+ * (réutilise `client_config_parse_line`, jamais de logique de validation
+ * dupliquée) — écrit dans la configuration en préparation et annule
+ * DÉFINITIVEMENT le décompte, seulement si la ligne est acceptée (une faute
+ * de frappe ne doit pas faire perdre l'auto-démarrage). Un seul argument
+ * (clé sans valeur) : `CMD_ERR_USAGE`.
  */
 int config_interpreter(void) {
+    char *key = strtok(NULL, " ");
+    if (key != NULL) {
+        char *value = strtok(NULL, " ");
+        if (value == NULL) {
+            return CMD_ERR_USAGE;
+        }
+        char line[600];
+        snprintf(line, sizeof(line), "%s = %s", key, value);
+        client_config_line_status_t status = fork_orchestrator_stage_config_line(line);
+        switch (status) {
+        case CLIENT_CONFIG_LINE_SET:
+            log_info("config : \"%s\" préparé (%s = %s) — décompte annulé s'il était en cours\n",
+                      key, key, value);
+            return 0;
+        case CLIENT_CONFIG_LINE_UNKNOWN_KEY:
+            log_error("config : clé inconnue \"%s\"\n", key);
+            return -1;
+        case CLIENT_CONFIG_LINE_INVALID_VALUE:
+            log_error("config : valeur invalide pour \"%s\" : \"%s\"\n", key, value);
+            return -1;
+        case CLIENT_CONFIG_LINE_IGNORED:
+            return 0;
+        }
+        return -1;
+    }
+
+    orch_state_t state;
+    long countdown_remaining_ms;
+    fork_orchestrator_snapshot(&state, &countdown_remaining_ms);
+
+    char state_line[80];
+    if (state == ORCH_COUNTDOWN && countdown_remaining_ms > 0) {
+        snprintf(state_line, sizeof(state_line), "%s (auto-démarrage dans %llds)",
+                  orch_state_name(state),
+                  (long long)((countdown_remaining_ms + 999) / 1000));
+    } else {
+        snprintf(state_line, sizeof(state_line), "%s", orch_state_name(state));
+    }
+
     client_config_t cfg;
     client_config_capture_effective(&cfg, g_client_server_host);
-
     char buf[1024];
     client_config_format(&cfg, buf, sizeof(buf));
-    log_info("config (fichier : %s) :\n%s", client_config_file_path,
-              buf[0] != '\0' ? buf : "  (aucune valeur)\n");
-
     client_config_free(&cfg);
+
+    char staged_buf[1024];
+    fork_orchestrator_format_staged_config(staged_buf, sizeof(staged_buf));
+
+    log_info("config : état=%s\n"
+              "configuration effective (fichier : %s) :\n%s"
+              "configuration en préparation :\n%s",
+              state_line, client_config_file_path,
+              buf[0] != '\0' ? buf : "  (aucune valeur)\n",
+              staged_buf[0] != '\0' ? staged_buf : "  (aucune valeur)\n");
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `start` : fork immédiat avec la configuration
+ *        EFFECTIVE (pas celle en préparation, cf. commande `config`).
+ *
+ * Poste `EV_START` (même chemin de code qu'un décompte de COUNTDOWN écoulé)
+ * via `fork_orchestrator_post_event`, qui applique la transition
+ * SYNCHRONEMENT : le résultat (erreur si déjà en RUNNING) est donc connu
+ * immédiatement, sans latence de sondage.
+ */
+int start_interpreter(void) {
+    orch_actions_t actions;
+    fork_orchestrator_post_event(EV_START, &actions);
+    if (actions.error == ORCH_ERR_ALREADY_RUNNING) {
+        log_error("start : la recherche est déjà en cours d'exécution\n");
+        return -1;
+    }
+    log_info("start : démarrage demandé\n");
     return 0;
 }
 
@@ -425,6 +526,11 @@ int config_interpreter(void) {
 int config_save_interpreter(void) {
     client_config_t cfg;
     client_config_capture_effective(&cfg, g_client_server_host);
+    // Superpose la configuration EN PRÉPARATION (config <clé> <valeur>) sur
+    // l'effective : sans ceci, une valeur préparée puis sauvegardée était
+    // perdue au redémarrage suivant (configSave ne capturait jamais que
+    // l'effective).
+    fork_orchestrator_merge_staged_config(&cfg);
 
     int rc = client_config_save(client_config_file_path, &cfg);
     client_config_free(&cfg);
@@ -1397,15 +1503,18 @@ int min_interpreter(void) {
  * @return            Pointeur vers la commande canonique trouvée, ou NULL si inconnue.
  */
 /**
- * @brief `config`/`configSave` agissent sur la configuration CLIENT
- *        (client_config.h) : exécutées côté SERVEUR, elles liraient/écriraient
- *        les globales du serveur (sans rapport avec cette configuration, ex.
- *        `NB_THREADS` y désigne la taille du pool de connexions, pas un
- *        nombre de forks) — trompeur plutôt qu'un no-op inoffensif comme les
- *        commandes `server_only` à l'inverse (`clients`, …, harmless sur un
- *        client puisque `control_registry` y est toujours vide). D'où un
- *        masquage explicite (ni listées, ni exécutables, ni suggérées) plutôt
- *        qu'une simple annotation "[serveur]"/"[client]".
+ * @brief `config`/`configSave`/`start` agissent sur la configuration/le cycle
+ *        de vie CLIENT (client_config.h, fork_orchestrator.h) : exécutées
+ *        côté SERVEUR, elles liraient/écriraient les globales du serveur
+ *        (sans rapport avec cette configuration, ex. `NB_THREADS` y désigne
+ *        la taille du pool de connexions, pas un nombre de forks) ou
+ *        posteraient un événement à un orchestrateur qu'aucune boucle ne
+ *        consomme jamais côté serveur (`fork_orchestrator_run` n'est appelée
+ *        que par `handle_client`) — trompeur plutôt qu'un no-op inoffensif
+ *        comme les commandes `server_only` à l'inverse (`clients`, …,
+ *        harmless sur un client puisque `control_registry` y est toujours
+ *        vide). D'où un masquage explicite (ni listées, ni exécutables, ni
+ *        suggérées) plutôt qu'une simple annotation "[serveur]"/"[client]".
  *
  * Delibérément une liste de noms plutôt qu'un nouveau champ sur
  * `command_description` : la table `commands[]` compte ~50 entrées toutes
@@ -1415,7 +1524,8 @@ int min_interpreter(void) {
  */
 static int command_is_client_only(const command_description *command) {
     return strcmp(command->command, "config") == 0 ||
-           strcmp(command->command, "configSave") == 0;
+           strcmp(command->command, "configSave") == 0 ||
+           strcmp(command->command, "start") == 0;
 }
 
 /**

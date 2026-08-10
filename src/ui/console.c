@@ -10,6 +10,7 @@
 #include "ui/command_history.h"
 #include "ui/line_edit.h"
 #include "app/fork_gate.h"
+#include "app/fork_orchestrator.h"
 
 #define EXIT_CMD "exit"
 
@@ -166,6 +167,13 @@ static char *getcmdline_raw(void)
             console_input_end();
             return NULL;
         }
+        // Toute frappe au clavier annule un décompte d'auto-démarrage en
+        // cours (état COUNTDOWN de l'orchestrateur) : 5 s ne suffisent pas à
+        // taper une commande complète, donc on ne peut pas attendre qu'une
+        // ligne `config <clé> <valeur>` soit validée en entier pour annuler —
+        // le simple fait de commencer à saisir (même juste "start") doit
+        // déjà donner un temps illimité. No-op hors COUNTDOWN (self-loop).
+        fork_orchestrator_post_event(EV_CONFIG_BEGUN, NULL);
 
         if (c == '\n' || c == '\r') {
             console_input_end();        /* écho de Entrée + fin de protection */

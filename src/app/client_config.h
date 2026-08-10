@@ -171,6 +171,25 @@ int client_config_save(const char *path, const client_config_t *cfg);
 void client_config_apply_to_globals(const client_config_t *cfg, int argc, const char **server_host);
 
 /**
+ * @brief Applique INCONDITIONNELLEMENT les clés de @p cfg aux globales
+ *        correspondantes — contrairement à `client_config_apply_to_globals`,
+ *        aucun seuil `argc` n'est consulté : chaque clé présente (`has_* == 1`)
+ *        écrase la globale correspondante.
+ *
+ * Utilisée pour appliquer immédiatement, sans redémarrage du process, une
+ * configuration saisie en cours de session via `config <clé> <valeur>` — un
+ * ordre explicite de l'opérateur pendant l'exécution est par construction
+ * plus récent que tout argument positionnel donné au lancement, donc toujours
+ * prioritaire. Sans effet sur les clés absentes de @p cfg.
+ *
+ * @param cfg         Configuration à appliquer (typiquement la configuration
+ *                    "en préparation" de `fork_orchestrator`).
+ * @param server_host Pointeur vers la variable de l'appelant contenant l'hôte
+ *                    serveur courant — mis à jour si `cfg` fournit `server_host`.
+ */
+void client_config_apply_direct(const client_config_t *cfg, const char **server_host);
+
+/**
  * @brief Capture la configuration EFFECTIVE actuelle (valeurs réellement en
  *        vigueur) depuis les globales, dans un `client_config_t` neuf.
  *

@@ -1,13 +1,15 @@
 # Cycle de vie dynamique des processus fils (client)
 
 **Statut : en cours d'implémentation.** PR A ([#183](https://github.com/xaviergriffon/eternityII/pull/183),
-module `client_config`) et PR B (infrastructure de quiescence, `src/app/fork_gate.{h,c}`) livrées — voir le
-découpage en PR ci-dessous pour le détail et le suivi. PR C à E restent des **propositions** : ce document
-continue de décrire une **cible**, pas le comportement actuel du code, sauf pour les parties couvertes par
-PR A (chargement de `--config-file` au démarrage et commandes `config`/`configSave`, documentées dans
-`AGENTS.md`, `README.md` et `docs/console.md`) et PR B (primitives `fork_gate_*`, checkpoints câblés dans
-les quatre threads candidats, nettoyage des slots morts — comportement externe inchangé, le fork reste
-avant le démarrage des threads).
+module `client_config`), PR B (infrastructure de quiescence, `src/app/fork_gate.{h,c}`) et PR C
+(orchestrateur de démarrage différé, `src/app/fork_orchestrator.{h,c}`) livrées — voir le découpage en PR
+ci-dessous pour le détail et le suivi. PR D et E restent des **propositions** : ce document continue de
+décrire une **cible**, pas le comportement actuel du code, sauf pour les parties couvertes par PR A
+(chargement de `--config-file` au démarrage et commandes `config`/`configSave`, documentées dans
+`AGENTS.md`, `README.md` et `docs/console.md`), PR B (primitives `fork_gate_*`, checkpoints câblés dans les
+quatre threads candidats, nettoyage des slots morts) et PR C (démarrage réellement différé : le fork
+n'a plus lieu au boot mais sur décompte de 5 s ou commande `start`/`config <clé> <valeur>` — voir
+`AGENTS.md`, `docs/console.md`, `docs/utilisation.md` pour le comportement actuel).
 
 ## Objectif
 
@@ -278,7 +280,7 @@ travail prêté.
 
 ## Découpage en PR
 
-**Suivi : 2/5 livrées (PR A, PR B).** Branche dédiée par PR, jamais sur `master`, messages de commit brefs et
+**Suivi : 3/5 livrées (PR A, PR B, PR C).** Branche dédiée par PR, jamais sur `master`, messages de commit brefs et
 sans signature. Chaque PR met à jour `README.md`, `AGENTS.md` et les documents de `docs/` concernés.
 
 - **PR A — `client_config`. Livrée** ([#183](https://github.com/xaviergriffon/eternityII/pull/183)).
@@ -333,16 +335,147 @@ sans signature. Chaque PR met à jour `README.md`, `AGENTS.md` et les documents 
   primitives d'E/S) et de nouveaux tests dans `tests/app/test_app_runtime.c`
   (`pid_is_alive_*`/`reap_dead_child_slots_*`, technique `fork()`+`waitpid()` déjà utilisée par
   `tests/ui/test_command_lines.c` pour obtenir un pid mort déterministe).
-- **PR C — Orchestrateur, démarrage différé et décompte de 5 s.** Module `fork_orchestrator`,
-  `handle_client` restructuré (threads d'abord, boucle d'orchestration à la place de `wait_child`),
-  commandes `start` et `config <clé> <valeur>` avec annulation du décompte, `nb_forks` dynamique côté
-  canal de contrôle. Tests exhaustifs de `orchestrator_step` (transitions, décompte, annulation,
-  fichier absent).
+- **PR C — Orchestrateur, démarrage différé et décompte de 5 s. Livrée.** Module
+  `src/app/fork_orchestrator.{h,c}` : cœur pur et total `orchestrator_step` (7 états × 6 événements,
+  chaque cas explicite — pas de `default:`, pour que `-Wswitch` signale un événement oublié si l'enum
+  grandit), prédicat pur `orchestrator_countdown_elapsed`, et un driver impur (`fork_orchestrator_run`,
+  tick de 100 ms) qui remplace `wait_child()` dans `handle_client` — restructuré pour démarrer les
+  threads du parent (checker, console, canal de contrôle, `server_tcp`) **avant** tout fork, exactement
+  le scénario que PR B préparait. `handle_client` calcule l'état initial (`COUNTDOWN` si
+  `client_config_load` a chargé un fichier, `WAITING_CONFIG` sinon) et ne fait plus rien d'autre côté
+  fork — tout est piloté par l'orchestrateur.
+
+  **Écarts délibérés par rapport à ce paragraphe**, tranchés pendant l'implémentation (aucun n'est une
+  régression de portée, juste des détails que ce document laissait sous-spécifiés) :
+  - Le décompte de 5 s n'est PAS stocké dans l'état pur : sa deadline est une variable locale du
+    driver. À échéance, le driver appelle `orchestrator_step(COUNTDOWN, EV_START, now_ms, &out)` —
+    exactement le même appel qu'un `start` manuel : un seul chemin de code, testé une fois.
+  - La "boîte aux lettres" de D1 (mutex+condvar+file bornée) est réalisée plus simplement : un point
+    d'entrée thread-safe unique, `fork_orchestrator_post_event`, applique la transition
+    SYNCHRONEMENT sous verrou et rend la main avec le résultat exact (retour immédiat de `start` en
+    cas d'erreur "déjà en RUNNING", sans latence de sondage) ; le thread orchestrateur dédié, seul à
+    jamais appeler `fork()` (D1 respecté), se réveille sur cette même condvar. Les événements de PR C
+    étant des changements d'état idempotents (pas du travail à empiler), une file bornée littérale
+    n'apportait rien.
+  - `EV_STOP_FORKS`/`EV_RESTART` sont déclarés et traités par `orchestrator_step` (retour à l'état
+    inchangé + `ORCH_ERR_UNSUPPORTED`, dans tous les états) mais leur vraie sémantique — où atterrit
+    `STOPPING` selon qu'il s'agit d'un `stopForks` ou d'un `configApply` — n'est PAS devinée : ça
+    dépend de détails que seule l'implémentation de PR D peut trancher. `EV_EXIT` est géré correctement
+    par le cœur pur (tout état → `EXITING`, jamais une erreur) mais aucun driver ne le poste encore ;
+    `exit_interpreter` garde son comportement actuel (kill direct + `exit()`), inchangé.
+  - `config <clé> <valeur>` écrit dans une configuration "en préparation" tenue par
+    `fork_orchestrator.c` (réutilise `client_config_parse_line`, PR A, zéro logique dupliquée) et
+    n'annule le décompte QUE si la ligne est acceptée (`CLIENT_CONFIG_LINE_SET`) — une faute de frappe
+    ne doit pas coûter l'auto-démarrage. `start` (manuel ou déclenché par le décompte) consomme
+    toujours la configuration EFFECTIVE, jamais celle en préparation — fidèle au libellé exact du doc
+    ("Fork immédiat avec la configuration effective"). La configuration en préparation reste inerte
+    tant que `configApply` (PR D) n'existe pas pour la consommer ; `configSave` (PR A) n'est pas
+    modifiée, elle continue de capturer/écrire l'effective.
+  - `nb_forks` dynamique (D4) : nouveau global `g_active_forks`, relu par `run_control_channel` à
+    chaque reconnexion (plus figé au démarrage du thread), et `control_channel_request_reconnect()`
+    (drapeau atomique one-shot, consulté dans la boucle de service interne du canal) force la
+    reconnexion d'une session déjà établie après chaque (re)fork — sans lui le serveur ne voit jamais
+    le vrai nombre de fils tant que la session initiale reste en vie.
+  - **Deux interblocages spécifiques à macOS découverts en testant manuellement un vrai client** (pas
+    par les tests unitaires — `fork_gate_suite`/`fork_orchestrator_suite` ne forkent jamais réellement
+    et n'ont pas de console bloquée dans un vrai `read()`) : (1) `fflush(NULL)` dans
+    `fork_gate_acquire_io_locks` bloque contre le thread console, qui détient le verrou stdio de
+    `stdin` pour toute la durée de son `fgetc()` bloquant — un opérateur simplement assis au prompt
+    suffisait à reproduire l'interblocage à chaque tentative de fork. (2) même après ce correctif,
+    `flockfile(stdout)`/`flockfile(stderr)` ne survivent PAS de façon fiable à `fork()` sous macOS
+    dans un process multi-thread — le fils hérite un verrou marqué détenu par une identité de thread
+    qui n'existe plus en tant que telle, et son premier `flockfile()` (le tout premier `log_info`
+    après le fork) bloque indéfiniment. Les deux corrigés en abandonnant `flockfile`/`fflush(NULL)`
+    au profit de `fflush(stdout)`/`fflush(stderr)` explicites — la quiescence coopérative de PR B
+    protège déjà entièrement contre le risque que `flockfile` était censé couvrir (un AUTRE thread
+    mi-écriture au moment du fork), donc verrouiller le flux depuis le thread forkeur lui-même
+    n'apportait aucune protection supplémentaire. Voir `AGENTS.md` (*Deferred-start orchestrator*)
+    pour le diagnostic complet (`sample(1)`) ; les deux sont désormais exercés par
+    `run_solution_16.sh` (client piloté par une FIFO laissée ouverte, donc réellement bloqué dans
+    `fgetc()` comme un opérateur inactif, avant de forker pour de vrai).
+  - La boucle de fork historique de `main.c` est déplacée dans `orchestrator_spawn_forks`, avec la
+    quiescence/les verrous d'E/S pris et relâchés AUTOUR DE CHAQUE `fork()` individuel — pas une seule
+    fois pour tout le lot de `NB_THREADS` : une section critique élargie à la boucle entière
+    s'auto-interbloquait dès qu'un message de bilan (échec de fork, trace `DEBUG_THREAD`) reprenait le
+    verrou du logger déjà détenu. `run_client` (anciennement privé à `main.c`) est devenu une fonction
+    statique de `fork_orchestrator.c`, qui doit rester linkable dans le binaire de test (jamais lié à
+    `main.c`).
+
+  **Trois ajustements faits après des tests manuels réels** (le point dur du guide de tests :
+  `fork_orchestrator_suite` ne détecte rien de ceci, car aucun de ces trois éléments n'est exercé sans
+  un vrai opérateur au clavier) :
+  1. `configSave` ne capturait que l'EFFECTIVE, jamais la configuration en préparation — un
+     `config <clé> <valeur>` suivi de `configSave` puis d'un redémarrage du process ne changeait donc
+     jamais rien, alors que c'est exactement le geste qu'un opérateur ferait pour rendre une
+     modification permanente. Corrigé par `fork_orchestrator_merge_staged_config`, appelée par
+     `configSave` juste avant l'écriture : superpose chaque clé stagée sur l'effective déjà capturée.
+  2. Le décompte de 5 s n'est en pratique pas assez long pour taper une commande complète — attendre
+     qu'une ligne `config <clé> <valeur>` soit intégralement saisie ET acceptée avant d'annuler le
+     laissait de facto ininterruptible. Corrigé en postant `EV_CONFIG_BEGUN` dès la PREMIÈRE touche lue
+     par la console (`console.c`/`logger_ncurses.c`), pas seulement sur une ligne complète et valide —
+     conforme au sens littéral de `CONFIGURING` ("une saisie a COMMENCÉ"). Sans effet hors `COUNTDOWN`
+     (self-loop). La console cuite (non-TTY, cas des tests pilotés par FIFO) n'est pas concernée : elle
+     ne voit jamais qu'une ligne entière à la fois.
+  3. Rien n'affichait le CONTENU de la configuration chargée avant le décompte — seul le fait qu'un
+     fichier avait été trouvé était loggé. Un opérateur ne pouvait donc pas juger, sans rien taper,
+     s'il fallait l'interrompre. `fork_orchestrator_run` logge désormais la configuration effective
+     complète juste avant d'entrer en `COUNTDOWN`.
+
+  **Deux régressions supplémentaires trouvées en re-testant manuellement le point 3 ci-dessus et la
+  consommation de la configuration en préparation, toutes deux invisibles à `fork_orchestrator_suite`
+  pour la même raison — aucun vrai console/fork n'y est exercé :**
+  1. **Le point 3 ne s'affichait en réalité JAMAIS**, malgré le correctif : `log_info` (`src/ui/logger.c`)
+     ne flushe `stdout` que si une lecture console est déjà bloquante (`input_active`, cf.
+     `write_stream_locked`) — et à l'endroit où `fork_orchestrator_run` journalise, le thread console
+     vient tout juste d'être lancé (asynchrone) par `handle_client` et n'a très probablement pas encore
+     atteint sa première lecture bloquante. Le bloc restait donc dans le tampon de la libc, invisible
+     jusqu'à ce qu'un autre événement finisse par flusher `stdout` (ou jamais, en `--headless`, où aucun
+     thread console n'existe pour faire passer `input_active` à 1). Corrigé en remplaçant `log_info` par
+     `log_console` (flush inconditionnel, `write_output(stdout, buf, 1)`) pour ce message ET pour le
+     tick de décompte une fois par seconde — exactement la fonction que le projet réserve déjà à
+     l'affichage interactif destiné à l'opérateur.
+  2. **`start` ne consommait QUE l'effective, jamais la configuration en préparation** — un
+     `config nb_forks 8` suivi de `start` forkait toujours avec l'ANCIENNE valeur ; il fallait
+     `configSave` PUIS redémarrer le process pour que la nouvelle valeur prenne effet (correctif 1
+     ci-dessus). C'est un geste bien plus naturel pour un opérateur (préparer, puis démarrer tout de
+     suite) que celui couvert par correctif 1 (préparer, sauvegarder, redémarrer) — l'un ne remplace pas
+     l'autre, les deux coexistent désormais. Corrigé par `fork_orchestrator_apply_staged_config`,
+     appelée par le driver juste avant CHAQUE fork effectif (`start` manuel ou décompte qui va à son
+     terme, même point de code) : superpose la configuration en préparation directement sur les globales
+     en vigueur via `client_config_apply_direct` (`src/app/client_config.{h,c}`, jumeau inconditionnel de
+     `client_config_apply_to_globals` — sans seuil `argc`, puisqu'un ordre explicite donné en cours de
+     session est par construction plus récent que tout argument de lancement).
+  3. **`config nb_forks <n>` au-delà du nombre initial faisait segfaulter le PARENT** — bug rapporté
+     par un opérateur via un vrai crash reproduit avec exactement cette séquence : démarrage,
+     Entrée, `config`, `config nb_forks 6` (au-delà du nombre initial), `configSave`, `start` — avec
+     les fils déjà forkés restant vivants après coup. Cause : `init_childs()` dimensionne
+     `childrens_pid`/`forkId`/`fork_statistics` sur `NB_THREADS` AU MOMENT de son appel, avant tout
+     fork ; une fois que `fork_orchestrator_apply_staged_config` (correctif 2 ci-dessus) peut relever
+     `NB_THREADS` après coup, la boucle de `orchestrator_spawn_forks` écrivait hors bornes dès que le
+     nouveau `nb_forks` dépassait l'allocation d'origine — débordement de tas classique, cohérent
+     avec le symptôme observé (le parent plante dans sa propre boucle de fork, les fils déjà créés
+     avant le débordement restent vivants). Corrigé par `ensure_childs_capacity`
+     (`src/app/app_runtime.{h,c}`) : agrandit (jamais ne rétrécit) les trois tableaux via `realloc`,
+     préserve les slots existants, initialise les nouveaux comme `init_childs` — appelée juste après
+     `fork_orchestrator_apply_staged_config` et avant `orchestrator_spawn_forks`, à chaque tentative
+     de fork effective.
+
+  Tests : `tests/app/test_fork_orchestrator.c` — matrice exhaustive de `orchestrator_step` (chaque état
+  × chaque événement), `orchestrator_countdown_elapsed`, et tests d'intégration légers du driver
+  thread-safe (`post_event`/`snapshot`/`stage_config_line`/`merge_staged_config`/`apply_staged_config`) ;
+  `tests/app/test_app_runtime.c` pour `ensure_childs_capacity` (agrandissement en préservant les slots
+  existants, no-op quand la capacité est déjà suffisante). Pas de test unitaire du fork réel
+  (`orchestrator_spawn_forks`/`fork_orchestrator_run`) ni du câblage clavier — couverts par
+  `make test-integration`, dont `run_solution_16.sh` pilote désormais le client par FIFO (au lieu de
+  `</dev/null`) pour pouvoir lui envoyer `start` ; `run_control_channel.sh` reste inchangé, ses
+  vérifications ne dépendant d'aucun fork réel.
 - **PR D — Arrêt et redémarrage à chaud.** `stopForks`, `configApply`, séquence
   arrêt/escalade/récolte sous SIGCHLD masqué, `free_childs` et réallocation sur changement de
-  `nb_forks`, reconstruction de la map sur changement de `parts_file`,
-  `control_channel_request_reconnect`. Tests de `stop_escalation_next`, `client_config_diff` et des
-  transitions STOPPING/APPLYING.
+  `nb_forks`, reconstruction de la map sur changement de `parts_file`, réutilisation de
+  `control_channel_request_reconnect` (livrée en PR C) après le re-fork. Tests de
+  `stop_escalation_next`, `client_config_diff` et des transitions STOPPING/APPLYING (la table
+  `orchestrator_step` existe déjà depuis PR C — PR D lui donne sa vraie sémantique pour ces deux
+  événements, cf. `ORCH_ERR_UNSUPPORTED` ci-dessus).
 - **PR E — Pilotage à distance et intégration.** Listes blanches de `control_protocol.c` avec la
   défense en profondeur côté client, branches réentrantes dans `admin_apply_remote_command` (jeton
   Bearer sur l'API HTTP), script `tests/integration/run_client_lifecycle.sh` sur le patron de
