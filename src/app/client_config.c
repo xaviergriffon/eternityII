@@ -303,6 +303,28 @@ void client_config_apply_to_globals(const client_config_t *cfg, int argc, const 
     }
 }
 
+void client_config_apply_direct(const client_config_t *cfg, const char **server_host)
+{
+    if (cfg->has_nb_forks) {
+        NB_THREADS = cfg->nb_forks;
+    }
+    if (cfg->has_server_host && cfg->server_host != NULL && server_host != NULL) {
+        *server_host = strdup(cfg->server_host);
+    }
+    if (cfg->has_parts_file && cfg->parts_file != NULL) {
+        parts_files = strdup(cfg->parts_file);
+    }
+    if (cfg->has_max_stock_by_thread) {
+        max_stock_by_thread = cfg->max_stock_by_thread;
+    }
+    if (cfg->has_limit) {
+        max_search_by_sec = cfg->limit;
+    }
+    if (cfg->has_pruner_batch) {
+        pruner_batch_size = cfg->pruner_batch;
+    }
+}
+
 void client_config_capture_effective(client_config_t *out, const char *server_host)
 {
     client_config_init(out);

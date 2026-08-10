@@ -94,10 +94,21 @@ void *run_control_channel(void *param);
  *
  * @param server_ip Adresse/hôte du serveur (copiée dans les paramètres du
  *                   thread, l'appelant reste propriétaire de la chaîne).
- * @param nb_forks  Nombre de process de recherche réellement créés (bilan
- *                   après la boucle de fork, cf. `count_created_forks`),
- *                   transmis tel quel dans le hello.
  */
-void start_control_channel(const char *server_ip, int nb_forks);
+void start_control_channel(const char *server_ip);
+
+/**
+ * @brief Force la reconnexion de la session de contrôle en cours.
+ *
+ * `hello.nb_forks` est désormais relu depuis la globale `g_active_forks` à
+ * CHAQUE reconnexion (plus une valeur figée au démarrage du thread) — mais
+ * une session déjà établie ne reconnecte pas spontanément juste parce que
+ * `g_active_forks` a changé. Cette fonction pose un drapeau consulté par la
+ * boucle de service de `run_control_channel` : la session en cours se ferme
+ * proprement (même chemin qu'un timeout normal) puis se rouvre avec un hello
+ * à jour. Appelée par `orchestrator_spawn_forks` après chaque (re)démarrage
+ * des fils. Thread-safe, appelable depuis n'importe quel thread.
+ */
+void control_channel_request_reconnect(void);
 
 #endif

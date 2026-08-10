@@ -35,8 +35,25 @@
  */
 typedef struct {
     char server_ip[256];
-    int nb_forks;
 } control_channel_params_t;
+
+/**
+ * @brief Drapeau "reconnexion demandée" : posé par
+ *        `control_channel_request_reconnect`, consulté (et effacé, one-shot)
+ *        par `run_control_channel` via `control_channel_reconnect_pending`.
+ */
+static volatile int g_control_reconnect_requested = 0;
+
+void control_channel_request_reconnect(void)
+{
+    __atomic_store_n(&g_control_reconnect_requested, 1, __ATOMIC_RELAXED);
+}
+
+/** @brief Test-and-clear atomique : consommation à usage unique du drapeau. */
+static int control_channel_reconnect_pending(void)
+{
+    return __atomic_exchange_n(&g_control_reconnect_requested, 0, __ATOMIC_RELAXED);
+}
 
 void control_channel_build_stats(control_stats_t *out)
 {
@@ -153,14 +170,12 @@ void *run_control_channel(void *param)
     char server_ip[256];
     strncpy(server_ip, params->server_ip, sizeof(server_ip) - 1);
     server_ip[sizeof(server_ip) - 1] = '\0';
-    int nb_forks = params->nb_forks;
     free(params);
 
     useconds_t backoff = 0;
-    // Enregistrement auprès du gate de quiescence (PR B de
-    // docs/conception/cycle_vie_forks.md, D2) : ce thread est l'un des quatre
-    // candidats à la quiescence coopérative. Le checkpoint ci-dessous est un
-    // no-op tant que rien n'appelle fork_gate_request_quiesce (PR C/D).
+    // Enregistrement auprès du gate de quiescence coopérative : ce thread
+    // est l'un des quatre candidats — se gare réellement dès qu'un fork à
+    // chaud est décidé par l'orchestrateur.
     int gate_slot = fork_gate_register("control_channel");
 
     while (request_keeps_running(request)) {
@@ -205,7 +220,10 @@ void *run_control_channel(void *param)
 
         control_hello_t hello;
         hello.pid = (int32_t)getpid();
-        hello.nb_forks = (int32_t)nb_forks;
+        // Lu à CHAQUE (re)connexion, plus une valeur figée à la création du
+        // thread — g_active_forks est mis à jour par
+        // orchestrator_spawn_forks() après chaque (re)démarrage des fils.
+        hello.nb_forks = (int32_t)g_active_forks;
         // Identité déclarée (v12) : ce hello représente le process PARENT
         // dans son ensemble, jamais un fork particulier — fork_seq = -1 le
         // distingue du hello par-fork de la connexion de travail
@@ -250,6 +268,28 @@ void *run_control_channel(void *param)
 
         int service_ok = 1;
         while (service_ok && request_keeps_running(request)) {
+            // Checkpoint de quiescence : à la différence de la
+            // boucle externe (checkpoint une seule fois par tentative de
+            // connexion), une session établie peut vivre ici indéfiniment
+            // tant que le serveur répond dans les temps (SO_RCVTIMEO =
+            // tcp_timeout, 10 s par défaut) — sans ce point de contrôle ICI,
+            // ce thread resterait injoignable pour toute la durée de la
+            // session, largement au-delà du budget de
+            // fork_gate_request_quiesce (FORK_GATE_DEFAULT_TIMEOUT_MS, 2 s).
+            fork_gate_checkpoint(gate_slot);
+            if (!request_keeps_running(request)) {
+                service_ok = 0;
+                break;
+            }
+            // Une reconnexion forcée (nb_forks a changé) tombe
+            // dans le MÊME chemin qu'un timeout normal ci-dessous
+            // (close_socket + back-off + boucle externe) — aucun nouveau
+            // flux de contrôle, juste une raison de plus de sortir du
+            // service en cours.
+            if (control_channel_reconnect_pending()) {
+                service_ok = 0;
+                break;
+            }
             void *payload = NULL;
             int32_t len = 0;
             int cmd = ctrl_recv_frame(socket_id, &payload, &len);
@@ -279,7 +319,7 @@ void *run_control_channel(void *param)
     return NULL;
 }
 
-void start_control_channel(const char *server_ip, int nb_forks)
+void start_control_channel(const char *server_ip)
 {
     control_channel_params_t *params = malloc(sizeof(*params));
     if (params == NULL) {
@@ -290,7 +330,6 @@ void start_control_channel(const char *server_ip, int nb_forks)
     if (server_ip != NULL) {
         strncpy(params->server_ip, server_ip, sizeof(params->server_ip) - 1);
     }
-    params->nb_forks = nb_forks;
 
     pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
     pthread_attr_init(thread_attributes);

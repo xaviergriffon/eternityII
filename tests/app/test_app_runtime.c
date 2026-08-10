@@ -107,6 +107,75 @@ TEST init_childs_initializes_contexts(void)
     PASS();
 }
 
+/* ensure_childs_capacity : agrandit childrens_pid/forkId/fork_statistics
+   au-delà de la capacité allouée par init_childs, en préservant les slots
+   existants et en initialisant les nouveaux comme le ferait init_childs.
+   Reproduit le scénario réel qui segfaultait : init_childs(NB_THREADS=1) puis
+   "config nb_forks 6" + "start" écrivaient hors bornes dans ces tableaux. */
+TEST ensure_childs_capacity_grows_and_preserves_existing_slots(void)
+{
+    int saved_nb = NB_THREADS;
+    pid_t *spid = childrens_pid;
+    char **sfork = forkId;
+    struct client_statistics *sstat = fork_statistics;
+
+    NB_THREADS = 1;
+    init_childs();
+    childrens_pid[0] = 4242; /* simule un fork déjà en vie sur le slot 0 */
+    strcpy(forkId[0], "etii_fork.4242");
+    fork_statistics[0].shots_per_second = 99;
+
+    ensure_childs_capacity(6);
+
+    int ok = (childrens_pid != NULL && forkId != NULL && fork_statistics != NULL);
+    int preserved = ok && childrens_pid[0] == 4242
+        && strcmp(forkId[0], "etii_fork.4242") == 0
+        && fork_statistics[0].shots_per_second == 99;
+    int new_slots_ok = ok;
+    if (ok) {
+        for (int i = 1; i < 6; i++) {
+            if (childrens_pid[i] != -1) new_slots_ok = 0;
+            if (forkId[i] == NULL || forkId[i][0] != '\0') new_slots_ok = 0;
+            if (fork_statistics[i].shots_per_second != 0) new_slots_ok = 0;
+        }
+        for (int i = 0; i < 6; i++) free(forkId[i]);
+    }
+    free(childrens_pid); free(forkId); free(fork_statistics);
+    childrens_pid = spid; forkId = sfork; fork_statistics = sstat;
+    NB_THREADS = saved_nb;
+
+    ASSERT(ok);
+    ASSERT(preserved);
+    ASSERT(new_slots_ok);
+    PASS();
+}
+
+/* Un appel avec needed <= capacité déjà allouée ne fait rien (pas de
+   rétrécissement, pas de perte des slots existants). */
+TEST ensure_childs_capacity_is_a_no_op_when_already_covered(void)
+{
+    int saved_nb = NB_THREADS;
+    pid_t *spid = childrens_pid;
+    char **sfork = forkId;
+    struct client_statistics *sstat = fork_statistics;
+
+    NB_THREADS = 4;
+    init_childs();
+    childrens_pid[3] = 777;
+
+    ensure_childs_capacity(2); /* inférieur à la capacité existante (4) */
+
+    int preserved = (childrens_pid[3] == 777);
+
+    for (int i = 0; i < 4; i++) free(forkId[i]);
+    free(childrens_pid); free(forkId); free(fork_statistics);
+    childrens_pid = spid; forkId = sfork; fork_statistics = sstat;
+    NB_THREADS = saved_nb;
+
+    ASSERT(preserved);
+    PASS();
+}
+
 /* ---------- pid_is_alive / reap_dead_child_slots (D3 de cycle_vie_forks.md) - */
 
 /* pid_is_alive : vrai pour le process courant, faux pour un pid déjà récolté
@@ -1313,6 +1382,8 @@ SUITE(app_runtime_suite)
 {
     RUN_TEST(init_counters_allocates_zeroed);
     RUN_TEST(init_childs_initializes_contexts);
+    RUN_TEST(ensure_childs_capacity_grows_and_preserves_existing_slots);
+    RUN_TEST(ensure_childs_capacity_is_a_no_op_when_already_covered);
     RUN_TEST(pid_is_alive_detects_self_and_reaped_child);
     RUN_TEST(pid_is_alive_rejects_non_positive_pid);
     RUN_TEST(reap_dead_child_slots_clears_only_dead_slots);

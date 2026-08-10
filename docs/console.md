@@ -39,8 +39,16 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `help [commande\|catégorie]` | Affiche l'aide générale, le détail d'une commande, ou une seule catégorie (alias : `?`) |
 | `exit` | Arrête proprement le programme (alias : `quit`) |
 | `clear` | Efface l'écran sans perdre le contenu — poussé dans le scrollback natif en ANSI, accessible via `PgUp` en ncurses (alias : `cls` ; raccourci : `Ctrl-L`) |
-| `config` *(client/pruner)* | Affiche la configuration client **effective** (`nb_forks`, `server_host`, `parts_file`, `max_stock_by_thread`, `limit`, `pruner_batch`) — reflète les globales courantes, y compris un `limit`/`maxStockByThread`/`prunerBatch` déjà exécuté depuis la console. Pas encore de configuration « en préparation » ni de décompte d'auto-démarrage (arrivent avec l'orchestrateur, voir [docs/conception/cycle_vie_forks.md](conception/cycle_vie_forks.md)) |
-| `configSave` *(client/pruner)* | Écrit la configuration effective dans le fichier de configuration (écriture atomique `.tmp` puis `rename`, comme `backup`) — défaut `./eternityii-client.conf`, option `--config-file <chemin>` |
+| `config` *(client/pruner)* | Sans argument : affiche l'état de l'orchestrateur de démarrage différé (`WAITING_CONFIG`/`COUNTDOWN`/`CONFIGURING`/`RUNNING`/…, avec le temps restant avant auto-démarrage en `COUNTDOWN`), la configuration **effective** (`nb_forks`, `server_host`, `parts_file`, `max_stock_by_thread`, `limit`, `pruner_batch` — reflète les globales courantes, y compris un `limit`/`maxStockByThread`/`prunerBatch` déjà exécuté depuis la console) et la configuration **en préparation**. N'annule pas le décompte |
+| `config <clé> <valeur>` *(client/pruner)* | Écrit `<clé> = <valeur>` dans la configuration **en préparation** (mêmes clés que le fichier `--config-file`) et **annule définitivement** le décompte d'auto-démarrage s'il était en cours — comme n'importe quelle frappe au clavier pendant le décompte, cf. plus bas. `start` (manuel ou déclenché par un décompte qui va à son terme) applique cette configuration en préparation aux globales AVANT de forker — pas besoin de redémarrer le process pour qu'une valeur préparée prenne effet |
+| `configSave` *(client/pruner)* | Écrit la configuration effective dans le fichier de configuration, avec toute valeur **en préparation** superposée par-dessus (écriture atomique `.tmp` puis `rename`, comme `backup`) — défaut `./eternityii-client.conf`, option `--config-file <chemin>`. C'est ainsi qu'une valeur préparée par `config <clé> <valeur>` finit par prendre effet, au prochain démarrage |
+| `start` *(client/pruner)* | Fork immédiat des process de recherche avec la configuration **effective**, sans attendre un éventuel décompte (`COUNTDOWN`) — même chemin de code que ce décompte à échéance. Erreur explicite si déjà en cours d'exécution |
+
+> **Décompte d'auto-démarrage (`COUNTDOWN`)** : 5 s ne suffisent pas à taper
+> une commande — dès la première touche pressée à l'invite, le décompte est
+> annulé (état `CONFIGURING`), qu'elle appartienne ou non à une commande
+> `config` valide. La configuration effective chargée est affichée dans les
+> logs avant le décompte, pour juger sans rien taper s'il faut l'interrompre.
 
 ### Recherche & régulation
 

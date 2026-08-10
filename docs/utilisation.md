@@ -86,10 +86,20 @@ distribuable se raréfie en cours de recherche).
 
 ## Mode client
 
-Se connecte à un serveur et lance `N` processus de recherche en parallèle.
+Se connecte à un serveur pour y lancer `N` processus de recherche en
+parallèle — **le fork de ces process est différé**, piloté par un
+orchestrateur d'état (`WAITING_CONFIG`/`COUNTDOWN`/`CONFIGURING`/`RUNNING`) :
+si un fichier de configuration existe (défaut `./eternityii-client.conf`,
+option `--config-file`), un décompte de 5 s démarre automatiquement les fils
+de recherche ; sinon le process reste en attente d'une commande console
+`start` (fork immédiat) ou `config <clé> <valeur>` (prépare une configuration
+et annule le décompte). Voir la commande console
+[`config`/`start`](console.md#général) pour le détail de l'orchestrateur. Les
+paramètres positionnels ci-dessous restent ceux consultés au moment du fork
+effectif (qu'il soit automatique ou déclenché par `start`).
 
 ```sh
-./eternityII client [--name LABEL] [--machine-uid-file CHEMIN] [serveur] [nb_threads] [max_stock_par_thread] [fichier_pieces.csv]
+./eternityII client [--name LABEL] [--machine-uid-file CHEMIN] [--config-file CHEMIN] [serveur] [nb_threads] [max_stock_par_thread] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -100,6 +110,7 @@ Se connecte à un serveur et lance `N` processus de recherche en parallèle.
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
 | `--name LABEL` | nom d'hôte | Libellé déclaré, affiché côté serveur (commande console `clients`, `GET /api/v1/clients`) — purement déclaratif, jamais vérifié |
 | `--machine-uid-file CHEMIN` | `./eternityii-machine_uid` | Fichier d'identité machine persistante (nonce hexadécimal, tiré et écrit au premier lancement) — absent/illisible : régénéré silencieusement ; répertoire non inscriptible : identité volatile pour cette exécution (la recherche continue) |
+| `--config-file CHEMIN` | `./eternityii-client.conf` | Fichier de configuration `clé = valeur` : présent au démarrage → décompte d'auto-démarrage de 5 s (`COUNTDOWN`) ; absent → attente d'un `start`/`config` en console (`WAITING_CONFIG`). Priorité CLI > fichier > défauts. Voir la commande console `config`/`configSave` |
 
 > En conteneur, monter ce fichier en volume (ou pointer `--machine-uid-file` dessus) :
 > sans ça, chaque redémarrage de conteneur régénère un `machine_uid` et fragmente le
@@ -113,8 +124,10 @@ Exemples :
 ./eternityII client --name jetson-1 localhost 8
 ```
 
-> `--name`/`--machine-uid-file` s'appliquent aussi au mode `pruner` ci-dessous (même
-> plomberie d'identité). Trois notions distinctes, à ne pas confondre : `machine_uid`
+> `--name`/`--machine-uid-file`/`--config-file` s'appliquent aussi au mode `pruner`
+> ci-dessous (même plomberie d'identité et de configuration — `pruner` partage
+> `handle_client` avec `client`, donc le même orchestrateur de démarrage différé).
+> Trois notions distinctes, à ne pas confondre : `machine_uid`
 > (persistant, survit aux redémarrages — clé de cumul des statistiques),
 > `client_uid` (nonce tiré à chaque démarrage du processus parent, jamais persisté —
 > identité de LA SESSION en cours), et `fork_seq` (rang du fork dans son parent,

@@ -51,6 +51,32 @@ int  init_counters(void);
 void init_childs(void);
 
 /**
+ * @brief Agrandit si besoin `childrens_pid`/`forkId`/`fork_statistics` pour
+ *        couvrir au moins @p needed slots, en préservant les slots existants.
+ *
+ * `init_childs()` dimensionne ces trois tableaux sur `NB_THREADS` AU MOMENT
+ * de son appel — avant tout fork, dans `handle_client`. Depuis que
+ * `config nb_forks <n>` (console) suivi de `start` peut modifier `NB_THREADS`
+ * APRÈS cet appel (`fork_orchestrator_apply_staged_config`,
+ * `src/app/fork_orchestrator.c`), un `nb_forks` augmenté fait que
+ * `orchestrator_spawn_forks` écrit hors bornes dans ces tableaux — trouvé via
+ * un crash réel (`segmentation fault`) reproduit par un opérateur : démarrer,
+ * `config nb_forks 6` (au-delà du nombre initial), `configSave`, `start`. Les
+ * fils forkés avant le débordement restent vivants (observé), seul le parent
+ * segfault dans la boucle de fork elle-même.
+ *
+ * Sans effet si @p needed est déjà couvert (jamais de rétrécissement — un
+ * `nb_forks` réduit laisse simplement des slots surnuméraires inutilisés,
+ * inoffensif). Les nouveaux slots sont initialisés exactement comme
+ * `init_childs()` : `childrens_pid[c] = -1`, `forkId[c]` alloué et vide,
+ * `fork_statistics[c]` remis à zéro.
+ *
+ * @param needed Capacité minimale requise (typiquement `NB_THREADS`, relu
+ *               APRÈS l'application d'une configuration en préparation).
+ */
+void ensure_childs_capacity(int needed);
+
+/**
  * @brief Prédicat de vivacité d'un pid par défaut (production) : `kill(pid, 0)`.
  *
  * `ESRCH` ⇒ mort ; tout le reste (succès, ou `EPERM` — un pid vivant possédé

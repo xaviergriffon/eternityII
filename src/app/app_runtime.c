@@ -576,10 +576,19 @@ void wait_child(void) {
     }
     log_info("end wait_child\n");
  }
+/** @brief Capacité actuellement allouée de `childrens_pid`/`forkId`/`fork_statistics`
+ *         (dernier `NB_THREADS` connu de `init_childs`/`ensure_childs_capacity`) —
+ *         voir `ensure_childs_capacity` : NB_THREADS peut changer après coup
+ *         (`config nb_forks` + `start`), ce compteur permet de savoir de
+ *         combien agrandir sans le redéduire de NB_THREADS lui-même (déjà
+ *         muté au moment où l'agrandissement est décidé). */
+static int g_childs_capacity = 0;
+
 /**
  * @brief Initialise les attributs des threads enfants.
  */
 void init_childs(void) {
+    g_childs_capacity = NB_THREADS;
     childrens_pid = malloc(sizeof(pid_t) * NB_THREADS);
     forkId = malloc(sizeof(char *) * NB_THREADS);
     fork_statistics = malloc(sizeof(struct client_statistics) * NB_THREADS);
@@ -588,11 +597,30 @@ void init_childs(void) {
         childrens_pid[c] = -1;
         forkId[c] = malloc(sizeof(char) * 300);
         forkId[c][0] = '\0';
-        
+
         fork_statistics[c].analyses_in_stock = 0;
         fork_statistics[c].possibilities_in_stock = 0;
         fork_statistics[c].shots_per_second = 0;
     }
+}
+
+void ensure_childs_capacity(int needed) {
+    if (needed <= g_childs_capacity) {
+        return;
+    }
+    childrens_pid = realloc(childrens_pid, sizeof(pid_t) * (size_t)needed);
+    forkId = realloc(forkId, sizeof(char *) * (size_t)needed);
+    fork_statistics = realloc(fork_statistics, sizeof(struct client_statistics) * (size_t)needed);
+    for (int c = g_childs_capacity; c < needed; c++) {
+        childrens_pid[c] = -1;
+        forkId[c] = malloc(sizeof(char) * 300);
+        forkId[c][0] = '\0';
+
+        fork_statistics[c].analyses_in_stock = 0;
+        fork_statistics[c].possibilities_in_stock = 0;
+        fork_statistics[c].shots_per_second = 0;
+    }
+    g_childs_capacity = needed;
 }
 
 int pid_is_alive(pid_t pid)

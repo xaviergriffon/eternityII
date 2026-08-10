@@ -120,6 +120,7 @@ volatile int request = REQUEST_CONTINUE;
 long inst_unknow = 0;
 
 int NB_THREADS = 10;
+int g_active_forks = 0;
 
 int version = VERSION;
 

@@ -49,6 +49,7 @@
 #include "ui/line_edit.h"
 #include "app/static_variables.h"
 #include "app/fork_gate.h"
+#include "app/fork_orchestrator.h"
 #include "net/ipc_protocol.h"
 
 /* ------------------------------------------------------------------------- */
@@ -805,6 +806,12 @@ void nc_console_loop(void)
             usleep(30000);
             continue;
         }
+
+        // Toute frappe au clavier annule un décompte d'auto-démarrage en
+        // cours (état COUNTDOWN de l'orchestrateur) — cf. console.c pour le
+        // même besoin côté ANSI : 5 s ne suffisent pas à taper une commande
+        // complète. No-op hors COUNTDOWN.
+        fork_orchestrator_post_event(EV_CONFIG_BEGUN, NULL);
 
         /* KEY_RESIZE : ncurses a déjà mis à jour LINES/COLS. */
         if (ch == KEY_RESIZE) {
