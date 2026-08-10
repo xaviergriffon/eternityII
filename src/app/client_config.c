@@ -325,6 +325,25 @@ void client_config_apply_direct(const client_config_t *cfg, const char **server_
     }
 }
 
+client_config_diff_t client_config_diff(const client_config_t *current, const client_config_t *staged)
+{
+    if (staged->has_nb_forks &&
+        (!current->has_nb_forks || staged->nb_forks != current->nb_forks)) {
+        return CLIENT_CONFIG_DIFF_NEEDS_RESTART;
+    }
+    if (staged->has_server_host &&
+        (!current->has_server_host || current->server_host == NULL ||
+         staged->server_host == NULL || strcmp(staged->server_host, current->server_host) != 0)) {
+        return CLIENT_CONFIG_DIFF_NEEDS_RESTART;
+    }
+    if (staged->has_parts_file &&
+        (!current->has_parts_file || current->parts_file == NULL ||
+         staged->parts_file == NULL || strcmp(staged->parts_file, current->parts_file) != 0)) {
+        return CLIENT_CONFIG_DIFF_NEEDS_RESTART;
+    }
+    return CLIENT_CONFIG_DIFF_HOT_ONLY;
+}
+
 void client_config_capture_effective(client_config_t *out, const char *server_host)
 {
     client_config_init(out);

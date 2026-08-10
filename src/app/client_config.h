@@ -206,6 +206,40 @@ void client_config_apply_direct(const client_config_t *cfg, const char **server_
  */
 void client_config_capture_effective(client_config_t *out, const char *server_host);
 
+/// Résultat de `client_config_diff`.
+typedef enum {
+    CLIENT_CONFIG_DIFF_HOT_ONLY = 0,      ///< Aucune clé stagée ne requiert de redémarrage : diffusion IPC seule.
+    CLIENT_CONFIG_DIFF_NEEDS_RESTART = 1, ///< Au moins une clé stagée (nb_forks/server_host/parts_file) requiert un redémarrage des fils.
+} client_config_diff_t;
+
+/**
+ * @brief Compare la configuration EN PRÉPARATION (@p staged) à la
+ *        configuration EFFECTIVE (@p current) pour décider, côté `configApply`
+ *        (PR D de docs/conception/cycle_vie_forks.md), entre une simple
+ *        diffusion IPC (`HOT_ONLY`) et un arrêt + reconstruction + re-fork
+ *        complet (`NEEDS_RESTART`).
+ *
+ * Fonction pure : seules `nb_forks`, `server_host` et `parts_file` peuvent
+ * déclencher `NEEDS_RESTART` (elles conditionnent respectivement le
+ * dimensionnement des tableaux de fils, la cible réseau et la map de
+ * recherche partagée COW — aucune des trois ne peut changer sans arrêter
+ * les fils existants). Une clé stagée absente de @p staged, ou présente mais
+ * identique à @p current, ne déclenche jamais de redémarrage à elle seule.
+ * Les clés à chaud (`max_stock_by_thread`/`limit`/`pruner_batch`) n'influencent
+ * jamais le résultat : elles sont toujours diffusables par IPC.
+ *
+ * @param current Configuration EFFECTIVE actuelle (typiquement
+ *                `client_config_capture_effective`).
+ * @param staged  Configuration EN PRÉPARATION (`config <clé> <valeur>`).
+ * @return        `CLIENT_CONFIG_DIFF_NEEDS_RESTART` si `nb_forks`,
+ *                `server_host` ou `parts_file` est stagée avec une valeur
+ *                différente de (ou absente de) @p current ;
+ *                `CLIENT_CONFIG_DIFF_HOT_ONLY` sinon (y compris si rien n'est
+ *                stagé du tout — un `configApply` sans rien préparer est un
+ *                no-op inoffensif).
+ */
+client_config_diff_t client_config_diff(const client_config_t *current, const client_config_t *staged);
+
 /**
  * @brief Hôte serveur effectif du process CLIENT/PRUNER courant, résolu une
  *        seule fois par `handle_client` (src/app/main.c) juste après

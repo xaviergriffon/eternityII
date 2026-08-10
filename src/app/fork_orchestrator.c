@@ -1,6 +1,7 @@
 #include "app/fork_orchestrator.h"
 
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +31,7 @@ orch_state_t orchestrator_step(orch_state_t s, orch_event_t ev, long now_ms, orc
         out = &local_actions;
     }
     out->spawn_forks = 0;
+    out->stop_forks = 0;
     out->error = ORCH_OK;
 
     switch (ev) {
@@ -46,10 +48,17 @@ orch_state_t orchestrator_step(orch_state_t s, orch_event_t ev, long now_ms, orc
         break;
 
     case EV_START:
-        if (s == ORCH_RUNNING || s == ORCH_STOPPING || s == ORCH_APPLYING || s == ORCH_EXITING) {
+        if (s == ORCH_RUNNING || s == ORCH_STOPPING || s == ORCH_EXITING) {
             /* "erreur si déjà en RUNNING" — étendu aux autres états où
                démarrer n'a pas de sens plutôt que d'inventer un nouveau code
-               d'erreur. */
+               d'erreur. ORCH_APPLYING est volontairement ABSENT de cette
+               liste (cf. branche commune ci-dessous) : c'est le MÊME chemin
+               EV_START qui déclenche le re-fork à la fin d'un `configApply`
+               NEEDS_RESTART, exactement comme il déclenche déjà le premier
+               fork après WAITING_CONFIG/COUNTDOWN/CONFIGURING — un seul
+               chemin de code pour "il faut forker maintenant", testé une
+               fois (même principe que le décompte de COUNTDOWN, cf.
+               fork_orchestrator_run). */
             out->error = ORCH_ERR_ALREADY_RUNNING;
             break;
         }
@@ -58,15 +67,25 @@ orch_state_t orchestrator_step(orch_state_t s, orch_event_t ev, long now_ms, orc
 
     case EV_STOP_FORKS:
     case EV_RESTART:
-        /* Réservé pour une future séquence arrêt/escalade/récolte
-           (EV_STOP_FORKS) et réapplication + re-fork (EV_RESTART).
-           Sémantique volontairement non devinée ici : où atterrit-on après
-           STOPPING, distinction entre un simple arrêt et une réapplication —
-           tout cela dépend de détails que seule une implémentation complète
-           de la séquence d'arrêt peut trancher sans fabriquer un
-           comportement non vérifié. */
-        out->error = ORCH_ERR_UNSUPPORTED;
-        break;
+        /* stopForks (arrêt simple) et configApply NEEDS_RESTART (arrêt puis
+           réapplication + re-fork) partagent la MÊME transition pure
+           RUNNING -> STOPPING : la distinction entre "revenir à
+           WAITING_CONFIG une fois arrêté" et "enchaîner sur APPLYING puis
+           EV_START" ne peut pas être portée par cet état pur seul (ce serait
+           un second axe orthogonal à orch_state_t) — exactement comme la
+           deadline du décompte de COUNTDOWN n'est pas dans l'état pur non
+           plus. Le driver (fork_orchestrator_post_event) mémorise ce choix
+           dans une variable locale au module (même convention), au vu de
+           quel ÉVÉNEMENT a réussi cette transition précise. */
+        if (s != ORCH_RUNNING) {
+            /* Rien à arrêter hors RUNNING : ni un décompte, ni une
+               configuration en préparation seule ne constituent des fils
+               vivants. */
+            out->error = ORCH_ERR_NOT_RUNNING;
+            break;
+        }
+        out->stop_forks = 1;
+        return ORCH_STOPPING;
 
     case EV_EXIT:
         /* Toujours acceptée, depuis n'importe quel état — jamais une erreur.
@@ -88,6 +107,28 @@ int orchestrator_countdown_elapsed(long countdown_deadline_ms, long now_ms)
     return now_ms >= countdown_deadline_ms;
 }
 
+stop_escalation_action_t stop_escalation_next(long elapsed_ms)
+{
+    if (elapsed_ms >= STOP_ESCALATION_SIGKILL_MS) {
+        return STOP_ESCALATION_SIGKILL;
+    }
+    if (elapsed_ms >= STOP_ESCALATION_SIGTERM_MS) {
+        return STOP_ESCALATION_SIGTERM;
+    }
+    return STOP_ESCALATION_NONE;
+}
+
+int waitpid_target_is_reaped(pid_t waitpid_result, pid_t target_pid, int wait_errno)
+{
+    if (waitpid_result == target_pid) {
+        return 1;
+    }
+    if (waitpid_result == -1 && wait_errno == ECHILD) {
+        return 1;
+    }
+    return 0;
+}
+
 /* ============================ Driver impur ================================ */
 
 static pthread_mutex_t g_orch_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -97,6 +138,13 @@ static long g_countdown_deadline_ms = 0;
 static int g_orch_pending_spawn = 0;
 static client_config_t g_staged_config;
 static int g_staged_config_ready = 0;
+/** @brief 1 si la STOPPING en cours doit enchaîner sur APPLYING + re-fork
+ *         (déclenchée par EV_RESTART), 0 si elle doit s'arrêter là
+ *         (EV_STOP_FORKS). Comme `g_countdown_deadline_ms`, cette distinction
+ *         n'est PAS portée par l'état pur `orch_state_t` — mémorisée ici par
+ *         le driver, sous le même mutex, au vu de l'événement qui a réussi la
+ *         transition RUNNING -> STOPPING (cf. orchestrator_step). */
+static int g_restart_after_stop = 0;
 
 static long current_time_ms(void)
 {
@@ -120,6 +168,7 @@ void fork_orchestrator_reset(void)
     g_orch_state = ORCH_WAITING_CONFIG;
     g_countdown_deadline_ms = 0;
     g_orch_pending_spawn = 0;
+    g_restart_after_stop = 0;
     if (g_staged_config_ready) {
         client_config_free(&g_staged_config);
     }
@@ -141,6 +190,12 @@ void fork_orchestrator_post_event(orch_event_t ev, orch_actions_t *out)
     g_orch_state = new_state;
     if (out->spawn_forks) {
         g_orch_pending_spawn = 1;
+    }
+    if (out->stop_forks && out->error == ORCH_OK) {
+        /* Mémorise, pour le driver, si cette STOPPING doit enchaîner sur un
+           re-fork (EV_RESTART) ou s'arrêter là (EV_STOP_FORKS) — cf. le
+           commentaire de g_restart_after_stop. */
+        g_restart_after_stop = (ev == EV_RESTART);
     }
     pthread_cond_broadcast(&g_orch_cond);
     pthread_mutex_unlock(&g_orch_mutex);
@@ -226,6 +281,52 @@ void fork_orchestrator_apply_staged_config(void)
     ensure_staged_config_locked();
     client_config_apply_direct(&g_staged_config, &g_client_server_host);
     pthread_mutex_unlock(&g_orch_mutex);
+}
+
+client_config_diff_t fork_orchestrator_diff_staged_config(const client_config_t *effective)
+{
+    pthread_mutex_lock(&g_orch_mutex);
+    ensure_staged_config_locked();
+    client_config_diff_t d = client_config_diff(effective, &g_staged_config);
+    pthread_mutex_unlock(&g_orch_mutex);
+    return d;
+}
+
+void fork_orchestrator_apply_hot_staged_config(void)
+{
+    int has_max_stock, has_limit, has_pruner_batch;
+    int max_stock_val = 0;
+    unsigned long long limit_val = 0;
+    int pruner_batch_val = 0;
+
+    pthread_mutex_lock(&g_orch_mutex);
+    ensure_staged_config_locked();
+    client_config_apply_direct(&g_staged_config, &g_client_server_host);
+    has_max_stock = g_staged_config.has_max_stock_by_thread;
+    max_stock_val = g_staged_config.max_stock_by_thread;
+    has_limit = g_staged_config.has_limit;
+    limit_val = g_staged_config.limit;
+    has_pruner_batch = g_staged_config.has_pruner_batch;
+    pruner_batch_val = g_staged_config.pruner_batch;
+    pthread_mutex_unlock(&g_orch_mutex);
+
+    /* Diffusion aux fils DÉJÀ en cours d'exécution — jamais sous
+       g_orch_mutex (send_command_to_childs fait des appels réseau/IPC). Même
+       texte de commande que les interpréteurs console homonymes, pour ne
+       dupliquer aucun format. */
+    char cmd[64];
+    if (has_max_stock) {
+        snprintf(cmd, sizeof(cmd), "maxStockByThread %d", max_stock_val);
+        send_command_to_childs(cmd);
+    }
+    if (has_limit) {
+        snprintf(cmd, sizeof(cmd), "limit %llu", limit_val);
+        send_command_to_childs(cmd);
+    }
+    if (has_pruner_batch) {
+        snprintf(cmd, sizeof(cmd), "prunerBatch %d", pruner_batch_val);
+        send_command_to_childs(cmd);
+    }
 }
 
 /**
@@ -359,6 +460,26 @@ int orchestrator_spawn_forks(void)
                 }
 #ifndef DEBUG_IN_MONO_PROCESS
             } else {
+                // Neutralise IMMÉDIATEMENT, avant tout autre code (y compris
+                // le log_info DEBUG_THREAD ci-dessous), l'atexit(status_zone_teardown)
+                // hérité du parent : status_zone_init() (console.c, appelée
+                // AVANT tout fork depuis PR C) l'enregistre dans le parent, et
+                // fork() duplique la liste des handlers atexit — ce fils
+                // l'hérite donc aussi, bien qu'il ne "possède" jamais le
+                // terminal partagé. Sans ce garde-fou, le exit() normal de ce
+                // fils (spawn_child_body, en fin de recherche OU après un
+                // SIGINT/SIGTERM de stopForks/configApply) ré-exécute ce
+                // handler hérité et restaure le terminal (endwin() en
+                // NCURSES=1, région de défilement complète en ANSI) — visible
+                // depuis le PARENT puisque le terminal est un état PARTAGÉ,
+                // pas un état par-process : "on quitte le mode ncurses" à
+                // chaque fils qui meurt proprement (SIGKILL, qui saute
+                // atexit, n'est pas concerné — d'où le caractère
+                // intermittent observé). `status_zone_disown_child()` ne
+                // touche JAMAIS le terminal lui-même : elle ne fait que
+                // rendre le handler hérité NO-OP dans CE process (écriture
+                // dans la copie COW du fils, sans effet sur le parent).
+                status_zone_disown_child();
 #endif // DEBUG_IN_MONO_PROCESS
 #ifdef DEBUG_THREAD
                 log_info("NEW thread %i\n", getpid());
@@ -382,6 +503,168 @@ int orchestrator_spawn_forks(void)
     g_active_forks = created;
     control_channel_request_reconnect();
     return created;
+}
+
+/**
+ * @brief Séquence d'arrêt/escalade/récolte des fils vivants (ORCH_STOPPING).
+ *
+ * SIGCHLD masqué pour toute la durée SUR CE THREAD (`pthread_sigmask`) :
+ * `sigchld_handler` moissonne en `WNOHANG` sur N'IMPORTE QUEL pid, ce qui
+ * rendrait le `waitpid(pid, …)` ciblé ci-dessous non déterministe (risque
+ * #2, cf. docs/conception/cycle_vie_forks.md). SIGINT à chaque slot vivant,
+ * puis scrutation bornée (`waitpid(pid, …, WNOHANG)`, cadence `MICRO_SLEEP`)
+ * avec escalade `stop_escalation_next` (SIGTERM à +5 s, SIGKILL à +10 s) —
+ * un process déjà mort au moment du SIGINT (recherche terminée entre-temps,
+ * `--stop-on-solution`) est simplement récolté au premier tour, sans jamais
+ * recevoir d'escalade. Slots nettoyés au fil de l'eau, comme
+ * `reap_dead_child_slots`. Ne retourne qu'une fois tous les slots vides.
+ *
+ * Le masquage de SIGCHLD ne porte QUE sur ce thread — les autres threads du
+ * parent (checker, `server_tcp`, canal de contrôle, console) ne le bloquent
+ * pas. Un enfant qui meurt pendant cette séquence peut donc être moissonné
+ * par `sigchld_handler` sur N'IMPORTE LEQUEL de ces autres threads AVANT que
+ * le `waitpid(pid, …)` ci-dessous n'ait sa chance : sans
+ * `waitpid_target_is_reaped` (qui traite `-1`/`ECHILD` — « déjà réclamé
+ * ailleurs » — comme une mort, pas comme « encore vivant ») la boucle
+ * tournait INDÉFINIMENT, croyant l'enfant toujours vivant même après
+ * escalade SIGKILL. Bogue réel trouvé en testant manuellement `configApply`
+ * (état `STOPPING` qui ne se résorbait jamais).
+ */
+static void orchestrator_do_stop_forks(void)
+{
+    if (childrens_pid == NULL) {
+        return;
+    }
+
+    sigset_t block_set, old_set;
+    sigemptyset(&block_set);
+    sigaddset(&block_set, SIGCHLD);
+    pthread_sigmask(SIG_BLOCK, &block_set, &old_set);
+
+    int any_live = 0;
+    for (int c = 0; c < NB_THREADS; c++) {
+        if (childrens_pid[c] > 0) {
+            kill(childrens_pid[c], SIGINT);
+            any_live = 1;
+        }
+    }
+
+    if (any_live) {
+        long start_ms = current_time_ms();
+        stop_escalation_action_t last_action = STOP_ESCALATION_NONE;
+        for (;;) {
+            int remaining = 0;
+            for (int c = 0; c < NB_THREADS; c++) {
+                pid_t pid = childrens_pid[c];
+                if (pid <= 0) {
+                    continue;
+                }
+                int status = 0;
+                errno = 0;
+                pid_t r = waitpid(pid, &status, WNOHANG);
+                int wait_errno = errno;
+                if (waitpid_target_is_reaped(r, pid, wait_errno)) {
+                    childrens_pid[c] = -1;
+                    if (forkId[c] != NULL) {
+                        forkId[c][0] = '\0';
+                    }
+                    memset(&fork_statistics[c], 0, sizeof(fork_statistics[c]));
+                } else {
+                    remaining++;
+                }
+            }
+            if (remaining == 0) {
+                break;
+            }
+
+            long elapsed_ms = current_time_ms() - start_ms;
+            stop_escalation_action_t action = stop_escalation_next(elapsed_ms);
+            if (action != last_action && action != STOP_ESCALATION_NONE) {
+                int sig = (action == STOP_ESCALATION_SIGKILL) ? SIGKILL : SIGTERM;
+                log_error("orchestrateur : %i fils encore vivants après %lds — escalade %s\n",
+                          remaining, elapsed_ms / 1000,
+                          action == STOP_ESCALATION_SIGKILL ? "SIGKILL" : "SIGTERM");
+                for (int c = 0; c < NB_THREADS; c++) {
+                    if (childrens_pid[c] > 0) {
+                        kill(childrens_pid[c], sig);
+                    }
+                }
+            }
+            last_action = action;
+            usleep(MICRO_SLEEP);
+        }
+    }
+
+    pthread_sigmask(SIG_SETMASK, &old_set, NULL);
+
+    g_active_forks = 0;
+    control_channel_request_reconnect();
+    log_info("orchestrateur : fils arrêtés\n");
+}
+
+int orchestrator_apply_restart_config(struct search_parts *shared_parts)
+{
+    // Quiescence coopérative (D2/APPLYING, docs/conception/cycle_vie_forks.md :
+    // « les lecteurs des tableaux ... sont garés, donc aucun mutex dédié
+    // n'est nécessaire ») — OUBLIÉE dans la première version de cette
+    // fonction. `childrens_pid`/`forkId`/`fork_statistics` sont libérés PUIS
+    // réalloués ci-dessous quand `nb_forks` change, et la map de recherche
+    // partagée est libérée PUIS reconstruite quand `parts_file` change ; sans
+    // garer le checker, `server_tcp`, le canal de contrôle et la console (les
+    // quatre lecteurs concurrents de ces tableaux), n'importe lequel peut
+    // déréférencer un pointeur déjà libéré pendant la fenêtre de
+    // reconstruction. Signalé par un crash réel du thread console sous
+    // `NCURSES=1` (rafraîchissement très fréquent de la bannière de stats,
+    // donc fenêtre de course touchée presque systématiquement) et, plus
+    // discrètement en mode ANSI, par une configuration qui « ne semblait pas
+    // prise en compte » (même course, juste moins souvent fatale — un lecteur
+    // concurrent pouvant aussi écrire dans un slot fraîchement réalloué au
+    // mauvais moment). Locké par `apply_restart_config_quiesces_concurrent_array_readers`
+    // (tests/app/test_fork_orchestrator.c), qui prouve — par construction,
+    // pas par mesure de timing — qu'un lecteur en boucle serrée ne peut
+    // jamais observer ces tableaux à NULL pendant cet appel.
+    //
+    // Jamais dans le doute : un timeout ici annule TOUT le redémarrage à
+    // chaud (rien n'est modifié — configuration, tableaux et map restent
+    // inchangés) plutôt que de risquer la même corruption avec un budget de
+    // temps expiré. Les fils sont déjà arrêtés à ce stade (appelée après
+    // `orchestrator_do_stop_forks`) : l'appelant retombe simplement en
+    // `ORCH_WAITING_CONFIG`, l'opérateur peut retenter `configApply`/`start`.
+    fork_gate_result_t qr = fork_gate_request_quiesce(FORK_GATE_DEFAULT_TIMEOUT_MS);
+    if (qr != FORK_GATE_QUIESCED) {
+        log_error("orchestrateur : quiescence non atteinte — redémarrage à chaud refusé "
+                  "(jamais de reconstruction dans le doute)\n");
+        return 0;
+    }
+
+    int old_nb_threads = NB_THREADS;
+    char *old_parts_files = (parts_files != NULL) ? strdup(parts_files) : NULL;
+
+    fork_orchestrator_apply_staged_config();
+
+    if (NB_THREADS != old_nb_threads) {
+        log_info("orchestrateur : nb_forks %i -> %i — reconstruction des tableaux de fils\n",
+                  old_nb_threads, NB_THREADS);
+        free_childs();
+        init_childs();
+        init_counters();
+    }
+
+    int parts_file_changed = (parts_files != NULL) &&
+        (old_parts_files == NULL || strcmp(parts_files, old_parts_files) != 0);
+    if (parts_file_changed && shared_parts != NULL) {
+        log_info("orchestrateur : parts_file \"%s\" -> \"%s\" — reconstruction de la map de recherche\n",
+                  old_parts_files != NULL ? old_parts_files : "(aucun)", parts_files);
+        set_inherited_search_parts(NULL);
+        free_search_parts(shared_parts);
+        build_search_parts(shared_parts, parts_files);
+        set_inherited_search_parts(shared_parts);
+    }
+
+    free(old_parts_files);
+
+    fork_gate_release_quiesce();
+    return 1;
 }
 
 /** @brief Calcule la prochaine échéance absolue à `ORCH_TICK_MS` de maintenant. */
@@ -413,7 +696,7 @@ void fork_orchestrator_init_state(int config_loaded_at_boot)
     pthread_mutex_unlock(&g_orch_mutex);
 }
 
-void fork_orchestrator_run(int config_loaded_at_boot)
+void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_parts)
 {
     long now_ms;
 
@@ -448,6 +731,16 @@ void fork_orchestrator_run(int config_loaded_at_boot)
 
     int ever_running = 0;
     long last_logged_sec = -1;
+    /* 1 quand le process parent a délibérément zéro fils vivant (arrêt via
+       `stopForks`, ou fenêtre STOPPING/APPLYING d'un `configApply`
+       NEEDS_RESTART) : sans ce drapeau, la condition de sortie de boucle
+       ci-dessous — historiquement "plus aucun fork ET on a déjà tourné" —
+       confondrait cet arrêt VOLONTAIRE avec la fin naturelle des fils
+       (solution + --stop-on-solution, ou tous morts) et terminerait le
+       process PARENT tout entier, à l'exact opposé de "sans jamais arrêter
+       le process principal" (cf. docs/conception/cycle_vie_forks.md, PR D).
+       Remis à 0 dès qu'un (re)fork réussit. */
+    int forks_parked = 0;
 
     for (;;) {
         struct timespec deadline;
@@ -488,14 +781,20 @@ void fork_orchestrator_run(int config_loaded_at_boot)
             int created = orchestrator_spawn_forks();
             if (created > 0) {
                 ever_running = 1;
+                forks_parked = 0;
             } else {
                 // Aucun process créé (quiescence en échec pour chaque slot
                 // tenté, ou ressources épuisées) : jamais de crash, on
-                // redonne la main à l'opérateur.
+                // redonne la main à l'opérateur. `forks_parked` reste/passe à 1
+                // pour qu'un `configApply` NEEDS_RESTART dont le re-fork échoue
+                // laisse le parent EN VIE, en attente d'un nouveau `start` —
+                // sans lui la condition de sortie de boucle terminerait le
+                // process au tour suivant (ever_running déjà vrai depuis avant).
                 log_error("orchestrateur : démarrage échoué — retour en attente de configuration\n");
                 pthread_mutex_lock(&g_orch_mutex);
                 g_orch_state = ORCH_WAITING_CONFIG;
                 pthread_mutex_unlock(&g_orch_mutex);
+                forks_parked = 1;
             }
         } else if (state_snapshot == ORCH_COUNTDOWN) {
             long deadline_ms;
@@ -522,10 +821,53 @@ void fork_orchestrator_run(int config_loaded_at_boot)
             if (cleaned > 0) {
                 fork_orchestrator_post_event(EV_CHILD_DIED, NULL);
             }
+        } else if (state_snapshot == ORCH_STOPPING) {
+            // Séquence bornée (~10 s au pire) exécutée SYNCHRONEMENT sur ce
+            // thread — c'est le seul thread qui forke/attend ses enfants (D1),
+            // donc rien d'autre ne peut avancer le cycle de vie pendant ce
+            // temps de toute façon.
+            orchestrator_do_stop_forks();
+
+            int restart_after_stop;
+            pthread_mutex_lock(&g_orch_mutex);
+            restart_after_stop = g_restart_after_stop;
+            pthread_mutex_unlock(&g_orch_mutex);
+
+            if (restart_after_stop) {
+                pthread_mutex_lock(&g_orch_mutex);
+                g_orch_state = ORCH_APPLYING;
+                pthread_mutex_unlock(&g_orch_mutex);
+
+                forks_parked = 1; // levé par le prochain do_spawn réussi
+
+                if (orchestrator_apply_restart_config(shared_parts)) {
+                    // Même chemin EV_START qu'un `start` manuel ou qu'un
+                    // décompte écoulé (cf. orchestrator_step) : le fork
+                    // effectif attend le prochain tour, une fois
+                    // pending_spawn observé.
+                    fork_orchestrator_post_event(EV_START, NULL);
+                } else {
+                    // Quiescence refusée (timeout) : rien n'a été modifié —
+                    // jamais de reconstruction dans le doute. Les fils sont
+                    // déjà arrêtés (orchestrator_do_stop_forks ci-dessus) ;
+                    // on retombe en WAITING_CONFIG plutôt que de tenter un
+                    // fork avec un état potentiellement à moitié appliqué.
+                    pthread_mutex_lock(&g_orch_mutex);
+                    g_orch_state = ORCH_WAITING_CONFIG;
+                    pthread_mutex_unlock(&g_orch_mutex);
+                }
+            } else {
+                pthread_mutex_lock(&g_orch_mutex);
+                g_orch_state = ORCH_WAITING_CONFIG;
+                pthread_mutex_unlock(&g_orch_mutex);
+                forks_parked = 1;
+                log_console("orchestrateur : fils arrêtés — en attente de "
+                          "\"start\" ou \"config <clé> <valeur>\"\n");
+            }
         }
 
         int remaining_forks = count_created_forks(childrens_pid, NB_THREADS);
-        if (remaining_forks == 0 && (ever_running || request == REQUEST_STOP)) {
+        if (remaining_forks == 0 && (request == REQUEST_STOP || (ever_running && !forks_parked))) {
             break;
         }
     }

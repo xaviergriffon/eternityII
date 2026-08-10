@@ -23,7 +23,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 50
+#define NB_COMMANDS 52
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -125,6 +125,8 @@ int lease_duration_interpreter(void);
 int config_interpreter(void);
 int config_save_interpreter(void);
 int start_interpreter(void);
+int stop_forks_interpreter(void);
+int config_apply_interpreter(void);
 
 /**
  * @brief Commandes prises en charge (entrées canoniques puis alias).
@@ -167,6 +169,20 @@ static command_description commands[NB_COMMANDS] = {
      "sans attendre un éventuel décompte d'auto-démarrage (COUNTDOWN) — même chemin\n"
      "de code que ce décompte à échéance. Consomme la configuration EFFECTIVE, pas\n"
      "celle en préparation par `config <clé> <valeur>` (cf. commande `config`).", NULL},
+    {"stopForks", stop_forks_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
+     "arrête les process de recherche sans quitter ce process",
+     "Erreur si aucun fork n'est en cours d'exécution. SIGINT à chaque fils, puis\n"
+     "escalade SIGTERM (+5s) et SIGKILL (+10s) si nécessaire — jamais bloquant plus\n"
+     "de ~10s. Le process reste vivant après (console, canal de contrôle, API HTTP\n"
+     "restent actifs) : état ramené à WAITING_CONFIG, en attente d'un nouveau `start`.", NULL},
+    {"configApply", config_apply_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
+     "applique la configuration en préparation, à chaud si possible",
+     "Erreur si aucun fork n'est en cours d'exécution. Si seules des clés à chaud\n"
+     "(max_stock_by_thread/limit/pruner_batch) sont préparées : appliquées immédiatement\n"
+     "et diffusées aux fils en cours par IPC, sans interruption. Si nb_forks/server_host/\n"
+     "parts_file est préparé (cf. `client_config_diff`) : arrête les fils (comme\n"
+     "`stopForks`), reconstruit les tableaux de fils et/ou la map de recherche partagée,\n"
+     "puis reforke automatiquement avec la nouvelle configuration.", NULL},
 
     {"pause", pause_interpreter, 1, CMD_CAT_SEARCH, 0, NULL,
      "met la recherche en pause administrative (locale + clients connectés)",
@@ -516,6 +532,87 @@ int start_interpreter(void) {
         return -1;
     }
     log_info("start : démarrage demandé\n");
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `stopForks` : arrête les fils de recherche sans
+ *        quitter ce process (console, canal de contrôle, API HTTP restent
+ *        actifs).
+ *
+ * Poste `EV_STOP_FORKS` (`fork_orchestrator_post_event`, transition
+ * SYNCHRONE) : erreur immédiate si aucun fork n'est en cours d'exécution
+ * (`ORCH_ERR_NOT_RUNNING`). La séquence d'arrêt/escalade/récolte elle-même
+ * s'exécute sur le thread orchestrateur (`fork_orchestrator_run`), jamais sur
+ * ce thread console — cette commande ne fait que la DEMANDER.
+ */
+int stop_forks_interpreter(void) {
+    orch_actions_t actions;
+    fork_orchestrator_post_event(EV_STOP_FORKS, &actions);
+    if (actions.error == ORCH_ERR_NOT_RUNNING) {
+        log_error("stopForks : aucun fork en cours d'exécution\n");
+        return -1;
+    }
+    log_info("stopForks : arrêt des process de recherche demandé\n");
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `configApply` : applique la configuration en
+ *        préparation (`config <clé> <valeur>`), à chaud si possible.
+ *
+ * `client_config_diff` (via `fork_orchestrator_diff_staged_config`) décide
+ * entre les deux chemins :
+ *  - `HOT_ONLY` (aucune clé stagée parmi nb_forks/server_host/parts_file) :
+ *    application immédiate aux globales du parent + diffusion IPC aux fils
+ *    déjà en cours (`fork_orchestrator_apply_hot_staged_config`), sans jamais
+ *    interrompre la recherche.
+ *  - `NEEDS_RESTART` : poste `EV_RESTART` (erreur immédiate si aucun fork
+ *    n'est en cours d'exécution) — l'arrêt, la reconstruction et le re-fork
+ *    s'exécutent ensuite sur le thread orchestrateur, cette commande ne fait
+ *    que le déclencher.
+ */
+int config_apply_interpreter(void) {
+    // Vérifié EN PREMIER, indépendamment du verdict de client_config_diff :
+    // sans ce garde-fou, un configApply HOT_ONLY (ex. valeur stagée identique
+    // à l'effective) alors qu'AUCUN fork n'existe (ORCH_WAITING_CONFIG,
+    // stopForks déjà passé par là) rapportait à tort "configuration à chaud
+    // appliquée, aucun redémarrage nécessaire" sans jamais avoir démarré quoi
+    // que ce soit — trouvé en testant manuellement stopForks puis configApply
+    // avec une valeur inchangée. `clientsWork`/`clientsCommand` n'ont pas ce
+    // problème : ce sont des commandes SERVEUR, sans notion d'orchestrateur
+    // local.
+    orch_state_t state;
+    fork_orchestrator_snapshot(&state, NULL);
+    if (state != ORCH_RUNNING) {
+        log_error("configApply : aucun fork en cours d'exécution -- utilisez "
+                  "\"config\" puis \"start\"\n");
+        return -1;
+    }
+
+    client_config_t effective;
+    client_config_capture_effective(&effective, g_client_server_host);
+    client_config_diff_t diff = fork_orchestrator_diff_staged_config(&effective);
+    client_config_free(&effective);
+
+    if (diff == CLIENT_CONFIG_DIFF_NEEDS_RESTART) {
+        orch_actions_t actions;
+        fork_orchestrator_post_event(EV_RESTART, &actions);
+        if (actions.error == ORCH_ERR_NOT_RUNNING) {
+            // Course rare : les fils sont morts entre le snapshot ci-dessus
+            // et ce post_event (ex. --stop-on-solution). Même message, même
+            // code d'erreur : l'opérateur voit la même chose dans les deux cas.
+            log_error("configApply : aucun fork en cours d'exécution -- utilisez "
+                      "\"config\" puis \"start\"\n");
+            return -1;
+        }
+        log_info("configApply : redémarrage à chaud demandé (nb_forks/server_host/"
+                  "parts_file modifié)\n");
+        return 0;
+    }
+
+    fork_orchestrator_apply_hot_staged_config();
+    log_info("configApply : configuration à chaud appliquée, aucun redémarrage nécessaire\n");
     return 0;
 }
 
@@ -1525,7 +1622,9 @@ int min_interpreter(void) {
 static int command_is_client_only(const command_description *command) {
     return strcmp(command->command, "config") == 0 ||
            strcmp(command->command, "configSave") == 0 ||
-           strcmp(command->command, "start") == 0;
+           strcmp(command->command, "start") == 0 ||
+           strcmp(command->command, "stopForks") == 0 ||
+           strcmp(command->command, "configApply") == 0;
 }
 
 /**

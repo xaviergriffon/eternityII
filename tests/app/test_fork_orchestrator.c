@@ -15,9 +15,15 @@
  */
 #include "greatest.h"
 #include "app/fork_orchestrator.h"
+#include "app/app_runtime.h"
+#include "app/fork_gate.h"
 #include "app/static_variables.h"
+#include "app/etii_statistic.h"
 
 #include <string.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <errno.h>
 
 /* ============================ orchestrator_step ============================ */
 
@@ -45,8 +51,11 @@ TEST orchestrator_step_config_begun_matrix(void)
     PASS();
 }
 
-/* EV_START : WAITING_CONFIG/COUNTDOWN/CONFIGURING -> RUNNING (spawn_forks=1) ;
-   RUNNING/STOPPING/APPLYING/EXITING -> inchangé + ALREADY_RUNNING. */
+/* EV_START : WAITING_CONFIG/COUNTDOWN/CONFIGURING/APPLYING -> RUNNING
+   (spawn_forks=1) ; RUNNING/STOPPING/EXITING -> inchangé + ALREADY_RUNNING.
+   APPLYING est volontairement spawn-éligible (PR D) : c'est le MÊME chemin
+   EV_START qui déclenche le re-fork à la fin d'un `configApply`
+   NEEDS_RESTART, cf. fork_orchestrator.c. */
 TEST orchestrator_step_start_matrix(void)
 {
     for (int i = 0; i < N_STATES; i++) {
@@ -54,8 +63,7 @@ TEST orchestrator_step_start_matrix(void)
         orch_actions_t out;
         orch_state_t next = orchestrator_step(s, EV_START, 0, &out);
 
-        int busy = (s == ORCH_RUNNING || s == ORCH_STOPPING ||
-                    s == ORCH_APPLYING || s == ORCH_EXITING);
+        int busy = (s == ORCH_RUNNING || s == ORCH_STOPPING || s == ORCH_EXITING);
         if (busy) {
             ASSERT_EQ_FMT((int)s, (int)next, "%d");
             ASSERT_EQ_FMT(0, out.spawn_forks, "%d");
@@ -69,24 +77,41 @@ TEST orchestrator_step_start_matrix(void)
     PASS();
 }
 
-/* EV_STOP_FORKS / EV_RESTART : réservés pour un futur usage — état inchangé
-   + UNSUPPORTED, dans TOUS les états. */
-TEST orchestrator_step_stop_forks_and_restart_are_unsupported_everywhere(void)
+/* EV_STOP_FORKS / EV_RESTART (PR D) : RUNNING -> STOPPING (stop_forks=1,
+   OK) ; tout autre état -> inchangé + ORCH_ERR_NOT_RUNNING, stop_forks=0.
+   Les deux événements partagent EXACTEMENT la même transition pure — la
+   distinction "faut-il re-forker après" est portée par le driver, pas par
+   cet état (cf. g_restart_after_stop, fork_orchestrator.c), donc le cœur pur
+   ne peut pas non plus la distinguer ici. */
+TEST orchestrator_step_stop_forks_and_restart_matrix(void)
 {
     for (int i = 0; i < N_STATES; i++) {
         orch_state_t s = ALL_STATES[i];
 
         orch_actions_t out1;
         orch_state_t next1 = orchestrator_step(s, EV_STOP_FORKS, 0, &out1);
-        ASSERT_EQ_FMT((int)s, (int)next1, "%d");
-        ASSERT_EQ_FMT(0, out1.spawn_forks, "%d");
-        ASSERT_EQ_FMT((int)ORCH_ERR_UNSUPPORTED, (int)out1.error, "%d");
-
         orch_actions_t out2;
         orch_state_t next2 = orchestrator_step(s, EV_RESTART, 0, &out2);
-        ASSERT_EQ_FMT((int)s, (int)next2, "%d");
-        ASSERT_EQ_FMT(0, out2.spawn_forks, "%d");
-        ASSERT_EQ_FMT((int)ORCH_ERR_UNSUPPORTED, (int)out2.error, "%d");
+
+        if (s == ORCH_RUNNING) {
+            ASSERT_EQ_FMT((int)ORCH_STOPPING, (int)next1, "%d");
+            ASSERT_EQ_FMT(1, out1.stop_forks, "%d");
+            ASSERT_EQ_FMT(0, out1.spawn_forks, "%d");
+            ASSERT_EQ_FMT((int)ORCH_OK, (int)out1.error, "%d");
+
+            ASSERT_EQ_FMT((int)ORCH_STOPPING, (int)next2, "%d");
+            ASSERT_EQ_FMT(1, out2.stop_forks, "%d");
+            ASSERT_EQ_FMT(0, out2.spawn_forks, "%d");
+            ASSERT_EQ_FMT((int)ORCH_OK, (int)out2.error, "%d");
+        } else {
+            ASSERT_EQ_FMT((int)s, (int)next1, "%d");
+            ASSERT_EQ_FMT(0, out1.stop_forks, "%d");
+            ASSERT_EQ_FMT((int)ORCH_ERR_NOT_RUNNING, (int)out1.error, "%d");
+
+            ASSERT_EQ_FMT((int)s, (int)next2, "%d");
+            ASSERT_EQ_FMT(0, out2.stop_forks, "%d");
+            ASSERT_EQ_FMT((int)ORCH_ERR_NOT_RUNNING, (int)out2.error, "%d");
+        }
     }
     PASS();
 }
@@ -131,6 +156,41 @@ TEST orchestrator_step_accepts_null_out(void)
     PASS();
 }
 
+/* ============================ waitpid_target_is_reaped ======================= */
+
+/*
+ * Régression : `orchestrator_do_stop_forks` tournait indéfiniment quand un
+ * enfant était réclamé par `sigchld_handler` sur un AUTRE thread (checker,
+ * console, …) avant que le `waitpid(pid, …)` explicite de la séquence
+ * d'arrêt n'ait sa chance — `waitpid` renvoie alors `-1`/`ECHILD` ("plus mon
+ * enfant"), que l'ancien code traitait à tort comme "encore vivant" au lieu
+ * de "déjà mort ailleurs". Trouvé en testant manuellement `configApply`
+ * (l'état `STOPPING` ne se résorbait jamais, même après l'escalade SIGKILL).
+ */
+TEST waitpid_target_is_reaped_matrix(void)
+{
+    /* Réclamé par CET appel : le cas nominal. */
+    ASSERT_EQ_FMT(1, waitpid_target_is_reaped(4242, 4242, 0), "%d");
+
+    /* Encore vivant (WNOHANG n'a rien trouvé) : jamais "reaped". */
+    ASSERT_EQ_FMT(0, waitpid_target_is_reaped(0, 4242, 0), "%d");
+
+    /* Déjà réclamé PAR UN AUTRE THREAD (sigchld_handler) entre-temps :
+       waitpid(pid, …) renvoie -1/ECHILD, PAS le pid — compte comme mort. */
+    ASSERT_EQ_FMT(1, waitpid_target_is_reaped(-1, 4242, ECHILD), "%d");
+
+    /* Erreur transitoire (ex. EINTR) : ni mort ni vivant confirmé — on
+       retentera au tour suivant, jamais traité comme "reaped". */
+    ASSERT_EQ_FMT(0, waitpid_target_is_reaped(-1, 4242, EINTR), "%d");
+
+    /* Un pid renvoyé qui NE correspond PAS au pid demandé (ne devrait jamais
+       arriver avec waitpid(pid, …) ciblé, mais la fonction ne doit pas le
+       confondre avec une réussite). */
+    ASSERT_EQ_FMT(0, waitpid_target_is_reaped(9999, 4242, 0), "%d");
+
+    PASS();
+}
+
 /* ============================ orchestrator_countdown_elapsed ================ */
 
 TEST countdown_elapsed_before_at_and_after_deadline(void)
@@ -138,6 +198,21 @@ TEST countdown_elapsed_before_at_and_after_deadline(void)
     ASSERT_EQ_FMT(0, orchestrator_countdown_elapsed(5000, 4999), "%d");
     ASSERT_EQ_FMT(1, orchestrator_countdown_elapsed(5000, 5000), "%d");
     ASSERT_EQ_FMT(1, orchestrator_countdown_elapsed(5000, 5001), "%d");
+    PASS();
+}
+
+/* ============================ stop_escalation_next =========================== */
+
+/* Avant 5s : NONE (on attend juste, le SIGINT initial suffit peut-être).
+   [5s, 10s[ : SIGTERM. >= 10s : SIGKILL. Bornes exactes testées. */
+TEST stop_escalation_next_thresholds(void)
+{
+    ASSERT_EQ_FMT((int)STOP_ESCALATION_NONE, (int)stop_escalation_next(0), "%d");
+    ASSERT_EQ_FMT((int)STOP_ESCALATION_NONE, (int)stop_escalation_next(4999), "%d");
+    ASSERT_EQ_FMT((int)STOP_ESCALATION_SIGTERM, (int)stop_escalation_next(5000), "%d");
+    ASSERT_EQ_FMT((int)STOP_ESCALATION_SIGTERM, (int)stop_escalation_next(9999), "%d");
+    ASSERT_EQ_FMT((int)STOP_ESCALATION_SIGKILL, (int)stop_escalation_next(10000), "%d");
+    ASSERT_EQ_FMT((int)STOP_ESCALATION_SIGKILL, (int)stop_escalation_next(999999), "%d");
     PASS();
 }
 
@@ -177,6 +252,57 @@ TEST post_event_start_twice_reports_already_running(void)
     fork_orchestrator_post_event(EV_START, &second);
     ASSERT_EQ_FMT((int)ORCH_ERR_ALREADY_RUNNING, (int)second.error, "%d");
     ASSERT_EQ_FMT(0, second.spawn_forks, "%d");
+
+    fork_orchestrator_reset();
+    PASS();
+}
+
+/* stopForks (EV_STOP_FORKS) : refusé hors RUNNING (ORCH_ERR_NOT_RUNNING),
+   accepté depuis RUNNING (-> STOPPING, visible via snapshot). */
+TEST post_event_stop_forks_requires_running(void)
+{
+    fork_orchestrator_reset();
+
+    orch_actions_t not_running;
+    fork_orchestrator_post_event(EV_STOP_FORKS, &not_running);
+    ASSERT_EQ_FMT((int)ORCH_ERR_NOT_RUNNING, (int)not_running.error, "%d");
+
+    orch_actions_t start;
+    fork_orchestrator_post_event(EV_START, &start);
+    ASSERT_EQ_FMT((int)ORCH_OK, (int)start.error, "%d");
+
+    orch_actions_t stop;
+    fork_orchestrator_post_event(EV_STOP_FORKS, &stop);
+    ASSERT_EQ_FMT((int)ORCH_OK, (int)stop.error, "%d");
+    ASSERT_EQ_FMT(1, stop.stop_forks, "%d");
+
+    orch_state_t state;
+    fork_orchestrator_snapshot(&state, NULL);
+    ASSERT_EQ_FMT((int)ORCH_STOPPING, (int)state, "%d");
+
+    fork_orchestrator_reset();
+    PASS();
+}
+
+/* configApply (EV_RESTART) : même garde-fou que stopForks. */
+TEST post_event_restart_requires_running(void)
+{
+    fork_orchestrator_reset();
+
+    orch_actions_t not_running;
+    fork_orchestrator_post_event(EV_RESTART, &not_running);
+    ASSERT_EQ_FMT((int)ORCH_ERR_NOT_RUNNING, (int)not_running.error, "%d");
+
+    fork_orchestrator_post_event(EV_START, NULL);
+
+    orch_actions_t restart;
+    fork_orchestrator_post_event(EV_RESTART, &restart);
+    ASSERT_EQ_FMT((int)ORCH_OK, (int)restart.error, "%d");
+    ASSERT_EQ_FMT(1, restart.stop_forks, "%d");
+
+    orch_state_t state;
+    fork_orchestrator_snapshot(&state, NULL);
+    ASSERT_EQ_FMT((int)ORCH_STOPPING, (int)state, "%d");
 
     fork_orchestrator_reset();
     PASS();
@@ -330,22 +456,127 @@ TEST reset_clears_staged_config(void)
     PASS();
 }
 
+/* ==================== orchestrator_apply_restart_config (quiescence) ======== */
+
+/*
+ * Régression : `orchestrator_apply_restart_config` (appelée en ORCH_APPLYING,
+ * cf. docs/conception/cycle_vie_forks.md PR D) libère puis réalloue
+ * `childrens_pid`/`forkId`/`fork_statistics` quand `nb_forks` change — un
+ * lecteur concurrent (checker, server_tcp, canal de contrôle, console) qui ne
+ * serait pas garé pendant cette fenêtre peut déréférencer un pointeur déjà
+ * libéré. Signalé par l'utilisateur comme un crash réel du thread console
+ * sous NCURSES=1 après un `configApply` changeant `nb_forks` (et, plus
+ * discrètement en mode ANSI, comme "la configuration ne semble pas prise en
+ * compte" — même course, juste moins souvent fatale). Cause : la fonction ne
+ * demandait aucune quiescence coopérative (`fork_gate_request_quiesce`)
+ * avant de toucher ces tableaux, alors que D2/APPLYING l'exige explicitement.
+ *
+ * Ce test fait tourner un thread compagnon qui boucle en tâche serrée sur
+ * `fork_gate_checkpoint` (comme le checker/la console réels) et, à CHAQUE
+ * tour où il n'est pas garé, lit `childrens_pid`/`forkId`/`fork_statistics` —
+ * exactement comme un vrai lecteur le ferait. Si la quiescence protège
+ * réellement la fenêtre de reconstruction, ce thread ne peut PAR CONSTRUCTION
+ * jamais observer ces pointeurs à NULL (il est bloqué dans
+ * `fork_gate_checkpoint` tant que la quiescence est active) — un test de
+ * contrat déterministe, pas une simple mesure de timing probabiliste.
+ */
+static volatile int g_race_worker_stop = 0;
+static volatile int g_race_worker_slot = -1;
+static volatile int g_race_worker_saw_null = 0;
+static volatile long g_race_worker_iterations = 0;
+
+static void *restart_race_worker(void *arg)
+{
+    (void)arg;
+    int slot = fork_gate_register("race-worker");
+    g_race_worker_slot = slot;
+    while (!g_race_worker_stop) {
+        fork_gate_checkpoint(slot);
+        if (childrens_pid == NULL || forkId == NULL || fork_statistics == NULL) {
+            g_race_worker_saw_null = 1;
+        } else {
+            volatile pid_t p = childrens_pid[0];
+            (void)p;
+        }
+        g_race_worker_iterations++;
+    }
+    fork_gate_unregister(slot);
+    return NULL;
+}
+
+TEST apply_restart_config_quiesces_concurrent_array_readers(void)
+{
+    fork_gate_reset();
+    fork_orchestrator_reset();
+
+    int saved_nb = NB_THREADS;
+    pid_t *spid = childrens_pid;
+    char **sfork = forkId;
+    struct client_statistics *sstat = fork_statistics;
+    char *saved_parts_files = parts_files;
+
+    NB_THREADS = 2;
+    init_childs();
+    parts_files = NULL; /* NULL : pas de reconstruction de map dans ce test (shared_parts=NULL) */
+
+    fork_orchestrator_stage_config_line("nb_forks = 5");
+
+    g_race_worker_stop = 0;
+    g_race_worker_slot = -1;
+    g_race_worker_saw_null = 0;
+    g_race_worker_iterations = 0;
+
+    pthread_t t;
+    ASSERT_EQ_FMT(0, pthread_create(&t, NULL, restart_race_worker, NULL), "%d");
+    while (g_race_worker_slot < 0) {
+        usleep(200);
+    }
+    usleep(2000); /* laisse le worker tourner un peu avant l'appel */
+
+    int rc = orchestrator_apply_restart_config(NULL);
+
+    g_race_worker_stop = 1;
+    pthread_join(t, NULL);
+
+    int ok = (childrens_pid != NULL && forkId != NULL && fork_statistics != NULL);
+    for (int i = 0; ok && i < NB_THREADS; i++) {
+        free(forkId[i]);
+    }
+    free(childrens_pid); free(forkId); free(fork_statistics);
+    childrens_pid = spid; forkId = sfork; fork_statistics = sstat;
+    NB_THREADS = saved_nb;
+    parts_files = saved_parts_files;
+
+    ASSERT_EQ_FMT(1, rc, "%d");
+    ASSERT_EQ_FMT(0, g_race_worker_saw_null, "%d");
+    ASSERT(g_race_worker_iterations > 0); /* le worker a bien tourné pendant le test */
+
+    fork_orchestrator_reset();
+    fork_gate_reset();
+    PASS();
+}
+
 SUITE(fork_orchestrator_suite)
 {
     RUN_TEST(orchestrator_step_config_begun_matrix);
     RUN_TEST(orchestrator_step_start_matrix);
-    RUN_TEST(orchestrator_step_stop_forks_and_restart_are_unsupported_everywhere);
+    RUN_TEST(orchestrator_step_stop_forks_and_restart_matrix);
     RUN_TEST(orchestrator_step_exit_matrix);
     RUN_TEST(orchestrator_step_child_died_is_always_a_self_loop);
     RUN_TEST(orchestrator_step_accepts_null_out);
     RUN_TEST(countdown_elapsed_before_at_and_after_deadline);
+    RUN_TEST(stop_escalation_next_thresholds);
+    RUN_TEST(waitpid_target_is_reaped_matrix);
 
     RUN_TEST(post_event_start_from_waiting_config_transitions_to_running);
     RUN_TEST(post_event_start_twice_reports_already_running);
+    RUN_TEST(post_event_stop_forks_requires_running);
+    RUN_TEST(post_event_restart_requires_running);
     RUN_TEST(snapshot_countdown_remaining_is_negative_outside_countdown);
     RUN_TEST(stage_config_line_valid_key_cancels_countdown_and_is_formatted);
     RUN_TEST(stage_config_line_invalid_does_not_transition);
     RUN_TEST(merge_staged_config_overlays_only_staged_keys);
     RUN_TEST(apply_staged_config_writes_globals_immediately);
     RUN_TEST(reset_clears_staged_config);
+    RUN_TEST(apply_restart_config_quiesces_concurrent_array_readers);
 }

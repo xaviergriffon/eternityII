@@ -268,14 +268,8 @@ void *run_control_channel(void *param)
 
         int service_ok = 1;
         while (service_ok && request_keeps_running(request)) {
-            // Checkpoint de quiescence : à la différence de la
-            // boucle externe (checkpoint une seule fois par tentative de
-            // connexion), une session établie peut vivre ici indéfiniment
-            // tant que le serveur répond dans les temps (SO_RCVTIMEO =
-            // tcp_timeout, 10 s par défaut) — sans ce point de contrôle ICI,
-            // ce thread resterait injoignable pour toute la durée de la
-            // session, largement au-delà du budget de
-            // fork_gate_request_quiesce (FORK_GATE_DEFAULT_TIMEOUT_MS, 2 s).
+            // Checkpoint RAPIDE avant la tentative de lecture : couvre le cas
+            // courant (pas de quiescence en cours), sans coût.
             fork_gate_checkpoint(gate_slot);
             if (!request_keeps_running(request)) {
                 service_ok = 0;
@@ -292,7 +286,35 @@ void *run_control_channel(void *param)
             }
             void *payload = NULL;
             int32_t len = 0;
+            // ctrl_recv_frame est BLOQUANT jusqu'à `tcp_timeout` secondes
+            // (SO_RCVTIMEO, 10 s par défaut) en attendant la prochaine trame
+            // du SERVEUR (ce canal est piloté par le serveur — pas de trame
+            // à envoyer de ce côté en attendant). Le checkpoint ci-dessus,
+            // lui, n'est réévalué qu'AU RETOUR de cet appel : sans
+            // `fork_gate_mark_blocked`, ce thread restait injoignable par
+            // `fork_gate_request_quiesce` (budget `FORK_GATE_DEFAULT_TIMEOUT_MS`,
+            // 2 s) pendant toute la durée d'un `recv()` en cours — bogue réel
+            // en production : au boot, un seul fork sur les N demandés
+            // arrivait à se créer (les suivants refusés par
+            // `orchestrator_spawn_forks` faute de quiescence atteinte), un
+            // canal de contrôle fraîchement connecté et déjà entré dans un
+            // `ctrl_recv_frame` de plusieurs secondes suffisant à faire
+            // échouer toute la rafale de forks qui suit. Ce thread ne détient
+            // aucun verrou stdio/logger/malloc pendant ce `recv()` — même
+            // contrat que la console autour de son `read()` bloquant
+            // (`console.c`) : `fork_gate_mark_blocked(slot, 1)` juste avant,
+            // `fork_gate_mark_blocked(slot, 0)` juste après, PUIS un
+            // checkpoint pour se garer pour de bon si une quiescence a été
+            // demandée pendant l'attente.
+            fork_gate_mark_blocked(gate_slot, 1);
             int cmd = ctrl_recv_frame(socket_id, &payload, &len);
+            fork_gate_mark_blocked(gate_slot, 0);
+            fork_gate_checkpoint(gate_slot);
+            if (!request_keeps_running(request)) {
+                free(payload);
+                service_ok = 0;
+                break;
+            }
             if (cmd < 0) {
                 // Timeout (ETIMEDOUT/EAGAIN) ou vraie erreur réseau : on ne
                 // les distingue pas, la politique la plus sûre dans les deux

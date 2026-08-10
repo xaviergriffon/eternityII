@@ -77,6 +77,24 @@ void init_childs(void);
 void ensure_childs_capacity(int needed);
 
 /**
+ * @brief Libère `childrens_pid`/`forkId`/`fork_statistics` et remet la
+ *        capacité suivie (`ensure_childs_capacity`) à 0 — symétrique
+ *        d'`init_childs()`.
+ *
+ * Réservée à la phase `ORCH_APPLYING` d'un redémarrage à chaud
+ * (`src/app/fork_orchestrator.c`, cf. docs/conception/cycle_vie_forks.md,
+ * PR D) quand `nb_forks` change : appelée seulement une fois `NB_THREADS`
+ * fils vivants ont été récoltés (zéro fils restant), immédiatement suivie
+ * d'un nouvel `init_childs()` (qui alloue sur le `NB_THREADS` désormais à
+ * jour) et d'un `init_counters()`. Ne PAS appeler pendant que des fils sont
+ * encore vivants : les tableaux libérés sont ceux que `send_command_to_childs`/
+ * le checker/le canal de contrôle lisent.
+ *
+ * Tolère un état déjà libéré (NULL) : idempotente, comme `client_config_free`.
+ */
+void free_childs(void);
+
+/**
  * @brief Prédicat de vivacité d'un pid par défaut (production) : `kill(pid, 0)`.
  *
  * `ESRCH` ⇒ mort ; tout le reste (succès, ou `EPERM` — un pid vivant possédé

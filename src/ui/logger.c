@@ -734,6 +734,14 @@ void status_zone_teardown(void)
     pthread_mutex_unlock(&output_mutex);
 }
 
+void status_zone_disown_child(void)
+{
+    /* Pas de verrou : appelée comme tout premier traitement d'un process
+       fraîchement forké, mono-thread à cet instant (cf. logger.h). Écrit
+       dans la copie COW du fils — sans effet sur le parent. */
+    zone_active = 0;
+}
+
 /**
  * @brief Efface la zone interactive en préservant le contenu dans le scrollback.
  *

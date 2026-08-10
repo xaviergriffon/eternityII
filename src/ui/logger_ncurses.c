@@ -699,6 +699,15 @@ void status_zone_teardown(void)
     pthread_mutex_unlock(&output_mutex);
 }
 
+void status_zone_disown_child(void)
+{
+    /* Pas de verrou : appelée comme tout premier traitement d'un process
+       fraîchement forké, mono-thread à cet instant (cf. logger.h). Écrit
+       dans la copie COW du fils — sans effet sur le parent, et surtout
+       n'appelle JAMAIS endwin() ici (ce fils ne possède pas le terminal). */
+    nc_active = 0;
+}
+
 /**
  * @brief Efface la vue de sortie SANS détruire l'historique du pad.
  *

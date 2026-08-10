@@ -258,7 +258,7 @@ void handle_client(int argc, const char *argv[]) {
     // tant qu'aucun fork n'existe encore.
     start_control_channel(serverIp);
 
-    fork_orchestrator_run(config_loaded_at_boot);
+    fork_orchestrator_run(config_loaded_at_boot, &shared_parts);
 
     close(*socket_id);
 #ifdef DEBUG_LOCAL_SOCKET
