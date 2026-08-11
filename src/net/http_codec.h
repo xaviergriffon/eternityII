@@ -186,31 +186,37 @@ int http_token_equals_constant_time(const char *a, const char *b, size_t max_len
  *        jeton lui-même, ni le détail de la classification des commandes.
  *
  * Cette fonction ignore tout de la classification par NOM de commande : elle
- * ne voit que deux booléens déjà tranchés par l'appelant (`src/net/http_server.c`).
- * Depuis l'exigence « toute commande de modification doit être authentifiée »,
- * `is_allowed` ne signifie donc plus « dans `control_command_allowed` » mais
- * « exécutable SANS authentification » — l'appelant le calcule comme
- * `control_command_allowed(command) && control_command_read_only(command)`
- * (aujourd'hui : seulement `clientsWork`) — et `is_privileged` ne signifie
- * plus seulement « dans `control_command_privileged` » (restore/backup) mais
- * « nécessite un jeton valide » — l'appelant le calcule comme
- * `control_command_privileged(command) || (control_command_allowed(command)
- * && !control_command_read_only(command))`, ce qui inclut désormais aussi
- * `pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`,
- * `clientsCommand`/`clientsCmd`. La logique de CETTE fonction reste
+ * ne voit que deux booléens déjà tranchés par l'appelant (`src/net/http_server.c`),
+ * nommés d'après ce qu'ils décident réellement sur CETTE route plutôt que
+ * d'après les noms des listes blanches de `control_protocol.h` — ces
+ * dernières encodent un axe différent (relayable vers un client ou non, cf.
+ * `control_command_class_t`), qui a cessé de correspondre à un niveau
+ * d'authentification distinct depuis l'exigence « toute commande de
+ * modification doit être authentifiée » : `is_public` et `needs_auth` sont
+ * calculés par l'appelant comme
+ * `is_public  = control_command_allowed(command) && control_command_read_only(command)`
+ * (aujourd'hui : seulement `clientsWork`) et
+ * `needs_auth = !is_public && (control_command_allowed(command) || control_command_privileged(command))`
+ * — c.-à-d. `control_command_classify(command) != CTRL_CMD_UNKNOWN` et pas
+ * `CTRL_CMD_READ_ONLY`, ce qui regroupe `pause`, `resume`, `limit`,
+ * `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`,
+ * `start`/`stopForks`/`configApply`/`config`/`configSave`
+ * (`CTRL_CMD_WRITE_RELAYABLE`) ET `restore`/`backup`/`sortAsc`/`sortDesc`/
+ * `sortDescMulti`/`split`/`regroup` (`CTRL_CMD_WRITE_SERVER_ONLY`) sous LA
+ * MÊME exigence d'authentification. La logique de CETTE fonction reste
  * inchangée — seule la façon dont l'appelant peuple ses deux entrées a changé.
  *
  * Règles :
- * - `is_allowed` : toujours OK, sans vérification de jeton.
- * - `is_privileged` : OK seulement si un jeton est configuré ET que
+ * - `is_public` : toujours OK, sans vérification de jeton.
+ * - `needs_auth` : OK seulement si un jeton est configuré ET que
  *   `token_valid` l'atteste ; sinon UNAUTHORIZED (401), qu'un jeton soit
  *   configuré ou non — un serveur sans jeton configuré refuse aussi ces
  *   commandes plutôt que de les exécuter sans aucune preuve d'identité.
- * - Ni l'un ni l'autre : FORBIDDEN (403), comme aujourd'hui pour `exit`,
- *   `import`, etc.
+ * - Ni l'un ni l'autre (commande hors des deux listes blanches, ex. `exit`,
+ *   `import`) : FORBIDDEN (403).
  *
- * @param is_allowed           Commande exécutable sans authentification (voir ci-dessus).
- * @param is_privileged        Commande nécessitant un jeton Bearer valide (voir ci-dessus).
+ * @param is_public            Commande exécutable sans authentification (voir ci-dessus).
+ * @param needs_auth           Commande nécessitant un jeton Bearer valide (voir ci-dessus).
  * @param has_configured_token 1 si le serveur a chargé un jeton au démarrage
  *                             (`--http-token-file`), 0 sinon.
  * @param token_valid          1 si un jeton Bearer a été fourni ET correspond
@@ -219,11 +225,11 @@ int http_token_equals_constant_time(const char *a, const char *b, size_t max_len
  */
 typedef enum {
     HTTP_CMD_AUTH_OK = 0,          ///< Commande autorisée, à exécuter.
-    HTTP_CMD_AUTH_FORBIDDEN,       ///< Hors des deux listes blanches -> 403.
-    HTTP_CMD_AUTH_UNAUTHORIZED     ///< Privilégiée, jeton absent/invalide/non configuré -> 401.
+    HTTP_CMD_AUTH_FORBIDDEN,       ///< Ni publique ni reconnue -> 403.
+    HTTP_CMD_AUTH_UNAUTHORIZED     ///< Modifiante, jeton absent/invalide/non configuré -> 401.
 } http_cmd_auth_result_t;
 
-http_cmd_auth_result_t http_command_authorize(int is_allowed, int is_privileged, int has_configured_token, int token_valid);
+http_cmd_auth_result_t http_command_authorize(int is_public, int needs_auth, int has_configured_token, int token_valid);
 
 /**
  * @brief Extrait la valeur d'une clé JSON de type chaîne dans un objet JSON plat.

@@ -347,16 +347,24 @@ static void send_response_unauthorized(int socket_id, const char *json_body)
  *        autorisation, puis l'applique via `admin_apply_privileged_command`.
  *
  * **Toute commande de modification requiert un jeton Bearer valide** — seule
- * exception, `clientsWork` (`control_command_read_only`), une consultation
- * pure qui ne change aucun état. `needs_auth` combine `control_command_privileged`
- * (restore/backup) avec les commandes de `control_command_allowed` qui ne
- * sont PAS `control_command_read_only` (`pause`, `resume`, `limit`,
- * `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`) : le
- * jeton n'est extrait/comparé QUE si `needs_auth` est vrai — une commande
- * purement lecture (`clientsWork`, ou une route `GET`) n'en a jamais eu
- * besoin. Sans `--http-token-file` configuré, toute commande de modification
- * reste donc inaccessible via cette API (401), quel que soit l'en-tête
- * fourni — seule la lecture (GET, `clientsWork`) fonctionne sans jeton.
+ * exception, `clientsWork` (`CTRL_CMD_READ_ONLY`), une consultation pure qui
+ * ne change aucun état. La classification par `control_command_classify`
+ * (`net/control_protocol.h`) réduit ici à deux drapeaux : `is_public`
+ * (`CTRL_CMD_READ_ONLY`, jamais de jeton requis) et `needs_auth` (toute
+ * commande reconnue mais PAS `is_public` — regroupe indifféremment les
+ * commandes relayables à un client, `CTRL_CMD_WRITE_RELAYABLE` : `pause`,
+ * `resume`, `limit`, `maxStockByThread`, `prunerBatch`,
+ * `clientsCommand`/`clientsCmd`, `start`/`stopForks`/`configApply`/`config`/
+ * `configSave`, et les commandes serveur-seulement, `CTRL_CMD_WRITE_SERVER_ONLY` :
+ * `restore`/`backup`/`sortAsc`/`sortDesc`/`sortDescMulti`/`split`/`regroup` —
+ * ces deux catégories exigent aujourd'hui exactement le même jeton, seule
+ * leur relayabilité vers un client diffère, un axe sans effet sur cette
+ * route). Le jeton n'est extrait/comparé QUE si `needs_auth` est vrai — une
+ * commande purement lecture (`clientsWork`, ou une route `GET`) n'en a jamais
+ * eu besoin. Sans `--http-token-file` configuré, toute commande de
+ * modification reste donc inaccessible via cette API (401), quel que soit
+ * l'en-tête fourni — seule la lecture (GET, `clientsWork`) fonctionne sans
+ * jeton.
  */
 static void handle_command_route(int socket_id, const http_request_t *req)
 {
@@ -367,10 +375,9 @@ static void handle_command_route(int socket_id, const http_request_t *req)
         return;
     }
 
-    int is_standard = control_command_allowed(command);
-    int is_read_only = is_standard && control_command_read_only(command);
-    int is_unauthenticated_ok = is_read_only;
-    int needs_auth = control_command_privileged(command) || (is_standard && !is_read_only);
+    control_command_class_t cmd_class = control_command_classify(command);
+    int is_public = (cmd_class == CTRL_CMD_READ_ONLY);
+    int needs_auth = (cmd_class == CTRL_CMD_WRITE_RELAYABLE || cmd_class == CTRL_CMD_WRITE_SERVER_ONLY);
     int has_configured_token = HTTP_ADMIN_TOKEN[0] != '\0';
     int token_present = 0;
     int token_valid = 0;
@@ -383,7 +390,7 @@ static void handle_command_route(int socket_id, const http_request_t *req)
         }
     }
 
-    http_cmd_auth_result_t decision = http_command_authorize(is_unauthenticated_ok, needs_auth, has_configured_token, token_valid);
+    http_cmd_auth_result_t decision = http_command_authorize(is_public, needs_auth, has_configured_token, token_valid);
 
     if (decision == HTTP_CMD_AUTH_FORBIDDEN) {
         send_response(socket_id, 403, "{\"error\":\"command not allowed\"}");

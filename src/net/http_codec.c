@@ -321,12 +321,12 @@ int http_token_equals_constant_time(const char *a, const char *b, size_t max_len
     return diff == 0;
 }
 
-http_cmd_auth_result_t http_command_authorize(int is_allowed, int is_privileged, int has_configured_token, int token_valid)
+http_cmd_auth_result_t http_command_authorize(int is_public, int needs_auth, int has_configured_token, int token_valid)
 {
-    if (is_allowed) {
+    if (is_public) {
         return HTTP_CMD_AUTH_OK;
     }
-    if (is_privileged) {
+    if (needs_auth) {
         return (has_configured_token && token_valid) ? HTTP_CMD_AUTH_OK : HTTP_CMD_AUTH_UNAUTHORIZED;
     }
     return HTTP_CMD_AUTH_FORBIDDEN;
