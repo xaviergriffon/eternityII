@@ -204,20 +204,79 @@ int32_t control_stats_encode(const control_stats_t *stats, uint8_t *buf);
 int control_stats_decode(const uint8_t *buf, int32_t len, control_stats_t *out);
 
 /**
- * @brief Liste blanche des commandes console déclenchables à distance via
- *        CTRL_COMMAND (fonction pure, cœur-métier, sans dépendance réseau).
+ * @brief Classe d'une commande console vis-à-vis des surfaces de pilotage
+ *        distant (canal de contrôle binaire `CTRL_COMMAND` et API REST admin
+ *        `POST /api/v1/command`) — SOURCE UNIQUE DE VÉRITÉ dont
+ *        `control_command_allowed`/`control_command_privileged`/
+ *        `control_command_read_only` (ci-dessous) ne sont que des projections.
  *
- * Compare uniquement le premier mot de `command_name` (avant un éventuel
- * espace/argument) aux commandes autorisées : "pause", "resume", "limit",
- * "maxStockByThread", "prunerBatch", "clientsCommand" (alias "clientsCmd"),
- * "clientsWork", "start", "stopForks", "configApply", "config", "configSave".
- * Tout le reste — dont "exit", "restore", "import" — est refusé.
+ * Deux axes orthogonaux existent pour une commande admise sur au moins une
+ * surface, et cet enum les fusionne en UNE valeur plutôt que de les laisser
+ * se déduire par croisement de plusieurs listes :
+ *  - « relayable vers un client » (CTRL_COMMAND, `clientsCommand`/`clientsCmd`)
+ *    vs « strictement serveur/HTTP » (jamais poussée à un client) ;
+ *  - « lecture pure » vs « modifie un état » — le SEUL axe qui compte encore
+ *    pour l'authentification HTTP (`--http-token-file`), depuis que
+ *    l'exigence « toute commande de modification doit être authentifiée » a
+ *    aligné le niveau d'auth de TOUTES les commandes modifiantes, qu'elles
+ *    soient relayables ou non. Avant cet alignement, "allowed" (relayable) et
+ *    "privileged" (jamais relayée) codaient AUSSI, implicitement, deux
+ *    niveaux d'auth distincts sur l'API HTTP — ce n'est plus le cas
+ *    aujourd'hui, d'où la confusion à lire seulement leurs noms.
+ */
+typedef enum {
+    /// Ni relayable ni exposée par l'API HTTP admin (ex. "exit", "restore"
+    /// via CTRL_COMMAND, ou toute commande inconnue) : refusée partout, avec
+    /// un code d'erreur "commande non reconnue" (jamais un problème d'auth).
+    CTRL_CMD_UNKNOWN = 0,
+    /// Lecture pure, relayable ET exposée par l'API HTTP SANS authentification
+    /// (`clientsWork` : seule occupante à ce jour).
+    CTRL_CMD_READ_ONLY,
+    /// Modifie un état (local ou, via CTRL_COMMAND, celui d'un client
+    /// distant) ; relayable par le canal de contrôle binaire ET par
+    /// `clientsCommand`/`clientsCmd` ; exposée par l'API HTTP avec
+    /// authentification requise (`pause`, `resume`, `limit`,
+    /// `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`,
+    /// `start`, `stopForks`, `configApply`, `config`, `configSave`).
+    CTRL_CMD_WRITE_RELAYABLE,
+    /// Modifie un état SERVEUR en bloc (remplacement de fichiers `.back`, ou
+    /// réorganisation sous verrou de tout le stock de possibilités) ; jamais
+    /// relayable à un client (n'aurait de toute façon aucun sens côté
+    /// client) ; exposée par l'API HTTP avec authentification requise, même
+    /// exigence que `CTRL_CMD_WRITE_RELAYABLE` (`restore`, `backup`,
+    /// `sortAsc`, `sortDesc`, `sortDescMulti`, `split`, `regroup`).
+    CTRL_CMD_WRITE_SERVER_ONLY,
+} control_command_class_t;
+
+/**
+ * @brief Classifie `command_name` (fonction pure, cœur-métier, sans
+ *        dépendance réseau) — compare uniquement son premier mot (avant un
+ *        éventuel espace/argument). `command_name == NULL` ou vide retourne
+ *        `CTRL_CMD_UNKNOWN` explicitement, jamais de déréférencement.
+ *
+ * `config` SANS argument (simple affichage) reste classé
+ * `CTRL_CMD_WRITE_RELAYABLE` comme toute autre invocation de `config` : cette
+ * fonction ne distingue pas les variantes d'une même commande, seulement son
+ * premier mot — donc `config` seul exige aussi un jeton sur l'API HTTP, bien
+ * qu'il s'agisse alors d'un simple affichage.
+ *
+ * @param command_name Nom (ou ligne complète) de la commande à classifier.
+ * @return              La classe de `command_name` (@ref control_command_class_t).
+ */
+control_command_class_t control_command_classify(const char *command_name);
+
+/**
+ * @brief Commande relayable à distance vers un CLIENT — via le canal de
+ *        contrôle binaire (`CTRL_COMMAND`, poussé par le SERVEUR) ou la
+ *        console `clientsCommand`/`clientsCmd`. Équivaut à
+ *        `control_command_classify(command_name) != CTRL_CMD_UNKNOWN &&
+ *        != CTRL_CMD_WRITE_SERVER_ONLY` (c.-à-d. `CTRL_CMD_READ_ONLY` ou
+ *        `CTRL_CMD_WRITE_RELAYABLE`).
  *
  * "clientsCommand"/"clientsCmd" et "clientsWork" sont des commandes SERVEUR
  * (elles agissent sur `control_registry`, jamais sur les forks de recherche
  * d'un client) : les admettre ici les rend exécutables via
- * `admin_apply_remote_command` (POST /api/v1/command) sans authentification
- * supplémentaire, exactement comme pause/resume/limit. Les autoriser aussi
+ * `admin_apply_remote_command` (POST /api/v1/command). Les autoriser aussi
  * côté canal de contrôle (`CTRL_COMMAND`, poussé par le SERVEUR vers un
  * client) est inoffensif par construction : sur un client, `control_registry`
  * est toujours vide, donc leur exécution y est un no-op silencieux — même
@@ -226,27 +285,27 @@ int control_stats_decode(const uint8_t *buf, int32_t len, control_stats_t *out);
  *
  * "start"/"stopForks"/"configApply"/"config"/"configSave" pilotent à
  * distance le cycle de vie des fils de recherche d'un CLIENT
- * (`fork_orchestrator.h`) : elles n'ont de
- * sens que poussées vers un client (jamais un serveur, où elles sont de toute
- * façon masquées — cf. `command_is_client_only`, command_lines.c). "exit"
- * n'entre PAS dans cette liste et n'y entrera jamais.
+ * (`fork_orchestrator.h`) : elles n'ont de sens que poussées vers un client
+ * (jamais un serveur, où elles sont de toute façon masquées — cf.
+ * `command_is_client_only`, command_lines.c). "exit" n'entre PAS dans cette
+ * liste et n'y entrera jamais.
+ *
+ * NE distingue PAS lecture/écriture — voir `control_command_read_only` pour
+ * cet axe, orthogonal.
  *
  * @param command_name Nom (ou ligne complète) de la commande à vérifier.
- *                      `NULL` est géré explicitement (retourne 0, jamais de
- *                      déréférencement) : une trame CTRL_COMMAND corrompue ou
- *                      un appelant qui n'a pas encore de ligne ne doivent pas
- *                      pouvoir crasher ce garde-fou.
  * @return              1 si la commande est autorisée à distance, 0 sinon
  *                      (y compris pour `command_name == NULL` ou vide).
  */
 int control_command_allowed(const char *command_name);
 
 /**
- * @brief Liste blanche des commandes PRIVILÉGIÉES déclenchables uniquement
- *        par `POST /api/v1/command` (API REST admin, `src/net/http_server.c`)
+ * @brief Commande SERVEUR-SEULEMENT déclenchable uniquement par
+ *        `POST /api/v1/command` (API REST admin, `src/net/http_server.c`)
  *        après authentification par jeton Bearer (`--http-token-file`) —
  *        JAMAIS via le canal de contrôle binaire (`CTRL_COMMAND`), qui reste
- *        strictement borné à `control_command_allowed`.
+ *        strictement borné à `control_command_allowed`. Équivaut à
+ *        `control_command_classify(command_name) == CTRL_CMD_WRITE_SERVER_ONLY`.
  *
  * Contient "restore" et "backup" (les deux seules commandes de
  * `command_lines.c` capables de remplacer/écraser l'état du serveur, fichiers
@@ -254,39 +313,39 @@ int control_command_allowed(const char *command_name);
  * "regroup" : ces cinq dernières ne remplacent aucun fichier mais réorganisent
  * en bloc, sous verrou, l'ensemble du stock de possibilités du serveur — un
  * effet de bord suffisamment large (et potentiellement coûteux, `sortDescMulti`
- * est multi-thread) pour justifier la même preuve d'identité que restore/backup
- * plutôt que le simple niveau "standard" de `control_command_allowed`. Toujours
- * disjointe de `control_command_allowed` — une commande n'est jamais dans les
- * deux listes à la fois.
+ * est multi-thread) pour n'avoir de sens que côté serveur, jamais relayée à
+ * un client. Toujours disjointe de `control_command_allowed` — une commande
+ * n'est jamais dans les deux listes à la fois.
+ *
+ * Ce prédicat n'implique PLUS, à lui seul, un niveau d'authentification HTTP
+ * supérieur à `control_command_allowed` — les deux exigent aujourd'hui le
+ * même jeton Bearer dès qu'elles modifient un état (voir
+ * `control_command_class_t` ci-dessus pour la raison). Sa seule portée
+ * réelle restante est : jamais relayable à un client.
  *
  * Même style que `control_command_allowed` : compare uniquement le premier
  * mot de `command_name`, gère `NULL` explicitement (retourne 0).
  *
  * @param command_name Nom (ou ligne complète) de la commande à vérifier.
- * @return              1 si la commande est privilégiée, 0 sinon (y compris
- *                      pour `command_name == NULL` ou vide).
+ * @return              1 si la commande est serveur-seulement, 0 sinon (y
+ *                      compris pour `command_name == NULL` ou vide).
  */
 int control_command_privileged(const char *command_name);
 
 /**
- * @brief Identifie, PARMI les commandes de `control_command_allowed`, celles
- *        qui ne modifient AUCUN état (ni local, ni distant) — utilisé
- *        EXCLUSIVEMENT par `POST /api/v1/command` (`src/net/http_server.c`)
- *        pour décider si l'authentification par jeton Bearer est requise.
+ * @brief Commande de LECTURE PURE (ne modifie aucun état, ni local ni
+ *        distant) — utilisé EXCLUSIVEMENT par `POST /api/v1/command`
+ *        (`src/net/http_server.c`) pour décider si l'authentification par
+ *        jeton Bearer est requise. Équivaut à
+ *        `control_command_classify(command_name) == CTRL_CMD_READ_ONLY`.
  *
  * Ne contient que "clientsWork" : une consultation pure (lit une attribution
- * déjà enregistrée côté serveur, n'envoie jamais rien à un client). Tout le
- * reste de `control_command_allowed` — `pause`, `resume`, `limit`,
- * `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `start`,
- * `stopForks`, `configApply`, `config`, `configSave` — modifie un état (local,
- * ou distant via `CTRL_COMMAND`) et doit donc être authentifié au même titre
- * que `restore`/`backup` quand cette commande arrive par l'API HTTP admin
- * (voir `handle_command_route`, `src/net/http_server.c`, qui combine ce
- * prédicat avec `control_command_allowed`/`control_command_privileged` pour
- * décider de l'authentification — ce module n'a connaissance ni de l'API HTTP
- * ni du jeton lui-même). `config` SANS argument (simple affichage) n'échappe
- * pas à cette règle : ce prédicat ne distingue pas les variantes d'une même
- * commande, seulement son premier mot.
+ * déjà enregistrée côté serveur, n'envoie jamais rien à un client). Toute
+ * commande admise par `control_command_allowed` OU `control_command_privileged`
+ * qui n'est PAS `control_command_read_only` modifie un état et doit donc être
+ * authentifiée sur l'API HTTP admin (voir `handle_command_route`,
+ * `src/net/http_server.c` — ce module n'a connaissance ni de l'API HTTP ni du
+ * jeton lui-même).
  *
  * N'a AUCUN effet sur le canal de contrôle binaire (`CTRL_COMMAND`) ni sur la
  * console : ces deux chemins n'ont pas de notion d'authentification (l'un est
@@ -299,9 +358,8 @@ int control_command_privileged(const char *command_name);
  * explicitement (retourne 0).
  *
  * @param command_name Nom (ou ligne complète) de la commande à vérifier.
- * @return              1 si la commande est un pur read de `control_command_allowed`,
- *                      0 sinon (y compris pour `command_name == NULL` ou vide,
- *                      ou pour une commande hors de `control_command_allowed`).
+ * @return              1 si la commande est un pur read, 0 sinon (y compris
+ *                      pour `command_name == NULL` ou vide).
  */
 int control_command_read_only(const char *command_name);
 

@@ -318,7 +318,10 @@ client, `control_registry` est toujours vide (rempli uniquement côté serveur p
 raisonnement déjà appliqué à `pause`/`resume` plus haut.
 
 **`restore`/`backup` restent hors de portée de ce canal, quoi qu'il arrive.**
-`control_command_privileged` (`src/net/control_protocol.c`) liste ces deux commandes
+`control_command_privileged` (`src/net/control_protocol.c` — comme
+`control_command_allowed`/`control_command_read_only`, une simple projection de
+`control_command_classify`, la source unique de vérité qui distingue explicitement
+« relayable vers un client » de « lecture vs écriture ») liste ces deux commandes
 séparément de `control_command_allowed`, et **seule** l'[API HTTP admin](api_http_rest.md#authentification)
 (`POST /api/v1/command`, après authentification par jeton Bearer via
 `--http-token-file`) les consulte — jamais `control_channel_handle_frame` ni

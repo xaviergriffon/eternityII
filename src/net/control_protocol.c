@@ -180,9 +180,12 @@ static int command_first_word_matches(const char *command_name, const char *cons
 	return 0;
 }
 
-int control_command_allowed(const char *command_name)
+control_command_class_t control_command_classify(const char *command_name)
 {
-	static const char *const allowed[] = {
+	static const char *const read_only[] = {
+		"clientsWork",
+	};
+	static const char *const write_relayable[] = {
 		"pause",
 		"resume",
 		"limit",
@@ -190,21 +193,13 @@ int control_command_allowed(const char *command_name)
 		"prunerBatch",
 		"clientsCommand",
 		"clientsCmd",
-		"clientsWork",
 		"start",
 		"stopForks",
 		"configApply",
 		"config",
 		"configSave",
 	};
-	static const size_t nb_allowed = sizeof(allowed) / sizeof(allowed[0]);
-
-	return command_first_word_matches(command_name, allowed, nb_allowed);
-}
-
-int control_command_privileged(const char *command_name)
-{
-	static const char *const privileged[] = {
+	static const char *const write_server_only[] = {
 		"restore",
 		"backup",
 		"sortAsc",
@@ -213,17 +208,31 @@ int control_command_privileged(const char *command_name)
 		"split",
 		"regroup",
 	};
-	static const size_t nb_privileged = sizeof(privileged) / sizeof(privileged[0]);
 
-	return command_first_word_matches(command_name, privileged, nb_privileged);
+	if (command_first_word_matches(command_name, read_only, sizeof(read_only) / sizeof(read_only[0]))) {
+		return CTRL_CMD_READ_ONLY;
+	}
+	if (command_first_word_matches(command_name, write_relayable, sizeof(write_relayable) / sizeof(write_relayable[0]))) {
+		return CTRL_CMD_WRITE_RELAYABLE;
+	}
+	if (command_first_word_matches(command_name, write_server_only, sizeof(write_server_only) / sizeof(write_server_only[0]))) {
+		return CTRL_CMD_WRITE_SERVER_ONLY;
+	}
+	return CTRL_CMD_UNKNOWN;
+}
+
+int control_command_allowed(const char *command_name)
+{
+	control_command_class_t cls = control_command_classify(command_name);
+	return cls == CTRL_CMD_READ_ONLY || cls == CTRL_CMD_WRITE_RELAYABLE;
+}
+
+int control_command_privileged(const char *command_name)
+{
+	return control_command_classify(command_name) == CTRL_CMD_WRITE_SERVER_ONLY;
 }
 
 int control_command_read_only(const char *command_name)
 {
-	static const char *const read_only[] = {
-		"clientsWork",
-	};
-	static const size_t nb_read_only = sizeof(read_only) / sizeof(read_only[0]);
-
-	return command_first_word_matches(command_name, read_only, nb_read_only);
+	return control_command_classify(command_name) == CTRL_CMD_READ_ONLY;
 }
