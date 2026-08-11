@@ -232,7 +232,7 @@ TEST ensure_childs_capacity_is_a_no_op_when_already_covered(void)
     PASS();
 }
 
-/* free_childs (PR D) : libère les trois tableaux et remet la capacité suivie
+/* free_childs : libère les trois tableaux et remet la capacité suivie
    à 0 — symétrique d'init_childs(). Réutilisée par ORCH_APPLYING
    (fork_orchestrator.c) quand nb_forks change, pour un shrink/regrow propre
    plutôt qu'un simple ensure_childs_capacity (qui ne fait QUE grandir). */
@@ -297,7 +297,7 @@ TEST free_childs_tolerates_already_freed_state(void)
     PASS();
 }
 
-/* ---------- pid_is_alive / reap_dead_child_slots (D3 de cycle_vie_forks.md) - */
+/* ---------- pid_is_alive / reap_dead_child_slots -------------------------- */
 
 /* pid_is_alive : vrai pour le process courant, faux pour un pid déjà récolté
  * (fork()+waitpid(), même patron que fork_exit_client_with_children_array

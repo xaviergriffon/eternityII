@@ -256,6 +256,20 @@ TEST control_command_allowed_accepts_whitelist(void)
     PASS();
 }
 
+/* Commandes de cycle de vie des fils : rejoignent la liste blanche pour être
+   pilotables à distance (canal de contrôle, API HTTP admin). */
+TEST control_command_allowed_accepts_lifecycle_commands(void)
+{
+    ASSERT_EQ_FMT(1, control_command_allowed("start"), "%d");
+    ASSERT_EQ_FMT(1, control_command_allowed("stopForks"), "%d");
+    ASSERT_EQ_FMT(1, control_command_allowed("configApply"), "%d");
+    ASSERT_EQ_FMT(1, control_command_allowed("config"), "%d");
+    ASSERT_EQ_FMT(1, control_command_allowed("configSave"), "%d");
+    /* Avec argument : seul le premier mot compte. */
+    ASSERT_EQ_FMT(1, control_command_allowed("config nb_forks 2"), "%d");
+    PASS();
+}
+
 TEST control_command_allowed_rejects_others(void)
 {
     ASSERT_EQ_FMT(0, control_command_allowed("exit"), "%d");
@@ -309,7 +323,8 @@ TEST control_command_allowed_and_privileged_are_disjoint(void)
 {
     static const char *const allowed_names[] = {
         "pause", "resume", "limit", "maxStockByThread", "prunerBatch",
-        "clientsCommand", "clientsCmd", "clientsWork"
+        "clientsCommand", "clientsCmd", "clientsWork",
+        "start", "stopForks", "configApply", "config", "configSave"
     };
     static const char *const privileged_names[] = { "restore", "backup" };
 
@@ -343,6 +358,13 @@ TEST control_command_read_only_rejects_modifying_standard_commands(void)
     ASSERT_EQ_FMT(0, control_command_read_only("prunerBatch"), "%d");
     ASSERT_EQ_FMT(0, control_command_read_only("clientsCommand"), "%d");
     ASSERT_EQ_FMT(0, control_command_read_only("clientsCmd"), "%d");
+    /* Les commandes de cycle de vie des fils modifient toutes un état
+       (local au minimum) -- aucune n'est un pur read. */
+    ASSERT_EQ_FMT(0, control_command_read_only("start"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("stopForks"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("configApply"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("config"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("configSave"), "%d");
     PASS();
 }
 
@@ -378,6 +400,7 @@ SUITE(control_protocol_suite)
     RUN_TEST(control_stats_round_trip);
     RUN_TEST(control_stats_decode_rejects_short_buffer);
     RUN_TEST(control_command_allowed_accepts_whitelist);
+    RUN_TEST(control_command_allowed_accepts_lifecycle_commands);
     RUN_TEST(control_command_allowed_rejects_others);
     RUN_TEST(control_command_allowed_handles_null);
     RUN_TEST(control_command_privileged_accepts_whitelist);

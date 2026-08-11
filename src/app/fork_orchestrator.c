@@ -463,7 +463,7 @@ int orchestrator_spawn_forks(void)
                 // Neutralise IMMÉDIATEMENT, avant tout autre code (y compris
                 // le log_info DEBUG_THREAD ci-dessous), l'atexit(status_zone_teardown)
                 // hérité du parent : status_zone_init() (console.c, appelée
-                // AVANT tout fork depuis PR C) l'enregistre dans le parent, et
+                // AVANT tout fork, cf. le démarrage différé plus haut) l'enregistre dans le parent, et
                 // fork() duplique la liste des handlers atexit — ce fils
                 // l'hérite donc aussi, bien qu'il ne "possède" jamais le
                 // terminal partagé. Sans ce garde-fou, le exit() normal de ce
@@ -510,8 +510,8 @@ int orchestrator_spawn_forks(void)
  *
  * SIGCHLD masqué pour toute la durée SUR CE THREAD (`pthread_sigmask`) :
  * `sigchld_handler` moissonne en `WNOHANG` sur N'IMPORTE QUEL pid, ce qui
- * rendrait le `waitpid(pid, …)` ciblé ci-dessous non déterministe (risque
- * #2, cf. docs/conception/cycle_vie_forks.md). SIGINT à chaque slot vivant,
+ * rendrait le `waitpid(pid, …)` ciblé ci-dessous non déterministe sans ce
+ * masquage. SIGINT à chaque slot vivant,
  * puis scrutation bornée (`waitpid(pid, …, WNOHANG)`, cadence `MICRO_SLEEP`)
  * avec escalade `stop_escalation_next` (SIGTERM à +5 s, SIGKILL à +10 s) —
  * un process déjà mort au moment du SIGINT (recherche terminée entre-temps,
@@ -604,10 +604,9 @@ static void orchestrator_do_stop_forks(void)
 
 int orchestrator_apply_restart_config(struct search_parts *shared_parts)
 {
-    // Quiescence coopérative (D2/APPLYING, docs/conception/cycle_vie_forks.md :
-    // « les lecteurs des tableaux ... sont garés, donc aucun mutex dédié
-    // n'est nécessaire ») — OUBLIÉE dans la première version de cette
-    // fonction. `childrens_pid`/`forkId`/`fork_statistics` sont libérés PUIS
+    // Quiescence coopérative (ORCH_APPLYING) : les lecteurs des tableaux
+    // sont garés, donc aucun mutex dédié n'est nécessaire — OUBLIÉE dans la
+    // première version de cette fonction. `childrens_pid`/`forkId`/`fork_statistics` sont libérés PUIS
     // réalloués ci-dessous quand `nb_forks` change, et la map de recherche
     // partagée est libérée PUIS reconstruite quand `parts_file` change ; sans
     // garer le checker, `server_tcp`, le canal de contrôle et la console (les
@@ -737,8 +736,8 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
        ci-dessous — historiquement "plus aucun fork ET on a déjà tourné" —
        confondrait cet arrêt VOLONTAIRE avec la fin naturelle des fils
        (solution + --stop-on-solution, ou tous morts) et terminerait le
-       process PARENT tout entier, à l'exact opposé de "sans jamais arrêter
-       le process principal" (cf. docs/conception/cycle_vie_forks.md, PR D).
+       process PARENT tout entier, à l'exact opposé de l'objectif : arrêter
+       les fils sans jamais arrêter le process principal.
        Remis à 0 dès qu'un (re)fork réussit. */
     int forks_parked = 0;
 

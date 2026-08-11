@@ -251,12 +251,16 @@ test-bench:
 #
 # Compile un binaire dédié ETERN_PARTS=16 (le release nettoie build/ derrière
 # lui : pas d'objets parasites pour un `make` 256 ultérieur), puis lance les
-# deux scénarios serveur+client de tests/integration/ sur ce même binaire :
+# trois scénarios serveur+client de tests/integration/ sur ce même binaire :
 #   - run_solution_16.sh : le client résout le 4×4, signale la solution ; le
 #     serveur l'affiche, sauvegarde son stock et s'arrête (--stop-on-solution).
 #   - run_control_channel.sh : sans --stop-on-solution (les deux processus
 #     restent vivants), vérifie le round-trip complet du canal de contrôle v9
 #     (clientsStats/clientsPause/clientsResume) puis l'arrêt propre via `exit`.
+#   - run_client_lifecycle.sh : cycle de vie dynamique des fils, piloté
+#     ENTIÈREMENT à distance depuis la console serveur (clientsCommand) :
+#     auto-démarrage, stopForks, start, configApply avec changement de
+#     nb_forks.
 # Chaque script vérifie son scénario avec un timeout borné.
 # INTEGRATION_TIMEOUT (défaut 60s) surcharge le délai max de CHAQUE script.
 # ---------------------------------------------------------------------------
@@ -271,6 +275,11 @@ test-integration:
 		if [ $$rc -eq 0 ]; then \
 			BIN=./$(INTEGRATION_BIN) DATA=data/pieces16.csv TIMEOUT=$(INTEGRATION_TIMEOUT) \
 				bash tests/integration/run_control_channel.sh; \
+			rc=$$?; \
+		fi; \
+		if [ $$rc -eq 0 ]; then \
+			BIN=./$(INTEGRATION_BIN) DATA=data/pieces16.csv TIMEOUT=$(INTEGRATION_TIMEOUT) \
+				bash tests/integration/run_client_lifecycle.sh; \
 			rc=$$?; \
 		fi; \
 		rm -f ./$(INTEGRATION_BIN); exit $$rc

@@ -83,9 +83,29 @@ int pruner_batch_clamp(int v);
  * Ne couvre que les commandes acceptées par `control_command_allowed`
  * (control_protocol.h) : `pause`, `resume`, `limit <n>`,
  * `maxStockByThread <n>`, `prunerBatch <n>`, `clientsCommand [--to <cible>]
- * <ligne...>` (alias `clientsCmd`), `clientsWork <cible>`. Toute autre
- * commande (dont `exit`, `restore`, `import`) est refusée avant même d'être
- * tokenisée.
+ * <ligne...>` (alias `clientsCmd`), `clientsWork <cible>`, `start`,
+ * `stopForks`, `configApply`, `config [<clé> <valeur>]`, `configSave`. Toute
+ * autre commande (dont `exit`, `restore`, `import`) est refusée avant même
+ * d'être tokenisée.
+ *
+ * `start`/`stopForks`/`configApply`/`configSave` pilotent le cycle de vie des
+ * fils de recherche d'un client : leurs interpréteurs console
+ * (`start_interpreter`/`stop_forks_interpreter`/`config_apply_interpreter`/
+ * `config_save_interpreter`) ne touchent jamais `strtok`, donc appelés
+ * directement ici, comme `backup_interpreter` dans
+ * `admin_apply_privileged_command`. `config` EST retokenisé, via une portion
+ * réentrante dédiée (`admin_remote_config`, statique dans command_lines.c) —
+ * jamais `config_interpreter` lui-même, qui lit `strtok(NULL, " ")` sur le
+ * curseur global.
+ *
+ * Ces cinq commandes sont en outre refusées (`ADMIN_CMD_FORBIDDEN`) si
+ * `server` vaut 1 (`admin_remote_command_is_client_only`, statique dans
+ * command_lines.c) : `POST /api/v1/command` (seul appelant HTTP de cette
+ * fonction) n'est jamais atteignable ailleurs que depuis `runserver`, donc
+ * `server` y vaut toujours 1 -- sans ce garde-fou, elles agiraient sur les
+ * globales/l'orchestrateur du SERVEUR (`NB_THREADS` y désigne le pool de
+ * connexions, pas un nombre de forks) au lieu du no-op silencieux voulu, même
+ * raisonnement que `command_is_client_only` pour la console.
  *
  * `pause`/`resume`, comme leurs pendants console (`pause_interpreter`/
  * `resume_interpreter`), diffusent aussi `CTRL_COMMAND` à toutes les sessions
