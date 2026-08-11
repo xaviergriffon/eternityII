@@ -293,7 +293,8 @@ entre elles. Verrouillé par
 
 Seules quelques commandes console sont déclenchables à distance
 (`control_command_allowed`) : `pause`, `resume`, `limit`, `maxStockByThread`,
-`prunerBatch`, `clientsCommand` (alias `clientsCmd`), `clientsWork` — jamais `exit`,
+`prunerBatch`, `clientsCommand` (alias `clientsCmd`), `clientsWork`, `start`,
+`stopForks`, `configApply`, `config`, `configSave` — jamais `exit`,
 `restore`, `import`, ni rien de destructeur. Cette vérification est faite **deux fois
 indépendamment** : côté serveur dans l'interpréteur de `clientsCmd` (qui refuse même
 de diffuser une ligne interdite), et, en défense en profondeur, côté client dans
@@ -325,6 +326,44 @@ séparément de `control_command_allowed`, et **seule** l'[API HTTP admin](api_h
 **pas** déclenchables à distance sur un client par ce canal : les deux vérifications
 ci-dessus restent strictement bornées à la même liste `control_command_allowed`
 qu'avant.
+
+### Pilotage à distance du cycle de vie des fils
+
+`start`, `stopForks`, `configApply`, `config` (sans argument ou `config <clé>
+<valeur>`) et `configSave` rejoignent `control_command_allowed` pour être
+poussables par le serveur vers un client, exactement comme `pause`/`limit`/…
+(voir [la console interactive](console.md#général) pour la sémantique de
+chacune côté console). Deux points à retenir, propres à ces cinq commandes :
+
+- **Elles n'ont de sens que sur un CLIENT.** Comme sur la console
+  (`command_is_client_only`, `src/ui/command_lines.c`), elles agissent sur
+  `fork_orchestrator`/`client_config` — inexistants côté rôle serveur
+  (`fork_orchestrator_run` n'est jamais appelée par `handle_server`). Poussées
+  via `clientsCommand`/`clientsCmd` (canal de contrôle), elles n'atteignent de
+  toute façon jamais qu'un client (`control_registry` ne contient QUE des
+  sessions client, jamais le serveur lui-même) : pas de risque côté binaire.
+  Sur `POST /api/v1/command` en revanche, la commande serait exécutée
+  directement sur le processus qui héberge l'API HTTP — TOUJOURS le serveur
+  (`--http-port` est une option serveur uniquement) — donc
+  `admin_apply_remote_command` les refuse explicitement (`403`) dès que
+  `server == 1`, plutôt que de laisser `configApply` reconstruire les
+  tableaux de fils/la map de recherche du SERVEUR par erreur (voir
+  [l'API HTTP admin](api_http_rest.md#post-apiv1command) pour la manière
+  correcte de les déclencher à distance : `clientsCommand --to <cible>
+  <commande>`).
+- **`config`/`configSave` restent, elles, masquées côté SERVEUR sur sa PROPRE
+  console** (`command_is_client_only`) et ne figurent dans
+  `control_command_allowed` que pour être poussées vers un CLIENT — un
+  `clientsCmd config` depuis un serveur n'a jamais de sens sur le serveur lui-
+  même, pour la raison ci-dessus.
+
+Exemple : reconfigurer `nb_forks` d'un client `jetson-1` déjà en cours
+d'exécution, sans jamais couper sa console ni sa connexion :
+
+```
+clientsCommand --to jetson-1 config nb_forks 8
+clientsCommand --to jetson-1 configApply
+```
 
 ### Adressage des commandes (`--to`)
 

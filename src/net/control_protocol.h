@@ -210,7 +210,8 @@ int control_stats_decode(const uint8_t *buf, int32_t len, control_stats_t *out);
  * Compare uniquement le premier mot de `command_name` (avant un éventuel
  * espace/argument) aux commandes autorisées : "pause", "resume", "limit",
  * "maxStockByThread", "prunerBatch", "clientsCommand" (alias "clientsCmd"),
- * "clientsWork". Tout le reste — dont "exit", "restore", "import" — est refusé.
+ * "clientsWork", "start", "stopForks", "configApply", "config", "configSave".
+ * Tout le reste — dont "exit", "restore", "import" — est refusé.
  *
  * "clientsCommand"/"clientsCmd" et "clientsWork" sont des commandes SERVEUR
  * (elles agissent sur `control_registry`, jamais sur les forks de recherche
@@ -222,6 +223,13 @@ int control_stats_decode(const uint8_t *buf, int32_t len, control_stats_t *out);
  * est toujours vide, donc leur exécution y est un no-op silencieux — même
  * raisonnement déjà appliqué à pause/resume (cf. leurs interpréteurs dans
  * command_lines.c).
+ *
+ * "start"/"stopForks"/"configApply"/"config"/"configSave" pilotent à
+ * distance le cycle de vie des fils de recherche d'un CLIENT
+ * (`fork_orchestrator.h`) : elles n'ont de
+ * sens que poussées vers un client (jamais un serveur, où elles sont de toute
+ * façon masquées — cf. `command_is_client_only`, command_lines.c). "exit"
+ * n'entre PAS dans cette liste et n'y entrera jamais.
  *
  * @param command_name Nom (ou ligne complète) de la commande à vérifier.
  *                      `NULL` est géré explicitement (retourne 0, jamais de
@@ -269,13 +277,16 @@ int control_command_privileged(const char *command_name);
  * Ne contient que "clientsWork" : une consultation pure (lit une attribution
  * déjà enregistrée côté serveur, n'envoie jamais rien à un client). Tout le
  * reste de `control_command_allowed` — `pause`, `resume`, `limit`,
- * `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd` — modifie
- * un état (local, ou distant via `CTRL_COMMAND`) et doit donc être authentifié
- * au même titre que `restore`/`backup` quand cette commande arrive par l'API
- * HTTP admin (voir `handle_command_route`, `src/net/http_server.c`, qui
- * combine ce prédicat avec `control_command_allowed`/`control_command_privileged`
- * pour décider de l'authentification — ce module n'a connaissance ni de
- * l'API HTTP ni du jeton lui-même).
+ * `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `start`,
+ * `stopForks`, `configApply`, `config`, `configSave` — modifie un état (local,
+ * ou distant via `CTRL_COMMAND`) et doit donc être authentifié au même titre
+ * que `restore`/`backup` quand cette commande arrive par l'API HTTP admin
+ * (voir `handle_command_route`, `src/net/http_server.c`, qui combine ce
+ * prédicat avec `control_command_allowed`/`control_command_privileged` pour
+ * décider de l'authentification — ce module n'a connaissance ni de l'API HTTP
+ * ni du jeton lui-même). `config` SANS argument (simple affichage) n'échappe
+ * pas à cette règle : ce prédicat ne distingue pas les variantes d'une même
+ * commande, seulement son premier mot.
  *
  * N'a AUCUN effet sur le canal de contrôle binaire (`CTRL_COMMAND`) ni sur la
  * console : ces deux chemins n'ont pas de notion d'authentification (l'un est

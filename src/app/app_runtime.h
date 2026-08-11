@@ -82,8 +82,7 @@ void ensure_childs_capacity(int needed);
  *        d'`init_childs()`.
  *
  * Réservée à la phase `ORCH_APPLYING` d'un redémarrage à chaud
- * (`src/app/fork_orchestrator.c`, cf. docs/conception/cycle_vie_forks.md,
- * PR D) quand `nb_forks` change : appelée seulement une fois `NB_THREADS`
+ * (`src/app/fork_orchestrator.c`) quand `nb_forks` change : appelée seulement une fois `NB_THREADS`
  * fils vivants ont été récoltés (zéro fils restant), immédiatement suivie
  * d'un nouvel `init_childs()` (qui alloue sur le `NB_THREADS` désormais à
  * jour) et d'un `init_counters()`. Ne PAS appeler pendant que des fils sont
@@ -113,8 +112,7 @@ typedef int (*child_pid_alive_fn)(pid_t pid);
  * @brief Nettoie les slots de `childrens_pid`/`forkId`/`fork_statistics` dont
  *        le process n'est plus vivant.
  *
- * Corrige un trou existant (cf. docs/conception/cycle_vie_forks.md, D3) :
- * `sigchld_handler` moissonne les zombies (`waitpid`) mais ne touche jamais
+ * Corrige un trou existant : `sigchld_handler` moissonne les zombies (`waitpid`) mais ne touche jamais
  * ces tableaux, si bien qu'un fils mort de façon inattendue laisse un slot
  * fantôme — `forkId[]` continue de cibler une socket Unix `etii_fork.<pid>`
  * disparue, vers laquelle `send_command_to_childs`

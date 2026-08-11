@@ -53,7 +53,7 @@ TEST orchestrator_step_config_begun_matrix(void)
 
 /* EV_START : WAITING_CONFIG/COUNTDOWN/CONFIGURING/APPLYING -> RUNNING
    (spawn_forks=1) ; RUNNING/STOPPING/EXITING -> inchangé + ALREADY_RUNNING.
-   APPLYING est volontairement spawn-éligible (PR D) : c'est le MÊME chemin
+   APPLYING est volontairement spawn-éligible : c'est le MÊME chemin
    EV_START qui déclenche le re-fork à la fin d'un `configApply`
    NEEDS_RESTART, cf. fork_orchestrator.c. */
 TEST orchestrator_step_start_matrix(void)
@@ -77,7 +77,7 @@ TEST orchestrator_step_start_matrix(void)
     PASS();
 }
 
-/* EV_STOP_FORKS / EV_RESTART (PR D) : RUNNING -> STOPPING (stop_forks=1,
+/* EV_STOP_FORKS / EV_RESTART : RUNNING -> STOPPING (stop_forks=1,
    OK) ; tout autre état -> inchangé + ORCH_ERR_NOT_RUNNING, stop_forks=0.
    Les deux événements partagent EXACTEMENT la même transition pure — la
    distinction "faut-il re-forker après" est portée par le driver, pas par
@@ -459,8 +459,8 @@ TEST reset_clears_staged_config(void)
 /* ==================== orchestrator_apply_restart_config (quiescence) ======== */
 
 /*
- * Régression : `orchestrator_apply_restart_config` (appelée en ORCH_APPLYING,
- * cf. docs/conception/cycle_vie_forks.md PR D) libère puis réalloue
+ * Régression : `orchestrator_apply_restart_config` (appelée en ORCH_APPLYING)
+ * libère puis réalloue
  * `childrens_pid`/`forkId`/`fork_statistics` quand `nb_forks` change — un
  * lecteur concurrent (checker, server_tcp, canal de contrôle, console) qui ne
  * serait pas garé pendant cette fenêtre peut déréférencer un pointeur déjà

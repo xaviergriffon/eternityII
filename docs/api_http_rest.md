@@ -237,6 +237,24 @@ pratique car toutes les commandes whitelistées n'utilisent que `[A-Za-z0-9 ]`.
 | `clientsCommand [--to <session_no\|client_uid\|label>] <ligne...>` (alias `clientsCmd`) | Équivalent HTTP de la commande console du même nom : sans `--to`, diffuse `<ligne...>` à toutes les sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) actives ; avec `--to <cible>`, l'envoie à UNE SEULE session (résolue par `session_no` décimal, `client_uid` hexadécimal, ou `label` déclaré — cf. `control_registry_send_command_to`). `<ligne...>` elle-même est revérifiée par `control_command_allowed` avant tout envoi : cibler une session n'élargit jamais le jeu de commandes exécutables sur un client (`exit`, `restore`, … restent hors de portée même via `clientsCommand --to`) | **requise** |
 | `clientsWork <session_no\|client_uid\|label>` | Consultation en lecture seule : journalise (`log_info`, aucune donnée dans le corps de la réponse — voir note ci-dessous) ce que le serveur a lui-même attribué à la session ciblée (même résolution de cible que `clientsCommand --to`) | **aucune** |
 
+**Cinq commandes de `control_command_allowed` listées ci-dessus dans le code mais
+JAMAIS directement exécutables via cette route** : `start`, `stopForks`,
+`configApply`, `config [<clé> <valeur>]`, `configSave` (cycle de vie des fils,
+voir [Pilotage à distance du cycle de vie des fils](echanges_client_serveur.md#pilotage-à-distance-du-cycle-de-vie-des-fils))
+sont whitelistées pour être poussées par le SERVEUR vers un CLIENT sur le [canal de
+contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) (`CTRL_COMMAND`), mais
+répondent toujours `403` en `command` direct de `POST /api/v1/command` — cette route
+n'est atteignable que depuis `runserver` (`--http-port` est une option serveur
+uniquement), et ces cinq commandes agissent sur `fork_orchestrator`/`client_config`,
+qui ne veulent rien dire côté serveur (`NB_THREADS` y désigne le pool de connexions,
+pas un nombre de forks ; `fork_orchestrator_run` n'y tourne jamais) — même garde-fou
+que `command_is_client_only` pour la console (`admin_remote_command_is_client_only`,
+`src/ui/command_lines.c`). Pour les déclencher à distance sur un client précis,
+passer par `clientsCommand --to <cible> <commande>` (ligne du tableau ci-dessus), qui
+les relaie telles quelles sur le canal de contrôle de ce client — ex.
+`{"command":"clientsCommand --to jetson-1 stopForks"}` puis
+`{"command":"clientsCommand --to jetson-1 configApply"}`.
+
 **Toute commande de modification exige un jeton Bearer valide** (voir
 [Authentification](#authentification) ci-dessous) — `clientsWork` est la SEULE
 exception : une consultation pure (`control_command_read_only`,

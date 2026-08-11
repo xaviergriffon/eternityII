@@ -191,6 +191,11 @@ int control_command_allowed(const char *command_name)
 		"clientsCommand",
 		"clientsCmd",
 		"clientsWork",
+		"start",
+		"stopForks",
+		"configApply",
+		"config",
+		"configSave",
 	};
 	static const size_t nb_allowed = sizeof(allowed) / sizeof(allowed[0]);
 

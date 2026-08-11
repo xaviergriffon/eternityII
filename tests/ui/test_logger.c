@@ -531,9 +531,9 @@ TEST status_zone_lifecycle_over_pty(void)
 }
 
 /*
- * Régression (cycle_vie_forks.md, PR D) : `status_zone_init()` (ci-dessus)
- * est appelée UNE FOIS, dans le process PARENT, AVANT tout fork depuis PR C
- * (démarrage différé) — `fork()` duplique donc la liste des handlers
+ * Régression : `status_zone_init()` (ci-dessus)
+ * est appelée UNE FOIS, dans le process PARENT, AVANT tout fork (démarrage
+ * différé) — `fork()` duplique donc la liste des handlers
  * `atexit()`, si bien qu'un process de recherche fraîchement forké hérite
  * lui aussi l'enregistrement de `status_zone_teardown`, bien qu'il ne
  * "possède" jamais le terminal partagé. Sans `status_zone_disown_child()`,

@@ -1,5 +1,5 @@
 /*
- * Tests unitaires de client_config.c (PR A, docs/conception/cycle_vie_forks.md) :
+ * Tests unitaires de client_config.c :
  * parsing/écriture de la configuration client clé=valeur, et son application
  * aux globales avec la priorité CLI > fichier > défauts.
  */
@@ -513,7 +513,7 @@ TEST capture_effective_omits_server_host_when_absent(void)
     PASS();
 }
 
-/* ------------------------------- diff (PR D) --------------------------------- */
+/* ------------------------------- diff ----------------------------------- */
 
 /* Rien de stagé : toujours HOT_ONLY, même avec un current bien rempli. */
 TEST diff_nothing_staged_is_hot_only(void)

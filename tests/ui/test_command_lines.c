@@ -18,6 +18,7 @@
 #include "core/datamanager.h"
 #include "core/possibility.h"
 #include "core/best_board.h"
+#include "app/fork_orchestrator.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1783,6 +1784,240 @@ TEST admin_apply_remote_command_does_not_disturb_external_strtok(void)
     PASS();
 }
 
+/* ---------- admin_apply_remote_command : cycle de vie des fils ------------
+ *
+ * "start"/"stopForks"/"configApply"/"config" rejoignent la liste blanche
+ * pour être pilotables à distance -- canal de contrôle (CTRL_COMMAND) ou
+ * API HTTP admin. Ces tests
+ * n'exercent QUE la transition pure/le verrou partagé de `fork_orchestrator`
+ * (comme tests/app/test_fork_orchestrator.c) : aucun `fork()` réel n'a lieu
+ * ici, puisque `orchestrator_spawn_forks`/la séquence d'arrêt ne s'exécutent
+ * que sur le thread dédié de `fork_orchestrator_run`, jamais démarré par ces
+ * tests. `fork_orchestrator_reset()` avant ET après chaque test, même
+ * convention que test_fork_orchestrator.c, pour ne pas polluer l'état
+ * partagé entre suites.
+ */
+
+TEST admin_apply_remote_command_start_transitions_to_running(void)
+{
+    fork_orchestrator_reset();
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("start"), "%d");
+    orch_state_t state;
+    fork_orchestrator_snapshot(&state, NULL);
+    ASSERT_EQ_FMT((int)ORCH_RUNNING, (int)state, "%d");
+
+    /* Un second "start" alors qu'on est déjà RUNNING est refusé. */
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("start"), "%d");
+
+    fork_orchestrator_reset();
+    PASS();
+}
+
+TEST admin_apply_remote_command_stopforks_requires_running(void)
+{
+    fork_orchestrator_reset();
+
+    /* Aucun fork en cours (WAITING_CONFIG) : refusé. */
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("stopForks"), "%d");
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("start"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("stopForks"), "%d");
+    orch_state_t state;
+    fork_orchestrator_snapshot(&state, NULL);
+    ASSERT_EQ_FMT((int)ORCH_STOPPING, (int)state, "%d");
+
+    fork_orchestrator_reset();
+    PASS();
+}
+
+TEST admin_apply_remote_command_config_bare_reports_state(void)
+{
+    fork_orchestrator_reset();
+
+    /* Sans argument : affichage seul, aucune erreur, aucun effet sur l'état. */
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("config"), "%d");
+    orch_state_t state;
+    fork_orchestrator_snapshot(&state, NULL);
+    ASSERT_EQ_FMT((int)ORCH_WAITING_CONFIG, (int)state, "%d");
+
+    fork_orchestrator_reset();
+    PASS();
+}
+
+TEST admin_apply_remote_command_config_stages_key_value(void)
+{
+    fork_orchestrator_reset();
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("config nb_forks 3"), "%d");
+
+    char staged[256];
+    ASSERT(fork_orchestrator_format_staged_config(staged, sizeof staged) > 0);
+    ASSERT(strstr(staged, "nb_forks") != NULL);
+    ASSERT(strstr(staged, "3") != NULL);
+
+    fork_orchestrator_reset();
+    PASS();
+}
+
+TEST admin_apply_remote_command_config_rejects_bad_input(void)
+{
+    fork_orchestrator_reset();
+
+    /* Clé seule, sans valeur. */
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("config nb_forks"), "%d");
+    /* Clé inconnue. */
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("config no_such_key 1"), "%d");
+    /* Valeur invalide (nb_forks doit être un entier positif). */
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("config nb_forks abc"), "%d");
+
+    fork_orchestrator_reset();
+    PASS();
+}
+
+TEST admin_apply_remote_command_configapply_requires_running(void)
+{
+    fork_orchestrator_reset();
+
+    /* Aucun fork en cours : refusé avant même de calculer le diff. */
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("configApply"), "%d");
+
+    fork_orchestrator_reset();
+    PASS();
+}
+
+/* configApply, branche HOT_ONLY : une clé à chaud stagée (ici "limit") est
+   appliquée immédiatement, sans redémarrage -- l'état reste RUNNING. */
+TEST admin_apply_remote_command_configapply_hot_only(void)
+{
+    fork_orchestrator_reset();
+    unsigned long long saved_limit = max_search_by_sec;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("start"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("config limit 777"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("configApply"), "%d");
+
+    ASSERT_EQ_FMT(777ULL, max_search_by_sec, "%llu");
+    orch_state_t state;
+    fork_orchestrator_snapshot(&state, NULL);
+    ASSERT_EQ_FMT((int)ORCH_RUNNING, (int)state, "%d");
+
+    max_search_by_sec = saved_limit;
+    fork_orchestrator_reset();
+    PASS();
+}
+
+/* configApply, branche NEEDS_RESTART : une clé de redémarrage stagée (ici
+   "nb_forks") déclenche EV_RESTART -> RUNNING passe en STOPPING (le re-fork
+   lui-même n'a lieu que sur le thread dédié de fork_orchestrator_run, jamais
+   exécuté ici). */
+TEST admin_apply_remote_command_configapply_needs_restart(void)
+{
+    fork_orchestrator_reset();
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("start"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("config nb_forks 2"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("configApply"), "%d");
+
+    orch_state_t state;
+    fork_orchestrator_snapshot(&state, NULL);
+    ASSERT_EQ_FMT((int)ORCH_STOPPING, (int)state, "%d");
+
+    fork_orchestrator_reset();
+    PASS();
+}
+
+/* configSave écrit réellement un fichier (comme do_command_line_config_save_*
+   ci-dessus), mais via le chemin réentrant. */
+TEST admin_apply_remote_command_configsave_writes_file(void)
+{
+    fork_orchestrator_reset();
+    const char *saved_path = client_config_file_path;
+
+    char path[] = "/tmp/etii_admin_configsave_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    client_config_file_path = path;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("configSave"), "%d");
+    FILE *f = fopen(path, "r");
+    ASSERT(f != NULL);
+    fclose(f);
+
+    unlink(path);
+    client_config_file_path = saved_path;
+    fork_orchestrator_reset();
+    PASS();
+}
+
+/* Sur un SERVEUR (server == 1), les cinq commandes de cycle de vie sont
+   refusées : POST /api/v1/command (seul appelant HTTP de cette fonction)
+   n'est atteignable que depuis runserver, où "config nb_forks <n>" +
+   "configApply" agiraient réellement sur NB_THREADS/childrens_pid du
+   SERVEUR (taille du pool de connexions) sans ce garde-fou -- même
+   raisonnement que command_is_client_only pour la console. */
+TEST admin_apply_remote_command_lifecycle_forbidden_on_server(void)
+{
+    fork_orchestrator_reset();
+    int saved_server = server;
+    server = 1;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("start"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("stopForks"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("configApply"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("config"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("config nb_forks 2"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("configSave"), "%d");
+
+    /* L'orchestrateur n'a subi AUCUNE transition : toujours WAITING_CONFIG. */
+    orch_state_t state;
+    fork_orchestrator_snapshot(&state, NULL);
+    ASSERT_EQ_FMT((int)ORCH_WAITING_CONFIG, (int)state, "%d");
+
+    server = saved_server;
+    fork_orchestrator_reset();
+    PASS();
+}
+
+/* Sur un client (server == 0, cas normal de POST /api/v1/command jamais
+   atteint en pratique mais couvert pour la symétrie), ces commandes restent
+   acceptées -- non-régression du comportement déjà testé ci-dessus. */
+TEST admin_apply_remote_command_lifecycle_allowed_on_client(void)
+{
+    fork_orchestrator_reset();
+    int saved_server = server;
+    server = 0;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("start"), "%d");
+
+    server = saved_server;
+    fork_orchestrator_reset();
+    PASS();
+}
+
+/* Réentrance : ces commandes ne doivent pas non plus perturber une séquence
+   strtok() externe déjà en cours (même garantie que les autres commandes de
+   admin_apply_remote_command). */
+TEST admin_apply_remote_command_lifecycle_does_not_disturb_external_strtok(void)
+{
+    fork_orchestrator_reset();
+
+    char outer[] = "alpha beta gamma";
+    char *first = strtok(outer, " ");
+    ASSERT(first != NULL);
+    ASSERT_STR_EQ("alpha", first);
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("config nb_forks 4"), "%d");
+
+    char *second = strtok(NULL, " ");
+    ASSERT(second != NULL);
+    ASSERT_STR_EQ("beta", second);
+
+    fork_orchestrator_reset();
+    PASS();
+}
+
 /* ---------- admin_apply_remote_command : clientsCommand/clientsCmd/clientsWork
  *
  * Mêmes commandes que la console (clients_cmd_interpreter/clients_work_interpreter),
@@ -2141,6 +2376,19 @@ SUITE(command_lines_suite)
     RUN_TEST(admin_apply_remote_command_rejects_forbidden);
     RUN_TEST(admin_apply_remote_command_bad_args);
     RUN_TEST(admin_apply_remote_command_does_not_disturb_external_strtok);
+
+    RUN_TEST(admin_apply_remote_command_start_transitions_to_running);
+    RUN_TEST(admin_apply_remote_command_stopforks_requires_running);
+    RUN_TEST(admin_apply_remote_command_config_bare_reports_state);
+    RUN_TEST(admin_apply_remote_command_config_stages_key_value);
+    RUN_TEST(admin_apply_remote_command_config_rejects_bad_input);
+    RUN_TEST(admin_apply_remote_command_configapply_requires_running);
+    RUN_TEST(admin_apply_remote_command_configapply_hot_only);
+    RUN_TEST(admin_apply_remote_command_configapply_needs_restart);
+    RUN_TEST(admin_apply_remote_command_configsave_writes_file);
+    RUN_TEST(admin_apply_remote_command_lifecycle_forbidden_on_server);
+    RUN_TEST(admin_apply_remote_command_lifecycle_allowed_on_client);
+    RUN_TEST(admin_apply_remote_command_lifecycle_does_not_disturb_external_strtok);
 
     RUN_TEST(admin_apply_remote_command_clientscommand_broadcasts);
     RUN_TEST(admin_apply_remote_command_clientscommand_to_targets_one_session);

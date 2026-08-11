@@ -989,8 +989,8 @@ int run_fork_checker(struct sockaddr_un *main_addr)
    ci-dessous) : sans timeout, un process parent sans aucun fork vivant (ou
    entre deux tours de fork_checker, 1/s) bloquerait indéfiniment dans le
    noyau sans jamais revoir la tête de boucle — le checkpoint de quiescence
-   (PR B de docs/conception/cycle_vie_forks.md, D2) ne serait alors observé
-   qu'au prochain datagramme reçu, pas dans un délai borné. Valeur courte :
+   coopérative ci-dessous ne serait alors observé qu'au prochain datagramme
+   reçu, pas dans un délai borné. Valeur courte :
    ce thread ne fait rien d'autre qu'attendre, un réveil par seconde est sans
    coût mesurable. */
 #define SERVER_TCP_RECV_TIMEOUT_SEC 1

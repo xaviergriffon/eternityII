@@ -776,9 +776,8 @@ void nc_console_loop(void)
 
     int input_dirty = 0;
 
-    // Enregistrement auprès du gate de quiescence (PR B de
-    // docs/conception/cycle_vie_forks.md, D2). Contrairement à la variante
-    // ANSI (console.c), cette boucle est déjà non bloquante (wgetch en mode
+    // Enregistrement auprès du gate de quiescence coopérative. Contrairement
+    // à la variante ANSI (console.c), cette boucle est déjà non bloquante (wgetch en mode
     // nodelay, cf. plus bas) : un simple checkpoint en tête de boucle suffit,
     // pas besoin de fork_gate_mark_blocked.
     int gate_slot = fork_gate_register("console");

@@ -280,9 +280,8 @@ void * console(void *param)
     nc_console_loop();
     exit(EXIT_SUCCESS);
 #else
-    // Enregistrement auprès du gate de quiescence (PR B de
-    // docs/conception/cycle_vie_forks.md, D2) : la console est le cas
-    // particulier, bloquée dans read() (getcmdline). fork_gate_mark_blocked
+    // Enregistrement auprès du gate de quiescence coopérative : la console
+    // est le cas particulier, bloquée dans read() (getcmdline). fork_gate_mark_blocked
     // la déclare quiescente pour la durée du read (elle n'y détient aucun
     // verrou) sans avoir besoin de se garer sur la condvar ; au retour, si une
     // quiescence a été demandée entre-temps, fork_gate_checkpoint la gare

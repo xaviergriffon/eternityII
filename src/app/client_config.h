@@ -2,12 +2,9 @@
  * @file client_config.h
  * @brief Configuration client persistée (fichier texte clé=valeur).
  *
- * PR A de docs/conception/cycle_vie_forks.md : module de parsing/écriture,
- * lecture au démarrage appliquée aux globales (priorité CLI > fichier >
- * défauts), et les commandes console `config`/`configSave`. Aucun changement
- * du cycle de vie des fils — le fichier ne fait, pour l'instant, que
- * pré-remplir les valeurs par défaut des options déjà existantes
- * (`--config-file`, cf. static_variables.h).
+ * Module de parsing/écriture, lecture au démarrage appliquée aux globales
+ * (priorité CLI > fichier > défauts), et les commandes console
+ * `config`/`configSave` (`--config-file`, cf. static_variables.h).
  */
 #ifndef client_config_h
 #define client_config_h
@@ -98,7 +95,7 @@ client_config_line_status_t client_config_parse_line(const char *line, client_co
 /**
  * @brief Charge un fichier de configuration clé=valeur dans @p cfg.
  *
- * Lecture TOLÉRANTE (cf. docs/conception/cycle_vie_forks.md, D5) : un fichier
+ * Lecture TOLÉRANTE : un fichier
  * absent ou illisible n'est pas une erreur (`CLIENT_CONFIG_ABSENT`, @p cfg
  * inchangée) — le process ne refuse jamais de démarrer à cause de ce fichier.
  * Une ligne à clé inconnue ou à valeur invalide est journalisée
@@ -214,10 +211,9 @@ typedef enum {
 
 /**
  * @brief Compare la configuration EN PRÉPARATION (@p staged) à la
- *        configuration EFFECTIVE (@p current) pour décider, côté `configApply`
- *        (PR D de docs/conception/cycle_vie_forks.md), entre une simple
- *        diffusion IPC (`HOT_ONLY`) et un arrêt + reconstruction + re-fork
- *        complet (`NEEDS_RESTART`).
+ *        configuration EFFECTIVE (@p current) pour décider, côté `configApply`,
+ *        entre une simple diffusion IPC (`HOT_ONLY`) et un arrêt +
+ *        reconstruction + re-fork complet (`NEEDS_RESTART`).
  *
  * Fonction pure : seules `nb_forks`, `server_host` et `parts_file` peuvent
  * déclencher `NEEDS_RESTART` (elles conditionnent respectivement le

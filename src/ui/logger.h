@@ -63,8 +63,8 @@ void flush_info(void);
  * @brief Prend/relâche le verrou interne qui sérialise les écritures sur le
  *        terminal (`output_mutex`, ANSI comme ncurses).
  *
- * Exposé pour `src/app/fork_gate.c` (infrastructure de quiescence, PR B de
- * `docs/conception/cycle_vie_forks.md`) : avant un `fork()`, le thread
+ * Exposé pour `src/app/fork_gate.c` (infrastructure de quiescence
+ * coopérative) : avant un `fork()`, le thread
  * forkeur doit détenir CE verrou en plus de `flockfile(stdout)`/
  * `flockfile(stderr)`, sans quoi un autre thread pourrait être au milieu d'un
  * log au moment du fork et transmettre son état à l'enfant sans le thread qui
@@ -136,8 +136,8 @@ void status_zone_teardown(void);
  *        `log_*`), jamais par le process PARENT.
  *
  * `status_zone_init()` (`console.c`) est appelée UNE FOIS, dans le PARENT,
- * AVANT tout fork (démarrage différé depuis PR C de
- * docs/conception/cycle_vie_forks.md) — `fork()` duplique donc la liste des
+ * AVANT tout fork (démarrage différé, cf. l'orchestrateur de démarrage
+ * différé) — `fork()` duplique donc la liste des
  * handlers `atexit()`, si bien que chaque fils de recherche hérite lui aussi
  * l'enregistrement de `status_zone_teardown`, bien qu'il ne "possède" jamais
  * le terminal partagé. Sans ce garde-fou, le `exit()` normal d'un fils (fin

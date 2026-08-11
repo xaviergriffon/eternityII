@@ -1204,6 +1204,110 @@ static int admin_remote_clients_work(char *target) {
 }
 
 /**
+ * @brief Portion "config [<clé> <valeur>]" de `admin_apply_remote_command`,
+ *        réentrante (aucun strtok global) — pendant HTTP/canal de contrôle de
+ *        `config_interpreter`, qui lui tokenise via le curseur global `strtok`
+ *        et ne doit donc JAMAIS être appelé depuis ce chemin.
+ *
+ * `rest` est le reliquat de ligne laissé par `strtok_r` juste après le mot
+ * "config" -- toujours un pointeur dans le tampon modifiable de l'appelant.
+ * Sans argument : journalise l'état de l'orchestrateur, la configuration
+ * effective et la configuration en préparation (même contenu que
+ * `config_interpreter`), n'annule PAS le décompte. Avec "<clé> <valeur>"
+ * (un seul token par valeur, même convention que `limit`/`prunerBatch`) :
+ * écrit dans la configuration en préparation via
+ * `fork_orchestrator_stage_config_line` et annule le décompte SEULEMENT si la
+ * ligne est acceptée -- une commande mal formée ne doit pas coûter
+ * l'auto-démarrage.
+ */
+static int admin_remote_config(char *rest) {
+    while (rest != NULL && *rest == ' ') {
+        rest++;
+    }
+    if (rest == NULL || *rest == '\0') {
+        orch_state_t state;
+        long countdown_remaining_ms;
+        fork_orchestrator_snapshot(&state, &countdown_remaining_ms);
+
+        client_config_t cfg;
+        client_config_capture_effective(&cfg, g_client_server_host);
+        char buf[1024];
+        client_config_format(&cfg, buf, sizeof(buf));
+        client_config_free(&cfg);
+
+        char staged_buf[1024];
+        fork_orchestrator_format_staged_config(staged_buf, sizeof(staged_buf));
+
+        log_info("config (API HTTP admin) : état=%s\n"
+                  "configuration effective (fichier : %s) :\n%s"
+                  "configuration en préparation :\n%s",
+                  orch_state_name(state), client_config_file_path,
+                  buf[0] != '\0' ? buf : "  (aucune valeur)\n",
+                  staged_buf[0] != '\0' ? staged_buf : "  (aucune valeur)\n");
+        return ADMIN_CMD_OK;
+    }
+
+    char *sep = strchr(rest, ' ');
+    if (sep == NULL) {
+        /* Clé seule, sans valeur : rien à préparer. */
+        return ADMIN_CMD_BAD_ARGS;
+    }
+    *sep = '\0';
+    const char *key = rest;
+    char *value = sep + 1;
+    while (*value == ' ') {
+        value++;
+    }
+    if (*value == '\0') {
+        return ADMIN_CMD_BAD_ARGS;
+    }
+    char *value_end = strchr(value, ' ');
+    if (value_end != NULL) {
+        *value_end = '\0';
+    }
+
+    char line[600];
+    snprintf(line, sizeof(line), "%s = %s", key, value);
+    client_config_line_status_t status = fork_orchestrator_stage_config_line(line);
+    switch (status) {
+    case CLIENT_CONFIG_LINE_SET:
+        log_info("config (API HTTP admin) : \"%s\" préparé (%s = %s) — décompte annulé s'il était en cours\n",
+                  key, key, value);
+        return ADMIN_CMD_OK;
+    case CLIENT_CONFIG_LINE_IGNORED:
+        return ADMIN_CMD_OK;
+    case CLIENT_CONFIG_LINE_UNKNOWN_KEY:
+    case CLIENT_CONFIG_LINE_INVALID_VALUE:
+        return ADMIN_CMD_BAD_ARGS;
+    }
+    return ADMIN_CMD_BAD_ARGS;
+}
+
+/**
+ * @brief Les cinq commandes de cycle de vie des fils ("start",
+ *        "stopForks", "configApply", "config", "configSave") agissent sur
+ *        `fork_orchestrator`/`client_config`, qui ne veulent rien dire côté
+ *        SERVEUR -- même raisonnement que `command_is_client_only` pour la
+ *        console (voir sa doc), mais appliqué ICI parce que
+ *        `admin_apply_remote_command` (contrairement à `do_command_line`) ne
+ *        consulte jamais `command_is_client_only`. `POST /api/v1/command`
+ *        (`src/net/http_server.c`, seul appelant de cette fonction en dehors
+ *        des tests) n'est atteignable QUE depuis `runserver`
+ *        (`src/app/etii_server.c`) : `server` y vaut donc toujours 1, et sans
+ *        ce garde-fou "config nb_forks <n>" + "configApply" reçues par
+ *        POST /api/v1/command corromprait réellement `NB_THREADS`/
+ *        `childrens_pid`/… du SERVEUR (taille du pool de connexions, pas un
+ *        nombre de forks) au lieu du no-op silencieux voulu.
+ */
+static int admin_remote_command_is_client_only(const char *word) {
+    return strcmp(word, "config") == 0 ||
+           strcmp(word, "configSave") == 0 ||
+           strcmp(word, "start") == 0 ||
+           strcmp(word, "stopForks") == 0 ||
+           strcmp(word, "configApply") == 0;
+}
+
+/**
  * @brief Voir la doc dans command_lines.h.
  */
 int admin_apply_remote_command(const char *line) {
@@ -1219,11 +1323,25 @@ int admin_apply_remote_command(const char *line) {
     char *word = strtok_r(copy, " ", &save);
     int result = ADMIN_CMD_BAD_ARGS;
     if (word != NULL) {
-        if (strcmp(word, "clientsCommand") == 0 || strcmp(word, "clientsCmd") == 0) {
+        if (server && admin_remote_command_is_client_only(word)) {
+            result = ADMIN_CMD_FORBIDDEN;
+        } else if (strcmp(word, "clientsCommand") == 0 || strcmp(word, "clientsCmd") == 0) {
             result = admin_remote_clients_command(save);
         } else if (strcmp(word, "clientsWork") == 0) {
             char *target = strtok_r(NULL, " ", &save);
             result = admin_remote_clients_work(target);
+        } else if (strcmp(word, "config") == 0) {
+            result = admin_remote_config(save);
+        } else if (strcmp(word, "start") == 0) {
+            // start_interpreter ne touche jamais strtok : appelable
+            // directement, comme backup_interpreter (admin_apply_privileged_command).
+            result = (start_interpreter() == 0) ? ADMIN_CMD_OK : ADMIN_CMD_BAD_ARGS;
+        } else if (strcmp(word, "stopForks") == 0) {
+            result = (stop_forks_interpreter() == 0) ? ADMIN_CMD_OK : ADMIN_CMD_BAD_ARGS;
+        } else if (strcmp(word, "configApply") == 0) {
+            result = (config_apply_interpreter() == 0) ? ADMIN_CMD_OK : ADMIN_CMD_BAD_ARGS;
+        } else if (strcmp(word, "configSave") == 0) {
+            result = (config_save_interpreter() == 0) ? ADMIN_CMD_OK : ADMIN_CMD_BAD_ARGS;
         } else {
             char *arg = strtok_r(NULL, " ", &save);
             if (strcmp(word, "pause") == 0) {

@@ -100,8 +100,8 @@ typedef enum {
 #define STOP_ESCALATION_SIGKILL_MS 10000
 
 /**
- * @brief Prédicat PUR décidant l'escalade de signal d'arrêt, cf. D2/séquence
- *        de redémarrage à chaud (docs/conception/cycle_vie_forks.md) :
+ * @brief Prédicat PUR décidant l'escalade de signal d'arrêt de la séquence
+ *        de redémarrage à chaud :
  *        SIGINT initial (envoyé par l'appelant, hors de cette fonction), puis
  *        SIGTERM à +5 s si des fils sont toujours vivants, puis SIGKILL à
  *        +10 s. Ne dépend que d'une horloge injectée (jamais `time()`

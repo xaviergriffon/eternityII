@@ -1,6 +1,6 @@
 /*
  * Tests unitaires de l'infrastructure de quiescence coopérative
- * (src/app/fork_gate.c — PR B de docs/conception/cycle_vie_forks.md, D2).
+ * (src/app/fork_gate.c).
  *
  * Chaque test appelle fork_gate_reset() avant ET après pour repartir d'un
  * état propre : le module est un singleton process-wide, partagé entre tous
@@ -190,8 +190,8 @@ TEST fork_gate_request_quiesce_times_out_on_stuck_participant(void)
 /* ============================ primitives d'E/S ============================== */
 
 /* Smoke test : acquire/release ne doivent jamais se bloquer mutuellement
-   (même thread, appels successifs) — c'est tout ce que PR B expose, PR C/D
-   les appelleront réellement autour d'un fork(). */
+   (même thread, appels successifs) — ces primitives sont ensuite appelées
+   réellement autour d'un fork() par l'orchestrateur (fork_orchestrator.c). */
 TEST fork_gate_io_locks_acquire_and_release(void)
 {
     fork_gate_acquire_io_locks();
