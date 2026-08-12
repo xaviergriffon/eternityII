@@ -555,6 +555,142 @@ TEST sigchld_handler_without_children_is_noop(void)
     PASS();
 }
 
+/* ---------- child_death_record / child_death_drain / child_death_format_reason -- */
+
+/* Vide le ring d'un éventuel résidu laissé par un test précédent (globale de
+   module partagée entre tous les tests de ce binaire) et remet à 0 le
+   compteur de pertes — mêmes précautions que sur les autres globaux de ce
+   fichier (cf. en-tête). */
+static void drain_all_child_deaths(void)
+{
+    child_death_record_t buf[CHILD_DEATH_RING_CAPACITY];
+    while (child_death_drain(buf, CHILD_DEATH_RING_CAPACITY) > 0) { }
+    child_death_dropped_count();
+}
+
+/* child_death_record + child_death_drain : round-trip en ordre FIFO. */
+TEST child_death_ring_records_and_drains_in_order(void)
+{
+    drain_all_child_deaths();
+
+    child_death_record(4242, 0x1234);
+    child_death_record(5252, 0x5678);
+
+    child_death_record_t out[4];
+    int n = child_death_drain(out, 4);
+    ASSERT_EQ_FMT(2, n, "%d");
+    ASSERT_EQ_FMT(4242, (int)out[0].pid, "%d");
+    ASSERT_EQ_FMT(0x1234, out[0].status, "%d");
+    ASSERT_EQ_FMT(5252, (int)out[1].pid, "%d");
+    ASSERT_EQ_FMT(0x5678, out[1].status, "%d");
+
+    /* Un second drain sans nouvel évènement ne renvoie rien. */
+    ASSERT_EQ_FMT(0, child_death_drain(out, 4), "%d");
+    PASS();
+}
+
+/* Dépassement de capacité entre deux drains : les entrées les plus anciennes
+   sont écrasées, comptées par child_death_dropped_count(), et le drain
+   suivant reprend au plus vieux slot encore valide (jamais une entrée
+   potentiellement réécrite). */
+TEST child_death_ring_reports_dropped_on_overflow(void)
+{
+    drain_all_child_deaths();
+
+    for (int i = 0; i < CHILD_DEATH_RING_CAPACITY + 5; i++) {
+        child_death_record(1000 + i, i);
+    }
+
+    child_death_record_t out[CHILD_DEATH_RING_CAPACITY];
+    int n = child_death_drain(out, CHILD_DEATH_RING_CAPACITY);
+    ASSERT_EQ_FMT(CHILD_DEATH_RING_CAPACITY, n, "%d");
+    /* Les 5 plus anciennes (pid 1000..1004) ont été écrasées : le premier
+       élément restant est le 6e inséré. */
+    ASSERT_EQ_FMT(1005, (int)out[0].pid, "%d");
+    ASSERT_EQ_FMT(5, child_death_dropped_count(), "%d");
+    /* Le compteur de pertes est un delta, remis à 0 à chaque lecture. */
+    ASSERT_EQ_FMT(0, child_death_dropped_count(), "%d");
+    PASS();
+}
+
+/* child_death_format_reason : décodage d'un statut de sortie normale. */
+TEST child_death_format_reason_decodes_normal_exit(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) { _exit(3); }
+    ASSERT(pid > 0);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    ASSERT(WIFEXITED(status));
+
+    char buf[64];
+    child_death_format_reason(status, buf, sizeof(buf));
+    ASSERT(strstr(buf, "sortie normale") != NULL);
+    ASSERT(strstr(buf, "3") != NULL);
+    PASS();
+}
+
+/* child_death_format_reason : décodage d'un statut "tué par signal". */
+TEST child_death_format_reason_decodes_signal_death(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        raise(SIGKILL);
+        _exit(0); /* jamais atteint */
+    }
+    ASSERT(pid > 0);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    ASSERT(WIFSIGNALED(status));
+
+    char buf[64];
+    char needle[16];
+    snprintf(needle, sizeof(needle), "(%d)", SIGKILL);
+    child_death_format_reason(status, buf, sizeof(buf));
+    ASSERT(strstr(buf, "tué par le signal") != NULL);
+    ASSERT(strstr(buf, needle) != NULL);
+    PASS();
+}
+
+/* NULL/0 : jamais de déréférencement, no-op silencieux. */
+TEST child_death_format_reason_tolerates_null_output(void)
+{
+    child_death_format_reason(0, NULL, 0);
+    char buf[8];
+    child_death_format_reason(0, buf, 0);
+    PASS();
+}
+
+/* sigchld_handler enregistre bien pid+statut dans le ring pour un enfant
+   réellement mort — le chemin de production complet (signal handler ->
+   child_death_record), pas seulement la fonction de bas niveau isolée. */
+TEST sigchld_handler_records_child_death(void)
+{
+    drain_all_child_deaths();
+
+    pid_t pid = fork();
+    if (pid == 0) { _exit(7); }
+    ASSERT(pid > 0);
+
+    /* _exit() est quasi instantané, mais on ne bloque jamais dans le test sur
+       une hypothèse de timing : on rappelle le handler jusqu'à ce qu'il ait
+       effectivement récolté l'enfant (waitpid(WNOHANG) interne), borné pour
+       ne jamais accrocher le runner en cas de régression. */
+    child_death_record_t out[4];
+    int n = 0;
+    for (int tries = 0; tries < 500 && n == 0; tries++) {
+        usleep(1000);
+        sigchld_handler(SIGCHLD);
+        n = child_death_drain(out, 4);
+    }
+
+    ASSERT_EQ_FMT(1, n, "%d");
+    ASSERT_EQ_FMT((int)pid, (int)out[0].pid, "%d");
+    ASSERT(WIFEXITED(out[0].status));
+    ASSERT_EQ_FMT(7, WEXITSTATUS(out[0].status), "%d");
+    PASS();
+}
+
 /* wait_child : récolte tous les enfants (boucle wait() jusqu'à ECHILD). */
 TEST wait_child_reaps_children(void)
 {
@@ -1523,6 +1659,12 @@ SUITE(app_runtime_suite)
     RUN_TEST(signal_end_handler_sets_request_stop);
     RUN_TEST(signal_end_handler_server_calls_exit);
     RUN_TEST(sigchld_handler_without_children_is_noop);
+    RUN_TEST(child_death_ring_records_and_drains_in_order);
+    RUN_TEST(child_death_ring_reports_dropped_on_overflow);
+    RUN_TEST(child_death_format_reason_decodes_normal_exit);
+    RUN_TEST(child_death_format_reason_decodes_signal_death);
+    RUN_TEST(child_death_format_reason_tolerates_null_output);
+    RUN_TEST(sigchld_handler_records_child_death);
     RUN_TEST(wait_child_reaps_children);
     RUN_TEST(init_sigchld_sigaction_installs_handler);
     RUN_TEST(init_signals_installs_handlers);

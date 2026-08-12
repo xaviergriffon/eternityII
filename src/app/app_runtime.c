@@ -500,29 +500,111 @@ void signal_end_handler(int sig)
  *
  * @param signal Numéro du signal (toujours SIGCHLD).
  */
+/* ---- Visibilité sur la mort des enfants (diagnostic, cf. app_runtime.h) --- */
+
+static child_death_record_t g_child_death_ring[CHILD_DEATH_RING_CAPACITY];
+/* Index d'écriture : jamais remis à 0, toujours croissant. Un seul écrivain
+   possible à la fois PAR CONSTRUCTION habituelle (SIGCHLD se bloque sur le
+   thread qui exécute son propre handler pendant l'exécution de celui-ci),
+   mais rien n'empêche en théorie deux threads différents de recevoir SIGCHLD
+   et d'exécuter le handler en parallèle (le masquage est par-thread, pas
+   process-wide) — __atomic_fetch_add reste correct dans ce cas, contrairement
+   à un simple `g_child_death_write_index++`. */
+static unsigned long g_child_death_write_index = 0;
+/* Index de lecture : lu/écrit UNIQUEMENT par le thread consommateur
+   (fork_orchestrator_run) — jamais concurrent avec lui-même, pas besoin
+   d'atomique côté lecture pour cet index précis. */
+static unsigned long g_child_death_read_index = 0;
+static int g_child_death_dropped = 0;
+
+void child_death_record(pid_t pid, int status)
+{
+    unsigned long idx = __atomic_fetch_add(&g_child_death_write_index, 1, __ATOMIC_SEQ_CST);
+    child_death_record_t *slot = &g_child_death_ring[idx % CHILD_DEATH_RING_CAPACITY];
+    slot->pid = pid;
+    slot->status = status;
+}
+
+int child_death_drain(child_death_record_t *out, int max_out)
+{
+    if (out == NULL || max_out <= 0) {
+        return 0;
+    }
+    unsigned long write_index = __atomic_load_n(&g_child_death_write_index, __ATOMIC_SEQ_CST);
+    unsigned long available = write_index - g_child_death_read_index;
+    if (available > CHILD_DEATH_RING_CAPACITY) {
+        /* Débordement depuis le dernier drain : les entrées les plus
+           anciennes ont déjà été écrasées par des morts plus récentes — on
+           saute directement au plus vieux slot encore valide plutôt que de
+           relire une entrée potentiellement déjà réécrite. */
+        g_child_death_dropped += (int)(available - CHILD_DEATH_RING_CAPACITY);
+        g_child_death_read_index = write_index - CHILD_DEATH_RING_CAPACITY;
+        available = CHILD_DEATH_RING_CAPACITY;
+    }
+    int n = 0;
+    while (n < max_out && (unsigned long)n < available) {
+        out[n] = g_child_death_ring[g_child_death_read_index % CHILD_DEATH_RING_CAPACITY];
+        g_child_death_read_index++;
+        n++;
+    }
+    return n;
+}
+
+int child_death_dropped_count(void)
+{
+    int d = g_child_death_dropped;
+    g_child_death_dropped = 0;
+    return d;
+}
+
+void child_death_format_reason(int status, char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+    if (WIFEXITED(status)) {
+        snprintf(out, out_size, "sortie normale, code %d", WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        snprintf(out, out_size, "tué par le signal %s (%d)%s",
+                 strsignal(WTERMSIG(status)), WTERMSIG(status),
+#ifdef WCOREDUMP
+                 WCOREDUMP(status) ? " [core dump]" : ""
+#else
+                 ""
+#endif
+                 );
+    } else {
+        snprintf(out, out_size, "statut brut 0x%x (ni sortie ni signal)", (unsigned)status);
+    }
+}
+
 void sigchld_handler(int signal) {
 	(void)signal;
 	// lecture du statut pour éviter les process zombie
 	int status = 0;
+	pid_t wpid;
 #ifdef DEBUG_SIGNAL
     log_debug("sigchld_handler\n");
-	pid_t wpid;
+#endif // DEBUG_SIGNAL
     while(0 < (wpid = waitpid(-1, &status, WNOHANG))) {
+        // child_death_record : async-signal-safe (cf. app_runtime.h), capture
+        // pid+statut pour un drain/log différé hors contexte signal — voir
+        // fork_orchestrator_run. Remplace l'ancien log_debug (DEBUG_SIGNAL
+        // uniquement, jamais actif en production) comme seule trace d'une
+        // mort d'enfant inattendue.
+        child_death_record(wpid, status);
+#ifdef DEBUG_SIGNAL
         log_debug("waitpid %d\n", (int)wpid);
+        log_debug("Exit status of %d was %d\n", (int)wpid, status);
+        if (WIFEXITED(status)) {
+            log_debug("Exit value %d\n", WEXITSTATUS(status));
+        } else if (WIFSIGNALED(status)) {
+            log_debug("Killed by %s\n", strsignal(WTERMSIG(status)));
+        }
+#endif // DEBUG_SIGNAL
     }
-	
-    log_debug("Exit status of %d was %d\n", (int)wpid, status);
-	if(WIFEXITED(status)) {
-		/* The child process exited normally */
-		log_debug("Exit value %d\n", WEXITSTATUS(status));
-	} else if(WIFSIGNALED(status)) {
-		/* The child process was killed by a signal. Note the use of strsignal
-			to make the output human-readable. */
-		log_debug("Killed by %s\n", strsignal(WTERMSIG(status)));
-	}
+#ifdef DEBUG_SIGNAL
     flush_debug();
-#else
-    while(0 < waitpid(-1, &status, WNOHANG));
 #endif // DEBUG_SIGNAL
 }
 
@@ -1070,6 +1152,39 @@ void *server_tcp(void *param) {
                     if (cpt >= 0) {
                         memcpy(&fork_statistics[cpt], buf + 1,
                                sizeof(struct client_statistics));
+                    } else {
+                        // Un datagramme de stats dont l'expéditeur ne correspond
+                        // à AUCUN slot connu (forkId[]) était jusqu'ici jeté en
+                        // silence — un fork bien vivant, envoyant correctement
+                        // ses stats, pouvait donc rester invisible côté parent
+                        // sans la moindre trace si son socket source ne
+                        // correspondait plus à l'entrée attendue (ex. tableau
+                        // reconstruit entre-temps par un `configApply`). Un seul
+                        // avertissement par chemin de socket inconnu (pas un par
+                        // seconde, ce message reviendrait sinon en boucle tant
+                        // que ce fork continue d'émettre) pour signaler la
+                        // désynchronisation sans noyer les logs.
+                        static char last_unknown_sender[sizeof(claddr->sun_path)] = {0};
+                        if (strncmp(last_unknown_sender, claddr->sun_path,
+                                    sizeof(last_unknown_sender)) != 0) {
+                            // memcpy plutôt que strncpy : claddr->sun_path est
+                            // déjà explicitement NUL-terminé DANS ses bornes
+                            // quelques lignes plus haut dans cette même
+                            // fonction (recvfrom() ne le garantit pas), donc
+                            // les deux tampons ont la même taille et copier
+                            // le tampon entier reste toujours borné et
+                            // termine correctement — gcc/ARM (-Wstringop-truncation)
+                            // ne peut pas le prouver pour strncpy, qui ne
+                            // garantit d'ailleurs pas la terminaison NUL en
+                            // cas de troncature (même piège déjà rencontré
+                            // sur http_known_clients_collect/http_clients_collect,
+                            // cf. AGENTS.md).
+                            memcpy(last_unknown_sender, claddr->sun_path,
+                                   sizeof(last_unknown_sender));
+                            log_error("stats IPC : datagramme reçu de \"%s\", "
+                                      "qui ne correspond à aucun fork connu — "
+                                      "statistiques ignorées\n", claddr->sun_path);
+                        }
                     }
                 }
                 break;
