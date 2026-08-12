@@ -759,6 +759,15 @@ static unsigned long long bench_nodes_done(void)
  * boucle plus rapide d'un gain dû à un forward-check qui élague différemment.
  * Lecture atomique comme dans `check_client_threads_step`, pas de nouveau
  * verrou ni coût ajouté à `bt_forward_check` lui-même.
+ *
+ * Journalise aussi `max_result` (profondeur maximale atteinte, `etii_search.c`) :
+ * `nodes_reached`/s mesure un DÉBIT de traitement, pas un progrès réel — un
+ * élagage plus faible peut faire visiter plus de nœuds pour la même
+ * profondeur atteinte (arbre plus large), auquel cas un débit plus élevé ne
+ * traduirait pas un vrai gain. `max_result` à cible de nœuds fixe est le
+ * témoin direct : à `nodes_reached` comparable entre deux versions, une
+ * profondeur maximale comparable ou supérieure confirme que le débit gagné
+ * se traduit en profondeur réelle, pas seulement en nœuds « dilués ».
  */
 static void bench_poll_and_maybe_stop(void)
 {
@@ -770,10 +779,11 @@ static void bench_poll_and_maybe_stop(void)
 #if FORWARD_CHECK_K > 0
         unsigned long long fca = __atomic_load_n(&fc_attempts, __ATOMIC_RELAXED);
         unsigned long long fcp = __atomic_load_n(&fc_pruned, __ATOMIC_RELAXED);
-        log_info("ETII_BENCH nodes_reached=%llu target=%llu fc_attempts=%llu fc_pruned=%llu\n",
-                  nodes_done, bench_target_nodes, fca, fcp);
+        log_info("ETII_BENCH nodes_reached=%llu target=%llu fc_attempts=%llu fc_pruned=%llu max_result=%u\n",
+                  nodes_done, bench_target_nodes, fca, fcp, (unsigned int)max_result);
 #else
-        log_info("ETII_BENCH nodes_reached=%llu target=%llu\n", nodes_done, bench_target_nodes);
+        log_info("ETII_BENCH nodes_reached=%llu target=%llu max_result=%u\n",
+                  nodes_done, bench_target_nodes, (unsigned int)max_result);
 #endif
         request = REQUEST_STOP;
     }
