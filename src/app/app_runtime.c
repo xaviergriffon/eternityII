@@ -1167,8 +1167,20 @@ void *server_tcp(void *param) {
                         static char last_unknown_sender[sizeof(claddr->sun_path)] = {0};
                         if (strncmp(last_unknown_sender, claddr->sun_path,
                                     sizeof(last_unknown_sender)) != 0) {
-                            strncpy(last_unknown_sender, claddr->sun_path,
-                                    sizeof(last_unknown_sender) - 1);
+                            // memcpy plutôt que strncpy : claddr->sun_path est
+                            // déjà explicitement NUL-terminé DANS ses bornes
+                            // quelques lignes plus haut dans cette même
+                            // fonction (recvfrom() ne le garantit pas), donc
+                            // les deux tampons ont la même taille et copier
+                            // le tampon entier reste toujours borné et
+                            // termine correctement — gcc/ARM (-Wstringop-truncation)
+                            // ne peut pas le prouver pour strncpy, qui ne
+                            // garantit d'ailleurs pas la terminaison NUL en
+                            // cas de troncature (même piège déjà rencontré
+                            // sur http_known_clients_collect/http_clients_collect,
+                            // cf. AGENTS.md).
+                            memcpy(last_unknown_sender, claddr->sun_path,
+                                   sizeof(last_unknown_sender));
                             log_error("stats IPC : datagramme reçu de \"%s\", "
                                       "qui ne correspond à aucun fork connu — "
                                       "statistiques ignorées\n", claddr->sun_path);
