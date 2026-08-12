@@ -698,6 +698,13 @@ int backup_interpreter(void) {
 
 /** @brief Interpréteur de `exit` : arrête proprement le programme (signal SIGINT aux enfants en mode client). */
 int exit_interpreter(void) {
+    // Trace explicite de la demande d'arrêt : ce chemin appelle exit()
+    // directement plus bas (mode serveur, ou une fois les fils du client
+    // récoltés) et ne repasse donc jamais par le log de fin de main() —
+    // sans cette ligne, un `exit` déclenché à distance (canal de contrôle,
+    // API HTTP `POST /api/v1/command`) ne laissait aucune trace de LA CAUSE
+    // de l'arrêt dans les logs, uniquement son effet.
+    log_info("exit : arrêt du programme demandé\n");
     request = REQUEST_STOP;
     if (server == 0) {
         if (parent_pid == getpid()) {

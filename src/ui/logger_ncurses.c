@@ -818,7 +818,14 @@ void nc_console_loop(void)
         // Toute frappe au clavier annule un décompte d'auto-démarrage en
         // cours (état COUNTDOWN de l'orchestrateur) — cf. console.c pour le
         // même besoin côté ANSI : 5 s ne suffisent pas à taper une commande
-        // complète. No-op hors COUNTDOWN.
+        // complète. No-op hors COUNTDOWN. Snapshot avant l'événement, même
+        // convention que console.c : un seul log au moment de la bascule
+        // réelle, pas un par frappe.
+        orch_state_t state_before_key;
+        fork_orchestrator_snapshot(&state_before_key, NULL);
+        if (state_before_key == ORCH_COUNTDOWN) {
+            log_info("orchestrateur : décompte d'auto-démarrage annulé par une saisie clavier\n");
+        }
         fork_orchestrator_post_event(EV_CONFIG_BEGUN, NULL);
 
         /* KEY_RESIZE : ncurses a déjà mis à jour LINES/COLS. */

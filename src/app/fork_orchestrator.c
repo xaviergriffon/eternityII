@@ -498,6 +498,13 @@ int orchestrator_spawn_forks(void)
     if (fork_error > 0) {
         log_info("%i/%i process créés ; %i non créés (ressources insuffisantes) — poursuite\n",
                  created, NB_THREADS, fork_error);
+    } else {
+        // Confirmation explicite du succès complet : avant ce log, un
+        // démarrage/redémarrage sans le moindre échec ne laissait AUCUNE
+        // trace de son résultat effectif (seul le côté échec était couvert
+        // ci-dessus) — l'opérateur devait déduire le succès de l'absence
+        // d'erreur plutôt que de le lire directement.
+        log_info("orchestrateur : %i process de recherche démarrés\n", created);
     }
 
     g_active_forks = created;
@@ -825,12 +832,20 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
             // thread — c'est le seul thread qui forke/attend ses enfants (D1),
             // donc rien d'autre ne peut avancer le cycle de vie pendant ce
             // temps de toute façon.
-            orchestrator_do_stop_forks();
-
+            // Log de DÉBUT de séquence (avant, pas seulement le "fils arrêtés"
+            // de fin déjà loggé par orchestrator_do_stop_forks) : sans lui,
+            // rien ne distinguait dans les logs un arrêt en cours (potentiellement
+            // plusieurs secondes, escalade SIGTERM/SIGKILL incluse) d'un
+            // orchestrateur simplement inactif. Lu sous mutex (comme juste en
+            // dessous) plutôt que la globale directement, par cohérence avec
+            // le reste de cette fonction.
             int restart_after_stop;
             pthread_mutex_lock(&g_orch_mutex);
             restart_after_stop = g_restart_after_stop;
             pthread_mutex_unlock(&g_orch_mutex);
+            log_info("orchestrateur : arrêt des fils en cours (%s)\n",
+                      restart_after_stop ? "redémarrage à chaud" : "stopForks");
+            orchestrator_do_stop_forks();
 
             if (restart_after_stop) {
                 pthread_mutex_lock(&g_orch_mutex);
@@ -839,6 +854,8 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
 
                 forks_parked = 1; // levé par le prochain do_spawn réussi
 
+                log_info("orchestrateur : application de la configuration à chaud "
+                          "(reconstruction éventuelle des structures) en cours\n");
                 if (orchestrator_apply_restart_config(shared_parts)) {
                     // Même chemin EV_START qu'un `start` manuel ou qu'un
                     // décompte écoulé (cf. orchestrator_step) : le fork

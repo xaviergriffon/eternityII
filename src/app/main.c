@@ -147,6 +147,20 @@ int main(int argc, const char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    // Point de sortie normal unique pour les trois modes (client/server/test)
+    // une fois leur fonction de gestion revenue — trace la fin du programme,
+    // symétrique du "Version %i" loggé au tout début de main(). Ne couvre PAS
+    // les deux autres chemins de sortie existants : `exit` interpreter
+    // (console/canal de contrôle/API HTTP, cf. command_lines.c, qui a son
+    // propre log) et signal_end_handler côté serveur (app_runtime.c), qui
+    // appelle exit(0) directement DEPUIS le gestionnaire de signal — logger
+    // depuis un signal handler n'est pas async-signal-safe (cf. les usages
+    // existants, tous gardés par DEBUG_SIGNAL), donc volontairement pas touché
+    // ici. Côté client, un Ctrl-C atteint bien CE log : signal_end_handler s'y
+    // contente de positionner request=REQUEST_STOP et de propager le signal
+    // aux fils, le process parent revient ensuite normalement jusqu'ici via
+    // handle_client()/fork_orchestrator_run().
+    log_info("fin du programme (sortie normale)\n");
     exit(EXIT_SUCCESS);
 }
 
