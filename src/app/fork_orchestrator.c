@@ -446,6 +446,24 @@ int orchestrator_spawn_forks(void)
     pid_t child_pid = -1;
     int fork_error = 0;
     for (int c = 0; c < NB_THREADS; c++) {
+        if (request == REQUEST_STOP) {
+            // Un arrêt (SIGINT/SIGHUP/SIGTERM — ce dernier atteint un process
+            // lancé en arrière-plan détaché, ex. nohup/screen/tmux/systemd,
+            // sans qu'aucune commande console n'ait jamais été tapée) peut
+            // survenir PENDANT ce lot de forks : sans ce garde-fou, la boucle
+            // continuait à créer TOUS les NB_THREADS forks restants et à
+            // répéter des cycles quiesce/fork/release même après la demande
+            // d'arrêt — élargissant sans raison la fenêtre de course pendant
+            // laquelle d'autres threads (console, canal de contrôle, checker)
+            // réagissent au MÊME signal et se désenregistrent de `fork_gate`
+            // concurremment à ces cycles. On s'arrête net : les forks déjà
+            // créés restent valides (comptés normalement ci-dessous), on
+            // n'en tente simplement aucun de plus.
+            log_info("orchestrateur : arrêt demandé pendant le lot de forks — "
+                      "%i/%i tentés, arrêt de la création de nouveaux process\n",
+                      c, NB_THREADS);
+            break;
+        }
         if (parent_pid == getpid()) {
             // Quiescence + verrous d'E/S pris JUSTE AVANT ce fork() précis
             // et relâchés JUSTE APRÈS, dans le parent ET dans le fils — PAS

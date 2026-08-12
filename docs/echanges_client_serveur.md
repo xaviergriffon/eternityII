@@ -1060,3 +1060,17 @@ rapide même quand ce cas se présente. Le blocage prolongé d'un `connect()`
 initial (pool serveur saturé, ou réseau lent) reste un contributeur possible
 au symptôme d'origine, non résolu par ce correctif — le filet par fork
 ci-dessus reste le bon outil pour le repérer la prochaine fois.
+
+### Investigation ouverte : blocage intermittent dans `fork_gate_release_quiesce`
+
+Une troisième reproduction, après le correctif `SA_RESTART` ci-dessus, a montré
+que le fork encore une fois signalé bloqué par le filet par fork mettait
+toujours plus de 10 s à répondre à `exit` — et que la cause n'est en réalité
+pas dans un fork de recherche mais dans le process **parent** lui-même, bloqué
+à demeure dans `fork_gate_release_quiesce()`. Deux correctifs structurels ont
+été appliqués par prudence (ils réduisent une fenêtre de course plausible)
+sans confirmation qu'ils éliminent le blocage lui-même — investigation
+toujours **ouverte**, suivie séparément dans
+[docs/investigations/blocage_fork_gate_release_quiesce.md](investigations/blocage_fork_gate_release_quiesce.md)
+(faits établis, hypothèses écartées, prochaine capture décisive si ça se
+reproduit) plutôt qu'ici, puisque la cause exacte n'est pas confirmée.
