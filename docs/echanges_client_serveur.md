@@ -964,3 +964,41 @@ Reproduit et vérifié fixé par 15 exécutions consécutives de
 environnement Linux/gcc que la CI) sans aucun échec, en plus des suites
 `make test`/`make test ASAN=1` (1034/1034) et de `make test-integration`
 localement (macOS).
+
+### Correctif : le filet « stuck forks » était agrégé (tous à zéro), pas par fork
+
+Le premier vrai cas reproduit en conditions réelles (256 pièces, `nb_forks=3`,
+serveur distant) n'était couvert par AUCUN des trois diagnostics ci-dessus,
+malgré un symptôme concret et persistant : le rapport `check` montrait le
+fork 0 travaillant normalement (stock, analysé, coups/s tous non nuls)
+pendant que les forks 1 et 2 restaient **collés à zéro** en continu — puis,
+sur `exit`, ces deux mêmes forks ont mis plus de 10 s à répondre au SIGINT
+(escalade SIGTERM puis SIGKILL, cf. le correctif précédent) sans qu'aucune
+ligne, ni en console ni dans `events.log`, n'ait jamais signalé le problème
+pendant qu'il se produisait.
+
+Cause : le filet « aucun indicateur » (`STUCK_FORKS_WARN_MS`) reposait sur
+`fork_stats_all_zero`, un agrégat qui n'exige que TOUS les forks soient à
+zéro — un fork sur trois qui travaille normalement suffit à ce que la
+condition ne se déclenche jamais, quel que soit le nombre de forks
+réellement bloqués à côté. C'est exactement la panne réelle observée :
+partielle par construction, jamais totale.
+
+Remplacé par un filet **par fork** : `fork_stat_is_zero` (`src/app/fork_orchestrator.{h,c}`)
+évalue un seul `struct client_statistics`, et `g_stuck_fork_warned` (tableau
+de taille `NB_THREADS`, réalloué à chaque (re)fork réussi comme
+`g_running_since_ms`) mémorise, SLOT PAR SLOT, si l'avertissement a déjà été
+émis pour ce fork précis. En `ORCH_RUNNING`, chaque slot vivant
+(`childrens_pid[c] > 0`) dont les statistiques sont encore à zéro
+`STUCK_FORKS_WARN_MS` après le (re)fork déclenche son PROPRE `log_error`
+(pid + numéro de slot), indépendamment de ce que rapportent ses voisins.
+`fork_stats_all_zero` (agrégat) est conservé — testé et documenté comme
+insuffisant en production — pour ne pas casser sa compatibilité binaire ni
+ses tests existants, mais n'est plus utilisé par `fork_orchestrator_run`.
+
+Ce filet reste, comme les précédents, un symptôme et non une cause : il ne
+dit pas POURQUOI un fork particulier n'obtient rien (connexion bloquée vers
+le serveur, deadlock local, stock serveur épuisé pour sa portion de l'arbre
+de recherche…) — seulement LEQUEL, avec son pid et son ancienneté, pour
+que l'opérateur puisse cibler son investigation (ex. `lsof -p <pid>`,
+`gdb -p <pid>`) sans devoir d'abord deviner quel fork est en cause.

@@ -126,12 +126,30 @@ typedef enum {
 int stuck_forks_threshold_elapsed(long running_since_ms, long now_ms);
 
 /**
+ * @brief Prédicat PUR : ce fork rapporte-t-il zéro sur les trois indicateurs
+ *        qui comptent pour l'exploitant (stock en cours, stock analysé,
+ *        coups/s) ? `stat == NULL` renvoie 1 (rien à montrer = suspect).
+ *
+ * Version PAR FORK de `fork_stats_all_zero` : indispensable pour repérer un
+ * sous-ensemble de forks bloqués pendant que les autres travaillent
+ * normalement — l'agrégat "tous à zéro" ne s'alarme jamais dans ce cas,
+ * exactement le cas trouvé en conditions réelles (voir
+ * `g_stuck_fork_warned`, `src/app/fork_orchestrator.c`).
+ */
+int fork_stat_is_zero(const struct client_statistics *stat);
+
+/**
  * @brief Prédicat PUR : tous les forks de `stats` (tableau de taille `nb`)
  *        rapportent-ils zéro sur les trois indicateurs qui comptent pour
  *        l'exploitant (stock en cours, stock analysé, coups/s) ?
  *
  * `nb <= 0` renvoie 1 (« rien à montrer » compte comme suspect, ne bloque
- * jamais la détection sur un NB_THREADS mal lu).
+ * jamais la détection sur un NB_THREADS mal lu). Conservé pour compatibilité
+ * (et testé indépendamment) mais SUPPLANTÉ en production par le filet par
+ * fork (`fork_stat_is_zero` + `g_stuck_fork_warned`) : un agrégat "tous à
+ * zéro" ne détecte jamais un sous-ensemble de forks bloqués pendant que les
+ * autres travaillent — voir le correctif documenté dans
+ * docs/echanges_client_serveur.md.
  */
 int fork_stats_all_zero(const struct client_statistics *stats, int nb);
 
