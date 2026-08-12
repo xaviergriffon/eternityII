@@ -27,8 +27,12 @@ survivent nulle part ailleurs.
 
 ## Documents
 
-Aucun document en cours à l'heure actuelle — voir *Documents supprimés* ci-dessous pour
-ceux entièrement implémentés et absorbés par `docs/`.
+| Document | Statut | Contenu |
+|---|---|---|
+| [elagage_recherche.md](elagage_recherche.md) | proposition | Élargir l'élagage au-delà du forward-check de proximité : le faire porter sur les voisines plutôt que sur la fenêtre de parcours, contrainte de type coin/bord/intérieur, comptage global couleur, conflit de singletons, propagation des cases forcées, pruner à budget de nœuds, ordre dynamique. Mesures de couverture à l'appui et découpage en 9 PR. |
+
+Voir aussi *Documents supprimés* ci-dessous pour ceux entièrement implémentés et absorbés
+par `docs/`.
 
 ### Documents supprimés (entièrement implémentés, contenu absorbé par `docs/`)
 
