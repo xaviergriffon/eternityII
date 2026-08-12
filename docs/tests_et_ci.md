@@ -220,8 +220,10 @@ d'environnement (`bench_parse_nodes_env`) sont des fonctions pures
 
 `autosearch()` élague aussi ses branches en ligne, sans réseau : à chaque
 placement candidat, `bt_forward_check` (`src/core/etii_search.c`) teste les
-`FORWARD_CHECK_K` cases suivantes (défaut 6) avant de s'engager plus loin. Ce
-mécanisme est distinct du process `pruner` séparé (qui vérifie des
+voisines géométriques encore vides de la case posée (au plus 4) avant de
+s'engager plus loin — voir
+[autosearch_step.md §1.3 ter](autosearch_step.md#13-ter-bt_forward_check--les-voisines-de-la-pièce-posée-pas-une-fenêtre-de-parcours).
+Ce mécanisme est distinct du process `pruner` séparé (qui vérifie des
 possibilités reçues du serveur par lots réseau) — il n'est pas couvert par ce
 banc et n'a pas besoin de l'être : son coût est entièrement inclus dans le
 temps mesuré, puisqu'il s'exécute dans la même boucle chaude.
@@ -237,6 +239,38 @@ changer le comportement de l'élagage (taux stable), ou au contraire modifier
 l'ordre d'exploration et donc le taux — un signal que le changement n'est pas
 sémantiquement neutre. Absent des logs (et donc du rapport) sur un build
 `FORWARD_CHECK_K=0`.
+
+### `max_result` : le débit seul ne prouve pas un vrai gain
+
+**Piège concret, rencontré en pratique.** Un changement qui réduit la portée du
+forward-check (ex. inspecter moins de cases par placement) peut faire
+progresser `nodes/s` ET, simultanément, faire élaguer une part légèrement
+différente des branches — observable comme « plus de coups, moins
+d'éliminations » à l'exécution. Le débit seul ne dit pas si c'est un vrai gain
+(le même travail utile, fait plus vite) ou un gain en trompe-l'œil (un arbre
+plus large exploré plus vite, donc *pas moins* de temps réel jusqu'à un
+résultat donné). Le **taux d'élagage** (`fc_pruned / fc_attempts`) ne tranche
+pas non plus : une variation de quelques dixièmes de point ne dit rien de son
+effet cumulé sur la taille réelle de l'arbre exploré.
+
+Le témoin décisif est `max_result` (profondeur maximale atteinte,
+`etii_search.c`) **à cible de nœuds FIXE** : si deux versions atteignent la
+même profondeur maximale pour le même nombre de nœuds explorés, alors le
+travail utile accompli est identique — un débit plus élevé pour arriver au
+même point est un gain réel, pas un artefact de comptage. Journalisé sur la
+même ligne `ETII_BENCH` (`max_result=<n>`), agrégé par le script dans le JSON
+(`max_result_median`/`_min`/`_max`) et comparé par `--baseline` **seulement
+quand `nodes_target` est identique entre les deux rapports** — à cibles
+différentes, plus de nœuds donnant mécaniquement plus de profondeur
+indépendamment de tout changement d'élagage, la comparaison n'est
+qu'indicative.
+
+**Vérifié pour PR1** (voisines géométriques plutôt que fenêtre de parcours,
+[docs/conception/elagage_recherche.md](conception/elagage_recherche.md) §4.1) :
+`max_result` atteint exactement **74** avant et après, à quatre cibles de
+nœuds différentes (20 M, 50 M, 200 M, 500 M) — la même profondeur réelle,
+obtenue à chaque fois en 39 à 45 % de temps mural en moins. C'est cette mesure,
+et non le seul débit, qui confirme que le gain de PR1 est réel.
 
 ### Le script
 

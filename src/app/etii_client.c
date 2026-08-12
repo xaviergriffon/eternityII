@@ -595,10 +595,12 @@ void check_client_threads_step(int *last_record)
     // static_variables.h pour le détail de la race corrigée).
     size_t table_size = 256 + (size_t)NB_THREADS * 80;
     // La ligne forward-check (voir plus bas) ajoute jusqu'à ~24 octets par
-    // valeur de distance 1..FORWARD_CHECK_K : avec le défaut (4096) le fixe
-    // suffit large mais un FORWARD_CHECK_K élevé (ex. 250, via -D) le ferait
-    // déborder comme fctemp ci-dessous — même correctif, même raison.
-    size_t fc_margin = 256 + (size_t)FORWARD_CHECK_K * 24;
+    // position 1..FC_STAT_MAX_K (borne indépendante de FORWARD_CHECK_K depuis
+    // le passage de bt_forward_check aux voisines, cf. static_variables.h) :
+    // avec FC_STAT_MAX_K=8 le fixe suffit large, mais on garde le calcul
+    // explicite plutôt qu'une constante — même correctif que fctemp ci-dessous,
+    // même raison.
+    size_t fc_margin = 256 + (size_t)FC_STAT_MAX_K * 24;
     size_t lastcheck_size = table_size + 4096 + fc_margin;
     char *report = calloc(lastcheck_size, sizeof(char));
 
@@ -618,30 +620,37 @@ void check_client_threads_step(int *last_record)
 #if FORWARD_CHECK_K > 0
         // Forward-checking : agrégat des forks + compteurs du processus courant
         // (ces derniers couvrent les modes test et DEBUG_IN_MONO_PROCESS).
+        // Boucles bornées par FC_STAT_MAX_K (indépendant de FORWARD_CHECK_K,
+        // cf. le commentaire de fc_pruned_at dans static_variables.h) : la
+        // boucle chaude (bt_forward_check) n'y contribue qu'aux positions 1..4
+        // (voisines géométriques), les chemins froids (forward_check_next_k)
+        // jusqu'à FORWARD_CHECK_K — le tableau doit couvrir les deux.
         unsigned long long fca = __atomic_load_n(&fc_attempts, __ATOMIC_RELAXED);
         unsigned long long fcp = __atomic_load_n(&fc_pruned, __ATOMIC_RELAXED);
-        unsigned long long fcd[FORWARD_CHECK_K + 1];
-        for (int j = 1; j <= FORWARD_CHECK_K; j++) {
+        unsigned long long fcd[FC_STAT_MAX_K + 1];
+        for (int j = 1; j <= FC_STAT_MAX_K; j++) {
             fcd[j] = __atomic_load_n(&fc_pruned_at[j], __ATOMIC_RELAXED);
         }
         for (f = 0; f < NB_THREADS; f++) {
             fca += fork_statistics[f].fc_attempts;
             fcp += fork_statistics[f].fc_pruned;
-            for (int j = 1; j <= FORWARD_CHECK_K; j++) {
+            for (int j = 1; j <= FC_STAT_MAX_K; j++) {
                 fcd[j] += fork_statistics[f].fc_pruned_at[j];
             }
         }
         if (fca > 0) {
-            // Buffer dimensionné sur FORWARD_CHECK_K : la boucle ci-dessous ajoute
-            // une entrée " d%d:%.1f%%" (jusqu'à ~12 octets) par distance 1..K.
-            // Un buffer fixe (comme l'ancien calloc(1000, ...)) débordait le tas
-            // dès que FORWARD_CHECK_K dépassait la grosse centaine d'unités.
-            size_t fctemp_size = 256 + (size_t)FORWARD_CHECK_K * 24;
+            // Buffer dimensionné sur FC_STAT_MAX_K : la boucle ci-dessous ajoute
+            // une entrée " p%d:%.1f%%" (jusqu'à ~12 octets) par position 1..8.
+            size_t fctemp_size = 256 + (size_t)FC_STAT_MAX_K * 24;
             char *fctemp = calloc(fctemp_size, sizeof(char));
-            int fcoff = sprintf(fctemp, "forward-check K=%d : pruned %llu/%llu (%.2f%%), par distance :",
-                                FORWARD_CHECK_K, fcp, fca, 100.0 * (double)fcp / (double)fca);
-            for (int j = 1; j <= FORWARD_CHECK_K; j++) {
-                fcoff += sprintf(fctemp + fcoff, " d%d:%.1f%%", j,
+            // « par position dans la fenêtre inspectée », et non plus « par
+            // distance » : depuis le passage de bt_forward_check aux voisines
+            // géométriques, la position n'est plus une distance de parcours
+            // uniforme (cf. le commentaire de fc_pruned_at, static_variables.h).
+            int fcoff = sprintf(fctemp, "forward-check : pruned %llu/%llu (%.2f%%), par position dans la fenêtre inspectée :",
+                                fcp, fca, 100.0 * (double)fcp / (double)fca);
+            for (int j = 1; j <= FC_STAT_MAX_K; j++) {
+                fcoff += sprintf(fctemp + fcoff, " p%d:%.1f%%", j,
                                  fcp > 0 ? 100.0 * (double)fcd[j] / (double)fcp : 0.0);
             }
             sprintf(fctemp + fcoff, "\n");
@@ -750,6 +759,15 @@ static unsigned long long bench_nodes_done(void)
  * boucle plus rapide d'un gain dû à un forward-check qui élague différemment.
  * Lecture atomique comme dans `check_client_threads_step`, pas de nouveau
  * verrou ni coût ajouté à `bt_forward_check` lui-même.
+ *
+ * Journalise aussi `max_result` (profondeur maximale atteinte, `etii_search.c`) :
+ * `nodes_reached`/s mesure un DÉBIT de traitement, pas un progrès réel — un
+ * élagage plus faible peut faire visiter plus de nœuds pour la même
+ * profondeur atteinte (arbre plus large), auquel cas un débit plus élevé ne
+ * traduirait pas un vrai gain. `max_result` à cible de nœuds fixe est le
+ * témoin direct : à `nodes_reached` comparable entre deux versions, une
+ * profondeur maximale comparable ou supérieure confirme que le débit gagné
+ * se traduit en profondeur réelle, pas seulement en nœuds « dilués ».
  */
 static void bench_poll_and_maybe_stop(void)
 {
@@ -761,10 +779,11 @@ static void bench_poll_and_maybe_stop(void)
 #if FORWARD_CHECK_K > 0
         unsigned long long fca = __atomic_load_n(&fc_attempts, __ATOMIC_RELAXED);
         unsigned long long fcp = __atomic_load_n(&fc_pruned, __ATOMIC_RELAXED);
-        log_info("ETII_BENCH nodes_reached=%llu target=%llu fc_attempts=%llu fc_pruned=%llu\n",
-                  nodes_done, bench_target_nodes, fca, fcp);
+        log_info("ETII_BENCH nodes_reached=%llu target=%llu fc_attempts=%llu fc_pruned=%llu max_result=%u\n",
+                  nodes_done, bench_target_nodes, fca, fcp, (unsigned int)max_result);
 #else
-        log_info("ETII_BENCH nodes_reached=%llu target=%llu\n", nodes_done, bench_target_nodes);
+        log_info("ETII_BENCH nodes_reached=%llu target=%llu max_result=%u\n",
+                  nodes_done, bench_target_nodes, (unsigned int)max_result);
 #endif
         request = REQUEST_STOP;
     }

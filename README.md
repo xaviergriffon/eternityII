@@ -21,6 +21,7 @@ Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisa
 - Chaque **client** forke `N` processus de recherche ; des **pruners** (CPU ou GPU) vérifient en parallèle les possibilités et élaguent les branches mortes.
 - Le serveur peut **piloter les clients à distance** (statistiques, pause/reprise) via un canal de contrôle dédié, et exposer une **API HTTP REST** pour la supervision.
 - Un client peut aussi tourner en mode **autonome** (`test`), sans serveur.
+- Le forward-checking de la boucle chaude inspecte les **voisines géométriques** de la pièce qu'on vient de placer (au plus 4) plutôt qu'une fenêtre de parcours : **+68,8 % de nœuds/s**, taux d'élagage quasi inchangé.
 - La boucle de recherche lit sa table de candidats via un **index compact** (4 octets par compartiment au lieu de 16), qui divise par 3,8 le volume balayé par le forward-checking : **+10 % de nœuds/s** sur un worker, **+29 %** sur 16 workers concurrents.
 - Cette table étant en lecture seule une fois construite, le parent la construit **avant de forker** : les processus de recherche s'en partagent **une seule copie** (copy-on-write) au lieu d'en fabriquer chacun la leur — **−90 % d'empreinte mémoire** à 16 workers (111 → 11 Mo de `Pss`), pour un débit inchangé.
 

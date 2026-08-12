@@ -69,7 +69,7 @@ La map expose **deux représentations des mêmes données**, et le chemin chaud 
 | `flat` | `sizearray^4` × `struct array_part` (16 o : une taille + un pointeur) | **5,06 Mo** | `get_parts_bigarray*` — lookup de placement (§1.3) et tous les autres appelants |
 | `packed` | `sizearray^4` × `uint32_t` : `{offset:16 \| size:16}`, offset relatif à `arena` | **1,27 Mo** | `map_bucket_packed` — uniquement `bt_forward_check` |
 
-**Pourquoi.** Sur le puzzle 256, la map compte 331 776 compartiments dont **6 254 non vides (1,9 %)** ; les données utiles (`arena`, 14 401 pièces = 0,11 Mo) tiennent confortablement en L2. Autrement dit, **98 % des 5 Mo balayés par la boucle chaude sont du vide**. Or `bt_forward_check` est appelé une fois par candidat posé et fait jusqu'à `FORWARD_CHECK_K` (6) itérations, chacune un accès aléatoire dans ces 5 Mo — le plus souvent pour ne lire qu'un compteur de 4 octets. En ramenant le compartiment à un `uint32_t`, une ligne de cache rapporte **16 compartiments au lieu de 4**.
+**Pourquoi.** Sur le puzzle 256, la map compte 331 776 compartiments dont **6 254 non vides (1,9 %)** ; les données utiles (`arena`, 14 401 pièces = 0,11 Mo) tiennent confortablement en L2. Autrement dit, **98 % des 5 Mo balayés par la boucle chaude sont du vide**. Or `bt_forward_check` est appelé une fois par candidat posé et fait jusqu'à 4 itérations (les voisines géométriques de la case posée, cf. §1.3 ter — 6 au moment de cette mesure, quand la fenêtre suivait encore le parcours), chacune un accès aléatoire dans ces 5 Mo — le plus souvent pour ne lire qu'un compteur de 4 octets. En ramenant le compartiment à un `uint32_t`, une ligne de cache rapporte **16 compartiments au lieu de 4**.
 
 **Gain mesuré** (`tests/bench/bench_search.sh`, puzzle 256, i9-9880H, médianes) :
 
@@ -91,6 +91,26 @@ L'écart se creuse avec le nombre de workers : dans cette mesure, chaque worker 
 - un **dépassement de capacité** : les offsets et les tailles tiennent sur 16 bits (puzzle 256 : arène de 14 401 pièces, plus gros compartiment de 784 — très loin des 65 535). Si un autre jeu de pièces dépassait cette borne, `build_packed_index` (`src/core/part.c`) **renonce à construire l'index** au lieu de tronquer silencieusement, journalise la raison, et la recherche continue via `flat`. La décision est isolée dans `map_packed_fits`, testée aux bornes exactes 65535/65536.
 
 **Variante évaluée et écartée.** Un **bitmap d'occupation** (41 Ko, 1 bit par compartiment, entièrement résident en L1/L2) a été implémenté et mesuré par-dessus l'index compact, pour ne payer qu'une lecture minuscule sur le test « compartiment vide ». Résultat : **−4 %**, donc abandonné. Le forward-check réussit ~54 % du temps, si bien que la majorité des cases inspectées tombent sur un compartiment **non vide** — et paient alors *deux* accès aléatoires (bitmap puis `packed`) au lieu d'un seul.
+
+### 1.3 ter `bt_forward_check` : les voisines de la pièce posée, pas une fenêtre de parcours
+
+Après avoir placé une pièce en `(cx, cy)`, `bt_forward_check` inspecte ses **voisines géométriques encore vides** — au plus 4 (haut/droite/bas/gauche, cf. `bt_propagate_place`) — et non plus les `FORWARD_CHECK_K` prochaines cases du parcours `directions[]` (comportement antérieur, toujours en vigueur sur le chemin froid `forward_check_next_k`, cf. §1.3 bis pour son usage exclusif via `packed`).
+
+**Pourquoi.** Seul un placement modifie la clé de ses voisines directes ; une case du parcours peut se trouver à des dizaines de cases de distance sans jamais être une voisine. Mesuré sur le puzzle 256 (analyse statique de `dirx[]`/`diry[]`, script reproductible dans `docs/conception/elagage_recherche.md`) : l'ancienne fenêtre `K=6` ne couvrait que 61 % des relations « case → voisine encore vide » du parcours, avec un retard de détection médian de 8 niveaux (max 152).
+
+**Gain mesuré** (`tests/bench/bench_search.sh`, puzzle 256, A/B à ordre alterné pour neutraliser la dérive thermique de la machine, 20 M nœuds × 5 :
+
+| Configuration | Nœuds/s | Taux d'élagage |
+|---|---|---|
+| Avant (fenêtre `K=6`) | 5 867 621 | 45,7099 % |
+| Après (voisines) | 9 906 019 | 45,6471 % |
+| Delta | **+68,8 %** | −0,06 point |
+
+Le débit progresse fortement (moins de lookups par placement : au plus 4 voisines contre jusqu'à 6 cases de fenêtre, souvent moins avec l'arrêt anticipé sur la première case morte) alors que le taux d'élagage — la part des tentatives de placement rejetées — reste quasiment inchangé : la condition nécessaire reste tout aussi efficace en pratique, seule son assiette de calcul est devenue moins chère.
+
+**Invariant : nécessaire, pas complet.** Comme toute condition de forward-checking, `bt_forward_check` ne peut jamais produire de faux positif (une branche qu'il laisse passer peut être morte pour d'autres raisons, une branche qu'il élague l'est réellement), mais il n'a **aucune obligation d'exhaustivité** sur l'ensemble des cases qu'il pourrait inspecter — restreindre son périmètre aux voisines directes est donc un choix de performance, jamais un risque de correction. Verrouillé par `bt_forward_check_inspects_at_most_geometric_neighbors` (`tests/core/test_etii_search.c`), qui compte les cases réellement inspectées (`fc_cells_studied`) sur un coin (2 voisines) et une case intérieure (4).
+
+**Statistique par position (`fc_pruned_at[]`).** Depuis ce changement, l'indice n'est plus une distance de parcours mais une **position dans la fenêtre inspectée** : 1..4 pour la boucle chaude (rang de la voisine dans l'énumération haut/droite/bas/gauche), 1..`FORWARD_CHECK_K` pour le chemin froid `forward_check_next_k`. Le tableau est dimensionné sur `FC_STAT_MAX_K` (8, indépendant de `FORWARD_CHECK_K`) pour rester sûr quel que soit le plus petit des deux domaines — voir le commentaire de `fc_pruned_at` dans `static_variables.h`.
 
 **Seconde variante évaluée et écartée : le lookup de placement via `packed`.** Le septième et dernier accès à la map par nœud — celui du placement (`stack[top].search`) — est resté sur `flat`. Le convertir lui aussi à `map_bucket_packed` a été implémenté, mesuré, puis **reverté** (PR #161, annulée par `revert/placement-lookup-packed`). L'idée était bonne sur le papier : `flat` quittait entièrement le chemin chaud et le jeu de travail partagé de la boucle tombait de 6,44 Mo (`packed` + arène + `flat`) à 1,38 Mo, soit **−79 %**. Le gain mesuré est **nul** : sur i9-9880H en A/B apparié à ordre alterné, **1 worker −0,9 %** (IC 95 % [−3,8 %, +2,0 %]) et **16 forks −0,7 %** (IC [−3,5 %, +2,2 %]).
 

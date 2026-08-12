@@ -204,11 +204,14 @@ fi
 rates_file="$WORKDIR/rates"
 nodes_file="$WORKDIR/nodes"
 fc_rate_file="$WORKDIR/fc_rates"
+max_result_file="$WORKDIR/max_results"
 : > "$rates_file"
 : > "$nodes_file"
 : > "$fc_rate_file"
+: > "$max_result_file"
 runs_json="[]"
 have_fc=0
+have_maxresult=0
 
 for ((i = 1; i <= REPS; i++)); do
     log "Run $i/$REPS..."
@@ -250,14 +253,30 @@ for ((i = 1; i <= REPS; i++)); do
             "$fc_attempts" "$fc_pruned" "$fc_rate")
     fi
 
-    run_entry=$(printf '{"run":%d,"nodes_reached":%s,"elapsed_sec":%s,"nodes_per_sec":%s%s}' \
-        "$i" "$nodes_reached" "$elapsed" "$rate" "$fc_json")
+    # max_result (profondeur maximale atteinte, etii_search.c) : nodes/s mesure
+    # un DÉBIT de traitement, pas un progrès réel — un élagage qui coupe moins
+    # ferait visiter plus de nœuds pour la même profondeur (arbre plus large),
+    # auquel cas un débit plus élevé ne traduirait pas un vrai gain. À cible de
+    # nœuds FIXE (comparaison avec --baseline ci-dessous), une profondeur
+    # maximale comparable ou supérieure confirme que le débit gagné se traduit
+    # en profondeur réelle. Absent des logs sur un binaire antérieur à cette
+    # instrumentation : ne bloque jamais le banc, juste omis du rapport.
+    max_result=$(extract_field "$outlog" max_result)
+    max_result_json=""
+    if [[ -n "$max_result" ]]; then
+        have_maxresult=1
+        echo "$max_result" >> "$max_result_file"
+        max_result_json=$(printf ',"max_result":%s' "$max_result")
+    fi
+
+    run_entry=$(printf '{"run":%d,"nodes_reached":%s,"elapsed_sec":%s,"nodes_per_sec":%s%s%s}' \
+        "$i" "$nodes_reached" "$elapsed" "$rate" "$fc_json" "$max_result_json")
     if [[ "$runs_json" == "[]" ]]; then
         runs_json="[$run_entry]"
     else
         runs_json="${runs_json%]},${run_entry}]"
     fi
-    log "  nodes_reached=$nodes_reached elapsed=${elapsed}s nodes/s=$rate${fc_json:+ fc_prune_rate=${fc_rate}%}"
+    log "  nodes_reached=$nodes_reached elapsed=${elapsed}s nodes/s=$rate${fc_json:+ fc_prune_rate=${fc_rate}%}${max_result_json:+ max_result=${max_result}}"
 done
 
 # --- Statistiques (médiane/min/max/écart-type relatif) ---------------------
@@ -299,6 +318,15 @@ if [[ $have_fc -eq 1 ]]; then
     fc_summary_line="taux d'élagage forward-check : médiane=${fc_rate_med}% min=${fc_rate_min}% max=${fc_rate_max}%"
 fi
 
+max_result_json_fields=""
+max_result_summary_line=""
+if [[ $have_maxresult -eq 1 ]]; then
+    read -r maxr_med maxr_min maxr_max _ _ < <(compute_stats < "$max_result_file")
+    max_result_json_fields=$(printf ',\n  "max_result_median": %s,\n  "max_result_min": %s,\n  "max_result_max": %s' \
+        "$maxr_med" "$maxr_min" "$maxr_max")
+    max_result_summary_line="profondeur maximale atteinte (max_result) : médiane=$maxr_med min=$maxr_min max=$maxr_max"
+fi
+
 # --- Rapport JSON ------------------------------------------------------------
 
 git_commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -332,7 +360,7 @@ report_file="$WORKDIR/report.json"
     printf '  "nodes_reached_median": %s,\n' "$nodes_med"
     printf '  "nodes_reached_min": %s,\n' "$nodes_min"
     printf '  "nodes_reached_max": %s,\n' "$nodes_max"
-    printf '  "nodes_reached_all_equal": %s%s\n' "$nodes_all_equal" "$fc_json_fields"
+    printf '  "nodes_reached_all_equal": %s%s%s\n' "$nodes_all_equal" "$fc_json_fields" "$max_result_json_fields"
     printf '}\n'
 } > "$report_file"
 
@@ -360,6 +388,9 @@ if [[ -n "$fc_summary_line" ]]; then
     log "$fc_summary_line"
 else
     log "élagage forward-check : absent des logs (binaire compilé avec FORWARD_CHECK_K=0 ?)"
+fi
+if [[ -n "$max_result_summary_line" ]]; then
+    log "$max_result_summary_line"
 fi
 
 if [[ -n "$BASELINE" ]]; then
@@ -390,6 +421,24 @@ if [[ -n "$BASELINE" ]]; then
         if [[ -n "$base_fc_rate" && -n "$fc_summary_line" ]]; then
             log "taux d'élagage forward-check médian : baseline=${base_fc_rate}%  actuel=${fc_rate_med}%" \
                 "— un écart signale un changement de comportement de l'élagage, pas seulement de débit."
+        fi
+
+        # max_result n'est comparable QUE si la cible de nœuds est identique : à
+        # cible fixe, une profondeur atteinte comparable démontre qu'un débit
+        # (nœuds/s) plus élevé se traduit en progrès réel et non en nœuds
+        # « dilués » par un élagage plus faible qui explorerait un arbre plus
+        # large pour la même profondeur. À cible différente la comparaison ne
+        # dit rien (plus de nœuds -> plus de profondeur, indépendamment de
+        # tout changement d'élagage) : on l'affiche à titre indicatif seulement.
+        base_maxr=$(json_field "$BASELINE" max_result_median)
+        if [[ -n "$base_maxr" && -n "$max_result_summary_line" ]]; then
+            if [[ "$base_nodes_target" == "$NODES" ]]; then
+                log "profondeur atteinte (max_result) à cible de nœuds IDENTIQUE : baseline=$base_maxr  actuel=$maxr_med" \
+                    "— comparable/supérieure = le gain de débit est un vrai gain de progrès, pas un arbre plus large exploré plus vite."
+            else
+                log "profondeur atteinte (max_result) : baseline=$base_maxr (cible $base_nodes_target)  actuel=$maxr_med (cible $NODES)" \
+                    "— cibles de nœuds différentes, comparaison non probante (indicatif uniquement)."
+            fi
         fi
     fi
 fi

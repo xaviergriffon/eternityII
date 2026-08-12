@@ -127,42 +127,66 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
 /**
  * @brief Forward-checking de la boucle chaude, basé sur le cache de contraintes.
  *
- * Même sémantique que `forward_check_next_k` (possibility.c) mais sans recalcul
- * de clé : la clé de chaque case inspectée est lue directement dans le cache
- * `constraints[][]` maintenu par `bt_propagate_place`/`bt_propagate_undo`.
- * C'est LA version du hot path (`search_packet_backtracking`) ; la variante
- * sans cache `forward_check_next_k` ne sert que les chemins froids
- * (`bt_materialize_pending`, throttlé, et les tests) — tout nouveau code de la
- * boucle chaude doit passer par ici.
+ * Inspecte les VOISINES géométriques de la pièce qu'on vient de placer en
+ * `(cx, cy)` — au plus 4 (haut/droite/bas/gauche, cf. `bt_propagate_place`) —
+ * plutôt que les `FORWARD_CHECK_K` prochaines cases du parcours `directions[]`.
+ * Seul un placement modifie la clé de ses voisines directes ; une case du
+ * parcours peut se trouver à des dizaines de cases de distance sans jamais
+ * être une voisine (mesuré sur le puzzle 256 : 39 % des relations de
+ * voisinage ne sont jamais couvertes par l'ancienne fenêtre K=6, retard de
+ * détection médian 8 niveaux, max 152 — cf.
+ * `docs/conception/elagage_recherche.md` §3.1/§4.1). Moins cher aussi : 1,9
+ * case voisine à inspecter en moyenne contre 6 avec l'ancienne fenêtre.
+ *
+ * Ne lit PAS `FORWARD_CHECK_K` : ce paramètre ne borne plus que l'activation
+ * du forward-checking (`#if FORWARD_CHECK_K > 0`), pas la taille d'une
+ * fenêtre — le nombre de voisines est une propriété de la grille (4 au plus),
+ * indépendante de tout réglage. La variante `forward_check_next_k`
+ * (possibility.c) garde, elle, l'ancienne sémantique de fenêtre : elle ne
+ * sert que les chemins froids (`bt_materialize_pending`, throttlé, et les
+ * tests), pour lesquels une fenêtre de parcours reste un contrat valide et
+ * testé indépendamment. Tout nouveau code de la boucle chaude doit passer
+ * par ici.
  *
  * @param constraints Cache de contraintes maintenu par le backtracking.
  * @param board       Plateau courant (grille + masque des pièces utilisées).
  * @param mapParts    Table de lookup.
- * @param alloc       Indice de la première case non remplie du parcours.
- * @return            1 si toutes les cases inspectées ont au moins une pièce candidate, 0 sinon.
+ * @param cx          Colonne de la pièce qu'on vient de placer.
+ * @param cy          Ligne de la pièce qu'on vient de placer.
+ * @return            1 si toutes les voisines vides ont au moins une pièce candidate, 0 sinon.
  */
 static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
                             struct possibility_packet *board,
-                            map_big_array *mapParts, int alloc)
+                            map_big_array *mapParts, int cx, int cy)
 {
-    int end = alloc + FORWARD_CHECK_K;
-    if (end > ETERN_PARTS) {
-        end = ETERN_PARTS;
-    }
+    // Même ordre que bt_propagate_place/undo (haut, droite, bas, gauche) :
+    // au plus 4 voisines, celles qui tombent dans la grille.
+    int8_t nx[4];
+    int8_t ny[4];
+    int n = 0;
+    if (cy > 0)              { nx[n] = (int8_t)cx;     ny[n] = (int8_t)(cy - 1); n++; }
+    if (cx < ETERN_SIZE - 1) { nx[n] = (int8_t)(cx + 1); ny[n] = (int8_t)cy;     n++; }
+    if (cy < ETERN_SIZE - 1) { nx[n] = (int8_t)cx;     ny[n] = (int8_t)(cy + 1); n++; }
+    if (cx > 0)              { nx[n] = (int8_t)(cx - 1); ny[n] = (int8_t)cy;     n++; }
 
     // Cases réellement inspectées (statistique « études de prunage ») :
     // cumulées localement, un seul ajout atomique par appel (boucle chaude).
     unsigned int cells = 0;
+    // Rang (1..4) de la voisine dans CETTE énumération, indexant fc_pruned_at
+    // à l'élagage : ce n'est plus une distance de parcours, cf. son commentaire
+    // dans static_variables.h.
+    int rank = 0;
 
-    for (int c = alloc; c < end; c++) {
-        int8_t x = dirx[c];
-        int8_t y = diry[c];
+    for (int i = 0; i < n; i++) {
+        int8_t x = nx[i];
+        int8_t y = ny[i];
 
-        // Case déjà remplie (pièce placée à l'avance) : on saute
+        // Case déjà remplie : on saute
         if (board->grid[x][y] != -2) {
             continue;
         }
         cells++;
+        rank++;
 
         // Lookup via l'index COMPACT (`packed`) et non `flat` : à ce stade la
         // très grande majorité des accès ne sert qu'à lire une taille, et
@@ -171,7 +195,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         map_bucket search = map_bucket_packed(mapParts, &constraints[x][y]);
         if (search.size == 0) {
             // case morte : aucune pièce candidate
-            __atomic_fetch_add(&fc_pruned_at[c - alloc + 1], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
             __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
             return 0;
         }
@@ -186,7 +210,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         }
         if (!found) {
             // case morte : toutes les pièces candidates sont déjà utilisées
-            __atomic_fetch_add(&fc_pruned_at[c - alloc + 1], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
             __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
             return 0;
         }
@@ -710,11 +734,11 @@ backtrack:;
                     bt_propagate_place(constraints, cx, cy, &search->parts[s]);
                     board.alloc = d + 1;
 #if FORWARD_CHECK_K > 0
-                    // Forward-checking : on inspecte les FORWARD_CHECK_K prochaines cases
-                    // pour détecter une impasse immédiate
+                    // Forward-checking : on inspecte les voisines de la case
+                    // qu'on vient de remplir pour détecter une impasse immédiate
                     if (d + 1 < ETERN_PARTS) {
                         __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
-                        if (!bt_forward_check(constraints, &board, client->map_part, d + 1)) {
+                        if (!bt_forward_check(constraints, &board, client->map_part, cx, cy)) {
                             board.grid[cx][cy] = -2;
                             BOARD_SET_FACE(&board, position, 0);
                             bt_propagate_undo(constraints, cx, cy, all_face);
