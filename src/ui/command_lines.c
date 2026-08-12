@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <signal.h>
+#include <time.h>
 
 #include "ui/logger.h"
 #include "core/datamanager.h"
@@ -728,6 +729,19 @@ int exit_interpreter(void) {
 
             int cptloop = 0;
             int remaining;
+            // Escalade SIGTERM/SIGKILL si le SIGINT initial ne suffit pas —
+            // même barème que `orchestrator_do_stop_forks` (stopForks/
+            // configApply, cf. fork_orchestrator.h), qui ESCALADE déjà pour
+            // exactement cette raison : sans elle, cette boucle attendait
+            // INDÉFINIMENT (aucune borne de temps, contrairement à la
+            // séquence d'arrêt de l'orchestrateur) un fork qui, pour
+            // n'importe quelle raison, ne réagit pas au SIGINT — observé en
+            // CI sur `run_client_lifecycle.sh` (`exit` n'aboutissant jamais,
+            // le script de test finissant par tuer les process au bout de
+            // 60s). `exit` DOIT terminer le programme, jamais rester bloqué
+            // à attendre un fils récalcitrant.
+            time_t escalation_start = time(NULL);
+            stop_escalation_action_t last_escalation = STOP_ESCALATION_NONE;
             // On attend que tous les enfants soient réellement terminés.
             // kill(pid, 0) renvoie 0 tant que le process existe, -1 (ESRCH)
             // une fois qu'il a été récolté par wait_child / sigchld_handler.
@@ -739,6 +753,22 @@ int exit_interpreter(void) {
                             remaining++;
                         }
                     }
+                }
+                if (remaining > 0 && childrens_pid != NULL) {
+                    long elapsed_ms = (long)(time(NULL) - escalation_start) * 1000L;
+                    stop_escalation_action_t action = stop_escalation_next(elapsed_ms);
+                    if (action != last_escalation && action != STOP_ESCALATION_NONE) {
+                        int sig = (action == STOP_ESCALATION_SIGKILL) ? SIGKILL : SIGTERM;
+                        log_error("exit : %d fils encore vivant(s) après %lds — escalade %s\n",
+                                  remaining, elapsed_ms / 1000,
+                                  action == STOP_ESCALATION_SIGKILL ? "SIGKILL" : "SIGTERM");
+                        for (int c = 0; c < NB_THREADS; c++) {
+                            if (childrens_pid[c] > 0) {
+                                kill(childrens_pid[c], sig);
+                            }
+                        }
+                    }
+                    last_escalation = action;
                 }
                 if (cptloop == 10) {
                     log_console("\r            ");

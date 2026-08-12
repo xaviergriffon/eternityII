@@ -578,6 +578,11 @@ void child_death_format_reason(int status, char *out, size_t out_size)
     }
 }
 
+int child_death_is_clean_exit(int status)
+{
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 void sigchld_handler(int signal) {
 	(void)signal;
 	// lecture du statut pour éviter les process zombie

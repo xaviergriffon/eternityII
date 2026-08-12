@@ -204,6 +204,27 @@ int child_death_dropped_count(void);
  */
 void child_death_format_reason(int status, char *out, size_t out_size);
 
+/**
+ * @brief Prédicat PUR : ce statut waitpid() correspond-il à une fin de
+ *        process propre et volontaire (`WIFEXITED` + code de sortie 0) ?
+ *
+ * Un fork de recherche peut légitimement `exit(EXIT_SUCCESS)` de lui-même en
+ * dehors de toute séquence `stopForks`/`configApply` — typiquement en
+ * exhaustant tout l'espace de recherche local d'un tout petit puzzle
+ * (`ETERN_PARTS=16`, cf. les scripts `tests/integration/`), qui peut se vider
+ * entièrement en quelques dizaines de millisecondes. Sans ce prédicat,
+ * `fork_orchestrator_run` classait CETTE mort — un succès, pas une anomalie —
+ * comme « disparu de façon inattendue » (`log_error`) simplement parce
+ * qu'elle survenait en `ORCH_RUNNING` plutôt que pendant un arrêt piloté
+ * (`ORCH_STOPPING`/`ORCH_APPLYING`), un faux positif trouvé sur le test
+ * d'intégration `run_client_lifecycle.sh` (16 pièces, plusieurs cycles
+ * start/stopForks/configApply). Un code de sortie non nul, ou une
+ * terminaison par signal (crash, OOM killer, `kill -9`), reste classé comme
+ * anomalie potentielle quel que soit l'état — seul le "succès propre" est
+ * inconditionnellement bénin.
+ */
+int child_death_is_clean_exit(int status);
+
 /** @brief Affiche le message d'usage (arguments invalides) : aide générale sur
  *         stderr via `log_error` — même source de vérité que `--help`. */
 void failed_arg(void);
