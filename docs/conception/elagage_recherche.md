@@ -2,7 +2,9 @@
 
 **Statut : en cours d'implémentation.** PR 1 (§4.1) livrée et mesurée — voir
 [autosearch_step.md §1.3 ter](../autosearch_step.md#13-ter-bt_forward_check--les-voisines-de-la-pièce-posée-pas-une-fenêtre-de-parcours)
-pour le comportement actuel. Les pistes 2 à 9 restent des propositions non implémentées.
+pour le comportement actuel. PR 2 (§4.4) évaluée et **écartée** après mesure (code absent
+de `master`, raisonnement et chiffres conservés en §4.4). Les pistes 3 à 9 restent des
+propositions non implémentées.
 
 ## 1. Question posée
 
@@ -167,16 +169,63 @@ de bord encore vides.
 sur mesure plutôt que sur intuition : si le test ne tire jamais, il se retire aussi
 facilement qu'il s'ajoute.
 
-### 4.4 Conflit de singletons (mini-test de Hall)
+### 4.4 Conflit de singletons (mini-test de Hall) — IMPLÉMENTÉ, MESURÉ, ÉCARTÉ
+
+**Statut : évalué et abandonné.** Implémenté dans `bt_forward_check`, mesuré, puis
+**reverté** — code absent de `master`. Ce qui suit est la trace du raisonnement et de la
+mesure, dans le même esprit que le lookup de placement via `packed` (PR #161,
+[autosearch_step.md](../autosearch_step.md)) : une piste correcte et bien motivée peut
+rester sans effet mesurable si la partie de l'arbre où elle jouerait n'est pas encore
+atteinte.
 
 **Principe.** Pendant le balayage du forward-check, retenir les cases dont le nombre de
 candidats **libres** vaut exactement 1, avec l'`id` de cette pièce. Si deux cases exigent
 la même pièce unique ⇒ branche morte. C'est le cas `|S| = 2` du théorème de Hall, le
-premier que le forward-check ne peut structurellement pas voir.
+premier que le forward-check ne peut structurellement pas voir — et un vrai « case par
+case » ne peut jamais le détecter : chaque voisine prise isolément a bien ≥ 1 candidat.
 
-**Coût.** Le FC énumère déjà les candidats et s'arrête au premier libre ; il faut ne plus
-s'arrêter (ou s'arrêter au deuxième), plus ≤ 6 comparaisons. Se greffe naturellement sur
-la même boucle que 4.1 et se mesure avec le même banc.
+**Implémentation.** Greffée sur la boucle de 4.1 (`bt_forward_check`, au plus 4 voisines
+géométriques par appel) : au lieu de s'arrêter au premier candidat libre trouvé, compter
+jusqu'à 2 (assez pour distinguer « singleton » de « pas singleton », inutile d'aller plus
+loin) ; si exactement 1, comparer son `id` aux singletons déjà vus dans CE balayage (≤ 3
+comparaisons, tableau de 4 entrées). Un compteur dédié, `fc_singleton_conflict`
+(sous-ensemble de `fc_pruned`), isolait sa contribution — condition nécessaire pour
+répondre à « rentable ou non » sans se fier au seul débit agrégé.
+
+**Mesuré** (`tests/bench/bench_search.sh`, puzzle 256, A/B à ordre alterné, 50 M nœuds × 2
+répétitions × 2 tours) :
+
+| Configuration | Nœuds/s | `fc_singleton_conflict` | `max_result` |
+|---|---|---|---|
+| Sans (PR1 seul) | ≈ 10,7 M | — | 74 |
+| Avec | ≈ 9,7 M | **0** | 74 |
+| Delta | **−9 %** | — | inchangé |
+
+`fc_singleton_conflict` reste à **zéro** sur 500 M nœuds explorés (373,7 M élagages) —
+pas « rare », mais jamais observé dans la région du puzzle 256 réellement atteinte
+aujourd'hui (le mur structurel à `max_result` = 74, cf.
+[tests_et_ci.md § max_result](../tests_et_ci.md#max_result--le-débit-seul-ne-prouve-pas-un-vrai-gain)).
+Le coût, lui, est systématique : chercher un deuxième candidat libre au lieu de s'arrêter
+au premier coûte à CHAQUE appel, que la voisine finisse par être un singleton ou non —
+d'où la perte de débit malgré un mécanisme qui ne s'est jamais déclenché.
+
+**Pourquoi ça ne se déclenche pas (hypothèse, non vérifiée en détail).** Un conflit exige
+que DEUX voisines survivent chacune jusqu'à `free_count == 1` sans que ni l'une ni l'autre
+n'ait déjà déclenché l'élagage « classique » (compartiment vide ou toutes pièces
+utilisées) — c'est-à-dire que la première voisine inspectée soit déjà, elle, dans cet état
+rare. Dans la région du puzzle réellement explorée à ce jour (bornée par le même mur
+structurel qu'ailleurs dans ce document, `max_result` ≈ 74), la plupart des élagages
+observés surviennent probablement dès la première voisine inspectée (compartiment vide ou
+épuisé), avant même qu'un deuxième candidat unique puisse entrer en jeu — non mesuré
+précisément (`fc_pruned_at[]` n'a pas été relevé pour cette piste), mais cohérent avec un
+coût constant pour un gain nul.
+
+**Décision : ne pas merger, garder la piste consignée pour plus tard.** Reprendre
+uniquement si une PR ultérieure de cette série (au premier chef 4.7, l'ordre dynamique, ou
+4.5, la propagation des cases forcées) change la profondeur réellement atteinte : plus le
+plateau se remplit, plus les compartiments de candidats s'amenuisent, et plus un conflit de
+singletons devient a priori probable. Remesurer à ce moment-là plutôt que de raviver ce
+mécanisme en l'état.
 
 ### 4.5 Propagation des cases forcées dans la boucle chaude
 
@@ -263,6 +312,11 @@ risque, à mener au banc.
   (cf. [autosearch_step.md](../autosearch_step.md)) — le forward-check réussit ~54 % du
   temps, donc la majorité des cases inspectées paieraient deux accès aléatoires au lieu
   d'un.
+- **Pas de conflit de singletons dans l'état actuel de l'arbre exploré.** Implémenté,
+  mesuré, reverté (§4.4) : **−9 % de débit, 0 déclenchement** sur 500 M nœuds. Correct
+  mais sans effet mesurable tant que la profondeur atteinte reste bornée par le mur
+  structurel à `max_result` ≈ 74 — à remesurer si une PR ultérieure (4.5 ou 4.7) déplace ce
+  mur, pas à raviver en l'état.
 - **Ne pas retoucher `directions[]` dans ce cadre.** L'ordre actuel a été choisi pour
   éliminer tôt et son changement impose un bump de protocole ; les pistes ci-dessus
   s'appliquent toutes à ordre constant.
@@ -275,6 +329,9 @@ risque, à mener au banc.
   compteurs.
 - ~~**4.1 : garder ou non la fenêtre `c+1 … c+2` ?**~~ Tranché : non — voir §4.1, mesure à
   l'appui (−0,06 point de taux d'élagage sans la fenêtre résiduelle, effet négligeable).
+- ~~**4.4 : le conflit de singletons est-il rentable ?**~~ Tranché : non, dans l'état actuel
+  de l'arbre exploré — voir §4.4, implémenté/mesuré/reverté (−9 % de débit, 0
+  déclenchement sur 500 M nœuds).
 - **4.3 : le test tire-t-il jamais ?** Aucune estimation *a priori* fiable ; le compteur
   livré avec la PR tranchera.
 - **4.6b : quel budget de nœuds ?** Dépend du profil de profondeur du stock serveur, que
@@ -296,7 +353,7 @@ recherché ici.
 | PR | Contenu | Risque | Décision attendue |
 |---|---|---|---|
 | 1 | ~~**4.1** forward-check sur les voisines (+ réétiquetage de `fc_pruned_at[]`, + A/B)~~ **livré** | faible | pas de fenêtre résiduelle (mesuré, §4.1) |
-| 2 | **4.4** conflit de singletons dans le même balayage | faible | rentable ou non |
+| 2 | ~~**4.4** conflit de singletons dans le même balayage~~ **écarté** | faible | non rentable (mesuré, §4.4 : −9 %, 0 déclenchement) |
 | 3 | **4.2** contrainte de type coin/bord/intérieur | faible | compteurs ou partition |
 | 4 | **4.3** comptage global couleur + compteur `count_pruned` | faible | conserver ou retirer |
 | 5 | **4.6a** point fixe dans le balayage du pruner | faible | — |
