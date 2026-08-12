@@ -13,10 +13,20 @@ Le code correspondant vit dans :
 - [src/app/main.c](../src/app/main.c) — dispatch de l'option `--gpu` du mode `pruner` ;
 - [Makefile](../Makefile) — switch `CUDA=1` / `VERIFY=1`.
 
-Le pruner GPU **n'est qu'une accélération** : le contrôle réalisé est strictement
+Le pruner GPU **n'est qu'une accélération** : le contrôle réalisé vise à être strictement
 équivalent à `possibility_all_has_a_next` (CPU), qui reste l'implémentation de
 référence. Le protocole client/serveur est identique au pruner CPU — voir
 [Échanges client / serveur](echanges_client_serveur.md).
+
+> **Divergence connue depuis le point fixe CPU (§4.6a de
+> [elagage_recherche.md](conception/elagage_recherche.md)).** `possibility_all_has_a_next_counted`
+> (CPU) relance désormais le balayage tant qu'un placement forcé a eu lieu, jusqu'à point
+> fixe — `prune_kernel` (ci-dessous) reproduit encore la version **une seule passe**,
+> antérieure à ce correctif. Le GPU reste donc **conservateur** (jamais de faux mort) mais
+> peut manquer une mort en cascade qu'une seconde passe aurait détectée — exactement le
+> manque documenté en §4.6a, non encore reporté côté GPU. Une build `VERIFY=1` peut donc
+> désormais montrer des divergences CPU/GPU **attendues** sur ce cas précis (CPU mort, GPU
+> vivant) ; ce n'est pas une régression, mais un rattrapage du kernel resté en suspens.
 
 ## Vue d'ensemble
 
@@ -113,13 +123,14 @@ lancement** (plusieurs blocs répartis sur tous les SM), d'où l'intérêt d'un 
    buffers managed, puis `prune_kernel` est lancé (`128` threads/bloc, un thread par
    possibilité).
 
-3. **Kernel (`prune_kernel`) — parité stricte avec le CPU.** Chaque thread reproduit
-   à l'identique `possibility_all_has_a_next` : balayage des cases de `alloc` à
-   `ETERN_PARTS` suivant `dirx/diry`, sortie anticipée **uniquement** sur case morte
-   (bucket vide), placement des pièces forcées (bucket de taille 1). Court-circuit si
-   `checked == 1` (vivant sans recalcul). Un plateau complété fait passer `alloc` à
-   `ETERN_PARTS` — le device ne peut pas `exit()`, c'est **l'hôte** qui détecte la
-   solution.
+3. **Kernel (`prune_kernel`) — un seul balayage (voir divergence connue ci-dessus).**
+   Chaque thread reproduit la version historique, une seule passe, de
+   `possibility_all_has_a_next` : balayage des cases de `alloc` à `ETERN_PARTS` suivant
+   `dirx/diry`, sortie anticipée **uniquement** sur case morte (bucket vide), placement
+   des pièces forcées (bucket de taille 1) — sans relance jusqu'à point fixe côté GPU.
+   Court-circuit si `checked == 1` (vivant sans recalcul). Un plateau complété fait passer
+   `alloc` à `ETERN_PARTS` — le device ne peut pas `exit()`, c'est **l'hôte** qui détecte
+   la solution.
 
 4. **Retour à l'hôte.** Après `cudaDeviceSynchronize`, les buffers managed sont recopiés :
    paquets éventuellement mutés, `alive[]` (1 = vivant, 0 = mort) et `cells[]` (nombre de
