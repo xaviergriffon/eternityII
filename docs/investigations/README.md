@@ -35,4 +35,4 @@ reste incomplètement expliqué.
 
 | Document | Statut | Sujet |
 |---|---|---|
-| [blocage_fork_gate_release_quiesce.md](blocage_fork_gate_release_quiesce.md) | ouverte | Blocage permanent intermittent dans `fork_gate_release_quiesce` (client, process parent) — forks « qui ne rapportent aucun travail », process parent devenant sourd à toute commande |
+| [blocage_fork_gate_release_quiesce.md](blocage_fork_gate_release_quiesce.md) | résolue | Blocage permanent intermittent dans `fork_gate_release_quiesce`, causé par son appel depuis le FILS fraîchement forké (condvar héritée en état incohérent) — conservé pour le raisonnement, les fausses pistes écartées et la méthode de capture (journal de trace en mémoire, `strace` empêchant la reproduction) |
