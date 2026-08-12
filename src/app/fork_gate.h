@@ -165,4 +165,74 @@ void fork_gate_acquire_io_locks(void);
 /** @brief Relâche les verrous pris par `fork_gate_acquire_io_locks`, dans l'ordre inverse. */
 void fork_gate_release_io_locks(void);
 
+/* ============================ Journal de trace (diagnostic) =============== */
+
+/**
+ * @brief Événement enregistré par `fork_gate_trace_record` — un par appel
+ *        d'une fonction de ce module qui modifie l'état d'un participant ou
+ *        de la quiescence globale.
+ *
+ * Contexte : une investigation en cours (voir
+ * docs/investigations/blocage_fork_gate_release_quiesce.md) a montré un
+ * blocage permanent, intermittent, dans `fork_gate_release_quiesce`
+ * (`pthread_cond_broadcast` bloqué à demeure dans un mécanisme interne de
+ * glibc) — et a aussi montré qu'entourer le process avec `strace` (même
+ * limité à quelques appels système) empêche la reproduction : le
+ * ralentissement introduit par l'interception ptrace de CHAQUE appel
+ * système referme la fenêtre de course. Ce module trace donc chaque
+ * transition d'état SANS AUCUN appel système sur le chemin chaud
+ * (`clock_gettime` + une écriture atomique dans un tableau préalloué,
+ * quelques nanosecondes) — invisible pour `strace`/ptrace, donc sans effet
+ * sur la reproductibilité — et le résultat se lit APRÈS COUP, une fois le
+ * blocage survenu, via `gdb -p <pid>` (`print g_fork_gate_trace_buf` /
+ * `print g_fork_gate_trace_write_index`) — cette lecture ponctuelle
+ * n'intervient qu'une fois la course déjà terminée, donc sans le même
+ * risque de la masquer.
+ */
+typedef enum {
+    FGT_REGISTER = 0,          /**< fork_gate_register : slot attribué. */
+    FGT_UNREGISTER,             /**< fork_gate_unregister. */
+    FGT_PARK_BEGIN,              /**< fork_gate_checkpoint : entrée dans pthread_cond_wait(&g_released). */
+    FGT_PARK_END,                /**< fork_gate_checkpoint : sortie de pthread_cond_wait (réveillé). */
+    FGT_BLOCKED_ON,               /**< fork_gate_mark_blocked(slot, 1). */
+    FGT_BLOCKED_OFF,               /**< fork_gate_mark_blocked(slot, 0). */
+    FGT_REQUEST_QUIESCE_BEGIN,      /**< fork_gate_request_quiesce : entrée. */
+    FGT_REQUEST_QUIESCE_QUIESCED,    /**< fork_gate_request_quiesce : succès. */
+    FGT_REQUEST_QUIESCE_TIMEOUT,      /**< fork_gate_request_quiesce : timeout, demande annulée. */
+    FGT_RELEASE_QUIESCE_BEGIN,         /**< fork_gate_release_quiesce : juste avant pthread_cond_broadcast. */
+    FGT_RELEASE_QUIESCE_END,            /**< fork_gate_release_quiesce : juste après (jamais atteint en cas de blocage). */
+} fork_gate_trace_event_t;
+
+/** @brief Capacité du ring de trace — dépassée, les plus anciennes entrées sont écrasées (diagnostic, pas une garantie de rétention). */
+#define FORK_GATE_TRACE_CAPACITY 1024
+
+/** @brief Une entrée du journal de trace. Champs bruts, décodage à la lecture (gdb ou tests). */
+typedef struct {
+    long long timestamp_ns; /**< CLOCK_MONOTONIC, comparable entre entrées du même process. */
+    long tid;                /**< Identifiant de thread (TID noyau sous Linux, sinon pthread_self() casté). */
+    int slot;                 /**< Slot concerné (-1 si sans objet, ex. RELEASE_QUIESCE). */
+    fork_gate_trace_event_t event;
+} fork_gate_trace_record_t;
+
+/**
+ * @brief Journal de trace globaux, en lecture directe via gdb sur un process
+ *        vivant (y compris bloqué) : `print g_fork_gate_trace_buf`,
+ *        `print g_fork_gate_trace_write_index`. L'entrée la plus récente est
+ *        à l'indice `(g_fork_gate_trace_write_index - 1) % FORK_GATE_TRACE_CAPACITY`
+ *        (l'index ne revient jamais à zéro, y compris après un tour du ring).
+ *        Délibérément NON `static` pour rester trouvable par son nom simple
+ *        sous gdb sans qualifier de fichier.
+ */
+extern fork_gate_trace_record_t g_fork_gate_trace_buf[FORK_GATE_TRACE_CAPACITY];
+extern unsigned long g_fork_gate_trace_write_index;
+
+/**
+ * @brief Enregistre un événement dans le journal de trace. Async-signal-safe
+ *        et sans appel système sur le chemin chaud (seul `clock_gettime`
+ *        peut, selon la plateforme, être un vrai appel système — sous Linux
+ *        avec VDSO, ce qui est le cas de la cible de production de ce
+ *        projet, c'est un accès mémoire pur, pas un `syscall()`).
+ */
+void fork_gate_trace_record(fork_gate_trace_event_t event, int slot);
+
 #endif /* fork_gate_h */

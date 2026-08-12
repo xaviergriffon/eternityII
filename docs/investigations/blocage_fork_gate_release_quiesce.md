@@ -2,8 +2,10 @@
 
 **Statut : ouverte** — cause exacte non confirmée. Deux correctifs structurels appliqués
 par prudence (ils réduisent une fenêtre de course plausible), sans preuve qu'ils
-éliminent le blocage lui-même. Voir la convention de ce répertoire dans
-[README.md](README.md).
+éliminent le blocage lui-même. `strace -f` (piste de capture initialement envisagée)
+s'est révélé empêcher la reproduction — remplacé par un journal de trace en mémoire,
+sans appel système, lisible via `gdb` après coup (voir *Journal de trace en mémoire*
+ci-dessous). Voir la convention de ce répertoire dans [README.md](README.md).
 
 ## Symptôme signalé par l'opérateur
 
@@ -150,18 +152,59 @@ glibc (`__condvar_quiesce_and_switch_g1`) — seulement pourquoi/quand un partic
 disparaître, et une piste plausible (mais non prouvée) de fenêtre de course élargie
 entre cette disparition et un cycle de quiescence en cours.
 
-## Prochaine étape si le problème se reproduit encore
+## `strace -f` empêche la reproduction — piste abandonnée
 
-La capture décisive manquante est un `strace -f` attaché **au tout début** du process
-parent (avant même le premier `fork()`), journalisant la création et la sortie de
-CHAQUE thread avec horodatage — pour obtenir la séquence causale complète (quel thread
-sort, à quel instant précis, par rapport à quel cycle de quiescence) plutôt qu'un
-instantané a posteriori qui ne montre que l'état final.
+La capture initialement envisagée (`strace -f` attaché dès le lancement, journalisant la
+création/sortie de chaque thread) a été essayée : **avec `strace`, le blocage ne se
+reproduit quasiment jamais ; sans lui, presque à chaque lancement.** L'opérateur a
+observé que « la rapidité du lancement semble influencer le problème » — cohérent avec
+une vraie course : l'interception ptrace de `strace` ralentit CHAQUE appel système
+intercepté (arrêt + relais vers le traceur + reprise), ce qui referme la fenêtre de
+course pendant la séquence de démarrage (auto-démarrage puis création rapide des
+`nb_forks` forks). `strace` est donc inutilisable pour cette investigation précise —
+piste abandonnée.
+
+## Journal de trace en mémoire (`fork_gate_trace_record`) — la piste retenue
+
+Pour observer sans perturber, `src/app/fork_gate.{h,c}` trace désormais chaque
+transition d'état dans un ring en mémoire, SANS AUCUN appel système sur le chemin chaud
+(`clock_gettime(CLOCK_MONOTONIC)` passe par le VDSO sous Linux — pas de `syscall()` réel
+— suivi d'une simple écriture atomique dans un tableau préalloué) : invisible pour
+`strace`/ptrace, donc sans effet sur la reproductibilité. La lecture, elle, se fait APRÈS
+COUP — une fois le blocage déjà survenu — via `gdb` sur le process vivant (bloqué mais
+pas mort) :
 
 ```bash
-# Sur la machine où le client va être lancé, dans le même répertoire de travail :
-strace -f -tt -o /tmp/eternityii_strace.log ./eternityII client ... &
-# Laisser tourner jusqu'à la prochaine reproduction (le fichier peut devenir volumineux :
-# envisager -e trace=clone,futex,exit,exit_group,rt_sigaction,rt_sigprocmask pour limiter
-# le bruit aux appels pertinents pour cette investigation).
+PID=<pid du process PARENT bloqué — celui identifié par le filet par fork, ou repéré
+     par "cat /proc/<pid>/status | grep Threads" -> 1 sur un client qui devrait en avoir ~5>
+
+sudo gdb -p $PID -batch \
+  -ex "print g_fork_gate_trace_write_index" \
+  -ex "print g_fork_gate_trace_buf" \
+  -ex "detach" -ex "quit" 2>&1 | tee /tmp/eternityii_fork_gate_trace.txt
 ```
+
+`g_fork_gate_trace_write_index` donne le nombre total d'événements enregistrés depuis le
+démarrage (jamais remis à zéro, y compris après un tour du ring de
+`FORK_GATE_TRACE_CAPACITY` = 1024 entrées — seul `(write_index - 1) % 1024` donne
+l'entrée la plus récente). Chaque entrée de `g_fork_gate_trace_buf` a :
+
+- `timestamp_ns` — `CLOCK_MONOTONIC`, comparable entre entrées du même process (permet
+  de reconstruire l'ordre et les écarts en temps réel entre événements) ;
+- `tid` — identifiant de thread noyau (comparable directement au `TID` de `ps -T -p $PID`
+  ou du `LWP` affiché par `gdb`) ;
+- `slot` — le slot fork_gate concerné (-1 pour les événements globaux comme
+  `RELEASE_QUIESCE_BEGIN`/`END`) ;
+- `event` — une valeur de `fork_gate_trace_event_t` (`src/app/fork_gate.h`) : `0`=REGISTER,
+  `1`=UNREGISTER, `2`=PARK_BEGIN, `3`=PARK_END, `4`=BLOCKED_ON, `5`=BLOCKED_OFF,
+  `6`=REQUEST_QUIESCE_BEGIN, `7`=REQUEST_QUIESCE_QUIESCED, `8`=REQUEST_QUIESCE_TIMEOUT,
+  `9`=RELEASE_QUIESCE_BEGIN, `10`=RELEASE_QUIESCE_END.
+
+**Preuve directe recherchée dans le journal** : si le blocage est bien dans
+`fork_gate_release_quiesce`, la dernière entrée `RELEASE_QUIESCE_BEGIN` (9) du journal
+n'a JAMAIS de `RELEASE_QUIESCE_END` (10) correspondant qui la suit — la trace elle-même
+le montre, sans avoir besoin de `gdb`'s propre pile d'appels pour le déduire. Croiser
+ensuite avec les derniers `PARK_BEGIN`/`PARK_END` (par `tid`, pour voir quel participant
+n'a jamais eu de `PARK_END` après son dernier `PARK_BEGIN`) et les derniers
+`UNREGISTER` (pour voir si un participant a disparu juste avant) donne la séquence
+causale complète, exactement ce que `strace -f` aurait dû montrer sans le pouvoir.
