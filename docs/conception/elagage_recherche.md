@@ -2,9 +2,12 @@
 
 **Statut : en cours d'implémentation.** PR 1 (§4.1) livrée et mesurée — voir
 [autosearch_step.md §1.3 ter](../autosearch_step.md#13-ter-bt_forward_check--les-voisines-de-la-pièce-posée-pas-une-fenêtre-de-parcours)
-pour le comportement actuel. PR 2 (§4.4) évaluée et **écartée** après mesure (code absent
-de `master`, raisonnement et chiffres conservés en §4.4). Les pistes 3 à 9 restent des
-propositions non implémentées.
+pour le comportement actuel. PR 2 (§4.4), PR 3 (§4.2, variante compteurs) et PR 4 (§4.3)
+évaluées et **écartées** après mesure (code absent de `master`, raisonnement et chiffres
+conservés dans chaque section — §4.3 pour une raison différente des deux autres : un
+recoupement structurel avec le forward-check, pas une absence de déclenchement). Les
+pistes 5 à 9 (dont la variante « partition de l'arène » de §4.2) restent des propositions
+non implémentées.
 
 ## 1. Question posée
 
@@ -141,7 +144,16 @@ La seconde est préférable (elle *supprime* le travail au lieu de le rejeter) m
 [`part.c`](../../src/core/part.c) et l'invariant « `packed` est purement redondant sur
 `flat` » — arbitrage à trancher en §6.
 
-### 4.3 Comptage global couleur : demande de frontière vs stock disponible
+### 4.3 Comptage global couleur : demande de frontière vs stock disponible — IMPLÉMENTÉ, MESURÉ, ÉCARTÉ
+
+**Statut : implémenté (version complète, consciente des ancêtres), mesuré, abandonné**
+(code absent de `master`). Contrairement à §4.2/§4.4 (compteurs volontairement affaiblis,
+scindés à cet appel de `search_packet_backtracking` pour éviter un risque de fixture),
+cette piste a été implémentée **sans concession** : demande/disponible sont initialisés
+depuis l'état RÉEL du paquet racine (genèse, indices, ancêtres, délégation), pas depuis une
+capacité théorique repartant de zéro. Résultat : un mécanisme qui **tire massivement**
+(contrairement à §4.2/§4.4) mais qui reste un **net négatif** — pour une raison différente
+et plus instructive que « ne se déclenche jamais ».
 
 **Principe.** Le forward-check juge chaque case **isolément** : il ne verra jamais que
 5 cases de frontière réclament la couleur 9 alors qu'il ne reste que 3 demi-arêtes de
@@ -159,15 +171,63 @@ correspondent à deux couples (case, direction) distincts, donc à deux faces di
 pièces non utilisées — même quand elles visent la même case vide (deux faces de la même
 pièce). L'injection impose `demande[c] ≤ disponible[c]`. ∎
 
-**Coût.** Un placement touche au plus 8 compteurs (4 faces retirées du stock, ≤ 4
-demandes créées ou consommées) ⇒ **O(1) incrémental**, annulation symétrique au
-backtrack, ~8 comparaisons. Le gris (`0`) se traite à part et plus fortement : c'est une
-**égalité**, `disponible[0]` doit valoir exactement le nombre de faces sortantes des cases
-de bord encore vides.
+**Implémentation.** `demande[]` est dérivé du cache `constraints[][]` déjà maintenu par
+4.1 (`bt_init_constraints`/`bt_propagate_place`/`bt_propagate_undo`) : pour toute case
+VIDE, chaque côté non-wildcard de `constraints[case]` EST une demi-arête de demande — pas
+besoin de décoder les pièces déjà posées. `disponible[]` est initialisé par un balayage de
+`b_faceused` via `all_rotate_part` (id-indexé sur `ETERN_PARTS`, cf. ci-dessous), puis
+maintenu en O(1) par placement/retrait (au plus 8 compteurs touchés). L'ordre LIFO du
+backtracking garantit qu'à l'annulation, l'état d'emptiness des voisines est identique à
+celui observé à la pose — aucun stockage supplémentaire n'est nécessaire pour cette part,
+seule la couleur de la pièce posée (rotation réellement choisie, pas rotation 0) est
+mémorisée par niveau pour un retrait correct à distance.
 
-**Gain attendu : inconnu.** Livrer avec un compteur dédié (`count_pruned`) pour l'arbitrer
-sur mesure plutôt que sur intuition : si le test ne tire jamais, il se retire aussi
-facilement qu'il s'ajoute.
+**Pré-requis découvert en cours de route : corriger `make_small_parts()`.** Ce fixture de
+test partagé (`tests/core/test_etii_search.c`, utilisé par une dizaine de tests de
+`search_packet_backtracking`) était indexé `parts[i]` pour l'id `i+1` — un schéma qui ne
+correspond PAS à la convention `id`-comme-indice de `rotate_all_parts()` (bouchon id=0 à
+l'indice 0). Ça n'avait jamais posé de problème car rien ne lisait `all_rotate_part` par id
+sur un plateau vide avant cette piste. Corrigé : indexage `id`-comme-indice, ids 1..8
+inchangés (valeurs historiques), ids 9..`ETERN_PARTS` complétés avec un stock généreux des
+couleurs déjà en usage — un stock en excès ne peut jamais déclencher de famine (le test ne
+compare qu'un déficit).
+
+**Mesuré** (`tests/bench/bench_search.sh`, puzzle 256, A/B à ordre alterné, 50 M nœuds × 2
+répétitions × 2 tours) :
+
+| Configuration | Nœuds/s | `fc_colour_starvation` / `fc_pruned` | `max_result` |
+|---|---|---|---|
+| Sans | ≈ 10,8 M | — | 74 |
+| Avec | ≈ 8,2 M | **≈ 47–49 %** | 74 |
+| Delta | **−24 %** | — | inchangé |
+
+Contrairement à §4.2/§4.4, `fc_colour_starvation` **tire énormément** — près de la moitié
+de TOUS les élagages inline, à n'importe quelle échelle testée (20 M à 200 M nœuds). Mais
+le taux d'élagage TOTAL (`fc_pruned / fc_attempts`, colonnes couleur + forward-check
+confondues) reste dans la même fourchette que la référence §4.1 (~44-46 %) — c'est-à-dire
+que ce mécanisme n'ajoute quasiment **aucune branche morte que le forward-check
+n'aurait pas fini par trouver de toute façon**, il se contente souvent de la trouver un
+peu plus tôt. Le coût de tenue à jour (8 compteurs entiers, deux directions
+d'annulation, à CHAQUE placement, y compris ceux qui ne mèneront à aucune famine) dépasse
+la valeur de ce raccourci.
+
+**Pourquoi le recoupement avec le forward-check, et pas un vrai complément (hypothèse,
+cohérente avec la mesure mais non prouvée formellement).** Une famine de couleur `c`
+suppose que `disponible[c]` est bas — ce qui, structurellement, signifie que la plupart des
+pièces de couleur `c` sont déjà posées. Sur un plateau où ça arrive, une case de bordure
+proche réclamant `c` a de bonnes chances d'être elle-même la voisine directe d'une pièce
+déjà posée — exactement ce que `bt_forward_check` (§4.1) inspecte déjà. Les deux
+mécanismes convergent donc souvent vers la MÊME impasse locale, découverte par deux
+chemins de coût différent (comparaisons d'entiers vs lookup de map) mais de portée
+largement recouvrante dans la région du puzzle réellement atteinte aujourd'hui.
+
+**Décision : ne pas merger.** Contrairement à §4.2/§4.4, ce n'est pas un problème
+d'implémentation affaiblie (celle-ci était complète) — c'est un recoupement structurel
+avec un mécanisme déjà en place. Reprendre uniquement avec une implémentation qui réduit
+drastiquement le coût par placement (ex. ne suivre que les couleurs à faible stock, 18–22,
+plutôt que les 23 uniformément — non essayé) ET seulement si une mesure ultérieure montre
+que le recoupement avec le forward-check diminue (ex. après 4.7, l'ordre dynamique, qui
+changerait la forme de l'arbre et donc la proximité entre demande et voisinage).
 
 ### 4.4 Conflit de singletons (mini-test de Hall) — IMPLÉMENTÉ, MESURÉ, ÉCARTÉ
 
@@ -317,6 +377,13 @@ risque, à mener au banc.
   mais sans effet mesurable tant que la profondeur atteinte reste bornée par le mur
   structurel à `max_result` ≈ 74 — à remesurer si une PR ultérieure (4.5 ou 4.7) déplace ce
   mur, pas à raviver en l'état.
+- **Pas de comptage global couleur (implémentation uniforme sur les 23 couleurs).**
+  Implémenté SANS concession (compteurs conscients des ancêtres, pas affaiblis comme
+  4.2/4.4), mesuré, reverté (§4.3) : **−24 % de débit** malgré un déclenchement massif
+  (≈47-49 % des élagages inline). Cas différent des deux précédents : pas une absence de
+  déclenchement, un recoupement structurel avec le forward-check — les deux mécanismes
+  trouvent souvent la MÊME impasse, le second à moindre coût par appel. Une variante ciblée
+  (colonnes 18-22 seulement) reste envisageable mais non essayée.
 - **Ne pas retoucher `directions[]` dans ce cadre.** L'ordre actuel a été choisi pour
   éliminer tôt et son changement impose un bump de protocole ; les pistes ci-dessus
   s'appliquent toutes à ordre constant.
@@ -332,8 +399,11 @@ risque, à mener au banc.
 - ~~**4.4 : le conflit de singletons est-il rentable ?**~~ Tranché : non, dans l'état actuel
   de l'arbre exploré — voir §4.4, implémenté/mesuré/reverté (−9 % de débit, 0
   déclenchement sur 500 M nœuds).
-- **4.3 : le test tire-t-il jamais ?** Aucune estimation *a priori* fiable ; le compteur
-  livré avec la PR tranchera.
+- ~~**4.3 : le test tire-t-il jamais ?**~~ Tranché : il tire ÉNORMÉMENT (≈47-49 % de tous
+  les élagages inline) — mais §4.3, non rentable quand même : −24 % de débit, car il
+  recoupe structurellement ce que le forward-check trouvait déjà, pour un coût de tenue à
+  jour bien plus élevé (voir §4.3, seule piste de la série où « ça tire beaucoup » et « ce
+  n'est pas rentable » coexistent).
 - **4.6b : quel budget de nœuds ?** Dépend du profil de profondeur du stock serveur, que
   `GET /api/v1/stock-distribution` expose déjà — à relever sur un serveur réel avant de
   fixer une valeur, et à rendre réglable (console + fichier de configuration client) plutôt
@@ -354,8 +424,8 @@ recherché ici.
 |---|---|---|---|
 | 1 | ~~**4.1** forward-check sur les voisines (+ réétiquetage de `fc_pruned_at[]`, + A/B)~~ **livré** | faible | pas de fenêtre résiduelle (mesuré, §4.1) |
 | 2 | ~~**4.4** conflit de singletons dans le même balayage~~ **écarté** | faible | non rentable (mesuré, §4.4 : −9 %, 0 déclenchement) |
-| 3 | **4.2** contrainte de type coin/bord/intérieur | faible | compteurs ou partition |
-| 4 | **4.3** comptage global couleur + compteur `count_pruned` | faible | conserver ou retirer |
+| 3 | ~~**4.2** contrainte de type coin/bord/intérieur (compteurs)~~ **écarté** | faible | non rentable (mesuré, §4.2 : −14 %, 0 déclenchement) ; partition de l'arène reste ouverte |
+| 4 | ~~**4.3** comptage global couleur (implémentation complète)~~ **écarté** | faible | non rentable (mesuré, §4.3 : −24 %, recoupe le forward-check malgré ≈47-49 % de déclenchement) |
 | 5 | **4.6a** point fixe dans le balayage du pruner | faible | — |
 | 6 | **4.6b** DFS à budget dans le pruner (+ réglage du budget) | moyen | valeur du budget, exposition en configuration |
 | 7 | **4.8** ordre des candidats dans l'arène (expérience) | faible | adopter ou classer |
