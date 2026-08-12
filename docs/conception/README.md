@@ -29,7 +29,7 @@ survivent nulle part ailleurs.
 
 | Document | Statut | Contenu |
 |---|---|---|
-| [elagage_recherche.md](elagage_recherche.md) | en cours d'implémentation | Élargir l'élagage au-delà du forward-check de proximité. PR 1/9 livrée : voisines géométriques plutôt que fenêtre de parcours (+68,8 % de débit, taux d'élagage quasi inchangé). PR 2/9 (conflit de singletons) évaluée et écartée après mesure (−9 % de débit, 0 déclenchement sur 500 M nœuds). Restent en proposition : contrainte de type coin/bord/intérieur, comptage global couleur, propagation des cases forcées, pruner à budget de nœuds, ordre dynamique. |
+| [elagage_recherche.md](elagage_recherche.md) | en cours d'implémentation | Élargir l'élagage au-delà du forward-check de proximité. PR 1/9 livrée : voisines géométriques plutôt que fenêtre de parcours (+68,8 % de débit, taux d'élagage quasi inchangé). PR 2/9 (conflit de singletons) et PR 3/9 (typage coin/bord, variante compteurs) évaluées et écartées après mesure (−9 % et −14 % de débit respectivement, 0 déclenchement sur 200-500 M nœuds). Restent en proposition : typage coin/bord par partition de l'arène, comptage global couleur, propagation des cases forcées, pruner à budget de nœuds, ordre dynamique. |
 
 Voir aussi *Documents supprimés* ci-dessous pour ceux entièrement implémentés et absorbés
 par `docs/`.
