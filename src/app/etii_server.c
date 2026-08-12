@@ -760,10 +760,14 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 log_error("client hello : décodage échoué (connexion conservée)\n");
             } else {
                 client->has_identity = 1;
-#ifdef DEBUG_SOCKET
-                log_event("connexion de travail identifiée (fork_seq=%d, label=\"%s\")",
-                          client->identity.fork_seq, client->identity.label);
-#endif // DEBUG_SOCKET
+                // Visible en fonctionnement normal (pas seulement DEBUG_SOCKET,
+                // contrairement à avant) : au même titre qu'INST_CONTROL_HELLO
+                // ci-dessus, c'est une information de connexion utile à
+                // l'opérateur pour comprendre quel fork de quel client tient
+                // quelle connexion de travail, sans avoir à recompiler en debug.
+                log_event("connexion de travail identifiée (fork_seq=%d, mode=%u, label=\"%s\")",
+                          client->identity.fork_seq, (unsigned)client->identity.mode,
+                          client->identity.label);
             }
         } else if (instruction == INST_TEST_CONNECTED) {
             send_instruction(client->socket_id, INST_TEST_CONNECTED);

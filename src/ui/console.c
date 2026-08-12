@@ -173,6 +173,16 @@ static char *getcmdline_raw(void)
         // ligne `config <clé> <valeur>` soit validée en entier pour annuler —
         // le simple fait de commencer à saisir (même juste "start") doit
         // déjà donner un temps illimité. No-op hors COUNTDOWN (self-loop).
+        // Snapshot AVANT l'envoi de l'événement : un seul log au moment où le
+        // décompte bascule réellement (COUNTDOWN -> CONFIGURING, une seule
+        // fois), pas à chaque frappe suivante — sans quoi cette annulation
+        // restait totalement invisible dans les logs (l'opérateur ne pouvait
+        // que la déduire de l'absence des lignes "auto-démarrage dans …s").
+        orch_state_t state_before_key;
+        fork_orchestrator_snapshot(&state_before_key, NULL);
+        if (state_before_key == ORCH_COUNTDOWN) {
+            log_info("orchestrateur : décompte d'auto-démarrage annulé par une saisie clavier\n");
+        }
         fork_orchestrator_post_event(EV_CONFIG_BEGUN, NULL);
 
         if (c == '\n' || c == '\r') {
