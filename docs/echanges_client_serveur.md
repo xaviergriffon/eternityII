@@ -1060,3 +1060,88 @@ rapide même quand ce cas se présente. Le blocage prolongé d'un `connect()`
 initial (pool serveur saturé, ou réseau lent) reste un contributeur possible
 au symptôme d'origine, non résolu par ce correctif — le filet par fork
 ci-dessus reste le bon outil pour le repérer la prochaine fois.
+
+### Investigation : un blocage permanent dans `fork_gate_release_quiesce`, cause exacte non confirmée
+
+Une troisième reproduction, après le correctif `SA_RESTART` ci-dessus, a montré
+que le fork encore une fois signalé bloqué par le filet par fork mettait
+toujours plus de 10 s à répondre à `exit`. Capture en direct (`gdb -p <pid>
+-batch -ex "thread apply all bt"`, sur le process **parent**, pas un fork de
+recherche — confirmé par `main()` dans la pile, qu'un fork ne peut jamais
+avoir dans la sienne puisqu'il ne repasse jamais par `main()` après
+`fork()`) :
+
+```
+#0  futex_wait (expected=3, futex_word=&g_released+16) at futex-internal.h:146
+#1  futex_wait_simple (...) at futex-internal.h:177
+#2  __condvar_quiesce_and_switch_g1 (cond=&g_released) at pthread_cond_common.c:276
+#3  ___pthread_cond_broadcast (cond=&g_released) at pthread_cond_broadcast.c:72
+#4  fork_gate_release_quiesce ()
+#5  orchestrator_spawn_forks ()
+#6  fork_orchestrator_run ()
+#7  handle_client ()
+#8  main ()
+```
+
+Faits établis, dans l'ordre où ils ont resserré le diagnostic :
+
+1. **Confirmé permanent, pas transitoire** : `strace -p <pid>` pendant 30 s
+   montre EXACTEMENT le même `futex(..., FUTEX_WAIT_PRIVATE, 3, NULL)` en
+   attente sans jamais retourner ; une seconde capture `gdb` 30 s plus tard
+   montre la pile identique au symbole près. Élimine une simple famine de
+   CPU/ordonnancement transitoire (l'opérateur a aussi laissé tourner
+   plusieurs minutes sans que ça ne se débloque jamais seul).
+2. **Reproduit sur deux architectures et deux versions de glibc très
+   éloignées** (aarch64 glibc 2.35 ET x86_64 glibc 2.39, cette dernière
+   nettement postérieure au correctif connu du bug historique de
+   `pthread_cond_broadcast` sur ARM — glibc bug 25847, corrigé en 2.34).
+   Élimine un bug glibc précis lié à l'architecture ou à une version
+   particulière.
+3. **Un seul thread vivant dans TOUT le process parent** au moment du
+   blocage (`cat /proc/<pid>/status` → `Threads: 1`, confirmé indépendamment
+   par `gdb`'s `thread apply all` qui n'énumère qu'un seul thread) — alors
+   qu'un parent en fonctionnement normal en a ~5 (orchestrateur, checker,
+   `server_tcp`, canal de contrôle, console). Les quatre autres ont donc
+   disparu AVANT ou PENDANT ce blocage précis.
+4. **`pthread_cond_broadcast` sur `g_released` ne peut rester bloqué que si
+   un AUTRE thread est, à cet instant précis, en train de sortir de son
+   propre `pthread_cond_wait` sur ce même `g_released` sans jamais y
+   parvenir** — le seul appelant de cette attente est `fork_gate_checkpoint`
+   (`src/app/fork_gate.c`), utilisé par les quatre threads de service
+   ci-dessus. Rien dans ce code n'appelle `pthread_cancel`/`pthread_kill`
+   sur un thread individuel, et `SIGKILL` sur Linux termine tout le groupe
+   de threads d'un coup (jamais un seul thread isolément) — aucun mécanisme
+   applicatif connu ne peut donc "tuer" un seul de ces threads en plein
+   `pthread_cond_wait` sans terminer le process parent entier (ce qui
+   aurait aussi tué le thread orchestrateur, toujours vivant ici).
+
+**Deux pistes structurelles identifiées, corrigées par prudence, sans preuve
+définitive qu'elles sont LA cause :**
+
+- `console()` (`src/ui/console.c`) se désenregistre et s'arrête
+  DÉFINITIVEMENT dès que `getcmdline()` renvoie `NULL` (stdin fermé/EOF —
+  pertinent puisque ce client tourne en arrière-plan détaché,
+  nohup/screen/tmux/systemd, contexte confirmé par l'opérateur). Comportement
+  voulu (« le traitement continue sans console ») mais qui illustre qu'un
+  participant peut légitimement disparaître en cours de route.
+- **`orchestrator_spawn_forks` ne vérifiait `REQUEST_STOP` à AUCUN moment
+  dans sa boucle de création des forks** (`src/app/fork_orchestrator.c`) : un
+  arrêt demandé (SIGINT/SIGHUP/SIGTERM — ce dernier atteignant couramment un
+  process lancé en arrière-plan détaché) au MILIEU d'un lot de forks n'empêchait
+  pas la boucle de continuer à créer les forks restants et à répéter des
+  cycles `quiesce`/`fork`/`release`, exactement au moment où d'autres threads
+  réagissent au MÊME signal et se désenregistrent de `fork_gate`
+  concurremment. Corrigé : la boucle vérifie désormais `request` en tête de
+  chaque itération et s'arrête net (sans tenter de fork supplémentaire) dès
+  qu'un arrêt est demandé — les forks déjà créés restent valides.
+
+**Ce qui n'est PAS résolu par ces deux correctifs** : ni l'un ni l'autre
+n'explique de façon certaine pourquoi `pthread_cond_broadcast` lui-même reste
+bloqué pour de bon dans le mécanisme interne de glibc (`__condvar_quiesce_and_switch_g1`)
+— seulement pourquoi/quand un participant peut disparaître, et une piste
+plausible (mais non prouvée) de fenêtre de course élargie entre cette
+disparition et un cycle de quiescence en cours. Si le problème se
+reproduit malgré ces deux correctifs, la prochaine capture décisive serait
+un `strace -f` attaché AU DÉMARRAGE du process parent (avant tout fork),
+journalisant la création/sortie de CHAQUE thread avec horodatage — pour
+obtenir la séquence causale complète plutôt qu'un instantané a posteriori.
