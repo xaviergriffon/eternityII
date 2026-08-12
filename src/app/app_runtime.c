@@ -1009,7 +1009,12 @@ void *fork_checker(void *param) {
         // affichés par le parent dans le rapport de la commande `check`.
         statistic->fc_attempts = __atomic_load_n(&fc_attempts, __ATOMIC_RELAXED);
         statistic->fc_pruned = __atomic_load_n(&fc_pruned, __ATOMIC_RELAXED);
-        for (int j = 1; j <= FORWARD_CHECK_K; j++) {
+        // Borné par FC_STAT_MAX_K (indépendant de FORWARD_CHECK_K depuis le
+        // passage de bt_forward_check aux voisines) et non par FORWARD_CHECK_K :
+        // sinon un FORWARD_CHECK_K < 4 tronquerait la copie des positions 1..4
+        // que la boucle chaude peut effectivement produire — cf. le commentaire
+        // de fc_pruned_at dans static_variables.h.
+        for (int j = 1; j <= FC_STAT_MAX_K; j++) {
             statistic->fc_pruned_at[j] = __atomic_load_n(&fc_pruned_at[j], __ATOMIC_RELAXED);
         }
 #endif // FORWARD_CHECK_K > 0

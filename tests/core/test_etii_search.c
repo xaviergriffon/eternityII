@@ -411,8 +411,10 @@ static map_big_array *make_dead_map(void)
 }
 
 #if FORWARD_CHECK_K > 0
-/* bt_forward_check : 1 si chaque case vide de la fenêtre a un candidat libre,
- * 0 si une case est morte (aucun candidat / tous utilisés). */
+/* bt_forward_check : 1 si chaque voisine VIDE de la pièce qu'on vient de
+ * placer en (cx, cy) a un candidat libre, 0 si l'une est morte (aucun
+ * candidat / tous utilisés). Coin (0,0) : 2 voisines dans la grille,
+ * (1,0) et (0,1), toutes deux vides sur un plateau neuf. */
 TEST bt_forward_check_detects_dead_cells(void)
 {
     struct possibility_packet board;
@@ -422,27 +424,28 @@ TEST bt_forward_check_detects_dead_cells(void)
     key_part C[ETERN_SIZE][ETERN_SIZE];
     bt_init_constraints(C, &board, make_parts(), 2);
 
-    /* (a) un candidat libre (pièce 9) pour toute clé -> toutes les cases vivent. */
+    /* (a) un candidat libre (pièce 9) pour toute clé -> toutes les voisines vivent. */
     struct part p_free[1] = { { .id = 9 } };
     struct array_part cand_free = { .size = 1, .parts = p_free };
     map_big_array *map = make_uniform_map(&cand_free);
-    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 0), "%d");
+    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 0, 0), "%d");
 
-    /* (b) le seul candidat (pièce 9) est déjà utilisé -> case morte -> 0. */
+    /* (b) le seul candidat (pièce 9) est déjà utilisé -> voisine morte -> 0. */
     set_face_used(board.b_faceused, 8, 1); /* pièce 9 */
-    ASSERT_EQ_FMT(0, bt_forward_check(C, &board, map, 0), "%d");
+    ASSERT_EQ_FMT(0, bt_forward_check(C, &board, map, 0, 0), "%d");
     set_face_used(board.b_faceused, 8, 0);
 
-    /* (c) aucun candidat pour aucune clé -> case morte -> 0. */
+    /* (c) aucun candidat pour aucune clé -> voisine morte -> 0. */
     struct array_part cand_empty = { .size = 0, .parts = NULL };
     map_big_array *map_empty = make_uniform_map(&cand_empty);
-    ASSERT_EQ_FMT(0, bt_forward_check(C, &board, map_empty, 0), "%d");
+    ASSERT_EQ_FMT(0, bt_forward_check(C, &board, map_empty, 0, 0), "%d");
 
     PASS();
 }
 
-/* bt_forward_check : une case PRÉ-REMPLIE de la fenêtre est sautée sans lookup
- * (grid != -2), et un candidat id 0 (trou de map) est ignoré sans tuer la case. */
+/* bt_forward_check : une voisine déjà remplie de (cx, cy) est sautée sans
+ * lookup (grid != -2), et un candidat id 0 (trou de map) est ignoré sans
+ * tuer la voisine restante. */
 TEST bt_forward_check_skips_prefilled_and_zero_id(void)
 {
     struct possibility_packet board;
@@ -451,14 +454,45 @@ TEST bt_forward_check_skips_prefilled_and_zero_id(void)
     key_part C[ETERN_SIZE][ETERN_SIZE];
     bt_init_constraints(C, &board, make_parts(), 2);
 
-    /* La première case du parcours est déjà remplie : sautée par la fenêtre. */
-    board.grid[dirx[0]][diry[0]] = 3;
+    /* Une des deux voisines du coin (0,0) est déjà remplie : sautée sans lookup. */
+    board.grid[1][0] = 3;
 
-    /* Candidats [id 0 (ignoré), id 9 (libre)] : les cases vides restent vivantes. */
+    /* Candidats [id 0 (ignoré), id 9 (libre)] : la voisine restante (0,1) reste vivante. */
     struct part cand[2] = { { .id = 0 }, { .id = 9 } };
     struct array_part list = { .size = 2, .parts = cand };
     map_big_array *map = make_uniform_map(&list);
-    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 0), "%d");
+    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 0, 0), "%d");
+
+    PASS();
+}
+
+/* bt_forward_check n'inspecte QUE les voisines géométriques de (cx, cy) — au
+ * plus 4, jamais une case plus lointaine du parcours (l'ancien comportement
+ * à fenêtre, cf. docs/conception/elagage_recherche.md §4.1). Verrouillé en
+ * comptant les voisines réellement inspectées via fc_cells_studied : sur le
+ * coin (0,0), au plus 2 (jamais 4, jamais un nombre dépendant de
+ * FORWARD_CHECK_K). */
+TEST bt_forward_check_inspects_at_most_geometric_neighbors(void)
+{
+    struct possibility_packet board;
+    make_empty_board(&board);
+
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, make_parts(), 2);
+
+    struct part p_free[1] = { { .id = 9 } };
+    struct array_part cand_free = { .size = 1, .parts = p_free };
+    map_big_array *map = make_uniform_map(&cand_free);
+
+    unsigned long long before = fc_cells_studied;
+    /* Coin (0,0) : 2 voisines dans la grille, (1,0) et (0,1). */
+    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 0, 0), "%d");
+    ASSERT_EQ_FMT(before + 2, fc_cells_studied, "%llu");
+
+    before = fc_cells_studied;
+    /* Case intérieure (1,1) (existe dès ETERN_SIZE >= 3) : 4 voisines. */
+    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 1, 1), "%d");
+    ASSERT_EQ_FMT(before + 4, fc_cells_studied, "%llu");
 
     PASS();
 }
@@ -466,8 +500,11 @@ TEST bt_forward_check_skips_prefilled_and_zero_id(void)
 /* bt_forward_check lit la map via l'index COMPACT (map_bucket_packed) et non
  * via `flat`. Sur une map RÉELLE (bâtie par buildBigArray, donc pourvue de son
  * index — les fixtures faites main ci-dessus exercent, elles, le repli), les
- * deux représentations doivent conduire au MÊME verdict pour chaque fenêtre :
- * c'est l'invariant « même élagage, donc mêmes nœuds explorés ». */
+ * deux représentations doivent conduire au MÊME verdict pour CHAQUE case
+ * candidate : c'est l'invariant « même élagage, donc mêmes nœuds explorés ».
+ * Balaie les 16 cases (coin, bordure, intérieur) plutôt qu'une fenêtre de
+ * parcours : la case candidate détermine désormais directement l'ensemble
+ * des voisines inspectées. */
 TEST bt_forward_check_same_verdict_with_and_without_packed_index(void)
 {
     /* Jeu couvrant les trois natures de case du plateau : coin (deux bords de
@@ -508,12 +545,12 @@ TEST bt_forward_check_same_verdict_with_and_without_packed_index(void)
         if (phase == 1) {
             for (int id = 1; id <= nb_ids; id++) set_face_used(board.b_faceused, id - 1, 1);
         }
-        for (int alloc = 0; alloc < 4 && alloc < ETERN_PARTS; alloc++) {
-            int with_index = bt_forward_check(C, &board, map, alloc);
+        for (int cx = 0; cx < ETERN_SIZE; cx++) for (int cy = 0; cy < ETERN_SIZE; cy++) {
+            int with_index = bt_forward_check(C, &board, map, cx, cy);
 
             uint32_t *saved = map->packed;
             map->packed = NULL; /* force le repli sur `flat` */
-            int without_index = bt_forward_check(C, &board, map, alloc);
+            int without_index = bt_forward_check(C, &board, map, cx, cy);
             map->packed = saved;
 
             ASSERT_EQ_FMT(without_index, with_index, "%d");
@@ -2220,6 +2257,7 @@ SUITE(etii_search_suite)
 #if FORWARD_CHECK_K > 0
     RUN_TEST(bt_forward_check_detects_dead_cells);
     RUN_TEST(bt_forward_check_skips_prefilled_and_zero_id);
+    RUN_TEST(bt_forward_check_inspects_at_most_geometric_neighbors);
     RUN_TEST(bt_forward_check_same_verdict_with_and_without_packed_index);
 #endif
     RUN_TEST(bt_materialize_pending_orders_deepest_first);

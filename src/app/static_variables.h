@@ -248,16 +248,23 @@
 #define BUF_SIZE 300
 
 /**
- * @brief Taille de la fenêtre de forward-checking.
+ * @brief Bascule d'activation du forward-checking, et taille de fenêtre du
+ *        chemin froid `forward_check_next_k`.
  *
- * Après avoir placé une pièce à `directions[i]`, on vérifie que les
- * `FORWARD_CHECK_K` prochaines cases (`directions[i+1] ... directions[i+K]`)
- * possèdent encore au moins une pièce candidate compatible compte tenu de
- * l'état courant du plateau et du stock de pièces. Si l'une est « morte »,
- * la branche est abandonnée immédiatement sans la pousser dans la file.
+ * Sur la boucle chaude (`bt_forward_check`, `etii_search.c`), CETTE VALEUR NE
+ * BORNE PLUS AUCUNE FENÊTRE depuis le passage aux voisines géométriques : le
+ * nombre de cases inspectées après un placement est une propriété de la
+ * grille (au plus 4 voisines), indépendante de `FORWARD_CHECK_K`. Seul le
+ * chemin froid `forward_check_next_k` (`possibility.c` — matérialisation de
+ * délégation, tests) garde l'ancienne sémantique de fenêtre : après avoir
+ * placé une pièce à `directions[i]`, il vérifie que les `FORWARD_CHECK_K`
+ * prochaines cases (`directions[i+1] ... directions[i+K]`) possèdent encore
+ * au moins une pièce candidate. Voir `docs/conception/elagage_recherche.md`
+ * §4.1 pour la mesure qui motive ce changement (39 % des relations de
+ * voisinage jamais couvertes par l'ancienne fenêtre K=6).
  *
- * Une valeur plus élevée détecte les impasses plus tôt mais coûte plus de
- * lookups par placement. K=3 est un bon compromis par défaut.
+ * `FORWARD_CHECK_K == 0` reste le seul interrupteur : il compile TOUT le
+ * forward-checking hors du binaire (les deux chemins).
  */
 // Surchargeable via -DFORWARD_CHECK_K=0 (désactive le forward-checking) : la CI
 // compile aussi cette variante. Défaut 6.
@@ -306,15 +313,23 @@ extern volatile unsigned long long fc_attempts;
 #endif
 
 /**
- * @brief Cumul des élagages par distance de la première case morte.
+ * @brief Cumul des élagages par position dans la fenêtre inspectée.
  *
  * `fc_pruned_at[j]` compte les élagages dont la première case sans candidat
- * est à distance j (1..FORWARD_CHECK_K) du placement testé. La somme des
- * indices 1..K vaut `fc_pruned`. Permet d'estimer la taille des sous-arbres
- * économisés (croissance géométrique avec la distance) et donc le rapport
- * gain/coût de la valeur de K choisie.
+ * est en position j (1..) dans la fenêtre inspectée par l'appelant. Deux
+ * appelants y contribuent, avec des fenêtres de nature différente :
+ * - `bt_forward_check` (`etii_search.c`, boucle chaude) inspecte les VOISINES
+ *   géométriques de la pièce qu'on vient de placer — au plus 4, donc j ∈ [1,4] ;
+ * - `forward_check_next_k` (`possibility.c`, chemins froids : matérialisation
+ *   de délégation, tests) inspecte encore les `FORWARD_CHECK_K` prochaines
+ *   cases du PARCOURS — j ∈ [1, FORWARD_CHECK_K].
+ * Le tableau est dimensionné sur `FC_STAT_MAX_K` (borne indépendante de
+ * `FORWARD_CHECK_K`, cf. `etii_statistic.h`) pour rester sûr quel que soit le
+ * plus petit des deux domaines. La somme de tous les indices vaut toujours
+ * `fc_pruned` ; sa répartition n'estime plus une distance de parcours
+ * uniforme — voir `docs/conception/elagage_recherche.md` (§4.1).
  */
-extern volatile unsigned long long fc_pruned_at[FORWARD_CHECK_K + 1];
+extern volatile unsigned long long fc_pruned_at[FC_STAT_MAX_K + 1];
 #endif // FORWARD_CHECK_K > 0
 
 extern uint8_t directions[ETERN_PARTS];
@@ -463,11 +478,12 @@ extern volatile unsigned long long pruner_cells_studied;
 /**
  * @brief Cumul des cases inspectées par le forward-checking.
  *
- * Chaque appel à `forward_check_next_k` / `bt_forward_check` inspecte jusqu'à
- * `FORWARD_CHECK_K` cases : ce cumul compte chaque case réellement inspectée
- * (cases déjà remplies sautées non comptées). Même unité qu'un coup de la
- * recherche, flux disjoint de `counters`. Reste à 0 quand
- * `FORWARD_CHECK_K == 0`. Incrémenté par ajout atomique (boucle chaude
+ * Chaque appel à `bt_forward_check` (boucle chaude : au plus 4 voisines
+ * géométriques) ou `forward_check_next_k` (chemin froid : jusqu'à
+ * `FORWARD_CHECK_K` cases du parcours) ajoute au cumul chaque case
+ * RÉELLEMENT inspectée (cases déjà remplies sautées non comptées). Même
+ * unité qu'un coup de la recherche, flux disjoint de `counters`. Reste à 0
+ * quand `FORWARD_CHECK_K == 0`. Incrémenté par ajout atomique (boucle chaude
  * multi-thread), comme `fc_attempts`.
  */
 extern volatile unsigned long long fc_cells_studied;
