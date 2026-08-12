@@ -115,7 +115,11 @@ genèse), ses tests existants en dépendent, et il ne pèse pas sur le débit �
 docstring de `bt_forward_check` (`etii_search.c`) pour le partage explicite des
 responsabilités entre les deux fonctions.
 
-### 4.2 Contrainte de type coin / bord / intérieur
+### 4.2 Contrainte de type coin / bord / intérieur — VARIANTE « COMPTEURS » ÉVALUÉE ET ÉCARTÉE
+
+**Statut : la variante « compteurs » évaluée et abandonnée** (code absent de `master`) ;
+la variante « partition de l'arène » reste une proposition non essayée — voir la décision
+en fin de section. Même esprit que §4.4 : correct, testé, mesuré, reverté avant commit.
 
 **Principe.** `buildBigArray` place **toutes** les pièces dans le compartiment wildcard :
 rien n'interdit une pièce de cadre sur une case intérieure. Pire, le forward-check ne
@@ -130,19 +134,57 @@ d'index < 74** sont concernées — mais elles sont tout en haut de l'arbre, là
 sous-arbre condamné coûte le plus cher, et la détection n'est garantie qu'à la **dernière**
 case de cadre (médiane 34 niveaux plus loin, max 71).
 
-**Deux implémentations, toutes deux à coût nul :**
+**Implémentation testée : compteurs, mais volontairement AFFAIBLIS.** L'idée d'origine
+(« coins_libres/bords_libres » comptés en scannant `b_faceused` pour connaître le type de
+chaque pièce déjà utilisée) exige d'interroger le type d'un `id` arbitraire via
+`all_rotate_part` — sûr en production (toujours dimensionné à `ETERN_PARTS`), mais PAS
+garanti par tous les fixtures de test existants (`make_small_parts()`, utilisé par une
+dizaine de tests de `search_packet_backtracking`, n'a que 8 entrées avec un indexage qui
+ne correspond pas à la convention `id`-comme-indice de `rotate_all_parts`). Plutôt que de
+retoucher ce fixture partagé (risque de régression sur des tests qui n'ont rien à voir
+avec cette piste), l'implémentation testée est **volontairement plus faible** : les
+compteurs repartent de la capacité THÉORIQUE MAXIMALE (4 coins, `4×(ETERN_SIZE−2)` bords)
+à **chaque appel** de `search_packet_backtracking`, et ne sont ajustés que par les
+décisions prises PAR CET APPEL — jamais par un scan de l'état hérité d'un ancêtre ou d'un
+paquet matérialisé par `bt_materialize_pending`. Un stock en excès ne peut jamais produire
+de faux positif (le test ne compare qu'un déficit) : cette simplification ne peut que
+**manquer** une famine déjà introduite ailleurs, jamais rejeter à tort une branche valide
+— mais elle est, de ce fait, structurellement aveugle à toute famine héritée par
+délégation, un chemin pourtant fréquent.
 
-- **compteurs** : maintenir `coins_libres`/`bords_libres` et
-  `cases_coin_vides`/`cases_bord_vides` ; toute inégalité ⇒ branche morte. Deux
-  comparaisons par placement, et le cas « pièce de coin sur une case de bord » est couvert
-  par la même mécanique ;
-- **partition de l'arène** : ranger les pièces intérieures en tête de chaque compartiment
-  et stocker un `n_interieur` par bucket. Une case intérieure n'itère que le préfixe :
-  zéro test par candidat, et les balayages du forward-check raccourcissent aussi.
+**Mesuré** (`tests/bench/bench_search.sh`, puzzle 256, A/B à ordre alterné, 50 M nœuds × 2
+répétitions × 2 tours) :
 
-La seconde est préférable (elle *supprime* le travail au lieu de le rejeter) mais touche
-[`part.c`](../../src/core/part.c) et l'invariant « `packed` est purement redondant sur
-`flat` » — arbitrage à trancher en §6.
+| Configuration | Nœuds/s | `fc_frame_starvation` | `max_result` |
+|---|---|---|---|
+| Sans | ≈ 10,8 M | — | 74 |
+| Avec | ≈ 9,3 M | **0** | 74 |
+| Delta | **−14 %** | — | inchangé |
+
+`fc_frame_starvation` reste à **zéro** jusqu'à 200 M nœuds explorés — jamais un seul
+déclenchement, malgré l'estimation *a priori* plus favorable que §4.4 (2 à 12 % des
+candidats d'une case intérieure sont des pièces de cadre, cf. §3.3 — contre un événement
+composé et rare pour le conflit de singletons). Le coût (≈ 5 comparaisons entières et 2
+`if` supplémentaires par placement, dans la boucle la plus chaude du programme) est,
+comme pour §4.4, systématique et sans contrepartie mesurée.
+
+**Pourquoi ça ne se déclenche pas malgré une estimation plus favorable (hypothèse, non
+vérifiée en détail).** Deux explications distinctes, non exclusives : (1) le stock de
+pièces de cadre (4 coins, jusqu'à 56 bords sur le puzzle 256) est large comparé au nombre
+de décisions qu'un seul appel de `search_packet_backtracking` prend avant délégation ou
+épuisement — une poignée de mauvais placements dans UN sous-arbre a peu de chances
+d'épuiser un stock aussi grand ; (2) la variante testée, comme expliqué ci-dessus, ne voit
+JAMAIS une famine introduite avant le début de cet appel (délégation, ancêtre) — exactement
+le chemin par lequel une vraie famine, une fois introduite, se propagerait dans l'arbre.
+
+**Décision : ne pas merger le code de la variante compteurs affaiblie.** La variante
+« partition de l'arène » (toujours en proposition, §6) contourne le problème différemment
+: elle empêche la MAUVAISE PIÈCE d'être un candidat du tout (au lieu de la rejeter après
+coup), donc n'a pas besoin de connaître le type des pièces déjà utilisées — elle échappe
+entièrement au risque de fixture qui a motivé l'affaiblissement des compteurs. C'est la
+piste à essayer en premier si ce mécanisme est repris, plutôt qu'une version renforcée
+(ancêtre-consciente) des compteurs, qui replonge dans le même risque de fixture pour un
+gain non démontré.
 
 ### 4.3 Comptage global couleur : demande de frontière vs stock disponible — IMPLÉMENTÉ, MESURÉ, ÉCARTÉ
 
@@ -390,10 +432,11 @@ risque, à mener au banc.
 
 ## 6. Points laissés ouverts
 
-- **4.2 : compteurs ou partition de l'arène ?** La partition supprime le travail au lieu de
-  le rejeter, mais ajoute un champ par compartiment et met en tension l'invariant
-  « `packed` est purement redondant sur `flat` ». Trancher au vu du coût mesuré des
-  compteurs.
+- ~~**4.2 : compteurs ou partition de l'arène ?**~~ Tranché par élimination : les compteurs
+  (variante affaiblie, seule testée) sont écartés (§4.2, −14 % de débit, 0 déclenchement).
+  La partition reste ouverte et devient la SEULE variante encore candidate — elle
+  échappe au risque de fixture qui a motivé l'affaiblissement des compteurs, en empêchant
+  la mauvaise pièce d'être candidate plutôt qu'en la rejetant après coup.
 - ~~**4.1 : garder ou non la fenêtre `c+1 … c+2` ?**~~ Tranché : non — voir §4.1, mesure à
   l'appui (−0,06 point de taux d'élagage sans la fenêtre résiduelle, effet négligeable).
 - ~~**4.4 : le conflit de singletons est-il rentable ?**~~ Tranché : non, dans l'état actuel
