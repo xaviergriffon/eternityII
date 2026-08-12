@@ -29,7 +29,7 @@ survivent nulle part ailleurs.
 
 | Document | Statut | Contenu |
 |---|---|---|
-| [elagage_recherche.md](elagage_recherche.md) | proposition | Élargir l'élagage au-delà du forward-check de proximité : le faire porter sur les voisines plutôt que sur la fenêtre de parcours, contrainte de type coin/bord/intérieur, comptage global couleur, conflit de singletons, propagation des cases forcées, pruner à budget de nœuds, ordre dynamique. Mesures de couverture à l'appui et découpage en 9 PR. |
+| [elagage_recherche.md](elagage_recherche.md) | en cours d'implémentation | Élargir l'élagage au-delà du forward-check de proximité. PR 1/9 livrée : voisines géométriques plutôt que fenêtre de parcours (+68,8 % de débit, taux d'élagage quasi inchangé). Restent en proposition : contrainte de type coin/bord/intérieur, comptage global couleur, conflit de singletons, propagation des cases forcées, pruner à budget de nœuds, ordre dynamique. |
 
 Voir aussi *Documents supprimés* ci-dessous pour ceux entièrement implémentés et absorbés
 par `docs/`.

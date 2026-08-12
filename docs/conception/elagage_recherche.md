@@ -1,8 +1,8 @@
 # Élagage de la recherche : pistes au-delà du forward-check
 
-**Statut : proposition.** Aucune de ces pistes n'est implémentée. Ce document décrit une
-cible, pas le comportement actuel du code — pour ce dernier, voir
-[autosearch_step.md](../autosearch_step.md).
+**Statut : en cours d'implémentation.** PR 1 (§4.1) livrée et mesurée — voir
+[autosearch_step.md §1.3 ter](../autosearch_step.md#13-ter-bt_forward_check--les-voisines-de-la-pièce-posée-pas-une-fenêtre-de-parcours)
+pour le comportement actuel. Les pistes 2 à 9 restent des propositions non implémentées.
 
 ## 1. Question posée
 
@@ -63,7 +63,12 @@ n'exige de faire tourner le solveur.
 Chacune est une **condition nécessaire** : elle ne peut jamais rejeter une branche qui
 mène à une solution. C'est le seul critère non négociable (§5).
 
-### 4.1 Forward-check sur les voisines plutôt que sur la fenêtre de parcours
+### 4.1 Forward-check sur les voisines plutôt que sur la fenêtre de parcours — LIVRÉ
+
+**Statut : implémenté.** Voir
+[autosearch_step.md §1.3 ter](../autosearch_step.md#13-ter-bt_forward_check--les-voisines-de-la-pièce-posée-pas-une-fenêtre-de-parcours)
+pour le comportement actuel ; ce qui suit reste la trace du raisonnement et de la mesure
+qui ont tranché.
 
 **Principe.** Poser une pièce en `c` ne modifie la clé que de ses **4 voisines**. Le FC
 actuel inspecte `c+1 … c+6` dans l'ordre `directions[]`, qui n'est pas un ordre de
@@ -75,14 +80,35 @@ un retard médian de 8 niveaux et jusqu'à 152.
 voisines, et `constraints[x][y]` fournit leur clé sans recalcul — le lookup
 `map_bucket_packed` est identique.
 
-**Variante prudente.** Voisines ∪ `c+1 … c+2`. La fenêtre actuelle attrape aussi un
-second effet, distinct : une case lointaine qui perd son **dernier candidat libre** parce
-que la pièce vient d'être consommée ailleurs. Effet réel mais faible ; à mesurer avant de
-le supprimer.
+**Mesuré** (`tests/bench/bench_search.sh`, puzzle 256, A/B à ordre alterné pour neutraliser
+la dérive thermique de la machine, 20 M nœuds × 5) :
 
-**Impact statistique.** `fc_pruned_at[]` est indexé par distance dans le parcours ; sa
-sémantique devient « distance de voisinage » et l'histogramme n'est plus comparable
-d'avant à après. À réétiqueter dans la même PR.
+| Configuration | Nœuds/s | Taux d'élagage |
+|---|---|---|
+| Avant (fenêtre `K=6`) | 5 867 621 | 45,7099 % |
+| Après (voisines) | 9 906 019 | 45,6471 % |
+| Delta | **+68,8 %** | −0,06 point |
+
+**Variante prudente écartée.** L'hypothèse initiale envisageait `voisines ∪ c+1 … c+2`, au
+cas où la fenêtre attraperait un second effet (une case lointaine perdant son dernier
+candidat libre par consommation ailleurs). Mesuré : le taux d'élagage bouge de −0,06 point
+seulement en passant aux voisines SEULES — cet effet est donc négligeable en pratique, pas
+assez pour justifier le coût et la complexité de la variante mixte. **Décision : voisines
+seules, pas de fenêtre résiduelle.**
+
+**Impact statistique.** `fc_pruned_at[]` est réétiqueté « position dans la fenêtre
+inspectée » (1..4 pour la boucle chaude, 1..`FORWARD_CHECK_K` pour le chemin froid
+`forward_check_next_k`, resté sur l'ancienne sémantique de fenêtre) plutôt que « distance
+de parcours ». Dimensionné sur `FC_STAT_MAX_K` (borne fixe, indépendante de
+`FORWARD_CHECK_K`) pour rester sûr quel que soit le plus petit des deux domaines — voir le
+commentaire de `fc_pruned_at` dans `static_variables.h`.
+
+**Chemin froid non touché.** `forward_check_next_k` (`possibility.c`, matérialisation de
+délégation + tests) garde sciemment l'ancienne sémantique de fenêtre : son contrat est
+plus général (une fenêtre de parcours a un sens même sans pièce « juste posée », ex. à la
+genèse), ses tests existants en dépendent, et il ne pèse pas sur le débit — voir la
+docstring de `bt_forward_check` (`etii_search.c`) pour le partage explicite des
+responsabilités entre les deux fonctions.
 
 ### 4.2 Contrainte de type coin / bord / intérieur
 
@@ -247,9 +273,8 @@ risque, à mener au banc.
   le rejeter, mais ajoute un champ par compartiment et met en tension l'invariant
   « `packed` est purement redondant sur `flat` ». Trancher au vu du coût mesuré des
   compteurs.
-- **4.1 : garder ou non la fenêtre `c+1 … c+2` ?** Dépend de la part d'élagages réellement
-  due à l'épuisement de pièce plutôt qu'à la contrainte de couleur — non mesurée à ce jour,
-  et `fc_pruned_at[]` ne distingue pas les deux causes.
+- ~~**4.1 : garder ou non la fenêtre `c+1 … c+2` ?**~~ Tranché : non — voir §4.1, mesure à
+  l'appui (−0,06 point de taux d'élagage sans la fenêtre résiduelle, effet négligeable).
 - **4.3 : le test tire-t-il jamais ?** Aucune estimation *a priori* fiable ; le compteur
   livré avec la PR tranchera.
 - **4.6b : quel budget de nœuds ?** Dépend du profil de profondeur du stock serveur, que
@@ -270,7 +295,7 @@ recherché ici.
 
 | PR | Contenu | Risque | Décision attendue |
 |---|---|---|---|
-| 1 | **4.1** forward-check sur les voisines (+ réétiquetage de `fc_pruned_at[]`, + A/B) | faible | garder la fenêtre `c+1..c+2` ou non |
+| 1 | ~~**4.1** forward-check sur les voisines (+ réétiquetage de `fc_pruned_at[]`, + A/B)~~ **livré** | faible | pas de fenêtre résiduelle (mesuré, §4.1) |
 | 2 | **4.4** conflit de singletons dans le même balayage | faible | rentable ou non |
 | 3 | **4.2** contrainte de type coin/bord/intérieur | faible | compteurs ou partition |
 | 4 | **4.3** comptage global couleur + compteur `count_pruned` | faible | conserver ou retirer |
