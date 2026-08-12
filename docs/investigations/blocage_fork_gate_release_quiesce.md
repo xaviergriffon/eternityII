@@ -1,9 +1,14 @@
 # Blocage permanent intermittent dans `fork_gate_release_quiesce`
 
-**Statut : ouverte** — cause exacte non confirmée. Deux correctifs structurels appliqués
-par prudence (ils réduisent une fenêtre de course plausible), sans preuve qu'ils
-éliminent le blocage lui-même. Voir la convention de ce répertoire dans
-[README.md](README.md).
+**Statut : résolue.** Cause confirmée grâce au journal de trace en mémoire décrit
+ci-dessous (lui-même construit parce que `strace -f` empêchait la reproduction — voir
+*`strace -f` empêche la reproduction* plus bas) : `fork_gate_release_quiesce()` était
+appelée par le FILS fraîchement forké, pas seulement par le parent — voir *Cause
+confirmée* tout en bas pour le détail complet et le correctif. Document conservé (plutôt
+qu'absorbé et supprimé, cf. la convention de [README.md](README.md)) : le raisonnement,
+les fausses pistes écartées une à une (bug glibc/architecture, famine CPU/thermique,
+`SA_RESTART`, boucle de fork sans vérification de `REQUEST_STOP`) et la méthode de
+capture gardent de la valeur pour un futur blocage de nature similaire.
 
 ## Symptôme signalé par l'opérateur
 
@@ -150,18 +155,148 @@ glibc (`__condvar_quiesce_and_switch_g1`) — seulement pourquoi/quand un partic
 disparaître, et une piste plausible (mais non prouvée) de fenêtre de course élargie
 entre cette disparition et un cycle de quiescence en cours.
 
-## Prochaine étape si le problème se reproduit encore
+## `strace -f` empêche la reproduction — piste abandonnée
 
-La capture décisive manquante est un `strace -f` attaché **au tout début** du process
-parent (avant même le premier `fork()`), journalisant la création et la sortie de
-CHAQUE thread avec horodatage — pour obtenir la séquence causale complète (quel thread
-sort, à quel instant précis, par rapport à quel cycle de quiescence) plutôt qu'un
-instantané a posteriori qui ne montre que l'état final.
+La capture initialement envisagée (`strace -f` attaché dès le lancement, journalisant la
+création/sortie de chaque thread) a été essayée : **avec `strace`, le blocage ne se
+reproduit quasiment jamais ; sans lui, presque à chaque lancement.** L'opérateur a
+observé que « la rapidité du lancement semble influencer le problème » — cohérent avec
+une vraie course : l'interception ptrace de `strace` ralentit CHAQUE appel système
+intercepté (arrêt + relais vers le traceur + reprise), ce qui referme la fenêtre de
+course pendant la séquence de démarrage (auto-démarrage puis création rapide des
+`nb_forks` forks). `strace` est donc inutilisable pour cette investigation précise —
+piste abandonnée.
+
+## Journal de trace en mémoire (`fork_gate_trace_record`) — la piste retenue
+
+Pour observer sans perturber, `src/app/fork_gate.{h,c}` trace désormais chaque
+transition d'état dans un ring en mémoire, SANS AUCUN appel système sur le chemin chaud
+(`clock_gettime(CLOCK_MONOTONIC)` passe par le VDSO sous Linux — pas de `syscall()` réel
+— suivi d'une simple écriture atomique dans un tableau préalloué) : invisible pour
+`strace`/ptrace, donc sans effet sur la reproductibilité. La lecture, elle, se fait APRÈS
+COUP — une fois le blocage déjà survenu — via `gdb` sur le process vivant (bloqué mais
+pas mort) :
 
 ```bash
-# Sur la machine où le client va être lancé, dans le même répertoire de travail :
-strace -f -tt -o /tmp/eternityii_strace.log ./eternityII client ... &
-# Laisser tourner jusqu'à la prochaine reproduction (le fichier peut devenir volumineux :
-# envisager -e trace=clone,futex,exit,exit_group,rt_sigaction,rt_sigprocmask pour limiter
-# le bruit aux appels pertinents pour cette investigation).
+PID=<pid du process PARENT bloqué — celui identifié par le filet par fork, ou repéré
+     par "cat /proc/<pid>/status | grep Threads" -> 1 sur un client qui devrait en avoir ~5>
+
+sudo gdb -p $PID -batch \
+  -ex "print g_fork_gate_trace_write_index" \
+  -ex "print g_fork_gate_trace_buf" \
+  -ex "detach" -ex "quit" 2>&1 | tee /tmp/eternityii_fork_gate_trace.txt
 ```
+
+`g_fork_gate_trace_write_index` donne le nombre total d'événements enregistrés depuis le
+démarrage (jamais remis à zéro, y compris après un tour du ring de
+`FORK_GATE_TRACE_CAPACITY` = 1024 entrées — seul `(write_index - 1) % 1024` donne
+l'entrée la plus récente). Chaque entrée de `g_fork_gate_trace_buf` a :
+
+- `timestamp_ns` — `CLOCK_MONOTONIC`, comparable entre entrées du même process (permet
+  de reconstruire l'ordre et les écarts en temps réel entre événements) ;
+- `tid` — identifiant de thread noyau (comparable directement au `TID` de `ps -T -p $PID`
+  ou du `LWP` affiché par `gdb`) ;
+- `slot` — le slot fork_gate concerné (-1 pour les événements globaux comme
+  `RELEASE_QUIESCE_BEGIN`/`END`) ;
+- `event` — une valeur de `fork_gate_trace_event_t` (`src/app/fork_gate.h`) : `0`=REGISTER,
+  `1`=UNREGISTER, `2`=PARK_BEGIN, `3`=PARK_END, `4`=BLOCKED_ON, `5`=BLOCKED_OFF,
+  `6`=REQUEST_QUIESCE_BEGIN, `7`=REQUEST_QUIESCE_QUIESCED, `8`=REQUEST_QUIESCE_TIMEOUT,
+  `9`=RELEASE_QUIESCE_BEGIN, `10`=RELEASE_QUIESCE_END.
+
+**Preuve directe recherchée dans le journal** : si le blocage est bien dans
+`fork_gate_release_quiesce`, la dernière entrée `RELEASE_QUIESCE_BEGIN` (9) du journal
+n'a JAMAIS de `RELEASE_QUIESCE_END` (10) correspondant qui la suit — la trace elle-même
+le montre, sans avoir besoin de `gdb`'s propre pile d'appels pour le déduire. Croiser
+ensuite avec les derniers `PARK_BEGIN`/`PARK_END` (par `tid`, pour voir quel participant
+n'a jamais eu de `PARK_END` après son dernier `PARK_BEGIN`) et les derniers
+`UNREGISTER` (pour voir si un participant a disparu juste avant) donne la séquence
+causale complète, exactement ce que `strace -f` aurait dû montrer sans le pouvoir.
+
+**Piège rencontré à la première utilisation : `gdb` sur le binaire de production
+(`make`, sans `-g`) refuse de décoder les types** (`'g_fork_gate_trace_buf' has unknown
+type; cast it to its declared type`) — le binaire n'embarque aucune information de
+debug, `gdb` ne voit que les symboles bruts. `make DEBUG=1` (mêmes flags d'optimisation
+`-Ofast`/`-O3 -ffast-math`, `-g` en plus) résout ça sans changer le timing d'exécution —
+contrairement à `strace`, ajouter `-g` ne modifie pas le code généré ni son
+ordonnancement. Redéployer ce binaire suffit à faire fonctionner `print
+g_fork_gate_trace_buf` normalement. Pour lire les 19 premières entrées précisément (et
+uniquement celles-là, sans le bruit des 1005 jamais utilisées) :
+
+```bash
+sudo gdb -p $PID -batch \
+  -ex "set width 0" -ex "set print elements 0" -ex "set pagination off" \
+  -ex "print g_fork_gate_trace_write_index" \
+  -ex "print g_fork_gate_trace_buf[0]@<write_index>" \
+  -ex "detach" -ex "quit"
+```
+
+## Cause confirmée
+
+Première reproduction réelle avec le journal de trace, `write_index = 19` (le blocage
+survient très tôt — dans les 19 premiers événements `fork_gate` du démarrage). Décodage
+des entrées clés (horodatages en millisecondes relatives à la première entrée) :
+
+```
+t≈4006ms  tid=568528  slot=-1  REQUEST_QUIESCE_BEGIN      (2ᵉ cycle de fork — le 1ᵉʳ, entrées 10-15, avait réussi EN ENTIER avec ce même tid)
+t≈4204ms  tid=568528  slot=-1  REQUEST_QUIESCE_QUIESCED   (toujours le même tid)
+          [fork() a lieu ici]
+t≈4205ms  tid=568552  slot=-1  RELEASE_QUIESCE_BEGIN      ← TID DIFFÉRENT. Dernière entrée du journal — jamais de END.
+```
+
+Le `tid` de l'appelant de `RELEASE_QUIESCE_BEGIN` (568552) diffère de celui qui venait
+de réussir le `REQUEST_QUIESCE` précédent (568528), quelques microsecondes plus tôt,
+dans ce qui devrait être un simple appel séquentiel de la même fonction C. Or 568552
+correspond EXACTEMENT au `$PID` sur lequel `gdb` était attaché — c'est-à-dire que **le
+process observé comme « bloqué » n'était pas le parent, mais le FILS fraîchement forké**,
+toujours en train d'exécuter la même fonction (son `main()` hérité du parent est encore
+sur sa pile, puisqu'il n'a pas encore atteint la branche `spawn_child_body` qui l'en
+détournerait).
+
+En relisant `orchestrator_spawn_forks` (`src/app/fork_orchestrator.c`), la cause saute
+aux yeux :
+
+```c
+fork_gate_acquire_io_locks();
+child_pid = fork();
+fork_gate_release_io_locks();
+fork_gate_release_quiesce();   // <-- appelée AVANT le test suivant : donc par les DEUX branches
+
+if (child_pid != 0) {
+    // ... traitement propre au parent ...
+} else {
+    // ... spawn_child_body(c), le fils ...
+}
+```
+
+`fork_gate_release_quiesce()` était placée AVANT le test `if (child_pid != 0)` — donc
+exécutée par le FILS aussi bien que par le parent. Le fils hérite (COW) tout l'état de
+`fork_gate` (`g_mutex`, `g_released`, `g_slots[]`) au moment du `fork()`. Si l'état
+interne de la condvar `g_released` (le compteur/générateur G1/G2 interne à
+`pthread_cond_t`, une mécanique privée de glibc) était, À CET INSTANT PRÉCIS, en cours
+de transition dans un AUTRE thread du parent — un réveil de `pthread_cond_wait` en train
+de se terminer, par exemple — le fils hérite un instantané FIGÉ et INCOHÉRENT de cette
+condvar (`fork()` ne clone que le thread appelant ; les autres threads du parent, et
+donc leur travail en cours sur cette condvar, n'existent simplement plus dans le fils).
+Le fils rappelant alors `pthread_cond_broadcast()` sur cette même condvar peut rester
+bloqué à jamais, attendant que la comptabilité interne de glibc soit satisfaite par un
+thread qui n'existe plus et ne existera jamais dans ce process.
+
+C'est un piège général et documenté de la combinaison `fork()` + variables de condition
+(POSIX ne garantit leur cohérence dans le fils que si elles étaient IDLE — sans aucun
+thread en transition dessus — au moment précis du `fork()`), **pas un bug glibc précis**
+— ce qui explique la reproduction identique sur deux architectures et deux versions de
+glibc très éloignées (glibc 2.35 aarch64 et glibc 2.39 x86_64), et pourquoi `strace -f`
+empêchait la reproduction (le ralentissement changeait la probabilité qu'un AUTRE thread
+soit exactement en transition sur cette condvar à l'instant du `fork()`).
+
+**Correctif** (`src/app/fork_orchestrator.c`) : `fork_gate_release_quiesce()` n'est plus
+appelée que dans la branche parent (`if (child_pid != 0) { fork_gate_release_quiesce();
+... }`). Le fils n'a de toute façon rien à en faire : il vient de naître avec un seul
+thread, sans le moindre participant `fork_gate` à lui — `fork_gate_release_io_locks()`,
+en revanche, reste appelée dans les DEUX branches (elle libère bien SA PROPRE copie
+héritée d'un verrou stdio, un besoin réel du fils, sans rapport avec la quiescence).
+
+Les deux correctifs appliqués par prudence pendant l'investigation (`SA_RESTART` retiré,
+boucle de fork vérifiant `REQUEST_STOP`) restent en place — ils corrigent des défauts
+réels indépendants, découverts en cours de route, même s'ils n'étaient pas LA cause de
+ce blocage précis.

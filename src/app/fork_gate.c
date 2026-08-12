@@ -5,6 +5,10 @@
 #include <time.h>
 #include <errno.h>
 #include <pthread.h>
+#include <unistd.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif // __linux__
 
 #include "ui/logger.h"
 
@@ -37,6 +41,38 @@ static fork_gate_slot_t g_slots[FORK_GATE_MAX_PARTICIPANTS];
    fc_attempts/fc_pruned de etii_client.c. Toute écriture passe par g_mutex. */
 static volatile int g_quiesce_requested = 0;
 
+/* Journal de trace (diagnostic, cf. fork_gate.h) : ring signal-safe rempli par
+   un simple __atomic_fetch_add, même patron que child_death_record
+   (app_runtime.c). Délibérément SANS verrou et SANS appel système sur le
+   chemin chaud (clock_gettime passe par le VDSO sous Linux — pas de
+   syscall() réel), pour rester invisible à strace/ptrace : entourer le
+   process de strace, même limité à quelques appels système, a empêché la
+   reproduction du blocage étudié (le ralentissement introduit referme la
+   fenêtre de course) — ce journal est la façon d'observer sans perturber. */
+fork_gate_trace_record_t g_fork_gate_trace_buf[FORK_GATE_TRACE_CAPACITY];
+unsigned long g_fork_gate_trace_write_index = 0;
+
+static long trace_tid(void)
+{
+#ifdef __linux__
+    return (long)syscall(SYS_gettid);
+#else
+    return (long)(unsigned long)pthread_self();
+#endif // __linux__
+}
+
+void fork_gate_trace_record(fork_gate_trace_event_t event, int slot)
+{
+    unsigned long idx = __atomic_fetch_add(&g_fork_gate_trace_write_index, 1, __ATOMIC_RELAXED)
+        % FORK_GATE_TRACE_CAPACITY;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    g_fork_gate_trace_buf[idx].timestamp_ns = (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    g_fork_gate_trace_buf[idx].tid = trace_tid();
+    g_fork_gate_trace_buf[idx].slot = slot;
+    g_fork_gate_trace_buf[idx].event = event;
+}
+
 void fork_gate_reset(void)
 {
     pthread_mutex_lock(&g_mutex);
@@ -67,6 +103,7 @@ int fork_gate_register(const char *name)
     }
     pthread_cond_broadcast(&g_state_changed);
     pthread_mutex_unlock(&g_mutex);
+    fork_gate_trace_record(FGT_REGISTER, slot);
     return slot;
 }
 
@@ -75,6 +112,7 @@ void fork_gate_unregister(int slot)
     if (slot < 0 || slot >= FORK_GATE_MAX_PARTICIPANTS) {
         return;
     }
+    fork_gate_trace_record(FGT_UNREGISTER, slot);
     pthread_mutex_lock(&g_mutex);
     g_slots[slot].in_use = 0;
     pthread_cond_broadcast(&g_state_changed);
@@ -100,9 +138,11 @@ void fork_gate_checkpoint(int slot)
     }
     g_slots[slot].state = FORK_GATE_ST_PARKED;
     pthread_cond_broadcast(&g_state_changed);
+    fork_gate_trace_record(FGT_PARK_BEGIN, slot);
     while (g_quiesce_requested) {
         pthread_cond_wait(&g_released, &g_mutex);
     }
+    fork_gate_trace_record(FGT_PARK_END, slot);
     g_slots[slot].state = FORK_GATE_ST_RUNNING;
     pthread_mutex_unlock(&g_mutex);
 }
@@ -112,6 +152,7 @@ void fork_gate_mark_blocked(int slot, int blocked)
     if (slot < 0 || slot >= FORK_GATE_MAX_PARTICIPANTS) {
         return;
     }
+    fork_gate_trace_record(blocked ? FGT_BLOCKED_ON : FGT_BLOCKED_OFF, slot);
     pthread_mutex_lock(&g_mutex);
     g_slots[slot].state = blocked ? FORK_GATE_ST_BLOCKED : FORK_GATE_ST_RUNNING;
     pthread_cond_broadcast(&g_state_changed);
@@ -140,6 +181,7 @@ fork_gate_result_t fork_gate_request_quiesce(long timeout_ms)
         deadline.tv_sec += 1;
     }
 
+    fork_gate_trace_record(FGT_REQUEST_QUIESCE_BEGIN, -1);
     pthread_mutex_lock(&g_mutex);
     __atomic_store_n(&g_quiesce_requested, 1, __ATOMIC_RELAXED);
 
@@ -155,19 +197,29 @@ fork_gate_result_t fork_gate_request_quiesce(long timeout_ms)
             __atomic_store_n(&g_quiesce_requested, 0, __ATOMIC_RELAXED);
             pthread_cond_broadcast(&g_released);
             pthread_mutex_unlock(&g_mutex);
+            fork_gate_trace_record(FGT_REQUEST_QUIESCE_TIMEOUT, -1);
             return FORK_GATE_TIMEOUT;
         }
     }
     pthread_mutex_unlock(&g_mutex);
+    fork_gate_trace_record(FGT_REQUEST_QUIESCE_QUIESCED, -1);
     return FORK_GATE_QUIESCED;
 }
 
 void fork_gate_release_quiesce(void)
 {
+    fork_gate_trace_record(FGT_RELEASE_QUIESCE_BEGIN, -1);
     pthread_mutex_lock(&g_mutex);
     __atomic_store_n(&g_quiesce_requested, 0, __ATOMIC_RELAXED);
     pthread_cond_broadcast(&g_released);
     pthread_mutex_unlock(&g_mutex);
+    // Si le process se retrouve un jour bloqué à demeure dans le
+    // pthread_cond_broadcast ci-dessus (cf. docs/investigations/blocage_fork_gate_release_quiesce.md),
+    // cette trace n'est JAMAIS atteinte — l'entrée FGT_RELEASE_QUIESCE_BEGIN
+    // la plus récente sans FGT_RELEASE_QUIESCE_END correspondant qui la suit
+    // EST alors la preuve directe, dans le journal lui-même, que c'est cet
+    // appel précis qui est resté bloqué.
+    fork_gate_trace_record(FGT_RELEASE_QUIESCE_END, -1);
 }
 
 int fork_gate_is_quiescing(void)

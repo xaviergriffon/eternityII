@@ -187,6 +187,72 @@ TEST fork_gate_request_quiesce_times_out_on_stuck_participant(void)
     PASS();
 }
 
+/* ============================ journal de trace (diagnostic) ================= */
+
+/* fork_gate_trace_record : écrit une entrée exploitable (horodatage croissant,
+   tid non nul, champs fidèles) et avance g_fork_gate_trace_write_index d'exactement
+   un cran par appel — le contrat lu par gdb sur un process bloqué en
+   conditions réelles (cf. docs/investigations/blocage_fork_gate_release_quiesce.md). */
+TEST fork_gate_trace_record_writes_expected_fields(void)
+{
+    unsigned long before = g_fork_gate_trace_write_index;
+    fork_gate_trace_record(FGT_REGISTER, 3);
+    ASSERT_EQ_FMT(before + 1, g_fork_gate_trace_write_index, "%lu");
+
+    unsigned long idx = before % FORK_GATE_TRACE_CAPACITY;
+    ASSERT_EQ_FMT((int)FGT_REGISTER, (int)g_fork_gate_trace_buf[idx].event, "%d");
+    ASSERT_EQ_FMT(3, g_fork_gate_trace_buf[idx].slot, "%d");
+    ASSERT(g_fork_gate_trace_buf[idx].tid != 0);
+    ASSERT(g_fork_gate_trace_buf[idx].timestamp_ns > 0);
+    PASS();
+}
+
+/* Deux appels successifs : le second timestamp n'est jamais antérieur au
+   premier (CLOCK_MONOTONIC) — condition nécessaire pour reconstruire un ordre
+   causal à la lecture. */
+TEST fork_gate_trace_record_timestamps_are_monotonic(void)
+{
+    fork_gate_trace_record(FGT_PARK_BEGIN, 0);
+    unsigned long idx1 = (g_fork_gate_trace_write_index - 1) % FORK_GATE_TRACE_CAPACITY;
+    long long t1 = g_fork_gate_trace_buf[idx1].timestamp_ns;
+
+    fork_gate_trace_record(FGT_PARK_END, 0);
+    unsigned long idx2 = (g_fork_gate_trace_write_index - 1) % FORK_GATE_TRACE_CAPACITY;
+    long long t2 = g_fork_gate_trace_buf[idx2].timestamp_ns;
+
+    ASSERT(t2 >= t1);
+    PASS();
+}
+
+/* register/unregister/checkpoint/mark_blocked/request_quiesce/release_quiesce
+   alimentent bien le journal (pas seulement fork_gate_trace_record appelée
+   directement) — verrouille l'intégration, pas seulement la fonction isolée. */
+TEST fork_gate_public_api_feeds_trace(void)
+{
+    fork_gate_reset();
+    unsigned long before = g_fork_gate_trace_write_index;
+
+    int slot = fork_gate_register("trace-test");
+    ASSERT(slot >= 0);
+    /* BLOCKED et laissé ainsi (pas de retour à RUNNING avant request_quiesce) :
+       all_participants_quiescent_locked exige que ce seul participant soit
+       PARKED ou BLOCKED, jamais RUNNING — même patron que la console autour
+       de son read() bloquant. */
+    fork_gate_mark_blocked(slot, 1);
+    fork_gate_result_t rc = fork_gate_request_quiesce(50);
+    ASSERT_EQ_FMT((int)FORK_GATE_QUIESCED, (int)rc, "%d");
+    fork_gate_release_quiesce();
+    fork_gate_mark_blocked(slot, 0);
+    fork_gate_unregister(slot);
+
+    /* Au moins un événement par appel ci-dessus (REGISTER, BLOCKED_ON,
+       BLOCKED_OFF, REQUEST_QUIESCE_BEGIN, REQUEST_QUIESCE_QUIESCED,
+       RELEASE_QUIESCE_BEGIN, RELEASE_QUIESCE_END, UNREGISTER = 8). */
+    ASSERT(g_fork_gate_trace_write_index >= before + 8);
+    fork_gate_reset();
+    PASS();
+}
+
 /* ============================ primitives d'E/S ============================== */
 
 /* Smoke test : acquire/release ne doivent jamais se bloquer mutuellement
@@ -209,4 +275,7 @@ SUITE(fork_gate_suite)
     RUN_TEST(fork_gate_request_quiesce_succeeds_when_worker_parks);
     RUN_TEST(fork_gate_request_quiesce_times_out_on_stuck_participant);
     RUN_TEST(fork_gate_io_locks_acquire_and_release);
+    RUN_TEST(fork_gate_trace_record_writes_expected_fields);
+    RUN_TEST(fork_gate_trace_record_timestamps_are_monotonic);
+    RUN_TEST(fork_gate_public_api_feeds_trace);
 }

@@ -493,11 +493,46 @@ int orchestrator_spawn_forks(void)
             child_pid = fork();
 #endif // DEBUG_IN_MONO_PROCESS
             // Relâché IMMÉDIATEMENT, dans les DEUX branches, avant tout
-            // log_info/log_error qui suit (cf. commentaire ci-dessus).
+            // log_info/log_error qui suit (cf. commentaire ci-dessus) — le
+            // fils a hérité (COW) ce verrou VERROUILLÉ et doit relâcher SA
+            // PROPRE copie pour ne pas s'auto-bloquer à son premier log_*.
             fork_gate_release_io_locks();
-            fork_gate_release_quiesce();
-
+            // `fork_gate_release_quiesce()` en revanche NE DOIT JAMAIS être
+            // appelée par le fils — trouvé en investiguant un blocage
+            // permanent et intermittent (aarch64 ET x86_64, glibc 2.35 ET
+            // 2.39 : pas un bug d'architecture précis), via le journal de
+            // trace en mémoire de fork_gate.c (cf.
+            // docs/investigations/blocage_fork_gate_release_quiesce.md) —
+            // celui-ci a montré, sur un process réellement bloqué, que
+            // l'appelant de `fork_gate_release_quiesce` avait un tid DIFFÉRENT
+            // de celui qui venait de réussir le `fork_gate_request_quiesce`
+            // précédent : le "process" observé n'était en réalité PAS le
+            // parent mais LE FILS fraîchement créé, toujours en train
+            // d'exécuter cette même fonction (son pile d'appels contient
+            // encore `main()`, hérité du parent, puisqu'il n'a pas encore
+            // atteint la branche `spawn_child_body` ci-dessous). Avant ce
+            // correctif, l'appel était placé ICI — donc exécuté par les DEUX
+            // branches. Le fils hérite (COW) `g_mutex`/`g_released`/`g_slots`
+            // du parent : si l'état interne de `pthread_cond_t g_released`
+            // était, à l'instant précis du `fork()`, en cours de transition
+            // dans un AUTRE thread du parent (un réveil de
+            // `pthread_cond_wait` pas encore totalement achevé — le fils n'a
+            // par construction copié QUE le thread appelant, jamais les
+            // autres), le fils hérite un instantané figé et incohérent de
+            // cette condvar ; son propre `pthread_cond_broadcast` dessus peut
+            // alors rester bloqué à jamais sur une comptabilité interne que
+            // plus aucun thread (le fils n'en a qu'un, fraîchement créé) ne
+            // peut jamais compléter. Un piège général et documenté de
+            // `fork()` combiné aux condvars (POSIX ne garantit leur
+            // cohérence dans le fils que si elles étaient IDLE au moment du
+            // fork — jamais si un AUTRE thread du parent était en transition
+            // dessus), pas un bug glibc précis : cohérent avec la
+            // reproduction sur deux architectures et deux versions de glibc
+            // très éloignées. Le fils n'a de toute façon RIEN à relâcher : il
+            // vient de naître avec un seul thread, aucun participant à lui.
             if (child_pid != 0) {
+                fork_gate_release_quiesce();
+
                 if (child_pid == -1) {
                     // Échec de création de CE process : on le signale et on
                     // poursuit avec les autres — cf. main.c historique.
