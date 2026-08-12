@@ -112,15 +112,23 @@ int stuck_forks_threshold_elapsed(long running_since_ms, long now_ms)
     return (now_ms - running_since_ms) >= STUCK_FORKS_WARN_MS;
 }
 
+int fork_stat_is_zero(const struct client_statistics *stat)
+{
+    if (stat == NULL) {
+        return 1;
+    }
+    return stat->possibilities_in_stock == 0
+        && stat->analyses_in_stock == 0
+        && stat->shots_per_second == 0;
+}
+
 int fork_stats_all_zero(const struct client_statistics *stats, int nb)
 {
     if (nb <= 0 || stats == NULL) {
         return 1;
     }
     for (int f = 0; f < nb; f++) {
-        if (stats[f].possibilities_in_stock != 0
-            || stats[f].analyses_in_stock != 0
-            || stats[f].shots_per_second != 0) {
+        if (!fork_stat_is_zero(&stats[f])) {
             return 0;
         }
     }
@@ -170,10 +178,22 @@ static int g_restart_after_stop = 0;
  *         réussi. Comme `g_countdown_deadline_ms`, cet axe temporel n'est PAS
  *         porté par l'état pur `orch_state_t`. */
 static long g_running_since_ms = 0;
-/** @brief 1 une fois l'avertissement « aucun fork ne produit rien »
- *         émis pour le (re)fork en cours — jamais qu'une fois par démarrage,
- *         remis à 0 par le (re)fork suivant qui réussit. */
-static int g_stuck_forks_warned = 0;
+/** @brief Tableau (taille NB_THREADS au (re)fork) : 1 une fois l'avertissement
+ *         "ce fork ne produit rien" émis pour le SLOT correspondant du
+ *         (re)fork en cours — un par slot, jamais un seul drapeau global.
+ *
+ * Remplace un premier avertissement agrégé "AUCUN fork ne rapporte de
+ * travail" (tous à zéro) — trouvé insuffisant dès la première reproduction
+ * en conditions réelles (256 pièces, `nb_forks=3`) : deux forks sur trois
+ * restaient collés à zéro (`Fork 1`/`Fork 2` du rapport `check`) pendant que
+ * le troisième travaillait normalement — l'agrégat ne s'alarme QUE si TOUS
+ * les forks sont à zéro, donc ce cas concret (partiel, la vraie panne
+ * observée) ne déclenchait jamais rien, ni en console ni dans events.log.
+ * Réalloué (`calloc`, taille NB_THREADS) à chaque (re)fork réussi
+ * (`orchestrator_spawn_forks`) : NULL accepté partout en aval (désactive
+ * silencieusement le filet plutôt que de planter sur un OOM — diagnostic
+ * seulement, jamais critique). */
+static int *g_stuck_fork_warned = NULL;
 
 static long current_time_ms(void)
 {
@@ -539,10 +559,14 @@ int orchestrator_spawn_forks(void)
     g_active_forks = created;
     control_channel_request_reconnect();
 
-    // Base du filet de sécurité "aucun indicateur après démarrage" (cf.
-    // STUCK_FORKS_WARN_MS) : un seul avertissement par (re)fork réussi.
+    // Base du filet de sécurité "fork(s) sans indicateur après démarrage"
+    // (cf. STUCK_FORKS_WARN_MS) : un avertissement par SLOT, jamais réémis
+    // pour le même slot tant que ce (re)fork tourne. `calloc` peut renvoyer
+    // NULL (OOM) : toléré, le filet se désactive silencieusement plutôt que
+    // de planter — diagnostic seulement, jamais critique.
+    free(g_stuck_fork_warned);
+    g_stuck_fork_warned = calloc((size_t)NB_THREADS, sizeof(int));
     g_running_since_ms = current_time_ms();
-    g_stuck_forks_warned = 0;
 
     return created;
 }
@@ -938,20 +962,32 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
                 fork_orchestrator_post_event(EV_CHILD_DIED, NULL);
             }
 
-            // Filet de sécurité : tous les forks sont vivants (aucun nettoyage
-            // ci-dessus) mais ne rapportent RIEN depuis STUCK_FORKS_WARN_MS —
-            // le symptôme rapporté à plusieurs reprises ("reste à 0 sur tous
-            // les indicateurs"). Un seul avertissement par (re)fork réussi
-            // (g_stuck_forks_warned), jamais un log en boucle toutes les 100ms.
-            if (!g_stuck_forks_warned && g_running_since_ms != 0
-                && stuck_forks_threshold_elapsed(g_running_since_ms, now_ms)
-                && fork_stats_all_zero(fork_statistics, NB_THREADS)) {
-                g_stuck_forks_warned = 1;
-                log_error("orchestrateur : aucun des %d fork(s) actifs ne rapporte de "
-                          "travail (stock/analysé/coups-s tous à 0) depuis %lds — "
-                          "vérifier la connexion au serveur et le stock serveur\n",
-                          count_created_forks(childrens_pid, NB_THREADS),
-                          (now_ms - g_running_since_ms) / 1000);
+            // Filet de sécurité PAR FORK : un slot vivant qui ne rapporte
+            // RIEN depuis STUCK_FORKS_WARN_MS — le symptôme rapporté à
+            // plusieurs reprises. PAR SLOT et non par agrégat : reproduit en
+            // conditions réelles (256 pièces, nb_forks=3), seuls 2 des 3
+            // forks étaient bloqués à zéro pendant que le 3ᵉ travaillait
+            // normalement — un agrégat "tous à zéro" ne se déclenche jamais
+            // dans ce cas précis (cf. g_stuck_fork_warned). Un avertissement
+            // par SLOT, jamais réémis pour le même slot tant que ce (re)fork
+            // tourne (`g_stuck_fork_warned[c]`, remis à zéro au (re)fork
+            // suivant par `orchestrator_spawn_forks`).
+            if (g_running_since_ms != 0 && g_stuck_fork_warned != NULL
+                && stuck_forks_threshold_elapsed(g_running_since_ms, now_ms)) {
+                for (int c = 0; c < NB_THREADS; c++) {
+                    if (childrens_pid[c] <= 0 || g_stuck_fork_warned[c]) {
+                        continue;
+                    }
+                    if (fork_stat_is_zero(&fork_statistics[c])) {
+                        g_stuck_fork_warned[c] = 1;
+                        log_error("orchestrateur : fork %d (slot %d) ne rapporte aucun "
+                                  "travail (stock/analysé/coups-s à 0) depuis %lds — "
+                                  "vérifier CE fork spécifiquement (connexion serveur "
+                                  "bloquée, deadlock, ou stock serveur épuisé pour lui)\n",
+                                  (int)childrens_pid[c], c,
+                                  (now_ms - g_running_since_ms) / 1000);
+                    }
+                }
             }
         } else if (state_snapshot == ORCH_STOPPING) {
             // Séquence bornée (~10 s au pire) exécutée SYNCHRONEMENT sur ce

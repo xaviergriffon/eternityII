@@ -215,6 +215,37 @@ TEST stuck_forks_threshold_before_at_and_after_deadline(void)
     PASS();
 }
 
+/* ============================ fork_stat_is_zero ================================ */
+
+/* Version PAR FORK (un seul struct, pas un tableau) — base du filet par slot
+   (g_stuck_fork_warned) qui repère un sous-ensemble de forks bloqués pendant
+   que les autres travaillent, un cas que fork_stats_all_zero (agrégat) ne
+   détecte jamais (cf. son commentaire dans fork_orchestrator.h). */
+TEST fork_stat_is_zero_detects_any_nonzero_field(void)
+{
+    struct client_statistics stat;
+    memset(&stat, 0, sizeof(stat));
+    ASSERT_EQ_FMT(1, fork_stat_is_zero(&stat), "%d");
+
+    stat.possibilities_in_stock = 1;
+    ASSERT_EQ_FMT(0, fork_stat_is_zero(&stat), "%d");
+    stat.possibilities_in_stock = 0;
+
+    stat.analyses_in_stock = 1;
+    ASSERT_EQ_FMT(0, fork_stat_is_zero(&stat), "%d");
+    stat.analyses_in_stock = 0;
+
+    stat.shots_per_second = 1;
+    ASSERT_EQ_FMT(0, fork_stat_is_zero(&stat), "%d");
+    PASS();
+}
+
+TEST fork_stat_is_zero_treats_null_as_zero(void)
+{
+    ASSERT_EQ_FMT(1, fork_stat_is_zero(NULL), "%d");
+    PASS();
+}
+
 /* ============================ fork_stats_all_zero ============================= */
 
 TEST fork_stats_all_zero_detects_any_nonzero_indicator(void)
@@ -612,6 +643,8 @@ SUITE(fork_orchestrator_suite)
     RUN_TEST(orchestrator_step_accepts_null_out);
     RUN_TEST(countdown_elapsed_before_at_and_after_deadline);
     RUN_TEST(stuck_forks_threshold_before_at_and_after_deadline);
+    RUN_TEST(fork_stat_is_zero_detects_any_nonzero_field);
+    RUN_TEST(fork_stat_is_zero_treats_null_as_zero);
     RUN_TEST(fork_stats_all_zero_detects_any_nonzero_indicator);
     RUN_TEST(fork_stats_all_zero_treats_empty_input_as_zero);
     RUN_TEST(stop_escalation_next_thresholds);
