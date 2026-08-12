@@ -850,3 +850,74 @@ par `send_all`/`recv_all`, qui bouclent jusqu'à transfert complet ou erreur fra
 - Une possibilité remise à un **client de recherche** (`INST_GET`) est transférée : si
   ce client meurt avant d'avoir redéposé ses branches filles, cette portion de
   l'espace de recherche est perdue pour la session en cours.
+
+## Diagnostic : forks vivants qui ne rapportent rien après un démarrage
+
+Symptôme observé à plusieurs reprises en exploitation, sans scénario de
+reproduction fiable : après un `start` (ou un `stopForks` suivi d'un `start`/
+`configApply`), le rapport client (`Thread queues`) reste bloqué à 0 sur tous
+les indicateurs (stock, analysé, coups/s) pour un ou plusieurs forks, sans
+aucune trace dans les logs permettant de comprendre pourquoi. Trois filets de
+sécurité complémentaires ont été ajoutés pour que la PROCHAINE occurrence
+laisse une trace exploitable — aucun d'eux ne corrige une cause précise
+(aucune n'a pu être confirmée sans repro), ils réduisent la zone aveugle.
+
+### Mort d'un fork jamais tracée en production
+
+`sigchld_handler` (`src/app/app_runtime.c`) moissonnait déjà les zombies
+(`waitpid(-1, …, WNOHANG)`) mais ne conservait leur statut de sortie (code
+réel, ou signal tueur) nulle part hors `DEBUG_SIGNAL` — jamais activé en
+production. Un fork mort de façon inattendue (crash, OOM killer, SIGSEGV)
+laissait donc les compteurs de l'orchestrateur retomber silencieusement à
+zéro sans la moindre trace de la cause ; seul le NETTOYAGE du slot mort
+(`reap_dead_child_slots`, tick de l'orchestrateur, 100 ms) était visible, et
+lui non plus ne loggait rien.
+
+`child_death_record`/`child_death_drain` (`src/app/app_runtime.{h,c}`) est le
+pont entre le contexte signal (où appeler `log_*` est interdit — non
+signal-safe) et le thread de l'orchestrateur : `sigchld_handler` capture
+pid+statut brut dans un petit ring signal-safe (écriture par un simple
+`__atomic_fetch_add`, aucun malloc, aucun appel non-safe) ; `fork_orchestrator_run`
+le draine à CHAQUE tour et logue la cause décodée
+(`child_death_format_reason` : « sortie normale, code N » ou « tué par le
+signal SIGxxx (N) »). La sévérité dépend de l'état courant : `log_error`
+(« disparu de façon inattendue ») si l'orchestrateur est `RUNNING` (une vraie
+anomalie), `log_info` (« arrêt piloté en cours ») si `STOPPING`/`APPLYING`
+(mort attendue, causée par `stopForks`/`configApply`). Un débordement du ring
+entre deux tours (plus de `CHILD_DEATH_RING_CAPACITY` morts en 100 ms) est
+lui-même signalé (`log_error`, compte perdu), jamais silencieux.
+
+`g_active_forks` — lu par le canal de contrôle pour annoncer au serveur son
+nombre de forks vivants — n'était par ailleurs JAMAIS recalculé quand
+`reap_dead_child_slots` nettoyait des slots en `ORCH_RUNNING` (contrairement
+à `orchestrator_do_stop_forks`, qui le fait pour un arrêt piloté) : le
+serveur continuait de voir un nombre de forks qui n'existaient déjà plus.
+Corrigé au même point : `g_active_forks` est recalculé et
+`control_channel_request_reconnect()` appelé dès qu'un nettoyage a lieu.
+
+### Datagramme de stats reçu d'un expéditeur inconnu
+
+`server_tcp` (`src/app/app_runtime.c`, thread IPC du process PARENT) jetait
+en silence tout datagramme `IPC_MSG_STATS` dont le chemin de socket source ne
+correspondait à aucune entrée de `forkId[]` (`find_fork_index` renvoie -1) —
+un fork vivant, émettant correctement ses statistiques, pouvait donc rester
+invisible côté parent sans la moindre trace si son socket source ne
+correspondait plus à l'entrée attendue (désynchronisation d'index après une
+reconstruction des tableaux, par exemple). Un avertissement (`log_error`, une
+fois par chemin de socket inconnu — pas un par seconde) signale désormais
+cette désynchronisation au lieu de la faire disparaître silencieusement.
+
+### Filet de sécurité « tous les indicateurs à 0 »
+
+Même quand aucun fork ne meurt et que les stats arrivent bien (les deux
+diagnostics ci-dessus ne trouvent rien à signaler), le symptôme rapporté
+reste possible : un fork vivant, connecté ou non, qui ne produit simplement
+rien. `fork_orchestrator_run` mémorise l'horodatage du dernier (re)fork
+réussi (`g_running_since_ms`) et, en `ORCH_RUNNING`, si `STUCK_FORKS_WARN_MS`
+(30 s) s'est écoulé sans qu'AUCUN fork ne rapporte le moindre stock/analysé/
+coups-s (`fork_stats_all_zero`, pur, testé), logue un avertissement unique
+(`log_error`, un seul par démarrage — jamais en boucle) invitant à vérifier
+la connexion au serveur et le stock serveur. Ce filet ne diagnostique jamais
+LA cause — seulement le symptôme, avec l'horodatage et le nombre de forks
+concernés, pour orienter la suite de l'investigation la prochaine fois que ça
+se reproduit.

@@ -32,6 +32,7 @@
 #include <sys/types.h>
 
 #include "app/client_config.h"
+#include "app/etii_statistic.h"
 
 /* Déclaration avancée plutôt qu'un `#include "app/etii_client.h"` complet :
    ce dernier tire (via core/possibility.h -> core/lifo.h) une déclaration
@@ -98,6 +99,41 @@ typedef enum {
 #define STOP_ESCALATION_SIGTERM_MS 5000
 /** @brief Délai (ms) après le SIGINT initial avant escalade SIGKILL. */
 #define STOP_ESCALATION_SIGKILL_MS 10000
+
+/**
+ * @brief Délai (ms) après un démarrage/redémarrage réussi (ORCH_RUNNING) sans
+ *        qu'AUCUN fork ne rapporte le moindre indicateur (stock, analysé,
+ *        coups/s) avant que l'orchestrateur ne signale la situation comme
+ *        suspecte (`log_error`, une seule fois par démarrage).
+ *
+ * Ne diagnostique jamais LA cause (connexion serveur en échec, stock serveur
+ * vide, fork bloqué avant sa première recherche…) — seulement le SYMPTÔME
+ * rapporté à plusieurs reprises par l'exploitant : après un `start`/`config
+ * Apply`, tous les indicateurs restent obstinément à 0 sans qu'aucune trace
+ * ne permette de comprendre pourquoi. Combiné aux logs de connexion déjà
+ * inconditionnels (`check_and_connect_to_server`, `core/datamanager.c`) et au
+ * drainage des morts d'enfants (`app_runtime.h`), ce filet de sécurité couvre
+ * le cas restant : des forks vivants, correctement connectés ou non, mais qui
+ * ne produisent tout simplement rien.
+ */
+#define STUCK_FORKS_WARN_MS 30000
+
+/**
+ * @brief Prédicat PUR : le délai `STUCK_FORKS_WARN_MS` est-il écoulé depuis
+ *        `running_since_ms` ? Même convention que `orchestrator_countdown_elapsed`
+ *        (horloge injectée, jamais lue directement — testable sans `sleep`).
+ */
+int stuck_forks_threshold_elapsed(long running_since_ms, long now_ms);
+
+/**
+ * @brief Prédicat PUR : tous les forks de `stats` (tableau de taille `nb`)
+ *        rapportent-ils zéro sur les trois indicateurs qui comptent pour
+ *        l'exploitant (stock en cours, stock analysé, coups/s) ?
+ *
+ * `nb <= 0` renvoie 1 (« rien à montrer » compte comme suspect, ne bloque
+ * jamais la détection sur un NB_THREADS mal lu).
+ */
+int fork_stats_all_zero(const struct client_statistics *stats, int nb);
 
 /**
  * @brief Prédicat PUR décidant l'escalade de signal d'arrêt de la séquence

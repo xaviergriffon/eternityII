@@ -201,6 +201,52 @@ TEST countdown_elapsed_before_at_and_after_deadline(void)
     PASS();
 }
 
+/* ============================ stuck_forks_threshold_elapsed ================== */
+
+TEST stuck_forks_threshold_before_at_and_after_deadline(void)
+{
+    ASSERT_EQ_FMT(0, stuck_forks_threshold_elapsed(0, STUCK_FORKS_WARN_MS - 1), "%d");
+    ASSERT_EQ_FMT(1, stuck_forks_threshold_elapsed(0, STUCK_FORKS_WARN_MS), "%d");
+    ASSERT_EQ_FMT(1, stuck_forks_threshold_elapsed(0, STUCK_FORKS_WARN_MS + 1), "%d");
+    /* running_since_ms non nul : c'est bien un delta qui compte, pas une
+       horloge absolue. */
+    ASSERT_EQ_FMT(0, stuck_forks_threshold_elapsed(1000000, 1000000 + STUCK_FORKS_WARN_MS - 1), "%d");
+    ASSERT_EQ_FMT(1, stuck_forks_threshold_elapsed(1000000, 1000000 + STUCK_FORKS_WARN_MS), "%d");
+    PASS();
+}
+
+/* ============================ fork_stats_all_zero ============================= */
+
+TEST fork_stats_all_zero_detects_any_nonzero_indicator(void)
+{
+    struct client_statistics stats[3];
+    memset(stats, 0, sizeof(stats));
+    ASSERT_EQ_FMT(1, fork_stats_all_zero(stats, 3), "%d");
+
+    stats[1].possibilities_in_stock = 1;
+    ASSERT_EQ_FMT(0, fork_stats_all_zero(stats, 3), "%d");
+    stats[1].possibilities_in_stock = 0;
+
+    stats[2].analyses_in_stock = 1;
+    ASSERT_EQ_FMT(0, fork_stats_all_zero(stats, 3), "%d");
+    stats[2].analyses_in_stock = 0;
+
+    stats[0].shots_per_second = 1;
+    ASSERT_EQ_FMT(0, fork_stats_all_zero(stats, 3), "%d");
+    PASS();
+}
+
+/* nb <= 0 ou stats == NULL : "rien à montrer" compte comme suspect (1), ne
+   bloque jamais la détection sur un NB_THREADS mal lu. */
+TEST fork_stats_all_zero_treats_empty_input_as_zero(void)
+{
+    struct client_statistics stats[1];
+    memset(stats, 0, sizeof(stats));
+    ASSERT_EQ_FMT(1, fork_stats_all_zero(stats, 0), "%d");
+    ASSERT_EQ_FMT(1, fork_stats_all_zero(NULL, 3), "%d");
+    PASS();
+}
+
 /* ============================ stop_escalation_next =========================== */
 
 /* Avant 5s : NONE (on attend juste, le SIGINT initial suffit peut-être).
@@ -565,6 +611,9 @@ SUITE(fork_orchestrator_suite)
     RUN_TEST(orchestrator_step_child_died_is_always_a_self_loop);
     RUN_TEST(orchestrator_step_accepts_null_out);
     RUN_TEST(countdown_elapsed_before_at_and_after_deadline);
+    RUN_TEST(stuck_forks_threshold_before_at_and_after_deadline);
+    RUN_TEST(fork_stats_all_zero_detects_any_nonzero_indicator);
+    RUN_TEST(fork_stats_all_zero_treats_empty_input_as_zero);
     RUN_TEST(stop_escalation_next_thresholds);
     RUN_TEST(waitpid_target_is_reaped_matrix);
 

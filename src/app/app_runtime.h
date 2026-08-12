@@ -134,6 +134,76 @@ int reap_dead_child_slots(pid_t *childrens_pid, char **forkId,
                            struct client_statistics *fork_statistics,
                            int nb, child_pid_alive_fn alive);
 
+/* ---- Visibilité sur la mort des enfants (diagnostic) ---------------------- */
+
+/**
+ * @brief Capacité du ring signal-safe de `child_death_record`/`child_death_drain`.
+ *
+ * Diagnostic uniquement : un dépassement fait perdre les évènements les plus
+ * anciens depuis le dernier drain (comptés par `child_death_drain`, jamais
+ * silencieusement), pas une file de production à ne jamais perdre.
+ */
+#define CHILD_DEATH_RING_CAPACITY 64
+
+/** @brief Un évènement « enfant terminé » capturé par `sigchld_handler`. */
+typedef struct {
+    pid_t pid;
+    int status; /**< Statut brut renvoyé par waitpid() — décoder avec
+                     `child_death_format_reason` (WIFEXITED/WIFSIGNALED). */
+} child_death_record_t;
+
+/**
+ * @brief Enregistre un évènement de mort d'enfant — appelée UNIQUEMENT depuis
+ *        `sigchld_handler` (contexte signal). Async-signal-safe : un simple
+ *        `__atomic_fetch_add` suivi d'une écriture dans un tableau statique
+ *        préalloué, aucun malloc, aucun appel à `log_*` (non signal-safe, cf.
+ *        le commentaire de `sigchld_handler`).
+ *
+ * `sigchld_handler` moissonnait déjà les zombies (`waitpid`) mais ne
+ * conservait leur statut de sortie nulle part hors `DEBUG_SIGNAL` (jamais
+ * activé en production) : un fork mort de façon inattendue (crash, OOM
+ * killer, SIGSEGV) laissait les compteurs de l'orchestrateur retomber
+ * silencieusement à zéro sans AUCUNE trace de la cause. Ce ring est le pont
+ * entre le contexte signal (où logger est interdit) et le thread de
+ * l'orchestrateur (`fork_orchestrator_run`), qui le draine à chaque tour et
+ * logue la cause décodée.
+ */
+void child_death_record(pid_t pid, int status);
+
+/**
+ * @brief Draine jusqu'à @p max_out évènements enregistrés par
+ *        `child_death_record` depuis le dernier appel. Lecture réservée à un
+ *        seul thread consommateur (l'orchestrateur) — pas de verrou, la
+ *        synchronisation avec l'écrivain (signal) passe par les opérations
+ *        atomiques sur l'index d'écriture.
+ *
+ * Un dépassement de `CHILD_DEATH_RING_CAPACITY` entre deux drains fait sauter
+ * silencieusement aux entrées encore valides (les plus anciennes sont déjà
+ * écrasées) — la perte est comptée, jamais un accès à une entrée
+ * potentiellement en cours de réécriture. Voir `child_death_dropped_count`.
+ *
+ * @return Le nombre d'évènements copiés dans @p out (0..max_out).
+ */
+int child_death_drain(child_death_record_t *out, int max_out);
+
+/**
+ * @brief Nombre d'évènements perdus par débordement du ring depuis le
+ *        dernier appel à cette fonction (remise à 0 à chaque appel, comme un
+ *        compteur "delta" plutôt que cumulé).
+ */
+int child_death_dropped_count(void);
+
+/**
+ * @brief Décode un statut brut waitpid() en texte lisible (sortie normale +
+ *        code, ou signal tueur + nom). Fonction pure, testable sans process
+ *        réel (statuts synthétiques).
+ *
+ * @param status   Statut brut tel que renvoyé par waitpid()/child_death_record.
+ * @param out      Tampon destination, toujours NUL-terminé.
+ * @param out_size Taille de @p out.
+ */
+void child_death_format_reason(int status, char *out, size_t out_size);
+
 /** @brief Affiche le message d'usage (arguments invalides) : aide générale sur
  *         stderr via `log_error` — même source de vérité que `--help`. */
 void failed_arg(void);

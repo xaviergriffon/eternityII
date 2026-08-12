@@ -107,6 +107,26 @@ int orchestrator_countdown_elapsed(long countdown_deadline_ms, long now_ms)
     return now_ms >= countdown_deadline_ms;
 }
 
+int stuck_forks_threshold_elapsed(long running_since_ms, long now_ms)
+{
+    return (now_ms - running_since_ms) >= STUCK_FORKS_WARN_MS;
+}
+
+int fork_stats_all_zero(const struct client_statistics *stats, int nb)
+{
+    if (nb <= 0 || stats == NULL) {
+        return 1;
+    }
+    for (int f = 0; f < nb; f++) {
+        if (stats[f].possibilities_in_stock != 0
+            || stats[f].analyses_in_stock != 0
+            || stats[f].shots_per_second != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 stop_escalation_action_t stop_escalation_next(long elapsed_ms)
 {
     if (elapsed_ms >= STOP_ESCALATION_SIGKILL_MS) {
@@ -145,6 +165,15 @@ static int g_staged_config_ready = 0;
  *         le driver, sous le même mutex, au vu de l'événement qui a réussi la
  *         transition RUNNING -> STOPPING (cf. orchestrator_step). */
 static int g_restart_after_stop = 0;
+/** @brief Horodatage (ms) du dernier (re)fork réussi — base de
+ *         `stuck_forks_threshold_elapsed`. 0 tant qu'aucun fork n'a jamais
+ *         réussi. Comme `g_countdown_deadline_ms`, cet axe temporel n'est PAS
+ *         porté par l'état pur `orch_state_t`. */
+static long g_running_since_ms = 0;
+/** @brief 1 une fois l'avertissement « aucun fork ne produit rien »
+ *         émis pour le (re)fork en cours — jamais qu'une fois par démarrage,
+ *         remis à 0 par le (re)fork suivant qui réussit. */
+static int g_stuck_forks_warned = 0;
 
 static long current_time_ms(void)
 {
@@ -509,6 +538,12 @@ int orchestrator_spawn_forks(void)
 
     g_active_forks = created;
     control_channel_request_reconnect();
+
+    // Base du filet de sécurité "aucun indicateur après démarrage" (cf.
+    // STUCK_FORKS_WARN_MS) : un seul avertissement par (re)fork réussi.
+    g_running_since_ms = current_time_ms();
+    g_stuck_forks_warned = 0;
+
     return created;
 }
 
@@ -766,6 +801,40 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
 
         now_ms = current_time_ms();
 
+        // Drainage des morts d'enfants capturées par sigchld_handler (cf.
+        // app_runtime.h) — à CHAQUE tour, quel que soit l'état : un fork peut
+        // mourir pendant STOPPING/APPLYING (arrêt piloté, attendu) tout comme
+        // pendant RUNNING (inattendu, la vraie cible de ce filet). On draine
+        // systématiquement pour ne jamais laisser le ring déborder entre deux
+        // passages en RUNNING, mais on n'ALARME (log_error) que si la mort
+        // n'est pas expliquée par une séquence d'arrêt en cours.
+        {
+            child_death_record_t deaths[CHILD_DEATH_RING_CAPACITY];
+            int nb_deaths = child_death_drain(deaths, CHILD_DEATH_RING_CAPACITY);
+            for (int d = 0; d < nb_deaths; d++) {
+                char reason[64];
+                child_death_format_reason(deaths[d].status, reason, sizeof(reason));
+                if (state_snapshot == ORCH_STOPPING || state_snapshot == ORCH_APPLYING) {
+                    log_info("orchestrateur : fork %d terminé (%s) — arrêt piloté en cours\n",
+                              (int)deaths[d].pid, reason);
+                } else if (state_snapshot == ORCH_RUNNING) {
+                    log_error("orchestrateur : fork %d disparu de façon inattendue (%s)\n",
+                              (int)deaths[d].pid, reason);
+                } else {
+                    // WAITING_CONFIG/COUNTDOWN/CONFIGURING/EXITING : aucun fork
+                    // ne devrait exister ici — trace tardive d'une mort déjà
+                    // traitée par ailleurs (ex. queue de la séquence d'arrêt
+                    // juste avant le changement d'état ci-dessous).
+                    log_info("orchestrateur : fork %d terminé (%s)\n", (int)deaths[d].pid, reason);
+                }
+            }
+            int dropped = child_death_dropped_count();
+            if (dropped > 0) {
+                log_error("orchestrateur : %d évènement(s) de mort d'enfant perdu(s) "
+                          "(ring de diagnostic saturé entre deux tours)\n", dropped);
+            }
+        }
+
         if (do_spawn) {
             // Applique la configuration "en préparation" (config <clé>
             // <valeur>) aux globales AVANT le fork effectif — pour un start
@@ -825,7 +894,34 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
         } else if (state_snapshot == ORCH_RUNNING) {
             int cleaned = reap_dead_child_slots(childrens_pid, forkId, fork_statistics, NB_THREADS, NULL);
             if (cleaned > 0) {
+                // Avant ce bloc, un nettoyage de slots ici ne mettait JAMAIS
+                // à jour `g_active_forks` (contrairement à
+                // `orchestrator_do_stop_forks`, qui le fait pour un arrêt
+                // piloté) : le canal de contrôle continuait d'annoncer au
+                // serveur un nombre de forks qui n'existaient déjà plus.
+                int remaining = count_created_forks(childrens_pid, NB_THREADS);
+                g_active_forks = remaining;
+                control_channel_request_reconnect();
+                log_error("orchestrateur : %d fork(s) disparu(s) de façon inattendue, "
+                          "%d restant(s) sur %d — voir les lignes ci-dessus pour la cause\n",
+                          cleaned, remaining, NB_THREADS);
                 fork_orchestrator_post_event(EV_CHILD_DIED, NULL);
+            }
+
+            // Filet de sécurité : tous les forks sont vivants (aucun nettoyage
+            // ci-dessus) mais ne rapportent RIEN depuis STUCK_FORKS_WARN_MS —
+            // le symptôme rapporté à plusieurs reprises ("reste à 0 sur tous
+            // les indicateurs"). Un seul avertissement par (re)fork réussi
+            // (g_stuck_forks_warned), jamais un log en boucle toutes les 100ms.
+            if (!g_stuck_forks_warned && g_running_since_ms != 0
+                && stuck_forks_threshold_elapsed(g_running_since_ms, now_ms)
+                && fork_stats_all_zero(fork_statistics, NB_THREADS)) {
+                g_stuck_forks_warned = 1;
+                log_error("orchestrateur : aucun des %d fork(s) actifs ne rapporte de "
+                          "travail (stock/analysé/coups-s tous à 0) depuis %lds — "
+                          "vérifier la connexion au serveur et le stock serveur\n",
+                          count_created_forks(childrens_pid, NB_THREADS),
+                          (now_ms - g_running_since_ms) / 1000);
             }
         } else if (state_snapshot == ORCH_STOPPING) {
             // Séquence bornée (~10 s au pire) exécutée SYNCHRONEMENT sur ce
