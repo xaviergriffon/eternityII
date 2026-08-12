@@ -1002,3 +1002,61 @@ le serveur, deadlock local, stock serveur épuisé pour sa portion de l'arbre
 de recherche…) — seulement LEQUEL, avec son pid et son ancienneté, pour
 que l'opérateur puisse cibler son investigation (ex. `lsof -p <pid>`,
 `gdb -p <pid>`) sans devoir d'abord deviner quel fork est en cause.
+
+### Correctif : `SA_RESTART` sur SIGINT rendait certains forks sourds à l'arrêt
+
+Le filet par fork ci-dessus a permis d'identifier LEQUEL était en cause à
+chaque reproduction — et, à la deuxième reproduction en conditions réelles
+(toujours 256 pièces, `nb_forks=3`), un fait nouveau et déterminant est
+apparu : le fork identifié comme bloqué (`fork 512574 (slot 1)`) est
+EXACTEMENT celui qui a mis plus de 10 s à répondre à `exit` (SIGINT →
+escalade SIGTERM à 5 s → SIGKILL à 10 s), pendant que ses deux frères — qui
+travaillaient normalement, donc presque toujours en plein calcul CPU plutôt
+que bloqués dans un appel système — sont morts proprement en une fraction de
+seconde. Cette corrélation pointe vers une seule et même cause : ce fork
+passe le plus clair de son temps bloqué dans un appel système, et ce blocage
+n'est JAMAIS interrompu par les signaux.
+
+Cause trouvée : `configure_child_signals()` (`src/app/app_runtime.c`),
+appelée par le thread `fork_udp` de CHAQUE fork de recherche (réception des
+commandes IPC relayées par le parent), installait `SIGINT` avec
+`SA_RESTART` — à tort, et en contradiction directe avec le choix explicite
+et documenté d'`init_signals()` (« Pas de SA_RESTART : on veut que les
+appels bloquants… renvoient EINTR »). `sigaction()` est un réglage
+PROCESS-WIDE (seul le masque de signaux bloqués est par-thread) : cet appel,
+fait après le `fork()` depuis un thread interne au fork, REMPLACE purement
+et simplement le `SA_RESTART=0` hérité du parent par `SA_RESTART=1` pour
+tout le process enfant, dès que son thread `fork_udp` démarre — c'est-à-dire
+quasiment immédiatement après le fork, pour toute la durée de vie du
+process. Avec `SA_RESTART`, un signal interrompant un appel bloquant fait
+juste RELANCER cet appel silencieusement au lieu de renvoyer `EINTR` — la
+boucle appelante ne revoit alors jamais la main pour constater
+`request==REQUEST_STOP`. Deux appels bloquants exactement dans ce cas :
+- Le `recvfrom()` de `fork_udp` lui-même, SANS AUCUN timeout (contrairement
+  aux sockets TCP de travail, réglées via `tcp_timeout`/`SO_RCVTIMEO`) — un
+  fork inactif (rien à faire car aucun travail reçu) y passe la quasi
+  totalité de son temps.
+- Le `connect()` bloquant de `create_tcp_client` (`src/net/tcpclient.c`),
+  qui n'est borné par AUCUN timeout applicatif (`SO_RCVTIMEO`/`SO_SNDTIMEO`
+  ne s'appliquent qu'à `send`/`recv`, jamais à `connect`) — un `connect()`
+  qui tarde (ex. pool de threads serveur momentanément saturé, cf. la note
+  de dimensionnement de `NB_THREADS` dans *Testing*, AGENTS.md) peut bloquer
+  plusieurs dizaines de secondes, potentiellement expliquant AUSSI pourquoi
+  ce fork n'a jamais reçu le moindre travail avant même que l'arrêt ne soit
+  demandé.
+
+Corrigé en retirant `SA_RESTART` de `configure_child_signals()` — même choix
+et même rationale qu'`init_signals()`, désormais partagés au lieu de
+diverger silencieusement. Verrouillé par une assertion étendue dans
+`configure_child_signals_installs_sigint` (`tests/app/test_app_runtime.c`) :
+`(sa_flags & SA_RESTART) == 0`.
+
+Ce correctif explique et corrige pourquoi un fork bloqué mettait plus de
+10 s à mourir sur `stopForks`/`configApply`/`exit` (nécessitant l'escalade
+jusqu'à SIGKILL, cf. le correctif précédent) ; il ne garantit PAS à lui seul
+qu'un fork obtienne du travail plus vite — seulement qu'un `connect()`/
+`recvfrom()` bloqué redevient interruptible, donc que l'arrêt redevient
+rapide même quand ce cas se présente. Le blocage prolongé d'un `connect()`
+initial (pool serveur saturé, ou réseau lent) reste un contributeur possible
+au symptôme d'origine, non résolu par ce correctif — le filet par fork
+ci-dessus reste le bon outil pour le repérer la prochaine fois.

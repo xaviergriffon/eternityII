@@ -869,7 +869,28 @@ void configure_child_signals(void) {
 
     struct sigaction sa;
     sa.sa_handler = signal_end_handler;
-    sa.sa_flags = SA_RESTART;
+    /* Pas de SA_RESTART — même rationale qu'init_signals() ci-dessus, dont
+       cette fonction contredisait à tort le choix : sigaction() est un
+       réglage PROCESS-WIDE (seul le masque bloqué est par-thread), donc
+       l'appeler ici — depuis le thread fork_udp d'un fork de recherche,
+       après init_signals() côté parent avant le fork() — REMPLACE le SA_RESTART=0
+       hérité par SA_RESTART=1 pour tout le process enfant. Avec SA_RESTART, un
+       SIGINT/SIGTERM reçu pendant un appel bloquant (le `recvfrom()` de
+       fork_udp lui-même, qui n'a AUCUN timeout et bloque la quasi-totalité du
+       temps d'un fork inactif ; ou le `connect()` bloquant de
+       `create_tcp_client`, qui n'est pas borné par SO_RCVTIMEO/SO_SNDTIMEO)
+       fait juste RELANCER silencieusement l'appel interrompu au lieu de
+       renvoyer EINTR — la boucle appelante ne voit alors JAMAIS
+       request==REQUEST_STOP, et le fork reste sourd à stopForks/configApply/
+       exit jusqu'à l'escalade SIGTERM (elle aussi absorbée par le même
+       mécanisme) puis SIGKILL. Bogue réel reproduit deux fois de suite en
+       conditions réelles : un fork resté à 0 (aucun travail) qui a mis plus
+       de 10 s à mourir sur `exit` (`orchestrateur : X fils encore vivant(s)
+       après 10s — escalade SIGKILL`), quand ses deux frères — occupés par du
+       calcul CPU, jamais bloqués dans un appel système au moment du SIGINT —
+       mouraient proprement en une fraction de seconde. Voir
+       docs/echanges_client_serveur.md. */
+    sa.sa_flags = 0;
     sigemptyset(&sa.sa_mask);
 
     // Configure SIGINT pour les threads enfants

@@ -775,7 +775,14 @@ TEST init_signals_installs_handlers(void)
     PASS();
 }
 
-/* configure_child_signals : débloque SIGINT et y installe signal_end_handler. */
+/* configure_child_signals : débloque SIGINT et y installe signal_end_handler,
+ * SANS SA_RESTART — même rationale qu'init_signals (cf. son commentaire) :
+ * un appel bloquant interrompu par SIGINT doit renvoyer EINTR, jamais être
+ * relancé silencieusement, pour que la boucle appelante puisse constater
+ * request==REQUEST_STOP. Un fork resté sourd à SIGINT/SIGTERM (nécessitant
+ * l'escalade jusqu'à SIGKILL) a été reproduit deux fois en conditions
+ * réelles avec SA_RESTART actif ici par erreur — verrouillé pour ne jamais
+ * régresser (cf. docs/echanges_client_serveur.md). */
 TEST configure_child_signals_installs_sigint(void)
 {
     struct sigaction old, cur;
@@ -786,10 +793,12 @@ TEST configure_child_signals_installs_sigint(void)
     configure_child_signals();
     sigaction(SIGINT, NULL, &cur);
     int ok = (cur.sa_handler == signal_end_handler);
+    int no_restart = (cur.sa_flags & SA_RESTART) == 0;
 
     sigaction(SIGINT, &old, NULL);                 /* RESTAURE avant assertion */
     pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
     ASSERT(ok);
+    ASSERT(no_restart);
     PASS();
 }
 
