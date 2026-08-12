@@ -652,6 +652,36 @@ TEST child_death_format_reason_decodes_signal_death(void)
     PASS();
 }
 
+/* child_death_is_clean_exit : vrai UNIQUEMENT pour une sortie normale de
+   code 0 — un fork qui exhauste tout son espace de recherche local (petit
+   puzzle) s'arrête ainsi, sans le moindre rapport avec stopForks/configApply
+   ni un crash ; ni un code de sortie non nul ni une terminaison par signal
+   ne doivent jamais être classés "propres". */
+TEST child_death_is_clean_exit_only_for_exit_code_zero(void)
+{
+    pid_t pid_ok = fork();
+    if (pid_ok == 0) { _exit(0); }
+    ASSERT(pid_ok > 0);
+    int status_ok = 0;
+    waitpid(pid_ok, &status_ok, 0);
+    ASSERT_EQ_FMT(1, child_death_is_clean_exit(status_ok), "%d");
+
+    pid_t pid_err = fork();
+    if (pid_err == 0) { _exit(1); }
+    ASSERT(pid_err > 0);
+    int status_err = 0;
+    waitpid(pid_err, &status_err, 0);
+    ASSERT_EQ_FMT(0, child_death_is_clean_exit(status_err), "%d");
+
+    pid_t pid_sig = fork();
+    if (pid_sig == 0) { raise(SIGKILL); _exit(0); }
+    ASSERT(pid_sig > 0);
+    int status_sig = 0;
+    waitpid(pid_sig, &status_sig, 0);
+    ASSERT_EQ_FMT(0, child_death_is_clean_exit(status_sig), "%d");
+    PASS();
+}
+
 /* NULL/0 : jamais de déréférencement, no-op silencieux. */
 TEST child_death_format_reason_tolerates_null_output(void)
 {
@@ -1663,6 +1693,7 @@ SUITE(app_runtime_suite)
     RUN_TEST(child_death_ring_reports_dropped_on_overflow);
     RUN_TEST(child_death_format_reason_decodes_normal_exit);
     RUN_TEST(child_death_format_reason_decodes_signal_death);
+    RUN_TEST(child_death_is_clean_exit_only_for_exit_code_zero);
     RUN_TEST(child_death_format_reason_tolerates_null_output);
     RUN_TEST(sigchld_handler_records_child_death);
     RUN_TEST(wait_child_reaps_children);

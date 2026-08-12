@@ -808,16 +808,35 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
         // systématiquement pour ne jamais laisser le ring déborder entre deux
         // passages en RUNNING, mais on n'ALARME (log_error) que si la mort
         // n'est pas expliquée par une séquence d'arrêt en cours.
+        // Compte, pour ce seul tour, les morts classées "disparu de façon
+        // inattendue" ci-dessous (ni sortie propre, ni arrêt piloté) — lu par
+        // la branche ORCH_RUNNING un peu plus bas pour choisir le ton du
+        // résumé de `reap_dead_child_slots` (log_error seulement si au moins
+        // une mort de CE tour était réellement anormale, jamais pour un tour
+        // qui n'a nettoyé que des sorties propres).
+        int nb_unexpected_deaths_this_tick = 0;
         {
             child_death_record_t deaths[CHILD_DEATH_RING_CAPACITY];
             int nb_deaths = child_death_drain(deaths, CHILD_DEATH_RING_CAPACITY);
             for (int d = 0; d < nb_deaths; d++) {
                 char reason[64];
                 child_death_format_reason(deaths[d].status, reason, sizeof(reason));
-                if (state_snapshot == ORCH_STOPPING || state_snapshot == ORCH_APPLYING) {
+                if (child_death_is_clean_exit(deaths[d].status)) {
+                    // Sortie normale (code 0) : TOUJOURS bénin, quel que soit
+                    // l'état — un fork peut légitimement s'arrêter de
+                    // lui-même en exhaustant tout son espace de recherche
+                    // local (cf. child_death_is_clean_exit) sans que cela
+                    // n'ait le moindre rapport avec stopForks/configApply.
+                    // Vérifié EN PREMIER, avant les branches par état
+                    // ci-dessous, pour ne jamais le classer à tort comme
+                    // "disparu de façon inattendue".
+                    log_info("orchestrateur : fork %d terminé proprement (%s)\n",
+                              (int)deaths[d].pid, reason);
+                } else if (state_snapshot == ORCH_STOPPING || state_snapshot == ORCH_APPLYING) {
                     log_info("orchestrateur : fork %d terminé (%s) — arrêt piloté en cours\n",
                               (int)deaths[d].pid, reason);
                 } else if (state_snapshot == ORCH_RUNNING) {
+                    nb_unexpected_deaths_this_tick++;
                     log_error("orchestrateur : fork %d disparu de façon inattendue (%s)\n",
                               (int)deaths[d].pid, reason);
                 } else {
@@ -902,9 +921,20 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
                 int remaining = count_created_forks(childrens_pid, NB_THREADS);
                 g_active_forks = remaining;
                 control_channel_request_reconnect();
-                log_error("orchestrateur : %d fork(s) disparu(s) de façon inattendue, "
-                          "%d restant(s) sur %d — voir les lignes ci-dessus pour la cause\n",
-                          cleaned, remaining, NB_THREADS);
+                // Ton du résumé aligné sur les lignes détaillées ci-dessus :
+                // log_error seulement si au moins une des morts nettoyées ce
+                // tour était réellement anormale (nb_unexpected_deaths_this_tick) —
+                // un tour qui n'a nettoyé que des sorties propres (ex. un
+                // tout petit puzzle exhaustant tout son espace de recherche)
+                // ne doit jamais s'afficher comme une alarme.
+                if (nb_unexpected_deaths_this_tick > 0) {
+                    log_error("orchestrateur : %d fork(s) disparu(s) de façon inattendue, "
+                              "%d restant(s) sur %d — voir les lignes ci-dessus pour la cause\n",
+                              cleaned, remaining, NB_THREADS);
+                } else {
+                    log_info("orchestrateur : %d fork(s) terminé(s), %d restant(s) sur %d\n",
+                              cleaned, remaining, NB_THREADS);
+                }
                 fork_orchestrator_post_event(EV_CHILD_DIED, NULL);
             }
 

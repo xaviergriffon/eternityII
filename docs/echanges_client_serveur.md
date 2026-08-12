@@ -921,3 +921,46 @@ la connexion au serveur et le stock serveur. Ce filet ne diagnostique jamais
 LA cause — seulement le symptôme, avec l'horodatage et le nombre de forks
 concernés, pour orienter la suite de l'investigation la prochaine fois que ça
 se reproduit.
+
+### Correctif : faux positif « disparu de façon inattendue » sur une sortie propre, et `exit` sans échéance
+
+Le tout premier passage en CI de ce diagnostic (`run_client_lifecycle.sh`,
+16 pièces, plusieurs cycles `start`/`stopForks`/`configApply`) a immédiatement
+mis en évidence deux défauts, l'un dans le diagnostic lui-même, l'autre
+préexistant :
+
+1. **Faux positif de classification.** `fork_orchestrator_run` classait
+   n'importe quelle mort survenant en `ORCH_RUNNING` (hors séquence
+   `stopForks`/`configApply`) comme « disparu de façon inattendue »
+   (`log_error`) — mais un fork peut légitimement `exit(EXIT_SUCCESS)` de
+   lui-même en dehors de toute séquence d'arrêt pilotée : sur un tout petit
+   puzzle (`ETERN_PARTS=16`, exactement le cas de ce test), l'espace de
+   recherche local d'un fork peut s'exhauster entièrement en quelques dizaines
+   de millisecondes. `child_death_is_clean_exit` (`WIFEXITED` + code 0,
+   `src/app/app_runtime.{h,c}`) est désormais vérifié EN PREMIER, avant toute
+   branche par état : une sortie propre est toujours bénigne (`log_info`,
+   « terminé proprement »), quel que soit l'état de l'orchestrateur au moment
+   où elle est drainée. Un code de sortie non nul ou une terminaison par
+   signal reste classé comme anomalie potentielle en `ORCH_RUNNING`.
+2. **`exit` sans échéance, bogue préexistant révélé (pas causé) par ce diagnostic.** La boucle
+   d'attente d'`exit_interpreter` (`src/ui/command_lines.c`) envoie un SIGINT
+   une fois puis attend `kill(pid, 0) != 0` pour CHAQUE fils, INDÉFINIMENT —
+   contrairement à `orchestrator_do_stop_forks` (`stopForks`/`configApply`),
+   qui escalade SIGTERM à +5 s puis SIGKILL à +10 s (`stop_escalation_next`,
+   voir *Deferred-start orchestrator* dans AGENTS.md). Un fils qui ne réagit
+   pas promptement au SIGINT (pour quelque raison que ce soit — CI plus lente
+   ou plus chargée que la machine de développement, aggravant la probabilité
+   après plusieurs cycles de redémarrage) bloquait `exit` pour toujours, ce
+   qui explique le dépassement du délai de 60 s du script de test (tué de
+   force par son propre filet de sécurité, jamais par `exit` lui-même).
+   `exit_interpreter` réutilise désormais le MÊME barème d'escalade que
+   `orchestrator_do_stop_forks` (`stop_escalation_next`,
+   `STOP_ESCALATION_SIGTERM_MS`/`_SIGKILL_MS`, `src/app/fork_orchestrator.h`,
+   déjà inclus dans ce fichier) : `exit` ne reste plus jamais bloqué
+   indéfiniment, quelle que soit la cause d'un fils récalcitrant.
+
+Reproduit et vérifié fixé par 15 exécutions consécutives de
+`run_client_lifecycle.sh` dans le conteneur `make test-docker` (même
+environnement Linux/gcc que la CI) sans aucun échec, en plus des suites
+`make test`/`make test ASAN=1` (1034/1034) et de `make test-integration`
+localement (macOS).
