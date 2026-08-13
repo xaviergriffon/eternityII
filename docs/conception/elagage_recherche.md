@@ -349,11 +349,46 @@ pruner). Lever l'ambiguïté **avant** cette PR, pas pendant.
 C'est le processus dont le métier est précisément « éliminer sans développer », et il fait
 aujourd'hui le minimum. Deux montées en puissance indépendantes :
 
-**a) Itérer jusqu'au point fixe.** `possibility_all_has_a_next_counted` fait **une seule
-passe** : une pièce forcée en fin de balayage peut rendre morte une case déjà validée en
-début de passe, et personne ne revient dessus. Relancer tant qu'un placement a eu lieu est
-strictement plus fort, pour quelques passes de plus — un coût négligeable dans un
-processus dont c'est l'unique travail.
+**a) Itérer jusqu'au point fixe — LIVRÉ (PR 5/9).** `possibility_all_has_a_next_counted`
+faisait **une seule passe** : une pièce forcée en fin de balayage peut rendre morte une
+case déjà validée en début de passe, et personne ne revenait dessus — un manque déjà
+documenté (commentaire historique au-dessus de `remove_possibilities_with_no_next`,
+`src/core/datamanager.c`) mais jamais corrigé. Fixé en enveloppant le balayage existant
+dans une boucle `do { … } while (…)` qui relance un passage complet tant qu'un placement a
+eu lieu lors du précédent, jusqu'à point fixe (aucun placement) ou case sans issue. Coût
+non nul mais borné : au pire `ETERN_PARTS` passages, chacun strictement causé par un
+placement du précédent (donc un budget total de l'ordre de `O(ETERN_PARTS²)` dans le pire
+cas théorique, jamais atteint en pratique — voir mesure ci-dessous).
+
+*Test unitaire* (`all_has_a_next_fixpoint_detects_cascading_forced_dead_cell`,
+`tests/core/test_possibility.c`) : montage à 3 coins mutuellement non adjacents où une
+case à 2 candidats, examinée EN PREMIER dans le parcours, voit ses deux candidats
+consommés par deux forçages **ultérieurs** dans le même balayage — l'ancien code renvoyait
+« vivant » à tort, le point fixe détecte correctement la mort au 2e passage.
+
+*Mesure réelle* (256 pièces, `--expand-level 4`, stock initial identique de 1193
+possibilités, comparaison via git worktree contre `master`, `rmnonext` déclenché depuis la
+console serveur) :
+
+| | avant | après 1 appel `rmnonext` | stable après un 2e appel ? | temps (médiane, 5 rép.) |
+|---|---|---|---|---|
+| master (une passe) | 1193 | 965 (-228) | **NON** — un 2e appel retire 15 de plus (→950) | ~0,084 s |
+| PR 5 (point fixe) | 1193 | 950 (-243) | oui, dès le 1er appel | ~0,142 s |
+
+Confirmation directe et non synthétique du manque documenté : sur un stock réel, `master`
+n'atteint le point fixe correct (950) qu'au bout d'un **second** appel manuel — la
+possibilité de rejouer `rmnonext` plusieurs fois n'existe que pour l'opérateur console.
+Côté pruner **client** (`autoprune_step`, `src/core/etii_search.c`), chaque possibilité
+n'est examinée qu'**une seule fois** avant d'être renvoyée au serveur : il n'y a jamais de
+« second passage » naturel, donc le manque de `master` y est un déficit **permanent et
+non détecté**, pas seulement un inconvénient opérationnel. Le surcoût par appel (~1,7×)
+est strictement inférieur au coût cumulé des deux appels que `master` nécessiterait pour
+atteindre le même état. Conservé.
+
+Tests : `tests/core/test_possibility.c` (`all_has_a_next_fixpoint_detects_cascading_forced_dead_cell`,
+`all_has_a_next_fixpoint_isolated_force_still_returns_one` — non-régression : un forçage
+isolé sans cascade continue de renvoyer 1). Suite complète (1042 tests), WERROR, tous les
+`DEBUG_*`, `ETERN_PARTS=16`, ASan et `make test-integration` : verts.
 
 **b) DFS à budget de nœuds.** Rejouer `search_packet_backtracking` avec un plafond (ordre
 de grandeur : 10 000 nœuds). Si le sous-arbre se **ferme** dans le budget, la possibilité
@@ -469,7 +504,7 @@ recherché ici.
 | 2 | ~~**4.4** conflit de singletons dans le même balayage~~ **écarté** | faible | non rentable (mesuré, §4.4 : −9 %, 0 déclenchement) |
 | 3 | ~~**4.2** contrainte de type coin/bord/intérieur (compteurs)~~ **écarté** | faible | non rentable (mesuré, §4.2 : −14 %, 0 déclenchement) ; partition de l'arène reste ouverte |
 | 4 | ~~**4.3** comptage global couleur (implémentation complète)~~ **écarté** | faible | non rentable (mesuré, §4.3 : −24 %, recoupe le forward-check malgré ≈47-49 % de déclenchement) |
-| 5 | **4.6a** point fixe dans le balayage du pruner | faible | — |
+| 5 | ~~**4.6a** point fixe dans le balayage du pruner~~ **livré** | faible | rentable (mesuré, §4.6a : stock réel 1193→950 en 1 appel contre 2 pour `master`, ~1,7× de surcoût par appel largement absorbé) |
 | 6 | **4.6b** DFS à budget dans le pruner (+ réglage du budget) | moyen | valeur du budget, exposition en configuration |
 | 7 | **4.8** ordre des candidats dans l'arène (expérience) | faible | adopter ou classer |
 | 8 | **4.5** propagation des forcées dans la boucle chaude | moyen | après clarification d'`alloc` |

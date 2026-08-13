@@ -2020,6 +2020,109 @@ TEST all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell(void)
     PASS();
 }
 
+/* Point fixe (§4.6a) : un forçage TARDIF (case visitée plus loin dans le
+ * balayage) peut consommer le candidat d'une case DÉJÀ examinée plus tôt dans
+ * le MÊME balayage, la laissant sans aucune suite -- un seul balayage ne le
+ * détecte jamais (avant ce correctif, possibility_all_has_a_next_counted
+ * renvoyait 1 à tort dans ce cas précis). Cf. le commentaire historique
+ * au-dessus de remove_possibilities_with_no_next (src/core/datamanager.c) qui
+ * documentait déjà ce trou.
+ *
+ * Montage : 3 coins mutuellement non adjacents (aucun voisin en commun).
+ *   - p0=(0,0), premier du parcours (dirx[0]=diry[0]=0) : 2 candidats libres
+ *     {X=id1, Y=id2} à sa clé (0,8,9,0). Examiné en premier, aucun des deux
+ *     n'est encore utilisé -> pas de forçage (compartiment de taille 2), la
+ *     case reste vide et n'est PAS réexaminée plus tard dans CE balayage.
+ *   - p1=(15,15) : sa clé (7,0,0,6) n'a qu'UN candidat, une seconde
+ *     représentation de Y -> forçage, Y consommé.
+ *   - p2=(0,15) : sa clé (5,4,0,0) n'a qu'UN candidat, une seconde
+ *     représentation de X -> forçage, X consommé.
+ * Après le 1er balayage complet, X et Y sont tous deux utilisés mais p0 (déjà
+ * passé) n'a jamais été réexaminé : le point fixe relance un 2e balayage
+ * (repart de alloc=0) qui découvre p0 sans aucune suite -> 0.
+ */
+TEST all_has_a_next_fixpoint_detects_cascading_forced_dead_cell(void)
+{
+    struct part parts[] = {
+        { .id = 0 },                                                /* [0] bouchon */
+        { .id = 1, .top = 0, .right = 8, .bottom = 9, .left = 0 },  /* [1] X @ clé p0 */
+        { .id = 2, .top = 0, .right = 8, .bottom = 9, .left = 0 },  /* [2] Y @ clé p0 */
+        { .id = 3, .left = 8 },                                     /* [3] voisin (1,0)   : gauche=8 -> k2 p0 */
+        { .id = 4, .top = 9 },                                      /* [4] voisin (0,1)   : haut=9   -> k3 p0 */
+        { .id = 5, .bottom = 7 },                                   /* [5] voisin (15,14) : bas=7    -> k1 p1 */
+        { .id = 6, .right = 6 },                                    /* [6] voisin (14,15) : droite=6 -> k4 p1 */
+        { .id = 7, .bottom = 5 },                                   /* [7] voisin (0,14)  : bas=5    -> k1 p2 */
+        { .id = 8, .left = 4 },                                     /* [8] voisin (1,15)  : gauche=4 -> k2 p2 */
+        { .id = 2, .top = 7, .right = 0, .bottom = 0, .left = 6 },  /* [9]  Y @ clé p1 (seul candidat, forcé) */
+        { .id = 1, .top = 5, .right = 4, .bottom = 0, .left = 0 },  /* [10] X @ clé p2 (seul candidat, forcé) */
+    };
+    struct array_part rp = { .size = 11, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet();
+    p->grid[0][0] = -2;   /* p0 */
+    p->grid[15][15] = -2; /* p1 */
+    p->grid[0][15] = -2;  /* p2 */
+    p->grid[1][0] = 3;
+    p->grid[0][1] = 4;
+    p->grid[15][14] = 5;
+    p->grid[14][15] = 6;
+    p->grid[0][14] = 7;
+    p->grid[1][15] = 8;
+    p->alloc = 0;
+
+    ASSERT_EQ_FMT((int8_t)0, dirx[0], "%d");
+    ASSERT_EQ_FMT((int8_t)0, diry[0], "%d");
+
+    unsigned int cells = 0;
+    ASSERT_EQ_FMT(0, possibility_all_has_a_next_counted(p, map, &rp, &cells), "%d");
+    /* Détecté seulement au 2e balayage : strictement plus de ETERN_PARTS
+     * cases étudiées (le point fixe a dû relancer un balayage complet). */
+    ASSERT(cells > (unsigned int)ETERN_PARTS);
+    /* X et Y ont bien été consommés par p1/p2 avant que p0 ne soit rejugé. */
+    ASSERT(is_face_used(p->b_faceused, 0)); /* X = id 1 */
+    ASSERT(is_face_used(p->b_faceused, 1)); /* Y = id 2 */
+    /* p0 lui-même n'a jamais été forcé (2 candidats au moment de son examen). */
+    ASSERT_EQ_FMT(-2, (int)p->grid[0][0], "%d");
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
+/* Contrepartie : un forçage isolé qui ne provoque AUCUNE cascade (la case
+ * forcée n'est le voisin d'aucune autre case encore libre) doit toujours
+ * renvoyer 1 -- non-régression du comportement historique
+ * (all_has_a_next_single_candidate_places_piece) sous la nouvelle boucle à
+ * point fixe : le forçage déclenche bien un 2e balayage (cf. commentaire
+ * d'implémentation), mais ce 2e balayage ne doit rien invalider. */
+TEST all_has_a_next_fixpoint_isolated_force_still_returns_one(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 }, /* coin, seul candidat */
+        { .id = 2, .top = 5, .right = 6, .bottom = 7, .left = 2 }, /* voisin droit */
+        { .id = 3, .top = 3, .right = 8, .bottom = 9, .left = 4 }, /* voisin bas */
+    };
+    struct array_part rp = { .size = 4, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = 0;
+    p->grid[dirx[0]][diry[0]] = -2;
+    p->grid[1][0] = 2;
+    p->grid[0][1] = 3;
+
+    unsigned int cells = 0;
+    ASSERT_EQ_FMT(1, possibility_all_has_a_next_counted(p, map, &rp, &cells), "%d");
+    ASSERT(p->grid[dirx[0]][diry[0]] != -2);
+    ASSERT(is_face_used(p->b_faceused, 0));
+
+    free_bigarray(map);
+    free(p);
+    PASS();
+}
+
 /* ------------------------------------------------------------------------- *
  *  Map synthétique 256 pièces (sans pieces.csv) pour tester first_possibility *
  * ------------------------------------------------------------------------- *
@@ -2337,5 +2440,7 @@ SUITE(possibility_suite)
     RUN_TEST(all_has_a_next_counted_complete_board_counts_zero);
 #if ETERN_PARTS == 256
     RUN_TEST(all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell);
+    RUN_TEST(all_has_a_next_fixpoint_detects_cascading_forced_dead_cell);
+    RUN_TEST(all_has_a_next_fixpoint_isolated_force_still_returns_one);
 #endif
 }

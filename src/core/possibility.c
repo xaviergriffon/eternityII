@@ -534,12 +534,24 @@ int possibility_has_a_next(struct possibility_packet *possibility, map_big_array
  * retourne 0 (le paquet est sans issue).
  * Optimisation : si une case n'admet qu'une seule pièce, la place immédiatement.
  *
+ * Itère ce balayage jusqu'à point fixe (§4.6a) : un balayage place des cases
+ * forcées (une seule pièce candidate) en AVANÇANT dans `directions[]`, mais ne
+ * revient jamais sur une case DÉJÀ examinée plus tôt dans le MÊME balayage —
+ * une case qui avait 2 candidats libres au moment de son examen (donc jamais
+ * forcée, jamais revisitée) peut se retrouver sans AUCUN candidat une fois
+ * que ses deux candidats ont chacun été consommés par des forçages
+ * ultérieurs. Un seul passage ne le détecte pas (cf. le commentaire
+ * historique au-dessus de `remove_possibilities_with_no_next`,
+ * src/core/datamanager.c, qui documentait déjà ce trou). Tant qu'un passage a
+ * forcé au moins une case, on relance un passage complet ; on s'arrête dès
+ * qu'un passage ne force plus rien (point fixe atteint) ou trouve une case
+ * sans issue.
+ *
  * @param possibility    Paquet à analyser (peut être modifié si des pièces uniques sont placées).
  * @param mapParts       Tableau 4D de lookup.
  * @param all_rotate_part Tableau de toutes les rotations.
- * @param out_cells_studied Si non NULL, reçoit le nombre de cases examinées par
- *                       le balayage (une par itération, arrêt anticipé inclus) —
- *                       la même unité qu'un coup de la recherche.
+ * @param out_cells_studied Si non NULL, reçoit le nombre de cases examinées,
+ *                       cumulé sur tous les passages du point fixe.
  * @return               1 si toutes les cases libres ont au moins une suite, 0 sinon.
  */
 int possibility_all_has_a_next_counted(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part, unsigned int *out_cells_studied)
@@ -550,56 +562,63 @@ int possibility_all_has_a_next_counted(struct possibility_packet *possibility, m
 	int c;
     int alloc = possibility->alloc;
     unsigned int cells_studied = 0;
-    // On parcours
-	for(c=possibility->alloc;c < ETERN_PARTS && result == 1;c++) {
-		result = 0;
-		cells_studied++;
-		int8_t x = dirx[c];
-		int8_t y = diry[c];
-		if(possibility->grid[x][y] == -2) {
-			what_search_in_grid_to_key(all_rotate_part, possibility, x, y,&wsearch, mapParts->sizearrayM);
-			if(wsearch.k1 < mapParts->sizearrayM || wsearch.k2 < mapParts->sizearrayM || wsearch.k3 < mapParts->sizearrayM || wsearch.k4 < mapParts->sizearrayM) {
-				
-				struct array_part *search = get_parts_bigarray_with_key(mapParts, &wsearch);
-				int s;
-				if(search->size > 0)
-				{
-					for(s=0; s< search->size && result == 0; s++)
-					{
-						if(search->parts[s].id != 0 && is_face_used(possibility->b_faceused, search->parts[s].id -1) == 0)
-						{
-							if( search->size == 1) {
-                                set_face_used(possibility->b_faceused, search->parts[s].id - 1, 1);
-								possibility->grid[x][y] = id_for_rotated_part(search->parts[s].id, search->parts[s].rotation);
-                                alloc++;
-							}
-							result = 1;
-						}
-					}
-					
-                } else {
-                    // On a rien trouvé, il n'y a donc pas de suite
-                    break;
+    int forced_this_pass;
+
+    do {
+        forced_this_pass = 0;
+        result = 1;
+        // On parcours
+        for(c=possibility->alloc;c < ETERN_PARTS && result == 1;c++) {
+            result = 0;
+            cells_studied++;
+            int8_t x = dirx[c];
+            int8_t y = diry[c];
+            if(possibility->grid[x][y] == -2) {
+                what_search_in_grid_to_key(all_rotate_part, possibility, x, y,&wsearch, mapParts->sizearrayM);
+                if(wsearch.k1 < mapParts->sizearrayM || wsearch.k2 < mapParts->sizearrayM || wsearch.k3 < mapParts->sizearrayM || wsearch.k4 < mapParts->sizearrayM) {
+
+                    struct array_part *search = get_parts_bigarray_with_key(mapParts, &wsearch);
+                    int s;
+                    if(search->size > 0)
+                    {
+                        for(s=0; s< search->size && result == 0; s++)
+                        {
+                            if(search->parts[s].id != 0 && is_face_used(possibility->b_faceused, search->parts[s].id -1) == 0)
+                            {
+                                if( search->size == 1) {
+                                    set_face_used(possibility->b_faceused, search->parts[s].id - 1, 1);
+                                    possibility->grid[x][y] = id_for_rotated_part(search->parts[s].id, search->parts[s].rotation);
+                                    alloc++;
+                                    forced_this_pass = 1;
+                                }
+                                result = 1;
+                            }
+                        }
+
+                    } else {
+                        // On a rien trouvé, il n'y a donc pas de suite
+                        break;
+                    }
+                }else {
+                    /* Case non contrainte (les 4 clés valent all_face : ni bord de
+                     * grille, ni voisin posé). Le compartiment "toute face" de la
+                     * map contient l'union de toutes les pièces (cf. buildBigArray),
+                     * donc cette case est satisfiable par construction tant qu'il
+                     * reste au moins une pièce non utilisée -- ce qui est
+                     * nécessairement vrai ici puisque le jeu complet n'est pas
+                     * épuisé. Ne PAS interrompre le balayage : une case plus loin
+                     * dans directions[] peut être contrainte (pièces pré-placées,
+                     * indices, trous d'import) et sans issue ; s'arrêter ici
+                     * masquerait cette impasse (sous-détection, cf. régression
+                     * all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell).
+                     */
+                    result = 1;
                 }
-			}else {
-				/* Case non contrainte (les 4 clés valent all_face : ni bord de
-				 * grille, ni voisin posé). Le compartiment "toute face" de la
-				 * map contient l'union de toutes les pièces (cf. buildBigArray),
-				 * donc cette case est satisfiable par construction tant qu'il
-				 * reste au moins une pièce non utilisée -- ce qui est
-				 * nécessairement vrai ici puisque le jeu complet n'est pas
-				 * épuisé. Ne PAS interrompre le balayage : une case plus loin
-				 * dans directions[] peut être contrainte (pièces pré-placées,
-				 * indices, trous d'import) et sans issue ; s'arrêter ici
-				 * masquerait cette impasse (sous-détection, cf. régression
-				 * all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell).
-				 */
-				result = 1;
-			}
-		} else {
-			result = 1;
-		}
-	}
+            } else {
+                result = 1;
+            }
+        }
+    } while (result == 1 && forced_this_pass && alloc < ETERN_PARTS);
 #ifdef DEBUG_RM_NO_NEXT
     if (alloc > possibility->alloc) {
         log_debug("all has next (%i) allocated %i -> %i\n", result, possibility->alloc, alloc);
