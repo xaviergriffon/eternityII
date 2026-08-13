@@ -24,7 +24,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 52
+#define NB_COMMANDS 53
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -90,6 +90,7 @@ int sort_ascending_interpreter(void);
 int sort_descending_interpreter(void);
 int max_stock_by_thread_interpreter(void);
 int pruner_batch_interpreter(void);
+int pruner_dfs_budget_interpreter(void);
 int limit_interpreter(void);
 int exit_interpreter(void);
 int check_interpreter(void);
@@ -154,7 +155,8 @@ static command_description commands[NB_COMMANDS] = {
      "CONFIGURING/RUNNING/...), la configuration EFFECTIVE (celle réellement en\n"
      "vigueur) et la configuration EN PRÉPARATION. N'annule pas le décompte.\n"
      "Avec <clé> <valeur> : écrit dans la configuration en préparation (clés :\n"
-     "nb_forks, server_host, parts_file, max_stock_by_thread, limit, pruner_batch)\n"
+     "nb_forks, server_host, parts_file, max_stock_by_thread, limit, pruner_batch,\n"
+     "dfs_budget)\n"
      "et ANNULE DÉFINITIVEMENT le décompte d'auto-démarrage — `start` consomme\n"
      "toujours la configuration EFFECTIVE, pas celle en préparation.", NULL},
     {"configSave", config_save_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
@@ -179,7 +181,7 @@ static command_description commands[NB_COMMANDS] = {
     {"configApply", config_apply_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
      "applique la configuration en préparation, à chaud si possible",
      "Erreur si aucun fork n'est en cours d'exécution. Si seules des clés à chaud\n"
-     "(max_stock_by_thread/limit/pruner_batch) sont préparées : appliquées immédiatement\n"
+     "(max_stock_by_thread/limit/pruner_batch/dfs_budget) sont préparées : appliquées immédiatement\n"
      "et diffusées aux fils en cours par IPC, sans interruption. Si nb_forks/server_host/\n"
      "parts_file est préparé (cf. `client_config_diff`) : arrête les fils (comme\n"
      "`stopForks`), reconstruit les tableaux de fils et/ou la map de recherche partagée,\n"
@@ -201,6 +203,16 @@ static command_description commands[NB_COMMANDS] = {
     {"prunerBatch", pruner_batch_interpreter, 1, CMD_CAT_SEARCH, 0, "prunerBatch <n>",
      "fixe la taille de lot d'échange du pruner",
      "Bornée à [1, PRUNER_BATCH_MAX] pour maîtriser la mémoire du pruner et les tampons GPU.", NULL},
+    {"prunerDfsBudget", pruner_dfs_budget_interpreter, 1, CMD_CAT_SEARCH, 0, "prunerDfsBudget <n>",
+     "fixe le budget de nœuds de la preuve de fermeture bornée du pruner (§4.6b)",
+     "Une possibilité jugée vivante par le contrôle superficiel mais pas encore `checked`\n"
+     "est rejouée par un backtracking RÉEL plafonné à <n> nœuds ; si ce budget suffit à\n"
+     "épuiser tout son sous-arbre, elle est prouvée morte (aucun faux positif possible :\n"
+     "même code que la recherche réelle) et jamais redistribuée -- sinon, comportement\n"
+     "inchangé (conservée, marquée checked). <n> <= 0 désactive ce contrôle supplémentaire\n"
+     "(comme « limit 0 »). Bornée à [0, PRUNER_DFS_BUDGET_MAX]. DÉSACTIVÉ PAR DÉFAUT (0) :\n"
+     "mesuré sans gain sur le stock réel actuel (mur structurel max_result ~74/256, voir\n"
+     "docs/conception/elagage_recherche.md §4.6b) -- opt-in, pas un défaut prudent.", NULL},
 
     {"sortAsc", sort_ascending_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
      "trie le stock par ordre croissant (moins avancées d'abord)", NULL, NULL},
@@ -276,7 +288,7 @@ static command_description commands[NB_COMMANDS] = {
     {"clientsCommand", clients_cmd_interpreter, 0, CMD_CAT_CLIENTS, 1,
      "clientsCommand [--to <session_no|client_uid|label>] <commande...>",
      "pousse une commande à un client précis ou à tous les clients connectés",
-     "Liste blanche : pause, resume, limit, maxStockByThread, prunerBatch.\n"
+     "Liste blanche : pause, resume, limit, maxStockByThread, prunerBatch, prunerDfsBudget.\n"
      "Toute autre commande est refusée sans être diffusée, avec ou sans --to.\n"
      "Sans --to : diffusion à toutes les sessions de contrôle actives (comportement\n"
      "historique). Avec --to <cible> : n'atteint QUE la session désignée, par son\n"
@@ -378,6 +390,36 @@ int pruner_batch_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments != NULL) {
         pruner_batch_size = pruner_batch_clamp(atoi(arguments));
+        return 0;
+    }
+    return CMD_ERR_USAGE;
+}
+
+/**
+ * @brief Voir la doc dans command_lines.h.
+ */
+int pruner_dfs_budget_clamp(int v) {
+    if (v < 0) {
+        return 0;
+    }
+    if (v > PRUNER_DFS_BUDGET_MAX) {
+        return PRUNER_DFS_BUDGET_MAX;
+    }
+    return v;
+}
+
+/**
+ * @brief Interpréteur de `prunerDfsBudget <n>` : fixe le budget de nœuds de la
+ *        preuve de fermeture bornée du pruner CPU (§4.6b).
+ *
+ * Propagée aux process enfants (send_to_childs = 1). Bornée à
+ * [0, PRUNER_DFS_BUDGET_MAX] ; `<n> <= 0` désactive ce contrôle supplémentaire
+ * (même convention que `limit 0`).
+ */
+int pruner_dfs_budget_interpreter(void) {
+    char *arguments = strtok(NULL, " ");
+    if (arguments != NULL) {
+        pruner_dfs_budget = pruner_dfs_budget_clamp(atoi(arguments));
         return 0;
     }
     return CMD_ERR_USAGE;
@@ -1398,6 +1440,9 @@ int admin_apply_remote_command(const char *line) {
             } else if (strcmp(word, "prunerBatch") == 0 && arg != NULL) {
                 pruner_batch_size = pruner_batch_clamp(atoi(arg));
                 result = ADMIN_CMD_OK;
+            } else if (strcmp(word, "prunerDfsBudget") == 0 && arg != NULL) {
+                pruner_dfs_budget = pruner_dfs_budget_clamp(atoi(arg));
+                result = ADMIN_CMD_OK;
             }
         }
     }
@@ -1569,7 +1614,7 @@ int clients_cmd_interpreter(void) {
     }
 
     if (!control_command_allowed(rest)) {
-        log_error("clientsCommand : commande non autorisée à distance (liste blanche : pause, resume, limit, maxStockByThread, prunerBatch) : \"%s\"\n", rest);
+        log_error("clientsCommand : commande non autorisée à distance (liste blanche : pause, resume, limit, maxStockByThread, prunerBatch, prunerDfsBudget) : \"%s\"\n", rest);
         return -1;
     }
 

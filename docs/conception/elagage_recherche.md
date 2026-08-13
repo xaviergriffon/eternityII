@@ -5,9 +5,12 @@
 pour le comportement actuel. PR 2 (§4.4), PR 3 (§4.2, variante compteurs) et PR 4 (§4.3)
 évaluées et **écartées** après mesure (code absent de `master`, raisonnement et chiffres
 conservés dans chaque section — §4.3 pour une raison différente des deux autres : un
-recoupement structurel avec le forward-check, pas une absence de déclenchement). Les
-pistes 5 à 9 (dont la variante « partition de l'arène » de §4.2) restent des propositions
-non implémentées.
+recoupement structurel avec le forward-check, pas une absence de déclenchement). PR 5
+(§4.6a, point fixe du pruner) **livrée**. PR 6 (§4.6b, DFS à budget dans le pruner)
+**implémentée et testée, mais désactivée par défaut** — mesurée sans aucun gain sur le
+stock réel actuel, code conservé (opt-in), pour la même raison structurelle que §4.2/§4.4 :
+voir §4.6b pour la mesure complète. Les pistes 7 à 9 (§4.5, §4.7, §4.8), ainsi que la
+variante « partition de l'arène » de §4.2, restent des propositions non implémentées.
 
 ## 1. Question posée
 
@@ -390,14 +393,105 @@ Tests : `tests/core/test_possibility.c` (`all_has_a_next_fixpoint_detects_cascad
 isolé sans cascade continue de renvoyer 1). Suite complète (1042 tests), WERROR, tous les
 `DEBUG_*`, `ETERN_PARTS=16`, ASan et `make test-integration` : verts.
 
-**b) DFS à budget de nœuds.** Rejouer `search_packet_backtracking` avec un plafond (ordre
-de grandeur : 10 000 nœuds). Si le sous-arbre se **ferme** dans le budget, la possibilité
-est définitivement morte : retirée du stock, jamais redistribuée. Si le budget est
-atteint, elle est conservée `checked` comme aujourd'hui. Aucun faux positif possible, et
-c'est bien calibré sur le stock réel : la délégation cède les frères les **plus profonds**
-([`bt_materialize_pending`](../../src/core/etii_search.c)), dont les sous-arbres sont les
-plus petits. Le pruner cesse d'être un filtre pour devenir un finisseur de petits
-sous-arbres.
+**b) DFS à budget de nœuds — IMPLÉMENTÉ, TESTÉ, DÉSACTIVÉ PAR DÉFAUT (PR 6).** Rejouer
+`search_packet_backtracking` avec un plafond de nœuds (ordre de grandeur envisagé
+initialement : 10 000). Si le sous-arbre se **ferme** dans le budget, la possibilité est
+définitivement morte : retirée du stock, jamais redistribuée. Si le budget est atteint,
+elle est conservée `checked` comme aujourd'hui. Aucun faux positif possible : c'est le même
+code que la recherche réelle qui tranche, pas une heuristique.
+
+**Implémentation.** La boucle chaude de `search_packet_backtracking` (§4.1) est factorisée
+en `search_packet_backtracking_core` (`src/core/etii_search.c`), paramétrée par un plafond
+de nœuds (`node_budget`, `<= 0` = illimité) et un drapeau `allow_delegate` — deux fines
+enveloppes la spécialisent sans dupliquer la boucle : `search_packet_backtracking` (usage
+recherche réelle, inchangé : illimité, délégation autorisée) et
+`search_packet_backtracking_budgeted` (nouvelle, usage pruner : plafonnée, délégation
+**interdite**). La désactivation de la délégation n'est pas cosmétique : céder une partie
+du sous-arbre à un tiers pendant la preuve romprait la preuve elle-même (le budget
+n'aurait plus exploré tout ce qu'il prétend avoir fermé). Sur `REQUEST_STOP`, la variante
+recherche réelle renvoie le travail en cours au serveur (`bt_flush_pending`) ; la variante
+bornée ne renvoie RIEN — elle abandonne simplement l'exploration locale, et l'appelant
+retombe sur le comportement d'avant cette PR (possibilité originale intacte, conservée
+`checked`) : fragmenter une possibilité en cours de preuve n'aurait aucun sens pour un
+contrôle qui n'a jamais eu vocation à déléguer. `autoprune_step` insère l'appel entre le
+contrôle superficiel et la décision historique : seule une possibilité jugée vivante par
+`possibility_all_has_a_next_counted` mais **pas encore** `checked` (`!work.checked &&
+has_next`) déclenche la preuve bornée — une possibilité déjà `checked` ou déjà prouvée
+morte par le contrôle superficiel ne paie jamais ce coût supplémentaire.
+
+**Configuration.** `pruner_dfs_budget` (`src/app/static_variables.{h,c}`), configurable au
+démarrage (fichier de configuration client, clé `dfs_budget`) et à l'exécution (commande
+console `prunerDfsBudget <n>`, propagée aux process enfants, pilotable à distance via
+`clientsCommand`/l'API HTTP admin comme `prunerBatch`) ; `<= 0` désactive entièrement ce
+contrôle supplémentaire (même convention que `limit 0`), plafonné à
+`PRUNER_DFS_BUDGET_MAX` (10 000 000) au-delà duquel un seul contrôle de possibilité
+cesserait d'être une opération bon marché. `pruner_dfs_closed`/`pruner_dfs_nodes`
+(compteurs locaux, non propagés au réseau — voir leur doc dans `static_variables.h` pour
+la justification) isolent la contribution propre du mécanisme, dans le même esprit que
+`fc_singleton_conflict` pour §4.4 : répondre à « rentable ou non » sans se fier au seul
+débit agrégé.
+
+*Tests unitaires* (`tests/core/test_etii_search.c`), à deux volets comme l'exige §5 :
+`search_backtracking_budgeted_closes_when_budget_suffices` (budget large sur un arbre
+minuscule → `BT_CORE_EXHAUSTED`, jamais délégué) et
+`search_backtracking_budgeted_returns_budget_when_insufficient` (même arbre, budget d'UN
+nœud → `BT_CORE_BUDGET`) pour le cœur ; `autoprune_step_dfs_budget_closes_possibility`,
+`autoprune_step_dfs_budget_too_small_keeps_possibility` et
+`autoprune_step_dfs_budget_disabled_skips_dfs` pour l'intégration dans le pruner. Un
+quatrième test, `search_backtracking_budgeted_stop_returns_stopped_without_flush`,
+verrouille spécifiquement la divergence volontaire avec la variante illimitée sur
+`REQUEST_STOP` (aucun flush). Trois tests **préexistants** (`autoprune_step_keeps_live_packet`,
+`autoprune_step_pauses_then_resumes`, `autoprune_step_add_error_reputs_locally`) réutilisaient
+une fixture (`make_free_map`, 2 identifiants de pièce réels seulement) qui se trouve être,
+elle aussi, un sous-arbre que la preuve bornée fermerait entièrement : désactivée
+explicitement (`pruner_dfs_budget = 0`) dans ces trois tests, qui ne portent pas sur ce
+mécanisme — trouvé en faisant tourner la suite complète avec le budget par défaut à 10 000
+lors du développement, avant la décision de désactivation ci-dessous (la suite aurait
+autrement continué de passer accidentellement avec un défaut à 0, masquant la question).
+
+**Mesure sur stock réel.** Contrairement à §4.1/§4.2/§4.3/§4.4 (mesurés via
+`tests/bench/bench_search.sh`, protocole conçu pour la boucle de recherche), §4.6b agit sur
+le pruner : un harnais dédié, jetable, a rejoué le VRAI `search_packet_backtracking_budgeted`
+sur du stock RÉEL (256 pièces, `data/pieces.csv`) obtenu de deux façons — (1) genèse
+peu développée (`expand_datas_to_level`, comme `--expand-level` au démarrage serveur), et
+(2) surtout, une recherche réelle (`search_packet_backtracking`, illimitée) lancée depuis la
+genèse et interrompue après quelques secondes par `REQUEST_STOP`, dont le flush
+(`bt_flush_pending`) verse dans le stock les frères non explorés — un stock représentatif
+de ce que la délégation envoie réellement au pruner, pas une fixture synthétique :
+
+| Génération du stock | Possibilités | Profondeur (`alloc`) min/moy/max | Candidats à la preuve | Fermées (n'importe quel budget testé) |
+|---|---|---|---|---|
+| `expand_datas_to_level(4)` | 1193 | 4 / 4 / 4 | 950 | **0** (budget 10 000) |
+| Recherche réelle, 2 s (`max_result`=74) | 1689 | 1 / 33,7 / 72 | 107 | **0** (budget 10 000) |
+| Recherche réelle, 8 s (`max_result`=74) | 4951 | 1 / 33,6 / 71 | 107 | **0** (budget **1 000 000**, 100× l'ordre de grandeur envisagé) |
+
+**Verdict : 0 % de fermeture, à n'importe quelle échelle de budget testée.** La cause est
+structurelle, pas un manque de budget : ce puzzle plafonne aujourd'hui à `max_result` ≈
+74/256 pièces posées (le même mur structurel déjà cité en §4.4/§4.6a/§7, atteint
+indépendamment sur des centaines de millions de nœuds ailleurs dans ce document) — même la
+possibilité la plus profonde jamais atteinte dans ces mesures (`alloc` = 72) laisse encore
+**~184 cases vides**. Le sous-arbre qui en découle est démesurément plus grand que ce
+qu'aucun budget raisonnable (10 000, ni même 1 000 000 — 100× plus) ne peut épuiser : la
+délégation réelle ne cède aujourd'hui **jamais** de possibilité assez profonde pour que
+cette preuve ait une chance d'aboutir. Le coût, lui, est bien réel et systématique : au
+budget 10 000, chaque tentative infructueuse coûte environ 1 ms (mesuré : 936 µs/tentative
+sur le premier échantillon), contre ~1 µs pour le seul contrôle superficiel — un surcoût
+d'environ 230× sur les possibilités qui atteignent cette branche, pour un gain mesuré nul.
+
+**Décision : conserver le code (correct, testé, sans coût si désactivé), mais désactivé
+par défaut.** Différent de §4.2/§4.3/§4.4, dont le code a été retiré de `master` : ici la
+garde `pruner_dfs_budget > 0` rend le mécanisme strictement gratuit une fois désactivé
+(aucun appel à `search_packet_backtracking_budgeted`), donc le garder en configuration
+opt-in ne coûte rien à l'état actuel du projet et évite de perdre le travail de
+factorisation (`search_packet_backtracking_core`, réutilisée telle quelle si le mécanisme
+redevient pertinent) si une PR ultérieure change la donne. `PRUNER_DFS_BUDGET_DEFAULT` vaut
+donc **0** (désactivé), pas l'ordre de grandeur initialement envisagé — un choix délibéré,
+pas un défaut prudent en attendant un réglage plus fin : aucune valeur de budget ne changerait
+la conclusion tant que la profondeur atteignable reste bornée par ce mur. **À réactiver
+uniquement si 4.5 (propagation des cases forcées) ou 4.7 (ordre dynamique MRV) déplacent ce
+mur significativement plus profond** (cases vides restantes de l'ordre de la dizaine, pas de
+la centaine) — remesurer à ce moment-là avec le même harnais plutôt que de raviver le
+mécanisme en l'état, exactement la même discipline que la décision de §4.4.
 
 Le mode GPU ([`gpu_pruner.cu`](../../src/app/gpu_pruner.cu)) ne suit pas sur (b) — un DFS
 divergent par thread convient mal au modèle SIMT. (a) lui est en revanche transposable.
@@ -464,6 +558,15 @@ risque, à mener au banc.
 - **Ne pas retoucher `directions[]` dans ce cadre.** L'ordre actuel a été choisi pour
   éliminer tôt et son changement impose un bump de protocole ; les pistes ci-dessus
   s'appliquent toutes à ordre constant.
+- **4.6b (DFS à budget du pruner) : code conservé, désactivé par défaut.** Implémenté et
+  testé sans concession (même code que la recherche réelle, cf. §4.6b), mesuré sur du stock
+  RÉEL (delegation réelle après recherche, pas une fixture synthétique) : **0 % de
+  fermeture**, même à budget 100× l'ordre de grandeur envisagé (1 000 000 contre 10 000
+  nœuds). Cas différent de §4.2/§4.3/§4.4 : la garde est gratuite une fois désactivée, donc
+  le code reste en configuration opt-in plutôt que d'être retiré — mais le défaut passe à 0
+  (désactivé), pas à la valeur initialement envisagée. Cause identique à §4.4 (mur
+  structurel `max_result` ≈ 74) : à remesurer si 4.5/4.7 le déplacent, pas à activer en
+  l'état.
 
 ## 6. Points laissés ouverts
 
@@ -482,10 +585,16 @@ risque, à mener au banc.
   recoupe structurellement ce que le forward-check trouvait déjà, pour un coût de tenue à
   jour bien plus élevé (voir §4.3, seule piste de la série où « ça tire beaucoup » et « ce
   n'est pas rentable » coexistent).
-- **4.6b : quel budget de nœuds ?** Dépend du profil de profondeur du stock serveur, que
-  `GET /api/v1/stock-distribution` expose déjà — à relever sur un serveur réel avant de
-  fixer une valeur, et à rendre réglable (console + fichier de configuration client) plutôt
-  que codée en dur.
+- ~~**4.6b : quel budget de nœuds ?**~~ Tranché, mais pas comme prévu : la question n'était
+  pas la bonne valeur, c'était la profondeur du stock disponible — voir §4.6b, mesuré sur
+  stock réel (delegation après recherche réelle) : **0 % de fermeture à n'importe quel
+  budget testé** (jusqu'à 1 000 000 de nœuds), le mur structurel `max_result` ≈ 74 (§4.4)
+  laissant toujours ~184 cases vides sur les possibilités les plus profondes délivrées
+  aujourd'hui. Réglable en configuration (console `prunerDfsBudget <n>` + fichier de
+  configuration client `dfs_budget`) comme prévu, mais désactivé par défaut (`0`) — un
+  opt-in à activer manuellement si le profil de profondeur change (`GET
+  /api/v1/stock-distribution` reste l'outil pour le vérifier sur un serveur réel avant
+  d'activer), pas une valeur à deviner a priori.
 - **Cumul des élagages.** Les gains ne s'additionnent pas : 4.1 et 4.2 attrapent en partie
   les mêmes branches. Chaque PR doit être mesurée **par-dessus** la précédente, jamais
   contre `master`.
@@ -505,7 +614,7 @@ recherché ici.
 | 3 | ~~**4.2** contrainte de type coin/bord/intérieur (compteurs)~~ **écarté** | faible | non rentable (mesuré, §4.2 : −14 %, 0 déclenchement) ; partition de l'arène reste ouverte |
 | 4 | ~~**4.3** comptage global couleur (implémentation complète)~~ **écarté** | faible | non rentable (mesuré, §4.3 : −24 %, recoupe le forward-check malgré ≈47-49 % de déclenchement) |
 | 5 | ~~**4.6a** point fixe dans le balayage du pruner~~ **livré** | faible | rentable (mesuré, §4.6a : stock réel 1193→950 en 1 appel contre 2 pour `master`, ~1,7× de surcoût par appel largement absorbé) |
-| 6 | **4.6b** DFS à budget dans le pruner (+ réglage du budget) | moyen | valeur du budget, exposition en configuration |
+| 6 | ~~**4.6b** DFS à budget dans le pruner (+ réglage du budget)~~ **implémenté, testé, désactivé par défaut** | moyen | code conservé (opt-in), 0 % de fermeture sur stock réel à n'importe quel budget testé (mesuré, §4.6b) — mur structurel `max_result` ≈ 74, cause identique à §4.4 |
 | 7 | **4.8** ordre des candidats dans l'arène (expérience) | faible | adopter ou classer |
 | 8 | **4.5** propagation des forcées dans la boucle chaude | moyen | après clarification d'`alloc` |
 | 9 | **4.7** ordre dynamique MRV | élevé | à rouvrir au vu des mesures 1–8 |

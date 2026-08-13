@@ -284,6 +284,7 @@ typedef struct {
     unsigned long long limit;
     int max_stock_by_thread;
     int pruner_batch;
+    int pruner_dfs_budget;
 } http_status_view_t;
 
 /**

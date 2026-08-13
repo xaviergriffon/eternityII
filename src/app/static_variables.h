@@ -105,6 +105,37 @@
 // Plafonne la mémoire d'un échange par lot (côté serveur comme pruner) et la
 // taille des tampons GPU managés. 65536 × ~0,5 Ko ≈ 36 Mo.
 #define PRUNER_BATCH_MAX 65536
+
+// Budget de nœuds par défaut de la preuve de fermeture bornée du pruner CPU
+// (§4.6b de docs/conception/elagage_recherche.md, `pruner_dfs_budget`) :
+// nombre de nœuds de backtracking RÉEL (search_packet_backtracking_budgeted)
+// qu'une possibilité jugée vivante par le contrôle superficiel
+// (`possibility_all_has_a_next_counted`) mais pas encore `checked` peut encore
+// consommer avant que le pruner renonce à prouver sa fermeture et la
+// conserve, comme avant cette PR.
+//
+// DÉSACTIVÉ PAR DÉFAUT (0), délibérément — pas un simple "pas encore réglé".
+// Mesuré sur un stock RÉEL (256 pièces, possibilités délivrées par la
+// délégation réelle de search_packet_backtracking après plusieurs secondes de
+// recherche) : à la profondeur atteignable aujourd'hui par ce puzzle (mur
+// structurel `max_result` ≈ 74/256, cf. §4.4 de docs/conception/elagage_recherche.md),
+// même un budget 100× plus grand que l'ordre de grandeur retenu par le
+// document de conception (1 000 000 contre 10 000 nœuds) ferme 0 % des
+// candidats — un plateau à 74 pièces posées laisse encore ~182 cases vides,
+// un sous-arbre bien trop grand pour qu'AUCUN budget raisonnable ne l'épuise.
+// Voir §4.6b du document de conception pour la mesure complète et la
+// décision. Reste configurable à l'exécution (console `prunerDfsBudget <n>`,
+// fichier de configuration client `dfs_budget`) : le mécanisme est correct et
+// sans coût quand désactivé (`pruner_dfs_budget <= 0` court-circuite avant
+// tout backtracking) — à réactiver si une PR ultérieure (4.5 ou 4.7) déplace
+// ce mur, pas à activer par défaut en l'état.
+#define PRUNER_DFS_BUDGET_DEFAULT 0
+// Plafond de sécurité du budget configurable : au-delà, un seul contrôle de
+// possibilité cesse d'être une opération bornée bon marché (l'objet même de
+// cette PR) et se rapproche d'une recherche non plafonnée. Ne borne pas la
+// MÉMOIRE (le backtracking borné n'alloue rien de plus que la recherche
+// réelle) mais le TEMPS qu'un seul contrôle peut engager.
+#define PRUNER_DFS_BUDGET_MAX 10000000
 // Expansion du stock au démarrage du serveur (option `--expand-level`, commande
 // console `expand`). Le serveur développe lui-même les possibilités du stock
 // (une pièce candidate par case suivante) jusqu'à ce que leur curseur `alloc`
@@ -436,6 +467,22 @@ extern int headless_mode;
 extern int pruner_batch_size;
 
 /**
+ * @brief Budget de nœuds de la preuve de fermeture bornée du pruner CPU (§4.6b).
+ *
+ * Configurable au démarrage (fichier de configuration client, clé
+ * `dfs_budget`) et à l'exécution via la commande `prunerDfsBudget <n>`
+ * (propagée aux process enfants). `<= 0` désactive entièrement ce contrôle
+ * supplémentaire — `autoprune_step` retombe alors sur le seul contrôle
+ * superficiel (`possibility_all_has_a_next_counted`), comportement d'avant
+ * cette PR. Défaut `PRUNER_DFS_BUDGET_DEFAULT` = 0 (DÉSACTIVÉ, voir sa doc) :
+ * mesuré sans gain sur le stock réel actuel, mur structurel `max_result` ≈ 74
+ * oblige — un opt-in délibéré, pas un défaut prudent en attendant mieux.
+ * Plafonné à `PRUNER_DFS_BUDGET_MAX` par `pruner_dfs_budget_clamp`
+ * (`src/ui/command_lines.{h,c}`).
+ */
+extern int pruner_dfs_budget;
+
+/**
  * @brief Durée (secondes) du bail à expiration des possibilités attribuées à
  *        un client (PR7).
  *
@@ -474,6 +521,35 @@ extern volatile unsigned long long pruner_removed;
  * l'indice « études/s (recherche+prunage) » des rapports `check`.
  */
 extern volatile unsigned long long pruner_cells_studied;
+
+/**
+ * @brief Cumul des possibilités prouvées mortes par la preuve de fermeture
+ *        bornée du pruner CPU (§4.6b), sous-ensemble de `pruner_removed`.
+ *
+ * Isole la contribution PROPRE de ce mécanisme (par opposition au contrôle
+ * superficiel `possibility_all_has_a_next_counted`, qui incrémente
+ * `pruner_removed` sans jamais toucher ce compteur) — même discipline de
+ * mesure que `fc_singleton_conflict` pour §4.4 : répondre à « rentable ou
+ * non » exige de ne pas se fier au seul débit agrégé. Compteur PUREMENT
+ * LOCAL au process : contrairement à `pruner_checked`/`pruner_removed`, il
+ * n'est PAS propagé au parent par `client_statistics`/IPC ni exposé sur le
+ * canal de contrôle ou l'API HTTP — un choix délibéré pour ne pas faire
+ * grossir le format de ces échanges pour un compteur de diagnostic
+ * (mesure/tests), qui reste lisible en local (débogueur, tests unitaires).
+ */
+extern volatile unsigned long long pruner_dfs_closed;
+
+/**
+ * @brief Cumul des nœuds de backtracking explorés par la preuve de fermeture
+ *        bornée du pruner CPU (§4.6b), qu'elle ait fermé le sous-arbre ou
+ *        épuisé son budget sans conclure.
+ *
+ * Coût réel du mécanisme, complémentaire de `pruner_dfs_closed` : le nombre
+ * de fermetures prouvées seul ne dit rien du prix payé pour les tentatives
+ * infructueuses (budget épuisé). Même flux purement local que
+ * `pruner_dfs_closed`, pour la même raison (voir sa doc).
+ */
+extern volatile unsigned long long pruner_dfs_nodes;
 
 /**
  * @brief Cumul des cases inspectées par le forward-checking.

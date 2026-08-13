@@ -997,6 +997,7 @@ TEST http_stats_and_status_collect_do_not_crash(void)
     http_status_view_t status;
     http_status_collect(&status);
     ASSERT_STR_EQ("running", status.state);
+    ASSERT_EQ_FMT(pruner_dfs_budget, status.pruner_dfs_budget, "%d");
     request = saved_req;
 
     PASS();

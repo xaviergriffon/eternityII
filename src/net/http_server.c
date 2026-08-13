@@ -140,6 +140,7 @@ void http_status_collect(http_status_view_t *out)
     out->limit = max_search_by_sec;
     out->max_stock_by_thread = max_stock_by_thread;
     out->pruner_batch = pruner_batch_size;
+    out->pruner_dfs_budget = pruner_dfs_budget;
 }
 
 /* Le memcpy champ-à-champ ci-dessous suppose ces tailles identiques (voir

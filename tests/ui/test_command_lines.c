@@ -359,6 +359,43 @@ TEST do_command_line_pruner_batch_requires_arg(void)
     PASS();
 }
 
+/* prunerDfsBudget <n> : borné à [0, PRUNER_DFS_BUDGET_MAX] (§4.6b). 0 est une
+ * valeur légitime (désactive la preuve de fermeture bornée), contrairement à
+ * prunerBatch où 0 est relevé à 1. */
+TEST do_command_line_pruner_dfs_budget_is_clamped(void)
+{
+    int saved = pruner_dfs_budget;
+
+    char ok[] = "prunerDfsBudget 5000";
+    ASSERT_EQ_FMT(0, run_command_quiet(ok), "%d");
+    ASSERT_EQ_FMT(5000, pruner_dfs_budget, "%d");
+
+    char disable[] = "prunerDfsBudget 0";
+    ASSERT_EQ_FMT(0, run_command_quiet(disable), "%d");
+    ASSERT_EQ_FMT(0, pruner_dfs_budget, "%d");
+
+    char negative[] = "prunerDfsBudget -7"; /* < 0 -> ramené à 0 */
+    ASSERT_EQ_FMT(0, run_command_quiet(negative), "%d");
+    ASSERT_EQ_FMT(0, pruner_dfs_budget, "%d");
+
+    char high[] = "prunerDfsBudget 999999999"; /* > PRUNER_DFS_BUDGET_MAX -> plafonné */
+    ASSERT_EQ_FMT(0, run_command_quiet(high), "%d");
+    ASSERT_EQ_FMT(PRUNER_DFS_BUDGET_MAX, pruner_dfs_budget, "%d");
+
+    pruner_dfs_budget = saved;
+    PASS();
+}
+
+/* prunerDfsBudget sans argument -> -1 (erreur d'interprète), stock inchangé. */
+TEST do_command_line_pruner_dfs_budget_requires_arg(void)
+{
+    int saved = pruner_dfs_budget;
+    char cmd[] = "prunerDfsBudget";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+    ASSERT_EQ_FMT(saved, pruner_dfs_budget, "%d");
+    PASS();
+}
+
 /* leaseDuration <n> : fixe analysed_lease_seconds (PR7). Pas de bornage
  * (contrairement à prunerBatch) : <= 0 est une valeur légitime (désactive le
  * bail, cf. commentaire de static_variables.h), donc acceptée telle quelle. */
@@ -1640,6 +1677,22 @@ TEST pruner_batch_clamp_bounds(void)
     PASS();
 }
 
+/* ---------- pruner_dfs_budget_clamp (pure) -------------------------------- */
+/*
+ * Fonction pure extraite de pruner_dfs_budget_interpreter : bornes
+ * [0, PRUNER_DFS_BUDGET_MAX] (§4.6b) -- 0 EST une borne basse valide,
+ * contrairement à pruner_batch_clamp qui relève 0 à 1.
+ */
+TEST pruner_dfs_budget_clamp_bounds(void)
+{
+    ASSERT_EQ_FMT(0, pruner_dfs_budget_clamp(0), "%d");
+    ASSERT_EQ_FMT(0, pruner_dfs_budget_clamp(-5), "%d");
+    ASSERT_EQ_FMT(8, pruner_dfs_budget_clamp(8), "%d");
+    ASSERT_EQ_FMT(PRUNER_DFS_BUDGET_MAX, pruner_dfs_budget_clamp(999999999), "%d");
+    ASSERT_EQ_FMT(PRUNER_DFS_BUDGET_MAX, pruner_dfs_budget_clamp(PRUNER_DFS_BUDGET_MAX), "%d");
+    PASS();
+}
+
 /* ---------- admin_apply_remote_command ------------------------------------ */
 /*
  * Chemin d'exécution réentrant (strtok_r) destiné à un appelant concurrent
@@ -1731,6 +1784,20 @@ TEST admin_apply_remote_command_pruner_batch_is_clamped(void)
     ASSERT_EQ_FMT(PRUNER_BATCH_MAX, pruner_batch_size, "%d");
 
     pruner_batch_size = saved;
+    PASS();
+}
+
+TEST admin_apply_remote_command_pruner_dfs_budget_is_clamped(void)
+{
+    int saved = pruner_dfs_budget;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("prunerDfsBudget 999999999"), "%d");
+    ASSERT_EQ_FMT(PRUNER_DFS_BUDGET_MAX, pruner_dfs_budget, "%d");
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("prunerDfsBudget 0"), "%d");
+    ASSERT_EQ_FMT(0, pruner_dfs_budget, "%d");
+
+    pruner_dfs_budget = saved;
     PASS();
 }
 
@@ -2305,6 +2372,8 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_max_stock_requires_arg);
     RUN_TEST(do_command_line_pruner_batch_is_clamped);
     RUN_TEST(do_command_line_pruner_batch_requires_arg);
+    RUN_TEST(do_command_line_pruner_dfs_budget_is_clamped);
+    RUN_TEST(do_command_line_pruner_dfs_budget_requires_arg);
     RUN_TEST(do_command_line_lease_duration_sets_global);
     RUN_TEST(do_command_line_lease_duration_requires_arg);
     RUN_TEST(do_command_line_limit_sets_global);
@@ -2368,11 +2437,13 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_clientswork_reports_owned_attribution);
 
     RUN_TEST(pruner_batch_clamp_bounds);
+    RUN_TEST(pruner_dfs_budget_clamp_bounds);
     RUN_TEST(admin_apply_remote_command_pause_resume);
     RUN_TEST(admin_apply_remote_command_pause_broadcasts_to_control_sessions);
     RUN_TEST(admin_apply_remote_command_limit_sets_global);
     RUN_TEST(admin_apply_remote_command_max_stock_sets_global);
     RUN_TEST(admin_apply_remote_command_pruner_batch_is_clamped);
+    RUN_TEST(admin_apply_remote_command_pruner_dfs_budget_is_clamped);
     RUN_TEST(admin_apply_remote_command_rejects_forbidden);
     RUN_TEST(admin_apply_remote_command_bad_args);
     RUN_TEST(admin_apply_remote_command_does_not_disturb_external_strtok);

@@ -171,6 +171,28 @@ TEST parse_line_pruner_batch_is_clamped_not_rejected(void)
     PASS();
 }
 
+/* dfs_budget est borné via pruner_dfs_budget_clamp, jamais rejeté une fois
+   numérique. Contrairement à pruner_batch, 0 est une borne BASSE valide
+   (désactive la preuve de fermeture bornée, §4.6b), pas relevée à 1. */
+TEST parse_line_dfs_budget_is_clamped_not_rejected(void)
+{
+    client_config_t cfg;
+    client_config_init(&cfg);
+    ASSERT_EQ_FMT(CLIENT_CONFIG_LINE_SET, client_config_parse_line("dfs_budget = 999999999\n", &cfg), "%d");
+    ASSERT_EQ_FMT(PRUNER_DFS_BUDGET_MAX, cfg.dfs_budget, "%d");
+
+    client_config_t cfg2;
+    client_config_init(&cfg2);
+    ASSERT_EQ_FMT(CLIENT_CONFIG_LINE_SET, client_config_parse_line("dfs_budget = -5\n", &cfg2), "%d");
+    ASSERT_EQ_FMT(0, cfg2.dfs_budget, "%d");
+
+    client_config_t cfg3;
+    client_config_init(&cfg3);
+    ASSERT_EQ_FMT(CLIENT_CONFIG_LINE_SET, client_config_parse_line("dfs_budget = 5000\n", &cfg3), "%d");
+    ASSERT_EQ_FMT(5000, cfg3.dfs_budget, "%d");
+    PASS();
+}
+
 /* ------------------------------- client_config_load ------------------------ */
 
 TEST load_missing_file_is_absent_not_an_error(void)
@@ -204,6 +226,7 @@ TEST load_valid_file_sets_all_keys(void)
     fputs("max_stock_by_thread = 200\n", f);
     fputs("limit               = 0\n", f);
     fputs("pruner_batch        = 500\n", f);
+    fputs("dfs_budget          = 42\n", f);
     fclose(f);
 
     client_config_t cfg;
@@ -218,6 +241,7 @@ TEST load_valid_file_sets_all_keys(void)
     ASSERT_EQ_FMT(1, cfg.has_limit, "%d");
     ASSERT_EQ_FMT(0, (int)cfg.limit, "%d");
     ASSERT_EQ_FMT(500, cfg.pruner_batch, "%d");
+    ASSERT_EQ_FMT(42, cfg.dfs_budget, "%d");
 
     client_config_free(&cfg);
     unlink(path);
@@ -472,6 +496,22 @@ TEST apply_pruner_batch_only_applies_in_pruner_mode(void)
     PASS();
 }
 
+/* dfs_budget n'a aucun équivalent positionnel au démarrage (comme `limit`) :
+   s'applique toujours, indépendamment de argc/pruner_mode. */
+TEST apply_dfs_budget_always_applies_when_present(void)
+{
+    pruner_mode = 0;
+    pruner_dfs_budget = 111;
+    client_config_t cfg;
+    client_config_init(&cfg);
+    cfg.has_dfs_budget = 1;
+    cfg.dfs_budget = 222;
+
+    client_config_apply_to_globals(&cfg, 10, NULL);
+    ASSERT_EQ_FMT(222, pruner_dfs_budget, "%d");
+    PASS();
+}
+
 /* ---------------------------- capture_effective ----------------------------- */
 
 TEST capture_effective_reads_current_globals(void)
@@ -482,6 +522,7 @@ TEST capture_effective_reads_current_globals(void)
     max_stock_by_thread = 321;
     max_search_by_sec = 654;
     pruner_batch_size = 789;
+    pruner_dfs_budget = 8000;
 
     client_config_t cfg;
     client_config_capture_effective(&cfg, "srv.example");
@@ -494,6 +535,7 @@ TEST capture_effective_reads_current_globals(void)
     ASSERT_EQ_FMT(321, cfg.max_stock_by_thread, "%d");
     ASSERT_EQ_FMT(654, (int)cfg.limit, "%d");
     ASSERT_EQ_FMT(789, cfg.pruner_batch, "%d");
+    ASSERT_EQ_FMT(8000, cfg.dfs_budget, "%d");
 
     client_config_free(&cfg);
     parts_files = saved_parts_files;
@@ -547,6 +589,8 @@ TEST diff_only_hot_keys_staged_is_hot_only(void)
     staged.limit = 5000;
     staged.has_pruner_batch = 1;
     staged.pruner_batch = 64;
+    staged.has_dfs_budget = 1;
+    staged.dfs_budget = 5000;
 
     ASSERT_EQ_FMT((int)CLIENT_CONFIG_DIFF_HOT_ONLY, (int)client_config_diff(&current, &staged), "%d");
     PASS();
@@ -641,6 +685,7 @@ SUITE(client_config_suite)
     RUN_TEST(parse_line_max_stock_by_thread_valid_and_invalid);
     RUN_TEST(parse_line_limit_valid_and_invalid);
     RUN_TEST(parse_line_pruner_batch_is_clamped_not_rejected);
+    RUN_TEST(parse_line_dfs_budget_is_clamped_not_rejected);
 
     RUN_TEST(load_missing_file_is_absent_not_an_error);
     RUN_TEST(load_null_path_is_absent);
@@ -660,6 +705,7 @@ SUITE(client_config_suite)
     RUN_TEST(apply_parts_file_threshold_differs_for_pruner_mode);
     RUN_TEST(apply_limit_always_applies_when_present);
     RUN_TEST(apply_pruner_batch_only_applies_in_pruner_mode);
+    RUN_TEST(apply_dfs_budget_always_applies_when_present);
 
     RUN_TEST(capture_effective_reads_current_globals);
     RUN_TEST(capture_effective_omits_server_host_when_absent);

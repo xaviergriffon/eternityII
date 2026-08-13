@@ -39,6 +39,9 @@ typedef struct {
 
     int has_pruner_batch;
     int pruner_batch;
+
+    int has_dfs_budget;
+    int dfs_budget;
 } client_config_t;
 
 /// Résultat de `client_config_parse_line`.
@@ -82,7 +85,9 @@ void client_config_free(client_config_t *cfg);
  * `server_host` (chaîne non vide), `parts_file` (chaîne non vide),
  * `max_stock_by_thread` (entier >= 0), `limit` (entier >= 0), `pruner_batch`
  * (entier, borné via `pruner_batch_clamp` — jamais invalide une fois
- * numérique, cf. command_lines.h). Une valeur déjà présente pour une clé
+ * numérique, cf. command_lines.h), `dfs_budget` (entier, borné via
+ * `pruner_dfs_budget_clamp` — jamais invalide une fois numérique ; `<= 0`
+ * désactive la preuve de fermeture bornée du pruner, §4.6b). Une valeur déjà présente pour une clé
  * chaîne est remplacée (l'ancienne copie est libérée) : la DERNIÈRE occurrence
  * d'une clé dans un fichier l'emporte.
  *
@@ -221,8 +226,8 @@ typedef enum {
  * recherche partagée COW — aucune des trois ne peut changer sans arrêter
  * les fils existants). Une clé stagée absente de @p staged, ou présente mais
  * identique à @p current, ne déclenche jamais de redémarrage à elle seule.
- * Les clés à chaud (`max_stock_by_thread`/`limit`/`pruner_batch`) n'influencent
- * jamais le résultat : elles sont toujours diffusables par IPC.
+ * Les clés à chaud (`max_stock_by_thread`/`limit`/`pruner_batch`/`dfs_budget`)
+ * n'influencent jamais le résultat : elles sont toujours diffusables par IPC.
  *
  * @param current Configuration EFFECTIVE actuelle (typiquement
  *                `client_config_capture_effective`).

@@ -34,7 +34,7 @@ désactivée) plutôt que d'ouvrir un port au hasard.
 
 Optionnellement, `--http-token-file <chemin>` active l'authentification de toutes
 les commandes de MODIFICATION (`pause`, `resume`, `limit`, `maxStockByThread`,
-`prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup` — voir
+`prunerBatch`, `prunerDfsBudget`, `clientsCommand`/`clientsCmd`, `restore`, `backup` — voir
 [Authentification](#authentification) ci-dessous) :
 
 ```sh
@@ -53,7 +53,7 @@ chmod 600 /etc/eternityii/http-token
   supposé — la machine elle-même, ou un tunnel authentifié en amont — ne jamais
   exposer directement sur un réseau non maîtrisé), mais **aucune commande de
   modification** (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`,
-  `clientsCommand`/`clientsCmd`, `restore`, `backup`) n'est exécutable. Avec
+  `prunerDfsBudget`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) n'est exécutable. Avec
   `--http-token-file`, un jeton Bearer devient nécessaire pour toutes ces commandes de
   modification — plus seulement `restore`/`backup` (voir
   [Authentification](#authentification)).
@@ -184,7 +184,8 @@ Instantané de l'état et de la configuration courante.
   "version": 9,
   "limit": 1000,
   "max_stock_by_thread": 500,
-  "pruner_batch": 64
+  "pruner_batch": 64,
+  "pruner_dfs_budget": 10000
 }
 ```
 
@@ -196,6 +197,7 @@ Instantané de l'état et de la configuration courante.
 | `limit` | entier ≥ 0 | Débit de recherche maximum configuré (essais/seconde) ; `0` = illimité |
 | `max_stock_by_thread` | entier | Seuil de stock local par thread avant délégation au serveur |
 | `pruner_batch` | entier | Taille de lot d'échange du pruner courante |
+| `pruner_dfs_budget` | entier | Budget de nœuds courant de la preuve de fermeture bornée du pruner (§4.6b) ; `0` = désactivée |
 
 Valeurs possibles de `state` :
 
@@ -234,6 +236,7 @@ pratique car toutes les commandes whitelistées n'utilisent que `[A-Za-z0-9 ]`.
 | `limit <n>` | Fixe le débit maximum de recherche à `n` essais/seconde (`0` = illimité) | **requise** |
 | `maxStockByThread <n>` | Fixe le seuil de stock local par thread | **requise** |
 | `prunerBatch <n>` | Fixe la taille de lot du pruner, bornée à `[1, PRUNER_BATCH_MAX]` (65536) — une valeur hors borne est silencieusement ramenée à la borne la plus proche, pas un `400` | **requise** |
+| `prunerDfsBudget <n>` | Fixe le budget de nœuds de la preuve de fermeture bornée du pruner (§4.6b), bornée à `[0, PRUNER_DFS_BUDGET_MAX]` (10000000) — `n <= 0` la désactive ; valeur hors borne ramenée silencieusement, pas un `400` | **requise** |
 | `clientsCommand [--to <session_no\|client_uid\|label>] <ligne...>` (alias `clientsCmd`) | Équivalent HTTP de la commande console du même nom : sans `--to`, diffuse `<ligne...>` à toutes les sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) actives ; avec `--to <cible>`, l'envoie à UNE SEULE session (résolue par `session_no` décimal, `client_uid` hexadécimal, ou `label` déclaré — cf. `control_registry_send_command_to`). `<ligne...>` elle-même est revérifiée par `control_command_allowed` avant tout envoi : cibler une session n'élargit jamais le jeu de commandes exécutables sur un client (`exit`, `restore`, … restent hors de portée même via `clientsCommand --to`) | **requise** |
 | `clientsWork <session_no\|client_uid\|label>` | Consultation en lecture seule : journalise (`log_info`, aucune donnée dans le corps de la réponse — voir note ci-dessous) ce que le serveur a lui-même attribué à la session ciblée (même résolution de cible que `clientsCommand --to`) | **aucune** |
 
@@ -333,7 +336,7 @@ ne corrompt jamais le découpage de l'autre.
 ### Authentification
 
 **Toute commande de modification** — `pause`, `resume`, `limit`, `maxStockByThread`,
-`prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup` — exige un jeton
+`prunerBatch`, `prunerDfsBudget`, `clientsCommand`/`clientsCmd`, `restore`, `backup` — exige un jeton
 Bearer valide. Seule `clientsWork` (pure lecture, `control_command_read_only`) en est
 dispensée, au même titre que les routes `GET`. Par défaut (sans `--http-token-file`),
 **aucune** commande de modification n'est exécutable via cette API : sans jeton
@@ -714,7 +717,7 @@ sequenceDiagram
 ```
 
 Le même échange s'applique à `pause`, `resume`, `limit`, `maxStockByThread`,
-`prunerBatch`, `clientsCommand`/`clientsCmd` — pas seulement `restore`/`backup`.
+`prunerBatch`, `prunerDfsBudget`, `clientsCommand`/`clientsCmd` — pas seulement `restore`/`backup`.
 `clientsWork` est la seule commande de `POST /api/v1/command` qui ne suit jamais ce
 schéma : elle répond directement `200`, sans en-tête `Authorization`.
 

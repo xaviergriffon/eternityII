@@ -321,6 +321,10 @@ void fork_orchestrator_merge_staged_config(client_config_t *out)
         out->has_pruner_batch = 1;
         out->pruner_batch = g_staged_config.pruner_batch;
     }
+    if (g_staged_config.has_dfs_budget) {
+        out->has_dfs_budget = 1;
+        out->dfs_budget = g_staged_config.dfs_budget;
+    }
     pthread_mutex_unlock(&g_orch_mutex);
 }
 
@@ -343,10 +347,11 @@ client_config_diff_t fork_orchestrator_diff_staged_config(const client_config_t 
 
 void fork_orchestrator_apply_hot_staged_config(void)
 {
-    int has_max_stock, has_limit, has_pruner_batch;
+    int has_max_stock, has_limit, has_pruner_batch, has_dfs_budget;
     int max_stock_val = 0;
     unsigned long long limit_val = 0;
     int pruner_batch_val = 0;
+    int dfs_budget_val = 0;
 
     pthread_mutex_lock(&g_orch_mutex);
     ensure_staged_config_locked();
@@ -357,6 +362,8 @@ void fork_orchestrator_apply_hot_staged_config(void)
     limit_val = g_staged_config.limit;
     has_pruner_batch = g_staged_config.has_pruner_batch;
     pruner_batch_val = g_staged_config.pruner_batch;
+    has_dfs_budget = g_staged_config.has_dfs_budget;
+    dfs_budget_val = g_staged_config.dfs_budget;
     pthread_mutex_unlock(&g_orch_mutex);
 
     /* Diffusion aux fils DÉJÀ en cours d'exécution — jamais sous
@@ -374,6 +381,10 @@ void fork_orchestrator_apply_hot_staged_config(void)
     }
     if (has_pruner_batch) {
         snprintf(cmd, sizeof(cmd), "prunerBatch %d", pruner_batch_val);
+        send_command_to_childs(cmd);
+    }
+    if (has_dfs_budget) {
+        snprintf(cmd, sizeof(cmd), "prunerDfsBudget %d", dfs_budget_val);
         send_command_to_childs(cmd);
     }
 }
