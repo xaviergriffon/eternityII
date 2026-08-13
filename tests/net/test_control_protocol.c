@@ -250,6 +250,7 @@ TEST control_command_allowed_accepts_whitelist(void)
     ASSERT_EQ_FMT(1, control_command_allowed("limit"), "%d");
     ASSERT_EQ_FMT(1, control_command_allowed("maxStockByThread"), "%d");
     ASSERT_EQ_FMT(1, control_command_allowed("prunerBatch"), "%d");
+    ASSERT_EQ_FMT(1, control_command_allowed("prunerDfsBudget"), "%d");
     /* Avec argument : seul le premier mot compte. */
     ASSERT_EQ_FMT(1, control_command_allowed("limit 100"), "%d");
     ASSERT_EQ_FMT(1, control_command_allowed("maxStockByThread 5000"), "%d");
@@ -322,7 +323,7 @@ TEST control_command_privileged_handles_null(void)
 TEST control_command_allowed_and_privileged_are_disjoint(void)
 {
     static const char *const allowed_names[] = {
-        "pause", "resume", "limit", "maxStockByThread", "prunerBatch",
+        "pause", "resume", "limit", "maxStockByThread", "prunerBatch", "prunerDfsBudget",
         "clientsCommand", "clientsCmd", "clientsWork",
         "start", "stopForks", "configApply", "config", "configSave"
     };
@@ -356,6 +357,7 @@ TEST control_command_read_only_rejects_modifying_standard_commands(void)
     ASSERT_EQ_FMT(0, control_command_read_only("limit"), "%d");
     ASSERT_EQ_FMT(0, control_command_read_only("maxStockByThread"), "%d");
     ASSERT_EQ_FMT(0, control_command_read_only("prunerBatch"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("prunerDfsBudget"), "%d");
     ASSERT_EQ_FMT(0, control_command_read_only("clientsCommand"), "%d");
     ASSERT_EQ_FMT(0, control_command_read_only("clientsCmd"), "%d");
     /* Les commandes de cycle de vie des fils modifient toutes un état

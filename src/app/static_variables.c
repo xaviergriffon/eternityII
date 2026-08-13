@@ -53,6 +53,8 @@ int headless_mode = 0;
 
 int pruner_batch_size = PRUNER_BATCH_SIZE;
 
+int pruner_dfs_budget = PRUNER_DFS_BUDGET_DEFAULT;
+
 int analysed_lease_seconds = ANALYSED_LEASE_DEFAULT_SECONDS;
 
 #ifdef WITH_CUDA
@@ -64,6 +66,10 @@ volatile unsigned long long pruner_checked = 0;
 volatile unsigned long long pruner_removed = 0;
 
 volatile unsigned long long pruner_cells_studied = 0;
+
+volatile unsigned long long pruner_dfs_closed = 0;
+
+volatile unsigned long long pruner_dfs_nodes = 0;
 
 volatile unsigned long long fc_cells_studied = 0;
 

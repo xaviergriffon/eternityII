@@ -1288,6 +1288,142 @@ TEST search_backtracking_explores_and_exhausts(void)
     PASS();
 }
 
+/* ======================================================================
+ * search_packet_backtracking_budgeted (§4.6b de
+ * docs/conception/elagage_recherche.md) : même cœur que
+ * search_packet_backtracking (search_packet_backtracking_core), plafonné en
+ * nœuds et SANS délégation (allow_delegate = 0). Deux volets, comme l'exige
+ * la doctrine de tests du document de conception (§5) : un plateau où la
+ * fermeture DOIT être prouvée (budget large), un où elle NE DOIT PAS l'être
+ * (budget insuffisant) — plus la divergence volontaire avec la variante
+ * illimitée sur REQUEST_STOP (jamais de flush réseau).
+ * ====================================================================== */
+
+/* Budget large sur un arbre minuscule (map uniforme [0,6,7], même fixture que
+ * search_backtracking_explores_and_exhausts) : le sous-arbre s'épuise entièrement
+ * bien avant le budget -> BT_CORE_EXHAUSTED, jamais délégué (allow_delegate=0). */
+TEST search_backtracking_budgeted_closes_when_budget_suffices(void)
+{
+    drain_local();
+    ensure_counters();
+
+    static struct part cand[3];
+    memset(cand, 0, sizeof cand);
+    cand[0].id = 0; cand[1].id = 6; cand[2].id = 7;
+    static struct array_part list;
+    list.size = 3; list.parts = cand;
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_uniform_map(&list);
+    client.all_rotate_part = make_small_parts();
+
+    struct possibility_packet root;
+    make_empty_board(&root);
+    root.alloc = 0;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    int saved_req = request;
+    uint16_t saved_max = max_result;
+    request = REQUEST_CONTINUE;
+    max_result = 0;
+    unsigned long long nodes = 0;
+    bt_core_result_t rc = search_packet_backtracking_budgeted(&client, &root, idParts, 10000, &nodes);
+    request = saved_req;
+    max_result = saved_max;
+
+    ASSERT_EQ_FMT(BT_CORE_EXHAUSTED, rc, "%d");
+    ASSERT(nodes > 0);                          /* coût rapporté, non nul */
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* jamais délégué/flushé */
+
+    PASS();
+}
+
+/* Même arbre, mais budget d'UN seul nœud : ne peut pas suffire à l'épuiser
+ * (le seul nœud racine ne place déjà aucune pièce) -> BT_CORE_BUDGET, statut
+ * indéterminé. Contrairement à REQUEST_STOP sur la variante illimitée, aucun
+ * travail n'est renvoyé (allow_delegate=0) : une preuve avortée n'abandonne
+ * rien, elle laisse l'appelant décider (conserver, comme avant cette PR). */
+TEST search_backtracking_budgeted_returns_budget_when_insufficient(void)
+{
+    drain_local();
+    ensure_counters();
+
+    static struct part cand[3];
+    memset(cand, 0, sizeof cand);
+    cand[0].id = 0; cand[1].id = 6; cand[2].id = 7;
+    static struct array_part list;
+    list.size = 3; list.parts = cand;
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_uniform_map(&list);
+    client.all_rotate_part = make_small_parts();
+
+    struct possibility_packet root;
+    make_empty_board(&root);
+    root.alloc = 0;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    int saved_req = request;
+    uint16_t saved_max = max_result;
+    request = REQUEST_CONTINUE;
+    max_result = 0;
+    unsigned long long nodes = 0;
+    bt_core_result_t rc = search_packet_backtracking_budgeted(&client, &root, idParts, 1, &nodes);
+    request = saved_req;
+    max_result = saved_max;
+
+    ASSERT_EQ_FMT(BT_CORE_BUDGET, rc, "%d");
+    ASSERT(nodes >= 1);
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* aucun flush : rien n'est perdu ni renvoyé */
+
+    PASS();
+}
+
+/* REQUEST_STOP en cours de preuve : contrairement à search_packet_backtracking
+ * (search_backtracking_stop_flushes_and_returns_one, qui renvoie 1 possibilité
+ * flushée), la variante bornée ne délègue ni ne flushe JAMAIS (allow_delegate=0)
+ * — déléguer casserait la preuve de fermeture elle-même. Résultat :
+ * BT_CORE_STOPPED, stock local inchangé. */
+TEST search_backtracking_budgeted_stop_returns_stopped_without_flush(void)
+{
+    drain_local();
+    ensure_counters();
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_dead_map();
+    client.all_rotate_part = make_small_parts();
+
+    struct possibility_packet root;
+    make_empty_board(&root);
+    root.alloc = 0;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    int saved = request;
+    request = REQUEST_STOP;
+    unsigned long long nodes = 12345;
+    bt_core_result_t rc = search_packet_backtracking_budgeted(&client, &root, idParts, 10000, &nodes);
+    request = saved;
+
+    ASSERT_EQ_FMT(BT_CORE_STOPPED, rc, "%d");
+    ASSERT_EQ_FMT(1ULL, nodes, "%llu");          /* seul le nœud racine compté */
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* jamais flushé, contrairement à la recherche illimitée */
+
+    drain_local();
+    PASS();
+}
+
 /* search_packet_backtracking : REQUEST_PAUSE fait patienter la boucle, puis un
  * REQUEST_STOP (posé par un thread auxiliaire) déclenche le flush et la sortie. */
 static void *es_flip_pause_to_stop(void *arg)
@@ -1884,6 +2020,12 @@ TEST autoprune_step_keeps_live_packet(void)
     make_empty_board(&aposs->possibilities[0]);
     client.aposs = aposs;
 
+    /* §4.6b : make_free_map() n'expose que 2 ids réels, un sous-arbre que la
+       preuve de fermeture bornée fermerait entièrement (cf. les tests dédiés
+       autoprune_step_dfs_budget_*) -- désactivée ici, ce test porte sur le
+       seul contrôle superficiel (comportement d'avant cette PR). */
+    int saved_dfs_budget = pruner_dfs_budget;
+    pruner_dfs_budget = 0;
     unsigned long long checked_before = pruner_checked;
     unsigned long long cells_before = pruner_cells_studied;
     unsigned long long counter_before = counters[0];
@@ -1891,6 +2033,7 @@ TEST autoprune_step_keeps_live_packet(void)
     request = REQUEST_CONTINUE;
     int cont = autoprune_step(&client);
     request = saved;
+    pruner_dfs_budget = saved_dfs_budget;
 
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT(client.aposs == NULL);
@@ -1937,6 +2080,10 @@ TEST autoprune_step_pauses_then_resumes(void)
     make_empty_board(&aposs->possibilities[0]);
     client.aposs = aposs;
 
+    /* §4.6b : voir le commentaire de autoprune_step_keeps_live_packet -- ce
+       test porte sur la reprise après pause, pas sur la preuve de fermeture. */
+    int saved_dfs_budget = pruner_dfs_budget;
+    pruner_dfs_budget = 0;
     int saved = request;
     request = REQUEST_PAUSE;              /* le lot attend la reprise */
     pthread_t th;
@@ -1944,6 +2091,7 @@ TEST autoprune_step_pauses_then_resumes(void)
     int cont = autoprune_step(&client);
     pthread_join(th, NULL);
     request = saved;
+    pruner_dfs_budget = saved_dfs_budget;
 
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* le paquet a bien été traité après la pause */
@@ -2023,6 +2171,143 @@ TEST autoprune_step_keeps_checked_dead_packet(void)
     PASS();
 }
 
+/* ======================================================================
+ * autoprune_step : intégration de la preuve de fermeture bornée (§4.6b).
+ *
+ * Fixture partagée avec autoprune_step_keeps_live_packet : make_free_map()
+ * (candidats [6,7] partout) + plateau vide -> possibility_all_has_a_next_counted
+ * répond « vivant » (has_next=1) sans jamais poser de pièce forcée (2 candidats
+ * par case, jamais 1 seul) -- work.checked reste à 0 en entrant dans la
+ * nouvelle branche. Comme make_free_map n'expose que 2 ids réels, le
+ * sous-arbre s'épuise en quelques nœuds (même raisonnement que
+ * search_backtracking_explores_and_exhausts) : un budget confortable le ferme
+ * entièrement.
+ * ====================================================================== */
+
+/* Budget confortable : la fermeture est prouvée -> éliminée (comme une
+ * branche morte du contrôle superficiel), jamais renvoyée au stock. */
+TEST autoprune_step_dfs_budget_closes_possibility(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 1;
+    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
+    make_empty_board(&aposs->possibilities[0]);
+    client.aposs = aposs;
+
+    int saved_budget = pruner_dfs_budget;
+    pruner_dfs_budget = 10000;
+    unsigned long long removed_before = pruner_removed;
+    unsigned long long checked_before = pruner_checked;
+    unsigned long long closed_before = pruner_dfs_closed;
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    int cont = autoprune_step(&client);
+    request = saved;
+    pruner_dfs_budget = saved_budget;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");                    /* jamais redistribuée */
+    ASSERT_EQ_FMT(removed_before + 1, pruner_removed, "%llu");    /* même compteur qu'une branche morte */
+    ASSERT_EQ_FMT(checked_before, pruner_checked, "%llu");        /* jamais marquée checked */
+    ASSERT_EQ_FMT(closed_before + 1, pruner_dfs_closed, "%llu");  /* contribution isolée du mécanisme */
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
+/* Budget d'UN seul nœud : ne peut pas suffire à prouver la fermeture ->
+ * comportement d'avant cette PR inchangé (conservée, marquée checked). */
+TEST autoprune_step_dfs_budget_too_small_keeps_possibility(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 1;
+    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
+    make_empty_board(&aposs->possibilities[0]);
+    client.aposs = aposs;
+
+    int saved_budget = pruner_dfs_budget;
+    pruner_dfs_budget = 1;
+    unsigned long long checked_before = pruner_checked;
+    unsigned long long closed_before = pruner_dfs_closed;
+    unsigned long long dfs_nodes_before = pruner_dfs_nodes;
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    int cont = autoprune_step(&client);
+    request = saved;
+    pruner_dfs_budget = saved_budget;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");                    /* conservée, comme avant cette PR */
+    ASSERT_EQ_FMT(checked_before + 1, pruner_checked, "%llu");
+    ASSERT_EQ_FMT(closed_before, pruner_dfs_closed, "%llu");      /* pas de fermeture prouvée */
+    ASSERT(pruner_dfs_nodes > dfs_nodes_before);                  /* mais la tentative a un coût rapporté */
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
+/* pruner_dfs_budget <= 0 : la nouvelle branche est entièrement désactivée --
+ * comportement IDENTIQUE à autoprune_step_keeps_live_packet, aucun coût. */
+TEST autoprune_step_dfs_budget_disabled_skips_dfs(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 1;
+    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
+    make_empty_board(&aposs->possibilities[0]);
+    client.aposs = aposs;
+
+    int saved_budget = pruner_dfs_budget;
+    pruner_dfs_budget = 0;
+    unsigned long long checked_before = pruner_checked;
+    unsigned long long dfs_nodes_before = pruner_dfs_nodes;
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    int cont = autoprune_step(&client);
+    request = saved;
+    pruner_dfs_budget = saved_budget;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(checked_before + 1, pruner_checked, "%llu");
+    ASSERT_EQ_FMT(dfs_nodes_before, pruner_dfs_nodes, "%llu");    /* jamais appelée : aucun nœud compté */
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
 /* Échec d'envoi du paquet vivant : log + remise en local par put_to_server. */
 TEST autoprune_step_add_error_reputs_locally(void)
 {
@@ -2045,12 +2330,18 @@ TEST autoprune_step_add_error_reputs_locally(void)
     make_empty_board(&aposs->possibilities[0]);
     client.aposs = aposs;
 
+    /* §4.6b : voir le commentaire de autoprune_step_keeps_live_packet -- ce
+       test porte sur l'échec réseau de add_possibility, pas sur la preuve de
+       fermeture (qui court-circuiterait cet appel en prouvant la mort avant). */
+    int saved_dfs_budget = pruner_dfs_budget;
+    pruner_dfs_budget = 0;
     int saved = request;
     request = REQUEST_CONTINUE;
     es_silence_std();
     int cont = autoprune_step(&client);
     es_restore_std();
     request = saved;
+    pruner_dfs_budget = saved_dfs_budget;
 
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* remis en local malgré l'échec */
@@ -2281,6 +2572,9 @@ SUITE(etii_search_suite)
     RUN_TEST(search_backtracking_stop_flushes_and_returns_one);
     RUN_TEST(search_backtracking_prefilled_cells_no_decision);
     RUN_TEST(search_backtracking_explores_and_exhausts);
+    RUN_TEST(search_backtracking_budgeted_closes_when_budget_suffices);
+    RUN_TEST(search_backtracking_budgeted_returns_budget_when_insufficient);
+    RUN_TEST(search_backtracking_budgeted_stop_returns_stopped_without_flush);
     RUN_TEST(search_backtracking_pause_waits_then_stops);
     RUN_TEST(requeue_unprocessed_packets_routes_tail_locally);
     RUN_TEST(requeue_error_reputs_locally);
@@ -2296,6 +2590,9 @@ SUITE(etii_search_suite)
     RUN_TEST(autoprune_step_pauses_then_resumes);
     RUN_TEST(autoprune_step_removes_dead_packet);
     RUN_TEST(autoprune_step_keeps_checked_dead_packet);
+    RUN_TEST(autoprune_step_dfs_budget_closes_possibility);
+    RUN_TEST(autoprune_step_dfs_budget_too_small_keeps_possibility);
+    RUN_TEST(autoprune_step_dfs_budget_disabled_skips_dfs);
     RUN_TEST(autoprune_step_add_error_reputs_locally);
     RUN_TEST(autoprune_step_complete_board_records_solution_and_continues);
     RUN_TEST(autoprune_step_complete_board_stop_on_solution_exits);

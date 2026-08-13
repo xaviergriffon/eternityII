@@ -61,6 +61,20 @@ int admin_pause_transition(int current, int want_pause);
  */
 int pruner_batch_clamp(int v);
 
+/**
+ * @brief Borne une valeur de budget de nœuds du pruner à [0, PRUNER_DFS_BUDGET_MAX].
+ *
+ * Extrait de `pruner_dfs_budget_interpreter` pour être réutilisé par
+ * `admin_apply_remote_command` et `client_config_parse_line` sans dupliquer
+ * les bornes. Contrairement à `pruner_batch_clamp`, 0 (et toute valeur
+ * négative, ramenée à 0) est une valeur BASSE valide : elle désactive la
+ * preuve de fermeture bornée (§4.6b), même convention que `limit 0`.
+ *
+ * @param v Valeur brute demandée.
+ * @return  `v` borné à [0, PRUNER_DFS_BUDGET_MAX].
+ */
+int pruner_dfs_budget_clamp(int v);
+
 /// `admin_apply_remote_command` a appliqué la commande avec succès.
 #define ADMIN_CMD_OK 0
 /// Commande reconnue mais arguments manquants/invalides.
@@ -82,11 +96,11 @@ int pruner_batch_clamp(int v);
  *
  * Ne couvre que les commandes acceptées par `control_command_allowed`
  * (control_protocol.h) : `pause`, `resume`, `limit <n>`,
- * `maxStockByThread <n>`, `prunerBatch <n>`, `clientsCommand [--to <cible>]
- * <ligne...>` (alias `clientsCmd`), `clientsWork <cible>`, `start`,
- * `stopForks`, `configApply`, `config [<clé> <valeur>]`, `configSave`. Toute
- * autre commande (dont `exit`, `restore`, `import`) est refusée avant même
- * d'être tokenisée.
+ * `maxStockByThread <n>`, `prunerBatch <n>`, `prunerDfsBudget <n>`,
+ * `clientsCommand [--to <cible>] <ligne...>` (alias `clientsCmd`),
+ * `clientsWork <cible>`, `start`, `stopForks`, `configApply`,
+ * `config [<clé> <valeur>]`, `configSave`. Toute autre commande (dont `exit`,
+ * `restore`, `import`) est refusée avant même d'être tokenisée.
  *
  * `start`/`stopForks`/`configApply`/`configSave` pilotent le cycle de vie des
  * fils de recherche d'un client : leurs interpréteurs console

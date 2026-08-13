@@ -135,6 +135,14 @@ client_config_line_status_t client_config_parse_line(const char *line, client_co
         }
         cfg->has_pruner_batch = 1;
         cfg->pruner_batch = pruner_batch_clamp((int)n);
+    } else if (strcmp(key, "dfs_budget") == 0) {
+        char *end = NULL;
+        long n = strtol(value, &end, 10);
+        if (end == value || *end != '\0' || n < INT_MIN || n > INT_MAX) {
+            return CLIENT_CONFIG_LINE_INVALID_VALUE;
+        }
+        cfg->has_dfs_budget = 1;
+        cfg->dfs_budget = pruner_dfs_budget_clamp((int)n);
     } else {
         return CLIENT_CONFIG_LINE_UNKNOWN_KEY;
     }
@@ -216,6 +224,9 @@ int client_config_format(const client_config_t *cfg, char *out, size_t out_size)
     }
     if (cfg->has_pruner_batch) {
         APPEND("pruner_batch        = %d\n", cfg->pruner_batch);
+    }
+    if (cfg->has_dfs_budget) {
+        APPEND("dfs_budget          = %d\n", cfg->dfs_budget);
     }
 #undef APPEND
 
@@ -301,6 +312,11 @@ void client_config_apply_to_globals(const client_config_t *cfg, int argc, const 
     if (pruner_mode && cfg->has_pruner_batch && argc < 6) {
         pruner_batch_size = cfg->pruner_batch;
     }
+
+    if (cfg->has_dfs_budget) {
+        /* Aucun équivalent positionnel au démarrage, comme `limit`. */
+        pruner_dfs_budget = cfg->dfs_budget;
+    }
 }
 
 void client_config_apply_direct(const client_config_t *cfg, const char **server_host)
@@ -322,6 +338,9 @@ void client_config_apply_direct(const client_config_t *cfg, const char **server_
     }
     if (cfg->has_pruner_batch) {
         pruner_batch_size = cfg->pruner_batch;
+    }
+    if (cfg->has_dfs_budget) {
+        pruner_dfs_budget = cfg->dfs_budget;
     }
 }
 
@@ -369,4 +388,7 @@ void client_config_capture_effective(client_config_t *out, const char *server_ho
 
     out->has_pruner_batch = 1;
     out->pruner_batch = pruner_batch_size;
+
+    out->has_dfs_budget = 1;
+    out->dfs_budget = pruner_dfs_budget;
 }

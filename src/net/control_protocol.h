@@ -236,8 +236,9 @@ typedef enum {
     /// distant) ; relayable par le canal de contrôle binaire ET par
     /// `clientsCommand`/`clientsCmd` ; exposée par l'API HTTP avec
     /// authentification requise (`pause`, `resume`, `limit`,
-    /// `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`,
-    /// `start`, `stopForks`, `configApply`, `config`, `configSave`).
+    /// `maxStockByThread`, `prunerBatch`, `prunerDfsBudget`,
+    /// `clientsCommand`/`clientsCmd`, `start`, `stopForks`, `configApply`,
+    /// `config`, `configSave`).
     CTRL_CMD_WRITE_RELAYABLE,
     /// Modifie un état SERVEUR en bloc (remplacement de fichiers `.back`, ou
     /// réorganisation sous verrou de tout le stock de possibilités) ; jamais

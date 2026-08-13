@@ -567,28 +567,60 @@ static void bt_flush_pending(client_possibility_t *client,
 }
 
 /**
- * @brief Explore en profondeur le sous-arbre d'un paquet racine par backtracking in-place.
- *
- * Remplace la file de paquets de l'ancienne implémentation : un unique plateau
- * (copie locale du paquet racine) est modifié en place. Avancer = écrire une case
- * et positionner un bit ; reculer = effacer la case, libérer le bit et passer au
- * candidat suivant du niveau. Aucune copie de `possibility_packet` ni allocation
- * dans la boucle chaude. L'ordre de parcours (`directions[]`), le forward-checking
- * et les statistiques sont identiques à l'ancienne version : le même arbre est
- * exploré, seul le support mémoire change.
- *
- * Le format paquet n'est utilisé qu'aux frontières : délégation périodique du
- * surplus de travail (`bt_delegate_if_needed`) et arrêt (`bt_flush_pending`).
- *
- * @param client  Contexte du thread client.
- * @param root    Paquet racine à explorer (non modifié).
- * @param idParts Table de pré-calcul des indices de rotation [id][rotation].
- * @return        0 si le sous-arbre est entièrement exploré, 1 si arrêt demandé
- *                (le travail restant a été renvoyé au serveur).
+ * @brief Issue de `search_packet_backtracking_core`.
  */
-static int search_packet_backtracking(client_possibility_t *client,
+typedef enum {
+    BT_CORE_EXHAUSTED = 0, /**< Sous-arbre entièrement exploré : mort, prouvé (solutions éventuelles déjà signalées). */
+    BT_CORE_STOPPED = 1,   /**< REQUEST_STOP : arrêt demandé. */
+    BT_CORE_BUDGET = 2,    /**< `node_budget` épuisé avant exhaustivité : statut indéterminé. */
+} bt_core_result_t;
+
+/**
+ * @brief Cœur du backtracking in-place, factorisé pour servir deux usages : la
+ *        recherche réelle illimitée (`search_packet_backtracking`) et la preuve
+ *        de fermeture bornée en nœuds du pruner (`search_packet_backtracking_budgeted`,
+ *        §4.6b de `docs/conception/elagage_recherche.md`).
+ *
+ * Un unique plateau (copie locale du paquet racine) est modifié en place.
+ * Avancer = écrire une case et positionner un bit ; reculer = effacer la case,
+ * libérer le bit et passer au candidat suivant du niveau. Aucune copie de
+ * `possibility_packet` ni allocation dans la boucle chaude. L'ordre de parcours
+ * (`directions[]`), le forward-checking et les statistiques de nœuds
+ * (`counters`, `fc_attempts`/`fc_pruned`, `max_result`) sont identiques quel
+ * que soit l'appelant : le même arbre est exploré par le même code, seuls le
+ * plafond de nœuds et la délégation réseau diffèrent — c'est ce qui garantit
+ * qu'une fermeture prouvée par la variante bornée est une VRAIE preuve
+ * (aucune divergence de comportement possible entre les deux usages).
+ *
+ * @param client         Contexte du thread client.
+ * @param root           Paquet racine à explorer (non modifié).
+ * @param idParts        Table de pré-calcul des indices de rotation [id][rotation].
+ * @param node_budget    Nombre maximal de nœuds à explorer avant de renoncer
+ *                        (`BT_CORE_BUDGET`) ; `<= 0` = illimité (la recherche
+ *                        réelle ne s'arrête jamais sur ce critère).
+ * @param allow_delegate 1 : délégation périodique du surplus de travail
+ *                        (`bt_delegate_if_needed`) et renvoi au serveur du
+ *                        travail restant à l'arrêt (`bt_flush_pending`), comme
+ *                        avant cette factorisation — usage recherche réelle.
+ *                        0 : ni l'un ni l'autre. Déléguer une partie du
+ *                        sous-arbre romprait la preuve de fermeture elle-même
+ *                        (le budget n'aurait plus exploré tout ce qu'il
+ *                        prétend avoir fermé) — usage preuve bornée du pruner,
+ *                        où un arrêt (REQUEST_STOP) doit se contenter
+ *                        d'abandonner l'exploration locale : l'appelant
+ *                        retombe alors sur le comportement d'avant cette PR
+ *                        (possibilité originale conservée intacte, `checked`).
+ * @param out_nodes      Optionnel (NULL si non désiré) : reçoit le nombre de
+ *                        nœuds explorés, quel que soit le statut de retour —
+ *                        coût de la preuve, pour instrumentation/mesure.
+ * @return               `BT_CORE_EXHAUSTED`, `BT_CORE_STOPPED` ou `BT_CORE_BUDGET`.
+ */
+static bt_core_result_t search_packet_backtracking_core(client_possibility_t *client,
                                       struct possibility_packet *root,
-                                      int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
+                                      int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
+                                      long node_budget,
+                                      int allow_delegate,
+                                      unsigned long long *out_nodes)
 {
     // Plateau unique modifié en place
     struct possibility_packet board;
@@ -608,6 +640,9 @@ static int search_packet_backtracking(client_possibility_t *client,
     // Date de la dernière délégation (0 = jamais : la première est autorisée)
     struct timespec last_delegate = {0, 0};
 
+    // Nœuds explorés (miroir local des incréments de `counters`, pour
+    // `out_nodes` et le plafond `node_budget` — jamais lu hors de cette pile).
+    unsigned long long nodes = 1;
     // Statistique : le paquet racine compte comme une possibilité étudiée
     counters[client->compteur]++;
 
@@ -632,31 +667,39 @@ static int search_packet_backtracking(client_possibility_t *client,
                 usleep(pause_us);
                 continue;
             }
-            // REQUEST_STOP : renvoi du travail restant au serveur
-            bt_flush_pending(client, &board, stack, top, start_depth, idParts);
-            return 1;
+            // REQUEST_STOP : renvoi du travail restant au serveur (recherche
+            // réelle seulement — cf. doc de allow_delegate ci-dessus)
+            if (allow_delegate) {
+                bt_flush_pending(client, &board, stack, top, start_depth, idParts);
+            }
+            if (out_nodes != NULL) {
+                *out_nodes = nodes;
+            }
+            return BT_CORE_STOPPED;
         }
 
-        // Volontairement == et non % : noCheckDelegate n'est écrit qu'ici (+1
-        // puis remise à zéro au seuil), il ne peut donc jamais sauter par-dessus
-        // le seuil. Les chemins qui esquivent cet incrément (continue sur
-        // REQUEST_PAUSE, goto backtrack après une solution) ne font que retarder
-        // son atteinte.
-        noCheckDelegate++;
-        if (noCheckDelegate == DELEGATE_CHECK_INTERVAL_NODES) {
-            noCheckDelegate = 0;
-            // La fréquence de délégation est bornée en temps et non en nombre de
-            // nœuds : une délégation = jusqu'à max_stock_by_thread aller-retours
-            // TCP synchrones exécutés par ce thread. Indexée sur les nœuds, elle
-            // croîtrait avec la vitesse du moteur et mangerait le gain.
-            struct timespec now;
-            clock_gettime(CLOCK_MONOTONIC, &now);
-            long long elapsed_ms = (now.tv_sec - last_delegate.tv_sec) * 1000LL
-                                 + (now.tv_nsec - last_delegate.tv_nsec) / 1000000LL;
-            if (elapsed_ms >= DELEGATE_MIN_INTERVAL_MS) {
-                // Si trop d'étude à faire pour 1 thread, alors on délègue une partie
-                bt_delegate_if_needed(client, &board, stack, top, start_depth, idParts);
-                last_delegate = now;
+        if (allow_delegate) {
+            // Volontairement == et non % : noCheckDelegate n'est écrit qu'ici (+1
+            // puis remise à zéro au seuil), il ne peut donc jamais sauter par-dessus
+            // le seuil. Les chemins qui esquivent cet incrément (continue sur
+            // REQUEST_PAUSE, goto backtrack après une solution) ne font que retarder
+            // son atteinte.
+            noCheckDelegate++;
+            if (noCheckDelegate == DELEGATE_CHECK_INTERVAL_NODES) {
+                noCheckDelegate = 0;
+                // La fréquence de délégation est bornée en temps et non en nombre de
+                // nœuds : une délégation = jusqu'à max_stock_by_thread aller-retours
+                // TCP synchrones exécutés par ce thread. Indexée sur les nœuds, elle
+                // croîtrait avec la vitesse du moteur et mangerait le gain.
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                long long elapsed_ms = (now.tv_sec - last_delegate.tv_sec) * 1000LL
+                                     + (now.tv_nsec - last_delegate.tv_nsec) / 1000000LL;
+                if (elapsed_ms >= DELEGATE_MIN_INTERVAL_MS) {
+                    // Si trop d'étude à faire pour 1 thread, alors on délègue une partie
+                    bt_delegate_if_needed(client, &board, stack, top, start_depth, idParts);
+                    last_delegate = now;
+                }
             }
         }
 
@@ -671,9 +714,16 @@ static int search_packet_backtracking(client_possibility_t *client,
             // Case déjà remplie (indice du paquet d'origine) : niveau sans décision
             stack[top].search = NULL;
             counters[client->compteur]++;
+            nodes++;
             if (depth + 1 > max_result) {
                 max_result = depth + 1;
                 best_board_try_record(&g_search_best_board, &board, (uint16_t)(depth + 1));
+            }
+            if (node_budget > 0 && nodes >= (unsigned long long)node_budget) {
+                if (out_nodes != NULL) {
+                    *out_nodes = nodes;
+                }
+                return BT_CORE_BUDGET;
             }
             continue;
         }
@@ -763,11 +813,15 @@ backtrack:;
 
         if (top < 0) {
             // Le sous-arbre du paquet racine est entièrement exploré
-            return 0;
+            if (out_nodes != NULL) {
+                *out_nodes = nodes;
+            }
+            return BT_CORE_EXHAUSTED;
         }
 
         // Statistique possibilité étudiée + meilleur résultat
         counters[client->compteur]++;
+        nodes++;
         if (board.alloc > max_result) {
             max_result = board.alloc;
             best_board_try_record(&g_search_best_board, &board, board.alloc);
@@ -784,7 +838,67 @@ backtrack:;
             print_possibility_packet(&board);
         }
 #endif // DEBUG_CHECK_POSSIBILITY
+        if (node_budget > 0 && nodes >= (unsigned long long)node_budget) {
+            if (out_nodes != NULL) {
+                *out_nodes = nodes;
+            }
+            return BT_CORE_BUDGET;
+        }
     }
+}
+
+/**
+ * @brief Explore en profondeur le sous-arbre d'un paquet racine par backtracking in-place.
+ *
+ * Fine enveloppe de `search_packet_backtracking_core` (illimité, délégation
+ * autorisée) préservant la signature/le contrat historiques de cette fonction :
+ * seule la recherche réelle (`autosearch_step`) l'appelle.
+ *
+ * @param client  Contexte du thread client.
+ * @param root    Paquet racine à explorer (non modifié).
+ * @param idParts Table de pré-calcul des indices de rotation [id][rotation].
+ * @return        0 si le sous-arbre est entièrement exploré, 1 si arrêt demandé
+ *                (le travail restant a été renvoyé au serveur).
+ */
+static int search_packet_backtracking(client_possibility_t *client,
+                                      struct possibility_packet *root,
+                                      int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
+{
+    bt_core_result_t r = search_packet_backtracking_core(client, root, idParts, -1, 1, NULL);
+    return (r == BT_CORE_STOPPED) ? 1 : 0;
+}
+
+/**
+ * @brief Preuve de fermeture bornée en nœuds du sous-arbre d'une possibilité (§4.6b
+ *        de `docs/conception/elagage_recherche.md`).
+ *
+ * Rejoue `root` par le même backtracking que la recherche réelle
+ * (`search_packet_backtracking_core`), plafonné à `node_budget` nœuds et sans
+ * délégation (`allow_delegate = 0`, cf. sa doc). Une condition nécessaire
+ * exacte, pas une heuristique : si `BT_CORE_EXHAUSTED` est retourné, le
+ * sous-arbre entier a été parcouru par le même code que la recherche fait
+ * foi — aucun faux positif possible, exactement la même garantie qu'une
+ * fermeture découverte par la recherche elle-même. `BT_CORE_BUDGET` et
+ * `BT_CORE_STOPPED` signifient seulement « statut indéterminé dans ce budget » :
+ * l'appelant doit alors traiter la possibilité comme avant cette PR (aucune
+ * conclusion, ni positive ni négative, n'en découle).
+ *
+ * @param client      Contexte du thread client (pruner).
+ * @param root        Possibilité à contrôler (non modifiée).
+ * @param idParts     Table de pré-calcul des indices de rotation [id][rotation].
+ * @param node_budget Plafond de nœuds (`<= 0` : appelant ne doit pas appeler
+ *                    cette fonction — la budgétisation est désactivée en amont).
+ * @param out_nodes   Optionnel (NULL si non désiré) : nœuds explorés, coût de
+ *                    la preuve pour instrumentation.
+ * @return            `BT_CORE_EXHAUSTED`, `BT_CORE_BUDGET` ou `BT_CORE_STOPPED`.
+ */
+static bt_core_result_t search_packet_backtracking_budgeted(client_possibility_t *client,
+                                      struct possibility_packet *root,
+                                      int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
+                                      long node_budget,
+                                      unsigned long long *out_nodes)
+{
+    return search_packet_backtracking_core(client, root, idParts, node_budget, 0, out_nodes);
 }
 
 static void init_id_parts(int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
@@ -955,10 +1069,28 @@ void *autosearch (void *userdata)
  * puis nettoie le cycle. Extrait du corps de `while(1)` pour être testable hors
  * de la boucle infinie.
  *
+ * Depuis §4.6b (`docs/conception/elagage_recherche.md`) : une possibilité que
+ * le contrôle superficiel juge vivante mais pas encore `checked` est en plus
+ * soumise à `search_packet_backtracking_budgeted`, une preuve de fermeture par
+ * backtracking RÉEL borné en nœuds (`pruner_dfs_budget`). Si le budget suffit
+ * à épuiser tout le sous-arbre, la possibilité est prouvée morte au même titre
+ * qu'une trouvaille de la recherche elle-même — éliminée, jamais redistribuée.
+ * Sinon (budget épuisé, ou arrêt demandé en cours de preuve), comportement
+ * inchangé : conservée, marquée `checked`. `pruner_dfs_budget <= 0` désactive
+ * entièrement ce contrôle supplémentaire (même convention que `limit 0`).
+ *
  * @return 1 pour poursuivre la boucle, 0 pour s'arrêter (REQUEST_STOP).
  */
 static int autoprune_step(client_possibility_t *client)
 {
+    // Table de pré-calcul des rotations, nécessaire uniquement à la preuve de
+    // fermeture bornée ci-dessous (search_packet_backtracking_budgeted).
+    // Recalculée à chaque appel (un par lot, pas par possibilité) : coût
+    // négligeable (ETERN_PARTS+1 * PART_SIZES affectations d'int16_t) au
+    // regard d'un aller-retour TCP de lot.
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    init_id_parts(idParts);
+
     // Attente d'un jeu de possibilité : works/aposs relus ensemble sous
     // works_mutex (cf. commentaire détaillé dans autosearch_step ci-dessus —
     // même risque théorique de réordonnancement mémoire, notamment sur ARM).
@@ -1012,6 +1144,33 @@ static int autoprune_step(client_possibility_t *client)
             record_solution(client, &work);
             a++;
             continue;
+        }
+        if (!work.checked && has_next && pruner_dfs_budget > 0)
+        {
+            // Vivant selon le contrôle superficiel mais pas encore `checked` :
+            // tenter la preuve de fermeture bornée avant de se résigner à
+            // conserver. Jamais tentée quand `work.checked` est déjà vrai (cf.
+            // §4.6b : ce drapeau court-circuite tout, comportement d'avant
+            // cette PR préservé à l'identique) ni quand le contrôle
+            // superficiel a déjà tranché « mort » (has_next == 0, cas déjà
+            // traité ci-dessous sans le coût d'un backtracking).
+            unsigned long long dfs_nodes = 0;
+            bt_core_result_t dfs = search_packet_backtracking_budgeted(
+                client, &work, idParts, pruner_dfs_budget, &dfs_nodes);
+            pruner_dfs_nodes += dfs_nodes;
+            if (dfs == BT_CORE_EXHAUSTED)
+            {
+                // Sous-arbre entier prouvé mort (ou déjà entièrement soldé :
+                // toute solution qu'il contenait a été signalée au passage par
+                // search_packet_backtracking_core) : éliminée, comme une
+                // branche morte du contrôle superficiel.
+                pruner_dfs_closed++;
+                pruner_removed++;
+                a++;
+                continue;
+            }
+            // BT_CORE_BUDGET ou BT_CORE_STOPPED : statut indéterminé, on
+            // retombe sur le comportement historique ci-dessous.
         }
         if (work.checked || has_next)
         {
