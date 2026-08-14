@@ -125,6 +125,30 @@ Le débit progresse fortement (moins de lookups par placement : au plus 4 voisin
 
 > **À lire comme une seule histoire avant de rouvrir ce chantier.** Le +28,6 % de l'index compact (tableau ci-dessus) a été mesuré sur 16 **processus indépendants**, chacun avec sa copie privée : la pression venait de la **duplication** (16 × 5,06 Mo contre 16 × 1,27 Mo), pas de la taille de la table. Le partage en copy-on-write l'a supprimée à la racine — une seule copie de 6,44 Mo pour toute la machine, déjà résidente en cache. La conversion du lookup de placement optimisait donc un jeu de travail qui n'était plus sous pression, et l'a mesuré. **La boucle de recherche est bornée par le calcul et les branchements, pas par la mémoire** : toute future optimisation de jeu de travail sur cette boucle doit être précédée d'un `perf stat` démontrant que la hiérarchie mémoire pèse une fraction non négligeable du temps. Ce n'est pas le cas aujourd'hui. Corollaire pour le dimensionnement matériel : **la taille du cache n'est pas un critère de choix pour ce programme** — maximiser le nombre de cœurs entiers, l'IPC par cœur et la qualité de la prédiction de branchement.
 
+### 1.3 quater `mrv_choose_cell` : la case la plus contrainte, pas la suivante du parcours
+
+Depuis §4.7 de [docs/conception/elagage_recherche.md](conception/elagage_recherche.md), le moteur de production ne remplit plus les cases dans l'ordre figé `dirx[]/diry[]` : à chaque nœud il choisit la **case vide la plus contrainte** (MRV, *minimum remaining values*) — celle qui offre le moins de pièces encore libres. C'est `search_packet_backtracking_mrv` (`src/core/etii_search.c`) ; `search_packet_backtracking_core` (ordre fixe) reste en place, utilisée par la preuve bornée du pruner (§4.6b) et accessible pour une mesure A/B via `ETII_MRV=0`.
+
+**Ce que ça change, mesuré** (`tests/bench/bench_search.sh`, puzzle 256, 2 M nœuds × 3 répétitions) :
+
+| Configuration | Nœuds/s (médiane) | `max_result` à budget de nœuds identique |
+|---|---|---|
+| Ordre fixe (`ETII_MRV=0`) | 6 102 866 | 74 |
+| Ordre dynamique (défaut) | 811 617 | **186** |
+| Delta | **−86,7 %** | **+151 %** |
+
+Le débit n'est pas la mesure de ce changement (cf. [tests_et_ci.md](tests_et_ci.md#max_result--le-débit-seul-ne-prouve-pas-un-vrai-gain)) : à temps mural égal l'ordre fixe explore ~10× plus de nœuds et **reste à 74** — le plafond documenté depuis §4.4, atteint indépendamment sur des centaines de millions de nœuds. Ce mur était un artefact de l'ordre de parcours, pas une propriété du puzzle. À 50 M nœuds, MRV atteint 188.
+
+**Trois choses rendent le choix abordable**, là où le prototype de mesure de la PR 9 tombait à 23 k nœuds/s (−99,7 %) :
+
+1. **Balayage restreint à la frontière.** Une case dont les 4 côtés valent `all_face` n'est contrainte par rien (ni bord de plateau, ni voisine posée) : elle accepte toutes les pièces libres et ne peut donc jamais être le minimum tant qu'une case contrainte existe. Le test est une lecture du cache `constraints[][]` déjà maintenu par `bt_propagate_place`/`_undo`, pas un lookup. La frontière compte 29 cases en moyenne (max 52) contre 256 cases balayées par le prototype.
+2. **Comptage par `popcount`.** `bucket_id_mask` (construit une fois avec la map, à côté de `packed` — `build_bucket_id_mask`, `src/core/part.c`) donne le masque des ids d'un compartiment ; le nombre de pièces encore libres est `popcount(masque & ~utilisées)`, **indépendant de la taille du compartiment**, là où le prototype parcourait toutes ses entrées (jusqu'à plusieurs centaines). Le masque des pièces utilisées du plateau est miroité en mots de 64 bits (`mrv_used_init`/`mrv_used_set`/`mrv_used_clear`), maintenu incrémentalement comme le cache de contraintes.
+3. Le balayage reste **complet** (pas d'arrêt anticipé sur une case à un seul candidat) : toute case de frontière sans aucun candidat est détectée au passage, un test de mort plus large que le forward-check local — gratuit puisque le balayage a lieu de toute façon.
+
+**Délégation : les paquets sont re-canonisés.** La profondeur de pile n'étant plus le curseur de parcours, `bt_canonicalize_packet` rétablit `alloc` = index de la **première case vide dans l'ordre `directions[]`** (via `normalize_possibility_packet`) sur chaque paquet matérialisé (`bt_materialize_pending`/`bt_flush_pending` avec `dynamic_order = 1`). Les cases remplies au-delà du curseur sont exactement le cas déjà prévu par le format (« indices fixes », traitées comme des niveaux sans décision) : un paquet cédé par un client MRV est donc repris à l'identique par un client à ordre fixe, un pruner ou un `.back`. **Aucun bump de `VERSION`** — c'est ce qui permet à une flotte mixte de partager le même serveur. Verrouillé par `search_backtracking_mrv_delegation_preserves_solution_count` (`tests/core/test_etii_search.c`) : exploration MRV du vrai puzzle 4×4 interrompue en cours de route, travail restant repris **à ordre fixe** jusqu'à épuisement, nombre total de solutions rigoureusement égal à celui d'une exploration exhaustive à ordre fixe.
+
+**Ce que MRV n'apporte pas.** Le taux d'élagage du forward-check bouge à peine (44,2 % → 43,2 %) : la valeur de MRV n'est pas dans l'élagage, elle est dans la **forme** de l'arbre exploré.
+
 ### 1.4 Exploration d'un niveau : un candidat à la fois
 
 Une idée clé : **on ne génère pas tous les successeurs de la case courante**. On prend le premier candidat valide, on descend d'un niveau, et on reviendra aux candidats suivants seulement si le sous-arbre en dessous est épuisé.

@@ -487,6 +487,84 @@ static uint32_t *build_packed_index(map_big_array *map, unsigned long long nbKey
 }
 
 /**
+ * @brief Construit `bucket_id_mask` : le masque des ids de chaque compartiment.
+ *
+ * À appeler APRÈS `build_packed_index` (l'offset d'un compartiment dans
+ * `arena` est lu dans `packed`, et sert d'indice du masque). Comme `packed`,
+ * l'index est purement redondant : il ne change aucune donnée, il rend
+ * seulement le comptage des pièces libres d'un compartiment indépendant de sa
+ * taille (quelques `popcount` au lieu d'un parcours) — cf. §4.7 (ordre
+ * dynamique MRV) de `docs/conception/elagage_recherche.md`.
+ *
+ * Le nombre de mots est déduit du plus grand id RÉELLEMENT présent dans
+ * l'arène, jamais de `ETERN_PARTS` : `part.c` reste agnostique de la taille du
+ * puzzle, et une map bâtie à la main dans un test obtient un masque à sa
+ * mesure.
+ *
+ * @param map        Map dont `arena`/`packed` sont déjà construits.
+ * @param nbKeys     Nombre de compartiments (`sizearray^4`).
+ * @param totalParts Nombre d'entrées dans l'arène (borne des offsets).
+ * @param out_words  Sortie : nombre de mots d'un masque (0 si non construit).
+ * @return           Index alloué, ou NULL (les lecteurs comptent alors par
+ *                   parcours — jamais de résultat tronqué).
+ */
+static uint64_t *build_bucket_id_mask(map_big_array *map, unsigned long long nbKeys,
+                                      unsigned long long totalParts, int *out_words)
+{
+	*out_words = 0;
+	// Sans index compact, pas d'offset de compartiment : rien à indexer.
+	if (map->packed == NULL || map->arena == NULL || totalParts == 0)
+	{
+		return NULL;
+	}
+
+	int16_t maxId = 0;
+	for (unsigned long long i = 0; i < totalParts; i++)
+	{
+		if (map->arena[i].id > maxId)
+		{
+			maxId = map->arena[i].id;
+		}
+	}
+	if (maxId <= 0)
+	{
+		// Arène ne contenant que des entrées bouchon (id 0) : rien à masquer.
+		return NULL;
+	}
+
+	int words = ((int)maxId + 63) / 64;
+	uint64_t *masks = calloc((size_t)totalParts * (size_t)words, sizeof(uint64_t));
+	if (masks == NULL)
+	{
+		return NULL;
+	}
+
+	for (unsigned long long idx = 0; idx < nbKeys; idx++)
+	{
+		uint32_t entry = map->packed[idx];
+		unsigned int size = entry & MAP_PACKED_FIELD_MAX;
+		if (size == 0)
+		{
+			continue;
+		}
+		unsigned int offset = entry >> 16;
+		uint64_t *mask = &masks[(size_t)offset * (size_t)words];
+		for (unsigned int s = 0; s < size; s++)
+		{
+			int16_t id = map->arena[offset + s].id;
+			if (id > 0)
+			{
+				int bit = id - 1;
+				mask[bit / 64] |= (uint64_t)1 << (bit % 64);
+			}
+		}
+	}
+
+	*out_words = words;
+	return masks;
+}
+
+/**
  * @brief Fréquence globale de chaque couleur de bord (0..maxFace) dans `apart`.
  *
  * Compte les 4 faces de CHAQUE entrée de `apart`, rotations comprises : si
@@ -715,6 +793,7 @@ map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 		}
 	}
 	result->packed = build_packed_index(result, nbKeys, totalParts);
+	result->bucket_id_mask = build_bucket_id_mask(result, nbKeys, totalParts, &result->id_mask_words);
 	free(arena_sort_freq);
 #ifdef DEBUG_CHECK_POSSIBILITY
 	log_info("max array:%i\n", maxarray);
@@ -847,6 +926,10 @@ int free_bigarray(map_big_array *array_parts)
 	if (array_parts->packed != NULL)
 	{
 		free(array_parts->packed);
+	}
+	if (array_parts->bucket_id_mask != NULL)
+	{
+		free(array_parts->bucket_id_mask);
 	}
 	free(array_parts->flat);
 	free(array_parts);

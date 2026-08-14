@@ -93,6 +93,28 @@ typedef struct
 	 * Invariant : `packed != NULL` implique `arena != NULL`.
 	 */
 	uint32_t *packed;
+	/**
+	 * Masque des IDENTIFIANTS de pièces présents dans chaque compartiment, un
+	 * bit par pièce (bit `id - 1`, mot `(id - 1) / 64`), indexé par l'OFFSET
+	 * du compartiment dans `arena` : le masque du compartiment commençant à
+	 * `offset` occupe `id_mask_words` mots à partir de
+	 * `bucket_id_mask[offset * id_mask_words]`. Seuls les offsets de début de
+	 * compartiment sont renseignés (les autres restent à zéro) — un tableau
+	 * volontairement creux, 0,46 Mo sur le puzzle 256, qui évite une seconde
+	 * table indexée par clé (10,6 Mo) ou une indirection supplémentaire.
+	 *
+	 * Sert au choix de case de l'ordre dynamique MRV (§4.7 de
+	 * `docs/conception/elagage_recherche.md`) : compter les pièces ENCORE
+	 * LIBRES d'un compartiment devient quelques `popcount` au lieu d'un
+	 * parcours de toutes ses entrées. Purement redondant, comme `packed`.
+	 *
+	 * NULL si non construit (map bâtie à la main, `packed` absent, ou échec
+	 * d'allocation) : les lecteurs retombent alors sur le comptage par
+	 * parcours, cf. `map_bucket_id_mask`.
+	 */
+	uint64_t *bucket_id_mask;
+	/** Nombre de mots de 64 bits d'un masque de `bucket_id_mask` (0 si absent). */
+	int id_mask_words;
 } map_big_array;
 
 /**
@@ -287,6 +309,63 @@ static inline map_bucket map_bucket_packed(const map_big_array *map, const key_p
 		bucket.size = entry->size;
 	}
 	return bucket;
+}
+
+/**
+ * @brief Masque des ids de pièces d'un compartiment, ou NULL si indisponible.
+ *
+ * Complément de `map_bucket_packed` : même clé, même compartiment, mais la
+ * réponse est le masque de bits des IDENTIFIANTS présents (bit `id - 1`)
+ * plutôt que la liste des entrées. Permet de compter les pièces encore libres
+ * par `popcount` contre le masque des pièces utilisées du plateau, sans
+ * parcourir le compartiment — cf. `map_mask_free_count`.
+ *
+ * Renvoie NULL quand l'index n'existe pas (map bâtie à la main, `packed`
+ * absent, allocation échouée) OU quand le compartiment est vide : dans les
+ * deux cas l'appelant doit retomber sur un comptage par parcours, jamais
+ * supposer « zéro pièce libre ».
+ *
+ * @param map Table de lookup pré-calculée.
+ * @param key Clé de recherche (k1=top, k2=right, k3=bottom, k4=left).
+ * @return    Masque de `map->id_mask_words` mots (appartient à la map, ne pas
+ *            libérer), ou NULL.
+ */
+static inline const uint64_t *map_bucket_id_mask(const map_big_array *map, const key_part *key)
+{
+	// packed est testé aussi : un test peut neutraliser l'index compact d'une
+	// map réelle après construction pour forcer le repli sur `flat`.
+	if (map->bucket_id_mask == NULL || map->packed == NULL)
+	{
+		return NULL;
+	}
+	int m = map->sizearray;
+	size_t idx = (size_t)((((int)key->k1 * m + key->k2) * m + key->k3) * m + key->k4);
+	// bucket_id_mask != NULL implique packed != NULL (cf. build_bucket_id_mask).
+	uint32_t entry = map->packed[idx];
+	if ((entry & MAP_PACKED_FIELD_MAX) == 0)
+	{
+		return NULL;
+	}
+	return &map->bucket_id_mask[(size_t)(entry >> 16) * (size_t)map->id_mask_words];
+}
+
+/**
+ * @brief Nombre de pièces d'un compartiment encore libres, par `popcount`.
+ *
+ * @param mask  Masque des ids du compartiment (`map_bucket_id_mask`).
+ * @param words Nombre de mots du masque (`map->id_mask_words`).
+ * @param used  Masque des pièces déjà posées, même convention de bits
+ *              (bit `id - 1`), au moins `words` mots.
+ * @return      Nombre d'ids présents dans le compartiment et non utilisés.
+ */
+static inline int map_mask_free_count(const uint64_t *mask, int words, const uint64_t *used)
+{
+	int count = 0;
+	for (int w = 0; w < words; w++)
+	{
+		count += __builtin_popcountll(mask[w] & ~used[w]);
+	}
+	return count;
 }
 
 /**

@@ -89,11 +89,12 @@ int main(int argc, const char *argv[]) {
                   bench_target_nodes);
     }
 
-    // ETII_MRV : prototype de développement (§4.7, cf. static_variables.h) —
-    // ordre de variable dynamique, délégation désactivée dans cette branche.
+    // ETII_MRV : ordre de variable de la recherche (§4.7, cf.
+    // static_variables.h). Dynamique (MRV) par défaut ; ETII_MRV=0 rétablit
+    // l'ordre fixe historique, pour une mesure A/B au banc ou un repli.
     mrv_enabled = mrv_parse_env(getenv("ETII_MRV"));
-    if (mrv_enabled) {
-        log_info("banc de mesure : prototype MRV activé (ETII_MRV=1), délégation désactivée\n");
+    if (!mrv_enabled) {
+        log_info("recherche : ordre de parcours FIXE (ETII_MRV=0), moteur historique\n");
     }
 
     if (argc >= 2 && argv[1] != NULL) {

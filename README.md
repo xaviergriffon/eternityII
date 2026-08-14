@@ -25,6 +25,7 @@ Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisa
 - La boucle de recherche lit sa table de candidats via un **index compact** (4 octets par compartiment au lieu de 16), qui divise par 3,8 le volume balayé par le forward-checking : **+10 % de nœuds/s** sur un worker, **+29 %** sur 16 workers concurrents.
 - Cette table étant en lecture seule une fois construite, le parent la construit **avant de forker** : les processus de recherche s'en partagent **une seule copie** (copy-on-write) au lieu d'en fabriquer chacun la leur — **−90 % d'empreinte mémoire** à 16 workers (111 → 11 Mo de `Pss`), pour un débit inchangé.
 - Chaque compartiment de la table de candidats est trié **à sa construction** par rareté croissante de couleur exposée (la pièce la plus rare essayée en premier) : coût nul dans la boucle chaude, **+3,2 % de nœuds/s** mesuré.
+- La recherche choisit à chaque nœud la **case vide la plus contrainte** (ordre dynamique MRV) au lieu de suivre un ordre de parcours figé. C'est **7,5× plus lent par nœud**, mais la profondeur atteinte passe de **74 à 186 pièces posées** à budget de nœuds identique — l'ordre fixe restant bloqué à 74 même en lui laissant dix fois plus de nœuds (donc plus de temps mural). Les paquets délégués sont re-canonisés avant émission : clients à ordre dynamique et à ordre fixe restent interopérables sur le même serveur, sans changement du protocole.
 
 > Détails (modèle de processus/threads, IPC parent↔enfants, structure des sources) : [docs/architecture.md](docs/architecture.md).
 

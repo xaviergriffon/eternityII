@@ -823,21 +823,39 @@ extern unsigned long long bench_target_nodes;
 unsigned long long bench_parse_nodes_env(const char *env_value);
 
 /**
- * @brief Active le PROTOTYPE d'ordre de variable dynamique (MRV) de la boucle
- *        de recherche — §4.7 de docs/conception/elagage_recherche.md,
- *        variable d'environnement de développement `ETII_MRV` (`1` = activé),
- *        lue une seule fois au démarrage comme `ETII_BENCH_NODES`, hors du
- *        chemin de production (pas d'entrée `cli_topics[]`).
+ * @brief Valeur par défaut de `mrv_enabled` : l'ordre de variable DYNAMIQUE
+ *        (MRV) est le moteur de recherche de production depuis §4.7
+ *        (docs/conception/elagage_recherche.md).
  *
- * Défaut (absente ou toute valeur différente de `1`) : DÉSACTIVÉ — contraire
- * à `forced_propagation_enabled` (§4.5), ce prototype n'est PAS censé
- * approcher un comportement de production : il choisit à chaque nœud la case
- * vide la plus contrainte au lieu de suivre `directions[]`, ce qui rend les
- * paquets produits non interopérables avec le reste du protocole (la
- * délégation/matérialisation suppose l'ordre fixe). `search_packet_backtracking`
- * bascule vers `search_packet_backtracking_mrv_experiment` (délégation
- * TOUJOURS désactivée dans cette branche, quel que soit l'appelant) quand ce
- * drapeau est levé — voir §4.7 pour le protocole de mesure complet.
+ * Mesuré sur le puzzle 256 (`tests/bench/bench_search.sh`, 2 M nœuds × 3) :
+ * débit −86,7 % (6,10 M → 0,81 M nœuds/s) mais profondeur atteinte
+ * `max_result` 74 → **186** à budget de nœuds identique — et l'ordre fixe
+ * reste à 74 même en lui laissant 10× plus de nœuds, c'est-à-dire plus de
+ * temps mural que MRV n'en a consommé. Le débit n'est pas la mesure de ce
+ * changement (cf. docs/tests_et_ci.md, « max_result : le débit seul ne prouve
+ * pas un vrai gain ») : le mur structurel à 74 documenté depuis §4.4 était un
+ * artefact de l'ordre de parcours FIXE, pas une propriété du puzzle.
+ */
+#define MRV_DEFAULT_ENABLED 1
+
+/**
+ * @brief Sélectionne l'ordre de variable de la boucle de recherche : DYNAMIQUE
+ *        (MRV, la case vide la plus contrainte à chaque nœud) ou FIXE
+ *        (`directions[]`, le moteur historique) — §4.7 de
+ *        docs/conception/elagage_recherche.md.
+ *
+ * Défaut : `MRV_DEFAULT_ENABLED` (dynamique). La variable d'environnement de
+ * développement `ETII_MRV` (`0` = ordre fixe, `1` = ordre dynamique) est lue
+ * une seule fois au démarrage, comme `ETII_BENCH_NODES`, et n'a donc pas
+ * d'entrée dans `cli_topics[]` : elle n'existe que pour les mesures A/B du
+ * banc (protocole §7 : chaque piste se mesure PAR-DESSUS la précédente) et
+ * pour revenir au moteur historique sans reconstruire, jamais comme réglage
+ * d'exploitation.
+ *
+ * Les deux moteurs sont interopérables : `search_packet_backtracking_mrv`
+ * re-canonise tout paquet délégué (`bt_canonicalize_packet`), si bien qu'un
+ * client MRV, un client à ordre fixe et un pruner peuvent se partager le même
+ * serveur — aucun bump de `VERSION` (§5).
  */
 extern int mrv_enabled;
 
@@ -845,7 +863,9 @@ extern int mrv_enabled;
  * @brief Parse `ETII_MRV` en drapeau d'activation. Fonction pure et testable.
  *
  * @param env_value Valeur de la variable d'environnement, ou NULL si absente.
- * @return 1 si `env_value` vaut exactement "1", 0 sinon (y compris absente).
+ * @return 0 si `env_value` vaut exactement "0", 1 s'il vaut exactement "1",
+ *         `MRV_DEFAULT_ENABLED` sinon (absente ou valeur non reconnue : jamais
+ *         de bascule silencieuse hors du défaut du programme).
  */
 int mrv_parse_env(const char *env_value);
 

@@ -53,18 +53,30 @@ void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibil
 /**
  * @brief Niveau de la pile de décisions du backtracking in-place.
  *
- * Chaque case du parcours `directions[]` explorée depuis le paquet racine
- * occupe un niveau de pile. Un niveau mémorise uniquement la liste de candidats
- * de la map (pointeur stable, la map est en lecture seule pendant la recherche)
- * et la position de reprise : le plateau lui-même est partagé et modifié en place.
+ * Chaque case explorée depuis le paquet racine occupe un niveau de pile. Un
+ * niveau mémorise la case concernée, la liste de candidats de la map (pointeur
+ * stable, la map est en lecture seule pendant la recherche) et la position de
+ * reprise : le plateau lui-même est partagé et modifié en place.
+ *
+ * La case (`x`, `y`) est stockée plutôt que déduite de `dirx[depth]/diry[depth]`
+ * : en ordre FIXE elle vaut exactement cela, mais en ordre DYNAMIQUE (MRV,
+ * §4.7 de `docs/conception/elagage_recherche.md`) elle est choisie à chaque
+ * nœud par `mrv_choose_cell`. C'est ce qui permet aux mécanismes de délégation
+ * (`bt_count_pending`, `bt_materialize_pending`, `bt_flush_pending`) d'être
+ * strictement les mêmes pour les deux moteurs — une seule sémantique de
+ * délégation, testée une seule fois.
  */
 typedef struct {
-    /** Liste des candidats pour cette case (NULL = case pré-remplie, aucune décision). */
+    /** Liste des candidats pour cette case (NULL = case pré-remplie ou sans issue, aucune décision). */
     struct array_part *search;
     /** Prochain indice de candidat à essayer dans `search` lors d'un retour sur ce niveau. */
     int next_s;
     /** Indice faceused (id-1) de la pièce actuellement placée à ce niveau, -1 si aucune. */
     int16_t placed_pos;
+    /** Colonne de la case de ce niveau. */
+    uint8_t x;
+    /** Ligne de la case de ce niveau. */
+    uint8_t y;
 } bt_level;
 
 /**
@@ -292,6 +304,35 @@ static void record_solution(client_possibility_t *client, struct possibility_pac
 }
 
 /**
+ * @brief Re-canonise un paquet produit par une exploration en ordre DYNAMIQUE.
+ *
+ * Un paquet exploré en ordre MRV (§4.7) a des cases remplies un peu partout :
+ * la profondeur de pile qui l'a produit n'a plus aucun rapport avec le curseur
+ * de parcours `directions[]`. Or `alloc` EST ce curseur (cf. sa documentation
+ * canonique dans `possibility.h`), et le seul invariant qu'un consommateur —
+ * serveur, pruner, ou client à ordre fixe — est en droit d'attendre est :
+ * toutes les cases d'index `< alloc` dans `directions[]` sont remplies. On
+ * rétablit donc `alloc` = index de la PREMIÈRE case vide du parcours, ce que
+ * `normalize_possibility_packet` sait déjà faire (et qui recale `x`/`y` dans
+ * la foulée) : le paquet redevient indiscernable d'un paquet produit en ordre
+ * fixe. Les cases remplies au-delà d'`alloc` sont exactement le cas déjà prévu
+ * et documenté (« indices fixes », sautés par un niveau sans décision) —
+ * aucune extension du format, donc aucun bump de `VERSION`.
+ *
+ * @param pkt Paquet à canoniser (modifié : `alloc`, `x`, `y`).
+ * @return    1 si le plateau est COMPLET (aucune case vide : c'est une
+ *            solution, pas un travail à déléguer), 0 sinon.
+ */
+static int bt_canonicalize_packet(struct possibility_packet *pkt)
+{
+    // normalize_possibility_packet n'abaisse `alloc` que s'il dépasse le
+    // premier trou : on part donc du maximum pour qu'il le recale toujours.
+    pkt->alloc = ETERN_PARTS;
+    normalize_possibility_packet(pkt);
+    return pkt->alloc >= ETERN_PARTS;
+}
+
+/**
  * @brief Matérialise en paquets les frères non explorés de la pile, du plus profond vers la racine.
  *
  * Reconstruit l'état du plateau à chaque niveau (annulation progressive des
@@ -316,6 +357,17 @@ static void record_solution(client_possibility_t *client, struct possibility_pac
  * @param out        Tableau de destination des paquets matérialisés.
  * @param max_out    Nombre maximal de paquets à produire.
  * @param new_next_s Sortie : nouveau `next_s` par niveau si l'envoi réussit.
+ * @param dynamic_order 0 : ordre fixe — `alloc` vaut la profondeur du niveau,
+ *                      qui EST le curseur de parcours (invariant conservé de
+ *                      proche en proche depuis un paquet racine canonique).
+ *                      1 : ordre dynamique (MRV) — la profondeur de pile n'a
+ *                      plus aucun rapport avec le curseur `directions[]`, le
+ *                      paquet est donc RE-CANONISÉ (`bt_canonicalize_packet`)
+ *                      avant d'être émis, ce qui le rend indiscernable, pour
+ *                      tout autre client ou pour le serveur, d'un paquet
+ *                      produit en ordre fixe — cf. §4.7 (« re-canonisation aux
+ *                      frontières de délégation ») : c'est ce qui évite tout
+ *                      bump de `VERSION`.
  * @return           Nombre de paquets effectivement matérialisés.
  */
 static int bt_materialize_pending(client_possibility_t *client,
@@ -323,7 +375,7 @@ static int bt_materialize_pending(client_possibility_t *client,
                                   const bt_level *stack, int top, int start_depth,
                                   int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
                                   struct possibility_packet *out, int max_out,
-                                  int *new_next_s)
+                                  int *new_next_s, int dynamic_order)
 {
     struct possibility_packet scratch;
     memcpy(&scratch, board, sizeof(scratch));
@@ -336,12 +388,12 @@ static int bt_materialize_pending(client_possibility_t *client,
         new_next_s[i] = lvl->next_s;
         // Annulation du placement du niveau : scratch = état au moment du choix
         if (lvl->placed_pos >= 0) {
-            scratch.grid[dirx[d]][diry[d]] = -2;
+            scratch.grid[lvl->x][lvl->y] = -2;
             BOARD_SET_FACE(&scratch, lvl->placed_pos, 0);
         }
         if (lvl->search != NULL) {
-            uint8_t cx = dirx[d];
-            uint8_t cy = diry[d];
+            uint8_t cx = lvl->x;
+            uint8_t cy = lvl->y;
             int s = lvl->next_s;
             for (; s < lvl->search->size && count < max_out; s++) {
                 struct part *cand = &lvl->search->parts[s];
@@ -358,17 +410,25 @@ static int bt_materialize_pending(client_possibility_t *client,
                 memcpy(pkt, &scratch, sizeof(*pkt));
                 pkt->grid[cx][cy] = idParts[cand->id][cand->rotation];
                 BOARD_SET_FACE(pkt, position, 1);
-                pkt->alloc = d + 1;
-                if (pkt->alloc >= ETERN_PARTS) {
-                    // Solution complète parmi les frères : enregistre + signale.
-                    // Avec --stop-on-solution, record_solution ne revient pas.
-                    // Sinon on ne la matérialise pas (rien à explorer au-delà ;
-                    // dirx[d+1] serait hors borne) et on passe au candidat suivant.
-                    record_solution(client, pkt);
-                    continue;
+                if (dynamic_order) {
+                    if (bt_canonicalize_packet(pkt)) {
+                        // Plateau complet : même traitement qu'en ordre fixe.
+                        record_solution(client, pkt);
+                        continue;
+                    }
+                } else {
+                    pkt->alloc = d + 1;
+                    if (pkt->alloc >= ETERN_PARTS) {
+                        // Solution complète parmi les frères : enregistre + signale.
+                        // Avec --stop-on-solution, record_solution ne revient pas.
+                        // Sinon on ne la matérialise pas (rien à explorer au-delà ;
+                        // dirx[d+1] serait hors borne) et on passe au candidat suivant.
+                        record_solution(client, pkt);
+                        continue;
+                    }
+                    pkt->x = dirx[d + 1];
+                    pkt->y = diry[d + 1];
                 }
-                pkt->x = dirx[d + 1];
-                pkt->y = diry[d + 1];
                 // Nouvel état de plateau : le contrôle pruner ne vaut plus
                 pkt->checked = 0;
 #if FORWARD_CHECK_K > 0
@@ -476,11 +536,14 @@ static int bt_ensure_delegate_buf(client_possibility_t *client, int capacity)
  * @param top         Indice du dernier niveau occupé.
  * @param start_depth Profondeur du paquet racine.
  * @param idParts     Table de pré-calcul des indices de rotation.
+ * @param dynamic_order Ordre de parcours du moteur appelant, transmis tel quel
+ *                      à `bt_materialize_pending` (cf. sa doc).
  */
 static void bt_delegate_if_needed(client_possibility_t *client,
                                   const struct possibility_packet *board,
                                   bt_level *stack, int top, int start_depth,
-                                  int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
+                                  int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
+                                  int dynamic_order)
 {
     unsigned long long pending = bt_count_pending(board, stack, top);
     // Statistique du nombre de possibilités en étude
@@ -502,7 +565,7 @@ static void bt_delegate_if_needed(client_possibility_t *client,
     int new_next_s[ETERN_PARTS];
     aposs.size = bt_materialize_pending(client, board, stack, top, start_depth,
                                         idParts, aposs.possibilities,
-                                        quota, new_next_s);
+                                        quota, new_next_s, dynamic_order);
     if (aposs.size > 0) {
         if (add_possibility(client, &aposs)) {
             // Échec d'envoi : la pile n'est pas marquée, le travail reste local
@@ -535,11 +598,15 @@ static void bt_delegate_if_needed(client_possibility_t *client,
  * @param top         Indice du dernier niveau occupé.
  * @param start_depth Profondeur du paquet racine.
  * @param idParts     Table de pré-calcul des indices de rotation.
+ * @param dynamic_order Ordre de parcours du moteur appelant (cf.
+ *                      `bt_materialize_pending`) : en ordre dynamique, le
+ *                      paquet du chemin courant est lui aussi re-canonisé.
  */
 static void bt_flush_pending(client_possibility_t *client,
                              struct possibility_packet *board,
                              bt_level *stack, int top, int start_depth,
-                             int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
+                             int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
+                             int dynamic_order)
 {
     unsigned long long pending = bt_count_pending(board, stack, top);
 
@@ -548,17 +615,26 @@ static void bt_flush_pending(client_possibility_t *client,
     int new_next_s[ETERN_PARTS];
     aposs->size = bt_materialize_pending(client, board, stack, top, start_depth,
                                          idParts, aposs->possibilities,
-                                         (int)pending, new_next_s);
+                                         (int)pending, new_next_s, dynamic_order);
 
     // Le chemin courant lui-même : prochaine case à étudier avec le plateau actuel
     struct possibility_packet *cur = &aposs->possibilities[aposs->size];
     memcpy(cur, board, sizeof(*cur));
-    cur->alloc = start_depth + top + 1;
-    cur->x = dirx[cur->alloc];
-    cur->y = diry[cur->alloc];
+    int complete = 0;
+    if (dynamic_order) {
+        complete = bt_canonicalize_packet(cur);
+    } else {
+        cur->alloc = start_depth + top + 1;
+        cur->x = dirx[cur->alloc];
+        cur->y = diry[cur->alloc];
+    }
     // Des pièces ont pu être placées depuis la racine : contrôle pruner caduc
     cur->checked = 0;
-    aposs->size++;
+    // Un plateau complet (cas défensif, ordre dynamique uniquement) n'est pas
+    // un travail : rien à explorer au-delà, la solution a déjà été signalée.
+    if (!complete) {
+        aposs->size++;
+    }
 
     if (add_possibility(client, aposs)) {
         log_error("Error on add_possibility \n");
@@ -670,7 +746,7 @@ static bt_core_result_t search_packet_backtracking_core(client_possibility_t *cl
             // REQUEST_STOP : renvoi du travail restant au serveur (recherche
             // réelle seulement — cf. doc de allow_delegate ci-dessus)
             if (allow_delegate) {
-                bt_flush_pending(client, &board, stack, top, start_depth, idParts);
+                bt_flush_pending(client, &board, stack, top, start_depth, idParts, 0);
             }
             if (out_nodes != NULL) {
                 *out_nodes = nodes;
@@ -697,7 +773,7 @@ static bt_core_result_t search_packet_backtracking_core(client_possibility_t *cl
                                      + (now.tv_nsec - last_delegate.tv_nsec) / 1000000LL;
                 if (elapsed_ms >= DELEGATE_MIN_INTERVAL_MS) {
                     // Si trop d'étude à faire pour 1 thread, alors on délègue une partie
-                    bt_delegate_if_needed(client, &board, stack, top, start_depth, idParts);
+                    bt_delegate_if_needed(client, &board, stack, top, start_depth, idParts, 0);
                     last_delegate = now;
                 }
             }
@@ -709,6 +785,11 @@ static bt_core_result_t search_packet_backtracking_core(client_possibility_t *cl
         top++;
         stack[top].next_s = 0;
         stack[top].placed_pos = -1;
+        // En ordre fixe, la case du niveau EST dirx[depth]/diry[depth] : on la
+        // mémorise quand même, pour que la pile ait la même forme qu'en ordre
+        // dynamique et que la délégation soit rigoureusement le même code.
+        stack[top].x = x;
+        stack[top].y = y;
 
         if (board.grid[x][y] != -2) {
             // Case déjà remplie (indice du paquet d'origine) : niveau sans décision
@@ -756,8 +837,8 @@ backtrack:;
         while (top >= 0) {
             bt_level *lvl = &stack[top];
             int d = start_depth + top;
-            uint8_t cx = dirx[d];
-            uint8_t cy = diry[d];
+            uint8_t cx = lvl->x;
+            uint8_t cy = lvl->y;
 
             // Annulation du placement courant du niveau (reprise après backtrack)
             if (lvl->placed_pos >= 0) {
@@ -848,30 +929,135 @@ backtrack:;
 }
 
 /**
- * @brief Niveau de décision du PROTOTYPE d'ordre dynamique MRV — §4.7,
- *        expérience isolée de `bt_level` (jamais utilisée par le moteur de
- *        production). La case de ce niveau est choisie DYNAMIQUEMENT
- *        (`mrv_choose_cell`), donc mémorisée ici plutôt que déduite de
- *        `dirx[depth]/diry[depth]`.
+ * @brief Nombre de mots de 64 bits couvrant le masque des pièces utilisées.
+ *
+ * Dérivé de `FACES_USED_SIZE` (le masque du paquet, en groupes de 16 bits) et
+ * non de `ETERN_PARTS` : 4 groupes du paquet tiennent dans un mot, le dernier
+ * mot peut être partiellement rempli. Garantit `MRV_USED_WORDS >=
+ * map->id_mask_words` pour toute map dont les ids tiennent dans le masque du
+ * paquet — c'est-à-dire toute map de production.
  */
-typedef struct {
-    struct array_part *search;
-    int next_s;
-    int16_t placed_pos;
-    uint8_t x;
-    uint8_t y;
-} mrv_level;
+#define MRV_USED_WORDS ((FACES_USED_SIZE + 3) / 4)
+
+/**
+ * @brief Construit le miroir 64 bits du masque des pièces utilisées du plateau.
+ *
+ * `possibility_packet.b_faceused` est un masque en groupes de 16 bits (bit
+ * `p & 15` du groupe `p >> 4`, pour `p = id - 1`) : parfait pour un test
+ * unitaire, trop étroit pour compter par `popcount`. Ce miroir regroupe 4
+ * groupes par mot de 64 bits — explicitement, par décalage, jamais par
+ * réinterprétation de la mémoire du paquet (qui dépendrait de l'endianness de
+ * la machine).
+ *
+ * Le miroir est ensuite maintenu en place par `mrv_used_set` / `mrv_used_clear`
+ * à chaque pose/retrait, exactement comme le cache de contraintes : jamais
+ * reconstruit dans la boucle chaude.
+ *
+ * @param used  Miroir à remplir (`MRV_USED_WORDS` mots).
+ * @param board Plateau source.
+ */
+static void mrv_used_init(uint64_t used[MRV_USED_WORDS], const struct possibility_packet *board)
+{
+    for (int w = 0; w < MRV_USED_WORDS; w++) {
+        used[w] = 0;
+    }
+    for (int g = 0; g < FACES_USED_SIZE; g++) {
+        used[g / 4] |= (uint64_t)board->b_faceused[g] << ((g % 4) * 16);
+    }
+}
+
+/** @brief Marque la pièce d'indice `position` (= id - 1) utilisée dans le miroir. */
+static inline void mrv_used_set(uint64_t used[MRV_USED_WORDS], int position)
+{
+    used[position / 64] |= (uint64_t)1 << (position % 64);
+}
+
+/** @brief Marque la pièce d'indice `position` (= id - 1) libre dans le miroir. */
+static inline void mrv_used_clear(uint64_t used[MRV_USED_WORDS], int position)
+{
+    used[position / 64] &= ~((uint64_t)1 << (position % 64));
+}
+
+/**
+ * @brief Nombre de pièces ENCORE LIBRES candidates à une case, pour le choix MRV.
+ *
+ * Chemin rapide : `popcount` du masque d'ids du compartiment (`bucket_id_mask`,
+ * construit une fois avec la map) contre le miroir des pièces utilisées —
+ * indépendant de la TAILLE du compartiment, alors que le prototype de mesure
+ * parcourait toutes ses entrées (jusqu'à plusieurs centaines). C'est le premier
+ * des deux verrous de coût identifiés par §4.7 ; l'autre est la restriction du
+ * balayage aux cases de frontière (`mrv_choose_cell`).
+ *
+ * Repli (map bâtie à la main dans un test, index compact absent, ou masque plus
+ * large que le miroir) : comptage par parcours, résultat identique. Les deux
+ * chemins comptent des IDENTIFIANTS distincts, jamais des entrées : une pièce
+ * présente sous deux rotations dans le même compartiment compte une fois. Ce
+ * choix est indifférent aux deux usages : `== 0` (case morte) est équivalent
+ * dans les deux comptages, et le reste n'est qu'un critère d'ORDRE.
+ *
+ * @param map   Table de lookup.
+ * @param key   Clé de la case.
+ * @param board Plateau (masque des pièces utilisées, pour le repli).
+ * @param used  Miroir 64 bits du même masque.
+ * @return      Nombre de pièces distinctes candidates et libres (0 = case morte).
+ */
+static inline int mrv_free_candidates(const map_big_array *map, const key_part *key,
+                                      struct possibility_packet *board,
+                                      const uint64_t used[MRV_USED_WORDS])
+{
+    const uint64_t *mask = map_bucket_id_mask(map, key);
+    if (mask != NULL && map->id_mask_words <= MRV_USED_WORDS) {
+        return map_mask_free_count(mask, map->id_mask_words, used);
+    }
+    map_bucket bucket = map_bucket_packed(map, key);
+    int count = 0;
+    int16_t seen_last = 0;
+    for (int s = 0; s < bucket.size; s++) {
+        int16_t id = bucket.parts[s].id;
+        if (id == 0 || id == seen_last || BOARD_FACE_USED(board, id - 1)) {
+            continue;
+        }
+        // Les rotations d'une même pièce sont contiguës dans un compartiment
+        // (cf. search_face) : ce filtre suffit à ne compter chaque id qu'une
+        // fois sur le chemin de repli. Un doublon non contigu ne fausserait de
+        // toute façon qu'un critère d'ordre, jamais le test de mort.
+        seen_last = id;
+        count++;
+    }
+    return count;
+}
 
 /**
  * @brief Choisit la case vide la plus contrainte (MRV, « minimum remaining
- *        values ») — §4.7, prototype de mesure.
+ *        values ») — §4.7 de `docs/conception/elagage_recherche.md`.
  *
- * Balaie TOUT le plateau (contrairement à `bt_forward_check`, limité aux
- * voisines géométriques) : plus cher par nœud, mais détecte en sous-produit
- * TOUTE case sans aucun candidat, où qu'elle soit — un test de mort plus
- * complet qu'un forward-check local, gratuit puisque le balayage a de toute
- * façon lieu pour choisir la case.
+ * Deux différences avec le prototype de mesure, qui coûtait un parcours de
+ * compartiment pour CHACUNE des cases vides du plateau (jusqu'à 256) :
  *
+ * 1. **Restriction aux cases de FRONTIÈRE** : une case dont les 4 côtés valent
+ *    `all_face` n'est contrainte par rien (ni bord de plateau, ni voisine
+ *    posée) et offre donc, par construction, toutes les pièces libres — elle ne
+ *    peut jamais être le minimum tant qu'une case contrainte existe. Le test
+ *    est une lecture du cache de contraintes déjà maintenu par le moteur, pas
+ *    un lookup. Sur le puzzle 256 la frontière compte 29 cases en moyenne
+ *    (max 52) contre 256 cases balayées par le prototype (§3.2).
+ *    Il existe TOUJOURS une case de frontière tant qu'une case vide existe :
+ *    la première case vide dans l'ordre lexicographique a soit un bord de
+ *    plateau, soit une voisine de rang inférieur nécessairement remplie. Le
+ *    repli `fallback` couvre malgré tout ce cas, plutôt que de le supposer.
+ * 2. **Comptage par `popcount`** au lieu d'un parcours du compartiment
+ *    (`mrv_free_candidates`).
+ *
+ * Le balayage reste COMPLET (pas d'arrêt anticipé sur une case à 1 candidat) :
+ * sa détection de case morte, où qu'elle soit sur la frontière, est un
+ * sous-produit gratuit et strictement plus large que le forward-check local —
+ * on ne la sacrifie pas pour quelques cycles.
+ *
+ * @param board       Plateau courant.
+ * @param constraints Cache de contraintes du moteur.
+ * @param mapParts    Table de lookup.
+ * @param used        Miroir 64 bits des pièces utilisées.
+ * @param all_face    Valeur « toute face » (= map->sizearrayM).
  * @param out_x/out_y Remplis avec la case choisie si succès ; non modifiés sinon.
  * @return 1 si une case a été choisie, 0 si au moins une case vide n'a AUCUN
  *         candidat (branche morte détectée par le balayage lui-même).
@@ -879,24 +1065,35 @@ typedef struct {
 static int mrv_choose_cell(struct possibility_packet *board,
                            key_part constraints[ETERN_SIZE][ETERN_SIZE],
                            map_big_array *mapParts,
+                           const uint64_t used[MRV_USED_WORDS],
+                           int8_t all_face,
                            uint8_t *out_x, uint8_t *out_y)
 {
     int best_count = -1;
     uint8_t best_x = 0, best_y = 0;
+    int fallback_found = 0;
+    uint8_t fallback_x = 0, fallback_y = 0;
+
     for (int x = 0; x < ETERN_SIZE; x++) {
         for (int y = 0; y < ETERN_SIZE; y++) {
             if (board->grid[x][y] != -2) {
                 continue;
             }
-            map_bucket b = map_bucket_packed(mapParts, &constraints[x][y]);
-            int count = 0;
-            for (int s = 0; s < b.size; s++) {
-                if (b.parts[s].id != 0 && !BOARD_FACE_USED(board, b.parts[s].id - 1)) {
-                    count++;
+            const key_part *key = &constraints[x][y];
+            if (key->k1 == all_face && key->k2 == all_face
+                && key->k3 == all_face && key->k4 == all_face) {
+                // Case sans aucune contrainte : jamais le minimum (cf. doc).
+                if (!fallback_found) {
+                    fallback_found = 1;
+                    fallback_x = (uint8_t)x;
+                    fallback_y = (uint8_t)y;
                 }
+                continue;
             }
+            int count = mrv_free_candidates(mapParts, key, board, used);
             if (count == 0) {
-                return 0; // case sans issue : sous-arbre mort, inutile de continuer le balayage
+                // Case sans issue : sous-arbre mort, inutile de continuer.
+                return 0;
             }
             if (best_count < 0 || count < best_count) {
                 best_count = count;
@@ -905,35 +1102,85 @@ static int mrv_choose_cell(struct possibility_packet *board,
             }
         }
     }
+
+    if (best_count < 0) {
+        if (!fallback_found) {
+            // Aucune case vide : l'appelant vérifie le plateau complet avant
+            // d'appeler, ce retour n'est donc pas atteint en pratique.
+            return 0;
+        }
+        *out_x = fallback_x;
+        *out_y = fallback_y;
+        return 1;
+    }
     *out_x = best_x;
     *out_y = best_y;
     return 1;
 }
 
 /**
- * @brief PROTOTYPE de recherche à ordre de variable dynamique (MRV) — §4.7 de
- *        docs/conception/elagage_recherche.md. Expérience de MESURE
- *        uniquement, isolée de `search_packet_backtracking_core` : jamais de
- *        délégation (les paquets matérialisés supposeraient l'ordre fixe
- *        `dirx[]/diry[]`, que cette variante ne suit plus), jamais appelée
- *        hors du drapeau de développement `mrv_enabled` (`ETII_MRV=1`).
+ * @brief Nombre de cases réellement remplies d'un plateau.
  *
- * Structurellement identique à `search_packet_backtracking_core` (même
- * plateau unique modifié en place, même pile de décisions, même
- * forward-check après placement) — seule la case choisie à chaque niveau
- * change : `mrv_choose_cell` remplace `dirx[depth]/diry[depth]`.
+ * Le moteur à ordre dynamique ne peut pas lire `board.alloc` pour cela : sur un
+ * paquet re-canonisé (`bt_canonicalize_packet`), `alloc` est le curseur de
+ * parcours, c'est-à-dire une BORNE INFÉRIEURE du nombre de pièces posées, pas
+ * ce nombre. On compte donc les cases, une fois, à l'entrée du moteur.
  *
- * @param node_budget `<= 0` = illimité.
- * @param out_nodes   Optionnel : nombre de nœuds explorés.
- * @return `BT_CORE_EXHAUSTED`, `BT_CORE_STOPPED` (jamais de flush : le
- *         travail restant est simplement abandonné, comme la variante
- *         budgétée §4.6b) ou `BT_CORE_BUDGET`.
+ * @param board Plateau à compter.
+ * @return      Nombre de cases non vides.
  */
-static bt_core_result_t search_packet_backtracking_mrv_experiment(client_possibility_t *client,
-                                                                   struct possibility_packet *root,
-                                                                   int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
-                                                                   long node_budget,
-                                                                   unsigned long long *out_nodes)
+static int mrv_count_placed(const struct possibility_packet *board)
+{
+    int placed = 0;
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            if (board->grid[x][y] != -2) {
+                placed++;
+            }
+        }
+    }
+    return placed;
+}
+
+/**
+ * @brief Recherche à ordre de variable DYNAMIQUE (MRV) — §4.7 de
+ *        `docs/conception/elagage_recherche.md`.
+ *
+ * Même contrat que `search_packet_backtracking_core` (même plateau unique
+ * modifié en place, même pile de décisions `bt_level`, même forward-check après
+ * placement, mêmes statistiques, même délégation) — une seule chose change :
+ * la case traitée à chaque niveau est choisie par `mrv_choose_cell` (la plus
+ * contrainte) au lieu d'être imposée par `dirx[depth]/diry[depth]`.
+ *
+ * Ce qui découle de ce seul changement, et qui distingue ce moteur du prototype
+ * de mesure de la PR 9 (lequel ne déléguait jamais) :
+ * - la profondeur de pile n'est plus le curseur de parcours, donc les paquets
+ *   délégués sont RE-CANONISÉS avant émission (`bt_materialize_pending` avec
+ *   `dynamic_order = 1`) — un client à ordre fixe, un pruner ou un `.back`
+ *   n'y voient que du feu, d'où l'absence de bump de `VERSION` ;
+ * - le nombre de pièces posées est compté explicitement (`mrv_count_placed`)
+ *   puis maintenu, au lieu d'être lu dans `alloc` : un paquet reçu peut être
+ *   troué (cases remplies au-delà du curseur), y compris s'il vient d'un autre
+ *   client MRV ;
+ * - `board.alloc` n'est mis à jour que là où il est OBSERVÉ (record de
+ *   `max_result`, solution, délégation), jamais comme compteur de boucle.
+ *
+ * @param client         Contexte du thread client.
+ * @param root           Paquet racine à explorer (non modifié).
+ * @param idParts        Table de pré-calcul des indices de rotation.
+ * @param node_budget    Plafond de nœuds (`<= 0` = illimité), même sémantique
+ *                       que `search_packet_backtracking_core`.
+ * @param allow_delegate 1 : délégation périodique + renvoi du travail restant
+ *                       à l'arrêt ; 0 : ni l'un ni l'autre.
+ * @param out_nodes      Optionnel : nombre de nœuds explorés.
+ * @return               `BT_CORE_EXHAUSTED`, `BT_CORE_STOPPED` ou `BT_CORE_BUDGET`.
+ */
+static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *client,
+                                                       struct possibility_packet *root,
+                                                       int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
+                                                       long node_budget,
+                                                       int allow_delegate,
+                                                       unsigned long long *out_nodes)
 {
     struct possibility_packet board;
     memcpy(&board, root, sizeof(board));
@@ -942,12 +1189,18 @@ static bt_core_result_t search_packet_backtracking_mrv_experiment(client_possibi
     key_part constraints[ETERN_SIZE][ETERN_SIZE];
     bt_init_constraints(constraints, &board, client->all_rotate_part, all_face);
 
-    mrv_level stack[ETERN_PARTS];
+    uint64_t used[MRV_USED_WORDS];
+    mrv_used_init(used, &board);
+
+    bt_level stack[ETERN_PARTS];
     int top = -1;
-    // Nombre de pièces déjà posées dans le paquet racine : pour un paquet
-    // "propre" (jamais produit par §4.5, absent de ce code), alloc en est un
-    // compte exact, pas seulement une borne inférieure.
-    int placed_count = board.alloc;
+    // `start_depth` n'a plus de rôle d'ordonnancement ici : il ne sert qu'aux
+    // fonctions de délégation partagées, dont la branche `dynamic_order` ne
+    // l'utilise pas. Le vrai compteur de progression est `placed_count`.
+    const int start_depth = board.alloc;
+    int placed_count = mrv_count_placed(&board);
+    int noCheckDelegate = 0;
+    struct timespec last_delegate = {0, 0};
 
     unsigned long long nodes = 1;
     counters[client->compteur]++;
@@ -955,6 +1208,8 @@ static bt_core_result_t search_packet_backtracking_mrv_experiment(client_possibi
     for (;;) {
         if (placed_count >= ETERN_PARTS) {
             board.alloc = (uint16_t)placed_count;
+            // Toutes les pièces sont placées : enregistre + signale au serveur.
+            // Avec --stop-on-solution, record_solution ne revient pas (exit).
             record_solution(client, &board);
             goto backtrack;
         }
@@ -965,12 +1220,28 @@ static bt_core_result_t search_packet_backtracking_mrv_experiment(client_possibi
                 usleep(pause_us);
                 continue;
             }
-            // Pas de délégation dans ce prototype (cf. doc de la fonction) :
-            // le travail restant est simplement abandonné.
+            if (allow_delegate) {
+                bt_flush_pending(client, &board, stack, top, start_depth, idParts, 1);
+            }
             if (out_nodes != NULL) {
                 *out_nodes = nodes;
             }
             return BT_CORE_STOPPED;
+        }
+
+        if (allow_delegate) {
+            noCheckDelegate++;
+            if (noCheckDelegate == DELEGATE_CHECK_INTERVAL_NODES) {
+                noCheckDelegate = 0;
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                long long elapsed_ms = (now.tv_sec - last_delegate.tv_sec) * 1000LL
+                                     + (now.tv_nsec - last_delegate.tv_nsec) / 1000000LL;
+                if (elapsed_ms >= DELEGATE_MIN_INTERVAL_MS) {
+                    bt_delegate_if_needed(client, &board, stack, top, start_depth, idParts, 1);
+                    last_delegate = now;
+                }
+            }
         }
 
         top++;
@@ -978,7 +1249,7 @@ static bt_core_result_t search_packet_backtracking_mrv_experiment(client_possibi
         stack[top].placed_pos = -1;
 
         uint8_t x, y;
-        if (mrv_choose_cell(&board, constraints, client->map_part, &x, &y)) {
+        if (mrv_choose_cell(&board, constraints, client->map_part, used, all_face, &x, &y)) {
             stack[top].x = x;
             stack[top].y = y;
             stack[top].search = get_parts_bigarray_with_key(client->map_part, &constraints[x][y]);
@@ -994,13 +1265,14 @@ static bt_core_result_t search_packet_backtracking_mrv_experiment(client_possibi
 backtrack:;
         int placed = 0;
         while (top >= 0) {
-            mrv_level *lvl = &stack[top];
+            bt_level *lvl = &stack[top];
             uint8_t cx = lvl->x;
             uint8_t cy = lvl->y;
 
             if (lvl->placed_pos >= 0) {
                 board.grid[cx][cy] = -2;
                 BOARD_SET_FACE(&board, lvl->placed_pos, 0);
+                mrv_used_clear(used, lvl->placed_pos);
                 bt_propagate_undo(constraints, cx, cy, all_face);
                 lvl->placed_pos = -1;
                 placed_count--;
@@ -1018,6 +1290,7 @@ backtrack:;
                     }
                     board.grid[cx][cy] = idParts[search->parts[s].id][search->parts[s].rotation];
                     BOARD_SET_FACE(&board, position, 1);
+                    mrv_used_set(used, position);
                     bt_propagate_place(constraints, cx, cy, &search->parts[s]);
                     placed_count++;
 #if FORWARD_CHECK_K > 0
@@ -1026,6 +1299,7 @@ backtrack:;
                         if (!bt_forward_check(constraints, &board, client->map_part, cx, cy)) {
                             board.grid[cx][cy] = -2;
                             BOARD_SET_FACE(&board, position, 0);
+                            mrv_used_clear(used, position);
                             bt_propagate_undo(constraints, cx, cy, all_face);
                             placed_count--;
                             __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
@@ -1055,11 +1329,29 @@ backtrack:;
 
         counters[client->compteur]++;
         nodes++;
-        if ((uint16_t)placed_count > max_result) {
-            max_result = (uint16_t)placed_count;
-            board.alloc = (uint16_t)placed_count;
-            best_board_try_record(&g_search_best_board, &board, (uint16_t)placed_count);
+        // `alloc` porte ici le NOMBRE de pièces posées, la convention déjà
+        // retenue par max_result/best_board (cf. la note du site symétrique de
+        // search_packet_backtracking_core) — jamais un curseur de parcours :
+        // tout paquet SORTANT est re-canonisé par bt_canonicalize_packet.
+        board.alloc = (uint16_t)placed_count;
+        if (board.alloc > max_result) {
+            max_result = board.alloc;
+            best_board_try_record(&g_search_best_board, &board, board.alloc);
+#ifdef DEBUG_CHECK_POSSIBILITY
+            log_info("max result:%i\n", max_result);
+#endif // DEBUG_CHECK_POSSIBILITY
         }
+#ifdef DEBUG_CHECK_POSSIBILITY
+        {
+            uint64_t expected[MRV_USED_WORDS];
+            mrv_used_init(expected, &board);
+            for (int w = 0; w < MRV_USED_WORDS; w++) {
+                if (expected[w] != used[w]) {
+                    log_error("miroir des pièces utilisées désynchronisé (mot %i)\n", w);
+                }
+            }
+        }
+#endif // DEBUG_CHECK_POSSIBILITY
         if (node_budget > 0 && nodes >= (unsigned long long)node_budget) {
             if (out_nodes != NULL) {
                 *out_nodes = nodes;
@@ -1075,9 +1367,9 @@ backtrack:;
  * Fine enveloppe de `search_packet_backtracking_core` (illimité, délégation
  * autorisée) préservant la signature/le contrat historiques de cette fonction :
  * seule la recherche réelle (`autosearch_step`) l'appelle. Bascule vers le
- * prototype MRV (`search_packet_backtracking_mrv_experiment`, §4.7) quand
- * `mrv_enabled` est levé (`ETII_MRV=1`, hors chemin de production) — voir sa
- * doc pour la portée de cette expérience (jamais de délégation).
+ * moteur à ordre dynamique (`search_packet_backtracking_mrv`, §4.7) quand
+ * `mrv_enabled` est levé — même contrat de retour, même délégation : le choix
+ * de l'ordre est invisible de l'appelant.
  *
  * @param client  Contexte du thread client.
  * @param root    Paquet racine à explorer (non modifié).
@@ -1090,7 +1382,7 @@ static int search_packet_backtracking(client_possibility_t *client,
                                       int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
 {
     if (mrv_enabled) {
-        bt_core_result_t r = search_packet_backtracking_mrv_experiment(client, root, idParts, -1, NULL);
+        bt_core_result_t r = search_packet_backtracking_mrv(client, root, idParts, -1, 1, NULL);
         return (r == BT_CORE_STOPPED) ? 1 : 0;
     }
     bt_core_result_t r = search_packet_backtracking_core(client, root, idParts, -1, 1, NULL);

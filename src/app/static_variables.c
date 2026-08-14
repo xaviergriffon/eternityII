@@ -199,11 +199,19 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
     return target_nodes > 0 && nodes_done >= target_nodes;
 }
 
-int mrv_enabled = 0;
+int mrv_enabled = MRV_DEFAULT_ENABLED;
 
 int mrv_parse_env(const char *env_value)
 {
-    return env_value != NULL && strcmp(env_value, "1") == 0;
+    if (env_value != NULL && strcmp(env_value, "0") == 0) {
+        return 0;
+    }
+    if (env_value != NULL && strcmp(env_value, "1") == 0) {
+        return 1;
+    }
+    // Absente ou valeur non reconnue : le défaut du programme, jamais une
+    // désactivation silencieuse d'un moteur adopté.
+    return MRV_DEFAULT_ENABLED;
 }
 
 int parse_cli_options(int argc, const char *argv[])
