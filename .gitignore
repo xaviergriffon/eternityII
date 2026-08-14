@@ -23,3 +23,6 @@ tests/fixtures/solution16.h
 *.gcov
 *.gcno
 *.gcda
+
+# Binaire du banc de réfutation (make bench-refutation)
+tests/bench/bench_refutation

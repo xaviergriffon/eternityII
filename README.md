@@ -87,6 +87,10 @@ make test-docker      # rejoue les jobs de test CI dans un conteneur Linux
 make test-docker-arm  # vérifie la compilation croisée ARM 64-bit (Raspberry Pi) dans le même conteneur
 make coverage-report  # rapports de couverture gcovr (XML + HTML + Markdown)
 
+# Banc de RÉFUTATION : coût de la preuve qu'une possibilité est morte (la mesure qui
+# correspond à l'objectif du solveur — cf. docs/tests_et_ci.md)
+make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --min-pieces 90 --budget 5000000"
+
 # Banc de mesure du débit de la boucle de recherche (préalable à toute optimisation)
 tests/bench/bench_search.sh --nodes 5000000 --reps 5
 ```

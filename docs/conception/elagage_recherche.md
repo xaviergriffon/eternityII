@@ -790,6 +790,33 @@ atteint 186 en 2,46 s, et 188 à 50 M nœuds. Le taux d'élagage du forward-chec
 (44,15 % → 43,18 %) : la valeur de MRV n'est pas dans l'élagage, elle est dans la FORME de
 l'arbre exploré — exactement ce que concluait la PR 9.
 
+**Mesure de RÉFUTATION — la bonne question, posée après coup.** `max_result` reste un proxy
+discutable : descendre loin dans une branche n'est pas l'objectif du solveur, prouver tôt
+qu'une possibilité est morte l'est. La mesure correspondante est le coût de FERMETURE d'un
+sous-arbre (nœuds/temps jusqu'à `BT_CORE_EXHAUSTED`) à racine IDENTIQUE entre les deux
+moteurs — c'est ce que mesure `tests/bench/bench_refutation.c` (`make bench-refutation`,
+cf. [tests_et_ci.md](../tests_et_ci.md#banc-de-réfutation-make-bench-refutation)). Sur un
+VRAI stock serveur (17 815 possibilités, 8 à 153 pièces posées, moyenne 34,5 — produit par
+un serveur `--expand-level 3` alimenté 60 s par un client à ordre fixe), plafond 5 M nœuds :
+
+| Bande (pièces posées) | Fermées, ordre fixe | Fermées, MRV | Nœuds sur les racines fermées par les DEUX |
+|---|---|---|---|
+| 20–45 | 5/10 | **10/10** | 70 vs 22 |
+| 55–89 | 16/16 | 16/16 | 40 804 vs **32** (×1 275) |
+| ≥ 90 | 17/25 | **25/25** | 565 677 vs **25** (×22 627) |
+
+MRV ferme donc des racines que l'ordre fixe ne ferme pas du tout dans le plafond, et coûte
+des ordres de grandeur moins cher sur celles que les deux ferment. **Mais l'ordre MRV n'est
+pas uniformément meilleur** : sur des racines FABRIQUÉES (préfixes d'une descente MRV
+profonde, c'est-à-dire des sous-arbres réellement vivants, que le stock réel fournit
+rarement), à 100 pièces posées, l'ordre fixe ferme en 73 482 nœuds là où MRV en dépense
+4 443 906 — 60× plus. Les deux faits sont vrais et doivent être cités ensemble. À noter
+aussi qu'une grande partie des réfutations MRV coûtent **1 nœud** : la possibilité était
+déjà morte à sa création et le balayage de `mrv_choose_cell` le voit immédiatement — le même
+test que `possibility_all_has_a_next_counted` (le pruner), mais à chaque nœud plutôt qu'une
+fois. Sur ces racines-là, la comparaison mesure surtout la présence de ce test global, pas
+la qualité de l'ordre.
+
 **Ce que cette adoption rouvre.** §4.4 (conflit de singletons), §4.5 (propagation des cases
 forcées) et §4.6b (DFS à budget du pruner) ont tous les trois été écartés ou désactivés pour
 la MÊME raison : le mur structurel à `max_result` ≈ 74 les rendait soit muets (0
