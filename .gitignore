@@ -24,5 +24,6 @@ tests/fixtures/solution16.h
 *.gcno
 *.gcda
 
-# Binaire du banc de réfutation (make bench-refutation)
+# Binaire du banc de réfutation (make bench-refutation / bench-refutation-gpu)
 tests/bench/bench_refutation
+tests/bench/bench_refutation_gpu

@@ -693,7 +693,25 @@ diagnostic : le mécanisme n'a jamais été inutile, il a été désactivé sur 
 dont le stock n'était pas représentatif.
 
 Le mode GPU ([`gpu_pruner.cu`](../../src/app/gpu_pruner.cu)) ne suit pas sur (b) — un DFS
-divergent par thread convient mal au modèle SIMT. (a) lui est en revanche transposable.
+divergent par thread convient mal au modèle SIMT. (a) lui est en revanche transposable, mais
+ne l'a pas encore été : `prune_kernel` reproduit toujours la version **une seule passe**
+antérieure au correctif point-fixe de (a) ci-dessus — écart documenté depuis mais jamais
+chiffré jusqu'à `--pruner-profile --gpu` (`tests/bench/bench_refutation.c`, voir
+[tests_et_ci.md](../tests_et_ci.md#mode---pruner-profile---gpu-rejoue-le-vrai-pipeline-gpu)).
+Sur un stock serveur réel (8438 possibilités, 8 à 73 pièces posées, Jetson Orin Nano) : le
+contrôle GPU une passe élimine **21,4 %** de l'échantillon contre **32,2 %** pour le CPU
+point fixe — **910 possibilités (10,8 %)** que le GPU garde vivantes et que le CPU point
+fixe élimine (la cascade non rattrapée par une seule passe, exactement l'écart que (a)
+corrige côté CPU), et **zéro** possibilité éliminée à tort par le GPU (aucun faux mort :
+la condition nécessaire tient toujours, seule la complétude du contrôle diffère). Débit
+mesuré sur ce même banc : le contrôle GPU par lots plafonne à ~69 000–74 000
+possibilités/s (invariant à la taille de lot, 100 à 8438) contre ~217 000 possibilités/s
+pour le contrôle CPU séquentiel du même banc — à cette échelle de lot, le forward-check par
+possibilité (194 cases examinées en moyenne) est trop bon marché pour amortir le lancement
+kernel et `cudaDeviceSynchronize`, donc le CPU séquentiel va plus vite que le GPU sur ce
+contrôle précis. Porter (a) au GPU réduirait l'écart de 10,8 points sans le mécanisme DFS
+(toujours écarté du GPU pour la raison SIMT ci-dessus) ; ni l'un ni l'autre n'est fait à ce
+stade.
 
 ### 4.7 Ordre de variable dynamique (MRV) — implémenté et mesuré favorable (PR 10), pas encore le défaut de déploiement
 

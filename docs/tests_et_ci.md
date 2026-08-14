@@ -588,6 +588,59 @@ qu'`autoprune_step` fait réellement en premier. Sans aucun pruner actif, un
 serveur conserve donc une moitié de stock déjà morte, occupant de la mémoire et
 de la bande passante de distribution pour rien.
 
+### Mode `--pruner-profile --gpu` : rejoue le VRAI pipeline GPU
+
+Variante de `--pruner-profile` (ci-dessus) qui rejoue, au lieu du pipeline CPU
+superficiel+DFS, le pipeline **GPU** réel : `gpu_pruner_check_batch`
+(`src/app/gpu_pruner.cu`), soumis PAR LOTS (`--gpu-batch`, défaut 100 — proche
+de `PRUNER_BATCH_SIZE`, comme `autoprune_gpu` en production), jamais
+possibilité par possibilité. N'a pas d'équivalent DFS : le GPU ne fait, en
+production, que le contrôle superficiel (§4.6b explique pourquoi un DFS
+divergent par thread convient mal au modèle SIMT). Build dédié, indépendant du
+flag `CUDA=1` du binaire de production :
+
+```sh
+make bench-refutation-gpu BENCH_REFUT_ARGS="--from-back temp.back --pruner-profile 8438 --gpu --gpu-batch 100"
+```
+
+`checked` est forcé à 0 sur l'état de départ soumis aux deux côtés (GPU et
+contrôle CPU de comparaison) : le contrôle CPU
+(`possibility_all_has_a_next_counted`) recalcule toujours indépendamment de ce
+champ, alors que le kernel GPU court-circuite dessus en production
+(`p->checked == 1` → vivant sans recalcul) — sans ce forçage la mesure
+confondrait la divergence « une passe vs point fixe » (celle qu'on veut
+chiffrer) avec celle, hors sujet ici, du court-circuit `checked`.
+
+Sur un stock réel de 8438 possibilités (8 à 73 pièces posées, généré comme au
+§ ci-dessus — client à ordre fixe contre un serveur `--expand-level 3`,
+mesuré sur Jetson Orin Nano) :
+
+| | Mortes au contrôle superficiel | Cases examinées/possibilité | Débit (possibilités/s) |
+|---|---|---|---|
+| CPU (point fixe, `--pruner-profile --budget 0`) | 32,2 % | 289,29 | 216 669 |
+| GPU (une passe, `--pruner-profile --gpu`) | 21,4 % | 194,33 | ~69 000–74 000 (invariant, lot 100 à 8438) |
+
+Divergence vs le CPU point fixe, sur le MÊME état de départ (8438
+possibilités) : **910 (10,8 %)** que le GPU juge vivantes et le CPU mortes (la
+cascade en fin de balayage que le point fixe rattrape et l'unique passe GPU
+non — §4.6a) ; **0** que le GPU juge mortes et le CPU vivantes (aucun faux
+mort — le contrôle GPU reste une condition nécessaire, jamais une
+heuristique, cf. §5 de [elagage_recherche.md](conception/elagage_recherche.md)).
+Le mode échoue explicitement (`exit(EXIT_FAILURE)`) si un seul faux mort est
+observé, plutôt que de se contenter de le documenter.
+
+**Le CPU séquentiel va plus vite que le GPU par lots, à cette échelle.** Le
+débit GPU ne bouge pas avec la taille de lot (100, 500, 1000, 4219, 8438
+testés : 68 000–74 000 possibilités/s dans tous les cas) — le goulot n'est
+donc pas le nombre de lancements kernel, mais le lancement + la synchronisation
+(`cudaDeviceSynchronize`) eux-mêmes, mal amortis par un travail par
+possibilité aussi bon marché (194 cases examinées en moyenne). Même
+enseignement que l'étude GPU sur le lookahead de recherche (rejetée, cf.
+mémoire de session) : l'avantage GPU suppose un travail par élément assez
+coûteux pour dominer le coût fixe du lancement, ce qui n'est pas le cas de ce
+contrôle à cette échelle de lot. Voir [pruner_gpu_cuda.md](pruner_gpu_cuda.md)
+pour la discussion complète (à ne pas vendre sur le débit brut).
+
 ## Voir aussi
 
 - [tests/README.md](../tests/README.md) — organisation des suites, conventions, ajout d'un test.

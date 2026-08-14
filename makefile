@@ -253,6 +253,37 @@ bench-refutation:
 	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Werror -pthread -o $(BENCH_REFUT_BIN) tests/bench/bench_refutation.c $(TEST_MODULES) -lm
 	./$(BENCH_REFUT_BIN) $(BENCH_REFUT_ARGS)
 
+# Variante GPU du banc de réfutation (option --pruner-profile --gpu) : mesure le
+# contrôle superficiel une-passe du pruner GPU (src/app/gpu_pruner.cu) contre le
+# contrôle CPU point-fixe, sur le même échantillon de stock réel. Indépendante
+# du flag CUDA=1 du build principal — cette cible compile son propre binaire de
+# banc, sans jamais toucher à ./eternityII ; suit néanmoins le même schéma que
+# la règle de production ci-dessus (gpu_pruner.cu compilé par nvcc en objet
+# séparé, puis lié par gcc -DWITH_CUDA contre le runtime CUDA). Surcharges :
+# BENCH_NVCC, BENCH_NVCC_ARCH (défaut Orin Nano = sm_87), BENCH_CUDA_PATH.
+BENCH_REFUT_GPU_BIN := tests/bench/bench_refutation_gpu
+BENCH_GPU_OBJ        := $(BUILD_DIR)/app/gpu_pruner_bench.o
+BENCH_NVCC           ?= $(if $(filter 1,$(CUDA)),$(NVCC),nvcc)
+BENCH_NVCC_ARCH      ?= $(if $(filter 1,$(CUDA)),$(NVCC_ARCH),sm_87)
+BENCH_CUDA_PATH      ?= $(if $(filter 1,$(CUDA)),$(CUDA_PATH),/usr/local/cuda)
+BENCH_NVCCFLAGS      := -O3 -arch=$(BENCH_NVCC_ARCH)
+# WERROR=1 propage -Werror all-warnings côté nvcc, exactement comme la cible de
+# production (voir le bloc CUDA=1 plus haut) ; laissé non gaté côté gcc, comme
+# bench-refutation ci-dessus (le banc lui-même est toujours tenu à -Werror).
+ifeq ($(WERROR),1)
+    BENCH_NVCCFLAGS += -Werror all-warnings
+endif
+
+.PHONY: bench-refutation-gpu
+bench-refutation-gpu:
+	@command -v $(BENCH_NVCC) >/dev/null 2>&1 || { echo "bench-refutation-gpu exige nvcc (BENCH_NVCC=$(BENCH_NVCC) introuvable dans le PATH). Installez le toolkit CUDA ou indiquez BENCH_NVCC=/chemin/vers/nvcc." >&2; exit 1; }
+	@mkdir -p $(dir $(BENCH_GPU_OBJ))
+	$(BENCH_NVCC) $(BENCH_NVCCFLAGS) -DWITH_CUDA -Isrc -c src/app/gpu_pruner.cu -o $(BENCH_GPU_OBJ)
+	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -DWITH_CUDA -Werror -pthread \
+	    -o $(BENCH_REFUT_GPU_BIN) tests/bench/bench_refutation.c $(TEST_MODULES) $(BENCH_GPU_OBJ) \
+	    -L$(BENCH_CUDA_PATH)/lib64 -lcudart -lstdc++ -lm
+	./$(BENCH_REFUT_GPU_BIN) $(BENCH_REFUT_ARGS)
+
 # Fonctions pures du banc de mesure (tests/bench/bench_lib.sh) : pas de C, donc
 # hors des suites greatest, mais rattaché à `make test` pour tourner partout où
 # elles tournent (CI, make test-docker). Ni compilation ni process lancé.

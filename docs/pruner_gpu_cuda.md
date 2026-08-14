@@ -27,6 +27,15 @@ référence. Le protocole client/serveur est identique au pruner CPU — voir
 > manque documenté en §4.6a, non encore reporté côté GPU. Une build `VERIFY=1` peut donc
 > désormais montrer des divergences CPU/GPU **attendues** sur ce cas précis (CPU mort, GPU
 > vivant) ; ce n'est pas une régression, mais un rattrapage du kernel resté en suspens.
+>
+> **Chiffré depuis (`--pruner-profile --gpu`, `tests/bench/bench_refutation.c`, sur Jetson
+> Orin Nano, stock serveur réel de 8438 possibilités, 8 à 73 pièces posées) :** le contrôle
+> GPU une passe élimine **21,4 %** de l'échantillon contre **32,2 %** pour le contrôle CPU
+> point fixe — soit **910 possibilités (10,8 % de l'échantillon)** que le GPU juge vivantes
+> et que le CPU juge mortes (la cascade documentée ci-dessus), et **zéro** possibilité que
+> le GPU juge morte et le CPU vivante (aucun faux mort — la condition nécessaire tient).
+> Voir [tests_et_ci.md](tests_et_ci.md#mode---pruner-profile---gpu-rejoue-le-vrai-pipeline-gpu)
+> pour le détail et le débit mesuré.
 
 ## Vue d'ensemble
 
@@ -155,6 +164,20 @@ lancement** (plusieurs blocs répartis sur tous les SM), d'où l'intérêt d'un 
 - **Débit de prunage accru** → plus de branches mortes éliminées par seconde, donc un
   stock serveur plus « propre » et des clients de recherche mieux alimentés en
   possibilités déjà vérifiées (`checked = 1`).
+  > **Mesuré, à nuancer** : sur le banc `--pruner-profile --gpu` (stock réel, 8438
+  > possibilités, Jetson Orin Nano), le contrôle GPU par lots plafonne à ~69 000–74 000
+  > possibilités/s (invariant à la taille de lot testée, 100 à 8438) contre ~217 000
+  > possibilités/s pour le contrôle CPU séquentiel du même banc (un seul cœur, aucun
+  > parallélisme) — le CPU va donc plus vite que le GPU sur ce contrôle, à cette échelle de
+  > lot. Le forward-check par possibilité est trop bon marché (194 cases examinées en
+  > moyenne) pour amortir le lancement kernel + la synchronisation `cudaDeviceSynchronize`
+  > sur des lots de quelques milliers d'éléments — même conclusion de fond que l'étude GPU
+  > sur le lookahead de recherche (rejetée, voir la mémoire de session correspondante) :
+  > l'avantage GPU suppose un travail par élément assez coûteux, ce que ce contrôle n'est
+  > pas. **Ne pas vendre ce mode sur le débit brut à cette échelle** — son intérêt mesuré
+  > reste le déchargement du CPU (bullet suivant) et, en production, le lot réel
+  > (`PRUNER_BATCH_SIZE`) et la cadence d'appel diffèrent de ce banc ; à re-mesurer si ces
+  > paramètres changent significativement.
 - **Décharge le CPU** de la Jetson : le pruning part sur le GPU, laissant les cœurs ARM
   disponibles pour d'autres clients de recherche.
 - **Aucune régression sur le build standard.** Toute la logique CUDA est derrière
