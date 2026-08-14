@@ -201,6 +201,8 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
 
 int mrv_enabled = MRV_DEFAULT_ENABLED;
 
+int global_dead_check = 0;
+
 int mrv_parse_env(const char *env_value)
 {
     if (env_value != NULL && strcmp(env_value, "0") == 0) {

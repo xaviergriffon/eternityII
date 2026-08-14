@@ -643,292 +643,6 @@ static void bt_flush_pending(client_possibility_t *client,
 }
 
 /**
- * @brief Issue de `search_packet_backtracking_core`.
- */
-typedef enum {
-    BT_CORE_EXHAUSTED = 0, /**< Sous-arbre entièrement exploré : mort, prouvé (solutions éventuelles déjà signalées). */
-    BT_CORE_STOPPED = 1,   /**< REQUEST_STOP : arrêt demandé. */
-    BT_CORE_BUDGET = 2,    /**< `node_budget` épuisé avant exhaustivité : statut indéterminé. */
-} bt_core_result_t;
-
-/**
- * @brief Cœur du backtracking in-place, factorisé pour servir deux usages : la
- *        recherche réelle illimitée (`search_packet_backtracking`) et la preuve
- *        de fermeture bornée en nœuds du pruner (`search_packet_backtracking_budgeted`,
- *        §4.6b de `docs/conception/elagage_recherche.md`).
- *
- * Un unique plateau (copie locale du paquet racine) est modifié en place.
- * Avancer = écrire une case et positionner un bit ; reculer = effacer la case,
- * libérer le bit et passer au candidat suivant du niveau. Aucune copie de
- * `possibility_packet` ni allocation dans la boucle chaude. L'ordre de parcours
- * (`directions[]`), le forward-checking et les statistiques de nœuds
- * (`counters`, `fc_attempts`/`fc_pruned`, `max_result`) sont identiques quel
- * que soit l'appelant : le même arbre est exploré par le même code, seuls le
- * plafond de nœuds et la délégation réseau diffèrent — c'est ce qui garantit
- * qu'une fermeture prouvée par la variante bornée est une VRAIE preuve
- * (aucune divergence de comportement possible entre les deux usages).
- *
- * @param client         Contexte du thread client.
- * @param root           Paquet racine à explorer (non modifié).
- * @param idParts        Table de pré-calcul des indices de rotation [id][rotation].
- * @param node_budget    Nombre maximal de nœuds à explorer avant de renoncer
- *                        (`BT_CORE_BUDGET`) ; `<= 0` = illimité (la recherche
- *                        réelle ne s'arrête jamais sur ce critère).
- * @param allow_delegate 1 : délégation périodique du surplus de travail
- *                        (`bt_delegate_if_needed`) et renvoi au serveur du
- *                        travail restant à l'arrêt (`bt_flush_pending`), comme
- *                        avant cette factorisation — usage recherche réelle.
- *                        0 : ni l'un ni l'autre. Déléguer une partie du
- *                        sous-arbre romprait la preuve de fermeture elle-même
- *                        (le budget n'aurait plus exploré tout ce qu'il
- *                        prétend avoir fermé) — usage preuve bornée du pruner,
- *                        où un arrêt (REQUEST_STOP) doit se contenter
- *                        d'abandonner l'exploration locale : l'appelant
- *                        retombe alors sur le comportement d'avant cette PR
- *                        (possibilité originale conservée intacte, `checked`).
- * @param out_nodes      Optionnel (NULL si non désiré) : reçoit le nombre de
- *                        nœuds explorés, quel que soit le statut de retour —
- *                        coût de la preuve, pour instrumentation/mesure.
- * @return               `BT_CORE_EXHAUSTED`, `BT_CORE_STOPPED` ou `BT_CORE_BUDGET`.
- */
-static bt_core_result_t search_packet_backtracking_core(client_possibility_t *client,
-                                      struct possibility_packet *root,
-                                      int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
-                                      long node_budget,
-                                      int allow_delegate,
-                                      unsigned long long *out_nodes)
-{
-    // Plateau unique modifié en place
-    struct possibility_packet board;
-    memcpy(&board, root, sizeof(board));
-
-    // Cache de contraintes : clé de recherche de chaque case, maintenue
-    // incrémentalement à chaque placement/retrait
-    const int8_t all_face = (int8_t)client->map_part->sizearrayM;
-    key_part constraints[ETERN_SIZE][ETERN_SIZE];
-    bt_init_constraints(constraints, &board, client->all_rotate_part, all_face);
-
-    // Pile de décisions : un niveau par case explorée depuis la racine
-    bt_level stack[ETERN_PARTS];
-    int top = -1;
-    const int start_depth = board.alloc;
-    int noCheckDelegate = 0;
-    // Date de la dernière délégation (0 = jamais : la première est autorisée)
-    struct timespec last_delegate = {0, 0};
-
-    // Nœuds explorés (miroir local des incréments de `counters`, pour
-    // `out_nodes` et le plafond `node_budget` — jamais lu hors de cette pile).
-    unsigned long long nodes = 1;
-    // Statistique : le paquet racine compte comme une possibilité étudiée
-    counters[client->compteur]++;
-
-    for (;;) {
-        // Prochaine case du parcours à remplir
-        int depth = start_depth + top + 1;
-
-        if (depth >= ETERN_PARTS) {
-            board.alloc = depth;
-            // Toutes les pièces sont placées : enregistre + signale au serveur.
-            // Avec --stop-on-solution, record_solution ne revient pas (exit).
-            // Sinon, on backtrack pour continuer à chercher d'autres solutions
-            // (saut direct dans la remontée : pas de niveau ETERN_PARTS à empiler,
-            // dirx/diry n'ont que ETERN_PARTS cases).
-            record_solution(client, &board);
-            goto backtrack;
-        }
-
-        if (request != REQUEST_CONTINUE) {
-            useconds_t pause_us = request_is_pause(request);
-            if (pause_us > 0) {
-                usleep(pause_us);
-                continue;
-            }
-            // REQUEST_STOP : renvoi du travail restant au serveur (recherche
-            // réelle seulement — cf. doc de allow_delegate ci-dessus)
-            if (allow_delegate) {
-                bt_flush_pending(client, &board, stack, top, start_depth, idParts, 0);
-            }
-            if (out_nodes != NULL) {
-                *out_nodes = nodes;
-            }
-            return BT_CORE_STOPPED;
-        }
-
-        if (allow_delegate) {
-            // Volontairement == et non % : noCheckDelegate n'est écrit qu'ici (+1
-            // puis remise à zéro au seuil), il ne peut donc jamais sauter par-dessus
-            // le seuil. Les chemins qui esquivent cet incrément (continue sur
-            // REQUEST_PAUSE, goto backtrack après une solution) ne font que retarder
-            // son atteinte.
-            noCheckDelegate++;
-            if (noCheckDelegate == DELEGATE_CHECK_INTERVAL_NODES) {
-                noCheckDelegate = 0;
-                // La fréquence de délégation est bornée en temps et non en nombre de
-                // nœuds : une délégation = jusqu'à max_stock_by_thread aller-retours
-                // TCP synchrones exécutés par ce thread. Indexée sur les nœuds, elle
-                // croîtrait avec la vitesse du moteur et mangerait le gain.
-                struct timespec now;
-                clock_gettime(CLOCK_MONOTONIC, &now);
-                long long elapsed_ms = (now.tv_sec - last_delegate.tv_sec) * 1000LL
-                                     + (now.tv_nsec - last_delegate.tv_nsec) / 1000000LL;
-                if (elapsed_ms >= DELEGATE_MIN_INTERVAL_MS) {
-                    // Si trop d'étude à faire pour 1 thread, alors on délègue une partie
-                    bt_delegate_if_needed(client, &board, stack, top, start_depth, idParts, 0);
-                    last_delegate = now;
-                }
-            }
-        }
-
-        uint8_t x = dirx[depth];
-        uint8_t y = diry[depth];
-
-        top++;
-        stack[top].next_s = 0;
-        stack[top].placed_pos = -1;
-        // En ordre fixe, la case du niveau EST dirx[depth]/diry[depth] : on la
-        // mémorise quand même, pour que la pile ait la même forme qu'en ordre
-        // dynamique et que la délégation soit rigoureusement le même code.
-        stack[top].x = x;
-        stack[top].y = y;
-
-        if (board.grid[x][y] != -2) {
-            // Case déjà remplie (indice du paquet d'origine) : niveau sans décision
-            stack[top].search = NULL;
-            counters[client->compteur]++;
-            nodes++;
-            if (depth + 1 > max_result) {
-                max_result = depth + 1;
-                best_board_try_record(&g_search_best_board, &board, (uint16_t)(depth + 1));
-            }
-            if (node_budget > 0 && nodes >= (unsigned long long)node_budget) {
-                if (out_nodes != NULL) {
-                    *out_nodes = nodes;
-                }
-                return BT_CORE_BUDGET;
-            }
-            continue;
-        }
-
-        board.x = x;
-        board.y = y;
-        board.alloc = depth;
-#ifdef DEBUG_CHECK_POSSIBILITY
-        // Contrôle de cohérence du cache de contraintes face au recalcul complet
-        {
-            key_part recomputed;
-            what_search_in_grid_to_key(client->all_rotate_part, &board, (int8_t)x, (int8_t)y, &recomputed, all_face);
-            if (recomputed.k1 != constraints[x][y].k1 || recomputed.k2 != constraints[x][y].k2
-                || recomputed.k3 != constraints[x][y].k3 || recomputed.k4 != constraints[x][y].k4) {
-                log_error("constraints cache mismatch (%i,%i) : cache %i/%i/%i/%i recalc %i/%i/%i/%i\n",
-                          x, y,
-                          constraints[x][y].k1, constraints[x][y].k2, constraints[x][y].k3, constraints[x][y].k4,
-                          recomputed.k1, recomputed.k2, recomputed.k3, recomputed.k4);
-            }
-        }
-#endif // DEBUG_CHECK_POSSIBILITY
-        stack[top].search = get_parts_bigarray_with_key(client->map_part, &constraints[x][y]);
-
-backtrack:;
-        // Place le prochain candidat du niveau courant, sinon remonte (backtrack).
-        // Atteint aussi par `goto` après une solution (mode « continuer ») : on
-        // repart du niveau courant, dont le placement gagnant sera annulé pour
-        // essayer le candidat suivant.
-        int placed = 0;
-        while (top >= 0) {
-            bt_level *lvl = &stack[top];
-            int d = start_depth + top;
-            uint8_t cx = lvl->x;
-            uint8_t cy = lvl->y;
-
-            // Annulation du placement courant du niveau (reprise après backtrack)
-            if (lvl->placed_pos >= 0) {
-                board.grid[cx][cy] = -2;
-                BOARD_SET_FACE(&board, lvl->placed_pos, 0);
-                bt_propagate_undo(constraints, cx, cy, all_face);
-                lvl->placed_pos = -1;
-            }
-
-            if (lvl->search != NULL) {
-                struct array_part *search = lvl->search;
-                for (int s = lvl->next_s; s < search->size; s++) {
-                    if (search->parts[s].id == 0) {
-                        continue;
-                    }
-                    int position = search->parts[s].id - 1;
-                    // Si la piece n'est pas déjà utilisée, on a une possibilité supplémentaire
-                    if (BOARD_FACE_USED(&board, position)) {
-                        continue;
-                    }
-                    // On place la piece
-                    board.grid[cx][cy] = idParts[search->parts[s].id][search->parts[s].rotation];
-                    BOARD_SET_FACE(&board, position, 1);
-                    bt_propagate_place(constraints, cx, cy, &search->parts[s]);
-                    board.alloc = d + 1;
-#if FORWARD_CHECK_K > 0
-                    // Forward-checking : on inspecte les voisines de la case
-                    // qu'on vient de remplir pour détecter une impasse immédiate
-                    if (d + 1 < ETERN_PARTS) {
-                        __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
-                        if (!bt_forward_check(constraints, &board, client->map_part, cx, cy)) {
-                            board.grid[cx][cy] = -2;
-                            BOARD_SET_FACE(&board, position, 0);
-                            bt_propagate_undo(constraints, cx, cy, all_face);
-                            __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
-                            continue;
-                        }
-                    }
-#endif // FORWARD_CHECK_K > 0
-                    lvl->next_s = s + 1;
-                    lvl->placed_pos = position;
-                    placed = 1;
-                    break;
-                }
-            }
-
-            if (placed) {
-                break;
-            }
-            // Niveau épuisé (ou case pré-remplie lors d'une remontée) : backtrack
-            top--;
-        }
-
-        if (top < 0) {
-            // Le sous-arbre du paquet racine est entièrement exploré
-            if (out_nodes != NULL) {
-                *out_nodes = nodes;
-            }
-            return BT_CORE_EXHAUSTED;
-        }
-
-        // Statistique possibilité étudiée + meilleur résultat
-        counters[client->compteur]++;
-        nodes++;
-        if (board.alloc > max_result) {
-            max_result = board.alloc;
-            best_board_try_record(&g_search_best_board, &board, board.alloc);
-#ifdef DEBUG_CHECK_POSSIBILITY
-            log_info("max result:%i\n", max_result);
-#endif // DEBUG_CHECK_POSSIBILITY
-        }
-#ifdef DEBUG_CHECK_POSSIBILITY
-        int analyse = check_possibility(&board, client->all_rotate_part);
-        if (analyse < 0)
-        {
-            log_error("possibility error : %i\n", analyse);
-            log_error(" ---");
-            print_possibility_packet(&board);
-        }
-#endif // DEBUG_CHECK_POSSIBILITY
-        if (node_budget > 0 && nodes >= (unsigned long long)node_budget) {
-            if (out_nodes != NULL) {
-                *out_nodes = nodes;
-            }
-            return BT_CORE_BUDGET;
-        }
-    }
-}
-
-/**
  * @brief Nombre de mots de 64 bits couvrant le masque des pièces utilisées.
  *
  * Dérivé de `FACES_USED_SIZE` (le masque du paquet, en groupes de 16 bits) et
@@ -1117,6 +831,327 @@ static int mrv_choose_cell(struct possibility_packet *board,
     *out_y = best_y;
     return 1;
 }
+
+/**
+ * @brief Issue de `search_packet_backtracking_core`.
+ */
+typedef enum {
+    BT_CORE_EXHAUSTED = 0, /**< Sous-arbre entièrement exploré : mort, prouvé (solutions éventuelles déjà signalées). */
+    BT_CORE_STOPPED = 1,   /**< REQUEST_STOP : arrêt demandé. */
+    BT_CORE_BUDGET = 2,    /**< `node_budget` épuisé avant exhaustivité : statut indéterminé. */
+} bt_core_result_t;
+
+/**
+ * @brief Cœur du backtracking in-place, factorisé pour servir deux usages : la
+ *        recherche réelle illimitée (`search_packet_backtracking`) et la preuve
+ *        de fermeture bornée en nœuds du pruner (`search_packet_backtracking_budgeted`,
+ *        §4.6b de `docs/conception/elagage_recherche.md`).
+ *
+ * Un unique plateau (copie locale du paquet racine) est modifié en place.
+ * Avancer = écrire une case et positionner un bit ; reculer = effacer la case,
+ * libérer le bit et passer au candidat suivant du niveau. Aucune copie de
+ * `possibility_packet` ni allocation dans la boucle chaude. L'ordre de parcours
+ * (`directions[]`), le forward-checking et les statistiques de nœuds
+ * (`counters`, `fc_attempts`/`fc_pruned`, `max_result`) sont identiques quel
+ * que soit l'appelant : le même arbre est exploré par le même code, seuls le
+ * plafond de nœuds et la délégation réseau diffèrent — c'est ce qui garantit
+ * qu'une fermeture prouvée par la variante bornée est une VRAIE preuve
+ * (aucune divergence de comportement possible entre les deux usages).
+ *
+ * @param client         Contexte du thread client.
+ * @param root           Paquet racine à explorer (non modifié).
+ * @param idParts        Table de pré-calcul des indices de rotation [id][rotation].
+ * @param node_budget    Nombre maximal de nœuds à explorer avant de renoncer
+ *                        (`BT_CORE_BUDGET`) ; `<= 0` = illimité (la recherche
+ *                        réelle ne s'arrête jamais sur ce critère).
+ * @param allow_delegate 1 : délégation périodique du surplus de travail
+ *                        (`bt_delegate_if_needed`) et renvoi au serveur du
+ *                        travail restant à l'arrêt (`bt_flush_pending`), comme
+ *                        avant cette factorisation — usage recherche réelle.
+ *                        0 : ni l'un ni l'autre. Déléguer une partie du
+ *                        sous-arbre romprait la preuve de fermeture elle-même
+ *                        (le budget n'aurait plus exploré tout ce qu'il
+ *                        prétend avoir fermé) — usage preuve bornée du pruner,
+ *                        où un arrêt (REQUEST_STOP) doit se contenter
+ *                        d'abandonner l'exploration locale : l'appelant
+ *                        retombe alors sur le comportement d'avant cette PR
+ *                        (possibilité originale conservée intacte, `checked`).
+ * @param out_nodes      Optionnel (NULL si non désiré) : reçoit le nombre de
+ *                        nœuds explorés, quel que soit le statut de retour —
+ *                        coût de la preuve, pour instrumentation/mesure.
+ * @return               `BT_CORE_EXHAUSTED`, `BT_CORE_STOPPED` ou `BT_CORE_BUDGET`.
+ */
+static bt_core_result_t search_packet_backtracking_core(client_possibility_t *client,
+                                      struct possibility_packet *root,
+                                      int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
+                                      long node_budget,
+                                      int allow_delegate,
+                                      unsigned long long *out_nodes)
+{
+    // Plateau unique modifié en place
+    struct possibility_packet board;
+    memcpy(&board, root, sizeof(board));
+
+    // Cache de contraintes : clé de recherche de chaque case, maintenue
+    // incrémentalement à chaque placement/retrait
+    const int8_t all_face = (int8_t)client->map_part->sizearrayM;
+    key_part constraints[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(constraints, &board, client->all_rotate_part, all_face);
+
+    // Miroir du masque des pièces utilisées : nécessaire au seul balayage
+    // global de case morte (`global_dead_check`), donc entretenu uniquement
+    // quand il est armé — l'ordre fixe historique ne paie rien.
+    uint64_t used[MRV_USED_WORDS];
+    if (global_dead_check) {
+        mrv_used_init(used, &board);
+    }
+
+    // Pile de décisions : un niveau par case explorée depuis la racine
+    bt_level stack[ETERN_PARTS];
+    int top = -1;
+    const int start_depth = board.alloc;
+    int noCheckDelegate = 0;
+    // Date de la dernière délégation (0 = jamais : la première est autorisée)
+    struct timespec last_delegate = {0, 0};
+
+    // Nœuds explorés (miroir local des incréments de `counters`, pour
+    // `out_nodes` et le plafond `node_budget` — jamais lu hors de cette pile).
+    unsigned long long nodes = 1;
+    // Statistique : le paquet racine compte comme une possibilité étudiée
+    counters[client->compteur]++;
+
+    for (;;) {
+        // Prochaine case du parcours à remplir
+        int depth = start_depth + top + 1;
+
+        if (depth >= ETERN_PARTS) {
+            board.alloc = depth;
+            // Toutes les pièces sont placées : enregistre + signale au serveur.
+            // Avec --stop-on-solution, record_solution ne revient pas (exit).
+            // Sinon, on backtrack pour continuer à chercher d'autres solutions
+            // (saut direct dans la remontée : pas de niveau ETERN_PARTS à empiler,
+            // dirx/diry n'ont que ETERN_PARTS cases).
+            record_solution(client, &board);
+            goto backtrack;
+        }
+
+        if (request != REQUEST_CONTINUE) {
+            useconds_t pause_us = request_is_pause(request);
+            if (pause_us > 0) {
+                usleep(pause_us);
+                continue;
+            }
+            // REQUEST_STOP : renvoi du travail restant au serveur (recherche
+            // réelle seulement — cf. doc de allow_delegate ci-dessus)
+            if (allow_delegate) {
+                bt_flush_pending(client, &board, stack, top, start_depth, idParts, 0);
+            }
+            if (out_nodes != NULL) {
+                *out_nodes = nodes;
+            }
+            return BT_CORE_STOPPED;
+        }
+
+        if (allow_delegate) {
+            // Volontairement == et non % : noCheckDelegate n'est écrit qu'ici (+1
+            // puis remise à zéro au seuil), il ne peut donc jamais sauter par-dessus
+            // le seuil. Les chemins qui esquivent cet incrément (continue sur
+            // REQUEST_PAUSE, goto backtrack après une solution) ne font que retarder
+            // son atteinte.
+            noCheckDelegate++;
+            if (noCheckDelegate == DELEGATE_CHECK_INTERVAL_NODES) {
+                noCheckDelegate = 0;
+                // La fréquence de délégation est bornée en temps et non en nombre de
+                // nœuds : une délégation = jusqu'à max_stock_by_thread aller-retours
+                // TCP synchrones exécutés par ce thread. Indexée sur les nœuds, elle
+                // croîtrait avec la vitesse du moteur et mangerait le gain.
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                long long elapsed_ms = (now.tv_sec - last_delegate.tv_sec) * 1000LL
+                                     + (now.tv_nsec - last_delegate.tv_nsec) / 1000000LL;
+                if (elapsed_ms >= DELEGATE_MIN_INTERVAL_MS) {
+                    // Si trop d'étude à faire pour 1 thread, alors on délègue une partie
+                    bt_delegate_if_needed(client, &board, stack, top, start_depth, idParts, 0);
+                    last_delegate = now;
+                }
+            }
+        }
+
+        uint8_t x = dirx[depth];
+        uint8_t y = diry[depth];
+
+        top++;
+        stack[top].next_s = 0;
+        stack[top].placed_pos = -1;
+        // En ordre fixe, la case du niveau EST dirx[depth]/diry[depth] : on la
+        // mémorise quand même, pour que la pile ait la même forme qu'en ordre
+        // dynamique et que la délégation soit rigoureusement le même code.
+        stack[top].x = x;
+        stack[top].y = y;
+
+        if (board.grid[x][y] != -2) {
+            // Case déjà remplie (indice du paquet d'origine) : niveau sans décision
+            stack[top].search = NULL;
+            counters[client->compteur]++;
+            nodes++;
+            if (depth + 1 > max_result) {
+                max_result = depth + 1;
+                best_board_try_record(&g_search_best_board, &board, (uint16_t)(depth + 1));
+            }
+            if (node_budget > 0 && nodes >= (unsigned long long)node_budget) {
+                if (out_nodes != NULL) {
+                    *out_nodes = nodes;
+                }
+                return BT_CORE_BUDGET;
+            }
+            continue;
+        }
+
+        board.x = x;
+        board.y = y;
+        board.alloc = depth;
+#ifdef DEBUG_CHECK_POSSIBILITY
+        // Contrôle de cohérence du cache de contraintes face au recalcul complet
+        {
+            key_part recomputed;
+            what_search_in_grid_to_key(client->all_rotate_part, &board, (int8_t)x, (int8_t)y, &recomputed, all_face);
+            if (recomputed.k1 != constraints[x][y].k1 || recomputed.k2 != constraints[x][y].k2
+                || recomputed.k3 != constraints[x][y].k3 || recomputed.k4 != constraints[x][y].k4) {
+                log_error("constraints cache mismatch (%i,%i) : cache %i/%i/%i/%i recalc %i/%i/%i/%i\n",
+                          x, y,
+                          constraints[x][y].k1, constraints[x][y].k2, constraints[x][y].k3, constraints[x][y].k4,
+                          recomputed.k1, recomputed.k2, recomputed.k3, recomputed.k4);
+            }
+        }
+#endif // DEBUG_CHECK_POSSIBILITY
+        stack[top].search = get_parts_bigarray_with_key(client->map_part, &constraints[x][y]);
+
+backtrack:;
+        // Place le prochain candidat du niveau courant, sinon remonte (backtrack).
+        // Atteint aussi par `goto` après une solution (mode « continuer ») : on
+        // repart du niveau courant, dont le placement gagnant sera annulé pour
+        // essayer le candidat suivant.
+        int placed = 0;
+        while (top >= 0) {
+            bt_level *lvl = &stack[top];
+            int d = start_depth + top;
+            uint8_t cx = lvl->x;
+            uint8_t cy = lvl->y;
+
+            // Annulation du placement courant du niveau (reprise après backtrack)
+            if (lvl->placed_pos >= 0) {
+                board.grid[cx][cy] = -2;
+                BOARD_SET_FACE(&board, lvl->placed_pos, 0);
+                if (global_dead_check) {
+                    mrv_used_clear(used, lvl->placed_pos);
+                }
+                bt_propagate_undo(constraints, cx, cy, all_face);
+                lvl->placed_pos = -1;
+            }
+
+            if (lvl->search != NULL) {
+                struct array_part *search = lvl->search;
+                for (int s = lvl->next_s; s < search->size; s++) {
+                    if (search->parts[s].id == 0) {
+                        continue;
+                    }
+                    int position = search->parts[s].id - 1;
+                    // Si la piece n'est pas déjà utilisée, on a une possibilité supplémentaire
+                    if (BOARD_FACE_USED(&board, position)) {
+                        continue;
+                    }
+                    // On place la piece
+                    board.grid[cx][cy] = idParts[search->parts[s].id][search->parts[s].rotation];
+                    BOARD_SET_FACE(&board, position, 1);
+                    if (global_dead_check) {
+                        mrv_used_set(used, position);
+                    }
+                    bt_propagate_place(constraints, cx, cy, &search->parts[s]);
+                    board.alloc = d + 1;
+#if FORWARD_CHECK_K > 0
+                    // Forward-checking : on inspecte les voisines de la case
+                    // qu'on vient de remplir pour détecter une impasse immédiate
+                    if (d + 1 < ETERN_PARTS) {
+                        __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
+                        if (!bt_forward_check(constraints, &board, client->map_part, cx, cy)) {
+                            board.grid[cx][cy] = -2;
+                            BOARD_SET_FACE(&board, position, 0);
+                            if (global_dead_check) {
+                                mrv_used_clear(used, position);
+                            }
+                            bt_propagate_undo(constraints, cx, cy, all_face);
+                            __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
+                            continue;
+                        }
+                    }
+#endif // FORWARD_CHECK_K > 0
+                    // Balayage GLOBAL de case morte (expérience d'ablation, cf.
+                    // `global_dead_check`) : exactement le sous-produit gratuit
+                    // du choix de case MRV, mais ici on jette le choix et on ne
+                    // garde que le test de mort — c'est ce qui sépare l'effet de
+                    // l'ORDRE de celui de la PORTÉE de la détection.
+                    if (global_dead_check && d + 1 < ETERN_PARTS) {
+                        uint8_t gx, gy;
+                        if (!mrv_choose_cell(&board, constraints, client->map_part,
+                                             used, all_face, &gx, &gy)) {
+                            board.grid[cx][cy] = -2;
+                            BOARD_SET_FACE(&board, position, 0);
+                            mrv_used_clear(used, position);
+                            bt_propagate_undo(constraints, cx, cy, all_face);
+                            __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
+                            continue;
+                        }
+                    }
+                    lvl->next_s = s + 1;
+                    lvl->placed_pos = position;
+                    placed = 1;
+                    break;
+                }
+            }
+
+            if (placed) {
+                break;
+            }
+            // Niveau épuisé (ou case pré-remplie lors d'une remontée) : backtrack
+            top--;
+        }
+
+        if (top < 0) {
+            // Le sous-arbre du paquet racine est entièrement exploré
+            if (out_nodes != NULL) {
+                *out_nodes = nodes;
+            }
+            return BT_CORE_EXHAUSTED;
+        }
+
+        // Statistique possibilité étudiée + meilleur résultat
+        counters[client->compteur]++;
+        nodes++;
+        if (board.alloc > max_result) {
+            max_result = board.alloc;
+            best_board_try_record(&g_search_best_board, &board, board.alloc);
+#ifdef DEBUG_CHECK_POSSIBILITY
+            log_info("max result:%i\n", max_result);
+#endif // DEBUG_CHECK_POSSIBILITY
+        }
+#ifdef DEBUG_CHECK_POSSIBILITY
+        int analyse = check_possibility(&board, client->all_rotate_part);
+        if (analyse < 0)
+        {
+            log_error("possibility error : %i\n", analyse);
+            log_error(" ---");
+            print_possibility_packet(&board);
+        }
+#endif // DEBUG_CHECK_POSSIBILITY
+        if (node_budget > 0 && nodes >= (unsigned long long)node_budget) {
+            if (out_nodes != NULL) {
+                *out_nodes = nodes;
+            }
+            return BT_CORE_BUDGET;
+        }
+    }
+}
+
 
 /**
  * @brief Nombre de cases réellement remplies d'un plateau.

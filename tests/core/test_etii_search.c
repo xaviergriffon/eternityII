@@ -1937,6 +1937,57 @@ TEST search_backtracking_mrv_preserves_solution_count(void)
     PASS();
 }
 
+/* §4.7 — ABLATION « ordre fixe + détection globale » (`global_dead_check`).
+ * Le balayage global rejette une branche dès qu'une case du plateau, où
+ * qu'elle soit, n'a plus aucun candidat : c'est une condition NÉCESSAIRE, donc
+ * il ne doit jamais coûter une seule solution. Même verrou que pour MRV :
+ * exploration exhaustive du vrai puzzle 4×4, drapeau levé puis baissé, même
+ * nombre de solutions. */
+TEST search_backtracking_global_dead_check_preserves_solution_count(void)
+{
+    ensure_counters();
+    ASSERT(es_setup());
+
+    char dir_on[256], dir_off[256];
+    strcpy(dir_on, "/tmp/etii_es_gdc_on_XXXXXX");
+    strcpy(dir_off, "/tmp/etii_es_gdc_off_XXXXXX");
+    ASSERT(mkdtemp(dir_on) != NULL);
+    ASSERT(mkdtemp(dir_off) != NULL);
+
+    int saved_mrv = mrv_enabled;
+    int saved_gdc = global_dead_check;
+    mrv_enabled = 0;                 /* l'ablation porte sur l'ordre FIXE */
+
+    global_dead_check = 1;
+    strcpy(es_solution_dir, dir_on);
+    pid_t pid_on = 0;
+    int code_on = run_in_fork(es_child_full_explore, &pid_on);
+
+    global_dead_check = 0;
+    strcpy(es_solution_dir, dir_off);
+    pid_t pid_off = 0;
+    int code_off = run_in_fork(es_child_full_explore, &pid_off);
+
+    mrv_enabled = saved_mrv;
+    global_dead_check = saved_gdc;
+
+    int count_on = es_count_solution_files(dir_on);
+    int count_off = es_count_solution_files(dir_off);
+    es_unlink_solutions(dir_on);
+    es_unlink_solutions(dir_off);
+    rmdir(dir_on);
+    rmdir(dir_off);
+
+    ASSERT_EQ_FMT(0, code_on, "%d");
+    ASSERT_EQ_FMT(0, code_off, "%d");
+    ASSERT(count_off > 0);
+    ASSERT_EQ_FMT(count_off, count_on, "%d");
+
+    free_bigarray(es_client.map_part);
+    free_array_part(es_client.all_rotate_part);
+    PASS();
+}
+
 /* Drapeau de fin de recherche, lu par le thread d'arrêt (fils du fork : un
  * seul thread écrit, un seul lit, valeur non composite). */
 static volatile int es_mrv_search_done = 0;
@@ -3035,6 +3086,7 @@ SUITE(etii_search_suite)
     RUN_TEST(search_backtracking_stop_on_solution_exits_success);
     RUN_TEST(search_backtracking_mrv_preserves_solution_count);
     RUN_TEST(search_backtracking_mrv_delegation_preserves_solution_count);
+    RUN_TEST(search_backtracking_global_dead_check_preserves_solution_count);
 #endif
 
     RUN_TEST(autosearch_stops_immediately_on_request_stop);

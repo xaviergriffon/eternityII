@@ -384,40 +384,81 @@ plateau profond, dont on extrait des préfixes (`--depths`) — utile pour
 construire des cas **durs** (sous-arbre réellement vivant), que le stock réel
 fournit rarement.
 
-### Résultats (moteur à ordre fixe vs MRV, plafond 5 M nœuds)
+### Trois moteurs, pas deux : l'ablation qui sépare les deux axes
 
-Sur le stock réel ci-dessus :
+Les deux moteurs de production **confondent deux axes indépendants** :
 
-| Bande (pièces posées) | Fermées, ordre fixe | Fermées, MRV | Nœuds sur les racines fermées par les DEUX |
-|---|---|---|---|
-| 20–45 | 5/10 | **10/10** | 70 vs 22 |
-| 55–89 | 16/16 | 16/16 | 40 804 vs **32** (×1 275) |
-| ≥ 90 | 17/25 | **25/25** | 565 677 vs **25** (×22 627) |
-
-Sur les racines **fabriquées** (préfixes, plafond 40 M nœuds), la conclusion
-s'inverse :
-
-| Profondeur | Ordre fixe | MRV |
+| | détection de case morte **locale** (4 voisines) | détection **globale** (tout le plateau) |
 |---|---|---|
-| 100 pièces | FERMÉ, 73 482 nœuds, 0,004 s | FERMÉ, **4 443 906** nœuds, 5,17 s |
-| 110 pièces | FERMÉ, 63 029 nœuds | FERMÉ, 78 547 nœuds |
-| 120 pièces | FERMÉ, 19 391 nœuds | FERMÉ, **1 403** nœuds |
+| **ordre fixe** | moteur historique (`fixe`) | `fixe+global` — l'ablation |
+| **ordre dynamique** | (dégénéré : le balayage la donne gratuitement) | moteur MRV (`MRV`) |
 
-**Lecture.** Sur ce que le serveur distribue réellement, MRV réfute massivement
-plus vite, et surtout il ferme des racines que l'ordre fixe ne ferme pas du tout
-dans le plafond. Mais son ordre n'est pas uniformément meilleur : sur un
-sous-arbre réellement vivant (préfixe à 100 pièces), il explore 60× plus de
-nœuds que l'ordre fixe pour le même résultat. Les deux faits sont vrais et
-doivent être cités ensemble.
+Ne comparer que les deux coins opposés ne dit pas lequel des deux axes produit
+l'effet mesuré. D'où le drapeau `global_dead_check` (`src/app/static_variables.h`,
+défaut 0, coût nul quand il vaut 0) : il fait appeler à l'ordre FIXE exactement
+le même balayage que MRV (`mrv_choose_cell`) en **jetant le choix de case**, ne
+gardant que le test de mort. `--engines fixe,fixe+global,mrv` sélectionne les
+variantes comparées. Verrou de correction : le balayage global est une condition
+nécessaire, il ne doit coûter aucune solution —
+`search_backtracking_global_dead_check_preserves_solution_count`
+(`tests/core/test_etii_search.c`), exploration exhaustive du vrai 4×4 avec et
+sans, même nombre de solutions.
 
-**Nuance importante, à ne pas passer sous silence** : une grande partie des
-réfutations MRV coûtent **1 nœud**. La possibilité était déjà morte au moment où
-le serveur l'a créée, et le balayage de plateau de `mrv_choose_cell` le voit
+### Résultat 1 — KPI de production, à TEMPS CPU ÉGAL
+
+120 racines échantillonnées régulièrement dans un stock serveur réel (1 sur 148,
+**aucun filtre de profondeur** : c'est ce que le serveur sert vraiment). Le
+plafond par racine est calibré **par moteur** pour que chacun dépense le même
+temps total (~22 s) — sans quoi le moteur qui renonce le plus vite paraît le plus
+« efficace » simplement parce qu'il abandonne moins cher :
+
+| moteur | plafond/racine | fermées | temps total | fermetures/s |
+|---|---|---|---|---|
+| `fixe` | 2 500 000 nœuds | 20/120 | 21,97 s | 0,91 |
+| `fixe+global` | 275 000 nœuds | 52/120 | 23,02 s | 2,26 |
+| `MRV` | 500 000 nœuds | **79/120** | 22,67 s | **3,48** |
+
+À temps CPU égal, MRV résout **4× plus** du stock que l'ordre fixe. Et l'ablation
+répartit le mérite : la détection globale seule fait passer 20 → 52 (×2,6), l'ordre
+dynamique ajoute 52 → 79 (×1,5). **Aucun des deux axes n'est redondant** — l'effet
+de l'ordre ne s'explique pas par le seul test global, contrairement à l'hypothèse
+que les réfutations à 1 nœud suggéraient.
+
+Comparaison appariée (mêmes racines, plafond commun de 500 k nœuds, les 19 que les
+trois moteurs ferment) : `fixe` 295 339 nœuds / 0,026 s, `fixe+global` 124 030
+nœuds / 0,159 s, `MRV` **40 nœuds** / ~0 s. Noter que `fixe+global` explore moins
+de nœuds que `fixe` mais met plus de TEMPS : le balayage coûte environ 10× le prix
+d'un nœud ordinaire. C'est le coût que MRV paie aussi — et qu'il rentabilise.
+
+### Résultat 2 — le contre-exemple : racines réellement vivantes
+
+Sur des racines **fabriquées** (préfixes d'une descente MRV, `--seed-nodes 200000
+--depths 100,110,120`), c'est-à-dire des sous-arbres que rien ne tue d'emblée :
+
+| moteur | nœuds (3 racines) | temps |
+|---|---|---|
+| `fixe` | 155 902 | 0,012 s |
+| `fixe+global` | 134 218 | 0,112 s |
+| `MRV` | **4 523 856** | **5,094 s** |
+
+Ici MRV est 29× pire en nœuds et 400× pire en temps — et l'ablation montre que
+c'est bien l'**ordre** qui est en cause, pas le balayage : `fixe+global` n'élague
+presque rien de plus que `fixe` (134 k contre 156 k nœuds) sur ces racines. Le
+gain de MRV n'est donc pas universel : il tient à la structure du stock réel
+(beaucoup de possibilités déjà mortes ou presque), pas à une supériorité
+intrinsèque de l'ordre en toutes circonstances.
+
+### Nuance à ne pas passer sous silence
+
+Une grande partie des réfutations coûtent **1 nœud** : la possibilité était déjà
+morte quand le serveur l'a créée, et le balayage de plateau le voit
 immédiatement — c'est le même test que `possibility_all_has_a_next_counted`
-(le pruner), mais appliqué à CHAQUE nœud au lieu d'une seule fois. Cela dit
-aussi quelque chose du stock lui-même : sans pruner en service, un serveur
-accumule du travail déjà mort. Comparer les deux moteurs sur ces racines-là
-mesure surtout la présence de ce test global, pas la qualité de l'ordre.
+(le pruner), mais joué à chaque nœud au lieu d'une fois par possibilité. Cela dit
+aussi quelque chose du stock : **sans pruner en service, un serveur accumule du
+travail déjà mort** en quantité (ici 52/120 racines tuées par le seul test global).
+Sur ces racines-là, la comparaison mesure la présence de ce test, pas la qualité
+de l'ordre — d'où l'importance de la comparaison appariée ci-dessus, où MRV garde
+un avantage de 3 ordres de grandeur.
 
 ## Voir aussi
 

@@ -860,6 +860,26 @@ unsigned long long bench_parse_nodes_env(const char *env_value);
 extern int mrv_enabled;
 
 /**
+ * @brief Arme le balayage GLOBAL de case morte dans le moteur à ordre FIXE —
+ *        expérience d'ABLATION, jamais un réglage d'exploitation (défaut 0).
+ *
+ * Les deux moteurs confondent deux axes indépendants : l'ordre fixe va toujours
+ * avec une détection de case morte LOCALE (les 4 voisines, `bt_forward_check`),
+ * l'ordre dynamique toujours avec une détection GLOBALE (le balayage de
+ * `mrv_choose_cell` voit toute case morte du plateau, où qu'elle soit). Comparer
+ * ces deux-là ne dit donc pas lequel des deux axes produit l'effet mesuré.
+ * Ce drapeau remplit la case manquante : ordre fixe + détection globale, en
+ * appelant exactement le même balayage que MRV et en JETANT le choix de case.
+ *
+ * Coût nul quand il vaut 0 (le miroir 64 bits des pièces utilisées n'est même
+ * pas entretenu). Lu par `search_packet_backtracking_core` uniquement — le
+ * moteur MRV fait déjà ce test par construction. Utilisé par
+ * `tests/bench/bench_refutation.c` ; aucune entrée `cli_topics[]`, aucune
+ * commande console.
+ */
+extern int global_dead_check;
+
+/**
  * @brief Parse `ETII_MRV` en drapeau d'activation. Fonction pure et testable.
  *
  * @param env_value Valeur de la variable d'environnement, ou NULL si absente.

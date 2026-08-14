@@ -60,7 +60,6 @@
 #include "core/datamanager.h"
 
 #define MAX_DEPTHS 32
-#define MAX_BACK_ROOTS 4096
 
 static client_possibility_t g_client;
 static int16_t g_idParts[ETERN_PARTS + 1][PART_SIZES];
@@ -109,25 +108,43 @@ static double now_seconds(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
+/**
+ * @brief Une variante de moteur à comparer.
+ *
+ * Les deux axes sont volontairement SÉPARÉS, parce que les deux moteurs
+ * historiques les confondent : l'ordre fixe va toujours avec une détection de
+ * case morte LOCALE (les 4 voisines, `bt_forward_check`), l'ordre dynamique
+ * toujours avec une détection GLOBALE (le balayage de `mrv_choose_cell` voit
+ * toute case morte du plateau). Tant qu'on ne compare que ces deux-là, on ne
+ * peut pas savoir lequel des deux axes produit l'effet mesuré — d'où la
+ * troisième variante, « ordre fixe + détection globale ».
+ */
+typedef struct {
+    const char *name;
+    /** 1 : ordre dynamique (MRV) ; 0 : ordre de parcours fixe `directions[]`. */
+    int dynamic;
+    /** 1 : ajoute le balayage global de case morte à l'ordre fixe (sans effet si `dynamic`). */
+    int global_check;
+} engine_t;
+
 /** @brief Résultat d'une tentative de fermeture. */
 typedef struct {
     bt_core_result_t status;
     unsigned long long nodes;
     double seconds;
-    uint16_t max_result_reached;
 } closure_t;
 
 /**
  * @brief Tente de fermer le sous-arbre de `root` avec un moteur donné.
  *
- * `allow_delegate = 0` dans les deux cas : céder une partie du sous-arbre
+ * `allow_delegate = 0` dans tous les cas : céder une partie du sous-arbre
  * romprait la preuve elle-même (cf. la doc de `search_packet_backtracking_core`).
  *
- * @param root    Racine (non modifiée).
- * @param dynamic 1 : moteur MRV ; 0 : moteur à ordre fixe.
- * @param budget  Plafond de nœuds.
+ * @param root   Racine (non modifiée).
+ * @param eng    Variante de moteur.
+ * @param budget Plafond de nœuds.
  */
-static closure_t close_subtree(struct possibility_packet *root, int dynamic, long budget)
+static closure_t close_subtree(const struct possibility_packet *root, const engine_t *eng, long budget)
 {
     closure_t out;
     struct possibility_packet work;
@@ -136,15 +153,16 @@ static closure_t close_subtree(struct possibility_packet *root, int dynamic, lon
     counters[0] = 0;
     max_result = 0;
     request = REQUEST_CONTINUE;
+    global_dead_check = eng->global_check;
 
     unsigned long long nodes = 0;
     double t0 = now_seconds();
-    out.status = dynamic
+    out.status = eng->dynamic
         ? search_packet_backtracking_mrv(&g_client, &work, g_idParts, budget, 0, &nodes)
         : search_packet_backtracking_core(&g_client, &work, g_idParts, budget, 0, &nodes);
     out.seconds = now_seconds() - t0;
     out.nodes = nodes;
-    out.max_result_reached = max_result;
+    global_dead_check = 0;
     return out;
 }
 
@@ -177,7 +195,8 @@ static int placed_count(const struct possibility_packet *b)
  * Toute restriction d'un plateau cohérent reste cohérente (on ne fait que
  * retirer des contraintes), et prendre le préfixe du parcours donne exactement
  * la forme qu'un client à ordre fixe produirait — donc une racine qu'aucun des
- * deux moteurs n'avantage a priori.
+ * moteurs n'avantage a priori. Ces racines-là sont, contrairement au stock
+ * réel, des sous-arbres RÉELLEMENT VIVANTS : c'est le cas dur.
  */
 static void build_prefix_root(const struct possibility_packet *deep, int k,
                               struct possibility_packet *out)
@@ -200,19 +219,59 @@ static void build_prefix_root(const struct possibility_packet *deep, int k,
     bt_canonicalize_packet(out);
 }
 
-static void print_row(const char *label, int depth, closure_t fixed, closure_t mrv)
+/* ==========================================================================
+ * Sortie : un tableau par racine (colonnes = moteurs), puis un bilan.
+ * ========================================================================== */
+
+static void print_header(const engine_t *engines, int nb)
 {
-    printf("%-14s %5d | %-6s %12llu %9.3f s | %-6s %12llu %9.3f s",
-           label, depth,
-           status_label(fixed.status), fixed.nodes, fixed.seconds,
-           status_label(mrv.status), mrv.nodes, mrv.seconds);
-    if (fixed.status == BT_CORE_EXHAUSTED && mrv.status == BT_CORE_EXHAUSTED) {
-        printf(" | ×%.2f nœuds  ×%.2f temps",
-               mrv.nodes > 0 ? (double)fixed.nodes / (double)mrv.nodes : 0.0,
-               mrv.seconds > 0 ? fixed.seconds / mrv.seconds : 0.0);
+    printf("%-12s %6s", "racine", "pièces");
+    for (int e = 0; e < nb; e++) {
+        printf(" | %-11s %12s %9s", engines[e].name, "nœuds", "temps");
+    }
+    printf("\n");
+    for (int i = 0; i < 19 + nb * 37; i++) putchar('-');
+    printf("\n");
+}
+
+static void print_row(const char *label, int pieces, const engine_t *engines, int nb,
+                      const closure_t *res)
+{
+    printf("%-12s %6d", label, pieces);
+    for (int e = 0; e < nb; e++) {
+        printf(" | %-11s %12llu %7.3f s",
+               status_label(res[e].status), res[e].nodes, res[e].seconds);
     }
     printf("\n");
     fflush(stdout);
+}
+
+/** @brief Bilan agrégé d'un moteur sur un échantillon de racines. */
+typedef struct {
+    int closed;
+    unsigned long long nodes;
+    double seconds;
+} tally_t;
+
+static void print_tally(const engine_t *engines, int nb, const tally_t *t, int roots,
+                        const tally_t *common, int nb_common)
+{
+    printf("\n%-14s %8s %8s %14s %16s\n",
+           "moteur", "fermées", "sur", "temps total", "fermetures/s");
+    for (int e = 0; e < nb; e++) {
+        printf("%-14s %8d %8d %12.3f s %16.2f\n",
+               engines[e].name, t[e].closed, roots, t[e].seconds,
+               t[e].seconds > 0 ? (double)t[e].closed / t[e].seconds : 0.0);
+    }
+    // Le tableau ci-dessus est biaisé par le plafond : un moteur qui renonce
+    // vite dépense peu de temps sur les racines qu'il ne ferme pas, et son
+    // ratio « fermetures/s » s'en trouve flatté. Le sous-ensemble fermé par
+    // TOUS les moteurs est la seule comparaison appariée, sans plafond en jeu.
+    printf("\ncomparaison appariée — les %d racines fermées par TOUS les moteurs :\n", nb_common);
+    printf("%-14s %14s %14s\n", "moteur", "nœuds", "temps");
+    for (int e = 0; e < nb; e++) {
+        printf("%-14s %14llu %12.3f s\n", engines[e].name, common[e].nodes, common[e].seconds);
+    }
 }
 
 static void usage(void)
@@ -225,7 +284,11 @@ static void usage(void)
            "  --from-back <f>    prend les racines dans un stock serveur (.back) au lieu de les fabriquer\n"
            "  --max-roots <n>    nombre de racines lues d'un .back (défaut 20)\n"
            "  --min-pieces <n>   ne retient d'un .back que les racines d'au moins n pièces posées\n"
-           "  --max-pieces <n>   ... et d'au plus n pièces posées\n");
+           "  --max-pieces <n>   ... et d'au plus n pièces posées\n"
+           "  --kpi <n>          mode KPI : échantillonne n racines RÉGULIÈREMENT réparties dans le\n"
+           "                     .back (aucun filtre de profondeur — c'est ce que le serveur sert\n"
+           "                     réellement), n'imprime que le bilan fermetures/seconde\n"
+           "  --engines <liste>  moteurs à comparer parmi fixe,fixe+global,mrv (défaut : tous)\n");
 }
 
 int main(int argc, char **argv)
@@ -236,17 +299,41 @@ int main(int argc, char **argv)
     long budget = 5000000;
     long seed_nodes = 2000000;
     int max_roots = 20;
+    int kpi = 0;
     int depths[MAX_DEPTHS] = {150, 165, 175, 180, 185};
     int nb_depths = 5;
 
+    engine_t all_engines[3] = {
+        { "fixe",        0, 0 },
+        { "fixe+global", 0, 1 },
+        { "MRV",         1, 0 },
+    };
+    engine_t engines[3];
+    int nb_engines = 3;
+    memcpy(engines, all_engines, sizeof(all_engines));
+
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--pieces") == 0 && i + 1 < argc)          pieces = argv[++i];
-        else if (strcmp(argv[i], "--budget") == 0 && i + 1 < argc)     budget = atol(argv[++i]);
-        else if (strcmp(argv[i], "--seed-nodes") == 0 && i + 1 < argc) seed_nodes = atol(argv[++i]);
-        else if (strcmp(argv[i], "--from-back") == 0 && i + 1 < argc)  back = argv[++i];
-        else if (strcmp(argv[i], "--max-roots") == 0 && i + 1 < argc)  max_roots = atoi(argv[++i]);
+        if (strcmp(argv[i], "--pieces") == 0 && i + 1 < argc)           pieces = argv[++i];
+        else if (strcmp(argv[i], "--budget") == 0 && i + 1 < argc)      budget = atol(argv[++i]);
+        else if (strcmp(argv[i], "--seed-nodes") == 0 && i + 1 < argc)  seed_nodes = atol(argv[++i]);
+        else if (strcmp(argv[i], "--from-back") == 0 && i + 1 < argc)   back = argv[++i];
+        else if (strcmp(argv[i], "--max-roots") == 0 && i + 1 < argc)   max_roots = atoi(argv[++i]);
         else if (strcmp(argv[i], "--min-pieces") == 0 && i + 1 < argc)  min_pieces = atoi(argv[++i]);
         else if (strcmp(argv[i], "--max-pieces") == 0 && i + 1 < argc)  max_pieces = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--kpi") == 0 && i + 1 < argc)         kpi = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--engines") == 0 && i + 1 < argc) {
+            nb_engines = 0;
+            char *copy = strdup(argv[++i]);
+            for (char *tok = strtok(copy, ","); tok != NULL; tok = strtok(NULL, ",")) {
+                for (int e = 0; e < 3; e++) {
+                    if (strcmp(tok, all_engines[e].name) == 0) {
+                        engines[nb_engines++] = all_engines[e];
+                    }
+                }
+            }
+            free(copy);
+            if (nb_engines == 0) { usage(); return EXIT_FAILURE; }
+        }
         else if (strcmp(argv[i], "--depths") == 0 && i + 1 < argc) {
             nb_depths = 0;
             char *copy = strdup(argv[++i]);
@@ -279,69 +366,90 @@ int main(int argc, char **argv)
     g_client.all_rotate_part = rot;
     g_client.map_part = map;
 
-    printf("banc de réfutation : coût de la PREUVE qu'un sous-arbre est mort\n");
-    printf("pièces : %s   plafond : %ld nœuds par tentative\n\n", pieces, budget);
-    printf("%-14s %5s | %-6s %12s %11s | %-6s %12s %11s\n",
-           "racine", "pièces", "fixe", "nœuds", "temps", "MRV", "nœuds", "temps");
-    printf("---------------------------------------------------------------------------------------\n");
+    printf("\nbanc de réfutation : coût de la PREUVE qu'un sous-arbre est mort\n");
+    printf("pièces : %s   plafond : %ld nœuds par racine et par moteur\n", pieces, budget);
+
+    tally_t tally[3], common[3];
+    memset(tally, 0, sizeof(tally));
+    memset(common, 0, sizeof(common));
+    int nb_common = 0;
+    closure_t res[3];
+    int roots_done = 0;
 
     if (back != NULL) {
-        // Racines réelles : le stock d'un serveur, tel qu'il est sauvegardé.
         FILE *f = fopen(back, "r");
         if (f == NULL) {
             fprintf(stderr, "ouverture de %s impossible\n", back);
             return EXIT_FAILURE;
         }
+        // Première passe : profil du stock (et, en mode KPI, le pas
+        // d'échantillonnage — il faut connaître le total pour répartir).
         struct possibility_packet pkt;
-        int n = 0, closed_fixed = 0, closed_mrv = 0, both_closed = 0;
-        unsigned long long both_nodes_fixed = 0, both_nodes_mrv = 0;
-        double both_sec_fixed = 0.0, both_sec_mrv = 0.0;
-        int min_alloc = ETERN_PARTS, max_alloc = 0;
-        long long sum_alloc = 0, total = 0;
+        long long total = 0, sum_pieces = 0;
+        int min_seen = ETERN_PARTS, max_seen = 0;
         while (fread(&pkt, sizeof(pkt), 1, f) == 1) {
-            total++;
             int p = placed_count(&pkt);
-            if (p < min_alloc) min_alloc = p;
-            if (p > max_alloc) max_alloc = p;
-            sum_alloc += p;
-            if (n >= max_roots || p < min_pieces || p > max_pieces) {
-                continue; // on continue à lire pour le profil de profondeur
+            total++;
+            sum_pieces += p;
+            if (p < min_seen) min_seen = p;
+            if (p > max_seen) max_seen = p;
+        }
+        printf("stock : %lld possibilités, pièces posées min/moy/max = %d / %.1f / %d\n",
+               total, min_seen, total > 0 ? (double)sum_pieces / (double)total : 0.0, max_seen);
+        long long stride = (kpi > 0 && total > kpi) ? total / kpi : 1;
+        if (kpi > 0) {
+            printf("mode KPI : %d racines échantillonnées 1 sur %lld, aucun filtre de profondeur\n",
+                   kpi, stride);
+        }
+        printf("\n");
+        if (!kpi) {
+            print_header(engines, nb_engines);
+        }
+
+        rewind(f);
+        long long index = 0;
+        while (fread(&pkt, sizeof(pkt), 1, f) == 1) {
+            int p = placed_count(&pkt);
+            long long i = index++;
+            if (roots_done >= (kpi > 0 ? kpi : max_roots)) break;
+            if (kpi > 0) {
+                if (i % stride != 0) continue;
+            } else if (p < min_pieces || p > max_pieces) {
+                continue;
             }
             normalize_possibility_packet(&pkt);
-            closure_t fx = close_subtree(&pkt, 0, budget);
-            closure_t mv = close_subtree(&pkt, 1, budget);
-            closed_fixed += (fx.status == BT_CORE_EXHAUSTED);
-            closed_mrv += (mv.status == BT_CORE_EXHAUSTED);
-            if (fx.status == BT_CORE_EXHAUSTED && mv.status == BT_CORE_EXHAUSTED) {
-                both_closed++;
-                both_nodes_fixed += fx.nodes; both_nodes_mrv += mv.nodes;
-                both_sec_fixed += fx.seconds; both_sec_mrv += mv.seconds;
+            for (int e = 0; e < nb_engines; e++) {
+                res[e] = close_subtree(&pkt, &engines[e], budget);
+                tally[e].closed += (res[e].status == BT_CORE_EXHAUSTED);
+                tally[e].nodes += res[e].nodes;
+                tally[e].seconds += res[e].seconds;
             }
-            char label[32];
-            snprintf(label, sizeof(label), "back#%d", n);
-            print_row(label, p, fx, mv);
-            n++;
+            int all_closed = 1;
+            for (int e = 0; e < nb_engines; e++) {
+                all_closed &= (res[e].status == BT_CORE_EXHAUSTED);
+            }
+            if (all_closed) {
+                nb_common++;
+                for (int e = 0; e < nb_engines; e++) {
+                    common[e].nodes += res[e].nodes;
+                    common[e].seconds += res[e].seconds;
+                }
+            }
+            if (!kpi) {
+                char label[32];
+                snprintf(label, sizeof(label), "back#%d", roots_done);
+                print_row(label, p, engines, nb_engines, res);
+            }
+            roots_done++;
         }
         fclose(f);
-        printf("\nstock lu : %lld possibilités, pièces posées min/moy/max = %d / %.1f / %d\n",
-               total, min_alloc, total > 0 ? (double)sum_alloc / (double)total : 0.0, max_alloc);
-        printf("fermetures dans le plafond : ordre fixe %d/%d, MRV %d/%d\n",
-               closed_fixed, n, closed_mrv, n);
-        if (both_closed > 0) {
-            printf("racines fermées par les DEUX (%d) : nœuds fixe %llu vs MRV %llu (×%.2f),"
-                   " temps fixe %.3f s vs MRV %.3f s (×%.2f)\n",
-                   both_closed, both_nodes_fixed, both_nodes_mrv,
-                   both_nodes_mrv > 0 ? (double)both_nodes_fixed / (double)both_nodes_mrv : 0.0,
-                   both_sec_fixed, both_sec_mrv,
-                   both_sec_mrv > 0 ? both_sec_fixed / both_sec_mrv : 0.0);
-        }
     } else {
-        // Racines fabriquées : préfixes d'une descente MRV profonde.
         struct possibility_packet root;
         make_empty_board(&root);
         best_board_init(&g_search_best_board);
         max_result = 0;
         request = REQUEST_CONTINUE;
+        global_dead_check = 0;
         unsigned long long seeded = 0;
         search_packet_backtracking_mrv(&g_client, &root, g_idParts, seed_nodes, 0, &seeded);
 
@@ -351,17 +459,36 @@ int main(int argc, char **argv)
             fprintf(stderr, "aucun plateau profond produit par la descente\n");
             return EXIT_FAILURE;
         }
-        printf("# descente MRV : %llu nœuds -> plateau profond de %d pièces posées\n\n",
+        printf("descente MRV : %llu nœuds -> plateau profond de %d pièces posées\n\n",
                seeded, placed_count(&deep));
+        print_header(engines, nb_engines);
 
         for (int i = 0; i < nb_depths; i++) {
             struct possibility_packet r;
             build_prefix_root(&deep, depths[i], &r);
-            closure_t fx = close_subtree(&r, 0, budget);
-            closure_t mv = close_subtree(&r, 1, budget);
-            print_row("préfixe", placed_count(&r), fx, mv);
+            for (int e = 0; e < nb_engines; e++) {
+                res[e] = close_subtree(&r, &engines[e], budget);
+                tally[e].closed += (res[e].status == BT_CORE_EXHAUSTED);
+                tally[e].nodes += res[e].nodes;
+                tally[e].seconds += res[e].seconds;
+            }
+            int all_closed = 1;
+            for (int e = 0; e < nb_engines; e++) {
+                all_closed &= (res[e].status == BT_CORE_EXHAUSTED);
+            }
+            if (all_closed) {
+                nb_common++;
+                for (int e = 0; e < nb_engines; e++) {
+                    common[e].nodes += res[e].nodes;
+                    common[e].seconds += res[e].seconds;
+                }
+            }
+            print_row("préfixe", placed_count(&r), engines, nb_engines, res);
+            roots_done++;
         }
     }
+
+    print_tally(engines, nb_engines, tally, roots_done, common, nb_common);
 
     free_bigarray(map);
     free_array_part(rot);

@@ -817,6 +817,39 @@ test que `possibility_all_has_a_next_counted` (le pruner), mais à chaque nœud 
 fois. Sur ces racines-là, la comparaison mesure surtout la présence de ce test global, pas
 la qualité de l'ordre.
 
+**Ablation : ce qui revient à l'ORDRE et ce qui revient à la PORTÉE de la détection.** Les
+deux moteurs confondaient deux axes — l'ordre fixe va toujours avec une détection de case
+morte LOCALE (`bt_forward_check`, 4 voisines), l'ordre dynamique toujours avec une détection
+GLOBALE (le balayage de `mrv_choose_cell` voit toute case morte du plateau). Le drapeau
+`global_dead_check` (`static_variables.h`, défaut 0, coût nul désarmé) remplit la case
+manquante : ordre FIXE + balayage global, en appelant exactement le même balayage que MRV et
+en JETANT le choix de case. Verrouillé par
+`search_backtracking_global_dead_check_preserves_solution_count` (exploration exhaustive du
+4×4, même nombre de solutions armé ou non — le balayage est une condition nécessaire, il ne
+doit coûter aucune solution). KPI à **temps CPU égal** (~22 s par moteur, 120 racines
+échantillonnées régulièrement dans le stock réel, plafond calibré par moteur) :
+
+| moteur | plafond/racine | fermées | temps total | fermetures/s |
+|---|---|---|---|---|
+| ordre fixe | 2 500 000 nœuds | 20/120 | 21,97 s | 0,91 |
+| ordre fixe + balayage global | 275 000 nœuds | 52/120 | 23,02 s | 2,26 |
+| MRV | 500 000 nœuds | **79/120** | 22,67 s | **3,48** |
+
+**Les deux axes comptent, aucun n'est redondant** : le balayage global seul fait 20 → 52
+(×2,6), l'ordre dynamique ajoute 52 → 79 (×1,5). L'hypothèse « tout l'effet vient du test
+global, l'ordre ne sert à rien » — que les réfutations à 1 nœud rendaient plausible — est
+donc réfutée. Sur les 19 racines fermées par les trois : 295 339 nœuds (fixe), 124 030
+(fixe+global), **40** (MRV). À noter que fixe+global explore moins de nœuds que fixe mais met
+plus de temps : le balayage coûte ~10× un nœud ordinaire — c'est le prix que MRV paie aussi,
+et rentabilise.
+
+Sur les racines FABRIQUÉES (préfixes vivants, `--seed-nodes 200000 --depths 100,110,120`), la
+conclusion s'inverse et l'ablation en donne la cause : fixe 155 902 nœuds / 0,012 s,
+fixe+global 134 218 / 0,112 s, MRV 4 523 856 / 5,094 s. C'est bien l'**ordre** qui coûte là
+(le balayage n'élague presque rien de plus que le forward-check local sur ces racines). Le
+gain de MRV tient donc à la structure du stock réel — beaucoup de possibilités déjà mortes ou
+presque — pas à une supériorité de l'ordre en toutes circonstances.
+
 **Ce que cette adoption rouvre.** §4.4 (conflit de singletons), §4.5 (propagation des cases
 forcées) et §4.6b (DFS à budget du pruner) ont tous les trois été écartés ou désactivés pour
 la MÊME raison : le mur structurel à `max_result` ≈ 74 les rendait soit muets (0
