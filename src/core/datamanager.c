@@ -2021,7 +2021,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
 
     int rounds = 0;
     int cap_reached = 0;
-    while (rounds < EXPAND_MAX_LEVELS && !cap_reached) {
+    while (rounds < expand_max_levels && !cap_reached) {
         // 1. Draine tout le pool non vérifié dans une file de travail. L'expansion
         //    tourne au démarrage du serveur, mono-thread (aucun thread TCP ni
         //    rmnonext lancé) : le verrou est pris par cohérence, sans contention.
@@ -2044,7 +2044,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         //    Plafond en NOMBRE (garde-fou principal) : le facteur de branchement
         //    est inconnu et une seule passe peut exploser (des dizaines de
         //    milliers × le branchement). On compte donc le stock reconstruit et,
-        //    dès `EXPAND_MAX_STOCK` franchi, on cesse d'approfondir : le reste du
+        //    dès `expand_max_stock` franchi, on cesse d'approfondir : le reste du
         //    travail est réinjecté tel quel (possibilités valides, niveau moindre).
         //    Le stock est déjà largement suffisant pour nourrir les clients.
         unsigned long long produced = 0;
@@ -2074,7 +2074,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                 free_array_possibility_packet(single);
                 produced++;
             }
-            if (produced >= (unsigned long long)EXPAND_MAX_STOCK) {
+            if (produced >= (unsigned long long)expand_max_stock) {
                 cap_reached = 1; // le reste de `work` sera réinjecté tel quel
             }
         }
@@ -2084,7 +2084,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
 
         if (cap_reached) {
             log_event("expansion : plafond de stock atteint (%llu ≥ %d) — arrêt de l'approfondissement",
-                      produced, EXPAND_MAX_STOCK);
+                      produced, expand_max_stock);
         }
         if (!expanded_any) {
             break; // tout le stock a atteint le niveau cible : rien de plus à faire

@@ -27,13 +27,15 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
 |---|---|---|
 | `nb_threads` | 80 | Nombre de connexions clients simultanées |
 | `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'au niveau de curseur `N` (anti-famine, voir ci-dessous) |
+| `--expand-max-stock N` | `EXPAND_MAX_STOCK` (100000) | Plafonne en NOMBRE de possibilités la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
+| `--expand-max-levels N` | `EXPAND_MAX_LEVELS` (4) | Plafonne en NOMBRE DE PASSES la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
 | `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
@@ -43,6 +45,8 @@ Exemples :
 ./eternityII server 80
 ./eternityII server 80 data/pieces.csv
 ./eternityII server 80 --expand-level 4 data/pieces.csv
+./eternityII server 80 --expand-level 4 --expand-max-stock 1000000 data/pieces.csv
+./eternityII server 80 --expand-level 8 --expand-max-stock 1000000 --expand-max-levels 8 data/pieces.csv
 ./eternityII server 80 --http-port 8080 data/pieces.csv
 ./eternityII server 80 --http-port 8080 --http-token-file /etc/eternityii/http-token data/pieces.csv
 ```
@@ -68,17 +72,24 @@ jusqu'à ce que leur curseur `alloc` atteigne le niveau `N`. Le paquet genèse d
 ainsi des milliers de possibilités distribuables. C'est un calcul **purement serveur,
 sans aucun impact client**.
 
-L'expansion est bornée sur deux axes (dans
-[src/app/static_variables.h](../src/app/static_variables.h)) : `EXPAND_MAX_LEVELS` (4)
-plafonne le nombre de passes quelle que soit la consigne — garde-fou en *profondeur* —
-et `EXPAND_MAX_STOCK` (100000) plafonne le *nombre* de possibilités entre passes ;
-comme le facteur de branchement est inconnu et qu'une seule passe peut exploser, ce
-plafond en nombre est le vrai garde-fou de temps et de mémoire. Sur le puzzle 256 le
-branchement mesuré est ≈11×/niveau (niveau 3 → ~500 possibilités, niveau 4 → ~5300,
-niveau 5 → ~56000) : **le niveau 3–4 est le point idéal** — de quoi remplir le stock
-local de tous les clients avec réserve, en bien moins d'une seconde. La même opération
-est disponible à chaud via la commande interactive `expand N` (utile si le stock
-distribuable se raréfie en cours de recherche).
+L'expansion est bornée sur deux axes, tous deux configurables au lancement (dans
+[src/app/static_variables.h](../src/app/static_variables.h)) : `--expand-max-levels N`
+(défaut `EXPAND_MAX_LEVELS`, 4) plafonne le nombre de passes quelle que soit la
+consigne — garde-fou en *profondeur* — et `--expand-max-stock N` (défaut
+`EXPAND_MAX_STOCK`, 100000) plafonne le *nombre* de possibilités entre passes ; comme le
+facteur de branchement est inconnu et qu'une seule passe peut exploser, ce plafond en
+nombre est le vrai garde-fou de temps et de mémoire. Sur le puzzle 256 le branchement
+mesuré est ≈11×/niveau (niveau 3 → ~500 possibilités, niveau 4 → ~5300, niveau 5 →
+~56000) : **le niveau 3–4 est le point idéal** — de quoi remplir le stock local de tous
+les clients avec réserve, en bien moins d'une seconde. Les deux options sont
+volontairement configurables — un serveur disposant de plus de capacité (RAM, CPU) peut
+relever `--expand-max-stock` (~54 Mo à 100000, la mémoire consacrée à la réserve) et/ou
+`--expand-max-levels` (le temps qu'il s'autorise à passer sur cette pré-expansion) pour
+atteindre un `--expand-level` élevé sans être arrêté prématurément (`N ≤ 0` est ignoré
+pour les deux, la valeur par défaut ou déjà fixée est conservée). La même opération
+d'expansion est disponible à chaud via la commande interactive `expand N` (utile si le
+stock distribuable se raréfie en cours de recherche) ; elle respecte elle aussi les deux
+plafonds en vigueur.
 
 > Cette expansion est le pendant *serveur* de la délégation anticipée côté *client*
 > (sonde de faim `INST_NEED_WORK`, VERSION 8) décrite dans

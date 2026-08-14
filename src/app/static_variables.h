@@ -148,14 +148,19 @@
 // un seul client détient tout l'arbre pendant que le serveur n'a rien à servir.
 // L'impact client est nul (calcul purement serveur, avant toute connexion).
 //
-// EXPAND_MAX_LEVELS : nombre maximal de passes d'expansion, quelle que soit la
-// consigne de niveau — garde-fou en PROFONDEUR pour ne pas mettre le serveur au
-// travail trop longtemps.
+// EXPAND_MAX_LEVELS : valeur par DÉFAUT du plafond en NOMBRE DE PASSES
+// d'expansion (variable globale `expand_max_levels`, configurable via
+// l'option CLI `--expand-max-levels <n>` — voir static_variables.h), quelle
+// que soit la consigne de niveau — garde-fou en PROFONDEUR pour ne pas mettre
+// le serveur au travail trop longtemps.
 #define EXPAND_MAX_LEVELS 4
-// EXPAND_MAX_STOCK : plafond de sécurité en NOMBRE de possibilités. Le facteur
+// EXPAND_MAX_STOCK : valeur par DÉFAUT du plafond de sécurité en NOMBRE de
+// possibilités (variable globale `expand_max_stock`, configurable à chaud via
+// l'option CLI `--expand-max-stock <n>` — voir static_variables.h). Le facteur
 // de branchement du puzzle étant inconnu et variable, la seule borne en
 // profondeur ne borne pas le travail réel ; on arrête donc l'expansion entre
-// deux passes dès que le stock dépasse ce seuil. ~100000 × ~0,5 Ko ≈ 54 Mo.
+// deux passes dès que le stock dépasse ce seuil. ~100000 × ~0,5 Ko ≈ 54 Mo —
+// un serveur à plus grosse capacité peut relever ce plafond.
 #define EXPAND_MAX_STOCK 100000
 
 // Bail à expiration des analyses en cours (PR7) : durée par défaut, en
@@ -453,11 +458,45 @@ extern int help_requested;
  *
  * 0 (défaut) : pas d'expansion. Sinon, `runserver` développe le stock genèse
  * jusqu'à ce que chaque possibilité atteigne ce niveau, borné par
- * `EXPAND_MAX_LEVELS` passes et `EXPAND_MAX_STOCK` possibilités. Lu côté serveur
- * uniquement (les autres modes l'ignorent). Position-indépendant, retiré d'argv
- * par `parse_cli_options` avant le parsing positionnel.
+ * `EXPAND_MAX_LEVELS` passes et `expand_max_stock` possibilités. Lu côté
+ * serveur uniquement (les autres modes l'ignorent). Position-indépendant,
+ * retiré d'argv par `parse_cli_options` avant le parsing positionnel.
  */
 extern int expand_min_level;
+
+/**
+ * @brief Plafond en NOMBRE de possibilités de l'expansion du stock au
+ *        démarrage du serveur (option CLI `--expand-max-stock <n>`).
+ *
+ * Valeur par défaut `EXPAND_MAX_STOCK` (100000, ~54 Mo) — la mémoire qu'un
+ * serveur "moyen" peut consacrer à cette pré-expansion. Un serveur disposant
+ * de plus de capacité (RAM, cœurs) peut relever ce plafond pour produire une
+ * réserve distribuable plus grande à `--expand-level` égal. `<n> <= 0` est
+ * ignoré (garde la valeur par défaut ou celle déjà fixée) — contrairement à
+ * `expand_min_level`, un plafond nul n'a pas de sens utile (l'expansion
+ * s'arrêterait avant même la première pièce placée). Lu côté serveur
+ * uniquement, position-indépendant, retiré d'argv par `parse_cli_options`
+ * avant le parsing positionnel.
+ */
+extern int expand_max_stock;
+
+/**
+ * @brief Plafond en NOMBRE DE PASSES de l'expansion du stock au démarrage du
+ *        serveur (option CLI `--expand-max-levels <n>`).
+ *
+ * Valeur par défaut `EXPAND_MAX_LEVELS` (4) — garde-fou en *profondeur*,
+ * indépendant du garde-fou en *volume* `expand_max_stock` ci-dessus : même
+ * avec un plafond de volume élevé, une consigne `expand_min_level` absurdement
+ * grande ne peut pas faire tourner le serveur indéfiniment. Un serveur à plus
+ * grosse capacité qui relève aussi `expand_max_stock` peut vouloir relever ce
+ * plafond en parallèle pour atteindre un `expand_min_level` élevé sans être
+ * arrêté prématurément par le nombre de passes. Même convention que
+ * `expand_max_stock` : `<n> <= 0` est ignoré (garde la valeur par défaut ou
+ * celle déjà fixée), un plafond nul empêcherait toute expansion. Lu côté
+ * serveur uniquement, position-indépendant, retiré d'argv par
+ * `parse_cli_options` avant le parsing positionnel.
+ */
+extern int expand_max_levels;
 
 /**
  * @brief 1 si la console interactive (lecture de stdin) ne doit pas démarrer
@@ -971,13 +1010,14 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
 /**
  * @brief Extrait les options globales de `argv` et les retire du tableau.
  *
- * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--http-port <n>`,
- * `--http-token-file <chemin>`, `--name <label>`, `--machine-uid-file <chemin>`,
- * `--config-file <chemin>`, `--gpu`, `--headless` et `--help`/`-h` (positionne
- * respectivement `stop_on_solution`, `expand_min_level`, `HTTP_PORT`,
- * `HTTP_TOKEN_FILE`, `client_label`, `machine_uid_file_path`,
- * `client_config_file_path`, `gpu_requested`, `headless_mode` et
- * `help_requested`). Compacte
+ * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--expand-max-stock <n>`,
+ * `--expand-max-levels <n>`, `--http-port <n>`, `--http-token-file <chemin>`,
+ * `--name <label>`, `--machine-uid-file <chemin>`, `--config-file <chemin>`,
+ * `--gpu`, `--headless` et `--help`/`-h` (positionne respectivement
+ * `stop_on_solution`, `expand_min_level`, `expand_max_stock`,
+ * `expand_max_levels`, `HTTP_PORT`, `HTTP_TOKEN_FILE`, `client_label`,
+ * `machine_uid_file_path`, `client_config_file_path`, `gpu_requested`,
+ * `headless_mode` et `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.
  *

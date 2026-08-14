@@ -49,6 +49,8 @@ int gpu_requested = 0;
 int help_requested = 0;
 
 int expand_min_level = 0;
+int expand_max_stock = EXPAND_MAX_STOCK;
+int expand_max_levels = EXPAND_MAX_LEVELS;
 
 int headless_mode = 0;
 
@@ -246,6 +248,31 @@ int parse_cli_options(int argc, const char *argv[])
                 expand_min_level = atoi(argv[r + 1]);
                 if (expand_min_level < 0) {
                     expand_min_level = 0;
+                }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--expand-max-stock") == 0) {
+            // Option valuée, même schéma que --expand-level. Contrairement à
+            // expand_min_level (0 = expansion désactivée, valeur légitime),
+            // un plafond <= 0 n'a pas de sens utile : valeur absente ou <= 0
+            // ignorée, expand_max_stock garde sa valeur par défaut
+            // (EXPAND_MAX_STOCK) ou celle déjà fixée par un usage antérieur.
+            if (r + 1 < argc) {
+                int max_stock = atoi(argv[r + 1]);
+                if (max_stock > 0) {
+                    expand_max_stock = max_stock;
+                }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--expand-max-levels") == 0) {
+            // Option valuée, même schéma que --expand-max-stock : un plafond
+            // <= 0 empêcherait toute expansion (aucune passe), donc valeur
+            // absente ou <= 0 ignorée, expand_max_levels garde sa valeur par
+            // défaut (EXPAND_MAX_LEVELS) ou celle déjà fixée.
+            if (r + 1 < argc) {
+                int max_levels = atoi(argv[r + 1]);
+                if (max_levels > 0) {
+                    expand_max_levels = max_levels;
                 }
                 r++; // consomme aussi la valeur
             }

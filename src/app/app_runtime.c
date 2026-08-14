@@ -89,7 +89,23 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Serveur : pré-expansion du stock au démarrage jusqu'au niveau de curseur n.",
 	  "Transforme la possibilité genèse en milliers de possibilités distribuables\n"
 	  "avant l'arrivée des clients (anti-famine). Niveau 3-4 conseillé ; borné par\n"
-	  "EXPAND_MAX_LEVELS et EXPAND_MAX_STOCK. Ignorée par les autres modes." },
+	  "--expand-max-levels (profondeur) et --expand-max-stock (volume) — cf. leurs\n"
+	  "aides respectives. Ignorée par les autres modes." },
+	{ "--expand-max-stock",
+	  "--expand-max-stock <n>",
+	  "Serveur : plafonne en NOMBRE de possibilités la pré-expansion --expand-level.",
+	  "Défaut EXPAND_MAX_STOCK (100000, ~54 Mo) — relever ce plafond sur un serveur\n"
+	  "disposant de plus de RAM produit une réserve distribuable plus grande à\n"
+	  "--expand-level égal. Sans effet si --expand-level n'est pas fourni. Valeur\n"
+	  "absente ou <= 0 : ignorée (garde le défaut). Ignorée par les autres modes." },
+	{ "--expand-max-levels",
+	  "--expand-max-levels <n>",
+	  "Serveur : plafonne en NOMBRE DE PASSES la pré-expansion --expand-level.",
+	  "Défaut EXPAND_MAX_LEVELS (4) — garde-fou en profondeur, indépendant du\n"
+	  "garde-fou en volume --expand-max-stock : relever ce plafond permet\n"
+	  "d'atteindre un --expand-level élevé sans être arrêté prématurément par le\n"
+	  "nombre de passes. Sans effet si --expand-level n'est pas fourni. Valeur\n"
+	  "absente ou <= 0 : ignorée (garde le défaut). Ignorée par les autres modes." },
 	{ "--http-port",
 	  "--http-port <n>",
 	  "Serveur : API REST d'administration sur 127.0.0.1:<n> (désactivée par défaut).",

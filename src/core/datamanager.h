@@ -552,10 +552,13 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
  * Calcul purement serveur (avant toute connexion) : impact client nul.
  *
  * Bornée sur deux axes pour ne pas mettre le serveur au travail trop longtemps :
- *  - `EXPAND_MAX_LEVELS` passes maximum (borne en profondeur), quelle que soit
- *    la consigne `target_level` ;
- *  - `EXPAND_MAX_STOCK` possibilités (borne en nombre, contrôlée entre passes) —
- *    garde-fou contre un facteur de branchement élevé.
+ *  - `expand_max_levels` passes maximum (borne en profondeur, quelle que soit
+ *    la consigne `target_level`, défaut `EXPAND_MAX_LEVELS`, configurable via
+ *    l'option CLI `--expand-max-levels <n>`) ;
+ *  - `expand_max_stock` possibilités (borne en nombre, contrôlée entre passes,
+ *    défaut `EXPAND_MAX_STOCK`, configurable via l'option CLI
+ *    `--expand-max-stock <n>`) — garde-fou contre un facteur de branchement
+ *    élevé.
  *
  * Les branches mortes (aucun successeur) sont élaguées au passage. À appeler
  * pendant que la `map_big_array` est encore vivante (dans `runserver`, avant
