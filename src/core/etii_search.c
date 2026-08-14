@@ -848,11 +848,236 @@ backtrack:;
 }
 
 /**
+ * @brief Niveau de décision du PROTOTYPE d'ordre dynamique MRV — §4.7,
+ *        expérience isolée de `bt_level` (jamais utilisée par le moteur de
+ *        production). La case de ce niveau est choisie DYNAMIQUEMENT
+ *        (`mrv_choose_cell`), donc mémorisée ici plutôt que déduite de
+ *        `dirx[depth]/diry[depth]`.
+ */
+typedef struct {
+    struct array_part *search;
+    int next_s;
+    int16_t placed_pos;
+    uint8_t x;
+    uint8_t y;
+} mrv_level;
+
+/**
+ * @brief Choisit la case vide la plus contrainte (MRV, « minimum remaining
+ *        values ») — §4.7, prototype de mesure.
+ *
+ * Balaie TOUT le plateau (contrairement à `bt_forward_check`, limité aux
+ * voisines géométriques) : plus cher par nœud, mais détecte en sous-produit
+ * TOUTE case sans aucun candidat, où qu'elle soit — un test de mort plus
+ * complet qu'un forward-check local, gratuit puisque le balayage a de toute
+ * façon lieu pour choisir la case.
+ *
+ * @param out_x/out_y Remplis avec la case choisie si succès ; non modifiés sinon.
+ * @return 1 si une case a été choisie, 0 si au moins une case vide n'a AUCUN
+ *         candidat (branche morte détectée par le balayage lui-même).
+ */
+static int mrv_choose_cell(struct possibility_packet *board,
+                           key_part constraints[ETERN_SIZE][ETERN_SIZE],
+                           map_big_array *mapParts,
+                           uint8_t *out_x, uint8_t *out_y)
+{
+    int best_count = -1;
+    uint8_t best_x = 0, best_y = 0;
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            if (board->grid[x][y] != -2) {
+                continue;
+            }
+            map_bucket b = map_bucket_packed(mapParts, &constraints[x][y]);
+            int count = 0;
+            for (int s = 0; s < b.size; s++) {
+                if (b.parts[s].id != 0 && !BOARD_FACE_USED(board, b.parts[s].id - 1)) {
+                    count++;
+                }
+            }
+            if (count == 0) {
+                return 0; // case sans issue : sous-arbre mort, inutile de continuer le balayage
+            }
+            if (best_count < 0 || count < best_count) {
+                best_count = count;
+                best_x = (uint8_t)x;
+                best_y = (uint8_t)y;
+            }
+        }
+    }
+    *out_x = best_x;
+    *out_y = best_y;
+    return 1;
+}
+
+/**
+ * @brief PROTOTYPE de recherche à ordre de variable dynamique (MRV) — §4.7 de
+ *        docs/conception/elagage_recherche.md. Expérience de MESURE
+ *        uniquement, isolée de `search_packet_backtracking_core` : jamais de
+ *        délégation (les paquets matérialisés supposeraient l'ordre fixe
+ *        `dirx[]/diry[]`, que cette variante ne suit plus), jamais appelée
+ *        hors du drapeau de développement `mrv_enabled` (`ETII_MRV=1`).
+ *
+ * Structurellement identique à `search_packet_backtracking_core` (même
+ * plateau unique modifié en place, même pile de décisions, même
+ * forward-check après placement) — seule la case choisie à chaque niveau
+ * change : `mrv_choose_cell` remplace `dirx[depth]/diry[depth]`.
+ *
+ * @param node_budget `<= 0` = illimité.
+ * @param out_nodes   Optionnel : nombre de nœuds explorés.
+ * @return `BT_CORE_EXHAUSTED`, `BT_CORE_STOPPED` (jamais de flush : le
+ *         travail restant est simplement abandonné, comme la variante
+ *         budgétée §4.6b) ou `BT_CORE_BUDGET`.
+ */
+static bt_core_result_t search_packet_backtracking_mrv_experiment(client_possibility_t *client,
+                                                                   struct possibility_packet *root,
+                                                                   int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
+                                                                   long node_budget,
+                                                                   unsigned long long *out_nodes)
+{
+    struct possibility_packet board;
+    memcpy(&board, root, sizeof(board));
+
+    const int8_t all_face = (int8_t)client->map_part->sizearrayM;
+    key_part constraints[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(constraints, &board, client->all_rotate_part, all_face);
+
+    mrv_level stack[ETERN_PARTS];
+    int top = -1;
+    // Nombre de pièces déjà posées dans le paquet racine : pour un paquet
+    // "propre" (jamais produit par §4.5, absent de ce code), alloc en est un
+    // compte exact, pas seulement une borne inférieure.
+    int placed_count = board.alloc;
+
+    unsigned long long nodes = 1;
+    counters[client->compteur]++;
+
+    for (;;) {
+        if (placed_count >= ETERN_PARTS) {
+            board.alloc = (uint16_t)placed_count;
+            record_solution(client, &board);
+            goto backtrack;
+        }
+
+        if (request != REQUEST_CONTINUE) {
+            useconds_t pause_us = request_is_pause(request);
+            if (pause_us > 0) {
+                usleep(pause_us);
+                continue;
+            }
+            // Pas de délégation dans ce prototype (cf. doc de la fonction) :
+            // le travail restant est simplement abandonné.
+            if (out_nodes != NULL) {
+                *out_nodes = nodes;
+            }
+            return BT_CORE_STOPPED;
+        }
+
+        top++;
+        stack[top].next_s = 0;
+        stack[top].placed_pos = -1;
+
+        uint8_t x, y;
+        if (mrv_choose_cell(&board, constraints, client->map_part, &x, &y)) {
+            stack[top].x = x;
+            stack[top].y = y;
+            stack[top].search = get_parts_bigarray_with_key(client->map_part, &constraints[x][y]);
+        } else {
+            // Case sans issue détectée par le balayage : niveau sans aucun
+            // candidat à essayer — le backtrack normal (search == NULL) le
+            // traite exactement comme un niveau épuisé.
+            stack[top].x = 0;
+            stack[top].y = 0;
+            stack[top].search = NULL;
+        }
+
+backtrack:;
+        int placed = 0;
+        while (top >= 0) {
+            mrv_level *lvl = &stack[top];
+            uint8_t cx = lvl->x;
+            uint8_t cy = lvl->y;
+
+            if (lvl->placed_pos >= 0) {
+                board.grid[cx][cy] = -2;
+                BOARD_SET_FACE(&board, lvl->placed_pos, 0);
+                bt_propagate_undo(constraints, cx, cy, all_face);
+                lvl->placed_pos = -1;
+                placed_count--;
+            }
+
+            if (lvl->search != NULL) {
+                struct array_part *search = lvl->search;
+                for (int s = lvl->next_s; s < search->size; s++) {
+                    if (search->parts[s].id == 0) {
+                        continue;
+                    }
+                    int position = search->parts[s].id - 1;
+                    if (BOARD_FACE_USED(&board, position)) {
+                        continue;
+                    }
+                    board.grid[cx][cy] = idParts[search->parts[s].id][search->parts[s].rotation];
+                    BOARD_SET_FACE(&board, position, 1);
+                    bt_propagate_place(constraints, cx, cy, &search->parts[s]);
+                    placed_count++;
+#if FORWARD_CHECK_K > 0
+                    if (placed_count < ETERN_PARTS) {
+                        __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
+                        if (!bt_forward_check(constraints, &board, client->map_part, cx, cy)) {
+                            board.grid[cx][cy] = -2;
+                            BOARD_SET_FACE(&board, position, 0);
+                            bt_propagate_undo(constraints, cx, cy, all_face);
+                            placed_count--;
+                            __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
+                            continue;
+                        }
+                    }
+#endif // FORWARD_CHECK_K > 0
+                    lvl->next_s = s + 1;
+                    lvl->placed_pos = position;
+                    placed = 1;
+                    break;
+                }
+            }
+
+            if (placed) {
+                break;
+            }
+            top--;
+        }
+
+        if (top < 0) {
+            if (out_nodes != NULL) {
+                *out_nodes = nodes;
+            }
+            return BT_CORE_EXHAUSTED;
+        }
+
+        counters[client->compteur]++;
+        nodes++;
+        if ((uint16_t)placed_count > max_result) {
+            max_result = (uint16_t)placed_count;
+            board.alloc = (uint16_t)placed_count;
+            best_board_try_record(&g_search_best_board, &board, (uint16_t)placed_count);
+        }
+        if (node_budget > 0 && nodes >= (unsigned long long)node_budget) {
+            if (out_nodes != NULL) {
+                *out_nodes = nodes;
+            }
+            return BT_CORE_BUDGET;
+        }
+    }
+}
+
+/**
  * @brief Explore en profondeur le sous-arbre d'un paquet racine par backtracking in-place.
  *
  * Fine enveloppe de `search_packet_backtracking_core` (illimité, délégation
  * autorisée) préservant la signature/le contrat historiques de cette fonction :
- * seule la recherche réelle (`autosearch_step`) l'appelle.
+ * seule la recherche réelle (`autosearch_step`) l'appelle. Bascule vers le
+ * prototype MRV (`search_packet_backtracking_mrv_experiment`, §4.7) quand
+ * `mrv_enabled` est levé (`ETII_MRV=1`, hors chemin de production) — voir sa
+ * doc pour la portée de cette expérience (jamais de délégation).
  *
  * @param client  Contexte du thread client.
  * @param root    Paquet racine à explorer (non modifié).
@@ -864,6 +1089,10 @@ static int search_packet_backtracking(client_possibility_t *client,
                                       struct possibility_packet *root,
                                       int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
 {
+    if (mrv_enabled) {
+        bt_core_result_t r = search_packet_backtracking_mrv_experiment(client, root, idParts, -1, NULL);
+        return (r == BT_CORE_STOPPED) ? 1 : 0;
+    }
     bt_core_result_t r = search_packet_backtracking_core(client, root, idParts, -1, 1, NULL);
     return (r == BT_CORE_STOPPED) ? 1 : 0;
 }
