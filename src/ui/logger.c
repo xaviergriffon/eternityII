@@ -19,13 +19,19 @@
 /* ------------------------------------------------------------------------- */
 /*  Zone d'affichage fixe (stats + événements) + journal fichier             */
 /*                                                                            */
-/*  Layout (même empilement que la variante ncurses, logger_ncurses.c) :     */
+/*  Layout — variante ANSI uniquement (contrairement à logger_ncurses.c, qui */
+/*  garde stats et événements sur deux fenêtres distinctes : là-bas le       */
+/*  redessin est déjà purement événementiel, sans le clignotement qui a      */
+/*  motivé le redessin conditionnel ici) :                                   */
 /*    rangées 1 .. zone_rows - ZONE_RESERVED       → région de défilement     */
 /*                                                   (output des commandes,   */
-/*                                                    prompt en bas)          */
-/*    rangée  zone_rows - ZONE_RESERVED            → bandeau de stats live    */
-/*    rangée  zone_rows - ZONE_RESERVED + 1        → titre « Events »         */
-/*    rangées zone_rows - EVENT_ZONE_LINES + 1 ..  → derniers événements      */
+/*                                                    ligne de commande en    */
+/*                                                    dernière rangée)        */
+/*    rangée  zone_rows - ZONE_RESERVED + 1        → bandeau de stats live    */
+/*                                                   (pas de titre « Events » :*/
+/*                                                   le bandeau fait déjà la  */
+/*                                                   séparation)              */
+/*    rangées zone_rows - ZONE_RESERVED + 2 ..     → derniers événements      */
 /*            zone_rows                                                       */
 /*                                                                            */
 /*  Comme la région de défilement commence à la rangée 1, les lignes qui     */
@@ -37,8 +43,7 @@
 #define EVENT_LOG_FILE   "events.log"
 #define STATS_ZONE_LINES 1           /* bandeau de stats live : une seule ligne    */
 #define STATUS_MSG_MAX   512
-/* +1 pour la ligne de titre « Events », +STATS_ZONE_LINES pour le bandeau de stats. */
-#define ZONE_RESERVED    (STATS_ZONE_LINES + EVENT_ZONE_LINES + 1)
+#define ZONE_RESERVED    (STATS_ZONE_LINES + EVENT_ZONE_LINES)
 
 /* Sérialise toutes les écritures sur le terminal (logs + redessin de la zone). */
 static pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -408,9 +413,11 @@ void logger_unlock_output(void)
 /**
  * @brief Redessine la zone fixe (placée en bas de l'écran) à partir du buffer.
  *
- * Sauvegarde la position du curseur, écrit le titre puis les derniers événements
- * en positionnant chaque ligne en absolu (rangées `zone_rows - ZONE_RESERVED + 1`
- * à `zone_rows`), puis restaure le curseur. L'appelant doit détenir `output_mutex`.
+ * Sauvegarde la position du curseur, écrit les derniers événements en
+ * positionnant chaque ligne en absolu (rangées `zone_rows - ZONE_RESERVED + 2`
+ * à `zone_rows`, juste sous le bandeau de stats dessiné par
+ * redraw_status_zone_locked), puis restaure le curseur. L'appelant doit
+ * détenir `output_mutex`.
  */
 static void redraw_event_zone_locked(void)
 {
@@ -428,15 +435,16 @@ static void redraw_event_zone_locked(void)
     }
     pthread_mutex_unlock(&event_mutex);
 
-    int title_row = zone_rows - ZONE_RESERVED + 1;
+    /* +2 : +1 pour sortir de la région de défilement (dont la dernière rangée,
+       zone_rows - ZONE_RESERVED, est celle où vit la ligne de commande), +1
+       pour sauter par-dessus le bandeau de stats lui-même — cf. le même
+       décalage dans redraw_status_zone_locked. */
+    int first_event_row = zone_rows - ZONE_RESERVED + 2;
     char buf[32];
 
     fputs("\0337", stdout);                            /* sauvegarde curseur (DECSC) */
-    snprintf(buf, sizeof buf, "\033[%d;1H", title_row);
-    fputs(buf, stdout);
-    fputs("\033[7m\033[K Events \033[0m", stdout);     /* titre, vidéo inverse       */
     for (int i = 0; i < EVENT_ZONE_LINES; i++) {
-        snprintf(buf, sizeof buf, "\033[%d;1H", title_row + 1 + i);
+        snprintf(buf, sizeof buf, "\033[%d;1H", first_event_row + i);
         fputs(buf, stdout);
         fputs("\033[K", stdout);                       /* efface la ligne            */
         if (i < n) {
@@ -449,11 +457,14 @@ static void redraw_event_zone_locked(void)
 
 /**
  * @brief Redessine le bandeau de stats live (vidéo inverse, pleine largeur),
- *        juste au-dessus du titre « Events » — même empilement que la
- *        variante ncurses (stats_win au-dessus de events_win). L'appelant
- *        doit détenir `output_mutex` ; sauvegarde/restaure le curseur comme
- *        redraw_event_zone_locked pour ne jamais perturber la région de
- *        défilement ni la ligne de saisie en cours.
+ *        juste au-dessus des événements. Pas de titre « Events » : le
+ *        bandeau lui-même fait déjà la séparation visuelle avec la région de
+ *        défilement au-dessus, et le format horodaté des lignes qui suivent
+ *        ("[hh:mm:ss] ...") suffit à les identifier comme des logs — un
+ *        titre y était redondant. L'appelant doit détenir `output_mutex` ;
+ *        sauvegarde/restaure le curseur comme redraw_event_zone_locked pour
+ *        ne jamais perturber la région de défilement ni la ligne de saisie
+ *        en cours.
  */
 static void redraw_status_zone_locked(void)
 {
@@ -461,19 +472,29 @@ static void redraw_status_zone_locked(void)
         return;
     }
 
-    int stats_row = zone_rows - ZONE_RESERVED; /* juste au-dessus du titre Events */
+    /* +1 : la région de défilement occupe les rangées 1..zone_rows-ZONE_RESERVED
+       (sa dernière rangée est celle où vit la ligne de commande, qui y reste
+       ancrée par le mécanisme de scroll — voir status_zone_init) ; la zone
+       fixe commence donc UNE rangée plus bas, jamais sur cette même rangée.
+       Un bandeau calculé sans ce +1 s'écrirait sur la ligne de commande
+       elle-même : exactement le symptôme rapporté (bandeau invisible,
+       recouvert par la saisie en cours). */
+    int stats_row = zone_rows - ZONE_RESERVED + 1;
     char buf[32];
 
     fputs("\0337", stdout);                            /* sauvegarde curseur (DECSC) */
     snprintf(buf, sizeof buf, "\033[%d;1H", stats_row);
     fputs(buf, stdout);
     fputs("\033[7m", stdout);                          /* vidéo inverse              */
-    fputs(status_buf, stdout);
-    int len = (int)strlen(status_buf);
+
     int cols = zone_cols > 0 ? zone_cols : 80;
-    for (int c = len; c < cols; c++) {
+    int len = (int)strlen(status_buf);
+    int shown = len < cols ? len : cols;
+    fwrite(status_buf, 1, (size_t)shown, stdout);
+    for (int c = shown; c < cols; c++) {
         fputc(' ', stdout);                            /* complète la bande jusqu'au bord */
     }
+
     fputs("\033[0m", stdout);
     fputs("\0338", stdout);                            /* restaure curseur (DECRC)   */
     fflush(stdout);
@@ -482,11 +503,11 @@ static void redraw_status_zone_locked(void)
 /**
  * @brief Met à jour le bandeau de statistiques « live » (vitesse, stock, record…).
  *
- * Mode ANSI : réserve désormais une ligne d'état dédiée, juste au-dessus de la
- * zone Events (même empilement que la variante ncurses) — voir
- * redraw_status_zone_locked. Sans zone fixe installée (sortie non interactive,
- * terminal trop petit), le message est simplement mémorisé sans effet visible
- * : `check` reste la voie de consultation des statistiques dans ce cas.
+ * Mode ANSI : réserve une ligne d'état dédiée, juste au-dessus de la liste
+ * des événements — voir redraw_status_zone_locked. Sans zone fixe installée
+ * (sortie non interactive, terminal trop petit), le message est simplement
+ * mémorisé sans effet visible : `check` reste la voie de consultation des
+ * statistiques dans ce cas.
  */
 void log_status(const char *format, ...)
 {
@@ -649,10 +670,22 @@ void console_pager_end(void)
 /* ------------------------------------------------------------------------- */
 
 /**
- * @brief Thread de rafraîchissement de la zone fixe (heartbeat + redimensionnement).
+ * @brief Thread de surveillance du redimensionnement du terminal.
  *
- * Toutes les secondes : si la taille du terminal a changé, réajuste la région
- * de défilement ; redessine ensuite la zone des événements.
+ * Toutes les secondes, vérifie si la taille du terminal a changé ; si oui,
+ * réajuste la région de défilement puis redessine la zone fixe (le nouveau
+ * découpage a pu déplacer ses rangées). Ce thread ne redessine PLUS la zone
+ * fixe de façon inconditionnelle à chaque tick : `log_status`/`log_event`
+ * la redessinent déjà eux-mêmes, immédiatement, dès que leur contenu change
+ * (cf. redraw_status_zone_locked/redraw_event_zone_locked ci-dessus). Un
+ * redessin inconditionnel toutes les secondes n'apportait donc rien de plus
+ * — sauf, en mode raw, une réémission de séquences d'échappement en vidéo
+ * inverse à chaque tick pendant que l'opérateur tape une commande : rien ne
+ * corrompait le texte saisi (repositionnement de curseur par sauvegarde/
+ * restauration), mais le clignotement du bandeau était perceptible et
+ * dérangeant à chaque frappe. Limiter le redessin au cas où la taille a
+ * réellement changé supprime ce bruit sans rien retirer à la fraîcheur de
+ * l'affichage (toujours mis à jour immédiatement sur changement réel).
  */
 static void *event_zone_loop(void *arg)
 {
@@ -660,18 +693,16 @@ static void *event_zone_loop(void *arg)
     while (zone_active) {
         int rows = query_terminal_rows();
         pthread_mutex_lock(&output_mutex);
-        if (zone_active) {
-            if (rows > ZONE_RESERVED + 1 && rows != zone_rows) {
-                zone_rows = rows;
-                zone_cols = query_terminal_cols();
-                int region_bottom = zone_rows - ZONE_RESERVED;
-                char buf[32];
-                snprintf(buf, sizeof buf, "\033[1;%dr", region_bottom);
-                fputs(buf, stdout);              /* nouvelle région de défilement */
-                snprintf(buf, sizeof buf, "\033[%d;1H", region_bottom);
-                fputs(buf, stdout);              /* curseur en bas de la région   */
-                fflush(stdout);
-            }
+        if (zone_active && rows > ZONE_RESERVED + 1 && rows != zone_rows) {
+            zone_rows = rows;
+            zone_cols = query_terminal_cols();
+            int region_bottom = zone_rows - ZONE_RESERVED;
+            char buf[32];
+            snprintf(buf, sizeof buf, "\033[1;%dr", region_bottom);
+            fputs(buf, stdout);              /* nouvelle région de défilement */
+            snprintf(buf, sizeof buf, "\033[%d;1H", region_bottom);
+            fputs(buf, stdout);              /* curseur en bas de la région   */
+            fflush(stdout);
             redraw_status_zone_locked();
             redraw_event_zone_locked();
         }

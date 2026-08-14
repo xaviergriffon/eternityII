@@ -12,9 +12,12 @@
  *   ├────────────────────────────────┤  ← stats_win (bandeau live)
  *   │ coups/s … stock … record …     │  (vidéo inverse, MAJ par le checker)
  *   ├────────────────────────────────┤  ← début events_win
- *   │  Events  [+N pour PgDn/End]    │  (titre vidéo inverse + indicateur scroll)
- *   │  [hh:mm:ss] event 1            │
- *   │  ...                           │
+ *   │  [hh:mm:ss] event 1            │  (pas de titre : le bandeau de stats
+ *   │  ...                           │   juste au-dessus fait déjà la
+ *   │                                │   séparation ; la rangée ne s'affiche
+ *   │                                │   en vidéo inverse que si on a remonté
+ *   │                                │   dans l'historique du pad, cf. « +N
+ *   │                                │   lignes sous la vue » ci-dessous)
  *   ├────────────────────────────────┤  ← input_win
  *   │  commande : _                  │
  *   └────────────────────────────────┘  ← dernière rangée
@@ -321,24 +324,30 @@ static void nc_draw_events_locked(void)
 
     werase(events_win);
 
-    char title[128];
+    /* Rangée 0 : plus de titre « Events » — le bandeau de stats juste
+       au-dessus fait déjà la séparation visuelle, et le format horodaté des
+       lignes qui suivent ("[hh:mm:ss] ...") suffit à les identifier comme
+       des logs. Cette rangée reste néanmoins utile pour signaler qu'on a
+       remonté dans l'historique du pad de sortie (PgUp) : sans indicateur,
+       rien ne dirait qu'il y a du contenu plus récent hors vue. Elle ne
+       s'affiche donc, en vidéo inverse, QUE dans ce cas — sinon elle reste
+       simplement vide (déjà effacée par werase ci-dessus). */
     int hidden = pad_max_view_top(output_screen_h) - pad_view_top;
     if (hidden > 0) {
-        snprintf(title, sizeof title,
-                 " Events  [+%d ligne%s sous la vue — PgDn/End pour revenir] ",
+        char indicator[128];
+        snprintf(indicator, sizeof indicator,
+                 " +%d ligne%s sous la vue — PgDn/End pour revenir ",
                  hidden, hidden > 1 ? "s" : "");
-    } else {
-        snprintf(title, sizeof title, " Events ");
-    }
-    int title_len = (int)strlen(title);
-    if (title_len > cols) title_len = cols;
+        int indicator_len = (int)strlen(indicator);
+        if (indicator_len > cols) indicator_len = cols;
 
-    wattron(events_win, A_REVERSE);
-    mvwaddnstr(events_win, 0, 0, title, title_len);
-    for (int c = title_len; c < cols; c++) {
-        waddch(events_win, ' ');
+        wattron(events_win, A_REVERSE);
+        mvwaddnstr(events_win, 0, 0, indicator, indicator_len);
+        for (int c = indicator_len; c < cols; c++) {
+            waddch(events_win, ' ');
+        }
+        wattroff(events_win, A_REVERSE);
     }
-    wattroff(events_win, A_REVERSE);
 
     for (int i = 0; i < n && i < EVENT_ZONE_LINES; i++) {
         mvwaddnstr(events_win, i + 1, 0, snapshot[i], cols - 1);
