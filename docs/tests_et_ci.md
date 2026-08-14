@@ -363,6 +363,24 @@ make bench-refutation BENCH_REFUT_ARGS="--from-back /chemin/temp.back --min-piec
 make bench-refutation BENCH_REFUT_ARGS="--depths 100,110,120 --budget 40000000"
 ```
 
+### Le « mur à `max_result` ≈ 74 » est un artefact DE CE BANC, pas des moteurs
+
+Conséquence directe de ce que ce banc a permis de mesurer, et qui corrige une
+affirmation propagée par plusieurs sections de
+[conception/elagage_recherche.md](conception/elagage_recherche.md) : le plafond à
+74 pièces posées est une propriété du **protocole de mesure** de
+`bench_search.sh` — mono-processus, depuis la genèse, sans stock ni délégation,
+donc une seule descente en profondeur piégée dans le sous-arbre le plus à
+gauche. Contre un vrai serveur (expansion + délégation répartissant le travail),
+un client à **ordre fixe** atteint `max_result` = 186 et délègue des paquets à
+153 pièces posées ; un client MRV atteint 209 et délègue jusqu'à 186.
+
+Ce qui reste vrai : à protocole IDENTIQUE (le banc), MRV atteint 186 là où
+l'ordre fixe plafonne à 74. Ce qui est faux : en déduire une propriété des
+moteurs hors du banc — et, surtout, écarter un mécanisme d'élagage au motif que
+« la profondeur atteinte reste trop faible pour qu'il joue » (le raisonnement de
+§4.4 et §4.6b), alors que la profondeur en question était celle du banc.
+
 ### D'où viennent les racines — et pourquoi un backup serveur est la bonne source
 
 Une racine utile doit avoir **beaucoup de suites mais aucune solution**, et être
@@ -375,7 +393,12 @@ comme `import()`), affiche le profil de profondeur du stock, et `--min-pieces`/
 
 Sur un stock réel produit par un serveur (`--expand-level 3`) alimenté 60 s par un
 client à ordre fixe : **17 815 possibilités, de 8 à 153 pièces posées, moyenne
-34,5**. Le stock contient donc bien des racines profondes exploitables —
+34,5** ; par un client MRV pendant 90 s : **29 481 possibilités, de 8 à 186
+pièces posées, moyenne 72,3**. Le banc contrôle au passage l'intégrité du stock
+(`check_possibility` + `normalize_possibility_packet` sur chaque paquet) : **0
+incohérent, 0 non canonique** dans les deux cas — c'est la vérification, sur
+données réelles et à l'échelle (29 481 paquets), de la re-canonisation des
+paquets délégués en ordre dynamique (§4.7). Le stock contient donc bien des racines profondes exploitables —
 contrairement à ce que la mesure de §4.6b laissait croire (elle bornait à
 `alloc` ≈ 72, c'est-à-dire le CURSEUR de parcours et non le nombre de pièces).
 

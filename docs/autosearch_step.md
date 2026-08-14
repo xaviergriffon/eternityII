@@ -137,7 +137,7 @@ Depuis §4.7 de [docs/conception/elagage_recherche.md](conception/elagage_recher
 | Ordre dynamique (défaut) | 811 617 | **186** |
 | Delta | **−86,7 %** | **+151 %** |
 
-Le débit n'est pas la mesure de ce changement (cf. [tests_et_ci.md](tests_et_ci.md#max_result--le-débit-seul-ne-prouve-pas-un-vrai-gain)) : à temps mural égal l'ordre fixe explore ~10× plus de nœuds et **reste à 74** — le plafond documenté depuis §4.4, atteint indépendamment sur des centaines de millions de nœuds. Ce mur était un artefact de l'ordre de parcours, pas une propriété du puzzle. À 50 M nœuds, MRV atteint 188.
+Le débit n'est pas la mesure de ce changement (cf. [tests_et_ci.md](tests_et_ci.md#max_result--le-débit-seul-ne-prouve-pas-un-vrai-gain)) : à temps mural égal l'ordre fixe explore ~10× plus de nœuds et **reste à 74** ; à 50 M nœuds, MRV atteint 188. **Attention à la portée de ce chiffre** : les 74 sont un plafond DU BANC (mono-processus, depuis la genèse, sans stock ni délégation), pas une propriété de l'ordre fixe — contre un vrai serveur, un client à ordre fixe atteint 186 (cf. §4.7 de [elagage_recherche.md](conception/elagage_recherche.md), correction). La comparaison reste valide à protocole identique ; la mesure qui tranche vraiment est le coût de RÉFUTATION ([banc dédié](tests_et_ci.md#banc-de-réfutation-make-bench-refutation)).
 
 **Trois choses rendent le choix abordable**, là où le prototype de mesure de la PR 9 tombait à 23 k nœuds/s (−99,7 %) :
 

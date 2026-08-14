@@ -21,10 +21,10 @@ branchement ne compense au mur structurel actuel. PR 9 (§4.7, ordre dynamique M
 74 → 180 à 5 M nœuds — puis **implémentation complète livrée et ADOPTÉE comme moteur de
 production** (PR 10) : coût du choix de case ramené d'un balayage naïf à une frontière
 comptée par `popcount` (23 k → 812 k nœuds/s), délégation rétablie par re-canonisation des
-paquets émis, `max_result` **186** à 2 M nœuds — voir §4.7. Le mur structurel documenté
-depuis §4.4 était bien un artefact de l'ordre de parcours FIXE, pas une propriété du puzzle,
-ce qui rouvre §4.4, §4.5 et §4.6b (tous écartés/désactivés pour cause de profondeur
-insuffisante) à une nouvelle mesure. La variante « partition de l'arène » de §4.2 reste une
+paquets émis, `max_result` **186** à 2 M nœuds — voir §4.7. Le « mur structurel » invoqué depuis §4.4
+s'est révélé être un artefact du PROTOCOLE DE MESURE (mono-processus depuis la genèse), pas
+une propriété de l'ordre fixe — voir la correction en §4.7 — ce qui rouvre §4.4, §4.5 et
+§4.6b (tous écartés/désactivés pour cause de profondeur insuffisante) à une nouvelle mesure. La variante « partition de l'arène » de §4.2 reste une
 proposition non implémentée.
 
 ## 1. Question posée
@@ -849,6 +849,22 @@ fixe+global 134 218 / 0,112 s, MRV 4 523 856 / 5,094 s. C'est bien l'**ordre** q
 (le balayage n'élague presque rien de plus que le forward-check local sur ces racines). Le
 gain de MRV tient donc à la structure du stock réel — beaucoup de possibilités déjà mortes ou
 presque — pas à une supériorité de l'ordre en toutes circonstances.
+
+**Correction importante, établie APRÈS coup sur une flotte réelle.** La lecture « le mur à
+`max_result` ≈ 74 était un artefact de l'ORDRE de parcours » est **fausse**, et ce document
+l'a propagée depuis §4.4. Un client à ordre FIXE lancé contre un vrai serveur (256 pièces,
+`--expand-level 3`, 3 forks, 60 s) atteint `max_result` = **186**, et le stock qu'il délègue
+contient des paquets à **153 pièces posées** — très au-delà de 74. Le mur est un artefact du
+PROTOCOLE DE MESURE : `tests/bench/bench_search.sh` tourne en mode `test`, mono-processus,
+depuis la genèse, sans stock ni délégation — une seule descente en profondeur qui reste
+piégée dans le sous-arbre le plus à gauche. Dès qu'un serveur répartit le travail (expansion
++ délégation), n'importe quel moteur atteint des profondeurs bien supérieures. Ce qui reste
+vrai et vérifié : à protocole de mesure IDENTIQUE (le banc), MRV atteint 186 là où l'ordre
+fixe plafonne à 74. Ce qui est faux : en déduire une propriété des moteurs hors du banc.
+Conséquence directe : les décisions de §4.4 et §4.6b, motivées par « la profondeur atteinte
+est trop faible pour que ce mécanisme joue », reposaient sur une profondeur mesurée dans ces
+conditions-là — à remesurer sur du stock réel (le banc de réfutation le fait déjà : l'ordre
+fixe y ferme 20 racines sur 120, ce que §4.6b concluait impossible).
 
 **Ce que cette adoption rouvre.** §4.4 (conflit de singletons), §4.5 (propagation des cases
 forcées) et §4.6b (DFS à budget du pruner) ont tous les trois été écartés ou désactivés pour

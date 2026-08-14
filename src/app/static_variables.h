@@ -827,14 +827,17 @@ unsigned long long bench_parse_nodes_env(const char *env_value);
  *        (MRV) est le moteur de recherche de production depuis §4.7
  *        (docs/conception/elagage_recherche.md).
  *
- * Mesuré sur le puzzle 256 (`tests/bench/bench_search.sh`, 2 M nœuds × 3) :
- * débit −86,7 % (6,10 M → 0,81 M nœuds/s) mais profondeur atteinte
- * `max_result` 74 → **186** à budget de nœuds identique — et l'ordre fixe
- * reste à 74 même en lui laissant 10× plus de nœuds, c'est-à-dire plus de
- * temps mural que MRV n'en a consommé. Le débit n'est pas la mesure de ce
- * changement (cf. docs/tests_et_ci.md, « max_result : le débit seul ne prouve
- * pas un vrai gain ») : le mur structurel à 74 documenté depuis §4.4 était un
- * artefact de l'ordre de parcours FIXE, pas une propriété du puzzle.
+ * Mesuré sur le puzzle 256. Débit : −86,7 % (6,10 M → 0,81 M nœuds/s,
+ * `tests/bench/bench_search.sh`). Ce n'est pas la mesure qui décide : le
+ * critère retenu est le coût de RÉFUTATION — prouver qu'une possibilité est
+ * morte — sur un VRAI stock serveur, à temps CPU égal
+ * (`tests/bench/bench_refutation.c`) : 79 racines fermées sur 120, contre 20
+ * pour l'ordre fixe et 52 pour l'ordre fixe doté du seul balayage global
+ * (`global_dead_check`), soit ~4× plus de stock résolu par seconde de CPU.
+ * NE PAS reprendre l'affirmation « le mur à max_result ≈ 74 était un artefact
+ * de l'ordre fixe » : c'était un artefact du PROTOCOLE de mesure du banc
+ * (mono-processus, depuis la genèse, sans stock ni délégation) — contre un
+ * vrai serveur, un client à ordre fixe atteint 186.
  */
 #define MRV_DEFAULT_ENABLED 1
 

@@ -385,7 +385,7 @@ int main(int argc, char **argv)
         // Première passe : profil du stock (et, en mode KPI, le pas
         // d'échantillonnage — il faut connaître le total pour répartir).
         struct possibility_packet pkt;
-        long long total = 0, sum_pieces = 0;
+        long long total = 0, sum_pieces = 0, not_canonical = 0, inconsistent = 0;
         int min_seen = ETERN_PARTS, max_seen = 0;
         while (fread(&pkt, sizeof(pkt), 1, f) == 1) {
             int p = placed_count(&pkt);
@@ -393,9 +393,18 @@ int main(int argc, char **argv)
             sum_pieces += p;
             if (p < min_seen) min_seen = p;
             if (p > max_seen) max_seen = p;
+            // Contrôle du stock lui-même : tout paquet servi par le serveur doit
+            // être cohérent (`check_possibility`) et déjà canonique
+            // (`normalize_possibility_packet` n'a rien à réparer). C'est la
+            // vérification, sur données RÉELLES, de la re-canonisation des
+            // paquets délégués en ordre dynamique (§4.7).
+            if (check_possibility(&pkt, g_client.all_rotate_part) < 0) inconsistent++;
+            if (normalize_possibility_packet(&pkt) != 0) not_canonical++;
         }
         printf("stock : %lld possibilités, pièces posées min/moy/max = %d / %.1f / %d\n",
                total, min_seen, total > 0 ? (double)sum_pieces / (double)total : 0.0, max_seen);
+        printf("intégrité du stock : %lld incohérent(s), %lld non canonique(s)\n",
+               inconsistent, not_canonical);
         long long stride = (kpi > 0 && total > kpi) ? total / kpi : 1;
         if (kpi > 0) {
             printf("mode KPI : %d racines échantillonnées 1 sur %lld, aucun filtre de profondeur\n",
