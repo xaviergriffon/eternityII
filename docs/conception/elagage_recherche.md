@@ -9,8 +9,10 @@ recoupement structurel avec le forward-check, pas une absence de déclenchement)
 (§4.6a, point fixe du pruner) **livrée**. PR 6 (§4.6b, DFS à budget dans le pruner)
 **implémentée et testée, mais désactivée par défaut** — mesurée sans aucun gain sur le
 stock réel actuel, code conservé (opt-in), pour la même raison structurelle que §4.2/§4.4 :
-voir §4.6b pour la mesure complète. Les pistes 7 à 9 (§4.5, §4.7, §4.8), ainsi que la
-variante « partition de l'arène » de §4.2, restent des propositions non implémentées.
+voir §4.6b pour la mesure complète. PR 7 (§4.8, ordre des candidats dans l'arène)
+**livrée** — comportement inconditionnel, aucun interrupteur laissé en place (comme §4.1).
+Les pistes 8 et 9 (§4.5, §4.7), ainsi que la variante « partition de l'arène » de §4.2,
+restent des propositions non implémentées.
 
 ## 1. Question posée
 
@@ -514,13 +516,88 @@ clé, la pile de décisions doit mémoriser la case choisie par niveau, et la
 re-canonisation des paquets délégués devient non triviale. À n'engager qu'après les
 mesures des PR précédentes, et à traiter comme un projet à part entière.
 
-### 4.8 Ordre des candidats dans l'arène (n'élague rien, mais gratuit)
+### 4.8 Ordre des candidats dans l'arène — ADOPTÉ (PR 7)
 
-Trier chaque compartiment **à la construction** — pièce exposant les couleurs les plus
-rares en premier, ou l'inverse — coûte **zéro à l'exécution** et change la vitesse à
-laquelle les branches mortes s'épuisent. Sans effet sur le format de paquet : les indices
-`next_s` sont purement locaux à un client et ne transitent jamais. Expérience à faible
-risque, à mener au banc.
+**Statut : implémenté, mesuré, adopté.** Comportement de production
+**inconditionnel** depuis cette PR — aucun interrupteur laissé en place, même discipline
+que §4.1 (« voisines seules, pas de fenêtre résiduelle »).
+
+**Principe.** Trier chaque compartiment **à la construction** — pièce exposant les
+couleurs les plus rares en premier, ou l'inverse — coûte **zéro à l'exécution** (le tri a
+lieu une seule fois, à la construction de la map, avant tout fork et avant toute
+recherche) et change la vitesse à laquelle les branches mortes s'épuisent. Sans effet sur
+le format de paquet : les indices `next_s` sont purement locaux à un client et ne
+transitent jamais — aucun bump de `VERSION`.
+
+**Implémentation.** `compute_face_frequency` (`src/core/part.c`) compte, une seule fois par
+construction de map, le nombre de demi-arêtes de chaque couleur dans `apart` (rotations
+comprises — un facteur d'échelle uniforme ×4 qui ne change pas l'ordre relatif de rareté
+entre couleurs). `arena_exposed_score` note une pièce candidate d'un compartiment
+`(f1,f2,f3,f4)` en ne sommant la fréquence QUE sur les côtés **wildcard** (`f_i == -1`) :
+les côtés contraints sont identiques pour toutes les pièces du compartiment et ne
+discriminent aucun ordre. `sort_compartment_by_exposed_rarity` trie chaque compartiment
+non trivial par ce score **croissant** (la pièce exposant la couleur la plus rare essayée
+en premier), par insertion avec les scores précalculés une fois — les compartiments non
+vides restent petits en pratique (cf. §4.2/plus gros compartiment observé, quelques
+centaines de pièces). Le tri a lieu dans `buildBigArray`, sur `entry->parts` **avant** le
+compactage dans `arena` : `packed` et `flat` restent construits à partir du même tableau
+déjà trié, donc leur équivalence stricte (`packed_index_matches_flat_for_every_key`,
+§ ci-dessous) continue de tenir sans modification.
+
+**Garantie de correction.** Le tri ne change JAMAIS le multi-ensemble de pièces d'un
+compartiment (mêmes ids, mêmes rotations, même taille) — uniquement l'ORDRE dans lequel
+elles seront essayées. Verrouillé par
+`arena_sort_preserves_multiset_and_orders_by_rarity` (`tests/core/test_part.c`), et par un
+test d'intégration bout-en-bout,
+`buildbigarray_sorts_wildcard_compartment_by_ascending_rarity`, qui construit une vraie map
+via `buildBigArray` et vérifie que le plus gros compartiment obtenu est bien trié par
+score croissant.
+
+**Protocole de mesure.** Avant adoption, l'ordre était piloté par une variable
+d'environnement de développement (`ETII_ARENA_ORDER=rare_first|common_first`), lue une
+seule fois via `getenv()` dans `buildBigArray` — même convention que `ETII_BENCH_NODES`,
+hors chemin de production. Trois configurations comparées au banc
+(`tests/bench/bench_search.sh`, puzzle 256, 20 M nœuds × 5 répétitions, A/B à **ordre
+alterné** pour neutraliser la dérive thermique de la machine — 8 mesures au total dans
+l'ordre baseline → rare_first → baseline → common_first → rare_first → baseline →
+rare_first → common_first) :
+
+| Configuration | nœuds/s (médiane par run) | Moyenne sur N runs | Taux d'élagage forward-check | `max_result` |
+|---|---|---|---|---|
+| Sans tri (`master`) | 10 760 419 / 10 964 297 / 10 747 543 | **10 824 086** (3 runs) | ≈ 45,648 % | 74 |
+| `rare_first` | 11 142 362 / 11 205 017 / 11 169 099 | **11 172 160** (3 runs) | ≈ 42,188 % | 74 |
+| `common_first` | 10 961 956 / 11 148 979 | **11 055 468** (2 runs) | ≈ 41,904 % | 74 |
+
+`rare_first` : **+3,22 %** de débit médian moyen par rapport à la baseline, avec un
+regroupement serré entre les 3 mesures (11 142 160–11 205 017, aucun recouvrement avec la
+plage des 3 baselines 10 747 543–10 964 297) — une séparation nette, contrairement à la
+dérive thermique seule mesurée entre deux baselines consécutives (+1,89 % entre A1 et A2,
+prise comme référence du bruit de fond de la machine). `common_first` : +2,14 % en
+moyenne mais avec un recouvrement partiel avec `rare_first` (11 148 979 chevauche presque
+le minimum de `rare_first`) — signal moins net, cohérent avec l'absence de justification a
+priori pour cet ordre (l'intuition de §4.8 — résoudre tôt les contraintes rares pendant
+qu'il reste du stock — ne motive que `rare_first`).
+
+Fait notable : le taux d'élagage forward-check **change** dans les deux configurations
+triées (45,6 % → ~42 %) sans que `max_result` bouge (toujours 74 à 20 M nœuds, dans les
+huit mesures) — signe que le tri modifie réellement la **forme** de l'arbre exploré (moins
+de branches nécessitent le forward-check pour être coupées, une partie de ce travail étant
+maintenant fait plus tôt par le simple ordre d'essai), sans jamais explorer un arbre plus
+petit pour le même travail : exactement le critère que §7 impose de vérifier avant de
+crediter un gain de débit apparent (cf. la note sur `max_result` dans le protocole de
+mesure du banc, [tests_et_ci.md](../tests_et_ci.md#max_result--le-débit-seul-ne-prouve-pas-un-vrai-gain)).
+
+**Décision : adopter `rare_first`, inconditionnellement.** Le gain est modeste (+3,2 %,
+loin des +68,8 % de §4.1) mais reproductible sur 3 mesures indépendantes nettement
+séparées de la baseline, à coût nul (le tri n'ajoute rien à la boucle chaude — seul le
+temps de construction de la map, négligeable et payé une seule fois, augmente légèrement)
+et sans aucun risque de correction (invariant multi-ensemble verrouillé par test). Une
+fois la décision prise, l'interrupteur de développement (`ETII_ARENA_ORDER`, l'enum de
+mode, le `getenv()`) est retiré du code de production plutôt que laissé en configuration
+opt-in — contrairement à §4.6b (conservé opt-in car non prouvé bénéfique sur le stock
+actuel), ici le bénéfice est acquis : garder un levier inutilisé n'aurait aucune valeur et
+n'est pas la convention de ce projet pour une piste adoptée (cf. §4.1). `common_first`
+n'est pas retenu, faute de justification a priori et de signal aussi net.
 
 ## 5. Arbitrages tranchés
 
@@ -567,6 +644,15 @@ risque, à mener au banc.
   (désactivé), pas à la valeur initialement envisagée. Cause identique à §4.4 (mur
   structurel `max_result` ≈ 74) : à remesurer si 4.5/4.7 le déplacent, pas à activer en
   l'état.
+- **4.8 (ordre des candidats dans l'arène) : `rare_first` adopté, inconditionnel.**
+  Mesuré au banc (20 M nœuds × 5 répétitions, A/B à ordre alterné, 3 baselines et 3
+  mesures `rare_first` non recouvrantes) : **+3,2 % de débit médian moyen**, taux
+  d'élagage forward-check modifié (45,6 % → 42,2 %, signe d'un arbre de forme différente)
+  mais `max_result` inchangé (74, à N nœuds identique dans les 8 mesures) — un vrai gain
+  de progrès, pas un artefact de mesure. `common_first` mesuré aussi (+2,1 % en moyenne,
+  mais chevauchement partiel avec `rare_first`, signal moins net) : non retenu. Contraste
+  avec §4.2/§4.3/§4.4/§4.6b : ici le mécanisme est gratuit ET bénéfique, donc adopté sans
+  laisser d'interrupteur — cf. §4.8 pour le détail complet des mesures.
 
 ## 6. Points laissés ouverts
 
@@ -615,7 +701,7 @@ recherché ici.
 | 4 | ~~**4.3** comptage global couleur (implémentation complète)~~ **écarté** | faible | non rentable (mesuré, §4.3 : −24 %, recoupe le forward-check malgré ≈47-49 % de déclenchement) |
 | 5 | ~~**4.6a** point fixe dans le balayage du pruner~~ **livré** | faible | rentable (mesuré, §4.6a : stock réel 1193→950 en 1 appel contre 2 pour `master`, ~1,7× de surcoût par appel largement absorbé) |
 | 6 | ~~**4.6b** DFS à budget dans le pruner (+ réglage du budget)~~ **implémenté, testé, désactivé par défaut** | moyen | code conservé (opt-in), 0 % de fermeture sur stock réel à n'importe quel budget testé (mesuré, §4.6b) — mur structurel `max_result` ≈ 74, cause identique à §4.4 |
-| 7 | **4.8** ordre des candidats dans l'arène (expérience) | faible | adopter ou classer |
+| 7 | ~~**4.8** ordre des candidats dans l'arène (expérience)~~ **adopté** | faible | `rare_first` adopté inconditionnellement (mesuré, §4.8 : +3,2 %, taux d'élagage changé mais `max_result` inchangé) |
 | 8 | **4.5** propagation des forcées dans la boucle chaude | moyen | après clarification d'`alloc` |
 | 9 | **4.7** ordre dynamique MRV | élevé | à rouvrir au vu des mesures 1–8 |
 

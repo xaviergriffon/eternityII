@@ -13,6 +13,7 @@
 #include "app/static_variables.h" /* ETERN_PARTS */
 
 #include <stdlib.h>
+#include <string.h>
 
 /* Fonctions publiques non déclarées dans part.h : prototypes locaux. */
 int8_t          convert_p(int8_t p, int maxFaceM);
@@ -20,6 +21,12 @@ int put_part(struct map_part *map, unsigned int key_int, char *key, struct array
 unsigned long   hashmap_hash_int(unsigned long key);
 unsigned int    hash(char *str);
 struct array_part *get_parts(struct map_part *map, char *key);
+long *compute_face_frequency(struct array_part *apart, int maxFace);
+long arena_exposed_score(const struct part *p, int f1, int f2, int f3, int f4,
+                          const long *freq, int maxFace);
+void sort_compartment_by_exposed_rarity(struct array_part *arraypart,
+                                         int f1, int f2, int f3, int f4,
+                                         const long *freq, int maxFace);
 
 /* --------------------------------------------------------------------------
  * rotatePart : rotation horaire d'un quart de tour
@@ -514,15 +521,6 @@ TEST regroup_map_empty_map_frees_parts(void)
     PASS();
 }
 
-/* --------------------------------------------------------------------------
- * Index compact `packed` : map_bucket_packed / map_packed_fits
- *
- * `packed` est une SECONDE REPRÉSENTATION de `flat`, plus dense, lue par la
- * boucle chaude du forward-checking. Le contrat, et donc l'objet de ces tests,
- * est l'équivalence STRICTE des deux représentations : si elle tient pour
- * toutes les clés, la sémantique de recherche ne peut pas avoir bougé.
- * ------------------------------------------------------------------------ */
-
 /* Jeu de pièces varié (bords 1..4) : produit à la fois des compartiments vides,
  * des compartiments à une pièce et un gros compartiment (celui tout-joker). */
 static struct array_part *make_varied_parts(void)
@@ -539,6 +537,166 @@ static struct array_part *make_varied_parts(void)
     static struct array_part a = { .size = 7, .parts = parts };
     return &a;
 }
+
+/* --------------------------------------------------------------------------
+ * §4.8 (docs/conception/elagage_recherche.md) : ordre expérimental des
+ * candidats dans chaque compartiment — compute_face_frequency,
+ * arena_exposed_score, sort_compartment_by_exposed_rarity.
+ * ------------------------------------------------------------------------ */
+
+TEST compute_face_frequency_counts_all_four_faces(void)
+{
+    struct part parts[] = {
+        { .id = 1, .top = 0, .right = 1, .bottom = 2, .left = 1 },
+        { .id = 2, .top = 1, .right = 1, .bottom = 3, .left = 0 },
+    };
+    struct array_part a = { .size = 2, .parts = parts };
+
+    long *freq = compute_face_frequency(&a, 3);
+    ASSERT(freq != NULL);
+    ASSERT_EQ_FMT(2L, freq[0], "%ld"); /* p1.top + p2.left */
+    ASSERT_EQ_FMT(4L, freq[1], "%ld"); /* p1.right + p1.left + p2.top + p2.right */
+    ASSERT_EQ_FMT(1L, freq[2], "%ld"); /* p1.bottom */
+    ASSERT_EQ_FMT(1L, freq[3], "%ld"); /* p2.bottom */
+
+    free(freq);
+    PASS();
+}
+
+TEST compute_face_frequency_negative_max_face_returns_null(void)
+{
+    struct part parts[] = { { .id = 1, .top = 0, .right = 0, .bottom = 0, .left = 0 } };
+    struct array_part a = { .size = 1, .parts = parts };
+    ASSERT(compute_face_frequency(&a, -1) == NULL);
+    PASS();
+}
+
+/* arena_exposed_score : seuls les côtés WILDCARD du compartiment (f_i == -1)
+ * doivent contribuer au score — les côtés contraints sont identiques pour
+ * toutes les pièces du compartiment et ne doivent jamais peser dessus. */
+TEST arena_exposed_score_counts_only_wildcard_faces(void)
+{
+    struct part p = { .id = 1, .top = 5, .right = 9, .bottom = 1, .left = 2 };
+    long freq[10] = { 0 };
+    freq[1] = 100; freq[2] = 100; freq[5] = 10; freq[9] = 5;
+
+    /* top et right wildcard (f1=f2=-1), bottom et left contraints (f3=1,f4=2) */
+    long score_wildcard_top_right = arena_exposed_score(&p, -1, -1, 1, 2, freq, 9);
+    ASSERT_EQ_FMT(15L, score_wildcard_top_right, "%ld"); /* freq[5] + freq[9] */
+
+    /* tous contraints : aucune contribution, quelles que soient les fréquences */
+    long score_all_constrained = arena_exposed_score(&p, 5, 9, 1, 2, freq, 9);
+    ASSERT_EQ_FMT(0L, score_all_constrained, "%ld");
+
+    /* tous wildcard : les 4 faces contribuent */
+    long score_all_wildcard = arena_exposed_score(&p, -1, -1, -1, -1, freq, 9);
+    ASSERT_EQ_FMT(215L, score_all_wildcard, "%ld"); /* 10 + 5 + 100 + 100 */
+
+    PASS();
+}
+
+/* Sans fréquence (allocation échouée en amont), le tri se dégrade en no-op
+ * plutôt que de lire freq == NULL. */
+TEST sort_compartment_null_freq_is_a_no_op(void)
+{
+    struct part parts[] = {
+        { .id = 30, .top = 5, .right = 9, .bottom = 1, .left = 2 },
+        { .id = 31, .top = 1, .right = 3, .bottom = 1, .left = 2 },
+    };
+    struct array_part a = { .size = 2, .parts = parts };
+
+    sort_compartment_by_exposed_rarity(&a, -1, -1, 1, 2, NULL, 9);
+
+    ASSERT_EQ_FMT(30, (int)a.parts[0].id, "%d");
+    ASSERT_EQ_FMT(31, (int)a.parts[1].id, "%d");
+    PASS();
+}
+
+/* Cœur de la garantie de correction §4.8 : le tri ne peut JAMAIS faire
+ * disparaître ou apparaître un candidat (un faux négatif jetterait
+ * silencieusement une solution) — seul l'ordre change. Vérifié ici en même
+ * temps que l'ordre effectivement obtenu (rareté croissante), sur un
+ * compartiment où les scores sont tous distincts (pas d'ambiguïté d'ordre). */
+TEST arena_sort_preserves_multiset_and_orders_by_rarity(void)
+{
+    struct part original[] = {
+        { .id = 30, .top = 5, .right = 9, .bottom = 1, .left = 2 }, /* score 15 */
+        { .id = 31, .top = 1, .right = 3, .bottom = 1, .left = 2 }, /* score 150 */
+        { .id = 32, .top = 9, .right = 1, .bottom = 1, .left = 2 }, /* score 105 */
+    };
+    struct part sorted[3];
+    memcpy(sorted, original, sizeof(original));
+
+    struct array_part a = { .size = 3, .parts = sorted };
+    long freq[10] = { 0 };
+    freq[1] = 100; freq[2] = 100; freq[3] = 50; freq[5] = 10; freq[9] = 5;
+
+    sort_compartment_by_exposed_rarity(&a, -1, -1, 1, 2, freq, 9);
+
+    ASSERT_EQ_FMT(30, (int)a.parts[0].id, "%d"); /* score 15  (le plus rare) */
+    ASSERT_EQ_FMT(32, (int)a.parts[1].id, "%d"); /* score 105 */
+    ASSERT_EQ_FMT(31, (int)a.parts[2].id, "%d"); /* score 150 (le plus courant) */
+
+    /* Multi-ensemble préservé : mêmes 3 ids présents, indépendamment de l'ordre. */
+    for (int i = 0; i < 3; i++) {
+        int found = 0;
+        for (int j = 0; j < 3; j++) {
+            if (a.parts[j].id == original[i].id) {
+                found = 1;
+            }
+        }
+        ASSERT(found);
+    }
+    PASS();
+}
+
+/* Intégration : buildBigArray (via prepare_map_part) trie RÉELLEMENT les
+ * compartiments en production (comportement inconditionnel depuis
+ * l'adoption de §4.8) — vérifié sur le compartiment « tout joker »
+ * (f1=f2=f3=f4=-1, le plus gros de `make_varied_parts`) en comparant l'ordre
+ * obtenu à un calcul indépendant de `arena_exposed_score` sur les MÊMES
+ * fréquences. L'équivalence packed/flat, elle, est déjà verrouillée sans
+ * hypothèse sur l'ordre par `packed_index_matches_flat_for_every_key`
+ * ci-dessous : les deux représentations sont construites à partir du même
+ * `flat` déjà trié, jamais l'une sans l'autre. */
+TEST buildbigarray_sorts_wildcard_compartment_by_ascending_rarity(void)
+{
+    struct array_part *apart = make_varied_parts();
+    int maxFace = search_max_face(apart);
+    long *freq = compute_face_frequency(apart, maxFace);
+    ASSERT(freq != NULL);
+
+    map_big_array *map = buildBigArray(apart, maxFace);
+
+    /* Convention d'indexation de buildBigArray pour f == -1 (voir la boucle de
+     * construction) : p = maxFace + abs(f) = maxFace + 1 — PAS `convert_p`,
+     * qui encode une convention différente (maxFace tout court) et n'est
+     * appelée nulle part dans le code de production. */
+    int8_t wildcard_idx = (int8_t)(maxFace + 1);
+    key_part key = { .k1 = wildcard_idx, .k2 = wildcard_idx,
+                      .k3 = wildcard_idx, .k4 = wildcard_idx };
+    struct array_part *compartment = get_parts_bigarray_with_key(map, &key);
+    ASSERT(compartment->size > 1); /* sinon le test ne prouve rien */
+
+    for (int i = 1; i < compartment->size; i++) {
+        long prev_score = arena_exposed_score(&compartment->parts[i - 1], -1, -1, -1, -1, freq, maxFace);
+        long cur_score = arena_exposed_score(&compartment->parts[i], -1, -1, -1, -1, freq, maxFace);
+        ASSERT(prev_score <= cur_score);
+    }
+
+    free(freq);
+    free_bigarray(map);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * Index compact `packed` : map_bucket_packed / map_packed_fits
+ *
+ * `packed` est une SECONDE REPRÉSENTATION de `flat`, plus dense, lue par la
+ * boucle chaude du forward-checking. Le contrat, et donc l'objet de ces tests,
+ * est l'équivalence STRICTE des deux représentations : si elle tient pour
+ * toutes les clés, la sémantique de recherche ne peut pas avoir bougé.
+ * ------------------------------------------------------------------------ */
 
 /* Équivalence exhaustive : pour CHAQUE clé de la map, `map_bucket_packed` et
  * `get_parts_bigarray_with_key` renvoient la même taille et la même liste. */
@@ -717,4 +875,10 @@ SUITE(part_suite)
     RUN_TEST(packed_index_falls_back_to_flat_when_absent);
     RUN_TEST(map_packed_fits_detects_capacity_overflow);
     RUN_TEST(packed_index_absent_when_arena_empty);
+    RUN_TEST(compute_face_frequency_counts_all_four_faces);
+    RUN_TEST(compute_face_frequency_negative_max_face_returns_null);
+    RUN_TEST(arena_exposed_score_counts_only_wildcard_faces);
+    RUN_TEST(sort_compartment_null_freq_is_a_no_op);
+    RUN_TEST(arena_sort_preserves_multiset_and_orders_by_rarity);
+    RUN_TEST(buildbigarray_sorts_wildcard_compartment_by_ascending_rarity);
 }
