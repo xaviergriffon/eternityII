@@ -114,21 +114,25 @@
 // consommer avant que le pruner renonce à prouver sa fermeture et la
 // conserve, comme avant cette PR.
 //
-// DÉSACTIVÉ PAR DÉFAUT (0), délibérément — pas un simple "pas encore réglé".
-// Mesuré sur un stock RÉEL (256 pièces, possibilités délivrées par la
-// délégation réelle de search_packet_backtracking après plusieurs secondes de
-// recherche) : à la profondeur atteignable aujourd'hui par ce puzzle (mur
-// structurel `max_result` ≈ 74/256, cf. §4.4 de docs/conception/elagage_recherche.md),
-// même un budget 100× plus grand que l'ordre de grandeur retenu par le
-// document de conception (1 000 000 contre 10 000 nœuds) ferme 0 % des
-// candidats — un plateau à 74 pièces posées laisse encore ~182 cases vides,
-// un sous-arbre bien trop grand pour qu'AUCUN budget raisonnable ne l'épuise.
-// Voir §4.6b du document de conception pour la mesure complète et la
-// décision. Reste configurable à l'exécution (console `prunerDfsBudget <n>`,
-// fichier de configuration client `dfs_budget`) : le mécanisme est correct et
-// sans coût quand désactivé (`pruner_dfs_budget <= 0` court-circuite avant
-// tout backtracking) — à réactiver si une PR ultérieure (4.5 ou 4.7) déplace
-// ce mur, pas à activer par défaut en l'état.
+// DÉSACTIVÉ PAR DÉFAUT (0) — décision de DÉPLOIEMENT, pas verdict de mesure
+// (même raisonnement que MRV_DEFAULT_ENABLED, cf. sa doc dans ce fichier).
+// Une mesure initiale (stock synthétique trop peu profond, même erreur de
+// méthode que corrigée pour MRV) avait conclu à 0 % de fermeture à tout
+// budget testé jusqu'à 1 000 000 de nœuds. REMESURÉ depuis sur du VRAI stock
+// serveur (`--pruner-profile`, tests/bench/bench_refutation.c, rejouant le
+// pipeline réel `autoprune_step`) : la preuve DFS ferme bien +4,6 à +5,6
+// points de pourcentage de possibilités au-delà du contrôle superficiel
+// gratuit (lui-même à 50,2 % sur ce stock), reproduit sur un second stock.
+// Voir §4.6b de docs/conception/elagage_recherche.md pour la table complète.
+// NE PAS reprendre l'affirmation « 0 % de fermeture, mécanisme inutile » —
+// elle est fausse. Le défaut reste 0 malgré tout : basculer par défaut change
+// le coût CPU de tout pruner déployé, décision laissée à l'opérateur, pas
+// encore prise. Valeur recommandée par la mesure si activé : 10000 (capture
+// 82 % du gain mesuré à 1 000 000 pour 1 % du coût CPU, rendements
+// décroissants nets au-delà). Reste configurable à l'exécution (console
+// `prunerDfsBudget <n>`, fichier de configuration client `dfs_budget`) : le
+// mécanisme est correct et sans coût quand désactivé (`pruner_dfs_budget <= 0`
+// court-circuite avant tout backtracking).
 #define PRUNER_DFS_BUDGET_DEFAULT 0
 // Plafond de sécurité du budget configurable : au-delà, un seul contrôle de
 // possibilité cesse d'être une opération bornée bon marché (l'objet même de

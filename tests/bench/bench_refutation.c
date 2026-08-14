@@ -234,8 +234,7 @@ static void print_header(const engine_t *engines, int nb)
     printf("\n");
 }
 
-static void print_row(const char *label, int pieces, const engine_t *engines, int nb,
-                      const closure_t *res)
+static void print_row(const char *label, int pieces, int nb, const closure_t *res)
 {
     printf("%-12s %6d", label, pieces);
     for (int e = 0; e < nb; e++) {
@@ -288,7 +287,13 @@ static void usage(void)
            "  --kpi <n>          mode KPI : échantillonne n racines RÉGULIÈREMENT réparties dans le\n"
            "                     .back (aucun filtre de profondeur — c'est ce que le serveur sert\n"
            "                     réellement), n'imprime que le bilan fermetures/seconde\n"
-           "  --engines <liste>  moteurs à comparer parmi fixe,fixe+global,mrv (défaut : tous)\n");
+           "  --engines <liste>  moteurs à comparer parmi fixe,fixe+global,mrv (défaut : tous)\n"
+           "  --pruner-profile <n> rejoue le VRAI pipeline du pruner (autoprune_step) sur n\n"
+           "                     possibilités échantillonnées régulièrement dans le .back :\n"
+           "                     part morte au contrôle superficiel seul, part fermée par la\n"
+           "                     preuve DFS bornée (§4.6b, --budget) parmi le reste, part qui\n"
+           "                     survit intacte — répond à §4.6b (le budget ferme-t-il ?) et à\n"
+           "                     §4.9 (combien un pruner en service éliminerait-il déjà seul ?)\n");
 }
 
 int main(int argc, char **argv)
@@ -300,6 +305,7 @@ int main(int argc, char **argv)
     long seed_nodes = 2000000;
     int max_roots = 20;
     int kpi = 0;
+    int pruner_profile = 0;
     int depths[MAX_DEPTHS] = {150, 165, 175, 180, 185};
     int nb_depths = 5;
 
@@ -321,6 +327,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--min-pieces") == 0 && i + 1 < argc)  min_pieces = atoi(argv[++i]);
         else if (strcmp(argv[i], "--max-pieces") == 0 && i + 1 < argc)  max_pieces = atoi(argv[++i]);
         else if (strcmp(argv[i], "--kpi") == 0 && i + 1 < argc)         kpi = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--pruner-profile") == 0 && i + 1 < argc) pruner_profile = atoi(argv[++i]);
         else if (strcmp(argv[i], "--engines") == 0 && i + 1 < argc) {
             nb_engines = 0;
             char *copy = strdup(argv[++i]);
@@ -375,6 +382,88 @@ int main(int argc, char **argv)
     int nb_common = 0;
     closure_t res[3];
     int roots_done = 0;
+
+    if (pruner_profile > 0) {
+        if (back == NULL) {
+            fprintf(stderr, "--pruner-profile exige --from-back\n");
+            return EXIT_FAILURE;
+        }
+        FILE *f = fopen(back, "r");
+        if (f == NULL) {
+            fprintf(stderr, "ouverture de %s impossible\n", back);
+            return EXIT_FAILURE;
+        }
+        struct possibility_packet pkt;
+        long long total = 0;
+        while (fread(&pkt, sizeof(pkt), 1, f) == 1) total++;
+        long long stride = (total > pruner_profile) ? total / pruner_profile : 1;
+        printf("stock : %lld possibilités\n", total);
+        printf("profil du VRAI pipeline pruner (autoprune_step) sur %d possibilités"
+               " échantillonnées 1 sur %lld, plafond DFS %ld nœuds :\n\n",
+               pruner_profile, stride, budget);
+
+        rewind(f);
+        long long index = 0, sampled = 0;
+        long long dead_superficial = 0, closed_by_dfs = 0, survives = 0, solutions = 0;
+        unsigned long long dfs_nodes_total = 0;
+        double dfs_seconds_total = 0.0;
+        while (fread(&pkt, sizeof(pkt), 1, f) == 1) {
+            long long i = index++;
+            if (sampled >= pruner_profile) break;
+            if (i % stride != 0) continue;
+            sampled++;
+
+            struct possibility_packet work;
+            memcpy(&work, &pkt, sizeof(work));
+            unsigned int cells_studied = 0;
+            // Même appel, mêmes arguments que autoprune_step (etii_search.c) :
+            // c'est le contrôle superficiel réel du pruner, pas une simulation.
+            int has_next = possibility_all_has_a_next_counted(&work, g_client.map_part,
+                                                               g_client.all_rotate_part,
+                                                               &cells_studied);
+            if (work.alloc >= ETERN_PARTS) {
+                solutions++;
+                continue;
+            }
+            if (!work.checked && has_next && budget > 0) {
+                unsigned long long dfs_nodes = 0;
+                double t0 = now_seconds();
+                bt_core_result_t dfs = search_packet_backtracking_budgeted(&g_client, &work,
+                                                                           g_idParts, budget,
+                                                                           &dfs_nodes);
+                dfs_seconds_total += now_seconds() - t0;
+                dfs_nodes_total += dfs_nodes;
+                if (dfs == BT_CORE_EXHAUSTED) {
+                    closed_by_dfs++;
+                    continue;
+                }
+            }
+            if (work.checked || has_next) {
+                survives++;
+            } else {
+                dead_superficial++;
+            }
+        }
+        fclose(f);
+
+        long long eliminated = dead_superficial + closed_by_dfs;
+        printf("%-28s %8lld  (%.1f %% de l'échantillon)\n", "mortes au contrôle superficiel :",
+               dead_superficial, sampled > 0 ? 100.0 * (double)dead_superficial / (double)sampled : 0.0);
+        printf("%-28s %8lld  (%.1f %%) — %llu nœuds DFS, %.3f s\n", "fermées par la preuve DFS :",
+               closed_by_dfs, sampled > 0 ? 100.0 * (double)closed_by_dfs / (double)sampled : 0.0,
+               dfs_nodes_total, dfs_seconds_total);
+        printf("%-28s %8lld  (%.1f %%)\n", "solutions rencontrées :",
+               solutions, sampled > 0 ? 100.0 * (double)solutions / (double)sampled : 0.0);
+        printf("%-28s %8lld  (%.1f %%)\n", "survivent intactes :",
+               survives, sampled > 0 ? 100.0 * (double)survives / (double)sampled : 0.0);
+        printf("\n%-28s %8lld  (%.1f %% de l'échantillon éliminé, superficiel + DFS)\n",
+               "total éliminé :", eliminated,
+               sampled > 0 ? 100.0 * (double)eliminated / (double)sampled : 0.0);
+
+        free_bigarray(map);
+        free_array_part(rot);
+        return EXIT_SUCCESS;
+    }
 
     if (back != NULL) {
         FILE *f = fopen(back, "r");
@@ -447,7 +536,7 @@ int main(int argc, char **argv)
             if (!kpi) {
                 char label[32];
                 snprintf(label, sizeof(label), "back#%d", roots_done);
-                print_row(label, p, engines, nb_engines, res);
+                print_row(label, p, nb_engines, res);
             }
             roots_done++;
         }
@@ -492,7 +581,7 @@ int main(int argc, char **argv)
                     common[e].seconds += res[e].seconds;
                 }
             }
-            print_row("préfixe", placed_count(&r), engines, nb_engines, res);
+            print_row("préfixe", placed_count(&r), nb_engines, res);
             roots_done++;
         }
     }

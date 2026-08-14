@@ -141,6 +141,17 @@ Un **pruner** réutilise la même plomberie réseau qu'un client, mais au lieu d
 il demande au serveur des possibilités *à vérifier* et élague celles qui n'ont aucune
 continuation possible. Deux variantes :
 
+**Sans aucun pruner en service, un serveur accumule du travail déjà mort.** Mesuré sur
+un stock réel (`tests/bench/bench_refutation.c --pruner-profile`, voir
+[docs/tests_et_ci.md](tests_et_ci.md#mode---pruner-profile--rejoue-le-vrai-pipeline-du-pruner)) :
+le seul contrôle superficiel qu'un pruner exécute (`possibility_all_has_a_next_counted`,
+gratuit — un pruner ne fait rien de plus cher tant que `prunerDfsBudget` n'est pas réglé)
+rejette déjà **50,2 %** d'un stock produit par un client à ordre fixe (16,3 % sur un stock
+produit par un client MRV, dont les possibilités sont en moyenne plus avancées avant
+délégation). Faire tourner au moins un pruner, même en CPU et avec un seul thread, réduit
+donc le stock distribué de façon substantielle et gratuite — indépendamment de tout autre
+réglage.
+
 ```sh
 ./eternityII pruner [serveur] [nb_threads] [fichier_pieces.csv] [taille_lot]   # élagage CPU
 ./eternityII pruner --gpu [serveur] [nb_threads] [fichier_pieces.csv] [taille_lot]   # élagage GPU (build CUDA=1)

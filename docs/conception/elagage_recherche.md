@@ -598,21 +598,50 @@ budget 10 000, chaque tentative infructueuse coûte environ 1 ms (mesuré : 936 
 sur le premier échantillon), contre ~1 µs pour le seul contrôle superficiel — un surcoût
 d'environ 230× sur les possibilités qui atteignent cette branche, pour un gain mesuré nul.
 
-**Décision : conserver le code (correct, testé, sans coût si désactivé), mais désactivé
-par défaut.** Différent de §4.2/§4.3/§4.4, dont le code a été retiré de `master` : ici la
-garde `pruner_dfs_budget > 0` rend le mécanisme strictement gratuit une fois désactivé
+**Décision initiale : conserver le code (correct, testé, sans coût si désactivé), mais
+désactivé par défaut.** Différent de §4.2/§4.3/§4.4, dont le code a été retiré de `master` :
+ici la garde `pruner_dfs_budget > 0` rend le mécanisme strictement gratuit une fois désactivé
 (aucun appel à `search_packet_backtracking_budgeted`), donc le garder en configuration
 opt-in ne coûte rien à l'état actuel du projet et évite de perdre le travail de
 factorisation (`search_packet_backtracking_core`, réutilisée telle quelle si le mécanisme
 redevient pertinent) si une PR ultérieure change la donne. `PRUNER_DFS_BUDGET_DEFAULT` vaut
-donc **0** (désactivé), pas l'ordre de grandeur initialement envisagé — un choix délibéré,
-pas un défaut prudent en attendant un réglage plus fin : aucune valeur de budget ne changerait
-la conclusion tant que la profondeur atteignable reste bornée par ce mur. **À réactiver
-une fois l'implémentation complète de 4.7 (ordre dynamique MRV) livrée** — son prototype
-déplace déjà ce mur significativement plus profond (§4.7 : 74 → 180 à 5 M nœuds ; 4.5, la
-propagation des cases forcées, a elle été tentée et ne le déplace pas, cf. §4.5) — remesurer
-à ce moment-là avec le même harnais plutôt que de raviver le mécanisme en l'état
-aujourd'hui, exactement la même discipline que la décision de §4.4.
+donc **0** (désactivé). Cette décision reposait sur « aucune valeur de budget ne changerait la
+conclusion tant que la profondeur atteignable reste bornée par ce mur » — voir la correction
+ci-dessous : cette prémisse était fausse.
+
+**Correction (remesure post-PR 10), même erreur que celle corrigée en §4.7 : « 0 % de
+fermeture à n'importe quel budget » reposait sur un stock synthétique, pas sur du stock
+réel.** La mesure originale ci-dessus générait son stock soit par `expand_datas_to_level(4)`
+(profondeur `alloc` 4/4/4, un genèse à peine développée), soit par une recherche réelle
+interrompue après quelques secondes (`alloc` jusqu'à 72 — c'est le même chiffre, et la même
+confusion curseur/pièces posées, qui a produit le « mur à `max_result` ≈ 74 » corrigé en
+§4.7). Rejoué avec `--pruner-profile` du banc de réfutation
+(`tests/bench/bench_refutation.c`, voir [tests_et_ci.md](../tests_et_ci.md#mode---pruner-profile--rejoue-le-vrai-pipeline-du-pruner))
+sur du VRAI stock serveur (17 815 possibilités, un client à ordre fixe délégant contre un
+serveur `--expand-level 3`, exactement le pipeline réel `autoprune_step` : contrôle
+superficiel puis, seulement si vivant et pas encore `checked`, la preuve DFS) :
+
+| Budget DFS | Mortes au contrôle superficiel | + Fermées par DFS | Coût DFS cumulé (500 possibilités) |
+|---|---|---|---|
+| 0 | 50,2 % | — | — |
+| 10 000 | 50,2 % | +4,6 pt | 2 277 016 nœuds, 0,195 s |
+| 100 000 | 50,2 % | +5,2 pt | 22 457 285 nœuds, 1,887 s |
+| 1 000 000 | 50,2 % | +5,6 pt | 221 842 743 nœuds, 18,590 s |
+
+**La preuve DFS ferme bien des possibilités sur du stock réel** (+4,6 à +5,6 points de
+pourcentage au-delà du contrôle superficiel gratuit, reproduit sur un second stock généré par
+un client MRV : +2,3 à +5,7 points). Rendements décroissants nets : 10 000 nœuds capture 82 %
+du gain mesuré à 1 000 000 pour 1 % du coût CPU — un point de départ raisonnable si le
+mécanisme est réactivé.
+
+**Décision : la correction ne change PAS `PRUNER_DFS_BUDGET_DEFAULT` (reste 0), pour la même
+raison de prudence de déploiement que §4.7 (`MRV_DEFAULT_ENABLED`).** Le mécanisme est
+mesurément bénéfique, mais activer un défaut consomme plus de CPU sur toute une flotte
+déployée sans confirmation en conditions réelles au-delà de ce banc — décision explicitement
+laissée à l'opérateur, `prunerDfsBudget <n>` restant le moyen de l'activer sans reconstruire
+(valeur recommandée par la mesure ci-dessus : `10000`). Ce que la correction change, c'est le
+diagnostic : le mécanisme n'a jamais été inutile, il a été désactivé sur la foi d'une mesure
+dont le stock n'était pas représentatif.
 
 Le mode GPU ([`gpu_pruner.cu`](../../src/app/gpu_pruner.cu)) ne suit pas sur (b) — un DFS
 divergent par thread convient mal au modèle SIMT. (a) lui est en revanche transposable.
@@ -1006,16 +1035,18 @@ n'est pas retenu, faute de justification a priori et de signal aussi net.
 - **Ne pas retoucher `directions[]` dans ce cadre.** L'ordre actuel a été choisi pour
   éliminer tôt et son changement impose un bump de protocole ; les pistes ci-dessus
   s'appliquent toutes à ordre constant.
-- **4.6b (DFS à budget du pruner) : code conservé, désactivé par défaut.** Implémenté et
-  testé sans concession (même code que la recherche réelle, cf. §4.6b), mesuré sur du stock
-  RÉEL (delegation réelle après recherche, pas une fixture synthétique) : **0 % de
-  fermeture**, même à budget 100× l'ordre de grandeur envisagé (1 000 000 contre 10 000
-  nœuds). Cas différent de §4.2/§4.3/§4.4 : la garde est gratuite une fois désactivée, donc
-  le code reste en configuration opt-in plutôt que d'être retiré — mais le défaut passe à 0
-  (désactivé), pas à la valeur initialement envisagée. Cause identique à §4.4 (mur
-  structurel `max_result` ≈ 74) : à remesurer une fois l'implémentation complète de 4.7
-  livrée (son prototype le déplace déjà, cf. §4.7 ; §4.5, testé, n'y change rien — voir
-  ci-dessous), pas à activer en l'état aujourd'hui.
+- **4.6b (DFS à budget du pruner) : code conservé, remesuré POST-PR 10, mesurément
+  bénéfique — défaut de déploiement inchangé (`0`), décision opérateur.** La mesure
+  originale (**0 % de fermeture** à n'importe quel budget testé) reposait sur un stock
+  synthétique trop peu profond — même erreur de méthode que le « mur à `max_result` ≈ 74 »
+  corrigé en §4.7. Rejouée sur du VRAI stock serveur via `--pruner-profile`
+  (`tests/bench/bench_refutation.c`) rejouant le pipeline réel `autoprune_step` :
+  la preuve DFS ferme **+4,6 à +5,6 points de pourcentage** au-delà du contrôle
+  superficiel gratuit (déjà 50,2 % à lui seul), reproduit sur un second stock. Voir
+  §4.6b pour le détail complet et la table de mesure. La garde reste gratuite une fois
+  désactivée, donc le code reste opt-in ; `PRUNER_DFS_BUDGET_DEFAULT` reste à `0` pour la
+  même raison de prudence de déploiement que `MRV_DEFAULT_ENABLED` (§4.7) — mesurément
+  bénéfique n'est pas encore décidé comme défaut d'une flotte déployée.
 - **4.8 (ordre des candidats dans l'arène) : `rare_first` adopté, inconditionnel.**
   Mesuré au banc (20 M nœuds × 5 répétitions, A/B à ordre alterné, 3 baselines et 3
   mesures `rare_first` non recouvrantes) : **+3,2 % de débit médian moyen**, taux
@@ -1095,7 +1126,7 @@ recherché ici.
 | 3 | ~~**4.2** contrainte de type coin/bord/intérieur (compteurs)~~ **écarté** | faible | non rentable (mesuré, §4.2 : −14 %, 0 déclenchement) ; partition de l'arène reste ouverte |
 | 4 | ~~**4.3** comptage global couleur (implémentation complète)~~ **écarté** | faible | non rentable (mesuré, §4.3 : −24 %, recoupe le forward-check malgré ≈47-49 % de déclenchement) |
 | 5 | ~~**4.6a** point fixe dans le balayage du pruner~~ **livré** | faible | rentable (mesuré, §4.6a : stock réel 1193→950 en 1 appel contre 2 pour `master`, ~1,7× de surcoût par appel largement absorbé) |
-| 6 | ~~**4.6b** DFS à budget dans le pruner (+ réglage du budget)~~ **implémenté, testé, désactivé par défaut** | moyen | code conservé (opt-in), 0 % de fermeture sur stock réel à n'importe quel budget testé (mesuré, §4.6b) — mur structurel `max_result` ≈ 74, cause identique à §4.4 |
+| 6 | ~~**4.6b** DFS à budget dans le pruner (+ réglage du budget)~~ **implémenté, testé, remesuré favorable post-PR 10, défaut inchangé** | moyen | code conservé (opt-in), mesure originale (0 % de fermeture) corrigée : +4,6 à +5,6 pt de fermetures sur stock réel via `--pruner-profile` (§4.6b) — `PRUNER_DFS_BUDGET_DEFAULT` reste 0, bascule laissée à l'opérateur comme pour `MRV_DEFAULT_ENABLED` |
 | 7 | ~~**4.8** ordre des candidats dans l'arène (expérience)~~ **adopté** | faible | `rare_first` adopté inconditionnellement (mesuré, §4.8 : +3,2 %, taux d'élagage changé mais `max_result` inchangé) |
 | 8 | ~~**4.5** propagation des forcées dans la boucle chaude~~ **écarté** | moyen | non rentable (mesuré, §4.5 : −40,4 %, `max_result` inférieur à budget égal) — recoupe le forward-check, coût de lookup doublé sur le même périmètre de voisines |
 | 9 | ~~**4.7** ordre dynamique MRV (prototype scopé)~~ **concluant** | élevé | validé (mesuré, §4.7 : `max_result` 74→180 à 5 M nœuds) — délégation désactivée dans le prototype, non déployable en l'état ; cache incrémental + re-canonisation restent à faire |

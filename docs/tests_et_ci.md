@@ -483,6 +483,56 @@ Sur ces racines-là, la comparaison mesure la présence de ce test, pas la quali
 de l'ordre — d'où l'importance de la comparaison appariée ci-dessus, où MRV garde
 un avantage de 3 ordres de grandeur.
 
+### Mode `--pruner-profile` : rejoue le VRAI pipeline du pruner
+
+Les modes précédents mesurent des moteurs de RECHERCHE. `--pruner-profile <n>`
+mesure le PRUNER lui-même : il rejoue, possibilité par possibilité, exactement
+la logique d'`autoprune_step` (`src/core/etii_search.c`) — contrôle superficiel
+(`possibility_all_has_a_next_counted`), puis, seulement si vivant et pas encore
+`checked`, la preuve de fermeture bornée (`search_packet_backtracking_budgeted`,
+§4.6b) — sur `n` possibilités échantillonnées régulièrement dans un `.back`, et
+rapporte la répartition : mortes au contrôle superficiel (gratuit), fermées par
+la preuve DFS (coûteux, borné par `--budget`), solutions rencontrées, survivent
+intactes.
+
+```sh
+make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --pruner-profile 500 --budget 10000"
+```
+
+Sur le stock réel de 17 815 possibilités (§ ci-dessus, produit par un client à
+ordre fixe), échantillon de 500, plafond DFS variable :
+
+| Budget DFS | Mortes au contrôle superficiel | + Fermées par DFS | Survivent | Coût DFS cumulé |
+|---|---|---|---|---|
+| 0 (désactivé) | 50,2 % | — | 49,8 % | — |
+| 10 000 | 50,2 % | +4,6 pt (54,8 % cumulé) | 45,2 % | 2 277 016 nœuds, 0,195 s |
+| 100 000 | 50,2 % | +5,2 pt (55,4 %) | 44,6 % | 22 457 285 nœuds, 1,887 s |
+| 1 000 000 | 50,2 % | +5,6 pt (55,8 %) | 44,2 % | 221 842 743 nœuds, 18,590 s |
+
+Sur un second stock, produit par un client MRV (possibilités en moyenne plus
+profondes, donc déjà davantage travaillées avant délégation) : 16,3 % mortes au
+contrôle superficiel, +2,3 pt à budget 10 000, +5,7 pt à budget 1 000 000.
+
+**Ceci corrige directement la mesure originale de §4.6b** (« 0 % de fermeture à
+n'importe quel budget testé, jusqu'à 1 000 000 de nœuds ») : sur du VRAI stock
+serveur, la preuve DFS ferme bien des possibilités, de façon reproductible sur
+deux générations de stock différentes. La cause de la mesure originale n'était
+pas un défaut du mécanisme mais la profondeur du stock synthétique utilisé —
+voir la correction en §4.6b du document de conception.
+
+**Rendements décroissants nets** : passer de 10 000 à 1 000 000 nœuds (×100)
+n'apporte qu'un point de pourcentage de fermetures en plus pour ~100× le coût
+CPU. 10 000 nœuds capture 82 % du gain total mesuré à 1 M pour 1 % du coût — un
+bon point de départ si ce mécanisme est réactivé.
+
+**Ce que ce mode donne aussi, gratuitement : la quantification de « faites
+tourner un pruner ».** Le taux « mortes au contrôle superficiel » (50,2 % sur le
+premier stock) mesure exactement ce qu'un pruner en service éliminerait sans
+même la preuve DFS — puisque c'est le même appel, sur le même stock, que celui
+qu'`autoprune_step` fait réellement en premier. Sans aucun pruner actif, un
+serveur conserve donc une moitié de stock déjà morte, occupant de la mémoire et
+de la bande passante de distribution pour rien.
+
 ## Voir aussi
 
 - [tests/README.md](../tests/README.md) — organisation des suites, conventions, ajout d'un test.
