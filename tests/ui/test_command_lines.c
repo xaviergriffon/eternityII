@@ -168,7 +168,7 @@ TEST help_format_topic_command_and_category(void)
     ASSERT_EQ_FMT(0, help_format_topic("expand", out, sizeof out), "%d");
     ASSERT(strstr(out, "expand <niveau>") != NULL);
     ASSERT(strstr(out, "propagation") != NULL);
-    ASSERT(strstr(out, "EXPAND_MAX_LEVELS") != NULL);    /* le complément est affiché */
+    ASSERT(strstr(out, "expand_max_levels") != NULL);    /* le complément est affiché */
 
     ASSERT_EQ_FMT(0, help_format_topic("clients", out, sizeof out), "%d");
     ASSERT(strstr(out, "serveur uniquement") != NULL);

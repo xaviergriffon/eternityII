@@ -73,7 +73,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `split` | Répartit les possibilités entre les 10 files |
 | `regroup` | Regroupe toutes les files en une seule |
 | `removeNoNext` | Supprime les possibilités sans continuation possible (élagage ; alias : `rmnonext`, `prune`) |
-| `expand N` | Développe le stock jusqu'au niveau de curseur `N` ([anti-famine](utilisation.md#expansion-du-stock-au-démarrage---expand-level-anti-famine), borné à 4 passes / `EXPAND_MAX_STOCK` possibilités) |
+| `expand N` | Développe le stock jusqu'au niveau de curseur `N` ([anti-famine](utilisation.md#expansion-du-stock-au-démarrage---expand-level-anti-famine), borné à `expand_max_levels` passes (défaut 4, réglable via `--expand-max-levels`) / `expand_max_stock` possibilités (défaut 100000, réglable via `--expand-max-stock`)) |
 | `restockAnalysed` | Remet les possibilités en cours d'analyse dans le stock |
 | `min` | Affiche le niveau minimum dans les files |
 

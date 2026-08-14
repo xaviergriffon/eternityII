@@ -230,7 +230,8 @@ static command_description commands[NB_COMMANDS] = {
      "développe le stock jusqu'au niveau de curseur <niveau> (anti-famine)",
      "Place une pièce candidate sur la case suivante de chaque possibilité, jusqu'au niveau\n"
      "demandé — utile côté serveur quand le stock distribuable s'est raréfié. Borné en\n"
-     "profondeur (EXPAND_MAX_LEVELS) et en volume (EXPAND_MAX_STOCK) ; niveau 3-4 recommandé.", NULL},
+     "profondeur (expand_max_levels, réglable via --expand-max-levels au démarrage) et en\n"
+     "volume (expand_max_stock, réglable via --expand-max-stock) ; niveau 3-4 recommandé.", NULL},
     {"restockAnalysed", restockanalysed_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
      "remet les possibilités en cours d'analyse dans le stock", NULL, NULL},
     {"min", min_interpreter, 1, CMD_CAT_STOCK, 0, NULL,

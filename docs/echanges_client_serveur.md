@@ -761,8 +761,11 @@ la case suivante de chaque possibilité jusqu'à ce que leur curseur `alloc` att
 niveau `N`, transformant le paquet genèse en des milliers de possibilités
 distribuables. Chaque client trouve alors du travail dès sa connexion. C'est un calcul
 purement serveur (aucun échange, aucun impact client), borné en profondeur
-(`EXPAND_MAX_LEVELS`, 4 passes) et en nombre (`EXPAND_MAX_STOCK`, plafond entre passes —
-le vrai garde-fou, le facteur de branchement étant inconnu). La même opération est
+(`expand_max_levels`, défaut `EXPAND_MAX_LEVELS` 4 passes, réglable via l'option CLI
+`--expand-max-levels N`) et en nombre (`expand_max_stock`, plafond entre passes — le
+vrai garde-fou, le facteur de branchement étant inconnu — défaut `EXPAND_MAX_STOCK`
+100000, réglable via l'option CLI `--expand-max-stock N`) ; les deux sont réglables
+pour un serveur disposant de plus de capacité (mémoire, temps). La même opération est
 disponible à chaud via la commande console `expand N`. Voir le
 [mode serveur](utilisation.md#expansion-du-stock-au-démarrage---expand-level-anti-famine)
 pour les niveaux recommandés (3–4).

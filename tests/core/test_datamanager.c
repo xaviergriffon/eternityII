@@ -3876,14 +3876,21 @@ TEST expand_noop_when_already_deep_enough(void)
    arrête l'expansion — pas de boucle infinie, stock borné. */
 TEST expand_depth_cap_limits_passes(void)
 {
+    /* expand_max_levels/expand_max_stock sont des globales runtime (options CLI
+       --expand-max-levels/--expand-max-stock) : les remettre à leur défaut ici
+       protège cette assertion d'une pollution par un autre test du même
+       binaire qui les aurait modifiées. */
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+
     drain_all();
     seed_genesis(0);
 
     int passes = expand_datas_to_level(100, make_expand_free_map(), make_expand_parts());
 
-    ASSERT_EQ_FMT(EXPAND_MAX_LEVELS, passes, "%d");  /* borné par la profondeur */
+    ASSERT_EQ_FMT(expand_max_levels, passes, "%d"); /* borné par la profondeur */
     ASSERT(datas_size() > 1);                         /* a bien produit du stock */
-    ASSERT(datas_size() < (unsigned long long)EXPAND_MAX_STOCK); /* et resté borné */
+    ASSERT(datas_size() < (unsigned long long)expand_max_stock); /* et resté borné */
 
     drain_all();
     PASS();

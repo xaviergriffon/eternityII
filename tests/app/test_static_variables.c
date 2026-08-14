@@ -123,6 +123,91 @@ TEST expand_level_coexists_with_stop_on_solution(void)
     PASS();
 }
 
+/* --expand-max-stock <n> : option VALUÉE, même schéma que --expand-level, mais
+   0/négatif/absent est IGNORÉ (garde la valeur courante) plutôt que bornée à 0
+   — un plafond nul n'a pas de sens utile, contrairement à un niveau nul. */
+TEST expand_max_stock_strips_option_and_value_sets_global(void)
+{
+    expand_max_stock = EXPAND_MAX_STOCK;
+    const char *argv[] = {"prog", "server", "--expand-max-stock", "500000", "8"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");              /* option + valeur retirées (5 → 3) */
+    ASSERT_EQ_FMT(500000, expand_max_stock, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);               /* argument positionnel non décalé */
+    PASS();
+}
+
+/* Valeur absente : ignorée sans lire hors argv, expand_max_stock reste
+   inchangé, l'option est tout de même consommée. */
+TEST expand_max_stock_without_value_is_ignored(void)
+{
+    expand_max_stock = EXPAND_MAX_STOCK;
+    const char *argv[] = {"prog", "server", "--expand-max-stock"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");              /* seul le token option est retiré */
+    ASSERT_EQ_FMT(EXPAND_MAX_STOCK, expand_max_stock, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    PASS();
+}
+
+/* Valeur <= 0 : ignorée (garde la valeur déjà fixée), pas un plafond absurde
+   qui arrêterait l'expansion avant même la première pièce placée. */
+TEST expand_max_stock_non_positive_value_is_ignored(void)
+{
+    expand_max_stock = 12345;                    /* valeur résiduelle à préserver */
+    const char *argv[] = {"prog", "server", "--expand-max-stock", "0"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(12345, expand_max_stock, "%d");
+    PASS();
+}
+
+/* --expand-max-levels <n> : option VALUÉE, même schéma que --expand-max-stock
+   (0/négatif/absent ignoré, garde la valeur courante). */
+TEST expand_max_levels_strips_option_and_value_sets_global(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    const char *argv[] = {"prog", "server", "--expand-max-levels", "8", "80"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");              /* option + valeur retirées (5 → 3) */
+    ASSERT_EQ_FMT(8, expand_max_levels, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("80", argv[2]);              /* argument positionnel non décalé */
+    PASS();
+}
+
+/* Valeur absente : ignorée sans lire hors argv, expand_max_levels reste
+   inchangé, l'option est tout de même consommée. */
+TEST expand_max_levels_without_value_is_ignored(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    const char *argv[] = {"prog", "server", "--expand-max-levels"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");              /* seul le token option est retiré */
+    ASSERT_EQ_FMT(EXPAND_MAX_LEVELS, expand_max_levels, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    PASS();
+}
+
+/* Valeur <= 0 : ignorée (garde la valeur déjà fixée), un plafond nul
+   empêcherait toute passe d'expansion. */
+TEST expand_max_levels_non_positive_value_is_ignored(void)
+{
+    expand_max_levels = 6;                        /* valeur résiduelle à préserver */
+    const char *argv[] = {"prog", "server", "--expand-max-levels", "-1"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(6, expand_max_levels, "%d");
+    PASS();
+}
+
 /* --http-port <n> : option VALUÉE, même schéma que --expand-level. Valeur dans
    [1, 65535] : les deux tokens sont retirés d'argv, HTTP_PORT est fixé. */
 TEST http_port_strips_option_and_value_sets_global(void)
@@ -440,6 +525,12 @@ SUITE(static_variables_suite)
     RUN_TEST(expand_level_without_value_is_ignored);
     RUN_TEST(expand_level_negative_clamped_to_zero);
     RUN_TEST(expand_level_coexists_with_stop_on_solution);
+    RUN_TEST(expand_max_stock_strips_option_and_value_sets_global);
+    RUN_TEST(expand_max_stock_without_value_is_ignored);
+    RUN_TEST(expand_max_stock_non_positive_value_is_ignored);
+    RUN_TEST(expand_max_levels_strips_option_and_value_sets_global);
+    RUN_TEST(expand_max_levels_without_value_is_ignored);
+    RUN_TEST(expand_max_levels_non_positive_value_is_ignored);
     RUN_TEST(http_port_strips_option_and_value_sets_global);
     RUN_TEST(http_port_without_value_is_ignored);
     RUN_TEST(http_port_out_of_range_values_are_ignored);
