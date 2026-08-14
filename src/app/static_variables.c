@@ -199,6 +199,13 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
     return target_nodes > 0 && nodes_done >= target_nodes;
 }
 
+int mrv_enabled = 0;
+
+int mrv_parse_env(const char *env_value)
+{
+    return env_value != NULL && strcmp(env_value, "1") == 0;
+}
+
 int parse_cli_options(int argc, const char *argv[])
 {
     int w = 0;

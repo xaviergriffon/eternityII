@@ -619,6 +619,134 @@ static void fill_idparts(int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
     }
 }
 
+/* ======================================================================
+ * mrv_choose_cell (§4.7, prototype de mesure). Non gardée par
+ * FORWARD_CHECK_K (indépendante de bt_forward_check).
+ * ====================================================================== */
+
+/* Pièce de « remplissage » à faces PETITES (0), utilisée pour pré-remplir un
+ * plateau AVANT bt_init_constraints — what_search_in_grid_to_key indexe
+ * DIRECTEMENT par la valeur de grille (`all_rotate_parts->parts[grid[x][y]]`,
+ * sans -1) : l'indice 0 est le bouchon conventionnel, l'indice 1 correspond
+ * à la valeur de grille 1 (= idParts[1][0], pièce 1 rotation 0). */
+static struct array_part *make_filler_part(void)
+{
+    static struct part p[2] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 0, .bottom = 0, .left = 0, .rotation = 0 },
+    };
+    static struct array_part ap = { .size = 2, .parts = p };
+    return &ap;
+}
+
+/* Cas « choisit la case la plus contrainte » : une vraie map (pas uniforme —
+ * une map uniforme renverrait forcément le même compte à toute case vide,
+ * puisque `faceused` est un état global, pas par case) où deux cases vides
+ * ont des CLÉS différentes (voisinages différents), donc des compartiments de
+ * tailles différentes. Plateau : pièce A en (0,0) (right=5), pièce B en
+ * (1,1) (left=6), tout le reste rempli par la pièce de remplissage
+ * (faces 0). Case (0,1) : voisines (0,0).bottom=0, (1,1).left=6, (0,2)=0,
+ * bord=0 -> clé (0,6,0,0). Case (1,0) : bord=0, (2,0)=0, (1,1).top=0,
+ * (0,0).right=5 -> clé (0,0,0,5). Un candidat unique (id 20) est placé dans
+ * le compartiment de (0,1) ; deux candidats (id 21, 22) dans celui de (1,0) :
+ * mrv_choose_cell doit choisir (0,1), strictement plus contrainte. */
+TEST mrv_choose_cell_picks_the_most_constrained_cell(void)
+{
+    struct possibility_packet board;
+    make_empty_board(&board);
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            board.grid[x][y] = 1; /* remplissage : idParts[1][0] = pièce d'indice 1, faces 0 */
+    board.grid[0][0] = 2;  /* pièce A : idParts[2][0] = indice 2 */
+    board.grid[1][1] = 3;  /* pièce B : idParts[3][0] = indice 3 */
+    board.grid[0][1] = -2; /* case la plus contrainte (1 seul candidat) */
+    board.grid[1][0] = -2; /* case moins contrainte (2 candidats) */
+
+    static struct part rot_parts[4] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 0, .bottom = 0, .left = 0 },             /* remplissage */
+        { .id = 2, .top = 0, .right = 5, .bottom = 0, .left = 0 },             /* pièce A */
+        { .id = 3, .top = 0, .right = 0, .bottom = 0, .left = 6 },             /* pièce B */
+    };
+    static struct array_part rot_ap = { .size = 4, .parts = rot_parts };
+
+    map_big_array *map = prepare_map_part(&rot_ap);
+
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, &rot_ap, (int8_t)map->sizearrayM);
+
+    /* Clé de (0,1) attendue : k1=(0,0).bottom=0, k2=(1,1).left=6, k3=(0,2).top=0
+     * (case de remplissage), k4=bord=0 -> (0,6,0,0). */
+    ASSERT_EQ_FMT(0, (int)C[0][1].k1, "%d");
+    ASSERT_EQ_FMT(6, (int)C[0][1].k2, "%d");
+    ASSERT_EQ_FMT(0, (int)C[0][1].k3, "%d");
+    ASSERT_EQ_FMT(0, (int)C[0][1].k4, "%d");
+    /* Clé de (1,0) attendue : k1=bord=0, k2=(2,0).left=0, k3=(1,1).top=0, k4=(0,0).right=5 -> (0,0,0,5). */
+    ASSERT_EQ_FMT(0, (int)C[1][0].k1, "%d");
+    ASSERT_EQ_FMT(0, (int)C[1][0].k2, "%d");
+    ASSERT_EQ_FMT(0, (int)C[1][0].k3, "%d");
+    ASSERT_EQ_FMT(5, (int)C[1][0].k4, "%d");
+
+    /* Injecte artificiellement des candidats dans les deux compartiments
+     * ciblés : id 20 (1 seul) dans (0,6,0,0), id 21/22 (deux) dans (0,0,0,5).
+     * On construit ces deux array_part à la main et on les insère dans le
+     * flat de la map réelle, aux index calculés comme buildBigArray. */
+    static struct part cand_scarce[1] = { { .id = 20, .top = 0, .right = 5, .bottom = 6, .left = 0 } };
+    static struct array_part list_scarce = { .size = 1, .parts = cand_scarce };
+    static struct part cand_plenty[2] = {
+        { .id = 21, .top = 0, .right = 0, .bottom = 0, .left = 5 },
+        { .id = 22, .top = 1, .right = 0, .bottom = 0, .left = 5 },
+    };
+    static struct array_part list_plenty = { .size = 2, .parts = cand_plenty };
+
+    int M = map->sizearray;
+    unsigned long long idx_scarce = (((unsigned long long)0 * M + 6) * M + 0) * M + 0;
+    unsigned long long idx_plenty = (((unsigned long long)0 * M + 0) * M + 0) * M + 5;
+    map->flat[idx_scarce] = list_scarce;
+    map->flat[idx_plenty] = list_plenty;
+    map->packed = NULL; /* neutralise l'index compact : force le repli sur flat pour ce test */
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    uint8_t x = 255, y = 255;
+    int rc = mrv_choose_cell(&board, C, map, &x, &y);
+
+    ASSERT_EQ_FMT(1, rc, "%d");
+    ASSERT_EQ_FMT(0, (int)x, "%d");
+    ASSERT_EQ_FMT(1, (int)y, "%d"); /* (0,1) : 1 seul candidat, la plus contrainte */
+
+    free_bigarray(map);
+    PASS();
+}
+
+/* Cas « détecte une case sans issue » : une case vide dont le compartiment
+ * n'offre AUCUN candidat -> mrv_choose_cell doit renvoyer 0 sans se soucier
+ * du reste du plateau (branche morte, peu importe les autres cases). */
+TEST mrv_choose_cell_detects_dead_cell(void)
+{
+    struct possibility_packet board;
+    make_empty_board(&board);
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            board.grid[x][y] = 1;
+    board.grid[0][0] = 1;
+    board.grid[0][1] = -2; /* seule case vide : sans candidat */
+
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, make_filler_part(), 2);
+
+    struct array_part empty_list = { .size = 0, .parts = NULL };
+    map_big_array *map = make_uniform_map(&empty_list);
+
+    uint8_t x = 255, y = 255;
+    int rc = mrv_choose_cell(&board, C, map, &x, &y);
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+
+    PASS();
+}
+
 /* Pièces aux faces PETITES (toutes dans {0,1,2}) : indispensables dès qu'on POSE
  * des pièces, car what_search_in_grid_to_key indexe la map par les couleurs de
  * faces des voisins. make_parts() a des faces jusqu'à ~73 qui déborderaient le
@@ -1630,6 +1758,69 @@ TEST search_backtracking_stop_on_solution_exits_success(void)
     free_array_part(es_client.all_rotate_part);
     PASS();
 }
+
+/* Compte les fichiers solution_*.csv dans dir (variante dénombrante de
+ * es_has_solution_file). */
+static int es_count_solution_files(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (d == NULL) return 0;
+    struct dirent *e;
+    int count = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "solution_", 9) == 0) count++;
+    }
+    closedir(d);
+    return count;
+}
+
+/* §4.7 (prototype MRV) : quel que soit l'ordre de variable (fixe ou
+ * dynamique), une exploration exhaustive doit trouver le MÊME ensemble de
+ * solutions — l'ordre change la FORME de l'arbre, jamais l'exhaustivité de
+ * l'exploration. Sur le vrai puzzle 4×4, explore deux fois le même arbre
+ * depuis la racine vide, une fois avec le prototype MRV activé, une fois
+ * désactivé : le nombre de solutions enregistrées doit être identique. */
+TEST search_backtracking_mrv_preserves_solution_count(void)
+{
+    ensure_counters();
+    ASSERT(es_setup());
+
+    char dir_on[256], dir_off[256];
+    strcpy(dir_on, "/tmp/etii_es_mrv_on_XXXXXX");
+    strcpy(dir_off, "/tmp/etii_es_mrv_off_XXXXXX");
+    ASSERT(mkdtemp(dir_on) != NULL);
+    ASSERT(mkdtemp(dir_off) != NULL);
+
+    int saved_mrv = mrv_enabled;
+
+    mrv_enabled = 1;
+    strcpy(es_solution_dir, dir_on);
+    pid_t pid_on = 0;
+    int code_on = run_in_fork(es_child_full_explore, &pid_on);
+
+    mrv_enabled = 0;
+    strcpy(es_solution_dir, dir_off);
+    pid_t pid_off = 0;
+    int code_off = run_in_fork(es_child_full_explore, &pid_off);
+
+    mrv_enabled = saved_mrv;
+
+    int count_on = es_count_solution_files(dir_on);
+    int count_off = es_count_solution_files(dir_off);
+    es_unlink_solutions(dir_on);
+    es_unlink_solutions(dir_off);
+    rmdir(dir_on);
+    rmdir(dir_off);
+
+    ASSERT_EQ_FMT(0, code_on, "%d");             /* sous-arbre entièrement exploré, les 2 fois */
+    ASSERT_EQ_FMT(0, code_off, "%d");
+    ASSERT(count_off > 0);                       /* le puzzle a bien au moins une solution */
+    ASSERT_EQ_FMT(count_off, count_on, "%d");     /* même ensemble, ordre fixe ou MRV */
+
+    free_bigarray(es_client.map_part);
+    free_array_part(es_client.all_rotate_part);
+    PASS();
+}
 #endif /* ETERN_PARTS == 16 */
 
 /* --------------------------------------------------------------------------
@@ -2551,6 +2742,8 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_forward_check_inspects_at_most_geometric_neighbors);
     RUN_TEST(bt_forward_check_same_verdict_with_and_without_packed_index);
 #endif
+    RUN_TEST(mrv_choose_cell_picks_the_most_constrained_cell);
+    RUN_TEST(mrv_choose_cell_detects_dead_cell);
     RUN_TEST(bt_materialize_pending_orders_deepest_first);
     RUN_TEST(bt_materialize_pending_respects_max_out);
     RUN_TEST(bt_materialize_skips_no_decision_level_and_zero_id);
@@ -2599,6 +2792,7 @@ SUITE(etii_search_suite)
 #if ETERN_PARTS == 16
     RUN_TEST(search_backtracking_solves_4x4_and_returns_zero);
     RUN_TEST(search_backtracking_stop_on_solution_exits_success);
+    RUN_TEST(search_backtracking_mrv_preserves_solution_count);
 #endif
 
     RUN_TEST(autosearch_stops_immediately_on_request_stop);

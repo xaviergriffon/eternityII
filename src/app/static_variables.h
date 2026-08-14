@@ -823,6 +823,33 @@ extern unsigned long long bench_target_nodes;
 unsigned long long bench_parse_nodes_env(const char *env_value);
 
 /**
+ * @brief Active le PROTOTYPE d'ordre de variable dynamique (MRV) de la boucle
+ *        de recherche — §4.7 de docs/conception/elagage_recherche.md,
+ *        variable d'environnement de développement `ETII_MRV` (`1` = activé),
+ *        lue une seule fois au démarrage comme `ETII_BENCH_NODES`, hors du
+ *        chemin de production (pas d'entrée `cli_topics[]`).
+ *
+ * Défaut (absente ou toute valeur différente de `1`) : DÉSACTIVÉ — contraire
+ * à `forced_propagation_enabled` (§4.5), ce prototype n'est PAS censé
+ * approcher un comportement de production : il choisit à chaque nœud la case
+ * vide la plus contrainte au lieu de suivre `directions[]`, ce qui rend les
+ * paquets produits non interopérables avec le reste du protocole (la
+ * délégation/matérialisation suppose l'ordre fixe). `search_packet_backtracking`
+ * bascule vers `search_packet_backtracking_mrv_experiment` (délégation
+ * TOUJOURS désactivée dans cette branche, quel que soit l'appelant) quand ce
+ * drapeau est levé — voir §4.7 pour le protocole de mesure complet.
+ */
+extern int mrv_enabled;
+
+/**
+ * @brief Parse `ETII_MRV` en drapeau d'activation. Fonction pure et testable.
+ *
+ * @param env_value Valeur de la variable d'environnement, ou NULL si absente.
+ * @return 1 si `env_value` vaut exactement "1", 0 sinon (y compris absente).
+ */
+int mrv_parse_env(const char *env_value);
+
+/**
  * @brief Décide si le banc de mesure doit demander l'arrêt de la recherche.
  *
  * Fonction pure et testable, séparée du sondage réel (`check_client_threads`)
