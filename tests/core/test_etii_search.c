@@ -563,6 +563,130 @@ TEST bt_forward_check_same_verdict_with_and_without_packed_index(void)
     free_bigarray(map);
     PASS();
 }
+
+/* ======================================================================
+ * §4.4 — conflit de singletons (`singleton_conflict_check`).
+ *
+ * Fixture partagée par les trois tests suivants : pièce B posée en (1,1),
+ * dont les deux voisines VIDES (0,1) et (1,0) ont des clés distinctes,
+ * chacune injectée à la main dans `flat` avec un compartiment à candidat
+ * UNIQUE — même technique que `mrv_choose_cell_picks_the_most_constrained_cell`
+ * plus haut dans ce fichier (hors de ce bloc `#if`, donc non réutilisable
+ * telle quelle). Les deux autres voisines géométriques de (1,1), (2,1) et
+ * (1,2), sont déjà remplies (grid != -2) : bt_forward_check(1,1) n'inspecte
+ * donc bien QUE (0,1) et (1,0), exactement les deux compartiments injectés.
+ *
+ * @param id_a Id du candidat unique injecté dans le compartiment de (0,1).
+ * @param id_b Id du candidat unique injecté dans le compartiment de (1,0).
+ * @return     La map construite (à libérer par l'appelant) ; *out_C reçoit
+ *             le cache de contraintes ; *out_board le plateau.
+ */
+static map_big_array *build_singleton_conflict_fixture(int16_t id_a, int16_t id_b,
+                                                        struct possibility_packet *out_board,
+                                                        key_part out_C[ETERN_SIZE][ETERN_SIZE])
+{
+    make_empty_board(out_board);
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            out_board->grid[x][y] = 1; /* remplissage : idParts[1][0], faces 0 */
+    out_board->grid[0][0] = 2; /* pièce A : idParts[2][0] */
+    out_board->grid[1][1] = 3; /* pièce B (« juste posée ») : idParts[3][0] */
+    out_board->grid[0][1] = -2;
+    out_board->grid[1][0] = -2;
+
+    static struct part rot_parts[4] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 0, .bottom = 0, .left = 0 },
+        { .id = 2, .top = 0, .right = 5, .bottom = 0, .left = 0 },
+        { .id = 3, .top = 0, .right = 0, .bottom = 0, .left = 6 },
+    };
+    static struct array_part rot_ap = { .size = 4, .parts = rot_parts };
+
+    map_big_array *map = prepare_map_part(&rot_ap);
+    bt_init_constraints(out_C, out_board, &rot_ap, (int8_t)map->sizearrayM);
+
+    /* Mêmes clés que le fixture mrv_choose_cell : (0,1) -> (0,6,0,0), (1,0) -> (0,0,0,5). */
+    static struct part cand_a[1];
+    static struct array_part list_a;
+    static struct part cand_b[1];
+    static struct array_part list_b;
+    cand_a[0] = (struct part){ .id = id_a, .top = 0, .right = 5, .bottom = 6, .left = 0 };
+    list_a = (struct array_part){ .size = 1, .parts = cand_a };
+    cand_b[0] = (struct part){ .id = id_b, .top = 0, .right = 0, .bottom = 0, .left = 5 };
+    list_b = (struct array_part){ .size = 1, .parts = cand_b };
+
+    int M = map->sizearray;
+    unsigned long long idx_a = (((unsigned long long)0 * M + 6) * M + 0) * M + 0;
+    unsigned long long idx_b = (((unsigned long long)0 * M + 0) * M + 0) * M + 5;
+    map->flat[idx_a] = list_a;
+    map->flat[idx_b] = list_b;
+    map->packed = NULL; /* force le repli sur flat pour ce test */
+
+    return map;
+}
+
+/* Cas « doit tirer » : (0,1) et (1,0) exigent chacune, comme SEUL candidat
+ * libre, la même pièce (id 20) -> conflit de Hall |S|=2 -> branche morte. */
+TEST bt_forward_check_singleton_conflict_detects_matching_ids(void)
+{
+    struct possibility_packet board;
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    map_big_array *map = build_singleton_conflict_fixture(20, 20, &board, C);
+
+    int saved = singleton_conflict_check;
+    singleton_conflict_check = 1;
+    unsigned long long before = fc_singleton_conflict;
+
+    ASSERT_EQ_FMT(0, bt_forward_check(C, &board, map, 1, 1), "%d");
+    ASSERT_EQ_FMT(before + 1, fc_singleton_conflict, "%llu");
+
+    singleton_conflict_check = saved;
+    free_bigarray(map);
+    PASS();
+}
+
+/* Cas « ne doit pas tirer » : (0,1) et (1,0) ont bien chacune un candidat
+ * UNIQUE, mais des ids DISTINCTS (20 et 21) -> aucun conflit, condition
+ * nécessaire respectée (pas de faux positif). */
+TEST bt_forward_check_singleton_conflict_ignores_distinct_ids(void)
+{
+    struct possibility_packet board;
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    map_big_array *map = build_singleton_conflict_fixture(20, 21, &board, C);
+
+    int saved = singleton_conflict_check;
+    singleton_conflict_check = 1;
+    unsigned long long before = fc_singleton_conflict;
+
+    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 1, 1), "%d");
+    ASSERT_EQ_FMT(before, fc_singleton_conflict, "%llu");
+
+    singleton_conflict_check = saved;
+    free_bigarray(map);
+    PASS();
+}
+
+/* Drapeau BAS (comportement historique) : même configuration « ids
+ * identiques » que le premier cas, mais singleton_conflict_check = 0 ->
+ * chaque voisine a bien >= 1 candidat libre, donc vivante — le test de
+ * conflit ne doit jamais s'exécuter quand le drapeau est désactivé. */
+TEST bt_forward_check_singleton_conflict_disabled_by_default(void)
+{
+    struct possibility_packet board;
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    map_big_array *map = build_singleton_conflict_fixture(20, 20, &board, C);
+
+    int saved = singleton_conflict_check;
+    singleton_conflict_check = 0;
+    unsigned long long before = fc_singleton_conflict;
+
+    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 1, 1), "%d");
+    ASSERT_EQ_FMT(before, fc_singleton_conflict, "%llu");
+
+    singleton_conflict_check = saved;
+    free_bigarray(map);
+    PASS();
+}
 #endif /* FORWARD_CHECK_K > 0 */
 
 /* bt_count_pending : un niveau sans décision (case pré-remplie : search == NULL,
@@ -1988,6 +2112,101 @@ TEST search_backtracking_global_dead_check_preserves_solution_count(void)
     PASS();
 }
 
+/* §4.4 — CONFLIT DE SINGLETONS (`singleton_conflict_check`). Comme le
+ * balayage global, c'est une condition NÉCESSAIRE : elle ne doit jamais
+ * coûter une seule solution. Même verrou, sur les DEUX moteurs (le drapeau
+ * vit dans bt_forward_check, partagé par l'ordre fixe et MRV) : exploration
+ * exhaustive du vrai puzzle 4×4, drapeau levé puis baissé, même nombre de
+ * solutions. */
+TEST search_backtracking_singleton_conflict_check_preserves_solution_count(void)
+{
+    ensure_counters();
+    ASSERT(es_setup());
+
+    char dir_on[256], dir_off[256];
+    strcpy(dir_on, "/tmp/etii_es_sgc_on_XXXXXX");
+    strcpy(dir_off, "/tmp/etii_es_sgc_off_XXXXXX");
+    ASSERT(mkdtemp(dir_on) != NULL);
+    ASSERT(mkdtemp(dir_off) != NULL);
+
+    int saved_scc = singleton_conflict_check;
+
+    singleton_conflict_check = 1;
+    strcpy(es_solution_dir, dir_on);
+    pid_t pid_on = 0;
+    int code_on = run_in_fork(es_child_full_explore, &pid_on);
+
+    singleton_conflict_check = 0;
+    strcpy(es_solution_dir, dir_off);
+    pid_t pid_off = 0;
+    int code_off = run_in_fork(es_child_full_explore, &pid_off);
+
+    singleton_conflict_check = saved_scc;
+
+    int count_on = es_count_solution_files(dir_on);
+    int count_off = es_count_solution_files(dir_off);
+    es_unlink_solutions(dir_on);
+    es_unlink_solutions(dir_off);
+    rmdir(dir_on);
+    rmdir(dir_off);
+
+    ASSERT_EQ_FMT(0, code_on, "%d");
+    ASSERT_EQ_FMT(0, code_off, "%d");
+    ASSERT(count_off > 0);
+    ASSERT_EQ_FMT(count_off, count_on, "%d");
+
+    free_bigarray(es_client.map_part);
+    free_array_part(es_client.all_rotate_part);
+    PASS();
+}
+
+/* Même verrou côté moteur MRV : le drapeau est partagé par bt_forward_check,
+ * donc doit rester une condition nécessaire quel que soit l'ordre. */
+TEST search_backtracking_mrv_singleton_conflict_check_preserves_solution_count(void)
+{
+    ensure_counters();
+    ASSERT(es_setup());
+
+    char dir_on[256], dir_off[256];
+    strcpy(dir_on, "/tmp/etii_es_mrvsgc_on_XXXXXX");
+    strcpy(dir_off, "/tmp/etii_es_mrvsgc_off_XXXXXX");
+    ASSERT(mkdtemp(dir_on) != NULL);
+    ASSERT(mkdtemp(dir_off) != NULL);
+
+    int saved_mrv = mrv_enabled;
+    int saved_scc = singleton_conflict_check;
+    mrv_enabled = 1;
+
+    singleton_conflict_check = 1;
+    strcpy(es_solution_dir, dir_on);
+    pid_t pid_on = 0;
+    int code_on = run_in_fork(es_child_full_explore, &pid_on);
+
+    singleton_conflict_check = 0;
+    strcpy(es_solution_dir, dir_off);
+    pid_t pid_off = 0;
+    int code_off = run_in_fork(es_child_full_explore, &pid_off);
+
+    mrv_enabled = saved_mrv;
+    singleton_conflict_check = saved_scc;
+
+    int count_on = es_count_solution_files(dir_on);
+    int count_off = es_count_solution_files(dir_off);
+    es_unlink_solutions(dir_on);
+    es_unlink_solutions(dir_off);
+    rmdir(dir_on);
+    rmdir(dir_off);
+
+    ASSERT_EQ_FMT(0, code_on, "%d");
+    ASSERT_EQ_FMT(0, code_off, "%d");
+    ASSERT(count_off > 0);
+    ASSERT_EQ_FMT(count_off, count_on, "%d");
+
+    free_bigarray(es_client.map_part);
+    free_array_part(es_client.all_rotate_part);
+    PASS();
+}
+
 /* Drapeau de fin de recherche, lu par le thread d'arrêt (fils du fork : un
  * seul thread écrit, un seul lit, valeur non composite). */
 static volatile int es_mrv_search_done = 0;
@@ -3030,6 +3249,9 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_forward_check_skips_prefilled_and_zero_id);
     RUN_TEST(bt_forward_check_inspects_at_most_geometric_neighbors);
     RUN_TEST(bt_forward_check_same_verdict_with_and_without_packed_index);
+    RUN_TEST(bt_forward_check_singleton_conflict_detects_matching_ids);
+    RUN_TEST(bt_forward_check_singleton_conflict_ignores_distinct_ids);
+    RUN_TEST(bt_forward_check_singleton_conflict_disabled_by_default);
 #endif
     RUN_TEST(mrv_choose_cell_picks_the_most_constrained_cell);
     RUN_TEST(mrv_choose_cell_detects_dead_cell);
@@ -3087,6 +3309,8 @@ SUITE(etii_search_suite)
     RUN_TEST(search_backtracking_mrv_preserves_solution_count);
     RUN_TEST(search_backtracking_mrv_delegation_preserves_solution_count);
     RUN_TEST(search_backtracking_global_dead_check_preserves_solution_count);
+    RUN_TEST(search_backtracking_singleton_conflict_check_preserves_solution_count);
+    RUN_TEST(search_backtracking_mrv_singleton_conflict_check_preserves_solution_count);
 #endif
 
     RUN_TEST(autosearch_stops_immediately_on_request_stop);
