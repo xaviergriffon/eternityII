@@ -135,19 +135,56 @@ process qui exécute in fine la commande, qui décide.
 
 ## Bandeau de stats live (mode ANSI)
 
-Comme en ncurses, une ligne fixe en vidéo inverse, juste au-dessus de la zone
-Events, affiche en continu les statistiques du thread checker (`coups/s`,
-`stock`, `analyse`, `record`, …) — même mécanisme de région fixe que la zone
-Events (`redraw_status_zone_locked`, `src/ui/logger.c`), rafraîchi via
-`log_status()` sans perturber la région de défilement ni la ligne de saisie.
-Avant le premier rapport, la ligne affiche un message d'attente. Sur un
-terminal trop petit pour réserver la zone (ou sortie non interactive), le
-bandeau est simplement absent — `check` reste la voie de consultation.
+Une ligne fixe en vidéo inverse, juste au-dessus de la liste des événements,
+affiche en continu les statistiques du thread checker (`coups/s`, `stock`,
+`analyse`, `record`, …) — `redraw_status_zone_locked`, `src/ui/logger.c`,
+rafraîchi via `log_status()` sans perturber la région de défilement ni la
+ligne de saisie. Avant le premier rapport, la ligne affiche un message
+d'attente. Sur un terminal trop petit pour réserver la zone (ou sortie non
+interactive), le bandeau est simplement absent — `check` reste la voie de
+consultation.
+
+**Pas de titre « Events » : le bandeau lui-même fait déjà la séparation
+visuelle** avec la région de défilement au-dessus, et le format horodaté des
+lignes qui suivent (`[hh:mm:ss] ...`) suffit à les identifier comme des logs
+— un titre y était redondant (retiré aussi bien côté ANSI que ncurses, voir
+la note ci-dessous). Le bandeau occupe donc toute la largeur du terminal avec
+uniquement le texte des stats, complété d'espaces jusqu'au bord.
+
+**Positionnement : une rangée sous la région de défilement, jamais dessus.**
+La dernière rangée de la région de défilement (`\033[1;Nr`) est celle où vit
+la ligne de commande, qui y reste ancrée par le mécanisme de scroll — le
+bandeau doit donc être calculé UNE rangée plus bas (`redraw_status_zone_locked`,
+`src/ui/logger.c`), jamais sur cette même rangée : un bandeau mal placé s'y
+écrirait, invisible car aussitôt recouvert par le redessin de la ligne de
+saisie — exactement le symptôme observé avant ce correctif (bandeau/« Events »
+disparaissant, saisie apparemment « sur la même ligne » que les stats).
+
+**Le redessin n'a lieu que sur changement réel, jamais en tâche de fond à
+cadence fixe.** `log_status()`/`log_event()` redessinent déjà, chacun,
+immédiatement quand leur propre contenu change. Le thread de fond
+`event_zone_loop` (`src/ui/logger.c`), qui tourne toutes les secondes, ne
+sert donc qu'à détecter un redimensionnement de terminal (`SIGWINCH` n'étant
+pas exploité côté ANSI, contrairement à la variante ncurses) — il ne
+redessine la zone que si la taille a effectivement changé, jamais de façon
+inconditionnelle à chaque tick (source du scintillement pendant la saisie qui
+a motivé ce correctif).
+
+Ce dernier point (redessin conditionnel plutôt qu'à cadence fixe) ne concerne
+que le mode ANSI par défaut : la variante ncurses (`src/ui/logger_ncurses.c`)
+garde `stats_win`/`events_win` sur deux fenêtres distinctes et redessine déjà
+de façon purement événementielle (pas de heartbeat périodique), donc sans le
+scintillement observé côté ANSI. Le retrait du titre « Events », en revanche,
+s'applique aux deux variantes : côté ncurses, la rangée de titre au-dessus
+des événements ne s'affiche plus (en vidéo inverse) que lorsqu'on a remonté
+dans l'historique du pad de sortie (PgUp), pour signaler qu'il y a du contenu
+plus récent hors vue (`+N lignes sous la vue — PgDn/End pour revenir`) — sinon
+elle reste simplement vide.
 
 ## Zone Events (en bas de l'écran)
 
 Les évènements notables sont affichés dans une bande fixe en bas de la console, juste
-au-dessus du prompt, sous le bandeau de stats :
+au-dessus du prompt, sous le bandeau de stats (voir ci-dessus) :
 
 ```
 ┌──────────────────────────────────┐
@@ -157,9 +194,7 @@ au-dessus du prompt, sous le bandeau de stats :
 │  file:0 stock:0                  │
 │  …                               │
 ├──────────────────────────────────┤
-│  coups/s:… stock:… record:…      │  ← bandeau de stats, fixe (vidéo inverse)
-├──────────────────────────────────┤
-│  Events                          │  ← bande inversée, fixe
+│  coups/s:… stock:… record:…       │ ← bandeau de stats, fixe (vidéo inverse)
 │  [21:29:30] new record: 65 …     │
 │  [21:30:15] SOLUTION FOUND! …    │
 │  …                               │
@@ -330,9 +365,9 @@ par une vraie interface ncurses à quatre zones :
 ├────────────────────────────────────┤
 │  coups/s:… stock:… record:…        │  ← bandeau stats live (vidéo inverse)
 ├────────────────────────────────────┤
-│  Events  [+47 sous la vue]         │
-│  …                                 │
-├────────────────────────────────────┤
+│  …                                 │  ← pas de titre : le bandeau de stats
+│  …                                 │    juste au-dessus fait déjà la
+├────────────────────────────────────┤    séparation
 │  commande : _                      │
 └────────────────────────────────────┘
 ```
@@ -357,8 +392,13 @@ Touches de navigation dans l'historique :
 > défaut) est surchargeable à la compilation :
 > `make NCURSES=1 CPPFLAGS="-DOUTPUT_PAD_LINES=10000"`.
 
-Quand on n'est pas en bas, le titre de la zone Events affiche le nombre de lignes
-cachées (`[+N sous la vue — PgDn/End pour revenir]`).
+La zone d'événements n'a pas de titre — le bandeau de stats juste au-dessus
+fait déjà la séparation visuelle, et le format horodaté des lignes
+(`[hh:mm:ss] ...`) suffit à les identifier comme des logs. Sa première rangée
+reste néanmoins utilisée, en vidéo inverse, pour signaler qu'on a remonté
+dans l'historique du pad de sortie (`PgUp`) : `+N lignes sous la vue —
+PgDn/End pour revenir`. Une fois revenu en bas (`End`, ou tout simplement en
+tapant `Entrée`), cette rangée redevient vide.
 
 Le build par défaut (sans `NCURSES=1`) reste 100 % fonctionnel et **sans aucune
 dépendance** sur ncurses.
