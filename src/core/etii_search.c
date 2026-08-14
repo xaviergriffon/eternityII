@@ -1098,7 +1098,14 @@ backtrack:;
                             BOARD_SET_FACE(&board, position, 0);
                             mrv_used_clear(used, position);
                             bt_propagate_undo(constraints, cx, cy, all_face);
+#if FORWARD_CHECK_K > 0
+                            // `fc_pruned` n'existe que si le forward-checking est
+                            // compilé (cf. static_variables.h) ; la statistique est
+                            // partagée avec lui parce que les deux comptent la même
+                            // chose — un placement rejeté — mais le mécanisme, lui,
+                            // ne dépend pas de FORWARD_CHECK_K.
                             __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
+#endif // FORWARD_CHECK_K > 0
                             continue;
                         }
                     }
