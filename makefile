@@ -250,7 +250,7 @@ BENCH_REFUT_BIN := tests/bench/bench_refutation
 
 .PHONY: bench-refutation
 bench-refutation:
-	gcc -Wall -std=gnu99 -O3 -Isrc -pthread -o $(BENCH_REFUT_BIN) tests/bench/bench_refutation.c $(TEST_MODULES) -lm
+	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Werror -pthread -o $(BENCH_REFUT_BIN) tests/bench/bench_refutation.c $(TEST_MODULES) -lm
 	./$(BENCH_REFUT_BIN) $(BENCH_REFUT_ARGS)
 
 # Fonctions pures du banc de mesure (tests/bench/bench_lib.sh) : pas de C, donc
