@@ -338,6 +338,151 @@ Ces deux fonctions sont pures et couvertes par `tests/bench/test_bench_parse.sh`
 (lancé par `make test`, cible `test-bench`) — même démarche que pour
 `bench_should_stop` côté C.
 
+## Banc de réfutation (`make bench-refutation`)
+
+`bench_search.sh` mesure un **débit** (nœuds/s) et, comme garde-fou, la
+profondeur atteinte (`max_result`). Ces deux grandeurs restent des **proxys** :
+le débit ne dit pas si les nœuds explorés servent à quelque chose, et
+`max_result` récompense le fait de descendre loin dans une branche — or
+descendre loin dans une branche qui ne mène nulle part n'est pas l'objectif du
+solveur. Le vrai travail du moteur est l'inverse : établir **le plus tôt
+possible** qu'une possibilité est morte, pour ne jamais développer son
+sous-arbre.
+
+`tests/bench/bench_refutation.c` mesure exactement cela : le coût (nœuds et
+temps) jusqu'à `BT_CORE_EXHAUSTED` — le sous-arbre entièrement exploré, donc
+**mort prouvé** — à racine IDENTIQUE entre les deux ordres de parcours. C'est une
+comparaison appariée : les deux moteurs traitent le même sous-arbre, seul l'ordre
+change. La primitive est celle de la preuve bornée du pruner (§4.6b) : un plafond
+de nœuds, et trois issues possibles (`FERMÉ`, `budget` = indéterminé, `arrêt`).
+
+```sh
+# Racines d'un VRAI stock serveur (fichier .back), filtrées par profondeur
+make bench-refutation BENCH_REFUT_ARGS="--from-back /chemin/temp.back --min-pieces 90 --max-roots 25 --budget 5000000"
+# Racines fabriquées : préfixes d'une descente MRV profonde
+make bench-refutation BENCH_REFUT_ARGS="--depths 100,110,120 --budget 40000000"
+```
+
+### Le « mur à `max_result` ≈ 74 » est un artefact DE CE BANC, pas des moteurs
+
+Conséquence directe de ce que ce banc a permis de mesurer, et qui corrige une
+affirmation propagée par plusieurs sections de
+[conception/elagage_recherche.md](conception/elagage_recherche.md) : le plafond à
+74 pièces posées est une propriété du **protocole de mesure** de
+`bench_search.sh` — mono-processus, depuis la genèse, sans stock ni délégation,
+donc une seule descente en profondeur piégée dans le sous-arbre le plus à
+gauche. Contre un vrai serveur (expansion + délégation répartissant le travail),
+un client à **ordre fixe** atteint `max_result` = 186 et délègue des paquets à
+153 pièces posées ; un client MRV atteint 209 et délègue jusqu'à 186.
+
+Ce qui reste vrai : à protocole IDENTIQUE (le banc), MRV atteint 186 là où
+l'ordre fixe plafonne à 74. Ce qui est faux : en déduire une propriété des
+moteurs hors du banc — et, surtout, écarter un mécanisme d'élagage au motif que
+« la profondeur atteinte reste trop faible pour qu'il joue » (le raisonnement de
+§4.4 et §4.6b), alors que la profondeur en question était celle du banc.
+
+### D'où viennent les racines — et pourquoi un backup serveur est la bonne source
+
+Une racine utile doit avoir **beaucoup de suites mais aucune solution**, et être
+assez petite pour être fermée dans un budget raisonnable. Un **backup d'un
+serveur en cours** (`temp.back`, `eternityII.back`) est la source la plus
+représentative qui soit : c'est littéralement le travail que le serveur
+distribue. `--from-back` les lit directement (`fread` de `possibility_packet`,
+comme `import()`), affiche le profil de profondeur du stock, et `--min-pieces`/
+`--max-pieces` permettent de sélectionner une bande.
+
+Sur un stock réel produit par un serveur (`--expand-level 3`) alimenté 60 s par un
+client à ordre fixe : **17 815 possibilités, de 8 à 153 pièces posées, moyenne
+34,5** ; par un client MRV pendant 90 s : **29 481 possibilités, de 8 à 186
+pièces posées, moyenne 72,3**. Le banc contrôle au passage l'intégrité du stock
+(`check_possibility` + `normalize_possibility_packet` sur chaque paquet) : **0
+incohérent, 0 non canonique** dans les deux cas — c'est la vérification, sur
+données réelles et à l'échelle (29 481 paquets), de la re-canonisation des
+paquets délégués en ordre dynamique (§4.7). Le stock contient donc bien des racines profondes exploitables —
+contrairement à ce que la mesure de §4.6b laissait croire (elle bornait à
+`alloc` ≈ 72, c'est-à-dire le CURSEUR de parcours et non le nombre de pièces).
+
+À défaut de backup, le banc fabrique des racines : une descente MRV produit un
+plateau profond, dont on extrait des préfixes (`--depths`) — utile pour
+construire des cas **durs** (sous-arbre réellement vivant), que le stock réel
+fournit rarement.
+
+### Trois moteurs, pas deux : l'ablation qui sépare les deux axes
+
+Les deux moteurs de production **confondent deux axes indépendants** :
+
+| | détection de case morte **locale** (4 voisines) | détection **globale** (tout le plateau) |
+|---|---|---|
+| **ordre fixe** | moteur historique (`fixe`) | `fixe+global` — l'ablation |
+| **ordre dynamique** | (dégénéré : le balayage la donne gratuitement) | moteur MRV (`MRV`) |
+
+Ne comparer que les deux coins opposés ne dit pas lequel des deux axes produit
+l'effet mesuré. D'où le drapeau `global_dead_check` (`src/app/static_variables.h`,
+défaut 0, coût nul quand il vaut 0) : il fait appeler à l'ordre FIXE exactement
+le même balayage que MRV (`mrv_choose_cell`) en **jetant le choix de case**, ne
+gardant que le test de mort. `--engines fixe,fixe+global,mrv` sélectionne les
+variantes comparées. Verrou de correction : le balayage global est une condition
+nécessaire, il ne doit coûter aucune solution —
+`search_backtracking_global_dead_check_preserves_solution_count`
+(`tests/core/test_etii_search.c`), exploration exhaustive du vrai 4×4 avec et
+sans, même nombre de solutions.
+
+### Résultat 1 — KPI de production, à TEMPS CPU ÉGAL
+
+120 racines échantillonnées régulièrement dans un stock serveur réel (1 sur 148,
+**aucun filtre de profondeur** : c'est ce que le serveur sert vraiment). Le
+plafond par racine est calibré **par moteur** pour que chacun dépense le même
+temps total (~22 s) — sans quoi le moteur qui renonce le plus vite paraît le plus
+« efficace » simplement parce qu'il abandonne moins cher :
+
+| moteur | plafond/racine | fermées | temps total | fermetures/s |
+|---|---|---|---|---|
+| `fixe` | 2 500 000 nœuds | 20/120 | 21,97 s | 0,91 |
+| `fixe+global` | 275 000 nœuds | 52/120 | 23,02 s | 2,26 |
+| `MRV` | 500 000 nœuds | **79/120** | 22,67 s | **3,48** |
+
+À temps CPU égal, MRV résout **4× plus** du stock que l'ordre fixe. Et l'ablation
+répartit le mérite : la détection globale seule fait passer 20 → 52 (×2,6), l'ordre
+dynamique ajoute 52 → 79 (×1,5). **Aucun des deux axes n'est redondant** — l'effet
+de l'ordre ne s'explique pas par le seul test global, contrairement à l'hypothèse
+que les réfutations à 1 nœud suggéraient.
+
+Comparaison appariée (mêmes racines, plafond commun de 500 k nœuds, les 19 que les
+trois moteurs ferment) : `fixe` 295 339 nœuds / 0,026 s, `fixe+global` 124 030
+nœuds / 0,159 s, `MRV` **40 nœuds** / ~0 s. Noter que `fixe+global` explore moins
+de nœuds que `fixe` mais met plus de TEMPS : le balayage coûte environ 10× le prix
+d'un nœud ordinaire. C'est le coût que MRV paie aussi — et qu'il rentabilise.
+
+### Résultat 2 — le contre-exemple : racines réellement vivantes
+
+Sur des racines **fabriquées** (préfixes d'une descente MRV, `--seed-nodes 200000
+--depths 100,110,120`), c'est-à-dire des sous-arbres que rien ne tue d'emblée :
+
+| moteur | nœuds (3 racines) | temps |
+|---|---|---|
+| `fixe` | 155 902 | 0,012 s |
+| `fixe+global` | 134 218 | 0,112 s |
+| `MRV` | **4 523 856** | **5,094 s** |
+
+Ici MRV est 29× pire en nœuds et 400× pire en temps — et l'ablation montre que
+c'est bien l'**ordre** qui est en cause, pas le balayage : `fixe+global` n'élague
+presque rien de plus que `fixe` (134 k contre 156 k nœuds) sur ces racines. Le
+gain de MRV n'est donc pas universel : il tient à la structure du stock réel
+(beaucoup de possibilités déjà mortes ou presque), pas à une supériorité
+intrinsèque de l'ordre en toutes circonstances.
+
+### Nuance à ne pas passer sous silence
+
+Une grande partie des réfutations coûtent **1 nœud** : la possibilité était déjà
+morte quand le serveur l'a créée, et le balayage de plateau le voit
+immédiatement — c'est le même test que `possibility_all_has_a_next_counted`
+(le pruner), mais joué à chaque nœud au lieu d'une fois par possibilité. Cela dit
+aussi quelque chose du stock : **sans pruner en service, un serveur accumule du
+travail déjà mort** en quantité (ici 52/120 racines tuées par le seul test global).
+Sur ces racines-là, la comparaison mesure la présence de ce test, pas la qualité
+de l'ordre — d'où l'importance de la comparaison appariée ci-dessus, où MRV garde
+un avantage de 3 ordres de grandeur.
+
 ## Voir aussi
 
 - [tests/README.md](../tests/README.md) — organisation des suites, conventions, ajout d'un test.

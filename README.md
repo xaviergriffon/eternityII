@@ -25,6 +25,7 @@ Le puzzle consiste à placer 256 pièces carrées sur une grille 16×16 en faisa
 - La boucle de recherche lit sa table de candidats via un **index compact** (4 octets par compartiment au lieu de 16), qui divise par 3,8 le volume balayé par le forward-checking : **+10 % de nœuds/s** sur un worker, **+29 %** sur 16 workers concurrents.
 - Cette table étant en lecture seule une fois construite, le parent la construit **avant de forker** : les processus de recherche s'en partagent **une seule copie** (copy-on-write) au lieu d'en fabriquer chacun la leur — **−90 % d'empreinte mémoire** à 16 workers (111 → 11 Mo de `Pss`), pour un débit inchangé.
 - Chaque compartiment de la table de candidats est trié **à sa construction** par rareté croissante de couleur exposée (la pièce la plus rare essayée en premier) : coût nul dans la boucle chaude, **+3,2 % de nœuds/s** mesuré.
+- Un moteur de recherche à **ordre dynamique** (MRV : la case vide la plus contrainte à chaque nœud), implémenté et mesuré favorable, est disponible via `ETII_MRV=1` — pas encore le défaut de déploiement (`ETII_MRV=0`, l'ordre fixe historique). C'est 7,5× plus lent par nœud, mais il réfute bien plus tôt : à temps CPU égal, sur un vrai stock serveur, il prouve la mort de 79 possibilités sur 120 contre 20 pour l'ordre fixe (mesuré par `make bench-refutation`). Les paquets délégués sont re-canonisés avant émission : clients à ordre dynamique et à ordre fixe restent interopérables sur le même serveur, sans changement du protocole.
 
 > Détails (modèle de processus/threads, IPC parent↔enfants, structure des sources) : [docs/architecture.md](docs/architecture.md).
 
@@ -85,6 +86,10 @@ make test-integration # scénarios bout-en-bout client/serveur (16 pièces)
 make test-docker      # rejoue les jobs de test CI dans un conteneur Linux
 make test-docker-arm  # vérifie la compilation croisée ARM 64-bit (Raspberry Pi) dans le même conteneur
 make coverage-report  # rapports de couverture gcovr (XML + HTML + Markdown)
+
+# Banc de RÉFUTATION : coût de la preuve qu'une possibilité est morte (la mesure qui
+# correspond à l'objectif du solveur — cf. docs/tests_et_ci.md)
+make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --min-pieces 90 --budget 5000000"
 
 # Banc de mesure du débit de la boucle de recherche (préalable à toute optimisation)
 tests/bench/bench_search.sh --nodes 5000000 --reps 5

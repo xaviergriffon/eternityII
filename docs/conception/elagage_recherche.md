@@ -17,13 +17,16 @@ désactivée), mesurée et **écartée** — code absent de `master` : −40,4 %
 `max_result` légèrement inférieur à débit égal (73 contre 74), le mécanisme recoupant le
 forward-check au point de doubler son coût de lookup par placement sans que la réduction de
 branchement ne compense au mur structurel actuel. PR 9 (§4.7, ordre dynamique MRV) :
-**prototype scopé concluant** — délégation désactivée (non déployable en l'état), mais le
-levier lui-même est validé de façon spectaculaire : `max_result` passe de 74 à **180** à
-5 M nœuds (et déjà 173 à 500 k nœuds), confirmant que le mur structurel documenté depuis
-§4.4 est un artefact de l'ordre de parcours FIXE, pas une propriété du puzzle.
-Implémentation complète (cache incrémental, re-canonisation aux frontières de délégation)
-recommandée comme projet séparé — voir §4.7. La variante « partition de l'arène » de §4.2
-reste une proposition non implémentée.
+**prototype scopé concluant** (délégation désactivée, non déployable en l'état) — `max_result`
+74 → 180 à 5 M nœuds — puis **implémentation complète livrée et mesurée favorable** (PR 10)
+(le critère décisif étant le coût de RÉFUTATION sur stock réel, pas `max_result` — voir
+PR 10 pour le détail) : coût du choix de case ramené d'un balayage naïf à une frontière
+comptée par `popcount` (23 k → 812 k nœuds/s), délégation rétablie par re-canonisation des
+paquets émis, `max_result` **186** à 2 M nœuds — voir §4.7. Le « mur structurel » invoqué depuis §4.4
+s'est révélé être un artefact du PROTOCOLE DE MESURE (mono-processus depuis la genèse), pas
+une propriété de l'ordre fixe — voir la correction en §4.7 — ce qui rouvre §4.4, §4.5 et
+§4.6b (tous écartés/désactivés pour cause de profondeur insuffisante) à une nouvelle mesure. La variante « partition de l'arène » de §4.2 reste une
+proposition non implémentée.
 
 ## 1. Question posée
 
@@ -614,13 +617,18 @@ aujourd'hui, exactement la même discipline que la décision de §4.4.
 Le mode GPU ([`gpu_pruner.cu`](../../src/app/gpu_pruner.cu)) ne suit pas sur (b) — un DFS
 divergent par thread convient mal au modèle SIMT. (a) lui est en revanche transposable.
 
-### 4.7 Ordre de variable dynamique (MRV) — PROTOTYPE CONCLUANT, projet complet non lancé
+### 4.7 Ordre de variable dynamique (MRV) — implémenté et mesuré favorable (PR 10), pas encore le défaut de déploiement
 
-**Statut : prototype scopé implémenté, testé, mesuré — résultat très positif, mais
-INCOMPLET par construction (délégation désactivée), donc non fusionnable en l'état.**
-Contrairement à toutes les PR précédentes (adopter/écarter en l'état), la décision ici est
-« continuer, en tant que projet à part entière séparé » — exactement l'issue anticipée par
-la version initiale de cette section (« à traiter comme un projet à part entière »).
+**Statut : implémenté, testé, mesuré favorable — PAS ENCORE le défaut de déploiement.**
+Traité en deux temps, ce que la section garde en trace parce que le raisonnement de la
+première étape est ce qui a justifié d'investir dans la seconde : un **prototype scopé**
+d'abord (PR 9, ci-dessous), volontairement dégradé (balayage naïf, aucune délégation) mais
+suffisant pour trancher « le levier paie-t-il ? » ; puis l'**implémentation complète**
+(PR 10, § dédié en fin de section) qui lève les deux limites. `mrv_enabled` (`ETII_MRV`,
+`src/app/static_variables.h`) reste à 0 par défaut (`MRV_DEFAULT_ENABLED`) : décision de
+DÉPLOIEMENT, pas verdict de mesure — basculer le défaut change le moteur de recherche de
+toute une flotte déployée, ce qui appelle plus de recul que ce qu'une seule PR peut
+apporter. `ETII_MRV=1` l'active sans reconstruire.
 
 **Principe.** Choisir à chaque nœud la case vide **la plus contrainte** au lieu de suivre
 `directions[]`. C'est le levier le plus massif connu en résolution de CSP, et le seul de
@@ -634,8 +642,9 @@ une question factuelle, pas une évidence a priori. Décision : mesurer le levie
 d'abord, sur une implémentation volontairement dégradée mais correcte, avant d'investir
 dans l'interopérabilité.
 
-**Implémentation du prototype.** `search_packet_backtracking_mrv_experiment` (nouvelle
-fonction, `etii_search.c`) : structurellement une copie de
+**Implémentation du prototype (PR 9 — remplacée depuis par `search_packet_backtracking_mrv`,
+cf. PR 10 en fin de section ; ce paragraphe décrit l'état au moment de la mesure).**
+`search_packet_backtracking_mrv_experiment` (alors nouvelle fonction, `etii_search.c`) : structurellement une copie de
 `search_packet_backtracking_core` (même plateau unique modifié en place, même pile de
 décisions, même forward-check après placement), mais où `mrv_choose_cell` remplace
 `dirx[depth]/diry[depth]` — elle balaie **tout le plateau** (pas seulement les voisines
@@ -682,31 +691,197 @@ détection de case morte du balayage MRV lui-même (sous-produit gratuit, cf.
 implémentation) recoupe largement ce que le forward-check aurait trouvé de toute façon —
 la vraie valeur de MRV n'est pas dans l'élagage, elle est dans la FORME de l'arbre exploré.
 
-**Décision : ne PAS fusionner ce prototype (délégation désactivée = non déployable), mais
-NE PAS l'écarter non plus.** Contrairement à §4.2/§4.3/§4.4/§4.5 (mesurés puis retirés du
-code), le code du prototype est **conservé sur cette branche** — jamais mergé sur `master`
-en l'état (`search_packet_backtracking_mrv_experiment` n'est atteignable que derrière
-`ETII_MRV=1`, un chemin de développement, jamais un défaut de production, exactement comme
-`ETII_BENCH_NODES`) : il documente une direction VALIDÉE, pas un échec. **Recommandation :
-lancer l'implémentation complète comme projet séparé**, avec pour axes de travail
-identifiés par cette mesure :
-1. **Cache de candidats incrémental**, pour remplacer le balayage naïf O(256) — le vrai
-   verrou du coût actuel. Options : maintenir un compte de candidats disponibles par case,
-   mis à jour à chaque `bt_propagate_place`/`bt_propagate_undo` (délicat : un changement de
-   `faceused` peut affecter le compte de N'IMPORTE QUELLE case dont le compartiment
-   contient la pièce concernée, pas seulement les voisines — coût de maintenance à
-   caractériser avant de s'engager).
-2. **Re-canonisation aux frontières de délégation** (`bt_materialize_pending`/
-   `bt_flush_pending`) : transformer un paquet exploré en ordre MRV vers la représentation
-   canonique `directions[]` pour rester interopérable avec les clients à ordre fixe — la
-   « faisabilité sans casser le protocole » déjà argumentée reste à implémenter et tester.
-3. **`VERSION`** : à trancher une fois (1) et (2) posés — possible que la représentation de
-   paquet elle-même n'ait pas besoin de changer (voir (2)), auquel cas le bump évoqué dans
-   la version initiale de cette section ne serait pas nécessaire.
+**Décision (PR 9) : ne PAS fusionner ce prototype (délégation désactivée = non déployable),
+mais NE PAS l'écarter non plus** — il documente une direction VALIDÉE, pas un échec ;
+implémentation complète recommandée comme projet séparé, sur trois axes : (1) cache de
+candidats remplaçant le balayage naïf O(256), (2) re-canonisation aux frontières de
+délégation, (3) arbitrage d'un bump de `VERSION`. **Ces trois axes sont traités ci-dessous
+(PR 10) et le moteur est implémenté, testé, mesuré favorable — mais le défaut de
+déploiement reste l'ordre fixe.**
 
-Ce travail est substantiel et délibérément **hors du périmètre de cette PR** — le prototype
-répond uniquement à la question qui devait être tranchée avant d'investir : le levier
-paie-t-il ? Réponse : oui, massivement.
+#### PR 10 — implémentation complète, mesurée favorable (pas encore le défaut)
+
+**Statut : livrée, mesurée favorable, PAS ENCORE le défaut.**
+`search_packet_backtracking_mrv` (`src/core/etii_search.c`) remplace le prototype de mesure ;
+`mrv_enabled` (`MRV_DEFAULT_ENABLED`, `static_variables.h`) reste à **0** — ordre fixe par
+défaut, décision de DÉPLOIEMENT distincte du verdict de mesure : basculer le défaut change le
+moteur de recherche de toute une flotte déployée, ce qui appelle plus de recul que ce qu'une
+seule PR peut apporter. `ETII_MRV=1` active l'ordre dynamique sans reconstruire. Contrairement
+à §4.1/§4.8 (leviers adoptés dont l'interrupteur a été retiré une fois le défaut basculé),
+l'interrupteur est ici structurel plutôt que temporaire : le protocole de mesure du banc (§7)
+impose de pouvoir comparer PAR-DESSUS l'état précédent, et `search_packet_backtracking_core`
+(ordre fixe) reste de toute façon vivante — c'est elle que rejoue la preuve bornée du
+pruner (§4.6b).
+
+**Axe 1 — coût du choix de case : frontière + `popcount`, pas de cache incrémental.**
+Le balayage naïf du prototype coûtait, à CHAQUE nœud, un `map_bucket_packed` *et un
+parcours complet du compartiment* pour chacune des ≤ 256 cases vides. Deux changements,
+aucun des deux n'étant le « compte incrémental par case » envisagé en PR 9 :
+
+- **Restriction à la frontière.** Une case dont les 4 côtés valent `all_face` n'est
+  contrainte par rien (ni bord de plateau, ni voisine posée) : elle accepte *toutes* les
+  pièces libres et ne peut donc jamais être le minimum tant qu'une case contrainte existe.
+  Le test se lit dans le cache `constraints[][]` déjà maintenu par §4.1, sans aucun lookup.
+  Frontière : 29 cases en moyenne, 52 au pire (§3.2), contre 256 balayées.
+  L'existence d'au moins une case de frontière tant qu'une case vide existe se démontre
+  (la première case vide en ordre lexicographique a soit un bord de plateau, soit une
+  voisine de rang inférieur nécessairement remplie) — un repli couvre malgré tout le cas.
+- **Comptage indépendant de la taille du compartiment.** `bucket_id_mask`
+  (`build_bucket_id_mask`, `src/core/part.c`) est une TROISIÈME représentation redondante
+  de `flat`, dans le même esprit que `packed` : le masque de bits des ids présents dans
+  chaque compartiment, indexé par offset d'arène (0,46 Mo sur le puzzle 256, tableau creux
+  — voir sa doc pour l'arbitrage contre une table indexée par clé, 10,6 Mo). Le nombre de
+  pièces encore libres devient `popcount(masque & ~utilisées)`. Le masque des pièces
+  utilisées du plateau est miroité en mots de 64 bits (`mrv_used_init`/`_set`/`_clear`),
+  construit explicitement par décalages — jamais par réinterprétation mémoire de
+  `b_faceused`, qui dépendrait de l'endianness.
+
+**Pourquoi PAS le cache incrémental de la PR 9.** L'axe (1) tel qu'envisagé (« un compte de
+candidats par case, mis à jour à chaque `bt_propagate_place`/`_undo` ») bute sur la
+difficulté que la PR 9 identifiait déjà : un changement de `faceused` peut modifier le
+compte de N'IMPORTE quelle case dont le compartiment contient la pièce concernée, pas
+seulement des voisines. La maintenance incrémentale coûte donc, elle aussi, O(frontière)
+par placement (un test d'appartenance par case suivie) — c'est-à-dire le même ordre de
+grandeur que le recalcul à la demande une fois celui-ci ramené à quelques `popcount`. Le
+cache incrémental n'aurait acheté qu'un facteur constant, au prix d'une symétrie
+pose/retrait supplémentaire à maintenir exacte (et de la même classe de bug que §4.5 :
+une annulation incomplète est invisible en test et fausse la recherche). Renoncé
+délibérément ; à reconsidérer seulement si une mesure montre le choix de case redevenu
+dominant.
+
+**Axe 2 — re-canonisation aux frontières de délégation.** `bt_canonicalize_packet` rétablit,
+sur chaque paquet matérialisé, `alloc` = index de la PREMIÈRE case vide dans l'ordre
+`directions[]` (et recale `x`/`y`) — c'est-à-dire exactement ce que
+`normalize_possibility_packet` sait déjà faire, réutilisé plutôt que réécrit. Les cases
+remplies au-delà du curseur sont le cas déjà prévu et documenté du format (« indices fixes »,
+traitées comme des niveaux sans décision par le moteur à ordre fixe). Conséquence :
+`bt_count_pending`, `bt_materialize_pending`, `bt_delegate_if_needed` et `bt_flush_pending`
+sont **partagés à l'identique** par les deux moteurs (un paramètre `dynamic_order`, et
+`bt_level` porte désormais la case `(x, y)` du niveau au lieu de la déduire de
+`dirx[depth]`) — une seule sémantique de délégation, testée une seule fois.
+
+**Axe 3 — `VERSION` : pas de bump.** Découle de l'axe 2 : un paquet cédé par un client MRV
+est indiscernable d'un paquet produit en ordre fixe. Une flotte mixte (clients MRV, clients
+à ordre fixe, pruners, fichiers `.back` existants) partage le même serveur sans changement
+de protocole — contrairement à ce qu'envisageait la version initiale de cette section.
+
+**Garantie de correction.** Trois niveaux, dans l'esprit de §5 :
+(a) `bucket_id_mask_matches_flat_for_every_key` (`tests/core/test_part.c`) : équivalence
+exhaustive du comptage par `popcount` avec un comptage par parcours, sur TOUTES les clés et
+trois états de plateau — une divergence changerait silencieusement la case choisie et,
+pire, le test de mort ; (b) `bt_canonicalize_packet_*` et
+`bt_materialize_pending_dynamic_order_emits_canonical_packets`
+(`tests/core/test_etii_search.c`) : le curseur d'un paquet délégué désigne bien le premier
+trou du parcours, jamais la profondeur de pile ; (c) surtout,
+`search_backtracking_mrv_delegation_preserves_solution_count` : sur le VRAI puzzle 4×4,
+exploration MRV depuis la racine vide **interrompue en cours de route**, travail restant
+repris **à ordre FIXE** jusqu'à épuisement (en vérifiant `check_possibility` et le caractère
+déjà canonique de chaque paquet reçu), nombre total de solutions rigoureusement égal à celui
+d'une exploration exhaustive à ordre fixe. Ce dernier test échoue bien sur le code
+sans re-canonisation (vérifié en la neutralisant), comme l'exige la règle de test du projet.
+L'ancien verrou de PR 9 (`search_backtracking_mrv_preserves_solution_count`, même ensemble de
+solutions quel que soit l'ordre) est conservé tel quel.
+
+**Mesuré** (`tests/bench/bench_search.sh`, puzzle 256, 2 M nœuds × 3 répétitions, i9-9880H) :
+
+| Configuration | Nœuds/s (médiane) | Taux d'élagage FC | `max_result` à budget de nœuds identique |
+|---|---|---|---|
+| Ordre fixe (`ETII_MRV=0`) | 6 102 866 | 44,15 % | 74 |
+| MRV, prototype PR 9 | 23 177 | 43,3 % | 173 (à 500 k nœuds) |
+| **MRV, implémentation complète** | **811 617** | 43,18 % | **186** |
+
+**Débit : −86,7 % contre l'ordre fixe, mais ×35 contre le prototype** (23 k → 812 k nœuds/s)
+— les deux axes de coût ci-dessus ont bien porté. Et, comme en PR 9, **ce n'est pas la
+mesure qui compte** : à temps mural égal, l'ordre fixe explore ~10× plus de nœuds
+(15 M nœuds en 1,58 s, contre 2 M en 2,46 s pour MRV) et **reste à `max_result` = 74** —
+le même plafond que sur des centaines de millions de nœuds ailleurs dans ce document. MRV
+atteint 186 en 2,46 s, et 188 à 50 M nœuds. Le taux d'élagage du forward-check bouge à peine
+(44,15 % → 43,18 %) : la valeur de MRV n'est pas dans l'élagage, elle est dans la FORME de
+l'arbre exploré — exactement ce que concluait la PR 9.
+
+**Mesure de RÉFUTATION — la bonne question, posée après coup.** `max_result` reste un proxy
+discutable : descendre loin dans une branche n'est pas l'objectif du solveur, prouver tôt
+qu'une possibilité est morte l'est. La mesure correspondante est le coût de FERMETURE d'un
+sous-arbre (nœuds/temps jusqu'à `BT_CORE_EXHAUSTED`) à racine IDENTIQUE entre les deux
+moteurs — c'est ce que mesure `tests/bench/bench_refutation.c` (`make bench-refutation`,
+cf. [tests_et_ci.md](../tests_et_ci.md#banc-de-réfutation-make-bench-refutation)). Sur un
+VRAI stock serveur (17 815 possibilités, 8 à 153 pièces posées, moyenne 34,5 — produit par
+un serveur `--expand-level 3` alimenté 60 s par un client à ordre fixe), plafond 5 M nœuds :
+
+| Bande (pièces posées) | Fermées, ordre fixe | Fermées, MRV | Nœuds sur les racines fermées par les DEUX |
+|---|---|---|---|
+| 20–45 | 5/10 | **10/10** | 70 vs 22 |
+| 55–89 | 16/16 | 16/16 | 40 804 vs **32** (×1 275) |
+| ≥ 90 | 17/25 | **25/25** | 565 677 vs **25** (×22 627) |
+
+MRV ferme donc des racines que l'ordre fixe ne ferme pas du tout dans le plafond, et coûte
+des ordres de grandeur moins cher sur celles que les deux ferment. **Mais l'ordre MRV n'est
+pas uniformément meilleur** : sur des racines FABRIQUÉES (préfixes d'une descente MRV
+profonde, c'est-à-dire des sous-arbres réellement vivants, que le stock réel fournit
+rarement), à 100 pièces posées, l'ordre fixe ferme en 73 482 nœuds là où MRV en dépense
+4 443 906 — 60× plus. Les deux faits sont vrais et doivent être cités ensemble. À noter
+aussi qu'une grande partie des réfutations MRV coûtent **1 nœud** : la possibilité était
+déjà morte à sa création et le balayage de `mrv_choose_cell` le voit immédiatement — le même
+test que `possibility_all_has_a_next_counted` (le pruner), mais à chaque nœud plutôt qu'une
+fois. Sur ces racines-là, la comparaison mesure surtout la présence de ce test global, pas
+la qualité de l'ordre.
+
+**Ablation : ce qui revient à l'ORDRE et ce qui revient à la PORTÉE de la détection.** Les
+deux moteurs confondaient deux axes — l'ordre fixe va toujours avec une détection de case
+morte LOCALE (`bt_forward_check`, 4 voisines), l'ordre dynamique toujours avec une détection
+GLOBALE (le balayage de `mrv_choose_cell` voit toute case morte du plateau). Le drapeau
+`global_dead_check` (`static_variables.h`, défaut 0, coût nul désarmé) remplit la case
+manquante : ordre FIXE + balayage global, en appelant exactement le même balayage que MRV et
+en JETANT le choix de case. Verrouillé par
+`search_backtracking_global_dead_check_preserves_solution_count` (exploration exhaustive du
+4×4, même nombre de solutions armé ou non — le balayage est une condition nécessaire, il ne
+doit coûter aucune solution). KPI à **temps CPU égal** (~22 s par moteur, 120 racines
+échantillonnées régulièrement dans le stock réel, plafond calibré par moteur) :
+
+| moteur | plafond/racine | fermées | temps total | fermetures/s |
+|---|---|---|---|---|
+| ordre fixe | 2 500 000 nœuds | 20/120 | 21,97 s | 0,91 |
+| ordre fixe + balayage global | 275 000 nœuds | 52/120 | 23,02 s | 2,26 |
+| MRV | 500 000 nœuds | **79/120** | 22,67 s | **3,48** |
+
+**Les deux axes comptent, aucun n'est redondant** : le balayage global seul fait 20 → 52
+(×2,6), l'ordre dynamique ajoute 52 → 79 (×1,5). L'hypothèse « tout l'effet vient du test
+global, l'ordre ne sert à rien » — que les réfutations à 1 nœud rendaient plausible — est
+donc réfutée. Sur les 19 racines fermées par les trois : 295 339 nœuds (fixe), 124 030
+(fixe+global), **40** (MRV). À noter que fixe+global explore moins de nœuds que fixe mais met
+plus de temps : le balayage coûte ~10× un nœud ordinaire — c'est le prix que MRV paie aussi,
+et rentabilise.
+
+Sur les racines FABRIQUÉES (préfixes vivants, `--seed-nodes 200000 --depths 100,110,120`), la
+conclusion s'inverse et l'ablation en donne la cause : fixe 155 902 nœuds / 0,012 s,
+fixe+global 134 218 / 0,112 s, MRV 4 523 856 / 5,094 s. C'est bien l'**ordre** qui coûte là
+(le balayage n'élague presque rien de plus que le forward-check local sur ces racines). Le
+gain de MRV tient donc à la structure du stock réel — beaucoup de possibilités déjà mortes ou
+presque — pas à une supériorité de l'ordre en toutes circonstances.
+
+**Correction importante, établie APRÈS coup sur une flotte réelle.** La lecture « le mur à
+`max_result` ≈ 74 était un artefact de l'ORDRE de parcours » est **fausse**, et ce document
+l'a propagée depuis §4.4. Un client à ordre FIXE lancé contre un vrai serveur (256 pièces,
+`--expand-level 3`, 3 forks, 60 s) atteint `max_result` = **186**, et le stock qu'il délègue
+contient des paquets à **153 pièces posées** — très au-delà de 74. Le mur est un artefact du
+PROTOCOLE DE MESURE : `tests/bench/bench_search.sh` tourne en mode `test`, mono-processus,
+depuis la genèse, sans stock ni délégation — une seule descente en profondeur qui reste
+piégée dans le sous-arbre le plus à gauche. Dès qu'un serveur répartit le travail (expansion
++ délégation), n'importe quel moteur atteint des profondeurs bien supérieures. Ce qui reste
+vrai et vérifié : à protocole de mesure IDENTIQUE (le banc), MRV atteint 186 là où l'ordre
+fixe plafonne à 74. Ce qui est faux : en déduire une propriété des moteurs hors du banc.
+Conséquence directe : les décisions de §4.4 et §4.6b, motivées par « la profondeur atteinte
+est trop faible pour que ce mécanisme joue », reposaient sur une profondeur mesurée dans ces
+conditions-là — à remesurer sur du stock réel (le banc de réfutation le fait déjà : l'ordre
+fixe y ferme 20 racines sur 120, ce que §4.6b concluait impossible).
+
+**Ce que cette adoption rouvre.** §4.4 (conflit de singletons), §4.5 (propagation des cases
+forcées) et §4.6b (DFS à budget du pruner) ont tous les trois été écartés ou désactivés pour
+la MÊME raison : le mur structurel à `max_result` ≈ 74 les rendait soit muets (0
+déclenchement), soit non rentables. Ce mur vient de bouger d'un facteur 2,5. Les trois sont
+à REMESURER dans ce nouveau régime, avec le même protocole que la première fois (§7 :
+par-dessus l'état courant, jamais contre `master`) — §4.6b en particulier, dont le code est
+resté en place derrière `pruner_dfs_budget` justement pour ce cas de figure.
 
 ### 4.8 Ordre des candidats dans l'arène — ADOPTÉ (PR 7)
 
@@ -797,10 +972,12 @@ n'est pas retenu, faute de justification a priori et de signal aussi net.
   silencieusement la solution et ne se manifeste par aucun symptôme observable. Chaque
   élagage est livré avec un test unitaire à deux volets : un plateau où il **doit** tirer,
   un plateau où il **ne doit pas** tirer. Aucune mesure de débit ne remplace ce verrou.
-- **Pas de bump de `VERSION`**, sauf éventuellement l'implémentation complète de 4.7 (pas
-  son prototype scopé, qui ne délègue jamais et n'émet donc aucun paquet). Un paquet reste
-  un état de plateau ; seul le sous-ensemble exploré change. C'est le changement de
-  `directions[]` qui avait forcé le bump v11, parce qu'il redéfinissait le sens d'`alloc`.
+- **Pas de bump de `VERSION`**, y compris pour l'implémentation complète de 4.7 : tranché
+  par la mesure et non par principe — les paquets délégués par un client MRV sont
+  re-canonisés avant émission (`bt_canonicalize_packet`, §4.7/PR 10), donc indiscernables de
+  ceux d'un client à ordre fixe. Un paquet reste un état de plateau ; seul le sous-ensemble
+  exploré change. C'est le changement de `directions[]` qui avait forcé le bump v11, parce
+  qu'il redéfinissait le sens d'`alloc`.
 - **La parité de couleur est une impasse.** Les 23 couleurs de `pieces.csv` sont toutes en
   compte pair, et tout placement légal préserve cette parité : la face posée quitte le
   stock pendant que la demande correspondante apparaît (voisin vide) ou disparaît (voisin
@@ -860,16 +1037,17 @@ n'est pas retenu, faute de justification a priori et de signal aussi net.
   étant restées volontairement séparées). Code entièrement retiré, comme §4.2/§4.3/§4.4 —
   cf. §4.5 pour le détail complet et la piste de fusion non essayée qui pourrait changer
   cette conclusion.
-- **4.7 (ordre dynamique MRV) : prototype scopé concluant, code CONSERVÉ (non déployé).**
-  Seule PR de la série où la conclusion n'est ni « adopter » ni « écarter » : un prototype
-  volontairement dégradé (balayage naïf de tout le plateau, délégation désactivée) mesure
-  un déplacement massif et quasi immédiat du mur structurel — `max_result` 74 → **180** à
-  5 M nœuds, déjà **173** à 500 k nœuds (35× moins) — malgré un débit en chute de **99,7 %**
-  (coût attendu du balayage naïf, pas du principe MRV lui-même). Contrairement à
-  §4.2/§4.3/§4.4/§4.5, le code n'est PAS retiré : il documente une direction validée,
-  atteignable uniquement derrière `ETII_MRV=1` (jamais le défaut de production). L'
-  implémentation complète (cache incrémental, re-canonisation aux frontières de
-  délégation) est hors périmètre de cette PR — recommandée comme projet séparé, cf. §4.7.
+- **4.7 (ordre dynamique MRV) : implémenté et mesuré favorable, `ETII_MRV=0` reste le défaut de déploiement.** Prototype scopé d'abord
+  (PR 9 : `max_result` 74 → **180** à 5 M nœuds, mais −99,7 % de débit et aucune délégation
+  possible — conservé sans être déployé), puis implémentation complète (PR 10) : choix de
+  case ramené d'un balayage naïf de tout le plateau à la seule frontière comptée par
+  `popcount` (**×35 de débit** : 23 k → 812 k nœuds/s), délégation rétablie par
+  re-canonisation des paquets émis (donc **aucun bump de `VERSION`**, flotte mixte
+  possible), `max_result` **186** à 2 M nœuds contre 74 pour l'ordre fixe — lequel reste à
+  74 même avec 10× plus de nœuds, c'est-à-dire plus de temps mural. `ETII_MRV=0` conserve
+  l'ordre fixe pour les mesures A/B et un repli. Conséquence à ne pas oublier : §4.4, §4.5
+  et §4.6b ont été écartés/désactivés à cause du mur à 74, qui vient de bouger — à
+  remesurer, cf. §4.7.
 
 ## 6. Points laissés ouverts
 
@@ -920,7 +1098,8 @@ recherché ici.
 | 6 | ~~**4.6b** DFS à budget dans le pruner (+ réglage du budget)~~ **implémenté, testé, désactivé par défaut** | moyen | code conservé (opt-in), 0 % de fermeture sur stock réel à n'importe quel budget testé (mesuré, §4.6b) — mur structurel `max_result` ≈ 74, cause identique à §4.4 |
 | 7 | ~~**4.8** ordre des candidats dans l'arène (expérience)~~ **adopté** | faible | `rare_first` adopté inconditionnellement (mesuré, §4.8 : +3,2 %, taux d'élagage changé mais `max_result` inchangé) |
 | 8 | ~~**4.5** propagation des forcées dans la boucle chaude~~ **écarté** | moyen | non rentable (mesuré, §4.5 : −40,4 %, `max_result` inférieur à budget égal) — recoupe le forward-check, coût de lookup doublé sur le même périmètre de voisines |
-| 9 | ~~**4.7** ordre dynamique MRV~~ **prototype concluant, implémentation complète à lancer séparément** | élevé | validé (mesuré, §4.7 : `max_result` 74→180 à 5 M nœuds) — délégation désactivée dans le prototype, non déployable en l'état ; cache incrémental + re-canonisation restent à faire |
+| 9 | ~~**4.7** ordre dynamique MRV (prototype scopé)~~ **concluant** | élevé | validé (mesuré, §4.7 : `max_result` 74→180 à 5 M nœuds) — délégation désactivée dans le prototype, non déployable en l'état ; cache incrémental + re-canonisation restent à faire |
+| 10 | ~~**4.7** ordre dynamique MRV (implémentation complète)~~ **mesuré favorable, défaut inchangé (`ETII_MRV=0`)** | élevé | coût de réfutation ~4× meilleur sur stock réel à CPU égal (§4.7) — frontière + `popcount`, re-canonisation des paquets délégués, pas de bump de `VERSION` ; rouvre §4.4/§4.5/§4.6b ; bascule du défaut de déploiement laissée à l'opérateur |
 
 L'ordre 1→4 est un ordre de **rapport gain/coût décroissant présumé**, pas une dépendance :
 seules 8 (qui suppose `alloc` clarifié) et 9 (à arbitrer en dernier) sont contraintes.

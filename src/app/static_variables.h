@@ -823,29 +823,74 @@ extern unsigned long long bench_target_nodes;
 unsigned long long bench_parse_nodes_env(const char *env_value);
 
 /**
- * @brief Active le PROTOTYPE d'ordre de variable dynamique (MRV) de la boucle
- *        de recherche — §4.7 de docs/conception/elagage_recherche.md,
- *        variable d'environnement de développement `ETII_MRV` (`1` = activé),
- *        lue une seule fois au démarrage comme `ETII_BENCH_NODES`, hors du
- *        chemin de production (pas d'entrée `cli_topics[]`).
+ * @brief Valeur par défaut de `mrv_enabled`.
  *
- * Défaut (absente ou toute valeur différente de `1`) : DÉSACTIVÉ — contraire
- * à `forced_propagation_enabled` (§4.5), ce prototype n'est PAS censé
- * approcher un comportement de production : il choisit à chaque nœud la case
- * vide la plus contrainte au lieu de suivre `directions[]`, ce qui rend les
- * paquets produits non interopérables avec le reste du protocole (la
- * délégation/matérialisation suppose l'ordre fixe). `search_packet_backtracking`
- * bascule vers `search_packet_backtracking_mrv_experiment` (délégation
- * TOUJOURS désactivée dans cette branche, quel que soit l'appelant) quand ce
- * drapeau est levé — voir §4.7 pour le protocole de mesure complet.
+ * **0 (ordre FIXE) pour l'instant — décision de déploiement, pas de mesure.**
+ * L'ordre dynamique (MRV, §4.7 de docs/conception/elagage_recherche.md) est
+ * mesuré favorable sur le critère retenu — le coût de RÉFUTATION (prouver
+ * qu'une possibilité est morte) sur un VRAI stock serveur, à temps CPU égal
+ * (`tests/bench/bench_refutation.c`) : 79 racines fermées sur 120, contre 20
+ * pour l'ordre fixe et 52 pour l'ordre fixe doté du seul balayage global
+ * (`global_dead_check`), soit ~4× plus de stock résolu par seconde de CPU —
+ * mais ce basculement change le moteur de recherche de toute une flotte
+ * déployée, et l'opérateur a demandé du recul avant de l'imposer par défaut.
+ * `ETII_MRV=1` reste le moyen de l'activer sans reconstruire, exactement le
+ * même mécanisme que le repli l'aurait été dans l'autre sens.
+ * NE PAS reprendre l'affirmation « le mur à max_result ≈ 74 était un artefact
+ * de l'ordre fixe » : c'était un artefact du PROTOCOLE de mesure du banc de
+ * débit (mono-processus, depuis la genèse, sans stock ni délégation) — contre
+ * un vrai serveur, un client à ordre fixe atteint 186.
+ */
+#define MRV_DEFAULT_ENABLED 0
+
+/**
+ * @brief Sélectionne l'ordre de variable de la boucle de recherche : DYNAMIQUE
+ *        (MRV, la case vide la plus contrainte à chaque nœud) ou FIXE
+ *        (`directions[]`, le moteur historique) — §4.7 de
+ *        docs/conception/elagage_recherche.md.
+ *
+ * Défaut : `MRV_DEFAULT_ENABLED` (FIXE, cf. sa doc — MRV est mesuré favorable
+ * mais pas encore le défaut de déploiement). La variable d'environnement de
+ * développement `ETII_MRV` (`0` = ordre fixe, `1` = ordre dynamique) est lue
+ * une seule fois au démarrage, comme `ETII_BENCH_NODES`, et n'a donc pas
+ * d'entrée dans `cli_topics[]` : elle sert aux mesures A/B du banc (protocole
+ * §7 : chaque piste se mesure PAR-DESSUS la précédente) et à activer MRV sans
+ * reconstruire, jamais comme réglage d'exploitation courant.
+ *
+ * Les deux moteurs sont interopérables : `search_packet_backtracking_mrv`
+ * re-canonise tout paquet délégué (`bt_canonicalize_packet`), si bien qu'un
+ * client MRV, un client à ordre fixe et un pruner peuvent se partager le même
+ * serveur — aucun bump de `VERSION` (§5).
  */
 extern int mrv_enabled;
+
+/**
+ * @brief Arme le balayage GLOBAL de case morte dans le moteur à ordre FIXE —
+ *        expérience d'ABLATION, jamais un réglage d'exploitation (défaut 0).
+ *
+ * Les deux moteurs confondent deux axes indépendants : l'ordre fixe va toujours
+ * avec une détection de case morte LOCALE (les 4 voisines, `bt_forward_check`),
+ * l'ordre dynamique toujours avec une détection GLOBALE (le balayage de
+ * `mrv_choose_cell` voit toute case morte du plateau, où qu'elle soit). Comparer
+ * ces deux-là ne dit donc pas lequel des deux axes produit l'effet mesuré.
+ * Ce drapeau remplit la case manquante : ordre fixe + détection globale, en
+ * appelant exactement le même balayage que MRV et en JETANT le choix de case.
+ *
+ * Coût nul quand il vaut 0 (le miroir 64 bits des pièces utilisées n'est même
+ * pas entretenu). Lu par `search_packet_backtracking_core` uniquement — le
+ * moteur MRV fait déjà ce test par construction. Utilisé par
+ * `tests/bench/bench_refutation.c` ; aucune entrée `cli_topics[]`, aucune
+ * commande console.
+ */
+extern int global_dead_check;
 
 /**
  * @brief Parse `ETII_MRV` en drapeau d'activation. Fonction pure et testable.
  *
  * @param env_value Valeur de la variable d'environnement, ou NULL si absente.
- * @return 1 si `env_value` vaut exactement "1", 0 sinon (y compris absente).
+ * @return 0 si `env_value` vaut exactement "0", 1 s'il vaut exactement "1",
+ *         `MRV_DEFAULT_ENABLED` sinon (absente ou valeur non reconnue : jamais
+ *         de bascule silencieuse hors du défaut du programme).
  */
 int mrv_parse_env(const char *env_value);
 

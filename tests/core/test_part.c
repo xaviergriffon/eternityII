@@ -742,6 +742,83 @@ TEST packed_index_matches_flat_for_every_key(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * Index des masques d'ids `bucket_id_mask` (§4.7, choix de case MRV)
+ *
+ * Troisième représentation redondante du même `flat`, comme `packed` : le
+ * contrat, et donc l'objet de ces tests, est l'ÉQUIVALENCE STRICTE avec un
+ * comptage par parcours du compartiment. Une divergence changerait
+ * silencieusement la case choisie par MRV — et, pire, le test de mort
+ * (« zéro pièce libre ») qui, lui, élague pour de bon.
+ * ------------------------------------------------------------------------ */
+
+/* Équivalence exhaustive : pour CHAQUE clé, le nombre d'ids distincts du
+ * masque (popcount) est celui obtenu en parcourant le compartiment, et ce pour
+ * plusieurs masques de pièces utilisées (aucune, une sur deux, toutes). */
+/* Borne large des ids de la fixture (7 pièces) : le masque n'en a besoin que
+ * d'un mot, et `used` en réserve 8 — aucune hypothèse sur ETERN_PARTS. */
+#define MASK_TEST_MAX_ID 64
+
+TEST bucket_id_mask_matches_flat_for_every_key(void)
+{
+    map_big_array *map = prepare_map_part(make_varied_parts());
+    ASSERT(map->packed != NULL);
+    ASSERT(map->bucket_id_mask != NULL);
+    ASSERT(map->id_mask_words > 0);
+
+    int words = map->id_mask_words;
+    /* Trois états de plateau : rien d'utilisé, un id sur deux, tout utilisé. */
+    for (int scenario = 0; scenario < 3; scenario++) {
+        uint64_t used[8] = {0};
+        int used_flags[MASK_TEST_MAX_ID + 1];
+        for (int id = 1; id <= MASK_TEST_MAX_ID; id++) {
+            int is_used = (scenario == 2) || (scenario == 1 && (id % 2) == 0);
+            used_flags[id] = is_used;
+            if (is_used) {
+                used[(id - 1) / 64] |= (uint64_t)1 << ((id - 1) % 64);
+            }
+        }
+
+        int m = map->sizearray;
+        long non_empty = 0;
+        for (int k1 = 0; k1 < m; k1++)
+            for (int k2 = 0; k2 < m; k2++)
+                for (int k3 = 0; k3 < m; k3++)
+                    for (int k4 = 0; k4 < m; k4++) {
+                        key_part key = { .k1 = (int8_t)k1, .k2 = (int8_t)k2,
+                                         .k3 = (int8_t)k3, .k4 = (int8_t)k4 };
+                        struct array_part *ref = get_parts_bigarray_with_key(map, &key);
+                        const uint64_t *mask = map_bucket_id_mask(map, &key);
+                        if (ref->size == 0) {
+                            /* Compartiment vide : pas de masque (l'appelant
+                             * doit retomber sur le parcours, jamais conclure). */
+                            ASSERT(mask == NULL);
+                            continue;
+                        }
+                        ASSERT(mask != NULL);
+                        non_empty++;
+
+                        /* Référence : ids DISTINCTS et libres du compartiment. */
+                        int seen[MASK_TEST_MAX_ID + 1];
+                        memset(seen, 0, sizeof(seen));
+                        int expected = 0;
+                        for (int s = 0; s < ref->size; s++) {
+                            int id = ref->parts[s].id;
+                            if (id <= 0 || id > MASK_TEST_MAX_ID || seen[id] || used_flags[id]) {
+                                continue;
+                            }
+                            seen[id] = 1;
+                            expected++;
+                        }
+                        ASSERT_EQ_FMT(expected, map_mask_free_count(mask, words, used), "%d");
+                    }
+        ASSERT(non_empty > 0);
+    }
+
+    free_bigarray(map);
+    PASS();
+}
+
 /* Cas limites : compartiment vide (taille 0) et plus gros compartiment
  * (celui de la clé tout-joker, qui contient toutes les rotations). */
 TEST packed_index_handles_empty_and_largest_bucket(void)
@@ -871,6 +948,7 @@ SUITE(part_suite)
     RUN_TEST(free_bigarray_with_null_arena);
     RUN_TEST(check_array_handles_valid_and_null);
     RUN_TEST(packed_index_matches_flat_for_every_key);
+    RUN_TEST(bucket_id_mask_matches_flat_for_every_key);
     RUN_TEST(packed_index_handles_empty_and_largest_bucket);
     RUN_TEST(packed_index_falls_back_to_flat_when_absent);
     RUN_TEST(map_packed_fits_detects_capacity_overflow);

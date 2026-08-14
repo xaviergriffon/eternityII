@@ -240,6 +240,19 @@ test-256:
 	gcc $(TEST_CFLAGS) $(TEST_SANFLAGS) -pthread -o $(TEST_BIN) $(TEST_SRCS) $(TEST_MODULES) -lm
 	./$(TEST_BIN)
 
+# Banc de RÉFUTATION (tests/bench/bench_refutation.c) : coût de la PREUVE qu'un
+# sous-arbre est mort, à racine identique entre les deux ordres de parcours.
+# Compilé en -O3 (comme la production) : c'est un banc, pas une suite de tests —
+# il n'est donc PAS rattaché à `make test`. etii_search.c est inclus par la TU du
+# banc, exactement comme dans tests/core/test_etii_search.c, d'où son absence de
+# TEST_MODULES.
+BENCH_REFUT_BIN := tests/bench/bench_refutation
+
+.PHONY: bench-refutation
+bench-refutation:
+	gcc -Wall -std=gnu99 -O3 -Isrc -pthread -o $(BENCH_REFUT_BIN) tests/bench/bench_refutation.c $(TEST_MODULES) -lm
+	./$(BENCH_REFUT_BIN) $(BENCH_REFUT_ARGS)
+
 # Fonctions pures du banc de mesure (tests/bench/bench_lib.sh) : pas de C, donc
 # hors des suites greatest, mais rattaché à `make test` pour tourner partout où
 # elles tournent (CI, make test-docker). Ni compilation ni process lancé.

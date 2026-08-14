@@ -710,7 +710,9 @@ TEST mrv_choose_cell_picks_the_most_constrained_cell(void)
     fill_idparts(idParts);
 
     uint8_t x = 255, y = 255;
-    int rc = mrv_choose_cell(&board, C, map, &x, &y);
+    uint64_t used[MRV_USED_WORDS];
+    mrv_used_init(used, &board);
+    int rc = mrv_choose_cell(&board, C, map, used, (int8_t)map->sizearrayM, &x, &y);
 
     ASSERT_EQ_FMT(1, rc, "%d");
     ASSERT_EQ_FMT(0, (int)x, "%d");
@@ -740,7 +742,9 @@ TEST mrv_choose_cell_detects_dead_cell(void)
     map_big_array *map = make_uniform_map(&empty_list);
 
     uint8_t x = 255, y = 255;
-    int rc = mrv_choose_cell(&board, C, map, &x, &y);
+    uint64_t used[MRV_USED_WORDS];
+    mrv_used_init(used, &board);
+    int rc = mrv_choose_cell(&board, C, map, used, (int8_t)map->sizearrayM, &x, &y);
 
     ASSERT_EQ_FMT(0, rc, "%d");
 
@@ -811,6 +815,9 @@ static int build_two_level_fixture(struct possibility_packet *board, bt_level st
 
     stack[0].search = &lvl0_list; stack[0].next_s = 1; stack[0].placed_pos = 0; /* pièce 1 */
     stack[1].search = &lvl1_list; stack[1].next_s = 1; stack[1].placed_pos = 3; /* pièce 4 */
+    /* Case du niveau : en ordre fixe elle vaut dirx[d]/diry[d] (cf. bt_level). */
+    stack[0].x = dirx[0]; stack[0].y = diry[0];
+    stack[1].x = dirx[1]; stack[1].y = diry[1];
 
     memset(client, 0, sizeof(*client));
     client->compteur = 0;
@@ -835,7 +842,7 @@ TEST bt_materialize_pending_orders_deepest_first(void)
 
     struct possibility_packet out[8];
     int new_next_s[2];
-    int n = bt_materialize_pending(&client, &board, stack, top, 0, idParts, out, 8, new_next_s);
+    int n = bt_materialize_pending(&client, &board, stack, top, 0, idParts, out, 8, new_next_s, 0);
 
     /* 3 frères : pièce 5 (niveau 1, le plus profond), puis pièces 2 et 3 (niveau 0). */
     ASSERT_EQ_FMT(3, n, "%d");
@@ -849,6 +856,111 @@ TEST bt_materialize_pending_orders_deepest_first(void)
     /* Positions de reprise consommées : niveau 1 épuisé (2), niveau 0 épuisé (3). */
     ASSERT_EQ_FMT(2, new_next_s[1], "%d");
     ASSERT_EQ_FMT(3, new_next_s[0], "%d");
+
+    PASS();
+}
+
+/* ======================================================================
+ * §4.7 — re-canonisation des paquets délégués en ordre DYNAMIQUE.
+ *
+ * C'est la seule chose que `dynamic_order = 1` change dans la délégation, et
+ * c'est ce qui permet à un client MRV de céder du travail à un client à ordre
+ * FIXE sans toucher au format de paquet (donc sans bump de VERSION).
+ * ====================================================================== */
+
+/* bt_canonicalize_packet : `alloc` doit devenir l'index de la PREMIÈRE case
+ * vide du parcours directions[], quelles que soient les cases remplies
+ * au-delà, et x/y doivent la désigner. */
+TEST bt_canonicalize_packet_uses_first_hole_of_traversal(void)
+{
+    struct possibility_packet pkt;
+    make_empty_board(&pkt);
+    /* Cases remplies HORS ordre de parcours : 0, 1 et 5 (2 reste vide). */
+    pkt.grid[dirx[0]][diry[0]] = 1;
+    pkt.grid[dirx[1]][diry[1]] = 2;
+    pkt.grid[dirx[5]][diry[5]] = 3;
+    pkt.alloc = 0;
+    pkt.x = 200; pkt.y = 200;
+
+    ASSERT_EQ_FMT(0, bt_canonicalize_packet(&pkt), "%d"); /* plateau incomplet */
+    ASSERT_EQ_FMT(2, (int)pkt.alloc, "%d");               /* 1er trou = index 2 */
+    ASSERT_EQ_FMT((int)dirx[2], (int)pkt.x, "%d");
+    ASSERT_EQ_FMT((int)diry[2], (int)pkt.y, "%d");
+    /* La case remplie au-delà du curseur est CONSERVÉE (indice fixe). */
+    ASSERT_EQ_FMT(3, (int)pkt.grid[dirx[5]][diry[5]], "%d");
+    PASS();
+}
+
+/* bt_canonicalize_packet : plateau complet -> 1 (c'est une solution, pas un
+ * travail à déléguer) et `alloc` reste à ETERN_PARTS. */
+TEST bt_canonicalize_packet_detects_complete_board(void)
+{
+    struct possibility_packet pkt;
+    make_empty_board(&pkt);
+    for (int i = 0; i < ETERN_PARTS; i++) {
+        pkt.grid[dirx[i]][diry[i]] = 1;
+    }
+    pkt.alloc = 0;
+
+    ASSERT_EQ_FMT(1, bt_canonicalize_packet(&pkt), "%d");
+    ASSERT_EQ_FMT(ETERN_PARTS, (int)pkt.alloc, "%d");
+    PASS();
+}
+
+/* bt_materialize_pending(dynamic_order = 1) : un niveau dont la case n'est PAS
+ * celle de sa profondeur de pile (ordre MRV) produit des paquets canoniques —
+ * `alloc` désigne le premier trou du parcours (ici 0, la case dirx[0] étant
+ * restée vide), et surtout PAS la profondeur du niveau (qui vaudrait 1 et
+ * décrirait un plateau troué, impossible à reprendre par un client à ordre
+ * fixe). */
+TEST bt_materialize_pending_dynamic_order_emits_canonical_packets(void)
+{
+    drain_local();
+    ensure_counters();
+
+    static struct part cand[2];
+    static struct array_part list;
+    for (int i = 0; i < 2; i++) { memset(&cand[i], 0, sizeof(struct part)); cand[i].id = (int16_t)(i + 6); }
+    list.size = 2; list.parts = cand;
+
+    struct possibility_packet board;
+    make_empty_board(&board);
+
+    /* Un seul niveau, sur une case CHOISIE (index 5 du parcours) : rien n'est
+     * posé avant elle, exactement ce que fait MRV. */
+    bt_level stack[1];
+    stack[0].search = &list;
+    stack[0].next_s = 0;
+    stack[0].placed_pos = -1;
+    stack[0].x = dirx[5];
+    stack[0].y = diry[5];
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof(client));
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    struct possibility_packet out[4];
+    int new_next_s[1];
+    int n = bt_materialize_pending(&client, &board, stack, 0, 0, idParts, out, 4, new_next_s, 1);
+
+    ASSERT_EQ_FMT(2, n, "%d");
+    for (int i = 0; i < n; i++) {
+        /* La pièce est bien posée sur la case CHOISIE… */
+        ASSERT(out[i].grid[dirx[5]][diry[5]] != -2);
+        /* …et le curseur redevient le premier trou du parcours (index 0). */
+        ASSERT_EQ_FMT(0, (int)out[i].alloc, "%d");
+        ASSERT_EQ_FMT((int)dirx[0], (int)out[i].x, "%d");
+        ASSERT_EQ_FMT((int)diry[0], (int)out[i].y, "%d");
+        /* Invariant canonique : plus rien à réparer. */
+        ASSERT_EQ_FMT(0, normalize_possibility_packet(&out[i]), "%d");
+        ASSERT_EQ_FMT(0, (int)out[i].checked, "%d");
+    }
+    ASSERT_EQ_FMT(2, new_next_s[0], "%d"); /* niveau épuisé */
 
     PASS();
 }
@@ -870,7 +982,7 @@ TEST bt_materialize_pending_respects_max_out(void)
 
     struct possibility_packet out[8];
     int new_next_s[2];
-    int n = bt_materialize_pending(&client, &board, stack, top, 0, idParts, out, 1, new_next_s);
+    int n = bt_materialize_pending(&client, &board, stack, top, 0, idParts, out, 1, new_next_s, 0);
 
     ASSERT_EQ_FMT(1, n, "%d");                 /* un seul (le plus profond) */
     ASSERT_EQ_FMT(2, new_next_s[1], "%d");      /* niveau 1 consommé */
@@ -894,7 +1006,7 @@ TEST bt_delegate_noop_below_threshold(void)
     int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
     fill_idparts(idParts);
 
-    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts);
+    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts, 0);
 
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");          /* rien délégué */
     ASSERT_EQ_FMT(3ULL, lastfilesize[0], "%llu");        /* pending = 3 enregistré */
@@ -919,7 +1031,7 @@ TEST bt_delegate_moves_excess_to_local(void)
     int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
     fill_idparts(idParts);
 
-    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts);
+    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts, 0);
 
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");           /* 1 possibilité déléguée */
     ASSERT_EQ_FMT(2, stack[1].next_s, "%d");             /* niveau profond consommé */
@@ -951,7 +1063,7 @@ TEST bt_delegate_reuses_and_grows_buffer(void)
     fill_idparts(idParts);
 
     /* 1er appel : alloue le buffer à la capacité = seuil courant (1). */
-    bt_delegate_if_needed(&client, &board, stack, 1, 0, idParts);
+    bt_delegate_if_needed(&client, &board, stack, 1, 0, idParts, 0);
     ASSERT(client.delegate_buf != NULL);
     ASSERT_EQ_FMT(1, client.delegate_buf_capacity, "%d");
     struct possibility_packet *first_buf = client.delegate_buf;
@@ -960,7 +1072,7 @@ TEST bt_delegate_reuses_and_grows_buffer(void)
     build_two_level_fixture(&board, stack, &client);   /* reset pile/plateau... */
     client.delegate_buf = first_buf;                   /* ...sans perdre le buffer */
     client.delegate_buf_capacity = 1;
-    bt_delegate_if_needed(&client, &board, stack, 1, 0, idParts);
+    bt_delegate_if_needed(&client, &board, stack, 1, 0, idParts, 0);
     ASSERT_EQ(first_buf, client.delegate_buf);         /* même pointeur */
     ASSERT_EQ_FMT(1, client.delegate_buf_capacity, "%d");
 
@@ -970,7 +1082,7 @@ TEST bt_delegate_reuses_and_grows_buffer(void)
     build_two_level_fixture(&board, stack, &client);
     client.delegate_buf = first_buf;
     client.delegate_buf_capacity = 1;
-    bt_delegate_if_needed(&client, &board, stack, 1, 0, idParts);
+    bt_delegate_if_needed(&client, &board, stack, 1, 0, idParts, 0);
     ASSERT(client.delegate_buf_capacity >= 2);          /* capacité suffisante */
 
     free(client.delegate_buf);
@@ -1027,7 +1139,7 @@ TEST bt_delegate_hunger_moves_below_threshold(void)
     int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
     fill_idparts(idParts);
 
-    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts);
+    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts, 0);
 
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");           /* 1 possibilité cédée   */
     ASSERT_EQ_FMT(2, stack[1].next_s, "%d");             /* niveau profond avancé */
@@ -1055,7 +1167,7 @@ TEST bt_flush_pending_sends_all_plus_current(void)
     int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
     fill_idparts(idParts);
 
-    bt_flush_pending(&client, &board, stack, top, 0, idParts);
+    bt_flush_pending(&client, &board, stack, top, 0, idParts, 0);
 
     /* 3 frères matérialisés + 1 paquet « chemin courant » = 4. */
     ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
@@ -1089,6 +1201,8 @@ TEST bt_materialize_skips_no_decision_level_and_zero_id(void)
     bt_level stack[2];
     stack[0].search = NULL;  stack[0].next_s = 0; stack[0].placed_pos = -1;
     stack[1].search = &list; stack[1].next_s = 1; stack[1].placed_pos = 5;
+    stack[0].x = dirx[0]; stack[0].y = diry[0];
+    stack[1].x = dirx[1]; stack[1].y = diry[1];
 
     client_possibility_t client;
     memset(&client, 0, sizeof client);
@@ -1101,7 +1215,7 @@ TEST bt_materialize_skips_no_decision_level_and_zero_id(void)
 
     struct possibility_packet out[4];
     int new_next_s[2];
-    int n = bt_materialize_pending(&client, &board, stack, 1, 0, idParts, out, 4, new_next_s);
+    int n = bt_materialize_pending(&client, &board, stack, 1, 0, idParts, out, 4, new_next_s, 0);
 
     /* Seul id 7 est matérialisé : id 0 sauté, niveau 0 sans décision. */
     ASSERT_EQ_FMT(1, n, "%d");
@@ -1131,7 +1245,7 @@ TEST bt_materialize_dead_map_produces_nothing(void)
 
     struct possibility_packet out[8];
     int new_next_s[2];
-    int n = bt_materialize_pending(&client, &board, stack, top, 0, idParts, out, 8, new_next_s);
+    int n = bt_materialize_pending(&client, &board, stack, top, 0, idParts, out, 8, new_next_s, 0);
 
     ASSERT_EQ_FMT(0, n, "%d");               /* rien produit... */
     ASSERT_EQ_FMT(2, new_next_s[1], "%d");   /* ...mais les candidats sont consommés */
@@ -1157,7 +1271,7 @@ TEST bt_delegate_dead_map_sends_nothing(void)
     int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
     fill_idparts(idParts);
 
-    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts);
+    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts, 0);
 
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* rien envoyé */
     ASSERT_EQ_FMT(1, stack[1].next_s, "%d");     /* pile non consommée */
@@ -1188,7 +1302,7 @@ TEST bt_delegate_error_keeps_stack(void)
     fill_idparts(idParts);
 
     es_silence_std();
-    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts);
+    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts, 0);
     es_restore_std();
 
     ASSERT_EQ_FMT(1, stack[1].next_s, "%d");      /* pile inchangée (pas d'avance) */
@@ -1220,7 +1334,7 @@ TEST bt_flush_error_reputs_locally(void)
     fill_idparts(idParts);
 
     es_silence_std();
-    bt_flush_pending(&client, &board, stack, top, 0, idParts);
+    bt_flush_pending(&client, &board, stack, top, 0, idParts, 0);
     es_restore_std();
 
     /* 3 frères + le chemin courant : tous remis en local malgré l'échec. */
@@ -1260,7 +1374,7 @@ static void mz_child_sibling_solution(void)
     struct possibility_packet out[4];
     int new_next_s[1];
     int n = bt_materialize_pending(&mz_client, &mz_board, mz_stack, 0,
-                                   ETERN_PARTS - 1, mz_idParts, out, 4, new_next_s);
+                                   ETERN_PARTS - 1, mz_idParts, out, 4, new_next_s, 0);
     if (n != 0) exit(50);                       /* la solution n'est pas matérialisée */
     if (new_next_s[0] != 1) exit(51);           /* mais le candidat est consommé */
     if (!es_has_solution_file(".")) exit(52);   /* et elle a été enregistrée */
@@ -1285,6 +1399,7 @@ TEST bt_materialize_sibling_solution_records_and_continues(void)
     mz_cand[0].id = 6;                          /* pièce libre : frère matérialisable */
     mz_list.size = 1; mz_list.parts = mz_cand;
     mz_stack[0].search = &mz_list; mz_stack[0].next_s = 0; mz_stack[0].placed_pos = -1;
+    mz_stack[0].x = dirx[ETERN_PARTS - 1]; mz_stack[0].y = diry[ETERN_PARTS - 1];
 
     fill_idparts(mz_idParts);
 
@@ -1816,6 +1931,180 @@ TEST search_backtracking_mrv_preserves_solution_count(void)
     ASSERT_EQ_FMT(0, code_off, "%d");
     ASSERT(count_off > 0);                       /* le puzzle a bien au moins une solution */
     ASSERT_EQ_FMT(count_off, count_on, "%d");     /* même ensemble, ordre fixe ou MRV */
+
+    free_bigarray(es_client.map_part);
+    free_array_part(es_client.all_rotate_part);
+    PASS();
+}
+
+/* §4.7 — ABLATION « ordre fixe + détection globale » (`global_dead_check`).
+ * Le balayage global rejette une branche dès qu'une case du plateau, où
+ * qu'elle soit, n'a plus aucun candidat : c'est une condition NÉCESSAIRE, donc
+ * il ne doit jamais coûter une seule solution. Même verrou que pour MRV :
+ * exploration exhaustive du vrai puzzle 4×4, drapeau levé puis baissé, même
+ * nombre de solutions. */
+TEST search_backtracking_global_dead_check_preserves_solution_count(void)
+{
+    ensure_counters();
+    ASSERT(es_setup());
+
+    char dir_on[256], dir_off[256];
+    strcpy(dir_on, "/tmp/etii_es_gdc_on_XXXXXX");
+    strcpy(dir_off, "/tmp/etii_es_gdc_off_XXXXXX");
+    ASSERT(mkdtemp(dir_on) != NULL);
+    ASSERT(mkdtemp(dir_off) != NULL);
+
+    int saved_mrv = mrv_enabled;
+    int saved_gdc = global_dead_check;
+    mrv_enabled = 0;                 /* l'ablation porte sur l'ordre FIXE */
+
+    global_dead_check = 1;
+    strcpy(es_solution_dir, dir_on);
+    pid_t pid_on = 0;
+    int code_on = run_in_fork(es_child_full_explore, &pid_on);
+
+    global_dead_check = 0;
+    strcpy(es_solution_dir, dir_off);
+    pid_t pid_off = 0;
+    int code_off = run_in_fork(es_child_full_explore, &pid_off);
+
+    mrv_enabled = saved_mrv;
+    global_dead_check = saved_gdc;
+
+    int count_on = es_count_solution_files(dir_on);
+    int count_off = es_count_solution_files(dir_off);
+    es_unlink_solutions(dir_on);
+    es_unlink_solutions(dir_off);
+    rmdir(dir_on);
+    rmdir(dir_off);
+
+    ASSERT_EQ_FMT(0, code_on, "%d");
+    ASSERT_EQ_FMT(0, code_off, "%d");
+    ASSERT(count_off > 0);
+    ASSERT_EQ_FMT(count_off, count_on, "%d");
+
+    free_bigarray(es_client.map_part);
+    free_array_part(es_client.all_rotate_part);
+    PASS();
+}
+
+/* Drapeau de fin de recherche, lu par le thread d'arrêt (fils du fork : un
+ * seul thread écrit, un seul lit, valeur non composite). */
+static volatile int es_mrv_search_done = 0;
+
+/* Demande l'arrêt dès que la recherche a franchi quelques nœuds, pour que le
+ * renvoi du travail restant (bt_flush_pending) porte sur une VRAIE pile MRV
+ * partiellement explorée, pas sur la seule racine. Sort aussi si la recherche
+ * s'est terminée d'elle-même avant (l'assertion du test reste valide dans les
+ * deux cas — voir la doc du test). */
+static void *es_mrv_stop_requester(void *arg)
+{
+    (void)arg;
+    while (!es_mrv_search_done && counters[0] < 40) {
+        /* attente active : la recherche 4×4 dure des millisecondes */
+    }
+    request = REQUEST_STOP;
+    return NULL;
+}
+
+/* §4.7 — INTEROPÉRABILITÉ de la délégation en ordre dynamique.
+ *
+ * Le point le plus délicat de l'implémentation complète : un client MRV cède
+ * du travail sous forme de `possibility_packet`, et ces paquets doivent être
+ * repris par N'IMPORTE quel moteur — typiquement un client à ordre FIXE. Le
+ * test rejoue exactement ce scénario sur le vrai puzzle 4×4 :
+ *   1. exploration MRV depuis la racine vide, interrompue en cours de route
+ *      (REQUEST_STOP) : le travail restant part dans le stock local ;
+ *   2. reprise du stock, à ordre FIXE (`mrv_enabled = 0`), jusqu'à épuisement,
+ *      en vérifiant au passage que chaque paquet reçu est cohérent
+ *      (`check_possibility`) et déjà canonique (`normalize_possibility_packet`
+ *      n'a rien à réparer) ;
+ *   3. le nombre TOTAL de solutions doit être exactement celui d'une
+ *      exploration exhaustive à ordre fixe.
+ *
+ * Un paquet mal canonisé (curseur `alloc` pointant derrière un trou) ferait
+ * perdre silencieusement les solutions du sous-arbre correspondant : le
+ * comptage serait plus BAS. Si l'arrêt arrive après la fin de la recherche
+ * (course sans conséquence), l'étape 2 ne fait rien et le comptage reste
+ * exact : le test ne peut pas être instable, seulement moins couvrant. */
+static void es_child_mrv_delegating_explore(void)
+{
+    if (chdir(es_solution_dir) != 0) exit(97);
+    stop_on_solution = 0;
+    request = REQUEST_CONTINUE;
+    es_mrv_search_done = 0;
+    mrv_enabled = 1;
+    // Remise à zéro : le compteur est cumulé par les tests précédents du même
+    // processus, et le seuil du thread d'arrêt serait déjà franchi.
+    counters[0] = 0;
+
+    pthread_t stopper;
+    if (pthread_create(&stopper, NULL, es_mrv_stop_requester, NULL) != 0) exit(96);
+    int rc = search_packet_backtracking(&es_client, &es_root, es_idParts);
+    es_mrv_search_done = 1;
+    pthread_join(stopper, NULL);
+    // Arrêt effectivement pris en cours de route : du travail DOIT avoir été
+    // renvoyé, sans quoi l'étape 2 ne prouverait rien.
+    if (rc == 1 && datas_size() == 0) exit(62);
+
+    // Reprise du travail délégué par un moteur à ORDRE FIXE : c'est
+    // précisément l'interopérabilité que la re-canonisation doit garantir.
+    request = REQUEST_CONTINUE;
+    mrv_enabled = 0;
+    for (;;) {
+        array_possibility_packet *r = get_last_possibility(NULL, 64);
+        if (r->size == 0) {
+            free_array_possibility_packet(r);
+            break;
+        }
+        for (int i = 0; i < r->size; i++) {
+            if (check_possibility(&r->possibilities[i], es_client.all_rotate_part) < 0) exit(60);
+            if (normalize_possibility_packet(&r->possibilities[i]) != 0) exit(61);
+            search_packet_backtracking(&es_client, &r->possibilities[i], es_idParts);
+        }
+        free_array_possibility_packet(r);
+    }
+    exit(rc == 0 || rc == 1 ? 0 : 3);
+}
+
+TEST search_backtracking_mrv_delegation_preserves_solution_count(void)
+{
+    ensure_counters();
+    drain_local();
+    ASSERT(es_setup());
+
+    char dir_mrv[256], dir_ref[256];
+    strcpy(dir_mrv, "/tmp/etii_es_mrvdel_XXXXXX");
+    strcpy(dir_ref, "/tmp/etii_es_mrvref_XXXXXX");
+    ASSERT(mkdtemp(dir_mrv) != NULL);
+    ASSERT(mkdtemp(dir_ref) != NULL);
+
+    int saved_mrv = mrv_enabled;
+
+    strcpy(es_solution_dir, dir_mrv);
+    pid_t pid_mrv = 0;
+    int code_mrv = run_in_fork(es_child_mrv_delegating_explore, &pid_mrv);
+
+    mrv_enabled = 0;
+    strcpy(es_solution_dir, dir_ref);
+    pid_t pid_ref = 0;
+    int code_ref = run_in_fork(es_child_full_explore, &pid_ref);
+
+    mrv_enabled = saved_mrv;
+    request = REQUEST_CONTINUE;
+    drain_local();
+
+    int count_mrv = es_count_solution_files(dir_mrv);
+    int count_ref = es_count_solution_files(dir_ref);
+    es_unlink_solutions(dir_mrv);
+    es_unlink_solutions(dir_ref);
+    rmdir(dir_mrv);
+    rmdir(dir_ref);
+
+    ASSERT_EQ_FMT(0, code_mrv, "%d");   /* aucun paquet incohérent ni non canonique */
+    ASSERT_EQ_FMT(0, code_ref, "%d");
+    ASSERT(count_ref > 0);
+    ASSERT_EQ_FMT(count_ref, count_mrv, "%d");
 
     free_bigarray(es_client.map_part);
     free_array_part(es_client.all_rotate_part);
@@ -2746,6 +3035,9 @@ SUITE(etii_search_suite)
     RUN_TEST(mrv_choose_cell_detects_dead_cell);
     RUN_TEST(bt_materialize_pending_orders_deepest_first);
     RUN_TEST(bt_materialize_pending_respects_max_out);
+    RUN_TEST(bt_canonicalize_packet_uses_first_hole_of_traversal);
+    RUN_TEST(bt_canonicalize_packet_detects_complete_board);
+    RUN_TEST(bt_materialize_pending_dynamic_order_emits_canonical_packets);
     RUN_TEST(bt_materialize_skips_no_decision_level_and_zero_id);
 #if FORWARD_CHECK_K > 0
     RUN_TEST(bt_materialize_dead_map_produces_nothing);
@@ -2793,6 +3085,8 @@ SUITE(etii_search_suite)
     RUN_TEST(search_backtracking_solves_4x4_and_returns_zero);
     RUN_TEST(search_backtracking_stop_on_solution_exits_success);
     RUN_TEST(search_backtracking_mrv_preserves_solution_count);
+    RUN_TEST(search_backtracking_mrv_delegation_preserves_solution_count);
+    RUN_TEST(search_backtracking_global_dead_check_preserves_solution_count);
 #endif
 
     RUN_TEST(autosearch_stops_immediately_on_request_stop);
