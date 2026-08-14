@@ -11,8 +11,14 @@ recoupement structurel avec le forward-check, pas une absence de déclenchement)
 stock réel actuel, code conservé (opt-in), pour la même raison structurelle que §4.2/§4.4 :
 voir §4.6b pour la mesure complète. PR 7 (§4.8, ordre des candidats dans l'arène)
 **livrée** — comportement inconditionnel, aucun interrupteur laissé en place (comme §4.1).
-Les pistes 8 et 9 (§4.5, §4.7), ainsi que la variante « partition de l'arène » de §4.2,
-restent des propositions non implémentées.
+PR 8 (§4.5, propagation des cases forcées) implémentée sans concession, testée
+(intégration exhaustive sur le vrai puzzle 4×4, même ensemble de solutions activée/
+désactivée), mesurée et **écartée** — code absent de `master` : −40,4 % de débit, et
+`max_result` légèrement inférieur à débit égal (73 contre 74), le mécanisme recoupant le
+forward-check au point de doubler son coût de lookup par placement sans que la réduction de
+branchement ne compense au mur structurel actuel. La piste 9 (§4.7, ordre dynamique MRV),
+ainsi que la variante « partition de l'arène » de §4.2, restent des propositions non
+implémentées.
 
 ## 1. Question posée
 
@@ -328,26 +334,126 @@ précisément (`fc_pruned_at[]` n'a pas été relevé pour cette piste), mais co
 coût constant pour un gain nul.
 
 **Décision : ne pas merger, garder la piste consignée pour plus tard.** Reprendre
-uniquement si une PR ultérieure de cette série (au premier chef 4.7, l'ordre dynamique, ou
-4.5, la propagation des cases forcées) change la profondeur réellement atteinte : plus le
-plateau se remplit, plus les compartiments de candidats s'amenuisent, et plus un conflit de
-singletons devient a priori probable. Remesurer à ce moment-là plutôt que de raviver ce
-mécanisme en l'état.
+uniquement si une PR ultérieure de cette série change la profondeur réellement atteinte —
+à ce stade, seul 4.7 (l'ordre dynamique) reste candidat : 4.5 (la propagation des cases
+forcées) a été tentée et **ne déplace pas le mur** (mesuré, §4.5 : `max_result` légèrement
+inférieur, pas supérieur, à budget de nœuds égal). Plus le plateau se remplit, plus les
+compartiments de candidats s'amenuisent, et plus un conflit de singletons devient a priori
+probable — remesurer si 4.7 y parvient un jour, plutôt que de raviver ce mécanisme en
+l'état.
 
-### 4.5 Propagation des cases forcées dans la boucle chaude
+### 4.5 Propagation des cases forcées dans la boucle chaude — IMPLÉMENTÉ, MESURÉ, ÉCARTÉ
+
+**Statut : implémenté sans concession, testé, mesuré, abandonné** (code absent de
+`master`). Contrairement à §4.2/§4.4 (compteurs volontairement affaiblis) mais comme §4.3
+(comptage global couleur) : ce n'est pas un problème d'implémentation partielle — le
+mécanisme est correct et déclenche substantiellement — c'est un **coût par nœud qui
+dépasse largement le bénéfice**, et par une marge plus large qu'aucune des pistes
+précédentes de ce document.
 
 **Principe.** Le pruner place les pièces des cases à candidat unique
-([`possibility_all_has_a_next_counted`](../../src/core/possibility.c)) ; **la recherche ne
-le fait pas**. Chaque placement forcé supprime un niveau de branchement *et* resserre les
-clés de ses voisines, ce qui cascade.
+([`possibility_all_has_a_next_counted`](../../src/core/possibility.c)) ; avant cette PR,
+**la recherche ne le faisait pas**. Chaque placement forcé supprime un niveau de
+branchement *et* resserre les clés de ses voisines, ce qui cascade.
 
-**Compatibilité.** Acquise : le format paquet supporte déjà les cases pré-remplies, que le
-moteur traite comme un « niveau sans décision ». Le travail réel est le **défaire** —
-mémoriser dans `bt_level` les positions forcées par niveau pour les libérer au backtrack.
+**Levée de l'ambiguïté `alloc` (préalable, avant toute ligne de code).** Un audit complet
+de tous les sites lisant/écrivant `possibility_packet.alloc` (etii_search.c, possibility.c,
+datamanager.c, best_board.c, le réseau) a confirmé que la sémantique « `alloc` = curseur de
+parcours, PAS un compte de pièces posées » est **déjà** celle du reste du code —
+`check_possibility` exige `faceused >= alloc`, jamais `==` ; `normalize_possibility_packet`
+documente explicitement que « les cases remplies au-delà de `alloc` sont conservées, les
+moteurs les traitent comme des indices fixes » ; `possibility_all_has_a_next_counted`
+(le pruner) pose déjà des pièces forcées hors ordre sans avancer `alloc` sauf plateau
+complet. Aucun site n'utilise `alloc` pour piloter une décision d'exploration — seul
+`alloc >= ETERN_PARTS` (un test de curseur pur, jamais faux tant que la boucle visite
+séquentiellement chaque position) décide quoi que ce soit. La seule zone grise identifiée
+était `max_result`/`best_board_try_record`, qui lisent `board.alloc` comme s'il s'agissait
+du nombre réel de pièces posées — une convention déjà documentée ailleurs dans le code
+(`http_codec.h`, sur le endpoint `/api/v1/best-board` : « BORNE INFÉRIEURE du nombre de
+pièces réellement posées »). La « levée d'ambiguïté » demandée s'est donc résolue en
+**documentation** (un commentaire canonique sur le champ `alloc` dans `possibility.h`, plus
+la note symétrique au site `max_result` d'`etii_search.c`), pas en changement de code —
+aucun consommateur existant n'aurait pu casser.
 
-**Attention.** `alloc` sert à la fois d'index de parcours et de compteur de pièces posées,
-et les placements forcés font diverger les deux (divergence déjà présente aujourd'hui côté
-pruner). Lever l'ambiguïté **avant** cette PR, pas pendant.
+**Implémentation.** `bt_propagate_forced` (nouvelle fonction, `etii_search.c`) : après un
+placement de décision réussi (forward-check compris), une file bornée à `ETERN_PARTS`
+cases est ensemencée avec les voisines géométriques de la case posée — même périmètre que
+`bt_forward_check` (§4.1), jamais un balayage du plateau entier comme le fait le pruner.
+Pour chaque case défilée : si son compartiment (via `map_bucket_packed`, comme le
+forward-check) n'offre plus qu'**exactement un** candidat encore libre, la pièce est posée
+immédiatement, ses propres voisines sont enfilées à leur tour (cascade), et le placement
+est journalisé sur une **piste partagée** `bt_forced_entry trail[ETERN_PARTS]` (position +
+indice faceused). Un `bt_level.forced_start` par niveau (hauteur de la piste à l'entrée du
+niveau) permet un défaire exact et symétrique du placement de décision existant : à chaque
+retour en arrière sur un niveau, les cases forcées **depuis ce niveau** sont défaites en
+même temps que sa propre pièce — bornant strictement la portée de l'annulation à ce que
+CE niveau a produit. `bt_count_pending`/`bt_materialize_pending`/`bt_flush_pending`
+(délégation/renvoi) ont dû être étendues pour dérouler/réappliquer les plages de piste par
+niveau au même titre que `placed_pos`, sans quoi une pièce forcée par un niveau délégué
+resterait marquée « utilisée » dans les paquets frères reconstruits. Aucun faux positif
+possible : une case dont la cascade rencontre une impasse fait rejeter **tout** le
+candidat de décision qui l'a déclenchée (annulation complète, y compris les cases déjà
+forcées par cette même cascade) — condition nécessaire, jamais une heuristique, comme
+l'exige §5.
+
+**Garantie de correction.** Deux niveaux de verrou, comme pour les mécanismes précédents :
+(a) trois tests directs de `bt_propagate_forced` (doit forcer une voisine à candidat
+unique ; ne doit rien toucher à deux candidats libres ; doit défaire intégralement une
+cascade qui rencontre une case morte — plateau, masque et piste restaurés à l'identique) ;
+(b) un test d'intégration bout-en-bout sur le VRAI puzzle 4×4 (`pieces16.csv`) : exploration
+exhaustive depuis la racine vide, deux fois — propagation activée puis désactivée — et
+comparaison du **nombre de solutions enregistrées**, qui doit être rigoureusement
+identique. C'est un verrou plus fort qu'un simple « ça compile et ça ne plante pas » : une
+cascade qui rejetterait à tort une branche menant à une solution se serait traduite par un
+comptage plus bas côté « activée ». Les deux comptages ont coïncidé.
+
+**Mesuré** (`tests/bench/bench_search.sh`, puzzle 256, A/B à ordre alterné, 20 M nœuds × 5,
+interrupteur de développement `ETII_FORCED_PROPAGATION` — même convention que
+`ETII_ARENA_ORDER` pour §4.8, retiré avec le reste du code une fois la mesure faite) :
+
+| Configuration | nœuds/s (médiane par run) | Moyenne sur 2 runs | Taux d'élagage forward-check | `max_result` (20 M nœuds) |
+|---|---|---|---|---|
+| Désactivée (référence post-§4.8) | 10 455 205 | **10 455 205** (1 run) | 42,19 % | 74 |
+| Activée | 6 034 308 / 6 434 443 | **6 234 376** (2 runs) | ≈ 22,89 % | 73 |
+
+**Activée : −40,4 % de débit** par rapport à désactivée (symétriquement, désactiver rapporte
+**+67,7 %**) — un écart largement supérieur à tout ce que ce document a mesuré jusqu'ici, y
+compris §4.3 (−24 %, la piste la plus proche par nature). Et contrairement à un mécanisme
+qui ralentirait sans rien apporter, celui-ci **fait pire que rien à débit égal** :
+`max_result` retombe à **73** au lieu de 74 pour le même budget de 20 M nœuds — non
+seulement le mécanisme coûte cher, mais la progression réelle en pâtit aussi.
+
+Le taux d'élagage forward-check ON (≈ 23 %) est presque exactement la **moitié** de OFF
+(≈ 42 %) : la propagation forcée ne « ne se déclenche jamais » comme §4.2/§4.4 — elle
+intercepte une part énorme de ce que le forward-check aurait autrement détecté lui-même
+(une case forcée dont le seul candidat est en réalité un cas particulier d'une case morte
+détectable plus tard). C'est le même phénomène que §4.3 (« ça tire énormément mais ce n'est
+pas rentable »), en plus marqué : ici la piste **recoupe structurellement le forward-check
+au point de le remplacer à moitié**, pour un coût par placement bien supérieur — chaque
+case examinée par la cascade paie un `map_bucket_packed` de plus, sur un périmètre
+**identique** aux voisines déjà inspectées par `bt_forward_check` juste avant dans le même
+nœud (les deux fonctions ont délibérément été laissées séparées plutôt que fusionnées —
+voir la piste ouverte ci-dessous), doublant de fait le nombre de lookups par placement pour
+un gain de branchement qui ne compense pas au mur structurel actuel (`max_result` ≈ 74/256,
+cf. §4.4/§4.6a/§4.6b) — le même plafond qui explique déjà pourquoi §4.4 et §4.6b ne
+déclenchent jamais : ici le mécanisme déclenche bien, mais sur un arbre encore trop peu
+profond pour que la réduction de branchement rembourse son coût de détection.
+
+**Décision : ne pas merger.** Code entièrement retiré (comme §4.2/§4.3/§4.4), pas conservé
+en configuration opt-in (contrairement à §4.6b, dont le coût est nul une fois désactivé) —
+ici le coût de la vérification `alloc`/documentation était nul, mais le mécanisme
+lui-même n'a aucune valeur mesurée à l'état actuel de l'arbre exploré, et le garder
+« au cas où » ajouterait de la surface (nouveau champ `bt_level`, nouvelle piste partagée,
+signatures étendues de 3 fonctions de délégation) sans bénéfice démontré. **Piste non
+essayée qui pourrait changer la conclusion** : fusionner `bt_propagate_forced` dans
+`bt_forward_check` lui-même (un seul passage sur les voisines, comptant jusqu'à 2 candidats
+au lieu de s'arrêter au premier trouvé, comme le fait déjà la cascade) éliminerait
+le doublon de lookups identifié comme la cause probable du surcoût — non tenté ici par
+prudence sur une fonction déjà très optimisée et abondamment testée (cf. l'historique de
+§4.1), et parce que rien ne garantit que la réduction de coût suffise à combler un écart de
+cette ampleur. À reprendre uniquement avec cette fusion effectivement mesurée, et/ou si
+§4.7 (ordre dynamique MRV) déplace le mur structurel — jamais en réactivant le mécanisme
+séparé en l'état.
 
 ### 4.6 Pruner : du test superficiel à la preuve de mort bornée
 
@@ -490,9 +596,10 @@ redevient pertinent) si une PR ultérieure change la donne. `PRUNER_DFS_BUDGET_D
 donc **0** (désactivé), pas l'ordre de grandeur initialement envisagé — un choix délibéré,
 pas un défaut prudent en attendant un réglage plus fin : aucune valeur de budget ne changerait
 la conclusion tant que la profondeur atteignable reste bornée par ce mur. **À réactiver
-uniquement si 4.5 (propagation des cases forcées) ou 4.7 (ordre dynamique MRV) déplacent ce
-mur significativement plus profond** (cases vides restantes de l'ordre de la dizaine, pas de
-la centaine) — remesurer à ce moment-là avec le même harnais plutôt que de raviver le
+uniquement si 4.7 (ordre dynamique MRV) déplace ce mur significativement plus profond**
+(cases vides restantes de l'ordre de la dizaine, pas de la centaine — 4.5, la propagation
+des cases forcées, a été tentée et ne le déplace pas, cf. §4.5) — remesurer à ce moment-là
+avec le même harnais plutôt que de raviver le
 mécanisme en l'état, exactement la même discipline que la décision de §4.4.
 
 Le mode GPU ([`gpu_pruner.cu`](../../src/app/gpu_pruner.cu)) ne suit pas sur (b) — un DFS
@@ -623,8 +730,8 @@ n'est pas retenu, faute de justification a priori et de signal aussi net.
 - **Pas de conflit de singletons dans l'état actuel de l'arbre exploré.** Implémenté,
   mesuré, reverté (§4.4) : **−9 % de débit, 0 déclenchement** sur 500 M nœuds. Correct
   mais sans effet mesurable tant que la profondeur atteinte reste bornée par le mur
-  structurel à `max_result` ≈ 74 — à remesurer si une PR ultérieure (4.5 ou 4.7) déplace ce
-  mur, pas à raviver en l'état.
+  structurel à `max_result` ≈ 74 — à remesurer si 4.7 déplace ce mur (4.5, tentée, ne le
+  déplace pas, cf. §4.5), pas à raviver en l'état.
 - **Pas de comptage global couleur (implémentation uniforme sur les 23 couleurs).**
   Implémenté SANS concession (compteurs conscients des ancêtres, pas affaiblis comme
   4.2/4.4), mesuré, reverté (§4.3) : **−24 % de débit** malgré un déclenchement massif
@@ -642,8 +749,8 @@ n'est pas retenu, faute de justification a priori et de signal aussi net.
   nœuds). Cas différent de §4.2/§4.3/§4.4 : la garde est gratuite une fois désactivée, donc
   le code reste en configuration opt-in plutôt que d'être retiré — mais le défaut passe à 0
   (désactivé), pas à la valeur initialement envisagée. Cause identique à §4.4 (mur
-  structurel `max_result` ≈ 74) : à remesurer si 4.5/4.7 le déplacent, pas à activer en
-  l'état.
+  structurel `max_result` ≈ 74) : à remesurer si 4.7 le déplace (§4.5, testé, n'y change
+  rien — voir ci-dessous), pas à activer en l'état.
 - **4.8 (ordre des candidats dans l'arène) : `rare_first` adopté, inconditionnel.**
   Mesuré au banc (20 M nœuds × 5 répétitions, A/B à ordre alterné, 3 baselines et 3
   mesures `rare_first` non recouvrantes) : **+3,2 % de débit médian moyen**, taux
@@ -653,6 +760,18 @@ n'est pas retenu, faute de justification a priori et de signal aussi net.
   mais chevauchement partiel avec `rare_first`, signal moins net) : non retenu. Contraste
   avec §4.2/§4.3/§4.4/§4.6b : ici le mécanisme est gratuit ET bénéfique, donc adopté sans
   laisser d'interrupteur — cf. §4.8 pour le détail complet des mesures.
+- **4.5 (propagation des cases forcées) : implémenté sans concession, testé, écarté.**
+  Mesuré au banc (20 M nœuds × 5 répétitions, A/B à ordre alterné) : **−40,4 % de débit**,
+  et `max_result` légèrement inférieur à budget de nœuds égal (73 contre 74) — pire que
+  l'absence du mécanisme, pas seulement plus lent. Cas différent de tous les précédents :
+  le taux d'élagage forward-check ON tombe à la MOITIÉ de OFF (≈23 % contre ≈42 %), preuve
+  que le mécanisme intercepte réellement une grosse part de ce que le forward-check aurait
+  détecté de toute façon — un recoupement structurel comme §4.3, mais avec un coût par
+  placement bien plus élevé (chaque case forcée examinée paie un lookup en plus de celui
+  déjà fait par `bt_forward_check` sur le même périmètre de voisines, les deux fonctions
+  étant restées volontairement séparées). Code entièrement retiré, comme §4.2/§4.3/§4.4 —
+  cf. §4.5 pour le détail complet et la piste de fusion non essayée qui pourrait changer
+  cette conclusion.
 
 ## 6. Points laissés ouverts
 
@@ -702,7 +821,7 @@ recherché ici.
 | 5 | ~~**4.6a** point fixe dans le balayage du pruner~~ **livré** | faible | rentable (mesuré, §4.6a : stock réel 1193→950 en 1 appel contre 2 pour `master`, ~1,7× de surcoût par appel largement absorbé) |
 | 6 | ~~**4.6b** DFS à budget dans le pruner (+ réglage du budget)~~ **implémenté, testé, désactivé par défaut** | moyen | code conservé (opt-in), 0 % de fermeture sur stock réel à n'importe quel budget testé (mesuré, §4.6b) — mur structurel `max_result` ≈ 74, cause identique à §4.4 |
 | 7 | ~~**4.8** ordre des candidats dans l'arène (expérience)~~ **adopté** | faible | `rare_first` adopté inconditionnellement (mesuré, §4.8 : +3,2 %, taux d'élagage changé mais `max_result` inchangé) |
-| 8 | **4.5** propagation des forcées dans la boucle chaude | moyen | après clarification d'`alloc` |
+| 8 | ~~**4.5** propagation des forcées dans la boucle chaude~~ **écarté** | moyen | non rentable (mesuré, §4.5 : −40,4 %, `max_result` inférieur à budget égal) — recoupe le forward-check, coût de lookup doublé sur le même périmètre de voisines |
 | 9 | **4.7** ordre dynamique MRV | élevé | à rouvrir au vu des mesures 1–8 |
 
 L'ordre 1→4 est un ordre de **rapport gain/coût décroissant présumé**, pas une dépendance :
