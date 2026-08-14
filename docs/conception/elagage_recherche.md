@@ -18,8 +18,9 @@ désactivée), mesurée et **écartée** — code absent de `master` : −40,4 %
 forward-check au point de doubler son coût de lookup par placement sans que la réduction de
 branchement ne compense au mur structurel actuel. PR 9 (§4.7, ordre dynamique MRV) :
 **prototype scopé concluant** (délégation désactivée, non déployable en l'état) — `max_result`
-74 → 180 à 5 M nœuds — puis **implémentation complète livrée et ADOPTÉE comme moteur de
-production** (PR 10) : coût du choix de case ramené d'un balayage naïf à une frontière
+74 → 180 à 5 M nœuds — puis **implémentation complète livrée et mesurée favorable** (PR 10)
+(le critère décisif étant le coût de RÉFUTATION sur stock réel, pas `max_result` — voir
+PR 10 pour le détail) : coût du choix de case ramené d'un balayage naïf à une frontière
 comptée par `popcount` (23 k → 812 k nœuds/s), délégation rétablie par re-canonisation des
 paquets émis, `max_result` **186** à 2 M nœuds — voir §4.7. Le « mur structurel » invoqué depuis §4.4
 s'est révélé être un artefact du PROTOCOLE DE MESURE (mono-processus depuis la genèse), pas
@@ -616,14 +617,18 @@ aujourd'hui, exactement la même discipline que la décision de §4.4.
 Le mode GPU ([`gpu_pruner.cu`](../../src/app/gpu_pruner.cu)) ne suit pas sur (b) — un DFS
 divergent par thread convient mal au modèle SIMT. (a) lui est en revanche transposable.
 
-### 4.7 Ordre de variable dynamique (MRV) — ADOPTÉ (PR 10), moteur de production
+### 4.7 Ordre de variable dynamique (MRV) — implémenté et mesuré favorable (PR 10), pas encore le défaut de déploiement
 
-**Statut : ADOPTÉ — c'est le moteur de recherche de production.** Traité en deux temps, ce
-que la section garde en trace parce que le raisonnement de la première étape est ce qui a
-justifié d'investir dans la seconde : un **prototype scopé** d'abord (PR 9, ci-dessous),
-volontairement dégradé (balayage naïf, aucune délégation) mais suffisant pour trancher
-« le levier paie-t-il ? » ; puis l'**implémentation complète** (PR 10, § dédié en fin de
-section) qui lève les deux limites et devient le défaut.
+**Statut : implémenté, testé, mesuré favorable — PAS ENCORE le défaut de déploiement.**
+Traité en deux temps, ce que la section garde en trace parce que le raisonnement de la
+première étape est ce qui a justifié d'investir dans la seconde : un **prototype scopé**
+d'abord (PR 9, ci-dessous), volontairement dégradé (balayage naïf, aucune délégation) mais
+suffisant pour trancher « le levier paie-t-il ? » ; puis l'**implémentation complète**
+(PR 10, § dédié en fin de section) qui lève les deux limites. `mrv_enabled` (`ETII_MRV`,
+`src/app/static_variables.h`) reste à 0 par défaut (`MRV_DEFAULT_ENABLED`) : décision de
+DÉPLOIEMENT, pas verdict de mesure — basculer le défaut change le moteur de recherche de
+toute une flotte déployée, ce qui appelle plus de recul que ce qu'une seule PR peut
+apporter. `ETII_MRV=1` l'active sans reconstruire.
 
 **Principe.** Choisir à chaque nœud la case vide **la plus contrainte** au lieu de suivre
 `directions[]`. C'est le levier le plus massif connu en résolution de CSP, et le seul de
@@ -691,16 +696,20 @@ mais NE PAS l'écarter non plus** — il documente une direction VALIDÉE, pas u
 implémentation complète recommandée comme projet séparé, sur trois axes : (1) cache de
 candidats remplaçant le balayage naïf O(256), (2) re-canonisation aux frontières de
 délégation, (3) arbitrage d'un bump de `VERSION`. **Ces trois axes sont traités ci-dessous
-(PR 10) et le moteur est adopté.**
+(PR 10) et le moteur est implémenté, testé, mesuré favorable — mais le défaut de
+déploiement reste l'ordre fixe.**
 
-#### PR 10 — implémentation complète, ADOPTÉE comme moteur de production
+#### PR 10 — implémentation complète, mesurée favorable (pas encore le défaut)
 
-**Statut : livrée.** `search_packet_backtracking_mrv` (`src/core/etii_search.c`) remplace le
-prototype de mesure ; `mrv_enabled` vaut désormais **1 par défaut**
-(`MRV_DEFAULT_ENABLED`, `static_variables.h`), `ETII_MRV=0` rétablissant l'ordre fixe
-historique pour une mesure A/B ou un repli. Contrairement à §4.1/§4.8 (leviers adoptés
-dont l'interrupteur a été retiré), celui-ci est conservé : le protocole de mesure du banc
-(§7) impose de pouvoir comparer PAR-DESSUS l'état précédent, et `search_packet_backtracking_core`
+**Statut : livrée, mesurée favorable, PAS ENCORE le défaut.**
+`search_packet_backtracking_mrv` (`src/core/etii_search.c`) remplace le prototype de mesure ;
+`mrv_enabled` (`MRV_DEFAULT_ENABLED`, `static_variables.h`) reste à **0** — ordre fixe par
+défaut, décision de DÉPLOIEMENT distincte du verdict de mesure : basculer le défaut change le
+moteur de recherche de toute une flotte déployée, ce qui appelle plus de recul que ce qu'une
+seule PR peut apporter. `ETII_MRV=1` active l'ordre dynamique sans reconstruire. Contrairement
+à §4.1/§4.8 (leviers adoptés dont l'interrupteur a été retiré une fois le défaut basculé),
+l'interrupteur est ici structurel plutôt que temporaire : le protocole de mesure du banc (§7)
+impose de pouvoir comparer PAR-DESSUS l'état précédent, et `search_packet_backtracking_core`
 (ordre fixe) reste de toute façon vivante — c'est elle que rejoue la preuve bornée du
 pruner (§4.6b).
 
@@ -1028,7 +1037,7 @@ n'est pas retenu, faute de justification a priori et de signal aussi net.
   étant restées volontairement séparées). Code entièrement retiré, comme §4.2/§4.3/§4.4 —
   cf. §4.5 pour le détail complet et la piste de fusion non essayée qui pourrait changer
   cette conclusion.
-- **4.7 (ordre dynamique MRV) : ADOPTÉ, moteur de production.** Prototype scopé d'abord
+- **4.7 (ordre dynamique MRV) : implémenté et mesuré favorable, `ETII_MRV=0` reste le défaut de déploiement.** Prototype scopé d'abord
   (PR 9 : `max_result` 74 → **180** à 5 M nœuds, mais −99,7 % de débit et aucune délégation
   possible — conservé sans être déployé), puis implémentation complète (PR 10) : choix de
   case ramené d'un balayage naïf de tout le plateau à la seule frontière comptée par
@@ -1090,7 +1099,7 @@ recherché ici.
 | 7 | ~~**4.8** ordre des candidats dans l'arène (expérience)~~ **adopté** | faible | `rare_first` adopté inconditionnellement (mesuré, §4.8 : +3,2 %, taux d'élagage changé mais `max_result` inchangé) |
 | 8 | ~~**4.5** propagation des forcées dans la boucle chaude~~ **écarté** | moyen | non rentable (mesuré, §4.5 : −40,4 %, `max_result` inférieur à budget égal) — recoupe le forward-check, coût de lookup doublé sur le même périmètre de voisines |
 | 9 | ~~**4.7** ordre dynamique MRV (prototype scopé)~~ **concluant** | élevé | validé (mesuré, §4.7 : `max_result` 74→180 à 5 M nœuds) — délégation désactivée dans le prototype, non déployable en l'état ; cache incrémental + re-canonisation restent à faire |
-| 10 | ~~**4.7** ordre dynamique MRV (implémentation complète)~~ **adopté** | élevé | moteur de production (mesuré, §4.7 : 812 k nœuds/s, `max_result` 74→186 à budget égal) — frontière + `popcount`, re-canonisation des paquets délégués, pas de bump de `VERSION` ; rouvre §4.4/§4.5/§4.6b |
+| 10 | ~~**4.7** ordre dynamique MRV (implémentation complète)~~ **mesuré favorable, défaut inchangé (`ETII_MRV=0`)** | élevé | coût de réfutation ~4× meilleur sur stock réel à CPU égal (§4.7) — frontière + `popcount`, re-canonisation des paquets délégués, pas de bump de `VERSION` ; rouvre §4.4/§4.5/§4.6b ; bascule du défaut de déploiement laissée à l'opérateur |
 
 L'ordre 1→4 est un ordre de **rapport gain/coût décroissant présumé**, pas une dépendance :
 seules 8 (qui suppose `alloc` clarifié) et 9 (à arbitrer en dernier) sont contraintes.

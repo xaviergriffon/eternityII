@@ -426,8 +426,8 @@ TEST mrv_parse_env_absent_or_unknown_returns_default(void)
 
 TEST mrv_parse_env_explicit_values_win(void)
 {
-    ASSERT_EQ_FMT(0, mrv_parse_env("0"), "%d"); /* repli ordre fixe historique */
-    ASSERT_EQ_FMT(1, mrv_parse_env("1"), "%d");
+    ASSERT_EQ_FMT(0, mrv_parse_env("0"), "%d"); /* ordre fixe */
+    ASSERT_EQ_FMT(1, mrv_parse_env("1"), "%d"); /* ordre dynamique (MRV) */
     PASS();
 }
 

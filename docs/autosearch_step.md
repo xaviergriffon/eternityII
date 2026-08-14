@@ -127,7 +127,7 @@ Le débit progresse fortement (moins de lookups par placement : au plus 4 voisin
 
 ### 1.3 quater `mrv_choose_cell` : la case la plus contrainte, pas la suivante du parcours
 
-Depuis §4.7 de [docs/conception/elagage_recherche.md](conception/elagage_recherche.md), le moteur de production ne remplit plus les cases dans l'ordre figé `dirx[]/diry[]` : à chaque nœud il choisit la **case vide la plus contrainte** (MRV, *minimum remaining values*) — celle qui offre le moins de pièces encore libres. C'est `search_packet_backtracking_mrv` (`src/core/etii_search.c`) ; `search_packet_backtracking_core` (ordre fixe) reste en place, utilisée par la preuve bornée du pruner (§4.6b) et accessible pour une mesure A/B via `ETII_MRV=0`.
+Depuis §4.7 de [docs/conception/elagage_recherche.md](conception/elagage_recherche.md), un second moteur de recherche est disponible : au lieu de remplir les cases dans l'ordre figé `dirx[]/diry[]`, il choisit à chaque nœud la **case vide la plus contrainte** (MRV, *minimum remaining values*) — celle qui offre le moins de pièces encore libres. C'est `search_packet_backtracking_mrv` (`src/core/etii_search.c`), activé par `ETII_MRV=1` — mesuré favorable (voir plus bas) mais pas encore le défaut de déploiement. `search_packet_backtracking_core` (ordre fixe) reste le moteur utilisé par défaut (`ETII_MRV=0`, `MRV_DEFAULT_ENABLED`) et celui que rejoue la preuve bornée du pruner (§4.6b).
 
 **Ce que ça change, mesuré** (`tests/bench/bench_search.sh`, puzzle 256, 2 M nœuds × 3 répétitions) :
 

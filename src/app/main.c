@@ -90,11 +90,12 @@ int main(int argc, const char *argv[]) {
     }
 
     // ETII_MRV : ordre de variable de la recherche (§4.7, cf.
-    // static_variables.h). Dynamique (MRV) par défaut ; ETII_MRV=0 rétablit
-    // l'ordre fixe historique, pour une mesure A/B au banc ou un repli.
+    // static_variables.h). Ordre FIXE par défaut (MRV_DEFAULT_ENABLED=0,
+    // décision de déploiement — MRV est mesuré favorable mais pas encore le
+    // défaut) ; ETII_MRV=1 active l'ordre dynamique sans reconstruire.
     mrv_enabled = mrv_parse_env(getenv("ETII_MRV"));
-    if (!mrv_enabled) {
-        log_info("recherche : ordre de parcours FIXE (ETII_MRV=0), moteur historique\n");
+    if (mrv_enabled) {
+        log_info("recherche : ordre de parcours DYNAMIQUE (ETII_MRV=1), moteur MRV\n");
     }
 
     if (argc >= 2 && argv[1] != NULL) {

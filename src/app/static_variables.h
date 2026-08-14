@@ -823,23 +823,25 @@ extern unsigned long long bench_target_nodes;
 unsigned long long bench_parse_nodes_env(const char *env_value);
 
 /**
- * @brief Valeur par défaut de `mrv_enabled` : l'ordre de variable DYNAMIQUE
- *        (MRV) est le moteur de recherche de production depuis §4.7
- *        (docs/conception/elagage_recherche.md).
+ * @brief Valeur par défaut de `mrv_enabled`.
  *
- * Mesuré sur le puzzle 256. Débit : −86,7 % (6,10 M → 0,81 M nœuds/s,
- * `tests/bench/bench_search.sh`). Ce n'est pas la mesure qui décide : le
- * critère retenu est le coût de RÉFUTATION — prouver qu'une possibilité est
- * morte — sur un VRAI stock serveur, à temps CPU égal
+ * **0 (ordre FIXE) pour l'instant — décision de déploiement, pas de mesure.**
+ * L'ordre dynamique (MRV, §4.7 de docs/conception/elagage_recherche.md) est
+ * mesuré favorable sur le critère retenu — le coût de RÉFUTATION (prouver
+ * qu'une possibilité est morte) sur un VRAI stock serveur, à temps CPU égal
  * (`tests/bench/bench_refutation.c`) : 79 racines fermées sur 120, contre 20
  * pour l'ordre fixe et 52 pour l'ordre fixe doté du seul balayage global
- * (`global_dead_check`), soit ~4× plus de stock résolu par seconde de CPU.
+ * (`global_dead_check`), soit ~4× plus de stock résolu par seconde de CPU —
+ * mais ce basculement change le moteur de recherche de toute une flotte
+ * déployée, et l'opérateur a demandé du recul avant de l'imposer par défaut.
+ * `ETII_MRV=1` reste le moyen de l'activer sans reconstruire, exactement le
+ * même mécanisme que le repli l'aurait été dans l'autre sens.
  * NE PAS reprendre l'affirmation « le mur à max_result ≈ 74 était un artefact
- * de l'ordre fixe » : c'était un artefact du PROTOCOLE de mesure du banc
- * (mono-processus, depuis la genèse, sans stock ni délégation) — contre un
- * vrai serveur, un client à ordre fixe atteint 186.
+ * de l'ordre fixe » : c'était un artefact du PROTOCOLE de mesure du banc de
+ * débit (mono-processus, depuis la genèse, sans stock ni délégation) — contre
+ * un vrai serveur, un client à ordre fixe atteint 186.
  */
-#define MRV_DEFAULT_ENABLED 1
+#define MRV_DEFAULT_ENABLED 0
 
 /**
  * @brief Sélectionne l'ordre de variable de la boucle de recherche : DYNAMIQUE
@@ -847,13 +849,13 @@ unsigned long long bench_parse_nodes_env(const char *env_value);
  *        (`directions[]`, le moteur historique) — §4.7 de
  *        docs/conception/elagage_recherche.md.
  *
- * Défaut : `MRV_DEFAULT_ENABLED` (dynamique). La variable d'environnement de
+ * Défaut : `MRV_DEFAULT_ENABLED` (FIXE, cf. sa doc — MRV est mesuré favorable
+ * mais pas encore le défaut de déploiement). La variable d'environnement de
  * développement `ETII_MRV` (`0` = ordre fixe, `1` = ordre dynamique) est lue
  * une seule fois au démarrage, comme `ETII_BENCH_NODES`, et n'a donc pas
- * d'entrée dans `cli_topics[]` : elle n'existe que pour les mesures A/B du
- * banc (protocole §7 : chaque piste se mesure PAR-DESSUS la précédente) et
- * pour revenir au moteur historique sans reconstruire, jamais comme réglage
- * d'exploitation.
+ * d'entrée dans `cli_topics[]` : elle sert aux mesures A/B du banc (protocole
+ * §7 : chaque piste se mesure PAR-DESSUS la précédente) et à activer MRV sans
+ * reconstruire, jamais comme réglage d'exploitation courant.
  *
  * Les deux moteurs sont interopérables : `search_packet_backtracking_mrv`
  * re-canonise tout paquet délégué (`bt_canonicalize_packet`), si bien qu'un
