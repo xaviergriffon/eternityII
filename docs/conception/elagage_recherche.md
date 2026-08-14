@@ -290,14 +290,13 @@ plutôt que les 23 uniformément — non essayé) ET seulement si une mesure ult
 que le recoupement avec le forward-check diminue (ex. après 4.7, l'ordre dynamique, qui
 changerait la forme de l'arbre et donc la proximité entre demande et voisinage).
 
-### 4.4 Conflit de singletons (mini-test de Hall) — IMPLÉMENTÉ, MESURÉ, ÉCARTÉ
+### 4.4 Conflit de singletons (mini-test de Hall) — REMESURÉ SUR STOCK RÉEL POST-PR 10, ÉCARTÉ POUR LA BONNE RAISON
 
-**Statut : évalué et abandonné.** Implémenté dans `bt_forward_check`, mesuré, puis
-**reverté** — code absent de `master`. Ce qui suit est la trace du raisonnement et de la
-mesure, dans le même esprit que le lookup de placement via `packed` (PR #161,
-[autosearch_step.md](../autosearch_step.md)) : une piste correcte et bien motivée peut
-rester sans effet mesurable si la partie de l'arbre où elle jouerait n'est pas encore
-atteinte.
+**Statut : évalué, abandonné, remesuré sur stock réel — décision CONFIRMÉE, raison
+CORRIGÉE.** Implémenté une première fois dans `bt_forward_check`, mesuré à 0
+déclenchement sur le protocole synthétique du banc de débit, puis reverté. Ce qui suit
+d'abord est la trace de ce raisonnement initial ; la correction post-PR 10 (même esprit
+que celles de §4.6b et du « mur à 74 » de §4.7) suit immédiatement après, avant §4.5.
 
 **Principe.** Pendant le balayage du forward-check, retenir les cases dont le nombre de
 candidats **libres** vaut exactement 1, avec l'`id` de cette pièce. Si deux cases exigent
@@ -341,16 +340,66 @@ observés surviennent probablement dès la première voisine inspectée (compart
 précisément (`fc_pruned_at[]` n'a pas été relevé pour cette piste), mais cohérent avec un
 coût constant pour un gain nul.
 
-**Décision : ne pas merger, garder la piste consignée pour plus tard.** Reprendre
-uniquement une fois la profondeur réellement atteinte déplacée — 4.5 (la propagation des
-cases forcées) a été tentée et **ne déplace pas le mur** (mesuré, §4.5 : `max_result`
-légèrement inférieur, pas supérieur, à budget de nœuds égal) ; 4.7 (l'ordre dynamique), lui,
-le déplace massivement dans son prototype (§4.7 : 74 → 180 à 5 M nœuds), mais seulement une
-fois son implémentation complète livrée (le prototype scopé ne délègue pas, donc
-n'atteint jamais le stock réel où cette piste jouerait). Plus le plateau se remplit, plus les
-compartiments de candidats s'amenuisent, et plus un conflit de singletons devient a priori
-probable — remesurer si 4.7 y parvient un jour, plutôt que de raviver ce mécanisme en
-l'état.
+**Décision initiale : ne pas merger, garder la piste consignée pour plus tard.** Reprendre
+uniquement une fois la profondeur réellement atteinte déplacée — remesurer si 4.7 (l'ordre
+dynamique) y parvient un jour, plutôt que de raviver ce mécanisme en l'état. Voir la
+correction ci-dessous : cette prémisse (« ne se déclenche jamais parce que la profondeur
+atteignable reste trop faible ») était fausse, comme pour §4.6b et §4.7.
+
+#### Correction (remesure post-PR 10) : le mécanisme se déclenche bien sur stock réel — mais jamais là où ça compte
+
+**Même erreur de méthode que le « mur à `max_result` ≈ 74 » (§4.7) et la mesure originale de
+§4.6b : le protocole `bench_search.sh` (mono-processus, depuis la genèse) ne construit jamais
+de sous-arbre réellement profond dérivé d'une vraie délégation — il ne peut PAS voir un
+mécanisme qui ne se déclenche que loin dans l'arbre, même si ce mécanisme se déclenche
+réellement ailleurs.** Réimplémenté derrière `singleton_conflict_check`
+(`src/app/static_variables.h`, défaut 0) : contrairement à §4.7/§4.6b, le mécanisme vit dans
+`bt_forward_check`, PARTAGÉ par les deux moteurs de recherche — armé, il s'applique aussi bien
+à l'ordre fixe qu'à MRV, sans code dupliqué. Ajouté au banc de réfutation comme quatrième
+variante (`fixe+singleton`, `tests/bench/bench_refutation.c --engines`).
+
+**Mesure 1 — fermeture bornée (protocole de §4.6b) : le mécanisme tire, sans aucun effet sur
+la fermeture.** Sur 120 racines réelles, budget 5 000 000 nœuds : `fixe` et `fixe+singleton`
+ferment exactement les MÊMES 20 racines, avec des totaux de nœuds identiques au nœud près
+(1 326 277 pour les deux). Pourtant `fc_singleton_conflict` — un compteur direct, pas une
+inférence — rapporte **35 056 déclenchements** sur cette même exécution : le mécanisme tire
+bien, mais exclusivement dans les 100 racines qui dépassent le budget de toute façon, jamais
+dans les 20 qui ferment. Reproduit sur un second stock (client MRV) : 134 565 déclenchements,
+avec cette fois un effet marginal et dans le bruit sur le sous-ensemble commun (−0,06 % de
+nœuds).
+
+**Mesure 2 — débit agrégé sur l'échantillon entier (même instrument que la mesure originale,
+sur stock réel plutôt que synthétique) : coût confirmé, cohérent avec 2024.**
+
+| Stock | `fixe` (nœuds/s) | `fixe+singleton` (nœuds/s) | Delta |
+|---|---|---|---|
+| Client à ordre fixe, 120 racines, budget 5 M | 11 775 963 | 10 500 749 | **−10,8 %** |
+| Même stock, 60 racines, budget 10 M | 10 898 683 | 9 861 136 | **−9,5 %** |
+| Client MRV, 120 racines, budget 5 M | 15 746 462 | 13 949 110 | **−11,4 %** |
+
+Trois mesures indépendantes, deux stocks, un coût de **−9,5 à −11,4 %** — cohérent avec le
+−9 % mesuré à l'origine. La combinaison des deux mesures explique précisément ce que
+l'original ne pouvait pas voir : le mécanisme se déclenche réellement (des dizaines de
+milliers de fois par échantillon), mais uniquement au fond de sous-arbres trop grands pour
+être fermés dans les budgets testés — jamais là où une preuve de fermeture aurait pu en
+profiter — tout en payant son coût de balayage (un deuxième candidat cherché au lieu de
+s'arrêter au premier) sur CHAQUE appel, y compris les ~98 % qui ne mènent à rien.
+
+**Verrous de correction.** Trois tests directs de `bt_forward_check` (doit tirer sur deux
+voisines exigeant le même id ; ne doit jamais tirer sur des ids distincts, même tous deux
+singletons — pas de faux positif ; drapeau bas ⇒ comportement historique inchangé,
+`tests/core/test_etii_search.c`) plus le même verrou d'intégration que §4.7/§4.6b (exhaustif
+4×4, armé/désarmé, même nombre de solutions, sur les DEUX moteurs puisque le drapeau leur est
+commun).
+
+**Décision : la décision de ne pas fusionner ce mécanisme est CONFIRMÉE, mais la raison
+invoquée à l'origine (« ne se déclenche jamais ») est CORRIGÉE.** Contrairement à §4.6b (où
+la correction a RENVERSÉ la conclusion : le mécanisme s'est révélé bénéfique), ici la
+correction affine le diagnostic sans changer le verdict — le plus proche parent de ce
+résultat dans ce document est §4.3 (comptage global couleur : « tire énormément, pas
+rentable »), pas §4.4 tel qu'il était compris jusqu'ici. Code non réintroduit dans le chemin
+de production ; `singleton_conflict_check` reste un drapeau de mesure, comme
+`global_dead_check`.
 
 ### 4.5 Propagation des cases forcées dans la boucle chaude — IMPLÉMENTÉ, MESURÉ, ÉCARTÉ
 
@@ -902,13 +951,17 @@ fixe plafonne à 74. Ce qui est faux : en déduire une propriété des moteurs h
 Conséquence directe : les décisions de §4.4 et §4.6b, motivées par « la profondeur atteinte
 est trop faible pour que ce mécanisme joue », reposaient sur une profondeur mesurée dans ces
 conditions-là — à remesurer sur du stock réel (le banc de réfutation le fait déjà : l'ordre
-fixe y ferme 20 racines sur 120, ce que §4.6b concluait impossible).
+fixe y ferme 20 racines sur 120, ce que §4.6b concluait impossible). **Fait depuis** : §4.4 a
+été remesuré (correction dans sa propre section — le mécanisme tire réellement sur stock réel,
+mais jamais dans les sous-arbres fermables, décision confirmée) et §4.6b aussi (correction
+inverse : mesurément bénéfique). §4.5 (propagation des cases forcées) reste non remesuré.
 
-**Ce que cette adoption rouvre.** §4.4 (conflit de singletons), §4.5 (propagation des cases
+**Ce que cette adoption a rouvert.** §4.4 (conflit de singletons), §4.5 (propagation des cases
 forcées) et §4.6b (DFS à budget du pruner) ont tous les trois été écartés ou désactivés pour
 la MÊME raison : le mur structurel à `max_result` ≈ 74 les rendait soit muets (0
-déclenchement), soit non rentables. Ce mur vient de bouger d'un facteur 2,5. Les trois sont
-à REMESURER dans ce nouveau régime, avec le même protocole que la première fois (§7 :
+déclenchement), soit non rentables. Ce mur vient de bouger d'un facteur 2,5. §4.4 et §4.6b ont
+été remesurés depuis (voir leurs sections). §4.5 reste à REMESURER, avec le même protocole que
+la première fois (§7 :
 par-dessus l'état courant, jamais contre `master`) — §4.6b en particulier, dont le code est
 resté en place derrière `pruner_dfs_budget` justement pour ce cas de figure.
 
@@ -1019,12 +1072,16 @@ n'est pas retenu, faute de justification a priori et de signal aussi net.
   (cf. [autosearch_step.md](../autosearch_step.md)) — le forward-check réussit ~54 % du
   temps, donc la majorité des cases inspectées paieraient deux accès aléatoires au lieu
   d'un.
-- **Pas de conflit de singletons dans l'état actuel de l'arbre exploré.** Implémenté,
-  mesuré, reverté (§4.4) : **−9 % de débit, 0 déclenchement** sur 500 M nœuds. Correct
-  mais sans effet mesurable tant que la profondeur atteinte reste bornée par le mur
-  structurel à `max_result` ≈ 74 — à remesurer une fois l'implémentation complète de 4.7
-  livrée (son prototype déplace déjà ce mur, cf. §4.7 ; 4.5, tentée, ne le déplace pas, cf.
-  §4.5), pas à raviver en l'état aujourd'hui.
+- **Pas de conflit de singletons — CONFIRMÉ sur stock réel, raison originale CORRIGÉE
+  (§4.4).** Implémenté, mesuré une première fois à −9 % de débit / 0 déclenchement sur le
+  protocole synthétique, reverté. Remesuré post-PR 10 sur stock réel via le banc de
+  réfutation (`--engines fixe+singleton`) : le mécanisme tire réellement (35 056 à 134 565
+  déclenchements selon le stock, sur des échantillons de 120 racines) mais EXCLUSIVEMENT
+  dans des sous-arbres trop grands pour fermer dans les budgets testés — jamais d'effet sur
+  le sous-ensemble de racines réellement fermées. Coût confirmé sur trois mesures
+  indépendantes : −9,5 à −11,4 % de débit agrégé, cohérent avec la mesure de 2024. Décision
+  inchangée (ne pas fusionner), diagnostic corrigé (« ne se déclenche jamais » → « se
+  déclenche mais jamais là où ça compte »).
 - **Pas de comptage global couleur (implémentation uniforme sur les 23 couleurs).**
   Implémenté SANS concession (compteurs conscients des ancêtres, pas affaiblis comme
   4.2/4.4), mesuré, reverté (§4.3) : **−24 % de débit** malgré un déclenchement massif
@@ -1089,9 +1146,10 @@ n'est pas retenu, faute de justification a priori et de signal aussi net.
   la mauvaise pièce d'être candidate plutôt qu'en la rejetant après coup.
 - ~~**4.1 : garder ou non la fenêtre `c+1 … c+2` ?**~~ Tranché : non — voir §4.1, mesure à
   l'appui (−0,06 point de taux d'élagage sans la fenêtre résiduelle, effet négligeable).
-- ~~**4.4 : le conflit de singletons est-il rentable ?**~~ Tranché : non, dans l'état actuel
-  de l'arbre exploré — voir §4.4, implémenté/mesuré/reverté (−9 % de débit, 0
-  déclenchement sur 500 M nœuds).
+- ~~**4.4 : le conflit de singletons est-il rentable ?**~~ Tranché deux fois : non, en 2024
+  sur protocole synthétique (0 déclenchement, −9 %) ; **remesuré post-PR 10 sur stock réel**
+  (§4.4) — il se déclenche bien (dizaines de milliers de fois par échantillon) mais jamais
+  dans un sous-arbre fermable, coût confirmé (−9,5 à −11,4 %). Même verdict, raison corrigée.
 - ~~**4.3 : le test tire-t-il jamais ?**~~ Tranché : il tire ÉNORMÉMENT (≈47-49 % de tous
   les élagages inline) — mais §4.3, non rentable quand même : −24 % de débit, car il
   recoupe structurellement ce que le forward-check trouvait déjà, pour un coût de tenue à
@@ -1122,7 +1180,7 @@ recherché ici.
 | PR | Contenu | Risque | Décision attendue |
 |---|---|---|---|
 | 1 | ~~**4.1** forward-check sur les voisines (+ réétiquetage de `fc_pruned_at[]`, + A/B)~~ **livré** | faible | pas de fenêtre résiduelle (mesuré, §4.1) |
-| 2 | ~~**4.4** conflit de singletons dans le même balayage~~ **écarté** | faible | non rentable (mesuré, §4.4 : −9 %, 0 déclenchement) |
+| 2 | ~~**4.4** conflit de singletons dans le même balayage~~ **écarté, raison corrigée post-PR 10** | faible | remesuré sur stock réel (§4.4) : se déclenche réellement (35 k–135 k fois/échantillon) mais jamais dans un sous-arbre fermable ; coût confirmé −9,5 à −11,4 % |
 | 3 | ~~**4.2** contrainte de type coin/bord/intérieur (compteurs)~~ **écarté** | faible | non rentable (mesuré, §4.2 : −14 %, 0 déclenchement) ; partition de l'arène reste ouverte |
 | 4 | ~~**4.3** comptage global couleur (implémentation complète)~~ **écarté** | faible | non rentable (mesuré, §4.3 : −24 %, recoupe le forward-check malgré ≈47-49 % de déclenchement) |
 | 5 | ~~**4.6a** point fixe dans le balayage du pruner~~ **livré** | faible | rentable (mesuré, §4.6a : stock réel 1193→950 en 1 appel contre 2 pour `master`, ~1,7× de surcoût par appel largement absorbé) |

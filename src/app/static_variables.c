@@ -37,6 +37,7 @@ uint8_t diry[ETERN_PARTS] = {0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3};
 volatile unsigned long long fc_pruned = 0;
 volatile unsigned long long fc_attempts = 0;
 volatile unsigned long long fc_pruned_at[FC_STAT_MAX_K + 1] = {0};
+volatile unsigned long long fc_singleton_conflict = 0;
 #endif // FORWARD_CHECK_K > 0
 
 int pruner_mode = 0;
@@ -202,6 +203,8 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
 int mrv_enabled = MRV_DEFAULT_ENABLED;
 
 int global_dead_check = 0;
+
+int singleton_conflict_check = 0;
 
 int mrv_parse_env(const char *env_value)
 {

@@ -165,7 +165,9 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
  * @param mapParts    Table de lookup.
  * @param cx          Colonne de la pièce qu'on vient de placer.
  * @param cy          Ligne de la pièce qu'on vient de placer.
- * @return            1 si toutes les voisines vides ont au moins une pièce candidate, 0 sinon.
+ * @return            1 si toutes les voisines vides ont au moins une pièce candidate
+ *                    (et, si `singleton_conflict_check` est levé, qu'aucune paire de
+ *                    voisines n'exige la même pièce comme unique candidat), 0 sinon.
  */
 static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
                             struct possibility_packet *board,
@@ -188,6 +190,12 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
     // à l'élagage : ce n'est plus une distance de parcours, cf. son commentaire
     // dans static_variables.h.
     int rank = 0;
+
+    // §4.4 (conflit de singletons, cf. singleton_conflict_check) : ids des
+    // voisines dont l'UNIQUE candidat libre a déjà été vu dans CE balayage
+    // (au plus 4 entrées, une par voisine). Non touché si le drapeau est bas.
+    int16_t singleton_ids[4];
+    int nb_singletons = 0;
 
     for (int i = 0; i < n; i++) {
         int8_t x = nx[i];
@@ -212,19 +220,54 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
             return 0;
         }
 
-        // Vérifier qu'au moins une pièce candidate n'est pas déjà utilisée ailleurs
-        int found = 0;
-        for (int s = 0; s < search.size; s++) {
+        if (!singleton_conflict_check) {
+            // Chemin historique : s'arrête au premier candidat libre trouvé.
+            int found = 0;
+            for (int s = 0; s < search.size; s++) {
+                if (search.parts[s].id != 0 && !BOARD_FACE_USED(board, search.parts[s].id - 1)) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                // case morte : toutes les pièces candidates sont déjà utilisées
+                __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+                return 0;
+            }
+            continue;
+        }
+
+        // §4.4 : compte jusqu'à 2 candidats libres — assez pour distinguer
+        // « singleton » de « pas singleton », inutile d'aller plus loin.
+        int16_t first_free_id = 0;
+        int free_count = 0;
+        for (int s = 0; s < search.size && free_count < 2; s++) {
             if (search.parts[s].id != 0 && !BOARD_FACE_USED(board, search.parts[s].id - 1)) {
-                found = 1;
-                break;
+                if (free_count == 0) {
+                    first_free_id = search.parts[s].id;
+                }
+                free_count++;
             }
         }
-        if (!found) {
+        if (free_count == 0) {
             // case morte : toutes les pièces candidates sont déjà utilisées
             __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
             __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
             return 0;
+        }
+        if (free_count == 1) {
+            // Voisine à candidat UNIQUE : conflit si une autre voisine de ce
+            // même balayage exige déjà la même pièce (théorème de Hall, |S|=2).
+            for (int k = 0; k < nb_singletons; k++) {
+                if (singleton_ids[k] == first_free_id) {
+                    __atomic_fetch_add(&fc_singleton_conflict, 1, __ATOMIC_RELAXED);
+                    __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
+                    __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+                    return 0;
+                }
+            }
+            singleton_ids[nb_singletons++] = first_free_id;
         }
     }
 

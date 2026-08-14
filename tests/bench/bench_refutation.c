@@ -111,13 +111,14 @@ static double now_seconds(void)
 /**
  * @brief Une variante de moteur à comparer.
  *
- * Les deux axes sont volontairement SÉPARÉS, parce que les deux moteurs
- * historiques les confondent : l'ordre fixe va toujours avec une détection de
- * case morte LOCALE (les 4 voisines, `bt_forward_check`), l'ordre dynamique
- * toujours avec une détection GLOBALE (le balayage de `mrv_choose_cell` voit
- * toute case morte du plateau). Tant qu'on ne compare que ces deux-là, on ne
- * peut pas savoir lequel des deux axes produit l'effet mesuré — d'où la
- * troisième variante, « ordre fixe + détection globale ».
+ * Trois axes, volontairement SÉPARÉS : les deux moteurs historiques
+ * confondaient ordre de parcours et portée de la détection de case morte
+ * (fixe = LOCALE, 4 voisines via `bt_forward_check` ; dynamique = GLOBALE,
+ * tout le plateau via `mrv_choose_cell`) — `global_check` isole cet axe en
+ * armant le balayage global sur l'ordre fixe (§4.7, ablation). `singleton_check`
+ * est un troisième mécanisme, orthogonal aux deux premiers puisqu'il vit dans
+ * `bt_forward_check`, donc actif pour les deux moteurs dès qu'il est levé
+ * (§4.4, conflit de singletons / théorème de Hall |S|=2).
  */
 typedef struct {
     const char *name;
@@ -125,6 +126,8 @@ typedef struct {
     int dynamic;
     /** 1 : ajoute le balayage global de case morte à l'ordre fixe (sans effet si `dynamic`). */
     int global_check;
+    /** 1 : arme le conflit de singletons dans bt_forward_check (§4.4, les deux moteurs). */
+    int singleton_check;
 } engine_t;
 
 /** @brief Résultat d'une tentative de fermeture. */
@@ -154,6 +157,7 @@ static closure_t close_subtree(const struct possibility_packet *root, const engi
     max_result = 0;
     request = REQUEST_CONTINUE;
     global_dead_check = eng->global_check;
+    singleton_conflict_check = eng->singleton_check;
 
     unsigned long long nodes = 0;
     double t0 = now_seconds();
@@ -163,6 +167,7 @@ static closure_t close_subtree(const struct possibility_packet *root, const engi
     out.seconds = now_seconds() - t0;
     out.nodes = nodes;
     global_dead_check = 0;
+    singleton_conflict_check = 0;
     return out;
 }
 
@@ -255,12 +260,18 @@ typedef struct {
 static void print_tally(const engine_t *engines, int nb, const tally_t *t, int roots,
                         const tally_t *common, int nb_common)
 {
-    printf("\n%-14s %8s %8s %14s %16s\n",
-           "moteur", "fermées", "sur", "temps total", "fermetures/s");
+    // Débit AGRÉGÉ (toutes racines confondues, fermées ou non) : c'est
+    // l'équivalent, sur stock RÉEL, du nœuds/s de tests/bench/bench_search.sh
+    // — la mesure qui répond à « ce mécanisme change-t-il l'efficacité de la
+    // boucle chaude elle-même ? », distincte de la question de fermeture
+    // bornée ci-dessous (§4.6b vs §4.4 : deux questions, deux instruments).
+    printf("\n%-14s %8s %8s %14s %16s %16s\n",
+           "moteur", "fermées", "sur", "temps total", "fermetures/s", "nœuds/s (total)");
     for (int e = 0; e < nb; e++) {
-        printf("%-14s %8d %8d %12.3f s %16.2f\n",
+        printf("%-14s %8d %8d %12.3f s %16.2f %16.0f\n",
                engines[e].name, t[e].closed, roots, t[e].seconds,
-               t[e].seconds > 0 ? (double)t[e].closed / t[e].seconds : 0.0);
+               t[e].seconds > 0 ? (double)t[e].closed / t[e].seconds : 0.0,
+               t[e].seconds > 0 ? (double)t[e].nodes / t[e].seconds : 0.0);
     }
     // Le tableau ci-dessus est biaisé par le plafond : un moteur qui renonce
     // vite dépense peu de temps sur les racines qu'il ne ferme pas, et son
@@ -287,7 +298,7 @@ static void usage(void)
            "  --kpi <n>          mode KPI : échantillonne n racines RÉGULIÈREMENT réparties dans le\n"
            "                     .back (aucun filtre de profondeur — c'est ce que le serveur sert\n"
            "                     réellement), n'imprime que le bilan fermetures/seconde\n"
-           "  --engines <liste>  moteurs à comparer parmi fixe,fixe+global,mrv (défaut : tous)\n"
+           "  --engines <liste>  moteurs à comparer parmi fixe,fixe+global,fixe+singleton,mrv (défaut : tous)\n"
            "  --pruner-profile <n> rejoue le VRAI pipeline du pruner (autoprune_step) sur n\n"
            "                     possibilités échantillonnées régulièrement dans le .back :\n"
            "                     part morte au contrôle superficiel seul, part fermée par la\n"
@@ -309,13 +320,14 @@ int main(int argc, char **argv)
     int depths[MAX_DEPTHS] = {150, 165, 175, 180, 185};
     int nb_depths = 5;
 
-    engine_t all_engines[3] = {
-        { "fixe",        0, 0 },
-        { "fixe+global", 0, 1 },
-        { "MRV",         1, 0 },
+    engine_t all_engines[4] = {
+        { "fixe",           0, 0, 0 },
+        { "fixe+global",    0, 1, 0 },
+        { "fixe+singleton", 0, 0, 1 },
+        { "MRV",            1, 0, 0 },
     };
-    engine_t engines[3];
-    int nb_engines = 3;
+    engine_t engines[4];
+    int nb_engines = 4;
     memcpy(engines, all_engines, sizeof(all_engines));
 
     for (int i = 1; i < argc; i++) {
@@ -332,7 +344,7 @@ int main(int argc, char **argv)
             nb_engines = 0;
             char *copy = strdup(argv[++i]);
             for (char *tok = strtok(copy, ","); tok != NULL; tok = strtok(NULL, ",")) {
-                for (int e = 0; e < 3; e++) {
+                for (int e = 0; e < 4; e++) {
                     if (strcmp(tok, all_engines[e].name) == 0) {
                         engines[nb_engines++] = all_engines[e];
                     }
@@ -376,11 +388,11 @@ int main(int argc, char **argv)
     printf("\nbanc de réfutation : coût de la PREUVE qu'un sous-arbre est mort\n");
     printf("pièces : %s   plafond : %ld nœuds par racine et par moteur\n", pieces, budget);
 
-    tally_t tally[3], common[3];
+    tally_t tally[4], common[4];
     memset(tally, 0, sizeof(tally));
     memset(common, 0, sizeof(common));
     int nb_common = 0;
-    closure_t res[3];
+    closure_t res[4];
     int roots_done = 0;
 
     if (pruner_profile > 0) {
@@ -587,6 +599,18 @@ int main(int argc, char **argv)
     }
 
     print_tally(engines, nb_engines, tally, roots_done, common, nb_common);
+
+    // Compteur global exact plutôt qu'une inférence par comptage de nœuds :
+    // répond directement à « ce mécanisme s'est-il seulement déclenché ? »
+    // (§4.4), la question que §4.4/§4.6b ont montré ne pas pouvoir se
+    // trancher sur un protocole non représentatif.
+    for (int e = 0; e < nb_engines; e++) {
+        if (engines[e].singleton_check) {
+            printf("\nfc_singleton_conflict (%s) : %llu déclenchement(s) sur cette exécution\n",
+                   engines[e].name, (unsigned long long)fc_singleton_conflict);
+            break;
+        }
+    }
 
     free_bigarray(map);
     free_array_part(rot);

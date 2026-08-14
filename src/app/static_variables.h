@@ -365,6 +365,21 @@ extern volatile unsigned long long fc_attempts;
  * uniforme — voir `docs/conception/elagage_recherche.md` (§4.1).
  */
 extern volatile unsigned long long fc_pruned_at[FC_STAT_MAX_K + 1];
+
+/**
+ * @brief Compteur du nombre d'élagages dus à un CONFLIT DE SINGLETONS —
+ *        sous-ensemble de `fc_pruned` (§4.4 de docs/conception/elagage_recherche.md).
+ *
+ * Incrémenté par `bt_forward_check` quand deux voisines de la pièce posée
+ * exigent chacune, comme seul candidat encore libre, la MÊME pièce — cas
+ * `|S| = 2` du théorème de Hall, que le forward-check case-par-case ne peut
+ * structurellement pas voir (chaque voisine prise isolément a bien ≥ 1
+ * candidat). Compteur DÉDIÉ plutôt que replié dans `fc_pruned_at[]` :
+ * répond à « ce mécanisme se déclenche-t-il, indépendamment du débit
+ * agrégé ? » — la question tranchée en §4.4. Actif seulement quand
+ * `singleton_conflict_check` est levé (cf. sa doc).
+ */
+extern volatile unsigned long long fc_singleton_conflict;
 #endif // FORWARD_CHECK_K > 0
 
 extern uint8_t directions[ETERN_PARTS];
@@ -887,6 +902,45 @@ extern int mrv_enabled;
  * commande console.
  */
 extern int global_dead_check;
+
+/**
+ * @brief Arme la détection de CONFLIT DE SINGLETONS dans `bt_forward_check` —
+ *        expérience de mesure, jamais un réglage d'exploitation (défaut 0).
+ *
+ * §4.4 de docs/conception/elagage_recherche.md, réimplémentation post-PR 10 :
+ * pendant le balayage des voisines, au lieu de s'arrêter au premier candidat
+ * libre trouvé (comportement par défaut), compte jusqu'à 2 candidats libres
+ * — assez pour distinguer « singleton » de « pas singleton », inutile
+ * d'aller plus loin. Si exactement 1, compare son `id` à celui des
+ * singletons déjà rencontrés dans CE balayage (au plus 4 voisines par
+ * appel) : un `id` répété ⇒ deux cases exigent la même pièce unique ⇒
+ * branche morte — le cas `|S| = 2` du théorème de Hall, structurellement
+ * invisible à un test case-par-case.
+ *
+ * Mesuré une première fois (§4.4, avant PR 10) sur le protocole du banc de
+ * débit (`bench_search.sh`, mono-processus depuis la genèse) : **0
+ * déclenchement** sur 500 M nœuds, code reverté. Cette conclusion souffrait
+ * de la même erreur de méthode que le « mur à `max_result` ≈ 74 » corrigé en
+ * §4.7 : protocole non représentatif du stock réel d'un serveur.
+ *
+ * REMESURÉ sur du VRAI stock via l'engin `fixe+singleton` du banc de
+ * réfutation (`tests/bench/bench_refutation.c --engines`, jamais
+ * `--pruner-profile` — ce mode-là ne touche pas `bt_forward_check`). Verdict :
+ * le mécanisme se déclenche RÉELLEMENT (35 056 à 134 565 fois sur des
+ * échantillons de 120 racines, compteur `fc_singleton_conflict`), mais
+ * EXCLUSIVEMENT dans des sous-arbres trop grands pour fermer dans les
+ * budgets testés — jamais dans un sous-arbre effectivement fermé. Coût
+ * confirmé sur trois mesures indépendantes : −9,5 à −11,4 % de débit agrégé,
+ * cohérent avec la mesure originale. Décision inchangée (ne pas fusionner),
+ * diagnostic corrigé (« ne se déclenche jamais » → « se déclenche mais
+ * jamais là où ça compte ») — voir §4.4 pour la trace complète.
+ *
+ * Coût nul quand il vaut 0 (le chemin historique, un seul candidat cherché,
+ * est inchangé). Lu par `bt_forward_check` uniquement, donc actif pour LES
+ * DEUX moteurs (ordre fixe et MRV, qui partagent cette même fonction) dès
+ * qu'il est levé.
+ */
+extern int singleton_conflict_check;
 
 /**
  * @brief Parse `ETII_MRV` en drapeau d'activation. Fonction pure et testable.
