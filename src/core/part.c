@@ -487,6 +487,113 @@ static uint32_t *build_packed_index(map_big_array *map, unsigned long long nbKey
 }
 
 /**
+ * @brief Fréquence globale de chaque couleur de bord (0..maxFace) dans `apart`.
+ *
+ * Compte les 4 faces de CHAQUE entrée de `apart`, rotations comprises : si
+ * `apart` est le résultat de `rotate_all_parts` (4 rotations par pièce
+ * physique), chaque couleur est comptée ×4 par rapport à un dénombrement sur
+ * les seules pièces physiques — un facteur d'échelle UNIFORME sur toutes les
+ * couleurs, qui ne change donc pas leur ordre relatif de rareté. Support de
+ * §4.8 (docs/conception/elagage_recherche.md) : le score de rareté utilisé
+ * pour trier chaque compartiment de `buildBigArray`.
+ *
+ * @return Tableau alloué de `maxFace + 1` entrées (à libérer par l'appelant),
+ *         ou NULL si `maxFace < 0` ou si l'allocation échoue.
+ */
+long *compute_face_frequency(struct array_part *apart, int maxFace)
+{
+	if (maxFace < 0) {
+		return NULL;
+	}
+	long *freq = calloc((size_t)maxFace + 1, sizeof(long));
+	if (freq == NULL) {
+		return NULL;
+	}
+	for (int i = 0; i < apart->size; i++) {
+		struct part *p = &apart->parts[i];
+		if (p->top >= 0 && p->top <= maxFace)      freq[p->top]++;
+		if (p->right >= 0 && p->right <= maxFace)  freq[p->right]++;
+		if (p->bottom >= 0 && p->bottom <= maxFace) freq[p->bottom]++;
+		if (p->left >= 0 && p->left <= maxFace)    freq[p->left]++;
+	}
+	return freq;
+}
+
+/**
+ * @brief Score de rareté des couleurs EXPOSÉES d'une pièce dans un compartiment.
+ *
+ * Un compartiment (f1,f2,f3,f4) fixe la couleur attendue sur les côtés
+ * CONTRAINTS (f_i >= 0) : cette valeur est la même pour toutes les pièces du
+ * compartiment, elle ne discrimine donc aucun ordre. Seuls les côtés
+ * « wildcard » (f_i == -1) varient d'une pièce à l'autre : ce sont les
+ * couleurs que cette pièce EXPOSERA vers une case encore vide si elle est
+ * posée ici — §4.8 de docs/conception/elagage_recherche.md.
+ *
+ * @param freq    Fréquence globale de chaque couleur, cf. `compute_face_frequency`.
+ * @param maxFace Borne supérieure de `freq` (même valeur que pour sa construction).
+ */
+long arena_exposed_score(const struct part *p, int f1, int f2, int f3, int f4,
+                          const long *freq, int maxFace)
+{
+	long score = 0;
+	if (f1 == -1 && p->top >= 0 && p->top <= maxFace)      score += freq[p->top];
+	if (f2 == -1 && p->right >= 0 && p->right <= maxFace)  score += freq[p->right];
+	if (f3 == -1 && p->bottom >= 0 && p->bottom <= maxFace) score += freq[p->bottom];
+	if (f4 == -1 && p->left >= 0 && p->left <= maxFace)    score += freq[p->left];
+	return score;
+}
+
+/**
+ * @brief Trie EN PLACE les candidats d'un compartiment par rareté CROISSANTE
+ *        de couleur exposée — la pièce exposant la couleur la plus RARE
+ *        d'abord (§4.8 de docs/conception/elagage_recherche.md, ADOPTÉ après
+ *        mesure : +3,2 % de débit médian, taux d'élagage forward-check et
+ *        profondeur atteinte inchangés — voir la mesure complète dans le
+ *        document). Comportement de production INCONDITIONNEL depuis cette
+ *        adoption : pas d'interrupteur laissé en place, même discipline que
+ *        §4.1 (« voisines seules, pas de fenêtre résiduelle »).
+ *
+ * N'ALTÈRE JAMAIS le multi-ensemble de pièces du compartiment (même ids,
+ * mêmes rotations, même taille) — uniquement l'ORDRE dans lequel elles seront
+ * essayées par la recherche : `arena_sort_preserves_multiset_and_orders_by_rarity`
+ * (tests/core/test_part.c) verrouille cet invariant.
+ *
+ * Tri par insertion (les compartiments non vides sont petits en pratique — cf.
+ * la mesure de `map-packed-index-cache.md`, plus gros compartiment observé :
+ * quelques centaines de pièces) avec les scores précalculés une fois, pas
+ * recalculés à chaque comparaison.
+ */
+void sort_compartment_by_exposed_rarity(struct array_part *arraypart,
+                                         int f1, int f2, int f3, int f4,
+                                         const long *freq, int maxFace)
+{
+	if (arraypart->size < 2 || freq == NULL) {
+		return;
+	}
+	int n = arraypart->size;
+	long *scores = malloc(sizeof(long) * (size_t)n);
+	if (scores == NULL) {
+		return; // tri = optimisation, jamais bloquant si l'allocation échoue
+	}
+	for (int i = 0; i < n; i++) {
+		scores[i] = arena_exposed_score(&arraypart->parts[i], f1, f2, f3, f4, freq, maxFace);
+	}
+	for (int i = 1; i < n; i++) {
+		struct part moving = arraypart->parts[i];
+		long moving_score = scores[i];
+		int j = i - 1;
+		while (j >= 0 && scores[j] > moving_score) {
+			arraypart->parts[j + 1] = arraypart->parts[j];
+			scores[j + 1] = scores[j];
+			j--;
+		}
+		arraypart->parts[j + 1] = moving;
+		scores[j + 1] = moving_score;
+	}
+	free(scores);
+}
+
+/**
  * @brief Construit la structure de lookup 4D indexée par (top, right, bottom, left).
  *
  * Pour chaque combinaison possible de valeurs de bord (de -1 à maxFace),
@@ -497,12 +604,21 @@ static uint32_t *build_packed_index(map_big_array *map, unsigned long long nbKey
  * Cette structure est la principale table de lookup du moteur de recherche :
  * un accès direct en O(1) retourne toutes les pièces posables à un emplacement.
  *
+ * §4.8 (docs/conception/elagage_recherche.md, ADOPTÉ) : chaque compartiment
+ * est trié par rareté de couleur exposée CROISSANTE (la pièce la plus rare
+ * essayée en premier) avant compactage dans `arena` — voir
+ * `sort_compartment_by_exposed_rarity`. Coût : négligeable et payé une seule
+ * fois, à la construction de la map (avant tout fork, avant toute recherche) —
+ * jamais dans la boucle chaude, donc aucun bump de `VERSION` (§5 du document).
+ *
  * @param apart   Tableau de toutes les rotations (sortie de `rotate_all_parts`).
  * @param maxFace Valeur maximale de couleur de bord (sortie de `search_max_face`).
  * @return        Tableau 4D alloué (à libérer avec `free_bigarray`).
  */
 map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 {
+	long *arena_sort_freq = compute_face_frequency(apart, maxFace);
+
 	int sizeBigArray = (maxFace + 2);
 	map_big_array *result = malloc(sizeof(map_big_array));
 	result->sizearray = sizeBigArray;
@@ -553,6 +669,8 @@ map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 					}
 
 					struct array_part *arraypart = search_face(arraypart3, f4, PART_LEFT);
+					sort_compartment_by_exposed_rarity(arraypart, f1, f2, f3, f4,
+					                                    arena_sort_freq, maxFace);
 					if (f1 >= 0 || f2 >= 0 || f3 >= 0 || f4 >= 0)
 					{
 						if (arraypart->size > maxarray)
@@ -597,6 +715,7 @@ map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 		}
 	}
 	result->packed = build_packed_index(result, nbKeys, totalParts);
+	free(arena_sort_freq);
 #ifdef DEBUG_CHECK_POSSIBILITY
 	log_info("max array:%i\n", maxarray);
 #endif // DEBUG_CHECK_POSSIBILITY
