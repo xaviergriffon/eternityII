@@ -483,6 +483,61 @@ Sur ces racines-là, la comparaison mesure la présence de ce test, pas la quali
 de l'ordre — d'où l'importance de la comparaison appariée ci-dessus, où MRV garde
 un avantage de 3 ordres de grandeur.
 
+### Quatrième moteur : `fixe+singleton`, la remesure de §4.4
+
+Le conflit de singletons (§4.4 de
+[elagage_recherche.md](conception/elagage_recherche.md), théorème de Hall
+`|S| = 2`) avait été implémenté, mesuré à **0 déclenchement** sur 500 M nœuds
+via `bench_search.sh` (protocole mono-processus depuis la genèse), puis
+reverté. Même erreur de méthode que le mur à 74 et que la première mesure de
+§4.6b : ce protocole ne construit jamais de sous-arbre RÉEL, profond, dérivé
+d'une vraie délégation — il ne pouvait pas voir le mécanisme se déclencher
+même s'il se déclenche réellement ailleurs.
+
+Réimplémenté derrière `singleton_conflict_check` (`src/app/static_variables.h`,
+défaut 0, vit dans `bt_forward_check`, donc actif pour les DEUX moteurs de
+recherche) et ajouté au banc comme quatrième variante (`--engines
+fixe,fixe+singleton`). Deux mesures distinctes, parce que ce sont deux
+questions différentes :
+
+**1. Fermeture bornée (même protocole que §4.6b) : aucun effet.** Sur 120
+racines réelles, budget 5 000 000 nœuds : `fixe` et `fixe+singleton` ferment
+exactement le **même nombre** de racines (20/120), avec des totaux de nœuds
+**identiques au nœud près** sur le sous-ensemble commun (1 326 277 pour les
+deux). Pourtant `fc_singleton_conflict` (compteur direct, pas une inférence)
+rapporte **35 056 déclenchements** sur cette même exécution — le mécanisme
+tire bien, mais exclusivement dans des sous-arbres qui dépassent le budget de
+toute façon : jamais dans les 20 qui ferment. Reproduit sur un second stock
+(client MRV) à 134 565 déclenchements, avec cette fois un effet marginal sur
+le sous-ensemble commun (6 330 646 contre 6 334 296 nœuds, −0,06 %) — dans le
+bruit, sans conséquence sur aucune décision de fermeture.
+
+**2. Débit agrégé sur l'échantillon entier (même instrument que la mesure
+originale, sur stock réel plutôt que synthétique) : coût confirmé.**
+
+| Stock | `fixe` (nœuds/s) | `fixe+singleton` (nœuds/s) | Delta |
+|---|---|---|---|
+| Client à ordre fixe, 120 racines, budget 5 M | 11 775 963 | 10 500 749 | **−10,8 %** |
+| Même stock, 60 racines, budget 10 M | 10 898 683 | 9 861 136 | **−9,5 %** |
+| Client MRV, 120 racines, budget 5 M | 15 746 462 | 13 949 110 | **−11,4 %** |
+
+Trois mesures indépendantes, deux stocks, un coût de **−9,5 à −11,4 %** —
+cohérent avec le −9 % mesuré à l'origine sur le protocole synthétique. La
+COMBINAISON des deux mesures explique ce que l'original ne pouvait pas voir :
+le mécanisme se déclenche réellement (des dizaines de milliers de fois par
+échantillon) mais uniquement au fond de sous-arbres trop grands pour être
+fermés dans les budgets testés — c'est-à-dire jamais là où une preuve de
+fermeture aurait pu en profiter — tout en payant son coût de balayage (un
+deuxième candidat cherché au lieu de s'arrêter au premier) sur CHAQUE appel,
+y compris les 98 % qui ne mènent à rien.
+
+**Verdict : la décision de ne pas fusionner ce mécanisme est CONFIRMÉE, mais
+la raison invoquée à l'origine (« ne se déclenche jamais ») est CORRIGÉE.** Il
+se déclenche, sur du stock réel, à un rythme mesurable — simplement jamais là
+où ça compterait pour une preuve de fermeture, et son coût par nœud reste
+supérieur à tout bénéfice observé sur trois mesures indépendantes. Voir §4.4
+du document de conception pour la trace complète.
+
 ### Mode `--pruner-profile` : rejoue le VRAI pipeline du pruner
 
 Les modes précédents mesurent des moteurs de RECHERCHE. `--pruner-profile <n>`
