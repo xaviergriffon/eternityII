@@ -59,6 +59,13 @@
 #include "app/etii_client.h"
 #include "core/datamanager.h"
 
+/* etii_search.c inclut déjà "app/gpu_pruner.h" sous WITH_CUDA (protégé par son
+ * propre garde d'inclusion) ; répété ici pour rendre la dépendance explicite à
+ * la lecture de ce fichier. */
+#ifdef WITH_CUDA
+#include "app/gpu_pruner.h"
+#endif
+
 #define MAX_DEPTHS 32
 
 static client_possibility_t g_client;
@@ -273,6 +280,137 @@ static void print_tally(const engine_t *engines, int nb, const tally_t *t, int r
     }
 }
 
+#ifdef WITH_CUDA
+/**
+ * @brief Variante GPU de `--pruner-profile` : rejoue le contrôle superficiel
+ *        du pruner GPU (`gpu_pruner_check_batch`, une seule passe — cf.
+ *        `src/app/gpu_pruner.cu`) sur le même échantillon régulier d'un
+ *        stock réel, PAR LOTS de `gpu_batch` (comme `autoprune_gpu` en
+ *        production, jamais possibilité par possibilité — le débit mesuré
+ *        n'aurait sinon aucun sens vis-à-vis de la taille réelle des
+ *        lancements kernel).
+ *
+ * N'a PAS d'équivalent DFS borné : le GPU ne fait, en production, que le
+ * contrôle superficiel (§4.6b documente pourquoi un DFS divergent par thread
+ * convient mal au modèle SIMT — jamais tenté côté GPU). La comparaison
+ * pertinente n'est donc pas GPU-vs-DFS mais GPU (une passe) vs CPU (point
+ * fixe, `possibility_all_has_a_next_counted`) sur l'état de départ EXACT
+ * (`orig[i]`, jamais muté) : c'est la divergence documentée mais jamais
+ * chiffrée en §4.6a / docs/pruner_gpu_cuda.md.
+ *
+ * `checked` est forcé à 0 sur l'état de départ soumis aux deux côtés : le
+ * contrôle CPU (`possibility_all_has_a_next_counted`) recalcule toujours
+ * indépendamment de ce champ, alors que le kernel GPU court-circuite dessus
+ * (`p->checked == 1` -> vivant sans recalcul, cf. `prune_kernel`). Sans ce
+ * forçage la mesure confondrait la divergence "une passe vs point fixe" avec
+ * celle, sans intérêt ici, du court-circuit `checked`.
+ */
+static void run_pruner_profile_gpu(const char *back, int pruner_profile, int gpu_batch,
+                                    map_big_array *map, struct array_part *rot)
+{
+    FILE *f = fopen(back, "r");
+    if (f == NULL) {
+        fprintf(stderr, "ouverture de %s impossible\n", back);
+        exit(EXIT_FAILURE);
+    }
+    struct possibility_packet pkt;
+    long long total = 0;
+    while (fread(&pkt, sizeof(pkt), 1, f) == 1) total++;
+    long long stride = (total > pruner_profile) ? total / pruner_profile : 1;
+    printf("stock : %lld possibilités\n", total);
+    printf("profil GPU (contrôle une passe, lots de %d) sur %d possibilités"
+           " échantillonnées 1 sur %lld :\n\n", gpu_batch, pruner_profile, stride);
+
+    struct possibility_packet *orig = malloc(sizeof(*orig) * (size_t)pruner_profile);
+    struct possibility_packet *work = malloc(sizeof(*work) * (size_t)pruner_profile);
+    uint8_t *alive = malloc((size_t)pruner_profile);
+    uint32_t *cells = malloc(sizeof(*cells) * (size_t)pruner_profile);
+    if (orig == NULL || work == NULL || alive == NULL || cells == NULL) {
+        fprintf(stderr, "allocation impossible\n");
+        exit(EXIT_FAILURE);
+    }
+
+    rewind(f);
+    long long index = 0;
+    int sampled = 0;
+    while (fread(&pkt, sizeof(pkt), 1, f) == 1) {
+        long long i = index++;
+        if (sampled >= pruner_profile) break;
+        if (i % stride != 0) continue;
+        pkt.checked = 0;
+        orig[sampled] = pkt;
+        work[sampled] = pkt;
+        sampled++;
+    }
+    fclose(f);
+
+    if (gpu_pruner_init(map, rot) != 0) {
+        fprintf(stderr, "gpu_pruner_init a échoué (pas de GPU CUDA détecté ?)\n");
+        exit(EXIT_FAILURE);
+    }
+
+    double t0 = now_seconds();
+    for (int base = 0; base < sampled; base += gpu_batch) {
+        int cnt = sampled - base;
+        if (cnt > gpu_batch) cnt = gpu_batch;
+        gpu_pruner_check_batch(work + base, cnt, alive + base, cells + base);
+    }
+    double gpu_seconds = now_seconds() - t0;
+
+    long long gpu_dead = 0, gpu_alive = 0, gpu_solutions = 0;
+    unsigned long long cells_total = 0;
+    long long false_dead = 0, missed_cascade = 0;
+    for (int i = 0; i < sampled; i++) {
+        cells_total += cells[i];
+        if (work[i].alloc >= ETERN_PARTS) {
+            gpu_solutions++;
+        } else if (alive[i]) {
+            gpu_alive++;
+        } else {
+            gpu_dead++;
+        }
+
+        struct possibility_packet cpu_copy = orig[i];
+        int cpu_alive = possibility_all_has_a_next_counted(&cpu_copy, map, rot, NULL);
+        if (!alive[i] && cpu_alive) {
+            false_dead++;
+        } else if (alive[i] && !cpu_alive) {
+            missed_cascade++;
+        }
+    }
+
+    gpu_pruner_shutdown();
+    free(orig);
+    free(work);
+    free(alive);
+    free(cells);
+
+    printf("%-28s %8lld  (%.1f %% de l'échantillon)\n", "mortes au contrôle GPU (1 passe) :",
+           gpu_dead, sampled > 0 ? 100.0 * (double)gpu_dead / (double)sampled : 0.0);
+    printf("%-28s %8lld  (%.1f %%)\n", "survivent (GPU, 1 passe) :",
+           gpu_alive, sampled > 0 ? 100.0 * (double)gpu_alive / (double)sampled : 0.0);
+    printf("%-28s %8lld  (%.1f %%)\n", "solutions rencontrées :",
+           gpu_solutions, sampled > 0 ? 100.0 * (double)gpu_solutions / (double)sampled : 0.0);
+    printf("\ndébit GPU : %.0f possibilités/s, %.2f cases examinées/possibilité"
+           " (%.3f s total, %d possibilités, lot=%d)\n",
+           gpu_seconds > 0 ? (double)sampled / gpu_seconds : 0.0,
+           sampled > 0 ? (double)cells_total / (double)sampled : 0.0,
+           gpu_seconds, sampled, gpu_batch);
+    printf("\ndivergence vs CPU (point fixe) sur le MÊME état de départ (%d possibilités) :\n", sampled);
+    printf("  GPU mort / CPU vivant (FAUX MORT, doit être nul)            : %lld\n", false_dead);
+    printf("  GPU vivant / CPU mort (cascade en fin de balayage manquée,\n"
+           "  attendue et documentée, §4.6a/docs/pruner_gpu_cuda.md)      : %lld\n", missed_cascade);
+
+    if (false_dead > 0) {
+        fprintf(stderr, "\nERREUR : %lld faux mort(s) détecté(s) — le GPU élimine une possibilité"
+                " que le CPU juge vivante. Ce n'est alors plus une condition nécessaire"
+                " (cf. §5 de docs/conception/elagage_recherche.md) : à corriger avant tout,"
+                " jamais seulement documenter.\n", false_dead);
+        exit(EXIT_FAILURE);
+    }
+}
+#endif // WITH_CUDA
+
 static void usage(void)
 {
     printf("Usage : bench_refutation [options]\n"
@@ -293,7 +431,13 @@ static void usage(void)
            "                     part morte au contrôle superficiel seul, part fermée par la\n"
            "                     preuve DFS bornée (§4.6b, --budget) parmi le reste, part qui\n"
            "                     survit intacte — répond à §4.6b (le budget ferme-t-il ?) et à\n"
-           "                     §4.9 (combien un pruner en service éliminerait-il déjà seul ?)\n");
+           "                     §4.9 (combien un pruner en service éliminerait-il déjà seul ?)\n"
+           "  --gpu              (avec --pruner-profile, build CUDA uniquement) rejoue le\n"
+           "                     contrôle GPU une passe (gpu_pruner_check_batch) au lieu du\n"
+           "                     pipeline CPU superficiel+DFS ; mesure le taux d'élimination,\n"
+           "                     le débit et la divergence vs le point fixe CPU (§4.6a)\n"
+           "  --gpu-batch <n>    taille de lot soumise à gpu_pruner_check_batch (défaut 100,\n"
+           "                     proche de PRUNER_BATCH_SIZE — sans effet sans --gpu)\n");
 }
 
 int main(int argc, char **argv)
@@ -306,6 +450,8 @@ int main(int argc, char **argv)
     int max_roots = 20;
     int kpi = 0;
     int pruner_profile = 0;
+    int gpu = 0;
+    int gpu_batch = 100;
     int depths[MAX_DEPTHS] = {150, 165, 175, 180, 185};
     int nb_depths = 5;
 
@@ -328,6 +474,8 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--max-pieces") == 0 && i + 1 < argc)  max_pieces = atoi(argv[++i]);
         else if (strcmp(argv[i], "--kpi") == 0 && i + 1 < argc)         kpi = atoi(argv[++i]);
         else if (strcmp(argv[i], "--pruner-profile") == 0 && i + 1 < argc) pruner_profile = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--gpu") == 0)                          gpu = 1;
+        else if (strcmp(argv[i], "--gpu-batch") == 0 && i + 1 < argc)    gpu_batch = atoi(argv[++i]);
         else if (strcmp(argv[i], "--engines") == 0 && i + 1 < argc) {
             nb_engines = 0;
             char *copy = strdup(argv[++i]);
@@ -353,6 +501,15 @@ int main(int argc, char **argv)
             return EXIT_FAILURE;
         }
     }
+
+#ifndef WITH_CUDA
+    if (gpu) {
+        fprintf(stderr, "--gpu exige un build CUDA (make bench-refutation-gpu) ; ce binaire"
+                " a été compilé sans support CUDA (pas de repli silencieux vers le CPU).\n");
+        return EXIT_FAILURE;
+    }
+#endif
+    if (gpu_batch < 1) gpu_batch = 1;
 
     alloc_counters();
     fill_idparts();
@@ -388,6 +545,14 @@ int main(int argc, char **argv)
             fprintf(stderr, "--pruner-profile exige --from-back\n");
             return EXIT_FAILURE;
         }
+#ifdef WITH_CUDA
+        if (gpu) {
+            run_pruner_profile_gpu(back, pruner_profile, gpu_batch, map, rot);
+            free_bigarray(map);
+            free_array_part(rot);
+            return EXIT_SUCCESS;
+        }
+#endif
         FILE *f = fopen(back, "r");
         if (f == NULL) {
             fprintf(stderr, "ouverture de %s impossible\n", back);
@@ -407,6 +572,13 @@ int main(int argc, char **argv)
         long long dead_superficial = 0, closed_by_dfs = 0, survives = 0, solutions = 0;
         unsigned long long dfs_nodes_total = 0;
         double dfs_seconds_total = 0.0;
+        // Chronométrage du seul contrôle superficiel (possibility_all_has_a_next_counted),
+        // symétrique de la mesure de débit GPU (run_pruner_profile_gpu ci-dessus) : sert
+        // de terme de comparaison CPU séquentiel / GPU par lots, sans jamais inclure le
+        // temps DFS (chronométré séparément, dfs_seconds_total) ni le coût fixe de
+        // démarrage (lecture pièces.csv, construction de la map, double lecture du .back).
+        unsigned long long superficial_cells_total = 0;
+        double superficial_seconds_total = 0.0;
         while (fread(&pkt, sizeof(pkt), 1, f) == 1) {
             long long i = index++;
             if (sampled >= pruner_profile) break;
@@ -418,9 +590,12 @@ int main(int argc, char **argv)
             unsigned int cells_studied = 0;
             // Même appel, mêmes arguments que autoprune_step (etii_search.c) :
             // c'est le contrôle superficiel réel du pruner, pas une simulation.
+            double ts0 = now_seconds();
             int has_next = possibility_all_has_a_next_counted(&work, g_client.map_part,
                                                                g_client.all_rotate_part,
                                                                &cells_studied);
+            superficial_seconds_total += now_seconds() - ts0;
+            superficial_cells_total += cells_studied;
             if (work.alloc >= ETERN_PARTS) {
                 solutions++;
                 continue;
@@ -459,6 +634,11 @@ int main(int argc, char **argv)
         printf("\n%-28s %8lld  (%.1f %% de l'échantillon éliminé, superficiel + DFS)\n",
                "total éliminé :", eliminated,
                sampled > 0 ? 100.0 * (double)eliminated / (double)sampled : 0.0);
+        printf("\ndébit du contrôle superficiel CPU (séquentiel, hors DFS) : %.0f possibilités/s,"
+               " %.2f cases examinées/possibilité (%.3f s total, %lld possibilités)\n",
+               superficial_seconds_total > 0 ? (double)sampled / superficial_seconds_total : 0.0,
+               sampled > 0 ? (double)superficial_cells_total / (double)sampled : 0.0,
+               superficial_seconds_total, sampled);
 
         free_bigarray(map);
         free_array_part(rot);
