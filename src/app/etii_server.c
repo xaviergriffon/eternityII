@@ -288,7 +288,7 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
         // docs/conception/maitrise_charge_serveur.md) : backup()+backup_analysed()
         // appelées séparément laisseraient une fenêtre entre les deux instants.
         int rba = 0;
-        int rb = backup_coherent("./temp.back", "./temp_analysed.back", &rba);
+        int rb = consistent_backup("./temp.back", "./temp_analysed.back", &rba);
         if (rb == BACKUP_SKIPPED_MAINTENANCE) {
             log_error("autobackup : sauté (maintenance en cours) sur ./temp.back\n");
         } else if (rb != BACKUP_OK) {
@@ -700,7 +700,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                         // croirait à tort avoir sauvegardé le stock serait un piège
                         // classique de reprise sur crash.
                         int rba = 0;
-                        int rb = backup_coherent("./eternityII.back", "./eternityII-in_analyse.back", &rba);
+                        int rb = consistent_backup("./eternityII.back", "./eternityII-in_analyse.back", &rba);
                         if (rb == BACKUP_SKIPPED_MAINTENANCE) {
                             log_error("arrêt sur solution : backup sauté (maintenance en cours) sur ./eternityII.back\n");
                         } else if (rb != BACKUP_OK) {

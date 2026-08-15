@@ -93,9 +93,9 @@ restent inchangés et continuent de passer (relâchement à 60 ms, bien sous le 
 **Livrée telle que conçue ci-dessous**, avec un correctif de trajectoire trouvé en
 implémentant : le PR1 mergé documentait un `setvbuf` sur le fichier de sauvegarde
 (`backup()`) qui n'avait en réalité jamais été codé — corrigé au passage sur `backup()`,
-`backup_analysed()` et le nouveau `backup_coherent()`.
+`backup_analysed()` et le nouveau `consistent_backup()`.
 
-`backup_coherent(stock_filename, analysed_filename, &out_analysed_status)`
+`consistent_backup(stock_filename, analysed_filename, &out_analysed_status)`
 (`src/core/datamanager.{c,h}`) est la nouvelle fonction, appelée aux cinq points de
 production qui sauvegardaient auparavant stock et analysé l'un après l'autre :
 l'autobackup (`check_server_step`), l'arrêt sur solution (deux points — le chemin normal

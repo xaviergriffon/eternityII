@@ -707,7 +707,7 @@ int backup_interpreter(void) {
         def_known_clients_file = temp;
     }
     int rba = 0;
-    int rb = backup_coherent(def_file, def_analyse_file, &rba);
+    int rb = consistent_backup(def_file, def_analyse_file, &rba);
     if (rb == BACKUP_SKIPPED_MAINTENANCE) {
         log_info("backup de %s sauté (maintenance en cours)\n", def_file);
     } else if (rb != BACKUP_OK) {

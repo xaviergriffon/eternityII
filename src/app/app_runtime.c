@@ -432,7 +432,7 @@ void backup_failed_exit(void)
         sprintf(def_file, "./failed_exit_eternityII_%i.back", getpid());
         char *def_analyse_file = malloc(sizeof(char) * 60);
         sprintf(def_analyse_file, "./failed_exit_eternityII-in_analyse_%i.back", getpid());
-		backup_coherent(def_file, def_analyse_file, NULL);
+		consistent_backup(def_file, def_analyse_file, NULL);
         free(def_file);
         free(def_analyse_file);
 	}

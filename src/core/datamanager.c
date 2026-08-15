@@ -1697,7 +1697,7 @@ int backup_analysed(char *filename)
  *                             BACKUP_ERROR/BACKUP_SKIPPED_MAINTENANCE) — NULL accepté.
  * @return Code du volet stock (même convention que `backup`).
  */
-int backup_coherent(char *stock_filename, char *analysed_filename, int *out_analysed_status)
+int consistent_backup(char *stock_filename, char *analysed_filename, int *out_analysed_status)
 {
 	if (out_analysed_status != NULL)
 	{
@@ -2389,7 +2389,7 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                 log_info("solution sauvegardée dans %s\n", fileName);
                 if (stop_on_solution) {
                     unlock_all_file();
-                    backup_coherent("./eternityII.back", "./eternityII-in_analyse.back", NULL);
+                    consistent_backup("./eternityII.back", "./eternityII-in_analyse.back", NULL);
                     log_event("serveur arrêté suite à la solution (stock sauvegardé)");
                     log_info("serveur arrêté suite à la solution — stock sauvegardé\n");
                     flush_info();

@@ -301,7 +301,7 @@ int backup_analysed(char *filename);
  * @return Code du volet stock — BACKUP_OK (0), BACKUP_SKIPPED_MAINTENANCE (1)
  *         ou BACKUP_ERROR (-1).
  */
-int backup_coherent(char *stock_filename, char *analysed_filename, int *out_analysed_status);
+int consistent_backup(char *stock_filename, char *analysed_filename, int *out_analysed_status);
 /**
  * @brief Reconstruit les files avec le contenu du fichier
  * 
