@@ -175,6 +175,18 @@
 // un serveur à plus grosse capacité peut relever ce plafond.
 #define EXPAND_MAX_STOCK 100000
 
+// Rééquilibrage incrémental du stock entre files (PR3,
+// docs/conception/maitrise_charge_serveur.md) : valeur par DÉFAUT du nombre
+// de possibilités déplacées de la file la plus pleine vers la plus vide à
+// chaque tour de `check_server_step` (variable globale `rebalance_budget`,
+// configurable via l'option CLI `--rebalance-budget <n>`). Ce qui rend le
+// « temps de blocage ≤ 1 s par file » de la sauvegarde cohérente (PR2) vrai :
+// des files de tailles comparables. Un budget modeste par tour (comme
+// `expand_max_stock`, un plafond nul n'a pas de sens utile) répartit
+// progressivement la charge sur plusieurs tours plutôt que de bloquer un
+// tour entier sur un rééquilibrage complet.
+#define REBALANCE_BUDGET_DEFAULT 1000
+
 // Bail à expiration des analyses en cours (PR7) : durée par défaut, en
 // secondes, au-delà de laquelle une possibilité attribuée à un client
 // (owner_uid connu, cf. add_possibility_analysed_owned) et jamais acquittée
@@ -509,6 +521,20 @@ extern int expand_max_stock;
  * `parse_cli_options` avant le parsing positionnel.
  */
 extern int expand_max_levels;
+
+/**
+ * @brief Nombre de possibilités déplacées de la file la plus pleine vers la
+ *        plus vide à chaque tour de `check_server_step` (option CLI
+ *        `--rebalance-budget <n>`, PR3).
+ *
+ * Valeur par défaut `REBALANCE_BUDGET_DEFAULT` (1000). Consommé par
+ * `datamanager_rebalance_step` (`core/datamanager.h`), appelé une fois par
+ * tour (10 s) — jamais un chemin chaud. `<n> <= 0` est ignoré (garde la
+ * valeur par défaut ou celle déjà fixée), même convention que
+ * `expand_max_stock`. Lu côté serveur uniquement, position-indépendant,
+ * retiré d'argv par `parse_cli_options` avant le parsing positionnel.
+ */
+extern int rebalance_budget;
 
 /**
  * @brief 1 si la console interactive (lecture de stdin) ne doit pas démarrer

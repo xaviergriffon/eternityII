@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -1082,6 +1083,135 @@ int restock_analysed(void) {
     }
     log_info("restock_analysed : %llu possibilité(s) remise(s) dans le stock\n", moved);
     return 0;
+}
+
+/**
+ * @brief Rééquilibre UN pool (non vérifié ou vérifié) d'un pas incrémental :
+ *        déplace jusqu'à `max_packets` possibilités de la file la plus
+ *        pleine vers la plus vide (PR3, docs/conception/maitrise_charge_serveur.md).
+ *
+ * Lecture des tailles en O(1) (`.file.size`, sans verrou — même convention
+ * que `file_size`/`datas_size`) pour choisir la file source/destination,
+ * puis extraction bloquante de la SEULE file source (`pthread_mutex_lock`,
+ * jamais `lock_all_file`), relâchée avant l'insertion — jamais deux verrous
+ * de pool tenus ensemble, même discipline que `restock_analysed`/
+ * `datamanager_reclaim_expired_leases`. L'insertion vise la file la plus
+ * vide en priorité, avec repli en balayage rotatif (`trylock` + tour suivant)
+ * si elle est momentanément prise par un autre thread — jamais de perte,
+ * même motif que `restock_analysed`.
+ *
+ * Ne déplace rien si `pool[fullest] <= total/NB_FILE_POSSIBILITY` (déjà
+ * équilibré) : évite un va-et-vient perpétuel entre deux tours pour de
+ * petites variations dues au trafic concurrent normal.
+ *
+ * @param pool        Pool cible (`file_possibility` ou `file_possibility_checked`).
+ * @param max_packets Borne du nombre de possibilités déplacées par cet appel.
+ * @return            Nombre de possibilités effectivement déplacées.
+ */
+static int rebalance_pool_step(file_possibility_t *pool, int max_packets)
+{
+	if (max_packets <= 0) {
+		return 0;
+	}
+
+	unsigned long long sizes[NB_FILE_POSSIBILITY];
+	unsigned long long total = 0;
+	int fullest = 0;
+	int emptiest = 0;
+	for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++) {
+		sizes[fp] = pool[fp].file.size;
+		total += sizes[fp];
+		if (sizes[fp] > sizes[fullest]) { fullest = fp; }
+		if (sizes[fp] < sizes[emptiest]) { emptiest = fp; }
+	}
+	if (fullest == emptiest || total == 0) {
+		return 0;
+	}
+
+	unsigned long long target = total / NB_FILE_POSSIBILITY;
+	if (sizes[fullest] <= target) {
+		return 0;
+	}
+
+	unsigned long long surplus = sizes[fullest] - target;
+	unsigned long long deficit = (sizes[emptiest] < target) ? (target - sizes[emptiest]) : 1;
+	unsigned long long to_move = (surplus < deficit) ? surplus : deficit;
+	if (to_move == 0) { to_move = 1; }
+	if (to_move > (unsigned long long)max_packets) { to_move = (unsigned long long)max_packets; }
+
+	struct possibility_packet *buf = malloc((size_t)to_move * sizeof(struct possibility_packet));
+	if (buf == NULL) {
+		return 0;
+	}
+
+	pthread_mutex_lock(&pool[fullest].lock);
+	unsigned long long n = 0;
+	while (n < to_move && scroll(&pool[fullest].file, &buf[n])) {
+		n++;
+	}
+	pthread_mutex_unlock(&pool[fullest].lock);
+
+	for (unsigned long long i = 0; i < n; i++) {
+		int dest = emptiest;
+		int added = 0;
+		while (!added) {
+			if (pthread_mutex_trylock(&pool[dest].lock) == 0) {
+				put(&pool[dest].file, &buf[i]);
+				pthread_mutex_unlock(&pool[dest].lock);
+				added = 1;
+			} else {
+				dest = (dest + 1) % NB_FILE_POSSIBILITY;
+				usleep(MICRO_SLEEP);
+			}
+		}
+	}
+	free(buf);
+	return (int)n;
+}
+
+/**
+ * @brief Répète `rebalance_pool_step` sur UN pool jusqu'à épuisement du
+ *        budget ou équilibre complet (PR3).
+ *
+ * `rebalance_pool_step` ne fixe qu'UNE paire (la plus pleine vers la plus
+ * vide) par appel : son propre plafond de mouvement (`min(surplus, deficit)`)
+ * est souvent plus petit que le budget disponible, laissant une grande
+ * partie du budget d'un tour inutilisée alors que d'autres files restent
+ * déséquilibrées. Cette boucle enchaîne les paires jusqu'à consommer tout
+ * `max_packets` (converge plus vite, même budget total par tour) — chaque
+ * pas individuel reste court (un seul verrou de pool à la fois, comme avant)
+ * : ce n'est que le NOMBRE de pas par appel qui change, pas leur coût
+ * unitaire.
+ *
+ * Termine en au plus `NB_FILE_POSSIBILITY` pas structurellement (chaque pas
+ * fixe définitivement au moins une file à sa cible, cf. `rebalance_pool_step`)
+ * — garde-fou de boucle par prudence, même discipline que `split_datas`.
+ *
+ * @param pool        Pool cible.
+ * @param max_packets Budget total pour CE pool, réparti sur autant de pas
+ *                     que nécessaire.
+ * @return             Nombre total de possibilités déplacées.
+ */
+static int rebalance_pool_until_budget(file_possibility_t *pool, int max_packets)
+{
+	int moved_total = 0;
+	int rounds = 0;
+	while (moved_total < max_packets && rounds < NB_FILE_POSSIBILITY * 2) {
+		int moved = rebalance_pool_step(pool, max_packets - moved_total);
+		if (moved <= 0) {
+			break;
+		}
+		moved_total += moved;
+		rounds++;
+	}
+	return moved_total;
+}
+
+int datamanager_rebalance_step(int max_packets)
+{
+	int moved = rebalance_pool_until_budget(file_possibility, max_packets);
+	moved += rebalance_pool_until_budget(file_possibility_checked, max_packets);
+	return moved;
 }
 
 /**
@@ -2512,11 +2642,17 @@ int split_datas_nolock(int nbsplit)
 
 int split_datas(void)
 {
-	lock_all_file();
-	// Les deux pools sont répartis indépendamment : non vérifié et vérifié
-	split_pool_nolock(file_possibility, NB_FILE_POSSIBILITY);
-	split_pool_nolock(file_possibility_checked, NB_FILE_POSSIBILITY);
-	unlock_all_file();
+	// PR3 (docs/conception/maitrise_charge_serveur.md) : rééquilibrage
+	// incrémental (datamanager_rebalance_step) au lieu de regroup_pool_nolock
+	// + 3 copies par paquet sous verrou global (split_pool_nolock ci-dessus)
+	// — inexploitable à l'échelle de plusieurs millions de possibilités.
+	// Budget INT_MAX : datamanager_rebalance_step boucle désormais en interne
+	// jusqu'à épuisement du budget ou équilibre complet (rebalance_pool_until_budget),
+	// donc un seul appel suffit à converger entièrement — split_datas() est un
+	// appel EXPLICITE (commande console), pas un tick périodique, on veut
+	// converger en un coup plutôt qu'étaler sur plusieurs tours comme le fait
+	// l'appel périodique de check_server_step avec un budget modeste.
+	datamanager_rebalance_step(INT_MAX);
 	return 0;
 }
 

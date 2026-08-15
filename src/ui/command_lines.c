@@ -24,7 +24,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 53
+#define NB_COMMANDS 54
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -124,6 +124,7 @@ int clients_cmd_interpreter(void);
 int known_clients_interpreter(void);
 int clients_work_interpreter(void);
 int lease_duration_interpreter(void);
+int rebalance_interpreter(void);
 int config_interpreter(void);
 int config_save_interpreter(void);
 int start_interpreter(void);
@@ -234,6 +235,16 @@ static command_description commands[NB_COMMANDS] = {
      "volume (expand_max_stock, réglable via --expand-max-stock) ; niveau 3-4 recommandé.", NULL},
     {"restockAnalysed", restockanalysed_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
      "remet les possibilités en cours d'analyse dans le stock", NULL, NULL},
+    {"rebalance", rebalance_interpreter, 0, CMD_CAT_STOCK, 0, "rebalance [n]",
+     "rééquilibre le stock : file la plus pleine -> la plus vide (PR3)",
+     "Déplace jusqu'à <n> possibilités (défaut rebalance_budget, réglable via\n"
+     "--rebalance-budget au démarrage) de la file la plus pleine vers la plus\n"
+     "vide, pour les deux pools (non vérifié et vérifié) indépendamment --\n"
+     "enchaîne autant de paires que le budget le permet, pas un seul pas isolé.\n"
+     "Même appel que celui automatique de chaque tour serveur (10 s) — utile\n"
+     "pour forcer un rééquilibrage immédiat plutôt que d'attendre plusieurs\n"
+     "tours. Contrairement à split, borné par <n> : peut s'arrêter avant un\n"
+     "équilibre complet sur un très gros déséquilibre.", NULL},
     {"min", min_interpreter, 1, CMD_CAT_STOCK, 0, NULL,
      "affiche le niveau minimal de pièces placées dans les files", NULL, NULL},
 
@@ -1519,6 +1530,15 @@ int admin_apply_privileged_command(const char *line) {
         } else if (strcmp(word, "regroup") == 0) {
             regroup_datas();
             result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "rebalance") == 0) {
+            char *arg = strtok_r(NULL, " ", &save);
+            int budget = rebalance_budget;
+            if (arg != NULL) {
+                int n = atoi(arg);
+                if (n > 0) { budget = n; }
+            }
+            datamanager_rebalance_step(budget);
+            result = ADMIN_CMD_OK;
         }
     }
 
@@ -1781,6 +1801,34 @@ int printanalysed_interpreter(void) {
 /** @brief Interpréteur de `restockAnalysed` : remet les possibilités en cours d'analyse dans le stock. */
 int restockanalysed_interpreter(void) {
     return restock_analysed();
+}
+
+/**
+ * @brief Interpréteur de `rebalance [n]` (PR3, docs/conception/maitrise_charge_serveur.md) :
+ *        un seul pas incrémental de rééquilibrage du stock (file la plus
+ *        pleine vers la plus vide), même appel que celui automatique de
+ *        chaque tour serveur (`check_server_step`) mais déclenché
+ *        immédiatement plutôt que d'attendre le prochain tour.
+ *
+ * `n` optionnel : budget de possibilités déplacées PAR POOL (défaut
+ * `rebalance_budget`, la même variable globale que l'appel périodique).
+ * `n <= 0` explicitement fourni est un usage invalide (contrairement à
+ * l'absence d'argument, qui retombe sur le défaut) — même distinction que
+ * `sortDesc [n]`.
+ */
+int rebalance_interpreter(void) {
+    char *arguments = strtok(NULL, " ");
+    int budget = rebalance_budget;
+    if (arguments != NULL) {
+        int n = atoi(arguments);
+        if (n <= 0) {
+            return CMD_ERR_USAGE;
+        }
+        budget = n;
+    }
+    int moved = datamanager_rebalance_step(budget);
+    log_info("rebalance : %d possibilité(s) déplacée(s)\n", moved);
+    return 0;
 }
 
 /** @brief Interpréteur de `min` : affiche le nombre minimal de pièces placées parmi toutes les possibilités. */

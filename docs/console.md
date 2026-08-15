@@ -75,6 +75,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `removeNoNext` | Supprime les possibilités sans continuation possible (élagage ; alias : `rmnonext`, `prune`) |
 | `expand N` | Développe le stock jusqu'au niveau de curseur `N` ([anti-famine](utilisation.md#expansion-du-stock-au-démarrage---expand-level-anti-famine), borné à `expand_max_levels` passes (défaut 4, réglable via `--expand-max-levels`) / `expand_max_stock` possibilités (défaut 100000, réglable via `--expand-max-stock`)) |
 | `restockAnalysed` | Remet les possibilités en cours d'analyse dans le stock |
+| `rebalance [n]` | Rééquilibre le stock d'un seul pas incrémental (file la plus pleine → la plus vide, `n` possibilités par pool, défaut `rebalance_budget` réglable via `--rebalance-budget`) — le même appel que celui automatique de chaque tour serveur (10 s), déclenché immédiatement ; contrairement à `split`, ne redistribue pas intégralement en un appel (voir [maitrise_charge_serveur.md](conception/maitrise_charge_serveur.md)) |
 | `min` | Affiche le niveau minimum dans les files |
 
 ### Sauvegarde & restauration

@@ -208,6 +208,7 @@ control_command_class_t control_command_classify(const char *command_name)
 		"sortDescMulti",
 		"split",
 		"regroup",
+		"rebalance",
 	};
 
 	if (command_first_word_matches(command_name, read_only, sizeof(read_only) / sizeof(read_only[0]))) {
