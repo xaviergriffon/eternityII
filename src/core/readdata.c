@@ -28,8 +28,7 @@ struct array_part *read_parts(const char *file)
 	FILE *f = fopen(file, "r");
 	if(!f)
 	{
-		log_error("read_parts file :%s",file);
-		perror("fopen()");
+		log_errno("read_parts file :%s ",file);
 		exit(EXIT_FAILURE);
 	}
 	

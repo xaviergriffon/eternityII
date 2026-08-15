@@ -75,6 +75,28 @@ TEST log_error_to_stderr(void)
     PASS();
 }
 
+/* log_error doit aussi persister dans events.log (pas seulement stderr), pour
+   qu'une erreur reste traçable après coup (`tail -f events.log`) même une fois
+   sortie du scrollback de la console — contrairement à log_info/log_debug/
+   log_console, qui n'y touchent jamais. */
+TEST log_error_appends_to_events_log(void)
+{
+    unlink("events.log");
+    char out[256];
+    CAPTURE(2, stderr, log_error("disk full on %s", "/data"), out);
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[256] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    ASSERT(strstr(line, "disk full on /data") != NULL);
+    ASSERT(strstr(line, "[") != NULL); /* horodatage entre crochets */
+    unlink("events.log");
+    PASS();
+}
+
 TEST log_errno_appends_strerror(void)
 {
     char out[256];
@@ -82,6 +104,30 @@ TEST log_errno_appends_strerror(void)
     CAPTURE(2, stderr, log_errno("ctx %d => ", 5), out);
     ASSERT(strstr(out, "ctx 5") != NULL);          /* message formaté */
     ASSERT(strstr(out, strerror(ENOENT)) != NULL); /* + texte de l'errno */
+    PASS();
+}
+
+/* log_errno (utilisée par tous les sites d'échec d'E/S qui appelaient perror()
+   avant : read_parts, save_possibility, backup(_analysed), import/restore
+   (_analysed), configSave) doit aussi persister le détail errno dans
+   events.log, pas seulement sur stderr — perror() contournait entièrement le
+   logger et ce détail n'apparaissait jamais dans le journal. */
+TEST log_errno_appends_to_events_log(void)
+{
+    unlink("events.log");
+    char out[256];
+    errno = ENOENT;
+    CAPTURE(2, stderr, log_errno("read_parts file :%s ", "missing.csv"), out);
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[256] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    ASSERT(strstr(line, "read_parts file :missing.csv") != NULL);
+    ASSERT(strstr(line, strerror(ENOENT)) != NULL); /* détail errno présent */
+    unlink("events.log");
     PASS();
 }
 
@@ -657,8 +703,10 @@ SUITE(logger_suite)
     RUN_TEST(log_info_formats_to_stdout);
     RUN_TEST(log_debug_and_console_to_stdout);
     RUN_TEST(log_error_to_stderr);
+    RUN_TEST(log_error_appends_to_events_log);
     RUN_TEST(fatal_error_logs_then_exits_failure);
     RUN_TEST(log_errno_appends_strerror);
+    RUN_TEST(log_errno_appends_to_events_log);
     RUN_TEST(log_status_no_visible_output_without_zone);
     RUN_TEST(log_status_noop_when_routed_to_parent);
     RUN_TEST(log_event_prints_and_logs);

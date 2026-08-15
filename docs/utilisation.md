@@ -297,7 +297,7 @@ Ces fichiers permettent de reprendre une recherche interrompue avec la commande
 
 | Fichier | Contenu |
 |---|---|
-| `events.log` | Journal des évènements horodatés (nouveaux records, solutions, etc.). Append-only. |
+| `events.log` | Journal des évènements horodatés (nouveaux records, solutions, etc.) **et des erreurs** (`log_error`/`log_errno`, ex. écriture de fichier échouée). Append-only ; voir [Console interactive](console.md#zone-events-en-bas-de-lécran). |
 | `solution_<pid>_<seq>` | Plateau sérialisé quand une solution complète est trouvée (déclenche aussi un évènement). |
 
 ## Limitations connues

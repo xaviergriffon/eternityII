@@ -257,8 +257,7 @@ int client_config_save(const char *path, const client_config_t *cfg)
 
     FILE *f = fopen(tmp_path, "w");
     if (f == NULL) {
-        log_error("configSave (%s)", tmp_path);
-        perror("fopen()");
+        log_errno("configSave (%s) ", tmp_path);
         free(tmp_path);
         return -1;
     }
@@ -274,8 +273,7 @@ int client_config_save(const char *path, const client_config_t *cfg)
     }
 
     if (rename(tmp_path, path) != 0) {
-        log_error("configSave (%s -> %s)", tmp_path, path);
-        perror("rename()");
+        log_errno("configSave (%s -> %s) ", tmp_path, path);
         unlink(tmp_path);
         free(tmp_path);
         return -1;

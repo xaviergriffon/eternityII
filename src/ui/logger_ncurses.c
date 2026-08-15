@@ -439,6 +439,35 @@ static void nc_write_output_locked(const char *text)
     }
 }
 
+/**
+ * @brief Ajoute une ligne horodatée (date complète) à `events.log`, sans
+ *        toucher au buffer circulaire ni redessiner la fenêtre "Events" —
+ *        seul log_event() fait les deux. Utilisée par log_event() elle-même
+ *        et par log_error()/log_errno(), pour que les erreurs restent
+ *        traçables après coup (`tail -f events.log`) même une fois sorties
+ *        du pad de sortie. Un éventuel saut de ligne final est retiré ; les
+ *        sauts de ligne internes (message multi-lignes) sont conservés.
+ */
+static void append_events_log_file(const char *msg)
+{
+    size_t l = strlen(msg);
+    while (l > 0 && (msg[l - 1] == '\n' || msg[l - 1] == '\r')) {
+        l--;
+    }
+
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    char fts[24];
+    strftime(fts, sizeof fts, "%Y-%m-%d %H:%M:%S", &tmv);
+
+    FILE *f = fopen(EVENT_LOG_FILE, "a");
+    if (f != NULL) {
+        fprintf(f, "[%s] %.*s\n", fts, (int)l, msg);
+        fclose(f);
+    }
+}
+
 void log_errno(const char *format, ...)
 {
     char buf[LOG_LINE_MAX];
@@ -457,6 +486,7 @@ void log_errno(const char *format, ...)
     pthread_mutex_lock(&output_mutex);
     nc_write_output_locked(buf);
     pthread_mutex_unlock(&output_mutex);
+    append_events_log_file(buf);
 }
 
 void log_error(const char *format, ...)
@@ -473,6 +503,7 @@ void log_error(const char *format, ...)
     pthread_mutex_lock(&output_mutex);
     nc_write_output_locked(buf);
     pthread_mutex_unlock(&output_mutex);
+    append_events_log_file(buf);
 }
 
 /**
@@ -605,13 +636,8 @@ void log_event(const char *format, ...)
     }
     pthread_mutex_unlock(&event_mutex);
 
-    char fts[24];
-    strftime(fts, sizeof fts, "%Y-%m-%d %H:%M:%S", &tmv);
-    FILE *f = fopen(EVENT_LOG_FILE, "a");
-    if (f != NULL) {
-        fprintf(f, "[%s] %s\n", fts, msg);
-        fclose(f);
-    }
+    /* Journal fichier (date complète, horodatage propre à append_events_log_file). */
+    append_events_log_file(msg);
 
     pthread_mutex_lock(&output_mutex);
     if (nc_active) {

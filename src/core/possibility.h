@@ -254,6 +254,24 @@ int search_possiblity_light(File *result, key_part *key, struct possibility_pack
 int print_possibility_packet(struct possibility_packet *packet);
 
 /**
+ * @brief Affiche un `possibility_packet` au format JSON, au niveau ERREUR.
+ *
+ * Même format que print_possibility_packet, mais via log_error() au lieu de
+ * log_info() : à réserver au contexte de diagnostic d'une erreur (ex. la
+ * possibilité en cause lors d'un problème de communication avec le serveur),
+ * jamais aux commandes console de dump en masse (`print`/`printFile`/
+ * `printAnalysed`, qui restent sur print_possibility_packet/log_info — un
+ * gros stock ne doit pas noyer events.log). Contrairement à log_info,
+ * log_error persiste dans events.log (voir logger.h), donc le paquet en
+ * cause reste traçable après coup, pas seulement visible sur la console au
+ * moment de l'erreur.
+ *
+ * @param packet Paquet à afficher.
+ * @return       0.
+ */
+int log_error_possibility_packet(struct possibility_packet *packet);
+
+/**
  * @brief Écrit un `possibility_packet` au format JSON dans un fichier arbitraire.
  *
  * Même format que print_possibility_packet ; utilisée pour l'export console

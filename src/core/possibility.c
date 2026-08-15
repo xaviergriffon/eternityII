@@ -387,8 +387,7 @@ int save_possibility(char *filename, struct possibility_packet *possibility)
 	FILE *f = fopen(filename, "w");
 	if(!f)
 	{
-		log_error("save_possibility file :%s",filename);
-		perror("fopen()");
+		log_errno("save_possibility file :%s ",filename);
 		exit(EXIT_FAILURE);
 	}
 	
@@ -403,8 +402,7 @@ int save_solution_csv(const char *filename, const struct possibility_packet *pos
 {
     FILE *f = fopen(filename, "w");
     if (!f) {
-        log_error("save_solution_csv file: %s", filename);
-        perror("fopen()");
+        log_errno("save_solution_csv file: %s ", filename);
         return -1;
     }
 
@@ -1190,6 +1188,23 @@ int print_possibility_packet(struct possibility_packet *packet)
 }
 
 /**
+ * @brief Variante de print_possibility_packet au niveau ERREUR (voir possibility.h) :
+ *        persiste dans events.log, contrairement à log_info. Un seul appel à
+ *        log_error (pas trois comme print_possibility_packet) pour que la
+ *        ligne complète — alloc/x/y/grille — arrive intacte dans events.log,
+ *        où chaque log_error écrit sa propre ligne horodatée.
+ */
+int log_error_possibility_packet(struct possibility_packet *packet)
+{
+	char *grid = build_grid_json(packet);
+	log_error("{\"alloc\": %i, \"x\": %i, \"y\": %i, \"grid\": %s}\n", packet->alloc, packet->x, packet->y, grid);
+
+	free(grid);
+
+	return 0;
+}
+
+/**
  * @brief Écrit un `possibility_packet` au format JSON dans un fichier arbitraire.
  *
  * Même format que print_possibility_packet (destinée aux logs), utilisée par
@@ -1359,7 +1374,7 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         if (normalize_possibility_packet(packet) || analyse < 0) {
             // Pour l'initialisation, on crash car ce n'est vraiment pas normal :
             // on dump d'abord le paquet fautif, puis fatal_error trace + sort.
-            print_possibility_packet(packet);
+            log_error_possibility_packet(packet);
             fatal_error("first_possibility : paquet initial incohérent (check : %i)\n", analyse);
         }
         if(packet->alloc > max_result)

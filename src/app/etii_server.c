@@ -356,7 +356,7 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent)
         if (add_possibility(NULL, single))
         {
             log_error("Error with possibility : \n");
-            print_possibility_packet(possibility);
+            log_error_possibility_packet(possibility);
             save_possibility("./error_possibility", possibility);
         }
         free_array_possibility_packet(single);
@@ -572,7 +572,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
 
                 } else{
                     log_error("possibility analysed not removed\n");
-                    print_possibility_packet(possibilityPacket);
+                    log_error_possibility_packet(possibilityPacket);
                     send_instruction(client->socket_id,INST_ERROR);
                 }
             } else {

@@ -1783,6 +1783,47 @@ TEST print_possibility_packet_survives_max_width_grid(void)
 }
 
 /* --------------------------------------------------------------------------
+ * log_error_possibility_packet : variante ERREUR de print_possibility_packet
+ * (voir possibility.h) — même JSON, mais via log_error() pour persister dans
+ * events.log (contrairement à print_possibility_packet/log_info, jamais
+ * écrite dans ce journal). Réservée aux sites qui diagnostiquent une erreur
+ * (ex. paquet en cause lors d'un problème de communication avec le serveur).
+ * ------------------------------------------------------------------------ */
+
+TEST log_error_possibility_packet_persists_to_events_log(void)
+{
+    struct possibility_packet *p = new_zeroed_packet();
+    p->alloc = 3; p->x = 1; p->y = 2;
+
+    unlink("events.log");
+    int saved = dup(2);
+    int devnull = open("/dev/null", O_WRONLY);
+    dup2(devnull, 2);
+
+    int ret = log_error_possibility_packet(p);
+
+    fflush(stderr);
+    dup2(saved, 2);
+    close(saved);
+    close(devnull);
+
+    ASSERT_EQ_FMT(0, ret, "%d");
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[512] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    ASSERT(strstr(line, "\"alloc\": 3") != NULL);
+    ASSERT(strstr(line, "\"x\": 1") != NULL);
+    ASSERT(strstr(line, "\"y\": 2") != NULL);
+    unlink("events.log");
+    free(p);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
  * possibility_all_has_a_next : toutes les cases libres ont-elles une suite ?
  * ------------------------------------------------------------------------ */
 
@@ -2431,6 +2472,7 @@ SUITE(possibility_suite)
     RUN_TEST(what_search_to_key_empty_and_placed_neighbor);
     RUN_TEST(print_possibility_packet_runs);
     RUN_TEST(print_possibility_packet_survives_max_width_grid);
+    RUN_TEST(log_error_possibility_packet_persists_to_events_log);
     RUN_TEST(all_has_a_next_all_filled_returns_one);
     RUN_TEST(all_has_a_next_dead_cell_returns_zero);
     RUN_TEST(all_has_a_next_single_candidate_places_piece);
