@@ -169,6 +169,101 @@ Tests: `tests/net/test_control_protocol.c` (the five commands join `control_comm
 
 **`--expand-max-levels <n>`** (optional, position-independent valued option, same parsing shape/convention as `--expand-max-stock`; server-only, effective only when `--expand-level` is also given). Overrides the default `expand_max_levels` depth-based safeguard (`EXPAND_MAX_LEVELS`, 4) — a server with more capacity (RAM and CPU time) to spare can raise this cap alongside `--expand-max-stock` to reach a high `--expand-level` without the expansion stopping prematurely on the pass-count guard. Same `n <= 0` ignored-not-clamped convention as `--expand-max-stock` (a zero-pass cap would prevent any expansion at all). Read by `expand_datas_to_level` (`src/core/datamanager.c`) via the live global, same as `expand_max_stock` — the console `expand <n>` command and a startup `--expand-level` both respect whatever value is currently in effect.
 
+### Server load management (bounded locks, coherent backup, incremental rebalance, configurable stock files)
+
+Four PRs (docs/conception/maitrise_charge_serveur.md — PR1-4 shipped, PR5 still a proposal)
+fixing a real production incident: under heavy load (`--expand-level 9`, 14M+ possibilities),
+a pruner's connections all died together because `backup()` held a global lock (20 mutexes,
+both stock pools) for the entire duration of writing the stock to disk, starving every client
+thread past its TCP timeout — the client-side symptom (`Broken pipe`, batches acked twice)
+traced back to three previously-*unbounded* `pthread_mutex_trylock` loops in
+`src/core/datamanager.c` (`scroll_from_pool`, `put_to_pool`,
+`add_possibility_analysed_impl`), plus the absence of `setvbuf` on the backup `FILE*` (~1.4M
+unbuffered `write()` calls under lock for a 5.5 Gio backup).
+
+**PR1 — bounded locks, `--tcp-timeout <n>`.** The three loops above now give up after a
+bounded wait (~500ms) instead of spinning forever: a starved `scroll_from_pool`/`put_to_pool`
+degrades to the pre-existing "empty stock" response (`K=0` / `INST_ERROR`, both already
+handled gracefully by callers — no protocol bump), and `add_possibility_analysed_impl`
+declines to serve a possibility it couldn't record rather than serving one that would escape
+its lease and `requeue_last_sent_possibility`. `setvbuf(f, NULL, _IOFBF, 1 MiB)` on the backup
+`FILE*` collapses ~1.4M `write()` calls to ~1.4K. **`--tcp-timeout <n>`** (optional,
+position-independent valued option; applies to both server and client/pruner work sockets,
+`SO_RCVTIMEO`/`SO_SNDTIMEO`) overrides `DEFAULT_TCP_TIMEOUT` (10s) — a safety valve for a
+slower network or a bigger stock, though the bounded loops above already keep any single
+maintenance operation well under this budget by construction.
+
+**PR2 — `consistent_backup` (renamed from an earlier `backup_coherent`): a global freeze,
+then progressive release, for a true point-in-time snapshot.** All files of both pools (stock
++ analysed) are locked *simultaneously* at one instant T, `maintenance` raised once, then
+written and released one file at a time — analysed pool first (serving `INST_GET` needs both a
+stock lock and an analysed lock, so releasing stock first would gain nothing). A file stays
+locked continuously from T until it is written, so nothing can migrate out of it before its
+own snapshot is taken — the correctness property a naive per-file lazy-lock backup lacks (a
+possibility could migrate from a not-yet-written file into an already-written one, vanishing
+from the backup entirely). Deliberately **not** a `fork()`/COW snapshot (Redis-style
+`BGSAVE`): COW can approach 2× resident memory, untenable with a multi-GB stock on a
+memory-constrained box, and would reopen the fork-in-a-multithreaded-process minefield this
+project already paid for once (`docs/investigations/blocage_fork_gate_release_quiesce.md`).
+Trade-off accepted: clients are throughput-degraded (partially `K=0`) during the backup window
+(now bounded to roughly the write time of *one* file, not the whole backup), never
+disconnected. Holding both lock families together is normally forbidden
+(`src/core/datamanager.h`) but verified safe here specifically: every other path that touches
+both releases one before acquiring the other (`restock_analysed`,
+`datamanager_reclaim_expired_leases`), so `consistent_backup` is the sole simultaneous holder
+and no two-party deadlock cycle can form.
+
+**PR3 — incremental rebalance, `--rebalance-budget <n>`, console command `rebalance [n]`.**
+What makes "≤1s per file" during PR2's backup actually true is files of comparable size.
+`datamanager_rebalance_step`/`rebalance_pool_until_budget` (`src/core/datamanager.{h,c}`) read
+each file's `size` (O(1)) and move packets from the fullest file toward the emptiest, one pool
+lock at a time (never two pool locks together — same discipline as `restock_analysed`), and
+**replay across as many file pairs as the budget allows** in one call rather than stopping
+after a single pair (the deficit `target - size[emptiest]`, not the requested budget, is often
+the binding constraint on any one pair — replaying spreads the remaining budget over more
+pairs, converging faster). Called once per server tick (10s, `check_server_step`) with
+`rebalance_budget` (`--rebalance-budget <n>`, default `REBALANCE_BUDGET_DEFAULT` = 1000,
+`n <= 0` ignored) packets per tick; the console command `rebalance [n]` (server-only,
+`command_lines.c`) triggers one step immediately, `n` overriding the budget for that call only.
+`split_datas()` — the old all-in-one rebalancer, 3 copies per packet under the *global* stock
+lock — stays for its historical `split`/`regroup` console commands but is no longer the tool
+this PR relies on at scale.
+
+**PR4 — `--stock-files <n>`: configurable file count, pointer-array storage.** Closes the
+long-standing `@todo Rendre configurable` on the file count (`src/core/datamanager.h`).
+`file_possibility`/`file_possibility_checked`/`file_possibility_analysed`/`analysed_index`
+(`src/core/datamanager.c`) are tables of **pointers** (`file_possibility_t **`,
+`AnalysedIndexNode ***`), grown by `realloc` and populated slot-by-slot
+(`malloc`+`init_file`+`pthread_mutex_init`, each slot initialized exactly once — the POSIX
+hazard of re-initializing a live mutex that originally motivated a fixed static array is
+avoided by construction, not by a pre-filled floor) — memory cost is 8 bytes per unused entry
+rather than a full `file_possibility_t`/hash-bucket-table pre-allocated regardless of use.
+`NB_FILE_POSSIBILITY_DEFAULT` (10, applied at startup absent `--stock-files`) and
+`NB_FILE_POSSIBILITY_MAX` (128, a sanity cap on `--stock-files`, not a preallocation limit)
+remain the only two compile-time constants; `nb_file_possibility` (the real active count)
+starts at **0** and stays there until `datamanager_configure_stock_files` is called — a
+mandatory, one-time call every real process entry point makes first thing (`src/app/main.c`,
+`tests/test_main.c`, `tests/bench/bench_refutation.c` — the three actual `main()` functions in
+the repo), unlike the rest of this module's failures, which always degrade gracefully (PR1):
+indexing a file before this call is a NULL-pointer dereference, not a state to tolerate.
+`ensure_stock_files_cover_forks(nb_threads)` (`src/app/app_runtime.{h,c}`) still grows
+`nb_file_possibility` at client startup to stay ≥ the fork count (the analysed pool is indexed
+by `fork_seq`), never the reverse.
+
+**A real SIGILL crash found only by running the real binary with a high `--stock-files`, not
+by any unit test.** `report` (`check_server_step`, `src/app/etii_server.c`) was `calloc`'d at a
+**fixed** 4000 bytes, historically enough since `nb_file_possibility` was always 10 — but the
+`table` string it `strcat`s in (`build_file_queues_table`, one line per file) correctly scales
+with `nb_file_possibility` and can reach ~8.4 KiB at `NB_FILE_POSSIBILITY_MAX` (128). No
+existing unit test called `check_server_step` with a large file count, so nothing caught it;
+`./eternityII server --stock-files 500` (clamped to 128) booted fine and then died in SIGILL
+(`__strcat_chk` / `_FORTIFY_SOURCE`) on its first statistics tick (10s later). Fixed by
+building `table` first and sizing `report` on `strlen(table) + 1200` (the fixed-size `temp`
+block appended after it). Locked by
+`check_server_step_handles_large_stock_files_count` (`tests/app/test_etii_server.c`) — fails
+against the pre-fix code even without ASan, since `_FORTIFY_SOURCE` is on by default on this
+toolchain.
+
 ### HTTP REST admin API
 
 **`--http-port <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only, `n` in `[1, 65535]`). Starts a minimal HTTP/1.1 admin API on **`127.0.0.1:<n>`** — loopback only, never `INADDR_ANY`, so it is never reachable off the machine by default (use an SSH tunnel or a reverse proxy for remote access). **Absent by default** (`HTTP_PORT` global defaults to 0): no extra socket is opened unless explicitly requested. Lets an external HTTP application (written in any language) read server telemetry and drive a few whitelisted admin actions without speaking the binary `packet`/`control_protocol` wire formats.
