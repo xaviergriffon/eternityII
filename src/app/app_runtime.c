@@ -147,6 +147,14 @@ static const cli_help_topic_t cli_topics[] = {
 	  "pas une erreur (valeurs par défaut/CLI utilisées). Écrit par la commande\n"
 	  "console configSave (écriture atomique .tmp puis rename) ; affiché par\n"
 	  "la commande config." },
+	{ "--rebalance-budget",
+	  "--rebalance-budget <n>",
+	  "Serveur : nombre de possibilités rééquilibrées entre files à chaque tour (10 s).",
+	  "Défaut REBALANCE_BUDGET_DEFAULT (1000) — déplace la file la plus pleine vers\n"
+	  "la plus vide, par petits lots, pour que les files restent de taille\n"
+	  "comparable (temps de blocage court à la sauvegarde, PR2/PR3, cf.\n"
+	  "docs/conception/maitrise_charge_serveur.md). Valeur absente ou <= 0 :\n"
+	  "ignorée (garde le défaut)." },
 	{ "--tcp-timeout",
 	  "--tcp-timeout <n>",
 	  "Serveur et client/pruner : timeout d'inactivité (secondes) des sockets TCP de travail.",

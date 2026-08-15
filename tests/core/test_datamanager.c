@@ -561,6 +561,127 @@ TEST split_then_regroup_preserves_count(void)
     PASS();
 }
 
+/* Depuis PR3, split_datas() converge par pas incrémentaux
+ * (datamanager_rebalance_step) plutôt que par un quotient exact calculé
+ * d'un coup — vérifie que le résultat reste effectivement équilibré (pas
+ * seulement « réparti sur plusieurs files » comme le test ci-dessus). */
+TEST split_datas_balances_within_one_of_target(void)
+{
+    drain_datamanager();
+    int allocs[97]; /* premier, pour un reste non nul au quotient */
+    for (int i = 0; i < 97; i++) allocs[i] = (i % 13) + 1;
+    add_packets(allocs, 97);
+    ASSERT_EQ_FMT(97ULL, file_size(0), "%llu"); /* tout dans le pool 0 au départ */
+
+    split_datas();
+    ASSERT_EQ_FMT(97ULL, datas_size(), "%llu"); /* total préservé */
+
+    unsigned long long min_sz = ULLONG_MAX, max_sz = 0;
+    for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++) {
+        unsigned long long sz = file_size(fp);
+        if (sz < min_sz) min_sz = sz;
+        if (sz > max_sz) max_sz = sz;
+    }
+    /* 97 / 10 = 9 reste 7 : au plus 7 files à 10, les autres à 9 -- jamais
+     * plus d'un écart entre la plus pleine et la plus vide. */
+    ASSERT(max_sz - min_sz <= 1);
+
+    drain_datamanager();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * datamanager_rebalance_step (PR3, docs/conception/maitrise_charge_serveur.md) :
+ * rééquilibrage incrémental, file la plus pleine -> la plus vide.
+ * ------------------------------------------------------------------------ */
+
+TEST rebalance_step_preserves_total_count(void)
+{
+    drain_datamanager();
+    int allocs[50];
+    for (int i = 0; i < 50; i++) allocs[i] = (i % 13) + 1;
+    add_packets(allocs, 50);
+    ASSERT_EQ_FMT(50ULL, datas_size(), "%llu");
+
+    for (int i = 0; i < 20; i++) {
+        datamanager_rebalance_step(1000);
+        ASSERT_EQ_FMT(50ULL, datas_size(), "%llu"); /* jamais perdu ni dupliqué */
+    }
+
+    drain_datamanager();
+    PASS();
+}
+
+TEST rebalance_step_converges_to_balance(void)
+{
+    drain_datamanager();
+    int allocs[83];
+    for (int i = 0; i < 83; i++) allocs[i] = (i % 13) + 1;
+    add_packets(allocs, 83);
+    ASSERT_EQ_FMT(83ULL, file_size(0), "%llu");
+
+    int moved;
+    int rounds = 0;
+    do {
+        moved = datamanager_rebalance_step(1000);
+        rounds++;
+    } while (moved > 0 && rounds < NB_FILE_POSSIBILITY * 4);
+
+    ASSERT_EQ_FMT(83ULL, datas_size(), "%llu");
+    unsigned long long min_sz = ULLONG_MAX, max_sz = 0;
+    for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++) {
+        unsigned long long sz = file_size(fp);
+        if (sz < min_sz) min_sz = sz;
+        if (sz > max_sz) max_sz = sz;
+    }
+    ASSERT(max_sz - min_sz <= 1); /* 83 / 10 = 8 reste 3 */
+
+    drain_datamanager();
+    PASS();
+}
+
+/* Un budget de 1 par appel ne peut déplacer qu'UNE possibilité (par pool) :
+ * borne le "temps de blocage" que datamanager_rebalance_step peut imposer à
+ * un appelant (check_server_step, à chaque tour). */
+TEST rebalance_step_respects_budget(void)
+{
+    drain_datamanager();
+    int allocs[40];
+    for (int i = 0; i < 40; i++) allocs[i] = (i % 13) + 1;
+    add_packets(allocs, 40);
+    ASSERT_EQ_FMT(40ULL, file_size(0), "%llu");
+
+    /* Seul le pool non vérifié a du contenu ici : le budget s'applique par
+     * pool, donc au plus 1 possibilité déplacée par cet appel. */
+    int moved = datamanager_rebalance_step(1);
+    ASSERT_EQ_FMT(1, moved, "%d");
+    ASSERT_EQ_FMT(40ULL, datas_size(), "%llu"); /* rien perdu */
+
+    drain_datamanager();
+    PASS();
+}
+
+/* Un stock déjà équilibré ne bouge pas : évite un va-et-vient perpétuel pour
+ * de petites variations sans intérêt. */
+TEST rebalance_step_noop_when_already_balanced(void)
+{
+    drain_datamanager();
+    /* Force explicitement un état équilibré : split_datas() sur un stock
+     * multiple de NB_FILE_POSSIBILITY donne un compte identique par file. */
+    int allocs[NB_FILE_POSSIBILITY * 3];
+    for (int i = 0; i < NB_FILE_POSSIBILITY * 3; i++) allocs[i] = (i % 13) + 1;
+    add_packets(allocs, NB_FILE_POSSIBILITY * 3);
+    split_datas();
+    for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++) {
+        ASSERT_EQ_FMT(3ULL, file_size(fp), "%llu");
+    }
+
+    ASSERT_EQ_FMT(0, datamanager_rebalance_step(1000), "%d");
+
+    drain_datamanager();
+    PASS();
+}
+
 /* --------------------------------------------------------------------------
  * Pool « checked » : possibilités vérifiées par un pruner (checked == 1)
  * ------------------------------------------------------------------------ */
@@ -4224,6 +4345,11 @@ SUITE(datamanager_suite)
     RUN_TEST(consistent_backup_skipped_during_maintenance_reports_distinct_code);
     RUN_TEST(consistent_backup_analysed_open_failure_aborts_stock_too);
     RUN_TEST(split_then_regroup_preserves_count);
+    RUN_TEST(split_datas_balances_within_one_of_target);
+    RUN_TEST(rebalance_step_preserves_total_count);
+    RUN_TEST(rebalance_step_converges_to_balance);
+    RUN_TEST(rebalance_step_respects_budget);
+    RUN_TEST(rebalance_step_noop_when_already_balanced);
     RUN_TEST(checked_possibility_goes_to_checked_pool);
     RUN_TEST(analysed_add_and_restock);
     RUN_TEST(analysed_backup_restore_round_trip);

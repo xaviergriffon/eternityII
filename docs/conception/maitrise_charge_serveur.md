@@ -1,7 +1,7 @@
 # Maîtrise de la charge serveur : verrous bornés, sauvegarde cohérente à libération progressive
 
-**Statut : en cours d'implémentation.** PR 1 (§2) et PR 2 (§3) **livrées**. PR 3 à 5 (§4 à
-§6) en proposition, non implémentées.
+**Statut : en cours d'implémentation.** PR 1 (§2), PR 2 (§3) et PR 3 (§4) **livrées**. PR 4
+et 5 (§5, §6) en proposition, non implémentées.
 
 ## 1. Contexte et diagnostic
 
@@ -165,15 +165,35 @@ libérer d'abord le stock ne servirait à rien tant que le pool analysé reste g
 ne contient que le travail en vol (souvent quasi vide) : son écriture est rapide, et la
 libération progressive du stock retrouve alors tout son effet.
 
-## 4. Rééquilibrage incrémental borné en temps (PR 3, proposition)
+## 4. Rééquilibrage incrémental borné en temps (PR 3, livrée)
 
 Ce qui rend un « temps de blocage ≤ 1 s par file » vrai : des files de tailles comparables.
-`datamanager_rebalance_step` déplacerait, par petits lots et un verrou de pool à la fois
-(jamais deux ensemble — même motif que `restock_analysed`/`reclaim_expired_leases`), de la
-file la plus pleine vers la plus vide, appelé une fois par tour depuis `check_server_step`.
-`split_datas` (aujourd'hui : trois copies par paquet sous verrou global,
-`split_pool_nolock`) serait réécrite par-dessus — inexploitable à l'échelle de 14 millions
-de possibilités.
+
+`datamanager_rebalance_step(max_packets)` (`src/core/datamanager.{c,h}`) déplace, par pas
+borné et un verrou de pool à la fois (jamais deux ensemble — même motif que
+`restock_analysed`/`reclaim_expired_leases`), de la file la plus pleine vers la plus vide —
+indépendamment pour le pool non vérifié et le pool vérifié. Le montant déplacé est plafonné
+à la fois par `max_packets` et par ce qui suffit à amener la file source ou la file
+destination exactement à la cible (`total/NB_FILE_POSSIBILITY`) — jamais de dépassement, et
+un stock déjà équilibré ne bouge pas (évite un va-et-vient perpétuel pour de petites
+variations dues au trafic concurrent). Appelé une fois par tour dans `check_server_step`
+avec un budget modeste (`rebalance_budget`, réglable via `--rebalance-budget <n>`, défaut
+1000) — jamais un chemin chaud.
+
+`split_datas()` (l'ancienne version : `regroup_pool_nolock` + trois copies par paquet sous
+`lock_all_file()`, inexploitable à l'échelle de plusieurs millions de possibilités) appelle
+maintenant `datamanager_rebalance_step` en boucle avec un budget large (`INT_MAX` — c'est un
+appel explicite, pas un tick périodique, on veut converger en un seul appel) jusqu'à
+équilibre. `split_datas_nolock` (utilisée en interne par `sort_descending_mthread`, qui a
+besoin d'une redistribution **exacte** par quotient, pas d'une convergence incrémentale)
+reste inchangée — seule la version publique, sans argument, est réécrite.
+
+Commande console `rebalance [n]` ajoutée pour déclencher immédiatement un pas plutôt que
+d'attendre le prochain tour — `n` optionnel (défaut `rebalance_budget`). **Correction par
+rapport au plan initial** : classée `server_only = 0` (cosmétique, comme `split`/`regroup`,
+pas `1` comme envisagé) — le mécanisme est générique et fonctionne aussi bien sur le stock
+local d'un client, exactement comme ses deux voisines. Ajoutée au whitelist privilégié de
+l'API HTTP admin (`control_command_privileged`) aux côtés de `split`/`regroup`.
 
 ## 5. Nombre de files configurable au démarrage (PR 4, proposition)
 

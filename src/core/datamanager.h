@@ -412,6 +412,25 @@ int fprint_all_file_analysed(FILE *out, size_t *count);
  */
 int restock_analysed(void);
 
+/**
+ * @brief Rééquilibre les deux pools de stock (non vérifié et vérifié) d'un
+ *        pas incrémental (PR3, docs/conception/maitrise_charge_serveur.md) :
+ *        déplace jusqu'à `max_packets` possibilités par pool de la file la
+ *        plus pleine vers la plus vide.
+ *
+ * Jamais deux verrous de pool tenus ensemble (même discipline que
+ * `restock_analysed`/`datamanager_reclaim_expired_leases`) — pensé pour être
+ * appelé fréquemment à petit budget (une fois par tour de `check_server_step`,
+ * jamais un chemin chaud) plutôt qu'une fois avec un budget illimité, pour
+ * que les files restent de taille comparable sans jamais monopoliser un tour
+ * entier. `split_datas` l'appelle en boucle avec un budget large pour une
+ * convergence complète en un seul appel explicite.
+ *
+ * @param max_packets Borne du nombre de possibilités déplacées PAR POOL.
+ * @return            Nombre total de possibilités déplacées (les deux pools confondus).
+ */
+int datamanager_rebalance_step(int max_packets);
+
 /** @brief Trie toutes les files de possibilités par ordre croissant de `alloc`. */
 int sort_ascending(void);
 

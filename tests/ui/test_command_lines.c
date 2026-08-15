@@ -2311,6 +2311,7 @@ TEST admin_apply_remote_command_rejects_sort_group_split(void)
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("sortDescMulti"), "%d");
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("split"), "%d");
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("regroup"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("rebalance"), "%d");
     PASS();
 }
 
@@ -2331,6 +2332,27 @@ TEST admin_apply_privileged_command_split_regroup_round_trip(void)
     ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("regroup"), "%d");
     ASSERT_EQ_FMT(10ULL, datas_size(), "%llu");
     ASSERT_EQ_FMT(10ULL, file_size(0), "%llu"); /* re-consolide dans le pool 0 */
+
+    dm_drain();
+    PASS();
+}
+
+/* rebalance [n] (PR3) : un seul pas incrementiel, pas une redistribution
+ * complete comme split -- verifie que le total est preserve et qu'exactement
+ * <n> possibilites bougent quand le budget est la contrainte active (stock
+ * assez grand pour que la cible par file -- ici 100/10 = 10 -- ne plafonne
+ * pas le mouvement avant le budget lui-meme). */
+TEST admin_apply_privileged_command_rebalance_moves_within_budget(void)
+{
+    dm_drain();
+    int allocs[100];
+    for (int i = 0; i < 100; i++) allocs[i] = (i % 13) + 1;
+    dm_add(allocs, 100);
+    ASSERT_EQ_FMT(100ULL, file_size(0), "%llu");
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("rebalance 2"), "%d");
+    ASSERT_EQ_FMT(100ULL, datas_size(), "%llu"); /* rien perdu */
+    ASSERT_EQ_FMT(98ULL, file_size(0), "%llu");   /* exactement 2 deplaces */
 
     dm_drain();
     PASS();
@@ -2476,5 +2498,6 @@ SUITE(command_lines_suite)
     RUN_TEST(admin_apply_privileged_command_backup_restore_round_trip);
     RUN_TEST(admin_apply_remote_command_rejects_sort_group_split);
     RUN_TEST(admin_apply_privileged_command_split_regroup_round_trip);
+    RUN_TEST(admin_apply_privileged_command_rebalance_moves_within_budget);
     RUN_TEST(admin_apply_privileged_command_sorts_run);
 }

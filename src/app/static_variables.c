@@ -51,6 +51,7 @@ int help_requested = 0;
 int expand_min_level = 0;
 int expand_max_stock = EXPAND_MAX_STOCK;
 int expand_max_levels = EXPAND_MAX_LEVELS;
+int rebalance_budget = REBALANCE_BUDGET_DEFAULT;
 
 int headless_mode = 0;
 
@@ -313,6 +314,18 @@ int parse_cli_options(int argc, const char *argv[])
             // parse_cli_options).
             if (r + 1 < argc) {
                 machine_uid_file_path = argv[r + 1];
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--rebalance-budget") == 0) {
+            // Option valuée, même schéma que --expand-max-stock : un budget
+            // <= 0 n'a pas de sens utile (aucun rééquilibrage), valeur
+            // absente ou <= 0 ignorée, rebalance_budget garde sa valeur par
+            // défaut (REBALANCE_BUDGET_DEFAULT) ou celle déjà fixée.
+            if (r + 1 < argc) {
+                int budget = atoi(argv[r + 1]);
+                if (budget > 0) {
+                    rebalance_budget = budget;
+                }
                 r++; // consomme aussi la valeur
             }
         } else if (strcmp(argv[r], "--tcp-timeout") == 0) {

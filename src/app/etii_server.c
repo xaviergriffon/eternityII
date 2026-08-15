@@ -282,6 +282,12 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
         log_event("bail expiré : %llu possibilité(s) rendue(s) au stock (client disparu)", reclaimed_leases);
     }
 
+    // Rééquilibrage incrémental (PR3, docs/conception/maitrise_charge_serveur.md) :
+    // budget modeste par tour (rebalance_budget), jamais un chemin chaud — ce
+    // qui garde le temps de blocage de la sauvegarde cohérente (PR2) court en
+    // gardant les files de taille comparable, sans jamais monopoliser un tour.
+    datamanager_rebalance_step(rebalance_budget);
+
     if (should_autobackup(lastBack, lastClientsFileUpdateBackup, clientsFileUpdates))
     {
         // Instant T unique pour le stock et le pool analysé (PR2, cf.
