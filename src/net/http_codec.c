@@ -413,7 +413,7 @@ int http_json_format_stats(char *buf, size_t size, const http_stats_view_t *view
     }
     offset += (size_t)written;
 
-    for (int i = 0; i < NB_FILE_POSSIBILITY; i++) {
+    for (int i = 0; i < nb_file_possibility; i++) {
         written = snprintf(buf + offset, size - offset,
             "%s{\"file\":%d,\"unchecked\":%llu,\"checked\":%llu,\"analysed\":%llu}",
             (i == 0) ? "" : ",", i,

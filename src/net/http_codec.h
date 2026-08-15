@@ -264,12 +264,14 @@ typedef struct {
     unsigned long long active_threads;
     unsigned long long pruner_checked;
     unsigned long long pruner_removed;
-    /// Tailles par file (index 0..NB_FILE_POSSIBILITY-1), pool non vérifié.
-    unsigned long long queue_unchecked[NB_FILE_POSSIBILITY];
+    /// Tailles par file (index 0..nb_file_possibility-1, PR4 : le compte
+    /// RÉEL est une variable, ce tableau est dimensionné au plafond de
+    /// compilation NB_FILE_POSSIBILITY_MAX), pool non vérifié.
+    unsigned long long queue_unchecked[NB_FILE_POSSIBILITY_MAX];
     /// Tailles par file, pool vérifié.
-    unsigned long long queue_checked[NB_FILE_POSSIBILITY];
+    unsigned long long queue_checked[NB_FILE_POSSIBILITY_MAX];
     /// Tailles par file, pool analysé.
-    unsigned long long queue_analysed[NB_FILE_POSSIBILITY];
+    unsigned long long queue_analysed[NB_FILE_POSSIBILITY_MAX];
 } http_stats_view_t;
 
 /**

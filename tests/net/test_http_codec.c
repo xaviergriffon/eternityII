@@ -270,14 +270,14 @@ TEST http_json_format_stats_golden(void)
     ASSERT(strstr(buf, "\"queues\":[{\"file\":0,\"unchecked\":7,\"checked\":1,\"analysed\":0}") != NULL);
     ASSERT(strstr(buf, "]}") != NULL); /* tableau bien refermé */
 
-    /* NB_FILE_POSSIBILITY entrées attendues dans le tableau. */
+    /* NB_FILE_POSSIBILITY_DEFAULT entrées attendues dans le tableau. */
     int file_count = 0;
     const char *cursor = buf;
     while ((cursor = strstr(cursor, "\"file\":")) != NULL) {
         file_count++;
         cursor += strlen("\"file\":");
     }
-    ASSERT_EQ_FMT(NB_FILE_POSSIBILITY, file_count, "%d");
+    ASSERT_EQ_FMT(NB_FILE_POSSIBILITY_DEFAULT, file_count, "%d");
     PASS();
 }
 

@@ -52,6 +52,7 @@ int expand_min_level = 0;
 int expand_max_stock = EXPAND_MAX_STOCK;
 int expand_max_levels = EXPAND_MAX_LEVELS;
 int rebalance_budget = REBALANCE_BUDGET_DEFAULT;
+int stock_files_requested = 0;
 
 int headless_mode = 0;
 
@@ -325,6 +326,18 @@ int parse_cli_options(int argc, const char *argv[])
                 int budget = atoi(argv[r + 1]);
                 if (budget > 0) {
                     rebalance_budget = budget;
+                }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--stock-files") == 0) {
+            // Option valuée, même schéma que --expand-max-stock : appliquée
+            // plus tard par main() (datamanager_configure_stock_files), pas
+            // ici (aucune dépendance sur core/datamanager.h dans ce fichier).
+            // <n> <= 0 ignoré (garde 0 = défaut NB_FILE_POSSIBILITY_DEFAULT).
+            if (r + 1 < argc) {
+                int n = atoi(argv[r + 1]);
+                if (n > 0) {
+                    stock_files_requested = n;
                 }
                 r++; // consomme aussi la valeur
             }

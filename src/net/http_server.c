@@ -89,7 +89,7 @@ void http_stats_collect(http_stats_view_t *out)
     out->pruner_removed = pruner_removed;
 
     unsigned long long unchecked_total = 0, checked_total = 0, analysed_total = 0;
-    for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+    for (int f = 0; f < nb_file_possibility; f++) {
         unsigned long long u = file_size(f);
         unsigned long long c = file_checked_size(f);
         unsigned long long a = file_analysed_size(f);

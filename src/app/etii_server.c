@@ -112,13 +112,13 @@ char *build_file_queues_table(unsigned long long *out_unchecked,
                               unsigned long long *out_analysed)
 {
     unsigned long long unchecked = 0, checked = 0, analysed = 0;
-    size_t size = 256 + (size_t)NB_FILE_POSSIBILITY * 64;
+    size_t size = 256 + (size_t)nb_file_possibility * 64;
     char *table = calloc(size, sizeof(char));
     int off = snprintf(table, size,
         "File queues\n"
         "File |    Unchecked |      Checked |     Analysed\n"
         "-----+--------------+--------------+-------------\n");
-    for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+    for (int f = 0; f < nb_file_possibility; f++) {
         unsigned long long u = file_size(f);
         unsigned long long c = file_checked_size(f);
         unsigned long long a = file_analysed_size(f);

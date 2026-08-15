@@ -1,7 +1,7 @@
 # Maîtrise de la charge serveur : verrous bornés, sauvegarde cohérente à libération progressive
 
-**Statut : en cours d'implémentation.** PR 1 (§2), PR 2 (§3) et PR 3 (§4) **livrées**. PR 4
-et 5 (§5, §6) en proposition, non implémentées.
+**Statut : en cours d'implémentation.** PR 1 (§2), PR 2 (§3), PR 3 (§4) et PR 4 (§5)
+**livrées**. PR 5 (§6) en proposition, non implémentée.
 
 ## 1. Contexte et diagnostic
 
@@ -202,14 +202,54 @@ pas `1` comme envisagé) — le mécanisme est générique et fonctionne aussi b
 local d'un client, exactement comme ses deux voisines. Ajoutée au whitelist privilégié de
 l'API HTTP admin (`control_command_privileged`) aux côtés de `split`/`regroup`.
 
-## 5. Nombre de files configurable au démarrage (PR 4, proposition)
+## 5. Nombre de files configurable au démarrage (PR 4, livrée)
 
-Ferme le `@todo Rendre configurable` déjà présent sur `NB_FILE_POSSIBILITY`
+Ferme le `@todo Rendre configurable` qui vivait sur `NB_FILE_POSSIBILITY`
 (`src/core/datamanager.h`). Un plus grand nombre de files réduit le temps d'écriture par
-file (PR 2) et la granularité du rééquilibrage (PR 3). Fixé une seule fois au démarrage
-(`--stock-files <n>`), jamais à chaud. Contrainte à préserver : le nombre de files doit
-rester ≥ au nombre de forks des clients (le pool analysé y est indexé par `fork_seq` côté
-client).
+file de la sauvegarde cohérente (PR 2) et affine la granularité du rééquilibrage
+incrémental (PR 3).
+
+**Écart assumé par rapport au plan initial : plafond de compilation, pas une allocation
+dynamique.** Le plan envisageait de passer `file_possibility[]`/`file_possibility_checked[]`/
+`file_possibility_analysed[]`/`analysed_index[][]` en allocation dynamique (`malloc`), sizée
+exactement sur la valeur demandée. En creusant l'implémentation, cette voie exigeait un
+appel d'initialisation explicite avant TOUT usage de `datamanager.c` — y compris par les
+~1100 tests unitaires du projet, qui appellent ces fonctions directement sans jamais passer
+par `main()`. Le risque (un site d'appel oublié = déréférencement de pointeur NULL, pas une
+dégradation gracieuse) l'emportait sur le bénéfice mémoire, marginal à cette échelle
+(`analysed_index` reste le poste dominant même dynamique : ~8191 pointeurs × 8 octets par
+file).
+
+Retenu à la place : deux constantes de compilation, `NB_FILE_POSSIBILITY_DEFAULT` (10,
+comportement historique inchangé — les tableaux restent statiquement initialisés pour ces
+10 premières files, **zéro changement de risque pour le chemin par défaut, y compris tous
+les tests existants**) et `NB_FILE_POSSIBILITY_MAX` (128, plafond de compilation
+dimensionnant les tableaux — `analysed_index` à ce plafond : ~8191 × 8 × 128 ≈ 8,4 Mio,
+alloué statiquement que `--stock-files` soit utilisé ou non, négligeable pour un process
+serveur). `nb_file_possibility` (variable) est le compte RÉELLEMENT actif, dans
+`[1, NB_FILE_POSSIBILITY_MAX]`.
+
+`datamanager_configure_stock_files(n)` (`src/core/datamanager.{c,h}`) initialise
+explicitement (`init_file` + `pthread_mutex_init`) uniquement les files AU-DELÀ du socle par
+défaut déjà statiquement valide — les réinitialiser serait un comportement non défini par
+POSIX (`pthread_mutex_init` sur un mutex déjà initialisé). Appelée depuis `main()`
+uniquement si `--stock-files <n>` est explicitement fourni (`stock_files_requested > 0`) —
+sinon, comportement strictement identique à avant cette PR.
+
+**Contrainte préservée, avec un garde-fou actif plutôt qu'un simple constat** :
+`ensure_stock_files_cover_forks(nb_threads)` (`src/app/app_runtime.{h,c}`, appelée par
+`handle_client`) fait croître `nb_file_possibility` si nécessaire pour qu'il reste toujours
+≥ au nombre de forks demandé (le pool analysé y est indexé par `fork_seq`,
+`add_possibility_analysed(p, thread)`) — jamais l'inverse. Un `--stock-files` explicite trop
+petit pour le nombre de forks est donc relevé silencieusement (avec un log explicite), plutôt
+que de risquer un `put()` qui échoue silencieusement sur une file jamais initialisée.
+
+**Point laissé ouvert** : cette garantie n'est vérifiée qu'au démarrage. Un `configApply`
+augmentant `nb_forks` à chaud (cycle de vie dynamique des fils, voir `AGENTS.md`) au-delà du
+`nb_file_possibility` alors actif n'est pas re-vérifié — contrairement à
+`ensure_childs_capacity`, qui couvre le cas analogue pour `childrens_pid[]`/`forkId[]`. Risque
+jugé faible (un opérateur qui augmente `nb_forks` à chaud dépasse rarement 128 forks) mais non
+nul ; à traiter si l'usage réel le justifie.
 
 ## 6. Une sauvegarde inutile ne s'exécute pas (PR 5, proposition)
 

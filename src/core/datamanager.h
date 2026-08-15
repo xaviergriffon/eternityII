@@ -11,10 +11,54 @@
 #include "core/possibility.h"
 #include "core/lifo.h"
 
+// Nombre de files configurable au démarrage (PR4, docs/conception/maitrise_charge_serveur.md
+// — ferme le @todo qui vivait ici). Deux constantes de compilation distinctes :
+// NB_FILE_POSSIBILITY_DEFAULT (10, comportement historique, sans --stock-files) et
+// NB_FILE_POSSIBILITY_MAX (plafond de compilation dimensionnant les tableaux —
+// file_possibility[]/file_possibility_checked[]/file_possibility_analysed[]/
+// analysed_index[][], et http_stats_view_t côté net/http_codec.h). `nb_file_possibility`
+// (variable, définie dans datamanager.c) est le compte RÉELLEMENT actif, dans
+// [1, NB_FILE_POSSIBILITY_MAX] -- c'est CETTE valeur, jamais les deux constantes
+// ci-dessus, que lisent les boucles `for (fp = 0; fp < nb_file_possibility; fp++)`.
+#define NB_FILE_POSSIBILITY_DEFAULT 10
+#define NB_FILE_POSSIBILITY_MAX 128
+
 /**
- * @todo Rendre configurable
+ * @brief Nombre de files RÉELLEMENT actif (option CLI `--stock-files <n>`,
+ *        appliqué une seule fois au démarrage via `datamanager_configure_stock_files`,
+ *        jamais à chaud).
+ *
+ * Défaut `NB_FILE_POSSIBILITY_DEFAULT` (10). Un plus grand nombre de files réduit le
+ * temps d'écriture par file de la sauvegarde cohérente (PR2) et affine la granularité du
+ * rééquilibrage incrémental (PR3) — au prix d'un `analysed_index` plus grand
+ * (NB_FILE_POSSIBILITY_MAX * ANALYSED_INDEX_BUCKETS pointeurs, alloué statiquement quel
+ * que soit `nb_file_possibility`). Lu par TOUTES les boucles `for (fp = 0; fp <
+ * nb_file_possibility; fp++)` de ce fichier (et de `src/net/http_codec.c`,
+ * `src/net/http_server.c`, `src/app/etii_server.c`, `src/app/app_runtime.c`) —
+ * jamais `NB_FILE_POSSIBILITY_MAX`, qui ne borne QUE la taille de compilation des
+ * tableaux, ni `NB_FILE_POSSIBILITY_DEFAULT`, qui ne sert qu'à `datamanager_configure_stock_files`.
  */
-#define NB_FILE_POSSIBILITY 10
+extern int nb_file_possibility;
+
+/**
+ * @brief Applique un nombre de files différent du défaut (option CLI
+ *        `--stock-files <n>`), avant tout thread/fork (PR4).
+ *
+ * Les `NB_FILE_POSSIBILITY_DEFAULT` premières files sont déjà initialisées
+ * statiquement (`PTHREAD_MUTEX_INITIALIZER` + `File` valide) : les
+ * réinitialiser serait un comportement non défini par POSIX
+ * (`pthread_mutex_init` sur un mutex déjà initialisé). Cette fonction
+ * n'initialise donc explicitement (`init_file` + `pthread_mutex_init`) QUE
+ * les files AU-DELÀ de ce socle par défaut, encore à l'état zéro pur — un
+ * `File.sizeofvalue` resté à 0 ferait sinon échouer silencieusement tout
+ * `put()` sur ces files.
+ *
+ * @param n Nombre de files demandé. `n <= 0` est refusé (retour -1, aucun
+ *          effet) ; `n > NB_FILE_POSSIBILITY_MAX` est silencieusement
+ *          plafonné à `NB_FILE_POSSIBILITY_MAX`.
+ * @return  0 si appliqué (y compris plafonné), -1 si `n <= 0`.
+ */
+int datamanager_configure_stock_files(int n);
 
 /**
  * @brief Structure représentant un file de possibilités

@@ -13,7 +13,18 @@
 #include "net/etii_protocol.h"
 #include "core/readdata.h"
 
-static file_possibility_t file_possibility[NB_FILE_POSSIBILITY] =
+// PR4 (docs/conception/maitrise_charge_serveur.md) : ces trois tableaux et
+// analysed_index[][] plus bas sont dimensionnés au plafond de compilation
+// NB_FILE_POSSIBILITY_MAX, pas au compte réellement actif nb_file_possibility
+// (variable). Les NB_FILE_POSSIBILITY_DEFAULT premières lignes de chacun sont
+// initialisées statiquement ci-dessous (comportement historique, inchangé) ;
+// les lignes au-delà (jusqu'à NB_FILE_POSSIBILITY_MAX) restent zéro-initialisées
+// par défaut C — valides mais INERTES tant que datamanager_configure_stock_files
+// ne les a pas explicitement initialisées (File.sizeofvalue resterait à 0,
+// mutex jamais pthread_mutex_init'd).
+int nb_file_possibility = NB_FILE_POSSIBILITY_DEFAULT;
+
+static file_possibility_t file_possibility[NB_FILE_POSSIBILITY_MAX] =
 {
 	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
 	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
@@ -27,7 +38,7 @@ static file_possibility_t file_possibility[NB_FILE_POSSIBILITY] =
     {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
 };
 
-static file_possibility_t file_possibility_analysed[NB_FILE_POSSIBILITY] =
+static file_possibility_t file_possibility_analysed[NB_FILE_POSSIBILITY_MAX] =
 {
 	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
 	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
@@ -49,7 +60,7 @@ static file_possibility_t file_possibility_analysed[NB_FILE_POSSIBILITY] =
  * clients pruners (INST_GET_TO_CHECK) ainsi que, en repli, les clients de
  * recherche quand ce pool-ci est vide (fonctionnement sans pruner inchangé).
  */
-static file_possibility_t file_possibility_checked[NB_FILE_POSSIBILITY] =
+static file_possibility_t file_possibility_checked[NB_FILE_POSSIBILITY_MAX] =
 {
 	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
 	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
@@ -63,6 +74,29 @@ static file_possibility_t file_possibility_checked[NB_FILE_POSSIBILITY] =
     {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
 };
 
+int datamanager_configure_stock_files(int n)
+{
+	if (n <= 0) {
+		return -1;
+	}
+	if (n > NB_FILE_POSSIBILITY_MAX) {
+		n = NB_FILE_POSSIBILITY_MAX;
+	}
+	// Cf. le commentaire sur nb_file_possibility (datamanager.h) : les
+	// NB_FILE_POSSIBILITY_DEFAULT premières files sont déjà valides
+	// (initialiseur statique ci-dessus) — on ne touche QUE celles au-delà,
+	// encore à l'état zéro pur.
+	for (int fp = NB_FILE_POSSIBILITY_DEFAULT; fp < n; fp++) {
+		init_file(&file_possibility[fp].file, sizeof(struct possibility_packet));
+		pthread_mutex_init(&file_possibility[fp].lock, NULL);
+		init_file(&file_possibility_checked[fp].file, sizeof(struct possibility_packet));
+		pthread_mutex_init(&file_possibility_checked[fp].lock, NULL);
+		init_file(&file_possibility_analysed[fp].file, sizeof(struct possibility_packet));
+		pthread_mutex_init(&file_possibility_analysed[fp].lock, NULL);
+	}
+	nb_file_possibility = n;
+	return 0;
+}
 
 char*server_ip = NULL;
 
@@ -353,10 +387,10 @@ static int put_to_pool(file_possibility_t *pool, array_possibility_packet *possi
 			pthread_mutex_unlock(&pool[currfile].lock);
 		}
 		currfile++;
-		if(currfile >= NB_FILE_POSSIBILITY)
+		if(currfile >= nb_file_possibility)
 		{
 			currfile = 0;
-			// On ne cède le CPU que quand un tour complet des NB_FILE_POSSIBILITY
+			// On ne cède le CPU que quand un tour complet des nb_file_possibility
 			// files n'a permis de verrouiller aucune d'entre elles : le cas
 			// nominal (trylock réussi dès le premier essai) sort de la boucle
 			// via addpossibility avant même d'atteindre ce wraparound. Même
@@ -468,7 +502,7 @@ typedef struct AnalysedIndexNode {
 	struct AnalysedIndexNode *next;
 } AnalysedIndexNode;
 
-static AnalysedIndexNode *analysed_index[NB_FILE_POSSIBILITY][ANALYSED_INDEX_BUCKETS];
+static AnalysedIndexNode *analysed_index[NB_FILE_POSSIBILITY_MAX][ANALYSED_INDEX_BUCKETS];
 
 /**
  * @brief Calcule le hash d'une possibilité, cohérent avec `compare_possibility`.
@@ -518,7 +552,7 @@ static uint64_t hash_possibility_key(const struct possibility_packet *p)
  * `datamanager_analysed_owned_by` (PR6) ne le verra simplement pas, comme
  * documenté sur `AnalysedIndexNode` ci-dessus.
  *
- * @param fileidx   Indice de la file analysée (0..NB_FILE_POSSIBILITY-1).
+ * @param fileidx   Indice de la file analysée (0..nb_file_possibility-1).
  * @param e         Élément (déjà présent dans la file) à indexer.
  * @param owner_uid `client_uid` du client servi côté serveur (PR6), ou `NULL`
  *                  si aucune attribution n'est connue/pertinente ici.
@@ -693,7 +727,7 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 		if (checked == 1) {
 			if (thread < 0) {
 				currfile++;
-				if(currfile >= NB_FILE_POSSIBILITY)
+				if(currfile >= nb_file_possibility)
 				{
 					// On n'a pas retrouvé la possibilité
 #ifdef DEBUG_CHECK_POSSIBILITY
@@ -869,7 +903,7 @@ static int add_possibility_analysed_impl(struct possibility_packet *possiblity, 
 		}
 		if (thread < 0) {
 			currfile++;
-			if(currfile >= NB_FILE_POSSIBILITY)
+			if(currfile >= nb_file_possibility)
 			{
 				currfile = 0;
 				usleep(MICRO_SLEEP);
@@ -929,7 +963,7 @@ int datamanager_analysed_owned_by(const uint8_t owner_uid[CLIENT_UID_BYTES],
 	}
 	*out_count = 0;
 	*out_max_alloc = -1;
-	for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+	for (int f = 0; f < nb_file_possibility; f++) {
 		pthread_mutex_lock(&file_possibility_analysed[f].lock);
 		for (size_t b = 0; b < ANALYSED_INDEX_BUCKETS; b++) {
 			for (AnalysedIndexNode *node = analysed_index[f][b]; node != NULL; node = node->next) {
@@ -967,7 +1001,7 @@ int analysed_lease_is_expired(time_t lease_deadline, time_t now) {
  */
 unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner_alive_fn owner_alive) {
 	unsigned long long reclaimed_total = 0;
-	for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+	for (int f = 0; f < nb_file_possibility; f++) {
 		pthread_mutex_lock(&file_possibility_analysed[f].lock);
 		File *file = &file_possibility_analysed[f].file;
 		unsigned long long capacity = file->size;
@@ -1023,7 +1057,7 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner
 					pthread_mutex_unlock(&file_possibility[dest].lock);
 					added = 1;
 				} else {
-					dest = (dest + 1) % NB_FILE_POSSIBILITY;
+					dest = (dest + 1) % nb_file_possibility;
 					usleep(MICRO_SLEEP);
 				}
 			}
@@ -1045,7 +1079,7 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner
  */
 int restock_analysed(void) {
     unsigned long long moved = 0;
-    for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+    for (int f = 0; f < nb_file_possibility; f++) {
         pthread_mutex_lock(&file_possibility_analysed[f].lock);
         File *src = &file_possibility_analysed[f].file;
         unsigned long long count = src->size;
@@ -1073,7 +1107,7 @@ int restock_analysed(void) {
                     pthread_mutex_unlock(&file_possibility[dest].lock);
                     added = 1;
                 } else {
-                    dest = (dest + 1) % NB_FILE_POSSIBILITY;
+                    dest = (dest + 1) % nb_file_possibility;
                     usleep(MICRO_SLEEP);
                 }
             }
@@ -1100,7 +1134,7 @@ int restock_analysed(void) {
  * si elle est momentanément prise par un autre thread — jamais de perte,
  * même motif que `restock_analysed`.
  *
- * Ne déplace rien si `pool[fullest] <= total/NB_FILE_POSSIBILITY` (déjà
+ * Ne déplace rien si `pool[fullest] <= total/nb_file_possibility` (déjà
  * équilibré) : évite un va-et-vient perpétuel entre deux tours pour de
  * petites variations dues au trafic concurrent normal.
  *
@@ -1114,11 +1148,11 @@ static int rebalance_pool_step(file_possibility_t *pool, int max_packets)
 		return 0;
 	}
 
-	unsigned long long sizes[NB_FILE_POSSIBILITY];
+	unsigned long long sizes[nb_file_possibility];
 	unsigned long long total = 0;
 	int fullest = 0;
 	int emptiest = 0;
-	for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++) {
+	for (int fp = 0; fp < nb_file_possibility; fp++) {
 		sizes[fp] = pool[fp].file.size;
 		total += sizes[fp];
 		if (sizes[fp] > sizes[fullest]) { fullest = fp; }
@@ -1128,7 +1162,7 @@ static int rebalance_pool_step(file_possibility_t *pool, int max_packets)
 		return 0;
 	}
 
-	unsigned long long target = total / NB_FILE_POSSIBILITY;
+	unsigned long long target = total / nb_file_possibility;
 	if (sizes[fullest] <= target) {
 		return 0;
 	}
@@ -1160,7 +1194,7 @@ static int rebalance_pool_step(file_possibility_t *pool, int max_packets)
 				pthread_mutex_unlock(&pool[dest].lock);
 				added = 1;
 			} else {
-				dest = (dest + 1) % NB_FILE_POSSIBILITY;
+				dest = (dest + 1) % nb_file_possibility;
 				usleep(MICRO_SLEEP);
 			}
 		}
@@ -1183,7 +1217,7 @@ static int rebalance_pool_step(file_possibility_t *pool, int max_packets)
  * : ce n'est que le NOMBRE de pas par appel qui change, pas leur coût
  * unitaire.
  *
- * Termine en au plus `NB_FILE_POSSIBILITY` pas structurellement (chaque pas
+ * Termine en au plus `nb_file_possibility` pas structurellement (chaque pas
  * fixe définitivement au moins une file à sa cible, cf. `rebalance_pool_step`)
  * — garde-fou de boucle par prudence, même discipline que `split_datas`.
  *
@@ -1196,7 +1230,7 @@ static int rebalance_pool_until_budget(file_possibility_t *pool, int max_packets
 {
 	int moved_total = 0;
 	int rounds = 0;
-	while (moved_total < max_packets && rounds < NB_FILE_POSSIBILITY * 2) {
+	while (moved_total < max_packets && rounds < nb_file_possibility * 2) {
 		int moved = rebalance_pool_step(pool, max_packets - moved_total);
 		if (moved <= 0) {
 			break;
@@ -1349,16 +1383,16 @@ static void scroll_from_pool(file_possibility_t *pool, array_possibility_packet 
 {
 	int getpossibility = 0;
 	int currfile = 0;
-	int filetested[NB_FILE_POSSIBILITY];
+	int filetested[nb_file_possibility];
 	int failed_sweeps = 0;
 	int i;
-	for(i = 0; i < NB_FILE_POSSIBILITY; i++)
+	for(i = 0; i < nb_file_possibility; i++)
 	{
 		filetested[i] = 0;
 	}
 	while (getpossibility == 0) {
 		int f;
-		for (f=0; f < NB_FILE_POSSIBILITY && getpossibility == 0; f++)
+		for (f=0; f < nb_file_possibility && getpossibility == 0; f++)
 		{
 			if(filetested[f] == 0)
 			{
@@ -1421,7 +1455,7 @@ static void scroll_from_pool(file_possibility_t *pool, array_possibility_packet 
 		if(getpossibility == 1 && result->size == 0)
 		{
 			int all_tested = 1;
-			for(f=0; f < NB_FILE_POSSIBILITY; f++)
+			for(f=0; f < nb_file_possibility; f++)
 			{
 				if(filetested[f] == 0)
 				{
@@ -1515,7 +1549,7 @@ array_possibility_packet *get_last_possibility_tocheck(int max_result)
 
 unsigned long long file_size(int nfile)
 {
-	if(nfile >= 0 && nfile < NB_FILE_POSSIBILITY)
+	if(nfile >= 0 && nfile < nb_file_possibility)
 	{
 		return file_possibility[nfile].file.size;
 	}
@@ -1524,7 +1558,7 @@ unsigned long long file_size(int nfile)
 
 unsigned long long file_checked_size(int nfile)
 {
-	if(nfile >= 0 && nfile < NB_FILE_POSSIBILITY)
+	if(nfile >= 0 && nfile < nb_file_possibility)
 	{
 		return file_possibility_checked[nfile].file.size;
 	}
@@ -1533,7 +1567,7 @@ unsigned long long file_checked_size(int nfile)
 
 unsigned long long file_analysed_size(int nfile)
 {
-	if(nfile >= 0 && nfile < NB_FILE_POSSIBILITY)
+	if(nfile >= 0 && nfile < nb_file_possibility)
 	{
 		return file_possibility_analysed[nfile].file.size;
 	}
@@ -1544,7 +1578,7 @@ unsigned long long datas_size(void)
 {
     unsigned long long result = 0;
 	int f;
-	for(f=0; f < NB_FILE_POSSIBILITY; f++)
+	for(f=0; f < nb_file_possibility; f++)
 	{
         result += file_size(f);
         result += file_checked_size(f);
@@ -1555,7 +1589,7 @@ unsigned long long datas_size(void)
 /**
  * @brief Verrouille toutes les files de possibilités et active le mode maintenance.
  *
- * Appel bloquant (pthread_mutex_lock) sur chacune des `NB_FILE_POSSIBILITY` files.
+ * Appel bloquant (pthread_mutex_lock) sur chacune des `nb_file_possibility` files.
  * Doit être suivi d'un appel à `unlock_all_file`.
  */
 void lock_all_file(void)
@@ -1563,7 +1597,7 @@ void lock_all_file(void)
 	maintenance = 1;
 	int fp;
 	// Bloquage des files (les deux pools : non vérifié et vérifié)
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		pthread_mutex_lock(&file_possibility[fp].lock);
 		pthread_mutex_lock(&file_possibility_checked[fp].lock);
@@ -1577,7 +1611,7 @@ void unlock_all_file(void)
 {
 	int fp;
 	//libération des files (les deux pools)
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		pthread_mutex_unlock(&file_possibility[fp].lock);
 		pthread_mutex_unlock(&file_possibility_checked[fp].lock);
@@ -1633,7 +1667,7 @@ int backup(char *filename)
 	int write_error = 0;
 	lock_all_file();
 	int fp;
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		Element *currElement = file_possibility[fp].file.start;
 		while(currElement != NULL)
@@ -1699,7 +1733,7 @@ void lock_all_file_analysed(void)
 	maintenance = 1;
 	int fp;
 	// Bloquage des files
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		pthread_mutex_lock(&file_possibility_analysed[fp].lock);
 	}
@@ -1712,7 +1746,7 @@ void unlock_all_file_analysed(void)
 {
 	int fp;
 	//libération des files
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		pthread_mutex_unlock(&file_possibility_analysed[fp].lock);
 	}
@@ -1745,7 +1779,7 @@ int backup_analysed(char *filename)
 	int write_error = 0;
 	lock_all_file_analysed();
 	int fp;
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		Element *currElement = file_possibility_analysed[fp].file.start;
 		while(currElement != NULL)
@@ -1879,11 +1913,11 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	// Phase 1 : gel global à l'instant T (cf. docstring ci-dessus).
 	maintenance = 1;
 	int fp;
-	for (fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
 		pthread_mutex_lock(&file_possibility_analysed[fp].lock);
 	}
-	for (fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
 		pthread_mutex_lock(&file_possibility[fp].lock);
 		pthread_mutex_lock(&file_possibility_checked[fp].lock);
@@ -1891,7 +1925,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 
 	// Phase 2a : pool analysé, libéré au fil de l'écriture.
 	int write_error_analysed = 0;
-	for (fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
 		Element *currElement = file_possibility_analysed[fp].file.start;
 		while (currElement != NULL)
@@ -1912,7 +1946,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	// Phase 2b : stock (non vérifié + vérifié), une file à la fois, libérée
 	// dès son écriture terminée.
 	int write_error_stock = 0;
-	for (fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
 		Element *currElement = file_possibility[fp].file.start;
 		while (currElement != NULL)
@@ -2042,7 +2076,7 @@ int restore(char *filename)
 	lock_all_file();
 	int fp;
 	//vidage des files (les deux pools)
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		File *suite = &file_possibility[fp].file;
 		struct possibility_packet value;
@@ -2067,7 +2101,7 @@ int import_json(void) {
 	
 	int fp;
 	//vidage des files
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		File *suite = &file_possibility[fp].file;
 		while(suite->size >0)
@@ -2132,7 +2166,7 @@ int restore_analysed(char *filename)
 	lock_all_file_analysed();
 	int fp;
 	//vidage des files
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		File *suite = &file_possibility_analysed[fp].file;
 		while(suite->size >0)
@@ -2176,7 +2210,7 @@ int printdatamanager(void)
 {
 	lock_all_file();
 	int fp;
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		print_file(fp);
 	}
@@ -2235,7 +2269,7 @@ int fprint_datamanager(FILE *out, size_t *count)
 {
 	lock_all_file();
 	int rc = 0;
-	for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (int fp = 0; fp < nb_file_possibility; fp++)
 	{
 		if (fprint_file(out, fp, count) != 0) {
 			rc = -1;
@@ -2293,7 +2327,7 @@ int print_all_file_analysed(void)
 {
 	lock_all_file_analysed();
 	int fp;
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		print_file_analysed(fp);
 	}
@@ -2313,7 +2347,7 @@ int fprint_all_file_analysed(FILE *out, size_t *count)
 {
 	lock_all_file_analysed();
 	int rc = 0;
-	for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (int fp = 0; fp < nb_file_possibility; fp++)
 	{
 		if (fprint_file_analysed(out, fp, count) != 0) {
 			rc = -1;
@@ -2337,7 +2371,7 @@ static unsigned long long regroup_pool_nolock(file_possibility_t *pool)
 	int fp;
 	unsigned long long size = pool[0].file.size;
 	struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
-	for (fp=1; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=1; fp < nb_file_possibility; fp++)
 	{
 
 		while (pool[fp].file.size > 0) {
@@ -2407,7 +2441,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         File work;
         init_file(&work, sizeof(struct possibility_packet));
         lock_all_file();
-        for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++) {
+        for (int fp = 0; fp < nb_file_possibility; fp++) {
             struct possibility_packet drained;
             while (scroll(&file_possibility[fp].file, &drained)) {
                 put(&work, &drained);
@@ -2491,7 +2525,7 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
     unsigned long long total_cells = 0;
 	// Seul le pool non vérifié est élagué : une possibilité vérifiée (checked == 1)
 	// a déjà été confirmée vivante par un pruner, elle a donc forcément une suite.
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		Element *currElement = file_possibility[fp].file.start;
 
@@ -2578,13 +2612,13 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
  * Regroupe d'abord tout dans la file 0, puis distribue par quotient égal.
  * Doit être appelée avec les files déjà verrouillées.
  *
- * @param nbsplit Nombre de files cibles (≤ NB_FILE_POSSIBILITY).
+ * @param nbsplit Nombre de files cibles (≤ nb_file_possibility).
  * @return        0.
  */
 /**
  * @brief Répartit un pool sur `nbsplit` files, sans verrouillage.
  * @param pool    Tableau de files (pool non vérifié ou vérifié).
- * @param nbsplit Nombre de files cibles (≤ NB_FILE_POSSIBILITY).
+ * @param nbsplit Nombre de files cibles (≤ nb_file_possibility).
  * @return        0.
  */
 static int split_pool_nolock(file_possibility_t *pool, int nbsplit)
@@ -2665,7 +2699,7 @@ int check_datas(void)
 	int count = 0;
     int errors = 0;
 	int fp;
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		// Les deux pools sont vérifiés : non vérifié et vérifié (checked == 1)
 		File *pools[2] = { &file_possibility[fp].file, &file_possibility_checked[fp].file };
@@ -2727,7 +2761,7 @@ void *check_duplicate_thread(void *arguments) {
     while (currElement != NULL && duplicateAnalyzed[args->threadPosition] <= args->nbCombinations)
     {
         duplicateCount[args->threadPosition]++;
-        for (cfp=fp; cfp < NB_FILE_POSSIBILITY; cfp++)
+        for (cfp=fp; cfp < nb_file_possibility; cfp++)
         {
             unsigned long long comparePosition = 0;
             Element *elementToCompare = NULL;
@@ -2773,7 +2807,7 @@ void *check_duplicate_thread(void *arguments) {
             fp++;
             position = 0;
             currElement = NULL;
-            if (fp < NB_FILE_POSSIBILITY) {
+            if (fp < nb_file_possibility) {
                 currElement = file_possibility[fp].file.start;
             }
         }
@@ -2882,13 +2916,13 @@ int check_duplicate(void)
     // NOTE : la détection de doublons ne balaie que le pool non vérifié.
     // Le walker threadé (check_duplicate_thread) référence directement
     // file_possibility[] pour partitionner et comparer ; étendre la recherche
-    // au pool vérifié (checked == 1) imposerait de chaîner 2*NB_FILE_POSSIBILITY
+    // au pool vérifié (checked == 1) imposerait de chaîner 2*nb_file_possibility
     // files dans une même séquence — hors périmètre ici. On dimensionne donc le
     // travail sur la taille du seul pool non vérifié (et non datas_size(), qui
     // inclut le pool vérifié) pour que le nombre de combinaisons corresponde
     // exactement aux éléments réellement parcourus.
     unsigned long long dataSize = 0;
-    for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+    for (int f = 0; f < nb_file_possibility; f++) {
         dataSize += file_size(f);
     }
     unsigned long long nbCombinations = count_combinations(dataSize);
@@ -2907,7 +2941,7 @@ int check_duplicate(void)
     // lancé garde un duplicateFinish résiduel qui ferait boucler l'attente sans
     // fin sur un thread jamais créé.
     int spawned = 0;
-    for (int t = 0; t < nbDuplicateThread && fp < NB_FILE_POSSIBILITY && allocated < nbCombinations; t++) {
+    for (int t = 0; t < nbDuplicateThread && fp < nb_file_possibility && allocated < nbCombinations; t++) {
         duplicateCount[t] = 0;
         duplicateErrors[t] = 0;
         duplicateFinish[t] = 0;
@@ -2928,7 +2962,7 @@ int check_duplicate(void)
                 if (position > file_possibility[fp].file.size) {
                     fp++;
                     position = 0;
-                    if (fp >= NB_FILE_POSSIBILITY) {
+                    if (fp >= nb_file_possibility) {
                         currElement = NULL;
                         break;
                     }
@@ -3002,7 +3036,7 @@ void datamanager_stock_distribution(stock_distribution_t *out)
 
     // Passe 1 : les deux pools de stock (non vérifié et vérifié).
     lock_all_file();
-    for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+    for (int fp = 0; fp < nb_file_possibility; fp++)
     {
         out->total_unchecked += accumulate_alloc_levels(&file_possibility[fp].file, out->unchecked);
         out->total_checked += accumulate_alloc_levels(&file_possibility_checked[fp].file, out->checked);
@@ -3012,7 +3046,7 @@ void datamanager_stock_distribution(stock_distribution_t *out)
     // Passe 2 : le pool « en cours d'analyse », sous sa propre famille de
     // verrous — jamais tenue en même temps que la précédente.
     lock_all_file_analysed();
-    for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+    for (int fp = 0; fp < nb_file_possibility; fp++)
     {
         out->total_analysed += accumulate_alloc_levels(&file_possibility_analysed[fp].file, out->analysed);
     }
@@ -3059,7 +3093,7 @@ int search_min_datas(void)
 	int result = ETERN_PARTS + 1;
 	lock_all_file();
 	int fp;
-	for (fp=0; fp < NB_FILE_POSSIBILITY; fp++)
+	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		// Les deux pools comptent : non vérifié et vérifié (checked == 1)
 		result = min_alloc_in_file(&file_possibility[fp].file, result);
@@ -3340,7 +3374,7 @@ int check_file(int f)
 int check_files(void)
 {
 	int f;
-	for(f = 0; f < NB_FILE_POSSIBILITY;f++)
+	for(f = 0; f < nb_file_possibility;f++)
 	{
 		if(check_file(f))
 		{
@@ -3370,15 +3404,15 @@ int sort_descending_nolock(void)
 /**
  * @brief Trie toutes les files en parallèle (un thread par file).
  *
- * Lance `NB_FILE_POSSIBILITY` threads de tri descendant en parallèle
+ * Lance `nb_file_possibility` threads de tri descendant en parallèle
  * et attend leur fin avec `pthread_join`.
  */
 void sortdmthread(void)
 {
-	pthread_t *tid = malloc( NB_FILE_POSSIBILITY * sizeof(pthread_t) );
-	int *f = malloc(NB_FILE_POSSIBILITY * sizeof(int));
+	pthread_t *tid = malloc( nb_file_possibility * sizeof(pthread_t) );
+	int *f = malloc(nb_file_possibility * sizeof(int));
 	int i;
-	for( i=0; i<NB_FILE_POSSIBILITY; i++ )
+	for( i=0; i<nb_file_possibility; i++ )
 	{
 		f[i] = i;
 		pthread_create( &tid[i], NULL, sort_d_mono, &f[i] );
@@ -3386,7 +3420,7 @@ void sortdmthread(void)
 	
 	
 	// Attente que les threads on terminés
-	for( i=0; i<NB_FILE_POSSIBILITY; i++ )
+	for( i=0; i<nb_file_possibility; i++ )
 	{
 		pthread_join( tid[i], NULL );
 	}
@@ -3399,7 +3433,7 @@ int sort_descending_mthread(void)
 {
 	lock_all_file();
 	
-	int nbfile=NB_FILE_POSSIBILITY;
+	int nbfile=nb_file_possibility;
 	int n;
 	for(n = 1; n < nbfile; n++)
 	{

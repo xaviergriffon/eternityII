@@ -1111,6 +1111,31 @@ TEST backup_failed_exit_saves_leftover_stock(void)
     PASS();
 }
 
+/* ---------- ensure_stock_files_cover_forks (PR4) --------------------------- */
+/*
+ * nb_file_possibility est un état GLOBAL qui persiste entre tests : chaque
+ * test le restaure à NB_FILE_POSSIBILITY_DEFAULT avant PASS().
+ */
+
+TEST ensure_stock_files_cover_forks_noop_when_already_sufficient(void)
+{
+    ASSERT_EQ_FMT(NB_FILE_POSSIBILITY_DEFAULT, nb_file_possibility, "%d");
+    ASSERT_EQ_FMT(0, ensure_stock_files_cover_forks(NB_FILE_POSSIBILITY_DEFAULT), "%d");
+    ASSERT_EQ_FMT(0, ensure_stock_files_cover_forks(NB_FILE_POSSIBILITY_DEFAULT - 2), "%d");
+    ASSERT_EQ_FMT(NB_FILE_POSSIBILITY_DEFAULT, nb_file_possibility, "%d"); /* jamais réduit */
+    PASS();
+}
+
+TEST ensure_stock_files_cover_forks_grows_when_forks_exceed_files(void)
+{
+    ASSERT_EQ_FMT(NB_FILE_POSSIBILITY_DEFAULT, nb_file_possibility, "%d");
+    ASSERT_EQ_FMT(1, ensure_stock_files_cover_forks(25), "%d");
+    ASSERT_EQ_FMT(25, nb_file_possibility, "%d");
+
+    datamanager_configure_stock_files(NB_FILE_POSSIBILITY_DEFAULT);
+    PASS();
+}
+
 /* ---------- run_checker ---------------------------------------------------- */
 /*
  * REQUEST_STOP prépositionné : le thread détaché (check_server ou
@@ -1733,6 +1758,8 @@ SUITE(app_runtime_suite)
 
     RUN_TEST(backup_failed_exit_empty_is_noop);
     RUN_TEST(backup_failed_exit_saves_leftover_stock);
+    RUN_TEST(ensure_stock_files_cover_forks_noop_when_already_sufficient);
+    RUN_TEST(ensure_stock_files_cover_forks_grows_when_forks_exceed_files);
 
     RUN_TEST(run_checker_client_starts_and_stops);
     RUN_TEST(run_checker_server_starts_and_stops);

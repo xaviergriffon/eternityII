@@ -147,6 +147,15 @@ static const cli_help_topic_t cli_topics[] = {
 	  "pas une erreur (valeurs par défaut/CLI utilisées). Écrit par la commande\n"
 	  "console configSave (écriture atomique .tmp puis rename) ; affiché par\n"
 	  "la commande config." },
+	{ "--stock-files",
+	  "--stock-files <n>",
+	  "Nombre de files de stock au démarrage (défaut NB_FILE_POSSIBILITY_DEFAULT, 10).",
+	  "Un plus grand nombre de files réduit le temps d'écriture par file de la\n"
+	  "sauvegarde cohérente (PR2) et affine la granularité du rééquilibrage\n"
+	  "incrémental (PR3) — voir docs/conception/maitrise_charge_serveur.md.\n"
+	  "Plafonné à NB_FILE_POSSIBILITY_MAX (128). Fixé une seule fois au\n"
+	  "démarrage, jamais à chaud. Valeur absente ou <= 0 : ignorée (garde le\n"
+	  "défaut)." },
 	{ "--rebalance-budget",
 	  "--rebalance-budget <n>",
 	  "Serveur : nombre de possibilités rééquilibrées entre files à chaque tour (10 s).",
@@ -823,6 +832,35 @@ void resolve_client_label(const char *cli_label, const char *hostname_or_null,
 	out[len] = '\0';
 }
 
+/**
+ * @brief Garantit `nb_file_possibility >= nb_threads` avant tout fork (PR4,
+ *        docs/conception/maitrise_charge_serveur.md).
+ *
+ * Le pool analysé est indexé par `fork_seq` côté client
+ * (`add_possibility_analysed(p, thread)`, `src/app/etii_client.c`) : un
+ * nombre de files inférieur au nombre de forks laisserait un index de fork
+ * viser une file jamais initialisée par `datamanager_configure_stock_files`
+ * (`File.sizeofvalue` resté à 0, `put()` échouerait silencieusement). Ne
+ * PEUT que faire croître `nb_file_possibility`, jamais le réduire — un
+ * `--stock-files` explicite trop petit pour `nb_threads` est donc relevé
+ * silencieusement (avec un log explicite) plutôt que de risquer ce bug.
+ *
+ * @param nb_threads Nombre de forks de recherche demandés (`NB_THREADS`).
+ * @return           1 si un ajustement a eu lieu (log déjà émis), 0 sinon
+ *                    (déjà suffisant, rien à faire).
+ */
+int ensure_stock_files_cover_forks(int nb_threads)
+{
+	if (nb_threads <= nb_file_possibility) {
+		return 0;
+	}
+	int previous = nb_file_possibility;
+	datamanager_configure_stock_files(nb_threads);
+	log_info("stock-files : relevé de %d à %d (couvre les %d threads demandés)\n",
+	          previous, nb_file_possibility, nb_threads);
+	return 1;
+}
+
 void init_client_identity(void)
 {
 	memset(&g_client_identity_template, 0, sizeof(g_client_identity_template));
@@ -1030,7 +1068,7 @@ void *fork_checker(void *param) {
         statistic->pruner_cells_per_second = pps;
 
         int analyses_in_stock = 0;
-        for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+        for (int f = 0; f < nb_file_possibility; f++) {
             analyses_in_stock += file_analysed_size(f);
         }
         statistic->analyses_in_stock = analyses_in_stock;

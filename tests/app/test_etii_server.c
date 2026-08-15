@@ -226,7 +226,7 @@ TEST active_threads_all_connected(void)
 /* ---------- build_file_queues_table -------------------------------------- */
 
 /* Sur un stock vide, tous les totaux valent 0 et le tableau est bien structuré
-   (en-tête + ligne Total). Exerce la boucle complète sur NB_FILE_POSSIBILITY. */
+   (en-tête + ligne Total). Exerce la boucle complète sur NB_FILE_POSSIBILITY_DEFAULT. */
 TEST file_queues_table_empty_is_all_zero(void)
 {
     dm_drain_all();

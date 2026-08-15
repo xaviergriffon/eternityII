@@ -577,7 +577,7 @@ TEST split_datas_balances_within_one_of_target(void)
     ASSERT_EQ_FMT(97ULL, datas_size(), "%llu"); /* total préservé */
 
     unsigned long long min_sz = ULLONG_MAX, max_sz = 0;
-    for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++) {
+    for (int fp = 0; fp < NB_FILE_POSSIBILITY_DEFAULT; fp++) {
         unsigned long long sz = file_size(fp);
         if (sz < min_sz) min_sz = sz;
         if (sz > max_sz) max_sz = sz;
@@ -625,11 +625,11 @@ TEST rebalance_step_converges_to_balance(void)
     do {
         moved = datamanager_rebalance_step(1000);
         rounds++;
-    } while (moved > 0 && rounds < NB_FILE_POSSIBILITY * 4);
+    } while (moved > 0 && rounds < NB_FILE_POSSIBILITY_DEFAULT * 4);
 
     ASSERT_EQ_FMT(83ULL, datas_size(), "%llu");
     unsigned long long min_sz = ULLONG_MAX, max_sz = 0;
-    for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++) {
+    for (int fp = 0; fp < NB_FILE_POSSIBILITY_DEFAULT; fp++) {
         unsigned long long sz = file_size(fp);
         if (sz < min_sz) min_sz = sz;
         if (sz > max_sz) max_sz = sz;
@@ -688,16 +688,82 @@ TEST rebalance_step_noop_when_already_balanced(void)
 {
     drain_datamanager();
     /* Force explicitement un état équilibré : split_datas() sur un stock
-     * multiple de NB_FILE_POSSIBILITY donne un compte identique par file. */
-    int allocs[NB_FILE_POSSIBILITY * 3];
-    for (int i = 0; i < NB_FILE_POSSIBILITY * 3; i++) allocs[i] = (i % 13) + 1;
-    add_packets(allocs, NB_FILE_POSSIBILITY * 3);
+     * multiple de NB_FILE_POSSIBILITY_DEFAULT donne un compte identique par file. */
+    int allocs[NB_FILE_POSSIBILITY_DEFAULT * 3];
+    for (int i = 0; i < NB_FILE_POSSIBILITY_DEFAULT * 3; i++) allocs[i] = (i % 13) + 1;
+    add_packets(allocs, NB_FILE_POSSIBILITY_DEFAULT * 3);
     split_datas();
-    for (int fp = 0; fp < NB_FILE_POSSIBILITY; fp++) {
+    for (int fp = 0; fp < NB_FILE_POSSIBILITY_DEFAULT; fp++) {
         ASSERT_EQ_FMT(3ULL, file_size(fp), "%llu");
     }
 
     ASSERT_EQ_FMT(0, datamanager_rebalance_step(1000), "%d");
+
+    drain_datamanager();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * datamanager_configure_stock_files (PR4, docs/conception/maitrise_charge_serveur.md)
+ *
+ * nb_file_possibility est un état GLOBAL qui persiste entre tests (comme
+ * server_ip ou max_result) : chaque test qui le modifie le restaure à
+ * NB_FILE_POSSIBILITY_DEFAULT avant PASS(), pour ne pas affecter les tests
+ * suivants (beaucoup supposent implicitement le défaut).
+ * ------------------------------------------------------------------------ */
+
+TEST configure_stock_files_rejects_non_positive(void)
+{
+    ASSERT_EQ_FMT(NB_FILE_POSSIBILITY_DEFAULT, nb_file_possibility, "%d"); /* état de départ propre */
+    ASSERT_EQ_FMT(-1, datamanager_configure_stock_files(0), "%d");
+    ASSERT_EQ_FMT(-1, datamanager_configure_stock_files(-5), "%d");
+    ASSERT_EQ_FMT(NB_FILE_POSSIBILITY_DEFAULT, nb_file_possibility, "%d"); /* inchangé */
+    PASS();
+}
+
+TEST configure_stock_files_clamps_to_max(void)
+{
+    ASSERT_EQ_FMT(0, datamanager_configure_stock_files(NB_FILE_POSSIBILITY_MAX + 50), "%d");
+    ASSERT_EQ_FMT(NB_FILE_POSSIBILITY_MAX, nb_file_possibility, "%d");
+
+    datamanager_configure_stock_files(NB_FILE_POSSIBILITY_DEFAULT);
+    PASS();
+}
+
+/* La propriété qui justifie toute la PR : une file au-delà du socle par
+ * défaut (jamais initialisée statiquement) doit devenir réellement
+ * utilisable après configuration -- pas seulement "ne pas planter". */
+TEST configure_stock_files_new_files_are_usable(void)
+{
+    drain_all();
+    ASSERT_EQ_FMT(0, datamanager_configure_stock_files(20), "%d");
+    ASSERT_EQ_FMT(20, nb_file_possibility, "%d");
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 7;
+    ASSERT_EQ_FMT(0, add_possibility_analysed(&pk, 15), "%d"); /* file au-delà du socle par défaut */
+    ASSERT_EQ_FMT(1ULL, file_analysed_size(15), "%llu");
+
+    drain_all();
+    datamanager_configure_stock_files(NB_FILE_POSSIBILITY_DEFAULT);
+    PASS();
+}
+
+/* Revenir à un compte plus petit ne doit ni planter ni perdre ce qui est
+ * dans les files encore couvertes par le nouveau compte (aucune file n'est
+ * jamais désinitialisée -- seules celles au-delà du nouveau compte
+ * deviennent inertes/ignorées par les boucles). */
+TEST configure_stock_files_shrinking_back_is_safe(void)
+{
+    drain_all();
+    ASSERT_EQ_FMT(0, datamanager_configure_stock_files(20), "%d");
+    int allocs[3] = { 1, 2, 3 };
+    add_packets(allocs, 3); /* atterrit dans une file < NB_FILE_POSSIBILITY_DEFAULT */
+
+    ASSERT_EQ_FMT(0, datamanager_configure_stock_files(NB_FILE_POSSIBILITY_DEFAULT), "%d");
+    ASSERT_EQ_FMT(NB_FILE_POSSIBILITY_DEFAULT, nb_file_possibility, "%d");
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu"); /* rien perdu */
 
     drain_datamanager();
     PASS();
@@ -2308,16 +2374,16 @@ TEST check_files_reports_consistent_stock(void)
 }
 
 /* file_size / file_checked_size / file_analysed_size : un index hors de
-   [0, NB_FILE_POSSIBILITY[ renvoie 0 (garde de borne, côté false jamais pris
+   [0, NB_FILE_POSSIBILITY_DEFAULT[ renvoie 0 (garde de borne, côté false jamais pris
    par les autres tests qui n'utilisent que des index valides). */
 TEST file_size_accessors_reject_out_of_range(void)
 {
     ASSERT_EQ_FMT(0ULL, file_size(-1), "%llu");
-    ASSERT_EQ_FMT(0ULL, file_size(NB_FILE_POSSIBILITY), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_size(NB_FILE_POSSIBILITY_DEFAULT), "%llu");
     ASSERT_EQ_FMT(0ULL, file_checked_size(-1), "%llu");
     ASSERT_EQ_FMT(0ULL, file_checked_size(999), "%llu");
     ASSERT_EQ_FMT(0ULL, file_analysed_size(-7), "%llu");
-    ASSERT_EQ_FMT(0ULL, file_analysed_size(NB_FILE_POSSIBILITY), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_analysed_size(NB_FILE_POSSIBILITY_DEFAULT), "%llu");
     PASS();
 }
 
@@ -2454,7 +2520,7 @@ TEST regroup_split_nolock_preserve_count(void)
 
     silence_std();
     lock_all_file();
-    split_datas_nolock(NB_FILE_POSSIBILITY);   /* réparti sur toutes les files */
+    split_datas_nolock(NB_FILE_POSSIBILITY_DEFAULT);   /* réparti sur toutes les files */
     regroup_datas_nolock();                    /* re-consolidé dans la file 0 */
     unlock_all_file();
     restore_std();
@@ -3595,7 +3661,7 @@ TEST add_possibility_analysed_gives_up_when_pool_never_unlocked_rotating(void)
 
 /* Même contrat, mode « file fixe » (thread >= 0, utilisé côté client pour son
  * propre fork) : arithmétique de sortie différente (un usleep par tentative,
- * pas un par tour de NB_FILE_POSSIBILITY tentatives) — verrouillée
+ * pas un par tour de NB_FILE_POSSIBILITY_DEFAULT tentatives) — verrouillée
  * indépendamment pour ne pas laisser cette branche régresser sans le voir. */
 TEST add_possibility_analysed_gives_up_when_pool_never_unlocked_pinned(void)
 {
@@ -4037,7 +4103,7 @@ TEST reclaim_expired_leases_idempotent_with_later_ack(void)
     PASS();
 }
 
-/* Plusieurs files : le balayage couvre bien NB_FILE_POSSIBILITY files, pas
+/* Plusieurs files : le balayage couvre bien NB_FILE_POSSIBILITY_DEFAULT files, pas
  * seulement la file 0 (thread >= 0 force la file cible à l'insertion). */
 TEST reclaim_expired_leases_covers_all_files(void)
 {
@@ -4372,6 +4438,10 @@ SUITE(datamanager_suite)
     RUN_TEST(rebalance_step_respects_budget);
     RUN_TEST(rebalance_step_uses_full_budget_across_multiple_pairs);
     RUN_TEST(rebalance_step_noop_when_already_balanced);
+    RUN_TEST(configure_stock_files_rejects_non_positive);
+    RUN_TEST(configure_stock_files_clamps_to_max);
+    RUN_TEST(configure_stock_files_new_files_are_usable);
+    RUN_TEST(configure_stock_files_shrinking_back_is_safe);
     RUN_TEST(checked_possibility_goes_to_checked_pool);
     RUN_TEST(analysed_add_and_restock);
     RUN_TEST(analysed_backup_restore_round_trip);
