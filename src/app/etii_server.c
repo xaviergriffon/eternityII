@@ -112,13 +112,13 @@ char *build_file_queues_table(unsigned long long *out_unchecked,
                               unsigned long long *out_analysed)
 {
     unsigned long long unchecked = 0, checked = 0, analysed = 0;
-    size_t size = 256 + (size_t)NB_FILE_POSSIBILITY * 64;
+    size_t size = 256 + (size_t)nb_file_possibility * 64;
     char *table = calloc(size, sizeof(char));
     int off = snprintf(table, size,
         "File queues\n"
         "File |    Unchecked |      Checked |     Analysed\n"
         "-----+--------------+--------------+-------------\n");
-    for (int f = 0; f < NB_FILE_POSSIBILITY; f++) {
+    for (int f = 0; f < nb_file_possibility; f++) {
         unsigned long long u = file_size(f);
         unsigned long long c = file_checked_size(f);
         unsigned long long a = file_analysed_size(f);
@@ -198,13 +198,6 @@ static int owner_control_session_alive(const uint8_t owner_uid[CLIENT_UID_BYTES]
 void check_server_step(unsigned long long *lastactive, unsigned long long *lastClientsFileUpdateBackup,
                        int *lastBack, int *last_record, int sleep_time)
 {
-    // Rapport construit dans un buffer LOCAL (jamais dans `lastcheck`
-    // directement) : les strcat/sprintf qui suivent ne touchent aucun état
-    // partagé, donc aucun besoin de tenir un verrou pendant leur exécution.
-    // `lastcheck_publish()` n'est appelée qu'une fois le rapport complet,
-    // ce qui réduit la section critique au seul échange de pointeur (voir
-    // static_variables.h pour le détail de la race corrigée).
-    char *report = calloc(4000, sizeof(char));
     unsigned long long currentactive = *lastactive;
     unsigned long long clientsFileUpdates = 0;
     int c;
@@ -219,14 +212,30 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
     currentactive = *lastactive - currentactive;
     non_null_possibilities = *lastactive;
 
-    // Pool des possibilités vérifiées par les pruners : 10 files, comme le
-    // pool standard (trylock pour servir plusieurs requêtes en parallèle)
+    // Pool des possibilités vérifiées par les pruners : `nb_file_possibility`
+    // files (PR4, docs/conception/maitrise_charge_serveur.md — configurable,
+    // jusqu'à NB_FILE_POSSIBILITY_MAX), comme le pool standard (trylock pour
+    // servir plusieurs requêtes en parallèle)
     unsigned long long file_possibility_stock = 0;
     unsigned long long file_possibility_checked_stock = 0;
     unsigned long long file_possibility_analysed_stock = 0;
     char *table = build_file_queues_table(&file_possibility_stock,
                                           &file_possibility_checked_stock,
                                           &file_possibility_analysed_stock);
+
+    // Rapport construit dans un buffer LOCAL (jamais dans `lastcheck`
+    // directement) : les strcat/sprintf qui suivent ne touchent aucun état
+    // partagé, donc aucun besoin de tenir un verrou pendant leur exécution.
+    // `lastcheck_publish()` n'est appelée qu'une fois le rapport complet,
+    // ce qui réduit la section critique au seul échange de pointeur (voir
+    // static_variables.h pour le détail de la race corrigée). Taille
+    // dimensionnée sur `table` (une ligne par file, donc proportionnelle à
+    // `nb_file_possibility` — PR4) + 1200 pour le bloc `temp` ci-dessous
+    // (fixe, indépendant du nombre de files) : un `report` figé à 4000
+    // octets débordait dès que `--stock-files` dépassait ~40 files (`table`
+    // seul peut atteindre 256 + 128*64 ≈ 8,4 Kio à NB_FILE_POSSIBILITY_MAX),
+    // `strcat` détecté par `_FORTIFY_SOURCE` (SIGILL) sur ce dépassement.
+    char *report = calloc(strlen(table) + 1200, sizeof(char));
     strcat(report, table);
     free(table);
 

@@ -537,6 +537,22 @@ extern int expand_max_levels;
 extern int rebalance_budget;
 
 /**
+ * @brief Nombre de files de stock demandé au démarrage (option CLI
+ *        `--stock-files <n>`, PR4).
+ *
+ * 0 = non demandé (défaut `NB_FILE_POSSIBILITY_DEFAULT`, `core/datamanager.h`
+ * — inchangé). Stocké ici plutôt qu'appliqué directement dans
+ * `parse_cli_options` : ce fichier reste volontairement sans dépendance sur
+ * `core/datamanager.h` (même raison que `HTTP_TOKEN_FILE`, dont le chargement
+ * réel est aussi différé à `main()`) ; `main()` applique la valeur via
+ * `datamanager_configure_stock_files`, avant tout fork/thread. `<n> <= 0`
+ * fourni explicitement est ignoré (garde 0 = défaut), même convention que
+ * `expand_max_stock`. Position-indépendant, retiré d'argv par
+ * `parse_cli_options` avant le parsing positionnel.
+ */
+extern int stock_files_requested;
+
+/**
  * @brief 1 si la console interactive (lecture de stdin) ne doit pas démarrer
  *        (option CLI `--headless`).
  *

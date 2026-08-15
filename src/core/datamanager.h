@@ -11,10 +11,64 @@
 #include "core/possibility.h"
 #include "core/lifo.h"
 
+// Nombre de files configurable au démarrage (PR4, docs/conception/maitrise_charge_serveur.md
+// — ferme le @todo qui vivait ici). `file_possibility`/`file_possibility_checked`/
+// `file_possibility_analysed`/`analysed_index` (datamanager.c) sont des tableaux de
+// POINTEURS, alloués/agrandis par `datamanager_configure_stock_files` — le coût mémoire
+// suit le nombre de files RÉELLEMENT actif, jamais un plafond pré-alloué. Deux constantes
+// de compilation subsistent néanmoins : NB_FILE_POSSIBILITY_DEFAULT (10, nombre appliqué
+// au démarrage quand --stock-files est absent) et NB_FILE_POSSIBILITY_MAX (128, garde-fou
+// de bon sens contre une valeur absurde — coûte maintenant seulement 8 octets par entrée
+// non utilisée dans les tableaux de POINTEURS, pas 8 Kio comme avec l'ancien tableau
+// statique de structures). `nb_file_possibility` (variable) est le compte réellement actif
+// — c'est CETTE valeur, jamais les deux constantes ci-dessus, que lisent les boucles
+// `for (fp = 0; fp < nb_file_possibility; fp++)`.
+#define NB_FILE_POSSIBILITY_DEFAULT 10
+#define NB_FILE_POSSIBILITY_MAX 128
+
 /**
- * @todo Rendre configurable
+ * @brief Nombre de files RÉELLEMENT actif (option CLI `--stock-files <n>`,
+ *        appliqué une seule fois au démarrage via `datamanager_configure_stock_files`,
+ *        jamais à chaud).
+ *
+ * Défaut `NB_FILE_POSSIBILITY_DEFAULT` (10). Un plus grand nombre de files réduit le
+ * temps d'écriture par file de la sauvegarde cohérente (PR2) et affine la granularité du
+ * rééquilibrage incrémental (PR3). Lu par TOUTES les boucles `for (fp = 0; fp <
+ * nb_file_possibility; fp++)` de ce fichier (et de `src/net/http_codec.c`,
+ * `src/net/http_server.c`, `src/app/etii_server.c`, `src/app/app_runtime.c`).
+ *
+ * **Vaut 0 tant que `datamanager_configure_stock_files` n'a pas été appelée** — appel
+ * OBLIGATOIRE, une fois, avant tout autre usage de ce fichier. Trois points d'entrée de
+ * processus de ce projet (les trois seuls `main()` réels du dépôt) l'appellent chacun en
+ * tout premier : `src/app/main.c` (mode production), `tests/test_main.c` (suite de tests)
+ * et `tests/bench/bench_refutation.c` (banc de mesure, par prudence — il n'exerce
+ * aujourd'hui aucune fonction de pool, mais lie `datamanager.c` via `TEST_MODULES`).
+ * Contrairement au reste de ce module — dont les échecs dégradent toujours gracieusement
+ * (PR1) — indexer une file avant cet appel est un déréférencement de pointeur NULL, pas
+ * une dégradation : ce n'est PAS un état à tolérer, seulement à ne jamais créer.
  */
-#define NB_FILE_POSSIBILITY 10
+extern int nb_file_possibility;
+
+/**
+ * @brief (Ré)alloue les files de stock pour couvrir `n` (PR4) — croît, ne
+ *        réduit jamais la mémoire déjà allouée.
+ *
+ * Premier appel du processus (`nb_file_possibility` encore à 0) : alloue les
+ * `n` premières files depuis rien. Appels suivants : n'alloue que les files
+ * AU-DELÀ de la capacité déjà acquise (`nb_file_possibility_capacity`,
+ * interne) — jamais de perte ni de réinitialisation de ce qui existe déjà.
+ * Un `n` inférieur au compte actuel réduit `nb_file_possibility` (les files
+ * au-delà deviennent inertes, ignorées par les boucles) SANS libérer leur
+ * mémoire — un futur agrandissement au-delà les retrouve déjà valides.
+ *
+ * @param n Nombre de files demandé. `n <= 0` est refusé (retour -1, aucun
+ *          effet) ; `n > NB_FILE_POSSIBILITY_MAX` est silencieusement
+ *          plafonné à `NB_FILE_POSSIBILITY_MAX` (garde-fou de bon sens, pas
+ *          une limite de pré-allocation — cf. commentaire plus haut).
+ * @return  0 si appliqué (y compris plafonné), -1 si `n <= 0` ou en cas
+ *          d'échec d'allocation (déjà journalisé).
+ */
+int datamanager_configure_stock_files(int n);
 
 /**
  * @brief Structure représentant un file de possibilités

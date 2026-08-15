@@ -98,6 +98,21 @@ int main(int argc, const char *argv[]) {
         log_info("recherche : ordre de parcours DYNAMIQUE (ETII_MRV=1), moteur MRV\n");
     }
 
+    // --stock-files (PR4, docs/conception/maitrise_charge_serveur.md) :
+    // appliqué ici, avant tout fork/thread, quel que soit le mode — même
+    // emplacement que les autres options globales. Appel OBLIGATOIRE et
+    // INCONDITIONNEL depuis le passage aux pools alloués dynamiquement
+    // (tableaux de pointeurs, cf. datamanager.c) : nb_file_possibility vaut 0
+    // tant que cette fonction n'a jamais été appelée, pool NULL non
+    // utilisable. stock_files_requested reste à 0 (non demandé) tant que
+    // l'option n'est pas fournie : on retombe alors sur
+    // NB_FILE_POSSIBILITY_DEFAULT.
+    datamanager_configure_stock_files(
+        stock_files_requested > 0 ? stock_files_requested : NB_FILE_POSSIBILITY_DEFAULT);
+    if (stock_files_requested > 0) {
+        log_info("option : %d files de stock (--stock-files)\n", nb_file_possibility);
+    }
+
     if (argc >= 2 && argv[1] != NULL) {
         // Initialisation avant tout fork/thread de statistiques : pas de
         // concurrence possible ici, mais on passe par lastcheck_publish()
@@ -208,6 +223,10 @@ void handle_client(int argc, const char *argv[]) {
     // depuis le thread console du process PARENT : serverIp n'est sinon
     // accessible que dans la pile de cette fonction.
     g_client_server_host = serverIp;
+
+    // PR4 (docs/conception/maitrise_charge_serveur.md) : voir la doc de
+    // ensure_stock_files_cover_forks (app_runtime.{h,c}) pour le raisonnement.
+    ensure_stock_files_cover_forks(NB_THREADS);
 
     init_childs();
     init_counters();

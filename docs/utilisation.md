@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -36,6 +36,8 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'au niveau de curseur `N` (anti-famine, voir ci-dessous) |
 | `--expand-max-stock N` | `EXPAND_MAX_STOCK` (100000) | Plafonne en NOMBRE de possibilités la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
 | `--expand-max-levels N` | `EXPAND_MAX_LEVELS` (4) | Plafonne en NOMBRE DE PASSES la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
+| `--stock-files N` | `NB_FILE_POSSIBILITY_DEFAULT` (10) | Nombre de files de stock, fixé une seule fois au démarrage (jamais à chaud), plafonné à `NB_FILE_POSSIBILITY_MAX` (128) — voir [maîtrise de la charge serveur](conception/maitrise_charge_serveur.md) |
+| `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir [maîtrise de la charge serveur](conception/maitrise_charge_serveur.md) |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
 | `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
@@ -47,9 +49,22 @@ Exemples :
 ./eternityII server 80 --expand-level 4 data/pieces.csv
 ./eternityII server 80 --expand-level 4 --expand-max-stock 1000000 data/pieces.csv
 ./eternityII server 80 --expand-level 8 --expand-max-stock 1000000 --expand-max-levels 8 data/pieces.csv
+./eternityII server 80 --stock-files 32 --rebalance-budget 5000 data/pieces.csv
 ./eternityII server 80 --http-port 8080 data/pieces.csv
 ./eternityII server 80 --http-port 8080 --http-token-file /etc/eternityii/http-token data/pieces.csv
 ```
+
+### Maîtrise de la charge serveur (`--stock-files`, `--rebalance-budget`, `--tcp-timeout`)
+
+Sous forte charge (gros stock, sauvegarde volumineuse), une sauvegarde qui immobilise
+longtemps les verrous du stock peut affamer les clients connectés jusqu'à leur timeout TCP.
+`--stock-files` augmente le nombre de files pour réduire le temps d'écriture par file de la
+sauvegarde cohérente (à instant T unique, libérée progressivement, file par file) ;
+`--rebalance-budget` règle la vitesse à laquelle le stock est rééquilibré entre ces files
+(file la plus pleine → la plus vide, borné en temps, disponible aussi via la commande
+console `rebalance [n]` — voir [Console interactive](console.md)) ; `--tcp-timeout`
+(ci-dessous) élargit la marge côté réseau. Détails, mesures et arbitrages :
+[docs/conception/maitrise_charge_serveur.md](conception/maitrise_charge_serveur.md).
 
 > ⚠️ **Dimensionnement de `nb_threads`** : chaque processus client connecté ouvre,
 > en plus des connexions de travail de ses forks, une connexion de
@@ -250,6 +265,21 @@ StandardInput=null
 StandardOutput=journal
 StandardError=journal
 Restart=on-failure
+```
+
+## Option `--tcp-timeout` (serveur et client/pruner)
+
+Acceptée par tous les modes réseau, à n'importe quelle position : règle le timeout
+d'inactivité (secondes) des sockets TCP de travail (`SO_RCVTIMEO`/`SO_SNDTIMEO`), des deux
+côtés de la connexion. Défaut `DEFAULT_TCP_TIMEOUT` (10 s). Une maintenance serveur longue
+(sauvegarde, restore, tri) reste largement sous ce budget par construction (voir
+[maîtrise de la charge serveur](conception/maitrise_charge_serveur.md)) ; cette option reste
+une soupape pour un réseau plus lent ou un stock plus volumineux. Valeur absente ou `<= 0` :
+ignorée (garde le défaut).
+
+```sh
+./eternityII server 80 --tcp-timeout 30 data/pieces.csv
+./eternityII client --tcp-timeout 30 localhost 4
 ```
 
 ## Canal de contrôle et pilotage à distance

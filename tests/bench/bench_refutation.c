@@ -453,6 +453,11 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
+    /* Pools alloués dynamiquement (tableaux de pointeurs, PR4) : appel
+     * OBLIGATOIRE avant tout usage de datamanager.c (lié via TEST_MODULES),
+     * même si ce banc n'exerce aujourd'hui aucune fonction de pool. */
+    datamanager_configure_stock_files(NB_FILE_POSSIBILITY_DEFAULT);
+
     const char *pieces = "data/pieces.csv";
     const char *back = NULL;
     int min_pieces = 0, max_pieces = ETERN_PARTS;
