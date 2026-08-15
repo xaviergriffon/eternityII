@@ -36,7 +36,10 @@ typedef struct
  *
  * @param client_possibility Contexte du thread client (peut être NULL en mode local).
  * @param possibilities      Tableau de paquets à ajouter.
- * @return                   0 si OK, valeur négative en cas d'erreur.
+ * @return                   0 si OK, non nul en cas d'erreur (-1 : connexion
+ *                           serveur perdue ; 1 : pool local resté verrouillé
+ *                           au-delà d'un délai borné, PR1 — rien n'a été
+ *                           inséré dans les deux cas, sûr à réessayer).
  */
 int add_possibility(client_possibility_t *client_possibility, array_possibility_packet *possibilities);
 
@@ -65,7 +68,9 @@ array_possibility_packet *get_last_possibility_tocheck(int max_result);
  *
  * @param possiblity Paquet à enregistrer.
  * @param thread     Index du thread (−1 = choix automatique).
- * @return           0.
+ * @return           0 si ajouté, -1 si le pool est resté intégralement
+ *                    verrouillé au-delà d'un délai borné (PR1, maintenance
+ *                    en cours) — rien n'est inséré dans ce cas.
  */
 int add_possibility_analysed(struct possibility_packet *possiblity, int thread);
 
@@ -81,7 +86,9 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread);
  * @param thread     Index du thread (−1 = choix automatique).
  * @param owner_uid  `client_uid` (16 octets) du client servi, jamais NULL
  *                    (utiliser `add_possibility_analysed` sinon).
- * @return           0.
+ * @return           0 si ajouté, -1 si le pool est resté intégralement
+ *                    verrouillé au-delà d'un délai borné (PR1, maintenance
+ *                    en cours) — rien n'est inséré dans ce cas.
  */
 int add_possibility_analysed_owned(struct possibility_packet *possiblity, int thread,
                                     const uint8_t owner_uid[CLIENT_UID_BYTES]);
