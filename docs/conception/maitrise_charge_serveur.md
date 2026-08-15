@@ -1,7 +1,7 @@
 # Maîtrise de la charge serveur : verrous bornés, sauvegarde cohérente à libération progressive
 
-**Statut : en cours d'implémentation.** PR 1 (§2) **livrée**. PR 2 à 5 (§3 à §6) en
-proposition, non implémentées.
+**Statut : en cours d'implémentation.** PR 1 (§2) et PR 2 (§3) **livrées**. PR 3 à 5 (§4 à
+§6) en proposition, non implémentées.
 
 ## 1. Contexte et diagnostic
 
@@ -88,7 +88,28 @@ un verrou relâché **avant** le budget laisse l'opération aboutir normalement 
 restent inchangés et continuent de passer (relâchement à 60 ms, bien sous le budget de
 500 ms).
 
-## 3. Conception retenue pour la sauvegarde (PR 2, proposition)
+## 3. Conception retenue pour la sauvegarde (PR 2, livrée)
+
+**Livrée telle que conçue ci-dessous**, avec un correctif de trajectoire trouvé en
+implémentant : le PR1 mergé documentait un `setvbuf` sur le fichier de sauvegarde
+(`backup()`) qui n'avait en réalité jamais été codé — corrigé au passage sur `backup()`,
+`backup_analysed()` et le nouveau `consistent_backup()`.
+
+`consistent_backup(stock_filename, analysed_filename, &out_analysed_status)`
+(`src/core/datamanager.{c,h}`) est la nouvelle fonction, appelée aux cinq points de
+production qui sauvegardaient auparavant stock et analysé l'un après l'autre :
+l'autobackup (`check_server_step`), l'arrêt sur solution (deux points — le chemin normal
+et celui de `remove_possibilities_with_no_next`), la commande console `backup` (et donc
+l'API HTTP admin, qui délègue à `backup_interpreter`), et le dump de diagnostic
+`backup_failed_exit` côté client. `backup()`/`backup_analysed()` restent inchangées comme
+fonctions indépendantes — largement utilisées telles quelles par la suite de tests — mais
+ne sont plus appelées en paire nulle part en production.
+
+Vérifié en conditions réelles : sur le même scénario de reproduction que PR1 (stock
+expansé, pruner 4 forks), un autobackup réel a capturé `temp_analysed.back` non vide
+(le pool analysé contenait effectivement du travail en vol du pruner), sans aucune
+déconnexion — confirmant que la fenêtre `maintenance` unique couvrant les deux pools
+n'introduit pas de nouveau blocage par rapport à PR1.
 
 **Contrainte imposée** : la sauvegarde doit rester une image cohérente à l'instant T,
 portant sur l'ensemble des possibilités — stock **et** pool « analysé ».

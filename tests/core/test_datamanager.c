@@ -407,6 +407,135 @@ TEST backup_failure_preserves_previous_file(void)
 }
 
 /* --------------------------------------------------------------------------
+ * consistent_backup (PR2, docs/conception/maitrise_charge_serveur.md) :
+ * sauvegarde du stock ET du pool analysé à un instant T unique.
+ *
+ * `maintenance` (posé par consistent_backup avant tout verrou, levé après le
+ * dernier déverrouillage) n'est déclaré extern nulle part dans les headers —
+ * comme les autres internes de datamanager.c dont ce fichier a besoin
+ * (lock_all_file_analysed, etc.), on le redéclare ici.
+ * ------------------------------------------------------------------------ */
+extern int maintenance;
+void lock_all_file_analysed(void);
+void unlock_all_file_analysed(void);
+
+TEST consistent_backup_round_trip_preserves_both_pools(void)
+{
+    drain_all();
+    int allocs[] = { 1, 2, 3 };
+    add_packets(allocs, 3);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 9;
+    add_possibility_analysed(&pk, 0);
+
+    char dir_template[] = "/tmp/etii_consistent_backup_XXXXXX";
+    ASSERT(mkdtemp(dir_template) != NULL);
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/store.back", dir_template);
+    char path_an[PATH_MAX];
+    snprintf(path_an, sizeof path_an, "%s/analysed.back", dir_template);
+
+    int rba = -99;
+    int rb = consistent_backup(path, path_an, &rba);
+    ASSERT_EQ_FMT(BACKUP_OK, rb, "%d");
+    ASSERT_EQ_FMT(BACKUP_OK, rba, "%d");
+
+    drain_all();
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+
+    ASSERT_EQ_FMT(0, restore(path), "%d");
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+    silence_std();
+    ASSERT_EQ_FMT(0, restore_analysed(path_an), "%d");
+    restore_std();
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
+
+    unlink(path);
+    unlink(path_an);
+    rmdir(dir_template);
+    drain_all();
+    PASS();
+}
+
+/* Même contrat que backup_skipped_during_maintenance_reports_distinct_code,
+ * étendu aux deux volets : une maintenance déjà en cours (n'importe laquelle
+ * des deux familles de verrous) fait sauter consistent_backup ENTIER — ni le
+ * stock ni l'analysé ne doivent être touchés, jamais un volet sauté et
+ * l'autre écrit (ça romprait précisément la cohérence à l'instant T que
+ * cette fonction existe pour garantir). */
+TEST consistent_backup_skipped_during_maintenance_reports_distinct_code(void)
+{
+    drain_all();
+    int allocs[] = { 1 };
+    add_packets(allocs, 1);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 2;
+    add_possibility_analysed(&pk, 0);
+
+    char dir_template[] = "/tmp/etii_consistent_backup_maint_XXXXXX";
+    ASSERT(mkdtemp(dir_template) != NULL);
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/store.back", dir_template);
+    char path_an[PATH_MAX];
+    snprintf(path_an, sizeof path_an, "%s/analysed.back", dir_template);
+
+    lock_all_file_analysed(); /* simule une maintenance déjà en cours */
+    int rba = -99;
+    int rb = consistent_backup(path, path_an, &rba);
+    unlock_all_file_analysed();
+
+    ASSERT_EQ_FMT(BACKUP_SKIPPED_MAINTENANCE, rb,  "%d");
+    ASSERT_EQ_FMT(BACKUP_SKIPPED_MAINTENANCE, rba, "%d");
+
+    struct stat st;
+    ASSERT(stat(path, &st) != 0);
+    ASSERT(stat(path_an, &st) != 0);
+
+    rmdir(dir_template);
+    drain_all();
+    PASS();
+}
+
+/* Ouverture du fichier analysé impossible (répertoire inexistant) : le volet
+ * stock, déjà ouvert avec succès à ce stade, doit être proprement défait
+ * (.tmp supprimé, rien renommé) plutôt que de laisser un fichier orphelin ou
+ * de continuer sans le volet analysé — les deux volets réussissent ou aucun. */
+TEST consistent_backup_analysed_open_failure_aborts_stock_too(void)
+{
+    drain_datamanager();
+    int allocs[] = { 4, 5 };
+    add_packets(allocs, 2);
+
+    char dir_template[] = "/tmp/etii_consistent_backup_openfail_XXXXXX";
+    ASSERT(mkdtemp(dir_template) != NULL);
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/store.back", dir_template);
+    char bad_path_an[PATH_MAX];
+    snprintf(bad_path_an, sizeof bad_path_an, "%s/missing_subdir/analysed.back", dir_template);
+
+    silence_std();
+    int rba = -99;
+    int rb = consistent_backup(path, bad_path_an, &rba);
+    restore_std();
+
+    ASSERT_EQ_FMT(BACKUP_ERROR, rb, "%d");
+    ASSERT_EQ_FMT(BACKUP_ERROR, rba, "%d");
+
+    struct stat st;
+    ASSERT(stat(path, &st) != 0);         /* jamais renommé */
+    char stock_tmp[PATH_MAX];
+    snprintf(stock_tmp, sizeof stock_tmp, "%s.tmp", path);
+    ASSERT(stat(stock_tmp, &st) != 0);    /* .tmp nettoyé, pas laissé traîner */
+
+    rmdir(dir_template);
+    drain_datamanager();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
  * split_datas / regroup_datas : redistribution puis consolidation
  * ------------------------------------------------------------------------ */
 
@@ -4091,6 +4220,9 @@ SUITE(datamanager_suite)
     RUN_TEST(backup_leaves_no_residual_tmp_file);
     RUN_TEST(backup_skipped_during_maintenance_reports_distinct_code);
     RUN_TEST(backup_failure_preserves_previous_file);
+    RUN_TEST(consistent_backup_round_trip_preserves_both_pools);
+    RUN_TEST(consistent_backup_skipped_during_maintenance_reports_distinct_code);
+    RUN_TEST(consistent_backup_analysed_open_failure_aborts_stock_too);
     RUN_TEST(split_then_regroup_preserves_count);
     RUN_TEST(checked_possibility_goes_to_checked_pool);
     RUN_TEST(analysed_add_and_restock);

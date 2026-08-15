@@ -706,13 +706,13 @@ int backup_interpreter(void) {
         sprintf(temp, "%s_%i", def_known_clients_file, getpid());
         def_known_clients_file = temp;
     }
-    int rb = backup(def_file);
+    int rba = 0;
+    int rb = consistent_backup(def_file, def_analyse_file, &rba);
     if (rb == BACKUP_SKIPPED_MAINTENANCE) {
         log_info("backup de %s sauté (maintenance en cours)\n", def_file);
     } else if (rb != BACKUP_OK) {
         log_info("backup de %s échoué\n", def_file);
     }
-    int rba = backup_analysed(def_analyse_file);
     if (rba == BACKUP_SKIPPED_MAINTENANCE) {
         log_info("backup de %s sauté (maintenance en cours)\n", def_analyse_file);
     } else if (rba != BACKUP_OK) {
