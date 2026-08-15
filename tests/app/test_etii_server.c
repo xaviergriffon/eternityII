@@ -32,6 +32,7 @@
 #include <signal.h>
 
 extern unsigned long long *fileUpdates;   /* global défini dans etii_server.c */
+extern unsigned long long *analysedFileUpdates; /* global défini dans etii_server.c (PR5) */
 extern client_t *thread_params;           /* global défini dans etii_server.c */
 void *communicate_with_client(void *userdata);
 void create_server_thread(client_t *thread_params, int i);
@@ -361,23 +362,29 @@ static int make_pair(int sv[2])
 
 static unsigned long long g_counters_buf[1];
 static unsigned long long g_fileupd_buf[1];
+static unsigned long long g_analysedfileupd_buf[1];
 static unsigned long long *g_saved_counters;
 static unsigned long long *g_saved_fileupd;
+static unsigned long long *g_saved_analysedfileupd;
 
 static void wire_counters(void)
 {
     g_saved_counters = counters;
     g_saved_fileupd = fileUpdates;
+    g_saved_analysedfileupd = analysedFileUpdates;
     g_counters_buf[0] = 0;
     g_fileupd_buf[0] = 0;
+    g_analysedfileupd_buf[0] = 0;
     counters = g_counters_buf;
     fileUpdates = g_fileupd_buf;
+    analysedFileUpdates = g_analysedfileupd_buf;
 }
 
 static void unwire_counters(void)
 {
     counters = g_saved_counters;
     fileUpdates = g_saved_fileupd;
+    analysedFileUpdates = g_saved_analysedfileupd;
 }
 
 /* INST_TEST_CONNECTED : ping renvoyé tel quel, on continue. */
@@ -762,6 +769,7 @@ TEST record_possibility_analysed_no_owner_when_identity_unknown(void)
 TEST step_possibility_analysed_acks(void)
 {
     dm_drain_all();
+    wire_counters(); /* analysedFileUpdates[client->compteur]++ (PR5) */
 
     int sv[2];
     ASSERT_EQ(0, make_pair(sv));
@@ -783,6 +791,7 @@ TEST step_possibility_analysed_acks(void)
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT_EQ_FMT((int)INST_CONSIDERED, (int)recv_instruction(sv[1]), "%d");
 
+    unwire_counters();
     close(sv[0]); close(sv[1]);
     PASS();
 }
@@ -850,6 +859,7 @@ TEST step_get_to_check_batch_empty_returns_zero(void)
 TEST step_analysed_batch_acks(void)
 {
     dm_drain_all();
+    wire_counters(); /* analysedFileUpdates[client->compteur]++ (PR5) */
 
     int sv[2];
     ASSERT_EQ(0, make_pair(sv));
@@ -876,6 +886,7 @@ TEST step_analysed_batch_acks(void)
     ASSERT_EQ_FMT(1, cont, "%d");
     ASSERT_EQ_FMT((int)INST_CONSIDERED, (int)recv_instruction(sv[1]), "%d");
 
+    unwire_counters();
     close(sv[0]); close(sv[1]);
     PASS();
 }
@@ -1220,6 +1231,7 @@ TEST step_analysed_short_recv_stops(void)
 TEST step_analysed_batch_incomplete_packet_stops(void)
 {
     dm_drain_all();
+    wire_counters(); /* analysedFileUpdates[client->compteur]++ (PR5) sur le paquet retiré avant l'EOF */
     /* Le serveur répond INST_ERROR sur un pair déjà fermé : sans cela le
      * SIGPIPE résultant tuerait le runner (la production l'ignore aussi). */
     signal(SIGPIPE, SIG_IGN);
@@ -1246,6 +1258,7 @@ TEST step_analysed_batch_incomplete_packet_stops(void)
 
     ASSERT_EQ_FMT(0, cont, "%d");  /* INST_ERROR envoyé puis arrêt (pair fermé : non relu) */
 
+    unwire_counters();
     close(sv[0]);
     PASS();
 }
@@ -1431,10 +1444,10 @@ TEST check_server_step_reports_basic_stats(void)
     uint16_t saved_mr = max_result;
     max_result = 10;
 
-    unsigned long long lastactive = 0, lastBackupUpd = 0;
-    int lastBack = 0;
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
     int last_record = (int)max_result;
-    check_server_step(&lastactive, &lastBackupUpd, &lastBack, &last_record, 10);
+    check_server_step(&lastactive, &backup_state, &last_record, 10);
 
     char *report = read_lastcheck_copy();
     ASSERT(report != NULL);
@@ -1445,7 +1458,7 @@ TEST check_server_step_reports_basic_stats(void)
     ASSERT(strstr(report, "dont prunage/s") != NULL);
     free(report);
     ASSERT_EQ_FMT(10, last_record, "%d");   /* pas de nouveau record */
-    ASSERT_EQ_FMT(1, lastBack, "%d");       /* sous le seuil : incrémenté */
+    ASSERT_EQ_FMT(1, backup_state.stock.lastBack, "%d");       /* sous le seuil : incrémenté */
 
     thread_params = saved_tp;
     NB_THREADS = saved_nb;
@@ -1477,10 +1490,10 @@ TEST check_server_step_handles_large_stock_files_count(void)
 
     ASSERT_EQ_FMT(0, datamanager_configure_stock_files(NB_FILE_POSSIBILITY_MAX), "%d");
 
-    unsigned long long lastactive = 0, lastBackupUpd = 0;
-    int lastBack = 0;
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
     int last_record = (int)max_result;
-    check_server_step(&lastactive, &lastBackupUpd, &lastBack, &last_record, 10);
+    check_server_step(&lastactive, &backup_state, &last_record, 10);
 
     char *report = read_lastcheck_copy();
     ASSERT(report != NULL);
@@ -1514,16 +1527,17 @@ TEST check_server_step_detects_record_and_autobackups(void)
     unlink("events.log");
     unlink("./temp.back");
     unlink("./temp_analysed.back");
-    fileUpdates[0] = 5; /* != lastBackupUpd(0) -> autobackup se déclenche au seuil */
+    fileUpdates[0] = 5; /* != lastUpdates(0) -> autobackup se déclenche au seuil */
 
-    unsigned long long lastactive = 0, lastBackupUpd = 0;
-    int lastBack = 6; /* seuil atteint */
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
+    backup_state.stock.lastBack = 6; /* seuil atteint */
     int last_record = 10;
-    check_server_step(&lastactive, &lastBackupUpd, &lastBack, &last_record, 10);
+    check_server_step(&lastactive, &backup_state, &last_record, 10);
 
     ASSERT_EQ_FMT(99, last_record, "%d");        /* nouveau record détecté */
-    ASSERT_EQ_FMT(0, lastBack, "%d");            /* backup déclenché -> remis à 0 */
-    ASSERT_EQ_FMT(5ULL, lastBackupUpd, "%llu");
+    ASSERT_EQ_FMT(0, backup_state.stock.lastBack, "%d");            /* backup déclenché -> remis à 0 */
+    ASSERT_EQ_FMT(5ULL, backup_state.stock.lastUpdates, "%llu");
     ASSERT_EQ_FMT(0, access("./temp.back", F_OK), "%d");
     ASSERT_EQ_FMT(0, access("./temp_analysed.back", F_OK), "%d");
 
@@ -1552,16 +1566,17 @@ TEST check_server_step_autobackup_skipped_during_maintenance(void)
 
     unlink("./temp.back");
     unlink("./temp_analysed.back");
-    fileUpdates[0] = 3;            /* != lastBackupUpd(0) -> déclenchement au seuil */
+    fileUpdates[0] = 3;            /* != lastUpdates(0) -> déclenchement au seuil */
 
-    unsigned long long lastactive = 0, lastBackupUpd = 0;
-    int lastBack = 6;              /* seuil atteint */
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
+    backup_state.stock.lastBack = 6;              /* seuil atteint */
     int last_record = (int)max_result;   /* pas de nouveau record */
     lock_all_file();               /* maintenance en cours */
-    check_server_step(&lastactive, &lastBackupUpd, &lastBack, &last_record, 10);
+    check_server_step(&lastactive, &backup_state, &last_record, 10);
     unlock_all_file();
 
-    ASSERT_EQ_FMT(0, lastBack, "%d");             /* cadence consommée */
+    ASSERT_EQ_FMT(0, backup_state.stock.lastBack, "%d");             /* cadence consommée */
     ASSERT(access("./temp.back", F_OK) != 0);     /* mais aucun backup écrit */
     ASSERT(access("./temp_analysed.back", F_OK) != 0);
 
@@ -1610,10 +1625,10 @@ TEST check_server_step_reclaims_expired_lease(void)
 
     usleep(1100 * 1000);    /* laisse le bail de 1 s expirer avant le tour */
 
-    unsigned long long lastactive = 0, lastBackupUpd = 0;
-    int lastBack = 0;
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
     int last_record = (int)max_result;
-    check_server_step(&lastactive, &lastBackupUpd, &lastBack, &last_record, 10);
+    check_server_step(&lastactive, &backup_state, &last_record, 10);
 
     count = 999; max_alloc = -999;
     ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
@@ -1664,10 +1679,10 @@ TEST check_server_step_does_not_reclaim_lease_of_alive_client(void)
 
     usleep(1100 * 1000);    /* le bail (1 s) est dépassé, mais le client reste "vivant" */
 
-    unsigned long long lastactive = 0, lastBackupUpd = 0;
-    int lastBack = 0;
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
     int last_record = (int)max_result;
-    check_server_step(&lastactive, &lastBackupUpd, &lastBack, &last_record, 10);
+    check_server_step(&lastactive, &backup_state, &last_record, 10);
 
     unsigned long long count = 999;
     int max_alloc = -999;

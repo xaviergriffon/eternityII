@@ -162,6 +162,7 @@ const char *client_config_file_path = "./eternityii-client.conf";
 client_identity_t g_client_identity_template;
 
 volatile unsigned long long server_shots_per_second = 0;
+volatile unsigned long long server_last_backup_duration_ms = 0;
 
 unsigned long long max_search_by_sec = 0;
 

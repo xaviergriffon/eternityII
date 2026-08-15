@@ -1,7 +1,8 @@
 # Maîtrise de la charge serveur : verrous bornés, sauvegarde cohérente à libération progressive
 
-**Statut : en cours d'implémentation.** PR 1 (§2), PR 2 (§3), PR 3 (§4) et PR 4 (§5)
-**livrées**. PR 5 (§6) en proposition, non implémentée.
+**Statut : en cours d'implémentation.** PR 1 (§2), PR 2 (§3), PR 3 (§4), PR 4 (§5) et PR 5 (§6)
+**livrées** — PR 5 partiellement (portes indépendantes par artefact + durée observable ; la
+composition plus fine « par file de stock » avec PR 2 reste en proposition, voir §6).
 
 ## 1. Contexte et diagnostic
 
@@ -289,7 +290,7 @@ le code d'avant ce correctif (`_FORTIFY_SOURCE` est actif par défaut sur ce too
 seulement sous ASan). Reproduit et vérifié corrigé sur le binaire réel : le serveur reste vivant
 au-delà du premier tour de statistiques avec `--stock-files 500`.
 
-## 6. Une sauvegarde inutile ne s'exécute pas (PR 5, proposition)
+## 6. Une sauvegarde inutile ne s'exécute pas (PR 5, livrée partiellement)
 
 **Le principe existe déjà, vérifié dans le code** : `should_autobackup`
 (`src/app/etii_server.c`) saute déjà la sauvegarde quand rien n'a changé —
@@ -297,17 +298,47 @@ au-delà du premier tour de statistiques avec `--stock-files 500`.
 réellement touché un pool de stock. Un stock inactif ne déclenche déjà aucune écriture
 aujourd'hui.
 
-Le vrai trou, trouvé en traçant les incréments : les quatre artefacts sauvegardés à la même
-cadence (`backup`, `backup_analysed`, `best_board_save`, `known_clients_registry_save`)
-partagent une **unique** porte, keyed uniquement sur le trafic stock — les acquittements
-`INST_POSSIBILITY_ANALYSED[_BATCH]` n'incrémentent rien. Une activité purement pruner peut
-laisser `temp_analysed.back` périmé sans le signaler ; symétriquement, une activité
-purement stock réécrit les trois autres fichiers pour rien.
+**Le vrai trou, trouvé en traçant les incréments** : les quatre artefacts sauvegardés à la même
+cadence (`consistent_backup`, `best_board_save`, `known_clients_registry_save`) partageaient une
+**unique** porte, keyed uniquement sur le trafic stock — un stock actif réécrivait
+`best_board`/`known_clients` même sans le moindre changement de leur côté, et symétriquement un
+record `best_board` distant (rapporté par un client via le canal de contrôle, jamais par du
+trafic stock local) pouvait rester non sauvegardé indéfiniment si le stock local restait
+inactif.
 
-Proposition : un compteur de mutations indépendant par artefact, et — en composition avec
-PR 2 — un drapeau « modifiée depuis la dernière sauvegarde » **par file de stock**, pour
-qu'une file non modifiée ne soit même pas verrouillée en phase 1 de la sauvegarde
-progressive, pas seulement écrite à coût nul.
+**Livré** : un compteur de mutations indépendant par artefact — `check_server_step` appelle
+désormais `should_autobackup` **quatre fois**, une par artefact (stock, pool analysé, meilleur
+plateau, registre des clients connus), chacune contre son propre `autobackup_gate_t`. Un nouveau
+`analysedFileUpdates[]` (miroir de `fileUpdates[]`) capte les mutations du pool analysé côté
+attribution ET côté acquittement (`INST_POSSIBILITY_ANALYSED[_BATCH]`, qui n'incrémentait rien
+auparavant) ; `best_board_result()` sert directement de signal (monotone par construction) ;
+`known_clients_registry_mutation_count()` (nouveau) compte les mutations persistées du registre.
+`consistent_backup` reste un appel unique couvrant stock+analysé dès que L'UN DES DEUX a une
+mutation en attente — cohérence à l'instant T (PR 2) inchangée, seule la DÉCISION d'écrire
+devient indépendante par artefact. Durée observable : `server_last_backup_duration_ms`, exposée
+par `GET /api/v1/status` (`last_backup_duration_ms`).
+
+**Non livré, laissé en proposition** : la composition avec PR 2 à la granularité **par file de
+stock** (un drapeau « modifiée depuis la dernière sauvegarde » par file, pour qu'une file non
+modifiée ne soit même pas verrouillée en phase 1 de la sauvegarde progressive, pas seulement
+écrite à coût nul). Écarté après évaluation du rapport risque/gain : il faudrait poser et lever
+ce drapeau correctement sur CHAQUE site de mutation d'une file (`put_to_pool`, `scroll_from_pool`,
+`rebalance_pool_step`, `regroup_pool_nolock`, `split_pool_nolock`) — un seul site oublié rendrait
+une file silencieusement considérée « propre » alors qu'elle ne l'est pas, un mode de défaillance
+invisible jusqu'au jour où un `restore` en aurait besoin. L'essentiel du gain concret observé
+(réécritures inutiles de `best_board`/`known_clients`) est déjà obtenu par les portes
+indépendantes ci-dessus, à un risque bien moindre.
+
+**Décision assumée : `datamanager_reclaim_expired_leases` (PR 7) et `datamanager_rebalance_step`
+(PR 3) n'alimentent PAS les compteurs de mutation.** Les deux mutent réellement les pools (un
+bail expiré déplace une possibilité de l'analysé vers le stock ; un rééquilibrage déplace des
+possibilités entre files du stock), mais le nombre qu'un appel déplace dépend de l'horloge et du
+contenu courant du stock — l'intégrer à un compteur cumulatif casserait les assertions
+d'égalité déterministes des tests existants de `check_server_step`. Sans conséquence sur la
+correction : l'ensemble complet des possibilités reste toujours présent dans au moins un des
+fichiers stock/analysé à la prochaine écriture déclenchée par du trafic client réel — qui
+survient en pratique bien avant la fenêtre de 60 s — seule la fraîcheur immédiate de cette
+redistribution interne est différée, jamais une perte de possibilité.
 
 ## 7. Hors série, laissé ouvert
 

@@ -169,7 +169,7 @@ Tests: `tests/net/test_control_protocol.c` (the five commands join `control_comm
 
 **`--expand-max-levels <n>`** (optional, position-independent valued option, same parsing shape/convention as `--expand-max-stock`; server-only, effective only when `--expand-level` is also given). Overrides the default `expand_max_levels` depth-based safeguard (`EXPAND_MAX_LEVELS`, 4) — a server with more capacity (RAM and CPU time) to spare can raise this cap alongside `--expand-max-stock` to reach a high `--expand-level` without the expansion stopping prematurely on the pass-count guard. Same `n <= 0` ignored-not-clamped convention as `--expand-max-stock` (a zero-pass cap would prevent any expansion at all). Read by `expand_datas_to_level` (`src/core/datamanager.c`) via the live global, same as `expand_max_stock` — the console `expand <n>` command and a startup `--expand-level` both respect whatever value is currently in effect.
 
-### Server load management (bounded locks, coherent backup, incremental rebalance, configurable stock files)
+### Server load management (bounded locks, coherent backup, incremental rebalance, configurable stock files, needless-save avoidance)
 
 Four PRs (docs/conception/maitrise_charge_serveur.md — PR1-4 shipped, PR5 still a proposal)
 fixing a real production incident: under heavy load (`--expand-level 9`, 14M+ possibilities),
@@ -264,6 +264,77 @@ block appended after it). Locked by
 against the pre-fix code even without ASan, since `_FORTIFY_SOURCE` is on by default on this
 toolchain.
 
+**PR5 — a needless save no longer runs, per artefact.** Before this, a single gate
+(`should_autobackup`, keyed only on stock/analysed-pool traffic via `fileUpdates[]`) governed
+all four autobackup writes together every tick where it fired: `consistent_backup` (stock +
+analysed pools), `best_board_save`, and `known_clients_registry_save` — so any stock activity
+rewrote `temp-best_board.back`/`temp-known_clients.back` even when neither had changed at all,
+and, symmetrically, a genuine remote best-board record (pulled from a client over the control
+channel — never local stock traffic) could sit unsaved indefinitely if the local stock stayed
+idle in the meantime. `check_server_step` (`src/app/etii_server.c`) now calls the same pure
+`should_autobackup` **four times**, once per artefact, each against its own `autobackup_gate_t`
+(`lastBack`/`lastUpdates` pair) inside a new `autobackup_state_t` (`src/app/etii_server.h`,
+replacing the old flat `lastClientsFileUpdateBackup`/`lastBack` parameters) — `check_server`
+owns one `autobackup_state_t` for the lifetime of its loop, same as before. The four mutation
+signals: `clientsFileUpdates` (unchanged — sum of the per-thread `fileUpdates[]`, one per
+search/pruner connection, already incremented on `INST_ADD` and on every `INST_GET`/
+`INST_GET_TO_CHECK[_BATCH]` serve via `record_batch_analysed_for_client`); a new
+`analysedFileUpdates[]` (same per-thread-array shape, allocated/freed alongside `fileUpdates`
+in `init_server_thread_pool`), incremented on **both** sides of the analysed pool's traffic —
+attribution (the same `record_batch_analysed_for_client` call site that already bumps
+`fileUpdates`, since a GET-serve mutates the stock pool it drains from **and** the analysed
+pool it attributes into) and acknowledgement (`remove_possibility_analysed` succeeding inside
+the `INST_POSSIBILITY_ANALYSED`/`INST_POSSIBILITY_ANALYSED_BATCH` handlers, which never touched
+any counter before this PR); `best_board_result(&g_server_best_board)` directly (monotonically
+non-decreasing by `best_board_t`'s own "first strictly-greater record wins" contract — no new
+field needed); and a new `known_clients_registry_mutation_count()` (`src/app/
+known_clients_registry.{h,c}`), a monotone counter bumped inside `on_connect`/`on_stats`/
+`on_disconnect` whenever they actually touch a **persisted** field (`label`/`peer_ip`/`mode`/
+`last_seen`/cumulative totals/`cumulative_uptime_seconds`) — never on a rejected call (registry
+full, unknown identity). `consistent_backup` stays a single call covering **both** files
+whenever *either* stock or analysed has a pending mutation (`do_stock || do_analysed`) — PR2's
+point-in-time coherence is unaffected, since both pools are still frozen together at one instant
+whenever the call happens; only the *decision* to write becomes independent per artefact.
+`best_board_save`/`known_clients_registry_save` are now two fully independent gates.
+
+**Deliberately narrower than the design doc's full proposal.** `docs/conception/
+maitrise_charge_serveur.md` also envisioned composing this with PR2 at the granularity of a
+single stock **file** (a per-file "dirty since last backup" flag so an untouched file is not
+even locked during `consistent_backup`'s phase 1, not just cheaply rewritten) — not implemented
+here. That would touch every mutation path in `datamanager.c` (`put_to_pool`, `scroll_from_pool`,
+`rebalance_pool_step`, `regroup_pool_nolock`, `split_pool_nolock`) to correctly set/clear a
+per-file flag; a single missed update site would make a file wrongly look "clean" and silently
+stale in future backups — the failure mode is invisible until an operator actually needs to
+`restore` from it. Given the artefact-level gate above already captures the bulk of the waste
+(needless `best_board`/`known_clients` rewrites — the concrete problem observed) at a fraction
+of the risk, the finer per-file composition is left as a documented, not-yet-implemented
+extension.
+
+**Lease reclaim (PR7) and incremental rebalance (PR3) deliberately do NOT feed the mutation
+counters.** Both genuinely mutate the stock/analysed pools (a reclaimed lease moves a
+possibility from analysed back to stock; a rebalance step moves possibilities between stock
+files), but folding their per-tick counts into `clientsFileUpdates`/`analysedUpdates` would
+require a function-static accumulator inside `check_server_step` — and unlike client traffic
+(`fileUpdates`/`analysedFileUpdates`, fully controlled by a test via `wire_counters`), how many
+leases/packets a single call moves depends on the clock and the stock's current contents,
+breaking the exact-equality assertions the existing `check_server_step_*` tests rely on
+(`check_server_step_detects_record_and_autobackups` asserts `backup_state.stock.lastUpdates ==
+5` after one specific call). Harmless to correctness either way: the full set of possibilities
+always still exists in at least one of the two files, and the next real client GET/ADD/ACK —
+which in practice arrives well inside the 60s window on any active server — folds the
+redistribution into the next triggered write; only the *immediate* freshness of an idle-server
+reclaim/rebalance is deferred, never a lost possibility.
+
+**Backup duration, observed rather than deduced from an incident.** `server_last_backup_duration_ms`
+(`volatile unsigned long long`, `src/app/static_variables.{h,c}`, same no-lock/telemetry-only
+convention as `server_shots_per_second`) is set once per `check_server_step` tick that triggers
+*any* of the four writes above, timed with `clock_gettime(CLOCK_MONOTONIC, …)` around the whole
+block (whichever subset actually ran). Exposed as `last_backup_duration_ms` on
+`GET /api/v1/status` (`http_status_view_t`/`http_json_format_status`/`http_status_collect`) —
+`0` until the first autobackup of the process. This is what makes the original incident's own
+"how long did the backup actually take" question answerable directly instead of inferred after
+the fact from log timestamps, as it had to be for the §1 diagnosis.
+
 ### HTTP REST admin API
 
 **`--http-port <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only, `n` in `[1, 65535]`). Starts a minimal HTTP/1.1 admin API on **`127.0.0.1:<n>`** — loopback only, never `INADDR_ANY`, so it is never reachable off the machine by default (use an SSH tunnel or a reverse proxy for remote access). **Absent by default** (`HTTP_PORT` global defaults to 0): no extra socket is opened unless explicitly requested. Lets an external HTTP application (written in any language) read server telemetry and drive a few whitelisted admin actions without speaking the binary `packet`/`control_protocol` wire formats.
@@ -275,7 +346,7 @@ Endpoints (all under `/api/v1`, JSON in/out):
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/v1/stats` | — | `{"shots_per_second","possibility_stock","checked_stock","analysed_stock","max_result","active_threads","pruner_checked","pruner_removed","queues":[{"file","unchecked","checked","analysed"}, …]}` |
-| GET | `/api/v1/status` | — | `{"state","uptime_seconds","version","limit","max_stock_by_thread","pruner_batch"}` (`state` ∈ `running`/`admin_pause`/`regulation_pause`/`stopping`) |
+| GET | `/api/v1/status` | — | `{"state","uptime_seconds","version","limit","max_stock_by_thread","pruner_batch","pruner_dfs_budget","last_backup_duration_ms"}` (`state` ∈ `running`/`admin_pause`/`regulation_pause`/`stopping`; `last_backup_duration_ms` — PR5, docs/conception/maitrise_charge_serveur.md — durée en ms de la dernière sauvegarde automatique réellement exécutée, `0` tant qu'aucune n'a eu lieu) |
 | POST | `/api/v1/command` | `{"command":"limit 1000"}` | `{"result":"ok"}` (200), or an error body with 400 (missing/invalid args), 401 (a modifying command without a valid Bearer token — every standard/privileged command except `clientsWork`), 403 (not whitelisted), 404 (unknown path), or 405 (wrong method) |
 | GET | `/api/v1/clients` | — | `{"clients":[{"session_no","pid","forks","mode","label","machine_uid","client_uid","ip","last_activity","stats"}, …]}` — one entry per active control-channel session (`control_registry_snapshot`, same source as the console `clients` command); `mode` ∈ `search`/`pruner`/`gpu_pruner`/`unknown`, `ip` is the TCP peer address of that session's connection (see below), `last_activity` is a Unix epoch (seconds); empty array if no client is connected. `session_no` (v12) is a server-side monotonic identifier, never reused even across reconnections — unlike the underlying registry slot, which is recycled the moment a session disconnects. `label` (v12) is the client's declared name (`--name`, default hostname) — a JSON string, always properly escaped since it is client-declared and never validated. `machine_uid`/`client_uid` (v12) are hex-encoded 128-bit nonces (`net/client_identity.h`) identifying respectively the machine (persisted across restarts) and this process execution (fresh per start). `stats` is `null` until a `CTRL_GET_STATS` round-trip has completed at least once for that session, otherwise `{"shots_per_second","possibility_stock","analysed_stock","max_result","pruner_checked","pruner_removed","pruner_cells_per_second","stats_time"}` (cached snapshot, `stats_time` = Unix epoch of that reply — can be stale if the client hasn't been re-polled). |
 | POST | `/api/v1/clients/stats` | — | `{"result":"ok","requested":N}` — HTTP equivalent of the console `clientsStats` command: broadcasts `CTRL_GET_STATS` to the `N` active control sessions and returns immediately (fire-and-forget, like its console counterpart). Replies land asynchronously on each session's own control thread and are cached in `control_registry` (`control_registry_record_stats`); poll `GET /api/v1/clients` shortly after (sessions wake immediately on the posted command, so the round-trip is typically sub-second) to read the refreshed `stats`. |

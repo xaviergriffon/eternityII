@@ -883,6 +883,21 @@ extern client_identity_t g_client_identity_template;
  */
 extern volatile unsigned long long server_shots_per_second;
 
+/**
+ * @brief Durée (millisecondes) de la DERNIÈRE sauvegarde automatique
+ *        effectivement exécutée (PR5, docs/conception/maitrise_charge_serveur.md)
+ *        — englobe tout ce que `check_server_step` déclenche à ce tour :
+ *        `consistent_backup` (si stock ou pool analysé a bougé),
+ *        `best_board_save`, `known_clients_registry_save` (chacun
+ *        indépendamment sauté si son propre artefact n'a pas changé). 0 tant
+ *        qu'aucune sauvegarde n'a encore eu lieu. Écrite par le seul thread
+ *        `check_server` (pas de concurrence réelle), lue sans verrou par
+ *        `GET /api/v1/status` — même tolérance que `server_shots_per_second`
+ *        ci-dessus : un lecteur concurrent voit au pire une valeur d'un tour
+ *        de retard, sans conséquence pour un indicateur de télémétrie.
+ */
+extern volatile unsigned long long server_last_backup_duration_ms;
+
 extern unsigned long long max_search_by_sec;
 
 extern int max_stock_by_thread;

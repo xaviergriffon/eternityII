@@ -411,6 +411,7 @@ TEST http_json_format_status_golden(void)
     view.max_stock_by_thread = 500;
     view.pruner_batch = 64;
     view.pruner_dfs_budget = 10000;
+    view.last_backup_duration_ms = 42;
 
     char buf[512];
     int n = http_json_format_status(buf, sizeof(buf), &view);
@@ -419,7 +420,7 @@ TEST http_json_format_status_golden(void)
     ASSERT_STR_EQ(
         "{\"state\":\"admin_pause\",\"uptime_seconds\":3600,\"version\":9,"
         "\"limit\":1000,\"max_stock_by_thread\":500,\"pruner_batch\":64,"
-        "\"pruner_dfs_budget\":10000}",
+        "\"pruner_dfs_budget\":10000,\"last_backup_duration_ms\":42}",
         buf);
     PASS();
 }
