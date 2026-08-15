@@ -81,7 +81,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 
 | Commande | Description |
 |---|---|
-| `backup` | Sauvegarde les files de possibilités dans `eternityII.back` et `eternityII-in_analyse.back`, ainsi que le meilleur plateau connu (`eternityII-best_board.back`) et le cumul par machine (`eternityII-known_clients.back`, voir [Registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus)) |
+| `backup` | Sauvegarde les files de possibilités dans `eternityII.back` et `eternityII-in_analyse.back` (stock et pool analysé capturés à un instant unique — voir [maitrise_charge_serveur.md](conception/maitrise_charge_serveur.md)), ainsi que le meilleur plateau connu (`eternityII-best_board.back`) et le cumul par machine (`eternityII-known_clients.back`, voir [Registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus)) |
 | `restore [fichier [fichier_analyse]]` | Restaure les files depuis les fichiers `.back` (remplace le stock) ; recharge aussi, sans argument dédié, le meilleur plateau connu et le cumul par machine (absence tolérée) |
 | `import` | Importe des possibilités depuis les fichiers `.back` dans les files courantes |
 | `loadJson` | Importe une possibilité depuis une chaîne JSON (équivalent de `import` pour le format JSON) |

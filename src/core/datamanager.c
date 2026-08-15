@@ -1494,6 +1494,11 @@ int backup(char *filename)
 		free(tmp_filename);
 		return BACKUP_ERROR;
 	}
+	// Tampon explicite (1 Mio) : le tampon stdio par défaut ramène un stock de
+	// plusieurs millions de possibilités à quelques milliers d'appels write()
+	// au lieu d'un par possibilité — significatif car ces write() ont lieu
+	// sous lock_all_file() (voir PR1, docs/conception/maitrise_charge_serveur.md).
+	setvbuf(f, NULL, _IOFBF, 1 << 20);
 
 	int write_error = 0;
 	lock_all_file();
@@ -1605,6 +1610,7 @@ int backup_analysed(char *filename)
 		free(tmp_filename);
 		return BACKUP_ERROR;
 	}
+	setvbuf(f, NULL, _IOFBF, 1 << 20);
 
 	int write_error = 0;
 	lock_all_file_analysed();
@@ -1650,6 +1656,205 @@ int backup_analysed(char *filename)
 
 	free(tmp_filename);
 	return BACKUP_OK;
+}
+
+/**
+ * @brief Sauvegarde le pool analysé et le stock à un instant T UNIQUE (PR2,
+ *        docs/conception/maitrise_charge_serveur.md) — corrige un trou
+ *        préexistant de `backup()`/`backup_analysed()` appelées l'une après
+ *        l'autre : une possibilité acquittée entre les deux instants
+ *        disparaissait des deux sauvegardes (le parent déjà retiré du pool
+ *        analysé, ses enfants pas encore présents dans le stock capturé plus
+ *        tôt).
+ *
+ * Phase 1 : verrouille TOUTES les files des trois pools (analysé, stock non
+ * vérifié, stock vérifié) avant d'écrire quoi que ce soit — c'est cette
+ * fenêtre de gel simultané qui rend l'image cohérente à T, pas un
+ * verrouillage progressif (qui laisserait une possibilité migrer d'une file
+ * pas encore gelée vers une file déjà écrite). `maintenance` est posé une
+ * seule fois explicitement ici, PAS via `lock_all_file()`/
+ * `lock_all_file_analysed()` : leurs `unlock_*` respectifs remettraient le
+ * drapeau à 0 dès la première famille libérée (non-réentrance déjà en place
+ * pour ces deux verrous), alors qu'ici les deux familles doivent rester sous
+ * le même état "maintenance" jusqu'à la fin de la phase 2.
+ *
+ * Phase 2 : écrit puis libère progressivement, une file à la fois — pool
+ * analysé D'ABORD (un `INST_GET` exige à la fois un verrou de stock et un
+ * verrou analysé ; libérer le stock en premier ne raccourcirait donc en rien
+ * la dégradation), puis chaque file de stock (non vérifié + vérifié
+ * ensemble, comme `backup()`). La fenêtre de blocage total pour un client
+ * vaut ainsi le temps d'écriture d'UNE file, pas de la sauvegarde entière —
+ * la capacité de service remonte par paliers au fil de la libération.
+ *
+ * Ne modifie jamais les pools eux-mêmes (lecture seule des `Element`
+ * existants, comme `backup()`/`backup_analysed()`) : une erreur d'écriture à
+ * mi-parcours ne perd ni ne duplique aucune possibilité en mémoire — seul le
+ * fichier `.tmp` correspondant est invalidé.
+ *
+ * @param stock_filename    Fichier cible du stock (même convention que `backup`).
+ * @param analysed_filename Fichier cible du pool analysé (même convention que `backup_analysed`).
+ * @param out_analysed_status Sur retour, code du volet analysé (BACKUP_OK/
+ *                             BACKUP_ERROR/BACKUP_SKIPPED_MAINTENANCE) — NULL accepté.
+ * @return Code du volet stock (même convention que `backup`).
+ */
+int backup_coherent(char *stock_filename, char *analysed_filename, int *out_analysed_status)
+{
+	if (out_analysed_status != NULL)
+	{
+		*out_analysed_status = BACKUP_ERROR;
+	}
+
+	if (maintenance)
+	{
+		if (out_analysed_status != NULL) { *out_analysed_status = BACKUP_SKIPPED_MAINTENANCE; }
+		return BACKUP_SKIPPED_MAINTENANCE;
+	}
+
+	char *stock_tmp = backup_tmp_path(stock_filename);
+	if (!stock_tmp)
+	{
+		log_error("backup (cohérent) file :%s (malloc échoué)\n", stock_filename);
+		return BACKUP_ERROR;
+	}
+	char *analysed_tmp = backup_tmp_path(analysed_filename);
+	if (!analysed_tmp)
+	{
+		log_error("backup (cohérent) file :%s (malloc échoué)\n", analysed_filename);
+		free(stock_tmp);
+		return BACKUP_ERROR;
+	}
+
+	FILE *fstock = fopen(stock_tmp, "w");
+	if (!fstock)
+	{
+		log_errno("backup (cohérent) file :%s ", stock_tmp);
+		free(stock_tmp);
+		free(analysed_tmp);
+		return BACKUP_ERROR;
+	}
+	setvbuf(fstock, NULL, _IOFBF, 1 << 20);
+
+	FILE *fanalysed = fopen(analysed_tmp, "w");
+	if (!fanalysed)
+	{
+		log_errno("backup (cohérent) file :%s ", analysed_tmp);
+		fclose(fstock);
+		unlink(stock_tmp);
+		free(stock_tmp);
+		free(analysed_tmp);
+		return BACKUP_ERROR;
+	}
+	setvbuf(fanalysed, NULL, _IOFBF, 1 << 20);
+
+	// Phase 1 : gel global à l'instant T (cf. docstring ci-dessus).
+	maintenance = 1;
+	int fp;
+	for (fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		pthread_mutex_lock(&file_possibility_analysed[fp].lock);
+	}
+	for (fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		pthread_mutex_lock(&file_possibility[fp].lock);
+		pthread_mutex_lock(&file_possibility_checked[fp].lock);
+	}
+
+	// Phase 2a : pool analysé, libéré au fil de l'écriture.
+	int write_error_analysed = 0;
+	for (fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		Element *currElement = file_possibility_analysed[fp].file.start;
+		while (currElement != NULL)
+		{
+			if (currElement->value != NULL)
+			{
+				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				if (fwrite(possibility, sizeof(struct possibility_packet), 1, fanalysed) != 1)
+				{
+					write_error_analysed = 1;
+				}
+			}
+			currElement = currElement->next;
+		}
+		pthread_mutex_unlock(&file_possibility_analysed[fp].lock);
+	}
+
+	// Phase 2b : stock (non vérifié + vérifié), une file à la fois, libérée
+	// dès son écriture terminée.
+	int write_error_stock = 0;
+	for (fp = 0; fp < NB_FILE_POSSIBILITY; fp++)
+	{
+		Element *currElement = file_possibility[fp].file.start;
+		while (currElement != NULL)
+		{
+			if (currElement->value != NULL)
+			{
+				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				if (fwrite(possibility, sizeof(struct possibility_packet), 1, fstock) != 1)
+				{
+					write_error_stock = 1;
+				}
+			}
+			currElement = currElement->next;
+		}
+		currElement = file_possibility_checked[fp].file.start;
+		while (currElement != NULL)
+		{
+			if (currElement->value != NULL)
+			{
+				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				if (fwrite(possibility, sizeof(struct possibility_packet), 1, fstock) != 1)
+				{
+					write_error_stock = 1;
+				}
+			}
+			currElement = currElement->next;
+		}
+		pthread_mutex_unlock(&file_possibility[fp].lock);
+		pthread_mutex_unlock(&file_possibility_checked[fp].lock);
+	}
+	maintenance = 0;
+
+	int rc_analysed = BACKUP_OK;
+	if (fclose(fanalysed) != 0)
+	{
+		write_error_analysed = 1;
+	}
+	if (write_error_analysed)
+	{
+		log_error("backup (cohérent) file :%s (écriture incomplète)\n", analysed_tmp);
+		unlink(analysed_tmp);
+		rc_analysed = BACKUP_ERROR;
+	}
+	else if (rename(analysed_tmp, analysed_filename) != 0)
+	{
+		log_errno("backup (cohérent) file :%s -> %s (rename) ", analysed_tmp, analysed_filename);
+		unlink(analysed_tmp);
+		rc_analysed = BACKUP_ERROR;
+	}
+
+	int rc_stock = BACKUP_OK;
+	if (fclose(fstock) != 0)
+	{
+		write_error_stock = 1;
+	}
+	if (write_error_stock)
+	{
+		log_error("backup (cohérent) file :%s (écriture incomplète)\n", stock_tmp);
+		unlink(stock_tmp);
+		rc_stock = BACKUP_ERROR;
+	}
+	else if (rename(stock_tmp, stock_filename) != 0)
+	{
+		log_errno("backup (cohérent) file :%s -> %s (rename) ", stock_tmp, stock_filename);
+		unlink(stock_tmp);
+		rc_stock = BACKUP_ERROR;
+	}
+
+	free(stock_tmp);
+	free(analysed_tmp);
+	if (out_analysed_status != NULL) { *out_analysed_status = rc_analysed; }
+	return rc_stock;
 }
 
 int import(client_possibility_t *client_possibility, char *filename)
@@ -2184,8 +2389,7 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                 log_info("solution sauvegardée dans %s\n", fileName);
                 if (stop_on_solution) {
                     unlock_all_file();
-                    backup("./eternityII.back");
-                    backup_analysed("./eternityII-in_analyse.back");
+                    backup_coherent("./eternityII.back", "./eternityII-in_analyse.back", NULL);
                     log_event("serveur arrêté suite à la solution (stock sauvegardé)");
                     log_info("serveur arrêté suite à la solution — stock sauvegardé\n");
                     flush_info();

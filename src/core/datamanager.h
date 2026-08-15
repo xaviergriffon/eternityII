@@ -282,6 +282,27 @@ int backup(char *filename);
  */
 int backup_analysed(char *filename);
 /**
+ * @brief Sauvegarde le pool analysé et le stock à un instant T unique (PR2,
+ *        docs/conception/maitrise_charge_serveur.md) — préférer à
+ *        `backup()` + `backup_analysed()` appelées l'une après l'autre,
+ *        qui laissent une fenêtre entre les deux instants (une possibilité
+ *        acquittée dans l'intervalle peut disparaître des deux sauvegardes).
+ *        Toutes les files des trois pools sont gelées d'un coup avant la
+ *        première écriture, puis libérées progressivement (pool analysé
+ *        d'abord) au fil de l'écriture — jamais toutes relâchées d'un coup à
+ *        la fin, contrairement à `backup`/`backup_analysed`.
+ *
+ * @param stock_filename       Fichier cible du stock (comme `backup`).
+ * @param analysed_filename    Fichier cible du pool analysé (comme `backup_analysed`).
+ * @param out_analysed_status  Sur retour : code du volet analysé (mêmes
+ *                             constantes BACKUP_* que le retour de la
+ *                             fonction, qui porte le code du volet stock).
+ *                             NULL accepté si l'appelant ne veut pas ce détail.
+ * @return Code du volet stock — BACKUP_OK (0), BACKUP_SKIPPED_MAINTENANCE (1)
+ *         ou BACKUP_ERROR (-1).
+ */
+int backup_coherent(char *stock_filename, char *analysed_filename, int *out_analysed_status);
+/**
  * @brief Reconstruit les files avec le contenu du fichier
  * 
  * @param filename nom du fichier contenant une sauvegarde de file de possibilité
