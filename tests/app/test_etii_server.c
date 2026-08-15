@@ -1455,6 +1455,48 @@ TEST check_server_step_reports_basic_stats(void)
     PASS();
 }
 
+/* Régression : `report` (check_server_step) était calloc'é à une taille FIXE
+ * (4000 octets) alors que `table` (build_file_queues_table) grandit avec
+ * `nb_file_possibility` (PR4, docs/conception/maitrise_charge_serveur.md —
+ * jusqu'à NB_FILE_POSSIBILITY_MAX = 128, ~8,4 Kio) : `strcat(report, table)`
+ * débordait, détecté par `_FORTIFY_SOURCE` en SIGILL sur une exécution réelle
+ * avec `--stock-files` élevé (trouvé en vérifiant le binaire réel, pas par ce
+ * test seul -- mais ASan sur cette même scène aurait suffi à l'attraper).
+ * `nb_file_possibility` étant un état global partagé (cf. commentaire de
+ * `tests/core/test_datamanager.c`), restauré au défaut avant PASS(). */
+TEST check_server_step_handles_large_stock_files_count(void)
+{
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+    uint16_t saved_mr = max_result;
+    max_result = 10;
+
+    ASSERT_EQ_FMT(0, datamanager_configure_stock_files(NB_FILE_POSSIBILITY_MAX), "%d");
+
+    unsigned long long lastactive = 0, lastBackupUpd = 0;
+    int lastBack = 0;
+    int last_record = (int)max_result;
+    check_server_step(&lastactive, &lastBackupUpd, &lastBack, &last_record, 10);
+
+    char *report = read_lastcheck_copy();
+    ASSERT(report != NULL);
+    ASSERT(strstr(report, "File queues") != NULL);
+    ASSERT(strstr(report, "active thread last") != NULL); /* bloc `temp` intact après `table` */
+    free(report);
+
+    datamanager_configure_stock_files(NB_FILE_POSSIBILITY_DEFAULT);
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    max_result = saved_mr;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
 /* Seuil d'autobackup atteint + stock modifié + nouveau record : les deux
  * branches se déclenchent ensemble (backup réel sur ./temp*.back, nettoyé
  * après coup). */
@@ -2589,6 +2631,7 @@ SUITE(etii_server_suite)
     RUN_TEST(autobackup_waits_full_window_even_if_changed);
 
     RUN_TEST(check_server_step_reports_basic_stats);
+    RUN_TEST(check_server_step_handles_large_stock_files_count);
     RUN_TEST(check_server_step_detects_record_and_autobackups);
     RUN_TEST(check_server_step_autobackup_skipped_during_maintenance);
     RUN_TEST(check_server_step_reclaims_expired_lease);

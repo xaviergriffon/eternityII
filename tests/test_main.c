@@ -8,6 +8,7 @@
  * Compilation : voir la cible `make test` à la racine.
  */
 #include "greatest.h"
+#include "core/datamanager.h"
 
 /* Suites définies dans les autres fichiers de test. */
 SUITE_EXTERN(lifo_suite);
@@ -49,6 +50,9 @@ GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
 {
+    /* Pools alloués dynamiquement (tableaux de pointeurs, PR4) : appel
+     * OBLIGATOIRE avant tout usage de datamanager.c, cf. sa doc. */
+    datamanager_configure_stock_files(NB_FILE_POSSIBILITY_DEFAULT);
     GREATEST_MAIN_BEGIN(); /* parse les arguments, init le runner */
     RUN_SUITE(lifo_suite);
     RUN_SUITE(part_suite);

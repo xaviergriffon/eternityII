@@ -209,32 +209,49 @@ Ferme le `@todo Rendre configurable` qui vivait sur `NB_FILE_POSSIBILITY`
 file de la sauvegarde cohérente (PR 2) et affine la granularité du rééquilibrage
 incrémental (PR 3).
 
-**Écart assumé par rapport au plan initial : plafond de compilation, pas une allocation
-dynamique.** Le plan envisageait de passer `file_possibility[]`/`file_possibility_checked[]`/
-`file_possibility_analysed[]`/`analysed_index[][]` en allocation dynamique (`malloc`), sizée
-exactement sur la valeur demandée. En creusant l'implémentation, cette voie exigeait un
-appel d'initialisation explicite avant TOUT usage de `datamanager.c` — y compris par les
-~1100 tests unitaires du projet, qui appellent ces fonctions directement sans jamais passer
-par `main()`. Le risque (un site d'appel oublié = déréférencement de pointeur NULL, pas une
-dégradation gracieuse) l'emportait sur le bénéfice mémoire, marginal à cette échelle
-(`analysed_index` reste le poste dominant même dynamique : ~8191 pointeurs × 8 octets par
-file).
+**Révision du plan initial : tableaux de POINTEURS, allocation réellement dynamique.**
+Une première version de cette PR avait retenu un plafond de compilation
+(`NB_FILE_POSSIBILITY_MAX` = 128 dimensionnant des tableaux statiques
+`file_possibility_t[NB_FILE_POSSIBILITY_MAX]`) plutôt qu'une allocation dynamique, par
+prudence vis-à-vis du risque d'un site d'appel d'initialisation oublié (déréférencement de
+pointeur NULL). Question soulevée après coup : les files ne devraient-elles pas être gérées
+par référence, comme les possibilités elles-mêmes, plutôt que par un tableau ? Une vraie
+liste chaînée de files a été écartée (elle ferait perdre l'accès indexé O(1) dont dépend
+`add_possibility_analysed(p, thread)`, qui indexe directement par `fork_seq` — voir plus
+bas), mais l'intermédiaire — un tableau de **pointeurs**, chaque file allouée séparément sur
+le tas — retient l'indexation O(1) tout en supprimant le plafond pré-alloué. Retenu :
+`file_possibility`, `file_possibility_checked`, `file_possibility_analysed` sont désormais
+`file_possibility_t **` (et `analysed_index` un `AnalysedIndexNode ***`), redimensionnés par
+`realloc` et peuplés slot par slot (`malloc` + `init_file` + `pthread_mutex_init`) au fur et
+à mesure que `datamanager_configure_stock_files` fait croître `nb_file_possibility_capacity`
+— jamais de réinitialisation d'un mutex déjà vivant, le risque POSIX qui avait motivé le
+tableau statique reste évité, mais désormais par construction (un slot n'est initialisé
+qu'une fois, à sa toute première allocation) plutôt que par un socle pré-rempli. Coût
+mémoire : 8 octets par entrée non utilisée (un pointeur NULL) au lieu des ~66 octets d'une
+`file_possibility_t` complète — `analysed_index` à son plafond `NB_FILE_POSSIBILITY_MAX`
+(128) ne coûte plus que 128 × 8 = 1 Kio de squelette tant qu'aucune file n'est
+effectivement demandée, contre 8,4 Mio pré-alloués inconditionnellement dans la version
+précédente.
 
-Retenu à la place : deux constantes de compilation, `NB_FILE_POSSIBILITY_DEFAULT` (10,
-comportement historique inchangé — les tableaux restent statiquement initialisés pour ces
-10 premières files, **zéro changement de risque pour le chemin par défaut, y compris tous
-les tests existants**) et `NB_FILE_POSSIBILITY_MAX` (128, plafond de compilation
-dimensionnant les tableaux — `analysed_index` à ce plafond : ~8191 × 8 × 128 ≈ 8,4 Mio,
-alloué statiquement que `--stock-files` soit utilisé ou non, négligeable pour un process
-serveur). `nb_file_possibility` (variable) est le compte RÉELLEMENT actif, dans
-`[1, NB_FILE_POSSIBILITY_MAX]`.
+`NB_FILE_POSSIBILITY_MAX` (128) reste un garde-fou de bon sens contre un `--stock-files`
+manifestement excessif (une seule requête `sizes[]`/`filetested[]`, VLA bornées par cette
+même constante, cf. `datamanager.c`), plus jamais un dimensionnement de tableau. `nb_file_possibility`
+vaut **0** tant que `datamanager_configure_stock_files` n'a jamais été appelée : appel
+**obligatoire**, une fois, avant tout autre usage de ce fichier — les trois points d'entrée
+processus (`src/app/main.c`, `tests/test_main.c`, `tests/bench/bench_refutation.c`, les
+seuls `main()` réels du dépôt) l'appellent chacun en tout premier, avec
+`NB_FILE_POSSIBILITY_DEFAULT` (10) en l'absence de `--stock-files`. `main()` l'appelle
+désormais **inconditionnellement** (avant cette révision, seulement si
+`stock_files_requested > 0` — insuffisant maintenant que le point de départ n'est plus
+statiquement valide).
 
-`datamanager_configure_stock_files(n)` (`src/core/datamanager.{c,h}`) initialise
-explicitement (`init_file` + `pthread_mutex_init`) uniquement les files AU-DELÀ du socle par
-défaut déjà statiquement valide — les réinitialiser serait un comportement non défini par
-POSIX (`pthread_mutex_init` sur un mutex déjà initialisé). Appelée depuis `main()`
-uniquement si `--stock-files <n>` est explicitement fourni (`stock_files_requested > 0`) —
-sinon, comportement strictement identique à avant cette PR.
+`datamanager_configure_stock_files(n)` (`src/core/datamanager.{c,h}`) fait croître (jamais
+décroître) les quatre tableaux de pointeurs via `realloc`, puis alloue et initialise
+uniquement les slots au-delà de la capacité déjà atteinte — `realloc` ne libère jamais le
+pointeur d'origine en cas d'échec partiel : chaque tableau qui a réussi remplace le global
+correspondant même si un autre a échoué, sans fuite ni pointeur pendant, et
+`nb_file_possibility_capacity` n'avance qu'après le succès complet de la boucle
+d'initialisation, pour qu'un appel suivant reparte d'une base cohérente.
 
 **Contrainte préservée, avec un garde-fou actif plutôt qu'un simple constat** :
 `ensure_stock_files_cover_forks(nb_threads)` (`src/app/app_runtime.{h,c}`, appelée par
@@ -250,6 +267,27 @@ augmentant `nb_forks` à chaud (cycle de vie dynamique des fils, voir `AGENTS.md
 `ensure_childs_capacity`, qui couvre le cas analogue pour `childrens_pid[]`/`forkId[]`. Risque
 jugé faible (un opérateur qui augmente `nb_forks` à chaud dépasse rarement 128 forks) mais non
 nul ; à traiter si l'usage réel le justifie.
+
+**Bogue trouvé par la vérification sur le vrai binaire, pas par les tests unitaires : `report`
+(`check_server_step`, `src/app/etii_server.c`) débordait au-delà de ~40 files.** La règle du
+projet — une fonctionnalité n'est finie qu'exercée dans le vrai binaire — a encore payé ici :
+`./eternityII server --stock-files 500` (clampé à 128) démarrait normalement, mais mourait en
+`SIGILL` (`__strcat_chk` de `_FORTIFY_SOURCE`) dès le premier tour de `check_server_step`
+(10 s après le démarrage). Cause : `table` (`build_file_queues_table`) est correctement
+dimensionnée sur `nb_file_possibility` (`256 + n*64` octets, ~8,4 Kio à
+`NB_FILE_POSSIBILITY_MAX` = 128), mais `report`, dans lequel `table` est ensuite `strcat`-ée,
+restait `calloc`é à une taille **fixe** de 4000 octets — comportement historique jamais mis en
+cause tant que `nb_file_possibility` valait 10. Aucun test unitaire existant n'appelait
+`check_server_step` avec un `nb_file_possibility` élevé, donc aucun n'aurait pu l'attraper.
+Corrigé en réordonnant le corps de la fonction : `table` est construite en premier, `report`
+est ensuite alloué sur sa taille réelle (`strlen(table) + 1200`, la marge couvrant le second
+bloc `temp`, de taille fixe indépendante de `nb_file_possibility`). Verrouillé par
+`check_server_step_handles_large_stock_files_count` (`tests/app/test_etii_server.c`) : appelle
+`check_server_step` avec `nb_file_possibility` porté à `NB_FILE_POSSIBILITY_MAX` et vérifie que
+le rapport publié contient intact le bloc `temp` qui suit `table` — un test qui échoue contre
+le code d'avant ce correctif (`_FORTIFY_SOURCE` est actif par défaut sur ce toolchain, pas
+seulement sous ASan). Reproduit et vérifié corrigé sur le binaire réel : le serveur reste vivant
+au-delà du premier tour de statistiques avec `--stock-files 500`.
 
 ## 6. Une sauvegarde inutile ne s'exécute pas (PR 5, proposition)
 

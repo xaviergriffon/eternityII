@@ -13,44 +13,19 @@
 #include "net/etii_protocol.h"
 #include "core/readdata.h"
 
-// PR4 (docs/conception/maitrise_charge_serveur.md) : ces trois tableaux et
-// analysed_index[][] plus bas sont dimensionnés au plafond de compilation
-// NB_FILE_POSSIBILITY_MAX, pas au compte réellement actif nb_file_possibility
-// (variable). Les NB_FILE_POSSIBILITY_DEFAULT premières lignes de chacun sont
-// initialisées statiquement ci-dessous (comportement historique, inchangé) ;
-// les lignes au-delà (jusqu'à NB_FILE_POSSIBILITY_MAX) restent zéro-initialisées
-// par défaut C — valides mais INERTES tant que datamanager_configure_stock_files
-// ne les a pas explicitement initialisées (File.sizeofvalue resterait à 0,
-// mutex jamais pthread_mutex_init'd).
-int nb_file_possibility = NB_FILE_POSSIBILITY_DEFAULT;
+// PR4 (docs/conception/maitrise_charge_serveur.md) : ces trois pools et
+// analysed_index plus bas sont des tableaux de POINTEURS, (ré)alloués par
+// datamanager_configure_stock_files — le coût mémoire suit nb_file_possibility,
+// jamais un plafond pré-alloué (cf. le commentaire de NB_FILE_POSSIBILITY_MAX,
+// datamanager.h). Valent NULL/0 tant que datamanager_configure_stock_files n'a
+// pas été appelée — appel OBLIGATOIRE avant tout autre usage de ce fichier,
+// cf. la doc de nb_file_possibility (datamanager.h) pour la liste des points
+// d'entrée qui l'appellent.
+int nb_file_possibility = 0;
+static int nb_file_possibility_capacity = 0; // NOMBRE DE FILES RÉELLEMENT ALLOUÉES (>= nb_file_possibility ; ne décroît jamais, cf. datamanager_configure_stock_files)
 
-static file_possibility_t file_possibility[NB_FILE_POSSIBILITY_MAX] =
-{
-	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
-};
-
-static file_possibility_t file_possibility_analysed[NB_FILE_POSSIBILITY_MAX] =
-{
-	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
-};
+static file_possibility_t **file_possibility = NULL;
+static file_possibility_t **file_possibility_analysed = NULL;
 
 /**
  * @brief Files des possibilités vérifiées par un client pruner (`checked == 1`).
@@ -60,19 +35,75 @@ static file_possibility_t file_possibility_analysed[NB_FILE_POSSIBILITY_MAX] =
  * clients pruners (INST_GET_TO_CHECK) ainsi que, en repli, les clients de
  * recherche quand ce pool-ci est vide (fonctionnement sans pruner inchangé).
  */
-static file_possibility_t file_possibility_checked[NB_FILE_POSSIBILITY_MAX] =
-{
-	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-	{{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER},
-    {{NULL,NULL,0,sizeof(struct possibility_packet)},PTHREAD_MUTEX_INITIALIZER}
-};
+static file_possibility_t **file_possibility_checked = NULL;
+
+/* ==========================================================================
+ * Index de recherche du pool « analysed » (accélère remove_possibility_analysed)
+ * ==========================================================================
+ *
+ * remove_possibility_analysed() est appelée pour CHAQUE possibilité acquittée
+ * (INST_POSSIBILITY_ANALYSED / _BATCH, requeue côté serveur) et balayait
+ * linéairement toute la file avec compare_possibility() : O(n) par retrait,
+ * O(n·M) pour un acquittement de M paquets. Cet index (une table de hachage
+ * par file, à chaînage séparé) ramène le cas courant — la possibilité
+ * recherchée est bien présente — à O(1) amorti : compare_possibility() n'est
+ * plus appelée que sur les quelques candidats du seau concerné, jamais sur
+ * toute la file.
+ *
+ * Le hash ne porte QUE sur les champs réellement comparés par
+ * compare_possibility() : alloc, x, y, les ETERN_PARTS premiers bits de
+ * b_faceused (soit ETERN_PARTS/16 mots), et grid. Il exclut `checked`
+ * (jamais comparé) ainsi que tout octet de bourrage de struct — b_faceused
+ * porte un `__attribute__((aligned(16)))` qui, combiné au `packed` global,
+ * introduit du padding avant lui ; ce padding n'est pas garanti initialisé et
+ * hacher l'image mémoire brute du paquet ferait diverger le hash de deux
+ * paquets pourtant égaux au sens de compare_possibility().
+ *
+ * L'index n'est jamais une source de vérité : sur un « miss » (rien dans le
+ * seau), remove_possibility_analysed() retombe sur le balayage linéaire
+ * historique. Un nœud qui n'a pas pu être alloué (OOM) ou toute divergence
+ * éventuelle n'affecte donc jamais la correction, seulement la performance de
+ * ce cas limite — la file reste la seule source de vérité.
+ */
+#define ANALYSED_INDEX_BUCKETS 8191
+
+/*
+ * Attribution des analyses en cours (PR6) : `owner_uid` est le `client_uid` du
+ * client à qui LE SERVEUR a servi cette possibilité (INST_GET /
+ * INST_GET_TO_CHECK[_BATCH]). C'est une table latérale adossée à
+ * `analysed_index`, jamais un champ ajouté à `possibility_packet` (fil +
+ * backups + padding caché, cf. possibility-packet-struct-padding), et jamais
+ * une surcharge du paramètre `thread` (déjà -1 côté serveur / index de thread
+ * côté client, deux sens distincts qu'il ne faut pas empiler d'un troisième).
+ * `has_owner == 0` côté client (thread >= 0, cf. add_possibility_analysed) et
+ * pour toute possibilité rechargée par `import_analysed`/`restore_analysed` :
+ * les baux ne sont pas persistés, l'attribution ne l'est donc pas davantage —
+ * au redémarrage, une possibilité restaurée est réputée sans propriétaire,
+ * comme avant cette PR.
+ */
+typedef struct AnalysedIndexNode {
+	uint64_t hash;
+	Element *element;
+	uint8_t owner_uid[CLIENT_UID_BYTES];
+	int has_owner;
+	/*
+	 * Échéance du bail (PR7, section 4.3) : instant (epoch) au-delà duquel
+	 * cette possibilité, si toujours non acquittée, est réputée abandonnée
+	 * et rendue au stock par datamanager_reclaim_expired_leases(). Valide
+	 * seulement si has_owner (une possibilité sans propriétaire connu n'a pas
+	 * de bail — rien à rendre à personne). 0 = bail désactivé
+	 * (analysed_lease_seconds <= 0 au moment de l'insertion) : jamais expiré.
+	 */
+	time_t lease_deadline;
+	struct AnalysedIndexNode *next;
+} AnalysedIndexNode;
+
+// PR4 : tableau de POINTEURS (un par file) vers un tableau de
+// ANALYSED_INDEX_BUCKETS pointeurs chacun — alloué par
+// datamanager_configure_stock_files, comme les trois pools ci-dessus.
+// analysed_index[fileidx][bucket] reste une expression valide identique à
+// avant (déréférencement à deux niveaux), seule l'ALLOCATION change.
+static AnalysedIndexNode ***analysed_index = NULL;
 
 int datamanager_configure_stock_files(int n)
 {
@@ -82,17 +113,47 @@ int datamanager_configure_stock_files(int n)
 	if (n > NB_FILE_POSSIBILITY_MAX) {
 		n = NB_FILE_POSSIBILITY_MAX;
 	}
-	// Cf. le commentaire sur nb_file_possibility (datamanager.h) : les
-	// NB_FILE_POSSIBILITY_DEFAULT premières files sont déjà valides
-	// (initialiseur statique ci-dessus) — on ne touche QUE celles au-delà,
-	// encore à l'état zéro pur.
-	for (int fp = NB_FILE_POSSIBILITY_DEFAULT; fp < n; fp++) {
-		init_file(&file_possibility[fp].file, sizeof(struct possibility_packet));
-		pthread_mutex_init(&file_possibility[fp].lock, NULL);
-		init_file(&file_possibility_checked[fp].file, sizeof(struct possibility_packet));
-		pthread_mutex_init(&file_possibility_checked[fp].lock, NULL);
-		init_file(&file_possibility_analysed[fp].file, sizeof(struct possibility_packet));
-		pthread_mutex_init(&file_possibility_analysed[fp].lock, NULL);
+	if (n > nb_file_possibility_capacity) {
+		file_possibility_t **grown_stock = realloc(file_possibility, (size_t)n * sizeof(file_possibility_t *));
+		file_possibility_t **grown_checked = realloc(file_possibility_checked, (size_t)n * sizeof(file_possibility_t *));
+		file_possibility_t **grown_analysed = realloc(file_possibility_analysed, (size_t)n * sizeof(file_possibility_t *));
+		AnalysedIndexNode ***grown_index = realloc(analysed_index, (size_t)n * sizeof(AnalysedIndexNode **));
+		// realloc NE LIBÈRE JAMAIS l'original en cas d'échec : chaque pointeur
+		// "grown_*" réussi remplace le global correspondant même si un AUTRE a
+		// échoué — pas de fuite, pas de pointeur pendant. nb_file_possibility_capacity
+		// n'avance pas dans ce cas : le prochain appel retente depuis la même base.
+		if (grown_stock != NULL) { file_possibility = grown_stock; }
+		if (grown_checked != NULL) { file_possibility_checked = grown_checked; }
+		if (grown_analysed != NULL) { file_possibility_analysed = grown_analysed; }
+		if (grown_index != NULL) { analysed_index = grown_index; }
+		if (grown_stock == NULL || grown_checked == NULL || grown_analysed == NULL || grown_index == NULL) {
+			log_error("datamanager_configure_stock_files : realloc échoué pour %d files\n", n);
+			return -1;
+		}
+
+		for (int fp = nb_file_possibility_capacity; fp < n; fp++) {
+			file_possibility[fp] = malloc(sizeof(file_possibility_t));
+			file_possibility_checked[fp] = malloc(sizeof(file_possibility_t));
+			file_possibility_analysed[fp] = malloc(sizeof(file_possibility_t));
+			analysed_index[fp] = calloc(ANALYSED_INDEX_BUCKETS, sizeof(AnalysedIndexNode *));
+			if (file_possibility[fp] == NULL || file_possibility_checked[fp] == NULL ||
+			    file_possibility_analysed[fp] == NULL || analysed_index[fp] == NULL) {
+				// nb_file_possibility_capacity n'avance pas au-delà de ce qui a
+				// RÉUSSI (mise à jour seulement après la boucle complète) : les
+				// quelques slots [nb_file_possibility_capacity, fp] déjà alloués
+				// ici restent orphelins mais jamais indexés (nb_file_possibility
+				// non plus avancé) — fuite mineure, jamais un déréférencement.
+				log_error("datamanager_configure_stock_files : allocation échouée pour la file %d\n", fp);
+				return -1;
+			}
+			init_file(&file_possibility[fp]->file, sizeof(struct possibility_packet));
+			pthread_mutex_init(&file_possibility[fp]->lock, NULL);
+			init_file(&file_possibility_checked[fp]->file, sizeof(struct possibility_packet));
+			pthread_mutex_init(&file_possibility_checked[fp]->lock, NULL);
+			init_file(&file_possibility_analysed[fp]->file, sizeof(struct possibility_packet));
+			pthread_mutex_init(&file_possibility_analysed[fp]->lock, NULL);
+		}
+		nb_file_possibility_capacity = n;
 	}
 	nb_file_possibility = n;
 	return 0;
@@ -344,7 +405,7 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
  *                       cours : sauvegarde, restore, tri...) — rien n'a été
  *                       inséré dans ce cas, sûr à réessayer par l'appelant.
  */
-static int put_to_pool(file_possibility_t *pool, array_possibility_packet *possibilities, int want_checked)
+static int put_to_pool(file_possibility_t **pool, array_possibility_packet *possibilities, int want_checked)
 {
 	int count = 0;
 	int t;
@@ -367,7 +428,7 @@ static int put_to_pool(file_possibility_t *pool, array_possibility_packet *possi
 	int failed_sweeps = 0;
 	while(addpossibility == 0)
 	{
-		if(pthread_mutex_trylock(&pool[currfile].lock) == 0)
+		if(pthread_mutex_trylock(&pool[currfile]->lock) == 0)
 		{
             for(t=0; t< possibilities->size; t++)
             {
@@ -381,10 +442,10 @@ static int put_to_pool(file_possibility_t *pool, array_possibility_packet *possi
                     //printf("max result:%i\n",max_result);
                 }
 
-                put(&pool[currfile].file, &possibilities->possibilities[t]);
+                put(&pool[currfile]->file, &possibilities->possibilities[t]);
             }
 			addpossibility = 1;
-			pthread_mutex_unlock(&pool[currfile].lock);
+			pthread_mutex_unlock(&pool[currfile]->lock);
 		}
 		currfile++;
 		if(currfile >= nb_file_possibility)
@@ -440,69 +501,6 @@ int add_possibility(client_possibility_t *client_possibility, array_possibility_
 	
 	return error;
 }
-
-/* ==========================================================================
- * Index de recherche du pool « analysed » (accélère remove_possibility_analysed)
- * ==========================================================================
- *
- * remove_possibility_analysed() est appelée pour CHAQUE possibilité acquittée
- * (INST_POSSIBILITY_ANALYSED / _BATCH, requeue côté serveur) et balayait
- * linéairement toute la file avec compare_possibility() : O(n) par retrait,
- * O(n·M) pour un acquittement de M paquets. Cet index (une table de hachage
- * par file, à chaînage séparé) ramène le cas courant — la possibilité
- * recherchée est bien présente — à O(1) amorti : compare_possibility() n'est
- * plus appelée que sur les quelques candidats du seau concerné, jamais sur
- * toute la file.
- *
- * Le hash ne porte QUE sur les champs réellement comparés par
- * compare_possibility() : alloc, x, y, les ETERN_PARTS premiers bits de
- * b_faceused (soit ETERN_PARTS/16 mots), et grid. Il exclut `checked`
- * (jamais comparé) ainsi que tout octet de bourrage de struct — b_faceused
- * porte un `__attribute__((aligned(16)))` qui, combiné au `packed` global,
- * introduit du padding avant lui ; ce padding n'est pas garanti initialisé et
- * hacher l'image mémoire brute du paquet ferait diverger le hash de deux
- * paquets pourtant égaux au sens de compare_possibility().
- *
- * L'index n'est jamais une source de vérité : sur un « miss » (rien dans le
- * seau), remove_possibility_analysed() retombe sur le balayage linéaire
- * historique. Un nœud qui n'a pas pu être alloué (OOM) ou toute divergence
- * éventuelle n'affecte donc jamais la correction, seulement la performance de
- * ce cas limite — la file reste la seule source de vérité.
- */
-#define ANALYSED_INDEX_BUCKETS 8191
-
-/*
- * Attribution des analyses en cours (PR6) : `owner_uid` est le `client_uid` du
- * client à qui LE SERVEUR a servi cette possibilité (INST_GET /
- * INST_GET_TO_CHECK[_BATCH]). C'est une table latérale adossée à
- * `analysed_index`, jamais un champ ajouté à `possibility_packet` (fil +
- * backups + padding caché, cf. possibility-packet-struct-padding), et jamais
- * une surcharge du paramètre `thread` (déjà -1 côté serveur / index de thread
- * côté client, deux sens distincts qu'il ne faut pas empiler d'un troisième).
- * `has_owner == 0` côté client (thread >= 0, cf. add_possibility_analysed) et
- * pour toute possibilité rechargée par `import_analysed`/`restore_analysed` :
- * les baux ne sont pas persistés, l'attribution ne l'est donc pas davantage —
- * au redémarrage, une possibilité restaurée est réputée sans propriétaire,
- * comme avant cette PR.
- */
-typedef struct AnalysedIndexNode {
-	uint64_t hash;
-	Element *element;
-	uint8_t owner_uid[CLIENT_UID_BYTES];
-	int has_owner;
-	/*
-	 * Échéance du bail (PR7, section 4.3) : instant (epoch) au-delà duquel
-	 * cette possibilité, si toujours non acquittée, est réputée abandonnée
-	 * et rendue au stock par datamanager_reclaim_expired_leases(). Valide
-	 * seulement si has_owner (une possibilité sans propriétaire connu n'a pas
-	 * de bail — rien à rendre à personne). 0 = bail désactivé
-	 * (analysed_lease_seconds <= 0 au moment de l'insertion) : jamais expiré.
-	 */
-	time_t lease_deadline;
-	struct AnalysedIndexNode *next;
-} AnalysedIndexNode;
-
-static AnalysedIndexNode *analysed_index[NB_FILE_POSSIBILITY_MAX][ANALYSED_INDEX_BUCKETS];
 
 /**
  * @brief Calcule le hash d'une possibilité, cohérent avec `compare_possibility`.
@@ -656,7 +654,7 @@ static void analysed_index_remove_element(int fileidx, Element *victim)
 /**
  * @brief Vide entièrement l'index d'une file analysée.
  *
- * À appeler après tout drainage complet de `file_possibility_analysed[fileidx].file`
+ * À appeler après tout drainage complet de `file_possibility_analysed[fileidx]->file`
  * (restock_analysed, restore_analysed, send_possibility_analysed en mode
  * local) : les `Element*` référencés par l'index seraient sinon des
  * pointeurs pendants (use-after-free au prochain hit).
@@ -701,9 +699,9 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 	while(removed_possibility == 0)
 	{
 		int checked = 0;
-		if(pthread_mutex_trylock(&file_possibility_analysed[currfile].lock) == 0)
+		if(pthread_mutex_trylock(&file_possibility_analysed[currfile]->lock) == 0)
 		{
-			File *file = &file_possibility_analysed[currfile].file;
+			File *file = &file_possibility_analysed[currfile]->file;
 			// Chemin rapide : l'index de hachage retrouve la possibilité en
 			// O(1) amorti (cas courant : elle est bien présente).
 			Element *element = analysed_index_find_and_remove(currfile, possibility);
@@ -722,7 +720,7 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 			}
 
 			checked = 1;
-			pthread_mutex_unlock(&file_possibility_analysed[currfile].lock);
+			pthread_mutex_unlock(&file_possibility_analysed[currfile]->lock);
 		}
 		if (checked == 1) {
 			if (thread < 0) {
@@ -765,9 +763,9 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 void send_possibility_analysed(client_possibility_t *client_possibility) {
 	int thread = client_possibility->id;
 	if (server_ip == NULL) {
-		if(pthread_mutex_trylock(&file_possibility_analysed[thread].lock) == 0)
+		if(pthread_mutex_trylock(&file_possibility_analysed[thread]->lock) == 0)
 		{
-			File *file = &file_possibility_analysed[thread].file;
+			File *file = &file_possibility_analysed[thread]->file;
 			Element *element = file->start;
 			if (element != NULL) {
                 struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
@@ -780,7 +778,7 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
                 analysed_index_clear(thread);
 			}
 
-			pthread_mutex_unlock(&file_possibility_analysed[thread].lock);
+			pthread_mutex_unlock(&file_possibility_analysed[thread]->lock);
 		}
 
 		return;
@@ -793,9 +791,9 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 		pthread_mutex_unlock(&client_possibility->socket_mutex);
 		return;
 	}
-	if(pthread_mutex_trylock(&file_possibility_analysed[thread].lock) == 0)
+	if(pthread_mutex_trylock(&file_possibility_analysed[thread]->lock) == 0)
 	{
-		File *file = &file_possibility_analysed[thread].file;
+		File *file = &file_possibility_analysed[thread]->file;
 		if (file->start != NULL) {
 			// Acquittement par lot : on draine la file par tranches de
 			// pruner_batch_size et on envoie chaque tranche en un seul
@@ -843,7 +841,7 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 			}
 		}
 
-		pthread_mutex_unlock(&file_possibility_analysed[thread].lock);
+		pthread_mutex_unlock(&file_possibility_analysed[thread]->lock);
 	}
 
 	pthread_mutex_unlock(&client_possibility->socket_mutex);
@@ -879,7 +877,7 @@ static int add_possibility_analysed_impl(struct possibility_packet *possiblity, 
 	}
 	while(possiblity != NULL && addpossibility == 0)
 	{
-		if(pthread_mutex_trylock(&file_possibility_analysed[currfile].lock) == 0)
+		if(pthread_mutex_trylock(&file_possibility_analysed[currfile]->lock) == 0)
 		{
 			if(possiblity->alloc > max_result)
 			{
@@ -893,12 +891,12 @@ static int add_possibility_analysed_impl(struct possibility_packet *possiblity, 
 			}
              */
 
-			File *target = &file_possibility_analysed[currfile].file;
+			File *target = &file_possibility_analysed[currfile]->file;
 			if (put(target, possiblity)) {
 				analysed_index_add(currfile, target->end, owner_uid);
 			}
 			addpossibility = 1;
-			pthread_mutex_unlock(&file_possibility_analysed[currfile].lock);
+			pthread_mutex_unlock(&file_possibility_analysed[currfile]->lock);
 			break;
 		}
 		if (thread < 0) {
@@ -964,7 +962,7 @@ int datamanager_analysed_owned_by(const uint8_t owner_uid[CLIENT_UID_BYTES],
 	*out_count = 0;
 	*out_max_alloc = -1;
 	for (int f = 0; f < nb_file_possibility; f++) {
-		pthread_mutex_lock(&file_possibility_analysed[f].lock);
+		pthread_mutex_lock(&file_possibility_analysed[f]->lock);
 		for (size_t b = 0; b < ANALYSED_INDEX_BUCKETS; b++) {
 			for (AnalysedIndexNode *node = analysed_index[f][b]; node != NULL; node = node->next) {
 				if (!node->has_owner || memcmp(node->owner_uid, owner_uid, CLIENT_UID_BYTES) != 0) {
@@ -977,7 +975,7 @@ int datamanager_analysed_owned_by(const uint8_t owner_uid[CLIENT_UID_BYTES],
 				}
 			}
 		}
-		pthread_mutex_unlock(&file_possibility_analysed[f].lock);
+		pthread_mutex_unlock(&file_possibility_analysed[f]->lock);
 	}
 	return 0;
 }
@@ -996,14 +994,14 @@ int analysed_lease_is_expired(time_t lease_deadline, time_t now) {
  *        `restock_analysed` : une passe par file, tout le travail sur l'index
  *        et la `File` sous le verrou de CETTE file, puis remise en stock hors
  *        verrou (même ordre de verrouillage que `restock_analysed` : jamais
- *        `file_possibility[dest].lock` pris pendant que
- *        `file_possibility_analysed[f].lock` est tenu).
+ *        `file_possibility[dest]->lock` pris pendant que
+ *        `file_possibility_analysed[f]->lock` est tenu).
  */
 unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner_alive_fn owner_alive) {
 	unsigned long long reclaimed_total = 0;
 	for (int f = 0; f < nb_file_possibility; f++) {
-		pthread_mutex_lock(&file_possibility_analysed[f].lock);
-		File *file = &file_possibility_analysed[f].file;
+		pthread_mutex_lock(&file_possibility_analysed[f]->lock);
+		File *file = &file_possibility_analysed[f]->file;
 		unsigned long long capacity = file->size;
 		struct possibility_packet *buf = (capacity > 0)
 		                                      ? malloc(capacity * sizeof(struct possibility_packet))
@@ -1045,16 +1043,16 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner
 			log_error("datamanager_reclaim_expired_leases : allocation échouée (file %d, %llu possibilités) — passe sautée\n",
 			          f, capacity);
 		}
-		pthread_mutex_unlock(&file_possibility_analysed[f].lock);
+		pthread_mutex_unlock(&file_possibility_analysed[f]->lock);
 
 		for (unsigned long long i = 0; i < n; i++) {
 			int dest = 0;
 			int added = 0;
 			while (!added) {
-				if (pthread_mutex_trylock(&file_possibility[dest].lock) == 0) {
+				if (pthread_mutex_trylock(&file_possibility[dest]->lock) == 0) {
 					if (buf[i].alloc > max_result) max_result = buf[i].alloc;
-					put(&file_possibility[dest].file, &buf[i]);
-					pthread_mutex_unlock(&file_possibility[dest].lock);
+					put(&file_possibility[dest]->file, &buf[i]);
+					pthread_mutex_unlock(&file_possibility[dest]->lock);
 					added = 1;
 				} else {
 					dest = (dest + 1) % nb_file_possibility;
@@ -1080,11 +1078,11 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner
 int restock_analysed(void) {
     unsigned long long moved = 0;
     for (int f = 0; f < nb_file_possibility; f++) {
-        pthread_mutex_lock(&file_possibility_analysed[f].lock);
-        File *src = &file_possibility_analysed[f].file;
+        pthread_mutex_lock(&file_possibility_analysed[f]->lock);
+        File *src = &file_possibility_analysed[f]->file;
         unsigned long long count = src->size;
         if (count == 0) {
-            pthread_mutex_unlock(&file_possibility_analysed[f].lock);
+            pthread_mutex_unlock(&file_possibility_analysed[f]->lock);
             continue;
         }
         struct possibility_packet *buf = malloc(count * sizeof(struct possibility_packet));
@@ -1095,16 +1093,16 @@ int restock_analysed(void) {
         // La file est désormais entièrement vide : purge en bloc de l'index
         // (pas de recherche possibilité par possibilité).
         analysed_index_clear(f);
-        pthread_mutex_unlock(&file_possibility_analysed[f].lock);
+        pthread_mutex_unlock(&file_possibility_analysed[f]->lock);
 
         for (unsigned long long i = 0; i < n; i++) {
             int dest = 0;
             int added = 0;
             while (!added) {
-                if (pthread_mutex_trylock(&file_possibility[dest].lock) == 0) {
+                if (pthread_mutex_trylock(&file_possibility[dest]->lock) == 0) {
                     if (buf[i].alloc > max_result) max_result = buf[i].alloc;
-                    put(&file_possibility[dest].file, &buf[i]);
-                    pthread_mutex_unlock(&file_possibility[dest].lock);
+                    put(&file_possibility[dest]->file, &buf[i]);
+                    pthread_mutex_unlock(&file_possibility[dest]->lock);
                     added = 1;
                 } else {
                     dest = (dest + 1) % nb_file_possibility;
@@ -1142,7 +1140,7 @@ int restock_analysed(void) {
  * @param max_packets Borne du nombre de possibilités déplacées par cet appel.
  * @return            Nombre de possibilités effectivement déplacées.
  */
-static int rebalance_pool_step(file_possibility_t *pool, int max_packets)
+static int rebalance_pool_step(file_possibility_t **pool, int max_packets)
 {
 	if (max_packets <= 0) {
 		return 0;
@@ -1153,7 +1151,7 @@ static int rebalance_pool_step(file_possibility_t *pool, int max_packets)
 	int fullest = 0;
 	int emptiest = 0;
 	for (int fp = 0; fp < nb_file_possibility; fp++) {
-		sizes[fp] = pool[fp].file.size;
+		sizes[fp] = pool[fp]->file.size;
 		total += sizes[fp];
 		if (sizes[fp] > sizes[fullest]) { fullest = fp; }
 		if (sizes[fp] < sizes[emptiest]) { emptiest = fp; }
@@ -1178,20 +1176,20 @@ static int rebalance_pool_step(file_possibility_t *pool, int max_packets)
 		return 0;
 	}
 
-	pthread_mutex_lock(&pool[fullest].lock);
+	pthread_mutex_lock(&pool[fullest]->lock);
 	unsigned long long n = 0;
-	while (n < to_move && scroll(&pool[fullest].file, &buf[n])) {
+	while (n < to_move && scroll(&pool[fullest]->file, &buf[n])) {
 		n++;
 	}
-	pthread_mutex_unlock(&pool[fullest].lock);
+	pthread_mutex_unlock(&pool[fullest]->lock);
 
 	for (unsigned long long i = 0; i < n; i++) {
 		int dest = emptiest;
 		int added = 0;
 		while (!added) {
-			if (pthread_mutex_trylock(&pool[dest].lock) == 0) {
-				put(&pool[dest].file, &buf[i]);
-				pthread_mutex_unlock(&pool[dest].lock);
+			if (pthread_mutex_trylock(&pool[dest]->lock) == 0) {
+				put(&pool[dest]->file, &buf[i]);
+				pthread_mutex_unlock(&pool[dest]->lock);
 				added = 1;
 			} else {
 				dest = (dest + 1) % nb_file_possibility;
@@ -1226,7 +1224,7 @@ static int rebalance_pool_step(file_possibility_t *pool, int max_packets)
  *                     que nécessaire.
  * @return             Nombre total de possibilités déplacées.
  */
-static int rebalance_pool_until_budget(file_possibility_t *pool, int max_packets)
+static int rebalance_pool_until_budget(file_possibility_t **pool, int max_packets)
 {
 	int moved_total = 0;
 	int rounds = 0;
@@ -1379,7 +1377,7 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
  * @param result     Tableau de résultats à remplir.
  * @param max_result Nombre maximum de possibilités à extraire.
  */
-static void scroll_from_pool(file_possibility_t *pool, array_possibility_packet *result, int max_result)
+static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet *result, int max_result)
 {
 	int getpossibility = 0;
 	int currfile = 0;
@@ -1397,7 +1395,7 @@ static void scroll_from_pool(file_possibility_t *pool, array_possibility_packet 
 			if(filetested[f] == 0)
 			{
 				currfile = f;
-				if(pthread_mutex_trylock(&pool[currfile].lock) == 0)
+				if(pthread_mutex_trylock(&pool[currfile]->lock) == 0)
 				{
 					int p;
 					int nothing = 0;
@@ -1406,7 +1404,7 @@ static void scroll_from_pool(file_possibility_t *pool, array_possibility_packet 
 					init_file(&file, sizeof(struct possibility_packet));
 					for(p=0; p < max_result && nothing == 0;p++)
 					{
-						if(scroll(&pool[currfile].file, &packet))
+						if(scroll(&pool[currfile]->file, &packet))
 						{
 							put(&file, &packet);
 						} else
@@ -1429,7 +1427,7 @@ static void scroll_from_pool(file_possibility_t *pool, array_possibility_packet 
 					
 					filetested[f] = 1;
 					getpossibility = 1;
-					pthread_mutex_unlock(&pool[currfile].lock);
+					pthread_mutex_unlock(&pool[currfile]->lock);
 				}
 			}
 		}
@@ -1551,7 +1549,7 @@ unsigned long long file_size(int nfile)
 {
 	if(nfile >= 0 && nfile < nb_file_possibility)
 	{
-		return file_possibility[nfile].file.size;
+		return file_possibility[nfile]->file.size;
 	}
     return 0;
 }
@@ -1560,7 +1558,7 @@ unsigned long long file_checked_size(int nfile)
 {
 	if(nfile >= 0 && nfile < nb_file_possibility)
 	{
-		return file_possibility_checked[nfile].file.size;
+		return file_possibility_checked[nfile]->file.size;
 	}
 	return 0;
 }
@@ -1569,7 +1567,7 @@ unsigned long long file_analysed_size(int nfile)
 {
 	if(nfile >= 0 && nfile < nb_file_possibility)
 	{
-		return file_possibility_analysed[nfile].file.size;
+		return file_possibility_analysed[nfile]->file.size;
 	}
 	return 0;
 }
@@ -1599,8 +1597,8 @@ void lock_all_file(void)
 	// Bloquage des files (les deux pools : non vérifié et vérifié)
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		pthread_mutex_lock(&file_possibility[fp].lock);
-		pthread_mutex_lock(&file_possibility_checked[fp].lock);
+		pthread_mutex_lock(&file_possibility[fp]->lock);
+		pthread_mutex_lock(&file_possibility_checked[fp]->lock);
 	}
 }
 
@@ -1613,8 +1611,8 @@ void unlock_all_file(void)
 	//libération des files (les deux pools)
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		pthread_mutex_unlock(&file_possibility[fp].lock);
-		pthread_mutex_unlock(&file_possibility_checked[fp].lock);
+		pthread_mutex_unlock(&file_possibility[fp]->lock);
+		pthread_mutex_unlock(&file_possibility_checked[fp]->lock);
 	}
 	maintenance = 0;
 }
@@ -1669,7 +1667,7 @@ int backup(char *filename)
 	int fp;
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		Element *currElement = file_possibility[fp].file.start;
+		Element *currElement = file_possibility[fp]->file.start;
 		while(currElement != NULL)
 		{
 			if(currElement->value != NULL)
@@ -1684,7 +1682,7 @@ int backup(char *filename)
 		}
 		// Pool vérifié : le flag `checked` est dans le paquet, la restauration
 		// re-routera automatiquement chaque possibilité dans le bon pool.
-		currElement = file_possibility_checked[fp].file.start;
+		currElement = file_possibility_checked[fp]->file.start;
 		while(currElement != NULL)
 		{
 			if(currElement->value != NULL)
@@ -1735,7 +1733,7 @@ void lock_all_file_analysed(void)
 	// Bloquage des files
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		pthread_mutex_lock(&file_possibility_analysed[fp].lock);
+		pthread_mutex_lock(&file_possibility_analysed[fp]->lock);
 	}
 }
 
@@ -1748,7 +1746,7 @@ void unlock_all_file_analysed(void)
 	//libération des files
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		pthread_mutex_unlock(&file_possibility_analysed[fp].lock);
+		pthread_mutex_unlock(&file_possibility_analysed[fp]->lock);
 	}
 	maintenance = 0;
 }
@@ -1781,7 +1779,7 @@ int backup_analysed(char *filename)
 	int fp;
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		Element *currElement = file_possibility_analysed[fp].file.start;
+		Element *currElement = file_possibility_analysed[fp]->file.start;
 		while(currElement != NULL)
 		{
 			if(currElement->value != NULL)
@@ -1915,19 +1913,19 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	int fp;
 	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
-		pthread_mutex_lock(&file_possibility_analysed[fp].lock);
+		pthread_mutex_lock(&file_possibility_analysed[fp]->lock);
 	}
 	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
-		pthread_mutex_lock(&file_possibility[fp].lock);
-		pthread_mutex_lock(&file_possibility_checked[fp].lock);
+		pthread_mutex_lock(&file_possibility[fp]->lock);
+		pthread_mutex_lock(&file_possibility_checked[fp]->lock);
 	}
 
 	// Phase 2a : pool analysé, libéré au fil de l'écriture.
 	int write_error_analysed = 0;
 	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
-		Element *currElement = file_possibility_analysed[fp].file.start;
+		Element *currElement = file_possibility_analysed[fp]->file.start;
 		while (currElement != NULL)
 		{
 			if (currElement->value != NULL)
@@ -1940,7 +1938,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 			}
 			currElement = currElement->next;
 		}
-		pthread_mutex_unlock(&file_possibility_analysed[fp].lock);
+		pthread_mutex_unlock(&file_possibility_analysed[fp]->lock);
 	}
 
 	// Phase 2b : stock (non vérifié + vérifié), une file à la fois, libérée
@@ -1948,7 +1946,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	int write_error_stock = 0;
 	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
-		Element *currElement = file_possibility[fp].file.start;
+		Element *currElement = file_possibility[fp]->file.start;
 		while (currElement != NULL)
 		{
 			if (currElement->value != NULL)
@@ -1961,7 +1959,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 			}
 			currElement = currElement->next;
 		}
-		currElement = file_possibility_checked[fp].file.start;
+		currElement = file_possibility_checked[fp]->file.start;
 		while (currElement != NULL)
 		{
 			if (currElement->value != NULL)
@@ -1974,8 +1972,8 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 			}
 			currElement = currElement->next;
 		}
-		pthread_mutex_unlock(&file_possibility[fp].lock);
-		pthread_mutex_unlock(&file_possibility_checked[fp].lock);
+		pthread_mutex_unlock(&file_possibility[fp]->lock);
+		pthread_mutex_unlock(&file_possibility_checked[fp]->lock);
 	}
 	maintenance = 0;
 
@@ -2078,13 +2076,13 @@ int restore(char *filename)
 	//vidage des files (les deux pools)
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		File *suite = &file_possibility[fp].file;
+		File *suite = &file_possibility[fp]->file;
 		struct possibility_packet value;
 		while(suite->size >0)
 		{
 			scroll(suite, &value);
 		}
-		suite = &file_possibility_checked[fp].file;
+		suite = &file_possibility_checked[fp]->file;
 		while(suite->size >0)
 		{
 			scroll(suite, &value);
@@ -2103,7 +2101,7 @@ int import_json(void) {
 	//vidage des files
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		File *suite = &file_possibility[fp].file;
+		File *suite = &file_possibility[fp]->file;
 		while(suite->size >0)
 		{
 			struct possibility_packet *value = malloc(sizeof(struct possibility_packet));
@@ -2168,7 +2166,7 @@ int restore_analysed(char *filename)
 	//vidage des files
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		File *suite = &file_possibility_analysed[fp].file;
+		File *suite = &file_possibility_analysed[fp]->file;
 		while(suite->size >0)
 		{
 			struct possibility_packet *value = malloc(sizeof(struct possibility_packet));
@@ -2187,7 +2185,7 @@ int restore_analysed(char *filename)
 int print_file(int fp)
 {
     // Les deux pools sont affichés : non vérifié et vérifié (checked == 1)
-    File *pools[2] = { &file_possibility[fp].file, &file_possibility_checked[fp].file };
+    File *pools[2] = { &file_possibility[fp]->file, &file_possibility_checked[fp]->file };
     for (int p = 0; p < 2; p++)
     {
         Element *currElement = pools[p]->start;
@@ -2237,7 +2235,7 @@ int printdatamanager(void)
  */
 int fprint_file(FILE *out, int fp, size_t *count)
 {
-    File *pools[2] = { &file_possibility[fp].file, &file_possibility_checked[fp].file };
+    File *pools[2] = { &file_possibility[fp]->file, &file_possibility_checked[fp]->file };
     for (int p = 0; p < 2; p++)
     {
         Element *currElement = pools[p]->start;
@@ -2282,8 +2280,8 @@ int fprint_datamanager(FILE *out, size_t *count)
 
 int print_file_analysed(int fp)
 {
-	log_info("file_analysed %i, size:%llu\n", fp, file_possibility_analysed[fp].file.size);
-    Element *currElement = file_possibility_analysed[fp].file.start;
+	log_info("file_analysed %i, size:%llu\n", fp, file_possibility_analysed[fp]->file.size);
+    Element *currElement = file_possibility_analysed[fp]->file.start;
     while(currElement != NULL)
     {
         if(currElement->value != NULL)
@@ -2307,7 +2305,7 @@ int print_file_analysed(int fp)
  */
 int fprint_file_analysed(FILE *out, int fp, size_t *count)
 {
-    Element *currElement = file_possibility_analysed[fp].file.start;
+    Element *currElement = file_possibility_analysed[fp]->file.start;
     while(currElement != NULL)
     {
         if(currElement->value != NULL)
@@ -2366,18 +2364,18 @@ int fprint_all_file_analysed(FILE *out, size_t *count)
  * @param pool Tableau de files (pool non vérifié ou vérifié).
  * @return     Taille totale de la file 0 après regroupement.
  */
-static unsigned long long regroup_pool_nolock(file_possibility_t *pool)
+static unsigned long long regroup_pool_nolock(file_possibility_t **pool)
 {
 	int fp;
-	unsigned long long size = pool[0].file.size;
+	unsigned long long size = pool[0]->file.size;
 	struct possibility_packet *packet = malloc(sizeof(struct possibility_packet));
 	for (fp=1; fp < nb_file_possibility; fp++)
 	{
 
-		while (pool[fp].file.size > 0) {
+		while (pool[fp]->file.size > 0) {
 
-			scroll(&pool[fp].file,packet);
-			put(&pool[0].file, packet);
+			scroll(&pool[fp]->file,packet);
+			put(&pool[0]->file, packet);
 			size++;
 
 		}
@@ -2443,7 +2441,7 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         lock_all_file();
         for (int fp = 0; fp < nb_file_possibility; fp++) {
             struct possibility_packet drained;
-            while (scroll(&file_possibility[fp].file, &drained)) {
+            while (scroll(&file_possibility[fp]->file, &drained)) {
                 put(&work, &drained);
             }
         }
@@ -2527,7 +2525,7 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
 	// a déjà été confirmée vivante par un pruner, elle a donc forcément une suite.
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
-		Element *currElement = file_possibility[fp].file.start;
+		Element *currElement = file_possibility[fp]->file.start;
 
 		while (currElement != NULL)
 		{
@@ -2570,7 +2568,7 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                     currElement->previous->next = currElement->next;
                 } else {
                     // On est au début alors la pile commence au suivant
-                    file_possibility[fp].file.start = currElement->next;
+                    file_possibility[fp]->file.start = currElement->next;
                 }
 
                 // On a une suite alors le précédent du suivant devient le précédent du courrant
@@ -2579,13 +2577,13 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                     currElement->next->previous = currElement->previous;
                 } else {
                     // Pas de suite alors la fin de la pile  devient le précédent (ou null)
-                    file_possibility[fp].file.end = currElement->previous;
+                    file_possibility[fp]->file.end = currElement->previous;
                 }
                 nextElement = currElement->next;
                 free (currElement->value);
                 free (currElement);
                 currElement = NULL;
-                file_possibility[fp].file.size--;
+                file_possibility[fp]->file.size--;
 
 			}
             
@@ -2621,17 +2619,17 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
  * @param nbsplit Nombre de files cibles (≤ nb_file_possibility).
  * @return        0.
  */
-static int split_pool_nolock(file_possibility_t *pool, int nbsplit)
+static int split_pool_nolock(file_possibility_t **pool, int nbsplit)
 {
 	regroup_pool_nolock(pool);
 
 	File *file = malloc(sizeof(File));
 	init_file(file, sizeof(struct possibility_packet));
 	struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
-	while (pool[0].file.size > 0)
+	while (pool[0]->file.size > 0)
 	{
 
-		if(scroll(&pool[0].file, possibility))
+		if(scroll(&pool[0]->file, possibility))
 		{
 			put(file, possibility);
 		}
@@ -2646,10 +2644,10 @@ static int split_pool_nolock(file_possibility_t *pool, int nbsplit)
 
 	int f;
 	for (f=0; f < nbsplit; f++){
-		while(pool[f].file.size < (unsigned long long)quotient && file->size > 0){
+		while(pool[f]->file.size < (unsigned long long)quotient && file->size > 0){
 			if(scroll(file, possibility))
 			{
-				put(&pool[f].file, possibility);
+				put(&pool[f]->file, possibility);
 			}
 		}
 	}
@@ -2658,7 +2656,7 @@ static int split_pool_nolock(file_possibility_t *pool, int nbsplit)
 	while(file->size > 0){
 		if(scroll(file, possibility))
 		{
-			put(&pool[0].file, possibility);
+			put(&pool[0]->file, possibility);
 		}
 	}
 
@@ -2702,7 +2700,7 @@ int check_datas(void)
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		// Les deux pools sont vérifiés : non vérifié et vérifié (checked == 1)
-		File *pools[2] = { &file_possibility[fp].file, &file_possibility_checked[fp].file };
+		File *pools[2] = { &file_possibility[fp]->file, &file_possibility_checked[fp]->file };
 		for (int p = 0; p < 2; p++)
 		{
 			Element *currElement = pools[p]->start;
@@ -2770,7 +2768,7 @@ void *check_duplicate_thread(void *arguments) {
                 comparePosition = position + 1;
                 //printf("%i position %llu start with next for %llu\n", args->threadPosition, position, duplicateCount[args->threadPosition]);
             } else {
-                elementToCompare = file_possibility[cfp].file.start;
+                elementToCompare = file_possibility[cfp]->file.start;
                 //printf("%i position %llu start with start %i for %llu\n", args->threadPosition, position, cfp, duplicateCount[args->threadPosition]);
             }
             while (elementToCompare != NULL)
@@ -2803,12 +2801,12 @@ void *check_duplicate_thread(void *arguments) {
             currElement = currElement->next;
             position++;
         }
-        if (position >= file_possibility[fp].file.size) {
+        if (position >= file_possibility[fp]->file.size) {
             fp++;
             position = 0;
             currElement = NULL;
             if (fp < nb_file_possibility) {
-                currElement = file_possibility[fp].file.start;
+                currElement = file_possibility[fp]->file.start;
             }
         }
 
@@ -2930,7 +2928,7 @@ int check_duplicate(void)
     log_info("qt: %llu nb combinations %llu | nb/threads: %llu\n", dataSize, nbCombinations, nbByThread);
     
     int fp = 0;
-    Element *currElement = file_possibility[fp].file.start;
+    Element *currElement = file_possibility[fp]->file.start;
     unsigned long long position = 0;
     unsigned long long allocated = 0;
     unsigned long long remains = dataSize;
@@ -2959,14 +2957,14 @@ int check_duplicate(void)
                 remains--;
                 allocatedToThread += remains;
                 position++;
-                if (position > file_possibility[fp].file.size) {
+                if (position > file_possibility[fp]->file.size) {
                     fp++;
                     position = 0;
                     if (fp >= nb_file_possibility) {
                         currElement = NULL;
                         break;
                     }
-                    currElement = file_possibility[fp].file.start;
+                    currElement = file_possibility[fp]->file.start;
                 } else {
                     currElement = currElement->next;
                 }
@@ -3038,8 +3036,8 @@ void datamanager_stock_distribution(stock_distribution_t *out)
     lock_all_file();
     for (int fp = 0; fp < nb_file_possibility; fp++)
     {
-        out->total_unchecked += accumulate_alloc_levels(&file_possibility[fp].file, out->unchecked);
-        out->total_checked += accumulate_alloc_levels(&file_possibility_checked[fp].file, out->checked);
+        out->total_unchecked += accumulate_alloc_levels(&file_possibility[fp]->file, out->unchecked);
+        out->total_checked += accumulate_alloc_levels(&file_possibility_checked[fp]->file, out->checked);
     }
     unlock_all_file();
 
@@ -3048,7 +3046,7 @@ void datamanager_stock_distribution(stock_distribution_t *out)
     lock_all_file_analysed();
     for (int fp = 0; fp < nb_file_possibility; fp++)
     {
-        out->total_analysed += accumulate_alloc_levels(&file_possibility_analysed[fp].file, out->analysed);
+        out->total_analysed += accumulate_alloc_levels(&file_possibility_analysed[fp]->file, out->analysed);
     }
     unlock_all_file_analysed();
 }
@@ -3096,8 +3094,8 @@ int search_min_datas(void)
 	for (fp=0; fp < nb_file_possibility; fp++)
 	{
 		// Les deux pools comptent : non vérifié et vérifié (checked == 1)
-		result = min_alloc_in_file(&file_possibility[fp].file, result);
-		result = min_alloc_in_file(&file_possibility_checked[fp].file, result);
+		result = min_alloc_in_file(&file_possibility[fp]->file, result);
+		result = min_alloc_in_file(&file_possibility_checked[fp]->file, result);
 	}
 
 	unlock_all_file();
@@ -3204,9 +3202,9 @@ int sort_ascending(void)
 	lock_all_file();
 	// regroupement pour ne parcourir qu'une seule file, pour chaque pool
 	regroup_pool_nolock(file_possibility);
-	sort_one_file_ascending(&file_possibility[0].file);
+	sort_one_file_ascending(&file_possibility[0]->file);
 	regroup_pool_nolock(file_possibility_checked);
-	sort_one_file_ascending(&file_possibility_checked[0].file);
+	sort_one_file_ascending(&file_possibility_checked[0]->file);
 	unlock_all_file();
 	return 0;
 }
@@ -3303,7 +3301,7 @@ void *sort_d_mono(void *f)
 {
     int intf = *(int *)f;
 	log_info("sort d file:%i\n",intf);
-	sort_one_file_descending(&file_possibility[intf].file);
+	sort_one_file_descending(&file_possibility[intf]->file);
 	log_info("end sort d file:%i\n",intf);
 	return NULL;
 }
@@ -3363,8 +3361,8 @@ int check_one_file(File *file, int f, const char *label)
 int check_file(int f)
 {
 	// Les deux pools sont contrôlés : non vérifié et vérifié (checked == 1)
-	int result = check_one_file(&file_possibility[f].file, f, "unchecked");
-	if(check_one_file(&file_possibility_checked[f].file, f, "checked") != 0)
+	int result = check_one_file(&file_possibility[f]->file, f, "unchecked");
+	if(check_one_file(&file_possibility_checked[f]->file, f, "checked") != 0)
 	{
 		result = -1;
 	}
@@ -3397,7 +3395,7 @@ int sort_descending_nolock(void)
     log_info("regroup datas \n");
 	regroup_pool_nolock(file_possibility);
     log_info("sort file 0\n");
-	sort_one_file_descending(&file_possibility[0].file);
+	sort_one_file_descending(&file_possibility[0]->file);
 	return 0;
 }
 
@@ -3454,7 +3452,7 @@ int sort_descending_mthread(void)
 	// Pool vérifié (généralement petit) : un seul passage de tri
 	log_info("sort d checked pool\n");
 	regroup_pool_nolock(file_possibility_checked);
-	sort_one_file_descending(&file_possibility_checked[0].file);
+	sort_one_file_descending(&file_possibility_checked[0]->file);
 
 	unlock_all_file();
 	return 0;
@@ -3468,7 +3466,7 @@ int sort_descending(void)
 	// Les deux pools sont triés indépendamment : non vérifié et vérifié
 	sort_descending_nolock();
 	regroup_pool_nolock(file_possibility_checked);
-	sort_one_file_descending(&file_possibility_checked[0].file);
+	sort_one_file_descending(&file_possibility_checked[0]->file);
 
 	unlock_all_file();
 	return 0;
