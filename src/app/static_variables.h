@@ -47,6 +47,18 @@
 #define MICRO_SHORT_SLEEP 10
 // Temps d'attente pour les boucles de threads
 #define THREAD_MICRO_SLEEP 10000
+// Nombre de tours (chacun un balayage complet des NB_FILE_POSSIBILITY files,
+// ou une tentative isolée sur une file fixée) après lequel les boucles
+// d'attente active de datamanager.c (put_to_pool, scroll_from_pool,
+// add_possibility_analysed_impl) abandonnent au lieu de tourner indéfiniment
+// quand AUCUNE file du pool visé n'est disponible — typiquement une file
+// gelée par une opération de maintenance (sauvegarde, restore, tri...).
+// Borne le pire cas à DATAMANAGER_TRYLOCK_MAX_SWEEPS * MICRO_SLEEP (µs)
+// ≈ 500 ms, très en-deçà de tcp_timeout par défaut (10 s, DEFAULT_TCP_TIMEOUT
+// ci-dessous) : le client reçoit un stock K=0 ou un INST_ERROR gracieux,
+// déjà géré des deux côtés, plutôt qu'un timeout de connexion. Cf. PR1 de
+// docs/conception/maitrise_charge_serveur.md.
+#define DATAMANAGER_TRYLOCK_MAX_SWEEPS 5000
 // Cadence de la boucle d'attente active en pause de RÉGULATION (REQUEST_PAUSE,
 // control_step) dans la boucle chaude de recherche (etii_search.c :
 // search_packet_backtracking, autoprune_step, autoprune_gpu). Utilisait
@@ -847,6 +859,16 @@ extern int opened_tcp;
 
 extern long nb_client;
 
+// Timeout d'inactivité (secondes) des sockets TCP de travail, des deux côtés
+// de la connexion : SO_RCVTIMEO/SO_SNDTIMEO côté client (create_tcp_client,
+// src/net/tcpclient.c) et côté serveur (configure_client_socket,
+// src/app/etii_server.c). Défaut DEFAULT_TCP_TIMEOUT (10 s) ; réglable via
+// --tcp-timeout (src/app/static_variables.c:parse_cli_options), option
+// globale sans restriction de mode (les deux côtés en dépendent). Une
+// maintenance longue (sauvegarde, restore, tri) qui gèle temporairement le
+// stock (cf. DATAMANAGER_TRYLOCK_MAX_SWEEPS ci-dessus) reste largement sous
+// ce budget par construction ; cette option reste une soupape pour un
+// réseau plus lent ou un stock encore plus volumineux.
 extern int tcp_timeout;
 
 extern int server;

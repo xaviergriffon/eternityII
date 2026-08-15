@@ -176,10 +176,17 @@ char *build_file_queues_table(unsigned long long *out_unchecked,
  * pour être testable hors thread (comme `communicate_with_client_step`) et
  * pour n'écrire cette décision qu'à un seul endroit.
  *
+ * PR1 (docs/conception/maitrise_charge_serveur.md) : peut échouer (pool
+ * analysé intégralement verrouillé par une maintenance en cours, au-delà
+ * d'un délai borné) — l'appelant NE DOIT PAS servir cette possibilité au
+ * client dans ce cas, sous peine de l'échapper au bail (PR7) et à
+ * `requeue_last_sent_possibility`.
+ *
  * @param client      Contexte du thread serveur (identité déclarée si connue).
  * @param possibility Paquet tout juste extrait du stock et envoyé au client.
+ * @return            0 si enregistrée, -1 sinon (rien n'est enregistré).
  */
-void record_possibility_analysed_for_client(client_t *client, struct possibility_packet *possibility);
+int record_possibility_analysed_for_client(client_t *client, struct possibility_packet *possibility);
 
 /**
  * @brief Renvoie au stock local les possibilités servies au client mais jamais

@@ -315,6 +315,18 @@ int parse_cli_options(int argc, const char *argv[])
                 machine_uid_file_path = argv[r + 1];
                 r++; // consomme aussi la valeur
             }
+        } else if (strcmp(argv[r], "--tcp-timeout") == 0) {
+            // Option valuée, même schéma que --http-port : un timeout <= 0
+            // n'a pas de sens utile (des sockets qui n'expirent jamais),
+            // valeur absente ou <= 0 ignorée, tcp_timeout garde sa valeur
+            // par défaut (DEFAULT_TCP_TIMEOUT) ou celle déjà fixée.
+            if (r + 1 < argc) {
+                int timeout = atoi(argv[r + 1]);
+                if (timeout > 0) {
+                    tcp_timeout = timeout;
+                }
+                r++; // consomme aussi la valeur
+            }
         } else if (strcmp(argv[r], "--config-file") == 0) {
             // Option valuée, même schéma. Chargement effectif (lecture, puis
             // application aux globales) dans handle_client (src/app/main.c),

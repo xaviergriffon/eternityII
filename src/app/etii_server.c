@@ -373,16 +373,79 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent)
  * un client plus ancien, ou dont le hello n'est pas encore arrivé, sert la
  * possibilité sans attribution — exactement le comportement d'avant cette PR.
  *
+ * PR1 (docs/conception/maitrise_charge_serveur.md) : `add_possibility_analysed[_owned]`
+ * peut désormais échouer (pool analysé intégralement verrouillé par une
+ * maintenance en cours, au-delà d'un délai borné) plutôt que bloquer
+ * indéfiniment. Le résultat est propagé à l'appelant, qui NE DOIT PAS servir
+ * cette possibilité au client dans ce cas — sinon elle échapperait au bail
+ * (PR7) et à `requeue_last_sent_possibility` : personne, côté serveur, ne
+ * saurait qu'elle est en cours d'analyse.
+ *
  * @param client      Contexte du thread serveur (identité déclarée si connue).
  * @param possibility Paquet tout juste extrait du stock et envoyé au client.
+ * @return            0 si enregistrée, -1 si le pool analysé est resté
+ *                     verrouillé au-delà du délai borné (rien n'est
+ *                     enregistré dans ce cas).
  */
-void record_possibility_analysed_for_client(client_t *client, struct possibility_packet *possibility)
+int record_possibility_analysed_for_client(client_t *client, struct possibility_packet *possibility)
 {
     if (client->has_identity) {
-        add_possibility_analysed_owned(possibility, -1, client->identity.client_uid);
-    } else {
-        add_possibility_analysed(possibility, -1);
+        return add_possibility_analysed_owned(possibility, -1, client->identity.client_uid);
     }
+    return add_possibility_analysed(possibility, -1);
+}
+
+/**
+ * @brief Enregistre chaque possibilité d'un lot juste extrait du stock comme
+ *        « en cours d'analyse », et retire du lot celles dont
+ *        l'enregistrement a échoué (PR1, docs/conception/maitrise_charge_serveur.md).
+ *
+ * Factorise la boucle auparavant dupliquée aux trois points de service
+ * (`INST_GET` / `INST_GET_TO_CHECK` / `INST_GET_TO_CHECK_BATCH`). Une
+ * possibilité dont l'enregistrement échoue (pool analysé intégralement
+ * verrouillé par une maintenance, au-delà d'un délai borné) est rendue au
+ * stock plutôt que servie sans trace — sinon elle échapperait au bail (PR7)
+ * et à `requeue_last_sent_possibility`. `add_possibility` peut lui-même
+ * échouer si le stock est ÉGALEMENT gelé (même mécanisme borné, non
+ * bloquant) ; dans ce cas, comme `requeue_last_sent_possibility`, on
+ * journalise et on la sauvegarde sur disque plutôt que de la perdre
+ * silencieusement.
+ *
+ * @param client Contexte du thread serveur.
+ * @param batch  Lot juste extrait du stock (`get_last_possibility[_tocheck]`) ;
+ *               `batch->size` est réduit en place au nombre effectivement
+ *               enregistré, et le bloc `batch->possibilities[0..size)` reste
+ *               contigu (compacté en place).
+ */
+static void record_batch_analysed_for_client(client_t *client, array_possibility_packet *batch)
+{
+    int32_t kept = 0;
+    for (int p = 0; p < batch->size; p++)
+    {
+        struct possibility_packet *possibility = &batch->possibilities[p];
+        if (record_possibility_analysed_for_client(client, possibility) == 0)
+        {
+            if (kept != p)
+            {
+                batch->possibilities[kept] = *possibility;
+            }
+            kept++;
+            counters[client->compteur]++;
+            fileUpdates[client->compteur]++;
+        }
+        else
+        {
+            array_possibility_packet *single = build_single_array_possibility_packet(possibility);
+            if (add_possibility(NULL, single))
+            {
+                log_error("Possibilité non ré-attribuable (pool analysé et stock indisponibles) : \n");
+                log_error_possibility_packet(possibility);
+                save_possibility("./error_possibility", possibility);
+            }
+            free_array_possibility_packet(single);
+        }
+    }
+    batch->size = kept;
 }
 
 /**
@@ -432,13 +495,8 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             }
 
             *lastSent = get_last_possibility(NULL, 1);
+            record_batch_analysed_for_client(client, *lastSent);
             int32_t k = (int32_t)(*lastSent)->size;
-            for (int p = 0; p < k; p++)
-            {
-                record_possibility_analysed_for_client(client, &(*lastSent)->possibilities[p]);
-                counters[client->compteur]++;
-                fileUpdates[client->compteur]++;
-            }
             // Réponse cadrée (VERSION 7) : compte K puis, si K > 0, le bloc
             // contigu des K paquets. send_all réassemble les envois partiels —
             // l'ancien send() brut pouvait tronquer un paquet et désynchroniser
@@ -464,13 +522,8 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             }
 
             *lastSent = get_last_possibility_tocheck(1);
+            record_batch_analysed_for_client(client, *lastSent);
             int32_t k = (int32_t)(*lastSent)->size;
-            for (int p = 0; p < k; p++)
-            {
-                record_possibility_analysed_for_client(client, &(*lastSent)->possibilities[p]);
-                counters[client->compteur]++;
-                fileUpdates[client->compteur]++;
-            }
             // Réponse cadrée (VERSION 7) — même trame que INST_GET.
             if (send_all(client->socket_id, &k, sizeof(k)) != (long)sizeof(k))
             {
@@ -502,13 +555,8 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 *lastSent = NULL;
             }
             *lastSent = get_last_possibility_tocheck(requested);
+            record_batch_analysed_for_client(client, *lastSent);
             int32_t k = (int32_t)(*lastSent)->size;
-            for (int p = 0; p < k; p++)
-            {
-                record_possibility_analysed_for_client(client, &(*lastSent)->possibilities[p]);
-                counters[client->compteur]++;
-                fileUpdates[client->compteur]++;
-            }
             // Envoi : compte K puis, si K > 0, le bloc contigu des K paquets.
             if (send_all(client->socket_id, &k, sizeof(k)) != (long)sizeof(k))
             {

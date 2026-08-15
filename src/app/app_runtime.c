@@ -147,6 +147,15 @@ static const cli_help_topic_t cli_topics[] = {
 	  "pas une erreur (valeurs par défaut/CLI utilisées). Écrit par la commande\n"
 	  "console configSave (écriture atomique .tmp puis rename) ; affiché par\n"
 	  "la commande config." },
+	{ "--tcp-timeout",
+	  "--tcp-timeout <n>",
+	  "Serveur et client/pruner : timeout d'inactivité (secondes) des sockets TCP de travail.",
+	  "Défaut DEFAULT_TCP_TIMEOUT (10) — s'applique aux deux extrémités de la\n"
+	  "connexion (SO_RCVTIMEO/SO_SNDTIMEO). Une maintenance serveur longue\n"
+	  "(sauvegarde, restore, tri) reste largement sous ce budget par\n"
+	  "construction (cf. les boucles bornées de datamanager.c) ; cette option\n"
+	  "reste une soupape pour un réseau plus lent ou un stock plus volumineux.\n"
+	  "Valeur absente ou <= 0 : ignorée (garde le défaut)." },
 	{ "--gpu",
 	  "--gpu",
 	  "Pruner : exécute le contrôle des lots sur le GPU (build CUDA=1 uniquement).",

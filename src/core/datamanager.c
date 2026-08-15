@@ -303,7 +303,11 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
  * @param pool          Pool de files cible.
  * @param possibilities Tableau de possibilités à filtrer/insérer.
  * @param want_checked   1 pour le pool vérifié (checked == 1), 0 pour le reste.
- * @return              0.
+ * @return              0 si inséré (ou rien à insérer), 1 si `pool` est resté
+ *                       intégralement verrouillé au-delà de
+ *                       DATAMANAGER_TRYLOCK_MAX_SWEEPS tours (maintenance en
+ *                       cours : sauvegarde, restore, tri...) — rien n'a été
+ *                       inséré dans ce cas, sûr à réessayer par l'appelant.
  */
 static int put_to_pool(file_possibility_t *pool, array_possibility_packet *possibilities, int want_checked)
 {
@@ -325,6 +329,7 @@ static int put_to_pool(file_possibility_t *pool, array_possibility_packet *possi
 
 	int addpossibility = 0;
 	int currfile = 0;
+	int failed_sweeps = 0;
 	while(addpossibility == 0)
 	{
 		if(pthread_mutex_trylock(&pool[currfile].lock) == 0)
@@ -340,7 +345,7 @@ static int put_to_pool(file_possibility_t *pool, array_possibility_packet *possi
                     max_result = possibilities->possibilities[t].alloc;
                     //printf("max result:%i\n",max_result);
                 }
-				
+
                 put(&pool[currfile].file, &possibilities->possibilities[t]);
             }
 			addpossibility = 1;
@@ -356,6 +361,17 @@ static int put_to_pool(file_possibility_t *pool, array_possibility_packet *possi
 			// via addpossibility avant même d'atteindre ce wraparound. Même
 			// motif que add_possibility_analysed.
 			usleep(MICRO_SLEEP);
+			// Sortie bornée (PR1, docs/conception/maitrise_charge_serveur.md) :
+			// au-delà de DATAMANAGER_TRYLOCK_MAX_SWEEPS tours consécutifs sans
+			// verrouiller la moindre file, abandonner plutôt que de bloquer
+			// indéfiniment le thread serveur qui sert ce client (et par
+			// ricochet la connexion TCP jusqu'à son timeout). Rien n'a été
+			// inséré : sûr de rendre la main ici.
+			failed_sweeps++;
+			if (failed_sweeps >= DATAMANAGER_TRYLOCK_MAX_SWEEPS)
+			{
+				return 1;
+			}
 		}
 	}
 	return 0;
@@ -368,10 +384,12 @@ int put_to_local(array_possibility_packet *possibilities)
 		return 0;
 	}
 	// Routage par le flag `checked` : les possibilités vérifiées par un pruner
-	// vont dans leur pool dédié, les autres dans le pool historique.
-	put_to_pool(file_possibility, possibilities, 0);
-	put_to_pool(file_possibility_checked, possibilities, 1);
-	return 0;
+	// vont dans leur pool dédié, les autres dans le pool historique. Chaque
+	// sous-tableau (checked / unchecked) est indépendant : un échec borné
+	// (PR1) sur l'un des deux pools n'empêche pas l'insertion dans l'autre.
+	int err_unchecked = put_to_pool(file_possibility, possibilities, 0);
+	int err_checked = put_to_pool(file_possibility_checked, possibilities, 1);
+	return (err_unchecked || err_checked) ? 1 : 0;
 }
 
 int add_possibility(client_possibility_t *client_possibility, array_possibility_packet *possibilities)
@@ -809,12 +827,18 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
  * @param owner_uid  `client_uid` du client servi côté serveur, ou `NULL` (cf.
  *                   `AnalysedIndexNode` pour les cas où l'attribution est
  *                   sciemment absente : côté client, ou possibilité restaurée).
- * @return           0 si ajouté, -1 si toutes les files sont verrouillées.
+ * @return           0 si ajouté, -1 si toutes les files sont restées
+ *                    verrouillées au-delà de DATAMANAGER_TRYLOCK_MAX_SWEEPS
+ *                    tours (PR1, docs/conception/maitrise_charge_serveur.md —
+ *                    typiquement une maintenance en cours sur le pool
+ *                    analysé : sauvegarde, restore, tri...). Rien n'est
+ *                    inséré dans ce cas.
  */
 static int add_possibility_analysed_impl(struct possibility_packet *possiblity, int thread,
                                           const uint8_t owner_uid[CLIENT_UID_BYTES]) {
 	int addpossibility = 0;
 	int currfile = 0;
+	int waits = 0;
 	if (thread >=0) {
 		currfile = thread;
 	}
@@ -840,6 +864,7 @@ static int add_possibility_analysed_impl(struct possibility_packet *possiblity, 
 			}
 			addpossibility = 1;
 			pthread_mutex_unlock(&file_possibility_analysed[currfile].lock);
+			break;
 		}
 		if (thread < 0) {
 			currfile++;
@@ -847,9 +872,20 @@ static int add_possibility_analysed_impl(struct possibility_packet *possiblity, 
 			{
 				currfile = 0;
 				usleep(MICRO_SLEEP);
+				waits++;
 			}
-		} else if (addpossibility == 0) {
+		} else {
 			usleep(MICRO_SLEEP);
+			waits++;
+		}
+		// Sortie bornée (PR1) : cf. le commentaire de la fonction. `waits`
+		// compte les usleep() effectivement exécutés dans les deux modes
+		// (rotation sur thread < 0, une file fixe sur thread >= 0) pour borner
+		// le même temps d'horloge quel que soit le mode, plutôt qu'un nombre
+		// de tentatives dont le coût réel diffère d'un mode à l'autre.
+		if (waits >= DATAMANAGER_TRYLOCK_MAX_SWEEPS)
+		{
+			return -1;
 		}
 	}
 	return 0;
@@ -1169,6 +1205,13 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
  * Extrait jusqu'à `max_result` possibilités depuis la première file non vide trouvée.
  * Réessaie sur les autres files si la première est vide.
  *
+ * Sortie bornée (PR1, docs/conception/maitrise_charge_serveur.md) : si
+ * `pool` reste intégralement verrouillé au-delà de
+ * DATAMANAGER_TRYLOCK_MAX_SWEEPS tours (maintenance en cours — sauvegarde,
+ * restore, tri...), abandonne avec `result->size == 0` plutôt que de tourner
+ * indéfiniment. Indiscernable, côté appelant, d'un pool réellement vide —
+ * réponse déjà normale et supportée du protocole (K = 0) depuis la v7.
+ *
  * @param result     Tableau de résultats à remplir.
  * @param max_result Nombre maximum de possibilités à extraire.
  */
@@ -1177,6 +1220,7 @@ static void scroll_from_pool(file_possibility_t *pool, array_possibility_packet 
 	int getpossibility = 0;
 	int currfile = 0;
 	int filetested[NB_FILE_POSSIBILITY];
+	int failed_sweeps = 0;
 	int i;
 	for(i = 0; i < NB_FILE_POSSIBILITY; i++)
 	{
@@ -1235,6 +1279,13 @@ static void scroll_from_pool(file_possibility_t *pool, array_possibility_packet 
 			// premier essai) ne passe jamais par ici. Même motif que
 			// add_possibility_analysed.
 			usleep(MICRO_SLEEP);
+			// Sortie bornée (PR1) : cf. le commentaire de la fonction. `result`
+			// est déjà à taille 0 (initialisé par l'appelant) : rien à défaire.
+			failed_sweeps++;
+			if (failed_sweeps >= DATAMANAGER_TRYLOCK_MAX_SWEEPS)
+			{
+				return;
+			}
 		}
 
 		if(getpossibility == 1 && result->size == 0)

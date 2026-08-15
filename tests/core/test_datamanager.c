@@ -3086,6 +3086,16 @@ TEST sort_large_shuffled_stock_both_directions(void)
 void lock_all_file_analysed(void);
 void unlock_all_file_analysed(void);
 
+/* PR1 (docs/conception/maitrise_charge_serveur.md) : les trois boucles
+ * ci-dessus n'attendent plus indéfiniment un trylock — au-delà de
+ * DATAMANAGER_TRYLOCK_MAX_SWEEPS tours elles abandonnent (résultat vide /
+ * code d'erreur) plutôt que de bloquer le thread serveur qui les appelle.
+ * Marge de sécurité ×3 sur le budget nominal pour rester robuste sous ASan
+ * ou une machine chargée, sans jamais dépendre d'un pthread_join bloquant
+ * qui ferait pendre CE test si jamais la régression revenait : on attend un
+ * temps borné puis on LIT un drapeau, on ne joint qu'ensuite. */
+#define TEST_TRYLOCK_BOUND_MARGIN_US ((useconds_t)DATAMANAGER_TRYLOCK_MAX_SWEEPS * MICRO_SLEEP * 3)
+
 static void *th_add_possibility(void *arg)
 {
     (void)arg;
@@ -3108,6 +3118,44 @@ TEST add_possibility_spins_until_lock_released(void)
     pthread_join(th, NULL);
 
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+static volatile int g_bounded_put_done = 0;
+static int g_bounded_put_rc = -99;
+static void *th_add_possibility_never_unlocked(void *arg)
+{
+    (void)arg;
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 4;
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    g_bounded_put_rc = add_possibility(NULL, &arr);
+    g_bounded_put_done = 1;
+    return NULL;
+}
+
+/* Contrepartie de add_possibility_spins_until_lock_released : si le verrou
+ * n'est JAMAIS relâché (maintenance qui dure), put_to_pool doit rendre la
+ * main — échec signalé, rien d'inséré — plutôt que de bloquer indéfiniment
+ * le thread serveur qui sert ce client. */
+TEST add_possibility_gives_up_when_stock_never_unlocked(void)
+{
+    drain_all();
+    g_bounded_put_done = 0;
+    g_bounded_put_rc = -99;
+    lock_all_file();
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, th_add_possibility_never_unlocked, NULL));
+    usleep(TEST_TRYLOCK_BOUND_MARGIN_US);
+    int returned_while_locked = g_bounded_put_done;
+    unlock_all_file();
+    pthread_join(th, NULL);
+
+    ASSERT_EQ_FMT(1, returned_while_locked, "%d");
+    ASSERT(g_bounded_put_rc != 0);
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
     drain_all();
     PASS();
 }
@@ -3140,6 +3188,51 @@ TEST get_last_possibility_spins_until_lock_released(void)
     ASSERT(g_cont_result != NULL);
     ASSERT_EQ_FMT(1, g_cont_result->size, "%d");
     free_array_possibility_packet(g_cont_result);
+    drain_all();
+    PASS();
+}
+
+static volatile int g_bounded_get_done = 0;
+static array_possibility_packet *g_bounded_get_result = NULL;
+static void *th_get_possibility_never_unlocked(void *arg)
+{
+    (void)arg;
+    g_bounded_get_result = get_last_possibility_tocheck(1);
+    g_bounded_get_done = 1;
+    return NULL;
+}
+
+/* Contrepartie de get_last_possibility_spins_until_lock_released : si le
+ * verrou n'est JAMAIS relâché, scroll_from_pool doit rendre la main avec un
+ * résultat vide — indiscernable, côté appelant, d'un stock réellement vide
+ * (réponse K=0 déjà normale du protocole depuis la v7) — plutôt que de
+ * tourner indéfiniment. */
+TEST get_last_possibility_gives_up_when_stock_never_unlocked(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 5;
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    add_possibility(NULL, &arr);
+
+    g_bounded_get_done = 0;
+    g_bounded_get_result = NULL;
+    lock_all_file();
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, th_get_possibility_never_unlocked, NULL));
+    usleep(TEST_TRYLOCK_BOUND_MARGIN_US);
+    int returned_while_locked = g_bounded_get_done;
+    unlock_all_file();
+    pthread_join(th, NULL);
+
+    ASSERT_EQ_FMT(1, returned_while_locked, "%d");
+    ASSERT(g_bounded_get_result != NULL);
+    ASSERT_EQ_FMT(0, g_bounded_get_result->size, "%d");
+    free_array_possibility_packet(g_bounded_get_result);
+    /* La possibilité ajoutée avant le verrouillage est toujours là : rien
+     * n'a été perdu, seulement pas servie tant que le stock était gelé. */
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
     drain_all();
     PASS();
 }
@@ -3177,6 +3270,78 @@ TEST add_possibility_analysed_spins_both_modes(void)
     pthread_join(th_fixed, NULL);
 
     ASSERT_EQ_FMT(2ULL, analysed_total(), "%llu");
+    drain_all();
+    PASS();
+}
+
+static volatile int g_bounded_analysed_done = 0;
+static int g_bounded_analysed_rc = -99;
+static void *th_add_analysed_any_file_never_unlocked(void *arg)
+{
+    (void)arg;
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 8;
+    g_bounded_analysed_rc = add_possibility_analysed(&pk, -1);   /* wraparound */
+    g_bounded_analysed_done = 1;
+    return NULL;
+}
+
+static void *th_add_analysed_fixed_file_never_unlocked(void *arg)
+{
+    (void)arg;
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 9;
+    g_bounded_analysed_rc = add_possibility_analysed(&pk, 2);    /* file fixe */
+    g_bounded_analysed_done = 1;
+    return NULL;
+}
+
+/* Contrepartie de add_possibility_analysed_spins_both_modes, mode « wraparound »
+ * (thread < 0, utilisé côté serveur par record_possibility_analysed_for_client) :
+ * si le verrou n'est JAMAIS relâché, la fonction doit rendre la main avec
+ * -1 (contrat documenté) plutôt que de tourner indéfiniment. */
+TEST add_possibility_analysed_gives_up_when_pool_never_unlocked_rotating(void)
+{
+    drain_all();
+    g_bounded_analysed_done = 0;
+    g_bounded_analysed_rc = -99;
+    lock_all_file_analysed();
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, th_add_analysed_any_file_never_unlocked, NULL));
+    usleep(TEST_TRYLOCK_BOUND_MARGIN_US);
+    int returned_while_locked = g_bounded_analysed_done;
+    unlock_all_file_analysed();
+    pthread_join(th, NULL);
+
+    ASSERT_EQ_FMT(1, returned_while_locked, "%d");
+    ASSERT_EQ_FMT(-1, g_bounded_analysed_rc, "%d");
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* Même contrat, mode « file fixe » (thread >= 0, utilisé côté client pour son
+ * propre fork) : arithmétique de sortie différente (un usleep par tentative,
+ * pas un par tour de NB_FILE_POSSIBILITY tentatives) — verrouillée
+ * indépendamment pour ne pas laisser cette branche régresser sans le voir. */
+TEST add_possibility_analysed_gives_up_when_pool_never_unlocked_pinned(void)
+{
+    drain_all();
+    g_bounded_analysed_done = 0;
+    g_bounded_analysed_rc = -99;
+    lock_all_file_analysed();
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, th_add_analysed_fixed_file_never_unlocked, NULL));
+    usleep(TEST_TRYLOCK_BOUND_MARGIN_US);
+    int returned_while_locked = g_bounded_analysed_done;
+    unlock_all_file_analysed();
+    pthread_join(th, NULL);
+
+    ASSERT_EQ_FMT(1, returned_while_locked, "%d");
+    ASSERT_EQ_FMT(-1, g_bounded_analysed_rc, "%d");
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
     drain_all();
     PASS();
 }
@@ -3977,8 +4142,12 @@ SUITE(datamanager_suite)
     RUN_TEST(check_duplicate_detects_identical_packets_across_files);
 
     RUN_TEST(add_possibility_spins_until_lock_released);
+    RUN_TEST(add_possibility_gives_up_when_stock_never_unlocked);
     RUN_TEST(get_last_possibility_spins_until_lock_released);
+    RUN_TEST(get_last_possibility_gives_up_when_stock_never_unlocked);
     RUN_TEST(add_possibility_analysed_spins_both_modes);
+    RUN_TEST(add_possibility_analysed_gives_up_when_pool_never_unlocked_rotating);
+    RUN_TEST(add_possibility_analysed_gives_up_when_pool_never_unlocked_pinned);
     RUN_TEST(remove_possibility_analysed_spins_until_lock_released);
     RUN_TEST(restock_analysed_spins_until_stock_unlocked);
     RUN_TEST(analysed_index_walks_collision_chains);
