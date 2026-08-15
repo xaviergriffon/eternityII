@@ -169,22 +169,29 @@ libération progressive du stock retrouve alors tout son effet.
 
 Ce qui rend un « temps de blocage ≤ 1 s par file » vrai : des files de tailles comparables.
 
-`datamanager_rebalance_step(max_packets)` (`src/core/datamanager.{c,h}`) déplace, par pas
-borné et un verrou de pool à la fois (jamais deux ensemble — même motif que
-`restock_analysed`/`reclaim_expired_leases`), de la file la plus pleine vers la plus vide —
-indépendamment pour le pool non vérifié et le pool vérifié. Le montant déplacé est plafonné
-à la fois par `max_packets` et par ce qui suffit à amener la file source ou la file
-destination exactement à la cible (`total/NB_FILE_POSSIBILITY`) — jamais de dépassement, et
-un stock déjà équilibré ne bouge pas (évite un va-et-vient perpétuel pour de petites
-variations dues au trafic concurrent). Appelé une fois par tour dans `check_server_step`
-avec un budget modeste (`rebalance_budget`, réglable via `--rebalance-budget <n>`, défaut
-1000) — jamais un chemin chaud.
+`datamanager_rebalance_step(max_packets)` (`src/core/datamanager.{c,h}`) déplace, un verrou
+de pool à la fois (jamais deux ensemble — même motif que `restock_analysed`/
+`reclaim_expired_leases`), de la file la plus pleine vers la plus vide — indépendamment pour
+le pool non vérifié et le pool vérifié. Chaque **paire** (une file source, une file
+destination) est plafonnée par ce qui suffit à amener l'une des deux exactement à la cible
+(`total/NB_FILE_POSSIBILITY`) — jamais de dépassement — mais la fonction **enchaîne autant
+de paires que `max_packets` le permet** (`rebalance_pool_until_budget`) plutôt que de
+s'arrêter à la première : un pas isolé est souvent plafonné par le déficit de la file la
+plus vide, bien en-deçà du budget disponible (mesuré : 1000 possibilités concentrées dans
+une file, cible 100 — un seul pas ne bouge que 100, alors qu'un budget de 500 doit pouvoir
+en bouger 500 en 5 paires successives), ce qui aurait laissé le stock converger beaucoup
+plus lentement qu'il ne le faut pour le budget réellement accordé à chaque tour. Un stock
+déjà équilibré ne bouge pas (évite un va-et-vient perpétuel pour de petites variations dues
+au trafic concurrent). Appelé une fois par tour dans `check_server_step` avec un budget
+modeste (`rebalance_budget`, réglable via `--rebalance-budget <n>`, défaut 1000) — jamais un
+chemin chaud : chaque paire individuelle reste un pas court, seul leur NOMBRE par appel
+change.
 
 `split_datas()` (l'ancienne version : `regroup_pool_nolock` + trois copies par paquet sous
 `lock_all_file()`, inexploitable à l'échelle de plusieurs millions de possibilités) appelle
-maintenant `datamanager_rebalance_step` en boucle avec un budget large (`INT_MAX` — c'est un
-appel explicite, pas un tick périodique, on veut converger en un seul appel) jusqu'à
-équilibre. `split_datas_nolock` (utilisée en interne par `sort_descending_mthread`, qui a
+maintenant `datamanager_rebalance_step` une seule fois avec un budget illimité (`INT_MAX`) —
+la boucle interne convergeant déjà jusqu'à l'équilibre complet, plus besoin de boucler côté
+appelant. `split_datas_nolock` (utilisée en interne par `sort_descending_mthread`, qui a
 besoin d'une redistribution **exacte** par quotient, pas d'une convergence incrémentale)
 reste inchangée — seule la version publique, sans argument, est réécrite.
 

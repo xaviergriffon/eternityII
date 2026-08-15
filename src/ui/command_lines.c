@@ -239,11 +239,12 @@ static command_description commands[NB_COMMANDS] = {
      "rééquilibre le stock : file la plus pleine -> la plus vide (PR3)",
      "Déplace jusqu'à <n> possibilités (défaut rebalance_budget, réglable via\n"
      "--rebalance-budget au démarrage) de la file la plus pleine vers la plus\n"
-     "vide, pour les deux pools (non vérifié et vérifié) indépendamment. Même\n"
-     "appel que celui automatique de chaque tour serveur (10 s) — utile pour\n"
-     "forcer un rééquilibrage immédiat plutôt que d'attendre plusieurs tours.\n"
-     "Contrairement à split, ne redistribue pas intégralement : un seul pas\n"
-     "incrémental par appel.", NULL},
+     "vide, pour les deux pools (non vérifié et vérifié) indépendamment --\n"
+     "enchaîne autant de paires que le budget le permet, pas un seul pas isolé.\n"
+     "Même appel que celui automatique de chaque tour serveur (10 s) — utile\n"
+     "pour forcer un rééquilibrage immédiat plutôt que d'attendre plusieurs\n"
+     "tours. Contrairement à split, borné par <n> : peut s'arrêter avant un\n"
+     "équilibre complet sur un très gros déséquilibre.", NULL},
     {"min", min_interpreter, 1, CMD_CAT_STOCK, 0, NULL,
      "affiche le niveau minimal de pièces placées dans les files", NULL, NULL},
 

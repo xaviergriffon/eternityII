@@ -413,20 +413,27 @@ int fprint_all_file_analysed(FILE *out, size_t *count);
 int restock_analysed(void);
 
 /**
- * @brief Rééquilibre les deux pools de stock (non vérifié et vérifié) d'un
- *        pas incrémental (PR3, docs/conception/maitrise_charge_serveur.md) :
- *        déplace jusqu'à `max_packets` possibilités par pool de la file la
- *        plus pleine vers la plus vide.
+ * @brief Rééquilibre les deux pools de stock (non vérifié et vérifié)
+ *        (PR3, docs/conception/maitrise_charge_serveur.md) : déplace jusqu'à
+ *        `max_packets` possibilités PAR POOL de la ou des files les plus
+ *        pleines vers les plus vides, en enchaînant autant de paires
+ *        fullest→emptiest que le budget le permet (pas un seul pas isolé) —
+ *        converge donc le plus vite possible pour un budget donné, plutôt
+ *        que de laisser le budget inutilisé dès que la première paire est
+ *        plus petite que lui.
  *
- * Jamais deux verrous de pool tenus ensemble (même discipline que
- * `restock_analysed`/`datamanager_reclaim_expired_leases`) — pensé pour être
- * appelé fréquemment à petit budget (une fois par tour de `check_server_step`,
- * jamais un chemin chaud) plutôt qu'une fois avec un budget illimité, pour
- * que les files restent de taille comparable sans jamais monopoliser un tour
- * entier. `split_datas` l'appelle en boucle avec un budget large pour une
- * convergence complète en un seul appel explicite.
+ * Chaque paire reste un pas COURT : un seul verrou de pool tenu à la fois
+ * (jamais deux ensemble, même discipline que `restock_analysed`/
+ * `datamanager_reclaim_expired_leases`) — seul le NOMBRE de paires par appel
+ * change, pas leur coût unitaire. Pensé pour être appelé fréquemment à petit
+ * budget (une fois par tour de `check_server_step`, jamais un chemin chaud),
+ * de sorte que les files restent de taille comparable sans jamais
+ * monopoliser un tour entier. `split_datas` l'appelle une seule fois avec un
+ * budget illimité (`INT_MAX`) : la boucle interne convergeant déjà jusqu'à
+ * l'équilibre complet, un seul appel suffit.
  *
- * @param max_packets Borne du nombre de possibilités déplacées PAR POOL.
+ * @param max_packets Borne du nombre de possibilités déplacées PAR POOL,
+ *                     toutes paires confondues.
  * @return            Nombre total de possibilités déplacées (les deux pools confondus).
  */
 int datamanager_rebalance_step(int max_packets);

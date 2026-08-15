@@ -1169,10 +1169,48 @@ static int rebalance_pool_step(file_possibility_t *pool, int max_packets)
 	return (int)n;
 }
 
+/**
+ * @brief Répète `rebalance_pool_step` sur UN pool jusqu'à épuisement du
+ *        budget ou équilibre complet (PR3).
+ *
+ * `rebalance_pool_step` ne fixe qu'UNE paire (la plus pleine vers la plus
+ * vide) par appel : son propre plafond de mouvement (`min(surplus, deficit)`)
+ * est souvent plus petit que le budget disponible, laissant une grande
+ * partie du budget d'un tour inutilisée alors que d'autres files restent
+ * déséquilibrées. Cette boucle enchaîne les paires jusqu'à consommer tout
+ * `max_packets` (converge plus vite, même budget total par tour) — chaque
+ * pas individuel reste court (un seul verrou de pool à la fois, comme avant)
+ * : ce n'est que le NOMBRE de pas par appel qui change, pas leur coût
+ * unitaire.
+ *
+ * Termine en au plus `NB_FILE_POSSIBILITY` pas structurellement (chaque pas
+ * fixe définitivement au moins une file à sa cible, cf. `rebalance_pool_step`)
+ * — garde-fou de boucle par prudence, même discipline que `split_datas`.
+ *
+ * @param pool        Pool cible.
+ * @param max_packets Budget total pour CE pool, réparti sur autant de pas
+ *                     que nécessaire.
+ * @return             Nombre total de possibilités déplacées.
+ */
+static int rebalance_pool_until_budget(file_possibility_t *pool, int max_packets)
+{
+	int moved_total = 0;
+	int rounds = 0;
+	while (moved_total < max_packets && rounds < NB_FILE_POSSIBILITY * 2) {
+		int moved = rebalance_pool_step(pool, max_packets - moved_total);
+		if (moved <= 0) {
+			break;
+		}
+		moved_total += moved;
+		rounds++;
+	}
+	return moved_total;
+}
+
 int datamanager_rebalance_step(int max_packets)
 {
-	int moved = rebalance_pool_step(file_possibility, max_packets);
-	moved += rebalance_pool_step(file_possibility_checked, max_packets);
+	int moved = rebalance_pool_until_budget(file_possibility, max_packets);
+	moved += rebalance_pool_until_budget(file_possibility_checked, max_packets);
 	return moved;
 }
 
@@ -2608,18 +2646,13 @@ int split_datas(void)
 	// incrémental (datamanager_rebalance_step) au lieu de regroup_pool_nolock
 	// + 3 copies par paquet sous verrou global (split_pool_nolock ci-dessus)
 	// — inexploitable à l'échelle de plusieurs millions de possibilités.
-	// Budget large par appel (INT_MAX) : split_datas() est un appel EXPLICITE
-	// (commande console), pas un tick périodique, on veut converger en un
-	// seul appel plutôt qu'étaler sur plusieurs tours comme le fait l'appel
-	// périodique de check_server_step. Chaque tour fixe définitivement au
-	// moins une file à sa cible (cf. rebalance_pool_step) : NB_FILE_POSSIBILITY
-	// tours suffisent structurellement à converger, marge gardée par prudence.
-	int rounds = 0;
-	int moved;
-	do {
-		moved = datamanager_rebalance_step(INT_MAX);
-		rounds++;
-	} while (moved > 0 && rounds < NB_FILE_POSSIBILITY * 4);
+	// Budget INT_MAX : datamanager_rebalance_step boucle désormais en interne
+	// jusqu'à épuisement du budget ou équilibre complet (rebalance_pool_until_budget),
+	// donc un seul appel suffit à converger entièrement — split_datas() est un
+	// appel EXPLICITE (commande console), pas un tick périodique, on veut
+	// converger en un coup plutôt qu'étaler sur plusieurs tours comme le fait
+	// l'appel périodique de check_server_step avec un budget modeste.
+	datamanager_rebalance_step(INT_MAX);
 	return 0;
 }
 

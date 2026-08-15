@@ -661,6 +661,27 @@ TEST rebalance_step_respects_budget(void)
     PASS();
 }
 
+/* Un pas isolé (fullest -> emptiest) est souvent plafonné par le déficit de
+ * la file la plus vide, pas par le budget : avec 1000 possibilités dans la
+ * file 0 et une cible de 100 (1000/10), UN pas ne peut déplacer que 100 --
+ * datamanager_rebalance_step doit enchaîner plusieurs paires pour consommer
+ * tout le budget demandé (500) plutôt que de le laisser inutilisé. */
+TEST rebalance_step_uses_full_budget_across_multiple_pairs(void)
+{
+    drain_datamanager();
+    int allocs[1000];
+    for (int i = 0; i < 1000; i++) allocs[i] = (i % 13) + 1;
+    add_packets(allocs, 1000);
+    ASSERT_EQ_FMT(1000ULL, file_size(0), "%llu");
+
+    int moved = datamanager_rebalance_step(500);
+    ASSERT_EQ_FMT(500, moved, "%d"); /* tout le budget consommé, pas juste 100 */
+    ASSERT_EQ_FMT(1000ULL, datas_size(), "%llu"); /* rien perdu */
+
+    drain_datamanager();
+    PASS();
+}
+
 /* Un stock déjà équilibré ne bouge pas : évite un va-et-vient perpétuel pour
  * de petites variations sans intérêt. */
 TEST rebalance_step_noop_when_already_balanced(void)
@@ -4349,6 +4370,7 @@ SUITE(datamanager_suite)
     RUN_TEST(rebalance_step_preserves_total_count);
     RUN_TEST(rebalance_step_converges_to_balance);
     RUN_TEST(rebalance_step_respects_budget);
+    RUN_TEST(rebalance_step_uses_full_budget_across_multiple_pairs);
     RUN_TEST(rebalance_step_noop_when_already_balanced);
     RUN_TEST(checked_possibility_goes_to_checked_pool);
     RUN_TEST(analysed_add_and_restock);
