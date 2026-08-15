@@ -223,6 +223,29 @@ dans la zone), ce qui permet de garder une trace persistante hors session :
 tail -f events.log
 ```
 
+**Les erreurs (`log_error`/`log_errno`) sont aussi persistées dans `events.log`**,
+horodatées de la même façon — sans pour autant apparaître dans la bande fixe
+"Events" ci-dessus ni dans le buffer circulaire qu'elle affiche, pour ne pas
+noyer les évènements notables (records, connexions…) sous des erreurs répétées.
+Avant cela, une erreur (ex. écriture de fichier échouée, désynchronisation
+protocolaire) n'était visible que sur `stderr`/le pad de sortie de la console —
+perdue une fois sortie du scrollback ou d'une session non interactive. Un
+enfant forké relaie son erreur au process PARENT par IPC (comme pour les
+autres logs) ; c'est ce dernier qui écrit effectivement la ligne dans
+`events.log`, pour éviter plusieurs écrivains concurrents sur le fichier.
+
+**Le détail système (errno) fait partie de la même ligne.** Les points
+d'échec d'E/S (`read_parts`, `save_possibility`, `backup`/`backup_analysed`,
+`import`/`restore`(`_analysed`), `configSave`) utilisaient `perror()` pour
+afficher le détail (`fopen(): No such file or directory`) : cet appel écrit
+directement sur `stderr`, en contournant entièrement le logger — ni routé par
+IPC pour un enfant forké (risque de désynchronisation avec le reste de
+l'affichage console), ni jamais écrit dans `events.log`. Ces 10 sites
+utilisent désormais `log_errno()`, qui produit une seule ligne journalisée
+avec le contexte ET le détail errno (`read_parts file :chemin 2 : No such
+file or directory`), correctement routée et donc bien présente dans
+`events.log`.
+
 ## Effacement de l'écran : la commande `clear` (Ctrl-L)
 
 La politique d'affichage est uniforme : **aucune commande n'efface l'écran

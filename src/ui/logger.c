@@ -259,6 +259,36 @@ static int query_terminal_cols(void)
 /* ------------------------------------------------------------------------- */
 
 /**
+ * @brief Ajoute une ligne horodatée (date complète) à `events.log`, sans
+ *        toucher au buffer circulaire ni redessiner la bande fixe "Events" —
+ *        seul log_event() fait les deux. Utilisé par log_event() elle-même
+ *        (horodatage court réutilisé) et par log_error()/log_errno(), pour
+ *        que les erreurs restent traçables après coup (`tail -f events.log`)
+ *        même une fois sorties du scrollback de la console. Un éventuel saut
+ *        de ligne final est retiré ; les sauts de ligne internes (message
+ *        multi-lignes) sont conservés tels quels.
+ */
+static void append_events_log_file(const char *msg)
+{
+    size_t l = strlen(msg);
+    while (l > 0 && (msg[l - 1] == '\n' || msg[l - 1] == '\r')) {
+        l--;
+    }
+
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    char fts[24];
+    strftime(fts, sizeof fts, "%Y-%m-%d %H:%M:%S", &tmv);
+
+    FILE *f = fopen(EVENT_LOG_FILE, "a");
+    if (f != NULL) {
+        fprintf(f, "[%s] %.*s\n", fts, (int)l, msg);
+        fclose(f);
+    }
+}
+
+/**
  * @brief Affiche un message d'erreur suivi du message système correspondant à `errno`.
  */
 void log_errno(const char *format, ...)
@@ -277,6 +307,7 @@ void log_errno(const char *format, ...)
         return;
     }
     write_output(stderr, buf, 1);
+    append_events_log_file(buf);
 }
 
 /**
@@ -295,6 +326,7 @@ void log_error(const char *format, ...)
         return;
     }
     write_output(stderr, buf, 1);
+    append_events_log_file(buf);
 }
 
 /**
@@ -575,14 +607,8 @@ void log_event(const char *format, ...)
     }
     pthread_mutex_unlock(&event_mutex);
 
-    /* Journal fichier (date complète). */
-    char fts[24];
-    strftime(fts, sizeof fts, "%Y-%m-%d %H:%M:%S", &tmv);
-    FILE *f = fopen(EVENT_LOG_FILE, "a");
-    if (f != NULL) {
-        fprintf(f, "[%s] %s\n", fts, msg);
-        fclose(f);
-    }
+    /* Journal fichier (date complète, horodatage propre à append_events_log_file). */
+    append_events_log_file(msg);
 
     pthread_mutex_lock(&output_mutex);
     if (zone_active) {

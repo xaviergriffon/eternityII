@@ -225,7 +225,7 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
 			array_possibility_packet *single_array = build_single_array_possibility_packet(possibility);
 			put_to_local(single_array);
 			free_array_possibility_packet(single_array);
-			print_possibility_packet(possibility);
+			log_error_possibility_packet(possibility);
 			if (ack == INST_END) {
 				/* Connexion perdue (timeout ou fermeture) : on sort et on remet t+1..fin en local */
 				last_routed = t;
@@ -1439,8 +1439,7 @@ int backup(char *filename)
 	FILE *f = fopen(tmp_filename, "w");
 	if(!f)
 	{
-		log_error("backup file :%s",tmp_filename);
-		perror("fopen()");
+		log_errno("backup file :%s ",tmp_filename);
 		free(tmp_filename);
 		return BACKUP_ERROR;
 	}
@@ -1496,8 +1495,7 @@ int backup(char *filename)
 
 	if(rename(tmp_filename, filename) != 0)
 	{
-		log_error("backup file :%s -> %s (rename)",tmp_filename, filename);
-		perror("rename()");
+		log_errno("backup file :%s -> %s (rename) ",tmp_filename, filename);
 		unlink(tmp_filename);
 		free(tmp_filename);
 		return BACKUP_ERROR;
@@ -1552,8 +1550,7 @@ int backup_analysed(char *filename)
 	FILE *f = fopen(tmp_filename, "w");
 	if(!f)
 	{
-		log_error("backup_analysed file :%s",tmp_filename);
-		perror("fopen()");
+		log_errno("backup_analysed file :%s ",tmp_filename);
 		free(tmp_filename);
 		return BACKUP_ERROR;
 	}
@@ -1594,8 +1591,7 @@ int backup_analysed(char *filename)
 
 	if(rename(tmp_filename, filename) != 0)
 	{
-		log_error("backup_analysed file :%s -> %s (rename)",tmp_filename, filename);
-		perror("rename()");
+		log_errno("backup_analysed file :%s -> %s (rename) ",tmp_filename, filename);
 		unlink(tmp_filename);
 		free(tmp_filename);
 		return BACKUP_ERROR;
@@ -1610,8 +1606,7 @@ int import(client_possibility_t *client_possibility, char *filename)
     FILE *f = fopen(filename, "r");
     if(!f)
     {
-        log_error("import file :%s",filename);
-        perror("fopen()");
+        log_errno("import file :%s ",filename);
         return -1;
     }
     
@@ -1653,8 +1648,7 @@ int restore(char *filename)
 	FILE *f = fopen(filename, "r");
 	if(!f)
 	{
-		log_error("restore file :%s",filename);
-		perror("fopen()");
+		log_errno("restore file :%s ",filename);
 		return -1;
 	}
 	fclose(f);
@@ -1721,8 +1715,7 @@ int import_analysed(char *filename)
 	FILE *f = fopen(filename, "r");
 	if(!f)
 	{
-		log_error("import_analysed file :%s",filename);
-		perror("fopen()");
+		log_errno("import_analysed file :%s ",filename);
 		return -1;
 	}
 	
@@ -1745,8 +1738,7 @@ int restore_analysed(char *filename)
 	FILE *f = fopen(filename, "r");
 	if(!f)
 	{
-		log_error("restore_analysed file :%s",filename);
-		perror("fopen()");
+		log_errno("restore_analysed file :%s ",filename);
 		return -1;
 	}
 	fclose(f);
@@ -2297,7 +2289,7 @@ int check_datas(void)
 				{
 					log_error("possibility error : %i\n",analyse);
 					log_error(" ---");
-					print_possibility_packet((struct possibility_packet *)currElement->value);
+					log_error_possibility_packet((struct possibility_packet *)currElement->value);
 					errors++;
 				}
 				currElement = currElement->next;
