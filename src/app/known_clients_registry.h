@@ -253,4 +253,23 @@ int known_clients_registry_snapshot(known_client_info_t *out, int max);
  */
 int known_clients_registry_count(void);
 
+/**
+ * @brief Compteur monotone de mutations persistées du registre (PR5,
+ *        docs/conception/maitrise_charge_serveur.md) : incrémenté à chaque
+ *        appel de `known_clients_registry_on_connect`/`_on_stats`/
+ *        `_on_disconnect` qui modifie réellement une entrée (jamais sur un
+ *        rejet — registre plein, identité NULL, machine/session introuvable).
+ *        Ne rentre jamais à zéro (n'est jamais réinitialisé par `restore`,
+ *        propriété volontaire : seule la valeur COURANTE importe, comparée
+ *        par égalité à un instantané précédent — `check_server_step` s'en
+ *        sert pour savoir si `known_clients_registry_save` a du travail réel
+ *        à faire depuis sa dernière écriture, sans dupliquer cette logique.
+ *        Ne compte PAS les mutations en mémoire pure des champs volatils
+ *        (`nb_active_sessions`, `sessions[]`) séparément de celles des champs
+ *        persistés : les deux catégories changent ensemble aux mêmes points
+ *        d'appel, une distinction plus fine n'aurait aucune valeur pratique
+ *        ici.
+ */
+unsigned long long known_clients_registry_mutation_count(void);
+
 #endif /* eternityII_known_clients_registry_h */

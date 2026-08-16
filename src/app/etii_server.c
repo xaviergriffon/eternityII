@@ -33,6 +33,18 @@ struct array_part *g_server_rotate_parts = NULL;
 // Nombre de modification des files par client
 unsigned long long *fileUpdates = NULL;
 
+// Nombre de mutations du pool ANALYSÉ par client (PR5,
+// docs/conception/maitrise_charge_serveur.md) : contrepartie de `fileUpdates`
+// (pools stock unchecked/checked) pour la porte de sauvegarde indépendante de
+// `consistent_backup`. Incrémenté à la fois côté attribution (GET/GET_TO_CHECK*,
+// record_batch_analysed_for_client — une possibilité ENTRE dans le pool
+// analysé) et côté acquittement (INST_POSSIBILITY_ANALYSED[_BATCH],
+// remove_possibility_analysed réussi — une possibilité en SORT) : les deux
+// mutent réellement file_possibility_analysed, contrairement à fileUpdates
+// qui ne bouge que côté attribution (la seule des deux qui touche aussi les
+// pools stock).
+unsigned long long *analysedFileUpdates = NULL;
+
 int32_t clamp_pruner_batch(int32_t requested) {
     if (requested < 1) return 1;
     if (requested > PRUNER_BATCH_MAX) return PRUNER_BATCH_MAX;
@@ -189,17 +201,19 @@ static int owner_control_session_alive(const uint8_t owner_uid[CLIENT_UID_BYTES]
  * périodique. Ne contient PAS le `sleep(sleep_time)` de fin de tour : c'est
  * l'appelant (la boucle `while(1)` de `check_server`) qui rythme les tours.
  *
- * @param lastactive                In/out : compteur cumulé de coups joués (fenêtre glissante).
- * @param lastClientsFileUpdateBackup In/out : total des mises à jour de files au dernier backup.
- * @param lastBack                  In/out : nombre de tours écoulés depuis le dernier backup.
- * @param last_record                In/out : meilleur résultat déjà annoncé (détection de record).
- * @param sleep_time                 Durée nominale du tour (secondes), utilisée pour le débit rapporté.
+ * @param lastactive    In/out : compteur cumulé de coups joués (fenêtre glissante).
+ * @param backup_state  In/out : état des quatre portes d'autobackup indépendantes
+ *                      (stock, analysé, meilleur plateau, clients connus — PR5,
+ *                      docs/conception/maitrise_charge_serveur.md).
+ * @param last_record   In/out : meilleur résultat déjà annoncé (détection de record).
+ * @param sleep_time    Durée nominale du tour (secondes), utilisée pour le débit rapporté.
  */
-void check_server_step(unsigned long long *lastactive, unsigned long long *lastClientsFileUpdateBackup,
-                       int *lastBack, int *last_record, int sleep_time)
+void check_server_step(unsigned long long *lastactive, autobackup_state_t *backup_state,
+                       int *last_record, int sleep_time)
 {
     unsigned long long currentactive = *lastactive;
     unsigned long long clientsFileUpdates = 0;
+    unsigned long long analysedUpdates = 0;
     int c;
     *lastactive = 0;
     for(c=0; c < NB_THREADS;c++)
@@ -207,6 +221,9 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
         *lastactive = *lastactive + counters[c];
         if (fileUpdates != NULL) {
             clientsFileUpdates = clientsFileUpdates + fileUpdates[c];
+        }
+        if (analysedFileUpdates != NULL) {
+            analysedUpdates = analysedUpdates + analysedFileUpdates[c];
         }
     }
     currentactive = *lastactive - currentactive;
@@ -290,6 +307,21 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
     if (reclaimed_leases > 0) {
         log_event("bail expiré : %llu possibilité(s) rendue(s) au stock (client disparu)", reclaimed_leases);
     }
+    // Un bail expiré déplace des possibilités du pool analysé vers le stock,
+    // et le rééquilibrage incrémental ci-dessous en déplace entre files du
+    // pool stock : deux mutations réelles, délibérément PAS repliées dans les
+    // compteurs de la porte d'autobackup (PR5) ci-dessous. Contrairement au
+    // trafic client (fileUpdates/analysedFileUpdates, entièrement maîtrisé par
+    // l'appelant d'un test), le nombre de baux/paquets qu'UN appel déplace
+    // dépend de l'horloge/du contenu courant du stock -- l'intégrer romprait
+    // la comparaison par égalité déterministe qu'utilisent les tests de cette
+    // fonction (cf. check_server_step_detects_record_and_autobackups). Sans
+    // conséquence sur la correction : l'ensemble complet des possibilités
+    // reste toujours présent dans AU MOINS un des deux fichiers (stock ou
+    // analysé) à la prochaine écriture déclenchée par un vrai trafic client,
+    // qui survient en pratique bien avant la fenêtre de 60 s -- seule la
+    // fraîcheur immédiate de cette redistribution interne est différée, jamais
+    // une perte de possibilité.
 
     // Rééquilibrage incrémental (PR3, docs/conception/maitrise_charge_serveur.md) :
     // budget modeste par tour (rebalance_budget), jamais un chemin chaud — ce
@@ -297,33 +329,75 @@ void check_server_step(unsigned long long *lastactive, unsigned long long *lastC
     // gardant les files de taille comparable, sans jamais monopoliser un tour.
     datamanager_rebalance_step(rebalance_budget);
 
-    if (should_autobackup(lastBack, lastClientsFileUpdateBackup, clientsFileUpdates))
+    unsigned long long best_board_current = (unsigned long long)best_board_result(&g_server_best_board);
+    unsigned long long known_clients_current = known_clients_registry_mutation_count();
+
+    // Porte de sauvegarde indépendante PAR ARTEFACT (PR5, docs/conception/
+    // maitrise_charge_serveur.md) : should_autobackup() décide, sans écrire,
+    // si CET artefact a une mutation en attente après au moins 6 tours
+    // (~60s). Avant cette PR, une seule porte (basée uniquement sur le trafic
+    // stock) gouvernait les quatre écritures ensemble -- réécrivant
+    // best_board/known_clients même sans le moindre changement de leur côté,
+    // et symétriquement pouvant laisser un record best_board distant (rapporté
+    // par un client, jamais local) non sauvegardé indéfiniment si le stock
+    // restait inactif. Le stock et le pool analysé restent réunis dans le
+    // MÊME appel consistent_backup dès que L'UN DES DEUX a une mutation en
+    // attente : cohérence à l'instant T préservée (PR2), seule la DÉCISION
+    // d'écrire devient indépendante par artefact -- pas encore la portée plus
+    // fine « par file de stock » envisagée en composition avec PR2 (laissée
+    // en proposition, cf. le document de conception : le risque d'un drapeau
+    // « propre » erroné sur un site de mutation oublié -- un fichier
+    // silencieusement périmé -- l'emporte sur le gain, l'essentiel du
+    // bénéfice de cette PR étant déjà obtenu ici).
+    int do_stock = should_autobackup(&backup_state->stock.lastBack, &backup_state->stock.lastUpdates, clientsFileUpdates);
+    int do_analysed = should_autobackup(&backup_state->analysed.lastBack, &backup_state->analysed.lastUpdates, analysedUpdates);
+    int do_best_board = should_autobackup(&backup_state->best_board.lastBack, &backup_state->best_board.lastUpdates, best_board_current);
+    int do_known_clients = should_autobackup(&backup_state->known_clients.lastBack, &backup_state->known_clients.lastUpdates, known_clients_current);
+
+    if (do_stock || do_analysed || do_best_board || do_known_clients)
     {
-        // Instant T unique pour le stock et le pool analysé (PR2, cf.
-        // docs/conception/maitrise_charge_serveur.md) : backup()+backup_analysed()
-        // appelées séparément laisseraient une fenêtre entre les deux instants.
-        int rba = 0;
-        int rb = consistent_backup("./temp.back", "./temp_analysed.back", &rba);
-        if (rb == BACKUP_SKIPPED_MAINTENANCE) {
-            log_error("autobackup : sauté (maintenance en cours) sur ./temp.back\n");
-        } else if (rb != BACKUP_OK) {
-            log_error("autobackup : échec sur ./temp.back\n");
+        struct timespec backup_start, backup_end;
+        clock_gettime(CLOCK_MONOTONIC, &backup_start);
+
+        if (do_stock || do_analysed) {
+            // Instant T unique pour le stock et le pool analysé (PR2, cf.
+            // docs/conception/maitrise_charge_serveur.md) : backup()+backup_analysed()
+            // appelées séparément laisseraient une fenêtre entre les deux instants.
+            int rba = 0;
+            int rb = consistent_backup("./temp.back", "./temp_analysed.back", &rba);
+            if (rb == BACKUP_SKIPPED_MAINTENANCE) {
+                log_error("autobackup : sauté (maintenance en cours) sur ./temp.back\n");
+            } else if (rb != BACKUP_OK) {
+                log_error("autobackup : échec sur ./temp.back\n");
+            }
+            if (rba == BACKUP_SKIPPED_MAINTENANCE) {
+                log_error("autobackup : sauté (maintenance en cours) sur ./temp_analysed.back\n");
+            } else if (rba != BACKUP_OK) {
+                log_error("autobackup : échec sur ./temp_analysed.back\n");
+            }
         }
-        if (rba == BACKUP_SKIPPED_MAINTENANCE) {
-            log_error("autobackup : sauté (maintenance en cours) sur ./temp_analysed.back\n");
-        } else if (rba != BACKUP_OK) {
-            log_error("autobackup : échec sur ./temp_analysed.back\n");
+        if (do_best_board) {
+            // Représentation du meilleur plateau connu (pas seulement max_result) :
+            // fichier dédié (cf. core/best_board.h), porte indépendante (PR5).
+            if (best_board_save(&g_server_best_board, "./temp-best_board.back") != 0) {
+                log_error("autobackup : échec sur ./temp-best_board.back\n");
+            }
         }
-        // Représentation du meilleur plateau connu (pas seulement max_result) :
-        // même cadence que le reste du stock, fichier dédié (cf. core/best_board.h).
-        if (best_board_save(&g_server_best_board, "./temp-best_board.back") != 0) {
-            log_error("autobackup : échec sur ./temp-best_board.back\n");
+        if (do_known_clients) {
+            // Cumul par machine, fichier dédié (cf. app/known_clients_registry.h),
+            // porte indépendante (PR5).
+            if (known_clients_registry_save("./temp-known_clients.back") != 0) {
+                log_error("autobackup : échec sur ./temp-known_clients.back\n");
+            }
         }
-        // Cumul par machine (PR5) : même cadence
-        // que le reste du stock, fichier dédié (cf. app/known_clients_registry.h).
-        if (known_clients_registry_save("./temp-known_clients.back") != 0) {
-            log_error("autobackup : échec sur ./temp-known_clients.back\n");
-        }
+
+        // Durée observable (PR5) plutôt que déduite d'un incident (cf. §1) :
+        // couvre tout ce qui a réellement été déclenché à ce tour, exposée
+        // par GET /api/v1/status (http_status_view_t.last_backup_duration_ms).
+        clock_gettime(CLOCK_MONOTONIC, &backup_end);
+        long long elapsed_ms = (backup_end.tv_sec - backup_start.tv_sec) * 1000LL
+                              + (backup_end.tv_nsec - backup_start.tv_nsec) / 1000000LL;
+        server_last_backup_duration_ms = (unsigned long long)(elapsed_ms > 0 ? elapsed_ms : 0);
     }
 }
 
@@ -331,16 +405,15 @@ void *check_server(void *param)
 {
     (void)param;
     unsigned long long lastactive = 0;
-    unsigned long long lastClientsFileUpdateBackup = 0;
+    autobackup_state_t backup_state = {0};
     int sleep_time = 10;
-    int lastBack = 0;
     int last_record = max_result;
     // Comme les autres threads (rmnonext, server_tcp, …) : la boucle s'arrête
     // sur REQUEST_STOP — en production celui-ci n'arrive qu'à l'arrêt du
     // processus, le comportement est donc inchangé (et le thread testable).
     while(request != REQUEST_STOP)
     {
-        check_server_step(&lastactive, &lastClientsFileUpdateBackup, &lastBack, &last_record, sleep_time);
+        check_server_step(&lastactive, &backup_state, &last_record, sleep_time);
         sleep(sleep_time);
     }
 
@@ -450,6 +523,10 @@ static void record_batch_analysed_for_client(client_t *client, array_possibility
             kept++;
             counters[client->compteur]++;
             fileUpdates[client->compteur]++;
+            // Attribution au pool analysé (PR5) : la possibilité y ENTRE ici,
+            // symétrique du retrait sur acquittement (INST_POSSIBILITY_ANALYSED*
+            // ci-dessous) — les deux mutent file_possibility_analysed.
+            analysedFileUpdates[client->compteur]++;
         }
         else
         {
@@ -635,6 +712,9 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 if(remove_possibility_analysed(possibilityPacket, -1) == 0)
                 {
                     send_instruction(client->socket_id,INST_CONSIDERED);
+                    // Retrait du pool analysé (PR5) : symétrique de
+                    // l'attribution dans record_batch_analysed_for_client.
+                    analysedFileUpdates[client->compteur]++;
 
                 } else{
                     log_error("possibility analysed not removed\n");
@@ -673,6 +753,9 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 if (remove_possibility_analysed(&pkt, -1) != 0) {
                     // Non bloquant : l'entrée « en analyse » a pu déjà être retirée.
                     log_error("batch analysed : possibilité non retirée (%d)\n", p);
+                } else {
+                    // Retrait du pool analysé (PR5), un par paquet effectivement retiré.
+                    analysedFileUpdates[client->compteur]++;
                 }
             }
             if (transfer_ok) {
@@ -1322,6 +1405,7 @@ void init_server_thread_pool(struct array_part *rotateParts)
         exit(EXIT_FAILURE);
     }
     fileUpdates = malloc(sizeof(unsigned long long) * NB_THREADS);
+    analysedFileUpdates = malloc(sizeof(unsigned long long) * NB_THREADS);
     for(int i = 0; i < NB_THREADS; i++)
     {
         thread_params[i].exist = 0;
@@ -1332,6 +1416,7 @@ void init_server_thread_pool(struct array_part *rotateParts)
         thread_params[i].peer_ip[0] = '\0';
         thread_params[i].has_identity = 0;
         fileUpdates[i] = 0;
+        analysedFileUpdates[i] = 0;
     }
 }
 

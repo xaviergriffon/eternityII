@@ -43,6 +43,38 @@ typedef struct
 } client_t;
 
 /**
+ * @brief État de la porte d'autobackup indépendante pour UN artefact (PR5,
+ *        docs/conception/maitrise_charge_serveur.md), consultée/mise à jour
+ *        par `should_autobackup`.
+ */
+typedef struct
+{
+    /// Nombre de tours (10s) écoulés depuis la dernière écriture, plafonné à 6.
+    int lastBack;
+    /// Compteur de mutations vu à la dernière écriture (comparé par égalité).
+    unsigned long long lastUpdates;
+} autobackup_gate_t;
+
+/**
+ * @brief Regroupe les quatre portes d'autobackup indépendantes de
+ *        `check_server_step` (PR5) : stock (pools non vérifié + vérifié),
+ *        pool analysé, meilleur plateau connu, registre des clients connus.
+ *        Chaque artefact n'est réécrit que si SON compteur de mutations a
+ *        bougé depuis SA dernière écriture — `consistent_backup` reste
+ *        appelée en un seul appel couvrant stock+analysé dès que L'UN DES
+ *        DEUX a une mutation en attente (cohérence à l'instant T préservée,
+ *        cf. PR2) ; `best_board`/`known_clients` sont deux portes
+ *        entièrement indépendantes l'une de l'autre et du stock.
+ */
+typedef struct
+{
+    autobackup_gate_t stock;
+    autobackup_gate_t analysed;
+    autobackup_gate_t best_board;
+    autobackup_gate_t known_clients;
+} autobackup_state_t;
+
+/**
  * @brief Initialise et démarre le serveur EternityII.
  *
  * Charge les pièces depuis `file`, construit la map de lookup, génère le paquet
@@ -73,8 +105,8 @@ void *check_server(void *param);
  * Extrait pour être testable hors thread. Voir etii_server.c pour le détail
  * des paramètres in/out (état persistant d'un tour à l'autre).
  */
-void check_server_step(unsigned long long *lastactive, unsigned long long *lastClientsFileUpdateBackup,
-                       int *lastBack, int *last_record, int sleep_time);
+void check_server_step(unsigned long long *lastactive, autobackup_state_t *backup_state,
+                       int *last_record, int sleep_time);
 
 /**
  * @brief Borne le nombre de possibilités demandées en lot par un pruner.

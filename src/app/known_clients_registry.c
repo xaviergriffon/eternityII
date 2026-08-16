@@ -57,6 +57,10 @@ static known_client_t g_known_clients[MAX_KNOWN_CLIENTS];
  * pas de granularité par entrée. */
 static pthread_mutex_t g_known_clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// Compteur de mutations persistées (PR5) : voir la doc de
+// known_clients_registry_mutation_count (known_clients_registry.h).
+static unsigned long long g_known_clients_mutation_count = 0;
+
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
 
 static void known_clients_init_once(void)
@@ -200,6 +204,7 @@ void known_clients_registry_on_connect(const client_identity_t *identity, const 
     }
     kc->sessions[sidx].connect_time = now;
 
+    g_known_clients_mutation_count++;
     pthread_mutex_unlock(&g_known_clients_mutex);
 }
 
@@ -237,6 +242,7 @@ void known_clients_registry_on_stats(const uint8_t *machine_uid, const uint8_t *
             kc->best_max_result = stats->max_result;
         }
         kc->last_seen = time(NULL);
+        g_known_clients_mutation_count++;
     }
     pthread_mutex_unlock(&g_known_clients_mutex);
 }
@@ -263,6 +269,7 @@ void known_clients_registry_on_disconnect(const uint8_t *machine_uid, const uint
             kc->nb_active_sessions--;
         }
         kc->last_seen = now;
+        g_known_clients_mutation_count++;
     }
     pthread_mutex_unlock(&g_known_clients_mutex);
 }
@@ -474,6 +481,15 @@ int known_clients_registry_count(void)
             n++;
         }
     }
+    pthread_mutex_unlock(&g_known_clients_mutex);
+    return n;
+}
+
+unsigned long long known_clients_registry_mutation_count(void)
+{
+    pthread_once(&g_init_once, known_clients_init_once);
+    pthread_mutex_lock(&g_known_clients_mutex);
+    unsigned long long n = g_known_clients_mutation_count;
     pthread_mutex_unlock(&g_known_clients_mutex);
     return n;
 }

@@ -185,7 +185,8 @@ Instantané de l'état et de la configuration courante.
   "limit": 1000,
   "max_stock_by_thread": 500,
   "pruner_batch": 64,
-  "pruner_dfs_budget": 10000
+  "pruner_dfs_budget": 10000,
+  "last_backup_duration_ms": 42
 }
 ```
 
@@ -198,6 +199,7 @@ Instantané de l'état et de la configuration courante.
 | `max_stock_by_thread` | entier | Seuil de stock local par thread avant délégation au serveur |
 | `pruner_batch` | entier | Taille de lot d'échange du pruner courante |
 | `pruner_dfs_budget` | entier | Budget de nœuds courant de la preuve de fermeture bornée du pruner (§4.6b) ; `0` = désactivée |
+| `last_backup_duration_ms` | entier ≥ 0 | Durée (millisecondes) de la DERNIÈRE sauvegarde automatique effectivement exécutée (PR5, [maîtrise de la charge serveur](conception/maitrise_charge_serveur.md)) — englobe tout ce que ce tour a réellement déclenché (stock/analysé, meilleur plateau, clients connus — chacun sauté indépendamment si son propre artefact n'a pas changé). `0` tant qu'aucune sauvegarde n'a encore eu lieu |
 
 Valeurs possibles de `state` :
 

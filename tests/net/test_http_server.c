@@ -998,6 +998,7 @@ TEST http_stats_and_status_collect_do_not_crash(void)
     http_status_collect(&status);
     ASSERT_STR_EQ("running", status.state);
     ASSERT_EQ_FMT(pruner_dfs_budget, status.pruner_dfs_budget, "%d");
+    ASSERT_EQ_FMT(server_last_backup_duration_ms, status.last_backup_duration_ms, "%llu"); /* PR5 */
     request = saved_req;
 
     PASS();

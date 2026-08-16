@@ -287,6 +287,9 @@ typedef struct {
     int max_stock_by_thread;
     int pruner_batch;
     int pruner_dfs_budget;
+    /// Durée (ms) de la dernière sauvegarde automatique exécutée (PR5,
+    /// docs/conception/maitrise_charge_serveur.md), 0 si aucune n'a encore eu lieu.
+    unsigned long long last_backup_duration_ms;
 } http_status_view_t;
 
 /**

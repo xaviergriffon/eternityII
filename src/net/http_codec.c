@@ -658,10 +658,12 @@ int http_json_format_status(char *buf, size_t size, const http_status_view_t *vi
         "\"limit\":%llu,"
         "\"max_stock_by_thread\":%d,"
         "\"pruner_batch\":%d,"
-        "\"pruner_dfs_budget\":%d"
+        "\"pruner_dfs_budget\":%d,"
+        "\"last_backup_duration_ms\":%llu"
         "}",
         view->state, view->uptime_seconds, view->version, view->limit,
-        view->max_stock_by_thread, view->pruner_batch, view->pruner_dfs_budget);
+        view->max_stock_by_thread, view->pruner_batch, view->pruner_dfs_budget,
+        view->last_backup_duration_ms);
     if (written < 0 || (size_t)written >= size) {
         return -1;
     }
