@@ -171,7 +171,7 @@ Instantané de la télémétrie serveur courante.
 | `max_result` | entier ≥ 0 | Meilleur niveau de curseur atteint (voir [le champ `alloc`](#le-champ-alloc)), 0 à 256 (ou 0 à 16 en build `ETERN_PARTS=16`) |
 | `active_threads` | entier ≥ 0 | Nombre de connexions clients actuellement servies (canal de travail **et** de contrôle confondus, cf. [dimensionnement](echanges_client_serveur.md#impact-sur-le-dimensionnement-du-serveur)) |
 | `pruner_checked` / `pruner_removed` | entier ≥ 0 | Toujours `0` côté serveur (ces compteurs n'existent que côté processus pruner ; conservés dans le schéma pour rester alignable avec `control_stats_t` du canal de contrôle) |
-| `queues` | tableau | Une entrée par file de stock **active** (`nb_file_possibility`, configurable au démarrage via `--stock-files`, 10 par défaut, jusqu'à 128 — voir *Server load management* dans AGENTS.md), avec ses trois compteurs par pool. L'ordre des entrées suit l'index de file (0 à `nb_file_possibility - 1`), pas garanti trié par une autre clé |
+| `queues` | tableau | Une entrée par file de stock **active** (`nb_file_possibility`, configurable au démarrage via `--stock-files`, 10 par défaut, jusqu'à 128 — voir [Utilisation](utilisation.md#maîtrise-de-la-charge-serveur---stock-files---rebalance-budget---tcp-timeout)), avec ses trois compteurs par pool. L'ordre des entrées suit l'index de file (0 à `nb_file_possibility - 1`), pas garanti trié par une autre clé |
 
 ### GET /api/v1/status
 
@@ -199,7 +199,7 @@ Instantané de l'état et de la configuration courante.
 | `max_stock_by_thread` | entier | Seuil de stock local par thread avant délégation au serveur |
 | `pruner_batch` | entier | Taille de lot d'échange du pruner courante |
 | `pruner_dfs_budget` | entier | Budget de nœuds courant de la preuve de fermeture bornée du pruner (§4.6b) ; `0` = désactivée |
-| `last_backup_duration_ms` | entier ≥ 0 | Durée (millisecondes) de la DERNIÈRE sauvegarde automatique effectivement exécutée (PR5, [maîtrise de la charge serveur](conception/maitrise_charge_serveur.md)) — englobe tout ce que ce tour a réellement déclenché (stock/analysé, meilleur plateau, clients connus — chacun sauté indépendamment si son propre artefact n'a pas changé). `0` tant qu'aucune sauvegarde n'a encore eu lieu |
+| `last_backup_duration_ms` | entier ≥ 0 | Durée (millisecondes) de la DERNIÈRE sauvegarde automatique effectivement exécutée — englobe tout ce que ce tour a réellement déclenché (stock/analysé, meilleur plateau, clients connus — chacun sauté indépendamment si son propre artefact n'a pas changé). `0` tant qu'aucune sauvegarde n'a encore eu lieu |
 
 Valeurs possibles de `state` :
 
@@ -288,7 +288,7 @@ via cette route, et seulement avec un jeton Bearer valide (voir
 | `sortDescMulti` | Trie toutes les files en parallèle (multi-thread) — équivalent HTTP de `sortDescMulti`, peut prendre du temps sur un gros stock |
 | `split` | Répartit les possibilités entre les différentes files — équivalent HTTP de `split` |
 | `regroup` | Regroupe toutes les possibilités dans une seule file — équivalent HTTP de `regroup` |
-| `rebalance [n]` | Rééquilibre le stock d'un seul pas incrémental (file la plus pleine → la plus vide, `n` possibilités par pool, défaut `rebalance_budget`) — équivalent HTTP de `rebalance`, voir [maitrise_charge_serveur.md](conception/maitrise_charge_serveur.md) |
+| `rebalance [n]` | Rééquilibre le stock d'un seul pas incrémental (file la plus pleine → la plus vide, `n` possibilités par pool, défaut `rebalance_budget`) — équivalent HTTP de `rebalance` |
 
 Ces six dernières commandes (`sortAsc`/`sortDesc`/`sortDescMulti`/`split`/`regroup`/`rebalance`)
 ne remplacent aucun fichier, mais réorganisent en bloc, sous verrou, l'ensemble du

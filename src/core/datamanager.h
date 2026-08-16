@@ -11,8 +11,8 @@
 #include "core/possibility.h"
 #include "core/lifo.h"
 
-// Nombre de files configurable au démarrage (PR4, docs/conception/maitrise_charge_serveur.md
-// — ferme le @todo qui vivait ici). `file_possibility`/`file_possibility_checked`/
+// Nombre de files configurable au démarrage (ferme le @todo qui vivait ici).
+// `file_possibility`/`file_possibility_checked`/
 // `file_possibility_analysed`/`analysed_index` (datamanager.c) sont des tableaux de
 // POINTEURS, alloués/agrandis par `datamanager_configure_stock_files` — le coût mémoire
 // suit le nombre de files RÉELLEMENT actif, jamais un plafond pré-alloué. Deux constantes
@@ -336,9 +336,8 @@ int backup(char *filename);
  */
 int backup_analysed(char *filename);
 /**
- * @brief Sauvegarde le pool analysé et le stock à un instant T unique (PR2,
- *        docs/conception/maitrise_charge_serveur.md) — préférer à
- *        `backup()` + `backup_analysed()` appelées l'une après l'autre,
+ * @brief Sauvegarde le pool analysé et le stock à un instant T unique —
+ *        préférer à `backup()` + `backup_analysed()` appelées l'une après l'autre,
  *        qui laissent une fenêtre entre les deux instants (une possibilité
  *        acquittée dans l'intervalle peut disparaître des deux sauvegardes).
  *        Toutes les files des trois pools sont gelées d'un coup avant la
@@ -467,9 +466,8 @@ int fprint_all_file_analysed(FILE *out, size_t *count);
 int restock_analysed(void);
 
 /**
- * @brief Rééquilibre les deux pools de stock (non vérifié et vérifié)
- *        (PR3, docs/conception/maitrise_charge_serveur.md) : déplace jusqu'à
- *        `max_packets` possibilités PAR POOL de la ou des files les plus
+ * @brief Rééquilibre les deux pools de stock (non vérifié et vérifié) :
+ *        déplace jusqu'à `max_packets` possibilités PAR POOL de la ou des files les plus
  *        pleines vers les plus vides, en enchaînant autant de paires
  *        fullest→emptiest que le budget le permet (pas un seul pas isolé) —
  *        converge donc le plus vite possible pour un budget donné, plutôt

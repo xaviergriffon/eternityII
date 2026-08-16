@@ -427,7 +427,7 @@ static void run_client(const char *hostname, const char *file, int fork_seq)
  * est appelée par la boucle de l'orchestrateur (`fork_orchestrator_run`) :
  * si ce fils y REVENAIT normalement, il reprendrait à tort la boucle
  * d'orchestration. `exit()` plutôt que `_exit()` : garde le flush de
- * couverture gcov/llvm-cov (cf. AGENTS.md, pas de raison ici de s'en passer).
+ * couverture gcov/llvm-cov, pas de raison ici de s'en passer.
  */
 static void spawn_child_body(int fork_seq)
 {

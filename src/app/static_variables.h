@@ -56,8 +56,7 @@
 // Borne le pire cas à DATAMANAGER_TRYLOCK_MAX_SWEEPS * MICRO_SLEEP (µs)
 // ≈ 500 ms, très en-deçà de tcp_timeout par défaut (10 s, DEFAULT_TCP_TIMEOUT
 // ci-dessous) : le client reçoit un stock K=0 ou un INST_ERROR gracieux,
-// déjà géré des deux côtés, plutôt qu'un timeout de connexion. Cf. PR1 de
-// docs/conception/maitrise_charge_serveur.md.
+// déjà géré des deux côtés, plutôt qu'un timeout de connexion.
 #define DATAMANAGER_TRYLOCK_MAX_SWEEPS 5000
 // Cadence de la boucle d'attente active en pause de RÉGULATION (REQUEST_PAUSE,
 // control_step) dans la boucle chaude de recherche (etii_search.c :
@@ -175,8 +174,7 @@
 // un serveur à plus grosse capacité peut relever ce plafond.
 #define EXPAND_MAX_STOCK 100000
 
-// Rééquilibrage incrémental du stock entre files (PR3,
-// docs/conception/maitrise_charge_serveur.md) : valeur par DÉFAUT du nombre
+// Rééquilibrage incrémental du stock entre files : valeur par DÉFAUT du nombre
 // de possibilités déplacées de la file la plus pleine vers la plus vide à
 // chaque tour de `check_server_step` (variable globale `rebalance_budget`,
 // configurable via l'option CLI `--rebalance-budget <n>`). Ce qui rend le
@@ -268,7 +266,7 @@
 // équivalent HTTP `POST /api/v1/clients/stats`) n'a été postée manuellement.
 // Sans ce sondage périodique, `control_session_step` (etii_server.c) ne fait
 // que des CTRL_PING/CTRL_ACK entre deux commandes explicites : le tirage du
-// meilleur plateau (CTRL_GET_BEST_BOARD, cf. AGENTS.md "Control Channel")
+// meilleur plateau (CTRL_GET_BEST_BOARD, cf. docs/echanges_client_serveur.md "Canal de contrôle")
 // est déclenché par la RÉCEPTION d'un CTRL_STATS dont `max_result` dépasse le
 // record serveur connu — sans CTRL_STATS, un nouveau record côté client peut
 // donc rester invisible côté serveur indéfiniment, jusqu'à ce qu'un opérateur
@@ -885,8 +883,7 @@ extern volatile unsigned long long server_shots_per_second;
 
 /**
  * @brief Durée (millisecondes) de la DERNIÈRE sauvegarde automatique
- *        effectivement exécutée (PR5, docs/conception/maitrise_charge_serveur.md)
- *        — englobe tout ce que `check_server_step` déclenche à ce tour :
+ *        effectivement exécutée — englobe tout ce que `check_server_step` déclenche à ce tour :
  *        `consistent_backup` (si stock ou pool analysé a bougé),
  *        `best_board_save`, `known_clients_registry_save` (chacun
  *        indépendamment sauté si son propre artefact n'a pas changé). 0 tant

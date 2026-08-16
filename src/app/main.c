@@ -98,8 +98,7 @@ int main(int argc, const char *argv[]) {
         log_info("recherche : ordre de parcours DYNAMIQUE (ETII_MRV=1), moteur MRV\n");
     }
 
-    // --stock-files (PR4, docs/conception/maitrise_charge_serveur.md) :
-    // appliqué ici, avant tout fork/thread, quel que soit le mode — même
+    // --stock-files : appliqué ici, avant tout fork/thread, quel que soit le mode — même
     // emplacement que les autres options globales. Appel OBLIGATOIRE et
     // INCONDITIONNEL depuis le passage aux pools alloués dynamiquement
     // (tableaux de pointeurs, cf. datamanager.c) : nb_file_possibility vaut 0
@@ -224,8 +223,7 @@ void handle_client(int argc, const char *argv[]) {
     // accessible que dans la pile de cette fonction.
     g_client_server_host = serverIp;
 
-    // PR4 (docs/conception/maitrise_charge_serveur.md) : voir la doc de
-    // ensure_stock_files_cover_forks (app_runtime.{h,c}) pour le raisonnement.
+    // Voir la doc de ensure_stock_files_cover_forks (app_runtime.{h,c}) pour le raisonnement.
     ensure_stock_files_cover_forks(NB_THREADS);
 
     init_childs();

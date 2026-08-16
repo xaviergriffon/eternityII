@@ -5,13 +5,14 @@
 #
 # Scénario : on lance un serveur puis un client SANS --stop-on-solution (les
 # deux processus restent vivants indéfiniment, qu'une solution soit trouvée ou
-# non — cf. AGENTS.md) pour avoir tout le temps voulu de piloter le canal de
-# contrôle. Le processus PARENT du client ouvre, en plus de la connexion de
-# travail de son fork de recherche, sa propre connexion de canal de contrôle ;
-# le serveur pilote ce canal via sa commande console `clientsStats` et via
-# `pause`/`resume` (qui diffusent désormais systématiquement `CTRL_COMMAND`
-# aux sessions actives, en plus de leur effet local — l'ancien
-# `clientsPause`/`clientsResume` a été fusionné dedans, cf. AGENTS.md), et on
+# non — cf. docs/utilisation.md, option --stop-on-solution) pour avoir tout le
+# temps voulu de piloter le canal de contrôle. Le processus PARENT du client
+# ouvre, en plus de la connexion de travail de son fork de recherche, sa propre
+# connexion de canal de contrôle ; le serveur pilote ce canal via sa commande
+# console `clientsStats` et via `pause`/`resume` (qui diffusent désormais
+# systématiquement `CTRL_COMMAND` aux sessions actives, en plus de leur effet
+# local — l'ancien `clientsPause`/`clientsResume` a été fusionné dedans, cf.
+# docs/echanges_client_serveur.md, section canal de contrôle), et on
 # vérifie le round-trip complet à travers les logs des DEUX côtés :
 #
 #   console serveur -> CTRL_COMMAND/CTRL_GET_STATS -> canal de contrôle client
@@ -112,7 +113,7 @@ sleep 1   # laisse le serveur écouter (le client a de toute façon un back-off)
 
 # PAS de --stop-on-solution : les deux processus restent vivants tout le temps
 # nécessaire au pilotage du canal de contrôle, indépendamment de la vitesse de
-# résolution du 4×4 (quasi instantanée) — cf. AGENTS.md.
+# résolution du 4×4 (quasi instantanée).
 "$BIN" client 127.0.0.1 1 1000 "$DATA" <cli_in >client.log 2>&1 &
 CLI_PID=$!
 exec 4>cli_in

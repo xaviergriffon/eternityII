@@ -407,8 +407,7 @@ TEST backup_failure_preserves_previous_file(void)
 }
 
 /* --------------------------------------------------------------------------
- * consistent_backup (PR2, docs/conception/maitrise_charge_serveur.md) :
- * sauvegarde du stock ET du pool analysé à un instant T unique.
+ * consistent_backup : sauvegarde du stock ET du pool analysé à un instant T unique.
  *
  * `maintenance` (posé par consistent_backup avant tout verrou, levé après le
  * dernier déverrouillage) n'est déclaré extern nulle part dans les headers —
@@ -591,8 +590,8 @@ TEST split_datas_balances_within_one_of_target(void)
 }
 
 /* --------------------------------------------------------------------------
- * datamanager_rebalance_step (PR3, docs/conception/maitrise_charge_serveur.md) :
- * rééquilibrage incrémental, file la plus pleine -> la plus vide.
+ * datamanager_rebalance_step : rééquilibrage incrémental, file la plus
+ * pleine -> la plus vide.
  * ------------------------------------------------------------------------ */
 
 TEST rebalance_step_preserves_total_count(void)
@@ -704,7 +703,7 @@ TEST rebalance_step_noop_when_already_balanced(void)
 }
 
 /* --------------------------------------------------------------------------
- * datamanager_configure_stock_files (PR4, docs/conception/maitrise_charge_serveur.md)
+ * datamanager_configure_stock_files
  *
  * nb_file_possibility est un état GLOBAL qui persiste entre tests (comme
  * server_ip ou max_result) : chaque test qui le modifie le restaure à
@@ -3423,8 +3422,7 @@ TEST sort_large_shuffled_stock_both_directions(void)
 void lock_all_file_analysed(void);
 void unlock_all_file_analysed(void);
 
-/* PR1 (docs/conception/maitrise_charge_serveur.md) : les trois boucles
- * ci-dessus n'attendent plus indéfiniment un trylock — au-delà de
+/* Les trois boucles ci-dessus n'attendent plus indéfiniment un trylock — au-delà de
  * DATAMANAGER_TRYLOCK_MAX_SWEEPS tours elles abandonnent (résultat vide /
  * code d'erreur) plutôt que de bloquer le thread serveur qui les appelle.
  * Marge de sécurité ×3 sur le budget nominal pour rester robuste sous ASan

@@ -33,8 +33,7 @@ struct array_part *g_server_rotate_parts = NULL;
 // Nombre de modification des files par client
 unsigned long long *fileUpdates = NULL;
 
-// Nombre de mutations du pool ANALYSÉ par client (PR5,
-// docs/conception/maitrise_charge_serveur.md) : contrepartie de `fileUpdates`
+// Nombre de mutations du pool ANALYSÉ par client : contrepartie de `fileUpdates`
 // (pools stock unchecked/checked) pour la porte de sauvegarde indépendante de
 // `consistent_backup`. Incrémenté à la fois côté attribution (GET/GET_TO_CHECK*,
 // record_batch_analysed_for_client — une possibilité ENTRE dans le pool
@@ -203,8 +202,7 @@ static int owner_control_session_alive(const uint8_t owner_uid[CLIENT_UID_BYTES]
  *
  * @param lastactive    In/out : compteur cumulé de coups joués (fenêtre glissante).
  * @param backup_state  In/out : état des quatre portes d'autobackup indépendantes
- *                      (stock, analysé, meilleur plateau, clients connus — PR5,
- *                      docs/conception/maitrise_charge_serveur.md).
+ *                      (stock, analysé, meilleur plateau, clients connus).
  * @param last_record   In/out : meilleur résultat déjà annoncé (détection de record).
  * @param sleep_time    Durée nominale du tour (secondes), utilisée pour le débit rapporté.
  */
@@ -230,9 +228,8 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
     non_null_possibilities = *lastactive;
 
     // Pool des possibilités vérifiées par les pruners : `nb_file_possibility`
-    // files (PR4, docs/conception/maitrise_charge_serveur.md — configurable,
-    // jusqu'à NB_FILE_POSSIBILITY_MAX), comme le pool standard (trylock pour
-    // servir plusieurs requêtes en parallèle)
+    // files (configurable, jusqu'à NB_FILE_POSSIBILITY_MAX), comme le pool
+    // standard (trylock pour servir plusieurs requêtes en parallèle)
     unsigned long long file_possibility_stock = 0;
     unsigned long long file_possibility_checked_stock = 0;
     unsigned long long file_possibility_analysed_stock = 0;
@@ -323,32 +320,29 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
     // fraîcheur immédiate de cette redistribution interne est différée, jamais
     // une perte de possibilité.
 
-    // Rééquilibrage incrémental (PR3, docs/conception/maitrise_charge_serveur.md) :
-    // budget modeste par tour (rebalance_budget), jamais un chemin chaud — ce
-    // qui garde le temps de blocage de la sauvegarde cohérente (PR2) court en
-    // gardant les files de taille comparable, sans jamais monopoliser un tour.
+    // Rééquilibrage incrémental : budget modeste par tour (rebalance_budget),
+    // jamais un chemin chaud — ce qui garde le temps de blocage de la
+    // sauvegarde cohérente court en gardant les files de taille comparable,
+    // sans jamais monopoliser un tour.
     datamanager_rebalance_step(rebalance_budget);
 
     unsigned long long best_board_current = (unsigned long long)best_board_result(&g_server_best_board);
     unsigned long long known_clients_current = known_clients_registry_mutation_count();
 
-    // Porte de sauvegarde indépendante PAR ARTEFACT (PR5, docs/conception/
-    // maitrise_charge_serveur.md) : should_autobackup() décide, sans écrire,
-    // si CET artefact a une mutation en attente après au moins 6 tours
-    // (~60s). Avant cette PR, une seule porte (basée uniquement sur le trafic
-    // stock) gouvernait les quatre écritures ensemble -- réécrivant
-    // best_board/known_clients même sans le moindre changement de leur côté,
-    // et symétriquement pouvant laisser un record best_board distant (rapporté
-    // par un client, jamais local) non sauvegardé indéfiniment si le stock
-    // restait inactif. Le stock et le pool analysé restent réunis dans le
-    // MÊME appel consistent_backup dès que L'UN DES DEUX a une mutation en
-    // attente : cohérence à l'instant T préservée (PR2), seule la DÉCISION
-    // d'écrire devient indépendante par artefact -- pas encore la portée plus
-    // fine « par file de stock » envisagée en composition avec PR2 (laissée
-    // en proposition, cf. le document de conception : le risque d'un drapeau
-    // « propre » erroné sur un site de mutation oublié -- un fichier
-    // silencieusement périmé -- l'emporte sur le gain, l'essentiel du
-    // bénéfice de cette PR étant déjà obtenu ici).
+    // Porte de sauvegarde indépendante PAR ARTEFACT : should_autobackup()
+    // décide, sans écrire, si CET artefact a une mutation en attente après au
+    // moins 6 tours (~60s) — sans cette indépendance, toute activité stock
+    // réécrirait best_board/known_clients même sans le moindre changement de
+    // leur côté, et symétriquement un record best_board distant (rapporté par
+    // un client, jamais local) pourrait rester non sauvegardé indéfiniment si
+    // le stock restait inactif. Le stock et le pool analysé restent réunis
+    // dans le MÊME appel consistent_backup dès que L'UN DES DEUX a une
+    // mutation en attente : cohérence à l'instant T préservée, seule la
+    // DÉCISION d'écrire devient indépendante par artefact -- pas la portée
+    // plus fine « par file de stock » (drapeau « modifiée » posé/levé à
+    // chaque site de mutation du stock) : le risque d'un drapeau « propre »
+    // erroné sur un site oublié -- un fichier silencieusement périmé --
+    // l'emporte sur le gain, l'essentiel du bénéfice étant déjà obtenu ici.
     int do_stock = should_autobackup(&backup_state->stock.lastBack, &backup_state->stock.lastUpdates, clientsFileUpdates);
     int do_analysed = should_autobackup(&backup_state->analysed.lastBack, &backup_state->analysed.lastUpdates, analysedUpdates);
     int do_best_board = should_autobackup(&backup_state->best_board.lastBack, &backup_state->best_board.lastUpdates, best_board_current);
@@ -360,8 +354,7 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
         clock_gettime(CLOCK_MONOTONIC, &backup_start);
 
         if (do_stock || do_analysed) {
-            // Instant T unique pour le stock et le pool analysé (PR2, cf.
-            // docs/conception/maitrise_charge_serveur.md) : backup()+backup_analysed()
+            // Instant T unique pour le stock et le pool analysé : backup()+backup_analysed()
             // appelées séparément laisseraient une fenêtre entre les deux instants.
             int rba = 0;
             int rb = consistent_backup("./temp.back", "./temp_analysed.back", &rba);
@@ -464,8 +457,7 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent)
  * un client plus ancien, ou dont le hello n'est pas encore arrivé, sert la
  * possibilité sans attribution — exactement le comportement d'avant cette PR.
  *
- * PR1 (docs/conception/maitrise_charge_serveur.md) : `add_possibility_analysed[_owned]`
- * peut désormais échouer (pool analysé intégralement verrouillé par une
+ * `add_possibility_analysed[_owned]` peut échouer (pool analysé intégralement verrouillé par une
  * maintenance en cours, au-delà d'un délai borné) plutôt que bloquer
  * indéfiniment. Le résultat est propagé à l'appelant, qui NE DOIT PAS servir
  * cette possibilité au client dans ce cas — sinon elle échapperait au bail
@@ -489,7 +481,7 @@ int record_possibility_analysed_for_client(client_t *client, struct possibility_
 /**
  * @brief Enregistre chaque possibilité d'un lot juste extrait du stock comme
  *        « en cours d'analyse », et retire du lot celles dont
- *        l'enregistrement a échoué (PR1, docs/conception/maitrise_charge_serveur.md).
+ *        l'enregistrement a échoué.
  *
  * Factorise la boucle auparavant dupliquée aux trois points de service
  * (`INST_GET` / `INST_GET_TO_CHECK` / `INST_GET_TO_CHECK_BATCH`). Une

@@ -416,7 +416,7 @@ int orchestrator_apply_restart_config(struct search_parts *shared_parts);
  *        événement (console, canal de contrôle, HTTP…).
  *
  * Trouvé nécessaire via des tests manuels réels (invisible en local, reproduit
- * de façon fiable sous `make test-docker`, cf. AGENTS.md) : quand cette
+ * de façon fiable sous `make test-docker`) : quand cette
  * initialisation faisait partie de `fork_orchestrator_run` elle-même — appelée
  * APRÈS le lancement du thread console dans `handle_client` — un opérateur (ou
  * un banc de test piloté par FIFO) tapant `start` assez vite gagnait la course

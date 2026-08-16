@@ -254,8 +254,7 @@ int known_clients_registry_snapshot(known_client_info_t *out, int max);
 int known_clients_registry_count(void);
 
 /**
- * @brief Compteur monotone de mutations persistées du registre (PR5,
- *        docs/conception/maitrise_charge_serveur.md) : incrémenté à chaque
+ * @brief Compteur monotone de mutations persistées du registre : incrémenté à chaque
  *        appel de `known_clients_registry_on_connect`/`_on_stats`/
  *        `_on_disconnect` qui modifie réellement une entrée (jamais sur un
  *        rejet — registre plein, identité NULL, machine/session introuvable).

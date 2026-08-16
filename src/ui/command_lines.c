@@ -1804,8 +1804,8 @@ int restockanalysed_interpreter(void) {
 }
 
 /**
- * @brief Interpréteur de `rebalance [n]` (PR3, docs/conception/maitrise_charge_serveur.md) :
- *        un seul pas incrémental de rééquilibrage du stock (file la plus
+ * @brief Interpréteur de `rebalance [n]` : un seul pas incrémental de
+ *        rééquilibrage du stock (file la plus
  *        pleine vers la plus vide), même appel que celui automatique de
  *        chaque tour serveur (`check_server_step`) mais déclenché
  *        immédiatement plutôt que d'attendre le prochain tour.
