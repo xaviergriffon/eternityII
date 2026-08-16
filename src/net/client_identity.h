@@ -133,8 +133,7 @@ int client_identity_hex_decode(const char *hex, uint8_t *out, size_t n);
 /**
  * @brief Tire `n` octets aléatoires cryptographiquement sûrs (`getentropy(2)`,
  *        disponible sans dépendance supplémentaire sur macOS et Linux/glibc
- *        récents — cf. AGENTS.md, "compilable partout avec un minimum de
- *        dépendances"). `n` est plafonné à 256 octets par `getentropy`, très
+ *        récents). `n` est plafonné à 256 octets par `getentropy`, très
  *        au-delà des besoins de ce module (16 octets).
  *
  * @param out Tampon destination.

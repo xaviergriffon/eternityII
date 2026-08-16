@@ -260,9 +260,8 @@ void resolve_client_label(const char *cli_label, const char *hostname_or_null,
 void init_client_identity(void);
 
 /**
- * @brief Garantit `nb_file_possibility >= nb_threads` avant tout fork (PR4,
- *        docs/conception/maitrise_charge_serveur.md) — voir la doc au corps
- *        de la fonction (`src/app/app_runtime.c`) pour le raisonnement complet.
+ * @brief Garantit `nb_file_possibility >= nb_threads` avant tout fork — voir la
+ *        doc au corps de la fonction (`src/app/app_runtime.c`) pour le raisonnement complet.
  *
  * @param nb_threads Nombre de forks de recherche demandés (`NB_THREADS`).
  * @return           1 si un ajustement a eu lieu (log déjà émis), 0 sinon.

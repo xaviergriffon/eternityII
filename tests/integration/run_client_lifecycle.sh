@@ -5,7 +5,7 @@
 #
 # Scénario : le client démarre SANS fils (--config-file), lit un fichier de
 # configuration présent au boot -> auto-démarrage ~5 s plus tard (ORCH_COUNTDOWN,
-# cf. AGENTS.md/fork_orchestrator.h). Le serveur pilote ensuite ce client
+# cf. docs/utilisation.md « Mode client » et fork_orchestrator.h). Le serveur pilote ensuite ce client
 # EXCLUSIVEMENT à distance, via sa propre console et `clientsCommand` (canal de
 # contrôle v9/CTRL_COMMAND) -- jamais en tapant directement dans la console du
 # client, pour prouver que "start"/"stopForks"/"configApply"/"config" sont bien

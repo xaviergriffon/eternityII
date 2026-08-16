@@ -151,8 +151,7 @@ static const cli_help_topic_t cli_topics[] = {
 	  "--stock-files <n>",
 	  "Nombre de files de stock au démarrage (défaut NB_FILE_POSSIBILITY_DEFAULT, 10).",
 	  "Un plus grand nombre de files réduit le temps d'écriture par file de la\n"
-	  "sauvegarde cohérente (PR2) et affine la granularité du rééquilibrage\n"
-	  "incrémental (PR3) — voir docs/conception/maitrise_charge_serveur.md.\n"
+	  "sauvegarde cohérente et affine la granularité du rééquilibrage incrémental.\n"
 	  "Plafonné à NB_FILE_POSSIBILITY_MAX (128). Fixé une seule fois au\n"
 	  "démarrage, jamais à chaud. Valeur absente ou <= 0 : ignorée (garde le\n"
 	  "défaut)." },
@@ -161,8 +160,7 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Serveur : nombre de possibilités rééquilibrées entre files à chaque tour (10 s).",
 	  "Défaut REBALANCE_BUDGET_DEFAULT (1000) — déplace la file la plus pleine vers\n"
 	  "la plus vide, par petits lots, pour que les files restent de taille\n"
-	  "comparable (temps de blocage court à la sauvegarde, PR2/PR3, cf.\n"
-	  "docs/conception/maitrise_charge_serveur.md). Valeur absente ou <= 0 :\n"
+	  "comparable (temps de blocage court à la sauvegarde). Valeur absente ou <= 0 :\n"
 	  "ignorée (garde le défaut)." },
 	{ "--tcp-timeout",
 	  "--tcp-timeout <n>",
@@ -833,8 +831,7 @@ void resolve_client_label(const char *cli_label, const char *hostname_or_null,
 }
 
 /**
- * @brief Garantit `nb_file_possibility >= nb_threads` avant tout fork (PR4,
- *        docs/conception/maitrise_charge_serveur.md).
+ * @brief Garantit `nb_file_possibility >= nb_threads` avant tout fork.
  *
  * Le pool analysé est indexé par `fork_seq` côté client
  * (`add_possibility_analysed(p, thread)`, `src/app/etii_client.c`) : un
@@ -1279,7 +1276,7 @@ void *server_tcp(void *param) {
                             // garantit d'ailleurs pas la terminaison NUL en
                             // cas de troncature (même piège déjà rencontré
                             // sur http_known_clients_collect/http_clients_collect,
-                            // cf. AGENTS.md).
+                            // cf. docs/tests_et_ci.md « Compilation croisée ARM »).
                             memcpy(last_unknown_sender, claddr->sun_path,
                                    sizeof(last_unknown_sender));
                             log_error("stats IPC : datagramme reçu de \"%s\", "

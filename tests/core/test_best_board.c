@@ -1,6 +1,6 @@
 /*
  * Tests unitaires de best_board.c (mémorisation de la représentation du
- * plateau au meilleur résultat, cf. AGENTS.md — statistiques).
+ * plateau au meilleur résultat).
  *
  * Seule dépendance de link : aucune (best_board.c n'a besoin que de pthread).
  */

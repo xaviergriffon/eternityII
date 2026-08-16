@@ -36,8 +36,8 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'au niveau de curseur `N` (anti-famine, voir ci-dessous) |
 | `--expand-max-stock N` | `EXPAND_MAX_STOCK` (100000) | Plafonne en NOMBRE de possibilités la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
 | `--expand-max-levels N` | `EXPAND_MAX_LEVELS` (4) | Plafonne en NOMBRE DE PASSES la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
-| `--stock-files N` | `NB_FILE_POSSIBILITY_DEFAULT` (10) | Nombre de files de stock, fixé une seule fois au démarrage (jamais à chaud), plafonné à `NB_FILE_POSSIBILITY_MAX` (128) — voir [maîtrise de la charge serveur](conception/maitrise_charge_serveur.md) |
-| `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir [maîtrise de la charge serveur](conception/maitrise_charge_serveur.md) |
+| `--stock-files N` | `NB_FILE_POSSIBILITY_DEFAULT` (10) | Nombre de files de stock, fixé une seule fois au démarrage (jamais à chaud), plafonné à `NB_FILE_POSSIBILITY_MAX` (128) — voir ci-dessous |
+| `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir ci-dessous |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
 | `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
@@ -58,13 +58,19 @@ Exemples :
 
 Sous forte charge (gros stock, sauvegarde volumineuse), une sauvegarde qui immobilise
 longtemps les verrous du stock peut affamer les clients connectés jusqu'à leur timeout TCP.
-`--stock-files` augmente le nombre de files pour réduire le temps d'écriture par file de la
-sauvegarde cohérente (à instant T unique, libérée progressivement, file par file) ;
-`--rebalance-budget` règle la vitesse à laquelle le stock est rééquilibré entre ces files
-(file la plus pleine → la plus vide, borné en temps, disponible aussi via la commande
-console `rebalance [n]` — voir [Console interactive](console.md)) ; `--tcp-timeout`
-(ci-dessous) élargit la marge côté réseau. Détails, mesures et arbitrages :
-[docs/conception/maitrise_charge_serveur.md](conception/maitrise_charge_serveur.md).
+La sauvegarde automatique gèle toutes les files des deux pools (stock et analysé) à un
+instant T unique, puis les écrit et les libère progressivement, une file à la fois — la
+fenêtre de blocage total vaut donc le temps d'écriture d'**une seule** file, pas de la
+sauvegarde entière. `--stock-files` augmente le nombre de files pour réduire ce temps
+d'écriture par file ; `--rebalance-budget` règle la vitesse à laquelle le stock est
+rééquilibré entre ces files (file la plus pleine → la plus vide, borné en temps, disponible
+aussi via la commande console `rebalance [n]` — voir [Console interactive](console.md)), ce
+qui maintient des files de taille comparable et rend le gain de `--stock-files` effectif ;
+`--tcp-timeout` (ci-dessous) élargit en plus la marge côté réseau. Chaque artefact sauvegardé
+(stock, pool analysé, meilleur plateau connu, registre des clients connus) n'est réécrit que
+si son propre contenu a changé depuis sa dernière écriture — la durée de la dernière
+sauvegarde effectivement exécutée est exposée par `GET /api/v1/status`
+(`last_backup_duration_ms`, voir [API HTTP REST admin](api_http_rest.md)).
 
 > ⚠️ **Dimensionnement de `nb_threads`** : chaque processus client connecté ouvre,
 > en plus des connexions de travail de ses forks, une connexion de
@@ -272,10 +278,10 @@ Restart=on-failure
 Acceptée par tous les modes réseau, à n'importe quelle position : règle le timeout
 d'inactivité (secondes) des sockets TCP de travail (`SO_RCVTIMEO`/`SO_SNDTIMEO`), des deux
 côtés de la connexion. Défaut `DEFAULT_TCP_TIMEOUT` (10 s). Une maintenance serveur longue
-(sauvegarde, restore, tri) reste largement sous ce budget par construction (voir
-[maîtrise de la charge serveur](conception/maitrise_charge_serveur.md)) ; cette option reste
-une soupape pour un réseau plus lent ou un stock plus volumineux. Valeur absente ou `<= 0` :
-ignorée (garde le défaut).
+(sauvegarde, restore, tri) reste largement sous ce budget par construction (les boucles
+d'attente de `datamanager.c` abandonnent après un délai borné plutôt que de tourner
+indéfiniment) ; cette option reste une soupape pour un réseau plus lent ou un stock plus
+volumineux. Valeur absente ou `<= 0` : ignorée (garde le défaut).
 
 ```sh
 ./eternityII server 80 --tcp-timeout 30 data/pieces.csv

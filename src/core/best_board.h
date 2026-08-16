@@ -6,8 +6,7 @@
  * Jusqu'ici les statistiques (`max_result`, `client_statistics`,
  * `control_stats_t`, l'API HTTP) n'exposaient que le NOMBRE de pièces
  * placées au record — jamais l'agencement qui l'a produit, qui continue
- * d'être muté par le backtracking immédiatement après (cf. AGENTS.md,
- * section « Statistiques »). Ce module comble ce manque avec une primitive
+ * d'être muté par le backtracking immédiatement après. Ce module comble ce manque avec une primitive
  * unique, réutilisée à trois échelles indépendantes qui n'ont jamais
  * connaissance l'une de l'autre (chacune instancie son propre `best_board_t`,
  * cf. les globales `extern` ci-dessous) :

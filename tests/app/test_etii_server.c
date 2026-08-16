@@ -1470,8 +1470,8 @@ TEST check_server_step_reports_basic_stats(void)
 
 /* Régression : `report` (check_server_step) était calloc'é à une taille FIXE
  * (4000 octets) alors que `table` (build_file_queues_table) grandit avec
- * `nb_file_possibility` (PR4, docs/conception/maitrise_charge_serveur.md —
- * jusqu'à NB_FILE_POSSIBILITY_MAX = 128, ~8,4 Kio) : `strcat(report, table)`
+ * `nb_file_possibility` (jusqu'à NB_FILE_POSSIBILITY_MAX = 128, ~8,4 Kio) :
+ * `strcat(report, table)`
  * débordait, détecté par `_FORTIFY_SOURCE` en SIGILL sur une exécution réelle
  * avec `--stock-files` élevé (trouvé en vérifiant le binaire réel, pas par ce
  * test seul -- mais ASan sur cette même scène aurait suffi à l'attraper).

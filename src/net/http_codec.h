@@ -287,19 +287,18 @@ typedef struct {
     int max_stock_by_thread;
     int pruner_batch;
     int pruner_dfs_budget;
-    /// Durée (ms) de la dernière sauvegarde automatique exécutée (PR5,
-    /// docs/conception/maitrise_charge_serveur.md), 0 si aucune n'a encore eu lieu.
+    /// Durée (ms) de la dernière sauvegarde automatique exécutée, 0 si aucune n'a encore eu lieu.
     unsigned long long last_backup_duration_ms;
 } http_status_view_t;
 
 /**
- * @brief Sérialise `view` en JSON dans `buf` (cf. schéma documenté dans AGENTS.md).
+ * @brief Sérialise `view` en JSON dans `buf` (cf. schéma documenté dans docs/api_http_rest.md).
  * @return Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
  */
 int http_json_format_stats(char *buf, size_t size, const http_stats_view_t *view);
 
 /**
- * @brief Sérialise `view` en JSON dans `buf` (cf. schéma documenté dans AGENTS.md).
+ * @brief Sérialise `view` en JSON dans `buf` (cf. schéma documenté dans docs/api_http_rest.md).
  * @return Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
  */
 int http_json_format_status(char *buf, size_t size, const http_status_view_t *view);
@@ -334,7 +333,7 @@ typedef struct {
 } http_stock_distribution_view_t;
 
 /**
- * @brief Sérialise `view` en JSON dans `buf` (cf. schéma documenté dans AGENTS.md).
+ * @brief Sérialise `view` en JSON dans `buf` (cf. schéma documenté dans docs/api_http_rest.md).
  *
  * **Seuls les niveaux non vides sont listés** : sur les 257 niveaux possibles
  * (`STOCK_DISTRIBUTION_LEVELS` en build 256 pièces), un serveur réel n'en
@@ -414,7 +413,7 @@ typedef struct {
 
 /**
  * @brief Sérialise un tableau de sessions de contrôle actives en JSON dans `buf`
- *        (cf. schéma documenté dans AGENTS.md).
+ *        (cf. schéma documenté dans docs/api_http_rest.md).
  *
  * @param buf    Tampon destination.
  * @param size   Taille de `buf`.
@@ -466,7 +465,7 @@ typedef struct {
 
 /**
  * @brief Sérialise un tableau de machines connues en JSON dans `buf` (cf.
- *        schéma documenté dans AGENTS.md).
+ *        schéma documenté dans docs/api_http_rest.md).
  *
  * @param buf    Tampon destination.
  * @param size   Taille de `buf`.
@@ -521,7 +520,7 @@ typedef struct {
 } http_best_board_view_t;
 
 /**
- * @brief Sérialise `view` en JSON dans `buf` (cf. schéma documenté dans AGENTS.md).
+ * @brief Sérialise `view` en JSON dans `buf` (cf. schéma documenté dans docs/api_http_rest.md).
  * @return Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
  */
 int http_json_format_best_board(char *buf, size_t size, const http_best_board_view_t *view);

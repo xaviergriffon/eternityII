@@ -75,14 +75,14 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `removeNoNext` | Supprime les possibilités sans continuation possible (élagage ; alias : `rmnonext`, `prune`) |
 | `expand N` | Développe le stock jusqu'au niveau de curseur `N` ([anti-famine](utilisation.md#expansion-du-stock-au-démarrage---expand-level-anti-famine), borné à `expand_max_levels` passes (défaut 4, réglable via `--expand-max-levels`) / `expand_max_stock` possibilités (défaut 100000, réglable via `--expand-max-stock`)) |
 | `restockAnalysed` | Remet les possibilités en cours d'analyse dans le stock |
-| `rebalance [n]` | Rééquilibre le stock d'un seul pas incrémental (file la plus pleine → la plus vide, `n` possibilités par pool, défaut `rebalance_budget` réglable via `--rebalance-budget`) — le même appel que celui automatique de chaque tour serveur (10 s), déclenché immédiatement ; contrairement à `split`, ne redistribue pas intégralement en un appel (voir [maitrise_charge_serveur.md](conception/maitrise_charge_serveur.md)) |
+| `rebalance [n]` | Rééquilibre le stock d'un seul pas incrémental (file la plus pleine → la plus vide, `n` possibilités par pool, défaut `rebalance_budget` réglable via `--rebalance-budget`) — le même appel que celui automatique de chaque tour serveur (10 s), déclenché immédiatement ; contrairement à `split`, ne redistribue pas intégralement en un appel |
 | `min` | Affiche le niveau minimum dans les files |
 
 ### Sauvegarde & restauration
 
 | Commande | Description |
 |---|---|
-| `backup` | Sauvegarde les files de possibilités dans `eternityII.back` et `eternityII-in_analyse.back` (stock et pool analysé capturés à un instant unique — voir [maitrise_charge_serveur.md](conception/maitrise_charge_serveur.md)), ainsi que le meilleur plateau connu (`eternityII-best_board.back`) et le cumul par machine (`eternityII-known_clients.back`, voir [Registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus)) |
+| `backup` | Sauvegarde les files de possibilités dans `eternityII.back` et `eternityII-in_analyse.back` (stock et pool analysé capturés à un instant T unique, gelés puis libérés progressivement file par file), ainsi que le meilleur plateau connu (`eternityII-best_board.back`) et le cumul par machine (`eternityII-known_clients.back`, voir [Registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus)) — chaque fichier n'est réécrit que si son propre contenu a changé depuis la dernière écriture |
 | `restore [fichier [fichier_analyse]]` | Restaure les files depuis les fichiers `.back` (remplace le stock) ; recharge aussi, sans argument dédié, le meilleur plateau connu et le cumul par machine (absence tolérée) |
 | `import` | Importe des possibilités depuis les fichiers `.back` dans les files courantes |
 | `loadJson` | Importe une possibilité depuis une chaîne JSON (équivalent de `import` pour le format JSON) |

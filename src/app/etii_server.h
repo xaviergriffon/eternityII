@@ -43,9 +43,8 @@ typedef struct
 } client_t;
 
 /**
- * @brief État de la porte d'autobackup indépendante pour UN artefact (PR5,
- *        docs/conception/maitrise_charge_serveur.md), consultée/mise à jour
- *        par `should_autobackup`.
+ * @brief État de la porte d'autobackup indépendante pour UN artefact,
+ *        consultée/mise à jour par `should_autobackup`.
  */
 typedef struct
 {
@@ -208,9 +207,8 @@ char *build_file_queues_table(unsigned long long *out_unchecked,
  * pour être testable hors thread (comme `communicate_with_client_step`) et
  * pour n'écrire cette décision qu'à un seul endroit.
  *
- * PR1 (docs/conception/maitrise_charge_serveur.md) : peut échouer (pool
- * analysé intégralement verrouillé par une maintenance en cours, au-delà
- * d'un délai borné) — l'appelant NE DOIT PAS servir cette possibilité au
+ * Peut échouer (pool analysé intégralement verrouillé par une maintenance en
+ * cours, au-delà d'un délai borné) — l'appelant NE DOIT PAS servir cette possibilité au
  * client dans ce cas, sous peine de l'échapper au bail (PR7) et à
  * `requeue_last_sent_possibility`.
  *

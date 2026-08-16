@@ -13,8 +13,7 @@
 #include "net/etii_protocol.h"
 #include "core/readdata.h"
 
-// PR4 (docs/conception/maitrise_charge_serveur.md) : ces trois pools et
-// analysed_index plus bas sont des tableaux de POINTEURS, (ré)alloués par
+// Ces trois pools et analysed_index plus bas sont des tableaux de POINTEURS, (ré)alloués par
 // datamanager_configure_stock_files — le coût mémoire suit nb_file_possibility,
 // jamais un plafond pré-alloué (cf. le commentaire de NB_FILE_POSSIBILITY_MAX,
 // datamanager.h). Valent NULL/0 tant que datamanager_configure_stock_files n'a
@@ -457,8 +456,7 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 			// via addpossibility avant même d'atteindre ce wraparound. Même
 			// motif que add_possibility_analysed.
 			usleep(MICRO_SLEEP);
-			// Sortie bornée (PR1, docs/conception/maitrise_charge_serveur.md) :
-			// au-delà de DATAMANAGER_TRYLOCK_MAX_SWEEPS tours consécutifs sans
+			// Sortie bornée : au-delà de DATAMANAGER_TRYLOCK_MAX_SWEEPS tours consécutifs sans
 			// verrouiller la moindre file, abandonner plutôt que de bloquer
 			// indéfiniment le thread serveur qui sert ce client (et par
 			// ricochet la connexion TCP jusqu'à son timeout). Rien n'a été
@@ -862,8 +860,7 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
  *                   sciemment absente : côté client, ou possibilité restaurée).
  * @return           0 si ajouté, -1 si toutes les files sont restées
  *                    verrouillées au-delà de DATAMANAGER_TRYLOCK_MAX_SWEEPS
- *                    tours (PR1, docs/conception/maitrise_charge_serveur.md —
- *                    typiquement une maintenance en cours sur le pool
+ *                    tours (typiquement une maintenance en cours sur le pool
  *                    analysé : sauvegarde, restore, tri...). Rien n'est
  *                    inséré dans ce cas.
  */
@@ -1120,7 +1117,7 @@ int restock_analysed(void) {
 /**
  * @brief Rééquilibre UN pool (non vérifié ou vérifié) d'un pas incrémental :
  *        déplace jusqu'à `max_packets` possibilités de la file la plus
- *        pleine vers la plus vide (PR3, docs/conception/maitrise_charge_serveur.md).
+ *        pleine vers la plus vide.
  *
  * Lecture des tailles en O(1) (`.file.size`, sans verrou — même convention
  * que `file_size`/`datas_size`) pour choisir la file source/destination,
@@ -1367,8 +1364,7 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
  * Extrait jusqu'à `max_result` possibilités depuis la première file non vide trouvée.
  * Réessaie sur les autres files si la première est vide.
  *
- * Sortie bornée (PR1, docs/conception/maitrise_charge_serveur.md) : si
- * `pool` reste intégralement verrouillé au-delà de
+ * Sortie bornée : si `pool` reste intégralement verrouillé au-delà de
  * DATAMANAGER_TRYLOCK_MAX_SWEEPS tours (maintenance en cours — sauvegarde,
  * restore, tri...), abandonne avec `result->size == 0` plutôt que de tourner
  * indéfiniment. Indiscernable, côté appelant, d'un pool réellement vide —
@@ -1659,7 +1655,7 @@ int backup(char *filename)
 	// Tampon explicite (1 Mio) : le tampon stdio par défaut ramène un stock de
 	// plusieurs millions de possibilités à quelques milliers d'appels write()
 	// au lieu d'un par possibilité — significatif car ces write() ont lieu
-	// sous lock_all_file() (voir PR1, docs/conception/maitrise_charge_serveur.md).
+	// sous lock_all_file().
 	setvbuf(f, NULL, _IOFBF, 1 << 20);
 
 	int write_error = 0;
@@ -1821,9 +1817,8 @@ int backup_analysed(char *filename)
 }
 
 /**
- * @brief Sauvegarde le pool analysé et le stock à un instant T UNIQUE (PR2,
- *        docs/conception/maitrise_charge_serveur.md) — corrige un trou
- *        préexistant de `backup()`/`backup_analysed()` appelées l'une après
+ * @brief Sauvegarde le pool analysé et le stock à un instant T UNIQUE — corrige
+ *        un trou préexistant de `backup()`/`backup_analysed()` appelées l'une après
  *        l'autre : une possibilité acquittée entre les deux instants
  *        disparaissait des deux sauvegardes (le parent déjà retiré du pool
  *        analysé, ses enfants pas encore présents dans le stock capturé plus
@@ -2674,8 +2669,7 @@ int split_datas_nolock(int nbsplit)
 
 int split_datas(void)
 {
-	// PR3 (docs/conception/maitrise_charge_serveur.md) : rééquilibrage
-	// incrémental (datamanager_rebalance_step) au lieu de regroup_pool_nolock
+	// Rééquilibrage incrémental (datamanager_rebalance_step) au lieu de regroup_pool_nolock
 	// + 3 copies par paquet sous verrou global (split_pool_nolock ci-dessus)
 	// — inexploitable à l'échelle de plusieurs millions de possibilités.
 	// Budget INT_MAX : datamanager_rebalance_step boucle désormais en interne
