@@ -54,6 +54,7 @@ int expand_max_levels = EXPAND_MAX_LEVELS;
 int rebalance_budget = REBALANCE_BUDGET_DEFAULT;
 int stock_files_requested = 0;
 int stock_max_ram_mb = 0;
+const char *stock_spill_dir = "./eternityii-spill";
 
 int headless_mode = 0;
 
@@ -353,6 +354,17 @@ int parse_cli_options(int argc, const char *argv[])
                 if (mo > 0) {
                     stock_max_ram_mb = mo;
                 }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--stock-spill-dir") == 0) {
+            // Option valuée, même schéma que --machine-uid-file : pointeur
+            // direct dans argv, jamais copié. Création/purge effective du
+            // répertoire différée à stock_spill_configure
+            // (core/stock_spill.h), appelée par runserver (app/etii_server.c)
+            // -- aucune dépendance sur core/stock_spill.h dans ce fichier,
+            // aucune I/O ici.
+            if (r + 1 < argc) {
+                stock_spill_dir = argv[r + 1];
                 r++; // consomme aussi la valeur
             }
         } else if (strcmp(argv[r], "--tcp-timeout") == 0) {

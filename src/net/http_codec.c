@@ -404,10 +404,13 @@ int http_json_format_stats(char *buf, size_t size, const http_stats_view_t *view
         "\"active_threads\":%llu,"
         "\"pruner_checked\":%llu,"
         "\"pruner_removed\":%llu,"
+        "\"stock_spilled_packets\":%llu,"
+        "\"stock_spill_segments\":%llu,"
         "\"queues\":[",
         view->shots_per_second, view->possibility_stock, view->checked_stock,
         view->analysed_stock, view->max_result, view->active_threads,
-        view->pruner_checked, view->pruner_removed);
+        view->pruner_checked, view->pruner_removed,
+        view->stock_spilled_packets, view->stock_spill_segments);
     if (written < 0 || (size_t)written >= size - offset) {
         return -1;
     }

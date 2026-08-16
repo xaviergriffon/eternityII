@@ -587,6 +587,25 @@ extern int stock_files_requested;
 extern int stock_max_ram_mb;
 
 /**
+ * @brief Répertoire de débordement sur disque du stock serveur (option CLI
+ *        `--stock-spill-dir <chemin>`, PR2 — débordement, distinct de PR1
+ *        ci-dessus qui ne fait que refuser au-delà du plafond).
+ *
+ * Défaut `STOCK_SPILL_DIR_DEFAULT` (`"./eternityii-spill"`, `core/
+ * stock_spill.h`), même convention de chemin littéral que
+ * `machine_uid_file_path` : jamais alloué, jamais libéré, un pointeur
+ * `argv` le remplace directement si l'option est fournie (jamais copié).
+ * Aucune E/S ici — la création/purge effective du répertoire est différée à
+ * `stock_spill_configure` (`core/stock_spill.h`), appelée UNIQUEMENT depuis
+ * `runserver` (`app/etii_server.c`) : contrairement à `stock_max_ram_mb`,
+ * ce chemin n'a de sens que côté serveur (le stock local d'un client/pruner
+ * n'a pas de thread de débordement) — jamais lu ni appliqué sur les autres
+ * rôles. Position-indépendant, retiré d'argv par `parse_cli_options` avant
+ * le parsing positionnel.
+ */
+extern const char *stock_spill_dir;
+
+/**
  * @brief 1 si la console interactive (lecture de stdin) ne doit pas démarrer
  *        (option CLI `--headless`).
  *
@@ -1125,12 +1144,13 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
  * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--expand-max-stock <n>`,
  * `--expand-max-levels <n>`, `--http-port <n>`, `--http-token-file <chemin>`,
  * `--name <label>`, `--machine-uid-file <chemin>`, `--config-file <chemin>`,
- * `--stock-files <n>`, `--stock-max-ram <mo>`, `--rebalance-budget <n>`,
- * `--tcp-timeout <n>`, `--gpu`, `--headless` et `--help`/`-h` (positionne
- * respectivement `stop_on_solution`, `expand_min_level`, `expand_max_stock`,
- * `expand_max_levels`, `HTTP_PORT`, `HTTP_TOKEN_FILE`, `client_label`,
- * `machine_uid_file_path`, `client_config_file_path`, `stock_files_requested`,
- * `stock_max_ram_mb`, `rebalance_budget`, `tcp_timeout`, `gpu_requested`,
+ * `--stock-files <n>`, `--stock-max-ram <mo>`, `--stock-spill-dir <chemin>`,
+ * `--rebalance-budget <n>`, `--tcp-timeout <n>`, `--gpu`, `--headless` et
+ * `--help`/`-h` (positionne respectivement `stop_on_solution`,
+ * `expand_min_level`, `expand_max_stock`, `expand_max_levels`, `HTTP_PORT`,
+ * `HTTP_TOKEN_FILE`, `client_label`, `machine_uid_file_path`,
+ * `client_config_file_path`, `stock_files_requested`, `stock_max_ram_mb`,
+ * `stock_spill_dir`, `rebalance_budget`, `tcp_timeout`, `gpu_requested`,
  * `headless_mode` et `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.

@@ -456,14 +456,13 @@ incidents required it, and it was a materially bigger design question than bound
 gating a write — the RAM-cap half is now implemented (below), the disk-spillover and
 delta-backup halves are not.
 
-### RAM cap on the possibility stock (`--stock-max-ram`) — cap only, disk spillover not yet implemented
+### RAM cap on the possibility stock (`--stock-max-ram`) — PR1 of 3
 
 A follow-up series, planned in three PRs (a hard cap that refuses growth once the budget is
 reached; spilling the overflow to per-file disk segments; making backup/restore coherent with
-those segments) of which **only the first is implemented**. This section documents PR1 only —
-there is no disk spillover in this codebase yet: once `--stock-max-ram` is reached, the server
-simply refuses further growth (existing degrade-gracefully path, below) rather than writing
-anything to disk. Do not assume a spill file exists anywhere on disk because this option is set.
+those segments). **PR1 (this section) and PR2 (disk spillover, below) are both implemented.**
+PR3 (backup/restore coherence with spilled segments) is **not** — see its own section below for
+exactly what that means in practice (spilled data does not survive a server restart yet).
 
 **Scope: the two stock pools only, never the analysed pool.** `--stock-max-ram <mo>` (Mo,
 console `stockMaxRam <mo>` for hot changes, `0` = illimité/unlimited — same convention as
@@ -471,7 +470,8 @@ console `stockMaxRam <mo>` for hot changes, `0` = illimité/unlimited — same c
 not one per pool — a `put_to_pool` call on either pool checks the combined total). The analysed
 pool is deliberately excluded: it is already bounded by in-flight clients and PR7's expiration
 leases, and its hash index (`remove_possibility_analysed`) needs exact-match lookup that a
-spilled-to-disk entry would break — a reason that will still apply once PR2/PR3 exist.
+spilled-to-disk entry would break — a reason that still applies now that PR2 exists (below):
+the analysed pool is not, and will not be, spilled.
 
 **Conversion is Mo → possibility COUNT, once, not a running byte tally.** `put_to_pool`
 (`datamanager.c`) is the sole enforcement point (mirrors the narrow-funnel design PR1–PR8 above
@@ -488,7 +488,10 @@ possibility locally, retries later; see this document's own "Épilogue" section 
 that log line is `log_info`, not `log_error`). The refusal path in `put_to_pool` itself is
 throttled to one `log_error` per 10s (`STOCK_RAM_CAP_WARN_COOLDOWN_SEC`) — unlike the epilogue's
 maintenance-window refusals, a sustained cap hit is real operator-actionable signal (raise the
-cap, or wait for PR2's spillover), so it stays loud, just not per-ADD spam.
+cap, or configure `--stock-spill-dir` — PR2, below), so it stays loud, just not per-ADD spam.
+In practice PR2's spill thread keeps resident well under this hard cap most of the time
+(proactive eviction at 90%, see below), so this refusal path fires far less often than it did
+before PR2 existed — but it is still the safety net when eviction can't keep up.
 
 **`expand_datas_to_level` had the same "return value ignored" bug the Épilogue section already
 fixed once for a different call site — caught here before it could reach production, since a
@@ -537,6 +540,158 @@ forward-declared by the test file" convention as `datamanager_reset_rr_state_for
 `tests/net/test_control_protocol.c` (privileged-whitelist classification, Bearer-gated dispatch,
 `stockMemory` confirmed unreachable via either HTTP whitelist — a pure read, same as
 `statistic`/`check`).
+
+### Disk spillover of the possibility stock (`--stock-spill-dir`) — PR2 of 3
+
+New module `src/core/stock_spill.{h,c}`. PR1's hard cap has no recourse — once
+`--stock-max-ram` is reached, growth is refused, full stop. PR2 gives it one: before the cap is
+actually hit, a dedicated 100ms-tick thread proactively writes the COLDEST resident
+possibilities (the head of the queue — `scroll_fifo`, never touched by `scroll`, which
+`scroll_from_pool`/GET always pops from the tail) to per-`(pool, file)` disk segments, and reads
+them back when RAM has room again. `put_to_pool`'s hard refuse (PR1) is untouched and stays the
+safety net for whatever the eviction thread can't keep up with — this PR never changes the ADD
+hot path.
+
+**Dependency direction is one-way, `stock_spill.c` → `datamanager.h`, never the reverse.**
+`datamanager.c` gained exactly two new narrow, `core/`-only functions for this — thin C in the sense that
+`stock_spill.c` never touches `file_possibility`/`file_possibility_checked` or their mutexes
+directly:
+
+- `datamanager_pool_drain_head(is_checked, file_index, out, max_packets)` — single `trylock` +
+  `scroll_fifo` loop, gives up immediately on contention (rattrapé at the next 100ms tick, no
+  reason to block a background thread on ordinary ADD/GET traffic).
+- `datamanager_pool_refill(is_checked, file_index, in, count)` — MUST succeed (these
+  possibilities have nowhere else to go, having already left either RAM or a segment file):
+  `trylock` + rotate-through-files + `usleep`, unbounded, deliberately copying
+  `rebalance_pool_step`'s own reinsertion loop verbatim rather than inventing a bounded variant
+  — same accepted OOM blind spot (`put()`'s return value ignored, matching that existing code).
+
+`datamanager.c` itself has **zero** new dependency on `stock_spill.h` — `put_to_pool`'s cap
+check (PR1) is completely unaware spillover exists, by design: the RAM cap bounds RAM, spillover
+is what lets total stock (RAM + disk) exceed it, and coupling the two would have made PR1
+untestable/shippable on its own, which the plan explicitly wanted.
+
+**Why `scroll_fifo` existed but was dead code before this PR**: it was implemented in
+`lifo.c` from early in the project's history but never declared in `lifo.h`, hence never called
+by anything — a real, if harmless, latent gap. Declaring it (`lifo.h`) is this PR's only change
+to a file outside `core/stock_spill.{h,c}`/`core/datamanager.{h,c}`.
+
+**Segment format is a raw `struct possibility_packet` stream — byte-identical to `.back`**
+(`backup()`, `datamanager.c`): no header, no index, count is `file_size / sizeof(packet)`. Each
+`(pool, file)` gets its own LIFO **stack of segments** (`spill_<u|c>_<file>_<seq>.dat`,
+`STOCK_SPILL_SEGMENT_BYTES` = 64 MiB each, rounded DOWN to a whole number of packets —
+`stock_spill_full_segment_bytes()`, never the raw 64 MiB constant, since the two differ by up to
+`sizeof(packet) - 1` bytes and conflating them corrupts both the remaining-capacity arithmetic in
+eviction and the "this segment must be exactly full" assumption reload relies on when rolling back
+to the previous segment). Eviction always appends to the top (`last_seq`), rolling to a new
+segment when full; reload always pops from the top, `ftruncate`-ing (never rewriting) and
+deleting+decrementing `last_seq` once a segment empties. Segments below the top are, by
+construction, always exactly full — nothing ever compacts or rewrites a segment once it stops
+being the top.
+
+**Reload never destroys disk state until RAM insertion is confirmed ("peek, then commit").**
+`stock_spill_reload` reads the candidate packets from the segment file WITHOUT truncating,
+releases its own lock, calls `datamanager_pool_refill` (which — see above — cannot meaningfully
+fail short of OOM), and only THEN re-acquires the lock to `ftruncate`/delete. Eviction takes the
+opposite, equally loss-proof shape: drain from RAM first (cheap to undo), and if the disk write
+fails partway, whatever wasn't successfully written goes straight back into RAM via
+`datamanager_pool_refill` — never lost, throttled `log_error` either way (segment write failure,
+or segment read failure on reload) so a persistent disk problem doesn't degrade to silence.
+
+**A real hysteresis bug, caught by the unit tests before it ever ran live.** The original
+three-threshold table (90% high / 75% low / 25% reload) gave EVICTION two distinct thresholds
+(enter at 90%, exit at 75% — genuine hysteresis, prevents thrashing at a boundary under steady
+ADD/GET traffic) but RELOAD only one (25%, reused for both entry AND exit). In practice this
+meant reload almost always stalled after exactly ONE block: `STOCK_SPILL_BLOCK_PACKETS` (4096,
+or whatever budget the caller passes) very often exceeds 25% of a modest cap on its own, so the
+very first reloaded block immediately overshoots the 25% exit check and the mode reverts to
+IDLE — even with the cap barely touched and plenty of spilled data still waiting. Two of the
+seven new unit tests (`tests/core/test_stock_spill.c`) failed against this exact scenario before
+the fix (reload converging to a handful of packets instead of the whole backlog); fixed by
+making reload exit at the SAME "low" (75%) threshold eviction already exits at — both directions
+now converge on one shared resting point (`[75%, 90%]` is dead zone for both), reusing an
+existing named threshold rather than inventing a fourth. This was caught entirely by the test
+suite, not the real-world smoke test below (which used a cap so tiny relative to the test data
+that the effect was masked) — a concrete instance of this project's own guiding rule (`AGENTS.md`
+*Testing* section) that a difficult-to-observe behaviour is a sign to make it directly testable
+rather than to rely on manual reproduction alone.
+
+**Wiring**: `stock_spill_configure(stock_spill_dir, nb_file_possibility)` +
+`create_spill_thread()` (100ms tick, same detached-thread pattern as `create_rmnonext_thread`)
+are called from `runserver` (`etii_server.c`) BEFORE any `--expand-level` expansion — by the
+time either runs, `nb_file_possibility` is already final (`datamanager_configure_stock_files`
+ran in `main()`, before any fork, before `handle_server`/`runserver`). Both calls are
+unconditional, even without `--stock-max-ram`/`--stock-spill-dir` — `stock_spill_step` is then
+just a cheap no-op check (`cap == 0` returns immediately), matching the project's existing
+"always start the thread, let it no-op" convention (`create_rmnonext_thread` has no conditional
+creation either). `--stock-spill-dir` is, unlike `--stock-max-ram`, genuinely server-only in
+effect, not just by convention: `stock_spill_configure`/`create_spill_thread` are only ever
+called from `runserver`, never from `main()` unconditionally — a client/pruner process never
+creates a spill directory or thread at all.
+
+**Startup purge is real data loss, logged loudly, and is exactly the PR3 gap.** Since this PR
+has no backup/restore awareness, ANY segment found at `stock_spill_configure` time is from a
+process that never got to reload it before exiting — there is no way to know if it's still
+wanted. Purge matches ONLY the exact `spill_[uc]_<n>_<n>.dat` pattern (never a directory-wide
+wipe, since the directory is operator-supplied and might not be exclusively ours) and, if
+anything matching is found and non-empty, logs the exact possibility/segment count discarded at
+`log_error` — verified for real (see below): **spilled data does not survive a server restart
+until PR3 (backup/restore coherence) ships. `backup` before any planned restart if spillover is
+in use.**
+
+**Real-world verification, not just unit tests.** A real 256-piece server
+(`--expand-level 12 --expand-max-levels 10 --stock-max-ram 1 --stock-spill-dir <dir>`, well
+below what a deep expansion produces) confirmed the full path end-to-end: segment files
+appeared on disk, spread across multiple stock files exactly as the round-robin/fullest-file
+selection intends (`spill_u_0_1.dat` through `spill_u_3_1.dat`, real packet content, ~3984
+possibilities total), resident stock stayed bounded near the configured cap while GET/ADD kept
+being served, and a subsequent restart against the same `--stock-spill-dir` purged all four
+segments with the documented `log_error` naming the exact discarded count (3984 possibilities,
+4 segments) — matching the PR3 gap above exactly, not merely asserted.
+
+**One confirmed, accepted limitation: a single fast `--expand-level` burst can still outrun the
+100ms tick and hit PR1's refuse-and-drop path before the spill thread gets a turn.** Reproduced
+directly: `--expand-level 12 --expand-max-levels 10 --stock-max-ram 1` (a deliberately tiny cap)
+completed its entire expansion — and hit `expand_datas_to_level`'s PR1 drop-and-log path — inside
+a single synchronous burst faster than 100ms, with the spill directory still empty afterward.
+This is the same scoping call already made in the PR1 section above (`expand_datas_to_level` was
+deliberately NOT changed to call into spillover) — PR2's spill thread is aimed at *sustained*
+runtime pressure (ordinary search/delegation traffic), not a one-shot startup burst faster than
+its own tick interval; the PR1 safety net (loud drop, never silent) is what actually protects
+that case, unchanged by this PR.
+
+Tests: `tests/core/test_stock_spill.c` (new suite, real disk I/O in a per-test `mkdtemp`'d
+directory — `configure_creates_directory_and_starts_empty`,
+`configure_degrades_gracefully_when_directory_unwritable` (`SKIP_IF_ROOT`, same convention as
+the pre-existing unwritable-directory tests in `tests/ui/test_command_lines.c`),
+`configure_purges_matching_segments_and_spares_others` (proves the exact-pattern-only purge),
+`step_is_noop_without_ram_cap`, `evict_removes_oldest_first_and_conserves_total` (FIFO order,
+proven by checking the SET of alloc values left resident is exactly the most-recently-added
+contiguous range), `reload_restores_evicted_data_when_ram_drops_and_preserves_fields` (byte
+fidelity checked field-by-field, never a raw struct `memcmp` — see
+`possibility-packet-struct-padding`), `evict_and_reload_span_multiple_segments` (a test-only
+`stock_spill_set_segment_bytes_for_tests` hook shrinks segments to 5 packets each, since the real
+64 MiB/~106000-packet segment size is impractical to actually fill in a fast unit test — same
+"test-only hook, declared only in the .c, forward-declared by the test file" convention as
+`datamanager_set_ram_limit_packets_for_tests`). `tests/app/test_static_variables.c`
+(`--stock-spill-dir` CLI parsing pair, pointer-into-argv convention, modeled on
+`--http-token-file`'s tests). `tests/net/test_http_codec.c` (`stock_spilled_packets`/
+`stock_spill_segments` added to the `/api/v1/stats` golden). `tests/ui/test_command_lines.c` /
+`tests/net/test_control_protocol.c` (`spill [n]` joins `write_server_only[]`, same
+Bearer-gated/dispatch tests as `stockMaxRam`).
+
+A subtlety in the test suite itself worth remembering: `stock_max_ram_packets`
+(`datamanager.c`, set via the test-only `datamanager_set_ram_limit_packets_for_tests`) is a
+module-static shared by the WHOLE test binary, not scoped to one file or suite. An early test
+failure that skips its own end-of-test cleanup (greatest's `ASSERT_EQ_FMT` returns immediately
+on failure) can leave a stale non-zero cap active for every test that runs afterward, in ANY
+suite — including, observed directly during this PR's own development, an unrelated
+`admin_apply_privileged_command_rebalance_moves_within_budget` test in
+`tests/ui/test_command_lines.c` failing because a leftover cap from an earlier `stock_spill`
+test silently rejected its `dm_add` call. Fixed by resetting the cap to 0 defensively at the
+START of every test that then adds stock (immediately after `drain_datamanager()`, before
+`add_packets`), not only at the end — the general lesson being that end-of-test cleanup alone is
+not test isolation when assertions can return early.
 
 **Follow-up incident: the one trylock loop PR1 missed, plus a requeue race with a still-working
 pruner.** A reproduction at even higher load (`--expand-level 9`, `--expand-max-levels 10`,
@@ -983,7 +1138,8 @@ The metric that decided adoption is **not** throughput or `max_result`, but the 
 | `src/app/fork_orchestrator.c` | Deferred-start state machine: pure `orchestrator_step`, the tick-driven `fork_orchestrator_run` loop (replaces `wait_child`), `orchestrator_spawn_forks` (the real per-fork-quiesced `fork()`), staged config — see *Deferred-start orchestrator* above |
 | `src/net/http_codec.c` | Pure HTTP/1.1 admin API layer: request parsing, route resolution, response/JSON formatting (`http_json_format_stats/status/clients/best_board/known_clients/stock_distribution`) — no socket, no allocation |
 | `src/net/http_server.c` | Socket/thread shell of the admin API: `accept()` loop, per-request dispatch (`handle_http_connection`), and the `http_*_collect` functions that pull live server/registry state into the `http_codec.h` view structs |
-| `src/core/datamanager.c` | 10 mutex-protected possibility queues; backup/restore to `.back` files; `datamanager_stock_distribution` (per-`alloc` histogram, shared by the console `statistic` and `GET /api/v1/stock-distribution`) |
+| `src/core/datamanager.c` | 10 mutex-protected possibility queues; backup/restore to `.back` files; `datamanager_stock_distribution` (per-`alloc` histogram, shared by the console `statistic` and `GET /api/v1/stock-distribution`); RAM cap enforcement (`put_to_pool`) and the two narrow `datamanager_pool_drain_head`/`datamanager_pool_refill` hooks `stock_spill.c` uses instead of touching the pools directly |
+| `src/core/stock_spill.c` | Disk spillover of the stock once `--stock-max-ram` is approached (PR2): eviction/reload of the coldest RAM-resident possibilities to/from per-`(pool, file)` LIFO segment stacks, 90%/75%/25% hysteresis (`stock_spill_step`), startup purge of residual segments — no backup/restore awareness yet (PR3) |
 | `src/core/part.c` | Piece rotation, map building (`prepare_map_part`), face lookups; also builds the hot loop's compact index (`build_packed_index`, capacity-guarded by `map_packed_fits`) alongside `flat`/`arena` |
 | `src/core/readdata.c` | Parses `data/pieces.csv` into `array_part` |
 | `src/net/etii_protocol.c` | TCP send/recv helpers for the work-protocol `packet` structs |

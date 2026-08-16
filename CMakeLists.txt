@@ -98,6 +98,7 @@ set(PROD_SRCS
     src/core/part.c
     src/core/readdata.c
     src/core/datamanager.c
+    src/core/stock_spill.c
     src/core/possibility.c
     src/core/best_board.c
     src/net/etii_protocol.c
@@ -201,6 +202,7 @@ set(TEST_MODULES
     src/net/http_codec.c
     src/net/http_server.c
     src/core/datamanager.c
+    src/core/stock_spill.c
     src/net/local_socket.c
     src/net/tcpclient.c
     src/net/tcpserver.c
@@ -303,6 +305,7 @@ add_executable(eternityII16 EXCLUDE_FROM_ALL
     src/core/part.c
     src/core/readdata.c
     src/core/datamanager.c
+    src/core/stock_spill.c
     src/core/possibility.c
     src/core/best_board.c
     src/net/etii_protocol.c

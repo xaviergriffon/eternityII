@@ -280,6 +280,96 @@ unsigned long long datamanager_resident_packets(void)
 	return datas_size();
 }
 
+/**
+ * @brief Draine jusqu'à `max_packets` possibilités depuis la TÊTE (mode FIFO,
+ *        `scroll_fifo`) de la file `file_index` du pool désigné.
+ *
+ * Interface étroite réservée à `core/stock_spill.c` (débordement sur disque,
+ * PR2) : ce module ne connaît ni `file_possibility_t`, ni les tableaux
+ * privés `file_possibility`/`file_possibility_checked`, seulement cette
+ * fonction et `datamanager_pool_refill` ci-dessous. La tête de file contient
+ * les possibilités les plus ANCIENNES (jamais servies tant que la file ne se
+ * vide pas — `scroll()`, utilisée par `scroll_from_pool` pour servir un GET,
+ * dépile la QUEUE) : c'est exactement la donnée froide à évincer.
+ *
+ * Un seul essai de verrouillage (`trylock`), jamais de ré-essai ni
+ * d'attente : appelée depuis le tick périodique (100 ms) du thread de
+ * débordement, un échec ponctuel se rattrape simplement au tick suivant —
+ * inutile de bloquer ce thread sur une file momentanément contestée par le
+ * trafic ADD/GET normal.
+ *
+ * @param is_checked   0 = pool non vérifié, 1 = pool vérifié (même
+ *                     convention que `want_checked` dans `put_to_pool`).
+ * @param file_index   Indice de file, `[0, nb_file_possibility[`.
+ * @param out          Tampon de sortie, au moins `max_packets` éléments.
+ * @param max_packets  Nombre maximum de possibilités à extraire.
+ * @return             Nombre réellement extrait (0 : file vide, index hors
+ *                      bornes, ou verrou momentanément indisponible).
+ */
+int datamanager_pool_drain_head(int is_checked, int file_index, struct possibility_packet *out, int max_packets)
+{
+	if (file_index < 0 || file_index >= nb_file_possibility || max_packets <= 0) {
+		return 0;
+	}
+	file_possibility_t **pool = is_checked ? file_possibility_checked : file_possibility;
+	if (pthread_mutex_trylock(&pool[file_index]->lock) != 0) {
+		return 0;
+	}
+	int n = 0;
+	while (n < max_packets && scroll_fifo(&pool[file_index]->file, &out[n])) {
+		n++;
+	}
+	pthread_mutex_unlock(&pool[file_index]->lock);
+	return n;
+}
+
+/**
+ * @brief Réinsère `count` possibilités (déjà extraites d'ailleurs — segment
+ *        de débordement rechargé, ou drainées de la RAM par une éviction qui
+ *        a ensuite échoué à les écrire sur disque) dans la file `file_index`
+ *        du pool désigné, au bout chaud (`put`, comme tout ADD normal).
+ *
+ * Contrairement à `datamanager_pool_drain_head`, DOIT réussir : ces
+ * possibilités n'ont nulle part ailleurs où aller. Même discipline que la
+ * réinsertion de `rebalance_pool_step` (`trylock` + rotation vers la file
+ * suivante + micro-sommeil, sans budget borné — le stock déplacé a déjà
+ * quitté sa file d'origine, abandonner reviendrait à le perdre) : jamais
+ * utilisée sur le chemin chaud d'un client, seulement par le thread de
+ * débordement (PR2), où un blocage occasionnel de quelques dizaines de ms
+ * est sans conséquence.
+ *
+ * @param is_checked 0 = pool non vérifié, 1 = pool vérifié.
+ * @param file_index Indice de file, `[0, nb_file_possibility[`.
+ * @param in         Possibilités à réinsérer.
+ * @param count      Nombre de possibilités dans `in`.
+ * @return           `count` en fonctionnement normal ; peut être inférieur
+ *                    seulement sur OOM de `put()` (même angle mort accepté
+ *                    que `rebalance_pool_step`, dont la réinsertion ignore
+ *                    déjà ce cas).
+ */
+int datamanager_pool_refill(int is_checked, int file_index, const struct possibility_packet *in, int count)
+{
+	if (file_index < 0 || file_index >= nb_file_possibility || count <= 0) {
+		return 0;
+	}
+	file_possibility_t **pool = is_checked ? file_possibility_checked : file_possibility;
+	int dest = file_index;
+	for (int i = 0; i < count; i++) {
+		int added = 0;
+		while (!added) {
+			if (pthread_mutex_trylock(&pool[dest]->lock) == 0) {
+				put(&pool[dest]->file, (void *)&in[i]);
+				pthread_mutex_unlock(&pool[dest]->lock);
+				added = 1;
+			} else {
+				dest = (dest + 1) % nb_file_possibility;
+				usleep(MICRO_SLEEP);
+			}
+		}
+	}
+	return count;
+}
+
 // Réservée aux tests (jamais appelée en production, non déclarée dans
 // datamanager.h — même convention que datamanager_reset_rr_state_for_tests
 // ci-dessus) : fixe le plafond DIRECTEMENT en possibilités, sans passer par
@@ -296,6 +386,23 @@ char*server_ip = NULL;
 int put_to_local(array_possibility_packet *possibilities);
 
 int maintenance = 0;
+
+/**
+ * @brief 1 si une opération de maintenance (sauvegarde, restauration, tri…)
+ *        tient actuellement toutes les files verrouillées, 0 sinon.
+ *
+ * Accesseur plutôt qu'un `extern int maintenance` brut — même convention que
+ * `datas_size()`/`file_size()` pour l'état interne de ce module. Réservé à
+ * `core/stock_spill.c` (PR2) pour suspendre son propre travail (éviction/
+ * rechargement) pendant qu'un cliché RAM est en train d'être pris : sans
+ * cette pause, une possibilité pourrait migrer entre RAM et disque au
+ * mauvais instant et se retrouver comptée deux fois — ou aucune — dans une
+ * sauvegarde en cours.
+ */
+int datamanager_is_maintenance_active(void)
+{
+	return maintenance != 0;
+}
 
 void set_server_ip(const char *server)
 {

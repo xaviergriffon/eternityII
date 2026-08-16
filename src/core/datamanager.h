@@ -157,6 +157,48 @@ unsigned long long datamanager_ram_limit_packets(void);
 unsigned long long datamanager_resident_packets(void);
 
 /**
+ * @brief 1 si une opération de maintenance (sauvegarde, restauration,
+ *        tri…) tient actuellement toutes les files verrouillées, 0 sinon.
+ *
+ * Accesseur pour l'état interne `maintenance` — réservé à
+ * `core/stock_spill.c` (PR2), pour suspendre l'éviction/le rechargement
+ * pendant qu'un cliché RAM est en train d'être pris.
+ */
+int datamanager_is_maintenance_active(void);
+
+/**
+ * @brief Draine jusqu'à `max_packets` possibilités depuis la tête (mode
+ *        FIFO) de la file `file_index` du pool désigné — interface étroite
+ *        réservée à `core/stock_spill.c` (PR2). Un seul essai de verrou,
+ *        jamais de ré-essai (rattrapé au tick suivant).
+ *
+ * @param is_checked  0 = pool non vérifié, 1 = pool vérifié.
+ * @param file_index  Indice de file, `[0, nb_file_possibility[`.
+ * @param out         Tampon de sortie, au moins `max_packets` éléments.
+ * @param max_packets Nombre maximum de possibilités à extraire.
+ * @return            Nombre réellement extrait (0 : file vide, index hors
+ *                     bornes, ou verrou momentanément indisponible).
+ */
+int datamanager_pool_drain_head(int is_checked, int file_index, struct possibility_packet *out, int max_packets);
+
+/**
+ * @brief Réinsère `count` possibilités au bout chaud de la file
+ *        `file_index` du pool désigné — interface étroite réservée à
+ *        `core/stock_spill.c` (PR2). DOIT réussir (ces possibilités n'ont
+ *        nulle part ailleurs où aller) : trylock + rotation + micro-sommeil
+ *        sans budget borné, même discipline que la réinsertion de
+ *        `rebalance_pool_step`.
+ *
+ * @param is_checked 0 = pool non vérifié, 1 = pool vérifié.
+ * @param file_index Indice de file, `[0, nb_file_possibility[`.
+ * @param in         Possibilités à réinsérer.
+ * @param count      Nombre de possibilités dans `in`.
+ * @return           `count` en fonctionnement normal ; peut être inférieur
+ *                    seulement sur OOM de `put()`.
+ */
+int datamanager_pool_refill(int is_checked, int file_index, const struct possibility_packet *in, int count);
+
+/**
  * @brief Indice de file de départ pour un balayage round-robin ADD/GET.
  *
  * `put_to_pool`/`scroll_from_pool` (datamanager.c) trylock la première file
