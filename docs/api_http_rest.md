@@ -165,13 +165,13 @@ Instantané de la télémétrie serveur courante.
 | Champ | Type | Sens |
 |---|---|---|
 | `shots_per_second` | entier ≥ 0 | Débit de recherche courant (essais/seconde), même valeur que le bandeau `coups/s` de la console — publié toutes les 10 s, donc granularité de mise à jour de cet ordre |
-| `possibility_stock` | entier ≥ 0 | Total des possibilités **non vérifiées** en stock (somme des 10 files) |
+| `possibility_stock` | entier ≥ 0 | Total des possibilités **non vérifiées** en stock (somme de toutes les files) |
 | `checked_stock` | entier ≥ 0 | Total des possibilités **vérifiées** en attente de service |
 | `analysed_stock` | entier ≥ 0 | Total des possibilités dans le pool **en cours d'analyse** (distribuées aux pruners, pas encore acquittées) |
 | `max_result` | entier ≥ 0 | Meilleur niveau de curseur atteint (voir [le champ `alloc`](#le-champ-alloc)), 0 à 256 (ou 0 à 16 en build `ETERN_PARTS=16`) |
 | `active_threads` | entier ≥ 0 | Nombre de connexions clients actuellement servies (canal de travail **et** de contrôle confondus, cf. [dimensionnement](echanges_client_serveur.md#impact-sur-le-dimensionnement-du-serveur)) |
 | `pruner_checked` / `pruner_removed` | entier ≥ 0 | Toujours `0` côté serveur (ces compteurs n'existent que côté processus pruner ; conservés dans le schéma pour rester alignable avec `control_stats_t` du canal de contrôle) |
-| `queues` | tableau de 10 objets | Une entrée par file interne (`NB_FILE_POSSIBILITY`), avec ses trois compteurs par pool. L'ordre des entrées suit l'index de file (0 à 9), pas garanti trié par une autre clé |
+| `queues` | tableau | Une entrée par file de stock **active** (`nb_file_possibility`, configurable au démarrage via `--stock-files`, 10 par défaut, jusqu'à 128 — voir *Server load management* dans AGENTS.md), avec ses trois compteurs par pool. L'ordre des entrées suit l'index de file (0 à `nb_file_possibility - 1`), pas garanti trié par une autre clé |
 
 ### GET /api/v1/status
 
