@@ -1594,6 +1594,60 @@ static void *mini_srv_put_bad_ack(void *arg)
     return NULL;
 }
 
+/* Mini-serveur put_to_server — INST_ERROR pour le premier paquet :
+ *   pkt[0] → INST_ERROR (stock serveur momentanément verrouillé : c'est ce que
+ *            répond réellement le handler INST_ADD quand add_possibility échoue
+ *            sur le budget borné de put_to_pool, typiquement pendant la phase 1
+ *            de consistent_backup)
+ *   pkt[1] → INST_CONSIDERED
+ */
+static void *mini_srv_put_server_busy(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_ADD pkt[0] */
+    struct possibility_packet pkt;
+    recv_exact_sv(fd, &pkt, sizeof pkt);
+    b = INST_ERROR;                                   /* serveur occupé */
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_ADD pkt[1] */
+    recv_exact_sv(fd, &pkt, sizeof pkt);
+    b = INST_CONSIDERED;
+    send(fd, &b, 1, 0);
+    close(fd);
+    return NULL;
+}
+
+/* Capture stderr dans un fichier temporaire (stdout part vers /dev/null).
+ * log_error écrit sur stderr ET dans events.log ; log_info n'écrit que sur
+ * stdout — mesurer stderr distingue donc les deux sans dépendre du libellé. */
+static int g_cap_fd1 = -1, g_cap_fd2 = -1;
+static char g_cap_path[128];
+static void capture_stderr(void)
+{
+    fflush(stdout); fflush(stderr);
+    snprintf(g_cap_path, sizeof g_cap_path, "/tmp/etii_stderr_cap_%d", (int)getpid());
+    g_cap_fd1 = dup(1);
+    g_cap_fd2 = dup(2);
+    int dn = open("/dev/null", O_WRONLY);
+    dup2(dn, 1); close(dn);
+    int f = open(g_cap_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    dup2(f, 2); close(f);
+}
+static long restore_stderr_size(void)
+{
+    fflush(stdout); fflush(stderr);
+    dup2(g_cap_fd1, 1); close(g_cap_fd1);
+    dup2(g_cap_fd2, 2); close(g_cap_fd2);
+    struct stat st;
+    long sz = (stat(g_cap_path, &st) == 0) ? (long)st.st_size : -1;
+    unlink(g_cap_path);
+    return sz;
+}
+
 /* Mini-serveur send_solution — succès :
  *   1. is_connected : reçoit INST_TEST_CONNECTED → répond INST_TEST_CONNECTED
  *   2. reçoit INST_SOLUTION + possibility_packet → répond INST_CONSIDERED
@@ -2117,6 +2171,94 @@ TEST put_to_server_bad_ack_non_fatal(void)
 
     ASSERT_EQ_FMT(0, rc, "%d");          /* pas de connection_lost : rc=0 */
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* pkt[0] remis en local */
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* put_to_server : INST_ERROR (stock serveur momentanément verrouillé — phase 1
+ * de consistent_backup) est la dégradation gracieuse PRÉVUE par PR1, pas une
+ * anomalie. Deux propriétés verrouillées ici :
+ *   1. fonctionnelle — non fatal : la possibilité est conservée en stock local
+ *      (rien de perdu, renvoi ultérieur) et la boucle CONTINUE (pkt[1] est bien
+ *      envoyé, rc=0) ;
+ *   2. observabilité — RIEN sur stderr. log_error écrit sur stderr *et* dans
+ *      events.log ; log_info non. Avant ce correctif, chaque sauvegarde d'un
+ *      gros stock polluait events.log de « problème de prise en compte du
+ *      serveur (ack=-1) » + un vidage complet du plateau, faisant passer un
+ *      fonctionnement nominal pour un incident (signalé trois fois comme tel en
+ *      exploitation réelle). Assertion sur la TAILLE de stderr plutôt que sur le
+ *      libellé : reformuler le message ne casse pas le test, le repasser en
+ *      log_error si. */
+TEST put_to_server_server_busy_is_silent_and_non_fatal(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_put_server_busy, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    struct possibility_packet pkts[2];
+    memset(pkts, 0, sizeof pkts);
+    pkts[0].alloc = 3;
+    pkts[1].alloc = 4;
+    array_possibility_packet arr = { .size = 2, .possibilities = pkts };
+
+    capture_stderr();
+    int rc = put_to_server(&cp, &arr);
+    long err_bytes = restore_stderr_size();
+
+    ASSERT_EQ_FMT(0, rc, "%d");                  /* non fatal : la boucle a continué */
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");   /* pkt[0] conservé en local */
+    ASSERT_EQ_FMT(0L, err_bytes, "%ld");         /* aucune trace d'erreur/events.log */
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* Symétrique du test ci-dessus : un ACK réellement inattendu (INST_NULL, que le
+ * serveur n'envoie jamais sur INST_ADD) reste, lui, journalisé en erreur —
+ * le correctif ne doit pas rendre muettes les vraies anomalies protocolaires. */
+TEST put_to_server_unexpected_ack_still_logs_error(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_put_bad_ack, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    struct possibility_packet pkts[2];
+    memset(pkts, 0, sizeof pkts);
+    pkts[0].alloc = 3;
+    pkts[1].alloc = 4;
+    array_possibility_packet arr = { .size = 2, .possibilities = pkts };
+
+    capture_stderr();
+    int rc = put_to_server(&cp, &arr);
+    long err_bytes = restore_stderr_size();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT(err_bytes > 0);                       /* vraie anomalie : toujours signalée */
 
     pthread_join(srv, NULL);
     set_server_ip(NULL);
@@ -4683,6 +4825,8 @@ SUITE(datamanager_suite)
     RUN_TEST(send_possibility_analysed_success);
     RUN_TEST(send_possibility_analysed_bad_ack_requeues_and_reindexes);
     RUN_TEST(put_to_server_bad_ack_non_fatal);
+    RUN_TEST(put_to_server_server_busy_is_silent_and_non_fatal);
+    RUN_TEST(put_to_server_unexpected_ack_still_logs_error);
     RUN_TEST(send_solution_success);
     RUN_TEST(send_solution_server_rejects);
     RUN_TEST(put_to_server_success);

@@ -544,6 +544,53 @@ ruled the previous fix out as the explanation and pointed at a real double-ack.
    side effect they never asserted on simply becomes an intentional no-op — consistent with local
    mode never having a remote server to needlessly re-acknowledge in the first place.
 
+**Épilogue — le dernier message restant n'était pas un bug mais un mensonge de journalisation.**
+Une fois le double-acquittement corrigé (zéro `possibilité non retirée` côté serveur, confirmé sur
+une reproduction v4 à pleine échelle), le pruner continuait d'afficher
+`problème de prise en compte du serveur (ack=-1)`. Ce `ack=-1` est `INST_ERROR`, envoyé par le
+handler `INST_ADD` quand `add_possibility` échoue — c'est-à-dire **exactement la dégradation
+gracieuse que PR1 a conçue**, déclenchée par la phase 1 de `consistent_backup` (PR2) qui gèle
+toutes les files à l'instant T avant de les libérer une à une. Le budget borné de `put_to_pool`
+(`DATAMANAGER_TRYLOCK_MAX_SWEEPS` × `MICRO_SLEEP` ≈ 500 ms) est plus court que la fenêtre
+« tout verrouillé », qui vaut l'écriture d'UN fichier (≈ 1,8 s pour 14 M de possibilités sur
+20 files, mesuré : `last_backup_duration_ms` ≈ 36 s / 20) : **quelques refus par sauvegarde sont
+donc structurellement normaux**, et rien n'est perdu — `put_to_server` reverse la possibilité au
+stock local juste après, d'où elle repartira (et, depuis le correctif `from_server` ci-dessus,
+sans être acquittée à tort au passage). Le chronométrage du rapport v4 le confirme au tour près :
+`should_autobackup` exige 6 tours de 10 s **et** une mutation ; le serveur, resté sans client
+depuis la fin de son expansion, était garé à `lastBack == 6` — la toute première salve d'`INST_ADD`
+du pruner (connecté à 14:38:50) a donc déclenché la sauvegarde au tick suivant, et les trois refus
+sont horodatés 14:39:01.
+
+Le défaut réel était donc l'**observabilité**, pas la correction : l'événement partait en
+`log_error` — qui écrit sur stderr **et** ajoute à `events.log` (`append_events_log_file`,
+`src/ui/logger.c`) — accompagné d'un vidage complet du plateau, faisant passer un fonctionnement
+nominal pour un incident, au point d'être signalé trois fois comme tel en exploitation. Corrigé
+dans `put_to_server` (`src/core/datamanager.c`) : `INST_ERROR` est désormais journalisé en
+`log_info` avec un libellé qui dit ce qui se passe réellement (« stock serveur momentanément
+indisponible (maintenance) : possibilité conservée en local, renvoi ultérieur »), sans vidage de
+plateau — il disparaît donc d'`events.log`. **Toute autre valeur d'ack reste un `log_error` avec
+le plateau**, y compris `INST_END` (connexion perdue, comportement inchangé) : le correctif ne
+rend muette aucune anomalie protocolaire réelle. Aucun changement fonctionnel — même reversement
+local, même continuation de boucle, même code de retour.
+
+Tests (`tests/core/test_datamanager.c`) : `put_to_server_server_busy_is_silent_and_non_fatal`
+(nouveau mini-serveur `mini_srv_put_server_busy` répondant `INST_ERROR` sur le premier paquet)
+vérifie les deux propriétés ensemble — non-fatalité (possibilité conservée en local, boucle
+poursuivie sur le paquet suivant, `rc == 0`) **et** silence, en mesurant la **taille de stderr**
+(`capture_stderr`/`restore_stderr_size`) plutôt que le libellé : reformuler le message ne casse pas
+le test, le repasser en `log_error` si. Vérifié rouge contre le code d'avant le correctif
+(`0L != err_bytes`), vert après. `put_to_server_unexpected_ack_still_logs_error` est son symétrique
+sur `INST_NULL` (ack que le serveur n'envoie jamais sur `INST_ADD`) et garantit que les vraies
+anomalies restent bruyantes.
+
+**Piste laissée ouverte, délibérément non implémentée.** On pourrait supprimer ces refus plutôt que
+les taire, en allongeant le budget de `put_to_pool` au-delà du temps d'écriture d'un fichier —
+mais ce budget deviendrait fonction de la taille du stock (donc un nombre magique à re-régler à
+chaque changement d'échelle), et bloquer un thread serveur plusieurs secondes par `INST_ADD`
+pendant une sauvegarde saturerait le pool de threads, soit précisément l'incident que PR1 a
+corrigé. Le refus borné reste le bon compromis ; seule sa présentation était fautive.
+
 ### HTTP REST admin API
 
 **`--http-port <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only, `n` in `[1, 65535]`). Starts a minimal HTTP/1.1 admin API on **`127.0.0.1:<n>`** — loopback only, never `INADDR_ANY`, so it is never reachable off the machine by default (use an SSH tunnel or a reverse proxy for remote access). **Absent by default** (`HTTP_PORT` global defaults to 0): no extra socket is opened unless explicitly requested. Lets an external HTTP application (written in any language) read server telemetry and drive a few whitelisted admin actions without speaking the binary `packet`/`control_protocol` wire formats.

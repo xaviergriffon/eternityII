@@ -369,11 +369,34 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
 		}
 		int8_t ack = recv_instruction(socket_id);
 		if(ack != INST_CONSIDERED) {
-			log_error("problème de prise en compte du serveur (ack=%d)\n", ack);
+			// INST_ERROR n'est PAS une anomalie : c'est la dégradation gracieuse
+			// prévue (PR1) quand le stock du serveur est momentanément
+			// intégralement verrouillé — typiquement la phase 1 de
+			// consistent_backup (PR2), qui gèle toutes les files à l'instant T
+			// puis les libère une à une. `put_to_pool` y épuise son budget borné
+			// (DATAMANAGER_TRYLOCK_MAX_SWEEPS × MICRO_SLEEP ≈ 500 ms) et refuse
+			// l'insertion plutôt que de bloquer le thread serveur — et donc la
+			// connexion TCP — jusqu'au timeout du client. Sur un gros stock la
+			// fenêtre « tout verrouillé » vaut l'écriture d'UN fichier (≈ 1,8 s
+			// pour 14 M de possibilités réparties sur 20 files), soit plus que
+			// ce budget : quelques refus par sauvegarde sont donc NORMAUX.
+			// Rien n'est perdu : la possibilité part en stock local juste
+			// en dessous et sera renvoyée plus tard (et, depuis le correctif
+			// `from_server` de get_last_possibility, sans être acquittée à tort
+			// au passage). Journalisé en info, sans vidage du plateau, pour ne
+			// pas faire passer un fonctionnement nominal pour un incident.
+			// Tout AUTRE valeur reste une vraie anomalie protocolaire.
+			if (ack == INST_ERROR) {
+				log_info("stock serveur momentanément indisponible (maintenance) : possibilité conservée en local, renvoi ultérieur\n");
+			} else {
+				log_error("problème de prise en compte du serveur (ack=%d)\n", ack);
+			}
 			array_possibility_packet *single_array = build_single_array_possibility_packet(possibility);
 			put_to_local(single_array);
 			free_array_possibility_packet(single_array);
-			log_error_possibility_packet(possibility);
+			if (ack != INST_ERROR) {
+				log_error_possibility_packet(possibility);
+			}
 			if (ack == INST_END) {
 				/* Connexion perdue (timeout ou fermeture) : on sort et on remet t+1..fin en local */
 				last_routed = t;
