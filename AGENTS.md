@@ -313,6 +313,49 @@ stale in future backups — the failure mode is invisible until an operator actu
 of the risk, the finer per-file composition is left as a documented, not-yet-implemented
 extension.
 
+**PR6 — round-robin de démarrage pour `put_to_pool`/`scroll_from_pool` (répartition réelle du
+trafic ADD/GET entre les `--stock-files` files).** PR3/PR4 laissaient un biais structurel non
+documenté : `put_to_pool` (ADD) et `scroll_from_pool` (GET) verrouillaient toujours la première
+file libre en repartant de l'indice 0 à *chaque* appel — dans le cas nominal à faible
+contention (`pthread_mutex_trylock` réussit dès le premier essai), tout le trafic ADD comme
+tout le trafic GET se concentrait donc sur la file 0, les files suivantes ne recevant du
+trafic qu'en cas de verrou déjà pris sur les précédentes. `--rebalance-budget` (PR3) masquait
+le symptôme (files de taille comparable) sans jamais s'attaquer à sa cause : il devait
+compenser en continu un biais de *trafic*, pas un simple déséquilibre ponctuel de *contenu*.
+`datamanager_rr_next_start(unsigned int *counter, int n)` (`src/core/datamanager.{h,c}`) est
+l'unique fonction pure introduite : incrémente atomiquement (`__atomic_fetch_add`,
+`__ATOMIC_RELAXED` — même convention que `solution_seq`) un compteur fourni par l'appelant et
+renvoie sa valeur modulo `n` (0 si `n <= 0`), sans jamais lire d'état module — testable avec un
+compteur local. Quatre compteurs statiques dans `datamanager.c`
+(`rr_put_unchecked`/`rr_put_checked`/`rr_scroll_unchecked`/`rr_scroll_checked`, un par pool
+réellement distinct, jamais remis à zéro en production) fournissent le point de départ de
+chaque appel — partagés entre TOUS les appelants d'un même pool (ex. `rr_scroll_unchecked` sert
+aussi bien le repli de `scroll_from_local` que `scroll_from_local_tocheck`, puisque c'est le
+trafic *combiné* sur cette file qui doit tourner). Le reste de la logique de balayage borné
+(PR1 — `DATAMANAGER_TRYLOCK_MAX_SWEEPS` tours avant abandon) est inchangé : `scroll_from_pool`
+teste toujours les `nb_file_possibility` files en cas de départ vide, simplement dans l'ordre
+`(rr_start + k) % n` plutôt que `0..n-1` ; `put_to_pool` avance `currfile` modulo `n` à partir
+de ce même point plutôt que de 0, un compteur `tried` distinct de `currfile` remplaçant le test
+`currfile == 0` (qui ne signalait plus un tour complet une fois le départ non nul) pour détecter
+qu'aucune file n'a pu être verrouillée en un tour.
+
+Plusieurs tests historiques (`tests/core/test_datamanager.c`, `tests/ui/test_command_lines.c`)
+supposaient en dur « tout atterrit dans la file 0 juste après un ajout » — propriété du code
+d'AVANT ce correctif, pas une garantie fonctionnelle à préserver. Plutôt que de les réécrire
+un par un pour tolérer n'importe quelle file de destination (perdant au passage leur capacité à
+distinguer « un lot entier va dans UNE SEULE file » de « le lot s'est fragmenté »), une fonction
+réservée aux tests, `datamanager_reset_rr_state_for_tests()` (déclarée nulle part dans
+`datamanager.h`, forward-déclarée directement dans les fichiers de test — même convention que
+les autres « helpers internes » qu'ils déclarent déjà), remet les quatre compteurs à zéro ;
+elle est appelée à la fin de `drain_datamanager()`/`dm_drain()`, déjà invoqué en tête de
+pratiquement chaque test, rendant à nouveau déterministe « la file 0 en premier » juste après un
+drain sans toucher au comportement réel de production. La rotation elle-même — jamais exercée
+par ces tests puisqu'ils drainent entre deux ajouts — est verrouillée séparément par
+`add_possibility_rotates_start_file_across_calls` (`tests/core/test_datamanager.c`), qui
+enchaîne deux `add_packets`/extractions SANS drain intermédiaire et vérifie que le second appel
+n'atterrit pas dans la même file que le premier — le scénario que `--stock-files` est censé
+permettre et que le code d'avant ce correctif ne permettait pas.
+
 **Lease reclaim (PR7) and incremental rebalance (PR3) deliberately do NOT feed the mutation
 counters.** Both genuinely mutate the stock/analysed pools (a reclaimed lease moves a
 possibility from analysed back to stock; a rebalance step moves possibilities between stock

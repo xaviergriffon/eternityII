@@ -71,6 +71,31 @@ extern int nb_file_possibility;
 int datamanager_configure_stock_files(int n);
 
 /**
+ * @brief Indice de file de départ pour un balayage round-robin ADD/GET.
+ *
+ * `put_to_pool`/`scroll_from_pool` (datamanager.c) trylock la première file
+ * libre à partir de cet indice plutôt que de toujours démarrer à la file 0 :
+ * un appel non contesté (trylock réussi dès le premier essai — le cas nominal
+ * à faible concurrence) tombait sinon systématiquement sur la file 0, où tout
+ * le trafic ADD/GET se concentrait, à l'exact opposé de l'objectif de
+ * `--stock-files` (répartir la charge sur plusieurs files) et au prix d'un
+ * travail constant pour `datamanager_rebalance_step`, qui devait sans cesse
+ * compenser ce biais structurel plutôt qu'un simple déséquilibre de trafic.
+ *
+ * Fonction pure côté logique : l'état vit dans `*counter`, fourni par
+ * l'appelant (jamais une globale interne), ce qui la rend directement
+ * testable avec un compteur local sans dépendre de l'état module de
+ * `datamanager.c`. Incrémente `*counter` atomiquement (`__atomic_fetch_add`,
+ * jamais remis à 0) : sûr à appeler concurremment depuis plusieurs threads
+ * serveur.
+ *
+ * @param counter État partagé, incrémenté à chaque appel.
+ * @param n       Nombre de files (`nb_file_possibility`) ; `n <= 0` renvoie 0.
+ * @return        Indice de file dans `[0, n[`.
+ */
+int datamanager_rr_next_start(unsigned int *counter, int n);
+
+/**
  * @brief Structure représentant un file de possibilités
  * 
  * Cette structure permet d'indiquer qu'une file est "lockée" en mutli-thread
