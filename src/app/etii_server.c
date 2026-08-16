@@ -417,23 +417,58 @@ void *check_server(void *param)
  * @brief Renvoie au stock local les possibilités servies mais non acquittées.
  *
  * Extrait du bloc de fin de `communicate_with_client` (voir etii_server.h).
+ *
+ * Un client dont le canal de CONTRÔLE reste enregistré est vivant : CETTE
+ * connexion de TRAVAIL a pu se terminer par un simple aléa réseau (timeout
+ * pendant une maintenance serveur — sauvegarde, restore, tri —, ou une
+ * saturation transitoire du fil d'alimentation unique qui sert tous les
+ * forks d'un même process côté client), pas par la mort du client : le fork
+ * qui explorait ces possibilités est très probablement toujours en train de
+ * le faire, et les remettre au stock IMMÉDIATEMENT les ferait explorer une
+ * seconde fois en double dès qu'un autre client les recevrait. Dans ce cas
+ * on ne les remet PAS ici — même critère de vivacité que le bail
+ * d'expiration (PR7, `owner_control_session_alive`) : si le fork ne les
+ * acquitte jamais malgré tout, elles seront de toute façon récupérées par ce
+ * mécanisme (`analysed_lease_seconds`, 300 s par défaut), avec sa propre
+ * vérification de vivacité à CE moment-là — pas de fenêtre de perte, juste
+ * une récupération plus lente. Un `client` sans identité déclarée
+ * (`has_identity == 0`, client ancien) ou `NULL` (contexte de test, ou
+ * appelant qui n'en a pas) ne peut pas être vérifié : comportement
+ * INCHANGÉ, remise immédiate, comme avant cette vérification.
+ *
+ * @param lastSent Possibilités non acquittées de la connexion de travail qui
+ *                 se termine (peut être `NULL`).
+ * @param client   Client dont CETTE connexion de travail se termine — sert
+ *                 UNIQUEMENT à vérifier la vivacité de son canal de contrôle,
+ *                 jamais à identifier le propriétaire attribué (`owner_uid`,
+ *                 inchangé) des possibilités de `lastSent`. `NULL` toléré.
  */
-void requeue_last_sent_possibility(array_possibility_packet *lastSent)
+void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t *client)
 {
     if (lastSent == NULL)
     {
         return;
     }
+    if (client != NULL && client->has_identity &&
+        owner_control_session_alive(client->identity.client_uid))
+    {
+        return;
+    }
     // On ne réinjecte QUE les possibilités encore présentes dans file_analysed :
     // si le client l'avait acquittée (INST_POSSIBILITY_ANALYSED),
-    // remove_possibility_analysed renvoie ≠ 0 (déjà retirée) et on ne la remet
-    // pas — pas de doublon de travail déjà terminé.
+    // remove_possibility_analysed renvoie 1 (absence CONFIRMÉE) et on ne la
+    // remet pas — pas de doublon de travail déjà terminé. Un retour -1
+    // (absence NON confirmée : budget borné épuisé sans jamais verrouiller la
+    // moindre file, cf. datamanager.h) est traité comme "peut-être encore là"
+    // et REMIS quand même — dans le doute, ne jamais perdre silencieusement
+    // une possibilité : un doublon d'exploration coûte du CPU, une
+    // possibilité perdue coûte une branche jamais explorée.
     for (int rp = 0; rp < lastSent->size; rp++)
     {
         struct possibility_packet *possibility = &lastSent->possibilities[rp];
-        if (remove_possibility_analysed(possibility, -1) != 0)
+        if (remove_possibility_analysed(possibility, -1) == 1)
         {
-            // Déjà acquittée par le client : rien à rendre.
+            // Déjà acquittée par le client (absence confirmée) : rien à rendre.
             continue;
         }
         array_possibility_packet *single = build_single_array_possibility_packet(possibility);
@@ -701,7 +736,8 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             // sur un flux désynchronisé.
             long ssize = recv_all(client->socket_id, possibilityPacket, sizeof(struct possibility_packet));
             if ((long)sizeof(struct possibility_packet) == ssize) {
-                if(remove_possibility_analysed(possibilityPacket, -1) == 0)
+                int removed = remove_possibility_analysed(possibilityPacket, -1);
+                if(removed == 0)
                 {
                     send_instruction(client->socket_id,INST_CONSIDERED);
                     // Retrait du pool analysé (PR5) : symétrique de
@@ -709,7 +745,14 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                     analysedFileUpdates[client->compteur]++;
 
                 } else{
-                    log_error("possibility analysed not removed\n");
+                    // removed == 1 : absence confirmée (déjà retirée ailleurs).
+                    // removed == -1 : absence NON confirmée (budget borné
+                    // épuisé sans jamais verrouiller la moindre file — typiquement
+                    // une maintenance en cours) ; distingué au log seulement,
+                    // le client dégrade déjà gracieusement sur INST_ERROR.
+                    log_error(removed == -1
+                        ? "possibility analysed : vérification impossible (maintenance en cours)\n"
+                        : "possibility analysed not removed\n");
                     log_error_possibility_packet(possibilityPacket);
                     send_instruction(client->socket_id,INST_ERROR);
                 }
@@ -742,9 +785,17 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                     transfer_ok = 0;
                     break;
                 }
-                if (remove_possibility_analysed(&pkt, -1) != 0) {
-                    // Non bloquant : l'entrée « en analyse » a pu déjà être retirée.
-                    log_error("batch analysed : possibilité non retirée (%d)\n", p);
+                int removed = remove_possibility_analysed(&pkt, -1);
+                if (removed != 0) {
+                    // Non bloquant : l'entrée « en analyse » a pu déjà être
+                    // retirée (removed == 1, absence confirmée) ou n'a pas pu
+                    // être vérifiée à temps (removed == -1, maintenance en
+                    // cours — cf. datamanager.h). Paquet en cause journalisé
+                    // (comme le chemin unitaire ci-dessus) : sans ça, aucun
+                    // moyen de savoir QUELLE possibilité pose problème.
+                    log_error("batch analysed : possibilité non retirée (%d, %s)\n", p,
+                              removed == -1 ? "vérification impossible" : "absence confirmée");
+                    log_error_possibility_packet(&pkt);
                 } else {
                     // Retrait du pool analysé (PR5), un par paquet effectivement retiré.
                     analysedFileUpdates[client->compteur]++;
@@ -1220,7 +1271,7 @@ void *communicate_with_client (void *userdata)
                 // (INST_CONTROL_HELLO ne sert pas de possibilités), mais par
                 // sécurité on applique le même traitement qu'à la déconnexion
                 // normale avant de lâcher la main à la session de contrôle.
-                requeue_last_sent_possibility(lastPossibilityPacketSend);
+                requeue_last_sent_possibility(lastPossibilityPacketSend, client);
                 free_array_possibility_packet(lastPossibilityPacketSend);
             }
             run_control_session(client, control_session_index);
@@ -1237,7 +1288,7 @@ void *communicate_with_client (void *userdata)
         // acquittement — il a quitté sur une solution, expiré, ou fermé. On la
         // rend alors au stock pour qu'elle reste exploitable (cf.
         // requeue_last_sent_possibility).
-        requeue_last_sent_possibility(lastPossibilityPacketSend);
+        requeue_last_sent_possibility(lastPossibilityPacketSend, client);
         free_array_possibility_packet(lastPossibilityPacketSend);
     }
 

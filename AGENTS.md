@@ -389,6 +389,80 @@ full rewrite each time would all address this directly, but none is implemented 
 series' incidents required it, and it's a materially bigger design question than bounding a
 lock or gating a write.
 
+**Follow-up incident: the one trylock loop PR1 missed, plus a requeue race with a still-working
+pruner.** A reproduction at even higher load (`--expand-level 9`, `--expand-max-levels 10`,
+`--expand-max-stock 100000000`, `--stock-files 20`, `--rebalance-budget 10000`, a 4-fork pruner
+at batch 100) still showed pruner-side send errors: bursts of `batch analysed : possibilité non
+retirée` server-side, `INST_ERROR`/`ack=4` acknowledgements pruner-side, occasional `Broken pipe`.
+Root cause was **not** the backup lock (PR1–PR2 already cover that) but two separate, smaller
+gaps left over from before this series existed:
+
+1. **`remove_possibility_analysed` (`src/core/datamanager.c`) was the fourth `pthread_mutex_trylock`
+   loop in this file and the only one PR1 never bounded** — it predates the whole series and was
+   simply not in scope when PR1 enumerated `scroll_from_pool`/`put_to_pool`/
+   `add_possibility_analysed_impl`. Under contention (a `consistent_backup` in progress, or
+   several pruner forks acking concurrently against `--stock-files 20`), it could spin
+   indefinitely, holding the calling thread — and by extension the TCP connection it serves —
+   past the client's timeout. Fixed the same way as PR1's three loops: a `waits` counter bounded
+   by `DATAMANAGER_TRYLOCK_MAX_SWEEPS`, returning a **new, third** value distinct from the
+   existing 0 (removed)/1 (confirmed absent — every relevant file locked and scanned without a
+   match): **-1**, meaning the budget was exhausted without ever locking a single file, so
+   absence is *unconfirmed*, not proven. Every caller (`etii_server.c`'s single-ack and batch-ack
+   handlers, `requeue_last_sent_possibility`) treats -1 as "might still be there" and acts
+   accordingly — never folds it into the confirmed-absent case, which would silently drop a
+   possibility that may still be legitimately in flight. The doc comment on
+   `remove_possibility_analysed` (`src/core/datamanager.h`) was also corrected in the same change:
+   it had the 0/1 return values backwards.
+2. **The O(N) linear-scan fallback inside `remove_possibility_analysed` is now conditional**, not
+   unconditional. `analysed_index_find_and_remove` (the O(1)-amortized hash lookup) is expected to
+   be exhaustive — every successful `analysed_index_add` indexes its entry — so a miss normally
+   means genuine absence, and paying for a full scan of a `--stock-files`-sized pool on every
+   confirmed-absent case (the common case in the batch-ack path) was pure waste. A new flag,
+   `analysed_index_may_be_incomplete` (0 until the first `malloc` failure inside
+   `analysed_index_add`, 1 forever after — never reset), gates the fallback: the scan only runs
+   once this process has ever seen an index-node allocation fail, which is precisely when a miss
+   could be an indexing gap rather than a real absence.
+3. **`requeue_last_sent_possibility` (`src/app/etii_server.c`) gained a liveness check before
+   unconditionally returning a client's last-sent batch to the stock on disconnect.** Previously,
+   any connection drop (including the ordinary reconnect churn of a busy pruner cycling through
+   `--stock-files`-sized batches) requeued the whole batch immediately — and if the client's
+   *other* threads (or its next reconnection) then acked the same possibilities, the server saw
+   `remove_possibility_analysed` report absence for entries a sibling connection had, in the
+   meantime, already reprocessed or was still working. The fix takes a new `client_t *client`
+   parameter: if the disconnecting connection belongs to a process whose **control-channel**
+   session (a separate, per-process TCP connection — see *Control Channel* below) is still
+   registered and alive, the batch is left attributed rather than requeued, on the reasoning that
+   the process as a whole is provably still alive even though this one work connection dropped —
+   any possibility it never acks is still covered by PR7's existing lease-reclaim mechanism
+   (300s default) once it's actually abandoned. `client == NULL` or a client with no declared
+   identity (`INST_CLIENT_HELLO` never received — an older client) preserves the prior
+   unconditional-requeue behaviour exactly, so nothing changes for a fleet that predates v12
+   identity. Reuses `owner_control_session_alive`/`control_registry_has_active_client`, the same
+   liveness primitive PR7's lease sweep already established.
+4. **`is_connected()` (`src/net/etii_protocol.c`) was leaking a socket on one specific failure
+   branch.** Of its four failure branches, three already called `shutdown()`+`close()` before
+   returning 0; the "wrong instruction received" branch was missing both, found while auditing
+   every caller of a function that can now return early more often (point 1 above). Left the
+   socket open client-side (never reused, never freed) and the matching server-side session open
+   until its own unrelated timeout — a window during which `requeue_last_sent_possibility` could
+   act on a connection everyone else already considered dead. Fixed to match its three siblings.
+
+None of these four changes touch the wire protocol (`VERSION` unchanged) or require any new CLI
+option — pure bug fixes. Verified against a real reproduction at the same scale as the original
+incident report (server stock expanded to 3.2M possibilities, `--stock-files 20`, a 4-fork pruner
+at batch 100 run to exhaustion of the entire unchecked stock, spanning at least one full
+`consistent_backup` cycle): zero occurrences of `possibilité non retirée`, `Broken pipe`, or any
+other error-level log line on either side, where the pre-fix reproduction showed bursts of them
+within about a minute. Tests: `tests/core/test_datamanager.c`
+(`remove_possibility_analysed_gives_up_when_never_unlocked`, same "companion thread holds
+`lock_all_file_analysed()` indefinitely, assert the call returns anyway" contract as PR1's other
+three bounded-loop tests); `tests/app/test_etii_server.c`
+(`requeue_skipped_when_client_control_session_alive`,
+`requeue_returns_to_stock_when_client_not_alive`,
+`requeue_returns_to_stock_when_client_has_no_identity`); `tests/net/test_etii_protocol.c`
+(`is_connected_false_on_wrong_instruction`, updated to assert the socket is now closed instead of
+documenting the leak as a known gap).
+
 ### HTTP REST admin API
 
 **`--http-port <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only, `n` in `[1, 65535]`). Starts a minimal HTTP/1.1 admin API on **`127.0.0.1:<n>`** — loopback only, never `INADDR_ANY`, so it is never reachable off the machine by default (use an SSH tunnel or a reverse proxy for remote access). **Absent by default** (`HTTP_PORT` global defaults to 0): no extra socket is opened unless explicitly requested. Lets an external HTTP application (written in any language) read server telemetry and drive a few whitelisted admin actions without speaking the binary `packet`/`control_protocol` wire formats.

@@ -224,8 +224,14 @@ TEST is_connected_false_when_send_fails(void)
 }
 
 /* is_connected : le pair répond un octet qui n'est ni INST_END ni
- * INST_TEST_CONNECTED → retourne 0 SANS fermer le socket.
- * Couvre lignes 173-175 (branche « wrong instruction »).
+ * INST_TEST_CONNECTED → retourne 0 ET ferme le socket, comme les trois
+ * autres branches d'échec (send/recv/INST_END). Régression : cette branche
+ * était la SEULE des quatre à ne pas fermer le socket — fuite de fd côté
+ * appelant, et côté serveur une session orpheline qui ne se termine que par
+ * son propre timeout, pendant lequel `requeue_last_sent_possibility` peut
+ * remettre en jeu un travail que ce client fait toujours (cf.
+ * requeue_last_sent_possibility dans etii_server.c). Couvre lignes
+ * « wrong instruction » de is_connected.
  *
  * Mécanisme mono-thread : on pré-charge le tampon de sv[0] avec INST_ADD via sv[1]
  * avant l'appel.  is_connected(sv[0]) envoie INST_TEST_CONNECTED (sv[1] l'absorbe),
@@ -239,8 +245,8 @@ TEST is_connected_false_on_wrong_instruction(void)
     send_instruction(sv[1], INST_ADD);
 
     ASSERT_EQ_FMT(0, is_connected(sv[0]), "%d");
-    /* sv[0] n'est PAS fermé dans ce chemin (contrairement aux autres return 0). */
-    close(sv[0]);
+    /* sv[0] est fermé par is_connected — pas de double close (comme les
+     * trois autres branches d'échec). */
     close(sv[1]);
     PASS();
 }

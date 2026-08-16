@@ -226,13 +226,23 @@ int record_possibility_analysed_for_client(client_t *client, struct possibility_
  * la boucle d'événements. Pour chaque possibilité de `lastSent` encore présente
  * dans `file_analysed` (le client ne l'a pas acquittée via INST_POSSIBILITY_ANALYSED),
  * elle est retirée de l'« en analyse » et réinjectée dans le stock via
- * `add_possibility(NULL, …)`. Une possibilité déjà acquittée
- * (`remove_possibility_analysed != 0`) n'est pas réinjectée : pas de doublon de
- * travail terminé. NULL accepté (no-op). Ne libère PAS `lastSent`.
+ * `add_possibility(NULL, …)`. Une possibilité déjà acquittée (absence
+ * CONFIRMÉE, `remove_possibility_analysed == 1`) n'est pas réinjectée : pas
+ * de doublon de travail terminé — une absence NON confirmée
+ * (`remove_possibility_analysed == -1`, budget borné épuisé) est réinjectée
+ * quand même, jamais perdue dans le doute. NULL accepté pour `lastSent`
+ * (no-op) et pour `client` (comportement inchangé, remise immédiate). Ne
+ * libère PAS `lastSent`.
+ *
+ * `client` sert UNIQUEMENT à vérifier si le client reste vivant (son canal de
+ * contrôle est-il toujours enregistré ?) : si oui, cette fonction ne remet
+ * RIEN au stock — voir le corps de la fonction pour le raisonnement complet
+ * (même critère de vivacité que le bail d'expiration, PR7).
  *
  * @param lastSent Dernier lot de possibilités envoyé au client (peut être NULL).
+ * @param client   Client dont la connexion de travail se termine (peut être NULL).
  */
-void requeue_last_sent_possibility(array_possibility_packet *lastSent);
+void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t *client);
 
 /**
  * @brief Traite une instruction reçue d'un client (un tour de la boucle de

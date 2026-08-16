@@ -300,7 +300,15 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
  *
  * @param possiblity Paquet à retirer.
  * @param thread     Index de file préférentiel (−1 = recherche dans toutes les files).
- * @return           1 si le paquet a été trouvé et retiré, 0 sinon.
+ * @return           0 si trouvé et retiré ; 1 si absent (toutes les files
+ *                    concernées ont été verrouillées et parcourues sans le
+ *                    trouver — absence CONFIRMÉE) ; -1 si le budget borné
+ *                    (`DATAMANAGER_TRYLOCK_MAX_SWEEPS`) a été épuisé sans
+ *                    jamais réussir à verrouiller ne serait-ce qu'une file
+ *                    (maintenance en cours) — absence NON confirmée, à ne
+ *                    jamais traiter comme un 1 par un appelant qui rendrait
+ *                    silencieusement une possibilité peut-être toujours en
+ *                    cours d'analyse.
  */
 int remove_possibility_analysed(struct possibility_packet *possiblity, int thread);
 /** @brief Nombre de possibilités dans la file `nfile` du pool principal (non vérifiées). */

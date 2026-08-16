@@ -3795,6 +3795,54 @@ TEST remove_possibility_analysed_spins_until_lock_released(void)
     PASS();
 }
 
+static volatile int g_bounded_remove_done = 0;
+static int g_bounded_remove_rc = -99;
+static void *th_remove_analysed_never_unlocked(void *arg)
+{
+    (void)arg;
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 8;
+    g_bounded_remove_rc = remove_possibility_analysed(&pk, -1);
+    g_bounded_remove_done = 1;
+    return NULL;
+}
+
+/* Régression : remove_possibility_analysed était la SEULE des quatre boucles
+ * trylock analogues de datamanager.c à ne jamais rendre la main quand le pool
+ * analysé reste verrouillé indéfiniment (maintenance qui dure) -- les trois
+ * autres (put_to_pool, scroll_from_pool, add_possibility_analysed_impl) sont
+ * bornées depuis PR1. Contrepartie de remove_possibility_analysed_spins_until_lock_released :
+ * verrou JAMAIS relâché -> doit rendre la main (résultat -1, "absence NON
+ * confirmée", cf. datamanager.h) au lieu de bloquer indéfiniment l'appelant
+ * (et par ricochet la connexion TCP du client jusqu'à son timeout). Même
+ * motif déterministe que add_possibility_gives_up_when_stock_never_unlocked :
+ * on lit un drapeau après un délai borné, on ne joint qu'ensuite. */
+TEST remove_possibility_analysed_gives_up_when_never_unlocked(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 8;
+    add_possibility_analysed(&pk, 1);
+
+    g_bounded_remove_done = 0;
+    g_bounded_remove_rc = -99;
+    lock_all_file_analysed();
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, th_remove_analysed_never_unlocked, NULL));
+    usleep(TEST_TRYLOCK_BOUND_MARGIN_US);
+    int returned_while_locked = g_bounded_remove_done;
+    unlock_all_file_analysed();
+    pthread_join(th, NULL);
+
+    ASSERT_EQ_FMT(1, returned_while_locked, "%d");
+    ASSERT_EQ_FMT(-1, g_bounded_remove_rc, "%d");   /* absence NON confirmée, jamais 1 */
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");  /* toujours là : rien perdu */
+    drain_all();
+    PASS();
+}
+
 static void *th_restock_analysed(void *arg)
 {
     (void)arg;
@@ -4582,6 +4630,7 @@ SUITE(datamanager_suite)
     RUN_TEST(add_possibility_analysed_gives_up_when_pool_never_unlocked_rotating);
     RUN_TEST(add_possibility_analysed_gives_up_when_pool_never_unlocked_pinned);
     RUN_TEST(remove_possibility_analysed_spins_until_lock_released);
+    RUN_TEST(remove_possibility_analysed_gives_up_when_never_unlocked);
     RUN_TEST(restock_analysed_spins_until_stock_unlocked);
     RUN_TEST(analysed_index_walks_collision_chains);
     RUN_TEST(add_possibility_analysed_owned_visible_via_query);

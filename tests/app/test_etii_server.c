@@ -271,7 +271,7 @@ TEST file_queues_table_reflects_unchecked_stock(void)
 TEST requeue_null_is_noop(void)
 {
     dm_drain_all();
-    requeue_last_sent_possibility(NULL);
+    requeue_last_sent_possibility(NULL, NULL);
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
     PASS();
 }
@@ -288,7 +288,7 @@ TEST requeue_unacked_returns_to_stock(void)
     add_possibility_analysed(&pkt, -1);          /* le serveur l'avait servie */
 
     array_possibility_packet sent = { .size = 1, .possibilities = &pkt };
-    requeue_last_sent_possibility(&sent);
+    requeue_last_sent_possibility(&sent, NULL);
 
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");   /* rendue au stock */
     dm_drain_all();
@@ -307,7 +307,7 @@ TEST requeue_acked_is_skipped(void)
     /* jamais ajoutée à file_analysed : simule un client ayant déjà acquitté */
 
     array_possibility_packet sent = { .size = 1, .possibilities = &pkt };
-    requeue_last_sent_possibility(&sent);
+    requeue_last_sent_possibility(&sent, NULL);
 
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* rien rendu */
     PASS();
@@ -326,9 +326,113 @@ TEST requeue_mixed_batch_returns_only_unacked(void)
     add_possibility_analysed(&pkts[2], -1);
 
     array_possibility_packet sent = { .size = 3, .possibilities = pkts };
-    requeue_last_sent_possibility(&sent);
+    requeue_last_sent_possibility(&sent, NULL);
 
     ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+    dm_drain_all();
+    PASS();
+}
+
+/* Le client reste vivant (canal de contrôle toujours enregistré pour son
+ * client_uid) : cette connexion de TRAVAIL a pu se terminer par un simple
+ * aléa réseau -- la possibilité n'est PAS remise au stock, pour ne pas la
+ * faire explorer une seconde fois en double pendant que le fork y travaille
+ * peut-être toujours (même critère de vivacité que le bail d'expiration,
+ * PR7 -- voir requeue_last_sent_possibility). */
+TEST requeue_skipped_when_client_control_session_alive(void)
+{
+    restock_analysed();     /* purge un éventuel reliquat "analysed" d'un autre test */
+    dm_drain_all();
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    memset(owner, 0x99, sizeof owner);
+
+    control_hello_t h = { .pid = 9001, .nb_forks = 1, .identity = { .mode = 0 } };
+    memcpy(h.identity.client_uid, owner, CLIENT_UID_BYTES);
+    int session_idx = control_registry_register(1, "203.0.113.30", &h);
+    ASSERT(session_idx >= 0);
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 11;
+    add_possibility_analysed_owned(&pkt, -1, owner);   /* le serveur l'avait servie à `owner` */
+
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.has_identity = 1;
+    memcpy(client.identity.client_uid, owner, CLIENT_UID_BYTES);
+
+    array_possibility_packet sent = { .size = 1, .possibilities = &pkt };
+    requeue_last_sent_possibility(&sent, &client);
+
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* pas rendue au stock */
+    unsigned long long count = 999;
+    int max_alloc = -999;
+    ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
+    ASSERT_EQ_FMT(1ULL, count, "%llu");          /* toujours en cours d'analyse */
+
+    control_registry_unregister(session_idx);
+    // La possibilité n'a délibérément PAS été remise (c'est le but du test) :
+    // elle reste dans le pool analysé, jamais touché par dm_drain_all()
+    // (qui ne draine que le stock) -- restock_analysed() la rend au stock
+    // pour que dm_drain_all() puisse ensuite tout nettoyer, sans quoi elle
+    // fuiterait vers le test suivant (même hasard de contenu -> faux
+    // positif de hachage possible sur une autre possibilité "jamais
+    // ajoutée").
+    restock_analysed();
+    dm_drain_all();
+    PASS();
+}
+
+/* Sans session de contrôle enregistrée pour ce client_uid (client réellement
+ * disparu) : comportement inchangé, remise immédiate au stock. */
+TEST requeue_returns_to_stock_when_client_not_alive(void)
+{
+    dm_drain_all();
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    memset(owner, 0x9a, sizeof owner);
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 12;
+    add_possibility_analysed(&pkt, -1);
+
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.has_identity = 1;
+    memcpy(client.identity.client_uid, owner, CLIENT_UID_BYTES);
+    /* Aucune session de contrôle enregistrée pour ce client_uid. */
+
+    array_possibility_packet sent = { .size = 1, .possibilities = &pkt };
+    requeue_last_sent_possibility(&sent, &client);
+
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");   /* rendue au stock */
+    dm_drain_all();
+    PASS();
+}
+
+/* has_identity == 0 (client ancien, jamais de INST_CLIENT_HELLO) : la
+ * vivacité ne peut pas être vérifiée -- comportement inchangé, remise
+ * immédiate, même si une session de contrôle est par ailleurs enregistrée
+ * pour un autre client_uid. */
+TEST requeue_returns_to_stock_when_client_has_no_identity(void)
+{
+    dm_drain_all();
+
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    pkt.alloc = 13;
+    add_possibility_analysed(&pkt, -1);
+
+    client_t client;
+    memset(&client, 0, sizeof client);
+    client.has_identity = 0;
+
+    array_possibility_packet sent = { .size = 1, .possibilities = &pkt };
+    requeue_last_sent_possibility(&sent, &client);
+
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");   /* rendue au stock */
     dm_drain_all();
     PASS();
 }
@@ -2605,6 +2709,9 @@ SUITE(etii_server_suite)
     RUN_TEST(requeue_unacked_returns_to_stock);
     RUN_TEST(requeue_acked_is_skipped);
     RUN_TEST(requeue_mixed_batch_returns_only_unacked);
+    RUN_TEST(requeue_skipped_when_client_control_session_alive);
+    RUN_TEST(requeue_returns_to_stock_when_client_not_alive);
+    RUN_TEST(requeue_returns_to_stock_when_client_has_no_identity);
 
     RUN_TEST(step_test_connected_pings_back);
     RUN_TEST(compute_server_hunger_targets_two_per_client);
