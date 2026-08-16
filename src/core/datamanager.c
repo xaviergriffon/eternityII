@@ -95,11 +95,29 @@ static file_possibility_t **file_possibility_checked = NULL;
  *
  * L'index n'est jamais une source de vérité : sur un « miss » (rien dans le
  * seau), remove_possibility_analysed() retombe sur le balayage linéaire
- * historique. Un nœud qui n'a pas pu être alloué (OOM) ou toute divergence
- * éventuelle n'affecte donc jamais la correction, seulement la performance de
- * ce cas limite — la file reste la seule source de vérité.
+ * historique — mais SEULEMENT si `analysed_index_may_be_incomplete` (ci-dessous)
+ * l'exige : dans l'écrasante majorité du temps, un miss signifie une absence
+ * RÉELLE (voir sa doc), et le repli — O(taille de la file), sous verrou —
+ * serait une régression de performance pure sur le chemin le plus fréquent
+ * (acquittement d'une possibilité déjà retirée par un autre acquittement
+ * concurrent, ou par requeue_last_sent_possibility).
  */
 #define ANALYSED_INDEX_BUCKETS 8191
+
+/**
+ * @brief 0 tant qu'AUCUN `analysed_index_add` n'a jamais échoué (OOM) sur ce
+ *        process, 1 dès le premier échec — jamais remis à 0.
+ *
+ * Tant qu'il vaut 0, l'index est garanti EXHAUSTIF (chaque `put()` réussi
+ * dans `file_possibility_analysed` est indexé dans la foulée) : un miss de
+ * `analysed_index_find_and_remove` signifie alors une absence RÉELLE, jamais
+ * un défaut d'indexation, et `remove_possibility_analysed` peut sauter son
+ * repli par balayage linéaire sans risque. Bascule à 1 dès le premier échec
+ * d'allocation d'un nœud d'index et le reste pour tout le process : quelques
+ * balayages de repli superflus après un unique OOM coûtent moins cher qu'un
+ * second OOM silencieusement mal couvert.
+ */
+static int analysed_index_may_be_incomplete = 0;
 
 /*
  * Attribution des analyses en cours (PR6) : `owner_uid` est le `client_uid` du
@@ -351,11 +369,34 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
 		}
 		int8_t ack = recv_instruction(socket_id);
 		if(ack != INST_CONSIDERED) {
-			log_error("problème de prise en compte du serveur (ack=%d)\n", ack);
+			// INST_ERROR n'est PAS une anomalie : c'est la dégradation gracieuse
+			// prévue (PR1) quand le stock du serveur est momentanément
+			// intégralement verrouillé — typiquement la phase 1 de
+			// consistent_backup (PR2), qui gèle toutes les files à l'instant T
+			// puis les libère une à une. `put_to_pool` y épuise son budget borné
+			// (DATAMANAGER_TRYLOCK_MAX_SWEEPS × MICRO_SLEEP ≈ 500 ms) et refuse
+			// l'insertion plutôt que de bloquer le thread serveur — et donc la
+			// connexion TCP — jusqu'au timeout du client. Sur un gros stock la
+			// fenêtre « tout verrouillé » vaut l'écriture d'UN fichier (≈ 1,8 s
+			// pour 14 M de possibilités réparties sur 20 files), soit plus que
+			// ce budget : quelques refus par sauvegarde sont donc NORMAUX.
+			// Rien n'est perdu : la possibilité part en stock local juste
+			// en dessous et sera renvoyée plus tard (et, depuis le correctif
+			// `from_server` de get_last_possibility, sans être acquittée à tort
+			// au passage). Journalisé en info, sans vidage du plateau, pour ne
+			// pas faire passer un fonctionnement nominal pour un incident.
+			// Tout AUTRE valeur reste une vraie anomalie protocolaire.
+			if (ack == INST_ERROR) {
+				log_info("stock serveur momentanément indisponible (maintenance) : possibilité conservée en local, renvoi ultérieur\n");
+			} else {
+				log_error("problème de prise en compte du serveur (ack=%d)\n", ack);
+			}
 			array_possibility_packet *single_array = build_single_array_possibility_packet(possibility);
 			put_to_local(single_array);
 			free_array_possibility_packet(single_array);
-			log_error_possibility_packet(possibility);
+			if (ack != INST_ERROR) {
+				log_error_possibility_packet(possibility);
+			}
 			if (ack == INST_END) {
 				/* Connexion perdue (timeout ou fermeture) : on sort et on remet t+1..fin en local */
 				last_routed = t;
@@ -585,8 +626,9 @@ static uint64_t hash_possibility_key(const struct possibility_packet *p)
  *
  * À appeler juste après un `put()` réussi, avec `e == file->end`. En cas
  * d'échec d'allocation du nœud d'index (OOM), l'élément reste dans la file
- * mais non indexé : `remove_possibility_analysed` le retrouvera via son repli
- * sur le balayage linéaire (jamais silencieusement perdu) — et
+ * mais non indexé : bascule `analysed_index_may_be_incomplete` à 1, pour que
+ * `remove_possibility_analysed` réactive son repli par balayage linéaire (le
+ * retrouvant ainsi, jamais silencieusement perdu) — et
  * `datamanager_analysed_owned_by` (PR6) ne le verra simplement pas, comme
  * documenté sur `AnalysedIndexNode` ci-dessus.
  *
@@ -599,6 +641,7 @@ static void analysed_index_add(int fileidx, Element *e, const uint8_t owner_uid[
 {
 	AnalysedIndexNode *node = malloc(sizeof(AnalysedIndexNode));
 	if (node == NULL) {
+		analysed_index_may_be_incomplete = 1;
 		return;
 	}
 	node->hash = hash_possibility_key((struct possibility_packet *)e->value);
@@ -726,6 +769,7 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 #endif // DEBUG_CHECK_POSSIBILITY
 	int removed_possibility = 0;
 	int currfile = 0;
+	int waits = 0;
 	if (thread >=0) {
 		currfile = thread;
 	}
@@ -743,12 +787,15 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 		{
 			File *file = &file_possibility_analysed[currfile]->file;
 			// Chemin rapide : l'index de hachage retrouve la possibilité en
-			// O(1) amorti (cas courant : elle est bien présente).
+			// O(1) amorti (cas courant : elle est bien présente). Le repli par
+			// balayage linéaire (O(taille de la file), sous verrou) n'est
+			// tenté QUE si l'index a pu manquer une entrée (échec d'allocation
+			// d'un nœud, cf. analysed_index_may_be_incomplete) — sinon un miss
+			// de l'index signifie une absence RÉELLE, jamais un défaut
+			// d'indexation, et payer ce balayage serait une régression de
+			// performance pure sur le cas le plus fréquent.
 			Element *element = analysed_index_find_and_remove(currfile, possibility);
-			if (element == NULL) {
-				// Repli : balayage linéaire historique. Couvre l'absence
-				// réelle ET tout défaut d'indexation (ex. OOM lors d'un
-				// ajout) — la file reste toujours la source de vérité.
+			if (element == NULL && analysed_index_may_be_incomplete) {
 				element = file->start;
 				while (element != NULL && compare_possibility((struct possibility_packet *)element->value, possibility) != 0) {
 					element = element->next;
@@ -763,25 +810,46 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 			pthread_mutex_unlock(&file_possibility_analysed[currfile]->lock);
 		}
 		if (checked == 1) {
+			if (removed_possibility == 1) {
+				break;
+			}
 			if (thread < 0) {
 				currfile++;
 				if(currfile >= nb_file_possibility)
 				{
-					// On n'a pas retrouvé la possibilité
+					// Toutes les files ont été verrouillées et parcourues :
+					// absence CONFIRMÉE.
 #ifdef DEBUG_CHECK_POSSIBILITY
 					log_debug("non supprimée \n");
 #endif // DEBUG_CHECK_POSSIBILITY
 					return 1;
 				}
-			} else if (removed_possibility == 0) {
+			} else {
+				// Une seule file ciblée, déjà verrouillée et parcourue :
+				// absence CONFIRMÉE.
 #ifdef DEBUG_CHECK_POSSIBILITY
                 log_debug("non supprimée \n");
 #endif // DEBUG_CHECK_POSSIBILITY
-				// On n'a pas retrouvé la possibilité
 				return 1;
 			}
 		} else {
 			usleep(MICRO_SLEEP);
+			// Sortie bornée (même motif que add_possibility_analysed_impl,
+			// PR1) : au-delà de DATAMANAGER_TRYLOCK_MAX_SWEEPS attentes
+			// consécutives sans jamais réussir à verrouiller la moindre file,
+			// abandonner plutôt que de bloquer indéfiniment l'appelant (et par
+			// ricochet la connexion TCP du client jusqu'à son timeout) —
+			// AVANT ce correctif, cette boucle était la SEULE des quatre
+			// boucles trylock de ce fichier à ne pas être bornée. Retour -1,
+			// DISTINCT du "absence confirmée" (retour 1) : voir le contrat
+			// détaillé dans datamanager.h — un appelant qui confondrait les
+			// deux perdrait silencieusement une possibilité qui existe peut-
+			// être toujours mais n'a simplement pas pu être vérifiée à temps.
+			waits++;
+			if (waits >= DATAMANAGER_TRYLOCK_MAX_SWEEPS)
+			{
+				return -1;
+			}
 		}
 	}
 #ifdef DEBUG_CHECK_POSSIBILITY
@@ -1546,17 +1614,23 @@ void scroll_from_local_tocheck(array_possibility_packet *result, int max_result)
 	scroll_from_pool(file_possibility, result, max_result, &rr_scroll_unchecked);
 }
 
-array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result)
+array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result, int *from_server)
 {
 	array_possibility_packet *result = malloc(sizeof(array_possibility_packet));
 	result->size = 0;
 	result->possibilities = NULL;
-	
+	if (from_server != NULL) {
+		*from_server = 0;
+	}
+
 	scroll_from_local(result, max_result);
-    
+
 	if(result->size == 0 && server_ip != NULL)
 	{
 		scroll_from_server(client_possibility, result, max_result);
+		if (from_server != NULL && result->size > 0) {
+			*from_server = 1;
+		}
 	}
 
 	if(result->size == 0)

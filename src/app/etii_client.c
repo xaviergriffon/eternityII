@@ -175,13 +175,28 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
         send_possibility_analysed(client_possibility);
         // Un pruner consomme vite : on demande un lot pour amortir les
         // allers-retours TCP ; un client de recherche garde 1 racine
-        array_possibility_packet *aposs = get_last_possibility(client_possibility, pruner_mode ? pruner_batch_size : 1);
+        int from_server = 0;
+        array_possibility_packet *aposs = get_last_possibility(client_possibility, pruner_mode ? pruner_batch_size : 1, &from_server);
         if(aposs->size > 0)
         {
             (*got_work)++;
-            // On alimente la pile des possibilités en étude
-            for (int p = 0; p < aposs->size; p++) {
-                add_possibility_analysed(&aposs->possibilities[p], i);
+            // On alimente la pile des possibilités en étude UNIQUEMENT si ce
+            // lot vient réellement du serveur (get_last_possibility essaie
+            // d'abord les files locales — un repli put_to_local, par exemple
+            // un ADD refusé sous contention, cf. put_to_server — avant de
+            // solliciter le réseau). Un lot recyclé localement n'a jamais été
+            // (ré-)enregistré par le serveur via record_batch_analysed_for_client
+            // cette fois-ci : le suivre ici comme si c'était le cas ferait
+            // acquitter deux fois la MÊME possibilité (send_possibility_analysed
+            // la renverrait une seconde fois), la seconde fois trouvant le
+            // serveur sans plus rien à retirer — « absence confirmée »,
+            // observé en reproduction réelle (--expand-level 9, pruner 4 forks)
+            // et non par un test unitaire, aucun ne poussant jamais le stock
+            // local du client au point de faire échouer un ADD serveur.
+            if (from_server) {
+                for (int p = 0; p < aposs->size; p++) {
+                    add_possibility_analysed(&aposs->possibilities[p], i);
+                }
             }
             // Réacquisition du mutex uniquement pour la mise à jour de aposs/works
             pthread_mutex_lock(&thread_params[i].works_mutex);
@@ -239,12 +254,20 @@ void *feed_thread_aposs(void *param) {
     // en cours, on utilise alors la cadence normale THREAD_MICRO_SLEEP).
     useconds_t no_work_sleep = 0;
     while (request_keeps_running(request)) {
-        int needed_work = 0; // threads ayant demandé du travail ce tour
-        int got_work = 0;    // threads ayant effectivement reçu du travail
-        for(int i = 0; i < NB_THREADS; i++)
-        {
-            feed_one_thread(thread_params, i, &needed_work, &got_work);
-        }
+        int needed_work = 0; // 1 si ce fork a demandé du travail ce tour
+        int got_work = 0;    // 1 si ce fork en a effectivement reçu
+        // run_mono_client n'alloue jamais qu'UN SEUL client_possibility_t par
+        // fork (malloc(sizeof(*thread_params)), jamais un tableau) : boucler
+        // sur NB_THREADS (le nombre de FORKS du process parent, pas un compte
+        // de threads internes à CE fork) indexait thread_params[i] hors bornes
+        // pour tout i >= 1 dès que --nb_forks > 1 — écriture/lecture heap
+        // au-delà de l'unique allocation, undefined behavior silencieux en
+        // release (jamais de crash), à l'origine de pertes/doublons de suivi
+        // difficiles à rattacher à leur cause. `thread_params->id` (toujours 0
+        // dans ce modèle un-thread-par-fork, cf. init_client_possibility) est
+        // l'unique indice valide, cohérent avec send_possibility_analysed qui
+        // l'utilise déjà pour indexer file_possibility_analysed.
+        feed_one_thread(thread_params, thread_params->id, &needed_work, &got_work);
 
         // Pause adaptative : si des threads attendaient du travail mais que le
         // serveur n'a RIEN fourni à aucun (stock épuisé, ou serveur saturé qui

@@ -89,7 +89,7 @@ static void restore_std(void)
 static void drain_datamanager(void)
 {
     while (datas_size() > 0) {
-        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
         free_array_possibility_packet(r);
     }
     datamanager_reset_rr_state_for_tests();
@@ -221,7 +221,7 @@ TEST add_possibility_rotates_start_file_across_calls(void)
     /* Extraction directe (pas drain_datamanager()) : ne touche que l'état
      * round-robin du côté GET (rr_scroll_*), jamais celui du côté ADD
      * (rr_put_*) qu'on veut observer ensuite. */
-    array_possibility_packet *r = get_last_possibility(NULL, 10);
+    array_possibility_packet *r = get_last_possibility(NULL, 10, NULL);
     free_array_possibility_packet(r);
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
 
@@ -247,7 +247,7 @@ TEST get_last_possibility_drains_pool(void)
     int allocs[] = { 2, 4 };
     add_packets(allocs, 2);
 
-    array_possibility_packet *r = get_last_possibility(NULL, 10);
+    array_possibility_packet *r = get_last_possibility(NULL, 10, NULL);
     ASSERT(r != NULL);
     ASSERT_EQ_FMT(2, r->size, "%d");
     free_array_possibility_packet(r);
@@ -256,7 +256,7 @@ TEST get_last_possibility_drains_pool(void)
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
 
     /* Sur un pool vide, get renvoie un tableau de taille 0. */
-    array_possibility_packet *empty = get_last_possibility(NULL, 10);
+    array_possibility_packet *empty = get_last_possibility(NULL, 10, NULL);
     ASSERT_EQ_FMT(0, empty->size, "%d");
     free_array_possibility_packet(empty);
     PASS();
@@ -279,7 +279,7 @@ TEST put_and_scroll_round_trip_succeeds_when_pool_free(void)
         add_packets(allocs, 5);
         ASSERT_EQ_FMT(5ULL, datas_size(), "%llu");
 
-        array_possibility_packet *r = get_last_possibility(NULL, 100);
+        array_possibility_packet *r = get_last_possibility(NULL, 100, NULL);
         ASSERT(r != NULL);
         ASSERT_EQ_FMT(5, r->size, "%d");
         free_array_possibility_packet(r);
@@ -1594,6 +1594,60 @@ static void *mini_srv_put_bad_ack(void *arg)
     return NULL;
 }
 
+/* Mini-serveur put_to_server — INST_ERROR pour le premier paquet :
+ *   pkt[0] → INST_ERROR (stock serveur momentanément verrouillé : c'est ce que
+ *            répond réellement le handler INST_ADD quand add_possibility échoue
+ *            sur le budget borné de put_to_pool, typiquement pendant la phase 1
+ *            de consistent_backup)
+ *   pkt[1] → INST_CONSIDERED
+ */
+static void *mini_srv_put_server_busy(void *arg)
+{
+    int fd = *(int *)arg;
+    int8_t b;
+    recv(fd, &b, 1, 0);
+    b = INST_TEST_CONNECTED;
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_ADD pkt[0] */
+    struct possibility_packet pkt;
+    recv_exact_sv(fd, &pkt, sizeof pkt);
+    b = INST_ERROR;                                   /* serveur occupé */
+    send(fd, &b, 1, 0);
+    recv(fd, &b, 1, 0);                              /* INST_ADD pkt[1] */
+    recv_exact_sv(fd, &pkt, sizeof pkt);
+    b = INST_CONSIDERED;
+    send(fd, &b, 1, 0);
+    close(fd);
+    return NULL;
+}
+
+/* Capture stderr dans un fichier temporaire (stdout part vers /dev/null).
+ * log_error écrit sur stderr ET dans events.log ; log_info n'écrit que sur
+ * stdout — mesurer stderr distingue donc les deux sans dépendre du libellé. */
+static int g_cap_fd1 = -1, g_cap_fd2 = -1;
+static char g_cap_path[128];
+static void capture_stderr(void)
+{
+    fflush(stdout); fflush(stderr);
+    snprintf(g_cap_path, sizeof g_cap_path, "/tmp/etii_stderr_cap_%d", (int)getpid());
+    g_cap_fd1 = dup(1);
+    g_cap_fd2 = dup(2);
+    int dn = open("/dev/null", O_WRONLY);
+    dup2(dn, 1); close(dn);
+    int f = open(g_cap_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    dup2(f, 2); close(f);
+}
+static long restore_stderr_size(void)
+{
+    fflush(stdout); fflush(stderr);
+    dup2(g_cap_fd1, 1); close(g_cap_fd1);
+    dup2(g_cap_fd2, 2); close(g_cap_fd2);
+    struct stat st;
+    long sz = (stat(g_cap_path, &st) == 0) ? (long)st.st_size : -1;
+    unlink(g_cap_path);
+    return sz;
+}
+
 /* Mini-serveur send_solution — succès :
  *   1. is_connected : reçoit INST_TEST_CONNECTED → répond INST_TEST_CONNECTED
  *   2. reçoit INST_SOLUTION + possibility_packet → répond INST_CONSIDERED
@@ -1766,7 +1820,7 @@ TEST scroll_from_server_returns_packet(void)
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    array_possibility_packet *r = get_last_possibility(&cp, 1, NULL);
     restore_std();
 
     ASSERT(r != NULL);
@@ -1777,6 +1831,85 @@ TEST scroll_from_server_returns_packet(void)
     pthread_join(srv, NULL);
     set_server_ip(NULL);
     close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* get_last_possibility : from_server doit être mis à 1 quand le lot vient
+ * réellement d'un aller-retour serveur (scroll_from_server). C'est le signal
+ * que feed_one_thread (etii_client.c) utilise pour décider s'il doit suivre
+ * ce lot dans file_possibility_analysed en vue d'un futur acquittement
+ * INST_POSSIBILITY_ANALYSED[_BATCH] — voir le test symétrique ci-dessous. */
+TEST get_last_possibility_reports_from_server_true_when_server_serves(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_get_packet, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    int from_server = -1;
+    silence_std();
+    array_possibility_packet *r = get_last_possibility(&cp, 1, &from_server);
+    restore_std();
+
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(1, r->size, "%d");
+    ASSERT_EQ_FMT(1, from_server, "%d");
+    free_array_possibility_packet(r);
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* get_last_possibility : from_server doit rester à 0 quand le lot vient du
+ * pool LOCAL (scroll_from_local) — jamais un aller-retour serveur cette
+ * fois-ci, donc rien que le serveur ait enregistré comme « en analyse » pour
+ * ce client. C'est le repli put_to_local (ADD refusé par le serveur, par
+ * exemple sous contention — INST_ERROR, cf. put_to_server) qui alimente ce
+ * pool ; le mini-serveur n'est même pas sollicité ici (scroll_from_local
+ * trouve tout avant scroll_from_server), ce qui prouve à lui seul l'absence
+ * d'aller-retour réseau pour ce lot. */
+TEST get_last_possibility_reports_from_server_false_when_local_stock_used(void)
+{
+    drain_datamanager();
+
+    struct possibility_packet *p = malloc(sizeof *p);
+    memset(p, 0, sizeof *p);
+    p->alloc = 5;
+    array_possibility_packet *ap = malloc(sizeof *ap);
+    ap->size = 1;
+    ap->possibilities = p;
+    add_possibility(NULL, ap); /* put_to_local : simule le repli d'un ADD refusé */
+    free_array_possibility_packet(ap);
+
+    client_possibility_t cp;
+    memset(&cp, 0, sizeof cp);
+    pthread_mutex_init(&cp.socket_mutex, NULL);
+    cp.socket_id = -1;
+    set_server_ip("127.0.0.1"); /* server_ip != NULL : scénario client réel */
+
+    int from_server = -1;
+    array_possibility_packet *r = get_last_possibility(&cp, 1, &from_server);
+
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(1, r->size, "%d");
+    ASSERT_EQ_FMT(0, from_server, "%d");
+    ASSERT_EQ_FMT(5, (int)r->possibilities[0].alloc, "%d");
+    free_array_possibility_packet(r);
+
+    set_server_ip(NULL);
     pthread_mutex_destroy(&cp.socket_mutex);
     drain_datamanager();
     PASS();
@@ -1798,7 +1931,7 @@ TEST scroll_from_server_returns_empty(void)
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    array_possibility_packet *r = get_last_possibility(&cp, 1, NULL);
     restore_std();
 
     ASSERT(r != NULL);
@@ -1831,7 +1964,7 @@ TEST scroll_from_server_reassembles_fragmented_packet(void)
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    array_possibility_packet *r = get_last_possibility(&cp, 1, NULL);
     restore_std();
 
     ASSERT(r != NULL);
@@ -1870,7 +2003,7 @@ static array_possibility_packet *run_pruner_batch(int32_t k_announced, int packe
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, requested);
+    array_possibility_packet *r = get_last_possibility(&cp, requested, NULL);
     restore_std();
 
     pthread_join(srv, NULL);
@@ -2038,6 +2171,94 @@ TEST put_to_server_bad_ack_non_fatal(void)
 
     ASSERT_EQ_FMT(0, rc, "%d");          /* pas de connection_lost : rc=0 */
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* pkt[0] remis en local */
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* put_to_server : INST_ERROR (stock serveur momentanément verrouillé — phase 1
+ * de consistent_backup) est la dégradation gracieuse PRÉVUE par PR1, pas une
+ * anomalie. Deux propriétés verrouillées ici :
+ *   1. fonctionnelle — non fatal : la possibilité est conservée en stock local
+ *      (rien de perdu, renvoi ultérieur) et la boucle CONTINUE (pkt[1] est bien
+ *      envoyé, rc=0) ;
+ *   2. observabilité — RIEN sur stderr. log_error écrit sur stderr *et* dans
+ *      events.log ; log_info non. Avant ce correctif, chaque sauvegarde d'un
+ *      gros stock polluait events.log de « problème de prise en compte du
+ *      serveur (ack=-1) » + un vidage complet du plateau, faisant passer un
+ *      fonctionnement nominal pour un incident (signalé trois fois comme tel en
+ *      exploitation réelle). Assertion sur la TAILLE de stderr plutôt que sur le
+ *      libellé : reformuler le message ne casse pas le test, le repasser en
+ *      log_error si. */
+TEST put_to_server_server_busy_is_silent_and_non_fatal(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_put_server_busy, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    struct possibility_packet pkts[2];
+    memset(pkts, 0, sizeof pkts);
+    pkts[0].alloc = 3;
+    pkts[1].alloc = 4;
+    array_possibility_packet arr = { .size = 2, .possibilities = pkts };
+
+    capture_stderr();
+    int rc = put_to_server(&cp, &arr);
+    long err_bytes = restore_stderr_size();
+
+    ASSERT_EQ_FMT(0, rc, "%d");                  /* non fatal : la boucle a continué */
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");   /* pkt[0] conservé en local */
+    ASSERT_EQ_FMT(0L, err_bytes, "%ld");         /* aucune trace d'erreur/events.log */
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* Symétrique du test ci-dessus : un ACK réellement inattendu (INST_NULL, que le
+ * serveur n'envoie jamais sur INST_ADD) reste, lui, journalisé en erreur —
+ * le correctif ne doit pas rendre muettes les vraies anomalies protocolaires. */
+TEST put_to_server_unexpected_ack_still_logs_error(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_put_bad_ack, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    struct possibility_packet pkts[2];
+    memset(pkts, 0, sizeof pkts);
+    pkts[0].alloc = 3;
+    pkts[1].alloc = 4;
+    array_possibility_packet arr = { .size = 2, .possibilities = pkts };
+
+    capture_stderr();
+    int rc = put_to_server(&cp, &arr);
+    long err_bytes = restore_stderr_size();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT(err_bytes > 0);                       /* vraie anomalie : toujours signalée */
 
     pthread_join(srv, NULL);
     set_server_ip(NULL);
@@ -2835,7 +3056,7 @@ TEST scroll_from_server_count_recv_fails(void)
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    array_possibility_packet *r = get_last_possibility(&cp, 1, NULL);
     restore_std();
 
     ASSERT(r != NULL);
@@ -2864,7 +3085,7 @@ TEST scroll_from_server_rejects_aberrant_count(void)
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    array_possibility_packet *r = get_last_possibility(&cp, 1, NULL);
     restore_std();
 
     ASSERT(r != NULL);
@@ -2893,7 +3114,7 @@ TEST scroll_from_server_incomplete_packet_detected(void)
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    array_possibility_packet *r = get_last_possibility(&cp, 1, NULL);
     restore_std();
 
     ASSERT(r != NULL);
@@ -3581,7 +3802,7 @@ static array_possibility_packet *g_cont_result;
 static void *th_get_possibility(void *arg)
 {
     (void)arg;
-    g_cont_result = get_last_possibility(NULL, 1);
+    g_cont_result = get_last_possibility(NULL, 1, NULL);
     return NULL;
 }
 
@@ -3791,6 +4012,54 @@ TEST remove_possibility_analysed_spins_until_lock_released(void)
 
     ASSERT_EQ_FMT(0, g_cont_remove_rc, "%d");    /* trouvée et retirée */
     ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+    drain_all();
+    PASS();
+}
+
+static volatile int g_bounded_remove_done = 0;
+static int g_bounded_remove_rc = -99;
+static void *th_remove_analysed_never_unlocked(void *arg)
+{
+    (void)arg;
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 8;
+    g_bounded_remove_rc = remove_possibility_analysed(&pk, -1);
+    g_bounded_remove_done = 1;
+    return NULL;
+}
+
+/* Régression : remove_possibility_analysed était la SEULE des quatre boucles
+ * trylock analogues de datamanager.c à ne jamais rendre la main quand le pool
+ * analysé reste verrouillé indéfiniment (maintenance qui dure) -- les trois
+ * autres (put_to_pool, scroll_from_pool, add_possibility_analysed_impl) sont
+ * bornées depuis PR1. Contrepartie de remove_possibility_analysed_spins_until_lock_released :
+ * verrou JAMAIS relâché -> doit rendre la main (résultat -1, "absence NON
+ * confirmée", cf. datamanager.h) au lieu de bloquer indéfiniment l'appelant
+ * (et par ricochet la connexion TCP du client jusqu'à son timeout). Même
+ * motif déterministe que add_possibility_gives_up_when_stock_never_unlocked :
+ * on lit un drapeau après un délai borné, on ne joint qu'ensuite. */
+TEST remove_possibility_analysed_gives_up_when_never_unlocked(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 8;
+    add_possibility_analysed(&pk, 1);
+
+    g_bounded_remove_done = 0;
+    g_bounded_remove_rc = -99;
+    lock_all_file_analysed();
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, th_remove_analysed_never_unlocked, NULL));
+    usleep(TEST_TRYLOCK_BOUND_MARGIN_US);
+    int returned_while_locked = g_bounded_remove_done;
+    unlock_all_file_analysed();
+    pthread_join(th, NULL);
+
+    ASSERT_EQ_FMT(1, returned_while_locked, "%d");
+    ASSERT_EQ_FMT(-1, g_bounded_remove_rc, "%d");   /* absence NON confirmée, jamais 1 */
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");  /* toujours là : rien perdu */
     drain_all();
     PASS();
 }
@@ -4424,7 +4693,7 @@ TEST expand_grows_stock_and_advances_level(void)
     ASSERT(datas_size() > 1);                        /* le stock a grossi */
     /* Toutes les possibilités produites ont atteint le niveau cible. */
     unsigned long long n = datas_size();
-    array_possibility_packet *r = get_last_possibility(NULL, (int)n);
+    array_possibility_packet *r = get_last_possibility(NULL, (int)n, NULL);
     for (int i = 0; i < r->size; i++) {
         ASSERT(r->possibilities[i].alloc >= 2);
     }
@@ -4445,7 +4714,7 @@ TEST expand_noop_when_already_deep_enough(void)
 
     ASSERT_EQ_FMT(0, passes, "%d");                  /* rien à approfondir */
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");        /* stock inchangé */
-    array_possibility_packet *r = get_last_possibility(NULL, 1);
+    array_possibility_packet *r = get_last_possibility(NULL, 1, NULL);
     ASSERT_EQ_FMT(1, r->size, "%d");
     ASSERT_EQ_FMT(5, (int)r->possibilities[0].alloc, "%d");
     free_array_possibility_packet(r);
@@ -4545,6 +4814,8 @@ SUITE(datamanager_suite)
     RUN_TEST(remove_no_next_prunes_dead_packets);
     RUN_TEST(remove_no_next_handles_complete_solution);
     RUN_TEST(scroll_from_server_returns_packet);
+    RUN_TEST(get_last_possibility_reports_from_server_true_when_server_serves);
+    RUN_TEST(get_last_possibility_reports_from_server_false_when_local_stock_used);
     RUN_TEST(scroll_from_server_returns_empty);
     RUN_TEST(scroll_from_server_reassembles_fragmented_packet);
     RUN_TEST(scroll_from_server_pruner_batch_receives_all);
@@ -4554,6 +4825,8 @@ SUITE(datamanager_suite)
     RUN_TEST(send_possibility_analysed_success);
     RUN_TEST(send_possibility_analysed_bad_ack_requeues_and_reindexes);
     RUN_TEST(put_to_server_bad_ack_non_fatal);
+    RUN_TEST(put_to_server_server_busy_is_silent_and_non_fatal);
+    RUN_TEST(put_to_server_unexpected_ack_still_logs_error);
     RUN_TEST(send_solution_success);
     RUN_TEST(send_solution_server_rejects);
     RUN_TEST(put_to_server_success);
@@ -4582,6 +4855,7 @@ SUITE(datamanager_suite)
     RUN_TEST(add_possibility_analysed_gives_up_when_pool_never_unlocked_rotating);
     RUN_TEST(add_possibility_analysed_gives_up_when_pool_never_unlocked_pinned);
     RUN_TEST(remove_possibility_analysed_spins_until_lock_released);
+    RUN_TEST(remove_possibility_analysed_gives_up_when_never_unlocked);
     RUN_TEST(restock_analysed_spins_until_stock_unlocked);
     RUN_TEST(analysed_index_walks_collision_chains);
     RUN_TEST(add_possibility_analysed_owned_visible_via_query);

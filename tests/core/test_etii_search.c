@@ -57,7 +57,7 @@
 static void drain_local(void)
 {
     while (datas_size() > 0) {
-        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
         free_array_possibility_packet(r);
     }
 }
@@ -2271,7 +2271,7 @@ static void es_child_mrv_delegating_explore(void)
     request = REQUEST_CONTINUE;
     mrv_enabled = 0;
     for (;;) {
-        array_possibility_packet *r = get_last_possibility(NULL, 64);
+        array_possibility_packet *r = get_last_possibility(NULL, 64, NULL);
         if (r->size == 0) {
             free_array_possibility_packet(r);
             break;

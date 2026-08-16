@@ -1023,7 +1023,7 @@ static void add_stock_packets(const int *allocs, int n)
 static void drain_stock(void)
 {
     while (datas_size() > 0) {
-        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
         free_array_possibility_packet(r);
     }
 }

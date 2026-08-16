@@ -174,6 +174,16 @@ int is_connected(int socket_id) {
 	}
 	if (result != INST_TEST_CONNECTED) {
         log_error("wrong instruction received for connection test : %li\n", result);
+        // Manquait avant ce correctif, à la différence des trois autres
+        // branches d'échec ci-dessus : sans shutdown()/close(), le socket
+        // fuit côté client (le prochain appel en ouvre un nouveau sans
+        // jamais refermer celui-ci) ET la session correspondante reste
+        // ouverte côté serveur jusqu'à SON PROPRE timeout — fenêtre pendant
+        // laquelle un travail en cours peut être remis en jeu ailleurs
+        // (requeue_last_sent_possibility) alors que ce client y travaille
+        // toujours.
+        shutdown(socket_id, 2);
+        close(socket_id);
         return 0;
 	}
 	return 1;
