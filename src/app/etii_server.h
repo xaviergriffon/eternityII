@@ -200,6 +200,23 @@ char *build_file_queues_table(unsigned long long *out_unchecked,
                               unsigned long long *out_analysed);
 
 /**
+ * @brief File du pool analysé assignée à CETTE connexion serveur (PR8,
+ *        répartition de charge ADD/GET par connexion, cf. datamanager.c).
+ *
+ * `client->compteur` (slot de thread serveur, stable pour la durée de la
+ * connexion) modulo `nb_file_possibility` : tous les GET et tous les ACK
+ * d'une même connexion tombent sur la même file, ce qui rend le retrait
+ * (`remove_possibility_analysed`, paramètre `preferred_file`) direct plutôt
+ * que de balayer toutes les files.
+ *
+ * @param client Connexion concernée ; `NULL` toléré (retourne -1).
+ * @return       Indice de file dans `[0, nb_file_possibility)`, ou -1
+ *               (« pas de préférence », comportement historique) si
+ *               `client == NULL` ou si `nb_file_possibility <= 0`.
+ */
+int server_analysed_file_hint(client_t *client);
+
+/**
  * @brief Enregistre une possibilité servie comme « en cours d'analyse »,
  *        attribuée au client courant si son identité est connue (PR6).
  *

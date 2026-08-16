@@ -1664,7 +1664,7 @@ TEST do_command_line_clientswork_reports_owned_attribution(void)
     ASSERT_EQ_FMT(1ULL, count, "%llu");
     ASSERT_EQ_FMT(55, max_alloc, "%d");
 
-    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1), "%d");
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1, -1), "%d");
     control_registry_unregister(idx);
     PASS();
 }
@@ -2210,7 +2210,7 @@ TEST admin_apply_remote_command_clientswork_reports_owned_attribution(void)
     ASSERT_EQ_FMT(1ULL, count, "%llu");
     ASSERT_EQ_FMT(77, max_alloc, "%d");
 
-    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1), "%d");
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1, -1), "%d");
     control_registry_unregister(idx);
     PASS();
 }

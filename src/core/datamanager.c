@@ -757,7 +757,7 @@ static void analysed_index_clear(int fileidx)
 	}
 }
 
-int remove_possibility_analysed(struct possibility_packet *possibility, int thread) {
+int remove_possibility_analysed(struct possibility_packet *possibility, int thread, int preferred_file) {
 #ifdef DEBUG_CHECK_POSSIBILITY
     int analyse = check_possibility(possibility, NULL);
     if (analyse < 0)
@@ -770,8 +770,20 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 	int removed_possibility = 0;
 	int currfile = 0;
 	int waits = 0;
+	// `scan_start` fixe le point de départ du balayage exhaustif (thread < 0
+	// uniquement) : `preferred_file` (PR8, indice « probable » dérivé côté
+	// serveur de la connexion — server_analysed_file_hint) s'il est valide,
+	// sinon 0 comme avant ce correctif. `step` compte les files déjà
+	// essayées CE tour-ci pour détecter qu'on a fait le tour complet, quel
+	// que soit le point de départ — currfile lui-même ne peut plus servir à
+	// ça une fois qu'il ne part plus systématiquement de 0.
+	int scan_start = 0;
+	int step = 0;
 	if (thread >=0) {
 		currfile = thread;
+	} else if (preferred_file >= 0 && preferred_file < nb_file_possibility) {
+		scan_start = preferred_file;
+		currfile = scan_start;
 	}
 #ifdef DEBUG_CHECK_POSSIBILITY
 	log_debug("a supprimer : \n");
@@ -814,16 +826,18 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 				break;
 			}
 			if (thread < 0) {
-				currfile++;
-				if(currfile >= nb_file_possibility)
+				step++;
+				if(step >= nb_file_possibility)
 				{
-					// Toutes les files ont été verrouillées et parcourues :
-					// absence CONFIRMÉE.
+					// Toutes les files ont été verrouillées et parcourues (en
+					// partant de scan_start, quel qu'il soit) : absence
+					// CONFIRMÉE.
 #ifdef DEBUG_CHECK_POSSIBILITY
 					log_debug("non supprimée \n");
 #endif // DEBUG_CHECK_POSSIBILITY
 					return 1;
 				}
+				currfile = (scan_start + step) % nb_file_possibility;
 			} else {
 				// Une seule file ciblée, déjà verrouillée et parcourue :
 				// absence CONFIRMÉE.

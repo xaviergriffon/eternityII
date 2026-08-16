@@ -356,6 +356,71 @@ enchaîne deux `add_packets`/extractions SANS drain intermédiaire et vérifie q
 n'atterrit pas dans la même file que le premier — le scénario que `--stock-files` est censé
 permettre et que le code d'avant ce correctif ne permettait pas.
 
+**PR8 — répartition par CONNEXION (pas par item ni par lot) du pool analysé, pour que
+l'acquittement reste O(1) sans jamais balayer les autres files.** PR6 corrige le biais
+ADD/GET du stock, mais laisse intact un biais symétrique — et plus coûteux — sur le pool
+*analysé* : `add_possibility_analysed_impl` (branche `thread < 0`, utilisée par
+`record_possibility_analysed_for_client` à CHAQUE possibilité servie via
+INST_GET/INST_GET_TO_CHECK[_BATCH]) verrouillait elle aussi toujours la file 0 en premier.
+Observé en usage réel : un pruner qui acquitte un lot de `prunerBatch` possibilités
+(`INST_POSSIBILITY_ANALYSED_BATCH`) appelle `remove_possibility_analysed(..., -1)`
+séquentiellement pour chacune — verrouillant/déverrouillant la file 0 en boucle serrée — pendant
+que tout AUTRE pruner ayant besoin de cette même file (son propre GET ou son propre ACK) échoue
+son `trylock`, réessaie, jusqu'au budget borné (`DATAMANAGER_TRYLOCK_MAX_SWEEPS`) : le symptôme
+observé ("bloqué en maintenance") pour un mécanisme n'ayant, ici, rien à voir avec
+`consistent_backup`.
+
+Un simple round-robin (comme PR6, appliqué item par item ou lot par lot) aurait un coût caché
+spécifique à CE pool : contrairement à `scroll_from_pool` (qui peut servir N'IMPORTE QUELLE file
+disponible), `remove_possibility_analysed` doit retrouver une possibilité PRÉCISE sans savoir a
+priori dans quelle file elle a été insérée — avant ce correctif, ce n'était bon marché (trouvée
+dès la file 0) que PARCE QUE tout y était concentré ; répartir l'ADD sans rien changer au REMOVE
+ferait passer chaque acquittement de ~1 verrou à ~n/2 en moyenne.
+
+La solution retenue n'est ni un compteur atomique global (PR6) ni « une file par lot » (perdrait
+la garantie sur une reconnexion en cours de lot), mais une clé déterministe et STABLE pour toute
+la durée d'une connexion : `server_analysed_file_hint(client)` (`src/app/etii_server.{h,c}`) =
+`client->compteur % nb_file_possibility` — `compteur` étant l'indice du slot de thread serveur,
+stable tant que la connexion est active et jamais réutilisé par une AUTRE connexion active
+pendant ce temps (`find_free_thread_slot` ne recycle qu'un slot libre). Deux connexions
+concurrentes tombent donc en général sur des files différentes, sans coordination ; le
+`% nb_file_possibility` est OBLIGATOIRE (pas une simple précaution) : `compteur` va jusqu'à
+`NB_THREADS` (80 par défaut) alors que `nb_file_possibility` peut être bien plus petit (10 par
+défaut) — passer `compteur` tel quel indexerait `file_possibility_analysed[]` hors bornes.
+`record_possibility_analysed_for_client` calcule ce hint UNE FOIS et l'utilise comme `thread`
+(mode EXACT existant de `add_possibility_analysed[_owned]`, inchangé) : toutes les possibilités
+servies sur une même connexion (get unitaire ou lot entier) vont donc dans la MÊME file.
+
+Le retrait ne peut pas se contenter du même mode exact (`thread >= 0`, sans repli) : rien ne
+garantit qu'un ACK arrive sur la MÊME connexion que le GET correspondant (aléa réseau, cf.
+`requeue_last_sent_possibility` plus haut) — un hint qui se révèle faux ne doit jamais faire
+déclarer une absence à tort. `remove_possibility_analysed` gagne donc un troisième paramètre,
+`preferred_file` (signature étendue, tous les appelants mis à jour — production ET tests,
+`thread` conservant EXACTEMENT sa sémantique historique, `preferred_file` ignoré si
+`thread >= 0`) : quand `thread < 0`, le balayage démarre à `preferred_file` (au lieu de
+toujours 0) puis continue sur TOUTES les autres files via `(scan_start + step) % n` — même
+mécanique de rotation d'ordre que `scroll_from_pool` (PR6), même garantie de bornage
+(`DATAMANAGER_TRYLOCK_MAX_SWEEPS`) et même contrat de retour (0/1/-1) qu'avant. Cas nominal
+(hint correct, l'immense majorité des acquittements) : trouvé au premier essai, UNE SEULE file
+verrouillée. Cas de repli (hint faux, ou pas de client — `requeue_last_sent_possibility` avec
+`client == NULL`) : identique au comportement exhaustif d'avant ce correctif, juste réordonné.
+
+Les trois points de service serveur (`record_possibility_analysed_for_client`,
+INST_POSSIBILITY_ANALYSED, INST_POSSIBILITY_ANALYSED_BATCH) et `requeue_last_sent_possibility`
+utilisent tous `server_analysed_file_hint(client)` — pour le lot (`_BATCH`), calculé UNE SEULE
+fois avant la boucle des M paquets, puisque c'est la MÊME connexion pour tout le lot. Aucun
+changement de protocole, aucune structure globale supplémentaire à synchroniser (contrairement à
+un index hash→file envisagé puis écarté) : la clé de répartition (`client->compteur`) existait
+déjà.
+
+Tests : `tests/core/test_datamanager.c` (`remove_analysed_preferred_file_hit_finds_directly`,
+`_miss_falls_back_to_scan`, `_absent_scans_everything`, `_out_of_range_behaves_like_no_hint` —
+le contrat pur de `preferred_file`, indépendant de tout `client_t`) ;
+`tests/app/test_etii_server.c` (`server_analysed_file_hint_is_compteur_modulo_file_count` — le
+modulo et le cas `NULL` ; `record_and_remove_same_connection_use_same_file_hint` — bout en bout :
+deux connexions de `compteur` différent atterrissent dans deux files différentes, et le retrait
+via le hint de chacune ne touche jamais la file de l'autre).
+
 **Lease reclaim (PR7) and incremental rebalance (PR3) deliberately do NOT feed the mutation
 counters.** Both genuinely mutate the stock/analysed pools (a reclaimed lease moves a
 possibility from analysed back to stock; a rebalance step moves possibilities between stock

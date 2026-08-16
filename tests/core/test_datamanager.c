@@ -968,8 +968,8 @@ TEST analysed_restore_clears_untracked_packet(void)
     /* Seul le paquet sauvegardé est revenu (import_analysed() ne préserve pas
      * l'index de file d'origine : recherche sur toutes les files). */
     ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
-    ASSERT_EQ_FMT(0, remove_possibility_analysed(&backed_up, -1), "%d");
-    ASSERT_EQ_FMT(1, remove_possibility_analysed(&extra, -1), "%d");
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&backed_up, -1, -1), "%d");
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&extra, -1, -1), "%d");
 
     unlink(path);
     drain_all();
@@ -1198,11 +1198,11 @@ TEST remove_analysed_finds_then_misses(void)
     ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
 
     /* trouvée et retirée -> 0 */
-    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, 0), "%d");
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, 0, -1), "%d");
     ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
 
     /* deuxième passage : plus rien à retirer -> 1 */
-    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 0), "%d");
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 0, -1), "%d");
 
     drain_all();
     PASS();
@@ -1223,13 +1223,13 @@ TEST remove_analysed_handles_duplicate_packets(void)
     add_possibility_analysed(&pk, 0);
     ASSERT_EQ_FMT(2ULL, analysed_total(), "%llu");
 
-    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, 0), "%d");
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, 0, -1), "%d");
     ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
 
-    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, 0), "%d");
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, 0, -1), "%d");
     ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
 
-    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 0), "%d");
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 0, -1), "%d");
 
     drain_all();
     PASS();
@@ -1252,7 +1252,7 @@ TEST remove_analysed_after_restock_not_found(void)
     restore_std();
     ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
 
-    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 2), "%d");
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 2, -1), "%d");
 
     drain_all();
     PASS();
@@ -1269,7 +1269,85 @@ TEST remove_analysed_searches_all_files_when_thread_negative(void)
     add_possibility_analysed(&pk, 4); /* file analysed 4 */
     ASSERT_EQ_FMT(1ULL, file_analysed_size(4), "%llu");
 
-    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1), "%d");
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1, -1), "%d");
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+
+    drain_all();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * remove_possibility_analysed : hint preferred_file (PR8, répartition de
+ * charge ADD/GET du pool analysed par connexion serveur) -- thread < 0
+ * uniquement, thread >= 0 reste un mode exclusif à une seule file (déjà
+ * couvert ci-dessus), preferred_file y est donc ignoré.
+ * ------------------------------------------------------------------------ */
+
+/* Hint correct : trouvé directement dans la file indiquée, aucune autre file
+ * n'a besoin d'être parcourue -- observable indirectement via le fait que le
+ * paquet placé ailleurs (file 3) reste intact si on ne demande QUE la file 0
+ * en hint et que le paquet cible, lui, est bien en 0. */
+TEST remove_analysed_preferred_file_hit_finds_directly(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 8;
+    add_possibility_analysed(&pk, 0); /* atterrit dans la file analysed 0 */
+    ASSERT_EQ_FMT(1ULL, file_analysed_size(0), "%llu");
+
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1, 0), "%d");
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+
+    drain_all();
+    PASS();
+}
+
+/* Hint incorrect (le paquet est ailleurs) : repli sur le balayage des autres
+ * files -- toujours retrouvé, comportement identique à preferred_file = -1,
+ * juste un ordre de balayage différent. */
+TEST remove_analysed_preferred_file_miss_falls_back_to_scan(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 9;
+    add_possibility_analysed(&pk, 5); /* file analysed 5, PAS le hint */
+    ASSERT_EQ_FMT(1ULL, file_analysed_size(5), "%llu");
+
+    /* hint = 0, paquet réellement en 5 : doit quand même le trouver. */
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1, 0), "%d");
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+
+    drain_all();
+    PASS();
+}
+
+/* Absence réelle : avec ou sans hint, confirmé seulement après avoir
+ * verrouillé et parcouru TOUTES les files (même garantie qu'avant ce
+ * correctif, cf. remove_analysed_searches_all_files_when_thread_negative). */
+TEST remove_analysed_preferred_file_absent_scans_everything(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 11;
+    /* Jamais ajoutée nulle part. */
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, -1, 3), "%d");
+    PASS();
+}
+
+/* preferred_file hors bornes (>= nb_file_possibility) : traité comme "pas de
+ * préférence", identique à -1 -- ne doit ni planter ni changer le résultat. */
+TEST remove_analysed_preferred_file_out_of_range_behaves_like_no_hint(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 12;
+    add_possibility_analysed(&pk, 1);
+
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1, nb_file_possibility + 100), "%d");
     ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
 
     drain_all();
@@ -2092,7 +2170,7 @@ TEST send_possibility_analysed_success(void)
     ASSERT_EQ_FMT(0ULL, file_analysed_size(0), "%llu"); /* file vidée */
     /* Le paquet drainé par le batch envoyé ne doit plus être trouvable :
      * garde-fou contre une entrée d'index laissée pendante par le drain. */
-    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 0), "%d");
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, 0, -1), "%d");
 
     /* Fermer fds[0] pour débloquer le mini-serveur (son recv retourne 0). */
     close(fds[0]);
@@ -2132,7 +2210,7 @@ TEST send_possibility_analysed_bad_ack_requeues_and_reindexes(void)
 
     /* Rejeté par le serveur -> remis dans la file. */
     ASSERT_EQ_FMT(1ULL, file_analysed_size(0), "%llu");
-    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, 0), "%d");
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, 0, -1), "%d");
     ASSERT_EQ_FMT(0ULL, file_analysed_size(0), "%llu");
 
     close(fds[0]);
@@ -3991,7 +4069,7 @@ static void *th_remove_analysed(void *arg)
     struct possibility_packet pk;
     memset(&pk, 0, sizeof pk);
     pk.alloc = 8;
-    g_cont_remove_rc = remove_possibility_analysed(&pk, -1);
+    g_cont_remove_rc = remove_possibility_analysed(&pk, -1, -1);
     return NULL;
 }
 
@@ -4024,7 +4102,7 @@ static void *th_remove_analysed_never_unlocked(void *arg)
     struct possibility_packet pk;
     memset(&pk, 0, sizeof pk);
     pk.alloc = 8;
-    g_bounded_remove_rc = remove_possibility_analysed(&pk, -1);
+    g_bounded_remove_rc = remove_possibility_analysed(&pk, -1, -1);
     g_bounded_remove_done = 1;
     return NULL;
 }
@@ -4123,7 +4201,7 @@ TEST analysed_index_walks_collision_chains(void)
     for (int i = 0; i < NCOLL; i++) {
         pk.alloc = (uint16_t)i;
         pk.grid[dirx[0]][diry[0]] = (int16_t)(i + 1);
-        if (remove_possibility_analysed(&pk, 0) != 0) failed++;
+        if (remove_possibility_analysed(&pk, 0, -1) != 0) failed++;
     }
     ASSERT_EQ_FMT(0, failed, "%d");
     ASSERT_EQ_FMT(0ULL, file_analysed_size(0), "%llu");
@@ -4264,7 +4342,7 @@ TEST remove_possibility_analysed_clears_owner_attribution(void)
     ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
     ASSERT_EQ_FMT(1ULL, count, "%llu");
 
-    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1), "%d");   /* acquittée */
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1, -1), "%d");   /* acquittée */
 
     count = 999; max_alloc = -999;
     ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
@@ -4408,7 +4486,7 @@ TEST reclaim_expired_leases_idempotent_with_prior_ack(void)
 
     /* L'acquittement client (remove_possibility_analysed) gagne la course :
      * trouvé et retiré (retour 0). */
-    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1), "%d");
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pk, -1, -1), "%d");
     ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
 
     /* Le balayage d'expiration arrive ensuite, avec un `now` largement au-delà
@@ -4444,7 +4522,7 @@ TEST reclaim_expired_leases_idempotent_with_later_ack(void)
     /* L'acquittement arrive ensuite, trop tard : la possibilité n'est plus
      * dans le pool analysed -- « non trouvée » (retour 1), jamais une erreur
      * bruyante ni un retrait du stock déjà reconstitué. */
-    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, -1), "%d");
+    ASSERT_EQ_FMT(1, remove_possibility_analysed(&pk, -1, -1), "%d");
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");   /* toujours dans le stock, intacte */
 
     analysed_lease_seconds = saved_lease;
@@ -4811,6 +4889,10 @@ SUITE(datamanager_suite)
     RUN_TEST(remove_analysed_handles_duplicate_packets);
     RUN_TEST(remove_analysed_after_restock_not_found);
     RUN_TEST(remove_analysed_searches_all_files_when_thread_negative);
+    RUN_TEST(remove_analysed_preferred_file_hit_finds_directly);
+    RUN_TEST(remove_analysed_preferred_file_miss_falls_back_to_scan);
+    RUN_TEST(remove_analysed_preferred_file_absent_scans_everything);
+    RUN_TEST(remove_analysed_preferred_file_out_of_range_behaves_like_no_hint);
     RUN_TEST(remove_no_next_prunes_dead_packets);
     RUN_TEST(remove_no_next_handles_complete_solution);
     RUN_TEST(scroll_from_server_returns_packet);

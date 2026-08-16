@@ -414,6 +414,42 @@ void *check_server(void *param)
 }
 
 /**
+ * @brief File du pool analysé assignée à CETTE connexion serveur (PR8,
+ *        répartition de charge ADD/GET entre les files de --stock-files).
+ *
+ * `client->compteur` (indice du slot de thread serveur, stable pour toute la
+ * durée de la connexion — jamais réutilisé pendant qu'une connexion est
+ * active) sert de clé déterministe : tous les GET *et* tous les ACK d'une
+ * même connexion tombent ainsi sur la MÊME file, ce qui rend le retrait côté
+ * serveur direct (une seule file verrouillée, cf. `remove_possibility_analysed`,
+ * paramètre `preferred_file`) au lieu de balayer toutes les files comme avant
+ * ce correctif. Deux connexions concurrentes occupent des slots distincts
+ * (jamais le même pendant qu'elles sont actives toutes les deux), donc
+ * atterrissent en général sur des files différentes ; une collision modulo
+ * `nb_file_possibility` reste possible sous forte concurrence — se règle par
+ * `--stock-files`, pas par ce mécanisme.
+ *
+ * MODULO obligatoire : `client->compteur` va jusqu'à `NB_THREADS` (80 par
+ * défaut) alors que `nb_file_possibility` peut être bien plus petit (10 par
+ * défaut) — passer `compteur` tel quel à `add_possibility_analysed[_owned]`
+ * (qui l'utilise directement comme indice de tableau quand `thread >= 0`,
+ * sans jamais le borner lui-même) serait un déréférencement hors bornes.
+ *
+ * @param client Connexion serveur concernée ; `NULL` toléré (retourne -1,
+ *               « pas de préférence » — comportement historique).
+ * @return       Indice de file dans `[0, nb_file_possibility)`, ou -1 si
+ *               `client == NULL` ou si `nb_file_possibility <= 0` (pas encore
+ *               configuré).
+ */
+int server_analysed_file_hint(client_t *client)
+{
+    if (client == NULL || nb_file_possibility <= 0) {
+        return -1;
+    }
+    return client->compteur % nb_file_possibility;
+}
+
+/**
  * @brief Renvoie au stock local les possibilités servies mais non acquittées.
  *
  * Extrait du bloc de fin de `communicate_with_client` (voir etii_server.h).
@@ -463,10 +499,17 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t 
     // et REMIS quand même — dans le doute, ne jamais perdre silencieusement
     // une possibilité : un doublon d'exploration coûte du CPU, une
     // possibilité perdue coûte une branche jamais explorée.
+    //
+    // file_hint : ces possibilités ont été enregistrées via
+    // record_possibility_analysed_for_client(client, ...) sur CETTE MÊME
+    // connexion (celle qui se termine), donc avec CE MÊME indice — le
+    // retrait démarre directement sur la bonne file (PR8) au lieu de
+    // balayer depuis la file 0.
+    int file_hint = server_analysed_file_hint(client);
     for (int rp = 0; rp < lastSent->size; rp++)
     {
         struct possibility_packet *possibility = &lastSent->possibilities[rp];
-        if (remove_possibility_analysed(possibility, -1) == 1)
+        if (remove_possibility_analysed(possibility, -1, file_hint) == 1)
         {
             // Déjà acquittée par le client (absence confirmée) : rien à rendre.
             continue;
@@ -499,6 +542,12 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t 
  * (PR7) et à `requeue_last_sent_possibility` : personne, côté serveur, ne
  * saurait qu'elle est en cours d'analyse.
  *
+ * Insérée directement dans la file assignée à CETTE connexion
+ * (`server_analysed_file_hint`, PR8) plutôt que via la rotation `thread < 0`
+ * (qui concentrait tout sur la file 0 en l'absence de contention) : le
+ * retrait ultérieur (acquittement, ou requeue à la déconnexion) sait ainsi
+ * directement où chercher, sans balayer les autres files.
+ *
  * @param client      Contexte du thread serveur (identité déclarée si connue).
  * @param possibility Paquet tout juste extrait du stock et envoyé au client.
  * @return            0 si enregistrée, -1 si le pool analysé est resté
@@ -507,10 +556,11 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t 
  */
 int record_possibility_analysed_for_client(client_t *client, struct possibility_packet *possibility)
 {
+    int file_hint = server_analysed_file_hint(client);
     if (client->has_identity) {
-        return add_possibility_analysed_owned(possibility, -1, client->identity.client_uid);
+        return add_possibility_analysed_owned(possibility, file_hint, client->identity.client_uid);
     }
-    return add_possibility_analysed(possibility, -1);
+    return add_possibility_analysed(possibility, file_hint);
 }
 
 /**
@@ -736,7 +786,11 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             // sur un flux désynchronisé.
             long ssize = recv_all(client->socket_id, possibilityPacket, sizeof(struct possibility_packet));
             if ((long)sizeof(struct possibility_packet) == ssize) {
-                int removed = remove_possibility_analysed(possibilityPacket, -1);
+                // file_hint (PR8) : cette possibilité a été enregistrée sur
+                // CETTE MÊME connexion (record_possibility_analysed_for_client),
+                // donc avec le même indice — retrait direct sans balayer les
+                // autres files.
+                int removed = remove_possibility_analysed(possibilityPacket, -1, server_analysed_file_hint(client));
                 if(removed == 0)
                 {
                     send_instruction(client->socket_id,INST_CONSIDERED);
@@ -779,13 +833,24 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             }
             int transfer_ok = 1;
             struct possibility_packet pkt;
+            // file_hint (PR8) calculé UNE FOIS pour tout le lot : les M
+            // possibilités de cette connexion ont toutes été enregistrées
+            // dans la même file (record_possibility_analysed_for_client),
+            // donc chaque retrait de ce lot cible directement cette file au
+            // lieu de balayer — c'est précisément le cas d'usage motivant
+            // (lot de pruner, jusqu'à PRUNER_BATCH_MAX acquittements) : avant
+            // ce correctif, M retraits séquentiels sur `thread < 0`
+            // verrouillaient/déverrouillaient la file 0 en boucle serrée,
+            // affamant tout autre thread serveur ayant besoin de cette même
+            // file pendant ce temps.
+            int file_hint = server_analysed_file_hint(client);
             for (int p = 0; p < m; p++) {
                 if (recv_all(client->socket_id, &pkt, sizeof(pkt)) != (long)sizeof(pkt)) {
                     log_error("batch analysed : paquet %d incomplet\n", p);
                     transfer_ok = 0;
                     break;
                 }
-                int removed = remove_possibility_analysed(&pkt, -1);
+                int removed = remove_possibility_analysed(&pkt, -1, file_hint);
                 if (removed != 0) {
                     // Non bloquant : l'entrée « en analyse » a pu déjà être
                     // retirée (removed == 1, absence confirmée) ou n'a pas pu

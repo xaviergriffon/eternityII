@@ -837,7 +837,7 @@ TEST record_possibility_analysed_owns_when_identity_known(void)
     ASSERT_EQ_FMT(1ULL, count, "%llu");
     ASSERT_EQ_FMT(63, max_alloc, "%d");
 
-    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pkt, -1), "%d");
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pkt, -1, -1), "%d");
     dm_drain_all();
     PASS();
 }
@@ -864,6 +864,100 @@ TEST record_possibility_analysed_no_owner_when_identity_unknown(void)
     ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(zero_uid, &count, &max_alloc), "%d");
     ASSERT_EQ_FMT(0ULL, count, "%llu");
     ASSERT_EQ_FMT(-1, max_alloc, "%d");
+
+    /* record_possibility_analysed_for_client a bien inséré pkt dans le pool
+     * analysé (seule l'attribution d'owner est absente, pas l'insertion
+     * elle-même) : à retirer explicitement, dm_drain_all() ne draine que le
+     * stock, jamais le pool analysé -- sans ce retrait, l'entrée fuit vers
+     * les tests suivants qui partagent le même état global. */
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pkt, -1, -1), "%d");
+
+    dm_drain_all();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * server_analysed_file_hint (PR8, répartition de charge ADD/GET du pool
+ * analysed entre les files de --stock-files, par connexion serveur plutôt
+ * que par item ou par lot).
+ * ------------------------------------------------------------------------ */
+
+TEST server_analysed_file_hint_is_compteur_modulo_file_count(void)
+{
+    client_t client;
+    memset(&client, 0, sizeof client);
+
+    client.compteur = 3;
+    ASSERT_EQ_FMT(3 % nb_file_possibility, server_analysed_file_hint(&client), "%d");
+
+    /* compteur peut dépasser nb_file_possibility (NB_THREADS souvent >>
+     * nb_file_possibility) : le modulo est OBLIGATOIRE, pas optionnel --
+     * sans lui, add_possibility_analysed_impl indexerait le tableau de
+     * files hors bornes. */
+    client.compteur = nb_file_possibility + 2;
+    ASSERT_EQ_FMT((nb_file_possibility + 2) % nb_file_possibility, server_analysed_file_hint(&client), "%d");
+
+    /* Deux connexions de compteur différent (le cas normal : le pool de
+     * threads n'affecte jamais deux connexions actives au même slot)
+     * tombent en général sur des files différentes. */
+    client_t other;
+    memset(&other, 0, sizeof other);
+    other.compteur = 1;
+    ASSERT(server_analysed_file_hint(&client) != server_analysed_file_hint(&other));
+
+    ASSERT_EQ_FMT(-1, server_analysed_file_hint(NULL), "%d");
+    PASS();
+}
+
+/* Comportement de bout en bout visé par PR8 : une possibilité enregistrée
+ * pour une connexion donnée (record_possibility_analysed_for_client) est
+ * retrouvée et retirée DIRECTEMENT via le hint de cette même connexion, sans
+ * jamais toucher les autres files -- observable en constatant qu'une AUTRE
+ * possibilité, déposée dans une AUTRE file par une deuxième connexion, reste
+ * parfaitement intacte pendant l'opération. */
+TEST record_and_remove_same_connection_use_same_file_hint(void)
+{
+    dm_drain_all();
+    ASSERT(nb_file_possibility >= 2); /* sinon le test ne prouve rien */
+
+    client_t client_a;
+    memset(&client_a, 0, sizeof client_a);
+    client_a.compteur = 0;
+
+    client_t client_b;
+    memset(&client_b, 0, sizeof client_b);
+    client_b.compteur = 1;
+
+    int hint_a = server_analysed_file_hint(&client_a);
+    int hint_b = server_analysed_file_hint(&client_b);
+    ASSERT(hint_a != hint_b);
+
+    /* Deltas plutôt que valeurs absolues : le pool analysed est un état
+     * global partagé avec toutes les autres suites du même binaire de
+     * tests, on ne veut pas dépendre de ce qui a pu y être laissé ailleurs. */
+    unsigned long long before_a = file_analysed_size(hint_a);
+    unsigned long long before_b = file_analysed_size(hint_b);
+
+    struct possibility_packet pkt_a;
+    memset(&pkt_a, 0, sizeof pkt_a);
+    pkt_a.alloc = 71;
+    record_possibility_analysed_for_client(&client_a, &pkt_a);
+
+    struct possibility_packet pkt_b;
+    memset(&pkt_b, 0, sizeof pkt_b);
+    pkt_b.alloc = 72;
+    record_possibility_analysed_for_client(&client_b, &pkt_b);
+
+    ASSERT_EQ_FMT(before_a + 1, file_analysed_size(hint_a), "%llu");
+    ASSERT_EQ_FMT(before_b + 1, file_analysed_size(hint_b), "%llu");
+
+    /* Retrait de A via SON hint : trouvé directement, B reste intact. */
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pkt_a, -1, hint_a), "%d");
+    ASSERT_EQ_FMT(before_a, file_analysed_size(hint_a), "%llu");
+    ASSERT_EQ_FMT(before_b + 1, file_analysed_size(hint_b), "%llu");
+
+    ASSERT_EQ_FMT(0, remove_possibility_analysed(&pkt_b, -1, hint_b), "%d");
+    ASSERT_EQ_FMT(before_b, file_analysed_size(hint_b), "%llu");
 
     dm_drain_all();
     PASS();
@@ -1127,7 +1221,7 @@ TEST step_second_get_frees_previous_batch(void)
         ASSERT_EQ_FMT(1, (int)k, "%d");
         struct possibility_packet got;
         ASSERT_EQ((long)sizeof got, recv_all(sv[1], &got, sizeof got));
-        remove_possibility_analysed(&got, -1);       /* acquitte pour ne pas polluer */
+        remove_possibility_analysed(&got, -1, -1);       /* acquitte pour ne pas polluer */
     }
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
 
@@ -1168,7 +1262,7 @@ TEST step_get_to_check_serves_possibility(void)
         ASSERT_EQ_FMT(1, (int)k, "%d");
         struct possibility_packet got;
         ASSERT_EQ((long)sizeof got, recv_all(sv[1], &got, sizeof got));
-        remove_possibility_analysed(&got, -1);
+        remove_possibility_analysed(&got, -1, -1);
     }
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");        /* pool vidé */
 
@@ -1232,8 +1326,8 @@ TEST step_get_to_check_batch_serves_batch(void)
     ASSERT_EQ_FMT(2, (int)k, "%d");
     struct possibility_packet got[2];
     ASSERT_EQ((long)sizeof got, recv_all(sv[1], got, sizeof got));
-    remove_possibility_analysed(&got[0], -1);
-    remove_possibility_analysed(&got[1], -1);
+    remove_possibility_analysed(&got[0], -1, -1);
+    remove_possibility_analysed(&got[1], -1, -1);
 
     /* Second lot sur pool vide : libère le lastSent précédent, renvoie K == 0. */
     ASSERT_EQ((long)sizeof requested, send_all(sv[1], &requested, sizeof requested));
@@ -2727,6 +2821,8 @@ SUITE(etii_server_suite)
     RUN_TEST(step_get_serves_possibility);
     RUN_TEST(record_possibility_analysed_owns_when_identity_known);
     RUN_TEST(record_possibility_analysed_no_owner_when_identity_unknown);
+    RUN_TEST(server_analysed_file_hint_is_compteur_modulo_file_count);
+    RUN_TEST(record_and_remove_same_connection_use_same_file_hint);
     RUN_TEST(step_possibility_analysed_acks);
     RUN_TEST(step_get_to_check_empty_sends_zero_count);
     RUN_TEST(step_get_to_check_batch_empty_returns_zero);
