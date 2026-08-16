@@ -77,6 +77,19 @@ toujours sur la file 0 : la charge se répartit d'elle-même sur les `--stock-fi
 rééquilibrage n'ayant plus qu'à corriger de véritables déséquilibres de contenu, pas un biais
 structurel de trafic.
 
+Le pool des possibilités **en cours d'analyse** (« analysé ») a un point sensible différent : un
+pruner qui acquitte un lot (`prunerBatch`, voir ci-dessous) verrouille et déverrouille cette file
+en boucle serrée pour chacune des possibilités du lot, un temps de blocage sensiblement plus long
+que pour un ADD/GET isolé — visible côté opérateur comme un autre pruner « bloqué » sur la même
+file le temps du lot. Chaque connexion serveur (recherche ou pruner) se voit assigner une file
+dédiée pour toute la durée de sa connexion (dérivée de son propre slot dans le pool de threads),
+plutôt qu'une rotation par possibilité ou par lot : toutes les possibilités qu'elle reçoit ET
+acquitte tombent ainsi sur la même file, connue des deux côtés — le retrait devient direct
+(une seule file verrouillée) au lieu de devoir chercher parmi toutes. Deux connexions actives
+occupent toujours des slots différents, donc se retrouvent en général sur des files différentes ;
+sous forte concurrence, augmenter `--stock-files` réduit la probabilité que deux connexions
+partagent la même file.
+
 `--tcp-timeout` (ci-dessous) élargit en plus la marge côté réseau. Chaque artefact sauvegardé
 (stock, pool analysé, meilleur plateau connu, registre des clients connus) n'est réécrit que
 si son propre contenu a changé depuis sa dernière écriture — la durée de la dernière

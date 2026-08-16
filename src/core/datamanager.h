@@ -315,9 +315,23 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
  *
  * Parcourt les files d'analyse en cherchant le paquet correspondant et le supprime.
  *
- * @param possiblity Paquet à retirer.
- * @param thread     Index de file préférentiel (−1 = recherche dans toutes les files).
- * @return           0 si trouvé et retiré ; 1 si absent (toutes les files
+ * @param possiblity     Paquet à retirer.
+ * @param thread         Index de file EXACT et exclusif (≥ 0 : une seule file
+ *                        essayée, absence CONFIRMÉE si absente de celle-ci —
+ *                        aucun repli. Réservé à l'usage historique client
+ *                        (une file dédiée par fork, où rien d'autre n'écrit
+ *                        jamais) ; −1 pour balayer toutes les files, voir
+ *                        `preferred_file`.
+ * @param preferred_file Indice de file à essayer EN PREMIER quand `thread < 0`
+ *                        (`server_analysed_file_hint`, PR8, répartition de
+ *                        charge ADD/GET par connexion serveur) — ignoré si
+ *                        `thread >= 0`. Sur un manque à cette file, le
+ *                        balayage se poursuit sur TOUTES les autres
+ *                        (garantie inchangée : jamais d'absence déclarée sans
+ *                        avoir verrouillé et parcouru chaque file). `-1` (ou
+ *                        hors bornes) : comportement historique inchangé,
+ *                        balayage démarrant à la file 0.
+ * @return               0 si trouvé et retiré ; 1 si absent (toutes les files
  *                    concernées ont été verrouillées et parcourues sans le
  *                    trouver — absence CONFIRMÉE) ; -1 si le budget borné
  *                    (`DATAMANAGER_TRYLOCK_MAX_SWEEPS`) a été épuisé sans
@@ -327,7 +341,7 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
  *                    silencieusement une possibilité peut-être toujours en
  *                    cours d'analyse.
  */
-int remove_possibility_analysed(struct possibility_packet *possiblity, int thread);
+int remove_possibility_analysed(struct possibility_packet *possiblity, int thread, int preferred_file);
 /** @brief Nombre de possibilités dans la file `nfile` du pool principal (non vérifiées). */
 unsigned long long file_size(int nfile);
 /** @brief Nombre de possibilités dans la file `nfile` du pool vérifié (validées par un pruner). */
