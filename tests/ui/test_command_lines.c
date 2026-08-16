@@ -65,7 +65,7 @@ void datamanager_reset_rr_state_for_tests(void);
 static void dm_drain(void)
 {
     while (datas_size() > 0) {
-        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
         free_array_possibility_packet(r);
     }
     datamanager_reset_rr_state_for_tests();

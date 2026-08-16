@@ -89,7 +89,7 @@ static void restore_std(void)
 static void drain_datamanager(void)
 {
     while (datas_size() > 0) {
-        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
         free_array_possibility_packet(r);
     }
     datamanager_reset_rr_state_for_tests();
@@ -221,7 +221,7 @@ TEST add_possibility_rotates_start_file_across_calls(void)
     /* Extraction directe (pas drain_datamanager()) : ne touche que l'état
      * round-robin du côté GET (rr_scroll_*), jamais celui du côté ADD
      * (rr_put_*) qu'on veut observer ensuite. */
-    array_possibility_packet *r = get_last_possibility(NULL, 10);
+    array_possibility_packet *r = get_last_possibility(NULL, 10, NULL);
     free_array_possibility_packet(r);
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
 
@@ -247,7 +247,7 @@ TEST get_last_possibility_drains_pool(void)
     int allocs[] = { 2, 4 };
     add_packets(allocs, 2);
 
-    array_possibility_packet *r = get_last_possibility(NULL, 10);
+    array_possibility_packet *r = get_last_possibility(NULL, 10, NULL);
     ASSERT(r != NULL);
     ASSERT_EQ_FMT(2, r->size, "%d");
     free_array_possibility_packet(r);
@@ -256,7 +256,7 @@ TEST get_last_possibility_drains_pool(void)
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
 
     /* Sur un pool vide, get renvoie un tableau de taille 0. */
-    array_possibility_packet *empty = get_last_possibility(NULL, 10);
+    array_possibility_packet *empty = get_last_possibility(NULL, 10, NULL);
     ASSERT_EQ_FMT(0, empty->size, "%d");
     free_array_possibility_packet(empty);
     PASS();
@@ -279,7 +279,7 @@ TEST put_and_scroll_round_trip_succeeds_when_pool_free(void)
         add_packets(allocs, 5);
         ASSERT_EQ_FMT(5ULL, datas_size(), "%llu");
 
-        array_possibility_packet *r = get_last_possibility(NULL, 100);
+        array_possibility_packet *r = get_last_possibility(NULL, 100, NULL);
         ASSERT(r != NULL);
         ASSERT_EQ_FMT(5, r->size, "%d");
         free_array_possibility_packet(r);
@@ -1766,7 +1766,7 @@ TEST scroll_from_server_returns_packet(void)
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    array_possibility_packet *r = get_last_possibility(&cp, 1, NULL);
     restore_std();
 
     ASSERT(r != NULL);
@@ -1777,6 +1777,85 @@ TEST scroll_from_server_returns_packet(void)
     pthread_join(srv, NULL);
     set_server_ip(NULL);
     close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* get_last_possibility : from_server doit être mis à 1 quand le lot vient
+ * réellement d'un aller-retour serveur (scroll_from_server). C'est le signal
+ * que feed_one_thread (etii_client.c) utilise pour décider s'il doit suivre
+ * ce lot dans file_possibility_analysed en vue d'un futur acquittement
+ * INST_POSSIBILITY_ANALYSED[_BATCH] — voir le test symétrique ci-dessous. */
+TEST get_last_possibility_reports_from_server_true_when_server_serves(void)
+{
+    drain_datamanager();
+
+    int fds[2];
+    ASSERT_EQ_FMT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds), "%d");
+
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_get_packet, &fds[1]);
+
+    client_possibility_t cp;
+    init_cp_with_socket(&cp, fds[0]);
+    set_server_ip("127.0.0.1");
+
+    int from_server = -1;
+    silence_std();
+    array_possibility_packet *r = get_last_possibility(&cp, 1, &from_server);
+    restore_std();
+
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(1, r->size, "%d");
+    ASSERT_EQ_FMT(1, from_server, "%d");
+    free_array_possibility_packet(r);
+
+    pthread_join(srv, NULL);
+    set_server_ip(NULL);
+    close(fds[0]);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
+/* get_last_possibility : from_server doit rester à 0 quand le lot vient du
+ * pool LOCAL (scroll_from_local) — jamais un aller-retour serveur cette
+ * fois-ci, donc rien que le serveur ait enregistré comme « en analyse » pour
+ * ce client. C'est le repli put_to_local (ADD refusé par le serveur, par
+ * exemple sous contention — INST_ERROR, cf. put_to_server) qui alimente ce
+ * pool ; le mini-serveur n'est même pas sollicité ici (scroll_from_local
+ * trouve tout avant scroll_from_server), ce qui prouve à lui seul l'absence
+ * d'aller-retour réseau pour ce lot. */
+TEST get_last_possibility_reports_from_server_false_when_local_stock_used(void)
+{
+    drain_datamanager();
+
+    struct possibility_packet *p = malloc(sizeof *p);
+    memset(p, 0, sizeof *p);
+    p->alloc = 5;
+    array_possibility_packet *ap = malloc(sizeof *ap);
+    ap->size = 1;
+    ap->possibilities = p;
+    add_possibility(NULL, ap); /* put_to_local : simule le repli d'un ADD refusé */
+    free_array_possibility_packet(ap);
+
+    client_possibility_t cp;
+    memset(&cp, 0, sizeof cp);
+    pthread_mutex_init(&cp.socket_mutex, NULL);
+    cp.socket_id = -1;
+    set_server_ip("127.0.0.1"); /* server_ip != NULL : scénario client réel */
+
+    int from_server = -1;
+    array_possibility_packet *r = get_last_possibility(&cp, 1, &from_server);
+
+    ASSERT(r != NULL);
+    ASSERT_EQ_FMT(1, r->size, "%d");
+    ASSERT_EQ_FMT(0, from_server, "%d");
+    ASSERT_EQ_FMT(5, (int)r->possibilities[0].alloc, "%d");
+    free_array_possibility_packet(r);
+
+    set_server_ip(NULL);
     pthread_mutex_destroy(&cp.socket_mutex);
     drain_datamanager();
     PASS();
@@ -1798,7 +1877,7 @@ TEST scroll_from_server_returns_empty(void)
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    array_possibility_packet *r = get_last_possibility(&cp, 1, NULL);
     restore_std();
 
     ASSERT(r != NULL);
@@ -1831,7 +1910,7 @@ TEST scroll_from_server_reassembles_fragmented_packet(void)
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    array_possibility_packet *r = get_last_possibility(&cp, 1, NULL);
     restore_std();
 
     ASSERT(r != NULL);
@@ -1870,7 +1949,7 @@ static array_possibility_packet *run_pruner_batch(int32_t k_announced, int packe
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, requested);
+    array_possibility_packet *r = get_last_possibility(&cp, requested, NULL);
     restore_std();
 
     pthread_join(srv, NULL);
@@ -2835,7 +2914,7 @@ TEST scroll_from_server_count_recv_fails(void)
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    array_possibility_packet *r = get_last_possibility(&cp, 1, NULL);
     restore_std();
 
     ASSERT(r != NULL);
@@ -2864,7 +2943,7 @@ TEST scroll_from_server_rejects_aberrant_count(void)
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    array_possibility_packet *r = get_last_possibility(&cp, 1, NULL);
     restore_std();
 
     ASSERT(r != NULL);
@@ -2893,7 +2972,7 @@ TEST scroll_from_server_incomplete_packet_detected(void)
     set_server_ip("127.0.0.1");
 
     silence_std();
-    array_possibility_packet *r = get_last_possibility(&cp, 1);
+    array_possibility_packet *r = get_last_possibility(&cp, 1, NULL);
     restore_std();
 
     ASSERT(r != NULL);
@@ -3581,7 +3660,7 @@ static array_possibility_packet *g_cont_result;
 static void *th_get_possibility(void *arg)
 {
     (void)arg;
-    g_cont_result = get_last_possibility(NULL, 1);
+    g_cont_result = get_last_possibility(NULL, 1, NULL);
     return NULL;
 }
 
@@ -4472,7 +4551,7 @@ TEST expand_grows_stock_and_advances_level(void)
     ASSERT(datas_size() > 1);                        /* le stock a grossi */
     /* Toutes les possibilités produites ont atteint le niveau cible. */
     unsigned long long n = datas_size();
-    array_possibility_packet *r = get_last_possibility(NULL, (int)n);
+    array_possibility_packet *r = get_last_possibility(NULL, (int)n, NULL);
     for (int i = 0; i < r->size; i++) {
         ASSERT(r->possibilities[i].alloc >= 2);
     }
@@ -4493,7 +4572,7 @@ TEST expand_noop_when_already_deep_enough(void)
 
     ASSERT_EQ_FMT(0, passes, "%d");                  /* rien à approfondir */
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");        /* stock inchangé */
-    array_possibility_packet *r = get_last_possibility(NULL, 1);
+    array_possibility_packet *r = get_last_possibility(NULL, 1, NULL);
     ASSERT_EQ_FMT(1, r->size, "%d");
     ASSERT_EQ_FMT(5, (int)r->possibilities[0].alloc, "%d");
     free_array_possibility_packet(r);
@@ -4593,6 +4672,8 @@ SUITE(datamanager_suite)
     RUN_TEST(remove_no_next_prunes_dead_packets);
     RUN_TEST(remove_no_next_handles_complete_solution);
     RUN_TEST(scroll_from_server_returns_packet);
+    RUN_TEST(get_last_possibility_reports_from_server_true_when_server_serves);
+    RUN_TEST(get_last_possibility_reports_from_server_false_when_local_stock_used);
     RUN_TEST(scroll_from_server_returns_empty);
     RUN_TEST(scroll_from_server_reassembles_fragmented_packet);
     RUN_TEST(scroll_from_server_pruner_batch_receives_all);

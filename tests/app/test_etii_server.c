@@ -44,7 +44,7 @@ void *rmnonext_thread(void *param);       /* thread interne à etii_server.c */
 static void dm_drain_all(void)
 {
     while (datas_size() > 0) {
-        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
         free_array_possibility_packet(r);
     }
 }

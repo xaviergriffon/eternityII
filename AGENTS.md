@@ -463,6 +463,87 @@ three bounded-loop tests); `tests/app/test_etii_server.c`
 (`is_connected_false_on_wrong_instruction`, updated to assert the socket is now closed instead of
 documenting the leak as a known gap).
 
+**The above fix was real but did not resolve the reported symptom — the actual root cause was
+elsewhere, found only by re-reproducing at the operator's exact scale and instrumenting the wire
+with a temporary content-hash trace.** A second report at the same scale (`--expand-level 9`, no
+`--expand-max-stock` cap, 14 375 696 possibilities, 4-fork pruner at batch 100) still showed
+`batch analysed : possibilité non retirée` bursts — but this time consistently logged as
+**`absence confirmée`** (every one of the `nb_file_possibility` files locked and scanned, genuinely
+not there), never `vérification impossible` (the bounded-loop `-1` case the fix above introduced).
+That distinction, visible only because the log line itself now says which case fired, immediately
+ruled the previous fix out as the explanation and pointed at a real double-ack.
+
+1. **A real, long-standing heap out-of-bounds bug, found first and fixed on the way, but NOT the
+   cause of this symptom.** `feed_thread_aposs` (`src/app/etii_client.c`) looped
+   `for (int i = 0; i < NB_THREADS; i++) feed_one_thread(thread_params, i, …)` — but
+   `run_mono_client` allocates exactly **one** `client_possibility_t` per fork
+   (`malloc(sizeof(*thread_params))`, never an array), and `NB_THREADS` is the *fork count* of the
+   parent process, not a per-fork thread count (a distinction this project's own architecture
+   history — one thread per fork, `NB_THREADS` forks total — made this loop meaningless the moment
+   it stopped matching an older, pre-refactor design where multiple search threads lived in one
+   process). Every iteration past `i == 0` indexed `thread_params[i]` **past the end of a single
+   allocation** — a silent heap buffer overflow, present in the codebase since its earliest commits
+   (`git log -p` traces the same loop shape back to the initial `src/` layout), invisible on macOS
+   release builds and never caught by any test (every existing `feed_one_thread` test drives the
+   function directly with an explicit index, never through this loop). Fixed by calling
+   `feed_one_thread(thread_params, thread_params->id, …)` exactly once — `id` is already the
+   correct, and only, valid index (hardcoded to `0` by `init_client_possibility`, the same value
+   `send_possibility_analysed` already keys off of). **Confirmed insufficient on its own**: a full
+   reproduction after this fix alone still showed `possibilité non retirée` bursts, immediately
+   (not after the ~90s the corruption used to take to manifest) — proof the real cause was
+   independent of this bug, not merely masked by it.
+2. **The actual cause: `get_last_possibility` (`src/core/datamanager.c`) tries the client's own
+   LOCAL stock before the server, and `feed_one_thread` treated both sources identically.**
+   `get_last_possibility` calls `scroll_from_local` first and only falls back to
+   `scroll_from_server` if the local pool was empty — by design, so a client with local backlog
+   (e.g. `put_to_local`'s fallback inside `put_to_server`, reached whenever the server's own
+   `INST_ADD` handler returns `INST_ERROR` — expected and already handled gracefully under the
+   very kind of lock contention `--stock-files`/PR1 exist to absorb) doesn't starve waiting on the
+   network. But `feed_one_thread` called `add_possibility_analysed(&aposs->possibilities[p], i)` —
+   queuing the batch for a future `INST_POSSIBILITY_ANALYSED[_BATCH]` acknowledgement to the
+   server — **unconditionally**, regardless of which source populated the batch. A possibility
+   recycled from the client's own local stock was never (re-)served by the server this round
+   (`record_batch_analysed_for_client` never ran for it this time), yet still got queued for an ack
+   as if it had been — and when that ack eventually reached the server, the possibility was either
+   already removed (the *original* serve's ack, sent earlier, already succeeded) or never tracked
+   under this client at all: `remove_possibility_analysed` correctly, exhaustively finds nothing —
+   `absence confirmée`, not a bug in the removal path, a bug in what got queued for removal in the
+   first place. Traced by adding a temporary content-hash log (`hash_possibility_key`, made
+   non-static for the duration of the investigation) at every index insertion and every ack
+   attempt: the failing packet's hash showed exactly one server-side insertion, one successful
+   removal (as part of a normal 100-item batch ack), and then a **second** ack attempt for the
+   identical hash in a follow-up single-item batch — the signature of exactly this double-queue,
+   not of a lock-contention race or a lease reclaim (both already ruled out: the control-channel
+   session never disconnected during the whole reproduction, so PR7's liveness-gated reclaim never
+   fired, and `analysed_index_add`/`_find_and_remove` were confirmed to chain hash collisions
+   correctly rather than overwrite).
+
+   Fixed by giving `get_last_possibility` a new optional output parameter, `int *from_server`, set
+   to 1 only when `scroll_from_server` actually populated the result (never when
+   `scroll_from_local` did, and never on an empty result) — `feed_one_thread` now calls
+   `add_possibility_analysed` only when `from_server` is true. The two existing callers unaffected
+   by this distinction (`etii_server.c`'s own local `INST_GET` service, and every existing test)
+   pass `NULL`. This does not change wire behaviour or `VERSION`: it only decides which batches the
+   *client* tracks locally for a *future* acknowledgement it would otherwise have sent needlessly.
+
+   Verified against a full, uncapped reproduction of the operator's exact scale (14 375 696
+   possibilities, `--stock-files 20`, 4-fork pruner at batch 100, ~5 continuous minutes spanning a
+   real 35–38s `consistent_backup` cycle, well past the ~85–150s window that reliably reproduced
+   the bug pre-fix): zero `possibilité non retirée` occurrences. Tests:
+   `tests/core/test_datamanager.c`
+   (`get_last_possibility_reports_from_server_true_when_server_serves`,
+   `get_last_possibility_reports_from_server_false_when_local_stock_used` — the `from_server` output
+   contract in isolation, using the existing `mini_srv_get_packet` socketpair harness);
+   `tests/app/test_etii_client.c`
+   (`feed_one_thread_local_recycle_skips_analysed_tracking` — the actual regression: a possibility
+   recycled from the local pool via `add_possibility(NULL, …)` must leave
+   `file_possibility_analysed[0]` empty after `feed_one_thread` runs, where the pre-fix code queued
+   it for a spurious ack). None of the pre-existing `feed_one_thread_*` tests needed changes: they
+   all run with `server_ip == NULL` (documented at the top of that test group as the local/test-mode
+   convention), under which `from_server` is always false by construction and the analysed-tracking
+   side effect they never asserted on simply becomes an intentional no-op — consistent with local
+   mode never having a remote server to needlessly re-acknowledge in the first place.
+
 ### HTTP REST admin API
 
 **`--http-port <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only, `n` in `[1, 65535]`). Starts a minimal HTTP/1.1 admin API on **`127.0.0.1:<n>`** — loopback only, never `INADDR_ANY`, so it is never reachable off the machine by default (use an SSH tunnel or a reverse proxy for remote access). **Absent by default** (`HTTP_PORT` global defaults to 0): no extra socket is opened unless explicitly requested. Lets an external HTTP application (written in any language) read server telemetry and drive a few whitelisted admin actions without speaking the binary `packet`/`control_protocol` wire formats.

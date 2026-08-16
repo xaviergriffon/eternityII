@@ -1070,7 +1070,7 @@ TEST backup_failed_exit_empty_is_noop(void)
     unlink(path_an);
 
     while (datas_size() > 0) {   /* état partagé entre suites */
-        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
         free_array_possibility_packet(r);
     }
 
@@ -1105,7 +1105,7 @@ TEST backup_failed_exit_saves_leftover_stock(void)
     unlink(path);
     unlink(path_an);
     while (datas_size() > 0) {
-        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
         free_array_possibility_packet(r);
     }
     PASS();

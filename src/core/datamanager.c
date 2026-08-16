@@ -1591,17 +1591,23 @@ void scroll_from_local_tocheck(array_possibility_packet *result, int max_result)
 	scroll_from_pool(file_possibility, result, max_result, &rr_scroll_unchecked);
 }
 
-array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result)
+array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result, int *from_server)
 {
 	array_possibility_packet *result = malloc(sizeof(array_possibility_packet));
 	result->size = 0;
 	result->possibilities = NULL;
-	
+	if (from_server != NULL) {
+		*from_server = 0;
+	}
+
 	scroll_from_local(result, max_result);
-    
+
 	if(result->size == 0 && server_ip != NULL)
 	{
 		scroll_from_server(client_possibility, result, max_result);
+		if (from_server != NULL && result->size > 0) {
+			*from_server = 1;
+		}
 	}
 
 	if(result->size == 0)

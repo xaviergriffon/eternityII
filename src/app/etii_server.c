@@ -616,7 +616,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 *lastSent = NULL;
             }
 
-            *lastSent = get_last_possibility(NULL, 1);
+            *lastSent = get_last_possibility(NULL, 1, NULL);
             record_batch_analysed_for_client(client, *lastSent);
             int32_t k = (int32_t)(*lastSent)->size;
             // Réponse cadrée (VERSION 7) : compte K puis, si K > 0, le bloc

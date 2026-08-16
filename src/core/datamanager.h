@@ -129,9 +129,26 @@ int add_possibility(client_possibility_t *client_possibility, array_possibility_
  *
  * @param client_possibility Contexte du thread client.
  * @param max_result         Nombre maximum de possibilités à extraire.
+ * @param from_server         Optionnel (peut être `NULL`). En sortie, mis à 1
+ *                            si le lot retourné vient réellement d'un
+ *                            `INST_GET_TO_CHECK[_BATCH]` serveur (le serveur a
+ *                            donc enregistré CES possibilités comme « en
+ *                            analyse » pour ce client), 0 s'il vient des files
+ *                            locales (`scroll_from_local` — un repli
+ *                            `put_to_local`, par exemple un ADD refusé par le
+ *                            serveur sous contention, ou tout autre reliquat
+ *                            local ; le serveur n'a alors RIEN à acquitter
+ *                            pour ce lot). Distinction nécessaire à l'appelant
+ *                            pour ne pas envoyer d'acquittement
+ *                            (`INST_POSSIBILITY_ANALYSED[_BATCH]`) pour un lot
+ *                            que le serveur n'a jamais servi cette fois-ci —
+ *                            sans quoi un lot recyclé localement peut ré-
+ *                            acquitter une possibilité déjà retirée du pool
+ *                            analysé serveur par son acquittement d'origine
+ *                            (« absence confirmée » côté serveur).
  * @return                   Tableau alloué (à libérer avec `free_array_possibility_packet`).
  */
-array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result);
+array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result, int *from_server);
 /**
  * @brief Extrait des possibilités non vérifiées du datamanager local (côté serveur).
  *

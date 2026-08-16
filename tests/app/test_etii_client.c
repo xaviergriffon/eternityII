@@ -36,7 +36,7 @@ void check_client_threads_step(int *last_record);
 static void dm_drain_local(void)
 {
     while (datas_size() > 0) {
-        array_possibility_packet *r = get_last_possibility(NULL, 1000);
+        array_possibility_packet *r = get_last_possibility(NULL, 1000, NULL);
         free_array_possibility_packet(r);
     }
 }
@@ -565,6 +565,59 @@ TEST feed_one_thread_gets_work(void)
     /* nettoyage : aposs reçue + vidage de l'« en analyse » du thread 0 */
     free_array_possibility_packet(client[0].aposs);
     send_possibility_analysed(&client[0]);
+    destroy_test_client(&client[0]);
+    request = saved_req;
+    pruner_mode = saved_pm;
+    PASS();
+}
+
+/* Un lot servi depuis le pool LOCAL (server_ip != NULL, mais
+ * get_last_possibility trouve tout via scroll_from_local avant de solliciter
+ * le réseau — cf. son repli put_to_local, typiquement un ADD refusé par le
+ * serveur sous contention) ne doit PAS être suivi dans
+ * file_possibility_analysed : le serveur n'a rien (ré-)enregistré comme « en
+ * analyse » pour ce lot cette fois-ci. Avant le correctif, feed_one_thread
+ * appelait add_possibility_analysed inconditionnellement, quelle que soit la
+ * source — un lot recyclé localement finissait par être acquitté une seconde
+ * fois (send_possibility_analysed), le serveur ne retrouvant alors plus rien
+ * à retirer (« absence confirmée »), reproduit en conditions réelles
+ * (--expand-level 9, pruner 4 forks, cf. AGENTS.md) mais invisible ici sans
+ * ce test : aucun test existant ne pousse jamais le stock local du client au
+ * point de faire échouer un ADD serveur. */
+TEST feed_one_thread_local_recycle_skips_analysed_tracking(void)
+{
+    int saved_req = request, saved_pm = pruner_mode;
+    dm_drain_local();
+    request = REQUEST_CONTINUE;
+    pruner_mode = 0;
+
+    struct possibility_packet *p = malloc(sizeof *p);
+    memset(p, 0, sizeof *p);
+    p->alloc = 3;
+    array_possibility_packet *ap = malloc(sizeof *ap);
+    ap->size = 1;
+    ap->possibilities = p;
+    add_possibility(NULL, ap); /* put_to_local : simule le repli d'un ADD refusé */
+    free_array_possibility_packet(ap);
+
+    client_possibility_t client[1];
+    init_test_client(&client[0], 0);
+    set_server_ip("127.0.0.1"); /* scénario client réel : scroll_from_local doit primer */
+
+    ASSERT_EQ_FMT(0ULL, file_analysed_size(0), "%llu");
+
+    int needed = 0, got = 0;
+    feed_one_thread(client, 0, &needed, &got);
+
+    ASSERT_EQ_FMT(1, needed, "%d");
+    ASSERT_EQ_FMT(1, got, "%d");
+    ASSERT(client[0].aposs != NULL);
+    ASSERT_EQ_FMT(1, client[0].aposs->size, "%d");
+    /* Le cœur du correctif : rien à acquitter côté serveur pour ce lot. */
+    ASSERT_EQ_FMT(0ULL, file_analysed_size(0), "%llu");
+
+    free_array_possibility_packet(client[0].aposs);
+    set_server_ip(NULL);
     destroy_test_client(&client[0]);
     request = saved_req;
     pruner_mode = saved_pm;
@@ -1363,6 +1416,7 @@ SUITE(etii_client_suite)
     RUN_TEST(feed_one_thread_not_continue_is_noop);
     RUN_TEST(feed_one_thread_admin_pause_keeps_socket_alive);
     RUN_TEST(feed_one_thread_gets_work);
+    RUN_TEST(feed_one_thread_local_recycle_skips_analysed_tracking);
     RUN_TEST(feed_one_thread_no_work_available);
     RUN_TEST(feed_one_thread_busy_no_socket_noop);
     RUN_TEST(feed_one_thread_keepalive_refreshes_alive_socket);
