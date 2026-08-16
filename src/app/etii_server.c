@@ -548,7 +548,8 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t 
  * retrait ultérieur (acquittement, ou requeue à la déconnexion) sait ainsi
  * directement où chercher, sans balayer les autres files.
  *
- * @param client      Contexte du thread serveur (identité déclarée si connue).
+ * @param client      Contexte du thread serveur (identité déclarée si connue),
+ *                     JAMAIS NULL (déréférencé sans garde, comme avant PR8).
  * @param possibility Paquet tout juste extrait du stock et envoyé au client.
  * @return            0 si enregistrée, -1 si le pool analysé est resté
  *                     verrouillé au-delà du délai borné (rien n'est
@@ -556,7 +557,18 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t 
  */
 int record_possibility_analysed_for_client(client_t *client, struct possibility_packet *possibility)
 {
-    int file_hint = server_analysed_file_hint(client);
+    // Calcul direct plutôt que server_analysed_file_hint(client) : `client`
+    // est déjà déréférencé sans garde juste en dessous (`client->has_identity`),
+    // donc jamais NULL ici — mais gcc (-Ofast, une fois ce site inliné dans
+    // record_batch_analysed_for_client) a du mal à le prouver à travers l'appel
+    // à server_analysed_file_hint (qui, LUI, gère explicitement le cas NULL
+    // pour ses AUTRES appelants — requeue_last_sent_possibility notamment) :
+    // faux positif -Wstringop-overread observé sous gcc/Linux (CI, absent en
+    // clang/macOS), le compilateur croyant `client->identity.client_uid` lu
+    // depuis une région de taille 0. server_analysed_file_hint reste la seule
+    // implémentation du calcul (évite la duplication de la logique de modulo),
+    // seul CE site l'inline manuellement pour casser la chaîne d'inférence.
+    int file_hint = (nb_file_possibility > 0) ? (client->compteur % nb_file_possibility) : -1;
     if (client->has_identity) {
         return add_possibility_analysed_owned(possibility, file_hint, client->identity.client_uid);
     }
