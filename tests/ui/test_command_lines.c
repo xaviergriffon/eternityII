@@ -54,14 +54,21 @@ static int run_command_quiet(char *cmd)
     return r;
 }
 
+/* Reset (réservé aux tests) de l'état round-robin ADD/GET de datamanager.c —
+ * cf. son commentaire dans tests/core/test_datamanager.c. */
+void datamanager_reset_rr_state_for_tests(void);
+
 /* Vide entièrement le pool local (vérifié + non vérifié) entre les tests :
-   l'état datamanager est global et partagé avec les autres suites. */
+   l'état datamanager est global et partagé avec les autres suites. Réinitialise
+   aussi l'état round-robin ADD/GET pour que dm_add() atterrisse de façon
+   déterministe dans la file 0 juste après (cf. datamanager_rr_next_start). */
 static void dm_drain(void)
 {
     while (datas_size() > 0) {
         array_possibility_packet *r = get_last_possibility(NULL, 1000);
         free_array_possibility_packet(r);
     }
+    datamanager_reset_rr_state_for_tests();
 }
 
 /* Insère n possibilités non vérifiées d'allocs donnés dans le stock local. */

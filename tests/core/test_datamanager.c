@@ -44,6 +44,10 @@ void unlock_all_file(void);
 unsigned long long regroup_datas_nolock(void);
 int split_datas_nolock(int nbsplit);
 
+/* Reset (réservé aux tests) de l'état round-robin ADD/GET — datamanager_rr_next_start
+ * lui-même est déjà déclaré dans datamanager.h. */
+void datamanager_reset_rr_state_for_tests(void);
+
 /* Affichage de progression de check_duplicate (en prod, atteint uniquement après
    30 s d'attente d'un thread) + ses compteurs globaux (tableaux de nbDuplicateThread == 8). */
 void print_duplicate_activity(unsigned long long dataSize, unsigned long long nbCombinations);
@@ -73,13 +77,22 @@ static void restore_std(void)
     close(g_fd1); close(g_fd2);
 }
 
-/* Vide entièrement les pools locaux (vérifié + non vérifié). */
+/* Vide entièrement les pools locaux (vérifié + non vérifié).
+ *
+ * Réinitialise aussi l'état round-robin ADD/GET (datamanager_rr_next_start) :
+ * sans quoi le fichier de destination du prochain add_packets() dépendrait de
+ * l'ordre d'exécution des tests précédents (chacun avance le compteur), ce
+ * qui casserait les nombreuses assertions « tout atterrit dans la file 0
+ * juste après un drain » de ce fichier. La rotation elle-même — le
+ * comportement réel de production — est testée séparément, sans passer par
+ * drain_datamanager() entre les appels (cf. add_possibility_rotates_start_file). */
 static void drain_datamanager(void)
 {
     while (datas_size() > 0) {
         array_possibility_packet *r = get_last_possibility(NULL, 1000);
         free_array_possibility_packet(r);
     }
+    datamanager_reset_rr_state_for_tests();
 }
 
 /* Vide aussi le pool « analysed » (réinjecté dans le stock puis drainé). */
@@ -148,8 +161,77 @@ TEST add_increases_datas_size(void)
     add_packets(allocs, 3);
 
     ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
-    /* Toutes les possibilités non vérifiées atterrissent dans le pool 0. */
+    /* drain_datamanager() vient de remettre l'état round-robin à zéro : le lot
+     * atterrit donc bien dans le pool 0 (déterministe juste après un drain,
+     * cf. son commentaire) — mais ce que cette assertion vérifie vraiment est
+     * que tout le lot va dans UNE SEULE file, pas la file précise. */
     ASSERT_EQ_FMT(3ULL, file_size(0), "%llu");
+
+    drain_datamanager();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * datamanager_rr_next_start : rotation round-robin du point de départ
+ * ADD/GET, pour ne pas toujours concentrer le trafic sur la file 0 (fonction
+ * pure, état fourni par l'appelant).
+ * ------------------------------------------------------------------------ */
+
+TEST rr_next_start_rotates_then_wraps(void)
+{
+    unsigned int counter = 0;
+    ASSERT_EQ_FMT(0, datamanager_rr_next_start(&counter, 4), "%d");
+    ASSERT_EQ_FMT(1, datamanager_rr_next_start(&counter, 4), "%d");
+    ASSERT_EQ_FMT(2, datamanager_rr_next_start(&counter, 4), "%d");
+    ASSERT_EQ_FMT(3, datamanager_rr_next_start(&counter, 4), "%d");
+    ASSERT_EQ_FMT(0, datamanager_rr_next_start(&counter, 4), "%d"); /* boucle */
+    PASS();
+}
+
+TEST rr_next_start_non_positive_n_returns_zero_and_is_a_noop(void)
+{
+    unsigned int counter = 5;
+    ASSERT_EQ_FMT(0, datamanager_rr_next_start(&counter, 0), "%d");
+    ASSERT_EQ_FMT(0, datamanager_rr_next_start(&counter, -1), "%d");
+    /* n <= 0 : rien à répartir, le compteur n'avance pas. */
+    ASSERT_EQ_FMT(5u, counter, "%u");
+    PASS();
+}
+
+/* Comportement réel de production, SANS repasser par drain_datamanager()
+ * entre les deux ajouts (qui réinitialiserait l'état round-robin et
+ * masquerait exactement ce qu'on veut observer ici) : deux add_packets()
+ * consécutifs, séparés d'une seule extraction, doivent démarrer sur des
+ * files différentes plutôt que retomber tous les deux sur la file 0. C'est
+ * la régression que --stock-files (PR4) + la rééquilibrage incrémental
+ * (PR3) ne corrigeaient pas : sans cette rotation, la file 0 concentre tout
+ * le trafic ADD dès qu'elle n'est pas verrouillée par un appel concurrent. */
+TEST add_possibility_rotates_start_file_across_calls(void)
+{
+    drain_datamanager();
+
+    int allocs[] = { 1 };
+    add_packets(allocs, 1);
+    int first_file = -1;
+    for (int f = 0; f < nb_file_possibility; f++) {
+        if (file_size(f) == 1) { first_file = f; break; }
+    }
+    ASSERT(first_file >= 0);
+
+    /* Extraction directe (pas drain_datamanager()) : ne touche que l'état
+     * round-robin du côté GET (rr_scroll_*), jamais celui du côté ADD
+     * (rr_put_*) qu'on veut observer ensuite. */
+    array_possibility_packet *r = get_last_possibility(NULL, 10);
+    free_array_possibility_packet(r);
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    add_packets(allocs, 1);
+    int second_file = -1;
+    for (int f = 0; f < nb_file_possibility; f++) {
+        if (file_size(f) == 1) { second_file = f; break; }
+    }
+    ASSERT(second_file >= 0);
+    ASSERT(second_file != first_file);
 
     drain_datamanager();
     PASS();
@@ -4417,6 +4499,9 @@ SUITE(datamanager_suite)
     RUN_TEST(send_solution_without_client_is_local_noop);
     RUN_TEST(send_solution_without_server_configured_returns_error);
     RUN_TEST(add_increases_datas_size);
+    RUN_TEST(rr_next_start_rotates_then_wraps);
+    RUN_TEST(rr_next_start_non_positive_n_returns_zero_and_is_a_noop);
+    RUN_TEST(add_possibility_rotates_start_file_across_calls);
     RUN_TEST(get_last_possibility_drains_pool);
     RUN_TEST(put_and_scroll_round_trip_succeeds_when_pool_free);
     RUN_TEST(search_min_datas_finds_minimum);

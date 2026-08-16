@@ -23,6 +23,41 @@
 int nb_file_possibility = 0;
 static int nb_file_possibility_capacity = 0; // NOMBRE DE FILES RÉELLEMENT ALLOUÉES (>= nb_file_possibility ; ne décroît jamais, cf. datamanager_configure_stock_files)
 
+// Compteurs round-robin de démarrage pour put_to_pool/scroll_from_pool — un par
+// pool réellement distinct (non vérifié / vérifié), jamais remis à 0. Partagés
+// entre TOUS les appelants d'un même pool (ex. rr_scroll_unchecked sert aussi
+// bien scroll_from_local que scroll_from_local_tocheck) : c'est le trafic
+// combiné qui doit tourner, pas seulement celui d'un point d'appel isolé. Cf.
+// datamanager_rr_next_start.
+static unsigned int rr_put_unchecked = 0;
+static unsigned int rr_put_checked = 0;
+static unsigned int rr_scroll_unchecked = 0;
+static unsigned int rr_scroll_checked = 0;
+
+int datamanager_rr_next_start(unsigned int *counter, int n)
+{
+	if (n <= 0)
+	{
+		return 0;
+	}
+	unsigned int prev = __atomic_fetch_add(counter, 1u, __ATOMIC_RELAXED);
+	return (int)(prev % (unsigned int)n);
+}
+
+// Réservée aux tests (jamais appelée en production, non déclarée dans
+// datamanager.h — même convention que les autres « helpers internes » que
+// tests/core/test_datamanager.c déclare lui-même en tête de fichier) : remet
+// à zéro l'état round-robin ADD/GET pour que les assertions « tout atterrit
+// dans la file 0 juste après un drain » restent déterministes quel que soit
+// l'ordre d'exécution des tests.
+void datamanager_reset_rr_state_for_tests(void)
+{
+	rr_put_unchecked = 0;
+	rr_put_checked = 0;
+	rr_scroll_unchecked = 0;
+	rr_scroll_checked = 0;
+}
+
 static file_possibility_t **file_possibility = NULL;
 static file_possibility_t **file_possibility_analysed = NULL;
 
@@ -398,13 +433,16 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
  * @param pool          Pool de files cible.
  * @param possibilities Tableau de possibilités à filtrer/insérer.
  * @param want_checked   1 pour le pool vérifié (checked == 1), 0 pour le reste.
+ * @param rr_counter    État round-robin du pool (`rr_put_unchecked`/`rr_put_checked`) —
+ *                      fait démarrer chaque appel sur une file différente plutôt que
+ *                      toujours la file 0 (cf. `datamanager_rr_next_start`).
  * @return              0 si inséré (ou rien à insérer), 1 si `pool` est resté
  *                       intégralement verrouillé au-delà de
  *                       DATAMANAGER_TRYLOCK_MAX_SWEEPS tours (maintenance en
  *                       cours : sauvegarde, restore, tri...) — rien n'a été
  *                       inséré dans ce cas, sûr à réessayer par l'appelant.
  */
-static int put_to_pool(file_possibility_t **pool, array_possibility_packet *possibilities, int want_checked)
+static int put_to_pool(file_possibility_t **pool, array_possibility_packet *possibilities, int want_checked, unsigned int *rr_counter)
 {
 	int count = 0;
 	int t;
@@ -423,7 +461,8 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 	}
 
 	int addpossibility = 0;
-	int currfile = 0;
+	int currfile = datamanager_rr_next_start(rr_counter, nb_file_possibility);
+	int tried = 0;
 	int failed_sweeps = 0;
 	while(addpossibility == 0)
 	{
@@ -446,15 +485,18 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 			addpossibility = 1;
 			pthread_mutex_unlock(&pool[currfile]->lock);
 		}
-		currfile++;
-		if(currfile >= nb_file_possibility)
+		currfile = (currfile + 1) % nb_file_possibility;
+		tried++;
+		if(tried >= nb_file_possibility)
 		{
-			currfile = 0;
+			tried = 0;
 			// On ne cède le CPU que quand un tour complet des nb_file_possibility
 			// files n'a permis de verrouiller aucune d'entre elles : le cas
 			// nominal (trylock réussi dès le premier essai) sort de la boucle
-			// via addpossibility avant même d'atteindre ce wraparound. Même
-			// motif que add_possibility_analysed.
+			// via addpossibility avant même d'atteindre ce tour complet. Même
+			// motif que add_possibility_analysed. `tried` (et non plus
+			// `currfile == 0`) compte le tour, puisque `currfile` démarre
+			// désormais sur une file arbitraire (round-robin) plutôt que sur 0.
 			usleep(MICRO_SLEEP);
 			// Sortie bornée : au-delà de DATAMANAGER_TRYLOCK_MAX_SWEEPS tours consécutifs sans
 			// verrouiller la moindre file, abandonner plutôt que de bloquer
@@ -481,8 +523,8 @@ int put_to_local(array_possibility_packet *possibilities)
 	// vont dans leur pool dédié, les autres dans le pool historique. Chaque
 	// sous-tableau (checked / unchecked) est indépendant : un échec borné
 	// (PR1) sur l'un des deux pools n'empêche pas l'insertion dans l'autre.
-	int err_unchecked = put_to_pool(file_possibility, possibilities, 0);
-	int err_checked = put_to_pool(file_possibility_checked, possibilities, 1);
+	int err_unchecked = put_to_pool(file_possibility, possibilities, 0, &rr_put_unchecked);
+	int err_checked = put_to_pool(file_possibility_checked, possibilities, 1, &rr_put_checked);
 	return (err_unchecked || err_checked) ? 1 : 0;
 }
 
@@ -1372,22 +1414,27 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
  *
  * @param result     Tableau de résultats à remplir.
  * @param max_result Nombre maximum de possibilités à extraire.
+ * @param rr_counter État round-robin du pool (`rr_scroll_unchecked`/`rr_scroll_checked`) —
+ *                   fait démarrer chaque appel sur une file différente plutôt que
+ *                   toujours la file 0 (cf. `datamanager_rr_next_start`).
  */
-static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet *result, int max_result)
+static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet *result, int max_result, unsigned int *rr_counter)
 {
 	int getpossibility = 0;
 	int currfile = 0;
 	int filetested[nb_file_possibility];
 	int failed_sweeps = 0;
 	int i;
+	int rr_start = datamanager_rr_next_start(rr_counter, nb_file_possibility);
 	for(i = 0; i < nb_file_possibility; i++)
 	{
 		filetested[i] = 0;
 	}
 	while (getpossibility == 0) {
-		int f;
-		for (f=0; f < nb_file_possibility && getpossibility == 0; f++)
+		int k;
+		for (k=0; k < nb_file_possibility && getpossibility == 0; k++)
 		{
+			int f = (rr_start + k) % nb_file_possibility;
 			if(filetested[f] == 0)
 			{
 				currfile = f;
@@ -1449,7 +1496,7 @@ static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet
 		if(getpossibility == 1 && result->size == 0)
 		{
 			int all_tested = 1;
-			for(f=0; f < nb_file_possibility; f++)
+			for(int f=0; f < nb_file_possibility; f++)
 			{
 				if(filetested[f] == 0)
 				{
@@ -1478,10 +1525,10 @@ static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet
  */
 void scroll_from_local(array_possibility_packet *result, int max_result)
 {
-	scroll_from_pool(file_possibility_checked, result, max_result);
+	scroll_from_pool(file_possibility_checked, result, max_result, &rr_scroll_checked);
 	if(result->size == 0)
 	{
-		scroll_from_pool(file_possibility, result, max_result);
+		scroll_from_pool(file_possibility, result, max_result, &rr_scroll_unchecked);
 	}
 }
 
@@ -1496,7 +1543,7 @@ void scroll_from_local(array_possibility_packet *result, int max_result)
  */
 void scroll_from_local_tocheck(array_possibility_packet *result, int max_result)
 {
-	scroll_from_pool(file_possibility, result, max_result);
+	scroll_from_pool(file_possibility, result, max_result, &rr_scroll_unchecked);
 }
 
 array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result)

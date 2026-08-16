@@ -65,7 +65,18 @@ sauvegarde entière. `--stock-files` augmente le nombre de files pour réduire c
 d'écriture par file ; `--rebalance-budget` règle la vitesse à laquelle le stock est
 rééquilibré entre ces files (file la plus pleine → la plus vide, borné en temps, disponible
 aussi via la commande console `rebalance [n]` — voir [Console interactive](console.md)), ce
-qui maintient des files de taille comparable et rend le gain de `--stock-files` effectif ;
+qui maintient des files de taille comparable et rend le gain de `--stock-files` effectif.
+
+Sans autre précaution, un appel ADD ou GET non contesté (le cas nominal à faible concurrence)
+verrouille toujours la première file libre en partant de la file 0 — tout le trafic s'y
+concentrerait donc systématiquement, à l'exact opposé de l'objectif de `--stock-files`, et au
+prix d'un travail constant pour `--rebalance-budget` qui doit sans cesse compenser ce biais.
+Chaque appel démarre en réalité son balayage sur une file différente (rotation round-robin,
+indépendante entre ADD et GET, et entre le pool non vérifié et le pool vérifié) plutôt que
+toujours sur la file 0 : la charge se répartit d'elle-même sur les `--stock-files` files, le
+rééquilibrage n'ayant plus qu'à corriger de véritables déséquilibres de contenu, pas un biais
+structurel de trafic.
+
 `--tcp-timeout` (ci-dessous) élargit en plus la marge côté réseau. Chaque artefact sauvegardé
 (stock, pool analysé, meilleur plateau connu, registre des clients connus) n'est réécrit que
 si son propre contenu a changé depuis sa dernière écriture — la durée de la dernière
