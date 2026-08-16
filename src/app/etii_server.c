@@ -1618,6 +1618,39 @@ int try_assign_client_slot(int client_id, const char *peer_ip, int *busy_logged)
     return thread_id;
 }
 
+/**
+ * @brief Journalise dans `events.log` (jamais sur la console — `log_file`,
+ *        pas `log_console`/`log_event` : un dump de configuration noierait la
+ *        zone d'événements/le scrollback) un instantané de la configuration
+ *        effective et de l'environnement du serveur.
+ *
+ * Pendant du diagnostic déjà fait côté client (cf. `log_startup_diagnostics`,
+ * `fork_orchestrator.c`) : diagnostiquer après coup un déploiement serveur
+ * (quelles options CLI étaient réellement actives à cet instant) sans
+ * dépendre du scrollback de la console. Appelée une fois par `runserver`,
+ * juste avant que le serveur commence à accepter des connexions — tous les
+ * globaux issus du CLI sont résolus à ce point.
+ *
+ * Extraite en fonction nommée (plutôt que restée inline dans `runserver`)
+ * spécifiquement pour être testable sans socket ni boucle `accept()` réelle.
+ *
+ * @param file Chemin du fichier de pièces effectivement utilisé (résolu par
+ *             l'appelant — positionnel CLI ou `parts_files` par défaut).
+ */
+void log_server_startup_diagnostics(const char *file)
+{
+    log_file("démarrage serveur : pid=%d version_protocole=%d eternParts=%d "
+              "nb_threads=%d fichier=\"%s\" stock_files=%d tcp_timeout=%ds "
+              "stop_on_solution=%s expand_level=%d expand_max_stock=%d "
+              "expand_max_levels=%d rebalance_budget=%d http_port=%d "
+              "http_token=%s\n",
+              (int)getpid(), VERSION, ETERN_PARTS, NB_THREADS, file,
+              nb_file_possibility, tcp_timeout, stop_on_solution ? "oui" : "non",
+              expand_min_level, expand_max_stock, expand_max_levels,
+              rebalance_budget, HTTP_PORT,
+              HTTP_PORT > 0 ? (HTTP_ADMIN_TOKEN[0] != '\0' ? "configuré" : "absent") : "n/a");
+}
+
 void runserver(const char* file)
 {
     struct array_part *apart= read_parts(file);
@@ -1663,6 +1696,8 @@ void runserver(const char* file)
         // fonctionnelle.
         log_info("API HTTP admin démarrée sans --http-token-file : les commandes de modification (pause, resume, limit, maxStockByThread, prunerBatch, clientsCommand, restore, backup) resteront inaccessibles via POST /api/v1/command (401)\n");
     }
+
+    log_server_startup_diagnostics(file);
 
     int socket_id = create_tcp_server(SERVER_PORT, NB_THREADS);
     while (request != REQUEST_STOP) {

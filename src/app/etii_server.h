@@ -85,6 +85,19 @@ typedef struct
 void runserver(const char* file);
 
 /**
+ * @brief Journalise dans `events.log` un instantané de la configuration
+ *        effective/de l'environnement du serveur (jamais sur la console) —
+ *        voir la documentation détaillée dans etii_server.c.
+ *
+ * Extraite de `runserver` pour être testable sans socket ni boucle
+ * `accept()` réelle : ne fait qu'un appel à `log_file` à partir de globales
+ * déjà résolues par le CLI.
+ *
+ * @param file Chemin du fichier de pièces effectivement utilisé.
+ */
+void log_server_startup_diagnostics(const char *file);
+
+/**
  * @brief Thread de statistiques du serveur.
  *
  * Toutes les 10 secondes, collecte le stock de chaque file, les possibilités

@@ -247,6 +247,35 @@ avec le contexte ET le détail errno (`read_parts file :chemin 2 : No such
 file or directory`), correctement routée et donc bien présente dans
 `events.log`.
 
+**La configuration effective de démarrage est journalisée UNIQUEMENT dans
+`events.log`, jamais dans la zone d'événements ni sur la console.** Une
+nouvelle fonction, `log_file()` (`src/ui/logger.h`), sert exactement ce cas :
+écrire dans `events.log` sans afficher, contrairement à `log_event` (bornée à
+200 octets, dimensionnée pour tenir sur une ligne de la zone fixe) ou
+`log_console`/`log_info` (jamais persistés). Réservée au process PARENT
+(aucun routage IPC, à la différence des autres fonctions de ce fichier) :
+
+- **Côté client/pruner** : dès qu'un (re)démarrage des fils de recherche
+  réussit — `start` manuel, décompte automatique écoulé, ou redémarrage à
+  chaud `configApply` — une ligne `démarrage : N fork(s) lancé(s) — pid=…
+  version_protocole=… eternParts=… mode=… label="…" machine_uid=…
+  client_uid=… stock_files=…` suivie du dump de la configuration effective
+  (`nb_forks`, `server_host`, `parts_file`, `max_stock_by_thread`, `limit`,
+  `pruner_batch`, `dfs_budget`) est écrite. Voir
+  `log_startup_diagnostics` (`src/app/fork_orchestrator.c`).
+- **Côté serveur** : une ligne équivalente est écrite juste avant que
+  `runserver` ne commence à accepter des connexions — `démarrage serveur :
+  pid=… version_protocole=… eternParts=… nb_threads=… fichier="…"
+  stock_files=… tcp_timeout=…s stop_on_solution=… expand_level=…
+  expand_max_stock=… expand_max_levels=… rebalance_budget=… http_port=…
+  http_token=configuré|absent|n/a` (jamais la valeur du jeton lui-même). Voir
+  `log_server_startup_diagnostics` (`src/app/etii_server.c`).
+
+But : diagnostiquer après coup un déploiement (quelles options CLI étaient
+réellement actives à cet instant précis) via `tail -f events.log`, sans
+dépendre du scrollback de la console ni d'avoir pensé à lancer
+`config`/`configSave` avant un incident.
+
 ## Effacement de l'écran : la commande `clear` (Ctrl-L)
 
 La politique d'affichage est uniforme : **aucune commande n'efface l'écran
