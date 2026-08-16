@@ -208,6 +208,50 @@ TEST expand_max_levels_non_positive_value_is_ignored(void)
     PASS();
 }
 
+/* --stock-max-ram <mo> : option VALUÉE, même schéma que --expand-max-stock
+   (0/négatif/absent ignoré, garde la valeur courante = 0 = illimité). */
+TEST stock_max_ram_strips_option_and_value_sets_global(void)
+{
+    stock_max_ram_mb = 0;
+    const char *argv[] = {"prog", "server", "--stock-max-ram", "2048", "8"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");              /* option + valeur retirées (5 → 3) */
+    ASSERT_EQ_FMT(2048, stock_max_ram_mb, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);               /* argument positionnel non décalé */
+    PASS();
+}
+
+/* Valeur absente : ignorée sans lire hors argv, stock_max_ram_mb reste
+   inchangé, l'option est tout de même consommée. */
+TEST stock_max_ram_without_value_is_ignored(void)
+{
+    stock_max_ram_mb = 0;
+    const char *argv[] = {"prog", "server", "--stock-max-ram"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");              /* seul le token option est retiré */
+    ASSERT_EQ_FMT(0, stock_max_ram_mb, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    PASS();
+}
+
+/* Valeur <= 0 fournie explicitement : ignorée (garde la valeur déjà fixée),
+   même convention que --expand-max-stock -- pour DÉSACTIVER le plafond à
+   chaud, la commande console `stockMaxRam 0` reste le bon outil (elle
+   n'utilise pas ce chemin de parsing CLI). */
+TEST stock_max_ram_non_positive_value_is_ignored(void)
+{
+    stock_max_ram_mb = 4096;                    /* valeur résiduelle à préserver */
+    const char *argv[] = {"prog", "server", "--stock-max-ram", "-1"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(4096, stock_max_ram_mb, "%d");
+    PASS();
+}
+
 /* --http-port <n> : option VALUÉE, même schéma que --expand-level. Valeur dans
    [1, 65535] : les deux tokens sont retirés d'argv, HTTP_PORT est fixé. */
 TEST http_port_strips_option_and_value_sets_global(void)
@@ -531,6 +575,9 @@ SUITE(static_variables_suite)
     RUN_TEST(expand_max_levels_strips_option_and_value_sets_global);
     RUN_TEST(expand_max_levels_without_value_is_ignored);
     RUN_TEST(expand_max_levels_non_positive_value_is_ignored);
+    RUN_TEST(stock_max_ram_strips_option_and_value_sets_global);
+    RUN_TEST(stock_max_ram_without_value_is_ignored);
+    RUN_TEST(stock_max_ram_non_positive_value_is_ignored);
     RUN_TEST(http_port_strips_option_and_value_sets_global);
     RUN_TEST(http_port_without_value_is_ignored);
     RUN_TEST(http_port_out_of_range_values_are_ignored);

@@ -209,6 +209,7 @@ control_command_class_t control_command_classify(const char *command_name)
 		"split",
 		"regroup",
 		"rebalance",
+		"stockMaxRam",
 	};
 
 	if (command_first_word_matches(command_name, read_only, sizeof(read_only) / sizeof(read_only[0]))) {

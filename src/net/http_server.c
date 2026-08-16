@@ -142,6 +142,8 @@ void http_status_collect(http_status_view_t *out)
     out->pruner_batch = pruner_batch_size;
     out->pruner_dfs_budget = pruner_dfs_budget;
     out->last_backup_duration_ms = server_last_backup_duration_ms;
+    out->stock_ram_limit_mb = datamanager_packets_to_ram_mb(datamanager_ram_limit_packets());
+    out->stock_ram_used_mb = datamanager_packets_to_ram_mb(datamanager_resident_packets());
 }
 
 /* Le memcpy champ-à-champ ci-dessous suppose ces tailles identiques (voir

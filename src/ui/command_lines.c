@@ -24,7 +24,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 54
+#define NB_COMMANDS 56
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -125,6 +125,8 @@ int known_clients_interpreter(void);
 int clients_work_interpreter(void);
 int lease_duration_interpreter(void);
 int rebalance_interpreter(void);
+int stock_memory_interpreter(void);
+int stock_max_ram_interpreter(void);
 int config_interpreter(void);
 int config_save_interpreter(void);
 int start_interpreter(void);
@@ -245,6 +247,24 @@ static command_description commands[NB_COMMANDS] = {
      "pour forcer un rééquilibrage immédiat plutôt que d'attendre plusieurs\n"
      "tours. Contrairement à split, borné par <n> : peut s'arrêter avant un\n"
      "équilibre complet sur un très gros déséquilibre.", NULL},
+    {"stockMemory", stock_memory_interpreter, 0, CMD_CAT_STOCK, 1, NULL,
+     "affiche le plafond RAM du stock et l'occupation actuelle (Mo, possibilités)",
+     "Deux pools comptés ensemble (non vérifié + vérifié), jamais le pool\n"
+     "analysé (borné autrement : baux d'expiration, clients en vol -- cf.\n"
+     "leaseDuration). « illimité » si aucun plafond n'est fixé (défaut, ou\n"
+     "stockMaxRam 0). L'occupation est une ESTIMATION (sizeof(Element) +\n"
+     "sizeof(possibility_packet) + surcoût d'allocateur par possibilité,\n"
+     "jamais un relevé RSS réel du process) -- même chiffre que celui exposé\n"
+     "par GET /api/v1/status (stock_ram_limit_mb / stock_ram_used_mb).", NULL},
+    {"stockMaxRam", stock_max_ram_interpreter, 0, CMD_CAT_STOCK, 1, "stockMaxRam <mo>",
+     "fixe à chaud le plafond RAM (Mo) des deux pools de stock (--stock-max-ram)",
+     "<mo> <= 0 désactive le plafond (illimité), même convention que `limit 0`\n"
+     "et `leaseDuration 0` -- PAS une erreur d'usage, contrairement à un\n"
+     "argument entièrement absent. Converti UNE SEULE FOIS en nombre de\n"
+     "possibilités (l'unité réellement comparée par chaque ADD) : resserrer le\n"
+     "plafond en dessous de l'occupation actuelle ne fait RIEN à ce qui est\n"
+     "déjà résident -- seuls les ADD futurs sont refusés jusqu'à repasser sous\n"
+     "le plafond. Ne couvre pas le pool analysé (cf. stockMemory).", NULL},
     {"min", min_interpreter, 1, CMD_CAT_STOCK, 0, NULL,
      "affiche le niveau minimal de pièces placées dans les files", NULL, NULL},
 
@@ -1539,6 +1559,20 @@ int admin_apply_privileged_command(const char *line) {
             }
             datamanager_rebalance_step(budget);
             result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "stockMaxRam") == 0) {
+            // stock_max_ram_interpreter lit aussi <mo> via le curseur global
+            // strtok : appelé directement, pas via l'interpréteur, même
+            // raison que sortDesc/rebalance ci-dessus. <mo> ABSENT reste un
+            // usage invalide (ADMIN_CMD_BAD_ARGS) ; <mo> <= 0 fourni
+            // explicitement désactive le plafond (illimité), même convention
+            // que la commande console.
+            char *arg = strtok_r(NULL, " ", &save);
+            if (arg != NULL) {
+                int mo = atoi(arg);
+                stock_max_ram_mb = mo;
+                datamanager_configure_ram_limit(mo);
+                result = ADMIN_CMD_OK;
+            }
         }
     }
 
@@ -1828,6 +1862,54 @@ int rebalance_interpreter(void) {
     }
     int moved = datamanager_rebalance_step(budget);
     log_info("rebalance : %d possibilité(s) déplacée(s)\n", moved);
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `stockMemory` : affiche le plafond RAM du stock (Mo
+ *        et possibilités) et l'occupation actuelle des deux pools de stock.
+ *
+ * Lecture pure, jamais d'effet de bord — même esprit que `statistic`/`check`.
+ */
+int stock_memory_interpreter(void) {
+    unsigned long long limit_packets = datamanager_ram_limit_packets();
+    unsigned long long resident_packets = datamanager_resident_packets();
+    unsigned long long resident_mb = datamanager_packets_to_ram_mb(resident_packets);
+    if (limit_packets == 0) {
+        log_info("stockMemory : plafond illimité, occupation ~%llu Mo (%llu possibilité(s))\n",
+                  resident_mb, resident_packets);
+    } else {
+        unsigned long long limit_mb = datamanager_packets_to_ram_mb(limit_packets);
+        log_info("stockMemory : plafond %llu Mo (~%llu possibilité(s)), occupation ~%llu Mo (%llu possibilité(s))\n",
+                  limit_mb, limit_packets, resident_mb, resident_packets);
+    }
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `stockMaxRam <mo>` : fixe à chaud le plafond RAM des
+ *        deux pools de stock (non vérifié + vérifié).
+ *
+ * `<mo> <= 0` désactive le plafond (illimité) -- pas une erreur d'usage,
+ * même convention que `limit 0`/`leaseDuration 0` : seul un argument
+ * ENTIÈREMENT ABSENT est un usage invalide. Converti une seule fois en
+ * possibilités par `datamanager_configure_ram_limit` ; n'affecte jamais ce
+ * qui est déjà résident, seulement les ADD futurs.
+ */
+int stock_max_ram_interpreter(void) {
+    char *arguments = strtok(NULL, " ");
+    if (arguments == NULL) {
+        return CMD_ERR_USAGE;
+    }
+    int mo = atoi(arguments);
+    stock_max_ram_mb = mo;
+    datamanager_configure_ram_limit(mo);
+    if (mo > 0) {
+        log_info("stockMaxRam : plafond fixé à %d Mo (~%llu possibilité(s))\n",
+                  mo, datamanager_ram_limit_packets());
+    } else {
+        log_info("stockMaxRam : plafond désactivé (illimité)\n");
+    }
     return 0;
 }
 

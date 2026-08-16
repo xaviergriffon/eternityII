@@ -446,13 +446,97 @@ block (whichever subset actually ran). Exposed as `last_backup_duration_ms` on
 "how long did the backup actually take" question answerable directly instead of inferred after
 the fact from log timestamps, as it had to be during the original diagnosis.
 
-**Left open, out of scope for this series.** The real ceiling is *volume*: 14M possibilities ≈
-9GB resident on a 16GB box, and nothing bounds the stock's growth at runtime (`expand_max_stock`
-only bounds the one-time startup `--expand-level` expansion, never later growth from search/
-delegation traffic). A global stock cap, spilling to disk, or backing up by delta instead of a
-full rewrite each time would all address this directly, but none is implemented — none of this
-series' incidents required it, and it's a materially bigger design question than bounding a
-lock or gating a write.
+**Left open, out of scope for this series — since addressed, see below (RAM cap) and still
+partially open (disk spillover, delta backup).** The real ceiling is *volume*: 14M possibilities
+≈ 9GB resident on a 16GB box, and nothing bounded the stock's growth at runtime
+(`expand_max_stock` only bounds the one-time startup `--expand-level` expansion, never later
+growth from search/delegation traffic). A global stock cap, spilling to disk, or backing up by
+delta instead of a full rewrite each time would all address this directly; none of this series'
+incidents required it, and it was a materially bigger design question than bounding a lock or
+gating a write — the RAM-cap half is now implemented (below), the disk-spillover and
+delta-backup halves are not.
+
+### RAM cap on the possibility stock (`--stock-max-ram`) — cap only, disk spillover not yet implemented
+
+A follow-up series, planned in three PRs (a hard cap that refuses growth once the budget is
+reached; spilling the overflow to per-file disk segments; making backup/restore coherent with
+those segments) of which **only the first is implemented**. This section documents PR1 only —
+there is no disk spillover in this codebase yet: once `--stock-max-ram` is reached, the server
+simply refuses further growth (existing degrade-gracefully path, below) rather than writing
+anything to disk. Do not assume a spill file exists anywhere on disk because this option is set.
+
+**Scope: the two stock pools only, never the analysed pool.** `--stock-max-ram <mo>` (Mo,
+console `stockMaxRam <mo>` for hot changes, `0` = illimité/unlimited — same convention as
+`limit 0`/`leaseDuration 0`) bounds `possibility_stock + checked_stock` together (one budget,
+not one per pool — a `put_to_pool` call on either pool checks the combined total). The analysed
+pool is deliberately excluded: it is already bounded by in-flight clients and PR7's expiration
+leases, and its hash index (`remove_possibility_analysed`) needs exact-match lookup that a
+spilled-to-disk entry would break — a reason that will still apply once PR2/PR3 exist.
+
+**Conversion is Mo → possibility COUNT, once, not a running byte tally.** `put_to_pool`
+(`datamanager.c`) is the sole enforcement point (mirrors the narrow-funnel design PR1–PR8 above
+already established): a `datas_size()`-derived resident count, compared against a packet budget
+computed once by `datamanager_ram_limit_to_packets` (`core/datamanager.{h,c}`) from
+`datamanager_bytes_per_possibility()`. That per-possibility cost is **632 bytes on the 256-piece
+puzzle, not `sizeof(struct possibility_packet)` (576) alone** — `put()` (`core/lifo.c`) does
+**two** `malloc()` calls per stored possibility (the `Element` list node, 24 bytes, plus a copy
+of the packet itself), a real ~10% underestimate the rest of this document's own "14M
+possibilities ≈ 9GB" figure (above) was itself making. A refusal returns `1`, the same contract
+`put_to_pool` already used for trylock-budget exhaustion (PR1 of the load-management series,
+above) — `put_to_server` already degrades this gracefully into `INST_ERROR` (client keeps the
+possibility locally, retries later; see this document's own "Épilogue" section above for why
+that log line is `log_info`, not `log_error`). The refusal path in `put_to_pool` itself is
+throttled to one `log_error` per 10s (`STOCK_RAM_CAP_WARN_COOLDOWN_SEC`) — unlike the epilogue's
+maintenance-window refusals, a sustained cap hit is real operator-actionable signal (raise the
+cap, or wait for PR2's spillover), so it stays loud, just not per-ADD spam.
+
+**`expand_datas_to_level` had the same "return value ignored" bug the Épilogue section already
+fixed once for a different call site — caught here before it could reach production, since a
+cap that can refuse mid-expansion is new in this series.** Both call sites in
+`expand_datas_to_level` (`core/datamanager.c`) that reinsert a packet via `add_possibility(NULL,
+single)` discarded its return value; once a RAM cap could exist, a refusal there became a
+possibility vanishing with zero trace — the exact class of bug the Épilogue section above
+diagnosed for `put_to_server`, just never exercised on this path since nothing could refuse an
+insert here before this series. Fixed by counting refused packets (`dropped`) and logging a
+single explicit `log_error` at the end of `expand_datas_to_level` naming the count when
+`dropped > 0` — deliberately not a retry loop: expansion runs single-threaded, pre-fork, with no
+concurrent consumer that could ever free room, so retrying the same refused insert cannot
+succeed and would just spin. Locked by
+`expand_logs_and_bounds_stock_when_ram_cap_hit`/`expand_without_ram_cap_logs_nothing`
+(`tests/core/test_datamanager.c`, stderr-size-based like the Épilogue's own
+`put_to_server_server_busy_is_silent_and_non_fatal`, not content-matched — a relabeled message
+doesn't break the test, a silence regression does).
+
+**Applies to every mode mechanically, documented as server-only by convention.** Unlike
+`expand_min_level` (read only inside `runserver`), `datamanager_configure_ram_limit` is called
+unconditionally in `main()` — same placement and reasoning as `stock_files_requested`/
+`datamanager_configure_stock_files` just above it — because `put_to_pool` is shared code, used
+by a client/pruner's own local stock (`put_to_local`) exactly as much as by the server. In
+practice only the server's stock ever reaches a volume where this matters (a client/pruner's
+local backlog stays bounded by `max_stock_by_thread`/`pruner_batch_size`, both far under any
+sane Mo cap) — the same mechanical-vs-practical distinction the `rebalance` console command
+already established (also shared code, also labelled server-only, also a harmless no-op in
+practice on a client).
+
+**HTTP/console surface**, both read-only for the cap itself: `GET /api/v1/status` gained
+`stock_ram_limit_mb`/`stock_ram_used_mb` (`http_status_view_t`, both derived via
+`datamanager_packets_to_ram_mb`, never stored independently); console `stockMemory` prints the
+same pair. `stockMaxRam <mo>` (hot-set) joins `control_command_privileged`'s
+`write_server_only[]` list (`control_protocol.c`) — same authentication tier as `rebalance`/
+`sortAsc`/etc., a Bearer token is required over `POST /api/v1/command`, and it is never relayable
+over the binary control channel to a client (that whitelist, `control_command_allowed`, is
+untouched by this change).
+
+Tests: `tests/core/test_datamanager.c` (pure conversion functions, `hard_cap_refuses_add_beyond_
+budget`/`_allows_add_within_budget` via a test-only exact-packet setter,
+`datamanager_set_ram_limit_packets_for_tests` — deliberately bypassing the Mo-rounding path so
+the cap boundary tested is exact, same "test-only helper, declared only in the .c and
+forward-declared by the test file" convention as `datamanager_reset_rr_state_for_tests`);
+`tests/app/test_static_variables.c` (CLI parsing triplet, same shape as `expand_max_stock`'s);
+`tests/net/test_http_codec.c` (golden JSON updated); `tests/ui/test_command_lines.c` /
+`tests/net/test_control_protocol.c` (privileged-whitelist classification, Bearer-gated dispatch,
+`stockMemory` confirmed unreachable via either HTTP whitelist — a pure read, same as
+`statistic`/`check`).
 
 **Follow-up incident: the one trylock loop PR1 missed, plus a requeue race with a still-working
 pruner.** A reproduction at even higher load (`--expand-level 9`, `--expand-max-levels 10`,

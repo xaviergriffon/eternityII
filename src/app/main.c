@@ -112,6 +112,17 @@ int main(int argc, const char *argv[]) {
         log_info("option : %d files de stock (--stock-files)\n", nb_file_possibility);
     }
 
+    // --stock-max-ram : converti UNE SEULE FOIS en nombre de possibilités ici
+    // (même emplacement que --stock-files ci-dessus, avant tout fork/thread) ;
+    // stock_max_ram_mb reste à 0 (illimité) tant que l'option n'est pas
+    // fournie, auquel cas datamanager_configure_ram_limit(0) publie 0 = pas de
+    // plafond — comportement historique inchangé.
+    datamanager_configure_ram_limit(stock_max_ram_mb);
+    if (stock_max_ram_mb > 0) {
+        log_info("option : plafond stock %d Mo (--stock-max-ram, ~%llu possibilités)\n",
+                  stock_max_ram_mb, datamanager_ram_limit_packets());
+    }
+
     if (argc >= 2 && argv[1] != NULL) {
         // Initialisation avant tout fork/thread de statistiques : pas de
         // concurrence possible ici, mais on passe par lastcheck_publish()

@@ -71,6 +71,92 @@ extern int nb_file_possibility;
 int datamanager_configure_stock_files(int n);
 
 /**
+ * @brief Coût mémoire RÉEL, en octets, d'une possibilité résidente dans un
+ *        des pools de stock (non vérifié ou vérifié).
+ *
+ * `sizeof(struct possibility_packet)` seul (576 octets sur le puzzle 256)
+ * sous-estime l'empreinte réelle d'environ 10 % : `put()` (`core/lifo.c`)
+ * fait DEUX `malloc()` par possibilité stockée — un `Element` (le nœud de
+ * liste chaînée) et sa valeur (une copie du paquet) — jamais un seul. Cette
+ * fonction additionne `sizeof(Element)` + `sizeof(struct possibility_packet)`
+ * + un surcoût d'allocateur estimé par `malloc` (`DATAMANAGER_MALLOC_OVERHEAD`,
+ * deux fois). Utilise `sizeof` directement : reste juste aussi bien sous
+ * `ETERN_PARTS=256` (build par défaut) que sous `ETERN_PARTS=16` (CI/tests).
+ *
+ * @return Octets estimés par possibilité résidente.
+ */
+unsigned long long datamanager_bytes_per_possibility(void);
+
+/**
+ * @brief Convertit un plafond exprimé en Mo (tel que fourni par l'opérateur,
+ *        option CLI `--stock-max-ram`) en NOMBRE de possibilités — l'unité
+ *        réellement comparée par `put_to_pool`.
+ *
+ * Fonction pure : ne lit ni n'écrit aucun état module, testable isolément.
+ *
+ * @param megabytes Plafond en Mo. `<= 0` signifie « illimité » (même
+ *                   convention que `limit 0`/`leaseDuration 0`).
+ * @return           `0` si `megabytes <= 0` (illimité) ; sinon le nombre de
+ *                    possibilités que `megabytes` Mo peuvent contenir, calculé
+ *                    via `datamanager_bytes_per_possibility()`.
+ */
+unsigned long long datamanager_ram_limit_to_packets(int megabytes);
+
+/**
+ * @brief Convertit un nombre de possibilités résidentes en Mo — le sens
+ *        inverse de `datamanager_ram_limit_to_packets`, pour l'affichage
+ *        (console `stockMemory`, `GET /api/v1/status`).
+ *
+ * Fonction pure, mêmes garanties que `datamanager_ram_limit_to_packets`.
+ *
+ * @param packets Nombre de possibilités résidentes.
+ * @return        Mo occupés (arrondi au Mo supérieur), via
+ *                `datamanager_bytes_per_possibility()`.
+ */
+unsigned long long datamanager_packets_to_ram_mb(unsigned long long packets);
+
+/**
+ * @brief Applique le plafond RAM du stock (option CLI `--stock-max-ram`, ou
+ *        commande console `stockMaxRam`) — convertit une seule fois en
+ *        possibilités et publie le résultat pour `put_to_pool`.
+ *
+ * Ne couvre QUE les deux pools de stock (non vérifié + vérifié) — jamais le
+ * pool analysé (cf. le commentaire de `stock_max_ram_mb`,
+ * `app/static_variables.h`). Applicable à chaud : contrairement à
+ * `datamanager_configure_stock_files` (une seule fois, avant tout fork), un
+ * plafond RAM peut être resserré ou desserré en cours d'exécution sans
+ * reconstruire quoi que ce soit — il n'influence que la décision d'accepter
+ * ou de refuser un futur ADD, jamais l'état déjà résident.
+ *
+ * @param megabytes Nouveau plafond en Mo. `<= 0` = illimité.
+ */
+void datamanager_configure_ram_limit(int megabytes);
+
+/**
+ * @brief Plafond RAM actif du stock, en NOMBRE de possibilités (0 =
+ *        illimité) — tel que publié par `datamanager_configure_ram_limit`.
+ *
+ * Lu par `put_to_pool` à chaque insertion ; exposé pour les tests et pour la
+ * commande console `stockMemory`/la route `GET /api/v1/status`, qui affichent
+ * la limite effective sans dupliquer la conversion Mo -> possibilités.
+ *
+ * @return Plafond en possibilités, 0 = illimité.
+ */
+unsigned long long datamanager_ram_limit_packets(void);
+
+/**
+ * @brief Nombre de possibilités actuellement résidentes dans les deux pools
+ *        de stock (non vérifié + vérifié) — alias de `datas_size()`, sous ce
+ *        nom pour symétrie avec `datamanager_ram_limit_packets()`.
+ *
+ * Lecture sans verrou (même convention que `datas_size()`/`file_size()`) :
+ * une estimation, jamais un compte exact instantané sous contention.
+ *
+ * @return Possibilités résidentes, tous pools de stock confondus.
+ */
+unsigned long long datamanager_resident_packets(void);
+
+/**
  * @brief Indice de file de départ pour un balayage round-robin ADD/GET.
  *
  * `put_to_pool`/`scroll_from_pool` (datamanager.c) trylock la première file

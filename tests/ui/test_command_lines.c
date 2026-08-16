@@ -2319,6 +2319,7 @@ TEST admin_apply_remote_command_rejects_sort_group_split(void)
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("split"), "%d");
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("regroup"), "%d");
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("rebalance"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("stockMaxRam 100"), "%d");
     PASS();
 }
 
@@ -2362,6 +2363,43 @@ TEST admin_apply_privileged_command_rebalance_moves_within_budget(void)
     ASSERT_EQ_FMT(98ULL, file_size(0), "%llu");   /* exactement 2 deplaces */
 
     dm_drain();
+    PASS();
+}
+
+/* stockMaxRam <mo> (PR1) : meme famille que rebalance ci-dessus -- privilegie
+ * (control_command_privileged), refuse sur le chemin standard non
+ * authentifie, applique via le chemin privilegie. stock_max_ram_packets
+ * (datamanager.c) est un module-static PARTAGE par tout le binaire de
+ * tests : remis a 0 (illimite) en fin de test, comme dans
+ * tests/core/test_datamanager.c. */
+TEST admin_apply_privileged_command_stock_max_ram_sets_limit(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("stockMaxRam 100"), "%d");
+    ASSERT_EQ_FMT(datamanager_ram_limit_to_packets(100), datamanager_ram_limit_packets(), "%llu");
+    ASSERT_EQ_FMT(100, stock_max_ram_mb, "%d");
+
+    /* <mo> <= 0 explicite : desactive le plafond (illimite), pas une erreur. */
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("stockMaxRam 0"), "%d");
+    ASSERT_EQ_FMT(0ULL, datamanager_ram_limit_packets(), "%llu");
+
+    PASS();
+}
+
+/* Argument entierement absent : seul cas invalide (contrairement a <mo> <= 0
+ * fourni explicitement, cf. ci-dessus). */
+TEST admin_apply_privileged_command_stock_max_ram_requires_argument(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_privileged_command("stockMaxRam"), "%d");
+    PASS();
+}
+
+/* stockMemory : commande de LECTURE pure, jamais ajoutee a aucune des deux
+ * listes blanches (comme statistic/check) -- ni le chemin standard, ni le
+ * chemin privilegie ne la reconnaissent. */
+TEST admin_apply_privileged_command_stock_memory_is_not_remotely_reachable(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("stockMemory"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_privileged_command("stockMemory"), "%d");
     PASS();
 }
 
@@ -2506,5 +2544,8 @@ SUITE(command_lines_suite)
     RUN_TEST(admin_apply_remote_command_rejects_sort_group_split);
     RUN_TEST(admin_apply_privileged_command_split_regroup_round_trip);
     RUN_TEST(admin_apply_privileged_command_rebalance_moves_within_budget);
+    RUN_TEST(admin_apply_privileged_command_stock_max_ram_sets_limit);
+    RUN_TEST(admin_apply_privileged_command_stock_max_ram_requires_argument);
+    RUN_TEST(admin_apply_privileged_command_stock_memory_is_not_remotely_reachable);
     RUN_TEST(admin_apply_privileged_command_sorts_run);
 }
