@@ -21,6 +21,7 @@
 
 #include "fork_assert.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -1750,6 +1751,99 @@ TEST check_server_step_detects_record_and_autobackups(void)
     PASS();
 }
 
+/* log_server_startup_diagnostics : instantané de la configuration serveur
+ * (options CLI résolues) écrit dans events.log — jamais sur la console (cf.
+ * log_file, ui/logger.h). Extraite en fonction nommée depuis runserver()
+ * précisément pour être appelable ici sans socket ni boucle accept() réelle. */
+TEST log_server_startup_diagnostics_writes_config_to_events_log(void)
+{
+    unlink("events.log");
+
+    int saved_nb = NB_THREADS;
+    int saved_tcp_timeout = tcp_timeout;
+    int saved_stop_on_solution = stop_on_solution;
+    int saved_expand_min_level = expand_min_level;
+    int saved_expand_max_stock = expand_max_stock;
+    int saved_expand_max_levels = expand_max_levels;
+    int saved_rebalance_budget = rebalance_budget;
+    int saved_http_port = HTTP_PORT;
+    char saved_token[HTTP_ADMIN_TOKEN_MAX];
+    memcpy(saved_token, HTTP_ADMIN_TOKEN, sizeof(saved_token));
+
+    NB_THREADS = 7;
+    tcp_timeout = 42;
+    stop_on_solution = 1;
+    expand_min_level = 3;
+    expand_max_stock = 12345;
+    expand_max_levels = 5;
+    rebalance_budget = 999;
+    HTTP_PORT = 18099;
+    strncpy(HTTP_ADMIN_TOKEN, "secret-token-value", HTTP_ADMIN_TOKEN_MAX - 1);
+    HTTP_ADMIN_TOKEN[HTTP_ADMIN_TOKEN_MAX - 1] = '\0';
+
+    log_server_startup_diagnostics("data/pieces-test.csv");
+
+    NB_THREADS = saved_nb;
+    tcp_timeout = saved_tcp_timeout;
+    stop_on_solution = saved_stop_on_solution;
+    expand_min_level = saved_expand_min_level;
+    expand_max_stock = saved_expand_max_stock;
+    expand_max_levels = saved_expand_max_levels;
+    rebalance_budget = saved_rebalance_budget;
+    HTTP_PORT = saved_http_port;
+    memcpy(HTTP_ADMIN_TOKEN, saved_token, sizeof(saved_token));
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[1024] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    unlink("events.log");
+
+    char expect_pid[32];
+    snprintf(expect_pid, sizeof expect_pid, "pid=%d", (int)getpid());
+    ASSERT(strstr(line, expect_pid) != NULL);
+    ASSERT(strstr(line, "nb_threads=7") != NULL);
+    ASSERT(strstr(line, "fichier=\"data/pieces-test.csv\"") != NULL);
+    ASSERT(strstr(line, "tcp_timeout=42s") != NULL);
+    ASSERT(strstr(line, "stop_on_solution=oui") != NULL);
+    ASSERT(strstr(line, "expand_level=3") != NULL);
+    ASSERT(strstr(line, "expand_max_stock=12345") != NULL);
+    ASSERT(strstr(line, "expand_max_levels=5") != NULL);
+    ASSERT(strstr(line, "rebalance_budget=999") != NULL);
+    ASSERT(strstr(line, "http_port=18099") != NULL);
+    ASSERT(strstr(line, "http_token=configuré") != NULL);
+    ASSERT(strstr(line, "secret-token-value") == NULL); /* jamais la valeur du jeton elle-même */
+    ASSERT(strstr(line, "[") != NULL); /* horodatage entre crochets */
+    PASS();
+}
+
+/* http_port <= 0 (API désactivée) : http_token=n/a, quel que soit
+ * HTTP_ADMIN_TOKEN — distingue « API absente » de « API sans jeton ». */
+TEST log_server_startup_diagnostics_reports_http_disabled(void)
+{
+    unlink("events.log");
+    int saved_http_port = HTTP_PORT;
+    HTTP_PORT = 0;
+
+    log_server_startup_diagnostics("data/pieces.csv");
+
+    HTTP_PORT = saved_http_port;
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[1024] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    unlink("events.log");
+
+    ASSERT(strstr(line, "http_port=0") != NULL);
+    ASSERT(strstr(line, "http_token=n/a") != NULL);
+    PASS();
+}
+
 /* Seuil d'autobackup atteint pendant une maintenance : should_autobackup
  * déclenche (compteur remis à 0) mais backup()/backup_analysed() renvoient
  * BACKUP_SKIPPED_MAINTENANCE — journalisé, aucun fichier écrit. */
@@ -2851,6 +2945,8 @@ SUITE(etii_server_suite)
     RUN_TEST(check_server_step_reports_basic_stats);
     RUN_TEST(check_server_step_handles_large_stock_files_count);
     RUN_TEST(check_server_step_detects_record_and_autobackups);
+    RUN_TEST(log_server_startup_diagnostics_writes_config_to_events_log);
+    RUN_TEST(log_server_startup_diagnostics_reports_http_disabled);
     RUN_TEST(check_server_step_autobackup_skipped_during_maintenance);
     RUN_TEST(check_server_step_reclaims_expired_lease);
     RUN_TEST(check_server_step_does_not_reclaim_lease_of_alive_client);

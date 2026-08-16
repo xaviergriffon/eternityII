@@ -231,6 +231,93 @@ TEST log_event_prints_and_logs(void)
     PASS();
 }
 
+/* log_file : contrairement à log_event/log_console/log_info/log_debug,
+   n'écrit JAMAIS sur stdout/stderr — uniquement dans events.log, avec
+   l'horodatage complet (date + heure) d'append_events_log_file, et sans la
+   limite de 200 octets d'EVENT_MSG_MAX (le message ci-dessous en fait plus
+   de 200 pour le vérifier). */
+TEST log_file_writes_only_to_events_log(void)
+{
+    unlink("events.log");
+    char long_suffix[220];
+    memset(long_suffix, 'x', sizeof(long_suffix) - 1);
+    long_suffix[sizeof(long_suffix) - 1] = '\0';
+
+    char out[512];
+    CAPTURE(1, stdout, log_file("diag %d %s", 42, long_suffix), out);
+    ASSERT_EQ_FMT(0, (int)strlen(out), "%d"); /* rien sur stdout */
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[512] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    ASSERT(strstr(line, "diag 42 ") != NULL);
+    ASSERT(strstr(line, long_suffix) != NULL);       /* message long non tronqué */
+    ASSERT(strstr(line, "[") != NULL);                /* horodatage entre crochets */
+    unlink("events.log");
+    PASS();
+}
+
+/* log_file est réservée au process PARENT (cf. logger.h) : à la différence
+   des autres fonctions de logger.c, elle ne consulte jamais
+   log_should_route_to_parent() — même avec parent_pid/fork_checker_socket_id/
+   main_addr positionnés comme un fils forké, le message part directement
+   dans events.log, RIEN n'est envoyé sur le socket IPC. */
+TEST log_file_never_routes_to_parent(void)
+{
+    unlink("events.log");
+    char path[64];
+    snprintf(path, sizeof path, "/tmp/etii_log_file_route_%d.sock", (int)getpid());
+    unlink(path);
+
+    int rx = socket(AF_UNIX, SOCK_DGRAM, 0);
+    ASSERT(rx >= 0);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    ASSERT_EQ_FMT(0, bind(rx, (struct sockaddr *)&addr, sizeof addr), "%d");
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+    setsockopt(rx, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+
+    int tx = socket(AF_UNIX, SOCK_DGRAM, 0);
+    ASSERT(tx >= 0);
+
+    pid_t saved_parent = parent_pid;
+    int   saved_sock   = fork_checker_socket_id;
+    struct sockaddr_un *saved_addr = main_addr;
+
+    parent_pid = getpid() + 1; /* != getpid() et != 0 : conditions de routage réunies */
+    fork_checker_socket_id = tx;
+    main_addr = &addr;
+
+    log_file("should-not-be-routed");
+
+    parent_pid = saved_parent;
+    fork_checker_socket_id = saved_sock;
+    main_addr = saved_addr;
+
+    unsigned char buf[64];
+    ssize_t received = recvfrom(rx, buf, sizeof buf, 0, NULL, NULL);
+    close(tx);
+    close(rx);
+    unlink(path);
+
+    ASSERT_EQ_FMT(-1, (int)received, "%d"); /* timeout : rien reçu */
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[256] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    ASSERT(strstr(line, "should-not-be-routed") != NULL); /* écrit quand même dans le fichier */
+    unlink("events.log");
+    PASS();
+}
+
 /* Regroupe les helpers à exécuter sous redirection (isatty faux). */
 static void run_zone_helpers(void)
 {
@@ -710,6 +797,8 @@ SUITE(logger_suite)
     RUN_TEST(log_status_no_visible_output_without_zone);
     RUN_TEST(log_status_noop_when_routed_to_parent);
     RUN_TEST(log_event_prints_and_logs);
+    RUN_TEST(log_file_writes_only_to_events_log);
+    RUN_TEST(log_file_never_routes_to_parent);
     RUN_TEST(flush_and_zone_helpers_run);
     RUN_TEST(log_routes_to_parent_over_udp_socket);
     RUN_TEST(log_routes_each_type_to_parent);

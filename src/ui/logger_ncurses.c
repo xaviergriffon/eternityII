@@ -573,6 +573,28 @@ void log_console(const char *format, ...)
     pthread_mutex_unlock(&output_mutex);
 }
 
+/**
+ * @brief Journalise un message uniquement dans `events.log` — voir logger.h.
+ *
+ * Pas de garde `log_should_route_to_parent()` : cette fonction est réservée au
+ * process PARENT (elle sert des diagnostics de démarrage de l'orchestrateur,
+ * qui ne tourne jamais dans un fils forké — cf. fork_orchestrator.c), donc
+ * `parent_pid == getpid()` y est toujours vrai et le routage IPC ne
+ * s'appliquerait jamais de toute façon. Même comportement que la variante
+ * ANSI (logger.c) : jamais affiché dans le pad de sortie ni dans la fenêtre
+ * "Events", uniquement écrit dans le fichier.
+ */
+void log_file(const char *format, ...)
+{
+    char buf[LOG_LINE_MAX];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buf, sizeof buf, format, args);
+    va_end(args);
+
+    append_events_log_file(buf);
+}
+
 /* Sous ncurses, le rafraîchissement est implicite (doupdate). Ces flush_*
    restent appelables sans effet pour préserver l'API publique. */
 void flush_console(void) {}

@@ -479,4 +479,24 @@ void fork_orchestrator_init_state(int config_loaded_at_boot);
  */
 void fork_orchestrator_run(int config_loaded_at_boot, struct search_parts *shared_parts);
 
+/**
+ * @brief Journalise dans `events.log` (jamais sur la console — `log_file`)
+ *        un instantané de la configuration effective et de l'environnement,
+ *        juste après un démarrage RÉUSSI des fils de recherche.
+ *
+ * Exposée (non `static`) uniquement pour être appelable directement depuis
+ * les tests : ne touche à aucun état partagé de l'orchestrateur (ne lit que
+ * des globales déjà publiques — configuration effective, identité déclarée,
+ * `NB_THREADS`/`nb_file_possibility`) et n'a donc pas besoin d'un vrai
+ * `fork()`/driver pour être exercée, à la différence de
+ * `orchestrator_spawn_forks`/`fork_orchestrator_run` eux-mêmes (couverts par
+ * `make test-integration`, jamais par un fork réel en test unitaire — cf.
+ * l'en-tête de tests/app/test_fork_orchestrator.c).
+ *
+ * @param nb_created Nombre de fork(s) effectivement lancé(s) ce tour
+ *                    (`orchestrator_spawn_forks()`), inclus tel quel dans la
+ *                    ligne journalisée.
+ */
+void log_startup_diagnostics(int nb_created);
+
 #endif /* fork_orchestrator_h */

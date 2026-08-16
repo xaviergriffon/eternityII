@@ -24,6 +24,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdio.h>
 
 /* ============================ orchestrator_step ============================ */
 
@@ -633,6 +634,58 @@ TEST apply_restart_config_quiesces_concurrent_array_readers(void)
     PASS();
 }
 
+/* log_startup_diagnostics : instantané de la configuration effective +
+   identité écrit dans events.log (jamais sur la console — cf. log_file,
+   ui/logger.h). Exposée (non static) précisément pour être appelable ici
+   sans passer par un vrai fork()/driver — voir sa doc dans
+   fork_orchestrator.h. */
+TEST log_startup_diagnostics_writes_effective_config_to_events_log(void)
+{
+    unlink("events.log");
+
+    client_identity_t saved_identity = g_client_identity_template;
+    int saved_nb_threads = NB_THREADS;
+
+    NB_THREADS = 3;
+    memset(&g_client_identity_template, 0xAB, sizeof(g_client_identity_template));
+    g_client_identity_template.mode = CLIENT_MODE_PRUNER;
+    strncpy(g_client_identity_template.label, "test-diag-label", CLIENT_LABEL_MAX - 1);
+    g_client_identity_template.label[CLIENT_LABEL_MAX - 1] = '\0';
+
+    char machine_uid_hex[2 * MACHINE_UID_BYTES + 1];
+    char client_uid_hex[2 * CLIENT_UID_BYTES + 1];
+    client_identity_hex_encode(g_client_identity_template.machine_uid, MACHINE_UID_BYTES,
+                                machine_uid_hex, sizeof(machine_uid_hex));
+    client_identity_hex_encode(g_client_identity_template.client_uid, CLIENT_UID_BYTES,
+                                client_uid_hex, sizeof(client_uid_hex));
+
+    log_startup_diagnostics(3);
+
+    g_client_identity_template = saved_identity;
+    NB_THREADS = saved_nb_threads;
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[2048] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    unlink("events.log");
+
+    char expect_pid[32];
+    snprintf(expect_pid, sizeof expect_pid, "pid=%d", (int)getpid());
+    ASSERT(strstr(line, expect_pid) != NULL);
+    ASSERT(strstr(line, "3 fork(s) lanc") != NULL);
+    ASSERT(strstr(line, "mode=pruner") != NULL);
+    ASSERT(strstr(line, "label=\"test-diag-label\"") != NULL);
+    ASSERT(strstr(line, machine_uid_hex) != NULL);
+    ASSERT(strstr(line, client_uid_hex) != NULL);
+    ASSERT(strstr(line, "configuration effective") != NULL);
+    ASSERT(strstr(line, "nb_forks") != NULL); /* client_config_format */
+    ASSERT(strstr(line, "[") != NULL);        /* horodatage entre crochets */
+    PASS();
+}
+
 SUITE(fork_orchestrator_suite)
 {
     RUN_TEST(orchestrator_step_config_begun_matrix);
@@ -661,4 +714,5 @@ SUITE(fork_orchestrator_suite)
     RUN_TEST(apply_staged_config_writes_globals_immediately);
     RUN_TEST(reset_clears_staged_config);
     RUN_TEST(apply_restart_config_quiesces_concurrent_array_readers);
+    RUN_TEST(log_startup_diagnostics_writes_effective_config_to_events_log);
 }

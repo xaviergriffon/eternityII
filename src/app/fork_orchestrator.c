@@ -796,6 +796,53 @@ int orchestrator_apply_restart_config(struct search_parts *shared_parts)
     return 1;
 }
 
+/**
+ * @brief Journalise dans `events.log` (jamais sur la console : log_file, pas
+ *        log_console/log_event — un dump de configuration noierait la zone
+ *        d'événements/le scrollback) un instantané de la configuration
+ *        effective et de l'environnement, juste après un démarrage RÉUSSI des
+ *        fils de recherche.
+ *
+ * But : diagnostiquer après coup un déploiement (quelle configuration était
+ * réellement active à cet instant précis, quelle identité, quelle version du
+ * protocole/du binaire, combien de files de stock) sans dépendre du
+ * scrollback de la console ni d'avoir pensé à lancer `config`/`configSave`
+ * avant l'incident. Appelée une fois par (re)démarrage réussi — `start`
+ * manuel, décompte automatique écoulé, ou redémarrage à chaud
+ * (`configApply`) — jamais sur un démarrage refusé (quiescence en échec :
+ * rien n'a changé, un dump serait trompeur).
+ *
+ * Non `static` : voir fork_orchestrator.h pour la justification (testable
+ * sans fork réel).
+ */
+void log_startup_diagnostics(int nb_created)
+{
+    client_config_t effective;
+    client_config_capture_effective(&effective, g_client_server_host);
+    char cfg_buf[1024];
+    client_config_format(&effective, cfg_buf, sizeof(cfg_buf));
+    client_config_free(&effective);
+
+    char machine_uid_hex[2 * MACHINE_UID_BYTES + 1];
+    char client_uid_hex[2 * CLIENT_UID_BYTES + 1];
+    client_identity_hex_encode(g_client_identity_template.machine_uid, MACHINE_UID_BYTES,
+                                machine_uid_hex, sizeof(machine_uid_hex));
+    client_identity_hex_encode(g_client_identity_template.client_uid, CLIENT_UID_BYTES,
+                                client_uid_hex, sizeof(client_uid_hex));
+
+    const char *mode_str = g_client_identity_template.mode == CLIENT_MODE_GPU_PRUNER ? "gpu_pruner"
+                          : g_client_identity_template.mode == CLIENT_MODE_PRUNER ? "pruner"
+                          : "search";
+
+    log_file("démarrage : %d fork(s) lancé(s) — pid=%d version_protocole=%d "
+              "eternParts=%d mode=%s label=\"%s\" machine_uid=%s client_uid=%s "
+              "stock_files=%d\nconfiguration effective :\n%s",
+              nb_created, (int)getpid(), VERSION, ETERN_PARTS, mode_str,
+              g_client_identity_template.label, machine_uid_hex, client_uid_hex,
+              nb_file_possibility,
+              cfg_buf[0] != '\0' ? cfg_buf : "  (aucune valeur)\n");
+}
+
 /** @brief Calcule la prochaine échéance absolue à `ORCH_TICK_MS` de maintenant. */
 static void next_tick_deadline(struct timespec *deadline)
 {
@@ -964,6 +1011,7 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
             if (created > 0) {
                 ever_running = 1;
                 forks_parked = 0;
+                log_startup_diagnostics(created);
             } else {
                 // Aucun process créé (quiescence en échec pour chaque slot
                 // tenté, ou ressources épuisées) : jamais de crash, on
