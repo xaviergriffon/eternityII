@@ -211,6 +211,86 @@ int datamanager_configure_stock_files(int n)
 	return 0;
 }
 
+/**
+ * @brief Surcoût d'allocateur estimé, en octets, par appel `malloc()` réussi
+ *        (en-tête d'allocateur + arrondi interne). `put()` (`core/lifo.c`) en
+ *        paie DEUX par possibilité stockée (l'`Element` et sa valeur) — cf.
+ *        `datamanager_bytes_per_possibility`.
+ */
+#define DATAMANAGER_MALLOC_OVERHEAD 16
+
+/**
+ * @brief Plafond RAM actif du stock, en NOMBRE de possibilités — publié par
+ *        `datamanager_configure_ram_limit`, lu par `put_to_pool`. 0 = illimité
+ *        (comportement historique, avant l'introduction de ce plafond).
+ */
+static unsigned long long stock_max_ram_packets = 0;
+
+/**
+ * @brief Throttling du log « plafond RAM atteint » (`put_to_pool`) : un refus
+ *        peut se produire à chaque ADD sous charge soutenue, pas question
+ *        d'inonder les logs à ce rythme (contrairement à un refus de
+ *        contention passager, celui-ci signale une action opérateur réelle —
+ *        resserrer le débit, relever le plafond ou activer le débordement
+ *        (PR2) — donc il DOIT rester visible, juste pas à chaque appel).
+ */
+static time_t last_ram_cap_warning = 0;
+#define STOCK_RAM_CAP_WARN_COOLDOWN_SEC 10
+
+unsigned long long datamanager_bytes_per_possibility(void)
+{
+	return (unsigned long long)sizeof(Element) + (unsigned long long)sizeof(struct possibility_packet)
+	       + 2ULL * DATAMANAGER_MALLOC_OVERHEAD;
+}
+
+unsigned long long datamanager_ram_limit_to_packets(int megabytes)
+{
+	if (megabytes <= 0) {
+		return 0;
+	}
+	unsigned long long bytes_per_packet = datamanager_bytes_per_possibility();
+	if (bytes_per_packet == 0) {
+		return 0;
+	}
+	return ((unsigned long long)megabytes * 1024ULL * 1024ULL) / bytes_per_packet;
+}
+
+unsigned long long datamanager_packets_to_ram_mb(unsigned long long packets)
+{
+	unsigned long long bytes_per_packet = datamanager_bytes_per_possibility();
+	unsigned long long total_bytes = packets * bytes_per_packet;
+	// Arrondi au Mo SUPÉRIEUR : un affichage à 0 Mo pour un stock non vide
+	// serait trompeur (« illimité » se lit précisément 0 ailleurs dans ce
+	// module — cf. la convention `limit 0`/`leaseDuration 0`).
+	return (total_bytes + (1024ULL * 1024ULL) - 1ULL) / (1024ULL * 1024ULL);
+}
+
+void datamanager_configure_ram_limit(int megabytes)
+{
+	stock_max_ram_packets = datamanager_ram_limit_to_packets(megabytes);
+}
+
+unsigned long long datamanager_ram_limit_packets(void)
+{
+	return stock_max_ram_packets;
+}
+
+unsigned long long datamanager_resident_packets(void)
+{
+	return datas_size();
+}
+
+// Réservée aux tests (jamais appelée en production, non déclarée dans
+// datamanager.h — même convention que datamanager_reset_rr_state_for_tests
+// ci-dessus) : fixe le plafond DIRECTEMENT en possibilités, sans passer par
+// la conversion Mo -> possibilités (qui arrondit, cf.
+// datamanager_ram_limit_to_packets) -- un test de put_to_pool veut une
+// frontière EXACTE, pas une valeur approchée par un Mo.
+void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets)
+{
+	stock_max_ram_packets = packets;
+}
+
 char*server_ip = NULL;
 
 int put_to_local(array_possibility_packet *possibilities);
@@ -499,6 +579,29 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 	if(count == 0)
 	{
 		return 0;
+	}
+
+	// Plafond RAM (PR1, --stock-max-ram / commande stockMaxRam) : refuse AVANT
+	// toute insertion si l'ajout ferait dépasser le budget publié par
+	// datamanager_configure_ram_limit (0 = illimité, chemin inchangé). Compte
+	// les DEUX pools de stock ensemble (datamanager_resident_packets, alias de
+	// datas_size) puisque le budget couvre non-vérifié + vérifié, jamais un
+	// seul des deux isolément. Même contrat de retour que l'épuisement du
+	// budget de trylock plus bas (1 = rien inséré, sûr à réessayer) :
+	// l'appelant (put_to_server côté serveur) sait déjà dégrader gracieusement
+	// ce refus en INST_ERROR / repli local (cf. l'épilogue documenté dans
+	// AGENTS.md pour ce chemin).
+	if (stock_max_ram_packets > 0 &&
+	    datamanager_resident_packets() + (unsigned long long)count > stock_max_ram_packets)
+	{
+		time_t now = time(NULL);
+		if (now - last_ram_cap_warning >= STOCK_RAM_CAP_WARN_COOLDOWN_SEC)
+		{
+			last_ram_cap_warning = now;
+			log_error("stock : plafond RAM atteint (%llu possibilité(s) résidente(s), plafond %llu) — ADD refusé\n",
+			          datamanager_resident_packets(), stock_max_ram_packets);
+		}
+		return 1;
 	}
 
 	int addpossibility = 0;
@@ -2561,6 +2664,15 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
 
     int rounds = 0;
     int cap_reached = 0;
+    // Possibilités que add_possibility a refusées (plafond RAM --stock-max-ram
+    // atteint) et qui n'ont donc pu être réinsérées nulle part — cf. la boucle
+    // ci-dessous. Comptées et journalisées EXPLICITEMENT en fin de fonction
+    // plutôt que silencieusement perdues (avant ce correctif, le code de
+    // retour de add_possibility était totalement ignoré aux deux points
+    // d'appel : une fois un plafond introduit, un refus devenait une perte
+    // silencieuse de possibilité — un sous-arbre jamais exploré, sans aucune
+    // trace dans les logs).
+    unsigned long long dropped = 0;
     while (rounds < expand_max_levels && !cap_reached) {
         // 1. Draine tout le pool non vérifié dans une file de travail. L'expansion
         //    tourne au démarrage du serveur, mono-thread (aucun thread TCP ni
@@ -2594,7 +2706,15 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             int deep_enough = (pkt.alloc >= (uint16_t)target_level);
             if (deep_enough || cap_reached) {
                 array_possibility_packet *single = build_single_array_possibility_packet(&pkt);
-                add_possibility(NULL, single);
+                if (add_possibility(NULL, single) != 0) {
+                    // Refusé (plafond RAM --stock-max-ram atteint, cf.
+                    // put_to_pool) : mono-thread, pré-fork — rien ne libère de
+                    // place tant que cette fonction tourne, réessayer
+                    // immédiatement ne changerait rien. Compté honnêtement
+                    // (jamais perdu en silence) plutôt que retenté en boucle.
+                    dropped++;
+                    cap_reached = 1;
+                }
                 free_array_possibility_packet(single);
                 produced++;
                 continue;
@@ -2610,7 +2730,12 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             struct possibility_packet child;
             while (scroll(&children, &child)) {
                 array_possibility_packet *single = build_single_array_possibility_packet(&child);
-                add_possibility(NULL, single);
+                if (add_possibility(NULL, single) != 0) {
+                    // Même raisonnement que ci-dessus : refus honnêtement
+                    // compté, jamais silencieusement perdu.
+                    dropped++;
+                    cap_reached = 1;
+                }
                 free_array_possibility_packet(single);
                 produced++;
             }
@@ -2632,6 +2757,16 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         rounds++;
     }
 
+    if (dropped > 0) {
+        // Perte réelle, mais désormais JOURNALISÉE explicitement plutôt que
+        // silencieuse (avant ce correctif, le code de retour de
+        // add_possibility n'était vérifié nulle part dans cette fonction) :
+        // le plafond RAM (--stock-max-ram) est plus bas que ce que
+        // --expand-level/--expand-max-stock tentent de produire.
+        log_error("expansion : plafond RAM atteint, %llu possibilité(s) n'ont pas pu être "
+                  "réinsérées et ont été perdues (relever --stock-max-ram, ou réduire "
+                  "--expand-level/--expand-max-stock)\n", dropped);
+    }
     log_event("expansion terminée : %llu possibilités en stock (%d passe(s), niveau visé %d)",
               datas_size(), rounds, target_level);
     log_info("expansion : %llu possibilités en stock après %d passe(s) (niveau visé %d)\n",

@@ -48,6 +48,10 @@ int split_datas_nolock(int nbsplit);
  * lui-même est déjà déclaré dans datamanager.h. */
 void datamanager_reset_rr_state_for_tests(void);
 
+/* Fixe (réservé aux tests) le plafond RAM DIRECTEMENT en possibilités, sans
+ * passer par l'arrondi Mo -> possibilités — cf. sa doc, datamanager.c. */
+void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets);
+
 /* Affichage de progression de check_duplicate (en prod, atteint uniquement après
    30 s d'attente d'un thread) + ses compteurs globaux (tableaux de nbDuplicateThread == 8). */
 void print_duplicate_activity(unsigned long long dataSize, unsigned long long nbCombinations);
@@ -195,6 +199,135 @@ TEST rr_next_start_non_positive_n_returns_zero_and_is_a_noop(void)
     ASSERT_EQ_FMT(0, datamanager_rr_next_start(&counter, -1), "%d");
     /* n <= 0 : rien à répartir, le compteur n'avance pas. */
     ASSERT_EQ_FMT(5u, counter, "%u");
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * Plafond RAM du stock (PR1, --stock-max-ram) : conversion Mo <-> possibilités
+ * et application dans put_to_pool/expand_datas_to_level.
+ * ------------------------------------------------------------------------ */
+
+/* Fonctions pures : ne lisent/écrivent aucun état module, testables sans
+ * drain ni configuration préalable. */
+TEST bytes_per_possibility_matches_sizeof_formula(void)
+{
+    /* sizeof(Element) + sizeof(struct possibility_packet) + 2 * surcoût
+       d'allocateur (put() fait DEUX malloc par possibilité, cf. lifo.c) --
+       jamais sizeof(struct possibility_packet) seul, qui sous-estimerait le
+       coût réel d'environ 10 %. */
+    unsigned long long expected =
+        (unsigned long long)sizeof(Element) + (unsigned long long)sizeof(struct possibility_packet) + 32ULL;
+    ASSERT_EQ_FMT(expected, datamanager_bytes_per_possibility(), "%llu");
+    PASS();
+}
+
+TEST ram_limit_to_packets_non_positive_megabytes_is_unlimited(void)
+{
+    ASSERT_EQ_FMT(0ULL, datamanager_ram_limit_to_packets(0), "%llu");
+    ASSERT_EQ_FMT(0ULL, datamanager_ram_limit_to_packets(-1), "%llu");
+    ASSERT_EQ_FMT(0ULL, datamanager_ram_limit_to_packets(-1000), "%llu");
+    PASS();
+}
+
+TEST ram_limit_to_packets_converts_using_bytes_per_possibility(void)
+{
+    unsigned long long bpp = datamanager_bytes_per_possibility();
+    unsigned long long expected = (100ULL * 1024ULL * 1024ULL) / bpp;
+    ASSERT_EQ_FMT(expected, datamanager_ram_limit_to_packets(100), "%llu");
+    ASSERT(datamanager_ram_limit_to_packets(100) > 0ULL);
+    PASS();
+}
+
+/* Pas de débordement arithmétique sur une grande valeur : INT_MAX Mo tient
+ * confortablement dans un unsigned long long (le calcul passe par 64 bits
+ * avant toute division, cf. datamanager_ram_limit_to_packets). */
+TEST ram_limit_to_packets_large_value_does_not_overflow(void)
+{
+    unsigned long long bpp = datamanager_bytes_per_possibility();
+    unsigned long long expected = ((unsigned long long)INT_MAX * 1024ULL * 1024ULL) / bpp;
+    unsigned long long got = datamanager_ram_limit_to_packets(INT_MAX);
+    ASSERT_EQ_FMT(expected, got, "%llu");
+    ASSERT(got > 0ULL); /* pas un wraparound vers une petite valeur absurde */
+    PASS();
+}
+
+/* Sens inverse : arrondi au Mo SUPÉRIEUR pour qu'un stock non vide n'affiche
+ * jamais "0 Mo" (0 est réservé au sens "illimité" ailleurs dans ce module). */
+TEST packets_to_ram_mb_rounds_up_and_zero_is_zero(void)
+{
+    ASSERT_EQ_FMT(0ULL, datamanager_packets_to_ram_mb(0), "%llu");
+    unsigned long long bpp = datamanager_bytes_per_possibility();
+    unsigned long long one_mb_worth = (1024ULL * 1024ULL) / bpp; /* tronqué : un peu moins d'1 Mo plein */
+    ASSERT(one_mb_worth > 0ULL);
+    ASSERT_EQ_FMT(1ULL, datamanager_packets_to_ram_mb(one_mb_worth), "%llu");
+    PASS();
+}
+
+/* datamanager_configure_ram_limit publie le plafond en possibilités, lu par
+ * put_to_pool ; datamanager_ram_limit_packets() est le seul accesseur --
+ * remis à 0 (illimité) en fin de test, l'état étant un module-static PARTAGÉ
+ * par TOUT le binaire de tests. */
+TEST configure_ram_limit_publishes_packet_cap(void)
+{
+    datamanager_configure_ram_limit(50);
+    ASSERT_EQ_FMT(datamanager_ram_limit_to_packets(50), datamanager_ram_limit_packets(), "%llu");
+
+    datamanager_configure_ram_limit(0);
+    ASSERT_EQ_FMT(0ULL, datamanager_ram_limit_packets(), "%llu");
+    PASS();
+}
+
+/* Le plafond dur refuse un ADD qui ferait dépasser le budget : put_to_pool
+ * renvoie 1 (même contrat que l'épuisement du budget de trylock), RIEN n'est
+ * inséré, et datas_size() ne dépasse jamais le plafond publié.
+ *
+ * Utilise datamanager_set_ram_limit_packets_for_tests (réservée aux tests,
+ * cf. sa doc datamanager.c) pour fixer le plafond EXACTEMENT en
+ * possibilités : ce test porte sur put_to_pool, pas sur l'arrondi Mo ->
+ * possibilités (déjà couvert isolément par ram_limit_to_packets_*
+ * ci-dessus). */
+TEST hard_cap_refuses_add_beyond_budget(void)
+{
+    drain_all();
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    int allocs2[] = { 1, 2 };
+    add_packets(allocs2, 2);
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+
+    /* Plafond fixé À la taille actuelle : plus rien ne doit pouvoir entrer. */
+    datamanager_set_ram_limit_packets_for_tests(2);
+
+    int allocs1[] = { 3 };
+    array_possibility_packet arr;
+    arr.size = 1;
+    arr.possibilities = calloc(1, sizeof(struct possibility_packet));
+    arr.possibilities[0].alloc = (uint16_t)allocs1[0];
+    arr.possibilities[0].checked = 0;
+    int rc = add_possibility(NULL, &arr);
+    free(arr.possibilities);
+
+    ASSERT_EQ_FMT(1, rc, "%d");            /* refusé */
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu"); /* rien inséré */
+
+    datamanager_set_ram_limit_packets_for_tests(0); /* repart d'illimité pour les tests suivants */
+    drain_all();
+    PASS();
+}
+
+/* Symétrique : sous le plafond, l'ADD réussit normalement (le plafond n'est
+ * pas une régression sur le chemin nominal). */
+TEST hard_cap_allows_add_within_budget(void)
+{
+    drain_all();
+    datamanager_set_ram_limit_packets_for_tests(10);
+
+    int allocs[] = { 1, 2, 3 };
+    add_packets(allocs, 3);
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_all();
     PASS();
 }
 
@@ -4840,6 +4973,62 @@ TEST expand_zero_level_is_noop(void)
     PASS();
 }
 
+/* Plafond RAM assez bas pour être atteint pendant l'expansion : AVANT ce
+ * correctif, le code de retour de add_possibility était totalement ignoré
+ * dans expand_datas_to_level -- une fois un plafond introduit, un refus
+ * devenait une perte SILENCIEUSE de possibilité. Vérifie les deux propriétés
+ * ensemble : le refus est désormais journalisé (log_error, mesuré par la
+ * TAILLE de stderr plutôt que par son contenu -- même technique que
+ * put_to_server_server_busy_is_silent_and_non_fatal ci-dessus, pour ne pas
+ * casser ce test si le libellé change) ET le stock résident ne dépasse
+ * jamais le plafond fixé. */
+TEST expand_logs_and_bounds_stock_when_ram_cap_hit(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+
+    drain_all();
+    seed_genesis(0);
+
+    /* La genèse (1 possibilité) tient sous ce plafond, mais le premier
+     * niveau d'expansion (8 candidats/branche, cf. make_expand_free_map)
+     * déborde largement -- force un refus dès la première passe. */
+    datamanager_set_ram_limit_packets_for_tests(3);
+
+    capture_stderr();
+    int passes = expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    long err_bytes = restore_stderr_size();
+    (void)passes;
+
+    ASSERT(err_bytes > 0);            /* refus journalisé, jamais silencieux */
+    ASSERT(datas_size() <= 3ULL);      /* plafond respecté */
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_all();
+    PASS();
+}
+
+/* Symétrique : sans plafond (cas nominal, illimité), aucune ligne d'erreur --
+ * pas de faux positif qui inonderait les logs en fonctionnement normal. */
+TEST expand_without_ram_cap_logs_nothing(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+
+    drain_all();
+    seed_genesis(0);
+    datamanager_set_ram_limit_packets_for_tests(0); /* illimité, cas nominal */
+
+    capture_stderr();
+    expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    long err_bytes = restore_stderr_size();
+
+    ASSERT_EQ_FMT(0L, err_bytes, "%ld");
+
+    drain_all();
+    PASS();
+}
+
 SUITE(datamanager_suite)
 {
     RUN_TEST(server_ip_round_trip);
@@ -4848,6 +5037,14 @@ SUITE(datamanager_suite)
     RUN_TEST(add_increases_datas_size);
     RUN_TEST(rr_next_start_rotates_then_wraps);
     RUN_TEST(rr_next_start_non_positive_n_returns_zero_and_is_a_noop);
+    RUN_TEST(bytes_per_possibility_matches_sizeof_formula);
+    RUN_TEST(ram_limit_to_packets_non_positive_megabytes_is_unlimited);
+    RUN_TEST(ram_limit_to_packets_converts_using_bytes_per_possibility);
+    RUN_TEST(ram_limit_to_packets_large_value_does_not_overflow);
+    RUN_TEST(packets_to_ram_mb_rounds_up_and_zero_is_zero);
+    RUN_TEST(configure_ram_limit_publishes_packet_cap);
+    RUN_TEST(hard_cap_refuses_add_beyond_budget);
+    RUN_TEST(hard_cap_allows_add_within_budget);
     RUN_TEST(add_possibility_rotates_start_file_across_calls);
     RUN_TEST(get_last_possibility_drains_pool);
     RUN_TEST(put_and_scroll_round_trip_succeeds_when_pool_free);
@@ -4985,4 +5182,6 @@ SUITE(datamanager_suite)
     RUN_TEST(expand_noop_when_already_deep_enough);
     RUN_TEST(expand_depth_cap_limits_passes);
     RUN_TEST(expand_zero_level_is_noop);
+    RUN_TEST(expand_logs_and_bounds_stock_when_ram_cap_hit);
+    RUN_TEST(expand_without_ram_cap_logs_nothing);
 }

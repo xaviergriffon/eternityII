@@ -1642,12 +1642,12 @@ void log_server_startup_diagnostics(const char *file)
     log_file("démarrage serveur : pid=%d version_protocole=%d eternParts=%d "
               "nb_threads=%d fichier=\"%s\" stock_files=%d tcp_timeout=%ds "
               "stop_on_solution=%s expand_level=%d expand_max_stock=%d "
-              "expand_max_levels=%d rebalance_budget=%d http_port=%d "
-              "http_token=%s\n",
+              "expand_max_levels=%d rebalance_budget=%d stock_max_ram_mb=%d "
+              "http_port=%d http_token=%s\n",
               (int)getpid(), VERSION, ETERN_PARTS, NB_THREADS, file,
               nb_file_possibility, tcp_timeout, stop_on_solution ? "oui" : "non",
               expand_min_level, expand_max_stock, expand_max_levels,
-              rebalance_budget, HTTP_PORT,
+              rebalance_budget, stock_max_ram_mb, HTTP_PORT,
               HTTP_PORT > 0 ? (HTTP_ADMIN_TOKEN[0] != '\0' ? "configuré" : "absent") : "n/a");
 }
 

@@ -53,6 +53,7 @@ int expand_max_stock = EXPAND_MAX_STOCK;
 int expand_max_levels = EXPAND_MAX_LEVELS;
 int rebalance_budget = REBALANCE_BUDGET_DEFAULT;
 int stock_files_requested = 0;
+int stock_max_ram_mb = 0;
 
 int headless_mode = 0;
 
@@ -339,6 +340,18 @@ int parse_cli_options(int argc, const char *argv[])
                 int n = atoi(argv[r + 1]);
                 if (n > 0) {
                     stock_files_requested = n;
+                }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--stock-max-ram") == 0) {
+            // Option valuée, même schéma que --expand-max-stock : appliquée
+            // plus tard par main() (datamanager_configure_ram_limit), pas ici
+            // (aucune dépendance sur core/datamanager.h dans ce fichier).
+            // <mo> <= 0 ignoré (garde 0 = illimité, comportement inchangé).
+            if (r + 1 < argc) {
+                int mo = atoi(argv[r + 1]);
+                if (mo > 0) {
+                    stock_max_ram_mb = mo;
                 }
                 r++; // consomme aussi la valeur
             }

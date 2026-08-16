@@ -20,7 +20,9 @@ sources. Le protocole TCP entre serveur et clients est détaillé dans
   (« possibilités », `struct possibility_packet`) à explorer, réparties en files
   protégées par mutex ([src/core/datamanager.c](../src/core/datamanager.c)), et les
   distribue aux clients. Il peut sauvegarder/restaurer ce stock dans des fichiers
-  `.back` (voir [Utilisation — fichiers générés](utilisation.md#fichiers-générés)).
+  `.back` (voir [Utilisation — fichiers générés](utilisation.md#fichiers-générés)) et,
+  optionnellement, plafonner sa croissance en RAM (`--stock-max-ram`, voir
+  [Utilisation — plafond RAM du stock](utilisation.md#plafond-ram-du-stock---stock-max-ram)).
 - Chaque **client** (`client`, `pruner`, `pruner --gpu`) forke `N` processus
   enfants. Chaque enfant se connecte au serveur, récupère des possibilités, les
   explore (ou les vérifie, en mode pruner), puis renvoie les nouvelles positions

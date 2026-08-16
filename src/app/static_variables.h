@@ -551,6 +551,42 @@ extern int rebalance_budget;
 extern int stock_files_requested;
 
 /**
+ * @brief Plafond en Mo de la RAM consacrée aux DEUX pools de stock serveur
+ *        (non vérifié + vérifié — option CLI `--stock-max-ram <mo>`).
+ *
+ * 0 (défaut) = illimité, comportement inchangé — même convention que `limit 0`
+ * et `leaseDuration 0`. Une valeur strictement positive fixe la limite en Mo
+ * telle que fournie par l'opérateur ; la conversion en NOMBRE de possibilités
+ * (l'unité réellement comparée par `put_to_pool`) est faite une seule fois,
+ * après le parsing, par `datamanager_configure_ram_limit`
+ * (`core/datamanager.h`) — ce fichier reste volontairement sans dépendance
+ * sur `core/datamanager.h`, même raison que `stock_files_requested`
+ * ci-dessus. Le pool ANALYSÉ n'est délibérément PAS couvert par ce plafond :
+ * il est déjà borné par le nombre de clients en vol et par les baux
+ * d'expiration (`analysed_lease_seconds`), et son index de hachage impose une
+ * recherche par correspondance exacte qu'un déport casserait. `<mo> <= 0`
+ * fourni explicitement est ignoré (garde 0 = illimité), même convention que
+ * `expand_max_stock`. Position-indépendant, retiré d'argv par
+ * `parse_cli_options` avant le parsing positionnel.
+ *
+ * Contrairement à `expand_min_level` (lu UNIQUEMENT par `runserver`),
+ * `datamanager_configure_ram_limit` est appelé sans condition de rôle dans
+ * `main()`, avant tout fork — même endroit et même raison que
+ * `stock_files_requested`/`datamanager_configure_stock_files` juste
+ * au-dessus : `put_to_pool` (`core/datamanager.c`), qui applique le plafond,
+ * est du code PARTAGÉ, utilisé aussi bien par le stock local d'un client/
+ * pruner (`put_to_local`) que par le serveur. Même précédent que la commande
+ * console `rebalance` (elle aussi mécaniquement active sur le stock local
+ * d'un client, sans garde de rôle). En pratique, seul le stock SERVEUR
+ * atteint un volume significatif : le stock local d'un client/pruner reste
+ * déjà borné par `max_stock_by_thread`/`pruner_batch_size`, largement sous
+ * tout plafond RAM raisonnable — d'où la description « serveur » de cette
+ * option dans l'aide CLI (`--help`), qui reflète l'usage réel, pas une
+ * restriction de code.
+ */
+extern int stock_max_ram_mb;
+
+/**
  * @brief 1 si la console interactive (lecture de stdin) ne doit pas démarrer
  *        (option CLI `--headless`).
  *
@@ -1089,10 +1125,12 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
  * Reconnaît `--stop-on-solution`, `--expand-level <n>`, `--expand-max-stock <n>`,
  * `--expand-max-levels <n>`, `--http-port <n>`, `--http-token-file <chemin>`,
  * `--name <label>`, `--machine-uid-file <chemin>`, `--config-file <chemin>`,
- * `--gpu`, `--headless` et `--help`/`-h` (positionne respectivement
- * `stop_on_solution`, `expand_min_level`, `expand_max_stock`,
+ * `--stock-files <n>`, `--stock-max-ram <mo>`, `--rebalance-budget <n>`,
+ * `--tcp-timeout <n>`, `--gpu`, `--headless` et `--help`/`-h` (positionne
+ * respectivement `stop_on_solution`, `expand_min_level`, `expand_max_stock`,
  * `expand_max_levels`, `HTTP_PORT`, `HTTP_TOKEN_FILE`, `client_label`,
- * `machine_uid_file_path`, `client_config_file_path`, `gpu_requested`,
+ * `machine_uid_file_path`, `client_config_file_path`, `stock_files_requested`,
+ * `stock_max_ram_mb`, `rebalance_budget`, `tcp_timeout`, `gpu_requested`,
  * `headless_mode` et `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.

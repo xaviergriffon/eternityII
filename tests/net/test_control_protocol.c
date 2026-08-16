@@ -319,6 +319,17 @@ TEST control_command_privileged_handles_null(void)
     PASS();
 }
 
+/* stockMaxRam (PR1, --stock-max-ram) : même famille que rebalance/sortAsc --
+ * privilégiée (jeton Bearer requis côté API HTTP admin), jamais relayable via
+ * le canal de contrôle binaire. */
+TEST control_command_privileged_accepts_stock_max_ram(void)
+{
+    ASSERT_EQ_FMT(1, control_command_privileged("stockMaxRam"), "%d");
+    ASSERT_EQ_FMT(1, control_command_privileged("stockMaxRam 100"), "%d");
+    ASSERT_EQ_FMT(0, control_command_allowed("stockMaxRam"), "%d"); /* jamais dans l'autre liste */
+    PASS();
+}
+
 /* Les deux listes blanches ne se recoupent jamais. */
 TEST control_command_allowed_and_privileged_are_disjoint(void)
 {
@@ -408,6 +419,7 @@ SUITE(control_protocol_suite)
     RUN_TEST(control_command_privileged_accepts_whitelist);
     RUN_TEST(control_command_privileged_rejects_others);
     RUN_TEST(control_command_privileged_handles_null);
+    RUN_TEST(control_command_privileged_accepts_stock_max_ram);
     RUN_TEST(control_command_allowed_and_privileged_are_disjoint);
     RUN_TEST(control_command_read_only_accepts_only_clientswork);
     RUN_TEST(control_command_read_only_rejects_modifying_standard_commands);

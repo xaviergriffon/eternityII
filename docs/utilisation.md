@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -38,6 +38,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--expand-max-levels N` | `EXPAND_MAX_LEVELS` (4) | Plafonne en NOMBRE DE PASSES la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
 | `--stock-files N` | `NB_FILE_POSSIBILITY_DEFAULT` (10) | Nombre de files de stock, fixé une seule fois au démarrage (jamais à chaud), plafonné à `NB_FILE_POSSIBILITY_MAX` (128) — voir ci-dessous |
 | `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir ci-dessous |
+| `--stock-max-ram N` | *(absent, illimité)* | Plafond en Mo des DEUX pools de stock (non vérifié + vérifié) — voir ci-dessous |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
 | `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
@@ -50,6 +51,7 @@ Exemples :
 ./eternityII server 80 --expand-level 4 --expand-max-stock 1000000 data/pieces.csv
 ./eternityII server 80 --expand-level 8 --expand-max-stock 1000000 --expand-max-levels 8 data/pieces.csv
 ./eternityII server 80 --stock-files 32 --rebalance-budget 5000 data/pieces.csv
+./eternityII server 80 --stock-max-ram 4096 data/pieces.csv
 ./eternityII server 80 --http-port 8080 data/pieces.csv
 ./eternityII server 80 --http-port 8080 --http-token-file /etc/eternityii/http-token data/pieces.csv
 ```
@@ -103,6 +105,37 @@ sauvegarde effectivement exécutée est exposée par `GET /api/v1/status`
 > (connexions de travail simultanées) **+** (processus clients connectés), pas
 > seulement le premier terme. Le défaut (80) laisse une large marge.
 
+### Plafond RAM du stock (`--stock-max-ram`)
+
+Rien ne bornait auparavant la croissance du stock serveur au fil du trafic de recherche et de
+délégation : un stock de plusieurs millions de possibilités peut consommer plusieurs Go de RAM
+(`sizeof(struct possibility_packet)` = 576 octets sur le puzzle 256 pièces, plus le coût réel
+d'allocation — `Element` de la liste chaînée + deux `malloc()` par possibilité stockée, cf.
+`core/lifo.c` — porte le coût réel à environ 632 octets/possibilité).
+
+`--stock-max-ram N` fixe un plafond en **Mo**, converti **une seule fois** en NOMBRE de
+possibilités au démarrage (l'unité réellement comparée à chaque ajout). Ce plafond couvre les
+**deux pools de stock ensemble** (non vérifié + vérifié) — jamais le pool des possibilités en
+cours d'analyse, déjà borné autrement (baux d'expiration, nombre de clients en vol, voir
+[Échanges client/serveur](echanges_client_serveur.md)), ni les lots pruner en vol
+(`prunerBatch`, jusqu'à ~36 Mo) ni la table de recherche partagée (~6,6 Mo) : prévoir une marge
+plutôt que de régler ce plafond au plus près de la RAM physique disponible (60 à 70 % est un
+point de départ raisonnable).
+
+Un ajout qui ferait dépasser le plafond est **refusé** — le même chemin de dégradation
+gracieuse qu'un refus de contention (`INST_ERROR` côté client, qui conserve la possibilité en
+local et la renverra plus tard, cf. la section « Épilogue » d'[AGENTS.md](../AGENTS.md)).
+**Aucun débordement sur disque n'existe à ce stade** : atteindre le plafond ralentit
+l'absorption de nouveau travail par le serveur, il ne fait jamais perdre ce qui est déjà
+résident. Réglable à chaud via la commande console `stockMaxRam <mo>` (`<mo> <= 0` désactive le
+plafond) et consultable via `stockMemory` ou `GET /api/v1/status`
+(`stock_ram_limit_mb`/`stock_ram_used_mb`, voir [API HTTP REST admin](api_http_rest.md)).
+
+Exemple :
+```sh
+./eternityII server 80 --stock-max-ram 2048 data/pieces.csv   # 2 Go pour les deux pools de stock
+```
+
 ### Expansion du stock au démarrage (`--expand-level`, anti-famine)
 
 Au démarrage, le serveur ne détient que le paquet *genèse* et ses tout premiers
@@ -135,6 +168,14 @@ pour les deux, la valeur par défaut ou déjà fixée est conservée). La même 
 d'expansion est disponible à chaud via la commande interactive `expand N` (utile si le
 stock distribuable se raréfie en cours de recherche) ; elle respecte elle aussi les deux
 plafonds en vigueur.
+
+Si `--stock-max-ram` (ci-dessus) est également fixé et se révèle plus contraignant que
+`--expand-max-stock`, l'expansion s'arrête dès que le plafond RAM est atteint — le reste du
+travail en cours n'est jamais perdu en silence : un refus est journalisé explicitement
+(`log_error`, visible dans `events.log`) avec le nombre exact de possibilités qui n'ont pu
+être réinjectées. Un tel refus signale un déséquilibre de configuration (relever
+`--stock-max-ram`, ou réduire `--expand-level`/`--expand-max-stock`), pas un fonctionnement
+normal.
 
 > Cette expansion est le pendant *serveur* de la délégation anticipée côté *client*
 > (sonde de faim `INST_NEED_WORK`, VERSION 8) décrite dans

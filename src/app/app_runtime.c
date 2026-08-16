@@ -162,6 +162,19 @@ static const cli_help_topic_t cli_topics[] = {
 	  "la plus vide, par petits lots, pour que les files restent de taille\n"
 	  "comparable (temps de blocage court à la sauvegarde). Valeur absente ou <= 0 :\n"
 	  "ignorée (garde le défaut)." },
+	{ "--stock-max-ram",
+	  "--stock-max-ram <mo>",
+	  "Serveur : plafond en Mo des DEUX pools de stock (non vérifié + vérifié).",
+	  "Défaut 0 = illimité (comportement inchangé). Converti UNE SEULE FOIS en\n"
+	  "nombre de possibilités au démarrage ; un ADD qui ferait dépasser le\n"
+	  "plafond est refusé (dégradation gracieuse déjà supportée par le\n"
+	  "protocole, comme un refus de contention). Ne couvre PAS le pool analysé,\n"
+	  "les lots pruner en vol, ni la map de recherche partagée — prévoir une\n"
+	  "marge (60-70 % de la RAM physique). Réglable à chaud via la commande\n"
+	  "console `stockMaxRam <mo>`. Accepté par tous les modes (code partagé),\n"
+	  "mais n'a d'effet pratique que côté serveur : le stock local d'un\n"
+	  "client/pruner reste déjà borné par max_stock_by_thread/pruner_batch.\n"
+	  "Valeur absente ou <= 0 : ignorée (garde le défaut)." },
 	{ "--tcp-timeout",
 	  "--tcp-timeout <n>",
 	  "Serveur et client/pruner : timeout d'inactivité (secondes) des sockets TCP de travail.",

@@ -13,7 +13,7 @@ Le code correspondant vit dans :
 - [src/net/http_codec.h](../src/net/http_codec.h) / [http_codec.c](../src/net/http_codec.c) — parsing HTTP/1.1 (dont l'en-tête `Authorization`), routage, formatage JSON, extraction/vérification du jeton Bearer (`http_extract_bearer_token`, `http_token_equals_constant_time`, `http_command_authorize`) : fonctions pures, sans socket ;
 - [src/net/http_server.h](../src/net/http_server.h) / [http_server.c](../src/net/http_server.c) — écouteur réseau (thread détaché, boucle accept), les fonctions `http_*_collect` qui alimentent les vues JSON à partir de l'état serveur/registre vivant, et `http_token_load` (chargement/validation du fichier jeton au démarrage) ;
 - [src/ui/command_lines.c](../src/ui/command_lines.c) (`admin_apply_remote_command`, `admin_apply_privileged_command`) — exécution des commandes admin, réentrante ;
-- [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_classify`, source unique de vérité ; `control_command_allowed`/`control_command_privileged`/`control_command_read_only` n'en sont que des projections, voir encadré ci-dessous) — `control_command_allowed` (lecture + écriture relayable) est **partagée** avec le canal de contrôle binaire, `control_command_privileged` (écriture serveur-seulement : restore/backup/sortAsc/sortDesc/sortDescMulti/split/regroup/rebalance) ne l'est **pas** (accessible uniquement via cette API, jamais via le canal de contrôle) ;
+- [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_classify`, source unique de vérité ; `control_command_allowed`/`control_command_privileged`/`control_command_read_only` n'en sont que des projections, voir encadré ci-dessous) — `control_command_allowed` (lecture + écriture relayable) est **partagée** avec le canal de contrôle binaire, `control_command_privileged` (écriture serveur-seulement : restore/backup/sortAsc/sortDesc/sortDescMulti/split/regroup/rebalance/stockMaxRam) ne l'est **pas** (accessible uniquement via cette API, jamais via le canal de contrôle) ;
 - [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) (`control_registry_snapshot`, `control_registry_record_stats`, `control_registry_broadcast_get_stats`) — registre des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), source de `GET /api/v1/clients` et `POST /api/v1/clients/stats` ;
 - [src/app/known_clients_registry.h](../src/app/known_clients_registry.h) / [known_clients_registry.c](../src/app/known_clients_registry.c) (`known_clients_registry_snapshot`) — [registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus) (cumul par `machine_uid`, survit à la déconnexion), source de `GET /api/v1/known-clients` ;
 - [src/core/best_board.h](../src/core/best_board.h) / [best_board.c](../src/core/best_board.c) (`g_server_best_board`) — représentation du meilleur plateau connu, source de `GET /api/v1/best-board` ;
@@ -186,7 +186,9 @@ Instantané de l'état et de la configuration courante.
   "max_stock_by_thread": 500,
   "pruner_batch": 64,
   "pruner_dfs_budget": 10000,
-  "last_backup_duration_ms": 42
+  "last_backup_duration_ms": 42,
+  "stock_ram_limit_mb": 2048,
+  "stock_ram_used_mb": 512
 }
 ```
 
@@ -200,6 +202,8 @@ Instantané de l'état et de la configuration courante.
 | `pruner_batch` | entier | Taille de lot d'échange du pruner courante |
 | `pruner_dfs_budget` | entier | Budget de nœuds courant de la preuve de fermeture bornée du pruner (§4.6b) ; `0` = désactivée |
 | `last_backup_duration_ms` | entier ≥ 0 | Durée (millisecondes) de la DERNIÈRE sauvegarde automatique effectivement exécutée — englobe tout ce que ce tour a réellement déclenché (stock/analysé, meilleur plateau, clients connus — chacun sauté indépendamment si son propre artefact n'a pas changé). `0` tant qu'aucune sauvegarde n'a encore eu lieu |
+| `stock_ram_limit_mb` | entier ≥ 0 | Plafond RAM configuré des deux pools de stock (non vérifié + vérifié), en Mo — [`--stock-max-ram`](utilisation.md#plafond-ram-du-stock---stock-max-ram)/commande `stockMaxRam`. `0` = illimité |
+| `stock_ram_used_mb` | entier ≥ 0 | Occupation ESTIMÉE actuelle des deux pools de stock, en Mo (jamais un relevé RSS réel du process — dérivée du nombre de possibilités résidentes) |
 
 Valeurs possibles de `state` :
 
@@ -289,11 +293,14 @@ via cette route, et seulement avec un jeton Bearer valide (voir
 | `split` | Répartit les possibilités entre les différentes files — équivalent HTTP de `split` |
 | `regroup` | Regroupe toutes les possibilités dans une seule file — équivalent HTTP de `regroup` |
 | `rebalance [n]` | Rééquilibre le stock d'un seul pas incrémental (file la plus pleine → la plus vide, `n` possibilités par pool, défaut `rebalance_budget`) — équivalent HTTP de `rebalance` |
+| `stockMaxRam <mo>` | Fixe à chaud le [plafond RAM du stock](utilisation.md#plafond-ram-du-stock---stock-max-ram) — équivalent HTTP de `stockMaxRam` ; `<mo> <= 0` désactive le plafond (illimité) |
 
 Ces six dernières commandes (`sortAsc`/`sortDesc`/`sortDescMulti`/`split`/`regroup`/`rebalance`)
 ne remplacent aucun fichier, mais réorganisent en bloc, sous verrou, l'ensemble du
 stock de possibilités du serveur — un effet de bord suffisamment large (et
-potentiellement coûteux) pour n'avoir de sens que côté serveur.
+potentiellement coûteux) pour n'avoir de sens que côté serveur. `stockMaxRam` rejoint cette
+liste pour la même raison (modifie un réglage strictement serveur), mais sans en partager le
+coût : c'est une simple affectation, jamais un réarrangement du stock.
 
 > **Deux listes, un seul niveau d'authentification.** `control_command_allowed`
 > ("standard", partagée avec le canal de contrôle) et `control_command_privileged`
