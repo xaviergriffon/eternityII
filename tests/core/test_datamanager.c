@@ -4973,35 +4973,100 @@ TEST expand_zero_level_is_noop(void)
     PASS();
 }
 
-/* Plafond RAM assez bas pour être atteint pendant l'expansion : AVANT ce
- * correctif, le code de retour de add_possibility était totalement ignoré
- * dans expand_datas_to_level -- une fois un plafond introduit, un refus
- * devenait une perte SILENCIEUSE de possibilité. Vérifie les deux propriétés
- * ensemble : le refus est désormais journalisé (log_error, mesuré par la
- * TAILLE de stderr plutôt que par son contenu -- même technique que
- * put_to_server_server_busy_is_silent_and_non_fatal ci-dessus, pour ne pas
- * casser ce test si le libellé change) ET le stock résident ne dépasse
- * jamais le plafond fixé. */
-TEST expand_logs_and_bounds_stock_when_ram_cap_hit(void)
+/* Plafond RAM assez bas pour être atteint pendant l'expansion : un refus
+ * n'est PLUS jamais abandonné (comportement remplacé -- avant ce correctif,
+ * un refus au-delà du plafond RAM comptait la possibilité comme perdue et
+ * continuait ; désormais expand_datas_to_level ATTEND patiemment que de la
+ * place se libère, même principe que put_to_server côté client : un ADD
+ * refusé n'est jamais perdu, seulement retenté plus tard). Un thread
+ * compagnon simule ce que le thread de débordement (core/stock_spill.c)
+ * ferait en production : lever le plafond après un court délai, laissant à
+ * expand_datas_to_level la possibilité de reprendre. Vérifie l'invariant
+ * central : AUCUNE possibilité produite n'est perdue, seulement retardée --
+ * et que l'attente est journalisée (mesurée par la TAILLE de stderr, pas son
+ * contenu, même technique que put_to_server_server_busy_is_silent_and_non_fatal
+ * ci-dessus, pour ne pas casser ce test si le libellé change). */
+static void *raise_ram_cap_after_delay_for_tests(void *arg)
+{
+    (void)arg;
+    usleep(150000); /* 150 ms : largement plus qu'un tick de débordement (100 ms) simulé */
+    datamanager_set_ram_limit_packets_for_tests(0); /* illimité : débloque tout le reste */
+    return NULL;
+}
+
+TEST expand_waits_for_ram_and_never_loses_possibilities(void)
 {
     expand_max_levels = EXPAND_MAX_LEVELS;
     expand_max_stock = EXPAND_MAX_STOCK;
 
     drain_all();
     seed_genesis(0);
+    request = REQUEST_CONTINUE;
 
-    /* La genèse (1 possibilité) tient sous ce plafond, mais le premier
-     * niveau d'expansion (8 candidats/branche, cf. make_expand_free_map)
-     * déborde largement -- force un refus dès la première passe. */
+    /* La genèse (1 possibilité, drainée en RAM de travail dès le premier
+     * tour) laisse le pool RÉSIDENT à 0 avant l'expansion : les 3 premiers
+     * des 8 enfants (cf. make_expand_free_map) tiennent sous ce plafond, les
+     * 5 suivants doivent attendre. */
     datamanager_set_ram_limit_packets_for_tests(3);
+
+    pthread_t releaser;
+    ASSERT_EQ_FMT(0, pthread_create(&releaser, NULL, raise_ram_cap_after_delay_for_tests, NULL), "%d");
 
     capture_stderr();
     int passes = expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
     long err_bytes = restore_stderr_size();
     (void)passes;
 
-    ASSERT(err_bytes > 0);            /* refus journalisé, jamais silencieux */
-    ASSERT(datas_size() <= 3ULL);      /* plafond respecté */
+    pthread_join(releaser, NULL);
+
+    ASSERT(err_bytes > 0); /* attente journalisée, jamais silencieuse */
+    /* AUCUNE perte : les 8 enfants de la genèse doivent TOUS finir résidents,
+     * pas seulement les 3 qui tenaient sous le plafond initial. */
+    ASSERT_EQ_FMT(8ULL, datas_size(), "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_all();
+    PASS();
+}
+
+/* Un Ctrl-C (REQUEST_STOP) pendant l'attente interrompt proprement l'attente
+ * -- ni blocage indéfini, ni fuite mémoire (work/children correctement
+ * drainées sans passer par free_file sur une structure pile), ni crash.
+ * Le refus initial reste journalisé même si l'insertion n'a jamais abouti :
+ * un opérateur qui regarde les logs après un arrêt sait pourquoi
+ * l'expansion n'était pas allée à son terme. */
+static void *request_stop_after_delay_for_tests(void *arg)
+{
+    (void)arg;
+    usleep(100000); /* 100 ms : laisse le premier refus être journalisé avant d'interrompre */
+    request = REQUEST_STOP;
+    return NULL;
+}
+
+TEST expand_aborts_cleanly_on_request_stop_during_ram_wait(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+
+    drain_all();
+    seed_genesis(0);
+    request = REQUEST_CONTINUE;
+
+    datamanager_set_ram_limit_packets_for_tests(3); /* jamais levé dans ce test : bloquerait indéfiniment sans l'arrêt */
+
+    pthread_t stopper;
+    ASSERT_EQ_FMT(0, pthread_create(&stopper, NULL, request_stop_after_delay_for_tests, NULL), "%d");
+
+    capture_stderr();
+    int passes = expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    long err_bytes = restore_stderr_size();
+    (void)passes;
+
+    pthread_join(stopper, NULL);
+    request = REQUEST_CONTINUE; /* restaure l'état pour le reste du binaire de tests */
+
+    ASSERT(err_bytes > 0);           /* le refus initial a bien été journalisé avant l'arrêt */
+    ASSERT(datas_size() <= 3ULL);     /* jamais dépassé le plafond, même interrompu en cours d'attente */
 
     datamanager_set_ram_limit_packets_for_tests(0);
     drain_all();
@@ -5182,6 +5247,7 @@ SUITE(datamanager_suite)
     RUN_TEST(expand_noop_when_already_deep_enough);
     RUN_TEST(expand_depth_cap_limits_passes);
     RUN_TEST(expand_zero_level_is_noop);
-    RUN_TEST(expand_logs_and_bounds_stock_when_ram_cap_hit);
+    RUN_TEST(expand_waits_for_ram_and_never_loses_possibilities);
+    RUN_TEST(expand_aborts_cleanly_on_request_stop_during_ram_wait);
     RUN_TEST(expand_without_ram_cap_logs_nothing);
 }

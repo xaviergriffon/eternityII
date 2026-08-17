@@ -502,13 +502,16 @@ possibility vanishing with zero trace — the exact class of bug the Épilogue s
 diagnosed for `put_to_server`, just never exercised on this path since nothing could refuse an
 insert here before this series. Fixed by counting refused packets (`dropped`) and logging a
 single explicit `log_error` at the end of `expand_datas_to_level` naming the count when
-`dropped > 0` — deliberately not a retry loop: expansion runs single-threaded, pre-fork, with no
-concurrent consumer that could ever free room, so retrying the same refused insert cannot
-succeed and would just spin. Locked by
-`expand_logs_and_bounds_stock_when_ram_cap_hit`/`expand_without_ram_cap_logs_nothing`
+`dropped > 0` — deliberately not a retry loop AT THE TIME: PR1 shipped before PR2's spill thread
+existed, so nothing could ever concurrently free room during expansion, and retrying the same
+refused insert would just spin forever. **This reasoning stopped holding once PR2 landed** (a
+genuine concurrent consumer now exists) — dropping was corrected to a proper wait-and-retry once
+that became safe to do; see "No possibility loss during expansion" in the PR2 section below for
+the followup that superseded this drop-and-log design. `expand_without_ram_cap_logs_nothing`
 (`tests/core/test_datamanager.c`, stderr-size-based like the Épilogue's own
 `put_to_server_server_busy_is_silent_and_non_fatal`, not content-matched — a relabeled message
-doesn't break the test, a silence regression does).
+doesn't break the test, a silence regression does) is the one test from this original PR1 change
+that is still current; its sibling asserting the drop itself was replaced, see below.
 
 **Applies to every mode mechanically, documented as server-only by convention.** Unlike
 `expand_min_level` (read only inside `runserver`), `datamanager_configure_ram_limit` is called
@@ -649,16 +652,64 @@ being served, and a subsequent restart against the same `--stock-spill-dir` purg
 segments with the documented `log_error` naming the exact discarded count (3984 possibilities,
 4 segments) — matching the PR3 gap above exactly, not merely asserted.
 
-**One confirmed, accepted limitation: a single fast `--expand-level` burst can still outrun the
-100ms tick and hit PR1's refuse-and-drop path before the spill thread gets a turn.** Reproduced
-directly: `--expand-level 12 --expand-max-levels 10 --stock-max-ram 1` (a deliberately tiny cap)
-completed its entire expansion — and hit `expand_datas_to_level`'s PR1 drop-and-log path — inside
-a single synchronous burst faster than 100ms, with the spill directory still empty afterward.
-This is the same scoping call already made in the PR1 section above (`expand_datas_to_level` was
-deliberately NOT changed to call into spillover) — PR2's spill thread is aimed at *sustained*
-runtime pressure (ordinary search/delegation traffic), not a one-shot startup burst faster than
-its own tick interval; the PR1 safety net (loud drop, never silent) is what actually protects
-that case, unchanged by this PR.
+**No possibility loss during expansion — the drop-and-log path from PR1 was replaced with a
+wait-and-retry, once PR2 made that safe.** Confirmed as a real, reproducible gap, not
+theoretical: `--expand-level 12 --expand-max-levels 10 --stock-max-ram 1` (a deliberately tiny
+cap) completed its entire expansion — and hit `expand_datas_to_level`'s PR1 drop-and-log path —
+inside a single synchronous burst faster than the spill thread's 100ms tick, with the spill
+directory still empty afterward: ~1000 possibilities counted as "dropped" in that one run,
+exactly the scenario PR1's own log message warned about but did nothing to prevent. Since these
+are possibilities the search has already computed (a subtree explored once, discarded, never
+regenerated — this project's own stated goal is minimizing wasted recomputation), silently
+losing them defeats the point of `--expand-level` in the first place.
+
+Fixed by `add_possibility_with_retry_or_abort` (`core/datamanager.c`, used by both call sites in
+`expand_datas_to_level` that previously counted a refusal as `dropped`): on refusal it does NOT
+give up — it logs once, then polls (`usleep`, 20ms — much coarser than `MICRO_SLEEP`'s 100µs
+lock-contention backoff, since this is waiting on a 100ms spill tick or a client GET, not a
+momentarily-held mutex) and retries the SAME insert until it succeeds. Same principle as the
+client side (`put_to_server`: a refused ADD is never lost, only retried later) — adapted to
+`expand_datas_to_level`'s single-threaded, pre-fork context, which has no equivalent to the
+client's "naturally retried on the next delegation cycle": the wait has to happen inside the
+function itself, since nothing else will ever revisit its local `work`/`children` buffers.
+
+**Deliberately unbounded except for shutdown, not a fixed timeout.** The only two ways out of
+the wait are success (room appears — the intended path, since `--stock-spill-dir` is configured
+unconditionally by default whenever a RAM cap is set, so this resolves within one or two 100ms
+ticks in any working deployment) or `request == REQUEST_STOP` (Ctrl-C during startup, checked on
+every poll). A fixed timeout was considered and rejected: any number small enough to keep a
+misconfigured deployment from hanging indefinitely would also be small enough to reintroduce
+real loss on a deployment that's merely slow (a large `--expand-level` burst against a modest
+cap, genuinely still draining via spill) — exactly the class of guess this project's own testing
+philosophy warns against baking in without evidence. A genuinely stuck configuration (spill
+directory unwritable, cap set below what even one possibility needs) now manifests as expansion
+**not progressing**, loudly and diagnosably (see logging below), rather than as data silently
+vanishing — a stall an operator can see and fix is strictly better than a loss they can't detect
+until it's too late to matter.
+
+**Logging tells the whole story, not just the fact of a wait.** First refusal: `log_error`
+naming the cause and pointing at both remedies (`--stock-max-ram`, `--stock-spill-dir`).
+Continued waiting: a repeat every 5s (`EXPAND_RAM_WAIT_LOG_INTERVAL_SEC`) with elapsed time, so
+a long wait is never mistaken for a hang with no explanation. Resolution: a `log_info`
+confirming how long the wait actually took. This directly answers the concern that a
+RAM-driven slowdown could otherwise be mistaken for a different problem — an operator watching
+the log sees "waiting on RAM" specifically, not a generic pause.
+
+**`cap_reached` (the pre-existing `--expand-max-stock` volume guard) now doubles as a "we had to
+wait at all" signal**, via a `had_to_wait` out-parameter `add_possibility_with_retry_or_abort`
+sets on its first refusal for any given item: once RAM pressure is observed even once, expansion
+stops deepening further for the rest of that pass (the remainder of `work` is reinjected as-is,
+at whatever depth it already reached) rather than continuing to manufacture more work at the
+exact moment room is tight — a deliberate throttle, not a correctness requirement (the retry
+itself guarantees no loss either way).
+
+**Clean shutdown mid-wait, without corrupting the pile-allocated `work`/`children` buffers.** On
+`REQUEST_STOP`, the enclosing loops stop attempting further insertions and drain whatever
+remains in `work`/`children` via plain `scroll()` calls (freeing each `Element`) — never
+`free_file()`, which would `free()` the `File` struct itself and is reserved for heap-allocated
+Files; both are stack locals here, a distinction this function's comments already called out
+before this change and that remains just as load-bearing now that there's a new early-exit path
+to get wrong.
 
 Tests: `tests/core/test_stock_spill.c` (new suite, real disk I/O in a per-test `mkdtemp`'d
 directory — `configure_creates_directory_and_starts_empty`,
@@ -678,7 +729,15 @@ fidelity checked field-by-field, never a raw struct `memcmp` — see
 `--http-token-file`'s tests). `tests/net/test_http_codec.c` (`stock_spilled_packets`/
 `stock_spill_segments` added to the `/api/v1/stats` golden). `tests/ui/test_command_lines.c` /
 `tests/net/test_control_protocol.c` (`spill [n]` joins `write_server_only[]`, same
-Bearer-gated/dispatch tests as `stockMaxRam`).
+Bearer-gated/dispatch tests as `stockMaxRam`). `tests/core/test_datamanager.c`
+(`expand_waits_for_ram_and_never_loses_possibilities` — a companion `pthread` raises the RAM
+cap after a delay, standing in for what the spill thread would do in production, and asserts the
+FULL expected count ends up resident, none lost, plus a journalled wait;
+`expand_aborts_cleanly_on_request_stop_during_ram_wait` — a companion thread sets `REQUEST_STOP`
+mid-wait, asserting the function returns promptly rather than hanging, with the cap still
+respected; both confirmed leak-free and race-free under `make test ASAN=1`, real threads not
+simulated. Replaces `expand_logs_and_bounds_stock_when_ram_cap_hit`, which asserted the
+drop-and-log behaviour these tests now prove is gone).
 
 A subtlety in the test suite itself worth remembering: `stock_max_ram_packets`
 (`datamanager.c`, set via the test-only `datamanager_set_ram_limit_packets_for_tests`) is a

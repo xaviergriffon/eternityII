@@ -170,10 +170,12 @@ voir [API HTTP REST admin](api_http_rest.md)).
 > travail séparé, pas encore livré.
 
 Un pic d'expansion très rapide au démarrage (`--expand-level`) peut dépasser le plafond RAM
-plus vite que le tick de 100 ms ne peut réagir : dans ce cas, le comportement documenté plus
-haut (refus journalisé, jamais silencieux) reste celui qui protège l'intégrité du stock — le
-débordement cible surtout la pression soutenue du trafic de recherche/délégation en régime de
-croisière, pas nécessairement une rafale ponctuelle plus rapide qu'un tick.
+plus vite que le tick de 100 ms ne peut réagir. Aucune possibilité n'est perdue pour autant :
+`expand_datas_to_level` **attend** que le débordement (ou un GET client) libère de la place
+plutôt que d'abandonner, journalisant le refus initial puis un rappel toutes les 5 s tant que
+l'attente se prolonge — un ralentissement au démarrage visible dans les logs, jamais une perte
+silencieuse. Voir la section « No possibility loss during expansion » d'[AGENTS.md](../AGENTS.md)
+pour le détail.
 
 Exemple :
 ```sh
@@ -214,14 +216,14 @@ stock distribuable se raréfie en cours de recherche) ; elle respecte elle aussi
 plafonds en vigueur.
 
 Si `--stock-max-ram` (ci-dessus) est également fixé et se révèle plus contraignant que
-`--expand-max-stock`, l'expansion s'arrête dès que le plafond RAM est atteint — le reste du
-travail en cours n'est jamais perdu en silence : un refus est journalisé explicitement
-(`log_error`, visible dans `events.log`) avec le nombre exact de possibilités qui n'ont pu
-être réinjectées. Un tel refus signale un déséquilibre de configuration (relever
-`--stock-max-ram`, ou réduire `--expand-level`/`--expand-max-stock`), pas un fonctionnement
-normal. `--stock-spill-dir` (ci-dessous) ne garantit pas d'éviter ce refus : une expansion
-ponctuelle rapide peut dépasser le plafond RAM plus vite que le thread de débordement (tick de
-100 ms) ne peut réagir — voir sa propre section pour ce cas.
+`--expand-max-stock`, l'expansion cesse d'approfondir dès que le plafond RAM est atteint — le
+reste du travail en cours est réinjecté tel quel, au niveau déjà atteint, plutôt que développé
+davantage. **Aucune possibilité générée n'est perdue** : un ADD qui bute sur le plafond RAM
+**attend** (journalisé explicitement — refus initial puis rappel toutes les 5 s si l'attente se
+prolonge, visible dans `events.log`) que `--stock-spill-dir` (ci-dessous) libère de la place,
+plutôt que d'être abandonné. Une attente qui se prolonge signale un déséquilibre de
+configuration (relever `--stock-max-ram`, configurer/vérifier `--stock-spill-dir`, ou réduire
+`--expand-level`/`--expand-max-stock`), pas une perte de données.
 
 > Cette expansion est le pendant *serveur* de la délégation anticipée côté *client*
 > (sonde de faim `INST_NEED_WORK`, VERSION 8) décrite dans
