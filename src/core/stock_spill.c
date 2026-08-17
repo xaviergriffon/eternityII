@@ -79,9 +79,55 @@ void stock_spill_set_segment_bytes_for_tests(long bytes)
 #define STOCK_SPILL_MANIFEST_MAGIC "eternityii-spill-manifest-v1"
 #define STOCK_SPILL_MANIFEST_NAME "manifest.txt"
 
+/// Taille des tampons destination construits à partir de `snap_dir` (lui-
+/// même déjà `PATH_MAX`, borné par sa propre construction). Nécessaire —
+/// pas seulement défensif — pour que gcc/glibc (`_FORTIFY_SOURCE`,
+/// `-Wformat-truncation`) puisse prouver statiquement l'absence de
+/// troncature possible : gcc propage par inlining la borne connue de
+/// `snap_dir` (≤ PATH_MAX-1 après son propre `snprintf`) jusqu'au site
+/// d'appel, et le pire cas (chemin + `/spill_%c_%d_%d.dat`, deux `%d` sur
+/// des `int` non bornés — jusqu'à 11 chiffres chacun) dépasse alors
+/// `PATH_MAX` de quelques dizaines d'octets — un faux positif sur les
+/// valeurs réelles (jamais aussi grandes en pratique), mais un vrai calcul
+/// de gcc, pas un bug de son analyseur (même piège que documenté dans
+/// AGENTS.md, section « Build croisé ARM 64-bit », pour `http_server.c`).
+/// Un tampon destination `g_spill_dir` (chaîne `strdup`, taille inconnue du
+/// compilateur) n'a PAS besoin de cette marge : gcc ne peut alors établir
+/// aucune borne supérieure finie et ne déclenche pas l'avertissement.
+#define SPILL_LOCAL_PATH_MAX (PATH_MAX + 64)
+
 static void spill_segment_path(char *buf, size_t bufsize, int is_checked, int file_index, int seq)
 {
 	snprintf(buf, bufsize, "%s/spill_%c_%d_%d.dat", g_spill_dir, is_checked ? 'c' : 'u', file_index, seq);
+}
+
+/// Variante de `spill_segment_path` pour un répertoire EXPLICITE (PR3 :
+/// snapshot/restauration jonglent avec `g_spill_dir` ET `snap_dir`, deux
+/// répertoires distincts). Le motif "buf/bufsize en paramètres de fonction"
+/// est délibéré, pas seulement pour la réutilisation : passer par une
+/// fonction plutôt qu'un `snprintf` direct dans un tableau local
+/// `char[PATH_MAX]` évite les faux positifs `-Wformat-truncation` de gcc
+/// (glibc/`_FORTIFY_SOURCE`) — gcc calcule un pire cas précis uniquement
+/// quand la taille du tampon est visible statiquement au point d'appel, pas
+/// quand elle transite par un paramètre `size_t bufsize` (cf. `AGENTS.md`,
+/// section « Build croisé ARM 64-bit », pour un autre cas de ce même piège).
+static void spill_segment_path_in(char *buf, size_t bufsize, const char *dir, int is_checked, int file_index, int seq)
+{
+	snprintf(buf, bufsize, "%s/spill_%c_%d_%d.dat", dir, is_checked ? 'c' : 'u', file_index, seq);
+}
+
+/// Concatène `dir`/`name` — même motif « buf/bufsize en paramètres » que
+/// `spill_segment_path_in`, pour la même raison (éviter les faux positifs
+/// `-Wformat-truncation`).
+static void spill_join_path(char *buf, size_t bufsize, const char *dir, const char *name)
+{
+	snprintf(buf, bufsize, "%s/%s", dir, name);
+}
+
+/// Chemin `.tmp` associé à un chemin final — même motif que ci-dessus.
+static void spill_tmp_path(char *buf, size_t bufsize, const char *final_path)
+{
+	snprintf(buf, bufsize, "%s.tmp", final_path);
 }
 
 static stock_spill_descriptor_t *spill_descriptor(int is_checked, int file_index)
@@ -606,10 +652,10 @@ static int spill_link_or_copy(const char *src, const char *dst)
 
 static int spill_write_manifest(const char *snap_dir)
 {
-	char final_path[PATH_MAX];
-	char tmp_path[PATH_MAX];
-	snprintf(final_path, sizeof(final_path), "%s/%s", snap_dir, STOCK_SPILL_MANIFEST_NAME);
-	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", final_path);
+	char final_path[SPILL_LOCAL_PATH_MAX];
+	char tmp_path[SPILL_LOCAL_PATH_MAX + 8]; // final_path + ".tmp" (4 car.) + nul
+	spill_join_path(final_path, sizeof(final_path), snap_dir, STOCK_SPILL_MANIFEST_NAME);
+	spill_tmp_path(tmp_path, sizeof(tmp_path), final_path);
 
 	FILE *f = fopen(tmp_path, "w");
 	if (f == NULL) {
@@ -679,7 +725,6 @@ void stock_spill_snapshot(const char *snapshot_subdir)
 	pthread_mutex_lock(&g_spill_mutex);
 	for (int pool = 0; pool < 2; pool++) {
 		int is_checked = (pool == STOCK_SPILL_POOL_CHECKED);
-		char pool_char = is_checked ? 'c' : 'u';
 		stock_spill_descriptor_t *arr = is_checked ? g_spill_checked : g_spill_unchecked;
 		for (int fidx = 0; fidx < g_spill_nb_files; fidx++) {
 			stock_spill_descriptor_t *desc = &arr[fidx];
@@ -687,16 +732,16 @@ void stock_spill_snapshot(const char *snapshot_subdir)
 				continue;
 			}
 			char live_path[PATH_MAX];
-			char snap_path[PATH_MAX];
+			char snap_path[SPILL_LOCAL_PATH_MAX];
 			for (int seq = 1; seq < desc->last_seq; seq++) {
 				spill_segment_path(live_path, sizeof(live_path), is_checked, fidx, seq);
-				snprintf(snap_path, sizeof(snap_path), "%s/spill_%c_%d_%d.dat", snap_dir, pool_char, fidx, seq);
+				spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, fidx, seq);
 				if (!spill_same_inode(live_path, snap_path)) {
 					spill_link_or_copy(live_path, snap_path);
 				}
 			}
 			spill_segment_path(live_path, sizeof(live_path), is_checked, fidx, desc->last_seq);
-			snprintf(snap_path, sizeof(snap_path), "%s/spill_%c_%d_%d.dat", snap_dir, pool_char, fidx, desc->last_seq);
+			spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, fidx, desc->last_seq);
 			spill_copy_file(live_path, snap_path, desc->tail_bytes);
 		}
 	}
@@ -722,8 +767,8 @@ void stock_spill_snapshot(const char *snapshot_subdir)
 			int stale = (fidx >= g_spill_nb_files) || (seq > spill_descriptor(pool_char == 'c', fidx)->last_seq);
 			pthread_mutex_unlock(&g_spill_mutex);
 			if (stale) {
-				char snap_path[PATH_MAX];
-				snprintf(snap_path, sizeof(snap_path), "%s/%s", snap_dir, entry->d_name);
+				char snap_path[SPILL_LOCAL_PATH_MAX];
+				spill_join_path(snap_path, sizeof(snap_path), snap_dir, entry->d_name);
 				unlink(snap_path);
 			}
 		}
@@ -747,8 +792,8 @@ typedef struct {
 /// LA FONCTION entière (rien de fiable à en tirer).
 static int spill_read_manifest(const char *snap_dir, spill_manifest_entry_t **out_entries, int *out_count)
 {
-	char path[PATH_MAX];
-	snprintf(path, sizeof(path), "%s/%s", snap_dir, STOCK_SPILL_MANIFEST_NAME);
+	char path[SPILL_LOCAL_PATH_MAX];
+	spill_join_path(path, sizeof(path), snap_dir, STOCK_SPILL_MANIFEST_NAME);
 	FILE *f = fopen(path, "r");
 	if (f == NULL) {
 		return -1;
@@ -876,14 +921,14 @@ void stock_spill_restore_snapshot(const char *snapshot_subdir)
 				// aucun déplacement de données, seuls les liens et les
 				// descripteurs changent — cf. la doc de cette fonction.
 				spill_manifest_entry_t *e = &entries[first_match];
-				char snap_path[PATH_MAX];
+				char snap_path[SPILL_LOCAL_PATH_MAX];
 				char live_path[PATH_MAX];
 				for (int seq = 1; seq < e->last_seq; seq++) {
-					snprintf(snap_path, sizeof(snap_path), "%s/spill_%c_%d_%d.dat", snap_dir, pc, e->old_file_index, seq);
+					spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, seq);
 					spill_segment_path(live_path, sizeof(live_path), is_checked, newf, seq);
 					spill_link_or_copy(snap_path, live_path);
 				}
-				snprintf(snap_path, sizeof(snap_path), "%s/spill_%c_%d_%d.dat", snap_dir, pc, e->old_file_index, e->last_seq);
+				spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, e->last_seq);
 				spill_segment_path(live_path, sizeof(live_path), is_checked, newf, e->last_seq);
 				spill_copy_file(snap_path, live_path, e->tail_bytes);
 
@@ -915,8 +960,8 @@ void stock_spill_restore_snapshot(const char *snapshot_subdir)
 						if (count <= 0) {
 							continue;
 						}
-						char snap_path[PATH_MAX];
-						snprintf(snap_path, sizeof(snap_path), "%s/spill_%c_%d_%d.dat", snap_dir, pc, e->old_file_index, seq);
+						char snap_path[SPILL_LOCAL_PATH_MAX];
+						spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, seq);
 						struct possibility_packet *buf = malloc((size_t)count * sizeof(struct possibility_packet));
 						if (buf == NULL) {
 							continue;
