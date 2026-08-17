@@ -26,7 +26,7 @@ sources. Le protocole TCP entre serveur et clients est détaillé dans
   avec un recours pour l'excédent : le déporter sur disque plutôt que refuser
   (`--stock-spill-dir`, [src/core/stock_spill.c](../src/core/stock_spill.c), voir
   [Utilisation — débordement sur disque](utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir)
-  — ne survit pas encore à un redémarrage).
+  — survit à un `backup` suivi d'un `restore`).
 - Chaque **client** (`client`, `pruner`, `pruner --gpu`) forke `N` processus
   enfants. Chaque enfant se connecte au serveur, récupère des possibilités, les
   explore (ou les vérifie, en mode pruner), puis renvoie les nouvelles positions

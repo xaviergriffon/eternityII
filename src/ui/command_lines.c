@@ -754,7 +754,10 @@ int backup_interpreter(void) {
         def_known_clients_file = temp;
     }
     int rba = 0;
-    int rb = consistent_backup(def_file, def_analyse_file, &rba);
+    // "snapshot" (débordement disque, PR3) : sans effet côté client
+    // (stock_spill n'est jamais configuré hors du rôle serveur — la
+    // fonction est un no-op silencieux via son propre g_spill_enabled).
+    int rb = consistent_backup(def_file, def_analyse_file, &rba, "snapshot", stock_spill_snapshot);
     if (rb == BACKUP_SKIPPED_MAINTENANCE) {
         log_info("backup de %s sauté (maintenance en cours)\n", def_file);
     } else if (rb != BACKUP_OK) {
@@ -904,6 +907,24 @@ static int restore_apply(char *file, char *analyse_file) {
         usleep(THREAD_MICRO_SLEEP);
     }
 
+    // Fenêtre `maintenance` posée pour TOUTE la séquence (débordement disque
+    // PUIS RAM) : `stock_spill_step` ne consulte que ce drapeau, jamais les
+    // verrous par file que `restore()` pose/lève lui-même — sans cette
+    // fenêtre, une éviction/un rechargement concurrent pourrait migrer une
+    // possibilité au beau milieu du remplacement (PR3).
+    datamanager_begin_maintenance();
+
+    // Remise en place des segments de débordement EN PREMIER (« snapshot »
+    // — même sous-répertoire que `backup_interpreter`/l'arrêt sur solution,
+    // les deux seuls chemins qui écrivent les fichiers par défaut que
+    // `restore` restaure ici) : un import qui déborde ensuite (configuration
+    // changée, plafond RAM plus bas) COMPLÈTE ces segments au lieu de les
+    // écraser — c'est cet ordre qui le garantit. Un `restore` d'un fichier
+    // personnalisé (chemin explicite, hors convention par défaut) n'a pas de
+    // cliché de débordement correspondant : no-op tolérant, RAM restaurée
+    // quand même, limitation documentée (AGENTS.md).
+    stock_spill_restore_snapshot("snapshot");
+
     int result = restore(file);
     if (result != 0) {
         log_error("restore impossible (%s) : stock conservé\n", file);
@@ -911,6 +932,8 @@ static int restore_apply(char *file, char *analyse_file) {
         log_error("restore analysed impossible (%s) : files analysées conservées\n", analyse_file);
         result = -1;
     }
+
+    datamanager_end_maintenance();
     // Non bloquant : un backup plus ancien peut ne pas avoir ce fichier (feature
     // ajoutée après coup) — le stock/analysed restaurés ci-dessus restent valides
     // sans lui, seule la représentation du meilleur plateau reste vide.

@@ -404,6 +404,31 @@ int datamanager_is_maintenance_active(void)
 	return maintenance != 0;
 }
 
+/**
+ * @brief Pose/lève `maintenance` pour un appelant EXTERNE à ce module (PR3) —
+ *        `restore_apply` (`ui/command_lines.c`) encadre `stock_spill_restore_snapshot`
+ *        (`core/stock_spill.c`) PUIS `restore`/`restore_analysed` dans une
+ *        seule fenêtre : sans elle, `stock_spill_step` (qui ne consulte QUE
+ *        `maintenance`, jamais les verrous par file que `restore()` pose et
+ *        lève lui-même) pourrait démarrer une éviction/un rechargement au
+ *        beau milieu du remplacement des segments ou du drainage/réimport
+ *        RAM, migrant des possibilités au mauvais instant.
+ *
+ * Non ré-entrant à dessein (pas de compteur) : ni `restore` ni
+ * `restore_analysed` ne touchent eux-mêmes `maintenance` aujourd'hui — ne
+ * jamais appeler depuis l'intérieur d'une fenêtre déjà posée par
+ * `consistent_backup`/`sort_*`, qui gèrent la leur en interne.
+ */
+void datamanager_begin_maintenance(void)
+{
+	maintenance = 1;
+}
+
+void datamanager_end_maintenance(void)
+{
+	maintenance = 0;
+}
+
 void set_server_ip(const char *server)
 {
 	if(server_ip != NULL)
@@ -2199,7 +2224,8 @@ int backup_analysed(char *filename)
  *                             BACKUP_ERROR/BACKUP_SKIPPED_MAINTENANCE) — NULL accepté.
  * @return Code du volet stock (même convention que `backup`).
  */
-int consistent_backup(char *stock_filename, char *analysed_filename, int *out_analysed_status)
+int consistent_backup(char *stock_filename, char *analysed_filename, int *out_analysed_status,
+                       const char *spill_snapshot_dir, consistent_backup_spill_snapshot_fn spill_snapshot_fn)
 {
 	if (out_analysed_status != NULL)
 	{
@@ -2259,6 +2285,15 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	{
 		pthread_mutex_lock(&file_possibility[fp]->lock);
 		pthread_mutex_lock(&file_possibility_checked[fp]->lock);
+	}
+
+	// Cliché du débordement disque (PR3), pendant que `maintenance` interdit
+	// toute éviction/rechargement concurrent (cf. `stock_spill_step`) — sans
+	// cette fenêtre, une possibilité pourrait migrer entre RAM et disque
+	// pendant la capture et finir dupliquée ou absente des deux côtés.
+	if (spill_snapshot_dir != NULL && spill_snapshot_fn != NULL)
+	{
+		spill_snapshot_fn(spill_snapshot_dir);
 	}
 
 	// Phase 2a : pool analysé, libéré au fil de l'écriture.
@@ -3121,7 +3156,15 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                 log_info("solution sauvegardée dans %s\n", fileName);
                 if (stop_on_solution) {
                     unlock_all_file();
-                    consistent_backup("./eternityII.back", "./eternityII-in_analyse.back", NULL);
+                    // Sans cliché de débordement ici (spill_snapshot_dir/fn
+                    // à NULL) : ce module (core/) ne peut pas dépendre de
+                    // core/stock_spill.h (règle de dépendance à sens unique,
+                    // AGENTS.md). Lacune documentée — plus étroite que celle
+                    // qu'elle remplace : seul CE chemin (solution trouvée par
+                    // le passe de fond rmnonext, pas celui, plus courant, où
+                    // un client la rapporte via etii_server.c) manque de
+                    // couverture du débordement.
+                    consistent_backup("./eternityII.back", "./eternityII-in_analyse.back", NULL, NULL, NULL);
                     log_event("serveur arrêté suite à la solution (stock sauvegardé)");
                     log_info("serveur arrêté suite à la solution — stock sauvegardé\n");
                     flush_info();

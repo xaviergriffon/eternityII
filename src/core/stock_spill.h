@@ -37,6 +37,11 @@
  * empile en haut de pile (numéro croissant), le rechargement dépile depuis
  * le haut (numéro décroissant) — jamais de compactage, jamais de réécriture
  * d'un segment déjà plein.
+ *
+ * **PR3 — cohérence sauvegarde/restauration** (`stock_spill_snapshot`/
+ * `stock_spill_restore_snapshot` ci-dessous) referme la portée ouverte plus
+ * haut : le débordement SURVIT désormais à un `backup`/`restore` (console,
+ * HTTP, autobackup, arrêt sur solution) — voir la doc de chaque fonction.
  */
 #ifndef eternityII_stock_spill_h
 #define eternityII_stock_spill_h
@@ -152,5 +157,79 @@ unsigned long long stock_spill_total_packets(void);
  *        pools et toutes files confondus.
  */
 unsigned long long stock_spill_total_segments(void);
+
+/**
+ * @brief Produit/actualise un cliché durable du débordement, dans le
+ *        sous-répertoire `snapshot_subdir` de `--stock-spill-dir`.
+ *
+ * **Précondition (jamais vérifiée ici) : l'appelant doit garantir qu'aucune
+ * éviction/rechargement concurrent ne peut avoir lieu pendant tout l'appel**
+ * — en pratique, appelée exclusivement depuis `consistent_backup`
+ * (`core/datamanager.c`, PR3) pendant sa fenêtre `maintenance = 1`, qui fait
+ * déjà de `stock_spill_step` un no-op. Un appelant hors de cette fenêtre
+ * doit poser `maintenance` lui-même en premier.
+ *
+ * **Incrémental et idempotent** : chaque segment PLEIN est dupliqué par
+ * `link()` (O(1), aucune copie de données) — comparé par inode à l'entrée du
+ * cliché existante pour ne relier QUE les segments nouveaux ou renumérotés
+ * depuis le dernier appel (un segment rechargé puis réévincé peut réutiliser
+ * le même numéro de séquence avec un contenu DIFFÉRENT ; comparer l'inode,
+ * pas seulement le nom de fichier, est ce qui détecte ce cas). Le segment de
+ * QUEUE (partiel, encore mutable côté vivant) est toujours une COPIE
+ * fraîche, jamais un lien — sinon une éviction ultérieure muterait aussi le
+ * cliché déjà publié. Les entrées du cliché qui ne correspondent plus à
+ * aucun segment vivant (rechargé/renuméroté depuis le cliché précédent) sont
+ * purgées. Repli sur la copie octet si `link()` échoue (EXDEV, système de
+ * fichiers sans liens physiques) — averti une seule fois par processus.
+ *
+ * Termine par l'écriture atomique (`.tmp` + `rename`) d'un manifeste texte
+ * listant, par (pool, file), `last_seq`/`packets`/`tail_bytes` — c'est ce
+ * manifeste que `stock_spill_restore_snapshot` relit.
+ *
+ * No-op silencieux si le module est désactivé (`stock_spill_configure` a
+ * échoué, ou jamais appelée — cas du rôle client) ou si `snapshot_subdir`
+ * est `NULL`. Échec de création du sous-répertoire : `log_error`, le cliché
+ * est sauté pour cet appel (la sauvegarde RAM appelante reste, elle, valide
+ * — dégradation indépendante, même convention que `best_board_save`).
+ *
+ * @param snapshot_subdir Nom du sous-répertoire, relatif à `--stock-spill-dir`
+ *                        (ex. `"snapshot"` pour la commande `backup`,
+ *                        `"snapshot-temp"` pour l'autobackup — même
+ *                        convention que `eternityII.back` / `temp.back`).
+ */
+void stock_spill_snapshot(const char *snapshot_subdir);
+
+/**
+ * @brief Reconstruit intégralement l'état de débordement VIVANT à partir du
+ *        cliché `snapshot_subdir`, en remplaçant tout ce qui s'y trouvait.
+ *
+ * Doit être appelée **avant** `import()`/`restore()` (`core/datamanager.c`)
+ * — jamais après : un import qui déborde doit COMPLÉTER les segments déjà
+ * remis en place, jamais les écraser. `stock_spill_configure` doit déjà
+ * avoir tourné pour ce process (au démarrage du serveur, avant toute
+ * commande `restore`) : le nombre de files courant (`--stock-files`) est lu
+ * depuis l'état déjà configuré, jamais un paramètre de cette fonction.
+ *
+ * Manifeste absent/illisible/en-tête non reconnu : tolérant, `log_info`,
+ * aucune action (pas une erreur — un `.back` sans cliché de débordement
+ * associé est un cas normal, ex. sauvegarde antérieure à PR3).
+ *
+ * **Re-séquencement si `--stock-files` a changé depuis la sauvegarde** :
+ * chaque entrée `(pool, ancienne_file)` du manifeste est reportée sur la
+ * file VIVANTE `ancienne_file %% nb_file_possibility_courant`.
+ * - **Sans collision** (la file vivante ne reçoit qu'UNE seule entrée du
+ *   cliché — le cas courant, `--stock-files` inchangé ou agrandi) : PURE
+ *   `link()` (repli copie), même numérotation de séquence conservée. Aucun
+ *   déplacement de données.
+ * - **Avec collision** (`--stock-files` réduit : plusieurs anciennes files
+ *   convergent vers la même file vivante) : chaque source est RELUE et
+ *   réempaquetée via la même fonction d'écriture que l'éviction normale
+ *   (`stock_spill_write_block`), pour ne jamais violer l'invariant « tout
+ *   segment sous le sommet est plein » avec un sommet partiel venu d'une
+ *   AUTRE source placé au milieu de la pile fusionnée.
+ *
+ * @param snapshot_subdir Même convention que `stock_spill_snapshot`.
+ */
+void stock_spill_restore_snapshot(const char *snapshot_subdir);
 
 #endif
