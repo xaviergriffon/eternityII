@@ -173,6 +173,17 @@ temps, chaque ancienne file `i` du cliché est reportée sur la file vivante `i 
 nb_file_possibility` ; en cas de collision (`--stock-files` réduit), les sources concernées sont
 réempaquetées, jamais perdues.
 
+**Une restauration incomplète du débordement est détectée et signalée en échec, jamais tolérée
+en silence.** `backup` écrit, à côté du fichier de stock (`<fichier>.spillcount`), le nombre
+exact de possibilités déportées à cet instant précis — indépendant du répertoire de débordement
+lui-même. `restore` compare ce compte à ce qu'il a réellement récupéré depuis le cliché : en cas
+d'écart (`--stock-spill-dir` oublié ou différent de celui utilisé à la sauvegarde, cliché
+supprimé/corrompu…), la commande **échoue explicitement** (`log_error` nommant le nombre exact de
+possibilités potentiellement perdues) plutôt que de rapporter un succès — le stock résident,
+lui, revient tout de même (mieux vaut une restauration partielle mais honnêtement signalée que
+rien du tout). Absence du fichier `.spillcount` (sauvegarde antérieure à cette vérification, ou
+sans débordement actif ce jour-là) : rien à vérifier, pas une anomalie.
+
 > ⚠️ **Sans `restore` après un redémarrage, le débordement résiduel EST perdu.** Ce module
 > lui-même n'a aucune conscience de la sauvegarde — au démarrage, tout segment résiduel d'un
 > précédent processus est **purgé** (`log_error` explicite indiquant le nombre exact de

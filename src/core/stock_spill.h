@@ -196,8 +196,16 @@ unsigned long long stock_spill_total_segments(void);
  *                        (ex. `"snapshot"` pour la commande `backup`,
  *                        `"snapshot-temp"` pour l'autobackup — même
  *                        convention que `eternityII.back` / `temp.back`).
+ * @return Nombre total de possibilités déportées à l'instant du cliché (0 si
+ *         le module est désactivé ou en cas d'échec de création du
+ *         sous-répertoire) — c'est ce compte que l'appelant
+ *         (`consistent_backup`, `core/datamanager.c`) écrit dans
+ *         `<stock_filename>.spillcount`, pour que `restore` puisse ensuite
+ *         détecter une restauration partielle du débordement plutôt que de
+ *         la tolérer en silence (correctif : un cliché absent/mal configuré
+ *         à la restauration perdait des possibilités sans le signaler).
  */
-void stock_spill_snapshot(const char *snapshot_subdir);
+unsigned long long stock_spill_snapshot(const char *snapshot_subdir);
 
 /**
  * @brief Reconstruit intégralement l'état de débordement VIVANT à partir du
@@ -229,7 +237,12 @@ void stock_spill_snapshot(const char *snapshot_subdir);
  *   AUTRE source placé au milieu de la pile fusionnée.
  *
  * @param snapshot_subdir Même convention que `stock_spill_snapshot`.
+ * @return Nombre total de possibilités effectivement remises en place (0 si
+ *         le module est désactivé, ou si aucun manifeste valide n'a été
+ *         trouvé) — à comparer par l'appelant avec `<stock_filename>.spillcount`
+ *         (`datamanager_read_spillcount_sidecar`) pour détecter une
+ *         restauration incomplète du débordement.
  */
-void stock_spill_restore_snapshot(const char *snapshot_subdir);
+unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir);
 
 #endif

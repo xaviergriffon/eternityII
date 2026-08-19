@@ -703,17 +703,17 @@ static int spill_write_manifest(const char *snap_dir)
 	return 0;
 }
 
-void stock_spill_snapshot(const char *snapshot_subdir)
+unsigned long long stock_spill_snapshot(const char *snapshot_subdir)
 {
 	if (!g_spill_enabled || snapshot_subdir == NULL) {
-		return;
+		return 0;
 	}
 	char snap_dir[PATH_MAX];
 	snprintf(snap_dir, sizeof(snap_dir), "%s/%s", g_spill_dir, snapshot_subdir);
 	if (mkdir(snap_dir, 0755) != 0 && errno != EEXIST) {
 		log_error("stock_spill_snapshot : impossible de créer « %s » (%s) — cliché de débordement "
 		          "sauté (la sauvegarde RAM appelante reste valide)\n", snap_dir, strerror(errno));
-		return;
+		return 0;
 	}
 
 	// Duplication des segments : PLEINS par lien (comparé par inode, pour ne
@@ -776,6 +776,7 @@ void stock_spill_snapshot(const char *snapshot_subdir)
 	}
 
 	spill_write_manifest(snap_dir);
+	return stock_spill_total_packets();
 }
 
 typedef struct {
@@ -856,10 +857,10 @@ static int spill_read_manifest(const char *snap_dir, spill_manifest_entry_t **ou
 	return 0;
 }
 
-void stock_spill_restore_snapshot(const char *snapshot_subdir)
+unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 {
 	if (!g_spill_enabled || snapshot_subdir == NULL) {
-		return;
+		return 0;
 	}
 	char snap_dir[PATH_MAX];
 	snprintf(snap_dir, sizeof(snap_dir), "%s/%s", g_spill_dir, snapshot_subdir);
@@ -869,7 +870,7 @@ void stock_spill_restore_snapshot(const char *snapshot_subdir)
 	if (spill_read_manifest(snap_dir, &entries, &n) != 0) {
 		log_info("stock_spill_restore_snapshot : aucun cliché de débordement valide dans « %s » — "
 		         "rien à restaurer côté disque\n", snap_dir);
-		return;
+		return 0;
 	}
 
 	// Remplacement intégral, comme le drainage RAM que `restore()`
@@ -988,4 +989,5 @@ void stock_spill_restore_snapshot(const char *snapshot_subdir)
 	         "sans collision, %llu possibilité(s) réempaquetée(s) sur %d file(s) — collision due à un "
 	         "--stock-files réduit depuis la sauvegarde)\n",
 	         snap_dir, total_linked, linked_groups, total_repacked, repacked_groups);
+	return total_linked + total_repacked;
 }

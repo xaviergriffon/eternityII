@@ -923,21 +923,56 @@ static int restore_apply(char *file, char *analyse_file) {
     // personnalisé (chemin explicite, hors convention par défaut) n'a pas de
     // cliché de débordement correspondant : no-op tolérant, RAM restaurée
     // quand même, limitation documentée (AGENTS.md).
-    stock_spill_restore_snapshot("snapshot");
+    unsigned long long spill_restored = stock_spill_restore_snapshot("snapshot");
 
-    int result = restore(file);
-    if (result != 0) {
+    // Correctif : `stock_spill_restore_snapshot` était tolérante par
+    // construction (cliché absent/mal configuré → simplement rien restauré,
+    // aucune erreur remontée) — un `--stock-spill-dir` oublié, différent de
+    // celui utilisé à la sauvegarde, ou un cliché supprimé/corrompu
+    // produisait donc une restauration RAPPORTÉE COMME RÉUSSIE mais en
+    // réalité amputée du débordement, en silence (perte de possibilités
+    // contraire au principe du projet — voir AGENTS.md, aucune perte
+    // tolérée sans plan de secours). `<file>.spillcount`
+    // (`datamanager_read_spillcount_sidecar`), écrit par `consistent_backup`
+    // au moment de CETTE sauvegarde précise et donc indépendant du
+    // répertoire de débordement (qui peut, lui, être absent/mal configuré à
+    // la restauration), permet de le détecter : sa présence dit combien de
+    // possibilités AURAIENT dû revenir. Absence tolérée (sauvegarde
+    // antérieure à ce correctif, ou sans débordement actif ce jour-là) —
+    // dans ce cas, rien à vérifier, pas une anomalie.
+    unsigned long long spill_expected = 0;
+    int spill_mismatch = 0;
+    if (datamanager_read_spillcount_sidecar(file, &spill_expected) && spill_expected != spill_restored) {
+        spill_mismatch = 1;
+        log_error("restore : débordement disque INCOMPLET — %llu possibilité(s) attendue(s) "
+                  "(déportées au moment de la sauvegarde de %s), %llu récupérée(s) depuis le "
+                  "cliché de débordement (--stock-spill-dir absent/différent de celui utilisé à "
+                  "la sauvegarde, ou cliché supprimé/corrompu ?) — %llu possibilité(s) "
+                  "potentiellement perdue(s). La restauration continue (le stock résident "
+                  "reste utilisable) mais est INCOMPLÈTE.\n",
+                  spill_expected, file, spill_restored,
+                  spill_expected > spill_restored ? spill_expected - spill_restored : 0);
+    }
+
+    // `core_result` (volet RAM stock+analysed) reste distinct de `result`
+    // (retour de la fonction) : un débordement incomplet (spill_mismatch)
+    // ne doit RIEN changer au chargement de best_board/known_clients
+    // ci-dessous, qui n'a aucun rapport avec le débordement — seul un échec
+    // RÉEL du volet RAM (core_result != 0) doit les sauter, comme avant ce
+    // correctif.
+    int core_result = restore(file);
+    if (core_result != 0) {
         log_error("restore impossible (%s) : stock conservé\n", file);
     } else if (restore_analysed(analyse_file) != 0) {
         log_error("restore analysed impossible (%s) : files analysées conservées\n", analyse_file);
-        result = -1;
+        core_result = -1;
     }
 
     datamanager_end_maintenance();
     // Non bloquant : un backup plus ancien peut ne pas avoir ce fichier (feature
     // ajoutée après coup) — le stock/analysed restaurés ci-dessus restent valides
     // sans lui, seule la représentation du meilleur plateau reste vide.
-    if (result == 0) {
+    if (core_result == 0) {
         if (best_board_load(&g_server_best_board, DEF_BEST_BOARD_FILE) != 0) {
             log_error("restore best board impossible (%s) : aucun plateau record connu\n", DEF_BEST_BOARD_FILE);
         } else {
@@ -967,6 +1002,12 @@ static int restore_apply(char *file, char *analyse_file) {
         request = previous_request;
     }
 
+    // Le résultat RENVOYÉ reflète l'ISSUE COMPLÈTE (RAM + débordement) —
+    // jamais un succès si le débordement est resté incomplet, même quand le
+    // volet RAM a, lui, parfaitement réussi (cf. la doc de spill_mismatch
+    // plus haut) : c'est ce qui fait remonter l'échec jusqu'à l'appelant
+    // (console, API HTTP admin) plutôt que de le taire.
+    int result = (core_result == 0 && !spill_mismatch) ? 0 : -1;
     if (result == 0) {
         log_info("backup restore\n");
     }

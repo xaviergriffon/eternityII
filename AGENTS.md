@@ -1130,6 +1130,70 @@ same/different `--stock-files`" via a second `stock_spill_configure` call must r
 boundaries against data written under the old override (caught immediately by both a `n != 8`
 mismatch and outright segment read failures, not a silent pass).
 
+**Follow-up, found by an operator testing this PR directly: a restore against a missing/wrong
+`--stock-spill-dir` silently reported SUCCESS while actually losing every spilled possibility.**
+`stock_spill_restore_snapshot` was deliberately tolerant by design (a missing manifest just means
+"nothing to restore," so a pre-PR3 backup or a client role restoring without ever having spilled
+degrades gracefully) — but that same tolerance meant a genuinely INCOMPLETE restore (operator
+forgot `--stock-spill-dir` on the new process, pointed it at a different path than the one used at
+backup time, or the snapshot directory was deleted/corrupted) was **indistinguishable** from the
+legitimate "nothing was ever spilled" case: both looked like a clean `restore` with `result == 0`.
+This directly violated the project's own no-possibility-loss principle — a possibility being
+silently dropped by a *tolerant* code path is exactly the failure mode that principle exists to
+rule out, and unlike a transient RAM-cap wait (retryable, nothing lost) a missing spill snapshot
+at restore time is unrecoverable within that restore attempt.
+
+**Fixed by giving `restore` an independent way to know what it SHOULD get back, decoupled from the
+spill directory that might itself be the thing that's wrong.** `consistent_backup` now writes a
+small sidecar file, `<stock_filename>.spillcount`, right after the stock `.back` file's own atomic
+rename succeeds — containing the exact packet count `spill_snapshot_fn` returned (its signature,
+and `stock_spill_snapshot`'s, changed from `void` to `unsigned long long`, returning
+`stock_spill_total_packets()` at the moment the snapshot was taken; `stock_spill_restore_snapshot`
+symmetrically changed to return the actual count it recovered, `total_linked + total_repacked`).
+The sidecar is written **only** when a real `spill_snapshot_fn` was supplied — never a fabricated
+"0 spilled" for a caller (client role, or the one internal `datamanager.c` call site that can't
+depend on `stock_spill.h`) that never asked for spill coverage in the first place, since the
+sidecar's own *absence* needs to stay a reliable "nothing to verify" signal, not become ambiguous
+with "0 packets, verified." `restore_apply` (`ui/command_lines.c`) reads it via the new
+`datamanager_read_spillcount_sidecar` (`core/datamanager.{h,c}`, symmetric with the writer, same
+file next to `stock_filename` — reachable independently of whatever `--stock-spill-dir` happens to
+resolve to on THIS run) and compares it against what `stock_spill_restore_snapshot` actually
+reports recovering; any mismatch (in either direction — under- or over-recovery, the latter
+suggesting a stale/unrelated snapshot got picked up) is now a loud `log_error` naming the exact
+expected/actual/lost counts and possible causes, and makes the function's overall return value
+**non-zero** — surfacing as a genuine failure to the console, the HTTP admin API, and any script
+driving `restore` remotely, instead of a silent "backup restore" success line.
+
+**Deliberately still completes the RAM-side restore even when spill is confirmed incomplete.**
+`restore_apply` was restructured to track a `core_result` (the stock+analysed RAM outcome) separate
+from the function's final `result` (RAM outcome AND spill match together): the spill mismatch check
+happens *before* `restore()` runs (spill-restore is already first in sequence, so nothing has to be
+undone), but rather than refuse the whole restore outright, the RAM portion still proceeds —
+partial-but-honestly-reported beats an all-or-nothing refusal that would deny an operator even the
+data that IS recoverable (e.g. a genuine disaster where the spill volume was lost but the `.back`
+files survived on different storage). `best_board_load`/`known_clients_registry_load` — unrelated
+to spill entirely — are gated on `core_result` alone, exactly as before this fix, so a spill
+mismatch never blocks them either.
+
+Tests: `tests/core/test_datamanager.c` — `consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window`
+extended to assert the sidecar round-trips the hook's (now non-`void`) return value via
+`datamanager_read_spillcount_sidecar`; `consistent_backup_round_trip_preserves_both_pools` (called
+with `NULL, NULL` for the spill callback) asserts the sidecar is correctly **absent** in that case
+— proving its absence stays a reliable "nothing to verify" signal, never a false "0 spilled."
+`tests/ui/test_command_lines.c` — `do_command_line_restore_detects_incomplete_spill` (a hand-written
+sidecar claiming 42 spilled possibilities, deliberately with no matching spill directory configured
+— `stock_spill_restore_snapshot` is then a guaranteed no-op — asserts the overall `restore` command
+now fails loudly while the RAM stock still comes back) and
+`do_command_line_restore_without_spillcount_sidecar_succeeds_normally` (no sidecar at all — the
+pre-existing, still-correct "nothing to verify" case, non-regression-tested explicitly rather than
+relying on it being an accidental side effect of another test). Verified for real: a 256-piece
+server with active spillover, `backup`, killed, restarted **without** `--stock-spill-dir` (the
+exact operator-reported reproduction) — `restore` now logs
+`"restore : débordement disque INCOMPLET — 2509 possibilité(s) attendue(s) ... 0 récupérée(s) ...
+2509 possibilité(s) potentiellement perdue(s)"` where it previously logged nothing beyond a plain
+`backup restore` success line; the same server restarted **with** the correct `--stock-spill-dir`
+restores cleanly with no false-positive mismatch (2509 expected, 2509 recovered).
+
 ### HTTP REST admin API
 
 **`--http-port <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only, `n` in `[1, 65535]`). Starts a minimal HTTP/1.1 admin API on **`127.0.0.1:<n>`** — loopback only, never `INADDR_ANY`, so it is never reachable off the machine by default (use an SSH tunnel or a reverse proxy for remote access). **Absent by default** (`HTTP_PORT` global defaults to 0): no extra socket is opened unless explicitly requested. Lets an external HTTP application (written in any language) read server telemetry and drive a few whitelisted admin actions without speaking the binary `packet`/`control_protocol` wire formats.

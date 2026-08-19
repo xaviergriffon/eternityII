@@ -2290,10 +2290,18 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	// Cliché du débordement disque (PR3), pendant que `maintenance` interdit
 	// toute éviction/rechargement concurrent (cf. `stock_spill_step`) — sans
 	// cette fenêtre, une possibilité pourrait migrer entre RAM et disque
-	// pendant la capture et finir dupliquée ou absente des deux côtés.
+	// pendant la capture et finir dupliquée ou absente des deux côtés. Le
+	// compte renvoyé est écrit plus bas dans `<stock_filename>.spillcount`,
+	// une fois le volet stock confirmé écrit — c'est ce compte qui permettra
+	// à `restore` de détecter une restauration partielle du débordement
+	// (correctif : avant, un cliché absent/mal configuré à la restauration
+	// était toléré en silence, perdant des possibilités sans le signaler).
+	unsigned long long spill_packets_snapshotted = 0;
+	int spill_snapshot_taken = 0;
 	if (spill_snapshot_dir != NULL && spill_snapshot_fn != NULL)
 	{
-		spill_snapshot_fn(spill_snapshot_dir);
+		spill_packets_snapshotted = spill_snapshot_fn(spill_snapshot_dir);
+		spill_snapshot_taken = 1;
 	}
 
 	// Phase 2a : pool analysé, libéré au fil de l'écriture.
@@ -2387,11 +2395,76 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 		unlink(stock_tmp);
 		rc_stock = BACKUP_ERROR;
 	}
+	else if (spill_snapshot_taken)
+	{
+		// Accessoire écrit UNIQUEMENT si un cliché de débordement a
+		// réellement été demandé (spill_snapshot_fn != NULL) : son ABSENCE
+		// doit rester un signal fiable de « rien à vérifier » (sauvegarde
+		// antérieure à ce correctif, ou appelant sans cliché — ex. rôle
+		// client, ou l'unique site interne à datamanager.c), jamais un faux
+		// « 0 possibilité déportée ».
+		size_t path_len = strlen(stock_filename) + strlen(".spillcount") + 1;
+		char *sidecar_path = malloc(path_len);
+		if (sidecar_path != NULL)
+		{
+			snprintf(sidecar_path, path_len, "%s.spillcount", stock_filename);
+			char *sidecar_tmp = backup_tmp_path(sidecar_path);
+			if (sidecar_tmp != NULL)
+			{
+				FILE *fsidecar = fopen(sidecar_tmp, "w");
+				if (fsidecar != NULL)
+				{
+					int written_ok = (fprintf(fsidecar, "%llu\n", spill_packets_snapshotted) > 0);
+					if (fclose(fsidecar) != 0) { written_ok = 0; }
+					if (!written_ok || rename(sidecar_tmp, sidecar_path) != 0)
+					{
+						log_error("backup (cohérent) : échec d'écriture de %s (compte de débordement non "
+						          "vérifiable à la prochaine restauration)\n", sidecar_path);
+						unlink(sidecar_tmp);
+					}
+				}
+				else
+				{
+					log_errno("backup (cohérent) file :%s ", sidecar_tmp);
+				}
+				free(sidecar_tmp);
+			}
+			free(sidecar_path);
+		}
+	}
 
 	free(stock_tmp);
 	free(analysed_tmp);
 	if (out_analysed_status != NULL) { *out_analysed_status = rc_analysed; }
 	return rc_stock;
+}
+
+int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned long long *out_count)
+{
+	size_t path_len = strlen(stock_filename) + strlen(".spillcount") + 1;
+	char *sidecar_path = malloc(path_len);
+	if (sidecar_path == NULL)
+	{
+		return 0;
+	}
+	snprintf(sidecar_path, path_len, "%s.spillcount", stock_filename);
+
+	FILE *f = fopen(sidecar_path, "r");
+	free(sidecar_path);
+	if (f == NULL)
+	{
+		return 0;
+	}
+
+	unsigned long long count = 0;
+	int ok = (fscanf(f, "%llu", &count) == 1);
+	fclose(f);
+	if (!ok)
+	{
+		return 0;
+	}
+	if (out_count != NULL) { *out_count = count; }
+	return 1;
 }
 
 int import(client_possibility_t *client_possibility, char *filename)

@@ -655,6 +655,13 @@ TEST consistent_backup_round_trip_preserves_both_pools(void)
     ASSERT_EQ_FMT(BACKUP_OK, rb, "%d");
     ASSERT_EQ_FMT(BACKUP_OK, rba, "%d");
 
+    /* Sans crochet de débordement (spill_snapshot_fn == NULL, cas normal
+     * côté client, ou l'unique site interne à datamanager.c) : aucun
+     * accessoire .spillcount écrit -- son absence doit rester un signal
+     * FIABLE de « rien à vérifier » pour restore, jamais une fausse alerte. */
+    unsigned long long unused_count = 0;
+    ASSERT_EQ_FMT(0, datamanager_read_spillcount_sidecar(path, &unused_count), "%d");
+
     drain_all();
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
     ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
@@ -681,11 +688,13 @@ TEST consistent_backup_round_trip_preserves_both_pools(void)
 static int g_spill_hook_calls = 0;
 static char g_spill_hook_dir[256];
 static int g_spill_hook_maintenance_seen = -1;
-static void fake_spill_snapshot_hook(const char *dir)
+static unsigned long long g_spill_hook_return = 0;
+static unsigned long long fake_spill_snapshot_hook(const char *dir)
 {
     g_spill_hook_calls++;
     snprintf(g_spill_hook_dir, sizeof g_spill_hook_dir, "%s", dir);
     g_spill_hook_maintenance_seen = maintenance;
+    return g_spill_hook_return;
 }
 
 TEST consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window(void)
@@ -703,6 +712,7 @@ TEST consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window(voi
 
     g_spill_hook_calls = 0;
     g_spill_hook_maintenance_seen = -1;
+    g_spill_hook_return = 4242; /* valeur arbitraire distinctive, vérifiée dans l'accessoire */
     int rba = -99;
     int rb = consistent_backup(path, path_an, &rba, "/tmp/some-spill-dir", fake_spill_snapshot_hook);
     ASSERT_EQ_FMT(BACKUP_OK, rb, "%d");
@@ -711,8 +721,19 @@ TEST consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window(voi
     ASSERT_EQ_FMT(1, g_spill_hook_maintenance_seen, "%d"); /* vu PENDANT la fenêtre */
     ASSERT_EQ_FMT(0, maintenance, "%d");                   /* levée après coup */
 
+    /* Correctif : le compte renvoyé par le crochet est écrit dans l'accessoire
+     * <path>.spillcount, relu indépendamment du répertoire de débordement --
+     * c'est ce qui permettra à restore de détecter une restauration
+     * incomplète du débordement plutôt que de la tolérer en silence. */
+    unsigned long long read_back = 0;
+    ASSERT_EQ_FMT(1, datamanager_read_spillcount_sidecar(path, &read_back), "%d");
+    ASSERT_EQ_FMT(4242ULL, read_back, "%llu");
+
+    char sidecar_path[PATH_MAX + 16];
+    snprintf(sidecar_path, sizeof sidecar_path, "%s.spillcount", path);
     unlink(path);
     unlink(path_an);
+    unlink(sidecar_path);
     rmdir(dir_template);
     drain_all();
     PASS();
