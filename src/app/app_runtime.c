@@ -475,7 +475,9 @@ void backup_failed_exit(void)
         sprintf(def_file, "./failed_exit_eternityII_%i.back", getpid());
         char *def_analyse_file = malloc(sizeof(char) * 60);
         sprintf(def_analyse_file, "./failed_exit_eternityII-in_analyse_%i.back", getpid());
-		consistent_backup(def_file, def_analyse_file, NULL);
+		// Client role : le débordement disque (stock_spill) n'est jamais
+		// configuré ici, ce backup d'urgence n'a donc rien à cliché-er.
+		consistent_backup(def_file, def_analyse_file, NULL, NULL, NULL);
         free(def_file);
         free(def_analyse_file);
 	}

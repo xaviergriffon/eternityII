@@ -289,8 +289,8 @@ via cette route, et seulement avec un jeton Bearer valide (voir
 
 | Commande | Effet |
 |---|---|
-| `restore [fichier [fichier_analyse]]` | Remplace le stock courant par le contenu des fichiers `.back` indiqués (défaut : `./eternityII.back` / `./eternityII-in_analyse.back`) |
-| `backup` | Sauvegarde les files courantes dans les fichiers `.back` |
+| `restore [fichier [fichier_analyse]]` | Remplace le stock courant par le contenu des fichiers `.back` indiqués (défaut : `./eternityII.back` / `./eternityII-in_analyse.back`) — remet aussi en place, avant l'import, le cliché de débordement disque le plus récent (`<--stock-spill-dir>/snapshot/`, absence tolérée) |
+| `backup` | Sauvegarde les files courantes dans les fichiers `.back`, ainsi qu'un cliché incrémental du débordement disque si `--stock-spill-dir` est actif |
 | `sortAsc` | Trie tout le stock par ordre croissant (moins avancées d'abord) — équivalent HTTP de la commande console `sortAsc` |
 | `sortDesc [n]` | Trie par ordre décroissant, toutes les files ou la file `<n>` si précisé — équivalent HTTP de `sortDesc` |
 | `sortDescMulti` | Trie toutes les files en parallèle (multi-thread) — équivalent HTTP de `sortDescMulti`, peut prendre du temps sur un gros stock |

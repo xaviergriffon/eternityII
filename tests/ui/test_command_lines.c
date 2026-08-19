@@ -1232,6 +1232,100 @@ TEST do_command_line_restore_with_two_arguments(void)
     PASS();
 }
 
+/* Correctif : une sauvegarde ayant réellement déporté des possibilités sur
+ * disque (accessoire <fichier>.spillcount écrit à la main ici -- pas besoin
+ * de faire tourner un vrai débordement pour exercer la DÉTECTION elle-même,
+ * cf. tests/core/test_stock_spill.c pour le mécanisme de cliché lui-même)
+ * mais dont le cliché de débordement est absent/mal configuré à la
+ * restauration (jamais de --stock-spill-dir dans ce test :
+ * stock_spill_restore_snapshot est un no-op garanti, 0 récupéré) doit faire
+ * ÉCHOUER la restauration dans son ensemble -- jamais un succès silencieux
+ * qui masquerait la perte. Le stock RAM, lui, doit tout de même revenir
+ * (partiel-mais-honnête vaut mieux que rien). */
+TEST do_command_line_restore_detects_incomplete_spill(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_rspillmismatch_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+
+    dm_drain();
+    int allocs[] = { 3, 4 };
+    dm_add(allocs, 2);
+    ASSERT_EQ_FMT(0, backup("./custom.back"), "%d");
+    ASSERT_EQ_FMT(0, backup_analysed("./custom_analysed.back"), "%d");
+
+    FILE *sc = fopen("./custom.back.spillcount", "w");
+    ASSERT(sc != NULL);
+    ASSERT(fprintf(sc, "42\n") > 0);
+    fclose(sc);
+
+    dm_drain();
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    char cmd[] = "restore ./custom.back ./custom_analysed.back";
+    int r = run_command_quiet(cmd);
+    unsigned long long after = datas_size();
+
+    dm_drain();
+    unlink("./custom.back");
+    unlink("./custom.back.spillcount");
+    unlink("./custom_analysed.back");
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+
+    ASSERT(r != 0);            /* échec signalé, jamais un succès silencieux */
+    ASSERT_EQ_FMT(2ULL, after, "%llu"); /* le stock RAM est quand même revenu */
+    PASS();
+}
+
+/* Symétrique : SANS accessoire .spillcount (sauvegarde antérieure à ce
+ * correctif, ou sans débordement actif) -- aucune vérification n'est
+ * tentée, la restauration réussit normalement comme avant. Non-régression
+ * du cas courant (déjà couvert par do_command_line_restore_with_two_arguments
+ * ci-dessus, mais vérifié explicitement ici pour ne pas dépendre d'une
+ * absence de fichier accidentelle). */
+TEST do_command_line_restore_without_spillcount_sidecar_succeeds_normally(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_rnospillcount_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+
+    dm_drain();
+    int allocs[] = { 3, 4 };
+    dm_add(allocs, 2);
+    ASSERT_EQ_FMT(0, backup("./custom.back"), "%d");
+    ASSERT_EQ_FMT(0, backup_analysed("./custom_analysed.back"), "%d");
+
+    struct stat st_sidecar;
+    ASSERT(stat("./custom.back.spillcount", &st_sidecar) != 0); /* absent, comme attendu */
+
+    dm_drain();
+
+    char cmd[] = "restore ./custom.back ./custom_analysed.back";
+    int r = run_command_quiet(cmd);
+    unsigned long long after = datas_size();
+
+    dm_drain();
+    unlink("./custom.back");
+    unlink("./custom_analysed.back");
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+
+    ASSERT_EQ_FMT(0, r, "%d");
+    ASSERT_EQ_FMT(2ULL, after, "%llu");
+    PASS();
+}
+
 /* check : ternaire « lastcheck != NULL » (L166) et « report_copy != NULL » (L170)
  * jamais vrais dans les tests précédents — on publie un rapport non-NULL. */
 TEST do_command_line_check_with_non_null_lastcheck(void)
@@ -2545,6 +2639,8 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_backup_client_mode_appends_pid);
     RUN_TEST(do_command_line_restore_with_one_argument);
     RUN_TEST(do_command_line_restore_with_two_arguments);
+    RUN_TEST(do_command_line_restore_detects_incomplete_spill);
+    RUN_TEST(do_command_line_restore_without_spillcount_sidecar_succeeds_normally);
 
     RUN_TEST(do_command_line_check_with_non_null_lastcheck);
     RUN_TEST(do_command_line_backup_skipped_when_maintenance);

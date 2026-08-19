@@ -446,15 +446,16 @@ block (whichever subset actually ran). Exposed as `last_backup_duration_ms` on
 "how long did the backup actually take" question answerable directly instead of inferred after
 the fact from log timestamps, as it had to be during the original diagnosis.
 
-**Left open, out of scope for this series — since addressed, see below (RAM cap) and still
-partially open (disk spillover, delta backup).** The real ceiling is *volume*: 14M possibilities
+**Left open, out of scope for this series — since addressed, see below (RAM cap, disk spillover)
+and still partially open (delta backup).** The real ceiling is *volume*: 14M possibilities
 ≈ 9GB resident on a 16GB box, and nothing bounded the stock's growth at runtime
 (`expand_max_stock` only bounds the one-time startup `--expand-level` expansion, never later
 growth from search/delegation traffic). A global stock cap, spilling to disk, or backing up by
 delta instead of a full rewrite each time would all address this directly; none of this series'
 incidents required it, and it was a materially bigger design question than bounding a lock or
-gating a write — the RAM-cap half is now implemented (below), the disk-spillover and
-delta-backup halves are not.
+gating a write — the RAM-cap and disk-spillover (including its own backup/restore coherence,
+PR3) halves are now implemented (below), only delta backup (avoiding a full rewrite of the
+RESIDENT portion on every `consistent_backup`) remains open.
 
 ### RAM cap on the possibility stock (`--stock-max-ram`) — PR1 of 3
 
@@ -1011,6 +1012,234 @@ chaque changement d'échelle), et bloquer un thread serveur plusieurs secondes p
 pendant une sauvegarde saturerait le pool de threads, soit précisément l'incident que PR1 a
 corrigé. Le refus borné reste le bon compromis ; seule sa présentation était fautive.
 
+### Backup/restore coherence for the disk spillover — PR3 of 3
+
+Closes the gap PR2 explicitly left open: **the spillover now survives a `backup` followed by a
+`restore`** (console, HTTP admin, autobackup, or `--stop-on-solution` shutdown) — previously,
+any segment found on disk at `stock_spill_configure` time was unconditionally purged and lost,
+since the module had no notion of a backup/restore cycle at all.
+
+**`consistent_backup` gained an optional injected callback, not a new `core/` → `stock_spill.h`
+dependency.** `core/stock_spill.c` was already allowed to depend on `core/datamanager.h` (PR2's
+one-way rule) — the reverse is still forbidden, and `consistent_backup` itself lives in
+`datamanager.c`, called both from `app/`/`ui/` (which legitimately know about `stock_spill.h`)
+and from **inside** `datamanager.c` itself (the `rmnonext`-triggered solution-stop path). Rather
+than have `datamanager.c` `#include "core/stock_spill.h"`, `consistent_backup` gained two new
+parameters — `const char *spill_snapshot_dir` and a function pointer,
+`consistent_backup_spill_snapshot_fn` (`typedef void (*)(const char *snapshot_dir)`) — invoked
+at most once, inside phase 1's lock window (right after all stock/analysed locks are acquired,
+`maintenance == 1`), so `stock_spill_step`'s own `maintenance` check (PR2) guarantees no
+concurrent eviction/reload can migrate a possibility mid-snapshot. Every production call site
+now passes `stock_spill_snapshot` (real function) and a subdirectory name mirroring the existing
+`.back` naming convention — `"snapshot-temp"` for autobackup (paired with `./temp.back`),
+`"snapshot"` for the privileged `backup` command and the solution/`--stop-on-solution` shutdown
+path (paired with `./eternityII.back`) — **except** the one call site inside `datamanager.c`
+itself (`remove_possibilities_with_no_next`'s solution-found-by-rmnonext path), which passes
+`NULL, NULL`: `core/` cannot depend on `stock_spill.h`, so this one narrower, documented path
+(a solution found by the background prune pass, not the more common client-reported path in
+`etii_server.c`) has no spillover coverage. `backup_failed_exit` (`app/app_runtime.c`, the
+client-role emergency backup on abnormal exit) also passes `NULL, NULL` — deliberately, since
+`stock_spill` is never configured client-side, so there is nothing to snapshot there regardless.
+
+**Snapshot is incremental and idempotent, not a full rewrite every time — `stock_spill_snapshot`
+(`core/stock_spill.c`).** Full segments (everything below the current top, immutable by PR2's own
+invariant) are duplicated by `link()` — O(1), zero data copy — **compared by inode, not just by
+filename**, before deciding whether to (re-)link: a segment can be fully reloaded (unlinked from
+the live directory) and later re-evicted, reusing the exact same sequence number with entirely
+DIFFERENT content — filename alone can't distinguish "already correctly linked" from "stale,
+needs relinking." The top (tail) segment — still mutable on the live side — is always a fresh
+**copy**, never a link: linking it would mean a later live append also mutates the already-
+published snapshot. A purge pass removes any snapshot entry whose `(pool, file, seq)` no longer
+corresponds to the live descriptor's current range (segment reloaded/renumbered since the last
+snapshot). Ends with an atomic `.tmp`+`rename` text manifest (`eternityii-spill-manifest-v1`
+magic line, then one `pool file_index last_seq packets tail_bytes` line per non-empty
+`(pool, file)`) — same convention as every other `.back`-adjacent format in this project.
+`link()` failure (EXDEV, a filesystem without hardlink support) falls back to a byte copy,
+warned once per process, never per call.
+
+**Restore re-sequences by `old_file_index %% nb_file_possibility_now` — pure `link()` when there's
+no collision, a reasoned repack when `--stock-files` shrank since the backup.**
+`stock_spill_restore_snapshot` (called from `restore_apply`, `ui/command_lines.c`, **before**
+`restore()`/`restore_analysed()` — the ordering the plan explicitly required, so that an import
+which itself overflows the RAM cap COMPLETES the just-restored segments instead of overwriting
+them) purges whatever is currently live (mirrors `restore()`'s own unconditional RAM-pool drain —
+expected, not a new loss), resets every descriptor, reads the manifest, and groups entries by
+`(pool, old_file_index %% nb_file_possibility)`:
+- **Exactly one source maps to a given live file** (the common case — `--stock-files` unchanged
+  or grown, so the modulo is always a no-op identity mapping): pure `link()`/copy-fallback, same
+  sequence numbers preserved, zero data movement — "restoring several GB costs only physical
+  links," per the plan's own stated goal.
+- **More than one source maps to the same live file** (`--stock-files` shrank): naive
+  concatenation of raw segment files was considered and rejected — it would leave a FORMERLY-
+  partial top segment from one source buried in the MIDDLE of the merged stack, violating PR2's
+  own load-bearing invariant that reload's rollback (`tail_bytes = stock_spill_full_segment_bytes()`
+  when a segment fully empties) depends on: "every non-top segment is exactly full." Instead each
+  colliding source is re-read, segment by segment, and fed through `stock_spill_write_block` —
+  the exact same function normal eviction already uses to append with correct segment rollover —
+  so the merged result always ends up with the same invariant an ordinary eviction would have
+  produced, no special-cased merge logic duplicated.
+
+**A new `maintenance` window, owned by the caller, not by `restore()` itself.**
+`restore()`/`restore_analysed()` never touched the `maintenance` flag before this PR — they
+relied only on `lock_all_file()`/`unlock_all_file()`'s per-file locks, which `stock_spill_step`
+never consults (it only checks `maintenance`, PR2's own documented contract). Without a fix,
+`stock_spill_step`'s periodic tick could run concurrently with `restore_apply`'s spill-segment
+placement or the RAM drain/import that follows, migrating a possibility at exactly the wrong
+instant. Two small new accessors — `datamanager_begin_maintenance()`/`_end_maintenance()`
+(`core/datamanager.{h,c}`, deliberately non-reentrant: neither `restore` nor `restore_analysed`
+ever sets `maintenance` themselves, so nesting is not a concern here) — let `restore_apply`
+bracket the WHOLE sequence (`stock_spill_restore_snapshot` → `restore` → `restore_analysed`) in
+one window, exactly mirroring the guarantee `consistent_backup` already gives its own callback.
+
+**Real-world verification, not just unit tests.** A 256-piece server
+(`--expand-level 6 --expand-max-levels 6 --expand-max-stock 200000 --stock-max-ram 1
+--stock-spill-dir ./spill --http-port 8099 --http-token-file …`) reached a stable
+1104-resident/1281-spilled/6-segment split (2385 total) purely from startup expansion waiting
+out the RAM cap (the PR2-era loss-fix, confirmed still lossless under real spillover pressure).
+`backup` produced a 6-segment/214-byte manifest snapshot (`./spill/snapshot/`), matching exactly.
+Killing the process and restarting fresh with the **same** `--stock-files` (default 10) then
+running `restore`: total came back as exactly 2385 (1104/1281/6), log line confirming
+"1281 possibilité(s) sur 6 file(s) sans collision" — the pure-link path. A second restart with
+`--stock-files 4` (deliberately shrunk) and another `restore`: total again exactly 2385, this
+time "422 possibilité(s) sur 2 file(s) sans collision, 859 possibilité(s) réempaquetée(s) sur 2
+file(s)" — both paths exercised in the same run, zero loss either way, and a subsequent
+`stockMaxRam 100` (removing the RAM pressure) fully reloaded all 2385 possibilities back into RAM
+with zero read errors, confirming the repacked segments respect the "only the top may be
+partial" invariant the repack path was specifically designed to preserve.
+
+Tests: `tests/core/test_datamanager.c`
+(`consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window` — a fake hook records
+whether `maintenance` was 1 at the instant it ran, and that it ran exactly once). Seven new tests
+in `tests/core/test_stock_spill.c`: `snapshot_links_full_segments_and_copies_tail` (inode
+comparison for the link path, exact manifest content), `snapshot_refreshes_stale_reused_segment_number`
+(the reload-then-re-evict-reusing-a-seq-number case — the one the inode comparison exists for —
+round-tripped through a full `restore_snapshot` to confirm only the NEW data comes back, never
+the old), `restore_snapshot_no_collision_round_trip_preserves_data`,
+`restore_snapshot_collision_repacks_when_stock_files_shrinks` (manifest and segment files
+constructed by hand — same technique `configure_purges_matching_segments_and_spares_others`
+already used in PR2 — to deterministically force a specific collision; also directly asserts
+`stat()` sizes on the rebuilt segments confirm "only the top is partial" survived the repack, not
+just the aggregate packet count), `restore_snapshot_tolerates_missing_manifest`,
+`restore_snapshot_replaces_current_live_segments` (current unsaved spillover is discarded, never
+merged with the restored snapshot — same "replace, don't merge" contract `restore()` already has
+for the RAM pools). A subtlety hit twice while writing these: `stock_spill_configure` resets the
+test-only segment-size override back to the real 64 MiB default every time it's called (needed in
+production so a real restart doesn't inherit a stale test setting) — a test simulating "restart,
+same/different `--stock-files`" via a second `stock_spill_configure` call must re-apply
+`stock_spill_set_segment_bytes_for_tests` afterward, or reload silently miscomputes segment
+boundaries against data written under the old override (caught immediately by both a `n != 8`
+mismatch and outright segment read failures, not a silent pass).
+
+**Follow-up, found by an operator testing this PR directly: a restore against a missing/wrong
+`--stock-spill-dir` silently reported SUCCESS while actually losing every spilled possibility.**
+`stock_spill_restore_snapshot` was deliberately tolerant by design (a missing manifest just means
+"nothing to restore," so a pre-PR3 backup or a client role restoring without ever having spilled
+degrades gracefully) — but that same tolerance meant a genuinely INCOMPLETE restore (operator
+forgot `--stock-spill-dir` on the new process, pointed it at a different path than the one used at
+backup time, or the snapshot directory was deleted/corrupted) was **indistinguishable** from the
+legitimate "nothing was ever spilled" case: both looked like a clean `restore` with `result == 0`.
+This directly violated the project's own no-possibility-loss principle — a possibility being
+silently dropped by a *tolerant* code path is exactly the failure mode that principle exists to
+rule out, and unlike a transient RAM-cap wait (retryable, nothing lost) a missing spill snapshot
+at restore time is unrecoverable within that restore attempt.
+
+**Fixed by giving `restore` an independent way to know what it SHOULD get back, decoupled from the
+spill directory that might itself be the thing that's wrong.** `consistent_backup` now writes a
+small sidecar file, `<stock_filename>.spillcount`, right after the stock `.back` file's own atomic
+rename succeeds — containing the exact packet count `spill_snapshot_fn` returned (its signature,
+and `stock_spill_snapshot`'s, changed from `void` to `unsigned long long`, returning
+`stock_spill_total_packets()` at the moment the snapshot was taken; `stock_spill_restore_snapshot`
+symmetrically changed to return the actual count it recovered, `total_linked + total_repacked`).
+The sidecar is written **only** when a real `spill_snapshot_fn` was supplied — never a fabricated
+"0 spilled" for a caller (client role, or the one internal `datamanager.c` call site that can't
+depend on `stock_spill.h`) that never asked for spill coverage in the first place, since the
+sidecar's own *absence* needs to stay a reliable "nothing to verify" signal, not become ambiguous
+with "0 packets, verified." `restore_apply` (`ui/command_lines.c`) reads it via the new
+`datamanager_read_spillcount_sidecar` (`core/datamanager.{h,c}`, symmetric with the writer, same
+file next to `stock_filename` — reachable independently of whatever `--stock-spill-dir` happens to
+resolve to on THIS run) and compares it against what `stock_spill_restore_snapshot` actually
+reports recovering; any mismatch (in either direction — under- or over-recovery, the latter
+suggesting a stale/unrelated snapshot got picked up) is now a loud `log_error` naming the exact
+expected/actual/lost counts and possible causes, and makes the function's overall return value
+**non-zero** — surfacing as a genuine failure to the console, the HTTP admin API, and any script
+driving `restore` remotely, instead of a silent "backup restore" success line.
+
+**Deliberately still completes the RAM-side restore even when spill is confirmed incomplete.**
+`restore_apply` was restructured to track a `core_result` (the stock+analysed RAM outcome) separate
+from the function's final `result` (RAM outcome AND spill match together): the spill mismatch check
+happens *before* `restore()` runs (spill-restore is already first in sequence, so nothing has to be
+undone), but rather than refuse the whole restore outright, the RAM portion still proceeds —
+partial-but-honestly-reported beats an all-or-nothing refusal that would deny an operator even the
+data that IS recoverable (e.g. a genuine disaster where the spill volume was lost but the `.back`
+files survived on different storage). `best_board_load`/`known_clients_registry_load` — unrelated
+to spill entirely — are gated on `core_result` alone, exactly as before this fix, so a spill
+mismatch never blocks them either.
+
+Tests: `tests/core/test_datamanager.c` — `consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window`
+extended to assert the sidecar round-trips the hook's (now non-`void`) return value via
+`datamanager_read_spillcount_sidecar`; `consistent_backup_round_trip_preserves_both_pools` (called
+with `NULL, NULL` for the spill callback) asserts the sidecar is correctly **absent** in that case
+— proving its absence stays a reliable "nothing to verify" signal, never a false "0 spilled."
+`tests/ui/test_command_lines.c` — `do_command_line_restore_detects_incomplete_spill` (a hand-written
+sidecar claiming 42 spilled possibilities, deliberately with no matching spill directory configured
+— `stock_spill_restore_snapshot` is then a guaranteed no-op — asserts the overall `restore` command
+now fails loudly while the RAM stock still comes back) and
+`do_command_line_restore_without_spillcount_sidecar_succeeds_normally` (no sidecar at all — the
+pre-existing, still-correct "nothing to verify" case, non-regression-tested explicitly rather than
+relying on it being an accidental side effect of another test). Verified for real: a 256-piece
+server with active spillover, `backup`, killed, restarted **without** `--stock-spill-dir` (the
+exact operator-reported reproduction) — `restore` now logs
+`"restore : débordement disque INCOMPLET — 2509 possibilité(s) attendue(s) ... 0 récupérée(s) ...
+2509 possibilité(s) potentiellement perdue(s)"` where it previously logged nothing beyond a plain
+`backup restore` success line; the same server restarted **with** the correct `--stock-spill-dir`
+restores cleanly with no false-positive mismatch (2509 expected, 2509 recovered).
+
+**Second follow-up, found the same day by the same operator: the sidecar check above didn't catch
+everything — a manifest listing a segment the disk no longer has (`.dat` deleted/corrupted,
+`manifest.txt` itself intact) still restored "successfully" with data silently not matching the
+backup.** Root cause was inside `stock_spill_restore_snapshot` itself, one layer below the sidecar
+check: both restore paths (no-collision `link()`/copy, and collision repack) counted a group's
+packets from the **manifest's own promise** (`e->packets`) unconditionally, never from what the
+`link()`/copy/`fread()` calls actually achieved. `spill_link_or_copy`'s and `spill_copy_file`'s
+return values were flat-out ignored — if the source `.dat` was missing, `link()` failed, the copy
+fallback's `fopen()` also failed and returned early (leaving the destination simply never
+created), yet the descriptor was still stamped with the full expected `packets`/`last_seq` and
+`total_linked`/`total_repacked` still added the full manifest amount. The sidecar comparison built
+for the first follow-up compared `spillcount` against this same over-counted return value, so it
+could never see the shortfall either — two independent bugs stacked on the same blind spot.
+
+**Fixed by making the return value trustworthy instead of adding a third, separate check.** No new
+verification layer was needed — once `stock_spill_restore_snapshot`'s own return value accurately
+reflects what actually landed on disk, the sidecar check from the first follow-up catches this case
+for free. No-collision path: each `spill_link_or_copy`/`spill_copy_file` call is now checked; on the
+first failure (`failed_at`, the 1-indexed segment rank), the whole group is invalidated — no
+descriptor update, nothing added to `total_linked` — and a `log_error` names the exact segment rank
+and how many possibilities are affected. Segments already placed before the failure (rank <
+`failed_at`) are unlinked rather than left as untracked orphans on the live directory (never the
+failed segment itself: neither helper leaves a partial file behind on error). Collision/repack path:
+a per-entry `entry_actual` sums only the packets `fread()` genuinely returned (never `e->packets`),
+and `total_repacked` accumulates `entry_actual` — so one bad source among several colliding ones
+only costs its own share, the others still come back in full; a `log_error` names the
+actual-vs-promised count for the incomplete entry.
+
+**Real-world verification, the exact operator reproduction.** 256-piece server, `backup` with
+active spillover (2509 spilled across 7 segments), then — before restarting — `spill_u_3_1.dat`
+deleted from the snapshot directory while `manifest.txt` (still listing its 442 possibilities) was
+left untouched. `restore` now logs `"segment de rang 1 manquant/illisible ... (pool u, ancienne
+file 3) — 442 possibilité(s) NON restaurée(s)"`, the function returns 2067 (2509 − 442) instead of
+the previously-false 2509, which the existing sidecar check then correctly reports as
+`"débordement disque INCOMPLET — 2509 attendue(s), 2067 récupérée(s)"`; the live spill directory
+shows exactly the 6 intact segments and no orphan/stray file for the deleted one.
+
+Tests: `tests/core/test_stock_spill.c` — `restore_snapshot_no_collision_missing_segment_reports_partial`
+(a hand-built manifest promising 2 segments for one file, only the first written to disk; asserts
+the function returns 0, the live descriptor stays at 0 packets/segments, and the one segment that
+*was* placed before the failure gets cleaned up rather than orphaned) and
+`restore_snapshot_collision_missing_segment_reports_partial` (two colliding sources, one intact and
+one with a missing segment; asserts the total returned and the live descriptor reflect only the
+intact source's 2 possibilities, round-tripped through a full reload to confirm their exact
+markers — never the 4 the manifest as a whole would suggest).
+
 ### HTTP REST admin API
 
 **`--http-port <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only, `n` in `[1, 65535]`). Starts a minimal HTTP/1.1 admin API on **`127.0.0.1:<n>`** — loopback only, never `INADDR_ANY`, so it is never reachable off the machine by default (use an SSH tunnel or a reverse proxy for remote access). **Absent by default** (`HTTP_PORT` global defaults to 0): no extra socket is opened unless explicitly requested. Lets an external HTTP application (written in any language) read server telemetry and drive a few whitelisted admin actions without speaking the binary `packet`/`control_protocol` wire formats.
@@ -1255,7 +1484,7 @@ The metric that decided adoption is **not** throughput or `max_result`, but the 
 | `src/net/http_codec.c` | Pure HTTP/1.1 admin API layer: request parsing, route resolution, response/JSON formatting (`http_json_format_stats/status/clients/best_board/known_clients/stock_distribution`) — no socket, no allocation |
 | `src/net/http_server.c` | Socket/thread shell of the admin API: `accept()` loop, per-request dispatch (`handle_http_connection`), and the `http_*_collect` functions that pull live server/registry state into the `http_codec.h` view structs |
 | `src/core/datamanager.c` | 10 mutex-protected possibility queues; backup/restore to `.back` files; `datamanager_stock_distribution` (per-`alloc` histogram, shared by the console `statistic` and `GET /api/v1/stock-distribution`); RAM cap enforcement (`put_to_pool`) and the two narrow `datamanager_pool_drain_head`/`datamanager_pool_refill` hooks `stock_spill.c` uses instead of touching the pools directly |
-| `src/core/stock_spill.c` | Disk spillover of the stock once `--stock-max-ram` is approached (PR2): eviction/reload of the coldest RAM-resident possibilities to/from per-`(pool, file)` LIFO segment stacks, 90%/75%/25% hysteresis (`stock_spill_step`), startup purge of residual segments — no backup/restore awareness yet (PR3) |
+| `src/core/stock_spill.c` | Disk spillover of the stock once `--stock-max-ram` is approached (PR2): eviction/reload of the coldest RAM-resident possibilities to/from per-`(pool, file)` LIFO segment stacks, 90%/75%/25% hysteresis (`stock_spill_step`), startup purge of residual segments; snapshot/restore coherence with `consistent_backup`/`restore` (PR3: `stock_spill_snapshot`, `stock_spill_restore_snapshot`) |
 | `src/core/part.c` | Piece rotation, map building (`prepare_map_part`), face lookups; also builds the hot loop's compact index (`build_packed_index`, capacity-guarded by `map_packed_fits`) alongside `flat`/`arena` |
 | `src/core/readdata.c` | Parses `data/pieces.csv` into `array_part` |
 | `src/net/etii_protocol.c` | TCP send/recv helpers for the work-protocol `packet` structs |

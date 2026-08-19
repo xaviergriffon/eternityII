@@ -368,7 +368,12 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
             // Instant T unique pour le stock et le pool analysé : backup()+backup_analysed()
             // appelées séparément laisseraient une fenêtre entre les deux instants.
             int rba = 0;
-            int rb = consistent_backup("./temp.back", "./temp_analysed.back", &rba);
+            // "snapshot-temp" (débordement disque, PR3) apparie "./temp.back"
+            // (résident RAM), même convention que "snapshot"/"eternityII.back"
+            // plus bas — stock_spill_snapshot est un no-op silencieux si le
+            // débordement n'est pas actif.
+            int rb = consistent_backup("./temp.back", "./temp_analysed.back", &rba,
+                                        "snapshot-temp", stock_spill_snapshot);
             if (rb == BACKUP_SKIPPED_MAINTENANCE) {
                 log_error("autobackup : sauté (maintenance en cours) sur ./temp.back\n");
             } else if (rb != BACKUP_OK) {
@@ -929,7 +934,8 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                         // croirait à tort avoir sauvegardé le stock serait un piège
                         // classique de reprise sur crash.
                         int rba = 0;
-                        int rb = consistent_backup("./eternityII.back", "./eternityII-in_analyse.back", &rba);
+                        int rb = consistent_backup("./eternityII.back", "./eternityII-in_analyse.back", &rba,
+                                                    "snapshot", stock_spill_snapshot);
                         if (rb == BACKUP_SKIPPED_MAINTENANCE) {
                             log_error("arrêt sur solution : backup sauté (maintenance en cours) sur ./eternityII.back\n");
                         } else if (rb != BACKUP_OK) {

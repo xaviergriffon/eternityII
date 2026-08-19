@@ -167,6 +167,18 @@ unsigned long long datamanager_resident_packets(void);
 int datamanager_is_maintenance_active(void);
 
 /**
+ * @brief Pose/lève `maintenance` pour un appelant EXTERNE à ce module (PR3)
+ *        — réservé à `restore_apply` (`ui/command_lines.c`), pour encadrer
+ *        `stock_spill_restore_snapshot` (`core/stock_spill.c`) PUIS
+ *        `restore`/`restore_analysed` dans une seule fenêtre où
+ *        `stock_spill_step` reste garanti inactif. Non ré-entrant : ne
+ *        jamais appeler depuis l'intérieur d'une fenêtre déjà posée par
+ *        `consistent_backup`/`sort_*`.
+ */
+void datamanager_begin_maintenance(void);
+void datamanager_end_maintenance(void);
+
+/**
  * @brief Draine jusqu'à `max_packets` possibilités depuis la tête (mode
  *        FIFO) de la file `file_index` du pool désigné — interface étroite
  *        réservée à `core/stock_spill.c` (PR2). Un seul essai de verrou,
@@ -537,16 +549,67 @@ int backup_analysed(char *filename);
  *        d'abord) au fil de l'écriture — jamais toutes relâchées d'un coup à
  *        la fin, contrairement à `backup`/`backup_analysed`.
  *
+ * `spill_snapshot_fn` (optionnel, `NULL` accepté) est appelée UNE FOIS,
+ * pendant la fenêtre `maintenance` (après la pose des verrous, avant leur
+ * relâchement) avec `spill_snapshot_dir` — c'est le point d'intégration du
+ * débordement disque (PR3, `core/stock_spill.h`) : le module `core/` ne peut
+ * pas dépendre de `stock_spill.h` (règle de dépendance à sens unique de ce
+ * fichier), donc l'appelant (`app/`, `ui/`) injecte la fonction réelle
+ * (`stock_spill_snapshot`) ; les appels internes à `datamanager.c` (ex. arrêt
+ * sur solution détectée par `rmnonext`) passent `NULL` — lacune documentée,
+ * cf. `AGENTS.md`. Son retour (nombre de possibilités effectivement
+ * déportées au moment du cliché) est écrit dans un fichier accessoire
+ * `<stock_filename>.spillcount` dès que le volet stock a réussi (jamais si
+ * `spill_snapshot_fn` est `NULL` — pas de faux « 0 possibilité déportée »
+ * pour un appelant qui n'a même pas demandé de cliché) : c'est ce compte,
+ * relu par `restore` indépendamment du répertoire de débordement lui-même
+ * (qui peut être absent/mal configuré au moment de la restauration), qui
+ * permet de DÉTECTER une restauration partielle plutôt que de la tolérer en
+ * silence — cf. `core/stock_spill.h`, `stock_spill_restore_snapshot`.
+ *
  * @param stock_filename       Fichier cible du stock (comme `backup`).
  * @param analysed_filename    Fichier cible du pool analysé (comme `backup_analysed`).
  * @param out_analysed_status  Sur retour : code du volet analysé (mêmes
  *                             constantes BACKUP_* que le retour de la
  *                             fonction, qui porte le code du volet stock).
  *                             NULL accepté si l'appelant ne veut pas ce détail.
+ * @param spill_snapshot_dir   Répertoire cible du cliché de débordement, ou
+ *                             `NULL` pour ne rien faire côté débordement.
+ * @param spill_snapshot_fn    Fonction de cliché à appeler (typiquement
+ *                             `stock_spill_snapshot`), ou `NULL`. Doit
+ *                             renvoyer le nombre de possibilités déportées
+ *                             au moment du cliché (0 si aucune).
  * @return Code du volet stock — BACKUP_OK (0), BACKUP_SKIPPED_MAINTENANCE (1)
  *         ou BACKUP_ERROR (-1).
  */
-int consistent_backup(char *stock_filename, char *analysed_filename, int *out_analysed_status);
+typedef unsigned long long (*consistent_backup_spill_snapshot_fn)(const char *snapshot_dir);
+int consistent_backup(char *stock_filename, char *analysed_filename, int *out_analysed_status,
+                       const char *spill_snapshot_dir, consistent_backup_spill_snapshot_fn spill_snapshot_fn);
+
+/**
+ * @brief Lit le fichier accessoire `<stock_filename>.spillcount` écrit par
+ *        `consistent_backup` (jamais `NULL` : symétrique de son écriture,
+ *        même convention de nommage centralisée ici plutôt que dupliquée
+ *        côté appelant).
+ *
+ * Réservé à `restore_apply` (`ui/command_lines.c`, PR3, correctif) : compare
+ * ce compte à ce que `stock_spill_restore_snapshot` (`core/stock_spill.h`)
+ * a RÉELLEMENT récupéré, pour détecter une restauration partielle du
+ * débordement (mauvais/absent `--stock-spill-dir`, cliché supprimé…) plutôt
+ * que de la tolérer en silence comme avant ce correctif.
+ *
+ * Absence tolérée (retour 0) : sauvegarde antérieure à ce correctif, ou
+ * `consistent_backup` appelée sans `spill_snapshot_fn` (rôle client, ou le
+ * seul site interne à `datamanager.c` qui ne peut pas en fournir un) — dans
+ * les deux cas, rien à vérifier, jamais une anomalie en soi.
+ *
+ * @param stock_filename Fichier stock (le même chemin passé à `consistent_backup`).
+ * @param out_count      Sur retour (si la fonction renvoie 1) : le nombre de
+ *                       possibilités déportées au moment de CETTE sauvegarde.
+ * @return 1 si trouvé et lu, 0 sinon (absent, illisible, ou contenu invalide).
+ */
+int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned long long *out_count);
+
 /**
  * @brief Reconstruit les files avec le contenu du fichier
  * 

@@ -651,9 +651,16 @@ TEST consistent_backup_round_trip_preserves_both_pools(void)
     snprintf(path_an, sizeof path_an, "%s/analysed.back", dir_template);
 
     int rba = -99;
-    int rb = consistent_backup(path, path_an, &rba);
+    int rb = consistent_backup(path, path_an, &rba, NULL, NULL);
     ASSERT_EQ_FMT(BACKUP_OK, rb, "%d");
     ASSERT_EQ_FMT(BACKUP_OK, rba, "%d");
+
+    /* Sans crochet de débordement (spill_snapshot_fn == NULL, cas normal
+     * côté client, ou l'unique site interne à datamanager.c) : aucun
+     * accessoire .spillcount écrit -- son absence doit rester un signal
+     * FIABLE de « rien à vérifier » pour restore, jamais une fausse alerte. */
+    unsigned long long unused_count = 0;
+    ASSERT_EQ_FMT(0, datamanager_read_spillcount_sidecar(path, &unused_count), "%d");
 
     drain_all();
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
@@ -668,6 +675,65 @@ TEST consistent_backup_round_trip_preserves_both_pools(void)
 
     unlink(path);
     unlink(path_an);
+    rmdir(dir_template);
+    drain_all();
+    PASS();
+}
+
+/* consistent_backup (PR3) : le crochet de cliché de débordement, quand fourni,
+ * est appelé EXACTEMENT une fois, PENDANT la fenêtre `maintenance` (avant
+ * qu'elle ne soit levée) — précondition documentée de stock_spill_snapshot
+ * (core/stock_spill.h) : sans cette garantie, une éviction/un rechargement
+ * concurrent pourrait migrer une possibilité au mauvais instant. */
+static int g_spill_hook_calls = 0;
+static char g_spill_hook_dir[256];
+static int g_spill_hook_maintenance_seen = -1;
+static unsigned long long g_spill_hook_return = 0;
+static unsigned long long fake_spill_snapshot_hook(const char *dir)
+{
+    g_spill_hook_calls++;
+    snprintf(g_spill_hook_dir, sizeof g_spill_hook_dir, "%s", dir);
+    g_spill_hook_maintenance_seen = maintenance;
+    return g_spill_hook_return;
+}
+
+TEST consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window(void)
+{
+    drain_all();
+    int allocs[] = { 1 };
+    add_packets(allocs, 1);
+
+    char dir_template[] = "/tmp/etii_consistent_backup_spillhook_XXXXXX";
+    ASSERT(mkdtemp(dir_template) != NULL);
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/store.back", dir_template);
+    char path_an[PATH_MAX];
+    snprintf(path_an, sizeof path_an, "%s/analysed.back", dir_template);
+
+    g_spill_hook_calls = 0;
+    g_spill_hook_maintenance_seen = -1;
+    g_spill_hook_return = 4242; /* valeur arbitraire distinctive, vérifiée dans l'accessoire */
+    int rba = -99;
+    int rb = consistent_backup(path, path_an, &rba, "/tmp/some-spill-dir", fake_spill_snapshot_hook);
+    ASSERT_EQ_FMT(BACKUP_OK, rb, "%d");
+    ASSERT_EQ_FMT(1, g_spill_hook_calls, "%d");
+    ASSERT_STR_EQ("/tmp/some-spill-dir", g_spill_hook_dir);
+    ASSERT_EQ_FMT(1, g_spill_hook_maintenance_seen, "%d"); /* vu PENDANT la fenêtre */
+    ASSERT_EQ_FMT(0, maintenance, "%d");                   /* levée après coup */
+
+    /* Correctif : le compte renvoyé par le crochet est écrit dans l'accessoire
+     * <path>.spillcount, relu indépendamment du répertoire de débordement --
+     * c'est ce qui permettra à restore de détecter une restauration
+     * incomplète du débordement plutôt que de la tolérer en silence. */
+    unsigned long long read_back = 0;
+    ASSERT_EQ_FMT(1, datamanager_read_spillcount_sidecar(path, &read_back), "%d");
+    ASSERT_EQ_FMT(4242ULL, read_back, "%llu");
+
+    char sidecar_path[PATH_MAX + 16];
+    snprintf(sidecar_path, sizeof sidecar_path, "%s.spillcount", path);
+    unlink(path);
+    unlink(path_an);
+    unlink(sidecar_path);
     rmdir(dir_template);
     drain_all();
     PASS();
@@ -698,7 +764,7 @@ TEST consistent_backup_skipped_during_maintenance_reports_distinct_code(void)
 
     lock_all_file_analysed(); /* simule une maintenance déjà en cours */
     int rba = -99;
-    int rb = consistent_backup(path, path_an, &rba);
+    int rb = consistent_backup(path, path_an, &rba, NULL, NULL);
     unlock_all_file_analysed();
 
     ASSERT_EQ_FMT(BACKUP_SKIPPED_MAINTENANCE, rb,  "%d");
@@ -732,7 +798,7 @@ TEST consistent_backup_analysed_open_failure_aborts_stock_too(void)
 
     silence_std();
     int rba = -99;
-    int rb = consistent_backup(path, bad_path_an, &rba);
+    int rb = consistent_backup(path, bad_path_an, &rba, NULL, NULL);
     restore_std();
 
     ASSERT_EQ_FMT(BACKUP_ERROR, rb, "%d");
@@ -5188,6 +5254,7 @@ SUITE(datamanager_suite)
     RUN_TEST(backup_skipped_during_maintenance_reports_distinct_code);
     RUN_TEST(backup_failure_preserves_previous_file);
     RUN_TEST(consistent_backup_round_trip_preserves_both_pools);
+    RUN_TEST(consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window);
     RUN_TEST(consistent_backup_skipped_during_maintenance_reports_distinct_code);
     RUN_TEST(consistent_backup_analysed_open_failure_aborts_stock_too);
     RUN_TEST(split_then_regroup_preserves_count);

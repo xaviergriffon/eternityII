@@ -161,13 +161,42 @@ crash). Un pas immédiat est déclenchable via la commande console `spill [n]` ;
 déportée est visible via `GET /api/v1/stats` (`stock_spilled_packets`/`stock_spill_segments`,
 voir [API HTTP REST admin](api_http_rest.md)).
 
-> ⚠️ **Le débordement ne survit PAS (encore) à un redémarrage.** Ce mécanisme n'a aucune
-> conscience de la sauvegarde/restauration : au démarrage, tout segment résiduel d'un
-> précédent processus est **purgé** (les possibilités qu'il contenait sont définitivement
-> perdues), avec un `log_error` explicite indiquant le nombre exact de possibilités
-> supprimées. Faire un `backup` avant tout redémarrage planifié si le débordement est en
-> service — la cohérence sauvegarde/restauration avec les segments de débordement est un
-> travail séparé, pas encore livré.
+**Le débordement survit à un `backup` suivi d'un `restore`** (console, HTTP admin,
+autobackup, ou l'arrêt sur solution avec `--stop-on-solution`) : `backup` produit, en plus des
+fichiers `.back` habituels, un **cliché** des segments dans `<--stock-spill-dir>/snapshot/`
+(`snapshot-temp/` pour l'autobackup) — les segments **pleins** y sont dupliqués par lien
+physique (`link()`, coût constant, aucune copie de données), seul le segment de **queue**
+(encore mutable côté vivant) est copié. `restore` remet ces segments en place **avant**
+d'importer le `.back` — un import qui déborderait ensuite (plafond plus bas, configuration
+changée) **complète** ces segments au lieu de les écraser. Si `--stock-files` a changé entre
+temps, chaque ancienne file `i` du cliché est reportée sur la file vivante `i %%
+nb_file_possibility` ; en cas de collision (`--stock-files` réduit), les sources concernées sont
+réempaquetées, jamais perdues.
+
+**Une restauration incomplète du débordement est détectée et signalée en échec, jamais tolérée
+en silence.** `backup` écrit, à côté du fichier de stock (`<fichier>.spillcount`), le nombre
+exact de possibilités déportées à cet instant précis — indépendant du répertoire de débordement
+lui-même. `restore` compare ce compte à ce qu'il a réellement récupéré depuis le cliché : en cas
+d'écart (`--stock-spill-dir` oublié ou différent de celui utilisé à la sauvegarde, cliché
+supprimé/corrompu…), la commande **échoue explicitement** (`log_error` nommant le nombre exact de
+possibilités potentiellement perdues) plutôt que de rapporter un succès — le stock résident,
+lui, revient tout de même (mieux vaut une restauration partielle mais honnêtement signalée que
+rien du tout). Absence du fichier `.spillcount` (sauvegarde antérieure à cette vérification, ou
+sans débordement actif ce jour-là) : rien à vérifier, pas une anomalie. Cette détection couvre
+aussi un cliché *partiellement* endommagé — `manifest.txt` présent mais un ou plusieurs fichiers
+`.dat` qu'il référence supprimés ou corrompus : ce cas précis est repéré directement, jamais
+compté comme restauré.
+
+> ⚠️ **Sans `restore` après un redémarrage, le débordement résiduel EST perdu.** Ce module
+> lui-même n'a aucune conscience de la sauvegarde — au démarrage, tout segment résiduel d'un
+> précédent processus est **purgé** (`log_error` explicite indiquant le nombre exact de
+> possibilités supprimées), qu'un cliché existe ou non. `restore` (juste après le démarrage)
+> remet ce cliché en place — voir ci-dessus. Sans `backup` préalable, il n'y a simplement rien à
+> restaurer.
+>
+> **Limite assumée** : le cliché de débordement est **local à la machine** (chemin absolu du
+> `--stock-spill-dir`) — un `.back` copié sur une autre machine ne restaure que la partie
+> résidente, jamais le débordement, qui n'existe que sur le disque d'origine.
 
 Un pic d'expansion très rapide au démarrage (`--expand-level`) peut dépasser le plafond RAM
 plus vite que le tick de 100 ms ne peut réagir. Aucune possibilité n'est perdue pour autant :

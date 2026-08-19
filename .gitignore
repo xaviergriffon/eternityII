@@ -8,6 +8,7 @@ eternityII
 eternityII16
 build/
 *.back
+*.spillcount
 *.log
 solution_*
 .eternityII_history
