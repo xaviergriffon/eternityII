@@ -841,6 +841,129 @@ TEST restore_snapshot_collision_repacks_when_stock_files_shrinks(void)
     PASS();
 }
 
+/* Correctif : le manifeste peut lister un segment que le disque n'a plus
+ * (fichier .dat supprimé/corrompu, manifest.txt lui-même intact) -- avant ce
+ * correctif, le groupe entier était compté dans total_linked et le
+ * descripteur posé tel quel malgré l'absence réelle des données sur disque,
+ * si bien qu'un restore semblait réussir alors qu'il importait un stock ne
+ * correspondant plus à la sauvegarde. Chemin SANS collision (une seule
+ * source par file vivante, le cas courant). */
+TEST restore_snapshot_no_collision_missing_segment_reports_partial(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+
+    char snap_dir[PATH_MAX];
+    snprintf(snap_dir, sizeof snap_dir, "%s/snap", dir);
+    ASSERT_EQ_FMT(0, mkdir(snap_dir, 0755), "%d");
+
+    /* Manifeste annonce 2 segments (1 plein + 1 partiel, 5 possibilités au
+     * total) pour (pool=u, ancienne file=0), mais SEUL le premier segment
+     * est réellement écrit sur disque -- le second (le sommet) manque, comme
+     * s'il avait été supprimé/corrompu après la sauvegarde. */
+    char seg1[PATH_MAX];
+    snprintf(seg1, sizeof seg1, "%s/spill_u_0_1.dat", snap_dir);
+    write_raw_segment(seg1, 100, 3); /* segment 1, plein : marqueurs 100,101,102 */
+    /* spill_u_0_2.dat (le sommet, 2 possibilités) volontairement absent. */
+
+    char manifest_path[PATH_MAX];
+    snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
+    FILE *mf = fopen(manifest_path, "w");
+    ASSERT(mf != NULL);
+    fprintf(mf, "eternityii-spill-manifest-v1\n");
+    write_manifest_line(mf, 'u', 0, 2, 5, 2 * ss_packet_size());
+    fclose(mf);
+
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_configure(dir, nb_file_possibility); /* même nb_files -> pas de collision (old 0 -> new 0) */
+    stock_spill_set_segment_bytes_for_tests(3 * ss_packet_size());
+
+    unsigned long long restored = stock_spill_restore_snapshot("snap");
+
+    /* Le groupe entier est invalidé -- jamais restauré à moitié en silence :
+     * ni compté dans le total renvoyé, ni reflété dans le descripteur vivant
+     * (stock_spill_total_packets), qui doit rester à 0 pour cette file
+     * plutôt que de prétendre que les 5 possibilités sont là. */
+    ASSERT_EQ_FMT(0ULL, restored, "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_segments(), "%llu");
+
+    /* Le segment 1, pourtant placé AVANT l'échec (constaté seulement au
+     * segment 2), est nettoyé plutôt que laissé orphelin sur le disque
+     * vivant, invisible du descripteur. */
+    char live_seg1[PATH_MAX];
+    snprintf(live_seg1, sizeof live_seg1, "%s/spill_u_0_1.dat", dir);
+    struct stat st;
+    ASSERT(stat(live_seg1, &st) != 0);
+
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* Même correctif, chemin AVEC collision (--stock-files réduit) : sur deux
+ * sources fusionnées dans la même file vivante, une seule a un segment
+ * manquant -- seule CETTE source doit être amputée du total, l'autre
+ * (intacte) doit revenir intégralement. */
+TEST restore_snapshot_collision_missing_segment_reports_partial(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+
+    char snap_dir[PATH_MAX];
+    snprintf(snap_dir, sizeof snap_dir, "%s/snap", dir);
+    ASSERT_EQ_FMT(0, mkdir(snap_dir, 0755), "%d");
+
+    /* old_file_index=0 : intact, 1 segment, 2 possibilités. */
+    char seg_a[PATH_MAX];
+    snprintf(seg_a, sizeof seg_a, "%s/spill_u_0_1.dat", snap_dir);
+    write_raw_segment(seg_a, 100, 2); /* marqueurs 100,101 */
+    /* old_file_index=3 : manifeste annonce 2 possibilités, mais le fichier
+     * .dat correspondant est absent (supprimé/corrompu). */
+
+    char manifest_path[PATH_MAX];
+    snprintf(manifest_path, sizeof manifest_path, "%s/manifest.txt", snap_dir);
+    FILE *mf = fopen(manifest_path, "w");
+    ASSERT(mf != NULL);
+    fprintf(mf, "eternityii-spill-manifest-v1\n");
+    write_manifest_line(mf, 'u', 0, 1, 2, 2 * ss_packet_size());
+    write_manifest_line(mf, 'u', 3, 1, 2, 2 * ss_packet_size());
+    fclose(mf);
+
+    /* nb_files=3 : old {0,3} convergent tous deux vers la file vivante 0
+     * (0%3=0, 3%3=0) -- collision garantie, comme
+     * restore_snapshot_collision_repacks_when_stock_files_shrinks. */
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_configure(dir, 3);
+    stock_spill_set_segment_bytes_for_tests(2 * ss_packet_size());
+
+    unsigned long long restored = stock_spill_restore_snapshot("snap");
+
+    /* Seules les 2 possibilités de la source intacte (old_file_index=0)
+     * reviennent -- jamais les 4 promises par le manifeste. */
+    ASSERT_EQ_FMT(2ULL, restored, "%llu");
+    ASSERT_EQ_FMT(2ULL, stock_spill_total_packets(), "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(1000);
+    int rounds = 0;
+    while (stock_spill_total_packets() > 0ULL && rounds < 30) { stock_spill_step(4096); rounds++; }
+    int markers[8];
+    int n = drain_and_collect_markers(markers, 8);
+    ASSERT_EQ_FMT(2, n, "%d");
+    qsort(markers, (size_t)n, sizeof(int), int_cmp);
+    ASSERT_EQ_FMT(100, markers[0], "%d");
+    ASSERT_EQ_FMT(101, markers[1], "%d");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
 /* Manifeste absent (aucun cliché sauvegardé pour ce répertoire, ou backup
  * antérieur à PR3) : tolérant, aucun crash, aucune action -- pas une
  * erreur. */
@@ -928,6 +1051,8 @@ SUITE(stock_spill_suite)
     RUN_TEST(snapshot_refreshes_stale_reused_segment_number);
     RUN_TEST(restore_snapshot_no_collision_round_trip_preserves_data);
     RUN_TEST(restore_snapshot_collision_repacks_when_stock_files_shrinks);
+    RUN_TEST(restore_snapshot_no_collision_missing_segment_reports_partial);
+    RUN_TEST(restore_snapshot_collision_missing_segment_reports_partial);
     RUN_TEST(restore_snapshot_tolerates_missing_manifest);
     RUN_TEST(restore_snapshot_replaces_current_live_segments);
 }

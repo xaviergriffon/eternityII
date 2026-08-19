@@ -921,28 +921,67 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 				// Pas de collision de re-séquencement (le cas courant) :
 				// aucun déplacement de données, seuls les liens et les
 				// descripteurs changent — cf. la doc de cette fonction.
+				//
+				// Correctif : un manifeste peut lister un segment que le
+				// disque n'a plus (fichier .dat supprimé/corrompu alors que
+				// manifest.txt, lui, reste intact) — sans vérifier le
+				// résultat de chaque lien/copie, le descripteur était posé
+				// tel quel (desc->packets = e->packets) et ce groupe comptait
+				// intégralement dans total_linked, alors que tout ou partie
+				// des données restaurées n'existait tout simplement pas sur
+				// disque : un import ultérieur lisait alors un flux tronqué
+				// ou vide sans le signaler. `failed_at` (rang du premier
+				// segment manquant/illisible, -1 si aucun) rend ce groupe
+				// entièrement invalide plutôt que de prétendre l'avoir
+				// restauré : ni le descripteur ni total_linked ne sont mis à
+				// jour, et `restore_apply` (ui/command_lines.c) le détecte
+				// ensuite via le compte de sauvegarde (<fichier>.spillcount),
+				// puisque le total renvoyé par cette fonction reflète alors
+				// fidèlement ce qui a RÉELLEMENT été placé.
 				spill_manifest_entry_t *e = &entries[first_match];
 				char snap_path[SPILL_LOCAL_PATH_MAX];
 				char live_path[PATH_MAX];
-				for (int seq = 1; seq < e->last_seq; seq++) {
+				int failed_at = -1;
+				for (int seq = 1; seq < e->last_seq && failed_at < 0; seq++) {
 					spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, seq);
 					spill_segment_path(live_path, sizeof(live_path), is_checked, newf, seq);
-					spill_link_or_copy(snap_path, live_path);
+					if (spill_link_or_copy(snap_path, live_path) != 0) {
+						failed_at = seq;
+					}
 				}
-				spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, e->last_seq);
-				spill_segment_path(live_path, sizeof(live_path), is_checked, newf, e->last_seq);
-				spill_copy_file(snap_path, live_path, e->tail_bytes);
+				if (failed_at < 0) {
+					spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, e->last_seq);
+					spill_segment_path(live_path, sizeof(live_path), is_checked, newf, e->last_seq);
+					if (spill_copy_file(snap_path, live_path, e->tail_bytes) != 0) {
+						failed_at = e->last_seq;
+					}
+				}
 
-				pthread_mutex_lock(&g_spill_mutex);
-				stock_spill_descriptor_t *desc = spill_descriptor(is_checked, newf);
-				desc->first_seq = 1;
-				desc->last_seq = e->last_seq;
-				desc->packets = e->packets;
-				desc->tail_bytes = e->tail_bytes;
-				pthread_mutex_unlock(&g_spill_mutex);
+				if (failed_at < 0) {
+					pthread_mutex_lock(&g_spill_mutex);
+					stock_spill_descriptor_t *desc = spill_descriptor(is_checked, newf);
+					desc->first_seq = 1;
+					desc->last_seq = e->last_seq;
+					desc->packets = e->packets;
+					desc->tail_bytes = e->tail_bytes;
+					pthread_mutex_unlock(&g_spill_mutex);
 
-				total_linked += e->packets;
-				linked_groups++;
+					total_linked += e->packets;
+					linked_groups++;
+				} else {
+					log_error("stock_spill_restore_snapshot : segment de rang %d manquant/illisible "
+					          "dans le cliché pour (pool %c, ancienne file %d) — %llu possibilité(s) "
+					          "NON restaurée(s) pour cette file (cliché incomplet ou corrompu)\n",
+					          failed_at, pc, e->old_file_index, e->packets);
+					// Nettoyage best-effort des segments déjà placés avant
+					// l'échec (jamais le segment en échec lui-même : ni
+					// spill_link_or_copy ni spill_copy_file ne laissent de
+					// fichier partiel derrière eux sur erreur).
+					for (int seq = 1; seq < failed_at; seq++) {
+						spill_segment_path(live_path, sizeof(live_path), is_checked, newf, seq);
+						unlink(live_path);
+					}
+				}
 			} else {
 				// Collision (--stock-files réduit depuis la sauvegarde) :
 				// chaque source est relue et réempaquetée via la même
@@ -950,11 +989,24 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 				// l'invariant « tout segment sous le sommet est plein »
 				// avec un sommet partiel venu d'une autre source placé au
 				// milieu de la pile fusionnée.
+				//
+				// Correctif (même raison que le chemin sans collision
+				// ci-dessus) : `total_repacked` comptait `e->packets` (la
+				// promesse du manifeste) même quand un segment source
+				// manquait ou n'était que partiellement lisible — `entry_actual`
+				// somme au contraire ce que `fread` a RÉELLEMENT pu relire
+				// (et donc ce que `stock_spill_write_block` a RÉELLEMENT
+				// réécrit), rendant le total renvoyé par cette fonction fidèle
+				// à l'état réel du disque, condition nécessaire pour que la
+				// vérification de `restore_apply` (comparaison au compte de
+				// sauvegarde, <fichier>.spillcount) détecte l'anomalie.
 				for (int i = 0; i < n; i++) {
 					if (entries[i].pool_char != pc || entries[i].old_file_index % g_spill_nb_files != newf) {
 						continue;
 					}
 					spill_manifest_entry_t *e = &entries[i];
+					unsigned long long entry_actual = 0;
+					int entry_incomplete = 0;
 					for (int seq = 1; seq <= e->last_seq; seq++) {
 						long seg_bytes = (seq < e->last_seq) ? stock_spill_full_segment_bytes() : e->tail_bytes;
 						int count = (int)(seg_bytes / packet_size);
@@ -965,19 +1017,33 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 						spill_segment_path_in(snap_path, sizeof(snap_path), snap_dir, is_checked, e->old_file_index, seq);
 						struct possibility_packet *buf = malloc((size_t)count * sizeof(struct possibility_packet));
 						if (buf == NULL) {
+							entry_incomplete = 1;
 							continue;
 						}
 						FILE *sf = fopen(snap_path, "rb");
-						if (sf != NULL) {
-							size_t got = fread(buf, (size_t)packet_size, (size_t)count, sf);
-							fclose(sf);
-							if (got > 0) {
-								stock_spill_write_block(is_checked, newf, buf, (int)got);
-							}
+						if (sf == NULL) {
+							entry_incomplete = 1;
+							free(buf);
+							continue;
+						}
+						size_t got = fread(buf, (size_t)packet_size, (size_t)count, sf);
+						fclose(sf);
+						if (got > 0) {
+							stock_spill_write_block(is_checked, newf, buf, (int)got);
+							entry_actual += got;
+						}
+						if (got != (size_t)count) {
+							entry_incomplete = 1;
 						}
 						free(buf);
 					}
-					total_repacked += e->packets;
+					if (entry_incomplete) {
+						log_error("stock_spill_restore_snapshot : réempaquetage incomplet pour "
+						          "(pool %c, ancienne file %d) — %llu/%llu possibilité(s) "
+						          "effectivement récupérée(s) (segment manquant/tronqué dans le "
+						          "cliché)\n", pc, e->old_file_index, entry_actual, e->packets);
+					}
+					total_repacked += entry_actual;
 				}
 				repacked_groups++;
 			}

@@ -182,7 +182,10 @@ supprimé/corrompu…), la commande **échoue explicitement** (`log_error` nomma
 possibilités potentiellement perdues) plutôt que de rapporter un succès — le stock résident,
 lui, revient tout de même (mieux vaut une restauration partielle mais honnêtement signalée que
 rien du tout). Absence du fichier `.spillcount` (sauvegarde antérieure à cette vérification, ou
-sans débordement actif ce jour-là) : rien à vérifier, pas une anomalie.
+sans débordement actif ce jour-là) : rien à vérifier, pas une anomalie. Cette détection couvre
+aussi un cliché *partiellement* endommagé — `manifest.txt` présent mais un ou plusieurs fichiers
+`.dat` qu'il référence supprimés ou corrompus : ce cas précis est repéré directement, jamais
+compté comme restauré.
 
 > ⚠️ **Sans `restore` après un redémarrage, le débordement résiduel EST perdu.** Ce module
 > lui-même n'a aucune conscience de la sauvegarde — au démarrage, tout segment résiduel d'un

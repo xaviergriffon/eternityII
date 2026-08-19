@@ -236,10 +236,27 @@ unsigned long long stock_spill_snapshot(const char *snapshot_subdir);
  *   segment sous le sommet est plein » avec un sommet partiel venu d'une
  *   AUTRE source placé au milieu de la pile fusionnée.
  *
+ * **Un segment `.dat` que le manifeste liste mais que le disque n'a plus**
+ * (supprimé, corrompu, cliché partiellement transféré…) **n'est jamais
+ * silencieusement ignoré.** Sans collision : le groupe entier
+ * `(pool, ancienne_file)` est invalidé (ni compté dans le total renvoyé, ni
+ * reflété dans le descripteur vivant, qui reste vide pour cette file — les
+ * segments qui avaient déjà été placés avant l'échec sont nettoyés plutôt
+ * que laissés orphelins) et un `log_error` nomme le rang du segment en
+ * cause. Avec collision : seule la source en défaut est amputée du total
+ * (celles qui restent intactes reviennent normalement) ; un segment source
+ * *tronqué* (lu partiellement) compte pour les octets réellement relus, pas
+ * pour la promesse du manifeste. Dans tous les cas, le total RENVOYÉ reflète
+ * fidèlement ce qui a été RÉELLEMENT placé sur disque — jamais celui promis
+ * par le manifeste — ce qui est précisément ce qui permet à `restore_apply`
+ * (`ui/command_lines.c`) de détecter l'anomalie via `<stock_filename>.spillcount`
+ * (`datamanager_read_spillcount_sidecar`).
+ *
  * @param snapshot_subdir Même convention que `stock_spill_snapshot`.
  * @return Nombre total de possibilités effectivement remises en place (0 si
- *         le module est désactivé, ou si aucun manifeste valide n'a été
- *         trouvé) — à comparer par l'appelant avec `<stock_filename>.spillcount`
+ *         le module est désactivé, si aucun manifeste valide n'a été
+ *         trouvé, ou si tous les groupes ont échoué) — à comparer par
+ *         l'appelant avec `<stock_filename>.spillcount`
  *         (`datamanager_read_spillcount_sidecar`) pour détecter une
  *         restauration incomplète du débordement.
  */

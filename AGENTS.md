@@ -1194,6 +1194,52 @@ exact operator-reported reproduction) — `restore` now logs
 `backup restore` success line; the same server restarted **with** the correct `--stock-spill-dir`
 restores cleanly with no false-positive mismatch (2509 expected, 2509 recovered).
 
+**Second follow-up, found the same day by the same operator: the sidecar check above didn't catch
+everything — a manifest listing a segment the disk no longer has (`.dat` deleted/corrupted,
+`manifest.txt` itself intact) still restored "successfully" with data silently not matching the
+backup.** Root cause was inside `stock_spill_restore_snapshot` itself, one layer below the sidecar
+check: both restore paths (no-collision `link()`/copy, and collision repack) counted a group's
+packets from the **manifest's own promise** (`e->packets`) unconditionally, never from what the
+`link()`/copy/`fread()` calls actually achieved. `spill_link_or_copy`'s and `spill_copy_file`'s
+return values were flat-out ignored — if the source `.dat` was missing, `link()` failed, the copy
+fallback's `fopen()` also failed and returned early (leaving the destination simply never
+created), yet the descriptor was still stamped with the full expected `packets`/`last_seq` and
+`total_linked`/`total_repacked` still added the full manifest amount. The sidecar comparison built
+for the first follow-up compared `spillcount` against this same over-counted return value, so it
+could never see the shortfall either — two independent bugs stacked on the same blind spot.
+
+**Fixed by making the return value trustworthy instead of adding a third, separate check.** No new
+verification layer was needed — once `stock_spill_restore_snapshot`'s own return value accurately
+reflects what actually landed on disk, the sidecar check from the first follow-up catches this case
+for free. No-collision path: each `spill_link_or_copy`/`spill_copy_file` call is now checked; on the
+first failure (`failed_at`, the 1-indexed segment rank), the whole group is invalidated — no
+descriptor update, nothing added to `total_linked` — and a `log_error` names the exact segment rank
+and how many possibilities are affected. Segments already placed before the failure (rank <
+`failed_at`) are unlinked rather than left as untracked orphans on the live directory (never the
+failed segment itself: neither helper leaves a partial file behind on error). Collision/repack path:
+a per-entry `entry_actual` sums only the packets `fread()` genuinely returned (never `e->packets`),
+and `total_repacked` accumulates `entry_actual` — so one bad source among several colliding ones
+only costs its own share, the others still come back in full; a `log_error` names the
+actual-vs-promised count for the incomplete entry.
+
+**Real-world verification, the exact operator reproduction.** 256-piece server, `backup` with
+active spillover (2509 spilled across 7 segments), then — before restarting — `spill_u_3_1.dat`
+deleted from the snapshot directory while `manifest.txt` (still listing its 442 possibilities) was
+left untouched. `restore` now logs `"segment de rang 1 manquant/illisible ... (pool u, ancienne
+file 3) — 442 possibilité(s) NON restaurée(s)"`, the function returns 2067 (2509 − 442) instead of
+the previously-false 2509, which the existing sidecar check then correctly reports as
+`"débordement disque INCOMPLET — 2509 attendue(s), 2067 récupérée(s)"`; the live spill directory
+shows exactly the 6 intact segments and no orphan/stray file for the deleted one.
+
+Tests: `tests/core/test_stock_spill.c` — `restore_snapshot_no_collision_missing_segment_reports_partial`
+(a hand-built manifest promising 2 segments for one file, only the first written to disk; asserts
+the function returns 0, the live descriptor stays at 0 packets/segments, and the one segment that
+*was* placed before the failure gets cleaned up rather than orphaned) and
+`restore_snapshot_collision_missing_segment_reports_partial` (two colliding sources, one intact and
+one with a missing segment; asserts the total returned and the live descriptor reflect only the
+intact source's 2 possibilities, round-tripped through a full reload to confirm their exact
+markers — never the 4 the manifest as a whole would suggest).
+
 ### HTTP REST admin API
 
 **`--http-port <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only, `n` in `[1, 65535]`). Starts a minimal HTTP/1.1 admin API on **`127.0.0.1:<n>`** — loopback only, never `INADDR_ANY`, so it is never reachable off the machine by default (use an SSH tunnel or a reverse proxy for remote access). **Absent by default** (`HTTP_PORT` global defaults to 0): no extra socket is opened unless explicitly requested. Lets an external HTTP application (written in any language) read server telemetry and drive a few whitelisted admin actions without speaking the binary `packet`/`control_protocol` wire formats.
