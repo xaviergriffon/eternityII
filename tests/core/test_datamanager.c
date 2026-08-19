@@ -4974,18 +4974,21 @@ TEST expand_zero_level_is_noop(void)
 }
 
 /* Plafond RAM assez bas pour être atteint pendant l'expansion : un refus
- * n'est PLUS jamais abandonné (comportement remplacé -- avant ce correctif,
- * un refus au-delà du plafond RAM comptait la possibilité comme perdue et
- * continuait ; désormais expand_datas_to_level ATTEND patiemment que de la
- * place se libère, même principe que put_to_server côté client : un ADD
- * refusé n'est jamais perdu, seulement retenté plus tard). Un thread
- * compagnon simule ce que le thread de débordement (core/stock_spill.c)
- * ferait en production : lever le plafond après un court délai, laissant à
- * expand_datas_to_level la possibilité de reprendre. Vérifie l'invariant
- * central : AUCUNE possibilité produite n'est perdue, seulement retardée --
- * et que l'attente est journalisée (mesurée par la TAILLE de stderr, pas son
- * contenu, même technique que put_to_server_server_busy_is_silent_and_non_fatal
- * ci-dessus, pour ne pas casser ce test si le libellé change). */
+ * n'est JAMAIS abandonné -- expand_datas_to_level ATTEND patiemment que de
+ * la place se libère (même principe que put_to_server côté client). Un
+ * thread compagnon simule ce que le thread de débordement (core/stock_spill.c)
+ * ferait en production : lever le plafond après un court délai. Vérifie
+ * DEUX invariants : (1) AUCUNE possibilité produite n'est perdue, l'attente
+ * est journalisée (mesurée par la TAILLE de stderr, pas son contenu, même
+ * technique que put_to_server_server_busy_is_silent_and_non_fatal ci-dessus,
+ * pour ne pas casser ce test si le libellé change) ; (2) l'expansion
+ * RESSAIE d'approfondir aux passes suivantes une fois la pression retombée
+ * -- une pression RAM rencontrée à la 1ʳᵉ passe ne doit PAS arrêter
+ * l'expansion pour de bon (contrairement au garde-fou de volume,
+ * --expand-max-stock, qui lui reste définitif) : le niveau visé doit être
+ * réellement atteint, exactement comme sans pression RAM du tout
+ * (cf. expand_grows_stock_and_advances_level, même carte, même cible, sans
+ * plafond -- les deux doivent converger vers le même état final). */
 static void *raise_ram_cap_after_delay_for_tests(void *arg)
 {
     (void)arg;
@@ -5006,7 +5009,9 @@ TEST expand_waits_for_ram_and_never_loses_possibilities(void)
     /* La genèse (1 possibilité, drainée en RAM de travail dès le premier
      * tour) laisse le pool RÉSIDENT à 0 avant l'expansion : les 3 premiers
      * des 8 enfants (cf. make_expand_free_map) tiennent sous ce plafond, les
-     * 5 suivants doivent attendre. */
+     * 5 suivants doivent attendre -- puis, une fois le plafond levé par le
+     * thread compagnon, la 2ᵉ passe (alloc 1 → 2, cf.
+     * expand_grows_stock_and_advances_level) doit elle aussi s'exécuter. */
     datamanager_set_ram_limit_packets_for_tests(3);
 
     pthread_t releaser;
@@ -5015,14 +5020,22 @@ TEST expand_waits_for_ram_and_never_loses_possibilities(void)
     capture_stderr();
     int passes = expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
     long err_bytes = restore_stderr_size();
-    (void)passes;
 
     pthread_join(releaser, NULL);
 
     ASSERT(err_bytes > 0); /* attente journalisée, jamais silencieuse */
-    /* AUCUNE perte : les 8 enfants de la genèse doivent TOUS finir résidents,
-     * pas seulement les 3 qui tenaient sous le plafond initial. */
-    ASSERT_EQ_FMT(8ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(2, passes, "%d"); /* les 2 passes ont bien eu lieu (alloc 0→1→2), pas arrêté après la 1ʳᵉ */
+    /* AUCUNE perte ET niveau visé réellement atteint : strictement plus que
+     * les 8 enfants directs de la genèse (la pression RAM n'a pas empêché la
+     * 2ᵉ passe de les approfondir à leur tour), et TOUTE possibilité
+     * résidente a bien atteint le niveau visé -- jamais bloquée à mi-chemin. */
+    ASSERT(datas_size() > 8ULL);
+    unsigned long long n = datas_size();
+    array_possibility_packet *r = get_last_possibility(NULL, (int)n, NULL);
+    for (int i = 0; i < r->size; i++) {
+        ASSERT(r->possibilities[i].alloc >= 2);
+    }
+    free_array_possibility_packet(r);
 
     datamanager_set_ram_limit_packets_for_tests(0);
     drain_all();
@@ -5067,6 +5080,60 @@ TEST expand_aborts_cleanly_on_request_stop_during_ram_wait(void)
 
     ASSERT(err_bytes > 0);           /* le refus initial a bien été journalisé avant l'arrêt */
     ASSERT(datas_size() <= 3ULL);     /* jamais dépassé le plafond, même interrompu en cours d'attente */
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_all();
+    PASS();
+}
+
+/* Symétrique du test précédent, mais l'arrêt frappe la NOUVELLE attente
+ * ENTRE deux passes (expand_wait_for_ram_headroom_between_passes), pas
+ * l'attente PAR PAQUET (déjà couverte ci-dessus) : le plafond est d'abord
+ * juste assez relevé pour que la 1ʳᵉ passe se termine intégralement (les 8
+ * enfants de la genèse tous résidents, plus aucune marge -- résident == plafond
+ * pile), puis JAMAIS relevé davantage -- la pause avant la 2ᵉ passe doit donc
+ * bloquer, et c'est CETTE attente-là que REQUEST_STOP interrompt. Vérifie
+ * que ce second point d'attente est, lui aussi, interruptible proprement
+ * (ni blocage indéfini, ni dépassement du plafond, ni perte des 8 possibilités
+ * déjà résidentes de la 1ʳᵉ passe). */
+static void *raise_ram_cap_to_exact_fit_then_stop_for_tests(void *arg)
+{
+    (void)arg;
+    usleep(100000); /* 100 ms : laisse les premiers refus de la 1re passe être journalisés */
+    datamanager_set_ram_limit_packets_for_tests(8); /* pile assez pour finir la 1re passe, sans aucune marge pour la 2e */
+    usleep(150000); /* 150 ms de plus : laisse la pause ENTRE les passes démarrer et se journaliser */
+    request = REQUEST_STOP;
+    return NULL;
+}
+
+TEST expand_aborts_cleanly_on_request_stop_during_between_pass_wait(void)
+{
+    expand_max_levels = EXPAND_MAX_LEVELS;
+    expand_max_stock = EXPAND_MAX_STOCK;
+
+    drain_all();
+    seed_genesis(0);
+    request = REQUEST_CONTINUE;
+
+    datamanager_set_ram_limit_packets_for_tests(3);
+
+    pthread_t stopper;
+    ASSERT_EQ_FMT(0, pthread_create(&stopper, NULL, raise_ram_cap_to_exact_fit_then_stop_for_tests, NULL), "%d");
+
+    capture_stderr();
+    int passes = expand_datas_to_level(2, make_expand_free_map(), make_expand_parts());
+    long err_bytes = restore_stderr_size();
+    (void)passes;
+
+    pthread_join(stopper, NULL);
+    request = REQUEST_CONTINUE;
+
+    ASSERT(err_bytes > 0);
+    /* La 1re passe a fini (les 8 enfants de la genèse, tous résidents --
+     * jamais perdus, comme le garantit add_possibility_with_retry_or_abort),
+     * mais la 2e n'a jamais démarré : interrompue proprement pendant la
+     * pause qui la précède. */
+    ASSERT_EQ_FMT(8ULL, datas_size(), "%llu");
 
     datamanager_set_ram_limit_packets_for_tests(0);
     drain_all();
@@ -5249,5 +5316,6 @@ SUITE(datamanager_suite)
     RUN_TEST(expand_zero_level_is_noop);
     RUN_TEST(expand_waits_for_ram_and_never_loses_possibilities);
     RUN_TEST(expand_aborts_cleanly_on_request_stop_during_ram_wait);
+    RUN_TEST(expand_aborts_cleanly_on_request_stop_during_between_pass_wait);
     RUN_TEST(expand_without_ram_cap_logs_nothing);
 }

@@ -2806,9 +2806,13 @@ int regroup_datas(void)
  * @param single     Possibilité à insérer (déjà enveloppée dans un tableau
  *                    à un élément, cf. `build_single_array_possibility_packet`).
  * @param had_to_wait Mis à 1 si au moins un refus a été essuyé (utilisé par
- *                    l'appelant pour cesser d'approfondir davantage —
- *                    inutile de produire plus de travail au moment précis
- *                    où la RAM est constatée sous tension), inchangé sinon.
+ *                    l'appelant pour cesser d'approfondir davantage POUR LA
+ *                    PASSE COURANTE seulement — inutile de produire plus de
+ *                    travail au moment précis où la RAM est constatée sous
+ *                    tension ; l'appelant marque ensuite une pause AVANT la
+ *                    passe suivante, cf. `expand_wait_for_ram_headroom_between_passes`,
+ *                    plutôt que d'arrêter l'expansion pour de bon), inchangé
+ *                    sinon.
  * @return            1 si insérée (avec ou sans attente), 0 si le process a
  *                     demandé l'arrêt PENDANT l'attente (`single` n'a pas
  *                     été inséré — le process s'arrête de toute façon ;
@@ -2845,6 +2849,61 @@ static int add_possibility_with_retry_or_abort(array_possibility_packet *single,
 		log_info("expansion : place libérée, reprise après %ld s d'attente\n",
 		         (long)(time(NULL) - first_refusal));
 	}
+	return 1;
+}
+
+/**
+ * @brief Attend, ENTRE deux passes de `expand_datas_to_level`, que le stock
+ *        résident redescende sous le plafond RAM avant de tenter
+ *        d'approfondir davantage.
+ *
+ * Une pression RAM rencontrée pendant une passe est TRANSITOIRE — le thread
+ * de débordement (`core/stock_spill.h`) a justement vocation à la faire
+ * retomber en quelques dizaines/centaines de ms — contrairement au
+ * garde-fou de VOLUME (`--expand-max-stock`), qui lui reste définitif (cf.
+ * `expand_datas_to_level`, où seul ce dernier arrête la boucle externe).
+ * Sans cette attente, une seule insertion ayant dû patienter arrêtait toute
+ * l'expansion pour de bon, quel que soit `--expand-max-levels` configuré —
+ * le niveau visé restait sous-atteint alors que les passes restantes
+ * auraient pu progresser une fois la pression retombée.
+ *
+ * Non bornée sauf par `REQUEST_STOP` (même philosophie que
+ * `add_possibility_with_retry_or_abort` : un délai fixe réintroduirait le
+ * risque qu'on cherche justement à éliminer). Journalise le début et la
+ * fin de l'attente, avec un rappel toutes les `EXPAND_RAM_WAIT_LOG_INTERVAL_SEC`
+ * secondes tant qu'elle se prolonge — même convention que ci-dessus.
+ *
+ * @return 1 si de la place a été retrouvée (ou si aucun plafond n'est
+ *         configuré), 0 si `REQUEST_STOP` a été demandé pendant l'attente
+ *         (l'appelant doit alors arrêter proprement, comme pour
+ *         `add_possibility_with_retry_or_abort`).
+ */
+static int expand_wait_for_ram_headroom_between_passes(void)
+{
+	if (datamanager_ram_limit_packets() == 0
+	    || datamanager_resident_packets() < datamanager_ram_limit_packets()) {
+		return 1;
+	}
+
+	time_t first_refusal = time(NULL);
+	time_t last_log = first_refusal;
+	log_error("expansion : plafond RAM toujours atteint entre deux passes — attente que le "
+	          "débordement (--stock-spill-dir) libère de la place avant de poursuivre "
+	          "l'approfondissement (jusqu'à %d passe(s) au total)\n", expand_max_levels);
+	while (datamanager_resident_packets() >= datamanager_ram_limit_packets()) {
+		if (request == REQUEST_STOP) {
+			return 0;
+		}
+		time_t now = time(NULL);
+		if (now - last_log >= EXPAND_RAM_WAIT_LOG_INTERVAL_SEC) {
+			log_error("expansion : toujours en attente entre deux passes (plafond RAM atteint depuis %ld s)\n",
+			          (long)(now - first_refusal));
+			last_log = now;
+		}
+		usleep(EXPAND_RAM_WAIT_POLL_US);
+	}
+	log_info("expansion : place retrouvée entre deux passes, reprise de l'approfondissement après %ld s d'attente\n",
+	         (long)(time(NULL) - first_refusal));
 	return 1;
 }
 
@@ -2905,23 +2964,41 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
         //    (le thread de débordement, core/stock_spill.h, ou un GET client
         //    libère de la place pendant ce temps) plutôt que de perdre la
         //    possibilité. Dès le premier refus essuyé (had_to_wait), on cesse
-        //    d'approfondir davantage (cap_reached) — inutile de produire
-        //    encore plus de travail au moment précis où la RAM est sous
-        //    tension ; le reste de `work` est réinjecté tel quel, chaque
-        //    insertion pouvant elle aussi attendre son tour.
+        //    d'approfondir davantage POUR CETTE PASSE (ram_wait_this_round) —
+        //    inutile de produire encore plus de travail au moment précis où
+        //    la RAM est sous tension ; le reste de `work` est réinjecté tel
+        //    quel, chaque insertion pouvant elle aussi attendre son tour.
+        //    Contrairement au garde-fou de volume ci-dessus, cet arrêt n'est
+        //    PAS définitif : une pause a lieu ENTRE cette passe et la
+        //    suivante (voir plus bas, expand_wait_for_ram_headroom_between_passes)
+        //    pour laisser la pression RAM retomber avant de retenter
+        //    d'approfondir, jusqu'à expand_max_levels passes.
         unsigned long long produced = 0;
         int expanded_any = 0;
-        // Distingué de cap_reached (qui pilote AUSSI la boucle externe et
-        // doit donc rester vrai une fois franchi) : sert uniquement à savoir
-        // QUEL garde-fou vient de déclencher, pour un message de journal
-        // exact plutôt qu'une comparaison numérique parfois fausse (le
-        // plafond RAM peut déclencher cap_reached bien avant que `produced`
-        // n'approche expand_max_stock).
+        // Local à CETTE passe (contrairement à cap_reached, qui reste vrai
+        // une fois franchi et pilote AUSSI la boucle externe) : une pression
+        // RAM rencontrée ici cesse d'approfondir pour le reste de la passe
+        // courante uniquement — la pause entre deux passes ci-dessous laisse
+        // sa chance à un approfondissement ultérieur une fois la pression
+        // retombée, plutôt que d'arrêter l'expansion pour de bon (seul
+        // cap_reached, le garde-fou de VOLUME, doit avoir cet effet définitif).
         int ram_wait_this_round = 0;
+        // Vrai dès qu'un paquet PAS ENCORE au niveau cible est réinjecté tel
+        // quel à cause de ram_wait_this_round (jamais à cause de deep_enough
+        // ni du garde-fou de volume) : signale qu'il reste du vrai travail
+        // d'approfondissement en attente, même si `expanded_any` est resté à
+        // 0 (la pression a pu frapper dès le premier paquet de la passe,
+        // avant tout approfondissement réel) — sans ce signal, le `break`
+        // sur `!expanded_any` plus bas conclurait à tort « plus rien à
+        // approfondir » et arrêterait l'expansion en silence.
+        int shallow_deferred_by_ram_wait = 0;
         struct possibility_packet pkt;
         while (!aborted && scroll(&work, &pkt)) {
             int deep_enough = (pkt.alloc >= (uint16_t)target_level);
-            if (deep_enough || cap_reached) {
+            if (deep_enough || cap_reached || ram_wait_this_round) {
+                if (!deep_enough && !cap_reached) {
+                    shallow_deferred_by_ram_wait = 1;
+                }
                 array_possibility_packet *single = build_single_array_possibility_packet(&pkt);
                 if (!add_possibility_with_retry_or_abort(single, &ram_wait_this_round)) {
                     aborted = 1;
@@ -2954,9 +3031,6 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                 struct possibility_packet discard;
                 while (scroll(&children, &discard)) { }
             }
-            if (ram_wait_this_round) {
-                cap_reached = 1; // cf. le commentaire plus haut : cesse d'approfondir davantage
-            }
             if (produced >= (unsigned long long)expand_max_stock) {
                 cap_reached = 1; // le reste de `work` sera réinjecté tel quel
             }
@@ -2973,10 +3047,22 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
             log_event("expansion : plafond de stock atteint (%llu ≥ %d) — arrêt de l'approfondissement",
                       produced, expand_max_stock);
         } else if (ram_wait_this_round) {
-            log_event("expansion : plafond RAM atteint pendant cette passe — arrêt de l'approfondissement "
-                      "(%llu possibilité(s) produites, réinjectées telles quelles)", produced);
+            log_event("expansion : plafond RAM atteint pendant cette passe — approfondissement suspendu "
+                      "pour cette passe (%llu possibilité(s) produites, réinjectées telles quelles)", produced);
         }
-        if (!expanded_any) {
+
+        // Pause ENTRE deux passes (pas d'arrêt définitif) si cette passe a
+        // été freinée par la RAM plutôt que par le garde-fou de volume, et
+        // qu'une passe suivante sera effectivement tentée — inutile
+        // d'attendre si c'était de toute façon la dernière autorisée
+        // (`expand_max_levels`) ou si l'arrêt du process a déjà été demandé.
+        if (ram_wait_this_round && !cap_reached && !aborted && rounds + 1 < expand_max_levels) {
+            if (!expand_wait_for_ram_headroom_between_passes()) {
+                aborted = 1;
+            }
+        }
+
+        if (!expanded_any && !shallow_deferred_by_ram_wait) {
             break; // tout le stock a atteint le niveau cible : rien de plus à faire
         }
         rounds++;

@@ -695,13 +695,59 @@ confirming how long the wait actually took. This directly answers the concern th
 RAM-driven slowdown could otherwise be mistaken for a different problem — an operator watching
 the log sees "waiting on RAM" specifically, not a generic pause.
 
-**`cap_reached` (the pre-existing `--expand-max-stock` volume guard) now doubles as a "we had to
-wait at all" signal**, via a `had_to_wait` out-parameter `add_possibility_with_retry_or_abort`
-sets on its first refusal for any given item: once RAM pressure is observed even once, expansion
-stops deepening further for the rest of that pass (the remainder of `work` is reinjected as-is,
-at whatever depth it already reached) rather than continuing to manufacture more work at the
-exact moment room is tight — a deliberate throttle, not a correctness requirement (the retry
-itself guarantees no loss either way).
+**`had_to_wait` (an out-parameter `add_possibility_with_retry_or_abort` sets on its first refusal
+for any given item) stops expansion from deepening further for the rest of THAT pass** (the
+remainder of `work` is reinjected as-is, at whatever depth it already reached) rather than
+continuing to manufacture more work at the exact moment room is tight — a deliberate throttle,
+not a correctness requirement (the retry itself guarantees no loss either way).
+
+**Follow-up, found by an operator testing this PR directly: a RAM wait on pass 1 used to end
+`--expand-level`/`--expand-max-levels` for good, silently under-delivering the requested depth
+even when `--expand-max-levels` allowed many more passes.** The original implementation folded
+`had_to_wait` into `cap_reached` — the SAME flag the `--expand-max-stock` volume guard sets, and
+that flag also drives the OUTER pass loop's own condition (`while (rounds < expand_max_levels &&
+!cap_reached && !aborted)`). That conflation was correct for the volume guard (hitting it means
+"produced enough, stop for good") but wrong for a RAM wait, which is transient by nature — the
+spill thread exists precisely to make room again within milliseconds. The reported symptom
+matched exactly: `--expand-max-levels 10` configured, but the log showed only 1–2 passes and the
+target level never reached, even though plenty of budget remained. Root cause confirmed by
+reading the loop: the very first `had_to_wait` in pass 1 set the same sticky flag that also
+terminates the whole function, regardless of how many passes were still available.
+
+Fixed by splitting the two meanings apart. `cap_reached` now means ONLY the volume guard again
+(sticky, still ends the outer loop for good). A pass-local `ram_wait_this_round` stops deepening
+for the rest of THAT pass exactly as before (folded into the same in-pass condition,
+`deep_enough || cap_reached || ram_wait_this_round`), but no longer touches `cap_reached`.
+Instead, once a pass that hit RAM pressure (not the volume guard) finishes fully draining `work`,
+a new function, `expand_wait_for_ram_headroom_between_passes` (`core/datamanager.c`), blocks —
+same unbounded-except-`REQUEST_STOP` philosophy and periodic-logging convention as
+`add_possibility_with_retry_or_abort` — until `datamanager_resident_packets() <
+datamanager_ram_limit_packets()` again, THEN the outer loop proceeds to the next pass, which
+resumes deepening from scratch (`ram_wait_this_round` reset to 0 for the new pass). Skipped
+entirely when there's no more budget left (`rounds + 1 >= expand_max_levels`) or a stop was
+already requested, so it never blocks pointlessly on what would be the last pass anyway.
+
+**A second, subtler bug found while implementing the first fix, never externally observed but
+caught by construction before it could be.** Once a pass could stop deepening WITHOUT ending the
+whole function, the pre-existing `if (!expanded_any) break;` (`expanded_any` — "at least one
+possibility was actually sent through `search_possiblity_light` this pass" — used to mean
+"nothing left to expand, stop") became ambiguous: if RAM pressure hit on the very FIRST item of
+a pass, before any real deepening happened, `expanded_any` stayed false — indistinguishable from
+the genuine "every possibility has already reached the target level" case, even though plenty of
+shallow, not-yet-deepened possibilities were sitting in `work`, just deferred by the pressure. The
+old code would have wrongly `break`ed out of the whole function right there, discarding the very
+budget the fix above was meant to restore. Fixed with a second, narrower signal,
+`shallow_deferred_by_ram_wait` — set only when an item that is NEITHER `deep_enough` NOR blocked
+by the volume guard gets reinjected as-is because of `ram_wait_this_round` — and the break
+condition became `if (!expanded_any && !shallow_deferred_by_ram_wait) break;`.
+
+Real-world verification (the same reproduction the operator used, extended): `--expand-level 6
+--expand-max-levels 10 --expand-max-stock 200000 --stock-max-ram 1 --stock-spill-dir <dir>` —
+before this fix, exactly 1 pass would have run; after it, all 10 configured passes ran (6 of them
+individually paused mid-flight on RAM pressure and resumed once the spill thread caught up, each
+logged as "approfondissement suspendu pour cette passe" rather than a final "arrêt"), ending at
+"expansion terminée : 1636 possibilités en stock (10 passe(s), niveau visé 6)" — zero error lines
+in the log, budget fully used as configured.
 
 **Clean shutdown mid-wait, without corrupting the pile-allocated `work`/`children` buffers.** On
 `REQUEST_STOP`, the enclosing loops stop attempting further insertions and drain whatever
@@ -737,7 +783,18 @@ FULL expected count ends up resident, none lost, plus a journalled wait;
 mid-wait, asserting the function returns promptly rather than hanging, with the cap still
 respected; both confirmed leak-free and race-free under `make test ASAN=1`, real threads not
 simulated. Replaces `expand_logs_and_bounds_stock_when_ram_cap_hit`, which asserted the
-drop-and-log behaviour these tests now prove is gone).
+drop-and-log behaviour these tests now prove is gone). Updated again for the between-passes fix
+above: `expand_waits_for_ram_and_never_loses_possibilities` now also asserts `passes == 2` and
+that every resulting possibility genuinely reached the target level (`alloc >= 2`, matching
+`expand_grows_stock_and_advances_level`'s own unconstrained assertion on the identical fixture —
+proving the RAM-constrained and unconstrained runs converge to the same end state), where before
+it only asserted the 8 direct children of genesis survived and stopped there. A new companion,
+`expand_aborts_cleanly_on_request_stop_during_between_pass_wait`, targets the NEW wait
+specifically (as opposed to the existing test above, which only ever interrupts the PER-ITEM
+wait): a two-stage companion thread first raises the cap to exactly the pass-1 total (enough for
+every item's own retry to succeed, but leaving zero headroom — `resident == cap` — for pass 2),
+then requests `REQUEST_STOP` once the between-passes wait should be blocking, asserting a clean
+exit with pass 1's possibilities intact and pass 2 never started.
 
 A subtlety in the test suite itself worth remembering: `stock_max_ram_packets`
 (`datamanager.c`, set via the test-only `datamanager_set_ram_limit_packets_for_tests`) is a
