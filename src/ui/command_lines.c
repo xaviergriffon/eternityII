@@ -833,35 +833,53 @@ int exit_interpreter(void) {
             // le script de test finissant par tuer les process au bout de
             // 60s). `exit` DOIT terminer le programme, jamais rester bloqué
             // à attendre un fils récalcitrant.
+            //
+            // Escalade INDIVIDUELLE, PAR FILS (child_idle_ms), pas un délai
+            // unique appliqué à tout le lot depuis le SIGINT initial : un fils
+            // encore en train de vider sa file d'acquittements en attente
+            // (feed_thread_aposs, après REQUEST_STOP — cf.
+            // shutdown_flush_active / fork_last_activity) ne doit pas être
+            // interrompu au milieu de ce vidage juste parce qu'un AUTRE fils,
+            // lui, est réellement bloqué. Un fils qui ne rapporte JAMAIS
+            // d'activité (ancien client sans cette instrumentation, ou mort
+            // avant son premier rapport) reste soumis à l'escalade normale —
+            // `child_idle_ms` compte alors son inactivité depuis
+            // `escalation_start`, exactement le comportement d'avant ce
+            // suivi par fils.
             time_t escalation_start = time(NULL);
-            stop_escalation_action_t last_escalation = STOP_ESCALATION_NONE;
+            stop_escalation_action_t *last_escalation =
+                (childrens_pid != NULL)
+                    ? calloc((size_t)NB_THREADS, sizeof(stop_escalation_action_t))
+                    : NULL;
             // On attend que tous les enfants soient réellement terminés.
             // kill(pid, 0) renvoie 0 tant que le process existe, -1 (ESRCH)
             // une fois qu'il a été récolté par wait_child / sigchld_handler.
             do {
                 remaining = 0;
+                time_t now = time(NULL);
                 if (childrens_pid != NULL) {
                     for (int c = 0; c < NB_THREADS; c++) {
-                        if (childrens_pid[c] > 0 && kill(childrens_pid[c], 0) == 0) {
-                            remaining++;
+                        pid_t childrenPid = childrens_pid[c];
+                        if (childrenPid <= 0 || kill(childrenPid, 0) != 0) {
+                            continue;
+                        }
+                        remaining++;
+
+                        time_t last_seen = (fork_last_activity != NULL) ? fork_last_activity[c] : 0;
+                        long idle_ms = child_idle_ms(last_seen, escalation_start, now);
+                        stop_escalation_action_t action = stop_escalation_next(idle_ms);
+                        if (last_escalation != NULL && action != last_escalation[c]
+                            && action != STOP_ESCALATION_NONE) {
+                            int sig = (action == STOP_ESCALATION_SIGKILL) ? SIGKILL : SIGTERM;
+                            log_error("exit : fils %d encore vivant après %lds d'inactivité — escalade %s\n",
+                                      (int)childrenPid, idle_ms / 1000,
+                                      action == STOP_ESCALATION_SIGKILL ? "SIGKILL" : "SIGTERM");
+                            kill(childrenPid, sig);
+                        }
+                        if (last_escalation != NULL) {
+                            last_escalation[c] = action;
                         }
                     }
-                }
-                if (remaining > 0 && childrens_pid != NULL) {
-                    long elapsed_ms = (long)(time(NULL) - escalation_start) * 1000L;
-                    stop_escalation_action_t action = stop_escalation_next(elapsed_ms);
-                    if (action != last_escalation && action != STOP_ESCALATION_NONE) {
-                        int sig = (action == STOP_ESCALATION_SIGKILL) ? SIGKILL : SIGTERM;
-                        log_error("exit : %d fils encore vivant(s) après %lds — escalade %s\n",
-                                  remaining, elapsed_ms / 1000,
-                                  action == STOP_ESCALATION_SIGKILL ? "SIGKILL" : "SIGTERM");
-                        for (int c = 0; c < NB_THREADS; c++) {
-                            if (childrens_pid[c] > 0) {
-                                kill(childrens_pid[c], sig);
-                            }
-                        }
-                    }
-                    last_escalation = action;
                 }
                 if (cptloop == 10) {
                     log_console("\r            ");
@@ -873,6 +891,7 @@ int exit_interpreter(void) {
                 cptloop++;
                 usleep(MICRO_SLEEP);
             } while (remaining > 0);
+            free(last_escalation);
             log_console("\n");
             flush_console();
             exit(EXIT_SUCCESS);

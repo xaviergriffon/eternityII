@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <time.h>
 #include <sys/un.h>
 #include <pthread.h>
 #include "app/etii_statistic.h"
@@ -827,6 +828,36 @@ extern pid_t *childrens_pid;
 extern char **forkId;
 
 extern struct client_statistics *fork_statistics;
+
+/**
+ * @brief Dernier `time(NULL)` où le parent a reçu un signe d'activité de
+ *        chaque fils (réception d'un datagramme `IPC_MSG_STATS`), parallèle
+ *        à `fork_statistics` (même taille, même cycle de vie — alloué/
+ *        réalloué/libéré aux côtés de celui-ci dans `init_childs`/
+ *        `ensure_childs_capacity`/`free_childs`). `0` tant qu'aucune activité
+ *        n'a encore été observée pour ce slot.
+ *
+ * Sert de base à l'escalade d'arrêt PAR FILS (`child_idle_ms`,
+ * `src/app/fork_orchestrator.h`) : un fils qui rapporte encore de l'activité
+ * (ex. vidage final de sa file d'acquittements en attente, cf.
+ * `shutdown_flush_active`) ne doit pas être interrompu par un délai fixe
+ * commun à tout le lot — seule SON inactivité doit compter.
+ */
+extern time_t *fork_last_activity;
+
+/**
+ * @brief Vrai (1) tant que CE fork (process courant, jamais le parent) est en
+ *        train d'effectuer son vidage final des possibilités analysées en
+ *        attente d'acquittement (cf. `feed_thread_aposs`, appelé une dernière
+ *        fois après `REQUEST_STOP`). Faux (0) sinon.
+ *
+ * Consulté uniquement par `fork_checker` (même process) pour décider de
+ * continuer à émettre des battements `IPC_MSG_STATS` un court instant après
+ * `REQUEST_STOP` — sans ce signal, le thread de stats s'arrête net dès
+ * `REQUEST_STOP` et le parent perd toute visibilité sur ce vidage en cours,
+ * qu'il interpréterait alors à tort comme de l'inactivité.
+ */
+extern volatile int shutdown_flush_active;
 
 extern int fork_checker_socket_id;
 

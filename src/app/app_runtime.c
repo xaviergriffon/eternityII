@@ -25,6 +25,7 @@
 #include "app/etii_server.h"
 #include "app/etii_statistic.h"
 #include "app/fork_gate.h"
+#include "app/fork_orchestrator.h"
 #include "core/datamanager.h"
 #include "core/best_board.h"
 #include "net/client_identity.h"
@@ -756,6 +757,7 @@ void init_childs(void) {
     forkId = malloc(sizeof(char *) * NB_THREADS);
     fork_statistics = malloc(sizeof(struct client_statistics) * NB_THREADS);
     memset(fork_statistics, 0, sizeof(struct client_statistics) * NB_THREADS);
+    fork_last_activity = malloc(sizeof(time_t) * NB_THREADS);
     for (int c = 0; c < NB_THREADS; c++) {
         childrens_pid[c] = -1;
         forkId[c] = malloc(sizeof(char) * 300);
@@ -764,6 +766,7 @@ void init_childs(void) {
         fork_statistics[c].analyses_in_stock = 0;
         fork_statistics[c].possibilities_in_stock = 0;
         fork_statistics[c].shots_per_second = 0;
+        fork_last_activity[c] = 0;
     }
 }
 
@@ -774,6 +777,7 @@ void ensure_childs_capacity(int needed) {
     childrens_pid = realloc(childrens_pid, sizeof(pid_t) * (size_t)needed);
     forkId = realloc(forkId, sizeof(char *) * (size_t)needed);
     fork_statistics = realloc(fork_statistics, sizeof(struct client_statistics) * (size_t)needed);
+    fork_last_activity = realloc(fork_last_activity, sizeof(time_t) * (size_t)needed);
     for (int c = g_childs_capacity; c < needed; c++) {
         childrens_pid[c] = -1;
         forkId[c] = malloc(sizeof(char) * 300);
@@ -782,6 +786,7 @@ void ensure_childs_capacity(int needed) {
         fork_statistics[c].analyses_in_stock = 0;
         fork_statistics[c].possibilities_in_stock = 0;
         fork_statistics[c].shots_per_second = 0;
+        fork_last_activity[c] = 0;
     }
     g_childs_capacity = needed;
 }
@@ -795,9 +800,11 @@ void free_childs(void) {
     free(childrens_pid);
     free(forkId);
     free(fork_statistics);
+    free(fork_last_activity);
     childrens_pid = NULL;
     forkId = NULL;
     fork_statistics = NULL;
+    fork_last_activity = NULL;
     g_childs_capacity = 0;
 }
 
@@ -1027,7 +1034,16 @@ void *fork_checker(void *param) {
     unsigned long long last_counter = 0;
     unsigned long long last_prune_cells = 0;
     struct client_statistics *statistic = calloc(1, sizeof(struct client_statistics));
-	while(request != REQUEST_STOP && fork_checker_socket_id > 0) {
+    // `|| shutdown_flush_active` : sans ce prolongement, ce thread cesse
+    // d'émettre à l'instant même de REQUEST_STOP — le parent perd alors toute
+    // visibilité sur le vidage final des possibilités analysées en attente
+    // (feed_thread_aposs, après la boucle principale) et ne peut plus
+    // distinguer un fork encore actif d'un fork bloqué (cf. fork_last_activity
+    // côté parent, consulté par exit_interpreter/orchestrator_do_stop_forks
+    // pour décider d'escalader SIGTERM/SIGKILL). Se termine de lui-même dès
+    // que shutdown_flush_active retombe à 0 (fin du vidage, bornée par
+    // tcp_timeout côté réseau) ou que fork_checker_socket_id devient invalide.
+	while((request != REQUEST_STOP || shutdown_flush_active) && fork_checker_socket_id > 0) {
         unsigned long long counter = 0;
         unsigned long long possibilities_in_stock = 0;
         for (t = 0; t < NB_THREADS; t++) {
@@ -1225,10 +1241,25 @@ void *server_tcp(void *param) {
 
     int gate_slot = fork_gate_register("server_tcp");
 
-    while (request != REQUEST_STOP) {
+    /* Fenêtre de grâce bornée après REQUEST_STOP : continue de recevoir les
+       battements IPC_MSG_STATS des forks encore en train de vider leur file
+       d'acquittements en attente (cf. shutdown_flush_active / fork_last_activity,
+       feed_thread_aposs) — sans elle, ce thread cesse d'écouter à l'instant
+       même de REQUEST_STOP et exit_interpreter/orchestrator_do_stop_forks
+       n'ont plus aucune activité à observer pour décider d'escalader vers
+       SIGTERM/SIGKILL, ce qui reviendrait à escalader à l'aveugle comme avant.
+       Même barème que l'escalade elle-même (STOP_ESCALATION_SIGKILL_MS) : au
+       -delà, plus aucun fils ne devrait légitimement avoir besoin d'émettre. */
+    time_t stop_requested_at = 0;
+    while (1) {
         fork_gate_checkpoint(gate_slot);
         if (request == REQUEST_STOP) {
-            break;
+            if (stop_requested_at == 0) {
+                stop_requested_at = time(NULL);
+            }
+            if ((long)(time(NULL) - stop_requested_at) * 1000L >= STOP_ESCALATION_SIGKILL_MS) {
+                break;
+            }
         }
         len = sizeof(struct sockaddr_un);
         numBytes = recvfrom(socket_id, buf, bufsz, 0,
@@ -1280,6 +1311,9 @@ void *server_tcp(void *param) {
                     if (cpt >= 0) {
                         memcpy(&fork_statistics[cpt], buf + 1,
                                sizeof(struct client_statistics));
+                        if (fork_last_activity != NULL) {
+                            fork_last_activity[cpt] = time(NULL);
+                        }
                     } else {
                         // Un datagramme de stats dont l'expéditeur ne correspond
                         // à AUCUN slot connu (forkId[]) était jusqu'ici jeté en

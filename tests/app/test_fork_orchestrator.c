@@ -294,6 +294,42 @@ TEST stop_escalation_next_thresholds(void)
     PASS();
 }
 
+/* ============================ child_idle_ms =========================== */
+
+/* Fils qui rapporte de l'activité en continu : l'inactivité reste bornée au
+   temps écoulé depuis SA dernière activité connue, jamais depuis le début de
+   la fenêtre d'arrêt — un fils qui vide encore sa file d'acquittements en
+   attente ne doit jamais être vu comme inactif tant qu'il rapporte. */
+TEST child_idle_ms_counts_since_last_activity(void)
+{
+    time_t escalation_start = 1000;
+    time_t last_activity = 1007; /* a rapporté 7s après le début de l'arrêt */
+    ASSERT_EQ_FMT(0L, child_idle_ms(last_activity, escalation_start, 1007), "%ld");
+    ASSERT_EQ_FMT(3000L, child_idle_ms(last_activity, escalation_start, 1010), "%ld");
+    PASS();
+}
+
+/* Fils qui n'a JAMAIS rapporté d'activité (last_activity == 0, ex. client
+   sans cette instrumentation, ou mort avant son premier rapport) : compté
+   inactif depuis escalation_start — comportement identique à avant
+   l'introduction du suivi par fils, jamais protégé indéfiniment. */
+TEST child_idle_ms_falls_back_to_escalation_start_when_never_reported(void)
+{
+    time_t escalation_start = 1000;
+    ASSERT_EQ_FMT(0L, child_idle_ms(0, escalation_start, 1000), "%ld");
+    ASSERT_EQ_FMT(5000L, child_idle_ms(0, escalation_start, 1005), "%ld");
+    PASS();
+}
+
+/* `now` antérieur ou égal à la référence (horloge injectée incohérente,
+   jamais censé arriver en pratique) : jamais négatif. */
+TEST child_idle_ms_never_negative(void)
+{
+    ASSERT_EQ_FMT(0L, child_idle_ms(1010, 1000, 1005), "%ld");
+    ASSERT_EQ_FMT(0L, child_idle_ms(1005, 1000, 1005), "%ld");
+    PASS();
+}
+
 /* ============================ driver thread-safe ============================ */
 
 /* WAITING_CONFIG + EV_START (post_event) : transition immédiate visible via
@@ -701,6 +737,9 @@ SUITE(fork_orchestrator_suite)
     RUN_TEST(fork_stats_all_zero_detects_any_nonzero_indicator);
     RUN_TEST(fork_stats_all_zero_treats_empty_input_as_zero);
     RUN_TEST(stop_escalation_next_thresholds);
+    RUN_TEST(child_idle_ms_counts_since_last_activity);
+    RUN_TEST(child_idle_ms_falls_back_to_escalation_start_when_never_reported);
+    RUN_TEST(child_idle_ms_never_negative);
     RUN_TEST(waitpid_target_is_reaped_matrix);
 
     RUN_TEST(post_event_start_from_waiting_config_transitions_to_running);

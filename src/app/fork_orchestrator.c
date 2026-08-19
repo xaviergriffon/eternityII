@@ -146,6 +146,15 @@ stop_escalation_action_t stop_escalation_next(long elapsed_ms)
     return STOP_ESCALATION_NONE;
 }
 
+long child_idle_ms(time_t last_activity, time_t escalation_start, time_t now)
+{
+    time_t baseline = (last_activity > 0) ? last_activity : escalation_start;
+    if (now <= baseline) {
+        return 0;
+    }
+    return (long)(now - baseline) * 1000L;
+}
+
 int waitpid_target_is_reaped(pid_t waitpid_result, pid_t target_pid, int wait_errno)
 {
     if (waitpid_result == target_pid) {
@@ -680,10 +689,20 @@ static void orchestrator_do_stop_forks(void)
     }
 
     if (any_live) {
-        long start_ms = current_time_ms();
-        stop_escalation_action_t last_action = STOP_ESCALATION_NONE;
+        // Escalade INDIVIDUELLE, PAR FILS, plutôt qu'un délai unique appliqué
+        // à tout le lot : un fils encore en train de vider sa file
+        // d'acquittements en attente (feed_thread_aposs, après REQUEST_STOP —
+        // cf. shutdown_flush_active / fork_last_activity) ne doit pas être
+        // interrompu au milieu de ce vidage juste parce qu'un AUTRE fils, lui,
+        // est réellement bloqué. `time(NULL)` (résolution 1s) suffit ici : la
+        // même granularité que fork_last_activity côté parent (stampé sur
+        // chaque IPC_MSG_STATS reçu), pas de raison d'être plus précis.
+        time_t escalation_start = time(NULL);
+        stop_escalation_action_t *last_action =
+            calloc((size_t)NB_THREADS, sizeof(stop_escalation_action_t));
         for (;;) {
             int remaining = 0;
+            time_t now = time(NULL);
             for (int c = 0; c < NB_THREADS; c++) {
                 pid_t pid = childrens_pid[c];
                 if (pid <= 0) {
@@ -699,30 +718,30 @@ static void orchestrator_do_stop_forks(void)
                         forkId[c][0] = '\0';
                     }
                     memset(&fork_statistics[c], 0, sizeof(fork_statistics[c]));
-                } else {
-                    remaining++;
+                    continue;
+                }
+                remaining++;
+
+                time_t last_seen = (fork_last_activity != NULL) ? fork_last_activity[c] : 0;
+                long idle_ms = child_idle_ms(last_seen, escalation_start, now);
+                stop_escalation_action_t action = stop_escalation_next(idle_ms);
+                if (last_action != NULL && action != last_action[c] && action != STOP_ESCALATION_NONE) {
+                    int sig = (action == STOP_ESCALATION_SIGKILL) ? SIGKILL : SIGTERM;
+                    log_error("orchestrateur : fils %d encore vivant après %lds d'inactivité — escalade %s\n",
+                              (int)pid, idle_ms / 1000,
+                              action == STOP_ESCALATION_SIGKILL ? "SIGKILL" : "SIGTERM");
+                    kill(pid, sig);
+                }
+                if (last_action != NULL) {
+                    last_action[c] = action;
                 }
             }
             if (remaining == 0) {
                 break;
             }
-
-            long elapsed_ms = current_time_ms() - start_ms;
-            stop_escalation_action_t action = stop_escalation_next(elapsed_ms);
-            if (action != last_action && action != STOP_ESCALATION_NONE) {
-                int sig = (action == STOP_ESCALATION_SIGKILL) ? SIGKILL : SIGTERM;
-                log_error("orchestrateur : %i fils encore vivants après %lds — escalade %s\n",
-                          remaining, elapsed_ms / 1000,
-                          action == STOP_ESCALATION_SIGKILL ? "SIGKILL" : "SIGTERM");
-                for (int c = 0; c < NB_THREADS; c++) {
-                    if (childrens_pid[c] > 0) {
-                        kill(childrens_pid[c], sig);
-                    }
-                }
-            }
-            last_action = action;
             usleep(MICRO_SLEEP);
         }
+        free(last_action);
     }
 
     pthread_sigmask(SIG_SETMASK, &old_set, NULL);
