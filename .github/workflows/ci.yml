@@ -140,8 +140,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Même exposition et même parade qu'`arm64-build` : ralentissement
+      # transitoire du miroir apt du runner, jamais un vrai problème de paquet.
       - name: Dépendance ncurses
-        run: sudo apt-get update && sudo apt-get install -y libncurses-dev
+        timeout-minutes: 5
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y libncurses-dev && break
+            echo "Tentative $i échouée, nouvel essai dans 10s..." >&2
+            sleep 10
+          done
 
       # Vérifie que le chemin logger_ncurses.c compile et lie toujours.
       # WERROR=1 : tout warning gcc dans la variante ncurses bloque la CI.
@@ -158,9 +166,14 @@ jobs:
       # ne requièrent pas de carte NVIDIA. Méthode « network » → ne tire que les
       # sous-paquets nécessaires (rapide). nvcc fournit le compilateur, cudart-dev
       # les en-têtes <cuda_runtime.h> et la lib pour le link -lcudart.
+      # timeout-minutes : cette action télécharge et installe le toolkit
+      # depuis les dépôts NVIDIA — sujette au même ralentissement transitoire
+      # que les étapes apt-get ci-dessous, sans mécanisme de reprise intégré.
+      # Un timeout explicite évite qu'un run bloque des dizaines de minutes.
       - name: Toolkit CUDA
         uses: Jimver/cuda-toolkit@v0.2.21
         id: cuda-toolkit
+        timeout-minutes: 15
         with:
           cuda: '12.5.0'
           method: 'network'
@@ -218,8 +231,19 @@ jobs:
 
       # gcc-aarch64-linux-gnu (+ libc6-dev-arm64-cross) : compilateur et libc
       # croisés pour aarch64, sans matériel ARM ni QEMU.
+      # timeout-minutes + boucle de reprise : cette étape échoue régulièrement
+      # en CI sur un simple ralentissement transitoire du miroir apt du runner
+      # (apt-get update qui traîne, jamais un vrai problème de paquet) — le
+      # timeout court évite qu'un run bloque des dizaines de minutes avant
+      # d'échouer, et la reprise absorbe le ralentissement sans intervention.
       - name: Toolchain croisé aarch64
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+        timeout-minutes: 5
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross && break
+            echo "Tentative $i échouée, nouvel essai dans 10s..." >&2
+            sleep 10
+          done
 
       # Compile-check seul (le binaire ELF aarch64 n'est pas exécutable sur ce
       # runner x86_64) : objectif, surfacer AVANT le push les diagnostics
