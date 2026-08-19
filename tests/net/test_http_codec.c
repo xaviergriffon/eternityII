@@ -256,6 +256,8 @@ TEST http_json_format_stats_golden(void)
     view.active_threads = 3;
     view.pruner_checked = 5;
     view.pruner_removed = 4;
+    view.stock_spilled_packets = 8;
+    view.stock_spill_segments = 2;
     view.queue_unchecked[0] = 7;
     view.queue_checked[0] = 1;
     view.queue_analysed[0] = 0;
@@ -267,6 +269,8 @@ TEST http_json_format_stats_golden(void)
     ASSERT(strstr(buf, "\"shots_per_second\":100") != NULL);
     ASSERT(strstr(buf, "\"max_result\":42") != NULL);
     ASSERT(strstr(buf, "\"active_threads\":3") != NULL);
+    ASSERT(strstr(buf, "\"stock_spilled_packets\":8") != NULL);
+    ASSERT(strstr(buf, "\"stock_spill_segments\":2") != NULL);
     ASSERT(strstr(buf, "\"queues\":[{\"file\":0,\"unchecked\":7,\"checked\":1,\"analysed\":0}") != NULL);
     ASSERT(strstr(buf, "]}") != NULL); /* tableau bien refermé */
 

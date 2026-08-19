@@ -19,6 +19,7 @@
 #include "app/control_registry.h"
 #include "app/known_clients_registry.h"
 #include "core/datamanager.h"
+#include "core/stock_spill.h"
 #include "core/possibility.h"
 #include "core/best_board.h"
 #include "core/part.h"
@@ -271,8 +272,18 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
 
     int activeThread = get_active_threads(thread_params);
 
+    // Débordement disque (--stock-spill-dir, PR2/PR3) : jusqu'ici visible
+    // uniquement via GET /api/v1/stats (stock_spilled_packets/stock_spill_segments)
+    // -- absent du rapport console `check` et du bandeau de stats live, alors
+    // que c'est justement ce qu'il faut pour lire le stock COMPLET (résident +
+    // déporté), pas seulement sa part résidente. 0 des deux si le débordement
+    // est désactivé/non configuré (no-op silencieux, même convention que
+    // stockMemory côté client -- stock_spill n'y est jamais configuré).
+    unsigned long long spilled_packets = stock_spill_total_packets();
+    unsigned long long spilled_segments = stock_spill_total_segments();
+
     char *temp = calloc(1000, sizeof(char));
-    sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\nétudes/s (recherche+prunage) :%llu\ndont prunage/s :%llu\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,(unsigned long long)bys + prune_bys,prune_bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,non_null_possibilities, max_result, activeThread);
+    sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\nétudes/s (recherche+prunage) :%llu\ndont prunage/s :%llu\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\nspilled on disk :%llu (segments:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,(unsigned long long)bys + prune_bys,prune_bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,spilled_packets,spilled_segments,non_null_possibilities, max_result, activeThread);
     strcat(report, temp);
     free(temp);
 
@@ -280,9 +291,9 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
 
     /* Bandeau de stats « live » : résumé compact poussé à chaque tour.
        En mode ncurses il s'affiche en continu ; en mode ANSI, no-op. */
-    log_status(" coups/s:%llu  stock:%llu  checked:%llu  analyse:%llu  record:%i/%i  threads:%i ",
+    log_status(" coups/s:%llu  stock:%llu  checked:%llu  analyse:%llu  spilled:%llu  record:%i/%i  threads:%i ",
                bys, file_possibility_stock, file_possibility_checked_stock,
-               file_possibility_analysed_stock, max_result, ETERN_PARTS, activeThread);
+               file_possibility_analysed_stock, spilled_packets, max_result, ETERN_PARTS, activeThread);
 
     if (max_result > *last_record) {
         *last_record = max_result;
@@ -1497,6 +1508,47 @@ void create_rmnonext_thread(void) {
 }
 
 /**
+ * @brief Boucle du thread de débordement sur disque (PR2, `core/
+ *        stock_spill.h`) : un pas incrémental toutes les 100 ms.
+ *
+ * Tick court (contrairement au tour de statistiques serveur, 10 s) :
+ * l'éviction doit réagir vite à un pic d'ADD approchant le plafond RAM
+ * (--stock-max-ram) avant qu'il ne devienne un mur dur, et le rechargement
+ * doit réagir vite à un GET trouvant une file vidée pour éviter de laisser
+ * les clients à vide plus que nécessaire. `stock_spill_step` est déjà un
+ * no-op bon marché (un test entier) si le module est désactivé ou si aucun
+ * plafond n'est configuré — le coût de ce tick est négligeable dans le cas
+ * courant (pas de --stock-max-ram).
+ */
+void *spill_thread(void *param) {
+    (void)param;
+    while (request != REQUEST_STOP) {
+        stock_spill_step(STOCK_SPILL_BLOCK_PACKETS);
+        usleep(100000); // 100 ms
+    }
+    return NULL;
+}
+
+/**
+ * @brief Démarre le thread de débordement sur disque en mode détaché — même
+ *        motif que `create_rmnonext_thread` ci-dessus.
+ */
+void create_spill_thread(void) {
+    pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
+    pthread_attr_init(thread_attributes);
+    pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    if(0 != pthread_create(&thread, thread_attributes, spill_thread, NULL))
+    {
+        log_error("create_spill_thread : Problème avec pthread_create()\n");
+        free(thread_attributes);
+        exit(EXIT_FAILURE);
+    }
+    pthread_attr_destroy(thread_attributes);
+    free(thread_attributes);
+}
+
+/**
  * @brief Point d'entrée du serveur EternityII.
  *
  * Initialise les possibilités de départ, démarre le thread d'élagage, crée
@@ -1643,11 +1695,11 @@ void log_server_startup_diagnostics(const char *file)
               "nb_threads=%d fichier=\"%s\" stock_files=%d tcp_timeout=%ds "
               "stop_on_solution=%s expand_level=%d expand_max_stock=%d "
               "expand_max_levels=%d rebalance_budget=%d stock_max_ram_mb=%d "
-              "http_port=%d http_token=%s\n",
+              "stock_spill_dir=\"%s\" http_port=%d http_token=%s\n",
               (int)getpid(), VERSION, ETERN_PARTS, NB_THREADS, file,
               nb_file_possibility, tcp_timeout, stop_on_solution ? "oui" : "non",
               expand_min_level, expand_max_stock, expand_max_levels,
-              rebalance_budget, stock_max_ram_mb, HTTP_PORT,
+              rebalance_budget, stock_max_ram_mb, stock_spill_dir, HTTP_PORT,
               HTTP_PORT > 0 ? (HTTP_ADMIN_TOKEN[0] != '\0' ? "configuré" : "absent") : "n/a");
 }
 
@@ -1658,6 +1710,19 @@ void runserver(const char* file)
     map_big_array *map_parts = prepare_map_part(rotateParts);
     free_array_part(apart);
     first_possibility(map_parts, rotateParts);
+
+    // Débordement sur disque (PR2, --stock-spill-dir) : configuré et son
+    // thread démarré AVANT toute expansion --expand-level ci-dessous, pour
+    // qu'une éventuelle pression RAM créée par l'expansion ait une chance
+    // d'être déportée plutôt que refusée (cf. expand_datas_to_level, PR1).
+    // nb_file_possibility est déjà définitif ici (fixé par
+    // datamanager_configure_stock_files dans main(), avant tout fork,
+    // jamais modifié ensuite). Toujours appelé, même sans --stock-max-ram :
+    // stock_spill_step est alors un no-op bon marché (le débordement n'a de
+    // sens que sous un plafond).
+    stock_spill_configure(stock_spill_dir, nb_file_possibility);
+    create_spill_thread();
+
     // Expansion du stock au démarrage (option --expand-level) : développe la
     // genèse en de nombreuses possibilités distribuables tant que la map est
     // vivante, pour que les clients trouvent tous du travail dès la connexion

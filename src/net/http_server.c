@@ -16,6 +16,7 @@
 #include "app/etii_server.h"
 #include "app/static_variables.h"
 #include "core/datamanager.h"
+#include "core/stock_spill.h"
 #include "core/best_board.h"
 #include "net/control_protocol.h"
 #include "net/etii_protocol.h"
@@ -87,6 +88,8 @@ void http_stats_collect(http_stats_view_t *out)
     out->active_threads = (unsigned long long)server_active_client_count();
     out->pruner_checked = pruner_checked;
     out->pruner_removed = pruner_removed;
+    out->stock_spilled_packets = stock_spill_total_packets();
+    out->stock_spill_segments = stock_spill_total_segments();
 
     unsigned long long unchecked_total = 0, checked_total = 0, analysed_total = 0;
     for (int f = 0; f < nb_file_possibility; f++) {

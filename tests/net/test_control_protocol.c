@@ -330,6 +330,16 @@ TEST control_command_privileged_accepts_stock_max_ram(void)
     PASS();
 }
 
+/* spill (PR2, débordement sur disque) : même famille que stockMaxRam --
+ * privilégiée, jamais relayable via le canal de contrôle binaire. */
+TEST control_command_privileged_accepts_spill(void)
+{
+    ASSERT_EQ_FMT(1, control_command_privileged("spill"), "%d");
+    ASSERT_EQ_FMT(1, control_command_privileged("spill 10"), "%d");
+    ASSERT_EQ_FMT(0, control_command_allowed("spill"), "%d");
+    PASS();
+}
+
 /* Les deux listes blanches ne se recoupent jamais. */
 TEST control_command_allowed_and_privileged_are_disjoint(void)
 {
@@ -420,6 +430,7 @@ SUITE(control_protocol_suite)
     RUN_TEST(control_command_privileged_rejects_others);
     RUN_TEST(control_command_privileged_handles_null);
     RUN_TEST(control_command_privileged_accepts_stock_max_ram);
+    RUN_TEST(control_command_privileged_accepts_spill);
     RUN_TEST(control_command_allowed_and_privileged_are_disjoint);
     RUN_TEST(control_command_read_only_accepts_only_clientswork);
     RUN_TEST(control_command_read_only_rejects_modifying_standard_commands);

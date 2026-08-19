@@ -65,6 +65,22 @@ void move_after(File *suite, Element *element, Element *target);
 int scroll (File * suite, void *dest);
 
 /**
+ * @brief Extrait et copie le premier élément de la file (mode FIFO).
+ *
+ * Contrairement à `scroll` (dépile la QUEUE, `end` — les possibilités les
+ * plus récemment ajoutées), extrait la TÊTE (`start`) : les éléments les
+ * plus anciens, jamais retouchés tant que la file ne se vide pas
+ * complètement. Utilisée par `core/stock_spill.c` (débordement sur disque,
+ * PR2) pour évincer précisément la donnée FROIDE, jamais celle qu'un GET
+ * normal (`scroll`) aurait servie en premier.
+ *
+ * @param suite File source.
+ * @param dest  Tampon de destination (au moins `sizeofvalue` octets).
+ * @return      1 si un élément a été extrait, 0 si la file est vide.
+ */
+int scroll_fifo (File * suite, void *dest);
+
+/**
  * @brief Supprime un élément de la file et libère sa mémoire.
  *
  * Recâble les pointeurs des voisins, met à jour `suite->start` / `suite->end`

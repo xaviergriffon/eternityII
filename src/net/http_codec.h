@@ -264,6 +264,13 @@ typedef struct {
     unsigned long long active_threads;
     unsigned long long pruner_checked;
     unsigned long long pruner_removed;
+    /// Possibilités actuellement déportées sur disque (PR2, --stock-max-ram
+    /// + --stock-spill-dir), tous pools et toutes files confondus — 0 si le
+    /// débordement est désactivé, illimité, ou inactif.
+    unsigned long long stock_spilled_packets;
+    /// Nombre de fichiers de segment de débordement actuellement sur disque,
+    /// tous pools et toutes files confondus.
+    unsigned long long stock_spill_segments;
     /// Tailles par file (index 0..nb_file_possibility-1, PR4 : le compte
     /// RÉEL est une variable, ce tableau est dimensionné au plafond de
     /// compilation NB_FILE_POSSIBILITY_MAX), pool non vérifié.

@@ -252,6 +252,36 @@ TEST stock_max_ram_non_positive_value_is_ignored(void)
     PASS();
 }
 
+/* --stock-spill-dir <chemin> : option VALUÉE pointeur, même schéma que
+   --http-token-file (jamais copiée, un pointeur argv remplace directement le
+   défaut littéral). */
+TEST stock_spill_dir_strips_option_and_value_sets_global(void)
+{
+    stock_spill_dir = "./eternityii-spill";
+    const char *argv[] = {"prog", "server", "--stock-spill-dir", "/mnt/spill", "8"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_STR_EQ("/mnt/spill", stock_spill_dir);
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);
+    PASS();
+}
+
+/* Valeur absente : ignorée sans lire hors argv, stock_spill_dir garde son
+   défaut littéral, l'option est tout de même consommée. */
+TEST stock_spill_dir_without_value_is_ignored(void)
+{
+    stock_spill_dir = "./eternityii-spill";
+    const char *argv[] = {"prog", "server", "--stock-spill-dir"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_STR_EQ("./eternityii-spill", stock_spill_dir);
+    ASSERT_STR_EQ("server", argv[1]);
+    PASS();
+}
+
 /* --http-port <n> : option VALUÉE, même schéma que --expand-level. Valeur dans
    [1, 65535] : les deux tokens sont retirés d'argv, HTTP_PORT est fixé. */
 TEST http_port_strips_option_and_value_sets_global(void)
@@ -578,6 +608,8 @@ SUITE(static_variables_suite)
     RUN_TEST(stock_max_ram_strips_option_and_value_sets_global);
     RUN_TEST(stock_max_ram_without_value_is_ignored);
     RUN_TEST(stock_max_ram_non_positive_value_is_ignored);
+    RUN_TEST(stock_spill_dir_strips_option_and_value_sets_global);
+    RUN_TEST(stock_spill_dir_without_value_is_ignored);
     RUN_TEST(http_port_strips_option_and_value_sets_global);
     RUN_TEST(http_port_without_value_is_ignored);
     RUN_TEST(http_port_out_of_range_values_are_ignored);

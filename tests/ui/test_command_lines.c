@@ -30,6 +30,9 @@
 /* exit_interpreter n'est pas exposé dans command_lines.h (appelé uniquement via
  * la table de dispatch de do_command_line). */
 int exit_interpreter(void);
+/* Même raison : stock_memory_interpreter n'est pas non plus exposé dans
+ * command_lines.h. */
+int stock_memory_interpreter(void);
 
 /* lock_all_file / unlock_all_file ne sont pas dans datamanager.h mais sont
  * accessibles via liaison directe (datamanager.c est toujours dans TEST_MODULES).
@@ -2320,6 +2323,7 @@ TEST admin_apply_remote_command_rejects_sort_group_split(void)
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("regroup"), "%d");
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("rebalance"), "%d");
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("stockMaxRam 100"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("spill"), "%d");
     PASS();
 }
 
@@ -2400,6 +2404,72 @@ TEST admin_apply_privileged_command_stock_memory_is_not_remotely_reachable(void)
 {
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("stockMemory"), "%d");
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_privileged_command("stockMemory"), "%d");
+    PASS();
+}
+
+/* stockMemory affiche aussi le debordement disque (--stock-spill-dir) et le
+ * total (resident + deporte) -- meme paire que GET /api/v1/stats
+ * (stock_spilled_packets/stock_spill_segments), jusqu'ici absente de la
+ * console. Capture le CONTENU de stdout (pas seulement sa taille, contrairement
+ * a capture_stderr/restore_stderr_size de tests/core/test_stock_spill.c) via
+ * la meme technique dup2-vers-fichier-temporaire : cote client comme cote
+ * serveur, stock_spill n'est jamais configure ici, donc 0 possibilite/segment
+ * -- la ligne doit tout de meme apparaitre (jamais absente selon l'etat, cf.
+ * la doc de stock_memory_interpreter). */
+TEST stock_memory_interpreter_reports_spill_totals(void)
+{
+    char tmpl[] = "/tmp/etii_stockmemory_XXXXXX";
+    int fd = mkstemp(tmpl);
+    ASSERT(fd >= 0);
+
+    fflush(stdout);
+    int saved_stdout = dup(1);
+    dup2(fd, 1);
+    close(fd);
+
+    int rc = stock_memory_interpreter();
+
+    fflush(stdout);
+    dup2(saved_stdout, 1);
+    close(saved_stdout);
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+
+    FILE *f = fopen(tmpl, "r");
+    ASSERT(f != NULL);
+    char buf[2048];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    unlink(tmpl);
+
+    ASSERT(strstr(buf, "déporté sur disque") != NULL);
+    ASSERT(strstr(buf, "total (résident + déporté)") != NULL);
+    PASS();
+}
+
+/* spill [n] (PR2, debordement sur disque) : meme famille que rebalance --
+ * privilegiee, refusee sur le chemin standard, appliquee via le chemin
+ * privilegie. Le module stock_spill peut etre active ou non selon ce qui a
+ * tourne avant dans ce binaire de tests (tests/core/test_stock_spill.c
+ * configure son propre repertoire, independant de ce fichier) : on verifie
+ * seulement le DISPATCH (accepte, code retour), jamais un deplacement reel
+ * de possibilites -- stock_spill_step() est concu pour etre un no-op sur
+ * silencieux quand le module est desactive ou sans plafond RAM. */
+TEST admin_apply_privileged_command_spill_runs(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("spill"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_privileged_command("spill 10"), "%d");
+    PASS();
+}
+
+/* <n> <= 0 fourni explicitement reste un usage invalide, meme convention que
+ * rebalance -- contrairement a stockMaxRam ou <mo> <= 0 est une valeur
+ * legitime (desactive le plafond). */
+TEST admin_apply_privileged_command_spill_rejects_non_positive_budget(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_privileged_command("spill 0"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_privileged_command("spill -5"), "%d");
     PASS();
 }
 
@@ -2547,5 +2617,8 @@ SUITE(command_lines_suite)
     RUN_TEST(admin_apply_privileged_command_stock_max_ram_sets_limit);
     RUN_TEST(admin_apply_privileged_command_stock_max_ram_requires_argument);
     RUN_TEST(admin_apply_privileged_command_stock_memory_is_not_remotely_reachable);
+    RUN_TEST(stock_memory_interpreter_reports_spill_totals);
+    RUN_TEST(admin_apply_privileged_command_spill_runs);
+    RUN_TEST(admin_apply_privileged_command_spill_rejects_non_positive_budget);
     RUN_TEST(admin_apply_privileged_command_sorts_run);
 }

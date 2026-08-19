@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -39,6 +39,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--stock-files N` | `NB_FILE_POSSIBILITY_DEFAULT` (10) | Nombre de files de stock, fixé une seule fois au démarrage (jamais à chaud), plafonné à `NB_FILE_POSSIBILITY_MAX` (128) — voir ci-dessous |
 | `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir ci-dessous |
 | `--stock-max-ram N` | *(absent, illimité)* | Plafond en Mo des DEUX pools de stock (non vérifié + vérifié) — voir ci-dessous |
+| `--stock-spill-dir CHEMIN` | `./eternityii-spill` | Répertoire de débordement sur disque une fois `--stock-max-ram` approché — voir ci-dessous |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
 | `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
@@ -52,6 +53,7 @@ Exemples :
 ./eternityII server 80 --expand-level 8 --expand-max-stock 1000000 --expand-max-levels 8 data/pieces.csv
 ./eternityII server 80 --stock-files 32 --rebalance-budget 5000 data/pieces.csv
 ./eternityII server 80 --stock-max-ram 4096 data/pieces.csv
+./eternityII server 80 --stock-max-ram 4096 --stock-spill-dir /var/lib/eternityii/spill data/pieces.csv
 ./eternityII server 80 --http-port 8080 data/pieces.csv
 ./eternityII server 80 --http-port 8080 --http-token-file /etc/eternityii/http-token data/pieces.csv
 ```
@@ -124,16 +126,60 @@ point de départ raisonnable).
 
 Un ajout qui ferait dépasser le plafond est **refusé** — le même chemin de dégradation
 gracieuse qu'un refus de contention (`INST_ERROR` côté client, qui conserve la possibilité en
-local et la renverra plus tard, cf. la section « Épilogue » d'[AGENTS.md](../AGENTS.md)).
-**Aucun débordement sur disque n'existe à ce stade** : atteindre le plafond ralentit
-l'absorption de nouveau travail par le serveur, il ne fait jamais perdre ce qui est déjà
-résident. Réglable à chaud via la commande console `stockMaxRam <mo>` (`<mo> <= 0` désactive le
-plafond) et consultable via `stockMemory` ou `GET /api/v1/status`
+local et la renverra plus tard, cf. la section « Épilogue » d'[AGENTS.md](../AGENTS.md)). Ce
+refus ne fait jamais perdre ce qui est déjà résident ; en pratique il devient rare une fois
+`--stock-spill-dir` configuré (ci-dessous), qui déporte l'excédent sur disque avant que ce mur
+dur ne soit atteint. Réglable à chaud via la commande console `stockMaxRam <mo>` (`<mo> <= 0`
+désactive le plafond) et consultable via `stockMemory` ou `GET /api/v1/status`
 (`stock_ram_limit_mb`/`stock_ram_used_mb`, voir [API HTTP REST admin](api_http_rest.md)).
 
 Exemple :
 ```sh
 ./eternityII server 80 --stock-max-ram 2048 data/pieces.csv   # 2 Go pour les deux pools de stock
+```
+
+### Débordement sur disque du stock (`--stock-spill-dir`)
+
+Le plafond RAM ci-dessus, seul, n'a aucun recours : une fois atteint, tout ADD supplémentaire
+est refusé jusqu'à ce qu'un GET libère de la place. `--stock-spill-dir CHEMIN` (défaut
+`./eternityii-spill`) donne un recours : un thread dédié (tick de 100 ms) écrit la possibilité
+la plus **ancienne** (jamais servie, en tête de file — les possibilités récemment ajoutées,
+plus susceptibles d'être demandées bientôt, restent en RAM) dans un fichier de « segment » sur
+disque dès que l'occupation approche 90 % du plafond, et la recharge automatiquement si
+l'occupation redescend sous 25 % et qu'un débordement existe — dans les deux cas jusqu'à
+converger vers 75 % (bande morte entre 75 % et 90 % où rien ne se passe, pour éviter
+d'alterner écriture/lecture à chaque tick sur une occupation qui oscille près d'un seuil). Le
+plafond RAM lui-même (`--stock-max-ram`) reste le filet de sécurité si l'éviction ne suit pas
+assez vite un pic d'ADD — cette option ne le remplace pas, elle le rend moins souvent atteint.
+
+**Sans `--stock-max-ram` (illimité), cette option est acceptée mais reste inerte** : le
+débordement n'a de sens que sous un plafond à respecter. Le format des segments est identique
+à celui des fichiers `.back` (un flux brut de possibilités, sans en-tête) — un opérateur peut
+les inspecter avec les mêmes outils. Un répertoire non inscriptible dégrade gracieusement (un
+avertissement, le plafond RAM redevient un mur dur sans recours, jamais de blocage ni de
+crash). Un pas immédiat est déclenchable via la commande console `spill [n]` ; l'occupation
+déportée est visible via `GET /api/v1/stats` (`stock_spilled_packets`/`stock_spill_segments`,
+voir [API HTTP REST admin](api_http_rest.md)).
+
+> ⚠️ **Le débordement ne survit PAS (encore) à un redémarrage.** Ce mécanisme n'a aucune
+> conscience de la sauvegarde/restauration : au démarrage, tout segment résiduel d'un
+> précédent processus est **purgé** (les possibilités qu'il contenait sont définitivement
+> perdues), avec un `log_error` explicite indiquant le nombre exact de possibilités
+> supprimées. Faire un `backup` avant tout redémarrage planifié si le débordement est en
+> service — la cohérence sauvegarde/restauration avec les segments de débordement est un
+> travail séparé, pas encore livré.
+
+Un pic d'expansion très rapide au démarrage (`--expand-level`) peut dépasser le plafond RAM
+plus vite que le tick de 100 ms ne peut réagir. Aucune possibilité n'est perdue pour autant :
+`expand_datas_to_level` **attend** que le débordement (ou un GET client) libère de la place
+plutôt que d'abandonner, journalisant le refus initial puis un rappel toutes les 5 s tant que
+l'attente se prolonge — un ralentissement au démarrage visible dans les logs, jamais une perte
+silencieuse. Voir la section « No possibility loss during expansion » d'[AGENTS.md](../AGENTS.md)
+pour le détail.
+
+Exemple :
+```sh
+./eternityII server 80 --stock-max-ram 2048 --stock-spill-dir /var/lib/eternityii/spill data/pieces.csv
 ```
 
 ### Expansion du stock au démarrage (`--expand-level`, anti-famine)
@@ -170,12 +216,14 @@ stock distribuable se raréfie en cours de recherche) ; elle respecte elle aussi
 plafonds en vigueur.
 
 Si `--stock-max-ram` (ci-dessus) est également fixé et se révèle plus contraignant que
-`--expand-max-stock`, l'expansion s'arrête dès que le plafond RAM est atteint — le reste du
-travail en cours n'est jamais perdu en silence : un refus est journalisé explicitement
-(`log_error`, visible dans `events.log`) avec le nombre exact de possibilités qui n'ont pu
-être réinjectées. Un tel refus signale un déséquilibre de configuration (relever
-`--stock-max-ram`, ou réduire `--expand-level`/`--expand-max-stock`), pas un fonctionnement
-normal.
+`--expand-max-stock`, l'expansion cesse d'approfondir dès que le plafond RAM est atteint — le
+reste du travail en cours est réinjecté tel quel, au niveau déjà atteint, plutôt que développé
+davantage. **Aucune possibilité générée n'est perdue** : un ADD qui bute sur le plafond RAM
+**attend** (journalisé explicitement — refus initial puis rappel toutes les 5 s si l'attente se
+prolonge, visible dans `events.log`) que `--stock-spill-dir` (ci-dessous) libère de la place,
+plutôt que d'être abandonné. Une attente qui se prolonge signale un déséquilibre de
+configuration (relever `--stock-max-ram`, configurer/vérifier `--stock-spill-dir`, ou réduire
+`--expand-level`/`--expand-max-stock`), pas une perte de données.
 
 > Cette expansion est le pendant *serveur* de la délégation anticipée côté *client*
 > (sonde de faim `INST_NEED_WORK`, VERSION 8) décrite dans

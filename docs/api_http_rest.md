@@ -13,7 +13,7 @@ Le code correspondant vit dans :
 - [src/net/http_codec.h](../src/net/http_codec.h) / [http_codec.c](../src/net/http_codec.c) — parsing HTTP/1.1 (dont l'en-tête `Authorization`), routage, formatage JSON, extraction/vérification du jeton Bearer (`http_extract_bearer_token`, `http_token_equals_constant_time`, `http_command_authorize`) : fonctions pures, sans socket ;
 - [src/net/http_server.h](../src/net/http_server.h) / [http_server.c](../src/net/http_server.c) — écouteur réseau (thread détaché, boucle accept), les fonctions `http_*_collect` qui alimentent les vues JSON à partir de l'état serveur/registre vivant, et `http_token_load` (chargement/validation du fichier jeton au démarrage) ;
 - [src/ui/command_lines.c](../src/ui/command_lines.c) (`admin_apply_remote_command`, `admin_apply_privileged_command`) — exécution des commandes admin, réentrante ;
-- [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_classify`, source unique de vérité ; `control_command_allowed`/`control_command_privileged`/`control_command_read_only` n'en sont que des projections, voir encadré ci-dessous) — `control_command_allowed` (lecture + écriture relayable) est **partagée** avec le canal de contrôle binaire, `control_command_privileged` (écriture serveur-seulement : restore/backup/sortAsc/sortDesc/sortDescMulti/split/regroup/rebalance/stockMaxRam) ne l'est **pas** (accessible uniquement via cette API, jamais via le canal de contrôle) ;
+- [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_classify`, source unique de vérité ; `control_command_allowed`/`control_command_privileged`/`control_command_read_only` n'en sont que des projections, voir encadré ci-dessous) — `control_command_allowed` (lecture + écriture relayable) est **partagée** avec le canal de contrôle binaire, `control_command_privileged` (écriture serveur-seulement : restore/backup/sortAsc/sortDesc/sortDescMulti/split/regroup/rebalance/stockMaxRam/spill) ne l'est **pas** (accessible uniquement via cette API, jamais via le canal de contrôle) ;
 - [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) (`control_registry_snapshot`, `control_registry_record_stats`, `control_registry_broadcast_get_stats`) — registre des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), source de `GET /api/v1/clients` et `POST /api/v1/clients/stats` ;
 - [src/app/known_clients_registry.h](../src/app/known_clients_registry.h) / [known_clients_registry.c](../src/app/known_clients_registry.c) (`known_clients_registry_snapshot`) — [registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus) (cumul par `machine_uid`, survit à la déconnexion), source de `GET /api/v1/known-clients` ;
 - [src/core/best_board.h](../src/core/best_board.h) / [best_board.c](../src/core/best_board.c) (`g_server_best_board`) — représentation du meilleur plateau connu, source de `GET /api/v1/best-board` ;
@@ -155,6 +155,8 @@ Instantané de la télémétrie serveur courante.
   "active_threads": 3,
   "pruner_checked": 0,
   "pruner_removed": 0,
+  "stock_spilled_packets": 0,
+  "stock_spill_segments": 0,
   "queues": [
     { "file": 0, "unchecked": 10, "checked": 2, "analysed": 1 },
     { "file": 1, "unchecked": 8,  "checked": 0, "analysed": 0 }
@@ -165,13 +167,15 @@ Instantané de la télémétrie serveur courante.
 | Champ | Type | Sens |
 |---|---|---|
 | `shots_per_second` | entier ≥ 0 | Débit de recherche courant (essais/seconde), même valeur que le bandeau `coups/s` de la console — publié toutes les 10 s, donc granularité de mise à jour de cet ordre |
-| `possibility_stock` | entier ≥ 0 | Total des possibilités **non vérifiées** en stock (somme de toutes les files) |
-| `checked_stock` | entier ≥ 0 | Total des possibilités **vérifiées** en attente de service |
+| `possibility_stock` | entier ≥ 0 | Total des possibilités **non vérifiées** en stock (somme de toutes les files) — RÉSIDENT uniquement, hors débordement sur disque (voir `stock_spilled_packets` ci-dessous) |
+| `checked_stock` | entier ≥ 0 | Total des possibilités **vérifiées** en attente de service — résident uniquement, même remarque |
 | `analysed_stock` | entier ≥ 0 | Total des possibilités dans le pool **en cours d'analyse** (distribuées aux pruners, pas encore acquittées) |
 | `max_result` | entier ≥ 0 | Meilleur niveau de curseur atteint (voir [le champ `alloc`](#le-champ-alloc)), 0 à 256 (ou 0 à 16 en build `ETERN_PARTS=16`) |
 | `active_threads` | entier ≥ 0 | Nombre de connexions clients actuellement servies (canal de travail **et** de contrôle confondus, cf. [dimensionnement](echanges_client_serveur.md#impact-sur-le-dimensionnement-du-serveur)) |
 | `pruner_checked` / `pruner_removed` | entier ≥ 0 | Toujours `0` côté serveur (ces compteurs n'existent que côté processus pruner ; conservés dans le schéma pour rester alignable avec `control_stats_t` du canal de contrôle) |
-| `queues` | tableau | Une entrée par file de stock **active** (`nb_file_possibility`, configurable au démarrage via `--stock-files`, 10 par défaut, jusqu'à 128 — voir [Utilisation](utilisation.md#maîtrise-de-la-charge-serveur---stock-files---rebalance-budget---tcp-timeout)), avec ses trois compteurs par pool. L'ordre des entrées suit l'index de file (0 à `nb_file_possibility - 1`), pas garanti trié par une autre clé |
+| `stock_spilled_packets` | entier ≥ 0 | Possibilités actuellement déportées sur disque ([`--stock-spill-dir`](utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir)), tous pools et toutes files confondus. `0` si le débordement est désactivé, illimité (`--stock-max-ram` absent), ou simplement inactif à cet instant |
+| `stock_spill_segments` | entier ≥ 0 | Nombre de fichiers de segment de débordement actuellement sur disque, tous pools et toutes files confondus |
+| `queues` | tableau | Une entrée par file de stock **active** (`nb_file_possibility`, configurable au démarrage via `--stock-files`, 10 par défaut, jusqu'à 128 — voir [Utilisation](utilisation.md#maîtrise-de-la-charge-serveur---stock-files---rebalance-budget---tcp-timeout)), avec ses trois compteurs par pool — RÉSIDENT uniquement, comme `possibility_stock`/`checked_stock`. L'ordre des entrées suit l'index de file (0 à `nb_file_possibility - 1`), pas garanti trié par une autre clé |
 
 ### GET /api/v1/status
 
@@ -294,13 +298,16 @@ via cette route, et seulement avec un jeton Bearer valide (voir
 | `regroup` | Regroupe toutes les possibilités dans une seule file — équivalent HTTP de `regroup` |
 | `rebalance [n]` | Rééquilibre le stock d'un seul pas incrémental (file la plus pleine → la plus vide, `n` possibilités par pool, défaut `rebalance_budget`) — équivalent HTTP de `rebalance` |
 | `stockMaxRam <mo>` | Fixe à chaud le [plafond RAM du stock](utilisation.md#plafond-ram-du-stock---stock-max-ram) — équivalent HTTP de `stockMaxRam` ; `<mo> <= 0` désactive le plafond (illimité) |
+| `spill [n]` | Déclenche immédiatement un pas de [débordement/rechargement sur disque](utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir) — équivalent HTTP de `spill` ; `n` optionnel : budget de possibilités pour ce pas (défaut 4096), `<n> <= 0` fourni explicitement est un usage invalide |
 
 Ces six dernières commandes (`sortAsc`/`sortDesc`/`sortDescMulti`/`split`/`regroup`/`rebalance`)
 ne remplacent aucun fichier, mais réorganisent en bloc, sous verrou, l'ensemble du
 stock de possibilités du serveur — un effet de bord suffisamment large (et
-potentiellement coûteux) pour n'avoir de sens que côté serveur. `stockMaxRam` rejoint cette
-liste pour la même raison (modifie un réglage strictement serveur), mais sans en partager le
-coût : c'est une simple affectation, jamais un réarrangement du stock.
+potentiellement coûteux) pour n'avoir de sens que côté serveur. `stockMaxRam`/`spill` rejoignent
+cette liste pour la même raison (modifient un réglage/état strictement serveur), sans en
+partager le coût pour `stockMaxRam` (une simple affectation, jamais un réarrangement du stock) ;
+`spill` réarrange bien le stock (RAM ↔ disque), mais par petits pas incrémentaux comme
+`rebalance`, jamais en bloc.
 
 > **Deux listes, un seul niveau d'authentification.** `control_command_allowed`
 > ("standard", partagée avec le canal de contrôle) et `control_command_privileged`

@@ -175,6 +175,21 @@ static const cli_help_topic_t cli_topics[] = {
 	  "mais n'a d'effet pratique que côté serveur : le stock local d'un\n"
 	  "client/pruner reste déjà borné par max_stock_by_thread/pruner_batch.\n"
 	  "Valeur absente ou <= 0 : ignorée (garde le défaut)." },
+	{ "--stock-spill-dir",
+	  "--stock-spill-dir <chemin>",
+	  "Serveur : répertoire de débordement sur disque quand --stock-max-ram est atteint.",
+	  "Défaut ./eternityii-spill. Une fois le plafond RAM approché (90 %), la\n"
+	  "possibilité la plus ANCIENNE de la file la plus pleine est écrite dans un\n"
+	  "segment sur ce répertoire plutôt que d'être refusée ; rechargée\n"
+	  "automatiquement si la RAM redescend sous 25 % du plafond et qu'un\n"
+	  "débordement existe, jusqu'à remonter à 75 % (puis s'arrête -- ne remplit\n"
+	  "jamais au-delà). Sans --stock-max-ram (illimité), cette option est\n"
+	  "acceptée mais reste inerte (rien à évincer). Répertoire non\n"
+	  "inscriptible : dégradation gracieuse (avertissement, plafond RAM redevient\n"
+	  "un mur dur, jamais de blocage ni de crash). Le débordement NE SURVIT PAS\n"
+	  "à un redémarrage (purge au démarrage, tant que la cohérence sauvegarde/\n"
+	  "restauration n'est pas livrée) : sauvegarder (backup) avant tout arrêt\n"
+	  "pour ne rien perdre. Réglage immédiat via la commande console `spill [n]`." },
 	{ "--tcp-timeout",
 	  "--tcp-timeout <n>",
 	  "Serveur et client/pruner : timeout d'inactivité (secondes) des sockets TCP de travail.",

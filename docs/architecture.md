@@ -22,7 +22,11 @@ sources. Le protocole TCP entre serveur et clients est détaillé dans
   distribue aux clients. Il peut sauvegarder/restaurer ce stock dans des fichiers
   `.back` (voir [Utilisation — fichiers générés](utilisation.md#fichiers-générés)) et,
   optionnellement, plafonner sa croissance en RAM (`--stock-max-ram`, voir
-  [Utilisation — plafond RAM du stock](utilisation.md#plafond-ram-du-stock---stock-max-ram)).
+  [Utilisation — plafond RAM du stock](utilisation.md#plafond-ram-du-stock---stock-max-ram)),
+  avec un recours pour l'excédent : le déporter sur disque plutôt que refuser
+  (`--stock-spill-dir`, [src/core/stock_spill.c](../src/core/stock_spill.c), voir
+  [Utilisation — débordement sur disque](utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir)
+  — ne survit pas encore à un redémarrage).
 - Chaque **client** (`client`, `pruner`, `pruner --gpu`) forke `N` processus
   enfants. Chaque enfant se connecte au serveur, récupère des possibilités, les
   explore (ou les vérifie, en mode pruner), puis renvoie les nouvelles positions

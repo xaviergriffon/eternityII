@@ -9,6 +9,7 @@
 
 #include "ui/logger.h"
 #include "core/datamanager.h"
+#include "core/stock_spill.h"
 #include "net/local_socket.h"
 #include "core/readdata.h"
 #include "ui/command_match.h"
@@ -24,7 +25,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 56
+#define NB_COMMANDS 57
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -127,6 +128,7 @@ int lease_duration_interpreter(void);
 int rebalance_interpreter(void);
 int stock_memory_interpreter(void);
 int stock_max_ram_interpreter(void);
+int spill_interpreter(void);
 int config_interpreter(void);
 int config_save_interpreter(void);
 int start_interpreter(void);
@@ -248,14 +250,17 @@ static command_description commands[NB_COMMANDS] = {
      "tours. Contrairement à split, borné par <n> : peut s'arrêter avant un\n"
      "équilibre complet sur un très gros déséquilibre.", NULL},
     {"stockMemory", stock_memory_interpreter, 0, CMD_CAT_STOCK, 1, NULL,
-     "affiche le plafond RAM du stock et l'occupation actuelle (Mo, possibilités)",
+     "affiche le plafond RAM du stock, l'occupation actuelle et le débordement disque",
      "Deux pools comptés ensemble (non vérifié + vérifié), jamais le pool\n"
      "analysé (borné autrement : baux d'expiration, clients en vol -- cf.\n"
      "leaseDuration). « illimité » si aucun plafond n'est fixé (défaut, ou\n"
      "stockMaxRam 0). L'occupation est une ESTIMATION (sizeof(Element) +\n"
      "sizeof(possibility_packet) + surcoût d'allocateur par possibilité,\n"
      "jamais un relevé RSS réel du process) -- même chiffre que celui exposé\n"
-     "par GET /api/v1/status (stock_ram_limit_mb / stock_ram_used_mb).", NULL},
+     "par GET /api/v1/status (stock_ram_limit_mb / stock_ram_used_mb). Affiche\n"
+     "aussi le débordement sur disque (--stock-spill-dir), toujours présent même\n"
+     "à 0, et le TOTAL (résident + déporté) -- même paire que GET /api/v1/stats\n"
+     "(stock_spilled_packets / stock_spill_segments).", NULL},
     {"stockMaxRam", stock_max_ram_interpreter, 0, CMD_CAT_STOCK, 1, "stockMaxRam <mo>",
      "fixe à chaud le plafond RAM (Mo) des deux pools de stock (--stock-max-ram)",
      "<mo> <= 0 désactive le plafond (illimité), même convention que `limit 0`\n"
@@ -265,6 +270,17 @@ static command_description commands[NB_COMMANDS] = {
      "plafond en dessous de l'occupation actuelle ne fait RIEN à ce qui est\n"
      "déjà résident -- seuls les ADD futurs sont refusés jusqu'à repasser sous\n"
      "le plafond. Ne couvre pas le pool analysé (cf. stockMemory).", NULL},
+    {"spill", spill_interpreter, 0, CMD_CAT_STOCK, 1, "spill [n]",
+     "déclenche immédiatement un pas de débordement/rechargement sur disque (PR2)",
+     "Même appel que celui automatique du thread de débordement (100 ms) --\n"
+     "utile pour forcer un pas immédiat plutôt que d'attendre le prochain tick.\n"
+     "<n> optionnel : budget de possibilités pour CE pas (défaut\n"
+     "STOCK_SPILL_BLOCK_PACKETS, 4096). Sens automatique : évince la file la\n"
+     "plus pleine si l'occupation RAM dépasse 90 % du plafond --stock-max-ram\n"
+     "(jusqu'à redescendre à 75 %), recharge la file la plus chargée sur disque\n"
+     "si elle redescend sous 25 % (jusqu'à remonter à 75 %). No-op silencieux\n"
+     "sans --stock-max-ram (illimité) ou sans\n"
+     "--stock-spill-dir utilisable (voir stockMemory pour l'état courant).", NULL},
     {"min", min_interpreter, 1, CMD_CAT_STOCK, 0, NULL,
      "affiche le niveau minimal de pièces placées dans les files", NULL, NULL},
 
@@ -1573,6 +1589,28 @@ int admin_apply_privileged_command(const char *line) {
                 datamanager_configure_ram_limit(mo);
                 result = ADMIN_CMD_OK;
             }
+        } else if (strcmp(word, "spill") == 0) {
+            // spill_interpreter lit aussi <n> via le curseur global strtok :
+            // appelé directement, même raison que stockMaxRam/rebalance
+            // ci-dessus. <n> absent -> budget par défaut (comme la commande
+            // console) ; <n> <= 0 fourni explicitement reste un usage
+            // invalide -- result garde ADMIN_CMD_BAD_ARGS (sa valeur par
+            // défaut), même convention que rebalance ci-dessus.
+            char *arg = strtok_r(NULL, " ", &save);
+            int budget = STOCK_SPILL_BLOCK_PACKETS;
+            int valid = 1;
+            if (arg != NULL) {
+                int n = atoi(arg);
+                if (n <= 0) {
+                    valid = 0;
+                } else {
+                    budget = n;
+                }
+            }
+            if (valid) {
+                stock_spill_step(budget);
+                result = ADMIN_CMD_OK;
+            }
         }
     }
 
@@ -1867,14 +1905,25 @@ int rebalance_interpreter(void) {
 
 /**
  * @brief Interpréteur de `stockMemory` : affiche le plafond RAM du stock (Mo
- *        et possibilités) et l'occupation actuelle des deux pools de stock.
+ *        et possibilités), l'occupation actuelle des deux pools de stock, et
+ *        le débordement disque (`--stock-spill-dir`) — toujours affiché,
+ *        même à 0, pour lire le stock COMPLET (résident + déporté) d'un seul
+ *        coup d'œil, y compris quand le débordement n'est pas actif (0
+ *        possibilité/segment, plutôt qu'une ligne qui disparaît selon l'état)
+ *        — jusqu'ici visible uniquement via GET /api/v1/stats
+ *        (`stock_spilled_packets`/`stock_spill_segments`).
  *
  * Lecture pure, jamais d'effet de bord — même esprit que `statistic`/`check`.
+ * `stock_spill_total_packets`/`_segments` renvoient 0 côté client (le
+ * débordement n'y est jamais configuré) : no-op silencieux, même convention
+ * que le reste de cette commande sur ce rôle.
  */
 int stock_memory_interpreter(void) {
     unsigned long long limit_packets = datamanager_ram_limit_packets();
     unsigned long long resident_packets = datamanager_resident_packets();
     unsigned long long resident_mb = datamanager_packets_to_ram_mb(resident_packets);
+    unsigned long long spilled_packets = stock_spill_total_packets();
+    unsigned long long spilled_segments = stock_spill_total_segments();
     if (limit_packets == 0) {
         log_info("stockMemory : plafond illimité, occupation ~%llu Mo (%llu possibilité(s))\n",
                   resident_mb, resident_packets);
@@ -1883,6 +1932,8 @@ int stock_memory_interpreter(void) {
         log_info("stockMemory : plafond %llu Mo (~%llu possibilité(s)), occupation ~%llu Mo (%llu possibilité(s))\n",
                   limit_mb, limit_packets, resident_mb, resident_packets);
     }
+    log_info("stockMemory : déporté sur disque : %llu possibilité(s) (%llu segment(s)) — total (résident + déporté) : %llu\n",
+              spilled_packets, spilled_segments, resident_packets + spilled_packets);
     return 0;
 }
 
@@ -1910,6 +1961,29 @@ int stock_max_ram_interpreter(void) {
     } else {
         log_info("stockMaxRam : plafond désactivé (illimité)\n");
     }
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `spill [n]` : déclenche immédiatement un pas de
+ *        débordement/rechargement sur disque (PR2, `core/stock_spill.h`).
+ *
+ * `n` optionnel : budget de possibilités pour CE pas (défaut
+ * `STOCK_SPILL_BLOCK_PACKETS`) -- même convention `<n> <= 0` = usage invalide
+ * que `rebalance [n]`.
+ */
+int spill_interpreter(void) {
+    char *arguments = strtok(NULL, " ");
+    int budget = STOCK_SPILL_BLOCK_PACKETS;
+    if (arguments != NULL) {
+        int n = atoi(arguments);
+        if (n <= 0) {
+            return CMD_ERR_USAGE;
+        }
+        budget = n;
+    }
+    int moved = stock_spill_step(budget);
+    log_info("spill : %d possibilité(s) déplacée(s) (RAM <-> disque)\n", moved);
     return 0;
 }
 
