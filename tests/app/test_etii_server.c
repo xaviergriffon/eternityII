@@ -1655,6 +1655,10 @@ TEST check_server_step_reports_basic_stats(void)
     /* Indice cumulé + part du prunage (delta de pruner_cells_studied) */
     ASSERT(strstr(report, "études/s (recherche+prunage)") != NULL);
     ASSERT(strstr(report, "dont prunage/s") != NULL);
+    /* Débordement disque (--stock-spill-dir) : jusqu'ici visible uniquement
+     * via GET /api/v1/stats, désormais aussi dans le rapport console `check`
+     * (pour lire le stock complet, résident + déporté, d'un coup d'œil). */
+    ASSERT(strstr(report, "spilled on disk") != NULL);
     free(report);
     ASSERT_EQ_FMT(10, last_record, "%d");   /* pas de nouveau record */
     ASSERT_EQ_FMT(1, backup_state.stock.lastBack, "%d");       /* sous le seuil : incrémenté */

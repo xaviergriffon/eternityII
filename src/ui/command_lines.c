@@ -250,14 +250,17 @@ static command_description commands[NB_COMMANDS] = {
      "tours. Contrairement à split, borné par <n> : peut s'arrêter avant un\n"
      "équilibre complet sur un très gros déséquilibre.", NULL},
     {"stockMemory", stock_memory_interpreter, 0, CMD_CAT_STOCK, 1, NULL,
-     "affiche le plafond RAM du stock et l'occupation actuelle (Mo, possibilités)",
+     "affiche le plafond RAM du stock, l'occupation actuelle et le débordement disque",
      "Deux pools comptés ensemble (non vérifié + vérifié), jamais le pool\n"
      "analysé (borné autrement : baux d'expiration, clients en vol -- cf.\n"
      "leaseDuration). « illimité » si aucun plafond n'est fixé (défaut, ou\n"
      "stockMaxRam 0). L'occupation est une ESTIMATION (sizeof(Element) +\n"
      "sizeof(possibility_packet) + surcoût d'allocateur par possibilité,\n"
      "jamais un relevé RSS réel du process) -- même chiffre que celui exposé\n"
-     "par GET /api/v1/status (stock_ram_limit_mb / stock_ram_used_mb).", NULL},
+     "par GET /api/v1/status (stock_ram_limit_mb / stock_ram_used_mb). Affiche\n"
+     "aussi le débordement sur disque (--stock-spill-dir), toujours présent même\n"
+     "à 0, et le TOTAL (résident + déporté) -- même paire que GET /api/v1/stats\n"
+     "(stock_spilled_packets / stock_spill_segments).", NULL},
     {"stockMaxRam", stock_max_ram_interpreter, 0, CMD_CAT_STOCK, 1, "stockMaxRam <mo>",
      "fixe à chaud le plafond RAM (Mo) des deux pools de stock (--stock-max-ram)",
      "<mo> <= 0 désactive le plafond (illimité), même convention que `limit 0`\n"
@@ -1902,14 +1905,25 @@ int rebalance_interpreter(void) {
 
 /**
  * @brief Interpréteur de `stockMemory` : affiche le plafond RAM du stock (Mo
- *        et possibilités) et l'occupation actuelle des deux pools de stock.
+ *        et possibilités), l'occupation actuelle des deux pools de stock, et
+ *        le débordement disque (`--stock-spill-dir`) — toujours affiché,
+ *        même à 0, pour lire le stock COMPLET (résident + déporté) d'un seul
+ *        coup d'œil, y compris quand le débordement n'est pas actif (0
+ *        possibilité/segment, plutôt qu'une ligne qui disparaît selon l'état)
+ *        — jusqu'ici visible uniquement via GET /api/v1/stats
+ *        (`stock_spilled_packets`/`stock_spill_segments`).
  *
  * Lecture pure, jamais d'effet de bord — même esprit que `statistic`/`check`.
+ * `stock_spill_total_packets`/`_segments` renvoient 0 côté client (le
+ * débordement n'y est jamais configuré) : no-op silencieux, même convention
+ * que le reste de cette commande sur ce rôle.
  */
 int stock_memory_interpreter(void) {
     unsigned long long limit_packets = datamanager_ram_limit_packets();
     unsigned long long resident_packets = datamanager_resident_packets();
     unsigned long long resident_mb = datamanager_packets_to_ram_mb(resident_packets);
+    unsigned long long spilled_packets = stock_spill_total_packets();
+    unsigned long long spilled_segments = stock_spill_total_segments();
     if (limit_packets == 0) {
         log_info("stockMemory : plafond illimité, occupation ~%llu Mo (%llu possibilité(s))\n",
                   resident_mb, resident_packets);
@@ -1918,6 +1932,8 @@ int stock_memory_interpreter(void) {
         log_info("stockMemory : plafond %llu Mo (~%llu possibilité(s)), occupation ~%llu Mo (%llu possibilité(s))\n",
                   limit_mb, limit_packets, resident_mb, resident_packets);
     }
+    log_info("stockMemory : déporté sur disque : %llu possibilité(s) (%llu segment(s)) — total (résident + déporté) : %llu\n",
+              spilled_packets, spilled_segments, resident_packets + spilled_packets);
     return 0;
 }
 

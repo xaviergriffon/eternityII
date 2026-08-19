@@ -272,8 +272,18 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
 
     int activeThread = get_active_threads(thread_params);
 
+    // Débordement disque (--stock-spill-dir, PR2/PR3) : jusqu'ici visible
+    // uniquement via GET /api/v1/stats (stock_spilled_packets/stock_spill_segments)
+    // -- absent du rapport console `check` et du bandeau de stats live, alors
+    // que c'est justement ce qu'il faut pour lire le stock COMPLET (résident +
+    // déporté), pas seulement sa part résidente. 0 des deux si le débordement
+    // est désactivé/non configuré (no-op silencieux, même convention que
+    // stockMemory côté client -- stock_spill n'y est jamais configuré).
+    unsigned long long spilled_packets = stock_spill_total_packets();
+    unsigned long long spilled_segments = stock_spill_total_segments();
+
     char *temp = calloc(1000, sizeof(char));
-    sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\nétudes/s (recherche+prunage) :%llu\ndont prunage/s :%llu\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,(unsigned long long)bys + prune_bys,prune_bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,non_null_possibilities, max_result, activeThread);
+    sprintf(temp, "active thread last %isec :%lli\nactive thread/s :%lli\nétudes/s (recherche+prunage) :%llu\ndont prunage/s :%llu\npossibility in stock :%lli (checked:%llu) (analysed:%llu)\nspilled on disk :%llu (segments:%llu)\ngetted possibility not null :%lli\nmax result on server :%i\nactive Thread :%i\n",sleep_time,currentactive, bys,(unsigned long long)bys + prune_bys,prune_bys,file_possibility_stock,file_possibility_checked_stock,file_possibility_analysed_stock,spilled_packets,spilled_segments,non_null_possibilities, max_result, activeThread);
     strcat(report, temp);
     free(temp);
 
@@ -281,9 +291,9 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
 
     /* Bandeau de stats « live » : résumé compact poussé à chaque tour.
        En mode ncurses il s'affiche en continu ; en mode ANSI, no-op. */
-    log_status(" coups/s:%llu  stock:%llu  checked:%llu  analyse:%llu  record:%i/%i  threads:%i ",
+    log_status(" coups/s:%llu  stock:%llu  checked:%llu  analyse:%llu  spilled:%llu  record:%i/%i  threads:%i ",
                bys, file_possibility_stock, file_possibility_checked_stock,
-               file_possibility_analysed_stock, max_result, ETERN_PARTS, activeThread);
+               file_possibility_analysed_stock, spilled_packets, max_result, ETERN_PARTS, activeThread);
 
     if (max_result > *last_record) {
         *last_record = max_result;
