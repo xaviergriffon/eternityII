@@ -198,6 +198,44 @@ stop_escalation_action_t stop_escalation_next(long elapsed_ms);
 long child_idle_ms(time_t last_activity, time_t escalation_start, time_t now);
 
 /**
+ * @brief Formate PUREMENT un résumé diagnostique court du dernier état connu
+ *        d'un fils, pour les lignes d'escalade d'arrêt PAR FILS
+ *        (`exit_interpreter`, `orchestrator_do_stop_forks`).
+ *
+ * Sans lui, une ligne d'escalade ne dit QUE « ce fils est encore vivant après
+ * N secondes d'inactivité » — impossible de distinguer depuis l'extérieur un
+ * fils réellement bloqué d'un fils occupé sur un état qui ne se voit pas
+ * autrement (ex. un gros lot d'acquittements en cours de vidage, cf.
+ * `shutdown_flush_active` / `feed_thread_aposs`), ou de savoir SI ce fils a
+ * seulement déjà rapporté quoi que ce soit. `stat` vient du dernier
+ * `client_statistics` connu (`fork_statistics[c]`, estampillé en même temps
+ * que `fork_last_activity[c]` sur chaque `IPC_MSG_STATS` reçu) — les mêmes
+ * compteurs déjà affichés par `check`/`clients`, pas une nouvelle télémétrie.
+ *
+ * @param stat        Dernier `client_statistics` connu pour ce fils. Jamais
+ *                     déréférencé si `reported` est faux.
+ * @param reported     Vrai si `stat` a RÉELLEMENT été rapporté au moins une
+ *                     fois (`fork_last_activity[c] != 0`) — sinon `stat` peut
+ *                     n'être que des zéros d'initialisation jamais mis à jour,
+ *                     à ne jamais présenter comme un état réel.
+ * @param pruner_mode  Vrai si ce process tourne en mode pruner (tous les fils
+ *                     d'un même process client partagent le même mode) :
+ *                     bascule entre les compteurs de recherche
+ *                     (stock/analysé/coups-s/profondeur) et ceux du pruner
+ *                     (vérifiées/éliminées/cases-s). Dans les deux cas, la
+ *                     sortie inclut aussi `stat->server_io_active`
+ *                     (`serveur=oui`/`serveur=non`, cf. `server_socket_io_lock`/
+ *                     `_unlock`, `core/datamanager.h`) — répond directement à
+ *                     « ce fils est-il en train de PARLER au serveur, ou juste
+ *                     bloqué/inactif ? ».
+ * @param out          Tampon de sortie, toujours NUL-terminé si `out_size > 0`.
+ * @param out_size     Taille de `out`. `out == NULL` ou `out_size == 0` :
+ *                     no-op sûr, jamais de déréférencement.
+ */
+void fork_diagnostic_summary(const struct client_statistics *stat, int reported,
+                              int pruner_mode, char *out, size_t out_size);
+
+/**
  * @brief Interprète PUREMENT le résultat d'un `waitpid(target_pid, &status,
  *        WNOHANG)` ciblé, tel qu'utilisé par la séquence d'arrêt
  *        (`orchestrator_do_stop_forks`, `src/app/fork_orchestrator.c`).

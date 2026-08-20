@@ -1117,6 +1117,7 @@ void *fork_checker(void *param) {
         statistic->analyses_in_stock = analyses_in_stock;
         statistic->possibilities_in_stock = possibilities_in_stock;
         statistic->max_result = max_result;
+        statistic->server_io_active = (uint8_t)(server_io_active ? 1 : 0);
 #if FORWARD_CHECK_K > 0
         // Statistiques du forward-checking : cumuls du processus, agrégés et
         // affichés par le parent dans le rapport de la commande `check`.

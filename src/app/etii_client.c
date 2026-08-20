@@ -226,7 +226,7 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
         }
         if (now - client_possibility->last_socket_activity >= interval)
         {
-            pthread_mutex_lock(&client_possibility->socket_mutex);
+            server_socket_io_lock(client_possibility);
             if (client_possibility->socket_id != -1) {
                 int32_t hunger = poll_server_hunger(client_possibility->socket_id);
                 if (hunger >= 0) {
@@ -240,7 +240,7 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
                     __atomic_store_n(&server_hunger, 0, __ATOMIC_RELAXED);
                 }
             }
-            pthread_mutex_unlock(&client_possibility->socket_mutex);
+            server_socket_io_unlock(client_possibility);
         }
     }
 }

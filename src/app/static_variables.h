@@ -859,6 +859,27 @@ extern time_t *fork_last_activity;
  */
 extern volatile int shutdown_flush_active;
 
+/**
+ * @brief Vrai (1) tant que CE fork (process courant) est en train d'échanger
+ *        avec le serveur — connexion, envoi ou réception d'un paquet, sonde
+ *        de faim (`INST_NEED_WORK`) — depuis N'IMPORTE LEQUEL de ses deux
+ *        threads réseau (le thread d'alimentation `feed_one_thread`, ou le
+ *        thread de recherche via `add_possibility`/délégation). Faux (0)
+ *        sinon. Basé sur le périmètre exact de `client_possibility->socket_mutex`
+ *        (un seul `client_possibility_t` par fork, donc un seul mutex,
+ *        déjà partagé entre ces deux threads — aucune notion de « par
+ *        thread » n'est nécessaire) : `server_socket_io_lock`/
+ *        `server_socket_io_unlock` (`core/datamanager.h`) sont les seuls
+ *        points qui doivent le faire varier, jamais une affectation directe
+ *        ailleurs.
+ *
+ * Rapporté au parent via `client_statistics.server_io_active` (IPC_MSG_STATS,
+ * même cadence que le reste des stats) — répond directement à « ce fils
+ * encore vivant à l'arrêt est-il en train de PARLER au serveur, ou juste
+ * bloqué/inactif ? » (cf. `fork_diagnostic_summary`).
+ */
+extern volatile int server_io_active;
+
 extern int fork_checker_socket_id;
 
 extern struct sockaddr_un *main_addr;

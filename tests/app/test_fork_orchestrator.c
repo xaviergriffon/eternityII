@@ -330,6 +330,78 @@ TEST child_idle_ms_never_negative(void)
     PASS();
 }
 
+/* ============================ fork_diagnostic_summary ========================= */
+
+/* reported == 0 : `stat` ne doit jamais être présenté comme un état réel,
+   même s'il n'est pas NULL (compteurs d'initialisation à zéro, jamais mis à
+   jour par un vrai IPC_MSG_STATS). */
+TEST fork_diagnostic_summary_never_reported(void)
+{
+    struct client_statistics stat;
+    memset(&stat, 0, sizeof(stat));
+    stat.possibilities_in_stock = 42; /* ne doit PAS apparaître : reported == 0 */
+    char buf[96];
+    fork_diagnostic_summary(&stat, 0, 0, buf, sizeof(buf));
+    ASSERT_STR_EQ("jamais rapporté", buf);
+    PASS();
+}
+
+/* `stat == NULL` : même comportement que reported == 0, jamais de déréférencement. */
+TEST fork_diagnostic_summary_null_stat(void)
+{
+    char buf[96];
+    fork_diagnostic_summary(NULL, 1, 0, buf, sizeof(buf));
+    ASSERT_STR_EQ("jamais rapporté", buf);
+    PASS();
+}
+
+/* Mode recherche (pruner_mode == 0) : stock/analysé/coups-s/profondeur max,
+   plus l'indicateur d'échange serveur (serveur=non ici : pas en train de
+   communiquer au moment du rapport). */
+TEST fork_diagnostic_summary_search_mode(void)
+{
+    struct client_statistics stat;
+    memset(&stat, 0, sizeof(stat));
+    stat.possibilities_in_stock = 1234;
+    stat.analyses_in_stock = 56;
+    stat.shots_per_second = 78900;
+    stat.max_result = 186;
+    stat.server_io_active = 0;
+    char buf[160];
+    fork_diagnostic_summary(&stat, 1, 0, buf, sizeof(buf));
+    ASSERT_STR_EQ("stock=1234 analysé=56 coups/s=78900 max=186 serveur=non", buf);
+    PASS();
+}
+
+/* Mode pruner (pruner_mode != 0) : vérifiées/éliminées/cases-s, jamais les
+   compteurs de recherche — plus l'indicateur d'échange serveur, ici vrai
+   (serveur=oui) : c'est exactement le cas qui motive cet indicateur, un fils
+   vivant mais en train de PARLER au serveur au moment de l'escalade. */
+TEST fork_diagnostic_summary_pruner_mode(void)
+{
+    struct client_statistics stat;
+    memset(&stat, 0, sizeof(stat));
+    stat.pruner_checked = 1000;
+    stat.pruner_removed = 250;
+    stat.pruner_cells_per_second = 54321;
+    stat.server_io_active = 1;
+    char buf[160];
+    fork_diagnostic_summary(&stat, 1, 1, buf, sizeof(buf));
+    ASSERT_STR_EQ("vérifiées=1000 éliminées=250 cases/s=54321 serveur=oui", buf);
+    PASS();
+}
+
+/* `out == NULL` / `out_size == 0` : no-op sûr, jamais de déréférencement. */
+TEST fork_diagnostic_summary_null_out_is_safe(void)
+{
+    struct client_statistics stat;
+    memset(&stat, 0, sizeof(stat));
+    fork_diagnostic_summary(&stat, 1, 0, NULL, 160);
+    char buf[160];
+    fork_diagnostic_summary(&stat, 1, 0, buf, 0);
+    PASS();
+}
+
 /* ============================ driver thread-safe ============================ */
 
 /* WAITING_CONFIG + EV_START (post_event) : transition immédiate visible via
@@ -740,6 +812,11 @@ SUITE(fork_orchestrator_suite)
     RUN_TEST(child_idle_ms_counts_since_last_activity);
     RUN_TEST(child_idle_ms_falls_back_to_escalation_start_when_never_reported);
     RUN_TEST(child_idle_ms_never_negative);
+    RUN_TEST(fork_diagnostic_summary_never_reported);
+    RUN_TEST(fork_diagnostic_summary_null_stat);
+    RUN_TEST(fork_diagnostic_summary_search_mode);
+    RUN_TEST(fork_diagnostic_summary_pruner_mode);
+    RUN_TEST(fork_diagnostic_summary_null_out_is_safe);
     RUN_TEST(waitpid_target_is_reaped_matrix);
 
     RUN_TEST(post_event_start_from_waiting_config_transitions_to_running);

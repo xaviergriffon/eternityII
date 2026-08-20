@@ -427,6 +427,39 @@ typedef int (*analysed_owner_alive_fn)(const uint8_t owner_uid[CLIENT_UID_BYTES]
 unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner_alive_fn owner_alive);
 
 /**
+ * @brief Verrouille `client_possibility->socket_mutex` ET signale
+ *        (`server_io_active`, `src/app/static_variables.h`) que ce fork est
+ *        en train d'échanger avec le serveur.
+ *
+ * Remplace un `pthread_mutex_lock(&client_possibility->socket_mutex)` nu
+ * PARTOUT où ce mutex borne exactement un échange réseau (connexion, envoi,
+ * réception) — `put_to_server`, `send_solution`, `send_possibility_analysed`,
+ * `scroll_from_server`, et la sonde de faim (`poll_server_hunger`,
+ * `src/app/etii_client.c`). Ne remplace PAS un verrouillage de ce même mutex
+ * qui ne borne PAS un échange serveur (ex. `run_mono_client` verrouillant
+ * juste pour fermer le socket en fin de vie du fork) — un seul `client_possibility_t`
+ * par fork, donc un seul mutex, partagé sans distinction entre le thread
+ * d'alimentation et le thread de recherche (délégation via `add_possibility`) :
+ * aucune notion de « par thread » n'est nécessaire, le mutex sérialise déjà
+ * tout.
+ *
+ * @param client_possibility Contexte du thread client dont le socket va être
+ *                            utilisé.
+ */
+void server_socket_io_lock(client_possibility_t *client_possibility);
+
+/**
+ * @brief Symétrique de `server_socket_io_lock` : efface `server_io_active`
+ *        PUIS déverrouille `client_possibility->socket_mutex` (dans cet ordre,
+ *        pour qu'aucun lecteur ne puisse observer le mutex libre alors que
+ *        `server_io_active` prétend encore un échange en cours).
+ *
+ * @param client_possibility Contexte du thread client dont le socket vient
+ *                            d'être utilisé.
+ */
+void server_socket_io_unlock(client_possibility_t *client_possibility);
+
+/**
  * @brief Renvoie au serveur les possibilités analysées depuis les files locales.
  *
  * Extrait les paquets de la file d'analyse et les transmet via le socket TCP

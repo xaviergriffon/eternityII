@@ -924,6 +924,42 @@ injectée). Pas de test unitaire du vidage final réseau ni de la fenêtre de gr
 `server_tcp` elles-mêmes (nécessitent un vrai fork/une vraie connexion TCP — même
 convention que le reste de cette séquence d'arrêt, voir *Testing* dans AGENTS.md).
 
+**Complément — savoir SI le fils encore vivant est en train de parler au serveur.**
+`fork_diagnostic_summary` ci-dessus donne le DERNIER état connu (stock, coups/s, …), mais ne
+dit rien sur l'INSTANT présent : un fils en plein `send_all`/`recv_all` (donc réellement
+occupé, pas bloqué) et un fils vraiment figé produisaient la même ligne de log. Un nouveau
+booléen, `server_io_active` (`src/app/static_variables.{h,c}`, process-local à chaque fork —
+jamais un tableau, puisqu'un seul `client_possibility_t` existe par fork), est mis à jour
+via deux fonctions dédiées, `server_socket_io_lock`/`server_socket_io_unlock`
+(`core/datamanager.{h,c}`) : elles enveloppent exactement `client_possibility->socket_mutex`
+sur SES portées d'échange réseau (`put_to_server`, `send_solution`,
+`send_possibility_analysed`, `scroll_from_server`, et la sonde de faim `poll_server_hunger`
+côté `feed_one_thread`) — jamais un verrouillage de ce même mutex qui ne borne PAS un échange
+serveur (ex. `run_mono_client` le prenant juste pour fermer le socket en fin de vie). Comme un
+seul mutex existe par fork, partagé sans distinction entre le thread d'alimentation et le
+thread de recherche (délégation via `add_possibility`, y compris `bt_flush_pending` — le
+propre vidage du travail restant du thread de RECHERCHE à l'arrêt, symétrique de celui du
+thread d'alimentation), un simple booléen global suffit : le mutex sérialise déjà tout,
+aucune notion de « par thread » n'est nécessaire. L'effacement précède TOUJOURS le
+déverrouillage (jamais l'inverse) : sinon un autre thread pourrait verrouiller et démarrer
+son propre échange avant que l'ancien détenteur n'ait fini de remettre le booléen à 0,
+écrasant à tort l'état du nouveau détenteur.
+
+Rapporté au parent via un nouveau champ `client_statistics.server_io_active` (IPC_MSG_STATS,
+même cadence 1s que le reste — aucun protocole réseau touché, ce `struct` ne circule que sur
+le socket local parent↔fork du MÊME build), et intégré à `fork_diagnostic_summary` (nouveau
+suffixe `serveur=oui`/`serveur=non` sur les deux formats, recherche et pruner) — une ligne
+d'escalade dit désormais explicitement si le fils encore vivant est en train d'échanger avec
+le serveur au moment précis du rapport, ou s'il est réellement inactif.
+
+Testé : `fork_diagnostic_summary_search_mode`/`_pruner_mode` étendus pour couvrir les deux
+valeurs de `server_io_active` (`tests/app/test_fork_orchestrator.c`) — le format de sortie
+exact des deux branches, `serveur=oui` inclus. Pas de test unitaire du verrouillage réseau
+lui-même (`server_socket_io_lock`/`_unlock` ne font qu'envelopper un mutex existant + une
+affectation triviale ; leur effet est vérifié transitivement par les tests réseau existants de
+`put_to_server`/`scroll_from_server`/`send_possibility_analysed`, qui continuent tous de
+passer inchangés).
+
 ## Diagnostic : forks vivants qui ne rapportent rien après un démarrage
 
 Symptôme observé à plusieurs reprises en exploitation, sans scénario de

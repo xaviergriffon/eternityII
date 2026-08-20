@@ -871,8 +871,12 @@ int exit_interpreter(void) {
                         if (last_escalation != NULL && action != last_escalation[c]
                             && action != STOP_ESCALATION_NONE) {
                             int sig = (action == STOP_ESCALATION_SIGKILL) ? SIGKILL : SIGTERM;
-                            log_error("exit : fils %d encore vivant après %lds d'inactivité — escalade %s\n",
-                                      (int)childrenPid, idle_ms / 1000,
+                            char state_buf[160];
+                            fork_diagnostic_summary(
+                                (fork_statistics != NULL) ? &fork_statistics[c] : NULL,
+                                last_seen != 0, pruner_mode, state_buf, sizeof(state_buf));
+                            log_error("exit : fils %d encore vivant après %lds d'inactivité (%s) — escalade %s\n",
+                                      (int)childrenPid, idle_ms / 1000, state_buf,
                                       action == STOP_ESCALATION_SIGKILL ? "SIGKILL" : "SIGTERM");
                             kill(childrenPid, sig);
                         }

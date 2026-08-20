@@ -155,6 +155,33 @@ long child_idle_ms(time_t last_activity, time_t escalation_start, time_t now)
     return (long)(now - baseline) * 1000L;
 }
 
+void fork_diagnostic_summary(const struct client_statistics *stat, int reported,
+                              int pruner_mode, char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+    if (!reported || stat == NULL) {
+        snprintf(out, out_size, "jamais rapporté");
+        return;
+    }
+    const char *server_state = stat->server_io_active ? "oui" : "non";
+    if (pruner_mode) {
+        snprintf(out, out_size, "vérifiées=%llu éliminées=%llu cases/s=%llu serveur=%s",
+                  (unsigned long long)stat->pruner_checked,
+                  (unsigned long long)stat->pruner_removed,
+                  (unsigned long long)stat->pruner_cells_per_second,
+                  server_state);
+    } else {
+        snprintf(out, out_size, "stock=%llu analysé=%llu coups/s=%llu max=%u serveur=%s",
+                  (unsigned long long)stat->possibilities_in_stock,
+                  (unsigned long long)stat->analyses_in_stock,
+                  (unsigned long long)stat->shots_per_second,
+                  (unsigned int)stat->max_result,
+                  server_state);
+    }
+}
+
 int waitpid_target_is_reaped(pid_t waitpid_result, pid_t target_pid, int wait_errno)
 {
     if (waitpid_result == target_pid) {
@@ -727,8 +754,12 @@ static void orchestrator_do_stop_forks(void)
                 stop_escalation_action_t action = stop_escalation_next(idle_ms);
                 if (last_action != NULL && action != last_action[c] && action != STOP_ESCALATION_NONE) {
                     int sig = (action == STOP_ESCALATION_SIGKILL) ? SIGKILL : SIGTERM;
-                    log_error("orchestrateur : fils %d encore vivant après %lds d'inactivité — escalade %s\n",
-                              (int)pid, idle_ms / 1000,
+                    char state_buf[160];
+                    fork_diagnostic_summary(
+                        (fork_statistics != NULL) ? &fork_statistics[c] : NULL,
+                        last_seen != 0, pruner_mode, state_buf, sizeof(state_buf));
+                    log_error("orchestrateur : fils %d encore vivant après %lds d'inactivité (%s) — escalade %s\n",
+                              (int)pid, idle_ms / 1000, state_buf,
                               action == STOP_ESCALATION_SIGKILL ? "SIGKILL" : "SIGTERM");
                     kill(pid, sig);
                 }
