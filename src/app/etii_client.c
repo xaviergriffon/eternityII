@@ -226,7 +226,7 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
         }
         if (now - client_possibility->last_socket_activity >= interval)
         {
-            pthread_mutex_lock(&client_possibility->socket_mutex);
+            server_socket_io_lock(client_possibility);
             if (client_possibility->socket_id != -1) {
                 int32_t hunger = poll_server_hunger(client_possibility->socket_id);
                 if (hunger >= 0) {
@@ -240,7 +240,7 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
                     __atomic_store_n(&server_hunger, 0, __ATOMIC_RELAXED);
                 }
             }
-            pthread_mutex_unlock(&client_possibility->socket_mutex);
+            server_socket_io_unlock(client_possibility);
         }
     }
 }
@@ -294,6 +294,27 @@ void *feed_thread_aposs(void *param) {
             usleep(THREAD_MICRO_SLEEP);
         }
     }
+    // Vidage final, best-effort, des possibilités déjà reçues du serveur mais
+    // pas encore acquittées (file_possibility_analysed[id]) : feed_one_thread
+    // refuse tout appel à send_possibility_analysed dès que REQUEST_STOP est
+    // observé (par construction, pour ne plus réclamer de NOUVEAU travail), et
+    // rien d'autre dans le chemin de sortie (run_mono_client) ne rappelait
+    // cette fonction — tout ce qui restait en attente d'acquittement au
+    // moment de l'arrêt (`exit`, Ctrl-C, SIGKILL) était donc perdu : le
+    // serveur le garde attribué à ce client jusqu'à expiration du bail
+    // (leaseDuration, 300s par défaut, PR7) avant de le remettre au stock —
+    // travail d'analyse déjà fait, jeté pour rien. Pendant cet appel,
+    // send_possibility_analysed lève elle-même server_io_active (via
+    // server_socket_io_lock/_unlock, core/datamanager.h) — fork_checker
+    // (autre thread, même process) continue donc d'émettre des battements
+    // IPC_MSG_STATS tant que cet échange dure, pour que le parent
+    // (fork_last_activity) ne le confonde pas avec une inactivité et
+    // n'escalade pas prématurément vers SIGTERM/SIGKILL (cf.
+    // exit_interpreter / orchestrator_do_stop_forks). Borné par construction :
+    // send_possibility_analysed vide toute la file en un seul appel (boucle
+    // interne par lots), chaque échange réseau étant lui-même borné par
+    // tcp_timeout (SO_RCVTIMEO/SO_SNDTIMEO) — jamais un délai fixe ajouté ici.
+    send_possibility_analysed(thread_params);
 #ifdef DEBUG_THREAD
     log_info("END aposs thread %i\n", getpid());
 #endif // DEBUG_THREAD

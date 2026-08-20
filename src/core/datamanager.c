@@ -542,13 +542,29 @@ int check_and_connect_to_server(client_possibility_t *client_possibility) {
  * @param possibilities      Tableau de possibilités à envoyer.
  * @return                   0 en cas de succès, -1 si la connexion échoue.
  */
+void server_socket_io_lock(client_possibility_t *client_possibility)
+{
+	pthread_mutex_lock(&client_possibility->socket_mutex);
+	server_io_active = 1;
+}
+
+void server_socket_io_unlock(client_possibility_t *client_possibility)
+{
+	// Effacer AVANT de déverrouiller : sinon un autre thread peut verrouiller
+	// et démarrer son propre échange (server_io_active repassant à 1) avant
+	// que CET appel n'ait fini de le remettre à 0 juste après — la remise à
+	// zéro écraserait alors, à tort, l'échange du nouveau détenteur.
+	server_io_active = 0;
+	pthread_mutex_unlock(&client_possibility->socket_mutex);
+}
+
 int put_to_server(client_possibility_t *client_possibility, array_possibility_packet *possibilities)
 {
 	// Échange réseau atomique : empêche l'entrelacement avec le thread d'alimentation.
-	pthread_mutex_lock(&client_possibility->socket_mutex);
+	server_socket_io_lock(client_possibility);
 	int socket_id = check_and_connect_to_server(client_possibility);
 	if (socket_id == -1) {
-		pthread_mutex_unlock(&client_possibility->socket_mutex);
+		server_socket_io_unlock(client_possibility);
 		return -1;
 	}
 
@@ -626,11 +642,11 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
 			remaining.size = possibilities->size - first_remaining;
 			put_to_local(&remaining);
 		}
-		pthread_mutex_unlock(&client_possibility->socket_mutex);
+		server_socket_io_unlock(client_possibility);
 		return -1;
 	}
 
-	pthread_mutex_unlock(&client_possibility->socket_mutex);
+	server_socket_io_unlock(client_possibility);
 	return 0;
 
 }
@@ -644,10 +660,10 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
 	}
 
 	// Échange réseau atomique : empêche l'entrelacement avec le thread d'alimentation.
-	pthread_mutex_lock(&client_possibility->socket_mutex);
+	server_socket_io_lock(client_possibility);
 	int socket_id = check_and_connect_to_server(client_possibility);
 	if (socket_id == -1) {
-		pthread_mutex_unlock(&client_possibility->socket_mutex);
+		server_socket_io_unlock(client_possibility);
 		log_error("solution trouvée mais serveur injoignable pour la signaler\n");
 		return -1;
 	}
@@ -664,7 +680,7 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
 		log_errno("envoi de la solution au serveur a échoué => ");
 	}
 
-	pthread_mutex_unlock(&client_possibility->socket_mutex);
+	server_socket_io_unlock(client_possibility);
 	return rc;
 }
 
@@ -1142,10 +1158,10 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 	}
 
 	// Échange réseau atomique : empêche l'entrelacement avec le thread d'alimentation.
-	pthread_mutex_lock(&client_possibility->socket_mutex);
+	server_socket_io_lock(client_possibility);
 	int socket_id = check_and_connect_to_server(client_possibility);
 	if (socket_id == -1) {
-		pthread_mutex_unlock(&client_possibility->socket_mutex);
+		server_socket_io_unlock(client_possibility);
 		return;
 	}
 	if(pthread_mutex_trylock(&file_possibility_analysed[thread]->lock) == 0)
@@ -1201,7 +1217,7 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 		pthread_mutex_unlock(&file_possibility_analysed[thread]->lock);
 	}
 
-	pthread_mutex_unlock(&client_possibility->socket_mutex);
+	server_socket_io_unlock(client_possibility);
 }
 
 /**
@@ -1615,10 +1631,10 @@ int datamanager_rebalance_step(int max_packets)
 void scroll_from_server(client_possibility_t *client_possibility, array_possibility_packet *result, int max_result)
 {
 	// Échange réseau atomique : empêche l'entrelacement avec le thread de recherche.
-	pthread_mutex_lock(&client_possibility->socket_mutex);
+	server_socket_io_lock(client_possibility);
 	int socket_id = check_and_connect_to_server(client_possibility);
 	if (socket_id == -1) {
-		pthread_mutex_unlock(&client_possibility->socket_mutex);
+		server_socket_io_unlock(client_possibility);
 		return;
 	}
 
@@ -1649,7 +1665,7 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 			}
 		}
 		// k == 0 → rien de disponible : result reste vide.
-		pthread_mutex_unlock(&client_possibility->socket_mutex);
+		server_socket_io_unlock(client_possibility);
 		return;
 	}
 
@@ -1713,7 +1729,7 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
 			p++;
 		}
 	}
-	pthread_mutex_unlock(&client_possibility->socket_mutex);
+	server_socket_io_unlock(client_possibility);
 }
 
 /**

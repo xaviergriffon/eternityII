@@ -854,6 +854,168 @@ par `send_all`/`recv_all`, qui bouclent jusqu'à transfert complet ou erreur fra
   ce client meurt avant d'avoir redéposé ses branches filles, cette portion de
   l'espace de recherche est perdue pour la session en cours.
 
+### Correctif : `exit`/`Ctrl-C` perdaient la file d'acquittements en attente, sans jamais flusher
+
+Un doute soulevé (2026-08-19) sur le comportement de `exit`/`Ctrl-C` côté client s'est
+révélé fondé à la lecture du code, pas seulement une inquiétude théorique.
+
+**Le problème.** `feed_one_thread` (`src/app/etii_client.c`) retourne IMMÉDIATEMENT dès
+que `request == REQUEST_STOP` — par construction, pour ne plus réclamer de nouveau
+travail. Mais `send_possibility_analysed` (qui vide `file_possibility_analysed[thread]`,
+la file des possibilités déjà reçues du serveur et en attente d'acquittement
+`INST_POSSIBILITY_ANALYSED[_BATCH]`) n'est appelée QUE depuis `feed_one_thread`, et
+uniquement quand le thread réclame du nouveau travail — jamais en réaction à
+`REQUEST_STOP`. Résultat : `exit_interpreter` attendait la mort de chaque fils (avec
+escalade SIGTERM/SIGKILL, voir le correctif précédent), mais que le fils meure en
+quelques millisecondes ou soit tué de force à +10s, RIEN dans le chemin de sortie
+(`run_mono_client`) ne rappelait jamais `send_possibility_analysed` — le temps d'attente
+d'`exit` ne servait donc à RIEN pour la synchro : `exit` et `kill -9` produisaient
+exactement le même résultat pour tout ce qui restait en attente d'acquittement. Ces
+possibilités restaient marquées « attribuées » côté serveur jusqu'à expiration du bail
+(`leaseDuration`, 300s par défaut, PR7 — voir *Bail à expiration des analyses en cours*
+ci-dessus) avant d'être remises au stock : pas une perte de possibilité au sens strict,
+mais le travail d'analyse déjà fait était jeté pour rien, et le stock restait
+indisponible 5 minutes.
+
+**Correctif — vidage final borné.** `feed_thread_aposs` appelle désormais
+`send_possibility_analysed` une dernière fois juste après la sortie de sa boucle
+principale (donc précisément quand `REQUEST_STOP` est observé), avant de retourner.
+Borné par construction, jamais par un délai fixe ajouté ici : `send_possibility_analysed`
+vide toute la file en un seul appel (boucle interne par lots), chaque échange réseau
+étant lui-même déjà borné par `tcp_timeout` (`SO_RCVTIMEO`/`SO_SNDTIMEO`).
+
+**Le second problème, découlant du premier.** Une fois ce vidage final ajouté, il peut
+prendre du temps (un ou plusieurs allers-retours réseau) — or l'escalade SIGTERM/SIGKILL
+(`exit_interpreter`, `orchestrator_do_stop_forks`) appliquait jusqu'ici un délai UNIQUE
+(5s/10s) commun à TOUT le lot de fils, décompté depuis le SIGINT initial, sans aucune
+notion d'activité : un fils en train de vider légitimement sa file pouvait être interrompu
+au milieu de ce vidage par le même couperet qu'un fils réellement bloqué.
+
+**Correctif — escalade par fils, fondée sur l'inactivité.** Un nouveau prédicat pur,
+`child_idle_ms(last_activity, escalation_start, now)` (`src/app/fork_orchestrator.{h,c}`),
+calcule l'inactivité INDIVIDUELLE d'un fils plutôt qu'un temps écoulé commun. La donnée
+d'activité (`fork_last_activity[]`, tableau parallèle à `fork_statistics[]`, même cycle de
+vie — alloué/réalloué/libéré dans `init_childs`/`ensure_childs_capacity`/`free_childs`,
+`src/app/app_runtime.c`) est estampillée à chaque réception d'un datagramme
+`IPC_MSG_STATS` (le canal IPC existant parent↔fork, ~1/s en fonctionnement normal). Deux
+prolongements bornés, au MÊME barème que l'escalade elle-même
+(`STOP_ESCALATION_SIGKILL_MS`), rendent ce signal disponible pendant la fenêtre d'arrêt :
+- `fork_checker` (côté fork, émetteur des `IPC_MSG_STATS`) continue d'émettre tant que
+  `shutdown_flush_active` (nouveau global, mis à 1/0 par `feed_thread_aposs` autour de son
+  vidage final) reste vrai, même après `REQUEST_STOP` — sans lui, ce thread s'arrêtait net
+  à l'instant même de la demande d'arrêt.
+- `server_tcp` (côté parent, récepteur) continue d'écouter pendant une fenêtre de grâce
+  bornée après `REQUEST_STOP` (au lieu de s'arrêter net) — sans elle, le parent perdait
+  toute visibilité sur cette activité tardive.
+
+`exit_interpreter` et `orchestrator_do_stop_forks` appliquent désormais
+`stop_escalation_next` au résultat de `child_idle_ms` PAR FILS (un tableau
+`last_escalation[NB_THREADS]` remplace le simple `last_escalation` scalaire) : un fils qui
+rapporte encore de l'activité voit son horloge d'inactivité repartir de zéro et n'est
+jamais escaladé tant qu'il progresse réellement ; un fils qui ne rapporte JAMAIS
+d'activité (client sans cette instrumentation, ou mort avant son premier rapport) reste
+compté inactif depuis le début de la fenêtre d'arrêt — comportement identique à avant ce
+suivi, jamais protégé indéfiniment par un défaut de signal.
+
+Testé : `child_idle_ms_counts_since_last_activity`,
+`child_idle_ms_falls_back_to_escalation_start_when_never_reported`,
+`child_idle_ms_never_negative` (`tests/app/test_fork_orchestrator.c`, prédicat pur, horloge
+injectée). Pas de test unitaire du vidage final réseau ni de la fenêtre de grâce de
+`server_tcp` elles-mêmes (nécessitent un vrai fork/une vraie connexion TCP — même
+convention que le reste de cette séquence d'arrêt, voir *Testing* dans AGENTS.md).
+
+**Complément — savoir SI le fils encore vivant est en train de parler au serveur.**
+`fork_diagnostic_summary` ci-dessus donne le DERNIER état connu (stock, coups/s, …), mais ne
+dit rien sur l'INSTANT présent : un fils en plein `send_all`/`recv_all` (donc réellement
+occupé, pas bloqué) et un fils vraiment figé produisaient la même ligne de log. Un nouveau
+booléen, `server_io_active` (`src/app/static_variables.{h,c}`, process-local à chaque fork —
+jamais un tableau, puisqu'un seul `client_possibility_t` existe par fork), est mis à jour
+via deux fonctions dédiées, `server_socket_io_lock`/`server_socket_io_unlock`
+(`core/datamanager.{h,c}`) : elles enveloppent exactement `client_possibility->socket_mutex`
+sur SES portées d'échange réseau (`put_to_server`, `send_solution`,
+`send_possibility_analysed`, `scroll_from_server`, et la sonde de faim `poll_server_hunger`
+côté `feed_one_thread`) — jamais un verrouillage de ce même mutex qui ne borne PAS un échange
+serveur (ex. `run_mono_client` le prenant juste pour fermer le socket en fin de vie). Comme un
+seul mutex existe par fork, partagé sans distinction entre le thread d'alimentation et le
+thread de recherche (délégation via `add_possibility`, y compris `bt_flush_pending` — le
+propre vidage du travail restant du thread de RECHERCHE à l'arrêt, symétrique de celui du
+thread d'alimentation), un simple booléen global suffit : le mutex sérialise déjà tout,
+aucune notion de « par thread » n'est nécessaire. L'effacement précède TOUJOURS le
+déverrouillage (jamais l'inverse) : sinon un autre thread pourrait verrouiller et démarrer
+son propre échange avant que l'ancien détenteur n'ait fini de remettre le booléen à 0,
+écrasant à tort l'état du nouveau détenteur.
+
+Rapporté au parent via un nouveau champ `client_statistics.server_io_active` (IPC_MSG_STATS,
+même cadence 1s que le reste — aucun protocole réseau touché, ce `struct` ne circule que sur
+le socket local parent↔fork du MÊME build), et intégré à `fork_diagnostic_summary` (nouveau
+suffixe `serveur=oui`/`serveur=non` sur les deux formats, recherche et pruner) — une ligne
+d'escalade dit désormais explicitement si le fils encore vivant est en train d'échanger avec
+le serveur au moment précis du rapport, ou s'il est réellement inactif.
+
+Testé : `fork_diagnostic_summary_search_mode`/`_pruner_mode` étendus pour couvrir les deux
+valeurs de `server_io_active` (`tests/app/test_fork_orchestrator.c`) — le format de sortie
+exact des deux branches, `serveur=oui` inclus. Pas de test unitaire du verrouillage réseau
+lui-même (`server_socket_io_lock`/`_unlock` ne font qu'envelopper un mutex existant + une
+affectation triviale ; leur effet est vérifié transitivement par les tests réseau existants de
+`put_to_server`/`scroll_from_server`/`send_possibility_analysed`, qui continuent tous de
+passer inchangés).
+
+### Correctif : `server_io_active` était calculé mais jamais réellement CONSULTÉ pour prolonger l'attente — les fils actifs continuaient d'être tués à 5s/10s
+
+Reproduit en conditions réelles sur cette même PR, immédiatement après le mérge du
+correctif ci-dessus : les logs montraient exactement `serveur=oui` sur des fils tués quand
+même à 5s (SIGTERM) puis 10s (SIGKILL) — l'indicateur disait la vérité, mais rien ne s'en
+servait pour retarder l'escalade. Deux bogues distincts, empilés :
+
+1. **`fork_checker` (côté fork) ne gardait la porte ouverte que pour le vidage du THREAD
+   D'ALIMENTATION.** Sa condition de boucle valait `(request != REQUEST_STOP ||
+   shutdown_flush_active)` — un premier drapeau, `shutdown_flush_active`, posé UNIQUEMENT
+   autour de l'appel `send_possibility_analysed` de `feed_thread_aposs`. Mais dans les logs
+   reproduits (`stock=205 … coups/s=0 serveur=oui`), c'est le THREAD DE RECHERCHE qui était
+   occupé — `bt_flush_pending` (`core/etii_search.c`), qui renvoie au serveur tout le stock
+   local restant à l'arrêt via `add_possibility` → `put_to_server`, EXACTEMENT le second usage
+   de `server_io_active` documenté ci-dessus mais que `shutdown_flush_active` ne couvrait
+   jamais. `fork_checker` cessait donc d'émettre à l'instant même de `REQUEST_STOP`, gelant
+   `fork_last_activity[]` côté parent, pendant que le fils travaillait réellement.
+
+   **Corrigé en remplaçant `shutdown_flush_active` par `server_io_active` dans la condition de
+   boucle de `fork_checker`** (`app_runtime.c`) — `server_io_active` couvre par construction
+   les DEUX threads réseau d'un fork (un seul mutex, cf. ci-dessus), donc cette condition
+   n'a plus besoin de connaître le détail de QUI communique. `shutdown_flush_active`, devenu
+   un sous-ensemble strict et donc redondant, est supprimé entièrement (plus aucun autre
+   usage) — `feed_thread_aposs` n'a plus besoin de le poser/lever lui-même : son appel à
+   `send_possibility_analysed` lève déjà `server_io_active` en interne, via
+   `server_socket_io_lock`/`_unlock`.
+
+2. **`server_tcp` (côté parent) plafonnait sa propre fenêtre d'écoute à
+   `STOP_ESCALATION_SIGKILL_MS` (10s) depuis `REQUEST_STOP`, sans jamais la prolonger même en
+   présence d'activité réelle.** Une fois le bogue n°1 corrigé, un flush prenant plus de 10s
+   (plusieurs forks vidant un gros stock vers un serveur simplement LENT, pas figé — la
+   panne que ce ticket signale) aurait quand même fini par se faire tuer : passé ce délai fixe,
+   `server_tcp` cesse d'écouter, `fork_last_activity[]` se fige à sa dernière valeur reçue, et
+   l'escalade PAR FILS (déjà correcte dans son principe) finit par se déclencher contre une
+   base gelée. Corrigé en réutilisant `child_idle_ms` UN NIVEAU AU-DESSUS : un nouveau
+   `last_active_seen_at`, mis à jour à `time(NULL)` chaque fois qu'un `IPC_MSG_STATS` reçu
+   rapporte `server_io_active == 1` pour N'IMPORTE LEQUEL des fils, sert de base à
+   `child_idle_ms(last_active_seen_at, stop_requested_at, now)` à la place d'un calcul
+   d'écart figé sur `stop_requested_at` seul — la fenêtre d'écoute du parent se prolonge donc
+   tant qu'AU MOINS un fils rapporte un échange serveur en cours, exactement la même logique
+   de repli (« jamais rapporté → compté depuis le début de la fenêtre d'arrêt ») que
+   `child_idle_ms` applique déjà par fils.
+
+**Toujours borné, jamais un délai fixe qui rejoue le même bogue un cran plus haut** : un
+échange serveur individuel reste plafonné par `tcp_timeout` (`SO_RCVTIMEO`/`SO_SNDTIMEO`,
+10s par défaut) — un serveur VRAIMENT figé (pas seulement lent) fait donc échouer
+`put_to_server` en un temps borné, `server_io_active` retombe à 0, et l'escalade normale
+reprend son cours. Seul un serveur qui répond, même lentement, prolonge indéfiniment la
+fenêtre — exactement le cas que ce correctif visait à protéger.
+
+Pas de test unitaire de la fenêtre de grâce de `server_tcp` elle-même ni de la boucle de
+`fork_checker` (les deux nécessitent un vrai fork/une vraie connexion TCP — même convention
+que le reste de cette séquence d'arrêt) ; `child_idle_ms` lui-même reste couvert par ses trois
+tests existants (`tests/app/test_fork_orchestrator.c`), réutilisés tels quels ici sans aucune
+modification de signature.
+
 ## Diagnostic : forks vivants qui ne rapportent rien après un démarrage
 
 Symptôme observé à plusieurs reprises en exploitation, sans scénario de

@@ -84,6 +84,10 @@ unsigned long long *counters = NULL;
 
 struct client_statistics *fork_statistics = NULL;
 
+time_t *fork_last_activity = NULL;
+
+volatile int server_io_active = 0;
+
 unsigned long long *lastfilesize = NULL;
 char *lastcheck = NULL;
 pthread_mutex_t lastcheck_mutex = PTHREAD_MUTEX_INITIALIZER;

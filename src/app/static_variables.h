@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <time.h>
 #include <sys/un.h>
 #include <pthread.h>
 #include "app/etii_statistic.h"
@@ -827,6 +828,43 @@ extern pid_t *childrens_pid;
 extern char **forkId;
 
 extern struct client_statistics *fork_statistics;
+
+/**
+ * @brief Dernier `time(NULL)` où le parent a reçu un signe d'activité de
+ *        chaque fils (réception d'un datagramme `IPC_MSG_STATS`), parallèle
+ *        à `fork_statistics` (même taille, même cycle de vie — alloué/
+ *        réalloué/libéré aux côtés de celui-ci dans `init_childs`/
+ *        `ensure_childs_capacity`/`free_childs`). `0` tant qu'aucune activité
+ *        n'a encore été observée pour ce slot.
+ *
+ * Sert de base à l'escalade d'arrêt PAR FILS (`child_idle_ms`,
+ * `src/app/fork_orchestrator.h`) : un fils qui rapporte encore de l'activité
+ * (ex. vidage final de sa file d'acquittements en attente, ou renvoi de son
+ * stock local restant, cf. `server_io_active`) ne doit pas être interrompu
+ * par un délai fixe commun à tout le lot — seule SON inactivité doit compter.
+ */
+extern time_t *fork_last_activity;
+
+/**
+ * @brief Vrai (1) tant que CE fork (process courant) est en train d'échanger
+ *        avec le serveur — connexion, envoi ou réception d'un paquet, sonde
+ *        de faim (`INST_NEED_WORK`) — depuis N'IMPORTE LEQUEL de ses deux
+ *        threads réseau (le thread d'alimentation `feed_one_thread`, ou le
+ *        thread de recherche via `add_possibility`/délégation). Faux (0)
+ *        sinon. Basé sur le périmètre exact de `client_possibility->socket_mutex`
+ *        (un seul `client_possibility_t` par fork, donc un seul mutex,
+ *        déjà partagé entre ces deux threads — aucune notion de « par
+ *        thread » n'est nécessaire) : `server_socket_io_lock`/
+ *        `server_socket_io_unlock` (`core/datamanager.h`) sont les seuls
+ *        points qui doivent le faire varier, jamais une affectation directe
+ *        ailleurs.
+ *
+ * Rapporté au parent via `client_statistics.server_io_active` (IPC_MSG_STATS,
+ * même cadence que le reste des stats) — répond directement à « ce fils
+ * encore vivant à l'arrêt est-il en train de PARLER au serveur, ou juste
+ * bloqué/inactif ? » (cf. `fork_diagnostic_summary`).
+ */
+extern volatile int server_io_active;
 
 extern int fork_checker_socket_id;
 
