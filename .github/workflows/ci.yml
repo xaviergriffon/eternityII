@@ -140,13 +140,24 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Même exposition et même parade qu'`arm64-build` : ralentissement
-      # transitoire du miroir apt du runner, jamais un vrai problème de paquet.
+      # Le miroir régional par défaut (azure.archive.ubuntu.com) se bloque
+      # parfois EN PLEIN TÉLÉCHARGEMENT (pas seulement au moment d'apt-get
+      # update) — une seule tentative épuisait alors tout le budget
+      # timeout-minutes sans que le retry ci-dessous n'ait sa chance. On
+      # bascule d'abord sur le miroir direct archive.ubuntu.com (observé
+      # fiable en repli lors des incidents), puis chaque tentative est bornée
+      # individuellement (`timeout 120`) plutôt que la boucle entière : un
+      # blocage réseau est tué et retenté, il ne consomme plus tout le job.
+      - name: Contournement miroir apt (azure.archive.ubuntu.com)
+        run: |
+          sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors.txt 2>/dev/null || true
+
       - name: Dépendance ncurses
-        timeout-minutes: 5
+        timeout-minutes: 8
         run: |
           for i in 1 2 3; do
-            sudo apt-get update && sudo apt-get install -y libncurses-dev && break
+            timeout 120 sudo apt-get update && timeout 120 sudo apt-get install -y libncurses-dev && break
             echo "Tentative $i échouée, nouvel essai dans 10s..." >&2
             sleep 10
           done
@@ -162,6 +173,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Même bascule que les jobs ncurses/arm64 : l'action ci-dessous lance son
+      # propre apt-get update en interne, sans reprise, et un blocage du
+      # miroir régional azure.archive.ubuntu.com lui coûte tout le job (déjà
+      # observé : bloquée 14 min sans plus une ligne de log après un
+      # apt-get update qui traîne, jusqu'au timeout). La config apt étant
+      # globale au runner, ce sed s'applique aussi à l'apt-get interne de
+      # l'action, sans avoir à la modifier.
+      - name: Contournement miroir apt (azure.archive.ubuntu.com)
+        run: |
+          sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors.txt 2>/dev/null || true
+
       # Installe le toolkit CUDA (nvcc + cudart-dev) sans GPU : COMPILER et LIER
       # ne requièrent pas de carte NVIDIA. Méthode « network » → ne tire que les
       # sous-paquets nécessaires (rapide). nvcc fournit le compilateur, cudart-dev
@@ -169,11 +192,13 @@ jobs:
       # timeout-minutes : cette action télécharge et installe le toolkit
       # depuis les dépôts NVIDIA — sujette au même ralentissement transitoire
       # que les étapes apt-get ci-dessous, sans mécanisme de reprise intégré.
-      # Un timeout explicite évite qu'un run bloque des dizaines de minutes.
+      # Un timeout explicite évite qu'un run bloque des dizaines de minutes ;
+      # relevé à 20 min (contre 15) pour laisser une vraie marge une fois le
+      # miroir contourné, plutôt que de reproduire le même timeout serré.
       - name: Toolkit CUDA
         uses: Jimver/cuda-toolkit@v0.2.21
         id: cuda-toolkit
-        timeout-minutes: 15
+        timeout-minutes: 20
         with:
           cuda: '12.5.0'
           method: 'network'
@@ -231,16 +256,30 @@ jobs:
 
       # gcc-aarch64-linux-gnu (+ libc6-dev-arm64-cross) : compilateur et libc
       # croisés pour aarch64, sans matériel ARM ni QEMU.
+      #
+      # Le miroir régional par défaut (azure.archive.ubuntu.com) se bloque
+      # parfois EN PLEIN TÉLÉCHARGEMENT (pas seulement au moment d'apt-get
+      # update) — déjà observé : un paquet de 10,8 Mo bloqué à mi-transfert
+      # jusqu'au timeout, sans que la reprise ci-dessous n'ait sa chance
+      # puisque timeout-minutes bornait la boucle ENTIÈRE, pas la tentative.
+      # On bascule d'abord sur le miroir direct archive.ubuntu.com (observé
+      # fiable en repli lors des incidents).
+      - name: Contournement miroir apt (azure.archive.ubuntu.com)
+        run: |
+          sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors.txt 2>/dev/null || true
+
       # timeout-minutes + boucle de reprise : cette étape échoue régulièrement
       # en CI sur un simple ralentissement transitoire du miroir apt du runner
-      # (apt-get update qui traîne, jamais un vrai problème de paquet) — le
-      # timeout court évite qu'un run bloque des dizaines de minutes avant
-      # d'échouer, et la reprise absorbe le ralentissement sans intervention.
+      # (apt-get update qui traîne, jamais un vrai problème de paquet). Chaque
+      # tentative est désormais bornée individuellement (`timeout 120`) plutôt
+      # que la boucle entière, pour qu'un blocage réseau soit tué et retenté
+      # au lieu de consommer tout le budget du job en une seule fois.
       - name: Toolchain croisé aarch64
-        timeout-minutes: 5
+        timeout-minutes: 8
         run: |
           for i in 1 2 3; do
-            sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross && break
+            timeout 120 sudo apt-get update && timeout 120 sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross && break
             echo "Tentative $i échouée, nouvel essai dans 10s..." >&2
             sleep 10
           done
