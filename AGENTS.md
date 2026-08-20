@@ -2,22 +2,40 @@
 
 This file is the single source of project guidance for AI coding agents (Claude Code, Codex, …) working with code in this repository. `CLAUDE.md` imports it via `@AGENTS.md`, so edit only this file.
 
+**This file is a compact index, not a changelog.** Full reference documentation of the **implemented** behaviour lives under `docs/` (table below) and is kept current — prefer it over guessing from source or from this file's history. Design proposals **not yet implemented** live in `docs/conception/` (a target, not the code's current behaviour — see [docs/conception/README.md](docs/conception/README.md)). Closed post-mortems on hard-to-reproduce bugs live in `docs/investigations/`. **When you add or change a feature, update the relevant `docs/*.md` file(s) and `README.md`** — not just this file. Only add something here if it's a durable, project-wide convention or invariant that a contributor needs before touching related code.
+
 ## Project Overview
 
 eternityII is a C program that attempts to solve the [Eternity II puzzle](https://en.wikipedia.org/wiki/Eternity_II_puzzle) — a 16×16 grid with 256 pieces. It uses a distributed client-server architecture to parallelise the search space across multiple processes or machines.
 
+## Documentation Map
+
+| Doc | Covers |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | Process/thread model, the COW-shared lookup map, parent↔child IPC, source layout |
+| [docs/utilisation.md](docs/utilisation.md) | Every CLI mode and option (server/client/pruner/test), RAM cap, disk spillover, startup expansion, generated files |
+| [docs/console.md](docs/console.md) | Every interactive console command, help system, ncurses UI |
+| [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md) | Wire protocol, control channel, load management, known-clients registry, failure diagnostics |
+| [docs/api_http_rest.md](docs/api_http_rest.md) | HTTP admin API: endpoints, auth model, client examples |
+| [docs/autosearch_step.md](docs/autosearch_step.md) | Search loop internals: memory flow, forward-check, MRV cell choice |
+| [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md) | GPU pruner (CUDA build) |
+| [docs/tests_et_ci.md](docs/tests_et_ci.md) + [tests/README.md](tests/README.md) | Test targets/CI matrix/benchmarks; unit-test conventions and fixtures |
+| [docs/compilation.md](docs/compilation.md) | Build targets, debug flags, puzzle-size configuration |
+| [docs/conception/](docs/conception/README.md) | Design proposals not yet implemented |
+| [docs/investigations/](docs/investigations/README.md) | Closed post-mortems on hard-to-reproduce bugs |
+
 ## Source Layout
 
-Sources live under `src/`, split into four domains. Includes are **explicit and domain-qualified** (e.g. `#include "core/part.h"`) and resolve via a single `-Isrc` (passed by both the Makefile and `target_include_directories(eternityII PRIVATE src)` in CMake).
+Sources live under `src/`, split into four domains. Includes are **explicit and domain-qualified** (e.g. `#include "core/part.h"`) and resolve via a single `-Isrc` (Makefile and `target_include_directories(eternityII PRIVATE src)` in CMake).
 
 | Directory | Domain | Modules |
 |---|---|---|
-| `src/core/` | Puzzle logic & data structures + search engine | `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `etii_search` `datamanager` |
-| `src/net/`  | TCP protocol & sockets, parent↔child IPC | `etii_protocol` `control_protocol` `tcpclient` `tcpserver` `local_socket` `ipc_protocol`(h) |
+| `src/core/` | Puzzle logic & data structures + search engine | `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `etii_search` `datamanager` `stock_spill` |
+| `src/net/`  | TCP protocol & sockets, parent↔child IPC | `etii_protocol` `control_protocol` `client_identity` `tcpclient` `tcpserver` `local_socket` `ipc_protocol`(h) `http_codec` `http_server` |
 | `src/ui/`   | Logging, console, command handling | `logger` `logger_ncurses`(c) `console` `command_lines` `command_match` `command_history` `line_edit` |
-| `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_control` `control_registry` `app_runtime` `etii_statistic`(h) `static_variables` `gpu_pruner`(.cu/.h) |
+| `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_control` `control_registry` `known_clients_registry` `client_config` `fork_gate` `fork_orchestrator` `app_runtime` `etii_statistic`(h) `static_variables` `gpu_pruner`(.cu/.h) |
 
-Other top-level dirs: `data/` (puzzle definitions `pieces.csv`, `pieces16.csv`), `build/` (compilation objects, mirrors `src/`, gitignored), `tests/` (unit tests), `docs/` (reference documentation of the **implemented** behaviour) and `docs/conception/` (design proposals **not yet implemented** — a target, not the code's behaviour; see [docs/conception/README.md](docs/conception/README.md) for the status/lifecycle convention). Adding a `.c` means dropping it under the right `src/<domain>/` and adding its `build/<domain>/<name>.o` to the `OBJS` list (and to `add_executable` in `CMakeLists.txt`).
+Other top-level dirs: `data/` (puzzle definitions), `build/` (compilation objects, mirrors `src/`, gitignored), `tests/` (unit tests, mirrors `src/`). **Adding a `.c` means dropping it under the right `src/<domain>/` and adding its `build/<domain>/<name>.o` to the `OBJS` list (and to `add_executable` in `CMakeLists.txt`).** Full diagram and module-by-module responsibility table: [docs/architecture.md](docs/architecture.md).
 
 ## Build Commands
 
@@ -25,1509 +43,167 @@ Other top-level dirs: `data/` (puzzle definitions `pieces.csv`, `pieces16.csv`),
 make                          # Release build → ./eternityII
 make DEBUG=1                  # Debug build (keeps .o files, adds -g)
 make NCURSES=1                # Build with ncurses UI (links -lncurses, replaces logger.c with logger_ncurses.c)
-make EXECUTABLE=myBinary      # Custom output name
+make CUDA=1                   # Build with the GPU pruner (nvcc kernel, see docs/pruner_gpu_cuda.md)
 make clean                    # Remove all build artifacts
-make test                     # Build & run the greatest unit-test suite (tests/) + the bench shell tests (test-bench)
-make test-integration         # End-to-end client/server scenarios on the 16-piece puzzle (solution round-trip + control channel)
-make test-docker              # Replay the CI test jobs (WERROR build, tests, ASan, integration) in a Linux/gcc container (requires Docker)
-make test-docker-arm          # Cross-compile-check the release build for ARM 64-bit (Raspberry Pi) in the same container (requires Docker)
-make coverage                 # Both passes (256+16); gcovr merged text summary (requires gcovr)
-make coverage-256             # 256-piece pass only; gcov per-module summary
-make coverage-report          # gcovr reports: Cobertura XML + HTML + Markdown summary
+make test                     # Unit-test suite (tests/) + bench shell tests
+make test-integration         # End-to-end client/server scenarios on the 16-piece puzzle
+make test-docker               # Replay CI (WERROR, ASan, integration) in a Linux/gcc container
+make coverage / coverage-report
 ```
 
-The Makefile auto-detects Darwin and links OpenCL with `-framework OpenCL` instead of `-lOpenCL` (OpenCL support is currently commented out in the link step).
+Darwin auto-links OpenCL with `-framework OpenCL` (currently unused — commented out in the link step). Full target list, `CC`/`CPPFLAGS` overrides, debug flags and puzzle-size configuration (`ETERN_PARTS`, `FORWARD_CHECK_K`): [docs/compilation.md](docs/compilation.md).
 
 ## Running the Program
 
 ```sh
-# Start the server (distributes possibilities to clients)
-./eternityII server [nb_threads] [data/pieces.csv]
-# …with startup stock expansion (anti-starvation): pre-expand to cursor level 4
-./eternityII server [nb_threads] --expand-level 4 [data/pieces.csv]
-# …with the HTTP REST admin API enabled on 127.0.0.1:8080
-./eternityII server [nb_threads] --http-port 8080 [data/pieces.csv]
-# …with a Bearer token unlocking the privileged restore/backup/sort/split/regroup admin commands
-./eternityII server [nb_threads] --http-port 8080 --http-token-file /etc/eternityii/http-token [data/pieces.csv]
-
-# Start a client (does the search)
-./eternityII client [server_host] [nb_threads] [max_stock_per_thread] [data/pieces.csv]
-# …with a declared identity (defaults to the hostname) and a custom machine-identity file path
-./eternityII client --name jetson-1 --machine-uid-file /var/lib/eternityii/machine_uid [server_host]
-
-# Start a pruner client (validates unchecked possibilities, batched exchange)
-./eternityII pruner [server_host] [nb_threads] [data/pieces.csv] [batch_size]
-# GPU pruner (CUDA build only): same args, batch checked on the GPU
-./eternityII pruner --gpu [server_host] [nb_threads] [data/pieces.csv] [batch_size]
-
-# Self-contained test/auto mode (no server needed)
-./eternityII test [data/pieces.csv]
-
-# Built-in CLI help: general help, or per-topic detail (mode or option)
-./eternityII --help          # position-independent, also -h; exits with success
-./eternityII help server  # topic names are case-insensitive; leading dashes optional
+./eternityII server [nb_threads] [options…] [data/pieces.csv]
+./eternityII client [server_host] [nb_threads] [max_stock_per_thread] [options…] [data/pieces.csv]
+./eternityII pruner [--gpu] [server_host] [nb_threads] [data/pieces.csv] [batch_size]
+./eternityII test [data/pieces.csv]     # self-contained, no server needed
+./eternityII --help | help [topic]      # position-independent, case-insensitive topics
 ```
 
-**CLI help system** (`--help`/`-h` anywhere in argv, or the `help [topic]` mode): the single source of truth is the `cli_topics[]` table in `src/app/app_runtime.c` (mirroring the console's `commands[]` design) — general help (`format_cli_help`), per-topic help (`format_cli_help_topic`), and the invalid-arguments message (`failed_arg`) all derive from it. **Adding a mode or a global option ⇒ add its entry to that table.** An unknown `help <topic>` prints an error plus the general help and exits with failure (so a typo is never a silent success); the `--gpu` option is always listed (with a "CUDA=1 build only" note) even in non-CUDA builds, so users can discover GPU pruning exists (a non-CUDA binary given `--gpu` fails with an explicit error instead of silently falling back to CPU).
+Full option reference per mode — `--expand-level`, `--stock-max-ram`, `--stock-spill-dir`, `--stock-files`, `--rebalance-budget`, `--tcp-timeout`, `--http-port`, `--http-token-file`, `--name`, `--machine-uid-file`, `--config-file`, `--stop-on-solution`, `--headless` — is in [docs/utilisation.md](docs/utilisation.md).
 
-**`--stop-on-solution`** (optional, accepted in any position by any mode, stripped from argv before the positional parse): stop at the **first** solution. A search process that finds one exits; a server that receives one backs up its queues and stops. **Default (flag absent): keep going** — the search process backtracks to look for more solutions and the server stays in service so clients keep exploring. Read in `main()` *before* any fork (global `stop_on_solution`), so forked search children inherit it. Each solution is saved to a **unique** file (`./solution_<pid>_<seq>` client-side, `./solution_server_<pid>_<seq>` server-side) — multiple solutions never overwrite one another.
+**CLI help system**: single source of truth is the `cli_topics[]` table in `src/app/app_runtime.c` — it feeds general help, per-topic help, and the invalid-arguments message alike. **Adding a mode or a global option ⇒ add its entry to that table.**
 
-**`--name <label>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; client/pruner-only in practical effect). Declares a human-readable label for this client, resolved once by `init_client_identity` (`src/app/app_runtime.c`) **before any fork**, so every fork inherits the same value (copy-on-write). **Default: the machine's hostname** (`gethostname`), or `"?"` if that fails — never empty. Purely **declarative**: unlike `peer_ip` (derived by the server from `accept()`), the label is never verified. Shown alongside a session's `session_no`, `machine_uid` and `client_uid` in the console `clients` command and `GET /api/v1/clients` (see below).
+**Pre-fork resolution invariant**: `--stop-on-solution`, `--name`, `--machine-uid-file` and `--config-file` are all parsed/resolved once in `main()`/`handle_client()` **before any `fork()`**, so every forked search worker inherits the same value via copy-on-write. Client config priority is always **CLI > `--config-file` > defaults** (`client_config_apply_to_globals`, `src/app/client_config.c`).
 
-**`--machine-uid-file <path>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; client/pruner-only in practical effect). Path to a small text file holding a persistent, machine-scoped 128-bit nonce (**`machine_uid`**, hex-encoded), read/created once by `machine_uid_load_or_create` (`src/net/client_identity.{h,c}`) in the same pre-fork window as `--name`. **Default: `./eternityii-machine_uid`** (same convention as the `.back` files). Absent, unreadable, or corrupt: a fresh nonce is generated and written back — the process **never refuses to start** over this file, since it is observability data, not search state. Directory not writable: the fresh nonce is kept **in memory only** for this run (a warning is logged) rather than blocking the search. This is distinct from **`client_uid`**, a 128-bit nonce drawn fresh at every process start (never persisted) that identifies *this execution* of the client, and from **`fork_seq`** (0..N-1), which distinguishes one fork's own work connection from its siblings. Four distinct notions, kept deliberately separate rather than merged into one field, each with its own lifetime and role: `machine_uid` (persistent, survives restarts — the cumulation key for statistics), `client_uid` (one process execution — the session identity for piloting/lease ownership), `fork_seq` (one fork within its parent — ties a work connection back to its parent), and `label` (declarative, display-only, never a key — two clients may legitimately share the same one).
+## Deferred-start orchestrator
 
-**`--config-file <path>` and the `client_config` module.** (optional, position-independent valued option, stripped with its value from argv before the positional parse; client/pruner-only in practical effect). Path to a text file (`key = value`, one per line, `#`-comments — inline or full-line — and blank lines ignored) parsed by `src/app/client_config.{h,c}`. **Default: `./eternityii-client.conf`** (same convention as `machine_uid_file_path`). Loaded once by `handle_client` (`src/app/main.c`), right after `parse_client_args`, and applied to the corresponding globals — `nb_forks` → `NB_THREADS`, `server_host` → the local `serverIp` resolved by `parse_client_args`, `parts_file` → `parts_files`, `max_stock_by_thread`, `limit` → `max_search_by_sec`, `pruner_batch` → `pruner_batch_size` — **only for the ones no positional CLI argument already supplied** (`client_config_apply_to_globals` re-derives the exact same `argc` thresholds `parse_client_args` itself consults, e.g. `argc >= 4` for `nb_forks`, so it can never diverge from what the CLI actually consumed): **priority is CLI > file > defaults**. Read is **tolerant** like `machine_uid_load_or_create`: file absent or unreadable is never an error (`CLIENT_CONFIG_ABSENT`), and a line with an unknown key or an invalid value is logged as a warning and skipped rather than aborting the load (`CLIENT_CONFIG_LOADED` — the rest of the file still applies). All string values are `strdup`'d, including when written into the CLI-convention globals (`parts_files`, `serverIp`) that this project otherwise never frees (same accepted micro-leak as `parts_files`/`HTTP_TOKEN_FILE`/`client_label` pointing into `argv`). The read side ships with two read-mostly console commands — `config` (prints the **effective** configuration, i.e. `client_config_capture_effective` reading the live globals, not a startup snapshot: it reflects a `limit`/`maxStockByThread`/`prunerBatch` already issued from the same console) and `configSave` (atomic `.tmp`+`rename` write of that same effective configuration, patterned on `backup()` in `src/core/datamanager.c`). `g_client_server_host` (`src/app/client_config.h`) exists solely so these two commands — which run on the PARENT's console thread — can see the resolved server host, which otherwise only lives on `handle_client`'s stack. Neither `--config-file` nor `config`/`configSave` has any effect on a **server** process: `handle_server` (`src/app/main.c`) never calls `client_config_load`/`client_config_apply_to_globals`, and unlike every other `server_only`-style command in `commands[]` (which stays listed and callable, just a harmless no-op in the wrong role — e.g. `clients` on a client reads an always-empty `control_registry`), `config`/`configSave` would act on the *server's own* globals if allowed to run there (`NB_THREADS` there means the connection-thread-pool size, not a fork count) — misleading rather than inert. So they are explicitly **masked** server-side rather than merely no-ops: `command_is_client_only` (`src/ui/command_lines.c`, a small name list rather than a new `command_description` field, since the ~50-entry table is initialized positionally and a new trailing field would either force touching every entry or trip `-Wmissing-field-initializers` under `-Wextra -Werror`) is consulted at every point a command could become visible or reachable — `help_append_category` (omitted from listings), `help_format_topic` (`help config` reports an unknown topic), `do_command_line`'s dispatch (treated exactly like an unknown instruction, not merely refused), and the Levenshtein typo-suggestion arrays feeding `closest_command` in both `do_command_line` and `help_interpreter` (via the shared `visible_command_names` helper) — so a server operator can never be pointed at a command that will then be rejected. There is, on purpose, no hot reconfiguration or dynamic fork *re*-spawn: stop/restart sequencing and remote piloting via the control channel and HTTP admin API remain out of scope. The staged/"in preparation" configuration and the deferred-start orchestrator are described below.
+Client/pruner processes don't fork their search workers immediately: a small pure state machine (`orchestrator_step`, `src/app/fork_orchestrator.{h,c}`) either counts down 5s to auto-start (if a config file was found) or waits for a console `start`. Console commands `config`/`configSave`/`start`/`stopForks`/`configApply`, hot vs. restart-requiring config keys, and remote piloting via `clientsCommand --to` are documented in [docs/console.md](docs/console.md) and [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md#pilotage-à-distance-du-cycle-de-vie-des-fils).
 
-**Quiescence infrastructure — `fork_gate` module.** Enables forking new search workers while the client PARENT's own threads (checker, fork-stats IPC receiver, control channel, console) are already running — otherwise forbidden by the rule at `src/app/main.c` ("no parent thread may run during the `fork()` loop", see *Lookup map shared across the search processes* above): a thread holding a stdio/logger lock at the instant of `fork()` hands that locked state to the child, which has no thread able to release it (permanent hang on its first `printf`/`malloc`). `src/app/fork_gate.{h,c}` implements a *cooperative quiescence* design: each candidate thread calls `fork_gate_register()` once, then `fork_gate_checkpoint(slot)` at the top of every loop iteration — a single atomic read when no quiescence is requested (fast path, effectively free), or the thread parks on a condvar (never holding any lock while parked) until `fork_gate_release_quiesce()`. The console's blocking `read()` can't reach a checkpoint mid-read, so it is instrumented differently: `fork_gate_mark_blocked(slot, 1)` around the blocking call marks it quiescent without parking (it holds no lock either), and `fork_gate_checkpoint` right after the call returns parks it for real if a quiescence was requested meanwhile. `fork_gate_request_quiesce(timeout_ms)` (2 s default) waits for every registered participant to reach PARKED or BLOCKED; on timeout it **cancels the request** and releases whatever already parked — never fork in doubt. `fork_gate_acquire_io_locks`/`_release_io_locks` bundle the logger's output lock (new `logger_lock_output`/`logger_unlock_output` accessors, `src/ui/logger.h`, implemented in both `logger.c` and `logger_ncurses.c`) with `fflush(stdout)`/`fflush(stderr)`. An earlier version of this primitive additionally took `flockfile(stdout)`/`flockfile(stderr)` and called `fflush(NULL)`; both were dropped after two platform-specific deadlocks were found the first time this primitive was actually exercised around a real `fork()` — see the *Deferred-start orchestrator* section below for both.
+**Fork-safety invariants** — each one below was violated once in production and is now load-bearing; see `docs/investigations/` and `docs/echanges_client_serveur.md` for the full diagnoses:
 
-Checkpoints are wired into the four candidate threads, all on the client PARENT process: the checker (`check_client_threads`, `src/app/etii_client.c`), `server_tcp` (`src/app/app_runtime.c` — the parent's fork-stats UDP receiver, now given a 1 s `SO_RCVTIMEO` so its `recvfrom` periodically returns and re-evaluates the checkpoint even when no fork is sending anything), the control channel (`run_control_channel`, `src/app/etii_control.c`, whose outer reconnect loop already had a bounded read via `tcp_timeout`), and the console — both variants: ANSI (`console()`, `src/ui/console.c`) via `fork_gate_mark_blocked` around `getcmdline()`, and ncurses (`nc_console_loop`, `src/ui/logger_ncurses.c`) which was already a non-blocking poll loop (`wgetch`/`nodelay`) so a plain checkpoint at the top suffices. **Observable behavior is unchanged**: nothing calls `fork_gate_request_quiesce` in production in this PR — the fork loop still runs before any parent thread starts, exactly as before.
+- **No parent thread may run during a `fork()` call**, other than the thread calling it — a thread holding a stdio/logger lock at that instant hands the locked state to a child with no thread able to release it. `src/app/fork_gate.{h,c}` provides cooperative quiescence (`fork_gate_checkpoint`/`_mark_blocked`/`_request_quiesce`) so other parent threads can keep running *between* forks, as long as they park (or declare themselves blocked-in-a-safe-syscall) first.
+- **Never call `fork_gate_release_quiesce()` from the child branch** after `fork()` — the child can inherit a torn condvar snapshot mid-transition and hang forever in `pthread_cond_broadcast`. Only the parent releases.
+- **Never `flockfile(stdout)`/`flockfile(stderr)` around a `fork()`** — the lock "owner" doesn't survive the fork on macOS; the child deadlocks on its own first log call. Use the plain, non-owner-tracked `logger_lock_output` mutex instead.
+- **`fflush(NULL)` can deadlock** if a console thread is mid-`fgetc()` (it holds `stdin`'s stdio lock) — flush only `stdout`/`stderr` explicitly.
+- **A forked child inherits the parent's `atexit()` chain**, including ncurses/ANSI terminal teardown — call `status_zone_disown_child()` as the very first statement in a freshly-forked child, or the child's own `exit()` corrupts the shared terminal.
+- **Never set `SA_RESTART` on `SIGINT` in a child** (`configure_child_signals`) — blocking calls (`recvfrom`, `connect`) must return `EINTR` so shutdown can interrupt them.
 
-**Dead child slot cleanup.** `reap_dead_child_slots`/`pid_is_alive` (`src/app/app_runtime.{h,c}`) fix a pre-existing gap: `sigchld_handler` reaps zombies (`waitpid`) but never updates `childrens_pid[]`/`forkId[]`, so a fork that dies unexpectedly (outside the normal `wait_child()` shutdown path) left a ghost slot that `send_command_to_childs` (`src/net/local_socket.c`) kept targeting at a socket path that no longer existed. `pid_is_alive` is `kill(pid, 0)`-based (`ESRCH` ⇒ dead, anything else ⇒ alive), the same technique the console's `exit` command already uses; `reap_dead_child_slots` takes an injected liveness predicate (`NULL` falls back to `pid_is_alive`) for testability without spawning real processes, mirroring the `analysed_owner_alive_fn` injected-liveness pattern already used by the analysed-possibility lease sweep (`datamanager_reclaim_expired_leases`, see *Expiration lease on in-progress analyses* above). Called once per tick from the orchestrator's own loop (100ms — see below), far more reactive than an earlier per-checker-tick placement (10s) would have been.
+## Server load management
 
-### Deferred-start orchestrator
+Eight PRs (all shipped) fixing a real production incident: an unbounded lock held for the duration of a multi-GB backup starved every client past its TCP timeout. Full narrative, measurements and two real-incident diagnoses: [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md#gestion-de-charge). User-facing options: [docs/utilisation.md](docs/utilisation.md). Console commands: [docs/console.md](docs/console.md).
 
-`handle_client` (`src/app/main.c`) does **not** fork its `NB_THREADS` search workers immediately at startup. The fork is **deferred**, driven by a small state machine (`src/app/fork_orchestrator.{h,c}`): at boot, either a config file was found (`client_config_load`) and a 5s countdown (`ORCH_COUNTDOWN`) starts the auto-fork, or none was found and the process waits (`ORCH_WAITING_CONFIG`) for a console `start` (immediate fork) or `config <clé> <valeur>` (stages a value, cancels the countdown permanently — `ORCH_CONFIGURING`). This is exactly the scenario the quiescence infrastructure above was built for: the parent's other threads (checker, control channel, console, `server_tcp`) run *before* any fork exists, so the real `fork()` call goes through `fork_gate_request_quiesce`/`fork_gate_acquire_io_locks`.
+- **PR1** — bounded locks: `scroll_from_pool`/`put_to_pool`/`add_possibility_analysed_impl`/`remove_possibility_analysed` give up after a bounded wait instead of spinning forever; `--tcp-timeout <n>` overrides the default 10s work-socket timeout.
+- **PR2** — `consistent_backup`: a true point-in-time snapshot via a global freeze then progressive per-file release (deliberately **not** a `fork()`/COW snapshot — too much RAM for a multi-GB stock).
+- **PR3** — incremental rebalance (`datamanager_rebalance_step`, `--rebalance-budget <n>`, console `rebalance [n]`): moves packets fullest-file → emptiest-file so PR2's "≤1s per file" holds.
+- **PR4** — `--stock-files <n>`: configurable file count via pointer-array storage instead of a fixed static array.
+- **PR5** — needless-save avoidance: `should_autobackup` is gated per artefact (stock, best-board, known-clients) instead of one flag governing all three.
+- **PR6 / PR8** — round-robin distribution: ADD/GET (PR6) and the analysed-pool ack path (PR8) no longer concentrate all traffic on file 0; PR8 keys the analysed pool by a per-connection stable hint (`compteur % nb_file_possibility`) so acknowledgement stays close to O(1).
+- **Two real-incident fixes**, found only by reproducing at the exact reported scale (14M+ possibilities): a double-acknowledgement bug (`get_last_possibility` now reports whether a batch actually came `from_server`, so a locally-recycled possibility is never queued for a spurious ack) and a real heap out-of-bounds in `feed_thread_aposs` (looped over `NB_THREADS`, the *fork count*, indexing a single-element allocation).
+- **Epilogue**: `INST_ERROR` from a server busy with its own backup is expected and non-fatal — logged at `log_info`, never `log_error`/board-dump. Any *other* ack value stays a loud `log_error`.
 
-**Pure core vs. impure driver.** `orch_state_t orchestrator_step(orch_state_t s, orch_event_t ev, long now_ms, orch_actions_t *out)` is a total, side-effect-free transition function — every (state, event) pair is handled explicitly (no `default:` in the `switch`, so `-Wswitch` catches a missed case if the enum ever grows) — covering all 7 states and 6 events, even though production only wires triggers for a subset: `EV_STOP_FORKS`/`EV_RESTART` return the state unchanged with `ORCH_ERR_UNSUPPORTED` in every state (their real semantics — where exactly `STOPPING` lands afterward depends on which command triggered it — are deliberately left unimplemented rather than guessed); `EV_EXIT` correctly transitions any state to `ORCH_EXITING` but no driver posts it yet (`exit_interpreter` keeps its current direct kill+`exit()` path, unchanged). The 5s countdown is **not** stored in the pure state — its deadline is a plain local variable in the impure driver (`fork_orchestrator_run`), and when the deadline is reached the driver calls `orchestrator_step(ORCH_COUNTDOWN, EV_START, now_ms, &out)` — the *exact same call* a manual `start` makes, so the automatic and manual paths are one code path, tested once. A tiny pure predicate, `orchestrator_countdown_elapsed(deadline_ms, now_ms)`, carries the only time-comparison logic, kept independently testable.
+**Coding rule**: `core/` must never depend on `app/`. Where server-only logic (e.g. control-registry liveness) is needed from `core/datamanager.c`, it's injected as a function pointer by the caller — see `owner_alive` in `datamanager_reclaim_expired_leases`.
 
-**Thread-safe entry point instead of a literal bounded queue.** Console (and, in the future, control-channel/HTTP) threads need a thread-safe way to post events into the orchestrator. Rather than a literal "mailbox" (mutex+condvar+bounded queue of opaque events), `fork_orchestrator_post_event(ev, out)` takes a single shared mutex, applies `orchestrator_step` to the shared state *synchronously*, and returns the exact resulting `orch_actions_t` to the caller immediately — no polling latency, so `start`'s "already running" error is reported the instant it's known. If the transition decided a fork, it sets a `pending_spawn` flag and broadcasts a condvar; the dedicated orchestrator thread (blocked in `pthread_cond_timedwait` with a 100ms tick, `ORCH_TICK_MS`) wakes on either the broadcast or the timeout, and — critically — is the **only** thread that ever calls `orchestrator_spawn_forks()` (the actual `fork()`), keeping fork-calling to a single thread. This is a deliberate simplification over a literal event queue, since these events are idempotent state-setters, not accumulating work items.
+## RAM cap & disk spillover
 
-**Two platform-specific deadlocks found via manual testing, not caught by any unit test.** `make test`'s `fork_gate_suite`/`fork_orchestrator_suite` (mutex/condvar logic, no real fork, no real console blocked in `read()`) passed throughout — both bugs only manifested when actually running a client end-to-end with a console attached, which is exactly why [docs/tests_et_ci.md](docs/tests_et_ci.md)'s guiding rule to manually exercise a feature in the real binary before declaring it done matters. Diagnosed both times with `sample(1)` (macOS) on the hung process:
-1. **`fflush(NULL)` inside `fork_gate_acquire_io_locks` deadlocks against the console.** `fflush(NULL)` walks *every* open `FILE*`, including `stdin` — and the console thread holds `stdin`'s stdio lock for the entire duration of its blocking `fgetc()` (an ordinary libc invariant, unrelated to and untouched by `fork_gate_mark_blocked`, which only declares quiescence in `fork_gate`'s own bookkeeping). An operator simply sitting at the prompt — the common case — deadlocked the orchestrator thread here on every real run. Fixed by flushing only `stdout`/`stderr` explicitly.
-2. **`flockfile(stdout)`/`flockfile(stderr)` don't survive `fork()` on macOS.** Even after fix #1, the *child* process deadlocked on its own first `log_info()` call, inside `flockfile`. `flockfile` is documented as safely recursive for the *same thread*, and the forking thread does hold the lock going into `fork()` — but macOS's libc apparently ties the recorded "owner" to a kernel-level thread identity that is **not** preserved for the child's surviving thread across `fork()`, so the child's first `flockfile()` call waits forever for an "owner" that effectively no longer exists as such (reproduced consistently via `sample(1)`: `flockfile → _pthread_mutex_firstfit_lock_wait`). The fix is to drop `flockfile`/`funlockfile` on stdout/stderr entirely: fork_gate's quiescence already guarantees no *other* thread can be mid-write when the fork happens (the original risk `flockfile` was meant to cover), so locking the stream from the forking thread itself added no protection while introducing this platform-specific hang. `logger_lock_output`/`logger_unlock_output` (a plain, non-owner-tracked `pthread_mutex_t`) is kept, since unlocking it from the child is safe.
+`--stock-max-ram <mo>` bounds the two stock pools (never the analysed pool); `--stock-spill-dir <dir>` gives it a recourse — evict coldest-first to per-file disk segments, reload on demand — instead of refusing growth outright once the cap is hit. Backup/restore is coherent with spilled segments (an incremental snapshot, and a `.spillcount` sidecar that turns an incomplete restore into a loud failure instead of silent data loss). Full behaviour, the 90%/75%/25% hysteresis, and the CLI/console surface: [docs/utilisation.md](docs/utilisation.md#plafond-ram-du-stock---stock-max-ram).
 
-Both fixes are now exercised — not by a dedicated unit test, but by `make test-integration`'s `run_solution_16.sh`, which drives the client's console over a FIFO left open for the test's duration (the write end isn't closed until cleanup), so the console genuinely sits blocked in `fgetc()` after processing `start` — the exact scenario that reproduced deadlock #1, and the fork that follows exercises #2 on every run.
+**Key invariants**:
+- `core/stock_spill.c` may depend on `core/datamanager.h`; the reverse is forbidden — `put_to_pool`'s hard-cap check has zero awareness spillover exists.
+- Reload never destroys disk state until RAM insertion is confirmed ("peek, then commit"); eviction drains RAM first (cheap to undo) before writing to disk.
+- `expand_datas_to_level` never drops a possibility on a RAM-cap refusal — it **waits**, bounded only by `REQUEST_STOP`, never by a fixed timeout: a stuck configuration should stall visibly (logged every 5s), not lose data silently.
 
-**Spawn loop moved from `main.c` to `fork_orchestrator.c`, quiesced per-fork, not per-batch.** The historical fork loop (`main.c`) is relocated verbatim into `orchestrator_spawn_forks()`, along with `run_client` (previously private to `main.c`, now `static` in `fork_orchestrator.c` since that file must stay linkable in the test binary, which never links `main.c`). The quiesce/IO-lock critical section is scoped to **each individual `fork()` call**, not the whole `NB_THREADS` batch: an earlier version wrapped the entire loop, and self-deadlocked the forking thread the moment it tried to `log_error`/`log_info` (e.g. a fork failure, or a `DEBUG_THREAD` trace line) while still holding `logger_lock_output`'s non-recursive mutex from before the loop started. Acquiring/releasing around each `fork()` individually keeps the critical section to the syscall itself, with every diagnostic log call happening after release. The child branch calls `exit(EXIT_SUCCESS)` explicitly at the end of `spawn_child_body` (never `_exit`, to keep the gcov/llvm-cov flush) instead of returning and falling through the old nested `parent_pid == getpid()` guards + the `NB_THREADS = 1` loop-exit trick that used to carry a dead-end child all the way back out through `main()`'s own final `exit()` — under the new design a child that returned normally would wrongly resume running the *parent's* orchestrator loop.
+## HTTP REST admin API
 
-**`g_active_forks` and forced control-channel reconnection.** `hello.nb_forks` in `run_control_channel` (`src/app/etii_control.c`) now reads the fresh global `g_active_forks` (`src/app/static_variables.h`, set by `orchestrator_spawn_forks` on success) on every reconnection, instead of a value frozen at thread-creation time (`start_control_channel` lost its `nb_forks` parameter — single call site in `main.c`, no compatibility concern). Since a long-lived, already-connected control session doesn't reconnect on its own just because `g_active_forks` changed, `control_channel_request_reconnect()` (an atomic one-shot flag, test-and-cleared by `control_channel_reconnect_pending()`) is checked inside the connection's inner service loop — falling into the exact same `close_socket`+backoff+reconnect path a normal timeout already takes, no new control flow. Called by `orchestrator_spawn_forks` right after a successful spawn, so the server sees the client's real fork count shortly after `start`/the countdown fires (previously always `0`, frozen from before any fork existed).
+`--http-port <n>` (server-only, loopback-only `127.0.0.1`) starts a minimal, dependency-free HTTP/1.1 admin API (`src/net/http_codec.{h,c}` for parsing/JSON, `src/net/http_server.{h,c}` for the socket shell). `--http-token-file <path>` gates every state-changing command behind a Bearer token — only pure reads (`GET` routes, `clientsWork`) stay open without one. Full endpoint reference, auth model and client examples (curl, Python): [docs/api_http_rest.md](docs/api_http_rest.md).
 
-**Orchestrator loop exit condition replicates `wait_child()`'s exact contract, plus a new case.** `wait_child()` only ever watched the child count (`wait()` until `ECHILD`), never `request`. `fork_orchestrator_run` exits its tick loop when `count_created_forks(childrens_pid, NB_THREADS) == 0 && (ever_running || request == REQUEST_STOP)` — `ever_running` (set once `ORCH_RUNNING` is ever reached) reproduces the old behavior exactly for `--stop-on-solution` (a lone fork exits on its own, `request` never changes, `wait_child()` used to notice via `ECHILD` alone), while `request == REQUEST_STOP` covers the genuinely new case of a Ctrl-C received while still `WAITING_CONFIG`/`COUNTDOWN` (impossible when forks always existed by the time any wait loop ran).
-
-**`config`/`start` console commands, `NB_COMMANDS` 49→50.** `start_interpreter` posts `EV_START` via `fork_orchestrator_post_event` and reports `ORCH_ERR_ALREADY_RUNNING` synchronously. The existing `config` interpreter is extended in place rather than adding a second command name: bare `config` now also prints the orchestrator snapshot (`fork_orchestrator_snapshot`) and the staged configuration (`fork_orchestrator_format_staged_config`) alongside the effective one; `config <clé> <valeur>` synthesizes a `"clé = valeur"` line and calls `fork_orchestrator_stage_config_line`, which reuses `client_config_parse_line` (zero duplicated validation logic) against a module-static "staged" `client_config_t` in `fork_orchestrator.c`, and posts `EV_CONFIG_BEGUN` **only** when the line was accepted (`CLIENT_CONFIG_LINE_SET`) — an unknown key or invalid value must never cost the operator their auto-start countdown. `start` joins `config`/`configSave` in `command_is_client_only` (`src/ui/command_lines.c`) for the same reason those two are masked server-side: `fork_orchestrator_run` is never called by `handle_server`, so posting `EV_START` there would silently mutate an orchestrator nobody drives.
-
-**Staged configuration applies immediately at fork time, not only on the next process restart.** `fork_orchestrator_run`'s driver calls `fork_orchestrator_apply_staged_config()` right before every effective fork attempt (manual `start` or a countdown that runs to completion, the same point of code for both) — it overlays the staged `client_config_t` onto the live globals via `client_config_apply_direct` (`src/app/client_config.{h,c}`, an unconditional sibling of `client_config_apply_to_globals` with no `argc` gating, since an explicit in-session console command is by construction more recent than anything given at launch). Found missing via manual testing: `config nb_forks 2` followed by `start` still forked with the old count — only a `configSave` followed by a full process restart picked it up, via `fork_orchestrator_merge_staged_config` (below) and the boot-time `client_config_load`. Both paths now coexist and serve different purposes: `fork_orchestrator_apply_staged_config` makes a staged value take effect on the fork about to happen, `fork_orchestrator_merge_staged_config` makes it survive into the file `configSave` writes for the *next* process start — neither is a shortcut for the other.
-
-**`config nb_forks <n>` above the original count segfaulted the parent — `ensure_childs_capacity` (`src/app/app_runtime.{h,c}`).** `init_childs()` sizes `childrens_pid`/`forkId`/`fork_statistics` on `NB_THREADS` **at the moment it's called** — before any fork, early in `handle_client`. Once `fork_orchestrator_apply_staged_config()` (above) could raise `NB_THREADS` after that point, `orchestrator_spawn_forks`'s loop wrote past the end of all three arrays the instant the new `nb_forks` exceeded the original allocation — a heap buffer overflow reproduced as a real crash (`segmentation fault` in the PARENT; already-forked children up to the original capacity survive, matching the corruption model exactly). Found via manual testing with the exact sequence `config` → `config nb_forks <n>` (bigger than the current count) → `configSave` → `start`. `ensure_childs_capacity(needed)` grows (never shrinks) the three arrays with `realloc`, preserving existing slots and initializing new ones exactly like `init_childs` (`childrens_pid[c] = -1`, empty `forkId[c]`, zeroed `fork_statistics[c]`) — called from the orchestrator's do-spawn branch right after `fork_orchestrator_apply_staged_config()` and before `orchestrator_spawn_forks()`, so the arrays are always at least `NB_THREADS` slots wide by the time the fork loop runs.
-
-`fork_orchestrator_merge_staged_config` (called before `client_config_save`): it captures the effective configuration then lets any staged key overwrite the corresponding field before writing — without this, a value staged then saved was silently lost, since `configSave` used to only ever see the effective globals, never the staged ones, so a `config nb_forks 8` followed by `configSave` and a process restart changed nothing (found via manual testing, cf. the guiding rule in *Testing* below).
-
-**Any keypress cancels a running countdown, not just an accepted `config` line.** `EV_CONFIG_BEGUN` is also posted straight from the console's raw-mode key-read loop (`console.c`'s `getcmdline_raw`, and the ncurses equivalent in `logger_ncurses.c`'s `nc_console_loop`) on every character read, not only once a full `config <clé> <valeur>` line has been parsed and accepted. Reason: the 5 s countdown is not enough time to type a whole command, so waiting for a fully-formed, valid line before cancelling left no real way to interrupt it in practice — the mere act of starting to type (even just `start`) must cancel it immediately, matching `ORCH_CONFIGURING`'s intended meaning ("a saisie has begun"). Harmless outside `COUNTDOWN` (self-loop in every other state, cf. `orchestrator_step`). The cooked (non-TTY) input fallback used by piped/FIFO-driven consoles is unaffected — it only ever sees a whole line at once, so it keeps relying on the existing per-command cancellation.
-
-**Effective configuration displayed before the countdown starts — via `log_console`, not `log_info`, and this distinction matters.** `fork_orchestrator_run` logs the just-loaded, just-applied effective configuration (`client_config_capture_effective` + `client_config_format`) immediately before entering `COUNTDOWN`, and the once-per-second countdown ticker uses the same function, so an operator watching the log can decide whether to let it run or interrupt it *before* having to type anything — previously only the bare fact that a config file had been found was logged, not its content. Found missing via manual testing even after that first fix: `log_info` (`src/ui/logger.c`) never flushes on its own — `write_stream_locked` only flushes stdout when a console read is already blocked (`input_active`), and at this point in `fork_orchestrator_run` the just-launched console thread (started asynchronously, moments earlier, by the same `handle_client`) has very likely not reached its first blocking read yet — so the whole block sat in libc's stdio buffer, invisible until something else happened to flush it later (or never, under `--headless`, where no console thread exists to ever set `input_active`). `log_console` (`write_output(stdout, buf, 1)`, unconditional flush) is the function this project already reserves for exactly this case — "message destiné à l'affichage interactif de la console" — so both the configuration dump and the countdown ticker use it instead.
-
-**Stop/restart at runtime — `stopForks`/`configApply` console commands, `NB_COMMANDS` 50→52, real semantics for `ORCH_STOPPING`/`ORCH_APPLYING`.** The orchestrator's pure core originally declared the `STOPPING`/`APPLYING` states and the `EV_STOP_FORKS`/`EV_RESTART` events but deliberately left their pure transition as `ORCH_ERR_UNSUPPORTED` in every state — where exactly `STOPPING` lands afterward depends on which command triggered it, a detail that could only be settled once stop/restart itself was implemented. Their real meaning:
-
-- `orchestrator_step`: `EV_STOP_FORKS`/`EV_RESTART` from `ORCH_RUNNING` → `ORCH_STOPPING` (`out->stop_forks = 1`); from any other state → unchanged + a new error code `ORCH_ERR_NOT_RUNNING` (there is nothing to stop outside `RUNNING`). Both events share the *exact same* pure transition — the pure core cannot distinguish "stop and stay stopped" from "stop then restart" any more than it stores the `COUNTDOWN` deadline itself (same established convention already used for that deadline above). `EV_START` is extended to also accept `ORCH_APPLYING` as a spawn-eligible source state (alongside `WAITING_CONFIG`/`COUNTDOWN`/`CONFIGURING`) — it is the *same* `EV_START` that re-forks at the end of a `configApply` restart, one code path for "fork now" regardless of trigger, tested once.
-- The driver (`fork_orchestrator_post_event`) remembers which event won the `RUNNING → STOPPING` transition in a module-static `g_restart_after_stop` flag, set under the same mutex as the rest of the shared state — mirroring `g_countdown_deadline_ms`: an axis the pure `orch_state_t` doesn't carry, tracked by the impure driver instead.
-- `fork_orchestrator_run`'s tick loop gained an `ORCH_STOPPING` branch: `orchestrator_do_stop_forks()` (new static helper) masks SIGCHLD (`pthread_sigmask`, not `sigprocmask` — the correct per-thread call in a multi-threaded process; `sigprocmask`'s behavior across threads is not portably defined, even though it happens to alias `pthread_sigmask` on Linux) for the whole sequence — otherwise `sigchld_handler`'s `WNOHANG` reap on *any* pid would race the deliberate `waitpid(pid, …)` per slot below. SIGINT to every live slot, then a bounded poll (`waitpid(pid, …, WNOHANG)` per slot, `MICRO_SLEEP` cadence) with escalation via the new pure predicate `stop_escalation_next(elapsed_ms)` (`SIGTERM` at +5s, `SIGKILL` at +10s, `fork_orchestrator.h`) — a process already dead when SIGINT was sent (search finished between the tick and the kill) is simply reaped on the first pass, no escalation. `g_active_forks = 0` + `control_channel_request_reconnect()` at the end either way, so the server's view of `nb_forks` (and the console `clients` listing) reflects zero forks immediately, not just after the next successful re-fork.
-- After the stop sequence completes: if it was a plain `stopForks` (`g_restart_after_stop == 0`), state goes directly to `ORCH_WAITING_CONFIG` (console/control-channel/HTTP threads stay alive — **the parent process never exits**, exactly the feature's stated goal). If it was a `configApply` restart (`g_restart_after_stop == 1`), state moves to `ORCH_APPLYING` and `orchestrator_apply_restart_config(shared_parts)` runs: `fork_orchestrator_apply_staged_config()` (existing, unchanged) writes the staged values to the globals, then — **only for the keys that actually changed** — `nb_forks` triggers `free_childs()` + `init_childs()` + `init_counters()` (a full rebuild, not `ensure_childs_capacity`, since a restart must be able to *shrink* the arrays too, not just grow them) and `parts_file` triggers a full map rebuild (`free_search_parts` + `build_search_parts` + `set_inherited_search_parts` on the SAME `search_parts_t` `handle_client` owns on its stack, threaded down through `fork_orchestrator_run`'s new `search_parts_t *shared_parts` parameter — ownership of the *allocation* stays with `handle_client`, only the *reconstruction* is delegated to the orchestrator, since only it knows the precise instant zero forks remain). `server_host` and the hot keys need nothing further — already live in the globals from `fork_orchestrator_apply_staged_config`. The re-fork itself is then the *same* `EV_START` post as a manual `start`, landing in the do-spawn branch already described above (`ensure_childs_capacity` + `orchestrator_spawn_forks`).
-- **`free_childs()`** (`src/app/app_runtime.{h,c}`) is the new symmetric counterpart to `init_childs()`: frees `childrens_pid`/`forkId`/`fork_statistics` and resets the tracked capacity to 0 (idempotent on an already-freed/NULL state). `init_counters()` also gained a `free(counters); free(lastfilesize);` at its top (both no-ops on the first, boot-time call, since the globals start at NULL) — without it, every hot `nb_forks` restart leaked the previous counters buffer, since nothing previously called this function more than once per process.
-- **A latent bug found only via manual testing (not caught by `fork_orchestrator_suite`, which never runs the real driver loop): the original loop-exit condition conflated "zero forks" with "process should exit."** `fork_orchestrator_run`'s termination check was `remaining_forks == 0 && (ever_running || request == REQUEST_STOP)` — correct before stop/restart existed, since forks could only ever reach zero through natural death (solution + `--stop-on-solution`, or a crash) or `Ctrl-C`. Stop/restart adds a *third*, deliberate reason for zero forks (`stopForks`, or the STOPPING window of a `configApply` restart) that must **never** trigger a process exit — the whole point of the feature is "arrêter les fils sans jamais arrêter le process principal." A new local `int forks_parked` flag (distinct from `ever_running`) is set whenever the parent deliberately has zero live forks and isn't trying to respawn — after a plain `stopForks` completes, and (defensively) after a `configApply` re-fork attempt itself fails (`orchestrator_spawn_forks()` returning 0, e.g. quiescence timeout or resource exhaustion) — and cleared the instant a (re-)fork actually succeeds. The exit condition became `remaining_forks == 0 && (request == REQUEST_STOP || (ever_running && !forks_parked))`: `Ctrl-C` still always wins (even mid-`stopForks`), but a merely-parked parent with an active console/control-channel/HTTP surface stays up indefinitely, waiting for `start`/`configApply` to try again.
-- **`configApply`'s HOT_ONLY branch had the same class of bug, found the same way.** `client_config_diff` only looks at whether `nb_forks`/`server_host`/`parts_file` *changed value* — it has no notion of whether any fork is currently alive at all. Reproduced manually: `stopForks`, then `config nb_forks <same value as before>` followed by `configApply` — `client_config_diff` correctly reports `HOT_ONLY` (nothing restart-worthy changed), so the interpreter applied the staged config to the parent's own globals and reported "configuration à chaud appliquée, aucun redémarrage nécessaire" — while genuinely having **zero forks running**, silently doing nothing useful and misleading the operator into thinking the (nonexistent) search was reconfigured. Fixed by checking `fork_orchestrator_snapshot() == ORCH_RUNNING` **first**, unconditionally, before even computing the diff — `configApply` (like `stopForks`) only ever makes sense against forks that are actually running; starting from a stopped state is `config` + `start`'s job, never `configApply`'s.
-- `client_config_diff(current, staged)` (`src/app/client_config.{h,c}`): pure, looks only at `nb_forks`/`server_host`/`parts_file` — a key absent from `staged`, or present but equal to `current`, never forces `NEEDS_RESTART` on its own (a `config nb_forks <same value>` followed by `configApply` is a harmless `HOT_ONLY` no-op on that key, not a needless restart). Any of the three present and *different* → `CLIENT_CONFIG_DIFF_NEEDS_RESTART`; otherwise (including nothing staged at all) → `CLIENT_CONFIG_DIFF_HOT_ONLY`. The hot keys (`max_stock_by_thread`/`limit`/`pruner_batch`) never influence the verdict either way — they're always diffusable by IPC. `fork_orchestrator_apply_hot_staged_config()` is the HOT_ONLY-branch counterpart to `fork_orchestrator_apply_staged_config`: applies the staged config to the parent's globals (`client_config_apply_direct`) *and* forwards the individual staged hot commands (`limit N`, `maxStockByThread N`, `prunerBatch N`, same wire text as their console counterparts) to every already-running fork via `send_command_to_childs` — never holding `g_orch_mutex` across that call, since it does real IPC.
-- `stopForks`/`configApply` join `command_is_client_only` (`src/ui/command_lines.c`) for the same reason as `config`/`configSave`/`start`: `fork_orchestrator_run` is never called by `handle_server`, so posting these events there would silently mutate an orchestrator nobody drives.
-- Remote triggering of `stopForks`/`configApply` (and of `start`/`config`/`configSave`) via the binary control channel or the HTTP admin API is described in *Remote piloting* below — console-only at this point.
-
-Tests: `tests/app/test_fork_orchestrator.c` — `orchestrator_step`'s exhaustive matrix updated for the real `EV_STOP_FORKS`/`EV_RESTART`/`EV_START`-from-`APPLYING` semantics, plus `stop_escalation_next`'s threshold boundaries and `fork_orchestrator_post_event`-level tests for the `ORCH_ERR_NOT_RUNNING` guard on both events. `tests/app/test_client_config.c` — `client_config_diff` across the "nothing staged," "only hot keys," "restart key changed," "restart key staged but unchanged," and "staged with no current value yet" cases. `tests/app/test_app_runtime.c` — `free_childs` shrink/regrow (including that a subsequent `ensure_childs_capacity` correctly resizes from the *new*, smaller capacity rather than the stale pre-free one) and idempotence on an already-freed state. No unit test of the real stop/restart sequence or the loop-exit fix itself (needs real forks and real signals) — verified instead by manually driving a real client over a FIFO (same technique as `run_solution_16.sh`): `start` → `stopForks` → confirm the parent stays alive and responsive → `config nb_forks <n>` + `configApply` → confirm the re-fork happens and the parent's control-channel session reconnects with the new fork count.
-
-**Two further bugs found in the days after stop/restart shipped, both reported by an operator who actually exercised `configApply` for real (crash under `NCURSES=1`, and "the configuration doesn't seem to be taken into account" under the ANSI build) — again neither caught by `fork_orchestrator_suite`, which never spawns real forks or real signals:**
-
-1. **`orchestrator_apply_restart_config` never requested quiescence, contrary to D2's explicit requirement for `APPLYING`.** It frees and reallocates `childrens_pid`/`forkId`/`fork_statistics` (`nb_forks` changed) and can free-then-rebuild the shared search-parts map (`parts_file` changed) — but nothing parked the checker, `server_tcp`, the control channel, or the console first, so any of them could dereference a pointer mid-free. Fatal under `NCURSES=1` (the stats banner redraws constantly, so the race window is hit almost every time); under ANSI the same race is rarer and just as often looked like "nothing happened" instead of crashing. Fixed by wrapping the whole function body in `fork_gate_request_quiesce`/`release_quiesce` (same budget as `orchestrator_spawn_forks`, `FORK_GATE_DEFAULT_TIMEOUT_MS`) and changing its signature to return 1 (reconstruction happened) / 0 (quiescence timed out — **nothing** was touched, jamais de reconstruction dans le doute); the caller falls back to `ORCH_WAITING_CONFIG` on 0 rather than posting `EV_START` against a half-applied state. Locked by `apply_restart_config_quiesces_concurrent_array_readers` (`tests/app/test_fork_orchestrator.c`): a companion thread spins on `fork_gate_checkpoint` and, on every iteration where it *isn't* parked, reads `childrens_pid[0]` — a **deterministic** contract test (the thread cannot execute past a held checkpoint), not a timing-dependent one, so it can't flake the way a sleep-based race reproduction would.
-
-   The same investigation also caught a **second, independent bug the new test itself tripped over**: `init_counters()`'s leak fix (see the `--config-file`/hot-restart entries above — it now frees the previous `counters`/`lastfilesize` before reallocating, needed for repeated `configApply` restarts) broke `init_counters_allocates_zeroed`'s existing save/restore pattern in `tests/app/test_app_runtime.c` — that test saved the pointer *before* calling `init_counters()`, which now frees that very pointer internally, then the test restored the (already-freed) saved pointer into the global at teardown, corrupting it for whichever test ran `init_counters()` next (a double-free, caught by both ASan and macOS's default malloc corruption checks). Fixed by having the test null the globals instead of restoring the stale pointer, plus a new `init_counters_is_safe_to_call_twice_in_a_row` regression test exercising the exact repeated-restart pattern directly.
-
-2. **`orchestrator_do_stop_forks` could hang forever past the SIGKILL escalation.** SIGCHLD masking (`pthread_sigmask`) only applies to the calling (orchestrator) thread — the checker, `server_tcp`, control-channel and console threads never block it, so the process-wide `sigchld_handler` can reap a dying child (via its own `waitpid(-1, …, WNOHANG)`) on any of *those* threads before the orchestrator's own targeted `waitpid(pid, …)` gets to it. The old code only treated `waitpid(pid, …) == pid` as "reaped"; the resulting `-1`/`ECHILD` ("no longer my child — already claimed") was folded into the same `else` branch as "still alive" (`r == 0`), so `remaining` never reached zero and the loop spun forever — observed as `config`'s `état=` staying at `STOPPING` indefinitely, well past the +10s SIGKILL point, which is exactly what made `configApply`'s restart look silently inert. Fixed by a new pure predicate, `waitpid_target_is_reaped(waitpid_result, target_pid, wait_errno)` (`fork_orchestrator.{h,c}`) — `errno` is captured by the caller immediately after `waitpid` and passed in explicitly, keeping the predicate itself pure and directly testable with synthetic `(result, errno)` pairs (`waitpid_target_is_reaped_matrix`) without needing a real race. `ECHILD` now counts as "dead" exactly like the matching-pid case; `EINTR` and any other transient result still fall through to "retry next tick."
-
-   Reproduced and verified fixed with the exact operator-reported sequence, both ANSI (FIFO-driven console, per `run_solution_16.sh`'s technique) and `NCURSES=1` (`script -q`/`TERM=xterm` PTY, per the `test-ncurses-tui` note): `start` → `config nb_forks 1` → `configApply` → confirmed no crash, `config` reports `état=RUNNING` (not stuck in `STOPPING`) with the new `nb_forks` in the effective configuration, and the server's `clients` log shows the control-channel session reconnecting with `forks=1`.
-
-3. **A third, distinct bug, reported separately after the above two were fixed: `stopForks` under `NCURSES=1` dropped the whole session out of ncurses' alternate screen (visually — and functionally — as if the console had crashed), and the same effect existed, more subtly, under the ANSI build (a spurious reset of the fixed status-zone scroll region).** Root cause has nothing to do with quiescence or `waitpid`: `status_zone_init()` (`console.c`, called once in the PARENT before any fork — true ever since the deferred-start redesign above moved console startup ahead of the fork loop) registers `atexit(status_zone_teardown)`. `fork()` duplicates the *entire* atexit handler chain, so every search-worker child inherits that same registration even though it never "owns" the shared terminal. A child that exits normally — which `stopForks`/`configApply` routinely cause via a graceful SIGINT, as opposed to a SIGKILL escalation which bypasses `atexit` entirely — re-runs the inherited handler, calling `endwin()` (NCURSES) or resetting the ANSI scroll region, visible from the parent because the terminal is genuinely shared state, not a per-process one. This explains the intermittent character precisely: children that die via SIGINT trigger it, children reaped only after escalating to SIGKILL don't. Fixed by a new `status_zone_disown_child()` (`logger.h`, implemented identically in both `logger.c` and `logger_ncurses.c` — just zeroing the module's `zone_active`/`nc_active` flag, in the child's own COW copy, never touching the terminal), called as the very first statement of the freshly-forked child branch in `orchestrator_spawn_forks` (`fork_orchestrator.c`, guarded out under `DEBUG_IN_MONO_PROCESS` where there is no real child process) — this makes the inherited `atexit` call a genuine no-op in the child (`status_zone_teardown` already early-returns when its active flag is false), while leaving the parent's own eventual, legitimate teardown untouched. Locked by `status_zone_child_process_does_not_reset_terminal_on_exit` (`tests/ui/test_logger.c`), which forks a real grandchild over a real PTY (same technique as the pre-existing `status_zone_lifecycle_over_pty`) that disowns then exits without ever calling teardown itself, and asserts the captured PTY stream shows *zero* scroll-region-reset sequences from that exit and exactly one from the legitimate owner's later, real teardown — a structural proof, not a timing-dependent one. Re-verified manually under `NCURSES=1` (`script -q`) with the exact `start` → `stopForks` sequence: the alternate-screen enter/leave escape pair (`smcup`/`rmcup`) now appears exactly once each, both at the true start and the true `exit` of the session — none in between.
-
-4. **A fourth bug, reported last and the most consequential: at boot, only 1 of N requested search forks would sometimes actually get created, the rest refused by `orchestrator_spawn_forks` with "quiescence non atteinte" — leaving those slots permanently idle (shots/s, stock, and analysed all at 0, since the process simply never existed).** Not specific to `stopForks`/`configApply` at all — this could hit the very first `start`/auto-`COUNTDOWN` boot, and had been present since the quiescence infrastructure/orchestrator were first introduced — the flurry of testing around stop/restart just made it visible. Root cause: `run_control_channel`'s service loop (`etii_control.c`) calls `fork_gate_checkpoint(gate_slot)` exactly once, immediately *before* `ctrl_recv_frame(socket_id, …)` — but that call is blocking, bounded only by `SO_RCVTIMEO` (`tcp_timeout`, 10s by default) while it waits for the server's next `CTRL_PING`/`CTRL_COMMAND` (this channel is server-initiated; the client has nothing to send in the meantime). The checkpoint is only re-evaluated once that call *returns* — so for however long the control channel happens to be mid-`recv()`, it is completely unreachable by `fork_gate_request_quiesce` (`FORK_GATE_DEFAULT_TIMEOUT_MS`, 2s) — a full order of magnitude shorter than the worst-case blocking window. `orchestrator_spawn_forks` requests quiescence once *per fork*, in a tight sequential loop: the first attempt can succeed by chance (the channel may not have settled into a long wait yet), but the moment it has, every subsequent attempt in the same batch fails in a row — exactly matching a real production log showing 1/5 created, then four consecutive "quiescence non atteinte" refusals. Fixed the same way the console already handles its own blocking `read()` (`console.c`): `fork_gate_mark_blocked(gate_slot, 1)` immediately before `ctrl_recv_frame`, `fork_gate_mark_blocked(gate_slot, 0)` immediately after it returns, then a checkpoint — the thread holds no stdio/logger/malloc lock while parked in `recv()`, so treating it as already-quiescent for the whole duration is safe and correct, exactly per `fork_gate.h`'s documented contract for this pattern. Locked by `run_control_channel_stays_quiescible_during_long_blocking_recv` (`tests/app/test_etii_control.c`): a genuine integration test — a real loopback TCP listener plays a deliberately silent "server" (completes the version handshake, then never sends a `CTRL_PING`) while the real, unmodified `start_control_channel`/`run_control_channel` thread runs against it with `tcp_timeout` set well above the quiescence budget; the test asserts `fork_gate_request_quiesce` still succeeds, and does so quickly. Confirmed to fail against the pre-fix code (`FORK_GATE_TIMEOUT`) before the fix was applied, and to pass after — not a hypothetical regression guard, an actually-exercised one.
-
-**Remote piloting — `start`/`stopForks`/`configApply`/`config`/`configSave` join `control_command_allowed`.** `src/net/control_protocol.c`'s whitelist gains these five commands (`NB_COMMANDS` unchanged — they already existed as console commands, described above; this only makes them remotely triggerable): the same whitelist already consulted by the binary control channel (`CTRL_COMMAND`, client-side defense-in-depth in `control_channel_handle_frame`, unchanged) and by `POST /api/v1/command` (`admin_apply_remote_command`/`admin_apply_privileged_command`, `src/ui/command_lines.c`). `start`/`stopForks`/`configApply`/`configSave` are called directly from `admin_apply_remote_command` — their console interpreters never touch `strtok`, same pattern as `backup_interpreter` in `admin_apply_privileged_command`; `config` (bare or with `<clé> <valeur>`) goes through a dedicated reentrant twin, `admin_remote_config` (static in `command_lines.c`), since `config_interpreter` itself reads `strtok(NULL, " ")` off the global cursor and must never be called from a concurrent path (HTTP thread, control-channel thread).
-
-**A guard not anticipated when this remote piloting was first designed, found by actually running the end-to-end scenario (not by unit tests, which only exercise `fork_orchestrator`'s pure transition and never start its driver thread): these five commands are refused (`ADMIN_CMD_FORBIDDEN`) whenever `admin_apply_remote_command` runs with `server == 1`** (`admin_remote_command_is_client_only`, static in `command_lines.c`). `POST /api/v1/command` (the only HTTP caller of this function, `src/net/http_server.c`) is reachable only from `runserver` — `--http-port` is a server-only option, never available on a client — so `server` is *always* 1 there. Without this guard, `{"command":"config nb_forks 2"}` followed by `{"command":"configApply"}` sent to the server itself would really rewrite the server's own `NB_THREADS`/`childrens_pid`/… (`NB_THREADS` there means the connection-thread-pool size, not a fork count) — exactly the risk `command_is_client_only` already neutralizes for `config`/`configSave` on the console, but that `admin_apply_remote_command` never consulted since it bypasses `do_command_line` entirely. To pilot these commands remotely on a specific **client**, go through `clientsCommand --to <target> <command>` (already in `control_command_allowed`), which relays them over that client's control channel — never as a direct `command` on this route. Locked by `admin_apply_remote_command_lifecycle_forbidden_on_server`/`_lifecycle_allowed_on_client` (`tests/ui/test_command_lines.c`).
-
-Integration test `tests/integration/run_client_lifecycle.sh` (pattern of `run_control_channel.sh`, wired into `make test-integration`): a 16-piece server started with **4 threads** (not 2), a pre-written `eternityii-client.conf` in the isolated work directory to trigger auto-start with zero commands sent, then piloting **entirely from the server's own console** via `clientsCommand` — never typing directly into the client's console — through four steps: auto-start (`forks=1` observed server-side with nothing sent), `stopForks` (parent client stays alive), `start` (re-fork), `config nb_forks 2` + `configApply` (hot restart, new `forks=2` session).
-
-**Two races found only by actually running this script (invisible to unit tests, which never start a real control channel or a real re-fork):**
-1. After a re-fork (`start`, or `configApply`'s `NEEDS_RESTART` branch), the OLD control-channel session (closed client-side at the moment of reconnection) stays registered server-side until its socket read detects the disconnect — an asynchronous window, not instantaneous. A `clientsCommand` sent during that window is broadcast to BOTH sessions; the stale one fails its `CTRL_RESULT` round-trip and never logs the expected acknowledgement, which makes the command meant for the still-alive session appear to fail too. Fixed script-side (not production-side — this behavior is correct, a session not yet detected as dead cannot be excluded a priori) via `wait_for_single_control_session`: forces a fresh `clients` snapshot and waits until it reports exactly one session before sending the next command.
-2. With only 2 server threads (as in `run_control_channel.sh`), this scenario's repeated `stopForks`/`start`/`configApply` cycles exhausted the pool: a not-yet-detected-dead old session could hold a thread right as the NEW work connection or control session tried to connect (`request unfulfilled: all threads busy`), failing the `CTRL_COMMAND` round-trip and triggering a cascading reconnect client-side. Fixed by bumping the script's server to **4 threads** — the margin this multi-cycle scenario specifically needs, beyond the baseline rule already documented above (*Testing*: size `NB_THREADS` for work connections + connected client processes) which a deployment that doesn't loop `stopForks`/`start`/`configApply` in tight succession doesn't need.
-
-Tests: `tests/net/test_control_protocol.c` (the five commands join `control_command_allowed_accepts_whitelist`/`_and_privileged_are_disjoint`, and `control_command_read_only_rejects_*` confirms none is a pure read); `tests/ui/test_command_lines.c` (`admin_apply_remote_command_start_transitions_to_running`, `_stopforks_requires_running`, `_config_bare_reports_state`, `_config_stages_key_value`, `_config_rejects_bad_input`, `_configapply_requires_running`, `_configapply_hot_only`, `_configapply_needs_restart`, `_configsave_writes_file`, `_lifecycle_forbidden_on_server`, `_lifecycle_allowed_on_client`, `_lifecycle_does_not_disturb_external_strtok` — same convention as the rest of the orchestrator's tests above, no unit test starts a real `fork()`/driver, only `fork_orchestrator_post_event`'s transition is exercised; end-to-end behavior is covered by `run_client_lifecycle.sh`).
-
-**Diagnostics for "forks alive but reporting zero indicators" (recurring operator complaint, no reliable repro).** Three complementary safety nets, none diagnosing a specific root cause — see [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md#diagnostic--forks-vivants-qui-ne-rapportent-rien-après-un-démarrage) for the full writeup: (1) `child_death_record`/`child_death_drain` (`src/app/app_runtime.{h,c}`) — a signal-safe ring (`__atomic_fetch_add`, no malloc, no `log_*`) that `sigchld_handler` fills with pid+raw waitpid status on every reap; `fork_orchestrator_run` drains it every tick and logs the decoded cause (`child_death_format_reason`), at `log_error` severity in `ORCH_RUNNING` (unexpected) or `log_info` in `STOPPING`/`APPLYING` (expected, caused by `stopForks`/`configApply`) — before this, a fork that crashed left zero trace anywhere in production logs. `g_active_forks` is also now recomputed (and the control channel told to reconnect) when `reap_dead_child_slots` cleans slots in `ORCH_RUNNING`, which it never did before. (2) `server_tcp` (`src/app/app_runtime.c`) now logs (once per unknown socket path) an `IPC_MSG_STATS` datagram whose sender doesn't match any `forkId[]` entry, instead of silently dropping it. (3) `stuck_forks_threshold_elapsed`/`fork_stat_is_zero` (pure, `src/app/fork_orchestrator.{h,c}`) back a **per-fork** `log_error` (pid + slot, `g_stuck_fork_warned[]`, one warning per slot per (re)fork batch) if `STUCK_FORKS_WARN_MS` (30s) elapses with that specific fork reporting zero stock/analysed/shots-per-second — the symptom itself, not its cause. Originally an aggregate (`fork_stats_all_zero`, still present but unused in production, kept for its own tests): the very first real-world reproduction (256 pieces, `nb_forks=3`) had 2 of 3 forks stuck at zero while the 3rd worked normally — an aggregate that only fires when *every* fork is zero never triggers on a partial failure, exactly the real-world case. Per-fork catches it regardless of how many siblings are healthy.
-
-**Root cause found via the per-fork filet above: `SA_RESTART` on SIGINT made a stuck fork deaf to `stopForks`/`configApply`/`exit`.** The second real-world reproduction correlated the stuck fork (flagged by name/slot above) with the exact fork that then took >10s to die on `exit` (SIGTERM at 5s, SIGKILL at 10s) while its healthy siblings — almost always mid-CPU-bound-search, not blocked in a syscall — died instantly. `configure_child_signals()` (`src/app/app_runtime.c`, called by every fork's `fork_udp` thread) installed SIGINT with `SA_RESTART` — `sigaction()` is process-wide (only the blocked mask is per-thread), so this silently overrode the `SA_RESTART=0` `init_signals()` had set pre-fork, for the entire child process's lifetime, contradicting `init_signals()`'s own explicit documented rationale ("no SA_RESTART: blocking calls must return EINTR so their loops can observe request==REQUEST_STOP"). With `SA_RESTART`, a signal arriving mid-syscall just silently re-issues that syscall instead of returning EINTR — and two blocking calls are almost always where an idle/stuck fork sits: `fork_udp`'s own `recvfrom()` (no timeout at all) and `create_tcp_client`'s `connect()` (`src/net/tcpclient.c`, unbounded by `SO_RCVTIMEO`/`SO_SNDTIMEO`, which only cover send/recv). Fixed by dropping `SA_RESTART` from `configure_child_signals()`, matching `init_signals()`. Locked by an extended assertion in `configure_child_signals_installs_sigint` (`tests/app/test_app_runtime.c`): `(sa_flags & SA_RESTART) == 0`. This fixes *unresponsiveness to shutdown*, not necessarily the root starvation itself — a long-blocked initial `connect()` (e.g. transient server thread-pool saturation) remains a plausible contributor to a fork never getting work in the first place; the per-fork filet above stays the tool to catch it next time.
-
-**Third reproduction, after the SA_RESTART fix: still >10s to die on `exit`. Root cause since confirmed and fixed.** Live `gdb` capture showed the hang wedged inside `fork_gate_release_quiesce()`'s `pthread_cond_broadcast`, deep in glibc internals, reproduced on two architectures and two far-apart glibc versions (ruling out an architecture/glibc-version-specific bug) and confirmed permanent (not scheduling starvation). Since `strace -f` itself prevented reproduction (ptrace overhead closes the race window), a signal-safe, syscall-free trace ring was added directly to `fork_gate.c` (`fork_gate_trace_record`, `src/app/fork_gate.{h,c}` — `clock_gettime` via VDSO, no real syscall, readable post-hoc via `gdb -p <pid>`), which nailed it: the caller of `fork_gate_release_quiesce()` at the moment of the hang had a *different* TID than the thread that had just succeeded the preceding `fork_gate_request_quiesce()` — because it was the **freshly forked CHILD process**, not the parent (`orchestrator_spawn_forks`, `src/app/fork_orchestrator.c`, called `fork_gate_release_quiesce()` *before* branching on `child_pid != 0`, so both branches ran it). The child inherits (COW) `fork_gate`'s mutex/condvar state at the exact fork() instant; if another parent thread's own condvar wake-up was mid-transition right then, the child inherits a torn, inconsistent snapshot and its own `pthread_cond_broadcast` on it can wedge forever waiting for internal glibc bookkeeping that no thread in the child will ever complete — a known, general `fork()`+condvar pitfall (POSIX only guarantees consistency in the child for condvars that were fully idle at fork time), not a glibc bug, which is why it reproduced identically across architectures/versions. Fixed by moving `fork_gate_release_quiesce()` inside the `if (child_pid != 0)` branch only — the child never had any participants to release in the first place. Full chronology, every ruled-out hypothesis (SA_RESTART, missing REQUEST_STOP check, CPU/thermal starvation, glibc/arch-specific bug), and the trace-buffer methodology are kept in [docs/investigations/blocage_fork_gate_release_quiesce.md](docs/investigations/blocage_fork_gate_release_quiesce.md) (marked resolved) rather than duplicated here.
-
-**`--expand-level <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only). At startup, after seeding the genesis possibility, the server **expands its own stock** — placing a candidate piece on the next cell of each possibility (via `search_possiblity_light`) — until every possibility's cursor `alloc` reaches level `n`. This turns the lone genesis packet into thousands of distributable possibilities, curing the **startup starvation** where the first client to connect grabs the whole tree and the server has nothing to hand the others (the complement, from the client side, is the v8 `INST_NEED_WORK` anticipatory delegation). It is a pure server-side computation done before any client connects, so **client-side impact is nil**. Bounded on two axes (`src/app/static_variables.h`): `EXPAND_MAX_LEVELS` (4, fixed) caps the number of passes regardless of `n` — a *depth* guard so the server doesn't work too long — and `expand_max_stock` (global, default `EXPAND_MAX_STOCK` = 100000) caps the *count* between passes, the real safeguard since the branching factor is unknown and one pass can explode. Measured branching on the 256-puzzle is ≈11×/level (level 2 → ~45 possibilities, level 3 → ~495, level 4 → ~5300, level 5 → ~56000); **level 3–4 is the practical sweet spot** — enough to fill every client's local stock with reserve, in well under a second. The same routine (`expand_datas_to_level`, `src/core/datamanager.c`) is also reachable at runtime via the **`expand <n>` console command** (rebuilds the map like `removeNoNext`), useful when the distributable stock has run low mid-run.
-
-**`--expand-max-stock <n>`** (optional, position-independent valued option, same parsing shape as `--expand-level`; server-only, effective only when `--expand-level` is also given). Overrides the default `expand_max_stock` count-based safeguard above — a server with more RAM to spare can raise this cap to produce a bigger distributable reserve at the same `--expand-level`. Unlike `expand_min_level` (0 is the legitimate "no expansion" default), `n <= 0` is a nonsensical cap (expansion would stop before placing a single piece), so it is silently **ignored** rather than clamped — `expand_max_stock` keeps its previous value (the default `EXPAND_MAX_STOCK`, or whatever an earlier occurrence of the option set). The console `expand <n>` command reads the same live `expand_max_stock` global, so a value set at startup also applies to any later interactive re-expansion.
-
-**`--expand-max-levels <n>`** (optional, position-independent valued option, same parsing shape/convention as `--expand-max-stock`; server-only, effective only when `--expand-level` is also given). Overrides the default `expand_max_levels` depth-based safeguard (`EXPAND_MAX_LEVELS`, 4) — a server with more capacity (RAM and CPU time) to spare can raise this cap alongside `--expand-max-stock` to reach a high `--expand-level` without the expansion stopping prematurely on the pass-count guard. Same `n <= 0` ignored-not-clamped convention as `--expand-max-stock` (a zero-pass cap would prevent any expansion at all). Read by `expand_datas_to_level` (`src/core/datamanager.c`) via the live global, same as `expand_max_stock` — the console `expand <n>` command and a startup `--expand-level` both respect whatever value is currently in effect.
-
-### Server load management (bounded locks, coherent backup, incremental rebalance, configurable stock files, needless-save avoidance)
-
-Five PRs, all shipped, fixing a real production incident: under heavy load (`--expand-level 9`,
-14 375 696 possibilities in stock), a pruner's connections all died together because `backup()`
-held a global lock (20 mutexes, both stock pools) for the entire duration of writing the stock
-to disk — a 5.48 GiB / 10 218 838-packet backup — starving every client thread past its TCP
-timeout on a 16GB machine (the resident stock alone was ≈9GB, `sizeof(struct
-possibility_packet)` = 576 bytes) — the client-side symptom (`Broken pipe`, batches acked
-twice, `INST_END` acks) traced back to three previously-*unbounded* `pthread_mutex_trylock`
-loops in `src/core/datamanager.c` (`scroll_from_pool`, `put_to_pool`,
-`add_possibility_analysed_impl`), plus the absence of `setvbuf` on the backup `FILE*` (~1.4M
-unbuffered `write()` calls under lock for that one backup). `rmnonext` shares the same
-structural defect (a global lock with no bounded exit) but was never the trigger observed, so
-it was deliberately left out of this series.
-
-**PR1 — bounded locks, `--tcp-timeout <n>`.** The three loops above now give up after a
-bounded wait (~500ms) instead of spinning forever: a starved `scroll_from_pool`/`put_to_pool`
-degrades to the pre-existing "empty stock" response (`K=0` / `INST_ERROR`, both already
-handled gracefully by callers — no protocol bump), and `add_possibility_analysed_impl`
-declines to serve a possibility it couldn't record rather than serving one that would escape
-its lease and `requeue_last_sent_possibility`. `setvbuf(f, NULL, _IOFBF, 1 MiB)` on the backup
-`FILE*` collapses ~1.4M `write()` calls to ~1.4K. **`--tcp-timeout <n>`** (optional,
-position-independent valued option; applies to both server and client/pruner work sockets,
-`SO_RCVTIMEO`/`SO_SNDTIMEO`) overrides `DEFAULT_TCP_TIMEOUT` (10s) — a safety valve for a
-slower network or a bigger stock, though the bounded loops above already keep any single
-maintenance operation well under this budget by construction.
-
-**PR2 — `consistent_backup` (renamed from an earlier `backup_coherent`): a global freeze,
-then progressive release, for a true point-in-time snapshot.** All files of both pools (stock
-+ analysed) are locked *simultaneously* at one instant T, `maintenance` raised once, then
-written and released one file at a time — analysed pool first (serving `INST_GET` needs both a
-stock lock and an analysed lock, so releasing stock first would gain nothing). A file stays
-locked continuously from T until it is written, so nothing can migrate out of it before its
-own snapshot is taken — the correctness property a naive per-file lazy-lock backup lacks (a
-possibility could migrate from a not-yet-written file into an already-written one, vanishing
-from the backup entirely). Deliberately **not** a `fork()`/COW snapshot (Redis-style
-`BGSAVE`): COW can approach 2× resident memory, untenable with a multi-GB stock on a
-memory-constrained box, and would reopen the fork-in-a-multithreaded-process minefield this
-project already paid for once (`docs/investigations/blocage_fork_gate_release_quiesce.md`).
-Trade-off accepted: clients are throughput-degraded (partially `K=0`) during the backup window
-(now bounded to roughly the write time of *one* file, not the whole backup), never
-disconnected. Holding both lock families together is normally forbidden
-(`src/core/datamanager.h`) but verified safe here specifically: every other path that touches
-both releases one before acquiring the other (`restock_analysed`,
-`datamanager_reclaim_expired_leases`), so `consistent_backup` is the sole simultaneous holder
-and no two-party deadlock cycle can form.
-
-**PR3 — incremental rebalance, `--rebalance-budget <n>`, console command `rebalance [n]`.**
-What makes "≤1s per file" during PR2's backup actually true is files of comparable size.
-`datamanager_rebalance_step`/`rebalance_pool_until_budget` (`src/core/datamanager.{h,c}`) read
-each file's `size` (O(1)) and move packets from the fullest file toward the emptiest, one pool
-lock at a time (never two pool locks together — same discipline as `restock_analysed`), and
-**replay across as many file pairs as the budget allows** in one call rather than stopping
-after a single pair (the deficit `target - size[emptiest]`, not the requested budget, is often
-the binding constraint on any one pair — replaying spreads the remaining budget over more
-pairs, converging faster). Called once per server tick (10s, `check_server_step`) with
-`rebalance_budget` (`--rebalance-budget <n>`, default `REBALANCE_BUDGET_DEFAULT` = 1000,
-`n <= 0` ignored) packets per tick; the console command `rebalance [n]` (server-only,
-`command_lines.c`) triggers one step immediately, `n` overriding the budget for that call only.
-`split_datas()` — the old all-in-one rebalancer, 3 copies per packet under the *global* stock
-lock — stays for its historical `split`/`regroup` console commands but is no longer the tool
-this PR relies on at scale.
-
-**PR4 — `--stock-files <n>`: configurable file count, pointer-array storage.** Closes the
-long-standing `@todo Rendre configurable` on the file count (`src/core/datamanager.h`).
-`file_possibility`/`file_possibility_checked`/`file_possibility_analysed`/`analysed_index`
-(`src/core/datamanager.c`) are tables of **pointers** (`file_possibility_t **`,
-`AnalysedIndexNode ***`), grown by `realloc` and populated slot-by-slot
-(`malloc`+`init_file`+`pthread_mutex_init`, each slot initialized exactly once — the POSIX
-hazard of re-initializing a live mutex that originally motivated a fixed static array is
-avoided by construction, not by a pre-filled floor) — memory cost is 8 bytes per unused entry
-rather than a full `file_possibility_t`/hash-bucket-table pre-allocated regardless of use.
-`NB_FILE_POSSIBILITY_DEFAULT` (10, applied at startup absent `--stock-files`) and
-`NB_FILE_POSSIBILITY_MAX` (128, a sanity cap on `--stock-files`, not a preallocation limit)
-remain the only two compile-time constants; `nb_file_possibility` (the real active count)
-starts at **0** and stays there until `datamanager_configure_stock_files` is called — a
-mandatory, one-time call every real process entry point makes first thing (`src/app/main.c`,
-`tests/test_main.c`, `tests/bench/bench_refutation.c` — the three actual `main()` functions in
-the repo), unlike the rest of this module's failures, which always degrade gracefully (PR1):
-indexing a file before this call is a NULL-pointer dereference, not a state to tolerate.
-`ensure_stock_files_cover_forks(nb_threads)` (`src/app/app_runtime.{h,c}`) still grows
-`nb_file_possibility` at client startup to stay ≥ the fork count (the analysed pool is indexed
-by `fork_seq`), never the reverse.
-
-**A real SIGILL crash found only by running the real binary with a high `--stock-files`, not
-by any unit test.** `report` (`check_server_step`, `src/app/etii_server.c`) was `calloc`'d at a
-**fixed** 4000 bytes, historically enough since `nb_file_possibility` was always 10 — but the
-`table` string it `strcat`s in (`build_file_queues_table`, one line per file) correctly scales
-with `nb_file_possibility` and can reach ~8.4 KiB at `NB_FILE_POSSIBILITY_MAX` (128). No
-existing unit test called `check_server_step` with a large file count, so nothing caught it;
-`./eternityII server --stock-files 500` (clamped to 128) booted fine and then died in SIGILL
-(`__strcat_chk` / `_FORTIFY_SOURCE`) on its first statistics tick (10s later). Fixed by
-building `table` first and sizing `report` on `strlen(table) + 1200` (the fixed-size `temp`
-block appended after it). Locked by
-`check_server_step_handles_large_stock_files_count` (`tests/app/test_etii_server.c`) — fails
-against the pre-fix code even without ASan, since `_FORTIFY_SOURCE` is on by default on this
-toolchain.
-
-**PR5 — a needless save no longer runs, per artefact.** Before this, a single gate
-(`should_autobackup`, keyed only on stock/analysed-pool traffic via `fileUpdates[]`) governed
-all four autobackup writes together every tick where it fired: `consistent_backup` (stock +
-analysed pools), `best_board_save`, and `known_clients_registry_save` — so any stock activity
-rewrote `temp-best_board.back`/`temp-known_clients.back` even when neither had changed at all,
-and, symmetrically, a genuine remote best-board record (pulled from a client over the control
-channel — never local stock traffic) could sit unsaved indefinitely if the local stock stayed
-idle in the meantime. `check_server_step` (`src/app/etii_server.c`) now calls the same pure
-`should_autobackup` **four times**, once per artefact, each against its own `autobackup_gate_t`
-(`lastBack`/`lastUpdates` pair) inside a new `autobackup_state_t` (`src/app/etii_server.h`,
-replacing the old flat `lastClientsFileUpdateBackup`/`lastBack` parameters) — `check_server`
-owns one `autobackup_state_t` for the lifetime of its loop, same as before. The four mutation
-signals: `clientsFileUpdates` (unchanged — sum of the per-thread `fileUpdates[]`, one per
-search/pruner connection, already incremented on `INST_ADD` and on every `INST_GET`/
-`INST_GET_TO_CHECK[_BATCH]` serve via `record_batch_analysed_for_client`); a new
-`analysedFileUpdates[]` (same per-thread-array shape, allocated/freed alongside `fileUpdates`
-in `init_server_thread_pool`), incremented on **both** sides of the analysed pool's traffic —
-attribution (the same `record_batch_analysed_for_client` call site that already bumps
-`fileUpdates`, since a GET-serve mutates the stock pool it drains from **and** the analysed
-pool it attributes into) and acknowledgement (`remove_possibility_analysed` succeeding inside
-the `INST_POSSIBILITY_ANALYSED`/`INST_POSSIBILITY_ANALYSED_BATCH` handlers, which never touched
-any counter before this PR); `best_board_result(&g_server_best_board)` directly (monotonically
-non-decreasing by `best_board_t`'s own "first strictly-greater record wins" contract — no new
-field needed); and a new `known_clients_registry_mutation_count()` (`src/app/
-known_clients_registry.{h,c}`), a monotone counter bumped inside `on_connect`/`on_stats`/
-`on_disconnect` whenever they actually touch a **persisted** field (`label`/`peer_ip`/`mode`/
-`last_seen`/cumulative totals/`cumulative_uptime_seconds`) — never on a rejected call (registry
-full, unknown identity). `consistent_backup` stays a single call covering **both** files
-whenever *either* stock or analysed has a pending mutation (`do_stock || do_analysed`) — PR2's
-point-in-time coherence is unaffected, since both pools are still frozen together at one instant
-whenever the call happens; only the *decision* to write becomes independent per artefact.
-`best_board_save`/`known_clients_registry_save` are now two fully independent gates.
-
-**Deliberately narrower than what was originally considered.** Composing this with PR2 at the
-granularity of a single stock **file** (a per-file "dirty since last backup" flag so an
-untouched file is not even locked during `consistent_backup`'s phase 1, not just cheaply
-rewritten) was considered but not implemented. That would touch every mutation path in
-`datamanager.c` (`put_to_pool`, `scroll_from_pool`,
-`rebalance_pool_step`, `regroup_pool_nolock`, `split_pool_nolock`) to correctly set/clear a
-per-file flag; a single missed update site would make a file wrongly look "clean" and silently
-stale in future backups — the failure mode is invisible until an operator actually needs to
-`restore` from it. Given the artefact-level gate above already captures the bulk of the waste
-(needless `best_board`/`known_clients` rewrites — the concrete problem observed) at a fraction
-of the risk, the finer per-file composition is left as a documented, not-yet-implemented
-extension.
-
-**PR6 — round-robin de démarrage pour `put_to_pool`/`scroll_from_pool` (répartition réelle du
-trafic ADD/GET entre les `--stock-files` files).** PR3/PR4 laissaient un biais structurel non
-documenté : `put_to_pool` (ADD) et `scroll_from_pool` (GET) verrouillaient toujours la première
-file libre en repartant de l'indice 0 à *chaque* appel — dans le cas nominal à faible
-contention (`pthread_mutex_trylock` réussit dès le premier essai), tout le trafic ADD comme
-tout le trafic GET se concentrait donc sur la file 0, les files suivantes ne recevant du
-trafic qu'en cas de verrou déjà pris sur les précédentes. `--rebalance-budget` (PR3) masquait
-le symptôme (files de taille comparable) sans jamais s'attaquer à sa cause : il devait
-compenser en continu un biais de *trafic*, pas un simple déséquilibre ponctuel de *contenu*.
-`datamanager_rr_next_start(unsigned int *counter, int n)` (`src/core/datamanager.{h,c}`) est
-l'unique fonction pure introduite : incrémente atomiquement (`__atomic_fetch_add`,
-`__ATOMIC_RELAXED` — même convention que `solution_seq`) un compteur fourni par l'appelant et
-renvoie sa valeur modulo `n` (0 si `n <= 0`), sans jamais lire d'état module — testable avec un
-compteur local. Quatre compteurs statiques dans `datamanager.c`
-(`rr_put_unchecked`/`rr_put_checked`/`rr_scroll_unchecked`/`rr_scroll_checked`, un par pool
-réellement distinct, jamais remis à zéro en production) fournissent le point de départ de
-chaque appel — partagés entre TOUS les appelants d'un même pool (ex. `rr_scroll_unchecked` sert
-aussi bien le repli de `scroll_from_local` que `scroll_from_local_tocheck`, puisque c'est le
-trafic *combiné* sur cette file qui doit tourner). Le reste de la logique de balayage borné
-(PR1 — `DATAMANAGER_TRYLOCK_MAX_SWEEPS` tours avant abandon) est inchangé : `scroll_from_pool`
-teste toujours les `nb_file_possibility` files en cas de départ vide, simplement dans l'ordre
-`(rr_start + k) % n` plutôt que `0..n-1` ; `put_to_pool` avance `currfile` modulo `n` à partir
-de ce même point plutôt que de 0, un compteur `tried` distinct de `currfile` remplaçant le test
-`currfile == 0` (qui ne signalait plus un tour complet une fois le départ non nul) pour détecter
-qu'aucune file n'a pu être verrouillée en un tour.
-
-Plusieurs tests historiques (`tests/core/test_datamanager.c`, `tests/ui/test_command_lines.c`)
-supposaient en dur « tout atterrit dans la file 0 juste après un ajout » — propriété du code
-d'AVANT ce correctif, pas une garantie fonctionnelle à préserver. Plutôt que de les réécrire
-un par un pour tolérer n'importe quelle file de destination (perdant au passage leur capacité à
-distinguer « un lot entier va dans UNE SEULE file » de « le lot s'est fragmenté »), une fonction
-réservée aux tests, `datamanager_reset_rr_state_for_tests()` (déclarée nulle part dans
-`datamanager.h`, forward-déclarée directement dans les fichiers de test — même convention que
-les autres « helpers internes » qu'ils déclarent déjà), remet les quatre compteurs à zéro ;
-elle est appelée à la fin de `drain_datamanager()`/`dm_drain()`, déjà invoqué en tête de
-pratiquement chaque test, rendant à nouveau déterministe « la file 0 en premier » juste après un
-drain sans toucher au comportement réel de production. La rotation elle-même — jamais exercée
-par ces tests puisqu'ils drainent entre deux ajouts — est verrouillée séparément par
-`add_possibility_rotates_start_file_across_calls` (`tests/core/test_datamanager.c`), qui
-enchaîne deux `add_packets`/extractions SANS drain intermédiaire et vérifie que le second appel
-n'atterrit pas dans la même file que le premier — le scénario que `--stock-files` est censé
-permettre et que le code d'avant ce correctif ne permettait pas.
-
-**PR8 — répartition par CONNEXION (pas par item ni par lot) du pool analysé, pour que
-l'acquittement reste O(1) sans jamais balayer les autres files.** PR6 corrige le biais
-ADD/GET du stock, mais laisse intact un biais symétrique — et plus coûteux — sur le pool
-*analysé* : `add_possibility_analysed_impl` (branche `thread < 0`, utilisée par
-`record_possibility_analysed_for_client` à CHAQUE possibilité servie via
-INST_GET/INST_GET_TO_CHECK[_BATCH]) verrouillait elle aussi toujours la file 0 en premier.
-Observé en usage réel : un pruner qui acquitte un lot de `prunerBatch` possibilités
-(`INST_POSSIBILITY_ANALYSED_BATCH`) appelle `remove_possibility_analysed(..., -1)`
-séquentiellement pour chacune — verrouillant/déverrouillant la file 0 en boucle serrée — pendant
-que tout AUTRE pruner ayant besoin de cette même file (son propre GET ou son propre ACK) échoue
-son `trylock`, réessaie, jusqu'au budget borné (`DATAMANAGER_TRYLOCK_MAX_SWEEPS`) : le symptôme
-observé ("bloqué en maintenance") pour un mécanisme n'ayant, ici, rien à voir avec
-`consistent_backup`.
-
-Un simple round-robin (comme PR6, appliqué item par item ou lot par lot) aurait un coût caché
-spécifique à CE pool : contrairement à `scroll_from_pool` (qui peut servir N'IMPORTE QUELLE file
-disponible), `remove_possibility_analysed` doit retrouver une possibilité PRÉCISE sans savoir a
-priori dans quelle file elle a été insérée — avant ce correctif, ce n'était bon marché (trouvée
-dès la file 0) que PARCE QUE tout y était concentré ; répartir l'ADD sans rien changer au REMOVE
-ferait passer chaque acquittement de ~1 verrou à ~n/2 en moyenne.
-
-La solution retenue n'est ni un compteur atomique global (PR6) ni « une file par lot » (perdrait
-la garantie sur une reconnexion en cours de lot), mais une clé déterministe et STABLE pour toute
-la durée d'une connexion : `server_analysed_file_hint(client)` (`src/app/etii_server.{h,c}`) =
-`client->compteur % nb_file_possibility` — `compteur` étant l'indice du slot de thread serveur,
-stable tant que la connexion est active et jamais réutilisé par une AUTRE connexion active
-pendant ce temps (`find_free_thread_slot` ne recycle qu'un slot libre). Deux connexions
-concurrentes tombent donc en général sur des files différentes, sans coordination ; le
-`% nb_file_possibility` est OBLIGATOIRE (pas une simple précaution) : `compteur` va jusqu'à
-`NB_THREADS` (80 par défaut) alors que `nb_file_possibility` peut être bien plus petit (10 par
-défaut) — passer `compteur` tel quel indexerait `file_possibility_analysed[]` hors bornes.
-`record_possibility_analysed_for_client` calcule ce hint UNE FOIS et l'utilise comme `thread`
-(mode EXACT existant de `add_possibility_analysed[_owned]`, inchangé) : toutes les possibilités
-servies sur une même connexion (get unitaire ou lot entier) vont donc dans la MÊME file.
-
-Le retrait ne peut pas se contenter du même mode exact (`thread >= 0`, sans repli) : rien ne
-garantit qu'un ACK arrive sur la MÊME connexion que le GET correspondant (aléa réseau, cf.
-`requeue_last_sent_possibility` plus haut) — un hint qui se révèle faux ne doit jamais faire
-déclarer une absence à tort. `remove_possibility_analysed` gagne donc un troisième paramètre,
-`preferred_file` (signature étendue, tous les appelants mis à jour — production ET tests,
-`thread` conservant EXACTEMENT sa sémantique historique, `preferred_file` ignoré si
-`thread >= 0`) : quand `thread < 0`, le balayage démarre à `preferred_file` (au lieu de
-toujours 0) puis continue sur TOUTES les autres files via `(scan_start + step) % n` — même
-mécanique de rotation d'ordre que `scroll_from_pool` (PR6), même garantie de bornage
-(`DATAMANAGER_TRYLOCK_MAX_SWEEPS`) et même contrat de retour (0/1/-1) qu'avant. Cas nominal
-(hint correct, l'immense majorité des acquittements) : trouvé au premier essai, UNE SEULE file
-verrouillée. Cas de repli (hint faux, ou pas de client — `requeue_last_sent_possibility` avec
-`client == NULL`) : identique au comportement exhaustif d'avant ce correctif, juste réordonné.
-
-Les trois points de service serveur (`record_possibility_analysed_for_client`,
-INST_POSSIBILITY_ANALYSED, INST_POSSIBILITY_ANALYSED_BATCH) et `requeue_last_sent_possibility`
-utilisent tous `server_analysed_file_hint(client)` — pour le lot (`_BATCH`), calculé UNE SEULE
-fois avant la boucle des M paquets, puisque c'est la MÊME connexion pour tout le lot. Aucun
-changement de protocole, aucune structure globale supplémentaire à synchroniser (contrairement à
-un index hash→file envisagé puis écarté) : la clé de répartition (`client->compteur`) existait
-déjà.
-
-Tests : `tests/core/test_datamanager.c` (`remove_analysed_preferred_file_hit_finds_directly`,
-`_miss_falls_back_to_scan`, `_absent_scans_everything`, `_out_of_range_behaves_like_no_hint` —
-le contrat pur de `preferred_file`, indépendant de tout `client_t`) ;
-`tests/app/test_etii_server.c` (`server_analysed_file_hint_is_compteur_modulo_file_count` — le
-modulo et le cas `NULL` ; `record_and_remove_same_connection_use_same_file_hint` — bout en bout :
-deux connexions de `compteur` différent atterrissent dans deux files différentes, et le retrait
-via le hint de chacune ne touche jamais la file de l'autre).
-
-**Lease reclaim (PR7) and incremental rebalance (PR3) deliberately do NOT feed the mutation
-counters.** Both genuinely mutate the stock/analysed pools (a reclaimed lease moves a
-possibility from analysed back to stock; a rebalance step moves possibilities between stock
-files), but folding their per-tick counts into `clientsFileUpdates`/`analysedUpdates` would
-require a function-static accumulator inside `check_server_step` — and unlike client traffic
-(`fileUpdates`/`analysedFileUpdates`, fully controlled by a test via `wire_counters`), how many
-leases/packets a single call moves depends on the clock and the stock's current contents,
-breaking the exact-equality assertions the existing `check_server_step_*` tests rely on
-(`check_server_step_detects_record_and_autobackups` asserts `backup_state.stock.lastUpdates ==
-5` after one specific call). Harmless to correctness either way: the full set of possibilities
-always still exists in at least one of the two files, and the next real client GET/ADD/ACK —
-which in practice arrives well inside the 60s window on any active server — folds the
-redistribution into the next triggered write; only the *immediate* freshness of an idle-server
-reclaim/rebalance is deferred, never a lost possibility.
-
-**Backup duration, observed rather than deduced from an incident.** `server_last_backup_duration_ms`
-(`volatile unsigned long long`, `src/app/static_variables.{h,c}`, same no-lock/telemetry-only
-convention as `server_shots_per_second`) is set once per `check_server_step` tick that triggers
-*any* of the four writes above, timed with `clock_gettime(CLOCK_MONOTONIC, …)` around the whole
-block (whichever subset actually ran). Exposed as `last_backup_duration_ms` on
-`GET /api/v1/status` (`http_status_view_t`/`http_json_format_status`/`http_status_collect`) —
-`0` until the first autobackup of the process. This is what makes the original incident's own
-"how long did the backup actually take" question answerable directly instead of inferred after
-the fact from log timestamps, as it had to be during the original diagnosis.
-
-**Left open, out of scope for this series — since addressed, see below (RAM cap, disk spillover)
-and still partially open (delta backup).** The real ceiling is *volume*: 14M possibilities
-≈ 9GB resident on a 16GB box, and nothing bounded the stock's growth at runtime
-(`expand_max_stock` only bounds the one-time startup `--expand-level` expansion, never later
-growth from search/delegation traffic). A global stock cap, spilling to disk, or backing up by
-delta instead of a full rewrite each time would all address this directly; none of this series'
-incidents required it, and it was a materially bigger design question than bounding a lock or
-gating a write — the RAM-cap and disk-spillover (including its own backup/restore coherence,
-PR3) halves are now implemented (below), only delta backup (avoiding a full rewrite of the
-RESIDENT portion on every `consistent_backup`) remains open.
-
-### RAM cap on the possibility stock (`--stock-max-ram`) — PR1 of 3
-
-A follow-up series, planned in three PRs (a hard cap that refuses growth once the budget is
-reached; spilling the overflow to per-file disk segments; making backup/restore coherent with
-those segments). **PR1 (this section) and PR2 (disk spillover, below) are both implemented.**
-PR3 (backup/restore coherence with spilled segments) is **not** — see its own section below for
-exactly what that means in practice (spilled data does not survive a server restart yet).
-
-**Scope: the two stock pools only, never the analysed pool.** `--stock-max-ram <mo>` (Mo,
-console `stockMaxRam <mo>` for hot changes, `0` = illimité/unlimited — same convention as
-`limit 0`/`leaseDuration 0`) bounds `possibility_stock + checked_stock` together (one budget,
-not one per pool — a `put_to_pool` call on either pool checks the combined total). The analysed
-pool is deliberately excluded: it is already bounded by in-flight clients and PR7's expiration
-leases, and its hash index (`remove_possibility_analysed`) needs exact-match lookup that a
-spilled-to-disk entry would break — a reason that still applies now that PR2 exists (below):
-the analysed pool is not, and will not be, spilled.
-
-**Conversion is Mo → possibility COUNT, once, not a running byte tally.** `put_to_pool`
-(`datamanager.c`) is the sole enforcement point (mirrors the narrow-funnel design PR1–PR8 above
-already established): a `datas_size()`-derived resident count, compared against a packet budget
-computed once by `datamanager_ram_limit_to_packets` (`core/datamanager.{h,c}`) from
-`datamanager_bytes_per_possibility()`. That per-possibility cost is **632 bytes on the 256-piece
-puzzle, not `sizeof(struct possibility_packet)` (576) alone** — `put()` (`core/lifo.c`) does
-**two** `malloc()` calls per stored possibility (the `Element` list node, 24 bytes, plus a copy
-of the packet itself), a real ~10% underestimate the rest of this document's own "14M
-possibilities ≈ 9GB" figure (above) was itself making. A refusal returns `1`, the same contract
-`put_to_pool` already used for trylock-budget exhaustion (PR1 of the load-management series,
-above) — `put_to_server` already degrades this gracefully into `INST_ERROR` (client keeps the
-possibility locally, retries later; see this document's own "Épilogue" section above for why
-that log line is `log_info`, not `log_error`). The refusal path in `put_to_pool` itself is
-throttled to one `log_error` per 10s (`STOCK_RAM_CAP_WARN_COOLDOWN_SEC`) — unlike the epilogue's
-maintenance-window refusals, a sustained cap hit is real operator-actionable signal (raise the
-cap, or configure `--stock-spill-dir` — PR2, below), so it stays loud, just not per-ADD spam.
-In practice PR2's spill thread keeps resident well under this hard cap most of the time
-(proactive eviction at 90%, see below), so this refusal path fires far less often than it did
-before PR2 existed — but it is still the safety net when eviction can't keep up.
-
-**`expand_datas_to_level` had the same "return value ignored" bug the Épilogue section already
-fixed once for a different call site — caught here before it could reach production, since a
-cap that can refuse mid-expansion is new in this series.** Both call sites in
-`expand_datas_to_level` (`core/datamanager.c`) that reinsert a packet via `add_possibility(NULL,
-single)` discarded its return value; once a RAM cap could exist, a refusal there became a
-possibility vanishing with zero trace — the exact class of bug the Épilogue section above
-diagnosed for `put_to_server`, just never exercised on this path since nothing could refuse an
-insert here before this series. Fixed by counting refused packets (`dropped`) and logging a
-single explicit `log_error` at the end of `expand_datas_to_level` naming the count when
-`dropped > 0` — deliberately not a retry loop AT THE TIME: PR1 shipped before PR2's spill thread
-existed, so nothing could ever concurrently free room during expansion, and retrying the same
-refused insert would just spin forever. **This reasoning stopped holding once PR2 landed** (a
-genuine concurrent consumer now exists) — dropping was corrected to a proper wait-and-retry once
-that became safe to do; see "No possibility loss during expansion" in the PR2 section below for
-the followup that superseded this drop-and-log design. `expand_without_ram_cap_logs_nothing`
-(`tests/core/test_datamanager.c`, stderr-size-based like the Épilogue's own
-`put_to_server_server_busy_is_silent_and_non_fatal`, not content-matched — a relabeled message
-doesn't break the test, a silence regression does) is the one test from this original PR1 change
-that is still current; its sibling asserting the drop itself was replaced, see below.
-
-**Applies to every mode mechanically, documented as server-only by convention.** Unlike
-`expand_min_level` (read only inside `runserver`), `datamanager_configure_ram_limit` is called
-unconditionally in `main()` — same placement and reasoning as `stock_files_requested`/
-`datamanager_configure_stock_files` just above it — because `put_to_pool` is shared code, used
-by a client/pruner's own local stock (`put_to_local`) exactly as much as by the server. In
-practice only the server's stock ever reaches a volume where this matters (a client/pruner's
-local backlog stays bounded by `max_stock_by_thread`/`pruner_batch_size`, both far under any
-sane Mo cap) — the same mechanical-vs-practical distinction the `rebalance` console command
-already established (also shared code, also labelled server-only, also a harmless no-op in
-practice on a client).
-
-**HTTP/console surface**, both read-only for the cap itself: `GET /api/v1/status` gained
-`stock_ram_limit_mb`/`stock_ram_used_mb` (`http_status_view_t`, both derived via
-`datamanager_packets_to_ram_mb`, never stored independently); console `stockMemory` prints the
-same pair. `stockMaxRam <mo>` (hot-set) joins `control_command_privileged`'s
-`write_server_only[]` list (`control_protocol.c`) — same authentication tier as `rebalance`/
-`sortAsc`/etc., a Bearer token is required over `POST /api/v1/command`, and it is never relayable
-over the binary control channel to a client (that whitelist, `control_command_allowed`, is
-untouched by this change).
-
-Tests: `tests/core/test_datamanager.c` (pure conversion functions, `hard_cap_refuses_add_beyond_
-budget`/`_allows_add_within_budget` via a test-only exact-packet setter,
-`datamanager_set_ram_limit_packets_for_tests` — deliberately bypassing the Mo-rounding path so
-the cap boundary tested is exact, same "test-only helper, declared only in the .c and
-forward-declared by the test file" convention as `datamanager_reset_rr_state_for_tests`);
-`tests/app/test_static_variables.c` (CLI parsing triplet, same shape as `expand_max_stock`'s);
-`tests/net/test_http_codec.c` (golden JSON updated); `tests/ui/test_command_lines.c` /
-`tests/net/test_control_protocol.c` (privileged-whitelist classification, Bearer-gated dispatch,
-`stockMemory` confirmed unreachable via either HTTP whitelist — a pure read, same as
-`statistic`/`check`).
-
-### Disk spillover of the possibility stock (`--stock-spill-dir`) — PR2 of 3
-
-New module `src/core/stock_spill.{h,c}`. PR1's hard cap has no recourse — once
-`--stock-max-ram` is reached, growth is refused, full stop. PR2 gives it one: before the cap is
-actually hit, a dedicated 100ms-tick thread proactively writes the COLDEST resident
-possibilities (the head of the queue — `scroll_fifo`, never touched by `scroll`, which
-`scroll_from_pool`/GET always pops from the tail) to per-`(pool, file)` disk segments, and reads
-them back when RAM has room again. `put_to_pool`'s hard refuse (PR1) is untouched and stays the
-safety net for whatever the eviction thread can't keep up with — this PR never changes the ADD
-hot path.
-
-**Dependency direction is one-way, `stock_spill.c` → `datamanager.h`, never the reverse.**
-`datamanager.c` gained exactly two new narrow, `core/`-only functions for this — thin C in the sense that
-`stock_spill.c` never touches `file_possibility`/`file_possibility_checked` or their mutexes
-directly:
-
-- `datamanager_pool_drain_head(is_checked, file_index, out, max_packets)` — single `trylock` +
-  `scroll_fifo` loop, gives up immediately on contention (rattrapé at the next 100ms tick, no
-  reason to block a background thread on ordinary ADD/GET traffic).
-- `datamanager_pool_refill(is_checked, file_index, in, count)` — MUST succeed (these
-  possibilities have nowhere else to go, having already left either RAM or a segment file):
-  `trylock` + rotate-through-files + `usleep`, unbounded, deliberately copying
-  `rebalance_pool_step`'s own reinsertion loop verbatim rather than inventing a bounded variant
-  — same accepted OOM blind spot (`put()`'s return value ignored, matching that existing code).
-
-`datamanager.c` itself has **zero** new dependency on `stock_spill.h` — `put_to_pool`'s cap
-check (PR1) is completely unaware spillover exists, by design: the RAM cap bounds RAM, spillover
-is what lets total stock (RAM + disk) exceed it, and coupling the two would have made PR1
-untestable/shippable on its own, which the plan explicitly wanted.
-
-**Why `scroll_fifo` existed but was dead code before this PR**: it was implemented in
-`lifo.c` from early in the project's history but never declared in `lifo.h`, hence never called
-by anything — a real, if harmless, latent gap. Declaring it (`lifo.h`) is this PR's only change
-to a file outside `core/stock_spill.{h,c}`/`core/datamanager.{h,c}`.
-
-**Segment format is a raw `struct possibility_packet` stream — byte-identical to `.back`**
-(`backup()`, `datamanager.c`): no header, no index, count is `file_size / sizeof(packet)`. Each
-`(pool, file)` gets its own LIFO **stack of segments** (`spill_<u|c>_<file>_<seq>.dat`,
-`STOCK_SPILL_SEGMENT_BYTES` = 64 MiB each, rounded DOWN to a whole number of packets —
-`stock_spill_full_segment_bytes()`, never the raw 64 MiB constant, since the two differ by up to
-`sizeof(packet) - 1` bytes and conflating them corrupts both the remaining-capacity arithmetic in
-eviction and the "this segment must be exactly full" assumption reload relies on when rolling back
-to the previous segment). Eviction always appends to the top (`last_seq`), rolling to a new
-segment when full; reload always pops from the top, `ftruncate`-ing (never rewriting) and
-deleting+decrementing `last_seq` once a segment empties. Segments below the top are, by
-construction, always exactly full — nothing ever compacts or rewrites a segment once it stops
-being the top.
-
-**Reload never destroys disk state until RAM insertion is confirmed ("peek, then commit").**
-`stock_spill_reload` reads the candidate packets from the segment file WITHOUT truncating,
-releases its own lock, calls `datamanager_pool_refill` (which — see above — cannot meaningfully
-fail short of OOM), and only THEN re-acquires the lock to `ftruncate`/delete. Eviction takes the
-opposite, equally loss-proof shape: drain from RAM first (cheap to undo), and if the disk write
-fails partway, whatever wasn't successfully written goes straight back into RAM via
-`datamanager_pool_refill` — never lost, throttled `log_error` either way (segment write failure,
-or segment read failure on reload) so a persistent disk problem doesn't degrade to silence.
-
-**A real hysteresis bug, caught by the unit tests before it ever ran live.** The original
-three-threshold table (90% high / 75% low / 25% reload) gave EVICTION two distinct thresholds
-(enter at 90%, exit at 75% — genuine hysteresis, prevents thrashing at a boundary under steady
-ADD/GET traffic) but RELOAD only one (25%, reused for both entry AND exit). In practice this
-meant reload almost always stalled after exactly ONE block: `STOCK_SPILL_BLOCK_PACKETS` (4096,
-or whatever budget the caller passes) very often exceeds 25% of a modest cap on its own, so the
-very first reloaded block immediately overshoots the 25% exit check and the mode reverts to
-IDLE — even with the cap barely touched and plenty of spilled data still waiting. Two of the
-seven new unit tests (`tests/core/test_stock_spill.c`) failed against this exact scenario before
-the fix (reload converging to a handful of packets instead of the whole backlog); fixed by
-making reload exit at the SAME "low" (75%) threshold eviction already exits at — both directions
-now converge on one shared resting point (`[75%, 90%]` is dead zone for both), reusing an
-existing named threshold rather than inventing a fourth. This was caught entirely by the test
-suite, not the real-world smoke test below (which used a cap so tiny relative to the test data
-that the effect was masked) — a concrete instance of this project's own guiding rule (`AGENTS.md`
-*Testing* section) that a difficult-to-observe behaviour is a sign to make it directly testable
-rather than to rely on manual reproduction alone.
-
-**Wiring**: `stock_spill_configure(stock_spill_dir, nb_file_possibility)` +
-`create_spill_thread()` (100ms tick, same detached-thread pattern as `create_rmnonext_thread`)
-are called from `runserver` (`etii_server.c`) BEFORE any `--expand-level` expansion — by the
-time either runs, `nb_file_possibility` is already final (`datamanager_configure_stock_files`
-ran in `main()`, before any fork, before `handle_server`/`runserver`). Both calls are
-unconditional, even without `--stock-max-ram`/`--stock-spill-dir` — `stock_spill_step` is then
-just a cheap no-op check (`cap == 0` returns immediately), matching the project's existing
-"always start the thread, let it no-op" convention (`create_rmnonext_thread` has no conditional
-creation either). `--stock-spill-dir` is, unlike `--stock-max-ram`, genuinely server-only in
-effect, not just by convention: `stock_spill_configure`/`create_spill_thread` are only ever
-called from `runserver`, never from `main()` unconditionally — a client/pruner process never
-creates a spill directory or thread at all.
-
-**Startup purge is real data loss, logged loudly, and is exactly the PR3 gap.** Since this PR
-has no backup/restore awareness, ANY segment found at `stock_spill_configure` time is from a
-process that never got to reload it before exiting — there is no way to know if it's still
-wanted. Purge matches ONLY the exact `spill_[uc]_<n>_<n>.dat` pattern (never a directory-wide
-wipe, since the directory is operator-supplied and might not be exclusively ours) and, if
-anything matching is found and non-empty, logs the exact possibility/segment count discarded at
-`log_error` — verified for real (see below): **spilled data does not survive a server restart
-until PR3 (backup/restore coherence) ships. `backup` before any planned restart if spillover is
-in use.**
-
-**Real-world verification, not just unit tests.** A real 256-piece server
-(`--expand-level 12 --expand-max-levels 10 --stock-max-ram 1 --stock-spill-dir <dir>`, well
-below what a deep expansion produces) confirmed the full path end-to-end: segment files
-appeared on disk, spread across multiple stock files exactly as the round-robin/fullest-file
-selection intends (`spill_u_0_1.dat` through `spill_u_3_1.dat`, real packet content, ~3984
-possibilities total), resident stock stayed bounded near the configured cap while GET/ADD kept
-being served, and a subsequent restart against the same `--stock-spill-dir` purged all four
-segments with the documented `log_error` naming the exact discarded count (3984 possibilities,
-4 segments) — matching the PR3 gap above exactly, not merely asserted.
-
-**No possibility loss during expansion — the drop-and-log path from PR1 was replaced with a
-wait-and-retry, once PR2 made that safe.** Confirmed as a real, reproducible gap, not
-theoretical: `--expand-level 12 --expand-max-levels 10 --stock-max-ram 1` (a deliberately tiny
-cap) completed its entire expansion — and hit `expand_datas_to_level`'s PR1 drop-and-log path —
-inside a single synchronous burst faster than the spill thread's 100ms tick, with the spill
-directory still empty afterward: ~1000 possibilities counted as "dropped" in that one run,
-exactly the scenario PR1's own log message warned about but did nothing to prevent. Since these
-are possibilities the search has already computed (a subtree explored once, discarded, never
-regenerated — this project's own stated goal is minimizing wasted recomputation), silently
-losing them defeats the point of `--expand-level` in the first place.
-
-Fixed by `add_possibility_with_retry_or_abort` (`core/datamanager.c`, used by both call sites in
-`expand_datas_to_level` that previously counted a refusal as `dropped`): on refusal it does NOT
-give up — it logs once, then polls (`usleep`, 20ms — much coarser than `MICRO_SLEEP`'s 100µs
-lock-contention backoff, since this is waiting on a 100ms spill tick or a client GET, not a
-momentarily-held mutex) and retries the SAME insert until it succeeds. Same principle as the
-client side (`put_to_server`: a refused ADD is never lost, only retried later) — adapted to
-`expand_datas_to_level`'s single-threaded, pre-fork context, which has no equivalent to the
-client's "naturally retried on the next delegation cycle": the wait has to happen inside the
-function itself, since nothing else will ever revisit its local `work`/`children` buffers.
-
-**Deliberately unbounded except for shutdown, not a fixed timeout.** The only two ways out of
-the wait are success (room appears — the intended path, since `--stock-spill-dir` is configured
-unconditionally by default whenever a RAM cap is set, so this resolves within one or two 100ms
-ticks in any working deployment) or `request == REQUEST_STOP` (Ctrl-C during startup, checked on
-every poll). A fixed timeout was considered and rejected: any number small enough to keep a
-misconfigured deployment from hanging indefinitely would also be small enough to reintroduce
-real loss on a deployment that's merely slow (a large `--expand-level` burst against a modest
-cap, genuinely still draining via spill) — exactly the class of guess this project's own testing
-philosophy warns against baking in without evidence. A genuinely stuck configuration (spill
-directory unwritable, cap set below what even one possibility needs) now manifests as expansion
-**not progressing**, loudly and diagnosably (see logging below), rather than as data silently
-vanishing — a stall an operator can see and fix is strictly better than a loss they can't detect
-until it's too late to matter.
-
-**Logging tells the whole story, not just the fact of a wait.** First refusal: `log_error`
-naming the cause and pointing at both remedies (`--stock-max-ram`, `--stock-spill-dir`).
-Continued waiting: a repeat every 5s (`EXPAND_RAM_WAIT_LOG_INTERVAL_SEC`) with elapsed time, so
-a long wait is never mistaken for a hang with no explanation. Resolution: a `log_info`
-confirming how long the wait actually took. This directly answers the concern that a
-RAM-driven slowdown could otherwise be mistaken for a different problem — an operator watching
-the log sees "waiting on RAM" specifically, not a generic pause.
-
-**`had_to_wait` (an out-parameter `add_possibility_with_retry_or_abort` sets on its first refusal
-for any given item) stops expansion from deepening further for the rest of THAT pass** (the
-remainder of `work` is reinjected as-is, at whatever depth it already reached) rather than
-continuing to manufacture more work at the exact moment room is tight — a deliberate throttle,
-not a correctness requirement (the retry itself guarantees no loss either way).
-
-**Follow-up, found by an operator testing this PR directly: a RAM wait on pass 1 used to end
-`--expand-level`/`--expand-max-levels` for good, silently under-delivering the requested depth
-even when `--expand-max-levels` allowed many more passes.** The original implementation folded
-`had_to_wait` into `cap_reached` — the SAME flag the `--expand-max-stock` volume guard sets, and
-that flag also drives the OUTER pass loop's own condition (`while (rounds < expand_max_levels &&
-!cap_reached && !aborted)`). That conflation was correct for the volume guard (hitting it means
-"produced enough, stop for good") but wrong for a RAM wait, which is transient by nature — the
-spill thread exists precisely to make room again within milliseconds. The reported symptom
-matched exactly: `--expand-max-levels 10` configured, but the log showed only 1–2 passes and the
-target level never reached, even though plenty of budget remained. Root cause confirmed by
-reading the loop: the very first `had_to_wait` in pass 1 set the same sticky flag that also
-terminates the whole function, regardless of how many passes were still available.
-
-Fixed by splitting the two meanings apart. `cap_reached` now means ONLY the volume guard again
-(sticky, still ends the outer loop for good). A pass-local `ram_wait_this_round` stops deepening
-for the rest of THAT pass exactly as before (folded into the same in-pass condition,
-`deep_enough || cap_reached || ram_wait_this_round`), but no longer touches `cap_reached`.
-Instead, once a pass that hit RAM pressure (not the volume guard) finishes fully draining `work`,
-a new function, `expand_wait_for_ram_headroom_between_passes` (`core/datamanager.c`), blocks —
-same unbounded-except-`REQUEST_STOP` philosophy and periodic-logging convention as
-`add_possibility_with_retry_or_abort` — until `datamanager_resident_packets() <
-datamanager_ram_limit_packets()` again, THEN the outer loop proceeds to the next pass, which
-resumes deepening from scratch (`ram_wait_this_round` reset to 0 for the new pass). Skipped
-entirely when there's no more budget left (`rounds + 1 >= expand_max_levels`) or a stop was
-already requested, so it never blocks pointlessly on what would be the last pass anyway.
-
-**A second, subtler bug found while implementing the first fix, never externally observed but
-caught by construction before it could be.** Once a pass could stop deepening WITHOUT ending the
-whole function, the pre-existing `if (!expanded_any) break;` (`expanded_any` — "at least one
-possibility was actually sent through `search_possiblity_light` this pass" — used to mean
-"nothing left to expand, stop") became ambiguous: if RAM pressure hit on the very FIRST item of
-a pass, before any real deepening happened, `expanded_any` stayed false — indistinguishable from
-the genuine "every possibility has already reached the target level" case, even though plenty of
-shallow, not-yet-deepened possibilities were sitting in `work`, just deferred by the pressure. The
-old code would have wrongly `break`ed out of the whole function right there, discarding the very
-budget the fix above was meant to restore. Fixed with a second, narrower signal,
-`shallow_deferred_by_ram_wait` — set only when an item that is NEITHER `deep_enough` NOR blocked
-by the volume guard gets reinjected as-is because of `ram_wait_this_round` — and the break
-condition became `if (!expanded_any && !shallow_deferred_by_ram_wait) break;`.
-
-Real-world verification (the same reproduction the operator used, extended): `--expand-level 6
---expand-max-levels 10 --expand-max-stock 200000 --stock-max-ram 1 --stock-spill-dir <dir>` —
-before this fix, exactly 1 pass would have run; after it, all 10 configured passes ran (6 of them
-individually paused mid-flight on RAM pressure and resumed once the spill thread caught up, each
-logged as "approfondissement suspendu pour cette passe" rather than a final "arrêt"), ending at
-"expansion terminée : 1636 possibilités en stock (10 passe(s), niveau visé 6)" — zero error lines
-in the log, budget fully used as configured.
-
-**Clean shutdown mid-wait, without corrupting the pile-allocated `work`/`children` buffers.** On
-`REQUEST_STOP`, the enclosing loops stop attempting further insertions and drain whatever
-remains in `work`/`children` via plain `scroll()` calls (freeing each `Element`) — never
-`free_file()`, which would `free()` the `File` struct itself and is reserved for heap-allocated
-Files; both are stack locals here, a distinction this function's comments already called out
-before this change and that remains just as load-bearing now that there's a new early-exit path
-to get wrong.
-
-Tests: `tests/core/test_stock_spill.c` (new suite, real disk I/O in a per-test `mkdtemp`'d
-directory — `configure_creates_directory_and_starts_empty`,
-`configure_degrades_gracefully_when_directory_unwritable` (`SKIP_IF_ROOT`, same convention as
-the pre-existing unwritable-directory tests in `tests/ui/test_command_lines.c`),
-`configure_purges_matching_segments_and_spares_others` (proves the exact-pattern-only purge),
-`step_is_noop_without_ram_cap`, `evict_removes_oldest_first_and_conserves_total` (FIFO order,
-proven by checking the SET of alloc values left resident is exactly the most-recently-added
-contiguous range), `reload_restores_evicted_data_when_ram_drops_and_preserves_fields` (byte
-fidelity checked field-by-field, never a raw struct `memcmp` — see
-`possibility-packet-struct-padding`), `evict_and_reload_span_multiple_segments` (a test-only
-`stock_spill_set_segment_bytes_for_tests` hook shrinks segments to 5 packets each, since the real
-64 MiB/~106000-packet segment size is impractical to actually fill in a fast unit test — same
-"test-only hook, declared only in the .c, forward-declared by the test file" convention as
-`datamanager_set_ram_limit_packets_for_tests`). `tests/app/test_static_variables.c`
-(`--stock-spill-dir` CLI parsing pair, pointer-into-argv convention, modeled on
-`--http-token-file`'s tests). `tests/net/test_http_codec.c` (`stock_spilled_packets`/
-`stock_spill_segments` added to the `/api/v1/stats` golden). `tests/ui/test_command_lines.c` /
-`tests/net/test_control_protocol.c` (`spill [n]` joins `write_server_only[]`, same
-Bearer-gated/dispatch tests as `stockMaxRam`). `tests/core/test_datamanager.c`
-(`expand_waits_for_ram_and_never_loses_possibilities` — a companion `pthread` raises the RAM
-cap after a delay, standing in for what the spill thread would do in production, and asserts the
-FULL expected count ends up resident, none lost, plus a journalled wait;
-`expand_aborts_cleanly_on_request_stop_during_ram_wait` — a companion thread sets `REQUEST_STOP`
-mid-wait, asserting the function returns promptly rather than hanging, with the cap still
-respected; both confirmed leak-free and race-free under `make test ASAN=1`, real threads not
-simulated. Replaces `expand_logs_and_bounds_stock_when_ram_cap_hit`, which asserted the
-drop-and-log behaviour these tests now prove is gone). Updated again for the between-passes fix
-above: `expand_waits_for_ram_and_never_loses_possibilities` now also asserts `passes == 2` and
-that every resulting possibility genuinely reached the target level (`alloc >= 2`, matching
-`expand_grows_stock_and_advances_level`'s own unconstrained assertion on the identical fixture —
-proving the RAM-constrained and unconstrained runs converge to the same end state), where before
-it only asserted the 8 direct children of genesis survived and stopped there. A new companion,
-`expand_aborts_cleanly_on_request_stop_during_between_pass_wait`, targets the NEW wait
-specifically (as opposed to the existing test above, which only ever interrupts the PER-ITEM
-wait): a two-stage companion thread first raises the cap to exactly the pass-1 total (enough for
-every item's own retry to succeed, but leaving zero headroom — `resident == cap` — for pass 2),
-then requests `REQUEST_STOP` once the between-passes wait should be blocking, asserting a clean
-exit with pass 1's possibilities intact and pass 2 never started.
-
-A subtlety in the test suite itself worth remembering: `stock_max_ram_packets`
-(`datamanager.c`, set via the test-only `datamanager_set_ram_limit_packets_for_tests`) is a
-module-static shared by the WHOLE test binary, not scoped to one file or suite. An early test
-failure that skips its own end-of-test cleanup (greatest's `ASSERT_EQ_FMT` returns immediately
-on failure) can leave a stale non-zero cap active for every test that runs afterward, in ANY
-suite — including, observed directly during this PR's own development, an unrelated
-`admin_apply_privileged_command_rebalance_moves_within_budget` test in
-`tests/ui/test_command_lines.c` failing because a leftover cap from an earlier `stock_spill`
-test silently rejected its `dm_add` call. Fixed by resetting the cap to 0 defensively at the
-START of every test that then adds stock (immediately after `drain_datamanager()`, before
-`add_packets`), not only at the end — the general lesson being that end-of-test cleanup alone is
-not test isolation when assertions can return early.
-
-**Follow-up incident: the one trylock loop PR1 missed, plus a requeue race with a still-working
-pruner.** A reproduction at even higher load (`--expand-level 9`, `--expand-max-levels 10`,
-`--expand-max-stock 100000000`, `--stock-files 20`, `--rebalance-budget 10000`, a 4-fork pruner
-at batch 100) still showed pruner-side send errors: bursts of `batch analysed : possibilité non
-retirée` server-side, `INST_ERROR`/`ack=4` acknowledgements pruner-side, occasional `Broken pipe`.
-Root cause was **not** the backup lock (PR1–PR2 already cover that) but two separate, smaller
-gaps left over from before this series existed:
-
-1. **`remove_possibility_analysed` (`src/core/datamanager.c`) was the fourth `pthread_mutex_trylock`
-   loop in this file and the only one PR1 never bounded** — it predates the whole series and was
-   simply not in scope when PR1 enumerated `scroll_from_pool`/`put_to_pool`/
-   `add_possibility_analysed_impl`. Under contention (a `consistent_backup` in progress, or
-   several pruner forks acking concurrently against `--stock-files 20`), it could spin
-   indefinitely, holding the calling thread — and by extension the TCP connection it serves —
-   past the client's timeout. Fixed the same way as PR1's three loops: a `waits` counter bounded
-   by `DATAMANAGER_TRYLOCK_MAX_SWEEPS`, returning a **new, third** value distinct from the
-   existing 0 (removed)/1 (confirmed absent — every relevant file locked and scanned without a
-   match): **-1**, meaning the budget was exhausted without ever locking a single file, so
-   absence is *unconfirmed*, not proven. Every caller (`etii_server.c`'s single-ack and batch-ack
-   handlers, `requeue_last_sent_possibility`) treats -1 as "might still be there" and acts
-   accordingly — never folds it into the confirmed-absent case, which would silently drop a
-   possibility that may still be legitimately in flight. The doc comment on
-   `remove_possibility_analysed` (`src/core/datamanager.h`) was also corrected in the same change:
-   it had the 0/1 return values backwards.
-2. **The O(N) linear-scan fallback inside `remove_possibility_analysed` is now conditional**, not
-   unconditional. `analysed_index_find_and_remove` (the O(1)-amortized hash lookup) is expected to
-   be exhaustive — every successful `analysed_index_add` indexes its entry — so a miss normally
-   means genuine absence, and paying for a full scan of a `--stock-files`-sized pool on every
-   confirmed-absent case (the common case in the batch-ack path) was pure waste. A new flag,
-   `analysed_index_may_be_incomplete` (0 until the first `malloc` failure inside
-   `analysed_index_add`, 1 forever after — never reset), gates the fallback: the scan only runs
-   once this process has ever seen an index-node allocation fail, which is precisely when a miss
-   could be an indexing gap rather than a real absence.
-3. **`requeue_last_sent_possibility` (`src/app/etii_server.c`) gained a liveness check before
-   unconditionally returning a client's last-sent batch to the stock on disconnect.** Previously,
-   any connection drop (including the ordinary reconnect churn of a busy pruner cycling through
-   `--stock-files`-sized batches) requeued the whole batch immediately — and if the client's
-   *other* threads (or its next reconnection) then acked the same possibilities, the server saw
-   `remove_possibility_analysed` report absence for entries a sibling connection had, in the
-   meantime, already reprocessed or was still working. The fix takes a new `client_t *client`
-   parameter: if the disconnecting connection belongs to a process whose **control-channel**
-   session (a separate, per-process TCP connection — see *Control Channel* below) is still
-   registered and alive, the batch is left attributed rather than requeued, on the reasoning that
-   the process as a whole is provably still alive even though this one work connection dropped —
-   any possibility it never acks is still covered by PR7's existing lease-reclaim mechanism
-   (300s default) once it's actually abandoned. `client == NULL` or a client with no declared
-   identity (`INST_CLIENT_HELLO` never received — an older client) preserves the prior
-   unconditional-requeue behaviour exactly, so nothing changes for a fleet that predates v12
-   identity. Reuses `owner_control_session_alive`/`control_registry_has_active_client`, the same
-   liveness primitive PR7's lease sweep already established.
-4. **`is_connected()` (`src/net/etii_protocol.c`) was leaking a socket on one specific failure
-   branch.** Of its four failure branches, three already called `shutdown()`+`close()` before
-   returning 0; the "wrong instruction received" branch was missing both, found while auditing
-   every caller of a function that can now return early more often (point 1 above). Left the
-   socket open client-side (never reused, never freed) and the matching server-side session open
-   until its own unrelated timeout — a window during which `requeue_last_sent_possibility` could
-   act on a connection everyone else already considered dead. Fixed to match its three siblings.
-
-None of these four changes touch the wire protocol (`VERSION` unchanged) or require any new CLI
-option — pure bug fixes. Verified against a real reproduction at the same scale as the original
-incident report (server stock expanded to 3.2M possibilities, `--stock-files 20`, a 4-fork pruner
-at batch 100 run to exhaustion of the entire unchecked stock, spanning at least one full
-`consistent_backup` cycle): zero occurrences of `possibilité non retirée`, `Broken pipe`, or any
-other error-level log line on either side, where the pre-fix reproduction showed bursts of them
-within about a minute. Tests: `tests/core/test_datamanager.c`
-(`remove_possibility_analysed_gives_up_when_never_unlocked`, same "companion thread holds
-`lock_all_file_analysed()` indefinitely, assert the call returns anyway" contract as PR1's other
-three bounded-loop tests); `tests/app/test_etii_server.c`
-(`requeue_skipped_when_client_control_session_alive`,
-`requeue_returns_to_stock_when_client_not_alive`,
-`requeue_returns_to_stock_when_client_has_no_identity`); `tests/net/test_etii_protocol.c`
-(`is_connected_false_on_wrong_instruction`, updated to assert the socket is now closed instead of
-documenting the leak as a known gap).
-
-**The above fix was real but did not resolve the reported symptom — the actual root cause was
-elsewhere, found only by re-reproducing at the operator's exact scale and instrumenting the wire
-with a temporary content-hash trace.** A second report at the same scale (`--expand-level 9`, no
-`--expand-max-stock` cap, 14 375 696 possibilities, 4-fork pruner at batch 100) still showed
-`batch analysed : possibilité non retirée` bursts — but this time consistently logged as
-**`absence confirmée`** (every one of the `nb_file_possibility` files locked and scanned, genuinely
-not there), never `vérification impossible` (the bounded-loop `-1` case the fix above introduced).
-That distinction, visible only because the log line itself now says which case fired, immediately
-ruled the previous fix out as the explanation and pointed at a real double-ack.
-
-1. **A real, long-standing heap out-of-bounds bug, found first and fixed on the way, but NOT the
-   cause of this symptom.** `feed_thread_aposs` (`src/app/etii_client.c`) looped
-   `for (int i = 0; i < NB_THREADS; i++) feed_one_thread(thread_params, i, …)` — but
-   `run_mono_client` allocates exactly **one** `client_possibility_t` per fork
-   (`malloc(sizeof(*thread_params))`, never an array), and `NB_THREADS` is the *fork count* of the
-   parent process, not a per-fork thread count (a distinction this project's own architecture
-   history — one thread per fork, `NB_THREADS` forks total — made this loop meaningless the moment
-   it stopped matching an older, pre-refactor design where multiple search threads lived in one
-   process). Every iteration past `i == 0` indexed `thread_params[i]` **past the end of a single
-   allocation** — a silent heap buffer overflow, present in the codebase since its earliest commits
-   (`git log -p` traces the same loop shape back to the initial `src/` layout), invisible on macOS
-   release builds and never caught by any test (every existing `feed_one_thread` test drives the
-   function directly with an explicit index, never through this loop). Fixed by calling
-   `feed_one_thread(thread_params, thread_params->id, …)` exactly once — `id` is already the
-   correct, and only, valid index (hardcoded to `0` by `init_client_possibility`, the same value
-   `send_possibility_analysed` already keys off of). **Confirmed insufficient on its own**: a full
-   reproduction after this fix alone still showed `possibilité non retirée` bursts, immediately
-   (not after the ~90s the corruption used to take to manifest) — proof the real cause was
-   independent of this bug, not merely masked by it.
-2. **The actual cause: `get_last_possibility` (`src/core/datamanager.c`) tries the client's own
-   LOCAL stock before the server, and `feed_one_thread` treated both sources identically.**
-   `get_last_possibility` calls `scroll_from_local` first and only falls back to
-   `scroll_from_server` if the local pool was empty — by design, so a client with local backlog
-   (e.g. `put_to_local`'s fallback inside `put_to_server`, reached whenever the server's own
-   `INST_ADD` handler returns `INST_ERROR` — expected and already handled gracefully under the
-   very kind of lock contention `--stock-files`/PR1 exist to absorb) doesn't starve waiting on the
-   network. But `feed_one_thread` called `add_possibility_analysed(&aposs->possibilities[p], i)` —
-   queuing the batch for a future `INST_POSSIBILITY_ANALYSED[_BATCH]` acknowledgement to the
-   server — **unconditionally**, regardless of which source populated the batch. A possibility
-   recycled from the client's own local stock was never (re-)served by the server this round
-   (`record_batch_analysed_for_client` never ran for it this time), yet still got queued for an ack
-   as if it had been — and when that ack eventually reached the server, the possibility was either
-   already removed (the *original* serve's ack, sent earlier, already succeeded) or never tracked
-   under this client at all: `remove_possibility_analysed` correctly, exhaustively finds nothing —
-   `absence confirmée`, not a bug in the removal path, a bug in what got queued for removal in the
-   first place. Traced by adding a temporary content-hash log (`hash_possibility_key`, made
-   non-static for the duration of the investigation) at every index insertion and every ack
-   attempt: the failing packet's hash showed exactly one server-side insertion, one successful
-   removal (as part of a normal 100-item batch ack), and then a **second** ack attempt for the
-   identical hash in a follow-up single-item batch — the signature of exactly this double-queue,
-   not of a lock-contention race or a lease reclaim (both already ruled out: the control-channel
-   session never disconnected during the whole reproduction, so PR7's liveness-gated reclaim never
-   fired, and `analysed_index_add`/`_find_and_remove` were confirmed to chain hash collisions
-   correctly rather than overwrite).
-
-   Fixed by giving `get_last_possibility` a new optional output parameter, `int *from_server`, set
-   to 1 only when `scroll_from_server` actually populated the result (never when
-   `scroll_from_local` did, and never on an empty result) — `feed_one_thread` now calls
-   `add_possibility_analysed` only when `from_server` is true. The two existing callers unaffected
-   by this distinction (`etii_server.c`'s own local `INST_GET` service, and every existing test)
-   pass `NULL`. This does not change wire behaviour or `VERSION`: it only decides which batches the
-   *client* tracks locally for a *future* acknowledgement it would otherwise have sent needlessly.
-
-   Verified against a full, uncapped reproduction of the operator's exact scale (14 375 696
-   possibilities, `--stock-files 20`, 4-fork pruner at batch 100, ~5 continuous minutes spanning a
-   real 35–38s `consistent_backup` cycle, well past the ~85–150s window that reliably reproduced
-   the bug pre-fix): zero `possibilité non retirée` occurrences. Tests:
-   `tests/core/test_datamanager.c`
-   (`get_last_possibility_reports_from_server_true_when_server_serves`,
-   `get_last_possibility_reports_from_server_false_when_local_stock_used` — the `from_server` output
-   contract in isolation, using the existing `mini_srv_get_packet` socketpair harness);
-   `tests/app/test_etii_client.c`
-   (`feed_one_thread_local_recycle_skips_analysed_tracking` — the actual regression: a possibility
-   recycled from the local pool via `add_possibility(NULL, …)` must leave
-   `file_possibility_analysed[0]` empty after `feed_one_thread` runs, where the pre-fix code queued
-   it for a spurious ack). None of the pre-existing `feed_one_thread_*` tests needed changes: they
-   all run with `server_ip == NULL` (documented at the top of that test group as the local/test-mode
-   convention), under which `from_server` is always false by construction and the analysed-tracking
-   side effect they never asserted on simply becomes an intentional no-op — consistent with local
-   mode never having a remote server to needlessly re-acknowledge in the first place.
-
-**Épilogue — le dernier message restant n'était pas un bug mais un mensonge de journalisation.**
-Une fois le double-acquittement corrigé (zéro `possibilité non retirée` côté serveur, confirmé sur
-une reproduction v4 à pleine échelle), le pruner continuait d'afficher
-`problème de prise en compte du serveur (ack=-1)`. Ce `ack=-1` est `INST_ERROR`, envoyé par le
-handler `INST_ADD` quand `add_possibility` échoue — c'est-à-dire **exactement la dégradation
-gracieuse que PR1 a conçue**, déclenchée par la phase 1 de `consistent_backup` (PR2) qui gèle
-toutes les files à l'instant T avant de les libérer une à une. Le budget borné de `put_to_pool`
-(`DATAMANAGER_TRYLOCK_MAX_SWEEPS` × `MICRO_SLEEP` ≈ 500 ms) est plus court que la fenêtre
-« tout verrouillé », qui vaut l'écriture d'UN fichier (≈ 1,8 s pour 14 M de possibilités sur
-20 files, mesuré : `last_backup_duration_ms` ≈ 36 s / 20) : **quelques refus par sauvegarde sont
-donc structurellement normaux**, et rien n'est perdu — `put_to_server` reverse la possibilité au
-stock local juste après, d'où elle repartira (et, depuis le correctif `from_server` ci-dessus,
-sans être acquittée à tort au passage). Le chronométrage du rapport v4 le confirme au tour près :
-`should_autobackup` exige 6 tours de 10 s **et** une mutation ; le serveur, resté sans client
-depuis la fin de son expansion, était garé à `lastBack == 6` — la toute première salve d'`INST_ADD`
-du pruner (connecté à 14:38:50) a donc déclenché la sauvegarde au tick suivant, et les trois refus
-sont horodatés 14:39:01.
-
-Le défaut réel était donc l'**observabilité**, pas la correction : l'événement partait en
-`log_error` — qui écrit sur stderr **et** ajoute à `events.log` (`append_events_log_file`,
-`src/ui/logger.c`) — accompagné d'un vidage complet du plateau, faisant passer un fonctionnement
-nominal pour un incident, au point d'être signalé trois fois comme tel en exploitation. Corrigé
-dans `put_to_server` (`src/core/datamanager.c`) : `INST_ERROR` est désormais journalisé en
-`log_info` avec un libellé qui dit ce qui se passe réellement (« stock serveur momentanément
-indisponible (maintenance) : possibilité conservée en local, renvoi ultérieur »), sans vidage de
-plateau — il disparaît donc d'`events.log`. **Toute autre valeur d'ack reste un `log_error` avec
-le plateau**, y compris `INST_END` (connexion perdue, comportement inchangé) : le correctif ne
-rend muette aucune anomalie protocolaire réelle. Aucun changement fonctionnel — même reversement
-local, même continuation de boucle, même code de retour.
-
-Tests (`tests/core/test_datamanager.c`) : `put_to_server_server_busy_is_silent_and_non_fatal`
-(nouveau mini-serveur `mini_srv_put_server_busy` répondant `INST_ERROR` sur le premier paquet)
-vérifie les deux propriétés ensemble — non-fatalité (possibilité conservée en local, boucle
-poursuivie sur le paquet suivant, `rc == 0`) **et** silence, en mesurant la **taille de stderr**
-(`capture_stderr`/`restore_stderr_size`) plutôt que le libellé : reformuler le message ne casse pas
-le test, le repasser en `log_error` si. Vérifié rouge contre le code d'avant le correctif
-(`0L != err_bytes`), vert après. `put_to_server_unexpected_ack_still_logs_error` est son symétrique
-sur `INST_NULL` (ack que le serveur n'envoie jamais sur `INST_ADD`) et garantit que les vraies
-anomalies restent bruyantes.
-
-**Piste laissée ouverte, délibérément non implémentée.** On pourrait supprimer ces refus plutôt que
-les taire, en allongeant le budget de `put_to_pool` au-delà du temps d'écriture d'un fichier —
-mais ce budget deviendrait fonction de la taille du stock (donc un nombre magique à re-régler à
-chaque changement d'échelle), et bloquer un thread serveur plusieurs secondes par `INST_ADD`
-pendant une sauvegarde saturerait le pool de threads, soit précisément l'incident que PR1 a
-corrigé. Le refus borné reste le bon compromis ; seule sa présentation était fautive.
-
-### Backup/restore coherence for the disk spillover — PR3 of 3
-
-Closes the gap PR2 explicitly left open: **the spillover now survives a `backup` followed by a
-`restore`** (console, HTTP admin, autobackup, or `--stop-on-solution` shutdown) — previously,
-any segment found on disk at `stock_spill_configure` time was unconditionally purged and lost,
-since the module had no notion of a backup/restore cycle at all.
-
-**`consistent_backup` gained an optional injected callback, not a new `core/` → `stock_spill.h`
-dependency.** `core/stock_spill.c` was already allowed to depend on `core/datamanager.h` (PR2's
-one-way rule) — the reverse is still forbidden, and `consistent_backup` itself lives in
-`datamanager.c`, called both from `app/`/`ui/` (which legitimately know about `stock_spill.h`)
-and from **inside** `datamanager.c` itself (the `rmnonext`-triggered solution-stop path). Rather
-than have `datamanager.c` `#include "core/stock_spill.h"`, `consistent_backup` gained two new
-parameters — `const char *spill_snapshot_dir` and a function pointer,
-`consistent_backup_spill_snapshot_fn` (`typedef void (*)(const char *snapshot_dir)`) — invoked
-at most once, inside phase 1's lock window (right after all stock/analysed locks are acquired,
-`maintenance == 1`), so `stock_spill_step`'s own `maintenance` check (PR2) guarantees no
-concurrent eviction/reload can migrate a possibility mid-snapshot. Every production call site
-now passes `stock_spill_snapshot` (real function) and a subdirectory name mirroring the existing
-`.back` naming convention — `"snapshot-temp"` for autobackup (paired with `./temp.back`),
-`"snapshot"` for the privileged `backup` command and the solution/`--stop-on-solution` shutdown
-path (paired with `./eternityII.back`) — **except** the one call site inside `datamanager.c`
-itself (`remove_possibilities_with_no_next`'s solution-found-by-rmnonext path), which passes
-`NULL, NULL`: `core/` cannot depend on `stock_spill.h`, so this one narrower, documented path
-(a solution found by the background prune pass, not the more common client-reported path in
-`etii_server.c`) has no spillover coverage. `backup_failed_exit` (`app/app_runtime.c`, the
-client-role emergency backup on abnormal exit) also passes `NULL, NULL` — deliberately, since
-`stock_spill` is never configured client-side, so there is nothing to snapshot there regardless.
-
-**Snapshot is incremental and idempotent, not a full rewrite every time — `stock_spill_snapshot`
-(`core/stock_spill.c`).** Full segments (everything below the current top, immutable by PR2's own
-invariant) are duplicated by `link()` — O(1), zero data copy — **compared by inode, not just by
-filename**, before deciding whether to (re-)link: a segment can be fully reloaded (unlinked from
-the live directory) and later re-evicted, reusing the exact same sequence number with entirely
-DIFFERENT content — filename alone can't distinguish "already correctly linked" from "stale,
-needs relinking." The top (tail) segment — still mutable on the live side — is always a fresh
-**copy**, never a link: linking it would mean a later live append also mutates the already-
-published snapshot. A purge pass removes any snapshot entry whose `(pool, file, seq)` no longer
-corresponds to the live descriptor's current range (segment reloaded/renumbered since the last
-snapshot). Ends with an atomic `.tmp`+`rename` text manifest (`eternityii-spill-manifest-v1`
-magic line, then one `pool file_index last_seq packets tail_bytes` line per non-empty
-`(pool, file)`) — same convention as every other `.back`-adjacent format in this project.
-`link()` failure (EXDEV, a filesystem without hardlink support) falls back to a byte copy,
-warned once per process, never per call.
-
-**Restore re-sequences by `old_file_index %% nb_file_possibility_now` — pure `link()` when there's
-no collision, a reasoned repack when `--stock-files` shrank since the backup.**
-`stock_spill_restore_snapshot` (called from `restore_apply`, `ui/command_lines.c`, **before**
-`restore()`/`restore_analysed()` — the ordering the plan explicitly required, so that an import
-which itself overflows the RAM cap COMPLETES the just-restored segments instead of overwriting
-them) purges whatever is currently live (mirrors `restore()`'s own unconditional RAM-pool drain —
-expected, not a new loss), resets every descriptor, reads the manifest, and groups entries by
-`(pool, old_file_index %% nb_file_possibility)`:
-- **Exactly one source maps to a given live file** (the common case — `--stock-files` unchanged
-  or grown, so the modulo is always a no-op identity mapping): pure `link()`/copy-fallback, same
-  sequence numbers preserved, zero data movement — "restoring several GB costs only physical
-  links," per the plan's own stated goal.
-- **More than one source maps to the same live file** (`--stock-files` shrank): naive
-  concatenation of raw segment files was considered and rejected — it would leave a FORMERLY-
-  partial top segment from one source buried in the MIDDLE of the merged stack, violating PR2's
-  own load-bearing invariant that reload's rollback (`tail_bytes = stock_spill_full_segment_bytes()`
-  when a segment fully empties) depends on: "every non-top segment is exactly full." Instead each
-  colliding source is re-read, segment by segment, and fed through `stock_spill_write_block` —
-  the exact same function normal eviction already uses to append with correct segment rollover —
-  so the merged result always ends up with the same invariant an ordinary eviction would have
-  produced, no special-cased merge logic duplicated.
-
-**A new `maintenance` window, owned by the caller, not by `restore()` itself.**
-`restore()`/`restore_analysed()` never touched the `maintenance` flag before this PR — they
-relied only on `lock_all_file()`/`unlock_all_file()`'s per-file locks, which `stock_spill_step`
-never consults (it only checks `maintenance`, PR2's own documented contract). Without a fix,
-`stock_spill_step`'s periodic tick could run concurrently with `restore_apply`'s spill-segment
-placement or the RAM drain/import that follows, migrating a possibility at exactly the wrong
-instant. Two small new accessors — `datamanager_begin_maintenance()`/`_end_maintenance()`
-(`core/datamanager.{h,c}`, deliberately non-reentrant: neither `restore` nor `restore_analysed`
-ever sets `maintenance` themselves, so nesting is not a concern here) — let `restore_apply`
-bracket the WHOLE sequence (`stock_spill_restore_snapshot` → `restore` → `restore_analysed`) in
-one window, exactly mirroring the guarantee `consistent_backup` already gives its own callback.
-
-**Real-world verification, not just unit tests.** A 256-piece server
-(`--expand-level 6 --expand-max-levels 6 --expand-max-stock 200000 --stock-max-ram 1
---stock-spill-dir ./spill --http-port 8099 --http-token-file …`) reached a stable
-1104-resident/1281-spilled/6-segment split (2385 total) purely from startup expansion waiting
-out the RAM cap (the PR2-era loss-fix, confirmed still lossless under real spillover pressure).
-`backup` produced a 6-segment/214-byte manifest snapshot (`./spill/snapshot/`), matching exactly.
-Killing the process and restarting fresh with the **same** `--stock-files` (default 10) then
-running `restore`: total came back as exactly 2385 (1104/1281/6), log line confirming
-"1281 possibilité(s) sur 6 file(s) sans collision" — the pure-link path. A second restart with
-`--stock-files 4` (deliberately shrunk) and another `restore`: total again exactly 2385, this
-time "422 possibilité(s) sur 2 file(s) sans collision, 859 possibilité(s) réempaquetée(s) sur 2
-file(s)" — both paths exercised in the same run, zero loss either way, and a subsequent
-`stockMaxRam 100` (removing the RAM pressure) fully reloaded all 2385 possibilities back into RAM
-with zero read errors, confirming the repacked segments respect the "only the top may be
-partial" invariant the repack path was specifically designed to preserve.
-
-Tests: `tests/core/test_datamanager.c`
-(`consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window` — a fake hook records
-whether `maintenance` was 1 at the instant it ran, and that it ran exactly once). Seven new tests
-in `tests/core/test_stock_spill.c`: `snapshot_links_full_segments_and_copies_tail` (inode
-comparison for the link path, exact manifest content), `snapshot_refreshes_stale_reused_segment_number`
-(the reload-then-re-evict-reusing-a-seq-number case — the one the inode comparison exists for —
-round-tripped through a full `restore_snapshot` to confirm only the NEW data comes back, never
-the old), `restore_snapshot_no_collision_round_trip_preserves_data`,
-`restore_snapshot_collision_repacks_when_stock_files_shrinks` (manifest and segment files
-constructed by hand — same technique `configure_purges_matching_segments_and_spares_others`
-already used in PR2 — to deterministically force a specific collision; also directly asserts
-`stat()` sizes on the rebuilt segments confirm "only the top is partial" survived the repack, not
-just the aggregate packet count), `restore_snapshot_tolerates_missing_manifest`,
-`restore_snapshot_replaces_current_live_segments` (current unsaved spillover is discarded, never
-merged with the restored snapshot — same "replace, don't merge" contract `restore()` already has
-for the RAM pools). A subtlety hit twice while writing these: `stock_spill_configure` resets the
-test-only segment-size override back to the real 64 MiB default every time it's called (needed in
-production so a real restart doesn't inherit a stale test setting) — a test simulating "restart,
-same/different `--stock-files`" via a second `stock_spill_configure` call must re-apply
-`stock_spill_set_segment_bytes_for_tests` afterward, or reload silently miscomputes segment
-boundaries against data written under the old override (caught immediately by both a `n != 8`
-mismatch and outright segment read failures, not a silent pass).
-
-**Follow-up, found by an operator testing this PR directly: a restore against a missing/wrong
-`--stock-spill-dir` silently reported SUCCESS while actually losing every spilled possibility.**
-`stock_spill_restore_snapshot` was deliberately tolerant by design (a missing manifest just means
-"nothing to restore," so a pre-PR3 backup or a client role restoring without ever having spilled
-degrades gracefully) — but that same tolerance meant a genuinely INCOMPLETE restore (operator
-forgot `--stock-spill-dir` on the new process, pointed it at a different path than the one used at
-backup time, or the snapshot directory was deleted/corrupted) was **indistinguishable** from the
-legitimate "nothing was ever spilled" case: both looked like a clean `restore` with `result == 0`.
-This directly violated the project's own no-possibility-loss principle — a possibility being
-silently dropped by a *tolerant* code path is exactly the failure mode that principle exists to
-rule out, and unlike a transient RAM-cap wait (retryable, nothing lost) a missing spill snapshot
-at restore time is unrecoverable within that restore attempt.
-
-**Fixed by giving `restore` an independent way to know what it SHOULD get back, decoupled from the
-spill directory that might itself be the thing that's wrong.** `consistent_backup` now writes a
-small sidecar file, `<stock_filename>.spillcount`, right after the stock `.back` file's own atomic
-rename succeeds — containing the exact packet count `spill_snapshot_fn` returned (its signature,
-and `stock_spill_snapshot`'s, changed from `void` to `unsigned long long`, returning
-`stock_spill_total_packets()` at the moment the snapshot was taken; `stock_spill_restore_snapshot`
-symmetrically changed to return the actual count it recovered, `total_linked + total_repacked`).
-The sidecar is written **only** when a real `spill_snapshot_fn` was supplied — never a fabricated
-"0 spilled" for a caller (client role, or the one internal `datamanager.c` call site that can't
-depend on `stock_spill.h`) that never asked for spill coverage in the first place, since the
-sidecar's own *absence* needs to stay a reliable "nothing to verify" signal, not become ambiguous
-with "0 packets, verified." `restore_apply` (`ui/command_lines.c`) reads it via the new
-`datamanager_read_spillcount_sidecar` (`core/datamanager.{h,c}`, symmetric with the writer, same
-file next to `stock_filename` — reachable independently of whatever `--stock-spill-dir` happens to
-resolve to on THIS run) and compares it against what `stock_spill_restore_snapshot` actually
-reports recovering; any mismatch (in either direction — under- or over-recovery, the latter
-suggesting a stale/unrelated snapshot got picked up) is now a loud `log_error` naming the exact
-expected/actual/lost counts and possible causes, and makes the function's overall return value
-**non-zero** — surfacing as a genuine failure to the console, the HTTP admin API, and any script
-driving `restore` remotely, instead of a silent "backup restore" success line.
-
-**Deliberately still completes the RAM-side restore even when spill is confirmed incomplete.**
-`restore_apply` was restructured to track a `core_result` (the stock+analysed RAM outcome) separate
-from the function's final `result` (RAM outcome AND spill match together): the spill mismatch check
-happens *before* `restore()` runs (spill-restore is already first in sequence, so nothing has to be
-undone), but rather than refuse the whole restore outright, the RAM portion still proceeds —
-partial-but-honestly-reported beats an all-or-nothing refusal that would deny an operator even the
-data that IS recoverable (e.g. a genuine disaster where the spill volume was lost but the `.back`
-files survived on different storage). `best_board_load`/`known_clients_registry_load` — unrelated
-to spill entirely — are gated on `core_result` alone, exactly as before this fix, so a spill
-mismatch never blocks them either.
-
-Tests: `tests/core/test_datamanager.c` — `consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window`
-extended to assert the sidecar round-trips the hook's (now non-`void`) return value via
-`datamanager_read_spillcount_sidecar`; `consistent_backup_round_trip_preserves_both_pools` (called
-with `NULL, NULL` for the spill callback) asserts the sidecar is correctly **absent** in that case
-— proving its absence stays a reliable "nothing to verify" signal, never a false "0 spilled."
-`tests/ui/test_command_lines.c` — `do_command_line_restore_detects_incomplete_spill` (a hand-written
-sidecar claiming 42 spilled possibilities, deliberately with no matching spill directory configured
-— `stock_spill_restore_snapshot` is then a guaranteed no-op — asserts the overall `restore` command
-now fails loudly while the RAM stock still comes back) and
-`do_command_line_restore_without_spillcount_sidecar_succeeds_normally` (no sidecar at all — the
-pre-existing, still-correct "nothing to verify" case, non-regression-tested explicitly rather than
-relying on it being an accidental side effect of another test). Verified for real: a 256-piece
-server with active spillover, `backup`, killed, restarted **without** `--stock-spill-dir` (the
-exact operator-reported reproduction) — `restore` now logs
-`"restore : débordement disque INCOMPLET — 2509 possibilité(s) attendue(s) ... 0 récupérée(s) ...
-2509 possibilité(s) potentiellement perdue(s)"` where it previously logged nothing beyond a plain
-`backup restore` success line; the same server restarted **with** the correct `--stock-spill-dir`
-restores cleanly with no false-positive mismatch (2509 expected, 2509 recovered).
-
-**Second follow-up, found the same day by the same operator: the sidecar check above didn't catch
-everything — a manifest listing a segment the disk no longer has (`.dat` deleted/corrupted,
-`manifest.txt` itself intact) still restored "successfully" with data silently not matching the
-backup.** Root cause was inside `stock_spill_restore_snapshot` itself, one layer below the sidecar
-check: both restore paths (no-collision `link()`/copy, and collision repack) counted a group's
-packets from the **manifest's own promise** (`e->packets`) unconditionally, never from what the
-`link()`/copy/`fread()` calls actually achieved. `spill_link_or_copy`'s and `spill_copy_file`'s
-return values were flat-out ignored — if the source `.dat` was missing, `link()` failed, the copy
-fallback's `fopen()` also failed and returned early (leaving the destination simply never
-created), yet the descriptor was still stamped with the full expected `packets`/`last_seq` and
-`total_linked`/`total_repacked` still added the full manifest amount. The sidecar comparison built
-for the first follow-up compared `spillcount` against this same over-counted return value, so it
-could never see the shortfall either — two independent bugs stacked on the same blind spot.
-
-**Fixed by making the return value trustworthy instead of adding a third, separate check.** No new
-verification layer was needed — once `stock_spill_restore_snapshot`'s own return value accurately
-reflects what actually landed on disk, the sidecar check from the first follow-up catches this case
-for free. No-collision path: each `spill_link_or_copy`/`spill_copy_file` call is now checked; on the
-first failure (`failed_at`, the 1-indexed segment rank), the whole group is invalidated — no
-descriptor update, nothing added to `total_linked` — and a `log_error` names the exact segment rank
-and how many possibilities are affected. Segments already placed before the failure (rank <
-`failed_at`) are unlinked rather than left as untracked orphans on the live directory (never the
-failed segment itself: neither helper leaves a partial file behind on error). Collision/repack path:
-a per-entry `entry_actual` sums only the packets `fread()` genuinely returned (never `e->packets`),
-and `total_repacked` accumulates `entry_actual` — so one bad source among several colliding ones
-only costs its own share, the others still come back in full; a `log_error` names the
-actual-vs-promised count for the incomplete entry.
-
-**Real-world verification, the exact operator reproduction.** 256-piece server, `backup` with
-active spillover (2509 spilled across 7 segments), then — before restarting — `spill_u_3_1.dat`
-deleted from the snapshot directory while `manifest.txt` (still listing its 442 possibilities) was
-left untouched. `restore` now logs `"segment de rang 1 manquant/illisible ... (pool u, ancienne
-file 3) — 442 possibilité(s) NON restaurée(s)"`, the function returns 2067 (2509 − 442) instead of
-the previously-false 2509, which the existing sidecar check then correctly reports as
-`"débordement disque INCOMPLET — 2509 attendue(s), 2067 récupérée(s)"`; the live spill directory
-shows exactly the 6 intact segments and no orphan/stray file for the deleted one.
-
-Tests: `tests/core/test_stock_spill.c` — `restore_snapshot_no_collision_missing_segment_reports_partial`
-(a hand-built manifest promising 2 segments for one file, only the first written to disk; asserts
-the function returns 0, the live descriptor stays at 0 packets/segments, and the one segment that
-*was* placed before the failure gets cleaned up rather than orphaned) and
-`restore_snapshot_collision_missing_segment_reports_partial` (two colliding sources, one intact and
-one with a missing segment; asserts the total returned and the live descriptor reflect only the
-intact source's 2 possibilities, round-tripped through a full reload to confirm their exact
-markers — never the 4 the manifest as a whole would suggest).
-
-### HTTP REST admin API
-
-**`--http-port <n>`** (optional, position-independent valued option, stripped with its value from argv before the positional parse; server-only, `n` in `[1, 65535]`). Starts a minimal HTTP/1.1 admin API on **`127.0.0.1:<n>`** — loopback only, never `INADDR_ANY`, so it is never reachable off the machine by default (use an SSH tunnel or a reverse proxy for remote access). **Absent by default** (`HTTP_PORT` global defaults to 0): no extra socket is opened unless explicitly requested. Lets an external HTTP application (written in any language) read server telemetry and drive a few whitelisted admin actions without speaking the binary `packet`/`control_protocol` wire formats.
-
-Implementation is hand-rolled and dependency-free by design (`src/net/http_codec.{h,c}` for the pure parsing/JSON layer, `src/net/http_server.{h,c}` for the socket/thread shell) — no HTTP or JSON library is vendored, matching the project's "compilable everywhere with minimal dependencies" goal. One connection is served at a time (sequential `accept()` loop on a single detached thread, `Connection: close`, 5s I/O timeout, 8 KiB request cap → `413` beyond that) — this is an occasional admin API, not a production web server. **No bump of `VERSION`**: the HTTP port is a completely separate listening socket from `SERVER_PORT`, so the existing binary protocol (packet/control_protocol handshake) is untouched.
-
-Endpoints (all under `/api/v1`, JSON in/out):
-
-| Method | Path | Body | Response |
-|---|---|---|---|
-| GET | `/api/v1/stats` | — | `{"shots_per_second","possibility_stock","checked_stock","analysed_stock","max_result","active_threads","pruner_checked","pruner_removed","queues":[{"file","unchecked","checked","analysed"}, …]}` |
-| GET | `/api/v1/status` | — | `{"state","uptime_seconds","version","limit","max_stock_by_thread","pruner_batch","pruner_dfs_budget","last_backup_duration_ms"}` (`state` ∈ `running`/`admin_pause`/`regulation_pause`/`stopping`; `last_backup_duration_ms` — durée en ms de la dernière sauvegarde automatique réellement exécutée, `0` tant qu'aucune n'a eu lieu) |
-| POST | `/api/v1/command` | `{"command":"limit 1000"}` | `{"result":"ok"}` (200), or an error body with 400 (missing/invalid args), 401 (a modifying command without a valid Bearer token — every standard/privileged command except `clientsWork`), 403 (not whitelisted), 404 (unknown path), or 405 (wrong method) |
-| GET | `/api/v1/clients` | — | `{"clients":[{"session_no","pid","forks","mode","label","machine_uid","client_uid","ip","last_activity","stats"}, …]}` — one entry per active control-channel session (`control_registry_snapshot`, same source as the console `clients` command); `mode` ∈ `search`/`pruner`/`gpu_pruner`/`unknown`, `ip` is the TCP peer address of that session's connection (see below), `last_activity` is a Unix epoch (seconds); empty array if no client is connected. `session_no` (v12) is a server-side monotonic identifier, never reused even across reconnections — unlike the underlying registry slot, which is recycled the moment a session disconnects. `label` (v12) is the client's declared name (`--name`, default hostname) — a JSON string, always properly escaped since it is client-declared and never validated. `machine_uid`/`client_uid` (v12) are hex-encoded 128-bit nonces (`net/client_identity.h`) identifying respectively the machine (persisted across restarts) and this process execution (fresh per start). `stats` is `null` until a `CTRL_GET_STATS` round-trip has completed at least once for that session, otherwise `{"shots_per_second","possibility_stock","analysed_stock","max_result","pruner_checked","pruner_removed","pruner_cells_per_second","stats_time"}` (cached snapshot, `stats_time` = Unix epoch of that reply — can be stale if the client hasn't been re-polled). |
-| POST | `/api/v1/clients/stats` | — | `{"result":"ok","requested":N}` — HTTP equivalent of the console `clientsStats` command: broadcasts `CTRL_GET_STATS` to the `N` active control sessions and returns immediately (fire-and-forget, like its console counterpart). Replies land asynchronously on each session's own control thread and are cached in `control_registry` (`control_registry_record_stats`); poll `GET /api/v1/clients` shortly after (sessions wake immediately on the posted command, so the round-trip is typically sub-second) to read the refreshed `stats`. |
-| GET | `/api/v1/best-board` | — | `{"has_board","alloc","grid"}` — full representation (not just the piece count) of the best board known to the server (`g_server_best_board`, `src/core/best_board.h`). `has_board` is `false` until at least one board has been recorded (fresh start, no `restore`); otherwise `alloc` (piece count) and `grid` (`grid[x][y]`, `null` for an empty cell, otherwise `{"id","rotation","top","right","bottom","left"}` — the actual piece placed, its rotation, and its 4 border colours, decoded via `g_server_rotate_parts`, never the raw internal index) are populated. A **dedicated** request, deliberately absent from `/api/v1/stats` — the 256-cell grid is an order of magnitude bigger than a counter, a consumer that only cares about throughput shouldn't pay for it on every poll. Synchronous local read (no network round-trip to clients), like `/api/v1/stats`. |
-| GET | `/api/v1/stock-distribution` | — | `{"total_unchecked","total_checked","total_analysed","levels":[{"alloc","unchecked","checked","analysed"}, …]}` — répartition du stock par niveau de curseur de parcours (`alloc`), la donnée que la console `statistic` se contente d'imprimer en logs (`datamanager_stock_distribution`, `src/core/datamanager.c`, désormais source **partagée** des deux). Une **requête dédiée**, jamais des champs de `/api/v1/stats`, pour la même raison que `best-board` : contrairement à `/stats` (lecture de compteurs déjà tenus à jour), elle **parcourt toutes les files sous verrou** — un consommateur qui ne poll que le débit ne doit pas payer ce parcours. Les niveaux entièrement vides sont **omis** (`levels` est trié par `alloc` croissant, un index n'y vaut donc pas son `alloc`) : sur les 257 niveaux possibles un serveur réel n'en occupe qu'une poignée, et les émettre tous ferait frôler `HTTP_RESPONSE_MAX` pour ne transporter que des zéros ; stock vide ⇒ `"levels":[]`, jamais une erreur. Les trois totaux correspondent exactement à `possibility_stock`/`checked_stock`/`analysed_stock` de `/stats`. L'instantané n'est **pas atomique entre les pools** : les deux pools de stock sont lus sous `lock_all_file()`, le pool analysé sous `lock_all_file_analysed()`, jamais les deux ensemble (discipline de verrouillage de `datamanager.c`) — une possibilité servie pile entre les deux passes peut être comptée deux fois ou zéro fois. Donnée d'observation, pas comptabilité. |
-| GET | `/api/v1/known-clients` | — | `{"known_clients":[{"machine_uid","label","ip","mode","connected","active_sessions","connections_total","first_seen","last_seen","total_pruner_checked","total_pruner_removed","best_max_result","cumulative_uptime_seconds"}, …]}` — one entry per **machine ever seen** (`known_clients_registry_snapshot`, PR4), same source as the console `knownClients` command. Distinct from `/api/v1/clients`: entries survive disconnection (`connected` flips to `false`, the entry stays listed) and accumulate across successive process restarts of the same machine, keyed by `machine_uid`. `total_pruner_checked`/`total_pruner_removed` are cumulated by **increment** observed at each `CTRL_STATS` (never by overwriting), since those are per-process counters that restart at 0 on every client reboot; `best_max_result` is a peak, never replaced by a lower value. Persisted since PR5 (`./eternityII-known_clients.back`, see below) — a server restart does not reset this cumul. |
-
-`POST /api/v1/command` accepts two disjoint whitelists. The standard one is shared with the binary control channel's `CTRL_COMMAND` (`control_command_allowed`, `src/net/control_protocol.c`): `pause`, `resume`, `limit <n>`, `maxStockByThread <n>`, `prunerBatch <n>`, `clientsCommand [--to <target>] <line>` (alias `clientsCmd`), `clientsWork <target>`. `clientsCommand`/`clientsWork` execute through dedicated reentrant helpers in `admin_apply_remote_command` (`src/ui/command_lines.c`, `strtok_r`-based, never `clients_cmd_interpreter`/`clients_work_interpreter` themselves — those tokenize via the process-global `strtok`) — see the *Command addressing* and *Attribution of in-progress analyses* sections below for what they do; `clientsWork`'s answer (possibility count, max `alloc`) is only ever logged server-side (`log_info`), since this route's response body is always `{"result":"ok"}` on success, never a data payload. An unknown/disconnected/ambiguous `--to`/`clientsWork` target is a recognized-but-invalid argument (`400`), not a whitelist rejection (`403`). A second, **privileged** whitelist (`control_command_privileged`, same file) contains `restore`, `backup`, `sortAsc`, `sortDesc [n]`, `sortDescMulti`, `split`, `regroup` and `rebalance [n]` — the two former able to replace/overwrite server state, the six latter able to reorganise the possibility stock in bulk (`sortDescMulti` is multi-threaded and, on a large stock, can run for a while; `rebalance` is the exception — a single incremental step under per-file locks, never the global stock lock the other five take) — and is consulted **exclusively** by this HTTP route; the control channel (both server-side `clientsCommand` and client-side `control_channel_handle_frame`) never calls it, so exposing these commands here does **not** make them remotely triggerable on a client via the control channel (they are server-only commands anyway — `send_to_childs = 0`, see the console command table below). Any other command (`exit`, `import`, …) is refused with `403` before even being tokenized, whitelist or not.
-
-**Authentication gates every command of the standard whitelist EXCEPT `clientsWork`.** A third pure predicate, `control_command_read_only` (`src/net/control_protocol.{h,c}`), identifies the one command of `control_command_allowed` that changes no state anywhere: `clientsWork` (a pure read of server-side attribution). `handle_command_route` (`src/net/http_server.c`) combines the three predicates into two flags fed to `http_command_authorize`: `is_unauthenticated_ok = control_command_allowed(command) && control_command_read_only(command)` (today, only `clientsWork`) and `needs_auth = control_command_privileged(command) || (control_command_allowed(command) && !control_command_read_only(command))` (`restore`, `backup`, plus every modifying standard command — `pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`). This is a **behavior reversal from the feature's initial shape**: standard commands used to be authentication-free by design; the requirement "every command that modifies state must be authenticated" (queries only exempt) pushed `pause`/`limit`/… etc. into the same gate as `restore`/`backup`. `control_command_read_only` has **no effect** on the control channel or the console — both keep consulting only `control_command_allowed`, unchanged, since neither has any notion of a Bearer token (the console assumes shell access is already trust; the control channel is server-initiated toward an already-connected client).
-
-Standard commands execute through **`admin_apply_remote_command`** (`src/ui/command_lines.c`), a `strtok_r`-based reentrant sibling of `do_command_line` — deliberately *not* `do_command_line` itself, since that function tokenizes via the process-global (non-reentrant) `strtok`, which a concurrent caller (HTTP thread, console thread, control-channel thread) could corrupt mid-parse. Like their console counterparts, the `pause`/`resume` branches also call `control_registry_broadcast_command` (not `strtok`-based, safe to call from this reentrant path) — otherwise a `pause` issued over HTTP would only flip the server's own (unused) `request` and never reach connected clients. Commands gated behind authentication, once authenticated (see below), execute through **`admin_apply_privileged_command`**, which delegates to `admin_apply_remote_command` for standard commands and, for `restore`/`backup`, to `restore_apply`/`backup_interpreter` directly — never through `restore_interpreter`'s global `strtok(NULL, " ")`, which would corrupt or race with the caller's own `strtok_r` cursor. `sortAsc`/`sortDesc [n]`/`sortDescMulti`/`split`/`regroup`/`rebalance [n]` are handled the same way, calling `sort_ascending`/`sort_descending`/`sort_d_mono`/`sort_descending_mthread`/`split_datas`/`regroup_datas`/`datamanager_rebalance_step` (`src/core/datamanager.h`) directly — never their `*_interpreter` console counterparts, since `sort_descending_interpreter`/`rebalance_interpreter` read their optional `[n]` argument off the process-global `strtok` cursor, the same reentrancy hazard as `restore_interpreter`.
-
-**Authenticating modifying commands (`--http-token-file <path>`, optional, position-independent valued option, server-only).** Absent by default: every modifying command (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`, `sortAsc`, `sortDesc`, `sortDescMulti`, `split`, `regroup`, `rebalance`) stays inaccessible via this API regardless of `--http-port` — only `clientsWork` and the `GET` routes work. `runserver` (`src/app/etii_server.c`) logs an informational (non-fatal) warning at startup when `--http-port` is set without `--http-token-file`, precisely because this makes the write side of the API a no-op until a token is configured. When set, the file is read once at startup (`http_token_load`, `src/net/http_server.c`), before any fork, into the global `HTTP_ADMIN_TOKEN` (`src/app/static_variables.h`) — the process **refuses to start** (explicit error, `exit(EXIT_FAILURE)`) if the file is unreadable or has permissions wider than owner-only (`mode & 0077 != 0`, the same bar as an SSH private key). `--http-token-file` without `--http-port` is accepted with a startup warning (the token is simply unused). Once configured, every gated command requires an `Authorization: Bearer <token>` header; a request with a missing/invalid token, or no token configured at all, gets `401` with a `WWW-Authenticate: Bearer` header — decided by the pure `http_command_authorize` (`src/net/http_codec.{h,c}`), fed by `http_extract_bearer_token` (header parsing) and `http_token_equals_constant_time` (constant-time comparison, to avoid leaking how many leading bytes of a guessed token are correct through response timing). An invalid-but-present token additionally incurs a ~200ms delay before the `401` response — a minimal anti-bruteforce measure that costs nothing in state, since the HTTP admin server already serves one connection at a time (see *Network model* above). Every gated attempt is logged (success via `log_info`, failure via `log_error`) — the token value itself is never logged.
-
-**`GET /api/v1/clients` and `POST /api/v1/clients/stats`** are the HTTP counterparts of the console `clients`/`clientsStats` commands (see *Control Channel* below), split across two endpoints because of an inherent async/sync mismatch: the HTTP server serves one connection at a time on a single thread and must answer within its 5s I/O timeout, but a `CTRL_GET_STATS` reply lands asynchronously on that session's own dedicated control thread — there is no way to block the HTTP thread on "wait for these N sessions to answer" without risking it hanging past its timeout if a client is slow or gone. So the read path (`GET /api/v1/clients`, via `http_clients_collect` → `control_registry_snapshot`) is a synchronous, non-blocking read of whatever `control_registry_record_stats` last cached, and the refresh path (`POST /api/v1/clients/stats`, via `control_registry_broadcast_get_stats`) is fire-and-forget, exactly like the console command it mirrors — it returns as soon as the request is queued, not once every client has replied. In practice the two are used as a pair: `POST` to trigger a refresh, then `GET` shortly after (each session's control thread wakes immediately on the posted command via its `pthread_cond_t`, so the round-trip is typically sub-second, but nothing enforces that — a slow or stalled client just leaves its cached `stats` stale rather than blocking the poller).
-
-```sh
-./eternityII server 4 --http-port 8080 data/pieces.csv
-curl http://127.0.0.1:8080/api/v1/stats
-curl http://127.0.0.1:8080/api/v1/status
-curl http://127.0.0.1:8080/api/v1/clients
-curl -X POST http://127.0.0.1:8080/api/v1/clients/stats   # -> {"result":"ok","requested":N}, then GET /clients for fresh "stats"
-curl -X POST -d '{"command":"clientsWork beta"}' http://127.0.0.1:8080/api/v1/command   # read-only, no token needed
-curl -X POST -d '{"command":"exit"}'  http://127.0.0.1:8080/api/v1/command   # -> 403, refused
-curl http://127.0.0.1:8080/api/v1/best-board
-curl http://127.0.0.1:8080/api/v1/known-clients
-curl http://127.0.0.1:8080/api/v1/stock-distribution
-
-# Modifying commands (server started with --http-token-file) — pause/limit/clientsCommand/restore/backup/sortAsc/sortDesc/sortDescMulti/split/regroup/rebalance all gated alike:
-curl -X POST -d '{"command":"pause"}' http://127.0.0.1:8080/api/v1/command   # -> 401, no token
-curl -X POST -H "Authorization: Bearer <token>" -d '{"command":"pause"}' http://127.0.0.1:8080/api/v1/command   # -> 200
-curl -X POST -H "Authorization: Bearer <token>" -d '{"command":"backup"}' http://127.0.0.1:8080/api/v1/command   # -> 200
-curl -X POST -H "Authorization: Bearer <token>" -d '{"command":"split"}' http://127.0.0.1:8080/api/v1/command   # -> 200, spreads the stock across all queues
-curl -X POST -H "Authorization: Bearer <token>" -d '{"command":"regroup"}' http://127.0.0.1:8080/api/v1/command   # -> 200, consolidates the stock into one queue
-curl -X POST -H "Authorization: Bearer <token>" -d '{"command":"sortDesc"}' http://127.0.0.1:8080/api/v1/command   # -> 200, sorts the whole stock by descending alloc
-```
-
-Puzzle definitions live in `data/`: `data/pieces.csv` (256-piece puzzle) and the 16-piece variant `data/pieces16.csv`. The code's built-in default (`parts_files` in `src/app/static_variables.c`) now points at `./data/pieces.csv` (or `./data/pieces16.csv` for the 16-piece build), so running from the repo root works without an explicit path argument.
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/stats` / `/status` | Telemetry, server state |
+| `GET /api/v1/clients` / `POST /api/v1/clients/stats` | Per-client stats (cached read / fire-and-forget refresh) |
+| `POST /api/v1/command` | Standard + privileged console commands, whitelisted (`control_command_allowed`/`_privileged`, `src/net/control_protocol.c`) |
+| `GET /api/v1/best-board` / `/known-clients` / `/stock-distribution` | Best board layout, known-machines registry, per-level stock histogram |
 
 ## Testing
 
-Unit tests live in `tests/` and use [greatest](https://github.com/silentbicycle/greatest) — a single-header C test framework vendored as `tests/greatest.h` (no external dependency). Suites are organised by domain, **mirroring `src/`** (`tests/core/`, `tests/net/`, `tests/ui/`), while the shared harness stays at the `tests/` root (`test_main.c` runner, `greatest.h`, `fork_assert.h`). Test files include production headers in the domain-qualified form (`#include "core/part.h"`, resolved via `-Isrc`) and the harness in short form (`#include "greatest.h"`, resolved via `-Itests`). The coverage report spans the **whole default build** (every `src/**/*.c` except the `NCURSES`/`CUDA` variants), so modules the tests don't exercise (`src/app/main.c`, …) show up at 0 % and the global percentage reflects the entire codebase.
-
 ```sh
-make test            # compile tests/ + run; non-zero exit on failure (CI-ready)
-make coverage        # both passes (256 + 16) + gcovr merged text summary (requires gcovr)
-make coverage-256    # 256-piece pass only; prints a gcov per-module summary
-make coverage-report # gcovr over those .gcda/gcno → Cobertura XML + HTML + Markdown summary
+make test               # unit suites (tests/, greatest framework) + bench shell tests
+make test-integration   # end-to-end 16-piece client/server scenarios
+make test-docker         # replay CI (WERROR, ASan, integration) in a Linux/gcc container
+make test-docker-arm     # compile-check the ARM64 cross-build
+make coverage            # gcovr merged summary (256 + 16 piece passes)
+make coverage-report     # Cobertura XML + HTML + Markdown
+make bench-refutation    # refutation-cost bench, see docs/tests_et_ci.md
 ```
 
-Beyond the unit suites, `make test-integration` compiles **one** `ETERN_PARTS=16` binary and runs it through **two** end-to-end scripts in sequence (both must pass):
+Suite layout, `fork_assert.h` (for testing `exit()`-calling code without killing the runner), hand-built fixtures, coverage artefacts, and both benchmark harnesses: [docs/tests_et_ci.md](docs/tests_et_ci.md) and [tests/README.md](tests/README.md).
 
-- **`tests/integration/run_solution_16.sh`** exercises the real client/server work protocol: launches a server + a client **both with `--stop-on-solution`**, and checks that **both sides** observe the solution. The client solves the 4×4, reports it via `INST_SOLUTION`; the server displays it, backs up its queues (`./eternityII.back`, `./eternityII-in_analyse.back`) and **stops** — that clean termination is what makes the test deterministic. It asserts: server exited cleanly, both logs carry the solution, both `solution_*` files and the `.back` backups exist.
-- **`tests/integration/run_control_channel.sh`** exercises the control channel (v9, see *Control Channel* below): launches a server + a client **without** `--stop-on-solution` (both processes stay alive regardless of solve speed — the 4×4 solves near-instantly, which would otherwise race any attempt to drive commands mid-search). It drives the SERVER's own console through a named pipe (`clientsStats`, `pause`, `resume`) and asserts the full round-trip in **both** logs: the control session registers, `clientsStats` yields an aggregated-stats line server-side, `pause`/`resume` each get acknowledged server-side (`commande distante "…" exécutée (code retour 0)`) **and** take effect client-side (`pause administrative demandée` / `levée`). It then stops both processes deterministically via their own `exit` console command (not a signal) before the safety-net `kill` trap.
+**Reproducing a CI failure that doesn't show up locally**: if a test fails on the GitHub runner (Linux/gcc) but passes on macOS/clang, reproduce it with `make test-docker` **before** investigating further — it replays the exact CI jobs (`WERROR=1` build, unit tests, ASan, integration) in a pinned `ubuntu:24.04` container, and catches classes of bug invisible on macOS (stricter `-Werror` diagnostics, ASan over-reads, glibc vs libSystem). `DOCKER_TEST_CMD="make test ASAN=1"` replays a single job. If the failure is ARM/Raspberry-Pi-specific (e.g. a `-Wformat-truncation` that only fires on aarch64), use `make test-docker-arm` instead — a cross-compiler compile+link check only, not an execution test. Full detail (including why the container runs as root and which two tests are deliberately skipped there): [docs/tests_et_ci.md](docs/tests_et_ci.md#tests-sous-linux-via-docker-make-test-docker).
 
-Both scripts run in an isolated `mktemp -d` working directory (nothing lands in the repo) and enforce a bounded timeout (`INTEGRATION_TIMEOUT`, default 60 s **per script**) so neither can hang; `run_control_channel.sh` additionally polls for log patterns in short slices (0.2 s ticks) rather than sleeping a fixed delay, so it finishes as soon as each round-trip completes instead of always waiting out the timeout.
-
-**Why `run_solution_16.sh`'s server needs 2 threads, not 1**: the client's PARENT process now opens, in addition to its search fork's work connection, its own control-channel connection (`INST_CONTROL_HELLO`) — and that session occupies a slot in the SAME `NB_THREADS` pool as work connections (see *Control Channel* below). With only 1 server thread, the control session and the search fork raced for the single slot; whichever lost was starved forever (`request unfulfilled: all threads busy`), and the test hung until timeout. This is a real operational implication, not just a test quirk: **any deployment must size the server's `NB_THREADS` for (concurrent work connections) + (concurrent client processes)**, not just the former — the default of 80 leaves ample headroom for normal fleets, but a server pinned to a small thread count needs to account for one extra slot per connected client machine.
-
-**Reproducing CI failures locally: `make test-docker`.** Tests that pass on macOS/clang sometimes fail on the Linux/gcc CI (stricter `-Werror` diagnostics, ASan catching over-reads invisible on macOS, glibc vs libSystem, gcov vs llvm-cov). `make test-docker` replays the CI test jobs in a container built from `tests/docker/Dockerfile` — pinned to `ubuntu:24.04` with the same toolchain as the runner (gcc/make/gcov preinstalled equivalent via `build-essential`, gcovr via pipx, `procps` for the integration script's `pkill`). The repo is mounted **read-only** on `/src` and copied to `/work` inside the container before building, so Linux artifacts (ELF `.o`, binaries, `.gcda`) never mix with the macOS ones in the host working directory. The default command chain mirrors the CI's `test`, `test-asan` and `integration-test` jobs (`make WERROR=1 && make test && make test ASAN=1 && make test-integration`, with `ASAN_OPTIONS=detect_leaks=0:abort_on_error=1` like CI); override it with `DOCKER_TEST_CMD="…"` to replay a single step (e.g. `make test-docker DOCKER_TEST_CMD="make test ASAN=1"`). This target is local-only tooling — CI itself already runs on Linux and does not use the image. When GitHub migrates `ubuntu-latest` to a newer release, bump the `FROM` line accordingly. **One deliberate divergence from CI: the container runs as root**, where the GitHub runner runs as the unprivileged `runner` user. Root overrides permission bits (`CAP_DAC_OVERRIDE`), so a test that `chmod(dir, 0444)`s a directory to assert that writing to it *fails* instead sees `fopen()` succeed — which is why `do_command_line_print_fails_on_unwritable_dir` and `do_command_line_backup_fails_on_unwritable_dir` (`tests/ui/test_command_lines.c`) open with `SKIP_IF_ROOT()` and report as *skipped* under `make test-docker` (they run normally on the host and in CI). Without that guard the first one failed on every `test-docker` run, permanently reddening the very target whose job is to surface real Linux-only failures. **Any new test whose premise is "this filesystem operation is denied" needs the same guard.** See [docs/tests_et_ci.md](docs/tests_et_ci.md#le-conteneur-tourne-en-root--tests-sautés).
-
-**Cross-compile-checking ARM (Raspberry Pi): `make test-docker-arm` and the `CC` variable.** GCC diagnostics are not portable across architectures — a build clean on macOS/clang and on the x86_64/gcc CI can still warn on ARM/gcc: `__builtin_object_size` (which backs `-Wstringop-truncation`/`-Wformat-truncation`) computes bounds differently under `-Ofast` per architecture, and can fall back to a pessimistic bound (the enclosing array instead of the indexed sub-object) on one target and not another — the `memcpy` fix in `http_known_clients_collect`/`http_clients_collect` (`src/net/http_server.c`) exists precisely because `snprintf` tripped exactly this on aarch64 while staying silent everywhere else this project builds. Since no ARM hardware or QEMU emulation is required to catch this class of bug — only the compiler needs to run on the actual target instruction set — the fix is a **cross-compiler**, not a virtual machine: `crossbuild-essential-arm64` (`gcc-aarch64-linux-gnu` + `libc6-dev-arm64-cross`) added to `tests/docker/Dockerfile` alongside the existing `test-docker` toolchain, and a `CC` Makefile variable (`?= gcc`, overridable) threaded through only the two rules that build the production executable (the pattern rule and the final link) — the test/coverage binaries stay pinned to the host's `gcc`, since they still need to *run* locally. `make test-docker-arm` reuses the same container image as `make test-docker` and runs `make clean && make CC=aarch64-linux-gnu-gcc WERROR=1` inside it — a **compile+link check only**: the resulting aarch64 ELF cannot execute on the x86_64 container, so this catches compiler diagnostics, not runtime behaviour (a real Raspberry Pi remains the source of truth for that). CI mirrors this as the `arm64-build` job (`.github/workflows/ci.yml`), installing the same cross-toolchain directly on the `ubuntu-latest` runner (no Docker needed there) and running `make CC=aarch64-linux-gnu-gcc WERROR=1` — same compile-check-only pattern as the `ncurses-build`/`cuda-build`/`config-build` jobs. Override the cross-compiler binary via `DOCKER_ARM_CC` (e.g. a different aarch64 toolchain) or the whole command via `DOCKER_ARM_TEST_CMD`, same convention as `test-docker`'s `DOCKER_TEST_CMD`.
-
-**Benchmarking the search hot loop: `tests/bench/bench_search.sh`.** `make test`/`coverage` check correctness, not throughput — before optimizing the memory layout or algorithm of `autosearch()` (`src/core/etii_search.c`), use this script to get a reliable nodes/s number to compare against. It relies on a **node-count stop criterion** rather than a duration: measuring wall-clock time for a *fixed* number of nodes is far less noisy than counting nodes over a fixed duration, and in `test` mode the search is deterministic (single process, no network), so at a fixed N the work explored is identical run to run. Activation is an environment variable, `ETII_BENCH_NODES=<n>` — deliberately **not** a CLI option, since the bench is off the production path and therefore needs no `cli_topics[]` entry; absent (the default), it changes nothing. The stop check lives in the stats thread that already samples `counters[]` periodically (`check_client_threads`, `src/app/etii_client.c`, polling every 1 ms instead of the usual 10 s while the bench is active, so the inevitable overshoot past N — no test is ever added to the hot loop itself — stays a negligible fraction of N) via the pure, unit-tested `bench_should_stop`/`bench_parse_nodes_env` (`src/app/static_variables.h`/`.c`, covered in `tests/app/test_static_variables.c`); `test` mode's interactive 100000 shots/s throttle is also lifted while the bench is active, to measure the machine's raw throughput. `tests/bench/bench_search.sh` wraps this: release build (`make clean && make`, no ASan/coverage), one uncounted warm-up run, `--reps` repetitions (default 5) reporting median/min/max/relative-stddev of nodes/s, core-pinning via `taskset` when available (Linux; macOS has no equivalent and says so rather than failing), a load-average-based refusal to run on a busy machine (override with `--force`), the actual nodes reached (a functional-regression guard: at fixed N and unchanged code it should stay tightly clustered run to run), and a `--baseline <report.json>` mode that reloads a previous JSON report and prints the percentage delta. It also reports the inline forward-check prune rate (`fc_attempts`/`fc_pruned`, from `bt_forward_check` — distinct from the separate `pruner` process, which isn't covered by this bench) as a second, complementary regression guard: a memory-layout change can speed up the loop without changing what gets pruned (stable rate) or, conversely, change the exploration order (a shifted rate signals a non-neutral change even if throughput looks fine). Absent from the report on a `FORWARD_CHECK_K=0` build. The elapsed time of each run is **validated before use**, not merely tested for emptiness: bash's own `time` can print a malformed value (`timeval_to_secs` rounds µs→ms without carrying into the seconds, so a 2.9997 s run comes out as `2.:00` instead of `3.000` — `mkfmt` renders the 1000 ms fraction as `(1000/100) + '0'` = `:`), which `awk` reads as 2.0, inflating that run's throughput by 50 %, poisoning `nodes_per_sec_max`/stddev and producing unparsable JSON. `bench_parse_elapsed` rejects it and `bench_retry_valid_time` replays the run (3 attempts, each logged) before giving up with a non-zero exit — both pure functions in `tests/bench/bench_lib.sh`, covered by `tests/bench/test_bench_parse.sh` (run by `make test` via the `test-bench` target, no compilation involved). See [docs/tests_et_ci.md](docs/tests_et_ci.md#banc-de-mesure-du-débit-de-recherche-testsbenchbench_searchsh) for the full walkthrough.
-
-**Measuring REFUTATION cost, not throughput: `make bench-refutation`.** `tests/bench/bench_search.sh` measures nodes/s with `max_result` as a guard rail, but both are proxies: the engine's actual job is to prove a possibility dead **as early as possible**, not to descend deep into a branch that leads nowhere. `tests/bench/bench_refutation.c` measures exactly that — nodes and wall time to `BT_CORE_EXHAUSTED` (subtree fully explored ⇒ proven dead) on an **identical root** under both variable orders, a paired comparison. Roots come either from a **real server stock** (`--from-back <file>`, a `.back` read exactly like `import()`, with `--min-pieces`/`--max-pieces` to select a depth band — the representative source, since it is literally the work the server distributes) or from a fabricated family (prefixes of a deep MRV descent, `--depths`, useful for genuinely *alive* subtrees which a real stock rarely provides). Measured on a real 17 815-possibility stock (8 to 153 pieces placed, mean 34.5): MRV closes 10/10, 16/16 and 25/25 roots in the 20–45, 55–89 and ≥90 bands where the fixed order closes 5/10, 16/16 and 17/25 — and costs ×1 275 to ×22 627 fewer nodes on the roots both close. **But the MRV order is not uniformly better**: on a fabricated 100-piece prefix (a genuinely alive subtree) the fixed order closes in 73 482 nodes against MRV's 4 443 906. Cite both. Also note that many MRV refutations cost **1 node** — the possibility was already dead when created and `mrv_choose_cell`'s board scan sees it at once (the same test as `possibility_all_has_a_next_counted`, run at every node rather than once), which measures the presence of that global test more than the quality of the order — and says something about the stock itself: with no pruner in service, a server accumulates already-dead work. **Three engines, not two — the ablation.** The two production engines confound two independent axes: fixed order always goes with a **local** dead-cell test (`bt_forward_check`, 4 neighbours), dynamic order always with a **global** one (`mrv_choose_cell`'s scan sees any dead cell on the board). `global_dead_check` (`src/app/static_variables.h`, default 0, free when off) fills the missing cell — fixed order calling the very same scan as MRV and **discarding the chosen cell** — so the bench can compare `fixe`, `fixe+global` and `MRV` (`--engines`). Locked by `search_backtracking_global_dead_check_preserves_solution_count` (exhaustive 4×4, same solution count either way: the scan is a necessary condition and must never cost a solution). KPI at **equal CPU time** (~22 s per engine, 120 roots sampled evenly across the real stock, per-engine node cap calibrated so each spends the same time — otherwise the engine that gives up cheapest looks the most "efficient"): fixed 20/120 closed, fixed+global 52/120, MRV **79/120**. **Neither axis is redundant**: the global scan alone takes 20 → 52 (×2.6), the dynamic order adds 52 → 79 (×1.5) — so "the ordering contributes nothing, it's all the global test" is refuted, despite the many 1-node refutations. On the paired subset all three close: 295 339 nodes (fixed), 124 030 (fixed+global), **40** (MRV); note fixed+global explores fewer nodes than fixed yet takes longer — the scan costs ~10× an ordinary node, the price MRV pays too and recoups. On the fabricated *alive* prefixes the ablation also attributes the pathology: fixed 155 902 nodes, fixed+global 134 218, MRV 4 523 856 — it is the **order** that costs there, not the scan.
-
-Full walkthrough: [docs/tests_et_ci.md](docs/tests_et_ci.md#banc-de-réfutation-make-bench-refutation).
-
-**Guiding rule: always try to add a unit test for every bug you fix and every behaviour you add**, so a past anomaly can never silently come back. When fixing a bug, first write (or extend) a test that fails on the old behaviour and passes on the fix; when adding a feature, cover its observable contract. If a piece of logic is hard to test, that is usually a sign to extract it into a small pure function (as was done for `parse_cli_options` in `src/app/static_variables.c`, tested in `tests/app/test_static_variables.c`; and for the signal/bootstrap helpers moved out of the unlinkable `main.c` into `src/app/app_runtime.c`, tested in `tests/app/test_app_runtime.c`) rather than to skip the test. The bugs already locked in this way: the server being told about solutions (`send_solution` local-mode guard, `tests/core/test_datamanager.c`), unique solution filenames so two solutions never overwrite (`log_solution`, `tests/core/test_possibility.c`), the `--stop-on-solution` argv parsing, the full client/server solution round-trip (`make test-integration` → `run_solution_16.sh`), the control-channel round-trip (`run_control_channel.sh`), the server thread-pool starvation caused by the control channel's extra connection under a small `NB_THREADS` (fixed by sizing `run_solution_16.sh`'s server at 2 threads instead of 1 — see the *Testing* section above for the full story), and the parent↔fork IPC datagrams silently dropped on macOS when they exceed `net.local.dgram.maxdgram` (2048 bytes — e.g. `IPC_MSG_STATS` once `FC_STAT_MAX_K` is raised to follow a high `FORWARD_CHECK_K`, which starved the client parent of all stats and made it look completely idle; fixed by sizing `SO_SNDBUF`/`SO_RCVBUF` from `ipc_max_datagram()` in `build_udp_local_socket`, locked by `build_udp_local_socket_allows_max_ipc_datagram` in `tests/net/test_local_socket.c`), and the benchmark silently reporting a 50 %-too-high throughput when bash's `time` emits a malformed `N.:00` elapsed (rounding carry bug, ~0.05 % of runs; fixed by `bench_parse_elapsed`/`bench_retry_valid_time`, locked by `tests/bench/test_bench_parse.sh`), and a forked search worker freeing the lookup map that belongs to its parent — which would pull it out from under its siblings (ownership carried by `acquire_search_parts`, locked by `run_mono_client_does_not_free_published_parts` in `tests/app/test_etii_client.c`, which re-reads the published map after `run_mono_client` returns — a use-after-free under ASan), and a new client-side best-board record staying unsynchronized on the server for an unbounded time because `control_session_step` only ever pulled `CTRL_STATS` in response to an explicitly queued command, never on its own timeout tick (fixed by `control_registry_auto_stats_due`/`CONTROL_AUTO_STATS_INTERVAL_SEC`, see *Automatic stats polling* above, locked by `tests/app/test_control_registry.c`'s `auto_stats_due_*` tests), and `childrens_pid[]`/`forkId[]` staying stale after a fork died unexpectedly because `sigchld_handler` reaps the zombie but never touches those arrays, leaving `send_command_to_childs` targeting a socket path that no longer exists (fixed by `reap_dead_child_slots`/`pid_is_alive`, `src/app/app_runtime.c`, called each tick from the orchestrator loop, locked by `tests/app/test_app_runtime.c`'s `reap_dead_child_slots_*`/`pid_is_alive_*` tests — see *Deferred-start orchestrator* above), and two platform-specific deadlocks in `fork_gate_acquire_io_locks` found only by manually running a real client (see *Deferred-start orchestrator* above for the full diagnosis) — `fflush(NULL)` blocking forever on the console thread's `stdin` lock, and `flockfile(stdout)`/`flockfile(stderr)` not surviving `fork()` on macOS — neither caught by `fork_gate_suite`/`fork_orchestrator_suite` (no real fork, no real blocked console reader there), both now exercised by `make test-integration`'s `run_solution_16.sh` (client console driven over a FIFO left open for the test's duration, so it genuinely blocks in `fgetc()` exactly like an idle operator, then forks for real), and `tests/bench/bench_search.sh` reporting a throughput delta with no way to tell a real gain from an illusory one — a change that narrows the forward-check's per-node scope (PR1 of [docs/conception/elagage_recherche.md](docs/conception/elagage_recherche.md), voisines géométriques instead of a traversal window) can raise nodes/s while also pruning a slightly different, not necessarily smaller, set of branches, and neither `nodes/s` nor the aggregate `fc_prune_rate_pct` distinguishes "faster at the same job" from "faster because it does less work per node and will need more nodes overall" (fixed by logging `max_result`, the deepest point reached, on the same `ETII_BENCH` line, and comparing it between `--baseline` and current runs **only when their `nodes_target` matches** — see [docs/tests_et_ci.md](docs/tests_et_ci.md#max_result--le-débit-seul-ne-prouve-pas-un-vrai-gain); verified for PR1 by matching `max_result` at four different node targets between old and new code, ruling out the "bigger tree, same or worse real progress" hypothesis the user who asked "est-ce qu'on élimine moins et fera plus d'analyses" was right to demand be checked, not just asserted). Note that the bench one is a **shell** test: the same guiding rule applies to the project's tooling, not just to its C.
-
-Conventions to keep in mind when adding or extending tests:
-
-- **No `main.c` in the test binary.** `make test` links only the modules under test plus their transitive link deps (`src/ui/logger.c`, `src/app/static_variables.c`). The `TEST_SRCS` / `TEST_MODULES` Makefile variables (now `src/<domain>/…` paths) control this; each test file exposes a `SUITE` registered in `tests/test_main.c`. A brand-new test file must be added to `TEST_SRCS` **and** registered (`SUITE_EXTERN` + `RUN_SUITE`) in `tests/test_main.c` — see `tests/app/test_static_variables.c`.
-- **Hand-built fixtures, not `pieces.csv` / `rotate_all_parts`.** Tests construct small `part` / `array_part` structs inline, so they stay independent of `ETERN_PARTS` (256 vs 16) and need no data file in the CWD. `rotate_all_parts` indexes by `i + ETERN_PARTS*r` and is only correct when `ETERN_PARTS` matches the real puzzle size — don't build fixtures through it.
-- **Code paths that call `exit()` ARE testable via `tests/fork_assert.h`.** greatest runs in-process, so a direct `exit()` would kill the whole runner; `run_in_fork(fn, &pid)` runs `fn` in a forked child (stdout/stderr to `/dev/null`, context passed through file-static globals copied by `fork()`) and returns its exit code to assert on. Used for `save_possibility` aborting on an unwritable path and `checkIfResultFound`/`log_solution` on a complete board (`tests/core/test_possibility.c`). Genuinely unreachable abort paths (e.g. a missing CSV deep in `read_parts`) can still be left uncovered, but prefer a fork test over skipping.
-- **Coverage artifacts** (`.o/.gcno/.gcda/.gcov`) are split across two directories: `tests/coverage/` (256-piece pass, produced by `make coverage-256`) and `tests/coverage-16/` (16-piece pass, produced by `make coverage-16`). Both are gitignored and removed by `make clean`. `make coverage-256` instruments **every default-build module** (`COV_ALL_MODULES`) so each gets a `.gcno`, then links the test binary with only the exercised subset (`COV_LINK_MODULES` = `TEST_MODULES`); modules that are compiled but never linked/run produce no `.gcda` and report 0 %. Drill into `tests/coverage/<module>.c.gcov` (`#####` = never executed).
-- **`make coverage`** (= `coverage-256` + `coverage-16`) runs [gcovr](https://gcovr.com) (pip/pipx) with `--txt` over both directories, printing a single merged text summary — the union of lines covered by both puzzle sizes. **`make coverage-report`** goes further and emits `tests/coverage/coverage.xml` (Cobertura, for Codecov), an HTML report under `tests/coverage/html/`, and `tests/coverage/coverage.md` (Markdown summary). After gcovr runs, `tests/coverage_by_domain.py` post-processes `coverage.md` to insert a **per-domain section** (`src/core/`, `src/net/`, `src/ui/`, `src/app/` subtotals, from gcovr's `--json-summary`) between the overall and per-file tables, **and** — reading the Cobertura `coverage.xml` passed as its 3rd arg — a short note under the *Overall coverage* table explaining why **Codecov reports a lower percentage**. gcovr counts a line as covered as soon as it is executed at least once (partially-taken branch lines included); Codecov files those partial-branch lines in a separate *partial* bucket that it does **not** count as covered. The note prints the actual partial-line count and the "hits-only" equivalent (`hit / total`) — whose numerator matches Codecov's "X of Y lines covered" headline (the denominators differ slightly because Codecov applies its own Cobertura normalization on ingest). This is expected, not a misconfiguration: both tools read the same `coverage.xml`, they just classify partially-covered lines differently. On macOS it auto-passes `--gcov-executable "llvm-cov gcov"`; `COV_FILTER` `--exclude`s `tests/` so only production code is reported. The Codecov upload step pins `disable_search: true` + `plugins: noop` so the action ingests *only* this `coverage.xml` (otherwise its built-in gcov plugin would re-scan the `.gcda` and re-add the `tests/` directory).
-
-CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the release build (`make WERROR=1`), `make test`, `make coverage-report`, and the `integration-test` job (`make test-integration`, both 16-piece end-to-end client/server scripts) on every push and PR. **Guiding rule: CI compiles every build combination of the code, each with `WERROR=1` (any warning fails the build)** — so no conditionally-compiled path can rot unnoticed. Beyond the release build, dedicated compile-check jobs cover the `NCURSES=1` variant, the `CUDA=1` variant (plus `CUDA=1 VERIFY=1`, the `-DGPU_PRUNER_VERIFY` cross-check path), a build that enables **all** the `DEBUG_*` flags of `src/app/static_variables.h` at once, and the alternative puzzle/algorithm configs `ETERN_PARTS=16` (4×4 board) and `FORWARD_CHECK_K=0` (forward-checking compiled out). All of these are driven via `CPPFLAGS` (`-D…`), so the source stays untouched — which is why `ETERN_PARTS` and `FORWARD_CHECK_K` are `#ifndef`-guarded in the header (overridable, default `256`/`6`). The CUDA toolkit is installed on the runner (`Jimver/cuda-toolkit`, network method) for **compilation only**: GitHub runners have no NVIDIA GPU, so the CUDA binary is never executed (functional validation happens on Jetson) — likewise every variant job is a compile/link check, not a run. For the CUDA jobs `WERROR=1` is enforced on both sides: the gcc-compiled C under `WITH_CUDA` (`-Werror`) **and** the `nvcc`-compiled `.cu` kernel (the Makefile adds `-Werror all-warnings` to `NVCCFLAGS`). The coverage results are published to **Codecov** (Cobertura `coverage.xml`; private repo → `CODECOV_TOKEN` secret required), as a **PR comment + Job Summary** (from `coverage.md` via `actions/github-script`), and as a downloadable **HTML artifact**.
+**Guiding rule: add a unit test for every bug you fix and every behaviour you add**, so a past anomaly can never silently come back. When fixing a bug, first write (or extend) a test that fails on the old behaviour and passes on the fix; when adding a feature, cover its observable contract. If a piece of logic is hard to test, that's usually a sign to extract it into a small pure function rather than skip the test (e.g. `parse_cli_options`, `orchestrator_step`, `bench_should_stop`). This project has a long track record of production bugs caught exactly this way — `git log` and `docs/tests_et_ci.md` carry the running list.
 
 ## Architecture
 
-### Process/Thread Model
+Process/thread model, the copy-on-write shared lookup map, and parent↔child IPC: [docs/architecture.md](docs/architecture.md). Full wire protocol and control channel: [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md). Search-loop internals (memory flow, forward-check, MRV cell choice): [docs/autosearch_step.md](docs/autosearch_step.md).
 
-- **Client mode**: the parent process builds the lookup map **once** (see *Lookup map shared across the search processes* below), then forks `NB_THREADS` child processes. Each child runs `run_mono_client()` independently, connecting to the server over TCP.
-- **Communication between parent and children**: Unix domain UDP sockets (`etii_main.<pid>` and `etii_fork.<pid>`). Children send `client_statistics` structs back to the parent every second via these sockets.
-- **Statistics thread** (`run_checker`): a detached thread in each process that monitors search rates (shots/second) and reports back to the parent.
-- **Console thread** (`run_console`): a detached thread reading stdin commands and dispatching to `do_command_line()`.
+### Client-Server TCP protocol, quick reference
 
-**Lookup map shared across the search processes (`search_parts_t`, `src/app/etii_client.{h,c}`).** The `map_big_array` is **read-only once built**, so the client parent builds it **once, before its `fork()` loop** (`handle_client`, `src/app/main.c`) and publishes it with `set_inherited_search_parts`; the children inherit it through plain **copy-on-write** and share a single physical copy — no `mmap(MAP_SHARED)`, no format change, no signature change to `prepare_map_part`/`buildBigArray`/`free_bigarray`/`get_parts_bigarray*`. Before, every child called `prepare_map_part()` *after* the fork and got its own private 6.6 Mo (5.06 `flat` + 1.27 `packed` + 0.11 arena).
-  - **Ownership is the whole point, and it is carried by one boolean.** `acquire_search_parts()` returns `0` (inherited — **never free it**, it outlives this process and is shared with its siblings) or `1` (built here — free it). `run_mono_client()` therefore works unchanged whether it is a forked search worker or the fork-less `test` mode (`run_auto`, which publishes nothing). The parent frees after `wait_child()`, and only there.
-  - **Measured — memory, the actual win.** Linux (`tests/docker` container, `Pss` from `/proc/<pid>/smaps_rollup` — `Rss` is blind to this, it counts shared pages in every process and stays at 140 Mo either way): at 16 workers the client's total `Pss` goes **111.2 Mo → 11.1 Mo (−90 %)**; per fork, `Private_Dirty` goes **7004 Ko → 176 Ko (−97 %)**, the map reappearing as 6864 Ko of `Shared_Dirty`. macOS (`footprint`/`vmmap`): per-fork physical footprint **7.4 Mo → 1.6 Mo (−78 %)**, and the map's three `MALLOC_LARGE` regions flip from `SM=PRV` / 6600 Ko dirty to `SM=COW` / ~900 Ko resident-shared (those 900 Ko being the pages that fork actually faulted in — its working set in the map; before, all 6600 Ko were dirty simply because the fork had just written them building its own copy).
-  - **Measured — throughput: no gain, if anything −1 %.** Aggregate shots/s of a real client+server at 16 workers, 4 pairs run with **alternating binary order** because the machine drifts −14.6 % across a campaign (thermal throttling, which would otherwise penalise whichever binary runs second): −2.90 % with master first, +0.79 % with the shared build first, i.e. **−1.07 %** once the drift cancels. That is at this bench's noise floor, but the sign is stable. Most likely cause: at 16 workers on 8 physical cores the binding constraint is core contention, and the real working set inside the map (~900 Ko/fork) already fitted in cache before sharing — there was no latency to win back. **Do not sell this change as a cache optimisation**; it is a memory-footprint change (how many workers fit on a memory-constrained box). On a machine where the L3 really is the binding constraint, re-measure before concluding.
-  - **Do not move thread creation into the pre-fork window** — the existing rule (no parent thread may run during the `fork()` loop, or a child inherits a stdio lock held by a thread that doesn't exist in it) is what makes building the map there legal in the first place: the parent is still single-threaded. A `fflush(NULL)` right before the loop keeps children from inheriting an unflushed stdio buffer and each re-emitting the startup log on exit.
-  - The **GPU pruner** still initialises CUDA *after* the fork (CUDA contexts are not inherited) — it just reads the inherited map. The **server**, `test` mode, and the `removeNoNext`/`expand` console commands each build their own map: unchanged.
-
-### Client-Server TCP Protocol (`etii_protocol`)
-
-The protocol uses fixed-size `packet` structs containing an `instruction` byte and a `possibility_packet`. Instructions:
+Fixed-size `packet` structs (`instruction` byte + `possibility_packet`), reassembled via `recv_all`/`send_all` — a raw one-shot `send`/`recv` can desync the whole stream. Bumping the wire format requires bumping `VERSION` (exact-match handshake).
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `INST_ADD` | 1 | Client sends a possibility to the server |
-| `INST_GET` | 2 | Client requests a possibility from the server (response since v7: `int32` K + K packets, K ∈ {0, 1}) |
-| `INST_SOLUTION` | 3 | Client found a solution: sends the full board; the search child also saves a unique `./solution_<pid>_<seq>`. The server displays it and saves a unique `./solution_server_<pid>_<seq>`. With `--stop-on-solution` the search child exits and the server backs up its queues and **stops**; by default both keep running to look for more solutions. |
-| `INST_END` | 4 | Session end |
-| `INST_CONSIDERED` | 5 | Acknowledge |
-| `INST_NULL` | 6 | No possibility available (legacy: no longer emitted since v7 — GET responses carry an explicit `int32` count instead) |
-| `INST_POSSIBILITY_ANALYSED` | 7 | Possibility already analysed |
-| `INST_CHECK_VERSION` / `INST_SUPPORTED_VERSION` / `INST_UNSUPPORTED_VERSION` | 9/10/11 | Version handshake |
-| `INST_GET_TO_CHECK` | 12 | Pruner requests one unchecked possibility (response since v7: `int32` K + K packets, like `INST_GET`) |
-| `INST_GET_TO_CHECK_BATCH` | 13 | Pruner requests up to N unchecked possibilities in one round-trip (`int32` N → `int32` K + K packets) |
-| `INST_POSSIBILITY_ANALYSED_BATCH` | 14 | Pruner acks M analysed possibilities in one round-trip (`int32` M + M packets → one `INST_CONSIDERED`) |
-| `INST_NEED_WORK` | 15 | Hunger probe (since v8): client asks how many possibilities the server would like to receive (response: `int32` N ≥ 0, `compute_server_hunger`). Sent by the client's feed thread in place of the keepalive; a positive N enables *anticipatory delegation* — busy search threads cede up to half their implicit stock (`bt_delegation_quota`) even below `max_stock_by_thread`, fixing the startup starvation where one client holds the whole tree while the server has nothing to serve. |
-| `INST_CONTROL_HELLO` | 16 | Control-channel announcement (since v9): the client's PARENT process (never a search fork) sends this on a SEPARATE TCP connection, immediately after the version handshake, to switch that connection into control-channel mode — see *Control Channel* below. |
-| `INST_CLIENT_HELLO` | 17 | Work-connection identity announcement (since v12, PR2). Every fork's **work** connection (`INST_GET`/`INST_ADD`/…) sends this exactly once, right after the version handshake and before its first work instruction: an `int32` length followed by a length-prefixed `client_identity_t` (`net/client_identity.h` — `machine_uid`, `client_uid`, `fork_seq`, `mode`, `label`), same framing convention as `INST_CONTROL_HELLO`'s payload. Purely declarative and best-effort on the server: a malformed *length* desyncs the stream and closes the connection (same rule as everywhere else on this wire), but a length-valid payload that fails to *decode* only logs an error — a cosmetic identity field must never take down a search connection. Decoded into `client_t.identity` (`src/app/etii_server.h`), not yet consumed beyond that in this PR (future PRs: analysis ownership/leases). |
+| `INST_ADD` / `INST_GET` | 1 / 2 | Client↔server possibility exchange (GET since v7: `int32` K + K packets) |
+| `INST_SOLUTION` | 3 | Solution found; saved to a unique `solution_<pid>_<seq>` file on both sides |
+| `INST_GET_TO_CHECK[_BATCH]` / `INST_POSSIBILITY_ANALYSED[_BATCH]` | 12–14 | Batched pruner exchange |
+| `INST_NEED_WORK` | 15 | Hunger probe (v8), enables anticipatory delegation |
+| `INST_CONTROL_HELLO` | 16 | Parent-only, opens the control channel (v9) |
+| `INST_CLIENT_HELLO` | 17 | Per-fork declared identity (v12) |
 
-A pruner exchanges with the server in batches of `pruner_batch_size` (configurable via the 4th `pruner` CLI arg, or the `prunerBatch <n>` console command, capped at `PRUNER_BATCH_MAX`), bounding its memory. **Every** `possibility_packet` transfer (unit GET/ADD/ANALYSED paths included, since v7) goes through `recv_all`/`send_all` (etii_protocol.c), which reassemble partial TCP transfers — a raw one-shot `send()`/`recv()` of a ~520-byte packet can transfer only part of it and desynchronise the whole connection stream. Bumping the wire format requires bumping `VERSION` (exact-match handshake). **v11** bumped `VERSION` on exactly this basis without adding any new instruction: the board traversal order (`directions[]`/`dirx[]`/`diry[]`, `src/app/static_variables.c`, chosen to eliminate possibilities earlier in the search) changed, so the same cursor index (`alloc`) now designates a different cell than in v10 — a `possibility_packet` exchanged across versions would silently desync the board instead of erroring, hence the explicit handshake rejection. **v12** bumps `VERSION` for `INST_CLIENT_HELLO` above: a v11 server receiving it would treat it as an unknown instruction and close the connection outright (`inst_unknow++`), so the exact-match handshake must reject the mismatch explicitly rather than let a v11↔v12 pairing desync silently.
+### Control channel (v9, extended v10/v12)
 
-### Control Channel (v9, extended in v10 and v12)
+A second, independent TCP connection per client **process** (opened only by the parent, never a fork) lets the server pilot a running client — pull live stats, push console commands — without touching search threads. Roles reverse: the server initiates (`CTRL_PING`/`CTRL_GET_STATS`/`CTRL_COMMAND`), the client answers. Only a whitelisted subset of console commands is remotely triggerable (`control_command_allowed`, `src/net/control_protocol.h`), checked **twice**: server-side before broadcast/target resolution, and client-side again (defense-in-depth) before `do_command_line`. Frame format, the known-clients registry, expiration leases on in-progress analyses, and remote lifecycle piloting (`start`/`stopForks`/`configApply`): [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md#canal-de-contrôle-v9).
 
-Beyond the work protocol above (client-initiated: GET/ADD/ANALYSED/…), a **second, independent TCP connection per client process** lets the SERVER pilot a running client — request its live statistics, or push a console command (`pause`, `resume`, `limit`, …) — without touching the search threads at all.
+### Dynamic variable order (MRV)
 
-**Who opens it, and why it costs nothing to the search.** Only the client's **PARENT** process (the one that forks the search workers, never a fork itself) opens this connection — one per client *process*, not per fork. It runs on its own detached thread (`run_control_channel`, `src/app/etii_control.c`), entirely separate from the search threads (`etii_search.c`), the work-protocol feed thread (`feed_thread_aposs`, `etii_client.c`), and the stats/console threads. The only thing the search hot loop pays is the pre-existing per-node read of the global `request` (see *Administrative pause* below) — nothing new was added to that loop for the control channel itself.
+The search can fill cells in most-constrained-first order instead of the fixed `dirx[]`/`diry[]` order (`search_packet_backtracking_mrv` vs. `_core`, `src/core/etii_search.c`). **Measured favorable but not the deployment default**: `mrv_enabled` defaults to 0 (`ETII_MRV=1` to enable). The metric that decided this is refutation cost at equal CPU time (`make bench-refutation`), not throughput or `max_result` — full measurements and the three-engine ablation: [docs/conception/elagage_recherche.md](docs/conception/elagage_recherche.md) §4.7.
 
-**Role reversal.** On this connection, after the version handshake, the client sends `INST_CONTROL_HELLO` (pid, fork count, and — since v12 — a declared identity: `machine_uid`, `client_uid`, `mode`, `label`, with `fork_seq` fixed to `-1` since this hello speaks for the PARENT process as a whole, never a single fork — `control_hello_t`, `src/net/control_protocol.h`) and the roles flip: the **server becomes the initiator**. The server's session thread for that connection stops reading work-protocol instructions (`INST_GET`/`INST_ADD`/…) and instead runs `run_control_session`/`control_session_step` (`src/app/etii_server.c`), which either forwards a pending console command or sends a `CTRL_PING` keepalive, and the client answers.
+### Core data structures
 
-**Declared identity (v12, PR2).** `control_hello_t`'s `mode` field was replaced by an embedded `client_identity_t` (`net/client_identity.h`) carrying `machine_uid` (128-bit nonce, persisted client-side across restarts — see `--machine-uid-file` above), `client_uid` (128-bit nonce, fresh per process start, shared by all of a parent's forks via copy-on-write), `fork_seq` (`-1` on this connection), `mode`, and `label` (`--name`, default hostname). The wire size is no longer fixed: `label` is length-prefixed (1 byte, 0–31), so `CONTROL_HELLO_WIRE_SIZE` was split into `CONTROL_HELLO_WIRE_MIN_SIZE` (empty label — the truncation-test boundary) and `CONTROL_HELLO_WIRE_MAX_SIZE` (full label — the buffer-sizing bound); `control_hello_encode` now takes an explicit `bufsize` and returns the actual bytes written rather than a constant. Server-side, `control_registry_register` also assigns a **`session_no`**: a monotonic `uint64_t` counter, never reused even across a slot's `unregister`/`register` cycle — unlike the registry's slot index (`0..MAX_CONTROL_SESSIONS-1`), which *is* recycled the moment a session disconnects. `session_no`, `label`, and the hex-encoded `machine_uid`/`client_uid` are surfaced through `control_session_info_t` into both the console `clients` command and `GET /api/v1/clients` (additive JSON fields, non-breaking — see *HTTP REST admin API* above). Because `label` is client-declared and never validated, `http_json_format_clients` escapes it (`json_escape_label`, `src/net/http_codec.c`) before embedding it in the JSON response — the hex UID fields need no escaping, being always `[0-9a-f]` by construction.
+- **`struct part`** (`src/core/part.h`): one puzzle piece.
+- **`map_big_array`**: 4D lookup table (top/right/bottom/left face colours → matching pieces), three redundant representations — `flat` (5.06 Mo), `packed` (compact index for the forward-check hot loop, 1.27 Mo), `bucket_id_mask` (bitmask for MRV, 0.46 Mo). Built once pre-fork and shared COW across search workers. Details, and the "reconverting the placement lookup to `packed` regressed, don't repeat it" history: [docs/architecture.md](docs/architecture.md), [docs/autosearch_step.md](docs/autosearch_step.md).
+- **`struct possibility_packet`** (`src/core/possibility.h`): full board state on the wire. **Has hidden compiler padding despite explicit field packing — never `memcmp`/hash the raw struct.**
+- **`File`** (`src/core/lifo.h`): doubly-linked queue of possibilities. **`big_table`**: flat, dynamically-growing result buffer.
 
-**Frame format.** A small, independent, heterogeneous-payload codec (`src/net/control_protocol.{h,c}`) — deliberately NOT reusing `packet`/`possibility_packet`, which only ever carries one payload shape (and whose `packed` struct still has hidden compiler padding — never memcmp/hash it raw, never put it on the wire without going through explicit fields). Every frame is `uint8_t cmd` + `int32_t len` + `len` bytes of payload, always through `send_all`/`recv_all` (never raw `send`/`recv`, which can transfer a frame partially and desync the whole stream — the same rule as the work protocol). `ctrl_recv_frame` rejects an out-of-range `len` (`< 0` or `> CTRL_PAYLOAD_MAX` = 4000) without ever attempting to allocate an attacker/corruption-controlled size.
-
-| `CTRL_*` command | Value | Meaning |
-|---|---|---|
-| `CTRL_PING` / `CTRL_ACK` | 1 / 2 | Keepalive, sent by the server when no command is pending (bounded by `tcp_timeout`, same `SO_RCVTIMEO` as the work protocol). |
-| `CTRL_GET_STATS` / `CTRL_STATS` | 3 / 4 | Server asks for the client's aggregated statistics; `control_stats_t` (shots/s, possibility/analysed stock, `max_result`, pruner checked/removed, pruner cells/s — summed across `fork_statistics[]`, the same source `build_thread_queues_table` uses for the console report) comes back. `pruner_cells_per_second` is the pruner's throughput analog to `shots_per_second` — the rate of cells studied by pruning (rmnonext/forward-check), 0 outside pruner mode. Sent either on an explicit request (`clientsStats`/`POST /api/v1/clients/stats`) or automatically, at most every `CONTROL_AUTO_STATS_INTERVAL_SEC` — see *Automatic stats polling* below. |
-| `CTRL_COMMAND` / `CTRL_RESULT` | 5 / 6 | Server pushes a console command line (text payload); the client executes it via `do_command_line()` (which already propagates to search forks via the existing `send_command_to_childs` IPC for commands flagged `send_to_childs = 1`) and returns an `int32` result code. |
-| `CTRL_GET_BEST_BOARD` / `CTRL_BEST_BOARD` | 7 / 8 | *(v10)* Server asks for the full representation (not just the count) of the best board known to the client (its forks' aggregate, `g_client_aggregate_best_board`); reply payload = `uint8_t valid` then, if `valid`, `sizeof(struct possibility_packet)` raw bytes (same convention as the work protocol's GET/ADD: struct copied as-is on the wire, valid for a same-build round-trip). Sent by `control_session_step` right after decoding a `CTRL_STATS` reply whose `max_result` exceeds the server's own best-known record — never unconditionally. |
-
-**Best board known (`CTRL_GET_BEST_BOARD`/`CTRL_BEST_BOARD`, v10, `src/core/best_board.h`).** Statistics (`max_result`/`control_stats_t.max_result`) only ever exposed the piece *count* at the record — never the board layout that produced it, since the backtracking board keeps mutating right after. `best_board_t` (mutex-protected, "only the first strictly-greater record wins", never overwritten by a tie) is reused at three independent scopes, none aware of the others: a search fork (`g_search_best_board`, updated in `etii_search.c`'s hot loop alongside `max_result`), the client PARENT process (`g_client_aggregate_best_board`, populated by `IPC_MSG_BEST_BOARD` — sent by a fork over the same Unix-domain socket as `IPC_MSG_STATS`, but only on a genuine local record, not every second), and the server (`g_server_best_board`, populated by its own genesis and by clients — pulled via `CTRL_GET_BEST_BOARD` the moment `control_session_step` sees a `CTRL_STATS.max_result` beat it, on the SAME connection, before returning to the ping loop). The server persists its aggregate alongside the rest of the stock (`best_board_save`/`best_board_load`, `./eternityII-best_board.back` / `./temp-best_board.back`, hooked into the same autobackup/stop-on-solution/`restore` call sites as `backup()`/`backup_analysed()`) and exposes it over `GET /api/v1/best-board` — a dedicated HTTP route, never folded into `/api/v1/stats`. That route decodes each `possibility_packet.grid[x][y]` raw index (`id + ETERN_PARTS*rotation`) into the actual piece placed — id, rotation, and its 4 border colours — via `g_server_rotate_parts` (`src/app/etii_server.c`, the same rotation table `runserver` already builds and shares with every `client_t.rotate_parts` for CSV solution export), so a consumer never has to reverse-engineer the internal indexing itself.
-
-**Two independent whitelist checks, not one.** Only a short list of console commands can be triggered remotely (`control_command_allowed`, `src/net/control_protocol.h`): `pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `clientsWork` — never `exit`, `restore`, `import`, or anything destructive. The last two are themselves SERVER-side commands (they act on `control_registry`, never on a client's own search forks): admitting them here is what makes them reachable from the HTTP admin API (`POST /api/v1/command`, see above) — on that API specifically, `clientsCommand`/`clientsCmd` needs a valid Bearer token like `pause`/`limit`/… (it is a modifying command), while `clientsWork` (a pure read) does not; this lecture/écriture split exists ONLY on the HTTP route (`control_command_read_only`, see above), never on this binary channel or the console. Admitting `clientsCommand`/`clientsWork` on the binary control channel too is harmless by construction, since `control_registry` is always empty on a client (only the server populates it via `INST_CONTROL_HELLO`) — pushing either to a client is therefore a silent no-op, the same reasoning already applied to `pause`/`resume`. This is checked **twice**, independently: server-side in the `clientsCommand` console interpreter (refuses to even broadcast a disallowed line) and, defense-in-depth, client-side again in `control_channel_handle_frame` (`src/app/etii_control.c`) before calling `do_command_line` — the client never trusts a `CTRL_COMMAND` payload just because it arrived on this socket. `restore`/`backup` (`control_command_privileged`, see *HTTP REST admin API* above) are **never** part of this — neither whitelist check ever consults that second list, so authenticating them on the HTTP admin API does not open any new path through this binary channel.
-
-**Server-side session bookkeeping (`src/app/control_registry.c`).** A control session shares its slot in the *same* `client_t[NB_THREADS]` pool as a normal work connection (see the capacity note in *Testing* above) — there is no separate pool of sockets. What IS separate is `control_registry`: a small bounded table (`MAX_CONTROL_SESSIONS`, 64) of session state — hello info, a per-session mutex + `pthread_cond_t` guarding a bounded queue (`CONTROL_SESSION_QUEUE_CAP`, 16) of pending commands. Console commands post into this queue and signal the condvar; `control_session_step` wakes immediately instead of waiting out the next ping interval.
-
-**Peer IP capture (`client_t.peer_ip`, `src/app/etii_server.c`).** The first, non-bumping step of the client-identification work: `runserver`'s `accept()` now captures the connecting `struct sockaddr_in` and formats it via `inet_ntop` into `peer_ip` (`PEER_IP_MAX_LEN` = 46, `src/app/static_variables.h` — sized for IPv6 even though `create_tcp_server` is IPv4-only today), stored on the `client_t` slot alongside `socket_id` in `try_assign_client_slot`. This is the one identity field the *server* derives itself rather than trusts from a client-declared hello, so it survives a client lying about anything else. When a connection later announces `INST_CONTROL_HELLO`, `client->peer_ip` is threaded through to `control_registry_register` and lands in `control_session_info_t.peer_ip`, from where both the console `clients` command and `GET /api/v1/clients` (`http_client_info_t.peer_ip`, a value **duplicated** rather than shared with `PEER_IP_MAX_LEN` — `src/net/http_codec.h` is deliberately dependency-free from `app/`) read it. No protocol bump: the IP is local server-side state, never sent on the wire in either direction.
-
-**Cached `CTRL_STATS` replies (`control_registry_record_stats`).** The registry also caches the last `control_stats_t` decoded for each session (plus the Unix timestamp it arrived at), reset to "no stats yet" on `register`/`unregister` so a slot reused by a different pid never leaks a stale reading. `control_session_step` writes into this cache immediately after a successful `CTRL_STATS` decode, right before the existing `log_info` line — the log line and the cache are two independent consumers of the same decoded reply, neither depends on the other. This exists purely so a synchronous reader with no way to wait on a specific session's condvar (the HTTP admin API's single accepter thread, see below) can read a client's last-known throughput without blocking on a live round-trip; `control_registry_snapshot` returns it alongside the existing hello/last-activity fields (`has_stats` flags whether it's populated).
-
-**Automatic stats polling (`control_registry_auto_stats_due`, `CONTROL_AUTO_STATS_INTERVAL_SEC` = 30s, `src/app/static_variables.h`).** Before this, `control_session_step` only ever sent `CTRL_GET_STATS` in response to an explicitly queued command (`clientsStats` console, or `POST /api/v1/clients/stats`) — absent that trigger, the timeout branch sent nothing but `CTRL_PING`/`CTRL_ACK` keepalives. Since the best-board pull (`CTRL_GET_BEST_BOARD`, above) only fires on the *receipt* of a `CTRL_STATS` whose `max_result` beats the server's own record, a new client-side record could sit unsynchronized on the server indefinitely — observed in practice as needing to run `clientsStats` manually, sometimes minutes after the record appeared, before `GET /api/v1/best-board` reflected it. `control_session_step`'s timeout branch now checks `control_registry_auto_stats_due(session_index, CONTROL_AUTO_STATS_INTERVAL_SEC)` first: when due, a `CTRL_GET_STATS` round-trip (factored into `control_session_poll_stats`, shared with the explicit-command path) replaces that tick's `CTRL_PING`, so a fresh record propagates within one interval without any operator action. The due-check and the "mark as attempted" write are atomic under the per-session mutex (`control_registry.c`), independent of `stats_time` (which only moves on a *successful* decode) so a transient failure doesn't cause the next tick to retry immediately.
-
-**Console commands** (`src/ui/command_lines.c`), server-only in practical effect (`send_to_childs = 0` for the `clients*` ones — they act on the registry, not on a client's own forks; `pause`/`resume` are shared with the client role, see below):
-
-| Command | Effect |
-|---|---|
-| `clients` | Lists active control sessions (session_no, declared label, pid, fork count, mode, machine_uid/client_uid, last activity) via `control_registry_snapshot`. |
-| `clientsStats` | Broadcasts `CTRL_GET_STATS` to every active session; each reply is logged (`stats client : coups/s=… stock=… …`) **and** cached in `control_registry` (`control_registry_record_stats`) — the same cache the HTTP admin API's `GET /api/v1/clients` reads, so a console `clientsStats` and an HTTP `POST /api/v1/clients/stats` are interchangeable triggers for the same underlying refresh. |
-| `clientsCommand [--to <session_no\|client_uid\|label>] <line>` (alias `clientsCmd`) | Pushes `CTRL_COMMAND <line>` to a single targeted session (`--to`, PR3) or, by default (no `--to`), broadcasts to every active session — **after** checking `control_command_allowed` on the first word in both cases: refused lines are never sent, and targeting a session never widens the whitelist. See *Command addressing* below. |
-| `pause` / `resume` | Sets/clears the LOCAL `REQUEST_ADMIN_PAUSE` **and** broadcasts `CTRL_COMMAND "pause"/"resume"` to every active control session (see below). |
-| `knownClients` | Lists known **machines** (PR4, `known_clients_registry_snapshot`) — includes disconnected ones (unlike `clients`), with cumulative connection count, pruner totals, peak `max_result` and connected/disconnected status. See *Known clients registry* above. |
-| `clientsWork <session_no\|client_uid\|label>` | **(PR6)** Reports what a specific client currently holds in the server's "analysed" pool (count + highest `alloc`). Target resolved exactly like `clientsCmd --to` (refused if unknown/disconnected/ambiguous). Pure read of server-side state — never a round-trip to the client. See *Attribution of in-progress analyses* below. |
-| `leaseDuration <n>` | **(PR7)** Sets `analysed_lease_seconds` (default `ANALYSED_LEASE_DEFAULT_SECONDS` = 300s), the *minimum* age before an attributed possibility becomes eligible for reclaim — a client with a live control-channel session is never reclaimed regardless of elapsed time. `<n> <= 0` disables the lease entirely (same convention as `limit 0`). Only affects possibilities attributed *after* the change. See *Expiration lease on in-progress analyses* below. |
-
-**`pause`/`resume` double as the remote broadcast (former `clientsPause`/`clientsResume`, now merged in).** On a **client**, the server never opens a control session against it in the "wrong" direction, but the local admin-pause transition is what actually matters (it pauses that process's own search). On the **server**, the local transition is a no-op — `request` is only ever consulted by `autosearch()` (`src/core/etii_search.c`), which the server process never runs — so without the broadcast, `pause` on the server console would do nothing observable. `pause_interpreter`/`resume_interpreter` (`src/ui/command_lines.c`) therefore call `control_registry_broadcast_command` unconditionally, on both roles: on a client, `control_registry` is always empty (only the server populates it, via `INST_CONTROL_HELLO`), so the call is a silent no-op (`n == 0`); on a server, it actually reaches every connected client. This also benefits from **persisted desired state** (`control_registry_desired_pause_state`, `src/app/control_registry.c`): a server-side `pause` sets a registry-global "desired state" flag, and any client that connects *afterward* has `CTRL_COMMAND "pause"` pre-queued at `control_registry_register` time — so a fleet that scales up mid-pause doesn't need the command replayed. `clientsCommand pause`/`clientsCommand resume` remain available too (same whitelist, same effect on the desired state) for scripting that wants the generic path.
-
-**Command addressing (`clientsCmd --to`, PR3).** `control_registry_send_command_to` (`src/app/control_registry.c`) resolves a `--to <target>` argument to exactly one active control session, tried in order as: a decimal `session_no`; a hex `client_uid` (exact length); a declared `label`. `session_no` and `client_uid` are both identifiers **never reassigned** to a different owner (unlike the registry's slot index, which is recycled the instant a session disconnects), so resolving by either can never hit the wrong client — the target session either still exists under that same identity, or it's gone and the command is refused as unknown/disconnected, never silently redirected to whatever now occupies the same slot ("session_no is not a slot"). `label` is **not** guaranteed unique (two clients may share the same `--name`), so a target matching more than one active session is refused as ambiguous rather than picking one arbitrarily. The whitelist check (`control_command_allowed`) runs on the command line **before** target resolution, exactly as for the broadcast path — targeting a session never expands the set of remotely-triggerable commands. `clients_cmd_interpreter` parses `--to <target>` itself (a plain token scan ahead of the existing `strtok(NULL, "")` remainder, since the target must not contain a space — a `session_no`/`client_uid` never does, and a spaced `label` must be targeted some other way); resolution and posting happen under the same `g_registry_mutex` as `control_registry_broadcast_command`, so no concurrent disconnect can reassign the slot between the two. Only `clientsCmd` gained `--to`: `pause`/`resume` remain broadcast-only (their local effect is process-wide, not per-session). `POST /api/v1/command` (HTTP admin API) gained the same `--to` targeting once `clientsCommand`/`clientsCmd` joined `control_command_allowed` (see *HTTP REST admin API* above): a dedicated reentrant parser in `admin_apply_remote_command` (`src/ui/command_lines.c`) re-implements this exact "--to <target>" parsing over a `strtok_r`-owned buffer instead of calling `clients_cmd_interpreter` — that function's own `strtok(NULL, "")` uses the process-global cursor, which a concurrent HTTP call must never touch, the same rule that already keeps `pause`/`limit`/… inlined there instead of delegating to their console interpreters.
-
-**Known clients registry (PR4, `src/app/known_clients_registry.{h,c}`).** A **second**, independent server registry — deliberately distinct from `control_registry` above — indexed by `machine_uid` rather than by session slot. `machine_uid` is chosen over `client_uid` as the cumulation key specifically because `client_uid` is a nonce drawn fresh on every process start (never persisted): keying on it would turn every client restart into a brand-new "unknown machine" and fragment the cumulative history. `machine_uid` is read from a local file (`--machine-uid-file`) and survives a client restart, making it the only identity stable enough to back a cumul that must itself survive a *server* restart too (see persistence below). Where `control_registry` is emptied on every disconnect (it exists to *pilot* live sessions), this registry is **never** emptied on disconnect (it exists to *measure*): an entry stays visible, flipped to "disconnected", until the registry's bound (`MAX_KNOWN_CLIENTS`, `src/app/static_variables.h` — `4 * MAX_CONTROL_SESSIONS` = 256, expressed as a multiple rather than an independent constant because the number of *simultaneously* known machines can never exceed `MAX_CONTROL_SESSIONS` in the first place — see its comment above — so the only pressure on this bound is historical churn, not the instantaneous peak) forces its eviction — LRU among **disconnected** entries only, an actively-connected machine is never a candidate. `known_clients_registry_on_connect`/`_on_stats`/`_on_disconnect` are called from the same three `etii_server.c` call sites as `control_registry_register`/`control_registry_record_stats`/`control_registry_unregister` (the identity needed at the latter two is resolved from the session index via the new `control_registry_get_identity` accessor). The one subtlety: `control_stats_t.pruner_checked`/`.pruner_removed` are **per-process** counters that restart at 0 on every client reboot, so a machine's cumulative total is computed by **increment** (`known_client_session_t.last_pruner_checked`/`.last_pruner_removed`, reset to 0 on `on_connect`) rather than by taking the raw value — a client that restarts keeps growing its machine's total instead of regressing it. `best_max_result` is a peak (never replaced by a lower value), matching `best_board_t`'s "first strictly-greater wins" convention. A `machine_uid` can have several concurrent sessions (e.g. a search client and a pruner on the same host), tracked in a small bounded per-entry array (`KNOWN_CLIENT_MAX_SESSIONS`, 8) keyed by `client_uid`; overflowing it only degrades that one session's cumulation (logged), never the network session that triggered the call — this registry is purely observational and must never be able to fail a real exchange. Exposed by the console `knownClients` command and `GET /api/v1/known-clients` (see *HTTP REST admin API* above).
-
-**Persistence of the cumul (PR5, `known_clients_registry_save`/`_load`, `src/app/known_clients_registry.{h,c}`).** A dedicated `.back` file, hooked into the **same** call sites as the rest of the stock: the autobackup tick (`check_server_step`, `./temp-known_clients.back`), `--stop-on-solution` shutdown and the console `backup` command (`./eternityII-known_clients.back`, `DEF_KNOWN_CLIENTS_FILE` in `src/ui/command_lines.c`) for the write side, and the console `restore` command for the read side — never an automatic load at server startup, matching `best_board_load`'s existing behaviour. Only the **cumulative** fields are written (`known_client_record_t`: label/peer_ip/mode/totals/timestamps) — never the live-session fields (`nb_active_sessions`, `sessions[]`), which make no sense after a restart, the same reasoning that keeps PR7's future leases out of persistence (section 4.7 of the design doc). Loading is a **merge**, not a `restore()`-style wholesale replacement: a `machine_uid` already present in the live registry (a client reconnected before the operator ran `restore`) has the file's cumulative counters **added** to what's already in memory (never overwritten, so a load can't regress a cumul already growing since server start) while its live `label`/`peer_ip`/`mode`/connected status are left untouched (more recent than a persisted file by construction); a `machine_uid` absent from the live registry gets a brand-new **disconnected** entry seeded from the file. Forward-tolerant read, like the rest of this feature's read paths: an absent file, an unreadable one, or one whose header magic (`KNOWN_CLIENTS_FILE_MAGIC`) doesn't match returns an error and leaves the in-memory registry untouched (`known_clients_registry_load` returns -1, logged by the caller as a non-fatal warning — exactly like `best_board_load`'s existing failure handling in `restore_apply`); a file truncated mid-record applies every record read up to the truncation point and returns success rather than failing the whole load. Wire format is explicit fixed-width fields (`known_client_record_t`), not a raw struct with compiler padding — same rule as `control_protocol.h`, applied here even though this is a local file rather than a network payload, since `time_t`/`int` width is build-dependent.
-
-**Attribution of in-progress analyses (PR6).** Before this, every possibility handed out by `INST_GET`/`INST_GET_TO_CHECK`/`INST_GET_TO_CHECK_BATCH` was recorded via `add_possibility_analysed(&pkt, -1)` — the `-1` meaning "no owner", the same call used client-side (with a real thread index, an unrelated meaning of the parameter) and by `import_analysed`/`restore_analysed` when reloading a backup. "Who is client X currently working on?" had no answer. The fix is a **side table riding along `datamanager.c`'s existing `analysed_index`** (the hash index that already accelerates `remove_possibility_analysed`, see *Compact index for the hot loop*-adjacent comments in `datamanager.c`) — deliberately **not** a new field on `possibility_packet` (wire format + backups + the struct's hidden padding, see `possibility-packet-struct-padding`) and **not** a third meaning stacked onto the already-overloaded `thread` parameter. Each `AnalysedIndexNode` gained an optional `owner_uid`/`has_owner` pair: `add_possibility_analysed_owned(possibility, thread, client_uid)` (`src/core/datamanager.{h,c}`) is `add_possibility_analysed`'s twin that also records it, and `record_possibility_analysed_for_client` (`src/app/etii_server.{h,c}`) is the single call site all three server GET paths route through — it calls the owned variant when `client->has_identity` (an `INST_CLIENT_HELLO`, v12, was received on that work connection) and falls back to the plain, unattributed call otherwise (an older client, or a hello not yet received), exactly the pre-PR6 behaviour. Consultation ("what does X hold?") is `datamanager_analysed_owned_by(client_uid, &count, &max_alloc)`: a bounded scan of `analysed_index` across all `NB_FILE_POSSIBILITY` files/buckets under the same per-file lock as every other access — deliberately a blocking `pthread_mutex_lock`, not the `trylock` used elsewhere in that file, since this is a diagnostic/console path that wants an exact answer, not to yield the CPU. Like the index itself, this table is **not persisted and not a source of truth beyond best-effort**: a possibility restored from a backup, or one whose index node failed to allocate (OOM, already tolerated by `remove_possibility_analysed`'s linear-scan fallback), is simply absent from the count for every `client_uid` — never a `possibility_packet` corruption. Exposed by the console command `clientsWork <target>` (`clients_work_interpreter`, `src/ui/command_lines.c`), which resolves `<target>` via a new **read-only** twin of the PR3 addressing resolver, `control_registry_resolve_client_uid` (`src/app/control_registry.{h,c}`) — same three-step resolution (`session_no` → `client_uid` → `label`), same refusal on unknown/ambiguous, but it never posts a command (unlike `control_registry_send_command_to`), matching this feature's read-only nature. PR7 builds the **write** side on the same table: an expiration lease (`lease_deadline`) that automatically returns a dead client's stock to the pool — see below.
-
-**Expiration lease on in-progress analyses (PR7).** Before this, a client that died mid-analysis (`kill -9`, network drop, machine failure) without acknowledging what it held froze that share of the stock indefinitely — the only recourse was the console's all-or-nothing `restockAnalysed`. PR7 adds a `lease_deadline` to the **same** `AnalysedIndexNode` PR6 introduced (`src/core/datamanager.c`): `add_possibility_analysed_owned` now also stamps `time(NULL) + analysed_lease_seconds` on every owned insertion (`0` = lease disabled, when `analysed_lease_seconds <= 0` — same convention as `limit 0`). A possibility with no known owner (older client, or reloaded from a backup) never gets a lease and therefore never expires by this mechanism. Leases are never persisted: their owner (`client_uid`) is tied to one process execution and never survives a restart anyway, so a possibility restored from a `.back` file is simply treated as unattributed (same as before this feature). `analysed_lease_is_expired(lease_deadline, now)` is a **pure** predicate (never reads the real clock — `now` is always a caller-supplied parameter, which is what makes it testable without `sleep`), and `datamanager_reclaim_expired_leases(now, owner_alive)` (`src/core/datamanager.{h,c}`) is the sweep: it walks `analysed_index` exactly like `datamanager_analysed_owned_by` (one file-scoped lock at a time, never all files together) and, for every node that is both expired AND not-alive, moves it from the analysed `File` back into the unchecked stock — mirroring `restock_analysed`'s two-phase shape (all index/`File` work under the analysed file's lock, then the stock insertion under the stock's own lock, so the two locks are never held together). `check_server_step` (`src/app/etii_server.c`) calls it once per statistics tick (10s, the same cadence as autobackup and record detection) with a single `time(NULL)` read — never inside the search hot loop.
-
-**Correctif : the deadline alone is not a valid death signal — a liveness check was added after real-world testing surfaced two bugs.** (1) Nothing bounds how long an analysis can legitimately take, so a busy-but-alive client (still answering `CTRL_PING`/`CTRL_STATS` on its control channel) had its work reclaimed the moment the fixed budget passed, with no relation to actual liveness. (2) A client whose work is reclaimed while still alive eventually submits results for a possibility that has already gone back to the pool (and possibly been re-served to another client), duplicating exploration of the same branch. `datamanager_reclaim_expired_leases` therefore takes a second parameter, `analysed_owner_alive_fn owner_alive` — a possibility is only reclaimed when **both** `analysed_lease_is_expired(...)` **and** `!owner_alive(owner_uid)` hold. `check_server_step` passes a small wrapper, `owner_control_session_alive`, which delegates to `control_registry_has_active_client(client_uid)` (`src/app/control_registry.{h,c}`, PR7 correctif): as long as the client's control-channel session stays registered — direct proof of life via the regular ping/pong and `CTRL_STATS` traffic — its work is **never** reclaimed, no matter how long a possibility takes; only a confirmed disconnect (`run_control_session` calls `control_registry_unregister` when its session loop ends) lifts that protection. `datamanager.c` (`core/`) deliberately does not depend on `control_registry.h` (`app/`, server-only) — the caller supplies the callback (`owner_alive == NULL` falls back to deadline-only, useful for tests that don't want to spin up a session registry), keeping the sweep unit-testable in isolation.
-
-**Idempotence under a concurrent acknowledgement** (the subtle part the design doc calls out): the sweep and `remove_possibility_analysed` (a normal client ack, or `requeue_last_sent_possibility` on disconnect) both take the *same* per-file lock before touching the index, so they're strictly serialized — whichever removes the entry first "wins", and the other either finds nothing to reclaim (no stock duplication) or gets `remove_possibility_analysed`'s existing "not found" return (1), which `requeue_last_sent_possibility` already treats as "already handled, nothing to requeue" without any code change on that path. Configurable via the console command `leaseDuration <n>` (`analysed_lease_seconds`, default `ANALYSED_LEASE_DEFAULT_SECONDS` = 300s, `src/app/static_variables.h`) — with the liveness check in place, this duration no longer needs to cover the worst-case analysis time (a pruner with a large `prunerBatch`, up to `PRUNER_BATCH_MAX` = 65536, being the majorant case); it now only bounds the delay before the *first* liveness check of a possibility held by an already-disconnected client. `<n> <= 0` disables the lease entirely. A duration change only affects possibilities attributed *after* the change — those already in flight keep the deadline computed at their own insertion.
-
-**Administrative pause (`REQUEST_ADMIN_PAUSE`, `src/app/static_variables.h`).** The pre-existing `REQUEST_PAUSE` belongs to the throughput regulator (`control_step`, `etii_client.c`): it's auto-lifted the instant a thread goes idle or the measured rate drops back under `max_search_by_sec`. Reusing it for a remotely-triggered pause would make it evaporate on the very next regulation tick. `REQUEST_ADMIN_PAUSE` is a distinct value that only the `pause`/`resume` console commands (locally, or remotely via a server-side `pause`/`resume` → `CTRL_COMMAND`, see above) ever set or clear — `control_step`'s strict `== REQUEST_PAUSE` comparisons never touch it. The search hot loop's existing per-node check (`request != REQUEST_CONTINUE`) already covers it for free; two small predicates, `request_is_pause()` (`REQUEST_PAUSE` or `REQUEST_ADMIN_PAUSE`) and `request_keeps_running()` (anything but `REQUEST_STOP`), keep the call sites readable without adding any new global state to watch.
-
-### Dynamic variable order (MRV) — measured favorable, not yet the deployment default
-
-The search no longer fills cells in the fixed `dirx[]`/`diry[]` order: at every node it picks the **most constrained empty cell** (MRV, *minimum remaining values*). `search_packet_backtracking_mrv` (`src/core/etii_search.c`) is the fully-implemented, delegation-capable engine — but **not the default**: `mrv_enabled` defaults to 0 (`MRV_DEFAULT_ENABLED`, `src/app/static_variables.h`), so `search_packet_backtracking_core` (fixed order, historical engine — also what the pruner's budgeted closure proof replays, §4.6b) still runs unless `ETII_MRV=1` is set. This is a **deployment decision, not a measurement verdict**: MRV is measured favorable (see below) but switching a whole deployed fleet's search engine by default needed more runway. `ETII_MRV=1`/`ETII_MRV=0` (read once at startup like `ETII_BENCH_NODES`, hence no `cli_topics[]` entry) toggles it without rebuilding.
-
-The metric that decided adoption is **not** throughput or `max_result`, but the cost of **refutation** — proving a possibility dead — measured on a REAL server stock at equal CPU time (`tests/bench/bench_refutation.c`, `make bench-refutation`): out of 120 roots sampled evenly from a live server's stock, MRV closes **79**, the fixed order closes 20, and the fixed order fitted with only the global dead-cell scan (`global_dead_check`, see the ablation below) closes 52 — roughly **4× more stock resolved per CPU-second**. Throughput itself is *not* the metric of this change (see [docs/tests_et_ci.md](docs/tests_et_ci.md#max_result--le-débit-seul-ne-prouve-pas-un-vrai-gain)). **Do not repeat the claim that the wall at `max_result` ≈ 74 was an artefact of the fixed ORDER** — it was an artefact of the `bench_search.sh` **measurement protocol**: single-process, from the genesis, no stock, no delegation, so one DFS stays trapped in the leftmost subtree. Against a real server a *fixed-order* client reaches `max_result` = 186 and delegates packets holding 153 placed pieces (an MRV client reaches 209, delegating up to 186 — verified end-to-end against a real 256-piece server, zero inconsistent or non-canonical packets across 29 481 delegated ones). What holds: under an identical protocol (the bench), MRV reaches 186 where the fixed order caps at 74. What does not: inferring a property of the engines outside the bench, or that a mechanism "never fires because depth stays capped at 74" — §4.4 and §4.6b were discarded on exactly that now-corrected premise. **§4.6b has since been re-measured** (`--pruner-profile <n>`, `tests/bench/bench_refutation.c`, replaying the real `autoprune_step` pipeline — superficial check, then the budgeted DFS proof only for possibilities judged alive and not yet `checked` — on real server stock): the original "0 % closure at any budget" verdict was wrong for the same reason as the max_result wall — the DFS proof closes an additional +4.6 to +5.6 percentage points beyond the free superficial check (itself already at 50.2 % on real stock), reproduced on a second stock. `PRUNER_DFS_BUDGET_DEFAULT` stays at 0 regardless — same deployment-caution rationale as `MRV_DEFAULT_ENABLED` — but the "mechanism is useless" premise is corrected; see [docs/conception/elagage_recherche.md](docs/conception/elagage_recherche.md) §4.6b and [docs/tests_et_ci.md](docs/tests_et_ci.md#mode---pruner-profile--rejoue-le-vrai-pipeline-du-pruner) for the full table. **§4.4 (singleton conflict) has also been re-measured**, with the opposite outcome from §4.6b: `singleton_conflict_check` (`src/app/static_variables.h`, lives inside `bt_forward_check` so it applies to both search engines) genuinely fires on real stock (35 056 to 134 565 times across 120-root samples, direct counter reads, not inferred) — but exclusively inside subtrees too large to close under any tested budget, never on the roots that actually close, so `fixe`/`fixe+singleton` close the identical root set with identical node counts on the paired subset. Aggregate throughput cost is confirmed across three independent measurements on two stocks: −9.5 to −11.4 %, consistent with the original −9 % on the synthetic protocol. **Verdict unchanged (do not merge), premise corrected**: not "never fires," but "fires deep in unclosable subtrees, never where it would help, while still costing every call." §4.5 (forced-cell propagation) remains the one mechanism not yet re-measured on real stock.
-
-**What makes the choice affordable** (the PR 9 prototype ran at 23 k nodes/s, −99.7 %): the scan is restricted to **frontier** cells — a cell whose 4 sides are all `all_face` is constrained by nothing and can never be the minimum while a constrained cell exists, and the test is a read of the `constraints[][]` cache the engine already maintains (29 frontier cells on average, max 52, versus 256 scanned by the prototype) — and counting free candidates is a **`popcount`** against `bucket_id_mask` instead of a walk of the bucket's entries (independent of bucket size; the board's used-piece mask is mirrored into 64-bit words by `mrv_used_init`/`_set`/`_clear`, built by explicit shifts, never by reinterpreting `b_faceused`'s memory, which would depend on endianness). The scan stays **complete** (no early exit on a single-candidate cell): any frontier cell with zero free candidates is detected in passing, a death test strictly wider than the local forward-check, free since the scan happens anyway. The per-cell incremental count sketched in the design doc was deliberately **not** implemented: a `faceused` change can alter the count of *any* cell whose bucket contains that piece, so incremental maintenance also costs O(frontier) per placement — the same order as recomputing on demand once that recompute is a few `popcount`s — for an extra place/undo symmetry to keep exact (the very class of bug §4.5 warns about).
-
-**Delegation and interoperability: no `VERSION` bump.** Since stack depth is no longer the traversal cursor, every materialised packet is **re-canonicalised** by `bt_canonicalize_packet`: `alloc` becomes the index of the first empty cell in `directions[]` order (reusing `normalize_possibility_packet`, which also realigns `x`/`y`). Cells filled beyond the cursor are exactly the case the format already documents ("fixed indices", replayed as decision-less levels), so a packet ceded by an MRV client is indistinguishable from one produced in fixed order — a mixed fleet (MRV clients, fixed-order clients, pruners, existing `.back` files) shares one server unchanged. `bt_level` therefore carries its level's `(x, y)` instead of deriving it from `dirx[depth]`, and `bt_count_pending`/`bt_materialize_pending`/`bt_delegate_if_needed`/`bt_flush_pending` are shared verbatim by both engines behind a `dynamic_order` flag — one delegation semantics, tested once. Locked by `search_backtracking_mrv_delegation_preserves_solution_count` (`tests/core/test_etii_search.c`): a real 4×4 MRV exploration interrupted mid-flight, its remaining work resumed **in fixed order** to exhaustion, total solution count rigorously equal to an exhaustive fixed-order run (and it fails against a build without re-canonicalisation — verified). The bucket-mask index has its own exhaustive equivalence lock, `bucket_id_mask_matches_flat_for_every_key` (`tests/core/test_part.c`), since a divergence would silently change both the chosen cell and the death test.
-
-### Core Data Structures
-
-- **`struct part`** (`src/core/part.h`): one puzzle piece — `id`, `top/right/bottom/left` face colours, `rotation`.
-- **`struct array_part`**: flat array of parts.
-- **`map_big_array`** / **`big_array`**: 4-dimensional array indexed by `(top, right, bottom, left)` face values, used as a fast lookup map from required edge colours → matching pieces. Holds **three representations of the same data**: `flat` (`sizearray^4` × `struct array_part`, 5.06 Mo on the 256-piece puzzle) read by `get_parts_bigarray*`, `packed` (`sizearray^4` × `uint32_t` packing `{offset:16 | size:16}`, offset relative to `arena`, 1.27 Mo) read by `map_bucket_packed` — see *Compact index for the hot loop* below — and `bucket_id_mask` (bitmask of the piece **ids** of each bucket, indexed by arena offset, 0.46 Mo) read by `map_bucket_id_mask`/`map_mask_free_count` for the MRV cell choice — see *Dynamic variable order* below.
-
-**Compact index (`packed`, `map_bucket_packed`).** On the 256-piece puzzle only **1.9 %** of the 331 776 buckets are non-empty (arena: 14 401 pieces = 0.11 Mo; biggest bucket: 784), so **98 % of the 5 Mo swept by the hot loop is padding** — and `bt_forward_check` (`src/core/etii_search.c`) does up to `FORWARD_CHECK_K` (6) random lookups per candidate placed, most of them just to read a 4-byte count. `packed` re-encodes each bucket as a single `uint32_t`, cutting the table to 1.27 Mo (**3.8×**) so one cache line carries 16 buckets instead of 4. Measured on the 256-piece puzzle (`tests/bench/bench_search.sh`, i9-9880H): **+10 %** at 1 worker, **+29 %** at 16 concurrent workers (16 × 1.27 Mo fits the 16 Mo L3, 16 × 5.06 Mo does not). Points to keep in mind when touching this:
-  - `packed` is **purely redundant** — it never holds anything `flat` doesn't. `map_bucket_packed` returns strictly the same size and the same pieces as `get_parts_bigarray_with_key` for every key (locked by `packed_index_matches_flat_for_every_key`, `tests/core/test_part.c`, which sweeps *all* keys). A divergence would silently change which nodes the search explores.
-  - **Only `bt_forward_check` reads it** — 6 lookups out of 7 in the hot loop. The placement lookup (`stack[top].search`, `etii_search.c`) and every other caller still use `get_parts_bigarray*` on `flat`, so all existing signatures and hand-built test fixtures are untouched.
-  - **Converting the placement lookup as well was implemented, measured and reverted** (PR #161, undone by `revert/placement-lookup-packed`). Routing `stack[top].search` through `map_bucket_packed` too takes `flat` out of the hot path entirely and drops the loop's shared working set from 6.44 Mo (`packed` + `arena` + `flat`) to 1.38 Mo (**−79 %**) — and buys **nothing**. Paired, order-alternating (ABBA) A/B on an i9-9880H: **1 worker −0.9 %**, 95 % CI [−3.8 %, +2.0 %] (mode `test`, 20 M nodes, 6 pairs) and **16 forks −0.7 %**, CI [−3.5 %, +2.2 %] (real client+server, aggregated shots/s). The converted build even measured slightly *worse* on a Pentium G2020 (LLC misses +49 %, L1 misses +18 %, wall time +3.3 % — single runs, not repeated); since the cache delta accounts for only ~0.24 % of the runtime (see below), that regression is not a memory effect at all — the likeliest cause is the 16-byte `map_bucket` stored **by value** into `stack[top]` on every node where the old code stored an 8-byte pointer, plus 2 Ko more automatic C stack.
-  - **The search loop is compute- and branch-bound, NOT memory-bound — measure before optimising the working set again.** `perf stat` on a Pentium G2020 (Ivy Bridge, 2 cores, 256 Ko L2/core, 3 Mo L3) settles it, and the decisive figure is an **absolute** one, not a delta: over a 4.64 s run (≈ 13.4 G cycles at 2.9 GHz), 2.92 M `L1-dcache-load-misses` (≈ 35 M cycles at ~12 cy) plus 265 k LLC misses (≈ 53 M cycles at ~200 cy) together account for **under 0.7 % of the runtime**. That is ≈ **0.2 L1 misses per node for 7 lookups per node**: the genuinely hot subset of the map is small enough to live in L1 (32 Ko), so shrinking the *table* from 5.06 Mo to 1.27 Mo cannot pay on any cache hierarchy — large L2, small L2, many cores or few. Any future working-set change on this loop must be preceded by a `perf stat` showing the memory hierarchy to be a non-trivial fraction of the runtime; today it is not.
-  - **Why `packed` paid for the forward-check but not for the placement lookup** — read PRs #157, #159 and #161 as a single story before re-opening this. #157's **+29 %** was measured on 16 **independent processes**, each holding its own private copy of the map: the pressure was 16 × 5.06 Mo vs 16 × 1.27 Mo, i.e. **duplication**, not table size. #159 (COW sharing, see *Lookup map shared across the search processes* above) removed that duplication outright — a single 6.44 Mo copy for the whole machine, already cache-resident. #161 therefore optimised a working set that had not been under pressure since #159, and measured exactly that. **Corollary for hardware sizing: cache capacity is not a selection criterion for this program** — maximise integer cores per euro, per-core IPC and branch prediction instead.
-  - **`packed == NULL` is a supported state, not an error**: `map_bucket_packed` then falls back to `flat`. That is what lets a hand-built `map_big_array` fixture (`tests/core/test_etii_search.c`, …) work unchanged, and it is also the **capacity guard** — `build_packed_index` (`src/core/part.c`) refuses to build the index rather than truncate when the arena or the biggest bucket exceeds 16 bits (`map_packed_fits`, unit-tested at the exact 65535/65536 boundary). A hypothetical larger puzzle degrades to the old lookup instead of corrupting the search. Invariant: `packed != NULL` ⇒ `arena != NULL`.
-  - A **bitmap of bucket occupancy** (41 Ko, 1 bit per bucket, L1-resident) was implemented and measured on top of this: it is a **−4 % regression** and was dropped. Forward-check passes ~54 % of the time, so most inspected cells hit a *non-empty* bucket and would pay two random loads (bitmap + `packed`) instead of one. Don't re-try it without a workload where empty buckets dominate.
-  - `src/app/gpu_pruner.cu` is unaffected: it reads `flat`/`arena` (whose layout is unchanged) and already builds its own device-side equivalent (`flat_off`/`flat_size`).
-- **`struct possibility_packet`** (`src/core/possibility.h`): the full board state passed between client and server — current position `(x, y)`, the 16×16 grid of placed piece IDs, bitmask of used pieces (`b_faceused`), and an `alloc` counter.
-- **`File`** (`src/core/lifo.h`): doubly-linked list used as a queue of `possibility_packet` objects.
-- **`big_table`** (`src/core/lifo.h`): dynamically-growing flat array used as a high-performance result buffer.
-- **`client_possibility_t`** (`src/app/etii_client.h`): per-search-thread context holding its queue, map, socket, and counters.
-
-### Key Module Responsibilities
+### Key module responsibilities
 
 | File | Responsibility |
 |---|---|
-| `src/app/main.c` | Entry point; dispatches to server/client/test modes; builds the shared lookup map before forking and manages fork lifecycle (signal handlers & runtime bootstrap live in `app_runtime.c`) |
-| `src/app/app_runtime.c` | Process plumbing extracted from `main.c` to be unit-testable: signal handlers/installers (`signal_end_handler`, `sigchld_handler`, `init_signals`, `configure_child_signals`, `wait_child`, …) and runtime bootstrap (`init_counters`, `init_childs`, `failed_arg`) |
-| `src/core/possibility.c` | Core search logic: generating, checking, and stepping through board possibilities |
-| `src/core/best_board.c` | `best_board_t`: mutex-protected "first strictly-greater record wins" board recorder, reused at three scopes (fork-local, client-parent aggregate, server aggregate) — see *Control Channel* below and `GET /api/v1/best-board` |
-| `src/core/etii_search.c` | `autosearch()` — the inner search loop run by each thread; two variable orders sharing one delegation path (`search_packet_backtracking_mrv`, dynamic/MRV, and `search_packet_backtracking_core`, fixed order — the deployment default) — see *Dynamic variable order (MRV)* below |
-| `src/app/etii_client.c` | Client orchestration: spawns search threads, manages their lifecycle; owns `search_parts_t`/`acquire_search_parts` (map inherited from the parent vs. built locally) |
-| `src/app/etii_server.c` | Server: accepts TCP connections, distributes/collects possibilities; also hosts `run_control_session`/`control_session_step` (control-channel sessions, see *Control Channel*) |
-| `src/app/etii_control.c` | Client-side control channel: `run_control_channel` (parent-only thread, reconnect/back-off, hello, service loop) and `control_channel_handle_frame` (testable per-frame handler, defense-in-depth whitelist check) |
-| `src/app/control_registry.c` | Server-side registry of active control sessions: hello info + per-session bounded command queue (mutex + `pthread_cond_t`) + cached last `CTRL_STATS` reply (`control_registry_record_stats`), independent of the `client_t` socket pool |
-| `src/app/known_clients_registry.c` | Server-side registry of known **machines** (PR4): cumulative totals keyed by `machine_uid`, survives disconnection (bounded, LRU-evicted among disconnected entries only) — independent of `control_registry`, see *Known clients registry* above |
-| `src/app/client_config.c` | Client configuration file (`--config-file`): tolerant key=value parsing/loading, atomic `.tmp`+`rename` saving, and applying loaded keys to the CLI-priority globals (`client_config_apply_to_globals`) — see *`--config-file`* above |
-| `src/app/fork_gate.c` | Cooperative quiescence infrastructure: participant registration, fast-path checkpoint, `mark_blocked`, `request_quiesce`/`release_quiesce`, IO-lock primitives — see *Quiescence infrastructure* above |
-| `src/app/fork_orchestrator.c` | Deferred-start state machine: pure `orchestrator_step`, the tick-driven `fork_orchestrator_run` loop (replaces `wait_child`), `orchestrator_spawn_forks` (the real per-fork-quiesced `fork()`), staged config — see *Deferred-start orchestrator* above |
-| `src/net/http_codec.c` | Pure HTTP/1.1 admin API layer: request parsing, route resolution, response/JSON formatting (`http_json_format_stats/status/clients/best_board/known_clients/stock_distribution`) — no socket, no allocation |
-| `src/net/http_server.c` | Socket/thread shell of the admin API: `accept()` loop, per-request dispatch (`handle_http_connection`), and the `http_*_collect` functions that pull live server/registry state into the `http_codec.h` view structs |
-| `src/core/datamanager.c` | 10 mutex-protected possibility queues; backup/restore to `.back` files; `datamanager_stock_distribution` (per-`alloc` histogram, shared by the console `statistic` and `GET /api/v1/stock-distribution`); RAM cap enforcement (`put_to_pool`) and the two narrow `datamanager_pool_drain_head`/`datamanager_pool_refill` hooks `stock_spill.c` uses instead of touching the pools directly |
-| `src/core/stock_spill.c` | Disk spillover of the stock once `--stock-max-ram` is approached (PR2): eviction/reload of the coldest RAM-resident possibilities to/from per-`(pool, file)` LIFO segment stacks, 90%/75%/25% hysteresis (`stock_spill_step`), startup purge of residual segments; snapshot/restore coherence with `consistent_backup`/`restore` (PR3: `stock_spill_snapshot`, `stock_spill_restore_snapshot`) |
-| `src/core/part.c` | Piece rotation, map building (`prepare_map_part`), face lookups; also builds the hot loop's compact index (`build_packed_index`, capacity-guarded by `map_packed_fits`) alongside `flat`/`arena` |
-| `src/core/readdata.c` | Parses `data/pieces.csv` into `array_part` |
-| `src/net/etii_protocol.c` | TCP send/recv helpers for the work-protocol `packet` structs |
-| `src/net/client_identity.c` | Declared client identity (v12): `client_identity_t` (de)serialisation shared by `INST_CLIENT_HELLO` (work connection) and `control_hello_t` (control channel); hex helpers; `machine_uid_load_or_create` (persistent machine nonce) and `client_identity_random_bytes` (`getentropy`-based uid generation) |
-| `src/net/control_protocol.c` | Codec for the control channel: `CTRL_*` framed messages (`ctrl_send_frame`/`ctrl_recv_frame`), `control_hello_t`/`control_stats_t` (de)serialisation, `control_command_allowed`/`control_command_privileged`/`control_command_read_only` whitelists |
-| `src/net/tcpclient.c` / `src/net/tcpserver.c` | Low-level TCP socket setup |
+| `src/app/main.c` | Entry point; dispatches server/client/test; builds the shared map before forking |
+| `src/app/app_runtime.c` | Signal handlers, runtime bootstrap (`init_counters`, `init_childs`, `failed_arg`) |
+| `src/core/possibility.c` | Core search logic: generating/checking/stepping board possibilities |
+| `src/core/best_board.c` | `best_board_t`: mutex-protected board recorder, reused at fork/client/server scope |
+| `src/core/etii_search.c` | `autosearch()` — the search loop; fixed-order and MRV engines share one delegation path |
+| `src/app/etii_client.c` | Client orchestration; owns `search_parts_t`/`acquire_search_parts` |
+| `src/app/etii_server.c` | Server: TCP accept/distribute; also hosts control-channel sessions |
+| `src/app/etii_control.c` | Client-side control channel |
+| `src/app/control_registry.c` | Server-side registry of active control sessions |
+| `src/app/known_clients_registry.c` | Server-side registry of known machines — cumulative, survives disconnect and restart |
+| `src/app/client_config.c` | `--config-file` parsing/loading/saving |
+| `src/app/fork_gate.c` | Cooperative quiescence for forking alongside live parent threads |
+| `src/app/fork_orchestrator.c` | Deferred-start state machine; the real per-fork `fork()` |
+| `src/net/http_codec.c` / `http_server.c` | HTTP admin API: pure parsing/JSON layer / socket + dispatch shell |
+| `src/core/datamanager.c` | Mutex-protected possibility queues; backup/restore; RAM-cap enforcement |
+| `src/core/stock_spill.c` | Disk spillover of the stock once `--stock-max-ram` is approached |
+| `src/core/part.c` | Piece rotation, map building, the compact `packed` index |
+| `src/core/readdata.c` | Parses `data/pieces.csv` |
+| `src/net/etii_protocol.c` | TCP send/recv helpers for work-protocol packets |
+| `src/net/client_identity.c` | Declared client identity (v12): `machine_uid`/`client_uid`/label |
+| `src/net/control_protocol.c` | Control-channel codec, command whitelists |
+| `src/net/tcpclient.c` / `tcpserver.c` | Low-level TCP socket setup |
 | `src/net/local_socket.c` | Unix domain UDP sockets for parent↔child IPC |
-| `src/core/lifo.c` | Queue (`File`) and flat array (`big_table`) data structures |
-| `src/ui/console.c` / `src/ui/command_lines.c` | Interactive command parsing from stdin; Levenshtein-based typo suggestion for unknown commands. The `commands[]` table carries help metadata (category, usage, summary, details, aliases) — single source of truth for the categorized `help` / `help <topic>` output and the automatic usage recall (`CMD_ERR_USAGE`); command names are case-insensitive |
-| `src/ui/command_history.c` | In-session command history (↑/↓ recall, 100-entry ring, dedup) |
-| `src/ui/line_edit.c` | I/O-free line-editing core shared by both consoles (cursor motion, backspace/delete, Ctrl-U/W, history recall with draft save/restore) — each frontend (`console.c` raw-mode reader, `logger_ncurses.c` input window) translates its raw input into abstract keys and redraws from the resulting state; directly unit-testable without a PTY or fork |
-| `src/ui/logger.c` | Thread-safe `log_info/log_debug/log_error/log_console/log_event/log_status` — ANSI build |
-| `src/ui/logger_ncurses.c` | Ncurses variant of logger (compiled instead of `src/ui/logger.c` when `NCURSES=1`); 4-pane layout: output pad, stats banner, events, input |
-| `src/net/ipc_protocol.h` | Structs for parent↔child Unix socket messages (stats, log forwarding, best-board-on-record) |
-| `src/app/etii_statistic.h` | `client_statistics` struct sent by child processes to parent every second |
-| `src/app/static_variables.c` | All global state (counters, flags, pids, socket handles) |
-| `src/app/gpu_pruner.cu` | CUDA batch pruner kernel (compiled only with `CUDA=1`) |
+| `src/core/lifo.c` | `File` queue / `big_table` flat array |
+| `src/ui/console.c` / `command_lines.c` | Interactive command parsing/dispatch; Levenshtein typo suggestion |
+| `src/ui/command_history.c` | In-session command history (↑/↓ recall) |
+| `src/ui/line_edit.c` | I/O-free line-editing core shared by both console frontends |
+| `src/ui/logger.c` / `logger_ncurses.c` | Thread-safe logging — ANSI / ncurses variant |
+| `src/net/ipc_protocol.h` | Parent↔child Unix socket message structs |
+| `src/app/etii_statistic.h` | `client_statistics` struct sent to the parent every second |
+| `src/app/static_variables.c` | Global state (counters, flags, pids, socket handles) |
+| `src/app/gpu_pruner.cu` | CUDA batch pruner kernel (`CUDA=1` builds only) |
 
-## Debug Flags
+## Debug Flags & Puzzle Configuration
 
-Defined (and commented out) in `src/app/static_variables.h`. Uncomment before building to enable:
-
-```c
-#define DEBUG_IN_MONO_PROCESS  // forces single-process (no fork) — essential for debugger
-#define DEBUG_SOCKET           // TCP connection/disconnection traces
-#define DEBUG_SIGNAL           // signal handler traces
-#define DEBUG_LOCAL_SOCKET     // Unix domain socket traces
-#define DEBUG_THREAD           // thread creation traces
-#define DEBUG_COMMANDS         // command parsing traces
-#define DEBUG_CHECK_POSSIBILITY // validates possibility packets
-#define DEBUG_RM_NO_NEXT       // traces rmnonext pruning
-```
-
-Locally you uncomment them; CI instead enables **all** of them at once via `CPPFLAGS` (the `debug-build` job, `make WERROR=1 CPPFLAGS="-DDEBUG_… …"`) and fails on any warning — so this normally-dead trace code can't rot when surrounding symbols change. Add a new `DEBUG_*` flag → add its `-D` to that job.
-
-## Puzzle Configuration
-
-`src/app/static_variables.h` controls the puzzle size:
-
-```c
-#define ETERN_PARTS 256   // 256 pieces → 16×16 board
-// or
-#define ETERN_PARTS 16    // 16 pieces  → 4×4 board (use data/pieces16.csv)
-```
-
-The `#define` is `#ifndef`-guarded, so you can also override it without editing the file: `make CPPFLAGS="-DETERN_PARTS=16"` (this is how CI compile-checks the 4×4 build). Same pattern for `FORWARD_CHECK_K`. Changing `ETERN_PARTS` requires a full rebuild.
+Debug traces (`DEBUG_SOCKET`, `DEBUG_THREAD`, …) and puzzle size (`ETERN_PARTS`, `FORWARD_CHECK_K`) are `#ifndef`-guarded constants in `src/app/static_variables.h`, overridable via `CPPFLAGS` without editing the file (e.g. `make CPPFLAGS="-DETERN_PARTS=16"`). CI compiles every combination with `WERROR=1` so conditionally-compiled code can't rot unnoticed. Full flag list and rationale: [docs/compilation.md](docs/compilation.md).

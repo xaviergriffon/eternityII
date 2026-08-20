@@ -126,7 +126,8 @@ point de départ raisonnable).
 
 Un ajout qui ferait dépasser le plafond est **refusé** — le même chemin de dégradation
 gracieuse qu'un refus de contention (`INST_ERROR` côté client, qui conserve la possibilité en
-local et la renverra plus tard, cf. la section « Épilogue » d'[AGENTS.md](../AGENTS.md)). Ce
+local et la renverra plus tard, journalisé en `log_info` — non fatal — plutôt qu'en `log_error`,
+voir [AGENTS.md § Server load management](../AGENTS.md#server-load-management)). Ce
 refus ne fait jamais perdre ce qui est déjà résident ; en pratique il devient rare une fois
 `--stock-spill-dir` configuré (ci-dessous), qui déporte l'excédent sur disque avant que ce mur
 dur ne soit atteint. Réglable à chaud via la commande console `stockMaxRam <mo>` (`<mo> <= 0`
@@ -203,8 +204,7 @@ plus vite que le tick de 100 ms ne peut réagir. Aucune possibilité n'est perdu
 `expand_datas_to_level` **attend** que le débordement (ou un GET client) libère de la place
 plutôt que d'abandonner, journalisant le refus initial puis un rappel toutes les 5 s tant que
 l'attente se prolonge — un ralentissement au démarrage visible dans les logs, jamais une perte
-silencieuse. Voir la section « No possibility loss during expansion » d'[AGENTS.md](../AGENTS.md)
-pour le détail.
+silencieuse (voir [AGENTS.md § RAM cap & disk spillover](../AGENTS.md#ram-cap--disk-spillover)).
 
 Exemple :
 ```sh
