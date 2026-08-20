@@ -77,6 +77,16 @@ La v12 bump `VERSION` pour `INST_CLIENT_HELLO` ci-dessus : un serveur v11 la
 traiterait comme une instruction inconnue et fermerait la connexion, d'où le refus
 explicite au handshake plutôt qu'un désync silencieux.
 
+La v13 bump `VERSION` exactement comme la v11 : un nouveau parcours de plateau
+(`directions[]`/`dirx[]`/`diry[]` en 256, `src/app/static_variables.c`), issu cette
+fois d'un glouton statique piloté par un score de risque (position pondérée par
+1/taille-du-pool-restant au moment de la pose, mesuré sur `data/pieces.csv` — voir
+[docs/conception/elagage_recherche.md](conception/elagage_recherche.md#32-structure-du-parcours)
+§3.2), redéfinit le sens de `alloc` pour un même indice de curseur. Un
+`possibility_packet` échangé entre un client v12 et un serveur v13 (ou l'inverse)
+désignerait donc une case différente pour le même `alloc`, d'où le refus explicite au
+handshake plutôt qu'un désync silencieux du board.
+
 ### Handshake de version
 
 À la connexion, le client envoie `INST_CHECK_VERSION` suivi de son numéro de version.

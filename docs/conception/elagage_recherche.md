@@ -68,11 +68,28 @@ n'exige de faire tourner le solveur.
 
 ### 3.2 Structure du parcours
 
-| Grandeur | Valeur |
-|---|---|
-| Largeur de frontière (cases vides adjacentes à une case posée), max / moyenne | 52 / 29 |
-| Cases de cadre | 60, la dernière à l'index 74 |
-| Cases intérieures posées **avant** la fin du cadre | 15 (index 3, 4, 16, 17, 22, 23, 39–42, 54, 55, …) |
+**Parcours livré (score de risque, depuis la v13 du protocole).** Les mesures §3.1/§3.3
+ci-dessus portaient sur l'ancien parcours (bord/intérieur entrelacé). Le parcours
+actuellement en vigueur (`src/app/static_variables.c`, bloc `ETERN_PARTS == 256`) vient
+d'un **glouton statique** : à chaque étape, poser la case dont le pool de candidats
+restants est le plus petit (coin = 4, bord = 56, intérieur = 196 — le pool s'épuisant
+globalement au fil du tracé), le score de risque étant la position pondérée par
+1/taille-du-pool-restant au moment de la pose (cases rares posées tôt = moins de travail
+de recherche gâché avant un échec éventuel). Analyse statique reproductible sur
+`data/pieces.csv` (mêmes outils qu'en §3). Résultat mesuré : **−1,3 %** de score de risque
+par rapport à l'ordre précédent, comparable au meilleur autre candidat testé (coins
+immédiats en premier, −1,4 %).
+
+| Grandeur | Valeur (ordre livré, v13) | Valeur (ancien ordre, v11) |
+|---|---|---|
+| Cases indices officielles (139/208/255/181/249), enjambées | index 0–4 (en tête, non branchantes) | dispersées dans le parcours |
+| Cases de cadre | 60, contiguës aux index 5–64 (un seul passage, immédiatement après les 5 index) | 60, la dernière à l'index 74 (entrelacées avec l'intérieur) |
+| Cases intérieures posées **avant** la fin du cadre | 0 (hors les 5 index, non branchantes) | 15 (index 3, 4, 16, 17, 22, 23, 39–42, 54, 55, …) |
+| Cases intérieures (index 65–255) | balayage systématique, sans retour vers le cadre | — |
+
+La largeur de frontière (52 max / 29 moyenne, §3.2 historique) et le typage des pièces
+(§3.3) ne dépendent que de la grille et de `data/pieces.csv`, pas de l'ordre : ces valeurs
+restent valables inchangées pour le nouveau parcours.
 
 ### 3.3 Typage des pièces
 
@@ -1107,9 +1124,13 @@ n'est pas retenu, faute de justification a priori et de signal aussi net.
   déclenchement, un recoupement structurel avec le forward-check — les deux mécanismes
   trouvent souvent la MÊME impasse, le second à moindre coût par appel. Une variante ciblée
   (colonnes 18-22 seulement) reste envisageable mais non essayée.
-- **Ne pas retoucher `directions[]` dans ce cadre.** L'ordre actuel a été choisi pour
-  éliminer tôt et son changement impose un bump de protocole ; les pistes ci-dessus
-  s'appliquent toutes à ordre constant.
+- **`directions[]` retouché une seconde fois (v13) — SUPERSEDE l'arbitrage initial.**
+  L'arbitrage d'origine (« ne pas retoucher `directions[]` dans ce cadre ») restait vrai
+  tant qu'aucune méthode de mesure ne dépassait le choix ayant motivé le bump v11. Le
+  glouton statique par score de risque (§3.2) mesure un gain (−1,3 %) sur ce même critère ;
+  le bump de protocole (v13, même raison qu'en v11 : `alloc` change de sens) a donc été
+  refait. Les pistes ci-dessous (§4.1 à §4.8) restent, comme avant, indépendantes de
+  l'ordre exact choisi — elles s'appliquent à n'importe quel parcours fixe.
 - **4.6b (DFS à budget du pruner) : code conservé, remesuré POST-PR 10, mesurément
   bénéfique — défaut de déploiement inchangé (`0`), décision opérateur.** La mesure
   originale (**0 % de fermeture** à n'importe quel budget testé) reposait sur un stock
