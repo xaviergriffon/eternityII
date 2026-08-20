@@ -39,7 +39,16 @@
 // inconnue (branche "else" de communicate_with_client_step) et fermerait la
 // connexion au lieu de simplement l'ignorer — l'exact-match du handshake evite
 // ce désync silencieux en le refusant explicitement à la place.
-#define VERSION 12
+// v13 : nouveau parcours de plateau (directions[]/dirx[]/diry[] en 256,
+// app/static_variables.c), issu d'un glouton statique sur un score de risque
+// (position pondérée par 1/pool-restant au moment de la pose, mesuré sur
+// data/pieces.csv — voir docs/conception/elagage_recherche.md §3.2). Exactement
+// le même cas que le bump v11 : un possibility_packet échangé entre un client
+// v12 et un serveur v13 (ou l'inverse) désignerait des cases différentes pour
+// le même indice de curseur (alloc) — bump de version pour forcer tous les
+// clients à se resynchroniser sur le nouveau parcours plutôt que corrompre le
+// board.
+#define VERSION 13
 
 #define NB_CONNECTIONS_PER_THREAD 1
 // Temps d'attente de 100 microsecondes

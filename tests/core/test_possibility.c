@@ -229,107 +229,91 @@ TEST check_possibility_valid_genesis_is_zero(void)
 }
 
 /*
- * check_possibility : voisins TOP/LEFT non encore posés (grid == -2), au sein
- * de la boucle de cohérence (p < alloc). Cas symétrique de
+ * check_possibility : voisins non encore posés (grid == -2), au sein de la
+ * boucle de cohérence (p < alloc). Cas symétrique de
  * check_possibility_consistent_interior_neighbors_is_zero (build 16, RIGHT et
- * BOTTOM) : sous le nouveau parcours du build 256 (directions[]/dirx[]/diry[],
- * app/static_variables.c), les 23 premiers indices (p=0..22) visitent (0,0)
- * puis longent le bord haut jusqu'à (15,0), avec trois courtes incursions
- * verticales en (2,*), (13,*) et (15,*) et un dernier saut en (14,2) -- sans
- * jamais visiter (14,1) avant l'indice 23 (exclu par alloc=23). Cela reproduit
- * les deux cas symétriques recherchés :
- *   - p=3 = (2,1) : voisin GAUCHE (1,1) jamais posé (hors de ce parcours) -> -1.
- *   - p=22 = (14,2) : voisin HAUT (14,1) posé plus tard (indice 23, exclu par
- *     alloc=23) -> -1.
+ * BOTTOM) : sous le parcours « score de risque » du build 256 (v13,
+ * directions[]/dirx[]/diry[], app/static_variables.c), l'indice 0 visite
+ * D'ABORD l'ancrage genèse (7,8) (case 139, enjambée par construction), puis
+ * les 4 autres indices officiels (208/255/181/249), puis les 4 coins
+ * (indices 5..8), puis longe le bord GAUCHE de haut en bas -- (0,1)..(0,4)
+ * aux indices 9..12 -- avant de poursuivre vers (0,5) à l'indice 13. Cela
+ * reproduit les deux cas symétriques recherchés :
+ *   - p=9 = (0,1) : voisin DROIT (1,1) jamais posé dans cette fenêtre (case
+ *     intérieure, visitée bien plus tard dans le balayage) -> -1.
+ *   - p=12 = (0,4) : voisin BAS (0,5) posé plus tard (indice 13, exclu par
+ *     alloc=13) -> -1.
  * Résultat attendu : 0 (aucune incohérence, les -1 court-circuitent la
- * comparaison).
+ * comparaison). L'indice 0 (7,8) doit désormais figurer dans `rp` : sa valeur
+ * de grille (`id_for_rotated_part(139, 2)`) est un indice de tableau, pas un
+ * identifiant de pièce -- `rp` doit donc être assez grand pour l'accueillir,
+ * même si ses faces ne sont jamais comparées ici (ses 4 voisins restent hors
+ * fenêtre).
  */
 TEST check_possibility_top_left_empty_neighbors_is_zero(void)
 {
-    /* parts[1..23] correspondent aux 23 premières cases du parcours (indices
-       0..22 de dirx[]/diry[]), dans l'ordre. parts[0] est un bouchon inutilisé. */
-    struct part parts[24];
+    /* Indexé par valeur de grille, pas par ordre du parcours : parts[0] est un
+       bouchon inutilisé, parts[1..12] couvrent les indices 1..12 du parcours
+       (les 4 index officiels restants + les 4 coins + la descente du bord
+       gauche), parts[651] est l'ancrage genèse (139, rotation 2 -- indice
+       calculé par id_for_rotated_part, jamais une petite valeur). */
+    struct part parts[652];
     memset(parts, 0, sizeof(parts));
-    for (int i = 0; i <= 23; i++) parts[i].id = i;
+    for (int i = 0; i <= 12; i++) parts[i].id = i;
+    parts[651].id = 139;
 
     int color = 100;
-    int L[15];
-    for (int i = 0; i < 15; i++) L[i] = color++;
-    int V2a = color++, V2b = color++;
-    int V13a = color++, V13b = color++;
-    int V15a = color++, V15b = color++;
-    int W1 = color++, W2 = color++;
+    int C0 = color++, C1 = color++, C2 = color++, C3 = color++;
 
-    /* Chaîne horizontale du bord haut (0,0)..(15,0) -> gridvals 1,2,3,6,7,8,9,
-       10,11,12,13,14,15,16,19,20 (les gridvals 4,5,17,18,21..23 sont les
-       incursions verticales / le saut final, hors de cette chaîne). */
-    parts[1].top = 0; parts[1].left = 0; parts[1].right = (int8_t)L[0];               /* (0,0) */
-    parts[2].top = 0; parts[2].left = (int8_t)L[0]; parts[2].right = (int8_t)L[1];    /* (1,0) */
-    parts[3].top = 0; parts[3].left = (int8_t)L[1]; parts[3].right = (int8_t)L[2];    /* (2,0) */
-    parts[3].bottom = (int8_t)V2a;
-    parts[4].top = (int8_t)V2a; parts[4].bottom = (int8_t)V2b;                        /* (2,1) */
-    parts[5].top = (int8_t)V2b;                                                        /* (2,2) */
-    parts[6].top = 0; parts[6].left = (int8_t)L[2]; parts[6].right = (int8_t)L[3];    /* (3,0) */
-    parts[7].top = 0; parts[7].left = (int8_t)L[3]; parts[7].right = (int8_t)L[4];    /* (4,0) */
-    parts[8].top = 0; parts[8].left = (int8_t)L[4]; parts[8].right = (int8_t)L[5];    /* (5,0) */
-    parts[9].top = 0; parts[9].left = (int8_t)L[5]; parts[9].right = (int8_t)L[6];    /* (6,0) */
-    parts[10].top = 0; parts[10].left = (int8_t)L[6]; parts[10].right = (int8_t)L[7]; /* (7,0) */
-    parts[11].top = 0; parts[11].left = (int8_t)L[7]; parts[11].right = (int8_t)L[8]; /* (8,0) */
-    parts[12].top = 0; parts[12].left = (int8_t)L[8]; parts[12].right = (int8_t)L[9]; /* (9,0) */
-    parts[13].top = 0; parts[13].left = (int8_t)L[9]; parts[13].right = (int8_t)L[10]; /* (10,0) */
-    parts[14].top = 0; parts[14].left = (int8_t)L[10]; parts[14].right = (int8_t)L[11]; /* (11,0) */
-    parts[15].top = 0; parts[15].left = (int8_t)L[11]; parts[15].right = (int8_t)L[12]; /* (12,0) */
-    parts[16].top = 0; parts[16].left = (int8_t)L[12]; parts[16].right = (int8_t)L[13]; /* (13,0) */
-    parts[16].bottom = (int8_t)V13a;
-    parts[17].top = (int8_t)V13a; parts[17].bottom = (int8_t)V13b;                     /* (13,1) */
-    parts[18].top = (int8_t)V13b; parts[18].right = (int8_t)W1;                        /* (13,2) */
-    parts[19].top = 0; parts[19].left = (int8_t)L[13]; parts[19].right = (int8_t)L[14]; /* (14,0) */
-    parts[20].top = 0; parts[20].left = (int8_t)L[14]; parts[20].right = 0;            /* (15,0) : coin bord droit */
-    parts[20].bottom = (int8_t)V15a;
-    parts[21].top = (int8_t)V15a; parts[21].right = 0; parts[21].bottom = (int8_t)V15b; /* (15,1) */
-    parts[22].top = (int8_t)V15b; parts[22].right = 0; parts[22].left = (int8_t)W2;    /* (15,2) */
-    parts[23].left = (int8_t)W1; parts[23].right = (int8_t)W2;                         /* (14,2) : TOP (14,1) non posé -> -1 */
+    /* Descente du bord gauche (0,0)..(0,4), indices 5,9,10,11,12 : chaîne
+       TOP/BOTTOM cohérente. (0,0) n'a ni TOP ni LEFT (bord de grille, hors
+       boucle de cohérence ici puisqu'aucun voisin n'est comparé sur ces
+       côtés) ; sa face RIGHT (voisin (1,0), hors fenêtre) et celle de chaque
+       cellule de la colonne x=0 (voisin DROIT, lui aussi hors fenêtre) ne
+       sont jamais comparées -> valeur arbitraire. */
+    parts[5].bottom = (int8_t)C0;                          /* (0,0), indice 5 */
+    parts[9].top = (int8_t)C0; parts[9].bottom = (int8_t)C1;   /* (0,1), indice 9  : voisin DROIT (1,1) jamais posé -> -1 */
+    parts[10].top = (int8_t)C1; parts[10].bottom = (int8_t)C2; /* (0,2), indice 10 */
+    parts[11].top = (int8_t)C2; parts[11].bottom = (int8_t)C3; /* (0,3), indice 11 */
+    parts[12].top = (int8_t)C3;                             /* (0,4), indice 12 : voisin BAS (0,5) exclu par alloc=13 -> -1 */
 
-    struct array_part rp = { .size = 24, .parts = parts };
+    /* Les 4 autres index officiels (indices 1..4) et les 3 autres coins
+       (indices 6..8) n'ont aucun voisin dans la fenêtre : faces laissées à 0
+       (déjà mises à zéro par le memset), aucune comparaison ne les atteint. */
+
+    parts[651].top = 2; parts[651].right = 15; parts[651].bottom = 15; parts[651].left = 3; /* 139 r2 réel */
+
+    struct array_part rp = { .size = 652, .parts = parts };
 
     struct possibility_packet *p = new_zeroed_packet();
     for (int x = 0; x < ETERN_SIZE; x++)
         for (int y = 0; y < ETERN_SIZE; y++)
             p->grid[x][y] = -2;
 
-    p->grid[0][0] = 1;
-    p->grid[1][0] = 2;
-    p->grid[2][0] = 3;
-    p->grid[2][1] = 4;
-    p->grid[2][2] = 5;
-    p->grid[3][0] = 6;
-    p->grid[4][0] = 7;
-    p->grid[5][0] = 8;
-    p->grid[6][0] = 9;
-    p->grid[7][0] = 10;
-    p->grid[8][0] = 11;
-    p->grid[9][0] = 12;
-    p->grid[10][0] = 13;
-    p->grid[11][0] = 14;
-    p->grid[12][0] = 15;
-    p->grid[13][0] = 16;
-    p->grid[13][1] = 17;
-    p->grid[13][2] = 18;
-    p->grid[14][0] = 19;
-    p->grid[15][0] = 20;
-    p->grid[15][1] = 21;
-    p->grid[15][2] = 22;
-    p->grid[14][2] = 23;
-    p->grid[7][8] = id_for_rotated_part(139, 2); /* ancrage genèse */
+    p->grid[7][8] = id_for_rotated_part(139, 2); /* ancrage genèse, indice 0 du parcours */
+    p->grid[2][2] = 1;    /* indice 1 (208) */
+    p->grid[13][2] = 2;   /* indice 2 (255) */
+    p->grid[2][13] = 3;   /* indice 3 (181) */
+    p->grid[13][13] = 4;  /* indice 4 (249) */
+    p->grid[0][0] = 5;    /* indice 5 : coin haut-gauche */
+    p->grid[0][15] = 6;   /* indice 6 : coin bas-gauche */
+    p->grid[15][0] = 7;   /* indice 7 : coin haut-droit */
+    p->grid[15][15] = 8;  /* indice 8 : coin bas-droit */
+    p->grid[0][1] = 9;    /* indice 9 */
+    p->grid[0][2] = 10;   /* indice 10 */
+    p->grid[0][3] = 11;   /* indice 11 */
+    p->grid[0][4] = 12;   /* indice 12 */
 
-    p->alloc = 23;
-    ASSERT_EQ_FMT((int8_t)2, dirx[3], "%d");
-    ASSERT_EQ_FMT((int8_t)1, diry[3], "%d");
-    ASSERT_EQ_FMT((int8_t)14, dirx[22], "%d");
-    ASSERT_EQ_FMT((int8_t)2, diry[22], "%d");
-    ASSERT_EQ_FMT((int8_t)14, dirx[23], "%d");
-    ASSERT_EQ_FMT((int8_t)1, diry[23], "%d");
-    for (int id = 1; id <= 23; id++) set_face_used(p->b_faceused, id - 1, 1);
+    p->alloc = 13;
+    ASSERT_EQ_FMT((int8_t)7, dirx[0], "%d");
+    ASSERT_EQ_FMT((int8_t)8, diry[0], "%d");
+    ASSERT_EQ_FMT((int8_t)0, dirx[9], "%d");
+    ASSERT_EQ_FMT((int8_t)1, diry[9], "%d");
+    ASSERT_EQ_FMT((int8_t)0, dirx[12], "%d");
+    ASSERT_EQ_FMT((int8_t)4, diry[12], "%d");
+    ASSERT_EQ_FMT((int8_t)0, dirx[13], "%d");
+    ASSERT_EQ_FMT((int8_t)5, diry[13], "%d");
+    for (int id = 1; id <= 13; id++) set_face_used(p->b_faceused, id - 1, 1);
 
     ASSERT_EQ_FMT(0, check_possibility(p, &rp), "%d");
 
@@ -1560,7 +1544,12 @@ TEST search_light_completes_board_skips_forward_check(void)
 /* Une case libre sans aucune pièce candidate -> branche morte (0). */
 TEST forward_check_detects_dead_cell(void)
 {
-    /* pièce non-coin (top=5) : la case (0,0) exige top=0 (bord) -> aucun candidat */
+    /* directions[0] = (7,8) (case interne, ancrage genèse depuis v13) : sans
+       voisin posé ni bord de grille, les 4 clés valent all_face, et le
+       compartiment "toute face" contient l'union de toutes les pièces (cf.
+       possibility_all_has_a_next) -- aucune couleur ne peut donc rendre cette
+       case morte. On force la mort autrement : l'unique pièce du jeu est
+       déjà marquée utilisée -> zéro candidat disponible. */
     struct part parts[] = { { .id = 0 }, { .id = 1, .top = 5, .right = 6, .bottom = 7, .left = 8 } };
     struct array_part rp = { .size = 2, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
@@ -1569,7 +1558,8 @@ TEST forward_check_detects_dead_cell(void)
     for (int x = 0; x < ETERN_SIZE; x++)
         for (int y = 0; y < ETERN_SIZE; y++)
             p->grid[x][y] = -2;
-    p->alloc = 0; /* la fenêtre commence à la case directions[0] = (0,0) */
+    p->alloc = 0; /* la fenêtre commence à la case directions[0] = (7,8) */
+    set_face_used(p->b_faceused, 0, 1); /* pièce 1 déjà utilisée -> aucun candidat disponible */
 
     unsigned long long fc_cells_before = fc_cells_studied;
     ASSERT_EQ_FMT(0, forward_check_next_k(p, map, &rp), "%d");
@@ -1869,14 +1859,18 @@ TEST all_has_a_next_dead_cell_returns_zero(void)
  * paquet) au lieu de se contenter de répondre 1. Jamais exercé par
  * all_has_a_next_all_filled_returns_one (aucune case libre) ni
  * all_has_a_next_dead_cell_returns_zero (0 candidat, pas 1). Même montage que
- * possibility_has_a_next_finds_and_excludes_used (clé concrète (0,2,3,0) via
- * voisins droit/bas placés) pour éviter la collision avec le bouchon id=0
- * (faces (0,0,0,0)) qui rendrait le compartiment de taille 2. */
+ * possibility_has_a_next_finds_and_excludes_used (voisins droit/bas placés
+ * pour contraindre RIGHT/BOTTOM) pour éviter la collision avec le bouchon
+ * id=0 (faces (0,0,0,0)) qui rendrait le compartiment de taille 2. Depuis le
+ * parcours v13, directions[0] = (7,8) est une case interne : TOP/LEFT restent
+ * en clé all_face (aucun voisin posé sur ces côtés, pas de bord de grille) --
+ * seuls RIGHT/BOTTOM sont contraints, ce qui suffit à isoler la pièce 1 comme
+ * seule candidate parmi les 3 pièces réelles. */
 TEST all_has_a_next_single_candidate_places_piece(void)
 {
     struct part parts[] = {
         { .id = 0 },
-        { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 }, /* coin, seul candidat */
+        { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 }, /* seul candidat (right=2, bottom=3) */
         { .id = 2, .top = 5, .right = 6, .bottom = 7, .left = 2 }, /* voisin droit */
         { .id = 3, .top = 3, .right = 8, .bottom = 9, .left = 4 }, /* voisin bas */
     };
@@ -1885,9 +1879,9 @@ TEST all_has_a_next_single_candidate_places_piece(void)
 
     struct possibility_packet *p = new_zeroed_packet(); /* reste = 0 partout (grid "remplie") */
     p->alloc = 0;
-    p->grid[dirx[0]][diry[0]] = -2;    /* case courante : seule case libre */
-    p->grid[1][0] = 2;                 /* voisin droit -> k2 = 2 */
-    p->grid[0][1] = 3;                 /* voisin bas   -> k3 = 3 */
+    p->grid[dirx[0]][diry[0]] = -2;              /* case courante : seule case libre */
+    p->grid[dirx[0] + 1][diry[0]] = 2;           /* voisin droit -> k2 = 2 */
+    p->grid[dirx[0]][diry[0] + 1] = 3;           /* voisin bas   -> k3 = 3 */
 
     ASSERT_EQ_FMT(1, possibility_all_has_a_next(p, map, &rp), "%d");
     /* La pièce 1 (seule candidate de la clé (0,2,3,0)) a été placée. */
@@ -1920,8 +1914,8 @@ TEST all_has_a_next_multi_candidate_skips_used_piece(void)
     struct possibility_packet *p = new_zeroed_packet();
     p->alloc = 0;
     p->grid[dirx[0]][diry[0]] = -2;
-    p->grid[1][0] = 3; /* voisin droit -> k2 = 2 */
-    p->grid[0][1] = 4; /* voisin bas   -> k3 = 3 */
+    p->grid[dirx[0] + 1][diry[0]] = 3; /* voisin droit -> k2 = 2 */
+    p->grid[dirx[0]][diry[0] + 1] = 4; /* voisin bas   -> k3 = 3 */
     set_face_used(p->b_faceused, 0, 1); /* pièce 1 déjà utilisée */
 
     ASSERT_EQ_FMT(1, possibility_all_has_a_next(p, map, &rp), "%d");
@@ -2024,13 +2018,13 @@ TEST all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell(void)
     struct part parts[] = {
         { .id = 0 }, /* bouchon */
         { .id = 1, .top = 9, .right = 9, .bottom = 9, .left = 9 }, /* candidat générique */
-        /* voisins posés autour de la case morte (13,13) -- ids 2..5, faces
+        /* voisins posés autour de la case morte (3,14) -- ids 2..5, faces
          * choisies pour qu'aucune pièce de rp n'ait simultanément
-         * top=8,right=7,bottom=6,left=6 (clé exacte de (13,13)). */
-        { .id = 2, .top = 0, .right = 0, .bottom = 6, .left = 0 }, /* voisin haut (13,12): bottom=6 -> k1 */
-        { .id = 3, .top = 0, .right = 0, .bottom = 0, .left = 7 }, /* voisin droit (14,13): left=7   -> k2 */
-        { .id = 4, .top = 8, .right = 0, .bottom = 0, .left = 0 }, /* voisin bas (13,14): top=8      -> k3 */
-        { .id = 5, .top = 0, .right = 6, .bottom = 0, .left = 0 }, /* voisin gauche (12,13): right=6 -> k4 */
+         * top=8,right=7,bottom=6,left=6 (clé exacte de (3,14)). */
+        { .id = 2, .top = 0, .right = 0, .bottom = 6, .left = 0 }, /* voisin haut (3,13): bottom=6  -> k1 */
+        { .id = 3, .top = 0, .right = 0, .bottom = 0, .left = 7 }, /* voisin droit (4,14): left=7   -> k2 */
+        { .id = 4, .top = 8, .right = 0, .bottom = 0, .left = 0 }, /* voisin bas (3,15): top=8      -> k3 */
+        { .id = 5, .top = 0, .right = 6, .bottom = 0, .left = 0 }, /* voisin gauche (2,14): right=6 -> k4 */
     };
     struct array_part rp = { .size = 6, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
@@ -2040,19 +2034,26 @@ TEST all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell(void)
         for (int y = 0; y < ETERN_SIZE; y++)
             p->grid[x][y] = -2; /* tout libre par défaut */
 
-    /* Cases déjà posées : les 4 voisins de la case morte (13,13). */
-    p->grid[13][12] = 2;
-    p->grid[14][13] = 3;
-    p->grid[13][14] = 4;
-    p->grid[12][13] = 5;
+    /* Cases déjà posées : les 4 voisins de la case morte (3,14). */
+    p->grid[3][13] = 2;
+    p->grid[4][14] = 3;
+    p->grid[3][15] = 4;
+    p->grid[2][14] = 5;
 
-    /* Démarre le balayage à c=23 = (14,1), une case non contrainte du
-     * parcours. c=40 = (13,13) est atteinte plus loin. */
-    p->alloc = 23;
-    ASSERT_EQ_FMT((int8_t)14, dirx[23], "%d");
-    ASSERT_EQ_FMT((int8_t)1, diry[23], "%d");
-    ASSERT_EQ_FMT((int8_t)13, dirx[40], "%d");
-    ASSERT_EQ_FMT((int8_t)13, diry[40], "%d");
+    /* Sous le parcours v13, le cadre (indices 5..64) est entièrement fait de
+     * cases de bord (forcément contraintes par au moins un côté de grille) :
+     * il n'y a donc plus de case interne non contrainte avant la fin du
+     * cadre, contrairement à l'ancien parcours. On choisit deux cases
+     * internes CONSÉCUTIVES dans le parcours (indices 85 et 86, aucune case
+     * entre les deux) : (3,2) -- non contrainte, aucun de ses 4 voisins n'est
+     * posé ni voisin de (3,14) -- puis (3,14), la case morte. Démarrer le
+     * balayage à c=85 garantit qu'aucune autre case n'est examinée avant ces
+     * deux-là. */
+    p->alloc = 85;
+    ASSERT_EQ_FMT((int8_t)3, dirx[85], "%d");
+    ASSERT_EQ_FMT((int8_t)2, diry[85], "%d");
+    ASSERT_EQ_FMT((int8_t)3, dirx[86], "%d");
+    ASSERT_EQ_FMT((int8_t)14, diry[86], "%d");
 
     ASSERT_EQ_FMT(0, possibility_all_has_a_next(p, map, &rp), "%d");
 
@@ -2069,15 +2070,20 @@ TEST all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell(void)
  * au-dessus de remove_possibilities_with_no_next (src/core/datamanager.c) qui
  * documentait déjà ce trou.
  *
- * Montage : 3 coins mutuellement non adjacents (aucun voisin en commun).
- *   - p0=(0,0), premier du parcours (dirx[0]=diry[0]=0) : 2 candidats libres
- *     {X=id1, Y=id2} à sa clé (0,8,9,0). Examiné en premier, aucun des deux
- *     n'est encore utilisé -> pas de forçage (compartiment de taille 2), la
- *     case reste vide et n'est PAS réexaminée plus tard dans CE balayage.
- *   - p1=(15,15) : sa clé (7,0,0,6) n'a qu'UN candidat, une seconde
- *     représentation de Y -> forçage, Y consommé.
- *   - p2=(0,15) : sa clé (5,4,0,0) n'a qu'UN candidat, une seconde
- *     représentation de X -> forçage, X consommé.
+ * Montage : p0, p1, p2 mutuellement non adjacents (aucun voisin en commun).
+ *   - p0 = (7,8) = directions[0] : sous l'ancien parcours c'était un coin de
+ *     plateau, où 2 des 4 côtés étaient automatiquement forcés à 0 par le
+ *     bord de grille. directions[0] est désormais une case INTERNE (ancrage
+ *     genèse, v13) : les 4 côtés sont donc fixés explicitement par 4 voisins
+ *     posés (au lieu de 2 voisins + 2 bords) pour obtenir la même clé
+ *     pleinement déterminée. 2 candidats libres {X=id1, Y=id2} y correspondent
+ *     exactement. Examiné en premier, aucun des deux n'est encore utilisé ->
+ *     pas de forçage (compartiment de taille 2), la case reste vide et n'est
+ *     PAS réexaminée plus tard dans CE balayage.
+ *   - p1=(15,15) (coin, inchangé) : sa clé (7,0,0,6) n'a qu'UN candidat, une
+ *     seconde représentation de Y -> forçage, Y consommé.
+ *   - p2=(0,15) (coin, inchangé) : sa clé (5,4,0,0) n'a qu'UN candidat, une
+ *     seconde représentation de X -> forçage, X consommé.
  * Après le 1er balayage complet, X et Y sont tous deux utilisés mais p0 (déjà
  * passé) n'a jamais été réexaminé : le point fixe relance un 2e balayage
  * (repart de alloc=0) qui découvre p0 sans aucune suite -> 0.
@@ -2085,35 +2091,39 @@ TEST all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell(void)
 TEST all_has_a_next_fixpoint_detects_cascading_forced_dead_cell(void)
 {
     struct part parts[] = {
-        { .id = 0 },                                                /* [0] bouchon */
-        { .id = 1, .top = 0, .right = 8, .bottom = 9, .left = 0 },  /* [1] X @ clé p0 */
-        { .id = 2, .top = 0, .right = 8, .bottom = 9, .left = 0 },  /* [2] Y @ clé p0 */
-        { .id = 3, .left = 8 },                                     /* [3] voisin (1,0)   : gauche=8 -> k2 p0 */
-        { .id = 4, .top = 9 },                                      /* [4] voisin (0,1)   : haut=9   -> k3 p0 */
-        { .id = 5, .bottom = 7 },                                   /* [5] voisin (15,14) : bas=7    -> k1 p1 */
-        { .id = 6, .right = 6 },                                    /* [6] voisin (14,15) : droite=6 -> k4 p1 */
-        { .id = 7, .bottom = 5 },                                   /* [7] voisin (0,14)  : bas=5    -> k1 p2 */
-        { .id = 8, .left = 4 },                                     /* [8] voisin (1,15)  : gauche=4 -> k2 p2 */
-        { .id = 2, .top = 7, .right = 0, .bottom = 0, .left = 6 },  /* [9]  Y @ clé p1 (seul candidat, forcé) */
-        { .id = 1, .top = 5, .right = 4, .bottom = 0, .left = 0 },  /* [10] X @ clé p2 (seul candidat, forcé) */
+        { .id = 0 },                                                 /* [0]  bouchon */
+        { .id = 1, .top = 20, .right = 21, .bottom = 22, .left = 23 }, /* [1]  X @ clé p0 */
+        { .id = 2, .top = 20, .right = 21, .bottom = 22, .left = 23 }, /* [2]  Y @ clé p0 */
+        { .id = 3, .bottom = 20 },                                    /* [3]  voisin haut  (7,7) de p0  : bas=20    -> k1 p0 */
+        { .id = 4, .left = 21 },                                      /* [4]  voisin droit (8,8) de p0  : gauche=21 -> k2 p0 */
+        { .id = 5, .top = 22 },                                       /* [5]  voisin bas   (7,9) de p0  : haut=22   -> k3 p0 */
+        { .id = 6, .right = 23 },                                     /* [6]  voisin gauche (6,8) de p0 : droite=23 -> k4 p0 */
+        { .id = 7, .bottom = 7 },                                     /* [7]  voisin (15,14) : bas=7    -> k1 p1 */
+        { .id = 8, .right = 6 },                                      /* [8]  voisin (14,15) : droite=6 -> k4 p1 */
+        { .id = 9, .bottom = 5 },                                     /* [9]  voisin (0,14)  : bas=5    -> k1 p2 */
+        { .id = 10, .left = 4 },                                      /* [10] voisin (1,15)  : gauche=4 -> k2 p2 */
+        { .id = 2, .top = 7, .right = 0, .bottom = 0, .left = 6 },   /* [11] Y @ clé p1 (seul candidat, forcé) */
+        { .id = 1, .top = 5, .right = 4, .bottom = 0, .left = 0 },   /* [12] X @ clé p2 (seul candidat, forcé) */
     };
-    struct array_part rp = { .size = 11, .parts = parts };
+    struct array_part rp = { .size = 13, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet *p = new_zeroed_packet();
-    p->grid[0][0] = -2;   /* p0 */
-    p->grid[15][15] = -2; /* p1 */
-    p->grid[0][15] = -2;  /* p2 */
-    p->grid[1][0] = 3;
-    p->grid[0][1] = 4;
-    p->grid[15][14] = 5;
-    p->grid[14][15] = 6;
-    p->grid[0][14] = 7;
-    p->grid[1][15] = 8;
+    p->grid[dirx[0]][diry[0]] = -2; /* p0 = (7,8) */
+    p->grid[15][15] = -2;           /* p1 */
+    p->grid[0][15] = -2;            /* p2 */
+    p->grid[dirx[0]][diry[0] - 1] = 3;  /* voisin haut  de p0 */
+    p->grid[dirx[0] + 1][diry[0]] = 4;  /* voisin droit de p0 */
+    p->grid[dirx[0]][diry[0] + 1] = 5;  /* voisin bas   de p0 */
+    p->grid[dirx[0] - 1][diry[0]] = 6;  /* voisin gauche de p0 */
+    p->grid[15][14] = 7;
+    p->grid[14][15] = 8;
+    p->grid[0][14] = 9;
+    p->grid[1][15] = 10;
     p->alloc = 0;
 
-    ASSERT_EQ_FMT((int8_t)0, dirx[0], "%d");
-    ASSERT_EQ_FMT((int8_t)0, diry[0], "%d");
+    ASSERT_EQ_FMT((int8_t)7, dirx[0], "%d");
+    ASSERT_EQ_FMT((int8_t)8, diry[0], "%d");
 
     unsigned int cells = 0;
     ASSERT_EQ_FMT(0, possibility_all_has_a_next_counted(p, map, &rp, &cells), "%d");
@@ -2124,7 +2134,7 @@ TEST all_has_a_next_fixpoint_detects_cascading_forced_dead_cell(void)
     ASSERT(is_face_used(p->b_faceused, 0)); /* X = id 1 */
     ASSERT(is_face_used(p->b_faceused, 1)); /* Y = id 2 */
     /* p0 lui-même n'a jamais été forcé (2 candidats au moment de son examen). */
-    ASSERT_EQ_FMT(-2, (int)p->grid[0][0], "%d");
+    ASSERT_EQ_FMT(-2, (int)p->grid[dirx[0]][diry[0]], "%d");
 
     free_bigarray(map);
     free(p);
@@ -2151,8 +2161,8 @@ TEST all_has_a_next_fixpoint_isolated_force_still_returns_one(void)
     struct possibility_packet *p = new_zeroed_packet();
     p->alloc = 0;
     p->grid[dirx[0]][diry[0]] = -2;
-    p->grid[1][0] = 2;
-    p->grid[0][1] = 3;
+    p->grid[dirx[0] + 1][diry[0]] = 2;
+    p->grid[dirx[0]][diry[0] + 1] = 3;
 
     unsigned int cells = 0;
     ASSERT_EQ_FMT(1, possibility_all_has_a_next_counted(p, map, &rp, &cells), "%d");
