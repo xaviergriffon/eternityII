@@ -303,18 +303,18 @@ void *feed_thread_aposs(void *param) {
     // moment de l'arrêt (`exit`, Ctrl-C, SIGKILL) était donc perdu : le
     // serveur le garde attribué à ce client jusqu'à expiration du bail
     // (leaseDuration, 300s par défaut, PR7) avant de le remettre au stock —
-    // travail d'analyse déjà fait, jeté pour rien. `shutdown_flush_active`
-    // signale à fork_checker (autre thread, même process) de continuer à
-    // émettre des battements IPC_MSG_STATS pendant ce vidage, pour que le
-    // parent (fork_last_activity) ne le confonde pas avec une inactivité et
+    // travail d'analyse déjà fait, jeté pour rien. Pendant cet appel,
+    // send_possibility_analysed lève elle-même server_io_active (via
+    // server_socket_io_lock/_unlock, core/datamanager.h) — fork_checker
+    // (autre thread, même process) continue donc d'émettre des battements
+    // IPC_MSG_STATS tant que cet échange dure, pour que le parent
+    // (fork_last_activity) ne le confonde pas avec une inactivité et
     // n'escalade pas prématurément vers SIGTERM/SIGKILL (cf.
     // exit_interpreter / orchestrator_do_stop_forks). Borné par construction :
     // send_possibility_analysed vide toute la file en un seul appel (boucle
     // interne par lots), chaque échange réseau étant lui-même borné par
     // tcp_timeout (SO_RCVTIMEO/SO_SNDTIMEO) — jamais un délai fixe ajouté ici.
-    shutdown_flush_active = 1;
     send_possibility_analysed(thread_params);
-    shutdown_flush_active = 0;
 #ifdef DEBUG_THREAD
     log_info("END aposs thread %i\n", getpid());
 #endif // DEBUG_THREAD

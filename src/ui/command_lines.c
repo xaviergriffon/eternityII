@@ -836,11 +836,12 @@ int exit_interpreter(void) {
             //
             // Escalade INDIVIDUELLE, PAR FILS (child_idle_ms), pas un délai
             // unique appliqué à tout le lot depuis le SIGINT initial : un fils
-            // encore en train de vider sa file d'acquittements en attente
-            // (feed_thread_aposs, après REQUEST_STOP — cf.
-            // shutdown_flush_active / fork_last_activity) ne doit pas être
-            // interrompu au milieu de ce vidage juste parce qu'un AUTRE fils,
-            // lui, est réellement bloqué. Un fils qui ne rapporte JAMAIS
+            // encore en train de vider sa file d'acquittements en attente, ou
+            // de renvoyer son stock local restant (feed_thread_aposs /
+            // bt_flush_pending, après REQUEST_STOP — cf. server_io_active /
+            // fork_last_activity) ne doit pas être interrompu au milieu de ce
+            // vidage juste parce qu'un AUTRE fils, lui, est réellement bloqué.
+            // Un fils qui ne rapporte JAMAIS
             // d'activité (ancien client sans cette instrumentation, ou mort
             // avant son premier rapport) reste soumis à l'escalade normale —
             // `child_idle_ms` compte alors son inactivité depuis

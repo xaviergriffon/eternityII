@@ -1034,16 +1034,25 @@ void *fork_checker(void *param) {
     unsigned long long last_counter = 0;
     unsigned long long last_prune_cells = 0;
     struct client_statistics *statistic = calloc(1, sizeof(struct client_statistics));
-    // `|| shutdown_flush_active` : sans ce prolongement, ce thread cesse
-    // d'émettre à l'instant même de REQUEST_STOP — le parent perd alors toute
-    // visibilité sur le vidage final des possibilités analysées en attente
-    // (feed_thread_aposs, après la boucle principale) et ne peut plus
+    // `|| server_io_active` : sans ce prolongement, ce thread cesse d'émettre
+    // à l'instant même de REQUEST_STOP — le parent perd alors toute
+    // visibilité sur un échange serveur encore en cours et ne peut plus
     // distinguer un fork encore actif d'un fork bloqué (cf. fork_last_activity
     // côté parent, consulté par exit_interpreter/orchestrator_do_stop_forks
-    // pour décider d'escalader SIGTERM/SIGKILL). Se termine de lui-même dès
-    // que shutdown_flush_active retombe à 0 (fin du vidage, bornée par
+    // pour décider d'escalader SIGTERM/SIGKILL). `server_io_active` couvre
+    // les DEUX threads réseau d'un fork, pas seulement le vidage du thread
+    // d'alimentation (feed_thread_aposs) : le thread de RECHERCHE fait son
+    // propre envoi du travail restant à l'arrêt (bt_flush_pending ->
+    // add_possibility -> put_to_server, core/etii_search.c) — un premier
+    // essai de ce garde-fou (`shutdown_flush_active`, ne couvrant QUE le
+    // thread d'alimentation) laissait ce second flush invisible, et un
+    // serveur lent/saturé pendant ce flush faisait escalader SIGTERM/SIGKILL
+    // à un fork pourtant réellement occupé (observé en conditions réelles :
+    // `stock=205 … coups/s=0 serveur=oui`, tué à 10s alors qu'il vidait
+    // encore son stock local vers un serveur lent). Se termine de lui-même
+    // dès que server_io_active retombe à 0 (fin de l'échange, borné par
     // tcp_timeout côté réseau) ou que fork_checker_socket_id devient invalide.
-	while((request != REQUEST_STOP || shutdown_flush_active) && fork_checker_socket_id > 0) {
+	while((request != REQUEST_STOP || server_io_active) && fork_checker_socket_id > 0) {
         unsigned long long counter = 0;
         unsigned long long possibilities_in_stock = 0;
         for (t = 0; t < NB_THREADS; t++) {
@@ -1242,23 +1251,36 @@ void *server_tcp(void *param) {
 
     int gate_slot = fork_gate_register("server_tcp");
 
-    /* Fenêtre de grâce bornée après REQUEST_STOP : continue de recevoir les
+    /* Fenêtre de grâce APRÈS REQUEST_STOP : continue de recevoir les
        battements IPC_MSG_STATS des forks encore en train de vider leur file
-       d'acquittements en attente (cf. shutdown_flush_active / fork_last_activity,
-       feed_thread_aposs) — sans elle, ce thread cesse d'écouter à l'instant
+       d'acquittements en attente, ou de renvoyer leur stock local restant
+       (cf. server_io_active / fork_last_activity, feed_thread_aposs /
+       bt_flush_pending) — sans elle, ce thread cesse d'écouter à l'instant
        même de REQUEST_STOP et exit_interpreter/orchestrator_do_stop_forks
        n'ont plus aucune activité à observer pour décider d'escalader vers
        SIGTERM/SIGKILL, ce qui reviendrait à escalader à l'aveugle comme avant.
-       Même barème que l'escalade elle-même (STOP_ESCALATION_SIGKILL_MS) : au
-       -delà, plus aucun fils ne devrait légitimement avoir besoin d'émettre. */
+       PROLONGÉE tant qu'un fils rapporte encore `server_io_active == 1`
+       (`last_active_seen_at`, réutilise child_idle_ms — mêmes semantiques,
+       testées une fois) : un plafond fixe à STOP_ESCALATION_SIGKILL_MS depuis
+       le seul `stop_requested_at` referait exactement le bogue que ce
+       prolongement corrige, un cran plus haut — un serveur lent (pas figé)
+       recevant un gros flush de plusieurs forks peut légitimement prendre
+       plus de 10s, et ce thread ne doit pas cesser d'écouter pendant que ça
+       progresse réellement (observé en conditions réelles : des fils tués à
+       5s/10s alors qu'ils vidaient encore leur stock local vers un serveur
+       lent). Un fils qui ne rapporte JAMAIS d'activité (mort avant, ou
+       process n'ayant jamais parlé au serveur) ne prolonge jamais rien —
+       exactement le comportement de repli de child_idle_ms. */
     time_t stop_requested_at = 0;
+    time_t last_active_seen_at = 0;
     while (1) {
         fork_gate_checkpoint(gate_slot);
         if (request == REQUEST_STOP) {
             if (stop_requested_at == 0) {
                 stop_requested_at = time(NULL);
             }
-            if ((long)(time(NULL) - stop_requested_at) * 1000L >= STOP_ESCALATION_SIGKILL_MS) {
+            if (child_idle_ms(last_active_seen_at, stop_requested_at, time(NULL))
+                >= STOP_ESCALATION_SIGKILL_MS) {
                 break;
             }
         }
@@ -1314,6 +1336,12 @@ void *server_tcp(void *param) {
                                sizeof(struct client_statistics));
                         if (fork_last_activity != NULL) {
                             fork_last_activity[cpt] = time(NULL);
+                        }
+                        // Prolonge la fenêtre de grâce ci-dessus tant qu'AU
+                        // MOINS un fils rapporte un échange serveur en cours
+                        // au moment de ce rapport (cf. sa doc).
+                        if (fork_statistics[cpt].server_io_active) {
+                            last_active_seen_at = time(NULL);
                         }
                     } else {
                         // Un datagramme de stats dont l'expéditeur ne correspond

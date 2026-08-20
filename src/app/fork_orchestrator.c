@@ -718,9 +718,10 @@ static void orchestrator_do_stop_forks(void)
     if (any_live) {
         // Escalade INDIVIDUELLE, PAR FILS, plutôt qu'un délai unique appliqué
         // à tout le lot : un fils encore en train de vider sa file
-        // d'acquittements en attente (feed_thread_aposs, après REQUEST_STOP —
-        // cf. shutdown_flush_active / fork_last_activity) ne doit pas être
-        // interrompu au milieu de ce vidage juste parce qu'un AUTRE fils, lui,
+        // d'acquittements en attente, ou de renvoyer son stock local restant
+        // (feed_thread_aposs / bt_flush_pending, après REQUEST_STOP — cf.
+        // server_io_active / fork_last_activity) ne doit pas être interrompu
+        // au milieu de ce vidage juste parce qu'un AUTRE fils, lui,
         // est réellement bloqué. `time(NULL)` (résolution 1s) suffit ici : la
         // même granularité que fork_last_activity côté parent (stampé sur
         // chaque IPC_MSG_STATS reçu), pas de raison d'être plus précis.

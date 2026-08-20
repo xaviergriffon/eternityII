@@ -176,12 +176,13 @@ stop_escalation_action_t stop_escalation_next(long elapsed_ms);
  *
  * Avant ce prédicat, `stop_escalation_next` était consulté avec le temps
  * écoulé depuis le SIGINT INITIAL, identique pour tous les fils — un fils
- * encore en train de vider sa file d'acquittements en attente (cf.
- * `shutdown_flush_active` côté fork, `fork_last_activity` côté parent) se
- * voyait donc interrompu par SIGTERM/SIGKILL au même instant qu'un fils
- * réellement bloqué, perdant le travail que ce vidage tentait justement de
- * sauver. `now`/`escalation_start`/`last_activity` sont tous des `time(NULL)`
- * injectés (jamais lus directement ici) : testable sans horloge réelle.
+ * encore en train de vider sa file d'acquittements en attente, ou de
+ * renvoyer son stock local restant (cf. `server_io_active` côté fork,
+ * `fork_last_activity` côté parent) se voyait donc interrompu par
+ * SIGTERM/SIGKILL au même instant qu'un fils réellement bloqué, perdant le
+ * travail que ce vidage tentait justement de sauver. `now`/`escalation_start`/
+ * `last_activity` sont tous des `time(NULL)` injectés (jamais lus
+ * directement ici) : testable sans horloge réelle.
  *
  * @param last_activity    Dernier instant connu où ce fils a été vu actif
  *                         (0 si jamais observé — un client sans cette
@@ -205,10 +206,10 @@ long child_idle_ms(time_t last_activity, time_t escalation_start, time_t now);
  * Sans lui, une ligne d'escalade ne dit QUE « ce fils est encore vivant après
  * N secondes d'inactivité » — impossible de distinguer depuis l'extérieur un
  * fils réellement bloqué d'un fils occupé sur un état qui ne se voit pas
- * autrement (ex. un gros lot d'acquittements en cours de vidage, cf.
- * `shutdown_flush_active` / `feed_thread_aposs`), ou de savoir SI ce fils a
- * seulement déjà rapporté quoi que ce soit. `stat` vient du dernier
- * `client_statistics` connu (`fork_statistics[c]`, estampillé en même temps
+ * autrement (ex. un gros lot d'acquittements ou de stock local en cours de
+ * vidage, cf. `server_io_active` / `feed_thread_aposs` / `bt_flush_pending`),
+ * ou de savoir SI ce fils a seulement déjà rapporté quoi que ce soit. `stat`
+ * vient du dernier `client_statistics` connu (`fork_statistics[c]`, estampillé en même temps
  * que `fork_last_activity[c]` sur chaque `IPC_MSG_STATS` reçu) — les mêmes
  * compteurs déjà affichés par `check`/`clients`, pas une nouvelle télémétrie.
  *

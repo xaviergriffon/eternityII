@@ -839,25 +839,11 @@ extern struct client_statistics *fork_statistics;
  *
  * Sert de base à l'escalade d'arrêt PAR FILS (`child_idle_ms`,
  * `src/app/fork_orchestrator.h`) : un fils qui rapporte encore de l'activité
- * (ex. vidage final de sa file d'acquittements en attente, cf.
- * `shutdown_flush_active`) ne doit pas être interrompu par un délai fixe
- * commun à tout le lot — seule SON inactivité doit compter.
+ * (ex. vidage final de sa file d'acquittements en attente, ou renvoi de son
+ * stock local restant, cf. `server_io_active`) ne doit pas être interrompu
+ * par un délai fixe commun à tout le lot — seule SON inactivité doit compter.
  */
 extern time_t *fork_last_activity;
-
-/**
- * @brief Vrai (1) tant que CE fork (process courant, jamais le parent) est en
- *        train d'effectuer son vidage final des possibilités analysées en
- *        attente d'acquittement (cf. `feed_thread_aposs`, appelé une dernière
- *        fois après `REQUEST_STOP`). Faux (0) sinon.
- *
- * Consulté uniquement par `fork_checker` (même process) pour décider de
- * continuer à émettre des battements `IPC_MSG_STATS` un court instant après
- * `REQUEST_STOP` — sans ce signal, le thread de stats s'arrête net dès
- * `REQUEST_STOP` et le parent perd toute visibilité sur ce vidage en cours,
- * qu'il interpréterait alors à tort comme de l'inactivité.
- */
-extern volatile int shutdown_flush_active;
 
 /**
  * @brief Vrai (1) tant que CE fork (process courant) est en train d'échanger
