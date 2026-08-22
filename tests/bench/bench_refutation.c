@@ -154,6 +154,237 @@ typedef struct {
  * @param eng    Variante de moteur.
  * @param budget Plafond de nœuds.
  */
+/* ------------------------------------------------------------------------- *
+ * Instrumentation : fenêtres 2x2 entièrement vides (comptage seul)
+ *
+ * Question posée : un test JOINT sur les 4 cases d'une fenêtre 2x2 vide
+ * fermerait-il des possibilités que le pipeline actuel du pruner laisse passer ?
+ *
+ * Motif : le contrôle superficiel (`possibility_all_has_a_next_counted`) juge
+ * chaque case ISOLÉMENT. Or dans une fenêtre 2x2 entièrement vide, aucune case
+ * n'a jamais plus de 2 faces connues — les 2 autres regardent les cases vides de
+ * la fenêtre. Un test joint en voit jusqu'à 8. C'est un angle mort de FORME du
+ * test par case, pas un défaut de finesse : le point fixe de §4.6a n'y change
+ * rien tant qu'aucune case de la fenêtre n'est forcée.
+ *
+ * Ce code ne fait que COMPTER. Il n'ajoute rien au chemin de production et n'est
+ * pas un mécanisme d'élagage. Il réutilise délibérément les primitives du moteur
+ * (`what_search_in_grid_to_key` / `get_parts_bigarray_with_key`) au lieu d'une
+ * table de blocs 2x2 précalculée : la mesure doit porter sur le POUVOIR de
+ * réfutation, pas sur une implémentation particulière — et aucune divergence de
+ * convention de faces n'est alors possible.
+ *
+ * Seules les fenêtres INTÉRIEURES sont examinées (x, y dans 1..ETERN_SIZE-3),
+ * pour que les 8 voisines existent toutes et que le décompte des côtés connus
+ * ait un sens uniforme. Un « côté connu » est un côté dont les DEUX voisines
+ * extérieures sont posées.
+ * ------------------------------------------------------------------------- */
+
+#define W2_MIN 1
+#define W2_MAX (ETERN_SIZE - 3)
+
+typedef struct {
+    long long windows_scanned;
+    long long windows_empty;
+    long long empty_by_sides[5];
+    long long refuted_by_sides[5];
+    long long refuted_colour;   /* réfutée sans même regarder les pièces déjà utilisées */
+    long long refuted_avail;    /* couleurs possibles, mais aucune pièce disponible */
+    long long cross_checked;    /* réfutations repassées par l'oracle indépendant */
+    long long cross_disagree;   /* ... et contredites : instrumentation fausse */
+} w2_stats_t;
+
+/**
+ * @brief Remplit récursivement les 4 cases d'une fenêtre 2x2 avec les primitives du moteur.
+ *
+ * @param b            Plateau de travail (modifié puis restauré à l'identique).
+ * @param x,y          Coin haut-gauche de la fenêtre.
+ * @param k            Case courante, 0..3 dans l'ordre (x,y) (x+1,y) (x,y+1) (x+1,y+1).
+ * @param ignore_used  1 = dimension COULEUR seule : les pièces déjà posées ailleurs sur
+ *                     le plateau sont considérées comme disponibles. La distinction des
+ *                     4 pièces DANS la fenêtre reste imposée dans les deux cas.
+ * @param local        Ids déjà placés dans la fenêtre (distinction interne).
+ * @return             1 si au moins un remplissage complet existe.
+ */
+static int w2_rec(struct possibility_packet *b, int x, int y, int k,
+                  map_big_array *map, struct array_part *rot,
+                  int ignore_used, int16_t local[4])
+{
+    static const int dx[4] = {0, 1, 0, 1};
+    static const int dy[4] = {0, 0, 1, 1};
+    if (k == 4) {
+        return 1;
+    }
+    int cx = x + dx[k], cy = y + dy[k];
+    key_part key;
+    what_search_in_grid_to_key(rot, b, (int8_t)cx, (int8_t)cy, &key, (int8_t)map->sizearrayM);
+    /* Pointeur dans map->flat, stable : la récursion peut en demander d'autres. */
+    struct array_part *cand = get_parts_bigarray_with_key(map, &key);
+    for (int s = 0; s < cand->size; s++) {
+        int16_t id = cand->parts[s].id;
+        if (id == 0) {
+            continue;
+        }
+        if (!ignore_used && is_face_used(b->b_faceused, (uint16_t)(id - 1))) {
+            continue;
+        }
+        int dup = 0;
+        for (int q = 0; q < k; q++) {
+            if (local[q] == id) {
+                dup = 1;
+                break;
+            }
+        }
+        if (dup) {
+            continue;
+        }
+        local[k] = id;
+        b->grid[cx][cy] = (int16_t)id_for_rotated_part((uint16_t)id, (uint8_t)cand->parts[s].rotation);
+        int ok = w2_rec(b, x, y, k + 1, map, rot, ignore_used, local);
+        b->grid[cx][cy] = -2;
+        if (ok) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/** @brief 1 si la fenêtre 2x2 en (x,y) admet au moins un remplissage. */
+static int w2_fillable(struct possibility_packet *b, int x, int y,
+                       map_big_array *map, struct array_part *rot, int ignore_used)
+{
+    int16_t local[4] = {0, 0, 0, 0};
+    return w2_rec(b, x, y, 0, map, rot, ignore_used, local);
+}
+
+/**
+ * @brief Oracle INDÉPENDANT du même remplissage : ni map, ni `what_search_in_grid_to_key`.
+ *
+ * Balaye toutes les rotations de toutes les pièces et compare les faces à la main,
+ * en relisant les voisines directement dans la grille. Sert uniquement à valider
+ * `w2_fillable` : deux chemins de code sans aucune primitive commune doivent
+ * toujours répondre la même chose. Un désaccord signale une instrumentation
+ * fausse — le symptôme qu'on espère d'un test d'élimination est précisément ce
+ * qu'un test d'élimination bogué produit.
+ */
+static int w2_bf_rec(struct possibility_packet *b, int x, int y, int k,
+                     struct array_part *rot, int16_t local[4])
+{
+    static const int dx[4] = {0, 1, 0, 1};
+    static const int dy[4] = {0, 0, 1, 1};
+    if (k == 4) {
+        return 1;
+    }
+    int cx = x + dx[k], cy = y + dy[k];
+    for (int i = 1; i < rot->size; i++) {
+        struct part *p = &rot->parts[i];
+        if (p->id == 0) {
+            continue;
+        }
+        /* Voisines : bord de grille => face grise imposée ; case posée => égalité ;
+         * case vide => aucune contrainte (même sémantique que la map). */
+        if (cy == 0) {
+            if (p->top != 0) continue;
+        } else if (b->grid[cx][cy - 1] != -2) {
+            if (p->top != rot->parts[b->grid[cx][cy - 1]].bottom) continue;
+        }
+        if (cy == ETERN_SIZE - 1) {
+            if (p->bottom != 0) continue;
+        } else if (b->grid[cx][cy + 1] != -2) {
+            if (p->bottom != rot->parts[b->grid[cx][cy + 1]].top) continue;
+        }
+        if (cx == 0) {
+            if (p->left != 0) continue;
+        } else if (b->grid[cx - 1][cy] != -2) {
+            if (p->left != rot->parts[b->grid[cx - 1][cy]].right) continue;
+        }
+        if (cx == ETERN_SIZE - 1) {
+            if (p->right != 0) continue;
+        } else if (b->grid[cx + 1][cy] != -2) {
+            if (p->right != rot->parts[b->grid[cx + 1][cy]].left) continue;
+        }
+        if (is_face_used(b->b_faceused, (uint16_t)(p->id - 1))) {
+            continue;
+        }
+        int dup = 0;
+        for (int q = 0; q < k; q++) {
+            if (local[q] == p->id) { dup = 1; break; }
+        }
+        if (dup) {
+            continue;
+        }
+        local[k] = p->id;
+        b->grid[cx][cy] = (int16_t)i;
+        int ok = w2_bf_rec(b, x, y, k + 1, rot, local);
+        b->grid[cx][cy] = -2;
+        if (ok) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int w2_fillable_bruteforce(struct possibility_packet *b, int x, int y,
+                                  struct array_part *rot)
+{
+    int16_t local[4] = {0, 0, 0, 0};
+    return w2_bf_rec(b, x, y, 0, rot, local);
+}
+
+/** @brief Nombre de côtés de la fenêtre dont les DEUX voisines extérieures sont posées. */
+static int w2_known_sides(const struct possibility_packet *b, int x, int y)
+{
+    int n = 0;
+    if (b->grid[x - 1][y] != -2 && b->grid[x - 1][y + 1] != -2) n++;   /* gauche */
+    if (b->grid[x][y - 1] != -2 && b->grid[x + 1][y - 1] != -2) n++;   /* haut   */
+    if (b->grid[x + 2][y] != -2 && b->grid[x + 2][y + 1] != -2) n++;   /* droite */
+    if (b->grid[x][y + 2] != -2 && b->grid[x + 1][y + 2] != -2) n++;   /* bas    */
+    return n;
+}
+
+/**
+ * @brief Balaye les fenêtres 2x2 intérieures d'une possibilité et cumule les compteurs.
+ *
+ * @param b  Plateau de travail : restauré à l'identique en sortie, mais passer une COPIE
+ *           du paquet d'origine reste la façon la plus sûre de l'appeler.
+ * @return   1 si au moins une fenêtre entièrement vide n'admet aucun remplissage —
+ *           c'est-à-dire si un test joint 2x2 aurait réfuté cette possibilité.
+ */
+static int w2_scan(struct possibility_packet *b, map_big_array *map,
+                   struct array_part *rot, w2_stats_t *st)
+{
+    int refuted = 0;
+    for (int x = W2_MIN; x <= W2_MAX; x++) {
+        for (int y = W2_MIN; y <= W2_MAX; y++) {
+            st->windows_scanned++;
+            if (b->grid[x][y] != -2 || b->grid[x + 1][y] != -2 ||
+                b->grid[x][y + 1] != -2 || b->grid[x + 1][y + 1] != -2) {
+                continue;
+            }
+            st->windows_empty++;
+            int sides = w2_known_sides(b, x, y);
+            st->empty_by_sides[sides]++;
+            if (w2_fillable(b, x, y, map, rot, 0)) {
+                continue;
+            }
+            refuted = 1;
+            st->refuted_by_sides[sides]++;
+            /* Contre-vérification systématique par un chemin de code sans map. */
+            st->cross_checked++;
+            if (w2_fillable_bruteforce(b, x, y, rot)) {
+                st->cross_disagree++;
+            }
+            /* De quelle dimension vient la réfutation : couleurs, ou épuisement du stock ? */
+            if (!w2_fillable(b, x, y, map, rot, 1)) {
+                st->refuted_colour++;
+            } else {
+                st->refuted_avail++;
+            }
+        }
+    }
+    return refuted;
+}
+
 static closure_t close_subtree(const struct possibility_packet *root, const engine_t *eng, long budget)
 {
     closure_t out;
@@ -447,6 +678,10 @@ static void usage(void)
            "                     à ordre DYNAMIQUE (MRV) au lieu de l'ordre fixe (§4.10) — c'est\n"
            "                     l'A/B de ce levier : même stock, même budget, seul le moteur de\n"
            "                     la preuve change\n"
+           "  --w2x2             (avec --pruner-profile) compte les fenêtres 2x2 intérieures\n"
+           "                     entièrement vides et celles qui n'admettent AUCUN\n"
+           "                     remplissage, puis recoupe avec le pipeline existant.\n"
+           "                     Comptage seul : n'élague rien, ne modifie aucun résultat.\n"
            "  --gpu              (avec --pruner-profile, build CUDA uniquement) rejoue le\n"
            "                     contrôle GPU une passe (gpu_pruner_check_batch) au lieu du\n"
            "                     pipeline CPU superficiel+DFS ; mesure le taux d'élimination,\n"
@@ -470,6 +705,7 @@ int main(int argc, char **argv)
     int max_roots = 20;
     int kpi = 0;
     int pruner_profile = 0;
+    int w2x2 = 0;
     int gpu = 0;
     int gpu_batch = 100;
     int depths[MAX_DEPTHS] = {150, 165, 175, 180, 185};
@@ -496,6 +732,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--kpi") == 0 && i + 1 < argc)         kpi = atoi(argv[++i]);
         else if (strcmp(argv[i], "--pruner-profile") == 0 && i + 1 < argc) pruner_profile = atoi(argv[++i]);
         else if (strcmp(argv[i], "--pruner-dfs-mrv") == 0)               pruner_dfs_mrv = 1;
+        else if (strcmp(argv[i], "--w2x2") == 0)                         w2x2 = 1;
         else if (strcmp(argv[i], "--gpu") == 0)                          gpu = 1;
         else if (strcmp(argv[i], "--gpu-batch") == 0 && i + 1 < argc)    gpu_batch = atoi(argv[++i]);
         else if (strcmp(argv[i], "--engines") == 0 && i + 1 < argc) {
@@ -575,6 +812,22 @@ int main(int argc, char **argv)
             return EXIT_SUCCESS;
         }
 #endif
+        if (w2x2) {
+            /* Auto-test de plomberie : sur un plateau VIDE, aucune fenêtre ne peut être
+             * réfutée (les 4 clés valent all_face, le compartiment est l'union des
+             * pièces). Un échec ici signale un branchement cassé, pas un résultat. */
+            struct possibility_packet probe;
+            w2_stats_t probe_st;
+            make_empty_board(&probe);
+            memset(&probe_st, 0, sizeof(probe_st));
+            if (w2_scan(&probe, map, rot, &probe_st) != 0) {
+                fprintf(stderr, "auto-test --w2x2 : une fenêtre est déclarée morte sur un"
+                                " plateau vide, instrumentation cassée\n");
+                return EXIT_FAILURE;
+            }
+            printf("auto-test --w2x2 : %lld fenêtres toutes remplissables sur plateau vide, OK\n",
+                   probe_st.windows_empty);
+        }
         FILE *f = fopen(back, "r");
         if (f == NULL) {
             fprintf(stderr, "ouverture de %s impossible\n", back);
@@ -592,6 +845,15 @@ int main(int argc, char **argv)
         rewind(f);
         long long index = 0, sampled = 0;
         long long dead_superficial = 0, closed_by_dfs = 0, survives = 0, solutions = 0;
+        w2_stats_t w2s;
+        memset(&w2s, 0, sizeof(w2s));
+        long long w2_ref_total = 0, w2_on_dead = 0, w2_on_dfs = 0, w2_on_solution = 0;
+        long long w2_marginal = 0;
+        double w2_seconds_total = 0.0;
+        /* Ventilation par profondeur : le modèle de branchement prédit que le
+         * pouvoir de réfutation croît quand le stock de pièces se vide. */
+        long long w2_depth_n[16] = {0}, w2_depth_ref[16] = {0};
+        long long w2_pkt_inconsistent = 0;
         unsigned long long dfs_nodes_total = 0;
         double dfs_seconds_total = 0.0;
         // Chronométrage du seul contrôle superficiel (possibility_all_has_a_next_counted),
@@ -609,6 +871,33 @@ int main(int argc, char **argv)
 
             struct possibility_packet work;
             memcpy(&work, &pkt, sizeof(work));
+            /* Balayage 2x2 sur une copie INTACTE : le contrôle superficiel ci-dessous
+             * pose les cases forcées, ce qui changerait la géométrie des fenêtres. */
+            int w2_ref = 0;
+            if (w2x2) {
+                struct possibility_packet w2work;
+                memcpy(&w2work, &pkt, sizeof(w2work));
+                /* Une réfutation par DISPONIBILITÉ n'a de sens que si b_faceused est
+                 * cohérent avec la grille. Un paquet incohérent est écarté du comptage
+                 * plutôt que de produire une fausse fermeture. */
+                if (check_possibility(&w2work, g_client.all_rotate_part) < 0) {
+                    w2_pkt_inconsistent++;
+                } else {
+                    double tw0 = now_seconds();
+                    w2_ref = w2_scan(&w2work, g_client.map_part,
+                                     g_client.all_rotate_part, &w2s);
+                    w2_seconds_total += now_seconds() - tw0;
+                    int bucket = placed_count(&pkt) / 16;
+                    if (bucket > 15) {
+                        bucket = 15;
+                    }
+                    w2_depth_n[bucket]++;
+                    if (w2_ref) {
+                        w2_ref_total++;
+                        w2_depth_ref[bucket]++;
+                    }
+                }
+            }
             unsigned int cells_studied = 0;
             // Même appel, mêmes arguments que autoprune_step (etii_search.c) :
             // c'est le contrôle superficiel réel du pruner, pas une simulation.
@@ -620,6 +909,9 @@ int main(int argc, char **argv)
             superficial_cells_total += cells_studied;
             if (work.alloc >= ETERN_PARTS) {
                 solutions++;
+                if (w2_ref) {
+                    w2_on_solution++;
+                }
                 continue;
             }
             if (!work.checked && has_next && budget > 0) {
@@ -632,13 +924,24 @@ int main(int argc, char **argv)
                 dfs_nodes_total += dfs_nodes;
                 if (dfs == BT_CORE_EXHAUSTED) {
                     closed_by_dfs++;
+                    if (w2_ref) {
+                        w2_on_dfs++;
+                    }
                     continue;
                 }
             }
             if (work.checked || has_next) {
                 survives++;
+                if (w2_ref) {
+                    /* Le seul chiffre qui décide : une fermeture que le pipeline
+                     * complet (superficiel + point fixe + preuve DFS) a laissée passer. */
+                    w2_marginal++;
+                }
             } else {
                 dead_superficial++;
+                if (w2_ref) {
+                    w2_on_dead++;
+                }
             }
         }
         fclose(f);
@@ -661,6 +964,54 @@ int main(int argc, char **argv)
                superficial_seconds_total > 0 ? (double)sampled / superficial_seconds_total : 0.0,
                sampled > 0 ? (double)superficial_cells_total / (double)sampled : 0.0,
                superficial_seconds_total, sampled);
+
+        if (w2x2) {
+            printf("\n--- fenêtres 2x2 intérieures entièrement vides (comptage seul) ---\n");
+            printf("%-40s %10lld  (%.1f par possibilité sur %d examinées)\n",
+                   "fenêtres balayées :", w2s.windows_scanned,
+                   sampled > 0 ? (double)w2s.windows_scanned / (double)sampled : 0.0, W2_MAX - W2_MIN + 1);
+            printf("%-40s %10lld  (%.2f par possibilité)\n", "entièrement vides :",
+                   w2s.windows_empty, sampled > 0 ? (double)w2s.windows_empty / (double)sampled : 0.0);
+            printf("\n%-16s %14s %14s\n", "côtés connus", "vides", "sans remplissage");
+            for (int k = 0; k <= 4; k++) {
+                printf("  %-14d %14lld %14lld%s\n", k, w2s.empty_by_sides[k], w2s.refuted_by_sides[k],
+                       w2s.empty_by_sides[k] > 0 && w2s.refuted_by_sides[k] > 0 ? "" : "");
+            }
+            printf("\n%-40s %10lld\n", "  dont réfutation par les COULEURS :", w2s.refuted_colour);
+            printf("%-40s %10lld\n", "  dont réfutation par DISPONIBILITÉ :", w2s.refuted_avail);
+            printf("\npossibilités réfutées par >=1 fenêtre 2x2 : %lld (%.1f %% de l'échantillon)\n",
+                   w2_ref_total, sampled > 0 ? 100.0 * (double)w2_ref_total / (double)sampled : 0.0);
+            printf("  déjà mortes au contrôle superficiel   : %lld\n", w2_on_dead);
+            printf("  déjà fermées par la preuve DFS        : %lld\n", w2_on_dfs);
+            printf("  sur une solution (faux positif !)     : %lld\n", w2_on_solution);
+            printf("  >>> MARGINALES (survivaient au pipeline) : %lld  (%.2f %% de l'échantillon)\n",
+                   w2_marginal, sampled > 0 ? 100.0 * (double)w2_marginal / (double)sampled : 0.0);
+            printf("\n%-18s %10s %10s %10s\n", "pièces posées", "possib.", "réfutées", "taux");
+            for (int k = 0; k < 16; k++) {
+                if (w2_depth_n[k] == 0) {
+                    continue;
+                }
+                printf("  %3d-%-13d %10lld %10lld %9.2f %%\n", k * 16, k * 16 + 15,
+                       w2_depth_n[k], w2_depth_ref[k],
+                       100.0 * (double)w2_depth_ref[k] / (double)w2_depth_n[k]);
+            }
+            printf("\ncoût du balayage 2x2 : %.3f s pour %lld possibilités"
+                   " (%.0f possibilités/s, %.1f us/possibilité)\n",
+                   w2_seconds_total, sampled,
+                   w2_seconds_total > 0 ? (double)sampled / w2_seconds_total : 0.0,
+                   sampled > 0 ? 1e6 * w2_seconds_total / (double)sampled : 0.0);
+            printf("paquets écartés (incohérents grille/b_faceused) : %lld\n", w2_pkt_inconsistent);
+            printf("\ncontre-vérification par un chemin sans map : %lld réfutations repassées,"
+                   " %lld désaccord(s)\n", w2s.cross_checked, w2s.cross_disagree);
+            if (w2s.cross_disagree > 0) {
+                printf("  ERREUR : les deux chemins ne concordent pas, instrumentation fausse.\n"
+                       "  Ne pas exploiter les chiffres.\n");
+            }
+            if (w2_on_solution > 0) {
+                printf("  ERREUR : une fenêtre a réfuté une possibilité qui est une SOLUTION.\n"
+                       "  L'instrumentation est fausse, ne pas exploiter les chiffres.\n");
+            }
+        }
 
         free_bigarray(map);
         free_array_part(rot);
