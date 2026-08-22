@@ -26,7 +26,9 @@ paquets émis, `max_result` **186** à 2 M nœuds — voir §4.7. Le « mur stru
 s'est révélé être un artefact du PROTOCOLE DE MESURE (mono-processus depuis la genèse), pas
 une propriété de l'ordre fixe — voir la correction en §4.7 — ce qui rouvre §4.4, §4.5 et
 §4.6b (tous écartés/désactivés pour cause de profondeur insuffisante) à une nouvelle mesure. La variante « partition de l'arène » de §4.2 reste une
-proposition non implémentée.
+proposition non implémentée. §4.9 (table de région sur les zones d'angle,
+et élimination par résolution d'un cadre complet) est **écartée sans implémentation** —
+seule piste du document tranchée avant écriture de code, par quatre mesures statiques.
 
 ## 1. Question posée
 
@@ -1066,6 +1068,174 @@ actuel), ici le bénéfice est acquis : garder un levier inutilisé n'aurait auc
 n'est pas la convention de ce projet pour une piste adoptée (cf. §4.1). `common_first`
 n'est pas retenu, faute de justification a priori et de signal aussi net.
 
+### 4.9 Table de région sur les zones d'angle (« pattern database ») — ÉVALUÉE ET ÉCARTÉE, SANS IMPLÉMENTATION
+
+**Statut : proposition tranchée par la mesure seule.** Aucune ligne de moteur écrite,
+aucune PR. C'est la première piste de ce document écartée sans implémentation — non par
+prudence, mais parce que quatre mesures statiques, toutes reproductibles en moins d'une
+seconde et sans exécuter le solveur, suffisent à montrer que le mécanisme ne peut pas se
+déclencher. Le raisonnement est conservé ici pour qu'il n'ait pas à être refait.
+
+**Origine de la proposition.** Énumérer, pour chaque angle, **tous** les remplissages
+valides du bloc 3×3 qui va du coin jusqu'à l'indice — les indices officiels posés par
+`first_possibility` (208 en (2,2), 255 en (13,2), 181 en (2,13), 249 en (13,13)) tombent
+exactement sur la case opposée au coin de chacun de ces blocs. On disposerait alors des
+pièces qui « répondent » à chaque zone, et on ne poursuivrait une possibilité que si elle
+correspond à l'un des cas répertoriés. Extension proposée : une fois les 4 tables
+calculées, éliminer davantage en tentant de résoudre un **cadre complet**.
+
+**Ce que c'est, dans le vocabulaire de ce document.** Une contrainte **en extension** sur
+une région — une table de région, ou *pattern database*. C'est la seule famille absente du
+tableau de §2, qui ne connaît que des tests par case. Elle est **exacte** au sens de §5 :
+la table relâche la contrainte « pièce déjà utilisée ailleurs sur le plateau », donc elle
+contient toujours au moins les remplissages réellement atteignables, et « absent de la
+table » est une réfutation valide. Et elle voit, en principe, des impasses qu'aucun test
+local ne peut voir : §3.1 mesure que le forward-check ignore des voisines jusqu'à 152
+niveaux plus loin.
+
+#### Mesure 1 — taille des tables : la piste est parfaitement tractable
+
+Énumération exhaustive du bloc 3×3 d'angle (pièces distinctes, couleurs cohérentes, gris
+sur le bord du plateau) :
+
+| Zone | Remplissages valides |
+|---|---|
+| Angle 3×3, sans indice | **2 633 221** (0,12 s à énumérer, ~30 Mo à stocker) |
+| Angle (0,0), indice 208 r3 en (2,2) | **3 215** |
+| Angle (15,0), indice 255 r3 en (13,2) | **3 891** |
+| Angle (0,15), indice 181 r3 en (2,13) | **3 447** |
+| Angle (15,15), indice 249 r0 en (13,13) | **3 029** |
+
+Sans indice, une seule table sert les 4 coins : aucune contrainte positionnelle ne les
+distingue. Avec les indices, chaque coin a la sienne, et l'indice divise le nombre de cas
+par ~780. Croissance mesurée : **×11 par case de cadre, ×2,6 par case intérieure**, d'où
+3×4 ≈ 1,9·10⁸ et 4×4 ≈ 3,8·10¹⁰ — le 3×3 est la dernière taille stockable, et il l'est
+confortablement. Produit des 4 tables : 1,31·10¹⁴ ; taux de disjonction des 4 zones mesuré
+à 0,90 %, soit **~1,2·10¹² configurations 4-zones réellement compatibles**.
+
+#### Mesure 2 — coût d'interrogation : rien ne bloque non plus de ce côté
+
+Signature de frontière d'une zone 3×3 = les 6 couleurs sortantes (2 de cadre, 4
+intérieures) :
+
+| Grandeur | Valeur |
+|---|---|
+| Espace a priori des signatures | 2 088 025 (bitset de 261 Ko) |
+| Signatures atteignables | 995 005 → **52,3 % de rejet** (prior uniforme) |
+| Zones partageant une signature | moyenne 2,6, **maximum 30**, 96 % ≤ 7 |
+
+L'absence de queue lourde est le point important : le test **exact** — signature → 2 ou 3
+zones candidates → vérification du masque des pièces déjà utilisées — coûte une poignée
+d'accès, pas un balayage. Techniquement, la piste est donc entièrement réalisable.
+
+#### Mesure 3 — le verrou : la table ne peut jamais être interrogée utilement
+
+Deux faits, indépendants de la taille de la table.
+
+**(a) Une zone complète et valide est toujours dans la table**, par construction. Tester
+l'appartenance d'une zone déjà remplie apporte exactement zéro information. La seule
+requête qui informe est « existe-t-il une complétion, sachant les couleurs que le reste du
+plateau réclame ? », ce qui exige que la **frontière soit connue avant que la zone soit
+remplie**.
+
+**(b) `directions[]` l'interdit.** Index de parcours mesurés (script en annexe) :
+
+| Angle | Zone 3×3 remplie aux index | Frontière entièrement connue à l'index | Faces de frontière connues avant la fin de la zone |
+|---|---|---|---|
+| (0,0) | 0-4, 72-75 | 92 | 2 / 6 |
+| (15,0) | 15-23 | 98 | 1 / 6 |
+| (15,15) | 34-42 | 86 | 1 / 6 |
+| (0,15) | 53-61 | 80 | 1 / 6 |
+
+À chaque fois la zone est terminée **20 à 75 niveaux avant** que sa frontière existe, et la
+ou les rares faces connues avant sont celles de voisines directes — donc déjà imposées par
+la clé 4D. **Déclenchement attendu : 0.** C'est le mode d'échec de §4.2 et §4.4, atteint
+ici avant d'avoir écrit le mécanisme.
+
+La variante qui collerait à l'ordre actuel — précalculer « zone extensible d'un anneau » et
+filtrer aux index 23/42/61/75 — tombe pour une autre raison : le nombre attendu
+d'extensions d'un 3×3 vers un 4×4 est ~1,4·10⁴, donc la probabilité qu'une zone n'en
+admette aucune est négligeable. Rien ne meurt à cet endroit.
+
+#### Mesure 4 — l'élimination par résolution d'un cadre complet
+
+En creusant la proposition, une reformulation apparaît, qui vaut d'être consignée
+indépendamment du verdict :
+
+> Chaque pièce de bordure porte une face grise ; les deux faces qui l'encadrent sont des
+> couleurs de **cadre**. Une pièce de bordure est donc une **arête** d'un multigraphe à 5
+> sommets, et **un cadre complet est exactement un circuit eulérien** de ce multigraphe (60
+> arêtes), avec les 4 coins aux positions 0/15/30/45 du circuit.
+
+Mesuré sur `data/pieces.csv` : 5 sommets (couleurs 18 à 22), 60 arêtes, **tous les degrés
+égaux à 24**, graphe connexe. Un multigraphe 24-régulier à 5 sommets possède un nombre
+astronomique de circuits eulériens — le cadre est structurellement libre, et la mesure
+directe le confirme :
+
+| | Zones sans indice | Zones avec les vrais indices |
+|---|---|---|
+| Quadruplets de zones disjointes testés | 300 | 300 |
+| Cadre complet trouvé | 300 | 298 |
+| **Cadre impossible** | **0** | **0** |
+| Indécis (cap de nœuds) | 3 | 2 |
+| Nœuds pour trouver un cadre | min 41 / **médiane 62** / p90 322 | — |
+
+Médiane 62 nœuds pour placer 40 cases : quasiment aucun retour arrière. Et même à supposer
+un taux d'échec non nul, éliminer une *zone* Z exigerait que **tous** les quadruplets
+contenant Z échouent — hors d'atteinte à 100 % de réussite.
+
+**Piège de mesure rencontré, à ne pas reproduire.** La première version du test enchaînait
+les 4 côtés du cadre **sans backtracking entre eux** : un côté résolu gloutonnement volait
+une pièce au suivant. Elle annonçait **9,7 % de quadruplets impossibles** — un artefact
+intégral, tombé à 0 % dès que le backtracking a couvert les 40 cases d'un seul tenant. Un
+test d'élimination mal implémenté produit exactement le symptôme qu'on espère de lui ;
+c'est le pendant, côté mesure statique, de la règle de §5 sur le test unitaire à deux
+volets.
+
+#### Pourquoi cette famille ne pouvait pas payer — le modèle de branchement
+
+Nombre attendu de candidats pour une case intérieure à 2 faces contraintes = `4R/17²`, où
+`R` est le nombre de pièces intérieures encore disponibles (196 pièces, 4 rotations, 17
+couleurs intérieures) :
+
+| Profondeur (cases posées) | 60 | 100 | 140 | 180 | **186** | 200 | 220 |
+|---|---|---|---|---|---|---|---|
+| `R` restant | 196 | 156 | 116 | 76 | 70 | 56 | 36 |
+| Candidats attendus | 2,71 | 2,16 | 1,61 | 1,05 | **0,97** | 0,78 | 0,50 |
+
+Le branchement croise 1 vers la profondeur **~186** — la valeur de `max_result` mesurée
+sous MRV en §4.7. C'est un modèle, pas une preuve, mais il donne le critère : **au-dessus
+de ~180, les impasses sont exponentiellement rares**, donc aucun élagage local ne peut y
+rentabiliser son coût. Or les zones d'angle et le cadre sont la région la moins profonde du
+parcours (les 60 cases de cadre sont bouclées à l'index 74, §3.2). Les deux moitiés de la
+proposition — table de zones et consistance du cadre — sont des raisonnements exacts et
+corrects qui travaillent là où **rien ne meurt**. Ils n'ont rien à réfuter.
+
+#### Décision : ne pas implémenter
+
+Ni la table de zones, ni le filtre par cadre. Le verdict ne tient pas à un coût mesuré
+trop élevé (contrairement à §4.3 ou §4.5) mais à une **impossibilité de déclenchement**
+établie avant écriture, et il couvre par le même argument les variantes voisines (zone
+4×4, zone ancrée sur l'indice, table de la bande frontière côté angles). Ne pas
+reproposer sans avoir d'abord invalidé la mesure 3.
+
+**Ce qui reste utilisable de l'analyse :**
+
+- **La reformulation eulérienne du cadre** est un fait structurel du puzzle, indépendant de
+  cette piste : le cadre ne porte aucune information discriminante, et tout mécanisme qui
+  espère réfuter par le cadre est voué au même sort.
+- **Le modèle de branchement** ci-dessus donne un critère d'admission bon marché pour les
+  futures pistes : une piste qui ne s'applique qu'au-dessus de la profondeur ~180 n'a
+  pratiquement rien à réfuter, quelle que soit sa force théorique. À rapprocher du
+  diagnostic corrigé de §4.4 (« se déclenche mais jamais là où ça compte »).
+- **Une seule condition rouvrirait la famille : un ordre de parcours où une zone peut être
+  entourée avant d'être remplie.** C'est structurellement possible en MRV (§4.7), où
+  l'ordre est dynamique. La mesure à faire, et la seule, serait d'instrumenter le moteur
+  MRV pour compter les occurrences « zone d'angle entièrement entourée, encore incomplète ».
+  Si ce compteur est nul ou marginal, la famille est close définitivement ; s'il ne l'est
+  pas, la mesure 2 dit que le test exact serait bon marché. Ne pas retoucher `directions[]`
+  pour provoquer artificiellement cette situation : bump de `VERSION` (§5).
+
 ## 5. Arbitrages tranchés
 
 - **Une condition nécessaire, jamais une heuristique.** Un faux positif jette
@@ -1154,6 +1324,19 @@ n'est pas retenu, faute de justification a priori et de signal aussi net.
   l'ordre fixe pour les mesures A/B et un repli. Conséquence à ne pas oublier : §4.4, §4.5
   et §4.6b ont été écartés/désactivés à cause du mur à 74, qui vient de bouger — à
   remesurer, cf. §4.7.
+
+- **Pas de table de région sur les zones d'angle, ni d'élimination par le cadre (§4.9).**
+  Écartée **sans implémentation**, cas unique dans ce document : quatre mesures statiques
+  suffisent. La table est pourtant tractable (2 633 221 remplissages du 3×3 d'angle sans
+  indice, 3 029 à 3 891 avec les indices officiels) et bon marché à interroger (multiplicité
+  maximale de 30 zones par signature de frontière) — mais elle ne peut jamais être
+  interrogée utilement : une zone complète et valide est **toujours** dans la table, et
+  `directions[]` termine chaque zone 20 à 75 niveaux **avant** que sa frontière existe.
+  L'élimination par résolution d'un cadre complet ne rejette rien non plus : un cadre est un
+  circuit eulérien d'un multigraphe 24-régulier à 5 sommets, 300/300 quadruplets de zones se
+  complètent, médiane 62 nœuds. À ne pas reproposer sans avoir invalidé la mesure 3 de §4.9 ;
+  la seule condition qui rouvrirait la famille est un ordre où une zone peut être entourée
+  avant d'être remplie, c'est-à-dire MRV.
 
 ## 6. Points laissés ouverts
 
@@ -1262,3 +1445,81 @@ ic = {c for pid, f in P if pid not in frame for c in f}
 print("couleurs exclusives au cadre :", sorted(fc - ic))
 print("pieces cadre/interieures : %d/%d" % (len(frame), len(P) - len(frame)))
 ```
+
+## Annexe — scripts des mesures de §4.9
+
+Reproductibles depuis la racine du dépôt, sans compilation ni exécution du solveur.
+
+**Comptage exact des zones d'angle ancrées sur les indices** (mesure 1) — retrouve
+3 215 / 3 891 / 3 447 / 3 029 en ~0,3 s. L'indice n'est posé qu'en dernière case du
+balayage, mais ses deux faces internes sont propagées en avance sur les deux voisines
+(`(1,2)` et `(2,1)`), ce qui suffit à garder l'arbre minuscule.
+
+```python
+T, R, B, L = 0, 1, 2, 3
+rows = [l.split() for l in open('data/pieces.csv').read().splitlines()[1:] if l.strip()]
+f0 = {int(r[0]): [int(r[1]), int(r[4]), int(r[3]), int(r[2])] for r in rows}  # top,right,bottom,left
+def rot(v, n):                       # part.c/rotatePart, n quarts de tour
+    v = list(v)
+    for _ in range(n):
+        v = [v[L], v[T], v[R], v[B]]
+    return v
+tiles = [(i, r, rot(f0[i], r)) for i in sorted(f0) for r in range(4)]
+
+# indices de first_possibility() : (piece, rotation, coin cx, cy, sens sx, sy)
+HINTS = [(208, 3, 0, 0, 1, 1), (255, 3, 15, 0, -1, 1),
+         (181, 3, 0, 15, 1, -1), (249, 0, 15, 15, -1, -1)]
+
+for pid, prot, cx, cy, sx, sy in HINTS:
+    BX, FX = (L, R) if sx > 0 else (R, L)
+    BY, FY = (T, B) if sy > 0 else (B, T)
+    hint = rot(f0[pid], prot)
+    idx = {}
+    for pi, pr, v in tiles:
+        m = sum(1 << k for k in range(4) if v[k] == 0)   # masque des faces grises
+        idx.setdefault((m, v[BX], v[BY]), []).append((pi, v))
+    total, g = 0, [[None] * 3 for _ in range(3)]
+    def rec(k, used):
+        global total
+        i, j = divmod(k, 3)
+        if (i, j) == (2, 2):
+            if pid not in used and hint[BX] == g[2][1][FX] and hint[BY] == g[1][2][FY]:
+                total += 1
+            return
+        need_x = 0 if j == 0 else g[i][j - 1][FX]
+        need_y = 0 if i == 0 else g[i - 1][j][FY]
+        mask = ((1 << BX) if j == 0 else 0) | ((1 << BY) if i == 0 else 0)
+        for pi, v in idx.get((mask, need_x, need_y), ()):
+            if pi in used:                                continue
+            if (i, j) == (1, 2) and v[FY] != hint[BY]:    continue   # face vue par l'indice
+            if (i, j) == (2, 1) and v[FX] != hint[BX]:    continue
+            g[i][j] = v
+            rec(k + 1, used | {pi})
+    rec(0, frozenset())
+    print("coin (%2d,%2d) / indice %3d r%d : %6d remplissages" % (cx, cy, pid, prot, total))
+```
+
+**Géométrie du parcours** (mesure 3) — la mesure décisive : la zone est toujours terminée
+avant que sa frontière existe.
+
+```python
+import re
+src = open('src/app/static_variables.c').read()
+grab = lambda n: [int(v) for v in re.search(
+    r'uint8_t ' + n + r'\[ETERN_PARTS\] = \{(.*?)\};', src, re.S
+).group(1).replace('\n', '').split(',') if v.strip()]
+dirx, diry = grab('dirx'), grab('diry')
+idx = {(x, y): c for c, (x, y) in enumerate(zip(dirx, diry))}
+for cx, cy in ((0, 0), (15, 0), (15, 15), (0, 15)):
+    sx, sy = (1 if cx == 0 else -1), (1 if cy == 0 else -1)
+    zone = [idx[(cx + sx * a, cy + sy * b)] for a in range(3) for b in range(3)]
+    bnd = [idx[(cx + sx * 3, cy + sy * b)] for b in range(3)] + \
+          [idx[(cx + sx * a, cy + sy * 3)] for a in range(3)]
+    print("coin (%2d,%2d) : zone finie a l'index %3d, frontiere connue a %3d, "
+          "faces connues avant : %d/6"
+          % (cx, cy, max(zone), max(bnd), sum(1 for b in bnd if b < max(zone))))
+```
+
+Les mesures 2 (signatures de frontière, table sans indice à 2 633 221 entrées) et 4
+(complétion de cadre) demandent une énumération de plusieurs millions de nœuds : elles ont
+été faites en C, hors dépôt, sur les mêmes conventions de faces que ci-dessus.

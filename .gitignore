@@ -6,6 +6,7 @@
 eternityII.xcodeproj/
 eternityII
 eternityII16
+eternityii-spill
 build/
 *.back
 *.spillcount
