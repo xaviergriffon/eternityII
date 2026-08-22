@@ -588,6 +588,98 @@ qu'`autoprune_step` fait réellement en premier. Sans aucun pruner actif, un
 serveur conserve donc une moitié de stock déjà morte, occupant de la mémoire et
 de la bande passante de distribution pour rien.
 
+### Mode `--w2x2` : compte les fenêtres 2×2 vides sans remplissage possible
+
+**Comptage seul.** Ce mode n'élague rien, ne modifie aucun autre résultat du
+banc et n'ajoute rien au chemin de production. Il répond à une seule question,
+posée avant d'écrire le moindre mécanisme : *un test JOINT sur les 4 cases d'une
+fenêtre 2×2 vide fermerait-il des possibilités que le pipeline actuel laisse
+passer ?*
+
+Le motif est un angle mort de **forme** du contrôle superficiel : dans une
+fenêtre 2×2 entièrement vide, aucune case n'a jamais plus de 2 faces connues —
+les 2 autres regardent les cases vides de la fenêtre. `possibility_all_has_a_next_counted`
+juge chaque case isolément et ne peut donc voir que 2 contraintes ; un test joint
+en voit jusqu'à 8. Le point fixe de §4.6a n'y change rien tant qu'aucune case de
+la fenêtre n'est forcée.
+
+```sh
+make bench-refutation BENCH_REFUT_ARGS="--from-back eternityII.back --pruner-profile 20000 --w2x2 --budget 0"
+```
+
+Le mode balaye les 169 fenêtres 2×2 **intérieures** (`x`, `y` dans
+`1..ETERN_SIZE-3`, pour que les 8 voisines existent), et pour chaque fenêtre
+entièrement vide tente un remplissage exhaustif des 4 cases avec les primitives
+du moteur (`what_search_in_grid_to_key` / `get_parts_bigarray_with_key`) — pas
+une table de blocs précalculée : la mesure doit porter sur le POUVOIR de
+réfutation, pas sur une implémentation, et aucune divergence de convention de
+faces n'est alors possible.
+
+**Trois garde-fous intégrés**, parce qu'un test d'élimination bogué produit
+exactement le symptôme qu'on espère de lui :
+
+1. **Auto-test de plomberie** au démarrage : sur un plateau vide, les 169
+   fenêtres doivent toutes être remplissables. Échec ⇒ sortie en erreur.
+2. **Oracle indépendant** : chaque réfutation est repassée par
+   `w2_fillable_bruteforce`, qui balaye toutes les rotations de toutes les pièces
+   en comparant les faces à la main, **sans la map ni `what_search_in_grid_to_key`**.
+   Deux chemins de code sans primitive commune doivent toujours concorder.
+3. **Cohérence des paquets** : une réfutation par disponibilité n'a de sens que
+   si `b_faceused` est cohérent avec la grille. Les paquets recalés par
+   `check_possibility` sont écartés du comptage et signalés.
+
+#### Mesure sur stock réel
+
+Stock `eternityII.back` (2 416 950 possibilités, 10 à 31 pièces posées),
+échantillon de 20 000, DFS désactivé puis à 100 000 et 200 000 nœuds :
+
+| | |
+|---|---|
+| Éliminé par le pipeline actuel (superficiel + point fixe + DFS) | **0 %** |
+| Possibilités réfutées par ≥1 fenêtre 2×2 | **155 (0,78 %)** |
+| … dont marginales (survivaient au pipeline complet) | **155 (0,78 %)** |
+| Faux positifs sur une solution | 0 |
+| Désaccords de l'oracle indépendant | **0 / 155** |
+| Paquets écartés pour incohérence | 0 |
+| Coût du balayage | **13,8 µs/possibilité** (72 392/s) |
+| Coût du contrôle superficiel, même échantillon | 1,9 µs/possibilité (528 495/s) |
+
+Répartition des fenêtres entièrement vides (148,75 sur 169 par possibilité) par
+nombre de côtés dont les DEUX voisines extérieures sont posées :
+
+| Côtés connus | Fenêtres vides | Sans remplissage |
+|---|---|---|
+| 0 | 2 921 167 | 0 |
+| 1 | 37 344 | 33 |
+| 2 | 16 514 | 122 |
+| 3 | **0** | 0 |
+| 4 | **0** | 0 |
+
+Origine des réfutations : 107 par les **couleurs** (aucun remplissage même en
+supposant toutes les pièces disponibles) et 48 par la **disponibilité** (couleurs
+possibles, mais les pièces nécessaires sont déjà posées ailleurs).
+
+**Trois enseignements pour qui voudrait implémenter le mécanisme :**
+
+- **Une table de blocs 2×2 indexée par 3 ou 4 côtés ne se déclencherait jamais
+  sur ce stock** : la configuration n'existe pas (0 fenêtre à ≥3 côtés connus).
+  Ce qui tire, c'est le test joint à 1 ou 2 côtés — donc la contrainte vient de
+  l'interaction des 4 cases entre elles, pas d'une bordure dense.
+- **Le pipeline actuel ne ferme rien sur ce stock**, contrairement aux stocks de
+  référence de §4.6b (50,2 % et 16,3 % de mortes au contrôle superficiel). « Marginal »
+  y est donc trivialement égal à « total » : le chiffre de 0,78 % n'a pas été
+  confronté à un pipeline qui ferme réellement.
+- **Le stock disponible est peu profond** (≤ 31 pièces sur 256). Le régime que le
+  modèle de branchement désigne comme celui où les impasses deviennent fréquentes
+  (~180 pièces posées) n'est pas représenté. Refaire la mesure sur un stock
+  profond avant toute décision — c'est exactement l'erreur de méthode qui a faussé
+  §4.4 et §4.6b.
+
+**Note sur `temp.back`** : ce fichier présent à la racine est inexploitable —
+5 475 paquets sur 5 475 signalés incohérents ET non canoniques par le contrôle
+d'intégrité préexistant du banc (pas par le nouveau mode). Il ne correspond pas
+aux stocks de référence cités plus haut, qui ne sont plus présents dans le dépôt.
+
 ### Mode `--pruner-profile --gpu` : rejoue le VRAI pipeline GPU
 
 Variante de `--pruner-profile` (ci-dessus) qui rejoue, au lieu du pipeline CPU
