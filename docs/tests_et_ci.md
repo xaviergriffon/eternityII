@@ -665,57 +665,68 @@ exactement le symptôme qu'on espère de lui :
    si `b_faceused` est cohérent avec la grille. Les paquets recalés par
    `check_possibility` sont écartés du comptage et signalés.
 
-#### Mesure sur stock réel
+#### Mesure sur stock réel : le pouvoir de réfutation croît avec la profondeur
 
-Stock `eternityII.back` (2 416 950 possibilités, 10 à 31 pièces posées),
-échantillon de 20 000, DFS désactivé puis à 100 000 et 200 000 nœuds :
+Deux stocks réels, de profondeurs très différentes, mesurés avec le même mode.
 
-| | |
-|---|---|
-| Éliminé par le pipeline actuel (superficiel + point fixe + DFS) | **0 %** |
-| Possibilités réfutées par ≥1 fenêtre 2×2 | **155 (0,78 %)** |
-| … dont marginales (survivaient au pipeline complet) | **155 (0,78 %)** |
-| Faux positifs sur une solution | 0 |
-| Désaccords de l'oracle indépendant | **0 / 155** |
-| Paquets écartés pour incohérence | 0 |
-| Coût du balayage | **13,8 µs/possibilité** (72 392/s) |
-| Coût du contrôle superficiel, même échantillon | 1,9 µs/possibilité (528 495/s) |
+**Stock peu profond** (2 416 950 possibilités, 10 à 31 pièces posées, échantillon
+de 20 000) : le pipeline actuel n'élimine **rien** (0 % au contrôle superficiel comme
+à la preuve DFS), le balayage 2×2 ferme **155 possibilités (0,78 %)**, pour
+14,8 µs/possibilité contre 1,9 µs pour le contrôle superficiel. Origine des
+réfutations : 107 par les couleurs, 48 par la disponibilité.
 
-Répartition des fenêtres entièrement vides (148,75 sur 169 par possibilité) par
-nombre de côtés dont les DEUX voisines extérieures sont posées :
+**Stock profond** (2 511 possibilités, 9 à 112 pièces posées, moyenne 23,
+échantillon complet) — c'est la mesure qui décide :
 
-| Côtés connus | Fenêtres vides | Sans remplissage |
-|---|---|---|
-| 0 | 2 921 167 | 0 |
-| 1 | 37 344 | 33 |
-| 2 | 16 514 | 122 |
-| 3 | **0** | 0 |
-| 4 | **0** | 0 |
+| Budget DFS | Fermé par le pipeline | Coût DFS | Marginal 2×2 | Coût 2×2 |
+|---|---|---|---|---|
+| 0 | 0 (0 %) | — | **37 (1,47 %)** | 0,125 s |
+| 10 000 | 114 (4,5 %) | 24,0 M nœuds, 2,281 s | **24 (0,96 %)** | 0,144 s |
+| 100 000 | 121 (4,8 %) | 239,4 M nœuds, 21,848 s | **23 (0,92 %)** | 0,153 s |
+| 1 000 000 | 137 (5,5 %) | 2 382,8 M nœuds, 201,295 s | **17 (0,68 %)** | 0,136 s |
 
-Origine des réfutations : 107 par les **couleurs** (aucun remplissage même en
-supposant toutes les pièces disponibles) et 48 par la **disponibilité** (couleurs
-possibles, mais les pièces nécessaires sont déjà posées ailleurs).
+**Le test 2×2 reste complémentaire de la preuve DFS à tous les budgets.** Même à
+1 000 000 de nœuds et 201 s de DFS, 17 des 37 réfutations restent hors de portée du
+DFS ; le recouvrement plafonne (13, puis 14, puis 20 sur 37). Les deux mécanismes ne
+trouvent pas les mêmes impasses. Rapport de coût : passer le DFS de 10 k à 1 M coûte
+**+199 s pour +23 fermetures** ; le balayage 2×2 en apporte **24 de plus pour 0,14 s**.
+
+Ventilation par profondeur (budget indifférent, le balayage ne dépend pas du DFS) :
+
+| Pièces posées | Possibilités | Réfutées | Taux |
+|---|---|---|---|
+| 0-15 | 1358 | 1 | 0,07 % |
+| 16-31 | 531 | 1 | 0,19 % |
+| 32-47 | 322 | 1 | 0,31 % |
+| 48-63 | 150 | 1 | 0,67 % |
+| 64-79 | 63 | 5 | **7,94 %** |
+| 80-95 | 60 | 13 | **21,67 %** |
+| 96-111 | 26 | 15 | **57,69 %** |
+
+Croissance monotone jusqu'à 57,7 %. Le modèle de branchement (§4.9 du document de
+conception) situe à ~186 pièces posées le point où le nombre de candidats attendu par
+case croise 1 : ce tableau n'a donc pas atteint son plateau.
 
 **Trois enseignements pour qui voudrait implémenter le mécanisme :**
 
-- **Une table de blocs 2×2 indexée par 3 ou 4 côtés ne se déclencherait jamais
-  sur ce stock** : la configuration n'existe pas (0 fenêtre à ≥3 côtés connus).
-  Ce qui tire, c'est le test joint à 1 ou 2 côtés — donc la contrainte vient de
-  l'interaction des 4 cases entre elles, pas d'une bordure dense.
-- **Le pipeline actuel ne ferme rien sur ce stock**, contrairement aux stocks de
-  référence de §4.6b (50,2 % et 16,3 % de mortes au contrôle superficiel). « Marginal »
-  y est donc trivialement égal à « total » : le chiffre de 0,78 % n'a pas été
-  confronté à un pipeline qui ferme réellement.
-- **Le stock disponible est peu profond** (≤ 31 pièces sur 256). Le régime que le
-  modèle de branchement désigne comme celui où les impasses deviennent fréquentes
-  (~180 pièces posées) n'est pas représenté. Refaire la mesure sur un stock
-  profond avant toute décision — c'est exactement l'erreur de méthode qui a faussé
-  §4.4 et §4.6b.
+- **Il n'y a pas de table de blocs 2×2 à construire.** Sur les deux stocks, **aucune**
+  fenêtre vide n'a 3 ou 4 côtés connus (0 sur 372 520 dans le stock profond, 0 sur
+  2 975 025 dans le peu profond). Une table indexée par 3 ou 4 côtés ne se
+  déclencherait jamais. Ce qui tire, c'est le test joint à 1 ou 2 côtés — la
+  contrainte vient de l'interaction des 4 cases entre elles et de la disponibilité
+  des pièces, pas d'une bordure dense.
+- **La source des réfutations s'inverse avec la profondeur** : 107 couleurs / 48
+  disponibilité sur le stock peu profond, **3 couleurs / 35 disponibilité** sur le
+  stock profond. En profondeur, c'est l'épuisement des pièces qui tue — exactement ce
+  que le contrôle superficiel ne peut pas voir CONJOINTEMENT sur les 4 cases.
+- **Mesurer sur stock profond, toujours.** Le même mode donne 0,78 % de fermetures
+  peu discriminantes sur stock peu profond et une courbe montant à 57,7 % sur stock
+  profond. C'est l'erreur de méthode qui a faussé §4.4 et §4.6b, reproduite ici à
+  l'identique — et corrigée seulement parce qu'un stock plus profond a été produit
+  exprès.
 
-**Note sur `temp.back`** : ce fichier présent à la racine est inexploitable —
-5 475 paquets sur 5 475 signalés incohérents ET non canoniques par le contrôle
-d'intégrité préexistant du banc (pas par le nouveau mode). Il ne correspond pas
-aux stocks de référence cités plus haut, qui ne sont plus présents dans le dépôt.
+Garde-fous à chaque exécution ci-dessus : 0 faux positif sur solution, 0 désaccord de
+l'oracle indépendant, 0 paquet écarté pour incohérence.
 
 ### Mode `--pruner-profile --gpu` : rejoue le VRAI pipeline GPU
 
