@@ -588,6 +588,44 @@ qu'`autoprune_step` fait réellement en premier. Sans aucun pruner actif, un
 serveur conserve donc une moitié de stock déjà morte, occupant de la mémoire et
 de la bande passante de distribution pour rien.
 
+#### Option `--pruner-dfs-mrv` : l'A/B du moteur de la preuve (§4.10)
+
+La preuve DFS bornée peut employer le moteur à ordre DYNAMIQUE au lieu de l'ordre fixe
+(`pruner_dfs_mrv`, `ETII_PRUNER_DFS_MRV=1` en production). `--pruner-dfs-mrv` bascule ce
+même drapeau dans le banc : même stock, même échantillon, même budget, seul le moteur de la
+preuve change — la comparaison appariée exigée par le protocole §7 du document de
+conception.
+
+```sh
+make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --pruner-profile 500 --budget 10000"
+make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --pruner-profile 500 --budget 10000 --pruner-dfs-mrv"
+```
+
+Mesuré sur un stock de PRODUCTION de 126 287 possibilités (produites par de vrais clients,
+pas par `expand_datas_to_level`), échantillon de 2 000 pris 1 sur 63 — contrôle superficiel
+identique aux six lignes : 22,1 % de mortes.
+
+| Budget DFS | Moteur | Fermées par la preuve | Total éliminé | Nœuds | Temps |
+|---|---|---|---|---|---|
+| 1 000 | ordre fixe | 8,3 % | 30,4 % | 1 404 859 | 0,129 s |
+| 1 000 | MRV | 34,8 % | 56,8 % | 888 745 | 1,081 s |
+| 10 000 | ordre fixe | 10,0 % | 32,0 % | 13 746 435 | 1,177 s |
+| 10 000 | MRV | 35,6 % | 57,7 % | 8 540 962 | 8,998 s |
+| 100 000 | ordre fixe | 11,7 % | 33,8 % | 133 804 294 | 11,521 s |
+| 100 000 | MRV | 36,0 % | 58,1 % | 84 108 383 | 85,575 s |
+
+Trois enseignements pour l'exploitation : ×3 à ×4 de fermetures à budget égal ; **les deux**
+moteurs plafonnent au-delà de 1 000 nœuds (l'ordre fixe ne gagne que 3,4 points en
+multipliant le budget par 100), donc `prunerDfsBudget 1000` est le bon point de
+fonctionnement ; et `MRV@1000` domine strictement `fixe@100000` (56,8 % contre 33,8 %
+éliminés, pour 10,7× moins de CPU). Attention en revanche à ne pas lire le débit de
+fermetures isolément : à budget égal MRV coûte ~2× plus par fermeture sur ce stock, parce
+qu'il ferme aussi les sous-arbres que l'ordre fixe ne ferme jamais. Voir §4.10 du document
+de conception pour l'analyse complète et une mesure secondaire sur un stock d'expansion.
+
+L'en-tête du rapport rappelle le moteur employé, pour qu'une sortie collée hors contexte
+reste interprétable.
+
 ### Mode `--pruner-profile --gpu` : rejoue le VRAI pipeline GPU
 
 Variante de `--pruner-profile` (ci-dessus) qui rejoue, au lieu du pipeline CPU

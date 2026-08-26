@@ -152,6 +152,40 @@
 // MÉMOIRE (le backtracking borné n'alloue rien de plus que la recherche
 // réelle) mais le TEMPS qu'un seul contrôle peut engager.
 #define PRUNER_DFS_BUDGET_MAX 10000000
+// Moteur par défaut de la preuve de fermeture bornée du pruner CPU
+// (§4.6b/§4.10 de docs/conception/elagage_recherche.md, `pruner_dfs_mrv`) :
+// 0 = ordre FIXE (`search_packet_backtracking_core`, comportement historique),
+// 1 = ordre DYNAMIQUE (`search_packet_backtracking_mrv`).
+//
+// Défaut 0 pour la même raison que MRV_DEFAULT_ENABLED et
+// PRUNER_DFS_BUDGET_DEFAULT : basculer un défaut change le coût CPU de toute
+// une flotte déployée, décision d'opérateur. Le levier est pourtant mesuré
+// nettement favorable POUR CE TRAVAIL PRÉCIS : le banc de réfutation
+// (tests/bench/bench_refutation.c) donne, à temps CPU égal sur du vrai stock
+// serveur, 3,48 fermetures/s pour MRV contre 0,91 pour l'ordre fixe, et 40
+// nœuds contre 295 339 sur les racines fermées par les deux — or fermer un
+// sous-arbre est EXACTEMENT le métier du pruner, pas un effet de bord.
+// Le risque connu de MRV (60× plus cher que l'ordre fixe sur des racines
+// encore vivantes, cf. §4.7) est ici BORNÉ PAR CONSTRUCTION par
+// `pruner_dfs_budget` : au pire la preuve échoue après B nœuds, exactement
+// comme aujourd'hui. C'est le seul contexte du document où le risque de MRV
+// est plafonné.
+//
+// Mesuré à l'A/B (`--pruner-profile --pruner-dfs-mrv`) sur un stock de
+// PRODUCTION de 126 287 possibilités produites par de vrais clients,
+// échantillon de 2 000 : ×3 à ×4 de fermetures à budget égal — 8,3 % → 34,8 %
+// à budget 1 000, 10,0 % → 35,6 % à 10 000, 11,7 % → 36,0 % à 100 000 ; le
+// stock éliminé passe de 32 % à 58 %. Aucun budget ne comble l'écart : LES
+// DEUX moteurs plafonnent (l'ordre fixe ne gagne que 3,4 points en payant ×100
+// de budget), à des niveaux différents — ce que MRV achète est un niveau
+// d'élimination inatteignable autrement, pas de la vitesse. `MRV@1000` domine
+// d'ailleurs strictement `fixe@100000` (56,8 % contre 33,8 % de stock éliminé,
+// pour 10,7× moins de CPU), d'où le budget d'exploitation recommandé : 1 000.
+// NE PAS lire le débit de fermetures isolément : à budget égal MRV coûte ~2×
+// PLUS par fermeture sur ce stock (1,56 ms contre 0,77 ms) — il ferme aussi
+// les sous-arbres que l'ordre fixe ne ferme jamais, qui sont les plus chers.
+// Détail complet : §4.10 du document de conception.
+#define PRUNER_DFS_MRV_DEFAULT 0
 // Expansion du stock au démarrage du serveur (option `--expand-level`, commande
 // console `expand`). Le serveur développe lui-même les possibilités du stock
 // (une pièce candidate par case suivante) jusqu'à ce que leur curseur `alloc`
@@ -647,6 +681,34 @@ extern int pruner_batch_size;
  * (`src/ui/command_lines.{h,c}`).
  */
 extern int pruner_dfs_budget;
+
+/**
+ * @brief Moteur de la preuve de fermeture bornée du pruner CPU : ordre
+ *        DYNAMIQUE (MRV) si levé, ordre FIXE sinon — §4.10 de
+ *        docs/conception/elagage_recherche.md.
+ *
+ * Lu par `search_packet_backtracking_budgeted` (`src/core/etii_search.c`)
+ * uniquement, donc sans aucun effet quand `pruner_dfs_budget <= 0` (la preuve
+ * n'est alors jamais tentée) ni sur la recherche réelle, dont l'ordre reste
+ * gouverné par `mrv_enabled` seul. Les deux drapeaux sont volontairement
+ * INDÉPENDANTS : un même process n'a qu'un rôle (recherche OU pruner), mais
+ * les mesurer ensemble interdirait l'A/B exigé par le protocole §7, et le
+ * verdict n'est pas le même des deux côtés — MRV est mesuré favorable pour la
+ * RÉFUTATION (le métier du pruner) sans l'être uniformément pour l'exploration
+ * de sous-arbres encore vivants (§4.7).
+ *
+ * Défaut `PRUNER_DFS_MRV_DEFAULT` (0, cf. sa doc). La variable
+ * d'environnement `ETII_PRUNER_DFS_MRV` (`0`/`1`) est lue une seule fois au
+ * démarrage, AVANT tout `fork()` (invariant de résolution pré-fork), comme
+ * `ETII_MRV` et `ETII_BENCH_NODES` : pas d'entrée `cli_topics[]`, pas de
+ * commande console — c'est un levier de mesure et de déploiement par machine
+ * (« les machines les plus performantes en pruner MRV »), pas un réglage à
+ * changer en cours de route. Aucune conséquence sur le protocole : la preuve
+ * bornée ne délègue rien et ne modifie pas la possibilité contrôlée, seul son
+ * VERDICT compte, et il est identique par construction (condition nécessaire
+ * exacte dans les deux ordres).
+ */
+extern int pruner_dfs_mrv;
 
 /**
  * @brief Durée (secondes) du bail à expiration des possibilités attribuées à
@@ -1159,6 +1221,21 @@ extern int singleton_conflict_check;
  *         de bascule silencieuse hors du défaut du programme).
  */
 int mrv_parse_env(const char *env_value);
+
+/**
+ * @brief Parse `ETII_PRUNER_DFS_MRV` en drapeau de moteur pour la preuve
+ *        bornée du pruner. Fonction pure et testable.
+ *
+ * Volontairement distincte de `mrv_parse_env` malgré une logique identique :
+ * les deux drapeaux ont des défauts et des verdicts de mesure indépendants
+ * (cf. `pruner_dfs_mrv`), les fusionner ferait qu'un futur basculement de l'un
+ * emporterait silencieusement l'autre.
+ *
+ * @param env_value Valeur de la variable d'environnement, ou NULL si absente.
+ * @return 0 si `env_value` vaut exactement "0", 1 s'il vaut exactement "1",
+ *         `PRUNER_DFS_MRV_DEFAULT` sinon (absente ou valeur non reconnue).
+ */
+int pruner_dfs_mrv_parse_env(const char *env_value);
 
 /**
  * @brief Décide si le banc de mesure doit demander l'arrêt de la recherche.

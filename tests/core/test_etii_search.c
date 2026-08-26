@@ -1754,6 +1754,115 @@ TEST search_backtracking_budgeted_returns_budget_when_insufficient(void)
     PASS();
 }
 
+/* ======================================================================
+ * §4.10 : la preuve bornée peut employer le moteur à ordre DYNAMIQUE (MRV)
+ * au lieu de l'ordre fixe (`pruner_dfs_mrv`). Même doctrine à deux volets que
+ * les tests ci-dessus : un plateau où la fermeture DOIT être prouvée, un où
+ * elle NE DOIT PAS l'être. Le verdict ne dépend pas du moteur (même sous-arbre,
+ * seul l'ordre des décisions change) — seul son COÛT change, ce que mesure
+ * tests/bench/bench_refutation.c, pas ces tests.
+ * ====================================================================== */
+
+/* Même fixture et même budget que search_backtracking_budgeted_closes_when_budget_suffices,
+ * mais preuve à ordre dynamique : le sous-arbre s'épuise aussi -> BT_CORE_EXHAUSTED,
+ * et toujours aucune délégation (allow_delegate = 0 vaut pour les deux moteurs). */
+TEST search_backtracking_budgeted_mrv_closes_when_budget_suffices(void)
+{
+    drain_local();
+    ensure_counters();
+
+    static struct part cand[3];
+    memset(cand, 0, sizeof cand);
+    cand[0].id = 0; cand[1].id = 6; cand[2].id = 7;
+    static struct array_part list;
+    list.size = 3; list.parts = cand;
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_uniform_map(&list);
+    client.all_rotate_part = make_small_parts();
+
+    struct possibility_packet root;
+    make_empty_board(&root);
+    root.alloc = 0;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    int saved_req = request;
+    uint16_t saved_max = max_result;
+    int saved_engine = pruner_dfs_mrv;
+    request = REQUEST_CONTINUE;
+    max_result = 0;
+    pruner_dfs_mrv = 1;
+    unsigned long long nodes = 0;
+    bt_core_result_t rc = search_packet_backtracking_budgeted(&client, &root, idParts, 10000, &nodes);
+    pruner_dfs_mrv = saved_engine;
+    request = saved_req;
+    max_result = saved_max;
+
+    ASSERT_EQ_FMT(BT_CORE_EXHAUSTED, rc, "%d");
+    ASSERT(nodes > 0);
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* jamais délégué/flushé */
+
+    PASS();
+}
+
+/* Volet symétrique : budget d'UN nœud, moteur dynamique -> BT_CORE_BUDGET.
+ * Le drapeau ne doit jamais transformer une preuve avortée en fermeture. */
+TEST search_backtracking_budgeted_mrv_returns_budget_when_insufficient(void)
+{
+    drain_local();
+    ensure_counters();
+
+    static struct part cand[3];
+    memset(cand, 0, sizeof cand);
+    cand[0].id = 0; cand[1].id = 6; cand[2].id = 7;
+    static struct array_part list;
+    list.size = 3; list.parts = cand;
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_uniform_map(&list);
+    client.all_rotate_part = make_small_parts();
+
+    struct possibility_packet root;
+    make_empty_board(&root);
+    root.alloc = 0;
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    int saved_req = request;
+    uint16_t saved_max = max_result;
+    int saved_engine = pruner_dfs_mrv;
+    request = REQUEST_CONTINUE;
+    max_result = 0;
+    pruner_dfs_mrv = 1;
+    unsigned long long nodes = 0;
+    bt_core_result_t rc = search_packet_backtracking_budgeted(&client, &root, idParts, 1, &nodes);
+    pruner_dfs_mrv = saved_engine;
+    request = saved_req;
+    max_result = saved_max;
+
+    ASSERT_EQ_FMT(BT_CORE_BUDGET, rc, "%d");
+    ASSERT(nodes >= 1);
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    PASS();
+}
+
+/* Non-régression du DÉFAUT : `pruner_dfs_mrv` vaut 0 hors intervention
+ * explicite, donc la preuve bornée reste à ordre fixe pour tout déploiement
+ * qui ne demande rien (`PRUNER_DFS_MRV_DEFAULT`, décision d'opérateur). */
+TEST pruner_dfs_mrv_defaults_to_fixed_order(void)
+{
+    ASSERT_EQ_FMT(0, PRUNER_DFS_MRV_DEFAULT, "%d");
+    PASS();
+}
+
 /* REQUEST_STOP en cours de preuve : contrairement à search_packet_backtracking
  * (search_backtracking_stop_flushes_and_returns_one, qui renvoie 1 possibilité
  * flushée), la variante bornée ne délègue ni ne flushe JAMAIS (allow_delegate=0)
@@ -1947,6 +2056,66 @@ static int es_setup(void)
 
     fill_idparts(es_idParts);
     return 1;
+}
+
+/* Fils : §4.10 — la preuve BORNÉE, jouée depuis la racine vide du vrai 4×4,
+ * doit rendre le MÊME verdict avec les deux moteurs (l'arbre entier tient
+ * largement dans le budget), et surtout ne jamais escamoter une solution :
+ * `BT_CORE_EXHAUSTED` signifie « sous-arbre entièrement parcouru », et toute
+ * solution rencontrée en chemin a été enregistrée par record_solution — c'est
+ * ce qui autorise le pruner à éliminer la possibilité. Le coût, lui, DIFFÈRE
+ * (ordres de décision distincts) : c'est la preuve que le drapeau route bien
+ * vers l'autre moteur, et non pas silencieusement vers le même.
+ * Codes de sortie distincts pour que l'échec soit lisible sans debugger. */
+static void es_child_budgeted_both_engines(void)
+{
+    if (chdir(es_solution_dir) != 0) exit(97);
+    stop_on_solution = 0;
+    request = REQUEST_CONTINUE;
+    max_result = 0;
+
+    unsigned long long nodes_fixed = 0, nodes_mrv = 0;
+    pruner_dfs_mrv = 0;
+    bt_core_result_t rc_fixed = search_packet_backtracking_budgeted(&es_client, &es_root,
+                                                                    es_idParts, 5000000, &nodes_fixed);
+    if (rc_fixed != BT_CORE_EXHAUSTED) exit(10);
+    if (!es_has_solution_file(".")) exit(11);   /* solution enregistrée par l'ordre fixe */
+    es_unlink_solutions(".");
+
+    max_result = 0;
+    pruner_dfs_mrv = 1;
+    bt_core_result_t rc_mrv = search_packet_backtracking_budgeted(&es_client, &es_root,
+                                                                  es_idParts, 5000000, &nodes_mrv);
+    if (rc_mrv != BT_CORE_EXHAUSTED) exit(12);  /* même verdict que l'ordre fixe */
+    if (!es_has_solution_file(".")) exit(13);   /* la solution N'est PAS perdue par le moteur MRV */
+    if (nodes_fixed == nodes_mrv) exit(14);     /* deux moteurs réellement distincts */
+    exit(0);
+}
+
+/* §4.10 : `pruner_dfs_mrv` change le moteur de la preuve bornée sans changer
+ * son verdict ni ce qu'elle enregistre en chemin. Verrou de la règle §5 du
+ * document de conception : un élagage est une condition nécessaire, il ne doit
+ * jamais coûter une solution. Échoue bien sur un code où la bascule serait
+ * inopérante (exit 14) comme sur un moteur qui perdrait la solution (exit 13). */
+TEST search_backtracking_budgeted_both_engines_agree_on_4x4(void)
+{
+    ensure_counters();
+    ASSERT(es_setup());
+
+    strcpy(es_solution_dir, "/tmp/etii_es_dfsmrv_XXXXXX");
+    ASSERT(mkdtemp(es_solution_dir) != NULL);
+
+    pid_t pid = 0;
+    int code = run_in_fork(es_child_budgeted_both_engines, &pid);
+
+    es_unlink_solutions(es_solution_dir);
+    rmdir(es_solution_dir);
+
+    ASSERT_EQ_FMT(0, code, "%d");
+
+    free_bigarray(es_client.map_part);
+    free_array_part(es_client.all_rotate_part);
+    PASS();
 }
 
 /* Exploration complète : la recherche trouve la solution (fichier écrit) puis
@@ -2925,6 +3094,53 @@ TEST autoprune_step_dfs_budget_closes_possibility(void)
     PASS();
 }
 
+/* §4.10 — même scénario que ci-dessus mais preuve à ordre DYNAMIQUE : le
+ * pipeline du pruner (contrôle superficiel puis preuve bornée) rend le MÊME
+ * verdict, éliminée sans redistribution. C'est l'intégration du drapeau
+ * `pruner_dfs_mrv` dans autoprune_step, via search_packet_backtracking_budgeted. */
+TEST autoprune_step_dfs_budget_mrv_closes_possibility(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_small_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 1;
+    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
+    make_empty_board(&aposs->possibilities[0]);
+    client.aposs = aposs;
+
+    int saved_budget = pruner_dfs_budget;
+    int saved_engine = pruner_dfs_mrv;
+    pruner_dfs_budget = 10000;
+    pruner_dfs_mrv = 1;
+    unsigned long long removed_before = pruner_removed;
+    unsigned long long checked_before = pruner_checked;
+    unsigned long long closed_before = pruner_dfs_closed;
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    int cont = autoprune_step(&client);
+    request = saved;
+    pruner_dfs_mrv = saved_engine;
+    pruner_dfs_budget = saved_budget;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");                    /* jamais redistribuée */
+    ASSERT_EQ_FMT(removed_before + 1, pruner_removed, "%llu");
+    ASSERT_EQ_FMT(checked_before, pruner_checked, "%llu");        /* jamais marquée checked */
+    ASSERT_EQ_FMT(closed_before + 1, pruner_dfs_closed, "%llu");  /* fermeture attribuée au mécanisme */
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
 /* Budget d'UN seul nœud : ne peut pas suffire à prouver la fermeture ->
  * comportement d'avant cette PR inchangé (conservée, marquée checked). */
 TEST autoprune_step_dfs_budget_too_small_keeps_possibility(void)
@@ -3281,6 +3497,9 @@ SUITE(etii_search_suite)
     RUN_TEST(search_backtracking_explores_and_exhausts);
     RUN_TEST(search_backtracking_budgeted_closes_when_budget_suffices);
     RUN_TEST(search_backtracking_budgeted_returns_budget_when_insufficient);
+    RUN_TEST(search_backtracking_budgeted_mrv_closes_when_budget_suffices);
+    RUN_TEST(search_backtracking_budgeted_mrv_returns_budget_when_insufficient);
+    RUN_TEST(pruner_dfs_mrv_defaults_to_fixed_order);
     RUN_TEST(search_backtracking_budgeted_stop_returns_stopped_without_flush);
     RUN_TEST(search_backtracking_pause_waits_then_stops);
     RUN_TEST(requeue_unprocessed_packets_routes_tail_locally);
@@ -3298,6 +3517,7 @@ SUITE(etii_search_suite)
     RUN_TEST(autoprune_step_removes_dead_packet);
     RUN_TEST(autoprune_step_keeps_checked_dead_packet);
     RUN_TEST(autoprune_step_dfs_budget_closes_possibility);
+    RUN_TEST(autoprune_step_dfs_budget_mrv_closes_possibility);
     RUN_TEST(autoprune_step_dfs_budget_too_small_keeps_possibility);
     RUN_TEST(autoprune_step_dfs_budget_disabled_skips_dfs);
     RUN_TEST(autoprune_step_add_error_reputs_locally);
@@ -3305,6 +3525,7 @@ SUITE(etii_search_suite)
     RUN_TEST(autoprune_step_complete_board_stop_on_solution_exits);
 #if ETERN_PARTS == 16
     RUN_TEST(search_backtracking_solves_4x4_and_returns_zero);
+    RUN_TEST(search_backtracking_budgeted_both_engines_agree_on_4x4);
     RUN_TEST(search_backtracking_stop_on_solution_exits_success);
     RUN_TEST(search_backtracking_mrv_preserves_solution_count);
     RUN_TEST(search_backtracking_mrv_delegation_preserves_solution_count);
