@@ -171,14 +171,20 @@
 // comme aujourd'hui. C'est le seul contexte du document où le risque de MRV
 // est plafonné.
 //
-// Mesuré à l'A/B sur stock réel (`--pruner-profile --pruner-dfs-mrv`, 3 658
-// possibilités, échantillon de 500) : ×4 de fermetures à budget égal — 12,6 %
-// → 60,2 % à budget 1 000, 14,6 % → 60,4 % à 10 000, 17,2 % → 60,4 % à
-// 100 000 ; le stock éliminé passe de ~25 % à ~71 %. Conséquence
-// d'exploitation : avec ce moteur, le budget utile n'est plus 10 000 mais
-// 1 000 (tout est acquis dès là), soit 0,148 s pour 301 fermetures contre
-// 3,3 s pour 86 à l'ordre fixe. Détail complet : §4.10 du document de
-// conception.
+// Mesuré à l'A/B (`--pruner-profile --pruner-dfs-mrv`) sur un stock de
+// PRODUCTION de 126 287 possibilités produites par de vrais clients,
+// échantillon de 2 000 : ×3 à ×4 de fermetures à budget égal — 8,3 % → 34,8 %
+// à budget 1 000, 10,0 % → 35,6 % à 10 000, 11,7 % → 36,0 % à 100 000 ; le
+// stock éliminé passe de 32 % à 58 %. Aucun budget ne comble l'écart : LES
+// DEUX moteurs plafonnent (l'ordre fixe ne gagne que 3,4 points en payant ×100
+// de budget), à des niveaux différents — ce que MRV achète est un niveau
+// d'élimination inatteignable autrement, pas de la vitesse. `MRV@1000` domine
+// d'ailleurs strictement `fixe@100000` (56,8 % contre 33,8 % de stock éliminé,
+// pour 10,7× moins de CPU), d'où le budget d'exploitation recommandé : 1 000.
+// NE PAS lire le débit de fermetures isolément : à budget égal MRV coûte ~2×
+// PLUS par fermeture sur ce stock (1,56 ms contre 0,77 ms) — il ferme aussi
+// les sous-arbres que l'ordre fixe ne ferme jamais, qui sont les plus chers.
+// Détail complet : §4.10 du document de conception.
 #define PRUNER_DFS_MRV_DEFAULT 0
 // Expansion du stock au démarrage du serveur (option `--expand-level`, commande
 // console `expand`). Le serveur développe lui-même les possibilités du stock

@@ -370,9 +370,9 @@ qu'une possibilité est morte, en rejouant réellement son sous-arbre avec un pl
 nœuds — `prunerDfsBudget <n>` (commande console, clé `dfs_budget` du fichier de
 configuration client, pilotable à distance par `clientsCommand` et l'API HTTP).
 **Désactivé par défaut (`0`)** : c'est un coût CPU que l'opérateur engage sciemment.
-Valeur recommandée par la mesure : `10000` en ordre fixe (capture 82 % du gain d'un budget
-100× plus grand, rendements décroissants nets au-delà), mais **`1000` suffit avec le moteur
-MRV ci-dessous**, qui a tout acquis dès ce budget.
+Valeur recommandée par la mesure : **`1000`** — les deux moteurs plafonnent au-delà (voir
+ci-dessous), et le `10000` de la première mesure de §4.6b ne se justifie plus sur un stock
+de production.
 
 La variable d'environnement **`ETII_PRUNER_DFS_MRV=1`** fait jouer cette preuve par le
 moteur à **ordre dynamique (MRV)** au lieu de l'ordre fixe. Elle est lue une seule fois au
@@ -384,10 +384,12 @@ uniformément sur le second. Le mauvais cas connu de MRV est ici **borné par
 `prunerDfsBudget`** : au pire la preuve échoue après ce nombre de nœuds, comme avec l'ordre
 fixe.
 
-Mesuré sur un stock réel de 3 658 possibilités (échantillon de 500, voir
+Mesuré sur un stock de production de 126 287 possibilités (échantillon de 2 000, voir
 [docs/tests_et_ci.md](tests_et_ci.md#option---pruner-dfs-mrv--lab-du-moteur-de-la-preuve-410)) :
-à budget 1 000, l'ordre fixe ferme 12,6 % des possibilités et MRV **60,2 %** — 25 % contre
-**71 %** de stock éliminé au total, contrôle superficiel compris.
+à budget 1 000, l'ordre fixe ferme 8,3 % des possibilités et MRV **34,8 %** — 30 % contre
+**57 %** de stock éliminé au total, contrôle superficiel compris. Et l'écart ne se rattrape
+pas en payant : à budget 100 000 (×100 de CPU), l'ordre fixe n'atteint que 33,8 %, soit
+toujours moins que MRV à budget 1 000 pour 10,7× plus de temps.
 
 ```sh
 # machine puissante dédiée à l'élagage : preuve bornée activée, moteur MRV

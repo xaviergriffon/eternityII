@@ -27,8 +27,8 @@ s'est révélé être un artefact du PROTOCOLE DE MESURE (mono-processus depuis 
 une propriété de l'ordre fixe — voir la correction en §4.7 — ce qui rouvre §4.4, §4.5 et
 §4.6b (tous écartés/désactivés pour cause de profondeur insuffisante) à une nouvelle mesure. La variante « partition de l'arène » de §4.2 reste une
 proposition non implémentée. PR 11 (§4.10, moteur MRV pour la preuve bornée du pruner) **livrée en opt-in**
-(`ETII_PRUNER_DFS_MRV=1`, défaut inchangé) : mesurée à ×4 de fermetures à budget égal sur
-stock réel — c'est la conséquence directe, côté pruner, du verdict de réfutation de PR 10.
+(`ETII_PRUNER_DFS_MRV=1`, défaut inchangé) : mesurée à ×3–×4 de fermetures à budget égal sur
+un stock de production de 126 287 possibilités — c'est la conséquence directe, côté pruner, du verdict de réfutation de PR 10.
 §4.9 (table de région sur les zones d'angle,
 et élimination par résolution d'un cadre complet) est **écartée sans implémentation** —
 seule piste du document tranchée avant écriture de code, par quatre mesures statiques.
@@ -1321,52 +1321,71 @@ make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --pruner-profile 5
 make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --pruner-profile 500 --budget 10000 --pruner-dfs-mrv"
 ```
 
-**Mesuré** — stock RÉEL produit pour cette PR (serveur `--expand-level 3 --stock-files 1`,
-alimenté ~3 min par un client à ordre FIXE à 2 fils, sauvegarde automatique `temp.back` :
-3 658 possibilités), échantillon de 500 possibilités prises 1 sur 7, conteneur 4 cœurs.
-Comparaison APPARIÉE : même stock, même échantillon, même budget, seul le moteur de la
-preuve change.
+**Mesuré — stock de RÉFÉRENCE : 126 287 possibilités d'un serveur de production**, produites
+par de vrais clients (et non par `expand_datas_to_level`, dont les possibilités sont des
+suites d'expansion peu représentatives). Échantillon de 2 000 prises 1 sur 63, comparaison
+APPARIÉE : même stock, même échantillon, même budget, seul le moteur de la preuve change.
+Contrôle superficiel identique aux six lignes : 22,1 % de mortes, 237 cases examinées par
+possibilité.
 
-| Budget DFS | Moteur | Fermées par la preuve DFS | Total éliminé (superficiel + DFS) | Nœuds DFS | Temps |
+| Budget DFS | Moteur | Fermées par la preuve | Total éliminé | Nœuds DFS | Temps |
 |---|---|---|---|---|---|
-| 1 000 | ordre fixe | 12,6 % | 23,0 % | 392 223 | 0,053 s |
-| 1 000 | **MRV** | **60,2 %** | **70,6 %** | 149 297 | 0,148 s |
-| 10 000 | ordre fixe | 14,6 % | 25,0 % | 3 782 356 | 0,353 s |
-| 10 000 | **MRV** | **60,4 %** | **70,8 %** | 1 464 840 | 1,311 s |
-| 100 000 | ordre fixe | 17,2 % | 27,6 % | 36 596 828 | 3,298 s |
-| 100 000 | **MRV** | **60,4 %** | **70,8 %** | 14 604 840 | 13,099 s |
+| 1 000 | ordre fixe | 8,3 % | 30,4 % | 1 404 859 | 0,129 s |
+| 1 000 | **MRV** | **34,8 %** | **56,8 %** | 888 745 | 1,081 s |
+| 10 000 | ordre fixe | 10,0 % | 32,0 % | 13 746 435 | 1,177 s |
+| 10 000 | **MRV** | **35,6 %** | **57,7 %** | 8 540 962 | 8,998 s |
+| 100 000 | ordre fixe | 11,7 % | 33,8 % | 133 804 294 | 11,521 s |
+| 100 000 | **MRV** | **36,0 %** | **58,1 %** | 84 108 383 | 85,575 s |
 
-(Contrôle superficiel seul, identique aux six lignes : 10,4 % de mortes — ce stock, produit
-par un client à ordre fixe sur trois minutes, est moins « déjà mort » que celui de §4.6b.)
+**Quatre lectures, dont une qui contredit une hypothèse de départ :**
 
-**Trois lectures, dans l'ordre d'importance :**
+1. **×3 à ×4 de fermetures à budget égal** (×4,2 à 1 000, ×3,6 à 10 000, ×3,1 à 100 000),
+   soit **+24 à +26 points de stock éliminé** : 32,0 % → 57,7 % au budget 10 000. Sur un
+   stock de 126 287 possibilités, l'écart représente ~32 000 possibilités que l'ordre fixe
+   laisse en circulation et que MRV retire.
 
-1. **×4 de fermetures à budget égal**, quel que soit le budget : 12,6 → 60,2 points à
-   1 000, 14,6 → 60,4 à 10 000, 17,2 → 60,4 à 100 000. Le stock éliminé passe de ~25 % à
-   ~71 %.
-2. **Le budget recommandé s'effondre.** L'ordre fixe grimpe lentement avec le budget (12,6 →
-   17,2 % pour ×100 de budget) ; MRV a déjà TOUT ce qu'il obtiendra à **1 000** nœuds
-   (60,2 % → 60,4 % ensuite, pour ×100 de coût). Autrement dit, un pruner MRV rend plus en
-   0,148 s que l'ordre fixe en 3,3 s — 22× moins de temps pour 3,5× plus de fermetures. La
-   valeur d'exploitation recommandée n'est donc PAS le `10000` de §4.6b quand le moteur est
-   MRV, mais **1 000**.
-3. **Le coût par nœud reste ~10× celui de l'ordre fixe** (mesuré : 149 297 nœuds en 0,148 s
-   contre 392 223 en 0,053 s), exactement comme en §4.7 — c'est le prix du balayage global.
-   Il est largement remboursé : par FERMETURE, MRV coûte 0,49 ms contre 0,84 ms (budget
-   1 000) et 38 ms (budget 100 000) pour l'ordre fixe.
+2. **Le plafond de l'ordre fixe n'est pas une question de budget.** Multiplier le budget par
+   100 lui fait gagner 3,4 points (8,3 → 11,7 %) ; MRV en gagne 1,2 (34,8 → 36,0 %). LES DEUX
+   moteurs plafonnent — mais pas au même niveau, et aucun budget ne comble l'écart. Ce que
+   MRV achète n'est donc pas de la vitesse, c'est un **niveau d'élimination inatteignable
+   autrement**.
 
-Un pruner MRV laisse 29,2 % du stock indéterminé, contre 75,0 % pour l'ordre fixe au même
-budget — et ces 29,2 % ne bougent plus quand on multiplie le budget par 100 : ce sont des
-sous-arbres réellement gros, pas des preuves manquées de peu.
+3. **DOMINATION STRICTE de `MRV@1000` sur `fixe@100000`** : 56,8 % contre 33,8 % de stock
+   éliminé, en **1,08 s contre 11,5 s** — 1,7× plus d'élimination pour 10,7× moins de CPU.
+   C'est la comparaison qui tranche, et le budget d'exploitation qu'elle désigne est
+   **1 000** (pour les deux moteurs, d'ailleurs : au-delà, chacun paie ×100 pour quelques
+   points).
+
+4. **Correction — MRV ne coûte PAS moins cher par fermeture sur ce stock.** À budget égal :
+   1,56 ms par fermeture contre 0,77 ms pour l'ordre fixe (budget 1 000), soit ~2× PLUS. Et
+   en fermetures par seconde de CPU, l'ordre fixe est même devant à chaque budget (1 295/s
+   contre 643/s à budget 1 000). Ce ratio-là est trompeur pris isolément : il compare des
+   moteurs qui ne s'arrêtent pas au même endroit. L'ordre fixe ferme vite les sous-arbres
+   FACILES et bute ensuite sur un plafond ; MRV ferme aussi les autres, plus chers par
+   nature. Le KPI qui décide est le **coût pour atteindre un niveau d'élimination donné**
+   (lecture 3), pas le débit de fermetures — un `fixe@1000` très rapide qui laisse 70 % du
+   stock en circulation ne rend pas le service attendu d'un pruner.
+
+**Mesure secondaire, stock plus petit et différemment produit** (3 658 possibilités, serveur
+`--expand-level 3` alimenté ~3 min par un client à ordre fixe, conteneur 4 cœurs — c'est le
+stock de la première version de cette section) : même conclusion, amplitude plus forte
+encore — 12,6 % → 60,2 % de fermetures à budget 1 000, total éliminé 23,0 % → 70,6 %, et là
+MRV coûtait AUSSI moins cher par fermeture (0,49 ms contre 0,84 ms). L'écart entre les deux
+stocks tient à leur composition (10,4 % de mortes au contrôle superficiel et 370 cases
+examinées par possibilité contre 22,1 % et 237) : un stock d'expansion contient beaucoup de
+sous-arbres presque morts, un stock de clients contient des possibilités plus avancées et
+plus dures. **C'est le stock de production (126 287) qui fait foi** ; le petit ne sert plus
+qu'à montrer que le sens du résultat ne dépend pas du mode de production du stock.
 
 **Décision : opt-in, défaut inchangé** — même prudence de déploiement que
 `MRV_DEFAULT_ENABLED` (§4.7) et `PRUNER_DFS_BUDGET_DEFAULT` (§4.6b), et pour une raison
 supplémentaire propre à cette PR : le mécanisme est de toute façon inerte tant que
 `pruner_dfs_budget` vaut 0, c'est-à-dire tant que l'opérateur n'a pas déjà pris la première
 décision. Recommandation d'exploitation pour une machine puissante dédiée au prunage :
-`ETII_PRUNER_DFS_MRV=1` + `prunerDfsBudget 1000` (et non `10000`, la valeur de §4.6b :
-la mesure ci-dessus montre que le moteur MRV a tout acquis dès 1 000 nœuds), après
-vérification du profil de profondeur du stock (`GET /api/v1/stock-distribution`).
+`ETII_PRUNER_DFS_MRV=1` + `prunerDfsBudget 1000` (et non `10000`, la valeur de §4.6b : les
+deux moteurs plafonnent au-delà de 1 000 nœuds, et `MRV@1000` domine strictement
+`fixe@100000` — lecture 3 ci-dessus), après vérification du profil de profondeur du stock
+(`GET /api/v1/stock-distribution`).
 
 **Ce que cette PR ne fait PAS, et pourquoi.** Le « repassage à budget croissant » du
 constat 1 n'est pas implémenté : il exigerait un PALIER mémorisé par possibilité (l'octet
@@ -1448,9 +1467,15 @@ elle-même.
   appelait `search_packet_backtracking_core` inconditionnellement : la preuve du pruner
   tournait en ordre fixe même sous `ETII_MRV=1`, alors que la mesure de réfutation de §4.7
   désigne MRV comme le meilleur moteur pour ce travail précis. Mesuré à l'A/B
-  (`--pruner-dfs-mrv` du banc, stock réel de 3 658 possibilités) : **×4 de fermetures à
-  budget égal** (14,6 → 60,4 points à budget 10 000 ; 25 % → 71 % du stock éliminé), et
-  budget utile divisé par 10 (tout est acquis dès 1 000 nœuds en MRV). Le mauvais cas connu
+  (`--pruner-dfs-mrv` du banc) sur un stock de PRODUCTION de 126 287 possibilités produites
+  par de vrais clients, échantillon de 2 000 : **×3 à ×4 de fermetures à budget égal**
+  (10,0 → 35,6 points à budget 10 000 ; 32 % → 58 % du stock éliminé). Aucun budget ne comble
+  l'écart — les deux moteurs plafonnent, à des niveaux différents (l'ordre fixe gagne 3,4
+  points en multipliant le budget par 100). `MRV@1000` **domine strictement** `fixe@100000` :
+  56,8 % contre 33,8 % de stock éliminé pour 10,7× moins de CPU, d'où un budget
+  d'exploitation recommandé de 1 000. À noter, contre l'intuition : à budget égal MRV coûte
+  ~2× PLUS par fermeture sur ce stock (1,56 ms contre 0,77 ms) — le débit de fermetures est
+  un KPI trompeur ici, seul compte le coût pour atteindre un niveau d'élimination donné. Le mauvais cas connu
   de MRV (§4.7 : 60× plus cher sur des racines vivantes) est ici borné par
   `pruner_dfs_budget`. Drapeau distinct de `mrv_enabled` À DESSEIN : réfuter et explorer
   n'ont ni le même métier ni le même verdict. Défaut à 0 par prudence de déploiement, comme
@@ -1553,7 +1578,7 @@ recherché ici.
 | 8 | ~~**4.5** propagation des forcées dans la boucle chaude~~ **écarté** | moyen | non rentable (mesuré, §4.5 : −40,4 %, `max_result` inférieur à budget égal) — recoupe le forward-check, coût de lookup doublé sur le même périmètre de voisines |
 | 9 | ~~**4.7** ordre dynamique MRV (prototype scopé)~~ **concluant** | élevé | validé (mesuré, §4.7 : `max_result` 74→180 à 5 M nœuds) — délégation désactivée dans le prototype, non déployable en l'état ; cache incrémental + re-canonisation restent à faire |
 | 10 | ~~**4.7** ordre dynamique MRV (implémentation complète)~~ **mesuré favorable, défaut inchangé (`ETII_MRV=0`)** | élevé | coût de réfutation ~4× meilleur sur stock réel à CPU égal (§4.7) — frontière + `popcount`, re-canonisation des paquets délégués, pas de bump de `VERSION` ; rouvre §4.4/§4.5/§4.6b ; bascule du défaut de déploiement laissée à l'opérateur |
-| 11 | **4.10** moteur MRV pour la preuve bornée du pruner (+ `--pruner-dfs-mrv` au banc) | faible | mesuré ×4 de fermetures à budget égal sur stock réel (§4.10) — opt-in `ETII_PRUNER_DFS_MRV=1`, défaut inchangé ; budget recommandé abaissé à 1 000 en MRV |
+| 11 | **4.10** moteur MRV pour la preuve bornée du pruner (+ `--pruner-dfs-mrv` au banc) | faible | mesuré ×3 à ×4 de fermetures à budget égal sur un stock de production de 126 287 possibilités (§4.10 : 32 % → 58 % de stock éliminé, `MRV@1000` dominant `fixe@100000`) — opt-in `ETII_PRUNER_DFS_MRV=1`, défaut inchangé ; budget recommandé 1 000 |
 
 L'ordre 1→4 est un ordre de **rapport gain/coût décroissant présumé**, pas une dépendance :
 seules 8 (qui suppose `alloc` clarifié) et 9 (à arbitrer en dernier) sont contraintes.
