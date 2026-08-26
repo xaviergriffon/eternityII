@@ -627,6 +627,9 @@ L'en-tête du rapport rappelle le moteur employé, pour qu'une sortie collée ho
 reste interprétable.
 #### Option `--w2x2` : compte les fenêtres 2×2 vides sans remplissage possible
 
+**Statut : mécanisme ÉVALUÉ et ÉCARTÉ** (mesure ci-dessous) — le mode de comptage
+reste disponible pour le remesurer si la référence bouge.
+
 **Comptage seul.** Ce mode n'élague rien, ne modifie aucun autre résultat du
 banc et n'ajoute rien au chemin de production. Il répond à une seule question,
 posée avant d'écrire le moindre mécanisme : *un test JOINT sur les 4 cases d'une
@@ -640,8 +643,11 @@ juge chaque case isolément et ne peut donc voir que 2 contraintes ; un test joi
 en voit jusqu'à 8. Le point fixe de §4.6a n'y change rien tant qu'aucune case de
 la fenêtre n'est forcée.
 
+L'A/B qui décide se fait **contre la preuve MRV** (§4.10), pas contre l'ordre fixe :
+
 ```sh
-make bench-refutation BENCH_REFUT_ARGS="--from-back eternityII.back --pruner-profile 20000 --w2x2 --budget 0"
+make bench-refutation BENCH_REFUT_ARGS="--from-back eternityII.back --pruner-profile 2000 --w2x2 --budget 1000"
+make bench-refutation BENCH_REFUT_ARGS="--from-back eternityII.back --pruner-profile 2000 --w2x2 --budget 1000 --pruner-dfs-mrv"
 ```
 
 Le mode balaye les 169 fenêtres 2×2 **intérieures** (`x`, `y` dans
@@ -665,68 +671,71 @@ exactement le symptôme qu'on espère de lui :
    si `b_faceused` est cohérent avec la grille. Les paquets recalés par
    `check_possibility` sont écartés du comptage et signalés.
 
-#### Mesure sur stock réel : le pouvoir de réfutation croît avec la profondeur
+#### Mesure : le test 2×2 est absorbé par la preuve MRV — ÉCARTÉ
 
-Deux stocks réels, de profondeurs très différentes, mesurés avec le même mode.
+**Verdict : ne pas implémenter le mécanisme.** Le test réfute réellement, et
+beaucoup — mais presque exclusivement des possibilités que le pipeline ferme déjà,
+dès lors que la preuve bornée emploie le moteur MRV (§4.10).
 
-**Stock peu profond** (2 416 950 possibilités, 10 à 31 pièces posées, échantillon
-de 20 000) : le pipeline actuel n'élimine **rien** (0 % au contrôle superficiel comme
-à la preuve DFS), le balayage 2×2 ferme **155 possibilités (0,78 %)**, pour
-14,8 µs/possibilité contre 1,9 µs pour le contrôle superficiel. Origine des
-réfutations : 107 par les couleurs, 48 par la disponibilité.
+A/B apparié sur deux stocks de PRODUCTION (126 287 et 141 734 possibilités, 9 à 167
+pièces posées, moyenne 46), échantillon de 2 000, budget DFS 1 000 — le point de
+fonctionnement retenu par §4.10 :
 
-**Stock profond** (2 511 possibilités, 9 à 112 pièces posées, moyenne 23,
-échantillon complet) — c'est la mesure qui décide :
-
-| Budget DFS | Fermé par le pipeline | Coût DFS | Marginal 2×2 | Coût 2×2 |
-|---|---|---|---|---|
-| 0 | 0 (0 %) | — | **37 (1,47 %)** | 0,125 s |
-| 10 000 | 114 (4,5 %) | 24,0 M nœuds, 2,281 s | **24 (0,96 %)** | 0,144 s |
-| 100 000 | 121 (4,8 %) | 239,4 M nœuds, 21,848 s | **23 (0,92 %)** | 0,153 s |
-| 1 000 000 | 137 (5,5 %) | 2 382,8 M nœuds, 201,295 s | **17 (0,68 %)** | 0,136 s |
-
-**Le test 2×2 reste complémentaire de la preuve DFS à tous les budgets.** Même à
-1 000 000 de nœuds et 201 s de DFS, 17 des 37 réfutations restent hors de portée du
-DFS ; le recouvrement plafonne (13, puis 14, puis 20 sur 37). Les deux mécanismes ne
-trouvent pas les mêmes impasses. Rapport de coût : passer le DFS de 10 k à 1 M coûte
-**+199 s pour +23 fermetures** ; le balayage 2×2 en apporte **24 de plus pour 0,14 s**.
-
-Ventilation par profondeur (budget indifférent, le balayage ne dépend pas du DFS) :
-
-| Pièces posées | Possibilités | Réfutées | Taux |
+| Stock | Moteur de la preuve | Éliminé par le pipeline | **Marginal 2×2** |
 |---|---|---|---|
-| 0-15 | 1358 | 1 | 0,07 % |
-| 16-31 | 531 | 1 | 0,19 % |
-| 32-47 | 322 | 1 | 0,31 % |
-| 48-63 | 150 | 1 | 0,67 % |
-| 64-79 | 63 | 5 | **7,94 %** |
-| 80-95 | 60 | 13 | **21,67 %** |
-| 96-111 | 26 | 15 | **57,69 %** |
+| 126 287 poss. | ordre fixe | 608 (30,4 %) | **71 (3,55 %)** |
+| 126 287 poss. | **MRV** | 1 136 (56,8 %) | **3 (0,15 %)** |
+| 141 734 poss. | ordre fixe | 583 (29,1 %) | **67 (3,35 %)** |
+| 141 734 poss. | **MRV** | 1 100 (55,0 %) | **2 (0,10 %)** |
 
-Croissance monotone jusqu'à 57,7 %. Le modèle de branchement (§4.9 du document de
-conception) situe à ~186 pièces posées le point où le nombre de candidats attendu par
-case croise 1 : ce tableau n'a donc pas atteint son plateau.
+Reproduit à budget 10 000 sur le premier stock : 3,10 % marginal en ordre fixe,
+**0,10 %** en MRV. Le moteur de la preuve, pas le budget, est ce qui décide.
 
-**Trois enseignements pour qui voudrait implémenter le mécanisme :**
+**Le mécanisme se déclenche énormément** — 433 possibilités sur 2 000 (21,6 %) ont au
+moins une fenêtre 2×2 sans remplissage possible. Ce n'est pas une absence de
+déclenchement comme §4.2 ou §4.4. C'est un **recoupement structurel**, comme §4.3 et
+§4.5 : sur ces 433, **339 sont déjà mortes au contrôle superficiel** (gratuit) et
+**91 de plus sont fermées par la preuve MRV**. Il en reste 3.
 
-- **Il n'y a pas de table de blocs 2×2 à construire.** Sur les deux stocks, **aucune**
-  fenêtre vide n'a 3 ou 4 côtés connus (0 sur 372 520 dans le stock profond, 0 sur
-  2 975 025 dans le peu profond). Une table indexée par 3 ou 4 côtés ne se
-  déclencherait jamais. Ce qui tire, c'est le test joint à 1 ou 2 côtés — la
-  contrainte vient de l'interaction des 4 cases entre elles et de la disponibilité
-  des pièces, pas d'une bordure dense.
+**Ce qui rendait la piste crédible, et pourquoi ça ne suffit pas.** Sur un stock plus
+ancien et moins profond (2 511 possibilités, ≤ 112 pièces), le taux de réfutation
+croissait de 0,07 % (0-15 pièces posées) à **57,69 %** (96-111), et le test restait
+complémentaire de la preuve en **ordre fixe** à tous les budgets — y compris 1 000 000
+de nœuds et 201 s de DFS, où 17 réfutations sur 37 échappaient encore au DFS. Cette
+conclusion était juste, et elle n'a pas survécu au changement de référence : §4.10 a
+remplacé le moteur de la preuve, et le nouveau absorbe ce que l'ancien laissait passer.
+C'est exactement la règle du protocole §7 du document de conception — *mesurer
+par-dessus la PR précédente, jamais contre `master`* — vérifiée dans le sens
+désagréable.
+
+**Sur le coût, une précaution.** Le balayage coûte 12 à 19 ms par possibilité dans
+cette instrumentation, contre 0,55 ms pour la preuve MRV entière à budget 1 000. Ce
+chiffre ne doit PAS être lu comme le coût d'une implémentation : le mode réutilise
+délibérément les primitives du moteur plutôt qu'une table de blocs 2×2 précalculée, et
+une vraie implémentation serait de plusieurs ordres de grandeur plus rapide. **Le
+verdict ne repose pas sur le coût mais sur le pouvoir marginal** (0,10 à 0,15 %), qui
+est mesuré, lui, indépendamment de toute implémentation.
+
+**Deux enseignements qui survivent au verdict :**
+
+- **Il n'y aurait de toute façon aucune table de blocs 2×2 à construire.** Sur tous
+  les stocks mesurés, **aucune** fenêtre vide n'a jamais 3 ou 4 côtés connus (0 sur
+  372 520, 0 sur 2 975 025). Une table indexée par 3 ou 4 côtés — dont le pouvoir de
+  rejet théorique est pourtant de 88,5 % et 99,94 % — ne se déclencherait jamais.
 - **La source des réfutations s'inverse avec la profondeur** : 107 couleurs / 48
-  disponibilité sur le stock peu profond, **3 couleurs / 35 disponibilité** sur le
-  stock profond. En profondeur, c'est l'épuisement des pièces qui tue — exactement ce
-  que le contrôle superficiel ne peut pas voir CONJOINTEMENT sur les 4 cases.
-- **Mesurer sur stock profond, toujours.** Le même mode donne 0,78 % de fermetures
-  peu discriminantes sur stock peu profond et une courbe montant à 57,7 % sur stock
-  profond. C'est l'erreur de méthode qui a faussé §4.4 et §4.6b, reproduite ici à
-  l'identique — et corrigée seulement parce qu'un stock plus profond a été produit
-  exprès.
+  disponibilité sur stock peu profond, 3 / 35 sur stock profond. En profondeur c'est
+  l'épuisement des pièces qui tue, jamais les couleurs.
+
+**Pourquoi le mode reste dans le banc** malgré le verdict : même raison que
+`--engines fixe+singleton`, qui sert encore à remesurer §4.4 quand la référence bouge.
+Si `pruner_dfs_mrv` s'avérait indéployable, le test 2×2 redeviendrait candidat — il
+apporte 3,4 à 3,6 points par-dessus la preuve en ordre fixe. Le mode ne coûte rien
+tant que le drapeau n'est pas passé.
 
 Garde-fous à chaque exécution ci-dessus : 0 faux positif sur solution, 0 désaccord de
-l'oracle indépendant, 0 paquet écarté pour incohérence.
+l'oracle indépendant (476 à 558 réfutations repassées par exécution), 0 paquet écarté
+pour incohérence.
+
 
 ### Mode `--pruner-profile --gpu` : rejoue le VRAI pipeline GPU
 
