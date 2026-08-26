@@ -443,6 +443,10 @@ static void usage(void)
            "                     preuve DFS bornée (§4.6b, --budget) parmi le reste, part qui\n"
            "                     survit intacte — répond à §4.6b (le budget ferme-t-il ?) et à\n"
            "                     §4.9 (combien un pruner en service éliminerait-il déjà seul ?)\n"
+           "  --pruner-dfs-mrv   (avec --pruner-profile) la preuve DFS bornée emploie le moteur\n"
+           "                     à ordre DYNAMIQUE (MRV) au lieu de l'ordre fixe (§4.10) — c'est\n"
+           "                     l'A/B de ce levier : même stock, même budget, seul le moteur de\n"
+           "                     la preuve change\n"
            "  --gpu              (avec --pruner-profile, build CUDA uniquement) rejoue le\n"
            "                     contrôle GPU une passe (gpu_pruner_check_batch) au lieu du\n"
            "                     pipeline CPU superficiel+DFS ; mesure le taux d'élimination,\n"
@@ -491,6 +495,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--max-pieces") == 0 && i + 1 < argc)  max_pieces = atoi(argv[++i]);
         else if (strcmp(argv[i], "--kpi") == 0 && i + 1 < argc)         kpi = atoi(argv[++i]);
         else if (strcmp(argv[i], "--pruner-profile") == 0 && i + 1 < argc) pruner_profile = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--pruner-dfs-mrv") == 0)               pruner_dfs_mrv = 1;
         else if (strcmp(argv[i], "--gpu") == 0)                          gpu = 1;
         else if (strcmp(argv[i], "--gpu-batch") == 0 && i + 1 < argc)    gpu_batch = atoi(argv[++i]);
         else if (strcmp(argv[i], "--engines") == 0 && i + 1 < argc) {
@@ -581,8 +586,8 @@ int main(int argc, char **argv)
         long long stride = (total > pruner_profile) ? total / pruner_profile : 1;
         printf("stock : %lld possibilités\n", total);
         printf("profil du VRAI pipeline pruner (autoprune_step) sur %d possibilités"
-               " échantillonnées 1 sur %lld, plafond DFS %ld nœuds :\n\n",
-               pruner_profile, stride, budget);
+               " échantillonnées 1 sur %lld, plafond DFS %ld nœuds, moteur de la preuve : %s :\n\n",
+               pruner_profile, stride, budget, pruner_dfs_mrv ? "MRV (ordre dynamique)" : "ordre fixe");
 
         rewind(f);
         long long index = 0, sampled = 0;

@@ -590,6 +590,26 @@ TEST mrv_parse_env_explicit_values_win(void)
     PASS();
 }
 
+/* pruner_dfs_mrv_parse_env : sélecteur du moteur de la PREUVE BORNÉE du pruner
+ * (§4.10), volontairement distinct de mrv_parse_env — même logique, défaut
+ * indépendant. Mêmes deux volets : jamais de bascule silencieuse hors du
+ * défaut, valeurs explicites respectées. */
+TEST pruner_dfs_mrv_parse_env_absent_or_unknown_returns_default(void)
+{
+    ASSERT_EQ_FMT(PRUNER_DFS_MRV_DEFAULT, pruner_dfs_mrv_parse_env(NULL), "%d");
+    ASSERT_EQ_FMT(PRUNER_DFS_MRV_DEFAULT, pruner_dfs_mrv_parse_env(""), "%d");
+    ASSERT_EQ_FMT(PRUNER_DFS_MRV_DEFAULT, pruner_dfs_mrv_parse_env("mrv"), "%d");
+    ASSERT_EQ_FMT(PRUNER_DFS_MRV_DEFAULT, pruner_dfs_mrv_parse_env("2"), "%d");
+    PASS();
+}
+
+TEST pruner_dfs_mrv_parse_env_explicit_values_win(void)
+{
+    ASSERT_EQ_FMT(0, pruner_dfs_mrv_parse_env("0"), "%d"); /* preuve à ordre fixe */
+    ASSERT_EQ_FMT(1, pruner_dfs_mrv_parse_env("1"), "%d"); /* preuve à ordre dynamique */
+    PASS();
+}
+
 SUITE(static_variables_suite)
 {
     RUN_TEST(flag_absent_leaves_argv_and_flag_untouched);
@@ -629,6 +649,8 @@ SUITE(static_variables_suite)
     RUN_TEST(request_keeps_running_is_false_only_on_stop);
     RUN_TEST(mrv_parse_env_absent_or_unknown_returns_default);
     RUN_TEST(mrv_parse_env_explicit_values_win);
+    RUN_TEST(pruner_dfs_mrv_parse_env_absent_or_unknown_returns_default);
+    RUN_TEST(pruner_dfs_mrv_parse_env_explicit_values_win);
     RUN_TEST(bench_parse_nodes_env_absent_or_empty_returns_zero);
     RUN_TEST(bench_parse_nodes_env_non_numeric_returns_zero);
     RUN_TEST(bench_parse_nodes_env_valid_decimal_is_parsed);

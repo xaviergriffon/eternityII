@@ -1478,9 +1478,18 @@ static int search_packet_backtracking(client_possibility_t *client,
  * @brief Preuve de fermeture bornée en nœuds du sous-arbre d'une possibilité (§4.6b
  *        de `docs/conception/elagage_recherche.md`).
  *
- * Rejoue `root` par le même backtracking que la recherche réelle
- * (`search_packet_backtracking_core`), plafonné à `node_budget` nœuds et sans
- * délégation (`allow_delegate = 0`, cf. sa doc). Une condition nécessaire
+ * Rejoue `root` par le même backtracking que la recherche réelle, plafonné à
+ * `node_budget` nœuds et sans délégation (`allow_delegate = 0`, cf. sa doc).
+ * Le moteur employé est choisi par `pruner_dfs_mrv` (§4.10) — ordre FIXE
+ * (`search_packet_backtracking_core`, défaut et comportement historique) ou
+ * ordre DYNAMIQUE (`search_packet_backtracking_mrv`) — INDÉPENDAMMENT de
+ * `mrv_enabled`, qui ne gouverne que la recherche réelle : les deux usages
+ * n'ont ni le même métier (réfuter vs. explorer) ni le même verdict de mesure.
+ * Le verdict rendu ne dépend pas de ce choix : les deux moteurs explorent le
+ * MÊME sous-arbre, seul l'ordre des décisions change, donc `BT_CORE_EXHAUSTED`
+ * a la même signification et la même exactitude dans les deux cas — seul son
+ * COÛT change (mesuré très en faveur de MRV sur ce travail précis, cf.
+ * `pruner_dfs_mrv`). Une condition nécessaire
  * exacte, pas une heuristique : si `BT_CORE_EXHAUSTED` est retourné, le
  * sous-arbre entier a été parcouru par le même code que la recherche fait
  * foi — aucun faux positif possible, exactement la même garantie qu'une
@@ -1504,6 +1513,9 @@ static bt_core_result_t search_packet_backtracking_budgeted(client_possibility_t
                                       long node_budget,
                                       unsigned long long *out_nodes)
 {
+    if (pruner_dfs_mrv) {
+        return search_packet_backtracking_mrv(client, root, idParts, node_budget, 0, out_nodes);
+    }
     return search_packet_backtracking_core(client, root, idParts, node_budget, 0, out_nodes);
 }
 

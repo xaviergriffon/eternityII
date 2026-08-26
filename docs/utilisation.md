@@ -363,6 +363,44 @@ Exemples :
 ./eternityII pruner --gpu localhost 1 data/pieces.csv 4096    # lots de 4096 (GPU)
 ```
 
+### Preuve de fermeture bornée (`prunerDfsBudget`) et son moteur (`ETII_PRUNER_DFS_MRV`)
+
+Au-delà du contrôle superficiel gratuit ci-dessus, un pruner peut tenter de **prouver**
+qu'une possibilité est morte, en rejouant réellement son sous-arbre avec un plafond de
+nœuds — `prunerDfsBudget <n>` (commande console, clé `dfs_budget` du fichier de
+configuration client, pilotable à distance par `clientsCommand` et l'API HTTP).
+**Désactivé par défaut (`0`)** : c'est un coût CPU que l'opérateur engage sciemment.
+Valeur recommandée par la mesure : `10000` en ordre fixe (capture 82 % du gain d'un budget
+100× plus grand, rendements décroissants nets au-delà), mais **`1000` suffit avec le moteur
+MRV ci-dessous**, qui a tout acquis dès ce budget.
+
+La variable d'environnement **`ETII_PRUNER_DFS_MRV=1`** fait jouer cette preuve par le
+moteur à **ordre dynamique (MRV)** au lieu de l'ordre fixe. Elle est lue une seule fois au
+démarrage, avant tout `fork()`, et ne concerne QUE cette preuve — l'ordre de la recherche
+réelle reste gouverné par `ETII_MRV`, indépendamment. Réfuter (le métier d'un pruner) et
+explorer sont deux travaux différents : MRV est mesuré nettement meilleur sur le premier
+(≈ 4× plus de sous-arbres fermés par seconde de CPU sur du stock réel), sans l'être
+uniformément sur le second. Le mauvais cas connu de MRV est ici **borné par
+`prunerDfsBudget`** : au pire la preuve échoue après ce nombre de nœuds, comme avec l'ordre
+fixe.
+
+Mesuré sur un stock réel de 3 658 possibilités (échantillon de 500, voir
+[docs/tests_et_ci.md](tests_et_ci.md#option---pruner-dfs-mrv--lab-du-moteur-de-la-preuve-410)) :
+à budget 1 000, l'ordre fixe ferme 12,6 % des possibilités et MRV **60,2 %** — 25 % contre
+**71 %** de stock éliminé au total, contrôle superficiel compris.
+
+```sh
+# machine puissante dédiée à l'élagage : preuve bornée activée, moteur MRV
+ETII_PRUNER_DFS_MRV=1 ./eternityII pruner serveur 8 data/pieces.csv 500
+# puis, dans sa console (ou à distance) :
+prunerDfsBudget 1000
+```
+
+> À vérifier avant d'activer : le profil de profondeur du stock du serveur
+> (`GET /api/v1/stock-distribution`). Et à garder en tête : élaguer profite surtout aux
+> AUTRES machines (le stock est distribué à toute la flotte) — un client qui tourne
+> lui-même en MRV refait déjà, à chaque nœud, l'essentiel du contrôle d'un pruner.
+
 > ⚠️ **Compatibilité protocole** : le handshake exige une égalité stricte des
 > versions — **tous les nœuds (serveur, clients, pruners) doivent être recompilés
 > ensemble** ; deux binaires de `VERSION` différente ne dialoguent pas. Voir

@@ -588,6 +588,38 @@ qu'`autoprune_step` fait réellement en premier. Sans aucun pruner actif, un
 serveur conserve donc une moitié de stock déjà morte, occupant de la mémoire et
 de la bande passante de distribution pour rien.
 
+#### Option `--pruner-dfs-mrv` : l'A/B du moteur de la preuve (§4.10)
+
+La preuve DFS bornée peut employer le moteur à ordre DYNAMIQUE au lieu de l'ordre fixe
+(`pruner_dfs_mrv`, `ETII_PRUNER_DFS_MRV=1` en production). `--pruner-dfs-mrv` bascule ce
+même drapeau dans le banc : même stock, même échantillon, même budget, seul le moteur de la
+preuve change — la comparaison appariée exigée par le protocole §7 du document de
+conception.
+
+```sh
+make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --pruner-profile 500 --budget 10000"
+make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --pruner-profile 500 --budget 10000 --pruner-dfs-mrv"
+```
+
+Mesuré sur un stock réel de 3 658 possibilités (serveur `--expand-level 3` alimenté ~3 min
+par un client à ordre fixe), échantillon de 500 :
+
+| Budget DFS | Moteur | Fermées par la preuve | Total éliminé | Nœuds | Temps |
+|---|---|---|---|---|---|
+| 1 000 | ordre fixe | 12,6 % | 23,0 % | 392 223 | 0,053 s |
+| 1 000 | MRV | 60,2 % | 70,6 % | 149 297 | 0,148 s |
+| 10 000 | ordre fixe | 14,6 % | 25,0 % | 3 782 356 | 0,353 s |
+| 10 000 | MRV | 60,4 % | 70,8 % | 1 464 840 | 1,311 s |
+| 100 000 | ordre fixe | 17,2 % | 27,6 % | 36 596 828 | 3,298 s |
+| 100 000 | MRV | 60,4 % | 70,8 % | 14 604 840 | 13,099 s |
+
+Deux enseignements pour l'exploitation : ×4 de fermetures à budget égal, et un budget utile
+bien plus BAS en MRV (tout est acquis dès 1 000 nœuds, contre une montée lente et coûteuse
+en ordre fixe). Voir §4.10 du document de conception pour l'analyse complète.
+
+L'en-tête du rapport rappelle le moteur employé, pour qu'une sortie collée hors contexte
+reste interprétable.
+
 ### Mode `--pruner-profile --gpu` : rejoue le VRAI pipeline GPU
 
 Variante de `--pruner-profile` (ci-dessus) qui rejoue, au lieu du pipeline CPU

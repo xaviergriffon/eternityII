@@ -26,7 +26,10 @@ paquets émis, `max_result` **186** à 2 M nœuds — voir §4.7. Le « mur stru
 s'est révélé être un artefact du PROTOCOLE DE MESURE (mono-processus depuis la genèse), pas
 une propriété de l'ordre fixe — voir la correction en §4.7 — ce qui rouvre §4.4, §4.5 et
 §4.6b (tous écartés/désactivés pour cause de profondeur insuffisante) à une nouvelle mesure. La variante « partition de l'arène » de §4.2 reste une
-proposition non implémentée. §4.9 (table de région sur les zones d'angle,
+proposition non implémentée. PR 11 (§4.10, moteur MRV pour la preuve bornée du pruner) **livrée en opt-in**
+(`ETII_PRUNER_DFS_MRV=1`, défaut inchangé) : mesurée à ×4 de fermetures à budget égal sur
+stock réel — c'est la conséquence directe, côté pruner, du verdict de réfutation de PR 10.
+§4.9 (table de région sur les zones d'angle,
 et élimination par résolution d'un cadre complet) est **écartée sans implémentation** —
 seule piste du document tranchée avant écriture de code, par quatre mesures statiques.
 
@@ -1236,6 +1239,154 @@ reproposer sans avoir d'abord invalidé la mesure 3.
   pas, la mesure 2 dit que le test exact serait bon marché. Ne pas retoucher `directions[]`
   pour provoquer artificiellement cette situation : bump de `VERSION` (§5).
 
+### 4.10 Moteur de la preuve bornée du pruner : MRV plutôt qu'ordre fixe — IMPLÉMENTÉ, OPT-IN
+
+**Statut : implémenté, testé, opt-in (`ETII_PRUNER_DFS_MRV=1`), défaut inchangé (ordre fixe).**
+Piste ouverte par une question d'exploitation : sur les machines les plus performantes,
+serait-il rentable d'élaguer davantage les possibilités en cours d'étude, pour éliminer au
+plus tôt ? La réponse tient en trois constats, dont le troisième est cette PR.
+
+**Constat 1 — « régulier » n'est pas le bon axe.** Une possibilité est un état de plateau
+FIGÉ : rien d'extérieur ne peut la tuer plus tard. Repasser le MÊME test dessus ne rendra
+jamais rien de nouveau — le seul cas qui rendait quelque chose (la cascade de forçages non
+rattrapée par une passe unique) est déjà réglé par le point fixe de §4.6a. Ce qui peut
+changer d'un passage à l'autre, c'est la FORCE du test : contrôle superficiel → preuve
+bornée à budget croissant. Un approfondissement itératif, pas une périodicité.
+
+**Constat 2 — fermer un sous-arbre ne fait pas gagner de nœuds à la flotte, à moteur
+égal.** Une preuve qui FERME dans un budget B démontre que le sous-arbre fait ≤ B nœuds :
+c'est exactement ce que le client de recherche aurait dépensé pour le fermer lui-même. À
+moteur identique, l'élagage préalable DÉPLACE le travail, il ne le supprime pas. Ses gains
+propres sont ailleurs, et ils sont réels : le volume de stock (50,2 % de mortes au contrôle
+gratuit, +4,6 pt au DFS 10 000 — plafond RAM, débordement disque et `consistent_backup` en
+moins), et l'absence de prolifération (la preuve bornée interdit la délégation, donc un
+sous-arbre condamné qu'elle absorbe ne recrache pas ses frères dans le stock, contrairement
+au même sous-arbre exploré par un client de recherche).
+
+**Constat 3 — le seul gain CPU massif est l'ASYMÉTRIE DE MOTEUR, et le code ne
+l'exploitait pas.** `search_packet_backtracking_budgeted` appelait
+`search_packet_backtracking_core` de façon INCONDITIONNELLE : la preuve du pruner tournait
+en ordre fixe même sur un binaire lancé avec `ETII_MRV=1`. Or la mesure de réfutation de
+§4.7 dit précisément l'inverse de ce que cet appel supposait — à temps CPU égal, sur du
+vrai stock serveur : 3,48 fermetures/s pour MRV contre 0,91 pour l'ordre fixe, et 40 nœuds
+contre 295 339 sur les racines fermées par les deux. Fermer un sous-arbre est le MÉTIER du
+pruner, pas un effet de bord : c'est exactement le KPI sur lequel MRV gagne le plus.
+
+**Ce que fait la PR.** Un seul point de bascule, `pruner_dfs_mrv`
+(`src/app/static_variables.{h,c}`, défaut `PRUNER_DFS_MRV_DEFAULT` = 0), lu par
+`search_packet_backtracking_budgeted` seule. Résolu une fois au démarrage depuis
+`ETII_PRUNER_DFS_MRV` dans `main()`, AVANT tout `fork()` (invariant de résolution pré-fork
+du projet), donc hérité à l'identique par tous les fils. Aucune commande console, aucune
+entrée `cli_topics[]` : c'est un levier par MACHINE (« telle machine tourne en pruner
+MRV »), pas un réglage à changer en cours de route.
+
+**Volontairement indépendant de `mrv_enabled`.** Un process n'a qu'un rôle (recherche OU
+pruner), donc un seul drapeau aurait suffi fonctionnellement — mais les deux usages n'ont
+ni le même métier (réfuter vs. explorer) ni le même verdict de mesure : MRV est mesuré
+favorable pour la réfutation sans l'être uniformément pour l'exploration de sous-arbres
+encore VIVANTS (§4.7 : 60× plus cher que l'ordre fixe sur des racines fabriquées). Les
+confondre ferait qu'un futur basculement de l'un emporterait silencieusement l'autre, et
+interdirait l'A/B exigé par le protocole §7.
+
+**Le risque connu de MRV est ici borné par construction.** Le contre-exemple de §4.7 (les
+racines encore vivantes, où l'ordre dynamique s'enfonce) coûte, dans ce contexte, au plus
+`pruner_dfs_budget` nœuds : la preuve échoue et l'appelant retombe sur le comportement
+historique. C'est le seul endroit de ce document où le mauvais cas de MRV est plafonné.
+
+**Aucune conséquence de protocole.** La preuve bornée ne délègue rien (`allow_delegate = 0`)
+et ne modifie pas la possibilité contrôlée : seul son VERDICT sort, et il a la même
+signification et la même exactitude dans les deux ordres (même sous-arbre, seul l'ordre des
+décisions change). Pas de bump de `VERSION`, flotte mixte inchangée.
+
+**Garantie de correction** (§5), trois volets :
+- `search_backtracking_budgeted_mrv_closes_when_budget_suffices` /
+  `_returns_budget_when_insufficient` (`tests/core/test_etii_search.c`) : un plateau où la
+  fermeture DOIT être prouvée, un où elle NE DOIT PAS l'être ;
+- `autoprune_step_dfs_budget_mrv_closes_possibility` : l'intégration réelle dans le pipeline
+  du pruner (contrôle superficiel puis preuve), verdict et compteurs identiques à la
+  variante à ordre fixe ;
+- surtout `search_backtracking_budgeted_both_engines_agree_on_4x4` : sur le VRAI puzzle 4×4,
+  la preuve bornée jouée depuis la racine vide rend le MÊME verdict
+  (`BT_CORE_EXHAUSTED`) avec les deux moteurs, ET la solution est enregistrée dans les deux
+  cas — un élagage est une condition nécessaire, il ne doit jamais coûter une solution. Le
+  test vérifie aussi que le coût en nœuds DIFFÈRE entre les deux moteurs : un drapeau
+  inopérant (qui routerait vers le même moteur) échoue explicitement dessus.
+
+**Mesure.** L'instrument existe déjà : `--pruner-profile` du banc de réfutation rejoue le
+pipeline réel `autoprune_step`. L'option `--pruner-dfs-mrv` lui a été ajoutée pour l'A/B —
+même stock, même budget, seul le moteur de la preuve change :
+
+```sh
+make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --pruner-profile 500 --budget 10000"
+make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --pruner-profile 500 --budget 10000 --pruner-dfs-mrv"
+```
+
+**Mesuré** — stock RÉEL produit pour cette PR (serveur `--expand-level 3 --stock-files 1`,
+alimenté ~3 min par un client à ordre FIXE à 2 fils, sauvegarde automatique `temp.back` :
+3 658 possibilités), échantillon de 500 possibilités prises 1 sur 7, conteneur 4 cœurs.
+Comparaison APPARIÉE : même stock, même échantillon, même budget, seul le moteur de la
+preuve change.
+
+| Budget DFS | Moteur | Fermées par la preuve DFS | Total éliminé (superficiel + DFS) | Nœuds DFS | Temps |
+|---|---|---|---|---|---|
+| 1 000 | ordre fixe | 12,6 % | 23,0 % | 392 223 | 0,053 s |
+| 1 000 | **MRV** | **60,2 %** | **70,6 %** | 149 297 | 0,148 s |
+| 10 000 | ordre fixe | 14,6 % | 25,0 % | 3 782 356 | 0,353 s |
+| 10 000 | **MRV** | **60,4 %** | **70,8 %** | 1 464 840 | 1,311 s |
+| 100 000 | ordre fixe | 17,2 % | 27,6 % | 36 596 828 | 3,298 s |
+| 100 000 | **MRV** | **60,4 %** | **70,8 %** | 14 604 840 | 13,099 s |
+
+(Contrôle superficiel seul, identique aux six lignes : 10,4 % de mortes — ce stock, produit
+par un client à ordre fixe sur trois minutes, est moins « déjà mort » que celui de §4.6b.)
+
+**Trois lectures, dans l'ordre d'importance :**
+
+1. **×4 de fermetures à budget égal**, quel que soit le budget : 12,6 → 60,2 points à
+   1 000, 14,6 → 60,4 à 10 000, 17,2 → 60,4 à 100 000. Le stock éliminé passe de ~25 % à
+   ~71 %.
+2. **Le budget recommandé s'effondre.** L'ordre fixe grimpe lentement avec le budget (12,6 →
+   17,2 % pour ×100 de budget) ; MRV a déjà TOUT ce qu'il obtiendra à **1 000** nœuds
+   (60,2 % → 60,4 % ensuite, pour ×100 de coût). Autrement dit, un pruner MRV rend plus en
+   0,148 s que l'ordre fixe en 3,3 s — 22× moins de temps pour 3,5× plus de fermetures. La
+   valeur d'exploitation recommandée n'est donc PAS le `10000` de §4.6b quand le moteur est
+   MRV, mais **1 000**.
+3. **Le coût par nœud reste ~10× celui de l'ordre fixe** (mesuré : 149 297 nœuds en 0,148 s
+   contre 392 223 en 0,053 s), exactement comme en §4.7 — c'est le prix du balayage global.
+   Il est largement remboursé : par FERMETURE, MRV coûte 0,49 ms contre 0,84 ms (budget
+   1 000) et 38 ms (budget 100 000) pour l'ordre fixe.
+
+Un pruner MRV laisse 29,2 % du stock indéterminé, contre 75,0 % pour l'ordre fixe au même
+budget — et ces 29,2 % ne bougent plus quand on multiplie le budget par 100 : ce sont des
+sous-arbres réellement gros, pas des preuves manquées de peu.
+
+**Décision : opt-in, défaut inchangé** — même prudence de déploiement que
+`MRV_DEFAULT_ENABLED` (§4.7) et `PRUNER_DFS_BUDGET_DEFAULT` (§4.6b), et pour une raison
+supplémentaire propre à cette PR : le mécanisme est de toute façon inerte tant que
+`pruner_dfs_budget` vaut 0, c'est-à-dire tant que l'opérateur n'a pas déjà pris la première
+décision. Recommandation d'exploitation pour une machine puissante dédiée au prunage :
+`ETII_PRUNER_DFS_MRV=1` + `prunerDfsBudget 1000` (et non `10000`, la valeur de §4.6b :
+la mesure ci-dessus montre que le moteur MRV a tout acquis dès 1 000 nœuds), après
+vérification du profil de profondeur du stock (`GET /api/v1/stock-distribution`).
+
+**Ce que cette PR ne fait PAS, et pourquoi.** Le « repassage à budget croissant » du
+constat 1 n'est pas implémenté : il exigerait un PALIER mémorisé par possibilité (l'octet
+`checked` pourrait le porter — toute valeur non nulle conserve la sémantique actuelle du
+routage, `datamanager.c` testant `== 1`, donc sans bump de `VERSION`) et un chemin de retour
+`checked → unchecked` (aujourd'hui `scroll_from_local_tocheck` ne sert que le pool non
+vérifié, et une possibilité n'est donc contrôlée qu'une seule fois dans toute sa vie). Sans
+palier mémorisé, chaque passage repaierait les nœuds du précédent. À mesurer séparément, et
+seulement si le stock sature pendant que le CPU reste libre : les rendements de §4.6b sont
+déjà nettement décroissants d'un palier au suivant (+4,6 pt à 10 000, +5,6 pt à 1 000 000).
+
+**Corollaire à ne pas oublier — élaguer POUR SOI ne paie presque rien en MRV.** Le moteur
+MRV embarque, à chaque nœud, le balayage global de case morte (`mrv_choose_cell`) : c'est le
+même test que `possibility_all_has_a_next_counted`, joué en continu, et une grande partie
+des réfutations MRV coûtent 1 nœud pour cette raison (§4.7). Pré-élaguer ce qu'une machine
+MRV va étudier elle-même est donc largement redondant. Le rendement d'une passe d'élagage
+supplémentaire est INVERSEMENT proportionnel à la force du moteur qui la suit : une machine
+puissante élague utilement pour LES AUTRES (le stock serveur, avant distribution), pas pour
+elle-même.
+
 ## 5. Arbitrages tranchés
 
 - **Une condition nécessaire, jamais une heuristique.** Un faux positif jette
@@ -1292,6 +1443,18 @@ reproposer sans avoir d'abord invalidé la mesure 3.
   désactivée, donc le code reste opt-in ; `PRUNER_DFS_BUDGET_DEFAULT` reste à `0` pour la
   même raison de prudence de déploiement que `MRV_DEFAULT_ENABLED` (§4.7) — mesurément
   bénéfique n'est pas encore décidé comme défaut d'une flotte déployée.
+- **4.10 (moteur de la preuve bornée du pruner) : MRV implémenté, opt-in
+  (`ETII_PRUNER_DFS_MRV=1`), défaut inchangé.** `search_packet_backtracking_budgeted`
+  appelait `search_packet_backtracking_core` inconditionnellement : la preuve du pruner
+  tournait en ordre fixe même sous `ETII_MRV=1`, alors que la mesure de réfutation de §4.7
+  désigne MRV comme le meilleur moteur pour ce travail précis. Mesuré à l'A/B
+  (`--pruner-dfs-mrv` du banc, stock réel de 3 658 possibilités) : **×4 de fermetures à
+  budget égal** (14,6 → 60,4 points à budget 10 000 ; 25 % → 71 % du stock éliminé), et
+  budget utile divisé par 10 (tout est acquis dès 1 000 nœuds en MRV). Le mauvais cas connu
+  de MRV (§4.7 : 60× plus cher sur des racines vivantes) est ici borné par
+  `pruner_dfs_budget`. Drapeau distinct de `mrv_enabled` À DESSEIN : réfuter et explorer
+  n'ont ni le même métier ni le même verdict. Défaut à 0 par prudence de déploiement, comme
+  §4.6b/§4.7 — et de toute façon inerte tant que `prunerDfsBudget` vaut 0.
 - **4.8 (ordre des candidats dans l'arène) : `rare_first` adopté, inconditionnel.**
   Mesuré au banc (20 M nœuds × 5 répétitions, A/B à ordre alterné, 3 baselines et 3
   mesures `rare_first` non recouvrantes) : **+3,2 % de débit médian moyen**, taux
@@ -1390,6 +1553,7 @@ recherché ici.
 | 8 | ~~**4.5** propagation des forcées dans la boucle chaude~~ **écarté** | moyen | non rentable (mesuré, §4.5 : −40,4 %, `max_result` inférieur à budget égal) — recoupe le forward-check, coût de lookup doublé sur le même périmètre de voisines |
 | 9 | ~~**4.7** ordre dynamique MRV (prototype scopé)~~ **concluant** | élevé | validé (mesuré, §4.7 : `max_result` 74→180 à 5 M nœuds) — délégation désactivée dans le prototype, non déployable en l'état ; cache incrémental + re-canonisation restent à faire |
 | 10 | ~~**4.7** ordre dynamique MRV (implémentation complète)~~ **mesuré favorable, défaut inchangé (`ETII_MRV=0`)** | élevé | coût de réfutation ~4× meilleur sur stock réel à CPU égal (§4.7) — frontière + `popcount`, re-canonisation des paquets délégués, pas de bump de `VERSION` ; rouvre §4.4/§4.5/§4.6b ; bascule du défaut de déploiement laissée à l'opérateur |
+| 11 | **4.10** moteur MRV pour la preuve bornée du pruner (+ `--pruner-dfs-mrv` au banc) | faible | mesuré ×4 de fermetures à budget égal sur stock réel (§4.10) — opt-in `ETII_PRUNER_DFS_MRV=1`, défaut inchangé ; budget recommandé abaissé à 1 000 en MRV |
 
 L'ordre 1→4 est un ordre de **rapport gain/coût décroissant présumé**, pas une dépendance :
 seules 8 (qui suppose `alloc` clarifié) et 9 (à arbitrer en dernier) sont contraintes.

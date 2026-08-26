@@ -98,6 +98,16 @@ int main(int argc, const char *argv[]) {
         log_info("recherche : ordre de parcours DYNAMIQUE (ETII_MRV=1), moteur MRV\n");
     }
 
+    // ETII_PRUNER_DFS_MRV : moteur de la PREUVE BORNÉE du pruner (§4.10, cf.
+    // static_variables.h). Indépendant de ETII_MRV ci-dessus (recherche réelle) :
+    // même levier, deux métiers différents. Lu ici, avant tout fork, comme les
+    // autres options globales — chaque fils hérite de la même valeur par
+    // copie-sur-écriture (invariant de résolution pré-fork).
+    pruner_dfs_mrv = pruner_dfs_mrv_parse_env(getenv("ETII_PRUNER_DFS_MRV"));
+    if (pruner_dfs_mrv) {
+        log_info("pruner : preuve bornée à ordre DYNAMIQUE (ETII_PRUNER_DFS_MRV=1), moteur MRV\n");
+    }
+
     // --stock-files : appliqué ici, avant tout fork/thread, quel que soit le mode — même
     // emplacement que les autres options globales. Appel OBLIGATOIRE et
     // INCONDITIONNEL depuis le passage aux pools alloués dynamiquement
