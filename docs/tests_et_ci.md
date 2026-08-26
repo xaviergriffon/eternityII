@@ -625,6 +625,117 @@ de conception pour l'analyse complète et une mesure secondaire sur un stock d'e
 
 L'en-tête du rapport rappelle le moteur employé, pour qu'une sortie collée hors contexte
 reste interprétable.
+#### Option `--w2x2` : compte les fenêtres 2×2 vides sans remplissage possible
+
+**Statut : mécanisme ÉVALUÉ et ÉCARTÉ** (mesure ci-dessous) — le mode de comptage
+reste disponible pour le remesurer si la référence bouge.
+
+**Comptage seul.** Ce mode n'élague rien, ne modifie aucun autre résultat du
+banc et n'ajoute rien au chemin de production. Il répond à une seule question,
+posée avant d'écrire le moindre mécanisme : *un test JOINT sur les 4 cases d'une
+fenêtre 2×2 vide fermerait-il des possibilités que le pipeline actuel laisse
+passer ?*
+
+Le motif est un angle mort de **forme** du contrôle superficiel : dans une
+fenêtre 2×2 entièrement vide, aucune case n'a jamais plus de 2 faces connues —
+les 2 autres regardent les cases vides de la fenêtre. `possibility_all_has_a_next_counted`
+juge chaque case isolément et ne peut donc voir que 2 contraintes ; un test joint
+en voit jusqu'à 8. Le point fixe de §4.6a n'y change rien tant qu'aucune case de
+la fenêtre n'est forcée.
+
+L'A/B qui décide se fait **contre la preuve MRV** (§4.10), pas contre l'ordre fixe :
+
+```sh
+make bench-refutation BENCH_REFUT_ARGS="--from-back eternityII.back --pruner-profile 2000 --w2x2 --budget 1000"
+make bench-refutation BENCH_REFUT_ARGS="--from-back eternityII.back --pruner-profile 2000 --w2x2 --budget 1000 --pruner-dfs-mrv"
+```
+
+Le mode balaye les 169 fenêtres 2×2 **intérieures** (`x`, `y` dans
+`1..ETERN_SIZE-3`, pour que les 8 voisines existent), et pour chaque fenêtre
+entièrement vide tente un remplissage exhaustif des 4 cases avec les primitives
+du moteur (`what_search_in_grid_to_key` / `get_parts_bigarray_with_key`) — pas
+une table de blocs précalculée : la mesure doit porter sur le POUVOIR de
+réfutation, pas sur une implémentation, et aucune divergence de convention de
+faces n'est alors possible.
+
+**Trois garde-fous intégrés**, parce qu'un test d'élimination bogué produit
+exactement le symptôme qu'on espère de lui :
+
+1. **Auto-test de plomberie** au démarrage : sur un plateau vide, les 169
+   fenêtres doivent toutes être remplissables. Échec ⇒ sortie en erreur.
+2. **Oracle indépendant** : chaque réfutation est repassée par
+   `w2_fillable_bruteforce`, qui balaye toutes les rotations de toutes les pièces
+   en comparant les faces à la main, **sans la map ni `what_search_in_grid_to_key`**.
+   Deux chemins de code sans primitive commune doivent toujours concorder.
+3. **Cohérence des paquets** : une réfutation par disponibilité n'a de sens que
+   si `b_faceused` est cohérent avec la grille. Les paquets recalés par
+   `check_possibility` sont écartés du comptage et signalés.
+
+#### Mesure : le test 2×2 est absorbé par la preuve MRV — ÉCARTÉ
+
+**Verdict : ne pas implémenter le mécanisme.** Le test réfute réellement, et
+beaucoup — mais presque exclusivement des possibilités que le pipeline ferme déjà,
+dès lors que la preuve bornée emploie le moteur MRV (§4.10).
+
+A/B apparié sur deux stocks de PRODUCTION (126 287 et 141 734 possibilités, 9 à 167
+pièces posées, moyenne 46), échantillon de 2 000, budget DFS 1 000 — le point de
+fonctionnement retenu par §4.10 :
+
+| Stock | Moteur de la preuve | Éliminé par le pipeline | **Marginal 2×2** |
+|---|---|---|---|
+| 126 287 poss. | ordre fixe | 608 (30,4 %) | **71 (3,55 %)** |
+| 126 287 poss. | **MRV** | 1 136 (56,8 %) | **3 (0,15 %)** |
+| 141 734 poss. | ordre fixe | 583 (29,1 %) | **67 (3,35 %)** |
+| 141 734 poss. | **MRV** | 1 100 (55,0 %) | **2 (0,10 %)** |
+
+Reproduit à budget 10 000 sur le premier stock : 3,10 % marginal en ordre fixe,
+**0,10 %** en MRV. Le moteur de la preuve, pas le budget, est ce qui décide.
+
+**Le mécanisme se déclenche énormément** — 433 possibilités sur 2 000 (21,6 %) ont au
+moins une fenêtre 2×2 sans remplissage possible. Ce n'est pas une absence de
+déclenchement comme §4.2 ou §4.4. C'est un **recoupement structurel**, comme §4.3 et
+§4.5 : sur ces 433, **339 sont déjà mortes au contrôle superficiel** (gratuit) et
+**91 de plus sont fermées par la preuve MRV**. Il en reste 3.
+
+**Ce qui rendait la piste crédible, et pourquoi ça ne suffit pas.** Sur un stock plus
+ancien et moins profond (2 511 possibilités, ≤ 112 pièces), le taux de réfutation
+croissait de 0,07 % (0-15 pièces posées) à **57,69 %** (96-111), et le test restait
+complémentaire de la preuve en **ordre fixe** à tous les budgets — y compris 1 000 000
+de nœuds et 201 s de DFS, où 17 réfutations sur 37 échappaient encore au DFS. Cette
+conclusion était juste, et elle n'a pas survécu au changement de référence : §4.10 a
+remplacé le moteur de la preuve, et le nouveau absorbe ce que l'ancien laissait passer.
+C'est exactement la règle du protocole §7 du document de conception — *mesurer
+par-dessus la PR précédente, jamais contre `master`* — vérifiée dans le sens
+désagréable.
+
+**Sur le coût, une précaution.** Le balayage coûte 12 à 19 ms par possibilité dans
+cette instrumentation, contre 0,55 ms pour la preuve MRV entière à budget 1 000. Ce
+chiffre ne doit PAS être lu comme le coût d'une implémentation : le mode réutilise
+délibérément les primitives du moteur plutôt qu'une table de blocs 2×2 précalculée, et
+une vraie implémentation serait de plusieurs ordres de grandeur plus rapide. **Le
+verdict ne repose pas sur le coût mais sur le pouvoir marginal** (0,10 à 0,15 %), qui
+est mesuré, lui, indépendamment de toute implémentation.
+
+**Deux enseignements qui survivent au verdict :**
+
+- **Il n'y aurait de toute façon aucune table de blocs 2×2 à construire.** Sur tous
+  les stocks mesurés, **aucune** fenêtre vide n'a jamais 3 ou 4 côtés connus (0 sur
+  372 520, 0 sur 2 975 025). Une table indexée par 3 ou 4 côtés — dont le pouvoir de
+  rejet théorique est pourtant de 88,5 % et 99,94 % — ne se déclencherait jamais.
+- **La source des réfutations s'inverse avec la profondeur** : 107 couleurs / 48
+  disponibilité sur stock peu profond, 3 / 35 sur stock profond. En profondeur c'est
+  l'épuisement des pièces qui tue, jamais les couleurs.
+
+**Pourquoi le mode reste dans le banc** malgré le verdict : même raison que
+`--engines fixe+singleton`, qui sert encore à remesurer §4.4 quand la référence bouge.
+Si `pruner_dfs_mrv` s'avérait indéployable, le test 2×2 redeviendrait candidat — il
+apporte 3,4 à 3,6 points par-dessus la preuve en ordre fixe. Le mode ne coûte rien
+tant que le drapeau n'est pas passé.
+
+Garde-fous à chaque exécution ci-dessus : 0 faux positif sur solution, 0 désaccord de
+l'oracle indépendant (476 à 558 réfutations repassées par exécution), 0 paquet écarté
+pour incohérence.
+
 
 ### Mode `--pruner-profile --gpu` : rejoue le VRAI pipeline GPU
 
