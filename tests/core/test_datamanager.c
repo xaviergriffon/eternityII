@@ -1534,6 +1534,68 @@ TEST stock_distribution_totals_match_datas_size(void)
     PASS();
 }
 
+/* Critère de succès de la PR4 (§8 de docs/conception/mrv_moteur_unique.md) :
+ * « histogramme du stock de production cohérent avec un recomptage
+ * indépendant ». Construit des paquets synthétiques avec un VRAI nombre de
+ * cases posées dans `grid` (via fill_packet_with_stale_alloc, avec
+ * alloc == placed cette fois — un paquet correct comme en produirait le code
+ * de production depuis VERSION 13), peuple le stock, puis vérifie
+ * l'histogramme de `datamanager_stock_distribution` contre un recomptage fait
+ * dans le test lui-même EN COMPTANT LES CASES de `grid` via
+ * `possibility_placed_count` — jamais en relisant `.alloc` — pour que la
+ * vérification soit réellement indépendante du champ produit par le code
+ * testé. */
+TEST stock_distribution_matches_independent_grid_recount(void)
+{
+    drain_all();
+
+    /* Paramétré sur ETERN_PARTS (les deux binaires de test, 16 et 256, jouent
+     * cette suite) : toutes les valeurs doivent tenir dans une grille de
+     * ETERN_PARTS cases et dans STOCK_DISTRIBUTION_LEVELS = ETERN_PARTS + 1. */
+    const int placed_counts[] = {
+        1, 1, 1,
+        ETERN_PARTS / 4, ETERN_PARTS / 4,
+        ETERN_PARTS / 2,
+        ETERN_PARTS - 1, ETERN_PARTS - 1, ETERN_PARTS - 1, ETERN_PARTS - 1,
+        ETERN_PARTS,
+    };
+    const int n = (int)(sizeof(placed_counts) / sizeof(placed_counts[0]));
+
+    array_possibility_packet arr;
+    arr.size = n;
+    arr.possibilities = calloc(n, sizeof(struct possibility_packet));
+    for (int i = 0; i < n; i++) {
+        fill_packet_with_stale_alloc(&arr.possibilities[i], placed_counts[i], placed_counts[i]);
+    }
+
+    /* Recomptage indépendant : compte les cases non vides de `grid` sur
+     * chaque paquet AVANT de les céder à add_possibility (qui peut copier ou
+     * modifier son entrée), sans jamais lire `.alloc`. */
+    unsigned long long expected[STOCK_DISTRIBUTION_LEVELS];
+    memset(expected, 0, sizeof(expected));
+    unsigned long long expected_total = 0;
+    for (int i = 0; i < n; i++) {
+        int recounted = possibility_placed_count(&arr.possibilities[i]);
+        ASSERT(recounted >= 0 && recounted < STOCK_DISTRIBUTION_LEVELS);
+        expected[recounted]++;
+        expected_total++;
+    }
+
+    add_possibility(NULL, &arr); /* server_ip == NULL -> put_to_local, pool non vérifié */
+    free(arr.possibilities);
+
+    stock_distribution_t d;
+    datamanager_stock_distribution(&d);
+
+    for (int i = 0; i < STOCK_DISTRIBUTION_LEVELS; i++) {
+        ASSERT_EQ_FMT(expected[i], d.unchecked[i], "%llu");
+    }
+    ASSERT_EQ_FMT(expected_total, d.total_unchecked, "%llu");
+
+    drain_all();
+    PASS();
+}
+
 /* --------------------------------------------------------------------------
  * count_combinations : nombre de paires (x*(x-1)/2)
  * ------------------------------------------------------------------------ */
@@ -5473,6 +5535,7 @@ SUITE(datamanager_suite)
     RUN_TEST(stock_distribution_on_empty_stock_is_all_zero);
     RUN_TEST(stock_distribution_counts_full_board_alloc);
     RUN_TEST(stock_distribution_totals_match_datas_size);
+    RUN_TEST(stock_distribution_matches_independent_grid_recount);
     RUN_TEST(count_combinations_is_triangular);
     RUN_TEST(get_tocheck_drains_unchecked_pool);
     RUN_TEST(remove_analysed_finds_then_misses);
