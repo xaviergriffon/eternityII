@@ -985,59 +985,22 @@ TEST bt_materialize_pending_orders_deepest_first(void)
 }
 
 /* ======================================================================
- * §4.7 — re-canonisation des paquets délégués en ordre DYNAMIQUE.
- *
- * C'est la seule chose que `dynamic_order = 1` change dans la délégation, et
- * c'est ce qui permet à un client MRV de céder du travail à un client à ordre
- * FIXE sans toucher au format de paquet (donc sans bump de VERSION).
+ * §4.7 / PR1 (docs/conception/mrv_moteur_unique.md) — délégation en ordre
+ * DYNAMIQUE : `alloc` des paquets émis est fixé par RECOMPTAGE
+ * (`possibility_placed_count`), plus par re-canonisation sur le premier trou
+ * du parcours (`bt_canonicalize_packet`, supprimée par PR1 : `directions[]`
+ * n'est plus un référentiel d'état). C'est ce qui permet à un client MRV de
+ * céder du travail à un client à ordre FIXE sans toucher au format de paquet
+ * (donc sans bump de `VERSION` pour CE changement précis — `VERSION` est
+ * bumpée par ailleurs, pour le changement de SENS de `alloc` lui-même).
  * ====================================================================== */
 
-/* bt_canonicalize_packet : `alloc` doit devenir l'index de la PREMIÈRE case
- * vide du parcours directions[], quelles que soient les cases remplies
- * au-delà, et x/y doivent la désigner. */
-TEST bt_canonicalize_packet_uses_first_hole_of_traversal(void)
-{
-    struct possibility_packet pkt;
-    make_empty_board(&pkt);
-    /* Cases remplies HORS ordre de parcours : 0, 1 et 5 (2 reste vide). */
-    pkt.grid[dirx[0]][diry[0]] = 1;
-    pkt.grid[dirx[1]][diry[1]] = 2;
-    pkt.grid[dirx[5]][diry[5]] = 3;
-    pkt.alloc = 0;
-    pkt.x = 200; pkt.y = 200;
-
-    ASSERT_EQ_FMT(0, bt_canonicalize_packet(&pkt), "%d"); /* plateau incomplet */
-    ASSERT_EQ_FMT(2, (int)pkt.alloc, "%d");               /* 1er trou = index 2 */
-    ASSERT_EQ_FMT((int)dirx[2], (int)pkt.x, "%d");
-    ASSERT_EQ_FMT((int)diry[2], (int)pkt.y, "%d");
-    /* La case remplie au-delà du curseur est CONSERVÉE (indice fixe). */
-    ASSERT_EQ_FMT(3, (int)pkt.grid[dirx[5]][diry[5]], "%d");
-    PASS();
-}
-
-/* bt_canonicalize_packet : plateau complet -> 1 (c'est une solution, pas un
- * travail à déléguer) et `alloc` reste à ETERN_PARTS. */
-TEST bt_canonicalize_packet_detects_complete_board(void)
-{
-    struct possibility_packet pkt;
-    make_empty_board(&pkt);
-    for (int i = 0; i < ETERN_PARTS; i++) {
-        pkt.grid[dirx[i]][diry[i]] = 1;
-    }
-    pkt.alloc = 0;
-
-    ASSERT_EQ_FMT(1, bt_canonicalize_packet(&pkt), "%d");
-    ASSERT_EQ_FMT(ETERN_PARTS, (int)pkt.alloc, "%d");
-    PASS();
-}
-
 /* bt_materialize_pending(dynamic_order = 1) : un niveau dont la case n'est PAS
- * celle de sa profondeur de pile (ordre MRV) produit des paquets canoniques —
- * `alloc` désigne le premier trou du parcours (ici 0, la case dirx[0] étant
- * restée vide), et surtout PAS la profondeur du niveau (qui vaudrait 1 et
- * décrirait un plateau troué, impossible à reprendre par un client à ordre
- * fixe). */
-TEST bt_materialize_pending_dynamic_order_emits_canonical_packets(void)
+ * celle de sa profondeur de pile (ordre MRV) produit des paquets dont `alloc`
+ * est le nombre RÉEL de pièces posées (ici 1 : le plateau racine est vide,
+ * une seule pièce est posée par ce niveau), jamais la profondeur du niveau
+ * ni un index de premier trou. */
+TEST bt_materialize_pending_dynamic_order_recomputes_alloc(void)
 {
     drain_local();
     ensure_counters();
@@ -1076,12 +1039,11 @@ TEST bt_materialize_pending_dynamic_order_emits_canonical_packets(void)
     for (int i = 0; i < n; i++) {
         /* La pièce est bien posée sur la case CHOISIE… */
         ASSERT(out[i].grid[dirx[5]][diry[5]] != -2);
-        /* …et le curseur redevient le premier trou du parcours (index 0). */
-        ASSERT_EQ_FMT(0, (int)out[i].alloc, "%d");
-        ASSERT_EQ_FMT((int)dirx[0], (int)out[i].x, "%d");
-        ASSERT_EQ_FMT((int)diry[0], (int)out[i].y, "%d");
-        /* Invariant canonique : plus rien à réparer. */
-        ASSERT_EQ_FMT(0, normalize_possibility_packet(&out[i]), "%d");
+        /* …et alloc = nombre RÉEL de pièces posées (1), pas la profondeur du
+         * niveau (qui vaudrait 1 par coïncidence ici avec l'ordre fixe -- le
+         * point du test est que c'est un RECOMPTAGE, cf. l'assertion suivante). */
+        ASSERT_EQ_FMT(1, (int)out[i].alloc, "%d");
+        ASSERT_EQ_FMT(possibility_placed_count(&out[i]), (int)out[i].alloc, "%d");
         ASSERT_EQ_FMT(0, (int)out[i].checked, "%d");
     }
     ASSERT_EQ_FMT(2, new_next_s[0], "%d"); /* niveau épuisé */
@@ -2395,7 +2357,7 @@ static void *es_mrv_stop_requester(void *arg)
     return NULL;
 }
 
-/* §4.7 — INTEROPÉRABILITÉ de la délégation en ordre dynamique.
+/* §4.7 / PR1 — INTEROPÉRABILITÉ de la délégation en ordre dynamique.
  *
  * Le point le plus délicat de l'implémentation complète : un client MRV cède
  * du travail sous forme de `possibility_packet`, et ces paquets doivent être
@@ -2405,16 +2367,23 @@ static void *es_mrv_stop_requester(void *arg)
  *      (REQUEST_STOP) : le travail restant part dans le stock local ;
  *   2. reprise du stock, à ordre FIXE (`mrv_enabled = 0`), jusqu'à épuisement,
  *      en vérifiant au passage que chaque paquet reçu est cohérent
- *      (`check_possibility`) et déjà canonique (`normalize_possibility_packet`
- *      n'a rien à réparer) ;
+ *      (`check_possibility`, qui couvre TOUTES les cases posées depuis PR1) ;
  *   3. le nombre TOTAL de solutions doit être exactement celui d'une
  *      exploration exhaustive à ordre fixe.
  *
- * Un paquet mal canonisé (curseur `alloc` pointant derrière un trou) ferait
- * perdre silencieusement les solutions du sous-arbre correspondant : le
- * comptage serait plus BAS. Si l'arrêt arrive après la fin de la recherche
- * (course sans conséquence), l'étape 2 ne fait rien et le comptage reste
- * exact : le test ne peut pas être instable, seulement moins couvrant. */
+ * Depuis PR1, `alloc` d'un paquet délégué en ordre dynamique est un simple
+ * RECOMPTAGE (`possibility_placed_count`), pas un curseur re-canonisé sur le
+ * premier trou de `directions[]` (`bt_canonicalize_packet`/
+ * `normalize_possibility_packet`, supprimées) : un paquet repris par le
+ * moteur à ordre FIXE peut donc être troué par rapport à `directions[]`.
+ * C'est exactement pour cette raison que `search_packet_backtracking_core`
+ * détermine désormais lui-même son point de départ en cherchant la première
+ * case VIDE du parcours plutôt que de faire confiance à `board.alloc` (cf. sa
+ * doc, etii_search.c) : sans cette adaptation, ce test perdrait silencieusement
+ * les solutions des cases sautées (comptage plus BAS que l'exploration de
+ * référence). Si l'arrêt arrive après la fin de la recherche (course sans
+ * conséquence), l'étape 2 ne fait rien et le comptage reste exact : le test
+ * ne peut pas être instable, seulement moins couvrant. */
 static void es_child_mrv_delegating_explore(void)
 {
     if (chdir(es_solution_dir) != 0) exit(97);
@@ -2436,7 +2405,8 @@ static void es_child_mrv_delegating_explore(void)
     if (rc == 1 && datas_size() == 0) exit(62);
 
     // Reprise du travail délégué par un moteur à ORDRE FIXE : c'est
-    // précisément l'interopérabilité que la re-canonisation doit garantir.
+    // précisément l'interopérabilité que l'adaptation de start_depth doit
+    // garantir (cf. la doc de la fonction ci-dessus).
     request = REQUEST_CONTINUE;
     mrv_enabled = 0;
     for (;;) {
@@ -2447,7 +2417,7 @@ static void es_child_mrv_delegating_explore(void)
         }
         for (int i = 0; i < r->size; i++) {
             if (check_possibility(&r->possibilities[i], es_client.all_rotate_part) < 0) exit(60);
-            if (normalize_possibility_packet(&r->possibilities[i]) != 0) exit(61);
+            if (possibility_placed_count(&r->possibilities[i]) != (int)r->possibilities[i].alloc) exit(61);
             search_packet_backtracking(&es_client, &r->possibilities[i], es_idParts);
         }
         free_array_possibility_packet(r);
@@ -3473,9 +3443,7 @@ SUITE(etii_search_suite)
     RUN_TEST(mrv_choose_cell_detects_dead_cell);
     RUN_TEST(bt_materialize_pending_orders_deepest_first);
     RUN_TEST(bt_materialize_pending_respects_max_out);
-    RUN_TEST(bt_canonicalize_packet_uses_first_hole_of_traversal);
-    RUN_TEST(bt_canonicalize_packet_detects_complete_board);
-    RUN_TEST(bt_materialize_pending_dynamic_order_emits_canonical_packets);
+    RUN_TEST(bt_materialize_pending_dynamic_order_recomputes_alloc);
     RUN_TEST(bt_materialize_skips_no_decision_level_and_zero_id);
 #if FORWARD_CHECK_K > 0
     RUN_TEST(bt_materialize_dead_map_produces_nothing);

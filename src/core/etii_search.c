@@ -347,35 +347,6 @@ static void record_solution(client_possibility_t *client, struct possibility_pac
 }
 
 /**
- * @brief Re-canonise un paquet produit par une exploration en ordre DYNAMIQUE.
- *
- * Un paquet exploré en ordre MRV (§4.7) a des cases remplies un peu partout :
- * la profondeur de pile qui l'a produit n'a plus aucun rapport avec le curseur
- * de parcours `directions[]`. Or `alloc` EST ce curseur (cf. sa documentation
- * canonique dans `possibility.h`), et le seul invariant qu'un consommateur —
- * serveur, pruner, ou client à ordre fixe — est en droit d'attendre est :
- * toutes les cases d'index `< alloc` dans `directions[]` sont remplies. On
- * rétablit donc `alloc` = index de la PREMIÈRE case vide du parcours, ce que
- * `normalize_possibility_packet` sait déjà faire (et qui recale `x`/`y` dans
- * la foulée) : le paquet redevient indiscernable d'un paquet produit en ordre
- * fixe. Les cases remplies au-delà d'`alloc` sont exactement le cas déjà prévu
- * et documenté (« indices fixes », sautés par un niveau sans décision) —
- * aucune extension du format, donc aucun bump de `VERSION`.
- *
- * @param pkt Paquet à canoniser (modifié : `alloc`, `x`, `y`).
- * @return    1 si le plateau est COMPLET (aucune case vide : c'est une
- *            solution, pas un travail à déléguer), 0 sinon.
- */
-static int bt_canonicalize_packet(struct possibility_packet *pkt)
-{
-    // normalize_possibility_packet n'abaisse `alloc` que s'il dépasse le
-    // premier trou : on part donc du maximum pour qu'il le recale toujours.
-    pkt->alloc = ETERN_PARTS;
-    normalize_possibility_packet(pkt);
-    return pkt->alloc >= ETERN_PARTS;
-}
-
-/**
  * @brief Matérialise en paquets les frères non explorés de la pile, du plus profond vers la racine.
  *
  * Reconstruit l'état du plateau à chaque niveau (annulation progressive des
@@ -395,22 +366,22 @@ static int bt_canonicalize_packet(struct possibility_packet *pkt)
  * @param board      Plateau courant (non modifié).
  * @param stack      Pile de décisions.
  * @param top        Indice du dernier niveau occupé.
- * @param start_depth Profondeur (alloc) du paquet racine.
+ * @param start_depth Index de la première case VIDE du parcours directions[]
+ *                    du paquet racine (PAS `board.alloc`, qui est un compte
+ *                    de pièces posées depuis VERSION 13 -- cf. la doc de
+ *                    `search_packet_backtracking_core`).
  * @param idParts    Table de pré-calcul des indices de rotation [id][rotation].
  * @param out        Tableau de destination des paquets matérialisés.
  * @param max_out    Nombre maximal de paquets à produire.
  * @param new_next_s Sortie : nouveau `next_s` par niveau si l'envoi réussit.
- * @param dynamic_order 0 : ordre fixe — `alloc` vaut la profondeur du niveau,
- *                      qui EST le curseur de parcours (invariant conservé de
- *                      proche en proche depuis un paquet racine canonique).
+ * @param dynamic_order 0 : ordre fixe — `alloc` est fixé à `d + 1` (profondeur
+ *                      du niveau + 1).
  *                      1 : ordre dynamique (MRV) — la profondeur de pile n'a
- *                      plus aucun rapport avec le curseur `directions[]`, le
- *                      paquet est donc RE-CANONISÉ (`bt_canonicalize_packet`)
- *                      avant d'être émis, ce qui le rend indiscernable, pour
- *                      tout autre client ou pour le serveur, d'un paquet
- *                      produit en ordre fixe — cf. §4.7 (« re-canonisation aux
- *                      frontières de délégation ») : c'est ce qui évite tout
- *                      bump de `VERSION`.
+ *                      aucun rapport avec le nombre de pièces posées, `alloc`
+ *                      est donc fixé par RECOMPTAGE (`possibility_placed_count`)
+ *                      après le placement du candidat : le comptage est déjà
+ *                      exact par construction (on vient de placer une pièce
+ *                      de plus sur `scratch`), aucune canonisation nécessaire.
  * @return           Nombre de paquets effectivement matérialisés.
  */
 static int bt_materialize_pending(client_possibility_t *client,
@@ -454,7 +425,8 @@ static int bt_materialize_pending(client_possibility_t *client,
                 pkt->grid[cx][cy] = idParts[cand->id][cand->rotation];
                 BOARD_SET_FACE(pkt, position, 1);
                 if (dynamic_order) {
-                    if (bt_canonicalize_packet(pkt)) {
+                    pkt->alloc = (uint16_t)possibility_placed_count(pkt);
+                    if (pkt->alloc >= ETERN_PARTS) {
                         // Plateau complet : même traitement qu'en ordre fixe.
                         record_solution(client, pkt);
                         continue;
@@ -577,7 +549,8 @@ static int bt_ensure_delegate_buf(client_possibility_t *client, int capacity)
  * @param board       Plateau courant.
  * @param stack       Pile de décisions (modifiée si l'envoi réussit).
  * @param top         Indice du dernier niveau occupé.
- * @param start_depth Profondeur du paquet racine.
+ * @param start_depth Index de la première case VIDE du parcours directions[]
+ *                    du paquet racine (PAS `board.alloc`).
  * @param idParts     Table de pré-calcul des indices de rotation.
  * @param dynamic_order Ordre de parcours du moteur appelant, transmis tel quel
  *                      à `bt_materialize_pending` (cf. sa doc).
@@ -639,11 +612,13 @@ static void bt_delegate_if_needed(client_possibility_t *client,
  * @param board       Plateau courant.
  * @param stack       Pile de décisions.
  * @param top         Indice du dernier niveau occupé.
- * @param start_depth Profondeur du paquet racine.
+ * @param start_depth Index de la première case VIDE du parcours directions[]
+ *                    du paquet racine (PAS `board.alloc`).
  * @param idParts     Table de pré-calcul des indices de rotation.
  * @param dynamic_order Ordre de parcours du moteur appelant (cf.
- *                      `bt_materialize_pending`) : en ordre dynamique, le
- *                      paquet du chemin courant est lui aussi re-canonisé.
+ *                      `bt_materialize_pending`) : en ordre dynamique, `alloc`
+ *                      du paquet du chemin courant est lui aussi fixé par
+ *                      recomptage.
  */
 static void bt_flush_pending(client_possibility_t *client,
                              struct possibility_packet *board,
@@ -665,7 +640,8 @@ static void bt_flush_pending(client_possibility_t *client,
     memcpy(cur, board, sizeof(*cur));
     int complete = 0;
     if (dynamic_order) {
-        complete = bt_canonicalize_packet(cur);
+        cur->alloc = (uint16_t)possibility_placed_count(cur);
+        complete = (cur->alloc >= ETERN_PARTS);
     } else {
         cur->alloc = start_depth + top + 1;
         cur->x = dirx[cur->alloc];
@@ -952,7 +928,28 @@ static bt_core_result_t search_packet_backtracking_core(client_possibility_t *cl
     // Pile de décisions : un niveau par case explorée depuis la racine
     bt_level stack[ETERN_PARTS];
     int top = -1;
-    const int start_depth = board.alloc;
+    // `start_depth` DOIT être l'index de la PREMIÈRE case vide du parcours
+    // directions[], PAS `board.alloc` (qui, depuis VERSION 13, est un compte
+    // de pièces posées, cf. possibility.h — plus un index de curseur). Un
+    // paquet racine peut être troué par rapport à directions[] même quand ce
+    // moteur à ordre fixe est seul en jeu : depuis PR1, `search_possiblity_light`
+    // choisit lui-même la case à développer (MRV), donc les possibilités
+    // initiales issues du démarrage serveur (`first_possibility`,
+    // `expand_datas_to_level`) ne suivent déjà plus l'ordre de directions[].
+    // Lire `board.alloc` directement comme point de départ sauterait purement
+    // et simplement les cases encore vides d'index < alloc, sans jamais les
+    // revisiter (le moteur ne progresse qu'en avant) : plateau final
+    // faussement complet, cases jamais décidées. Ancien équivalent externe :
+    // `bt_canonicalize_packet`/`normalize_possibility_packet`, supprimées par
+    // PR1 — cette recherche du premier trou est désormais faite ICI, à
+    // l'entrée du moteur, plutôt que par le producteur avant émission.
+    int start_depth = ETERN_PARTS;
+    for (int i = 0; i < ETERN_PARTS; i++) {
+        if (board.grid[dirx[i]][diry[i]] == -2) {
+            start_depth = i;
+            break;
+        }
+    }
     int noCheckDelegate = 0;
     // Date de la dernière délégation (0 = jamais : la première est autorisée)
     struct timespec last_delegate = {0, 0};
@@ -1204,30 +1201,6 @@ backtrack:;
 
 
 /**
- * @brief Nombre de cases réellement remplies d'un plateau.
- *
- * Le moteur à ordre dynamique ne peut pas lire `board.alloc` pour cela : sur un
- * paquet re-canonisé (`bt_canonicalize_packet`), `alloc` est le curseur de
- * parcours, c'est-à-dire une BORNE INFÉRIEURE du nombre de pièces posées, pas
- * ce nombre. On compte donc les cases, une fois, à l'entrée du moteur.
- *
- * @param board Plateau à compter.
- * @return      Nombre de cases non vides.
- */
-static int mrv_count_placed(const struct possibility_packet *board)
-{
-    int placed = 0;
-    for (int x = 0; x < ETERN_SIZE; x++) {
-        for (int y = 0; y < ETERN_SIZE; y++) {
-            if (board->grid[x][y] != -2) {
-                placed++;
-            }
-        }
-    }
-    return placed;
-}
-
-/**
  * @brief Recherche à ordre de variable DYNAMIQUE (MRV) — §4.7 de
  *        `docs/conception/elagage_recherche.md`.
  *
@@ -1239,14 +1212,17 @@ static int mrv_count_placed(const struct possibility_packet *board)
  *
  * Ce qui découle de ce seul changement, et qui distingue ce moteur du prototype
  * de mesure de la PR 9 (lequel ne déléguait jamais) :
- * - la profondeur de pile n'est plus le curseur de parcours, donc les paquets
- *   délégués sont RE-CANONISÉS avant émission (`bt_materialize_pending` avec
- *   `dynamic_order = 1`) — un client à ordre fixe, un pruner ou un `.back`
- *   n'y voient que du feu, d'où l'absence de bump de `VERSION` ;
- * - le nombre de pièces posées est compté explicitement (`mrv_count_placed`)
- *   puis maintenu, au lieu d'être lu dans `alloc` : un paquet reçu peut être
- *   troué (cases remplies au-delà du curseur), y compris s'il vient d'un autre
- *   client MRV ;
+ * - la profondeur de pile n'a plus de rapport avec le nombre de pièces posées,
+ *   donc les paquets délégués ont leur `alloc` fixé par RECOMPTAGE avant
+ *   émission (`bt_materialize_pending` avec `dynamic_order = 1`,
+ *   `possibility_placed_count`) — un client à ordre fixe, un pruner ou un
+ *   `.back` lisent `alloc` avec exactement la même définition (nombre de
+ *   pièces posées) quel que soit le moteur qui l'a produit ;
+ * - le nombre de pièces posées est compté explicitement
+ *   (`possibility_placed_count`) puis maintenu localement (`placed_count`),
+ *   au lieu d'être lu dans `alloc` : un paquet reçu peut être troué (cases
+ *   remplies dans le désordre par rapport à `directions[]`), y compris s'il
+ *   vient d'un autre client MRV ;
  * - `board.alloc` n'est mis à jour que là où il est OBSERVÉ (record de
  *   `max_result`, solution, délégation), jamais comme compteur de boucle.
  *
@@ -1283,7 +1259,7 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
     // fonctions de délégation partagées, dont la branche `dynamic_order` ne
     // l'utilise pas. Le vrai compteur de progression est `placed_count`.
     const int start_depth = board.alloc;
-    int placed_count = mrv_count_placed(&board);
+    int placed_count = possibility_placed_count(&board);
     int noCheckDelegate = 0;
     struct timespec last_delegate = {0, 0};
 
@@ -1414,10 +1390,10 @@ backtrack:;
 
         counters[client->compteur]++;
         nodes++;
-        // `alloc` porte ici le NOMBRE de pièces posées, la convention déjà
-        // retenue par max_result/best_board (cf. la note du site symétrique de
-        // search_packet_backtracking_core) — jamais un curseur de parcours :
-        // tout paquet SORTANT est re-canonisé par bt_canonicalize_packet.
+        // `alloc` porte le NOMBRE de pièces posées (définition canonique
+        // depuis VERSION 13, cf. possibility.h), jamais un curseur de
+        // parcours : tout paquet délégué a `alloc` fixé par recomptage
+        // (`possibility_placed_count`, cf. `bt_materialize_pending`/`bt_flush_pending`).
         board.alloc = (uint16_t)placed_count;
         if (board.alloc > max_result) {
             max_result = board.alloc;
