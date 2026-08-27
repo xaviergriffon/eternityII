@@ -39,7 +39,17 @@
 // inconnue (branche "else" de communicate_with_client_step) et fermerait la
 // connexion au lieu de simplement l'ignorer — l'exact-match du handshake evite
 // ce désync silencieux en le refusant explicitement à la place.
-#define VERSION 12
+// v13 : `possibility_packet.alloc` change de SENS sans changer de type ni de
+// position sur le fil — PR1 de docs/conception/mrv_moteur_unique.md. Avant
+// v13 : curseur de position dans directions[]/dirx[]/diry[] (« prochaine case
+// à traiter »). Depuis v13 : nombre de cases non vides de la grille
+// (possibility_placed_count), le référentiel qu'exige le moteur MRV (le
+// curseur de parcours n'a plus de rapport avec l'état réel du plateau une
+// fois l'ordre de variable rendu dynamique). Un client v12 et un serveur v13
+// (ou l'inverse) se comprendraient sur le fil tout en désynchronisant
+// silencieusement l'état du plateau — bump pour un refus explicite au
+// handshake plutôt qu'une corruption silencieuse (cf. §5 du document).
+#define VERSION 13
 
 #define NB_CONNECTIONS_PER_THREAD 1
 // Temps d'attente de 100 microsecondes
@@ -1146,10 +1156,13 @@ unsigned long long bench_parse_nodes_env(const char *env_value);
  * §7 : chaque piste se mesure PAR-DESSUS la précédente) et à activer MRV sans
  * reconstruire, jamais comme réglage d'exploitation courant.
  *
- * Les deux moteurs sont interopérables : `search_packet_backtracking_mrv`
- * re-canonise tout paquet délégué (`bt_canonicalize_packet`), si bien qu'un
- * client MRV, un client à ordre fixe et un pruner peuvent se partager le même
- * serveur — aucun bump de `VERSION` (§5).
+ * Les deux moteurs sont interopérables : `alloc` porte la même définition
+ * (nombre de pièces posées, `possibility_placed_count`) quel que soit le
+ * moteur qui a produit le paquet — `search_packet_backtracking_mrv` fixe
+ * `alloc` par recomptage à chaque paquet délégué (`bt_materialize_pending`/
+ * `bt_flush_pending`), si bien qu'un client MRV, un client à ordre fixe et un
+ * pruner peuvent se partager le même serveur (cf. VERSION 13,
+ * docs/conception/mrv_moteur_unique.md §5).
  */
 extern int mrv_enabled;
 

@@ -1577,9 +1577,15 @@ TEST remove_no_next_prunes_dead_packets(void)
     unsigned long long cells_before = pruner_cells_studied;
     remove_possibilities_with_no_next(map, &rp);
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* l'impasse a été retirée */
-    /* Études créditées : pks[0] balaie les ETERN_PARTS cases (grille pleine,
-       jamais d'impasse), pks[1] s'arrête à la 1re case (morte) -> +1. */
-    ASSERT_EQ_FMT(cells_before + ETERN_PARTS + 1, pruner_cells_studied, "%llu");
+    /* Études créditées : depuis PR1 (docs/conception/mrv_moteur_unique.md,
+       site 5), possibility_all_has_a_next_counted ne balaie plus que les
+       cases VIDES -- les cases déjà remplies ne sont plus recomptées. pks[0]
+       est une grille PLEINE (aucune case -2) -> 0 case réellement étudiée,
+       mais remove_possibilities_with_no_next applique un plancher d'1 coup
+       par possibilité (cf. son commentaire "minimum d'un coup par
+       possibilité (plateau déjà complet...)", inchangé par PR1) -> +1 ;
+       pks[1] a une seule case vide, morte dès son examen -> +1. */
+    ASSERT_EQ_FMT(cells_before + 2, pruner_cells_studied, "%llu");
 
     free_bigarray(map);
     drain_all();
