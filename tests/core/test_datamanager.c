@@ -467,6 +467,143 @@ TEST backup_then_restore_preserves_count(void)
     PASS();
 }
 
+/* Construit un paquet avec un nombre choisi de cases remplies (les
+ * `placed` premières cases en ordre ligne/colonne de `grid`, peu importe
+ * `directions[]`), et un `alloc` délibérément incohérent avec ce compte —
+ * reproduit le scénario §2.1 de docs/conception/mrv_moteur_unique.md : des
+ * cases remplies au-delà du curseur déclaré. */
+static void fill_packet_with_stale_alloc(struct possibility_packet *pk, int placed, int stale_alloc)
+{
+    memset(pk, 0, sizeof(*pk));
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            pk->grid[x][y] = -2;
+        }
+    }
+    int n = 0;
+    for (int x = 0; x < ETERN_SIZE && n < placed; x++) {
+        for (int y = 0; y < ETERN_SIZE && n < placed; y++) {
+            pk->grid[x][y] = 1; /* n'importe quelle valeur != -2 */
+            n++;
+        }
+    }
+    pk->alloc = (uint16_t)stale_alloc;
+    pk->checked = 0;
+}
+
+/* Écrit `n` paquets bruts (fwrite, pas add_possibility) dans un .back
+ * synthétique — reproduit fidèlement un fichier produit par du code
+ * pré-VERSION-13, sans passer par aucune API de ce module. */
+static int write_synthetic_back(const char *path, struct possibility_packet *pkts, int n)
+{
+    FILE *f = fopen(path, "wb");
+    if (f == NULL) {
+        return 0;
+    }
+    size_t written = fwrite(pkts, sizeof(struct possibility_packet), (size_t)n, f);
+    fclose(f);
+    return written == (size_t)n;
+}
+
+/* PR2 (docs/conception/mrv_moteur_unique.md §8) : critère de succès
+ * "restauration du .back de production 126287 -> 126287, zéro rejet",
+ * validé ici sur un stock synthétique (le vrai fichier de production n'est
+ * pas versionné). Chaque paquet porte un `alloc` "pré-v13" volontairement
+ * incohérent avec son nombre réel de cases pleines ; après restore(), zéro
+ * paquet ne doit manquer et chaque `alloc` doit avoir été recompté. */
+TEST restore_migrates_pre_v13_alloc_with_zero_loss(void)
+{
+    drain_datamanager();
+
+    const int n = 5;
+    /* Écarts variés, exprimés en fraction d'ETERN_PARTS pour rester valides
+     * quel que soit le format de compilation (256 ou 16 pièces, cf.
+     * tests/README.md) — le cas extrême de §2.2 (curseur << pièces posées)
+     * est représenté par le rapport, pas par des constantes absolues. */
+    int placed[5];
+    placed[0] = 1;
+    placed[1] = ETERN_PARTS / 4;
+    placed[2] = ETERN_PARTS / 2;
+    placed[3] = (ETERN_PARTS * 3) / 4;
+    placed[4] = ETERN_PARTS - 1;
+    int stale_alloc[5];
+    for (int i = 0; i < n; i++) {
+        stale_alloc[i] = placed[(i + 1) % n]; /* toujours différent de placed[i] (valeurs distinctes) */
+    }
+
+    struct possibility_packet pkts[5];
+    for (int i = 0; i < n; i++) {
+        fill_packet_with_stale_alloc(&pkts[i], placed[i], stale_alloc[i]);
+        ASSERT(pkts[i].alloc != possibility_placed_count(&pkts[i])); /* le scénario est bien incohérent */
+    }
+
+    char path[] = "/tmp/etii_back_stalealloc_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    ASSERT(write_synthetic_back(path, pkts, n));
+
+    ASSERT_EQ_FMT(0, restore(path), "%d");
+    ASSERT_EQ_FMT((unsigned long long)n, datas_size(), "%llu"); /* zéro rejet */
+
+    /* get_last_possibility() ne draine pas forcément tout en un seul appel
+     * (répartition round-robin entre les nb_file_possibility files, cf.
+     * drain_datamanager) : on boucle jusqu'à épuisement, comme le fait déjà
+     * ce helper partagé. */
+    int seen[5] = {0};
+    int total_seen = 0;
+    while (datas_size() > 0) {
+        array_possibility_packet *got = get_last_possibility(NULL, n, NULL);
+        for (int i = 0; i < got->size; i++) {
+            int pc = possibility_placed_count(&got->possibilities[i]);
+            ASSERT_EQ_FMT(pc, (int)got->possibilities[i].alloc, "%d"); /* alloc recompté */
+            total_seen++;
+            for (int j = 0; j < n; j++) {
+                if (!seen[j] && pc == placed[j]) { seen[j] = 1; break; }
+            }
+        }
+        free_array_possibility_packet(got);
+    }
+    ASSERT_EQ_FMT(n, total_seen, "%d");
+    for (int j = 0; j < n; j++) {
+        ASSERT(seen[j]); /* chaque paquet d'origine est bien retrouvé, aucun perdu */
+    }
+
+    unlink(path);
+    drain_datamanager();
+    PASS();
+}
+
+/* Idempotence : un paquet dont `alloc` est déjà correct (v13) traverse
+ * import()/restore() sans changement de valeur. */
+TEST restore_is_idempotent_on_already_correct_alloc(void)
+{
+    drain_datamanager();
+
+    struct possibility_packet pk;
+    fill_packet_with_stale_alloc(&pk, 77, 0 /* provisoire */);
+    pk.alloc = (uint16_t)possibility_placed_count(&pk); /* déjà correct, comme un paquet v13 */
+    uint16_t expected = pk.alloc;
+
+    char path[] = "/tmp/etii_back_idempotent_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    ASSERT(write_synthetic_back(path, &pk, 1));
+
+    ASSERT_EQ_FMT(0, restore(path), "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    array_possibility_packet *got = get_last_possibility(NULL, 1, NULL);
+    ASSERT_EQ_FMT(1, got->size, "%d");
+    ASSERT_EQ_FMT((int)expected, (int)got->possibilities[0].alloc, "%d"); /* inchangé */
+    free_array_possibility_packet(got);
+
+    unlink(path);
+    drain_datamanager();
+    PASS();
+}
+
 /* restore sur un fichier inexistant échoue (-1) sans toucher au stock. */
 TEST restore_missing_file_returns_error(void)
 {
@@ -1132,6 +1269,49 @@ TEST analysed_backup_restore_round_trip(void)
     PASS();
 }
 
+/* restore_analysed recompte `alloc` comme restore() : le pool analysé pilote
+ * `max_result` et le hash de déduplication (hash_possibility_key /
+ * compare_possibility comparent `alloc`), donc un paquet restauré avec un
+ * `alloc` "pré-v13" doit être réétiqueté, pas rejeu tel quel — sans quoi il
+ * ne se déduperait plus jamais contre un paquet v13 portant le même plateau.
+ * Vérifié en repassant le paquet restauré par restock_analysed() (simple
+ * relocalisation, ne modifie jamais `alloc`) puis en l'inspectant via
+ * get_last_possibility() du pool principal. */
+TEST restore_analysed_migrates_pre_v13_alloc(void)
+{
+    drain_all();
+
+    struct possibility_packet pk;
+    fill_packet_with_stale_alloc(&pk, 130, 20); /* écart volontaire, cf. §2.1 */
+    ASSERT(pk.alloc != possibility_placed_count(&pk));
+
+    char path[] = "/tmp/etii_back_an_stalealloc_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    ASSERT(write_synthetic_back(path, &pk, 1));
+
+    silence_std();
+    int rc = restore_analysed(path);
+    restore_std();
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu"); /* zéro rejet */
+
+    silence_std();
+    restock_analysed();
+    restore_std();
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    array_possibility_packet *got = get_last_possibility(NULL, 1, NULL);
+    ASSERT_EQ_FMT(1, got->size, "%d");
+    ASSERT_EQ_FMT(possibility_placed_count(&got->possibilities[0]), (int)got->possibilities[0].alloc, "%d");
+    free_array_possibility_packet(got);
+
+    unlink(path);
+    drain_all();
+    PASS();
+}
+
 /* restore_analysed vide totalement chaque file avant de réimporter : un paquet
  * présent avant restore mais absent de la sauvegarde ne doit plus être trouvable
  * ensuite (garde-fou contre une éventuelle entrée d'index restée pendante après
@@ -1139,9 +1319,15 @@ TEST analysed_backup_restore_round_trip(void)
 TEST analysed_restore_clears_untracked_packet(void)
 {
     drain_all();
+    /* alloc cohérent avec le contenu de la grille (9/11 cases pleines,
+     * respectivement) : restore_analysed() recompte désormais `alloc`
+     * inconditionnellement (docs/conception/mrv_moteur_unique.md, PR2 §8),
+     * donc la clé de recherche locale ci-dessous doit déjà porter la valeur
+     * post-migration pour que compare_possibility() la retrouve — un
+     * memset(0) (grid tout à zéro, jamais -2) serait vu comme un plateau
+     * plein après le passage par import_analysed(), pas comme 9/11. */
     struct possibility_packet backed_up;
-    memset(&backed_up, 0, sizeof(backed_up));
-    backed_up.alloc = 9;
+    fill_packet_with_stale_alloc(&backed_up, 9, 9);
     add_possibility_analysed(&backed_up, 1);
 
     char path[] = "/tmp/etii_back_an2_XXXXXX";
@@ -1154,8 +1340,7 @@ TEST analysed_restore_clears_untracked_packet(void)
 
     /* Paquet supplémentaire, jamais sauvegardé, ajouté dans la même file. */
     struct possibility_packet extra;
-    memset(&extra, 0, sizeof(extra));
-    extra.alloc = 11;
+    fill_packet_with_stale_alloc(&extra, 11, 11);
     add_possibility_analysed(&extra, 1);
     ASSERT_EQ_FMT(2ULL, file_analysed_size(1), "%llu");
 
@@ -5254,6 +5439,8 @@ SUITE(datamanager_suite)
     RUN_TEST(put_and_scroll_round_trip_succeeds_when_pool_free);
     RUN_TEST(search_min_datas_finds_minimum);
     RUN_TEST(backup_then_restore_preserves_count);
+    RUN_TEST(restore_migrates_pre_v13_alloc_with_zero_loss);
+    RUN_TEST(restore_is_idempotent_on_already_correct_alloc);
     RUN_TEST(restore_missing_file_returns_error);
     RUN_TEST(backup_and_import_return_error_on_bad_path);
     RUN_TEST(backup_leaves_no_residual_tmp_file);
@@ -5277,6 +5464,7 @@ SUITE(datamanager_suite)
     RUN_TEST(checked_possibility_goes_to_checked_pool);
     RUN_TEST(analysed_add_and_restock);
     RUN_TEST(analysed_backup_restore_round_trip);
+    RUN_TEST(restore_analysed_migrates_pre_v13_alloc);
     RUN_TEST(analysed_restore_clears_untracked_packet);
     RUN_TEST(sort_preserves_count);
     RUN_TEST(statistic_and_print_run);

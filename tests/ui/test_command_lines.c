@@ -75,14 +75,35 @@ static void dm_drain(void)
 }
 
 /* Insère n possibilités non vérifiées d'allocs donnés dans le stock local. */
+/* Grille -2 partout (case vide) sauf les `allocs[i]` premières cases (en
+ * ordre ligne/colonne), posées à une valeur quelconque != -2 : `alloc` posé
+ * ici correspond alors EXACTEMENT à `possibility_placed_count()`, comme un
+ * paquet v13. Nécessaire depuis que `restore()`/`import()` recomptent `alloc`
+ * inconditionnellement à la lecture d'un .back (docs/conception/
+ * mrv_moteur_unique.md, PR2 §8) — une grille calloc'ée (tout à 0, jamais -2)
+ * serait vue comme un plateau plein (ETERN_PARTS) après un aller-retour
+ * backup/restore, ce qui n'est l'intention d'aucun appelant de dm_add. */
 static void dm_add(const int *allocs, int n)
 {
     array_possibility_packet arr;
     arr.size = n;
     arr.possibilities = calloc(n, sizeof(struct possibility_packet));
     for (int i = 0; i < n; i++) {
-        arr.possibilities[i].alloc = (uint16_t)allocs[i];
-        arr.possibilities[i].checked = 0;
+        struct possibility_packet *p = &arr.possibilities[i];
+        for (int x = 0; x < ETERN_SIZE; x++) {
+            for (int y = 0; y < ETERN_SIZE; y++) {
+                p->grid[x][y] = -2;
+            }
+        }
+        int placed = 0;
+        for (int x = 0; x < ETERN_SIZE && placed < allocs[i]; x++) {
+            for (int y = 0; y < ETERN_SIZE && placed < allocs[i]; y++) {
+                p->grid[x][y] = 1;
+                placed++;
+            }
+        }
+        p->alloc = (uint16_t)allocs[i];
+        p->checked = 0;
     }
     add_possibility(NULL, &arr); /* server_ip == NULL -> stock local */
     free(arr.possibilities);

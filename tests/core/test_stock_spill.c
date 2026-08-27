@@ -77,12 +77,34 @@ static void drain_datamanager(void)
     datamanager_reset_rr_state_for_tests();
 }
 
+/* Grille "vide partout sauf une case" (-2 = case vide, cf.
+ * possibility_placed_count) : depuis VERSION 13, stock_spill_reload()
+ * recompte `alloc` au sens nombre de cases pleines dès qu'un paquet
+ * retraverse le disque (docs/conception/mrv_moteur_unique.md, PR2 §8) — une
+ * grille calloc'ée (tout à 0, jamais -2) serait donc vue comme entièrement
+ * pleine (256) après un aller-retour d'éviction/rechargement. `grid[0][0]`
+ * porte le marqueur distinctif ET la seule case pleine : la valeur de
+ * `alloc` posée ici survit tant que le paquet reste résident (jamais
+ * recomptée), mais un paquet qui a fait un aller-retour disque revient
+ * TOUJOURS avec `alloc == 1` (une case pleine) -- c'est `grid[0][0]`, pas
+ * `alloc`, qui reste l'identifiant fiable après un rechargement. */
+static void init_empty_grid(struct possibility_packet *p)
+{
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            p->grid[x][y] = -2;
+        }
+    }
+}
+
 static void add_packets(const int *allocs, int n)
 {
     array_possibility_packet arr;
     arr.size = n;
     arr.possibilities = calloc((size_t)n, sizeof(struct possibility_packet));
     for (int i = 0; i < n; i++) {
+        init_empty_grid(&arr.possibilities[i]);
+        arr.possibilities[i].grid[0][0] = (int16_t)allocs[i];
         arr.possibilities[i].alloc = (uint16_t)allocs[i];
         arr.possibilities[i].checked = 0;
     }
@@ -350,6 +372,7 @@ TEST reload_restores_evicted_data_when_ram_drops_and_preserves_fields(void)
     arr.size = 20;
     arr.possibilities = calloc(20, sizeof(struct possibility_packet));
     for (int i = 0; i < 20; i++) {
+        init_empty_grid(&arr.possibilities[i]);
         arr.possibilities[i].alloc = (uint16_t)(i + 1);
         arr.possibilities[i].checked = 0;
         arr.possibilities[i].grid[0][0] = (int16_t)(1000 + i); /* marqueur distinctif */
@@ -403,12 +426,24 @@ TEST reload_restores_evicted_data_when_ram_drops_and_preserves_fields(void)
      * possibilité et ne l'a jamais rendue : elles ne réapparaissent jamais. */
     ASSERT_EQ_FMT(spilled, file_size(0), "%llu");
 
+    /* VERSION 13 (docs/conception/mrv_moteur_unique.md, PR2 §8) : un paquet
+     * qui a fait un aller-retour par un segment de débordement traverse
+     * stock_spill_reload(), qui recompte `alloc` au sens nombre de cases
+     * pleines -- ici toujours 1, la seule case posée par construction. La
+     * formule `1000 + (alloc - 1)` d'avant cette bascule ne tient donc plus
+     * (alloc ne code plus l'ordre d'ajout) : c'est `grid[0][0]`, jamais
+     * recompté, qui reste l'identifiant fiable pour vérifier que chaque
+     * possibilité déportée est revenue sans perte ni duplication. */
     array_possibility_packet *reloaded = get_last_possibility(NULL, (int)spilled, NULL);
     ASSERT_EQ_FMT((int)spilled, reloaded->size, "%d");
+    int seen[20] = {0};
     for (int i = 0; i < reloaded->size; i++) {
-        int a = reloaded->possibilities[i].alloc;
-        ASSERT(a >= 1 && a <= 20);
-        ASSERT_EQ_FMT(1000 + (a - 1), (int)reloaded->possibilities[i].grid[0][0], "%d");
+        ASSERT_EQ_FMT(1, (int)reloaded->possibilities[i].alloc, "%d"); /* recompté : une seule case pleine */
+        int marker = reloaded->possibilities[i].grid[0][0];
+        ASSERT(marker >= 1000 && marker < 1020);
+        int idx = marker - 1000;
+        ASSERT(!seen[idx]); /* jamais deux fois le même marqueur */
+        seen[idx] = 1;
     }
     free_array_possibility_packet(reloaded);
 
@@ -509,6 +544,7 @@ static void write_raw_segment(const char *path, int first_marker, int n)
 {
     struct possibility_packet *buf = calloc((size_t)n, sizeof(struct possibility_packet));
     for (int i = 0; i < n; i++) {
+        init_empty_grid(&buf[i]);
         buf[i].alloc = (uint16_t)(first_marker + i);
         buf[i].grid[0][0] = (int16_t)(first_marker + i);
     }
@@ -530,17 +566,25 @@ static void write_manifest_line(FILE *f, char pool, int file_index, int last_seq
 }
 
 /* Récupère tous les paquets résidents (jusqu'à `max`) et renvoie le nombre
- * lu, en remplissant `markers_out[i]` avec chaque `.alloc` rencontré — le
- * marqueur distinctif que `add_packets`/`write_raw_segment` posent tous les
- * deux (contrairement à `grid[0][0]`, que `add_packets` ne renseigne pas) —
+ * lu, en remplissant `markers_out[i]` avec chaque marqueur `grid[0][0]`
+ * rencontré — que `add_packets`/`write_raw_segment` posent tous les deux —
  * pour vérifier qu'un ensemble EXACT de possibilités (ni perte, ni
- * duplication, ni contamination croisée) est revenu en RAM. */
+ * duplication, ni contamination croisée) est revenu en RAM.
+ *
+ * VERSION 13 (docs/conception/mrv_moteur_unique.md, PR2 §8) :
+ * délibérément PAS `.alloc` ici — un paquet qui a fait un aller-retour par
+ * un segment de débordement traverse `stock_spill_reload()`, qui recompte
+ * `alloc` au sens nombre de cases pleines (idempotent, mais `add_packets`/
+ * `write_raw_segment` ne posent qu'UNE case pleine par construction : tout
+ * paquet rechargé revient donc avec `alloc == 1`, quel que soit son
+ * marqueur d'origine). `grid[0][0]`, lui, n'est jamais touché par ce
+ * recomptage et reste l'identifiant fiable après rechargement. */
 static int drain_and_collect_markers(int *markers_out, int max)
 {
     array_possibility_packet *r = get_last_possibility(NULL, max, NULL);
     int n = r->size;
     for (int i = 0; i < n && i < max; i++) {
-        markers_out[i] = r->possibilities[i].alloc;
+        markers_out[i] = r->possibilities[i].grid[0][0];
     }
     free_array_possibility_packet(r);
     return n;

@@ -199,6 +199,17 @@ compté comme restauré.
 > `--stock-spill-dir`) — un `.back` copié sur une autre machine ne restaure que la partie
 > résidente, jamais le débordement, qui n'existe que sur le disque d'origine.
 
+**Migration transparente d'`alloc` à la restauration (VERSION 13).** Depuis la bascule MRV
+(moteur unique, [docs/conception/mrv_moteur_unique.md](conception/mrv_moteur_unique.md)),
+`alloc` désigne le nombre de pièces posées, plus une position de curseur dans le parcours de
+recherche. `restore`/`import` (fichiers `.back`, pool stock et pool analysé) et le rechargement
+d'un segment de débordement disque recomptent systématiquement et inconditionnellement `alloc`
+à la lecture — aucune détection de version de fichier, aucun marqueur de format : le recomptage
+est idempotent sur un paquet déjà correct (écrit par du code v13), donc l'appliquer à tous les
+paquets, anciens ou récents, donne le même résultat qu'une distinction explicite, sans logique de
+version à maintenir. Aucun paquet n'est jamais rejeté, seulement réétiqueté si besoin — un `.back`
+de production écrit avant cette bascule se restaure intégralement, sans perte.
+
 Un pic d'expansion très rapide au démarrage (`--expand-level`) peut dépasser le plafond RAM
 plus vite que le tick de 100 ms ne peut réagir. Aucune possibilité n'est perdue pour autant :
 `expand_datas_to_level` **attend** que le débordement (ou un GET client) libère de la place
