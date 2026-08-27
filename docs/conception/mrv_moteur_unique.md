@@ -1,10 +1,12 @@
 # MRV comme moteur unique : le curseur de parcours cesse d'être le référentiel d'état
 
-**Statut : implémenté (3/3 PR exécutées).** PR1 (`alloc` = comptage, `VERSION` → 13, moteur à
-ordre fixe conservé et adapté) et PR2 (migration du stock persistant) livrées ; PR3
-(bascule — MRV devient le moteur unique, suppression de `mrv_enabled`/`pruner_dfs_mrv` et du
-moteur à ordre fixe) livrée également : voir §8 pour le détail par PR. Ce document ne
-rediscute pas
+**Statut : implémenté (4/5 PR exécutées, PR5 différée).** PR1 (`alloc` = comptage, `VERSION` → 13,
+moteur à ordre fixe conservé et adapté), PR2 (migration du stock persistant) et PR3 (bascule —
+MRV devient le moteur unique, suppression de `mrv_enabled`/`pruner_dfs_mrv` et du moteur à ordre
+fixe) livrées ; PR4 (tableau de bord — `stockDistribution`, `sortDesc`, `expand`, API HTTP relus
+en « pièces posées », documentation) livrée également : voir §8 pour le détail par PR. La PR5
+(seconde coordonnée `min_candidats`, §4) reste explicitement différée, optionnelle, non
+bloquante. Ce document ne rediscute pas
 *si* MRV est meilleur — c'est tranché ailleurs, par mesure : [§4.7](elagage_recherche.md#47-ordre-de-variable-dynamique-mrv--implémenté-et-mesuré-favorable-pr-10-pas-encore-le-défaut-de-déploiement)
 pour la recherche (coût de réfutation sur stock réel) et [§4.10](elagage_recherche.md#410-moteur-de-la-preuve-bornée-du-pruner--mrv-plutôt-quordre-fixe--implémenté-opt-in)
 pour la preuve bornée du pruner (×3–×4 de fermetures à budget égal). Il traite la
@@ -335,8 +337,8 @@ restauration (`restore` recompte si le fichier est marqué v12).
 | 1 | **Sémantique** : `alloc` = comptage. Conversion des 5 sites de `directions[]`, suppression de `normalize_possibility_packet`/`bt_canonicalize_packet`, `VERSION` → 13. Le moteur à ordre fixe est **conservé** et adapté, les drapeaux restent. | `make test` + `make test-integration` verts ; `check_possibility` couvre 100 % des cases posées (test dédié sur un plateau troué) | **FAIT** |
 | 2 | **Migration du stock** : recomptage du `.back` (forme tranchée en §7), segments spillés inclus. | restauration du `.back` de production 126 287 → 126 287, zéro rejet | **FAIT** |
 | 3 | **Bascule** : MRV par défaut pour la recherche **et** pour la preuve du pruner ; suppression de `mrv_enabled`, `pruner_dfs_mrv` et du moteur à ordre fixe. | `make bench-refutation` : pas de régression du coût de fermeture vs. `ETII_MRV=1 ETII_PRUNER_DFS_MRV=1` sur `master` | **FAIT** — `search_packet_backtracking_core` et les deux drapeaux supprimés (`src/core/etii_search.c`, `src/app/static_variables.{h,c}`, `src/app/main.c`) ; `make test`/`make test-integration` verts ; `make bench-refutation` recompile et tourne sur le code post-bascule (smoke test, pas la mesure complète du tableau §4.10 faute de stock de production dans ce dépôt) |
-| 4 | **Tableau de bord** : `stockDistribution`, `sortDesc`, `expand`, API HTTP relus en « pièces posées » ; documentation. | histogramme du stock de production cohérent avec un recomptage indépendant | non fait |
-| 5 | *(optionnel, après coup)* seconde coordonnée `min_candidats` (§4). | histogramme 2D, `sortDesc` par difficulté | non fait |
+| 4 | **Tableau de bord** : `stockDistribution`, `sortDesc`, `expand`, API HTTP relus en « pièces posées » ; documentation. | histogramme du stock de production cohérent avec un recomptage indépendant | **FAIT** — relecture indépendante (2ᵉ passe après PR1) de `datamanager_stock_distribution`/`accumulate_alloc_levels`, `expand_datas_to_level`, `sortAsc`/`sortDesc`, `max_result`, champ `alloc` de l'API HTTP : tous déjà corrects (aucune hypothèse résiduelle `directions[alloc]` trouvée, aucun changement de code nécessaire) ; documentation mise à jour (`docs/api_http_rest.md` §« Le champ `alloc` », `docs/console.md`, `docs/echanges_client_serveur.md`, `docs/utilisation.md`, `docs/autosearch_step.md`, `docs/tests_et_ci.md`) ; test dédié `stock_distribution_matches_independent_grid_recount` (`tests/core/test_datamanager.c`) vérifiant l'histogramme contre un recomptage par `possibility_placed_count` sur `grid`, indépendant du champ `alloc` produit |
+| 5 | *(optionnel, après coup)* seconde coordonnée `min_candidats` (§4). | histogramme 2D, `sortDesc` par difficulté | non fait — différée |
 
 L'ordre est contraint : PR 1 avant PR 3, sinon la bascule se fait sur une sémantique
 d'`alloc` encore ambiguë. PR 2 doit précéder tout redémarrage sur le stock de production.

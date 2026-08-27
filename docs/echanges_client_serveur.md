@@ -763,10 +763,10 @@ dans un bloc déjà exécuté à cette cadence).
 faim ci-dessus traite la famine du démarrage *côté client* ; le serveur peut aussi la
 prévenir *à la source*. Avec l'option `--expand-level N`, juste après avoir semé le
 paquet genèse et avant toute connexion, le serveur **développe lui-même son stock**
-(`expand_datas_to_level`, `src/core/datamanager.c`) : il place une pièce candidate sur
-la case suivante de chaque possibilité jusqu'à ce que leur curseur `alloc` atteigne le
-niveau `N`, transformant le paquet genèse en des milliers de possibilités
-distribuables. Chaque client trouve alors du travail dès sa connexion. C'est un calcul
+(`expand_datas_to_level`, `src/core/datamanager.c`) : il pose, sur la case la plus
+contrainte choisie par MRV, une pièce candidate de chaque possibilité jusqu'à ce que
+son nombre de pièces posées (`alloc`) atteigne la cible `N`, transformant le paquet
+genèse en des milliers de possibilités distribuables. Chaque client trouve alors du travail dès sa connexion. C'est un calcul
 purement serveur (aucun échange, aucun impact client), borné en profondeur
 (`expand_max_levels`, défaut `EXPAND_MAX_LEVELS` 4 passes, réglable via l'option CLI
 `--expand-max-levels N`) et en nombre (`expand_max_stock`, plafond entre passes — le

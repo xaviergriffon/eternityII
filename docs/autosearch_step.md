@@ -377,7 +377,7 @@ free_array_possibility_packet(aposs)              // libération immédiate
 | Retirer une pièce | `board.grid[cx][cy] = -2` |
 | Libérer la pièce | `set_face_used(board.b_faceused, id-1, 0)` → bit à 0 |
 | Annuler la propagation | `constraints[voisin].k? = all_face` |
-| Mise à jour curseur | `board.alloc = d+1`, `board.x = dirx[d+1]`, `board.y = diry[d+1]` |
+| Mise à jour du compteur | `board.alloc = (uint16_t)possibility_placed_count(&board)` — nombre de cases posées, recompté après chaque pose (`x`/`y` ne sont plus tenus à jour, voir §3.2/PR1 de [docs/conception/mrv_moteur_unique.md](conception/mrv_moteur_unique.md)) |
 
 ### 3.4 Bitmask `b_faceused`
 
