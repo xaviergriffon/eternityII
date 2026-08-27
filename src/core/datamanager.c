@@ -2492,8 +2492,16 @@ int import(client_possibility_t *client_possibility, char *filename)
         return -1;
     }
     
+    // NOTE VERSION 13 (docs/conception/mrv_moteur_unique.md) : un fichier .back
+    // écrit avant ce bump peut porter `alloc` au sens curseur (position dans
+    // directions[]), pas au sens nombre de pièces posées. La migration du
+    // stock persistant est volontairement HORS SCOPE ici (PR2, §8 du document)
+    // — recompter `alloc` à l'import reviendrait à commencer cette migration
+    // par un chemin non dédié, non testé pour ce cas, et sans le
+    // `.spillcount`/les garanties de PR2. `import` reste donc un simple
+    // rejeu bit-à-bit : la cohérence du champ `alloc` d'un stock pré-v13
+    // relève exclusivement de l'utilitaire de migration à venir.
     struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
-    int repaired = 0;
     while(fread(possibility, sizeof(struct possibility_packet),1,f))
     {
         // Anciens fichiers .back (v4) : l'octet `checked` correspond à du padding
@@ -2502,9 +2510,6 @@ int import(client_possibility_t *client_possibility, char *filename)
         if (possibility->checked != 1) {
             possibility->checked = 0;
         }
-        // Paquets d'anciens fichiers .back : un trou peut subsister derrière la
-        // position de reprise (case (0,0) jamais traitée par l'ancien moteur)
-        repaired += normalize_possibility_packet(possibility);
         array_possibility_packet *possibilities = malloc(sizeof(array_possibility_packet));
         possibilities->size = 1;
         possibilities->possibilities = malloc(sizeof(struct possibility_packet));
@@ -2512,9 +2517,6 @@ int import(client_possibility_t *client_possibility, char *filename)
         add_possibility(client_possibility, possibilities);
 
         free_array_possibility_packet(possibilities);
-    }
-    if (repaired > 0) {
-        log_info("import : %i paquets ancien format normalisés (invariant alloc/directions)\n", repaired);
     }
 
     free(possibility);
@@ -3132,11 +3134,12 @@ int expand_datas_to_level(int target_level, map_big_array *mapParts, struct arra
                 continue;
             }
             expanded_any = 1;
-            key_part key;
-            what_search_to_key(all_rotate_part, &pkt, &key, mapParts->sizearrayM);
             File children;
             init_file(&children, sizeof(struct possibility_packet));
-            search_possiblity_light(&children, &key, &pkt, mapParts, all_rotate_part, idParts);
+            // search_possiblity_light choisit elle-même la case la plus
+            // contrainte (MRV) et calcule sa clé : plus de clé pré-calculée
+            // ici sur la case du curseur, cf. sa doc (possibility.h).
+            search_possiblity_light(&children, &pkt, mapParts, all_rotate_part, idParts);
             // `children` est sur la PILE : la vidange par scroll libère chaque
             // Element ; pas de free_file (qui ferait free() de la structure pile).
             struct possibility_packet child;

@@ -835,14 +835,13 @@ int check_duplicate(void);
 /**
  * @brief Nombre de niveaux d'un histogramme de répartition par `alloc`.
  *
- * `+1` : `alloc` peut valoir `ETERN_PARTS` (plateau complet, ex. import d'un
- * `.back` complet où `normalize_possibility_packet` ne réduit pas `alloc` faute
- * de trou), donc les niveaux valides vont de 0 à ETERN_PARTS inclus.
+ * `+1` : `alloc` peut valoir `ETERN_PARTS` (plateau complet), donc les
+ * niveaux valides vont de 0 à ETERN_PARTS inclus.
  */
 #define STOCK_DISTRIBUTION_LEVELS (ETERN_PARTS + 1)
 
 /**
- * @brief Répartition du stock par niveau de curseur de parcours (`alloc`).
+ * @brief Répartition du stock par niveau de nombre de pièces posées (`alloc`).
  *
  * Trois histogrammes indépendants, un par pool (non vérifié / vérifié / en
  * cours d'analyse), indexés par `alloc` (0 à `ETERN_PARTS` inclus). C'est la
@@ -935,12 +934,13 @@ int search_min_datas(void);
 int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part *all_rotate_part);
 
 /**
- * @brief Développe le stock du serveur jusqu'à un niveau de curseur cible.
+ * @brief Développe le stock du serveur jusqu'à un nombre de pièces posées cible.
  *
  * Transforme un stock maigre (typiquement le paquet genèse et ses premiers
  * enfants) en de nombreuses possibilités distribuables, en développant chaque
- * possibilité case par case (une pièce candidate par successeur, via
- * `search_possiblity_light`) jusqu'à ce que son curseur `alloc` atteigne
+ * possibilité case par case (une pièce candidate par successeur, sur la case
+ * la plus contrainte choisie par `search_possiblity_light`) jusqu'à ce que
+ * `alloc` (nombre de pièces posées, cf. `possibility_placed_count`) atteigne
  * `target_level`. But : supprimer la famine du démarrage, où un seul client
  * retient tout l'arbre pendant que le serveur n'a rien à servir aux autres.
  * Calcul purement serveur (avant toute connexion) : impact client nul.
