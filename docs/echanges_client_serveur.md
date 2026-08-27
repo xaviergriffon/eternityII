@@ -76,6 +76,13 @@ silencieusement le board plutôt que de planter, d'où le refus explicite au han
 La v12 bump `VERSION` pour `INST_CLIENT_HELLO` ci-dessus : un serveur v11 la
 traiterait comme une instruction inconnue et fermerait la connexion, d'où le refus
 explicite au handshake plutôt qu'un désync silencieux.
+La v13 change le SENS de `possibility_packet.alloc`, sans toucher son type ni sa
+position sur le fil (voir [docs/conception/mrv_moteur_unique.md](conception/mrv_moteur_unique.md)) :
+avant v13, `alloc` était un curseur de position dans `directions[]`/`dirx[]`/`diry[]`
+(« prochaine case à traiter ») ; depuis v13, c'est le nombre de cases non vides de la
+grille (`possibility_placed_count`). Un client v12 et un serveur v13 (ou l'inverse) se
+comprendraient sur le fil tout en désynchronisant silencieusement l'état du plateau —
+même raisonnement que pour la v11, d'où le refus explicite au handshake.
 
 ### Handshake de version
 
