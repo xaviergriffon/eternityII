@@ -16,9 +16,18 @@
  
  struct possibility_packet
  {
+ /// Depuis VERSION 13 (bascule MRV, moteur unique) : sans objet. `directions[]`
+ /// n'est plus un ordre d'exploration, donc « la prochaine case à traiter » ne
+ /// désigne plus rien de fiable — conservés inutilisés (paquet inchangé, zéro
+ /// risque, cf. docs/conception/mrv_moteur_unique.md §7).
  uint8_t x;
  uint8_t y;
  int16_t grid[ETERN_SIZE][ETERN_SIZE];
+ /// Nombre de cases non vides de la grille (`grid[x][y] != -2`), voir
+ /// `possibility_placed_count`. AVANT VERSION 13 : curseur de position dans
+ /// `directions[]`/`dirx[]`/`diry[]` (« prochaine case à traiter »). Les deux
+ /// sémantiques partagent le même type/la même position sur le fil, d'où le
+ /// bump de VERSION — cf. docs/conception/mrv_moteur_unique.md §5.
  uint16_t alloc;
  uint16_t b_faceused[FACES_USED_SIZE] __attribute__ ((aligned (16)));
  /// 1 si un client pruner a vérifié que toutes les cases vides ont encore au
@@ -158,9 +167,12 @@ int possibility_has_a_next(struct possibility_packet *possibility, map_big_array
 /**
  * @brief Vérifie que toutes les cases encore libres ont au moins une pièce posable.
  *
- * Parcourt les cases de `possibility->alloc` jusqu'à ETERN_PARTS. Si une case
- * n'admet aucune pièce, retourne 0 (impasse). Optimisation : si une case n'admet
- * qu'une seule pièce, la place immédiatement dans le paquet.
+ * Parcourt les cases VIDES de `directions[]` (celles déjà remplies sont
+ * sautées, où qu'elles soient dans le parcours — `alloc` n'indexe plus une
+ * position de curseur, cf. `possibility_placed_count`). Si une case n'admet
+ * aucune pièce, retourne 0 (impasse). Optimisation : si une case n'admet
+ * qu'une seule pièce, la place immédiatement dans le paquet (et `alloc` est
+ * recompté, jamais incrémenté à la main).
  *
  * @param possibility     Paquet à analyser (peut être modifié).
  * @param mapParts        Tableau 4D de lookup.
@@ -186,11 +198,16 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 int possibility_all_has_a_next_counted(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part, unsigned int *out_cells_studied);
 
 /**
- * @brief Forward-checking sur les `FORWARD_CHECK_K` prochaines cases.
+ * @brief Forward-checking sur les `FORWARD_CHECK_K` prochaines cases VIDES du parcours.
  *
- * Après avoir sélectionné une pièce candidate, vérifie que les prochaines
- * cases de parcours ont encore au moins un candidat disponible. Si l'une est
- * morte, la branche est abandonnée.
+ * Après avoir sélectionné une pièce candidate, parcourt `directions[]` dans
+ * l'ordre (simple énumération, cf. `possibility_placed_count`), saute les
+ * cases déjà remplies, et vérifie que les `FORWARD_CHECK_K` premières cases
+ * VIDES rencontrées ont encore au moins un candidat disponible. Si l'une est
+ * morte, la branche est abandonnée. Variante volontairement simple (« les K
+ * premières cases vides du parcours », pas « les K cases les plus
+ * contraintes ») : cette dernière suppose un score déjà calculé côté
+ * appelant, absent de ce chemin froid — cf. docs/conception/mrv_moteur_unique.md §7.
  *
  * Version sans cache (recalcule chaque clé), réservée aux chemins froids ;
  * le hot path du backtracking utilise `bt_forward_check` (etii_search.c),
@@ -230,18 +247,24 @@ int put_possibility(File *suite, struct possibility_packet *value);
 /**
  * @brief Développe un paquet en générant tous les successeurs valides (version optimisée, sortie `File`).
  *
- * Variante de `search_possiblity` utilisant une clé pré-calculée et une table
- * d'indices de rotation pour éviter des recalculs dans la boucle chaude.
+ * Choisit, parmi les cases encore vides, celle qui admet le moins de
+ * candidats libres (variante autonome de MRV — `light_choose_cell`, chemin
+ * froid sans le cache de contraintes du moteur, cf. sa doc dans possibility.c),
+ * puis développe tous les candidats compatibles avec CETTE case. Ne dépend
+ * plus d'une clé pré-calculée par l'appelant (le paquet ne porte plus de
+ * curseur de parcours faisant autorité, cf. `possibility_placed_count`) :
+ * la case et sa clé sont déterminées ici. `alloc` de chaque enfant est fixé
+ * par recomptage, jamais par incrément du curseur.
  *
  * @param result          File de destination des nouveaux paquets.
- * @param key             Clé de recherche pour la case courante (pré-calculée).
  * @param possiblity      Paquet source à développer.
  * @param mapParts        Tableau 4D de lookup.
  * @param all_rotate_part Tableau de toutes les rotations.
  * @param idParts         Table de pré-calcul des indices de rotation [id][rotation].
- * @return                Nombre de pièces dans le meilleur paquet produit, ou 0 si aucune.
+ * @return                Nombre de pièces dans le meilleur paquet produit, ou 0 si aucune
+ *                        (plateau déjà complet, ou aucune case vide n'a de candidat).
  */
-int search_possiblity_light(File *result, key_part *key, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4]);
+int search_possiblity_light(File *result, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4]);
 
 /**
  * @brief Affiche un `possibility_packet` au format JSON dans les logs.
@@ -319,6 +342,22 @@ int save_solution_csv(const char *filename, const struct possibility_packet *pos
 void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_part);
 
 /**
+ * @brief Nombre de cases non vides de la grille (`grid[x][y] != -2`).
+ *
+ * Définition canonique de `alloc` depuis la bascule MRV (moteur unique) :
+ * `directions[]`/`dirx[]`/`diry[]` ne sont plus qu'un ordre d'énumération, pas
+ * un référentiel d'état, donc `alloc` ne peut plus être lu comme un curseur de
+ * parcours. Point de vérité unique, appelé par tout site qui doit connaître —
+ * ou remettre à jour — le nombre réel de pièces posées d'un paquet
+ * (`search_packet_backtracking_mrv`, `bt_materialize_pending`/`bt_flush_pending`
+ * en ordre dynamique, `search_possiblity_light`).
+ *
+ * @param packet Paquet à compter.
+ * @return       Nombre de cases dont `grid[x][y] != -2`.
+ */
+int possibility_placed_count(const struct possibility_packet *packet);
+
+/**
  * @brief Valide la cohérence d'un `possibility_packet`.
  *
  * Codes de retour :
@@ -327,23 +366,22 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
  *  - -2 : x ou y ≥ ETERN_SIZE
  *  - -3 : direction hors bornes
  *  - -4 : alloc > ETERN_PARTS (alloc = 0 est l'état genèse, valide)
- *  - -5 : alloc incohérent avec le masque faceused
+ *  - -5 : alloc incohérent avec le masque faceused (`faceused < alloc` — un
+ *    moteur à ordre FIXE peut légitimement avoir `faceused > alloc` : des
+ *    indices officiels sont posés au-delà du curseur de parcours historique,
+ *    cf. docs/conception/mrv_moteur_unique.md §2.1 ; ce n'est PAS un bug, donc
+ *    pas une inégalité stricte)
+ *
+ * Contrôle de cohérence de couleur : porte sur TOUTES les cases non vides de
+ * la grille (`grid[x][y] != -2`), pas seulement les `alloc` premières du
+ * parcours `directions[]` — `alloc` n'indexe plus une position de curseur
+ * (cf. `possibility_placed_count`).
  *
  * @param packet      Paquet à vérifier.
  * @param rotateParts Tableau de toutes les rotations (peut être NULL pour un contrôle partiel).
  * @return            0 si valide, code d'erreur négatif sinon.
  */
 int check_possibility(struct possibility_packet *packet, struct array_part *rotateParts);
-
-/**
- * @brief Corrige un paquet dont le curseur `(x, y)` / `alloc` est désynchronisé.
- *
- * Recule `alloc` sur la première case vide du parcours et y repositionne `(x, y)`.
- *
- * @param packet Paquet à normaliser (modifié en place).
- * @return       0 si le paquet était déjà conforme, 1 s'il a été corrigé.
- */
-int normalize_possibility_packet(struct possibility_packet *packet);
 
 /**
  * @brief Vérifie que le tableau `directions` couvre bien toutes les cases de la grille.
@@ -372,10 +410,13 @@ int decode_direction(void);
 int compare_possibility(struct possibility_packet *packet, struct possibility_packet *other_packet);
 
 /**
- * @brief Indique si `packet` est un préfixe (ancêtre) de `other_packet`.
+ * @brief Indique si `packet` est un ancêtre (inclusion de plateaux) de `other_packet`.
  *
- * Vérifie que toutes les pièces placées dans `packet` (jusqu'à `alloc`)
- * sont identiques à celles d'`other_packet` aux mêmes positions.
+ * Vérifie que toutes les cases NON VIDES de `packet` sont identiques à
+ * celles d'`other_packet` aux mêmes positions — inclusion de plateaux, pas
+ * un préfixe de parcours (`alloc` n'indexe plus une position de curseur,
+ * cf. `possibility_placed_count`) : peu importe l'ORDRE dans lequel les
+ * pièces ont été posées, seul l'ENSEMBLE des cases posées compte.
  *
  * @param packet       Paquet supposément ancêtre (alloc inférieur).
  * @param other_packet Paquet supposément descendant.

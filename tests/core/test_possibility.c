@@ -215,12 +215,24 @@ TEST check_possibility_missing_genesis_anchor_is_minus_six(void)
     PASS();
 }
 
-/* Paquet genèse minimal valide : ancrage 139 r2 posé, alloc=0 (aucune case du
-   parcours encore décidée) -> la boucle de cohérence ne s'exécute pas -> 0. */
+/* Paquet genèse minimal valide : ancrage 139 r2 posé, seule case non vide de
+ * la grille -> le contrôle de cohérence porte sur cette unique case (toutes
+ * ses voisines sont vides -> bypass des 4 côtés) -> 0. rp doit couvrir
+ * l'indice id_for_rotated_part(139,2) (651 en 256) : make_dummy_rotate_parts
+ * (size=4) ne suffit plus depuis que check_possibility scanne TOUTES les
+ * cases non vides (site 4 de PR1), plus seulement les alloc premières du
+ * parcours -- (7,8) n'est pas dans les 0 premières cases (alloc=0) mais EST
+ * non vide. */
 TEST check_possibility_valid_genesis_is_zero(void)
 {
-    struct array_part *rp = make_dummy_rotate_parts();
+    struct array_part *rp = malloc(sizeof(struct array_part));
+    rp->size = id_for_rotated_part(139, 2) + 1;
+    rp->parts = calloc((size_t)rp->size, sizeof(struct part));
+
     struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
     p->grid[7][8] = id_for_rotated_part(139, 2);
     ASSERT_EQ_FMT(0, check_possibility(p, rp), "%d");
     free(p);
@@ -247,8 +259,13 @@ TEST check_possibility_valid_genesis_is_zero(void)
 TEST check_possibility_top_left_empty_neighbors_is_zero(void)
 {
     /* parts[1..23] correspondent aux 23 premières cases du parcours (indices
-       0..22 de dirx[]/diry[]), dans l'ordre. parts[0] est un bouchon inutilisé. */
-    struct part parts[24];
+       0..22 de dirx[]/diry[]), dans l'ordre. parts[0] est un bouchon inutilisé.
+       Dimensionné jusqu'à id_for_rotated_part(139,2) inclus (651) : depuis que
+       check_possibility scanne TOUTES les cases non vides (site 4 de PR1),
+       l'ancrage genèse posé en (7,8) est lui aussi validé (ses voisines sont
+       toutes vides ici -> bypass des 4 côtés, seul l'indice doit être dans
+       les bornes de rp). */
+    static struct part parts[652];
     memset(parts, 0, sizeof(parts));
     for (int i = 0; i <= 23; i++) parts[i].id = i;
 
@@ -290,7 +307,7 @@ TEST check_possibility_top_left_empty_neighbors_is_zero(void)
     parts[22].top = (int8_t)V15b; parts[22].right = 0; parts[22].left = (int8_t)W2;    /* (15,2) */
     parts[23].left = (int8_t)W1; parts[23].right = (int8_t)W2;                         /* (14,2) : TOP (14,1) non posé -> -1 */
 
-    struct array_part rp = { .size = 24, .parts = parts };
+    struct array_part rp = { .size = 652, .parts = parts };
 
     struct possibility_packet *p = new_zeroed_packet();
     for (int x = 0; x < ETERN_SIZE; x++)
@@ -350,9 +367,12 @@ TEST check_possibility_invalid_grid_value_is_minus_seven(void)
     struct part parts[] = { { .id = 0 }, { .id = 1 } };
     struct array_part rp = { .size = 2, .parts = parts };
     struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
     p->alloc = 1;
     set_face_used(p->b_faceused, 0, 1); /* faceused (1) >= alloc (1) */
-    p->grid[0][0] = -1;                 /* (dirx[0],diry[0]) = case invalide */
+    p->grid[0][0] = -1;                 /* (dirx[0],diry[0]) = case invalide, != -2 -> scannée */
     ASSERT_EQ_FMT(-7, check_possibility(p, &rp), "%d");
     free(p);
     PASS();
@@ -366,6 +386,9 @@ TEST check_possibility_grid_value_too_large_is_minus_seven(void)
     struct part parts[] = { { .id = 0 }, { .id = 1 } }; /* rp.size = 2 */
     struct array_part rp = { .size = 2, .parts = parts };
     struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
     p->alloc = 1;
     set_face_used(p->b_faceused, 0, 1);
     p->grid[0][0] = 2; /* >= rp.size (2) : hors bornes */
@@ -529,6 +552,47 @@ TEST check_possibility_left_mismatch_is_minus_nine(void)
     free(p);
     PASS();
 }
+
+/* --------------------------------------------------------------------------
+ * check_possibility : couverture à 100% d'un plateau TROUÉ (§8 du document
+ * de conception, docs/conception/mrv_moteur_unique.md — critère de succès
+ * explicite de PR1). Avant la conversion, la boucle de cohérence ne
+ * balayait que les `alloc` premières cases du parcours directions[] ; ici
+ * `alloc` est délibérément bas (1) alors que la grille porte 3 cases posées,
+ * DEUX D'ENTRE ELLES adjacentes et border-INCOHÉRENTES, toutes deux "au-delà"
+ * de alloc — exactement le scénario mesuré en §2.1 (indices/pièces posés
+ * hors de portée du curseur). L'ancienne implémentation (p < alloc) ne les
+ * aurait jamais visitées et aurait rendu 0 (paquet jugé valide à tort) ;
+ * check_possibility doit désormais couvrir TOUTES les cases non vides, quel
+ * que soit alloc, et détecter l'incohérence -> -9.
+ * ------------------------------------------------------------------------ */
+TEST check_possibility_covers_all_placed_cells_on_a_holed_board(void)
+{
+    struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 0, .bottom = 0, .left = 0 },   /* (0,0), isolée */
+        { .id = 2, .top = 0, .right = 9, .bottom = 0, .left = 0 },   /* (2,2) */
+        { .id = 3, .top = 0, .right = 0, .bottom = 0, .left = 8 },   /* (3,2) : left=8 != right(2,2)=9 */
+    };
+    struct array_part rp = { .size = 4, .parts = parts };
+
+    struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
+
+    /* alloc prétend qu'une seule pièce est posée -- la grille en porte 3. */
+    p->alloc = 1;
+    p->grid[0][0] = 1;
+    p->grid[2][2] = 2;
+    p->grid[3][2] = 3;
+    for (int id = 1; id <= 3; id++) set_face_used(p->b_faceused, id - 1, 1);
+
+    ASSERT_EQ_FMT(-9, check_possibility(p, &rp), "%d");
+
+    free(p);
+    PASS();
+}
 #endif /* ETERN_PARTS != 256 */
 
 /* --------------------------------------------------------------------------
@@ -579,10 +643,19 @@ TEST is_origin_of_recognizes_prefix(void)
 {
     struct possibility_packet *anc = new_zeroed_packet();
     struct possibility_packet *desc = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            anc->grid[x][y] = -2;
+            desc->grid[x][y] = -2;
+        }
 
-    /* desc place une pièce sur la 1re case du parcours, anc non. */
-    desc->grid[dirx[0]][diry[0]] = 77;
+    /* desc et anc ont tous deux une pièce posée à la même case (l'inclusion
+     * porte sur l'ENSEMBLE des cases non vides, pas un préfixe de parcours) ;
+     * desc a en plus une seconde case posée AILLEURS, hors de tout ordre de
+     * parcours -- anc reste bien un sous-ensemble de desc. */
     anc->grid[dirx[0]][diry[0]] = 77;
+    desc->grid[dirx[0]][diry[0]] = 77;
+    desc->grid[dirx[ETERN_PARTS - 1]][diry[ETERN_PARTS - 1]] = 88;
     anc->alloc = 1;
     desc->alloc = 2; /* desc descend plus loin */
 
@@ -593,7 +666,7 @@ TEST is_origin_of_recognizes_prefix(void)
     ASSERT_EQ_FMT(-1, is_origin_of(anc, desc), "%d");
     anc->alloc = 1;
 
-    /* divergence sur une case allouée -> -2 */
+    /* divergence sur une case posée de anc -> -2 */
     desc->grid[dirx[0]][diry[0]] = 99;
     ASSERT_EQ_FMT(-2, is_origin_of(anc, desc), "%d");
 
@@ -661,60 +734,51 @@ TEST generate_possibility_packet_encodes_grid(void)
 }
 
 /* --------------------------------------------------------------------------
- * normalize_possibility_packet : réparation de l'invariant de parcours
+ * possibility_placed_count : définition canonique de alloc (VERSION 13)
  * ------------------------------------------------------------------------ */
 
-/* alloc en avance sur la première case vide -> reculé et (x,y) repositionné. */
-TEST normalize_repairs_alloc_ahead_of_hole(void)
+/* Grille entièrement vide -> 0. */
+TEST placed_count_empty_grid_is_zero(void)
 {
     struct possibility_packet *p = new_zeroed_packet();
-    /* grille entièrement vide (-2 partout) -> firstHole = 0 */
     for (int x = 0; x < ETERN_SIZE; x++)
         for (int y = 0; y < ETERN_SIZE; y++)
             p->grid[x][y] = -2;
 
-    p->alloc = 5;
-    p->x = 9;
-    p->y = 9;
-
-    ASSERT_EQ_FMT(1, normalize_possibility_packet(p), "%d"); /* réparé */
-    ASSERT_EQ_FMT(0, (int)p->alloc, "%d");                   /* reculé sur le trou */
-    ASSERT_EQ_FMT((int)dirx[0], (int)p->x, "%d");
-    ASSERT_EQ_FMT((int)diry[0], (int)p->y, "%d");
+    ASSERT_EQ_FMT(0, possibility_placed_count(p), "%d");
 
     free(p);
     PASS();
 }
 
-/* Paquet déjà conforme (aucun trou avant alloc, (x,y) = directions[alloc]) -> 0. */
-TEST normalize_leaves_conforming_packet_untouched(void)
+/* Cases posées "au-delà" d'un curseur (scénario §2.1 du document de
+ * conception : indices officiels posés hors ordre par rapport à
+ * directions[]) -> compte EXACT, peu importe la position dans le parcours. */
+TEST placed_count_counts_holes_beyond_a_cursor(void)
 {
     struct possibility_packet *p = new_zeroed_packet();
-    /* grille sans aucune case vide (0 partout, pas -2) -> firstHole = ETERN_PARTS */
-    p->alloc = 3;
-    p->x = dirx[3];
-    p->y = diry[3];
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
 
-    ASSERT_EQ_FMT(0, normalize_possibility_packet(p), "%d"); /* rien à réparer */
-    ASSERT_EQ_FMT(3, (int)p->alloc, "%d");
+    /* Trois cases posées à des indices de parcours arbitraires et non
+       contigus, comme le seraient des indices officiels. */
+    p->grid[dirx[0]][diry[0]] = 1;
+    p->grid[dirx[ETERN_PARTS / 2]][diry[ETERN_PARTS / 2]] = 2;
+    p->grid[dirx[ETERN_PARTS - 1]][diry[ETERN_PARTS - 1]] = 3;
+
+    ASSERT_EQ_FMT(3, possibility_placed_count(p), "%d");
 
     free(p);
     PASS();
 }
 
-/* Plateau complet (alloc == ETERN_PARTS, aucun trou) : firstHole == ETERN_PARTS
- * n'est jamais < alloc (rien à reculer), et la branche de repositionnement
- * (x,y) est sautée (`alloc < ETERN_PARTS` faux, pas de directions[alloc] hors
- * bornes) -> 0, aucune réparation. Jamais exercé par les deux tests ci-dessus
- * (alloc=5 et alloc=3, tous deux < ETERN_PARTS). */
-TEST normalize_full_board_is_conforming(void)
+/* Plateau complet -> ETERN_PARTS. */
+TEST placed_count_full_grid_is_etern_parts(void)
 {
     struct possibility_packet *p = new_zeroed_packet(); /* grid tout à 0 (pas de -2) */
-    p->alloc = ETERN_PARTS;
-    p->x = 0; p->y = 0;
 
-    ASSERT_EQ_FMT(0, normalize_possibility_packet(p), "%d");
-    ASSERT_EQ_FMT(ETERN_PARTS, (int)p->alloc, "%d");
+    ASSERT_EQ_FMT(ETERN_PARTS, possibility_placed_count(p), "%d");
 
     free(p);
     PASS();
@@ -1337,6 +1401,25 @@ TEST possibility_has_a_next_skips_zero_id_and_used_piece(void)
 
 /* --------------------------------------------------------------------------
  * search_possiblity_light : expansion d'un paquet (File de résultats)
+ *
+ * Depuis PR1 (docs/conception/mrv_moteur_unique.md), la fonction choisit
+ * elle-même la case à développer (`light_choose_cell`, MRV : la case vide la
+ * plus contrainte) au lieu de recevoir une clé pré-calculée sur la case du
+ * curseur -- elle ne prend donc plus de `key_part *key` en paramètre.
+ *
+ * Les tests ci-dessous utilisent une map "uniforme" (même technique que
+ * `make_uniform_map` dans tests/core/test_etii_search.c et
+ * `make_uniform_map_fwd` plus bas dans ce fichier) : CHAQUE case vide résout
+ * à la MÊME liste de candidats, quelle que soit sa clé réelle. Nécessaire ici
+ * parce que light_choose_cell balaie TOUTES les cases vides de la grille pour
+ * trouver la plus contrainte -- avec une vraie `buildBigArray` construite sur
+ * 2-3 pièces synthétiques, la quasi-totalité des ~250 autres cases vides
+ * n'auraient AUCUN candidat (carte non représentative d'un vrai plateau) et
+ * seraient jugées mortes avant même d'atteindre la case visée par le test.
+ * La map uniforme élimine ce faux négatif : peu importe la case choisie, le
+ * résultat de la recherche est le même, donc seul le comportement réellement
+ * testé (filtrage id=0/déjà utilisé, saut des cases pré-remplies, échec de
+ * put_possibility) varie d'un test à l'autre.
  * ------------------------------------------------------------------------ */
 
 /* Remplit idParts[p][r] = p + ETERN_PARTS*r (encodage des rotations). */
@@ -1347,32 +1430,43 @@ static void fill_id_parts(int16_t idParts[ETERN_PARTS][4])
             idParts[p][r] = (int16_t)(p + ETERN_PARTS * r);
 }
 
-/* Deux pièces de mêmes bords -> deux successeurs générés sur la case vide. */
+/* Map "uniforme" : cf. note de section ci-dessus. */
+static map_big_array *sl_make_uniform_map(struct array_part *cand)
+{
+    static map_big_array map;
+    static struct array_part flat[3 * 3 * 3 * 3];
+    map.sizearray = 3;
+    map.sizearrayM = 2;
+    map.arena = NULL;
+    map.flat = flat;
+    for (int i = 0; i < 3 * 3 * 3 * 3; i++) flat[i] = *cand;
+    return &map;
+}
+
+/* Deux pièces libres -> deux successeurs générés sur la case choisie. Grille
+ * entièrement vide : toutes les cases sont à égalité (map uniforme), donc
+ * light_choose_cell retient la première balayée, (0,0) (balayage x puis y,
+ * cf. sa doc dans possibility.c). */
 TEST search_light_expands_one_per_candidate(void)
 {
-    struct part parts[] = {
-        { .id = 0 },
-        { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 },
-        { .id = 2, .top = 0, .right = 2, .bottom = 3, .left = 0 }, /* mêmes bords */
-    };
-    struct array_part rp = { .size = 3, .parts = parts };
-    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+    struct part cand[2] = { { .id = 1 }, { .id = 2 } };
+    struct array_part candlist = { .size = 2, .parts = cand };
+    map_big_array *map = sl_make_uniform_map(&candlist);
+    struct array_part rp = { .size = 0, .parts = NULL }; /* jamais lu : aucune case pré-remplie */
 
     struct possibility_packet *p = new_zeroed_packet();
     for (int x = 0; x < ETERN_SIZE; x++)
         for (int y = 0; y < ETERN_SIZE; y++)
             p->grid[x][y] = -2;
-    p->x = 0; p->y = 0; p->alloc = 0;
 
-    key_part key = { .k1 = 0, .k2 = 2, .k3 = 3, .k4 = 0 }; /* match exact des 2 pièces */
     int16_t idParts[ETERN_PARTS][4];
     fill_id_parts(idParts);
 
     File result;
     init_file(&result, sizeof(struct possibility_packet));
 
-    int max = search_possiblity_light(&result, &key, p, map, &rp, idParts);
-    ASSERT_EQ_FMT(1, max, "%d");                 /* incAlloc = 0 + 1 */
+    int max = search_possiblity_light(&result, p, map, &rp, idParts);
+    ASSERT_EQ_FMT(1, max, "%d");
     ASSERT_EQ_FMT(2ULL, (unsigned long long)result.size, "%llu"); /* un paquet par pièce */
 
     /* Le premier successeur a la case (0,0) remplie et alloc = 1. */
@@ -1382,7 +1476,6 @@ TEST search_light_expands_one_per_candidate(void)
     ASSERT(out.grid[0][0] != -2);
     while (result.size > 0) scroll(&result, &out); /* draine le reste */
 
-    free_bigarray(map);
     free(p);
     PASS();
 }
@@ -1394,29 +1487,24 @@ TEST search_light_expands_one_per_candidate(void)
  * dans son compartiment). */
 TEST search_light_skips_zero_id_and_used_candidate(void)
 {
-    struct part parts[] = {
-        { .id = 0, .top = 0, .right = 2, .bottom = 3, .left = 0 }, /* bouchon, même clé */
-        { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 }, /* déjà utilisée */
-        { .id = 2, .top = 0, .right = 2, .bottom = 3, .left = 0 }, /* libre */
-    };
-    struct array_part rp = { .size = 3, .parts = parts };
-    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+    struct part cand[3] = { { .id = 0 }, { .id = 1 }, { .id = 2 } }; /* bouchon, utilisée, libre */
+    struct array_part candlist = { .size = 3, .parts = cand };
+    map_big_array *map = sl_make_uniform_map(&candlist);
+    struct array_part rp = { .size = 0, .parts = NULL };
 
     struct possibility_packet *p = new_zeroed_packet();
     for (int x = 0; x < ETERN_SIZE; x++)
         for (int y = 0; y < ETERN_SIZE; y++)
             p->grid[x][y] = -2;
-    p->x = 0; p->y = 0; p->alloc = 0;
     set_face_used(p->b_faceused, 0, 1); /* pièce 1 (id-1=0) déjà utilisée */
 
-    key_part key = { .k1 = 0, .k2 = 2, .k3 = 3, .k4 = 0 };
     int16_t idParts[ETERN_PARTS][4];
     fill_id_parts(idParts);
 
     File result;
     init_file(&result, sizeof(struct possibility_packet));
 
-    int max = search_possiblity_light(&result, &key, p, map, &rp, idParts);
+    int max = search_possiblity_light(&result, p, map, &rp, idParts);
     ASSERT_EQ_FMT(1, max, "%d");
     ASSERT_EQ_FMT(1ULL, (unsigned long long)result.size, "%llu"); /* un seul successeur (pièce 2) */
 
@@ -1424,87 +1512,70 @@ TEST search_light_skips_zero_id_and_used_candidate(void)
     scroll(&result, &out);
     ASSERT(is_face_used(out.b_faceused, 1)); /* pièce 2 (id-1=1) placée */
 
-    free_bigarray(map);
     free(p);
     PASS();
 }
 
-/* Case déjà remplie (indice fixe) : le paquet est simplement avancé. */
+/* Case (0,0) déjà remplie (indice fixe, comme les indices officiels §2.1 du
+ * document de conception) : light_choose_cell la saute -- elle ne balaie que
+ * les cases VIDES -- et retient la case vide suivante dans son ordre de
+ * balayage (x puis y), (0,1). `alloc` du successeur est recompté : 1 case
+ * pré-remplie + 1 nouvelle = 2, jamais un curseur avancé de +1. */
 TEST search_light_skips_prefilled_cell(void)
 {
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 } };
-    struct array_part rp = { .size = 2, .parts = parts };
-    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+    struct part cand[1] = { { .id = 9 } };
+    struct array_part candlist = { .size = 1, .parts = cand };
+    map_big_array *map = sl_make_uniform_map(&candlist);
+
+    /* rp : lue pour (0,0) en tant que voisine de (0,1) (TOP) -- doit couvrir
+       l'indice placé ci-dessous, ses faces réelles n'important pas (map
+       uniforme, indépendante de la clé). */
+    struct part rp_parts[10];
+    memset(rp_parts, 0, sizeof(rp_parts));
+    struct array_part rp = { .size = 10, .parts = rp_parts };
 
     struct possibility_packet *p = new_zeroed_packet();
     for (int x = 0; x < ETERN_SIZE; x++)
         for (int y = 0; y < ETERN_SIZE; y++)
             p->grid[x][y] = -2;
-    p->x = 0; p->y = 0; p->alloc = 0;
-    p->grid[0][0] = 1; /* case courante déjà remplie (!= -2) */
+    p->grid[0][0] = 3; /* case (0,0) déjà remplie (indice fixe), != -2 */
 
-    key_part key = { .k1 = 0, .k2 = 2, .k3 = 3, .k4 = 0 };
     int16_t idParts[ETERN_PARTS][4];
     fill_id_parts(idParts);
 
     File result;
     init_file(&result, sizeof(struct possibility_packet));
 
-    int max = search_possiblity_light(&result, &key, p, map, &rp, idParts);
-    ASSERT_EQ_FMT(1, max, "%d");
-    ASSERT_EQ_FMT(1ULL, (unsigned long long)result.size, "%llu"); /* un seul paquet avancé */
+    int max = search_possiblity_light(&result, p, map, &rp, idParts);
+    ASSERT_EQ_FMT(2, max, "%d"); /* 1 case pré-remplie + 1 nouvelle, recompté */
+    ASSERT_EQ_FMT(1ULL, (unsigned long long)result.size, "%llu");
 
     struct possibility_packet out;
     scroll(&result, &out);
-    ASSERT_EQ_FMT(1, (int)out.alloc, "%d");
+    ASSERT_EQ_FMT(2, (int)out.alloc, "%d");
+    ASSERT(out.grid[0][1] != -2); /* première case VIDE balayée après (0,0) */
+    ASSERT_EQ_FMT(3, (int)out.grid[0][0], "%d"); /* case pré-remplie inchangée */
 
-    free_bigarray(map);
     free(p);
     PASS();
 }
 
-/* Case déjà remplie (branche « else ») + put_possibility échoue
- * (sizeofvalue=0) : retourne 0 sans planter. Mirroir de
- * search_light_aborts_on_put_failure, mais pour l'autre branche (cellule
- * déjà occupée) — jamais exercée par cette dernière (grille toute -2). */
-TEST search_light_prefilled_cell_aborts_on_put_failure(void)
-{
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 } };
-    struct array_part rp = { .size = 2, .parts = parts };
-    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+/* put_possibility échoue (sizeofvalue=0) sur la case choisie : retourne 0
+ * sans planter. La branche "case déjà occupée -> avancer le curseur" de
+ * l'ancienne implémentation a disparu (light_choose_cell ne sélectionne
+ * jamais une case pleine) ; son pendant "échec de put_possibility" est donc
+ * désormais couvert par le même chemin que search_light_aborts_on_put_failure
+ * (plus bas dans ce fichier), qui exerce déjà l'échec sur une case vide --
+ * un seul chemin de code, un seul test suffit. */
 
-    struct possibility_packet *p = new_zeroed_packet();
-    for (int x = 0; x < ETERN_SIZE; x++)
-        for (int y = 0; y < ETERN_SIZE; y++)
-            p->grid[x][y] = -2;
-    p->x = 0; p->y = 0; p->alloc = 0;
-    p->grid[0][0] = 1; /* case courante déjà remplie -> branche "else" */
-
-    key_part key = { .k1 = 0, .k2 = 2, .k3 = 3, .k4 = 0 };
-    int16_t idParts[ETERN_PARTS][4];
-    fill_id_parts(idParts);
-
-    File result;
-    init_file(&result, 0); /* sizeofvalue=0 -> put_possibility échoue toujours */
-
-    int max = search_possiblity_light(&result, &key, p, map, &rp, idParts);
-    ASSERT_EQ_FMT(0, max, "%d");
-    ASSERT_EQ_FMT(0ULL, (unsigned long long)result.size, "%llu");
-
-    free_bigarray(map);
-    free(p);
-    PASS();
-}
-
-/* Dernière case du parcours (incAlloc == ETERN_PARTS) : couvre le garde-fou
- * anti-débordement de dirx[]/diry[] (incAlloc < ETERN_PARTS ? ... : 0) côté
- * File, jamais exercé par les autres tests search_light_* (alloc=0). La pièce
- * placée complète le plateau -> checkIfResultFound sort EXIT_SUCCESS ; exécuté
- * en fork. */
+/* Dernière case du parcours : une seule case vide dans toute la grille (les
+ * ETERN_PARTS-1 autres sont "remplies" par le bouchon 0 par défaut de
+ * new_zeroed_packet) -- light_choose_cell la trouve nécessairement. La pièce
+ * placée complète le plateau -> checkIfResultFound sort EXIT_SUCCESS ;
+ * exécuté en fork. */
 static struct array_part *sl_rp;
 static map_big_array *sl_map;
 static struct possibility_packet *sl_p;
-static key_part sl_key;
 static int16_t sl_idParts[ETERN_PARTS][4];
 static char sl_solution_dir[256];
 
@@ -1513,28 +1584,30 @@ static void sl_child_completes_board(void)
     if (chdir(sl_solution_dir) != 0) _exit(97);
     File result;
     init_file(&result, sizeof(struct possibility_packet));
-    int max = search_possiblity_light(&result, &sl_key, sl_p, sl_map, sl_rp, sl_idParts);
+    int max = search_possiblity_light(&result, sl_p, sl_map, sl_rp, sl_idParts);
     (void)max; /* ne devrait pas revenir : checkIfResultFound exit() avant */
     _exit(98);
 }
 
 TEST search_light_completes_board_skips_forward_check(void)
 {
-    struct part parts[] = {
-        { .id = 0 },
-        { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 },
-    };
-    struct array_part rp = { .size = 2, .parts = parts };
-    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+    struct part cand[1] = { { .id = 9 } };
+    struct array_part candlist = { .size = 1, .parts = cand };
+    map_big_array *map = sl_make_uniform_map(&candlist);
 
-    struct possibility_packet *p = new_zeroed_packet(); /* grid=0 partout : index bouchon valide pour log_solution */
-    p->grid[dirx[ETERN_PARTS - 1]][diry[ETERN_PARTS - 1]] = -2; /* seule case vide : la dernière */
-    p->alloc = ETERN_PARTS - 1;
-    p->x = dirx[ETERN_PARTS - 1];
-    p->y = diry[ETERN_PARTS - 1];
+    /* rp couvre les valeurs de grille possibles : 0 (bouchon par défaut,
+       partout ailleurs) et 9 (la pièce placée) -- log_solution (déclenchée
+       par checkIfResultFound) lit all_rotate_part->parts[] pour LES 256
+       cases du plateau complété. */
+    static struct part rp_parts[10];
+    memset(rp_parts, 0, sizeof(rp_parts));
+    static struct array_part rp = { .size = 10 };
+    rp.parts = rp_parts;
+
+    struct possibility_packet *p = new_zeroed_packet(); /* grid=0 partout : bouchon valide pour log_solution */
+    p->grid[ETERN_SIZE - 1][ETERN_SIZE - 1] = -2; /* seule case vide de toute la grille */
 
     sl_map = map; sl_rp = &rp; sl_p = p;
-    sl_key = (key_part){ .k1 = 0, .k2 = 2, .k3 = 3, .k4 = 0 };
     fill_id_parts(sl_idParts);
     strcpy(sl_solution_dir, "/tmp/etii_sl_last_XXXXXX");
     ASSERT(mkdtemp(sl_solution_dir) != NULL);
@@ -1548,7 +1621,6 @@ TEST search_light_completes_board_skips_forward_check(void)
     rmdir(sl_solution_dir);
     ASSERT_EQ_FMT(EXIT_SUCCESS, code, "%d");
 
-    free_bigarray(map);
     free(p);
     PASS();
 }
@@ -1603,24 +1675,35 @@ TEST forward_check_passes_when_cells_filled(void)
     PASS();
 }
 
-/* alloc proche de la fin du parcours : alloc + FORWARD_CHECK_K dépasse
- * ETERN_PARTS -> la fenêtre est bornée à ETERN_PARTS (`end = ETERN_PARTS`).
- * Jamais exercé par les autres tests forward_check_* (alloc=0, très loin de
- * la fin). Toutes les cases de la fenêtre bornée sont déjà remplies (grid
- * tout à 0) -> pas de case morte -> 1. */
-TEST forward_check_clamps_window_at_end_of_parts(void)
+/* La case vide est la TOUTE DERNIÈRE du parcours (dirx[ETERN_PARTS-1]) et
+ * c'est la SEULE case vide de la grille : depuis PR1, forward_check_next_k
+ * ne borne plus sa fenêtre sur `alloc` (qui n'indexe plus une position de
+ * curseur) mais balaie directions[] en cherchant les K premières cases
+ * VIDES -- ce test verrouille qu'atteindre une case vide au tout dernier
+ * indice du parcours ne déborde pas dirx[]/diry[] (boucle bornée par
+ * `c < ETERN_PARTS`) et qu'elle est bien inspectée (pas de case morte ici,
+ * un candidat existe -> 1, une seule case créditée). */
+TEST forward_check_finds_late_empty_cell_without_overrun(void)
 {
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
-    struct array_part rp = { .size = 2, .parts = parts };
-    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+    struct part cand[1] = { { .id = 9 } };
+    struct array_part candlist = { .size = 1, .parts = cand };
+    map_big_array *map = sl_make_uniform_map(&candlist);
 
-    /* grille toute à 0 (pas de -2) -> chaque case de la fenêtre est « remplie ». */
+    /* rp : lue pour les voisines de la case vide (toutes "remplies" à 0 par
+       défaut) -- ses faces réelles n'importent pas (map uniforme). */
+    static struct part rp_parts[4];
+    memset(rp_parts, 0, sizeof(rp_parts));
+    struct array_part rp = { .size = 4, .parts = rp_parts };
+
+    /* grid=0 partout (bouchon) -> "remplie" partout, sauf la toute dernière
+       case du parcours. */
     struct possibility_packet *p = new_zeroed_packet();
-    p->alloc = ETERN_PARTS - 1; /* alloc + FORWARD_CHECK_K > ETERN_PARTS (K >= 1) */
+    p->grid[dirx[ETERN_PARTS - 1]][diry[ETERN_PARTS - 1]] = -2;
 
+    unsigned long long fc_cells_before = fc_cells_studied;
     ASSERT_EQ_FMT(1, forward_check_next_k(p, map, &rp), "%d");
+    ASSERT_EQ_FMT(fc_cells_before + 1, fc_cells_studied, "%llu");
 
-    free_bigarray(map);
     free(p);
     PASS();
 }
@@ -1629,31 +1712,19 @@ TEST forward_check_clamps_window_at_end_of_parts(void)
  * pièce déjà utilisée : le forward-check trouve la pièce libre -> vivant (1).
  * Jamais exercé par forward_check_detects_all_candidates_already_used (un seul
  * candidat, pas de bouchon id=0 dans la liste). */
-/* Map "uniforme" (indépendante des couleurs réelles, cf. helpers analogues de
- * tests/core/test_etii_search.c) : CHAQUE clé renvoie la même liste
- * [bouchon id=0, pièce déjà utilisée, pièce libre]. Nécessaire ici car la
- * fenêtre de forward-check inspecte FORWARD_CHECK_K cases (pas seulement la
- * 1re) : avec une vraie buildBigArray, la case suivante du parcours calculerait
- * une clé différente (son voisin gauche redevient "vide" -> incompatible avec
- * le compartiment ciblé) et ferait échouer le test avant même d'atteindre la
- * pièce libre. */
-static map_big_array *make_uniform_map_fwd(struct array_part *cand)
-{
-    static map_big_array map;
-    static struct array_part flat[3 * 3 * 3 * 3];
-    map.sizearray = 3;
-    map.sizearrayM = 2;
-    map.arena = NULL;
-    map.flat = flat;
-    for (int i = 0; i < 3 * 3 * 3 * 3; i++) flat[i] = *cand;
-    return &map;
-}
-
+/* Map "uniforme" (`sl_make_uniform_map`, définie plus haut pour les tests
+ * search_possiblity_light -- réutilisée ici) : CHAQUE clé renvoie la même
+ * liste [bouchon id=0, pièce déjà utilisée, pièce libre]. Nécessaire ici car
+ * la fenêtre de forward-check inspecte FORWARD_CHECK_K cases (pas seulement
+ * la 1re) : avec une vraie buildBigArray, la case suivante du parcours
+ * calculerait une clé différente (son voisin gauche redevient "vide" ->
+ * incompatible avec le compartiment ciblé) et ferait échouer le test avant
+ * même d'atteindre la pièce libre. */
 TEST forward_check_skips_zero_id_finds_free_candidate(void)
 {
     struct part cand[3] = { { .id = 0 }, { .id = 1 }, { .id = 2 } }; /* bouchon, utilisée, libre */
     struct array_part list = { .size = 3, .parts = cand };
-    map_big_array *map = make_uniform_map_fwd(&list);
+    map_big_array *map = sl_make_uniform_map(&list);
     struct array_part rp = { .size = 3, .parts = cand }; /* faces non pertinentes (map uniforme) */
 
     struct possibility_packet *p = new_zeroed_packet();
@@ -1937,18 +2008,55 @@ TEST all_has_a_next_multi_candidate_skips_used_piece(void)
  * -2, résultat 1 à chaque itération) examine toutes les cases de alloc à
  * ETERN_PARTS -> out_cells_studied = ETERN_PARTS. C'est l'unité créditée au
  * compteur de coups des pruners (une étude par case, comme la recherche). */
+/* Map "uniforme" (cf. `sl_make_uniform_map`, définie plus haut) : chaque case
+ * vide, qu'elle soit de bord (clé avec un 0 de bordure) ou d'intérieur (clé
+ * "toute face"), trouve exactement les 2 mêmes candidats jamais utilisés --
+ * aucune case n'est morte, aucune n'est forcée (2 candidats, pas 1), donc le
+ * balayage va bien jusqu'au bout de la grille sans early-exit. Une vraie
+ * `buildBigArray` sur 1-2 pièces synthétiques échouerait ici : une pièce ne
+ * peut pas simultanément satisfaire une bordure (0 exigé) et l'intérieur
+ * (couleur non nulle exigée par le compartiment "toute face", cf. la note de
+ * section de search_possiblity_light plus haut). */
 TEST all_has_a_next_counted_full_scan_counts_all_cells(void)
 {
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
-    struct array_part rp = { .size = 2, .parts = parts };
-    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+    struct part cand[2] = { { .id = 1 }, { .id = 2 } };
+    struct array_part candlist = { .size = 2, .parts = cand };
+    map_big_array *map = sl_make_uniform_map(&candlist);
+    struct array_part rp = { .size = 0, .parts = NULL };
 
     struct possibility_packet *p = new_zeroed_packet();
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            p->grid[x][y] = -2;
     p->alloc = 0;
 
     unsigned int cells = 0;
     ASSERT_EQ_FMT(1, possibility_all_has_a_next_counted(p, map, &rp, &cells), "%d");
     ASSERT_EQ_FMT((unsigned int)ETERN_PARTS, cells, "%u");
+
+    free(p);
+    PASS();
+}
+
+/* Correction PR1 (site 5, docs/conception/mrv_moteur_unique.md) : les cases
+ * déjà remplies ne sont plus re-balayées -- alloc n'indexe plus une position
+ * de curseur (`possibility_placed_count`), le balayage saute directement les
+ * cases non vides plutôt que de les compter comme "études de prunage".
+ * Grille entièrement remplie (grid=0 partout, aucune case -2) -> 0 case
+ * étudiée, contrairement à l'ancien comportement qui aurait compté
+ * ETERN_PARTS cases (le bug documenté au §2.3 du document de conception). */
+TEST all_has_a_next_counted_skips_already_filled_cells(void)
+{
+    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 2, .parts = parts };
+    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+
+    struct possibility_packet *p = new_zeroed_packet(); /* grid=0 partout : "remplie" */
+    p->alloc = 0; /* n'a plus d'effet sur le balayage : la grille décide seule */
+
+    unsigned int cells = 0;
+    ASSERT_EQ_FMT(1, possibility_all_has_a_next_counted(p, map, &rp, &cells), "%d");
+    ASSERT_EQ_FMT(0u, cells, "%u");
 
     free_bigarray(map);
     free(p);
@@ -2117,9 +2225,14 @@ TEST all_has_a_next_fixpoint_detects_cascading_forced_dead_cell(void)
 
     unsigned int cells = 0;
     ASSERT_EQ_FMT(0, possibility_all_has_a_next_counted(p, map, &rp, &cells), "%d");
-    /* Détecté seulement au 2e balayage : strictement plus de ETERN_PARTS
-     * cases étudiées (le point fixe a dû relancer un balayage complet). */
-    ASSERT(cells > (unsigned int)ETERN_PARTS);
+    /* Détecté seulement au 2e balayage : le point fixe a dû relancer un
+     * balayage complet -- mais depuis PR1 (site 5, docs/conception/
+     * mrv_moteur_unique.md), chaque balayage saute les cases déjà remplies
+     * au lieu de les recompter : passe 1 examine p0, p1, p2 (3 cases, les
+     * SEULES vides) ; passe 2 ne réexamine QUE p0 (1 case, désormais morte).
+     * Total 4, très inférieur à ETERN_PARTS (verrouille l'absence de
+     * rebalayage des 253 cases déjà remplies). */
+    ASSERT_EQ_FMT(4u, cells, "%u");
     /* X et Y ont bien été consommés par p1/p2 avant que p0 ne soit rejugé. */
     ASSERT(is_face_used(p->b_faceused, 0)); /* X = id 1 */
     ASSERT(is_face_used(p->b_faceused, 1)); /* Y = id 2 */
@@ -2199,6 +2312,21 @@ static const struct syn_index_face SYN_INDEX_FACES[] = {
     {249,  8,  5,  9, 10}, /* rotation 0 -> {8,5,9,10}                           */
 };
 
+/* Couleurs EXPOSÉES (post-rotation, cf. les commentaires "-> {...}" de
+ * SYN_INDEX_FACES) par les 5 pièces-indices une fois posées -- ce que leurs
+ * voisines doivent trouver en face pour ne pas être des impasses. Depuis PR1
+ * (docs/conception/mrv_moteur_unique.md), `search_possiblity_light` choisit
+ * la case la plus contrainte (MRV) sur TOUTE la grille au lieu de la case
+ * fixe `directions[0]` : elle balaie donc aussi les voisines des indices, et
+ * `light_choose_cell` interrompt tout le balayage dès qu'une case CONTRAINTE
+ * n'a aucun candidat (sous-arbre mort, cf. sa doc). Avec un filler
+ * uniformément coloré (4 partout), ces voisines n'ont structurellement AUCUN
+ * candidat -- ce n'est pas un défaut du choix de case, c'est cette carte
+ * synthétique qui ne serait de toute façon jamais un vrai puzzle résoluble.
+ * `make_synthetic_base_256` dédie donc quelques ids de filler à des couleurs
+ * "pont" reproduisant exactement ces bords exposés. */
+static const int8_t SYN_BRIDGE_COLORS[] = { 1, 2, 3, 5, 7, 8, 9, 10, 11, 12, 13, 15 };
+
 /* Construit l'array_part 256 base (mêmes conventions que read_parts : size=256,
  * parts[0] bouchon id 0, pièces réelles en 1..256). Si omit_id != 0, la
  * pièce-indice correspondante GARDE ses faces de filler : sa clé ne résout plus
@@ -2213,6 +2341,21 @@ static struct array_part *make_synthetic_base_256(int omit_id)
         a->parts[i].rotation = 0;
         a->parts[i].top = a->parts[i].right = a->parts[i].bottom = a->parts[i].left = 4;
     }
+    /* ids 2..13 : fillers "pont", un par couleur exposée nécessaire (uniforme
+     * sur les 4 côtés -- la rotation n'a donc aucune incidence). id=1 reste
+     * réservé à la pièce coin de run_fp_valid_injects. */
+    for (size_t k = 0; k < sizeof SYN_BRIDGE_COLORS / sizeof SYN_BRIDGE_COLORS[0]; k++) {
+        int id = (int)(2 + k);
+        a->parts[id].top = a->parts[id].right = a->parts[id].bottom = a->parts[id].left = SYN_BRIDGE_COLORS[k];
+    }
+    /* id=14 : filler "bord", UN seul côté à 0 (bordure), les 3 autres à une
+     * couleur inédite (20) -- ses 4 rotations couvrent chacune des 4 bordures
+     * (haut/droite/bas/gauche) prises isolément. Sans cette pièce, toute case
+     * de bord NON coin (ex. (0,5), (5,0)…) est structurellement une impasse
+     * (aucun filler n'expose 0 nulle part ailleurs qu'au coin (0,0) via la
+     * pièce id=1) -- et depuis PR1, `light_choose_cell` balaie TOUTE la
+     * grille, donc atteint forcément ces bords avant de choisir une case. */
+    a->parts[14].top = 0; a->parts[14].right = 20; a->parts[14].bottom = 20; a->parts[14].left = 20;
     for (size_t k = 0; k < sizeof SYN_INDEX_FACES / sizeof SYN_INDEX_FACES[0]; k++) {
         const struct syn_index_face *s = &SYN_INDEX_FACES[k];
         if (s->id == omit_id) continue; /* laissé filler -> clé non résolue */
@@ -2369,20 +2512,16 @@ TEST put_possibility_returns_zero_on_bad_sizeofvalue(void)
 /* search_possiblity_light s'arrête et retourne 0 quand put_possibility échoue. */
 TEST search_light_aborts_on_put_failure(void)
 {
-    struct part parts[] = {
-        { .id = 0 },
-        { .id = 1, .top = 0, .right = 2, .bottom = 3, .left = 0 },
-    };
-    struct array_part rp = { .size = 2, .parts = parts };
-    map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
+    struct part cand[1] = { { .id = 1 } };
+    struct array_part candlist = { .size = 1, .parts = cand };
+    map_big_array *map = sl_make_uniform_map(&candlist);
+    struct array_part rp = { .size = 0, .parts = NULL };
 
     struct possibility_packet *p = new_zeroed_packet();
     for (int x = 0; x < ETERN_SIZE; x++)
         for (int y = 0; y < ETERN_SIZE; y++)
             p->grid[x][y] = -2;
-    p->x = 0; p->y = 0; p->alloc = 0;
 
-    key_part key = { .k1 = 0, .k2 = 2, .k3 = 3, .k4 = 0 };
     int16_t idParts[ETERN_PARTS][4];
     fill_id_parts(idParts);
 
@@ -2390,11 +2529,10 @@ TEST search_light_aborts_on_put_failure(void)
     File result;
     init_file(&result, 0);
 
-    int max = search_possiblity_light(&result, &key, p, map, &rp, idParts);
+    int max = search_possiblity_light(&result, p, map, &rp, idParts);
     ASSERT_EQ_FMT(0, max, "%d");
     ASSERT_EQ_FMT(0ULL, (unsigned long long)result.size, "%llu");
 
-    free_bigarray(map);
     free(p);
     PASS();
 }
@@ -2428,14 +2566,15 @@ SUITE(possibility_suite)
     RUN_TEST(check_possibility_consistent_interior_neighbors_is_zero);
     RUN_TEST(check_possibility_bottom_mismatch_is_minus_nine);
     RUN_TEST(check_possibility_left_mismatch_is_minus_nine);
+    RUN_TEST(check_possibility_covers_all_placed_cells_on_a_holed_board);
 #endif
     RUN_TEST(compare_possibility_detects_each_difference);
     RUN_TEST(is_origin_of_recognizes_prefix);
     RUN_TEST(build_single_array_wraps_one_packet);
     RUN_TEST(generate_possibility_packet_encodes_grid);
-    RUN_TEST(normalize_repairs_alloc_ahead_of_hole);
-    RUN_TEST(normalize_leaves_conforming_packet_untouched);
-    RUN_TEST(normalize_full_board_is_conforming);
+    RUN_TEST(placed_count_empty_grid_is_zero);
+    RUN_TEST(placed_count_counts_holes_beyond_a_cursor);
+    RUN_TEST(placed_count_full_grid_is_etern_parts);
     RUN_TEST(save_possibility_writes_packet_to_file);
     RUN_TEST(save_possibility_unwritable_exits);
     RUN_TEST(fprint_possibility_packet_writes_json);
@@ -2462,11 +2601,10 @@ SUITE(possibility_suite)
     RUN_TEST(search_light_skips_prefilled_cell);
     RUN_TEST(put_possibility_returns_zero_on_bad_sizeofvalue);
     RUN_TEST(search_light_aborts_on_put_failure);
-    RUN_TEST(search_light_prefilled_cell_aborts_on_put_failure);
     RUN_TEST(search_light_completes_board_skips_forward_check);
     RUN_TEST(forward_check_detects_dead_cell);
     RUN_TEST(forward_check_passes_when_cells_filled);
-    RUN_TEST(forward_check_clamps_window_at_end_of_parts);
+    RUN_TEST(forward_check_finds_late_empty_cell_without_overrun);
     RUN_TEST(forward_check_skips_zero_id_finds_free_candidate);
     RUN_TEST(forward_check_detects_all_candidates_already_used);
     RUN_TEST(what_search_to_key_empty_and_placed_neighbor);
@@ -2478,6 +2616,7 @@ SUITE(possibility_suite)
     RUN_TEST(all_has_a_next_single_candidate_places_piece);
     RUN_TEST(all_has_a_next_multi_candidate_skips_used_piece);
     RUN_TEST(all_has_a_next_counted_full_scan_counts_all_cells);
+    RUN_TEST(all_has_a_next_counted_skips_already_filled_cells);
     RUN_TEST(all_has_a_next_counted_dead_first_cell_counts_one);
     RUN_TEST(all_has_a_next_counted_complete_board_counts_zero);
 #if ETERN_PARTS == 256
