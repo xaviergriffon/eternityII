@@ -127,12 +127,17 @@ __device__ static void dev_what_search_in_grid_to_key(const struct part *parts,
 /**
  * @brief Kernel v1 : un thread par paquet.
  *
- * Reproduit `possibility_all_has_a_next` : parcourt les cases de `alloc` à
- * ETERN_PARTS suivant `dirx/diry`, contrôle qu'au moins une pièce candidate
- * reste posable, place les pièces forcées (bucket de taille 1) et ne sort
- * en anticipé que sur bucket vide (case morte) — une case « toute libre »
- * poursuit le balayage, comme côté CPU. En cas de complétion (`alloc == ETERN_PARTS`), met à jour `alloc` :
- * l'hôte détectera la solution (le device ne peut pas `exit()`).
+ * Reproduit `possibility_all_has_a_next` : parcourt les cases VIDES de
+ * `directions[]` (celles déjà remplies sont sautées, où qu'elles soient dans
+ * le parcours — `alloc` n'indexe plus une position de curseur depuis VERSION
+ * 13, cf. `possibility_placed_count` côté CPU), contrôle qu'au moins une
+ * pièce candidate reste posable, place les pièces forcées (bucket de
+ * taille 1) et ne sort en anticipé que sur bucket vide (case morte) — une
+ * case « toute libre » poursuit le balayage, comme côté CPU. `alloc` est
+ * recompté (pas incrémenté à la main) dès qu'au moins un placement forcé a eu
+ * lieu, y compris quand le plateau ne se retrouve PAS complet — même
+ * correction que côté CPU (`possibility_all_has_a_next_counted`) : sinon
+ * `alloc` resterait périmé face à `b_faceused`, qui a déjà avancé.
  * `cells[i]` reçoit le nombre de cases examinées (statistique de débit,
  * même unité qu'un coup de la recherche ; 0 si court-circuit `checked`).
  */
@@ -155,51 +160,60 @@ __global__ void prune_kernel(struct possibility_packet *pk, uint8_t *alive, uint
     const int all_face = map.all_face;
 
     int result = 1;
-    int alloc = p->alloc;
+    int any_forced = 0;
     key_part wsearch;
 
-    for (int c = p->alloc; c < ETERN_PARTS && result == 1; c++) {
-        result = 0;
-        cells[i]++;
+    for (int c = 0; c < ETERN_PARTS && result == 1; c++) {
         int8_t x = (int8_t)c_dirx[c];
         int8_t y = (int8_t)c_diry[c];
-        if (p->grid[x][y] == -2) {
-            dev_what_search_in_grid_to_key(map.part_dev, p, x, y, &wsearch, (int8_t)all_face);
-            if (wsearch.k1 < all_face || wsearch.k2 < all_face || wsearch.k3 < all_face || wsearch.k4 < all_face) {
-                int idx = (((int)wsearch.k1 * m + wsearch.k2) * m + wsearch.k3) * m + wsearch.k4;
-                int size = map.flat_size[idx];
-                if (size > 0) {
-                    int off = map.flat_off[idx];
-                    for (int s = 0; s < size && result == 0; s++) {
-                        struct part cand = map.arena_dev[off + s];
-                        if (cand.id != 0 && dev_is_face_used(p->b_faceused, cand.id - 1) == 0) {
-                            if (size == 1) {
-                                dev_set_face_used(p->b_faceused, cand.id - 1, 1);
-                                p->grid[x][y] = (int16_t)(cand.id + ETERN_PARTS * cand.rotation);
-                                alloc++;
-                            }
-                            result = 1;
+        if (p->grid[x][y] != -2) {
+            continue;
+        }
+        result = 0;
+        cells[i]++;
+        dev_what_search_in_grid_to_key(map.part_dev, p, x, y, &wsearch, (int8_t)all_face);
+        if (wsearch.k1 < all_face || wsearch.k2 < all_face || wsearch.k3 < all_face || wsearch.k4 < all_face) {
+            int idx = (((int)wsearch.k1 * m + wsearch.k2) * m + wsearch.k3) * m + wsearch.k4;
+            int size = map.flat_size[idx];
+            if (size > 0) {
+                int off = map.flat_off[idx];
+                for (int s = 0; s < size && result == 0; s++) {
+                    struct part cand = map.arena_dev[off + s];
+                    if (cand.id != 0 && dev_is_face_used(p->b_faceused, cand.id - 1) == 0) {
+                        if (size == 1) {
+                            dev_set_face_used(p->b_faceused, cand.id - 1, 1);
+                            p->grid[x][y] = (int16_t)(cand.id + ETERN_PARTS * cand.rotation);
+                            any_forced = 1;
                         }
+                        result = 1;
                     }
-                } else {
-                    // Rien trouvé : pas de suite (case morte).
-                    break;
                 }
             } else {
-                /* Case non contrainte (les 4 clés valent all_face) : satisfiable
-                 * par construction, mais ne PAS interrompre le balayage — une case
-                 * plus loin dans directions[] peut être contrainte et sans issue
-                 * (même règle que possibility_all_has_a_next côté CPU, cf. #101). */
-                result = 1;
+                // Rien trouvé : pas de suite (case morte).
+                break;
             }
         } else {
+            /* Case non contrainte (les 4 clés valent all_face) : satisfiable
+             * par construction, mais ne PAS interrompre le balayage — une case
+             * plus loin dans directions[] peut être contrainte et sans issue
+             * (même règle que possibility_all_has_a_next côté CPU, cf. #101). */
             result = 1;
         }
     }
 
-    if (alloc == ETERN_PARTS) {
+    if (any_forced) {
+        // Recomptage direct (pas d'appel à une fonction hôte depuis le device) :
+        // même définition que possibility_placed_count côté CPU.
+        int placed = 0;
+        for (int gx = 0; gx < ETERN_SIZE; gx++) {
+            for (int gy = 0; gy < ETERN_SIZE; gy++) {
+                if (p->grid[gx][gy] != -2) {
+                    placed++;
+                }
+            }
+        }
+        p->alloc = (uint16_t)placed;
         // Plateau complet : l'hôte traitera la solution (checkIfResultFound).
-        p->alloc = alloc;
     }
 
     alive[i] = (uint8_t)result;
