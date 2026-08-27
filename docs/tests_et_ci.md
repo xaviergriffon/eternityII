@@ -409,7 +409,16 @@ fournit rarement.
 
 ### Trois moteurs, pas deux : l'ablation qui sépare les deux axes
 
-Les deux moteurs de production **confondent deux axes indépendants** :
+> **Note (PR3, [docs/conception/mrv_moteur_unique.md](conception/mrv_moteur_unique.md)) :**
+> cette section décrit la mesure qui a motivé la bascule vers MRV comme moteur
+> UNIQUE. Les moteurs `fixe`, `fixe+global` et `fixe+singleton` cités ci-dessous
+> (et le drapeau `global_dead_check` qui les distinguait) ont depuis été
+> **supprimés** avec l'ancien moteur à ordre fixe — le banc n'accepte plus que
+> `mrv`/`mrv+singleton` en argument de `--engines`. Le récit de la mesure reste
+> ci-dessous tel quel : c'est un post-mortem de décision valide, pas l'état
+> actuel du code.
+
+Les deux moteurs de production **confondaient deux axes indépendants** :
 
 | | détection de case morte **locale** (4 voisines) | détection **globale** (tout le plateau) |
 |---|---|---|
@@ -495,10 +504,11 @@ d'une vraie délégation — il ne pouvait pas voir le mécanisme se déclencher
 même s'il se déclenche réellement ailleurs.
 
 Réimplémenté derrière `singleton_conflict_check` (`src/app/static_variables.h`,
-défaut 0, vit dans `bt_forward_check`, donc actif pour les DEUX moteurs de
-recherche) et ajouté au banc comme quatrième variante (`--engines
-fixe,fixe+singleton`). Deux mesures distinctes, parce que ce sont deux
-questions différentes :
+défaut 0, vit dans `bt_forward_check` — actif pour le seul moteur MRV depuis
+PR3, autrefois partagé avec l'ordre fixe) et ajouté au banc comme quatrième
+variante (`--engines fixe,fixe+singleton` à l'époque de cette mesure ;
+`--engines mrv,mrv+singleton` aujourd'hui). Deux mesures distinctes, parce que
+ce sont deux questions différentes :
 
 **1. Fermeture bornée (même protocole que §4.6b) : aucun effet.** Sur 120
 racines réelles, budget 5 000 000 nœuds : `fixe` et `fixe+singleton` ferment
@@ -588,18 +598,16 @@ qu'`autoprune_step` fait réellement en premier. Sans aucun pruner actif, un
 serveur conserve donc une moitié de stock déjà morte, occupant de la mémoire et
 de la bande passante de distribution pour rien.
 
-#### Option `--pruner-dfs-mrv` : l'A/B du moteur de la preuve (§4.10)
+#### A/B historique du moteur de la preuve (§4.10) — moteur unique depuis PR3
 
-La preuve DFS bornée peut employer le moteur à ordre DYNAMIQUE au lieu de l'ordre fixe
-(`pruner_dfs_mrv`, `ETII_PRUNER_DFS_MRV=1` en production). `--pruner-dfs-mrv` bascule ce
-même drapeau dans le banc : même stock, même échantillon, même budget, seul le moteur de la
-preuve change — la comparaison appariée exigée par le protocole §7 du document de
-conception.
-
-```sh
-make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --pruner-profile 500 --budget 10000"
-make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --pruner-profile 500 --budget 10000 --pruner-dfs-mrv"
-```
+**Statut : mesure historique, mécanisme figé.** La preuve DFS bornée pouvait autrefois
+employer le moteur à ordre DYNAMIQUE au lieu de l'ordre fixe (`pruner_dfs_mrv`,
+`ETII_PRUNER_DFS_MRV=1` en production, `--pruner-dfs-mrv` dans ce banc) — le tableau
+ci-dessous est le résultat de cette comparaison appariée, exigée par le protocole §7 du
+document de conception. Depuis [docs/conception/mrv_moteur_unique.md](../conception/mrv_moteur_unique.md)
+(PR3), MRV est le SEUL moteur (recherche réelle et preuve bornée du pruner) : le drapeau
+`pruner_dfs_mrv` et l'option `--pruner-dfs-mrv` de ce banc ont été supprimés, il n'y a plus
+d'A/B à rejouer.
 
 Mesuré sur un stock de PRODUCTION de 126 287 possibilités (produites par de vrais clients,
 pas par `expand_datas_to_level`), échantillon de 2 000 pris 1 sur 63 — contrôle superficiel
@@ -643,11 +651,12 @@ juge chaque case isolément et ne peut donc voir que 2 contraintes ; un test joi
 en voit jusqu'à 8. Le point fixe de §4.6a n'y change rien tant qu'aucune case de
 la fenêtre n'est forcée.
 
-L'A/B qui décide se fait **contre la preuve MRV** (§4.10), pas contre l'ordre fixe :
+L'A/B historique qui a tranché s'est fait **contre la preuve MRV** (§4.10), pas contre
+l'ordre fixe — MRV est désormais le seul moteur (PR3), donc la seule commande utile
+aujourd'hui est :
 
 ```sh
 make bench-refutation BENCH_REFUT_ARGS="--from-back eternityII.back --pruner-profile 2000 --w2x2 --budget 1000"
-make bench-refutation BENCH_REFUT_ARGS="--from-back eternityII.back --pruner-profile 2000 --w2x2 --budget 1000 --pruner-dfs-mrv"
 ```
 
 Le mode balaye les 169 fenêtres 2×2 **intérieures** (`x`, `y` dans
@@ -727,10 +736,10 @@ est mesuré, lui, indépendamment de toute implémentation.
   l'épuisement des pièces qui tue, jamais les couleurs.
 
 **Pourquoi le mode reste dans le banc** malgré le verdict : même raison que
-`--engines fixe+singleton`, qui sert encore à remesurer §4.4 quand la référence bouge.
-Si `pruner_dfs_mrv` s'avérait indéployable, le test 2×2 redeviendrait candidat — il
-apporte 3,4 à 3,6 points par-dessus la preuve en ordre fixe. Le mode ne coûte rien
-tant que le drapeau n'est pas passé.
+`--engines mrv+singleton`, qui sert encore à remesurer §4.4 quand la référence bouge.
+Le mode ne coûte rien tant que `--w2x2` n'est pas passé. (MRV étant désormais le seul
+moteur — PR3 — l'hypothèse « si `pruner_dfs_mrv` s'avérait indéployable » ne se pose
+plus : il n'y a plus d'ordre fixe vers lequel replier.)
 
 Garde-fous à chaque exécution ci-dessus : 0 faux positif sur solution, 0 désaccord de
 l'oracle indépendant (476 à 558 réfutations repassées par exécution), 0 paquet écarté
