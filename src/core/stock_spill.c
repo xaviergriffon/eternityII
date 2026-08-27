@@ -398,6 +398,16 @@ static int stock_spill_reload(int is_checked, int file_index, int max_packets)
 		return 0;
 	}
 
+	// Migration transparente (docs/conception/mrv_moteur_unique.md, PR2 §8) :
+	// un segment de débordement écrit avant VERSION 13 porte `alloc` au sens
+	// curseur, pas au sens nombre de pièces posées. Recomptage systématique
+	// et inconditionnel — comme `import()` (core/datamanager.c) — avant que
+	// le paquet ne rejoigne la RAM : idempotent sur un segment déjà v13,
+	// donc aucun besoin de distinguer les deux cas.
+	for (int i = 0; i < to_read; i++) {
+		buf[i].alloc = (uint16_t)possibility_placed_count(&buf[i]);
+	}
+
 	datamanager_pool_refill(is_checked, file_index, buf, to_read);
 	free(buf);
 
@@ -857,6 +867,18 @@ static int spill_read_manifest(const char *snap_dir, spill_manifest_entry_t **ou
 	return 0;
 }
 
+// NOTE VERSION 13 (docs/conception/mrv_moteur_unique.md, PR2 §8) : cette
+// fonction ne recompte JAMAIS `alloc`, y compris dans la branche de
+// réempaquetage par collision ci-dessous qui relit pourtant des paquets en
+// mémoire (`--stock-files` réduit depuis le cliché). Choix délibéré : le
+// recomptage n'a besoin d'un seul point de passage, celui où un paquet
+// quitte réellement le disque pour la RAM et devient utilisable par le
+// moteur — `stock_spill_reload` (ci-dessus). Ici, un paquet reste un blob
+// opaque sur disque (lien/copie d'octets, ou réécriture via
+// `stock_spill_write_block` qui ne touche à aucun champ) : le recompter ici
+// serait un second point de vérité à maintenir en plus de `stock_spill_reload`
+// pour un gain nul, puisque `stock_spill_reload` recomptera de toute façon
+// au premier rechargement en RAM qui suivra cette restauration.
 unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 {
 	if (!g_spill_enabled || snapshot_subdir == NULL) {

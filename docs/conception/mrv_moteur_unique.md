@@ -301,7 +301,19 @@ restauration (`restore` recompte si le fichier est marqué v12).
   ordre d'énumération) ou « les `K` cases les plus contraintes » (cohérent avec MRV, mais
   suppose le score déjà calculé au site d'appel — il l'est dans le moteur, pas dans
   `bt_materialize_pending`). À mesurer, avec `make bench-refutation` comme juge.
-- **Migration** : utilitaire hors ligne ou recomptage à la restauration.
+- **Migration — tranché en PR2** : ni l'un ni l'autre des deux options envisagées ci-dessus.
+  Un recomptage systématique et **inconditionnel** à chaque lecture (`import`/`restore`,
+  pool stock et pool analysé, rechargement d'un segment de débordement), sans détection de
+  version de fichier. Raison : le recomptage (`alloc = possibility_placed_count(packet)`) est
+  **idempotent** — appliqué à un paquet déjà correct (écrit par du code v13), il ne change
+  rien. Il n'y a donc aucun besoin de savoir si un fichier est « v12 » ou « v13 » : recompter
+  systématiquement gère les deux cas uniformément, pour toujours, sans marqueur de format à
+  maintenir ni logique de version à faire évoluer au prochain bump. Plus simple que les deux
+  options envisagées, et respecte le critère de succès de PR2 (§8) sans distinction de cas.
+  Seul le réseau (`INST_ADD`/`INST_GET`) reste hors recomptage : un client v13 produit déjà
+  `alloc` correct par construction, recompter à réception serait un travail inutile sur le
+  chemin chaud — seuls les fichiers disque écrits par du code antérieur à la bascule ont besoin
+  d'être recomptés au chargement.
 - **Devenir de `x`/`y`** : conservés inutilisés (paquet inchangé, zéro risque) ou retirés
   (2 octets, sans effet sur la taille à cause du bourrage). Sans enjeu, à trancher au
   moment de l'écriture.

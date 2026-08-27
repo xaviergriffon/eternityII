@@ -2492,15 +2492,19 @@ int import(client_possibility_t *client_possibility, char *filename)
         return -1;
     }
     
-    // NOTE VERSION 13 (docs/conception/mrv_moteur_unique.md) : un fichier .back
-    // écrit avant ce bump peut porter `alloc` au sens curseur (position dans
-    // directions[]), pas au sens nombre de pièces posées. La migration du
-    // stock persistant est volontairement HORS SCOPE ici (PR2, §8 du document)
-    // — recompter `alloc` à l'import reviendrait à commencer cette migration
-    // par un chemin non dédié, non testé pour ce cas, et sans le
-    // `.spillcount`/les garanties de PR2. `import` reste donc un simple
-    // rejeu bit-à-bit : la cohérence du champ `alloc` d'un stock pré-v13
-    // relève exclusivement de l'utilitaire de migration à venir.
+    // NOTE VERSION 13 (docs/conception/mrv_moteur_unique.md, PR2 §8) : un
+    // fichier .back écrit avant ce bump porte `alloc` au sens curseur
+    // (position dans directions[]), pas au sens nombre de pièces posées —
+    // et même en ordre fixe ce curseur divergeait déjà du compte réel dans
+    // 99,98 % des cas (§2.1 du document). Recomptage systématique et
+    // INCONDITIONNEL à chaque lecture, sans détection de version de
+    // fichier : `possibility_placed_count` est idempotente sur un paquet
+    // déjà correct (écrit par du code v13, `alloc` y vaut déjà ce compte),
+    // donc appliquer le recomptage à tous les paquets — v12 ou v13 — donne
+    // le même résultat qu'une détection explicite, sans marqueur de format
+    // à maintenir ni logique de version à faire évoluer au prochain bump.
+    // Aucun paquet n'est jamais rejeté, seulement réétiqueté si besoin
+    // (critère de succès PR2 : 126287 → 126287, zéro rejet).
     struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
     while(fread(possibility, sizeof(struct possibility_packet),1,f))
     {
@@ -2510,6 +2514,7 @@ int import(client_possibility_t *client_possibility, char *filename)
         if (possibility->checked != 1) {
             possibility->checked = 0;
         }
+        possibility->alloc = (uint16_t)possibility_placed_count(possibility);
         array_possibility_packet *possibilities = malloc(sizeof(array_possibility_packet));
         possibilities->size = 1;
         possibilities->possibilities = malloc(sizeof(struct possibility_packet));
@@ -2603,15 +2608,26 @@ int import_analysed(char *filename)
 		return -1;
 	}
 	
+	// Même recomptage systématique et inconditionnel qu'`import` (cf. le
+	// commentaire détaillé là-bas) : le pool analysé n'est pas un simple
+	// journal, `alloc` y pilote `max_result` (add_possibility_analysed) ET
+	// le hash de déduplication `hash_possibility_key`/`compare_possibility`
+	// (datamanager.c), qui compare `alloc` champ à champ pour décider si
+	// deux paquets désignent le même plateau. Un paquet analysé restauré
+	// avec un `alloc` pré-v13 ne se déduperait plus jamais correctement
+	// contre un paquet produit en direct par un client v13 sur le même
+	// plateau — recompter ici est donc requis pour la même raison de fond
+	// que pour le pool stock, pas seulement par cohérence cosmétique.
 	struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
 	while(fread(possibility, sizeof(struct possibility_packet),1,f))
 	{
+		possibility->alloc = (uint16_t)possibility_placed_count(possibility);
 		add_possibility_analysed(possibility, -1);
 	}
-	
+
 	free(possibility);
-	
-	
+
+
 	fclose(f);
 	return 0;
 }
