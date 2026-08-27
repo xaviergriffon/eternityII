@@ -62,8 +62,6 @@ int pruner_batch_size = PRUNER_BATCH_SIZE;
 
 int pruner_dfs_budget = PRUNER_DFS_BUDGET_DEFAULT;
 
-int pruner_dfs_mrv = PRUNER_DFS_MRV_DEFAULT;
-
 int analysed_lease_seconds = ANALYSED_LEASE_DEFAULT_SECONDS;
 
 #ifdef WITH_CUDA
@@ -213,37 +211,7 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
     return target_nodes > 0 && nodes_done >= target_nodes;
 }
 
-int mrv_enabled = MRV_DEFAULT_ENABLED;
-
-int global_dead_check = 0;
-
 int singleton_conflict_check = 0;
-
-int mrv_parse_env(const char *env_value)
-{
-    if (env_value != NULL && strcmp(env_value, "0") == 0) {
-        return 0;
-    }
-    if (env_value != NULL && strcmp(env_value, "1") == 0) {
-        return 1;
-    }
-    // Absente ou valeur non reconnue : le défaut du programme, jamais une
-    // désactivation silencieuse d'un moteur adopté.
-    return MRV_DEFAULT_ENABLED;
-}
-
-int pruner_dfs_mrv_parse_env(const char *env_value)
-{
-    if (env_value != NULL && strcmp(env_value, "0") == 0) {
-        return 0;
-    }
-    if (env_value != NULL && strcmp(env_value, "1") == 0) {
-        return 1;
-    }
-    // Absente ou valeur non reconnue : le défaut du programme, jamais une
-    // bascule silencieuse du moteur de la preuve.
-    return PRUNER_DFS_MRV_DEFAULT;
-}
 
 int parse_cli_options(int argc, const char *argv[])
 {
