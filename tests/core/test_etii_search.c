@@ -966,7 +966,7 @@ TEST bt_materialize_pending_orders_deepest_first(void)
 
     struct possibility_packet out[8];
     int new_next_s[2];
-    int n = bt_materialize_pending(&client, &board, stack, top, 0, idParts, out, 8, new_next_s, 0);
+    int n = bt_materialize_pending(&client, &board, stack, top, idParts, out, 8, new_next_s);
 
     /* 3 frères : pièce 5 (niveau 1, le plus profond), puis pièces 2 et 3 (niveau 0). */
     ASSERT_EQ_FMT(3, n, "%d");
@@ -989,13 +989,15 @@ TEST bt_materialize_pending_orders_deepest_first(void)
  * DYNAMIQUE : `alloc` des paquets émis est fixé par RECOMPTAGE
  * (`possibility_placed_count`), plus par re-canonisation sur le premier trou
  * du parcours (`bt_canonicalize_packet`, supprimée par PR1 : `directions[]`
- * n'est plus un référentiel d'état). C'est ce qui permet à un client MRV de
- * céder du travail à un client à ordre FIXE sans toucher au format de paquet
- * (donc sans bump de `VERSION` pour CE changement précis — `VERSION` est
- * bumpée par ailleurs, pour le changement de SENS de `alloc` lui-même).
+ * n'est plus un référentiel d'état). C'est ce qui permet à un paquet délégué
+ * par un client MRV d'être repris SANS PERTE par n'importe quel autre client
+ * MRV, quel que soit l'ordre dans lequel ses cases ont été posées, sans
+ * toucher au format de paquet (donc sans bump de `VERSION` pour CE changement
+ * précis — `VERSION` est bumpée par ailleurs, pour le changement de SENS de
+ * `alloc` lui-même).
  * ====================================================================== */
 
-/* bt_materialize_pending(dynamic_order = 1) : un niveau dont la case n'est PAS
+/* bt_materialize_pending : un niveau dont la case n'est PAS
  * celle de sa profondeur de pile (ordre MRV) produit des paquets dont `alloc`
  * est le nombre RÉEL de pièces posées (ici 1 : le plateau racine est vide,
  * une seule pièce est posée par ce niveau), jamais la profondeur du niveau
@@ -1033,7 +1035,7 @@ TEST bt_materialize_pending_dynamic_order_recomputes_alloc(void)
 
     struct possibility_packet out[4];
     int new_next_s[1];
-    int n = bt_materialize_pending(&client, &board, stack, 0, 0, idParts, out, 4, new_next_s, 1);
+    int n = bt_materialize_pending(&client, &board, stack, 0, idParts, out, 4, new_next_s);
 
     ASSERT_EQ_FMT(2, n, "%d");
     for (int i = 0; i < n; i++) {
@@ -1068,7 +1070,7 @@ TEST bt_materialize_pending_respects_max_out(void)
 
     struct possibility_packet out[8];
     int new_next_s[2];
-    int n = bt_materialize_pending(&client, &board, stack, top, 0, idParts, out, 1, new_next_s, 0);
+    int n = bt_materialize_pending(&client, &board, stack, top, idParts, out, 1, new_next_s);
 
     ASSERT_EQ_FMT(1, n, "%d");                 /* un seul (le plus profond) */
     ASSERT_EQ_FMT(2, new_next_s[1], "%d");      /* niveau 1 consommé */
@@ -1092,7 +1094,7 @@ TEST bt_delegate_noop_below_threshold(void)
     int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
     fill_idparts(idParts);
 
-    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts, 0);
+    bt_delegate_if_needed(&client, &board, stack, top, idParts);
 
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");          /* rien délégué */
     ASSERT_EQ_FMT(3ULL, lastfilesize[0], "%llu");        /* pending = 3 enregistré */
@@ -1117,7 +1119,7 @@ TEST bt_delegate_moves_excess_to_local(void)
     int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
     fill_idparts(idParts);
 
-    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts, 0);
+    bt_delegate_if_needed(&client, &board, stack, top, idParts);
 
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");           /* 1 possibilité déléguée */
     ASSERT_EQ_FMT(2, stack[1].next_s, "%d");             /* niveau profond consommé */
@@ -1149,7 +1151,7 @@ TEST bt_delegate_reuses_and_grows_buffer(void)
     fill_idparts(idParts);
 
     /* 1er appel : alloue le buffer à la capacité = seuil courant (1). */
-    bt_delegate_if_needed(&client, &board, stack, 1, 0, idParts, 0);
+    bt_delegate_if_needed(&client, &board, stack, 1, idParts);
     ASSERT(client.delegate_buf != NULL);
     ASSERT_EQ_FMT(1, client.delegate_buf_capacity, "%d");
     struct possibility_packet *first_buf = client.delegate_buf;
@@ -1158,7 +1160,7 @@ TEST bt_delegate_reuses_and_grows_buffer(void)
     build_two_level_fixture(&board, stack, &client);   /* reset pile/plateau... */
     client.delegate_buf = first_buf;                   /* ...sans perdre le buffer */
     client.delegate_buf_capacity = 1;
-    bt_delegate_if_needed(&client, &board, stack, 1, 0, idParts, 0);
+    bt_delegate_if_needed(&client, &board, stack, 1, idParts);
     ASSERT_EQ(first_buf, client.delegate_buf);         /* même pointeur */
     ASSERT_EQ_FMT(1, client.delegate_buf_capacity, "%d");
 
@@ -1168,7 +1170,7 @@ TEST bt_delegate_reuses_and_grows_buffer(void)
     build_two_level_fixture(&board, stack, &client);
     client.delegate_buf = first_buf;
     client.delegate_buf_capacity = 1;
-    bt_delegate_if_needed(&client, &board, stack, 1, 0, idParts, 0);
+    bt_delegate_if_needed(&client, &board, stack, 1, idParts);
     ASSERT(client.delegate_buf_capacity >= 2);          /* capacité suffisante */
 
     free(client.delegate_buf);
@@ -1225,7 +1227,7 @@ TEST bt_delegate_hunger_moves_below_threshold(void)
     int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
     fill_idparts(idParts);
 
-    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts, 0);
+    bt_delegate_if_needed(&client, &board, stack, top, idParts);
 
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");           /* 1 possibilité cédée   */
     ASSERT_EQ_FMT(2, stack[1].next_s, "%d");             /* niveau profond avancé */
@@ -1253,7 +1255,7 @@ TEST bt_flush_pending_sends_all_plus_current(void)
     int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
     fill_idparts(idParts);
 
-    bt_flush_pending(&client, &board, stack, top, 0, idParts, 0);
+    bt_flush_pending(&client, &board, stack, top, idParts);
 
     /* 3 frères matérialisés + 1 paquet « chemin courant » = 4. */
     ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
@@ -1301,7 +1303,7 @@ TEST bt_materialize_skips_no_decision_level_and_zero_id(void)
 
     struct possibility_packet out[4];
     int new_next_s[2];
-    int n = bt_materialize_pending(&client, &board, stack, 1, 0, idParts, out, 4, new_next_s, 0);
+    int n = bt_materialize_pending(&client, &board, stack, 1, idParts, out, 4, new_next_s);
 
     /* Seul id 7 est matérialisé : id 0 sauté, niveau 0 sans décision. */
     ASSERT_EQ_FMT(1, n, "%d");
@@ -1331,7 +1333,7 @@ TEST bt_materialize_dead_map_produces_nothing(void)
 
     struct possibility_packet out[8];
     int new_next_s[2];
-    int n = bt_materialize_pending(&client, &board, stack, top, 0, idParts, out, 8, new_next_s, 0);
+    int n = bt_materialize_pending(&client, &board, stack, top, idParts, out, 8, new_next_s);
 
     ASSERT_EQ_FMT(0, n, "%d");               /* rien produit... */
     ASSERT_EQ_FMT(2, new_next_s[1], "%d");   /* ...mais les candidats sont consommés */
@@ -1357,7 +1359,7 @@ TEST bt_delegate_dead_map_sends_nothing(void)
     int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
     fill_idparts(idParts);
 
-    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts, 0);
+    bt_delegate_if_needed(&client, &board, stack, top, idParts);
 
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* rien envoyé */
     ASSERT_EQ_FMT(1, stack[1].next_s, "%d");     /* pile non consommée */
@@ -1388,7 +1390,7 @@ TEST bt_delegate_error_keeps_stack(void)
     fill_idparts(idParts);
 
     es_silence_std();
-    bt_delegate_if_needed(&client, &board, stack, top, 0, idParts, 0);
+    bt_delegate_if_needed(&client, &board, stack, top, idParts);
     es_restore_std();
 
     ASSERT_EQ_FMT(1, stack[1].next_s, "%d");      /* pile inchangée (pas d'avance) */
@@ -1420,7 +1422,7 @@ TEST bt_flush_error_reputs_locally(void)
     fill_idparts(idParts);
 
     es_silence_std();
-    bt_flush_pending(&client, &board, stack, top, 0, idParts, 0);
+    bt_flush_pending(&client, &board, stack, top, idParts);
     es_restore_std();
 
     /* 3 frères + le chemin courant : tous remis en local malgré l'échec. */
@@ -1434,11 +1436,11 @@ TEST bt_flush_error_reputs_locally(void)
 /* ======================================================================
  * bt_materialize_pending : une solution complète parmi les frères.
  *
- * Pile réduite à la DERNIÈRE case du parcours (start_depth = ETERN_PARTS-1) :
- * le frère matérialisé a alloc == ETERN_PARTS -> record_solution (fichier +
- * notification) puis, sans --stop-on-solution, il n'est PAS matérialisé (rien
- * à explorer au-delà) et la boucle continue. Fork : log_solution écrit un
- * fichier solution_* dans le CWD.
+ * Plateau presque complet (une seule case vide) : le frère matérialisé a
+ * `alloc` (RECOMPTAGE, `possibility_placed_count`) == ETERN_PARTS ->
+ * record_solution (fichier + notification) puis, sans --stop-on-solution, il
+ * n'est PAS matérialisé (rien à explorer au-delà) et la boucle continue.
+ * Fork : log_solution écrit un fichier solution_* dans le CWD.
  * ====================================================================== */
 
 static client_possibility_t mz_client;
@@ -1460,7 +1462,7 @@ static void mz_child_sibling_solution(void)
     struct possibility_packet out[4];
     int new_next_s[1];
     int n = bt_materialize_pending(&mz_client, &mz_board, mz_stack, 0,
-                                   ETERN_PARTS - 1, mz_idParts, out, 4, new_next_s, 0);
+                                   mz_idParts, out, 4, new_next_s);
     if (n != 0) exit(50);                       /* la solution n'est pas matérialisée */
     if (new_next_s[0] != 1) exit(51);           /* mais le candidat est consommé */
     if (!es_has_solution_file(".")) exit(52);   /* et elle a été enregistrée */
@@ -1619,13 +1621,14 @@ TEST search_backtracking_explores_and_exhausts(void)
 
 /* ======================================================================
  * search_packet_backtracking_budgeted (§4.6b de
- * docs/conception/elagage_recherche.md) : même cœur que
- * search_packet_backtracking (search_packet_backtracking_core), plafonné en
- * nœuds et SANS délégation (allow_delegate = 0). Deux volets, comme l'exige
- * la doctrine de tests du document de conception (§5) : un plateau où la
- * fermeture DOIT être prouvée (budget large), un où elle NE DOIT PAS l'être
- * (budget insuffisant) — plus la divergence volontaire avec la variante
- * illimitée sur REQUEST_STOP (jamais de flush réseau).
+ * docs/conception/elagage_recherche.md) : même cœur MRV que
+ * search_packet_backtracking (search_packet_backtracking_mrv, seul moteur
+ * depuis docs/conception/mrv_moteur_unique.md, PR3), plafonné en nœuds et SANS
+ * délégation (allow_delegate = 0). Deux volets, comme l'exige la doctrine de
+ * tests du document de conception (§5) : un plateau où la fermeture DOIT être
+ * prouvée (budget large), un où elle NE DOIT PAS l'être (budget insuffisant)
+ * — plus la divergence volontaire avec la variante illimitée sur REQUEST_STOP
+ * (jamais de flush réseau).
  * ====================================================================== */
 
 /* Budget large sur un arbre minuscule (map uniforme [0,6,7], même fixture que
@@ -1713,115 +1716,6 @@ TEST search_backtracking_budgeted_returns_budget_when_insufficient(void)
     ASSERT(nodes >= 1);
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* aucun flush : rien n'est perdu ni renvoyé */
 
-    PASS();
-}
-
-/* ======================================================================
- * §4.10 : la preuve bornée peut employer le moteur à ordre DYNAMIQUE (MRV)
- * au lieu de l'ordre fixe (`pruner_dfs_mrv`). Même doctrine à deux volets que
- * les tests ci-dessus : un plateau où la fermeture DOIT être prouvée, un où
- * elle NE DOIT PAS l'être. Le verdict ne dépend pas du moteur (même sous-arbre,
- * seul l'ordre des décisions change) — seul son COÛT change, ce que mesure
- * tests/bench/bench_refutation.c, pas ces tests.
- * ====================================================================== */
-
-/* Même fixture et même budget que search_backtracking_budgeted_closes_when_budget_suffices,
- * mais preuve à ordre dynamique : le sous-arbre s'épuise aussi -> BT_CORE_EXHAUSTED,
- * et toujours aucune délégation (allow_delegate = 0 vaut pour les deux moteurs). */
-TEST search_backtracking_budgeted_mrv_closes_when_budget_suffices(void)
-{
-    drain_local();
-    ensure_counters();
-
-    static struct part cand[3];
-    memset(cand, 0, sizeof cand);
-    cand[0].id = 0; cand[1].id = 6; cand[2].id = 7;
-    static struct array_part list;
-    list.size = 3; list.parts = cand;
-
-    client_possibility_t client;
-    memset(&client, 0, sizeof client);
-    client.compteur = 0;
-    client.map_part = make_uniform_map(&list);
-    client.all_rotate_part = make_small_parts();
-
-    struct possibility_packet root;
-    make_empty_board(&root);
-    root.alloc = 0;
-
-    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
-    fill_idparts(idParts);
-
-    int saved_req = request;
-    uint16_t saved_max = max_result;
-    int saved_engine = pruner_dfs_mrv;
-    request = REQUEST_CONTINUE;
-    max_result = 0;
-    pruner_dfs_mrv = 1;
-    unsigned long long nodes = 0;
-    bt_core_result_t rc = search_packet_backtracking_budgeted(&client, &root, idParts, 10000, &nodes);
-    pruner_dfs_mrv = saved_engine;
-    request = saved_req;
-    max_result = saved_max;
-
-    ASSERT_EQ_FMT(BT_CORE_EXHAUSTED, rc, "%d");
-    ASSERT(nodes > 0);
-    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");   /* jamais délégué/flushé */
-
-    PASS();
-}
-
-/* Volet symétrique : budget d'UN nœud, moteur dynamique -> BT_CORE_BUDGET.
- * Le drapeau ne doit jamais transformer une preuve avortée en fermeture. */
-TEST search_backtracking_budgeted_mrv_returns_budget_when_insufficient(void)
-{
-    drain_local();
-    ensure_counters();
-
-    static struct part cand[3];
-    memset(cand, 0, sizeof cand);
-    cand[0].id = 0; cand[1].id = 6; cand[2].id = 7;
-    static struct array_part list;
-    list.size = 3; list.parts = cand;
-
-    client_possibility_t client;
-    memset(&client, 0, sizeof client);
-    client.compteur = 0;
-    client.map_part = make_uniform_map(&list);
-    client.all_rotate_part = make_small_parts();
-
-    struct possibility_packet root;
-    make_empty_board(&root);
-    root.alloc = 0;
-
-    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
-    fill_idparts(idParts);
-
-    int saved_req = request;
-    uint16_t saved_max = max_result;
-    int saved_engine = pruner_dfs_mrv;
-    request = REQUEST_CONTINUE;
-    max_result = 0;
-    pruner_dfs_mrv = 1;
-    unsigned long long nodes = 0;
-    bt_core_result_t rc = search_packet_backtracking_budgeted(&client, &root, idParts, 1, &nodes);
-    pruner_dfs_mrv = saved_engine;
-    request = saved_req;
-    max_result = saved_max;
-
-    ASSERT_EQ_FMT(BT_CORE_BUDGET, rc, "%d");
-    ASSERT(nodes >= 1);
-    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
-
-    PASS();
-}
-
-/* Non-régression du DÉFAUT : `pruner_dfs_mrv` vaut 0 hors intervention
- * explicite, donc la preuve bornée reste à ordre fixe pour tout déploiement
- * qui ne demande rien (`PRUNER_DFS_MRV_DEFAULT`, décision d'opérateur). */
-TEST pruner_dfs_mrv_defaults_to_fixed_order(void)
-{
-    ASSERT_EQ_FMT(0, PRUNER_DFS_MRV_DEFAULT, "%d");
     PASS();
 }
 
@@ -2020,46 +1914,30 @@ static int es_setup(void)
     return 1;
 }
 
-/* Fils : §4.10 — la preuve BORNÉE, jouée depuis la racine vide du vrai 4×4,
- * doit rendre le MÊME verdict avec les deux moteurs (l'arbre entier tient
- * largement dans le budget), et surtout ne jamais escamoter une solution :
- * `BT_CORE_EXHAUSTED` signifie « sous-arbre entièrement parcouru », et toute
- * solution rencontrée en chemin a été enregistrée par record_solution — c'est
- * ce qui autorise le pruner à éliminer la possibilité. Le coût, lui, DIFFÈRE
- * (ordres de décision distincts) : c'est la preuve que le drapeau route bien
- * vers l'autre moteur, et non pas silencieusement vers le même.
- * Codes de sortie distincts pour que l'échec soit lisible sans debugger. */
-static void es_child_budgeted_both_engines(void)
+/* Fils : la preuve BORNÉE, jouée depuis la racine vide du vrai 4×4, doit
+ * fermer entièrement l'arbre (qui tient largement dans le budget) et ne
+ * jamais escamoter une solution : `BT_CORE_EXHAUSTED` signifie « sous-arbre
+ * entièrement parcouru », et toute solution rencontrée en chemin a été
+ * enregistrée par record_solution — c'est ce qui autorise le pruner à
+ * éliminer la possibilité. */
+static void es_child_budgeted_closes_4x4(void)
 {
     if (chdir(es_solution_dir) != 0) exit(97);
     stop_on_solution = 0;
     request = REQUEST_CONTINUE;
     max_result = 0;
 
-    unsigned long long nodes_fixed = 0, nodes_mrv = 0;
-    pruner_dfs_mrv = 0;
-    bt_core_result_t rc_fixed = search_packet_backtracking_budgeted(&es_client, &es_root,
-                                                                    es_idParts, 5000000, &nodes_fixed);
-    if (rc_fixed != BT_CORE_EXHAUSTED) exit(10);
-    if (!es_has_solution_file(".")) exit(11);   /* solution enregistrée par l'ordre fixe */
-    es_unlink_solutions(".");
-
-    max_result = 0;
-    pruner_dfs_mrv = 1;
-    bt_core_result_t rc_mrv = search_packet_backtracking_budgeted(&es_client, &es_root,
-                                                                  es_idParts, 5000000, &nodes_mrv);
-    if (rc_mrv != BT_CORE_EXHAUSTED) exit(12);  /* même verdict que l'ordre fixe */
-    if (!es_has_solution_file(".")) exit(13);   /* la solution N'est PAS perdue par le moteur MRV */
-    if (nodes_fixed == nodes_mrv) exit(14);     /* deux moteurs réellement distincts */
+    unsigned long long nodes = 0;
+    bt_core_result_t rc = search_packet_backtracking_budgeted(&es_client, &es_root,
+                                                               es_idParts, 5000000, &nodes);
+    if (rc != BT_CORE_EXHAUSTED) exit(10);
+    if (!es_has_solution_file(".")) exit(11);   /* la solution N'est PAS perdue */
     exit(0);
 }
 
-/* §4.10 : `pruner_dfs_mrv` change le moteur de la preuve bornée sans changer
- * son verdict ni ce qu'elle enregistre en chemin. Verrou de la règle §5 du
- * document de conception : un élagage est une condition nécessaire, il ne doit
- * jamais coûter une solution. Échoue bien sur un code où la bascule serait
- * inopérante (exit 14) comme sur un moteur qui perdrait la solution (exit 13). */
-TEST search_backtracking_budgeted_both_engines_agree_on_4x4(void)
+/* Verrou de la règle §5 du document de conception : un élagage est une
+ * condition nécessaire, il ne doit jamais coûter une solution. */
+TEST search_backtracking_budgeted_closes_4x4(void)
 {
     ensure_counters();
     ASSERT(es_setup());
@@ -2068,7 +1946,7 @@ TEST search_backtracking_budgeted_both_engines_agree_on_4x4(void)
     ASSERT(mkdtemp(es_solution_dir) != NULL);
 
     pid_t pid = 0;
-    int code = run_in_fork(es_child_budgeted_both_engines, &pid);
+    int code = run_in_fork(es_child_budgeted_closes_4x4, &pid);
 
     es_unlink_solutions(es_solution_dir);
     rmdir(es_solution_dir);
@@ -2144,111 +2022,13 @@ static int es_count_solution_files(const char *dir)
     return count;
 }
 
-/* §4.7 (prototype MRV) : quel que soit l'ordre de variable (fixe ou
- * dynamique), une exploration exhaustive doit trouver le MÊME ensemble de
- * solutions — l'ordre change la FORME de l'arbre, jamais l'exhaustivité de
- * l'exploration. Sur le vrai puzzle 4×4, explore deux fois le même arbre
- * depuis la racine vide, une fois avec le prototype MRV activé, une fois
- * désactivé : le nombre de solutions enregistrées doit être identique. */
-TEST search_backtracking_mrv_preserves_solution_count(void)
-{
-    ensure_counters();
-    ASSERT(es_setup());
-
-    char dir_on[256], dir_off[256];
-    strcpy(dir_on, "/tmp/etii_es_mrv_on_XXXXXX");
-    strcpy(dir_off, "/tmp/etii_es_mrv_off_XXXXXX");
-    ASSERT(mkdtemp(dir_on) != NULL);
-    ASSERT(mkdtemp(dir_off) != NULL);
-
-    int saved_mrv = mrv_enabled;
-
-    mrv_enabled = 1;
-    strcpy(es_solution_dir, dir_on);
-    pid_t pid_on = 0;
-    int code_on = run_in_fork(es_child_full_explore, &pid_on);
-
-    mrv_enabled = 0;
-    strcpy(es_solution_dir, dir_off);
-    pid_t pid_off = 0;
-    int code_off = run_in_fork(es_child_full_explore, &pid_off);
-
-    mrv_enabled = saved_mrv;
-
-    int count_on = es_count_solution_files(dir_on);
-    int count_off = es_count_solution_files(dir_off);
-    es_unlink_solutions(dir_on);
-    es_unlink_solutions(dir_off);
-    rmdir(dir_on);
-    rmdir(dir_off);
-
-    ASSERT_EQ_FMT(0, code_on, "%d");             /* sous-arbre entièrement exploré, les 2 fois */
-    ASSERT_EQ_FMT(0, code_off, "%d");
-    ASSERT(count_off > 0);                       /* le puzzle a bien au moins une solution */
-    ASSERT_EQ_FMT(count_off, count_on, "%d");     /* même ensemble, ordre fixe ou MRV */
-
-    free_bigarray(es_client.map_part);
-    free_array_part(es_client.all_rotate_part);
-    PASS();
-}
-
-/* §4.7 — ABLATION « ordre fixe + détection globale » (`global_dead_check`).
- * Le balayage global rejette une branche dès qu'une case du plateau, où
- * qu'elle soit, n'a plus aucun candidat : c'est une condition NÉCESSAIRE, donc
- * il ne doit jamais coûter une seule solution. Même verrou que pour MRV :
- * exploration exhaustive du vrai puzzle 4×4, drapeau levé puis baissé, même
- * nombre de solutions. */
-TEST search_backtracking_global_dead_check_preserves_solution_count(void)
-{
-    ensure_counters();
-    ASSERT(es_setup());
-
-    char dir_on[256], dir_off[256];
-    strcpy(dir_on, "/tmp/etii_es_gdc_on_XXXXXX");
-    strcpy(dir_off, "/tmp/etii_es_gdc_off_XXXXXX");
-    ASSERT(mkdtemp(dir_on) != NULL);
-    ASSERT(mkdtemp(dir_off) != NULL);
-
-    int saved_mrv = mrv_enabled;
-    int saved_gdc = global_dead_check;
-    mrv_enabled = 0;                 /* l'ablation porte sur l'ordre FIXE */
-
-    global_dead_check = 1;
-    strcpy(es_solution_dir, dir_on);
-    pid_t pid_on = 0;
-    int code_on = run_in_fork(es_child_full_explore, &pid_on);
-
-    global_dead_check = 0;
-    strcpy(es_solution_dir, dir_off);
-    pid_t pid_off = 0;
-    int code_off = run_in_fork(es_child_full_explore, &pid_off);
-
-    mrv_enabled = saved_mrv;
-    global_dead_check = saved_gdc;
-
-    int count_on = es_count_solution_files(dir_on);
-    int count_off = es_count_solution_files(dir_off);
-    es_unlink_solutions(dir_on);
-    es_unlink_solutions(dir_off);
-    rmdir(dir_on);
-    rmdir(dir_off);
-
-    ASSERT_EQ_FMT(0, code_on, "%d");
-    ASSERT_EQ_FMT(0, code_off, "%d");
-    ASSERT(count_off > 0);
-    ASSERT_EQ_FMT(count_off, count_on, "%d");
-
-    free_bigarray(es_client.map_part);
-    free_array_part(es_client.all_rotate_part);
-    PASS();
-}
-
-/* §4.4 — CONFLIT DE SINGLETONS (`singleton_conflict_check`). Comme le
- * balayage global, c'est une condition NÉCESSAIRE : elle ne doit jamais
- * coûter une seule solution. Même verrou, sur les DEUX moteurs (le drapeau
- * vit dans bt_forward_check, partagé par l'ordre fixe et MRV) : exploration
- * exhaustive du vrai puzzle 4×4, drapeau levé puis baissé, même nombre de
- * solutions. */
+/* §4.4 — CONFLIT DE SINGLETONS (`singleton_conflict_check`). C'est une
+ * condition NÉCESSAIRE : elle ne doit jamais coûter une seule solution.
+ * Verrou sur le moteur MRV (seul moteur depuis
+ * docs/conception/mrv_moteur_unique.md, PR3 — le drapeau vit dans
+ * bt_forward_check, partagé avec l'ancien moteur à ordre fixe avant sa
+ * suppression) : exploration exhaustive du vrai puzzle 4×4, drapeau levé puis
+ * baissé, même nombre de solutions. */
 TEST search_backtracking_singleton_conflict_check_preserves_solution_count(void)
 {
     ensure_counters();
@@ -2291,53 +2071,6 @@ TEST search_backtracking_singleton_conflict_check_preserves_solution_count(void)
     PASS();
 }
 
-/* Même verrou côté moteur MRV : le drapeau est partagé par bt_forward_check,
- * donc doit rester une condition nécessaire quel que soit l'ordre. */
-TEST search_backtracking_mrv_singleton_conflict_check_preserves_solution_count(void)
-{
-    ensure_counters();
-    ASSERT(es_setup());
-
-    char dir_on[256], dir_off[256];
-    strcpy(dir_on, "/tmp/etii_es_mrvsgc_on_XXXXXX");
-    strcpy(dir_off, "/tmp/etii_es_mrvsgc_off_XXXXXX");
-    ASSERT(mkdtemp(dir_on) != NULL);
-    ASSERT(mkdtemp(dir_off) != NULL);
-
-    int saved_mrv = mrv_enabled;
-    int saved_scc = singleton_conflict_check;
-    mrv_enabled = 1;
-
-    singleton_conflict_check = 1;
-    strcpy(es_solution_dir, dir_on);
-    pid_t pid_on = 0;
-    int code_on = run_in_fork(es_child_full_explore, &pid_on);
-
-    singleton_conflict_check = 0;
-    strcpy(es_solution_dir, dir_off);
-    pid_t pid_off = 0;
-    int code_off = run_in_fork(es_child_full_explore, &pid_off);
-
-    mrv_enabled = saved_mrv;
-    singleton_conflict_check = saved_scc;
-
-    int count_on = es_count_solution_files(dir_on);
-    int count_off = es_count_solution_files(dir_off);
-    es_unlink_solutions(dir_on);
-    es_unlink_solutions(dir_off);
-    rmdir(dir_on);
-    rmdir(dir_off);
-
-    ASSERT_EQ_FMT(0, code_on, "%d");
-    ASSERT_EQ_FMT(0, code_off, "%d");
-    ASSERT(count_off > 0);
-    ASSERT_EQ_FMT(count_off, count_on, "%d");
-
-    free_bigarray(es_client.map_part);
-    free_array_part(es_client.all_rotate_part);
-    PASS();
-}
-
 /* Drapeau de fin de recherche, lu par le thread d'arrêt (fils du fork : un
  * seul thread écrit, un seul lit, valeur non composite). */
 static volatile int es_mrv_search_done = 0;
@@ -2357,40 +2090,33 @@ static void *es_mrv_stop_requester(void *arg)
     return NULL;
 }
 
-/* §4.7 / PR1 — INTEROPÉRABILITÉ de la délégation en ordre dynamique.
+/* §4.7 / PR1 — INTÉGRITÉ de la délégation en ordre dynamique.
  *
  * Le point le plus délicat de l'implémentation complète : un client MRV cède
  * du travail sous forme de `possibility_packet`, et ces paquets doivent être
- * repris par N'IMPORTE quel moteur — typiquement un client à ordre FIXE. Le
- * test rejoue exactement ce scénario sur le vrai puzzle 4×4 :
- *   1. exploration MRV depuis la racine vide, interrompue en cours de route
+ * repris SANS PERTE par n'importe quel client MRV, y compris troués par
+ * rapport à `directions[]`. Le test rejoue exactement ce scénario sur le vrai
+ * puzzle 4×4 :
+ *   1. exploration depuis la racine vide, interrompue en cours de route
  *      (REQUEST_STOP) : le travail restant part dans le stock local ;
- *   2. reprise du stock, à ordre FIXE (`mrv_enabled = 0`), jusqu'à épuisement,
- *      en vérifiant au passage que chaque paquet reçu est cohérent
- *      (`check_possibility`, qui couvre TOUTES les cases posées depuis PR1) ;
+ *   2. reprise du stock jusqu'à épuisement, en vérifiant au passage que chaque
+ *      paquet reçu est cohérent (`check_possibility`, qui couvre TOUTES les
+ *      cases posées depuis PR1) et que `alloc` est bien un RECOMPTAGE exact
+ *      (`possibility_placed_count`), jamais un curseur re-canonisé sur le
+ *      premier trou de `directions[]` (`bt_canonicalize_packet`/
+ *      `normalize_possibility_packet`, supprimées dès PR1) ;
  *   3. le nombre TOTAL de solutions doit être exactement celui d'une
- *      exploration exhaustive à ordre fixe.
+ *      exploration exhaustive ininterrompue.
  *
- * Depuis PR1, `alloc` d'un paquet délégué en ordre dynamique est un simple
- * RECOMPTAGE (`possibility_placed_count`), pas un curseur re-canonisé sur le
- * premier trou de `directions[]` (`bt_canonicalize_packet`/
- * `normalize_possibility_packet`, supprimées) : un paquet repris par le
- * moteur à ordre FIXE peut donc être troué par rapport à `directions[]`.
- * C'est exactement pour cette raison que `search_packet_backtracking_core`
- * détermine désormais lui-même son point de départ en cherchant la première
- * case VIDE du parcours plutôt que de faire confiance à `board.alloc` (cf. sa
- * doc, etii_search.c) : sans cette adaptation, ce test perdrait silencieusement
- * les solutions des cases sautées (comptage plus BAS que l'exploration de
- * référence). Si l'arrêt arrive après la fin de la recherche (course sans
- * conséquence), l'étape 2 ne fait rien et le comptage reste exact : le test
- * ne peut pas être instable, seulement moins couvrant. */
+ * Si l'arrêt arrive après la fin de la recherche (course sans conséquence),
+ * l'étape 2 ne fait rien et le comptage reste exact : le test ne peut pas
+ * être instable, seulement moins couvrant. */
 static void es_child_mrv_delegating_explore(void)
 {
     if (chdir(es_solution_dir) != 0) exit(97);
     stop_on_solution = 0;
     request = REQUEST_CONTINUE;
     es_mrv_search_done = 0;
-    mrv_enabled = 1;
     // Remise à zéro : le compteur est cumulé par les tests précédents du même
     // processus, et le seuil du thread d'arrêt serait déjà franchi.
     counters[0] = 0;
@@ -2404,11 +2130,8 @@ static void es_child_mrv_delegating_explore(void)
     // renvoyé, sans quoi l'étape 2 ne prouverait rien.
     if (rc == 1 && datas_size() == 0) exit(62);
 
-    // Reprise du travail délégué par un moteur à ORDRE FIXE : c'est
-    // précisément l'interopérabilité que l'adaptation de start_depth doit
-    // garantir (cf. la doc de la fonction ci-dessus).
+    // Reprise du travail délégué, paquet par paquet.
     request = REQUEST_CONTINUE;
-    mrv_enabled = 0;
     for (;;) {
         array_possibility_packet *r = get_last_possibility(NULL, 64, NULL);
         if (r->size == 0) {
@@ -2437,18 +2160,14 @@ TEST search_backtracking_mrv_delegation_preserves_solution_count(void)
     ASSERT(mkdtemp(dir_mrv) != NULL);
     ASSERT(mkdtemp(dir_ref) != NULL);
 
-    int saved_mrv = mrv_enabled;
-
     strcpy(es_solution_dir, dir_mrv);
     pid_t pid_mrv = 0;
     int code_mrv = run_in_fork(es_child_mrv_delegating_explore, &pid_mrv);
 
-    mrv_enabled = 0;
     strcpy(es_solution_dir, dir_ref);
     pid_t pid_ref = 0;
     int code_ref = run_in_fork(es_child_full_explore, &pid_ref);
 
-    mrv_enabled = saved_mrv;
     request = REQUEST_CONTINUE;
     drain_local();
 
@@ -3064,52 +2783,6 @@ TEST autoprune_step_dfs_budget_closes_possibility(void)
     PASS();
 }
 
-/* §4.10 — même scénario que ci-dessus mais preuve à ordre DYNAMIQUE : le
- * pipeline du pruner (contrôle superficiel puis preuve bornée) rend le MÊME
- * verdict, éliminée sans redistribution. C'est l'intégration du drapeau
- * `pruner_dfs_mrv` dans autoprune_step, via search_packet_backtracking_budgeted. */
-TEST autoprune_step_dfs_budget_mrv_closes_possibility(void)
-{
-    drain_local();
-    ensure_counters();
-    client_possibility_t client;
-    memset(&client, 0, sizeof client);
-    client.compteur = 0;
-    client.map_part = make_free_map();
-    client.all_rotate_part = make_small_parts();
-    pthread_mutex_init(&client.works_mutex, NULL);
-    client.works = 1;
-
-    array_possibility_packet *aposs = malloc(sizeof *aposs);
-    aposs->size = 1;
-    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
-    make_empty_board(&aposs->possibilities[0]);
-    client.aposs = aposs;
-
-    int saved_budget = pruner_dfs_budget;
-    int saved_engine = pruner_dfs_mrv;
-    pruner_dfs_budget = 10000;
-    pruner_dfs_mrv = 1;
-    unsigned long long removed_before = pruner_removed;
-    unsigned long long checked_before = pruner_checked;
-    unsigned long long closed_before = pruner_dfs_closed;
-    int saved = request;
-    request = REQUEST_CONTINUE;
-    int cont = autoprune_step(&client);
-    request = saved;
-    pruner_dfs_mrv = saved_engine;
-    pruner_dfs_budget = saved_budget;
-
-    ASSERT_EQ_FMT(1, cont, "%d");
-    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");                    /* jamais redistribuée */
-    ASSERT_EQ_FMT(removed_before + 1, pruner_removed, "%llu");
-    ASSERT_EQ_FMT(checked_before, pruner_checked, "%llu");        /* jamais marquée checked */
-    ASSERT_EQ_FMT(closed_before + 1, pruner_dfs_closed, "%llu");  /* fermeture attribuée au mécanisme */
-
-    pthread_mutex_destroy(&client.works_mutex);
-    drain_local();
-    PASS();
-}
 
 /* Budget d'UN seul nœud : ne peut pas suffire à prouver la fermeture ->
  * comportement d'avant cette PR inchangé (conservée, marquée checked). */
@@ -3465,9 +3138,6 @@ SUITE(etii_search_suite)
     RUN_TEST(search_backtracking_explores_and_exhausts);
     RUN_TEST(search_backtracking_budgeted_closes_when_budget_suffices);
     RUN_TEST(search_backtracking_budgeted_returns_budget_when_insufficient);
-    RUN_TEST(search_backtracking_budgeted_mrv_closes_when_budget_suffices);
-    RUN_TEST(search_backtracking_budgeted_mrv_returns_budget_when_insufficient);
-    RUN_TEST(pruner_dfs_mrv_defaults_to_fixed_order);
     RUN_TEST(search_backtracking_budgeted_stop_returns_stopped_without_flush);
     RUN_TEST(search_backtracking_pause_waits_then_stops);
     RUN_TEST(requeue_unprocessed_packets_routes_tail_locally);
@@ -3485,7 +3155,6 @@ SUITE(etii_search_suite)
     RUN_TEST(autoprune_step_removes_dead_packet);
     RUN_TEST(autoprune_step_keeps_checked_dead_packet);
     RUN_TEST(autoprune_step_dfs_budget_closes_possibility);
-    RUN_TEST(autoprune_step_dfs_budget_mrv_closes_possibility);
     RUN_TEST(autoprune_step_dfs_budget_too_small_keeps_possibility);
     RUN_TEST(autoprune_step_dfs_budget_disabled_skips_dfs);
     RUN_TEST(autoprune_step_add_error_reputs_locally);
@@ -3493,13 +3162,10 @@ SUITE(etii_search_suite)
     RUN_TEST(autoprune_step_complete_board_stop_on_solution_exits);
 #if ETERN_PARTS == 16
     RUN_TEST(search_backtracking_solves_4x4_and_returns_zero);
-    RUN_TEST(search_backtracking_budgeted_both_engines_agree_on_4x4);
+    RUN_TEST(search_backtracking_budgeted_closes_4x4);
     RUN_TEST(search_backtracking_stop_on_solution_exits_success);
-    RUN_TEST(search_backtracking_mrv_preserves_solution_count);
     RUN_TEST(search_backtracking_mrv_delegation_preserves_solution_count);
-    RUN_TEST(search_backtracking_global_dead_check_preserves_solution_count);
     RUN_TEST(search_backtracking_singleton_conflict_check_preserves_solution_count);
-    RUN_TEST(search_backtracking_mrv_singleton_conflict_check_preserves_solution_count);
 #endif
 
     RUN_TEST(autosearch_stops_immediately_on_request_stop);
