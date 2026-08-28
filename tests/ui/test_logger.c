@@ -16,7 +16,7 @@
 #define _GNU_SOURCE 1
 #include "greatest.h"
 #include "ui/logger.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "net/ipc_protocol.h"
 
 #include <stdio.h>

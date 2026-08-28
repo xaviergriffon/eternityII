@@ -13,7 +13,7 @@
 #include "net/local_socket.h"
 #include "core/readdata.h"
 #include "ui/command_match.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "app/control_registry.h"
 #include "app/known_clients_registry.h"
 #include "net/control_protocol.h"
@@ -1300,7 +1300,7 @@ int admin_pause_transition(int current, int want_pause) {
  *
  * Contrairement à `REQUEST_PAUSE` (régulation de débit, levée automatiquement
  * par `control_step`), cette pause ne peut être levée que par la commande
- * `resume` — cf. la note dans static_variables.h. No-op côté local si déjà en
+ * `resume` — cf. la note dans core_static_variables.h. No-op côté local si déjà en
  * pause admin ou si le processus est en cours d'arrêt (`REQUEST_STOP`).
  *
  * Le volet diffusion (`control_registry_broadcast_command`) est ce qui rend

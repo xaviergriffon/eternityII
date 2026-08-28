@@ -16,7 +16,7 @@
 #include "greatest.h"
 #include "fork_assert.h"
 #include "app/app_runtime.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "app/etii_statistic.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"

@@ -31,7 +31,7 @@
 #include "core/possibility.h"
 #include "core/part.h"             /* prepare_map_part, rotate_all_parts */
 #include "core/readdata.h"         /* read_parts */
-#include "app/static_variables.h"  /* max_stock_by_thread, request, counters… */
+#include "core/core_static_variables.h"  /* max_stock_by_thread, request, counters… */
 #include "fork_assert.h"           /* run_in_fork (chemins qui exit()) */
 
 #include "net/etii_protocol.h"     /* INST_TEST_CONNECTED / INST_END (mini-serveurs) */

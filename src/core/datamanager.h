@@ -122,7 +122,7 @@ unsigned long long datamanager_packets_to_ram_mb(unsigned long long packets);
  *
  * Ne couvre QUE les deux pools de stock (non vérifié + vérifié) — jamais le
  * pool analysé (cf. le commentaire de `stock_max_ram_mb`,
- * `app/static_variables.h`). Applicable à chaud : contrairement à
+ * `app/app_static_variables.h`). Applicable à chaud : contrairement à
  * `datamanager_configure_stock_files` (une seule fois, avant tout fork), un
  * plafond RAM peut être resserré ou desserré en cours d'exécution sans
  * reconstruire quoi que ce soit — il n'influence que la décision d'accepter
@@ -428,7 +428,7 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner
 
 /**
  * @brief Verrouille `client_possibility->socket_mutex` ET signale
- *        (`server_io_active`, `src/app/static_variables.h`) que ce fork est
+ *        (`server_io_active`, `src/core/core_static_variables.h`) que ce fork est
  *        en train d'échanger avec le serveur.
  *
  * Remplace un `pthread_mutex_lock(&client_possibility->socket_mutex)` nu

@@ -69,7 +69,7 @@ réassemblent les envois TCP partiels (voir [Robustesse](#comportement-en-cas-de
 Toute évolution du format « fil » impose d'incrémenter `VERSION` : le handshake exige
 une correspondance exacte. La v11 a bumpé ainsi `VERSION` sans ajouter de nouvelle
 instruction : le nouveau parcours de plateau (`directions[]`/`dirx[]`/`diry[]`,
-`src/app/static_variables.c`, pensé pour éliminer des possibilités plus tôt dans la
+`src/core/core_static_variables.c`, pensé pour éliminer des possibilités plus tôt dans la
 recherche) fait qu'un même indice de curseur (`alloc`) désigne une case différente
 qu'en v10 — un `possibility_packet` échangé entre versions désynchroniserait
 silencieusement le board plutôt que de planter, d'où le refus explicite au handshake.
@@ -251,7 +251,7 @@ invisible côté serveur indéfiniment, jusqu'à ce qu'un opérateur pense à la
 `clientsStats` manuellement — potentiellement plusieurs minutes après son apparition.
 
 `control_registry_auto_stats_due(session_index, CONTROL_AUTO_STATS_INTERVAL_SEC)`
-(`src/app/control_registry.c`, intervalle 30 s défini dans `static_variables.h`) est
+(`src/app/control_registry.c`, intervalle 30 s défini dans `app_static_variables.h`) est
 maintenant vérifié en premier dans la branche timeout : si dû, un aller-retour
 `CTRL_GET_STATS`/`CTRL_STATS` (factorisé dans `control_session_poll_stats`, partagé
 avec le chemin de commande explicite) remplace le `CTRL_PING` de ce tour — un nouveau
@@ -662,7 +662,7 @@ pour les tests qui ne veulent pas faire vivre un registre de sessions), gardant 
 balayage testable en isolation.
 
 **Durée configurable — un minorant, pas un budget garanti.** `analysed_lease_seconds`
-(`src/app/static_variables.h`, défaut `ANALYSED_LEASE_DEFAULT_SECONDS` = 300 s) se
+(`src/app/app_static_variables.h`, défaut `ANALYSED_LEASE_DEFAULT_SECONDS` = 300 s) se
 règle à chaud via la commande console `leaseDuration <n>` — SERVEUR pure
 (`send_to_childs = 0`, le bail n'a de sens que côté serveur, seul à enregistrer une
 attribution). Avec la vérification de vivacité ci-dessus, cette durée n'a plus
@@ -944,7 +944,7 @@ convention que le reste de cette séquence d'arrêt, voir *Testing* dans AGENTS.
 `fork_diagnostic_summary` ci-dessus donne le DERNIER état connu (stock, coups/s, …), mais ne
 dit rien sur l'INSTANT présent : un fils en plein `send_all`/`recv_all` (donc réellement
 occupé, pas bloqué) et un fils vraiment figé produisaient la même ligne de log. Un nouveau
-booléen, `server_io_active` (`src/app/static_variables.{h,c}`, process-local à chaque fork —
+booléen, `server_io_active` (`src/core/core_static_variables.{h,c}`, process-local à chaque fork —
 jamais un tableau, puisqu'un seul `client_possibility_t` existe par fork), est mis à jour
 via deux fonctions dédiées, `server_socket_io_lock`/`server_socket_io_unlock`
 (`core/datamanager.{h,c}`) : elles enveloppent exactement `client_possibility->socket_mutex`

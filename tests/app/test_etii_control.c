@@ -10,7 +10,7 @@
  */
 #include "greatest.h"
 #include "app/etii_control.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "app/fork_gate.h"
 #include "net/control_protocol.h"
 #include "net/etii_protocol.h"

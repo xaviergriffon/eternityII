@@ -5,7 +5,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 
-#include "app/static_variables.h"   /* MAX_CONTROL_SESSIONS */
+#include "app/app_static_variables.h"   /* MAX_CONTROL_SESSIONS */
 
 /**
  * @brief Une commande en attente dans la file circulaire d'une session.

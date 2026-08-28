@@ -32,7 +32,7 @@ int do_command_line(char *command);
  *
  * Extrait de `pause_interpreter`/`resume_interpreter` pour être testable sans
  * passer par le global `request` — même philosophie que `parse_cli_options`
- * (src/app/static_variables.c) : la logique de décision reste une fonction pure,
+ * (src/app/app_static_variables.c) : la logique de décision reste une fonction pure,
  * les interpréteurs se contentent de lire/écrire le global et de logger.
  *
  * Règles :

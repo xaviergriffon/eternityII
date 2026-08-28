@@ -17,7 +17,7 @@
 #include "app/fork_orchestrator.h"
 #include "app/app_runtime.h"
 #include "app/fork_gate.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "app/etii_statistic.h"
 
 #include <string.h>

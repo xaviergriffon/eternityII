@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "ui/logger.h"
-#include "app/static_variables.h"
+#include "core/core_static_variables.h"
 #include "app/etii_client.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
@@ -196,7 +196,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
     unsigned int cells = 0;
     // Rang (1..4) de la voisine dans CETTE énumération, indexant fc_pruned_at
     // à l'élagage : ce n'est plus une distance de parcours, cf. son commentaire
-    // dans static_variables.h.
+    // dans core_static_variables.h.
     int rank = 0;
 
     // §4.4 (conflit de singletons, cf. singleton_conflict_check) : ids des

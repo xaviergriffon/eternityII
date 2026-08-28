@@ -5,7 +5,7 @@
 # `tests/bench/test_bench_parse.sh`.
 #
 # Même principe que côté C (cf. `bench_should_stop` / `bench_parse_nodes_env`
-# dans src/app/static_variables.c) : la logique qu'on veut verrouiller par un
+# dans src/app/app_static_variables.c) : la logique qu'on veut verrouiller par un
 # test est isolée dans une fonction sans effet de bord, plutôt que noyée dans
 # un script qui compile, lance des process et mesure.
 #

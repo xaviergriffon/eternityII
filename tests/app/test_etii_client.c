@@ -10,7 +10,7 @@
  */
 #include "greatest.h"
 #include "app/etii_client.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "app/etii_statistic.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
@@ -885,7 +885,7 @@ TEST feed_thread_aposs_backs_off_when_no_work_available(void)
 
 /* ---------- check_client_threads_step -------------------------------------- */
 
-/* Lit lastcheck sous son mutex documenté (contrat de static_variables.h), comme
+/* Lit lastcheck sous son mutex documenté (contrat de app_static_variables.h), comme
  * le fait check_interpreter côté production. */
 static char *read_lastcheck_copy(void)
 {

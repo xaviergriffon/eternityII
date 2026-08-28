@@ -10,7 +10,7 @@
 #include <netinet/in.h>
 
 #include "ui/logger.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "net/ipc_protocol.h"
 #include "core/possibility.h"
 

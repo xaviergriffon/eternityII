@@ -5,7 +5,7 @@
 #include <signal.h>
 #include <sys/socket.h>
 
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "ui/console.h"
 #include "core/possibility.h"
 
@@ -80,7 +80,7 @@ int main(int argc, const char *argv[]) {
     }
 
     // ETII_BENCH_NODES : variable d'environnement (pas d'option CLI, hors du
-    // chemin de production) activant le banc de mesure — voir static_variables.h
+    // chemin de production) activant le banc de mesure — voir app_static_variables.h
     // et tests/bench/bench_search.sh. Lue une seule fois ici, avant tout fork,
     // comme les options CLI ci-dessus.
     bench_target_nodes = bench_parse_nodes_env(getenv("ETII_BENCH_NODES"));
@@ -118,7 +118,7 @@ int main(int argc, const char *argv[]) {
         // Initialisation avant tout fork/thread de statistiques : pas de
         // concurrence possible ici, mais on passe par lastcheck_publish()
         // pour garder un unique point d'écriture protégé par lastcheck_mutex
-        // (cf. static_variables.h).
+        // (cf. app_static_variables.h).
         lastcheck_publish(calloc(2000, sizeof(char)));
 
         if (strcmp("client", argv[1]) == 0) {

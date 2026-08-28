@@ -26,7 +26,7 @@
  *   simplement K=0 — réponse déjà normale et supportée du protocole depuis
  *   la v7 — le rechargement suit au tick suivant (~100 ms).
  * - Le pool ANALYSÉ n'est jamais concerné (cf. `stock_max_ram_mb`,
- *   `app/static_variables.h`, pour le raisonnement).
+ *   `app/app_static_variables.h`, pour le raisonnement).
  *
  * Format des segments : un flux brut de `struct possibility_packet`,
  * strictement identique au format `.back` (`datamanager.c`, `backup()`) —

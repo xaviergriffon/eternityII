@@ -36,12 +36,12 @@
 #define HTTP_PATH_MAX 128
 /// Longueur maximale (avec terminateur) de l'en-tête `Authorization` accepté
 /// (ex. "Bearer " + un jeton de `HTTP_ADMIN_TOKEN_MAX` octets, cf.
-/// static_variables.h — marge incluse pour ne jamais tronquer un jeton valide).
+/// app_static_variables.h — marge incluse pour ne jamais tronquer un jeton valide).
 #define HTTP_AUTHORIZATION_MAX 320
 /// Longueur maximale (avec terminateur) de l'adresse IP du pair d'une session
 /// de contrôle (`http_client_info_t.peer_ip`), formatée côté serveur par
 /// `inet_ntop`. Valeur volontairement dupliquée de `PEER_IP_MAX_LEN`
-/// (app/static_variables.h) plutôt qu'importée : ce fichier n'a AUCUNE
+/// (app/app_static_variables.h) plutôt qu'importée : ce fichier n'a AUCUNE
 /// dépendance vers `app/` (cf. en-tête de fichier ci-dessus).
 #define HTTP_CLIENT_IP_MAX 46
 

@@ -16,7 +16,7 @@
 #include "app/etii_client.h"
 #include "app/etii_control.h"
 #include "app/fork_gate.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "core/datamanager.h"
 #include "net/local_socket.h"
 #include "ui/logger.h"

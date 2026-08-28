@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include "app/static_variables.h"
+#include "core/core_static_variables.h"
 
 #include "ui/logger.h"
 

@@ -30,10 +30,12 @@ Sources live under `src/`, split into four domains. Includes are **explicit and 
 
 | Directory | Domain | Modules |
 |---|---|---|
-| `src/core/` | Puzzle logic & data structures + search engine | `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `etii_search` `datamanager` `stock_spill` `stock_rate` |
+| `src/core/` | Puzzle logic & data structures + search engine | `core_static_variables` `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `etii_search` `datamanager` `stock_spill` `stock_rate` |
 | `src/net/`  | TCP protocol & sockets, parent↔child IPC | `etii_protocol` `control_protocol` `client_identity` `tcpclient` `tcpserver` `local_socket` `ipc_protocol`(h) `http_codec` `http_server` |
 | `src/ui/`   | Logging, console, command handling | `logger` `logger_ncurses`(c) `console` `command_lines` `command_match` `command_history` `line_edit` |
-| `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_control` `control_registry` `known_clients_registry` `client_config` `fork_gate` `fork_orchestrator` `app_runtime` `etii_statistic`(h) `static_variables` `gpu_pruner`(.cu/.h) |
+| `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_control` `control_registry` `known_clients_registry` `client_config` `fork_gate` `fork_orchestrator` `app_runtime` `etii_statistic`(h) `app_static_variables` `gpu_pruner`(.cu/.h) |
+
+**Static/global state is split by domain, not bundled in one file.** `src/core/core_static_variables.{h,c}` holds the state that `src/core/` itself needs (puzzle geometry, forward-check counters, the `request`/pause state machine, search/pruner counters) — verified by grep against actual `core/` usage, not reconstituted from memory. `src/app/app_static_variables.{h,c}` holds everything else (CLI options, client identity, HTTP admin, server expansion/rebalance/lease/RAM-cap config, benchmarks). This exists to stop `core/` depending on `app/` for symbols that have nothing applicative about them — a violation the single `static_variables.h` used to force on every file under `core/` that touched puzzle geometry. `core/datamanager.c` and `core/etii_search.c` remain documented exceptions: they read genuinely applicative state directly (protocol `version`, `SERVER_PORT`, `pruner_mode`, `g_client_identity_template`, expansion/lease config) and therefore include both headers — see the note at the top of `core/core_static_variables.h` for the full accounting. **Naming rule: any file holding this kind of global/static state must keep `static_variables` in its name**, prefixed by its domain (`core_`/`app_`) — do not reintroduce a bare `static_variables.{h,c}` or scatter globals under unrelated names.
 
 Other top-level dirs: `data/` (puzzle definitions), `build/` (compilation objects, mirrors `src/`, gitignored), `tests/` (unit tests, mirrors `src/`). **Adding a `.c` means dropping it under the right `src/<domain>/` and adding its `build/<domain>/<name>.o` to the `OBJS` list (and to `add_executable` in `CMakeLists.txt`).** Full diagram and module-by-module responsibility table: [docs/architecture.md](docs/architecture.md).
 
@@ -95,7 +97,7 @@ Eight PRs (all shipped) fixing a real production incident: an unbounded lock hel
 - **Two real-incident fixes**, found only by reproducing at the exact reported scale (14M+ possibilities): a double-acknowledgement bug (`get_last_possibility` now reports whether a batch actually came `from_server`, so a locally-recycled possibility is never queued for a spurious ack) and a real heap out-of-bounds in `feed_thread_aposs` (looped over `NB_THREADS`, the *fork count*, indexing a single-element allocation).
 - **Epilogue**: `INST_ERROR` from a server busy with its own backup is expected and non-fatal — logged at `log_info`, never `log_error`/board-dump. Any *other* ack value stays a loud `log_error`.
 
-**Coding rule**: `core/` must never depend on `app/`. Where server-only logic (e.g. control-registry liveness) is needed from `core/datamanager.c`, it's injected as a function pointer by the caller — see `owner_alive` in `datamanager_reclaim_expired_leases`.
+**Coding rule**: `core/` must never depend on `app/`. Where server-only logic (e.g. control-registry liveness) is needed from `core/datamanager.c`, it's injected as a function pointer by the caller — see `owner_alive` in `datamanager_reclaim_expired_leases`. This is the rule the `core_static_variables`/`app_static_variables` split (above) exists to uphold for *global state*; `core/datamanager.c` and `core/etii_search.c` are its known, documented exceptions — they still read applicative state (protocol version, server config) directly rather than through injection, a larger refactor left for later.
 
 ## RAM cap & disk spillover
 
@@ -202,9 +204,10 @@ MRV (most-constrained-first cell choice) is the **sole** search engine, for both
 | `src/ui/logger.c` / `logger_ncurses.c` | Thread-safe logging — ANSI / ncurses variant |
 | `src/net/ipc_protocol.h` | Parent↔child Unix socket message structs |
 | `src/app/etii_statistic.h` | `client_statistics` struct sent to the parent every second |
-| `src/app/static_variables.c` | Global state (counters, flags, pids, socket handles) |
+| `src/core/core_static_variables.c` | Global state `core/` itself needs: puzzle geometry, forward-check counters, `request`/pause state machine, search/pruner counters |
+| `src/app/app_static_variables.c` | Global state that's genuinely applicative: CLI options, pids, socket handles, HTTP/client-identity config |
 | `src/app/gpu_pruner.cu` | CUDA batch pruner kernel (`CUDA=1` builds only) |
 
 ## Debug Flags & Puzzle Configuration
 
-Debug traces (`DEBUG_SOCKET`, `DEBUG_THREAD`, …) and puzzle size (`ETERN_PARTS`, `FORWARD_CHECK_K`) are `#ifndef`-guarded constants in `src/app/static_variables.h`, overridable via `CPPFLAGS` without editing the file (e.g. `make CPPFLAGS="-DETERN_PARTS=16"`). CI compiles every combination with `WERROR=1` so conditionally-compiled code can't rot unnoticed. Full flag list and rationale: [docs/compilation.md](docs/compilation.md).
+Debug traces (`DEBUG_SOCKET`, `DEBUG_THREAD`, …) and puzzle size (`ETERN_PARTS`, `FORWARD_CHECK_K`) are `#ifndef`-guarded constants in `src/core/core_static_variables.h`, overridable via `CPPFLAGS` without editing the file (e.g. `make CPPFLAGS="-DETERN_PARTS=16"`). CI compiles every combination with `WERROR=1` so conditionally-compiled code can't rot unnoticed. Full flag list and rationale: [docs/compilation.md](docs/compilation.md).

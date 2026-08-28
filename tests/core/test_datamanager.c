@@ -65,7 +65,7 @@ extern unsigned long long duplicateErrors[];
 extern unsigned long long duplicateFinish[];
 extern unsigned long long duplicateAnalyzed[];
 
-/* Globales de static_variables.c utilisées par les tests du chemin connexion. */
+/* Globales de core_static_variables.c/app_static_variables.c utilisées par les tests du chemin connexion. */
 extern int SERVER_PORT;
 extern volatile int request;
 extern volatile uint16_t max_result;

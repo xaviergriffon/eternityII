@@ -13,7 +13,7 @@
 #include "greatest.h"
 #include "fork_assert.h"
 #include "ui/command_lines.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "app/control_registry.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
@@ -473,7 +473,7 @@ TEST do_command_line_pruner_dfs_budget_requires_arg(void)
 
 /* leaseDuration <n> : fixe analysed_lease_seconds (PR7). Pas de bornage
  * (contrairement à prunerBatch) : <= 0 est une valeur légitime (désactive le
- * bail, cf. commentaire de static_variables.h), donc acceptée telle quelle. */
+ * bail, cf. commentaire de app_static_variables.h), donc acceptée telle quelle. */
 TEST do_command_line_lease_duration_sets_global(void)
 {
     int saved = analysed_lease_seconds;

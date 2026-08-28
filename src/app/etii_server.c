@@ -13,7 +13,7 @@
 #include <time.h>
 
 #include "ui/logger.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "net/etii_protocol.h"
 #include "net/control_protocol.h"
 #include "app/control_registry.h"
@@ -243,7 +243,7 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
     // partagé, donc aucun besoin de tenir un verrou pendant leur exécution.
     // `lastcheck_publish()` n'est appelée qu'une fois le rapport complet,
     // ce qui réduit la section critique au seul échange de pointeur (voir
-    // static_variables.h pour le détail de la race corrigée). Taille
+    // app_static_variables.h pour le détail de la race corrigée). Taille
     // dimensionnée sur `table` (une ligne par file, donc proportionnelle à
     // `nb_file_possibility` — PR4) + 1200 pour le bloc `temp` ci-dessous
     // (fixe, indépendant du nombre de files) : un `report` figé à 4000
@@ -267,7 +267,7 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
 
     // Publié pour l'API REST (GET /api/v1/stats) : même indicateur « coups/s »
     // que le bandeau log_status ci-dessous (bys seul, pas bys+prune_bys), lu
-    // sans verrou (cf. static_variables.h).
+    // sans verrou (cf. app_static_variables.h).
     server_shots_per_second = bys;
 
     int activeThread = get_active_threads(thread_params);
@@ -1262,7 +1262,7 @@ int control_session_step(client_t *client, int session_index, int timeout_ms)
     // automatique est dû (CONTROL_AUTO_STATS_INTERVAL_SEC), un CTRL_GET_STATS
     // remplace le keepalive de ce tour — c'est ce qui permet à un nouveau
     // record côté client d'être tiré côté serveur sans attendre qu'un
-    // opérateur lance `clientsStats` manuellement (cf. static_variables.h).
+    // opérateur lance `clientsStats` manuellement (cf. app_static_variables.h).
     if (control_registry_auto_stats_due(session_index, CONTROL_AUTO_STATS_INTERVAL_SEC)) {
         return control_session_poll_stats(client, session_index);
     }

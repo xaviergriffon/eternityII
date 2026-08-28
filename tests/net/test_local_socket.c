@@ -9,7 +9,7 @@
 #include "net/local_socket.h"
 #include "net/ipc_protocol.h"
 #include "core/possibility.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 
 #include <stdlib.h>
 #include <string.h>

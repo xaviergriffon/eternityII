@@ -50,7 +50,7 @@
 #include "ui/command_lines.h"
 #include "ui/command_history.h"
 #include "ui/line_edit.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "app/fork_gate.h"
 #include "app/fork_orchestrator.h"
 #include "net/ipc_protocol.h"

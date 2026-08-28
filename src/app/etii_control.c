@@ -8,7 +8,7 @@
 #include <sys/types.h>
 #include <pthread.h>
 
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "app/etii_client.h"
 #include "app/fork_gate.h"
 #include "net/etii_protocol.h"

@@ -4,7 +4,7 @@
  *
  * Module de parsing/écriture, lecture au démarrage appliquée aux globales
  * (priorité CLI > fichier > défauts), et les commandes console
- * `config`/`configSave` (`--config-file`, cf. static_variables.h).
+ * `config`/`configSave` (`--config-file`, cf. app_static_variables.h).
  */
 #ifndef client_config_h
 #define client_config_h
@@ -151,7 +151,7 @@ int client_config_save(const char *path, const client_config_t *cfg);
  * (`argc >= 3` pour l'hôte serveur, `argc >= 4` pour `nb_forks`, etc. — cf.
  * `parse_client_args`) plutôt que de les redécouvrir, afin de ne jamais
  * diverger de ce que `parse_client_args` a réellement consommé. Lit le
- * global `pruner_mode` (src/app/static_variables.h) pour savoir si `argv[4]`
+ * global `pruner_mode` (src/app/app_static_variables.h) pour savoir si `argv[4]`
  * désigne `parts_file` (pruner) ou `max_stock_by_thread` (client de recherche).
  *
  * Les champs chaîne appliqués sont `strdup`és une seconde fois avant

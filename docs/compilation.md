@@ -36,7 +36,7 @@ make clean                    # Supprime les binaires et objets
 
 ## Configuration du puzzle
 
-[src/app/static_variables.h](../src/app/static_variables.h) contrôle la taille du
+[src/core/core_static_variables.h](../src/core/core_static_variables.h) contrôle la taille du
 puzzle et l'algorithme :
 
 ```c
@@ -58,7 +58,7 @@ Changer `ETERN_PARTS` nécessite un rebuild complet (`make clean` d'abord).
 ## Drapeaux de debug
 
 Des traces conditionnelles sont définies (et commentées) dans
-[src/app/static_variables.h](../src/app/static_variables.h) — à décommenter avant
+[src/core/core_static_variables.h](../src/core/core_static_variables.h) — à décommenter avant
 compilation, ou à passer via `CPPFLAGS="-D…"` :
 
 ```c

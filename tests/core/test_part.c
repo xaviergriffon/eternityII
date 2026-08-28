@@ -10,7 +10,7 @@
 #include "greatest.h"
 #include "fork_assert.h"
 #include "core/part.h"
-#include "app/static_variables.h" /* ETERN_PARTS */
+#include "core/core_static_variables.h" /* ETERN_PARTS */
 
 #include <stdlib.h>
 #include <string.h>

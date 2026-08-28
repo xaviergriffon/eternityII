@@ -181,10 +181,18 @@ explicites et qualifiés par domaine (`#include "core/part.h"`), résolus via `-
 
 | Répertoire | Domaine |
 |---|---|
-| `src/core/` | Logique du puzzle, structures de données et moteur de recherche (`part`, `readdata`, `possibility`, `best_board`, `lifo`, `etii_search`, `datamanager`, …) |
+| `src/core/` | Logique du puzzle, structures de données et moteur de recherche (`core_static_variables`, `part`, `readdata`, `possibility`, `best_board`, `lifo`, `etii_search`, `datamanager`, …) |
 | `src/net/`  | Protocole TCP, sockets et IPC parent↔enfant (`etii_protocol`, `control_protocol`, `tcpclient`, `tcpserver`, `local_socket`, `ipc_protocol`, `http_codec`, `http_server`) |
 | `src/ui/`   | Journalisation, console et commandes (`logger`, `logger_ncurses`, `console`, `command_lines`, `command_match`, `command_history`) |
-| `src/app/`  | Point d'entrée, rôles client/serveur, signaux, état global et GPU (`main`, `etii_client`, `etii_server`, `etii_control`, `control_registry`, `app_runtime`, `static_variables`, `gpu_pruner`) |
+| `src/app/`  | Point d'entrée, rôles client/serveur, signaux, état global et GPU (`main`, `etii_client`, `etii_server`, `etii_control`, `control_registry`, `app_runtime`, `app_static_variables`, `gpu_pruner`) |
+
+L'état statique/global est scindé par domaine plutôt que rassemblé dans un seul
+fichier : `src/core/core_static_variables.{h,c}` ne porte que ce dont `core/`
+a réellement besoin (géométrie du puzzle, compteurs de forward-checking,
+machine à états `request`) ; `src/app/app_static_variables.{h,c}` porte le
+reste (CLI, identité client, API HTTP, configuration serveur). Voir
+AGENTS.md pour le détail et les deux exceptions documentées
+(`core/datamanager.c`, `core/etii_search.c`).
 
 Les données du puzzle sont dans `data/` (`pieces.csv`, `pieces16.csv` — voir
 [le format du fichier de pièces](utilisation.md#format-du-fichier-de-pièces)), les

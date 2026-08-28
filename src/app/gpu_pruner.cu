@@ -30,14 +30,14 @@
 #include "app/gpu_pruner.h"
 #include "core/part.h"
 #include "core/possibility.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 
 extern "C" {
 #include "ui/logger.h"
 }
 
-/* dirx/diry sont des globaux C (static_variables.c) ; déclarés extern dans
-   static_variables.h, ils se résolvent au symbole non décoré côté C++. */
+/* dirx/diry sont des globaux C (core_static_variables.c) ; déclarés extern dans
+   core_static_variables.h, ils se résolvent au symbole non décoré côté C++. */
 
 /** @brief Miroir GPU résident de la map, passé par valeur au kernel. */
 struct GpuMap {

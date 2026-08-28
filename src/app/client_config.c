@@ -1,5 +1,5 @@
 #include "app/client_config.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "ui/command_lines.h"
 #include "ui/logger.h"
 
