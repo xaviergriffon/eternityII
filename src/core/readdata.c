@@ -115,6 +115,107 @@ struct array_part *read_parts(const char *file)
 }
 
 /**
+ * @brief Lit et parse le fichier CSV de définition des indices officiels.
+ *
+ * Format attendu :
+ * - Première ligne : `nindices: N`
+ * - Lignes suivantes : `id x y rotation mandatory`
+ *
+ * @param file Chemin du fichier CSV.
+ * @return     Tableau de `N` indices alloué (à libérer avec `free_array_index`).
+ *             Quitte le programme en cas d'erreur d'ouverture ou de parse.
+ */
+struct array_index *read_indices(const char *file)
+{
+	int ni = 0;
+
+	FILE *f = fopen(file, "r");
+	if (!f)
+	{
+		log_errno("read_indices file :%s ", file);
+		exit(EXIT_FAILURE);
+	}
+
+	if (fscanf(f, "nindices: %d", &ni) == 1)
+	{
+		log_info("nindices:%i\n", ni);
+	} else
+	{
+		log_error("read_indices: format nindices invalide dans %s\n", file);
+		exit(EXIT_FAILURE);
+	}
+
+	struct board_index *indices = NULL;
+	if (ni > 0 && NULL == (indices = malloc(ni * sizeof *indices)))
+	{
+		log_error("read_indices: malloc échoué pour %d indices\n", ni);
+		exit(EXIT_FAILURE);
+	}
+	struct array_index *array = malloc(sizeof(struct array_index));
+	array->size = ni;
+	array->indices = indices;
+
+	int count = 0;
+	for (;;)
+	{
+		int16_t id;
+		int x;
+		int y;
+		int rotation;
+		int mandatory;
+		int nread = fscanf(f, "%hd %d %d %d %d", &id, &x, &y, &rotation, &mandatory);
+
+		if (nread == EOF)
+		{
+			// Fin de fichier atteinte proprement : on sort de la boucle.
+			break;
+		}
+		if (nread != 5)
+		{
+			log_error("read_indices: ligne malformée dans %s (%d champs lus sur 5)", file, nread);
+			exit(EXIT_FAILURE);
+		}
+		if (count >= ni)
+		{
+			// Plus d'indices que nindices ne l'annonce : refus avant tout écrasement hors limites.
+			log_error("read_indices: trop d'indices dans %s (attendu %d)", file, ni);
+			exit(EXIT_FAILURE);
+		}
+
+		indices[count].id = id;
+		indices[count].x = (uint8_t)x;
+		indices[count].y = (uint8_t)y;
+		indices[count].rotation = (uint8_t)rotation;
+		indices[count].mandatory = (uint8_t)mandatory;
+		count++;
+	}
+
+	if (count != ni)
+	{
+		// Moins d'indices que nindices ne l'annonce.
+		log_error("read_indices: %d indices lus dans %s (attendu %d)", count, file, ni);
+		exit(EXIT_FAILURE);
+	}
+
+	fclose(f);
+	return array;
+}
+
+/**
+ * @brief Libère un `struct array_index` alloué par `read_indices`.
+ * @param array_indices Tableau à libérer (NULL toléré, ne fait rien).
+ */
+void free_array_index(struct array_index *array_indices)
+{
+	if (array_indices == NULL)
+	{
+		return;
+	}
+	free(array_indices->indices);
+	free(array_indices);
+}
+
+/**
  * @brief Parse une chaîne JSON représentant la grille et alimente `possibility->grid`.
  *
  * Extrait tous les entiers de `str_value` (regex `(-*[0-9]+)`) et les range

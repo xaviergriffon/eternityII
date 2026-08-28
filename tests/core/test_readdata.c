@@ -204,6 +204,108 @@ TEST read_parts_too_few_pieces_exits(void)
 }
 
 /* --------------------------------------------------------------------------
+ * read_indices : parsing du CSV d'indices officiels (id x y rotation mandatory).
+ * ------------------------------------------------------------------------ */
+
+/* Fonction-fils : tente de lire le CSV d'indices pointé par g_csv_path (exit attendu). */
+static void child_read_indices(void)
+{
+    struct array_index *a = read_indices(g_csv_path);
+    free_array_index(a); /* non atteint si read_indices exit() */
+}
+
+TEST read_indices_parses_a_well_formed_csv(void)
+{
+    char path[] = "/tmp/etii_readindices_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+
+    FILE *fp = fdopen(fd, "w");
+    ASSERT(fp != NULL);
+    fputs("nindices: 2\n"
+          "139 7 8 2 1\n"
+          "208 2 2 3 0\n",
+          fp);
+    fclose(fp);
+
+    struct array_index *a = read_indices(path);
+    unlink(path);
+
+    ASSERT(a != NULL);
+    ASSERT_EQ_FMT(2, a->size, "%d");
+
+    ASSERT_EQ_FMT(139, (int)a->indices[0].id, "%d");
+    ASSERT_EQ_FMT(7, (int)a->indices[0].x, "%d");
+    ASSERT_EQ_FMT(8, (int)a->indices[0].y, "%d");
+    ASSERT_EQ_FMT(2, (int)a->indices[0].rotation, "%d");
+    ASSERT_EQ_FMT(1, (int)a->indices[0].mandatory, "%d");
+
+    ASSERT_EQ_FMT(208, (int)a->indices[1].id, "%d");
+    ASSERT_EQ_FMT(0, (int)a->indices[1].mandatory, "%d");
+
+    free_array_index(a);
+    PASS();
+}
+
+TEST read_indices_missing_file_exits(void)
+{
+    strcpy(g_csv_path, "/tmp/etii_indices_does_not_exist_zzz_4242");
+    unlink(g_csv_path);
+    ASSERT_EQ_FMT(EXIT_FAILURE, run_in_fork(child_read_indices, NULL), "%d");
+    PASS();
+}
+
+TEST read_indices_bad_header_exits(void)
+{
+    const char *p = write_temp_csv("pas_de_nindices_ici\n139 7 8 2 1\n");
+    ASSERT(p != NULL);
+    strcpy(g_csv_path, p);
+    int code = run_in_fork(child_read_indices, NULL);
+    unlink(g_csv_path);
+    ASSERT_EQ_FMT(EXIT_FAILURE, code, "%d");
+    PASS();
+}
+
+TEST read_indices_malformed_line_exits(void)
+{
+    const char *p = write_temp_csv("nindices: 1\nGARBAGE\n");
+    ASSERT(p != NULL);
+    strcpy(g_csv_path, p);
+    int code = run_in_fork(child_read_indices, NULL);
+    unlink(g_csv_path);
+    ASSERT_EQ_FMT(EXIT_FAILURE, code, "%d");
+    PASS();
+}
+
+TEST read_indices_too_many_indices_exits(void)
+{
+    const char *p = write_temp_csv("nindices: 1\n139 7 8 2 1\n208 2 2 3 0\n");
+    ASSERT(p != NULL);
+    strcpy(g_csv_path, p);
+    int code = run_in_fork(child_read_indices, NULL);
+    unlink(g_csv_path);
+    ASSERT_EQ_FMT(EXIT_FAILURE, code, "%d");
+    PASS();
+}
+
+TEST read_indices_too_few_indices_exits(void)
+{
+    const char *p = write_temp_csv("nindices: 2\n139 7 8 2 1\n");
+    ASSERT(p != NULL);
+    strcpy(g_csv_path, p);
+    int code = run_in_fork(child_read_indices, NULL);
+    unlink(g_csv_path);
+    ASSERT_EQ_FMT(EXIT_FAILURE, code, "%d");
+    PASS();
+}
+
+TEST free_array_index_tolerates_null(void)
+{
+    free_array_index(NULL);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
  * compute_grid : remplissage colonne par colonne depuis une liste d'entiers.
  * ------------------------------------------------------------------------ */
 
@@ -308,6 +410,13 @@ SUITE(readdata_suite)
     RUN_TEST(read_parts_malformed_line_exits);
     RUN_TEST(read_parts_too_many_pieces_exits);
     RUN_TEST(read_parts_too_few_pieces_exits);
+    RUN_TEST(read_indices_parses_a_well_formed_csv);
+    RUN_TEST(read_indices_missing_file_exits);
+    RUN_TEST(read_indices_bad_header_exits);
+    RUN_TEST(read_indices_malformed_line_exits);
+    RUN_TEST(read_indices_too_many_indices_exits);
+    RUN_TEST(read_indices_too_few_indices_exits);
+    RUN_TEST(free_array_index_tolerates_null);
     RUN_TEST(compute_grid_fills_cells_in_order);
     RUN_TEST(compute_grid_no_match_leaves_grid_untouched);
     RUN_TEST(read_from_json_parses_scalars_and_grid);
