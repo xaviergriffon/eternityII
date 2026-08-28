@@ -3828,9 +3828,9 @@ void datamanager_stock_rate_stats(stock_rate_stats_t *out)
     }
     time_t now = time(NULL);
     stock_rate_windows(&stock_adds_rate, now,
-                        &out->adds_per_sec_1m, &out->adds_per_sec_1h, &out->adds_per_sec_1d);
+                        &out->adds_last_1m, &out->adds_last_1h, &out->adds_last_1d);
     stock_rate_windows(&stock_removes_rate, now,
-                        &out->removes_per_sec_1m, &out->removes_per_sec_1h, &out->removes_per_sec_1d);
+                        &out->removes_last_1m, &out->removes_last_1h, &out->removes_last_1d);
 }
 
 int statistic_datas(void)
@@ -3857,10 +3857,10 @@ int statistic_datas(void)
 
     stock_rate_stats_t rate;
     datamanager_stock_rate_stats(&rate);
-    log_info("stock ADD/s (1min/1h/1j) : %.2f / %.2f / %.2f\n",
-             rate.adds_per_sec_1m, rate.adds_per_sec_1h, rate.adds_per_sec_1d);
-    log_info("stock GET/s (1min/1h/1j) : %.2f / %.2f / %.2f\n",
-             rate.removes_per_sec_1m, rate.removes_per_sec_1h, rate.removes_per_sec_1d);
+    log_info("stock ADD (1min/1h/1j) : %llu / %llu / %llu\n",
+             rate.adds_last_1m, rate.adds_last_1h, rate.adds_last_1d);
+    log_info("stock GET (1min/1h/1j) : %llu / %llu / %llu\n",
+             rate.removes_last_1m, rate.removes_last_1h, rate.removes_last_1d);
     return 0;
 }
 

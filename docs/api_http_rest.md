@@ -171,12 +171,12 @@ Instantané de la télémétrie serveur courante.
   "pruner_removed": 0,
   "stock_spilled_packets": 0,
   "stock_spill_segments": 0,
-  "stock_adds_per_sec_1m": 12.5,
-  "stock_adds_per_sec_1h": 10.2,
-  "stock_adds_per_sec_1d": 8.7,
-  "stock_removes_per_sec_1m": 11.8,
-  "stock_removes_per_sec_1h": 9.9,
-  "stock_removes_per_sec_1d": 8.5,
+  "stock_adds_last_1m": 750,
+  "stock_adds_last_1h": 36700,
+  "stock_adds_last_1d": 752000,
+  "stock_removes_last_1m": 708,
+  "stock_removes_last_1h": 35600,
+  "stock_removes_last_1d": 734000,
   "queues": [
     { "file": 0, "unchecked": 10, "checked": 2, "analysed": 1 },
     { "file": 1, "unchecked": 8,  "checked": 0, "analysed": 0 }
@@ -195,8 +195,8 @@ Instantané de la télémétrie serveur courante.
 | `pruner_checked` / `pruner_removed` | entier ≥ 0 | Toujours `0` côté serveur (ces compteurs n'existent que côté processus pruner ; conservés dans le schéma pour rester alignable avec `control_stats_t` du canal de contrôle) |
 | `stock_spilled_packets` | entier ≥ 0 | Possibilités actuellement déportées sur disque ([`--stock-spill-dir`](utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir)), tous pools et toutes files confondus. `0` si le débordement est désactivé, illimité (`--stock-max-ram` absent), ou simplement inactif à cet instant |
 | `stock_spill_segments` | entier ≥ 0 | Nombre de fichiers de segment de débordement actuellement sur disque, tous pools et toutes files confondus |
-| `stock_adds_per_sec_1m` / `stock_adds_per_sec_1h` / `stock_adds_per_sec_1d` | flottant ≥ 0 | Débit d'ajouts au stock (événements `put_to_pool` réussis, tous pools confondus — non vérifié + vérifié), en événements/seconde, moyenné respectivement sur la dernière minute, la dernière heure et le dernier jour. Une fenêtre plus longue que l'âge réel du serveur est sous-estimée (dénominateur = taille nominale de la fenêtre, pas la durée réellement écoulée) — converge vers la vraie valeur en quelques fenêtres |
-| `stock_removes_per_sec_1m` / `stock_removes_per_sec_1h` / `stock_removes_per_sec_1d` | flottant ≥ 0 | Symétrique côté consommation (événements `scroll_from_pool`), même sémantique de fenêtres |
+| `stock_adds_last_1m` / `stock_adds_last_1h` / `stock_adds_last_1d` | entier ≥ 0 | Nombre CUMULÉ d'ajouts au stock (possibilités insérées par des appels `put_to_pool` réussis, tous pools confondus — non vérifié + vérifié) durant respectivement la dernière minute, la dernière heure et le dernier jour glissants. Un serveur démarré depuis moins longtemps que la fenêtre affiche simplement le cumul réel depuis son démarrage (pas d'extrapolation) |
+| `stock_removes_last_1m` / `stock_removes_last_1h` / `stock_removes_last_1d` | entier ≥ 0 | Symétrique côté consommation (possibilités retirées par `scroll_from_pool`), même sémantique de fenêtres |
 | `queues` | tableau | Une entrée par file de stock **active** (`nb_file_possibility`, configurable au démarrage via `--stock-files`, 10 par défaut, jusqu'à 128 — voir [Utilisation](utilisation.md#maîtrise-de-la-charge-serveur---stock-files---rebalance-budget---tcp-timeout)), avec ses trois compteurs par pool — RÉSIDENT uniquement, comme `possibility_stock`/`checked_stock`. L'ordre des entrées suit l'index de file (0 à `nb_file_possibility - 1`), pas garanti trié par une autre clé |
 
 ### GET /api/v1/status

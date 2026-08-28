@@ -77,33 +77,31 @@ static unsigned long long sum_min_window(const stock_rate_counter_t *c, uint64_t
 }
 
 void stock_rate_windows(const stock_rate_counter_t *c, time_t now,
-                         double *per_sec_1m, double *per_sec_1h, double *per_sec_1d)
+                         unsigned long long *last_1m, unsigned long long *last_1h,
+                         unsigned long long *last_1d)
 {
     if (c == NULL)
     {
-        if (per_sec_1m != NULL) *per_sec_1m = 0.0;
-        if (per_sec_1h != NULL) *per_sec_1h = 0.0;
-        if (per_sec_1d != NULL) *per_sec_1d = 0.0;
+        if (last_1m != NULL) *last_1m = 0;
+        if (last_1h != NULL) *last_1h = 0;
+        if (last_1d != NULL) *last_1d = 0;
         return;
     }
 
     uint64_t now_sec = (uint64_t)now;
     uint64_t now_min = (uint64_t)now / 60;
 
-    if (per_sec_1m != NULL)
+    if (last_1m != NULL)
     {
-        unsigned long long total = sum_sec_window(c, now_sec, STOCK_RATE_SEC_BUCKETS);
-        *per_sec_1m = (double)total / (double)STOCK_RATE_SEC_BUCKETS;
+        *last_1m = sum_sec_window(c, now_sec, STOCK_RATE_SEC_BUCKETS);
     }
-    if (per_sec_1h != NULL)
+    if (last_1h != NULL)
     {
-        unsigned long long total = sum_min_window(c, now_min, 60);
-        *per_sec_1h = (double)total / 3600.0;
+        *last_1h = sum_min_window(c, now_min, 60);
     }
-    if (per_sec_1d != NULL)
+    if (last_1d != NULL)
     {
-        unsigned long long total = sum_min_window(c, now_min, STOCK_RATE_MIN_BUCKETS);
-        *per_sec_1d = (double)total / 86400.0;
+        *last_1d = sum_min_window(c, now_min, STOCK_RATE_MIN_BUCKETS);
     }
 }
 

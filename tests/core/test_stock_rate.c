@@ -1,6 +1,6 @@
 /*
- * Tests unitaires du module stock_rate.c (débit d'ajouts/consommations du
- * stock, moyenné sur 1min/1h/1jour — cf. AGENTS.md).
+ * Tests unitaires du module stock_rate.c (cumul d'ajouts/consommations du
+ * stock sur 1min/1h/1jour — cf. AGENTS.md).
  *
  * stock_rate.c est totalement autonome (aucune dépendance autre que <time.h>
  * et <stdint.h>) : chaque test construit son propre `stock_rate_counter_t`
@@ -21,24 +21,21 @@
  * stock_rate_record / stock_rate_windows — fenêtre 1 minute
  * ------------------------------------------------------------------------ */
 
-TEST record_then_windows_reports_events_within_the_minute(void)
+TEST record_then_windows_reports_the_cumulative_count(void)
 {
     stock_rate_counter_t c;
     stock_rate_reset_for_tests(&c);
 
     stock_rate_record(&c, 60, BASE_NOW);
 
-    double m, h, d;
+    unsigned long long m, h, d;
     stock_rate_windows(&c, BASE_NOW, &m, &h, &d);
 
-    /* 60 événements concentrés dans UNE seconde => 1 événement/s en moyenne
-     * sur la fenêtre minute (60 événements / 60s). Les fenêtres heure/jour
-     * moyennent le même total sur une durée bien plus longue (3600s/86400s),
-     * donc un débit bien plus faible — ce n'est pas la même quantité que "m",
-     * juste le même total réparti sur un dénominateur différent. */
-    ASSERT_IN_RANGE(1.0, m, 0.001);
-    ASSERT_IN_RANGE(60.0 / 3600.0, h, 0.001);
-    ASSERT_IN_RANGE(60.0 / 86400.0, d, 0.0001);
+    /* Un seul événement de 60 : le même total cumulé se retrouve dans les
+     * trois fenêtres, puisqu'il est plus récent que chacune d'elles. */
+    ASSERT_EQ_FMT(60ULL, m, "%llu");
+    ASSERT_EQ_FMT(60ULL, h, "%llu");
+    ASSERT_EQ_FMT(60ULL, d, "%llu");
     PASS();
 }
 
@@ -49,11 +46,11 @@ TEST record_with_zero_count_is_noop(void)
 
     stock_rate_record(&c, 0, BASE_NOW);
 
-    double m, h, d;
+    unsigned long long m, h, d;
     stock_rate_windows(&c, BASE_NOW, &m, &h, &d);
-    ASSERT_IN_RANGE(0.0, m, 0.001);
-    ASSERT_IN_RANGE(0.0, h, 0.001);
-    ASSERT_IN_RANGE(0.0, d, 0.001);
+    ASSERT_EQ_FMT(0ULL, m, "%llu");
+    ASSERT_EQ_FMT(0ULL, h, "%llu");
+    ASSERT_EQ_FMT(0ULL, d, "%llu");
     PASS();
 }
 
@@ -62,12 +59,15 @@ TEST event_outside_the_minute_window_is_excluded_from_1m(void)
     stock_rate_counter_t c;
     stock_rate_reset_for_tests(&c);
 
-    /* Un événement il y a 120s : hors de la fenêtre 1 minute (60s). */
+    /* Un événement il y a 120s : hors de la fenêtre 1 minute (60s), mais
+     * toujours dans les fenêtres 1h/1j. */
     stock_rate_record(&c, 60, BASE_NOW - 120);
 
-    double m, h, d;
+    unsigned long long m, h, d;
     stock_rate_windows(&c, BASE_NOW, &m, &h, &d);
-    ASSERT_IN_RANGE(0.0, m, 0.001);
+    ASSERT_EQ_FMT(0ULL, m, "%llu");
+    ASSERT_EQ_FMT(60ULL, h, "%llu");
+    ASSERT_EQ_FMT(60ULL, d, "%llu");
     PASS();
 }
 
@@ -80,17 +80,14 @@ TEST event_within_the_hour_but_outside_the_minute_counts_only_in_1h_and_1d(void)
     stock_rate_counter_t c;
     stock_rate_reset_for_tests(&c);
 
-    /* Il y a 30 minutes : dans la fenêtre 1h (3600s) et 1j, hors de la
-     * fenêtre 1min. */
+    /* Il y a 30 minutes : dans la fenêtre 1h et 1j, hors de la fenêtre 1min. */
     stock_rate_record(&c, 3600, BASE_NOW - 1800);
 
-    double m, h, d;
+    unsigned long long m, h, d;
     stock_rate_windows(&c, BASE_NOW, &m, &h, &d);
-    ASSERT_IN_RANGE(0.0, m, 0.001);
-    /* 3600 événements / 3600s de fenêtre heure => 1 événement/s. */
-    ASSERT_IN_RANGE(1.0, h, 0.001);
-    /* Même total (3600) mais dénominateur jour (86400s) => débit plus faible. */
-    ASSERT_IN_RANGE(3600.0 / 86400.0, d, 0.001);
+    ASSERT_EQ_FMT(0ULL, m, "%llu");
+    ASSERT_EQ_FMT(3600ULL, h, "%llu");
+    ASSERT_EQ_FMT(3600ULL, d, "%llu");
     PASS();
 }
 
@@ -102,9 +99,10 @@ TEST event_outside_the_hour_window_is_excluded_from_1h(void)
     /* Il y a 2 heures : hors de la fenêtre 1h, toujours dans la fenêtre 1j. */
     stock_rate_record(&c, 3600, BASE_NOW - 7200);
 
-    double m, h, d;
+    unsigned long long m, h, d;
     stock_rate_windows(&c, BASE_NOW, &m, &h, &d);
-    ASSERT_IN_RANGE(0.0, h, 0.001);
+    ASSERT_EQ_FMT(0ULL, h, "%llu");
+    ASSERT_EQ_FMT(3600ULL, d, "%llu");
     PASS();
 }
 
@@ -120,11 +118,11 @@ TEST event_outside_the_day_window_is_excluded_from_1d(void)
     /* Il y a 2 jours : hors des trois fenêtres. */
     stock_rate_record(&c, 86400, BASE_NOW - 2 * 86400);
 
-    double m, h, d;
+    unsigned long long m, h, d;
     stock_rate_windows(&c, BASE_NOW, &m, &h, &d);
-    ASSERT_IN_RANGE(0.0, m, 0.001);
-    ASSERT_IN_RANGE(0.0, h, 0.001);
-    ASSERT_IN_RANGE(0.0, d, 0.001);
+    ASSERT_EQ_FMT(0ULL, m, "%llu");
+    ASSERT_EQ_FMT(0ULL, h, "%llu");
+    ASSERT_EQ_FMT(0ULL, d, "%llu");
     PASS();
 }
 
@@ -145,11 +143,11 @@ TEST bucket_rollover_does_not_leak_stale_seconds(void)
     stock_rate_record(&c, 42, BASE_NOW);
 
     time_t later = BASE_NOW + STOCK_RATE_SEC_BUCKETS;
-    double m, h, d;
+    unsigned long long m, h, d;
     stock_rate_windows(&c, later, &m, &h, &d);
     /* Le vieil événement est hors de la fenêtre 1min à `later` : le bucket
      * recyclé ne doit rapporter aucun événement pour cette seconde. */
-    ASSERT_IN_RANGE(0.0, m, 0.001);
+    ASSERT_EQ_FMT(0ULL, m, "%llu");
     PASS();
 }
 
@@ -164,15 +162,16 @@ TEST bucket_rollover_does_not_leak_stale_minutes(void)
     stock_rate_record(&c, 100, BASE_NOW);
 
     time_t later = BASE_NOW + (time_t)STOCK_RATE_MIN_BUCKETS * 60;
-    double m, h, d;
+    unsigned long long m, h, d;
     stock_rate_windows(&c, later, &m, &h, &d);
-    ASSERT_IN_RANGE(0.0, h, 0.001);
-    ASSERT_IN_RANGE(0.0, d, 0.001);
+    ASSERT_EQ_FMT(0ULL, h, "%llu");
+    ASSERT_EQ_FMT(0ULL, d, "%llu");
     PASS();
 }
 
 /* --------------------------------------------------------------------------
- * Accumulation de plusieurs appels dans le même bucket.
+ * Accumulation de plusieurs appels dans le même bucket, et sur des buckets
+ * différents à l'intérieur de la même fenêtre.
  * ------------------------------------------------------------------------ */
 
 TEST multiple_records_in_the_same_second_accumulate(void)
@@ -184,10 +183,27 @@ TEST multiple_records_in_the_same_second_accumulate(void)
     stock_rate_record(&c, 20, BASE_NOW);
     stock_rate_record(&c, 30, BASE_NOW);
 
-    double m, h, d;
+    unsigned long long m, h, d;
     stock_rate_windows(&c, BASE_NOW, &m, &h, &d);
-    /* 60 événements / 60s de fenêtre => 1 événement/s. */
-    ASSERT_IN_RANGE(1.0, m, 0.001);
+    ASSERT_EQ_FMT(60ULL, m, "%llu");
+    PASS();
+}
+
+TEST records_across_different_seconds_within_the_minute_sum_up(void)
+{
+    stock_rate_counter_t c;
+    stock_rate_reset_for_tests(&c);
+
+    /* Trois secondes distinctes, toutes dans la fenêtre 1min à BASE_NOW. */
+    stock_rate_record(&c, 1, BASE_NOW - 2);
+    stock_rate_record(&c, 2, BASE_NOW - 1);
+    stock_rate_record(&c, 3, BASE_NOW);
+
+    unsigned long long m, h, d;
+    stock_rate_windows(&c, BASE_NOW, &m, &h, &d);
+    ASSERT_EQ_FMT(6ULL, m, "%llu");
+    ASSERT_EQ_FMT(6ULL, h, "%llu");
+    ASSERT_EQ_FMT(6ULL, d, "%llu");
     PASS();
 }
 
@@ -203,9 +219,9 @@ TEST windows_tolerates_null_output_pointers(void)
     stock_rate_record(&c, 5, BASE_NOW);
 
     /* Ne doit pas planter même si seule une partie des sorties est demandée. */
-    double m;
+    unsigned long long m;
     stock_rate_windows(&c, BASE_NOW, &m, NULL, NULL);
-    ASSERT_IN_RANGE(5.0 / 60.0, m, 0.001);
+    ASSERT_EQ_FMT(5ULL, m, "%llu");
     PASS();
 }
 
@@ -218,17 +234,17 @@ TEST record_tolerates_null_counter(void)
 
 TEST windows_tolerates_null_counter(void)
 {
-    double m = -1.0, h = -1.0, d = -1.0;
+    unsigned long long m = 999, h = 999, d = 999;
     stock_rate_windows(NULL, BASE_NOW, &m, &h, &d);
-    ASSERT_IN_RANGE(0.0, m, 0.001);
-    ASSERT_IN_RANGE(0.0, h, 0.001);
-    ASSERT_IN_RANGE(0.0, d, 0.001);
+    ASSERT_EQ_FMT(0ULL, m, "%llu");
+    ASSERT_EQ_FMT(0ULL, h, "%llu");
+    ASSERT_EQ_FMT(0ULL, d, "%llu");
     PASS();
 }
 
 SUITE(stock_rate_suite)
 {
-    RUN_TEST(record_then_windows_reports_events_within_the_minute);
+    RUN_TEST(record_then_windows_reports_the_cumulative_count);
     RUN_TEST(record_with_zero_count_is_noop);
     RUN_TEST(event_outside_the_minute_window_is_excluded_from_1m);
     RUN_TEST(event_within_the_hour_but_outside_the_minute_counts_only_in_1h_and_1d);
@@ -237,6 +253,7 @@ SUITE(stock_rate_suite)
     RUN_TEST(bucket_rollover_does_not_leak_stale_seconds);
     RUN_TEST(bucket_rollover_does_not_leak_stale_minutes);
     RUN_TEST(multiple_records_in_the_same_second_accumulate);
+    RUN_TEST(records_across_different_seconds_within_the_minute_sum_up);
     RUN_TEST(windows_tolerates_null_output_pointers);
     RUN_TEST(record_tolerates_null_counter);
     RUN_TEST(windows_tolerates_null_counter);

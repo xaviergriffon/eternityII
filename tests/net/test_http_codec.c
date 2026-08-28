@@ -258,12 +258,12 @@ TEST http_json_format_stats_golden(void)
     view.pruner_removed = 4;
     view.stock_spilled_packets = 8;
     view.stock_spill_segments = 2;
-    view.stock_adds_per_sec_1m = 1.5;
-    view.stock_adds_per_sec_1h = 0.25;
-    view.stock_adds_per_sec_1d = 0.0125;
-    view.stock_removes_per_sec_1m = 1.25;
-    view.stock_removes_per_sec_1h = 0.2;
-    view.stock_removes_per_sec_1d = 0.01;
+    view.stock_adds_last_1m = 150;
+    view.stock_adds_last_1h = 900;
+    view.stock_adds_last_1d = 12000;
+    view.stock_removes_last_1m = 125;
+    view.stock_removes_last_1h = 720;
+    view.stock_removes_last_1d = 9000;
     view.queue_unchecked[0] = 7;
     view.queue_checked[0] = 1;
     view.queue_analysed[0] = 0;
@@ -277,12 +277,12 @@ TEST http_json_format_stats_golden(void)
     ASSERT(strstr(buf, "\"active_threads\":3") != NULL);
     ASSERT(strstr(buf, "\"stock_spilled_packets\":8") != NULL);
     ASSERT(strstr(buf, "\"stock_spill_segments\":2") != NULL);
-    ASSERT(strstr(buf, "\"stock_adds_per_sec_1m\":1.5000") != NULL);
-    ASSERT(strstr(buf, "\"stock_adds_per_sec_1h\":0.2500") != NULL);
-    ASSERT(strstr(buf, "\"stock_adds_per_sec_1d\":0.0125") != NULL);
-    ASSERT(strstr(buf, "\"stock_removes_per_sec_1m\":1.2500") != NULL);
-    ASSERT(strstr(buf, "\"stock_removes_per_sec_1h\":0.2000") != NULL);
-    ASSERT(strstr(buf, "\"stock_removes_per_sec_1d\":0.0100") != NULL);
+    ASSERT(strstr(buf, "\"stock_adds_last_1m\":150") != NULL);
+    ASSERT(strstr(buf, "\"stock_adds_last_1h\":900") != NULL);
+    ASSERT(strstr(buf, "\"stock_adds_last_1d\":12000") != NULL);
+    ASSERT(strstr(buf, "\"stock_removes_last_1m\":125") != NULL);
+    ASSERT(strstr(buf, "\"stock_removes_last_1h\":720") != NULL);
+    ASSERT(strstr(buf, "\"stock_removes_last_1d\":9000") != NULL);
     ASSERT(strstr(buf, "\"queues\":[{\"file\":0,\"unchecked\":7,\"checked\":1,\"analysed\":0}") != NULL);
     ASSERT(strstr(buf, "]}") != NULL); /* tableau bien refermé */
 

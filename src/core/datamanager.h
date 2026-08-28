@@ -896,23 +896,23 @@ typedef struct {
 void datamanager_stock_distribution(stock_distribution_t *out);
 
 /**
- * @brief Débit d'ajouts/consommations du stock, en événements/seconde,
- *        moyenné sur trois fenêtres glissantes — voir `stock_rate_windows`
- *        (`core/stock_rate.h`) pour la sémantique exacte de chaque champ.
+ * @brief Cumul d'événements d'ajout/consommation du stock sur trois fenêtres
+ *        glissantes — voir `stock_rate_windows` (`core/stock_rate.h`) pour
+ *        la sémantique exacte de chaque champ.
  */
 typedef struct {
-    double adds_per_sec_1m;
-    double adds_per_sec_1h;
-    double adds_per_sec_1d;
-    double removes_per_sec_1m;
-    double removes_per_sec_1h;
-    double removes_per_sec_1d;
+    unsigned long long adds_last_1m;
+    unsigned long long adds_last_1h;
+    unsigned long long adds_last_1d;
+    unsigned long long removes_last_1m;
+    unsigned long long removes_last_1h;
+    unsigned long long removes_last_1d;
 } stock_rate_stats_t;
 
 /**
- * @brief Débit courant d'ajouts (`put_to_pool`) et de consommations
+ * @brief Nombre d'ajouts (`put_to_pool`) et de consommations
  *        (`scroll_from_pool`) du stock, tous pools confondus (non vérifié +
- *        vérifié), moyenné sur la dernière minute/heure/jour.
+ *        vérifié), cumulés sur la dernière minute/heure/jour.
  *
  * Consulté par `statistic_datas()` (commande console `stats`/`statistic`) et
  * par `http_stats_collect()` (`GET /api/v1/stats`) — mesure côté serveur

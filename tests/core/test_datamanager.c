@@ -402,7 +402,7 @@ TEST get_last_possibility_drains_pool(void)
 }
 
 /* --------------------------------------------------------------------------
- * datamanager_stock_rate_stats : débit d'ajouts/consommations du stock
+ * datamanager_stock_rate_stats : cumul d'ajouts/consommations du stock
  * (core/stock_rate.h, instrumenté depuis put_to_pool/scroll_from_pool).
  *
  * Ces tests s'appuient sur l'horloge réelle (datamanager_stock_rate_stats
@@ -420,14 +420,14 @@ TEST stock_rate_stats_reflects_recent_add(void)
 
     stock_rate_stats_t before;
     datamanager_stock_rate_stats(&before);
-    ASSERT_IN_RANGE(0.0, before.adds_per_sec_1m, 0.0001);
+    ASSERT_EQ_FMT(0ULL, before.adds_last_1m, "%llu");
 
     int allocs[] = { 1, 2, 3 };
     add_packets(allocs, 3);
 
     stock_rate_stats_t after;
     datamanager_stock_rate_stats(&after);
-    ASSERT(after.adds_per_sec_1m > 0.0);
+    ASSERT_EQ_FMT(3ULL, after.adds_last_1m, "%llu");
 
     drain_datamanager();
     PASS();
@@ -441,14 +441,14 @@ TEST stock_rate_stats_reflects_recent_scroll(void)
 
     stock_rate_stats_t before;
     datamanager_stock_rate_stats(&before);
-    ASSERT_IN_RANGE(0.0, before.removes_per_sec_1m, 0.0001);
+    ASSERT_EQ_FMT(0ULL, before.removes_last_1m, "%llu");
 
     array_possibility_packet *r = get_last_possibility(NULL, 10, NULL);
     free_array_possibility_packet(r);
 
     stock_rate_stats_t after;
     datamanager_stock_rate_stats(&after);
-    ASSERT(after.removes_per_sec_1m > 0.0);
+    ASSERT_EQ_FMT(2ULL, after.removes_last_1m, "%llu");
     PASS();
 }
 

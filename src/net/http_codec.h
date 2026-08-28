@@ -271,16 +271,16 @@ typedef struct {
     /// Nombre de fichiers de segment de débordement actuellement sur disque,
     /// tous pools et toutes files confondus.
     unsigned long long stock_spill_segments;
-    /// Débit d'ajouts/consommations du stock (tous pools confondus), moyenné
-    /// sur 1 min/1h/1j — cf. `datamanager_stock_rate_stats`
+    /// Cumul d'ajouts/consommations du stock (tous pools confondus) sur les
+    /// trois fenêtres 1 min/1h/1j — cf. `datamanager_stock_rate_stats`
     /// (`core/datamanager.h`) et `core/stock_rate.h` pour la sémantique
     /// exacte des fenêtres.
-    double stock_adds_per_sec_1m;
-    double stock_adds_per_sec_1h;
-    double stock_adds_per_sec_1d;
-    double stock_removes_per_sec_1m;
-    double stock_removes_per_sec_1h;
-    double stock_removes_per_sec_1d;
+    unsigned long long stock_adds_last_1m;
+    unsigned long long stock_adds_last_1h;
+    unsigned long long stock_adds_last_1d;
+    unsigned long long stock_removes_last_1m;
+    unsigned long long stock_removes_last_1h;
+    unsigned long long stock_removes_last_1d;
     /// Tailles par file (index 0..nb_file_possibility-1, PR4 : le compte
     /// RÉEL est une variable, ce tableau est dimensionné au plafond de
     /// compilation NB_FILE_POSSIBILITY_MAX), pool non vérifié.

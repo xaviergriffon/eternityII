@@ -1,12 +1,13 @@
 /**
  * @file stock_rate.h
- * @brief Débit d'ajouts/consommations du stock de possibilités, moyenné sur
- *        trois fenêtres glissantes (1 minute, 1 heure, 1 jour).
+ * @brief Cumul d'événements d'ajout/consommation du stock de possibilités,
+ *        sur trois fenêtres glissantes (1 minute, 1 heure, 1 jour).
  *
  * Module côté serveur uniquement : instrumente `put_to_pool`/`scroll_from_pool`
- * (`core/datamanager.c`) pour répondre à « à quelle vitesse le stock
- * grossit/se vide en ce moment ? », sans attendre qu'un niveau instantané
- * change visiblement. Ne dépend d'aucun module `app/` (règle AGENTS.md).
+ * (`core/datamanager.c`) pour répondre à « combien d'ajouts/consommations le
+ * stock a-t-il vus durant chaque tranche ? », sans attendre qu'un niveau
+ * instantané change visiblement. Ne dépend d'aucun module `app/` (règle
+ * AGENTS.md).
  */
 #ifndef eternityII_stock_rate_h
 #define eternityII_stock_rate_h
@@ -62,25 +63,25 @@ typedef struct {
 void stock_rate_record(stock_rate_counter_t *c, unsigned int n, time_t now);
 
 /**
- * @brief Calcule le débit moyen (événements/seconde) sur les trois fenêtres,
- *        à l'instant `now`.
+ * @brief Cumule le nombre d'événements sur les trois fenêtres, à l'instant
+ *        `now`.
  *
  * Une fenêtre dont la durée réelle observée est plus courte que sa taille
- * nominale (ex. serveur démarré il y a 10 minutes : la fenêtre "jour" ne
- * couvre en réalité que ces 10 minutes) n'est PAS distinguée ici — le
- * dénominateur reste la taille nominale de la fenêtre (60/3600/86400s), donc
- * le débit affiché est sous-estimé tant que le serveur est jeune. Comportement
- * assumé : une statistique de tendance, pas un compteur exact, et qui
- * converge vers la vraie valeur en quelques fenêtres.
+ * nominale (ex. serveur démarré il y a 10 minutes : la fenêtre "jour" n'a en
+ * réalité que 10 minutes d'historique) n'est PAS distinguée ici — seuls les
+ * buckets réellement écrits contribuent au total, donc un serveur jeune
+ * affiche simplement moins d'événements sur la fenêtre jour, sans distorsion :
+ * c'est un cumul réel sur ce qui s'est passé, jamais une estimation.
  *
- * @param c           Compteur à interroger.
- * @param now         Horodatage de référence.
- * @param per_sec_1m  Sortie : débit moyen sur la dernière minute.
- * @param per_sec_1h  Sortie : débit moyen sur la dernière heure.
- * @param per_sec_1d  Sortie : débit moyen sur le dernier jour.
+ * @param c      Compteur à interroger.
+ * @param now    Horodatage de référence.
+ * @param last_1m Sortie : nombre d'événements survenus dans la dernière minute.
+ * @param last_1h Sortie : nombre d'événements survenus dans la dernière heure.
+ * @param last_1d Sortie : nombre d'événements survenus dans le dernier jour.
  */
 void stock_rate_windows(const stock_rate_counter_t *c, time_t now,
-                         double *per_sec_1m, double *per_sec_1h, double *per_sec_1d);
+                         unsigned long long *last_1m, unsigned long long *last_1h,
+                         unsigned long long *last_1d);
 
 /**
  * @brief Remet `c` à un état vierge (tous les buckets à zéro/époque 0).
