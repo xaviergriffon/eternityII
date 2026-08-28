@@ -27,8 +27,8 @@ s'est révélé être un artefact du PROTOCOLE DE MESURE (mono-processus depuis 
 une propriété de l'ordre fixe — voir la correction en §4.7 — ce qui rouvre §4.4, §4.5 et
 §4.6b (tous écartés/désactivés pour cause de profondeur insuffisante) à une nouvelle mesure. La variante « partition de l'arène » de §4.2 reste une
 proposition non implémentée. PR 11 (§4.10, moteur MRV pour la preuve bornée du pruner) **livrée en opt-in**
-(`ETII_PRUNER_DFS_MRV=1`, défaut inchangé) : mesurée à ×3–×4 de fermetures à budget égal sur
-un stock de production de 126 287 possibilités — c'est la conséquence directe, côté pruner, du verdict de réfutation de PR 10.
+(`ETII_PRUNER_DFS_MRV=1`, défaut inchangé à l'époque) : mesurée à ×3–×4 de fermetures à budget égal sur
+un stock de production de 126 287 possibilités — c'est la conséquence directe, côté pruner, du verdict de réfutation de PR 10. **MRV est depuis devenu le moteur UNIQUE, recherche et pruner, et les deux drapeaux ci-dessus ont été supprimés** — voir [docs/conception/mrv_moteur_unique.md](mrv_moteur_unique.md) (PR3).
 §4.9 (table de région sur les zones d'angle,
 et élimination par résolution d'un cadre complet) est **écartée sans implémentation** —
 seule piste du document tranchée avant écriture de code, par quatre mesures statiques.
@@ -718,9 +718,14 @@ contrôle précis. Porter (a) au GPU réduirait l'écart de 10,8 points sans le 
 (toujours écarté du GPU pour la raison SIMT ci-dessus) ; ni l'un ni l'autre n'est fait à ce
 stade.
 
-### 4.7 Ordre de variable dynamique (MRV) — implémenté et mesuré favorable (PR 10), pas encore le défaut de déploiement
+### 4.7 Ordre de variable dynamique (MRV) — implémenté et mesuré favorable (PR 10), devenu le moteur unique (PR3 de mrv_moteur_unique.md)
 
-**Statut : implémenté, testé, mesuré favorable — PAS ENCORE le défaut de déploiement.**
+**Statut : implémenté, testé, mesuré favorable, puis promu moteur UNIQUE.** La bascule
+décrite comme « pas encore le défaut de déploiement » ci-dessous a depuis été faite :
+voir [docs/conception/mrv_moteur_unique.md](mrv_moteur_unique.md) (PR3) — `mrv_enabled`/
+`ETII_MRV` et le moteur à ordre fixe qu'il sélectionnait ont été supprimés, MRV est
+désormais le seul moteur de recherche. Le récit de la mesure ci-dessous est conservé tel
+quel (post-mortem de décision valide), il ne décrit plus l'état actuel du code.
 Traité en deux temps, ce que la section garde en trace parce que le raisonnement de la
 première étape est ce qui a justifié d'investir dans la seconde : un **prototype scopé**
 d'abord (PR 9, ci-dessous), volontairement dégradé (balayage naïf, aucune délégation) mais
@@ -797,17 +802,22 @@ mais NE PAS l'écarter non plus** — il documente une direction VALIDÉE, pas u
 implémentation complète recommandée comme projet séparé, sur trois axes : (1) cache de
 candidats remplaçant le balayage naïf O(256), (2) re-canonisation aux frontières de
 délégation, (3) arbitrage d'un bump de `VERSION`. **Ces trois axes sont traités ci-dessous
-(PR 10) et le moteur est implémenté, testé, mesuré favorable — mais le défaut de
-déploiement reste l'ordre fixe.**
+(PR 10) et le moteur est implémenté, testé, mesuré favorable.** (Note : au moment de PR3,
+la bascule décrite comme « pas encore le défaut » a été faite — MRV est le moteur unique,
+voir [docs/conception/mrv_moteur_unique.md](mrv_moteur_unique.md).)
 
-#### PR 10 — implémentation complète, mesurée favorable (pas encore le défaut)
+#### PR 10 — implémentation complète, mesurée favorable (devenue le moteur unique en PR3)
 
-**Statut : livrée, mesurée favorable, PAS ENCORE le défaut.**
-`search_packet_backtracking_mrv` (`src/core/etii_search.c`) remplace le prototype de mesure ;
-`mrv_enabled` (`MRV_DEFAULT_ENABLED`, `static_variables.h`) reste à **0** — ordre fixe par
-défaut, décision de DÉPLOIEMENT distincte du verdict de mesure : basculer le défaut change le
-moteur de recherche de toute une flotte déployée, ce qui appelle plus de recul que ce qu'une
-seule PR peut apporter. `ETII_MRV=1` active l'ordre dynamique sans reconstruire. Contrairement
+**Statut : livrée, mesurée favorable, puis promue moteur UNIQUE (PR3).**
+`search_packet_backtracking_mrv` (`src/core/etii_search.c`) remplace le prototype de mesure.
+Le paragraphe suivant décrit l'état d'AVANT PR3 : `mrv_enabled` (`MRV_DEFAULT_ENABLED`,
+`static_variables.h`) restait à **0** — ordre fixe par défaut, décision de DÉPLOIEMENT
+distincte du verdict de mesure : basculer le défaut changeait le moteur de recherche de
+toute une flotte déployée, ce qui appelait plus de recul que ce qu'une seule PR pouvait
+apporter. `ETII_MRV=1` activait l'ordre dynamique sans reconstruire. Ce drapeau, et le
+moteur à ordre fixe qu'il sélectionnait, ont depuis été supprimés (PR3 de
+mrv_moteur_unique.md) une fois la mesure jugée favorable dans les deux usages (recherche et
+pruner) — le paragraphe ci-dessous, conservé pour le contraste historique : contrairement
 à §4.1/§4.8 (leviers adoptés dont l'interrupteur a été retiré une fois le défaut basculé),
 l'interrupteur est ici structurel plutôt que temporaire : le protocole de mesure du banc (§7)
 impose de pouvoir comparer PAR-DESSUS l'état précédent, et `search_packet_backtracking_core`
@@ -1239,9 +1249,14 @@ reproposer sans avoir d'abord invalidé la mesure 3.
   pas, la mesure 2 dit que le test exact serait bon marché. Ne pas retoucher `directions[]`
   pour provoquer artificiellement cette situation : bump de `VERSION` (§5).
 
-### 4.10 Moteur de la preuve bornée du pruner : MRV plutôt qu'ordre fixe — IMPLÉMENTÉ, OPT-IN
+### 4.10 Moteur de la preuve bornée du pruner : MRV plutôt qu'ordre fixe — devenu permanent (PR3 de mrv_moteur_unique.md)
 
-**Statut : implémenté, testé, opt-in (`ETII_PRUNER_DFS_MRV=1`), défaut inchangé (ordre fixe).**
+**Statut : implémenté, testé, opt-in (`ETII_PRUNER_DFS_MRV=1`), puis rendu PERMANENT.**
+Voir [docs/conception/mrv_moteur_unique.md](mrv_moteur_unique.md) (PR3) : `pruner_dfs_mrv`/
+`ETII_PRUNER_DFS_MRV` et l'ordre fixe qu'il pouvait sélectionner ont été supprimés — la
+preuve bornée du pruner emploie MRV inconditionnellement. Le récit ci-dessous (mesure
+opt-in, défaut inchangé) décrit l'état d'AVANT cette bascule, conservé tel quel comme
+post-mortem de décision.
 Piste ouverte par une question d'exploitation : sur les machines les plus performantes,
 serait-il rentable d'élaguer davantage les possibilités en cours d'étude, pour éliminer au
 plus tôt ? La réponse tient en trois constats, dont le troisième est cette PR.
@@ -1501,17 +1516,18 @@ elle-même.
   étant restées volontairement séparées). Code entièrement retiré, comme §4.2/§4.3/§4.4 —
   cf. §4.5 pour le détail complet et la piste de fusion non essayée qui pourrait changer
   cette conclusion.
-- **4.7 (ordre dynamique MRV) : implémenté et mesuré favorable, `ETII_MRV=0` reste le défaut de déploiement.** Prototype scopé d'abord
+- **4.7 (ordre dynamique MRV) : implémenté et mesuré favorable, devenu le moteur UNIQUE (PR3 de mrv_moteur_unique.md).** Prototype scopé d'abord
   (PR 9 : `max_result` 74 → **180** à 5 M nœuds, mais −99,7 % de débit et aucune délégation
   possible — conservé sans être déployé), puis implémentation complète (PR 10) : choix de
   case ramené d'un balayage naïf de tout le plateau à la seule frontière comptée par
   `popcount` (**×35 de débit** : 23 k → 812 k nœuds/s), délégation rétablie par
   re-canonisation des paquets émis (donc **aucun bump de `VERSION`**, flotte mixte
-  possible), `max_result` **186** à 2 M nœuds contre 74 pour l'ordre fixe — lequel reste à
-  74 même avec 10× plus de nœuds, c'est-à-dire plus de temps mural. `ETII_MRV=0` conserve
-  l'ordre fixe pour les mesures A/B et un repli. Conséquence à ne pas oublier : §4.4, §4.5
-  et §4.6b ont été écartés/désactivés à cause du mur à 74, qui vient de bouger — à
-  remesurer, cf. §4.7.
+  possible), `max_result` **186** à 2 M nœuds contre 74 pour l'ordre fixe — lequel restait à
+  74 même avec 10× plus de nœuds, c'est-à-dire plus de temps mural. `ETII_MRV=0` conservait
+  l'ordre fixe pour les mesures A/B et un repli, jusqu'à sa suppression en PR3 (mrv_moteur_unique.md) :
+  MRV est désormais le seul moteur, `mrv_enabled`/`ETII_MRV` n'existent plus. Conséquence à
+  ne pas oublier : §4.4, §4.5 et §4.6b ont été écartés/désactivés à cause du mur à 74, qui a
+  bougé — à remesurer, cf. §4.7.
 
 - **Pas de table de région sur les zones d'angle, ni d'élimination par le cadre (§4.9).**
   Écartée **sans implémentation**, cas unique dans ce document : quatre mesures statiques
@@ -1577,8 +1593,8 @@ recherché ici.
 | 7 | ~~**4.8** ordre des candidats dans l'arène (expérience)~~ **adopté** | faible | `rare_first` adopté inconditionnellement (mesuré, §4.8 : +3,2 %, taux d'élagage changé mais `max_result` inchangé) |
 | 8 | ~~**4.5** propagation des forcées dans la boucle chaude~~ **écarté** | moyen | non rentable (mesuré, §4.5 : −40,4 %, `max_result` inférieur à budget égal) — recoupe le forward-check, coût de lookup doublé sur le même périmètre de voisines |
 | 9 | ~~**4.7** ordre dynamique MRV (prototype scopé)~~ **concluant** | élevé | validé (mesuré, §4.7 : `max_result` 74→180 à 5 M nœuds) — délégation désactivée dans le prototype, non déployable en l'état ; cache incrémental + re-canonisation restent à faire |
-| 10 | ~~**4.7** ordre dynamique MRV (implémentation complète)~~ **mesuré favorable, défaut inchangé (`ETII_MRV=0`)** | élevé | coût de réfutation ~4× meilleur sur stock réel à CPU égal (§4.7) — frontière + `popcount`, re-canonisation des paquets délégués, pas de bump de `VERSION` ; rouvre §4.4/§4.5/§4.6b ; bascule du défaut de déploiement laissée à l'opérateur |
-| 11 | **4.10** moteur MRV pour la preuve bornée du pruner (+ `--pruner-dfs-mrv` au banc) | faible | mesuré ×3 à ×4 de fermetures à budget égal sur un stock de production de 126 287 possibilités (§4.10 : 32 % → 58 % de stock éliminé, `MRV@1000` dominant `fixe@100000`) — opt-in `ETII_PRUNER_DFS_MRV=1`, défaut inchangé ; budget recommandé 1 000 |
+| 10 | ~~**4.7** ordre dynamique MRV (implémentation complète)~~ **mesuré favorable ; devenu le moteur UNIQUE (PR3 de mrv_moteur_unique.md), `mrv_enabled`/`ETII_MRV` supprimés** | élevé | coût de réfutation ~4× meilleur sur stock réel à CPU égal (§4.7) — frontière + `popcount`, re-canonisation des paquets délégués, pas de bump de `VERSION` ; rouvre §4.4/§4.5/§4.6b |
+| 11 | ~~**4.10** moteur MRV pour la preuve bornée du pruner (+ `--pruner-dfs-mrv` au banc)~~ **mesuré favorable ; rendu PERMANENT (PR3 de mrv_moteur_unique.md), `pruner_dfs_mrv`/`ETII_PRUNER_DFS_MRV` supprimés** | faible | mesuré ×3 à ×4 de fermetures à budget égal sur un stock de production de 126 287 possibilités (§4.10 : 32 % → 58 % de stock éliminé, `MRV@1000` dominant `fixe@100000`) ; budget recommandé 1 000 |
 
 L'ordre 1→4 est un ordre de **rapport gain/coût décroissant présumé**, pas une dépendance :
 seules 8 (qui suppose `alloc` clarifié) et 9 (à arbitrer en dernier) sont contraintes.

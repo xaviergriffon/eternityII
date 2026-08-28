@@ -13,16 +13,20 @@
  *   - Le vrai travail du moteur est l'inverse : établir le plus TÔT possible
  *     qu'une possibilité est morte, pour ne jamais développer son sous-arbre.
  *     La mesure qui correspond à cet objectif est le coût de FERMETURE d'un
- *     sous-arbre (nœuds et temps jusqu'à `BT_CORE_EXHAUSTED`), à racine
- *     IDENTIQUE entre deux moteurs. C'est ce que mesure ce banc.
+ *     sous-arbre (nœuds et temps jusqu'à `BT_CORE_EXHAUSTED`). C'est ce que
+ *     mesure ce banc.
  *
- * La primitive existe déjà : `search_packet_backtracking_core` /
- * `search_packet_backtracking_mrv` acceptent toutes deux un plafond de nœuds et
- * renvoient `BT_CORE_EXHAUSTED` (sous-arbre entièrement exploré : mort prouvé,
- * sauf solution signalée) ou `BT_CORE_BUDGET` (indéterminé) — c'est la même
- * primitive que la preuve bornée du pruner (§4.6b de
- * docs/conception/elagage_recherche.md). Ce fichier n'est qu'un harnais autour
- * d'elles ; il n'ajoute aucun code au chemin de production.
+ * La primitive existe déjà : `search_packet_backtracking_mrv` accepte un
+ * plafond de nœuds et renvoie `BT_CORE_EXHAUSTED` (sous-arbre entièrement
+ * exploré : mort prouvé, sauf solution signalée) ou `BT_CORE_BUDGET`
+ * (indéterminé) — c'est la même primitive que la preuve bornée du pruner
+ * (§4.6b de docs/conception/elagage_recherche.md). Ce fichier n'est qu'un
+ * harnais autour d'elle ; il n'ajoute aucun code au chemin de production.
+ * MRV est le SEUL moteur depuis docs/conception/mrv_moteur_unique.md (PR3) —
+ * ce banc a historiquement comparé l'ancien moteur à ordre fixe
+ * (`search_packet_backtracking_core`) à MRV pour établir cette mesure ;
+ * l'ordre fixe a depuis été supprimé, ce banc ne compare donc plus que des
+ * variantes de MRV (avec/sans le conflit de singletons, §4.4).
  *
  * Deux sources de racines, correspondant à deux questions différentes :
  *
@@ -34,12 +38,11 @@
  *                          moteur MRV jusqu'à un plateau profond, puis on en
  *                          extrait des préfixes de profondeur croissante
  *                          (`--depths`). Répond à « à partir de quelle
- *                          profondeur un sous-arbre devient-il réfutable, et
- *                          quel moteur le réfute le moins cher ? »
+ *                          profondeur un sous-arbre devient-il réfutable ? »
  *
- * Chaque racine est soumise aux DEUX moteurs (ordre fixe et ordre dynamique),
+ * Chaque racine est soumise à toutes les variantes retenues (`--engines`),
  * avec le même plafond de nœuds : c'est une comparaison appariée, la seule
- * lecture honnête (les deux explorent le même sous-arbre, seul l'ordre change).
+ * lecture honnête (toutes explorent le même sous-arbre).
  *
  * Compilation/exécution : `make bench-refutation` (voir le makefile).
  */
@@ -116,24 +119,19 @@ static double now_seconds(void)
 }
 
 /**
- * @brief Une variante de moteur à comparer.
+ * @brief Une variante de MRV à comparer.
  *
- * Trois axes, volontairement SÉPARÉS : les deux moteurs historiques
- * confondaient ordre de parcours et portée de la détection de case morte
- * (fixe = LOCALE, 4 voisines via `bt_forward_check` ; dynamique = GLOBALE,
- * tout le plateau via `mrv_choose_cell`) — `global_check` isole cet axe en
- * armant le balayage global sur l'ordre fixe (§4.7, ablation). `singleton_check`
- * est un troisième mécanisme, orthogonal aux deux premiers puisqu'il vit dans
- * `bt_forward_check`, donc actif pour les deux moteurs dès qu'il est levé
- * (§4.4, conflit de singletons / théorème de Hall |S|=2).
+ * MRV est le SEUL moteur depuis docs/conception/mrv_moteur_unique.md (PR3) :
+ * ce banc a historiquement comparé l'ancien moteur à ordre fixe (portant
+ * aussi une variante « + balayage global de case morte », `global_check`,
+ * §4.7 ablation) à MRV — les deux ont disparu avec la suppression du moteur à
+ * ordre fixe. Seul reste `singleton_check`, orthogonal à l'ordre de parcours
+ * puisqu'il vit dans `bt_forward_check` (§4.4, conflit de singletons /
+ * théorème de Hall |S|=2).
  */
 typedef struct {
     const char *name;
-    /** 1 : ordre dynamique (MRV) ; 0 : ordre de parcours fixe `directions[]`. */
-    int dynamic;
-    /** 1 : ajoute le balayage global de case morte à l'ordre fixe (sans effet si `dynamic`). */
-    int global_check;
-    /** 1 : arme le conflit de singletons dans bt_forward_check (§4.4, les deux moteurs). */
+    /** 1 : arme le conflit de singletons dans bt_forward_check (§4.4). */
     int singleton_check;
 } engine_t;
 
@@ -145,10 +143,10 @@ typedef struct {
 } closure_t;
 
 /**
- * @brief Tente de fermer le sous-arbre de `root` avec un moteur donné.
+ * @brief Tente de fermer le sous-arbre de `root` avec une variante de MRV.
  *
  * `allow_delegate = 0` dans tous les cas : céder une partie du sous-arbre
- * romprait la preuve elle-même (cf. la doc de `search_packet_backtracking_core`).
+ * romprait la preuve elle-même (cf. la doc de `search_packet_backtracking_mrv`).
  *
  * @param root   Racine (non modifiée).
  * @param eng    Variante de moteur.
@@ -394,17 +392,13 @@ static closure_t close_subtree(const struct possibility_packet *root, const engi
     counters[0] = 0;
     max_result = 0;
     request = REQUEST_CONTINUE;
-    global_dead_check = eng->global_check;
     singleton_conflict_check = eng->singleton_check;
 
     unsigned long long nodes = 0;
     double t0 = now_seconds();
-    out.status = eng->dynamic
-        ? search_packet_backtracking_mrv(&g_client, &work, g_idParts, budget, 0, &nodes)
-        : search_packet_backtracking_core(&g_client, &work, g_idParts, budget, 0, &nodes);
+    out.status = search_packet_backtracking_mrv(&g_client, &work, g_idParts, budget, 0, &nodes);
     out.seconds = now_seconds() - t0;
     out.nodes = nodes;
-    global_dead_check = 0;
     singleton_conflict_check = 0;
     return out;
 }
@@ -459,7 +453,10 @@ static void build_prefix_root(const struct possibility_packet *deep, int k,
         set_face_used(out->b_faceused, (uint16_t)(id - 1), 1);
         kept++;
     }
-    bt_canonicalize_packet(out);
+    // `alloc` = RECOMPTAGE des pièces posées (VERSION 13,
+    // docs/conception/mrv_moteur_unique.md) — plus une re-canonisation sur le
+    // premier trou de `directions[]` (`bt_canonicalize_packet`, supprimée par PR1).
+    out->alloc = (uint16_t)possibility_placed_count(out);
 }
 
 /* ==========================================================================
@@ -667,17 +664,14 @@ static void usage(void)
            "  --kpi <n>          mode KPI : échantillonne n racines RÉGULIÈREMENT réparties dans le\n"
            "                     .back (aucun filtre de profondeur — c'est ce que le serveur sert\n"
            "                     réellement), n'imprime que le bilan fermetures/seconde\n"
-           "  --engines <liste>  moteurs à comparer parmi fixe,fixe+global,fixe+singleton,mrv (défaut : tous)\n"
+           "  --engines <liste>  variantes MRV à comparer parmi mrv,mrv+singleton (défaut : les deux)\n"
            "  --pruner-profile <n> rejoue le VRAI pipeline du pruner (autoprune_step) sur n\n"
            "                     possibilités échantillonnées régulièrement dans le .back :\n"
            "                     part morte au contrôle superficiel seul, part fermée par la\n"
            "                     preuve DFS bornée (§4.6b, --budget) parmi le reste, part qui\n"
            "                     survit intacte — répond à §4.6b (le budget ferme-t-il ?) et à\n"
            "                     §4.9 (combien un pruner en service éliminerait-il déjà seul ?)\n"
-           "  --pruner-dfs-mrv   (avec --pruner-profile) la preuve DFS bornée emploie le moteur\n"
-           "                     à ordre DYNAMIQUE (MRV) au lieu de l'ordre fixe (§4.10) — c'est\n"
-           "                     l'A/B de ce levier : même stock, même budget, seul le moteur de\n"
-           "                     la preuve change\n"
+           "                     La preuve DFS bornée emploie MRV, seul moteur depuis PR3.\n"
            "  --w2x2             (avec --pruner-profile) compte les fenêtres 2x2 intérieures\n"
            "                     entièrement vides et celles qui n'admettent AUCUN\n"
            "                     remplissage, puis recoupe avec le pipeline existant.\n"
@@ -711,14 +705,12 @@ int main(int argc, char **argv)
     int depths[MAX_DEPTHS] = {150, 165, 175, 180, 185};
     int nb_depths = 5;
 
-    engine_t all_engines[4] = {
-        { "fixe",           0, 0, 0 },
-        { "fixe+global",    0, 1, 0 },
-        { "fixe+singleton", 0, 0, 1 },
-        { "MRV",            1, 0, 0 },
+    engine_t all_engines[2] = {
+        { "mrv",           0 },
+        { "mrv+singleton", 1 },
     };
-    engine_t engines[4];
-    int nb_engines = 4;
+    engine_t engines[2];
+    int nb_engines = 2;
     memcpy(engines, all_engines, sizeof(all_engines));
 
     for (int i = 1; i < argc; i++) {
@@ -731,7 +723,6 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--max-pieces") == 0 && i + 1 < argc)  max_pieces = atoi(argv[++i]);
         else if (strcmp(argv[i], "--kpi") == 0 && i + 1 < argc)         kpi = atoi(argv[++i]);
         else if (strcmp(argv[i], "--pruner-profile") == 0 && i + 1 < argc) pruner_profile = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--pruner-dfs-mrv") == 0)               pruner_dfs_mrv = 1;
         else if (strcmp(argv[i], "--w2x2") == 0)                         w2x2 = 1;
         else if (strcmp(argv[i], "--gpu") == 0)                          gpu = 1;
         else if (strcmp(argv[i], "--gpu-batch") == 0 && i + 1 < argc)    gpu_batch = atoi(argv[++i]);
@@ -739,7 +730,7 @@ int main(int argc, char **argv)
             nb_engines = 0;
             char *copy = strdup(argv[++i]);
             for (char *tok = strtok(copy, ","); tok != NULL; tok = strtok(NULL, ",")) {
-                for (int e = 0; e < 4; e++) {
+                for (int e = 0; e < 2; e++) {
                     if (strcmp(tok, all_engines[e].name) == 0) {
                         engines[nb_engines++] = all_engines[e];
                     }
@@ -792,11 +783,11 @@ int main(int argc, char **argv)
     printf("\nbanc de réfutation : coût de la PREUVE qu'un sous-arbre est mort\n");
     printf("pièces : %s   plafond : %ld nœuds par racine et par moteur\n", pieces, budget);
 
-    tally_t tally[4], common[4];
+    tally_t tally[2], common[2];
     memset(tally, 0, sizeof(tally));
     memset(common, 0, sizeof(common));
     int nb_common = 0;
-    closure_t res[4];
+    closure_t res[2];
     int roots_done = 0;
 
     if (pruner_profile > 0) {
@@ -839,8 +830,9 @@ int main(int argc, char **argv)
         long long stride = (total > pruner_profile) ? total / pruner_profile : 1;
         printf("stock : %lld possibilités\n", total);
         printf("profil du VRAI pipeline pruner (autoprune_step) sur %d possibilités"
-               " échantillonnées 1 sur %lld, plafond DFS %ld nœuds, moteur de la preuve : %s :\n\n",
-               pruner_profile, stride, budget, pruner_dfs_mrv ? "MRV (ordre dynamique)" : "ordre fixe");
+               " échantillonnées 1 sur %lld, plafond DFS %ld nœuds, moteur de la preuve : MRV"
+               " (seul moteur depuis PR3) :\n\n",
+               pruner_profile, stride, budget);
 
         rewind(f);
         long long index = 0, sampled = 0;
@@ -1027,7 +1019,7 @@ int main(int argc, char **argv)
         // Première passe : profil du stock (et, en mode KPI, le pas
         // d'échantillonnage — il faut connaître le total pour répartir).
         struct possibility_packet pkt;
-        long long total = 0, sum_pieces = 0, not_canonical = 0, inconsistent = 0;
+        long long total = 0, sum_pieces = 0, alloc_mismatch = 0, inconsistent = 0;
         int min_seen = ETERN_PARTS, max_seen = 0;
         while (fread(&pkt, sizeof(pkt), 1, f) == 1) {
             int p = placed_count(&pkt);
@@ -1036,17 +1028,18 @@ int main(int argc, char **argv)
             if (p < min_seen) min_seen = p;
             if (p > max_seen) max_seen = p;
             // Contrôle du stock lui-même : tout paquet servi par le serveur doit
-            // être cohérent (`check_possibility`) et déjà canonique
-            // (`normalize_possibility_packet` n'a rien à réparer). C'est la
-            // vérification, sur données RÉELLES, de la re-canonisation des
-            // paquets délégués en ordre dynamique (§4.7).
+            // être cohérent (`check_possibility`) et son `alloc` doit être EXACT
+            // (RECOMPTAGE `possibility_placed_count`, cf. VERSION 13,
+            // docs/conception/mrv_moteur_unique.md) — plus une re-canonisation
+            // sur le premier trou de `directions[]` (`bt_canonicalize_packet`/
+            // `normalize_possibility_packet`, supprimées par PR1).
             if (check_possibility(&pkt, g_client.all_rotate_part) < 0) inconsistent++;
-            if (normalize_possibility_packet(&pkt) != 0) not_canonical++;
+            if ((int)pkt.alloc != p) alloc_mismatch++;
         }
         printf("stock : %lld possibilités, pièces posées min/moy/max = %d / %.1f / %d\n",
                total, min_seen, total > 0 ? (double)sum_pieces / (double)total : 0.0, max_seen);
-        printf("intégrité du stock : %lld incohérent(s), %lld non canonique(s)\n",
-               inconsistent, not_canonical);
+        printf("intégrité du stock : %lld incohérent(s), %lld alloc != recomptage\n",
+               inconsistent, alloc_mismatch);
         long long stride = (kpi > 0 && total > kpi) ? total / kpi : 1;
         if (kpi > 0) {
             printf("mode KPI : %d racines échantillonnées 1 sur %lld, aucun filtre de profondeur\n",
@@ -1068,7 +1061,8 @@ int main(int argc, char **argv)
             } else if (p < min_pieces || p > max_pieces) {
                 continue;
             }
-            normalize_possibility_packet(&pkt);
+            // `alloc` doit déjà être exact (recomptage, cf. plus haut) : plus de
+            // canonisation à faire avant fermeture, contrairement à avant PR1.
             for (int e = 0; e < nb_engines; e++) {
                 res[e] = close_subtree(&pkt, &engines[e], budget);
                 tally[e].closed += (res[e].status == BT_CORE_EXHAUSTED);
@@ -1100,7 +1094,6 @@ int main(int argc, char **argv)
         best_board_init(&g_search_best_board);
         max_result = 0;
         request = REQUEST_CONTINUE;
-        global_dead_check = 0;
         unsigned long long seeded = 0;
         search_packet_backtracking_mrv(&g_client, &root, g_idParts, seed_nodes, 0, &seeded);
 
