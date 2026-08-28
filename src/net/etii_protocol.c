@@ -9,6 +9,7 @@
 
 #include "net/etii_protocol.h"
 #include "ui/logger.h"
+#include "app/app_static_variables.h"
 
 /**
  * @brief Reçoit une instruction (1 octet) depuis un socket TCP.
