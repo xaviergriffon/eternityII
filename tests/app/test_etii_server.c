@@ -11,7 +11,7 @@
  */
 #include "greatest.h"
 #include "app/etii_server.h"
-#include "app/static_variables.h"   /* counters, version */
+#include "app/app_static_variables.h"   /* counters, version */
 #include "app/control_registry.h"  /* sessions de contrôle : INST_CONTROL_HELLO, control_session_step */
 #include "net/control_protocol.h"  /* CTRL_*, control_hello_encode, ctrl_send_frame/ctrl_recv_frame */
 #include "core/datamanager.h"
@@ -1621,7 +1621,7 @@ TEST autobackup_waits_full_window_even_if_changed(void)
  * -> 0), déjà couvert isolément par active_threads_null_is_zero.
  */
 
-/* Lit lastcheck sous son mutex documenté (contrat de static_variables.h), comme
+/* Lit lastcheck sous son mutex documenté (contrat de app_static_variables.h), comme
  * le fait check_interpreter côté production. */
 static char *read_lastcheck_copy(void)
 {

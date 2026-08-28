@@ -10,7 +10,7 @@
 #include <sys/un.h>
 
 #include "ui/logger.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "net/ipc_protocol.h"
 
 /* Taille max d'une ligne de log formatée (avant routage IPC ou affichage). */

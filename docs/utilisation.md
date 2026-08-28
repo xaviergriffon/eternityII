@@ -246,7 +246,7 @@ atteigne la cible `N`. Le paquet genèse devient ainsi des milliers de possibili
 distribuables. C'est un calcul **purement serveur, sans aucun impact client**.
 
 L'expansion est bornée sur deux axes, tous deux configurables au lancement (dans
-[src/app/static_variables.h](../src/app/static_variables.h)) : `--expand-max-levels N`
+[src/app/app_static_variables.h](../src/app/app_static_variables.h)) : `--expand-max-levels N`
 (défaut `EXPAND_MAX_LEVELS`, 4) plafonne le nombre de passes quelle que soit la
 consigne — garde-fou en *profondeur* — et `--expand-max-stock N` (défaut
 `EXPAND_MAX_STOCK`, 100000) plafonne le *nombre* de possibilités entre passes ; comme le
@@ -547,7 +547,7 @@ Ces fichiers permettent de reprendre une recherche interrompue avec la commande
   sonder à cadence rapide indéfiniment, consommant du CPU pour rien. Une piste serait
   d'appliquer à cette boucle un back-off progressif similaire à celui déjà en place
   côté thread d'alimentation (`feed_thread_aposs`, `NO_WORK_SLEEP_START`/
-  `NO_WORK_SLEEP_MAX` dans [src/app/static_variables.h](../src/app/static_variables.h)),
+  `NO_WORK_SLEEP_MAX` dans [src/app/app_static_variables.h](../src/app/app_static_variables.h)),
   afin de distinguer une pénurie ponctuelle d'un épuisement long/définitif — par
   opposition aux pauses (régulation `REQUEST_PAUSE` / admin `REQUEST_ADMIN_PAUSE`),
   qui bénéficient déjà chacune d'une cadence dédiée (`PAUSE_POLL_SLEEP_US` /

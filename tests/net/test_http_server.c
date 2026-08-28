@@ -13,7 +13,7 @@
 #include "app/control_registry.h"
 #include "app/known_clients_registry.h"
 #include "app/etii_server.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "core/best_board.h"
 #include "core/part.h"
 #include "ui/command_lines.h"

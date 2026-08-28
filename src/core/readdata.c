@@ -6,7 +6,7 @@
 #include <regex.h>
 
 #include "ui/logger.h"
-#include "app/static_variables.h"
+#include "core/core_static_variables.h"
 
 /**
  * @brief Lit et parse le fichier CSV de définition des pièces.

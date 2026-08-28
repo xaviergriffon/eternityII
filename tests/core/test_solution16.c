@@ -28,7 +28,7 @@
 #include "core/readdata.h"
 #include "net/etii_protocol.h"
 #include "app/etii_server.h"        /* communicate_with_client_step, client_t */
-#include "app/static_variables.h"   /* stop_on_solution */
+#include "core/core_static_variables.h"   /* stop_on_solution */
 #include "fork_assert.h"
 #include "fixtures/solution16.h"
 

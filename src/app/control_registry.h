@@ -27,7 +27,7 @@
 #include <time.h>
 
 #include "net/control_protocol.h"
-#include "app/static_variables.h"   /* PEER_IP_MAX_LEN */
+#include "app/app_static_variables.h"   /* PEER_IP_MAX_LEN */
 
 /// Capacité de la file de commandes en attente d'UNE session (tableau
 /// circulaire borné). Largement suffisant : les commandes `clientsCmd`/
@@ -298,7 +298,7 @@ int control_registry_has_active_client(const uint8_t client_uid[CLIENT_UID_BYTES
  *        session `index` (aucun sondage manuel `clientsStats`/HTTP n'exclut
  *        celui-ci : les deux partagent le même but, tirer un `CTRL_STATS`
  *        frais pour repérer un nouveau record côté client — cf.
- *        `CONTROL_AUTO_STATS_INTERVAL_SEC`, static_variables.h).
+ *        `CONTROL_AUTO_STATS_INTERVAL_SEC`, app_static_variables.h).
  *
  * Effet de bord si le sondage est dû : marque l'instant présent comme
  * dernière tentative, pour que l'appel suivant ne redevienne dû qu'après un

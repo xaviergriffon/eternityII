@@ -5,7 +5,7 @@
  */
 #include "greatest.h"
 #include "app/client_config.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 
 #include <string.h>
 #include <stdlib.h>

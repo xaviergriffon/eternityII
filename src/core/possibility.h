@@ -7,7 +7,7 @@
 #include "core/part.h"
 #include "core/lifo.h"
 #include "core/packed.h"
-#include "app/static_variables.h"
+#include "core/core_static_variables.h"
 
 #define DIR_UP 1
 #define DIR_RIGHT 2

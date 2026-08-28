@@ -9,7 +9,7 @@
 #include <pthread.h>
 #include <sys/times.h>
 #include <sys/types.h>
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "core/possibility.h"
 #include "core/part.h"
 

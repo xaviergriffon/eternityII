@@ -14,7 +14,7 @@
  */
 #include "greatest.h"
 #include "app/control_registry.h"
-#include "app/static_variables.h"   /* MAX_CONTROL_SESSIONS */
+#include "app/app_static_variables.h"   /* MAX_CONTROL_SESSIONS */
 
 #include <stdio.h>
 #include <string.h>

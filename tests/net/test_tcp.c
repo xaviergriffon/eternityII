@@ -12,7 +12,7 @@
 #include "fork_assert.h"
 #include "net/tcpserver.h"
 #include "net/tcpclient.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 
 #include <stdlib.h>
 #include <unistd.h>

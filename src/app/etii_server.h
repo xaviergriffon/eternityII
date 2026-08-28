@@ -10,7 +10,7 @@
 #include <stdint.h>
 #include "core/part.h"
 #include "core/possibility.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 
 /**
  * @brief Contexte d'un thread de communication serveur.

@@ -10,7 +10,7 @@
 
 #include "net/tcpclient.h"
 #include "ui/logger.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 
 // Interrompt les tentatives de reconnexion dès que l'arrêt est demandé.
 #define RECONNECT_SHOULD_ABORT() (request == REQUEST_STOP)

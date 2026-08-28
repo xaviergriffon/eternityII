@@ -6,7 +6,13 @@
 #include <unistd.h>
 
 #include "ui/logger.h"
-#include "app/static_variables.h"
+#include "core/core_static_variables.h"
+// core/ ne doit normalement dépendre que de core_static_variables.h — cette
+// inclusion de app/ reste une exception documentée (cf. la note en tête de
+// core/core_static_variables.h) : ce fichier lit directement `version`,
+// `server`, `SERVER_PORT`, `pruner_mode`, `g_client_identity_template` et
+// les options d'expansion/bail (protocole réseau et configuration serveur).
+#include "app/app_static_variables.h"
 #include "core/lifo.h"
 #include "core/datamanager.h"
 #include "core/stock_rate.h"

@@ -21,7 +21,7 @@ struct client_statistics {
     uint16_t max_result;
     /** Vrai si ce fork était en train d'échanger avec le serveur (connexion,
         envoi/réception, sonde de faim) au moment de ce rapport — cf.
-        `server_io_active`, `src/app/static_variables.h`. */
+        `server_io_active`, `src/core/core_static_variables.h`. */
     uint8_t server_io_active;
     /** Cumul des tentatives de placement soumises au forward-checking. */
     unsigned long long fc_attempts;

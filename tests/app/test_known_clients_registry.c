@@ -13,7 +13,7 @@
  */
 #include "greatest.h"
 #include "app/known_clients_registry.h"
-#include "app/static_variables.h"   /* MAX_KNOWN_CLIENTS, KNOWN_CLIENT_MAX_SESSIONS */
+#include "app/app_static_variables.h"   /* MAX_KNOWN_CLIENTS, KNOWN_CLIENT_MAX_SESSIONS */
 
 #include <string.h>
 #include <unistd.h>

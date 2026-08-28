@@ -160,7 +160,7 @@ Pi reste la référence pour ça.
   bloque la CI), pour qu'aucun chemin compilé sous condition ne se désynchronise en
   silence : la variante ncurses (`make NCURSES=1`), la variante CUDA (`make CUDA=1`
   puis `make CUDA=1 VERIFY=1`), un build activant **tous** les flags `DEBUG_*` de
-  [src/app/static_variables.h](../src/app/static_variables.h) à la fois, la
+  [src/core/core_static_variables.h](../src/core/core_static_variables.h) à la fois, la
   compilation croisée ARM 64-bit (`make CC=aarch64-linux-gnu-gcc WERROR=1`, job
   `arm64-build` — même principe que `make test-docker-arm` mais toolchain installée
   directement sur le runner, sans Docker), et les configurations alternatives
@@ -213,8 +213,8 @@ banc est actif, pour mesurer le débit brut de la machine.
 
 La décision d'arrêt (`bench_should_stop`) et le parsing de la variable
 d'environnement (`bench_parse_nodes_env`) sont des fonctions pures
-(`src/app/static_variables.h`/`.c`), testées unitairement dans
-`tests/app/test_static_variables.c`.
+(`src/app/app_static_variables.h`/`.c`), testées unitairement dans
+`tests/app/test_app_static_variables.c`.
 
 ### Élagage forward-check inline
 
@@ -434,7 +434,7 @@ Les deux moteurs de production **confondaient deux axes indépendants** :
 | **ordre dynamique** | (dégénéré : le balayage la donne gratuitement) | moteur MRV (`MRV`) |
 
 Ne comparer que les deux coins opposés ne dit pas lequel des deux axes produit
-l'effet mesuré. D'où le drapeau `global_dead_check` (`src/app/static_variables.h`,
+l'effet mesuré. D'où le drapeau `global_dead_check` (`src/core/core_static_variables.h`,
 défaut 0, coût nul quand il vaut 0) : il fait appeler à l'ordre FIXE exactement
 le même balayage que MRV (`mrv_choose_cell`) en **jetant le choix de case**, ne
 gardant que le test de mort. `--engines fixe,fixe+global,mrv` sélectionne les
@@ -511,7 +511,7 @@ reverté. Même erreur de méthode que le mur à 74 et que la première mesure d
 d'une vraie délégation — il ne pouvait pas voir le mécanisme se déclencher
 même s'il se déclenche réellement ailleurs.
 
-Réimplémenté derrière `singleton_conflict_check` (`src/app/static_variables.h`,
+Réimplémenté derrière `singleton_conflict_check` (`src/core/core_static_variables.h`,
 défaut 0, vit dans `bt_forward_check` — actif pour le seul moteur MRV depuis
 PR3, autrefois partagé avec l'ordre fixe) et ajouté au banc comme quatrième
 variante (`--engines fixe,fixe+singleton` à l'époque de cette mesure ;

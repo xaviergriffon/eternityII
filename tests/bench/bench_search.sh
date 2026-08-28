@@ -4,7 +4,7 @@
 #
 # Principe : au lieu de compter les nœuds explorés pendant une durée fixe (mesure
 # bruitée par la charge de la machine), on mesure le temps mural nécessaire pour
-# explorer un nombre de nœuds FIXE (ETII_BENCH_NODES, voir static_variables.h et
+# explorer un nombre de nœuds FIXE (ETII_BENCH_NODES, voir app_static_variables.h et
 # check_client_threads dans src/app/etii_client.c). En mode `test` la recherche
 # est déterministe : à N fixé, le travail exploré est le même d'un run à l'autre,
 # ce qui rend la mesure directement comparable entre deux runs ou deux versions

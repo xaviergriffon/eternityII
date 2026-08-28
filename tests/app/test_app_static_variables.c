@@ -1,6 +1,6 @@
 /*
- * Tests unitaires de static_variables.c — pour l'instant le parsing des options
- * globales de la ligne de commande (parse_cli_options).
+ * Tests unitaires de app_static_variables.c — pour l'instant le parsing des
+ * options globales de la ligne de commande (parse_cli_options).
  *
  * Régression visée : l'option --stop-on-solution doit être reconnue à n'importe
  * quelle position, positionner le drapeau global, et être RETIRÉE de argv sans
@@ -8,7 +8,7 @@
  * erreur ici décalerait les arguments (nb_threads lu sur le mauvais token, etc.).
  */
 #include "greatest.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 
 #include <string.h>
 
@@ -569,7 +569,7 @@ TEST bench_should_stop_true_at_or_above_target(void)
     PASS();
 }
 
-SUITE(static_variables_suite)
+SUITE(app_static_variables_suite)
 {
     RUN_TEST(flag_absent_leaves_argv_and_flag_untouched);
     RUN_TEST(flag_at_end_is_stripped_and_sets_global);

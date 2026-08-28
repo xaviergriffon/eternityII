@@ -41,7 +41,7 @@
 
 #include "net/client_identity.h"
 #include "net/control_protocol.h"
-#include "app/static_variables.h"   /* MAX_KNOWN_CLIENTS, PEER_IP_MAX_LEN */
+#include "app/app_static_variables.h"   /* MAX_KNOWN_CLIENTS, PEER_IP_MAX_LEN */
 
 /**
  * @brief Vue légère (sans mutex ni détail interne) d'une machine connue, pour

@@ -20,7 +20,7 @@
 #include <pthread.h>
 
 #include "app/app_runtime.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "app/etii_client.h"
 #include "app/etii_server.h"
 #include "app/etii_statistic.h"
@@ -1136,7 +1136,7 @@ void *fork_checker(void *param) {
         // passage de bt_forward_check aux voisines) et non par FORWARD_CHECK_K :
         // sinon un FORWARD_CHECK_K < 4 tronquerait la copie des positions 1..4
         // que la boucle chaude peut effectivement produire — cf. le commentaire
-        // de fc_pruned_at dans static_variables.h.
+        // de fc_pruned_at dans core_static_variables.h.
         for (int j = 1; j <= FC_STAT_MAX_K; j++) {
             statistic->fc_pruned_at[j] = __atomic_load_n(&fc_pruned_at[j], __ATOMIC_RELAXED);
         }

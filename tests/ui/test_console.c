@@ -17,7 +17,7 @@
 #define _GNU_SOURCE 1
 #include "greatest.h"
 #include "ui/console.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 
 #include <stdio.h>
 #include <stdlib.h>

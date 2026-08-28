@@ -28,8 +28,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-/* directions / dirx / diry sont des globaux définis dans static_variables.c
-   (déclarés via static_variables.h, inclus par possibility.h). */
+/* directions / dirx / diry sont des globaux définis dans core_static_variables.c
+   (déclarés via core_static_variables.h, inclus par possibility.h). */
 
 /* Petit tableau de rotations non vide pour passer un pointeur valide à
    check_possibility (évite la lecture de pieces.csv quand rotateParts != NULL). */
@@ -109,7 +109,7 @@ TEST test_directions_covers_every_cell(void)
 }
 
 /* directions[] corrompu (doublon -> un indice jamais visité) -> -1.
- * directions est un vrai global mutable (static_variables.c) : on le corrompt
+ * directions est un vrai global mutable (core_static_variables.c) : on le corrompt
  * temporairement puis on le restaure, quel que soit le résultat du test. */
 TEST test_directions_detects_missing_cell(void)
 {
@@ -245,7 +245,7 @@ TEST check_possibility_valid_genesis_is_zero(void)
  * de la boucle de cohérence (p < alloc). Cas symétrique de
  * check_possibility_consistent_interior_neighbors_is_zero (build 16, RIGHT et
  * BOTTOM) : sous le nouveau parcours du build 256 (directions[]/dirx[]/diry[],
- * app/static_variables.c), les 23 premiers indices (p=0..22) visitent (0,0)
+ * core/core_static_variables.c), les 23 premiers indices (p=0..22) visitent (0,0)
  * puis longent le bord haut jusqu'à (15,0), avec trois courtes incursions
  * verticales en (2,*), (13,*) et (15,*) et un dernier saut en (14,2) -- sans
  * jamais visiter (14,1) avant l'indice 23 (exclu par alloc=23). Cela reproduit

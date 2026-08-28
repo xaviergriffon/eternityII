@@ -15,7 +15,7 @@ option(CUDA         "Active le pruner GPU (requiert le toolkit CUDA)"        OFF
 option(VERIFY       "Vérification croisée GPU/CPU — requiert CUDA=ON"        OFF)
 option(ASAN         "AddressSanitizer pour les binaires de test"             OFF)
 
-# Paramètres puzzle/algo (#ifndef-guardés dans static_variables.h → surchargeables)
+# Paramètres puzzle/algo (#ifndef-guardés dans core/core_static_variables.h → surchargeables)
 set(ETERN_PARTS     "" CACHE STRING "Taille du puzzle : 16 ou 256 (défaut 256 du header)")
 set(FORWARD_CHECK_K "" CACHE STRING "Profondeur du forward-checking (défaut 6 du header)")
 
@@ -25,7 +25,7 @@ set(NVCC_ARCH "sm_87" CACHE STRING "Architecture CUDA cible (ex: sm_87)")
 # Timeout du test d'intégration (en secondes)
 set(INTEGRATION_TIMEOUT "60" CACHE STRING "Timeout (s) pour make test-integration")
 
-# Flags DEBUG_* (décommentés dans static_variables.h en dev local ; CI : -DCPPFLAGS)
+# Flags DEBUG_* (décommentés dans core/core_static_variables.h en dev local ; CI : -DCPPFLAGS)
 option(DEBUG_IN_MONO_PROCESS   "Force single-process (sans fork)"            OFF)
 option(DEBUG_SOCKET            "Traces TCP connexion/déconnexion"             OFF)
 option(DEBUG_SIGNAL            "Traces gestionnaire de signaux"               OFF)
@@ -90,7 +90,8 @@ endif()
 # ============================================================
 set(PROD_SRCS
     ${LOGGER_SRC}
-    src/app/static_variables.c
+    src/core/core_static_variables.c
+    src/app/app_static_variables.c
     src/net/local_socket.c
     src/core/lifo.c
     src/net/tcpclient.c
@@ -212,7 +213,8 @@ set(TEST_MODULES
     src/ui/console.c
     src/core/etii_search.c
     src/ui/logger.c
-    src/app/static_variables.c
+    src/core/core_static_variables.c
+    src/app/app_static_variables.c
     src/app/client_config.c
     src/app/app_runtime.c
     src/app/etii_control.c
@@ -242,7 +244,7 @@ set(TEST_SUITES_COMMON
     tests/ui/test_command_lines.c
     tests/ui/test_console.c
     tests/ui/test_logger.c
-    tests/app/test_static_variables.c
+    tests/app/test_app_static_variables.c
     tests/app/test_client_config.c
     tests/app/test_app_runtime.c
     tests/app/test_etii_control.c
@@ -300,7 +302,8 @@ add_custom_target(run-tests
 # Binaire ETERN_PARTS=16 dédié — toujours logger ANSI (pas de dépendance ncurses)
 add_executable(eternityII16 EXCLUDE_FROM_ALL
     src/ui/logger.c
-    src/app/static_variables.c
+    src/core/core_static_variables.c
+    src/app/app_static_variables.c
     src/net/local_socket.c
     src/core/lifo.c
     src/net/tcpclient.c

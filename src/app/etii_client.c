@@ -636,11 +636,11 @@ void check_client_threads_step(int *last_record)
     // partagé, donc aucun besoin de tenir un verrou pendant leur exécution.
     // `lastcheck_publish()` n'est appelée qu'une fois le rapport complet,
     // ce qui réduit la section critique au seul échange de pointeur (voir
-    // static_variables.h pour le détail de la race corrigée).
+    // app_static_variables.h pour le détail de la race corrigée).
     size_t table_size = 256 + (size_t)NB_THREADS * 80;
     // La ligne forward-check (voir plus bas) ajoute jusqu'à ~24 octets par
     // position 1..FC_STAT_MAX_K (borne indépendante de FORWARD_CHECK_K depuis
-    // le passage de bt_forward_check aux voisines, cf. static_variables.h) :
+    // le passage de bt_forward_check aux voisines, cf. core_static_variables.h) :
     // avec FC_STAT_MAX_K=8 le fixe suffit large, mais on garde le calcul
     // explicite plutôt qu'une constante — même correctif que fctemp ci-dessous,
     // même raison.
@@ -665,7 +665,7 @@ void check_client_threads_step(int *last_record)
         // Forward-checking : agrégat des forks + compteurs du processus courant
         // (ces derniers couvrent les modes test et DEBUG_IN_MONO_PROCESS).
         // Boucles bornées par FC_STAT_MAX_K (indépendant de FORWARD_CHECK_K,
-        // cf. le commentaire de fc_pruned_at dans static_variables.h) : la
+        // cf. le commentaire de fc_pruned_at dans core_static_variables.h) : la
         // boucle chaude (bt_forward_check) n'y contribue qu'aux positions 1..4
         // (voisines géométriques), les chemins froids (forward_check_next_k)
         // jusqu'à FORWARD_CHECK_K — le tableau doit couvrir les deux.
@@ -690,7 +690,7 @@ void check_client_threads_step(int *last_record)
             // « par position dans la fenêtre inspectée », et non plus « par
             // distance » : depuis le passage de bt_forward_check aux voisines
             // géométriques, la position n'est plus une distance de parcours
-            // uniforme (cf. le commentaire de fc_pruned_at, static_variables.h).
+            // uniforme (cf. le commentaire de fc_pruned_at, core_static_variables.h).
             int fcoff = sprintf(fctemp, "forward-check : pruned %llu/%llu (%.2f%%), par position dans la fenêtre inspectée :",
                                 fcp, fca, 100.0 * (double)fcp / (double)fca);
             for (int j = 1; j <= FC_STAT_MAX_K; j++) {
@@ -771,7 +771,7 @@ void check_client_threads_step(int *last_record)
  *        `test`/`DEBUG_IN_MONO_PROCESS`, ou un fork de recherche).
  *
  * Glue non pure (lit les globales `counters`/`NB_THREADS`) autour de la
- * décision pure `bench_should_stop` (static_variables.h) — c'est cette
+ * décision pure `bench_should_stop` (app_static_variables.h) — c'est cette
  * dernière qui est couverte par les tests unitaires.
  */
 static unsigned long long bench_nodes_done(void)

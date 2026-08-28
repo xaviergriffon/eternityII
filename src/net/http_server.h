@@ -7,11 +7,11 @@
  * Modèle volontairement minimal : accept séquentiel, une requête par
  * connexion (`Connection: close`), un seul thread — API d'administration
  * occasionnelle, pas un serveur web de production. Démarré uniquement si
- * `HTTP_PORT > 0` (option CLI `--http-port <n>`, cf. static_variables.h),
+ * `HTTP_PORT > 0` (option CLI `--http-port <n>`, cf. app_static_variables.h),
  * depuis `runserver` (src/app/etii_server.c).
  *
  * Authentification (`--http-token-file <chemin>`, `HTTP_ADMIN_TOKEN`, cf.
- * static_variables.h) : par défaut (aucun jeton configuré), seule la LECTURE
+ * app_static_variables.h) : par défaut (aucun jeton configuré), seule la LECTURE
  * fonctionne — les routes `GET` et la seule commande de lecture pure de
  * `POST /api/v1/command` (`clientsWork`, `control_command_read_only`). Toute
  * commande de MODIFICATION (`pause`, `resume`, `limit`, `maxStockByThread`,

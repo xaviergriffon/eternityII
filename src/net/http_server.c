@@ -14,7 +14,7 @@
 #include "app/control_registry.h"
 #include "app/known_clients_registry.h"
 #include "app/etii_server.h"
-#include "app/static_variables.h"
+#include "app/app_static_variables.h"
 #include "core/datamanager.h"
 #include "core/stock_spill.h"
 #include "core/best_board.h"

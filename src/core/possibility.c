@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "ui/logger.h"
-#include "app/static_variables.h"
+#include "core/core_static_variables.h"
 #include "core/datamanager.h"
 #include "core/readdata.h"
 #include "core/best_board.h"

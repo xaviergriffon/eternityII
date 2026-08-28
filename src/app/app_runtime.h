@@ -10,7 +10,8 @@
 /*
  * Fonctions « plumbing » du processus, extraites de main.c pour être testables
  * unitairement : main.c définit main() et n'est donc pas linké dans le binaire
- * de test. Ces fonctions ne dépendent que des globales de static_variables.h.
+ * de test. Ces fonctions ne dépendent que des globales de core_static_variables.h
+ * et app_static_variables.h.
  *
  * Deux familles :
  *   - gestion des signaux (handlers + installation des dispositions) ;
@@ -246,7 +247,7 @@ void resolve_client_label(const char *cli_label, const char *hostname_or_null,
 
 /**
  * @brief Résout l'identité déclarée de CE process client (`g_client_identity_template`,
- *        static_variables.h) AVANT tout fork : charge/crée le `machine_uid`
+ *        app_static_variables.h) AVANT tout fork : charge/crée le `machine_uid`
  *        persistant (`machine_uid_file_path`), tire un `client_uid` de session,
  *        résout le mode (recherche/pruner/pruner GPU) et le libellé
  *        (`resolve_client_label`). `fork_seq` est laissé à -1 dans le gabarit —
