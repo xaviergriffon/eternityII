@@ -835,6 +835,9 @@ int request_keeps_running(int r);
 // TODO : deplacer dans un parametre ?
 extern char* parts_files;
 
+// Indices officiels du puzzle (voir data/indices.csv et first_possibility, possibility.c).
+extern char* indices_file;
+
 extern unsigned long long non_null_possibilities;
 
 extern volatile int request;

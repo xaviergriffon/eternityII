@@ -129,6 +129,11 @@ char* parts_files = "./data/pieces.csv";
 char* parts_files = "./data/pieces16.csv";
 #endif // ETERN_PARTS == 256
 
+// Indices officiels du puzzle 256 pièces : lu par first_possibility (possibility.c)
+// uniquement quand ETERN_PARTS == 256. Le chemin reste défini inconditionnellement
+// pour rester surchargeable sans #if côté appelant.
+char* indices_file = "./data/indices.csv";
+
 unsigned long long non_null_possibilities = 0;
 volatile uint16_t max_result = 0;
 

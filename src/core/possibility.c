@@ -1303,31 +1303,12 @@ int fprint_possibility_packet(FILE *out, struct possibility_packet *packet)
 }
 
 /**
- * @brief Retourne la pièce 139 dans sa rotation i8 (rotation 2, bords 2,15,15,3).
- *
- * Cette pièce est l'indice fixe officiel du puzzle Eternity II placé en (7,8).
- * Quitte le programme si la pièce est introuvable dans la map (configuration invalide).
- *
- * @param mapParts Tableau 4D de lookup.
- * @return         Pointeur vers la pièce 139 r2 dans la map.
- */
-struct part* part_139_i8(map_big_array *mapParts)
-{
-    key_part key = {2,15,15,3};
-    struct part *part = get_one_part(mapParts, key);
-    if(part == NULL)
-    {
-        fatal_error("part 139 not found\n");
-    }
-    return part;
-}
-
-/**
  * @brief Génère l'ensemble des possibilités initiales et les injecte dans le datamanager.
  *
- * Pour le puzzle 16×16 (ETERN_PARTS == 256), place les indices officiels connus
- * (pièces 139, 208, 255, 181, 249) à leurs positions fixes, puis développe la
- * première case libre pour produire toutes les positions de départ.
+ * Pour le puzzle 16×16 (ETERN_PARTS == 256), place les indices officiels lus
+ * depuis `indices_file` (CSV `id x y rotation mandatory`, voir readdata.h),
+ * puis développe la première case libre pour produire toutes les positions
+ * de départ.
  *
  * Ces possibilités initiales sont ensuite distribuées par le serveur aux clients.
  *
@@ -1350,52 +1331,27 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
 #if ETERN_PARTS == 256
     int cur_dir = DIR_UP;
 
-    // Indice officiel : pièce 139 r2 en (7,8). La case sera enjambée par le
-    // parcours directions[] (niveau sans décision), comme les autres indices.
-    struct part *part = part_139_i8(mapParts);
-    etern[7][8] = part;
-
-#if ETERN_WITH_INDICES
-        // 208 C3 -- rotation 3
-        // 1 13 12 3
-        key_part k208 = {13,12,3,1};
-        part = get_one_part(mapParts, k208);
-        if(part == NULL)
-        {
-            fatal_error("part 208 r3 not found\n");
+    // Indices officiels du puzzle, lus depuis indices_file (data/indices.csv
+    // par défaut) plutôt que codés en dur : voir docs/architecture.md et le
+    // format attendu dans readdata.h (read_indices). La case sera enjambée
+    // par le parcours directions[] (niveau sans décision), pour chaque indice.
+    struct array_index *indices = read_indices(indices_file);
+    for (int i = 0; i < indices->size; i++) {
+        struct board_index *hint = &indices->indices[i];
+#if !ETERN_WITH_INDICES
+        // Seul l'indice géométrique (mandatory) reste posé sans ETERN_WITH_INDICES.
+        if (!hint->mandatory) {
+            continue;
         }
-        etern[2][2] = part;
-        
-        // 255 C14 -- rotation 3
-        // 7 13 11 13
-        key_part k255 = {13,11,13,7};
-        part = get_one_part(mapParts, k255);
-        if(part == NULL)
-        {
-            fatal_error("part 255 r3 not found\n");
-        }
-        etern[13][2] = part;
-        
-        // 181 N3-- rotation 3
-        // 3 7 15 5
-        key_part k181 = {7,15,5,3};
-        part = get_one_part(mapParts, k181);
-        if(part == NULL)
-        {
-            fatal_error("part 181 r3 not found\n");
-        }
-        etern[2][13] = part;
-        
-        // 249 N14 -- rotation 0
-        // 8 5 9 10
-        key_part k249 = {8,5,9,10};
-        part = get_one_part(mapParts, k249);
-        if(part == NULL)
-        {
-            fatal_error("part 249 r0 not found\n");
-        }
-        etern[13][13] = part;
 #endif
+        int position = hint->id + ETERN_PARTS * hint->rotation;
+        if (position < 0 || position >= all_rotate_part->size
+            || all_rotate_part->parts[position].id != hint->id) {
+            fatal_error("indices : pièce %i rotation %i introuvable\n", hint->id, hint->rotation);
+        }
+        etern[hint->x][hint->y] = &all_rotate_part->parts[position];
+    }
+    free_array_index(indices);
 #else
     int cur_dir = DIR_LEFT;
 #endif
