@@ -214,6 +214,51 @@ TEST help_format_topic_command_and_category(void)
 }
 
 /*
+ * Non-régression : `help_interpreter` émettait le texte d'aide générale en un
+ * seul appel `log_info("%s", help)`, dont le tampon fixe (LOG_LINE_MAX, 4096
+ * octets, logger.c) tronquait SILENCIEUSEMENT tout dépassement — la table
+ * `commands` a fini par dépasser ce seuil (ajout de `sortAscFiles`), révélant
+ * la troncature au milieu de l'aide (voir la commande console `checkDatas`).
+ * Le correctif émet désormais ligne par ligne (help_interpreter,
+ * command_lines.c) : ce test capture stdout via `do_command_line("help")`
+ * (le VRAI chemin console, pas `help_format_general` qui est pure et ne
+ * passait déjà pas par ce tampon) et vérifie qu'il dépasse 4096 octets ET que
+ * la toute dernière commande listée (catégorie Clients, dernière catégorie)
+ * apparaît intacte.
+ */
+TEST help_interpreter_output_survives_past_log_line_max(void)
+{
+    char tmpl[] = "/tmp/etii_help_full_XXXXXX";
+    int fd = mkstemp(tmpl);
+    ASSERT(fd >= 0);
+
+    fflush(stdout);
+    int saved_stdout = dup(1);
+    dup2(fd, 1);
+    close(fd);
+
+    int rc = do_command_line("help");
+
+    fflush(stdout);
+    dup2(saved_stdout, 1);
+    close(saved_stdout);
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+
+    FILE *f = fopen(tmpl, "r");
+    ASSERT(f != NULL);
+    char buf[32768];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    unlink(tmpl);
+
+    ASSERT(n > 4096); /* dépasse bien LOG_LINE_MAX : le test exerce la troncature */
+    ASSERT(strstr(buf, "leaseDuration <n>") != NULL); /* dernière entrée, catégorie Clients */
+    PASS();
+}
+
+/*
  * config/configSave sont masquées côté SERVEUR (ni listées dans l'aide, ni
  * exécutables) : voir command_is_client_only, command_lines.c. Exécutées
  * côté client/pruner (server=0), elles fonctionnent normalement -- elles
@@ -2613,6 +2658,7 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_clear_runs);
     RUN_TEST(help_format_general_lists_categories_and_aliases);
     RUN_TEST(help_format_topic_command_and_category);
+    RUN_TEST(help_interpreter_output_survives_past_log_line_max);
     RUN_TEST(help_hides_config_commands_on_server_only);
     RUN_TEST(do_command_line_config_is_masked_on_server_only);
     RUN_TEST(do_command_line_config_save_is_masked_on_server_only);

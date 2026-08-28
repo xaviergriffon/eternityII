@@ -781,6 +781,16 @@ int datamanager_rebalance_step(int max_packets);
 /** @brief Trie toutes les files de possibilités par ordre croissant de `alloc`. */
 int sort_ascending(void);
 
+/**
+ * @brief Trie chaque file de possibilités par ordre croissant de `alloc`,
+ *        individuellement, sans les regrouper dans une seule file.
+ *
+ * Consomme (`scroll`, LIFO) en priorité les possibilités les plus avancées de
+ * CHAQUE file, contrairement à `sort_ascending()` qui ne concentre le tri que
+ * sur la file 0 après fusion.
+ */
+int sort_ascending_files(void);
+
 /** @brief Trie toutes les files de possibilités par ordre décroissant de `alloc`. */
 int sort_descending(void);
 

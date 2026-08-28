@@ -16,7 +16,7 @@ la commande la plus proche (`vouliez-vous dire "sortDesc" ?`).
 Les noms canoniques sont en **camelCase complet** (`sortAsc`, `removeNoNext`,
 `clientsCommand`, …) et **insensibles à la casse** (`maxstockbythread` fonctionne).
 Les noms historiques abrégés restent acceptés comme **alias** : `sorta` (sortAsc),
-`sortd` (sortDesc), `sortdm` (sortDescMulti), `rmnonext` et `prune` (removeNoNext),
+`sortaf` (sortAscFiles), `sortd` (sortDesc), `sortdm` (sortDescMulti), `rmnonext` et `prune` (removeNoNext),
 `clientsCmd` (clientsCommand), plus `?` (help), `quit` (exit), `stats` (statistic).
 Une commande appelée avec un argument manquant affiche automatiquement son rappel
 d'usage (`usage : limit <n> — …`) au lieu d'échouer en silence.
@@ -68,6 +68,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | Commande | Description |
 |---|---|
 | `sortAsc` | Trie les possibilités par ordre croissant (moins avancées en premier ; alias : `sorta`) |
+| `sortAscFiles` | Trie chaque file par ordre croissant, **sans les regrouper** : sur toutes les files (pas seulement la première), consomme en priorité les possibilités les plus avancées (alias : `sortaf`) |
 | `sortDesc [n]` | Trie par ordre décroissant (plus avancées en premier) ; `n` pour une file spécifique (alias : `sortd`) |
 | `sortDescMulti` | Trie toutes les files en parallèle (alias : `sortdm`) |
 | `split` | Répartit les possibilités entre les 10 files |
