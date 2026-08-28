@@ -77,6 +77,14 @@ typedef struct {
     uint8_t x;
     /** Ligne de la case de ce niveau. */
     uint8_t y;
+    /** Score MRV (nombre de candidats) de la case (x,y) au moment où
+     * `mrv_choose_cell` l'a choisie — donc AVANT le placement de ce niveau.
+     * `POSSIBILITY_MIN_CANDIDATS_UNKNOWN` si la case n'était pas contrainte
+     * (repli `fallback`) ou si aucune case n'avait de candidat (sous-arbre
+     * mort, `search == NULL`). Recopié tel quel dans `min_candidats` de tout
+     * paquet dont la dernière pièce posée est celle de ce niveau — gratuit,
+     * déjà calculé par `mrv_choose_cell`. */
+    int16_t mrv_score;
 } bt_level;
 
 /**
@@ -370,13 +378,16 @@ static void record_solution(client_possibility_t *client, struct possibility_pac
  * @param out        Tableau de destination des paquets matérialisés.
  * @param max_out    Nombre maximal de paquets à produire.
  * @param new_next_s Sortie : nouveau `next_s` par niveau si l'envoi réussit.
- *                   MRV étant le seul moteur (docs/conception/mrv_moteur_unique.md,
- *                   PR3), la profondeur de pile n'a aucun rapport avec le
- *                   nombre de pièces posées : `alloc` est donc TOUJOURS fixé
- *                   par RECOMPTAGE (`possibility_placed_count`) après le
+ *                   MRV étant le seul moteur (docs/autosearch_step.md), la
+ *                   profondeur de pile n'a aucun rapport avec le nombre de
+ *                   pièces posées : `alloc` est donc TOUJOURS fixé par
+ *                   RECOMPTAGE (`possibility_placed_count`) après le
  *                   placement du candidat — le comptage est déjà exact par
  *                   construction (on vient de placer une pièce de plus sur
- *                   `scratch`), aucune canonisation nécessaire.
+ *                   `scratch`), aucune canonisation nécessaire. `min_candidats`
+ *                   est fixé en parallèle à `lvl->mrv_score` : le score que
+ *                   `mrv_choose_cell` a calculé pour (cx,cy) quand ce niveau a
+ *                   été ouvert, gratuit, aucun recalcul.
  * @return           Nombre de paquets effectivement matérialisés.
  */
 static int bt_materialize_pending(client_possibility_t *client,
@@ -419,6 +430,9 @@ static int bt_materialize_pending(client_possibility_t *client,
                 pkt->grid[cx][cy] = idParts[cand->id][cand->rotation];
                 BOARD_SET_FACE(pkt, position, 1);
                 pkt->alloc = (uint16_t)possibility_placed_count(pkt);
+                // Score MRV de la case (cx,cy) au moment où ce niveau l'a
+                // choisie — exactement la case qui reçoit `cand` ci-dessus.
+                pkt->min_candidats = lvl->mrv_score;
                 if (pkt->alloc >= ETERN_PARTS) {
                     // Plateau complet : enregistre + signale, rien à matérialiser.
                     record_solution(client, pkt);
@@ -753,6 +767,11 @@ static inline int mrv_free_candidates(const map_big_array *map, const key_part *
  * @param used        Miroir 64 bits des pièces utilisées.
  * @param all_face    Valeur « toute face » (= map->sizearrayM).
  * @param out_x/out_y Remplis avec la case choisie si succès ; non modifiés sinon.
+ * @param out_count   Rempli avec le score MRV (nombre de candidats) de la case
+ *                     choisie si succès ; `POSSIBILITY_MIN_CANDIDATS_UNKNOWN`
+ *                     si le repli `fallback` a été utilisé (case non
+ *                     contrainte, comptage non calculé). Non modifié en cas
+ *                     d'échec (valeur de retour 0).
  * @return 1 si une case a été choisie, 0 si au moins une case vide n'a AUCUN
  *         candidat (branche morte détectée par le balayage lui-même).
  */
@@ -761,7 +780,7 @@ static int mrv_choose_cell(struct possibility_packet *board,
                            map_big_array *mapParts,
                            const uint64_t used[MRV_USED_WORDS],
                            int8_t all_face,
-                           uint8_t *out_x, uint8_t *out_y)
+                           uint8_t *out_x, uint8_t *out_y, int *out_count)
 {
     int best_count = -1;
     uint8_t best_x = 0, best_y = 0;
@@ -805,16 +824,18 @@ static int mrv_choose_cell(struct possibility_packet *board,
         }
         *out_x = fallback_x;
         *out_y = fallback_y;
+        *out_count = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
         return 1;
     }
     *out_x = best_x;
     *out_y = best_y;
+    *out_count = best_count;
     return 1;
 }
 
 /**
  * @brief Issue de `search_packet_backtracking_mrv`, seul moteur de backtracking
- *        depuis la bascule MRV (docs/conception/mrv_moteur_unique.md, PR3).
+ *        depuis la bascule MRV (cf. docs/autosearch_step.md).
  */
 typedef enum {
     BT_CORE_EXHAUSTED = 0, /**< Sous-arbre entièrement exploré : mort, prouvé (solutions éventuelles déjà signalées). */
@@ -824,14 +845,14 @@ typedef enum {
 
 /**
  * @brief Recherche à ordre de variable DYNAMIQUE (MRV) — §4.7 de
- *        `docs/conception/elagage_recherche.md`. Depuis
- *        docs/conception/mrv_moteur_unique.md (PR3), c'est le SEUL moteur de
- *        backtracking, pour la recherche réelle comme pour la preuve bornée du
- *        pruner (`search_packet_backtracking_budgeted`) : l'ancien moteur à
- *        ordre FIXE (`search_packet_backtracking_core`, sélectionné par les
+ *        `docs/conception/elagage_recherche.md`. C'est le SEUL moteur de
+ *        backtracking (cf. docs/autosearch_step.md), pour la recherche réelle
+ *        comme pour la preuve bornée du pruner
+ *        (`search_packet_backtracking_budgeted`) : l'ancien moteur à ordre
+ *        FIXE (`search_packet_backtracking_core`, sélectionné par les
  *        drapeaux `mrv_enabled`/`pruner_dfs_mrv`) a été supprimé — mesuré
  *        favorable dans les deux usages, un interrupteur laissé en place
- *        aurait été un chemin de code non testé (cf. §6 point 6 du document).
+ *        aurait été un chemin de code non testé.
  *
  * Un unique plateau (copie locale du paquet racine) est modifié en place.
  * Avancer = écrire une case et positionner un bit ; reculer = effacer la case,
@@ -937,9 +958,11 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
         stack[top].placed_pos = -1;
 
         uint8_t x, y;
-        if (mrv_choose_cell(&board, constraints, client->map_part, used, all_face, &x, &y)) {
+        int mrv_count;
+        if (mrv_choose_cell(&board, constraints, client->map_part, used, all_face, &x, &y, &mrv_count)) {
             stack[top].x = x;
             stack[top].y = y;
+            stack[top].mrv_score = (int16_t)mrv_count;
             stack[top].search = get_parts_bigarray_with_key(client->map_part, &constraints[x][y]);
         } else {
             // Case sans issue détectée par le balayage : niveau sans aucun
@@ -947,6 +970,7 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
             // traite exactement comme un niveau épuisé.
             stack[top].x = 0;
             stack[top].y = 0;
+            stack[top].mrv_score = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
             stack[top].search = NULL;
         }
 
@@ -1022,6 +1046,10 @@ backtrack:;
         // parcours : tout paquet délégué a `alloc` fixé par recomptage
         // (`possibility_placed_count`, cf. `bt_materialize_pending`/`bt_flush_pending`).
         board.alloc = (uint16_t)placed_count;
+        // `min_candidats` : score MRV de la case qui vient de recevoir cette
+        // pièce, calculé gratuitement par `mrv_choose_cell` quand ce niveau a
+        // été ouvert (stack[top].mrv_score) — pas un recalcul dédié.
+        board.min_candidats = stack[top].mrv_score;
         if (board.alloc > max_result) {
             max_result = board.alloc;
             best_board_try_record(&g_search_best_board, &board, board.alloc);
@@ -1055,9 +1083,9 @@ backtrack:;
  * Fine enveloppe de `search_packet_backtracking_mrv` (illimité, délégation
  * autorisée) préservant la signature/le contrat historiques de cette fonction :
  * seule la recherche réelle (`autosearch_step`) l'appelle. MRV est le seul
- * moteur depuis docs/conception/mrv_moteur_unique.md (PR3) : plus de
- * branchement à faire ici, l'ancien drapeau `mrv_enabled` a disparu avec le
- * moteur à ordre fixe qu'il sélectionnait.
+ * moteur (cf. docs/autosearch_step.md) : plus de branchement à faire ici,
+ * l'ancien drapeau `mrv_enabled` a disparu avec le moteur à ordre fixe qu'il
+ * sélectionnait.
  *
  * @param client  Contexte du thread client.
  * @param root    Paquet racine à explorer (non modifié).
@@ -1079,11 +1107,11 @@ static int search_packet_backtracking(client_possibility_t *client,
  *
  * Rejoue `root` par le même backtracking MRV que la recherche réelle, plafonné
  * à `node_budget` nœuds et sans délégation (`allow_delegate = 0`, cf. sa doc).
- * MRV est le seul moteur depuis docs/conception/mrv_moteur_unique.md (PR3) :
- * l'ancien drapeau `pruner_dfs_mrv`, qui sélectionnait entre ordre fixe et
- * ordre dynamique pour cette preuve précisément, a disparu avec le moteur à
- * ordre fixe qu'il sélectionnait — mesuré ×3 à ×4 de fermetures à budget égal
- * sur du stock de production (§4.10 de docs/conception/elagage_recherche.md).
+ * MRV est le seul moteur (cf. docs/autosearch_step.md) : l'ancien drapeau
+ * `pruner_dfs_mrv`, qui sélectionnait entre ordre fixe et ordre dynamique pour
+ * cette preuve précisément, a disparu avec le moteur à ordre fixe qu'il
+ * sélectionnait — mesuré ×3 à ×4 de fermetures à budget égal sur du stock de
+ * production (§4.10 de docs/conception/elagage_recherche.md).
  * `BT_CORE_EXHAUSTED` est une condition nécessaire exacte, pas une
  * heuristique : si retourné, le sous-arbre entier a été parcouru par le même
  * code que la recherche fait foi — aucun faux positif possible, exactement la

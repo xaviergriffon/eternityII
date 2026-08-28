@@ -470,7 +470,7 @@ TEST backup_then_restore_preserves_count(void)
 /* Construit un paquet avec un nombre choisi de cases remplies (les
  * `placed` premières cases en ordre ligne/colonne de `grid`, peu importe
  * `directions[]`), et un `alloc` délibérément incohérent avec ce compte —
- * reproduit le scénario §2.1 de docs/conception/mrv_moteur_unique.md : des
+ * reproduit le scénario docs/autosearch_step.md : des
  * cases remplies au-delà du curseur déclaré. */
 static void fill_packet_with_stale_alloc(struct possibility_packet *pk, int placed, int stale_alloc)
 {
@@ -505,7 +505,7 @@ static int write_synthetic_back(const char *path, struct possibility_packet *pkt
     return written == (size_t)n;
 }
 
-/* PR2 (docs/conception/mrv_moteur_unique.md §8) : critère de succès
+/* docs/autosearch_step.md : critère de succès
  * "restauration du .back de production 126287 -> 126287, zéro rejet",
  * validé ici sur un stock synthétique (le vrai fichier de production n'est
  * pas versionné). Chaque paquet porte un `alloc` "pré-v13" volontairement
@@ -535,6 +535,11 @@ TEST restore_migrates_pre_v13_alloc_with_zero_loss(void)
     for (int i = 0; i < n; i++) {
         fill_packet_with_stale_alloc(&pkts[i], placed[i], stale_alloc[i]);
         ASSERT(pkts[i].alloc != possibility_placed_count(&pkts[i])); /* le scénario est bien incohérent */
+        /* min_candidats "plausible" (dans la plage valide d'un vrai score) mais
+         * hérité d'avant l'introduction du champ : doit être écrasé par la
+         * sentinelle, jamais faire confiance à un octet qui était du bourrage
+         * d'alignement (cf. docs/autosearch_step.md). */
+        pkts[i].min_candidats = 5;
     }
 
     char path[] = "/tmp/etii_back_stalealloc_XXXXXX";
@@ -557,6 +562,7 @@ TEST restore_migrates_pre_v13_alloc_with_zero_loss(void)
         for (int i = 0; i < got->size; i++) {
             int pc = possibility_placed_count(&got->possibilities[i]);
             ASSERT_EQ_FMT(pc, (int)got->possibilities[i].alloc, "%d"); /* alloc recompté */
+            ASSERT_EQ_FMT(POSSIBILITY_MIN_CANDIDATS_UNKNOWN, (int)got->possibilities[i].min_candidats, "%d"); /* sentinelle, pas recompté */
             total_seen++;
             for (int j = 0; j < n; j++) {
                 if (!seen[j] && pc == placed[j]) { seen[j] = 1; break; }
@@ -1321,7 +1327,7 @@ TEST analysed_restore_clears_untracked_packet(void)
     drain_all();
     /* alloc cohérent avec le contenu de la grille (9/11 cases pleines,
      * respectivement) : restore_analysed() recompte désormais `alloc`
-     * inconditionnellement (docs/conception/mrv_moteur_unique.md, PR2 §8),
+     * inconditionnellement (docs/autosearch_step.md),
      * donc la clé de recherche locale ci-dessous doit déjà porter la valeur
      * post-migration pour que compare_possibility() la retrouve — un
      * memset(0) (grid tout à zéro, jamais -2) serait vu comme un plateau
@@ -1534,7 +1540,37 @@ TEST stock_distribution_totals_match_datas_size(void)
     PASS();
 }
 
-/* Critère de succès de la PR4 (§8 de docs/conception/mrv_moteur_unique.md) :
+/* Seconde coordonnée (PR5, cf. docs/autosearch_step.md) : `datamanager_stock_distribution`
+ * cumule séparément la somme et le compte des `min_candidats` CONNUS par niveau -- un paquet
+ * à POSSIBILITY_MIN_CANDIDATS_UNKNOWN ne doit ni fausser la somme ni gonfler le compte. */
+TEST stock_distribution_aggregates_min_candidats_excluding_unknown(void)
+{
+    drain_all();
+
+    array_possibility_packet arr;
+    arr.size = 3;
+    arr.possibilities = calloc(3, sizeof(struct possibility_packet));
+    arr.possibilities[0].alloc = 4;
+    arr.possibilities[0].min_candidats = 2;
+    arr.possibilities[1].alloc = 4;
+    arr.possibilities[1].min_candidats = 6;
+    arr.possibilities[2].alloc = 4;
+    arr.possibilities[2].min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+    add_possibility(NULL, &arr);
+    free(arr.possibilities);
+
+    stock_distribution_t d;
+    datamanager_stock_distribution(&d);
+
+    ASSERT_EQ_FMT(3ULL, d.unchecked[4], "%llu"); /* les 3 paquets sont bien comptés */
+    ASSERT_EQ_FMT(2ULL, d.unchecked_min_candidats_known[4], "%llu"); /* le paquet UNKNOWN exclu */
+    ASSERT_EQ_FMT(8ULL, d.unchecked_min_candidats_sum[4], "%llu"); /* 2 + 6, pas 2 + 6 + (-1) */
+
+    drain_all();
+    PASS();
+}
+
+/* Critère de succès de la PR4 (cf. docs/autosearch_step.md, docs/api_http_rest.md) :
  * « histogramme du stock de production cohérent avec un recomptage
  * indépendant ». Construit des paquets synthétiques avec un VRAI nombre de
  * cases posées dans `grid` (via fill_packet_with_stale_alloc, avec
@@ -1824,8 +1860,7 @@ TEST remove_no_next_prunes_dead_packets(void)
     unsigned long long cells_before = pruner_cells_studied;
     remove_possibilities_with_no_next(map, &rp);
     ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* l'impasse a été retirée */
-    /* Études créditées : depuis PR1 (docs/conception/mrv_moteur_unique.md,
-       site 5), possibility_all_has_a_next_counted ne balaie plus que les
+    /* Études créditées : depuis docs/autosearch_step.md (site 5), possibility_all_has_a_next_counted ne balaie plus que les
        cases VIDES -- les cases déjà remplies ne sont plus recomptées. pks[0]
        est une grille PLEINE (aucune case -2) -> 0 case réellement étudiée,
        mais remove_possibilities_with_no_next applique un plancher d'1 coup
@@ -5535,6 +5570,7 @@ SUITE(datamanager_suite)
     RUN_TEST(stock_distribution_on_empty_stock_is_all_zero);
     RUN_TEST(stock_distribution_counts_full_board_alloc);
     RUN_TEST(stock_distribution_totals_match_datas_size);
+    RUN_TEST(stock_distribution_aggregates_min_candidats_excluding_unknown);
     RUN_TEST(stock_distribution_matches_independent_grid_recount);
     RUN_TEST(count_combinations_is_triangular);
     RUN_TEST(get_tocheck_drains_unchecked_pool);

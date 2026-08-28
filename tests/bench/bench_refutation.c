@@ -22,7 +22,7 @@
  * (indéterminé) — c'est la même primitive que la preuve bornée du pruner
  * (§4.6b de docs/conception/elagage_recherche.md). Ce fichier n'est qu'un
  * harnais autour d'elle ; il n'ajoute aucun code au chemin de production.
- * MRV est le SEUL moteur depuis docs/conception/mrv_moteur_unique.md (PR3) —
+ * MRV est le SEUL moteur depuis docs/autosearch_step.md —
  * ce banc a historiquement comparé l'ancien moteur à ordre fixe
  * (`search_packet_backtracking_core`) à MRV pour établir cette mesure ;
  * l'ordre fixe a depuis été supprimé, ce banc ne compare donc plus que des
@@ -121,7 +121,7 @@ static double now_seconds(void)
 /**
  * @brief Une variante de MRV à comparer.
  *
- * MRV est le SEUL moteur depuis docs/conception/mrv_moteur_unique.md (PR3) :
+ * MRV est le SEUL moteur depuis docs/autosearch_step.md :
  * ce banc a historiquement comparé l'ancien moteur à ordre fixe (portant
  * aussi une variante « + balayage global de case morte », `global_check`,
  * §4.7 ablation) à MRV — les deux ont disparu avec la suppression du moteur à
@@ -454,7 +454,7 @@ static void build_prefix_root(const struct possibility_packet *deep, int k,
         kept++;
     }
     // `alloc` = RECOMPTAGE des pièces posées (VERSION 13,
-    // docs/conception/mrv_moteur_unique.md) — plus une re-canonisation sur le
+    // docs/autosearch_step.md) — plus une re-canonisation sur le
     // premier trou de `directions[]` (`bt_canonicalize_packet`, supprimée par PR1).
     out->alloc = (uint16_t)possibility_placed_count(out);
 }
@@ -1030,7 +1030,7 @@ int main(int argc, char **argv)
             // Contrôle du stock lui-même : tout paquet servi par le serveur doit
             // être cohérent (`check_possibility`) et son `alloc` doit être EXACT
             // (RECOMPTAGE `possibility_placed_count`, cf. VERSION 13,
-            // docs/conception/mrv_moteur_unique.md) — plus une re-canonisation
+            // docs/autosearch_step.md) — plus une re-canonisation
             // sur le premier trou de `directions[]` (`bt_canonicalize_packet`/
             // `normalize_possibility_packet`, supprimées par PR1).
             if (check_possibility(&pkt, g_client.all_rotate_part) < 0) inconsistent++;

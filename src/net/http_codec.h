@@ -348,6 +348,15 @@ typedef struct {
     unsigned long long total_unchecked;
     unsigned long long total_checked;
     unsigned long long total_analysed;
+    /// Seconde coordonnée par niveau (cf. `stock_distribution_t` §
+    /// `min_candidats`, core/datamanager.h) : somme et compte des scores MRV
+    /// connus, un tableau par pool, à diviser pour obtenir la moyenne.
+    unsigned long long unchecked_min_candidats_sum[STOCK_DISTRIBUTION_LEVELS];
+    unsigned long long unchecked_min_candidats_known[STOCK_DISTRIBUTION_LEVELS];
+    unsigned long long checked_min_candidats_sum[STOCK_DISTRIBUTION_LEVELS];
+    unsigned long long checked_min_candidats_known[STOCK_DISTRIBUTION_LEVELS];
+    unsigned long long analysed_min_candidats_sum[STOCK_DISTRIBUTION_LEVELS];
+    unsigned long long analysed_min_candidats_known[STOCK_DISTRIBUTION_LEVELS];
 } http_stock_distribution_view_t;
 
 /**
@@ -528,11 +537,17 @@ typedef struct {
     /// 1 si un plateau a déjà été enregistré (aucun record avant le premier
     /// placement n'existe : `alloc`/`grid` ne sont valides que si `has_board`).
     int has_board;
-    /// Niveau du curseur de parcours de ce plateau. BORNE INFÉRIEURE du nombre
-    /// de pièces réellement posées : `possibility_all_has_a_next` pose les pièces
-    /// forcées sans avancer `alloc` (cf. l'invariant `faceused >= alloc` de
-    /// `check_possibility`). Compter les cases non vides de `grid` pour l'exact.
+    /// Nombre de pièces posées sur ce plateau (`possibility_packet.alloc`,
+    /// nombre de cases non vides de la grille depuis VERSION 13 — cf.
+    /// docs/autosearch_step.md).
     unsigned alloc;
+    /// Score MRV (nombre de candidats) de la case qui a reçu la dernière
+    /// pièce posée sur ce plateau — seconde coordonnée de `alloc`, deux
+    /// plateaux à autant de pièces posées n'ont pas forcément la même
+    /// difficulté. `POSSIBILITY_MIN_CANDIDATS_UNKNOWN` si non mesuré (plateau
+    /// non issu du moteur MRV, ou restauré depuis un stock antérieur à son
+    /// introduction). Valide seulement si `has_board`.
+    int min_candidats;
     /// Grille de descriptions de pièces : `grid[x][y]`, cf. `http_best_board_cell_t`.
     http_best_board_cell_t grid[ETERN_SIZE][ETERN_SIZE];
 } http_best_board_view_t;

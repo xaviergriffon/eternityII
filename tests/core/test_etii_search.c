@@ -834,13 +834,15 @@ TEST mrv_choose_cell_picks_the_most_constrained_cell(void)
     fill_idparts(idParts);
 
     uint8_t x = 255, y = 255;
+    int count = -99;
     uint64_t used[MRV_USED_WORDS];
     mrv_used_init(used, &board);
-    int rc = mrv_choose_cell(&board, C, map, used, (int8_t)map->sizearrayM, &x, &y);
+    int rc = mrv_choose_cell(&board, C, map, used, (int8_t)map->sizearrayM, &x, &y, &count);
 
     ASSERT_EQ_FMT(1, rc, "%d");
     ASSERT_EQ_FMT(0, (int)x, "%d");
     ASSERT_EQ_FMT(1, (int)y, "%d"); /* (0,1) : 1 seul candidat, la plus contrainte */
+    ASSERT_EQ_FMT(1, count, "%d"); /* score MRV de la case choisie : 1 candidat */
 
     free_bigarray(map);
     PASS();
@@ -866,9 +868,10 @@ TEST mrv_choose_cell_detects_dead_cell(void)
     map_big_array *map = make_uniform_map(&empty_list);
 
     uint8_t x = 255, y = 255;
+    int count = -99;
     uint64_t used[MRV_USED_WORDS];
     mrv_used_init(used, &board);
-    int rc = mrv_choose_cell(&board, C, map, used, (int8_t)map->sizearrayM, &x, &y);
+    int rc = mrv_choose_cell(&board, C, map, used, (int8_t)map->sizearrayM, &x, &y, &count);
 
     ASSERT_EQ_FMT(0, rc, "%d");
 
@@ -985,7 +988,7 @@ TEST bt_materialize_pending_orders_deepest_first(void)
 }
 
 /* ======================================================================
- * §4.7 / PR1 (docs/conception/mrv_moteur_unique.md) — délégation en ordre
+ * §4.7 (cf. docs/autosearch_step.md) — délégation en ordre
  * DYNAMIQUE : `alloc` des paquets émis est fixé par RECOMPTAGE
  * (`possibility_placed_count`), plus par re-canonisation sur le premier trou
  * du parcours (`bt_canonicalize_packet`, supprimée par PR1 : `directions[]`
@@ -1023,6 +1026,7 @@ TEST bt_materialize_pending_dynamic_order_recomputes_alloc(void)
     stack[0].placed_pos = -1;
     stack[0].x = dirx[5];
     stack[0].y = diry[5];
+    stack[0].mrv_score = 3; /* score MRV calculé quand ce niveau a été ouvert */
 
     client_possibility_t client;
     memset(&client, 0, sizeof(client));
@@ -1047,6 +1051,9 @@ TEST bt_materialize_pending_dynamic_order_recomputes_alloc(void)
         ASSERT_EQ_FMT(1, (int)out[i].alloc, "%d");
         ASSERT_EQ_FMT(possibility_placed_count(&out[i]), (int)out[i].alloc, "%d");
         ASSERT_EQ_FMT(0, (int)out[i].checked, "%d");
+        /* min_candidats est repris tel quel de stack[0].mrv_score : le score
+         * que mrv_choose_cell avait calculé pour cette case, gratuit. */
+        ASSERT_EQ_FMT(3, (int)out[i].min_candidats, "%d");
     }
     ASSERT_EQ_FMT(2, new_next_s[0], "%d"); /* niveau épuisé */
 
@@ -1623,7 +1630,7 @@ TEST search_backtracking_explores_and_exhausts(void)
  * search_packet_backtracking_budgeted (§4.6b de
  * docs/conception/elagage_recherche.md) : même cœur MRV que
  * search_packet_backtracking (search_packet_backtracking_mrv, seul moteur
- * depuis docs/conception/mrv_moteur_unique.md, PR3), plafonné en nœuds et SANS
+ * depuis docs/autosearch_step.md), plafonné en nœuds et SANS
  * délégation (allow_delegate = 0). Deux volets, comme l'exige la doctrine de
  * tests du document de conception (§5) : un plateau où la fermeture DOIT être
  * prouvée (budget large), un où elle NE DOIT PAS l'être (budget insuffisant)
@@ -2025,7 +2032,7 @@ static int es_count_solution_files(const char *dir)
 /* §4.4 — CONFLIT DE SINGLETONS (`singleton_conflict_check`). C'est une
  * condition NÉCESSAIRE : elle ne doit jamais coûter une seule solution.
  * Verrou sur le moteur MRV (seul moteur depuis
- * docs/conception/mrv_moteur_unique.md, PR3 — le drapeau vit dans
+ * docs/autosearch_step.md — le drapeau vit dans
  * bt_forward_check, partagé avec l'ancien moteur à ordre fixe avant sa
  * suppression) : exploration exhaustive du vrai puzzle 4×4, drapeau levé puis
  * baissé, même nombre de solutions. */

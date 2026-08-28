@@ -118,6 +118,12 @@ void http_stock_distribution_collect(http_stock_distribution_view_t *out)
         out->unchecked[level] = distribution.unchecked[level];
         out->checked[level] = distribution.checked[level];
         out->analysed[level] = distribution.analysed[level];
+        out->unchecked_min_candidats_sum[level] = distribution.unchecked_min_candidats_sum[level];
+        out->unchecked_min_candidats_known[level] = distribution.unchecked_min_candidats_known[level];
+        out->checked_min_candidats_sum[level] = distribution.checked_min_candidats_sum[level];
+        out->checked_min_candidats_known[level] = distribution.checked_min_candidats_known[level];
+        out->analysed_min_candidats_sum[level] = distribution.analysed_min_candidats_sum[level];
+        out->analysed_min_candidats_known[level] = distribution.analysed_min_candidats_known[level];
     }
     out->total_unchecked = distribution.total_unchecked;
     out->total_checked = distribution.total_checked;
@@ -267,6 +273,7 @@ void http_best_board_collect(http_best_board_view_t *out)
         return;
     }
     out->alloc = alloc;
+    out->min_candidats = board.min_candidats;
     for (int x = 0; x < ETERN_SIZE; x++) {
         for (int y = 0; y < ETERN_SIZE; y++) {
             decode_best_board_cell(board.grid[x][y], &out->grid[x][y]);

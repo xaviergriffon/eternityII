@@ -83,6 +83,15 @@ avant v13, `alloc` était un curseur de position dans `directions[]`/`dirx[]`/`d
 grille (`possibility_placed_count`). Un client v12 et un serveur v13 (ou l'inverse) se
 comprendraient sur le fil tout en désynchronisant silencieusement l'état du plateau —
 même raisonnement que pour la v11, d'où le refus explicite au handshake.
+Le champ `min_candidats` (score MRV, seconde coordonnée de `alloc` — voir
+[docs/autosearch_step.md](autosearch_step.md)) n'a en revanche PAS bumpé
+`VERSION` : il loge dans le bourrage d'alignement de `possibility_packet`
+(`sizeof` inchangé, 576 octets), et toute donnée fraîchement produite par le
+moteur MRV l'écrit correctement par construction — seul un fichier `.back`
+écrit avant son introduction en porte une valeur non fiable, traitée hors
+protocole (recomptage impossible, écrasée par la sentinelle « inconnu » au
+chargement, cf. `import`/`import_analysed`/`stock_spill_reload` dans
+`core/datamanager.c`/`core/stock_spill.c`).
 
 ### Handshake de version
 

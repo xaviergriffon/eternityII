@@ -134,6 +134,25 @@ directement, ou le retrouver indépendamment en comptant les cases de `grid` qui
 ne valent pas `null` (voir [`GET /api/v1/best-board`](#get-apiv1best-board)) —
 les deux comptes coïncident toujours.
 
+<a id="le-champ-min_candidats"></a>
+### Le champ `min_candidats` (seconde coordonnée de `alloc`)
+
+Deux plateaux au même `alloc` (même nombre de pièces posées) n'ont pas
+forcément la même difficulté : l'un peut avoir été atteint par une suite de
+choix presque forcés, l'autre par une suite de choix larges. `min_candidats`
+donne le nombre de candidats de la case qui a reçu la **dernière** pièce posée
+sur ce plateau, tel que calculé par le moteur MRV au moment du choix (score
+`mrv_choose_cell`, cf. [docs/autosearch_step.md](autosearch_step.md)) — un
+score bas signale un plateau atteint par un chemin contraint.
+
+`-1` signifie « non mesuré » : plateau non issu du moteur de recherche MRV
+(genèse, expansion en ordre fixe), ou stock restauré depuis un fichier écrit
+avant l'introduction de ce champ. Ne jamais confondre avec `0` : un
+sous-arbre à 0 candidat est mort et n'est jamais matérialisé, `0` n'apparaît
+donc jamais comme un score réel — `GET /api/v1/stock-distribution` s'en sert
+pour représenter « aucune mesure disponible pour ce niveau » sans ambiguïté
+(`avg_min_candidats: 0.0`).
+
 ## Endpoints
 
 ### GET /api/v1/stats
@@ -534,6 +553,7 @@ s'intéresse qu'au débit ne doit pas la payer à chaque poll.
 {
   "has_board": true,
   "alloc": 187,
+  "min_candidats": 2,
   "grid": [
     [ {"id": 4, "rotation": 1, "top": 0, "right": 19, "bottom": 21, "left": 0}, null, ... ],
     [ null, null, ... ],
@@ -552,6 +572,7 @@ s'intéresse qu'au débit ne doit pas la payer à chaque poll.
 |---|---|---|
 | `has_board` | booléen | `false` si le serveur n'a encore aucun plateau enregistré (juste après démarrage, sans `restore`) — `alloc`/`grid` absents dans ce cas |
 | `alloc` | entier | Nombre de pièces posées sur ce plateau (voir [le champ `alloc`](#le-champ-alloc)) — coïncide avec le compte des cases de `grid` qui ne valent pas `null` |
+| `min_candidats` | entier | Score MRV de la dernière pièce posée (voir [le champ `min_candidats`](#le-champ-min_candidats)) — `-1` si non mesuré |
 | `grid` | tableau 2D | `grid[x][y]` : `null` si la case est vide, sinon la description de la pièce réellement posée — **jamais** l'indice brut interne (`id + ETERN_PARTS*rotation`, cf. `id_for_rotated_part`) |
 | `grid[x][y].id` | entier | Identifiant réel de la pièce (celui du fichier `pieces.csv`) |
 | `grid[x][y].rotation` | entier (0-3) | Rotation appliquée à la pièce dans cette orientation |
@@ -636,8 +657,8 @@ meilleur plateau atteint.
   "total_checked": 40,
   "total_analysed": 12,
   "levels": [
-    { "alloc": 3, "unchecked": 12,   "checked": 0,  "analysed": 0 },
-    { "alloc": 4, "unchecked": 5300, "checked": 40, "analysed": 12 }
+    { "alloc": 3, "unchecked": 12,   "checked": 0,  "analysed": 0,  "avg_min_candidats": 2.50 },
+    { "alloc": 4, "unchecked": 5300, "checked": 40, "analysed": 12, "avg_min_candidats": 0.0  }
   ]
 }
 ```
@@ -650,6 +671,7 @@ meilleur plateau atteint.
 | `levels` | tableau | Un objet par niveau `alloc` **non vide**, trié par `alloc` croissant |
 | `levels[].alloc` | entier | Nombre de pièces posées de ces possibilités (voir [le champ `alloc`](#le-champ-alloc)), 0 à 256 (ou 0 à 16 en build `ETERN_PARTS=16`) |
 | `levels[].unchecked` / `checked` / `analysed` | entier ≥ 0 | Nombre de possibilités de ce niveau dans chacun des trois pools |
+| `levels[].avg_min_candidats` | flottant | Seconde coordonnée (voir [le champ `min_candidats`](#le-champ-min_candidats)) : moyenne des scores MRV connus à ce niveau, trois pools combinés. `0.0` si aucune mesure disponible pour ce niveau (niveau 4 de l'exemple ci-dessus) — jamais une vraie moyenne, `0` candidat n'étant jamais stocké (sous-arbre mort) |
 
 **Les niveaux entièrement vides sont omis.** Sur les 257 niveaux possibles, un
 serveur réel n'en occupe qu'une poignée : les émettre tous n'apporterait que des

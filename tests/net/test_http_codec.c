@@ -308,6 +308,10 @@ TEST http_json_format_stock_distribution_golden(void)
     view.total_unchecked = 19;
     view.total_checked = 4;
     view.total_analysed = 1;
+    // Seconde coordonnée : niveau 3 a des scores MRV connus (moyenne 2.00),
+    // niveau 5 n'en a aucun (POSSIBILITY_MIN_CANDIDATS_UNKNOWN partout) : 0.00.
+    view.unchecked_min_candidats_sum[3] = 24;
+    view.unchecked_min_candidats_known[3] = 12;
 
     char buf[4096];
     int n = http_json_format_stock_distribution(buf, sizeof(buf), &view);
@@ -316,8 +320,10 @@ TEST http_json_format_stock_distribution_golden(void)
     ASSERT(strstr(buf, "\"total_unchecked\":19") != NULL);
     ASSERT(strstr(buf, "\"total_checked\":4") != NULL);
     ASSERT(strstr(buf, "\"total_analysed\":1") != NULL);
-    ASSERT(strstr(buf, "\"levels\":[{\"alloc\":3,\"unchecked\":12,\"checked\":4,\"analysed\":1},"
-                       "{\"alloc\":5,\"unchecked\":7,\"checked\":0,\"analysed\":0}]}") != NULL);
+    ASSERT(strstr(buf, "\"levels\":[{\"alloc\":3,\"unchecked\":12,\"checked\":4,\"analysed\":1,"
+                       "\"avg_min_candidats\":2.00},"
+                       "{\"alloc\":5,\"unchecked\":7,\"checked\":0,\"analysed\":0,"
+                       "\"avg_min_candidats\":0.00}]}") != NULL);
     PASS();
 }
 
@@ -642,6 +648,7 @@ TEST http_json_format_best_board_golden(void)
     memset(&view, 0, sizeof(view));
     view.has_board = 1;
     view.alloc = 187;
+    view.min_candidats = 3;
     /* Toutes les cases sont vides par défaut (id=-1), comme le produit
        http_best_board_collect — un id=0 par défaut (memset) serait une pièce
        valide à tort et gonflerait artificiellement le JSON attendu. */
@@ -661,7 +668,7 @@ TEST http_json_format_best_board_golden(void)
     int n = http_json_format_best_board(buf, sizeof(buf), &view);
     ASSERT(n > 0);
     ASSERT(strstr(buf, "\"has_board\":true") != NULL);
-    ASSERT(strstr(buf, "\"alloc\":187") != NULL);
+    ASSERT(strstr(buf, "\"alloc\":187,\"min_candidats\":3") != NULL);
     ASSERT(strstr(buf, "{\"id\":139,\"rotation\":2,\"top\":2,\"right\":15,\"bottom\":15,\"left\":3}") != NULL);
     ASSERT(strstr(buf, "null") != NULL);
     ASSERT(strstr(buf, "]}") != NULL); /* grille bien refermée */

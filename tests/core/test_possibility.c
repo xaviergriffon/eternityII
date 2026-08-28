@@ -555,7 +555,7 @@ TEST check_possibility_left_mismatch_is_minus_nine(void)
 
 /* --------------------------------------------------------------------------
  * check_possibility : couverture à 100% d'un plateau TROUÉ (§8 du document
- * de conception, docs/conception/mrv_moteur_unique.md — critère de succès
+ * de conception, docs/autosearch_step.md — critère de succès
  * explicite de PR1). Avant la conversion, la boucle de cohérence ne
  * balayait que les `alloc` premières cases du parcours directions[] ; ici
  * `alloc` est délibérément bas (1) alors que la grille porte 3 cases posées,
@@ -1402,7 +1402,7 @@ TEST possibility_has_a_next_skips_zero_id_and_used_piece(void)
 /* --------------------------------------------------------------------------
  * search_possiblity_light : expansion d'un paquet (File de résultats)
  *
- * Depuis PR1 (docs/conception/mrv_moteur_unique.md), la fonction choisit
+ * Depuis docs/autosearch_step.md, la fonction choisit
  * elle-même la case à développer (`light_choose_cell`, MRV : la case vide la
  * plus contrainte) au lieu de recevoir une clé pré-calculée sur la case du
  * curseur -- elle ne prend donc plus de `key_part *key` en paramètre.
@@ -2038,7 +2038,7 @@ TEST all_has_a_next_counted_full_scan_counts_all_cells(void)
     PASS();
 }
 
-/* Correction PR1 (site 5, docs/conception/mrv_moteur_unique.md) : les cases
+/* Correction PR1 (site 5, docs/autosearch_step.md) : les cases
  * déjà remplies ne sont plus re-balayées -- alloc n'indexe plus une position
  * de curseur (`possibility_placed_count`), le balayage saute directement les
  * cases non vides plutôt que de les compter comme "études de prunage".
@@ -2226,8 +2226,8 @@ TEST all_has_a_next_fixpoint_detects_cascading_forced_dead_cell(void)
     unsigned int cells = 0;
     ASSERT_EQ_FMT(0, possibility_all_has_a_next_counted(p, map, &rp, &cells), "%d");
     /* Détecté seulement au 2e balayage : le point fixe a dû relancer un
-     * balayage complet -- mais depuis PR1 (site 5, docs/conception/
-     * mrv_moteur_unique.md), chaque balayage saute les cases déjà remplies
+     * balayage complet -- mais depuis le passage à MRV (site 5, cf.
+     * docs/autosearch_step.md), chaque balayage saute les cases déjà remplies
      * au lieu de les recompter : passe 1 examine p0, p1, p2 (3 cases, les
      * SEULES vides) ; passe 2 ne réexamine QUE p0 (1 case, désormais morte).
      * Total 4, très inférieur à ETERN_PARTS (verrouille l'absence de
@@ -2315,7 +2315,7 @@ static const struct syn_index_face SYN_INDEX_FACES[] = {
 /* Couleurs EXPOSÉES (post-rotation, cf. les commentaires "-> {...}" de
  * SYN_INDEX_FACES) par les 5 pièces-indices une fois posées -- ce que leurs
  * voisines doivent trouver en face pour ne pas être des impasses. Depuis PR1
- * (docs/conception/mrv_moteur_unique.md), `search_possiblity_light` choisit
+ * (docs/autosearch_step.md), `search_possiblity_light` choisit
  * la case la plus contrainte (MRV) sur TOUTE la grille au lieu de la case
  * fixe `directions[0]` : elle balaie donc aussi les voisines des indices, et
  * `light_choose_cell` interrompt tout le balayage dès qu'une case CONTRAINTE

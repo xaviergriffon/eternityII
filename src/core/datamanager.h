@@ -861,6 +861,19 @@ typedef struct {
     unsigned long long total_checked;
     /// Somme de `analysed[]`.
     unsigned long long total_analysed;
+    /// Seconde coordonnée : somme des `min_candidats` connus par niveau
+    /// (exclut `POSSIBILITY_MIN_CANDIDATS_UNKNOWN`), un tableau par pool —
+    /// à diviser par le `_known[]` correspondant pour la moyenne. Un niveau
+    /// sans aucune valeur connue (`*_known[i] == 0`) n'a pas de moyenne
+    /// définie : difficulté non mesurée pour ce niveau, pas 0 (0 candidats
+    /// n'est d'ailleurs jamais stocké — un sous-arbre à 0 candidat est mort,
+    /// jamais matérialisé).
+    unsigned long long unchecked_min_candidats_sum[STOCK_DISTRIBUTION_LEVELS];
+    unsigned long long unchecked_min_candidats_known[STOCK_DISTRIBUTION_LEVELS];
+    unsigned long long checked_min_candidats_sum[STOCK_DISTRIBUTION_LEVELS];
+    unsigned long long checked_min_candidats_known[STOCK_DISTRIBUTION_LEVELS];
+    unsigned long long analysed_min_candidats_sum[STOCK_DISTRIBUTION_LEVELS];
+    unsigned long long analysed_min_candidats_known[STOCK_DISTRIBUTION_LEVELS];
 } stock_distribution_t;
 
 /**
