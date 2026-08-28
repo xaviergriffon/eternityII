@@ -4297,3 +4297,31 @@ int sort_descending(void)
 	unlock_all_file();
 	return 0;
 }
+
+/**
+ * @brief Trie chaque file par ordre décroissant, individuellement, sans regroupement.
+ *
+ * Symétrique de `sort_ascending_files()` pour l'ordre décroissant : contrairement
+ * à `sort_descending()`/`sort_descending_mthread()` (qui fusionnent toutes les
+ * files de chaque pool en file 0 avant de trier), cette variante préserve la
+ * répartition round-robin existante entre les `nb_file_possibility` files et
+ * trie chacune en place. `scroll_from_pool` consomme depuis la fin
+ * (`scroll()` est LIFO) : un tri décroissant place donc les possibilités les
+ * MOINS avancées (`alloc` le plus petit) en fin de chaque file, pour qu'elles
+ * soient consommées en priorité — sur toutes les files, pas seulement la file 0.
+ *
+ * @return 0.
+ */
+int sort_descending_files(void)
+{
+	// on bloque les files le temps du trie
+	lock_all_file();
+	int fp;
+	for (fp = 0; fp < nb_file_possibility; fp++)
+	{
+		sort_one_file_descending(&file_possibility[fp]->file);
+		sort_one_file_descending(&file_possibility_checked[fp]->file);
+	}
+	unlock_all_file();
+	return 0;
+}
