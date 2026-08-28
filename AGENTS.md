@@ -30,7 +30,7 @@ Sources live under `src/`, split into four domains. Includes are **explicit and 
 
 | Directory | Domain | Modules |
 |---|---|---|
-| `src/core/` | Puzzle logic & data structures + search engine | `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `etii_search` `datamanager` `stock_spill` |
+| `src/core/` | Puzzle logic & data structures + search engine | `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `etii_search` `datamanager` `stock_spill` `stock_rate` |
 | `src/net/`  | TCP protocol & sockets, parent↔child IPC | `etii_protocol` `control_protocol` `client_identity` `tcpclient` `tcpserver` `local_socket` `ipc_protocol`(h) `http_codec` `http_server` |
 | `src/ui/`   | Logging, console, command handling | `logger` `logger_ncurses`(c) `console` `command_lines` `command_match` `command_history` `line_edit` |
 | `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_control` `control_registry` `known_clients_registry` `client_config` `fork_gate` `fork_orchestrator` `app_runtime` `etii_statistic`(h) `static_variables` `gpu_pruner`(.cu/.h) |
@@ -187,6 +187,7 @@ MRV (most-constrained-first cell choice) is the **sole** search engine, for both
 | `src/net/http_codec.c` / `http_server.c` | HTTP admin API: pure parsing/JSON layer / socket + dispatch shell |
 | `src/core/datamanager.c` | Mutex-protected possibility queues; backup/restore; RAM-cap enforcement |
 | `src/core/stock_spill.c` | Disk spillover of the stock once `--stock-max-ram` is approached |
+| `src/core/stock_rate.c` | ADD/GET stock event-rate counters, rolling 1min/1h/1day windows (console `statistic`, `GET /api/v1/stats`) |
 | `src/core/part.c` | Piece rotation, map building, the compact `packed` index |
 | `src/core/readdata.c` | Parses `data/pieces.csv` |
 | `src/net/etii_protocol.c` | TCP send/recv helpers for work-protocol packets |

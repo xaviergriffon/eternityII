@@ -9,6 +9,7 @@
 #include "app/static_variables.h"
 #include "core/lifo.h"
 #include "core/datamanager.h"
+#include "core/stock_rate.h"
 #include "net/tcpclient.h"
 #include "net/etii_protocol.h"
 #include "core/readdata.h"
@@ -34,6 +35,13 @@ static unsigned int rr_put_checked = 0;
 static unsigned int rr_scroll_unchecked = 0;
 static unsigned int rr_scroll_checked = 0;
 
+// Débit d'ajouts/consommations du stock (core/stock_rate.h), tous pools
+// confondus (non vérifié + vérifié) — instrumenté depuis put_to_pool/
+// scroll_from_pool ci-dessous. Lu par statistic_datas() (console) et
+// datamanager_stock_rate_stats() (exposé à l'API HTTP via http_stats_collect).
+static stock_rate_counter_t stock_adds_rate;
+static stock_rate_counter_t stock_removes_rate;
+
 int datamanager_rr_next_start(unsigned int *counter, int n)
 {
 	if (n <= 0)
@@ -56,6 +64,14 @@ void datamanager_reset_rr_state_for_tests(void)
 	rr_put_checked = 0;
 	rr_scroll_unchecked = 0;
 	rr_scroll_checked = 0;
+}
+
+// Réservée aux tests (même convention que datamanager_reset_rr_state_for_tests
+// ci-dessus) : isole les compteurs de débit ADD/GET entre deux cas de test.
+void datamanager_reset_stock_rate_counters_for_tests(void)
+{
+	stock_rate_reset_for_tests(&stock_adds_rate);
+	stock_rate_reset_for_tests(&stock_removes_rate);
 }
 
 static file_possibility_t **file_possibility = NULL;
@@ -776,6 +792,7 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
             }
 			addpossibility = 1;
 			pthread_mutex_unlock(&pool[currfile]->lock);
+			stock_rate_record(&stock_adds_rate, (unsigned int)count, time(NULL));
 		}
 		currfile = (currfile + 1) % nb_file_possibility;
 		tried++;
@@ -1791,6 +1808,7 @@ static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet
 
 					if(file.size > 0)
 					{
+						unsigned int moved = (unsigned int)file.size;
 						result->possibilities = malloc(file.size * sizeof(struct possibility_packet));
 						p = 0;
 						while(file.size > 0)
@@ -1799,8 +1817,9 @@ static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet
 							result->size++;
 							p++;
 						}
+						stock_rate_record(&stock_removes_rate, moved, time(NULL));
 					}
-					
+
 					filetested[f] = 1;
 					getpossibility = 1;
 					pthread_mutex_unlock(&pool[currfile]->lock);
@@ -3801,6 +3820,19 @@ void datamanager_stock_distribution(stock_distribution_t *out)
     unlock_all_file_analysed();
 }
 
+void datamanager_stock_rate_stats(stock_rate_stats_t *out)
+{
+    if (out == NULL)
+    {
+        return;
+    }
+    time_t now = time(NULL);
+    stock_rate_windows(&stock_adds_rate, now,
+                        &out->adds_per_sec_1m, &out->adds_per_sec_1h, &out->adds_per_sec_1d);
+    stock_rate_windows(&stock_removes_rate, now,
+                        &out->removes_per_sec_1m, &out->removes_per_sec_1h, &out->removes_per_sec_1d);
+}
+
 int statistic_datas(void)
 {
     stock_distribution_t distribution;
@@ -3822,6 +3854,13 @@ int statistic_datas(void)
             log_info("%i : %llu\n", i, count);
         }
     }
+
+    stock_rate_stats_t rate;
+    datamanager_stock_rate_stats(&rate);
+    log_info("stock ADD/s (1min/1h/1j) : %.2f / %.2f / %.2f\n",
+             rate.adds_per_sec_1m, rate.adds_per_sec_1h, rate.adds_per_sec_1d);
+    log_info("stock GET/s (1min/1h/1j) : %.2f / %.2f / %.2f\n",
+             rate.removes_per_sec_1m, rate.removes_per_sec_1h, rate.removes_per_sec_1d);
     return 0;
 }
 

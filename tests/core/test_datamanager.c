@@ -48,6 +48,11 @@ int split_datas_nolock(int nbsplit);
  * lui-même est déjà déclaré dans datamanager.h. */
 void datamanager_reset_rr_state_for_tests(void);
 
+/* Reset (réservé aux tests) des compteurs de débit ADD/GET du stock
+ * (core/stock_rate.h) — même rôle que datamanager_reset_rr_state_for_tests
+ * ci-dessus, pour l'isolation entre tests. */
+void datamanager_reset_stock_rate_counters_for_tests(void);
+
 /* Fixe (réservé aux tests) le plafond RAM DIRECTEMENT en possibilités, sans
  * passer par l'arrondi Mo -> possibilités — cf. sa doc, datamanager.c. */
 void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets);
@@ -97,6 +102,7 @@ static void drain_datamanager(void)
         free_array_possibility_packet(r);
     }
     datamanager_reset_rr_state_for_tests();
+    datamanager_reset_stock_rate_counters_for_tests();
 }
 
 /* Vide aussi le pool « analysed » (réinjecté dans le stock puis drainé). */
@@ -392,6 +398,63 @@ TEST get_last_possibility_drains_pool(void)
     array_possibility_packet *empty = get_last_possibility(NULL, 10, NULL);
     ASSERT_EQ_FMT(0, empty->size, "%d");
     free_array_possibility_packet(empty);
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * datamanager_stock_rate_stats : débit d'ajouts/consommations du stock
+ * (core/stock_rate.h, instrumenté depuis put_to_pool/scroll_from_pool).
+ *
+ * Ces tests s'appuient sur l'horloge réelle (datamanager_stock_rate_stats
+ * appelle time(NULL) en interne, jamais injectable depuis ce fichier) :
+ * l'événement enregistré et la lecture de la fenêtre surviennent dans la même
+ * exécution de test, donc dans la même seconde en pratique — largement dans
+ * la fenêtre 1 minute. La couverture fine des frontières de fenêtre (1h/1j,
+ * rollover du ring buffer) vit dans tests/core/test_stock_rate.c, qui teste
+ * stock_rate_windows() directement avec un `now` synthétique.
+ * ------------------------------------------------------------------------ */
+
+TEST stock_rate_stats_reflects_recent_add(void)
+{
+    drain_datamanager();
+
+    stock_rate_stats_t before;
+    datamanager_stock_rate_stats(&before);
+    ASSERT_IN_RANGE(0.0, before.adds_per_sec_1m, 0.0001);
+
+    int allocs[] = { 1, 2, 3 };
+    add_packets(allocs, 3);
+
+    stock_rate_stats_t after;
+    datamanager_stock_rate_stats(&after);
+    ASSERT(after.adds_per_sec_1m > 0.0);
+
+    drain_datamanager();
+    PASS();
+}
+
+TEST stock_rate_stats_reflects_recent_scroll(void)
+{
+    drain_datamanager();
+    int allocs[] = { 1, 2 };
+    add_packets(allocs, 2);
+
+    stock_rate_stats_t before;
+    datamanager_stock_rate_stats(&before);
+    ASSERT_IN_RANGE(0.0, before.removes_per_sec_1m, 0.0001);
+
+    array_possibility_packet *r = get_last_possibility(NULL, 10, NULL);
+    free_array_possibility_packet(r);
+
+    stock_rate_stats_t after;
+    datamanager_stock_rate_stats(&after);
+    ASSERT(after.removes_per_sec_1m > 0.0);
+    PASS();
+}
+
+TEST stock_rate_stats_tolerates_null(void)
+{
+    datamanager_stock_rate_stats(NULL); /* ne doit pas planter */
     PASS();
 }
 
@@ -5533,6 +5596,9 @@ SUITE(datamanager_suite)
     RUN_TEST(hard_cap_allows_add_within_budget);
     RUN_TEST(add_possibility_rotates_start_file_across_calls);
     RUN_TEST(get_last_possibility_drains_pool);
+    RUN_TEST(stock_rate_stats_reflects_recent_add);
+    RUN_TEST(stock_rate_stats_reflects_recent_scroll);
+    RUN_TEST(stock_rate_stats_tolerates_null);
     RUN_TEST(put_and_scroll_round_trip_succeeds_when_pool_free);
     RUN_TEST(search_min_datas_finds_minimum);
     RUN_TEST(backup_then_restore_preserves_count);
