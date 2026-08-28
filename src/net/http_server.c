@@ -91,6 +91,15 @@ void http_stats_collect(http_stats_view_t *out)
     out->stock_spilled_packets = stock_spill_total_packets();
     out->stock_spill_segments = stock_spill_total_segments();
 
+    stock_rate_stats_t rate;
+    datamanager_stock_rate_stats(&rate);
+    out->stock_adds_last_1m = rate.adds_last_1m;
+    out->stock_adds_last_1h = rate.adds_last_1h;
+    out->stock_adds_last_1d = rate.adds_last_1d;
+    out->stock_removes_last_1m = rate.removes_last_1m;
+    out->stock_removes_last_1h = rate.removes_last_1h;
+    out->stock_removes_last_1d = rate.removes_last_1d;
+
     unsigned long long unchecked_total = 0, checked_total = 0, analysed_total = 0;
     for (int f = 0; f < nb_file_possibility; f++) {
         unsigned long long u = file_size(f);

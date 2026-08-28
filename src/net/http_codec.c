@@ -406,11 +406,19 @@ int http_json_format_stats(char *buf, size_t size, const http_stats_view_t *view
         "\"pruner_removed\":%llu,"
         "\"stock_spilled_packets\":%llu,"
         "\"stock_spill_segments\":%llu,"
+        "\"stock_adds_last_1m\":%llu,"
+        "\"stock_adds_last_1h\":%llu,"
+        "\"stock_adds_last_1d\":%llu,"
+        "\"stock_removes_last_1m\":%llu,"
+        "\"stock_removes_last_1h\":%llu,"
+        "\"stock_removes_last_1d\":%llu,"
         "\"queues\":[",
         view->shots_per_second, view->possibility_stock, view->checked_stock,
         view->analysed_stock, view->max_result, view->active_threads,
         view->pruner_checked, view->pruner_removed,
-        view->stock_spilled_packets, view->stock_spill_segments);
+        view->stock_spilled_packets, view->stock_spill_segments,
+        view->stock_adds_last_1m, view->stock_adds_last_1h, view->stock_adds_last_1d,
+        view->stock_removes_last_1m, view->stock_removes_last_1h, view->stock_removes_last_1d);
     if (written < 0 || (size_t)written >= size - offset) {
         return -1;
     }

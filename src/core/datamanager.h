@@ -896,6 +896,33 @@ typedef struct {
 void datamanager_stock_distribution(stock_distribution_t *out);
 
 /**
+ * @brief Cumul d'événements d'ajout/consommation du stock sur trois fenêtres
+ *        glissantes — voir `stock_rate_windows` (`core/stock_rate.h`) pour
+ *        la sémantique exacte de chaque champ.
+ */
+typedef struct {
+    unsigned long long adds_last_1m;
+    unsigned long long adds_last_1h;
+    unsigned long long adds_last_1d;
+    unsigned long long removes_last_1m;
+    unsigned long long removes_last_1h;
+    unsigned long long removes_last_1d;
+} stock_rate_stats_t;
+
+/**
+ * @brief Nombre d'ajouts (`put_to_pool`) et de consommations
+ *        (`scroll_from_pool`) du stock, tous pools confondus (non vérifié +
+ *        vérifié), cumulés sur la dernière minute/heure/jour.
+ *
+ * Consulté par `statistic_datas()` (commande console `stats`/`statistic`) et
+ * par `http_stats_collect()` (`GET /api/v1/stats`) — mesure côté serveur
+ * uniquement, sans équivalent côté client/fork.
+ *
+ * @param out Structure à remplir (aucun effet si NULL).
+ */
+void datamanager_stock_rate_stats(stock_rate_stats_t *out);
+
+/**
  * @brief Affiche des statistiques sur la distribution des possibilités par `alloc`.
  * @return 0.
  */
