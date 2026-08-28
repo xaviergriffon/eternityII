@@ -794,6 +794,16 @@ int sort_ascending_files(void);
 /** @brief Trie toutes les files de possibilités par ordre décroissant de `alloc`. */
 int sort_descending(void);
 
+/**
+ * @brief Trie chaque file de possibilités par ordre décroissant de `alloc`,
+ *        individuellement, sans les regrouper dans une seule file.
+ *
+ * Consomme (`scroll`, LIFO) en priorité les possibilités les MOINS avancées
+ * de CHAQUE file, contrairement à `sort_descending()`/`sort_descending_mthread()`
+ * qui ne concentrent le tri que sur la file 0 après fusion.
+ */
+int sort_descending_files(void);
+
 /** @brief Trie les files par ordre décroissant en parallèle (multi-thread). */
 int sort_descending_mthread(void);
 

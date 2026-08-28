@@ -1522,6 +1522,75 @@ TEST sort_ascending_files_sorts_each_file_without_merging(void)
     PASS();
 }
 
+/* sort_descending_files() : symétrique de sort_ascending_files_sorts_each_file_
+ * without_merging ci-dessus, pour l'ordre décroissant. */
+TEST sort_descending_files_sorts_each_file_without_merging(void)
+{
+    drain_all();
+
+    enum { N = 40 };
+    struct possibility_packet pks[N];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < N; i++) {
+        pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
+    }
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas(); /* répartit sur toutes les files, comme en usage réel */
+    restore_std();
+
+    unsigned long long sizes_before[NB_FILE_POSSIBILITY_MAX];
+    int nb_non_empty_before = 0;
+    for (int f = 0; f < nb_file_possibility; f++) {
+        sizes_before[f] = file_size(f);
+        if (sizes_before[f] > 0) nb_non_empty_before++;
+    }
+    ASSERT(nb_non_empty_before > 1); /* pré-condition : bien réparti sur plusieurs files */
+
+    silence_std();
+    int rc = sort_descending_files();
+    restore_std();
+    ASSERT_EQ_FMT(0, rc, "%d");
+
+    ASSERT_EQ_FMT((unsigned long long)N, datas_size(), "%llu"); /* total inchangé */
+
+    for (int f = 0; f < nb_file_possibility; f++) {
+        /* Aucune fusion : la taille de CHAQUE file reste celle d'avant le tri
+         * (sort_descending() viderait au contraire tout dans la file 0). */
+        ASSERT_EQ_FMT(sizes_before[f], file_size(f), "%llu");
+
+        if (sizes_before[f] == 0) {
+            continue;
+        }
+
+        char *buf = NULL;
+        size_t buf_size = 0;
+        FILE *mem = open_memstream(&buf, &buf_size);
+        ASSERT(mem != NULL);
+        int prc = fprint_file(mem, f, NULL);
+        fclose(mem);
+        ASSERT_EQ_FMT(0, prc, "%d");
+
+        int prev = ETERN_PARTS + 1;
+        char *line = buf;
+        char *nl;
+        while ((nl = strchr(line, '\n')) != NULL) {
+            *nl = '\0';
+            int a = ETERN_PARTS + 1;
+            ASSERT_EQ_FMT(1, sscanf(line, "{\"alloc\": %d,", &a), "%d");
+            ASSERT(a <= prev); /* ordre décroissant, en place, dans CETTE file */
+            prev = a;
+            line = nl + 1;
+        }
+        free(buf);
+    }
+
+    drain_all();
+    PASS();
+}
+
 TEST statistic_and_print_run(void)
 {
     drain_all();
@@ -5701,6 +5770,7 @@ SUITE(datamanager_suite)
     RUN_TEST(analysed_restore_clears_untracked_packet);
     RUN_TEST(sort_preserves_count);
     RUN_TEST(sort_ascending_files_sorts_each_file_without_merging);
+    RUN_TEST(sort_descending_files_sorts_each_file_without_merging);
     RUN_TEST(statistic_and_print_run);
     RUN_TEST(statistic_datas_handles_full_board_alloc);
     RUN_TEST(stock_distribution_separates_the_three_pools);

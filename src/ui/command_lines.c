@@ -25,7 +25,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 59
+#define NB_COMMANDS 61
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -89,6 +89,7 @@ typedef struct
 
 int sort_ascending_interpreter(void);
 int sort_ascending_files_interpreter(void);
+int sort_descending_files_interpreter(void);
 int sort_descending_interpreter(void);
 int max_stock_by_thread_interpreter(void);
 int pruner_batch_interpreter(void);
@@ -232,6 +233,14 @@ static command_description commands[NB_COMMANDS] = {
      "comme le ferait « sortAsc ».", NULL},
     {"sortDesc", sort_descending_interpreter, 0, CMD_CAT_STOCK, 0, "sortDesc [n]",
      "trie par ordre décroissant, toutes les files ou la file <n>", NULL, NULL},
+    {"sortDescFiles", sort_descending_files_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
+     "trie chaque file par ordre décroissant, sans les regrouper",
+     "Comme « sortDesc » (sans argument), mais sans fusionner les files entre elles\n"
+     "au préalable : chacune des files de stock est triée en place (plus avancées\n"
+     "d'abord, dans cette file). Comme la consommation (GET) se fait par la fin de\n"
+     "chaque file, l'effet est de consommer en priorité, sur TOUTES les files, les\n"
+     "possibilités ayant le MOINS de cases posées -- sans concentrer le trafic sur\n"
+     "une seule file comme le ferait « sortDesc ».", NULL},
     {"sortDescMulti", sortdm_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
      "trie toutes les files en parallèle (multi-thread)", NULL, NULL},
     {"split", split_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
@@ -390,6 +399,7 @@ static command_description commands[NB_COMMANDS] = {
     {"stats", NULL, 0, CMD_CAT_DIAG, 0, NULL, NULL, NULL, "statistic"},
     {"sorta", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortAsc"},
     {"sortaf", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortAscFiles"},
+    {"sortdf", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortDescFiles"},
     {"sortd", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortDesc"},
     {"sortdm", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortDescMulti"},
     {"rmnonext", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "removeNoNext"},
@@ -417,6 +427,11 @@ int sort_descending_interpreter(void) {
     int n_file = atoi(arguments);
     sort_d_mono(&n_file);
     return 0;
+}
+
+/** @brief Interpréteur de la commande `sortDescFiles` (alias `sortdf`) : tri descendant de chaque file, sans regroupement. */
+int sort_descending_files_interpreter(void) {
+    return sort_descending_files();
 }
 
 /** @brief Interpréteur de `maxStockByThread <n>` : fixe la limite de possibilités par thread. */
@@ -1662,6 +1677,9 @@ int admin_apply_privileged_command(const char *line) {
             } else {
                 sort_descending();
             }
+            result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "sortDescFiles") == 0) {
+            sort_descending_files();
             result = ADMIN_CMD_OK;
         } else if (strcmp(word, "sortDescMulti") == 0) {
             sort_descending_mthread();

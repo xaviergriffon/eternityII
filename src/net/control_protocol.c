@@ -206,6 +206,7 @@ control_command_class_t control_command_classify(const char *command_name)
 		"sortAsc",
 		"sortAscFiles",
 		"sortDesc",
+		"sortDescFiles",
 		"sortDescMulti",
 		"split",
 		"regroup",
