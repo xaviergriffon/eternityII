@@ -402,6 +402,14 @@ paquets délégués en ordre dynamique (§4.7). Le stock contient donc bien des 
 contrairement à ce que la mesure de §4.6b laissait croire (elle bornait à
 `alloc` ≈ 72, c'est-à-dire le CURSEUR de parcours et non le nombre de pièces).
 
+> Mesure antérieure à la bascule MRV
+> ([docs/conception/mrv_moteur_unique.md](conception/mrv_moteur_unique.md)) : le
+> « client à ordre fixe » et `normalize_possibility_packet` ont depuis disparu
+> (PR1/PR3, `alloc` est désormais directement le nombre de pièces posées, plus
+> un curseur à re-canoniser). Chiffres conservés tels quels comme repère
+> historique de volumétrie ; ne pas s'attendre à retrouver ces deux éléments
+> dans le code actuel.
+
 À défaut de backup, le banc fabrique des racines : une descente MRV produit un
 plateau profond, dont on extrait des préfixes (`--depths`) — utile pour
 construire des cas **durs** (sous-arbre réellement vivant), que le stock réel

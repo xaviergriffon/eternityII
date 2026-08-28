@@ -73,7 +73,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `split` | Répartit les possibilités entre les 10 files |
 | `regroup` | Regroupe toutes les files en une seule |
 | `removeNoNext` | Supprime les possibilités sans continuation possible (élagage ; alias : `rmnonext`, `prune`) |
-| `expand N` | Développe le stock jusqu'au niveau de curseur `N` ([anti-famine](utilisation.md#expansion-du-stock-au-démarrage---expand-level-anti-famine), borné à `expand_max_levels` passes (défaut 4, réglable via `--expand-max-levels`) / `expand_max_stock` possibilités (défaut 100000, réglable via `--expand-max-stock`)) |
+| `expand N` | Développe le stock jusqu'à `N` pièces posées ([anti-famine](utilisation.md#expansion-du-stock-au-démarrage---expand-level-anti-famine), borné à `expand_max_levels` passes (défaut 4, réglable via `--expand-max-levels`) / `expand_max_stock` possibilités (défaut 100000, réglable via `--expand-max-stock`)) |
 | `restockAnalysed` | Remet les possibilités en cours d'analyse dans le stock |
 | `rebalance [n]` | Rééquilibre le stock d'un seul pas incrémental (file la plus pleine → la plus vide, `n` possibilités par pool, défaut `rebalance_budget` réglable via `--rebalance-budget`) — le même appel que celui automatique de chaque tour serveur (10 s), déclenché immédiatement ; contrairement à `split`, ne redistribue pas intégralement en un appel |
 | `stockMemory` | Affiche le [plafond RAM du stock](utilisation.md#plafond-ram-du-stock---stock-max-ram) et l'occupation actuelle (Mo, possibilités) — deux pools comptés ensemble, jamais le pool analysé — ainsi que le [débordement sur disque](utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir) (toujours affiché, même à 0) et le total résident + déporté |
@@ -98,7 +98,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `print [fichier]` | Affiche toutes les files au format JSON, ou les exporte dans `fichier` |
 | `printFile N [fichier]` | Affiche le contenu de la file numéro `N`, ou l'exporte dans `fichier` |
 | `printAnalysed [fichier]` | Affiche les possibilités en cours d'analyse, ou les exporte dans `fichier` |
-| `statistic` | Affiche la répartition du stock par niveau de curseur de parcours (`alloc`, voir [le champ `alloc`](api_http_rest.md#le-champ-alloc)), pools non vérifié et vérifié confondus (alias : `stats`). Non exécutable à distance (ni canal de contrôle, ni `POST /api/v1/command`) puisqu'elle n'écrit que dans les journaux ; l'équivalent exploitable par une application tierce est [`GET /api/v1/stock-distribution`](api_http_rest.md#get-apiv1stock-distribution), qui expose la même donnée en JSON, en distinguant en plus le pool « en cours d'analyse » |
+| `statistic` | Affiche la répartition du stock par nombre de pièces posées (`alloc`, voir [le champ `alloc`](api_http_rest.md#le-champ-alloc)), pools non vérifié et vérifié confondus (alias : `stats`). Non exécutable à distance (ni canal de contrôle, ni `POST /api/v1/command`) puisqu'elle n'écrit que dans les journaux ; l'équivalent exploitable par une application tierce est [`GET /api/v1/stock-distribution`](api_http_rest.md#get-apiv1stock-distribution), qui expose la même donnée en JSON, en distinguant en plus le pool « en cours d'analyse » |
 | `checkDatas` | Vérifie l'intégrité des possibilités |
 | `checkDuplicate` | Recherche les doublons dans les files |
 | `checkFiles` | Vérifie l'intégrité de toutes les files |

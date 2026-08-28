@@ -33,7 +33,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | Paramètre | Défaut | Description |
 |---|---|---|
 | `nb_threads` | 80 | Nombre de connexions clients simultanées |
-| `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'au niveau de curseur `N` (anti-famine, voir ci-dessous) |
+| `--expand-level N` | *(absent)* | Développe le stock au démarrage jusqu'à `N` pièces posées (anti-famine, voir ci-dessous) |
 | `--expand-max-stock N` | `EXPAND_MAX_STOCK` (100000) | Plafonne en NOMBRE de possibilités la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
 | `--expand-max-levels N` | `EXPAND_MAX_LEVELS` (4) | Plafonne en NOMBRE DE PASSES la pré-expansion `--expand-level` (voir ci-dessous) ; sans effet si `--expand-level` est absent |
 | `--stock-files N` | `NB_FILE_POSSIBILITY_DEFAULT` (10) | Nombre de files de stock, fixé une seule fois au démarrage (jamais à chaud), plafonné à `NB_FILE_POSSIBILITY_MAX` (128) — voir ci-dessous |
@@ -231,10 +231,10 @@ local ; le serveur se retrouve sans rien à distribuer aux autres clients, qui t
 
 L'option `--expand-level N` (position-indépendante, retirée d'argv avant l'analyse
 positionnelle) demande au serveur de **développer lui-même son stock** avant toute
-connexion : il place une pièce candidate sur la case suivante de chaque possibilité
-jusqu'à ce que leur curseur `alloc` atteigne le niveau `N`. Le paquet genèse devient
-ainsi des milliers de possibilités distribuables. C'est un calcul **purement serveur,
-sans aucun impact client**.
+connexion : il pose, sur la case la plus contrainte choisie par MRV, une pièce
+candidate de chaque possibilité jusqu'à ce que son nombre de pièces posées (`alloc`)
+atteigne la cible `N`. Le paquet genèse devient ainsi des milliers de possibilités
+distribuables. C'est un calcul **purement serveur, sans aucun impact client**.
 
 L'expansion est bornée sur deux axes, tous deux configurables au lancement (dans
 [src/app/static_variables.h](../src/app/static_variables.h)) : `--expand-max-levels N`
