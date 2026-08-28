@@ -25,7 +25,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 57
+#define NB_COMMANDS 59
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -88,6 +88,7 @@ typedef struct
 } command_description;
 
 int sort_ascending_interpreter(void);
+int sort_ascending_files_interpreter(void);
 int sort_descending_interpreter(void);
 int max_stock_by_thread_interpreter(void);
 int pruner_batch_interpreter(void);
@@ -221,6 +222,14 @@ static command_description commands[NB_COMMANDS] = {
 
     {"sortAsc", sort_ascending_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
      "trie le stock par ordre croissant (moins avancées d'abord)", NULL, NULL},
+    {"sortAscFiles", sort_ascending_files_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
+     "trie chaque file par ordre croissant, sans les regrouper",
+     "Comme « sortAsc », mais sans fusionner les files entre elles au préalable :\n"
+     "chacune des files de stock est triée en place (moins avancées d'abord, dans\n"
+     "cette file). Comme la consommation (GET) se fait par la fin de chaque file,\n"
+     "l'effet est de consommer en priorité, sur TOUTES les files, les possibilités\n"
+     "ayant le plus de cases posées -- sans concentrer le trafic sur une seule file\n"
+     "comme le ferait « sortAsc ».", NULL},
     {"sortDesc", sort_descending_interpreter, 0, CMD_CAT_STOCK, 0, "sortDesc [n]",
      "trie par ordre décroissant, toutes les files ou la file <n>", NULL, NULL},
     {"sortDescMulti", sortdm_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
@@ -380,6 +389,7 @@ static command_description commands[NB_COMMANDS] = {
     {"cls", NULL, 0, CMD_CAT_GENERAL, 0, NULL, NULL, NULL, "clear"},
     {"stats", NULL, 0, CMD_CAT_DIAG, 0, NULL, NULL, NULL, "statistic"},
     {"sorta", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortAsc"},
+    {"sortaf", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortAscFiles"},
     {"sortd", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortDesc"},
     {"sortdm", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "sortDescMulti"},
     {"rmnonext", NULL, 0, CMD_CAT_STOCK, 0, NULL, NULL, NULL, "removeNoNext"},
@@ -390,6 +400,11 @@ static command_description commands[NB_COMMANDS] = {
 /** @brief Interpréteur de la commande `sortAsc` (alias `sorta`) : tri ascendant des possibilités. */
 int sort_ascending_interpreter(void) {
     return sort_ascending();
+}
+
+/** @brief Interpréteur de la commande `sortAscFiles` (alias `sortaf`) : tri ascendant de chaque file, sans regroupement. */
+int sort_ascending_files_interpreter(void) {
+    return sort_ascending_files();
 }
 
 /** @brief Interpréteur de la commande `sortDesc [n_file]` (alias `sortd`) : tri descendant, optionnellement sur un seul fichier. */
@@ -1636,6 +1651,9 @@ int admin_apply_privileged_command(const char *line) {
             // réentrant, même raison que backup_interpreter/restore_apply ci-dessus.
             sort_ascending();
             result = ADMIN_CMD_OK;
+        } else if (strcmp(word, "sortAscFiles") == 0) {
+            sort_ascending_files();
+            result = ADMIN_CMD_OK;
         } else if (strcmp(word, "sortDesc") == 0) {
             char *arg = strtok_r(NULL, " ", &save);
             if (arg != NULL) {
@@ -2313,7 +2331,22 @@ int help_interpreter(void) {
     int result = arg == NULL ? help_format_general(help, HELP_BUFFER_SIZE)
                              : help_format_topic(arg, help, HELP_BUFFER_SIZE);
     if (result == 0) {
-        log_info("%s", help);
+        /* log_info() tronque silencieusement chaque appel à LOG_LINE_MAX
+           (4096 octets, cf. logger.c) : le texte d'aide générale dépasse
+           régulièrement cette taille (table `commands` en croissance), donc
+           on l'émet ligne par ligne (via strchr, pas strtok, pour ne pas
+           fusionner les lignes vides qui séparent les catégories) plutôt
+           qu'en un seul appel qui tronquerait la fin sans avertissement. */
+        char *line_start = help;
+        char *nl;
+        while ((nl = strchr(line_start, '\n')) != NULL) {
+            *nl = '\0';
+            log_info("%s\n", line_start);
+            line_start = nl + 1;
+        }
+        if (*line_start != '\0') {
+            log_info("%s\n", line_start);
+        }
     } else {
         const char *command_names[NB_COMMANDS];
         int n_visible = visible_command_names(command_names);
