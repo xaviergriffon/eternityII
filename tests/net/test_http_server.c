@@ -1070,8 +1070,8 @@ TEST http_server_get_stock_distribution_reflects_real_stock(void)
     ASSERT(n > 0);
     ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
     ASSERT(strstr(resp, "\"total_unchecked\":3") != NULL);
-    ASSERT(strstr(resp, "{\"alloc\":2,\"unchecked\":2,\"checked\":0,\"analysed\":0}") != NULL);
-    ASSERT(strstr(resp, "{\"alloc\":6,\"unchecked\":1,\"checked\":0,\"analysed\":0}") != NULL);
+    ASSERT(strstr(resp, "{\"alloc\":2,\"unchecked\":2,\"checked\":0,\"analysed\":0,\"avg_min_candidats\":0.00}") != NULL);
+    ASSERT(strstr(resp, "{\"alloc\":6,\"unchecked\":1,\"checked\":0,\"analysed\":0,\"avg_min_candidats\":0.00}") != NULL);
 
     close(sv[0]); close(sv[1]);
     drain_stock();

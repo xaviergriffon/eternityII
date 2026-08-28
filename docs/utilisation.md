@@ -210,6 +210,15 @@ paquets, anciens ou récents, donne le même résultat qu'une distinction explic
 version à maintenir. Aucun paquet n'est jamais rejeté, seulement réétiqueté si besoin — un `.back`
 de production écrit avant cette bascule se restaure intégralement, sans perte.
 
+Le champ `min_candidats` (score MRV, seconde coordonnée de `alloc` — voir
+[docs/autosearch_step.md](autosearch_step.md)) suit une règle différente aux mêmes points de
+lecture : contrairement à `alloc`, il ne se recalcule pas depuis la grille (il dépend de
+l'historique de recherche), donc `restore`/`import`/le rechargement d'un segment de débordement
+l'écrasent inconditionnellement par la sentinelle « inconnu » plutôt que de faire confiance à un
+octet qui logeait dans le bourrage d'alignement du paquet avant l'introduction du champ. Aucune
+perte de possibilité — seulement une difficulté redevenue « non mesurée » pour le stock restauré,
+qui se remesure normalement au fil de son exploration.
+
 Un pic d'expansion très rapide au démarrage (`--expand-level`) peut dépasser le plafond RAM
 plus vite que le tick de 100 ms ne peut réagir. Aucune possibilité n'est perdue pour autant :
 `expand_datas_to_level` **attend** que le débordement (ou un GET client) libère de la place

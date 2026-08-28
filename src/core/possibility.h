@@ -13,13 +13,19 @@
 #define DIR_RIGHT 2
 #define DIR_DOWN 3
 #define DIR_LEFT 4
- 
+
+/// Valeur sentinelle de `min_candidats` : score MRV non connu (paquet non
+/// issu du moteur MRV — expansion, forçage, genèse — ou stock écrit avant son
+/// introduction). Jamais produite par `mrv_choose_cell` sur une case
+/// contrainte (un score réel est toujours >= 0).
+#define POSSIBILITY_MIN_CANDIDATS_UNKNOWN (-1)
+
  struct possibility_packet
  {
  /// Depuis VERSION 13 (bascule MRV, moteur unique) : sans objet. `directions[]`
  /// n'est plus un ordre d'exploration, donc « la prochaine case à traiter » ne
  /// désigne plus rien de fiable — conservés inutilisés (paquet inchangé, zéro
- /// risque, cf. docs/conception/mrv_moteur_unique.md §7).
+ /// risque, cf. docs/autosearch_step.md).
  uint8_t x;
  uint8_t y;
  int16_t grid[ETERN_SIZE][ETERN_SIZE];
@@ -27,8 +33,17 @@
  /// `possibility_placed_count`. AVANT VERSION 13 : curseur de position dans
  /// `directions[]`/`dirx[]`/`diry[]` (« prochaine case à traiter »). Les deux
  /// sémantiques partagent le même type/la même position sur le fil, d'où le
- /// bump de VERSION — cf. docs/conception/mrv_moteur_unique.md §5.
+ /// bump de VERSION — cf. docs/echanges_client_serveur.md.
  uint16_t alloc;
+ /// Score MRV (nombre de candidats) de la case qui a reçu la DERNIÈRE pièce
+ /// posée sur ce plateau, tel que calculé gratuitement par `mrv_choose_cell`
+ /// au moment du choix — pas un recalcul dédié. `POSSIBILITY_MIN_CANDIDATS_UNKNOWN`
+ /// si non mesuré. Sert de seconde coordonnée à `alloc` : deux plateaux à
+ /// autant de pièces posées mais atteints par des choix plus ou moins
+ /// contraints n'ont pas la même difficulté (cf. docs/autosearch_step.md).
+ /// Loge dans le bourrage d'alignement de `b_faceused` : taille de paquet
+ /// inchangée (576 octets), aucun bump de VERSION.
+ int16_t min_candidats;
  uint16_t b_faceused[FACES_USED_SIZE] __attribute__ ((aligned (16)));
  /// 1 si un client pruner a vérifié que toutes les cases vides ont encore au
  /// moins une pièce candidate. Remis à 0 sur tout paquet issu d'une expansion
@@ -207,7 +222,7 @@ int possibility_all_has_a_next_counted(struct possibility_packet *possibility, m
  * morte, la branche est abandonnée. Variante volontairement simple (« les K
  * premières cases vides du parcours », pas « les K cases les plus
  * contraintes ») : cette dernière suppose un score déjà calculé côté
- * appelant, absent de ce chemin froid — cf. docs/conception/mrv_moteur_unique.md §7.
+ * appelant, absent de ce chemin froid — cf. docs/autosearch_step.md.
  *
  * Version sans cache (recalcule chaque clé), réservée aux chemins froids ;
  * le hot path du backtracking utilise `bt_forward_check` (etii_search.c),
@@ -368,9 +383,9 @@ int possibility_placed_count(const struct possibility_packet *packet);
  *  - -4 : alloc > ETERN_PARTS (alloc = 0 est l'état genèse, valide)
  *  - -5 : alloc incohérent avec le masque faceused (`faceused < alloc` — un
  *    moteur à ordre FIXE peut légitimement avoir `faceused > alloc` : des
- *    indices officiels sont posés au-delà du curseur de parcours historique,
- *    cf. docs/conception/mrv_moteur_unique.md §2.1 ; ce n'est PAS un bug, donc
- *    pas une inégalité stricte)
+ *    indices officiels sont posés au-delà du curseur de parcours historique
+ *    (cf. docs/autosearch_step.md) ; ce n'est PAS un bug, donc pas une
+ *    inégalité stricte)
  *
  * Contrôle de cohérence de couleur : porte sur TOUTES les cases non vides de
  * la grille (`grid[x][y] != -2`), pas seulement les `alloc` premières du

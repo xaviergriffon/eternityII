@@ -40,15 +40,15 @@
 // connexion au lieu de simplement l'ignorer — l'exact-match du handshake evite
 // ce désync silencieux en le refusant explicitement à la place.
 // v13 : `possibility_packet.alloc` change de SENS sans changer de type ni de
-// position sur le fil — PR1 de docs/conception/mrv_moteur_unique.md. Avant
-// v13 : curseur de position dans directions[]/dirx[]/diry[] (« prochaine case
-// à traiter »). Depuis v13 : nombre de cases non vides de la grille
+// position sur le fil (cf. docs/autosearch_step.md). Avant v13 : curseur de
+// position dans directions[]/dirx[]/diry[] (« prochaine case à traiter »).
+// Depuis v13 : nombre de cases non vides de la grille
 // (possibility_placed_count), le référentiel qu'exige le moteur MRV (le
 // curseur de parcours n'a plus de rapport avec l'état réel du plateau une
 // fois l'ordre de variable rendu dynamique). Un client v12 et un serveur v13
 // (ou l'inverse) se comprendraient sur le fil tout en désynchronisant
 // silencieusement l'état du plateau — bump pour un refus explicite au
-// handshake plutôt qu'une corruption silencieuse (cf. §5 du document).
+// handshake plutôt qu'une corruption silencieuse.
 #define VERSION 13
 
 #define NB_CONNECTIONS_PER_THREAD 1
@@ -170,10 +170,10 @@
 // global), `MRV@1000` dominant strictement `fixe@100000` (56,8 % contre 33,8 %
 // de stock éliminé pour 10,7× moins de CPU). Une fois la mesure favorable
 // établie, MRV est devenu le moteur unique — recherche réelle et preuve
-// bornée du pruner — et le drapeau a été supprimé (pas laissé à 1 par défaut) :
-// cf. docs/conception/mrv_moteur_unique.md, §6 point 6 (un interrupteur
-// maintenu en place aurait été un chemin de code non testé). Détail complet
-// de la mesure : §4.10 de docs/conception/elagage_recherche.md.
+// bornée du pruner — et le drapeau a été supprimé (pas laissé à 1 par défaut,
+// cf. docs/autosearch_step.md) : un interrupteur maintenu en place aurait été
+// un chemin de code non testé. Détail complet de la mesure : §4.10 de
+// docs/conception/elagage_recherche.md.
 // Expansion du stock au démarrage du serveur (option `--expand-level`, commande
 // console `expand`). Le serveur développe lui-même les possibilités du stock
 // (une pièce candidate par case suivante) jusqu'à ce que leur curseur `alloc`
@@ -1105,9 +1105,9 @@ unsigned long long bench_parse_nodes_env(const char *env_value);
  *
  * Coût nul quand il vaut 0 (le chemin historique, un seul candidat cherché,
  * est inchangé). Lu par `bt_forward_check` uniquement — MRV étant le seul
- * moteur depuis docs/conception/mrv_moteur_unique.md (PR3), ce drapeau ne
- * s'applique plus qu'à lui (autrefois partagé avec le moteur à ordre fixe,
- * qui utilisait aussi `bt_forward_check`).
+ * moteur (cf. docs/autosearch_step.md), ce drapeau ne s'applique plus qu'à
+ * lui (autrefois partagé avec le moteur à ordre fixe, qui utilisait aussi
+ * `bt_forward_check`).
  */
 extern int singleton_conflict_check;
 

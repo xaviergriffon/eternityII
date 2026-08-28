@@ -462,10 +462,27 @@ int http_json_format_stock_distribution(char *buf, size_t size, const http_stock
         if (view->unchecked[level] == 0 && view->checked[level] == 0 && view->analysed[level] == 0) {
             continue;
         }
+        // Seconde coordonnée (score MRV moyen), les trois pools combinés : 0.0
+        // signifie « non mesuré » (aucun `known`), jamais une vraie moyenne —
+        // un score réel stocké vaut toujours >= 0 candidat pour une case
+        // contrainte, mais un sous-arbre à 0 candidat est mort et n'est
+        // jamais matérialisé, donc 0.0 en sortie est sans ambiguïté possible
+        // avec une moyenne réelle. Combiné (pas un champ par pool) pour
+        // garder `HTTP_RESPONSE_MAX` large sur un histogramme à beaucoup de
+        // niveaux peuplés — le détail par pool reste dans `stock_distribution_t`
+        // pour un consommateur interne au process (console `statistic`).
+        unsigned long long known = view->unchecked_min_candidats_known[level]
+            + view->checked_min_candidats_known[level] + view->analysed_min_candidats_known[level];
+        double avg_min_candidats = known > 0
+            ? (double)(view->unchecked_min_candidats_sum[level] + view->checked_min_candidats_sum[level]
+                       + view->analysed_min_candidats_sum[level]) / (double)known
+            : 0.0;
         written = snprintf(buf + offset, size - offset,
-            "%s{\"alloc\":%d,\"unchecked\":%llu,\"checked\":%llu,\"analysed\":%llu}",
+            "%s{\"alloc\":%d,\"unchecked\":%llu,\"checked\":%llu,\"analysed\":%llu,"
+            "\"avg_min_candidats\":%.2f}",
             (emitted == 0) ? "" : ",", level,
-            view->unchecked[level], view->checked[level], view->analysed[level]);
+            view->unchecked[level], view->checked[level], view->analysed[level],
+            avg_min_candidats);
         if (written < 0 || (size_t)written >= size - offset) {
             return -1;
         }
@@ -691,7 +708,8 @@ int http_json_format_best_board(char *buf, size_t size, const http_best_board_vi
 
     size_t offset = 0;
     int written = snprintf(buf + offset, size - offset,
-        "{\"has_board\":true,\"alloc\":%u,\"grid\":[", view->alloc);
+        "{\"has_board\":true,\"alloc\":%u,\"min_candidats\":%d,\"grid\":[",
+        view->alloc, view->min_candidats);
     if (written < 0 || (size_t)written >= size - offset) {
         return -1;
     }

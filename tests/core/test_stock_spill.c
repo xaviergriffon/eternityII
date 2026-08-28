@@ -80,7 +80,7 @@ static void drain_datamanager(void)
 /* Grille "vide partout sauf une case" (-2 = case vide, cf.
  * possibility_placed_count) : depuis VERSION 13, stock_spill_reload()
  * recompte `alloc` au sens nombre de cases pleines dès qu'un paquet
- * retraverse le disque (docs/conception/mrv_moteur_unique.md, PR2 §8) — une
+ * retraverse le disque (docs/autosearch_step.md) — une
  * grille calloc'ée (tout à 0, jamais -2) serait donc vue comme entièrement
  * pleine (256) après un aller-retour d'éviction/rechargement. `grid[0][0]`
  * porte le marqueur distinctif ET la seule case pleine : la valeur de
@@ -426,7 +426,7 @@ TEST reload_restores_evicted_data_when_ram_drops_and_preserves_fields(void)
      * possibilité et ne l'a jamais rendue : elles ne réapparaissent jamais. */
     ASSERT_EQ_FMT(spilled, file_size(0), "%llu");
 
-    /* VERSION 13 (docs/conception/mrv_moteur_unique.md, PR2 §8) : un paquet
+    /* VERSION 13 (docs/autosearch_step.md) : un paquet
      * qui a fait un aller-retour par un segment de débordement traverse
      * stock_spill_reload(), qui recompte `alloc` au sens nombre de cases
      * pleines -- ici toujours 1, la seule case posée par construction. La
@@ -571,7 +571,7 @@ static void write_manifest_line(FILE *f, char pool, int file_index, int last_seq
  * pour vérifier qu'un ensemble EXACT de possibilités (ni perte, ni
  * duplication, ni contamination croisée) est revenu en RAM.
  *
- * VERSION 13 (docs/conception/mrv_moteur_unique.md, PR2 §8) :
+ * VERSION 13 (docs/autosearch_step.md) :
  * délibérément PAS `.alloc` ici — un paquet qui a fait un aller-retour par
  * un segment de débordement traverse `stock_spill_reload()`, qui recompte
  * `alloc` au sens nombre de cases pleines (idempotent, mais `add_packets`/

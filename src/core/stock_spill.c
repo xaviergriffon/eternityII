@@ -398,14 +398,17 @@ static int stock_spill_reload(int is_checked, int file_index, int max_packets)
 		return 0;
 	}
 
-	// Migration transparente (docs/conception/mrv_moteur_unique.md, PR2 §8) :
-	// un segment de débordement écrit avant VERSION 13 porte `alloc` au sens
-	// curseur, pas au sens nombre de pièces posées. Recomptage systématique
-	// et inconditionnel — comme `import()` (core/datamanager.c) — avant que
-	// le paquet ne rejoigne la RAM : idempotent sur un segment déjà v13,
-	// donc aucun besoin de distinguer les deux cas.
+	// Migration transparente (cf. docs/autosearch_step.md) : un segment de
+	// débordement écrit avant VERSION 13 porte `alloc` au sens curseur, pas
+	// au sens nombre de pièces posées. Recomptage systématique et
+	// inconditionnel — comme `import()` (core/datamanager.c) — avant que le
+	// paquet ne rejoigne la RAM : idempotent sur un segment déjà v13, donc
+	// aucun besoin de distinguer les deux cas. `min_candidats` (score MRV)
+	// n'est pas dérivable de la grille : écrasé par la sentinelle « inconnu »
+	// plutôt que recompté, même logique qu'à l'import.
 	for (int i = 0; i < to_read; i++) {
 		buf[i].alloc = (uint16_t)possibility_placed_count(&buf[i]);
+		buf[i].min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 	}
 
 	datamanager_pool_refill(is_checked, file_index, buf, to_read);
@@ -867,8 +870,8 @@ static int spill_read_manifest(const char *snap_dir, spill_manifest_entry_t **ou
 	return 0;
 }
 
-// NOTE VERSION 13 (docs/conception/mrv_moteur_unique.md, PR2 §8) : cette
-// fonction ne recompte JAMAIS `alloc`, y compris dans la branche de
+// NOTE VERSION 13 (cf. docs/autosearch_step.md) : cette fonction ne recompte
+// JAMAIS `alloc`, y compris dans la branche de
 // réempaquetage par collision ci-dessous qui relit pourtant des paquets en
 // mémoire (`--stock-files` réduit depuis le cliché). Choix délibéré : le
 // recomptage n'a besoin d'un seul point de passage, celui où un paquet

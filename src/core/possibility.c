@@ -107,6 +107,7 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 	result->x = x;
 	result->y = y;
 	result->alloc = 0;
+	result->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 	result->checked = 0;
 	memset(result->b_faceused, 0, sizeof(result->b_faceused));
 	int l;
@@ -650,6 +651,9 @@ int possibility_all_has_a_next_counted(struct possibility_packet *possibility, m
         log_debug("all has next (%i) allocated %i -> %i\n", result, possibility->alloc, possibility_placed_count(possibility));
 #endif // DEBUG_RM_NO_NEXT
         possibility->alloc = (uint16_t)possibility_placed_count(possibility);
+        // Placements forcés hors moteur MRV : le score de la dernière case
+        // posée n'est pas connu ici (pas de mrv_choose_cell).
+        possibility->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
         /* Ne pas appeler checkIfResultFound ici : cette fonction est invoquée
          * depuis des contextes variés (serveur, pruner client). Chaque appelant
          * teste possibility->alloc >= ETERN_PARTS et gère la solution dans son
@@ -904,6 +908,8 @@ int search_possiblity_light(File *result, struct possibility_packet *possiblity,
             // statistique du nombre de piece placée : recompté, jamais incrémenté
             // à la main (la case choisie n'est pas forcément le curseur du parent).
             currPossibility->alloc = (uint16_t)possibility_placed_count(currPossibility);
+            // Expansion en ordre fixe, hors moteur MRV : pas de score à reporter.
+            currPossibility->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
             // identifiant de la dernière piece utilisée
 
             lastId = search->parts[s].id;
@@ -940,7 +946,7 @@ int search_possiblity_light(File *result, struct possibility_packet *possiblity,
  * Variante volontairement simple : « les K premières cases vides du
  * parcours », pas « les K cases les plus contraintes » — cette dernière
  * suppose un score déjà calculé côté appelant, absent de ce chemin froid, cf.
- * docs/conception/mrv_moteur_unique.md §7. Pour chacune, calcule la clé de
+ * docs/autosearch_step.md. Pour chacune, calcule la clé de
  * contraintes à partir de l'état courant du plateau et interroge la
  * `map_big_array`. Si l'une de ces cases n'admet plus aucune pièce candidate
  * disponible (toutes utilisées, ou aucun résultat dans la map), la branche est
@@ -1067,8 +1073,8 @@ int check_possibility(struct possibility_packet *packet, struct array_part *rota
 	}
     // faceused > alloc reste légitime pour un paquet produit par le moteur à
     // ordre FIXE : des indices officiels sont posés au-delà du curseur
-    // historique de directions[] (cf. docs/conception/mrv_moteur_unique.md
-    // §2.1) — inégalité stricte volontaire, PAS une égalité.
+    // historique de directions[] (cf. docs/autosearch_step.md) — inégalité
+    // stricte volontaire, PAS une égalité.
     if(faceused < packet->alloc) {
         result = -5;
         goto cleanup;

@@ -1,12 +1,15 @@
 # MRV comme moteur unique : le curseur de parcours cesse d'être le référentiel d'état
 
-**Statut : implémenté (4/5 PR exécutées, PR5 différée).** PR1 (`alloc` = comptage, `VERSION` → 13,
+**Statut : implémenté (5/5 PR exécutées).** PR1 (`alloc` = comptage, `VERSION` → 13,
 moteur à ordre fixe conservé et adapté), PR2 (migration du stock persistant) et PR3 (bascule —
 MRV devient le moteur unique, suppression de `mrv_enabled`/`pruner_dfs_mrv` et du moteur à ordre
 fixe) livrées ; PR4 (tableau de bord — `stockDistribution`, `sortDesc`, `expand`, API HTTP relus
-en « pièces posées », documentation) livrée également : voir §8 pour le détail par PR. La PR5
-(seconde coordonnée `min_candidats`, §4) reste explicitement différée, optionnelle, non
-bloquante. Ce document ne rediscute pas
+en « pièces posées », documentation) livrée également ; PR5 (seconde coordonnée `min_candidats`,
+§4) livrée : voir §8 pour le détail par PR. Comportement durable documenté dans
+[docs/autosearch_step.md](../autosearch_step.md), [docs/api_http_rest.md](../api_http_rest.md) et
+[docs/echanges_client_serveur.md](../echanges_client_serveur.md) — ce document garde la valeur du
+raisonnement, des options écartées et des mesures d'origine, pas celle d'une référence à jour sur
+le comportement actuel. Ce document ne rediscute pas
 *si* MRV est meilleur — c'est tranché ailleurs, par mesure : [§4.7](elagage_recherche.md#47-ordre-de-variable-dynamique-mrv--implémenté-et-mesuré-favorable-pr-10-pas-encore-le-défaut-de-déploiement)
 pour la recherche (coût de réfutation sur stock réel) et [§4.10](elagage_recherche.md#410-moteur-de-la-preuve-bornée-du-pruner--mrv-plutôt-quordre-fixe--implémenté-opt-in)
 pour la preuve bornée du pruner (×3–×4 de fermetures à budget égal). Il traite la
@@ -324,7 +327,23 @@ restauration (`restore` recompte si le fichier est marqué v12).
 - **Devenir de `x`/`y`** : conservés inutilisés (paquet inchangé, zéro risque) ou retirés
   (2 octets, sans effet sur la taille à cause du bourrage). Sans enjeu, à trancher au
   moment de l'écriture.
-- **Seconde coordonnée `min_candidats`** (§4) : PR distincte, après la bascule.
+- **Seconde coordonnée `min_candidats`** (§4) : livrée en PR5. Décisions prises à
+  l'implémentation, non anticipées par ce document : (a) le score reporté est celui de la case
+  qui a reçu la DERNIÈRE pièce posée sur le plateau (pas une projection sur le prochain coup,
+  qui aurait exigé un recalcul non gratuit) — capturé dans `bt_level.mrv_score` au moment où
+  `mrv_choose_cell` le calcule, recopié tel quel partout où `alloc` est fixé par observation ;
+  (b) pas de bump de `VERSION` (le champ loge dans le bourrage d'alignement existant, `sizeof`
+  inchangé, et toute donnée fraîchement produite est correcte par construction) ; (c) migration
+  par SENTINELLE inconditionnelle (`POSSIBILITY_MIN_CANDIDATS_UNKNOWN`, -1) aux trois points de
+  rechargement disque (`import`/`import_analysed`/`stock_spill_reload`), pas par recomptage —
+  contrairement à `alloc`, `min_candidats` dépend de l'historique de recherche, pas de la grille,
+  donc n'est pas idempotemment recalculable ; le stock restauré se remesure normalement au fil de
+  son exploration ; (d) `stockDistribution`/l'API HTTP exposent une MOYENNE par niveau (combinée
+  sur les trois pools pour l'API, comme sur la commande console `statistic`), pas un histogramme
+  2D complet (257×257) — plus léger, suffisant pour la lecture visée. `sortDesc` n'a PAS été
+  retouché pour trier par difficulté : la commande reste triée par `alloc` seul, cette extension
+  restant un possible travail futur distinct. Détail : [docs/autosearch_step.md](../autosearch_step.md)
+  §1.3 quater, [docs/api_http_rest.md](../api_http_rest.md) (« Le champ `min_candidats` »).
 - **Le pruner GPU** (`gpu_pruner.cu`) suit la même conversion ; à vérifier avec
   `VERIFY=1` (parité CPU/GPU) sur du matériel Jetson, pas sur le Mac.
 
@@ -338,7 +357,7 @@ restauration (`restore` recompte si le fichier est marqué v12).
 | 2 | **Migration du stock** : recomptage du `.back` (forme tranchée en §7), segments spillés inclus. | restauration du `.back` de production 126 287 → 126 287, zéro rejet | **FAIT** |
 | 3 | **Bascule** : MRV par défaut pour la recherche **et** pour la preuve du pruner ; suppression de `mrv_enabled`, `pruner_dfs_mrv` et du moteur à ordre fixe. | `make bench-refutation` : pas de régression du coût de fermeture vs. `ETII_MRV=1 ETII_PRUNER_DFS_MRV=1` sur `master` | **FAIT** — `search_packet_backtracking_core` et les deux drapeaux supprimés (`src/core/etii_search.c`, `src/app/static_variables.{h,c}`, `src/app/main.c`) ; `make test`/`make test-integration` verts ; `make bench-refutation` recompile et tourne sur le code post-bascule (smoke test, pas la mesure complète du tableau §4.10 faute de stock de production dans ce dépôt) |
 | 4 | **Tableau de bord** : `stockDistribution`, `sortDesc`, `expand`, API HTTP relus en « pièces posées » ; documentation. | histogramme du stock de production cohérent avec un recomptage indépendant | **FAIT** — relecture indépendante (2ᵉ passe après PR1) de `datamanager_stock_distribution`/`accumulate_alloc_levels`, `expand_datas_to_level`, `sortAsc`/`sortDesc`, `max_result`, champ `alloc` de l'API HTTP : tous déjà corrects (aucune hypothèse résiduelle `directions[alloc]` trouvée, aucun changement de code nécessaire) ; documentation mise à jour (`docs/api_http_rest.md` §« Le champ `alloc` », `docs/console.md`, `docs/echanges_client_serveur.md`, `docs/utilisation.md`, `docs/autosearch_step.md`, `docs/tests_et_ci.md`) ; test dédié `stock_distribution_matches_independent_grid_recount` (`tests/core/test_datamanager.c`) vérifiant l'histogramme contre un recomptage par `possibility_placed_count` sur `grid`, indépendant du champ `alloc` produit |
-| 5 | *(optionnel, après coup)* seconde coordonnée `min_candidats` (§4). | histogramme 2D, `sortDesc` par difficulté | non fait — différée |
+| 5 | Seconde coordonnée `min_candidats` (§4) : champ `possibility_packet.min_candidats`, calculé gratuitement par `mrv_choose_cell` (`bt_level.mrv_score`), propagé partout où `alloc` est fixé par observation ; sentinelle `POSSIBILITY_MIN_CANDIDATS_UNKNOWN` aux points de rechargement disque ; exposé par `statistic`, `GET /api/v1/stock-distribution` (`avg_min_candidats`) et `GET /api/v1/best-board` (`min_candidats`). | moyenne par niveau cohérente avec un recalcul indépendant depuis les paquets stockés ; aucune régression `make test`/`make test-integration` | **FAIT** — pas de bump `VERSION` (champ dans le bourrage d'alignement, `sizeof` inchangé à 576 octets) ; portée délibérément réduite par rapport à l'ambition initiale du §4 : moyenne par niveau plutôt qu'histogramme 2D complet, et `sortDesc` NON retouché (reste trié par `alloc` seul) — voir §7 pour le détail des écarts et leur justification |
 
 L'ordre est contraint : PR 1 avant PR 3, sinon la bascule se fait sur une sémantique
 d'`alloc` encore ambiguë. PR 2 doit précéder tout redémarrage sur le stock de production.

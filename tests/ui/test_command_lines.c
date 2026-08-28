@@ -79,8 +79,7 @@ static void dm_drain(void)
  * ordre ligne/colonne), posées à une valeur quelconque != -2 : `alloc` posé
  * ici correspond alors EXACTEMENT à `possibility_placed_count()`, comme un
  * paquet v13. Nécessaire depuis que `restore()`/`import()` recomptent `alloc`
- * inconditionnellement à la lecture d'un .back (docs/conception/
- * mrv_moteur_unique.md, PR2 §8) — une grille calloc'ée (tout à 0, jamais -2)
+ * inconditionnellement à la lecture d'un .back (cf. docs/autosearch_step.md) — une grille calloc'ée (tout à 0, jamais -2)
  * serait vue comme un plateau plein (ETERN_PARTS) après un aller-retour
  * backup/restore, ce qui n'est l'intention d'aucun appelant de dm_add. */
 static void dm_add(const int *allocs, int n)

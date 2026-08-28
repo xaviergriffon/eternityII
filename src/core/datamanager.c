@@ -2492,19 +2492,25 @@ int import(client_possibility_t *client_possibility, char *filename)
         return -1;
     }
     
-    // NOTE VERSION 13 (docs/conception/mrv_moteur_unique.md, PR2 §8) : un
-    // fichier .back écrit avant ce bump porte `alloc` au sens curseur
-    // (position dans directions[]), pas au sens nombre de pièces posées —
-    // et même en ordre fixe ce curseur divergeait déjà du compte réel dans
-    // 99,98 % des cas (§2.1 du document). Recomptage systématique et
-    // INCONDITIONNEL à chaque lecture, sans détection de version de
-    // fichier : `possibility_placed_count` est idempotente sur un paquet
-    // déjà correct (écrit par du code v13, `alloc` y vaut déjà ce compte),
-    // donc appliquer le recomptage à tous les paquets — v12 ou v13 — donne
-    // le même résultat qu'une détection explicite, sans marqueur de format
-    // à maintenir ni logique de version à faire évoluer au prochain bump.
-    // Aucun paquet n'est jamais rejeté, seulement réétiqueté si besoin
-    // (critère de succès PR2 : 126287 → 126287, zéro rejet).
+    // NOTE VERSION 13 (cf. docs/autosearch_step.md) : un fichier .back écrit
+    // avant ce bump porte `alloc` au sens curseur (position dans
+    // directions[]), pas au sens nombre de pièces posées — et même en ordre
+    // fixe ce curseur divergeait déjà du compte réel dans l'immense majorité
+    // des cas. Recomptage systématique et INCONDITIONNEL à chaque lecture,
+    // sans détection de version de fichier : `possibility_placed_count` est
+    // idempotente sur un paquet déjà correct (écrit par du code v13, `alloc`
+    // y vaut déjà ce compte), donc appliquer le recomptage à tous les
+    // paquets — v12 ou v13 — donne le même résultat qu'une détection
+    // explicite, sans marqueur de format à maintenir ni logique de version à
+    // faire évoluer au prochain bump. Aucun paquet n'est jamais rejeté,
+    // seulement réétiqueté si besoin.
+    //
+    // `min_candidats` (score MRV) suit une règle différente : il ne se
+    // recalcule pas depuis la grille (il dépend de l'historique de
+    // recherche, pas de l'état). Un fichier écrit avant son introduction
+    // porte donc une valeur non fiable dans cet octet (ex-bourrage
+    // d'alignement) : on l'écrase inconditionnellement par la sentinelle
+    // « inconnu » plutôt que de la faire confiance.
     struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
     while(fread(possibility, sizeof(struct possibility_packet),1,f))
     {
@@ -2515,6 +2521,7 @@ int import(client_possibility_t *client_possibility, char *filename)
             possibility->checked = 0;
         }
         possibility->alloc = (uint16_t)possibility_placed_count(possibility);
+        possibility->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
         array_possibility_packet *possibilities = malloc(sizeof(array_possibility_packet));
         possibilities->size = 1;
         possibilities->possibilities = malloc(sizeof(struct possibility_packet));
@@ -2622,6 +2629,10 @@ int import_analysed(char *filename)
 	while(fread(possibility, sizeof(struct possibility_packet),1,f))
 	{
 		possibility->alloc = (uint16_t)possibility_placed_count(possibility);
+		// min_candidats ne se recompte pas (dépend de l'historique de
+		// recherche, pas de la grille) : écrasé par la sentinelle, comme à
+		// l'import du pool stock.
+		possibility->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 		add_possibility_analysed(possibility, -1);
 	}
 
@@ -3715,17 +3726,26 @@ int check_duplicate(void)
 }
 
 /**
- * @brief Cumule dans `levels` la répartition par `alloc` des paquets de `file`.
+ * @brief Cumule dans `levels` la répartition par `alloc` des paquets de `file`,
+ *        et dans `min_candidats_sum`/`min_candidats_known` la seconde
+ *        coordonnée (score MRV de la dernière pièce posée).
  *
  * Un `alloc` hors bornes (paquet corrompu) est ignoré plutôt qu'écrit hors du
  * tableau — ce parcours est de l'observation, il ne doit jamais pouvoir
- * déborder sur une donnée douteuse.
+ * déborder sur une donnée douteuse. `min_candidats == POSSIBILITY_MIN_CANDIDATS_UNKNOWN`
+ * (score non mesuré : paquet non issu du moteur MRV, ou stock antérieur à son
+ * introduction) est exclu de la somme/du compte plutôt que traité comme 0 —
+ * une moyenne sur un score absent serait une donnée inventée.
  *
- * @param file   File à parcourir (verrou déjà tenu par l'appelant).
- * @param levels Histogramme de `STOCK_DISTRIBUTION_LEVELS` entrées à incrémenter.
+ * @param file               File à parcourir (verrou déjà tenu par l'appelant).
+ * @param levels             Histogramme de `STOCK_DISTRIBUTION_LEVELS` entrées à incrémenter.
+ * @param min_candidats_sum  Somme des `min_candidats` connus, par niveau, à incrémenter.
+ * @param min_candidats_known Nombre de `min_candidats` connus, par niveau, à incrémenter.
  * @return       Nombre de paquets comptés (y compris ceux d'`alloc` hors bornes).
  */
-static unsigned long long accumulate_alloc_levels(File *file, unsigned long long *levels)
+static unsigned long long accumulate_alloc_levels(File *file, unsigned long long *levels,
+                                                    unsigned long long *min_candidats_sum,
+                                                    unsigned long long *min_candidats_known)
 {
     unsigned long long count = 0;
     Element *currElement = file->start;
@@ -3738,6 +3758,10 @@ static unsigned long long accumulate_alloc_levels(File *file, unsigned long long
             if (possibility->alloc < STOCK_DISTRIBUTION_LEVELS)
             {
                 levels[possibility->alloc]++;
+                if (possibility->min_candidats != POSSIBILITY_MIN_CANDIDATS_UNKNOWN) {
+                    min_candidats_sum[possibility->alloc] += (unsigned long long)possibility->min_candidats;
+                    min_candidats_known[possibility->alloc]++;
+                }
             }
         }
         currElement = currElement->next;
@@ -3756,8 +3780,12 @@ void datamanager_stock_distribution(stock_distribution_t *out)
     lock_all_file();
     for (int fp = 0; fp < nb_file_possibility; fp++)
     {
-        out->total_unchecked += accumulate_alloc_levels(&file_possibility[fp]->file, out->unchecked);
-        out->total_checked += accumulate_alloc_levels(&file_possibility_checked[fp]->file, out->checked);
+        out->total_unchecked += accumulate_alloc_levels(&file_possibility[fp]->file, out->unchecked,
+                                                          out->unchecked_min_candidats_sum,
+                                                          out->unchecked_min_candidats_known);
+        out->total_checked += accumulate_alloc_levels(&file_possibility_checked[fp]->file, out->checked,
+                                                        out->checked_min_candidats_sum,
+                                                        out->checked_min_candidats_known);
     }
     unlock_all_file();
 
@@ -3766,7 +3794,9 @@ void datamanager_stock_distribution(stock_distribution_t *out)
     lock_all_file_analysed();
     for (int fp = 0; fp < nb_file_possibility; fp++)
     {
-        out->total_analysed += accumulate_alloc_levels(&file_possibility_analysed[fp]->file, out->analysed);
+        out->total_analysed += accumulate_alloc_levels(&file_possibility_analysed[fp]->file, out->analysed,
+                                                         out->analysed_min_candidats_sum,
+                                                         out->analysed_min_candidats_known);
     }
     unlock_all_file_analysed();
 }
@@ -3780,7 +3810,17 @@ int statistic_datas(void)
     // (le pool analysé, distribué aux clients, n'en fait pas partie).
     log_info("check_datas analyses:%llu\n", distribution.total_unchecked + distribution.total_checked);
     for (int i = 0; i < STOCK_DISTRIBUTION_LEVELS; i++) {
-        log_info("%i : %llu\n", i, distribution.unchecked[i] + distribution.checked[i]);
+        unsigned long long count = distribution.unchecked[i] + distribution.checked[i];
+        unsigned long long known = distribution.unchecked_min_candidats_known[i] + distribution.checked_min_candidats_known[i];
+        if (known > 0) {
+            double avg = (double)(distribution.unchecked_min_candidats_sum[i] + distribution.checked_min_candidats_sum[i]) / (double)known;
+            // Seconde coordonnée : difficulté moyenne (score MRV) des paquets
+            // de ce niveau — deux niveaux à autant de pièces posées peuvent
+            // avoir une difficulté très différente (cf. docs/autosearch_step.md).
+            log_info("%i : %llu (min_candidats moyen : %.2f sur %llu mesurés)\n", i, count, avg, known);
+        } else {
+            log_info("%i : %llu\n", i, count);
+        }
     }
     return 0;
 }
