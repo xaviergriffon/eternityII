@@ -531,6 +531,109 @@ TEST compute_server_hunger_targets_two_per_client(void)
     PASS();
 }
 
+/* compute_desired_role_mix (fonction pure, PR4) : sens d'ajustement du
+ * dosage recherche/contrôle -- jamais une cible absolue. Chaque test isole
+ * une branche de la cascade de priorité documentée dans etii_server.h. */
+TEST compute_desired_role_mix_corrects_zero_search_violation_first(void)
+{
+    /* Parc déjà à 0 chercheur avec des pruners : corrigé en priorité,
+     * quels que soient les autres signaux (ici tous "calmes"). */
+    ASSERT_EQ_FMT((int)ROLE_MIX_DECREASE_PRUNE,
+                  (int)compute_desired_role_mix(0ULL, 0ULL, 0, 0ULL, 0ULL, 0, 3), "%d");
+    PASS();
+}
+
+TEST compute_desired_role_mix_keeps_when_fleet_empty(void)
+{
+    ASSERT_EQ_FMT((int)ROLE_MIX_KEEP,
+                  (int)compute_desired_role_mix(1000ULL, 0ULL, 1, 5ULL, 5ULL, 0, 0), "%d");
+    PASS();
+}
+
+TEST compute_desired_role_mix_decreases_on_prune_starvation(void)
+{
+    ASSERT_EQ_FMT((int)ROLE_MIX_DECREASE_PRUNE,
+                  (int)compute_desired_role_mix(0ULL, 0ULL, 0, 0ULL, 1ULL, 4, 2), "%d");
+    PASS();
+}
+
+TEST compute_desired_role_mix_decreases_on_search_starvation(void)
+{
+    /* Chercheur affamé aussi : recherche = seul rôle qui régénère du stock
+     * à partir de rien, la correction sûre reste de réduire le dosage. */
+    ASSERT_EQ_FMT((int)ROLE_MIX_DECREASE_PRUNE,
+                  (int)compute_desired_role_mix(0ULL, 0ULL, 0, 1ULL, 0ULL, 4, 2), "%d");
+    PASS();
+}
+
+TEST compute_desired_role_mix_keeps_starvation_without_prune_to_remove(void)
+{
+    /* Famine signalée mais déjà 0 pruner : rien à réduire. */
+    ASSERT_EQ_FMT((int)ROLE_MIX_KEEP,
+                  (int)compute_desired_role_mix(0ULL, 0ULL, 0, 1ULL, 0ULL, 4, 0), "%d");
+    PASS();
+}
+
+TEST compute_desired_role_mix_never_increases_at_search_floor(void)
+{
+    /* Un seul chercheur restant : jamais d'augmentation, même sous forte
+     * pression RAM ou déséquilibre marqué du stock. */
+    ASSERT_EQ_FMT((int)ROLE_MIX_KEEP,
+                  (int)compute_desired_role_mix(1000ULL, 0ULL, 1, 0ULL, 0ULL, 1, 3), "%d");
+    ASSERT_EQ_FMT((int)ROLE_MIX_KEEP,
+                  (int)compute_desired_role_mix(1000ULL, 0ULL, 0, 0ULL, 0ULL, 1, 0), "%d");
+    PASS();
+}
+
+TEST compute_desired_role_mix_increases_under_ram_pressure(void)
+{
+    ASSERT_EQ_FMT((int)ROLE_MIX_INCREASE_PRUNE,
+                  (int)compute_desired_role_mix(100ULL, 100ULL, 1, 0ULL, 0ULL, 4, 1), "%d");
+    PASS();
+}
+
+TEST compute_desired_role_mix_increases_on_unchecked_backlog(void)
+{
+    /* Stock non vérifié largement dominant (> 2x, au-dessus du plancher de
+     * bruit) : trop peu de pruners pour absorber le flux de la recherche. */
+    ASSERT_EQ_FMT((int)ROLE_MIX_INCREASE_PRUNE,
+                  (int)compute_desired_role_mix(1000ULL, 10ULL, 0, 0ULL, 0ULL, 4, 1), "%d");
+    PASS();
+}
+
+TEST compute_desired_role_mix_ignores_backlog_below_noise_floor(void)
+{
+    /* Même ratio 100:1, mais sous ROLE_MIX_BACKLOG_FLOOR : bruit de
+     * démarrage, ignoré. */
+    ASSERT_EQ_FMT((int)ROLE_MIX_KEEP,
+                  (int)compute_desired_role_mix(4ULL, 0ULL, 0, 0ULL, 0ULL, 4, 1), "%d");
+    PASS();
+}
+
+TEST compute_desired_role_mix_decreases_on_checked_backlog(void)
+{
+    /* Stock vérifié largement dominant : excès de pruners, réduire. */
+    ASSERT_EQ_FMT((int)ROLE_MIX_DECREASE_PRUNE,
+                  (int)compute_desired_role_mix(10ULL, 1000ULL, 0, 0ULL, 0ULL, 4, 1), "%d");
+    PASS();
+}
+
+TEST compute_desired_role_mix_keeps_checked_backlog_without_prune(void)
+{
+    /* Aucun pruner à retirer : rien à décider même avec un excès de stock
+     * vérifié. */
+    ASSERT_EQ_FMT((int)ROLE_MIX_KEEP,
+                  (int)compute_desired_role_mix(10ULL, 1000ULL, 0, 0ULL, 0ULL, 4, 0), "%d");
+    PASS();
+}
+
+TEST compute_desired_role_mix_keeps_when_balanced(void)
+{
+    ASSERT_EQ_FMT((int)ROLE_MIX_KEEP,
+                  (int)compute_desired_role_mix(500ULL, 500ULL, 0, 0ULL, 0ULL, 4, 2), "%d");
+    PASS();
+}
+
 /* INST_NEED_WORK (v8) : après handshake, le serveur répond sa faim (int32 ≥ 0),
  * cohérente avec compute_server_hunger sur son état courant, et on continue. */
 TEST step_need_work_replies_hunger(void)
@@ -1658,8 +1761,9 @@ TEST check_server_step_reports_basic_stats(void)
 
     unsigned long long lastactive = 0;
     autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
     int last_record = (int)max_result;
-    check_server_step(&lastactive, &backup_state, &last_record, 10);
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
 
     char *report = read_lastcheck_copy();
     ASSERT(report != NULL);
@@ -1708,8 +1812,9 @@ TEST check_server_step_handles_large_stock_files_count(void)
 
     unsigned long long lastactive = 0;
     autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
     int last_record = (int)max_result;
-    check_server_step(&lastactive, &backup_state, &last_record, 10);
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
 
     char *report = read_lastcheck_copy();
     ASSERT(report != NULL);
@@ -1747,9 +1852,10 @@ TEST check_server_step_detects_record_and_autobackups(void)
 
     unsigned long long lastactive = 0;
     autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
     backup_state.stock.lastBack = 6; /* seuil atteint */
     int last_record = 10;
-    check_server_step(&lastactive, &backup_state, &last_record, 10);
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
 
     ASSERT_EQ_FMT(99, last_record, "%d");        /* nouveau record détecté */
     ASSERT_EQ_FMT(0, backup_state.stock.lastBack, "%d");            /* backup déclenché -> remis à 0 */
@@ -1784,6 +1890,7 @@ TEST log_server_startup_diagnostics_writes_config_to_events_log(void)
     int saved_expand_max_levels = expand_max_levels;
     int saved_rebalance_budget = rebalance_budget;
     int saved_http_port = HTTP_PORT;
+    int saved_auto_roles = auto_roles_requested;
     char saved_token[HTTP_ADMIN_TOKEN_MAX];
     memcpy(saved_token, HTTP_ADMIN_TOKEN, sizeof(saved_token));
 
@@ -1795,6 +1902,7 @@ TEST log_server_startup_diagnostics_writes_config_to_events_log(void)
     expand_max_levels = 5;
     rebalance_budget = 999;
     HTTP_PORT = 18099;
+    auto_roles_requested = 1;
     strncpy(HTTP_ADMIN_TOKEN, "secret-token-value", HTTP_ADMIN_TOKEN_MAX - 1);
     HTTP_ADMIN_TOKEN[HTTP_ADMIN_TOKEN_MAX - 1] = '\0';
 
@@ -1808,6 +1916,7 @@ TEST log_server_startup_diagnostics_writes_config_to_events_log(void)
     expand_max_levels = saved_expand_max_levels;
     rebalance_budget = saved_rebalance_budget;
     HTTP_PORT = saved_http_port;
+    auto_roles_requested = saved_auto_roles;
     memcpy(HTTP_ADMIN_TOKEN, saved_token, sizeof(saved_token));
 
     FILE *f = fopen("events.log", "r");
@@ -1831,6 +1940,7 @@ TEST log_server_startup_diagnostics_writes_config_to_events_log(void)
     ASSERT(strstr(line, "rebalance_budget=999") != NULL);
     ASSERT(strstr(line, "http_port=18099") != NULL);
     ASSERT(strstr(line, "http_token=configuré") != NULL);
+    ASSERT(strstr(line, "auto_roles=oui") != NULL);
     ASSERT(strstr(line, "secret-token-value") == NULL); /* jamais la valeur du jeton elle-même */
     ASSERT(strstr(line, "[") != NULL); /* horodatage entre crochets */
     PASS();
@@ -1879,10 +1989,11 @@ TEST check_server_step_autobackup_skipped_during_maintenance(void)
 
     unsigned long long lastactive = 0;
     autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
     backup_state.stock.lastBack = 6;              /* seuil atteint */
     int last_record = (int)max_result;   /* pas de nouveau record */
     lock_all_file();               /* maintenance en cours */
-    check_server_step(&lastactive, &backup_state, &last_record, 10);
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
     unlock_all_file();
 
     ASSERT_EQ_FMT(0, backup_state.stock.lastBack, "%d");             /* cadence consommée */
@@ -1936,8 +2047,9 @@ TEST check_server_step_reclaims_expired_lease(void)
 
     unsigned long long lastactive = 0;
     autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
     int last_record = (int)max_result;
-    check_server_step(&lastactive, &backup_state, &last_record, 10);
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
 
     count = 999; max_alloc = -999;
     ASSERT_EQ_FMT(0, datamanager_analysed_owned_by(owner, &count, &max_alloc), "%d");
@@ -1990,8 +2102,9 @@ TEST check_server_step_does_not_reclaim_lease_of_alive_client(void)
 
     unsigned long long lastactive = 0;
     autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
     int last_record = (int)max_result;
-    check_server_step(&lastactive, &backup_state, &last_record, 10);
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
 
     unsigned long long count = 999;
     int max_alloc = -999;
@@ -2001,6 +2114,172 @@ TEST check_server_step_does_not_reclaim_lease_of_alive_client(void)
 
     control_registry_unregister(session_idx);
     analysed_lease_seconds = saved_lease;
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
+/* ---------- politique automatique de dosage (PR4, --auto-roles) ---------- */
+
+/* Désactivée par défaut : check_server_step ne touche ni au registre de
+ * contrôle ni à role_mix_state, quels que soient les signaux ambiants. */
+TEST check_server_step_auto_roles_disabled_leaves_state_untouched(void)
+{
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+    int saved_auto_roles = auto_roles_requested;
+    auto_roles_requested = 0;
+
+    struct possibility_packet *p = malloc(sizeof *p);
+    memset(p, 0, sizeof *p);
+    p->alloc = 8;
+    array_possibility_packet *ap = malloc(sizeof *ap);
+    ap->size = 1; ap->possibilities = p;
+    add_possibility(NULL, ap);
+    free_array_possibility_packet(ap);
+
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
+    int last_record = (int)max_result;
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
+
+    ASSERT_EQ_FMT(0, role_mix_state.current_dosage, "%d");
+    ASSERT_EQ_FMT(0, role_mix_state.ticks_since_change, "%d");
+    ASSERT_EQ_FMT(0ULL, role_mix_state.last_search_starved, "%llu");
+    ASSERT_EQ_FMT(0ULL, role_mix_state.last_prune_starved, "%llu");
+
+    auto_roles_requested = saved_auto_roles;
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
+/* Activée, mais le délai minimal (ROLE_MIX_MIN_TICKS_DEFAULT) n'est pas
+ * encore écoulé : le sens d'ajustement est calculable (INCREASE, backlog non
+ * vérifié marqué) mais AUCUN changement n'est diffusé au parc -- seul le
+ * compteur de tours avance. */
+TEST check_server_step_auto_roles_respects_min_ticks_before_first_change(void)
+{
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+    int saved_auto_roles = auto_roles_requested;
+    auto_roles_requested = 1;
+
+    uint8_t muid_a[MACHINE_UID_BYTES], muid_b[MACHINE_UID_BYTES];
+    memset(muid_a, 0xA1, sizeof muid_a);
+    memset(muid_b, 0xA2, sizeof muid_b);
+    control_hello_t ha = { .pid = 501, .nb_forks = 1, .identity = { .mode = CLIENT_MODE_SEARCH } };
+    memcpy(ha.identity.machine_uid, muid_a, MACHINE_UID_BYTES);
+    control_hello_t hb = { .pid = 502, .nb_forks = 1, .identity = { .mode = CLIENT_MODE_SEARCH } };
+    memcpy(hb.identity.machine_uid, muid_b, MACHINE_UID_BYTES);
+    int idx_a = control_registry_register(1, "203.0.113.40", &ha);
+    int idx_b = control_registry_register(1, "203.0.113.41", &hb);
+    ASSERT(idx_a >= 0);
+    ASSERT(idx_b >= 0);
+
+    /* Stock non vérifié largement dominant (aucun vérifié) : au-dessus du
+     * plancher de bruit, décision attendue = INCREASE_PRUNE. */
+    struct possibility_packet *pkts = calloc(20, sizeof *pkts);
+    for (int i = 0; i < 20; i++) pkts[i].alloc = 8;
+    array_possibility_packet ap = { .size = 20, .possibilities = pkts };
+    add_possibility(NULL, &ap);
+    free(pkts);
+
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
+    /* server_search_starved/server_prune_starved sont des compteurs globaux
+     * CUMULATIFS, jamais remis à zéro entre tests (mesure "depuis le
+     * démarrage du serveur", PR2) : role_mix_state doit être amorcé sur leur
+     * valeur COURANTE, sinon le premier delta calculé engloberait tout
+     * l'historique déjà accumulé par les tests précédents dans ce même
+     * process, et non 0 comme au démarrage réel du serveur. */
+    auto_role_mix_state_t role_mix_state = {
+        .last_search_starved = server_search_starved,
+        .last_prune_starved = server_prune_starved,
+    };
+    int last_record = (int)max_result;
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
+
+    ASSERT_EQ_FMT(0, role_mix_state.current_dosage, "%d");
+    ASSERT_EQ_FMT(1, role_mix_state.ticks_since_change, "%d");
+    ASSERT_EQ_FMT(-1, control_registry_desired_pruner_forks(muid_a), "%d");
+
+    control_registry_unregister(idx_a);
+    control_registry_unregister(idx_b);
+    auto_roles_requested = saved_auto_roles;
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
+/* Une fois le délai minimal déjà écoulé (état injecté directement --
+ * l'avantage d'un paramètre explicite plutôt qu'une statique cachée), le
+ * changement est appliqué : diffusé à TOUT le parc via
+ * control_registry_apply_role_dosage, mémorisé PAR MACHINE. */
+TEST check_server_step_auto_roles_applies_dosage_after_min_ticks(void)
+{
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+    int saved_auto_roles = auto_roles_requested;
+    auto_roles_requested = 1;
+
+    uint8_t muid_a[MACHINE_UID_BYTES], muid_b[MACHINE_UID_BYTES];
+    memset(muid_a, 0xB1, sizeof muid_a);
+    memset(muid_b, 0xB2, sizeof muid_b);
+    control_hello_t ha = { .pid = 601, .nb_forks = 1, .identity = { .mode = CLIENT_MODE_SEARCH } };
+    memcpy(ha.identity.machine_uid, muid_a, MACHINE_UID_BYTES);
+    control_hello_t hb = { .pid = 602, .nb_forks = 1, .identity = { .mode = CLIENT_MODE_SEARCH } };
+    memcpy(hb.identity.machine_uid, muid_b, MACHINE_UID_BYTES);
+    int idx_a = control_registry_register(1, "203.0.113.42", &ha);
+    int idx_b = control_registry_register(1, "203.0.113.43", &hb);
+    ASSERT(idx_a >= 0);
+    ASSERT(idx_b >= 0);
+
+    struct possibility_packet *pkts = calloc(20, sizeof *pkts);
+    for (int i = 0; i < 20; i++) pkts[i].alloc = 8;
+    array_possibility_packet ap = { .size = 20, .possibilities = pkts };
+    add_possibility(NULL, &ap);
+    free(pkts);
+
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
+    /* Même amorçage que ci-dessus : compteurs de famine cumulatifs, jamais
+     * remis à zéro entre tests. */
+    auto_role_mix_state_t role_mix_state = {
+        .last_search_starved = server_search_starved,
+        .last_prune_starved = server_prune_starved,
+        .ticks_since_change = ROLE_MIX_MIN_TICKS_DEFAULT,
+    };
+    int last_record = (int)max_result;
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
+
+    ASSERT_EQ_FMT(1, role_mix_state.current_dosage, "%d");
+    ASSERT_EQ_FMT(0, role_mix_state.ticks_since_change, "%d");
+    ASSERT_EQ_FMT(1, control_registry_desired_pruner_forks(muid_a), "%d");
+    ASSERT_EQ_FMT(1, control_registry_desired_pruner_forks(muid_b), "%d");
+
+    control_registry_unregister(idx_a);
+    control_registry_unregister(idx_b);
+    auto_roles_requested = saved_auto_roles;
     thread_params = saved_tp;
     NB_THREADS = saved_nb;
     unwire_counters();
@@ -2920,6 +3199,18 @@ SUITE(etii_server_suite)
 
     RUN_TEST(step_test_connected_pings_back);
     RUN_TEST(compute_server_hunger_targets_two_per_client);
+    RUN_TEST(compute_desired_role_mix_corrects_zero_search_violation_first);
+    RUN_TEST(compute_desired_role_mix_keeps_when_fleet_empty);
+    RUN_TEST(compute_desired_role_mix_decreases_on_prune_starvation);
+    RUN_TEST(compute_desired_role_mix_decreases_on_search_starvation);
+    RUN_TEST(compute_desired_role_mix_keeps_starvation_without_prune_to_remove);
+    RUN_TEST(compute_desired_role_mix_never_increases_at_search_floor);
+    RUN_TEST(compute_desired_role_mix_increases_under_ram_pressure);
+    RUN_TEST(compute_desired_role_mix_increases_on_unchecked_backlog);
+    RUN_TEST(compute_desired_role_mix_ignores_backlog_below_noise_floor);
+    RUN_TEST(compute_desired_role_mix_decreases_on_checked_backlog);
+    RUN_TEST(compute_desired_role_mix_keeps_checked_backlog_without_prune);
+    RUN_TEST(compute_desired_role_mix_keeps_when_balanced);
     RUN_TEST(step_need_work_replies_hunger);
     RUN_TEST(step_need_work_requires_version);
     RUN_TEST(step_unsupported_version_stops);
@@ -2967,6 +3258,9 @@ SUITE(etii_server_suite)
     RUN_TEST(check_server_step_autobackup_skipped_during_maintenance);
     RUN_TEST(check_server_step_reclaims_expired_lease);
     RUN_TEST(check_server_step_does_not_reclaim_lease_of_alive_client);
+    RUN_TEST(check_server_step_auto_roles_disabled_leaves_state_untouched);
+    RUN_TEST(check_server_step_auto_roles_respects_min_ticks_before_first_change);
+    RUN_TEST(check_server_step_auto_roles_applies_dosage_after_min_ticks);
     RUN_TEST(check_server_stops_immediately_on_request_stop);
 
     RUN_TEST(communicate_with_client_full_session_ends_cleanly);

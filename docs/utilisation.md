@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -40,6 +40,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir ci-dessous |
 | `--stock-max-ram N` | *(absent, illimité)* | Plafond en Mo des DEUX pools de stock (non vérifié + vérifié) — voir ci-dessous |
 | `--stock-spill-dir CHEMIN` | `./eternityii-spill` | Répertoire de débordement sur disque une fois `--stock-max-ram` approché — voir ci-dessous |
+| `--auto-roles` | *(absente, désactivée)* | Active la politique automatique de dosage recherche/contrôle du parc — voir ci-dessous |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
 | `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
@@ -277,6 +278,47 @@ configuration (relever `--stock-max-ram`, configurer/vérifier `--stock-spill-di
 > Cette expansion est le pendant *serveur* de la délégation anticipée côté *client*
 > (sonde de faim `INST_NEED_WORK`, VERSION 8) décrite dans
 > [Échanges client / serveur](echanges_client_serveur.md).
+
+### Politique automatique de dosage (`--auto-roles`)
+
+`--auto-roles` (serveur uniquement, **désactivée par défaut**) délègue au
+serveur lui-même la décision que [`clientsRoles`](console.md) laisse
+d'ordinaire à l'opérateur : ajuster `pruner_forks`
+([`--pruner-forks`](#dosage-recherchecontrôle-par-fork---pruner-forks),
+ci-dessous) diffusé à tout le parc connecté, en fonction du besoin mesuré.
+
+```sh
+./eternityII server 80 --auto-roles data/pieces.csv
+```
+
+Sans cette option, aucun comportement ne change : l'opérateur garde
+entièrement la main via `clientsRoles`. Une fois activée, le serveur ajuste
+lui-même le dosage à chaque tour de statistiques existant (10 s, aucune
+cadence dédiée), à partir de quatre signaux déjà mesurés :
+
+- la **famine par rôle** (`server_search_starved`/`server_prune_starved`,
+  PR2 de [docs/conception/pilotage_type_client.md](conception/pilotage_type_client.md)) —
+  signal le plus direct et le plus urgent ;
+- la **taille des deux pools de stock** (non vérifié / vérifié) — un excès de
+  non-vérifié signale trop peu de pruners (le problème d'origine : jusqu'à
+  50 % de stock mort distribué sans pruner) ;
+- la **pression sur `--stock-max-ram`** (ci-dessus), si configuré ;
+- le **parc connecté compté par rôle** (`control_registry_count_roles`).
+
+Deux garde-fous fixes, non désactivables : le dosage **n'augmente jamais**
+tant qu'il ne reste qu'un seul chercheur connecté (jamais 0 chercheur / jamais
+100 % pruner — sans producteur, le stock ne se régénère plus), et un
+**délai minimal (~2 minutes) entre deux changements effectifs** — chaque
+changement coûte un redémarrage des fils (`stopForks` + re-fork) chez
+chaque client visé, le même coût qu'un `clientsRoles` manuel. Chaque
+ajustement se fait par pas de ±1, jamais un saut direct vers une cible
+calculée.
+
+Une décision manuelle (`clientsRoles`) reste possible en parallèle : les deux
+mécanismes partagent le même dosage désiré persistant par machine (PR3), la
+politique automatique pouvant le remplacer à son prochain tour si les
+signaux le justifient. Détail des règles de décision et des seuils :
+[Politique automatique de dosage recherche/contrôle](echanges_client_serveur.md#politique-automatique-de-dosage-recherchecontrôle-pr4).
 
 ## Mode client
 

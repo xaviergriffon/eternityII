@@ -1,18 +1,21 @@
 # Pilotage du rôle des fils client depuis le serveur
 
-> **Statut : en cours d'implémentation (3/4 PR livrées).** Ce document décrit
-> une **cible** ; PR1 (§4, rôle par fork décidé localement — `fork_role_for`,
-> `--pruner-forks`, clé de configuration `pruner_forks` classée
-> `NEEDS_RESTART`) est livrée : voir [docs/utilisation.md](../utilisation.md#dosage-recherchecontrôle-par-fork---pruner-forks).
+> **Statut : implémentée (4/4 PR livrées).** Ce document décrit une cible qui
+> est désormais entièrement en place ; PR1 (§4, rôle par fork décidé
+> localement — `fork_role_for`, `--pruner-forks`, clé de configuration
+> `pruner_forks` classée `NEEDS_RESTART`) est livrée : voir
+> [docs/utilisation.md](../utilisation.md#dosage-recherchecontrôle-par-fork---pruner-forks).
 > PR2 (métriques de besoin par rôle côté serveur — compteurs de service à
 > vide, débit ADD/GET ventilé par pool, parc connecté compté par rôle) est
 > livrée : voir `statistic`/`knownClients` et `GET /api/v1/stats`/`GET
 > /api/v1/known-clients`. PR3 (pilotage explicite `clientsRoles` + dosage
 > désiré persistant par machine) est livrée : voir
 > [Dosage recherche/contrôle par fork, piloté à distance](../echanges_client_serveur.md#dosage-recherchecontrôle-par-fork-piloté-à-distance-clientsroles-pr3).
-> Seule PR4 (politique automatique) reste à l'état de proposition — rien de ce
-> qui la concerne n'est implémenté à ce jour. Voir [README.md](README.md)
-> pour la convention de ce répertoire.
+> PR4 (politique automatique, désactivée par défaut derrière `--auto-roles`)
+> est livrée : voir
+> [docs/utilisation.md](../utilisation.md#politique-automatique-de-dosage---auto-roles)
+> et [Politique automatique de dosage](../echanges_client_serveur.md#politique-automatique-de-dosage-recherchecontrôle-pr4).
+> Voir [README.md](README.md) pour la convention de ce répertoire.
 
 ## 1. Le problème
 
@@ -223,6 +226,13 @@ Cette PR apporte les deux choses qui manquent :
 
 ### PR4 — politique automatique (désactivée par défaut)
 
+**Statut : livrée.** Le seuil de backlog exact (`ROLE_MIX_BACKLOG_FLOOR`,
+facteur ×2) et le délai minimal (`ROLE_MIX_MIN_TICKS_DEFAULT`, 12 tours ≈ 2
+min) sont des points de départ documentés comme tels dans le code
+(`src/app/etii_server.h`), à remesurer une fois `--auto-roles` exercé en
+conditions réelles — même esprit que §4.7 de
+[elagage_recherche.md](elagage_recherche.md).
+
 - Fonction **pure** `compute_desired_role_mix(...)`, sur le modèle exact de
   `compute_server_hunger` (`src/app/etii_server.c:54`) : aucun état, aucune I/O,
   entièrement testable.
@@ -292,12 +302,15 @@ dépôt a déjà écarté trois propositions d'élagage sur cette base
   devient pruner tient des possibilités que personne ne réclamerait) et son pool
   analysé (sans quoi les baux d'expiration devront les récupérer). **À trancher
   après mesure de la fréquence réelle des changements**, pas avant.
-- **Quelle métrique arbitre le dosage ?** La question est ouverte à dessein. Le
-  précédent `bench-refutation` a montré qu'un mauvais critère (débit brut,
-  `max_result`) fait prendre la mauvaise décision là où le bon critère (coût de
-  réfutation à CPU égal) la renverse. Candidats à évaluer : décroissance du stock
-  mort, coût de réfutation global du parc, temps avant saturation RAM. Aucun n'est
-  retenu ici.
+- **Quelle métrique arbitre le dosage ?** PR4 tranche un PREMIER jeu de règles
+  (`compute_desired_role_mix`, priorité famine > garde-fou > pression RAM >
+  ratio de backlog non-vérifié/vérifié — voir §4 ci-dessus), mais la question
+  du critère IDÉAL reste ouverte. Le précédent `bench-refutation` a montré
+  qu'un mauvais critère (débit brut, `max_result`) fait prendre la mauvaise
+  décision là où le bon critère (coût de réfutation à CPU égal) la renverse.
+  Candidats encore à évaluer une fois `--auto-roles` exercé en conditions
+  réelles : décroissance du stock mort, coût de réfutation global du parc,
+  temps avant saturation RAM.
 - **Granularité du dosage.** `pruner_forks` est un entier global au process. Une
   variante « le serveur envoie un vecteur de rôles explicite » serait plus
   expressive mais n'a, à ce stade, aucun cas d'usage identifié.
