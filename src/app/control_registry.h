@@ -191,6 +191,31 @@ void control_registry_record_stats(int index, const control_stats_t *stats);
 int control_registry_snapshot(control_session_info_t *out, int max);
 
 /**
+ * @brief Compte PUREMENT, dans un instantané déjà pris (`control_registry_snapshot`),
+ *        combien de sessions déclarent le rôle recherche contre le rôle
+ *        contrôle (PR2, docs/conception/pilotage_type_client.md).
+ *
+ * `control_session_info_t.mode` porte déjà cette information depuis v9 ; rien
+ * ne la comptait jusqu'ici. `CLIENT_MODE_GPU_PRUNER` est compté avec
+ * `CLIENT_MODE_PRUNER` dans `*out_nb_prune` — même distinction binaire
+ * recherche/contrôle que `fork_role_t` (`fork_orchestrator.h`), le détail
+ * CPU/GPU du pruner n'ayant pas sa place dans un dosage de fork.
+ *
+ * Fonction PURE (aucune I/O, aucun accès au registre lui-même) : opère sur un
+ * tableau déjà fourni par l'appelant, pour rester testable sans mutex ni
+ * session réseau — même esprit que `fork_stats_all_zero`
+ * (`fork_orchestrator.h`).
+ *
+ * @param sessions      Instantané de sessions (peut être NULL si `n <= 0`).
+ * @param n             Nombre d'entrées valides dans `sessions`.
+ * @param out_nb_search Sortie (NULL accepté) : nombre de sessions `CLIENT_MODE_SEARCH`.
+ * @param out_nb_prune  Sortie (NULL accepté) : nombre de sessions `CLIENT_MODE_PRUNER`
+ *                      ou `CLIENT_MODE_GPU_PRUNER`.
+ */
+void control_registry_count_roles(const control_session_info_t *sessions, int n,
+                                   int *out_nb_search, int *out_nb_prune);
+
+/**
  * @brief Poste `cmd`/`command_line` à TOUTES les sessions actives (pour
  *        `clientsCmd`, et pour `pause`/`resume` qui diffusent systématiquement,
  *        cf. `pause_interpreter`/`resume_interpreter` dans `command_lines.c`).

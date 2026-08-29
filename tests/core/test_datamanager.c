@@ -136,6 +136,12 @@ static void add_packets(const int *allocs, int n)
     free(arr.possibilities);
 }
 
+/* Ajoute n possibilités VÉRIFIÉES (checked = 1) — définie plus bas dans ce
+ * fichier (juste avant les tests de datamanager_stock_distribution, qui
+ * l'utilisent aussi) ; déclarée ici pour les tests de ventilation ADD/GET par
+ * pool ci-dessous, qui la précèdent textuellement. */
+static void add_checked_packets(const int *allocs, int n);
+
 /* --------------------------------------------------------------------------
  * set_server_ip / get_server_ip
  * ------------------------------------------------------------------------ */
@@ -455,6 +461,82 @@ TEST stock_rate_stats_reflects_recent_scroll(void)
 TEST stock_rate_stats_tolerates_null(void)
 {
     datamanager_stock_rate_stats(NULL); /* ne doit pas planter */
+    PASS();
+}
+
+/* PR2 (docs/conception/pilotage_type_client.md) : ventilation par pool des
+ * mêmes compteurs — l'agrégat ci-dessus ne dit pas QUEL pool a bougé. */
+
+TEST stock_rate_stats_ventilates_adds_by_pool(void)
+{
+    drain_datamanager();
+
+    int unchecked_allocs[] = { 1, 2, 3 };
+    add_packets(unchecked_allocs, 3); /* checked = 0 */
+    int checked_allocs[] = { 4, 5 };
+    add_checked_packets(checked_allocs, 2); /* checked = 1 */
+
+    stock_rate_stats_t after;
+    datamanager_stock_rate_stats(&after);
+    ASSERT_EQ_FMT(3ULL, after.adds_unchecked_last_1m, "%llu");
+    ASSERT_EQ_FMT(2ULL, after.adds_checked_last_1m, "%llu");
+    // L'agrégat historique reste la somme des deux pools, inchangé.
+    ASSERT_EQ_FMT(5ULL, after.adds_last_1m, "%llu");
+
+    drain_all();
+    PASS();
+}
+
+TEST stock_rate_stats_ventilates_removes_by_pool(void)
+{
+    drain_datamanager();
+
+    // Pool NON vérifié seul : scroll_from_local retombe sur ce pool (le pool
+    // vérifié est vide), donc removes_unchecked bouge, removes_checked non.
+    int allocs[] = { 1, 2 };
+    add_packets(allocs, 2);
+
+    array_possibility_packet *r = get_last_possibility(NULL, 10, NULL);
+    free_array_possibility_packet(r);
+
+    stock_rate_stats_t after_unchecked;
+    datamanager_stock_rate_stats(&after_unchecked);
+    ASSERT_EQ_FMT(2ULL, after_unchecked.removes_unchecked_last_1m, "%llu");
+    ASSERT_EQ_FMT(0ULL, after_unchecked.removes_checked_last_1m, "%llu");
+
+    // Pool VÉRIFIÉ : scroll_from_local le sert en PRIORITÉ (jamais de repli
+    // nécessaire ici), donc removes_checked bouge cette fois.
+    int checked_allocs[] = { 3 };
+    add_checked_packets(checked_allocs, 1);
+
+    array_possibility_packet *r2 = get_last_possibility(NULL, 10, NULL);
+    free_array_possibility_packet(r2);
+
+    stock_rate_stats_t after_checked;
+    datamanager_stock_rate_stats(&after_checked);
+    ASSERT_EQ_FMT(1ULL, after_checked.removes_checked_last_1m, "%llu");
+    // L'agrégat historique reste la somme des deux pools, inchangé (2 + 1).
+    ASSERT_EQ_FMT(3ULL, after_checked.removes_last_1m, "%llu");
+
+    drain_all();
+    PASS();
+}
+
+TEST stock_rate_stats_ventilates_removes_tocheck_as_unchecked(void)
+{
+    drain_datamanager();
+    int allocs[] = { 1 };
+    add_packets(allocs, 1); /* checked = 0, pool non vérifié */
+
+    array_possibility_packet *r = get_last_possibility_tocheck(10);
+    free_array_possibility_packet(r);
+
+    stock_rate_stats_t after;
+    datamanager_stock_rate_stats(&after);
+    ASSERT_EQ_FMT(1ULL, after.removes_unchecked_last_1m, "%llu");
+    ASSERT_EQ_FMT(0ULL, after.removes_checked_last_1m, "%llu");
+
+    drain_all();
     PASS();
 }
 
@@ -5738,6 +5820,9 @@ SUITE(datamanager_suite)
     RUN_TEST(stock_rate_stats_reflects_recent_add);
     RUN_TEST(stock_rate_stats_reflects_recent_scroll);
     RUN_TEST(stock_rate_stats_tolerates_null);
+    RUN_TEST(stock_rate_stats_ventilates_adds_by_pool);
+    RUN_TEST(stock_rate_stats_ventilates_removes_by_pool);
+    RUN_TEST(stock_rate_stats_ventilates_removes_tocheck_as_unchecked);
     RUN_TEST(put_and_scroll_round_trip_succeeds_when_pool_free);
     RUN_TEST(search_min_datas_finds_minimum);
     RUN_TEST(backup_then_restore_preserves_count);

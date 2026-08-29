@@ -45,6 +45,10 @@ unsigned long long *fileUpdates = NULL;
 // pools stock).
 unsigned long long *analysedFileUpdates = NULL;
 
+// Compteurs de service à vide par rôle (PR2) — voir la doc dans etii_server.h.
+unsigned long long server_search_starved = 0;
+unsigned long long server_prune_starved = 0;
+
 int32_t clamp_pruner_batch(int32_t requested) {
     if (requested < 1) return 1;
     if (requested > PRUNER_BATCH_MAX) return PRUNER_BATCH_MAX;
@@ -697,6 +701,10 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             *lastSent = get_last_possibility(NULL, 1, NULL);
             record_batch_analysed_for_client(client, *lastSent);
             int32_t k = (int32_t)(*lastSent)->size;
+            if (k == 0) {
+                // Service à vide côté chercheur (PR2) : jusqu'ici sans trace.
+                __atomic_fetch_add(&server_search_starved, 1, __ATOMIC_RELAXED);
+            }
             // Réponse cadrée (VERSION 7) : compte K puis, si K > 0, le bloc
             // contigu des K paquets. send_all réassemble les envois partiels —
             // l'ancien send() brut pouvait tronquer un paquet et désynchroniser
@@ -724,6 +732,10 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             *lastSent = get_last_possibility_tocheck(1);
             record_batch_analysed_for_client(client, *lastSent);
             int32_t k = (int32_t)(*lastSent)->size;
+            if (k == 0) {
+                // Service à vide côté pruner (PR2) : jusqu'ici sans trace.
+                __atomic_fetch_add(&server_prune_starved, 1, __ATOMIC_RELAXED);
+            }
             // Réponse cadrée (VERSION 7) — même trame que INST_GET.
             if (send_all(client->socket_id, &k, sizeof(k)) != (long)sizeof(k))
             {
@@ -757,6 +769,12 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             *lastSent = get_last_possibility_tocheck(requested);
             record_batch_analysed_for_client(client, *lastSent);
             int32_t k = (int32_t)(*lastSent)->size;
+            if (k == 0) {
+                // Service à vide côté pruner (PR2), même compteur que
+                // INST_GET_TO_CHECK non groupé : les deux formats interrogent
+                // le même pool avec la même signification pour l'opérateur.
+                __atomic_fetch_add(&server_prune_starved, 1, __ATOMIC_RELAXED);
+            }
             // Envoi : compte K puis, si K > 0, le bloc contigu des K paquets.
             if (send_all(client->socket_id, &k, sizeof(k)) != (long)sizeof(k))
             {

@@ -172,8 +172,9 @@ plage) ; clé de configuration et sa classification `NEEDS_RESTART` ; parsing CL
 
 ### PR2 — le serveur mesure le besoin par rôle
 
-Le serveur ne peut pas encore décider : il lui manque les métriques. Cette PR
-comble quatre trous constatés, **indépendamment** de tout pilotage.
+**Statut : livrée.** Le serveur ne peut pas encore décider : il lui manque les
+métriques. Cette PR comble quatre trous constatés, **indépendamment** de tout
+pilotage.
 
 - **Compteurs de service à vide — le trou principal.** Aujourd'hui un `K = 0` ne
   laisse *aucune* trace : ni compteur, ni log. `counters[]`, `fileUpdates[]` et

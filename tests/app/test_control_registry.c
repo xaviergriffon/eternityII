@@ -312,6 +312,71 @@ TEST snapshot_respects_max_capacity(void)
     PASS();
 }
 
+/* ---------- count_roles (PR2, docs/conception/pilotage_type_client.md) ----- */
+
+/* Fonction PURE : exercée sur un tableau construit à la main, sans passer par
+ * le registre (aucun register/unregister nécessaire). */
+
+TEST count_roles_splits_search_and_prune(void)
+{
+    control_session_info_t sessions[4];
+    memset(sessions, 0, sizeof(sessions));
+    sessions[0].mode = CLIENT_MODE_SEARCH;
+    sessions[1].mode = CLIENT_MODE_PRUNER;
+    sessions[2].mode = CLIENT_MODE_SEARCH;
+    sessions[3].mode = CLIENT_MODE_PRUNER;
+
+    int nb_search = -1, nb_prune = -1;
+    control_registry_count_roles(sessions, 4, &nb_search, &nb_prune);
+    ASSERT_EQ(2, nb_search);
+    ASSERT_EQ(2, nb_prune);
+    PASS();
+}
+
+/* CLIENT_MODE_GPU_PRUNER compte comme « contrôle », même distinction binaire
+ * que fork_role_t (fork_orchestrator.h). */
+TEST count_roles_counts_gpu_pruner_as_prune(void)
+{
+    control_session_info_t sessions[2];
+    memset(sessions, 0, sizeof(sessions));
+    sessions[0].mode = CLIENT_MODE_SEARCH;
+    sessions[1].mode = CLIENT_MODE_GPU_PRUNER;
+
+    int nb_search = -1, nb_prune = -1;
+    control_registry_count_roles(sessions, 2, &nb_search, &nb_prune);
+    ASSERT_EQ(1, nb_search);
+    ASSERT_EQ(1, nb_prune);
+    PASS();
+}
+
+TEST count_roles_empty_snapshot_is_zero_zero(void)
+{
+    int nb_search = -1, nb_prune = -1;
+    control_registry_count_roles(NULL, 0, &nb_search, &nb_prune);
+    ASSERT_EQ(0, nb_search);
+    ASSERT_EQ(0, nb_prune);
+    PASS();
+}
+
+/* NULL accepté pour l'une ou l'autre sortie (appelant qui n'en veut qu'une). */
+TEST count_roles_tolerates_null_outputs(void)
+{
+    control_session_info_t sessions[1];
+    memset(sessions, 0, sizeof(sessions));
+    sessions[0].mode = CLIENT_MODE_SEARCH;
+
+    control_registry_count_roles(sessions, 1, NULL, NULL);
+
+    int nb_search = -1;
+    control_registry_count_roles(sessions, 1, &nb_search, NULL);
+    ASSERT_EQ(1, nb_search);
+
+    int nb_prune = -1;
+    control_registry_count_roles(sessions, 1, NULL, &nb_prune);
+    ASSERT_EQ(0, nb_prune);
+    PASS();
+}
+
 /* ---------- record_stats ----------------------------------------------------*/
 
 TEST snapshot_has_stats_false_before_any_record(void)
@@ -995,6 +1060,11 @@ SUITE(control_registry_suite)
     RUN_TEST(snapshot_respects_max_capacity);
 
     RUN_TEST(snapshot_has_stats_false_before_any_record);
+
+    RUN_TEST(count_roles_splits_search_and_prune);
+    RUN_TEST(count_roles_counts_gpu_pruner_as_prune);
+    RUN_TEST(count_roles_empty_snapshot_is_zero_zero);
+    RUN_TEST(count_roles_tolerates_null_outputs);
     RUN_TEST(record_stats_reflected_in_snapshot);
     RUN_TEST(record_stats_invalid_index_or_null_is_noop);
     RUN_TEST(unregister_then_register_clears_stale_stats);
