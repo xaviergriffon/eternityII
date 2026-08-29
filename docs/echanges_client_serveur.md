@@ -309,7 +309,7 @@ entre elles. Verrouillé par
 
 Seules quelques commandes console sont déclenchables à distance
 (`control_command_allowed`) : `pause`, `resume`, `limit`, `maxStockByThread`,
-`prunerBatch`, `clientsCommand` (alias `clientsCmd`), `clientsWork`, `start`,
+`prunerBatch`, `clientsCommand` (alias `clientsCmd`), `clientsRoles`, `clientsWork`, `start`,
 `stopForks`, `configApply`, `config`, `configSave` — jamais `exit`,
 `restore`, `import`, ni rien de destructeur. Cette vérification est faite **deux fois
 indépendamment** : côté serveur dans l'interpréteur de `clientsCmd` (qui refuse même
@@ -317,7 +317,7 @@ de diffuser une ligne interdite), et, en défense en profondeur, côté client d
 `control_channel_handle_frame` avant tout appel à `do_command_line` — le client ne
 fait jamais confiance à ce qui arrive sur ce socket au seul motif que ça y arrive.
 
-**`clientsCommand`/`clientsCmd` et `clientsWork` sont des commandes SERVEUR** (elles
+**`clientsCommand`/`clientsCmd`, `clientsRoles` et `clientsWork` sont des commandes SERVEUR** (elles
 agissent sur `control_registry`, jamais sur les forks de recherche d'un client) —
 les admettre dans cette même liste blanche est ce qui les rend exécutables via
 l'[API HTTP admin](api_http_rest.md#post-apiv1command) (`POST /api/v1/command` ->
@@ -435,6 +435,60 @@ tokenise via le curseur global `strtok` et corromprait un appel HTTP concurrent 
 saisie console ou à une trame du canal de contrôle en cours de découpage. Une cible
 inconnue/déconnectée/ambiguë y répond `400` (argument invalide), pas `403`/`401` : la
 commande elle-même reste whitelistée (et authentifiée, si un jeton valide a été fourni).
+
+### Dosage recherche/contrôle par fork, piloté à distance (`clientsRoles`, PR3)
+
+Le pilotage de base du dosage `pruner_forks` d'un client (PR1,
+[docs/conception/pilotage_type_client.md](conception/pilotage_type_client.md))
+**fonctionnait déjà** dès l'adressage des commandes ci-dessus, sans une ligne
+de plus :
+
+```
+clientsCommand --to jetson-1 config pruner_forks 2
+clientsCommand --to jetson-1 configApply
+```
+
+`clientsRoles [--to <cible>] <nb_pruner>` (`clients_roles_interpreter`,
+`src/ui/command_lines.c`) compose ces deux commandes en une seule — même
+résolution de cible que `clientsCommand --to` (`session_no`, `client_uid`,
+`label`, dans cet ordre), même comportement de diffusion par défaut sans
+`--to`. `clientsRoles` rejoint `control_command_allowed` exactement comme
+`clientsCommand`/`clientsCmd` (un seul point à toucher,
+`control_command_classify`) — accessible à distance (console, `POST
+/api/v1/command` avec jeton Bearer si `--http-token-file` est configuré) selon
+les mêmes règles.
+
+```
+clientsRoles --to jetson-1 2   # 2 forks de jetson-1 passent au contrôle
+clientsRoles 0                 # tous les clients connectés repassent en recherche pure
+```
+
+**Dosage désiré, persistant par machine.** `control_registry_apply_role_dosage`
+(`src/app/control_registry.c`) ne se contente pas de composer les deux
+commandes : pour chaque session effectivement touchée, elle mémorise
+`pruner_forks` dans une table interne keyée par **`machine_uid`** — jamais
+`client_uid` ni `session_no`, qui ne survivent pas à un redémarrage de
+processus client (`client_uid` est un nonce de SESSION, régénéré à chaque
+lancement, cf. [Trois notions distinctes](utilisation.md#mode-client)).
+`control_registry_register` consulte cette table à chaque nouvel
+enregistrement et, si la machine qui se (re)connecte a un dosage désiré
+mémorisé, pré-poste `"config pruner_forks <n>"` puis `"configApply"` dans sa
+file toute neuve, avant même son premier `CTRL_PING` — **même mécanisme** que
+`g_desired_pause_state` pour `pause`/`resume` (voir plus haut), simplement
+keyé par machine plutôt que global (le dosage est par construction une
+propriété PAR CLIENT, contrairement à la pause qui s'applique à tout le
+parc). Les deux mécanismes coexistent sans conflit dans la même file :
+une session qui se reconnecte pendant une pause désirée ET porteuse d'un
+dosage désiré reçoit les trois commandes (`pause`, `config pruner_forks <n>`,
+`configApply`), dans cet ordre.
+
+Une machine jamais touchée par `clientsRoles` n'a pas de dosage désiré
+mémorisé : elle garde le comportement par défaut de PR1 (rôle par fork
+impliqué par le mode de lancement, `client` ou `pruner`). Ce dosage désiré est
+**volatile** (perdu au redémarrage du SERVEUR, contrairement au [registre de
+clients connus](#registre-de-clients-connus) qui persiste sur disque) — un
+redémarrage du serveur retombe donc sur le dosage par défaut de chaque client
+tant que l'opérateur ne rejoue pas `clientsRoles`.
 
 ### Registre de clients connus
 

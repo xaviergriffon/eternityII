@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include <signal.h>
 #include <time.h>
+#include <limits.h>
 
 #include "ui/logger.h"
 #include "core/datamanager.h"
@@ -26,7 +27,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 61
+#define NB_COMMANDS 62
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -125,6 +126,7 @@ int resume_interpreter(void);
 int clients_interpreter(void);
 int clients_stats_interpreter(void);
 int clients_cmd_interpreter(void);
+int clients_roles_interpreter(void);
 int known_clients_interpreter(void);
 int clients_work_interpreter(void);
 int lease_duration_interpreter(void);
@@ -365,6 +367,20 @@ static command_description commands[NB_COMMANDS] = {
      "active (client déconnecté ou remplacé) est refusé, jamais redirigé vers un\n"
      "autre client ; un label partagé par plusieurs sessions actives est refusé\n"
      "comme ambigu.", NULL},
+    {"clientsRoles", clients_roles_interpreter, 0, CMD_CAT_CLIENTS, 1,
+     "clientsRoles [--to <session_no|client_uid|label>] <nb_pruner>",
+     "fixe le dosage recherche/contrôle (pruner_forks) d'un client précis ou de tous les clients connectés",
+     "Compose « config pruner_forks <nb_pruner> » + « configApply » (PR3, voir\n"
+     "docs/conception/pilotage_type_client.md) -- même résolution de cible que\n"
+     "clientsCommand --to (session_no, client_uid, ou label). <nb_pruner> est le\n"
+     "nombre de forks affectés au CONTRÔLE parmi le nb_forks de CHAQUE client\n"
+     "touché ; une valeur hors [0, nb_forks] est clampée côté client\n"
+     "(resolve_pruner_forks), jamais ici -- le serveur ne connaît pas le nb_forks\n"
+     "de la cible. Sans --to : diffusion à toutes les sessions actives. Le dosage\n"
+     "envoyé est aussi MÉMORISÉ par machine (machine_uid, pas client_uid ni\n"
+     "session_no) : une machine touchée qui se reconnecte ou redémarre le reçoit\n"
+     "automatiquement à sa prochaine connexion, sans qu'il faille rejouer la\n"
+     "commande -- même mécanisme que pause/resume (g_desired_pause_state).", NULL},
     {"knownClients", known_clients_interpreter, 0, CMD_CAT_CLIENTS, 1, NULL,
      "liste les machines connues (cumul, statut connecté/déconnecté)",
      "Distinct de « clients » : cette liste survit à la déconnexion (une machine reste\n"
@@ -1434,6 +1450,59 @@ static int admin_remote_clients_command(char *rest) {
 }
 
 /**
+ * @brief Portion "clientsRoles [--to <cible>] <nb_pruner>" de
+ *        `admin_apply_remote_command`, réentrante (aucun strtok global) --
+ *        pendant HTTP de `clients_roles_interpreter` (PR3), même syntaxe.
+ *
+ * La composition ("config pruner_forks <n>" + "configApply") et la
+ * mémorisation du dosage désiré par machine sont entièrement déléguées à
+ * `control_registry_apply_role_dosage` -- rien à revalider ici, les deux
+ * commandes composées sont fixes et déjà dans la liste blanche.
+ */
+static int admin_remote_clients_roles(char *rest) {
+    while (rest != NULL && *rest == ' ') {
+        rest++;
+    }
+    if (rest == NULL || *rest == '\0') {
+        return ADMIN_CMD_BAD_ARGS;
+    }
+
+    const char *target = NULL;
+    if (strncmp(rest, "--to ", 5) == 0) {
+        rest += 5;
+        while (*rest == ' ') {
+            rest++;
+        }
+        char *sep = strchr(rest, ' ');
+        if (sep == NULL) {
+            /* "--to <cible>" sans nombre derrière : rien à envoyer. */
+            return ADMIN_CMD_BAD_ARGS;
+        }
+        *sep = '\0';
+        target = rest;
+        rest = sep + 1;
+        while (*rest == ' ') {
+            rest++;
+        }
+        if (*rest == '\0') {
+            return ADMIN_CMD_BAD_ARGS;
+        }
+    }
+
+    char *end = NULL;
+    long n = strtol(rest, &end, 10);
+    if (end == rest || *end != '\0' || n < 0 || n > INT_MAX) {
+        return ADMIN_CMD_BAD_ARGS;
+    }
+
+    int touched = control_registry_apply_role_dosage(target, (int)n);
+    if (target != NULL && touched != 1) {
+        return ADMIN_CMD_BAD_ARGS;
+    }
+    return ADMIN_CMD_OK;
+}
+
+/**
  * @brief Portion "clientsWork <cible>" de `admin_apply_remote_command`,
  *        réentrante (aucun strtok global).
  *
@@ -1591,6 +1660,8 @@ int admin_apply_remote_command(const char *line) {
             result = ADMIN_CMD_FORBIDDEN;
         } else if (strcmp(word, "clientsCommand") == 0 || strcmp(word, "clientsCmd") == 0) {
             result = admin_remote_clients_command(save);
+        } else if (strcmp(word, "clientsRoles") == 0) {
+            result = admin_remote_clients_roles(save);
         } else if (strcmp(word, "clientsWork") == 0) {
             char *target = strtok_r(NULL, " ", &save);
             result = admin_remote_clients_work(target);
@@ -1866,6 +1937,74 @@ int clients_cmd_interpreter(void) {
 
     int n = control_registry_broadcast_command(CTRL_COMMAND, rest);
     log_info("clientsCommand : \"%s\" diffusée à %d session(s)\n", rest, n);
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `clientsRoles [--to <cible>] <nb_pruner>` (PR3,
+ *        docs/conception/pilotage_type_client.md) : ergonomie composant
+ *        `config pruner_forks <nb_pruner>` + `configApply`, déjà possible via
+ *        deux `clientsCommand` séparés -- voir `control_registry_apply_role_dosage`
+ *        pour la composition ET la mémorisation du dosage désiré par machine.
+ *
+ * Même syntaxe `--to` que `clientsCommand` (doit précéder immédiatement
+ * `<nb_pruner>`, sans espace dans la cible). `<nb_pruner>` doit être un
+ * entier décimal non négatif -- une valeur hors [0, nb_forks] de la cible est
+ * clampée côté client (`resolve_pruner_forks`), jamais rejetée ici : le
+ * serveur ne connaît pas le `nb_forks` de la cible.
+ */
+int clients_roles_interpreter(void) {
+    char *rest = strtok(NULL, "");
+    if (rest != NULL) {
+        while (*rest == ' ') {
+            rest++;
+        }
+    }
+    if (rest == NULL || *rest == '\0') {
+        return CMD_ERR_USAGE;
+    }
+
+    const char *target = NULL;
+    if (strncmp(rest, "--to ", 5) == 0) {
+        rest += 5;
+        while (*rest == ' ') {
+            rest++;
+        }
+        char *sep = strchr(rest, ' ');
+        if (sep == NULL) {
+            /* "--to <cible>" sans nombre derrière : rien à envoyer. */
+            return CMD_ERR_USAGE;
+        }
+        *sep = '\0';
+        target = rest;
+        rest = sep + 1;
+        while (*rest == ' ') {
+            rest++;
+        }
+        if (*rest == '\0') {
+            return CMD_ERR_USAGE;
+        }
+    }
+
+    char *end = NULL;
+    long n = strtol(rest, &end, 10);
+    if (end == rest || *end != '\0' || n < 0 || n > INT_MAX) {
+        return CMD_ERR_USAGE;
+    }
+
+    int touched = control_registry_apply_role_dosage(target, (int)n);
+    if (target != NULL) {
+        if (touched != 1) {
+            log_error("clientsRoles : cible \"%s\" introuvable, déconnectée ou ambiguë -- rien envoyé\n", target);
+            return -1;
+        }
+        log_info("clientsRoles : pruner_forks=%d envoyé à la cible \"%s\" (mémorisé pour les reconnexions futures)\n",
+                  (int)n, target);
+        return 0;
+    }
+
+    log_info("clientsRoles : pruner_forks=%d diffusé à %d session(s) (mémorisé pour les reconnexions futures)\n",
+              (int)n, touched);
     return 0;
 }
 

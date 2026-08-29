@@ -1767,6 +1767,109 @@ TEST do_command_line_clientscommand_to_missing_command_is_usage_error(void)
     PASS();
 }
 
+/* ---------- clientsRoles (dosage recherche/contrôle, PR3) ------------------
+ *
+ * `clientsRoles [--to <cible>] <nb_pruner>` : ergonomie composant
+ * "config pruner_forks <n>" + "configApply" (déjà possible via deux
+ * clientsCommand séparés) -- même résolution de cible que `clientsCommand
+ * --to`, mêmes deux commandes effectivement postées, PLUS la mémorisation du
+ * dosage désiré par machine (control_registry_apply_role_dosage, testée en
+ * détail dans test_control_registry.c).
+ */
+
+TEST do_command_line_clientsroles_to_reaches_only_targeted_session_by_label(void)
+{
+    control_hello_t alpha = { .pid = 10, .nb_forks = 4, .identity = { .mode = 0, .label = "roles-alpha" } };
+    control_hello_t beta = { .pid = 11, .nb_forks = 4, .identity = { .mode = 0, .label = "roles-beta" } };
+    /* machine_uid explicite et unique : control_registry_apply_role_dosage
+       mémorise le dosage GLOBALEMENT par machine_uid, sans réinitialisation
+       entre tests (calqué sur g_desired_pause_state) -- laisser le défaut
+       zéro d'un désignateur ferait fuiter ce dosage vers N'IMPORTE QUEL autre
+       test dont les sessions gardent, elles aussi, ce même défaut. */
+    memset(alpha.identity.machine_uid, 0x31, MACHINE_UID_BYTES);
+    memset(beta.identity.machine_uid, 0x32, MACHINE_UID_BYTES);
+    int idx_alpha = control_registry_register(1, "203.0.113.1", &alpha);
+    int idx_beta = control_registry_register(2, "203.0.113.2", &beta);
+    ASSERT(idx_alpha >= 0);
+    ASSERT(idx_beta >= 0);
+
+    char cmd[] = "clientsRoles --to roles-beta 2";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+
+    uint8_t out_cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx_beta, &out_cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)out_cmd);
+    ASSERT_STR_EQ("config pruner_forks 2", line);
+    ASSERT_EQ(0, control_registry_wait_command(idx_beta, &out_cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("configApply", line);
+    /* "alpha" n'a rien reçu : le timeout doit expirer. */
+    ASSERT_EQ(1, control_registry_wait_command(idx_alpha, &out_cmd, NULL, 0, 100));
+
+    control_registry_unregister(idx_alpha);
+    control_registry_unregister(idx_beta);
+    PASS();
+}
+
+TEST do_command_line_clientsroles_without_to_broadcasts(void)
+{
+    control_hello_t h1 = { .pid = 12, .nb_forks = 4, .identity = { .mode = 0, .label = "roles-b1" } };
+    control_hello_t h2 = { .pid = 13, .nb_forks = 4, .identity = { .mode = 1, .label = "roles-b2" } };
+    /* machine_uid explicite et unique -- voir le commentaire du test
+       précédent (dosage désiré mémorisé GLOBALEMENT par machine_uid). */
+    memset(h1.identity.machine_uid, 0x33, MACHINE_UID_BYTES);
+    memset(h2.identity.machine_uid, 0x34, MACHINE_UID_BYTES);
+    int idx1 = control_registry_register(1, "203.0.113.1", &h1);
+    int idx2 = control_registry_register(2, "203.0.113.2", &h2);
+    ASSERT(idx1 >= 0);
+    ASSERT(idx2 >= 0);
+
+    char cmd[] = "clientsRoles 3";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+
+    uint8_t out_cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx1, &out_cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("config pruner_forks 3", line);
+    ASSERT_EQ(0, control_registry_wait_command(idx2, &out_cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("config pruner_forks 3", line);
+
+    control_registry_unregister(idx1);
+    control_registry_unregister(idx2);
+    PASS();
+}
+
+TEST do_command_line_clientsroles_to_unknown_target_rejected(void)
+{
+    char cmd[] = "clientsRoles --to no-such-client 2";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+    PASS();
+}
+
+TEST do_command_line_clientsroles_missing_args_is_usage_error(void)
+{
+    char cmd1[] = "clientsRoles";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd1), "%d");
+
+    char cmd2[] = "clientsRoles --to alpha";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd2), "%d");
+    PASS();
+}
+
+TEST do_command_line_clientsroles_non_numeric_is_usage_error(void)
+{
+    char cmd[] = "clientsRoles abc";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+    PASS();
+}
+
+TEST do_command_line_clientsroles_negative_is_usage_error(void)
+{
+    char cmd[] = "clientsRoles -1";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+    PASS();
+}
+
 /* ---------- clientsWork (attribution des analyses en cours, PR6) ----------
  *
  * Consultation « que travaille X ? » : la cible est résolue exactement comme
@@ -2337,6 +2440,75 @@ TEST admin_apply_remote_command_clientscommand_missing_args(void)
     PASS();
 }
 
+/* ---------- admin_apply_remote_command : clientsRoles (PR3) ---------------- */
+
+TEST admin_apply_remote_command_clientsroles_to_targets_one_session(void)
+{
+    control_hello_t alpha = { .pid = 110, .nb_forks = 4, .identity = { .mode = 0, .label = "roles-admin-alpha" } };
+    control_hello_t beta = { .pid = 111, .nb_forks = 4, .identity = { .mode = 0, .label = "roles-admin-beta" } };
+    /* machine_uid explicite et unique -- control_registry_apply_role_dosage
+       mémorise le dosage GLOBALEMENT par machine_uid, sans réinitialisation
+       entre tests (calqué sur g_desired_pause_state) : laisser le défaut zéro
+       d'un désignateur ferait fuiter ce dosage vers tout autre test dont les
+       sessions gardent, elles aussi, ce même défaut. */
+    memset(alpha.identity.machine_uid, 0x35, MACHINE_UID_BYTES);
+    memset(beta.identity.machine_uid, 0x36, MACHINE_UID_BYTES);
+    int idx_alpha = control_registry_register(1, "203.0.113.44", &alpha);
+    int idx_beta = control_registry_register(2, "203.0.113.45", &beta);
+    ASSERT(idx_alpha >= 0);
+    ASSERT(idx_beta >= 0);
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("clientsRoles --to roles-admin-beta 2"), "%d");
+
+    uint8_t out_cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx_beta, &out_cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)out_cmd);
+    ASSERT_STR_EQ("config pruner_forks 2", line);
+    ASSERT_EQ(0, control_registry_wait_command(idx_beta, &out_cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("configApply", line);
+    /* "alpha" n'a rien reçu. */
+    ASSERT_EQ(1, control_registry_wait_command(idx_alpha, &out_cmd, NULL, 0, 100));
+
+    control_registry_unregister(idx_alpha);
+    control_registry_unregister(idx_beta);
+    PASS();
+}
+
+TEST admin_apply_remote_command_clientsroles_broadcasts(void)
+{
+    control_hello_t h = { .pid = 112, .nb_forks = 4, .identity = { .mode = 0 } };
+    /* machine_uid explicite -- voir le commentaire du test précédent. */
+    memset(h.identity.machine_uid, 0x37, MACHINE_UID_BYTES);
+    int idx = control_registry_register(1, "203.0.113.46", &h);
+    ASSERT(idx >= 0);
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("clientsRoles 1"), "%d");
+
+    uint8_t out_cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx, &out_cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("config pruner_forks 1", line);
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+TEST admin_apply_remote_command_clientsroles_to_unknown_target_is_bad_args(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("clientsRoles --to no-such-client 2"), "%d");
+    PASS();
+}
+
+TEST admin_apply_remote_command_clientsroles_missing_args(void)
+{
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("clientsRoles"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("clientsRoles --to alpha"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("clientsRoles abc"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("clientsRoles -1"), "%d");
+    PASS();
+}
+
 TEST admin_apply_remote_command_clientswork_missing_target_is_bad_args(void)
 {
     ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("clientsWork"), "%d");
@@ -2730,6 +2902,13 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_clientscommand_to_unknown_target_rejected);
     RUN_TEST(do_command_line_clientscommand_to_missing_command_is_usage_error);
 
+    RUN_TEST(do_command_line_clientsroles_to_reaches_only_targeted_session_by_label);
+    RUN_TEST(do_command_line_clientsroles_without_to_broadcasts);
+    RUN_TEST(do_command_line_clientsroles_to_unknown_target_rejected);
+    RUN_TEST(do_command_line_clientsroles_missing_args_is_usage_error);
+    RUN_TEST(do_command_line_clientsroles_non_numeric_is_usage_error);
+    RUN_TEST(do_command_line_clientsroles_negative_is_usage_error);
+
     RUN_TEST(do_command_line_clientswork_missing_target_is_usage_error);
     RUN_TEST(do_command_line_clientswork_unknown_target_rejected);
     RUN_TEST(do_command_line_clientswork_reports_nothing_owned);
@@ -2765,6 +2944,10 @@ SUITE(command_lines_suite)
     RUN_TEST(admin_apply_remote_command_clientscommand_to_still_enforces_whitelist);
     RUN_TEST(admin_apply_remote_command_clientscommand_to_unknown_target_is_bad_args);
     RUN_TEST(admin_apply_remote_command_clientscommand_missing_args);
+    RUN_TEST(admin_apply_remote_command_clientsroles_to_targets_one_session);
+    RUN_TEST(admin_apply_remote_command_clientsroles_broadcasts);
+    RUN_TEST(admin_apply_remote_command_clientsroles_to_unknown_target_is_bad_args);
+    RUN_TEST(admin_apply_remote_command_clientsroles_missing_args);
     RUN_TEST(admin_apply_remote_command_clientswork_missing_target_is_bad_args);
     RUN_TEST(admin_apply_remote_command_clientswork_unknown_target_is_bad_args);
     RUN_TEST(admin_apply_remote_command_clientswork_reports_owned_attribution);
