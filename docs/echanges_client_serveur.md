@@ -511,8 +511,21 @@ le modèle exact de `compute_server_hunger`, prend en entrée :
   `server_search_starved`/`server_prune_starved` (PR2 — ces compteurs sont
   CUMULATIFS depuis le démarrage du serveur, jamais remis à zéro : c'est
   l'appelant qui calcule le delta) ;
-- le compte de sessions de contrôle actives par rôle
-  (`control_registry_count_roles`, PR2).
+- le nombre de forks par rôle, pondéré par `nb_forks` et non par un simple
+  compte de sessions (`control_registry_count_role_forks`, PR4 — voir
+  encadré ci-dessous).
+
+> **Correctif** : la première version utilisait `control_registry_count_roles`
+> (PR2, un compte de SESSIONS — une par processus parent connecté). Avec une
+> seule machine cliente connectée, ce compte vaut toujours au plus 1, quel
+> que soit son nombre réel de forks — le garde-fou « jamais 0 chercheur »
+> (§4 ci-dessous) se déclenchait donc à TORT dès qu'une seule machine était
+> connectée, bloquant indéfiniment toute augmentation de `pruner_forks` même
+> avec des dizaines de forks de recherche et un stock non vérifié en
+> croissance continue (bug réel observé en usage, déploiement à une seule
+> machine cliente — le cas le plus courant). `control_registry_count_role_forks`
+> somme `nb_forks` par rôle au lieu de compter les sessions : une seule
+> machine à 8 forks compte désormais comme 8, pas comme 1.
 
 Elle renvoie un **sens** d'ajustement (`ROLE_MIX_DECREASE_PRUNE` /
 `ROLE_MIX_KEEP` / `ROLE_MIX_INCREASE_PRUNE`), jamais une cible absolue —

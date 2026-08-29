@@ -2287,6 +2287,62 @@ TEST check_server_step_auto_roles_applies_dosage_after_min_ticks(void)
     PASS();
 }
 
+/* Régression : bug réel observé en usage. Une SEULE machine cliente
+ * connectée (une seule session de contrôle), mais avec 8 forks de
+ * recherche déclarés (`nb_forks=8`) -- avant le passage à
+ * `control_registry_count_role_forks` (pondéré par nb_forks),
+ * `control_registry_count_roles` comptait cette session comme UNE seule
+ * unité, faisant croire à `compute_desired_role_mix` qu'il ne restait qu'un
+ * seul chercheur (`nb_search <= 1`) et bloquant PERMANENMENT toute
+ * augmentation de pruner_forks, quelle que soit l'ampleur du stock non
+ * vérifié accumulé -- exactement le scénario d'un déploiement à une seule
+ * machine cliente, le plus courant. */
+TEST check_server_step_auto_roles_increases_with_single_multi_fork_client(void)
+{
+    dm_drain_all();
+    wire_counters();
+    int saved_nb = NB_THREADS;
+    NB_THREADS = 1;
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+    int saved_auto_roles = auto_roles_requested;
+    auto_roles_requested = 1;
+
+    uint8_t muid[MACHINE_UID_BYTES];
+    memset(muid, 0xC1, sizeof muid);
+    control_hello_t h = { .pid = 701, .nb_forks = 8, .identity = { .mode = CLIENT_MODE_SEARCH } };
+    memcpy(h.identity.machine_uid, muid, MACHINE_UID_BYTES);
+    int idx = control_registry_register(1, "203.0.113.50", &h);
+    ASSERT(idx >= 0);
+
+    struct possibility_packet *pkts = calloc(20, sizeof *pkts);
+    for (int i = 0; i < 20; i++) pkts[i].alloc = 8;
+    array_possibility_packet ap = { .size = 20, .possibilities = pkts };
+    add_possibility(NULL, &ap);
+    free(pkts);
+
+    unsigned long long lastactive = 0;
+    autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {
+        .last_search_starved = server_search_starved,
+        .last_prune_starved = server_prune_starved,
+        .ticks_since_change = ROLE_MIX_MIN_TICKS_DEFAULT,
+    };
+    int last_record = (int)max_result;
+    check_server_step(&lastactive, &backup_state, &last_record, 10, &role_mix_state);
+
+    ASSERT_EQ_FMT(1, role_mix_state.current_dosage, "%d");
+    ASSERT_EQ_FMT(1, control_registry_desired_pruner_forks(muid), "%d");
+
+    control_registry_unregister(idx);
+    auto_roles_requested = saved_auto_roles;
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    unwire_counters();
+    dm_drain_all();
+    PASS();
+}
+
 /* Enveloppe de thread check_server : REQUEST_STOP prépositionné, la boucle
  * (while(request != REQUEST_STOP), refactor P8) ne s'exécute jamais — appel
  * direct sûr, le corps (step + sleep) est couvert via check_server_step. */
@@ -3261,6 +3317,7 @@ SUITE(etii_server_suite)
     RUN_TEST(check_server_step_auto_roles_disabled_leaves_state_untouched);
     RUN_TEST(check_server_step_auto_roles_respects_min_ticks_before_first_change);
     RUN_TEST(check_server_step_auto_roles_applies_dosage_after_min_ticks);
+    RUN_TEST(check_server_step_auto_roles_increases_with_single_multi_fork_client);
     RUN_TEST(check_server_stops_immediately_on_request_stop);
 
     RUN_TEST(communicate_with_client_full_session_ends_cleanly);

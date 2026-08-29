@@ -253,8 +253,15 @@ extern unsigned long long server_prune_starved;
  *                              notion de pression sans plafond).
  * @param search_starved_delta  Δ `server_search_starved` depuis le tour précédent.
  * @param prune_starved_delta   Δ `server_prune_starved` depuis le tour précédent.
- * @param nb_search             Nombre de sessions de contrôle en rôle recherche.
- * @param nb_prune              Nombre de sessions de contrôle en rôle contrôle.
+ * @param nb_search             Σ `nb_forks` des sessions en rôle recherche
+ *                              (`control_registry_count_role_forks`, PAS un
+ *                              compte de sessions — avec une seule machine
+ *                              connectée, un compte de sessions vaudrait
+ *                              toujours au plus 1, déclenchant à tort le
+ *                              garde-fou ci-dessous quel que soit son nombre
+ *                              réel de forks).
+ * @param nb_prune              Σ `nb_forks` des sessions en rôle contrôle,
+ *                              même remarque.
  * @return                      Le sens d'ajustement (jamais une cible absolue).
  */
 role_mix_decision_t compute_desired_role_mix(unsigned long long unchecked_stock,

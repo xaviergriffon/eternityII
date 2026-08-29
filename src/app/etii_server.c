@@ -471,8 +471,15 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
     if (auto_roles_requested && role_mix_state != NULL) {
         control_session_info_t sessions[MAX_CONTROL_SESSIONS];
         int nb_sessions = control_registry_snapshot(sessions, MAX_CONTROL_SESSIONS);
+        // Pondéré par nb_forks (control_registry_count_role_forks), jamais un
+        // compte de sessions (control_registry_count_roles) : avec une seule
+        // machine connectée -- quel que soit son nombre de forks -- un compte
+        // de sessions vaut au plus 1, ce qui déclenche à tort le garde-fou
+        // "jamais 0 chercheur" de compute_desired_role_mix et bloque toute
+        // augmentation même avec des dizaines de forks de recherche inactifs
+        // à convertir (bug réel observé en usage single-machine).
         int nb_search = 0, nb_prune = 0;
-        control_registry_count_roles(sessions, nb_sessions, &nb_search, &nb_prune);
+        control_registry_count_role_forks(sessions, nb_sessions, &nb_search, &nb_prune);
 
         unsigned long long search_starved_now = server_search_starved;
         unsigned long long prune_starved_now = server_prune_starved;

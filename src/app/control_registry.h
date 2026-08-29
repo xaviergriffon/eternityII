@@ -216,6 +216,37 @@ void control_registry_count_roles(const control_session_info_t *sessions, int n,
                                    int *out_nb_search, int *out_nb_prune);
 
 /**
+ * @brief Comme `control_registry_count_roles`, mais pondère chaque session
+ *        par son nombre de forks déclarés (`nb_forks`) plutôt que de compter
+ *        une session comme une seule unité (PR4,
+ *        docs/conception/pilotage_type_client.md).
+ *
+ * `control_registry_count_roles` compte des SESSIONS (une par processus
+ * parent connecté) : avec une seule machine cliente connectée, quel que soit
+ * son nombre de forks, `nb_search`/`nb_prune` vaut au plus 1 — un garde-fou
+ * de la politique automatique (« jamais 0 chercheur ») qui compare ce compte
+ * à un plancher de 1 ou 2 se retrouve donc TOUJOURS déclenché dès qu'une
+ * seule machine est connectée, même si elle fait tourner des dizaines de
+ * forks de recherche (bug réel observé en usage : le stock non vérifié
+ * s'accumulait indéfiniment sans jamais déclencher d'augmentation de
+ * `pruner_forks`, faute de second client connecté). Cette variante somme
+ * `nb_forks` au lieu de compter les sessions, pour que le garde-fou
+ * compare un nombre de FORKS à un plancher de forks, pas un nombre de
+ * MACHINES à un plancher de machines.
+ *
+ * Fonction PURE, mêmes garanties que `control_registry_count_roles`.
+ *
+ * @param sessions           Instantané de sessions (peut être NULL si `n <= 0`).
+ * @param n                  Nombre d'entrées valides dans `sessions`.
+ * @param out_nb_search_forks Sortie (NULL accepté) : Σ `nb_forks` des sessions
+ *                            `CLIENT_MODE_SEARCH`.
+ * @param out_nb_prune_forks  Sortie (NULL accepté) : Σ `nb_forks` des sessions
+ *                            `CLIENT_MODE_PRUNER`/`CLIENT_MODE_GPU_PRUNER`.
+ */
+void control_registry_count_role_forks(const control_session_info_t *sessions, int n,
+                                        int *out_nb_search_forks, int *out_nb_prune_forks);
+
+/**
  * @brief Poste `cmd`/`command_line` à TOUTES les sessions actives (pour
  *        `clientsCmd`, et pour `pause`/`resume` qui diffusent systématiquement,
  *        cf. `pause_interpreter`/`resume_interpreter` dans `command_lines.c`).

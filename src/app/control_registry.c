@@ -447,6 +447,26 @@ void control_registry_count_roles(const control_session_info_t *sessions, int n,
     }
 }
 
+void control_registry_count_role_forks(const control_session_info_t *sessions, int n,
+                                        int *out_nb_search_forks, int *out_nb_prune_forks)
+{
+    int nb_search_forks = 0;
+    int nb_prune_forks = 0;
+    for (int i = 0; i < n; i++) {
+        if (sessions[i].mode == CLIENT_MODE_SEARCH) {
+            nb_search_forks += sessions[i].nb_forks;
+        } else {
+            nb_prune_forks += sessions[i].nb_forks;
+        }
+    }
+    if (out_nb_search_forks != NULL) {
+        *out_nb_search_forks = nb_search_forks;
+    }
+    if (out_nb_prune_forks != NULL) {
+        *out_nb_prune_forks = nb_prune_forks;
+    }
+}
+
 int control_registry_get_identity(int index, client_identity_t *out)
 {
     pthread_once(&g_init_once, registry_init_once);
