@@ -11,6 +11,7 @@
 #include "greatest.h"
 #include "app/etii_client.h"
 #include "app/app_static_variables.h"
+#include "app/fork_orchestrator.h"
 #include "app/etii_statistic.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
@@ -175,6 +176,44 @@ TEST thread_queues_table_aggregates_forks(void)
     ASSERT_EQ_FMT(6ULL, analysed, "%llu");   /* 1+2+3 */
     ASSERT_EQ_FMT(600ULL, bys, "%llu");      /* 100+200+300 */
     ASSERT_EQ_FMT(80, (int)mr, "%d");        /* max des max_result par fork */
+    PASS();
+}
+
+/* Colonne Type (dosage recherche/contrôle par fork, --pruner-forks) : le rôle
+ * affiché doit refléter current_fork_role(f), pas une valeur figée -- les
+ * rangs les plus hauts sont les pruners (fork_role_for), comme
+ * spawn_child_body les affecte réellement. */
+TEST thread_queues_table_shows_per_fork_role(void)
+{
+    int saved_nb = NB_THREADS;
+    uint16_t saved_mr = max_result;
+    struct client_statistics *saved = fork_statistics;
+    int saved_pfr = pruner_forks_requested;
+    int saved_pm = pruner_mode;
+
+    struct client_statistics fs[4];
+    memset(fs, 0, sizeof fs);
+    NB_THREADS = 4;
+    fork_statistics = fs;
+    pruner_mode = 0;
+    pruner_forks_requested = 2; /* forks 2 et 3 : pruner ; forks 0 et 1 : recherche */
+
+    unsigned long long stock = 0, analysed = 0, bys = 0;
+    char *t = build_thread_queues_table(&stock, &analysed, &bys);
+
+    int row0_search = (strstr(t, "   0 | search") != NULL);
+    int row1_search = (strstr(t, "   1 | search") != NULL);
+    int row2_prune  = (strstr(t, "   2 | prune") != NULL);
+    int row3_prune  = (strstr(t, "   3 | prune") != NULL);
+    free(t);
+
+    fork_statistics = saved; NB_THREADS = saved_nb; max_result = saved_mr;
+    pruner_forks_requested = saved_pfr; pruner_mode = saved_pm;
+
+    ASSERT(row0_search);
+    ASSERT(row1_search);
+    ASSERT(row2_prune);
+    ASSERT(row3_prune);
     PASS();
 }
 
@@ -1403,6 +1442,7 @@ SUITE(etii_client_suite)
     RUN_TEST(find_no_match_returns_minus_one);
 
     RUN_TEST(thread_queues_table_aggregates_forks);
+    RUN_TEST(thread_queues_table_shows_per_fork_role);
     RUN_TEST(thread_queues_table_large_nb_threads_no_overflow);
 
     RUN_TEST(control_step_unlimited_leaves_request);

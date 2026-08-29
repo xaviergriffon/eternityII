@@ -412,6 +412,35 @@ Exemples :
 ./eternityII pruner srv 8 data/pieces.csv --pruner-forks 4   # 4 forks contrôlent, 4 cherchent
 ```
 
+**Visibilité côté client.** La commande console `check` affiche, dans le
+tableau « Thread queues », une colonne `Type` (`search`/`prune`) par fork —
+le rôle EFFECTIF, calculé sans la moindre I/O (le parent connaît déjà le
+dosage résolu de chaque fork). Un rôle reste valide pour toute la durée
+d'affichage jusqu'au prochain `configApply` :
+
+```
+Thread queues
+Fork | Type   |     In stock |     Analysed
+-----+--------+--------------+-------------
+   0 | search |          120 |            3
+   1 | search |           98 |            2
+   2 | prune  |            0 |           10
+   3 | prune  |            0 |            8
+-----+--------+--------------+-------------
+Total|        |          218 |           23
+```
+
+**Visibilité côté serveur.** Aucune API serveur (console `clients`, `GET
+/api/v1/clients`) n'expose aujourd'hui le rôle PAR FORK d'un client distant —
+seul le rôle DÉCLARÉ par le canal de contrôle du process PARENT est visible
+(un seul `mode` par session, celui du mode de lancement `client`/`pruner`, pas
+le détail d'un dosage mixte). Le serveur reçoit pourtant bien l'identité
+(`fork_seq`/`mode`) de chaque fork sur sa connexion de travail dès la
+connexion (visible ponctuellement dans `events.log` : « connexion de travail
+identifiée (fork_seq=N, mode=M, …) ») mais ne la conserve nulle part
+d'interrogeable — piste laissée ouverte pour une future extension de
+`clientsWork`/`GET /api/v1/clients`.
+
 ## Mode pruner (élagage)
 
 Un **pruner** réutilise la même plomberie réseau qu'un client, mais au lieu d'explorer

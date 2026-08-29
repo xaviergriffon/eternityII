@@ -12,6 +12,7 @@
 #include "core/etii_search.h"
 #include "net/etii_protocol.h"
 #include "app/fork_gate.h"
+#include "app/fork_orchestrator.h"
 
 #ifdef WITH_CUDA
 #include "app/gpu_pruner.h"
@@ -575,7 +576,9 @@ void run_mono_client(const char *file, int fork_seq)
  * Le buffer est dimensionné sur NB_THREADS (256 + NB_THREADS*80) — régression
  * d'un débordement de tas observé avec un buffer fixe sur un NB_THREADS élevé.
  * Extrait du corps de boucle de check_client_threads pour être testable hors
- * thread (pur : lit l'instantané fork_statistics[]).
+ * thread (pur : lit l'instantané fork_statistics[] ; le rôle par fork vient
+ * de `current_fork_role`, lui-même pur vis-à-vis des globales déjà résolues
+ * `pruner_forks_requested`/`pruner_mode`/`NB_THREADS` — aucune I/O).
  *
  * @return Chaîne allouée (à libérer par l'appelant).
  */
@@ -588,8 +591,8 @@ char *build_thread_queues_table(unsigned long long *out_stock,
     char *table = calloc(size, sizeof(char));
     int off = snprintf(table, size,
         "Thread queues\n"
-        "Fork |     In stock |     Analysed\n"
-        "-----+--------------+-------------\n");
+        "Fork | Type   |     In stock |     Analysed\n"
+        "-----+--------+--------------+-------------\n");
     for (int f = 0; f < NB_THREADS; f++) {
         if (fork_statistics[f].max_result > max_result) {
             max_result = fork_statistics[f].max_result;
@@ -597,13 +600,20 @@ char *build_thread_queues_table(unsigned long long *out_stock,
         bys += fork_statistics[f].shots_per_second;
         unsigned long long in_stock = fork_statistics[f].possibilities_in_stock;
         unsigned long long an = fork_statistics[f].analyses_in_stock;
+        // Dosage recherche/contrôle par fork (--pruner-forks, PR1 de
+        // docs/conception/pilotage_type_client.md) : jusqu'ici invisible dans
+        // ce tableau, alors que le rôle EFFECTIF de chaque fork (search ou
+        // prune) est déjà connu du parent sans la moindre I/O — chaque fork
+        // reste dans son rôle jusqu'au prochain re-fork (configApply), donc
+        // `current_fork_role` reste valide pour toute la durée d'affichage.
+        const char *role = (current_fork_role(f) == FORK_ROLE_PRUNE) ? "prune " : "search";
         off += snprintf(table + off, size - off,
-                        "%4i | %12llu | %12llu\n", f, in_stock, an);
+                        "%4i | %s | %12llu | %12llu\n", f, role, in_stock, an);
         stock += in_stock; analysed += an;
     }
     snprintf(table + off, size - off,
-             "-----+--------------+-------------\n"
-             "Total| %12llu | %12llu\n", stock, analysed);
+             "-----+--------+--------------+-------------\n"
+             "Total|        | %12llu | %12llu\n", stock, analysed);
     if (out_stock)         *out_stock         = stock;
     if (out_analysed)      *out_analysed      = analysed;
     if (out_shots_per_sec) *out_shots_per_sec = bys;
