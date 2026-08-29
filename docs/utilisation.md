@@ -68,8 +68,10 @@ au démarrage un fichier `clé = valeur` qui pré-remplit les options non fourni
 ligne de commande — priorité **CLI > fichier > défauts**. Contrairement au client, le
 serveur n'a pas d'orchestrateur de démarrage différé : le fichier est lu une seule
 fois, de façon synchrone, avant que le serveur ne démarre réellement (pas de
-décompte, pas de commande console `config`/`configSave`/`configApply` — celles-ci
-restent propres au mode client/pruner).
+décompte, pas de `configApply` — le serveur n'a pas de configuration "en
+préparation" à appliquer à chaud, celle-ci reste propre au mode client/pruner).
+Les commandes console `config` (affichage) et `configSave` (persistance), elles,
+fonctionnent aussi côté serveur — voir [Console interactive](console.md#général).
 
 ```sh
 ./eternityII server --config-file /etc/eternityii/server.conf

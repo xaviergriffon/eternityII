@@ -155,8 +155,10 @@ static const cli_help_topic_t cli_topics[] = {
 	  "expand_level, expand_max_stock, expand_max_levels, http_port, http_token_file,\n"
 	  "stock_files, stock_max_ram, stock_spill_dir, rebalance_budget, tcp_timeout,\n"
 	  "auto_roles, stop_on_solution, headless. Lu une seule fois, de façon synchrone,\n"
-	  "avant le démarrage du serveur -- pas d'orchestrateur différé, pas de commande\n"
-	  "console config/configSave/configApply côté serveur.\n"
+	  "avant le démarrage du serveur -- pas d'orchestrateur différé, pas de configApply\n"
+	  "(pas de configuration \"en préparation\" à appliquer à chaud) ; config/configSave\n"
+	  "fonctionnent en revanche côté serveur (affichage/persistance de la config\n"
+	  "effective), mais \"config <clé> <valeur>\" y est refusée.\n"
 	  "Dans les deux cas : fichier absent ou illisible -- pas une erreur (valeurs par\n"
 	  "défaut/CLI utilisées) ; une ligne à clé inconnue ou valeur invalide est\n"
 	  "journalisée (avertissement) puis ignorée, le chargement continue." },
