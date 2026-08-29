@@ -4,8 +4,10 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <stdio.h>
 
-#include "app/app_static_variables.h"   /* MAX_CONTROL_SESSIONS */
+#include "app/app_static_variables.h"   /* MAX_CONTROL_SESSIONS, MAX_KNOWN_CLIENTS */
+#include "ui/logger.h"
 
 /**
  * @brief Une commande en attente dans la file circulaire d'une session.
@@ -64,6 +66,71 @@ static uint64_t g_next_session_no = 1;
  * après-coup n'ait pas besoin d'une commande ré-émise manuellement. Protégé
  * par g_registry_mutex, comme le reste des parcours globaux du registre. */
 static int g_desired_pause_state = 0; /* 0 = résumé (défaut), 1 = en pause */
+
+/**
+ * @brief Dosage recherche/contrôle « désiré » PAR MACHINE (PR3,
+ *        docs/conception/pilotage_type_client.md), calqué sur
+ *        `g_desired_pause_state` mais KEYÉ par `machine_uid` — contrairement à
+ *        pause/resume (fleet-wide, un seul booléen suffit), le dosage est par
+ *        construction une propriété PAR CLIENT.
+ *
+ * `machine_uid` (jamais `client_uid`/`session_no`, qui ne survivent pas à un
+ * redémarrage de processus client) est la SEULE clé stable pour qu'une
+ * machine qui redémarre reprenne le dosage voulu — même choix de clé que
+ * `known_clients_registry` (cf. sa doc), mais table SÉPARÉE et volontairement
+ * plus petite : ce registre-ci reste dans le domaine « piloter » de
+ * control_registry, jamais « mesurer ». Mise à jour dans
+ * `control_registry_apply_role_dosage`, consultée à l'enregistrement
+ * (`control_registry_register`) pour pré-poster le dosage dans la file toute
+ * neuve d'une session qui vient de s'enregistrer. Protégée par
+ * `g_registry_mutex`, comme `g_desired_pause_state`.
+ */
+typedef struct {
+    int in_use;
+    uint8_t machine_uid[MACHINE_UID_BYTES];
+    int pruner_forks;
+} desired_role_t;
+
+static desired_role_t g_desired_roles[MAX_KNOWN_CLIENTS];
+
+/* Cherche l'entrée dont machine_uid correspond. Retourne -1 si absente.
+ * Appelant : doit détenir g_registry_mutex. */
+static int desired_role_find_locked(const uint8_t *machine_uid)
+{
+    for (int i = 0; i < MAX_KNOWN_CLIENTS; i++) {
+        if (g_desired_roles[i].in_use &&
+            memcmp(g_desired_roles[i].machine_uid, machine_uid, MACHINE_UID_BYTES) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Enregistre/actualise le dosage désiré de machine_uid. Purement
+ * observationnel : une table pleine ET une machine encore inconnue ne doit
+ * jamais faire échouer clientsRoles, seulement priver CETTE machine de
+ * persistance (avertissement, comme known_clients_registry sur registre
+ * plein). Appelant : doit détenir g_registry_mutex. */
+static void desired_role_set_locked(const uint8_t *machine_uid, int pruner_forks)
+{
+    int idx = desired_role_find_locked(machine_uid);
+    if (idx < 0) {
+        for (int i = 0; i < MAX_KNOWN_CLIENTS; i++) {
+            if (!g_desired_roles[i].in_use) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0) {
+            log_error("control_registry : table du dosage désiré pleine (>%d machines), "
+                      "dosage non mémorisé pour cette machine\n", MAX_KNOWN_CLIENTS);
+            return;
+        }
+        g_desired_roles[idx].in_use = 1;
+        memcpy(g_desired_roles[idx].machine_uid, machine_uid, MACHINE_UID_BYTES);
+    }
+    g_desired_roles[idx].pruner_forks = pruner_forks;
+}
 
 /* Compare le premier mot de `command_line` (délimité par un espace ou la fin
  * de chaîne) à `word`, sans retokeniser (même convention que
@@ -139,6 +206,31 @@ int control_registry_register(int socket_id, const char *peer_ip, const control_
             strncpy(s->queue[0].command_line, "pause", CONTROL_COMMAND_LINE_MAX - 1);
             s->queue[0].command_line[CONTROL_COMMAND_LINE_MAX - 1] = '\0';
             s->count = 1;
+        }
+        /* Dosage recherche/contrôle désiré (PR3) : même principe que la pause
+         * ci-dessus, mais keyé par machine_uid (cf. la doc de
+         * g_desired_roles) et donc en PLUS de la pause, jamais à sa place --
+         * les deux peuvent coexister dans la même file toute neuve. Deux
+         * commandes (config puis configApply), donc vérifie la place pour les
+         * DEUX avant d'en écrire une seule : jamais un `config` pré-posté sans
+         * son `configApply`, qui laisserait le dosage préparé mais jamais
+         * appliqué. */
+        int desired_idx = desired_role_find_locked(hello->identity.machine_uid);
+        if (desired_idx >= 0 && s->count + 2 <= CONTROL_SESSION_QUEUE_CAP) {
+            char line[CONTROL_COMMAND_LINE_MAX];
+            snprintf(line, sizeof(line), "config pruner_forks %d", g_desired_roles[desired_idx].pruner_forks);
+
+            int tail = (s->head + s->count) % CONTROL_SESSION_QUEUE_CAP;
+            s->queue[tail].cmd = CTRL_COMMAND;
+            strncpy(s->queue[tail].command_line, line, CONTROL_COMMAND_LINE_MAX - 1);
+            s->queue[tail].command_line[CONTROL_COMMAND_LINE_MAX - 1] = '\0';
+            s->count++;
+
+            tail = (s->head + s->count) % CONTROL_SESSION_QUEUE_CAP;
+            s->queue[tail].cmd = CTRL_COMMAND;
+            strncpy(s->queue[tail].command_line, "configApply", CONTROL_COMMAND_LINE_MAX - 1);
+            s->queue[tail].command_line[CONTROL_COMMAND_LINE_MAX - 1] = '\0';
+            s->count++;
         }
         pthread_mutex_unlock(&s->mutex);
     }
@@ -572,4 +664,104 @@ int control_registry_desired_pause_state(void)
     state = g_desired_pause_state;
     pthread_mutex_unlock(&g_registry_mutex);
     return state;
+}
+
+int control_registry_desired_pruner_forks(const uint8_t machine_uid[MACHINE_UID_BYTES])
+{
+    pthread_once(&g_init_once, registry_init_once);
+    int result = -1;
+    pthread_mutex_lock(&g_registry_mutex);
+    int idx = desired_role_find_locked(machine_uid);
+    if (idx >= 0) {
+        result = g_desired_roles[idx].pruner_forks;
+    }
+    pthread_mutex_unlock(&g_registry_mutex);
+    return result;
+}
+
+/* Copie machine_uid du titulaire du slot `index` si toujours actif au moment
+ * de l'appel. Appelant : doit détenir g_registry_mutex (mais PAS s->mutex du
+ * slot). Retourne 1 si copié, 0 si le slot n'est plus actif (déconnexion
+ * concurrente entre la résolution et cet appel -- ne peut arriver que si
+ * l'appelant a relâché puis repris g_registry_mutex entre les deux, jamais le
+ * cas dans ce fichier, mais vérifié quand même par défense en profondeur,
+ * même style que control_registry_resolve_client_uid). */
+static int copy_machine_uid_if_active_locked(int index, uint8_t out_machine_uid[MACHINE_UID_BYTES])
+{
+    control_session_t *s = &g_sessions[index];
+    int result = 0;
+    pthread_mutex_lock(&s->mutex);
+    if (s->in_use) {
+        memcpy(out_machine_uid, s->hello.identity.machine_uid, MACHINE_UID_BYTES);
+        result = 1;
+    }
+    pthread_mutex_unlock(&s->mutex);
+    return result;
+}
+
+int control_registry_apply_role_dosage(const char *target, int pruner_forks)
+{
+    pthread_once(&g_init_once, registry_init_once);
+
+    char line_config[CONTROL_COMMAND_LINE_MAX];
+    snprintf(line_config, sizeof(line_config), "config pruner_forks %d", pruner_forks);
+
+    pthread_mutex_lock(&g_registry_mutex);
+
+    if (target == NULL || *target == '\0') {
+        /* Diffusion : même boucle que control_registry_broadcast_command,
+         * mais deux commandes par session touchée plutôt qu'une, et le
+         * dosage désiré mémorisé pour chacune. */
+        int n = 0;
+        for (int i = 0; i < MAX_CONTROL_SESSIONS; i++) {
+            if (!g_sessions[i].in_use) {
+                continue;
+            }
+            if (control_registry_post_command(i, CTRL_COMMAND, line_config) == 0 &&
+                control_registry_post_command(i, CTRL_COMMAND, "configApply") == 0) {
+                uint8_t machine_uid[MACHINE_UID_BYTES];
+                if (copy_machine_uid_if_active_locked(i, machine_uid)) {
+                    desired_role_set_locked(machine_uid, pruner_forks);
+                    n++;
+                }
+            }
+        }
+        pthread_mutex_unlock(&g_registry_mutex);
+        return n;
+    }
+
+    /* Cible unique : même résolution (session_no, client_uid, label, dans cet
+     * ordre) que control_registry_send_command_to/resolve_client_uid. */
+    int matched_index = -1;
+    int nb_matches = 0;
+    for (int i = 0; i < MAX_CONTROL_SESSIONS; i++) {
+        control_session_t *s = &g_sessions[i];
+        pthread_mutex_lock(&s->mutex);
+        if (s->in_use) {
+            int hit = target_matches_session_no(target, s->session_no) ||
+                      target_matches_client_uid(target, s->hello.identity.client_uid) ||
+                      target_matches_label(target, s->hello.identity.label);
+            if (hit) {
+                nb_matches++;
+                if (nb_matches == 1) {
+                    matched_index = i;
+                }
+            }
+        }
+        pthread_mutex_unlock(&s->mutex);
+    }
+
+    int result = 0;
+    if (nb_matches == 1) {
+        if (control_registry_post_command(matched_index, CTRL_COMMAND, line_config) == 0 &&
+            control_registry_post_command(matched_index, CTRL_COMMAND, "configApply") == 0) {
+            uint8_t machine_uid[MACHINE_UID_BYTES];
+            if (copy_machine_uid_if_active_locked(matched_index, machine_uid)) {
+                desired_role_set_locked(machine_uid, pruner_forks);
+                result = 1;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_registry_mutex);
+    return result;
 }

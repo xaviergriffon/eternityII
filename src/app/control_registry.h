@@ -297,6 +297,46 @@ int control_registry_send_command_to(const char *target, uint8_t cmd, const char
 int control_registry_resolve_client_uid(const char *target, uint8_t out_client_uid[CLIENT_UID_BYTES]);
 
 /**
+ * @brief Applique un dosage recherche/contrôle (PR3,
+ *        docs/conception/pilotage_type_client.md) : compose et poste
+ *        `"config pruner_forks <pruner_forks>"` puis `"configApply"`, à une
+ *        cible unique (résolue exactement comme
+ *        `control_registry_send_command_to` : `session_no`, `client_uid`,
+ *        puis `label`) si `target` est fourni, ou à TOUTES les sessions
+ *        actuellement actives sinon (même convention que
+ *        `control_registry_broadcast_command`) — l'ergonomie que le document
+ *        de conception attend de `clientsRoles`.
+ *
+ * MÉMORISE aussi, pour chaque session effectivement touchée, `pruner_forks`
+ * comme dosage désiré de sa MACHINE (`machine_uid`, jamais `client_uid` ou
+ * `session_no` qui ne survivent pas à un redémarrage de processus) : une
+ * machine touchée qui se reconnecte plus tard (même après redémarrage du
+ * client) le reçoit automatiquement à l'enregistrement
+ * (`control_registry_register`), sans qu'il faille rejouer la commande —
+ * calqué sur `g_desired_pause_state`. Une machine jamais touchée par
+ * `clientsRoles` n'a pas de dosage désiré mémorisé : elle garde le
+ * comportement par défaut de PR1 (rôle impliqué par le mode de lancement).
+ *
+ * Ne fait AUCUNE vérification de liste blanche elle-même (comme
+ * `control_registry_send_command_to`) : `config`/`configApply` sont des
+ * commandes FIXES construites ici, déjà dans `write_relayable`
+ * (`control_protocol.c`), jamais du texte libre d'opérateur — rien à
+ * revalider avant de les poster.
+ *
+ * @param target       `NULL` ou chaîne vide pour diffuser à toutes les
+ *                      sessions actives ; sinon cible telle que saisie par
+ *                      l'opérateur (`session_no`/`client_uid`/`label`).
+ * @param pruner_forks Dosage visé, tel que reçu de l'opérateur — jamais borné
+ *                      ici contre `nb_forks` de la cible (inconnu côté
+ *                      serveur) : la résolution finale reste
+ *                      `resolve_pruner_forks` côté client (PR1).
+ * @return             Nombre de sessions effectivement touchées (postées ET
+ *                      toujours actives au moment de mémoriser le dosage) :
+ *                      0 ou 1 avec `target`, 0..N sans `target`.
+ */
+int control_registry_apply_role_dosage(const char *target, int pruner_forks);
+
+/**
  * @brief Indique si `client_uid` correspond à une session de contrôle
  *        ACTUELLEMENT active (enregistrée) dans le registre.
  *
@@ -351,5 +391,20 @@ int control_registry_auto_stats_due(int index, int interval_sec);
  * besoin de le consulter directement.
  */
 int control_registry_desired_pause_state(void);
+
+/**
+ * @brief Dosage recherche/contrôle désiré courant pour la machine
+ *        `machine_uid` (PR3) : -1 si aucun dosage n'a jamais été mémorisé pour
+ *        elle (comportement par défaut de PR1 inchangé), sinon la dernière
+ *        valeur reçue via `control_registry_apply_role_dosage`.
+ *
+ * Exposé principalement pour les tests ; `control_registry_register` est le
+ * seul consommateur en production (pré-poste le dosage dans la file toute
+ * neuve d'une session qui s'enregistre).
+ *
+ * @param machine_uid Nonce machine (16 octets, `MACHINE_UID_BYTES`).
+ * @return            Le dosage mémorisé, ou -1 si absent.
+ */
+int control_registry_desired_pruner_forks(const uint8_t machine_uid[MACHINE_UID_BYTES]);
 
 #endif /* eternityII_control_registry_h */

@@ -1,13 +1,18 @@
 # Pilotage du rôle des fils client depuis le serveur
 
-> **Statut : en cours d'implémentation (1/4 PR livrée).** Ce document décrit
+> **Statut : en cours d'implémentation (3/4 PR livrées).** Ce document décrit
 > une **cible** ; PR1 (§4, rôle par fork décidé localement — `fork_role_for`,
 > `--pruner-forks`, clé de configuration `pruner_forks` classée
 > `NEEDS_RESTART`) est livrée : voir [docs/utilisation.md](../utilisation.md#dosage-recherchecontrôle-par-fork---pruner-forks).
-> PR2 (métriques de besoin par rôle côté serveur), PR3 (pilotage explicite
-> `clientsRoles`) et PR4 (politique automatique) restent à l'état de
-> proposition — rien de ce qui les concerne n'est implémenté à ce jour. Voir
-> [README.md](README.md) pour la convention de ce répertoire.
+> PR2 (métriques de besoin par rôle côté serveur — compteurs de service à
+> vide, débit ADD/GET ventilé par pool, parc connecté compté par rôle) est
+> livrée : voir `statistic`/`knownClients` et `GET /api/v1/stats`/`GET
+> /api/v1/known-clients`. PR3 (pilotage explicite `clientsRoles` + dosage
+> désiré persistant par machine) est livrée : voir
+> [Dosage recherche/contrôle par fork, piloté à distance](../echanges_client_serveur.md#dosage-recherchecontrôle-par-fork-piloté-à-distance-clientsroles-pr3).
+> Seule PR4 (politique automatique) reste à l'état de proposition — rien de ce
+> qui la concerne n'est implémenté à ce jour. Voir [README.md](README.md)
+> pour la convention de ce répertoire.
 
 ## 1. Le problème
 
@@ -197,7 +202,7 @@ pilotage.
 
 ### PR3 — pilotage explicite par l'opérateur
 
-Le pilotage de base **fonctionne déjà** dès la PR1, sans une ligne de plus :
+**Statut : livrée.** Le pilotage de base **fonctionnait déjà** dès la PR1, sans une ligne de plus :
 
 ```
 clientsCommand --to jetson-1 config pruner_forks 2

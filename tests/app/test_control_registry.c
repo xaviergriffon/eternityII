@@ -890,6 +890,178 @@ TEST clients_cmd_pause_resume_also_update_desired_state(void)
     PASS();
 }
 
+/* ---------- control_registry_apply_role_dosage (PR3) ----------------------- */
+
+/* Un machine_uid jamais touché par clientsRoles n'a pas de dosage désiré. */
+TEST desired_pruner_forks_defaults_to_absent(void)
+{
+    uint8_t unknown_machine_uid[MACHINE_UID_BYTES];
+    memset(unknown_machine_uid, 0xAB, sizeof(unknown_machine_uid));
+    ASSERT_EQ(-1, control_registry_desired_pruner_forks(unknown_machine_uid));
+    PASS();
+}
+
+/* Cible unique (session_no) : les deux commandes composées sont postées dans
+   l'ordre, et le dosage désiré est mémorisé pour la machine de la cible. */
+TEST apply_role_dosage_targeted_posts_config_then_configapply(void)
+{
+    control_hello_t h = make_hello(100, 4, 0);
+    memset(h.identity.machine_uid, 0x11, MACHINE_UID_BYTES);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
+    ASSERT(idx >= 0);
+
+    /* Cible par client_uid hexadécimal complet -- toujours unique, comme
+       target_matches_client_uid (control_registry.c). */
+    char client_uid_hex[2 * CLIENT_UID_BYTES + 1];
+    client_identity_hex_encode(h.identity.client_uid, CLIENT_UID_BYTES, client_uid_hex, sizeof(client_uid_hex));
+
+    int touched = control_registry_apply_role_dosage(client_uid_hex, 2);
+    ASSERT_EQ(1, touched);
+    ASSERT_EQ(2, control_registry_desired_pruner_forks(h.identity.machine_uid));
+
+    uint8_t cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx, &cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)cmd);
+    ASSERT_STR_EQ("config pruner_forks 2", line);
+
+    ASSERT_EQ(0, control_registry_wait_command(idx, &cmd, line, sizeof(line), 200));
+    ASSERT_EQ((int)CTRL_COMMAND, (int)cmd);
+    ASSERT_STR_EQ("configApply", line);
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+/* Cible introuvable : aucune commande postée, aucun dosage mémorisé, 0 renvoyé. */
+TEST apply_role_dosage_unknown_target_touches_nothing(void)
+{
+    int touched = control_registry_apply_role_dosage("no-such-client", 3);
+    ASSERT_EQ(0, touched);
+    PASS();
+}
+
+/* Sans cible : diffusion à toutes les sessions actives, dosage mémorisé pour
+   chacune de leurs machines respectives. */
+TEST apply_role_dosage_broadcast_touches_all_active_sessions(void)
+{
+    control_hello_t h1 = make_hello(101, 4, 0);
+    memset(h1.identity.machine_uid, 0x21, MACHINE_UID_BYTES);
+    int idx1 = control_registry_register(1, "203.0.113.10", &h1);
+    ASSERT(idx1 >= 0);
+
+    control_hello_t h2 = make_hello(102, 4, 1);
+    memset(h2.identity.machine_uid, 0x22, MACHINE_UID_BYTES);
+    int idx2 = control_registry_register(2, "203.0.113.20", &h2);
+    ASSERT(idx2 >= 0);
+
+    int touched = control_registry_apply_role_dosage(NULL, 1);
+    ASSERT(touched >= 2); /* au moins ces deux-là -- d'autres tests peuvent laisser des sessions actives */
+
+    ASSERT_EQ(1, control_registry_desired_pruner_forks(h1.identity.machine_uid));
+    ASSERT_EQ(1, control_registry_desired_pruner_forks(h2.identity.machine_uid));
+
+    uint8_t cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx1, &cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("config pruner_forks 1", line);
+    ASSERT_EQ(0, control_registry_wait_command(idx1, &cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("configApply", line);
+
+    control_registry_unregister(idx1);
+    control_registry_unregister(idx2);
+    PASS();
+}
+
+/* Chaîne vide traitée comme "pas de cible" (diffusion), pas comme une cible
+   littérale introuvable -- même convention que target == NULL. */
+TEST apply_role_dosage_empty_target_string_broadcasts(void)
+{
+    control_hello_t h = make_hello(103, 2, 0);
+    memset(h.identity.machine_uid, 0x23, MACHINE_UID_BYTES);
+    int idx = control_registry_register(1, "203.0.113.10", &h);
+    ASSERT(idx >= 0);
+
+    int touched = control_registry_apply_role_dosage("", 5);
+    ASSERT(touched >= 1);
+    ASSERT_EQ(5, control_registry_desired_pruner_forks(h.identity.machine_uid));
+
+    control_registry_unregister(idx);
+    PASS();
+}
+
+/* Le point délicat : une machine touchée par clientsRoles qui se
+   RECONNECTE (nouveau client_uid, même machine_uid -- comme un redémarrage de
+   processus client) doit retrouver son dosage pré-posté dans sa toute
+   nouvelle file, sans commande rejouée -- même mécanisme que la pause. */
+TEST desired_pruner_forks_applied_on_reconnect_with_new_client_uid(void)
+{
+    control_hello_t h1 = make_hello(104, 4, 0);
+    memset(h1.identity.machine_uid, 0x24, MACHINE_UID_BYTES);
+    memset(h1.identity.client_uid, 0x01, CLIENT_UID_BYTES);
+    int idx1 = control_registry_register(1, "203.0.113.10", &h1);
+    ASSERT(idx1 >= 0);
+
+    char client_uid_hex[2 * CLIENT_UID_BYTES + 1];
+    client_identity_hex_encode(h1.identity.client_uid, CLIENT_UID_BYTES, client_uid_hex, sizeof(client_uid_hex));
+    ASSERT_EQ(1, control_registry_apply_role_dosage(client_uid_hex, 3));
+    control_registry_unregister(idx1);
+
+    /* Redémarrage simulé : même machine_uid, client_uid DIFFÉRENT (nonce de
+       session, régénéré à chaque lancement de processus, cf. client_identity.h). */
+    control_hello_t h2 = make_hello(105, 4, 0);
+    memcpy(h2.identity.machine_uid, h1.identity.machine_uid, MACHINE_UID_BYTES);
+    memset(h2.identity.client_uid, 0x02, CLIENT_UID_BYTES);
+    int idx2 = control_registry_register(2, "203.0.113.10", &h2);
+    ASSERT(idx2 >= 0);
+
+    uint8_t cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx2, &cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("config pruner_forks 3", line);
+    ASSERT_EQ(0, control_registry_wait_command(idx2, &cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("configApply", line);
+
+    control_registry_unregister(idx2);
+    PASS();
+}
+
+/* Pause désirée ET dosage désiré coexistent dans la même file toute neuve --
+   ni l'un ni l'autre n'écrase le premier posté. */
+TEST desired_pause_and_desired_role_coexist_on_registration(void)
+{
+    control_hello_t h1 = make_hello(106, 4, 0);
+    memset(h1.identity.machine_uid, 0x25, MACHINE_UID_BYTES);
+    memset(h1.identity.client_uid, 0x03, CLIENT_UID_BYTES);
+    int idx1 = control_registry_register(1, "203.0.113.10", &h1);
+    ASSERT(idx1 >= 0);
+    char client_uid_hex[2 * CLIENT_UID_BYTES + 1];
+    client_identity_hex_encode(h1.identity.client_uid, CLIENT_UID_BYTES, client_uid_hex, sizeof(client_uid_hex));
+    ASSERT_EQ(1, control_registry_apply_role_dosage(client_uid_hex, 1));
+    control_registry_unregister(idx1);
+
+    control_registry_broadcast_command(CTRL_COMMAND, "pause");
+
+    control_hello_t h2 = make_hello(107, 4, 0);
+    memcpy(h2.identity.machine_uid, h1.identity.machine_uid, MACHINE_UID_BYTES);
+    memset(h2.identity.client_uid, 0x04, CLIENT_UID_BYTES);
+    int idx2 = control_registry_register(2, "203.0.113.10", &h2);
+    ASSERT(idx2 >= 0);
+
+    uint8_t cmd = 0;
+    char line[64] = {0};
+    ASSERT_EQ(0, control_registry_wait_command(idx2, &cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("pause", line);
+    ASSERT_EQ(0, control_registry_wait_command(idx2, &cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("config pruner_forks 1", line);
+    ASSERT_EQ(0, control_registry_wait_command(idx2, &cmd, line, sizeof(line), 200));
+    ASSERT_STR_EQ("configApply", line);
+
+    control_registry_unregister(idx2);
+    control_registry_broadcast_command(CTRL_COMMAND, "resume");
+    PASS();
+}
+
 /* ---------- touch ---------------------------------------------------------*/
 
 TEST touch_updates_last_activity(void)
@@ -1098,6 +1270,14 @@ SUITE(control_registry_suite)
     RUN_TEST(broadcast_pause_sets_desired_state_for_future_registrations);
     RUN_TEST(broadcast_resume_clears_desired_state_for_future_registrations);
     RUN_TEST(clients_cmd_pause_resume_also_update_desired_state);
+
+    RUN_TEST(desired_pruner_forks_defaults_to_absent);
+    RUN_TEST(apply_role_dosage_targeted_posts_config_then_configapply);
+    RUN_TEST(apply_role_dosage_unknown_target_touches_nothing);
+    RUN_TEST(apply_role_dosage_broadcast_touches_all_active_sessions);
+    RUN_TEST(apply_role_dosage_empty_target_string_broadcasts);
+    RUN_TEST(desired_pruner_forks_applied_on_reconnect_with_new_client_uid);
+    RUN_TEST(desired_pause_and_desired_role_coexist_on_registration);
 
     RUN_TEST(touch_updates_last_activity);
     RUN_TEST(touch_out_of_range_is_noop);

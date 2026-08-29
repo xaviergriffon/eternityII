@@ -271,6 +271,21 @@ TEST control_command_allowed_accepts_lifecycle_commands(void)
     PASS();
 }
 
+/* clientsRoles (PR3, docs/conception/pilotage_type_client.md) : rejoint la
+   liste blanche relayable, même famille que clientsCommand/clientsCmd -- un
+   seul point à toucher (control_command_classify) pour que le contrôle
+   d'accès HTTP (needs_auth) et la vérification client-side (etii_control.c)
+   la reconnaissent. */
+TEST control_command_allowed_accepts_clients_roles(void)
+{
+    ASSERT_EQ_FMT(1, control_command_allowed("clientsRoles"), "%d");
+    /* Avec argument : seul le premier mot compte. */
+    ASSERT_EQ_FMT(1, control_command_allowed("clientsRoles --to jetson-1 2"), "%d");
+    ASSERT_EQ_FMT(0, control_command_privileged("clientsRoles"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("clientsRoles"), "%d");
+    PASS();
+}
+
 TEST control_command_allowed_rejects_others(void)
 {
     ASSERT_EQ_FMT(0, control_command_allowed("exit"), "%d");
@@ -345,7 +360,7 @@ TEST control_command_allowed_and_privileged_are_disjoint(void)
 {
     static const char *const allowed_names[] = {
         "pause", "resume", "limit", "maxStockByThread", "prunerBatch", "prunerDfsBudget",
-        "clientsCommand", "clientsCmd", "clientsWork",
+        "clientsCommand", "clientsCmd", "clientsRoles", "clientsWork",
         "start", "stopForks", "configApply", "config", "configSave"
     };
     static const char *const privileged_names[] = { "restore", "backup" };
@@ -424,6 +439,7 @@ SUITE(control_protocol_suite)
     RUN_TEST(control_stats_decode_rejects_short_buffer);
     RUN_TEST(control_command_allowed_accepts_whitelist);
     RUN_TEST(control_command_allowed_accepts_lifecycle_commands);
+    RUN_TEST(control_command_allowed_accepts_clients_roles);
     RUN_TEST(control_command_allowed_rejects_others);
     RUN_TEST(control_command_allowed_handles_null);
     RUN_TEST(control_command_privileged_accepts_whitelist);
