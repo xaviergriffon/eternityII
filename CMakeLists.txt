@@ -114,6 +114,7 @@ set(PROD_SRCS
     src/app/control_registry.c
     src/app/known_clients_registry.c
     src/app/client_config.c
+    src/app/server_config.c
     src/app/app_runtime.c
     src/app/fork_gate.c
     src/app/fork_orchestrator.c
@@ -216,6 +217,7 @@ set(TEST_MODULES
     src/core/core_static_variables.c
     src/app/app_static_variables.c
     src/app/client_config.c
+    src/app/server_config.c
     src/app/app_runtime.c
     src/app/etii_control.c
     src/app/fork_gate.c
@@ -246,6 +248,7 @@ set(TEST_SUITES_COMMON
     tests/ui/test_logger.c
     tests/app/test_app_static_variables.c
     tests/app/test_client_config.c
+    tests/app/test_server_config.c
     tests/app/test_app_runtime.c
     tests/app/test_etii_control.c
     tests/app/test_fork_gate.c
@@ -326,6 +329,7 @@ add_executable(eternityII16 EXCLUDE_FROM_ALL
     src/app/control_registry.c
     src/app/known_clients_registry.c
     src/app/client_config.c
+    src/app/server_config.c
     src/app/app_runtime.c
     src/app/fork_gate.c
     src/app/fork_orchestrator.c

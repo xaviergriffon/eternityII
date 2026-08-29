@@ -262,35 +262,41 @@ TEST help_interpreter_output_survives_past_log_line_max(void)
 }
 
 /*
- * config/configSave sont masquées côté SERVEUR (ni listées dans l'aide, ni
- * exécutables) : voir command_is_client_only, command_lines.c. Exécutées
- * côté client/pruner (server=0), elles fonctionnent normalement -- elles
- * agiraient sinon sur les globales du SERVEUR (NB_THREADS y désigne le pool
- * de connexions, pas un nombre de forks), ce qui serait trompeur plutôt
- * qu'un no-op inoffensif comme les commandes `*(serveur)*` à l'inverse.
+ * config/configSave sont désormais disponibles dans les DEUX rôles (voir
+ * command_is_client_only, command_lines.c) : leurs interpréteurs branchent
+ * eux-mêmes sur `server` -- configuration SERVEUR (server_config.h) d'un
+ * côté, configuration CLIENT (client_config.h) de l'autre. Seule la forme
+ * "config <clé> <valeur>" reste refusée côté serveur (pas de configuration
+ * "en préparation" à appliquer à chaud là-bas) ; start/stopForks/configApply
+ * restent, eux, masquées côté serveur (cycle de vie de fils CLIENT).
  */
-TEST help_hides_config_commands_on_server_only(void)
+TEST help_shows_config_commands_in_both_roles(void)
 {
     int saved_server = server;
     char out[16384];
 
     server = 0;
     ASSERT_EQ_FMT(0, help_format_topic("config", out, sizeof out), "%d");
+    ASSERT_EQ_FMT(0, help_format_topic("configSave", out, sizeof out), "%d");
     ASSERT_EQ_FMT(0, help_format_general(out, sizeof out), "%d");
     ASSERT(strstr(out, "config") != NULL);
 
     server = 1;
-    ASSERT_EQ_FMT(-1, help_format_topic("config", out, sizeof out), "%d");
-    ASSERT_EQ_FMT(-1, help_format_topic("configSave", out, sizeof out), "%d");
+    ASSERT_EQ_FMT(0, help_format_topic("config", out, sizeof out), "%d");
+    ASSERT_EQ_FMT(0, help_format_topic("configSave", out, sizeof out), "%d");
     ASSERT_EQ_FMT(0, help_format_general(out, sizeof out), "%d");
-    ASSERT(strstr(out, "config") == NULL);
-    ASSERT(strstr(out, "configSave") == NULL);
+    ASSERT(strstr(out, "config") != NULL);
+    ASSERT(strstr(out, "configSave") != NULL);
+    /* start/stopForks/configApply, eux, restent masquées côté serveur. */
+    ASSERT_EQ_FMT(-1, help_format_topic("start", out, sizeof out), "%d");
+    ASSERT_EQ_FMT(-1, help_format_topic("stopForks", out, sizeof out), "%d");
+    ASSERT_EQ_FMT(-1, help_format_topic("configApply", out, sizeof out), "%d");
 
     server = saved_server;
     PASS();
 }
 
-TEST do_command_line_config_is_masked_on_server_only(void)
+TEST do_command_line_config_bare_works_on_server_but_key_value_is_rejected(void)
 {
     int saved_server = server;
 
@@ -300,42 +306,56 @@ TEST do_command_line_config_is_masked_on_server_only(void)
 
     server = 1;
     char cmd_server[] = "config";
-    /* Masquée : traitée exactement comme une commande inconnue. */
-    ASSERT_EQ_FMT(-1, run_command_quiet(cmd_server), "%d");
+    /* Sans argument : affiche la configuration SERVEUR effective. */
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd_server), "%d");
+
+    char cmd_server_kv[] = "config nb_threads 40";
+    /* Avec <clé> <valeur> : refusée côté serveur. */
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd_server_kv), "%d");
 
     server = saved_server;
     PASS();
 }
 
-/* configSave écrit réellement un fichier : client_config_file_path est
-   redirigé vers un chemin temporaire pour ne rien laisser dans le dépôt, et
-   pour distinguer "masquée, rien écrit" de "exécutée, fichier ré-écrit". */
-TEST do_command_line_config_save_is_masked_on_server_only(void)
+/* configSave écrit réellement un fichier, des deux côtés -- client_config_file_path
+   et server_config_file_path sont chacun redirigés vers un chemin temporaire
+   pour ne rien laisser dans le dépôt. */
+TEST do_command_line_config_save_writes_client_or_server_file(void)
 {
     int saved_server = server;
-    const char *saved_path = client_config_file_path;
+    const char *saved_client_path = client_config_file_path;
+    const char *saved_server_path = server_config_file_path;
 
-    char path[] = "/tmp/etii_cmd_configsave_XXXXXX";
-    int fd = mkstemp(path);
-    ASSERT(fd >= 0);
-    close(fd);
-    client_config_file_path = path;
+    char client_path[] = "/tmp/etii_cmd_configsave_client_XXXXXX";
+    int fd1 = mkstemp(client_path);
+    ASSERT(fd1 >= 0);
+    close(fd1);
+    client_config_file_path = client_path;
+
+    char server_path[] = "/tmp/etii_cmd_configsave_server_XXXXXX";
+    int fd2 = mkstemp(server_path);
+    ASSERT(fd2 >= 0);
+    close(fd2);
+    server_config_file_path = server_path;
 
     server = 0;
     char cmd_client[] = "configSave";
     ASSERT_EQ_FMT(0, run_command_quiet(cmd_client), "%d");
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(client_path, "r");
     ASSERT(f != NULL);
     fclose(f);
 
-    unlink(path);
     server = 1;
     char cmd_server[] = "configSave";
-    ASSERT_EQ_FMT(-1, run_command_quiet(cmd_server), "%d");
-    FILE *f2 = fopen(path, "r");
-    ASSERT(f2 == NULL); /* masquée : rien n'a été écrit */
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd_server), "%d");
+    FILE *f2 = fopen(server_path, "r");
+    ASSERT(f2 != NULL);
+    fclose(f2);
 
-    client_config_file_path = saved_path;
+    unlink(client_path);
+    unlink(server_path);
+    client_config_file_path = saved_client_path;
+    server_config_file_path = saved_server_path;
     server = saved_server;
     PASS();
 }
@@ -2396,12 +2416,13 @@ TEST admin_apply_remote_command_configsave_writes_file(void)
     PASS();
 }
 
-/* Sur un SERVEUR (server == 1), les cinq commandes de cycle de vie sont
+/* Sur un SERVEUR (server == 1), "start"/"stopForks"/"configApply" restent
    refusées : POST /api/v1/command (seul appelant HTTP de cette fonction)
-   n'est atteignable que depuis runserver, où "config nb_forks <n>" +
-   "configApply" agiraient réellement sur NB_THREADS/childrens_pid du
-   SERVEUR (taille du pool de connexions) sans ce garde-fou -- même
-   raisonnement que command_is_client_only pour la console. */
+   n'est atteignable que depuis runserver, où elles agiraient sur un
+   orchestrateur qu'aucune boucle ne consomme jamais côté serveur -- même
+   raisonnement que command_is_client_only pour la console.
+   "config nb_forks 2" (forme <clé> <valeur>) reste aussi refusée : le serveur
+   n'a pas de configuration "en préparation" à appliquer à chaud. */
 TEST admin_apply_remote_command_lifecycle_forbidden_on_server(void)
 {
     fork_orchestrator_reset();
@@ -2411,9 +2432,7 @@ TEST admin_apply_remote_command_lifecycle_forbidden_on_server(void)
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("start"), "%d");
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("stopForks"), "%d");
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("configApply"), "%d");
-    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("config"), "%d");
     ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("config nb_forks 2"), "%d");
-    ASSERT_EQ_FMT(ADMIN_CMD_FORBIDDEN, admin_apply_remote_command("configSave"), "%d");
 
     /* L'orchestrateur n'a subi AUCUNE transition : toujours WAITING_CONFIG. */
     orch_state_t state;
@@ -2422,6 +2441,35 @@ TEST admin_apply_remote_command_lifecycle_forbidden_on_server(void)
 
     server = saved_server;
     fork_orchestrator_reset();
+    PASS();
+}
+
+/* "config" (sans argument) et "configSave" fonctionnent désormais sur un
+   SERVEUR : ils affichent/écrivent la configuration SERVEUR
+   (server_config.h), pas la configuration client/fork_orchestrator -- voir
+   config_interpreter/admin_remote_config, command_lines.c. */
+TEST admin_apply_remote_command_config_bare_and_save_work_on_server(void)
+{
+    int saved_server = server;
+    const char *saved_path = server_config_file_path;
+    server = 1;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("config"), "%d");
+
+    char path[] = "/tmp/etii_admin_server_configsave_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+    server_config_file_path = path;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("configSave"), "%d");
+    FILE *f = fopen(path, "r");
+    ASSERT(f != NULL);
+    fclose(f);
+
+    unlink(path);
+    server_config_file_path = saved_path;
+    server = saved_server;
     PASS();
 }
 
@@ -2997,9 +3045,9 @@ SUITE(command_lines_suite)
     RUN_TEST(help_format_general_lists_categories_and_aliases);
     RUN_TEST(help_format_topic_command_and_category);
     RUN_TEST(help_interpreter_output_survives_past_log_line_max);
-    RUN_TEST(help_hides_config_commands_on_server_only);
-    RUN_TEST(do_command_line_config_is_masked_on_server_only);
-    RUN_TEST(do_command_line_config_save_is_masked_on_server_only);
+    RUN_TEST(help_shows_config_commands_in_both_roles);
+    RUN_TEST(do_command_line_config_bare_works_on_server_but_key_value_is_rejected);
+    RUN_TEST(do_command_line_config_save_writes_client_or_server_file);
     RUN_TEST(command_canonical_name_resolves_aliases_and_case);
     RUN_TEST(do_command_line_case_insensitive_and_alias_dispatch);
     RUN_TEST(do_command_line_expand_requires_arg);
@@ -3106,6 +3154,7 @@ SUITE(command_lines_suite)
 #endif // WITH_CUDA
     RUN_TEST(admin_apply_remote_command_configsave_writes_file);
     RUN_TEST(admin_apply_remote_command_lifecycle_forbidden_on_server);
+    RUN_TEST(admin_apply_remote_command_config_bare_and_save_work_on_server);
     RUN_TEST(admin_apply_remote_command_lifecycle_allowed_on_client);
     RUN_TEST(admin_apply_remote_command_lifecycle_does_not_disturb_external_strtok);
 

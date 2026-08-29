@@ -51,7 +51,8 @@ static const cli_help_topic_t cli_topics[] = {
 	  "les connexions de travail PLUS une connexion de contrôle par machine cliente.\n"
 	  "Options utiles : --expand-level <n> (pré-expansion anti-famine du stock au\n"
 	  "démarrage), --http-port <n> (API REST d'administration sur 127.0.0.1),\n"
-	  "--http-token-file <chemin> (authentifie restore/backup sur cette API)." },
+	  "--http-token-file <chemin> (authentifie restore/backup sur cette API),\n"
+	  "--config-file <chemin> (persiste toutes les options de démarrage)." },
 	{ "client",
 	  "client [serveur] [nb_threads] [max_stock] [pieces.csv]",
 	  "Client de recherche : explore l'arbre et renvoie ses résultats au serveur.",
@@ -140,14 +141,27 @@ static const cli_help_topic_t cli_topics[] = {
 	  "(avertissement), la recherche continue normalement. Ignorée en mode serveur." },
 	{ "--config-file",
 	  "--config-file <chemin>",
-	  "Client/pruner : fichier de configuration clé=valeur (défaut ./eternityii-client.conf).",
-	  "Lu au démarrage (avant tout fork), pré-remplit les valeurs par défaut des\n"
-	  "positions non fournies en ligne de commande — priorité CLI > fichier >\n"
-	  "défauts. Clés reconnues : nb_forks, pruner_forks, server_host, parts_file,\n"
-	  "max_stock_by_thread, limit, pruner_batch. Fichier absent ou illisible :\n"
-	  "pas une erreur (valeurs par défaut/CLI utilisées). Écrit par la commande\n"
-	  "console configSave (écriture atomique .tmp puis rename) ; affiché par\n"
-	  "la commande config." },
+	  "Fichier de configuration clé=valeur, propre à chaque mode (client/pruner ou serveur).",
+	  "Une seule option pour les deux : au plus un mode s'exécute par process. Lu au\n"
+	  "démarrage (avant tout fork), pré-remplit les valeurs par défaut des options non\n"
+	  "fournies en ligne de commande — priorité CLI > fichier > défauts.\n"
+	  "Client/pruner (défaut ./eternityii-client.conf) : clés nb_forks, pruner_forks,\n"
+	  "server_host, parts_file, max_stock_by_thread, limit, pruner_batch, dfs_budget.\n"
+	  "Écrit par la commande console configSave (écriture atomique .tmp puis rename) ;\n"
+	  "affiché par la commande config ; appliqué à chaud via configApply — cf. leurs\n"
+	  "aides respectives. Suit l'orchestrateur de démarrage différé (cf. help client) :\n"
+	  "présent au démarrage -> décompte de 5 s ; absent -> attente d'un start/config.\n"
+	  "Serveur (défaut ./eternityii-server.conf) : clés nb_threads, parts_file,\n"
+	  "expand_level, expand_max_stock, expand_max_levels, http_port, http_token_file,\n"
+	  "stock_files, stock_max_ram, stock_spill_dir, rebalance_budget, tcp_timeout,\n"
+	  "auto_roles, stop_on_solution, headless. Lu une seule fois, de façon synchrone,\n"
+	  "avant le démarrage du serveur -- pas d'orchestrateur différé, pas de configApply\n"
+	  "(pas de configuration \"en préparation\" à appliquer à chaud) ; config/configSave\n"
+	  "fonctionnent en revanche côté serveur (affichage/persistance de la config\n"
+	  "effective), mais \"config <clé> <valeur>\" y est refusée.\n"
+	  "Dans les deux cas : fichier absent ou illisible -- pas une erreur (valeurs par\n"
+	  "défaut/CLI utilisées) ; une ligne à clé inconnue ou valeur invalide est\n"
+	  "journalisée (avertissement) puis ignorée, le chargement continue." },
 	{ "--pruner-forks",
 	  "--pruner-forks <n>",
 	  "Client/pruner : nombre de forks affectés au CONTRÔLE du stock parmi nb_forks.",

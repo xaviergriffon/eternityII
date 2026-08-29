@@ -17,6 +17,7 @@
 #include "app/etii_control.h"
 #include "app/app_runtime.h"
 #include "app/client_config.h"
+#include "app/server_config.h"
 #include "app/fork_orchestrator.h"
 #include "net/http_server.h"
 #include "net/local_socket.h"
@@ -26,7 +27,7 @@
 #include "net/ipc_protocol.h"
 
 void handle_client(int argc, const char *argv[]);
-void handle_server(int argc, const char *argv[]);
+void handle_server(int argc, const char *argv[], server_config_t *startup_cfg);
 void handle_test(const char *arg);
 
 /**
@@ -54,6 +55,31 @@ int main(int argc, const char *argv[]) {
         print_cli_help();
         exit(EXIT_SUCCESS);
     }
+    // --config-file (serveur) : chargé ICI, avant les blocs ci-dessous qui
+    // appliquent HTTP_TOKEN_FILE/HTTP_PORT/stock_files/stock_max_ram de façon
+    // INCONDITIONNELLE, avant même le dispatch de mode par argv[1] — priorité
+    // CLI > fichier > défauts, même convention que le client (cf.
+    // client_config_load dans handle_client). server_config_apply_pre_dispatch
+    // applique ici toutes les clés SAUF les deux positionnelles (nb_threads,
+    // parts_file), qui ne peuvent être résolues qu'après le parsing
+    // positionnel propre à handle_server (cf. server_config_apply_to_globals,
+    // appelée là-bas). Un fichier absent n'est jamais une erreur (cf.
+    // server_config_load). server_startup_cfg est passée à handle_server puis
+    // libérée là-bas, une fois ses deux clés positionnelles consommées.
+    int server_mode_requested = (argc >= 2 && argv[1] != NULL && strcmp(argv[1], "server") == 0);
+    server_config_t server_startup_cfg;
+    server_config_init(&server_startup_cfg);
+    int server_config_loaded_at_boot = 0;
+    if (server_mode_requested) {
+        server_config_loaded_at_boot =
+            (server_config_load(server_config_file_path, &server_startup_cfg) == SERVER_CONFIG_LOADED);
+        server_config_apply_pre_dispatch(&server_startup_cfg);
+        if (server_config_loaded_at_boot) {
+            log_info("option : configuration serveur chargée depuis \"%s\" (--config-file)\n",
+                      server_config_file_path);
+        }
+    }
+
     if (stop_on_solution) {
         log_info("option : arrêt à la première solution activé (--stop-on-solution)\n");
     }
@@ -142,7 +168,7 @@ int main(int argc, const char *argv[]) {
             }
             handle_client(argc, argv);
         } else if (strcmp("server", argv[1]) == 0) {
-            handle_server(argc, argv);
+            handle_server(argc, argv, &server_startup_cfg);
         } else if (strcmp("help", argv[1]) == 0) {
             // help [sujet] : aide générale, ou détail d'un mode/option. Un
             // sujet inconnu est une erreur d'argument (rappel de l'aide via
@@ -337,10 +363,16 @@ void handle_client(int argc, const char *argv[]) {
  *
  * Cette fonction initialise les fils, les signaux, les compteurs, les vérifications, la console, et exécute le serveur.
  *
- * @param argc Le nombre d'arguments de la ligne de commande.
- * @param argv Un tableau de chaînes terminées par un caractère nul représentant les arguments de la ligne de commande.
+ * @param argc        Le nombre d'arguments de la ligne de commande.
+ * @param argv        Un tableau de chaînes terminées par un caractère nul représentant les arguments de la ligne de commande.
+ * @param startup_cfg Configuration serveur déjà chargée par `main()` (--config-file) —
+ *                     ses clés positionnelles (`nb_threads`/`parts_file`) sont appliquées
+ *                     ici une fois le parsing positionnel CLI connu ; toutes les autres
+ *                     clés ont déjà été appliquées par `main()` avant l'appel
+ *                     (cf. `server_config_apply_pre_dispatch`). Libérée en sortie de
+ *                     cette fonction : `main()` n'y touche plus après cet appel.
  */
-void handle_server(int argc, const char *argv[]) {
+void handle_server(int argc, const char *argv[], server_config_t *startup_cfg) {
     log_info("server\n");
     server = 1;
     NB_THREADS = 80;
@@ -350,6 +382,7 @@ void handle_server(int argc, const char *argv[]) {
     // accepte les connexions mais ne les sert JAMAIS (stock figé, client inactif).
     // On valide donc l'argument et on récupère le cas du fichier passé à sa place.
     int file_arg = -1; // indice de l'argument « fichier de pièces », si fourni
+    int cli_gave_nb_threads = 0; // vrai seulement si argv[2] a été accepté comme NOMBRE de threads
     if (argc >= 3) {
         log_info("arg 2 : %s\n", argv[2]);
         switch (parse_server_thread_arg(argv[2], NB_THREADS, &NB_THREADS)) {
@@ -369,10 +402,17 @@ void handle_server(int argc, const char *argv[]) {
             if (argc >= 4) file_arg = 3;
             break;
         default: // SERVER_ARG_AS_COUNT
+            cli_gave_nb_threads = 1;
             if (argc >= 4) file_arg = 3;
             break;
         }
     }
+    // --config-file (serveur) : les deux seules clés qui restaient à appliquer
+    // (nb_threads/parts_file, positionnelles) — le reste a déjà été appliqué
+    // par main() avant l'appel, cf. server_config_apply_pre_dispatch. Priorité
+    // CLI > fichier > défauts : n'écrase jamais une valeur que la CLI a fournie.
+    server_config_apply_to_globals(startup_cfg, cli_gave_nb_threads, file_arg >= 0);
+    server_config_free(startup_cfg);
     log_info("Nb threads : %i\n", NB_THREADS);
     init_childs();
     init_signals();

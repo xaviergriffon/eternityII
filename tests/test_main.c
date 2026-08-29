@@ -35,6 +35,7 @@ SUITE_EXTERN(console_suite);
 SUITE_EXTERN(etii_search_suite);
 SUITE_EXTERN(app_static_variables_suite);
 SUITE_EXTERN(client_config_suite);
+SUITE_EXTERN(server_config_suite);
 SUITE_EXTERN(etii_client_suite);
 SUITE_EXTERN(etii_server_suite);
 SUITE_EXTERN(control_registry_suite);
@@ -80,6 +81,7 @@ int main(int argc, char **argv)
     RUN_SUITE(etii_search_suite);
     RUN_SUITE(app_static_variables_suite);
     RUN_SUITE(client_config_suite);
+    RUN_SUITE(server_config_suite);
     RUN_SUITE(etii_client_suite);
     RUN_SUITE(etii_server_suite);
     RUN_SUITE(control_registry_suite);

@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -43,6 +43,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--auto-roles` | *(absente, désactivée)* | Active la politique automatique de dosage recherche/contrôle du parc — voir ci-dessous |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
 | `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
+| `--config-file CHEMIN` | `./eternityii-server.conf` | Fichier de configuration `clé = valeur`, lu une seule fois au démarrage — voir ci-dessous |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
 
 Exemples :
@@ -57,7 +58,56 @@ Exemples :
 ./eternityII server 80 --stock-max-ram 4096 --stock-spill-dir /var/lib/eternityii/spill data/pieces.csv
 ./eternityII server 80 --http-port 8080 data/pieces.csv
 ./eternityII server 80 --http-port 8080 --http-token-file /etc/eternityii/http-token data/pieces.csv
+./eternityII server --config-file /etc/eternityii/server.conf
 ```
+
+### Fichier de configuration serveur (`--config-file`)
+
+Comme le client (voir [Mode client](#mode-client) ci-dessous), le serveur peut lire
+au démarrage un fichier `clé = valeur` qui pré-remplit les options non fournies en
+ligne de commande — priorité **CLI > fichier > défauts**. Contrairement au client, le
+serveur n'a pas d'orchestrateur de démarrage différé : le fichier est lu une seule
+fois, de façon synchrone, avant que le serveur ne démarre réellement (pas de
+décompte, pas de `configApply` — le serveur n'a pas de configuration "en
+préparation" à appliquer à chaud, celle-ci reste propre au mode client/pruner).
+Les commandes console `config` (affichage) et `configSave` (persistance), elles,
+fonctionnent aussi côté serveur — voir [Console interactive](console.md#général).
+
+```sh
+./eternityII server --config-file /etc/eternityii/server.conf
+```
+
+Chemin par défaut `./eternityii-server.conf` (même convention que
+`./eternityii-client.conf`, `--config-file` est la même option pour les deux modes —
+un seul mode s'exécute par process). Fichier absent ou illisible : jamais une erreur
+de démarrage, les valeurs par défaut/CLI s'appliquent normalement.
+
+Toutes les options de démarrage du serveur sont couvertes, avec les mêmes clés que
+les options CLI correspondantes (sans les tirets) :
+
+```
+nb_threads         = 40
+parts_file          = data/pieces.csv
+expand_level       = 3
+expand_max_stock   = 500000
+expand_max_levels  = 6
+http_port          = 8080
+http_token_file    = /etc/eternityii/http-token
+stock_files        = 32
+stock_max_ram      = 4096
+stock_spill_dir    = /var/lib/eternityii/spill
+rebalance_budget   = 5000
+tcp_timeout        = 20
+auto_roles         = 1
+stop_on_solution   = 0
+headless           = 1
+```
+
+`nb_threads` et `parts_file` correspondent aux paramètres positionnels
+(`server [nb_threads] [pieces.csv]`) ; toutes les autres clés correspondent à
+l'option CLI de même nom (`stop_on_solution`/`headless`/`auto_roles` valent `0`
+ou `1`). Une ligne à clé inconnue ou à valeur invalide est journalisée (avertissement)
+puis ignorée, le chargement continue avec les lignes suivantes.
 
 ### Maîtrise de la charge serveur (`--stock-files`, `--rebalance-budget`, `--tcp-timeout`)
 

@@ -20,6 +20,7 @@
 #include "net/control_protocol.h"
 #include "core/best_board.h"
 #include "app/client_config.h"
+#include "app/server_config.h"
 #include "app/fork_orchestrator.h"
 #include "app/etii_server.h"
 
@@ -160,22 +161,34 @@ static command_description commands[NB_COMMANDS] = {
      "Le contenu n'est pas perdu : en mode ANSI il part dans le scrollback natif du\n"
      "terminal (molette / Cmd+↑), en mode ncurses il reste accessible via PgUp.", NULL},
     {"config", config_interpreter, 0, CMD_CAT_GENERAL, 0, "config [clé valeur]",
-     "affiche ou prépare la configuration (nb_forks, serveur, fichier de pièces, ...)",
-     "Sans argument : affiche l'état de l'orchestrateur (WAITING_CONFIG/COUNTDOWN/\n"
-     "CONFIGURING/RUNNING/...), la configuration EFFECTIVE (celle réellement en\n"
-     "vigueur) et la configuration EN PRÉPARATION. N'annule pas le décompte.\n"
-     "Avec <clé> <valeur> : écrit dans la configuration en préparation (clés :\n"
-     "nb_forks, server_host, parts_file, max_stock_by_thread, limit, pruner_batch,\n"
-     "dfs_budget)\n"
-     "et ANNULE DÉFINITIVEMENT le décompte d'auto-démarrage — `start` consomme\n"
-     "toujours la configuration EFFECTIVE, pas celle en préparation.", NULL},
+     "affiche (et, hors serveur, prépare) la configuration (nb_forks, serveur, fichier de pièces, ...)",
+     "Client/pruner, sans argument : affiche l'état de l'orchestrateur\n"
+     "(WAITING_CONFIG/COUNTDOWN/CONFIGURING/RUNNING/...), la configuration\n"
+     "EFFECTIVE (celle réellement en vigueur) et la configuration EN PRÉPARATION.\n"
+     "N'annule pas le décompte. Client/pruner, avec <clé> <valeur> : écrit dans la\n"
+     "configuration en préparation (clés : nb_forks, server_host, parts_file,\n"
+     "max_stock_by_thread, limit, pruner_batch, dfs_budget) et ANNULE\n"
+     "DÉFINITIVEMENT le décompte d'auto-démarrage — `start` consomme toujours la\n"
+     "configuration EFFECTIVE, pas celle en préparation.\n"
+     "Serveur, sans argument : affiche la configuration EFFECTIVE du serveur (clés :\n"
+     "nb_threads, parts_file, expand_level, expand_max_stock, expand_max_levels,\n"
+     "http_port, http_token_file, stock_files, stock_max_ram, stock_spill_dir,\n"
+     "rebalance_budget, tcp_timeout, auto_roles, stop_on_solution, headless).\n"
+     "Serveur, avec <clé> <valeur> : REFUSÉE — le serveur n'a pas de configuration\n"
+     "\"en préparation\" à appliquer à chaud (pas de `configApply` côté serveur) ;\n"
+     "éditer le fichier `--config-file` puis redémarrer reste le chemin pour une clé\n"
+     "sans commande console dédiée (voir `stockMaxRam`/`spill`/`rebalance`/\n"
+     "`leaseDuration`/`clientsRoles` pour celles qui en ont une).", NULL},
     {"configSave", config_save_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
-     "écrit la configuration effective (+ en préparation) dans le fichier de configuration",
-     "Écrit la configuration EFFECTIVE, avec toute valeur EN PRÉPARATION\n"
-     "(`config <clé> <valeur>`) superposée par-dessus — c'est ainsi qu'une\n"
-     "valeur préparée prend effet au prochain démarrage. Écriture atomique\n"
-     "(.tmp puis rename, comme « backup »). Fichier par défaut\n"
-     "./eternityii-client.conf (option --config-file <chemin>).", NULL},
+     "écrit la configuration effective dans le fichier de configuration",
+     "Client/pruner : écrit la configuration EFFECTIVE, avec toute valeur EN\n"
+     "PRÉPARATION (`config <clé> <valeur>`) superposée par-dessus — c'est ainsi\n"
+     "qu'une valeur préparée prend effet au prochain démarrage. Fichier par défaut\n"
+     "./eternityii-client.conf (option --config-file <chemin>).\n"
+     "Serveur : écrit la configuration EFFECTIVE du serveur telle quelle (pas de\n"
+     "configuration \"en préparation\" côté serveur). Fichier par défaut\n"
+     "./eternityii-server.conf (même option --config-file <chemin>).\n"
+     "Dans les deux cas : écriture atomique (.tmp puis rename, comme « backup »).", NULL},
     {"start", start_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
      "fork immédiat des process de recherche avec la configuration effective",
      "Sans effet si déjà en RUNNING (erreur explicite). Sinon, démarre immédiatement\n"
@@ -579,24 +592,57 @@ static const char *orch_state_name(orch_state_t s) {
 /**
  * @brief Interpréteur de `config` (sans argument) / `config <clé> <valeur>`.
  *
- * Sans argument : affiche l'état de l'orchestrateur (`fork_orchestrator_snapshot`),
- * la configuration EFFECTIVE (celle réellement en vigueur — voir
- * `client_config_capture_effective`, reflète aussi un `limit`/`maxStockByThread`/
- * `prunerBatch` déjà exécuté depuis cette même console) et la configuration
- * EN PRÉPARATION (`fork_orchestrator_format_staged_config`). N'annule pas le
- * décompte.
+ * Branche sur `server` (côté serveur, aucun équivalent positionnel) :
  *
- * Avec deux arguments (`strtok` — même convention que `limit`/`prunerBatch` :
- * un token par espace, pas de valeur contenant un espace) : synthétise une
- * ligne `clé = valeur` et la délègue à `fork_orchestrator_stage_config_line`
- * (réutilise `client_config_parse_line`, jamais de logique de validation
- * dupliquée) — écrit dans la configuration en préparation et annule
- * DÉFINITIVEMENT le décompte, seulement si la ligne est acceptée (une faute
- * de frappe ne doit pas faire perdre l'auto-démarrage). Un seul argument
- * (clé sans valeur) : `CMD_ERR_USAGE`.
+ * - SERVEUR, sans argument : affiche la configuration EFFECTIVE du serveur
+ *   (`server_config_capture_effective`/`server_config_format`) et le fichier
+ *   `--config-file` en vigueur. Pas d'état d'orchestrateur ni de
+ *   configuration "en préparation" — le serveur n'en a pas.
+ * - SERVEUR, avec `<clé> <valeur>` : refusée (`-1`) — le serveur n'a pas de
+ *   configuration "en préparation" à appliquer à chaud (`configApply` n'existe
+ *   pas côté serveur, cf. `command_is_client_only`) ; seule `configSave`
+ *   persiste la configuration EFFECTIVE actuelle. Éditer le fichier
+ *   `--config-file` puis redémarrer reste le chemin pour changer une valeur
+ *   qui n'a pas de commande console dédiée (`stockMaxRam`, `spill`,
+ *   `rebalance`, `leaseDuration`, `clientsRoles`, …).
+ * - CLIENT/PRUNER, sans argument : affiche l'état de l'orchestrateur
+ *   (`fork_orchestrator_snapshot`), la configuration EFFECTIVE (celle
+ *   réellement en vigueur — voir `client_config_capture_effective`, reflète
+ *   aussi un `limit`/`maxStockByThread`/`prunerBatch` déjà exécuté depuis
+ *   cette même console) et la configuration EN PRÉPARATION
+ *   (`fork_orchestrator_format_staged_config`). N'annule pas le décompte.
+ * - CLIENT/PRUNER, avec deux arguments (`strtok` — même convention que
+ *   `limit`/`prunerBatch` : un token par espace, pas de valeur contenant un
+ *   espace) : synthétise une ligne `clé = valeur` et la délègue à
+ *   `fork_orchestrator_stage_config_line` (réutilise `client_config_parse_line`,
+ *   jamais de logique de validation dupliquée) — écrit dans la configuration
+ *   en préparation et annule DÉFINITIVEMENT le décompte, seulement si la
+ *   ligne est acceptée (une faute de frappe ne doit pas faire perdre
+ *   l'auto-démarrage). Un seul argument (clé sans valeur) : `CMD_ERR_USAGE`.
  */
 int config_interpreter(void) {
     char *key = strtok(NULL, " ");
+
+    if (server) {
+        if (key != NULL) {
+            log_error("config : \"config <clé> <valeur>\" n'est pas supporté en mode serveur "
+                      "(pas de configuration \"en préparation\" à appliquer à chaud) -- éditez "
+                      "le fichier %s puis redémarrez, ou utilisez configSave pour figer l'état "
+                      "courant\n", server_config_file_path);
+            return -1;
+        }
+        server_config_t cfg;
+        server_config_capture_effective(&cfg);
+        char buf[1024];
+        server_config_format(&cfg, buf, sizeof(buf));
+        server_config_free(&cfg);
+
+        log_info("config : configuration effective (fichier : %s) :\n%s",
+                  server_config_file_path,
+                  buf[0] != '\0' ? buf : "  (aucune valeur)\n");
+        return 0;
+    }
+
     if (key != NULL) {
         char *value = strtok(NULL, " ");
         if (value == NULL) {
@@ -774,10 +820,29 @@ int config_apply_interpreter(void) {
 }
 
 /**
- * @brief Interpréteur de `configSave` : écrit la configuration client
- *        EFFECTIVE dans le fichier `--config-file` (écriture atomique).
+ * @brief Interpréteur de `configSave` : écrit la configuration EFFECTIVE
+ *        (serveur ou client, selon `server`) dans le fichier `--config-file`
+ *        (écriture atomique).
+ *
+ * Côté serveur : pas de configuration "en préparation" à superposer (aucun
+ * équivalent de `config <clé> <valeur>` là-bas) — `server_config_capture_effective`
+ * suffit seule.
  */
 int config_save_interpreter(void) {
+    if (server) {
+        server_config_t cfg;
+        server_config_capture_effective(&cfg);
+        int rc = server_config_save(server_config_file_path, &cfg);
+        server_config_free(&cfg);
+
+        if (rc == 0) {
+            log_info("configSave : configuration écrite dans \"%s\"\n", server_config_file_path);
+        } else {
+            log_error("configSave : échec de l'écriture dans \"%s\"\n", server_config_file_path);
+        }
+        return rc;
+    }
+
     client_config_t cfg;
     client_config_capture_effective(&cfg, g_client_server_host);
     // Superpose la configuration EN PRÉPARATION (config <clé> <valeur>) sur
@@ -1598,19 +1663,51 @@ static int admin_remote_clients_work(char *target) {
  *
  * `rest` est le reliquat de ligne laissé par `strtok_r` juste après le mot
  * "config" -- toujours un pointeur dans le tampon modifiable de l'appelant.
- * Sans argument : journalise l'état de l'orchestrateur, la configuration
- * effective et la configuration en préparation (même contenu que
- * `config_interpreter`), n'annule PAS le décompte. Avec "<clé> <valeur>"
- * (un seul token par valeur, même convention que `limit`/`prunerBatch`) :
- * écrit dans la configuration en préparation via
- * `fork_orchestrator_stage_config_line` et annule le décompte SEULEMENT si la
- * ligne est acceptée -- une commande mal formée ne doit pas coûter
- * l'auto-démarrage.
+ * En PRODUCTION, `POST /api/v1/command` n'est atteignable que côté serveur
+ * (`server` y vaut toujours 1) ; cette fonction branche néanmoins sur `server`
+ * comme `config_interpreter` (plutôt que de le supposer), pour rester
+ * testable dans les deux contextes et cohérente si jamais réutilisée
+ * ailleurs :
+ *
+ * - SERVEUR, sans argument : affiche la configuration SERVEUR effective
+ *   (`server_config_capture_effective`). Avec "<clé> <valeur>" : refusée
+ *   (`ADMIN_CMD_FORBIDDEN`) — le serveur n'a pas de configuration "en
+ *   préparation" à appliquer à chaud.
+ * - CLIENT/PRUNER, sans argument : journalise l'état de l'orchestrateur, la
+ *   configuration effective et la configuration en préparation (même contenu
+ *   que `config_interpreter`), n'annule PAS le décompte. Avec "<clé> <valeur>"
+ *   (un seul token par valeur, même convention que `limit`/`prunerBatch`) :
+ *   écrit dans la configuration en préparation via
+ *   `fork_orchestrator_stage_config_line` et annule le décompte SEULEMENT si
+ *   la ligne est acceptée -- une commande mal formée ne doit pas coûter
+ *   l'auto-démarrage.
  */
 static int admin_remote_config(char *rest) {
     while (rest != NULL && *rest == ' ') {
         rest++;
     }
+
+    if (server) {
+        if (rest == NULL || *rest == '\0') {
+            server_config_t cfg;
+            server_config_capture_effective(&cfg);
+            char buf[1024];
+            server_config_format(&cfg, buf, sizeof(buf));
+            server_config_free(&cfg);
+
+            log_info("config (API HTTP admin) : configuration effective (fichier : %s) :\n%s",
+                      server_config_file_path,
+                      buf[0] != '\0' ? buf : "  (aucune valeur)\n");
+            return ADMIN_CMD_OK;
+        }
+
+        log_error("config (API HTTP admin) : \"config <clé> <valeur>\" n'est pas supporté en mode "
+                  "serveur (pas de configuration \"en préparation\" à appliquer à chaud) -- éditez "
+                  "le fichier %s puis redémarrez, ou utilisez configSave pour figer l'état courant\n",
+                  server_config_file_path);
+        return ADMIN_CMD_FORBIDDEN;
+    }
+
     if (rest == NULL || *rest == '\0') {
         orch_state_t state;
         long countdown_remaining_ms;
@@ -1671,25 +1768,23 @@ static int admin_remote_config(char *rest) {
 }
 
 /**
- * @brief Les cinq commandes de cycle de vie des fils ("start",
- *        "stopForks", "configApply", "config", "configSave") agissent sur
- *        `fork_orchestrator`/`client_config`, qui ne veulent rien dire côté
+ * @brief "start"/"stopForks"/"configApply" agissent sur le cycle de vie de
+ *        fils CLIENT (`fork_orchestrator`), qui ne veut rien dire côté
  *        SERVEUR -- même raisonnement que `command_is_client_only` pour la
  *        console (voir sa doc), mais appliqué ICI parce que
  *        `admin_apply_remote_command` (contrairement à `do_command_line`) ne
  *        consulte jamais `command_is_client_only`. `POST /api/v1/command`
  *        (`src/net/http_server.c`, seul appelant de cette fonction en dehors
  *        des tests) n'est atteignable QUE depuis `runserver`
- *        (`src/app/etii_server.c`) : `server` y vaut donc toujours 1, et sans
- *        ce garde-fou "config nb_forks <n>" + "configApply" reçues par
- *        POST /api/v1/command corromprait réellement `NB_THREADS`/
- *        `childrens_pid`/… du SERVEUR (taille du pool de connexions, pas un
- *        nombre de forks) au lieu du no-op silencieux voulu.
+ *        (`src/app/etii_server.c`) : `server` y vaut donc toujours 1.
+ *
+ * "config"/"configSave" n'en font PLUS partie : `admin_remote_config`
+ * (ci-dessous) et `config_save_interpreter` branchent désormais eux-mêmes sur
+ * `server` — seule la forme "config <clé> <valeur>" reste refusée
+ * (`ADMIN_CMD_FORBIDDEN`, pas de configuration "en préparation" côté serveur).
  */
 static int admin_remote_command_is_client_only(const char *word) {
-    return strcmp(word, "config") == 0 ||
-           strcmp(word, "configSave") == 0 ||
-           strcmp(word, "start") == 0 ||
+    return strcmp(word, "start") == 0 ||
            strcmp(word, "stopForks") == 0 ||
            strcmp(word, "configApply") == 0;
 }
@@ -2344,18 +2439,23 @@ int min_interpreter(void) {
  * @return            Pointeur vers la commande canonique trouvée, ou NULL si inconnue.
  */
 /**
- * @brief `config`/`configSave`/`start` agissent sur la configuration/le cycle
- *        de vie CLIENT (client_config.h, fork_orchestrator.h) : exécutées
- *        côté SERVEUR, elles liraient/écriraient les globales du serveur
- *        (sans rapport avec cette configuration, ex. `NB_THREADS` y désigne
- *        la taille du pool de connexions, pas un nombre de forks) ou
- *        posteraient un événement à un orchestrateur qu'aucune boucle ne
- *        consomme jamais côté serveur (`fork_orchestrator_run` n'est appelée
- *        que par `handle_client`) — trompeur plutôt qu'un no-op inoffensif
- *        comme les commandes `server_only` à l'inverse (`clients`, …,
- *        harmless sur un client puisque `control_registry` y est toujours
- *        vide). D'où un masquage explicite (ni listées, ni exécutables, ni
- *        suggérées) plutôt qu'une simple annotation "[serveur]"/"[client]".
+ * @brief `start`/`stopForks`/`configApply` agissent sur le cycle de vie CLIENT
+ *        (fork_orchestrator.h) : exécutées côté SERVEUR, elles posteraient un
+ *        événement à un orchestrateur qu'aucune boucle ne consomme jamais là
+ *        (`fork_orchestrator_run` n'est appelée que par `handle_client`) —
+ *        trompeur plutôt qu'un no-op inoffensif comme les commandes
+ *        `server_only` à l'inverse (`clients`, …, harmless sur un client
+ *        puisque `control_registry` y est toujours vide). D'où un masquage
+ *        explicite (ni listées, ni exécutables, ni suggérées) plutôt qu'une
+ *        simple annotation "[serveur]"/"[client]".
+ *
+ * `config`/`configSave` n'ont PLUS besoin de ce masquage : leurs interpréteurs
+ * (`config_interpreter`/`config_save_interpreter`) branchent désormais
+ * eux-mêmes sur `server` — affichage/écriture de la configuration SERVEUR
+ * (`server_config.h`) d'un côté, configuration CLIENT (`client_config.h`) de
+ * l'autre. Seule la forme `config <clé> <valeur>` (préparation d'un
+ * changement à appliquer via `configApply`) reste refusée côté serveur, qui
+ * n'a pas de configuration "en préparation" à appliquer à chaud.
  *
  * Delibérément une liste de noms plutôt qu'un nouveau champ sur
  * `command_description` : la table `commands[]` compte ~50 entrées toutes
@@ -2364,9 +2464,7 @@ int min_interpreter(void) {
  * `-Wmissing-field-initializers` (actif sous `-Wextra -Werror`) se déclencher.
  */
 static int command_is_client_only(const command_description *command) {
-    return strcmp(command->command, "config") == 0 ||
-           strcmp(command->command, "configSave") == 0 ||
-           strcmp(command->command, "start") == 0 ||
+    return strcmp(command->command, "start") == 0 ||
            strcmp(command->command, "stopForks") == 0 ||
            strcmp(command->command, "configApply") == 0;
 }

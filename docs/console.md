@@ -39,9 +39,9 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `help [commande\|catégorie]` | Affiche l'aide générale, le détail d'une commande, ou une seule catégorie (alias : `?`) |
 | `exit` | Arrête proprement le programme (alias : `quit`) |
 | `clear` | Efface l'écran sans perdre le contenu — poussé dans le scrollback natif en ANSI, accessible via `PgUp` en ncurses (alias : `cls` ; raccourci : `Ctrl-L`) |
-| `config` *(client/pruner)* | Sans argument : affiche l'état de l'orchestrateur de démarrage différé (`WAITING_CONFIG`/`COUNTDOWN`/`CONFIGURING`/`RUNNING`/…, avec le temps restant avant auto-démarrage en `COUNTDOWN`), la configuration **effective** (`nb_forks`, `server_host`, `parts_file`, `max_stock_by_thread`, `limit`, `pruner_batch`, `dfs_budget` — reflète les globales courantes, y compris un `limit`/`maxStockByThread`/`prunerBatch`/`prunerDfsBudget` déjà exécuté depuis la console) et la configuration **en préparation**. N'annule pas le décompte |
-| `config <clé> <valeur>` *(client/pruner)* | Écrit `<clé> = <valeur>` dans la configuration **en préparation** (mêmes clés que le fichier `--config-file`) et **annule définitivement** le décompte d'auto-démarrage s'il était en cours — comme n'importe quelle frappe au clavier pendant le décompte, cf. plus bas. `start` (manuel ou déclenché par un décompte qui va à son terme) applique cette configuration en préparation aux globales AVANT de forker — pas besoin de redémarrer le process pour qu'une valeur préparée prenne effet |
-| `configSave` *(client/pruner)* | Écrit la configuration effective dans le fichier de configuration, avec toute valeur **en préparation** superposée par-dessus (écriture atomique `.tmp` puis `rename`, comme `backup`) — défaut `./eternityii-client.conf`, option `--config-file <chemin>`. C'est ainsi qu'une valeur préparée par `config <clé> <valeur>` finit par prendre effet, au prochain démarrage |
+| `config` | **Client/pruner**, sans argument : affiche l'état de l'orchestrateur de démarrage différé (`WAITING_CONFIG`/`COUNTDOWN`/`CONFIGURING`/`RUNNING`/…, avec le temps restant avant auto-démarrage en `COUNTDOWN`), la configuration **effective** (`nb_forks`, `server_host`, `parts_file`, `max_stock_by_thread`, `limit`, `pruner_batch`, `dfs_budget` — reflète les globales courantes, y compris un `limit`/`maxStockByThread`/`prunerBatch`/`prunerDfsBudget` déjà exécuté depuis la console) et la configuration **en préparation**. N'annule pas le décompte. **Serveur**, sans argument : affiche la configuration **effective** du serveur (`nb_threads`, `parts_file`, `expand_level`, `expand_max_stock`, `expand_max_levels`, `http_port`, `http_token_file`, `stock_files`, `stock_max_ram`, `stock_spill_dir`, `rebalance_budget`, `tcp_timeout`, `auto_roles`, `stop_on_solution`, `headless`) et le fichier `--config-file` en vigueur — pas d'état d'orchestrateur ni de configuration "en préparation", le serveur n'en a pas |
+| `config <clé> <valeur>` *(client/pruner)* | Écrit `<clé> = <valeur>` dans la configuration **en préparation** (mêmes clés que le fichier `--config-file`) et **annule définitivement** le décompte d'auto-démarrage s'il était en cours — comme n'importe quelle frappe au clavier pendant le décompte, cf. plus bas. `start` (manuel ou déclenché par un décompte qui va à son terme) applique cette configuration en préparation aux globales AVANT de forker — pas besoin de redémarrer le process pour qu'une valeur préparée prenne effet. **Refusée côté serveur** (pas de configuration "en préparation" à appliquer à chaud là-bas ; éditer le fichier `--config-file` puis redémarrer reste le chemin pour une clé sans commande console dédiée, cf. `stockMaxRam`/`spill`/`rebalance`/`leaseDuration`/`clientsRoles` pour celles qui en ont une) |
+| `configSave` | **Client/pruner** : écrit la configuration effective dans le fichier de configuration, avec toute valeur **en préparation** superposée par-dessus (écriture atomique `.tmp` puis `rename`, comme `backup`) — défaut `./eternityii-client.conf`, option `--config-file <chemin>`. C'est ainsi qu'une valeur préparée par `config <clé> <valeur>` finit par prendre effet, au prochain démarrage. **Serveur** : écrit la configuration effective du serveur telle quelle (pas de configuration "en préparation" côté serveur) — défaut `./eternityii-server.conf`, même option `--config-file <chemin>` |
 | `start` *(client/pruner)* | Fork immédiat des process de recherche avec la configuration **effective**, sans attendre un éventuel décompte (`COUNTDOWN`) — même chemin de code que ce décompte à échéance. Erreur explicite si déjà en cours d'exécution |
 | `stopForks` *(client/pruner)* | Arrête les process de recherche **sans quitter ce process** (console, canal de contrôle, API HTTP restent actifs). SIGINT à chaque fils, puis escalade SIGTERM (+5s) et SIGKILL (+10s) si nécessaire — jamais bloquant plus de ~10s. Erreur explicite si aucun fork n'est en cours d'exécution. Retour à `WAITING_CONFIG` ensuite : un nouveau `start` (ou `config`+`configApply`) est nécessaire pour relancer |
 | `configApply` *(client/pruner)* | Applique la configuration **en préparation** (`config <clé> <valeur>`) aux fils déjà en cours d'exécution — erreur explicite si aucun fork n'est en cours. Si seules des clés à chaud (`max_stock_by_thread`/`limit`/`pruner_batch`/`dfs_budget`) sont préparées : appliquées immédiatement et diffusées par IPC aux fils, sans interruption de la recherche. Si `nb_forks`/`server_host`/`parts_file` est préparé (avec une valeur différente de l'effective) : équivalent à `stopForks` suivi d'une reconstruction (tableaux de fils et/ou map de recherche partagée) puis d'un re-fork automatique avec la nouvelle configuration |
@@ -126,19 +126,30 @@ socket Unix. Les commandes `clients*` sont **serveur uniquement** : elles agisse
 le [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) distant, pas
 sur des process fils locaux.
 
-`config`, `configSave`, `start`, `stopForks` et `configApply` sont, à l'inverse,
-**masquées côté serveur** : ni listées dans `help`, ni exécutables (`commande
-inconnue`), ni suggérées en cas de faute de frappe — contrairement aux commandes
-`*(serveur)*` ci-dessus, exécutées sans effet (no-op inoffensif) sur un client, ces
-cinq commandes agiraient sur les globales/l'orchestrateur du *serveur*
-(`NB_THREADS` y désigne la taille du pool de connexions, pas un nombre de forks ;
-`fork_orchestrator_run` n'est de toute façon appelée que par `handle_client`) si
-elles n'étaient pas bloquées, produisant un fichier de configuration trompeur ou un
-événement sans effet observable plutôt qu'un no-op sans conséquence. Ce masquage ne
-s'applique qu'à l'exécution **directe** sur la console d'un serveur : poussées à
-distance vers un CLIENT via `clientsCommand` (ligne ci-dessus), elles s'exécutent
-normalement — c'est le rôle du serveur qui reçoit `clientsCommand`, jamais celui du
-process qui exécute in fine la commande, qui décide.
+`start`, `stopForks` et `configApply` sont, à l'inverse, **masquées côté
+serveur** : ni listées dans `help`, ni exécutables (`commande inconnue`), ni
+suggérées en cas de faute de frappe — contrairement aux commandes `*(serveur)*`
+ci-dessus, exécutées sans effet (no-op inoffensif) sur un client, ces trois
+commandes agiraient sur l'orchestrateur du *client* (`fork_orchestrator_run`
+n'est de toute façon appelée que par `handle_client`) si elles n'étaient pas
+bloquées, produisant un événement sans effet observable plutôt qu'un no-op sans
+conséquence. Ce masquage ne s'applique qu'à l'exécution **directe** sur la
+console d'un serveur : poussées à distance vers un CLIENT via `clientsCommand`
+(ligne ci-dessus), elles s'exécutent normalement — c'est le rôle du serveur qui
+reçoit `clientsCommand`, jamais celui du process qui exécute in fine la
+commande, qui décide.
+
+`config` et `configSave`, elles, ne sont **plus masquées côté serveur** :
+leurs interpréteurs branchent directement sur le rôle du process (serveur vs
+client/pruner) et agissent sur la configuration qui a effectivement un sens
+pour lui — `server_config.h` (nb_threads, parts_file, expand_*, http_*,
+stock_*, rebalance_budget, tcp_timeout, auto_roles, stop_on_solution,
+headless) côté serveur, `client_config.h` (nb_forks, pruner_forks,
+server_host, parts_file, max_stock_by_thread, limit, pruner_batch, dfs_budget)
+côté client/pruner. Seule la forme `config <clé> <valeur>` reste refusée côté
+serveur (voir la ligne `config <clé> <valeur>` ci-dessus) : le serveur n'a pas
+de configuration "en préparation" à appliquer à chaud, faute d'orchestrateur
+de démarrage différé.
 
 ## Bandeau de stats live (mode ANSI)
 
