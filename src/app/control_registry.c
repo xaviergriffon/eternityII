@@ -132,6 +132,24 @@ static void desired_role_set_locked(const uint8_t *machine_uid, int pruner_forks
     g_desired_roles[idx].pruner_forks = pruner_forks;
 }
 
+/* Copie bornée, toujours NUL-terminée, d'une ligne de commande dans un slot de
+ * file (`command_line[CONTROL_COMMAND_LINE_MAX]`). Équivalent de
+ * `strncpy(out, source, CONTROL_COMMAND_LINE_MAX - 1); out[...] = '\0';`,
+ * réécrit en strlen()+memcpy() explicite : gcc (-Wstringop-truncation, CI
+ * Linux) signale l'idiome strncpy+troncature comme potentiellement non
+ * terminé dès que `source` est un buffer construit à l'exécution (ex.
+ * `snprintf`) plutôt qu'un littéral court — même correctif déjà appliqué dans
+ * `known_clients_registry.c`/`app_runtime.c` (`resolve_client_label`). */
+static void copy_bounded_command_line(char out[CONTROL_COMMAND_LINE_MAX], const char *source)
+{
+    size_t len = strlen(source);
+    if (len >= CONTROL_COMMAND_LINE_MAX) {
+        len = CONTROL_COMMAND_LINE_MAX - 1;
+    }
+    memcpy(out, source, len);
+    out[len] = '\0';
+}
+
 /* Compare le premier mot de `command_line` (délimité par un espace ou la fin
  * de chaîne) à `word`, sans retokeniser (même convention que
  * `control_command_allowed`, control_protocol.c). */
@@ -203,8 +221,7 @@ int control_registry_register(int socket_id, const char *peer_ip, const control_
              * même le premier CTRL_PING — le client rejoint dans le même état
              * que les sessions déjà actives, sans commande console à rejouer. */
             s->queue[0].cmd = CTRL_COMMAND;
-            strncpy(s->queue[0].command_line, "pause", CONTROL_COMMAND_LINE_MAX - 1);
-            s->queue[0].command_line[CONTROL_COMMAND_LINE_MAX - 1] = '\0';
+            copy_bounded_command_line(s->queue[0].command_line, "pause");
             s->count = 1;
         }
         /* Dosage recherche/contrôle désiré (PR3) : même principe que la pause
@@ -222,14 +239,12 @@ int control_registry_register(int socket_id, const char *peer_ip, const control_
 
             int tail = (s->head + s->count) % CONTROL_SESSION_QUEUE_CAP;
             s->queue[tail].cmd = CTRL_COMMAND;
-            strncpy(s->queue[tail].command_line, line, CONTROL_COMMAND_LINE_MAX - 1);
-            s->queue[tail].command_line[CONTROL_COMMAND_LINE_MAX - 1] = '\0';
+            copy_bounded_command_line(s->queue[tail].command_line, line);
             s->count++;
 
             tail = (s->head + s->count) % CONTROL_SESSION_QUEUE_CAP;
             s->queue[tail].cmd = CTRL_COMMAND;
-            strncpy(s->queue[tail].command_line, "configApply", CONTROL_COMMAND_LINE_MAX - 1);
-            s->queue[tail].command_line[CONTROL_COMMAND_LINE_MAX - 1] = '\0';
+            copy_bounded_command_line(s->queue[tail].command_line, "configApply");
             s->count++;
         }
         pthread_mutex_unlock(&s->mutex);
