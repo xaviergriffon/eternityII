@@ -83,6 +83,46 @@ TEST parse_line_nb_forks_non_numeric_is_invalid(void)
     PASS();
 }
 
+/* pruner_forks : contrairement à nb_forks, 0 est une valeur VALIDE (dosage
+   "tout recherche") — seule une valeur négative ou non numérique est
+   invalide. */
+TEST parse_line_pruner_forks_valid(void)
+{
+    client_config_t cfg;
+    client_config_init(&cfg);
+    ASSERT_EQ_FMT(CLIENT_CONFIG_LINE_SET, client_config_parse_line("pruner_forks = 2\n", &cfg), "%d");
+    ASSERT_EQ_FMT(1, cfg.has_pruner_forks, "%d");
+    ASSERT_EQ_FMT(2, cfg.pruner_forks, "%d");
+    PASS();
+}
+
+TEST parse_line_pruner_forks_zero_is_valid(void)
+{
+    client_config_t cfg;
+    client_config_init(&cfg);
+    ASSERT_EQ_FMT(CLIENT_CONFIG_LINE_SET, client_config_parse_line("pruner_forks = 0\n", &cfg), "%d");
+    ASSERT_EQ_FMT(1, cfg.has_pruner_forks, "%d");
+    ASSERT_EQ_FMT(0, cfg.pruner_forks, "%d");
+    PASS();
+}
+
+TEST parse_line_pruner_forks_negative_is_invalid(void)
+{
+    client_config_t cfg;
+    client_config_init(&cfg);
+    ASSERT_EQ_FMT(CLIENT_CONFIG_LINE_INVALID_VALUE, client_config_parse_line("pruner_forks = -1\n", &cfg), "%d");
+    ASSERT_EQ_FMT(0, cfg.has_pruner_forks, "%d");
+    PASS();
+}
+
+TEST parse_line_pruner_forks_non_numeric_is_invalid(void)
+{
+    client_config_t cfg;
+    client_config_init(&cfg);
+    ASSERT_EQ_FMT(CLIENT_CONFIG_LINE_INVALID_VALUE, client_config_parse_line("pruner_forks = abc\n", &cfg), "%d");
+    PASS();
+}
+
 TEST parse_line_server_host_valid(void)
 {
     client_config_t cfg;
@@ -306,6 +346,20 @@ TEST format_includes_only_present_keys(void)
     PASS();
 }
 
+TEST format_includes_pruner_forks_only_when_present(void)
+{
+    client_config_t cfg;
+    client_config_init(&cfg);
+    cfg.has_pruner_forks = 1;
+    cfg.pruner_forks = 2;
+
+    char buf[256];
+    int n = client_config_format(&cfg, buf, sizeof(buf));
+    ASSERT(n > 0);
+    ASSERT(strstr(buf, "pruner_forks") != NULL);
+    PASS();
+}
+
 TEST format_truncates_safely_on_small_buffer(void)
 {
     client_config_t cfg;
@@ -496,6 +550,51 @@ TEST apply_pruner_batch_only_applies_in_pruner_mode(void)
     PASS();
 }
 
+/* pruner_forks n'a aucun équivalent POSITIONNEL (c'est un drapeau,
+   --pruner-forks) : la priorité CLI > fichier se lit sur
+   pruner_forks_requested lui-même (déjà écrit par parse_cli_options si
+   fourni), jamais sur argc. */
+TEST apply_pruner_forks_uses_file_value_when_cli_did_not_provide_it(void)
+{
+    pruner_forks_requested = -1; /* --pruner-forks absent de la CLI */
+    client_config_t cfg;
+    client_config_init(&cfg);
+    cfg.has_pruner_forks = 1;
+    cfg.pruner_forks = 3;
+
+    client_config_apply_to_globals(&cfg, 10, NULL);
+    ASSERT_EQ_FMT(3, pruner_forks_requested, "%d");
+    PASS();
+}
+
+TEST apply_pruner_forks_leaves_cli_value_untouched_when_already_provided(void)
+{
+    pruner_forks_requested = 5; /* --pruner-forks 5 déjà fourni par la CLI */
+    client_config_t cfg;
+    client_config_init(&cfg);
+    cfg.has_pruner_forks = 1;
+    cfg.pruner_forks = 3;
+
+    client_config_apply_to_globals(&cfg, 10, NULL);
+    ASSERT_EQ_FMT(5, pruner_forks_requested, "%d");
+    PASS();
+}
+
+/* apply_direct (config <clé> <valeur> + configApply) : toujours
+   inconditionnel, comme nb_forks. */
+TEST apply_direct_pruner_forks_always_applies_when_present(void)
+{
+    pruner_forks_requested = 5;
+    client_config_t cfg;
+    client_config_init(&cfg);
+    cfg.has_pruner_forks = 1;
+    cfg.pruner_forks = 1;
+
+    client_config_apply_direct(&cfg, NULL);
+    ASSERT_EQ_FMT(1, pruner_forks_requested, "%d");
+    PASS();
+}
+
 /* dfs_budget n'a aucun équivalent positionnel au démarrage (comme `limit`) :
    s'applique toujours, indépendamment de argc/pruner_mode. */
 TEST apply_dfs_budget_always_applies_when_present(void)
@@ -523,12 +622,16 @@ TEST capture_effective_reads_current_globals(void)
     max_search_by_sec = 654;
     pruner_batch_size = 789;
     pruner_dfs_budget = 8000;
+    int saved_pruner_forks_requested = pruner_forks_requested;
+    pruner_forks_requested = 2;
 
     client_config_t cfg;
     client_config_capture_effective(&cfg, "srv.example");
 
     ASSERT_EQ_FMT(1, cfg.has_nb_forks, "%d");
     ASSERT_EQ_FMT(5, cfg.nb_forks, "%d");
+    ASSERT_EQ_FMT(1, cfg.has_pruner_forks, "%d");
+    ASSERT_EQ_FMT(2, cfg.pruner_forks, "%d");
     ASSERT_EQ_FMT(1, cfg.has_server_host, "%d");
     ASSERT_STR_EQ("srv.example", cfg.server_host);
     ASSERT_STR_EQ("effective.csv", cfg.parts_file);
@@ -539,6 +642,7 @@ TEST capture_effective_reads_current_globals(void)
 
     client_config_free(&cfg);
     parts_files = saved_parts_files;
+    pruner_forks_requested = saved_pruner_forks_requested;
     PASS();
 }
 
@@ -552,6 +656,22 @@ TEST capture_effective_omits_server_host_when_absent(void)
     client_config_t cfg2;
     client_config_capture_effective(&cfg2, "");
     ASSERT_EQ_FMT(0, cfg2.has_server_host, "%d");
+    PASS();
+}
+
+/* pruner_forks_requested == -1 (jamais demandé) : omis du résultat — le
+   sentinel ne doit jamais fuiter dans un fichier de configuration ni dans
+   l'affichage de `config`. */
+TEST capture_effective_omits_pruner_forks_when_never_requested(void)
+{
+    int saved = pruner_forks_requested;
+    pruner_forks_requested = -1;
+
+    client_config_t cfg;
+    client_config_capture_effective(&cfg, NULL);
+    ASSERT_EQ_FMT(0, cfg.has_pruner_forks, "%d");
+
+    pruner_forks_requested = saved;
     PASS();
 }
 
@@ -632,6 +752,42 @@ TEST diff_nb_forks_staged_same_value_is_hot_only(void)
     PASS();
 }
 
+/* pruner_forks stagé différent du current : NEEDS_RESTART — un changement de
+   dosage recherche/contrôle par fork impose un re-fork (§5.2, cf. le
+   document de conception). */
+TEST diff_pruner_forks_changed_needs_restart(void)
+{
+    client_config_t current;
+    client_config_init(&current);
+    current.has_pruner_forks = 1;
+    current.pruner_forks = 0;
+
+    client_config_t staged;
+    client_config_init(&staged);
+    staged.has_pruner_forks = 1;
+    staged.pruner_forks = 2;
+
+    ASSERT_EQ_FMT((int)CLIENT_CONFIG_DIFF_NEEDS_RESTART, (int)client_config_diff(&current, &staged), "%d");
+    PASS();
+}
+
+/* pruner_forks stagé mais IDENTIQUE au current : HOT_ONLY. */
+TEST diff_pruner_forks_staged_same_value_is_hot_only(void)
+{
+    client_config_t current;
+    client_config_init(&current);
+    current.has_pruner_forks = 1;
+    current.pruner_forks = 2;
+
+    client_config_t staged;
+    client_config_init(&staged);
+    staged.has_pruner_forks = 1;
+    staged.pruner_forks = 2;
+
+    ASSERT_EQ_FMT((int)CLIENT_CONFIG_DIFF_HOT_ONLY, (int)client_config_diff(&current, &staged), "%d");
+    PASS();
+}
+
 /* server_host stagé et différent (chaînes) : NEEDS_RESTART. */
 TEST diff_server_host_changed_needs_restart(void)
 {
@@ -686,6 +842,10 @@ SUITE(client_config_suite)
     RUN_TEST(parse_line_limit_valid_and_invalid);
     RUN_TEST(parse_line_pruner_batch_is_clamped_not_rejected);
     RUN_TEST(parse_line_dfs_budget_is_clamped_not_rejected);
+    RUN_TEST(parse_line_pruner_forks_valid);
+    RUN_TEST(parse_line_pruner_forks_zero_is_valid);
+    RUN_TEST(parse_line_pruner_forks_negative_is_invalid);
+    RUN_TEST(parse_line_pruner_forks_non_numeric_is_invalid);
 
     RUN_TEST(load_missing_file_is_absent_not_an_error);
     RUN_TEST(load_null_path_is_absent);
@@ -694,6 +854,7 @@ SUITE(client_config_suite)
 
     RUN_TEST(format_empty_config_produces_empty_string);
     RUN_TEST(format_includes_only_present_keys);
+    RUN_TEST(format_includes_pruner_forks_only_when_present);
     RUN_TEST(format_truncates_safely_on_small_buffer);
 
     RUN_TEST(save_load_round_trip_preserves_values);
@@ -705,15 +866,21 @@ SUITE(client_config_suite)
     RUN_TEST(apply_parts_file_threshold_differs_for_pruner_mode);
     RUN_TEST(apply_limit_always_applies_when_present);
     RUN_TEST(apply_pruner_batch_only_applies_in_pruner_mode);
+    RUN_TEST(apply_pruner_forks_uses_file_value_when_cli_did_not_provide_it);
+    RUN_TEST(apply_pruner_forks_leaves_cli_value_untouched_when_already_provided);
+    RUN_TEST(apply_direct_pruner_forks_always_applies_when_present);
     RUN_TEST(apply_dfs_budget_always_applies_when_present);
 
     RUN_TEST(capture_effective_reads_current_globals);
     RUN_TEST(capture_effective_omits_server_host_when_absent);
+    RUN_TEST(capture_effective_omits_pruner_forks_when_never_requested);
 
     RUN_TEST(diff_nothing_staged_is_hot_only);
     RUN_TEST(diff_only_hot_keys_staged_is_hot_only);
     RUN_TEST(diff_nb_forks_changed_needs_restart);
     RUN_TEST(diff_nb_forks_staged_same_value_is_hot_only);
+    RUN_TEST(diff_pruner_forks_changed_needs_restart);
+    RUN_TEST(diff_pruner_forks_staged_same_value_is_hot_only);
     RUN_TEST(diff_server_host_changed_needs_restart);
     RUN_TEST(diff_parts_file_staged_with_no_current_needs_restart);
 }

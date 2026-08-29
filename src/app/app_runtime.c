@@ -143,11 +143,23 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Client/pruner : fichier de configuration clé=valeur (défaut ./eternityii-client.conf).",
 	  "Lu au démarrage (avant tout fork), pré-remplit les valeurs par défaut des\n"
 	  "positions non fournies en ligne de commande — priorité CLI > fichier >\n"
-	  "défauts. Clés reconnues : nb_forks, server_host, parts_file,\n"
+	  "défauts. Clés reconnues : nb_forks, pruner_forks, server_host, parts_file,\n"
 	  "max_stock_by_thread, limit, pruner_batch. Fichier absent ou illisible :\n"
 	  "pas une erreur (valeurs par défaut/CLI utilisées). Écrit par la commande\n"
 	  "console configSave (écriture atomique .tmp puis rename) ; affiché par\n"
 	  "la commande config." },
+	{ "--pruner-forks",
+	  "--pruner-forks <n>",
+	  "Client/pruner : nombre de forks affectés au CONTRÔLE du stock parmi nb_forks.",
+	  "Dosage recherche/contrôle par fork (0..nb_forks) — les autres forks du même\n"
+	  "process cherchent. Absente (défaut) : chaque fork garde le rôle impliqué par\n"
+	  "le mode de lancement, comportement historique inchangé (tous cherchent en\n"
+	  "mode client, tous contrôlent en mode pruner). Une valeur hors [0, nb_forks]\n"
+	  "est clampée, jamais rejetée. Incompatible avec --gpu si elle diffère de\n"
+	  "nb_forks (le contexte CUDA n'est initialisé qu'une fois par process, un\n"
+	  "dosage mixte sur GPU n'aurait aucun sens) : erreur explicite au démarrage.\n"
+	  "Reconfigurable à chaud via `config pruner_forks <n>` + `configApply`\n"
+	  "(redémarrage des fils, comme nb_forks)." },
 	{ "--stock-files",
 	  "--stock-files <n>",
 	  "Nombre de files de stock au démarrage (défaut NB_FILE_POSSIBILITY_DEFAULT, 10).",
@@ -465,6 +477,11 @@ const char *parse_client_args(int argc, const char *argv[])
     NB_THREADS = 1;
 #endif
     return serverIp;
+}
+
+int gpu_pruner_forks_conflict(int gpu_pruner_mode, int pruner_forks_requested, int nb_forks)
+{
+    return gpu_pruner_mode && pruner_forks_requested >= 0 && pruner_forks_requested != nb_forks;
 }
 
 void backup_failed_exit(void)

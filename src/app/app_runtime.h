@@ -382,6 +382,35 @@ int parse_server_thread_arg(const char *arg, int default_nb_threads, int *out_nb
  */
 const char *parse_client_args(int argc, const char *argv[]);
 
+/**
+ * @brief Prédicat PUR : le dosage `--pruner-forks`/`pruner_forks` demandé
+ *        est-il incompatible avec le pruner GPU en cours ?
+ *
+ * Le contexte CUDA n'est initialisé QU'UNE FOIS par process
+ * (`gpu_pruner_init`, `src/app/etii_client.c:run_mono_client`) et son
+ * déclenchement (`if (gpu_pruner_mode) { autoprune_gpu(...) }`) ne consulte
+ * PAS le `pruner_mode` PAR FORK écrit par `spawn_child_body` — contrairement
+ * à `autoprune()`/`autosearch()` : un lot mixte sous `--gpu` ferait donc
+ * tourner CHAQUE fork (y compris ceux que `current_fork_role` a désignés
+ * `FORK_ROLE_SEARCH`) sur `autoprune_gpu`, jamais sur `autosearch` — un
+ * dosage silencieusement ignoré, pas seulement un gain nul (§5.4,
+ * docs/conception/pilotage_type_client.md). D'où l'échec explicite au
+ * démarrage plutôt qu'un repli silencieux.
+ *
+ * @param gpu_pruner_mode         Vrai si l'exécution GPU du pruner est active
+ *                                (build CUDA=1 uniquement — appelant à passer
+ *                                0 sur un build sans CUDA, où `--gpu` a de
+ *                                toute façon déjà fait échouer le démarrage
+ *                                plus tôt).
+ * @param pruner_forks_requested Dosage demandé (`-1` = non demandé : jamais
+ *                                de conflit, cf. `resolve_pruner_forks`).
+ * @param nb_forks                Nombre total de forks du lot (`NB_THREADS`).
+ * @return                        1 si `pruner_forks_requested` est fourni et
+ *                                diffère de `nb_forks` alors que le GPU est
+ *                                actif, 0 sinon.
+ */
+int gpu_pruner_forks_conflict(int gpu_pruner_mode, int pruner_forks_requested, int nb_forks);
+
 /* ---- Fin de vie du client ---- */
 
 /**

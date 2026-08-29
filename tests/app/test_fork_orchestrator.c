@@ -402,6 +402,118 @@ TEST fork_diagnostic_summary_null_out_is_safe(void)
     PASS();
 }
 
+/* ============================ resolve_pruner_forks / fork_role_for ========= */
+
+/* pruner_forks_requested < 0 (non demandé) : comportement historique — 0 en
+   mode client (pruner_mode == 0), nb_forks en mode pruner (pruner_mode != 0).
+   Les deux cas dégénérés attendus par le document de conception. */
+TEST resolve_pruner_forks_defaults_to_mode_when_not_requested(void)
+{
+    ASSERT_EQ_FMT(0, resolve_pruner_forks(-1, 0, 8), "%d");
+    ASSERT_EQ_FMT(8, resolve_pruner_forks(-1, 1, 8), "%d");
+    PASS();
+}
+
+/* Valeur demandée dans [0, nb_forks] : reprise telle quelle, quel que soit
+   pruner_mode (une demande explicite l'emporte toujours sur le mode). */
+TEST resolve_pruner_forks_uses_requested_value_in_range(void)
+{
+    ASSERT_EQ_FMT(3, resolve_pruner_forks(3, 0, 8), "%d");
+    ASSERT_EQ_FMT(3, resolve_pruner_forks(3, 1, 8), "%d");
+    ASSERT_EQ_FMT(0, resolve_pruner_forks(0, 1, 8), "%d");
+    ASSERT_EQ_FMT(8, resolve_pruner_forks(8, 0, 8), "%d");
+    PASS();
+}
+
+/* Valeur demandée hors [0, nb_forks] : clampée, jamais rejetée — un dosage
+   effectif reste toujours défini. */
+TEST resolve_pruner_forks_clamps_out_of_range_requests(void)
+{
+    ASSERT_EQ_FMT(8, resolve_pruner_forks(100, 0, 8), "%d");
+    ASSERT_EQ_FMT(0, resolve_pruner_forks(-5, 0, 8), "%d");
+    PASS();
+}
+
+/* nb_forks <= 0 : toujours 0, quel que soit ce qui est demandé. */
+TEST resolve_pruner_forks_zero_nb_forks_is_always_zero(void)
+{
+    ASSERT_EQ_FMT(0, resolve_pruner_forks(-1, 1, 0), "%d");
+    ASSERT_EQ_FMT(0, resolve_pruner_forks(4, 1, -1), "%d");
+    PASS();
+}
+
+/* pruner_forks == 0 : tous les forks cherchent (cas dégénéré "client"). */
+TEST fork_role_for_all_search_when_pruner_forks_is_zero(void)
+{
+    for (int c = 0; c < 4; c++) {
+        ASSERT_EQ_FMT((int)FORK_ROLE_SEARCH, (int)fork_role_for(c, 4, 0), "%d");
+    }
+    PASS();
+}
+
+/* pruner_forks == nb_forks : tous les forks contrôlent (cas dégénéré "pruner"). */
+TEST fork_role_for_all_prune_when_pruner_forks_equals_nb_forks(void)
+{
+    for (int c = 0; c < 4; c++) {
+        ASSERT_EQ_FMT((int)FORK_ROLE_PRUNE, (int)fork_role_for(c, 4, 4), "%d");
+    }
+    PASS();
+}
+
+/* Dosage mixte : les forks de plus haut rang sont les pruners (exemple du
+   document de conception — nb_forks=4, pruner_forks=2 -> fork 0,1 cherchent,
+   fork 2,3 contrôlent). */
+TEST fork_role_for_mixed_dosage_assigns_highest_ranks_to_prune(void)
+{
+    ASSERT_EQ_FMT((int)FORK_ROLE_SEARCH, (int)fork_role_for(0, 4, 2), "%d");
+    ASSERT_EQ_FMT((int)FORK_ROLE_SEARCH, (int)fork_role_for(1, 4, 2), "%d");
+    ASSERT_EQ_FMT((int)FORK_ROLE_PRUNE, (int)fork_role_for(2, 4, 2), "%d");
+    ASSERT_EQ_FMT((int)FORK_ROLE_PRUNE, (int)fork_role_for(3, 4, 2), "%d");
+    PASS();
+}
+
+/* fork_seq hors [0, nb_forks), ou nb_forks <= 0 : repli sûr FORK_ROLE_SEARCH,
+   jamais une branche indéfinie. */
+TEST fork_role_for_out_of_range_fork_seq_is_safe_search(void)
+{
+    ASSERT_EQ_FMT((int)FORK_ROLE_SEARCH, (int)fork_role_for(-1, 4, 2), "%d");
+    ASSERT_EQ_FMT((int)FORK_ROLE_SEARCH, (int)fork_role_for(4, 4, 2), "%d");
+    ASSERT_EQ_FMT((int)FORK_ROLE_SEARCH, (int)fork_role_for(0, 0, 0), "%d");
+    PASS();
+}
+
+/* pruner_forks hors [0, nb_forks] : clampé ICI AUSSI (défense en profondeur),
+   même si resolve_pruner_forks est censé l'avoir déjà fait en amont. */
+TEST fork_role_for_clamps_out_of_range_pruner_forks(void)
+{
+    ASSERT_EQ_FMT((int)FORK_ROLE_PRUNE, (int)fork_role_for(0, 4, 100), "%d");
+    ASSERT_EQ_FMT((int)FORK_ROLE_SEARCH, (int)fork_role_for(3, 4, -5), "%d");
+    PASS();
+}
+
+/* current_fork_role : enveloppe impure lisant pruner_forks_requested/pruner_mode/
+   NB_THREADS — vérifie qu'elle recompose bien resolve_pruner_forks + fork_role_for
+   à partir des globales, sans toucher à quoi que ce soit d'autre. Globales
+   sauvegardées/restaurées : ce module est un singleton process-wide. */
+TEST current_fork_role_reads_globals(void)
+{
+    int saved_requested = pruner_forks_requested;
+    int saved_pruner_mode = pruner_mode;
+    int saved_nb_threads = NB_THREADS;
+
+    pruner_forks_requested = 1;
+    pruner_mode = 0;
+    NB_THREADS = 3;
+    ASSERT_EQ_FMT((int)FORK_ROLE_SEARCH, (int)current_fork_role(0), "%d");
+    ASSERT_EQ_FMT((int)FORK_ROLE_SEARCH, (int)current_fork_role(1), "%d");
+    ASSERT_EQ_FMT((int)FORK_ROLE_PRUNE, (int)current_fork_role(2), "%d");
+
+    pruner_forks_requested = saved_requested;
+    pruner_mode = saved_pruner_mode;
+    NB_THREADS = saved_nb_threads;
+    PASS();
+}
+
 /* ============================ driver thread-safe ============================ */
 
 /* WAITING_CONFIG + EV_START (post_event) : transition immédiate visible via
@@ -817,6 +929,16 @@ SUITE(fork_orchestrator_suite)
     RUN_TEST(fork_diagnostic_summary_search_mode);
     RUN_TEST(fork_diagnostic_summary_pruner_mode);
     RUN_TEST(fork_diagnostic_summary_null_out_is_safe);
+    RUN_TEST(resolve_pruner_forks_defaults_to_mode_when_not_requested);
+    RUN_TEST(resolve_pruner_forks_uses_requested_value_in_range);
+    RUN_TEST(resolve_pruner_forks_clamps_out_of_range_requests);
+    RUN_TEST(resolve_pruner_forks_zero_nb_forks_is_always_zero);
+    RUN_TEST(fork_role_for_all_search_when_pruner_forks_is_zero);
+    RUN_TEST(fork_role_for_all_prune_when_pruner_forks_equals_nb_forks);
+    RUN_TEST(fork_role_for_mixed_dosage_assigns_highest_ranks_to_prune);
+    RUN_TEST(fork_role_for_out_of_range_fork_seq_is_safe_search);
+    RUN_TEST(fork_role_for_clamps_out_of_range_pruner_forks);
+    RUN_TEST(current_fork_role_reads_globals);
     RUN_TEST(waitpid_target_is_reaped_matrix);
 
     RUN_TEST(post_event_start_from_waiting_config_transitions_to_running);

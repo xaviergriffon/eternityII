@@ -7,6 +7,8 @@ int g_active_forks = 0;
 
 int pruner_mode = 0;
 
+int pruner_forks_requested = -1;
+
 int gpu_requested = 0;
 
 int help_requested = 0;
@@ -268,6 +270,18 @@ int parse_cli_options(int argc, const char *argv[])
                 if (timeout > 0) {
                     tcp_timeout = timeout;
                 }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--pruner-forks") == 0) {
+            // Option valuée : dosage recherche/contrôle demandé pour le lot de
+            // forks à venir (résolu contre NB_THREADS, pas encore connu ici,
+            // par resolve_pruner_forks — cf. app_static_variables.h). Le
+            // sentinel -1 (« non demandé ») doit rester réservé à l'absence de
+            // l'option : une valeur négative fournie explicitement est donc
+            // ramenée à 0 plutôt que traitée comme absente.
+            if (r + 1 < argc) {
+                int n = atoi(argv[r + 1]);
+                pruner_forks_requested = (n < 0) ? 0 : n;
                 r++; // consomme aussi la valeur
             }
         } else if (strcmp(argv[r], "--config-file") == 0) {

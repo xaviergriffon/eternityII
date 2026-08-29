@@ -228,6 +228,23 @@ void handle_client(int argc, const char *argv[]) {
     // Voir la doc de ensure_stock_files_cover_forks (app_runtime.{h,c}) pour le raisonnement.
     ensure_stock_files_cover_forks(NB_THREADS);
 
+#ifdef WITH_CUDA
+    // --pruner-forks incompatible avec --gpu dès qu'il diffère de nb_forks :
+    // le contexte CUDA n'est initialisé qu'UNE FOIS par process et son
+    // déclenchement ne consulte pas le pruner_mode PAR FORK — un dosage mixte
+    // ferait tourner CHAQUE fork sur autoprune_gpu, jamais sur autosearch (cf.
+    // gpu_pruner_forks_conflict, app_runtime.h). Échec explicite plutôt qu'un
+    // dosage silencieusement ignoré. NB_THREADS/pruner_forks_requested sont
+    // désormais résolus (CLI + --config-file), donc évalués ICI.
+    if (gpu_pruner_forks_conflict(gpu_pruner_mode, pruner_forks_requested, NB_THREADS)) {
+        log_error("--gpu : --pruner-forks %d incompatible avec le pruner GPU (nb_forks=%d) — "
+                  "le contexte CUDA n'est initialisé qu'une fois par process, un dosage mixte "
+                  "n'aurait aucun sens ; retirer --pruner-forks ou l'ajuster à nb_forks\n",
+                  pruner_forks_requested, NB_THREADS);
+        exit(EXIT_FAILURE);
+    }
+#endif // WITH_CUDA
+
     init_childs();
     init_counters();
     init_signals();

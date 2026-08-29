@@ -265,8 +265,8 @@ nouvelle fonction, `log_file()` (`src/ui/logger.h`), sert exactement ce cas :
   chaud `configApply` — une ligne `démarrage : N fork(s) lancé(s) — pid=…
   version_protocole=… eternParts=… mode=… label="…" machine_uid=…
   client_uid=… stock_files=…` suivie du dump de la configuration effective
-  (`nb_forks`, `server_host`, `parts_file`, `max_stock_by_thread`, `limit`,
-  `pruner_batch`, `dfs_budget`) est écrite. Voir
+  (`nb_forks`, `pruner_forks`, `server_host`, `parts_file`, `max_stock_by_thread`,
+  `limit`, `pruner_batch`, `dfs_budget`) est écrite. Voir
   `log_startup_diagnostics` (`src/app/fork_orchestrator.c`).
 - **Côté serveur** : une ligne équivalente est écrite juste avant que
   `runserver` ne commence à accepter des connexions — `démarrage serveur :

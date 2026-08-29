@@ -329,6 +329,47 @@ Exemples :
 > (`--name`) n'est qu'un affichage, jamais une clé : deux clients peuvent
 > légitimement partager le même.
 
+## Dosage recherche/contrôle par fork (`--pruner-forks`)
+
+Un process client/pruner héberge `nb_threads` forks de travail ; par défaut, ils
+partagent tous le même rôle, impliqué par le mode de lancement (`client` → tous
+cherchent, `pruner` → tous contrôlent). L'option `--pruner-forks <n>` permet de
+**mélanger les deux rôles au sein d'un même process** : `n` forks (parmi
+`nb_threads`) sont affectés au CONTRÔLE du stock (comme un pruner), les autres
+cherchent (comme un client) — voir
+[docs/conception/pilotage_type_client.md](conception/pilotage_type_client.md)
+pour le contexte complet.
+
+```sh
+./eternityII client [--pruner-forks N] [serveur] [nb_threads] [max_stock_par_thread] [fichier_pieces.csv]
+```
+
+| Valeur | Effet |
+|---|---|
+| *(absente)* | Comportement historique inchangé : tous les forks partagent le rôle impliqué par le mode (`client`/`pruner`) |
+| `0` | Tous les forks cherchent — équivalent au mode `client` sans l'option |
+| `nb_threads` | Tous les forks contrôlent — équivalent au mode `pruner` sans l'option |
+| `1..nb_threads-1` | Dosage mixte : les `n` forks de plus haut rang contrôlent, les autres cherchent |
+
+Une valeur hors `[0, nb_threads]` est clampée plutôt que rejetée. Le rôle
+est fixé une fois pour toutes à la naissance de chaque fork (pas de bascule à
+chaud) : changer le dosage passe par `config pruner_forks <n>` +
+`configApply` (ou la clé `pruner_forks` du `--config-file`), qui redémarrent
+les fils comme un changement de `nb_forks`.
+
+> **Incompatible avec `--gpu`** dès que la valeur diffère de `nb_threads` : le
+> contexte CUDA n'est initialisé qu'une seule fois par process et son
+> déclenchement ne consulte pas le rôle par fork — un dosage mixte ferait donc
+> tourner CHAQUE fork sur le pruner GPU, jamais sur la recherche. Le lancement
+> échoue avec une erreur explicite plutôt que d'ignorer silencieusement le
+> dosage demandé.
+
+Exemples :
+```sh
+./eternityII client srv 8 --pruner-forks 2       # 6 forks cherchent, 2 contrôlent
+./eternityII pruner srv 8 data/pieces.csv --pruner-forks 4   # 4 forks contrôlent, 4 cherchent
+```
+
 ## Mode pruner (élagage)
 
 Un **pruner** réutilise la même plomberie réseau qu'un client, mais au lieu d'explorer
