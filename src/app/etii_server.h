@@ -76,11 +76,11 @@ typedef struct
 /**
  * @brief Décision produite par `compute_desired_role_mix` : sens dans lequel
  *        faire évoluer le dosage recherche/contrôle diffusé au parc, jamais
- *        une valeur absolue (PR4, docs/conception/pilotage_type_client.md).
+ *        une valeur absolue.
  *
  * Un pas de ±1 (jamais un saut direct vers une cible calculée) est ce qui
  * rend l'hystérésis triviale à appliquer côté appelant : chaque changement
- * effectif coûte un `stopForks`+re-fork chez le client visé (PR1), donc
+ * effectif coûte un `stopForks`+re-fork chez le client visé, donc
  * chaque incrément doit rester une décision consciente, jamais un rattrapage
  * brutal d'un déséquilibre mesuré une seule fois.
  */
@@ -91,10 +91,11 @@ typedef enum {
 } role_mix_decision_t;
 
 /**
- * @brief État persistant d'un tour à l'autre de la politique automatique
- *        (PR4) — mêmes conventions in/out que `autobackup_state_t` :
- *        paramètre explicite plutôt que statique cachée, pour rester
- *        testable sans dépendre de l'ordre d'exécution des tests.
+ * @brief État persistant d'un tour à l'autre de la politique automatique de
+ *        dosage recherche/contrôle — mêmes conventions in/out que
+ *        `autobackup_state_t` : paramètre explicite plutôt que statique
+ *        cachée, pour rester testable sans dépendre de l'ordre d'exécution
+ *        des tests.
  */
 typedef struct {
     /// Valeur cumulée de `server_search_starved`/`server_prune_starved` au
@@ -153,9 +154,10 @@ void *check_server(void *param);
  * Extrait pour être testable hors thread. Voir etii_server.c pour le détail
  * des paramètres in/out (état persistant d'un tour à l'autre).
  *
- * @param role_mix_state État de la politique automatique (PR4) — ignoré (aucune
- *                        lecture, aucune écriture) si `auto_roles_requested`
- *                        est faux ou si ce pointeur est NULL.
+ * @param role_mix_state État de la politique automatique de dosage — ignoré
+ *                        (aucune lecture, aucune écriture) si
+ *                        `auto_roles_requested` est faux ou si ce pointeur
+ *                        est NULL.
  */
 void check_server_step(unsigned long long *lastactive, autobackup_state_t *backup_state,
                        int *last_record, int sleep_time, auto_role_mix_state_t *role_mix_state);
@@ -187,16 +189,16 @@ int32_t clamp_pruner_batch(int32_t requested);
 int32_t compute_server_hunger(unsigned long long stock, int active_clients);
 
 /**
- * @brief Compteurs de service à VIDE (PR2, docs/conception/pilotage_type_client.md) :
- *        combien de fois `communicate_with_client_step` a répondu `K = 0` à
+ * @brief Compteurs de service à VIDE : combien de fois
+ *        `communicate_with_client_step` a répondu `K = 0` à
  *        un `INST_GET` (`server_search_starved`, pool vide côté chercheurs)
  *        ou à un `INST_GET_TO_CHECK[_BATCH]` (`server_prune_starved`, pool
  *        vide côté pruners).
  *
- * Avant cette PR, un `K = 0` ne laissait aucune trace : ni compteur, ni log.
+ * Auparavant, un `K = 0` ne laissait aucune trace : ni compteur, ni log.
  * Les deux handlers de service étant déjà distincts, la famine se ventile
  * naturellement PAR RÔLE, sans aucune inférence — c'est la mesure la plus
- * directe du besoin (§PR2). Incrémentés via `__atomic_fetch_add`
+ * directe du besoin. Incrémentés via `__atomic_fetch_add`
  * (`__ATOMIC_RELAXED`, même convention que `stock_rate.c`/`app_runtime.c`) :
  * plusieurs threads serveur (un par connexion) incrémentent concurremment,
  * une statistique d'affichage tolère la rare imprécision d'un incrément
@@ -209,8 +211,7 @@ extern unsigned long long server_prune_starved;
 
 /**
  * @brief Calcule le sens d'ajustement du dosage recherche/contrôle à partir
- *        des signaux de besoin déjà mesurés par PR2 (PR4,
- *        docs/conception/pilotage_type_client.md §4).
+ *        des signaux de besoin déjà mesurés côté serveur.
  *
  * Fonction PURE (aucune I/O, aucun accès au registre ni à l'horloge) — les
  * deltas de famine et le ratio de pression RAM sont calculés par l'appelant
@@ -328,7 +329,7 @@ typedef struct {
  *        unique, PAR SESSION, du canal de contrôle (`control_session_info_t.mode`),
  *        qui ne reflète que le mode de LANCEMENT du process et jamais le
  *        détail d'un dosage mixte (`--pruner-forks`/`clientsRoles`/
- *        `--auto-roles`, docs/conception/pilotage_type_client.md).
+ *        `--auto-roles`).
  *
  * Balaie `thread_params[0..NB_THREADS[` SANS verrou — même convention que
  * `get_active_threads`/`find_free_thread_slot` : lecture best-effort, une

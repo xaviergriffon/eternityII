@@ -112,7 +112,7 @@ void http_stats_collect(http_stats_view_t *out)
     out->stock_removes_unchecked_last_1h = rate.removes_unchecked_last_1h;
     out->stock_removes_unchecked_last_1d = rate.removes_unchecked_last_1d;
 
-    // Métriques de besoin par rôle (PR2, docs/conception/pilotage_type_client.md).
+    // Métriques de besoin par rôle.
     out->server_search_starved = server_search_starved;
     out->server_prune_starved = server_prune_starved;
 

@@ -1938,8 +1938,8 @@ TEST do_command_line_clientswork_reports_owned_attribution(void)
 }
 
 /* clientsWork affiche aussi le rôle déclaré (search/prune) de chaque fork de
- * travail actuellement connecté du client visé (client_work_fork_roles, PR4
- * de docs/conception/pilotage_type_client.md) -- jusqu'ici le seul moyen de
+ * travail actuellement connecté du client visé (client_work_fork_roles) --
+ * jusqu'ici le seul moyen de
  * voir un dosage --pruner-forks/clientsRoles/--auto-roles depuis le serveur
  * était le tableau "Thread queues" local du client (commande check). */
 TEST do_command_line_clientswork_reports_fork_roles(void)

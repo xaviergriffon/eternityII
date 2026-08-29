@@ -68,8 +68,7 @@ static uint64_t g_next_session_no = 1;
 static int g_desired_pause_state = 0; /* 0 = résumé (défaut), 1 = en pause */
 
 /**
- * @brief Dosage recherche/contrôle « désiré » PAR MACHINE (PR3,
- *        docs/conception/pilotage_type_client.md), calqué sur
+ * @brief Dosage recherche/contrôle « désiré » PAR MACHINE, calqué sur
  *        `g_desired_pause_state` mais KEYÉ par `machine_uid` — contrairement à
  *        pause/resume (fleet-wide, un seul booléen suffit), le dosage est par
  *        construction une propriété PAR CLIENT.
@@ -224,7 +223,7 @@ int control_registry_register(int socket_id, const char *peer_ip, const control_
             copy_bounded_command_line(s->queue[0].command_line, "pause");
             s->count = 1;
         }
-        /* Dosage recherche/contrôle désiré (PR3) : même principe que la pause
+        /* Dosage recherche/contrôle désiré : même principe que la pause
          * ci-dessus, mais keyé par machine_uid (cf. la doc de
          * g_desired_roles) et donc en PLUS de la pause, jamais à sa place --
          * les deux peuvent coexister dans la même file toute neuve. Deux

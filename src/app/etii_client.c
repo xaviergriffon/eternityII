@@ -600,9 +600,8 @@ char *build_thread_queues_table(unsigned long long *out_stock,
         bys += fork_statistics[f].shots_per_second;
         unsigned long long in_stock = fork_statistics[f].possibilities_in_stock;
         unsigned long long an = fork_statistics[f].analyses_in_stock;
-        // Dosage recherche/contrôle par fork (--pruner-forks, PR1 de
-        // docs/conception/pilotage_type_client.md) : jusqu'ici invisible dans
-        // ce tableau, alors que le rôle EFFECTIF de chaque fork (search ou
+        // Dosage recherche/contrôle par fork (--pruner-forks) : jusqu'ici
+        // invisible dans ce tableau, alors que le rôle EFFECTIF de chaque fork (search ou
         // prune) est déjà connu du parent sans la moindre I/O — chaque fork
         // reste dans son rôle jusqu'au prochain re-fork (configApply), donc
         // `current_fork_role` reste valide pour toute la durée d'affichage.

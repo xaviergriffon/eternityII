@@ -927,8 +927,8 @@ typedef struct {
     unsigned long long removes_last_1m;
     unsigned long long removes_last_1h;
     unsigned long long removes_last_1d;
-    /// Même mesure, VENTILÉE par pool (PR2, docs/conception/pilotage_type_client.md) :
-    /// permet de distinguer si les ADD/GET consommés viennent du pool non
+    /// Même mesure, VENTILÉE par pool : permet de distinguer si les ADD/GET
+    /// consommés viennent du pool non
     /// vérifié (pruners) ou vérifié (chercheurs) — les six champs ci-dessus
     /// restent l'agrégat des deux, inchangé.
     unsigned long long adds_unchecked_last_1m;

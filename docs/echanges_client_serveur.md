@@ -436,10 +436,11 @@ saisie console ou à une trame du canal de contrôle en cours de découpage. Une
 inconnue/déconnectée/ambiguë y répond `400` (argument invalide), pas `403`/`401` : la
 commande elle-même reste whitelistée (et authentifiée, si un jeton valide a été fourni).
 
-### Dosage recherche/contrôle par fork, piloté à distance (`clientsRoles`, PR3)
+### Dosage recherche/contrôle par fork, piloté à distance (`clientsRoles`)
 
-Le pilotage de base du dosage `pruner_forks` d'un client (PR1,
-[docs/conception/pilotage_type_client.md](conception/pilotage_type_client.md))
+Le pilotage de base du dosage `pruner_forks` d'un client (option CLI
+`--pruner-forks`, clé de configuration `pruner_forks`, voir
+[docs/utilisation.md](utilisation.md#dosage-recherchecontrôle-par-fork---pruner-forks))
 **fonctionnait déjà** dès l'adressage des commandes ci-dessus, sans une ligne
 de plus :
 
@@ -483,8 +484,8 @@ dosage désiré reçoit les trois commandes (`pause`, `config pruner_forks <n>`,
 `configApply`), dans cet ordre.
 
 Une machine jamais touchée par `clientsRoles` n'a pas de dosage désiré
-mémorisé : elle garde le comportement par défaut de PR1 (rôle par fork
-impliqué par le mode de lancement, `client` ou `pruner`). Ce dosage désiré est
+mémorisé : elle garde le comportement par défaut (rôle par fork impliqué par
+le mode de lancement, `client` ou `pruner`). Ce dosage désiré est
 **volatile** (perdu au redémarrage du SERVEUR, contrairement au [registre de
 clients connus](#registre-de-clients-connus) qui persiste sur disque) — un
 redémarrage du serveur retombe donc sur le dosage par défaut de chaque client
@@ -497,8 +498,7 @@ client, un client lancé en `pruner --gpu` recevant ces deux commandes (ciblé
 explicitement, ou touché par une diffusion sans `--to`, ou par une politique
 `--auto-roles` qui ignore aussi le mode GPU) re-forkerait silencieusement
 avec un `pruner_forks` différent de `nb_forks` : exactement l'état que le
-garde-fou de démarrage (`gpu_pruner_forks_conflict`, §5.4 de
-[docs/conception/pilotage_type_client.md](conception/pilotage_type_client.md))
+garde-fou de démarrage (`gpu_pruner_forks_conflict`, `src/app/app_runtime.{h,c}`)
 rend impossible au lancement, puisque le contexte CUDA n'est initialisé
 qu'une seule fois par process et ne consulte pas le rôle par fork. C'est donc
 le CLIENT qui referme ce trou : `config_apply_interpreter`
@@ -514,12 +514,12 @@ tout autant). Un client GPU reste donc, par construction, exclu de tout
 pilotage dynamique du dosage — `clientsRoles`/`--auto-roles` n'ont aucun
 effet sur lui au-delà du refus journalisé.
 
-### Politique automatique de dosage recherche/contrôle (PR4)
+### Politique automatique de dosage recherche/contrôle
 
 `--auto-roles` (serveur uniquement, désactivée par défaut — voir
 [docs/utilisation.md](utilisation.md#politique-automatique-de-dosage---auto-roles))
-fait jouer au serveur, PAR LUI-MÊME, le rôle que `clientsRoles` (PR3
-ci-dessus) laisse à l'opérateur : ajuster `pruner_forks` diffusé au parc en
+fait jouer au serveur, PAR LUI-MÊME, le rôle que `clientsRoles` (ci-dessus)
+laisse à l'opérateur : ajuster `pruner_forks` diffusé au parc en
 fonction du besoin mesuré. Branchée dans le tour existant de 10 s de
 `check_server_step` (`src/app/etii_server.c`) — aucune cadence dédiée.
 
@@ -532,15 +532,15 @@ le modèle exact de `compute_server_hunger`, prend en entrée :
   comparé à `STOCK_SPILL_HIGH_PERCENT` (0 sans `--stock-max-ram`, pas de
   notion de pression sans plafond) ;
 - le delta, depuis le tour précédent, des compteurs de famine par rôle
-  `server_search_starved`/`server_prune_starved` (PR2 — ces compteurs sont
+  `server_search_starved`/`server_prune_starved` (ces compteurs sont
   CUMULATIFS depuis le démarrage du serveur, jamais remis à zéro : c'est
   l'appelant qui calcule le delta) ;
 - le nombre de forks par rôle, pondéré par `nb_forks` et non par un simple
-  compte de sessions (`control_registry_count_role_forks`, PR4 — voir
+  compte de sessions (`control_registry_count_role_forks` — voir
   encadré ci-dessous).
 
 > **Correctif** : la première version utilisait `control_registry_count_roles`
-> (PR2, un compte de SESSIONS — une par processus parent connecté). Avec une
+> (un compte de SESSIONS — une par processus parent connecté). Avec une
 > seule machine cliente connectée, ce compte vaut toujours au plus 1, quel
 > que soit son nombre réel de forks — le garde-fou « jamais 0 chercheur »
 > (§4 ci-dessous) se déclenchait donc à TORT dès qu'une seule machine était
@@ -574,14 +574,14 @@ priorité, du plus urgent au plus indicatif :
 explicite d'un tour à l'autre (`auto_role_mix_state_t` — un paramètre
 explicite, pas une statique cachée, pour rester testable indépendamment de
 l'ordre d'exécution des tests) : le dernier dosage effectivement diffusé
-(`current_dosage`, démarre à 0 — comportement PR1 par défaut) et le nombre de
+(`current_dosage`, démarre à 0 — comportement par défaut) et le nombre de
 tours écoulés depuis le dernier changement appliqué. Un changement de sens
 n'est traduit en action que si ce délai minimal
 (`ROLE_MIX_MIN_TICKS_DEFAULT`, 12 tours ≈ 2 minutes) est écoulé, et le
 dosage n'évolue alors que par pas de ±1 (jamais un saut direct) — chaque
-changement effectif coûte un `stopForks` + re-fork chez CHAQUE client visé
-(PR1), le même coût qu'un `clientsRoles` manuel. La diffusion elle-même
-réutilise `control_registry_apply_role_dosage(NULL, n)` (PR3, broadcast à
+changement effectif coûte un `stopForks` + re-fork chez CHAQUE client visé,
+le même coût qu'un `clientsRoles` manuel. La diffusion elle-même
+réutilise `control_registry_apply_role_dosage(NULL, n)` (broadcast à
 tout le parc) : une décision automatique et une décision manuelle
 (`clientsRoles`) partagent donc le même dosage désiré persistant par
 machine — l'automatique peut remplacer un dosage manuel à son prochain tour

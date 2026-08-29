@@ -281,8 +281,8 @@ typedef struct {
     unsigned long long stock_removes_last_1m;
     unsigned long long stock_removes_last_1h;
     unsigned long long stock_removes_last_1d;
-    /// Même mesure, VENTILÉE par pool (PR2, docs/conception/pilotage_type_client.md) :
-    /// distingue le trafic du pool vérifié (chercheurs) de celui du pool non
+    /// Même mesure, VENTILÉE par pool : distingue le trafic du pool vérifié
+    /// (chercheurs) de celui du pool non
     /// vérifié (pruners). Les six champs ci-dessus restent l'agrégat des deux,
     /// inchangé.
     unsigned long long stock_adds_checked_last_1m;

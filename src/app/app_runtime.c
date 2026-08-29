@@ -182,16 +182,16 @@ static const cli_help_topic_t cli_topics[] = {
 	  "comportement changé). Une fois activée, `check_server_step` (même tick de\n"
 	  "10 s que le reste des statistiques serveur, aucune cadence dédiée) ajuste\n"
 	  "lui-même le dosage `pruner_forks` diffusé à TOUT le parc connecté, par pas\n"
-	  "de ±1, à partir des signaux déjà mesurés par PR2 : famine par rôle\n"
+	  "de ±1, à partir de plusieurs signaux : famine par rôle\n"
 	  "(server_search_starved/server_prune_starved), taille des pools non\n"
-	  "vérifié/vérifié, pression sur --stock-max-ram, et compte de rôles du parc\n"
-	  "(control_registry). Deux garde-fous fixes : jamais 0 chercheur / jamais\n"
+	  "vérifié/vérifié, pression sur --stock-max-ram, et parc compté par rôle\n"
+	  "(pondéré par nb_forks, control_registry). Deux garde-fous fixes : jamais 0 chercheur / jamais\n"
 	  "100% pruner (le dosage n'augmente jamais tant qu'il ne reste qu'un seul\n"
 	  "chercheur connecté), et un délai minimal (~2 min) entre deux changements\n"
 	  "effectifs -- chaque changement coûte un redémarrage des fils chez les\n"
 	  "clients visés. Une décision manuelle via `clientsRoles` reste possible en\n"
 	  "parallèle ; la politique automatique la remplacera à son prochain tour si\n"
-	  "les signaux le justifient. Voir docs/conception/pilotage_type_client.md." },
+	  "les signaux le justifient. Voir docs/echanges_client_serveur.md." },
 	{ "--stock-max-ram",
 	  "--stock-max-ram <mo>",
 	  "Serveur : plafond en Mo des DEUX pools de stock (non vérifié + vérifié).",

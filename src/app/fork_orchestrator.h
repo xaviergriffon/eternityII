@@ -85,8 +85,8 @@ typedef struct {
 } orch_actions_t;
 
 /**
- * @brief Rôle assigné à UN fork de travail — cf.
- *        `docs/conception/pilotage_type_client.md`.
+ * @brief Rôle assigné à UN fork de travail (dosage recherche/contrôle par
+ *        fork — voir `docs/echanges_client_serveur.md`).
  */
 typedef enum {
     FORK_ROLE_SEARCH = 0, /**< Cherche (`autosearch`) : demande des possibilités vérifiées, en produit de nouvelles. */

@@ -107,7 +107,7 @@ TEST on_connect_creates_new_entry(void)
     PASS();
 }
 
-/* PR2 (docs/conception/pilotage_type_client.md) : ventilation par rôle. */
+/* Ventilation par rôle. */
 
 TEST on_connect_tracks_active_search_and_prune_counts(void)
 {

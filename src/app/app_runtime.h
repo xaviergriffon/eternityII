@@ -393,9 +393,8 @@ const char *parse_client_args(int argc, const char *argv[]);
  * à `autoprune()`/`autosearch()` : un lot mixte sous `--gpu` ferait donc
  * tourner CHAQUE fork (y compris ceux que `current_fork_role` a désignés
  * `FORK_ROLE_SEARCH`) sur `autoprune_gpu`, jamais sur `autosearch` — un
- * dosage silencieusement ignoré, pas seulement un gain nul (§5.4,
- * docs/conception/pilotage_type_client.md). D'où l'échec explicite au
- * démarrage plutôt qu'un repli silencieux.
+ * dosage silencieusement ignoré, pas seulement un gain nul. D'où l'échec
+ * explicite au démarrage plutôt qu'un repli silencieux.
  *
  * @param gpu_pruner_mode         Vrai si l'exécution GPU du pruner est active
  *                                (build CUDA=1 uniquement — appelant à passer
