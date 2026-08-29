@@ -314,6 +314,39 @@ int get_active_threads(client_t *thread_params);
 int server_active_client_count(void);
 
 /**
+ * @brief Un fork de travail actuellement connecté, avec son rôle déclaré.
+ */
+typedef struct {
+    int32_t fork_seq;
+    uint8_t mode; /**< CLIENT_MODE_SEARCH/PRUNER/GPU_PRUNER (net/client_identity.h). */
+} client_work_fork_t;
+
+/**
+ * @brief Liste, pour un `client_uid` donné, le rôle déclaré (`mode`) de
+ *        CHAQUE fork de travail actuellement connecté (identité reçue sur SA
+ *        PROPRE connexion de travail, `INST_CLIENT_HELLO` v12) — PAS le mode
+ *        unique, PAR SESSION, du canal de contrôle (`control_session_info_t.mode`),
+ *        qui ne reflète que le mode de LANCEMENT du process et jamais le
+ *        détail d'un dosage mixte (`--pruner-forks`/`clientsRoles`/
+ *        `--auto-roles`, docs/conception/pilotage_type_client.md).
+ *
+ * Balaie `thread_params[0..NB_THREADS[` SANS verrou — même convention que
+ * `get_active_threads`/`find_free_thread_slot` : lecture best-effort, une
+ * rare incohérence transitoire (connexion en cours d'établissement,
+ * `has_identity` pas encore posé) est acceptable pour une commande de
+ * diagnostic, jamais un chemin qui modifie quoi que ce soit.
+ *
+ * @param client_uid Identité de session (process parent) recherchée.
+ * @param out        Tableau de sortie.
+ * @param max        Capacité de `out`.
+ * @return           Nombre d'entrées écrites (0 si aucun fork de ce client
+ *                    n'est actuellement connecté en travail, `out == NULL`,
+ *                    ou `max <= 0`).
+ */
+int client_work_fork_roles(const uint8_t client_uid[CLIENT_UID_BYTES],
+                           client_work_fork_t *out, int max);
+
+/**
  * @brief Table complète des pièces + toutes leurs rotations, construite par
  *        `runserver` (`rotate_all_parts`) et déjà partagée avec chaque
  *        `client_t.rotate_parts` pour sérialiser les solutions en CSV.

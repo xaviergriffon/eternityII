@@ -437,16 +437,20 @@ Fork | Type   |     In stock |     Analysed
 Total|        |          218 |           23
 ```
 
-**Visibilité côté serveur.** Aucune API serveur (console `clients`, `GET
-/api/v1/clients`) n'expose aujourd'hui le rôle PAR FORK d'un client distant —
-seul le rôle DÉCLARÉ par le canal de contrôle du process PARENT est visible
-(un seul `mode` par session, celui du mode de lancement `client`/`pruner`, pas
-le détail d'un dosage mixte). Le serveur reçoit pourtant bien l'identité
-(`fork_seq`/`mode`) de chaque fork sur sa connexion de travail dès la
-connexion (visible ponctuellement dans `events.log` : « connexion de travail
-identifiée (fork_seq=N, mode=M, …) ») mais ne la conserve nulle part
-d'interrogeable — piste laissée ouverte pour une future extension de
-`clientsWork`/`GET /api/v1/clients`.
+**Visibilité côté serveur.** La console `clients`/`GET /api/v1/clients`
+n'expose qu'un seul `mode` PAR SESSION (celui du mode de lancement
+`client`/`pruner` du process, jamais le détail d'un dosage mixte). Le rôle
+PAR FORK, lui, est visible via `clientsWork <cible>` (console ou `POST
+/api/v1/command`) : le serveur retient déjà, par connexion de travail,
+l'identité déclarée sur son `INST_CLIENT_HELLO` (`fork_seq`/`mode`) —
+`clientsWork` ajoute cette liste à sa réponse habituelle (attribution du pool
+analysé) :
+
+```
+clientsWork mixed-client
+clientsWork (API HTTP admin) : mixed-client (client_uid=…) : 2 possibilite(s)
+en cours d'analyse, alloc max=6 ; forks: 0=search 1=search 2=prune 3=prune
+```
 
 ## Mode pruner (élagage)
 

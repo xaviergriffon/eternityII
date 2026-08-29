@@ -161,6 +161,29 @@ int server_active_client_count(void) {
 }
 
 /**
+ * @brief Voir la doc dans etii_server.h.
+ */
+int client_work_fork_roles(const uint8_t client_uid[CLIENT_UID_BYTES],
+                           client_work_fork_t *out, int max) {
+    if (thread_params == NULL || out == NULL || max <= 0) {
+        return 0;
+    }
+    int n = 0;
+    for (int i = 0; i < NB_THREADS && n < max; i++) {
+        if (!thread_params[i].has_identity) {
+            continue;
+        }
+        if (memcmp(thread_params[i].identity.client_uid, client_uid, CLIENT_UID_BYTES) != 0) {
+            continue;
+        }
+        out[n].fork_seq = thread_params[i].identity.fork_seq;
+        out[n].mode = thread_params[i].identity.mode;
+        n++;
+    }
+    return n;
+}
+
+/**
  * @brief Construit le tableau « File queues » du rapport serveur (une ligne par
  *        file : unchecked / checked / analysed, plus la ligne Total) dans une
  *        chaîne fraîchement allouée. Renvoie les totaux par pool via les

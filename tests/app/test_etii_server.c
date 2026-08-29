@@ -225,6 +225,129 @@ TEST active_threads_all_connected(void)
     PASS();
 }
 
+/* ---------- client_work_fork_roles (PR4, docs/conception/pilotage_type_client.md) */
+
+/* Rôle déclaré PAR FORK (identité de la connexion de travail,
+ * INST_CLIENT_HELLO v12), jamais le mode unique par-SESSION du canal de
+ * contrôle -- seul moyen, côté serveur, de voir un dosage mixte
+ * (--pruner-forks/clientsRoles/--auto-roles) sans attendre le `check` local
+ * du client concerné. */
+TEST client_work_fork_roles_filters_by_client_uid(void)
+{
+    client_t *saved_tp = thread_params;
+    int saved_nb = NB_THREADS;
+
+    uint8_t uid_a[CLIENT_UID_BYTES], uid_b[CLIENT_UID_BYTES];
+    memset(uid_a, 0xAA, sizeof uid_a);
+    memset(uid_b, 0xBB, sizeof uid_b);
+
+    client_t slots[4];
+    memset(slots, 0, sizeof slots);
+    slots[0].has_identity = 1;
+    memcpy(slots[0].identity.client_uid, uid_a, CLIENT_UID_BYTES);
+    slots[0].identity.fork_seq = 0;
+    slots[0].identity.mode = CLIENT_MODE_SEARCH;
+    slots[1].has_identity = 1;
+    memcpy(slots[1].identity.client_uid, uid_a, CLIENT_UID_BYTES);
+    slots[1].identity.fork_seq = 1;
+    slots[1].identity.mode = CLIENT_MODE_PRUNER;
+    slots[2].has_identity = 1;
+    memcpy(slots[2].identity.client_uid, uid_b, CLIENT_UID_BYTES); /* autre client : ignoré */
+    slots[2].identity.fork_seq = 0;
+    slots[2].identity.mode = CLIENT_MODE_SEARCH;
+    slots[3].has_identity = 0; /* pas encore identifié : ignoré */
+
+    NB_THREADS = 4;
+    thread_params = slots;
+
+    client_work_fork_t out[4];
+    int n = client_work_fork_roles(uid_a, out, 4);
+
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+
+    ASSERT_EQ_FMT(2, n, "%d");
+    ASSERT_EQ_FMT(0, out[0].fork_seq, "%d");
+    ASSERT_EQ_FMT((int)CLIENT_MODE_SEARCH, (int)out[0].mode, "%d");
+    ASSERT_EQ_FMT(1, out[1].fork_seq, "%d");
+    ASSERT_EQ_FMT((int)CLIENT_MODE_PRUNER, (int)out[1].mode, "%d");
+    PASS();
+}
+
+TEST client_work_fork_roles_no_match_is_zero(void)
+{
+    client_t *saved_tp = thread_params;
+    int saved_nb = NB_THREADS;
+
+    uint8_t uid_a[CLIENT_UID_BYTES], uid_other[CLIENT_UID_BYTES];
+    memset(uid_a, 0xCC, sizeof uid_a);
+    memset(uid_other, 0xDD, sizeof uid_other);
+
+    client_t slots[1];
+    memset(slots, 0, sizeof slots);
+    slots[0].has_identity = 1;
+    memcpy(slots[0].identity.client_uid, uid_other, CLIENT_UID_BYTES);
+
+    NB_THREADS = 1;
+    thread_params = slots;
+
+    client_work_fork_t out[1];
+    int n = client_work_fork_roles(uid_a, out, 1);
+
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+
+    ASSERT_EQ_FMT(0, n, "%d");
+    PASS();
+}
+
+TEST client_work_fork_roles_null_thread_params_is_zero(void)
+{
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+
+    uint8_t uid[CLIENT_UID_BYTES];
+    memset(uid, 0, sizeof uid);
+    client_work_fork_t out[1];
+    int n = client_work_fork_roles(uid, out, 1);
+
+    thread_params = saved_tp;
+
+    ASSERT_EQ_FMT(0, n, "%d");
+    PASS();
+}
+
+/* Plus de forks connectés que de capacité de sortie : tronqué, pas de
+ * débordement (comme control_registry_snapshot). */
+TEST client_work_fork_roles_respects_max_capacity(void)
+{
+    client_t *saved_tp = thread_params;
+    int saved_nb = NB_THREADS;
+
+    uint8_t uid[CLIENT_UID_BYTES];
+    memset(uid, 0xEE, sizeof uid);
+
+    client_t slots[3];
+    memset(slots, 0, sizeof slots);
+    for (int i = 0; i < 3; i++) {
+        slots[i].has_identity = 1;
+        memcpy(slots[i].identity.client_uid, uid, CLIENT_UID_BYTES);
+        slots[i].identity.fork_seq = i;
+    }
+
+    NB_THREADS = 3;
+    thread_params = slots;
+
+    client_work_fork_t out[2];
+    int n = client_work_fork_roles(uid, out, 2);
+
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+
+    ASSERT_EQ_FMT(2, n, "%d");
+    PASS();
+}
+
 /* ---------- build_file_queues_table -------------------------------------- */
 
 /* Sur un stock vide, tous les totaux valent 0 et le tableau est bien structuré
@@ -3241,6 +3364,10 @@ SUITE(etii_server_suite)
     RUN_TEST(active_threads_counts_connected_slots);
     RUN_TEST(active_threads_none_connected_is_zero);
     RUN_TEST(active_threads_all_connected);
+    RUN_TEST(client_work_fork_roles_filters_by_client_uid);
+    RUN_TEST(client_work_fork_roles_no_match_is_zero);
+    RUN_TEST(client_work_fork_roles_null_thread_params_is_zero);
+    RUN_TEST(client_work_fork_roles_respects_max_capacity);
 
     RUN_TEST(file_queues_table_empty_is_all_zero);
     RUN_TEST(file_queues_table_reflects_unchecked_stock);
