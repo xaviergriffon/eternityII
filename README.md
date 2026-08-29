@@ -58,7 +58,30 @@ Prérequis : `gcc`, `make`, pthreads (disponibles en standard sur macOS et Linux
 ./eternityII test
 ```
 
-Options transverses : `--stop-on-solution` (s'arrêter à la première solution ; par défaut la recherche continue), `--headless` (pas de console interactive — utile en service systemd), `--tcp-timeout <n>` (timeout d'inactivité des sockets TCP de travail, défaut 10 s), côté client/pruner `--name <label>` (identité affichée côté serveur, défaut le nom d'hôte) `--machine-uid-file <chemin>` (identité machine persistante, défaut `./eternityii-machine_uid`), `--pruner-forks <n>` (dosage recherche/contrôle par fork : `n` des `nb_forks` du process contrôlent le stock comme un pruner, les autres cherchent — absente : comportement historique inchangé ; incompatible avec `--gpu` si différente de `nb_forks` ; voir [Utilisation](docs/utilisation.md#dosage-recherchecontrôle-par-fork---pruner-forks)) et `--config-file <chemin>` (fichier de configuration clé=valeur, défaut `./eternityii-client.conf` — pré-remplit `nb_forks`/`pruner_forks`/`server_host`/`parts_file`/`max_stock_by_thread`/`limit`/`pruner_batch` pour les positions non fournies en ligne de commande ; commandes console `config`/`configSave`), et côté serveur `--stock-files <n>`/`--rebalance-budget <n>` (nombre de files de stock et vitesse de rééquilibrage — voir [Utilisation](docs/utilisation.md#maîtrise-de-la-charge-serveur---stock-files---rebalance-budget---tcp-timeout)), `--stock-max-ram <n>` (plafond en Mo des deux pools de stock, refuse la croissance au-delà — voir [Utilisation](docs/utilisation.md#plafond-ram-du-stock---stock-max-ram)), `--stock-spill-dir <chemin>` (déporte sur disque plutôt que refuser une fois le plafond RAM approché, défaut `./eternityii-spill` — survit à un `backup` suivi d'un `restore`, voir [Utilisation](docs/utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir)), `--auto-roles` (politique automatique de dosage recherche/contrôle du parc, désactivée par défaut — l'opérateur garde la main via `clientsRoles` tant qu'elle n'est pas activée ; voir [Utilisation](docs/utilisation.md#politique-automatique-de-dosage---auto-roles)) et `--http-port N` pour activer l'API HTTP REST admin sur `127.0.0.1:N`, éventuellement complétée par `--http-token-file <chemin>` pour exiger un jeton Bearer sur toutes les commandes admin de modification (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`, `clientsRoles`, `restore`, `backup`, `sortAsc`, `sortAscFiles`, `sortDesc`, `sortDescFiles`, `sortDescMulti`, `split`, `regroup`, `stockMaxRam` — seules les lectures restent ouvertes). L'aide intégrée est accessible via `./eternityII --help` (aide générale) et `./eternityII help <sujet>` (détail d'un mode ou d'une option).
+### Options transverses
+
+**Communes à tous les modes**
+
+- `--stop-on-solution` — s'arrêter à la première solution (par défaut la recherche continue).
+- `--headless` — pas de console interactive (utile en service systemd).
+- `--tcp-timeout <n>` — timeout d'inactivité des sockets TCP de travail (défaut 10 s).
+
+**Côté client/pruner**
+
+- `--name <label>` — identité affichée côté serveur (défaut le nom d'hôte).
+- `--machine-uid-file <chemin>` — identité machine persistante (défaut `./eternityii-machine_uid`).
+- `--pruner-forks <n>` — dosage recherche/contrôle par fork : `n` des `nb_forks` du process contrôlent le stock comme un pruner, les autres cherchent (absente : comportement historique inchangé ; incompatible avec `--gpu` si différente de `nb_forks`). Voir [Utilisation](docs/utilisation.md#dosage-recherchecontrôle-par-fork---pruner-forks).
+- `--config-file <chemin>` — fichier de configuration clé=valeur (défaut `./eternityii-client.conf`), pré-remplit `nb_forks`/`pruner_forks`/`server_host`/`parts_file`/`max_stock_by_thread`/`limit`/`pruner_batch` pour les positions non fournies en ligne de commande (commandes console `config`/`configSave`).
+
+**Côté serveur**
+
+- `--stock-files <n>` / `--rebalance-budget <n>` — nombre de files de stock et vitesse de rééquilibrage. Voir [Utilisation](docs/utilisation.md#maîtrise-de-la-charge-serveur---stock-files---rebalance-budget---tcp-timeout).
+- `--stock-max-ram <n>` — plafond en Mo des deux pools de stock, refuse la croissance au-delà. Voir [Utilisation](docs/utilisation.md#plafond-ram-du-stock---stock-max-ram).
+- `--stock-spill-dir <chemin>` — déporte sur disque plutôt que refuser une fois le plafond RAM approché (défaut `./eternityii-spill`, survit à un `backup` suivi d'un `restore`). Voir [Utilisation](docs/utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir).
+- `--auto-roles` — politique automatique de dosage recherche/contrôle du parc, désactivée par défaut (l'opérateur garde la main via `clientsRoles` tant qu'elle n'est pas activée). Voir [Utilisation](docs/utilisation.md#politique-automatique-de-dosage---auto-roles).
+- `--http-port N` — active l'API HTTP REST admin sur `127.0.0.1:N`, éventuellement complétée par `--http-token-file <chemin>` pour exiger un jeton Bearer sur toutes les commandes admin de modification (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`, `clientsRoles`, `restore`, `backup`, `sortAsc`, `sortAscFiles`, `sortDesc`, `sortDescFiles`, `sortDescMulti`, `split`, `regroup`, `stockMaxRam` — seules les lectures restent ouvertes).
+
+L'aide intégrée est accessible via `./eternityII --help` (aide générale) et `./eternityII help <sujet>` (détail d'un mode ou d'une option).
 
 Un client/pruner ne fork plus ses process de recherche immédiatement au démarrage : si un fichier de configuration est trouvé (`--config-file`), un décompte de 5 s lance l'auto-démarrage (annulé dès la première touche pressée) ; sinon il attend une commande `start`/`config <clé> <valeur>`. Ce cycle de vie (`start`, `stopForks`, `configApply`, `config`, `configSave`) est pilotable en **console locale** ou **à distance depuis le serveur** via `clientsCommand [--to <cible>]` (voir ci-dessous) — ex. `clientsCommand --to jetson-1 stopForks` puis `clientsCommand --to jetson-1 configApply` après avoir préparé `clientsCommand --to jetson-1 config nb_forks 8`. Détails : [docs/console.md](docs/console.md) et [docs/echanges_client_serveur.md](docs/echanges_client_serveur.md#pilotage-à-distance-du-cycle-de-vie-des-fils).
 
@@ -68,7 +91,18 @@ Un client/pruner ne fork plus ses process de recherche immédiatement au démarr
 
 Une fois lancé, le programme écoute des commandes sur l'entrée standard.
 
-- **Commandes principales** : sauvegarde/restauration du stock (`backup`, `restore`), tri et élagage des files (`sortDesc`, `sortAscFiles`, `sortDescFiles`, `removeNoNext`, `expand`), régulation (`limit`, `pause`/`resume`), cycle de vie des fils côté client/pruner (`start`, `stopForks`, `configApply`, `config [<clé> <valeur>]`, `configSave`), et pilotage des clients connectés depuis le serveur (`clients`, `clientsStats`, `clientsCommand [--to <session_no|client_uid|label>]` pour cibler un seul client au lieu de diffuser à tous — y compris les cinq commandes de cycle de vie ci-dessus, poussées à distance —, `clientsRoles [--to <cible>] <nb_pruner>` pour composer `config pruner_forks`/`configApply` en une commande et mémoriser le dosage désiré par machine (survit à une reconnexion/un redémarrage du client), `knownClients` pour la liste cumulative des machines connues — y compris déconnectées, `clientsWork <cible>` pour consulter ce qu'un client précis détient actuellement en cours d'analyse, `leaseDuration <n>` pour régler le bail à expiration qui rend automatiquement au stock la part d'un client disparu).
+- **Commandes principales** :
+  - Sauvegarde/restauration du stock : `backup`, `restore`.
+  - Tri et élagage des files : `sortDesc`, `sortAscFiles`, `sortDescFiles`, `removeNoNext`, `expand`.
+  - Régulation : `limit`, `pause`/`resume`.
+  - Cycle de vie des fils côté client/pruner : `start`, `stopForks`, `configApply`, `config [<clé> <valeur>]`, `configSave`.
+  - Pilotage des clients connectés depuis le serveur :
+    - `clients`, `clientsStats` — état des clients connectés.
+    - `clientsCommand [--to <session_no|client_uid|label>]` — cible un seul client au lieu de diffuser à tous, y compris les cinq commandes de cycle de vie ci-dessus poussées à distance.
+    - `clientsRoles [--to <cible>] <nb_pruner>` — compose `config pruner_forks`/`configApply` en une commande et mémorise le dosage désiré par machine (survit à une reconnexion/un redémarrage du client).
+    - `knownClients` — liste cumulative des machines connues, y compris déconnectées.
+    - `clientsWork <cible>` — consulte ce qu'un client précis détient actuellement en cours d'analyse.
+    - `leaseDuration <n>` — règle le bail à expiration qui rend automatiquement au stock la part d'un client disparu.
 - **Aide intégrée** : `help` liste les commandes par catégorie avec leur syntaxe, `help <commande>` détaille une commande, `help <catégorie>` filtre une section ; les noms canoniques sont en camelCase complet et insensibles à la casse, les noms historiques abrégés restent des alias (`sortd`, `rmnonext`, `clientsCmd`, `quit`, …) et un argument manquant affiche automatiquement le rappel d'usage.
 - **Évènements & historique** : les évènements notables (records, solutions, connexions) sont affichés dans une zone dédiée et journalisés dans `events.log` ; l'historique des commandes (↑/↓) est persisté entre sessions.
 - **Affichage** : aucune commande n'efface l'écran implicitement — seule la commande `clear` (alias `cls`, raccourci Ctrl-L) le fait, sans perdre le contenu (scrollback du terminal en ANSI, PgUp en ncurses) — et la ligne de saisie en cours n'est plus corrompue par les logs asynchrones (elle est redessinée sous chaque log). Les sorties longues (`help`, `statistic`, `print`, …) sont paginées en mode interactif (`--Suite--`, comme `more` ; en ncurses le pad scrollable — PgUp/PgDn et molette — couvre le besoin).
