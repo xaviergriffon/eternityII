@@ -216,4 +216,24 @@ void server_config_apply_pre_dispatch(const server_config_t *cfg);
  */
 void server_config_apply_to_globals(const server_config_t *cfg, int cli_gave_nb_threads, int cli_gave_parts_file);
 
+/**
+ * @brief Capture la configuration EFFECTIVE actuelle (valeurs réellement en
+ *        vigueur) depuis les globales, dans un `server_config_t` neuf.
+ *
+ * Contrairement à `server_config_load` (ce qui a été LU dans un fichier), ceci
+ * reflète toujours l'état COURANT du serveur — utilisé par les commandes
+ * console `config` (affichage) et `configSave` (persistance), qui doivent
+ * refléter la réalité, pas un instantané de démarrage. `stock_files` reflète
+ * `nb_file_possibility` (le compte RÉELLEMENT actif, cf. `core/datamanager.h`)
+ * plutôt que le sentinel `stock_files_requested` (0 = non demandé) : après
+ * démarrage, `nb_file_possibility` est toujours résolu (au pire au défaut
+ * `NB_FILE_POSSIBILITY_DEFAULT`), donc toujours la valeur pertinente à
+ * afficher/persister. `http_port`/`http_token_file`/`stock_max_ram` sont
+ * omis (`has_*` à 0) quand leur sentinel « non configuré » (`0`/`NULL`) est en
+ * vigueur — jamais une valeur inventée.
+ *
+ * @param out Configuration résultat (réinitialisée par cet appel).
+ */
+void server_config_capture_effective(server_config_t *out);
+
 #endif /* server_config_h */

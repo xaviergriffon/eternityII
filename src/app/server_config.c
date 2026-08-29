@@ -1,5 +1,6 @@
 #include "app/server_config.h"
 #include "app/app_static_variables.h"
+#include "core/datamanager.h"
 #include "ui/logger.h"
 
 #include <stdio.h>
@@ -406,6 +407,66 @@ void server_config_apply_pre_dispatch(const server_config_t *cfg)
     if (cfg->has_headless && headless_mode == 0) {
         headless_mode = cfg->headless;
     }
+}
+
+void server_config_capture_effective(server_config_t *out)
+{
+    server_config_init(out);
+
+    out->has_nb_threads = 1;
+    out->nb_threads = NB_THREADS;
+
+    if (parts_files != NULL) {
+        out->has_parts_file = 1;
+        out->parts_file = strdup(parts_files);
+    }
+
+    out->has_expand_level = 1;
+    out->expand_level = expand_min_level;
+
+    out->has_expand_max_stock = 1;
+    out->expand_max_stock = expand_max_stock;
+
+    out->has_expand_max_levels = 1;
+    out->expand_max_levels = expand_max_levels;
+
+    if (HTTP_PORT > 0) {
+        out->has_http_port = 1;
+        out->http_port = HTTP_PORT;
+    }
+
+    if (HTTP_TOKEN_FILE != NULL) {
+        out->has_http_token_file = 1;
+        out->http_token_file = strdup(HTTP_TOKEN_FILE);
+    }
+
+    out->has_stock_files = 1;
+    out->stock_files = nb_file_possibility;
+
+    if (stock_max_ram_mb > 0) {
+        out->has_stock_max_ram = 1;
+        out->stock_max_ram = stock_max_ram_mb;
+    }
+
+    if (stock_spill_dir != NULL) {
+        out->has_stock_spill_dir = 1;
+        out->stock_spill_dir = strdup(stock_spill_dir);
+    }
+
+    out->has_rebalance_budget = 1;
+    out->rebalance_budget = rebalance_budget;
+
+    out->has_tcp_timeout = 1;
+    out->tcp_timeout = tcp_timeout;
+
+    out->has_auto_roles = 1;
+    out->auto_roles = auto_roles_requested ? 1 : 0;
+
+    out->has_stop_on_solution = 1;
+    out->stop_on_solution = stop_on_solution ? 1 : 0;
+
+    out->has_headless = 1;
+    out->headless = headless_mode ? 1 : 0;
 }
 
 void server_config_apply_to_globals(const server_config_t *cfg, int cli_gave_nb_threads, int cli_gave_parts_file)
