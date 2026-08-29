@@ -70,6 +70,54 @@ int32_t compute_server_hunger(unsigned long long stock, int active_clients) {
     return (int32_t)missing;
 }
 
+role_mix_decision_t compute_desired_role_mix(unsigned long long unchecked_stock,
+                                              unsigned long long checked_stock,
+                                              int ram_pressure_high,
+                                              unsigned long long search_starved_delta,
+                                              unsigned long long prune_starved_delta,
+                                              int nb_search,
+                                              int nb_prune) {
+    if (nb_search <= 0 && nb_prune > 0) {
+        // Violation de l'invariant (ne devrait jamais arriver si cette
+        // fonction est la seule à piloter le dosage) : corrigée en priorité
+        // sur tout autre signal.
+        return ROLE_MIX_DECREASE_PRUNE;
+    }
+    if (nb_search + nb_prune <= 0) {
+        return ROLE_MIX_KEEP; // aucune session connectée : rien à décider
+    }
+
+    if (search_starved_delta > 0 || prune_starved_delta > 0) {
+        // Un rôle qui tourne à vide indique un parc mal dimensionné pour le
+        // travail disponible MAINTENANT ; la recherche étant le seul rôle
+        // qui régénère du stock à partir de rien, réduire le dosage est la
+        // correction sûre dans les deux cas (chercheur affamé ou pruner affamé).
+        return (nb_prune > 0) ? ROLE_MIX_DECREASE_PRUNE : ROLE_MIX_KEEP;
+    }
+
+    // Garde-fou "jamais 0 chercheur / jamais 100% pruner" : tant que le parc
+    // n'a plus qu'un chercheur (ou zéro), jamais d'augmentation.
+    int guard_min_search = (nb_search <= 1);
+
+    if (!guard_min_search && ram_pressure_high) {
+        return ROLE_MIX_INCREASE_PRUNE;
+    }
+
+    if (!guard_min_search &&
+        unchecked_stock > ROLE_MIX_BACKLOG_FLOOR &&
+        unchecked_stock > 2 * checked_stock) {
+        return ROLE_MIX_INCREASE_PRUNE;
+    }
+
+    if (nb_prune > 0 &&
+        checked_stock > ROLE_MIX_BACKLOG_FLOOR &&
+        checked_stock > 2 * unchecked_stock) {
+        return ROLE_MIX_DECREASE_PRUNE;
+    }
+
+    return ROLE_MIX_KEEP;
+}
+
 int find_free_thread_slot(client_t *threads, int nb) {
     for (int t = 0; t < nb; t++) {
         if (threads[t].exist != 0 && threads[t].socket_id == -1) return t;
@@ -110,6 +158,29 @@ int get_active_threads(client_t *thread_params) {
  */
 int server_active_client_count(void) {
     return get_active_threads(thread_params);
+}
+
+/**
+ * @brief Voir la doc dans etii_server.h.
+ */
+int client_work_fork_roles(const uint8_t client_uid[CLIENT_UID_BYTES],
+                           client_work_fork_t *out, int max) {
+    if (thread_params == NULL || out == NULL || max <= 0) {
+        return 0;
+    }
+    int n = 0;
+    for (int i = 0; i < NB_THREADS && n < max; i++) {
+        if (!thread_params[i].has_identity) {
+            continue;
+        }
+        if (memcmp(thread_params[i].identity.client_uid, client_uid, CLIENT_UID_BYTES) != 0) {
+            continue;
+        }
+        out[n].fork_seq = thread_params[i].identity.fork_seq;
+        out[n].mode = thread_params[i].identity.mode;
+        n++;
+    }
+    return n;
 }
 
 /**
@@ -212,7 +283,7 @@ static int owner_control_session_alive(const uint8_t owner_uid[CLIENT_UID_BYTES]
  * @param sleep_time    Durée nominale du tour (secondes), utilisée pour le débit rapporté.
  */
 void check_server_step(unsigned long long *lastactive, autobackup_state_t *backup_state,
-                       int *last_record, int sleep_time)
+                       int *last_record, int sleep_time, auto_role_mix_state_t *role_mix_state)
 {
     unsigned long long currentactive = *lastactive;
     unsigned long long clientsFileUpdates = 0;
@@ -412,6 +483,59 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
                               + (backup_end.tv_nsec - backup_start.tv_nsec) / 1000000LL;
         server_last_backup_duration_ms = (unsigned long long)(elapsed_ms > 0 ? elapsed_ms : 0);
     }
+
+    // Politique automatique de dosage recherche/contrôle (PR4, désactivée par
+    // défaut — voir --auto-roles). Branchée dans CE tour existant à 10s,
+    // aucune cadence dédiée : les deux tailles de stock (unchecked_stock,
+    // checked_stock) sont déjà calculées ci-dessus par build_file_queues_table,
+    // il ne manque que les deltas de famine (compteurs cumulatifs, PR2) et le
+    // compte de rôles du parc (control_registry, PR2) pour appeler la
+    // décision pure ci-dessus.
+    if (auto_roles_requested && role_mix_state != NULL) {
+        control_session_info_t sessions[MAX_CONTROL_SESSIONS];
+        int nb_sessions = control_registry_snapshot(sessions, MAX_CONTROL_SESSIONS);
+        // Pondéré par nb_forks (control_registry_count_role_forks), jamais un
+        // compte de sessions (control_registry_count_roles) : avec une seule
+        // machine connectée -- quel que soit son nombre de forks -- un compte
+        // de sessions vaut au plus 1, ce qui déclenche à tort le garde-fou
+        // "jamais 0 chercheur" de compute_desired_role_mix et bloque toute
+        // augmentation même avec des dizaines de forks de recherche inactifs
+        // à convertir (bug réel observé en usage single-machine).
+        int nb_search = 0, nb_prune = 0;
+        control_registry_count_role_forks(sessions, nb_sessions, &nb_search, &nb_prune);
+
+        unsigned long long search_starved_now = server_search_starved;
+        unsigned long long prune_starved_now = server_prune_starved;
+        unsigned long long search_starved_delta = search_starved_now - role_mix_state->last_search_starved;
+        unsigned long long prune_starved_delta = prune_starved_now - role_mix_state->last_prune_starved;
+        role_mix_state->last_search_starved = search_starved_now;
+        role_mix_state->last_prune_starved = prune_starved_now;
+
+        unsigned long long ram_limit = datamanager_ram_limit_packets();
+        unsigned long long ram_resident = datamanager_resident_packets();
+        int ram_pressure_high = (ram_limit > 0) &&
+                                 (ram_resident * 100ULL >= ram_limit * (unsigned long long)STOCK_SPILL_HIGH_PERCENT);
+
+        role_mix_state->ticks_since_change++;
+
+        role_mix_decision_t decision = compute_desired_role_mix(
+            file_possibility_stock, file_possibility_checked_stock, ram_pressure_high,
+            search_starved_delta, prune_starved_delta, nb_search, nb_prune);
+
+        if (decision != ROLE_MIX_KEEP && role_mix_state->ticks_since_change >= ROLE_MIX_MIN_TICKS_DEFAULT) {
+            int next_dosage = role_mix_state->current_dosage + (int)decision;
+            if (next_dosage < 0) next_dosage = 0;
+            if (next_dosage > ROLE_MIX_MAX_DOSAGE) next_dosage = ROLE_MIX_MAX_DOSAGE;
+            if (next_dosage != role_mix_state->current_dosage) {
+                control_registry_apply_role_dosage(NULL, next_dosage);
+                log_event("politique automatique (--auto-roles) : dosage recherche/contrôle ajusté à pruner_forks=%d "
+                          "(recherche:%d contrôle:%d, non vérifié:%llu vérifié:%llu)",
+                          next_dosage, nb_search, nb_prune, file_possibility_stock, file_possibility_checked_stock);
+                role_mix_state->current_dosage = next_dosage;
+                role_mix_state->ticks_since_change = 0;
+            }
+        }
+    }
 }
 
 void *check_server(void *param)
@@ -419,6 +543,7 @@ void *check_server(void *param)
     (void)param;
     unsigned long long lastactive = 0;
     autobackup_state_t backup_state = {0};
+    auto_role_mix_state_t role_mix_state = {0};
     int sleep_time = 10;
     int last_record = max_result;
     // Comme les autres threads (rmnonext, server_tcp, …) : la boucle s'arrête
@@ -426,7 +551,7 @@ void *check_server(void *param)
     // processus, le comportement est donc inchangé (et le thread testable).
     while(request != REQUEST_STOP)
     {
-        check_server_step(&lastactive, &backup_state, &last_record, sleep_time);
+        check_server_step(&lastactive, &backup_state, &last_record, sleep_time, &role_mix_state);
         sleep(sleep_time);
     }
 
@@ -1719,12 +1844,13 @@ void log_server_startup_diagnostics(const char *file)
               "nb_threads=%d fichier=\"%s\" stock_files=%d tcp_timeout=%ds "
               "stop_on_solution=%s expand_level=%d expand_max_stock=%d "
               "expand_max_levels=%d rebalance_budget=%d stock_max_ram_mb=%d "
-              "stock_spill_dir=\"%s\" http_port=%d http_token=%s\n",
+              "stock_spill_dir=\"%s\" http_port=%d http_token=%s auto_roles=%s\n",
               (int)getpid(), VERSION, ETERN_PARTS, NB_THREADS, file,
               nb_file_possibility, tcp_timeout, stop_on_solution ? "oui" : "non",
               expand_min_level, expand_max_stock, expand_max_levels,
               rebalance_budget, stock_max_ram_mb, stock_spill_dir, HTTP_PORT,
-              HTTP_PORT > 0 ? (HTTP_ADMIN_TOKEN[0] != '\0' ? "configuré" : "absent") : "n/a");
+              HTTP_PORT > 0 ? (HTTP_ADMIN_TOKEN[0] != '\0' ? "configuré" : "absent") : "n/a",
+              auto_roles_requested ? "oui" : "non");
 }
 
 void runserver(const char* file)

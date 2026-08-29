@@ -709,6 +709,119 @@ TEST merge_staged_config_overlays_only_staged_keys(void)
     PASS();
 }
 
+/* fork_orchestrator_staged_gpu_pruner_conflict_for : la reconfiguration à
+   chaud (configApply NEEDS_RESTART, y compris pousée à distance par
+   clientsRoles/--auto-roles) doit refuser exactement les configurations que
+   le garde-fou de démarrage (gpu_pruner_forks_conflict, app_runtime.h)
+   aurait refusées si elles avaient été fournies au lancement -- ni plus, ni
+   moins. */
+
+/* Aucune clé stagée : rien ne change, donc rien à refuser, même en mode GPU
+   avec un dosage déjà mixte (config antérieure à ce garde-fou, ou état
+   jamais atteignable normalement -- le test ne présume pas de comment on y
+   est arrivé). */
+TEST staged_gpu_pruner_conflict_absent_when_nothing_staged(void)
+{
+    fork_orchestrator_reset();
+    int saved_nb_threads = NB_THREADS;
+    int saved_pruner_forks = pruner_forks_requested;
+    NB_THREADS = 4;
+    pruner_forks_requested = 4;
+
+    ASSERT_EQ_FMT(0, fork_orchestrator_staged_gpu_pruner_conflict_for(1), "%d");
+
+    NB_THREADS = saved_nb_threads;
+    pruner_forks_requested = saved_pruner_forks;
+    fork_orchestrator_reset();
+    PASS();
+}
+
+/* gpu_pruner_mode=0 : jamais de conflit, quoi que ce soit de stagé --
+   même garantie que gpu_pruner_forks_conflict côté démarrage. */
+TEST staged_gpu_pruner_conflict_absent_when_gpu_inactive(void)
+{
+    fork_orchestrator_reset();
+    int saved_nb_threads = NB_THREADS;
+    int saved_pruner_forks = pruner_forks_requested;
+    NB_THREADS = 4;
+    pruner_forks_requested = 4;
+
+    fork_orchestrator_stage_config_line("nb_forks = 6");
+
+    ASSERT_EQ_FMT(0, fork_orchestrator_staged_gpu_pruner_conflict_for(0), "%d");
+
+    NB_THREADS = saved_nb_threads;
+    pruner_forks_requested = saved_pruner_forks;
+    fork_orchestrator_reset();
+    PASS();
+}
+
+/* Un pruner_forks stagé différent du nb_forks courant (nb_forks non stagé,
+   donc inchangé après application) : conflit détecté -- le cas signalé par
+   Xavier (clientsRoles/--auto-roles poussant "config pruner_forks <n>" +
+   "configApply" à un client GPU). */
+TEST staged_gpu_pruner_conflict_detected_for_staged_pruner_forks_mismatch(void)
+{
+    fork_orchestrator_reset();
+    int saved_nb_threads = NB_THREADS;
+    int saved_pruner_forks = pruner_forks_requested;
+    NB_THREADS = 4;
+    pruner_forks_requested = 4; /* valide au démarrage : pruner_forks == nb_forks */
+
+    fork_orchestrator_stage_config_line("pruner_forks = 2");
+
+    ASSERT_EQ_FMT(1, fork_orchestrator_staged_gpu_pruner_conflict_for(1), "%d");
+
+    NB_THREADS = saved_nb_threads;
+    pruner_forks_requested = saved_pruner_forks;
+    fork_orchestrator_reset();
+    PASS();
+}
+
+/* Un nb_forks stagé qui rend l'ancien pruner_forks_requested (non touché par
+   cette configuration) incohérent : conflit détecté aussi -- pruner_forks
+   n'a pas besoin d'être lui-même stagé pour que la config APRÈS application
+   viole l'invariant. */
+TEST staged_gpu_pruner_conflict_detected_for_staged_nb_forks_mismatch(void)
+{
+    fork_orchestrator_reset();
+    int saved_nb_threads = NB_THREADS;
+    int saved_pruner_forks = pruner_forks_requested;
+    NB_THREADS = 4;
+    pruner_forks_requested = 4; /* valide au démarrage : pruner_forks == nb_forks */
+
+    fork_orchestrator_stage_config_line("nb_forks = 6");
+
+    ASSERT_EQ_FMT(1, fork_orchestrator_staged_gpu_pruner_conflict_for(1), "%d");
+
+    NB_THREADS = saved_nb_threads;
+    pruner_forks_requested = saved_pruner_forks;
+    fork_orchestrator_reset();
+    PASS();
+}
+
+/* nb_forks ET pruner_forks stagés en même temps, alignés l'un sur l'autre :
+   pas de conflit -- l'opérateur peut légitimement redimensionner un client
+   GPU tant que pruner_forks suit. */
+TEST staged_gpu_pruner_conflict_absent_when_both_staged_in_sync(void)
+{
+    fork_orchestrator_reset();
+    int saved_nb_threads = NB_THREADS;
+    int saved_pruner_forks = pruner_forks_requested;
+    NB_THREADS = 4;
+    pruner_forks_requested = 4;
+
+    fork_orchestrator_stage_config_line("nb_forks = 6");
+    fork_orchestrator_stage_config_line("pruner_forks = 6");
+
+    ASSERT_EQ_FMT(0, fork_orchestrator_staged_gpu_pruner_conflict_for(1), "%d");
+
+    NB_THREADS = saved_nb_threads;
+    pruner_forks_requested = saved_pruner_forks;
+    fork_orchestrator_reset();
+    PASS();
+}
+
 /* fork_orchestrator_apply_staged_config applique IMMÉDIATEMENT (sans
    redémarrage) la configuration stagée aux globales en vigueur — c'est ce qui
    permet à "config nb_forks N" suivi de "start" de forker avec la nouvelle
@@ -949,6 +1062,11 @@ SUITE(fork_orchestrator_suite)
     RUN_TEST(stage_config_line_valid_key_cancels_countdown_and_is_formatted);
     RUN_TEST(stage_config_line_invalid_does_not_transition);
     RUN_TEST(merge_staged_config_overlays_only_staged_keys);
+    RUN_TEST(staged_gpu_pruner_conflict_absent_when_nothing_staged);
+    RUN_TEST(staged_gpu_pruner_conflict_absent_when_gpu_inactive);
+    RUN_TEST(staged_gpu_pruner_conflict_detected_for_staged_pruner_forks_mismatch);
+    RUN_TEST(staged_gpu_pruner_conflict_detected_for_staged_nb_forks_mismatch);
+    RUN_TEST(staged_gpu_pruner_conflict_absent_when_both_staged_in_sync);
     RUN_TEST(apply_staged_config_writes_globals_immediately);
     RUN_TEST(reset_clears_staged_config);
     RUN_TEST(apply_restart_config_quiesces_concurrent_array_readers);

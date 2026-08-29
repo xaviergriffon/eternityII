@@ -429,6 +429,35 @@ client_config_diff_t fork_orchestrator_diff_staged_config(const client_config_t 
     return d;
 }
 
+int fork_orchestrator_staged_gpu_pruner_conflict_for(int gpu_pruner_mode_value)
+{
+    pthread_mutex_lock(&g_orch_mutex);
+    ensure_staged_config_locked();
+    int nb_forks_after = g_staged_config.has_nb_forks ? g_staged_config.nb_forks : NB_THREADS;
+    int pruner_forks_after = g_staged_config.has_pruner_forks
+        ? g_staged_config.pruner_forks : pruner_forks_requested;
+    pthread_mutex_unlock(&g_orch_mutex);
+
+    return gpu_pruner_forks_conflict(gpu_pruner_mode_value, pruner_forks_after, nb_forks_after);
+}
+
+int fork_orchestrator_staged_gpu_pruner_conflict(void)
+{
+    // gpu_pruner_mode n'existe (déclaré app_static_variables.h) que sur un
+    // build WITH_CUDA -- comme le seul autre site qui la lit (main.c). Sur
+    // un build sans CUDA, --gpu échoue déjà au démarrage : jamais de conflit
+    // possible ici. Séparé en deux fonctions pour que
+    // fork_orchestrator_staged_gpu_pruner_conflict_for reste testable (avec
+    // gpu_pruner_mode=1 injecté) même sur un build sans CUDA -- même
+    // convention que gpu_pruner_forks_conflict (app_runtime.{h,c}), qui
+    // prend déjà gpu_pruner_mode en paramètre plutôt que de lire la globale.
+#ifdef WITH_CUDA
+    return fork_orchestrator_staged_gpu_pruner_conflict_for(gpu_pruner_mode);
+#else
+    return fork_orchestrator_staged_gpu_pruner_conflict_for(0);
+#endif
+}
+
 void fork_orchestrator_apply_hot_staged_config(void)
 {
     int has_max_stock, has_limit, has_pruner_batch, has_dfs_budget;

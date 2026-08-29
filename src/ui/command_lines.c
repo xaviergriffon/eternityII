@@ -734,6 +734,25 @@ int config_apply_interpreter(void) {
     client_config_free(&effective);
 
     if (diff == CLIENT_CONFIG_DIFF_NEEDS_RESTART) {
+        // Revérifié ICI, sur le chemin de reconfiguration à CHAUD : le
+        // garde-fou --gpu + --pruner-forks (gpu_pruner_forks_conflict,
+        // app_runtime.h) n'est autrement évalué qu'une fois, avant le tout
+        // premier fork() du process (handle_client/main.c). Sans ce test,
+        // un `configApply` NEEDS_RESTART -- déclenché en console, ou poussé
+        // à distance par `clientsRoles`/`--auto-roles` via le canal de
+        // contrôle -- pouvait re-forker un client `pruner --gpu` avec un
+        // pruner_forks stagé différent de nb_forks : exactement l'état que
+        // le garde-fou de démarrage rend impossible, mais silencieusement
+        // ici (aucun refus, aucun log_error).
+        if (fork_orchestrator_staged_gpu_pruner_conflict()) {
+            log_error("configApply : refusé -- la configuration en préparation rendrait "
+                      "pruner_forks incompatible avec le pruner GPU actif (--gpu) ; le "
+                      "contexte CUDA n'est initialisé qu'une fois par process, retirer "
+                      "pruner_forks de la configuration en préparation ou l'aligner sur "
+                      "nb_forks\n");
+            return -1;
+        }
+
         orch_actions_t actions;
         fork_orchestrator_post_event(EV_RESTART, &actions);
         if (actions.error == ORCH_ERR_NOT_RUNNING) {
@@ -1503,6 +1522,40 @@ static int admin_remote_clients_roles(char *rest) {
 }
 
 /**
+ * @brief Formate en texte compact `fork_seq=rôle ...` le rôle déclaré de
+ *        chaque fork de travail actuellement connecté d'un client
+ *        (`client_work_fork_roles`, PR4 de
+ *        docs/conception/pilotage_type_client.md) — jusqu'ici la seule
+ *        façon de voir ce dosage était le tableau « Thread queues » local du
+ *        client concerné (commande `check`), jamais depuis le serveur.
+ *        Partagé entre `clients_work_interpreter` et
+ *        `admin_remote_clients_work` (un seul point à toucher).
+ *
+ * `CLIENT_MODE_GPU_PRUNER` s'affiche `prune-gpu`, distinct de `prune` — ce
+ * détail n'a pas sa place dans `fork_role_t` (recherche/contrôle, binaire)
+ * mais reste visible ici puisque l'identité déclarée le porte déjà.
+ */
+static void format_client_work_fork_roles(const uint8_t client_uid[CLIENT_UID_BYTES],
+                                          char *buf, size_t bufsize) {
+    int cap = (NB_THREADS > 0) ? NB_THREADS : 1;
+    client_work_fork_t *roles = calloc((size_t)cap, sizeof *roles);
+    int n = client_work_fork_roles(client_uid, roles, cap);
+    if (n == 0) {
+        snprintf(buf, bufsize, "aucun fork de travail connecté");
+        free(roles);
+        return;
+    }
+    int off = 0;
+    for (int i = 0; i < n && off < (int)bufsize; i++) {
+        const char *role = (roles[i].mode == CLIENT_MODE_SEARCH) ? "search"
+                          : (roles[i].mode == CLIENT_MODE_PRUNER) ? "prune"
+                          : "prune-gpu";
+        off += snprintf(buf + off, bufsize - off, "%s%d=%s", (i > 0) ? " " : "", roles[i].fork_seq, role);
+    }
+    free(roles);
+}
+
+/**
  * @brief Portion "clientsWork <cible>" de `admin_apply_remote_command`,
  *        réentrante (aucun strtok global).
  *
@@ -1531,8 +1584,10 @@ static int admin_remote_clients_work(char *target) {
 
     char client_uid_hex[2 * CLIENT_UID_BYTES + 1];
     client_identity_hex_encode(client_uid, CLIENT_UID_BYTES, client_uid_hex, sizeof(client_uid_hex));
-    log_info("clientsWork (API HTTP admin) : %s (client_uid=%s) : %llu possibilite(s) en cours d'analyse, alloc max=%d\n",
-              target, client_uid_hex, count, max_alloc);
+    char fork_roles[512];
+    format_client_work_fork_roles(client_uid, fork_roles, sizeof fork_roles);
+    log_info("clientsWork (API HTTP admin) : %s (client_uid=%s) : %llu possibilite(s) en cours d'analyse, alloc max=%d ; forks: %s\n",
+              target, client_uid_hex, count, max_alloc, fork_roles);
     return ADMIN_CMD_OK;
 }
 
@@ -2077,12 +2132,15 @@ int clients_work_interpreter(void) {
     char client_uid_hex[2 * CLIENT_UID_BYTES + 1];
     client_identity_hex_encode(client_uid, CLIENT_UID_BYTES, client_uid_hex, sizeof(client_uid_hex));
 
+    char fork_roles[512];
+    format_client_work_fork_roles(client_uid, fork_roles, sizeof fork_roles);
+
     if (count == 0) {
-        log_info("clientsWork : %s (client_uid=%s) : aucune possibilité en cours d'analyse\n",
-                  target, client_uid_hex);
+        log_info("clientsWork : %s (client_uid=%s) : aucune possibilité en cours d'analyse ; forks: %s\n",
+                  target, client_uid_hex, fork_roles);
     } else {
-        log_info("clientsWork : %s (client_uid=%s) : %llu possibilité(s) en cours d'analyse, alloc max=%d\n",
-                  target, client_uid_hex, count, max_alloc);
+        log_info("clientsWork : %s (client_uid=%s) : %llu possibilité(s) en cours d'analyse, alloc max=%d ; forks: %s\n",
+                  target, client_uid_hex, count, max_alloc, fork_roles);
     }
     return 0;
 }

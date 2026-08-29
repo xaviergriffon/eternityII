@@ -74,6 +74,42 @@ typedef struct
 } autobackup_state_t;
 
 /**
+ * @brief Décision produite par `compute_desired_role_mix` : sens dans lequel
+ *        faire évoluer le dosage recherche/contrôle diffusé au parc, jamais
+ *        une valeur absolue (PR4, docs/conception/pilotage_type_client.md).
+ *
+ * Un pas de ±1 (jamais un saut direct vers une cible calculée) est ce qui
+ * rend l'hystérésis triviale à appliquer côté appelant : chaque changement
+ * effectif coûte un `stopForks`+re-fork chez le client visé (PR1), donc
+ * chaque incrément doit rester une décision consciente, jamais un rattrapage
+ * brutal d'un déséquilibre mesuré une seule fois.
+ */
+typedef enum {
+    ROLE_MIX_DECREASE_PRUNE = -1,
+    ROLE_MIX_KEEP = 0,
+    ROLE_MIX_INCREASE_PRUNE = 1,
+} role_mix_decision_t;
+
+/**
+ * @brief État persistant d'un tour à l'autre de la politique automatique
+ *        (PR4) — mêmes conventions in/out que `autobackup_state_t` :
+ *        paramètre explicite plutôt que statique cachée, pour rester
+ *        testable sans dépendre de l'ordre d'exécution des tests.
+ */
+typedef struct {
+    /// Valeur cumulée de `server_search_starved`/`server_prune_starved` au
+    /// tour précédent, pour calculer un delta (compteurs cumulatifs, jamais
+    /// remis à zéro).
+    unsigned long long last_search_starved;
+    unsigned long long last_prune_starved;
+    /// Dernier dosage (`pruner_forks`) effectivement diffusé au parc.
+    int current_dosage;
+    /// Nombre de tours (10s) écoulés depuis le dernier changement appliqué —
+    /// délai minimal avant d'accepter un nouveau changement (hystérésis).
+    int ticks_since_change;
+} auto_role_mix_state_t;
+
+/**
  * @brief Initialise et démarre le serveur EternityII.
  *
  * Charge les pièces depuis `file`, construit la map de lookup, génère le paquet
@@ -116,9 +152,13 @@ void *check_server(void *param);
  *
  * Extrait pour être testable hors thread. Voir etii_server.c pour le détail
  * des paramètres in/out (état persistant d'un tour à l'autre).
+ *
+ * @param role_mix_state État de la politique automatique (PR4) — ignoré (aucune
+ *                        lecture, aucune écriture) si `auto_roles_requested`
+ *                        est faux ou si ce pointeur est NULL.
  */
 void check_server_step(unsigned long long *lastactive, autobackup_state_t *backup_state,
-                       int *last_record, int sleep_time);
+                       int *last_record, int sleep_time, auto_role_mix_state_t *role_mix_state);
 
 /**
  * @brief Borne le nombre de possibilités demandées en lot par un pruner.
@@ -168,6 +208,71 @@ extern unsigned long long server_search_starved;
 extern unsigned long long server_prune_starved;
 
 /**
+ * @brief Calcule le sens d'ajustement du dosage recherche/contrôle à partir
+ *        des signaux de besoin déjà mesurés par PR2 (PR4,
+ *        docs/conception/pilotage_type_client.md §4).
+ *
+ * Fonction PURE (aucune I/O, aucun accès au registre ni à l'horloge) — les
+ * deltas de famine et le ratio de pression RAM sont calculés par l'appelant
+ * (`check_server_step`), qui tient l'état cumulatif d'un tour à l'autre.
+ *
+ * Priorité des signaux, du plus urgent au plus indicatif :
+ *  1. Un parc déjà à 0 chercheur avec au moins un pruner est une violation de
+ *     l'invariant (ne devrait jamais arriver si cette fonction est la seule
+ *     à piloter le dosage) : corrigée immédiatement, prioritaire sur tout
+ *     le reste.
+ *  2. Un parc vide (aucune session) : rien à décider.
+ *  3. Une famine (chercheur OU pruner) signale un parc mal dimensionné pour
+ *     le travail disponible MAINTENANT ; la recherche étant le seul rôle qui
+ *     régénère du stock à partir de rien, réduire le dosage est la
+ *     correction sûre dans les deux cas.
+ *  4. Garde-fou : tant que le parc n'a plus qu'un seul chercheur (ou zéro),
+ *     jamais d'augmentation — c'est le double garde-fou du document
+ *     (« jamais 0 chercheur » / « jamais 100% pruner », deux formulations
+ *     de la même limite).
+ *  5. Pression RAM haute (seuil `STOCK_SPILL_HIGH_PERCENT`) : plus de
+ *     vérification aide à éliminer les possibilités mortes plus vite.
+ *  6. Ratio de stock non-vérifié / vérifié : un déséquilibre marqué en
+ *     faveur du non-vérifié signale trop peu de pruners pour absorber le
+ *     flux produit par la recherche (le problème initial du document —
+ *     jusqu'à 50% de stock mort distribué sans pruner) ; l'inverse
+ *     (beaucoup de stock déjà vérifié, peu de non-vérifié) signale
+ *     l'excès contraire.
+ *
+ * Seuils choisis comme point de départ raisonnable (hystérésis et délai
+ * minimal restent la vraie garantie de stabilité, cf. `check_server_step`) —
+ * à remesurer une fois `--auto-roles` exercé en conditions réelles, même
+ * esprit que `docs/conception/elagage_recherche.md` §4.7.
+ *
+ * @param unchecked_stock       Σ taille des files non vérifiées (travail
+ *                              disponible pour un pruner).
+ * @param checked_stock         Σ taille des files vérifiées (travail
+ *                              disponible pour un chercheur).
+ * @param ram_pressure_high     1 si `resident/limite ≥ STOCK_SPILL_HIGH_PERCENT`
+ *                              (0 si le plafond RAM est désactivé — pas de
+ *                              notion de pression sans plafond).
+ * @param search_starved_delta  Δ `server_search_starved` depuis le tour précédent.
+ * @param prune_starved_delta   Δ `server_prune_starved` depuis le tour précédent.
+ * @param nb_search             Σ `nb_forks` des sessions en rôle recherche
+ *                              (`control_registry_count_role_forks`, PAS un
+ *                              compte de sessions — avec une seule machine
+ *                              connectée, un compte de sessions vaudrait
+ *                              toujours au plus 1, déclenchant à tort le
+ *                              garde-fou ci-dessous quel que soit son nombre
+ *                              réel de forks).
+ * @param nb_prune              Σ `nb_forks` des sessions en rôle contrôle,
+ *                              même remarque.
+ * @return                      Le sens d'ajustement (jamais une cible absolue).
+ */
+role_mix_decision_t compute_desired_role_mix(unsigned long long unchecked_stock,
+                                              unsigned long long checked_stock,
+                                              int ram_pressure_high,
+                                              unsigned long long search_starved_delta,
+                                              unsigned long long prune_starved_delta,
+                                              int nb_search,
+                                              int nb_prune);
+
+/**
  * @brief Cherche un slot de thread serveur occupé mais en attente de client.
  *
  * Un slot « libre » vérifie `exist != 0 && socket_id == -1`.
@@ -207,6 +312,39 @@ int get_active_threads(client_t *thread_params);
  * @return Nombre de slots connectés (0 avant `init_server_thread_pool`).
  */
 int server_active_client_count(void);
+
+/**
+ * @brief Un fork de travail actuellement connecté, avec son rôle déclaré.
+ */
+typedef struct {
+    int32_t fork_seq;
+    uint8_t mode; /**< CLIENT_MODE_SEARCH/PRUNER/GPU_PRUNER (net/client_identity.h). */
+} client_work_fork_t;
+
+/**
+ * @brief Liste, pour un `client_uid` donné, le rôle déclaré (`mode`) de
+ *        CHAQUE fork de travail actuellement connecté (identité reçue sur SA
+ *        PROPRE connexion de travail, `INST_CLIENT_HELLO` v12) — PAS le mode
+ *        unique, PAR SESSION, du canal de contrôle (`control_session_info_t.mode`),
+ *        qui ne reflète que le mode de LANCEMENT du process et jamais le
+ *        détail d'un dosage mixte (`--pruner-forks`/`clientsRoles`/
+ *        `--auto-roles`, docs/conception/pilotage_type_client.md).
+ *
+ * Balaie `thread_params[0..NB_THREADS[` SANS verrou — même convention que
+ * `get_active_threads`/`find_free_thread_slot` : lecture best-effort, une
+ * rare incohérence transitoire (connexion en cours d'établissement,
+ * `has_identity` pas encore posé) est acceptable pour une commande de
+ * diagnostic, jamais un chemin qui modifie quoi que ce soit.
+ *
+ * @param client_uid Identité de session (process parent) recherchée.
+ * @param out        Tableau de sortie.
+ * @param max        Capacité de `out`.
+ * @return           Nombre d'entrées écrites (0 si aucun fork de ce client
+ *                    n'est actuellement connecté en travail, `out == NULL`,
+ *                    ou `max <= 0`).
+ */
+int client_work_fork_roles(const uint8_t client_uid[CLIENT_UID_BYTES],
+                           client_work_fork_t *out, int max);
 
 /**
  * @brief Table complète des pièces + toutes leurs rotations, construite par

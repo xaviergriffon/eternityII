@@ -377,6 +377,95 @@ TEST count_roles_tolerates_null_outputs(void)
     PASS();
 }
 
+/* ---------- count_role_forks (PR4, docs/conception/pilotage_type_client.md) */
+
+/* Pondéré par nb_forks, pas un compte de sessions -- une seule session
+ * portant nb_forks=8 doit compter comme 8, pas comme 1 (bug réel observé en
+ * usage : avec une seule machine connectée, control_registry_count_roles
+ * vaut toujours au plus 1, déclenchant à tort le garde-fou "jamais 0
+ * chercheur" de compute_desired_role_mix quel que soit le nombre réel de
+ * forks de cette machine). */
+TEST count_role_forks_weighs_by_nb_forks_not_session_count(void)
+{
+    control_session_info_t sessions[1];
+    memset(sessions, 0, sizeof(sessions));
+    sessions[0].mode = CLIENT_MODE_SEARCH;
+    sessions[0].nb_forks = 8;
+
+    int nb_search_forks = -1, nb_prune_forks = -1;
+    control_registry_count_role_forks(sessions, 1, &nb_search_forks, &nb_prune_forks);
+    ASSERT_EQ(8, nb_search_forks);
+    ASSERT_EQ(0, nb_prune_forks);
+    PASS();
+}
+
+TEST count_role_forks_splits_search_and_prune(void)
+{
+    control_session_info_t sessions[4];
+    memset(sessions, 0, sizeof(sessions));
+    sessions[0].mode = CLIENT_MODE_SEARCH;
+    sessions[0].nb_forks = 8;
+    sessions[1].mode = CLIENT_MODE_PRUNER;
+    sessions[1].nb_forks = 4;
+    sessions[2].mode = CLIENT_MODE_SEARCH;
+    sessions[2].nb_forks = 2;
+    sessions[3].mode = CLIENT_MODE_PRUNER;
+    sessions[3].nb_forks = 1;
+
+    int nb_search_forks = -1, nb_prune_forks = -1;
+    control_registry_count_role_forks(sessions, 4, &nb_search_forks, &nb_prune_forks);
+    ASSERT_EQ(10, nb_search_forks);
+    ASSERT_EQ(5, nb_prune_forks);
+    PASS();
+}
+
+/* CLIENT_MODE_GPU_PRUNER compte comme « contrôle », même convention que
+ * count_roles. */
+TEST count_role_forks_counts_gpu_pruner_as_prune(void)
+{
+    control_session_info_t sessions[2];
+    memset(sessions, 0, sizeof(sessions));
+    sessions[0].mode = CLIENT_MODE_SEARCH;
+    sessions[0].nb_forks = 3;
+    sessions[1].mode = CLIENT_MODE_GPU_PRUNER;
+    sessions[1].nb_forks = 4;
+
+    int nb_search_forks = -1, nb_prune_forks = -1;
+    control_registry_count_role_forks(sessions, 2, &nb_search_forks, &nb_prune_forks);
+    ASSERT_EQ(3, nb_search_forks);
+    ASSERT_EQ(4, nb_prune_forks);
+    PASS();
+}
+
+TEST count_role_forks_empty_snapshot_is_zero_zero(void)
+{
+    int nb_search_forks = -1, nb_prune_forks = -1;
+    control_registry_count_role_forks(NULL, 0, &nb_search_forks, &nb_prune_forks);
+    ASSERT_EQ(0, nb_search_forks);
+    ASSERT_EQ(0, nb_prune_forks);
+    PASS();
+}
+
+/* NULL accepté pour l'une ou l'autre sortie (appelant qui n'en veut qu'une). */
+TEST count_role_forks_tolerates_null_outputs(void)
+{
+    control_session_info_t sessions[1];
+    memset(sessions, 0, sizeof(sessions));
+    sessions[0].mode = CLIENT_MODE_SEARCH;
+    sessions[0].nb_forks = 5;
+
+    control_registry_count_role_forks(sessions, 1, NULL, NULL);
+
+    int nb_search_forks = -1;
+    control_registry_count_role_forks(sessions, 1, &nb_search_forks, NULL);
+    ASSERT_EQ(5, nb_search_forks);
+
+    int nb_prune_forks = -1;
+    control_registry_count_role_forks(sessions, 1, NULL, &nb_prune_forks);
+    ASSERT_EQ(0, nb_prune_forks);
+    PASS();
+}
+
 /* ---------- record_stats ----------------------------------------------------*/
 
 TEST snapshot_has_stats_false_before_any_record(void)
@@ -1237,6 +1326,11 @@ SUITE(control_registry_suite)
     RUN_TEST(count_roles_counts_gpu_pruner_as_prune);
     RUN_TEST(count_roles_empty_snapshot_is_zero_zero);
     RUN_TEST(count_roles_tolerates_null_outputs);
+    RUN_TEST(count_role_forks_weighs_by_nb_forks_not_session_count);
+    RUN_TEST(count_role_forks_splits_search_and_prune);
+    RUN_TEST(count_role_forks_counts_gpu_pruner_as_prune);
+    RUN_TEST(count_role_forks_empty_snapshot_is_zero_zero);
+    RUN_TEST(count_role_forks_tolerates_null_outputs);
     RUN_TEST(record_stats_reflected_in_snapshot);
     RUN_TEST(record_stats_invalid_index_or_null_is_noop);
     RUN_TEST(unregister_then_register_clears_stale_stats);

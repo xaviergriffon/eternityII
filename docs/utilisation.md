@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -40,6 +40,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir ci-dessous |
 | `--stock-max-ram N` | *(absent, illimité)* | Plafond en Mo des DEUX pools de stock (non vérifié + vérifié) — voir ci-dessous |
 | `--stock-spill-dir CHEMIN` | `./eternityii-spill` | Répertoire de débordement sur disque une fois `--stock-max-ram` approché — voir ci-dessous |
+| `--auto-roles` | *(absente, désactivée)* | Active la politique automatique de dosage recherche/contrôle du parc — voir ci-dessous |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
 | `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
@@ -278,6 +279,47 @@ configuration (relever `--stock-max-ram`, configurer/vérifier `--stock-spill-di
 > (sonde de faim `INST_NEED_WORK`, VERSION 8) décrite dans
 > [Échanges client / serveur](echanges_client_serveur.md).
 
+### Politique automatique de dosage (`--auto-roles`)
+
+`--auto-roles` (serveur uniquement, **désactivée par défaut**) délègue au
+serveur lui-même la décision que [`clientsRoles`](console.md) laisse
+d'ordinaire à l'opérateur : ajuster `pruner_forks`
+([`--pruner-forks`](#dosage-recherchecontrôle-par-fork---pruner-forks),
+ci-dessous) diffusé à tout le parc connecté, en fonction du besoin mesuré.
+
+```sh
+./eternityII server 80 --auto-roles data/pieces.csv
+```
+
+Sans cette option, aucun comportement ne change : l'opérateur garde
+entièrement la main via `clientsRoles`. Une fois activée, le serveur ajuste
+lui-même le dosage à chaque tour de statistiques existant (10 s, aucune
+cadence dédiée), à partir de quatre signaux déjà mesurés :
+
+- la **famine par rôle** (`server_search_starved`/`server_prune_starved`,
+  PR2 de [docs/conception/pilotage_type_client.md](conception/pilotage_type_client.md)) —
+  signal le plus direct et le plus urgent ;
+- la **taille des deux pools de stock** (non vérifié / vérifié) — un excès de
+  non-vérifié signale trop peu de pruners (le problème d'origine : jusqu'à
+  50 % de stock mort distribué sans pruner) ;
+- la **pression sur `--stock-max-ram`** (ci-dessus), si configuré ;
+- le **parc connecté compté par rôle** (`control_registry_count_roles`).
+
+Deux garde-fous fixes, non désactivables : le dosage **n'augmente jamais**
+tant qu'il ne reste qu'un seul chercheur connecté (jamais 0 chercheur / jamais
+100 % pruner — sans producteur, le stock ne se régénère plus), et un
+**délai minimal (~2 minutes) entre deux changements effectifs** — chaque
+changement coûte un redémarrage des fils (`stopForks` + re-fork) chez
+chaque client visé, le même coût qu'un `clientsRoles` manuel. Chaque
+ajustement se fait par pas de ±1, jamais un saut direct vers une cible
+calculée.
+
+Une décision manuelle (`clientsRoles`) reste possible en parallèle : les deux
+mécanismes partagent le même dosage désiré persistant par machine (PR3), la
+politique automatique pouvant le remplacer à son prochain tour si les
+signaux le justifient. Détail des règles de décision et des seuils :
+[Politique automatique de dosage recherche/contrôle](echanges_client_serveur.md#politique-automatique-de-dosage-recherchecontrôle-pr4).
+
 ## Mode client
 
 Se connecte à un serveur pour y lancer `N` processus de recherche en
@@ -362,12 +404,52 @@ les fils comme un changement de `nb_forks`.
 > déclenchement ne consulte pas le rôle par fork — un dosage mixte ferait donc
 > tourner CHAQUE fork sur le pruner GPU, jamais sur la recherche. Le lancement
 > échoue avec une erreur explicite plutôt que d'ignorer silencieusement le
-> dosage demandé.
+> dosage demandé. Même garde-fou sur `configApply` (redémarrage à chaud) :
+> un client GPU refuse (`log_error`, aucun re-fork) toute configuration en
+> préparation qui rendrait `pruner_forks` différent de `nb_forks` une fois
+> appliquée — y compris quand elle est poussée à distance par
+> `clientsRoles`/`--auto-roles` (voir
+> [Dosage recherche/contrôle par fork, piloté à distance](echanges_client_serveur.md#dosage-recherchecontrôle-par-fork-piloté-à-distance-clientsroles-pr3)) :
+> un client `pruner --gpu` reste donc exclu de tout pilotage dynamique du
+> dosage, quelle qu'en soit la source.
 
 Exemples :
 ```sh
 ./eternityII client srv 8 --pruner-forks 2       # 6 forks cherchent, 2 contrôlent
 ./eternityII pruner srv 8 data/pieces.csv --pruner-forks 4   # 4 forks contrôlent, 4 cherchent
+```
+
+**Visibilité côté client.** La commande console `check` affiche, dans le
+tableau « Thread queues », une colonne `Type` (`search`/`prune`) par fork —
+le rôle EFFECTIF, calculé sans la moindre I/O (le parent connaît déjà le
+dosage résolu de chaque fork). Un rôle reste valide pour toute la durée
+d'affichage jusqu'au prochain `configApply` :
+
+```
+Thread queues
+Fork | Type   |     In stock |     Analysed
+-----+--------+--------------+-------------
+   0 | search |          120 |            3
+   1 | search |           98 |            2
+   2 | prune  |            0 |           10
+   3 | prune  |            0 |            8
+-----+--------+--------------+-------------
+Total|        |          218 |           23
+```
+
+**Visibilité côté serveur.** La console `clients`/`GET /api/v1/clients`
+n'expose qu'un seul `mode` PAR SESSION (celui du mode de lancement
+`client`/`pruner` du process, jamais le détail d'un dosage mixte). Le rôle
+PAR FORK, lui, est visible via `clientsWork <cible>` (console ou `POST
+/api/v1/command`) : le serveur retient déjà, par connexion de travail,
+l'identité déclarée sur son `INST_CLIENT_HELLO` (`fork_seq`/`mode`) —
+`clientsWork` ajoute cette liste à sa réponse habituelle (attribution du pool
+analysé) :
+
+```
+clientsWork mixed-client
+clientsWork (API HTTP admin) : mixed-client (client_uid=…) : 2 possibilite(s)
+en cours d'analyse, alloc max=6 ; forks: 0=search 1=search 2=prune 3=prune
 ```
 
 ## Mode pruner (élagage)

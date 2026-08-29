@@ -85,6 +85,27 @@
 // tour entier sur un rééquilibrage complet.
 #define REBALANCE_BUDGET_DEFAULT 1000
 
+// Politique automatique de dosage recherche/contrôle (option `--auto-roles`,
+// PR4, docs/conception/pilotage_type_client.md). Chaque changement de dosage
+// coûte un stopForks+re-fork chez le(s) client(s) visé(s) (PR1) : un délai
+// minimal entre deux changements (en tours de check_server_step, 10s chacun)
+// évite l'oscillation qu'un ajustement à chaque tour produirait sur un signal
+// bruité. ROLE_MIX_MIN_TICKS_DEFAULT × 10s ≈ 2 minutes, du même ordre que la
+// fenêtre d'autobackup (should_autobackup, ~60s) mais délibérément plus longue
+// (le coût d'un changement de dosage est plus élevé que celui d'une écriture
+// disque sautée).
+#define ROLE_MIX_MIN_TICKS_DEFAULT 12
+// Plafond défensif sur le dosage ATTEINT par la seule politique automatique
+// (pas la borne par-fork de resolve_pruner_forks, qui reste NB_THREADS) :
+// la politique n'avance que par pas de ±1 depuis 0, ce plafond n'a donc
+// d'effet que si un déséquilibre persiste des dizaines de tours d'affilée —
+// garde-fou de dernier recours, pas un objectif.
+#define ROLE_MIX_MAX_DOSAGE 8
+// Plancher sous lequel un déséquilibre stock non-vérifié/vérifié est ignoré
+// (bruit de démarrage/de faible activité), pour ne pas déclencher la
+// politique sur un stock encore quasi vide.
+#define ROLE_MIX_BACKLOG_FLOOR 8
+
 // Bail à expiration des analyses en cours (PR7) : durée par défaut, en
 // secondes, au-delà de laquelle une possibilité attribuée à un client
 // (owner_uid connu, cf. add_possibility_analysed_owned) et jamais acquittée
@@ -224,6 +245,20 @@ extern int pruner_mode;
  * `docs/conception/pilotage_type_client.md`.
  */
 extern int pruner_forks_requested;
+
+/**
+ * @brief 1 si la politique automatique de dosage recherche/contrôle a été
+ *        demandée (option CLI `--auto-roles`, PR4,
+ *        docs/conception/pilotage_type_client.md).
+ *
+ * `0` (défaut) : désactivée — l'opérateur garde la main via `clientsRoles`
+ * (PR3), aucun comportement changé. `1` : `check_server_step` (serveur
+ * uniquement) ajuste lui-même, à chaque tour de 10s, le dosage diffusé au
+ * parc via `control_registry_apply_role_dosage`, sous hystérésis (délai
+ * minimal entre deux changements) — voir `compute_desired_role_mix`
+ * (`src/app/etii_server.h`).
+ */
+extern int auto_roles_requested;
 
 /**
  * @brief 1 si l'exécution GPU du pruner a été demandée (option `--gpu`).
@@ -679,13 +714,13 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
  * `--expand-max-levels <n>`, `--http-port <n>`, `--http-token-file <chemin>`,
  * `--name <label>`, `--machine-uid-file <chemin>`, `--config-file <chemin>`,
  * `--stock-files <n>`, `--stock-max-ram <mo>`, `--stock-spill-dir <chemin>`,
- * `--rebalance-budget <n>`, `--tcp-timeout <n>`, `--pruner-forks <n>`, `--gpu`,
- * `--headless` et `--help`/`-h` (positionne respectivement `stop_on_solution`,
+ * `--rebalance-budget <n>`, `--tcp-timeout <n>`, `--pruner-forks <n>`, `--auto-roles`,
+ * `--gpu`, `--headless` et `--help`/`-h` (positionne respectivement `stop_on_solution`,
  * `expand_min_level`, `expand_max_stock`, `expand_max_levels`, `HTTP_PORT`,
  * `HTTP_TOKEN_FILE`, `client_label`, `machine_uid_file_path`,
  * `client_config_file_path`, `stock_files_requested`, `stock_max_ram_mb`,
  * `stock_spill_dir`, `rebalance_budget`, `tcp_timeout`, `pruner_forks_requested`,
- * `gpu_requested`, `headless_mode` et `help_requested`). Compacte
+ * `auto_roles_requested`, `gpu_requested`, `headless_mode` et `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.
  *

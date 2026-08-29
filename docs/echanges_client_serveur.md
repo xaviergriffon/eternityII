@@ -490,6 +490,112 @@ clients connus](#registre-de-clients-connus) qui persiste sur disque) — un
 redémarrage du serveur retombe donc sur le dosage par défaut de chaque client
 tant que l'opérateur ne rejoue pas `clientsRoles`.
 
+**Client GPU exclu du dosage dynamique.** `clientsRoles`/`--auto-roles`
+composent aveuglément `config pruner_forks <n>` + `configApply` — le serveur
+n'a aucune notion du contexte CUDA d'un client distant. Sans garde-fou côté
+client, un client lancé en `pruner --gpu` recevant ces deux commandes (ciblé
+explicitement, ou touché par une diffusion sans `--to`, ou par une politique
+`--auto-roles` qui ignore aussi le mode GPU) re-forkerait silencieusement
+avec un `pruner_forks` différent de `nb_forks` : exactement l'état que le
+garde-fou de démarrage (`gpu_pruner_forks_conflict`, §5.4 de
+[docs/conception/pilotage_type_client.md](conception/pilotage_type_client.md))
+rend impossible au lancement, puisque le contexte CUDA n'est initialisé
+qu'une seule fois par process et ne consulte pas le rôle par fork. C'est donc
+le CLIENT qui referme ce trou : `config_apply_interpreter`
+(`src/ui/command_lines.c`) réévalue l'invariant sur la configuration EN
+PRÉPARATION juste avant de poster `EV_RESTART`
+(`fork_orchestrator_staged_gpu_pruner_conflict`,
+`src/app/fork_orchestrator.{h,c}`) et refuse (`log_error`, aucun re-fork,
+`configApply` répond `ADMIN_CMD_BAD_ARGS` sur ce chemin) toute application qui
+rendrait `pruner_forks` incohérent avec `nb_forks` — que la clé stagée en
+cause soit `pruner_forks` lui-même ou `nb_forks` seul (un redimensionnement
+qui laisse l'ancien `pruner_forks_requested` incohérent viole l'invariant
+tout autant). Un client GPU reste donc, par construction, exclu de tout
+pilotage dynamique du dosage — `clientsRoles`/`--auto-roles` n'ont aucun
+effet sur lui au-delà du refus journalisé.
+
+### Politique automatique de dosage recherche/contrôle (PR4)
+
+`--auto-roles` (serveur uniquement, désactivée par défaut — voir
+[docs/utilisation.md](utilisation.md#politique-automatique-de-dosage---auto-roles))
+fait jouer au serveur, PAR LUI-MÊME, le rôle que `clientsRoles` (PR3
+ci-dessus) laisse à l'opérateur : ajuster `pruner_forks` diffusé au parc en
+fonction du besoin mesuré. Branchée dans le tour existant de 10 s de
+`check_server_step` (`src/app/etii_server.c`) — aucune cadence dédiée.
+
+**Décision pure.** `compute_desired_role_mix` (`src/app/etii_server.h`), sur
+le modèle exact de `compute_server_hunger`, prend en entrée :
+
+- les deux tailles de stock déjà calculées par ce même tour
+  (`Σ file_size(f)` non vérifié, `Σ file_checked_size(f)` vérifié) ;
+- le ratio `datamanager_resident_packets() / datamanager_ram_limit_packets()`
+  comparé à `STOCK_SPILL_HIGH_PERCENT` (0 sans `--stock-max-ram`, pas de
+  notion de pression sans plafond) ;
+- le delta, depuis le tour précédent, des compteurs de famine par rôle
+  `server_search_starved`/`server_prune_starved` (PR2 — ces compteurs sont
+  CUMULATIFS depuis le démarrage du serveur, jamais remis à zéro : c'est
+  l'appelant qui calcule le delta) ;
+- le nombre de forks par rôle, pondéré par `nb_forks` et non par un simple
+  compte de sessions (`control_registry_count_role_forks`, PR4 — voir
+  encadré ci-dessous).
+
+> **Correctif** : la première version utilisait `control_registry_count_roles`
+> (PR2, un compte de SESSIONS — une par processus parent connecté). Avec une
+> seule machine cliente connectée, ce compte vaut toujours au plus 1, quel
+> que soit son nombre réel de forks — le garde-fou « jamais 0 chercheur »
+> (§4 ci-dessous) se déclenchait donc à TORT dès qu'une seule machine était
+> connectée, bloquant indéfiniment toute augmentation de `pruner_forks` même
+> avec des dizaines de forks de recherche et un stock non vérifié en
+> croissance continue (bug réel observé en usage, déploiement à une seule
+> machine cliente — le cas le plus courant). `control_registry_count_role_forks`
+> somme `nb_forks` par rôle au lieu de compter les sessions : une seule
+> machine à 8 forks compte désormais comme 8, pas comme 1.
+
+Elle renvoie un **sens** d'ajustement (`ROLE_MIX_DECREASE_PRUNE` /
+`ROLE_MIX_KEEP` / `ROLE_MIX_INCREASE_PRUNE`), jamais une cible absolue —
+priorité, du plus urgent au plus indicatif :
+
+1. Parc déjà à 0 chercheur avec au moins un pruner : violation de
+   l'invariant, corrigée en priorité sur tout le reste.
+2. Parc vide : rien à décider.
+3. Famine (chercheur OU pruner) : la recherche étant le seul rôle qui
+   régénère du stock à partir de rien, réduire le dosage est la correction
+   sûre dans les deux cas.
+4. Garde-fou « jamais 0 chercheur / jamais 100 % pruner » : tant qu'il ne
+   reste qu'un chercheur (ou zéro), jamais d'augmentation.
+5. Pression RAM haute : plus de vérification aide à éliminer les
+   possibilités mortes plus vite.
+6. Ratio de backlog non-vérifié/vérifié : un excès marqué de non-vérifié
+   signale trop peu de pruners (le problème initial de ce document — jusqu'à
+   50 % de stock mort distribué sans pruner) ; l'excès inverse signale trop
+   de pruners.
+
+**Pilotage impur, avec hystérésis.** `check_server_step` tient un état
+explicite d'un tour à l'autre (`auto_role_mix_state_t` — un paramètre
+explicite, pas une statique cachée, pour rester testable indépendamment de
+l'ordre d'exécution des tests) : le dernier dosage effectivement diffusé
+(`current_dosage`, démarre à 0 — comportement PR1 par défaut) et le nombre de
+tours écoulés depuis le dernier changement appliqué. Un changement de sens
+n'est traduit en action que si ce délai minimal
+(`ROLE_MIX_MIN_TICKS_DEFAULT`, 12 tours ≈ 2 minutes) est écoulé, et le
+dosage n'évolue alors que par pas de ±1 (jamais un saut direct) — chaque
+changement effectif coûte un `stopForks` + re-fork chez CHAQUE client visé
+(PR1), le même coût qu'un `clientsRoles` manuel. La diffusion elle-même
+réutilise `control_registry_apply_role_dosage(NULL, n)` (PR3, broadcast à
+tout le parc) : une décision automatique et une décision manuelle
+(`clientsRoles`) partagent donc le même dosage désiré persistant par
+machine — l'automatique peut remplacer un dosage manuel à son prochain tour
+si les signaux le justifient, et réciproquement.
+
+Seuils choisis comme point de départ raisonnable, documentés comme tels dans
+le code — à remesurer une fois `--auto-roles` exercé en conditions réelles
+(même esprit que [elagage_recherche.md](conception/elagage_recherche.md)
+§4.7) : `ROLE_MIX_BACKLOG_FLOOR` (8, plancher de bruit sous lequel un
+déséquilibre de stock est ignoré) et `ROLE_MIX_MAX_DOSAGE` (8, plafond
+défensif de dernier recours sur le dosage atteint par la seule politique
+automatique, sans effet tant qu'un déséquilibre ne persiste pas des dizaines
+de tours d'affilée).
+
 ### Registre de clients connus
 
 PR4 ajoute un **second** registre serveur, `known_clients_registry.{h,c}`
