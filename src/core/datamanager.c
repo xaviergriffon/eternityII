@@ -48,8 +48,8 @@ static unsigned int rr_scroll_checked = 0;
 static stock_rate_counter_t stock_adds_rate;
 static stock_rate_counter_t stock_removes_rate;
 
-// Même débit, VENTILÉ par pool (PR2 de docs/conception/pilotage_type_client.md) :
-// l'agrégat ci-dessus ne dit pas si les GET consommés viennent du pool non
+// Même débit, VENTILÉ par pool : l'agrégat ci-dessus ne dit pas si les GET
+// consommés viennent du pool non
 // vérifié (pruners) ou vérifié (chercheurs), ni si les ADD alimentent l'un ou
 // l'autre. Enregistrés EN PLUS de l'agrégat (jamais à sa place — aucun
 // consommateur existant de stock_adds_rate/stock_removes_rate ne doit changer

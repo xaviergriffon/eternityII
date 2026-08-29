@@ -37,6 +37,16 @@
 /// Longueur maximale (avec le terminateur nul) d'une ligne de commande postée
 /// via `CTRL_COMMAND` — alignée sur les lignes de commande console usuelles,
 /// largement sous `CTRL_PAYLOAD_MAX` (control_protocol.h).
+///
+/// ATTENTION : `CONTROL_COMMAND_LINE_MAX` est aussi défini dans
+/// `src/app/etii_control.c` (512, buffer de réception client) — les deux
+/// valeurs DIFFÈRENT et les deux unités de compilation ne s'incluent pas
+/// l'une l'autre, donc ni avertissement ni erreur à la compilation. La borne
+/// EFFECTIVE de bout en bout est la plus petite des deux moins 1 (255
+/// caractères), avec troncature silencieuse dans
+/// `control_registry_post_command`. Sans conséquence pour les commandes
+/// actuelles (la plus longue en est très en deçà), mais à corriger (fusionner
+/// en une seule définition partagée) si une future commande s'en approche.
 #define CONTROL_COMMAND_LINE_MAX 256
 
 /**
@@ -193,7 +203,7 @@ int control_registry_snapshot(control_session_info_t *out, int max);
 /**
  * @brief Compte PUREMENT, dans un instantané déjà pris (`control_registry_snapshot`),
  *        combien de sessions déclarent le rôle recherche contre le rôle
- *        contrôle (PR2, docs/conception/pilotage_type_client.md).
+ *        contrôle.
  *
  * `control_session_info_t.mode` porte déjà cette information depuis v9 ; rien
  * ne la comptait jusqu'ici. `CLIENT_MODE_GPU_PRUNER` est compté avec
@@ -218,8 +228,7 @@ void control_registry_count_roles(const control_session_info_t *sessions, int n,
 /**
  * @brief Comme `control_registry_count_roles`, mais pondère chaque session
  *        par son nombre de forks déclarés (`nb_forks`) plutôt que de compter
- *        une session comme une seule unité (PR4,
- *        docs/conception/pilotage_type_client.md).
+ *        une session comme une seule unité.
  *
  * `control_registry_count_roles` compte des SESSIONS (une par processus
  * parent connecté) : avec une seule machine cliente connectée, quel que soit
@@ -328,15 +337,14 @@ int control_registry_send_command_to(const char *target, uint8_t cmd, const char
 int control_registry_resolve_client_uid(const char *target, uint8_t out_client_uid[CLIENT_UID_BYTES]);
 
 /**
- * @brief Applique un dosage recherche/contrôle (PR3,
- *        docs/conception/pilotage_type_client.md) : compose et poste
+ * @brief Applique un dosage recherche/contrôle : compose et poste
  *        `"config pruner_forks <pruner_forks>"` puis `"configApply"`, à une
  *        cible unique (résolue exactement comme
  *        `control_registry_send_command_to` : `session_no`, `client_uid`,
  *        puis `label`) si `target` est fourni, ou à TOUTES les sessions
  *        actuellement actives sinon (même convention que
- *        `control_registry_broadcast_command`) — l'ergonomie que le document
- *        de conception attend de `clientsRoles`.
+ *        `control_registry_broadcast_command`) — l'ergonomie derrière
+ *        `clientsRoles`.
  *
  * MÉMORISE aussi, pour chaque session effectivement touchée, `pruner_forks`
  * comme dosage désiré de sa MACHINE (`machine_uid`, jamais `client_uid` ou
@@ -346,7 +354,7 @@ int control_registry_resolve_client_uid(const char *target, uint8_t out_client_u
  * (`control_registry_register`), sans qu'il faille rejouer la commande —
  * calqué sur `g_desired_pause_state`. Une machine jamais touchée par
  * `clientsRoles` n'a pas de dosage désiré mémorisé : elle garde le
- * comportement par défaut de PR1 (rôle impliqué par le mode de lancement).
+ * comportement par défaut (rôle impliqué par le mode de lancement).
  *
  * Ne fait AUCUNE vérification de liste blanche elle-même (comme
  * `control_registry_send_command_to`) : `config`/`configApply` sont des
@@ -360,7 +368,7 @@ int control_registry_resolve_client_uid(const char *target, uint8_t out_client_u
  * @param pruner_forks Dosage visé, tel que reçu de l'opérateur — jamais borné
  *                      ici contre `nb_forks` de la cible (inconnu côté
  *                      serveur) : la résolution finale reste
- *                      `resolve_pruner_forks` côté client (PR1).
+ *                      `resolve_pruner_forks` côté client.
  * @return             Nombre de sessions effectivement touchées (postées ET
  *                      toujours actives au moment de mémoriser le dosage) :
  *                      0 ou 1 avec `target`, 0..N sans `target`.
@@ -425,8 +433,8 @@ int control_registry_desired_pause_state(void);
 
 /**
  * @brief Dosage recherche/contrôle désiré courant pour la machine
- *        `machine_uid` (PR3) : -1 si aucun dosage n'a jamais été mémorisé pour
- *        elle (comportement par défaut de PR1 inchangé), sinon la dernière
+ *        `machine_uid` : -1 si aucun dosage n'a jamais été mémorisé pour
+ *        elle (comportement par défaut inchangé), sinon la dernière
  *        valeur reçue via `control_registry_apply_role_dosage`.
  *
  * Exposé principalement pour les tests ; `control_registry_register` est le

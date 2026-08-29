@@ -464,8 +464,8 @@ TEST stock_rate_stats_tolerates_null(void)
     PASS();
 }
 
-/* PR2 (docs/conception/pilotage_type_client.md) : ventilation par pool des
- * mêmes compteurs — l'agrégat ci-dessus ne dit pas QUEL pool a bougé. */
+/* Ventilation par pool des mêmes compteurs — l'agrégat ci-dessus ne dit pas
+ * QUEL pool a bougé. */
 
 TEST stock_rate_stats_ventilates_adds_by_pool(void)
 {

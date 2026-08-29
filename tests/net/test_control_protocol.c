@@ -271,7 +271,7 @@ TEST control_command_allowed_accepts_lifecycle_commands(void)
     PASS();
 }
 
-/* clientsRoles (PR3, docs/conception/pilotage_type_client.md) : rejoint la
+/* clientsRoles : rejoint la
    liste blanche relayable, même famille que clientsCommand/clientsCmd -- un
    seul point à toucher (control_command_classify) pour que le contrôle
    d'accès HTTP (needs_auth) et la vérification client-side (etii_control.c)

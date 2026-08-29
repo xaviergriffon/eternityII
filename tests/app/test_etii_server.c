@@ -225,7 +225,7 @@ TEST active_threads_all_connected(void)
     PASS();
 }
 
-/* ---------- client_work_fork_roles (PR4, docs/conception/pilotage_type_client.md) */
+/* ---------- client_work_fork_roles ---------------------------------------- */
 
 /* Rôle déclaré PAR FORK (identité de la connexion de travail,
  * INST_CLIENT_HELLO v12), jamais le mode unique par-SESSION du canal de

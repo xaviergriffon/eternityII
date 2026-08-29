@@ -296,14 +296,14 @@ entièrement la main via `clientsRoles`. Une fois activée, le serveur ajuste
 lui-même le dosage à chaque tour de statistiques existant (10 s, aucune
 cadence dédiée), à partir de quatre signaux déjà mesurés :
 
-- la **famine par rôle** (`server_search_starved`/`server_prune_starved`,
-  PR2 de [docs/conception/pilotage_type_client.md](conception/pilotage_type_client.md)) —
+- la **famine par rôle** (`server_search_starved`/`server_prune_starved`) —
   signal le plus direct et le plus urgent ;
 - la **taille des deux pools de stock** (non vérifié / vérifié) — un excès de
   non-vérifié signale trop peu de pruners (le problème d'origine : jusqu'à
   50 % de stock mort distribué sans pruner) ;
 - la **pression sur `--stock-max-ram`** (ci-dessus), si configuré ;
-- le **parc connecté compté par rôle** (`control_registry_count_roles`).
+- le **parc connecté compté par rôle**, pondéré par `nb_forks` et non par un
+  simple compte de sessions (`control_registry_count_role_forks`).
 
 Deux garde-fous fixes, non désactivables : le dosage **n'augmente jamais**
 tant qu'il ne reste qu'un seul chercheur connecté (jamais 0 chercheur / jamais
@@ -315,10 +315,10 @@ ajustement se fait par pas de ±1, jamais un saut direct vers une cible
 calculée.
 
 Une décision manuelle (`clientsRoles`) reste possible en parallèle : les deux
-mécanismes partagent le même dosage désiré persistant par machine (PR3), la
+mécanismes partagent le même dosage désiré persistant par machine, la
 politique automatique pouvant le remplacer à son prochain tour si les
 signaux le justifient. Détail des règles de décision et des seuils :
-[Politique automatique de dosage recherche/contrôle](echanges_client_serveur.md#politique-automatique-de-dosage-recherchecontrôle-pr4).
+[Politique automatique de dosage recherche/contrôle](echanges_client_serveur.md#politique-automatique-de-dosage-recherchecontrôle).
 
 ## Mode client
 
@@ -378,9 +378,11 @@ partagent tous le même rôle, impliqué par le mode de lancement (`client` → 
 cherchent, `pruner` → tous contrôlent). L'option `--pruner-forks <n>` permet de
 **mélanger les deux rôles au sein d'un même process** : `n` forks (parmi
 `nb_threads`) sont affectés au CONTRÔLE du stock (comme un pruner), les autres
-cherchent (comme un client) — voir
-[docs/conception/pilotage_type_client.md](conception/pilotage_type_client.md)
-pour le contexte complet.
+cherchent (comme un client) — le serveur, seul acteur à connaître le besoin
+réel en temps réel, peut ainsi ajuster ce dosage à distance
+(`clientsRoles`/`--auto-roles`, voir
+[Échanges client/serveur](echanges_client_serveur.md#dosage-recherchecontrôle-par-fork-piloté-à-distance-clientsroles)),
+sans redéployer le client.
 
 ```sh
 ./eternityII client [--pruner-forks N] [serveur] [nb_threads] [max_stock_par_thread] [fichier_pieces.csv]
@@ -409,7 +411,7 @@ les fils comme un changement de `nb_forks`.
 > préparation qui rendrait `pruner_forks` différent de `nb_forks` une fois
 > appliquée — y compris quand elle est poussée à distance par
 > `clientsRoles`/`--auto-roles` (voir
-> [Dosage recherche/contrôle par fork, piloté à distance](echanges_client_serveur.md#dosage-recherchecontrôle-par-fork-piloté-à-distance-clientsroles-pr3)) :
+> [Dosage recherche/contrôle par fork, piloté à distance](echanges_client_serveur.md#dosage-recherchecontrôle-par-fork-piloté-à-distance-clientsroles)) :
 > un client `pruner --gpu` reste donc exclu de tout pilotage dynamique du
 > dosage, quelle qu'en soit la source.
 

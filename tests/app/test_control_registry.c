@@ -312,7 +312,7 @@ TEST snapshot_respects_max_capacity(void)
     PASS();
 }
 
-/* ---------- count_roles (PR2, docs/conception/pilotage_type_client.md) ----- */
+/* ---------- count_roles -------------------------------------------------- */
 
 /* Fonction PURE : exercée sur un tableau construit à la main, sans passer par
  * le registre (aucun register/unregister nécessaire). */
@@ -377,7 +377,7 @@ TEST count_roles_tolerates_null_outputs(void)
     PASS();
 }
 
-/* ---------- count_role_forks (PR4, docs/conception/pilotage_type_client.md) */
+/* ---------- count_role_forks ---------------------------------------------- */
 
 /* Pondéré par nb_forks, pas un compte de sessions -- une seule session
  * portant nb_forks=8 doit compter comme 8, pas comme 1 (bug réel observé en

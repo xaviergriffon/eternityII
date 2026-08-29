@@ -370,9 +370,9 @@ static command_description commands[NB_COMMANDS] = {
     {"clientsRoles", clients_roles_interpreter, 0, CMD_CAT_CLIENTS, 1,
      "clientsRoles [--to <session_no|client_uid|label>] <nb_pruner>",
      "fixe le dosage recherche/contrôle (pruner_forks) d'un client précis ou de tous les clients connectés",
-     "Compose « config pruner_forks <nb_pruner> » + « configApply » (PR3, voir\n"
-     "docs/conception/pilotage_type_client.md) -- même résolution de cible que\n"
-     "clientsCommand --to (session_no, client_uid, ou label). <nb_pruner> est le\n"
+     "Compose « config pruner_forks <nb_pruner> » + « configApply » -- même\n"
+     "résolution de cible que clientsCommand --to (session_no, client_uid, ou\n"
+     "label). <nb_pruner> est le\n"
      "nombre de forks affectés au CONTRÔLE parmi le nb_forks de CHAQUE client\n"
      "touché ; une valeur hors [0, nb_forks] est clampée côté client\n"
      "(resolve_pruner_forks), jamais ici -- le serveur ne connaît pas le nb_forks\n"
@@ -1217,9 +1217,9 @@ int check_duplicate_interpreter(void) {
 int statistic_interpreter(void) {
     int rc = statistic_datas();
 
-    // Métriques de besoin par rôle (PR2, docs/conception/pilotage_type_client.md) :
-    // core/ ne peut pas les afficher lui-même (etii_server.h/control_registry.h
-    // sont app/), d'où leur ajout ICI plutôt que dans statistic_datas().
+    // Métriques de besoin par rôle : core/ ne peut pas les afficher lui-même
+    // (etii_server.h/control_registry.h sont app/), d'où leur ajout ICI
+    // plutôt que dans statistic_datas().
     // Toujours à 0 sur un process client/pruner (aucune connexion de contrôle
     // entrante ni service INST_GET côté client) — comme `clients`/`knownClients`,
     // ces compteurs n'ont de sens que côté serveur, sans garde explicite.
@@ -1471,7 +1471,7 @@ static int admin_remote_clients_command(char *rest) {
 /**
  * @brief Portion "clientsRoles [--to <cible>] <nb_pruner>" de
  *        `admin_apply_remote_command`, réentrante (aucun strtok global) --
- *        pendant HTTP de `clients_roles_interpreter` (PR3), même syntaxe.
+ *        pendant HTTP de `clients_roles_interpreter`, même syntaxe.
  *
  * La composition ("config pruner_forks <n>" + "configApply") et la
  * mémorisation du dosage désiré par machine sont entièrement déléguées à
@@ -1524,8 +1524,7 @@ static int admin_remote_clients_roles(char *rest) {
 /**
  * @brief Formate en texte compact `fork_seq=rôle ...` le rôle déclaré de
  *        chaque fork de travail actuellement connecté d'un client
- *        (`client_work_fork_roles`, PR4 de
- *        docs/conception/pilotage_type_client.md) — jusqu'ici la seule
+ *        (`client_work_fork_roles`) — jusqu'ici la seule
  *        façon de voir ce dosage était le tableau « Thread queues » local du
  *        client concerné (commande `check`), jamais depuis le serveur.
  *        Partagé entre `clients_work_interpreter` et
@@ -1996,9 +1995,8 @@ int clients_cmd_interpreter(void) {
 }
 
 /**
- * @brief Interpréteur de `clientsRoles [--to <cible>] <nb_pruner>` (PR3,
- *        docs/conception/pilotage_type_client.md) : ergonomie composant
- *        `config pruner_forks <nb_pruner>` + `configApply`, déjà possible via
+ * @brief Interpréteur de `clientsRoles [--to <cible>] <nb_pruner>` : ergonomie
+ *        composant `config pruner_forks <nb_pruner>` + `configApply`, déjà possible via
  *        deux `clientsCommand` séparés -- voir `control_registry_apply_role_dosage`
  *        pour la composition ET la mémorisation du dosage désiré par machine.
  *

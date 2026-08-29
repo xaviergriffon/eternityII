@@ -536,8 +536,7 @@ static void run_client(const char *hostname, const char *file, int fork_seq)
  * `g_client_identity_template.mode` PAR FORK (`current_fork_role`), pendant
  * que `NB_THREADS` vaut encore le total du lot hérité par COW du parent — la
  * ligne suivante l'écrase à 1 pour ce process. C'est le SEUL point
- * d'injection du dosage recherche/contrôle (§2.2/§3,
- * docs/conception/pilotage_type_client.md) : aucun des cinq sites qui lisent
+ * d'injection du dosage recherche/contrôle : aucun des cinq sites qui lisent
  * ensuite `pruner_mode` (dont la vraie bifurcation `autoprune()`/`autosearch()`,
  * `src/app/etii_client.c`) n'a besoin d'être touché.
  *

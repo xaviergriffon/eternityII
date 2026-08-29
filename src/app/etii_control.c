@@ -24,6 +24,18 @@
  *        borne-ci est celle du buffer local utilisé comme chaîne C, cohérente
  *        avec l'ordre de grandeur des lignes de commande de la console
  *        (cf. `IPC_LINE_MAX`, src/net/ipc_protocol.h).
+ *
+ * @warning `CONTROL_COMMAND_LINE_MAX` est aussi défini dans
+ *          `src/app/control_registry.h` (256, slot de file serveur et buffer
+ *          d'émission de `control_session_step`) — les deux valeurs DIFFÈRENT
+ *          (512 ici, 256 là-bas) et les deux unités de compilation ne
+ *          s'incluent pas l'une l'autre, donc ni avertissement ni erreur à la
+ *          compilation. La borne EFFECTIVE de bout en bout est la plus petite
+ *          des deux moins 1 (255 caractères), avec troncature silencieuse
+ *          côté serveur (`control_registry_post_command`). Sans conséquence
+ *          pour les commandes actuelles (la plus longue en est très en deçà),
+ *          mais à corriger (fusionner en une seule définition partagée) si
+ *          une future commande s'en approche.
  */
 #define CONTROL_COMMAND_LINE_MAX 512
 

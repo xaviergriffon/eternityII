@@ -85,10 +85,10 @@
 // tour entier sur un rééquilibrage complet.
 #define REBALANCE_BUDGET_DEFAULT 1000
 
-// Politique automatique de dosage recherche/contrôle (option `--auto-roles`,
-// PR4, docs/conception/pilotage_type_client.md). Chaque changement de dosage
-// coûte un stopForks+re-fork chez le(s) client(s) visé(s) (PR1) : un délai
-// minimal entre deux changements (en tours de check_server_step, 10s chacun)
+// Politique automatique de dosage recherche/contrôle (option `--auto-roles`).
+// Chaque changement de dosage coûte un stopForks+re-fork chez le(s)
+// client(s) visé(s) : un délai minimal entre deux changements (en tours de
+// check_server_step, 10s chacun)
 // évite l'oscillation qu'un ajustement à chaque tour produirait sur un signal
 // bruité. ROLE_MIX_MIN_TICKS_DEFAULT × 10s ≈ 2 minutes, du même ordre que la
 // fenêtre d'autobackup (should_autobackup, ~60s) mais délibérément plus longue
@@ -241,18 +241,16 @@ extern int pruner_mode;
  * appliqué — même distinction que `NB_THREADS` (visé) vs `g_active_forks`
  * (réel). Lue en tête de `spawn_child_body` (`src/app/fork_orchestrator.c`),
  * dans la branche fille, pour décider `pruner_mode` PAR FORK avant que
- * celui-ci n'entame sa recherche/son contrôle — voir
- * `docs/conception/pilotage_type_client.md`.
+ * celui-ci n'entame sa recherche/son contrôle.
  */
 extern int pruner_forks_requested;
 
 /**
  * @brief 1 si la politique automatique de dosage recherche/contrôle a été
- *        demandée (option CLI `--auto-roles`, PR4,
- *        docs/conception/pilotage_type_client.md).
+ *        demandée (option CLI `--auto-roles`).
  *
- * `0` (défaut) : désactivée — l'opérateur garde la main via `clientsRoles`
- * (PR3), aucun comportement changé. `1` : `check_server_step` (serveur
+ * `0` (défaut) : désactivée — l'opérateur garde la main via `clientsRoles`,
+ * aucun comportement changé. `1` : `check_server_step` (serveur
  * uniquement) ajuste lui-même, à chaque tour de 10s, le dosage diffusé au
  * parc via `control_registry_apply_role_dosage`, sous hystérésis (délai
  * minimal entre deux changements) — voir `compute_desired_role_mix`
