@@ -490,6 +490,30 @@ clients connus](#registre-de-clients-connus) qui persiste sur disque) — un
 redémarrage du serveur retombe donc sur le dosage par défaut de chaque client
 tant que l'opérateur ne rejoue pas `clientsRoles`.
 
+**Client GPU exclu du dosage dynamique.** `clientsRoles`/`--auto-roles`
+composent aveuglément `config pruner_forks <n>` + `configApply` — le serveur
+n'a aucune notion du contexte CUDA d'un client distant. Sans garde-fou côté
+client, un client lancé en `pruner --gpu` recevant ces deux commandes (ciblé
+explicitement, ou touché par une diffusion sans `--to`, ou par une politique
+`--auto-roles` qui ignore aussi le mode GPU) re-forkerait silencieusement
+avec un `pruner_forks` différent de `nb_forks` : exactement l'état que le
+garde-fou de démarrage (`gpu_pruner_forks_conflict`, §5.4 de
+[docs/conception/pilotage_type_client.md](conception/pilotage_type_client.md))
+rend impossible au lancement, puisque le contexte CUDA n'est initialisé
+qu'une seule fois par process et ne consulte pas le rôle par fork. C'est donc
+le CLIENT qui referme ce trou : `config_apply_interpreter`
+(`src/ui/command_lines.c`) réévalue l'invariant sur la configuration EN
+PRÉPARATION juste avant de poster `EV_RESTART`
+(`fork_orchestrator_staged_gpu_pruner_conflict`,
+`src/app/fork_orchestrator.{h,c}`) et refuse (`log_error`, aucun re-fork,
+`configApply` répond `ADMIN_CMD_BAD_ARGS` sur ce chemin) toute application qui
+rendrait `pruner_forks` incohérent avec `nb_forks` — que la clé stagée en
+cause soit `pruner_forks` lui-même ou `nb_forks` seul (un redimensionnement
+qui laisse l'ancien `pruner_forks_requested` incohérent viole l'invariant
+tout autant). Un client GPU reste donc, par construction, exclu de tout
+pilotage dynamique du dosage — `clientsRoles`/`--auto-roles` n'ont aucun
+effet sur lui au-delà du refus journalisé.
+
 ### Politique automatique de dosage recherche/contrôle (PR4)
 
 `--auto-roles` (serveur uniquement, désactivée par défaut — voir

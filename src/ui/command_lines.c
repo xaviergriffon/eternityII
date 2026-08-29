@@ -734,6 +734,25 @@ int config_apply_interpreter(void) {
     client_config_free(&effective);
 
     if (diff == CLIENT_CONFIG_DIFF_NEEDS_RESTART) {
+        // Revérifié ICI, sur le chemin de reconfiguration à CHAUD : le
+        // garde-fou --gpu + --pruner-forks (gpu_pruner_forks_conflict,
+        // app_runtime.h) n'est autrement évalué qu'une fois, avant le tout
+        // premier fork() du process (handle_client/main.c). Sans ce test,
+        // un `configApply` NEEDS_RESTART -- déclenché en console, ou poussé
+        // à distance par `clientsRoles`/`--auto-roles` via le canal de
+        // contrôle -- pouvait re-forker un client `pruner --gpu` avec un
+        // pruner_forks stagé différent de nb_forks : exactement l'état que
+        // le garde-fou de démarrage rend impossible, mais silencieusement
+        // ici (aucun refus, aucun log_error).
+        if (fork_orchestrator_staged_gpu_pruner_conflict()) {
+            log_error("configApply : refusé -- la configuration en préparation rendrait "
+                      "pruner_forks incompatible avec le pruner GPU actif (--gpu) ; le "
+                      "contexte CUDA n'est initialisé qu'une fois par process, retirer "
+                      "pruner_forks de la configuration en préparation ou l'aligner sur "
+                      "nb_forks\n");
+            return -1;
+        }
+
         orch_actions_t actions;
         fork_orchestrator_post_event(EV_RESTART, &actions);
         if (actions.error == ORCH_ERR_NOT_RUNNING) {

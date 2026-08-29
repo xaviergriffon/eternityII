@@ -286,6 +286,17 @@ est déjà saturé par un seul). **Arbitrage** : `--gpu` force
 `pruner_forks = nb_forks`, avec un message explicite si l'opérateur demande autre
 chose — jamais un repli silencieux.
 
+Ce garde-fou (`gpu_pruner_forks_conflict`, `app_runtime.{h,c}`) n'était évalué
+qu'au démarrage (`handle_client`/`main.c`, avant le tout premier `fork()`) —
+PR3 (`clientsRoles`) rouvrait le trou : rien ne le réévaluait sur le chemin de
+reconfiguration à chaud (`configApply` NEEDS_RESTART), donc un client GPU
+ciblé par `clientsRoles`/`--auto-roles` re-forkait silencieusement en dosage
+mixte. Refermé : `config_apply_interpreter` réévalue l'invariant sur la
+configuration en préparation juste avant `EV_RESTART`
+(`fork_orchestrator_staged_gpu_pruner_conflict`) et refuse explicitement —
+voir [Client GPU exclu du dosage dynamique](../echanges_client_serveur.md#dosage-recherchecontrôle-par-fork-piloté-à-distance-clientsroles-pr3)
+pour le comportement complet.
+
 ### 5.5 Opérateur d'abord, automatique ensuite
 Même discipline que MRV et le DFS borné du pruner : le mécanisme d'abord, la mesure
 ensuite, l'automatisation en dernier — et seulement si la mesure la justifie. Le

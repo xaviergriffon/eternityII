@@ -474,6 +474,45 @@ void fork_orchestrator_apply_staged_config(void);
 client_config_diff_t fork_orchestrator_diff_staged_config(const client_config_t *effective);
 
 /**
+ * @brief La configuration EN PRÉPARATION, une fois appliquée, violerait-elle
+ *        `gpu_pruner_forks_conflict` (`app_runtime.h`) ?
+ *
+ * Le garde-fou `--gpu` + `--pruner-forks != nb_forks` de `handle_client`
+ * (`main.c`) n'est évalué qu'UNE FOIS, avant le tout premier `fork()` du
+ * process — jamais réévalué sur le chemin de reconfiguration à chaud
+ * (`configApply` NEEDS_RESTART, y compris poussé à distance par
+ * `clientsRoles`/`--auto-roles` via le canal de contrôle). Sans ce test,
+ * un client lancé en `pruner --gpu` peut recevoir un `pruner_forks` stagé
+ * différent de `nb_forks` (ou un `nb_forks` stagé qui rend l'ancien
+ * `pruner_forks_requested` incohérent) et re-forker silencieusement dans
+ * l'état exact que le garde-fou de démarrage rend impossible.
+ *
+ * Calcule les valeurs `nb_forks`/`pruner_forks_requested` qui seraient
+ * EFFECTIVES après application (clé stagée si présente, sinon valeur
+ * courante des globales — la même logique que `client_config_apply_direct`,
+ * sans rien appliquer ni modifier ici), et les soumet à
+ * `gpu_pruner_forks_conflict` avec le `gpu_pruner_mode` courant (lu
+ * directement : ce n'est jamais une clé de configuration stageable).
+ *
+ * @return 1 si l'application de la configuration stagée créerait le
+ *         conflit, 0 sinon (y compris sur un build sans CUDA, où
+ *         `gpu_pruner_mode` reste toujours à 0).
+ */
+int fork_orchestrator_staged_gpu_pruner_conflict(void);
+
+/**
+ * @brief Cœur testable de `fork_orchestrator_staged_gpu_pruner_conflict`,
+ *        avec `gpu_pruner_mode` injecté en paramètre plutôt que lu sur la
+ *        globale (qui n'existe même pas hors build `WITH_CUDA`) — même
+ *        convention que `gpu_pruner_forks_conflict` (`app_runtime.h`),
+ *        pour rester exercable par les tests indépendamment du build.
+ *
+ * @param gpu_pruner_mode_value Valeur à utiliser pour `gpu_pruner_mode`.
+ * @return                       Voir `fork_orchestrator_staged_gpu_pruner_conflict`.
+ */
+int fork_orchestrator_staged_gpu_pruner_conflict_for(int gpu_pruner_mode_value);
+
+/**
  * @brief Applique la configuration en préparation aux globales du PARENT
  *        (`client_config_apply_direct`) PUIS diffuse aux process fils déjà en
  *        cours d'exécution, par IPC, les seules clés à chaud effectivement

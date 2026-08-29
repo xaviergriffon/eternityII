@@ -404,7 +404,14 @@ les fils comme un changement de `nb_forks`.
 > déclenchement ne consulte pas le rôle par fork — un dosage mixte ferait donc
 > tourner CHAQUE fork sur le pruner GPU, jamais sur la recherche. Le lancement
 > échoue avec une erreur explicite plutôt que d'ignorer silencieusement le
-> dosage demandé.
+> dosage demandé. Même garde-fou sur `configApply` (redémarrage à chaud) :
+> un client GPU refuse (`log_error`, aucun re-fork) toute configuration en
+> préparation qui rendrait `pruner_forks` différent de `nb_forks` une fois
+> appliquée — y compris quand elle est poussée à distance par
+> `clientsRoles`/`--auto-roles` (voir
+> [Dosage recherche/contrôle par fork, piloté à distance](echanges_client_serveur.md#dosage-recherchecontrôle-par-fork-piloté-à-distance-clientsroles-pr3)) :
+> un client `pruner --gpu` reste donc exclu de tout pilotage dynamique du
+> dosage, quelle qu'en soit la source.
 
 Exemples :
 ```sh

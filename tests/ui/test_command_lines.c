@@ -2266,6 +2266,46 @@ TEST admin_apply_remote_command_configapply_needs_restart(void)
     PASS();
 }
 
+#ifdef WITH_CUDA
+/* configApply, branche NEEDS_RESTART, client en mode pruner GPU
+   (gpu_pruner_mode=1) : un pruner_forks stagé différent de NB_THREADS doit
+   être refusé (fork_orchestrator_staged_gpu_pruner_conflict), pas appliqué
+   silencieusement -- exactement l'état que gpu_pruner_forks_conflict rend
+   déjà impossible au démarrage (handle_client/main.c), mais jusqu'ici jamais
+   réévalué sur ce chemin de reconfiguration à chaud (console, ou poussé à
+   distance par clientsRoles/--auto-roles via le canal de contrôle). Seul
+   test qui exerce le VRAI global gpu_pruner_mode plutôt que la variante
+   testable à paramètre injecté (cf. test_fork_orchestrator.c) -- gpu_pruner_mode
+   n'existant que sur un build WITH_CUDA, ce test est guardé de même. */
+TEST admin_apply_remote_command_configapply_refuses_gpu_pruner_forks_mismatch(void)
+{
+    fork_orchestrator_reset();
+    int saved_nb_threads = NB_THREADS;
+    int saved_pruner_forks = pruner_forks_requested;
+    int saved_gpu_mode = gpu_pruner_mode;
+    NB_THREADS = 4;
+    pruner_forks_requested = 4; /* valide au démarrage : pruner_forks == nb_forks */
+    gpu_pruner_mode = 1;
+
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("start"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("config pruner_forks 2"), "%d");
+    ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("configApply"), "%d");
+
+    /* Refusé avant tout EV_RESTART : toujours RUNNING, aucun arrêt entamé. */
+    orch_state_t state;
+    fork_orchestrator_snapshot(&state, NULL);
+    ASSERT_EQ_FMT((int)ORCH_RUNNING, (int)state, "%d");
+    /* La globale n'a pas bougé : rien n'a été appliqué en douce. */
+    ASSERT_EQ_FMT(4, pruner_forks_requested, "%d");
+
+    NB_THREADS = saved_nb_threads;
+    pruner_forks_requested = saved_pruner_forks;
+    gpu_pruner_mode = saved_gpu_mode;
+    fork_orchestrator_reset();
+    PASS();
+}
+#endif // WITH_CUDA
+
 /* configSave écrit réellement un fichier (comme do_command_line_config_save_*
    ci-dessus), mais via le chemin réentrant. */
 TEST admin_apply_remote_command_configsave_writes_file(void)
@@ -2934,6 +2974,9 @@ SUITE(command_lines_suite)
     RUN_TEST(admin_apply_remote_command_configapply_requires_running);
     RUN_TEST(admin_apply_remote_command_configapply_hot_only);
     RUN_TEST(admin_apply_remote_command_configapply_needs_restart);
+#ifdef WITH_CUDA
+    RUN_TEST(admin_apply_remote_command_configapply_refuses_gpu_pruner_forks_mismatch);
+#endif // WITH_CUDA
     RUN_TEST(admin_apply_remote_command_configsave_writes_file);
     RUN_TEST(admin_apply_remote_command_lifecycle_forbidden_on_server);
     RUN_TEST(admin_apply_remote_command_lifecycle_allowed_on_client);
