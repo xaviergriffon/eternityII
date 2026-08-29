@@ -905,7 +905,8 @@ int exit_interpreter(void) {
                             char state_buf[160];
                             fork_diagnostic_summary(
                                 (fork_statistics != NULL) ? &fork_statistics[c] : NULL,
-                                last_seen != 0, pruner_mode, state_buf, sizeof(state_buf));
+                                last_seen != 0, current_fork_role(c) == FORK_ROLE_PRUNE,
+                                state_buf, sizeof(state_buf));
                             log_error("exit : fils %d encore vivant après %lds d'inactivité (%s) — escalade %s\n",
                                       (int)childrenPid, idle_ms / 1000, state_buf,
                                       action == STOP_ESCALATION_SIGKILL ? "SIGKILL" : "SIGTERM");

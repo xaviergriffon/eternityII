@@ -25,6 +25,9 @@ typedef struct {
     int has_nb_forks;
     int nb_forks;
 
+    int has_pruner_forks;
+    int pruner_forks;
+
     int has_server_host;
     char *server_host;
 
@@ -87,7 +90,12 @@ void client_config_free(client_config_t *cfg);
  * (entier, borné via `pruner_batch_clamp` — jamais invalide une fois
  * numérique, cf. command_lines.h), `dfs_budget` (entier, borné via
  * `pruner_dfs_budget_clamp` — jamais invalide une fois numérique ; `<= 0`
- * désactive la preuve de fermeture bornée du pruner, §4.6b). Une valeur déjà présente pour une clé
+ * désactive la preuve de fermeture bornée du pruner, §4.6b), `pruner_forks`
+ * (entier >= 0 — dosage recherche/contrôle demandé, cf.
+ * `pruner_forks_requested`, `app_static_variables.h` ; borné à `nb_forks`
+ * seulement à la résolution, `resolve_pruner_forks`,
+ * `fork_orchestrator.h` — pas ici, `nb_forks` n'est pas forcément connu au
+ * moment où cette ligne est parsée isolément). Une valeur déjà présente pour une clé
  * chaîne est remplacée (l'ancienne copie est libérée) : la DERNIÈRE occurrence
  * d'une clé dans un fichier l'emporte.
  *
@@ -220,10 +228,12 @@ typedef enum {
  *        entre une simple diffusion IPC (`HOT_ONLY`) et un arrêt +
  *        reconstruction + re-fork complet (`NEEDS_RESTART`).
  *
- * Fonction pure : seules `nb_forks`, `server_host` et `parts_file` peuvent
- * déclencher `NEEDS_RESTART` (elles conditionnent respectivement le
- * dimensionnement des tableaux de fils, la cible réseau et la map de
- * recherche partagée COW — aucune des trois ne peut changer sans arrêter
+ * Fonction pure : seules `nb_forks`, `pruner_forks`, `server_host` et
+ * `parts_file` peuvent déclencher `NEEDS_RESTART` (elles conditionnent
+ * respectivement le dimensionnement des tableaux de fils, le rôle PAR FORK
+ * (recherche/contrôle — cf. `fork_role_for`, `fork_orchestrator.h`) fixé une
+ * fois pour toutes à la naissance de chaque fork, la cible réseau et la map
+ * de recherche partagée COW — aucune des quatre ne peut changer sans arrêter
  * les fils existants). Une clé stagée absente de @p staged, ou présente mais
  * identique à @p current, ne déclenche jamais de redémarrage à elle seule.
  * Les clés à chaud (`max_stock_by_thread`/`limit`/`pruner_batch`/`dfs_budget`)
@@ -233,8 +243,8 @@ typedef enum {
  *                `client_config_capture_effective`).
  * @param staged  Configuration EN PRÉPARATION (`config <clé> <valeur>`).
  * @return        `CLIENT_CONFIG_DIFF_NEEDS_RESTART` si `nb_forks`,
- *                `server_host` ou `parts_file` est stagée avec une valeur
- *                différente de (ou absente de) @p current ;
+ *                `pruner_forks`, `server_host` ou `parts_file` est stagée
+ *                avec une valeur différente de (ou absente de) @p current ;
  *                `CLIENT_CONFIG_DIFF_HOT_ONLY` sinon (y compris si rien n'est
  *                stagé du tout — un `configApply` sans rien préparer est un
  *                no-op inoffensif).

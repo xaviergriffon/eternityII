@@ -84,6 +84,83 @@ typedef struct {
     orch_error_t error; /**< ORCH_OK si la transition est acceptée. */
 } orch_actions_t;
 
+/**
+ * @brief Rôle assigné à UN fork de travail — cf.
+ *        `docs/conception/pilotage_type_client.md`.
+ */
+typedef enum {
+    FORK_ROLE_SEARCH = 0, /**< Cherche (`autosearch`) : demande des possibilités vérifiées, en produit de nouvelles. */
+    FORK_ROLE_PRUNE = 1,  /**< Contrôle (`autoprune`) : demande des possibilités NON vérifiées, élimine les mortes. */
+} fork_role_t;
+
+/**
+ * @brief Résout PUREMENT le nombre de forks affectés au contrôle du stock
+ *        (`pruner_forks`, borné à `[0, nb_forks]`) à partir de ce qui a été
+ *        DEMANDÉ (`pruner_forks_requested`, cf. `app_static_variables.h`).
+ *
+ * `pruner_forks_requested < 0` (non demandé, sentinel par défaut) : retombe
+ * sur le comportement d'AVANT cette option — `nb_forks` si `pruner_mode`
+ * (mode `pruner` : tous les forks contrôlent), `0` sinon (mode `client` :
+ * tous cherchent). Les deux cas dégénérés (`0` et `nb_forks`) reproduisent
+ * ainsi exactement le comportement historique des modes `client`/`pruner`,
+ * qu'ils soient atteints par défaut ou explicitement demandés — aucun
+ * déploiement existant ne change de comportement. Une valeur demandée hors
+ * `[0, nb_forks]` (ex. `--pruner-forks` supérieur à `nb_forks`) est clampée
+ * plutôt que rejetée : le dosage effectif reste défini, jamais un
+ * comportement indéterminé.
+ *
+ * @param pruner_forks_requested Valeur demandée (`-1` = non demandé).
+ * @param pruner_mode             Mode de lancement du process (`pruner_mode`
+ *                                global AVANT toute réécriture par fork —
+ *                                cf. `fork_role_for`).
+ * @param nb_forks                Nombre total de forks du lot (`NB_THREADS`).
+ * @return                        Le nombre de forks CONTRÔLE effectif, dans `[0, nb_forks]`
+ *                                (`0` si `nb_forks <= 0`).
+ */
+int resolve_pruner_forks(int pruner_forks_requested, int pruner_mode, int nb_forks);
+
+/**
+ * @brief Décide PUREMENT le rôle du fork `fork_seq` parmi `nb_forks`, pour un
+ *        dosage `pruner_forks` (déjà résolu par `resolve_pruner_forks`) forks
+ *        de contrôle.
+ *
+ * Les `pruner_forks` forks de plus haut rang (`fork_seq >= nb_forks -
+ * pruner_forks`) sont `FORK_ROLE_PRUNE` ; les autres sont `FORK_ROLE_SEARCH` —
+ * convention arbitraire mais STABLE (le même `fork_seq` garde le même rôle
+ * tant que `nb_forks`/`pruner_forks` ne changent pas), qui reproduit les deux
+ * cas dégénérés `pruner_forks == 0` (tout recherche) et `pruner_forks ==
+ * nb_forks` (tout contrôle) sans discontinuité. `pruner_forks` est clampé à
+ * `[0, nb_forks]` ICI AUSSI (défense en profondeur : cette fonction ne doit
+ * jamais mal se comporter si elle est un jour appelée avec une valeur non
+ * déjà passée par `resolve_pruner_forks`). Un `fork_seq` hors `[0, nb_forks)`
+ * (ou `nb_forks <= 0`) renvoie `FORK_ROLE_SEARCH` par défaut sûr — jamais de
+ * déréférencement, jamais de branche indéfinie.
+ *
+ * @param fork_seq     Rang de ce fork parmi le lot (0..nb_forks-1).
+ * @param nb_forks      Nombre total de forks du lot.
+ * @param pruner_forks Nombre de forks de contrôle visé (résolu).
+ * @return              `FORK_ROLE_PRUNE` ou `FORK_ROLE_SEARCH`.
+ */
+fork_role_t fork_role_for(int fork_seq, int nb_forks, int pruner_forks);
+
+/**
+ * @brief Enveloppe IMPURE de `resolve_pruner_forks` + `fork_role_for` : rôle
+ *        EFFECTIF du fork `fork_seq` du lot en cours, résolu depuis les
+ *        globales courantes (`pruner_forks_requested`/`pruner_mode`/
+ *        `NB_THREADS`, cf. `app_static_variables.h`).
+ *
+ * Utilisée par `spawn_child_body` (branche fille, `src/app/fork_orchestrator.c`)
+ * pour fixer le `pruner_mode`/`g_client_identity_template.mode` PAR FORK avant
+ * tout `log_*`, et par les deux points d'affichage diagnostique
+ * (`fork_diagnostic_summary`, ici et `src/ui/command_lines.c`) qui doivent le
+ * rôle du FORK CONCERNÉ — jamais la globale `pruner_mode` du process PARENT,
+ * qui n'est plus représentative dès qu'un lot est mixte.
+ *
+ * @param fork_seq Rang du fork concerné (0..NB_THREADS-1).
+ * @return          `FORK_ROLE_PRUNE` ou `FORK_ROLE_SEARCH`.
+ */
+fork_role_t current_fork_role(int fork_seq);
+
 /** @brief Durée du décompte d'auto-démarrage. */
 #define ORCH_COUNTDOWN_MS 5000
 /** @brief Cadence du tick de la boucle orchestrateur. */

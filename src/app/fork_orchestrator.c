@@ -112,6 +112,35 @@ int stuck_forks_threshold_elapsed(long running_since_ms, long now_ms)
     return (now_ms - running_since_ms) >= STUCK_FORKS_WARN_MS;
 }
 
+int resolve_pruner_forks(int pruner_forks_requested, int pruner_mode, int nb_forks)
+{
+    if (nb_forks <= 0) {
+        return 0;
+    }
+    int n = (pruner_forks_requested >= 0) ? pruner_forks_requested : (pruner_mode ? nb_forks : 0);
+    if (n < 0) {
+        n = 0;
+    }
+    if (n > nb_forks) {
+        n = nb_forks;
+    }
+    return n;
+}
+
+fork_role_t fork_role_for(int fork_seq, int nb_forks, int pruner_forks)
+{
+    if (fork_seq < 0 || nb_forks <= 0 || fork_seq >= nb_forks) {
+        return FORK_ROLE_SEARCH;
+    }
+    if (pruner_forks < 0) {
+        pruner_forks = 0;
+    }
+    if (pruner_forks > nb_forks) {
+        pruner_forks = nb_forks;
+    }
+    return (fork_seq >= nb_forks - pruner_forks) ? FORK_ROLE_PRUNE : FORK_ROLE_SEARCH;
+}
+
 int fork_stat_is_zero(const struct client_statistics *stat)
 {
     if (stat == NULL) {
@@ -230,6 +259,25 @@ static long g_running_since_ms = 0;
  * silencieusement le filet plutôt que de planter sur un OOM — diagnostic
  * seulement, jamais critique). */
 static int *g_stuck_fork_warned = NULL;
+
+/**
+ * @brief Rôle EFFECTIF du fork `fork_seq` du lot en cours, résolu depuis les
+ *        globales courantes (`pruner_forks_requested`/`pruner_mode`/
+ *        `NB_THREADS`) — enveloppe impure de `resolve_pruner_forks` +
+ *        `fork_role_for` pour les appelants qui n'ont pas ces trois valeurs
+ *        déjà en main : `spawn_child_body` (branche fille, où `NB_THREADS`
+ *        vaut encore le total du lot hérité par COW, avant sa propre
+ *        réécriture locale à 1) et les deux points d'affichage diagnostique
+ *        (`fork_diagnostic_summary`, ici et `src/ui/command_lines.c`) qui
+ *        doivent le rôle du FORK CONCERNÉ, pas la globale `pruner_mode` du
+ *        process PARENT (jamais réécrite, donc jusqu'ici toujours fausse pour
+ *        un lot mixte).
+ */
+fork_role_t current_fork_role(int fork_seq)
+{
+    int pruner_forks = resolve_pruner_forks(pruner_forks_requested, pruner_mode, NB_THREADS);
+    return fork_role_for(fork_seq, NB_THREADS, pruner_forks);
+}
 
 static long current_time_ms(void)
 {
@@ -454,6 +502,16 @@ static void run_client(const char *hostname, const char *file, int fork_seq)
  * `fork()`, cf. `orchestrator_spawn_forks` — AVANT tout `log_*`, voir sa doc)
  * : rien à faire ici de ce côté.
  *
+ * PREMIÈRE instruction (après `status_zone_disown_child()`, déjà exécuté par
+ * l'appelant — avant TOUT `log_*` de ce corps) : fixe `pruner_mode` et
+ * `g_client_identity_template.mode` PAR FORK (`current_fork_role`), pendant
+ * que `NB_THREADS` vaut encore le total du lot hérité par COW du parent — la
+ * ligne suivante l'écrase à 1 pour ce process. C'est le SEUL point
+ * d'injection du dosage recherche/contrôle (§2.2/§3,
+ * docs/conception/pilotage_type_client.md) : aucun des cinq sites qui lisent
+ * ensuite `pruner_mode` (dont la vraie bifurcation `autoprune()`/`autosearch()`,
+ * `src/app/etii_client.c`) n'a besoin d'être touché.
+ *
  * Ne retourne JAMAIS : à la différence de l'ancienne boucle de `main.c`, où
  * un fils qui tombait hors de `run_client()` (fin de recherche, Ctrl-C)
  * finissait par ressortir de `handle_client()` — via le porte-à-faux
@@ -467,6 +525,14 @@ static void run_client(const char *hostname, const char *file, int fork_seq)
  */
 static void spawn_child_body(int fork_seq)
 {
+    pruner_mode = (current_fork_role(fork_seq) == FORK_ROLE_PRUNE) ? 1 : 0;
+#ifdef WITH_CUDA
+    g_client_identity_template.mode = (uint8_t)(gpu_pruner_mode ? CLIENT_MODE_GPU_PRUNER
+                                         : (pruner_mode ? CLIENT_MODE_PRUNER : CLIENT_MODE_SEARCH));
+#else
+    g_client_identity_template.mode = (uint8_t)(pruner_mode ? CLIENT_MODE_PRUNER : CLIENT_MODE_SEARCH);
+#endif
+
     NB_THREADS = 1;
     run_fork_checker(main_addr);
     run_client(g_client_server_host, parts_files, fork_seq);
@@ -758,7 +824,8 @@ static void orchestrator_do_stop_forks(void)
                     char state_buf[160];
                     fork_diagnostic_summary(
                         (fork_statistics != NULL) ? &fork_statistics[c] : NULL,
-                        last_seen != 0, pruner_mode, state_buf, sizeof(state_buf));
+                        last_seen != 0, current_fork_role(c) == FORK_ROLE_PRUNE,
+                        state_buf, sizeof(state_buf));
                     log_error("orchestrateur : fils %d encore vivant après %lds d'inactivité (%s) — escalade %s\n",
                               (int)pid, idle_ms / 1000, state_buf,
                               action == STOP_ESCALATION_SIGKILL ? "SIGKILL" : "SIGTERM");

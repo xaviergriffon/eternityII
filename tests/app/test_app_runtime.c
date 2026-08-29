@@ -1058,6 +1058,42 @@ TEST client_args_pruner_batch_is_clamped(void)
     PASS();
 }
 
+/* ---------- gpu_pruner_forks_conflict -------------------------------------- */
+
+/* GPU inactif : jamais de conflit, quel que soit le dosage demandé. */
+TEST gpu_pruner_forks_conflict_never_when_gpu_inactive(void)
+{
+    ASSERT_EQ_FMT(0, gpu_pruner_forks_conflict(0, 2, 8), "%d");
+    ASSERT_EQ_FMT(0, gpu_pruner_forks_conflict(0, -1, 8), "%d");
+    PASS();
+}
+
+/* GPU actif, aucun dosage demandé (-1, sentinel) : jamais de conflit — le
+   défaut (pruner_forks == nb_forks en mode pruner) s'applique sans friction. */
+TEST gpu_pruner_forks_conflict_never_when_not_requested(void)
+{
+    ASSERT_EQ_FMT(0, gpu_pruner_forks_conflict(1, -1, 8), "%d");
+    PASS();
+}
+
+/* GPU actif, dosage demandé ÉGAL à nb_forks : pas de conflit (cas dégénéré
+   explicite, équivalent au défaut). */
+TEST gpu_pruner_forks_conflict_never_when_requested_equals_nb_forks(void)
+{
+    ASSERT_EQ_FMT(0, gpu_pruner_forks_conflict(1, 8, 8), "%d");
+    PASS();
+}
+
+/* GPU actif, dosage mixte demandé (différent de nb_forks) : conflit — un
+   fork "recherche" tournerait quand même sur autoprune_gpu (cf. la doc de
+   gpu_pruner_forks_conflict, app_runtime.h). */
+TEST gpu_pruner_forks_conflict_detected_for_mixed_dosage(void)
+{
+    ASSERT_EQ_FMT(1, gpu_pruner_forks_conflict(1, 2, 8), "%d");
+    ASSERT_EQ_FMT(1, gpu_pruner_forks_conflict(1, 0, 8), "%d");
+    PASS();
+}
+
 /* ---------- backup_failed_exit -------------------------------------------- */
 
 /* Files vides : aucun fichier de secours créé. */
@@ -1755,6 +1791,11 @@ SUITE(app_runtime_suite)
     RUN_TEST(client_args_search_client_stock_and_file);
     RUN_TEST(client_args_pruner_file_and_batch);
     RUN_TEST(client_args_pruner_batch_is_clamped);
+
+    RUN_TEST(gpu_pruner_forks_conflict_never_when_gpu_inactive);
+    RUN_TEST(gpu_pruner_forks_conflict_never_when_not_requested);
+    RUN_TEST(gpu_pruner_forks_conflict_never_when_requested_equals_nb_forks);
+    RUN_TEST(gpu_pruner_forks_conflict_detected_for_mixed_dosage);
 
     RUN_TEST(backup_failed_exit_empty_is_noop);
     RUN_TEST(backup_failed_exit_saves_leftover_stock);

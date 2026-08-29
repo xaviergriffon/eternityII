@@ -206,6 +206,26 @@ extern int g_active_forks;
 extern int pruner_mode;
 
 /**
+ * @brief Dosage recherche/contrôle demandé pour LE LOT de forks à venir
+ *        (option CLI `--pruner-forks <n>`, ou clé de configuration
+ *        `pruner_forks` — cf. `client_config.h`).
+ *
+ * `-1` (défaut) : non demandé — chaque fork garde le rôle impliqué par le
+ * mode de lancement (`pruner_mode`), exactement le comportement d'avant
+ * cette option. `0..NB_THREADS` : nombre de forks affectés au CONTRÔLE
+ * (`FORK_ROLE_PRUNE`) parmi `NB_THREADS` ; les autres cherchent. Une valeur
+ * hors `[0, NB_THREADS]` est clampée au moment de la résolution
+ * (`resolve_pruner_forks`, `src/app/fork_orchestrator.h`), jamais ici : cette
+ * globale ne porte que ce qui a été DEMANDÉ, pas ce qui est effectivement
+ * appliqué — même distinction que `NB_THREADS` (visé) vs `g_active_forks`
+ * (réel). Lue en tête de `spawn_child_body` (`src/app/fork_orchestrator.c`),
+ * dans la branche fille, pour décider `pruner_mode` PAR FORK avant que
+ * celui-ci n'entame sa recherche/son contrôle — voir
+ * `docs/conception/pilotage_type_client.md`.
+ */
+extern int pruner_forks_requested;
+
+/**
  * @brief 1 si l'exécution GPU du pruner a été demandée (option `--gpu`).
  *
  * Position-indépendante, retirée d'argv par `parse_cli_options`. Lue dans
@@ -659,13 +679,13 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
  * `--expand-max-levels <n>`, `--http-port <n>`, `--http-token-file <chemin>`,
  * `--name <label>`, `--machine-uid-file <chemin>`, `--config-file <chemin>`,
  * `--stock-files <n>`, `--stock-max-ram <mo>`, `--stock-spill-dir <chemin>`,
- * `--rebalance-budget <n>`, `--tcp-timeout <n>`, `--gpu`, `--headless` et
- * `--help`/`-h` (positionne respectivement `stop_on_solution`,
+ * `--rebalance-budget <n>`, `--tcp-timeout <n>`, `--pruner-forks <n>`, `--gpu`,
+ * `--headless` et `--help`/`-h` (positionne respectivement `stop_on_solution`,
  * `expand_min_level`, `expand_max_stock`, `expand_max_levels`, `HTTP_PORT`,
  * `HTTP_TOKEN_FILE`, `client_label`, `machine_uid_file_path`,
  * `client_config_file_path`, `stock_files_requested`, `stock_max_ram_mb`,
- * `stock_spill_dir`, `rebalance_budget`, `tcp_timeout`, `gpu_requested`,
- * `headless_mode` et `help_requested`). Compacte
+ * `stock_spill_dir`, `rebalance_budget`, `tcp_timeout`, `pruner_forks_requested`,
+ * `gpu_requested`, `headless_mode` et `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
  * le parsing positionnel des modes. Appelée AVANT tout fork.
  *

@@ -135,6 +135,14 @@ client_config_line_status_t client_config_parse_line(const char *line, client_co
         }
         cfg->has_pruner_batch = 1;
         cfg->pruner_batch = pruner_batch_clamp((int)n);
+    } else if (strcmp(key, "pruner_forks") == 0) {
+        char *end = NULL;
+        long n = strtol(value, &end, 10);
+        if (end == value || *end != '\0' || n < 0 || n > INT_MAX) {
+            return CLIENT_CONFIG_LINE_INVALID_VALUE;
+        }
+        cfg->has_pruner_forks = 1;
+        cfg->pruner_forks = (int)n;
     } else if (strcmp(key, "dfs_budget") == 0) {
         char *end = NULL;
         long n = strtol(value, &end, 10);
@@ -209,6 +217,9 @@ int client_config_format(const client_config_t *cfg, char *out, size_t out_size)
 
     if (cfg->has_nb_forks) {
         APPEND("nb_forks            = %d\n", cfg->nb_forks);
+    }
+    if (cfg->has_pruner_forks) {
+        APPEND("pruner_forks        = %d\n", cfg->pruner_forks);
     }
     if (cfg->has_server_host && cfg->server_host != NULL) {
         APPEND("server_host         = %s\n", cfg->server_host);
@@ -288,6 +299,14 @@ void client_config_apply_to_globals(const client_config_t *cfg, int argc, const 
     if (cfg->has_nb_forks && argc < 4) {
         NB_THREADS = cfg->nb_forks;
     }
+    if (cfg->has_pruner_forks && pruner_forks_requested < 0) {
+        /* Aucun équivalent positionnel : `--pruner-forks` est un DRAPEAU, pas
+           un argument positionnel — la priorité CLI > fichier se lit donc
+           directement sur `pruner_forks_requested` (déjà écrit par
+           `parse_cli_options` si l'option a été fournie) plutôt que sur un
+           seuil `argc`, à la différence de `nb_forks` ci-dessus. */
+        pruner_forks_requested = cfg->pruner_forks;
+    }
     if (cfg->has_server_host && cfg->server_host != NULL && server_host != NULL && argc < 3) {
         *server_host = strdup(cfg->server_host);
     }
@@ -322,6 +341,9 @@ void client_config_apply_direct(const client_config_t *cfg, const char **server_
     if (cfg->has_nb_forks) {
         NB_THREADS = cfg->nb_forks;
     }
+    if (cfg->has_pruner_forks) {
+        pruner_forks_requested = cfg->pruner_forks;
+    }
     if (cfg->has_server_host && cfg->server_host != NULL && server_host != NULL) {
         *server_host = strdup(cfg->server_host);
     }
@@ -348,6 +370,10 @@ client_config_diff_t client_config_diff(const client_config_t *current, const cl
         (!current->has_nb_forks || staged->nb_forks != current->nb_forks)) {
         return CLIENT_CONFIG_DIFF_NEEDS_RESTART;
     }
+    if (staged->has_pruner_forks &&
+        (!current->has_pruner_forks || staged->pruner_forks != current->pruner_forks)) {
+        return CLIENT_CONFIG_DIFF_NEEDS_RESTART;
+    }
     if (staged->has_server_host &&
         (!current->has_server_host || current->server_host == NULL ||
          staged->server_host == NULL || strcmp(staged->server_host, current->server_host) != 0)) {
@@ -367,6 +393,17 @@ void client_config_capture_effective(client_config_t *out, const char *server_ho
 
     out->has_nb_forks = 1;
     out->nb_forks = NB_THREADS;
+
+    if (pruner_forks_requested >= 0) {
+        /* Omis (comme `server_host`/`parts_file` ci-dessous) tant qu'aucun
+           dosage n'a été explicitement demandé : le sentinel -1 ne doit
+           jamais être écrit dans un fichier de configuration ni réaffiché par
+           `config` — le rôle par fork reste alors implicitement dérivé de
+           `pruner_mode` (cf. `resolve_pruner_forks`), jamais une valeur
+           inventée ici. */
+        out->has_pruner_forks = 1;
+        out->pruner_forks = pruner_forks_requested;
+    }
 
     if (server_host != NULL && server_host[0] != '\0') {
         out->has_server_host = 1;

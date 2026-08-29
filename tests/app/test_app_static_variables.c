@@ -436,6 +436,75 @@ TEST gpu_flag_absent_leaves_global_untouched(void)
     PASS();
 }
 
+/* --pruner-forks <n> : option VALUÉE, dosage recherche/contrôle demandé.
+   Contrairement à --stock-max-ram/--expand-level, 0 est une valeur EXPLICITE
+   légitime (tout recherche) : le sentinel -1 doit rester réservé à l'absence
+   de l'option. */
+TEST pruner_forks_strips_option_and_value_sets_global(void)
+{
+    pruner_forks_requested = -1;
+    const char *argv[] = {"prog", "client", "srv", "8", "--pruner-forks", "2"};
+    int argc = parse_cli_options(6, argv);
+
+    ASSERT_EQ_FMT(4, argc, "%d");              /* option + valeur retirées (6 → 4) */
+    ASSERT_EQ_FMT(2, pruner_forks_requested, "%d");
+    ASSERT_STR_EQ("client", argv[1]);
+    ASSERT_STR_EQ("srv", argv[2]);
+    ASSERT_STR_EQ("8", argv[3]);               /* argument positionnel non décalé */
+    PASS();
+}
+
+/* Valeur explicite 0 : acceptée telle quelle (pas ignorée comme un "0" le
+   serait pour --stock-max-ram) — c'est le cas dégénéré "tout recherche". */
+TEST pruner_forks_zero_is_accepted_as_explicit_value(void)
+{
+    pruner_forks_requested = -1;
+    const char *argv[] = {"prog", "pruner", "--pruner-forks", "0"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(0, pruner_forks_requested, "%d");
+    PASS();
+}
+
+/* Valeur négative fournie explicitement : ramenée à 0 plutôt que traitée
+   comme "non demandé" (le sentinel -1 est réservé à l'absence de l'option). */
+TEST pruner_forks_negative_value_is_clamped_to_zero(void)
+{
+    pruner_forks_requested = -1;
+    const char *argv[] = {"prog", "client", "--pruner-forks", "-3"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(0, pruner_forks_requested, "%d");
+    PASS();
+}
+
+/* Valeur absente : ignorée sans lire hors argv, le sentinel -1 (non demandé)
+   reste inchangé — le seul token option est tout de même consommé. */
+TEST pruner_forks_without_value_is_ignored(void)
+{
+    pruner_forks_requested = -1;
+    const char *argv[] = {"prog", "client", "--pruner-forks"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(-1, pruner_forks_requested, "%d");
+    PASS();
+}
+
+/* Sans --pruner-forks, le sentinel reste à -1. */
+TEST pruner_forks_absent_leaves_global_untouched(void)
+{
+    pruner_forks_requested = -1;
+    const char *argv[] = {"prog", "client", "srv"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(-1, pruner_forks_requested, "%d");
+    PASS();
+}
+
 /* --headless : position-indépendante — retirée d'argv, headless_mode
    positionné, arguments positionnels intacts. */
 TEST headless_flag_is_stripped_and_sets_global(void)
@@ -600,6 +669,11 @@ SUITE(app_static_variables_suite)
     RUN_TEST(machine_uid_file_option_without_value_is_ignored);
     RUN_TEST(gpu_flag_is_stripped_and_sets_global);
     RUN_TEST(gpu_flag_absent_leaves_global_untouched);
+    RUN_TEST(pruner_forks_strips_option_and_value_sets_global);
+    RUN_TEST(pruner_forks_zero_is_accepted_as_explicit_value);
+    RUN_TEST(pruner_forks_negative_value_is_clamped_to_zero);
+    RUN_TEST(pruner_forks_without_value_is_ignored);
+    RUN_TEST(pruner_forks_absent_leaves_global_untouched);
     RUN_TEST(headless_flag_is_stripped_and_sets_global);
     RUN_TEST(headless_flag_absent_leaves_global_untouched);
     RUN_TEST(help_flag_is_stripped_and_sets_global);

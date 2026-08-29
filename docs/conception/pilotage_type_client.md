@@ -1,7 +1,12 @@
 # Pilotage du rôle des fils client depuis le serveur
 
-> **Statut : proposition.** Ce document décrit une **cible**, pas le comportement
-> actuel du code. Rien de ce qui suit n'est implémenté à ce jour. Voir
+> **Statut : en cours d'implémentation (1/4 PR livrée).** Ce document décrit
+> une **cible** ; PR1 (§4, rôle par fork décidé localement — `fork_role_for`,
+> `--pruner-forks`, clé de configuration `pruner_forks` classée
+> `NEEDS_RESTART`) est livrée : voir [docs/utilisation.md](../utilisation.md#dosage-recherchecontrôle-par-fork---pruner-forks).
+> PR2 (métriques de besoin par rôle côté serveur), PR3 (pilotage explicite
+> `clientsRoles`) et PR4 (politique automatique) restent à l'état de
+> proposition — rien de ce qui les concerne n'est implémenté à ce jour. Voir
 > [README.md](README.md) pour la convention de ce répertoire.
 
 ## 1. Le problème
@@ -138,7 +143,7 @@ Chaque PR est livrable seule, et **aucune ne touche le format du fil**.
 
 ### PR1 — rôle par fork, décidé localement
 
-Le mécanisme, sans aucune intervention du serveur. Après cette PR, un opérateur
+**Statut : livrée.** Le mécanisme, sans aucune intervention du serveur. Après cette PR, un opérateur
 peut déjà lancer `./eternityII client srv 8 --pruner-forks 2`.
 
 - Fonction **pure** `fork_role_for(fork_seq, nb_forks, pruner_forks)` →
