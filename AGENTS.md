@@ -8,6 +8,21 @@ This file is the single source of project guidance for AI coding agents (Claude 
 
 eternityII is a C program that attempts to solve the [Eternity II puzzle](https://en.wikipedia.org/wiki/Eternity_II_puzzle) — a 16×16 grid with 256 pieces. It uses a distributed client-server architecture to parallelise the search space across multiple processes or machines.
 
+## Development Workflow
+
+- **Always work on a dedicated branch, never on `master`** — open a PR for review, even for small changes.
+- **Commit messages are brief (one line) and never carry a `Co-Authored-By` trailer.**
+- **Any feature or behaviour change updates `README.md` and the relevant `docs/*.md` file(s)**, not just this index.
+
+### macOS-specific pitfalls
+
+These bite only on macOS/clang and stay invisible on Linux/CI — `make test-docker` catches them:
+
+- Git tracks `makefile` (lowercase); `git add Makefile` silently stages nothing on macOS's case-insensitive filesystem.
+- `_exit()` in a forked child skips the gcov/llvm-cov flush — use `exit()` unless you specifically need to bypass atexit handlers.
+- `gcov`'s branch coverage (`-b`) is a no-op on macOS — use clang `-fcoverage-mapping` + `llvm-cov` instead.
+- AF_UNIX datagrams over ~2048 bytes fail `sendto` with `EMSGSIZE` (macOS's `net.local.dgram.maxdgram` default) — always check `sendto`'s return value.
+
 ## Documentation Map
 
 | Doc | Covers |
