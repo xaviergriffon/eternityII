@@ -264,6 +264,14 @@ TEST http_json_format_stats_golden(void)
     view.stock_removes_last_1m = 125;
     view.stock_removes_last_1h = 720;
     view.stock_removes_last_1d = 9000;
+    view.stock_adds_checked_last_1m = 30;
+    view.stock_adds_unchecked_last_1m = 120;
+    view.stock_removes_checked_last_1m = 100;
+    view.stock_removes_unchecked_last_1m = 25;
+    view.server_search_starved = 7;
+    view.server_prune_starved = 91;
+    view.nb_search_sessions = 4;
+    view.nb_prune_sessions = 2;
     view.queue_unchecked[0] = 7;
     view.queue_checked[0] = 1;
     view.queue_analysed[0] = 0;
@@ -283,6 +291,14 @@ TEST http_json_format_stats_golden(void)
     ASSERT(strstr(buf, "\"stock_removes_last_1m\":125") != NULL);
     ASSERT(strstr(buf, "\"stock_removes_last_1h\":720") != NULL);
     ASSERT(strstr(buf, "\"stock_removes_last_1d\":9000") != NULL);
+    ASSERT(strstr(buf, "\"stock_adds_checked_last_1m\":30") != NULL);
+    ASSERT(strstr(buf, "\"stock_adds_unchecked_last_1m\":120") != NULL);
+    ASSERT(strstr(buf, "\"stock_removes_checked_last_1m\":100") != NULL);
+    ASSERT(strstr(buf, "\"stock_removes_unchecked_last_1m\":25") != NULL);
+    ASSERT(strstr(buf, "\"server_search_starved\":7") != NULL);
+    ASSERT(strstr(buf, "\"server_prune_starved\":91") != NULL);
+    ASSERT(strstr(buf, "\"nb_search_sessions\":4") != NULL);
+    ASSERT(strstr(buf, "\"nb_prune_sessions\":2") != NULL);
     ASSERT(strstr(buf, "\"queues\":[{\"file\":0,\"unchecked\":7,\"checked\":1,\"analysed\":0}") != NULL);
     ASSERT(strstr(buf, "]}") != NULL); /* tableau bien refermé */
 
@@ -570,6 +586,8 @@ TEST http_json_format_known_clients_golden(void)
     infos[0].mode = 0;
     infos[0].connected = 0;
     infos[0].nb_active_sessions = 0;
+    infos[0].nb_active_search = 0;
+    infos[0].nb_active_prune = 0;
     infos[0].nb_connections_total = 2;
     infos[0].first_seen = 1700000000;
     infos[0].last_seen = 1700000100;
@@ -584,6 +602,8 @@ TEST http_json_format_known_clients_golden(void)
     infos[1].mode = 1;
     infos[1].connected = 1;
     infos[1].nb_active_sessions = 1;
+    infos[1].nb_active_search = 0;
+    infos[1].nb_active_prune = 1;
     infos[1].nb_connections_total = 5;
     infos[1].first_seen = 1700000000;
     infos[1].last_seen = 1700000200;
@@ -599,12 +619,12 @@ TEST http_json_format_known_clients_golden(void)
     ASSERT_STR_EQ(
         "{\"known_clients\":["
         "{\"machine_uid\":\"0102030405060708090a0b0c0d0e0f10\",\"label\":\"\",\"ip\":\"\",\"mode\":\"search\","
-        "\"connected\":false,\"active_sessions\":0,\"connections_total\":2,"
+        "\"connected\":false,\"active_sessions\":0,\"active_search\":0,\"active_prune\":0,\"connections_total\":2,"
         "\"first_seen\":1700000000,\"last_seen\":1700000100,"
         "\"total_pruner_checked\":0,\"total_pruner_removed\":0,"
         "\"best_max_result\":0,\"cumulative_uptime_seconds\":3600},"
         "{\"machine_uid\":\"aabbccddeeff00112233445566778899\",\"label\":\"jetson-1\",\"ip\":\"203.0.113.10\",\"mode\":\"pruner\","
-        "\"connected\":true,\"active_sessions\":1,\"connections_total\":5,"
+        "\"connected\":true,\"active_sessions\":1,\"active_search\":0,\"active_prune\":1,\"connections_total\":5,"
         "\"first_seen\":1700000000,\"last_seen\":1700000200,"
         "\"total_pruner_checked\":900,\"total_pruner_removed\":40,"
         "\"best_max_result\":210,\"cumulative_uptime_seconds\":7200}"

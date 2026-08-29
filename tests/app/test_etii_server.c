@@ -740,6 +740,7 @@ TEST step_get_empty_sends_zero_count(void)
 {
     dm_drain_all();
     wire_counters();
+    unsigned long long before_starved = server_search_starved;
 
     int sv[2];
     ASSERT_EQ(0, make_pair(sv));
@@ -756,6 +757,8 @@ TEST step_get_empty_sends_zero_count(void)
     int32_t k = -1;
     ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
     ASSERT_EQ_FMT(0, (int)k, "%d");
+    // Service à vide (PR2) : le compteur côté chercheur avance d'exactement 1.
+    ASSERT_EQ_FMT(before_starved + 1, server_search_starved, "%llu");
 
     unwire_counters();
     if (last) free_array_possibility_packet(last);  /* tableau vide alloué par get_last_possibility */
@@ -769,6 +772,7 @@ TEST step_get_serves_possibility(void)
 {
     dm_drain_all();
     wire_counters();
+    unsigned long long before_starved = server_search_starved;
 
     struct possibility_packet *p = malloc(sizeof *p);
     memset(p, 0, sizeof *p);
@@ -801,6 +805,8 @@ TEST step_get_serves_possibility(void)
     ASSERT_EQ((long)sizeof got, recv_all(sv[1], &got, sizeof got));
     ASSERT_EQ_FMT(5, (int)got.alloc, "%d");
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");      /* retirée du stock */
+    // Service NON vide (PR2) : le compteur de famine n'avance pas.
+    ASSERT_EQ_FMT(before_starved, server_search_starved, "%llu");
 
     unwire_counters();
     if (last) free_array_possibility_packet(last);
@@ -1000,6 +1006,7 @@ TEST step_get_to_check_empty_sends_zero_count(void)
 {
     dm_drain_all();
     wire_counters();
+    unsigned long long before_starved = server_prune_starved;
 
     int sv[2];
     ASSERT_EQ(0, make_pair(sv));
@@ -1016,6 +1023,8 @@ TEST step_get_to_check_empty_sends_zero_count(void)
     int32_t k = -1;
     ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
     ASSERT_EQ_FMT(0, (int)k, "%d");
+    // Service à vide (PR2) : le compteur côté pruner avance d'exactement 1.
+    ASSERT_EQ_FMT(before_starved + 1, server_prune_starved, "%llu");
 
     unwire_counters();
     if (last) free_array_possibility_packet(last);
@@ -1028,6 +1037,7 @@ TEST step_get_to_check_batch_empty_returns_zero(void)
 {
     dm_drain_all();
     wire_counters();
+    unsigned long long before_starved = server_prune_starved;
 
     int sv[2];
     ASSERT_EQ(0, make_pair(sv));
@@ -1047,6 +1057,9 @@ TEST step_get_to_check_batch_empty_returns_zero(void)
     int32_t k = -1;
     ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
     ASSERT_EQ_FMT(0, (int)k, "%d");
+    // Même compteur que INST_GET_TO_CHECK non groupé (PR2) : les deux formats
+    // interrogent le même pool avec la même signification pour l'opérateur.
+    ASSERT_EQ_FMT(before_starved + 1, server_prune_starved, "%llu");
 
     unwire_counters();
     if (last) free_array_possibility_packet(last);

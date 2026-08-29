@@ -412,13 +412,35 @@ int http_json_format_stats(char *buf, size_t size, const http_stats_view_t *view
         "\"stock_removes_last_1m\":%llu,"
         "\"stock_removes_last_1h\":%llu,"
         "\"stock_removes_last_1d\":%llu,"
+        "\"stock_adds_checked_last_1m\":%llu,"
+        "\"stock_adds_checked_last_1h\":%llu,"
+        "\"stock_adds_checked_last_1d\":%llu,"
+        "\"stock_adds_unchecked_last_1m\":%llu,"
+        "\"stock_adds_unchecked_last_1h\":%llu,"
+        "\"stock_adds_unchecked_last_1d\":%llu,"
+        "\"stock_removes_checked_last_1m\":%llu,"
+        "\"stock_removes_checked_last_1h\":%llu,"
+        "\"stock_removes_checked_last_1d\":%llu,"
+        "\"stock_removes_unchecked_last_1m\":%llu,"
+        "\"stock_removes_unchecked_last_1h\":%llu,"
+        "\"stock_removes_unchecked_last_1d\":%llu,"
+        "\"server_search_starved\":%llu,"
+        "\"server_prune_starved\":%llu,"
+        "\"nb_search_sessions\":%llu,"
+        "\"nb_prune_sessions\":%llu,"
         "\"queues\":[",
         view->shots_per_second, view->possibility_stock, view->checked_stock,
         view->analysed_stock, view->max_result, view->active_threads,
         view->pruner_checked, view->pruner_removed,
         view->stock_spilled_packets, view->stock_spill_segments,
         view->stock_adds_last_1m, view->stock_adds_last_1h, view->stock_adds_last_1d,
-        view->stock_removes_last_1m, view->stock_removes_last_1h, view->stock_removes_last_1d);
+        view->stock_removes_last_1m, view->stock_removes_last_1h, view->stock_removes_last_1d,
+        view->stock_adds_checked_last_1m, view->stock_adds_checked_last_1h, view->stock_adds_checked_last_1d,
+        view->stock_adds_unchecked_last_1m, view->stock_adds_unchecked_last_1h, view->stock_adds_unchecked_last_1d,
+        view->stock_removes_checked_last_1m, view->stock_removes_checked_last_1h, view->stock_removes_checked_last_1d,
+        view->stock_removes_unchecked_last_1m, view->stock_removes_unchecked_last_1h, view->stock_removes_unchecked_last_1d,
+        view->server_search_starved, view->server_prune_starved,
+        view->nb_search_sessions, view->nb_prune_sessions);
     if (written < 0 || (size_t)written >= size - offset) {
         return -1;
     }
@@ -648,13 +670,15 @@ int http_json_format_known_clients(char *buf, size_t size, const http_known_clie
 
         written = snprintf(buf + offset, size - offset,
             "%s{\"machine_uid\":\"%s\",\"label\":%s,\"ip\":\"%s\",\"mode\":\"%s\","
-            "\"connected\":%s,\"active_sessions\":%d,\"connections_total\":%d,"
+            "\"connected\":%s,\"active_sessions\":%d,\"active_search\":%d,\"active_prune\":%d,"
+            "\"connections_total\":%d,"
             "\"first_seen\":%lld,\"last_seen\":%lld,"
             "\"total_pruner_checked\":%llu,\"total_pruner_removed\":%llu,"
             "\"best_max_result\":%llu,\"cumulative_uptime_seconds\":%llu}",
             (i == 0) ? "" : ",", infos[i].machine_uid_hex, label_json, infos[i].peer_ip,
             client_mode_label(infos[i].mode), infos[i].connected ? "true" : "false",
-            infos[i].nb_active_sessions, infos[i].nb_connections_total,
+            infos[i].nb_active_sessions, infos[i].nb_active_search, infos[i].nb_active_prune,
+            infos[i].nb_connections_total,
             infos[i].first_seen, infos[i].last_seen,
             infos[i].total_pruner_checked, infos[i].total_pruner_removed,
             infos[i].best_max_result, infos[i].cumulative_uptime_seconds);

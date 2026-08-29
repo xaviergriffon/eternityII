@@ -107,6 +107,75 @@ TEST on_connect_creates_new_entry(void)
     PASS();
 }
 
+/* PR2 (docs/conception/pilotage_type_client.md) : ventilation par rôle. */
+
+TEST on_connect_tracks_active_search_and_prune_counts(void)
+{
+    uint32_t machine_seed = next_seed();
+    client_identity_t search_id = make_identity(machine_seed, next_seed(), "mixed", CLIENT_MODE_SEARCH);
+    client_identity_t prune_id = make_identity(machine_seed, next_seed(), "mixed", CLIENT_MODE_PRUNER);
+    known_client_info_t buf[MAX_KNOWN_CLIENTS];
+
+    known_clients_registry_on_connect(&search_id, "203.0.113.10");
+    known_clients_registry_on_connect(&prune_id, "203.0.113.10");
+
+    const known_client_info_t *e = snapshot_find(&search_id, buf, MAX_KNOWN_CLIENTS);
+    ASSERT(e != NULL);
+    ASSERT_EQ(2, e->nb_active_sessions);
+    ASSERT_EQ(1, e->nb_active_search);
+    ASSERT_EQ(1, e->nb_active_prune);
+
+    known_clients_registry_on_disconnect(search_id.machine_uid, search_id.client_uid);
+    known_clients_registry_on_disconnect(prune_id.machine_uid, prune_id.client_uid);
+    PASS();
+}
+
+/* CLIENT_MODE_GPU_PRUNER compte comme « contrôle », même distinction binaire
+ * que control_registry_count_roles (control_registry.h). */
+TEST on_connect_counts_gpu_pruner_as_active_prune(void)
+{
+    client_identity_t id = make_identity(next_seed(), next_seed(), "gpu", CLIENT_MODE_GPU_PRUNER);
+    known_client_info_t buf[MAX_KNOWN_CLIENTS];
+
+    known_clients_registry_on_connect(&id, "203.0.113.10");
+    const known_client_info_t *e = snapshot_find(&id, buf, MAX_KNOWN_CLIENTS);
+    ASSERT(e != NULL);
+    ASSERT_EQ(0, e->nb_active_search);
+    ASSERT_EQ(1, e->nb_active_prune);
+
+    known_clients_registry_on_disconnect(id.machine_uid, id.client_uid);
+    PASS();
+}
+
+/* Le point délicat : à la déconnexion, le compteur décrémenté doit être celui
+ * du rôle de LA SESSION qui se déconnecte (figé à sa connexion), jamais celui
+ * déduit de `mode` (« dernière valeur déclarée » de la MACHINE) — sinon,
+ * déconnecter la session de recherche d'un dosage mixte déconnecterait à tort
+ * le compteur de contrôle (dernière valeur déclarée = celle de la session
+ * pruner, toujours active). */
+TEST on_disconnect_decrements_the_disconnecting_sessions_own_role(void)
+{
+    uint32_t machine_seed = next_seed();
+    client_identity_t search_id = make_identity(machine_seed, next_seed(), "mixed", CLIENT_MODE_SEARCH);
+    client_identity_t prune_id = make_identity(machine_seed, next_seed(), "mixed", CLIENT_MODE_PRUNER);
+    known_client_info_t buf[MAX_KNOWN_CLIENTS];
+
+    known_clients_registry_on_connect(&search_id, "203.0.113.10");
+    known_clients_registry_on_connect(&prune_id, "203.0.113.10");
+    // `mode` de la machine vaut désormais CLIENT_MODE_PRUNER (dernier hello).
+
+    known_clients_registry_on_disconnect(search_id.machine_uid, search_id.client_uid);
+
+    const known_client_info_t *e = snapshot_find(&search_id, buf, MAX_KNOWN_CLIENTS);
+    ASSERT(e != NULL);
+    ASSERT_EQ(1, e->nb_active_sessions);
+    ASSERT_EQ(0, e->nb_active_search);
+    ASSERT_EQ(1, e->nb_active_prune); // toujours actif, jamais décrémenté à tort
+
+    known_clients_registry_on_disconnect(prune_id.machine_uid, prune_id.client_uid);
+    PASS();
+}
+
 TEST on_connect_null_identity_is_noop(void)
 {
     int before = known_clients_registry_count();
@@ -607,6 +676,9 @@ TEST registry_full_evicts_oldest_disconnected_entry_never_a_connected_one(void)
 SUITE(known_clients_registry_suite)
 {
     RUN_TEST(on_connect_creates_new_entry);
+    RUN_TEST(on_connect_tracks_active_search_and_prune_counts);
+    RUN_TEST(on_connect_counts_gpu_pruner_as_active_prune);
+    RUN_TEST(on_disconnect_decrements_the_disconnecting_sessions_own_role);
     RUN_TEST(on_connect_null_identity_is_noop);
     RUN_TEST(on_connect_accepts_null_peer_ip_as_empty_string);
     RUN_TEST(on_connect_second_machine_updates_label_peer_ip_mode);

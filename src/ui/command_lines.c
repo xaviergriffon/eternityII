@@ -20,6 +20,7 @@
 #include "core/best_board.h"
 #include "app/client_config.h"
 #include "app/fork_orchestrator.h"
+#include "app/etii_server.h"
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
@@ -1179,7 +1180,24 @@ int check_duplicate_interpreter(void) {
 }
 /** @brief Interpréteur de `statistic` : affiche les statistiques détaillées des données. */
 int statistic_interpreter(void) {
-    return statistic_datas();
+    int rc = statistic_datas();
+
+    // Métriques de besoin par rôle (PR2, docs/conception/pilotage_type_client.md) :
+    // core/ ne peut pas les afficher lui-même (etii_server.h/control_registry.h
+    // sont app/), d'où leur ajout ICI plutôt que dans statistic_datas().
+    // Toujours à 0 sur un process client/pruner (aucune connexion de contrôle
+    // entrante ni service INST_GET côté client) — comme `clients`/`knownClients`,
+    // ces compteurs n'ont de sens que côté serveur, sans garde explicite.
+    log_info("service a vide (depuis le demarrage) : recherche=%llu controle=%llu\n",
+              server_search_starved, server_prune_starved);
+
+    control_session_info_t sessions[MAX_CONTROL_SESSIONS];
+    int n = control_registry_snapshot(sessions, MAX_CONTROL_SESSIONS);
+    int nb_search = 0, nb_prune = 0;
+    control_registry_count_roles(sessions, n, &nb_search, &nb_prune);
+    log_info("parc connecte : %d recherche(s), %d controle(s)\n", nb_search, nb_prune);
+
+    return rc;
 }
 
 /** @brief Interpréteur de `checkFiles` : vérifie la cohérence de toutes les files de possibilités. */
@@ -1869,13 +1887,14 @@ int known_clients_interpreter(void) {
     }
     log_info("knownClients : %d machine(s) connue(s)\n", n);
     for (int i = 0; i < n; i++) {
-        log_info("  %s  %s (%s)  %s  sessions actives=%d  connexions=%d  "
+        log_info("  %s  %s (%s)  %s  sessions actives=%d (recherche=%d controle=%d)  connexions=%d  "
                   "pruner checked=%llu removed=%llu  record=%llu  derniere activite=%lld\n",
                   infos[i].machine_uid_hex,
                   infos[i].label[0] != '\0' ? infos[i].label : "?",
                   infos[i].peer_ip[0] != '\0' ? infos[i].peer_ip : "?",
                   infos[i].connected ? "connecte" : "deconnecte",
-                  infos[i].nb_active_sessions, infos[i].nb_connections_total,
+                  infos[i].nb_active_sessions, infos[i].nb_active_search, infos[i].nb_active_prune,
+                  infos[i].nb_connections_total,
                   (unsigned long long)infos[i].total_pruner_checked,
                   (unsigned long long)infos[i].total_pruner_removed,
                   (unsigned long long)infos[i].best_max_result,

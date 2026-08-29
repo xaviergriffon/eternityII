@@ -318,6 +318,28 @@ int control_registry_snapshot(control_session_info_t *out, int max)
     return n;
 }
 
+void control_registry_count_roles(const control_session_info_t *sessions, int n,
+                                   int *out_nb_search, int *out_nb_prune)
+{
+    int nb_search = 0;
+    int nb_prune = 0;
+    for (int i = 0; i < n; i++) {
+        if (sessions[i].mode == CLIENT_MODE_SEARCH) {
+            nb_search++;
+        } else {
+            // CLIENT_MODE_PRUNER ou CLIENT_MODE_GPU_PRUNER : les deux comptent
+            // comme « contrôle » pour ce dosage binaire (cf. la doc du header).
+            nb_prune++;
+        }
+    }
+    if (out_nb_search != NULL) {
+        *out_nb_search = nb_search;
+    }
+    if (out_nb_prune != NULL) {
+        *out_nb_prune = nb_prune;
+    }
+}
+
 int control_registry_get_identity(int index, client_identity_t *out)
 {
     pthread_once(&g_init_once, registry_init_once);

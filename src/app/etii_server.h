@@ -147,6 +147,27 @@ int32_t clamp_pruner_batch(int32_t requested);
 int32_t compute_server_hunger(unsigned long long stock, int active_clients);
 
 /**
+ * @brief Compteurs de service à VIDE (PR2, docs/conception/pilotage_type_client.md) :
+ *        combien de fois `communicate_with_client_step` a répondu `K = 0` à
+ *        un `INST_GET` (`server_search_starved`, pool vide côté chercheurs)
+ *        ou à un `INST_GET_TO_CHECK[_BATCH]` (`server_prune_starved`, pool
+ *        vide côté pruners).
+ *
+ * Avant cette PR, un `K = 0` ne laissait aucune trace : ni compteur, ni log.
+ * Les deux handlers de service étant déjà distincts, la famine se ventile
+ * naturellement PAR RÔLE, sans aucune inférence — c'est la mesure la plus
+ * directe du besoin (§PR2). Incrémentés via `__atomic_fetch_add`
+ * (`__ATOMIC_RELAXED`, même convention que `stock_rate.c`/`app_runtime.c`) :
+ * plusieurs threads serveur (un par connexion) incrémentent concurremment,
+ * une statistique d'affichage tolère la rare imprécision d'un incrément
+ * relâché plutôt que de payer un verrou sur ce chemin. Cumulatifs, jamais
+ * remis à zéro (mesure « depuis le démarrage du serveur », comme
+ * `pruner_checked`/`pruner_removed`).
+ */
+extern unsigned long long server_search_starved;
+extern unsigned long long server_prune_starved;
+
+/**
  * @brief Cherche un slot de thread serveur occupé mais en attente de client.
  *
  * Un slot « libre » vérifie `exist != 0 && socket_id == -1`.

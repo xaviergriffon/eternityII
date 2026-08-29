@@ -22,6 +22,13 @@
 typedef struct {
     int in_use;
     uint8_t client_uid[CLIENT_UID_BYTES];
+    /// Rôle déclaré par CETTE session (`CLIENT_MODE_*`), figé à la connexion —
+    /// nécessaire pour décrémenter le bon compteur `nb_active_search`/
+    /// `nb_active_prune` de la machine à la déconnexion (PR2), puisque
+    /// `known_client_t.mode` (dernière valeur déclarée, toutes sessions
+    /// confondues) peut ne plus correspondre à CETTE session précise dans un
+    /// dosage mixte.
+    uint8_t mode;
     time_t connect_time;
     uint64_t last_pruner_checked;
     uint64_t last_pruner_removed;
@@ -38,6 +45,8 @@ typedef struct {
     char peer_ip[PEER_IP_MAX_LEN];
     uint8_t mode;
     int nb_active_sessions;
+    int nb_active_search;
+    int nb_active_prune;
     int nb_connections_total;
     time_t first_seen;
     time_t last_seen;
@@ -198,9 +207,18 @@ void known_clients_registry_on_connect(const client_identity_t *identity, const 
         }
         kc->sessions[sidx].in_use = 1;
         memcpy(kc->sessions[sidx].client_uid, identity->client_uid, CLIENT_UID_BYTES);
+        kc->sessions[sidx].mode = identity->mode;
         kc->sessions[sidx].last_pruner_checked = 0;
         kc->sessions[sidx].last_pruner_removed = 0;
         kc->nb_active_sessions++;
+        // Ventilation par rôle (PR2) : la même distinction binaire que
+        // control_registry_count_roles (control_registry.h) — GPU_PRUNER
+        // compte comme « contrôle ».
+        if (identity->mode == CLIENT_MODE_SEARCH) {
+            kc->nb_active_search++;
+        } else {
+            kc->nb_active_prune++;
+        }
     }
     kc->sessions[sidx].connect_time = now;
 
@@ -267,6 +285,16 @@ void known_clients_registry_on_disconnect(const uint8_t *machine_uid, const uint
             }
             kc->sessions[sidx].in_use = 0;
             kc->nb_active_sessions--;
+            // Symétrique de l'incrément côté on_connect : décrémente le
+            // compteur du rôle que CETTE session avait déclaré (figé dans
+            // sessions[sidx].mode à la connexion), jamais kc->mode (« dernière
+            // valeur déclarée », qui peut appartenir à une AUTRE session
+            // encore active dans un dosage mixte).
+            if (kc->sessions[sidx].mode == CLIENT_MODE_SEARCH) {
+                kc->nb_active_search--;
+            } else {
+                kc->nb_active_prune--;
+            }
         }
         kc->last_seen = now;
         g_known_clients_mutation_count++;
@@ -458,6 +486,8 @@ int known_clients_registry_snapshot(known_client_info_t *out, int max)
         out[n].mode = kc->mode;
         out[n].connected = (kc->nb_active_sessions > 0) ? 1 : 0;
         out[n].nb_active_sessions = kc->nb_active_sessions;
+        out[n].nb_active_search = kc->nb_active_search;
+        out[n].nb_active_prune = kc->nb_active_prune;
         out[n].nb_connections_total = kc->nb_connections_total;
         out[n].first_seen = kc->first_seen;
         out[n].last_seen = kc->last_seen;

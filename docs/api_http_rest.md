@@ -177,6 +177,22 @@ Instantané de la télémétrie serveur courante.
   "stock_removes_last_1m": 708,
   "stock_removes_last_1h": 35600,
   "stock_removes_last_1d": 734000,
+  "stock_adds_checked_last_1m": 120,
+  "stock_adds_checked_last_1h": 5900,
+  "stock_adds_checked_last_1d": 121000,
+  "stock_adds_unchecked_last_1m": 630,
+  "stock_adds_unchecked_last_1h": 30800,
+  "stock_adds_unchecked_last_1d": 631000,
+  "stock_removes_checked_last_1m": 700,
+  "stock_removes_checked_last_1h": 34900,
+  "stock_removes_checked_last_1d": 720000,
+  "stock_removes_unchecked_last_1m": 8,
+  "stock_removes_unchecked_last_1h": 700,
+  "stock_removes_unchecked_last_1d": 14000,
+  "server_search_starved": 42,
+  "server_prune_starved": 1370,
+  "nb_search_sessions": 6,
+  "nb_prune_sessions": 2,
   "queues": [
     { "file": 0, "unchecked": 10, "checked": 2, "analysed": 1 },
     { "file": 1, "unchecked": 8,  "checked": 0, "analysed": 0 }
@@ -197,6 +213,10 @@ Instantané de la télémétrie serveur courante.
 | `stock_spill_segments` | entier ≥ 0 | Nombre de fichiers de segment de débordement actuellement sur disque, tous pools et toutes files confondus |
 | `stock_adds_last_1m` / `stock_adds_last_1h` / `stock_adds_last_1d` | entier ≥ 0 | Nombre CUMULÉ d'ajouts au stock (possibilités insérées par des appels `put_to_pool` réussis, tous pools confondus — non vérifié + vérifié) durant respectivement la dernière minute, la dernière heure et le dernier jour glissants. Un serveur démarré depuis moins longtemps que la fenêtre affiche simplement le cumul réel depuis son démarrage (pas d'extrapolation) |
 | `stock_removes_last_1m` / `stock_removes_last_1h` / `stock_removes_last_1d` | entier ≥ 0 | Symétrique côté consommation (possibilités retirées par `scroll_from_pool`), même sémantique de fenêtres |
+| `stock_adds_checked_last_1m/1h/1d` / `stock_adds_unchecked_last_1m/1h/1d` | entier ≥ 0 | Même mesure que `stock_adds_last_*` ci-dessus, mais VENTILÉE par pool cible (vérifié = destiné aux chercheurs, non vérifié = destiné aux pruners) — permet de distinguer quel pool est effectivement alimenté. Les champs `stock_adds_last_*` restent l'agrégat des deux, inchangé |
+| `stock_removes_checked_last_1m/1h/1d` / `stock_removes_unchecked_last_1m/1h/1d` | entier ≥ 0 | Symétrique côté consommation : quel pool est effectivement drainé (vérifié = consommé par des chercheurs, non vérifié = consommé par des pruners **ou** par un chercheur en repli quand le pool vérifié est vide) |
+| `server_search_starved` / `server_prune_starved` | entier ≥ 0 | Nombre CUMULÉ (depuis le démarrage du serveur) de requêtes de service ayant renvoyé `K = 0` — `INST_GET` pour `server_search_starved` (pool vide côté chercheurs), `INST_GET_TO_CHECK`/`INST_GET_TO_CHECK_BATCH` pour `server_prune_starved` (pool vide côté pruners). Un `K = 0` occasionnel est normal (protocole supporté depuis la v7) ; une croissance soutenue signale un manque de production pour ce rôle |
+| `nb_search_sessions` / `nb_prune_sessions` | entier ≥ 0 | Nombre de sessions de contrôle actuellement connectées ayant déclaré respectivement le rôle recherche et le rôle contrôle (pruner CPU ou GPU confondus) — un process lancé avec `--pruner-forks` mixte compte pour UN SEUL rôle ici (celui déclaré par son canal de CONTRÔLE, résolu une fois par process avant tout fork — voir [Dosage recherche/contrôle par fork](utilisation.md#dosage-recherchecontrôle-par-fork---pruner-forks)), pas par fork ; `GET /api/v1/known-clients` détaille la ventilation par MACHINE (`active_search`/`active_prune`) |
 | `queues` | tableau | Une entrée par file de stock **active** (`nb_file_possibility`, configurable au démarrage via `--stock-files`, 10 par défaut, jusqu'à 128 — voir [Utilisation](utilisation.md#maîtrise-de-la-charge-serveur---stock-files---rebalance-budget---tcp-timeout)), avec ses trois compteurs par pool — RÉSIDENT uniquement, comme `possibility_stock`/`checked_stock`. L'ordre des entrées suit l'index de file (0 à `nb_file_possibility - 1`), pas garanti trié par une autre clé |
 
 ### GET /api/v1/status
@@ -619,6 +639,8 @@ même client.
       "mode": "search",
       "connected": true,
       "active_sessions": 1,
+      "active_search": 1,
+      "active_prune": 0,
       "connections_total": 3,
       "first_seen": 1729990000,
       "last_seen": 1730000000,
@@ -638,6 +660,7 @@ même client.
 | `label` / `ip` / `mode` | — | Dernières valeurs déclarées/observées pour cette machine (mêmes conventions que `GET /api/v1/clients` : `label` échappé côté serveur, `ip` non falsifiable) |
 | `connected` | booléen | `true` si au moins une session de cette machine est actuellement active (`active_sessions > 0`) |
 | `active_sessions` | entier ≥ 0 | Nombre de sessions **actuellement** actives pour cette machine — peut dépasser 1 (ex. un client de recherche et un pruner lancés en parallèle sur le même hôte) |
+| `active_search` / `active_prune` | entier ≥ 0 | Parmi `active_sessions`, combien déclarent respectivement le rôle recherche et le rôle contrôle (pruner CPU ou GPU confondus) — `active_search + active_prune == active_sessions` toujours (PR2, [docs/conception/pilotage_type_client.md](conception/pilotage_type_client.md)). Ventilé PAR SESSION (un process = une session de contrôle), pas par fork : un process lancé avec `--pruner-forks` mixte (voir [Dosage recherche/contrôle par fork](utilisation.md#dosage-recherchecontrôle-par-fork---pruner-forks)) compte pour un seul rôle ici, celui déclaré par son canal de contrôle |
 | `connections_total` | entier | Nombre total de connexions (hellos de contrôle) observées pour cette machine depuis le démarrage du serveur |
 | `first_seen` / `last_seen` | entier | Horodatages Unix (secondes) de la première connexion et de la dernière activité observées |
 | `total_pruner_checked` / `total_pruner_removed` | entier ≥ 0 | Cumul, sur toutes les sessions passées **et** en cours de cette machine, des possibilités vérifiées/éliminées par le pruner. Calculé par **accroissement** observé à chaque `CTRL_STATS` (jamais par simple somme des valeurs instantanées) : un client qui redémarre voit son compteur par-processus repartir de 0, mais ce total continue de croître dessus au lieu d'être écrasé |

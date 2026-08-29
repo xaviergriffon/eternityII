@@ -66,6 +66,13 @@ typedef struct {
     /// Nombre de sessions actuellement actives pour cette machine (0 si
     /// déconnectée ; peut dépasser 1, ex. recherche + pruner simultanés).
     int nb_active_sessions;
+    /// Parmi `nb_active_sessions`, combien déclarent le rôle recherche
+    /// (`CLIENT_MODE_SEARCH`) — PR2, docs/conception/pilotage_type_client.md.
+    /// `nb_active_search + nb_active_prune == nb_active_sessions` toujours.
+    int nb_active_search;
+    /// Parmi `nb_active_sessions`, combien déclarent le rôle contrôle
+    /// (`CLIENT_MODE_PRUNER` ou `CLIENT_MODE_GPU_PRUNER`).
+    int nb_active_prune;
     /// Nombre total de connexions (hellos de contrôle) observées pour cette
     /// machine depuis le démarrage du serveur, toutes sessions confondues.
     int nb_connections_total;

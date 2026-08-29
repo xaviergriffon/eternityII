@@ -99,6 +99,29 @@ void http_stats_collect(http_stats_view_t *out)
     out->stock_removes_last_1m = rate.removes_last_1m;
     out->stock_removes_last_1h = rate.removes_last_1h;
     out->stock_removes_last_1d = rate.removes_last_1d;
+    out->stock_adds_checked_last_1m = rate.adds_checked_last_1m;
+    out->stock_adds_checked_last_1h = rate.adds_checked_last_1h;
+    out->stock_adds_checked_last_1d = rate.adds_checked_last_1d;
+    out->stock_adds_unchecked_last_1m = rate.adds_unchecked_last_1m;
+    out->stock_adds_unchecked_last_1h = rate.adds_unchecked_last_1h;
+    out->stock_adds_unchecked_last_1d = rate.adds_unchecked_last_1d;
+    out->stock_removes_checked_last_1m = rate.removes_checked_last_1m;
+    out->stock_removes_checked_last_1h = rate.removes_checked_last_1h;
+    out->stock_removes_checked_last_1d = rate.removes_checked_last_1d;
+    out->stock_removes_unchecked_last_1m = rate.removes_unchecked_last_1m;
+    out->stock_removes_unchecked_last_1h = rate.removes_unchecked_last_1h;
+    out->stock_removes_unchecked_last_1d = rate.removes_unchecked_last_1d;
+
+    // Métriques de besoin par rôle (PR2, docs/conception/pilotage_type_client.md).
+    out->server_search_starved = server_search_starved;
+    out->server_prune_starved = server_prune_starved;
+
+    control_session_info_t sessions[MAX_CONTROL_SESSIONS];
+    int n = control_registry_snapshot(sessions, MAX_CONTROL_SESSIONS);
+    int nb_search = 0, nb_prune = 0;
+    control_registry_count_roles(sessions, n, &nb_search, &nb_prune);
+    out->nb_search_sessions = (unsigned long long)nb_search;
+    out->nb_prune_sessions = (unsigned long long)nb_prune;
 
     unsigned long long unchecked_total = 0, checked_total = 0, analysed_total = 0;
     for (int f = 0; f < nb_file_possibility; f++) {
@@ -228,6 +251,8 @@ int http_known_clients_collect(http_known_client_info_t *out, int max)
         out[i].mode = infos[i].mode;
         out[i].connected = infos[i].connected;
         out[i].nb_active_sessions = infos[i].nb_active_sessions;
+        out[i].nb_active_search = infos[i].nb_active_search;
+        out[i].nb_active_prune = infos[i].nb_active_prune;
         out[i].nb_connections_total = infos[i].nb_connections_total;
         out[i].first_seen = (long long)infos[i].first_seen;
         out[i].last_seen = (long long)infos[i].last_seen;

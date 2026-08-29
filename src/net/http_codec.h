@@ -281,6 +281,32 @@ typedef struct {
     unsigned long long stock_removes_last_1m;
     unsigned long long stock_removes_last_1h;
     unsigned long long stock_removes_last_1d;
+    /// Même mesure, VENTILÉE par pool (PR2, docs/conception/pilotage_type_client.md) :
+    /// distingue le trafic du pool vérifié (chercheurs) de celui du pool non
+    /// vérifié (pruners). Les six champs ci-dessus restent l'agrégat des deux,
+    /// inchangé.
+    unsigned long long stock_adds_checked_last_1m;
+    unsigned long long stock_adds_checked_last_1h;
+    unsigned long long stock_adds_checked_last_1d;
+    unsigned long long stock_adds_unchecked_last_1m;
+    unsigned long long stock_adds_unchecked_last_1h;
+    unsigned long long stock_adds_unchecked_last_1d;
+    unsigned long long stock_removes_checked_last_1m;
+    unsigned long long stock_removes_checked_last_1h;
+    unsigned long long stock_removes_checked_last_1d;
+    unsigned long long stock_removes_unchecked_last_1m;
+    unsigned long long stock_removes_unchecked_last_1h;
+    unsigned long long stock_removes_unchecked_last_1d;
+    /// Compteurs de service à vide par rôle (PR2) — un `INST_GET`/
+    /// `INST_GET_TO_CHECK[_BATCH]` ayant renvoyé `K = 0` depuis le démarrage
+    /// du serveur. Cf. `server_search_starved`/`server_prune_starved`
+    /// (`app/etii_server.h`).
+    unsigned long long server_search_starved;
+    unsigned long long server_prune_starved;
+    /// Parc actuellement connecté, ventilé par rôle déclaré (PR2) — cf.
+    /// `control_registry_count_roles` (`app/control_registry.h`).
+    unsigned long long nb_search_sessions;
+    unsigned long long nb_prune_sessions;
     /// Tailles par file (index 0..nb_file_possibility-1, PR4 : le compte
     /// RÉEL est une variable, ce tableau est dimensionné au plafond de
     /// compilation NB_FILE_POSSIBILITY_MAX), pool non vérifié.
@@ -482,6 +508,11 @@ typedef struct {
     int connected;
     /// Nombre de sessions actuellement actives pour cette machine.
     int nb_active_sessions;
+    /// Parmi `nb_active_sessions`, combien déclarent le rôle recherche (PR2).
+    int nb_active_search;
+    /// Parmi `nb_active_sessions`, combien déclarent le rôle contrôle (pruner
+    /// CPU ou GPU confondus).
+    int nb_active_prune;
     /// Nombre total de connexions observées depuis le démarrage du serveur.
     int nb_connections_total;
     /// Horodatage Unix (secondes) de la première connexion observée.

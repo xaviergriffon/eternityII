@@ -48,6 +48,18 @@ static unsigned int rr_scroll_checked = 0;
 static stock_rate_counter_t stock_adds_rate;
 static stock_rate_counter_t stock_removes_rate;
 
+// Même débit, VENTILÉ par pool (PR2 de docs/conception/pilotage_type_client.md) :
+// l'agrégat ci-dessus ne dit pas si les GET consommés viennent du pool non
+// vérifié (pruners) ou vérifié (chercheurs), ni si les ADD alimentent l'un ou
+// l'autre. Enregistrés EN PLUS de l'agrégat (jamais à sa place — aucun
+// consommateur existant de stock_adds_rate/stock_removes_rate ne doit changer
+// de comportement), depuis les mêmes sites, avec le pool déjà connu de
+// l'appelant (paramètre `want_checked`/`pool` de put_to_pool/scroll_from_pool).
+static stock_rate_counter_t stock_adds_unchecked_rate;
+static stock_rate_counter_t stock_adds_checked_rate;
+static stock_rate_counter_t stock_removes_unchecked_rate;
+static stock_rate_counter_t stock_removes_checked_rate;
+
 int datamanager_rr_next_start(unsigned int *counter, int n)
 {
 	if (n <= 0)
@@ -78,6 +90,10 @@ void datamanager_reset_stock_rate_counters_for_tests(void)
 {
 	stock_rate_reset_for_tests(&stock_adds_rate);
 	stock_rate_reset_for_tests(&stock_removes_rate);
+	stock_rate_reset_for_tests(&stock_adds_unchecked_rate);
+	stock_rate_reset_for_tests(&stock_adds_checked_rate);
+	stock_rate_reset_for_tests(&stock_removes_unchecked_rate);
+	stock_rate_reset_for_tests(&stock_removes_checked_rate);
 }
 
 static file_possibility_t **file_possibility = NULL;
@@ -727,13 +743,18 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
  * @param rr_counter    État round-robin du pool (`rr_put_unchecked`/`rr_put_checked`) —
  *                      fait démarrer chaque appel sur une file différente plutôt que
  *                      toujours la file 0 (cf. `datamanager_rr_next_start`).
+ * @param pool_rate     Compteur de débit VENTILÉ par pool (PR2,
+ *                      `stock_adds_unchecked_rate`/`stock_adds_checked_rate`) —
+ *                      enregistré EN PLUS de l'agrégat `stock_adds_rate`
+ *                      (inchangé), jamais à sa place.
  * @return              0 si inséré (ou rien à insérer), 1 si `pool` est resté
  *                       intégralement verrouillé au-delà de
  *                       DATAMANAGER_TRYLOCK_MAX_SWEEPS tours (maintenance en
  *                       cours : sauvegarde, restore, tri...) — rien n'a été
  *                       inséré dans ce cas, sûr à réessayer par l'appelant.
  */
-static int put_to_pool(file_possibility_t **pool, array_possibility_packet *possibilities, int want_checked, unsigned int *rr_counter)
+static int put_to_pool(file_possibility_t **pool, array_possibility_packet *possibilities, int want_checked,
+                        unsigned int *rr_counter, stock_rate_counter_t *pool_rate)
 {
 	int count = 0;
 	int t;
@@ -798,7 +819,9 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
             }
 			addpossibility = 1;
 			pthread_mutex_unlock(&pool[currfile]->lock);
-			stock_rate_record(&stock_adds_rate, (unsigned int)count, time(NULL));
+			time_t now_rate = time(NULL);
+			stock_rate_record(&stock_adds_rate, (unsigned int)count, now_rate);
+			stock_rate_record(pool_rate, (unsigned int)count, now_rate);
 		}
 		currfile = (currfile + 1) % nb_file_possibility;
 		tried++;
@@ -838,8 +861,8 @@ int put_to_local(array_possibility_packet *possibilities)
 	// vont dans leur pool dédié, les autres dans le pool historique. Chaque
 	// sous-tableau (checked / unchecked) est indépendant : un échec borné
 	// (PR1) sur l'un des deux pools n'empêche pas l'insertion dans l'autre.
-	int err_unchecked = put_to_pool(file_possibility, possibilities, 0, &rr_put_unchecked);
-	int err_checked = put_to_pool(file_possibility_checked, possibilities, 1, &rr_put_checked);
+	int err_unchecked = put_to_pool(file_possibility, possibilities, 0, &rr_put_unchecked, &stock_adds_unchecked_rate);
+	int err_checked = put_to_pool(file_possibility_checked, possibilities, 1, &rr_put_checked, &stock_adds_checked_rate);
 	return (err_unchecked || err_checked) ? 1 : 0;
 }
 
@@ -1773,8 +1796,13 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
  * @param rr_counter État round-robin du pool (`rr_scroll_unchecked`/`rr_scroll_checked`) —
  *                   fait démarrer chaque appel sur une file différente plutôt que
  *                   toujours la file 0 (cf. `datamanager_rr_next_start`).
+ * @param pool_rate  Compteur de débit VENTILÉ par pool (PR2,
+ *                   `stock_removes_unchecked_rate`/`stock_removes_checked_rate`) —
+ *                   enregistré EN PLUS de l'agrégat `stock_removes_rate`
+ *                   (inchangé), jamais à sa place.
  */
-static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet *result, int max_result, unsigned int *rr_counter)
+static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet *result, int max_result,
+                              unsigned int *rr_counter, stock_rate_counter_t *pool_rate)
 {
 	int getpossibility = 0;
 	int currfile = 0;
@@ -1823,7 +1851,9 @@ static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet
 							result->size++;
 							p++;
 						}
-						stock_rate_record(&stock_removes_rate, moved, time(NULL));
+						time_t now_rate = time(NULL);
+						stock_rate_record(&stock_removes_rate, moved, now_rate);
+						stock_rate_record(pool_rate, moved, now_rate);
 					}
 
 					filetested[f] = 1;
@@ -1883,10 +1913,10 @@ static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet
  */
 void scroll_from_local(array_possibility_packet *result, int max_result)
 {
-	scroll_from_pool(file_possibility_checked, result, max_result, &rr_scroll_checked);
+	scroll_from_pool(file_possibility_checked, result, max_result, &rr_scroll_checked, &stock_removes_checked_rate);
 	if(result->size == 0)
 	{
-		scroll_from_pool(file_possibility, result, max_result, &rr_scroll_unchecked);
+		scroll_from_pool(file_possibility, result, max_result, &rr_scroll_unchecked, &stock_removes_unchecked_rate);
 	}
 }
 
@@ -1901,7 +1931,7 @@ void scroll_from_local(array_possibility_packet *result, int max_result)
  */
 void scroll_from_local_tocheck(array_possibility_packet *result, int max_result)
 {
-	scroll_from_pool(file_possibility, result, max_result, &rr_scroll_unchecked);
+	scroll_from_pool(file_possibility, result, max_result, &rr_scroll_unchecked, &stock_removes_unchecked_rate);
 }
 
 array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result, int *from_server)
@@ -3837,6 +3867,14 @@ void datamanager_stock_rate_stats(stock_rate_stats_t *out)
                         &out->adds_last_1m, &out->adds_last_1h, &out->adds_last_1d);
     stock_rate_windows(&stock_removes_rate, now,
                         &out->removes_last_1m, &out->removes_last_1h, &out->removes_last_1d);
+    stock_rate_windows(&stock_adds_unchecked_rate, now,
+                        &out->adds_unchecked_last_1m, &out->adds_unchecked_last_1h, &out->adds_unchecked_last_1d);
+    stock_rate_windows(&stock_adds_checked_rate, now,
+                        &out->adds_checked_last_1m, &out->adds_checked_last_1h, &out->adds_checked_last_1d);
+    stock_rate_windows(&stock_removes_unchecked_rate, now,
+                        &out->removes_unchecked_last_1m, &out->removes_unchecked_last_1h, &out->removes_unchecked_last_1d);
+    stock_rate_windows(&stock_removes_checked_rate, now,
+                        &out->removes_checked_last_1m, &out->removes_checked_last_1h, &out->removes_checked_last_1d);
 }
 
 int statistic_datas(void)
@@ -3867,6 +3905,15 @@ int statistic_datas(void)
              rate.adds_last_1m, rate.adds_last_1h, rate.adds_last_1d);
     log_info("stock GET (1min/1h/1j) : %llu / %llu / %llu\n",
              rate.removes_last_1m, rate.removes_last_1h, rate.removes_last_1d);
+    // Ventilation par pool (PR2) : distingue ce qui alimente/consomme le pool
+    // vérifié (chercheurs) du pool non vérifié (pruners) — l'agrégat ci-dessus
+    // ne le permettait pas.
+    log_info("  dont pool verifie     ADD %llu/%llu/%llu  GET %llu/%llu/%llu\n",
+             rate.adds_checked_last_1m, rate.adds_checked_last_1h, rate.adds_checked_last_1d,
+             rate.removes_checked_last_1m, rate.removes_checked_last_1h, rate.removes_checked_last_1d);
+    log_info("  dont pool non verifie ADD %llu/%llu/%llu  GET %llu/%llu/%llu\n",
+             rate.adds_unchecked_last_1m, rate.adds_unchecked_last_1h, rate.adds_unchecked_last_1d,
+             rate.removes_unchecked_last_1m, rate.removes_unchecked_last_1h, rate.removes_unchecked_last_1d);
     return 0;
 }
 

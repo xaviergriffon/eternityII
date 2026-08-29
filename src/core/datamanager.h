@@ -927,12 +927,28 @@ typedef struct {
     unsigned long long removes_last_1m;
     unsigned long long removes_last_1h;
     unsigned long long removes_last_1d;
+    /// Même mesure, VENTILÉE par pool (PR2, docs/conception/pilotage_type_client.md) :
+    /// permet de distinguer si les ADD/GET consommés viennent du pool non
+    /// vérifié (pruners) ou vérifié (chercheurs) — les six champs ci-dessus
+    /// restent l'agrégat des deux, inchangé.
+    unsigned long long adds_unchecked_last_1m;
+    unsigned long long adds_unchecked_last_1h;
+    unsigned long long adds_unchecked_last_1d;
+    unsigned long long adds_checked_last_1m;
+    unsigned long long adds_checked_last_1h;
+    unsigned long long adds_checked_last_1d;
+    unsigned long long removes_unchecked_last_1m;
+    unsigned long long removes_unchecked_last_1h;
+    unsigned long long removes_unchecked_last_1d;
+    unsigned long long removes_checked_last_1m;
+    unsigned long long removes_checked_last_1h;
+    unsigned long long removes_checked_last_1d;
 } stock_rate_stats_t;
 
 /**
  * @brief Nombre d'ajouts (`put_to_pool`) et de consommations
  *        (`scroll_from_pool`) du stock, tous pools confondus (non vérifié +
- *        vérifié), cumulés sur la dernière minute/heure/jour.
+ *        vérifié) ET ventilés par pool, cumulés sur la dernière minute/heure/jour.
  *
  * Consulté par `statistic_datas()` (commande console `stats`/`statistic`) et
  * par `http_stats_collect()` (`GET /api/v1/stats`) — mesure côté serveur
