@@ -80,6 +80,8 @@ const char *machine_uid_file_path = "./eternityii-machine_uid";
 
 const char *client_config_file_path = "./eternityii-client.conf";
 
+const char *server_config_file_path = "./eternityii-server.conf";
+
 client_identity_t g_client_identity_template;
 
 volatile unsigned long long server_shots_per_second = 0;
@@ -293,11 +295,16 @@ int parse_cli_options(int argc, const char *argv[])
             auto_roles_requested = 1;
         } else if (strcmp(argv[r], "--config-file") == 0) {
             // Option valuée, même schéma. Chargement effectif (lecture, puis
-            // application aux globales) dans handle_client (src/app/main.c),
-            // via client_config_load/client_config_apply_to_globals — aucune
-            // I/O ici.
+            // application aux globales) dans handle_client/handle_server
+            // (src/app/main.c), via client_config_load/server_config_load —
+            // aucune I/O ici. Une seule option pour les deux : au plus un mode
+            // s'exécute par process, donc écrire la même valeur dans les deux
+            // globales est sans effet pour celle du mode qui ne tourne pas
+            // (jamais lue). Sans cette option, chaque mode garde son propre
+            // chemin par défaut (client_config_file_path/server_config_file_path).
             if (r + 1 < argc) {
                 client_config_file_path = argv[r + 1];
+                server_config_file_path = argv[r + 1];
                 r++; // consomme aussi la valeur
             }
         } else {

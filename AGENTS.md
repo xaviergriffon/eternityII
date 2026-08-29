@@ -33,7 +33,7 @@ Sources live under `src/`, split into four domains. Includes are **explicit and 
 | `src/core/` | Puzzle logic & data structures + search engine | `core_static_variables` `part` `readdata` `possibility` `best_board` `lifo` `packed`(h) `etii_search` `datamanager` `stock_spill` `stock_rate` |
 | `src/net/`  | TCP protocol & sockets, parent↔child IPC | `etii_protocol` `control_protocol` `client_identity` `tcpclient` `tcpserver` `local_socket` `ipc_protocol`(h) `http_codec` `http_server` |
 | `src/ui/`   | Logging, console, command handling | `logger` `logger_ncurses`(c) `console` `command_lines` `command_match` `command_history` `line_edit` |
-| `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_control` `control_registry` `known_clients_registry` `client_config` `fork_gate` `fork_orchestrator` `app_runtime` `etii_statistic`(h) `app_static_variables` `gpu_pruner`(.cu/.h) |
+| `src/app/`  | Entry point, client/server roles, signals, globals, GPU | `main`(c) `etii_client` `etii_server` `etii_control` `control_registry` `known_clients_registry` `client_config` `server_config` `fork_gate` `fork_orchestrator` `app_runtime` `etii_statistic`(h) `app_static_variables` `gpu_pruner`(.cu/.h) |
 
 **Static/global state is split by domain, not bundled in one file.** `src/core/core_static_variables.{h,c}` holds the state that `src/core/` itself needs (puzzle geometry, forward-check counters, the `request`/pause state machine, search/pruner counters) — verified by grep against actual `core/` usage, not reconstituted from memory. `src/app/app_static_variables.{h,c}` holds everything else (CLI options, client identity, HTTP admin, server expansion/rebalance/lease/RAM-cap config, benchmarks). This exists to stop `core/` depending on `app/` for symbols that have nothing applicative about them — a violation the single `static_variables.h` used to force on every file under `core/` that touched puzzle geometry. `core/datamanager.c` and `core/etii_search.c` remain documented exceptions: they read genuinely applicative state directly (protocol `version`, `SERVER_PORT`, `pruner_mode`, `g_client_identity_template`, expansion/lease config) and therefore include both headers — see the note at the top of `core/core_static_variables.h` for the full accounting. **Naming rule: any file holding this kind of global/static state must keep `static_variables` in its name**, prefixed by its domain (`core_`/`app_`) — do not reintroduce a bare `static_variables.{h,c}` or scatter globals under unrelated names.
 
@@ -70,6 +70,8 @@ Full option reference per mode — `--expand-level`, `--stock-max-ram`, `--stock
 **CLI help system**: single source of truth is the `cli_topics[]` table in `src/app/app_runtime.c` — it feeds general help, per-topic help, and the invalid-arguments message alike. **Adding a mode or a global option ⇒ add its entry to that table.**
 
 **Pre-fork resolution invariant**: `--stop-on-solution`, `--name`, `--machine-uid-file` and `--config-file` are all parsed/resolved once in `main()`/`handle_client()` **before any `fork()`**, so every forked search worker inherits the same value via copy-on-write. Client config priority is always **CLI > `--config-file` > defaults** (`client_config_apply_to_globals`, `src/app/client_config.c`).
+
+The server has its own config-file mechanism, `src/app/server_config.{h,c}`, covering every server startup option (nb_threads/parts_file plus `--expand-level`, `--expand-max-stock`, `--expand-max-levels`, `--http-port`, `--http-token-file`, `--stock-files`, `--stock-max-ram`, `--stock-spill-dir`, `--rebalance-budget`, `--tcp-timeout`, `--auto-roles`, `--stop-on-solution`, `--headless`) with the same **CLI > `--config-file` > defaults** priority — same `--config-file` flag as the client (only one mode runs per process), but its own default path (`./eternityii-server.conf`, vs. `./eternityii-client.conf`) and key set. Unlike the client, the server has no deferred-start orchestrator: the file is read once, synchronously, in `main()`/`handle_server()` before the server starts — no `config`/`configSave`/`configApply` console commands (those remain client-only, cf. `command_is_client_only`, `src/ui/command_lines.c`). Four keys (`http_port`, `http_token_file`, `stock_files`, `stock_max_ram`) must be applied by `server_config_apply_pre_dispatch` in `main()` **before** `parse_cli_options`'s unconditional post-processing (`http_token_load`, `datamanager_configure_stock_files`/`_configure_ram_limit`) — applying them later (e.g. from inside `handle_server`) would be too late.
 
 ## Deferred-start orchestrator
 
@@ -183,7 +185,8 @@ MRV (most-constrained-first cell choice) is the **sole** search engine, for both
 | `src/app/etii_control.c` | Client-side control channel |
 | `src/app/control_registry.c` | Server-side registry of active control sessions |
 | `src/app/known_clients_registry.c` | Server-side registry of known machines — cumulative, survives disconnect and restart |
-| `src/app/client_config.c` | `--config-file` parsing/loading/saving |
+| `src/app/client_config.c` | `--config-file` parsing/loading/saving (client/pruner) |
+| `src/app/server_config.c` | `--config-file` parsing/loading/saving (server) |
 | `src/app/fork_gate.c` | Cooperative quiescence for forking alongside live parent threads |
 | `src/app/fork_orchestrator.c` | Deferred-start state machine; the real per-fork `fork()` |
 | `src/net/http_codec.c` / `http_server.c` | HTTP admin API: pure parsing/JSON layer / socket + dispatch shell |

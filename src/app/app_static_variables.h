@@ -599,6 +599,21 @@ extern const char *machine_uid_file_path;
 extern const char *client_config_file_path;
 
 /**
+ * @brief Chemin du fichier de configuration serveur (option CLI
+ *        `--config-file <chemin>`, partagée avec le client — un seul mode
+ *        s'exécute par process, cf. `client_config_file_path` ci-dessus).
+ *
+ * Défaut `"./eternityii-server.conf"` (nom distinct du client, même
+ * répertoire). Lu au démarrage du serveur (`main`/`handle_server`,
+ * src/app/main.c) via `server_config_load` (src/app/server_config.h), qui
+ * pré-remplit les valeurs par défaut des options non fournies en ligne de
+ * commande (priorité CLI > fichier > défauts) — jamais un échec de démarrage
+ * si ce fichier est absent ou illisible. Position-indépendant, retiré d'argv
+ * par `parse_cli_options`.
+ */
+extern const char *server_config_file_path;
+
+/**
  * @brief Identité déclarée de CE process client, résolue une seule fois par
  *        `init_client_identity` (src/app/app_runtime.h) AVANT tout fork —
  *        chaque fork en hérite une copie identique par copy-on-write
@@ -716,7 +731,9 @@ int bench_should_stop(unsigned long long target_nodes, unsigned long long nodes_
  * `--gpu`, `--headless` et `--help`/`-h` (positionne respectivement `stop_on_solution`,
  * `expand_min_level`, `expand_max_stock`, `expand_max_levels`, `HTTP_PORT`,
  * `HTTP_TOKEN_FILE`, `client_label`, `machine_uid_file_path`,
- * `client_config_file_path`, `stock_files_requested`, `stock_max_ram_mb`,
+ * `client_config_file_path` et `server_config_file_path` (les deux à la fois —
+ * un seul mode s'exécute par process, cf. `server_config_file_path`),
+ * `stock_files_requested`, `stock_max_ram_mb`,
  * `stock_spill_dir`, `rebalance_budget`, `tcp_timeout`, `pruner_forks_requested`,
  * `auto_roles_requested`, `gpu_requested`, `headless_mode` et `help_requested`). Compacte
  * `argv` en place pour supprimer les options reconnues, afin de ne pas perturber
