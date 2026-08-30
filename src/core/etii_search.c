@@ -947,6 +947,18 @@ static inline int mrv_free_candidates(const map_big_array *map, const key_part *
  *    d'égalité, donc le même arbre exploré.
  * 3. **Comptage par `popcount`** au lieu d'un parcours du compartiment
  *    (`mrv_free_candidates`).
+ * 4. **Départage des égalités par le nombre de côtés contraints** (`nconstr`,
+ *    porté par la frontière incrémentale, donc gratuit à lire) : à score MRV
+ *    égal, la case dont le PLUS de côtés sont déjà contraints l'emporte, au
+ *    lieu de la première rencontrée. À défaut d'égalité sur `nconstr` aussi,
+ *    l'ordre d'énumération tranche comme avant.
+ *
+ *    Le sens du critère a été MESURÉ, pas supposé : l'heuristique de degré
+ *    classique de la littérature CSP recommande l'inverse (préférer la case
+ *    qui contraint le plus de variables NON affectées, soit `nconstr` minimal
+ *    puisqu'il est borné par 4). Sur un stock de production, cette variante-là
+ *    est nettement PERDANTE (+4,4 % de coût de réfutation), quand `nconstr`
+ *    maximal gagne −6,3 %. Cf. §4.12 de `docs/conception/elagage_recherche.md`.
  *
  * Le balayage reste COMPLET (pas d'arrêt anticipé sur une case à 1 candidat) :
  * sa détection de case morte, où qu'elle soit sur la frontière, est un
@@ -976,6 +988,7 @@ static int mrv_choose_cell(struct possibility_packet *board,
 {
     int best_count = -1;
     uint8_t best_x = 0, best_y = 0;
+    int best_nc = 0;
 
     for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
         uint64_t bits = front->empty[w] & front->constrained[w];
@@ -993,6 +1006,15 @@ static int mrv_choose_cell(struct possibility_packet *board,
                 best_count = count;
                 best_x = (uint8_t)x;
                 best_y = (uint8_t)y;
+                best_nc = front->nconstr[pos];
+            } else if (count == best_count && front->nconstr[pos] > best_nc) {
+                // Départage à score MRV égal : la case dont le PLUS de côtés
+                // sont déjà contraints (bords de grille + voisines posées).
+                // `nconstr` est maintenu par la frontière incrémentale, donc
+                // ce critère ne coûte qu'une lecture d'octet.
+                best_x = (uint8_t)x;
+                best_y = (uint8_t)y;
+                best_nc = front->nconstr[pos];
             }
         }
     }
