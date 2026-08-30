@@ -84,6 +84,30 @@ séquence est surchargeable pour rejouer un seul job :
 make test-docker DOCKER_TEST_CMD="make test ASAN=1"
 ```
 
+### La copie `/src` → `/work` ignore les fichiers spéciaux
+
+Le repo hôte est monté en lecture seule sur `/src` puis recopié dans `/work`.
+Cette copie n'est **pas** un `cp -R` : `cp` ne sait pas copier un fichier
+spécial et s'arrête net dessus —
+
+```
+cp: cannot stat '/src/./etii_main.76645': Operation not supported
+```
+
+— une seule socket résiduelle suffisait donc à bloquer *tout* le rejeu de la CI.
+Or le répertoire de travail en contient légitimement : les sockets Unix
+`etii_main.<pid>` / `etii_fork.<pid>` de l'IPC parent↔fork y sont créées par
+`bind()` (cf. [Architecture](architecture.md#cycle-de-vie-des-fichiers-socket)).
+Elles sont désormais supprimées à la terminaison du process qui les a créées,
+mais un process **encore vivant** — ou tué par `SIGKILL` — en laisse forcément
+une derrière lui, et elles sont invisibles de `git status` (git ne suit pas les
+fichiers spéciaux) : le diagnostic est donc particulièrement déroutant.
+
+La copie passe par `find ! -type s | tar`, qui les ignore explicitement plutôt
+que de dépendre d'un répertoire propre — une socket n'a de toute façon aucun sens
+à être recopiée dans le conteneur. Même mécanisme pour `make test-docker-arm`
+(variable `DOCKER_COPY_SRC` du Makefile, partagée par les deux cibles).
+
 ### Le conteneur tourne en root : tests sautés
 
 Une différence subsiste volontairement avec la CI : le conteneur exécute les tests
