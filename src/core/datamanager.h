@@ -424,6 +424,38 @@ typedef int (*analysed_owner_alive_fn)(const uint8_t owner_uid[CLIENT_UID_BYTES]
  *                    vivacité (échéance seule).
  * @return            Nombre de possibilités rendues au stock.
  */
+/**
+ * @brief Supprime toute possibilité dont l'une des `origins` est la racine.
+ *
+ * Rendre au stock une possibilité en cours d'analyse (bail expiré) la remet en
+ * concurrence avec les enfants que le client avait déjà poussés avant de
+ * disparaître : elle en devient la racine, et leur sous-arbre est dès lors
+ * couvert deux fois. Ce nettoyage supprime ces descendants — dans les deux
+ * pools de stock ET dans le pool analysé, un autre client pouvant travailler
+ * sur un descendant devenu redondant. L'origine elle-même n'est jamais
+ * touchée : c'est l'arbitrage de `check_origin` (on garde la racine, on
+ * supprime le descendant, cf. docs/console.md).
+ *
+ * Verrouillage en DEUX temps, pool analysé puis stock, sans jamais tenir les
+ * deux familles de verrous en même temps : aucun ordre d'acquisition nouveau
+ * n'est introduit, donc aucun risque d'interblocage avec `INST_GET`. Le prix
+ * est une atomicité imparfaite — une possibilité servie (stock -> analysé)
+ * entre les deux temps échappe à la passe. C'est un nettoyage au mieux, pas
+ * une garantie : le balayage exhaustif reste `check_origin`.
+ *
+ * Coût mesuré sur un stock de production réel (12 689 possibilités, 10 origines) :
+ * 1,0 ms, soit ~1,1 s extrapolé à 14 millions, en un seul fil — à comparer au
+ * `--tcp-timeout` de 10 s et à la fréquence réelle des réclamations (6 en sept
+ * semaines de journal de production). Pas de budget de temps dédié pour
+ * l'instant ; à revoir si le stock grossit d'un ordre de grandeur.
+ *
+ * @param origins Tableau de paquets racines (jamais supprimés). `NULL` -> 0.
+ * @param n       Nombre d'origines. `0` -> 0, sans prendre le moindre verrou.
+ * @return        Nombre de possibilités supprimées.
+ */
+unsigned long long datamanager_purge_descendants_of(const struct possibility_packet *origins,
+                                                    unsigned long long n);
+
 unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner_alive_fn owner_alive);
 
 /**

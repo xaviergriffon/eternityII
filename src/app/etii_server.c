@@ -184,6 +184,27 @@ int client_work_fork_roles(const uint8_t client_uid[CLIENT_UID_BYTES],
 }
 
 /**
+ * @brief Voir la doc dans etii_server.h.
+ */
+int client_has_open_work_connection(const uint8_t client_uid[CLIENT_UID_BYTES])
+{
+    if (thread_params == NULL || client_uid == NULL) {
+        return 0;
+    }
+    for (int i = 0; i < NB_THREADS; i++) {
+        // socket_id d'abord : à la déconnexion il repasse à -1 alors que
+        // has_identity reste posé jusqu'à la réutilisation du slot.
+        if (thread_params[i].socket_id == -1 || !thread_params[i].has_identity) {
+            continue;
+        }
+        if (memcmp(thread_params[i].identity.client_uid, client_uid, CLIENT_UID_BYTES) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/**
  * @brief Construit le tableau « File queues » du rapport serveur (une ligne par
  *        file : unchecked / checked / analysed, plus la ligne Total) dans une
  *        chaîne fraîchement allouée. Renvoie les totaux par pool via les
@@ -265,6 +286,31 @@ int should_autobackup(int *lastBack, unsigned long long *lastBackupUpdates,
 static int owner_control_session_alive(const uint8_t owner_uid[CLIENT_UID_BYTES])
 {
     return control_registry_has_active_client(owner_uid);
+}
+
+/**
+ * @brief Vivacité utilisée par le BAIL d'expiration : session de contrôle
+ *        enregistrée **ou** connexion de travail ouverte.
+ *
+ * Deux signaux, pas un seul. Quand un client s'arrête, son canal de contrôle
+ * se ferme EN PREMIER ; ses forks de travail sont alors encore en train
+ * d'envoyer leurs résultats et leurs acquittements. Sur le seul canal de
+ * contrôle, le bail réclamait donc une possibilité dont le client avait DÉJÀ
+ * poussé les enfants : parent et enfants se retrouvaient tous deux en stock,
+ * le parent devenant la racine de ses propres enfants. Diagnostic complet et
+ * mesures : `docs/investigations/bail_expire_racines_en_stock.md`.
+ *
+ * Volontairement DISTINCTE de `owner_control_session_alive`, qui reste le
+ * critère de `requeue_last_sent_possibility` : celle-ci est appelée par la
+ * connexion de travail qui se termine, laquelle serait comptée comme « encore
+ * ouverte » par `client_has_open_work_connection` selon l'instant où
+ * `socket_id` repasse à -1. Élargir ce critère-là changerait un comportement
+ * qui n'est pas en cause ici.
+ */
+static int owner_client_alive(const uint8_t owner_uid[CLIENT_UID_BYTES])
+{
+    return control_registry_has_active_client(owner_uid)
+        || client_has_open_work_connection(owner_uid);
 }
 
 /**
@@ -380,13 +426,13 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
     // est lu une seule fois ici et injecté, `datamanager_reclaim_expired_leases`
     // ne consulte jamais l'horloge elle-même (testable sans horloge réelle).
     // Idempotent vis-à-vis d'un acquittement concurrent : les deux passent par
-    // le même verrou par file (cf. datamanager.h). `owner_control_session_alive`
+    // le même verrou par file (cf. datamanager.h). `owner_client_alive`
     // (ci-dessous) est le second critère, ajouté après un essai réel : un
     // client toujours connecté sur son canal de contrôle n'est jamais réclamé,
     // même si une possibilité met plus longtemps que `analysed_lease_seconds`
     // à s'analyser -- ce budget de temps n'était qu'un minorant, jamais une
     // garantie de durée d'analyse.
-    unsigned long long reclaimed_leases = datamanager_reclaim_expired_leases(time(NULL), owner_control_session_alive);
+    unsigned long long reclaimed_leases = datamanager_reclaim_expired_leases(time(NULL), owner_client_alive);
     if (reclaimed_leases > 0) {
         log_event("bail expiré : %llu possibilité(s) rendue(s) au stock (client disparu)", reclaimed_leases);
     }

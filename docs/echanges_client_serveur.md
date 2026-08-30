@@ -808,13 +808,44 @@ même branche. `datamanager_reclaim_expired_leases(now, owner_alive)`
 (`src/core/datamanager.{h,c}`) prend donc un second paramètre, un callback de
 vivacité : une entrée n'est réclamée que si **les deux** conditions sont vraies —
 `analysed_lease_is_expired` **ET** `!owner_alive(owner_uid)`. `check_server_step`
-(`src/app/etii_server.c`) lui passe `owner_control_session_alive`, qui délègue à
-`control_registry_has_active_client(client_uid)` (`src/app/control_registry.{h,c}`) :
-tant que le canal de contrôle du client reste enregistré (preuve directe qu'il est
-vivant — pings/pongs et `CTRL_STATS` réguliers, voir *Canal de contrôle* ci-dessus),
-son travail n'expire **jamais**, aussi longtemps qu'une possibilité mette à
-s'analyser ; seule une déconnexion confirmée (`run_control_session` appelle
-`control_registry_unregister` à la fin de la session) lève cette protection.
+(`src/app/etii_server.c`) lui passe `owner_client_alive`, qui consulte **deux**
+signaux : `control_registry_has_active_client(client_uid)`
+(`src/app/control_registry.{h,c}`) et `client_has_open_work_connection(client_uid)`
+(`src/app/etii_server.{h,c}`). Tant que le client a une session de contrôle
+enregistrée **ou** au moins une connexion de travail ouverte, son travail n'expire
+**jamais**, aussi longtemps qu'une possibilité mette à s'analyser.
+
+**Pourquoi deux signaux et pas seulement le canal de contrôle.** La première version
+ne regardait que la session de contrôle, et c'est ce qui a produit en production
+**3617 possibilités redondantes sur 12 689** (28,5 % du stock) : à l'arrêt d'un
+client, le canal de contrôle — ouvert par le seul process parent — se ferme **avant**
+que ses forks de travail aient fini de vider leur file. Le serveur rendait alors au
+stock une possibilité dont le client avait **déjà poussé les enfants**, si bien que le
+parent devenait la racine de ses propres enfants (l'acquittement tardif du fork
+arrivait ensuite sous forme d'un « absence confirmée » réputé bénin). Diagnostic
+complet, comptes et preuves : [investigations/bail_expire_racines_en_stock.md](investigations/bail_expire_racines_en_stock.md).
+`client_has_open_work_connection` exige `socket_id != -1` **et** `has_identity` :
+`has_identity` n'étant remis à zéro qu'à la réutilisation du slot, s'y fier seul
+ferait vivre un client indéfiniment et le bail ne serait plus jamais réclamé.
+`requeue_last_sent_possibility` conserve délibérément l'ancien critère (session de
+contrôle seule) : elle est appelée par la connexion de travail qui se termine,
+laquelle serait comptée comme « encore ouverte » selon l'instant où `socket_id`
+repasse à -1.
+
+**Nettoyage à la réinjection.** Un client réellement mort voit toujours son bail
+réclamé — et la possibilité rendue peut alors être la racine d'enfants déjà en stock.
+`datamanager_reclaim_expired_leases` appelle donc
+`datamanager_purge_descendants_of(origines, n)` (`src/core/datamanager.{h,c}`) une
+fois tous ses verrous relâchés : les descendants des possibilités rendues sont
+supprimés des deux pools de stock **et** du pool analysé (un autre client peut
+travailler sur un descendant devenu redondant). L'origine n'est jamais touchée —
+même arbitrage que `checkOrigin` : on garde la racine, on supprime le descendant,
+puisqu'on ne sait pas ce qui a produit la paire et que le travail repart de la
+racine. Le verrouillage se fait en deux temps (pool analysé, puis stock) sans jamais
+tenir les deux familles ensemble : aucun ordre d'acquisition nouveau, donc aucun
+risque d'interblocage avec `INST_GET`, au prix d'une atomicité imparfaite — une
+possibilité servie entre les deux temps échappe à la passe. C'est un nettoyage au
+mieux ; le balayage exhaustif reste la commande `checkOrigin` ([console.md](console.md)).
 `datamanager.c` (domaine `core/`) ne dépend volontairement pas de
 `control_registry.h` (domaine `app/`, serveur uniquement) : c'est l'appelant qui
 fournit le callback (`owner_alive == NULL` retombe sur l'échéance seule — pratique
@@ -830,7 +861,7 @@ besoin d'être dimensionnée pour couvrir le pire cas d'analyse (un pruner à gr
 `prunerBatch`, par exemple) : elle ne sert plus qu'à borner le délai avant la
 PREMIÈRE vérification de vivacité d'une possibilité tenue par un client déjà
 déconnecté — un client réellement mort n'est de toute façon jamais protégé par
-`owner_alive`. `<n> <= 0` désactive le bail entièrement (le travail attribué n'est
+`owner_alive` (ni par sa session de contrôle, ni par une connexion de travail). `<n> <= 0` désactive le bail entièrement (le travail attribué n'est
 alors plus jamais rendu automatiquement, quelle que soit la vivacité). Un
 changement de durée n'affecte que les possibilités attribuées **après** le
 changement — celles déjà en cours d'analyse gardent l'échéance calculée à leur

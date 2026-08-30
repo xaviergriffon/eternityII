@@ -344,6 +344,44 @@ typedef struct {
  *                    n'est actuellement connecté en travail, `out == NULL`,
  *                    ou `max <= 0`).
  */
+/**
+ * @brief Indique si ce client a au moins une connexion de TRAVAIL ouverte.
+ *
+ * Complète `control_registry_has_active_client` pour juger la vivacité d'un
+ * client avant de réclamer son bail : le canal de contrôle d'un client qui
+ * s'arrête se ferme AVANT que ses forks de travail aient fini de vider leur
+ * file, si bien que le seul canal de contrôle déclare mort un client dont les
+ * forks travaillent encore (diagnostic complet : `docs/investigations/`).
+ *
+ * Un slot dont la connexion est fermée (`socket_id == -1`) ne compte pas, même
+ * s'il porte encore une identité — `has_identity` n'est remis à zéro qu'à la
+ * réutilisation du slot par `try_assign_client_slot`, jamais à la déconnexion.
+ *
+ * @param client_uid Identifiant du client recherché.
+ * @return           1 si au moins une connexion de travail ouverte lui appartient, 0 sinon.
+ */
+int client_has_open_work_connection(const uint8_t client_uid[CLIENT_UID_BYTES]);
+
+/**
+ * @brief Indique si ce client a au moins une connexion de TRAVAIL ouverte.
+ *
+ * Complète `control_registry_has_active_client` pour juger la vivacité d'un
+ * client avant de réclamer son bail : le canal de contrôle d'un client qui
+ * s'arrête se ferme AVANT que ses forks de travail aient fini de vider leur
+ * file, si bien que le seul canal de contrôle déclare mort un client dont les
+ * forks travaillent encore (diagnostic complet : `docs/investigations/`).
+ *
+ * Un slot dont la connexion est fermée (`socket_id == -1`) ne compte pas, même
+ * s'il porte encore une identité — `has_identity` n'est remis à zéro qu'à la
+ * réutilisation du slot par `try_assign_client_slot`, jamais à la déconnexion.
+ * Se fier à la seule identité ferait vivre un client indéfiniment et le bail
+ * ne serait plus jamais réclamé : le défaut exactement inverse.
+ *
+ * @param client_uid Identifiant du client recherché.
+ * @return           1 si au moins une connexion de travail ouverte lui appartient, 0 sinon.
+ */
+int client_has_open_work_connection(const uint8_t client_uid[CLIENT_UID_BYTES]);
+
 int client_work_fork_roles(const uint8_t client_uid[CLIENT_UID_BYTES],
                            client_work_fork_t *out, int max);
 
