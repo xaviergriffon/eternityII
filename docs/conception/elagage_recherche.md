@@ -139,6 +139,53 @@ genèse), ses tests existants en dépendent, et il ne pèse pas sur le débit �
 docstring de `bt_forward_check` (`etii_search.c`) pour le partage explicite des
 responsabilités entre les deux fonctions.
 
+#### Remesure post-MRV : le forward-check est LOGIQUEMENT redondant, et pourtant rentable
+
+Question rouverte une fois MRV devenu le moteur unique, et surtout une fois la frontière
+énumérée par masque de bits (§4.7, suite mesurée) : **`mrv_choose_cell` détecte un
+sur-ensemble strict de ce que trouve `bt_forward_check`.** Le forward-check déclare morte
+une case vide voisine de la pièce posée sans candidat libre ; le balayage MRV déclare morte
+*n'importe quelle* case de frontière sans candidat libre — or une voisine de la pièce
+posée est vide et contrainte, donc dans la frontière. Tout ce que le forward-check trouve
+serait donc trouvé au nœud suivant, sans lui. Il n'achète plus qu'un nœud d'avance.
+La question devient purement comptable, et A/B est gratuit : `FORWARD_CHECK_K=0` est déjà
+un réglage de compilation. (Pour rejouer la mesure : `bench_search.sh` s'interrompait
+silencieusement sur un binaire sans forward-check — `fc_attempts` absent du journal,
+`grep` sans correspondance, `pipefail` + `set -e` — corrigé par `bench_extract_field`
+dans `tests/bench/bench_lib.sh`.)
+
+**Piège de mesure, qui est tout le sujet.** Désactiver le forward-check **change la
+définition d'un nœud** : un placement qu'il rejetait devient un nœud accepté, qui meurt au
+`mrv_choose_cell` suivant — exactement un nœud de plus, jamais deux (le sous-arbre qui
+suit est identique). Donc `nœuds_off = nœuds_on + fc_pruned_on`, c'est-à-dire
+`nœuds_off ≡ fc_attempts_on`. Comparer les débits bruts donne la conclusion **inverse** de
+la vraie : 1 391 353 nœuds/s sans forward-check contre 987 933 avec, soit « +41 % » — un
+gain entièrement fabriqué par des nœuds moins chers et plus nombreux. L'unité comparable
+est la **tentative de placement**.
+
+**Mesuré** (`tests/bench/bench_search.sh`, puzzle 256, 5 répétitions, runs dos à dos sur
+la même machine, par-dessus la frontière incrémentale de §4.7) :
+
+| Configuration | Tentatives de placement | Temps médian | Coût unitaire |
+|---|---|---|---|
+| Forward-check **activé** (5 M nœuds) | 8 162 722 | 5,062 s | **620,1 ns** |
+| Forward-check **désactivé** (8 161 320 nœuds) | 8 162 913 | 5,866 s | 718,7 ns |
+| Delta | — | — | **+15,90 %** |
+
+Les deux volumes de travail tombent à 0,002 % l'un de l'autre alors que la cible du run
+sans forward-check avait été dérivée d'un run *antérieur* : l'équivalence
+`nœuds_off ≡ fc_attempts_on` est donc vérifiée par la mesure, pas seulement raisonnée.
+Contrôle secondaire cohérent : `max_result` 190 (avec) contre 191 (sans, avec un léger
+dépassement de cible) — les deux configurations sont bien au même point de l'exploration.
+
+**Décision : le forward-check est conservé.** Redondant en pouvoir d'élagage n'est pas
+redondant en coût. Inspecter ~1,9 case voisine contre son compartiment reste bien moins
+cher que le prix de laisser passer le placement mort : un `mrv_choose_cell` complet
+(balayage de frontière + ~29 blocs de `popcount`), plus l'empilement/dépilement d'un
+niveau et la comptabilité de nœud. Rendre `mrv_choose_cell` ~9 % moins cher (§4.7) n'a pas
+suffi à renverser l'arbitrage, et ne le renversera pas : c'est justement ce que ce banc
+mesure. Piste à ne pas rouvrir sans changer l'un des deux termes.
+
 ### 4.2 Contrainte de type coin / bord / intérieur — VARIANTE « COMPTEURS » ÉVALUÉE ET ÉCARTÉE
 
 **Statut : la variante « compteurs » évaluée et abandonnée** (code absent de `master`) ;
@@ -1587,6 +1634,11 @@ elle-même.
   opt-in à activer manuellement si le profil de profondeur change (`GET
   /api/v1/stock-distribution` reste l'outil pour le vérifier sur un serveur réel avant
   d'activer), pas une valeur à deviner a priori.
+- ~~**4.1 : le forward-check reste-t-il rentable maintenant que le balayage MRV le
+  subsume ?**~~ Tranché : oui, il est conservé — §4.1 (« Remesure post-MRV »), mesuré à
+  travail réel égal (la tentative de placement, pas le nœud, dont la définition change
+  avec le réglage) : **+15,90 % de temps sans lui**. Redondant en pouvoir d'élagage
+  n'est pas redondant en coût.
 - **Cumul des élagages.** Les gains ne s'additionnent pas : 4.1 et 4.2 attrapent en partie
   les mêmes branches. Chaque PR doit être mesurée **par-dessus** la précédente, jamais
   contre `master`.
