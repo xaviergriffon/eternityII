@@ -1536,6 +1536,68 @@ supplémentaire est INVERSEMENT proportionnel à la force du moteur qui la suit 
 puissante élague utilement pour LES AUTRES (le stock serveur, avant distribution), pas pour
 elle-même.
 
+### 4.11 Backjumping dirigé par conflit (CBJ) — ÉVALUÉE ET ÉCARTÉE, SANS IMPLÉMENTATION
+
+**Statut : écartée par mesure, aucun code écrit.** Deuxième piste de ce document tranchée
+avant d'écrire la moindre ligne de production, après §4.9.
+
+**L'idée.** Le moteur recule d'un seul niveau quand `mrv_choose_cell` détecte une case
+morte. Le backjumping dirigé par conflit, standard de la littérature CSP et successeur
+naturel de MRV, remonterait directement au niveau **coupable le plus profond**, sautant
+les décisions intermédiaires sans rapport avec la contradiction. C'est la piste au plus
+haut plafond théorique de la liste.
+
+**Ce qui rend la case morte imputable.** Une case de frontière sans candidat libre a deux
+familles de coupables :
+
+1. les niveaux ayant posé une de ses **voisines** — ils ont fixé sa clé, donc son
+   compartiment ;
+2. les niveaux ayant consommé une **pièce présente dans ce compartiment** — ils l'ont
+   rendue indisponible.
+
+Une pièce héritée de la racine n'est imputable à aucun niveau : un ensemble de conflit
+vide signifierait que le sous-arbre entier est réfuté d'un coup.
+
+**Méthode de mesure.** Sonde jetable dans `mrv_choose_cell` et la boucle chaude : deux
+cartes d'attribution (`pièce → niveau qui l'a posée`, `case → niveau qui l'a remplie`)
+maintenues à la pose et au retrait, puis, à chaque case morte, calcul du niveau coupable
+le plus profond et du nombre de niveaux que le backjump aurait sautés. Le gain mesuré est
+une **borne OPTIMISTE** : le CBJ complet propage en plus les ensembles de conflit en
+remontant, ce que la sonde ne simule pas. Population : racines d'un stock de production
+(`--from-back`, ≥ 100 pièces posées), c'est-à-dire du travail réellement servi.
+
+**Résultat, sur 152 128 détections de case morte :**
+
+| Gain du backjump (niveaux sautés) | Part |
+|---|---|
+| **0 — identique au backtracking chronologique** | **100,00 %** |
+| 1 à 8 | 0,00 % |
+| > 8 | 0,00 % |
+| sous-arbre entier réfuté (conflit vide) | 0 (0,000 %) |
+
+Pas « presque toujours nul » : **exactement nul, sur la totalité des événements**, à une
+profondeur de pile moyenne de 52,5. Un premier échantillon indépendant, plus petit (741
+événements), donnait déjà 100,00 %.
+
+**Pourquoi c'est structurel, et non un accident de mesure.** MRV choisit à chaque nœud la
+case *la plus contrainte*. Une case ne devient mortelle qu'au moment où quelque chose la
+contraint — c'est-à-dire au dernier placement. Le coupable le plus profond est donc
+toujours le niveau qu'on vient de quitter, et **le backtracking chronologique est déjà le
+backjump optimal**. Le raisonnement se retourne : plus le choix de variable est bon, moins
+il reste de décisions « sans rapport » à sauter. MRV a consommé d'avance le gain que le
+CBJ serait allé chercher.
+
+**Portée du verdict.** La sonde ne mesure que le saut immédiat, pas la propagation des
+ensembles de conflit à un niveau épuisé. C'est là que subsisterait un gain théorique — mais
+il faudrait qu'il justifie à lui seul une machinerie qui touche la pile de décisions, or
+cette pile est aussi le **stock implicite délégué au serveur** (`bt_count_pending`,
+`bt_materialize_pending`) : sauter des niveaux change ce qui est cédé, donc le protocole
+de délégation. Un plafond théorique résiduel ne justifie pas ce risque quand la partie
+mesurable du gain est nulle à 100 %.
+
+**Décision : ne pas implémenter.** À ne rouvrir que si le choix de variable cesse d'être
+MRV — c'est l'hypothèse dont dépend tout le raisonnement ci-dessus.
+
 ### 4.12 Départage des égalités du balayage MRV par le nombre de côtés contraints — ADOPTÉ
 
 **Statut : mesuré sur stock de production, adopté.** Première piste de la série tranchée par
