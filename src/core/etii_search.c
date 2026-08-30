@@ -281,6 +281,17 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
     if (cx > 0)              constraints[cx - 1][cy].k2 = all_face;
 }
 
+/**
+ * @brief Nombre de mots de 64 bits couvrant le masque des pièces utilisées.
+ *
+ * Dérivé de `FACES_USED_SIZE` (le masque du paquet, en groupes de 16 bits) et
+ * non de `ETERN_PARTS` : 4 groupes du paquet tiennent dans un mot, le dernier
+ * mot peut être partiellement rempli. Garantit `MRV_USED_WORDS >=
+ * map->id_mask_words` pour toute map dont les ids tiennent dans le masque du
+ * paquet — c'est-à-dire toute map de production.
+ */
+#define MRV_USED_WORDS ((FACES_USED_SIZE + 3) / 4)
+
 #if FORWARD_CHECK_K > 0
 /**
  * @brief Forward-checking de la boucle chaude, basé sur le cache de contraintes.
@@ -306,9 +317,20 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
  * testé indépendamment. Tout nouveau code de la boucle chaude doit passer
  * par ici.
  *
+ * Le test « cette voisine a-t-elle encore un candidat libre ? » passe par le
+ * masque d'ids du compartiment (`bucket_id_mask`) quand il est disponible :
+ * quelques `AND` sur `map->id_mask_words` mots, au lieu d'un parcours des
+ * entrées. Le parcours reste en repli, et reste le seul chemin quand
+ * `singleton_conflict_check` est levé — cette variante-là compte des ENTRÉES
+ * (deux rotations d'une même pièce libre valent 2, donc « pas un singleton »),
+ * ce qu'un masque d'identifiants ne sait pas reproduire ; la convertir
+ * changerait son verdict, pas seulement son coût.
+ *
  * @param constraints Cache de contraintes maintenu par le backtracking.
  * @param board       Plateau courant (grille + masque des pièces utilisées).
  * @param mapParts    Table de lookup.
+ * @param used        Miroir 64 bits des pièces utilisées, tenu par la boucle
+ *                    chaude (`mrv_used_init`/`_set`/`_clear`).
  * @param cx          Colonne de la pièce qu'on vient de placer.
  * @param cy          Ligne de la pièce qu'on vient de placer.
  * @return            1 si toutes les voisines vides ont au moins une pièce candidate
@@ -317,7 +339,9 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
  */
 static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
                             struct possibility_packet *board,
-                            map_big_array *mapParts, int cx, int cy)
+                            map_big_array *mapParts,
+                            const uint64_t used[MRV_USED_WORDS],
+                            int cx, int cy)
 {
     // Même ordre que bt_propagate_place/undo (haut, droite, bas, gauche) :
     // au plus 4 voisines, celles qui tombent dans la grille.
@@ -353,6 +377,26 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         }
         cells++;
         rank++;
+
+        // Voie rapide : le masque d'ids du compartiment répond à « reste-t-il
+        // une pièce libre ? » en quelques AND, sans toucher aux entrées. Elle
+        // ne sert pas la variante `singleton_conflict_check`, qui a besoin de
+        // COMPTER (cf. la doc ci-dessus).
+        if (!singleton_conflict_check) {
+            const uint64_t *id_mask = map_bucket_id_mask(mapParts, &constraints[x][y]);
+            if (id_mask != NULL && mapParts->id_mask_words <= MRV_USED_WORDS) {
+                if (!map_mask_any_free(id_mask, mapParts->id_mask_words, used)) {
+                    // case morte : aucune pièce candidate libre
+                    __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
+                    __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+                    return 0;
+                }
+                continue;
+            }
+            // Masque indisponible (map bâtie à la main, index absent,
+            // compartiment vide, ou masque plus large que le miroir) : le
+            // parcours ci-dessous tranche, avec le même verdict.
+        }
 
         // Lookup via l'index COMPACT (`packed`) et non `flat` : à ce stade la
         // très grande majorité des accès ne sert qu'à lire une taille, et
@@ -775,17 +819,6 @@ static void bt_flush_pending(client_possibility_t *client,
 }
 
 /**
- * @brief Nombre de mots de 64 bits couvrant le masque des pièces utilisées.
- *
- * Dérivé de `FACES_USED_SIZE` (le masque du paquet, en groupes de 16 bits) et
- * non de `ETERN_PARTS` : 4 groupes du paquet tiennent dans un mot, le dernier
- * mot peut être partiellement rempli. Garantit `MRV_USED_WORDS >=
- * map->id_mask_words` pour toute map dont les ids tiennent dans le masque du
- * paquet — c'est-à-dire toute map de production.
- */
-#define MRV_USED_WORDS ((FACES_USED_SIZE + 3) / 4)
-
-/**
  * @brief Construit le miroir 64 bits du masque des pièces utilisées du plateau.
  *
  * `possibility_packet.b_faceused` est un masque en groupes de 16 bits (bit
@@ -1157,7 +1190,7 @@ backtrack:;
 #if FORWARD_CHECK_K > 0
                     if (placed_count < ETERN_PARTS) {
                         __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
-                        if (!bt_forward_check(constraints, &board, client->map_part, cx, cy)) {
+                        if (!bt_forward_check(constraints, &board, client->map_part, used, cx, cy)) {
                             board.grid[cx][cy] = -2;
                             BOARD_SET_FACE(&board, position, 0);
                             mrv_used_clear(used, position);

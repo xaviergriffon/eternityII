@@ -411,6 +411,18 @@ static map_big_array *make_dead_map(void)
 }
 
 #if FORWARD_CHECK_K > 0
+/* Appelle bt_forward_check en dérivant le miroir des pièces utilisées du
+ * plateau, au lieu de le maintenir comme le fait la boucle chaude. Le miroir
+ * est reconstruit à CHAQUE appel : plusieurs tests modifient `b_faceused`
+ * entre deux appels (set_face_used) et doivent voir le changement. */
+static int fc_verdict(key_part C[ETERN_SIZE][ETERN_SIZE], struct possibility_packet *b,
+                      map_big_array *m, int cx, int cy)
+{
+    uint64_t used[MRV_USED_WORDS];
+    mrv_used_init(used, b);
+    return bt_forward_check(C, b, m, used, cx, cy);
+}
+
 /* bt_forward_check : 1 si chaque voisine VIDE de la pièce qu'on vient de
  * placer en (cx, cy) a un candidat libre, 0 si l'une est morte (aucun
  * candidat / tous utilisés). Coin (0,0) : 2 voisines dans la grille,
@@ -428,17 +440,17 @@ TEST bt_forward_check_detects_dead_cells(void)
     struct part p_free[1] = { { .id = 9 } };
     struct array_part cand_free = { .size = 1, .parts = p_free };
     map_big_array *map = make_uniform_map(&cand_free);
-    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 0, 0), "%d");
+    ASSERT_EQ_FMT(1, fc_verdict(C, &board, map, 0, 0), "%d");
 
     /* (b) le seul candidat (pièce 9) est déjà utilisé -> voisine morte -> 0. */
     set_face_used(board.b_faceused, 8, 1); /* pièce 9 */
-    ASSERT_EQ_FMT(0, bt_forward_check(C, &board, map, 0, 0), "%d");
+    ASSERT_EQ_FMT(0, fc_verdict(C, &board, map, 0, 0), "%d");
     set_face_used(board.b_faceused, 8, 0);
 
     /* (c) aucun candidat pour aucune clé -> voisine morte -> 0. */
     struct array_part cand_empty = { .size = 0, .parts = NULL };
     map_big_array *map_empty = make_uniform_map(&cand_empty);
-    ASSERT_EQ_FMT(0, bt_forward_check(C, &board, map_empty, 0, 0), "%d");
+    ASSERT_EQ_FMT(0, fc_verdict(C, &board, map_empty, 0, 0), "%d");
 
     PASS();
 }
@@ -461,7 +473,7 @@ TEST bt_forward_check_skips_prefilled_and_zero_id(void)
     struct part cand[2] = { { .id = 0 }, { .id = 9 } };
     struct array_part list = { .size = 2, .parts = cand };
     map_big_array *map = make_uniform_map(&list);
-    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 0, 0), "%d");
+    ASSERT_EQ_FMT(1, fc_verdict(C, &board, map, 0, 0), "%d");
 
     PASS();
 }
@@ -486,21 +498,23 @@ TEST bt_forward_check_inspects_at_most_geometric_neighbors(void)
 
     unsigned long long before = fc_cells_studied;
     /* Coin (0,0) : 2 voisines dans la grille, (1,0) et (0,1). */
-    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 0, 0), "%d");
+    ASSERT_EQ_FMT(1, fc_verdict(C, &board, map, 0, 0), "%d");
     ASSERT_EQ_FMT(before + 2, fc_cells_studied, "%llu");
 
     before = fc_cells_studied;
     /* Case intérieure (1,1) (existe dès ETERN_SIZE >= 3) : 4 voisines. */
-    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 1, 1), "%d");
+    ASSERT_EQ_FMT(1, fc_verdict(C, &board, map, 1, 1), "%d");
     ASSERT_EQ_FMT(before + 4, fc_cells_studied, "%llu");
 
     PASS();
 }
 
-/* bt_forward_check lit la map via l'index COMPACT (map_bucket_packed) et non
- * via `flat`. Sur une map RÉELLE (bâtie par buildBigArray, donc pourvue de son
+/* Neutraliser `packed` désactive du même coup le masque d'ids (map_bucket_id_mask
+ * l'exige) : ce test compare donc la voie RAPIDE d'une map réelle — le masque
+ * d'ids — au parcours des entrées de `flat`, les deux extrémités de la chaîne
+ * de replis. Sur une map RÉELLE (bâtie par buildBigArray, donc pourvue de ses
  * index — les fixtures faites main ci-dessus exercent, elles, le repli), les
- * deux représentations doivent conduire au MÊME verdict pour CHAQUE case
+ * représentations doivent conduire au MÊME verdict pour CHAQUE case
  * candidate : c'est l'invariant « même élagage, donc mêmes nœuds explorés ».
  * Balaie les 16 cases (coin, bordure, intérieur) plutôt qu'une fenêtre de
  * parcours : la case candidate détermine désormais directement l'ensemble
@@ -546,15 +560,77 @@ TEST bt_forward_check_same_verdict_with_and_without_packed_index(void)
             for (int id = 1; id <= nb_ids; id++) set_face_used(board.b_faceused, id - 1, 1);
         }
         for (int cx = 0; cx < ETERN_SIZE; cx++) for (int cy = 0; cy < ETERN_SIZE; cy++) {
-            int with_index = bt_forward_check(C, &board, map, cx, cy);
+            int with_index = fc_verdict(C, &board, map, cx, cy);
 
             uint32_t *saved = map->packed;
             map->packed = NULL; /* force le repli sur `flat` */
-            int without_index = bt_forward_check(C, &board, map, cx, cy);
+            int without_index = fc_verdict(C, &board, map, cx, cy);
             map->packed = saved;
 
             ASSERT_EQ_FMT(without_index, with_index, "%d");
             if (with_index) seen_alive = 1; else seen_dead = 1;
+        }
+    }
+    ASSERT(seen_alive);
+    ASSERT(seen_dead);
+
+    free_bigarray(map);
+    PASS();
+}
+
+/* Pendant du test précédent, mais isolant le SEUL maillon ajouté : la voie
+ * rapide par masque d'ids (`map_mask_any_free`) contre le parcours des entrées
+ * du compartiment. On neutralise `bucket_id_mask` en gardant `packed`, si bien
+ * que le repli lit l'index compact — les deux chemins voient donc exactement le
+ * même compartiment, et seule la façon de le questionner change.
+ *
+ * Ce que le test verrouille est une ÉQUIVALENCE, pas une valeur : le masque ne
+ * porte que les ids `> 0` réellement présents, exactement le filtre `id != 0`
+ * du parcours. Les deux phases (toutes pièces libres, puis toutes utilisées)
+ * garantissent qu'on observe les deux verdicts, faute de quoi l'égalité serait
+ * triviale. */
+TEST bt_forward_check_same_verdict_with_and_without_id_mask(void)
+{
+    static struct part parts[] = {
+        { .id = 0 },                                              /* bouchon bordure */
+        { .id = 1, .top = 0, .right = 1, .bottom = 1, .left = 0 },
+        { .id = 2, .top = 0, .right = 0, .bottom = 1, .left = 1 },
+        { .id = 3, .top = 1, .right = 0, .bottom = 0, .left = 1 },
+        { .id = 4, .top = 1, .right = 1, .bottom = 0, .left = 0 },
+        { .id = 5, .top = 0, .right = 1, .bottom = 1, .left = 1 },
+        { .id = 6, .top = 1, .right = 0, .bottom = 1, .left = 1 },
+        { .id = 7, .top = 1, .right = 1, .bottom = 0, .left = 1 },
+        { .id = 8, .top = 1, .right = 1, .bottom = 1, .left = 0 },
+        { .id = 9, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+    };
+    static struct array_part a = { .size = 10, .parts = parts };
+    const int nb_ids = 9;
+
+    map_big_array *map = prepare_map_part(&a);
+    ASSERT(map->packed != NULL);
+    ASSERT(map->bucket_id_mask != NULL); /* sinon le test ne prouverait rien */
+
+    struct possibility_packet board;
+    make_empty_board(&board);
+
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, &a, (int8_t)map->sizearrayM);
+
+    int seen_alive = 0, seen_dead = 0;
+    for (int phase = 0; phase < 2; phase++) {
+        if (phase == 1) {
+            for (int id = 1; id <= nb_ids; id++) set_face_used(board.b_faceused, id - 1, 1);
+        }
+        for (int cx = 0; cx < ETERN_SIZE; cx++) for (int cy = 0; cy < ETERN_SIZE; cy++) {
+            int with_mask = fc_verdict(C, &board, map, cx, cy);
+
+            uint64_t *saved = map->bucket_id_mask;
+            map->bucket_id_mask = NULL; /* force le parcours des entrées */
+            int without_mask = fc_verdict(C, &board, map, cx, cy);
+            map->bucket_id_mask = saved;
+
+            ASSERT_EQ_FMT(without_mask, with_mask, "%d");
+            if (with_mask) seen_alive = 1; else seen_dead = 1;
         }
     }
     ASSERT(seen_alive);
@@ -637,7 +713,7 @@ TEST bt_forward_check_singleton_conflict_detects_matching_ids(void)
     singleton_conflict_check = 1;
     unsigned long long before = fc_singleton_conflict;
 
-    ASSERT_EQ_FMT(0, bt_forward_check(C, &board, map, 1, 1), "%d");
+    ASSERT_EQ_FMT(0, fc_verdict(C, &board, map, 1, 1), "%d");
     ASSERT_EQ_FMT(before + 1, fc_singleton_conflict, "%llu");
 
     singleton_conflict_check = saved;
@@ -658,7 +734,7 @@ TEST bt_forward_check_singleton_conflict_ignores_distinct_ids(void)
     singleton_conflict_check = 1;
     unsigned long long before = fc_singleton_conflict;
 
-    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 1, 1), "%d");
+    ASSERT_EQ_FMT(1, fc_verdict(C, &board, map, 1, 1), "%d");
     ASSERT_EQ_FMT(before, fc_singleton_conflict, "%llu");
 
     singleton_conflict_check = saved;
@@ -680,7 +756,7 @@ TEST bt_forward_check_singleton_conflict_disabled_by_default(void)
     singleton_conflict_check = 0;
     unsigned long long before = fc_singleton_conflict;
 
-    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, 1, 1), "%d");
+    ASSERT_EQ_FMT(1, fc_verdict(C, &board, map, 1, 1), "%d");
     ASSERT_EQ_FMT(before, fc_singleton_conflict, "%llu");
 
     singleton_conflict_check = saved;
@@ -3379,6 +3455,7 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_forward_check_skips_prefilled_and_zero_id);
     RUN_TEST(bt_forward_check_inspects_at_most_geometric_neighbors);
     RUN_TEST(bt_forward_check_same_verdict_with_and_without_packed_index);
+    RUN_TEST(bt_forward_check_same_verdict_with_and_without_id_mask);
     RUN_TEST(bt_forward_check_singleton_conflict_detects_matching_ids);
     RUN_TEST(bt_forward_check_singleton_conflict_ignores_distinct_ids);
     RUN_TEST(bt_forward_check_singleton_conflict_disabled_by_default);

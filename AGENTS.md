@@ -184,7 +184,7 @@ MRV (most-constrained-first cell choice) is the **sole** search engine, for both
 ### Core data structures
 
 - **`struct part`** (`src/core/part.h`): one puzzle piece.
-- **`map_big_array`**: 4D lookup table (top/right/bottom/left face colours → matching pieces), three redundant representations — `flat` (5.06 Mo), `packed` (compact index for the forward-check hot loop, 1.27 Mo), `bucket_id_mask` (bitmask for MRV, 0.46 Mo). Built once pre-fork and shared COW across search workers. Details, and the "reconverting the placement lookup to `packed` regressed, don't repeat it" history: [docs/architecture.md](docs/architecture.md), [docs/autosearch_step.md](docs/autosearch_step.md).
+- **`map_big_array`**: 4D lookup table (top/right/bottom/left face colours → matching pieces), three redundant representations — `flat` (5.06 Mo), `packed` (compact index for the forward-check hot loop, 1.27 Mo), `bucket_id_mask` (per-bucket bitmask of piece ids, 0.46 Mo — serves both MRV's `popcount` count and the forward-check's existence test, `map_mask_free_count`/`map_mask_any_free`). Built once pre-fork and shared COW across search workers. Details, and the "reconverting the placement lookup to `packed` regressed, don't repeat it" history: [docs/architecture.md](docs/architecture.md), [docs/autosearch_step.md](docs/autosearch_step.md).
 - **`struct possibility_packet`** (`src/core/possibility.h`): full board state on the wire. **Has hidden compiler padding despite explicit field packing — never `memcmp`/hash the raw struct.**
 - **`File`** (`src/core/lifo.h`): doubly-linked queue of possibilities. **`big_table`**: flat, dynamically-growing result buffer.
 

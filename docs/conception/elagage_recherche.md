@@ -178,6 +178,39 @@ sans forward-check avait été dérivée d'un run *antérieur* : l'équivalence
 Contrôle secondaire cohérent : `max_result` 190 (avec) contre 191 (sans, avec un léger
 dépassement de cible) — les deux configurations sont bien au même point de l'exploration.
 
+#### Suite : puisqu'il reste, le rendre moins cher — le test d'existence par masque d'ids
+
+Corollaire direct de la décision ci-dessous : le forward-check reste sur le chemin chaud,
+donc son coût mérite d'être attaqué pour lui-même. Il posait à chaque voisine vide
+« reste-t-il un candidat libre ? » en parcourant les entrées du compartiment jusqu'au
+premier candidat libre. Bon marché quand la réponse est « oui » ; **proportionnel à la
+taille du compartiment quand elle est « non »** — c'est-à-dire exactement dans le cas qui
+élague, et donc celui qui compte. `bucket_id_mask`, bâti pour le comptage MRV de §4.7,
+répond en quelques `AND` bornés par `id_mask_words` (`map_mask_any_free`).
+
+Équivalence exacte : le masque ne porte que les ids `> 0` réellement présents, exactement
+le filtre `id != 0` du parcours. La variante `singleton_conflict_check` reste **hors**
+conversion — elle compte des ENTRÉES (deux rotations d'une même pièce libre valent 2, donc
+« pas un singleton »), ce qu'un masque d'identifiants ne reproduit pas ; la convertir
+changerait son verdict, pas son coût.
+
+**Mesuré** (5 M nœuds, A/B apparié à ordre alterné, 6 rondes × 7 répétitions par
+configuration sur deux worktrees — la machine était chargée ce jour-là, une ronde unique
+serait restée dans le bruit) :
+
+| | Nœuds/s (médiane) | Taux d'élagage | `max_result` |
+|---|---|---|---|
+| Parcours des entrées | 992 756 | 38,7344 % | 190 |
+| Masque d'ids | 1 008 393 | 38,7345 % | 190 |
+| Delta apparié médian | **+1,66 %** | — | — |
+
+6 rondes sur 6 positives (+1,29 % à +2,50 %), test des signes unilatéral p = 0,0156.
+**Adopté** — modeste en médiane, mais sans contrepartie : le verdict est prouvé identique
+(deux tests d'équivalence dédiés), et le pire cas passe de « proportionnel au plus gros
+compartiment » à « borné par le nombre de mots du masque ». À comparer à §4.8
+(`rare_first`, +3,2 %, adopté) et au lookup de placement via `packed` (gain nul, écarté) :
+le critère de ce projet est un gain **mesuré**, pas un gain plausible.
+
 **Décision : le forward-check est conservé.** Redondant en pouvoir d'élagage n'est pas
 redondant en coût. Inspecter ~1,9 case voisine contre son compartiment reste bien moins
 cher que le prix de laisser passer le placement mort : un `mrv_choose_cell` complet
