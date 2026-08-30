@@ -420,7 +420,56 @@ static int fc_verdict(key_part C[ETERN_SIZE][ETERN_SIZE], struct possibility_pac
 {
     uint64_t used[MRV_USED_WORDS];
     mrv_used_init(used, b);
-    return bt_forward_check(C, b, m, used, cx, cy);
+    /* bt_forward_check n'écrit plus les globales : il cumule en local et c'est
+     * son appelant qui publie (cf. fc_local_stats). Publier ici à CHAQUE appel
+     * rend les compteurs globaux observables comme avant depuis les tests —
+     * c'est aussi ce qui met fc_stats_publish sous test. */
+    fc_local_stats st = {0};
+    int verdict = bt_forward_check(C, b, m, used, &st, cx, cy);
+    fc_stats_publish(&st);
+    return verdict;
+}
+
+/* fc_stats_publish : contrat de la publication différée des compteurs.
+ *
+ * Ce que la boucle chaude gagne à cumuler en local, elle ne doit rien le faire
+ * perdre : la publication AJOUTE aux globales (jamais n'écrase), et vide les
+ * compteurs locaux pour qu'un second appel — inévitable, la boucle publiant à
+ * la fois périodiquement et à chaque sortie — ne compte pas deux fois. */
+TEST fc_stats_publish_adds_once_and_clears(void)
+{
+    const unsigned long long a0 = fc_attempts, p0 = fc_pruned, c0 = fc_cells_studied,
+                             s0 = fc_singleton_conflict, r0 = fc_pruned_at[2];
+
+    fc_local_stats st = {0};
+    st.attempts = 7; st.pruned = 3; st.cells_studied = 11;
+    st.singleton_conflict = 2; st.pruned_at[2] = 5;
+
+    fc_stats_publish(&st);
+
+    ASSERT_EQ_FMT(a0 + 7,  fc_attempts, "%llu");
+    ASSERT_EQ_FMT(p0 + 3,  fc_pruned, "%llu");
+    ASSERT_EQ_FMT(c0 + 11, fc_cells_studied, "%llu");
+    ASSERT_EQ_FMT(s0 + 2,  fc_singleton_conflict, "%llu");
+    ASSERT_EQ_FMT(r0 + 5,  fc_pruned_at[2], "%llu");
+
+    /* Compteurs locaux vidés : la publication a transféré, pas copié. */
+    ASSERT_EQ_FMT(0ULL, st.attempts, "%llu");
+    ASSERT_EQ_FMT(0ULL, st.pruned, "%llu");
+    ASSERT_EQ_FMT(0ULL, st.cells_studied, "%llu");
+    ASSERT_EQ_FMT(0ULL, st.singleton_conflict, "%llu");
+    ASSERT_EQ_FMT(0ULL, st.pruned_at[2], "%llu");
+
+    /* Second appel sur une structure vidée : strictement sans effet. C'est ce
+     * qui rend sûre la publication périodique suivie d'une publication de sortie. */
+    fc_stats_publish(&st);
+    ASSERT_EQ_FMT(a0 + 7,  fc_attempts, "%llu");
+    ASSERT_EQ_FMT(p0 + 3,  fc_pruned, "%llu");
+    ASSERT_EQ_FMT(c0 + 11, fc_cells_studied, "%llu");
+    ASSERT_EQ_FMT(s0 + 2,  fc_singleton_conflict, "%llu");
+    ASSERT_EQ_FMT(r0 + 5,  fc_pruned_at[2], "%llu");
+
+    PASS();
 }
 
 /* bt_forward_check : 1 si chaque voisine VIDE de la pièce qu'on vient de
@@ -3451,6 +3500,7 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_count_pending_counts_remaining_free);
     RUN_TEST(bt_count_pending_skips_no_decision_and_zero_id);
 #if FORWARD_CHECK_K > 0
+    RUN_TEST(fc_stats_publish_adds_once_and_clears);
     RUN_TEST(bt_forward_check_detects_dead_cells);
     RUN_TEST(bt_forward_check_skips_prefilled_and_zero_id);
     RUN_TEST(bt_forward_check_inspects_at_most_geometric_neighbors);

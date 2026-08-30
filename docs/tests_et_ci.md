@@ -237,7 +237,24 @@ la comparaison `--baseline`. C'est un second garde-fou, complémentaire du
 débit : un changement de mise en page mémoire peut accélérer la boucle sans
 changer le comportement de l'élagage (taux stable), ou au contraire modifier
 l'ordre d'exploration et donc le taux — un signal que le changement n'est pas
-sémantiquement neutre. Absent des logs (et donc du rapport) sur un build
+sémantiquement neutre.
+
+**Précision de ce taux : ±0,0005 point, pas exacte.** `bench_poll_and_maybe_stop`
+lit `fc_attempts`/`fc_pruned` **pendant** que la recherche tourne, alors que le
+compteur de nœuds, lui, est visible immédiatement. Or ces deux compteurs sont
+cumulés en local par la boucle chaude et publiés tous les
+`FC_STATS_PUBLISH_INTERVAL_NODES` nœuds (`core/etii_search.c`) : au moment de la
+lecture, une fenêtre peut être encore en attente. L'identité
+`fc_attempts ≈ nœuds + fc_pruned`, exacte à 1 près avant cette optimisation,
+l'est désormais à quelques milliers près sur 8 M. Sur le TAUX l'effet est
+mesuré à **−0,0002 point**, du même ordre que la dispersion du taux entre runs
+d'un même binaire (38,7343–38,7345 observés) : il ne se distingue pas du bruit,
+et c'est ce qui a fixé la fenêtre à 512 plutôt qu'à 4096, où le biais atteignait
++0,0012 point de façon systématique. **Conséquence pratique : ne pas traiter une
+différence de taux inférieure à ~0,001 point comme un changement de
+comportement.** Au-delà, le signal reste valide — les vrais changements
+d'élagage documentés se comptent en dixièmes de point (§4.1) voire en points
+entiers (bascule MRV). Absent des logs (et donc du rapport) sur un build
 `FORWARD_CHECK_K=0`.
 
 ### `max_result` : le débit seul ne prouve pas un vrai gain

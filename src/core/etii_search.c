@@ -294,6 +294,90 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
 
 #if FORWARD_CHECK_K > 0
 /**
+ * @brief Cadence de publication des compteurs de prunage, en nœuds.
+ *
+ * Ce n'est PAS un réglage d'amortissement : celui-ci est déjà total bien avant
+ * (~4,6 atomiques par nœud ramenées à ~0,023 ici, soit 0,5 % du coût d'origine
+ * — le porter à 4096 n'en retirerait plus que 0,4 point et ne se mesure pas).
+ * La valeur est fixée par la CONTRAINTE INVERSE : `bench_poll_and_maybe_stop`
+ * (`app/etii_client.c`) lit `fc_attempts`/`fc_pruned` **pendant** que la
+ * recherche tourne, alors que le compteur de nœuds, lui, est visible
+ * immédiatement. Toute publication différée rend donc ces deux lectures
+ * légèrement incohérentes, et décale le TAUX d'élagage rapporté par le banc —
+ * mesuré : +0,0012 point à 4096 nœuds de fenêtre, systématique sur 6 rondes.
+ * Minuscule dans l'absolu, mais ce taux sert de contrôle de non-régression
+ * STRICT dans ce projet (§4.1, §4.7) : un biais constant y serait pris pour un
+ * changement de comportement. À 512 le biais tombe d'un facteur 8 pour un coût
+ * indiscernable — c'est ce compromis-là, et non la fraîcheur d'affichage, qui
+ * fixe la valeur.
+ */
+#define FC_STATS_PUBLISH_INTERVAL_NODES 512
+
+/**
+ * @brief Compteurs de prunage cumulés en LOCAL, publiés périodiquement.
+ *
+ * `fc_attempts`, `fc_pruned`, `fc_cells_studied`, `fc_pruned_at[]` et
+ * `fc_singleton_conflict` sont écrits par le SEUL thread de recherche et lus
+ * environ une fois par seconde par le thread de statistiques (`app_runtime.c`)
+ * ou en fin de banc (`etii_client.c`). Les incrémenter atomiquement à chaque
+ * tentative de placement faisait payer à la boucle chaude une lecture-modification
+ * -écriture verrouillée par compteur touché, pour une donnée que personne
+ * n'observe à cette granularité.
+ *
+ * Même motif que `possibility_all_has_a_next_counted` (`core/possibility.c`),
+ * qui cumule déjà localement et ne publie qu'une fois par appel — ici la fenêtre
+ * de cumul est simplement plus large qu'un appel.
+ *
+ * Les compteurs restent MONOTONES et exacts : la publication ajoute, elle
+ * n'écrase pas. Seule leur fraîcheur change, bornée par
+ * `FC_STATS_PUBLISH_INTERVAL_NODES` et par une publication à chaque sortie du
+ * moteur (fin de sous-arbre, arrêt, budget épuisé, solution).
+ */
+typedef struct {
+    unsigned long long attempts;
+    unsigned long long pruned;
+    unsigned long long cells_studied;
+    unsigned long long singleton_conflict;
+    unsigned long long pruned_at[FC_STAT_MAX_K + 1];
+} fc_local_stats;
+
+/**
+ * @brief Publie les compteurs cumulés vers les globales, puis les remet à zéro.
+ *
+ * Chaque champ n'est publié que s'il est non nul : sur une fenêtre où rien n'a
+ * été élagué, la publication ne coûte que les tests. Remettre à zéro APRÈS
+ * publication est ce qui garantit qu'aucun incrément n'est compté deux fois si
+ * la fonction est rappelée (p. ex. sortie juste après une publication périodique).
+ *
+ * @param s Compteurs locaux (vidés).
+ */
+static void fc_stats_publish(fc_local_stats *s)
+{
+    if (s->attempts != 0) {
+        __atomic_fetch_add(&fc_attempts, s->attempts, __ATOMIC_RELAXED);
+        s->attempts = 0;
+    }
+    if (s->pruned != 0) {
+        __atomic_fetch_add(&fc_pruned, s->pruned, __ATOMIC_RELAXED);
+        s->pruned = 0;
+    }
+    if (s->cells_studied != 0) {
+        __atomic_fetch_add(&fc_cells_studied, s->cells_studied, __ATOMIC_RELAXED);
+        s->cells_studied = 0;
+    }
+    if (s->singleton_conflict != 0) {
+        __atomic_fetch_add(&fc_singleton_conflict, s->singleton_conflict, __ATOMIC_RELAXED);
+        s->singleton_conflict = 0;
+    }
+    for (int j = 0; j <= FC_STAT_MAX_K; j++) {
+        if (s->pruned_at[j] != 0) {
+            __atomic_fetch_add(&fc_pruned_at[j], s->pruned_at[j], __ATOMIC_RELAXED);
+            s->pruned_at[j] = 0;
+        }
+    }
+}
+
+/**
  * @brief Forward-checking de la boucle chaude, basé sur le cache de contraintes.
  *
  * Inspecte les VOISINES géométriques de la pièce qu'on vient de placer en
@@ -331,6 +415,8 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
  * @param mapParts    Table de lookup.
  * @param used        Miroir 64 bits des pièces utilisées, tenu par la boucle
  *                    chaude (`mrv_used_init`/`_set`/`_clear`).
+ * @param st          Compteurs de prunage cumulés en local (cf. `fc_local_stats`) :
+ *                    cette fonction n'écrit JAMAIS les globales elle-même.
  * @param cx          Colonne de la pièce qu'on vient de placer.
  * @param cy          Ligne de la pièce qu'on vient de placer.
  * @return            1 si toutes les voisines vides ont au moins une pièce candidate
@@ -341,6 +427,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
                             struct possibility_packet *board,
                             map_big_array *mapParts,
                             const uint64_t used[MRV_USED_WORDS],
+                            fc_local_stats *st,
                             int cx, int cy)
 {
     // Même ordre que bt_propagate_place/undo (haut, droite, bas, gauche) :
@@ -387,8 +474,8 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
             if (id_mask != NULL && mapParts->id_mask_words <= MRV_USED_WORDS) {
                 if (!map_mask_any_free(id_mask, mapParts->id_mask_words, used)) {
                     // case morte : aucune pièce candidate libre
-                    __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
-                    __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+                    st->pruned_at[rank]++;
+                    st->cells_studied += cells;
                     return 0;
                 }
                 continue;
@@ -405,8 +492,8 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         map_bucket search = map_bucket_packed(mapParts, &constraints[x][y]);
         if (search.size == 0) {
             // case morte : aucune pièce candidate
-            __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
-            __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+            st->pruned_at[rank]++;
+            st->cells_studied += cells;
             return 0;
         }
 
@@ -421,8 +508,8 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
             }
             if (!found) {
                 // case morte : toutes les pièces candidates sont déjà utilisées
-                __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
-                __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+                st->pruned_at[rank]++;
+                st->cells_studied += cells;
                 return 0;
             }
             continue;
@@ -442,8 +529,8 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         }
         if (free_count == 0) {
             // case morte : toutes les pièces candidates sont déjà utilisées
-            __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
-            __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+            st->pruned_at[rank]++;
+            st->cells_studied += cells;
             return 0;
         }
         if (free_count == 1) {
@@ -451,9 +538,9 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
             // même balayage exige déjà la même pièce (théorème de Hall, |S|=2).
             for (int k = 0; k < nb_singletons; k++) {
                 if (singleton_ids[k] == first_free_id) {
-                    __atomic_fetch_add(&fc_singleton_conflict, 1, __ATOMIC_RELAXED);
-                    __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
-                    __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+                    st->singleton_conflict++;
+                    st->pruned_at[rank]++;
+                    st->cells_studied += cells;
                     return 0;
                 }
             }
@@ -461,7 +548,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         }
     }
 
-    __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+    st->cells_studied += cells;
     return 1;
 }
 #endif // FORWARD_CHECK_K > 0
@@ -1083,6 +1170,13 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
     bt_frontier frontier;
     bt_frontier_init(&frontier, &board);
 
+#if FORWARD_CHECK_K > 0
+    // Compteurs de prunage cumulés localement, publiés tous les
+    // FC_STATS_PUBLISH_INTERVAL_NODES nœuds et à chaque sortie de la fonction.
+    fc_local_stats fcst = {0};
+    unsigned int fc_publish_countdown = FC_STATS_PUBLISH_INTERVAL_NODES;
+#endif // FORWARD_CHECK_K > 0
+
     bt_level stack[ETERN_PARTS];
     int top = -1;
     // Le compteur de progression est `placed_count` (pas la profondeur de
@@ -1098,7 +1192,12 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
         if (placed_count >= ETERN_PARTS) {
             board.alloc = (uint16_t)placed_count;
             // Toutes les pièces sont placées : enregistre + signale au serveur.
-            // Avec --stop-on-solution, record_solution ne revient pas (exit).
+            // Avec --stop-on-solution, record_solution ne revient pas (exit) :
+            // les compteurs cumulés depuis la dernière publication seraient
+            // perdus, on les publie donc AVANT l'appel.
+#if FORWARD_CHECK_K > 0
+            fc_stats_publish(&fcst);
+#endif
             record_solution(client, &board);
             goto backtrack;
         }
@@ -1115,6 +1214,9 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
             if (out_nodes != NULL) {
                 *out_nodes = nodes;
             }
+#if FORWARD_CHECK_K > 0
+            fc_stats_publish(&fcst);
+#endif
             return BT_CORE_STOPPED;
         }
 
@@ -1189,15 +1291,15 @@ backtrack:;
                     placed_count++;
 #if FORWARD_CHECK_K > 0
                     if (placed_count < ETERN_PARTS) {
-                        __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
-                        if (!bt_forward_check(constraints, &board, client->map_part, used, cx, cy)) {
+                        fcst.attempts++;
+                        if (!bt_forward_check(constraints, &board, client->map_part, used, &fcst, cx, cy)) {
                             board.grid[cx][cy] = -2;
                             BOARD_SET_FACE(&board, position, 0);
                             mrv_used_clear(used, position);
                             bt_propagate_undo(constraints, cx, cy, all_face);
                             bt_frontier_undo(&frontier, cx, cy);
                             placed_count--;
-                            __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
+                            fcst.pruned++;
                             continue;
                         }
                     }
@@ -1219,11 +1321,20 @@ backtrack:;
             if (out_nodes != NULL) {
                 *out_nodes = nodes;
             }
+#if FORWARD_CHECK_K > 0
+            fc_stats_publish(&fcst);
+#endif
             return BT_CORE_EXHAUSTED;
         }
 
         counters[client->compteur]++;
         nodes++;
+#if FORWARD_CHECK_K > 0
+        if (--fc_publish_countdown == 0) {
+            fc_publish_countdown = FC_STATS_PUBLISH_INTERVAL_NODES;
+            fc_stats_publish(&fcst);
+        }
+#endif // FORWARD_CHECK_K > 0
         // `alloc` porte le NOMBRE de pièces posées (définition canonique
         // depuis VERSION 13, cf. possibility.h), jamais un curseur de
         // parcours : tout paquet délégué a `alloc` fixé par recomptage
@@ -1266,6 +1377,9 @@ backtrack:;
             if (out_nodes != NULL) {
                 *out_nodes = nodes;
             }
+#if FORWARD_CHECK_K > 0
+            fc_stats_publish(&fcst);
+#endif
             return BT_CORE_BUDGET;
         }
     }
