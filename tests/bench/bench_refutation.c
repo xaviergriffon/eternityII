@@ -146,7 +146,11 @@ static double now_seconds(void)
  * Le dimensionnement unique n'est pas qu'un rangement : `all_engines` étant
  * déclaré `[NB_ALL_ENGINES]`, ajouter une entrée sans incrémenter la constante
  * devient une **erreur de compilation** (excès d'initialiseurs), et non plus
- * une corruption silencieuse à l'exécution.
+ * une corruption silencieuse à l'exécution. Vérifié sur les deux chaînes :
+ * clang la signale sous `-Wexcess-initializers`, gcc 13 comme un avertissement
+ * actif par défaut. **Ce garde-fou tient donc au `-Werror` que porte la cible
+ * `bench-refutation` du makefile** — le retirer le dégraderait en simple
+ * avertissement, et le débordement redeviendrait silencieux.
  */
 #define NB_ALL_ENGINES 2
 
