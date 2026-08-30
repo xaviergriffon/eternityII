@@ -108,6 +108,22 @@ Après avoir placé une pièce en `(cx, cy)`, `bt_forward_check` inspecte ses **
 
 Le débit progresse fortement (moins de lookups par placement : au plus 4 voisines contre jusqu'à 6 cases de fenêtre, souvent moins avec l'arrêt anticipé sur la première case morte) alors que le taux d'élagage — la part des tentatives de placement rejetées — reste quasiment inchangé : la condition nécessaire reste tout aussi efficace en pratique, seule son assiette de calcul est devenue moins chère.
 
+**Le test « reste-t-il un candidat ? » passe par le masque d'ids.** Pour chaque voisine vide inspectée, la question posée n'est pas *combien* de pièces restent candidates mais seulement *s'il en reste une*. Le parcours des entrées du compartiment y répondait en s'arrêtant au premier candidat libre — bon marché quand la réponse est « oui », mais **proportionnel à la taille du compartiment quand elle est « non »** : plusieurs centaines d'entrées, toutes visitées, et c'est précisément le cas qui compte puisque c'est celui qui élague. `bucket_id_mask` (le même index que celui bâti pour le comptage MRV, §1.3 quater) répond en quelques `AND` sur `map->id_mask_words` mots, avec sortie au premier mot non nul (`map_mask_any_free`, `src/core/part.h`) : **coût borné, indépendant de la taille du compartiment**.
+
+L'équivalence est exacte et non approchée : `build_bucket_id_mask` n'inscrit que les ids `> 0` réellement présents, exactement le filtre `id != 0` du parcours. La distinction « identifiants distincts vs entrées » qui sépare les deux comptages dans `map_mask_free_count` est ici sans objet, les deux s'annulant au test `== 0`.
+
+Le parcours reste en repli (map bâtie à la main, index absent, compartiment vide, masque plus large que le miroir) et reste le **seul** chemin quand `singleton_conflict_check` est levé : cette variante-là compte des ENTRÉES — deux rotations d'une même pièce libre valent 2, donc « pas un singleton » — ce qu'un masque d'identifiants ne sait pas reproduire. La convertir changerait son verdict, pas seulement son coût.
+
+**Gain mesuré** (`tests/bench/bench_search.sh`, puzzle 256, 5 M nœuds, A/B **apparié à ordre alterné** sur 6 rondes × 7 répétitions par configuration — machine chargée ce jour-là, une seule ronde n'aurait pas tranché) :
+
+| | Nœuds/s (médiane) | Taux d'élagage | `max_result` |
+|---|---|---|---|
+| Parcours des entrées | 992 756 | 38,7344 % | 190 |
+| Masque d'ids | 1 008 393 | 38,7345 % | 190 |
+| Delta apparié médian | **+1,66 %** | — | — |
+
+Les 6 rondes sont positives (+1,29 % à +2,50 %, test des signes unilatéral p = 0,0156). Le verdict du forward-check étant inchangé, taux d'élagage et `max_result` sont des contrôles de non-régression stricts, et non de simples garde-fous. Le gain moyen est modeste ; ce que la conversion apporte en plus ne se lit pas dans la médiane : elle **borne le pire cas**, jusque-là proportionnel à la taille du plus gros compartiment.
+
 **Invariant : nécessaire, pas complet.** Comme toute condition de forward-checking, `bt_forward_check` ne peut jamais produire de faux positif (une branche qu'il laisse passer peut être morte pour d'autres raisons, une branche qu'il élague l'est réellement), mais il n'a **aucune obligation d'exhaustivité** sur l'ensemble des cases qu'il pourrait inspecter — restreindre son périmètre aux voisines directes est donc un choix de performance, jamais un risque de correction. Verrouillé par `bt_forward_check_inspects_at_most_geometric_neighbors` (`tests/core/test_etii_search.c`), qui compte les cases réellement inspectées (`fc_cells_studied`) sur un coin (2 voisines) et une case intérieure (4).
 
 **Statistique par position (`fc_pruned_at[]`).** Depuis ce changement, l'indice n'est plus une distance de parcours mais une **position dans la fenêtre inspectée** : 1..4 pour la boucle chaude (rang de la voisine dans l'énumération haut/droite/bas/gauche), 1..`FORWARD_CHECK_K` pour le chemin froid `forward_check_next_k`. Le tableau est dimensionné sur `FC_STAT_MAX_K` (8, indépendant de `FORWARD_CHECK_K`) pour rester sûr quel que soit le plus petit des deux domaines — voir le commentaire de `fc_pruned_at` dans `core_static_variables.h`.

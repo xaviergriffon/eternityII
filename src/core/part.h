@@ -369,6 +369,40 @@ static inline int map_mask_free_count(const uint64_t *mask, int words, const uin
 }
 
 /**
+ * @brief Le compartiment a-t-il AU MOINS une pièce encore libre ?
+ *
+ * Variante « existence » de `map_mask_free_count` : le forward-check n'a pas
+ * besoin du nombre de candidats, seulement de savoir s'il en reste un. Sortir
+ * au premier mot non nul évite les `popcount` suivants, et surtout le coût est
+ * **borné par le nombre de mots**, là où le parcours d'entrées qu'il remplace
+ * est proportionnel à la TAILLE du compartiment — plusieurs centaines
+ * d'entrées dans le cas qui compte, celui où aucune n'est libre (case morte,
+ * donc élagage) et où le parcours va jusqu'au bout.
+ *
+ * Strictement équivalent au parcours : `bucket_id_mask` ne porte que les ids
+ * réellement présents et `> 0` (`build_bucket_id_mask` ignore les entrées
+ * bouchon), exactement le filtre `id != 0` du parcours. La différence
+ * « identifiants distincts vs entrées » qui sépare les deux comptages dans
+ * `map_mask_free_count` est ici sans objet : les deux s'annulent au test `== 0`.
+ *
+ * @param mask  Masque des ids du compartiment (`map_bucket_id_mask`).
+ * @param words Nombre de mots du masque (`map->id_mask_words`).
+ * @param used  Masque des pièces déjà posées, même convention de bits.
+ * @return      1 s'il reste au moins une pièce libre, 0 sinon.
+ */
+static inline int map_mask_any_free(const uint64_t *mask, int words, const uint64_t *used)
+{
+	for (int w = 0; w < words; w++)
+	{
+		if ((mask[w] & ~used[w]) != 0)
+		{
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/**
  * @brief Indique si une arène tient dans les champs 16 bits de l'index compact.
  *
  * Les offsets utilisés vont de 0 à `total_parts - 1` et les tailles de
