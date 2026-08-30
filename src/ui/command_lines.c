@@ -28,7 +28,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 62
+#define NB_COMMANDS 63
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -110,6 +110,7 @@ int split_interpreter(void);
 int regroup_interpreter(void);
 int checkdatas_interpreter(void);
 int check_duplicate_interpreter(void);
+int check_origin_interpreter(void);
 int checkfiles_interpreter(void);
 int printfile_interpreter(void);
 int checkfile_interpreter(void);
@@ -356,6 +357,19 @@ static command_description commands[NB_COMMANDS] = {
      "vérifie l'intégrité des possibilités stockées", NULL, NULL},
     {"checkDuplicate", check_duplicate_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
      "recherche les doublons dans les files", NULL, NULL},
+    {"checkOrigin", check_origin_interpreter, 0, CMD_CAT_DIAG, 0, "checkOrigin [purge]",
+     "vérifie qu'aucune possibilité en stock n'est la racine d'une autre",
+     "Une possibilité dont TOUTES les cases posées se retrouvent à l'identique dans une\n"
+     "autre, plus profonde, est la racine de celle-ci : le sous-arbre de la seconde est\n"
+     "déjà couvert par la première, le travail est fait deux fois. Balaie les deux pools\n"
+     "(non vérifié ET vérifié) et rapporte chaque relation trouvée (100 lignes de détail\n"
+     "au plus, puis le seul total).\n"
+     "Avec « purge » : supprime en plus chaque DESCENDANT — sa racine reste, donc aucune\n"
+     "branche de recherche n'est perdue. Lancer « backup » ensuite pour graver l'état\n"
+     "purgé. Sans argument, le stock n'est jamais modifié.\n"
+     "Coût en O(n²) sur la taille du stock : commande de diagnostic, pas de routine.\n"
+     "Ne balaie que le stock RÉSIDENT — ce qui a débordé sur disque (« spill ») est\n"
+     "signalé mais pas comparé.", NULL},
     {"checkFiles", checkfiles_interpreter, 0, CMD_CAT_DIAG, 0, NULL,
      "vérifie l'intégrité de toutes les files", NULL, NULL},
     {"checkFile", checkfile_interpreter, 0, CMD_CAT_DIAG, 0, "checkFile <n>",
@@ -1298,6 +1312,32 @@ int statistic_interpreter(void) {
     log_info("parc connecte : %d recherche(s), %d controle(s)\n", nb_search, nb_prune);
 
     return rc;
+}
+
+/**
+ * @brief Interpréteur de `checkOrigin [purge]` : vérifie qu'aucune possibilité
+ *        en stock n'est la racine d'une autre.
+ *
+ * L'avertissement sur le stock débordé est émis ICI et non dans `check_origin` :
+ * `core/datamanager.c` n'a pas le droit de dépendre de `core/stock_spill.c`
+ * (l'inverse seul est permis, cf. AGENTS.md).
+ */
+int check_origin_interpreter(void) {
+    char *arguments = strtok(NULL, " ");
+    int purge = 0;
+    if (arguments != NULL) {
+        // Seul « purge » est reconnu : une faute de frappe ne doit pas être
+        // silencieusement dégradée en simple rapport.
+        if (strcmp(arguments, "purge") != 0) {
+            return CMD_ERR_USAGE;
+        }
+        purge = 1;
+    }
+    unsigned long long spilled = stock_spill_total_packets();
+    if (spilled > 0) {
+        log_info("checkOrigin : %llu possibilites debordees sur disque ne sont PAS balayees\n", spilled);
+    }
+    return check_origin(purge);
 }
 
 /** @brief Interpréteur de `checkFiles` : vérifie la cohérence de toutes les files de possibilités. */

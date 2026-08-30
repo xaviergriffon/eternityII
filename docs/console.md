@@ -104,6 +104,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `checkDatas` | Vérifie l'intégrité des possibilités |
 | `checkDuplicate` | Recherche les doublons dans les files |
 | `checkFiles` | Vérifie l'intégrité de toutes les files |
+| `checkOrigin [purge]` | Vérifie qu'aucune possibilité en stock n'est la **racine** d'une autre — une possibilité dont toutes les cases posées se retrouvent à l'identique dans une autre, plus profonde (`is_origin_of`), rend celle-ci redondante : son sous-arbre est déjà couvert. Balaie les **deux** pools (non vérifié et vérifié), rapporte chaque relation trouvée (100 lignes de détail au plus, puis le seul total) et rend `-1` s'il en existe au moins une. Avec `purge` : supprime en plus chaque **descendant** — sa racine reste, donc aucune branche de recherche n'est perdue, et une seconde passe ne trouve alors plus rien ; lancer `backup` ensuite pour graver l'état purgé (la purge ne déclenche pas de sauvegarde automatique). Sans argument, le stock n'est jamais modifié ; tout autre argument que `purge` est refusé. Coût en **O(n²)** sur la taille du stock (le nombre de paires à comparer est annoncé au démarrage) : commande de diagnostic, pas de routine. Ne balaie que le stock **résident** — ce qui a débordé sur disque (voir [`spill`](utilisation.md#plafond-ram-du-stock---stock-max-ram)) est signalé mais pas comparé, et le pool « en cours d'analyse » est hors périmètre |
 | `checkFile N` | Vérifie la file numéro `N` |
 | `checkDirections` | Vérifie la cohérence des directions de parcours |
 

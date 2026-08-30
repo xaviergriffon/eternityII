@@ -853,6 +853,14 @@ int check_datas(void);
 int check_duplicate(void);
 
 /**
+ * @brief Vérifie qu'aucune possibilité du stock n'est la racine d'une autre.
+ *
+ * @param purge 0 : rapport seul. 1 : supprime en plus chaque descendant.
+ * @return      0 si aucune relation racine/descendant, -1 sinon.
+ */
+int check_origin(int purge);
+
+/**
  * @brief Nombre de niveaux d'un histogramme de répartition par `alloc`.
  *
  * `+1` : `alloc` peut valoir `ETERN_PARTS` (plateau complet), donc les
