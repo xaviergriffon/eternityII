@@ -142,6 +142,47 @@ else
     printf 'FAIL rejeu journalisé : %s message(s) (attendu 1)\n' "$(count logs)" >&2
 fi
 
+# --- bench_extract_field ------------------------------------------------------
+#
+# La régression visée : un binaire sans forward-check (FORWARD_CHECK_K=0)
+# n'émet pas fc_attempts/fc_pruned. L'ancienne implémentation, un pipeline
+# grep|tail|cut inline dans bench_search.sh, renvoyait alors 1 — ce que le
+# `set -euo pipefail` du banc transformait en arrêt SILENCIEUX du run 1.
+
+# field_case <libellé> <rc attendu> <sortie attendue> <texte> <nom>
+field_case() {
+    local label="$1" want_rc="$2" want="$3" text="$4" name="$5" got rc
+    got=$(bench_extract_field "$text" "$name")
+    rc=$?
+    if [[ $rc -eq $want_rc && "$got" == "$want" ]]; then
+        pass=$((pass + 1))
+    else
+        fail=$((fail + 1))
+        printf 'FAIL %s : bench_extract_field -> rc=%d "%s" (attendu rc=%d "%s")\n' \
+            "$label" "$rc" "$got" "$want_rc" "$want" >&2
+    fi
+}
+
+ETII_LINE_FC='ntiles:256
+ETII_BENCH nodes_reached=5000113 target=5000000 fc_attempts=8161319 fc_pruned=3161207 max_result=190'
+ETII_LINE_NOFC='ntiles:256
+ETII_BENCH nodes_reached=8162389 target=8161320 max_result=191'
+
+field_case 'champ présent'                 0 '5000113' "$ETII_LINE_FC"   'nodes_reached'
+field_case 'champ présent en fin de ligne' 0 '190'     "$ETII_LINE_FC"   'max_result'
+field_case 'champ optionnel présent'       0 '8161319' "$ETII_LINE_FC"   'fc_attempts'
+# LA régression : sans forward-check, le champ n'existe pas — vide, et rc 0.
+field_case 'champ absent (FORWARD_CHECK_K=0)' 0 '' "$ETII_LINE_NOFC" 'fc_attempts'
+field_case 'autre champ absent'               0 '' "$ETII_LINE_NOFC" 'fc_pruned'
+field_case 'texte vide'                       0 '' ''                'nodes_reached'
+# Plusieurs lignes ETII_BENCH (le solveur en émet une par relevé) : la dernière
+# fait foi, comme le faisait le `tail -1` d'origine.
+field_case 'dernière occurrence retenue' 0 '77' 'ETII_BENCH nodes_reached=11
+ETII_BENCH nodes_reached=77' 'nodes_reached'
+# Un nom qui préfixe un autre champ ne doit pas capter sa valeur : le `=` du
+# motif suffit, mais rien ne le disait jusqu'ici.
+field_case 'préfixe d’un autre champ' 0 '' 'ETII_BENCH fc_pruned_at=5' 'fc_pruned'
+
 # --- Bilan -------------------------------------------------------------------
 printf '\n* bench_lib.sh : %d assertions passées, %d échouées\n' "$pass" "$fail"
 [[ $fail -eq 0 ]]
