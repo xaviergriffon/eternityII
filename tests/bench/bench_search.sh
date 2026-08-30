@@ -182,7 +182,9 @@ run_once_validated() {
 extract_field() {
     # $1 = fichier de log, $2 = nom du champ ("nodes_reached", "fc_attempts", ...)
     # dans la ligne "ETII_BENCH key=val key=val ..." (src/app/etii_client.c).
-    grep -a -o "$2=[0-9]*" "$1" | tail -1 | cut -d= -f2
+    # Champ absent -> chaîne vide, jamais un code de retour non nul : voir
+    # bench_extract_field (bench_lib.sh) pour pourquoi c'est load-bearing.
+    bench_extract_field "$(cat "$1")" "$2"
 }
 
 extract_nodes_reached() { extract_field "$1" nodes_reached; }

@@ -96,3 +96,31 @@ bench_retry_valid_time() {
         "— banc interrompu plutôt que de rapporter un débit faux."
     return 1
 }
+
+# ---------------------------------------------------------------------------
+# bench_extract_field <texte> <nom>
+#
+# Extrait la DERNIÈRE valeur du champ `<nom>=<entier>` d'un texte (la ligne
+# `ETII_BENCH key=val …` émise par src/app/etii_client.c). Écrit la valeur sur
+# stdout, ou RIEN si le champ est absent — et renvoie 0 dans les deux cas.
+#
+# Le champ absent est un cas NORMAL, pas une erreur : un binaire compilé avec
+# `FORWARD_CHECK_K=0` n'émet ni `fc_attempts` ni `fc_pruned` (bt_forward_check
+# n'est pas compilé), et bench_search.sh sait déjà s'en passer — il n'annonce
+# alors simplement pas de taux d'élagage.
+#
+# C'est précisément ce que l'implémentation précédente ne faisait pas. Écrite
+# directement dans bench_search.sh sous la forme
+# `grep -o … | tail -1 | cut -d= -f2`, elle héritait du `set -euo pipefail` du
+# script : `grep` sans correspondance renvoie 1, `pipefail` propage ce 1 à la
+# substitution de commande, et `set -e` interrompt le banc — **sans aucun
+# message**, juste après « Run 1/5… ». Mesurer sans forward-check, cas pourtant
+# documenté en commentaire à côté de l'appel, était donc impossible.
+# ---------------------------------------------------------------------------
+bench_extract_field() {
+    local text="$1" name="$2" match
+    # `|| true` : l'absence de correspondance n'est pas une erreur ici, et sans
+    # cela le pipefail de l'appelant transformerait ce cas en arrêt du banc.
+    match=$(printf '%s\n' "$text" | grep -a -o -e "$name=[0-9]*" | tail -1) || true
+    printf '%s' "${match#*=}"
+}
