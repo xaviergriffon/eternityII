@@ -79,6 +79,18 @@ n'exige de faire tourner le solveur.
 | Cases de cadre | 60, la dernière à l'index 74 |
 | Cases intérieures posées **avant** la fin du cadre | 15 (index 3, 4, 16, 17, 22, 23, 39–42, 54, 55, …) |
 
+> **Portée de la ligne « largeur de frontière » — à ne pas transposer telle quelle.** Ces
+> valeurs viennent d'une **analyse statique de l'ordre FIXE** `dirx[]`/`diry[]` (annexe de
+> §3), et comptent les cases vides adjacentes à une case *posée*. Elles ne décrivent donc
+> pas la frontière que balaie `mrv_choose_cell` aujourd'hui, pour deux raisons cumulées :
+> ce balayage retient **aussi** toute case de bord vide (la clé 0 d'un bord de grille est
+> une vraie couleur, donc une contrainte permanente), et surtout MRV ne remplit pas de
+> proche en proche. Mesuré sous MRV (départ genèse, 1,5 M nœuds) : **52,2 en moyenne
+> (max 79)** pour la frontière réellement balayée, et **45,2 (max 54)** pour la grandeur de
+> ce tableau — l'ordre de remplissage pèse plus lourd que la différence de définition. Le
+> chiffre de 29 a été repris à tort dans §4.7 et dans `docs/autosearch_step.md`, les deux
+> sont corrigés.
+
 ### 3.3 Typage des pièces
 
 | Grandeur | Valeur |
@@ -930,7 +942,13 @@ aucun des deux n'étant le « compte incrémental par case » envisagé en PR 9 
   contrainte par rien (ni bord de plateau, ni voisine posée) : elle accepte *toutes* les
   pièces libres et ne peut donc jamais être le minimum tant qu'une case contrainte existe.
   Le test se lit dans le cache `constraints[][]` déjà maintenu par §4.1, sans aucun lookup.
-  Frontière : 29 cases en moyenne, 52 au pire (§3.2), contre 256 balayées.
+  Frontière : **52,2 cases en moyenne, 79 au pire**, contre 256 balayées (mesuré sous MRV,
+  départ genèse, 1,5 M nœuds). Le « 29 en moyenne, 52 au pire » de §3.2 ne décrit PAS cette
+  grandeur : il compte les cases vides adjacentes à une case *posée* (le balayage retient
+  aussi toute case de bord vide, la clé 0 d'un bord étant une vraie contrainte), et il vient
+  d'une analyse statique de l'ordre FIXE `dirx[]`/`diry[]`. À définition de §3.2 mais sous
+  MRV, la même grandeur vaut 45,2 en moyenne (max 54) — l'ordre de remplissage pèse donc plus
+  lourd que la définition. La restriction reste largement payante ; §3.2 la surestimait ~1,8×.
   L'existence d'au moins une case de frontière tant qu'une case vide existe se démontre
   (la première case vide en ordre lexicographique a soit un bord de plateau, soit une
   voisine de rang inférieur nécessairement remplie) — un repli couvre malgré tout le cas.
