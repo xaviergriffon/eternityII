@@ -3780,6 +3780,298 @@ int check_duplicate(void)
     return errors > 0 ? -1 : 0;
 }
 
+/* Nombre de threads du balayage check_origin (même ordre de grandeur que
+ * nbDuplicateThread : le travail est purement CPU et sans contention). */
+#define NB_ORIGIN_THREAD 8
+/* Plafond de lignes de détail loguées : au-delà, seul le total est rapporté.
+ * Un stock incohérent peut produire des millions de relations ; noyer la
+ * console (et, en ncurses, le pad de sortie) ne rendrait service à personne. */
+#define ORIGIN_REPORT_MAX_LINES 100
+
+/**
+ * @brief Une possibilité du stock, aplatie pour le balayage de `check_origin`.
+ *
+ * `file`/`element` sont conservés pour la purge (`file_remove_element`),
+ * `pool`/`file_index`/`position` uniquement pour le rapport. `alloc` est
+ * recopié ici pour que le tri et le filtre de profondeur ne déréférencent pas
+ * le paquet (une indirection par comparaison sur des millions d'entrées).
+ */
+typedef struct
+{
+	Element *element;
+	File *file;
+	unsigned long long position;
+	uint16_t alloc;
+	uint16_t file_index;
+	uint8_t pool;          /* 0 = pool non vérifié, 1 = pool vérifié */
+	uint8_t is_descendant; /* posé par le balayage : a une racine en stock */
+} origin_entry_t;
+
+struct arg_origin_thread {
+	origin_entry_t *entries;
+	unsigned long long count;
+	unsigned long long first;   /* premier indice traité */
+	unsigned long long stride;  /* pas entre deux indices traités */
+	int thread_position;
+};
+
+/* Partagés par les threads de check_origin : compteur de descendants trouvés,
+ * budget de lignes de rapport, progression. Tous manipulés en atomique. */
+static unsigned long long origin_found;
+static unsigned long long origin_reported;
+static unsigned long long origin_progress[NB_ORIGIN_THREAD];
+static unsigned long long origin_finish[NB_ORIGIN_THREAD];
+
+/**
+ * @brief Compare deux entrées par `alloc` croissant (comparateur `qsort`).
+ *
+ * Le tri est ce qui remplace tout pré-filtre : une racine a strictement moins
+ * de pièces posées que son descendant, donc après tri elle le PRÉCÈDE — il
+ * suffit de comparer chaque entrée à celles qui la suivent, une seule fois et
+ * dans le bon sens.
+ */
+static int origin_entry_cmp(const void *a, const void *b)
+{
+	uint16_t alloc_a = ((const origin_entry_t *)a)->alloc;
+	uint16_t alloc_b = ((const origin_entry_t *)b)->alloc;
+	if (alloc_a < alloc_b) { return -1; }
+	if (alloc_a > alloc_b) { return 1; }
+	return 0;
+}
+
+/**
+ * @brief Premier indice de `entries` (trié par `alloc` croissant) dont l'`alloc`
+ *        dépasse strictement `alloc`.
+ *
+ * Sans cette dichotomie, la boucle interne balaierait tout le préfixe des
+ * entrées de profondeur inférieure ou ÉGALE pour n'y rien faire. Sur un stock
+ * réel, où l'immense majorité des plateaux partage le même `alloc`, ce préfixe
+ * est presque tout le tableau : le coût deviendrait quadratique même quand il
+ * n'y a strictement aucune paire à comparer.
+ *
+ * @param entries Tableau trié par `alloc` croissant.
+ * @param count   Nombre d'entrées.
+ * @param alloc   Profondeur de référence.
+ * @return        Indice de la première entrée strictement plus profonde (`count` si aucune).
+ */
+static unsigned long long origin_upper_bound(const origin_entry_t *entries, unsigned long long count, uint16_t alloc)
+{
+	unsigned long long low = 0;
+	unsigned long long high = count;
+	while (low < high) {
+		unsigned long long mid = low + (high - low) / 2;
+		if (entries[mid].alloc > alloc) {
+			high = mid;
+		} else {
+			low = mid + 1;
+		}
+	}
+	return low;
+}
+
+/**
+ * @brief Thread de balayage de `check_origin`.
+ *
+ * Traite les indices `first`, `first + stride`, … (entrelacement plutôt que
+ * blocs contigus : le travail d'une entrée décroît avec son indice, un
+ * découpage par blocs donnerait au dernier thread une part dérisoire).
+ *
+ * Une entrée déjà marquée descendante est sautée : elle sera supprimée de
+ * toute façon, lui trouver une seconde racine n'apprendrait rien. La course
+ * sur `is_descendant` est bénigne (seule la valeur 1 est écrite) et le
+ * comptage reste exact grâce à l'échange atomique, qui n'attribue la
+ * découverte qu'à un seul thread.
+ *
+ * @param arguments `struct arg_origin_thread` décrivant la part à traiter.
+ * @return          NULL.
+ */
+void *check_origin_thread(void *arguments)
+{
+	struct arg_origin_thread *args = (struct arg_origin_thread *)arguments;
+	origin_entry_t *entries = args->entries;
+
+	for (unsigned long long i = args->first; i < args->count; i += args->stride) {
+		const struct possibility_packet *root =
+			(const struct possibility_packet *)entries[i].element->value;
+		/* Tri croissant : à alloc égal aucune des deux n'est la racine de
+		 * l'autre. On saute donc directement à la première entrée
+		 * strictement plus profonde — elle vient forcément après i. */
+		unsigned long long start = origin_upper_bound(entries, args->count, entries[i].alloc);
+		for (unsigned long long j = start; j < args->count; j++) {
+			if (__atomic_load_n(&entries[j].is_descendant, __ATOMIC_RELAXED)) {
+				continue;
+			}
+			if (is_origin_of((struct possibility_packet *)root,
+			                 (struct possibility_packet *)entries[j].element->value) != 1) {
+				continue;
+			}
+			if (__atomic_exchange_n(&entries[j].is_descendant, (uint8_t)1, __ATOMIC_RELAXED)) {
+				continue; /* un autre thread l'a marquée en même temps */
+			}
+			__atomic_fetch_add(&origin_found, 1ULL, __ATOMIC_RELAXED);
+			if (__atomic_fetch_add(&origin_reported, 1ULL, __ATOMIC_RELAXED)
+			    < ORIGIN_REPORT_MAX_LINES) {
+				log_info("possibility origin : %s F%u:%llu (alloc %u) racine de %s F%u:%llu (alloc %u)\n",
+				         entries[i].pool ? "checked" : "unchecked",
+				         (unsigned)entries[i].file_index, entries[i].position,
+				         (unsigned)entries[i].alloc,
+				         entries[j].pool ? "checked" : "unchecked",
+				         (unsigned)entries[j].file_index, entries[j].position,
+				         (unsigned)entries[j].alloc);
+			}
+		}
+		__atomic_fetch_add(&origin_progress[args->thread_position], 1ULL, __ATOMIC_RELAXED);
+	}
+
+	__atomic_store_n(&origin_finish[args->thread_position], 1ULL, __ATOMIC_RELAXED);
+	return NULL;
+}
+
+/**
+ * @brief Aplatit les deux pools de stock dans un tableau d'entrées.
+ *
+ * Verrou déjà tenu par l'appelant (`lock_all_file`), donc les `Element *`
+ * collectés restent valides pendant tout le balayage ET la purge.
+ *
+ * @param entries Tableau à remplir, dimensionné pour `datas_size()` entrées.
+ * @param capacity Capacité de `entries`.
+ * @return         Nombre d'entrées réellement écrites.
+ */
+static unsigned long long collect_origin_entries(origin_entry_t *entries, unsigned long long capacity)
+{
+	unsigned long long n = 0;
+	for (int fp = 0; fp < nb_file_possibility; fp++) {
+		File *pools[2] = { &file_possibility[fp]->file, &file_possibility_checked[fp]->file };
+		for (int p = 0; p < 2; p++) {
+			unsigned long long position = 0;
+			for (Element *e = pools[p]->start; e != NULL; e = e->next) {
+				if (n >= capacity) {
+					return n;
+				}
+				entries[n].element = e;
+				entries[n].file = pools[p];
+				entries[n].position = position;
+				entries[n].alloc = ((struct possibility_packet *)e->value)->alloc;
+				entries[n].file_index = (uint16_t)fp;
+				entries[n].pool = (uint8_t)p;
+				entries[n].is_descendant = 0;
+				n++;
+				position++;
+			}
+		}
+	}
+	return n;
+}
+
+int check_origin(int purge)
+{
+	lock_all_file();
+
+	unsigned long long capacity = datas_size();
+	origin_entry_t *entries = NULL;
+	if (capacity > 0) {
+		entries = malloc((size_t)capacity * sizeof(origin_entry_t));
+		if (entries == NULL) {
+			unlock_all_file();
+			// Un contrôle qui n'a pas pu tourner ne dit pas « tout va bien ».
+			log_error("check_origin : allocation de %llu entrees impossible\n", capacity);
+			return -1;
+		}
+	}
+	unsigned long long count = collect_origin_entries(entries, capacity);
+	if (count > 1) {
+		// Jamais qsort(NULL, 0, ...) : passer un pointeur nul est indéfini
+		// même avec un compte de 0 (et le stock vide est un cas courant).
+		qsort(entries, (size_t)count, sizeof(origin_entry_t), origin_entry_cmp);
+	}
+
+	origin_found = 0;
+	origin_reported = 0;
+	log_info("check_origin : %llu possibilites, %llu paires a comparer\n",
+	         count, count > 1 ? count_combinations(count) : 0ULL);
+
+	pthread_t threads[NB_ORIGIN_THREAD];
+	struct arg_origin_thread args[NB_ORIGIN_THREAD];
+	// Deux compteurs distincts, et non un seul : `configured` indexe
+	// origin_progress/origin_finish (une part préparée, qu'elle ait été
+	// confiée à un thread ou traitée sur place), `joinable` compte les
+	// pthread_t RÉELLEMENT créés. Les confondre décalerait threads[] dès le
+	// premier pthread_create en échec et ferait joindre un pthread_t jamais
+	// initialisé.
+	int configured = 0;
+	int joinable = 0;
+	for (int t = 0; t < NB_ORIGIN_THREAD && (unsigned long long)t < count; t++) {
+		origin_progress[t] = 0;
+		origin_finish[t] = 0;
+		args[t].entries = entries;
+		args[t].count = count;
+		args[t].first = (unsigned long long)t;
+		args[t].stride = NB_ORIGIN_THREAD;
+		args[t].thread_position = t;
+		configured++;
+		pthread_t thread;
+		if (pthread_create(&thread, NULL, check_origin_thread, &args[t]) != 0) {
+			// Repli sur place : le balayage doit aboutir, pas être abandonné.
+			log_error("check_origin : pthread_create a echoue, part %i traitee ici\n", t);
+			check_origin_thread(&args[t]);
+			continue;
+		}
+		threads[joinable++] = thread;
+	}
+
+	/* Progression toutes les 30s tant que des threads tournent, puis jointure
+	 * (immédiate : ils ont déjà fini quand la boucle sort).
+	 *
+	 * Sondage à 50 ms et non à la seconde : sur un stock minuscule le balayage
+	 * dure moins d'une milliseconde, et un sleep(1) ferait payer une seconde
+	 * pleine à chaque appel (7 s pour la seule suite de tests). */
+	int loop = 0;
+	int running = joinable;
+	while (running > 0) {
+		usleep(50000);
+		loop++;
+		running = 0;
+		unsigned long long done = 0;
+		for (int t = 0; t < configured; t++) {
+			if (__atomic_load_n(&origin_finish[t], __ATOMIC_RELAXED) == 0) { running++; }
+			done += __atomic_load_n(&origin_progress[t], __ATOMIC_RELAXED);
+		}
+		if (loop == 600 && running > 0) { /* 600 * 50 ms = 30 s */
+			loop = 0;
+			log_info("check_origin : %llu/%llu possibilites balayees | racines trouvees: %llu | threads actifs: %i\n",
+			         done, count, __atomic_load_n(&origin_found, __ATOMIC_RELAXED), running);
+		}
+	}
+	for (int t = 0; t < joinable; t++) {
+		pthread_join(threads[t], NULL);
+	}
+
+	unsigned long long found = origin_found;
+	unsigned long long removed = 0;
+	if (purge) {
+		for (unsigned long long i = 0; i < count; i++) {
+			if (entries[i].is_descendant) {
+				file_remove_element(entries[i].file, entries[i].element);
+				removed++;
+			}
+		}
+	}
+
+	free(entries);
+	unlock_all_file();
+
+	if (found > ORIGIN_REPORT_MAX_LINES) {
+		log_info("check_origin : %llu relations non detaillees (plafond de %i lignes)\n",
+		         found - ORIGIN_REPORT_MAX_LINES, ORIGIN_REPORT_MAX_LINES);
+	}
+	if (purge) {
+		log_info("check_origin : %llu possibilites supprimees sur %llu -- lancer « backup » pour graver l'etat purge\n",
+		         removed, count);
+	}
+	log_info("check_origin errors %llu on %llu\n", found, count);
+	return found > 0 ? -1 : 0;
+}
+
 /**
  * @brief Cumule dans `levels` la répartition par `alloc` des paquets de `file`,
  *        et dans `min_candidats_sum`/`min_candidats_known` la seconde

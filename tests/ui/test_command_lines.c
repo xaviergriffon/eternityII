@@ -407,6 +407,34 @@ TEST do_command_line_expand_requires_arg(void)
     PASS();
 }
 
+/* checkOrigin : contrôle « aucune possibilité n'est la racine d'une autre ».
+   Sur un stock vide il n'y a aucune relation -> 0. */
+TEST do_command_line_check_origin_reports_on_empty_stock(void)
+{
+    char cmd[] = "checkOrigin";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    PASS();
+}
+
+/* checkOrigin purge : l'argument de purge est accepté (même retour, rien à
+   purger sur un stock vide). */
+TEST do_command_line_check_origin_accepts_purge(void)
+{
+    char cmd[] = "checkOrigin purge";
+    ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+    PASS();
+}
+
+/* checkOrigin <autre chose> : seul « purge » est reconnu -> CMD_ERR_USAGE
+   (rappel d'usage automatique, -1 rendu). Sans ce refus, une faute de frappe
+   passerait silencieusement pour un simple rapport. */
+TEST do_command_line_check_origin_rejects_unknown_arg(void)
+{
+    char cmd[] = "checkOrigin bidule";
+    ASSERT_EQ_FMT(-1, run_command_quiet(cmd), "%d");
+    PASS();
+}
+
 /* maxStockByThread <n> : fixe le global correspondant. */
 TEST do_command_line_max_stock_sets_global(void)
 {
@@ -3051,6 +3079,9 @@ SUITE(command_lines_suite)
     RUN_TEST(command_canonical_name_resolves_aliases_and_case);
     RUN_TEST(do_command_line_case_insensitive_and_alias_dispatch);
     RUN_TEST(do_command_line_expand_requires_arg);
+    RUN_TEST(do_command_line_check_origin_reports_on_empty_stock);
+    RUN_TEST(do_command_line_check_origin_accepts_purge);
+    RUN_TEST(do_command_line_check_origin_rejects_unknown_arg);
     RUN_TEST(do_command_line_max_stock_sets_global);
     RUN_TEST(do_command_line_max_stock_requires_arg);
     RUN_TEST(do_command_line_pruner_batch_is_clamped);

@@ -4537,6 +4537,192 @@ TEST check_duplicate_multi_thread_across_files(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * check_origin : aucune possibilité du stock n'est la racine d'une autre
+ * ------------------------------------------------------------------------ */
+
+/* Construit un plateau : toutes les cases vides (-2, comme le produit
+ * generate_possibility_packet) sauf les `n` cases posées décrites par `cells`
+ * ({x, y, valeur}). `alloc` reçoit le nombre de cases posées.
+ *
+ * Le -2 est indispensable ici : is_origin_of IGNORE les cases vides de la
+ * racine candidate. Un memset(0) laisserait 256 cases « posées à 0 » et
+ * l'inclusion ne serait jamais reconnue. */
+static void build_board(struct possibility_packet *pk, const int cells[][3], int n, int checked)
+{
+    memset(pk, 0, sizeof *pk);
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            pk->grid[x][y] = -2;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        pk->grid[cells[i][0]][cells[i][1]] = (int16_t)cells[i][2];
+    }
+    pk->alloc = (uint16_t)n;
+    pk->checked = (uint8_t)checked;
+    pk->min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+}
+
+/* A (2 pièces) est un préfixe strict de B (3 pièces) : relation signalée,
+ * et sans l'argument de purge le stock est laissé intact. */
+TEST check_origin_flags_a_root_of_another(void)
+{
+    drain_all();
+    const int a[][3] = { {0,0,100}, {0,1,101} };
+    const int b[][3] = { {0,0,100}, {0,1,101}, {0,2,102} };
+    struct possibility_packet pks[2];
+    build_board(&pks[0], a, 2, 0);
+    build_board(&pks[1], b, 3, 0);
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_origin(0);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu"); /* rapport seul : rien supprimé */
+    drain_all();
+    PASS();
+}
+
+/* Ni deux plateaux frères (qui divergent), ni un doublon exact (alloc égal,
+ * donc aucun des deux n'est la RACINE de l'autre) ne sont signalés. */
+TEST check_origin_ignores_siblings_and_exact_duplicates(void)
+{
+    drain_all();
+    const int a[][3] = { {0,0,100}, {0,1,101} };
+    const int b[][3] = { {0,0,100}, {0,1,999} };            /* frère de a */
+    const int c[][3] = { {0,0,100}, {0,1,101} };            /* doublon exact de a */
+    const int d[][3] = { {0,0,555}, {0,1,999}, {0,2,7} };   /* plus profond, mais diverge */
+    struct possibility_packet pks[4];
+    build_board(&pks[0], a, 2, 0);
+    build_board(&pks[1], b, 2, 0);
+    build_board(&pks[2], c, 2, 0);
+    build_board(&pks[3], d, 3, 0);
+    array_possibility_packet arr = { .size = 4, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_origin(0);
+    restore_std();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* La relation est cherchée à travers les DEUX pools : racine dans le pool non
+ * vérifié, descendant dans le pool vérifié (checked == 1). C'est précisément
+ * ce que check_duplicate ne sait pas faire. */
+TEST check_origin_spans_both_pools(void)
+{
+    drain_all();
+    const int a[][3] = { {1,1,100}, {1,2,101} };
+    const int b[][3] = { {1,1,100}, {1,2,101}, {1,3,102} };
+    struct possibility_packet root, descendant;
+    build_board(&root, a, 2, 0);        /* pool non vérifié */
+    build_board(&descendant, b, 3, 1);  /* pool vérifié */
+    struct possibility_packet pks[2] = { root, descendant };
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_origin(0);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    drain_all();
+    PASS();
+}
+
+/* Purge : le DESCENDANT disparaît (son sous-arbre reste couvert par la
+ * racine), la racine reste, et une seconde passe ne trouve plus rien. */
+TEST check_origin_purge_removes_the_descendant_only(void)
+{
+    drain_all();
+    const int a[][3] = { {0,0,100}, {0,1,101} };
+    const int b[][3] = { {0,0,100}, {0,1,101}, {0,2,102} };
+    struct possibility_packet pks[2];
+    build_board(&pks[0], a, 2, 0);
+    build_board(&pks[1], b, 3, 0);
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_origin(1);
+    int rc_again = check_origin(0);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(0, rc_again, "%d"); /* clôture : plus aucune racine en stock */
+
+    /* Le survivant est bien la RACINE (2 pièces), pas le descendant. */
+    array_possibility_packet *left = get_last_possibility(NULL, 10, NULL);
+    ASSERT_EQ_FMT(1, left->size, "%d");
+    ASSERT_EQ_FMT(2, (int)left->possibilities[0].alloc, "%d");
+    free_array_possibility_packet(left);
+    drain_all();
+    PASS();
+}
+
+/* Chaîne A ⊂ B ⊂ C : C a DEUX racines en stock. La purge retire les deux
+ * descendants en une passe et ne garde que A. */
+TEST check_origin_purge_removes_a_whole_chain(void)
+{
+    drain_all();
+    const int a[][3] = { {0,0,100}, {0,1,101} };
+    const int b[][3] = { {0,0,100}, {0,1,101}, {0,2,102} };
+    const int c[][3] = { {0,0,100}, {0,1,101}, {0,2,102}, {0,3,103} };
+    struct possibility_packet pks[3];
+    build_board(&pks[0], a, 2, 0);
+    build_board(&pks[1], b, 3, 0);
+    build_board(&pks[2], c, 4, 0);
+    array_possibility_packet arr = { .size = 3, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_origin(1);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* Stock réparti sur plusieurs files : le partitionnement multi-thread croise
+ * les frontières de files sans manquer la paire ni inventer de faux positif. */
+TEST check_origin_across_files(void)
+{
+    drain_all();
+    enum { N = 26 };
+    struct possibility_packet pks[N];
+    for (int i = 0; i < N; i++) {
+        const int cells[][3] = { {0,0,100}, {0,1,(int)(200 + i)} };
+        build_board(&pks[i], cells, 2, 0);
+    }
+    /* Un seul descendant : celui du plateau 7. */
+    const int desc[][3] = { {0,0,100}, {0,1,207}, {0,2,42} };
+    build_board(&pks[N - 1], desc, 3, 0);
+
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas();               /* répartit sur les 10 files */
+    int rc = check_origin(1);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT_EQ_FMT((unsigned long long)(N - 1), datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
 /* Tris sur un stock mélangé assez gros pour déclencher l'affichage de
  * progression et les déplacements dans les deux sens : comptage préservé. */
 TEST sort_large_shuffled_stock_both_directions(void)
@@ -5961,6 +6147,12 @@ SUITE(datamanager_suite)
     RUN_TEST(rmnonext_solution_with_stop_on_solution_exits);
     RUN_TEST(check_duplicate_flags_duplicates_and_origins);
     RUN_TEST(check_duplicate_multi_thread_across_files);
+    RUN_TEST(check_origin_flags_a_root_of_another);
+    RUN_TEST(check_origin_ignores_siblings_and_exact_duplicates);
+    RUN_TEST(check_origin_spans_both_pools);
+    RUN_TEST(check_origin_purge_removes_the_descendant_only);
+    RUN_TEST(check_origin_purge_removes_a_whole_chain);
+    RUN_TEST(check_origin_across_files);
     RUN_TEST(sort_large_shuffled_stock_both_directions);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);
