@@ -11,6 +11,7 @@
 #include "app/app_static_variables.h"
 #include "app/etii_client.h"
 #include "app/fork_gate.h"
+#include "app/app_runtime.h"
 #include "net/etii_protocol.h"
 #include "net/tcpclient.h"
 #include "ui/command_lines.h"
@@ -86,6 +87,18 @@ void control_channel_build_stats(control_stats_t *out)
     }
 }
 
+/**
+ * @brief Voir la doc dans etii_control.h.
+ */
+int control_channel_keeps_serving(void)
+{
+    if (request_keeps_running(request)) {
+        return 1;
+    }
+    // Arrêt demandé : on ne raccroche qu'une fois le dernier fork parti.
+    return count_alive_forks(childrens_pid, NB_THREADS, NULL) > 0;
+}
+
 int control_channel_handle_frame(int socket_id, uint8_t cmd, const void *payload, int32_t len)
 {
     switch (cmd) {
@@ -134,11 +147,22 @@ int control_channel_handle_frame(int socket_id, uint8_t cmd, const void *payload
         command_line[copy_len] = '\0';
 
         int32_t result;
+        // Arrêt en cours : la session reste ouverte le temps que les forks
+        // finissent d'émettre (control_channel_keeps_serving), mais on
+        // n'exécute plus rien — un « start » arrivant ici reforkerait des
+        // process de recherche sur un client en train de mourir. Le cas
+        // n'existait pas avant ce maintien de session : la connexion était
+        // déjà fermée à cet instant.
+        if (!request_keeps_running(request)) {
+            log_info("canal de contrôle : commande ignorée, arrêt en cours : \"%s\"\n",
+                     command_line);
+            result = -1;
+        }
         // Défense en profondeur : le serveur (PR3) filtre déjà côté
         // clientsCmd, mais ce client ne fait JAMAIS confiance aveuglément à
         // ce qui arrive sur ce socket. control_command_allowed ne regarde que
         // le premier mot de la ligne, pas la peine de le découper ici.
-        if (!control_command_allowed(command_line)) {
+        else if (!control_command_allowed(command_line)) {
             log_error("canal de contrôle : commande refusée par la liste blanche : \"%s\"\n",
                       command_line);
             result = -1;
@@ -279,11 +303,15 @@ void *run_control_channel(void *param)
         setsockopt(socket_id, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         int service_ok = 1;
-        while (service_ok && request_keeps_running(request)) {
+        // `control_channel_keeps_serving` et non `request_keeps_running` : une
+        // session DÉJÀ ouverte survit à REQUEST_STOP tant qu'un fork de travail
+        // vit encore. La boucle EXTERNE, elle, garde `request_keeps_running` —
+        // pas de NOUVELLE session ouverte pendant l'arrêt.
+        while (service_ok && control_channel_keeps_serving()) {
             // Checkpoint RAPIDE avant la tentative de lecture : couvre le cas
             // courant (pas de quiescence en cours), sans coût.
             fork_gate_checkpoint(gate_slot);
-            if (!request_keeps_running(request)) {
+            if (!control_channel_keeps_serving()) {
                 service_ok = 0;
                 break;
             }
@@ -322,7 +350,7 @@ void *run_control_channel(void *param)
             int cmd = ctrl_recv_frame(socket_id, &payload, &len);
             fork_gate_mark_blocked(gate_slot, 0);
             fork_gate_checkpoint(gate_slot);
-            if (!request_keeps_running(request)) {
+            if (!control_channel_keeps_serving()) {
                 free(payload);
                 service_ok = 0;
                 break;

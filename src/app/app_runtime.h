@@ -131,6 +131,24 @@ typedef int (*child_pid_alive_fn)(pid_t pid);
  *                        obtienne quand même le comportement par défaut.
  * @return Le nombre de slots nettoyés.
  */
+/**
+ * @brief Compte les process de recherche encore vivants.
+ *
+ * Un slot est compté s'il est OCCUPÉ (`pids[i] > 0` — un slot libre vaut -1,
+ * cf. `init_childs`) ET que son process répond au prédicat de vivacité. Sert
+ * au canal de contrôle du parent pour savoir s'il reste des forks susceptibles
+ * d'émettre : tant qu'il y en a, il ne doit pas fermer sa session et annoncer
+ * au serveur une mort que ces forks n'ont pas encore consommée
+ * (`docs/investigations/bail_expire_racines_en_stock.md`).
+ *
+ * @param pids  Tableau des pids. `NULL` -> 0.
+ * @param nb    Nombre de slots. `<= 0` -> 0.
+ * @param alive Prédicat de vivacité. `NULL` -> repli sur `pid_is_alive`,
+ *              même convention que `reap_dead_child_slots`.
+ * @return      Nombre de forks vivants.
+ */
+int count_alive_forks(const pid_t *pids, int nb, child_pid_alive_fn alive);
+
 int reap_dead_child_slots(pid_t *childrens_pid, char **forkId,
                            struct client_statistics *fork_statistics,
                            int nb, child_pid_alive_fn alive);

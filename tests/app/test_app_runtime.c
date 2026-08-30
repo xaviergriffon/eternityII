@@ -1735,8 +1735,47 @@ TEST wait_child_retries_on_eintr(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * count_alive_forks
+ * ------------------------------------------------------------------------ */
+
+/* Prédicat de vivacité déterministe : « vivant » = pid pair. */
+static int fake_alive_even(pid_t pid) { return (pid % 2) == 0; }
+
+/* Ne compte que les slots RÉELLEMENT occupés (`pid > 0`) ET vivants. Un slot
+ * libre vaut -1 (init_childs) et ne doit jamais être sondé comme un pid. */
+TEST count_alive_forks_counts_only_occupied_and_alive_slots(void)
+{
+    pid_t pids[5] = { 10, 11, -1, 12, 0 };
+    /* 10 et 12 pairs -> vivants ; 11 impair -> mort ; -1 et 0 -> slots libres */
+    ASSERT_EQ_FMT(2, count_alive_forks(pids, 5, fake_alive_even), "%d");
+    PASS();
+}
+
+TEST count_alive_forks_handles_empty_and_null(void)
+{
+    pid_t pids[1] = { 10 };
+    ASSERT_EQ_FMT(0, count_alive_forks(NULL, 3, fake_alive_even), "%d");
+    ASSERT_EQ_FMT(0, count_alive_forks(pids, 0, fake_alive_even), "%d");
+    ASSERT_EQ_FMT(0, count_alive_forks(pids, -1, fake_alive_even), "%d");
+    PASS();
+}
+
+/* Prédicat NULL : repli sur pid_is_alive, comme reap_dead_child_slots. Le
+ * process de test lui-même est nécessairement vivant. */
+TEST count_alive_forks_null_predicate_falls_back_to_pid_is_alive(void)
+{
+    pid_t pids[1] = { getpid() };
+    ASSERT_EQ_FMT(1, count_alive_forks(pids, 1, NULL), "%d");
+    PASS();
+}
+
+
 SUITE(app_runtime_suite)
 {
+    RUN_TEST(count_alive_forks_counts_only_occupied_and_alive_slots);
+    RUN_TEST(count_alive_forks_handles_empty_and_null);
+    RUN_TEST(count_alive_forks_null_predicate_falls_back_to_pid_is_alive);
     RUN_TEST(init_counters_allocates_zeroed);
     RUN_TEST(init_counters_is_safe_to_call_twice_in_a_row);
     RUN_TEST(init_childs_initializes_contexts);

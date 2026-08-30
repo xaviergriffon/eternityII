@@ -835,6 +835,17 @@ stock une possibilité dont le client avait **déjà poussé les enfants**, si b
 parent devenait la racine de ses propres enfants (l'acquittement tardif du fork
 arrivait ensuite sous forme d'un « absence confirmée » réputé bénin). Diagnostic
 complet, comptes et preuves : [investigations/bail_expire_racines_en_stock.md](investigations/bail_expire_racines_en_stock.md).
+Le client fait sa part du chemin : `control_channel_keeps_serving`
+(`src/app/etii_control.{h,c}`) maintient une session **déjà ouverte** tant qu'un fork
+de travail vit encore (`count_alive_forks`), même après `REQUEST_STOP` — la boucle de
+reconnexion, elle, s'arrête bien à `REQUEST_STOP`, aucune NOUVELLE session n'est
+ouverte pendant l'arrêt. Contrepartie assumée : la session restant ouverte, une
+commande poussée par le serveur deviendrait exécutable sur un client en train de
+mourir (`start` reforkerait), ce qui n'était pas possible avant puisque la connexion
+était déjà fermée — `CTRL_COMMAND` est donc journalisé et refusé pendant l'arrêt,
+tandis que `CTRL_PING`/`CTRL_GET_STATS` continuent d'être servis (refuser aussi les
+pings ferait expirer la session côté serveur et rouvrirait la course).
+
 `client_has_open_work_connection` exige `socket_id != -1` **et** `has_identity` :
 `has_identity` n'étant remis à zéro qu'à la réutilisation du slot, s'y fier seul
 ferait vivre un client indéfiniment et le bail ne serait plus jamais réclamé.
