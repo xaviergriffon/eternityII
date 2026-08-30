@@ -129,6 +129,27 @@ static double now_seconds(void)
  * puisqu'il vit dans `bt_forward_check` (§4.4, conflit de singletons /
  * théorème de Hall |S|=2).
  */
+/**
+ * @brief Nombre de variantes de moteur déclarées dans `all_engines`.
+ *
+ * **Dimensionne AUSSI tous les tableaux indexés par moteur** — `engines`,
+ * `tally`, `common`, `res` — et borne la boucle de reconnaissance de
+ * `--engines`. C'est le seul endroit à modifier pour ajouter une variante.
+ *
+ * Ces tailles étaient auparavant écrites `2` à six endroits indépendants.
+ * Ajouter des variantes pour une mesure (deux départages MRV comparés à
+ * l'existant, §4.12) sans toucher les cinq autres a produit un débordement de
+ * pile : `res[2]`/`res[3]` écrasaient les locales voisines, la sortie par
+ * racine restait plausible, et le banc ne tombait qu'au bilan final — les
+ * chiffres du run étaient bons à jeter sans que rien ne le signale.
+ *
+ * Le dimensionnement unique n'est pas qu'un rangement : `all_engines` étant
+ * déclaré `[NB_ALL_ENGINES]`, ajouter une entrée sans incrémenter la constante
+ * devient une **erreur de compilation** (excès d'initialiseurs), et non plus
+ * une corruption silencieuse à l'exécution.
+ */
+#define NB_ALL_ENGINES 2
+
 typedef struct {
     const char *name;
     /** 1 : arme le conflit de singletons dans bt_forward_check (§4.4). */
@@ -705,12 +726,12 @@ int main(int argc, char **argv)
     int depths[MAX_DEPTHS] = {150, 165, 175, 180, 185};
     int nb_depths = 5;
 
-    engine_t all_engines[2] = {
+    engine_t all_engines[NB_ALL_ENGINES] = {
         { "mrv",           0 },
         { "mrv+singleton", 1 },
     };
-    engine_t engines[2];
-    int nb_engines = 2;
+    engine_t engines[NB_ALL_ENGINES];
+    int nb_engines = NB_ALL_ENGINES;
     memcpy(engines, all_engines, sizeof(all_engines));
 
     for (int i = 1; i < argc; i++) {
@@ -730,7 +751,7 @@ int main(int argc, char **argv)
             nb_engines = 0;
             char *copy = strdup(argv[++i]);
             for (char *tok = strtok(copy, ","); tok != NULL; tok = strtok(NULL, ",")) {
-                for (int e = 0; e < 2; e++) {
+                for (int e = 0; e < NB_ALL_ENGINES; e++) {
                     if (strcmp(tok, all_engines[e].name) == 0) {
                         engines[nb_engines++] = all_engines[e];
                     }
@@ -783,11 +804,11 @@ int main(int argc, char **argv)
     printf("\nbanc de réfutation : coût de la PREUVE qu'un sous-arbre est mort\n");
     printf("pièces : %s   plafond : %ld nœuds par racine et par moteur\n", pieces, budget);
 
-    tally_t tally[2], common[2];
+    tally_t tally[NB_ALL_ENGINES], common[NB_ALL_ENGINES];
     memset(tally, 0, sizeof(tally));
     memset(common, 0, sizeof(common));
     int nb_common = 0;
-    closure_t res[2];
+    closure_t res[NB_ALL_ENGINES];
     int roots_done = 0;
 
     if (pruner_profile > 0) {
