@@ -119,6 +119,12 @@ de journal. Jugé acceptable sans budget de temps dédié — mais c'est une ext
 linéaire depuis un stock 1000 fois plus petit, à revérifier si le stock grossit d'un ordre
 de grandeur ou si les réclamations deviennent fréquentes.
 
+**3. Ne pas annoncer sa mort trop tôt, côté client** (`control_channel_keeps_serving`,
+`src/app/etii_control.{h,c}`) : une session de contrôle déjà ouverte survit à
+`REQUEST_STOP` tant qu'un fork de travail vit encore (`count_alive_forks`,
+`src/app/app_runtime.{h,c}`). Détail et effet de bord gardé : section « Pistes écartées »
+ci-dessous.
+
 ## Trouvaille secondaire, corrigée depuis
 
 `datamanager_reclaim_expired_leases` réinjectait par `put(&file_possibility[dest]->file, …)`
@@ -144,6 +150,52 @@ Délibérément inchangé au passage : ces deux chemins ne consultent pas le pla
 réinjection ne doit jamais pouvoir échouer, sous peine de perdre une possibilité) et
 n'alimentent pas les compteurs de débit ADD. Deux écarts par rapport à `put_to_pool`, hors
 sujet ici.
+
+## Pistes écartées, avec leur raison
+
+Quatre pistes ont été posées face au diagnostic. Deux ont été retenues (A et C), deux
+écartées — consignées ici pour qu'elles n'aient pas à être rediscutées.
+
+**A — élargir le signal de vivacité. Retenue**, c'est le correctif principal ci-dessus.
+
+**C — fermer le canal de contrôle en dernier, côté client. Retenue**, en complément :
+`control_channel_keeps_serving` (`src/app/etii_control.{h,c}`) maintient une session DÉJÀ
+ouverte tant qu'un fork de travail vit encore, même après `REQUEST_STOP`. La boucle de
+reconnexion, elle, garde `request_keeps_running` : pas de NOUVELLE session ouverte pendant
+l'arrêt. A ferme la course côté serveur, C l'empêche de se produire côté client — un client
+ne devrait pas annoncer sa mort avant d'avoir fini d'émettre. C seule n'aurait pas suffi :
+elle ne protège pas d'une mort brutale (`kill -9`, coupure réseau), où le canal de contrôle
+tombe aussi en premier.
+
+Effet de bord assumé et gardé : maintenir la session ouverte rend exécutable une commande
+poussée par le serveur sur un client en train de mourir — un `start` reforkerait des
+process de recherche. Cela n'existait pas avant (la connexion était déjà fermée à cet
+instant), d'où le refus explicite ajouté dans `control_channel_handle_frame` : pendant
+l'arrêt, `CTRL_COMMAND` est journalisé et refusé, tandis que `CTRL_PING`/`CTRL_GET_STATS`
+continuent d'être servis — refuser aussi les pings ferait expirer la session côté serveur
+et rouvrirait exactement la course qu'on ferme.
+
+**B — délai de grâce après la perte du canal de contrôle. Écartée.** C'était une
+approximation temporelle de la question « le client travaille-t-il encore ? ». A y répond
+directement, en regardant les connexions de travail. Ajouter un délai par-dessus ne ferait
+que retarder la réclamation d'un client réellement mort, sans rien gagner — et toute durée
+choisie serait un pari : trop courte elle ne couvre pas un vidage lent, trop longue elle
+gèle la part d'un client mort. Écartée avant écriture de code.
+
+**D — exploiter l'acquittement tardif. Écartée.** L'idée était séduisante : « absence
+confirmée » signifie « je n'ai pas pu la retirer du pool analysé », et le serveur pourrait
+en déduire que la possibilité a bien été analysée, donc retirer la copie qu'il vient de
+réinjecter dans le stock. Les 50 lignes du journal correspondaient exactement aux 50
+possibilités fuitées.
+
+Écartée pour deux raisons. D'abord le risque : « absence confirmée » survient aussi
+légitimement — c'est le cas du double acquittement corrigé plus tôt (`get_last_possibility`
+distingue désormais `from_server`) — et retirer alors une possibilité qu'un AUTRE client est
+en train de traiter serait une régression franche, une branche perdue contre un doublon
+d'exploration. Ensuite le bénéfice a fondu : le nettoyage ciblé à la réinjection
+(`datamanager_purge_descendants_of`, ci-dessus) couvre déjà le même besoin par un mécanisme
+qui, lui, ne peut pas se tromper de cible — il compare des plateaux, il ne déduit rien d'un
+message.
 
 ## Ce qui reste ouvert
 

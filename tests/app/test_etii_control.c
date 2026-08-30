@@ -171,6 +171,98 @@ TEST control_channel_command_forbidden_is_not_executed(void)
     PASS();
 }
 
+/* Arrêt en cours : le canal reste ouvert (pour ne pas annoncer au serveur une
+   mort que les forks n'ont pas encore consommée), mais une commande poussée
+   par le serveur est REFUSÉE. Sans ce garde-fou, un `start` arrivant sur un
+   client en train de s'arrêter reforkerait des process de recherche. Le cas
+   n'existait pas avant : la connexion était déjà fermée à cet instant. */
+TEST control_channel_command_is_refused_while_shutting_down(void)
+{
+    int saved_request = request;
+    int saved_max = max_stock_by_thread;
+    request = REQUEST_STOP;
+
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    /* Commande de la liste blanche, donc refusée UNIQUEMENT par l'arrêt. */
+    const char *cmd_line = "maxStockByThread 4242";
+    int rc = control_channel_handle_frame(sv[0], CTRL_COMMAND, cmd_line, (int32_t)strlen(cmd_line));
+    ASSERT_EQ_FMT(0, rc, "%d");
+
+    void *payload = NULL;
+    int32_t len = -1;
+    int cmd = ctrl_recv_frame(sv[1], &payload, &len);
+    ASSERT_EQ_FMT((int)CTRL_RESULT, cmd, "%d");
+    ASSERT(payload != NULL);
+    int32_t result = 0;
+    memcpy(&result, payload, sizeof(result));
+    free(payload);
+
+    ASSERT(result < 0);
+    /* Non exécutée : le global n'a pas bougé. */
+    ASSERT_EQ_FMT(saved_max, max_stock_by_thread, "%d");
+
+    close(sv[0]); close(sv[1]);
+    request = saved_request;
+    max_stock_by_thread = saved_max;
+    PASS();
+}
+
+/* Un CTRL_PING, lui, continue d'être servi pendant l'arrêt : c'est ce qui
+   maintient la session vivante côté serveur le temps que les forks finissent
+   d'émettre. Refuser aussi les pings ferait expirer la session et rouvrirait
+   exactement la course qu'on ferme. */
+TEST control_channel_ping_is_still_served_while_shutting_down(void)
+{
+    int saved_request = request;
+    request = REQUEST_STOP;
+
+    int sv[2];
+    MAKE_PAIR(sv);
+    int rc = control_channel_handle_frame(sv[0], CTRL_PING, NULL, 0);
+    ASSERT_EQ_FMT(0, rc, "%d");
+
+    void *payload = NULL;
+    int32_t len = -1;
+    int cmd = ctrl_recv_frame(sv[1], &payload, &len);
+    free(payload);
+    ASSERT_EQ_FMT((int)CTRL_ACK, cmd, "%d");
+
+    close(sv[0]); close(sv[1]);
+    request = saved_request;
+    PASS();
+}
+
+/* Le canal continue de servir tant qu'un fork de travail est vivant, même
+   après REQUEST_STOP -- c'est tout l'objet du correctif : ne pas annoncer au
+   serveur une mort que les forks n'ont pas encore consommée. */
+TEST control_channel_keeps_serving_while_a_fork_is_alive(void)
+{
+    int saved_request = request;
+    pid_t *saved_pids = childrens_pid;
+    int saved_nb = NB_THREADS;
+
+    pid_t pids[1] = { getpid() };  /* vivant par construction */
+    childrens_pid = pids;
+    NB_THREADS = 1;
+
+    request = REQUEST_CONTINUE;
+    ASSERT_EQ_FMT(1, control_channel_keeps_serving(), "%d");
+
+    request = REQUEST_STOP;               /* arrêt demandé, fork encore vivant */
+    ASSERT_EQ_FMT(1, control_channel_keeps_serving(), "%d");
+
+    pid_t none[1] = { -1 };               /* plus aucun fork */
+    childrens_pid = none;
+    ASSERT_EQ_FMT(0, control_channel_keeps_serving(), "%d");
+
+    childrens_pid = saved_pids;
+    NB_THREADS = saved_nb;
+    request = saved_request;
+    PASS();
+}
+
 /* Commande de trame inconnue : journalisée, ignorée, pas de réponse envoyée
    (donc rien à lire côté pair : on vérifie juste l'absence de crash / d'erreur
    de retour, et que la session n'est pas jugée perdue). */
@@ -351,6 +443,9 @@ TEST run_control_channel_stays_quiescible_during_long_blocking_recv(void)
 
 SUITE(etii_control_suite)
 {
+    RUN_TEST(control_channel_command_is_refused_while_shutting_down);
+    RUN_TEST(control_channel_ping_is_still_served_while_shutting_down);
+    RUN_TEST(control_channel_keeps_serving_while_a_fork_is_alive);
     RUN_TEST(control_channel_ping_replies_ack);
     RUN_TEST(control_channel_get_stats_replies_aggregated_stats);
     RUN_TEST(control_channel_command_allowed_is_executed);

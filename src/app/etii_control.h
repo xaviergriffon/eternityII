@@ -61,6 +61,25 @@ void control_channel_build_stats(control_stats_t *out);
  *                  succès, -1 en cas d'échec d'envoi réseau (l'appelant doit
  *                  alors considérer la connexion perdue et reconnecter).
  */
+/**
+ * @brief Le canal de contrôle doit-il continuer à servir ?
+ *
+ * Vrai tant que le process tourne normalement — et, une fois l'arrêt demandé,
+ * tant qu'il reste au moins un fork de travail vivant.
+ *
+ * Le canal de contrôle est ouvert par le seul process PARENT. À l'arrêt, il se
+ * fermait dès `REQUEST_STOP`, donc AVANT que les forks aient fini de vider
+ * leur file : le serveur en concluait la mort du client et lui reprenait une
+ * possibilité dont les forks avaient déjà poussé les enfants — parent et
+ * enfants se retrouvaient tous deux en stock. Le serveur s'en protège
+ * désormais de son côté (`owner_client_alive`) ; ce prédicat ferme la même
+ * course à la source, côté client. Diagnostic complet :
+ * `docs/investigations/bail_expire_racines_en_stock.md`.
+ *
+ * @return 1 s'il faut continuer à servir la session en cours, 0 sinon.
+ */
+int control_channel_keeps_serving(void);
+
 int control_channel_handle_frame(int socket_id, uint8_t cmd, const void *payload, int32_t len);
 
 /**

@@ -797,6 +797,26 @@ void wait_child(void) {
 static int g_childs_capacity = 0;
 
 /**
+ * @brief Voir la doc dans app_runtime.h.
+ */
+int count_alive_forks(const pid_t *pids, int nb, child_pid_alive_fn alive)
+{
+    if (pids == NULL || nb <= 0) {
+        return 0;
+    }
+    child_pid_alive_fn is_alive = (alive != NULL) ? alive : pid_is_alive;
+    int n = 0;
+    for (int c = 0; c < nb; c++) {
+        // `pids[c] > 0` d'abord : un slot libre vaut -1 et ne doit jamais être
+        // sondé comme un pid (kill(-1, 0) viserait TOUS les process).
+        if (pids[c] > 0 && is_alive(pids[c])) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/**
  * @brief Initialise les attributs des threads enfants.
  */
 void init_childs(void) {
