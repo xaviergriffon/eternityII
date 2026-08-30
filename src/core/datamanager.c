@@ -1415,8 +1415,119 @@ int analysed_lease_is_expired(time_t lease_deadline, time_t now) {
  *        `file_possibility[dest]->lock` pris pendant que
  *        `file_possibility_analysed[f]->lock` est tenu).
  */
+// Verrous globaux définis plus bas dans ce fichier (et absents de
+// datamanager.h : ils sont internes au module).
+void lock_all_file(void);
+void unlock_all_file(void);
+void lock_all_file_analysed(void);
+void unlock_all_file_analysed(void);
+
+/**
+ * @brief Vrai si l'une des `n` origines est la racine de `candidate`.
+ */
+static int is_descendant_of_any(const struct possibility_packet *origins, unsigned long long n,
+                                struct possibility_packet *candidate)
+{
+	for (unsigned long long k = 0; k < n; k++) {
+		if (is_origin_of((struct possibility_packet *)&origins[k], candidate) == 1) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/**
+ * @brief Retire de l'index du pool analysé le nœud pointant sur `e` (s'il existe).
+ *
+ * Le compartiment est celui du hash de la VALEUR de `e` — c'est là que
+ * `add_possibility_analysed_impl` l'a rangé. On compare `node->element` et non
+ * le hash : deux paquets distincts peuvent partager un compartiment. Un nœud
+ * absent est normal et sans conséquence (`analysed_index_may_be_incomplete`
+ * quand une allocation de nœud a échoué), d'où le parcours de la File comme
+ * source de vérité plutôt que de l'index.
+ */
+static void analysed_index_forget_element(int fileidx, Element *e)
+{
+	size_t bucket = hash_possibility_key((struct possibility_packet *)e->value) % ANALYSED_INDEX_BUCKETS;
+	AnalysedIndexNode *node = analysed_index[fileidx][bucket];
+	AnalysedIndexNode *prev = NULL;
+	while (node != NULL) {
+		if (node->element == e) {
+			if (prev == NULL) {
+				analysed_index[fileidx][bucket] = node->next;
+			} else {
+				prev->next = node->next;
+			}
+			free(node);
+			return;
+		}
+		prev = node;
+		node = node->next;
+	}
+}
+
+unsigned long long datamanager_purge_descendants_of(const struct possibility_packet *origins,
+                                                    unsigned long long n)
+{
+	if (origins == NULL || n == 0) {
+		return 0;
+	}
+	unsigned long long removed = 0;
+
+	// Temps 1 : pool analysé. D'abord, parce qu'un descendant qui en sort
+	// (réinjection) retombe dans le stock, que le temps 2 balaie ensuite.
+	lock_all_file_analysed();
+	for (int f = 0; f < nb_file_possibility; f++) {
+		File *file = &file_possibility_analysed[f]->file;
+		Element *e = file->start;
+		while (e != NULL) {
+			Element *next = e->next;
+			if (e->value != NULL
+			    && is_descendant_of_any(origins, n, (struct possibility_packet *)e->value)) {
+				analysed_index_forget_element(f, e);
+				file_remove_element(file, e);
+				removed++;
+			}
+			e = next;
+		}
+	}
+	unlock_all_file_analysed();
+
+	// Temps 2 : les deux pools de stock.
+	lock_all_file();
+	for (int f = 0; f < nb_file_possibility; f++) {
+		File *pools[2] = { &file_possibility[f]->file, &file_possibility_checked[f]->file };
+		for (int p = 0; p < 2; p++) {
+			Element *e = pools[p]->start;
+			while (e != NULL) {
+				Element *next = e->next;
+				if (e->value != NULL
+				    && is_descendant_of_any(origins, n, (struct possibility_packet *)e->value)) {
+					file_remove_element(pools[p], e);
+					removed++;
+				}
+				e = next;
+			}
+		}
+	}
+	unlock_all_file();
+
+	if (removed > 0) {
+		log_info("bail rendu au stock : %llu possibilite(s) redondante(s) supprimee(s) (descendants de %llu racine(s))\n",
+		         removed, n);
+	}
+	return removed;
+}
+
 unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner_alive_fn owner_alive) {
 	unsigned long long reclaimed_total = 0;
+	// Accumulateur des paquets réellement rendus au stock : ils servent, une
+	// fois TOUS les verrous relâchés, à purger les descendants qu'ils rendent
+	// redondants (datamanager_purge_descendants_of). Une seule passe pour
+	// toutes les origines, et non une passe par origine.
+	struct possibility_packet *reclaimed_all = NULL;
+	unsigned long long reclaimed_all_n = 0;
+	int accumulation_ok = 1;
 	for (int f = 0; f < nb_file_possibility; f++) {
 		pthread_mutex_lock(&file_possibility_analysed[f]->lock);
 		File *file = &file_possibility_analysed[f]->file;
@@ -1478,9 +1589,30 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner
 				}
 			}
 		}
+		if (n > 0 && accumulation_ok) {
+			struct possibility_packet *grown = realloc(reclaimed_all,
+			                                           (size_t)(reclaimed_all_n + n) * sizeof(struct possibility_packet));
+			if (grown == NULL) {
+				// La réinjection, elle, a déjà eu lieu : rien n'est perdu. On
+				// renonce seulement au nettoyage ciblé, que `checkOrigin`
+				// rattrapera.
+				log_error("datamanager_reclaim_expired_leases : allocation du nettoyage échouée — descendants non purgés\n");
+				accumulation_ok = 0;
+			} else {
+				reclaimed_all = grown;
+				memcpy(&reclaimed_all[reclaimed_all_n], buf, (size_t)n * sizeof(struct possibility_packet));
+				reclaimed_all_n += n;
+			}
+		}
 		free(buf);
 		reclaimed_total += n;
 	}
+
+	// Hors de toute section critique : la purge prend elle-même ses verrous.
+	if (accumulation_ok && reclaimed_all_n > 0) {
+		datamanager_purge_descendants_of(reclaimed_all, reclaimed_all_n);
+	}
+	free(reclaimed_all);
 	return reclaimed_total;
 }
 

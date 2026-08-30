@@ -274,6 +274,106 @@ TEST client_work_fork_roles_filters_by_client_uid(void)
     PASS();
 }
 
+/* Vivacité d'un client vue depuis ses connexions de TRAVAIL.
+ *
+ * C'est le correctif de la cause racine des relations racine/descendant en
+ * stock (voir docs/investigations/) : le canal de contrôle d'un client se
+ * ferme AVANT que ses forks de travail aient fini de vider leur file, donc
+ * juger la vivacité sur le seul canal de contrôle réclame le bail d'un fork
+ * encore en train de travailler. */
+TEST client_has_open_work_connection_sees_a_connected_fork(void)
+{
+    client_t *saved_tp = thread_params;
+    int saved_nb = NB_THREADS;
+
+    uint8_t uid[CLIENT_UID_BYTES];
+    memset(uid, 0x11, sizeof uid);
+
+    client_t slots[2];
+    memset(slots, 0, sizeof slots);
+    slots[0].socket_id = -1;              /* slot libre */
+    slots[1].socket_id = 7;               /* connexion ouverte */
+    slots[1].has_identity = 1;
+    memcpy(slots[1].identity.client_uid, uid, CLIENT_UID_BYTES);
+
+    NB_THREADS = 2;
+    thread_params = slots;
+    int alive = client_has_open_work_connection(uid);
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+
+    ASSERT_EQ_FMT(1, alive, "%d");
+    PASS();
+}
+
+/* Le cœur du correctif : à la déconnexion, `socket_id` repasse à -1 mais
+ * `has_identity` N'EST PAS remis à zéro (il ne l'est qu'à la réutilisation du
+ * slot, dans try_assign_client_slot). Un slot périmé ne doit donc jamais
+ * compter comme vivant, sinon le bail ne serait plus JAMAIS réclamé. */
+TEST client_has_open_work_connection_ignores_a_closed_slot(void)
+{
+    client_t *saved_tp = thread_params;
+    int saved_nb = NB_THREADS;
+
+    uint8_t uid[CLIENT_UID_BYTES];
+    memset(uid, 0x22, sizeof uid);
+
+    client_t slots[1];
+    memset(slots, 0, sizeof slots);
+    slots[0].socket_id = -1;              /* déconnecté... */
+    slots[0].has_identity = 1;            /* ...mais l'identité reste posée */
+    memcpy(slots[0].identity.client_uid, uid, CLIENT_UID_BYTES);
+
+    NB_THREADS = 1;
+    thread_params = slots;
+    int alive = client_has_open_work_connection(uid);
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+
+    ASSERT_EQ_FMT(0, alive, "%d");
+    PASS();
+}
+
+/* Une connexion ouverte appartenant à un AUTRE client ne rend pas celui-ci vivant. */
+TEST client_has_open_work_connection_filters_by_uid(void)
+{
+    client_t *saved_tp = thread_params;
+    int saved_nb = NB_THREADS;
+
+    uint8_t uid[CLIENT_UID_BYTES], other[CLIENT_UID_BYTES];
+    memset(uid, 0x33, sizeof uid);
+    memset(other, 0x44, sizeof other);
+
+    client_t slots[2];
+    memset(slots, 0, sizeof slots);
+    slots[0].socket_id = 4;
+    slots[0].has_identity = 1;
+    memcpy(slots[0].identity.client_uid, other, CLIENT_UID_BYTES);
+    slots[1].socket_id = 5;
+    slots[1].has_identity = 0;            /* connecté mais pas encore identifié */
+
+    NB_THREADS = 2;
+    thread_params = slots;
+    int alive = client_has_open_work_connection(uid);
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+
+    ASSERT_EQ_FMT(0, alive, "%d");
+    PASS();
+}
+
+TEST client_has_open_work_connection_null_thread_params_is_zero(void)
+{
+    client_t *saved_tp = thread_params;
+    thread_params = NULL;
+    uint8_t uid[CLIENT_UID_BYTES];
+    memset(uid, 0, sizeof uid);
+    int alive = client_has_open_work_connection(uid);
+    thread_params = saved_tp;
+    ASSERT_EQ_FMT(0, alive, "%d");
+    PASS();
+}
+
 TEST client_work_fork_roles_no_match_is_zero(void)
 {
     client_t *saved_tp = thread_params;
@@ -3365,6 +3465,10 @@ SUITE(etii_server_suite)
     RUN_TEST(active_threads_none_connected_is_zero);
     RUN_TEST(active_threads_all_connected);
     RUN_TEST(client_work_fork_roles_filters_by_client_uid);
+    RUN_TEST(client_has_open_work_connection_sees_a_connected_fork);
+    RUN_TEST(client_has_open_work_connection_ignores_a_closed_slot);
+    RUN_TEST(client_has_open_work_connection_filters_by_uid);
+    RUN_TEST(client_has_open_work_connection_null_thread_params_is_zero);
     RUN_TEST(client_work_fork_roles_no_match_is_zero);
     RUN_TEST(client_work_fork_roles_null_thread_params_is_zero);
     RUN_TEST(client_work_fork_roles_respects_max_capacity);

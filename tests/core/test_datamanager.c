@@ -5376,6 +5376,144 @@ TEST reclaim_expired_leases_returns_owned_possibility_to_stock(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * datamanager_purge_descendants_of : nettoyage ciblé à la réinjection d'un bail
+ * ------------------------------------------------------------------------ */
+
+/* Rendre une possibilité au stock la remet en concurrence avec les enfants que
+ * le client avait déjà poussés avant de disparaître : elle en devient la
+ * racine. On purge donc ces descendants dans la foulée — dans les DEUX pools
+ * de stock ET dans le pool analysé (un autre client peut être en train de
+ * travailler sur un descendant désormais redondant). */
+TEST purge_descendants_sweeps_both_stock_pools_and_analysed(void)
+{
+    drain_all();
+    const int a[][3]  = { {0,0,100}, {0,1,101} };
+    const int b[][3]  = { {0,0,100}, {0,1,101}, {0,2,102} };            /* descendant */
+    const int c[][3]  = { {0,0,100}, {0,1,101}, {0,3,103} };            /* descendant */
+    const int d[][3]  = { {0,0,100}, {0,1,101}, {1,0,104}, {1,1,105} }; /* descendant */
+    const int e[][3]  = { {0,0,555}, {0,1,999}, {0,2,7} };              /* diverge */
+
+    struct possibility_packet origin, pb, pc, pd, pe;
+    build_board(&origin, a, 2, 0);
+    build_board(&pb, b, 3, 0);   /* pool non vérifié */
+    build_board(&pc, c, 3, 1);   /* pool vérifié */
+    build_board(&pd, d, 4, 0);   /* ira dans le pool analysé */
+    build_board(&pe, e, 3, 0);   /* étranger : doit survivre */
+
+    struct possibility_packet stock[3] = { origin, pb, pc };
+    array_possibility_packet arr = { .size = 3, .possibilities = stock };
+    add_possibility(NULL, &arr);
+    struct possibility_packet other = pe;
+    array_possibility_packet arr2 = { .size = 1, .possibilities = &other };
+    add_possibility(NULL, &arr2);
+    add_possibility_analysed(&pd, -1);
+
+    ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(1ULL, analysed_total(), "%llu");
+
+    silence_std();
+    unsigned long long removed = datamanager_purge_descendants_of(&origin, 1);
+    restore_std();
+
+    ASSERT_EQ_FMT(3ULL, removed, "%llu");   /* pb, pc, pd */
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu"); /* la racine et l'étranger restent */
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* La racine elle-même n'est jamais purgée, ni un plateau de MÊME profondeur
+ * (fût-il un doublon exact) : aucun des deux n'est la racine de l'autre. */
+TEST purge_descendants_keeps_the_origin_and_equal_depth_boards(void)
+{
+    drain_all();
+    const int a[][3] = { {0,0,100}, {0,1,101} };
+    struct possibility_packet origin, jumeau;
+    build_board(&origin, a, 2, 0);
+    build_board(&jumeau, a, 2, 0);
+    struct possibility_packet stock[2] = { origin, jumeau };
+    array_possibility_packet arr = { .size = 2, .possibilities = stock };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    unsigned long long removed = datamanager_purge_descendants_of(&origin, 1);
+    restore_std();
+
+    ASSERT_EQ_FMT(0ULL, removed, "%llu");
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* Aucune origine à traiter : rien n'est touché (le chemin est emprunté à
+ * chaque passe de bail sans expiration, il doit être gratuit et inoffensif). */
+TEST purge_descendants_of_nothing_is_a_noop(void)
+{
+    drain_all();
+    const int a[][3] = { {0,0,100}, {0,1,101}, {0,2,102} };
+    struct possibility_packet pk;
+    build_board(&pk, a, 3, 0);
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    unsigned long long r1 = datamanager_purge_descendants_of(NULL, 3);
+    unsigned long long r2 = datamanager_purge_descendants_of(&pk, 0);
+    restore_std();
+
+    ASSERT_EQ_FMT(0ULL, r1, "%llu");
+    ASSERT_EQ_FMT(0ULL, r2, "%llu");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* Bout en bout : un bail qui expire rend la possibilité au stock ET purge dans
+ * la foulée les descendants qu'elle rend redondants — c'est précisément la
+ * situation qui a produit 3617 possibilités redondantes en production. */
+TEST reclaim_expired_leases_purges_the_descendants_it_makes_redundant(void)
+{
+    drain_all();
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 60;
+
+    const int a[][3] = { {0,0,100}, {0,1,101} };
+    const int b[][3] = { {0,0,100}, {0,1,101}, {0,2,102} };
+    const int c[][3] = { {0,0,100}, {0,1,101}, {0,2,102}, {0,3,103} };
+    const int e[][3] = { {0,0,555}, {0,1,999} };
+
+    struct possibility_packet parent, enfant, petit, etranger;
+    build_board(&parent, a, 2, 0);
+    build_board(&enfant, b, 3, 0);
+    build_board(&petit, c, 4, 0);
+    build_board(&etranger, e, 2, 0);
+
+    /* Les enfants poussés par le client AVANT sa disparition. */
+    struct possibility_packet stock[2] = { enfant, etranger };
+    array_possibility_packet arr = { .size = 2, .possibilities = stock };
+    add_possibility(NULL, &arr);
+    add_possibility_analysed(&petit, -1);   /* un petit-fils encore en analyse */
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x71);
+    add_possibility_analysed_owned(&parent, -1, owner);
+
+    silence_std();
+    unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, NULL);
+    restore_std();
+
+    ASSERT_EQ_FMT(1ULL, reclaimed, "%llu");
+    /* Le parent est revenu au stock, l'étranger est intact, l'enfant a disparu. */
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+    /* Le petit-fils en analyse a disparu lui aussi. */
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+
+    analysed_lease_seconds = saved_lease;
+    drain_all();
+    PASS();
+}
+
 /* Une possibilité attribuée dont le bail n'est PAS encore expiré reste en
  * place (le balayage ne rend au stock que ce qui a réellement expiré). */
 TEST reclaim_expired_leases_leaves_not_yet_expired_alone(void)
@@ -6114,6 +6252,10 @@ SUITE(datamanager_suite)
     RUN_TEST(remove_possibility_analysed_clears_owner_attribution);
     RUN_TEST(analysed_lease_is_expired_pure_predicate);
     RUN_TEST(reclaim_expired_leases_returns_owned_possibility_to_stock);
+    RUN_TEST(purge_descendants_sweeps_both_stock_pools_and_analysed);
+    RUN_TEST(purge_descendants_keeps_the_origin_and_equal_depth_boards);
+    RUN_TEST(purge_descendants_of_nothing_is_a_noop);
+    RUN_TEST(reclaim_expired_leases_purges_the_descendants_it_makes_redundant);
     RUN_TEST(reclaim_expired_leases_leaves_not_yet_expired_alone);
     RUN_TEST(reclaim_expired_leases_ignores_unowned_possibilities);
     RUN_TEST(reclaim_expired_leases_idempotent_with_prior_ack);
