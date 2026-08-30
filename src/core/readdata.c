@@ -13,7 +13,7 @@
  *
  * Format attendu :
  * - Première ligne : `ntiles: N`
- * - Lignes suivantes : `id top right bottom left`
+ * - Lignes suivantes : `id top left bottom right`
  *
  * La pièce 0 (bordure) est insérée automatiquement avec tous ses bords à 0.
  *

@@ -676,7 +676,7 @@ l'[API HTTP REST admin](api_http_rest.md) (`--http-port`). Détails du protocole
 
 ```
 ntiles: 256
-<id> <top> <right> <bottom> <left>
+<id> <top> <left> <bottom> <right>
 ...
 ```
 
