@@ -1073,9 +1073,15 @@ TEST bt_frontier_place_undo_matches_full_recompute(void)
     PASS();
 }
 
-/* Réimplémentation VERBATIM du balayage des 256 cases tel qu'il était avant
- * l'énumération par masque : c'est l'oracle. Si les deux divergent d'une seule
- * case sur un seul plateau, l'arbre exploré n'est plus le même. */
+/* Réimplémentation indépendante du balayage des 256 cases : c'est l'oracle. Si
+ * les deux divergent d'une seule case sur un seul plateau, l'arbre exploré
+ * n'est plus le même.
+ *
+ * Le nombre de côtés contraints est ici dérivé du cache `constraints[][]`
+ * (« côté contraint » = clé différente de `all_face`, c'est la définition),
+ * et NON lu dans `bt_frontier.nconstr` qui le calcule, lui, depuis la géométrie
+ * et la grille. Les deux dérivations sont indépendantes : l'oracle vérifie donc
+ * du même coup que `nconstr` dit bien ce qu'il prétend. */
 static int reference_choose_cell(struct possibility_packet *board,
                                  key_part constraints[ETERN_SIZE][ETERN_SIZE],
                                  map_big_array *mapParts,
@@ -1085,6 +1091,7 @@ static int reference_choose_cell(struct possibility_packet *board,
 {
     int best_count = -1;
     uint8_t best_x = 0, best_y = 0;
+    int best_nc = 0;
     int fallback_found = 0;
     uint8_t fallback_x = 0, fallback_y = 0;
 
@@ -1107,10 +1114,21 @@ static int reference_choose_cell(struct possibility_packet *board,
             if (count == 0) {
                 return 0;
             }
+            /* Côtés contraints, dérivés du cache et non de bt_frontier. */
+            int nc = 0;
+            if (key->k1 != all_face) nc++;
+            if (key->k2 != all_face) nc++;
+            if (key->k3 != all_face) nc++;
+            if (key->k4 != all_face) nc++;
             if (best_count < 0 || count < best_count) {
                 best_count = count;
                 best_x = (uint8_t)x;
                 best_y = (uint8_t)y;
+                best_nc = nc;
+            } else if (count == best_count && nc > best_nc) {
+                best_x = (uint8_t)x;
+                best_y = (uint8_t)y;
+                best_nc = nc;
             }
         }
     }
@@ -1166,6 +1184,65 @@ TEST mrv_choose_cell_matches_full_scan_reference(void)
             ASSERT_EQ_FMT(rcount, ncount, "%d");
         }
     }
+    PASS();
+}
+
+/* Départage des égalités par le nombre de côtés contraints.
+ *
+ * Fixture : plateau plein sauf TROIS cases vides, sur une map UNIFORME — toute
+ * case contrainte offre donc le même nombre de candidats, et le score MRV ne
+ * départage rien. Restent les côtés contraints (`nconstr` = 4 − voisines vides) :
+ *
+ *   (0,0) et (0,1), adjacentes l'une à l'autre  -> une voisine vide  -> nconstr 3
+ *   (ETERN_SIZE/2, ETERN_SIZE/2), isolée        -> aucune voisine vide -> nconstr 4
+ *
+ * L'ordre d'énumération donnerait (0,0), qui vient en premier. Le départage doit
+ * lui préférer la case ISOLÉE, strictement plus contrainte — c'est le sens que la
+ * mesure sur stock de production a retenu, à l'INVERSE de l'heuristique de degré
+ * classique (cf. §4.12). Ce test verrouille ce sens : l'inverser le fait tomber. */
+TEST mrv_choose_cell_breaks_ties_by_constrained_sides(void)
+{
+    static struct part cand[2] = { { .id = 6 }, { .id = 7 } };
+    static struct array_part list = { .size = 2, .parts = cand };
+    map_big_array *map = make_uniform_map(&list);
+    const int8_t all_face = (int8_t)map->sizearrayM;
+    const int ix = ETERN_SIZE / 2, iy = ETERN_SIZE / 2;
+
+    struct possibility_packet board;
+    make_empty_board(&board);
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            board.grid[x][y] = 1;
+    board.grid[0][0] = -2;
+    board.grid[0][1] = -2;
+    board.grid[ix][iy] = -2;
+
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, make_filler_part(), all_face);
+    uint64_t used[MRV_USED_WORDS];
+    mrv_used_init(used, &board);
+    bt_frontier f;
+    bt_frontier_init(&f, &board);
+
+    /* Le fixture ne vaut que si les trois cases sont bien à égalité de score. */
+    ASSERT_EQ_FMT(3, (int)f.nconstr[BT_CELL_POS(0, 0)], "%d");
+    ASSERT_EQ_FMT(3, (int)f.nconstr[BT_CELL_POS(0, 1)], "%d");
+    ASSERT_EQ_FMT(4, (int)f.nconstr[BT_CELL_POS(ix, iy)], "%d");
+
+    uint8_t x = 200, y = 200; int count = -99;
+    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, &x, &y, &count), "%d");
+    ASSERT_EQ_FMT(ix, (int)x, "%d");
+    ASSERT_EQ_FMT(iy, (int)y, "%d");
+
+    /* Sans la case isolée, les deux restantes sont à égalité sur nconstr aussi :
+     * l'ordre d'énumération reprend la main, et c'est (0,0). */
+    board.grid[ix][iy] = 1;
+    bt_init_constraints(C, &board, make_filler_part(), all_face);
+    bt_frontier_init(&f, &board);
+    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, &x, &y, &count), "%d");
+    ASSERT_EQ_FMT(0, (int)x, "%d");
+    ASSERT_EQ_FMT(0, (int)y, "%d");
+
     PASS();
 }
 
@@ -3465,6 +3542,7 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_frontier_init_matches_constraint_cache);
     RUN_TEST(bt_frontier_place_undo_matches_full_recompute);
     RUN_TEST(mrv_choose_cell_matches_full_scan_reference);
+    RUN_TEST(mrv_choose_cell_breaks_ties_by_constrained_sides);
     RUN_TEST(mrv_choose_cell_full_board_and_unconstrained_fallback);
     RUN_TEST(bt_materialize_pending_orders_deepest_first);
     RUN_TEST(bt_materialize_pending_respects_max_out);

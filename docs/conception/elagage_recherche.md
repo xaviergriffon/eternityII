@@ -1536,6 +1536,62 @@ supplémentaire est INVERSEMENT proportionnel à la force du moteur qui la suit 
 puissante élague utilement pour LES AUTRES (le stock serveur, avant distribution), pas pour
 elle-même.
 
+### 4.12 Départage des égalités du balayage MRV par le nombre de côtés contraints — ADOPTÉ
+
+**Statut : mesuré sur stock de production, adopté.** Première piste de la série tranchée par
+le **coût de réfutation sur du travail réellement servi**, et non par un proxy.
+
+**L'idée.** `mrv_choose_cell` retenait la PREMIÈRE case de score minimal dans l'ordre
+d'énumération. Or les égalités sont fréquentes, et `bt_frontier.nconstr` — le nombre de
+côtés contraints, maintenu de toute façon par la frontière incrémentale — offre un critère
+gratuit à lire.
+
+**Le sens du critère ne se devine pas.** Deux thèses s'opposent, et `nconstr` étant borné
+par 4, elles sont exactement l'inverse l'une de l'autre (`nconstr = 4 − voisines vides`) :
+
+- l'**heuristique de degré** de la littérature CSP : préférer la variable qui contraint le
+  plus de variables NON affectées, soit `nconstr` **minimal** ;
+- l'intuition propre au pavage : traiter d'abord les cases les plus enfermées, soit
+  `nconstr` **maximal**.
+
+Les deux ont été implémentées derrière un drapeau temporaire et comparées **appariées sur
+les mêmes racines**, le drapeau étant supprimé avec la décision (un interrupteur laissé en
+place serait un chemin de code non testé, cf. §6 de `mrv_moteur_unique.md`).
+
+**Mesure.** Stock de production de 12 616 possibilités (8 / 44,4 / 179 pièces posées
+min/moy/max), plafond 2 000 000 nœuds. La population utile est celle des racines ≥ 130
+pièces : **en dessous, à peine 2 fermetures sur 250 racines** — cohérent avec le mur
+structurel de §4.6b. Les 433 racines concernées ont toutes été traitées : ce n'est donc pas
+un échantillon, mais la population entière.
+
+| Moteur | Fermetures / 433 | Nœuds appariés (383 fermées par tous) | Temps apparié |
+|---|---|---|---|
+| `mrv` (ordre d'énumération) | 383 | 35 327 545 | 42,013 s |
+| `mrv+nc_max` (**adopté**) | **387** | 33 105 827 | **39,910 s** |
+| Delta | **+4** | **−6,29 %** | **−5,01 %** |
+
+La variante de degré classique (`nc_min`), mesurée sur un échantillon antérieur de 214
+fermetures, est nettement **perdante** : +4,42 % de nœuds, +5,4 % de temps. La théorie
+recommandait le mauvais sens ; seule la mesure pouvait le dire.
+
+**Le temps est le juge, pas les nœuds.** Il inclut le coût du départage lui-même, puisque
+c'est le même moteur qui tourne. Par différence, le critère coûte **≈ +1,4 % par nœud** et
+en fait économiser 6,3 % : c'est ce solde, −5,01 %, qui est le résultat.
+
+**Piège de mesure rencontré, à ne pas répéter.** Un premier échantillon (47 fermetures,
+8,9 s au total) donnait −1,38 % de nœuds mais **+0,33 % de temps** — conclusion inverse. Il
+était simplement trop petit : le temps n'agrège assez de durées pour être exploitable qu'à
+partir de plusieurs dizaines de secondes cumulées. Les nœuds, eux, sont EXACTS dès la
+première racine (le comptage est déterministe) : c'est la grandeur à regarder en premier,
+le temps ne servant qu'à vérifier que le coût du critère ne mange pas le gain.
+
+**Une leçon de méthode, payée.** Cette piste avait d'abord été écartée sur la foi d'une
+sonde de FRÉQUENCE : le départage ne peut changer la décision que dans 1,45 % des nœuds
+(32,96 % d'égalités, mais `nconstr` ne sépare les ex aequo que dans 4,24 %, et le minimum
+vaut 1 — case forcée — dans 54,35 % des appels). Le raisonnement « petit levier donc petit
+effet » est **faux sur un arbre de recherche** : 1,45 % des décisions ont suffi à dévier
+l'exploration de 6,3 %. Mesurer la fréquence d'un critère ne dit rien de son effet.
+
 ## 5. Arbitrages tranchés
 
 - **Une condition nécessaire, jamais une heuristique.** Un faux positif jette
