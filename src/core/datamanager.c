@@ -1519,6 +1519,49 @@ unsigned long long datamanager_purge_descendants_of(const struct possibility_pac
 	return removed;
 }
 
+/**
+ * @brief Remet un paquet dans le stock, dans le pool correspondant à son
+ *        drapeau `checked`.
+ *
+ * Chemin commun aux deux réinjections « en bloc » (`restock_analysed` et
+ * `datamanager_reclaim_expired_leases`). Le troisième chemin,
+ * `requeue_last_sent_possibility`, passe par `add_possibility`/`put_to_local`
+ * et route déjà selon le drapeau : c'est ce comportement-là qui fait
+ * référence.
+ *
+ * Router selon `checked` et non forcer le pool non vérifié : la réinjection
+ * ne modifie pas le plateau, donc la vérification du pruner — qui porte sur
+ * cet état exact — vaut toujours (`checked` n'est remis à 0 que sur un paquet
+ * issu d'une EXPANSION, cf. `core/possibility.h`). Renvoyer un paquet vérifié
+ * dans le pool non vérifié le ferait re-vérifier pour rien et placerait le
+ * paquet dans un pool que son propre drapeau contredit — contradiction qui ne
+ * se résorbait qu'au prochain `restore`, lequel réaiguille selon le drapeau.
+ *
+ * Délibérément SANS contrôle de plafond RAM (à la différence de
+ * `put_to_pool`) : une réinjection ne doit jamais pouvoir échouer, sous peine
+ * de perdre une possibilité. La boucle `trylock` en tourniquet garantit
+ * qu'elle finit toujours par aboutir sur une file.
+ *
+ * @param pk Paquet à réinsérer (copié dans la file).
+ */
+static void put_back_to_stock(struct possibility_packet *pk)
+{
+	file_possibility_t **pool = pk->checked ? file_possibility_checked : file_possibility;
+	int dest = 0;
+	int added = 0;
+	while (!added) {
+		if (pthread_mutex_trylock(&pool[dest]->lock) == 0) {
+			if (pk->alloc > max_result) max_result = pk->alloc;
+			put(&pool[dest]->file, pk);
+			pthread_mutex_unlock(&pool[dest]->lock);
+			added = 1;
+		} else {
+			dest = (dest + 1) % nb_file_possibility;
+			usleep(MICRO_SLEEP);
+		}
+	}
+}
+
 unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner_alive_fn owner_alive) {
 	unsigned long long reclaimed_total = 0;
 	// Accumulateur des paquets réellement rendus au stock : ils servent, une
@@ -1575,19 +1618,7 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner
 		pthread_mutex_unlock(&file_possibility_analysed[f]->lock);
 
 		for (unsigned long long i = 0; i < n; i++) {
-			int dest = 0;
-			int added = 0;
-			while (!added) {
-				if (pthread_mutex_trylock(&file_possibility[dest]->lock) == 0) {
-					if (buf[i].alloc > max_result) max_result = buf[i].alloc;
-					put(&file_possibility[dest]->file, &buf[i]);
-					pthread_mutex_unlock(&file_possibility[dest]->lock);
-					added = 1;
-				} else {
-					dest = (dest + 1) % nb_file_possibility;
-					usleep(MICRO_SLEEP);
-				}
-			}
+			put_back_to_stock(&buf[i]);
 		}
 		if (n > 0 && accumulation_ok) {
 			struct possibility_packet *grown = realloc(reclaimed_all,
@@ -1620,8 +1651,9 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner
  * @brief Remet dans le stock toutes les possibilités en cours d'analyse.
  *
  * Vide chaque file `file_possibility_analysed` et réinjecte les paquets dans
- * `file_possibility` (stock non vérifié). Utile quand des clients sont morts
- * sans avoir terminé leur travail.
+ * le stock, chacun dans le pool correspondant à son drapeau `checked`
+ * (`put_back_to_stock`). Utile quand des clients sont morts sans avoir terminé
+ * leur travail.
  *
  * @return 0.
  */
@@ -1646,19 +1678,7 @@ int restock_analysed(void) {
         pthread_mutex_unlock(&file_possibility_analysed[f]->lock);
 
         for (unsigned long long i = 0; i < n; i++) {
-            int dest = 0;
-            int added = 0;
-            while (!added) {
-                if (pthread_mutex_trylock(&file_possibility[dest]->lock) == 0) {
-                    if (buf[i].alloc > max_result) max_result = buf[i].alloc;
-                    put(&file_possibility[dest]->file, &buf[i]);
-                    pthread_mutex_unlock(&file_possibility[dest]->lock);
-                    added = 1;
-                } else {
-                    dest = (dest + 1) % nb_file_possibility;
-                    usleep(MICRO_SLEEP);
-                }
-            }
+            put_back_to_stock(&buf[i]);
             moved++;
         }
         free(buf);
