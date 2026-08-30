@@ -117,8 +117,9 @@ static void bt_init_constraints(key_part constraints[ETERN_SIZE][ETERN_SIZE],
  * Frontière incrémentale du balayage MRV
  *
  * `mrv_choose_cell` ne s'intéresse qu'aux cases VIDES et CONTRAINTES (§4.7 de
- * docs/conception/elagage_recherche.md) : ~29 cases en moyenne sur le puzzle
- * 256. Les repérer par un balayage des 256 cases à chaque nœud coûtait plus
+ * docs/conception/elagage_recherche.md) : ~52 cases en moyenne sur le puzzle
+ * 256 (mesuré, cf. la doc de `mrv_choose_cell` pour les conditions et pour
+ * pourquoi §3.2 annonce 29). Les repérer par un balayage des 256 cases à chaque nœud coûtait plus
  * cher que le comptage lui-même. Deux masques de bits maintenus
  * incrémentalement — comme le cache de contraintes et le miroir des pièces
  * utilisées — donnent la même liste sans balayer la grille.
@@ -917,8 +918,20 @@ static inline int mrv_free_candidates(const map_big_array *map, const key_part *
  *    `all_face` n'est contrainte par rien (ni bord de plateau, ni voisine
  *    posée) et offre donc, par construction, toutes les pièces libres — elle ne
  *    peut jamais être le minimum tant qu'une case contrainte existe.
- *    Sur le puzzle 256 la frontière compte 29 cases en moyenne (max 52) contre
- *    256 cases balayées par le prototype (§3.2).
+ *    Sur le puzzle 256 la frontière compte **52,2 cases en moyenne (max 79)**
+ *    contre 256 cases balayées par le prototype — mesuré sous MRV, départ
+ *    genèse, 1,5 M nœuds.
+ *    Ce n'est PAS le « 29 en moyenne (max 52) » de §3.2, et l'écart a deux
+ *    causes distinctes, toutes deux mesurées : (a) §3.2 compte les cases vides
+ *    adjacentes à une case POSÉE, là où le balayage retient aussi toute case de
+ *    bord vide — `what_search_in_grid_to_key` y pose la clé 0, une vraie
+ *    couleur, donc une contrainte permanente ; (b) surtout, §3.2 vient d'une
+ *    analyse statique de l'ordre FIXE `dirx[]`/`diry[]`, qui remplit de proche
+ *    en proche, alors que MRV saute d'un bout à l'autre du plateau et laisse
+ *    une frontière bien plus déchiquetée. À définition de §3.2 mais sous MRV,
+ *    la même grandeur vaut 45,2 en moyenne (max 54) : l'ordre de remplissage
+ *    pèse plus lourd que la définition. La restriction reste largement
+ *    payante (52 cases sur 256), le chiffre de §3.2 la surestimait de ~1,8×.
  *    Il existe TOUJOURS une case de frontière tant qu'une case vide existe :
  *    la première case vide dans l'ordre lexicographique a soit un bord de
  *    plateau, soit une voisine de rang inférieur nécessairement remplie. Le
