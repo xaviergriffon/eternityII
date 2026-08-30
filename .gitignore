@@ -11,6 +11,7 @@ build/
 *.back
 *.spillcount
 *.log
+`.conf
 solution_*
 .eternityII_history
 eternityii-machine_uid
