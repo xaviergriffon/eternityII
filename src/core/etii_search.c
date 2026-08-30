@@ -113,6 +113,144 @@ static void bt_init_constraints(key_part constraints[ETERN_SIZE][ETERN_SIZE],
     }
 }
 
+/* ======================================================================
+ * Frontière incrémentale du balayage MRV
+ *
+ * `mrv_choose_cell` ne s'intéresse qu'aux cases VIDES et CONTRAINTES (§4.7 de
+ * docs/conception/elagage_recherche.md) : ~29 cases en moyenne sur le puzzle
+ * 256. Les repérer par un balayage des 256 cases à chaque nœud coûtait plus
+ * cher que le comptage lui-même. Deux masques de bits maintenus
+ * incrémentalement — comme le cache de contraintes et le miroir des pièces
+ * utilisées — donnent la même liste sans balayer la grille.
+ *
+ * Position d'une case : `pos = x * ETERN_SIZE + y`, donc l'ordre croissant des
+ * bits reproduit EXACTEMENT l'ordre `for x { for y }` de l'ancien balayage.
+ * C'est ce qui garantit un départage d'égalité identique, donc le même arbre
+ * exploré.
+ * ====================================================================== */
+
+/** @brief Nombre de cases de la grille. */
+#define BT_CELLS (ETERN_SIZE * ETERN_SIZE)
+/** @brief Nombre de mots de 64 bits couvrant un masque de cases. */
+#define BT_FRONTIER_WORDS ((BT_CELLS + 63) / 64)
+/** @brief Position d'une case dans les masques (ordre x-major, cf. ci-dessus). */
+#define BT_CELL_POS(x, y) ((x) * ETERN_SIZE + (y))
+
+/**
+ * @brief État incrémental permettant d'énumérer la frontière sans balayer la grille.
+ *
+ * `empty & constrained` (mot à mot) donne la frontière ; `empty & ~constrained`
+ * donne les cases vides sans aucune contrainte, c'est-à-dire exactement le
+ * repli `fallback` de `mrv_choose_cell`.
+ */
+typedef struct {
+    /** Bit `BT_CELL_POS(x,y)` levé ⇔ `grid[x][y] == -2` (même prédicat que
+     *  l'ancien balayage de `mrv_choose_cell`). */
+    uint64_t empty[BT_FRONTIER_WORDS];
+    /** Bit levé ⇔ `nconstr > 0`, c'est-à-dire au moins une des 4 clés de la
+     *  case diffère de `all_face`. */
+    uint64_t constrained[BT_FRONTIER_WORDS];
+    /** Nombre de côtés contraints : bords de grille (constants) + voisines
+     *  posées. Compteur, et non simple booléen : deux voisines peuvent
+     *  contraindre la même case, le retrait de l'une ne la libère pas. */
+    uint8_t nconstr[BT_CELLS];
+} bt_frontier;
+
+/**
+ * @brief Construit l'état de frontière depuis un plateau.
+ *
+ * Les deux prédicats sont repris TELS QUELS de leurs sources respectives, et
+ * ne sont volontairement pas unifiés : `empty` suit `mrv_choose_cell`
+ * (`== -2`), `nconstr` suit `what_search_in_grid_to_key` (`< 0` = voisine
+ * vide, donc côté non contraint). Ils coïncident sur tout plateau produit par
+ * la recherche — `idParts` est toujours ≥ 0 et le retrait écrit -2 — mais un
+ * paquet reçu porte des données non vérifiées : les garder distincts rend
+ * l'équivalence avec l'ancien balayage vraie sans hypothèse sur le contenu.
+ *
+ * @param f     État à construire.
+ * @param board Plateau source.
+ */
+static void bt_frontier_init(bt_frontier *f, const struct possibility_packet *board)
+{
+    memset(f, 0, sizeof(*f));
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            int pos = BT_CELL_POS(x, y);
+            if (board->grid[x][y] == -2) {
+                f->empty[pos / 64] |= (uint64_t)1 << (pos % 64);
+            }
+            int n = 0;
+            // Bords de grille : what_search_in_grid_to_key y pose la clé 0
+            // (une vraie couleur), jamais all_face — contrainte permanente.
+            if (y == 0)              n++;
+            if (x == ETERN_SIZE - 1) n++;
+            if (y == ETERN_SIZE - 1) n++;
+            if (x == 0)              n++;
+            // Voisines posées, dans le même ordre (haut, droite, bas, gauche).
+            if (y > 0              && board->grid[x][y - 1] >= 0) n++;
+            if (x < ETERN_SIZE - 1 && board->grid[x + 1][y] >= 0) n++;
+            if (y < ETERN_SIZE - 1 && board->grid[x][y + 1] >= 0) n++;
+            if (x > 0              && board->grid[x - 1][y] >= 0) n++;
+            f->nconstr[pos] = (uint8_t)n;
+            if (n > 0) {
+                f->constrained[pos / 64] |= (uint64_t)1 << (pos % 64);
+            }
+        }
+    }
+}
+
+/** @brief Une voisine de (x,y) vient d'être posée : un côté de plus contraint. */
+static inline void bt_frontier_constrain(bt_frontier *f, int x, int y)
+{
+    int pos = BT_CELL_POS(x, y);
+    if (f->nconstr[pos]++ == 0) {
+        f->constrained[pos / 64] |= (uint64_t)1 << (pos % 64);
+    }
+}
+
+/** @brief Une voisine de (x,y) vient d'être retirée : un côté de moins contraint. */
+static inline void bt_frontier_release(bt_frontier *f, int x, int y)
+{
+    int pos = BT_CELL_POS(x, y);
+    if (--f->nconstr[pos] == 0) {
+        f->constrained[pos / 64] &= ~((uint64_t)1 << (pos % 64));
+    }
+}
+
+/**
+ * @brief Met à jour la frontière après le placement d'une pièce en (cx, cy).
+ *
+ * Pendant de `bt_propagate_place`, appelé juste après lui et sur les MÊMES
+ * quatre voisines : la case sort des cases vides, ses voisines gagnent un côté
+ * contraint.
+ */
+static inline void bt_frontier_place(bt_frontier *f, int cx, int cy)
+{
+    int pos = BT_CELL_POS(cx, cy);
+    f->empty[pos / 64] &= ~((uint64_t)1 << (pos % 64));
+    if (cy > 0)              bt_frontier_constrain(f, cx, cy - 1);
+    if (cx < ETERN_SIZE - 1) bt_frontier_constrain(f, cx + 1, cy);
+    if (cy < ETERN_SIZE - 1) bt_frontier_constrain(f, cx, cy + 1);
+    if (cx > 0)              bt_frontier_constrain(f, cx - 1, cy);
+}
+
+/**
+ * @brief Met à jour la frontière après le retrait de la pièce de (cx, cy).
+ *
+ * Pendant de `bt_propagate_undo`, strictement symétrique de
+ * `bt_frontier_place` : la case redevient vide, ses voisines perdent un côté
+ * contraint.
+ */
+static inline void bt_frontier_undo(bt_frontier *f, int cx, int cy)
+{
+    int pos = BT_CELL_POS(cx, cy);
+    f->empty[pos / 64] |= (uint64_t)1 << (pos % 64);
+    if (cy > 0)              bt_frontier_release(f, cx, cy - 1);
+    if (cx < ETERN_SIZE - 1) bt_frontier_release(f, cx + 1, cy);
+    if (cy < ETERN_SIZE - 1) bt_frontier_release(f, cx, cy + 1);
+    if (cx > 0)              bt_frontier_release(f, cx - 1, cy);
+}
+
 /**
  * @brief Propage les couleurs d'une pièce placée en (cx, cy) vers les clés de ses voisines.
  * @param constraints Cache de contraintes.
@@ -739,21 +877,29 @@ static inline int mrv_free_candidates(const map_big_array *map, const key_part *
  * @brief Choisit la case vide la plus contrainte (MRV, « minimum remaining
  *        values ») — §4.7 de `docs/conception/elagage_recherche.md`.
  *
- * Deux différences avec le prototype de mesure, qui coûtait un parcours de
+ * Trois différences avec le prototype de mesure, qui coûtait un parcours de
  * compartiment pour CHACUNE des cases vides du plateau (jusqu'à 256) :
  *
  * 1. **Restriction aux cases de FRONTIÈRE** : une case dont les 4 côtés valent
  *    `all_face` n'est contrainte par rien (ni bord de plateau, ni voisine
  *    posée) et offre donc, par construction, toutes les pièces libres — elle ne
- *    peut jamais être le minimum tant qu'une case contrainte existe. Le test
- *    est une lecture du cache de contraintes déjà maintenu par le moteur, pas
- *    un lookup. Sur le puzzle 256 la frontière compte 29 cases en moyenne
- *    (max 52) contre 256 cases balayées par le prototype (§3.2).
+ *    peut jamais être le minimum tant qu'une case contrainte existe.
+ *    Sur le puzzle 256 la frontière compte 29 cases en moyenne (max 52) contre
+ *    256 cases balayées par le prototype (§3.2).
  *    Il existe TOUJOURS une case de frontière tant qu'une case vide existe :
  *    la première case vide dans l'ordre lexicographique a soit un bord de
  *    plateau, soit une voisine de rang inférieur nécessairement remplie. Le
  *    repli `fallback` couvre malgré tout ce cas, plutôt que de le supposer.
- * 2. **Comptage par `popcount`** au lieu d'un parcours du compartiment
+ * 2. **Énumération de la frontière par masque de bits** (`bt_frontier`) plutôt
+ *    que par balayage des 256 cases. La restriction ci-dessus n'était qu'un
+ *    TEST : elle évitait le lookup, pas la visite. Or repérer les ~29 cases
+ *    utiles en lisant 256 cases de grille puis ~182 clés coûtait plus cher que
+ *    le comptage lui-même. Les deux masques sont maintenus par
+ *    `bt_frontier_place`/`_undo`, exactement comme le cache de contraintes et
+ *    le miroir des pièces utilisées, et l'ordre croissant des bits reproduit
+ *    l'ordre `for x { for y }` de l'ancien balayage — donc le même départage
+ *    d'égalité, donc le même arbre exploré.
+ * 3. **Comptage par `popcount`** au lieu d'un parcours du compartiment
  *    (`mrv_free_candidates`).
  *
  * Le balayage reste COMPLET (pas d'arrêt anticipé sur une case à 1 candidat) :
@@ -765,7 +911,7 @@ static inline int mrv_free_candidates(const map_big_array *map, const key_part *
  * @param constraints Cache de contraintes du moteur.
  * @param mapParts    Table de lookup.
  * @param used        Miroir 64 bits des pièces utilisées.
- * @param all_face    Valeur « toute face » (= map->sizearrayM).
+ * @param front       Frontière incrémentale (cases vides / cases contraintes).
  * @param out_x/out_y Remplis avec la case choisie si succès ; non modifiés sinon.
  * @param out_count   Rempli avec le score MRV (nombre de candidats) de la case
  *                     choisie si succès ; `POSSIBILITY_MIN_CANDIDATS_UNKNOWN`
@@ -779,31 +925,20 @@ static int mrv_choose_cell(struct possibility_packet *board,
                            key_part constraints[ETERN_SIZE][ETERN_SIZE],
                            map_big_array *mapParts,
                            const uint64_t used[MRV_USED_WORDS],
-                           int8_t all_face,
+                           const bt_frontier *front,
                            uint8_t *out_x, uint8_t *out_y, int *out_count)
 {
     int best_count = -1;
     uint8_t best_x = 0, best_y = 0;
-    int fallback_found = 0;
-    uint8_t fallback_x = 0, fallback_y = 0;
 
-    for (int x = 0; x < ETERN_SIZE; x++) {
-        for (int y = 0; y < ETERN_SIZE; y++) {
-            if (board->grid[x][y] != -2) {
-                continue;
-            }
-            const key_part *key = &constraints[x][y];
-            if (key->k1 == all_face && key->k2 == all_face
-                && key->k3 == all_face && key->k4 == all_face) {
-                // Case sans aucune contrainte : jamais le minimum (cf. doc).
-                if (!fallback_found) {
-                    fallback_found = 1;
-                    fallback_x = (uint8_t)x;
-                    fallback_y = (uint8_t)y;
-                }
-                continue;
-            }
-            int count = mrv_free_candidates(mapParts, key, board, used);
+    for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+        uint64_t bits = front->empty[w] & front->constrained[w];
+        while (bits != 0) {
+            int pos = w * 64 + __builtin_ctzll(bits);
+            bits &= bits - 1;
+            int x = pos / ETERN_SIZE;
+            int y = pos % ETERN_SIZE;
+            int count = mrv_free_candidates(mapParts, &constraints[x][y], board, used);
             if (count == 0) {
                 // Case sans issue : sous-arbre mort, inutile de continuer.
                 return 0;
@@ -817,15 +952,21 @@ static int mrv_choose_cell(struct possibility_packet *board,
     }
 
     if (best_count < 0) {
-        if (!fallback_found) {
-            // Aucune case vide : l'appelant vérifie le plateau complet avant
-            // d'appeler, ce retour n'est donc pas atteint en pratique.
-            return 0;
+        // Aucune case de frontière : repli sur la première case vide non
+        // contrainte, dans le même ordre que le balayage ci-dessus.
+        for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+            uint64_t bits = front->empty[w] & ~front->constrained[w];
+            if (bits != 0) {
+                int pos = w * 64 + __builtin_ctzll(bits);
+                *out_x = (uint8_t)(pos / ETERN_SIZE);
+                *out_y = (uint8_t)(pos % ETERN_SIZE);
+                *out_count = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+                return 1;
+            }
         }
-        *out_x = fallback_x;
-        *out_y = fallback_y;
-        *out_count = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
-        return 1;
+        // Aucune case vide : l'appelant vérifie le plateau complet avant
+        // d'appeler, ce retour n'est donc pas atteint en pratique.
+        return 0;
     }
     *out_x = best_x;
     *out_y = best_y;
@@ -903,6 +1044,12 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
     uint64_t used[MRV_USED_WORDS];
     mrv_used_init(used, &board);
 
+    // Frontière incrémentale du balayage MRV, maintenue en place par
+    // bt_frontier_place/_undo — jamais reconstruite dans la boucle chaude,
+    // exactement comme `constraints` et `used`.
+    bt_frontier frontier;
+    bt_frontier_init(&frontier, &board);
+
     bt_level stack[ETERN_PARTS];
     int top = -1;
     // Le compteur de progression est `placed_count` (pas la profondeur de
@@ -959,7 +1106,7 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
 
         uint8_t x, y;
         int mrv_count;
-        if (mrv_choose_cell(&board, constraints, client->map_part, used, all_face, &x, &y, &mrv_count)) {
+        if (mrv_choose_cell(&board, constraints, client->map_part, used, &frontier, &x, &y, &mrv_count)) {
             stack[top].x = x;
             stack[top].y = y;
             stack[top].mrv_score = (int16_t)mrv_count;
@@ -986,6 +1133,7 @@ backtrack:;
                 BOARD_SET_FACE(&board, lvl->placed_pos, 0);
                 mrv_used_clear(used, lvl->placed_pos);
                 bt_propagate_undo(constraints, cx, cy, all_face);
+                bt_frontier_undo(&frontier, cx, cy);
                 lvl->placed_pos = -1;
                 placed_count--;
             }
@@ -1004,6 +1152,7 @@ backtrack:;
                     BOARD_SET_FACE(&board, position, 1);
                     mrv_used_set(used, position);
                     bt_propagate_place(constraints, cx, cy, &search->parts[s]);
+                    bt_frontier_place(&frontier, cx, cy);
                     placed_count++;
 #if FORWARD_CHECK_K > 0
                     if (placed_count < ETERN_PARTS) {
@@ -1013,6 +1162,7 @@ backtrack:;
                             BOARD_SET_FACE(&board, position, 0);
                             mrv_used_clear(used, position);
                             bt_propagate_undo(constraints, cx, cy, all_face);
+                            bt_frontier_undo(&frontier, cx, cy);
                             placed_count--;
                             __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
                             continue;
@@ -1064,6 +1214,17 @@ backtrack:;
             for (int w = 0; w < MRV_USED_WORDS; w++) {
                 if (expected[w] != used[w]) {
                     log_error("miroir des pièces utilisées désynchronisé (mot %i)\n", w);
+                }
+            }
+            // Même contrôle pour la frontière : bt_frontier_place/_undo sont
+            // appelés à CÔTÉ de bt_propagate_place/_undo, pas depuis eux — un
+            // futur site de placement qui oublierait la paire se verrait ici.
+            bt_frontier expected_front;
+            bt_frontier_init(&expected_front, &board);
+            for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+                if (expected_front.empty[w] != frontier.empty[w]
+                    || expected_front.constrained[w] != frontier.constrained[w]) {
+                    log_error("frontière MRV désynchronisée (mot %i)\n", w);
                 }
             }
         }
