@@ -119,18 +119,31 @@ de journal. Jugé acceptable sans budget de temps dédié — mais c'est une ext
 linéaire depuis un stock 1000 fois plus petit, à revérifier si le stock grossit d'un ordre
 de grandeur ou si les réclamations deviennent fréquentes.
 
-## Trouvaille secondaire, non corrigée
+## Trouvaille secondaire, corrigée depuis
 
-`datamanager_reclaim_expired_leases` réinjecte par `put(&file_possibility[dest]->file, …)`
-— le pool **non vérifié** — **sans remettre `checked` à 0**. Le paquet se retrouve donc
-dans le pool non vérifié en portant `checked = 1`, et au prochain `restore` il est
-réaiguillé vers le pool vérifié. C'est ce qui explique que le stock de production soit
-passé de 693 possibilités non vérifiées à 0.
+`datamanager_reclaim_expired_leases` réinjectait par `put(&file_possibility[dest]->file, …)`
+— le pool **non vérifié** — sans tenir compte de `checked`. Le paquet se retrouvait donc
+dans le pool non vérifié en portant `checked = 1`, était re-vérifié par un pruner pour
+rien, et la contradiction entre pool et drapeau ne se résorbait qu'au prochain `restore`,
+qui réaiguille, lui, selon le drapeau. C'est ce qui explique que le stock de production
+soit passé de 693 possibilités non vérifiées à 0.
 
-Gravité faible : le drapeau reste **véridique** (l'état du plateau n'a pas changé, la
-vérification du pruner vaut toujours), seule la place dans les pools contredit
-temporairement le drapeau. Laissé tel quel faute de conséquence démontrée ; à trancher si
-un mécanisme se met un jour à faire confiance à la cohérence pool/drapeau.
+`restock_analysed` (commande console `restockAnalysed`) partageait exactement le même
+défaut — sa documentation l'annonçait même explicitement. Le troisième chemin de
+réinjection, `requeue_last_sent_possibility`, routait déjà correctement puisqu'il passe par
+`add_possibility`/`put_to_local` : c'est lui qui a levé le doute sur le comportement voulu.
+
+Corrigé par `put_back_to_stock` (`src/core/datamanager.c`), chemin commun aux deux
+réinjections en bloc, qui choisit le pool d'après `checked`. La réinjection ne modifie pas
+le plateau : la vérification du pruner porte sur cet état exact et vaut donc toujours —
+`checked` n'est remis à 0 que sur un paquet issu d'une **expansion** (`core/possibility.h`).
+Trois tests couvrent le routage (paquet vérifié, paquet non vérifié, mélange via
+`restockAnalysed`).
+
+Délibérément inchangé au passage : ces deux chemins ne consultent pas le plafond RAM (une
+réinjection ne doit jamais pouvoir échouer, sous peine de perdre une possibilité) et
+n'alimentent pas les compteurs de débit ADD. Deux écarts par rapport à `put_to_pool`, hors
+sujet ici.
 
 ## Ce qui reste ouvert
 

@@ -770,12 +770,23 @@ façon déconnecté depuis longtemps n'aurait aucun sens.
 (`src/core/datamanager.{h,c}`) parcourt `analysed_index` exactement comme
 `datamanager_analysed_owned_by` (PR6) — un verrou par file, jamais toutes les
 files à la fois — et déplace chaque nœud expiré de la `File` d'analyse vers le
-stock non vérifié (même remise en stock que `restock_analysed`, en deux temps :
+stock, **dans le pool correspondant à son drapeau `checked`** (`put_back_to_stock`,
+chemin commun avec `restock_analysed`), en deux temps :
 tout le travail sur l'index et la `File` sous le verrou de la file d'analyse,
 puis l'insertion dans le stock hors verrou, pour ne jamais tenir les deux verrous
 en même temps). Appelée depuis `check_server_step` au même rythme que le reste de
 ce tour (10 s, là où vivent déjà l'autobackup et la détection de nouveau record) —
-jamais dans la boucle chaude de recherche. `now` est lu **une seule fois** par
+jamais dans la boucle chaude de recherche.
+
+Le routage par le drapeau est le comportement de référence : `add_possibility`/
+`put_to_local`, qu'emprunte le troisième chemin de réinjection
+(`requeue_last_sent_possibility`), l'a toujours fait. La réinjection ne modifie pas
+le plateau, donc la vérification du pruner — qui porte sur cet état exact — vaut
+toujours ; `checked` n'est remis à 0 que sur un paquet issu d'une **expansion**
+(cf. `core/possibility.h`). Les deux réinjections « en bloc » forçaient auparavant
+le pool non vérifié : le paquet s'y retrouvait en portant `checked = 1`, était
+re-vérifié pour rien, et la contradiction entre pool et drapeau ne se résorbait
+qu'au prochain `restore` — lequel réaiguille, lui, selon le drapeau. `now` est lu **une seule fois** par
 l'appelant et injecté : `datamanager_reclaim_expired_leases` ne consulte jamais
 l'horloge elle-même, ce qui la rend testable sans `sleep` (la décision
 d'expiration, `analysed_lease_is_expired(lease_deadline, now)`, est une fonction

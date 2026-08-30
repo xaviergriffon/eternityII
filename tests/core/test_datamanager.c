@@ -5376,6 +5376,116 @@ TEST reclaim_expired_leases_returns_owned_possibility_to_stock(void)
     PASS();
 }
 
+/* Somme des tailles du pool VÉRIFIÉ sur toutes les files. */
+static unsigned long long checked_total(void)
+{
+    unsigned long long s = 0;
+    for (int f = 0; f < nb_file_possibility; f++) s += file_checked_size(f);
+    return s;
+}
+
+/* Somme des tailles du pool NON VÉRIFIÉ sur toutes les files. */
+static unsigned long long unchecked_total(void)
+{
+    unsigned long long s = 0;
+    for (int f = 0; f < nb_file_possibility; f++) s += file_size(f);
+    return s;
+}
+
+/* Une possibilité rendue au stock retourne dans le pool correspondant à son
+ * drapeau `checked`, comme le fait déjà `add_possibility`/`put_to_local` sur
+ * le troisième chemin de réinjection (`requeue_last_sent_possibility`).
+ *
+ * La réinjection ne modifie pas le plateau : la vérification du pruner porte
+ * sur cet état exact et vaut donc toujours (`checked` n'est remis à 0 que sur
+ * un paquet issu d'une EXPANSION, cf. core/possibility.h). La renvoyer dans le
+ * pool non vérifié la ferait re-vérifier pour rien, et la placerait dans un
+ * pool que son drapeau contredit. */
+TEST reclaim_expired_leases_returns_a_checked_possibility_to_the_checked_pool(void)
+{
+    drain_all();
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 60;
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x80);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 44;
+    pk.checked = 1;
+    add_possibility_analysed_owned(&pk, -1, owner);
+
+    silence_std();
+    unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, NULL);
+    restore_std();
+
+    ASSERT_EQ_FMT(1ULL, reclaimed, "%llu");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(1ULL, checked_total(), "%llu");
+    ASSERT_EQ_FMT(0ULL, unchecked_total(), "%llu");
+
+    analysed_lease_seconds = saved_lease;
+    drain_all();
+    PASS();
+}
+
+/* Le pendant : un paquet non vérifié revient bien dans le pool non vérifié
+ * (le correctif route selon le drapeau, il ne déplace pas tout d'un côté). */
+TEST reclaim_expired_leases_returns_an_unchecked_possibility_to_the_unchecked_pool(void)
+{
+    drain_all();
+    int saved_lease = analysed_lease_seconds;
+    analysed_lease_seconds = 60;
+
+    uint8_t owner[CLIENT_UID_BYTES];
+    fill_owner(owner, 0x81);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 45;
+    pk.checked = 0;
+    add_possibility_analysed_owned(&pk, -1, owner);
+
+    silence_std();
+    unsigned long long reclaimed = datamanager_reclaim_expired_leases(time(NULL) + 1000000, NULL);
+    restore_std();
+
+    ASSERT_EQ_FMT(1ULL, reclaimed, "%llu");
+    ASSERT_EQ_FMT(0ULL, checked_total(), "%llu");
+    ASSERT_EQ_FMT(1ULL, unchecked_total(), "%llu");
+
+    analysed_lease_seconds = saved_lease;
+    drain_all();
+    PASS();
+}
+
+/* `restock_analysed` (commande console) partage le même défaut de routage :
+ * un mélange doit se répartir dans les DEUX pools selon le drapeau. */
+TEST restock_analysed_dispatches_each_packet_to_its_pool(void)
+{
+    drain_all();
+    struct possibility_packet ck, unck;
+    memset(&ck, 0, sizeof ck);
+    ck.alloc = 46;
+    ck.checked = 1;
+    memset(&unck, 0, sizeof unck);
+    unck.alloc = 47;
+    unck.checked = 0;
+    add_possibility_analysed(&ck, -1);
+    add_possibility_analysed(&unck, -1);
+    ASSERT_EQ_FMT(2ULL, analysed_total(), "%llu");
+
+    silence_std();
+    restock_analysed();
+    restore_std();
+
+    ASSERT_EQ_FMT(0ULL, analysed_total(), "%llu");
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(1ULL, checked_total(), "%llu");
+    ASSERT_EQ_FMT(1ULL, unchecked_total(), "%llu");
+    drain_all();
+    PASS();
+}
+
 /* --------------------------------------------------------------------------
  * datamanager_purge_descendants_of : nettoyage ciblé à la réinjection d'un bail
  * ------------------------------------------------------------------------ */
@@ -6252,6 +6362,9 @@ SUITE(datamanager_suite)
     RUN_TEST(remove_possibility_analysed_clears_owner_attribution);
     RUN_TEST(analysed_lease_is_expired_pure_predicate);
     RUN_TEST(reclaim_expired_leases_returns_owned_possibility_to_stock);
+    RUN_TEST(reclaim_expired_leases_returns_a_checked_possibility_to_the_checked_pool);
+    RUN_TEST(reclaim_expired_leases_returns_an_unchecked_possibility_to_the_unchecked_pool);
+    RUN_TEST(restock_analysed_dispatches_each_packet_to_its_pool);
     RUN_TEST(purge_descendants_sweeps_both_stock_pools_and_analysed);
     RUN_TEST(purge_descendants_keeps_the_origin_and_equal_depth_boards);
     RUN_TEST(purge_descendants_of_nothing_is_a_noop);
