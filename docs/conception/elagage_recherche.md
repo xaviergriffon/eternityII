@@ -1654,6 +1654,74 @@ vaut 1 — case forcée — dans 54,35 % des appels). Le raisonnement « petit l
 effet » est **faux sur un arbre de recherche** : 1,45 % des décisions ont suffi à dévier
 l'exploration de 6,3 %. Mesurer la fréquence d'un critère ne dit rien de son effet.
 
+### 4.13 Bilan mesuré de la série, bout à bout (`b0ece51` → `master`)
+
+Les sections précédentes mesurent chaque piste **contre l'état qui la précède**. Elles ne
+disent donc pas ce que la série vaut cumulée — et les gains ne s'additionnent pas (§6).
+Cette section mesure les deux extrémités.
+
+**Protocole.** Deux arbres de travail (`git worktree add <dir> b0ece51`) compilés
+séparément, exécutés en ALTERNANCE pour neutraliser la dérive thermique. Deux axes, parce
+que les pistes livrées ne sont pas de même nature : A (§4.7) et B (§4.1) rendent chaque
+nœud moins cher sans toucher l'arbre, D (§4.12) change l'arbre exploré. Un chiffre unique
+les mélangerait mal.
+
+**Axe 1 — débit** (`bench_search.sh`, 5 M nœuds, 3 rondes alternées × 7 répétitions) :
+
+| | Avant | Après | Delta |
+|---|---|---|---|
+| Nœuds/s (médiane, n = 21) | 858 856 | **922 881** | **+7,64 %** |
+| `max_result` à budget de nœuds égal | 190 | 190 | inchangé |
+
+Rondes : +6,74 / +7,88 / +7,64 %.
+
+**Axe 2 — coût de réfutation** (stock de production, 433 racines ≥ 130 pièces posées,
+budget 2 000 000 nœuds) :
+
+| | Avant | Après | Delta |
+|---|---|---|---|
+| Sous-arbres fermés | 383 / 433 | **387 / 433** | **+4, aucun perdu** |
+| Nœuds (383 racines communes) | 35 327 545 | 33 105 827 | **−6,29 %** |
+| Temps (383 racines communes) | 41,2–41,5 s | 37,9 s | **−7,9 à −8,8 %** |
+| Temps total (433 racines) | 154,8 s | 146,1 s | −5,6 % |
+
+Le nombre de nœuds est **identique au chiffre près entre les deux rondes** : la fermeture
+est déterministe, ces −6,29 % ne comportent aucun bruit. Seul le temps est bruité.
+
+#### Deux pièges de lecture, tous deux rencontrés
+
+**La ligne « comparaison appariée » du banc ne compare pas deux populations identiques.**
+Elle agrège *les racines fermées par ce run*. Entre deux binaires qui ne ferment pas le même
+nombre de sous-arbres (383 contre 387), les deux totaux portent sur des ensembles
+différents : lus tels quels ils annoncent « après = +10 % de nœuds », soit **l'inverse de la
+vérité**. Les chiffres ci-dessus viennent d'une intersection explicite des racines fermées
+des deux côtés, extraite des lignes par racine. Comparer deux MOTEURS dans un même run ne
+pose pas ce problème (le banc intersecte lui-même) ; comparer deux BINAIRES l'exige.
+
+**Le gain par nœud ne se transporte pas d'un régime à l'autre.** Sur la recherche depuis la
+genèse, +7,6 %. Sur les racines profondes du stock, en déduisant les nœuds économisés du
+temps gagné, chaque nœud n'est que **≈ 2,2 % moins cher**. C'est cohérent : A et B attaquent
+des coûts proportionnels à la taille de la frontière et des compartiments, tous deux bien
+plus petits sur un plateau à 130+ pièces que sur un plateau presque vide (frontière ≈ 52
+cases, §4.7). **`bench_search.sh` surestime donc ce que gagne le travail réellement servi** —
+à garder en tête avant d'extrapoler un gain de débit en gain de production.
+
+#### Registre de la série
+
+| Piste | Sort | Effet mesuré |
+|---|---|---|
+| §4.7 énumération de la frontière par masque de bits | livrée | +9,08 % de débit |
+| §4.1 forward-check par masque d'ids | livrée | +1,66 % de débit |
+| §4.12 départage par côtés contraints | livrée | −6,29 % de nœuds, +4 fermetures |
+| §4.1 suppression du forward-check | **écartée** | +15,90 % de temps sans lui |
+| cumul local des compteurs de prunage | **écartée** | +1,00 %, jugé trop coûteux à prouver pour ce qu'il rapporte |
+| §4.11 backjumping dirigé par conflit | **écartée** | gain nul à 100,00 % sur 152 128 mesures |
+
+**Réserve de portée.** Toutes ces mesures viennent d'une seule machine (macOS, 16 cœurs,
+sans épinglage — `bench_search.sh` le signale dans chaque rapport). Les deltas appariés à
+ordre alterné sont robustes à la charge et à la dérive ; les valeurs absolues de nœuds/s ne
+sont pas transposables à un autre matériel.
+
 ## 5. Arbitrages tranchés
 
 - **Une condition nécessaire, jamais une heuristique.** Un faux positif jette
@@ -1810,7 +1878,9 @@ l'exploration de 6,3 %. Mesurer la fréquence d'un critère ne dit rien de son e
   n'est pas redondant en coût.
 - **Cumul des élagages.** Les gains ne s'additionnent pas : 4.1 et 4.2 attrapent en partie
   les mêmes branches. Chaque PR doit être mesurée **par-dessus** la précédente, jamais
-  contre `master`.
+  contre `master`. Corollaire : ce que vaut une série cumulée ne se déduit pas de ses
+  mesures individuelles et doit être mesuré séparément, aux deux extrémités — voir §4.13,
+  qui le fait pour la série A/B/D et y relève deux pièges de lecture.
 
 ## 7. Découpage en PR
 
