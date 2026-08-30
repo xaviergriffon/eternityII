@@ -837,7 +837,9 @@ TEST mrv_choose_cell_picks_the_most_constrained_cell(void)
     int count = -99;
     uint64_t used[MRV_USED_WORDS];
     mrv_used_init(used, &board);
-    int rc = mrv_choose_cell(&board, C, map, used, (int8_t)map->sizearrayM, &x, &y, &count);
+    bt_frontier front;
+    bt_frontier_init(&front, &board);
+    int rc = mrv_choose_cell(&board, C, map, used, &front, &x, &y, &count);
 
     ASSERT_EQ_FMT(1, rc, "%d");
     ASSERT_EQ_FMT(0, (int)x, "%d");
@@ -871,9 +873,271 @@ TEST mrv_choose_cell_detects_dead_cell(void)
     int count = -99;
     uint64_t used[MRV_USED_WORDS];
     mrv_used_init(used, &board);
-    int rc = mrv_choose_cell(&board, C, map, used, (int8_t)map->sizearrayM, &x, &y, &count);
+    bt_frontier front;
+    bt_frontier_init(&front, &board);
+    int rc = mrv_choose_cell(&board, C, map, used, &front, &x, &y, &count);
 
     ASSERT_EQ_FMT(0, rc, "%d");
+
+    PASS();
+}
+
+/* ======================================================================
+ * bt_frontier : la frontière incrémentale du balayage MRV.
+ *
+ * L'enjeu de ces tests n'est pas « le masque a-t-il l'air correct » mais
+ * « énumérer la frontière par masque donne-t-il EXACTEMENT la même réponse
+ * que l'ancien balayage des 256 cases ». Toute divergence — y compris un
+ * simple départage d'égalité différent — changerait l'arbre exploré.
+ * ====================================================================== */
+
+/* Teste le bit d'une case dans un masque de bt_frontier. */
+static int frontier_bit(const uint64_t *mask, int x, int y)
+{
+    int pos = BT_CELL_POS(x, y);
+    return (int)((mask[pos / 64] >> (pos % 64)) & 1);
+}
+
+/* Générateur déterministe (pas de rand() : la mesure doit être rejouable). */
+static unsigned lcg_next(unsigned *state)
+{
+    *state = (*state) * 1103515245u + 12345u;
+    return (*state >> 16) & 0x7fff;
+}
+
+/* Plateau pseudo-aléatoire : chaque case est vide (-2) ou porte la pièce de
+ * remplissage (indice 1, faces 0 — cf. make_filler_part). */
+static void make_random_board(struct possibility_packet *b, unsigned *state)
+{
+    make_empty_board(b);
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            if (lcg_next(state) & 1)
+                b->grid[x][y] = 1;
+}
+
+/* bt_frontier_init doit reproduire EXACTEMENT les deux prédicats de l'ancien
+ * balayage : `empty` = `grid == -2`, `constrained` = « au moins une des 4 clés
+ * diffère de all_face » — ce dernier lu dans le cache que bt_init_constraints
+ * vient de calculer, et non redérivé. */
+TEST bt_frontier_init_matches_constraint_cache(void)
+{
+    unsigned state = 20260830u;
+    for (int iter = 0; iter < 40; iter++) {
+        struct possibility_packet board;
+        make_random_board(&board, &state);
+
+        key_part C[ETERN_SIZE][ETERN_SIZE];
+        const int8_t all_face = 2;
+        bt_init_constraints(C, &board, make_filler_part(), all_face);
+
+        bt_frontier f;
+        bt_frontier_init(&f, &board);
+
+        for (int x = 0; x < ETERN_SIZE; x++) {
+            for (int y = 0; y < ETERN_SIZE; y++) {
+                int expect_empty = (board.grid[x][y] == -2);
+                int expect_constrained = !(C[x][y].k1 == all_face && C[x][y].k2 == all_face
+                                        && C[x][y].k3 == all_face && C[x][y].k4 == all_face);
+                ASSERT_EQ_FMT(expect_empty, frontier_bit(f.empty, x, y), "%d");
+                ASSERT_EQ_FMT(expect_constrained, frontier_bit(f.constrained, x, y), "%d");
+            }
+        }
+    }
+    PASS();
+}
+
+/* Même contrat que bt_propagate_matches_full_recompute, pour l'autre cache :
+ * la mise à jour incrémentale doit donner le même état qu'un recalcul complet
+ * sur le plateau résultant, et bt_frontier_undo doit ramener à l'identique.
+ * Couvre les coins (gardes de bord) et l'intérieur. */
+TEST bt_frontier_place_undo_matches_full_recompute(void)
+{
+    /* Coordonnées dérivées d'ETERN_SIZE : la suite est rejouée en 4x4
+     * (ETERN_SIZE=4, puzzle 16 pièces) où toute constante > 3 déborde. */
+    const int cells[][2] = { {0,0}, {0,1}, {1,0}, {ETERN_SIZE/2, ETERN_SIZE-2},
+                             {ETERN_SIZE-1,ETERN_SIZE-1}, {ETERN_SIZE-1,0},
+                             {0,ETERN_SIZE-1} };
+    unsigned state = 7u;
+    for (size_t c = 0; c < sizeof(cells) / sizeof(cells[0]); c++) {
+        int cx = cells[c][0], cy = cells[c][1];
+        struct possibility_packet board;
+        make_random_board(&board, &state);
+        board.grid[cx][cy] = -2; /* la case doit être vide avant le placement */
+
+        bt_frontier before, f;
+        bt_frontier_init(&before, &board);
+        bt_frontier_init(&f, &board);
+
+        /* Pose : la grille est mise à jour, puis la frontière incrémentalement. */
+        board.grid[cx][cy] = 1;
+        bt_frontier_place(&f, cx, cy);
+
+        bt_frontier full;
+        bt_frontier_init(&full, &board);
+        for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+            ASSERT_EQ(full.empty[w], f.empty[w]);
+            ASSERT_EQ(full.constrained[w], f.constrained[w]);
+        }
+        for (int p = 0; p < BT_CELLS; p++) {
+            ASSERT_EQ_FMT((int)full.nconstr[p], (int)f.nconstr[p], "%d");
+        }
+
+        /* Retrait : retour à l'état initial, bit pour bit. */
+        board.grid[cx][cy] = -2;
+        bt_frontier_undo(&f, cx, cy);
+        for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+            ASSERT_EQ(before.empty[w], f.empty[w]);
+            ASSERT_EQ(before.constrained[w], f.constrained[w]);
+        }
+        for (int p = 0; p < BT_CELLS; p++) {
+            ASSERT_EQ_FMT((int)before.nconstr[p], (int)f.nconstr[p], "%d");
+        }
+    }
+    PASS();
+}
+
+/* Réimplémentation VERBATIM du balayage des 256 cases tel qu'il était avant
+ * l'énumération par masque : c'est l'oracle. Si les deux divergent d'une seule
+ * case sur un seul plateau, l'arbre exploré n'est plus le même. */
+static int reference_choose_cell(struct possibility_packet *board,
+                                 key_part constraints[ETERN_SIZE][ETERN_SIZE],
+                                 map_big_array *mapParts,
+                                 const uint64_t used[MRV_USED_WORDS],
+                                 int8_t all_face,
+                                 uint8_t *out_x, uint8_t *out_y, int *out_count)
+{
+    int best_count = -1;
+    uint8_t best_x = 0, best_y = 0;
+    int fallback_found = 0;
+    uint8_t fallback_x = 0, fallback_y = 0;
+
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            if (board->grid[x][y] != -2) {
+                continue;
+            }
+            const key_part *key = &constraints[x][y];
+            if (key->k1 == all_face && key->k2 == all_face
+                && key->k3 == all_face && key->k4 == all_face) {
+                if (!fallback_found) {
+                    fallback_found = 1;
+                    fallback_x = (uint8_t)x;
+                    fallback_y = (uint8_t)y;
+                }
+                continue;
+            }
+            int count = mrv_free_candidates(mapParts, key, board, used);
+            if (count == 0) {
+                return 0;
+            }
+            if (best_count < 0 || count < best_count) {
+                best_count = count;
+                best_x = (uint8_t)x;
+                best_y = (uint8_t)y;
+            }
+        }
+    }
+    if (best_count < 0) {
+        if (!fallback_found) {
+            return 0;
+        }
+        *out_x = fallback_x;
+        *out_y = fallback_y;
+        *out_count = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+        return 1;
+    }
+    *out_x = best_x;
+    *out_y = best_y;
+    *out_count = best_count;
+    return 1;
+}
+
+/* L'oracle, sur 200 plateaux pseudo-aléatoires. La map est UNIFORME : toute
+ * case contrainte offre le même nombre de candidats, donc tout est à égalité —
+ * c'est précisément le cas qui met le départage à l'épreuve, et c'est là que
+ * l'ordre d'énumération doit être identique au `for x { for y }` d'origine. */
+TEST mrv_choose_cell_matches_full_scan_reference(void)
+{
+    static struct part cand[2] = { { .id = 6 }, { .id = 7 } };
+    static struct array_part list = { .size = 2, .parts = cand };
+    map_big_array *map = make_uniform_map(&list);
+    const int8_t all_face = (int8_t)map->sizearrayM;
+
+    unsigned state = 424242u;
+    for (int iter = 0; iter < 200; iter++) {
+        struct possibility_packet board;
+        make_random_board(&board, &state);
+
+        key_part C[ETERN_SIZE][ETERN_SIZE];
+        bt_init_constraints(C, &board, make_filler_part(), all_face);
+
+        uint64_t used[MRV_USED_WORDS];
+        mrv_used_init(used, &board);
+
+        bt_frontier f;
+        bt_frontier_init(&f, &board);
+
+        uint8_t rx = 200, ry = 200; int rcount = -99;
+        uint8_t nx = 100, ny = 100; int ncount = -77;
+        int rrc = reference_choose_cell(&board, C, map, used, all_face, &rx, &ry, &rcount);
+        int nrc = mrv_choose_cell(&board, C, map, used, &f, &nx, &ny, &ncount);
+
+        ASSERT_EQ_FMT(rrc, nrc, "%d");
+        if (rrc == 1) {
+            ASSERT_EQ_FMT((int)rx, (int)nx, "%d");
+            ASSERT_EQ_FMT((int)ry, (int)ny, "%d");
+            ASSERT_EQ_FMT(rcount, ncount, "%d");
+        }
+    }
+    PASS();
+}
+
+/* Deux sorties que les plateaux aléatoires n'atteignent pas.
+ *
+ * (a) plateau PLEIN : aucune case vide -> 0, comme l'ancien balayage.
+ * (b) repli `fallback` : structurellement inatteignable depuis un vrai plateau
+ *     (toute case vide touche un bord ou une voisine posée — cf. la doc de
+ *     mrv_choose_cell), donc forcé ici en abaissant le masque `constrained`.
+ *     C'est une branche DÉFENSIVE : ce test dit qu'elle fait ce qu'elle
+ *     annonce, pas qu'elle se déclenche en production. */
+TEST mrv_choose_cell_full_board_and_unconstrained_fallback(void)
+{
+    static struct part cand[2] = { { .id = 6 }, { .id = 7 } };
+    static struct array_part list = { .size = 2, .parts = cand };
+    map_big_array *map = make_uniform_map(&list);
+    const int8_t all_face = (int8_t)map->sizearrayM;
+
+    struct possibility_packet board;
+    make_empty_board(&board);
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            board.grid[x][y] = 1;
+
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, make_filler_part(), all_face);
+    uint64_t used[MRV_USED_WORDS];
+    mrv_used_init(used, &board);
+
+    uint8_t x = 200, y = 200; int count = -99;
+
+    /* (a) plateau plein */
+    bt_frontier full_f;
+    bt_frontier_init(&full_f, &board);
+    ASSERT_EQ_FMT(0, mrv_choose_cell(&board, C, map, used, &full_f, &x, &y, &count), "%d");
+
+    /* (b) une case vide, mais déclarée non contrainte */
+    const int hx = ETERN_SIZE / 2, hy = ETERN_SIZE / 2;
+    board.grid[hx][hy] = -2;
+    bt_frontier f;
+    bt_frontier_init(&f, &board);
+    for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+        f.constrained[w] = 0;
+    }
+    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, &x, &y, &count), "%d");
+    ASSERT_EQ_FMT(hx, (int)x, "%d");
+    ASSERT_EQ_FMT(hy, (int)y, "%d");
+    ASSERT_EQ_FMT(POSSIBILITY_MIN_CANDIDATS_UNKNOWN, count, "%d");
 
     PASS();
 }
@@ -3121,6 +3385,10 @@ SUITE(etii_search_suite)
 #endif
     RUN_TEST(mrv_choose_cell_picks_the_most_constrained_cell);
     RUN_TEST(mrv_choose_cell_detects_dead_cell);
+    RUN_TEST(bt_frontier_init_matches_constraint_cache);
+    RUN_TEST(bt_frontier_place_undo_matches_full_recompute);
+    RUN_TEST(mrv_choose_cell_matches_full_scan_reference);
+    RUN_TEST(mrv_choose_cell_full_board_and_unconstrained_fallback);
     RUN_TEST(bt_materialize_pending_orders_deepest_first);
     RUN_TEST(bt_materialize_pending_respects_max_out);
     RUN_TEST(bt_materialize_pending_dynamic_order_recomputes_alloc);

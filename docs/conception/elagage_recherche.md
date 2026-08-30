@@ -726,6 +726,23 @@ voir [docs/conception/mrv_moteur_unique.md](mrv_moteur_unique.md) (PR3) — `mrv
 `ETII_MRV` et le moteur à ordre fixe qu'il sélectionnait ont été supprimés, MRV est
 désormais le seul moteur de recherche. Le récit de la mesure ci-dessous est conservé tel
 quel (post-mortem de décision valide), il ne décrit plus l'état actuel du code.
+
+**Suite mesurée (postérieure à la bascule) — la restriction à la frontière n'était qu'un
+test, pas une structure.** Telle qu'implémentée en PR 10, la « restriction à la frontière »
+évitait le *lookup* des cases non contraintes mais pas leur *visite* : `mrv_choose_cell`
+balayait toujours les 256 cases à chaque nœud pour n'en retenir ~29. Compté en accès
+mémoire, repérer la frontière (256 lectures de grille + ~182 de clés) coûtait donc plus
+cher que la compter (~29 × 4 `popcount`). Corrigé en énumérant la frontière depuis deux
+masques de bits maintenus incrémentalement (`bt_frontier`, `src/core/etii_search.c`),
+l'ordre des bits étant choisi (`pos = x * ETERN_SIZE + y`) pour reproduire à l'identique
+l'ordre `for x { for y }` du balayage — donc le même départage d'égalité, donc le même
+arbre. Mesuré `tests/bench/bench_search.sh` (5 M nœuds × 5 répétitions, puzzle 256,
+écart-type relatif 0,3-0,7 %) : **917 554 → 1 000 844 nœuds/s, +9,08 %**, taux d'élagage
+(38,7344 %) et `max_result` (190) inchangés. C'est le seul cas de la série où le débit est
+une mesure honnête : la transformation ne touche pas l'arbre exploré, donc `max_result` à
+budget de nœuds égal est un contrôle de non-régression strict et non un simple garde-fou.
+Détail : [docs/autosearch_step.md](../autosearch_step.md) §1.3 quater.
+
 Traité en deux temps, ce que la section garde en trace parce que le raisonnement de la
 première étape est ce qui a justifié d'investir dans la seconde : un **prototype scopé**
 d'abord (PR 9, ci-dessous), volontairement dégradé (balayage naïf, aucune délégation) mais
