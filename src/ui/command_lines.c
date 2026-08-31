@@ -565,17 +565,13 @@ int limit_interpreter(void) {
 /**
  * @brief Interpréteur de `check` : affiche le dernier rapport de statistiques `lastcheck`.
  *
- * `lastcheck` est republié toutes les 10 secondes par un thread de
- * statistiques (`check_server`/`check_client_threads`, via
- * `lastcheck_publish()`), potentiellement pendant que cette commande
- * s'exécute depuis le thread console. On prend donc `lastcheck_mutex` pour
- * copier le rapport dans un buffer local (`strdup`), et on logge cette copie
- * une fois le verrou relâché : sans cela, une lecture concurrente au swap
- * pointeur/free pourrait déréférencer un buffer déjà libéré (use-after-free)
- * ou encore en cours de remplissage.
+ * `lastcheck` est republié toutes les 10s par un thread de statistiques,
+ * potentiellement pendant que cette commande s'exécute depuis la console. On
+ * copie donc le rapport sous `lastcheck_mutex` (`strdup`) et on logge la
+ * copie hors verrou : sans cela, une lecture concurrente au swap
+ * pointeur/free pourrait déréférencer un buffer déjà libéré.
  *
- * N'efface plus l'écran : l'effacement est réservé à la commande `clear`
- * (aucune commande ne doit effacer implicitement — politique d'affichage).
+ * N'efface plus l'écran : réservé à la commande `clear`.
  */
 int check_interpreter(void) {
     pthread_mutex_lock(&lastcheck_mutex);
@@ -610,33 +606,22 @@ static const char *orch_state_name(orch_state_t s) {
 /**
  * @brief Interpréteur de `config` (sans argument) / `config <clé> <valeur>`.
  *
- * Branche sur `server` (côté serveur, aucun équivalent positionnel) :
+ * Branche sur `server` :
  *
- * - SERVEUR, sans argument : affiche la configuration EFFECTIVE du serveur
- *   (`server_config_capture_effective`/`server_config_format`) et le fichier
- *   `--config-file` en vigueur. Pas d'état d'orchestrateur ni de
- *   configuration "en préparation" — le serveur n'en a pas.
- * - SERVEUR, avec `<clé> <valeur>` : refusée (`-1`) — le serveur n'a pas de
- *   configuration "en préparation" à appliquer à chaud (`configApply` n'existe
- *   pas côté serveur, cf. `command_is_client_only`) ; seule `configSave`
- *   persiste la configuration EFFECTIVE actuelle. Éditer le fichier
- *   `--config-file` puis redémarrer reste le chemin pour changer une valeur
- *   qui n'a pas de commande console dédiée (`stockMaxRam`, `spill`,
- *   `rebalance`, `leaseDuration`, `clientsRoles`, …).
- * - CLIENT/PRUNER, sans argument : affiche l'état de l'orchestrateur
- *   (`fork_orchestrator_snapshot`), la configuration EFFECTIVE (celle
- *   réellement en vigueur — voir `client_config_capture_effective`, reflète
- *   aussi un `limit`/`maxStockByThread`/`prunerBatch` déjà exécuté depuis
- *   cette même console) et la configuration EN PRÉPARATION
- *   (`fork_orchestrator_format_staged_config`). N'annule pas le décompte.
- * - CLIENT/PRUNER, avec deux arguments (`strtok` — même convention que
- *   `limit`/`prunerBatch` : un token par espace, pas de valeur contenant un
- *   espace) : synthétise une ligne `clé = valeur` et la délègue à
- *   `fork_orchestrator_stage_config_line` (réutilise `client_config_parse_line`,
- *   jamais de logique de validation dupliquée) — écrit dans la configuration
- *   en préparation et annule DÉFINITIVEMENT le décompte, seulement si la
- *   ligne est acceptée (une faute de frappe ne doit pas faire perdre
- *   l'auto-démarrage). Un seul argument (clé sans valeur) : `CMD_ERR_USAGE`.
+ * - Serveur, sans argument : affiche la configuration effective du serveur
+ *   et le fichier `--config-file` en vigueur. Pas d'orchestrateur ni de
+ *   configuration en préparation côté serveur.
+ * - Serveur, avec `<clé> <valeur>` : refusée — `configApply` n'existe pas
+ *   côté serveur ; seule `configSave` persiste la configuration effective.
+ *   Éditer `--config-file` puis redémarrer reste le chemin pour les valeurs
+ *   sans commande console dédiée.
+ * - Client/pruner, sans argument : affiche l'état de l'orchestrateur, la
+ *   configuration effective et la configuration en préparation. N'annule
+ *   pas le décompte.
+ * - Client/pruner, avec deux arguments : synthétise une ligne `clé = valeur`
+ *   et la délègue à `fork_orchestrator_stage_config_line` — écrit dans la
+ *   configuration en préparation et annule définitivement le décompte,
+ *   seulement si la ligne est acceptée. Un seul argument : `CMD_ERR_USAGE`.
  */
 int config_interpreter(void) {
     char *key = strtok(NULL, " ");
@@ -1458,24 +1443,20 @@ int admin_pause_transition(int current, int want_pause) {
 }
 
 /**
- * @brief Interpréteur de `pause` : pose une pause administrative (`REQUEST_ADMIN_PAUSE`)
- *        ET diffuse `CTRL_COMMAND "pause"` à toutes les sessions de contrôle actives.
+ * @brief Interpréteur de `pause` : pose une pause administrative
+ *        (`REQUEST_ADMIN_PAUSE`) ET diffuse `CTRL_COMMAND "pause"` à toutes
+ *        les sessions de contrôle actives.
  *
- * Contrairement à `REQUEST_PAUSE` (régulation de débit, levée automatiquement
- * par `control_step`), cette pause ne peut être levée que par la commande
- * `resume` — cf. la note dans core_static_variables.h. No-op côté local si déjà en
- * pause admin ou si le processus est en cours d'arrêt (`REQUEST_STOP`).
+ * Contrairement à `REQUEST_PAUSE` (régulation de débit, levée
+ * automatiquement par `control_step`), cette pause ne peut être levée que
+ * par `resume`. No-op côté local si déjà en pause admin ou en arrêt.
  *
- * Le volet diffusion (`control_registry_broadcast_command`) est ce qui rend
- * cette commande utile sur le SERVEUR : celui-ci ne lance jamais lui-même de
- * recherche (`request` n'y est jamais consulté par `autosearch`), donc une
- * pause purement locale y serait un no-op. En diffusant systématiquement —
- * sans distinguer serveur/client — la commande reste correcte des deux côtés :
- * sur un client, `control_registry` est toujours vide (rempli uniquement côté
- * serveur par `INST_CONTROL_HELLO`), donc la diffusion y est un no-op
- * silencieux (`n == 0`). Ancien comportement de `clientsPause`, désormais
- * fusionné ici (y compris la persistance de l'état désiré pour les futurs
- * clients, `control_registry_desired_pause_state`).
+ * Le volet diffusion est ce qui rend cette commande utile sur le serveur,
+ * qui ne lance jamais lui-même de recherche : une pause purement locale y
+ * serait un no-op. Diffuser systématiquement, sans distinguer serveur/
+ * client, garde la commande correcte des deux côtés — sur un client,
+ * `control_registry` est toujours vide, donc la diffusion y est un no-op
+ * silencieux.
  */
 int pause_interpreter(void) {
     int previous = request;
@@ -1525,14 +1506,10 @@ int resume_interpreter(void) {
  *        `admin_apply_remote_command`, réentrante (aucun strtok global).
  *
  * `rest` est le reliquat de ligne laissé par `strtok_r` juste après le mot
- * "clientsCommand"/"clientsCmd" -- toujours un pointeur dans le tampon
- * modifiable de l'appelant, jamais retokenisé au delà de la recherche de
- * "--to". Même format et mêmes règles que `clients_cmd_interpreter` (cf. sa
- * documentation) : sans "--to", diffusion à toutes les sessions actives ;
- * avec "--to <cible>", une seule session ciblée (`session_no`, `client_uid`
- * ou `label`) ; dans les deux cas, la commande poussée est vérifiée par
- * `control_command_allowed` avant tout envoi -- cibler une session n'élargit
- * jamais le jeu de commandes autorisées.
+ * "clientsCommand"/"clientsCmd". Mêmes règles que `clients_cmd_interpreter` :
+ * sans "--to", diffusion à toutes les sessions actives ; avec "--to
+ * <cible>", une seule session ciblée. La commande poussée est vérifiée par
+ * `control_command_allowed` avant tout envoi.
  */
 static int admin_remote_clients_command(char *rest) {
     while (rest != NULL && *rest == ' ') {
@@ -1701,30 +1678,21 @@ static int admin_remote_clients_work(char *target) {
 
 /**
  * @brief Portion "config [<clé> <valeur>]" de `admin_apply_remote_command`,
- *        réentrante (aucun strtok global) — pendant HTTP/canal de contrôle de
- *        `config_interpreter`, qui lui tokenise via le curseur global `strtok`
- *        et ne doit donc JAMAIS être appelé depuis ce chemin.
+ *        réentrante (aucun strtok global) — pendant `config_interpreter`,
+ *        qui lui tokenise via le curseur global `strtok` et ne doit donc
+ *        jamais être appelé depuis ce chemin.
  *
  * `rest` est le reliquat de ligne laissé par `strtok_r` juste après le mot
- * "config" -- toujours un pointeur dans le tampon modifiable de l'appelant.
- * En PRODUCTION, `POST /api/v1/command` n'est atteignable que côté serveur
- * (`server` y vaut toujours 1) ; cette fonction branche néanmoins sur `server`
- * comme `config_interpreter` (plutôt que de le supposer), pour rester
- * testable dans les deux contextes et cohérente si jamais réutilisée
- * ailleurs :
+ * "config". Branche sur `server` comme `config_interpreter` :
  *
- * - SERVEUR, sans argument : affiche la configuration SERVEUR effective
- *   (`server_config_capture_effective`). Avec "<clé> <valeur>" : refusée
- *   (`ADMIN_CMD_FORBIDDEN`) — le serveur n'a pas de configuration "en
- *   préparation" à appliquer à chaud.
- * - CLIENT/PRUNER, sans argument : journalise l'état de l'orchestrateur, la
- *   configuration effective et la configuration en préparation (même contenu
- *   que `config_interpreter`), n'annule PAS le décompte. Avec "<clé> <valeur>"
- *   (un seul token par valeur, même convention que `limit`/`prunerBatch`) :
- *   écrit dans la configuration en préparation via
- *   `fork_orchestrator_stage_config_line` et annule le décompte SEULEMENT si
- *   la ligne est acceptée -- une commande mal formée ne doit pas coûter
- *   l'auto-démarrage.
+ * - Serveur, sans argument : affiche la configuration serveur effective.
+ *   Avec "<clé> <valeur>" : refusée, pas de configuration en préparation
+ *   côté serveur.
+ * - Client/pruner, sans argument : journalise l'état de l'orchestrateur, la
+ *   configuration effective et la configuration en préparation, n'annule
+ *   pas le décompte. Avec "<clé> <valeur>" : écrit dans la configuration en
+ *   préparation via `fork_orchestrator_stage_config_line` et annule le
+ *   décompte seulement si la ligne est acceptée.
  */
 static int admin_remote_config(char *rest) {
     while (rest != NULL && *rest == ' ') {
@@ -1813,19 +1781,14 @@ static int admin_remote_config(char *rest) {
 
 /**
  * @brief "start"/"stopForks"/"configApply" agissent sur le cycle de vie de
- *        fils CLIENT (`fork_orchestrator`), qui ne veut rien dire côté
- *        SERVEUR -- même raisonnement que `command_is_client_only` pour la
- *        console (voir sa doc), mais appliqué ICI parce que
- *        `admin_apply_remote_command` (contrairement à `do_command_line`) ne
- *        consulte jamais `command_is_client_only`. `POST /api/v1/command`
- *        (`src/net/http_server.c`, seul appelant de cette fonction en dehors
- *        des tests) n'est atteignable QUE depuis `runserver`
- *        (`src/app/etii_server.c`) : `server` y vaut donc toujours 1.
+ *        fils client (`fork_orchestrator`), qui ne veut rien dire côté
+ *        serveur — même raisonnement que `command_is_client_only` pour la
+ *        console, mais appliqué ici car `admin_apply_remote_command` ne
+ *        consulte jamais `command_is_client_only`.
  *
- * "config"/"configSave" n'en font PLUS partie : `admin_remote_config`
- * (ci-dessous) et `config_save_interpreter` branchent désormais eux-mêmes sur
- * `server` — seule la forme "config <clé> <valeur>" reste refusée
- * (`ADMIN_CMD_FORBIDDEN`, pas de configuration "en préparation" côté serveur).
+ * "config"/"configSave" n'en font plus partie : `admin_remote_config` et
+ * `config_save_interpreter` branchent désormais eux-mêmes sur `server` —
+ * seule la forme "config <clé> <valeur>" reste refusée.
  */
 static int admin_remote_command_is_client_only(const char *word) {
     return strcmp(word, "start") == 0 ||
@@ -2063,22 +2026,19 @@ int clients_stats_interpreter(void) {
 }
 
 /**
- * @brief Interpréteur de `clientsCommand [--to <cible>] <ligne...>` (alias `clientsCmd`) :
- *        pousse une commande console à distance (`CTRL_COMMAND`), à une session de
- *        contrôle précise (`--to`) ou, par défaut, à toutes les sessions actives.
+ * @brief Interpréteur de `clientsCommand [--to <cible>] <ligne...>` (alias
+ *        `clientsCmd`) : pousse une commande console à distance
+ *        (`CTRL_COMMAND`), à une session précise (`--to`) ou à toutes les
+ *        sessions actives par défaut.
  *
- * `<ligne...>` est reprise TELLE QUELLE (pas retokenisée : elle peut contenir
- * plusieurs arguments, ex. "limit 500"). Avant tout envoi, son premier mot est
- * vérifié par `control_command_allowed` (liste blanche définie dans
- * control_protocol.h) : une commande non autorisée est refusée SANS être
- * envoyée, avec ou sans `--to` -- cibler une session n'élargit jamais le jeu
- * de commandes autorisées.
+ * `<ligne...>` est reprise telle quelle (pas retokenisée). Avant tout envoi,
+ * son premier mot est vérifié par `control_command_allowed` : une commande
+ * non autorisée est refusée sans être envoyée — cibler une session
+ * n'élargit jamais le jeu de commandes autorisées.
  *
- * `--to <cible>` doit précéder immédiatement la commande et ne doit pas
- * contenir d'espace (un `session_no` ou un `client_uid` hexadécimal n'en
- * contiennent jamais ; un `label` qui en contiendrait doit être ciblé
- * autrement). La résolution (`control_registry_send_command_to`) refuse une
- * cible inconnue/déconnectée ou ambiguë plutôt que de deviner un destinataire.
+ * `--to <cible>` doit précéder immédiatement la commande, sans espace dans
+ * la cible. La résolution refuse une cible inconnue/déconnectée ou ambiguë
+ * plutôt que de deviner un destinataire.
  */
 int clients_cmd_interpreter(void) {
     char *rest = strtok(NULL, "");
@@ -2134,16 +2094,15 @@ int clients_cmd_interpreter(void) {
 }
 
 /**
- * @brief Interpréteur de `clientsRoles [--to <cible>] <nb_pruner>` : ergonomie
- *        composant `config pruner_forks <nb_pruner>` + `configApply`, déjà possible via
- *        deux `clientsCommand` séparés -- voir `control_registry_apply_role_dosage`
- *        pour la composition ET la mémorisation du dosage désiré par machine.
+ * @brief Interpréteur de `clientsRoles [--to <cible>] <nb_pruner>` :
+ *        ergonomie composant `config pruner_forks <nb_pruner>` +
+ *        `configApply` — voir `control_registry_apply_role_dosage` pour la
+ *        composition et la mémorisation du dosage désiré par machine.
  *
- * Même syntaxe `--to` que `clientsCommand` (doit précéder immédiatement
- * `<nb_pruner>`, sans espace dans la cible). `<nb_pruner>` doit être un
- * entier décimal non négatif -- une valeur hors [0, nb_forks] de la cible est
- * clampée côté client (`resolve_pruner_forks`), jamais rejetée ici : le
- * serveur ne connaît pas le `nb_forks` de la cible.
+ * Même syntaxe `--to` que `clientsCommand`. `<nb_pruner>` doit être un
+ * entier décimal non négatif — une valeur hors [0, nb_forks] de la cible
+ * est clampée côté client, jamais rejetée ici : le serveur ne connaît pas
+ * le `nb_forks` de la cible.
  */
 int clients_roles_interpreter(void) {
     char *rest = strtok(NULL, "");
@@ -2238,16 +2197,12 @@ int known_clients_interpreter(void) {
  * @brief Interpréteur de `clientsWork <cible>` : consultation « que travaille
  *        X ? » (attribution des analyses en cours).
  *
- * `<cible>` est résolue vers un `client_uid` exactement comme `clientsCommand
- * --to` (`session_no`, `client_uid` hexadécimal, ou `label` déclaré — cf.
- * `control_registry_resolve_client_uid`) : une cible inconnue, déconnectée ou
- * ambiguë (label partagé) est refusée plutôt que de deviner. Contrairement à
- * `clientsCommand`, cette commande ne pousse rien au client : elle lit
- * uniquement l'attribution que LE SERVEUR a lui-même enregistrée en servant
- * ce client (`INST_GET`/`INST_GET_TO_CHECK[_BATCH]`), donc le résultat reflète
- * le point de vue serveur, jamais un aller-retour réseau vers le client.
- * Commande SERVEUR pure (send_to_childs = 0) : côté client, `control_registry`
- * est toujours vide, la résolution échouerait systématiquement.
+ * `<cible>` est résolue vers un `client_uid` exactement comme
+ * `clientsCommand --to` : cible inconnue, déconnectée ou ambiguë refusée
+ * plutôt que devinée. Contrairement à `clientsCommand`, ne pousse rien au
+ * client : lit uniquement l'attribution que le serveur a lui-même
+ * enregistrée en servant ce client, donc le résultat reflète le point de
+ * vue serveur, jamais un aller-retour réseau. Commande serveur pure.
  */
 int clients_work_interpreter(void) {
     char *target = strtok(NULL, " ");
@@ -2308,15 +2263,12 @@ int lease_duration_interpreter(void) {
  *        en cours d'analyse, ou les exporte en JSON dans [fichier] si
  *        l'argument est fourni.
  *
- * `printAnalysed` est propagée aux process fils (send_to_childs = 1,
- * `send_command_to_childs`) : le TEXTE de la commande, [fichier] compris, est
- * rejoué tel quel par le parent ET par chaque fork de recherche — des
- * processus séparés. Sans précaution, tous écriraient dans LE MÊME fichier en
- * concurrence (écritures entrelacées / clobbering). On suffixe donc le chemin
- * par le pid en mode client — même convention que `backup_interpreter` pour
- * DEF_FILE/DEF_ANALYSE_FILE — pour que chaque process écrive dans son propre
- * fichier. Le serveur ne force aucun processus de recherche, donc pas de
- * collision possible côté serveur : chemin utilisé tel quel.
+ * `printAnalysed` est propagée aux process fils : le texte de la commande
+ * est rejoué tel quel par le parent et chaque fork — des processus séparés
+ * qui, sans précaution, écriraient tous dans le même fichier en concurrence.
+ * On suffixe donc le chemin par le pid en mode client, comme
+ * `backup_interpreter`. Le serveur ne force aucun processus de recherche,
+ * donc pas de collision possible : chemin utilisé tel quel.
  */
 int printanalysed_interpreter(void) {
     char *path = strtok(NULL, " ");
@@ -2383,18 +2335,13 @@ int rebalance_interpreter(void) {
 
 /**
  * @brief Interpréteur de `stockMemory` : affiche le plafond RAM du stock (Mo
- *        et possibilités), l'occupation actuelle des deux pools de stock, et
- *        le débordement disque (`--stock-spill-dir`) — toujours affiché,
- *        même à 0, pour lire le stock COMPLET (résident + déporté) d'un seul
- *        coup d'œil, y compris quand le débordement n'est pas actif (0
- *        possibilité/segment, plutôt qu'une ligne qui disparaît selon l'état)
- *        — jusqu'ici visible uniquement via GET /api/v1/stats
- *        (`stock_spilled_packets`/`stock_spill_segments`).
+ *        et possibilités), l'occupation actuelle des deux pools, et le
+ *        débordement disque — toujours affiché, même à 0, pour lire le
+ *        stock complet (résident + déporté) d'un seul coup d'œil.
  *
- * Lecture pure, jamais d'effet de bord — même esprit que `statistic`/`check`.
- * `stock_spill_total_packets`/`_segments` renvoient 0 côté client (le
- * débordement n'y est jamais configuré) : no-op silencieux, même convention
- * que le reste de cette commande sur ce rôle.
+ * Lecture pure, jamais d'effet de bord. `stock_spill_total_packets`/
+ * `_segments` renvoient 0 côté client (débordement jamais configuré) :
+ * no-op silencieux.
  */
 int stock_memory_interpreter(void) {
     unsigned long long limit_packets = datamanager_ram_limit_packets();
@@ -2483,29 +2430,22 @@ int min_interpreter(void) {
  * @return            Pointeur vers la commande canonique trouvée, ou NULL si inconnue.
  */
 /**
- * @brief `start`/`stopForks`/`configApply` agissent sur le cycle de vie CLIENT
- *        (fork_orchestrator.h) : exécutées côté SERVEUR, elles posteraient un
- *        événement à un orchestrateur qu'aucune boucle ne consomme jamais là
- *        (`fork_orchestrator_run` n'est appelée que par `handle_client`) —
- *        trompeur plutôt qu'un no-op inoffensif comme les commandes
- *        `server_only` à l'inverse (`clients`, …, harmless sur un client
- *        puisque `control_registry` y est toujours vide). D'où un masquage
- *        explicite (ni listées, ni exécutables, ni suggérées) plutôt qu'une
- *        simple annotation "[serveur]"/"[client]".
+ * @brief `start`/`stopForks`/`configApply` agissent sur le cycle de vie
+ *        client (`fork_orchestrator.h`) : exécutées côté serveur, elles
+ *        posteraient un événement à un orchestrateur qu'aucune boucle ne
+ *        consomme jamais là — trompeur plutôt qu'un no-op inoffensif comme
+ *        les commandes `server_only` à l'inverse. D'où un masquage
+ *        explicite (ni listées, ni exécutables, ni suggérées).
  *
- * `config`/`configSave` n'ont PLUS besoin de ce masquage : leurs interpréteurs
- * (`config_interpreter`/`config_save_interpreter`) branchent désormais
- * eux-mêmes sur `server` — affichage/écriture de la configuration SERVEUR
- * (`server_config.h`) d'un côté, configuration CLIENT (`client_config.h`) de
- * l'autre. Seule la forme `config <clé> <valeur>` (préparation d'un
- * changement à appliquer via `configApply`) reste refusée côté serveur, qui
- * n'a pas de configuration "en préparation" à appliquer à chaud.
+ * `config`/`configSave` n'ont plus besoin de ce masquage : leurs
+ * interpréteurs branchent désormais eux-mêmes sur `server`. Seule la forme
+ * `config <clé> <valeur>` reste refusée côté serveur, qui n'a pas de
+ * configuration en préparation à appliquer à chaud.
  *
- * Delibérément une liste de noms plutôt qu'un nouveau champ sur
- * `command_description` : la table `commands[]` compte ~50 entrées toutes
- * initialisées positionnellement (pas de désignateurs) — ajouter un champ
- * neuf y forcerait soit à toucher chaque entrée, soit à laisser
- * `-Wmissing-field-initializers` (actif sous `-Wextra -Werror`) se déclencher.
+ * Délibérément une liste de noms plutôt qu'un nouveau champ sur
+ * `command_description` : la table `commands[]` compte ~50 entrées
+ * initialisées positionnellement, ajouter un champ y forcerait à toucher
+ * chaque entrée ou déclencherait `-Wmissing-field-initializers`.
  */
 static int command_is_client_only(const command_description *command) {
     return strcmp(command->command, "start") == 0 ||

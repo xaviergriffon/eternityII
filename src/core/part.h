@@ -65,17 +65,15 @@ struct map_in_one
  *
  * Remplace l'ancien tableau 4D de pointeurs (4 déréférencements en cascade)
  * par un unique bloc contigu de `sizearray^4` listes, indexé par
- * `((k1*M + k2)*M + k3)*M + k4`. Les listes de candidats elles-mêmes sont
- * compactées bout à bout dans `arena` : un lookup = un calcul d'indice
- * + une lecture, et chaque liste est contiguë en mémoire.
+ * `((k1*M + k2)*M + k3)*M + k4`. Les listes de candidats sont compactées
+ * bout à bout dans `arena` : un lookup = un calcul d'indice + une lecture.
  *
- * `packed` est un INDEX COMPACT redondant sur `flat`, destiné au seul chemin
- * chaud du forward-checking : mêmes `sizearray^4` compartiments, mais réduits
- * à un `uint32_t` `{offset:16 | size:16}` (offset dans `arena`) au lieu d'un
- * `struct array_part` de 16 octets. Sur le puzzle 256 cela ramène la table
- * balayée par la boucle chaude de 5,06 Mo à 1,33 Mo (une ligne de cache
- * couvre 16 compartiments au lieu de 4) — or 98 % de ces compartiments sont
- * vides et ne sont lus que pour tester un compteur.
+ * `packed` est un index compact redondant sur `flat`, destiné au seul chemin
+ * chaud du forward-checking : mêmes compartiments, mais réduits à un
+ * `uint32_t` `{offset:16 | size:16}` au lieu d'un `struct array_part` de 16
+ * octets — divise par ~3,8 le volume balayé par la boucle chaude, la
+ * grande majorité des compartiments étant vides et lus juste pour tester
+ * un compteur.
  */
 typedef struct
 {
@@ -94,21 +92,19 @@ typedef struct
 	 */
 	uint32_t *packed;
 	/**
-	 * Masque des IDENTIFIANTS de pièces présents dans chaque compartiment, un
-	 * bit par pièce (bit `id - 1`, mot `(id - 1) / 64`), indexé par l'OFFSET
+	 * Masque des identifiants de pièces présents dans chaque compartiment, un
+	 * bit par pièce (bit `id - 1`, mot `(id - 1) / 64`), indexé par l'offset
 	 * du compartiment dans `arena` : le masque du compartiment commençant à
 	 * `offset` occupe `id_mask_words` mots à partir de
 	 * `bucket_id_mask[offset * id_mask_words]`. Seuls les offsets de début de
-	 * compartiment sont renseignés (les autres restent à zéro) — un tableau
-	 * volontairement creux, 0,46 Mo sur le puzzle 256, qui évite une seconde
-	 * table indexée par clé (10,6 Mo) ou une indirection supplémentaire.
+	 * compartiment sont renseignés — un tableau volontairement creux qui
+	 * évite une seconde table indexée par clé.
 	 *
-	 * Sert au choix de case de l'ordre dynamique MRV : compter les pièces ENCORE
-	 * LIBRES d'un compartiment devient quelques `popcount` au lieu d'un
-	 * parcours de toutes ses entrées. Purement redondant, comme `packed`.
+	 * Sert au choix de case de l'ordre dynamique MRV : compter les pièces
+	 * encore libres d'un compartiment devient quelques `popcount` au lieu
+	 * d'un parcours. Purement redondant, comme `packed`.
 	 *
-	 * NULL si non construit (map bâtie à la main, `packed` absent, ou échec
-	 * d'allocation) : les lecteurs retombent alors sur le comptage par
+	 * NULL si non construit : les lecteurs retombent sur le comptage par
 	 * parcours, cf. `map_bucket_id_mask`.
 	 */
 	uint64_t *bucket_id_mask;
@@ -368,26 +364,17 @@ static inline int map_mask_free_count(const uint64_t *mask, int words, const uin
 }
 
 /**
- * @brief Le compartiment a-t-il AU MOINS une pièce encore libre ?
+ * @brief Le compartiment a-t-il au moins une pièce encore libre ?
  *
  * Variante « existence » de `map_mask_free_count` : le forward-check n'a pas
- * besoin du nombre de candidats, seulement de savoir s'il en reste un. Sortir
- * au premier mot non nul évite les `popcount` suivants, et surtout le coût est
- * **borné par le nombre de mots**, là où le parcours d'entrées qu'il remplace
- * est proportionnel à la TAILLE du compartiment — plusieurs centaines
- * d'entrées dans le cas qui compte, celui où aucune n'est libre (case morte,
- * donc élagage) et où le parcours va jusqu'au bout.
+ * besoin du nombre de candidats, seulement de savoir s'il en reste un.
+ * Sortir au premier mot non nul évite les `popcount` suivants ; surtout le
+ * coût est borné par le nombre de mots, là où le parcours d'entrées qu'il
+ * remplace est proportionnel à la taille du compartiment — plusieurs
+ * centaines d'entrées dans le cas qui compte, celui où aucune n'est libre
+ * et où le parcours va jusqu'au bout.
  *
- * Strictement équivalent au parcours : `bucket_id_mask` ne porte que les ids
- * réellement présents et `> 0` (`build_bucket_id_mask` ignore les entrées
- * bouchon), exactement le filtre `id != 0` du parcours. La différence
- * « identifiants distincts vs entrées » qui sépare les deux comptages dans
- * `map_mask_free_count` est ici sans objet : les deux s'annulent au test `== 0`.
- *
- * @param mask  Masque des ids du compartiment (`map_bucket_id_mask`).
- * @param words Nombre de mots du masque (`map->id_mask_words`).
- * @param used  Masque des pièces déjà posées, même convention de bits.
- * @return      1 s'il reste au moins une pièce libre, 0 sinon.
+ * @return 1 s'il reste au moins une pièce libre, 0 sinon.
  */
 static inline int map_mask_any_free(const uint64_t *mask, int words, const uint64_t *used)
 {

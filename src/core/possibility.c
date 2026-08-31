@@ -133,16 +133,8 @@ struct possibility_packet *generate_possibility_packet(int x, int y, struct part
 /**
  * @brief Calcule la clé de recherche pour une case (x, y) quelconque de la grille.
  *
- * Variante de `what_search_to_key` qui prend des coordonnées explicites au lieu
- * d'utiliser la position courante du paquet. Utilisée par `possibility_all_has_a_next`
- * pour tester chaque case libre de la grille.
- *
- * @param all_rotate_parts Tableau de toutes les rotations.
- * @param possiblity       Paquet courant (état de la grille).
- * @param x                Coordonnée x de la case à tester.
- * @param y                Coordonnée y de la case à tester.
- * @param key              Clé résultante (sortie).
- * @param all_face         Valeur représentant « toute face » dans la map (= map->sizearrayM).
+ * Variante de `what_search_to_key` qui prend des coordonnées explicites au
+ * lieu de la position courante du paquet.
  */
 void what_search_in_grid_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, int8_t x, int8_t y,key_part *key, int8_t all_face) {
 	key->k1 =-2;
@@ -216,16 +208,8 @@ void what_search_in_grid_to_key(struct array_part *all_rotate_parts, struct poss
 /**
  * @brief Calcule la clé de recherche pour la case courante du paquet.
  *
- * Détermine les contraintes de bord imposées par les pièces voisines déjà placées.
- * - k1 = bord TOP requis (bottom du voisin du dessus, 0 si bord de grille, all_face si voisin absent)
- * - k2 = bord RIGHT requis
- * - k3 = bord BOTTOM requis
- * - k4 = bord LEFT requis
- *
- * @param all_rotate_parts Tableau de toutes les rotations.
- * @param possiblity       Paquet courant indiquant la position (x, y) à remplir.
- * @param key              Clé résultante (sortie).
- * @param all_face         Valeur représentant « toute face » (= map->sizearrayM).
+ * k1/k2/k3/k4 = bord requis top/right/bottom/left (bord du voisin
+ * correspondant, 0 si bord de grille, all_face si voisin absent).
  */
 void what_search_to_key(struct array_part *all_rotate_parts, struct possibility_packet *possiblity, key_part *key, int8_t all_face) {
     int x = possiblity->x;
@@ -545,39 +529,25 @@ int possibility_has_a_next(struct possibility_packet *possibility, map_big_array
 /**
  * @brief Vérifie que toutes les cases encore libres de la grille ont au moins une pièce posable.
  *
- * Parcourt EXHAUSTIVEMENT toutes les cases VIDES de `directions[]` (celles
- * déjà remplies sont sautées sans être ré-examinées, où qu'elles soient dans
- * le parcours — `alloc` n'indexe plus une position de curseur, cf.
- * `possibility_placed_count` ; correction par rapport à l'ancien balayage
- * `[alloc, ETERN_PARTS)`, qui ré-étudiait inutilement les cases déjà remplies
- * au-delà du curseur). Une case non contrainte ne stoppe pas le balayage :
- * elle est satisfiable par construction, cf. commentaire inline. Si une case
- * n'admet aucune pièce, retourne 0 (le paquet est sans issue).
- * Optimisation : si une case n'admet qu'une seule pièce, la place immédiatement.
+ * Parcourt exhaustivement toutes les cases vides de `directions[]` (celles
+ * déjà remplies sont sautées où qu'elles soient dans le parcours). Une case
+ * non contrainte ne stoppe pas le balayage : satisfiable par construction.
+ * Si une case n'admet aucune pièce, retourne 0. Si elle n'en admet qu'une,
+ * la place immédiatement.
  *
- * Itère ce balayage jusqu'à point fixe (§4.6a) : un balayage place des cases
- * forcées (une seule pièce candidate) en AVANÇANT dans `directions[]`, mais ne
- * revient jamais sur une case DÉJÀ examinée plus tôt dans le MÊME balayage —
- * une case qui avait 2 candidats libres au moment de son examen (donc jamais
- * forcée, jamais revisitée) peut se retrouver sans AUCUN candidat une fois
- * que ses deux candidats ont chacun été consommés par des forçages
- * ultérieurs. Un seul passage ne le détecte pas (cf. le commentaire
- * historique au-dessus de `remove_possibilities_with_no_next`,
- * src/core/datamanager.c, qui documentait déjà ce trou). Tant qu'un passage a
- * forcé au moins une case, on relance un passage complet ; on s'arrête dès
- * qu'un passage ne force plus rien (point fixe atteint) ou trouve une case
+ * Itère ce balayage jusqu'à point fixe : un balayage force des cases (une
+ * seule pièce candidate) en avançant, mais ne revient jamais sur une case
+ * déjà examinée plus tôt dans le même passage — une case qui avait 2
+ * candidats au moment de son examen peut se retrouver sans aucun candidat
+ * une fois ceux-ci consommés par des forçages ultérieurs. Un seul passage ne
+ * le détecte pas. Tant qu'un passage a forcé au moins une case, on relance
+ * un passage complet ; arrêt au point fixe (rien forcé) ou sur une case
  * sans issue.
  *
- * `alloc` est recompté (`possibility_placed_count`), jamais incrémenté à la
- * main, dès qu'au moins un placement forcé a eu lieu — y compris quand le
- * plateau ne se retrouve PAS complet : avant cette correction, `alloc`
- * restait périmé tant que ETERN_PARTS n'était pas atteint, alors que
- * `b_faceused` avait déjà avancé (source du code -5 documenté par
- * `check_possibility`).
+ * `alloc` est recompté, jamais incrémenté à la main, dès qu'un placement
+ * forcé a eu lieu — y compris quand le plateau ne se retrouve pas complet :
+ * sinon `alloc` restait périmé alors que `b_faceused` avait déjà avancé.
  *
- * @param possibility    Paquet à analyser (peut être modifié si des pièces uniques sont placées).
- * @param mapParts       Tableau 4D de lookup.
- * @param all_rotate_part Tableau de toutes les rotations.
  * @param out_cells_studied Si non NULL, reçoit le nombre de cases examinées,
  *                       cumulé sur tous les passages du point fixe.
  * @return               1 si toutes les cases libres ont au moins une suite, 0 sinon.
@@ -724,25 +694,14 @@ int put_possibility (File * suite, struct possibility_packet *value){
  * @brief Choisit, parmi les cases encore vides, celle qui admet le moins de
  *        candidats libres (MRV, variante autonome pour le chemin froid).
  *
- * Variante de `mrv_choose_cell` (core/etii_search.c, `static`, boucle chaude
- * de la recherche réelle) : ce chemin est appelé par `search_possiblity_light`
- * hors boucle chaude — l'expansion anti-famine du démarrage serveur
- * (`expand_datas_to_level`) et le paquet genèse (`first_possibility`), tous
- * deux exécutés une poignée de fois par process, jamais par nœud exploré.
- * `mrv_choose_cell` dépend d'un cache de contraintes et d'un miroir 64 bits
- * des pièces utilisées, maintenus INCRÉMENTALEMENT par le moteur de
- * recherche à chaque placement/retrait ; les reconstruire ici pour un seul
- * appel coûterait plus que le balayage direct qu'ils économisent, et
- * `mrv_choose_cell` est `static` dans un autre module (core/) — l'exposer
- * pour ce seul usage introduirait un couplage inter-module pour un chemin
- * froid. On recalcule donc une clé par case vide (`what_search_in_grid_to_key`),
- * au prix d'un balayage complet à chaque appel plutôt que d'une lecture de
- * cache : acceptable hors boucle chaude, comme `forward_check_next_k`.
+ * Variante de `mrv_choose_cell` (boucle chaude de la recherche réelle) :
+ * appelée hors boucle chaude par `search_possiblity_light`, une poignée de
+ * fois par process (jamais par nœud exploré). `mrv_choose_cell` dépend d'un
+ * cache maintenu incrémentalement par le moteur de recherche ; le
+ * reconstruire ici pour un seul appel coûterait plus que le balayage direct
+ * qu'il économise. On recalcule donc une clé par case vide, acceptable hors
+ * boucle chaude.
  *
- * @param possiblity      Paquet courant.
- * @param mapParts        Tableau 4D de lookup.
- * @param all_rotate_part Tableau de toutes les rotations.
- * @param out_x/out_y     Case choisie si succès (non modifiés sinon).
  * @return 1 si une case a été choisie, 0 si aucune case vide (plateau complet).
  */
 static int light_choose_cell(struct possibility_packet *possiblity, map_big_array *mapParts,
@@ -763,15 +722,10 @@ static int light_choose_cell(struct possibility_packet *possiblity, map_big_arra
             what_search_in_grid_to_key(all_rotate_part, possiblity, (int8_t)x, (int8_t)y, &wsearch, all_face);
             if (wsearch.k1 == all_face && wsearch.k2 == all_face
                 && wsearch.k3 == all_face && wsearch.k4 == all_face) {
-                // Case sans aucune contrainte (ni bord de grille, ni voisine
-                // posée) : le compartiment "toute face" contient l'union de
-                // toutes les pièces à bord non nul (cf. buildBigArray), donc
-                // cette case est satisfiable par construction tant qu'il
-                // reste une pièce libre -- jamais le minimum, jamais morte.
-                // Même règle que mrv_choose_cell (etii_search.c) : ne PAS la
-                // compter (elle vaudrait un nombre énorme de candidats et
-                // fausserait la comparaison), la garder seulement en repli
-                // pour le cas où AUCUNE case contrainte n'existe encore.
+                // Case sans aucune contrainte : satisfiable par construction
+                // tant qu'il reste une pièce libre, jamais le minimum, jamais
+                // morte. Ne pas la compter (comparaison faussée), la garder
+                // seulement en repli si aucune case contrainte n'existe.
                 if (!fallback_found) {
                     fallback_found = 1;
                     fallback_x = (uint8_t)x;
@@ -794,11 +748,8 @@ static int light_choose_cell(struct possibility_packet *possiblity, map_big_arra
                 count++;
             }
             if (count == 0) {
-                // Case CONTRAINTE sans aucun candidat : sous-arbre mort.
-                // Signalé immédiatement, comme mrv_choose_cell -- ne pas la
-                // laisser "gagner" la comparaison de minimum (elle le
-                // gagnerait toujours avec 0), ce qui masquerait la vraie
-                // impasse derrière un choix de case normal.
+                // Case contrainte sans candidat : sous-arbre mort, signalé
+                // immédiatement plutôt que de "gagner" la comparaison à 0.
                 return 0;
             }
             if (best_count < 0 || count < best_count) {
@@ -825,22 +776,14 @@ static int light_choose_cell(struct possibility_packet *possiblity, map_big_arra
 /**
  * @brief Développe un paquet en ajoutant une pièce sur la case la plus contrainte.
  *
- * Choisit la case vide la plus contrainte (`light_choose_cell`, MRV) puis, pour
- * chaque pièce compatible avec sa clé (et non encore utilisée), crée une copie
- * du paquet avec la pièce placée et l'ajoute dans `result`. `alloc` de chaque
- * enfant est fixé par recomptage (`possibility_placed_count`), pas par
- * incrément d'un curseur : la case choisie diffère d'un enfant à l'autre du
- * même appel n'est jamais le cas ici (une seule case par appel), mais peut
- * différer d'un appel à l'autre (l'appelant ne connaît plus à l'avance la
- * case qui sera développée).
+ * Choisit la case vide la plus contrainte (`light_choose_cell`, MRV) puis,
+ * pour chaque pièce compatible avec sa clé (et non encore utilisée), crée
+ * une copie du paquet avec la pièce placée et l'ajoute dans `result`.
+ * `alloc` de chaque enfant est fixé par recomptage, pas par incrément d'un
+ * curseur — la case choisie peut différer d'un appel à l'autre.
  *
- * @param result       File de destination des nouveaux paquets.
- * @param possiblity   Paquet source à développer.
- * @param mapParts     Tableau 4D de lookup.
- * @param all_rotate_part Tableau de toutes les rotations.
- * @param idParts      Table de pré-calcul des indices de rotation [id][rotation].
- * @return             Nombre de pièces dans le paquet produit, ou 0 si aucune
- *                     pièce posable (ou plateau déjà complet).
+ * @return Nombre de pièces dans le paquet produit, ou 0 si aucune pièce
+ *         posable (ou plateau déjà complet).
  */
 int search_possiblity_light(File *result, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4])
 {
@@ -937,38 +880,25 @@ int search_possiblity_light(File *result, struct possibility_packet *possiblity,
 
 #if FORWARD_CHECK_K > 0
 /**
- * @brief Forward-checking court sur les FORWARD_CHECK_K prochaines cases VIDES du parcours.
+ * @brief Forward-checking court sur les FORWARD_CHECK_K prochaines cases vides du parcours.
  *
- * Inspecte les `FORWARD_CHECK_K` premières cases VIDES rencontrées en
+ * Inspecte les `FORWARD_CHECK_K` premières cases vides rencontrées en
  * parcourant `directions[]` dans l'ordre (les cases déjà remplies sont
- * sautées, où qu'elles soient dans le parcours — cf.
- * `possibility_placed_count`, `alloc` n'indexe plus une position de curseur).
- * Variante volontairement simple : « les K premières cases vides du
- * parcours », pas « les K cases les plus contraintes » — cette dernière
- * suppose un score déjà calculé côté appelant, absent de ce chemin froid, cf.
- * docs/autosearch_step.md. Pour chacune, calcule la clé de
- * contraintes à partir de l'état courant du plateau et interroge la
- * `map_big_array`. Si l'une de ces cases n'admet plus aucune pièce candidate
- * disponible (toutes utilisées, ou aucun résultat dans la map), la branche est
+ * sautées). Variante volontairement simple : « les K premières cases vides
+ * du parcours », pas « les K cases les plus contraintes » — cette dernière
+ * suppose un score déjà calculé côté appelant, absent de ce chemin froid.
+ * Si l'une de ces cases n'admet plus aucune pièce candidate, la branche est
  * sans issue et la fonction retourne 0.
  *
- * Cette vérification élague des branches mortes juste après un placement,
- * sans changer l'ordre statique du parcours `directions[]`.
+ * Version sans cache — chemins froids uniquement. Chaque case inspectée
+ * recalcule sa clé via `what_search_in_grid_to_key`. Son seul appelant est
+ * `bt_materialize_pending`. Le moteur de backtracking chaud utilise
+ * `bt_forward_check`, même sémantique mais lisant la clé dans le cache
+ * `constraints[][]` maintenu incrémentalement — ne pas brancher cette
+ * version sur un hot path.
  *
- * ⚠ Version SANS cache — chemins froids uniquement. Chaque case inspectée
- * recalcule sa clé de contraintes via `what_search_in_grid_to_key`. Son seul
- * appelant est `bt_materialize_pending` (etii_search.c, délégation
- * throttlée par `DELEGATE_MIN_INTERVAL_MS`). Le moteur de backtracking chaud
- * (`search_packet_backtracking`) utilise `bt_forward_check` (etii_search.c),
- * même sémantique mais qui lit la clé dans le cache `constraints[][]` maintenu
- * incrémentalement — ne PAS brancher la présente version sur un hot path.
+ * Entièrement supprimée à la compilation quand `FORWARD_CHECK_K == 0`.
  *
- * Note : entièrement supprimée à la compilation quand `FORWARD_CHECK_K == 0`
- * (debit brut strictement identique au code d'origine).
- *
- * @param possibility    Paquet à tester (avec la pièce qu'on vient de placer).
- * @param mapParts       Tableau 4D de lookup.
- * @param all_rotate_part Tableau de toutes les rotations.
  * @return 1 si toutes les cases inspectées ont au moins une pièce candidate, 0 sinon.
  */
 int forward_check_next_k(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part)

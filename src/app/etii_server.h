@@ -189,22 +189,16 @@ int32_t clamp_pruner_batch(int32_t requested);
 int32_t compute_server_hunger(unsigned long long stock, int active_clients);
 
 /**
- * @brief Compteurs de service à VIDE : combien de fois
- *        `communicate_with_client_step` a répondu `K = 0` à
- *        un `INST_GET` (`server_search_starved`, pool vide côté chercheurs)
- *        ou à un `INST_GET_TO_CHECK[_BATCH]` (`server_prune_starved`, pool
- *        vide côté pruners).
+ * @brief Compteurs de service à vide : combien de fois
+ *        `communicate_with_client_step` a répondu `K = 0` à un `INST_GET`
+ *        (`server_search_starved`) ou à un `INST_GET_TO_CHECK[_BATCH]`
+ *        (`server_prune_starved`).
  *
- * Auparavant, un `K = 0` ne laissait aucune trace : ni compteur, ni log.
  * Les deux handlers de service étant déjà distincts, la famine se ventile
- * naturellement PAR RÔLE, sans aucune inférence — c'est la mesure la plus
- * directe du besoin. Incrémentés via `__atomic_fetch_add`
- * (`__ATOMIC_RELAXED`, même convention que `stock_rate.c`/`app_runtime.c`) :
- * plusieurs threads serveur (un par connexion) incrémentent concurremment,
- * une statistique d'affichage tolère la rare imprécision d'un incrément
- * relâché plutôt que de payer un verrou sur ce chemin. Cumulatifs, jamais
- * remis à zéro (mesure « depuis le démarrage du serveur », comme
- * `pruner_checked`/`pruner_removed`).
+ * naturellement par rôle. Incrémentés via `__atomic_fetch_add` relâché :
+ * plusieurs threads serveur incrémentent concurremment, une statistique
+ * d'affichage tolère la rare imprécision plutôt que de payer un verrou.
+ * Cumulatifs, jamais remis à zéro.
  */
 extern unsigned long long server_search_starved;
 extern unsigned long long server_prune_starved;
@@ -213,32 +207,17 @@ extern unsigned long long server_prune_starved;
  * @brief Calcule le sens d'ajustement du dosage recherche/contrôle à partir
  *        des signaux de besoin déjà mesurés côté serveur.
  *
- * Fonction PURE (aucune I/O, aucun accès au registre ni à l'horloge) — les
- * deltas de famine et le ratio de pression RAM sont calculés par l'appelant
- * (`check_server_step`), qui tient l'état cumulatif d'un tour à l'autre.
+ * Fonction PURE — deltas de famine et ratio de pression RAM sont calculés
+ * par l'appelant (`check_server_step`).
  *
- * Priorité des signaux, du plus urgent au plus indicatif :
- *  1. Un parc déjà à 0 chercheur avec au moins un pruner est une violation de
- *     l'invariant (ne devrait jamais arriver si cette fonction est la seule
- *     à piloter le dosage) : corrigée immédiatement, prioritaire sur tout
- *     le reste.
- *  2. Un parc vide (aucune session) : rien à décider.
- *  3. Une famine (chercheur OU pruner) signale un parc mal dimensionné pour
- *     le travail disponible MAINTENANT ; la recherche étant le seul rôle qui
- *     régénère du stock à partir de rien, réduire le dosage est la
- *     correction sûre dans les deux cas.
- *  4. Garde-fou : tant que le parc n'a plus qu'un seul chercheur (ou zéro),
- *     jamais d'augmentation — c'est le double garde-fou du document
- *     (« jamais 0 chercheur » / « jamais 100% pruner », deux formulations
- *     de la même limite).
- *  5. Pression RAM haute (seuil `STOCK_SPILL_HIGH_PERCENT`) : plus de
- *     vérification aide à éliminer les possibilités mortes plus vite.
- *  6. Ratio de stock non-vérifié / vérifié : un déséquilibre marqué en
- *     faveur du non-vérifié signale trop peu de pruners pour absorber le
- *     flux produit par la recherche (le problème initial du document —
- *     jusqu'à 50% de stock mort distribué sans pruner) ; l'inverse
- *     (beaucoup de stock déjà vérifié, peu de non-vérifié) signale
- *     l'excès contraire.
+ * Priorité des signaux, du plus urgent au plus indicatif : (1) 0 chercheur
+ * avec un pruner présent = violation d'invariant, corrigée en priorité ;
+ * (2) parc vide : rien à décider ; (3) famine (chercheur ou pruner) : réduire
+ * le dosage, la recherche étant le seul rôle qui régénère du stock ;
+ * (4) garde-fou : jamais d'augmentation avec un seul chercheur ou moins ;
+ * (5) pression RAM haute : plus de vérification pour éliminer le mort plus
+ * vite ; (6) ratio stock non-vérifié/vérifié déséquilibré dans un sens ou
+ * l'autre.
  *
  * Seuils choisis comme point de départ raisonnable (hystérésis et délai
  * minimal restent la vraie garantie de stabilité, cf. `check_server_step`) —
@@ -254,7 +233,7 @@ extern unsigned long long server_prune_starved;
  * @param search_starved_delta  Δ `server_search_starved` depuis le tour précédent.
  * @param prune_starved_delta   Δ `server_prune_starved` depuis le tour précédent.
  * @param nb_search             Σ `nb_forks` des sessions en rôle recherche
- *                              (`control_registry_count_role_forks`, PAS un
+ *                              (`control_registry_count_role_forks`, pas un
  *                              compte de sessions — avec une seule machine
  *                              connectée, un compte de sessions vaudrait
  *                              toujours au plus 1, déclenchant à tort le
@@ -322,81 +301,51 @@ typedef struct {
 } client_work_fork_t;
 
 /**
+ * @brief Indique si ce client a au moins une connexion de travail ouverte.
+ *
+ * Complète `control_registry_has_active_client` pour juger la vivacité d'un
+ * client avant de réclamer son bail : le canal de contrôle d'un client qui
+ * s'arrête se ferme avant que ses forks de travail aient fini de vider leur
+ * file, si bien que le seul canal de contrôle déclare mort un client dont
+ * les forks travaillent encore.
+ *
+ * Un slot dont la connexion est fermée (`socket_id == -1`) ne compte pas,
+ * même s'il porte encore une identité — `has_identity` n'est remis à zéro
+ * qu'à la réutilisation du slot, jamais à la déconnexion. Se fier à la
+ * seule identité ferait vivre un client indéfiniment et le bail ne serait
+ * plus jamais réclamé : le défaut exactement inverse.
+ *
+ * @return 1 si au moins une connexion de travail ouverte lui appartient, 0 sinon.
+ */
+int client_has_open_work_connection(const uint8_t client_uid[CLIENT_UID_BYTES]);
+
+/**
  * @brief Liste, pour un `client_uid` donné, le rôle déclaré (`mode`) de
- *        CHAQUE fork de travail actuellement connecté (identité reçue sur SA
- *        PROPRE connexion de travail, `INST_CLIENT_HELLO` v12) — PAS le mode
- *        unique, PAR SESSION, du canal de contrôle (`control_session_info_t.mode`),
- *        qui ne reflète que le mode de LANCEMENT du process et jamais le
- *        détail d'un dosage mixte (`--pruner-forks`/`clientsRoles`/
- *        `--auto-roles`).
+ *        chaque fork de travail actuellement connecté — pas le mode unique,
+ *        par session, du canal de contrôle, qui ne reflète que le mode de
+ *        lancement du process et jamais le détail d'un dosage mixte.
  *
- * Balaie `thread_params[0..NB_THREADS[` SANS verrou — même convention que
- * `get_active_threads`/`find_free_thread_slot` : lecture best-effort, une
- * rare incohérence transitoire (connexion en cours d'établissement,
- * `has_identity` pas encore posé) est acceptable pour une commande de
- * diagnostic, jamais un chemin qui modifie quoi que ce soit.
+ * Balaie `thread_params[0..NB_THREADS[` sans verrou : lecture best-effort,
+ * une rare incohérence transitoire est acceptable pour une commande de
+ * diagnostic.
  *
- * @param client_uid Identité de session (process parent) recherchée.
- * @param out        Tableau de sortie.
- * @param max        Capacité de `out`.
- * @return           Nombre d'entrées écrites (0 si aucun fork de ce client
- *                    n'est actuellement connecté en travail, `out == NULL`,
- *                    ou `max <= 0`).
+ * @return Nombre d'entrées écrites (0 si aucun fork de ce client n'est
+ *         actuellement connecté, `out == NULL`, ou `max <= 0`).
  */
-/**
- * @brief Indique si ce client a au moins une connexion de TRAVAIL ouverte.
- *
- * Complète `control_registry_has_active_client` pour juger la vivacité d'un
- * client avant de réclamer son bail : le canal de contrôle d'un client qui
- * s'arrête se ferme AVANT que ses forks de travail aient fini de vider leur
- * file, si bien que le seul canal de contrôle déclare mort un client dont les
- * forks travaillent encore (diagnostic complet : `docs/investigations/`).
- *
- * Un slot dont la connexion est fermée (`socket_id == -1`) ne compte pas, même
- * s'il porte encore une identité — `has_identity` n'est remis à zéro qu'à la
- * réutilisation du slot par `try_assign_client_slot`, jamais à la déconnexion.
- *
- * @param client_uid Identifiant du client recherché.
- * @return           1 si au moins une connexion de travail ouverte lui appartient, 0 sinon.
- */
-int client_has_open_work_connection(const uint8_t client_uid[CLIENT_UID_BYTES]);
-
-/**
- * @brief Indique si ce client a au moins une connexion de TRAVAIL ouverte.
- *
- * Complète `control_registry_has_active_client` pour juger la vivacité d'un
- * client avant de réclamer son bail : le canal de contrôle d'un client qui
- * s'arrête se ferme AVANT que ses forks de travail aient fini de vider leur
- * file, si bien que le seul canal de contrôle déclare mort un client dont les
- * forks travaillent encore (diagnostic complet : `docs/investigations/`).
- *
- * Un slot dont la connexion est fermée (`socket_id == -1`) ne compte pas, même
- * s'il porte encore une identité — `has_identity` n'est remis à zéro qu'à la
- * réutilisation du slot par `try_assign_client_slot`, jamais à la déconnexion.
- * Se fier à la seule identité ferait vivre un client indéfiniment et le bail
- * ne serait plus jamais réclamé : le défaut exactement inverse.
- *
- * @param client_uid Identifiant du client recherché.
- * @return           1 si au moins une connexion de travail ouverte lui appartient, 0 sinon.
- */
-int client_has_open_work_connection(const uint8_t client_uid[CLIENT_UID_BYTES]);
-
 int client_work_fork_roles(const uint8_t client_uid[CLIENT_UID_BYTES],
                            client_work_fork_t *out, int max);
 
 /**
  * @brief Table complète des pièces + toutes leurs rotations, construite par
- *        `runserver` (`rotate_all_parts`) et déjà partagée avec chaque
- *        `client_t.rotate_parts` pour sérialiser les solutions en CSV.
- *        Exposée en globale pour que `src/net/http_server.c` puisse décoder
- *        `possibility_packet.grid[x][y]` (indice `id + ETERN_PARTS*rotation`,
- *        cf. `id_for_rotated_part`) en pièce réelle (id, rotation, couleurs)
- *        pour `GET /api/v1/best-board`, sans dupliquer la lecture du CSV.
+ *        `runserver` et déjà partagée avec chaque `client_t.rotate_parts`
+ *        pour sérialiser les solutions en CSV. Exposée en globale pour que
+ *        `http_server.c` puisse décoder `possibility_packet.grid[x][y]` en
+ *        pièce réelle pour `GET /api/v1/best-board`, sans dupliquer la
+ *        lecture du CSV.
  *
- *        NULL avant que `runserver` ait construit la table (mode client/test,
- *        ou tout appelant avant le tout début de `runserver`) et remis à NULL
- *        après sa libération en fin de `runserver` — un appelant DOIT vérifier
- *        NULL avant de déréférencer.
+ *        NULL avant que `runserver` ait construit la table (mode
+ *        client/test) et remis à NULL après sa libération en fin de
+ *        `runserver` — un appelant doit vérifier NULL avant de déréférencer.
  */
 extern struct array_part *g_server_rotate_parts;
 
@@ -446,25 +395,20 @@ int server_analysed_file_hint(client_t *client);
 int record_possibility_analysed_for_client(client_t *client, struct possibility_packet *possibility);
 
 /**
- * @brief Renvoie au stock local les possibilités servies au client mais jamais
- *        acquittées, à la déconnexion (propre ou brutale).
+ * @brief Renvoie au stock local les possibilités servies au client mais
+ *        jamais acquittées, à la déconnexion (propre ou brutale).
  *
- * Extrait du bloc de fin de `communicate_with_client` pour être testable hors de
- * la boucle d'événements. Pour chaque possibilité de `lastSent` encore présente
- * dans `file_analysed` (le client ne l'a pas acquittée via INST_POSSIBILITY_ANALYSED),
- * elle est retirée de l'« en analyse » et réinjectée dans le stock via
- * `add_possibility(NULL, …)`. Une possibilité déjà acquittée (absence
- * CONFIRMÉE, `remove_possibility_analysed == 1`) n'est pas réinjectée : pas
- * de doublon de travail terminé — une absence NON confirmée
- * (`remove_possibility_analysed == -1`, budget borné épuisé) est réinjectée
- * quand même, jamais perdue dans le doute. NULL accepté pour `lastSent`
- * (no-op) et pour `client` (comportement inchangé, remise immédiate). Ne
- * libère PAS `lastSent`.
+ * Extrait du bloc de fin de `communicate_with_client` pour être testable
+ * hors de la boucle d'événements. Pour chaque possibilité de `lastSent`
+ * encore présente dans `file_analysed`, elle est retirée de l'« en analyse »
+ * et réinjectée dans le stock. Une possibilité déjà acquittée (absence
+ * confirmée) n'est pas réinjectée ; une absence non confirmée (budget borné
+ * épuisé) l'est quand même, jamais perdue dans le doute. NULL accepté pour
+ * `lastSent`/`client`. Ne libère pas `lastSent`.
  *
- * `client` sert UNIQUEMENT à vérifier si le client reste vivant (son canal de
- * contrôle est-il toujours enregistré ?) : si oui, cette fonction ne remet
- * RIEN au stock — voir le corps de la fonction pour le raisonnement complet
- * (même critère de vivacité que le bail d'expiration).
+ * `client` sert uniquement à vérifier si le client reste vivant (canal de
+ * contrôle toujours enregistré) : si oui, rien n'est remis au stock — même
+ * critère de vivacité que le bail d'expiration.
  *
  * @param lastSent Dernier lot de possibilités envoyé au client (peut être NULL).
  * @param client   Client dont la connexion de travail se termine (peut être NULL).
@@ -477,27 +421,19 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t 
  *
  * Extrait du corps du `while` pour être testable hors thread (le socket peut
  * être un socketpair). `*lastSent` mémorise le dernier lot servi à rendre au
- * stock à la déconnexion ; `*version_supported` porte l'état du handshake d'un
- * tour à l'autre.
+ * stock à la déconnexion ; `*version_supported` porte l'état du handshake
+ * d'un tour à l'autre.
  *
- * `out_control_session_index` est un pur OUT-param (pas d'état d'un tour à
- * l'autre, contrairement aux deux précédents) : la fonction y écrit
- * systématiquement -1 en entrée de traitement, SAUF quand l'instruction est
- * `INST_CONTROL_HELLO` et que l'enregistrement dans `control_registry` réussit,
- * auquel cas elle y écrit l'indice de session obtenu. L'appelant
- * (`communicate_with_client`) doit tester cette valeur après CHAQUE appel : un
- * indice ≥ 0 signifie que la session vient de basculer en canal de contrôle et
- * que l'appelant doit quitter la boucle normale recv_instruction/
- * communicate_with_client_step pour entrer dans `run_control_session` — qui
- * gère alors seule l'épilogue (fermeture socket incluse), sans jamais
- * repasser par la boucle habituelle (piège du double-close à éviter).
+ * `out_control_session_index` est un pur out-param : écrit -1 sauf quand
+ * l'instruction est `INST_CONTROL_HELLO` et que l'enregistrement dans
+ * `control_registry` réussit, auquel cas il porte l'indice de session
+ * obtenu. L'appelant doit tester cette valeur après chaque appel : un
+ * indice ≥ 0 signifie que la session vient de basculer en canal de contrôle
+ * et que l'appelant doit quitter la boucle normale pour entrer dans
+ * `run_control_session`, qui gère alors seule l'épilogue (fermeture socket
+ * incluse), sans jamais repasser par la boucle habituelle (piège du
+ * double-close à éviter).
  *
- * @param client            Contexte du thread (socket_id, compteur, rotate_parts).
- * @param instruction        Instruction reçue à traiter.
- * @param lastSent           In/out : dernier lot envoyé (libéré/réaffecté ici).
- * @param version_supported  In/out : 1 si le handshake de version a réussi.
- * @param out_control_session_index Out : -1 sauf bascule réussie en session de
- *                          contrôle (voir ci-dessus). `NULL` accepté (ignoré).
  * @return 1 pour poursuivre la boucle, 0 pour s'arrêter.
  */
 int communicate_with_client_step(client_t *client, int8_t instruction,
@@ -506,21 +442,16 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                                  int *out_control_session_index);
 
 /**
- * @brief Boucle de session de contrôle : le SERVEUR devient l'initiateur des
- *        échanges (`CTRL_PING`/`CTRL_GET_STATS`/`CTRL_COMMAND`) sur une session
- *        déjà enregistrée dans `control_registry` (après `INST_CONTROL_HELLO`).
+ * @brief Boucle de session de contrôle : le serveur devient l'initiateur des
+ *        échanges (`CTRL_PING`/`CTRL_GET_STATS`/`CTRL_COMMAND`) sur une
+ *        session déjà enregistrée dans `control_registry`.
  *
- * Tant que `request != REQUEST_STOP` et que la session reste vivante, répète
- * `control_session_step`. En sortie de boucle (normale ou erreur), désenregistre
- * la session (`control_registry_unregister`), ferme le socket (même épilogue
- * que `communicate_with_client` : shutdown + close + `client->socket_id = -1` +
- * `client->exist = 0`) et journalise via `log_event`. Ne fait JAMAIS double
- * emploi avec l'épilogue de `communicate_with_client` : c'est cette fonction,
- * et uniquement elle, qui ferme le socket dans ce cas (cf. contrat de
- * `communicate_with_client_step` ci-dessus).
- *
- * @param client        Contexte du thread (même slot que la session de travail).
- * @param session_index Indice de session renvoyé par `communicate_with_client_step`.
+ * Tant que `request != REQUEST_STOP` et que la session reste vivante,
+ * répète `control_session_step`. En sortie de boucle, désenregistre la
+ * session, ferme le socket (même épilogue que `communicate_with_client`) et
+ * journalise. Ne fait jamais double emploi avec l'épilogue de
+ * `communicate_with_client` : c'est cette fonction, et uniquement elle, qui
+ * ferme le socket dans ce cas.
  */
 void run_control_session(client_t *client, int session_index);
 

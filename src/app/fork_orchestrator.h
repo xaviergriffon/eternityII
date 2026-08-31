@@ -2,30 +2,14 @@
 #define fork_orchestrator_h
 
 /*
- * Orchestrateur de démarrage différé du client.
+ * Démarrage différé du client : fork des fils de recherche sur événement
+ * (config chargée -> décompte 5s, ou commande `start`), pas au boot.
  *
- * `handle_client` (src/app/main.c) ne forke plus ses NB_THREADS fils de
- * recherche IMMÉDIATEMENT au démarrage : le fork est un événement DIFFÉRÉ.
- * Au boot, soit un fichier de configuration existe (chargé par
- * `client_config_load`) et un décompte de 5 s démarre l'auto-fork, soit
- * aucun fichier n'existe et le process attend une commande console
- * (`start`, ou `config <clé> <valeur>` qui annule le décompte).
- *
- * Cœur PUR et testable (`orchestrator_step`) : aucune I/O, aucun fork, une
- * simple table de transition (état, événement) -> (nouvel état, actions).
- * Autour, un driver IMPUR (`fork_orchestrator_run`) tourne sur le thread
- * PARENT d'origine (celui qui bloquait autrefois dans `wait_child()`) et est
- * l'UNIQUE thread qui appelle jamais `fork()` — via `orchestrator_spawn_forks`,
- * protégé par l'infrastructure de quiescence coopérative de
- * `src/app/fork_gate.h` puisque les threads du parent (checker, réception
- * stats, canal de contrôle, console) tournent désormais AVANT le fork.
- *
- * `fork_orchestrator_post_event` est appelable depuis n'importe quel thread
- * (aujourd'hui : la console uniquement) : elle applique la transition pure
- * SYNCHRONEMENT sous un mutex partagé et réveille le thread orchestrateur si
- * un fork est décidé — une alternative plus simple qu'une file bornée
- * d'événements opaques, puisque chaque événement est un changement d'état
- * idempotent, pas un travail à empiler.
+ * `orchestrator_step` est pur (aucune I/O, aucun fork) ; le driver impur
+ * `fork_orchestrator_run` tourne sur le thread parent d'origine et est
+ * l'unique thread à appeler `fork()`, sous la quiescence de `fork_gate.h`.
+ * `fork_orchestrator_post_event` applique la transition synchronement sous
+ * mutex depuis n'importe quel thread (console).
  */
 
 #include <stddef.h>
@@ -35,129 +19,83 @@
 #include "app/client_config.h"
 #include "app/etii_statistic.h"
 
-/* Déclaration avancée plutôt qu'un `#include "app/etii_client.h"` complet :
-   ce dernier tire (via core/possibility.h -> core/lifo.h) une déclaration
-   `int scroll(File *, void *)` qui entre en collision avec la macro
-   `scroll(win)` de <ncurses.h> quand ce header est inclus, transitivement,
-   par src/ui/logger_ncurses.c (build NCURSES=1) — trouvé via un échec de
-   compilation réel (`too many arguments provided to function-like macro
-   invocation`). `struct search_parts` est un type opaque ici : seul un
-   pointeur y transite (`fork_orchestrator_run`), jamais un accès à ses
-   champs, donc une déclaration avancée suffit. La définition complète
-   (`typedef struct search_parts { ... } search_parts_t`, src/app/etii_client.h)
-   reste l'unique source de vérité du contenu du type. */
+/* Déclaration avancée : un `#include "app/etii_client.h"` complet tire
+   `scroll(File*, void*)` qui collisionne avec la macro ncurses `scroll(win)`
+   (build NCURSES=1, via logger_ncurses.c). Seul un pointeur transite ici. */
 struct search_parts;
 
 /** @brief États de l'orchestrateur. */
 typedef enum {
-    ORCH_WAITING_CONFIG = 0, /**< Aucun fichier de configuration au boot : attente manuelle, jamais de décompte. */
-    ORCH_COUNTDOWN,           /**< Configuration chargée au boot : auto-démarrage à T+5 s. */
-    ORCH_CONFIGURING,         /**< Une saisie `config <clé> <valeur>` a commencé : décompte annulé DÉFINITIVEMENT. */
+    ORCH_WAITING_CONFIG = 0, /**< Aucune config au boot : attente manuelle, jamais de décompte. */
+    ORCH_COUNTDOWN,           /**< Config chargée au boot : auto-démarrage à T+5 s. */
+    ORCH_CONFIGURING,         /**< `config <clé> <valeur>` saisie : décompte annulé définitivement. */
     ORCH_RUNNING,             /**< Fils de recherche en cours d'exécution. */
-    ORCH_STOPPING,            /**< Arrêt/escalade/récolte des fils en cours (`stopForks`, ou `configApply` NEEDS_RESTART avant re-fork). */
-    ORCH_APPLYING,            /**< Application de la configuration en préparation aux tableaux/à la map, fils déjà tous arrêtés — suivie d'un re-fork (`configApply` uniquement). */
+    ORCH_STOPPING,            /**< Arrêt/escalade/récolte en cours (`stopForks`, ou `configApply` avant re-fork). */
+    ORCH_APPLYING,            /**< Config en préparation appliquée aux tableaux/map, fils déjà arrêtés — suivi d'un re-fork. */
     ORCH_EXITING,             /**< Sortie demandée. Aucun driver ne poste encore EV_EXIT. */
 } orch_state_t;
 
 /** @brief Événements de l'orchestrateur. */
 typedef enum {
-    EV_CONFIG_BEGUN = 0, /**< `config <clé> <valeur>` a écrit une valeur valide dans la configuration en préparation. */
-    EV_START,             /**< Commande `start`, OU décompte de COUNTDOWN écoulé, OU fin de la phase APPLYING d'un `configApply` (même chemin de spawn dans les trois cas). */
-    EV_STOP_FORKS,        /**< Commande `stopForks` : arrête les fils sans redémarrer. */
-    EV_RESTART,           /**< `configApply` avec un changement nécessitant un redémarrage (cf. `client_config_diff`) : arrête les fils puis réapplique/re-forke. */
+    EV_CONFIG_BEGUN = 0, /**< `config <clé> <valeur>` a écrit une valeur valide en préparation. */
+    EV_START,             /**< `start`, décompte écoulé, ou fin de phase APPLYING — même chemin de spawn. */
+    EV_STOP_FORKS,        /**< `stopForks` : arrête les fils sans redémarrer. */
+    EV_RESTART,           /**< `configApply` nécessitant un redémarrage : arrête puis réapplique/re-forke. */
     EV_EXIT,              /**< Sortie demandée. Non posté par aucun driver actuellement. */
-    EV_CHILD_DIED,        /**< Un ou plusieurs slots ont été nettoyés par `reap_dead_child_slots` (observabilité pure, jamais d'auto-respawn). */
+    EV_CHILD_DIED,        /**< Slots nettoyés par `reap_dead_child_slots` (observabilité, jamais d'auto-respawn). */
 } orch_event_t;
 
 /** @brief Code d'erreur d'une transition refusée (`orch_actions_t.error`). */
 typedef enum {
     ORCH_OK = 0,
-    ORCH_ERR_ALREADY_RUNNING, /**< EV_START alors qu'un cycle de vie est déjà en cours (RUNNING/STOPPING/EXITING). */
-    ORCH_ERR_UNSUPPORTED,     /**< Réservé — plus émis actuellement, conservé pour compatibilité binaire de l'enum. */
-    ORCH_ERR_NOT_RUNNING,     /**< EV_STOP_FORKS/EV_RESTART alors qu'aucun fils n'est en cours d'exécution (hors ORCH_RUNNING). */
+    ORCH_ERR_ALREADY_RUNNING, /**< EV_START alors qu'un cycle de vie est déjà en cours. */
+    ORCH_ERR_UNSUPPORTED,     /**< Réservé — plus émis, conservé pour compatibilité binaire de l'enum. */
+    ORCH_ERR_NOT_RUNNING,     /**< EV_STOP_FORKS/EV_RESTART hors ORCH_RUNNING. */
 } orch_error_t;
 
-/** @brief Actions décidées par `orchestrator_step` — jamais d'I/O ici, seulement des drapeaux pour l'appelant. */
+/** @brief Actions décidées par `orchestrator_step` — jamais d'I/O, seulement des drapeaux. */
 typedef struct {
-    int spawn_forks;   /**< 1 : l'appelant doit forker (appeler `orchestrator_spawn_forks`). */
-    int stop_forks;    /**< 1 : l'appelant doit exécuter la séquence d'arrêt/escalade/récolte (RUNNING -> STOPPING). */
+    int spawn_forks;   /**< 1 : l'appelant doit forker (`orchestrator_spawn_forks`). */
+    int stop_forks;    /**< 1 : l'appelant doit exécuter l'arrêt/escalade/récolte (RUNNING -> STOPPING). */
     orch_error_t error; /**< ORCH_OK si la transition est acceptée. */
 } orch_actions_t;
 
-/**
- * @brief Rôle assigné à UN fork de travail (dosage recherche/contrôle par
- *        fork — voir `docs/echanges_client_serveur.md`).
- */
+/** @brief Rôle assigné à un fork de travail (dosage recherche/contrôle par fork). */
 typedef enum {
-    FORK_ROLE_SEARCH = 0, /**< Cherche (`autosearch`) : demande des possibilités vérifiées, en produit de nouvelles. */
-    FORK_ROLE_PRUNE = 1,  /**< Contrôle (`autoprune`) : demande des possibilités NON vérifiées, élimine les mortes. */
+    FORK_ROLE_SEARCH = 0, /**< Cherche (`autosearch`) : demande des possibilités vérifiées, en produit. */
+    FORK_ROLE_PRUNE = 1,  /**< Contrôle (`autoprune`) : demande des possibilités non vérifiées, élimine les mortes. */
 } fork_role_t;
 
 /**
- * @brief Résout PUREMENT le nombre de forks affectés au contrôle du stock
- *        (`pruner_forks`, borné à `[0, nb_forks]`) à partir de ce qui a été
- *        DEMANDÉ (`pruner_forks_requested`, cf. `app_static_variables.h`).
+ * @brief Résout PUREMENT le nombre de forks affectés au contrôle du stock,
+ *        borné à `[0, nb_forks]`, à partir de ce qui a été demandé.
  *
- * `pruner_forks_requested < 0` (non demandé, sentinel par défaut) : retombe
- * sur le comportement d'AVANT cette option — `nb_forks` si `pruner_mode`
- * (mode `pruner` : tous les forks contrôlent), `0` sinon (mode `client` :
- * tous cherchent). Les deux cas dégénérés (`0` et `nb_forks`) reproduisent
- * ainsi exactement le comportement historique des modes `client`/`pruner`,
- * qu'ils soient atteints par défaut ou explicitement demandés — aucun
- * déploiement existant ne change de comportement. Une valeur demandée hors
- * `[0, nb_forks]` (ex. `--pruner-forks` supérieur à `nb_forks`) est clampée
- * plutôt que rejetée : le dosage effectif reste défini, jamais un
- * comportement indéterminé.
- *
- * @param pruner_forks_requested Valeur demandée (`-1` = non demandé).
- * @param pruner_mode             Mode de lancement du process (`pruner_mode`
- *                                global AVANT toute réécriture par fork —
- *                                cf. `fork_role_for`).
- * @param nb_forks                Nombre total de forks du lot (`NB_THREADS`).
- * @return                        Le nombre de forks CONTRÔLE effectif, dans `[0, nb_forks]`
- *                                (`0` si `nb_forks <= 0`).
+ * `pruner_forks_requested < 0` (non demandé) retombe sur le comportement
+ * historique : `nb_forks` en mode pruner, `0` en mode client. Une valeur hors
+ * `[0, nb_forks]` est clampée plutôt que rejetée.
  */
 int resolve_pruner_forks(int pruner_forks_requested, int pruner_mode, int nb_forks);
 
 /**
  * @brief Décide PUREMENT le rôle du fork `fork_seq` parmi `nb_forks`, pour un
- *        dosage `pruner_forks` (déjà résolu par `resolve_pruner_forks`) forks
- *        de contrôle.
+ *        dosage `pruner_forks` de forks de contrôle.
  *
- * Les `pruner_forks` forks de plus haut rang (`fork_seq >= nb_forks -
- * pruner_forks`) sont `FORK_ROLE_PRUNE` ; les autres sont `FORK_ROLE_SEARCH` —
- * convention arbitraire mais STABLE (le même `fork_seq` garde le même rôle
- * tant que `nb_forks`/`pruner_forks` ne changent pas), qui reproduit les deux
- * cas dégénérés `pruner_forks == 0` (tout recherche) et `pruner_forks ==
- * nb_forks` (tout contrôle) sans discontinuité. `pruner_forks` est clampé à
- * `[0, nb_forks]` ICI AUSSI (défense en profondeur : cette fonction ne doit
- * jamais mal se comporter si elle est un jour appelée avec une valeur non
- * déjà passée par `resolve_pruner_forks`). Un `fork_seq` hors `[0, nb_forks)`
- * (ou `nb_forks <= 0`) renvoie `FORK_ROLE_SEARCH` par défaut sûr — jamais de
- * déréférencement, jamais de branche indéfinie.
- *
- * @param fork_seq     Rang de ce fork parmi le lot (0..nb_forks-1).
- * @param nb_forks      Nombre total de forks du lot.
- * @param pruner_forks Nombre de forks de contrôle visé (résolu).
- * @return              `FORK_ROLE_PRUNE` ou `FORK_ROLE_SEARCH`.
+ * Les `pruner_forks` forks de plus haut rang sont `FORK_ROLE_PRUNE`, les
+ * autres `FORK_ROLE_SEARCH` — convention stable tant que `nb_forks`/
+ * `pruner_forks` ne changent pas. Un `fork_seq` hors bornes renvoie
+ * `FORK_ROLE_SEARCH` par défaut sûr.
  */
 fork_role_t fork_role_for(int fork_seq, int nb_forks, int pruner_forks);
 
 /**
- * @brief Enveloppe IMPURE de `resolve_pruner_forks` + `fork_role_for` : rôle
- *        EFFECTIF du fork `fork_seq` du lot en cours, résolu depuis les
- *        globales courantes (`pruner_forks_requested`/`pruner_mode`/
- *        `NB_THREADS`, cf. `app_static_variables.h`).
+ * @brief Enveloppe impure de `resolve_pruner_forks` + `fork_role_for` : rôle
+ *        effectif du fork `fork_seq` du lot en cours, depuis les globales
+ *        courantes.
  *
- * Utilisée par `spawn_child_body` (branche fille, `src/app/fork_orchestrator.c`)
- * pour fixer le `pruner_mode`/`g_client_identity_template.mode` PAR FORK avant
- * tout `log_*`, et par les deux points d'affichage diagnostique
- * (`fork_diagnostic_summary`, ici et `src/ui/command_lines.c`) qui doivent le
- * rôle du FORK CONCERNÉ — jamais la globale `pruner_mode` du process PARENT,
- * qui n'est plus représentative dès qu'un lot est mixte.
- *
- * @param fork_seq Rang du fork concerné (0..NB_THREADS-1).
- * @return          `FORK_ROLE_PRUNE` ou `FORK_ROLE_SEARCH`.
+ * Utilisée pour fixer `pruner_mode` par fork avant tout log, et par les
+ * points d'affichage diagnostique qui doivent le rôle du fork concerné —
+ * jamais la globale `pruner_mode` du parent, plus représentative dès qu'un
+ * lot est mixte.
  */
 fork_role_t current_fork_role(int fork_seq);
 
@@ -179,189 +117,97 @@ typedef enum {
 #define STOP_ESCALATION_SIGKILL_MS 10000
 
 /**
- * @brief Délai (ms) après un démarrage/redémarrage réussi (ORCH_RUNNING) sans
- *        qu'AUCUN fork ne rapporte le moindre indicateur (stock, analysé,
- *        coups/s) avant que l'orchestrateur ne signale la situation comme
- *        suspecte (`log_error`, une seule fois par démarrage).
+ * @brief Délai (ms) après un `ORCH_RUNNING` réussi sans qu'aucun fork ne
+ *        rapporte de signal d'activité (stock/analysé/coups-s) avant qu'un
+ *        `log_error` (une fois par démarrage) signale la situation.
  *
- * Ne diagnostique jamais LA cause (connexion serveur en échec, stock serveur
- * vide, fork bloqué avant sa première recherche…) — seulement le SYMPTÔME
- * rapporté à plusieurs reprises par l'exploitant : après un `start`/`config
- * Apply`, tous les indicateurs restent obstinément à 0 sans qu'aucune trace
- * ne permette de comprendre pourquoi. Combiné aux logs de connexion déjà
- * inconditionnels (`check_and_connect_to_server`, `core/datamanager.c`) et au
- * drainage des morts d'enfants (`app_runtime.h`), ce filet de sécurité couvre
- * le cas restant : des forks vivants, correctement connectés ou non, mais qui
- * ne produisent tout simplement rien.
+ * Ne diagnostique pas la cause, seulement le symptôme : après un
+ * `start`/`configApply`, tous les indicateurs restent à 0 sans trace.
  */
 #define STUCK_FORKS_WARN_MS 30000
 
-/**
- * @brief Prédicat PUR : le délai `STUCK_FORKS_WARN_MS` est-il écoulé depuis
- *        `running_since_ms` ? Même convention que `orchestrator_countdown_elapsed`
- *        (horloge injectée, jamais lue directement — testable sans `sleep`).
- */
+/** @brief Prédicat PUR : `STUCK_FORKS_WARN_MS` est-il écoulé depuis `running_since_ms` ? Horloge injectée, testable sans sleep. */
 int stuck_forks_threshold_elapsed(long running_since_ms, long now_ms);
 
 /**
  * @brief Prédicat PUR : ce fork rapporte-t-il zéro sur les trois indicateurs
- *        qui comptent pour l'exploitant (stock en cours, stock analysé,
- *        coups/s) ? `stat == NULL` renvoie 1 (rien à montrer = suspect).
+ *        qui comptent (stock en cours, stock analysé, coups/s) ? `stat ==
+ *        NULL` renvoie 1 (rien à montrer = suspect).
  *
- * Version PAR FORK de `fork_stats_all_zero` : indispensable pour repérer un
- * sous-ensemble de forks bloqués pendant que les autres travaillent
- * normalement — l'agrégat "tous à zéro" ne s'alarme jamais dans ce cas,
- * exactement le cas trouvé en conditions réelles (voir
- * `g_stuck_fork_warned`, `src/app/fork_orchestrator.c`).
+ * Version par fork de `fork_stats_all_zero` : repère un sous-ensemble de
+ * forks bloqués pendant que les autres travaillent, cas où l'agrégat "tous à
+ * zéro" ne s'alarme jamais.
  */
 int fork_stat_is_zero(const struct client_statistics *stat);
 
 /**
- * @brief Prédicat PUR : tous les forks de `stats` (tableau de taille `nb`)
- *        rapportent-ils zéro sur les trois indicateurs qui comptent pour
- *        l'exploitant (stock en cours, stock analysé, coups/s) ?
+ * @brief Prédicat PUR : tous les forks de `stats` rapportent-ils zéro sur les
+ *        trois indicateurs qui comptent ? `nb <= 0` renvoie 1.
  *
- * `nb <= 0` renvoie 1 (« rien à montrer » compte comme suspect, ne bloque
- * jamais la détection sur un NB_THREADS mal lu). Conservé pour compatibilité
- * (et testé indépendamment) mais SUPPLANTÉ en production par le filet par
- * fork (`fork_stat_is_zero` + `g_stuck_fork_warned`) : un agrégat "tous à
- * zéro" ne détecte jamais un sous-ensemble de forks bloqués pendant que les
- * autres travaillent — voir le correctif documenté dans
- * docs/echanges_client_serveur.md.
+ * Conservé pour compatibilité mais supplanté en production par le filet par
+ * fork (`fork_stat_is_zero`), seul à détecter un sous-ensemble bloqué.
  */
 int fork_stats_all_zero(const struct client_statistics *stats, int nb);
 
 /**
- * @brief Prédicat PUR décidant l'escalade de signal d'arrêt de la séquence
- *        de redémarrage à chaud :
- *        SIGINT initial (envoyé par l'appelant, hors de cette fonction), puis
- *        SIGTERM à +5 s si des fils sont toujours vivants, puis SIGKILL à
- *        +10 s. Ne dépend que d'une horloge injectée (jamais `time()`
- *        lui-même) : testable sans "sleep" réel.
- *
- * @param elapsed_ms Millisecondes écoulées depuis l'envoi du SIGINT initial.
- * @return           `STOP_ESCALATION_NONE` avant 5 s, `STOP_ESCALATION_SIGTERM`
- *                    entre 5 s et 10 s, `STOP_ESCALATION_SIGKILL` à partir de 10 s.
+ * @brief Prédicat PUR décidant l'escalade de signal d'arrêt : SIGINT initial
+ *        (hors de cette fonction), SIGTERM à +5s si des fils sont encore
+ *        vivants, SIGKILL à +10s. Horloge injectée, testable sans sleep.
  */
 stop_escalation_action_t stop_escalation_next(long elapsed_ms);
 
 /**
- * @brief Prédicat PUR : millisecondes d'INACTIVITÉ d'un fils donné, base de
- *        l'escalade d'arrêt PAR FILS (`exit_interpreter`,
- *        `orchestrator_do_stop_forks`) plutôt qu'un délai unique appliqué à
- *        tout le lot.
+ * @brief Prédicat PUR : millisecondes d'inactivité d'un fils donné, base de
+ *        l'escalade d'arrêt PAR FILS plutôt qu'un délai unique pour tout le
+ *        lot.
  *
- * Avant ce prédicat, `stop_escalation_next` était consulté avec le temps
- * écoulé depuis le SIGINT INITIAL, identique pour tous les fils — un fils
- * encore en train de vider sa file d'acquittements en attente, ou de
- * renvoyer son stock local restant (cf. `server_io_active` côté fork,
- * `fork_last_activity` côté parent) se voyait donc interrompu par
- * SIGTERM/SIGKILL au même instant qu'un fils réellement bloqué, perdant le
- * travail que ce vidage tentait justement de sauver. `now`/`escalation_start`/
- * `last_activity` sont tous des `time(NULL)` injectés (jamais lus
- * directement ici) : testable sans horloge réelle.
- *
- * @param last_activity    Dernier instant connu où ce fils a été vu actif
- *                         (0 si jamais observé — un client sans cette
- *                         instrumentation, ou mort avant son premier rapport).
- * @param escalation_start Instant où la demande d'arrêt a commencé à
- *                         s'appliquer à ce fils (SIGINT envoyé).
- * @param now              Instant courant.
- * @return                 Millisecondes d'inactivité, jamais négatif. Si
- *                         `last_activity == 0`, l'inactivité est comptée
- *                         depuis `escalation_start` — un fils qui ne rapporte
- *                         JAMAIS rien reste soumis à l'escalade normale,
- *                         plutôt que d'en être indéfiniment protégé.
+ * Sans ceci un fils encore en train de vider son stock local se voyait
+ * interrompu au même instant qu'un fils réellement bloqué. Si
+ * `last_activity == 0` (jamais observé), l'inactivité est comptée depuis
+ * `escalation_start` — reste soumis à l'escalade normale plutôt que
+ * d'en être indéfiniment protégé.
  */
 long child_idle_ms(time_t last_activity, time_t escalation_start, time_t now);
 
 /**
  * @brief Formate PUREMENT un résumé diagnostique court du dernier état connu
- *        d'un fils, pour les lignes d'escalade d'arrêt PAR FILS
- *        (`exit_interpreter`, `orchestrator_do_stop_forks`).
+ *        d'un fils, pour les lignes d'escalade d'arrêt par fils.
  *
- * Sans lui, une ligne d'escalade ne dit QUE « ce fils est encore vivant après
- * N secondes d'inactivité » — impossible de distinguer depuis l'extérieur un
- * fils réellement bloqué d'un fils occupé sur un état qui ne se voit pas
- * autrement (ex. un gros lot d'acquittements ou de stock local en cours de
- * vidage, cf. `server_io_active` / `feed_thread_aposs` / `bt_flush_pending`),
- * ou de savoir SI ce fils a seulement déjà rapporté quoi que ce soit. `stat`
- * vient du dernier `client_statistics` connu (`fork_statistics[c]`, estampillé en même temps
- * que `fork_last_activity[c]` sur chaque `IPC_MSG_STATS` reçu) — les mêmes
- * compteurs déjà affichés par `check`/`clients`, pas une nouvelle télémétrie.
+ * Sans lui, une ligne d'escalade ne dit que « ce fils est encore vivant » —
+ * pas de distinction entre un fils bloqué et un fils occupé sur un état
+ * invisible autrement (gros lot d'acquittements en cours de vidage, etc.).
  *
- * @param stat        Dernier `client_statistics` connu pour ce fils. Jamais
- *                     déréférencé si `reported` est faux.
- * @param reported     Vrai si `stat` a RÉELLEMENT été rapporté au moins une
- *                     fois (`fork_last_activity[c] != 0`) — sinon `stat` peut
- *                     n'être que des zéros d'initialisation jamais mis à jour,
- *                     à ne jamais présenter comme un état réel.
- * @param pruner_mode  Vrai si ce process tourne en mode pruner (tous les fils
- *                     d'un même process client partagent le même mode) :
- *                     bascule entre les compteurs de recherche
- *                     (stock/analysé/coups-s/profondeur) et ceux du pruner
- *                     (vérifiées/éliminées/cases-s). Dans les deux cas, la
- *                     sortie inclut aussi `stat->server_io_active`
- *                     (`serveur=oui`/`serveur=non`, cf. `server_socket_io_lock`/
- *                     `_unlock`, `core/datamanager.h`) — répond directement à
- *                     « ce fils est-il en train de PARLER au serveur, ou juste
- *                     bloqué/inactif ? ».
- * @param out          Tampon de sortie, toujours NUL-terminé si `out_size > 0`.
- * @param out_size     Taille de `out`. `out == NULL` ou `out_size == 0` :
- *                     no-op sûr, jamais de déréférencement.
+ * @param reported    Vrai si `stat` a réellement été rapporté au moins une
+ *                    fois — sinon `stat` peut n'être que des zéros
+ *                    d'initialisation, à ne jamais présenter comme réel.
+ * @param pruner_mode Bascule entre compteurs de recherche et de pruner.
  */
 void fork_diagnostic_summary(const struct client_statistics *stat, int reported,
                               int pruner_mode, char *out, size_t out_size);
 
 /**
- * @brief Interprète PUREMENT le résultat d'un `waitpid(target_pid, &status,
- *        WNOHANG)` ciblé, tel qu'utilisé par la séquence d'arrêt
- *        (`orchestrator_do_stop_forks`, `src/app/fork_orchestrator.c`).
+ * @brief Interprète PUREMENT un `waitpid(target_pid, &status, WNOHANG)`
+ *        ciblé, tel qu'utilisé par la séquence d'arrêt.
  *
- * `sigchld_handler` (`src/app/app_runtime.c`) installe un gestionnaire
- * PROCESS-WIDE sur SIGCHLD, mais le MASQUAGE de ce signal
- * (`pthread_sigmask`, D2/risque #2) n'est posé que sur le thread
- * orchestrateur appelant — les autres threads du parent (checker,
- * `server_tcp`, canal de contrôle, console) ne le bloquent PAS. Un enfant qui
- * meurt pendant la séquence d'arrêt peut donc être moissonné par
- * `sigchld_handler` sur N'IMPORTE LEQUEL de ces autres threads (via son
- * propre `waitpid(-1, …, WNOHANG)`) AVANT que le `waitpid(pid, …)` explicite
- * ci-dessous n'ait sa chance — auquel cas ce dernier renvoie `-1`/`ECHILD`
- * (« plus mon enfant », déjà réclamé), pas `0` (« encore vivant, rien à
- * signaler pour l'instant »). Confondre ces deux cas fait tourner la
- * séquence d'arrêt INDÉFINIMENT en croyant l'enfant toujours vivant alors
- * qu'il est mort depuis longtemps — bogue réel trouvé en testant
- * manuellement `configApply` (état `STOPPING` qui ne se résorbait jamais,
- * même après l'escalade SIGKILL).
+ * Le masquage SIGCHLD n'est posé que sur le thread orchestrateur appelant ;
+ * un enfant mort pendant l'arrêt peut être moissonné par le handler global
+ * sur un autre thread avant que ce `waitpid` explicite n'ait sa chance —
+ * auquel cas il renvoie `-1`/`ECHILD` (déjà réclamé), pas `0` (encore
+ * vivant). Confondre les deux fait tourner l'arrêt indéfiniment en croyant
+ * l'enfant vivant — bogue réel trouvé en test manuel de `configApply`.
  *
- * @param waitpid_result  Valeur de retour de `waitpid`.
- * @param target_pid      Le pid explicitement attendu (2ᵉ argument passé à `waitpid`).
- * @param wait_errno       `errno` immédiatement après l'appel à `waitpid`
- *                         (capturé par l'appelant — cette fonction ne touche
- *                         jamais `errno` elle-même, pour rester pure/testable).
- * @return 1 si le pid est mort — soit réclamé par CET appel
- *         (`waitpid_result == target_pid`), soit déjà réclamé ENTRE-TEMPS par
- *         un autre thread (`waitpid_result == -1 && wait_errno == ECHILD`,
- *         ce qui compte comme mort aussi) ; 0 s'il est encore vivant
- *         (`WNOHANG` n'a rien trouvé, `waitpid_result == 0`) ou en cas
- *         d'erreur transitoire (`EINTR`, …) — l'appelant retentera au tour
- *         suivant.
+ * @return 1 si le pid est mort (réclamé par cet appel, ou déjà réclamé
+ *         entre-temps via ECHILD) ; 0 s'il est encore vivant ou en cas
+ *         d'erreur transitoire (EINTR…).
  */
 int waitpid_target_is_reaped(pid_t waitpid_result, pid_t target_pid, int wait_errno);
 
 /**
  * @brief Transition PURE de la machine à états. Aucune I/O, aucun fork.
  *
- * `now_ms` n'est pas consommé par la table de transition actuelle (le
- * décompte de 5 s est une deadline suivie par le DRIVER impur, pas par cet
- * état — cf. `orchestrator_countdown_elapsed`) ; conservé pour un usage
- * futur (horodatage d'une transition STOPPING/APPLYING).
- *
- * @param s      État courant.
- * @param ev     Événement reçu.
- * @param now_ms Horloge courante en millisecondes (réservé, cf. ci-dessus).
- * @param out    Sortie (jamais NULL déréférencé : NULL accepté, ignoré).
- * @return       Le nouvel état.
+ * `now_ms` n'est pas consommé par la table actuelle (le décompte de 5s est
+ * suivi par le driver impur, pas par cet état) ; conservé pour un usage
+ * futur.
  */
 orch_state_t orchestrator_step(orch_state_t s, orch_event_t ev, long now_ms, orch_actions_t *out);
 
@@ -369,318 +215,181 @@ orch_state_t orchestrator_step(orch_state_t s, orch_event_t ev, long now_ms, orc
 int orchestrator_countdown_elapsed(long countdown_deadline_ms, long now_ms);
 
 /**
- * @brief Réinitialise tout l'état partagé de l'orchestrateur (état, config en
- *        préparation, drapeau de fork en attente). Réservé aux tests
- *        unitaires — en production le module vit pour toute la durée du
- *        process (initialisé par `fork_orchestrator_run`).
+ * @brief Réinitialise tout l'état partagé de l'orchestrateur. Réservé aux
+ *        tests unitaires — en production le module vit pour toute la durée
+ *        du process.
  */
 void fork_orchestrator_reset(void);
 
 /**
  * @brief Applique un événement de façon thread-safe, appelable depuis
- *        N'IMPORTE QUEL thread (aujourd'hui : la console).
+ *        n'importe quel thread (aujourd'hui : la console).
  *
- * Prend le verrou partagé, applique `orchestrator_step` immédiatement,
- * met à jour l'état partagé, réveille le thread orchestrateur si un fork est
- * décidé, puis rend la main avec le résultat exact — c'est ce qui donne à
- * `start`/`config <clé> <valeur>` un retour d'erreur immédiat et correct
- * (« déjà en cours d'exécution ») sans latence de sondage.
- *
- * @param ev  Événement à appliquer.
- * @param out Sortie (NULL accepté si l'appelant ne veut pas le résultat).
+ * Prend le verrou partagé, applique `orchestrator_step` immédiatement, réveille
+ * l'orchestrateur si un fork est décidé, rend la main avec le résultat exact —
+ * donne à `start`/`config` un retour d'erreur immédiat sans latence de sondage.
  */
 void fork_orchestrator_post_event(orch_event_t ev, orch_actions_t *out);
 
 /**
  * @brief Lecture thread-safe de l'état courant et du temps restant avant
- *        auto-démarrage (utilisée par la commande console `config`).
+ *        auto-démarrage (commande console `config`).
  *
- * @param out_state                  Sortie (NULL accepté) : état courant.
- * @param out_countdown_remaining_ms Sortie (NULL accepté) : millisecondes
- *                                   restantes si l'état est `ORCH_COUNTDOWN`,
- *                                   -1 sinon.
+ * @param out_countdown_remaining_ms -1 sauf en `ORCH_COUNTDOWN`.
  */
 void fork_orchestrator_snapshot(orch_state_t *out_state, long *out_countdown_remaining_ms);
 
 /**
- * @brief Écrit une ligne `clé = valeur` dans la configuration "en
- *        préparation" (réutilise `client_config_parse_line`, jamais de
- *        logique de validation dupliquée) et poste `EV_CONFIG_BEGUN`
- *        SEULEMENT si la ligne a été acceptée (`CLIENT_CONFIG_LINE_SET`) —
+ * @brief Écrit une ligne `clé = valeur` dans la configuration en préparation
+ *        et poste `EV_CONFIG_BEGUN` seulement si la ligne a été acceptée —
  *        une ligne invalide ne doit pas annuler le décompte.
- *
- * @param line Ligne au format `clé = valeur` (même format que le fichier de
- *             configuration, cf. `client_config_parse_line`).
- * @return     Le statut de parsing, pour que l'appelant (l'interpréteur
- *             console) puisse rapporter une erreur précise.
  */
 client_config_line_status_t fork_orchestrator_stage_config_line(const char *line);
 
 /**
- * @brief Formate la configuration "en préparation" courante dans `out`, sous
- *        verrou (jamais de pointeur brut exposé vers l'état partagé — cf.
- *        `client_config_format`). Utilisée par la commande console `config`.
- *
- * @return Comme `client_config_format` : octets écrits, ou -1 si tronqué.
+ * @brief Formate la configuration en préparation dans `out`, sous verrou.
+ *        Utilisée par la commande console `config`.
  */
 int fork_orchestrator_format_staged_config(char *out, size_t out_size);
 
 /**
- * @brief Superpose la configuration "en préparation" sur `out` (déjà rempli,
- *        typiquement par `client_config_capture_effective`) : chaque clé
- *        présente côté staged écrase la valeur effective correspondante.
+ * @brief Superpose la configuration en préparation sur `out` (déjà rempli) :
+ *        chaque clé staged écrase la valeur effective correspondante.
  *
  * Sans ceci, une valeur préparée par `config <clé> <valeur>` puis écrite par
- * `configSave` était silencieusement perdue — `configSave` ne capturait que
- * l'EFFECTIVE, jamais la configuration en préparation, donc un
- * `config nb_forks 8` suivi de `configSave` puis d'un redémarrage du
- * process ne changeait jamais rien. Appelée par `configSave` avant
- * l'écriture, pour que ce qui a été préparé finisse bien par prendre effet
- * au prochain démarrage du process (redémarrage, cf. `--config-file`). Pour
- * une prise d'effet immédiate SANS redémarrer, voir
- * `fork_orchestrator_apply_staged_config`.
- *
- * @param out Configuration à mettre à jour en place (chaînes déjà présentes
- *            libérées avant remplacement si la clé est staged).
+ * `configSave` était silencieusement perdue. Pour une prise d'effet
+ * immédiate sans redémarrer, voir `fork_orchestrator_apply_staged_config`.
  */
 void fork_orchestrator_merge_staged_config(client_config_t *out);
 
 /**
- * @brief Applique IMMÉDIATEMENT la configuration "en préparation" aux
- *        globales en vigueur (`client_config_apply_direct`), sans attendre
- *        un redémarrage du process.
+ * @brief Applique immédiatement la configuration en préparation aux
+ *        globales en vigueur, sans attendre un redémarrage du process.
  *
- * Appelée par le driver (`fork_orchestrator_run`) juste avant tout fork
- * effectif — `start` manuel ou décompte auto-déclenché, le même point de
- * code pour les deux — pour que `config <clé> <valeur>` suivi de `start`
- * (ou d'un décompte qui va à son terme) prenne effet sur les process de
- * recherche qui vont être lancés, sans nécessiter de redémarrer l'exécutable.
- * Ceci est distinct de `fork_orchestrator_merge_staged_config` (qui vise le
- * fichier écrit par `configSave`, consommé au PROCHAIN démarrage) : les deux
- * chemins existent en parallèle, aucun n'est un raccourci vers l'autre.
+ * Appelée juste avant tout fork effectif (`start` ou décompte) pour que
+ * `config` suivi de `start` prenne effet sans redémarrer l'exécutable.
+ * Distinct de `fork_orchestrator_merge_staged_config` (fichier consommé au
+ * prochain démarrage) : les deux chemins coexistent.
  */
 void fork_orchestrator_apply_staged_config(void);
 
 /**
- * @brief Compare la configuration EFFECTIVE @p effective à la configuration
- *        EN PRÉPARATION courante (`client_config_diff`, sous verrou) — utilisée
- *        par `configApply` pour décider entre diffusion IPC seule et
- *        redémarrage complet.
- *
- * @param effective Configuration effective déjà capturée par l'appelant
- *                   (`client_config_capture_effective`).
- * @return           Le verdict de `client_config_diff`.
+ * @brief Compare la configuration effective à la configuration en
+ *        préparation — utilisée par `configApply` pour décider entre
+ *        diffusion IPC seule et redémarrage complet.
  */
 client_config_diff_t fork_orchestrator_diff_staged_config(const client_config_t *effective);
 
 /**
- * @brief La configuration EN PRÉPARATION, une fois appliquée, violerait-elle
- *        `gpu_pruner_forks_conflict` (`app_runtime.h`) ?
+ * @brief La configuration en préparation, une fois appliquée, violerait-elle
+ *        `gpu_pruner_forks_conflict` ?
  *
  * Le garde-fou `--gpu` + `--pruner-forks != nb_forks` de `handle_client`
- * (`main.c`) n'est évalué qu'UNE FOIS, avant le tout premier `fork()` du
- * process — jamais réévalué sur le chemin de reconfiguration à chaud
- * (`configApply` NEEDS_RESTART, y compris poussé à distance par
- * `clientsRoles`/`--auto-roles` via le canal de contrôle). Sans ce test,
- * un client lancé en `pruner --gpu` peut recevoir un `pruner_forks` stagé
- * différent de `nb_forks` (ou un `nb_forks` stagé qui rend l'ancien
- * `pruner_forks_requested` incohérent) et re-forker silencieusement dans
- * l'état exact que le garde-fou de démarrage rend impossible.
+ * n'est évalué qu'une fois, avant le premier fork — jamais réévalué sur le
+ * chemin de reconfiguration à chaud. Sans ce test, un client `pruner --gpu`
+ * peut re-forker silencieusement dans un état que le garde-fou de démarrage
+ * rend impossible.
  *
- * Calcule les valeurs `nb_forks`/`pruner_forks_requested` qui seraient
- * EFFECTIVES après application (clé stagée si présente, sinon valeur
- * courante des globales — la même logique que `client_config_apply_direct`,
- * sans rien appliquer ni modifier ici), et les soumet à
- * `gpu_pruner_forks_conflict` avec le `gpu_pruner_mode` courant (lu
- * directement : ce n'est jamais une clé de configuration stageable).
- *
- * @return 1 si l'application de la configuration stagée créerait le
- *         conflit, 0 sinon (y compris sur un build sans CUDA, où
- *         `gpu_pruner_mode` reste toujours à 0).
+ * @return 1 si l'application créerait le conflit, 0 sinon (toujours 0 sur un
+ *         build sans CUDA).
  */
 int fork_orchestrator_staged_gpu_pruner_conflict(void);
 
 /**
  * @brief Cœur testable de `fork_orchestrator_staged_gpu_pruner_conflict`,
- *        avec `gpu_pruner_mode` injecté en paramètre plutôt que lu sur la
- *        globale (qui n'existe même pas hors build `WITH_CUDA`) — même
- *        convention que `gpu_pruner_forks_conflict` (`app_runtime.h`),
- *        pour rester exercable par les tests indépendamment du build.
- *
- * @param gpu_pruner_mode_value Valeur à utiliser pour `gpu_pruner_mode`.
- * @return                       Voir `fork_orchestrator_staged_gpu_pruner_conflict`.
+ *        avec `gpu_pruner_mode` injecté plutôt que lu sur la globale (qui
+ *        n'existe pas hors build `WITH_CUDA`).
  */
 int fork_orchestrator_staged_gpu_pruner_conflict_for(int gpu_pruner_mode_value);
 
 /**
- * @brief Applique la configuration en préparation aux globales du PARENT
- *        (`client_config_apply_direct`) PUIS diffuse aux process fils déjà en
- *        cours d'exécution, par IPC, les seules clés à chaud effectivement
- *        stagées (`maxStockByThread`/`limit`/`prunerBatch`) — même mécanisme
- *        que les commandes console homonymes (`send_command_to_childs`).
+ * @brief Applique la configuration en préparation aux globales du parent
+ *        puis diffuse aux fils déjà en cours d'exécution, par IPC, les clés
+ *        à chaud effectivement stagées (`maxStockByThread`/`limit`/
+ *        `prunerBatch`).
  *
- * Réservée à la branche `HOT_ONLY` de `configApply`
- * (`fork_orchestrator_diff_staged_config` ayant déjà garanti qu'aucune clé
- * nécessitant un redémarrage n'est stagée). Sans effet sur `nb_forks`/
- * `server_host`/`parts_file`, qui ne peuvent être stagées ici puisque
- * `HOT_ONLY` l'exclut par construction — mais recopiées quand même vers les
- * globales si présentes, par simple réutilisation de
- * `fork_orchestrator_apply_staged_config` (no-op dans ce cas précis).
+ * Réservée à la branche HOT_ONLY de `configApply` (aucune clé nécessitant un
+ * redémarrage n'est stagée). Sans effet sur `nb_forks`/`server_host`/
+ * `parts_file`, exclus par construction du chemin HOT_ONLY.
  */
 void fork_orchestrator_apply_hot_staged_config(void);
 
 /**
- * @brief Fork réel des `NB_THREADS` process de recherche — corps de la
- *        boucle historique de `handle_client` (src/app/main.c), déplacé ici
- *        À L'IDENTIQUE, avec la quiescence coopérative prise/relâchée AUTOUR
- *        DE CHAQUE `fork()` PRIS INDIVIDUELLEMENT (pas une seule fois pour toute
- *        la boucle) puisque les threads du parent tournent déjà :
- *        `fork_gate_request_quiesce` + `fork_gate_acquire_io_locks`
- *        immédiatement avant chaque `fork()`, `fork_gate_release_io_locks`/
- *        `_release_quiesce` immédiatement après (dans les DEUX branches,
- *        avant tout `log_info`/`log_error` de bilan) — une section critique
- *        élargie à toute la boucle auto-interbloquerait le thread forkeur
- *        dès qu'un message diagnostique (erreur de fork, ligne
- *        `DEBUG_THREAD`) reprend le verrou de sortie du logger, non
- *        récursif, qu'il détient déjà.
+ * @brief Fork réel des `NB_THREADS` process de recherche.
  *
- * Un échec de quiescence pour UN slot donné (timeout ~2 s, jamais de fork
- * dans le doute) est traité comme un échec de fork ordinaire : compté dans
- * le même compteur d'échecs (abandon après 10), le slot suivant est
- * retenté.
+ * Quiescence coopérative prise/relâchée autour de chaque `fork()`
+ * individuellement (pas une seule fois pour toute la boucle), puisque les
+ * threads du parent tournent déjà — une section critique élargie à toute la
+ * boucle auto-interbloquerait le thread forkeur dès qu'un log de bilan
+ * reprend le verrou de sortie non récursif qu'il détient déjà.
  *
- * Sur succès (`created > 0`) : met à jour `g_active_forks` et appelle
- * `control_channel_request_reconnect()`.
+ * Un échec de quiescence pour un slot (timeout ~2s, jamais de fork dans le
+ * doute) est traité comme un échec de fork ordinaire.
  *
- * @return Le nombre de process créés (>= 0, comme `count_created_forks` —
- *         0 si aucun, y compris si la quiescence a échoué pour tous les
- *         slots tentés).
+ * @return Le nombre de process créés (>= 0).
  */
 int orchestrator_spawn_forks(void);
 
 /**
- * @brief Travail d'APPLYING (ORCH_APPLYING) : appelée par le driver
- *        uniquement une fois `orchestrator_do_stop_forks` revenue, donc zéro
- *        fils vivant — applique la configuration en préparation
- *        (`fork_orchestrator_apply_staged_config`), puis, SEULEMENT pour les
- *        clés qui ont réellement changé, reconstruit `childrens_pid`/
- *        `forkId`/`fork_statistics` (`nb_forks`) et/ou la map de recherche
- *        partagée COW (`parts_file`).
+ * @brief Travail d'APPLYING : appelée une fois `orchestrator_do_stop_forks`
+ *        revenue (zéro fils vivant) — applique la configuration en
+ *        préparation puis, seulement pour les clés qui ont changé,
+ *        reconstruit les tableaux de fils (`nb_forks`) et/ou la map de
+ *        recherche partagée COW (`parts_file`).
  *
- * Protégée par la quiescence coopérative (`fork_gate_request_quiesce`,
- * budget `FORK_GATE_DEFAULT_TIMEOUT_MS`) : sans elle, un lecteur concurrent
- * de ces tableaux (checker, `server_tcp`, canal de contrôle, console) peut
- * déréférencer un pointeur libéré pendant la fenêtre de reconstruction —
- * observé en pratique comme un crash réel du thread console sous
- * `NCURSES=1` et, plus discrètement en mode ANSI, comme une configuration
- * qui « ne semble pas prise en compte ». Jamais dans le doute : sur timeout,
- * la fonction ne modifie RIEN (configuration, tableaux, map inchangés) et
- * renvoie 0 — l'appelant retombe en `ORCH_WAITING_CONFIG`, fils déjà arrêtés,
- * en attente d'un nouveau `configApply`/`start`.
+ * Protégée par la quiescence coopérative : sans elle, un lecteur concurrent
+ * (checker, `server_tcp`, console…) peut déréférencer un pointeur libéré
+ * pendant la reconstruction — observé en pratique comme un crash console
+ * sous NCURSES=1. Sur timeout, ne modifie rien et renvoie 0 — l'appelant
+ * retombe en `ORCH_WAITING_CONFIG`.
  *
- * Exposée (non `static`) pour être testable directement : voir
- * `apply_restart_config_quiesces_concurrent_array_readers`
- * (tests/app/test_fork_orchestrator.c), qui prouve par construction (un
- * thread compagnon en boucle serrée sur `fork_gate_checkpoint` ne peut par
- * définition jamais s'exécuter pendant que la quiescence est active) que
- * cette fenêtre est bien protégée.
- *
- * @param shared_parts Pièces de recherche partagées, ou NULL (aucune
- *                      reconstruction de map n'est alors tentée, même si
- *                      `parts_file` a changé — mode dégradé défensif, ne
- *                      devrait pas se produire en production côté client).
- * @return 1 si la reconstruction a eu lieu (quiescence atteinte), 0 si elle
- *         a été refusée (timeout).
+ * @param shared_parts NULL : aucune reconstruction de map n'est tentée, même
+ *                     si `parts_file` a changé (mode dégradé défensif).
+ * @return 1 si la reconstruction a eu lieu, 0 si refusée (timeout).
  */
 int orchestrator_apply_restart_config(struct search_parts *shared_parts);
 
 /**
  * @brief Initialise l'état partagé de l'orchestrateur (`ORCH_COUNTDOWN` si
- *        @p config_loaded_at_boot, sinon `ORCH_WAITING_CONFIG`) — À APPELER
- *        AVANT le lancement de tout thread susceptible de poster un
+ *        @p config_loaded_at_boot, sinon `ORCH_WAITING_CONFIG`) — à appeler
+ *        avant le lancement de tout thread susceptible de poster un
  *        événement (console, canal de contrôle, HTTP…).
  *
- * Trouvé nécessaire via des tests manuels réels (invisible en local, reproduit
- * de façon fiable sous `make test-docker`) : quand cette
- * initialisation faisait partie de `fork_orchestrator_run` elle-même — appelée
- * APRÈS le lancement du thread console dans `handle_client` — un opérateur (ou
- * un banc de test piloté par FIFO) tapant `start` assez vite gagnait la course
- * : la console postait `EV_START` (état `RUNNING`, fork en attente) avant que
- * `fork_orchestrator_run` n'ait fini d'écraser SANS CONDITION l'état partagé
- * avec ses valeurs de démarrage — annulant silencieusement le `start`
- * (`g_orch_pending_spawn` remis à 0, état ramené à `WAITING_CONFIG`), sans
- * aucune erreur observable. Sur macOS la fenêtre de course est assez étroite
- * pour ne quasiment jamais se déclencher ; le conteneur Linux/gcc de
- * `make test-docker`, plus chargé et ordonnancé différemment, la reproduit à
- * chaque exécution de `run_solution_16.sh`. La correction structurelle est de
- * ne plus jamais réinitialiser cet état après le lancement d'un thread
- * concurrent : `fork_orchestrator_init_state` est donc désormais appelée par
- * `handle_client` (`src/app/main.c`) AVANT `run_server_thread`/`run_checker`/
- * `run_console`/`start_control_channel`, pendant que le process est encore
- * mono-thread — plus aucune course possible par construction.
- *
- * @param config_loaded_at_boot Statut de `client_config_load` au démarrage
- *                               de `handle_client` (1 = un fichier a été
- *                               chargé, 0 = absent/illisible).
+ * Doit rester appelée pendant que le process est encore mono-thread : quand
+ * cette init faisait partie de `fork_orchestrator_run` (après le lancement
+ * du thread console), un `start` tapé assez vite gagnait la course contre
+ * l'écrasement sans condition de l'état partagé, annulant silencieusement le
+ * `start` — invisible sur macOS, reproduit à chaque run sous
+ * `make test-docker` (plus chargé, ordonnancé différemment).
  */
 void fork_orchestrator_init_state(int config_loaded_at_boot);
 
 /**
  * @brief Boucle principale de l'orchestrateur — remplace `wait_child()` dans
- *        `handle_client`. Tourne sur le thread PARENT d'origine.
+ *        `handle_client`. Tourne sur le thread parent d'origine.
  *
- * PRÉREQUIS : `fork_orchestrator_init_state(config_loaded_at_boot)` doit déjà
- * avoir été appelée (voir sa doc) — cette fonction ne touche plus l'état
- * partagé elle-même, seulement le journal (affichage de la configuration
- * effective si @p config_loaded_at_boot) puis la boucle : réveil sur
- * événement posté ou sur timeout (tick `ORCH_TICK_MS`), décompte (log une
- * fois par seconde, auto-`EV_START` à échéance), spawn effectif sur décision,
- * nettoyage des slots morts (`reap_dead_child_slots`) et `EV_CHILD_DIED` en
- * `ORCH_RUNNING` ; en `ORCH_STOPPING`, exécute la séquence d'arrêt/escalade/
- * récolte (SIGCHLD masqué, SIGINT puis escalade `stop_escalation_next`), puis
- * soit revient en `ORCH_WAITING_CONFIG` (arrêt simple, `stopForks`), soit
- * passe en `ORCH_APPLYING` (redémarrage à chaud, `configApply` NEEDS_RESTART :
- * reconstruction des tableaux de fils si `nb_forks` a changé, de la map de
- * recherche partagée si `parts_file` a changé) puis re-fork via le MÊME
- * chemin `EV_START` qu'un `start` manuel. Ne retourne que lorsque plus aucun
- * fork ne subsiste ET
- * (soit un cycle RUNNING a déjà eu lieu, soit `request == REQUEST_STOP`) —
- * reproduit exactement le contrat de `wait_child()` (sortie sur zéro enfant)
- * tout en couvrant le nouveau cas « jamais démarré, puis Ctrl-C ».
+ * Prérequis : `fork_orchestrator_init_state` déjà appelée. Réveil sur
+ * événement posté ou timeout (tick `ORCH_TICK_MS`) ; décompte en
+ * `ORCH_COUNTDOWN` ; spawn effectif sur décision ; nettoyage des slots morts
+ * en `ORCH_RUNNING`. En `ORCH_STOPPING` : arrêt/escalade/récolte, puis retour
+ * en `ORCH_WAITING_CONFIG` (arrêt simple) ou passage en `ORCH_APPLYING`
+ * (redémarrage à chaud) suivi d'un re-fork via le même chemin `EV_START`
+ * qu'un `start` manuel. Ne retourne que quand plus aucun fork ne subsiste ET
+ * (un cycle RUNNING a déjà eu lieu, ou `request == REQUEST_STOP`).
  *
- * @param config_loaded_at_boot Même valeur que celle déjà passée à
- *                               `fork_orchestrator_init_state` — utilisée ici
- *                               uniquement pour décider quel message afficher,
- *                               jamais pour re-toucher l'état.
- * @param shared_parts           Pièces de recherche partagées COW, construites
- *                               et publiées par `handle_client` AVANT l'appel
- *                               (`build_search_parts` + `set_inherited_search_parts`).
- *                               La PROPRIÉTÉ de l'allocation reste à
- *                               `handle_client` (qui la libère après le retour
- *                               de cette fonction), mais la RECONSTRUCTION sur
- *                               changement de `parts_file` est déléguée à
- *                               l'orchestrateur (`ORCH_APPLYING`), seul à
- *                               savoir quand plus aucun fils n'est vivant.
+ * @param shared_parts Pièces de recherche partagées COW, construites et
+ *                     publiées par `handle_client` avant l'appel ; propriété
+ *                     de l'allocation reste au caller, mais sa reconstruction
+ *                     sur changement de `parts_file` est déléguée ici.
  */
 void fork_orchestrator_run(int config_loaded_at_boot, struct search_parts *shared_parts);
 
 /**
- * @brief Journalise dans `events.log` (jamais sur la console — `log_file`)
- *        un instantané de la configuration effective et de l'environnement,
- *        juste après un démarrage RÉUSSI des fils de recherche.
+ * @brief Journalise dans `events.log` (jamais sur la console) un instantané
+ *        de la configuration effective, juste après un démarrage réussi des
+ *        fils de recherche.
  *
- * Exposée (non `static`) uniquement pour être appelable directement depuis
- * les tests : ne touche à aucun état partagé de l'orchestrateur (ne lit que
- * des globales déjà publiques — configuration effective, identité déclarée,
- * `NB_THREADS`/`nb_file_possibility`) et n'a donc pas besoin d'un vrai
- * `fork()`/driver pour être exercée, à la différence de
- * `orchestrator_spawn_forks`/`fork_orchestrator_run` eux-mêmes (couverts par
- * `make test-integration`, jamais par un fork réel en test unitaire — cf.
- * l'en-tête de tests/app/test_fork_orchestrator.c).
- *
- * @param nb_created Nombre de fork(s) effectivement lancé(s) ce tour
- *                    (`orchestrator_spawn_forks()`), inclus tel quel dans la
- *                    ligne journalisée.
+ * Exposée (non `static`) pour être testable sans fork réel.
  */
 void log_startup_diagnostics(int nb_created);
 

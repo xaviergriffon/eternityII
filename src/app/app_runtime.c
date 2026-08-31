@@ -938,18 +938,14 @@ void resolve_client_label(const char *cli_label, const char *hostname_or_null,
 /**
  * @brief Garantit `nb_file_possibility >= nb_threads` avant tout fork.
  *
- * Le pool analysé est indexé par `fork_seq` côté client
- * (`add_possibility_analysed(p, thread)`, `src/app/etii_client.c`) : un
- * nombre de files inférieur au nombre de forks laisserait un index de fork
- * viser une file jamais initialisée par `datamanager_configure_stock_files`
- * (`File.sizeofvalue` resté à 0, `put()` échouerait silencieusement). Ne
- * PEUT que faire croître `nb_file_possibility`, jamais le réduire — un
- * `--stock-files` explicite trop petit pour `nb_threads` est donc relevé
- * silencieusement (avec un log explicite) plutôt que de risquer ce bug.
+ * Le pool analysé est indexé par `fork_seq` côté client : un nombre de
+ * files inférieur au nombre de forks laisserait un index de fork viser une
+ * file jamais initialisée (`put()` échouerait silencieusement). Ne peut que
+ * faire croître `nb_file_possibility`, jamais le réduire — un
+ * `--stock-files` explicite trop petit est donc relevé silencieusement
+ * (avec un log) plutôt que de risquer ce bug.
  *
- * @param nb_threads Nombre de forks de recherche demandés (`NB_THREADS`).
- * @return           1 si un ajustement a eu lieu (log déjà émis), 0 sinon
- *                    (déjà suffisant, rien à faire).
+ * @return 1 si un ajustement a eu lieu (log déjà émis), 0 sinon.
  */
 int ensure_stock_files_cover_forks(int nb_threads)
 {
@@ -1041,27 +1037,18 @@ void configure_child_signals(void) {
 
     struct sigaction sa;
     sa.sa_handler = signal_end_handler;
-    /* Pas de SA_RESTART — même rationale qu'init_signals() ci-dessus, dont
-       cette fonction contredisait à tort le choix : sigaction() est un
-       réglage PROCESS-WIDE (seul le masque bloqué est par-thread), donc
-       l'appeler ici — depuis le thread fork_udp d'un fork de recherche,
-       après init_signals() côté parent avant le fork() — REMPLACE le SA_RESTART=0
-       hérité par SA_RESTART=1 pour tout le process enfant. Avec SA_RESTART, un
-       SIGINT/SIGTERM reçu pendant un appel bloquant (le `recvfrom()` de
-       fork_udp lui-même, qui n'a AUCUN timeout et bloque la quasi-totalité du
-       temps d'un fork inactif ; ou le `connect()` bloquant de
-       `create_tcp_client`, qui n'est pas borné par SO_RCVTIMEO/SO_SNDTIMEO)
-       fait juste RELANCER silencieusement l'appel interrompu au lieu de
-       renvoyer EINTR — la boucle appelante ne voit alors JAMAIS
-       request==REQUEST_STOP, et le fork reste sourd à stopForks/configApply/
-       exit jusqu'à l'escalade SIGTERM (elle aussi absorbée par le même
-       mécanisme) puis SIGKILL. Bogue réel reproduit deux fois de suite en
-       conditions réelles : un fork resté à 0 (aucun travail) qui a mis plus
-       de 10 s à mourir sur `exit` (`orchestrateur : X fils encore vivant(s)
-       après 10s — escalade SIGKILL`), quand ses deux frères — occupés par du
-       calcul CPU, jamais bloqués dans un appel système au moment du SIGINT —
-       mouraient proprement en une fraction de seconde. Voir
-       docs/echanges_client_serveur.md. */
+    /* Pas de SA_RESTART — sigaction() est un réglage process-wide (seul le
+       masque bloqué est par-thread), donc l'appeler ici (thread fork_udp,
+       après le fork()) REMPLACE le SA_RESTART=0 hérité par SA_RESTART=1
+       pour tout le process enfant. Avec SA_RESTART, un SIGINT/SIGTERM reçu
+       pendant un appel bloquant (recvfrom() de fork_udp, sans timeout ;
+       connect() de create_tcp_client, non borné par SO_RCVTIMEO) relance
+       silencieusement l'appel au lieu de renvoyer EINTR — la boucle
+       appelante ne voit jamais request==REQUEST_STOP, et le fork reste
+       sourd jusqu'à l'escalade SIGKILL. Bogue réel reproduit deux fois : un
+       fork inactif a mis plus de 10s à mourir sur `exit`, quand ses frères
+       occupés par du calcul CPU mouraient proprement en une fraction de
+       seconde. */
     sa.sa_flags = 0;
     sigemptyset(&sa.sa_mask);
 
@@ -1319,26 +1306,18 @@ void *server_tcp(void *param) {
 
     int gate_slot = fork_gate_register("server_tcp");
 
-    /* Fenêtre de grâce APRÈS REQUEST_STOP : continue de recevoir les
-       battements IPC_MSG_STATS des forks encore en train de vider leur file
-       d'acquittements en attente, ou de renvoyer leur stock local restant
-       (cf. server_io_active / fork_last_activity, feed_thread_aposs /
-       bt_flush_pending) — sans elle, ce thread cesse d'écouter à l'instant
-       même de REQUEST_STOP et exit_interpreter/orchestrator_do_stop_forks
-       n'ont plus aucune activité à observer pour décider d'escalader vers
-       SIGTERM/SIGKILL, ce qui reviendrait à escalader à l'aveugle comme avant.
-       PROLONGÉE tant qu'un fils rapporte encore `server_io_active == 1`
-       (`last_active_seen_at`, réutilise child_idle_ms — mêmes semantiques,
-       testées une fois) : un plafond fixe à STOP_ESCALATION_SIGKILL_MS depuis
-       le seul `stop_requested_at` referait exactement le bogue que ce
-       prolongement corrige, un cran plus haut — un serveur lent (pas figé)
-       recevant un gros flush de plusieurs forks peut légitimement prendre
-       plus de 10s, et ce thread ne doit pas cesser d'écouter pendant que ça
-       progresse réellement (observé en conditions réelles : des fils tués à
-       5s/10s alors qu'ils vidaient encore leur stock local vers un serveur
-       lent). Un fils qui ne rapporte JAMAIS d'activité (mort avant, ou
-       process n'ayant jamais parlé au serveur) ne prolonge jamais rien —
-       exactement le comportement de repli de child_idle_ms. */
+    /* Fenêtre de grâce après REQUEST_STOP : continue de recevoir les
+       battements IPC_MSG_STATS des forks encore en train de vider leur
+       file d'acquittements ou de renvoyer leur stock local restant — sans
+       elle, ce thread cesse d'écouter à l'instant de REQUEST_STOP et
+       l'escalade SIGTERM/SIGKILL se fait à l'aveugle. Prolongée tant qu'un
+       fils rapporte encore `server_io_active == 1` (réutilise
+       child_idle_ms) : un plafond fixe depuis le seul `stop_requested_at`
+       referait le même bogue un cran plus haut — un serveur lent recevant
+       un gros flush peut légitimement prendre plus de 10s (observé : des
+       fils tués alors qu'ils vidaient encore leur stock vers un serveur
+       lent). Un fils qui ne rapporte jamais d'activité ne prolonge jamais
+       rien. */
     time_t stop_requested_at = 0;
     time_t last_active_seen_at = 0;
     while (1) {

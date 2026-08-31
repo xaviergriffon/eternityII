@@ -432,17 +432,14 @@ int map_packed_fits(unsigned long long total_parts, unsigned long long max_bucke
 /**
  * @brief Construit l'index compact `{offset:16 | size:16}` d'une map compactée.
  *
- * À appeler APRÈS le compactage de `flat` dans `arena` : chaque `flat[i].parts`
- * doit déjà pointer dans l'arène, sans quoi l'offset serait dénué de sens.
- * L'index est purement redondant : il ne change aucune donnée, il en propose
- * une seconde représentation 3,8× plus dense pour la boucle chaude.
+ * À appeler après le compactage de `flat` dans `arena` : chaque
+ * `flat[i].parts` doit déjà pointer dans l'arène. Index purement redondant :
+ * il ne change aucune donnée, il propose une seconde représentation plus
+ * dense pour la boucle chaude.
  *
- * @param map         Map dont `flat`/`arena` sont déjà compactés.
- * @param nbKeys      Nombre de compartiments (`sizearray^4`).
- * @param totalParts  Nombre de pièces dans l'arène.
- * @return            Index alloué, ou NULL si la capacité 16 bits est dépassée,
- *                    si l'arène est vide, ou si l'allocation échoue — les
- *                    lecteurs retombent alors sur `flat` (jamais de troncature).
+ * @return Index alloué, ou NULL si la capacité 16 bits est dépassée, si
+ *         l'arène est vide, ou si l'allocation échoue — les lecteurs
+ *         retombent alors sur `flat` (jamais de troncature).
  */
 static uint32_t *build_packed_index(map_big_array *map, unsigned long long nbKeys,
                                     unsigned long long totalParts)
@@ -489,24 +486,18 @@ static uint32_t *build_packed_index(map_big_array *map, unsigned long long nbKey
 /**
  * @brief Construit `bucket_id_mask` : le masque des ids de chaque compartiment.
  *
- * À appeler APRÈS `build_packed_index` (l'offset d'un compartiment dans
- * `arena` est lu dans `packed`, et sert d'indice du masque). Comme `packed`,
- * l'index est purement redondant : il ne change aucune donnée, il rend
- * seulement le comptage des pièces libres d'un compartiment indépendant de sa
- * taille (quelques `popcount` au lieu d'un parcours) — support de l'ordre
- * dynamique MRV.
+ * À appeler après `build_packed_index` (l'offset d'un compartiment dans
+ * `arena` est lu dans `packed`). Comme `packed`, l'index est purement
+ * redondant : rend le comptage des pièces libres d'un compartiment
+ * indépendant de sa taille (quelques `popcount` au lieu d'un parcours).
  *
- * Le nombre de mots est déduit du plus grand id RÉELLEMENT présent dans
- * l'arène, jamais de `ETERN_PARTS` : `part.c` reste agnostique de la taille du
- * puzzle, et une map bâtie à la main dans un test obtient un masque à sa
- * mesure.
+ * Le nombre de mots est déduit du plus grand id réellement présent dans
+ * l'arène, jamais de `ETERN_PARTS` : `part.c` reste agnostique de la taille
+ * du puzzle.
  *
- * @param map        Map dont `arena`/`packed` sont déjà construits.
- * @param nbKeys     Nombre de compartiments (`sizearray^4`).
- * @param totalParts Nombre d'entrées dans l'arène (borne des offsets).
- * @param out_words  Sortie : nombre de mots d'un masque (0 si non construit).
- * @return           Index alloué, ou NULL (les lecteurs comptent alors par
- *                   parcours — jamais de résultat tronqué).
+ * @param out_words Sortie : nombre de mots d'un masque (0 si non construit).
+ * @return          Index alloué, ou NULL (les lecteurs comptent alors par
+ *                  parcours — jamais de résultat tronqué).
  */
 static uint64_t *build_bucket_id_mask(map_big_array *map, unsigned long long nbKeys,
                                       unsigned long long totalParts, int *out_words)
@@ -567,12 +558,12 @@ static uint64_t *build_bucket_id_mask(map_big_array *map, unsigned long long nbK
 /**
  * @brief Fréquence globale de chaque couleur de bord (0..maxFace) dans `apart`.
  *
- * Compte les 4 faces de CHAQUE entrée de `apart`, rotations comprises : si
- * `apart` est le résultat de `rotate_all_parts` (4 rotations par pièce
- * physique), chaque couleur est comptée ×4 par rapport à un dénombrement sur
- * les seules pièces physiques — un facteur d'échelle UNIFORME sur toutes les
- * couleurs, qui ne change donc pas leur ordre relatif de rareté. Le score de
- * rareté utilisé pour trier chaque compartiment de `buildBigArray`.
+ * Compte les 4 faces de chaque entrée de `apart`, rotations comprises : si
+ * `apart` vient de `rotate_all_parts` (4 rotations par pièce physique),
+ * chaque couleur est comptée ×4 par rapport à un dénombrement sur les
+ * seules pièces physiques — un facteur d'échelle uniforme qui ne change pas
+ * leur ordre relatif de rareté. Alimente le score de rareté utilisé pour
+ * trier chaque compartiment de `buildBigArray`.
  *
  * @return Tableau alloué de `maxFace + 1` entrées (à libérer par l'appelant),
  *         ou NULL si `maxFace < 0` ou si l'allocation échoue.
@@ -597,14 +588,13 @@ long *compute_face_frequency(struct array_part *apart, int maxFace)
 }
 
 /**
- * @brief Score de rareté des couleurs EXPOSÉES d'une pièce dans un compartiment.
+ * @brief Score de rareté des couleurs exposées d'une pièce dans un compartiment.
  *
  * Un compartiment (f1,f2,f3,f4) fixe la couleur attendue sur les côtés
- * CONTRAINTS (f_i >= 0) : cette valeur est la même pour toutes les pièces du
+ * contraints (f_i >= 0) : cette valeur est la même pour toutes les pièces du
  * compartiment, elle ne discrimine donc aucun ordre. Seuls les côtés
  * « wildcard » (f_i == -1) varient d'une pièce à l'autre : ce sont les
- * couleurs que cette pièce EXPOSERA vers une case encore vide si elle est
- * posée ici.
+ * couleurs que cette pièce exposera vers une case encore vide si posée ici.
  *
  * @param freq    Fréquence globale de chaque couleur, cf. `compute_face_frequency`.
  * @param maxFace Borne supérieure de `freq` (même valeur que pour sa construction).
@@ -621,23 +611,20 @@ long arena_exposed_score(const struct part *p, int f1, int f2, int f3, int f4,
 }
 
 /**
- * @brief Trie EN PLACE les candidats d'un compartiment par rareté CROISSANTE
- *        de couleur exposée — la pièce exposant la couleur la plus RARE
- *        d'abord (ADOPTÉ après mesure : +3,2 % de débit médian, taux d'élagage forward-check et
- *        profondeur atteinte inchangés — voir la mesure complète dans le
- *        document). Comportement de production INCONDITIONNEL depuis cette
- *        adoption : pas d'interrupteur laissé en place, même discipline que
- *        §4.1 (« voisines seules, pas de fenêtre résiduelle »).
+ * @brief Trie en place les candidats d'un compartiment par rareté croissante
+ *        de couleur exposée — la pièce exposant la couleur la plus rare
+ *        d'abord (mesuré : +3,2 % de débit médian, taux d'élagage et
+ *        profondeur atteinte inchangés). Comportement de production
+ *        inconditionnel : pas d'interrupteur laissé en place.
  *
- * N'ALTÈRE JAMAIS le multi-ensemble de pièces du compartiment (même ids,
- * mêmes rotations, même taille) — uniquement l'ORDRE dans lequel elles seront
- * essayées par la recherche : `arena_sort_preserves_multiset_and_orders_by_rarity`
+ * N'altère jamais le multi-ensemble de pièces du compartiment (même ids,
+ * mêmes rotations, même taille) — uniquement l'ordre dans lequel elles
+ * seront essayées : `arena_sort_preserves_multiset_and_orders_by_rarity`
  * (tests/core/test_part.c) verrouille cet invariant.
  *
- * Tri par insertion (les compartiments non vides sont petits en pratique — cf.
- * la mesure de `map-packed-index-cache.md`, plus gros compartiment observé :
- * quelques centaines de pièces) avec les scores précalculés une fois, pas
- * recalculés à chaque comparaison.
+ * Tri par insertion (les compartiments non vides sont petits en pratique,
+ * quelques centaines de pièces au plus) avec les scores précalculés une
+ * fois, pas recalculés à chaque comparaison.
  */
 void sort_compartment_by_exposed_rarity(struct array_part *arraypart,
                                          int f1, int f2, int f3, int f4,
@@ -680,16 +667,12 @@ void sort_compartment_by_exposed_rarity(struct array_part *arraypart,
  * Cette structure est la principale table de lookup du moteur de recherche :
  * un accès direct en O(1) retourne toutes les pièces posables à un emplacement.
  *
- * Chaque compartiment
- * est trié par rareté de couleur exposée CROISSANTE (la pièce la plus rare
- * essayée en premier) avant compactage dans `arena` — voir
- * `sort_compartment_by_exposed_rarity`. Coût : négligeable et payé une seule
- * fois, à la construction de la map (avant tout fork, avant toute recherche) —
- * jamais dans la boucle chaude, donc aucun bump de `VERSION` (§5 du document).
+ * Chaque compartiment est trié par rareté de couleur exposée croissante (la
+ * pièce la plus rare essayée en premier) avant compactage dans `arena` —
+ * voir `sort_compartment_by_exposed_rarity`. Coût négligeable, payé une
+ * seule fois à la construction de la map, jamais dans la boucle chaude.
  *
- * @param apart   Tableau de toutes les rotations (sortie de `rotate_all_parts`).
- * @param maxFace Valeur maximale de couleur de bord (sortie de `search_max_face`).
- * @return        Tableau 4D alloué (à libérer avec `free_bigarray`).
+ * @return Tableau 4D alloué (à libérer avec `free_bigarray`).
  */
 map_big_array *buildBigArray(struct array_part *apart, int maxFace)
 {

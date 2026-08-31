@@ -213,24 +213,17 @@ int datamanager_pool_refill(int is_checked, int file_index, const struct possibi
 /**
  * @brief Indice de file de départ pour un balayage round-robin ADD/GET.
  *
- * `put_to_pool`/`scroll_from_pool` (datamanager.c) trylock la première file
- * libre à partir de cet indice plutôt que de toujours démarrer à la file 0 :
- * un appel non contesté (trylock réussi dès le premier essai — le cas nominal
- * à faible concurrence) tombait sinon systématiquement sur la file 0, où tout
- * le trafic ADD/GET se concentrait, à l'exact opposé de l'objectif de
- * `--stock-files` (répartir la charge sur plusieurs files) et au prix d'un
- * travail constant pour `datamanager_rebalance_step`, qui devait sans cesse
- * compenser ce biais structurel plutôt qu'un simple déséquilibre de trafic.
+ * `put_to_pool`/`scroll_from_pool` trylock la première file libre à partir
+ * de cet indice plutôt que de toujours démarrer à la file 0 : sinon un
+ * appel non contesté tombait systématiquement sur la file 0, où tout le
+ * trafic se concentrait, à l'opposé de l'objectif de `--stock-files`.
  *
- * Fonction pure côté logique : l'état vit dans `*counter`, fourni par
- * l'appelant (jamais une globale interne), ce qui la rend directement
- * testable avec un compteur local sans dépendre de l'état module de
- * `datamanager.c`. Incrémente `*counter` atomiquement (`__atomic_fetch_add`,
- * jamais remis à 0) : sûr à appeler concurremment depuis plusieurs threads
- * serveur.
+ * Fonction pure : l'état vit dans `*counter`, fourni par l'appelant, ce qui
+ * la rend directement testable. Incrémente `*counter` atomiquement, jamais
+ * remis à 0 : sûr à appeler concurremment depuis plusieurs threads serveur.
  *
  * @param counter État partagé, incrémenté à chaque appel.
- * @param n       Nombre de files (`nb_file_possibility`) ; `n <= 0` renvoie 0.
+ * @param n       Nombre de files ; `n <= 0` renvoie 0.
  * @return        Indice de file dans `[0, n[`.
  */
 int datamanager_rr_next_start(unsigned int *counter, int n);
@@ -269,24 +262,15 @@ int add_possibility(client_possibility_t *client_possibility, array_possibility_
  *
  * @param client_possibility Contexte du thread client.
  * @param max_result         Nombre maximum de possibilités à extraire.
- * @param from_server         Optionnel (peut être `NULL`). En sortie, mis à 1
- *                            si le lot retourné vient réellement d'un
- *                            `INST_GET_TO_CHECK[_BATCH]` serveur (le serveur a
- *                            donc enregistré CES possibilités comme « en
- *                            analyse » pour ce client), 0 s'il vient des files
- *                            locales (`scroll_from_local` — un repli
- *                            `put_to_local`, par exemple un ADD refusé par le
- *                            serveur sous contention, ou tout autre reliquat
- *                            local ; le serveur n'a alors RIEN à acquitter
- *                            pour ce lot). Distinction nécessaire à l'appelant
- *                            pour ne pas envoyer d'acquittement
- *                            (`INST_POSSIBILITY_ANALYSED[_BATCH]`) pour un lot
- *                            que le serveur n'a jamais servi cette fois-ci —
- *                            sans quoi un lot recyclé localement peut ré-
- *                            acquitter une possibilité déjà retirée du pool
- *                            analysé serveur par son acquittement d'origine
- *                            (« absence confirmée » côté serveur).
- * @return                   Tableau alloué (à libérer avec `free_array_possibility_packet`).
+ * @param from_server Optionnel. En sortie, mis à 1 si le lot vient
+ *                    réellement d'un `INST_GET_TO_CHECK[_BATCH]` serveur (le
+ *                    serveur a donc enregistré ces possibilités comme « en
+ *                    analyse »), 0 s'il vient des files locales — auquel cas
+ *                    le serveur n'a rien à acquitter. Sans cette
+ *                    distinction, un lot recyclé localement pourrait
+ *                    ré-acquitter une possibilité déjà retirée du pool
+ *                    analysé serveur.
+ * @return Tableau alloué (à libérer avec `free_array_possibility_packet`).
  */
 array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result, int *from_server);
 /**
@@ -383,43 +367,24 @@ typedef int (*analysed_owner_alive_fn)(const uint8_t owner_uid[CLIENT_UID_BYTES]
 /**
  * @brief Balaie la table latérale d'attribution et remet dans le stock non
  *        vérifié toute possibilité dont le bail a expiré à `now` **et** dont
- *        le propriétaire n'est plus vivant (bail à expiration).
+ *        le propriétaire n'est plus vivant.
  *
- * Un client disparu (mort, coupure réseau) sans avoir acquitté ce qu'il tenait
- * ne gèle plus indéfiniment sa part du stock : passé `analysed_lease_seconds`
- * secondes sans acquittement **et** sans preuve qu'il est toujours vivant, la
- * possibilité est rendue automatiquement.
+ * Un client disparu sans avoir acquitté ce qu'il tenait ne gèle plus
+ * indéfiniment sa part du stock. L'échéance seule ne suffit pas : un client
+ * occupé mais vivant (répond toujours aux `CTRL_PING` de son canal de
+ * contrôle) verrait son travail réclamé à tort. `owner_alive`, si non-NULL,
+ * est donc consulté en plus de l'échéance — réclamé seulement si les deux
+ * sont vrais. `owner_alive == NULL` retombe sur l'échéance seule.
  *
- * **Correctif (retour d'essais réels) : l'échéance seule ne suffit pas.** Rien
- * ne garantit qu'une possibilité s'analyse en moins de `analysed_lease_seconds`
- * — un client occupé mais bel et bien vivant (il continue de répondre aux
- * `CTRL_PING`/`CTRL_STATS` de son canal de contrôle) voyait donc son travail
- * réclamé à tort dès que ce budget de temps était dépassé, sans rapport avec
- * sa vivacité réelle. `owner_alive`, si non-NULL, est donc consulté en PLUS de
- * l'échéance : une entrée n'est réclamée que si `analysed_lease_is_expired`
- * ET `!owner_alive(owner_uid)` sont vrais tous les deux — tant que le canal de
- * contrôle du client reste enregistré, son travail n'expire JAMAIS, aussi
- * longtemps qu'une possibilité mette à s'analyser. `owner_alive == NULL`
- * retombe sur l'échéance seule (comportement d'avant ce correctif ; pratique
- * pour les tests qui ne veulent pas dépendre d'un registre de sessions).
+ * Balayage borné et périodique, jamais dans un chemin chaud, verrouillant
+ * chaque `file_possibility_analysed[f]` le temps de son propre passage. Ce
+ * verrou par file rend l'opération idempotente vis-à-vis d'un acquittement
+ * concurrent (`remove_possibility_analysed`) : les deux passent par le même
+ * verrou, jamais de double retrait. N'affecte que les entrées attribuées :
+ * une possibilité sans propriétaire connu n'expire jamais par ce mécanisme.
  *
- * Balayage borné et périodique — jamais dans un chemin chaud — verrouillant
- * chaque `file_possibility_analysed[f]` le temps de son propre passage (comme
- * `datamanager_analysed_owned_by`), jamais toutes les files à la fois. C'est
- * précisément ce verrou par file qui rend l'opération **idempotente** vis-à-vis
- * d'un acquittement concurrent (`remove_possibility_analysed`) : les deux
- * passent par le même verrou, donc soit l'acquittement a déjà retiré l'entrée
- * de l'index (rien à réclamer ici), soit c'est cette fonction qui l'a retirée
- * en premier (un acquittement qui arrive ensuite ne trouve plus rien et
- * renvoie « non trouvé », sans jamais dupliquer la possibilité dans le stock).
- * N'affecte que les entrées attribuées (`has_owner`) : une possibilité sans
- * propriétaire connu (client ancien, ou possibilité restaurée depuis un
- * backup — les baux ne sont pas persistés, section 4.7 du document) n'expire
- * jamais par ce mécanisme.
- *
- * @param now         Horodatage de référence (injecté : jamais `time(NULL)`
- *                    en interne, pour rester testable sans horloge réelle
- *                    ni `sleep`).
+ * @param now         Injecté (jamais `time(NULL)` en interne) : testable
+ *                    sans horloge réelle ni sleep.
  * @param owner_alive Callback de vivacité, ou `NULL` pour ignorer la
  *                    vivacité (échéance seule).
  * @return            Nombre de possibilités rendues au stock.
@@ -427,27 +392,16 @@ typedef int (*analysed_owner_alive_fn)(const uint8_t owner_uid[CLIENT_UID_BYTES]
 /**
  * @brief Supprime toute possibilité dont l'une des `origins` est la racine.
  *
- * Rendre au stock une possibilité en cours d'analyse (bail expiré) la remet en
- * concurrence avec les enfants que le client avait déjà poussés avant de
- * disparaître : elle en devient la racine, et leur sous-arbre est dès lors
- * couvert deux fois. Ce nettoyage supprime ces descendants — dans les deux
- * pools de stock ET dans le pool analysé, un autre client pouvant travailler
- * sur un descendant devenu redondant. L'origine elle-même n'est jamais
- * touchée : c'est l'arbitrage de `check_origin` (on garde la racine, on
- * supprime le descendant, cf. docs/console.md).
+ * Rendre au stock une possibilité en cours d'analyse (bail expiré) la remet
+ * en concurrence avec les enfants que le client avait déjà poussés avant de
+ * disparaître : leur sous-arbre est dès lors couvert deux fois. Ce nettoyage
+ * supprime ces descendants (stock ET pool analysé). L'origine elle-même
+ * n'est jamais touchée — même arbitrage que `check_origin`.
  *
- * Verrouillage en DEUX temps, pool analysé puis stock, sans jamais tenir les
- * deux familles de verrous en même temps : aucun ordre d'acquisition nouveau
- * n'est introduit, donc aucun risque d'interblocage avec `INST_GET`. Le prix
- * est une atomicité imparfaite — une possibilité servie (stock -> analysé)
- * entre les deux temps échappe à la passe. C'est un nettoyage au mieux, pas
- * une garantie : le balayage exhaustif reste `check_origin`.
- *
- * Coût mesuré sur un stock de production réel (12 689 possibilités, 10 origines) :
- * 1,0 ms, soit ~1,1 s extrapolé à 14 millions, en un seul fil — à comparer au
- * `--tcp-timeout` de 10 s et à la fréquence réelle des réclamations (6 en sept
- * semaines de journal de production). Pas de budget de temps dédié pour
- * l'instant ; à revoir si le stock grossit d'un ordre de grandeur.
+ * Verrouillage en deux temps, pool analysé puis stock, jamais les deux
+ * familles de verrous en même temps : pas de risque d'interblocage avec
+ * `INST_GET`, mais atomicité imparfaite — une possibilité servie entre les
+ * deux temps échappe à la passe. Nettoyage au mieux, pas une garantie.
  *
  * @param origins Tableau de paquets racines (jamais supprimés). `NULL` -> 0.
  * @param n       Nombre d'origines. `0` -> 0, sans prendre le moindre verrou.
@@ -521,30 +475,22 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
  * Parcourt les files d'analyse en cherchant le paquet correspondant et le supprime.
  *
  * @param possiblity     Paquet à retirer.
- * @param thread         Index de file EXACT et exclusif (≥ 0 : une seule file
- *                        essayée, absence CONFIRMÉE si absente de celle-ci —
- *                        aucun repli. Réservé à l'usage historique client
- *                        (une file dédiée par fork, où rien d'autre n'écrit
- *                        jamais) ; −1 pour balayer toutes les files, voir
- *                        `preferred_file`.
- * @param preferred_file Indice de file à essayer EN PREMIER quand `thread < 0`
- *                        (`server_analysed_file_hint`, répartition de
- *                        charge ADD/GET par connexion serveur) — ignoré si
- *                        `thread >= 0`. Sur un manque à cette file, le
- *                        balayage se poursuit sur TOUTES les autres
- *                        (garantie inchangée : jamais d'absence déclarée sans
- *                        avoir verrouillé et parcouru chaque file). `-1` (ou
- *                        hors bornes) : comportement historique inchangé,
- *                        balayage démarrant à la file 0.
- * @return               0 si trouvé et retiré ; 1 si absent (toutes les files
- *                    concernées ont été verrouillées et parcourues sans le
- *                    trouver — absence CONFIRMÉE) ; -1 si le budget borné
- *                    (`DATAMANAGER_TRYLOCK_MAX_SWEEPS`) a été épuisé sans
- *                    jamais réussir à verrouiller ne serait-ce qu'une file
- *                    (maintenance en cours) — absence NON confirmée, à ne
- *                    jamais traiter comme un 1 par un appelant qui rendrait
- *                    silencieusement une possibilité peut-être toujours en
- *                    cours d'analyse.
+ * @param thread         Index de file exact et exclusif (≥ 0 : une seule
+ *                        file essayée, absence confirmée si absente de
+ *                        celle-ci, aucun repli — réservé à l'usage client,
+ *                        une file dédiée par fork) ; -1 pour balayer toutes
+ *                        les files, voir `preferred_file`.
+ * @param preferred_file Indice de file à essayer en premier quand
+ *                        `thread < 0` (répartition de charge par connexion
+ *                        serveur) — ignoré si `thread >= 0`. Sur un manque à
+ *                        cette file, le balayage se poursuit sur toutes les
+ *                        autres. `-1` (ou hors bornes) : balayage démarrant
+ *                        à la file 0.
+ * @return 0 si trouvé et retiré ; 1 si absent (toutes les files concernées
+ *         ont été verrouillées et parcourues sans le trouver — absence
+ *         confirmée) ; -1 si le budget borné a été épuisé sans jamais
+ *         réussir à verrouiller ne serait-ce qu'une file (maintenance en
+ *         cours) — absence non confirmée, à ne jamais traiter comme un 1.
  */
 int remove_possibility_analysed(struct possibility_packet *possiblity, int thread, int preferred_file);
 /** @brief Nombre de possibilités dans la file `nfile` du pool principal (non vérifiées). */
@@ -606,44 +552,26 @@ int backup(char *filename);
 int backup_analysed(char *filename);
 /**
  * @brief Sauvegarde le pool analysé et le stock à un instant T unique —
- *        préférer à `backup()` + `backup_analysed()` appelées l'une après l'autre,
- *        qui laissent une fenêtre entre les deux instants (une possibilité
- *        acquittée dans l'intervalle peut disparaître des deux sauvegardes).
- *        Toutes les files des trois pools sont gelées d'un coup avant la
- *        première écriture, puis libérées progressivement (pool analysé
- *        d'abord) au fil de l'écriture — jamais toutes relâchées d'un coup à
- *        la fin, contrairement à `backup`/`backup_analysed`.
+ *        préférer à `backup()` + `backup_analysed()` séparés, qui laissent
+ *        une fenêtre où une possibilité acquittée peut disparaître des deux
+ *        sauvegardes. Toutes les files sont gelées d'un coup avant la
+ *        première écriture, puis libérées progressivement.
  *
- * `spill_snapshot_fn` (optionnel, `NULL` accepté) est appelée UNE FOIS,
- * pendant la fenêtre `maintenance` (après la pose des verrous, avant leur
- * relâchement) avec `spill_snapshot_dir` — c'est le point d'intégration du
- * débordement disque (`core/stock_spill.h`) : le module `core/` ne peut
- * pas dépendre de `stock_spill.h` (règle de dépendance à sens unique de ce
- * fichier), donc l'appelant (`app/`, `ui/`) injecte la fonction réelle
- * (`stock_spill_snapshot`) ; les appels internes à `datamanager.c` (ex. arrêt
- * sur solution détectée par `rmnonext`) passent `NULL` — lacune documentée,
- * lacune documentée. Son retour (nombre de possibilités effectivement
- * déportées au moment du cliché) est écrit dans un fichier accessoire
- * `<stock_filename>.spillcount` dès que le volet stock a réussi (jamais si
- * `spill_snapshot_fn` est `NULL` — pas de faux « 0 possibilité déportée »
- * pour un appelant qui n'a même pas demandé de cliché) : c'est ce compte,
- * relu par `restore` indépendamment du répertoire de débordement lui-même
- * (qui peut être absent/mal configuré au moment de la restauration), qui
- * permet de DÉTECTER une restauration partielle plutôt que de la tolérer en
- * silence — cf. `core/stock_spill.h`, `stock_spill_restore_snapshot`.
+ * `spill_snapshot_fn` (optionnel) est appelée une fois, pendant la fenêtre
+ * `maintenance`, avec `spill_snapshot_dir` : point d'intégration du
+ * débordement disque — `core/` ne pouvant dépendre de `stock_spill.h`,
+ * l'appelant injecte la fonction réelle (`stock_spill_snapshot`) ; les appels
+ * internes passent `NULL`. Son retour (possibilités déportées) est écrit
+ * dans `<stock_filename>.spillcount` dès que le volet stock a réussi (jamais
+ * si `spill_snapshot_fn` est `NULL`) — relu par `restore` pour détecter une
+ * restauration partielle du débordement plutôt que de la tolérer en silence.
  *
- * @param stock_filename       Fichier cible du stock (comme `backup`).
- * @param analysed_filename    Fichier cible du pool analysé (comme `backup_analysed`).
- * @param out_analysed_status  Sur retour : code du volet analysé (mêmes
- *                             constantes BACKUP_* que le retour de la
- *                             fonction, qui porte le code du volet stock).
- *                             NULL accepté si l'appelant ne veut pas ce détail.
- * @param spill_snapshot_dir   Répertoire cible du cliché de débordement, ou
- *                             `NULL` pour ne rien faire côté débordement.
- * @param spill_snapshot_fn    Fonction de cliché à appeler (typiquement
- *                             `stock_spill_snapshot`), ou `NULL`. Doit
- *                             renvoyer le nombre de possibilités déportées
- *                             au moment du cliché (0 si aucune).
+ * @param out_analysed_status Sur retour : code du volet analysé (mêmes
+ *                            constantes BACKUP_* que le retour de la
+ *                            fonction, qui porte le code du volet stock).
+ * @param spill_snapshot_dir  Répertoire cible du cliché, ou `NULL`.
+ * @param spill_snapshot_fn   Fonction de cliché (typiquement
+ *                            `stock_spill_snapshot`), ou `NULL`.
  * @return Code du volet stock — BACKUP_OK (0), BACKUP_SKIPPED_MAINTENANCE (1)
  *         ou BACKUP_ERROR (-1).
  */
@@ -653,24 +581,18 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 
 /**
  * @brief Lit le fichier accessoire `<stock_filename>.spillcount` écrit par
- *        `consistent_backup` (jamais `NULL` : symétrique de son écriture,
- *        même convention de nommage centralisée ici plutôt que dupliquée
- *        côté appelant).
+ *        `consistent_backup`.
  *
- * Réservé à `restore_apply` (`ui/command_lines.c`, correctif) : compare
- * ce compte à ce que `stock_spill_restore_snapshot` (`core/stock_spill.h`)
- * a RÉELLEMENT récupéré, pour détecter une restauration partielle du
- * débordement (mauvais/absent `--stock-spill-dir`, cliché supprimé…) plutôt
- * que de la tolérer en silence comme avant ce correctif.
+ * Réservé à `restore_apply` : compare ce compte à ce que
+ * `stock_spill_restore_snapshot` a réellement récupéré, pour détecter une
+ * restauration partielle du débordement plutôt que de la tolérer en silence.
  *
- * Absence tolérée (retour 0) : sauvegarde antérieure à ce correctif, ou
- * `consistent_backup` appelée sans `spill_snapshot_fn` (rôle client, ou le
- * seul site interne à `datamanager.c` qui ne peut pas en fournir un) — dans
- * les deux cas, rien à vérifier, jamais une anomalie en soi.
+ * Absence tolérée (retour 0) : sauvegarde antérieure à ce mécanisme, ou
+ * `consistent_backup` appelée sans `spill_snapshot_fn` — rien à vérifier,
+ * jamais une anomalie en soi.
  *
- * @param stock_filename Fichier stock (le même chemin passé à `consistent_backup`).
- * @param out_count      Sur retour (si la fonction renvoie 1) : le nombre de
- *                       possibilités déportées au moment de CETTE sauvegarde.
+ * @param out_count Sur retour (si la fonction renvoie 1) : nombre de
+ *                  possibilités déportées au moment de cette sauvegarde.
  * @return 1 si trouvé et lu, 0 sinon (absent, illisible, ou contenu invalide).
  */
 int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned long long *out_count);

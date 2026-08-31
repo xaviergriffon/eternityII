@@ -1,23 +1,17 @@
 /**
  * @file control_registry.h
- * @brief Registre des sessions de contrôle (canal `INST_CONTROL_HELLO`, v9).
+ * @brief Registre des sessions de contrôle (canal `INST_CONTROL_HELLO`).
  *
- * Une session de contrôle vit sur la MÊME connexion TCP qu'une session de
- * travail classique (même slot du pool `client_t` d'`etii_server.c`), mais
- * bascule après le hello dans un mode où c'est le SERVEUR qui initie les
- * échanges (`CTRL_PING`, `CTRL_GET_STATS`, `CTRL_COMMAND`, cf.
- * `control_protocol.h`). Ce registre est donc VOLONTAIREMENT indépendant du
- * pool `client_t` : il ne gère aucune socket, seulement l'état "session de
- * contrôle" associé — pid annoncé, mode, et une petite file de commandes en
- * attente pour le thread de session (posées par la console via les commandes
- * `clientsCmd`/`clientsStats`, et par `pause`/`resume` qui diffusent
- * systématiquement à ce registre en plus de leur effet local, dépilées par
- * `run_control_session`/`control_session_step`).
+ * Une session de contrôle vit sur la même connexion TCP qu'une session de
+ * travail classique, mais bascule après le hello dans un mode où c'est le
+ * serveur qui initie les échanges (`CTRL_PING`/`CTRL_GET_STATS`/
+ * `CTRL_COMMAND`). Registre volontairement indépendant du pool `client_t` :
+ * ne gère aucune socket, seulement l'état "session de contrôle" — pid, mode,
+ * et une file de commandes en attente pour le thread de session.
  *
  * Conçu pour être testable sans thread réseau : la logique de file/registre
- * (mutex + `pthread_cond_t` par session, protégeant une petite file circulaire
- * bornée) est exercée directement depuis les tests par des appels séquentiels
- * (mono-thread) et un scénario poste/attend (multi-thread, condvar).
+ * (mutex + `pthread_cond_t` par session) est exercée directement depuis les
+ * tests par des appels séquentiels et un scénario poste/attend.
  */
 #ifndef eternityII_control_registry_h
 #define eternityII_control_registry_h
@@ -35,18 +29,14 @@
 #define CONTROL_SESSION_QUEUE_CAP 16
 
 /// Longueur maximale (avec le terminateur nul) d'une ligne de commande postée
-/// via `CTRL_COMMAND` — alignée sur les lignes de commande console usuelles,
-/// largement sous `CTRL_PAYLOAD_MAX` (control_protocol.h).
+/// via `CTRL_COMMAND`.
 ///
-/// ATTENTION : `CONTROL_COMMAND_LINE_MAX` est aussi défini dans
-/// `src/app/etii_control.c` (512, buffer de réception client) — les deux
-/// valeurs DIFFÈRENT et les deux unités de compilation ne s'incluent pas
-/// l'une l'autre, donc ni avertissement ni erreur à la compilation. La borne
-/// EFFECTIVE de bout en bout est la plus petite des deux moins 1 (255
-/// caractères), avec troncature silencieuse dans
-/// `control_registry_post_command`. Sans conséquence pour les commandes
-/// actuelles (la plus longue en est très en deçà), mais à corriger (fusionner
-/// en une seule définition partagée) si une future commande s'en approche.
+/// ATTENTION : aussi défini dans `src/app/etii_control.c` (512) avec une
+/// valeur DIFFÉRENTE — les deux unités de compilation ne s'incluent pas
+/// l'une l'autre, donc pas d'erreur de compilation. La borne effective de
+/// bout en bout est la plus petite des deux moins 1 (255 caractères), avec
+/// troncature silencieuse dans `control_registry_post_command`. À fusionner
+/// en une seule définition si une future commande s'en approche.
 #define CONTROL_COMMAND_LINE_MAX 256
 
 /**
@@ -205,16 +195,12 @@ int control_registry_snapshot(control_session_info_t *out, int max);
  *        combien de sessions déclarent le rôle recherche contre le rôle
  *        contrôle.
  *
- * `control_session_info_t.mode` porte déjà cette information depuis v9 ; rien
- * ne la comptait jusqu'ici. `CLIENT_MODE_GPU_PRUNER` est compté avec
- * `CLIENT_MODE_PRUNER` dans `*out_nb_prune` — même distinction binaire
- * recherche/contrôle que `fork_role_t` (`fork_orchestrator.h`), le détail
- * CPU/GPU du pruner n'ayant pas sa place dans un dosage de fork.
+ * `CLIENT_MODE_GPU_PRUNER` est compté avec `CLIENT_MODE_PRUNER` dans
+ * `*out_nb_prune` — même distinction binaire recherche/contrôle que
+ * `fork_role_t`, le détail CPU/GPU n'ayant pas sa place dans un dosage.
  *
- * Fonction PURE (aucune I/O, aucun accès au registre lui-même) : opère sur un
- * tableau déjà fourni par l'appelant, pour rester testable sans mutex ni
- * session réseau — même esprit que `fork_stats_all_zero`
- * (`fork_orchestrator.h`).
+ * Fonction pure : opère sur un tableau déjà fourni par l'appelant, testable
+ * sans mutex ni session réseau.
  *
  * @param sessions      Instantané de sessions (peut être NULL si `n <= 0`).
  * @param n             Nombre d'entrées valides dans `sessions`.
@@ -230,20 +216,15 @@ void control_registry_count_roles(const control_session_info_t *sessions, int n,
  *        par son nombre de forks déclarés (`nb_forks`) plutôt que de compter
  *        une session comme une seule unité.
  *
- * `control_registry_count_roles` compte des SESSIONS (une par processus
- * parent connecté) : avec une seule machine cliente connectée, quel que soit
- * son nombre de forks, `nb_search`/`nb_prune` vaut au plus 1 — un garde-fou
- * de la politique automatique (« jamais 0 chercheur ») qui compare ce compte
- * à un plancher de 1 ou 2 se retrouve donc TOUJOURS déclenché dès qu'une
- * seule machine est connectée, même si elle fait tourner des dizaines de
- * forks de recherche (bug réel observé en usage : le stock non vérifié
- * s'accumulait indéfiniment sans jamais déclencher d'augmentation de
- * `pruner_forks`, faute de second client connecté). Cette variante somme
- * `nb_forks` au lieu de compter les sessions, pour que le garde-fou
- * compare un nombre de FORKS à un plancher de forks, pas un nombre de
- * MACHINES à un plancher de machines.
+ * `control_registry_count_roles` compte des sessions (une par processus
+ * parent) : avec une seule machine connectée, `nb_search`/`nb_prune` vaut au
+ * plus 1, quel que soit son nombre de forks — un garde-fou comparant ce
+ * compte à un plancher se déclenchait donc toujours dès une seule machine
+ * connectée (bug réel : stock non vérifié accumulé sans jamais augmenter
+ * `pruner_forks`, faute de second client). Cette variante somme `nb_forks`
+ * pour comparer un nombre de forks à un plancher de forks.
  *
- * Fonction PURE, mêmes garanties que `control_registry_count_roles`.
+ * Fonction pure, mêmes garanties que `control_registry_count_roles`.
  *
  * @param sessions           Instantané de sessions (peut être NULL si `n <= 0`).
  * @param n                  Nombre d'entrées valides dans `sessions`.
@@ -283,27 +264,19 @@ int control_registry_broadcast_get_stats(void);
  *        désigne et lui poste `cmd`/`command_line` (adressage
  *        `clientsCmd --to <cible>`).
  *
- * `target` est essayé, dans cet ordre, comme :
- *  1. un `session_no` décimal (chaîne entièrement numérique) ;
- *  2. un `client_uid` hexadécimal (longueur exacte `2*CLIENT_UID_BYTES`) ;
- *  3. un `label` déclaré (égalité exacte de chaîne).
+ * `target` est essayé, dans cet ordre, comme : (1) un `session_no` décimal ;
+ * (2) un `client_uid` hexadécimal (longueur exacte) ; (3) un `label` déclaré
+ * (égalité exacte).
  *
- * `session_no` et `client_uid` sont tous deux des identifiants jamais
- * réattribués à un titulaire différent (cf. `control_session_info_t.session_no`
- * et `client_identity_t.client_uid`) : une résolution par l'un de ces deux
- * champs ne peut donc jamais frapper le mauvais client — soit la session
- * visée existe encore sous cette même identité (le vrai titulaire), soit elle
- * a disparu et la cible est refusée comme inconnue, jamais silencieusement
- * redirigée vers le nouvel occupant du même slot (« session_no n'est pas un
- * slot »). `label` n'étant PAS garanti unique, une
- * cible qui correspond à plusieurs sessions actives est refusée comme
- * ambiguë plutôt que d'en choisir une arbitrairement.
+ * `session_no` et `client_uid` ne sont jamais réattribués à un titulaire
+ * différent : une résolution par l'un d'eux ne peut jamais frapper le
+ * mauvais client — soit la session existe encore sous cette identité, soit
+ * la cible est refusée comme inconnue, jamais redirigée silencieusement vers
+ * le nouvel occupant du même slot. `label` n'étant pas garanti unique, une
+ * cible correspondant à plusieurs sessions est refusée comme ambiguë.
  *
- * Ne fait AUCUNE vérification de liste blanche elle-même : l'appelant
- * (`clients_cmd_interpreter`, command_lines.c) doit avoir déjà validé
- * `command_line` via `control_command_allowed` avant cet appel, exactement
- * comme pour `control_registry_broadcast_command` — cibler une session
- * n'élargit jamais le jeu de commandes autorisées.
+ * Ne fait aucune vérification de liste blanche : l'appelant doit avoir déjà
+ * validé `command_line` via `control_command_allowed` avant cet appel.
  *
  * @param target       Cible telle que saisie par l'opérateur (non NULL).
  * @param cmd          Commande de trame (cf. `CTRL_*`, control_protocol.h).
@@ -317,83 +290,54 @@ int control_registry_send_command_to(const char *target, uint8_t cmd, const char
 
 /**
  * @brief Résout `target` vers le `client_uid` de l'unique session de contrôle
- *        active qu'il désigne, SANS poster de commande (contrairement à
- *        `control_registry_send_command_to`) — lecture pure pour la
- *        consultation « que travaille X ? » (attribution des analyses
- *        en cours).
+ *        active qu'il désigne, sans poster de commande — lecture pure pour
+ *        la consultation « que travaille X ? ».
  *
- * Mêmes règles de résolution, dans le même ordre, que
- * `control_registry_send_command_to` : `session_no` décimal, puis
- * `client_uid` hexadécimal complet, puis `label` déclaré (égalité exacte) --
- * voir sa documentation pour le détail des garanties (« session_no n'est pas
- * un slot », ambiguïté d'un `label` partagé).
+ * Mêmes règles de résolution que `control_registry_send_command_to`.
  *
- * @param target         Cible telle que saisie par l'opérateur (non NULL).
- * @param out_client_uid Out : rempli uniquement si le retour vaut 1.
- * @return               1 si résolu à exactement une session (out rempli),
- *                       0 si `target` ne désigne aucune session active ou en
- *                       désigne plusieurs (label ambigu), -1 si `target` est `NULL`.
+ * @param out_client_uid Rempli uniquement si le retour vaut 1.
+ * @return 1 si résolu à exactement une session, 0 si `target` ne désigne
+ *         aucune session ou en désigne plusieurs, -1 si `target` est `NULL`.
  */
 int control_registry_resolve_client_uid(const char *target, uint8_t out_client_uid[CLIENT_UID_BYTES]);
 
 /**
  * @brief Applique un dosage recherche/contrôle : compose et poste
  *        `"config pruner_forks <pruner_forks>"` puis `"configApply"`, à une
- *        cible unique (résolue exactement comme
- *        `control_registry_send_command_to` : `session_no`, `client_uid`,
- *        puis `label`) si `target` est fourni, ou à TOUTES les sessions
- *        actuellement actives sinon (même convention que
- *        `control_registry_broadcast_command`) — l'ergonomie derrière
- *        `clientsRoles`.
+ *        cible unique (résolue comme `control_registry_send_command_to`) si
+ *        `target` est fourni, ou à toutes les sessions actives sinon —
+ *        l'ergonomie derrière `clientsRoles`.
  *
- * MÉMORISE aussi, pour chaque session effectivement touchée, `pruner_forks`
- * comme dosage désiré de sa MACHINE (`machine_uid`, jamais `client_uid` ou
- * `session_no` qui ne survivent pas à un redémarrage de processus) : une
- * machine touchée qui se reconnecte plus tard (même après redémarrage du
- * client) le reçoit automatiquement à l'enregistrement
- * (`control_registry_register`), sans qu'il faille rejouer la commande —
- * calqué sur `g_desired_pause_state`. Une machine jamais touchée par
- * `clientsRoles` n'a pas de dosage désiré mémorisé : elle garde le
- * comportement par défaut (rôle impliqué par le mode de lancement).
+ * Mémorise aussi, pour chaque session touchée, `pruner_forks` comme dosage
+ * désiré de sa machine (`machine_uid`, survit à un redémarrage de processus
+ * contrairement à `client_uid`/`session_no`) : une machine touchée qui se
+ * reconnecte le reçoit automatiquement, sans rejouer la commande.
  *
- * Ne fait AUCUNE vérification de liste blanche elle-même (comme
- * `control_registry_send_command_to`) : `config`/`configApply` sont des
- * commandes FIXES construites ici, déjà dans `write_relayable`
- * (`control_protocol.c`), jamais du texte libre d'opérateur — rien à
- * revalider avant de les poster.
+ * Ne fait aucune vérification de liste blanche : `config`/`configApply`
+ * sont des commandes fixes construites ici, jamais du texte libre.
  *
- * @param target       `NULL` ou chaîne vide pour diffuser à toutes les
- *                      sessions actives ; sinon cible telle que saisie par
- *                      l'opérateur (`session_no`/`client_uid`/`label`).
- * @param pruner_forks Dosage visé, tel que reçu de l'opérateur — jamais borné
- *                      ici contre `nb_forks` de la cible (inconnu côté
- *                      serveur) : la résolution finale reste
+ * @param target       `NULL`/vide pour diffuser à toutes les sessions.
+ * @param pruner_forks Dosage visé, jamais borné ici contre `nb_forks` de la
+ *                      cible : la résolution finale reste
  *                      `resolve_pruner_forks` côté client.
- * @return             Nombre de sessions effectivement touchées (postées ET
- *                      toujours actives au moment de mémoriser le dosage) :
- *                      0 ou 1 avec `target`, 0..N sans `target`.
+ * @return Nombre de sessions effectivement touchées : 0 ou 1 avec `target`,
+ *         0..N sans `target`.
  */
 int control_registry_apply_role_dosage(const char *target, int pruner_forks);
 
 /**
  * @brief Indique si `client_uid` correspond à une session de contrôle
- *        ACTUELLEMENT active (enregistrée) dans le registre.
+ *        actuellement active dans le registre.
  *
- * Bail à expiration : un test réel a montré qu'un bail purement temporel (échéance
- * fixe depuis l'attribution) réclame le travail d'un client encore vivant dès
- * qu'une possibilité met plus longtemps que `analysed_lease_seconds` à
- * s'analyser — rien ne garantit qu'une analyse tienne dans ce budget. Cette
- * fonction fournit le second critère utilisé par
- * `datamanager_reclaim_expired_leases` : tant que le canal de contrôle du
- * client reste enregistré (preuve directe qu'il est vivant — pings/pongs et
- * `CTRL_STATS` réguliers), son travail n'est JAMAIS réclamé, quelle que soit
- * la durée écoulée. Seule l'absence de session active (déconnexion détectée
- * par `run_control_session`, qui appelle `control_registry_unregister`) lève
- * cette protection.
+ * Un bail purement temporel (échéance fixe depuis l'attribution) réclame le
+ * travail d'un client encore vivant dès qu'une analyse dépasse
+ * `analysed_lease_seconds` — rien ne garantit qu'elle tienne dans ce budget.
+ * Cette fonction fournit le second critère de
+ * `datamanager_reclaim_expired_leases` : tant que le canal de contrôle reste
+ * enregistré (preuve directe de vivacité), le travail n'est jamais réclamé.
+ * Seule une déconnexion détectée lève cette protection.
  *
- * @param client_uid `client_uid` recherché (16 octets, jamais NULL).
- * @return           1 si une session active porte ce `client_uid`, 0 sinon
- *                   (aucune correspondance, ou `client_uid == NULL`).
+ * @return 1 si une session active porte ce `client_uid`, 0 sinon.
  */
 int control_registry_has_active_client(const uint8_t client_uid[CLIENT_UID_BYTES]);
 

@@ -86,63 +86,24 @@ int pruner_dfs_budget_clamp(int v);
  * @brief Applique une commande admin distante (whitelistée) directement sur
  *        l'état serveur, sans passer par `do_command_line`.
  *
- * `do_command_line` (et tous ses interpréteurs) tokenise via `strtok`, qui
- * utilise un curseur global non réentrant : un appel concurrent depuis un
- * thread HTTP (ou tout autre appelant asynchrone) pendant que le thread
- * console ou le canal de contrôle tokenise déjà une ligne corromprait les
- * deux découpages. Cette fonction relit `line` avec `strtok_r` (curseur
- * local) et applique directement les quelques commandes admin sûres, sans
- * toucher à l'état global de `strtok`.
+ * `do_command_line` tokenise via `strtok`, curseur global non réentrant :
+ * un appel concurrent depuis un thread HTTP pendant que la console ou le
+ * canal de contrôle tokenise déjà une ligne corromprait les deux découpages.
+ * Cette fonction relit `line` avec `strtok_r` (curseur local) pour les
+ * commandes de `control_command_allowed` uniquement — toute autre (dont
+ * `exit`, `restore`, `import`) est refusée avant même d'être tokenisée.
  *
- * Ne couvre que les commandes acceptées par `control_command_allowed`
- * (control_protocol.h) : `pause`, `resume`, `limit <n>`,
- * `maxStockByThread <n>`, `prunerBatch <n>`, `prunerDfsBudget <n>`,
- * `clientsCommand [--to <cible>] <ligne...>` (alias `clientsCmd`),
- * `clientsWork <cible>`, `start`, `stopForks`, `configApply`,
- * `config [<clé> <valeur>]`, `configSave`. Toute autre commande (dont `exit`,
- * `restore`, `import`) est refusée avant même d'être tokenisée.
+ * `start`/`stopForks`/`configApply`/`configSave`/`clientsCommand`/
+ * `clientsWork` sont réservées au serveur : `POST /api/v1/command` n'est
+ * atteignable que depuis `runserver`, sans quoi elles agiraient sur les
+ * globales/l'orchestrateur du serveur au lieu du no-op voulu.
  *
- * `start`/`stopForks`/`configApply`/`configSave` pilotent le cycle de vie des
- * fils de recherche d'un client : leurs interpréteurs console
- * (`start_interpreter`/`stop_forks_interpreter`/`config_apply_interpreter`/
- * `config_save_interpreter`) ne touchent jamais `strtok`, donc appelés
- * directement ici, comme `backup_interpreter` dans
- * `admin_apply_privileged_command`. `config` EST retokenisé, via une portion
- * réentrante dédiée (`admin_remote_config`, statique dans command_lines.c) —
- * jamais `config_interpreter` lui-même, qui lit `strtok(NULL, " ")` sur le
- * curseur global.
+ * `pause`/`resume` diffusent aussi `CTRL_COMMAND` à toutes les sessions de
+ * contrôle actives — le serveur n'a pas de boucle de recherche à mettre en
+ * pause lui-même, seuls les clients connectés comptent.
  *
- * Ces cinq commandes sont en outre refusées (`ADMIN_CMD_FORBIDDEN`) si
- * `server` vaut 1 (`admin_remote_command_is_client_only`, statique dans
- * command_lines.c) : `POST /api/v1/command` (seul appelant HTTP de cette
- * fonction) n'est jamais atteignable ailleurs que depuis `runserver`, donc
- * `server` y vaut toujours 1 -- sans ce garde-fou, elles agiraient sur les
- * globales/l'orchestrateur du SERVEUR (`NB_THREADS` y désigne le pool de
- * connexions, pas un nombre de forks) au lieu du no-op silencieux voulu, même
- * raisonnement que `command_is_client_only` pour la console.
- *
- * `pause`/`resume`, comme leurs pendants console (`pause_interpreter`/
- * `resume_interpreter`), diffusent aussi `CTRL_COMMAND` à toutes les sessions
- * de contrôle actives (`control_registry_broadcast_command`) — sans quoi une
- * pause déclenchée via l'API HTTP admin (`--http-port`, POST
- * `/api/v1/command`) ne mettrait en pause QUE l'état local du serveur (jamais
- * consulté par sa propre boucle de recherche, qu'il ne lance pas) sans jamais
- * atteindre les clients connectés.
- *
- * `clientsCommand`/`clientsCmd` et `clientsWork` sont des commandes SERVEUR
- * (elles agissent sur `control_registry`, jamais sur les forks de recherche
- * d'un client), appliquées par des portions réentrantes dédiées
- * (`admin_remote_clients_command`/`admin_remote_clients_work`, statiques dans
- * command_lines.c) — jamais par `clients_cmd_interpreter`/
- * `clients_work_interpreter` eux-mêmes, qui tokenisent via le curseur global
- * `strtok`. `clientsWork` ne renvoie aucune donnée dans le corps de la
- * réponse HTTP (toujours `{"result":"ok"}` sur succès) : son résultat
- * (nombre de possibilités attribuées, `alloc` max) n'est journalisé
- * (`log_info`) que côté serveur.
- *
- * @param line Ligne de commande complète (ex. "limit 1000"), non modifiée.
- * @return     `ADMIN_CMD_OK`, `ADMIN_CMD_FORBIDDEN` (hors liste blanche) ou
- *             `ADMIN_CMD_BAD_ARGS` (commande reconnue, argument manquant/invalide).
+ * @return `ADMIN_CMD_OK`, `ADMIN_CMD_FORBIDDEN` (hors liste blanche) ou
+ *         `ADMIN_CMD_BAD_ARGS` (commande reconnue, argument manquant/invalide).
  */
 int admin_apply_remote_command(const char *line);
 

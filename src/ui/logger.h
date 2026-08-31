@@ -146,29 +146,22 @@ void status_zone_init(void);
 void status_zone_teardown(void);
 
 /**
- * @brief Neutralise, dans CE process, l'`atexit(status_zone_teardown)`
- *        hérité d'un `fork()` — à appeler UNE SEULE FOIS, comme tout premier
+ * @brief Neutralise, dans ce process, l'`atexit(status_zone_teardown)`
+ *        hérité d'un `fork()` — à appeler une seule fois, comme tout premier
  *        traitement d'un process de recherche fraîchement forké (avant tout
- *        `log_*`), jamais par le process PARENT.
+ *        `log_*`), jamais par le process parent.
  *
- * `status_zone_init()` (`console.c`) est appelée UNE FOIS, dans le PARENT,
- * AVANT tout fork (démarrage différé, cf. l'orchestrateur de démarrage
- * différé) — `fork()` duplique donc la liste des
- * handlers `atexit()`, si bien que chaque fils de recherche hérite lui aussi
- * l'enregistrement de `status_zone_teardown`, bien qu'il ne "possède" jamais
- * le terminal partagé. Sans ce garde-fou, le `exit()` normal d'un fils (fin
- * de recherche, OU sortie propre après un `stopForks`/`configApply` — jamais
- * après un SIGKILL, qui saute `atexit` : d'où le caractère intermittent
- * observé) ré-exécute ce handler hérité et restaure le terminal (`endwin()`
- * en `NCURSES=1`, région de défilement complète en ANSI) — visible depuis le
- * PARENT puisque le terminal est un état PARTAGÉ (même descripteur hérité),
- * pas un état par-process.
+ * `status_zone_init()` est appelée une fois, dans le parent, avant tout
+ * fork — `fork()` duplique la liste des handlers `atexit()`, si bien que
+ * chaque fils hérite aussi l'enregistrement de `status_zone_teardown`, bien
+ * qu'il ne possède jamais le terminal partagé. Sans ce garde-fou, le
+ * `exit()` normal d'un fils ré-exécute ce handler hérité et restaure le
+ * terminal (visible depuis le parent puisque le terminal est un état
+ * partagé, pas par-process) — jamais après un SIGKILL, qui saute `atexit`,
+ * d'où le caractère intermittent observé.
  *
- * Ne touche JAMAIS le terminal elle-même : elle rend seulement le handler
- * hérité NO-OP dans CE process (écriture dans la copie COW du drapeau
- * `zone_active`/`nc_active` du fils, sans effet sur le parent) —
- * `status_zone_teardown()` a déjà, pour cette même raison, un garde
- * `if (!zone_active) return;` en tête.
+ * Ne touche jamais le terminal elle-même : rend seulement le handler hérité
+ * no-op dans ce process (copie COW du drapeau, sans effet sur le parent).
  */
 void status_zone_disown_child(void);
 

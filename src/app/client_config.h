@@ -79,29 +79,18 @@ void client_config_init(client_config_t *cfg);
 void client_config_free(client_config_t *cfg);
 
 /**
- * @brief Parse UNE ligne au format `clé = valeur` (espaces autour du `=`
- *        ignorés, commentaire `#` jusqu'à fin de ligne — en tête de ligne ou
- *        après la valeur — ignoré) et met à jour @p cfg en conséquence.
+ * @brief Parse une ligne au format `clé = valeur` (espaces autour du `=`
+ *        ignorés, commentaire `#` ignoré) et met à jour @p cfg en conséquence.
  *
- * Fonction pure au sens de ce dépôt (cf. `parse_cli_options`) : aucune I/O,
- * seul @p cfg est modifié. Clés reconnues : `nb_forks` (entier > 0),
- * `server_host` (chaîne non vide), `parts_file` (chaîne non vide),
- * `max_stock_by_thread` (entier >= 0), `limit` (entier >= 0), `pruner_batch`
- * (entier, borné via `pruner_batch_clamp` — jamais invalide une fois
- * numérique, cf. command_lines.h), `dfs_budget` (entier, borné via
- * `pruner_dfs_budget_clamp` — jamais invalide une fois numérique ; `<= 0`
- * désactive la preuve de fermeture bornée du pruner, §4.6b), `pruner_forks`
- * (entier >= 0 — dosage recherche/contrôle demandé, cf.
- * `pruner_forks_requested`, `app_static_variables.h` ; borné à `nb_forks`
- * seulement à la résolution, `resolve_pruner_forks`,
- * `fork_orchestrator.h` — pas ici, `nb_forks` n'est pas forcément connu au
- * moment où cette ligne est parsée isolément). Une valeur déjà présente pour une clé
- * chaîne est remplacée (l'ancienne copie est libérée) : la DERNIÈRE occurrence
- * d'une clé dans un fichier l'emporte.
+ * Fonction pure : aucune I/O. Clés reconnues : `nb_forks`, `server_host`,
+ * `parts_file`, `max_stock_by_thread`, `limit`, `pruner_batch` (borné via
+ * `pruner_batch_clamp`), `dfs_budget` (borné via `pruner_dfs_budget_clamp` ;
+ * `<= 0` désactive la preuve de fermeture bornée du pruner), `pruner_forks`
+ * (borné à `nb_forks` seulement à la résolution, `nb_forks` n'étant pas
+ * forcément connu ici). La dernière occurrence d'une clé dans un fichier
+ * l'emporte.
  *
- * @param line Ligne à parser (peut contenir un `\n`/`\r` de fin, ignoré).
- * @param cfg  Configuration mise à jour en cas de `CLIENT_CONFIG_LINE_SET`.
- * @return     Le statut de la ligne (voir `client_config_line_status_t`).
+ * @return Le statut de la ligne (voir `client_config_line_status_t`).
  */
 client_config_line_status_t client_config_parse_line(const char *line, client_config_t *cfg);
 
@@ -151,32 +140,22 @@ int client_config_save(const char *path, const client_config_t *cfg);
 
 /**
  * @brief Applique les clés de @p cfg aux globales correspondantes, mais
- *        UNIQUEMENT pour celles qu'aucun argument positionnel de la ligne de
+ *        uniquement pour celles qu'aucun argument positionnel de la ligne de
  *        commande n'a déjà fournies — priorité CLI > fichier > défauts.
  *
- * @p argc est celui déjà consommé par `parse_client_args` (src/app/app_runtime.h)
- * pour ce même appel : cette fonction relit les mêmes seuils positionnels
- * (`argc >= 3` pour l'hôte serveur, `argc >= 4` pour `nb_forks`, etc. — cf.
- * `parse_client_args`) plutôt que de les redécouvrir, afin de ne jamais
- * diverger de ce que `parse_client_args` a réellement consommé. Lit le
- * global `pruner_mode` (src/app/app_static_variables.h) pour savoir si `argv[4]`
- * désigne `parts_file` (pruner) ou `max_stock_by_thread` (client de recherche).
+ * @p argc est celui déjà consommé par `parse_client_args` pour ce même
+ * appel : relit les mêmes seuils positionnels plutôt que de les
+ * redécouvrir, pour ne jamais diverger. Lit le global `pruner_mode` pour
+ * savoir si `argv[4]` désigne `parts_file` (pruner) ou
+ * `max_stock_by_thread` (client de recherche).
  *
- * Les champs chaîne appliqués sont `strdup`és une seconde fois avant
- * affectation à la globale (jamais un pointeur partagé avec @p cfg) : @p cfg
- * reste entièrement possédée par l'appelant, qui peut la libérer normalement
- * après cet appel via `client_config_free`. Les globales ainsi écrites
- * (`parts_files`, `*server_host`) ne sont, comme le reste des chemins issus
- * d'options CLI de ce projet, jamais libérées — valables pour toute la durée
- * du process.
+ * Les champs chaîne appliqués sont `strdup`és une seconde fois (jamais un
+ * pointeur partagé avec @p cfg) : @p cfg reste entièrement possédée par
+ * l'appelant.
  *
- * @param cfg         Configuration chargée depuis le fichier.
- * @param argc        Nombre d'arguments positionnels restants (après retrait
- *                    des options globales par `parse_cli_options`).
- * @param server_host Pointeur vers la variable locale de l'appelant contenant
- *                    l'hôte serveur déjà résolu par `parse_client_args` — mis
- *                    à jour si le fichier fournit `server_host` et qu'aucun
- *                    argument positionnel ne l'a fait.
+ * @param server_host Pointeur vers la variable locale de l'appelant, déjà
+ *                    résolue par `parse_client_args` — mise à jour si le
+ *                    fichier fournit `server_host` sans argument positionnel.
  */
 void client_config_apply_to_globals(const client_config_t *cfg, int argc, const char **server_host);
 
@@ -223,31 +202,22 @@ typedef enum {
 } client_config_diff_t;
 
 /**
- * @brief Compare la configuration EN PRÉPARATION (@p staged) à la
- *        configuration EFFECTIVE (@p current) pour décider, côté `configApply`,
- *        entre une simple diffusion IPC (`HOT_ONLY`) et un arrêt +
- *        reconstruction + re-fork complet (`NEEDS_RESTART`).
+ * @brief Compare la configuration en préparation (@p staged) à la
+ *        configuration effective (@p current) pour décider, côté
+ *        `configApply`, entre une simple diffusion IPC (`HOT_ONLY`) et un
+ *        arrêt + reconstruction + re-fork complet (`NEEDS_RESTART`).
  *
  * Fonction pure : seules `nb_forks`, `pruner_forks`, `server_host` et
- * `parts_file` peuvent déclencher `NEEDS_RESTART` (elles conditionnent
- * respectivement le dimensionnement des tableaux de fils, le rôle PAR FORK
- * (recherche/contrôle — cf. `fork_role_for`, `fork_orchestrator.h`) fixé une
- * fois pour toutes à la naissance de chaque fork, la cible réseau et la map
- * de recherche partagée COW — aucune des quatre ne peut changer sans arrêter
- * les fils existants). Une clé stagée absente de @p staged, ou présente mais
- * identique à @p current, ne déclenche jamais de redémarrage à elle seule.
- * Les clés à chaud (`max_stock_by_thread`/`limit`/`pruner_batch`/`dfs_budget`)
- * n'influencent jamais le résultat : elles sont toujours diffusables par IPC.
+ * `parts_file` peuvent déclencher `NEEDS_RESTART` — elles conditionnent le
+ * dimensionnement des tableaux de fils, le rôle par fork fixé à la
+ * naissance, la cible réseau et la map de recherche partagée COW, aucune ne
+ * peut changer sans arrêter les fils existants. Les clés à chaud
+ * (`max_stock_by_thread`/`limit`/`pruner_batch`/`dfs_budget`) n'influencent
+ * jamais le résultat, toujours diffusables par IPC.
  *
- * @param current Configuration EFFECTIVE actuelle (typiquement
- *                `client_config_capture_effective`).
- * @param staged  Configuration EN PRÉPARATION (`config <clé> <valeur>`).
- * @return        `CLIENT_CONFIG_DIFF_NEEDS_RESTART` si `nb_forks`,
- *                `pruner_forks`, `server_host` ou `parts_file` est stagée
- *                avec une valeur différente de (ou absente de) @p current ;
- *                `CLIENT_CONFIG_DIFF_HOT_ONLY` sinon (y compris si rien n'est
- *                stagé du tout — un `configApply` sans rien préparer est un
- *                no-op inoffensif).
+ * @return `CLIENT_CONFIG_DIFF_NEEDS_RESTART` si une des quatre clés est
+ *         stagée avec une valeur différente de @p current ;
+ *         `CLIENT_CONFIG_DIFF_HOT_ONLY` sinon.
  */
 client_config_diff_t client_config_diff(const client_config_t *current, const client_config_t *staged);
 

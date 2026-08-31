@@ -122,30 +122,19 @@ int find_fork_index(const char *sun_path, char **forkIds, int nb) {
 }
 
 /**
- * @brief Méthode chargée d'alimenter les threads quand lors file est à 0
- */
-/**
- * @brief Alimente un thread de recherche en travail (un tour de la boucle `for`
- *        de `feed_thread_aposs`).
+ * @brief Alimente un thread de recherche en travail (un tour de la boucle
+ *        `for` de `feed_thread_aposs`).
  *
- * Extrait du corps de boucle pour être testable hors thread (en mode local,
- * `server_ip == NULL`, les échanges passent par le datamanager). Ne fait rien du
- * tout si `request == REQUEST_STOP`. En pause (`REQUEST_PAUSE`/
- * `REQUEST_ADMIN_PAUSE`), ne réclame PAS de nouveau travail, mais le keepalive
- * ci-dessous continue de tourner — sans lui, une pause plus longue que
- * `tcp_timeout` laisserait le serveur fermer le socket (SO_RCVTIMEO) sans que le
- * client ne le sache. Si le thread `i` n'a plus de travail (`works == 0`) ET que
- * `request == REQUEST_CONTINUE`, draine son « en analyse » puis tente d'obtenir
- * une (ou un lot de) possibilité(s) ; s'il en reçoit, les empile et passe
- * `works = 1`. Sinon, s'il a un socket ouvert, émet un keepalive avant le
- * timeout serveur. Les compteurs `*needed_work` / `*got_work` (threads ayant
- * demandé / reçu du travail) sont incrémentés en place pour piloter le back-off
- * de l'appelant.
+ * Extrait du corps de boucle pour être testable hors thread. Ne fait rien
+ * si `request == REQUEST_STOP`. En pause, ne réclame pas de nouveau travail,
+ * mais le keepalive continue de tourner — sans lui, une pause plus longue
+ * que `tcp_timeout` laisserait le serveur fermer le socket sans que le
+ * client ne le sache. Si le thread `i` n'a plus de travail et que la
+ * recherche continue, draine son « en analyse » puis tente d'obtenir un lot
+ * de possibilités ; sinon émet un keepalive avant le timeout serveur.
  *
- * @param thread_params Tableau des contextes de threads de recherche.
- * @param i             Indice du thread à alimenter.
- * @param needed_work   Compteur in/out des threads ayant réclamé du travail.
- * @param got_work      Compteur in/out des threads ayant reçu du travail.
+ * @param needed_work Compteur in/out des threads ayant réclamé du travail.
+ * @param got_work    Compteur in/out des threads ayant reçu du travail.
  */
 void feed_one_thread(client_possibility_t *thread_params, int i,
                      int *needed_work, int *got_work)
@@ -567,18 +556,13 @@ void run_mono_client(const char *file, int fork_seq)
 }
 
 /**
- * @brief Construit le tableau « Thread queues » du rapport client (une ligne par
- *        fork : in-stock / analysed, plus la ligne Total) dans une chaîne
- *        fraîchement allouée. Renvoie via out-params (NULL accepté) le stock
- *        total, l'analysed total et la somme des coups/s ; met à jour la globale
- *        max_result avec le meilleur résultat parmi les forks.
+ * @brief Construit le tableau « Thread queues » du rapport client (une ligne
+ *        par fork : in-stock / analysed, plus la ligne Total). Renvoie via
+ *        out-params (NULL accepté) le stock total, l'analysed total et la
+ *        somme des coups/s ; met à jour la globale max_result.
  *
- * Le buffer est dimensionné sur NB_THREADS (256 + NB_THREADS*80) — régression
- * d'un débordement de tas observé avec un buffer fixe sur un NB_THREADS élevé.
- * Extrait du corps de boucle de check_client_threads pour être testable hors
- * thread (pur : lit l'instantané fork_statistics[] ; le rôle par fork vient
- * de `current_fork_role`, lui-même pur vis-à-vis des globales déjà résolues
- * `pruner_forks_requested`/`pruner_mode`/`NB_THREADS` — aucune I/O).
+ * Buffer dimensionné sur NB_THREADS (256 + NB_THREADS*80) — corrige un
+ * débordement de tas observé avec un buffer fixe sur un NB_THREADS élevé.
  *
  * @return Chaîne allouée (à libérer par l'appelant).
  */
@@ -796,31 +780,20 @@ static unsigned long long bench_nodes_done(void)
  * @brief Sonde le banc de mesure (`bench_target_nodes`) et demande l'arrêt de
  *        la recherche (`REQUEST_STOP`) dès que la cible est atteinte.
  *
- * No-op si le banc est désactivé (`bench_target_nodes == 0`, cas par défaut).
- * Journalise le nombre de nœuds RÉELLEMENT atteint (toujours >= la cible, un
- * léger dépassement est attendu — voir `bench_should_stop`) pour que
- * `tests/bench/bench_search.sh` puisse le relire au lieu de supposer que la
- * cible a été atteinte exactement.
+ * No-op si le banc est désactivé. Journalise le nombre de nœuds réellement
+ * atteint (toujours >= la cible, léger dépassement attendu) pour que
+ * `tests/bench/bench_search.sh` le relise plutôt que de supposer la cible
+ * atteinte exactement.
  *
- * Journalise aussi `fc_attempts`/`fc_pruned` (élagage par forward-check,
- * `bt_forward_check` dans `src/core/etii_search.c`) quand `FORWARD_CHECK_K >
- * 0` : c'est un pruning INLINE dans la boucle chaude d'`autosearch()` (pas le
- * process `pruner` séparé, qui a son propre chemin réseau et n'est pas
- * couvert par ce banc), donc son coût est déjà entièrement inclus dans
- * `nodes_reached`/temps mesuré — ces deux compteurs servent uniquement à
- * reporter le TAUX d'élagage, pour distinguer un gain de débit dû à une
- * boucle plus rapide d'un gain dû à un forward-check qui élague différemment.
- * Lecture atomique comme dans `check_client_threads_step`, pas de nouveau
- * verrou ni coût ajouté à `bt_forward_check` lui-même.
+ * Journalise aussi `fc_attempts`/`fc_pruned` : leur coût est déjà inclus
+ * dans `nodes_reached`, ils servent seulement à reporter le taux d'élagage
+ * — distinguer un gain de débit dû à une boucle plus rapide d'un gain dû à
+ * un forward-check qui élague différemment.
  *
- * Journalise aussi `max_result` (profondeur maximale atteinte, `etii_search.c`) :
- * `nodes_reached`/s mesure un DÉBIT de traitement, pas un progrès réel — un
- * élagage plus faible peut faire visiter plus de nœuds pour la même
- * profondeur atteinte (arbre plus large), auquel cas un débit plus élevé ne
- * traduirait pas un vrai gain. `max_result` à cible de nœuds fixe est le
- * témoin direct : à `nodes_reached` comparable entre deux versions, une
- * profondeur maximale comparable ou supérieure confirme que le débit gagné
- * se traduit en profondeur réelle, pas seulement en nœuds « dilués ».
+ * Journalise aussi `max_result` : `nodes_reached`/s mesure un débit, pas un
+ * progrès réel — un élagage plus faible peut visiter plus de nœuds pour la
+ * même profondeur (arbre plus large). `max_result` à cible de nœuds fixe est
+ * le témoin direct que le débit gagné se traduit en profondeur réelle.
  */
 static void bench_poll_and_maybe_stop(void)
 {

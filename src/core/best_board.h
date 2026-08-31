@@ -3,26 +3,17 @@
  * @brief Mémorisation du plateau (représentation complète, pas seulement le
  *        compte) correspondant au meilleur résultat observé.
  *
- * Jusqu'ici les statistiques (`max_result`, `client_statistics`,
- * `control_stats_t`, l'API HTTP) n'exposaient que le NOMBRE de pièces
- * placées au record — jamais l'agencement qui l'a produit, qui continue
- * d'être muté par le backtracking immédiatement après. Ce module comble ce manque avec une primitive
- * unique, réutilisée à trois échelles indépendantes qui n'ont jamais
- * connaissance l'une de l'autre (chacune instancie son propre `best_board_t`,
- * cf. les globales `extern` ci-dessous) :
- *  - un fork de recherche (état local à CE process, alimenté par
- *    `etii_search.c`/`possibility.c` au fil du backtracking) ;
- *  - le processus PARENT client (agrégat de ses forks, alimenté par IPC —
- *    cf. `IPC_MSG_BEST_BOARD`, `src/net/ipc_protocol.h`) ;
- *  - le serveur (agrégat de tous les clients connectés, alimenté par le
- *    canal de contrôle — cf. `CTRL_GET_BEST_BOARD`/`CTRL_BEST_BOARD`,
- *    `src/net/control_protocol.h`).
+ * Les statistiques (`max_result`, `client_statistics`, l'API HTTP)
+ * n'exposaient que le nombre de pièces placées au record — jamais
+ * l'agencement, muté par le backtracking immédiatement après. Une primitive
+ * unique est réutilisée à trois échelles indépendantes, chacune instanciant
+ * son propre `best_board_t` : un fork de recherche, le processus parent
+ * client (agrégat de ses forks par IPC), le serveur (agrégat de tous les
+ * clients par le canal de contrôle).
  *
- * La règle est la même partout : on ne conserve QUE la première
- * représentation qui dépasse STRICTEMENT le nombre de pièces déjà
- * enregistré — un nouveau plateau à égalité n'écrase jamais le précédent
- * (demande explicite : mémoriser un enregistrement par record, pas la
- * dernière valeur vue).
+ * Règle commune : on ne conserve que la première représentation qui dépasse
+ * strictement le nombre de pièces déjà enregistré — un nouveau plateau à
+ * égalité n'écrase jamais le précédent.
  */
 #ifndef eternityII_best_board_h
 #define eternityII_best_board_h

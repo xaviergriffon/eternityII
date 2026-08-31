@@ -1,19 +1,14 @@
 /**
  * @file etii_control.h
- * @brief Canal de contrôle côté client : le processus PARENT (celui qui
+ * @brief Canal de contrôle côté client : le processus parent (celui qui
  *        fork les process de recherche, jamais un fork lui-même) ouvre une
  *        connexion TCP additionnelle dédiée vers le serveur, s'annonce via
  *        `INST_CONTROL_HELLO`, puis répond aux trames `CTRL_*` envoyées par
- *        le serveur (qui devient l'initiateur sur CETTE connexion précise,
- *        cf. src/net/control_protocol.h).
+ *        le serveur (initiateur sur cette connexion précise).
  *
- * Convention de cadrage du hello, choisie ici faute de format déjà formalisé
- * avec le côté serveur (développée en parallèle) : `INST_CONTROL_HELLO`
- * (instruction du protocole existant, etii_protocol.h) suivi d'un `int32_t`
- * longueur puis du payload `control_hello_t` encodé, le tout via `send_all`
- * (jamais un `send`/`recv` brut sur un cadrage variable) — c'est le format
- * cadré standard déjà utilisé par le reste du protocole (INST_GET_TO_CHECK_BATCH,
- * INST_POSSIBILITY_ANALYSED_BATCH).
+ * Cadrage du hello : `INST_CONTROL_HELLO` suivi d'un `int32_t` longueur puis
+ * du payload `control_hello_t` encodé, via `send_all` — le format cadré
+ * standard déjà utilisé par le reste du protocole.
  */
 #ifndef eternityII_etii_control_h
 #define eternityII_etii_control_h
@@ -24,80 +19,59 @@
 
 /**
  * @brief Agrège `fork_statistics[]` (et le record global `max_result`) dans
- *        `out`, sur le modèle de `build_thread_queues_table`
- *        (src/app/etii_client.c) mais en structure binaire plutôt qu'en
- *        chaîne de caractères formatée pour l'affichage console.
- *
- * @param out Structure destination, entièrement réécrite (remise à zéro puis
- *            sommée).
+ *        `out`, en structure binaire plutôt qu'en chaîne formatée pour
+ *        l'affichage console.
  */
 void control_channel_build_stats(control_stats_t *out);
 
 /**
- * @brief Traite UNE trame de contrôle déjà reçue (corps testable par
- *        socketpair sans passer par `ctrl_recv_frame`, sur le modèle de
- *        `communicate_with_client_step`/`control_session_step` déjà utilisés
- *        ailleurs dans le projet pour rendre une boucle réseau testable).
- *
- * - `CTRL_PING` → répond `CTRL_ACK`.
- * - `CTRL_GET_STATS` → agrège les stats courantes et répond `CTRL_STATS`.
- * - `CTRL_COMMAND` → défense en profondeur : revérifie
- *   `control_command_allowed` (le serveur filtre déjà côté `clientsCmd`,
- *   mais ce client ne fait JAMAIS confiance aveuglément à ce qui arrive sur ce
- *   socket) avant d'exécuter via `do_command_line`, puis répond `CTRL_RESULT`.
- *   Une commande refusée n'est PAS exécutée ; le résultat renvoyé est alors
- *   négatif.
- * - Toute autre valeur de `cmd` : journalisée et ignorée (pas de fermeture de
- *   session pour une trame inattendue non dangereuse).
- *
- * @param socket_id Descripteur du socket connecté (pour la réponse).
- * @param cmd       Commande de trame reçue (cf. @ref ControlCommands).
- * @param payload   Payload reçu, peut être `NULL` si `len == 0`. Pour
- *                   `CTRL_COMMAND`, n'est PAS garanti null-terminé : ce module
- *                   en fait une copie bornée avant de l'utiliser comme chaîne C.
- * @param len       Longueur du payload.
- * @return          0 si la trame a été traitée et la réponse envoyée avec
- *                  succès, -1 en cas d'échec d'envoi réseau (l'appelant doit
- *                  alors considérer la connexion perdue et reconnecter).
- */
-/**
  * @brief Le canal de contrôle doit-il continuer à servir ?
  *
- * Vrai tant que le process tourne normalement — et, une fois l'arrêt demandé,
- * tant qu'il reste au moins un fork de travail vivant.
+ * Vrai tant que le process tourne normalement — et, une fois l'arrêt
+ * demandé, tant qu'il reste au moins un fork de travail vivant.
  *
- * Le canal de contrôle est ouvert par le seul process PARENT. À l'arrêt, il se
- * fermait dès `REQUEST_STOP`, donc AVANT que les forks aient fini de vider
- * leur file : le serveur en concluait la mort du client et lui reprenait une
- * possibilité dont les forks avaient déjà poussé les enfants — parent et
- * enfants se retrouvaient tous deux en stock. Le serveur s'en protège
- * désormais de son côté (`owner_client_alive`) ; ce prédicat ferme la même
- * course à la source, côté client. Diagnostic complet :
- * `docs/investigations/bail_expire_racines_en_stock.md`.
- *
- * @return 1 s'il faut continuer à servir la session en cours, 0 sinon.
+ * Le canal de contrôle est ouvert par le seul process parent. À l'arrêt, il
+ * se fermait dès `REQUEST_STOP`, avant que les forks aient fini de vider
+ * leur file : le serveur en concluait la mort du client et lui reprenait
+ * une possibilité dont les forks avaient déjà poussé les enfants — parent
+ * et enfants se retrouvaient tous deux en stock. Ce prédicat ferme cette
+ * course côté client (le serveur se protège symétriquement via
+ * `owner_client_alive`).
  */
 int control_channel_keeps_serving(void);
 
+/**
+ * @brief Traite une trame de contrôle déjà reçue (corps testable par
+ *        socketpair sans passer par `ctrl_recv_frame`).
+ *
+ * `CTRL_PING` → répond `CTRL_ACK`. `CTRL_GET_STATS` → agrège les stats et
+ * répond `CTRL_STATS`. `CTRL_COMMAND` → défense en profondeur : revérifie
+ * `control_command_allowed` (ce client ne fait jamais confiance aveuglément
+ * à ce qui arrive sur ce socket) avant d'exécuter via `do_command_line`,
+ * puis répond `CTRL_RESULT` (résultat négatif si refusée, non exécutée).
+ * Toute autre valeur de `cmd` : journalisée et ignorée.
+ *
+ * @param payload Pour `CTRL_COMMAND`, n'est pas garanti null-terminé : ce
+ *                module en fait une copie bornée avant usage comme chaîne C.
+ * @return 0 si traitée et réponse envoyée avec succès, -1 en cas d'échec
+ *         d'envoi réseau (connexion à considérer perdue).
+ */
 int control_channel_handle_frame(int socket_id, uint8_t cmd, const void *payload, int32_t len);
 
 /**
- * @brief Boucle du thread de canal de contrôle (tourne dans le processus
- *        PARENT uniquement). Se (re)connecte avec back-off exponentiel
- *        (sur le modèle de `next_no_work_sleep`, src/app/etii_client.c) tant
- *        que `request != REQUEST_STOP`, effectue le handshake de version
- *        EXACT comme `check_and_connect_to_server` (src/core/datamanager.c),
- *        envoie le hello, puis sert les trames du serveur en boucle via
+ * @brief Boucle du thread de canal de contrôle (processus parent
+ *        uniquement). Se (re)connecte avec back-off exponentiel tant que
+ *        `request != REQUEST_STOP`, effectue le handshake de version, envoie
+ *        le hello, puis sert les trames du serveur via
  *        `control_channel_handle_frame`.
  *
- * `HANDSHAKE_VERSION_REJECTED` arrête CE thread (log clair) sans poser
+ * `HANDSHAKE_VERSION_REJECTED` arrête ce thread sans poser
  * `request = REQUEST_STOP` : ce n'est pas à ce thread annexe de tuer le
- * process principal pour un problème qui ne concerne que ce canal.
+ * process principal pour un problème propre à ce canal.
  *
- * @param param `control_channel_params_t *` alloué par `start_control_channel`
- *              (libéré par ce thread dès que les champs sont copiés
- *              localement).
- * @return      Toujours `NULL`.
+ * @param param `control_channel_params_t *` alloué par
+ *              `start_control_channel` (libéré dès que les champs sont
+ *              copiés localement).
  */
 void *run_control_channel(void *param);
 

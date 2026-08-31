@@ -206,18 +206,14 @@
  * @brief Bascule d'activation du forward-checking, et taille de fenêtre du
  *        chemin froid `forward_check_next_k`.
  *
- * Sur la boucle chaude (`bt_forward_check`, `etii_search.c`), CETTE VALEUR NE
- * BORNE PLUS AUCUNE FENÊTRE depuis le passage aux voisines géométriques : le
- * nombre de cases inspectées après un placement est une propriété de la
- * grille (au plus 4 voisines), indépendante de `FORWARD_CHECK_K`. Seul le
- * chemin froid `forward_check_next_k` (`possibility.c` — matérialisation de
- * délégation, tests) garde l'ancienne sémantique de fenêtre : après avoir
- * placé une pièce à `directions[i]`, il vérifie que les `FORWARD_CHECK_K`
- * prochaines cases (`directions[i+1] ... directions[i+K]`) possèdent encore
- * au moins une pièce candidate (39 % des relations de
- * voisinage jamais couvertes par l'ancienne fenêtre K=6).
+ * Sur la boucle chaude (`bt_forward_check`), cette valeur ne borne plus
+ * aucune fenêtre depuis le passage aux voisines géométriques (au plus 4,
+ * indépendant de `FORWARD_CHECK_K`). Seul le chemin froid
+ * `forward_check_next_k` garde l'ancienne sémantique : après un placement,
+ * vérifie que les `FORWARD_CHECK_K` prochaines cases du parcours ont encore
+ * un candidat.
  *
- * `FORWARD_CHECK_K == 0` reste le seul interrupteur : il compile TOUT le
+ * `FORWARD_CHECK_K == 0` reste le seul interrupteur : compile tout le
  * forward-checking hors du binaire (les deux chemins).
  */
 // Surchargeable via -DFORWARD_CHECK_K=0 (désactive le forward-checking) : la CI
@@ -270,33 +266,25 @@ extern volatile unsigned long long fc_attempts;
  * @brief Cumul des élagages par position dans la fenêtre inspectée.
  *
  * `fc_pruned_at[j]` compte les élagages dont la première case sans candidat
- * est en position j (1..) dans la fenêtre inspectée par l'appelant. Deux
- * appelants y contribuent, avec des fenêtres de nature différente :
- * - `bt_forward_check` (`etii_search.c`, boucle chaude) inspecte les VOISINES
- *   géométriques de la pièce qu'on vient de placer — au plus 4, donc j ∈ [1,4] ;
- * - `forward_check_next_k` (`possibility.c`, chemins froids : matérialisation
- *   de délégation, tests) inspecte encore les `FORWARD_CHECK_K` prochaines
- *   cases du PARCOURS — j ∈ [1, FORWARD_CHECK_K].
- * Le tableau est dimensionné sur `FC_STAT_MAX_K` (borne indépendante de
- * `FORWARD_CHECK_K`, cf. `etii_statistic.h`) pour rester sûr quel que soit le
- * plus petit des deux domaines. La somme de tous les indices vaut toujours
- * `fc_pruned` ; sa répartition n'estime plus une distance de parcours
- * uniforme.
+ * est en position j (1..). Deux appelants contribuent avec des fenêtres de
+ * nature différente : `bt_forward_check` (boucle chaude) inspecte au plus 4
+ * voisines géométriques (j ∈ [1,4]) ; `forward_check_next_k` (chemins
+ * froids) inspecte les `FORWARD_CHECK_K` prochaines cases du parcours
+ * (j ∈ [1, FORWARD_CHECK_K]). Tableau dimensionné sur `FC_STAT_MAX_K`
+ * (indépendant de `FORWARD_CHECK_K`) pour rester sûr quel que soit le
+ * domaine. La somme de tous les indices vaut toujours `fc_pruned`.
  */
 extern volatile unsigned long long fc_pruned_at[FC_STAT_MAX_K + 1];
 
 /**
- * @brief Compteur du nombre d'élagages dus à un CONFLIT DE SINGLETONS —
+ * @brief Compteur du nombre d'élagages dus à un conflit de singletons —
  *        sous-ensemble de `fc_pruned`.
  *
  * Incrémenté par `bt_forward_check` quand deux voisines de la pièce posée
- * exigent chacune, comme seul candidat encore libre, la MÊME pièce — cas
- * `|S| = 2` du théorème de Hall, que le forward-check case-par-case ne peut
- * structurellement pas voir (chaque voisine prise isolément a bien ≥ 1
- * candidat). Compteur DÉDIÉ plutôt que replié dans `fc_pruned_at[]` :
- * répond à « ce mécanisme se déclenche-t-il, indépendamment du débit
- * agrégé ? » — la question tranchée en §4.4. Actif seulement quand
- * `singleton_conflict_check` est levé (cf. sa doc).
+ * exigent chacune, comme seul candidat encore libre, la même pièce — cas
+ * `|S| = 2` du théorème de Hall, structurellement invisible au forward-check
+ * case-par-case (chaque voisine prise isolément a bien ≥ 1 candidat). Actif
+ * seulement quand `singleton_conflict_check` est levé.
  */
 extern volatile unsigned long long fc_singleton_conflict;
 #endif // FORWARD_CHECK_K > 0
@@ -310,57 +298,42 @@ extern uint8_t diry[ETERN_PARTS];
 /**
  * @brief Cumul des cases inspectées par le forward-checking.
  *
- * Chaque appel à `bt_forward_check` (boucle chaude : au plus 4 voisines
- * géométriques) ou `forward_check_next_k` (chemin froid : jusqu'à
- * `FORWARD_CHECK_K` cases du parcours) ajoute au cumul chaque case
- * RÉELLEMENT inspectée (cases déjà remplies sautées non comptées). Même
- * unité qu'un coup de la recherche, flux disjoint de `counters`. Reste à 0
- * quand `FORWARD_CHECK_K == 0`. Incrémenté par ajout atomique (boucle chaude
- * multi-thread), comme `fc_attempts`.
+ * Chaque case réellement inspectée (les cases déjà remplies ne comptent
+ * pas) par `bt_forward_check` ou `forward_check_next_k`. Flux disjoint de
+ * `counters`. Reste à 0 quand `FORWARD_CHECK_K == 0`.
  */
 extern volatile unsigned long long fc_cells_studied;
 
 /**
- * @brief 1 si l'on s'arrête à la première solution (option `--stop-on-solution`).
+ * @brief 1 si l'on s'arrête à la première solution (`--stop-on-solution`).
  *
- * Défaut 0 : on continue après une solution — le processus de recherche backtrack
- * pour en chercher d'autres, et le serveur reste en service pour que les clients
- * continuent d'explorer. À 1 : le processus de recherche qui trouve une solution
- * sort, et le serveur qui en reçoit une sauvegarde son stock puis s'arrête.
+ * Défaut 0 : on continue après une solution, le serveur reste en service. À
+ * 1 : le processus qui trouve une solution sort, et le serveur qui la reçoit
+ * sauvegarde son stock puis s'arrête.
  *
- * Lue dans `main()` AVANT tout fork → héritée par les processus enfants
- * (fixée par `parse_cli_options`, app/app_static_variables.c), et consultée
- * directement par la boucle chaude de recherche (`core/etii_search.c`) et par
- * `core/datamanager.c` (sauvegarde/arrêt serveur à la réception d'une
- * solution) — d'où sa place ici plutôt que dans le fichier app.
+ * Lue dans `main()` avant tout fork, donc héritée par les enfants ; d'où sa
+ * place ici (`core/`) plutôt que dans app.
  */
 extern int stop_on_solution;
 
 /**
  * @brief Nombre de possibilités qu'un client pruner demande/acquitte par lot.
  *
- * Configurable au démarrage (argument CLI du mode `pruner`, app/client_config.c)
- * et à l'exécution via la commande `prunerBatch <n>` (propagée aux process
- * enfants). Borne la mémoire de l'échange : le pruner ne détient jamais plus
- * que ce lot, la capacité mémoire n'a donc pas à être supposée illimitée.
- * Défaut `PRUNER_BATCH_SIZE`, plafonné à `PRUNER_BATCH_MAX`. Lu directement
- * par `core/etii_search.c`/`core/datamanager.c` (taille de lot GET_TO_CHECK).
+ * Configurable au démarrage (CLI du mode `pruner`) et à l'exécution via
+ * `prunerBatch <n>`. Borne la mémoire de l'échange : le pruner ne détient
+ * jamais plus que ce lot. Défaut `PRUNER_BATCH_SIZE`, plafonné à
+ * `PRUNER_BATCH_MAX`.
  */
 extern int pruner_batch_size;
 
 /**
- * @brief Budget de nœuds de la preuve de fermeture bornée du pruner CPU (§4.6b).
+ * @brief Budget de nœuds de la preuve de fermeture bornée du pruner CPU.
  *
- * Configurable au démarrage (fichier de configuration client, clé
- * `dfs_budget`) et à l'exécution via la commande `prunerDfsBudget <n>`
- * (propagée aux process enfants). `<= 0` désactive entièrement ce contrôle
- * supplémentaire — `autoprune_step` retombe alors sur le seul contrôle
- * superficiel (`possibility_all_has_a_next_counted`), comportement d'avant
- * cette PR. Défaut `PRUNER_DFS_BUDGET_DEFAULT` = 0 (DÉSACTIVÉ, voir sa doc) :
- * mesuré sans gain sur le stock réel actuel, mur structurel `max_result` ≈ 74
- * oblige — un opt-in délibéré, pas un défaut prudent en attendant mieux.
- * Plafonné à `PRUNER_DFS_BUDGET_MAX` par `pruner_dfs_budget_clamp`
- * (`src/ui/command_lines.{h,c}`).
+ * Configurable au démarrage (clé `dfs_budget`) et via `prunerDfsBudget <n>`.
+ * `<= 0` désactive ce contrôle supplémentaire — `autoprune_step` retombe sur
+ * le seul contrôle superficiel. Défaut `PRUNER_DFS_BUDGET_DEFAULT` = 0
+ * (désactivé) : mesuré sans gain sur le stock actuel, opt-in délibéré.
+ * Plafonné à `PRUNER_DFS_BUDGET_MAX` par `pruner_dfs_budget_clamp`.
  */
 extern int pruner_dfs_budget;
 
@@ -373,50 +346,38 @@ extern volatile unsigned long long pruner_removed;
 /**
  * @brief Cumul des cases étudiées par les contrôles de possibilité du prunage.
  *
- * Chaque contrôle d'une possibilité (`possibility_all_has_a_next`, client
- * pruner ou élagage `rmnonext`) balaie plusieurs cases du plateau : ce cumul
- * compte chacune de ces études de case — la même unité qu'un coup de la
- * recherche, mais dans un flux DISJOINT de `counters` (pas de double compte).
- * Avec `fc_cells_studied`, il alimente le débit « dont prunage/s » et
- * l'indice « études/s (recherche+prunage) » des rapports `check`.
+ * Chaque contrôle d'une possibilité balaie plusieurs cases : ce cumul compte
+ * chacune de ces études, dans un flux disjoint de `counters`. Avec
+ * `fc_cells_studied`, alimente le débit « dont prunage/s » des rapports
+ * `check`.
  */
 extern volatile unsigned long long pruner_cells_studied;
 
 /**
  * @brief Cumul des possibilités prouvées mortes par la preuve de fermeture
- *        bornée du pruner CPU (§4.6b), sous-ensemble de `pruner_removed`.
+ *        bornée du pruner CPU, sous-ensemble de `pruner_removed`.
  *
- * Isole la contribution PROPRE de ce mécanisme (par opposition au contrôle
- * superficiel `possibility_all_has_a_next_counted`, qui incrémente
- * `pruner_removed` sans jamais toucher ce compteur) — même discipline de
- * mesure que `fc_singleton_conflict` pour §4.4 : répondre à « rentable ou
- * non » exige de ne pas se fier au seul débit agrégé. Compteur PUREMENT
- * LOCAL au process : contrairement à `pruner_checked`/`pruner_removed`, il
- * n'est PAS propagé au parent par `client_statistics`/IPC ni exposé sur le
- * canal de contrôle ou l'API HTTP — un choix délibéré pour ne pas faire
- * grossir le format de ces échanges pour un compteur de diagnostic
- * (mesure/tests), qui reste lisible en local (débogueur, tests unitaires).
+ * Isole la contribution propre de ce mécanisme, par opposition au contrôle
+ * superficiel qui incrémente `pruner_removed` sans le toucher. Compteur
+ * purement local au process : contrairement à `pruner_checked`/
+ * `pruner_removed`, n'est pas propagé au parent (diagnostic/tests
+ * seulement).
  */
 extern volatile unsigned long long pruner_dfs_closed;
 
 /**
  * @brief Cumul des nœuds de backtracking explorés par la preuve de fermeture
- *        bornée du pruner CPU (§4.6b), qu'elle ait fermé le sous-arbre ou
- *        épuisé son budget sans conclure.
+ *        bornée du pruner CPU, qu'elle ait fermé le sous-arbre ou épuisé son
+ *        budget sans conclure.
  *
  * Coût réel du mécanisme, complémentaire de `pruner_dfs_closed` : le nombre
- * de fermetures prouvées seul ne dit rien du prix payé pour les tentatives
- * infructueuses (budget épuisé). Même flux purement local que
- * `pruner_dfs_closed`, pour la même raison (voir sa doc).
+ * de fermetures seul ne dit rien du prix des tentatives infructueuses.
  */
 extern volatile unsigned long long pruner_dfs_nodes;
 
 /**
  * @brief Nombre de possibilités déplacées de la file la plus pleine vers la
- *        plus vide à chaque tour de `check_server_step` (option CLI
- *        `--rebalance-budget <n>`) — NON, voir app_static_variables.h :
- *        `rebalance_budget` lui-même reste app (seul `check_server_step`, un
- *        fichier app/, l'utilise).
+ *        plus vide à chaque tour de `check_server_step` (`--rebalance-budget`).
  */
 
 extern unsigned long long *counters;
@@ -427,36 +388,15 @@ extern volatile uint16_t max_result;
 /**
  * @brief Durée (µs) à attendre si `r` est l'une des deux valeurs de pause, 0 sinon.
  *
- * Regroupe `REQUEST_PAUSE` et `REQUEST_ADMIN_PAUSE` : les boucles chaudes qui
- * doivent juste attendre (usleep + continue) sans traiter cela comme un arrêt
- * n'ont pas à connaître la distinction entre les deux origines de pause — mais
- * l'objectif de chacune diffère, d'où deux durées distinctes plutôt qu'un
- * simple booléen :
- * - `REQUEST_PAUSE` (régulation de débit, `control_step`) doit rester précis :
- *   une attente trop longue fausserait la mesure de débit que ce même
- *   mécanisme réévalue à chaque tour. `PAUSE_POLL_SLEEP_US` (10 ms).
- * - `REQUEST_ADMIN_PAUSE` (pause manuelle/distante, durée arbitraire, parfois
- *   longue) n'a aucune contrainte de précision : on peut attendre bien plus
- *   longtemps pour économiser du CPU. `ADMIN_PAUSE_POLL_SLEEP_US` (500 ms).
- *
- * @param r Valeur de `request` à tester.
- * @return  `PAUSE_POLL_SLEEP_US` si `r == REQUEST_PAUSE`,
- *          `ADMIN_PAUSE_POLL_SLEEP_US` si `r == REQUEST_ADMIN_PAUSE`, 0 sinon.
+ * Deux durées distinctes plutôt qu'un booléen : `REQUEST_PAUSE` (régulation
+ * de débit) doit rester précis — une attente trop longue fausserait la
+ * mesure de débit réévaluée à chaque tour (`PAUSE_POLL_SLEEP_US`, 10 ms) ;
+ * `REQUEST_ADMIN_PAUSE` (pause manuelle/distante, durée arbitraire) n'a
+ * aucune contrainte de précision (`ADMIN_PAUSE_POLL_SLEEP_US`, 500 ms).
  */
 useconds_t request_is_pause(int r);
 
-/**
- * @brief Vrai si `r` ne signale pas un arrêt (`REQUEST_STOP`).
- *
- * Regroupe l'idée « on continue de tourner », que ce soit en fonctionnement
- * normal (`REQUEST_CONTINUE`), en pause de régulation (`REQUEST_PAUSE`) ou en
- * pause administrative (`REQUEST_ADMIN_PAUSE`) : seules les boucles d'attente
- * de travail doivent rester actives dans ces trois cas et se terminer sur
- * `REQUEST_STOP`.
- *
- * @param r Valeur de `request` à tester.
- * @return  1 si `r != REQUEST_STOP`, 0 sinon.
- */
+/** @brief Vrai si `r` ne signale pas un arrêt (`REQUEST_STOP`) — continue, pause de régulation ou pause admin. */
 int request_keeps_running(int r);
 
 // TODO : deplacer dans un parametre ?
@@ -472,24 +412,18 @@ extern volatile int request;
 extern int max_stock_by_thread;
 
 /**
- * @brief Vrai (1) tant que CE fork (process courant) est en train d'échanger
- *        avec le serveur — connexion, envoi ou réception d'un paquet, sonde
- *        de faim (`INST_NEED_WORK`) — depuis N'IMPORTE LEQUEL de ses deux
- *        threads réseau (le thread d'alimentation `feed_one_thread`, ou le
- *        thread de recherche via `add_possibility`/délégation). Faux (0)
- *        sinon. Basé sur le périmètre exact de `client_possibility->socket_mutex`
- *        (un seul `client_possibility_t` par fork, donc un seul mutex,
- *        déjà partagé entre ces deux threads — aucune notion de « par
- *        thread » n'est nécessaire) : `server_socket_io_lock`/
- *        `server_socket_io_unlock` (`core/datamanager.h`) sont les seuls
- *        points qui doivent le faire varier, jamais une affectation directe
- *        ailleurs.
+ * @brief Vrai (1) tant que ce fork est en train d'échanger avec le serveur
+ *        (connexion, envoi/réception, sonde de faim) depuis n'importe lequel
+ *        de ses deux threads réseau. Faux sinon.
  *
- * Rapporté au parent via `client_statistics.server_io_active` (IPC_MSG_STATS,
- * même cadence que le reste des stats) — répond directement à « ce fils
- * encore vivant à l'arrêt est-il en train de PARLER au serveur, ou juste
- * bloqué/inactif ? » (cf. `fork_diagnostic_summary`). Écrit par
- * `core/datamanager.c` (propriétaire réel de l'état), lu côté app pour le
+ * Basé sur le périmètre exact de `client_possibility->socket_mutex` (un seul
+ * mutex par fork, déjà partagé entre les deux threads) : seuls
+ * `server_socket_io_lock`/`_unlock` doivent le faire varier, jamais une
+ * affectation directe ailleurs.
+ *
+ * Rapporté au parent via `client_statistics.server_io_active` — répond à
+ * « ce fils encore vivant à l'arrêt parle-t-il au serveur, ou est-il
+ * bloqué/inactif ? ». Écrit par `core/datamanager.c`, lu côté app pour le
  * reporting — d'où sa place ici plutôt que dans le fichier app.
  */
 extern volatile int server_io_active;
@@ -502,42 +436,24 @@ extern volatile int server_io_active;
 extern int server_hunger;
 
 /**
- * @brief Arme la détection de CONFLIT DE SINGLETONS dans `bt_forward_check` —
- *        expérience de mesure, jamais un réglage d'exploitation (défaut 0).
+ * @brief Arme la détection de conflit de singletons dans `bt_forward_check`
+ *        — expérience de mesure, jamais un réglage d'exploitation (défaut 0).
  *
- * Réimplémentation ultérieure :
- * pendant le balayage des voisines, au lieu de s'arrêter au premier candidat
- * libre trouvé (comportement par défaut), compte jusqu'à 2 candidats libres
- * — assez pour distinguer « singleton » de « pas singleton », inutile
- * d'aller plus loin. Si exactement 1, compare son `id` à celui des
- * singletons déjà rencontrés dans CE balayage (au plus 4 voisines par
- * appel) : un `id` répété ⇒ deux cases exigent la même pièce unique ⇒
- * branche morte — le cas `|S| = 2` du théorème de Hall, structurellement
- * invisible à un test case-par-case.
+ * Pendant le balayage des voisines, au lieu de s'arrêter au premier candidat
+ * libre (comportement par défaut), compte jusqu'à 2 candidats libres — assez
+ * pour distinguer « singleton » de « pas singleton ». Si exactement 1,
+ * compare son `id` à celui des singletons déjà rencontrés dans ce balayage :
+ * un `id` répété ⇒ deux cases exigent la même pièce unique ⇒ branche morte
+ * — le cas `|S| = 2` du théorème de Hall, invisible à un test case-par-case.
  *
- * Mesuré une première fois (§4.4, avant PR 10) sur le protocole du banc de
- * débit (`bench_search.sh`, mono-processus depuis la genèse) : **0
- * déclenchement** sur 500 M nœuds, code reverté. Cette conclusion souffrait
- * de la même erreur de méthode que le « mur à `max_result` ≈ 74 » corrigé en
- * §4.7 : protocole non représentatif du stock réel d'un serveur.
+ * Mesuré sur du stock réel (banc de réfutation, engin `fixe+singleton`) : le
+ * mécanisme se déclenche réellement, mais exclusivement dans des sous-arbres
+ * trop grands pour fermer dans les budgets testés — jamais là où ça compte.
+ * Coût confirmé : −9,5 à −11,4 % de débit agrégé. Décision : ne pas
+ * fusionner dans le chemin par défaut.
  *
- * REMESURÉ sur du VRAI stock via l'engin `fixe+singleton` du banc de
- * réfutation (`tests/bench/bench_refutation.c --engines`, jamais
- * `--pruner-profile` — ce mode-là ne touche pas `bt_forward_check`). Verdict :
- * le mécanisme se déclenche RÉELLEMENT (35 056 à 134 565 fois sur des
- * échantillons de 120 racines, compteur `fc_singleton_conflict`), mais
- * EXCLUSIVEMENT dans des sous-arbres trop grands pour fermer dans les
- * budgets testés — jamais dans un sous-arbre effectivement fermé. Coût
- * confirmé sur trois mesures indépendantes : −9,5 à −11,4 % de débit agrégé,
- * cohérent avec la mesure originale. Décision inchangée (ne pas fusionner),
- * diagnostic corrigé (« ne se déclenche jamais » → « se déclenche mais
- * jamais là où ça compte ») — voir §4.4 pour la trace complète.
- *
- * Coût nul quand il vaut 0 (le chemin historique, un seul candidat cherché,
- * est inchangé). Lu par `bt_forward_check` uniquement — MRV étant le seul
- * moteur (cf. docs/autosearch_step.md), ce drapeau ne s'applique plus qu'à
- * lui (autrefois partagé avec le moteur à ordre fixe, qui utilisait aussi
- * `bt_forward_check`).
+ * Coût nul quand il vaut 0. Lu par `bt_forward_check` uniquement, seul
+ * moteur MRV.
  */
 extern int singleton_conflict_check;
 

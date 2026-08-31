@@ -1,27 +1,23 @@
 /**
- * @file client_identity.h
- * @brief Identité déclarée d'un client (v12) : nonce machine persistant,
- *        nonce de session, rang de fork, libellé — codec pur (sans I/O
- *        réseau) partagé par les DEUX hellos du protocole :
- *         - le hello de la connexion de TRAVAIL (`INST_CLIENT_HELLO`,
- *           etii_protocol.h), envoyé par chaque fork après le handshake ;
- *         - le hello du canal de CONTRÔLE (`control_hello_t`, étendu de ces
- *           mêmes champs, control_protocol.h), envoyé par le process parent.
+ * @brief Identité déclarée d'un client : nonce machine persistant, nonce de
+ *        session, rang de fork, libellé — codec pur (sans I/O réseau)
+ *        partagé par les deux hellos du protocole :
+ *         - le hello de la connexion de travail (`INST_CLIENT_HELLO`),
+ *           envoyé par chaque fork après le handshake ;
+ *         - le hello du canal de contrôle (`control_hello_t`, étendu de ces
+ *           mêmes champs), envoyé par le process parent.
  *
- * Pourquoi un module séparé plutôt que dupliquer l'encodage dans les deux
- * protocoles : les deux hellos transportent EXACTEMENT les mêmes 5 champs,
- * dont un champ de longueur variable (`label`) qu'il faut borner et cadrer
- * correctement des deux côtés — dupliquer cette logique reviendrait à
- * maintenir deux fois le même code de bornage, avec le risque qu'ils
- * divergent. Comme le reste du protocole (cf. control_protocol.h) : champs
- * de largeur fixe explicites, jamais un struct brut sur le fil.
+ * Module séparé plutôt que dupliquer l'encodage dans les deux protocoles :
+ * les deux hellos transportent exactement les mêmes champs, dont un champ
+ * de longueur variable (`label`) qu'il faut borner et cadrer correctement
+ * des deux côtés.
  *
- * Quatre notions distinctes, à ne jamais fusionner en un seul champ : `machine_uid`
- * (persistant, survit aux redémarrages — clé de cumul des statistiques),
- * `client_uid` (nonce d'UNE exécution du process parent — identité de session,
- * propriétaire des baux), `fork_seq` (rang d'un fork dans son parent — rattache
- * une connexion de travail à son parent) et `label` (déclaratif, affichage seul,
- * jamais une clé — deux clients peuvent légitimement partager le même).
+ * Quatre notions distinctes, à ne jamais fusionner : `machine_uid`
+ * (persistant, survit aux redémarrages — clé de cumul), `client_uid`
+ * (nonce d'une exécution du process parent — identité de session,
+ * propriétaire des baux), `fork_seq` (rang d'un fork — rattache une
+ * connexion de travail à son parent) et `label` (déclaratif, affichage
+ * seul, jamais une clé — deux clients peuvent légitimement le partager).
  */
 #ifndef eternityII_client_identity_h
 #define eternityII_client_identity_h
