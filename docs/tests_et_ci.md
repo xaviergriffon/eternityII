@@ -831,6 +831,61 @@ coûteux pour dominer le coût fixe du lancement, ce qui n'est pas le cas de ce
 contrôle à cette échelle de lot. Voir [pruner_gpu_cuda.md](pruner_gpu_cuda.md)
 pour la discussion complète (à ne pas vendre sur le débit brut).
 
+## Banc de contention SMT (`tests/bench/bench_smt_contention.sh`)
+
+Chaque fork de recherche/analyse (`client`, `pruner`) occupe aujourd'hui **un
+cœur physique entier**, un seul thread `autosearch`/`autoprune` CPU-bound par
+processus (voir [autosearch_step.md](autosearch_step.md)). Avant d'envisager
+de faire tourner 2 workers sur les 2 threads matériels d'un même cœur physique
+(SMT/Hyper-Threading — que ce soit via 2 threads dans un même fork ou 2 forks
+épinglés sur la même paire SMT, les deux placent le même travail sur le même
+matériel), la question à trancher est purement matérielle : cette boucle
+chaude, très sensible au cache (`map_bucket_packed`, forward-check sur les
+voisines — §1.3 bis/ter d'[autosearch_step.md](autosearch_step.md)),
+tire-t-elle un vrai gain agrégé d'un second thread matériel sur le même cœur,
+ou se contente-t-elle de se disputer les ports d'exécution et les caches
+L1/L2 partagés du cœur ?
+
+`tests/bench/bench_smt_contention.sh` mesure exactement ça, en mode `test`
+(comme `bench_search.sh`, réutilise `ETII_BENCH_NODES`/`bench_lib.sh`) :
+
+```sh
+tests/bench/bench_smt_contention.sh --list-topology     # cœurs physiques -> CPUs logiques
+tests/bench/bench_smt_contention.sh                      # auto-détecte une paire SMT
+tests/bench/bench_smt_contention.sh --cpus 0,1 --nodes 5000000 --reps 7 --out rapport.json
+```
+
+Pour un groupe de CPUs donné (typiquement les 2 threads matériels d'un même
+cœur), le banc compare :
+
+- **solo** : chaque CPU du groupe, seul (`taskset`), REPS fois — référence
+  sans aucune contention (débit d'1 seul worker sur ce cœur, la situation
+  actuelle) ;
+- **concurrent** : tous les CPUs du groupe en même temps, REPS fois — le
+  débit agrégé réel si N workers y tournaient en permanence.
+
+Deux métriques dans le rapport JSON tranchent la question, pas une seule :
+
+- `contention_efficiency_pct` = concurrent ÷ somme des solos, en % — 100 %
+  signifie que les workers ne se gênent pas du tout (le cas de 2 cœurs
+  physiques distincts, qui n'ont presque rien à se disputer) ; en dessous de
+  100 %, c'est la mesure directe de la contention SMT sur cette boucle.
+- `net_gain_vs_single_worker` = concurrent ÷ débit solo moyen d'UN CPU du
+  groupe — la métrique de décision : « ajouter le second thread matériel
+  rapporte-t-il plus que le seul worker qui tourne déjà là aujourd'hui ? ».
+  Proche de N (nombre de CPUs du groupe) = quasi tout bénéfice ; proche de 1 =
+  le second thread n'apporte presque rien.
+
+**Une vraie paire SMT est indispensable à cette mesure** — deux CPUs qui ne
+partagent qu'un cache L3 (le cas de deux cœurs physiques distincts) donnent
+un résultat proche de l'idéal sans contention par construction, ce qui ne
+répond pas à la question. Sans détection automatique possible (`Thread(s) per
+core: 1`, cas des VM cloud sans SMT exposé — dont l'environnement de
+développement courant), le banc s'arrête avec un message explicite plutôt que
+de publier un chiffre qui ne mesure pas ce qu'il prétend mesurer ; il doit
+alors tourner sur une machine avec SMT réellement actif, `--cpus a,b`
+renseigné à partir de `--list-topology` sur cette machine.
+
 ## Voir aussi
 
 - [tests/README.md](../tests/README.md) — organisation des suites, conventions, ajout d'un test.
