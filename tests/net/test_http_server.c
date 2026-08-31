@@ -1078,6 +1078,33 @@ TEST http_server_get_stock_distribution_reflects_real_stock(void)
     PASS();
 }
 
+/* ---------- GET /api/v1/commands --------------------------------------- */
+
+TEST http_server_get_commands_returns_200(void)
+{
+    int sv[2];
+    MAKE_PAIR(sv);
+
+    const char req[] = "GET /api/v1/commands HTTP/1.1\r\nHost: x\r\n\r\n";
+    ASSERT_EQ_FMT(0, send_all_test(sv[0], req, strlen(req)), "%d");
+    ASSERT_EQ_FMT(0, handle_http_connection(sv[1]), "%d");
+
+    char resp[HTTP_RESPONSE_MAX];
+    ssize_t n = read_response(sv[0], resp, sizeof(resp));
+    ASSERT(n > 0);
+    ASSERT(strstr(resp, "HTTP/1.1 200 OK") == resp);
+    /* Aucune authentification -- pas de "Authorization" dans la requête ci-dessus,
+       et pourtant 200 : confirme la posture "sans jeton" de cette route. */
+    ASSERT(strstr(resp, "\"commands\":[") != NULL);
+    ASSERT(strstr(resp, "\"name\":\"pause\"") != NULL);
+    ASSERT(strstr(resp, "\"name\":\"restore\"") != NULL);
+    ASSERT(strstr(resp, "\"scope\":\"client_only\"") != NULL); /* "start" */
+    ASSERT(strstr(resp, "\"remote_class\":\"write_server_only\"") != NULL);
+
+    close(sv[0]); close(sv[1]);
+    PASS();
+}
+
 SUITE(http_server_suite)
 {
     RUN_TEST(http_server_get_stats_returns_200);
@@ -1118,4 +1145,5 @@ SUITE(http_server_suite)
     RUN_TEST(http_server_get_best_board_returns_200_no_record);
     RUN_TEST(http_server_get_best_board_returns_200_with_record_no_rotate_table);
     RUN_TEST(http_server_get_best_board_reflects_real_part_with_rotate_table);
+    RUN_TEST(http_server_get_commands_returns_200);
 }

@@ -146,6 +146,7 @@ TEST http_route_resolve_known_routes(void)
     ASSERT_EQ_FMT(HTTP_ROUTE_CLIENTS_STATS, http_route_resolve("POST", "/api/v1/clients/stats"), "%d");
     ASSERT_EQ_FMT(HTTP_ROUTE_KNOWN_CLIENTS, http_route_resolve("GET", "/api/v1/known-clients"), "%d");
     ASSERT_EQ_FMT(HTTP_ROUTE_STOCK_DISTRIBUTION, http_route_resolve("GET", "/api/v1/stock-distribution"), "%d");
+    ASSERT_EQ_FMT(HTTP_ROUTE_COMMANDS, http_route_resolve("GET", "/api/v1/commands"), "%d");
     PASS();
 }
 
@@ -163,6 +164,7 @@ TEST http_route_resolve_bad_method(void)
     ASSERT_EQ_FMT(HTTP_ROUTE_BAD_METHOD, http_route_resolve("GET", "/api/v1/clients/stats"), "%d");
     ASSERT_EQ_FMT(HTTP_ROUTE_BAD_METHOD, http_route_resolve("POST", "/api/v1/known-clients"), "%d");
     ASSERT_EQ_FMT(HTTP_ROUTE_BAD_METHOD, http_route_resolve("POST", "/api/v1/stock-distribution"), "%d");
+    ASSERT_EQ_FMT(HTTP_ROUTE_BAD_METHOD, http_route_resolve("POST", "/api/v1/commands"), "%d");
     PASS();
 }
 

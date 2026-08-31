@@ -264,6 +264,30 @@ int http_known_clients_collect(http_known_client_info_t *out, int max)
     return n;
 }
 
+int http_commands_collect(http_command_info_t *out, int max)
+{
+    const char *names[CONTROL_COMMAND_TABLE_MAX];
+    control_command_class_t classes[CONTROL_COMMAND_TABLE_MAX];
+    int n = control_command_enumerate(names, classes, CONTROL_COMMAND_TABLE_MAX);
+    if (n > max) {
+        n = max;
+    }
+
+    for (int i = 0; i < n; i++) {
+        memset(&out[i], 0, sizeof(out[i]));
+        strncpy(out[i].name, names[i], sizeof(out[i].name) - 1);
+        out[i].remote_class = classes[i];
+        out[i].scope = command_scope_classify(names[i]);
+        out[i].requires_token = !control_command_read_only(names[i]);
+        const char *summary = NULL;
+        const char *usage = NULL;
+        command_lookup_help_text(names[i], &summary, &usage);
+        out[i].summary = summary;
+        out[i].usage = usage;
+    }
+    return n;
+}
+
 /**
  * @brief Décode `board.grid[x][y]` (indice `id + ETERN_PARTS*rotation`, cf.
  * `id_for_rotated_part`) en description de pièce, via `g_server_rotate_parts`
@@ -515,6 +539,16 @@ int handle_http_connection(int socket_id)
         case HTTP_ROUTE_COMMAND:
             handle_command_route(socket_id, &req);
             break;
+        case HTTP_ROUTE_COMMANDS: {
+            http_command_info_t infos[CONTROL_COMMAND_TABLE_MAX];
+            int n = http_commands_collect(infos, CONTROL_COMMAND_TABLE_MAX);
+            if (http_json_format_commands(json, sizeof(json), infos, n) > 0) {
+                send_response(socket_id, 200, json);
+            } else {
+                send_response(socket_id, 500, "{\"error\":\"internal\"}");
+            }
+            break;
+        }
         case HTTP_ROUTE_CLIENTS: {
             http_client_info_t infos[MAX_CONTROL_SESSIONS];
             int n = http_clients_collect(infos, MAX_CONTROL_SESSIONS);

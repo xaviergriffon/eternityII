@@ -186,6 +186,9 @@ http_route_t http_route_resolve(const char *method, const char *path)
     if (strcmp(path, "/api/v1/command") == 0) {
         return (strcmp(method, "POST") == 0) ? HTTP_ROUTE_COMMAND : HTTP_ROUTE_BAD_METHOD;
     }
+    if (strcmp(path, "/api/v1/commands") == 0) {
+        return (strcmp(method, "GET") == 0) ? HTTP_ROUTE_COMMANDS : HTTP_ROUTE_BAD_METHOD;
+    }
     if (strcmp(path, "/api/v1/clients") == 0) {
         return (strcmp(method, "GET") == 0) ? HTTP_ROUTE_CLIENTS : HTTP_ROUTE_BAD_METHOD;
     }

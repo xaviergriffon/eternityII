@@ -135,4 +135,18 @@ void http_best_board_collect(http_best_board_view_t *out);
  */
 int http_known_clients_collect(http_known_client_info_t *out, int max);
 
+/**
+ * @brief Construit la liste des commandes réseau-pertinentes (celles de
+ *        control_command_enumerate) avec leur scope/remote_class/
+ *        requires_token/summary/usage, pour GET /api/v1/commands. Fonction
+ *        pure : aucun état vivant à lire, tout est dérivé de tables
+ *        statiques (contrairement à http_clients_collect).
+ *
+ * @param out Tableau de sortie, capacité `max`.
+ * @param max Capacité de `out`.
+ * @return    Nombre d'entrées écrites (borné par `max` ET par
+ *            CONTROL_COMMAND_TABLE_MAX).
+ */
+int http_commands_collect(http_command_info_t *out, int max);
+
 #endif /* eternityII_http_server_h */

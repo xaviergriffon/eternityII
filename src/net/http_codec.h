@@ -107,6 +107,7 @@ typedef enum {
     HTTP_ROUTE_STATS,         ///< GET /api/v1/stats
     HTTP_ROUTE_STATUS,        ///< GET /api/v1/status
     HTTP_ROUTE_COMMAND,       ///< POST /api/v1/command
+    HTTP_ROUTE_COMMANDS,      ///< GET /api/v1/commands
     HTTP_ROUTE_CLIENTS,       ///< GET /api/v1/clients
     HTTP_ROUTE_CLIENTS_STATS, ///< POST /api/v1/clients/stats
     HTTP_ROUTE_BEST_BOARD,    ///< GET /api/v1/best-board
