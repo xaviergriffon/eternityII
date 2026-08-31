@@ -2468,6 +2468,9 @@ command_scope_t command_scope_classify(const char *command_name)
 
 int command_lookup_help_text(const char *command_name, const char **out_summary, const char **out_usage)
 {
+    if (command_name == NULL) {
+        return 0;
+    }
     const command_description *command = find_command(command_name);
     if (command == NULL) {
         return 0;

@@ -3129,6 +3129,16 @@ TEST command_lookup_help_text_not_found(void)
     PASS();
 }
 
+TEST command_lookup_help_text_null_name(void)
+{
+    const char *summary = (const char *)0x1; /* sentinelle : ne doit pas être touchée */
+    const char *usage = (const char *)0x1;
+    ASSERT_EQ_FMT(0, command_lookup_help_text(NULL, &summary, &usage), "%d");
+    ASSERT(summary == (const char *)0x1);
+    ASSERT(usage == (const char *)0x1);
+    PASS();
+}
+
 SUITE(command_lines_suite)
 {
     RUN_TEST(command_scope_classify_client_only);
@@ -3138,6 +3148,7 @@ SUITE(command_lines_suite)
     RUN_TEST(command_lookup_help_text_found_with_usage);
     RUN_TEST(command_lookup_help_text_found_without_usage);
     RUN_TEST(command_lookup_help_text_not_found);
+    RUN_TEST(command_lookup_help_text_null_name);
     RUN_TEST(do_command_line_handles_empty_input);
     RUN_TEST(do_command_line_unknown_returns_error);
     RUN_TEST(do_command_line_help_runs);
