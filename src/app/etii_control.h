@@ -1,6 +1,6 @@
 /**
  * @file etii_control.h
- * @brief Canal de contrôle côté client (PR4) : le processus PARENT (celui qui
+ * @brief Canal de contrôle côté client : le processus PARENT (celui qui
  *        fork les process de recherche, jamais un fork lui-même) ouvre une
  *        connexion TCP additionnelle dédiée vers le serveur, s'annonce via
  *        `INST_CONTROL_HELLO`, puis répond aux trames `CTRL_*` envoyées par
@@ -8,13 +8,12 @@
  *        cf. src/net/control_protocol.h).
  *
  * Convention de cadrage du hello, choisie ici faute de format déjà formalisé
- * avec le côté serveur (PR3, développée en parallèle) : `INST_CONTROL_HELLO`
+ * avec le côté serveur (développée en parallèle) : `INST_CONTROL_HELLO`
  * (instruction du protocole existant, etii_protocol.h) suivi d'un `int32_t`
  * longueur puis du payload `control_hello_t` encodé, le tout via `send_all`
  * (jamais un `send`/`recv` brut sur un cadrage variable) — c'est le format
  * cadré standard déjà utilisé par le reste du protocole (INST_GET_TO_CHECK_BATCH,
- * INST_POSSIBILITY_ANALYSED_BATCH). Si PR3 a fixé une convention différente,
- * un petit ajustement suffira à réconcilier les deux côtés au moment du merge.
+ * INST_POSSIBILITY_ANALYSED_BATCH).
  */
 #ifndef eternityII_etii_control_h
 #define eternityII_etii_control_h
@@ -43,7 +42,7 @@ void control_channel_build_stats(control_stats_t *out);
  * - `CTRL_PING` → répond `CTRL_ACK`.
  * - `CTRL_GET_STATS` → agrège les stats courantes et répond `CTRL_STATS`.
  * - `CTRL_COMMAND` → défense en profondeur : revérifie
- *   `control_command_allowed` (le serveur PR3 filtre déjà côté `clientsCmd`,
+ *   `control_command_allowed` (le serveur filtre déjà côté `clientsCmd`,
  *   mais ce client ne fait JAMAIS confiance aveuglément à ce qui arrive sur ce
  *   socket) avant d'exécuter via `do_command_line`, puis répond `CTRL_RESULT`.
  *   Une commande refusée n'est PAS exécutée ; le résultat renvoyé est alors

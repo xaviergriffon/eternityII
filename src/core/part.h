@@ -103,8 +103,7 @@ typedef struct
 	 * volontairement creux, 0,46 Mo sur le puzzle 256, qui évite une seconde
 	 * table indexée par clé (10,6 Mo) ou une indirection supplémentaire.
 	 *
-	 * Sert au choix de case de l'ordre dynamique MRV (§4.7 de
-	 * `docs/conception/elagage_recherche.md`) : compter les pièces ENCORE
+	 * Sert au choix de case de l'ordre dynamique MRV : compter les pièces ENCORE
 	 * LIBRES d'un compartiment devient quelques `popcount` au lieu d'un
 	 * parcours de toutes ses entrées. Purement redondant, comme `packed`.
 	 *

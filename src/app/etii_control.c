@@ -158,7 +158,7 @@ int control_channel_handle_frame(int socket_id, uint8_t cmd, const void *payload
                      command_line);
             result = -1;
         }
-        // Défense en profondeur : le serveur (PR3) filtre déjà côté
+        // Défense en profondeur : le serveur filtre déjà côté
         // clientsCmd, mais ce client ne fait JAMAIS confiance aveuglément à
         // ce qui arrive sur ce socket. control_command_allowed ne regarde que
         // le premier mot de la ligne, pas la peine de le découper ici.

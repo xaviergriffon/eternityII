@@ -45,7 +45,7 @@ unsigned long long *fileUpdates = NULL;
 // pools stock).
 unsigned long long *analysedFileUpdates = NULL;
 
-// Compteurs de service à vide par rôle (PR2) — voir la doc dans etii_server.h.
+// Compteurs de service à vide par rôle — voir la doc dans etii_server.h.
 unsigned long long server_search_starved = 0;
 unsigned long long server_prune_starved = 0;
 
@@ -280,7 +280,7 @@ int should_autobackup(int *lastBack, unsigned long long *lastBackupUpdates,
  * @brief Callback de vivacité (`analysed_owner_alive_fn`, `core/datamanager.h`)
  *        passé à `datamanager_reclaim_expired_leases` par `check_server_step` :
  *        un client est vivant tant que son canal de contrôle reste enregistré
- *        dans `control_registry` (PR7, correctif — voir le commentaire au
+ *        dans `control_registry` (correctif — voir le commentaire au
  *        point d'appel dans `check_server_step`).
  */
 static int owner_control_session_alive(const uint8_t owner_uid[CLIENT_UID_BYTES])
@@ -366,7 +366,7 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
     // ce qui réduit la section critique au seul échange de pointeur (voir
     // app_static_variables.h pour le détail de la race corrigée). Taille
     // dimensionnée sur `table` (une ligne par file, donc proportionnelle à
-    // `nb_file_possibility` — PR4) + 1200 pour le bloc `temp` ci-dessous
+    // `nb_file_possibility`) + 1200 pour le bloc `temp` ci-dessous
     // (fixe, indépendant du nombre de files) : un `report` figé à 4000
     // octets débordait dès que `--stock-files` dépassait ~40 files (`table`
     // seul peut atteindre 256 + 128*64 ≈ 8,4 Kio à NB_FILE_POSSIBILITY_MAX),
@@ -393,7 +393,7 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
 
     int activeThread = get_active_threads(thread_params);
 
-    // Débordement disque (--stock-spill-dir, PR2/PR3) : jusqu'ici visible
+    // Débordement disque (--stock-spill-dir) : jusqu'ici visible
     // uniquement via GET /api/v1/stats (stock_spilled_packets/stock_spill_segments)
     // -- absent du rapport console `check` et du bandeau de stats live, alors
     // que c'est justement ce qu'il faut pour lire le stock COMPLET (résident +
@@ -421,7 +421,7 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
         log_event("new record: %i pieces placed", max_result);
     }
 
-    // Bail à expiration des analyses en cours (PR7) : passe bornée, au même
+    // Bail à expiration des analyses en cours : passe bornée, au même
     // rythme que le reste de ce tour (10 s) -- jamais un chemin chaud. `now`
     // est lu une seule fois ici et injecté, `datamanager_reclaim_expired_leases`
     // ne consulte jamais l'horloge elle-même (testable sans horloge réelle).
@@ -439,7 +439,7 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
     // Un bail expiré déplace des possibilités du pool analysé vers le stock,
     // et le rééquilibrage incrémental ci-dessous en déplace entre files du
     // pool stock : deux mutations réelles, délibérément PAS repliées dans les
-    // compteurs de la porte d'autobackup (PR5) ci-dessous. Contrairement au
+    // compteurs de la porte d'autobackup ci-dessous. Contrairement au
     // trafic client (fileUpdates/analysedFileUpdates, entièrement maîtrisé par
     // l'appelant d'un test), le nombre de baux/paquets qu'UN appel déplace
     // dépend de l'horloge/du contenu courant du stock -- l'intégrer romprait
@@ -489,7 +489,7 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
             // Instant T unique pour le stock et le pool analysé : backup()+backup_analysed()
             // appelées séparément laisseraient une fenêtre entre les deux instants.
             int rba = 0;
-            // "snapshot-temp" (débordement disque, PR3) apparie "./temp.back"
+            // "snapshot-temp" (débordement disque) apparie "./temp.back"
             // (résident RAM), même convention que "snapshot"/"eternityII.back"
             // plus bas — stock_spill_snapshot est un no-op silencieux si le
             // débordement n'est pas actif.
@@ -508,20 +508,20 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
         }
         if (do_best_board) {
             // Représentation du meilleur plateau connu (pas seulement max_result) :
-            // fichier dédié (cf. core/best_board.h), porte indépendante (PR5).
+            // fichier dédié (cf. core/best_board.h), porte indépendante.
             if (best_board_save(&g_server_best_board, "./temp-best_board.back") != 0) {
                 log_error("autobackup : échec sur ./temp-best_board.back\n");
             }
         }
         if (do_known_clients) {
             // Cumul par machine, fichier dédié (cf. app/known_clients_registry.h),
-            // porte indépendante (PR5).
+            // porte indépendante.
             if (known_clients_registry_save("./temp-known_clients.back") != 0) {
                 log_error("autobackup : échec sur ./temp-known_clients.back\n");
             }
         }
 
-        // Durée observable (PR5) plutôt que déduite d'un incident (cf. §1) :
+        // Durée observable plutôt que déduite d'un incident (cf. §1) :
         // couvre tout ce qui a réellement été déclenché à ce tour, exposée
         // par GET /api/v1/status (http_status_view_t.last_backup_duration_ms).
         clock_gettime(CLOCK_MONOTONIC, &backup_end);
@@ -530,12 +530,12 @@ void check_server_step(unsigned long long *lastactive, autobackup_state_t *backu
         server_last_backup_duration_ms = (unsigned long long)(elapsed_ms > 0 ? elapsed_ms : 0);
     }
 
-    // Politique automatique de dosage recherche/contrôle (PR4, désactivée par
+    // Politique automatique de dosage recherche/contrôle (désactivée par
     // défaut — voir --auto-roles). Branchée dans CE tour existant à 10s,
     // aucune cadence dédiée : les deux tailles de stock (unchecked_stock,
     // checked_stock) sont déjà calculées ci-dessus par build_file_queues_table,
-    // il ne manque que les deltas de famine (compteurs cumulatifs, PR2) et le
-    // compte de rôles du parc (control_registry, PR2) pour appeler la
+    // il ne manque que les deltas de famine (compteurs cumulatifs) et le
+    // compte de rôles du parc (control_registry) pour appeler la
     // décision pure ci-dessus.
     if (auto_roles_requested && role_mix_state != NULL) {
         control_session_info_t sessions[MAX_CONTROL_SESSIONS];
@@ -605,8 +605,8 @@ void *check_server(void *param)
 }
 
 /**
- * @brief File du pool analysé assignée à CETTE connexion serveur (PR8,
- *        répartition de charge ADD/GET entre les files de --stock-files).
+ * @brief File du pool analysé assignée à CETTE connexion serveur
+ *        (répartition de charge ADD/GET entre les files de --stock-files).
  *
  * `client->compteur` (indice du slot de thread serveur, stable pour toute la
  * durée de la connexion — jamais réutilisé pendant qu'une connexion est
@@ -654,7 +654,7 @@ int server_analysed_file_hint(client_t *client)
  * le faire, et les remettre au stock IMMÉDIATEMENT les ferait explorer une
  * seconde fois en double dès qu'un autre client les recevrait. Dans ce cas
  * on ne les remet PAS ici — même critère de vivacité que le bail
- * d'expiration (PR7, `owner_control_session_alive`) : si le fork ne les
+ * d'expiration (`owner_control_session_alive`) : si le fork ne les
  * acquitte jamais malgré tout, elles seront de toute façon récupérées par ce
  * mécanisme (`analysed_lease_seconds`, 300 s par défaut), avec sa propre
  * vérification de vivacité à CE moment-là — pas de fenêtre de perte, juste
@@ -694,7 +694,7 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t 
     // file_hint : ces possibilités ont été enregistrées via
     // record_possibility_analysed_for_client(client, ...) sur CETTE MÊME
     // connexion (celle qui se termine), donc avec CE MÊME indice — le
-    // retrait démarre directement sur la bonne file (PR8) au lieu de
+    // retrait démarre directement sur la bonne file au lieu de
     // balayer depuis la file 0.
     int file_hint = server_analysed_file_hint(client);
     for (int rp = 0; rp < lastSent->size; rp++)
@@ -718,7 +718,7 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t 
 
 /**
  * @brief Enregistre une possibilité servie comme « en cours d'analyse »,
- *        attribuée au client courant si son identité est connue (PR6).
+ *        attribuée au client courant si son identité est connue.
  *
  * Extrait des trois points de service (`INST_GET`/`INST_GET_TO_CHECK[_BATCH]`)
  * pour n'écrire cette décision qu'à un seul endroit. `client->has_identity`
@@ -730,17 +730,17 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t 
  * maintenance en cours, au-delà d'un délai borné) plutôt que bloquer
  * indéfiniment. Le résultat est propagé à l'appelant, qui NE DOIT PAS servir
  * cette possibilité au client dans ce cas — sinon elle échapperait au bail
- * (PR7) et à `requeue_last_sent_possibility` : personne, côté serveur, ne
+ * et à `requeue_last_sent_possibility` : personne, côté serveur, ne
  * saurait qu'elle est en cours d'analyse.
  *
  * Insérée directement dans la file assignée à CETTE connexion
- * (`server_analysed_file_hint`, PR8) plutôt que via la rotation `thread < 0`
+ * (`server_analysed_file_hint`) plutôt que via la rotation `thread < 0`
  * (qui concentrait tout sur la file 0 en l'absence de contention) : le
  * retrait ultérieur (acquittement, ou requeue à la déconnexion) sait ainsi
  * directement où chercher, sans balayer les autres files.
  *
  * @param client      Contexte du thread serveur (identité déclarée si connue),
- *                     JAMAIS NULL (déréférencé sans garde, comme avant PR8).
+ *                     JAMAIS NULL (déréférencé sans garde).
  * @param possibility Paquet tout juste extrait du stock et envoyé au client.
  * @return            0 si enregistrée, -1 si le pool analysé est resté
  *                     verrouillé au-delà du délai borné (rien n'est
@@ -775,7 +775,7 @@ int record_possibility_analysed_for_client(client_t *client, struct possibility_
  * (`INST_GET` / `INST_GET_TO_CHECK` / `INST_GET_TO_CHECK_BATCH`). Une
  * possibilité dont l'enregistrement échoue (pool analysé intégralement
  * verrouillé par une maintenance, au-delà d'un délai borné) est rendue au
- * stock plutôt que servie sans trace — sinon elle échapperait au bail (PR7)
+ * stock plutôt que servie sans trace — sinon elle échapperait au bail
  * et à `requeue_last_sent_possibility`. `add_possibility` peut lui-même
  * échouer si le stock est ÉGALEMENT gelé (même mécanisme borné, non
  * bloquant) ; dans ce cas, comme `requeue_last_sent_possibility`, on
@@ -803,7 +803,7 @@ static void record_batch_analysed_for_client(client_t *client, array_possibility
             kept++;
             counters[client->compteur]++;
             fileUpdates[client->compteur]++;
-            // Attribution au pool analysé (PR5) : la possibilité y ENTRE ici,
+            // Attribution au pool analysé : la possibilité y ENTRE ici,
             // symétrique du retrait sur acquittement (INST_POSSIBILITY_ANALYSED*
             // ci-dessous) — les deux mutent file_possibility_analysed.
             analysedFileUpdates[client->compteur]++;
@@ -873,7 +873,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             record_batch_analysed_for_client(client, *lastSent);
             int32_t k = (int32_t)(*lastSent)->size;
             if (k == 0) {
-                // Service à vide côté chercheur (PR2) : jusqu'ici sans trace.
+                // Service à vide côté chercheur : jusqu'ici sans trace.
                 __atomic_fetch_add(&server_search_starved, 1, __ATOMIC_RELAXED);
             }
             // Réponse cadrée (VERSION 7) : compte K puis, si K > 0, le bloc
@@ -904,7 +904,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             record_batch_analysed_for_client(client, *lastSent);
             int32_t k = (int32_t)(*lastSent)->size;
             if (k == 0) {
-                // Service à vide côté pruner (PR2) : jusqu'ici sans trace.
+                // Service à vide côté pruner : jusqu'ici sans trace.
                 __atomic_fetch_add(&server_prune_starved, 1, __ATOMIC_RELAXED);
             }
             // Réponse cadrée (VERSION 7) — même trame que INST_GET.
@@ -941,7 +941,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             record_batch_analysed_for_client(client, *lastSent);
             int32_t k = (int32_t)(*lastSent)->size;
             if (k == 0) {
-                // Service à vide côté pruner (PR2), même compteur que
+                // Service à vide côté pruner, même compteur que
                 // INST_GET_TO_CHECK non groupé : les deux formats interrogent
                 // le même pool avec la même signification pour l'opérateur.
                 __atomic_fetch_add(&server_prune_starved, 1, __ATOMIC_RELAXED);
@@ -1003,7 +1003,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             // sur un flux désynchronisé.
             long ssize = recv_all(client->socket_id, possibilityPacket, sizeof(struct possibility_packet));
             if ((long)sizeof(struct possibility_packet) == ssize) {
-                // file_hint (PR8) : cette possibilité a été enregistrée sur
+                // file_hint : cette possibilité a été enregistrée sur
                 // CETTE MÊME connexion (record_possibility_analysed_for_client),
                 // donc avec le même indice — retrait direct sans balayer les
                 // autres files.
@@ -1011,7 +1011,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 if(removed == 0)
                 {
                     send_instruction(client->socket_id,INST_CONSIDERED);
-                    // Retrait du pool analysé (PR5) : symétrique de
+                    // Retrait du pool analysé : symétrique de
                     // l'attribution dans record_batch_analysed_for_client.
                     analysedFileUpdates[client->compteur]++;
 
@@ -1050,7 +1050,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             }
             int transfer_ok = 1;
             struct possibility_packet pkt;
-            // file_hint (PR8) calculé UNE FOIS pour tout le lot : les M
+            // file_hint calculé UNE FOIS pour tout le lot : les M
             // possibilités de cette connexion ont toutes été enregistrées
             // dans la même file (record_possibility_analysed_for_client),
             // donc chaque retrait de ce lot cible directement cette file au
@@ -1079,7 +1079,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                               removed == -1 ? "vérification impossible" : "absence confirmée");
                     log_error_possibility_packet(&pkt);
                 } else {
-                    // Retrait du pool analysé (PR5), un par paquet effectivement retiré.
+                    // Retrait du pool analysé, un par paquet effectivement retiré.
                     analysedFileUpdates[client->compteur]++;
                 }
             }
@@ -1200,7 +1200,7 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
                 log_error("control hello : registre de sessions de contrôle plein, session refusée\n");
                 return 0;
             }
-            // Registre de clients CONNUS (PR4, cumul par machine_uid) : distinct de
+            // Registre de clients CONNUS (cumul par machine_uid) : distinct de
             // control_registry ci-dessus, jamais vidé à la déconnexion — cf.
             // known_clients_registry.h. Purement observationnel, ne peut jamais faire
             // échouer cette session.
@@ -1333,7 +1333,7 @@ static int control_session_poll_stats(client_t *client, int session_index)
         return 0;
     }
     control_registry_record_stats(session_index, &stats);
-    // Registre de clients CONNUS (PR4) : cumule cette lecture dans le total de
+    // Registre de clients CONNUS : cumule cette lecture dans le total de
     // la machine plutôt que de simplement remplacer l'instantané (rôle de
     // control_registry ci-dessus). Résolution de l'identité par indice de
     // session, cette fonction ne détenant que session_index.
@@ -1496,7 +1496,7 @@ void run_control_session(client_t *client, int session_index)
         }
     }
 
-    // Registre de clients CONNUS (PR4) : résoudre l'identité AVANT
+    // Registre de clients CONNUS : résoudre l'identité AVANT
     // control_registry_unregister, qui efface le hello de ce slot.
     client_identity_t known_identity;
     if (control_registry_get_identity(session_index, &known_identity) == 0) {
@@ -1703,7 +1703,7 @@ void create_rmnonext_thread(void) {
 }
 
 /**
- * @brief Boucle du thread de débordement sur disque (PR2, `core/
+ * @brief Boucle du thread de débordement sur disque (`core/
  *        stock_spill.h`) : un pas incrémental toutes les 100 ms.
  *
  * Tick court (contrairement au tour de statistiques serveur, 10 s) :
@@ -1907,10 +1907,10 @@ void runserver(const char* file)
     free_array_part(apart);
     first_possibility(map_parts, rotateParts);
 
-    // Débordement sur disque (PR2, --stock-spill-dir) : configuré et son
+    // Débordement sur disque (--stock-spill-dir) : configuré et son
     // thread démarré AVANT toute expansion --expand-level ci-dessous, pour
     // qu'une éventuelle pression RAM créée par l'expansion ait une chance
-    // d'être déportée plutôt que refusée (cf. expand_datas_to_level, PR1).
+    // d'être déportée plutôt que refusée (cf. expand_datas_to_level).
     // nb_file_possibility est déjà définitif ici (fixé par
     // datamanager_configure_stock_files dans main(), avant tout fork,
     // jamais modifié ensuite). Toujours appelé, même sans --stock-max-ram :

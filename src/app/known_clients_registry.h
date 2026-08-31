@@ -1,6 +1,6 @@
 /**
  * @file known_clients_registry.h
- * @brief Registre des clients CONNUS (cumul, PR4), distinct de
+ * @brief Registre des clients CONNUS (cumul), distinct de
  *        `control_registry.h` (sessions vivantes, pilotage).
  *
  * Deux registres serveur qui ne se recouvrent pas.
@@ -8,7 +8,7 @@
  * |              | `control_registry` (existant)      | ce registre (nouveau)          |
  * |--------------|-------------------------------------|---------------------------------|
  * | Indexé par   | slot de session (réutilisé)         | `machine_uid` (clé de cumul)    |
- * | Durée de vie | la session TCP                      | la vie du serveur (PR5 : + persisté) |
+ * | Durée de vie | la session TCP                       | la vie du serveur (+ persisté) |
  * | Contenu      | hello, file de commandes, dernier `CTRL_STATS` | totaux cumulés, première/dernière vue, statut |
  * | Rôle         | piloter                              | mesurer                         |
  *
@@ -19,14 +19,14 @@
  * Pourquoi `machine_uid` et pas `client_uid` comme clé : `machine_uid` est le
  * SEUL identifiant qui survit au redémarrage d'un processus client (cf.
  * `client_identity.h`) — c'est donc la seule clé stable pour un cumul qui doit
- * lui-même survivre à un redémarrage du serveur (PR5, persistance ci-dessous).
+ * lui-même survivre à un redémarrage du serveur (persistance ci-dessous).
  * `client_uid` reste la clé de SESSION : une même
  * machine peut avoir plusieurs sessions actives simultanément (ex. un client
  * de recherche et un pruner sur le même hôte), chacune suivie séparément dans
  * le petit tableau `sessions[]` d'une entrée, borné par
  * `KNOWN_CLIENT_MAX_SESSIONS`.
  *
- * Persisté depuis PR5 sur un fichier `.back` dédié (`known_clients_registry_save`/
+ * Persisté sur un fichier `.back` dédié (`known_clients_registry_save`/
  * `_load` ci-dessous), tolérant en lecture : un fichier absent, illisible ou
  * d'un format inconnu fait simplement repartir le cumul de zéro, jamais
  * échouer le démarrage du serveur. Branché sur les mêmes points d'appel que
@@ -156,7 +156,7 @@ void known_clients_registry_on_stats(const uint8_t *machine_uid, const uint8_t *
 void known_clients_registry_on_disconnect(const uint8_t *machine_uid, const uint8_t *client_uid);
 
 /**
- * @brief Marqueur de format du fichier `.back` de ce registre (PR5). Vérifié
+ * @brief Marqueur de format du fichier `.back` de ce registre. Vérifié
  *        en tête de fichier par `known_clients_registry_load` ; un magic
  *        différent (fichier d'une autre nature, ou corrompu) fait échouer le
  *        chargement — jamais un octet interprété au hasard. Pas de champ de
@@ -184,7 +184,7 @@ typedef struct {
  *
  * Champs de largeur fixe explicite (comme `control_protocol.h`), même si ce
  * n'est pas un format réseau : `time_t`/`int` ont une largeur dépendante du
- * build, écrire ces types bruts rendrait un fichier PR5 illisible par un
+ * build, écrire ces types bruts rendrait un fichier illisible par un
  * binaire compilé différemment sur la même machine (ex. build 32 vs 64 bits).
  */
 typedef struct {

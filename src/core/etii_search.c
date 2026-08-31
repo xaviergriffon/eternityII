@@ -59,9 +59,8 @@ void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibil
  * reprise : le plateau lui-même est partagé et modifié en place.
  *
  * La case (`x`, `y`) est stockée plutôt que déduite de `dirx[depth]/diry[depth]`
- * : en ordre FIXE elle vaut exactement cela, mais en ordre DYNAMIQUE (MRV,
- * §4.7 de `docs/conception/elagage_recherche.md`) elle est choisie à chaque
- * nœud par `mrv_choose_cell`. C'est ce qui permet aux mécanismes de délégation
+ * : en ordre FIXE elle vaut exactement cela, mais en ordre DYNAMIQUE (MRV)
+ * elle est choisie à chaque nœud par `mrv_choose_cell`. C'est ce qui permet aux mécanismes de délégation
  * (`bt_count_pending`, `bt_materialize_pending`, `bt_flush_pending`) d'être
  * strictement les mêmes pour les deux moteurs — une seule sémantique de
  * délégation, testée une seule fois.
@@ -116,8 +115,7 @@ static void bt_init_constraints(key_part constraints[ETERN_SIZE][ETERN_SIZE],
 /* ======================================================================
  * Frontière incrémentale du balayage MRV
  *
- * `mrv_choose_cell` ne s'intéresse qu'aux cases VIDES et CONTRAINTES (§4.7 de
- * docs/conception/elagage_recherche.md) : ~52 cases en moyenne sur le puzzle
+ * `mrv_choose_cell` ne s'intéresse qu'aux cases VIDES et CONTRAINTES : ~52 cases en moyenne sur le puzzle
  * 256 (mesuré, cf. la doc de `mrv_choose_cell` pour les conditions et pour
  * pourquoi §3.2 annonce 29). Les repérer par un balayage des 256 cases à chaque nœud coûtait plus
  * cher que le comptage lui-même. Deux masques de bits maintenus
@@ -304,8 +302,7 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
  * parcours peut se trouver à des dizaines de cases de distance sans jamais
  * être une voisine (mesuré sur le puzzle 256 : 39 % des relations de
  * voisinage ne sont jamais couvertes par l'ancienne fenêtre K=6, retard de
- * détection médian 8 niveaux, max 152 — cf.
- * `docs/conception/elagage_recherche.md` §3.1/§4.1). Moins cher aussi : 1,9
+ * détection médian 8 niveaux, max 152). Moins cher aussi : 1,9
  * case voisine à inspecter en moyenne contre 6 avec l'ancienne fenêtre.
  *
  * Ne lit PAS `FORWARD_CHECK_K` : ce paramètre ne borne plus que l'activation
@@ -909,7 +906,7 @@ static inline int mrv_free_candidates(const map_big_array *map, const key_part *
 
 /**
  * @brief Choisit la case vide la plus contrainte (MRV, « minimum remaining
- *        values ») — §4.7 de `docs/conception/elagage_recherche.md`.
+ *        values »).
  *
  * Trois différences avec le prototype de mesure, qui coûtait un parcours de
  * compartiment pour CHACUNE des cases vides du plateau (jusqu'à 256) :
@@ -958,7 +955,7 @@ static inline int mrv_free_candidates(const map_big_array *map, const key_part *
  *    qui contraint le plus de variables NON affectées, soit `nconstr` minimal
  *    puisqu'il est borné par 4). Sur un stock de production, cette variante-là
  *    est nettement PERDANTE (+4,4 % de coût de réfutation), quand `nconstr`
- *    maximal gagne −6,3 %. Cf. §4.12 de `docs/conception/elagage_recherche.md`.
+ *    maximal gagne −6,3 % (mesuré).
  *
  * Le balayage reste COMPLET (pas d'arrêt anticipé sur une case à 1 candidat) :
  * sa détection de case morte, où qu'elle soit sur la frontière, est un
@@ -1053,8 +1050,7 @@ typedef enum {
 } bt_core_result_t;
 
 /**
- * @brief Recherche à ordre de variable DYNAMIQUE (MRV) — §4.7 de
- *        `docs/conception/elagage_recherche.md`. C'est le SEUL moteur de
+ * @brief Recherche à ordre de variable DYNAMIQUE (MRV). C'est le SEUL moteur de
  *        backtracking (cf. docs/autosearch_step.md), pour la recherche réelle
  *        comme pour la preuve bornée du pruner
  *        (`search_packet_backtracking_budgeted`) : l'ancien moteur à ordre
@@ -1331,8 +1327,7 @@ static int search_packet_backtracking(client_possibility_t *client,
 }
 
 /**
- * @brief Preuve de fermeture bornée en nœuds du sous-arbre d'une possibilité (§4.6b
- *        de `docs/conception/elagage_recherche.md`).
+ * @brief Preuve de fermeture bornée en nœuds du sous-arbre d'une possibilité.
  *
  * Rejoue `root` par le même backtracking MRV que la recherche réelle, plafonné
  * à `node_budget` nœuds et sans délégation (`allow_delegate = 0`, cf. sa doc).
@@ -1340,7 +1335,7 @@ static int search_packet_backtracking(client_possibility_t *client,
  * `pruner_dfs_mrv`, qui sélectionnait entre ordre fixe et ordre dynamique pour
  * cette preuve précisément, a disparu avec le moteur à ordre fixe qu'il
  * sélectionnait — mesuré ×3 à ×4 de fermetures à budget égal sur du stock de
- * production (§4.10 de docs/conception/elagage_recherche.md).
+ * production (mesuré).
  * `BT_CORE_EXHAUSTED` est une condition nécessaire exacte, pas une
  * heuristique : si retourné, le sous-arbre entier a été parcouru par le même
  * code que la recherche fait foi — aucun faux positif possible, exactement la
@@ -1536,7 +1531,7 @@ void *autosearch (void *userdata)
  * puis nettoie le cycle. Extrait du corps de `while(1)` pour être testable hors
  * de la boucle infinie.
  *
- * Depuis §4.6b (`docs/conception/elagage_recherche.md`) : une possibilité que
+ * Une possibilité que
  * le contrôle superficiel juge vivante mais pas encore `checked` est en plus
  * soumise à `search_packet_backtracking_budgeted`, une preuve de fermeture par
  * backtracking RÉEL borné en nœuds (`pruner_dfs_budget`). Si le budget suffit

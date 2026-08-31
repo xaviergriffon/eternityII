@@ -264,7 +264,7 @@ typedef struct {
     unsigned long long active_threads;
     unsigned long long pruner_checked;
     unsigned long long pruner_removed;
-    /// Possibilités actuellement déportées sur disque (PR2, --stock-max-ram
+    /// Possibilités actuellement déportées sur disque (--stock-max-ram
     /// + --stock-spill-dir), tous pools et toutes files confondus — 0 si le
     /// débordement est désactivé, illimité, ou inactif.
     unsigned long long stock_spilled_packets;
@@ -297,17 +297,17 @@ typedef struct {
     unsigned long long stock_removes_unchecked_last_1m;
     unsigned long long stock_removes_unchecked_last_1h;
     unsigned long long stock_removes_unchecked_last_1d;
-    /// Compteurs de service à vide par rôle (PR2) — un `INST_GET`/
+    /// Compteurs de service à vide par rôle — un `INST_GET`/
     /// `INST_GET_TO_CHECK[_BATCH]` ayant renvoyé `K = 0` depuis le démarrage
     /// du serveur. Cf. `server_search_starved`/`server_prune_starved`
     /// (`app/etii_server.h`).
     unsigned long long server_search_starved;
     unsigned long long server_prune_starved;
-    /// Parc actuellement connecté, ventilé par rôle déclaré (PR2) — cf.
+    /// Parc actuellement connecté, ventilé par rôle déclaré — cf.
     /// `control_registry_count_roles` (`app/control_registry.h`).
     unsigned long long nb_search_sessions;
     unsigned long long nb_prune_sessions;
-    /// Tailles par file (index 0..nb_file_possibility-1, PR4 : le compte
+    /// Tailles par file (index 0..nb_file_possibility-1, le compte
     /// RÉEL est une variable, ce tableau est dimensionné au plafond de
     /// compilation NB_FILE_POSSIBILITY_MAX), pool non vérifié.
     unsigned long long queue_unchecked[NB_FILE_POSSIBILITY_MAX];
@@ -488,7 +488,7 @@ int http_json_format_clients(char *buf, size_t size, const http_client_info_t *i
 
 /**
  * @brief Vue en lecture d'une machine connue du registre de cumul
- *        (`app/known_clients_registry.h`, PR4), pour
+ *        (`app/known_clients_registry.h`), pour
  *        `GET /api/v1/known-clients`. Remplie par `http_known_clients_collect`
  *        (src/net/http_server.h) à partir de `known_clients_registry_snapshot` —
  *        même schéma de séparation que `http_client_info_t` ci-dessus : ce
@@ -508,7 +508,7 @@ typedef struct {
     int connected;
     /// Nombre de sessions actuellement actives pour cette machine.
     int nb_active_sessions;
-    /// Parmi `nb_active_sessions`, combien déclarent le rôle recherche (PR2).
+    /// Parmi `nb_active_sessions`, combien déclarent le rôle recherche.
     int nb_active_search;
     /// Parmi `nb_active_sessions`, combien déclarent le rôle contrôle (pruner
     /// CPU ou GPU confondus).

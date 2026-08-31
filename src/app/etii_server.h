@@ -56,13 +56,13 @@ typedef struct
 
 /**
  * @brief Regroupe les quatre portes d'autobackup indépendantes de
- *        `check_server_step` (PR5) : stock (pools non vérifié + vérifié),
+ *        `check_server_step` : stock (pools non vérifié + vérifié),
  *        pool analysé, meilleur plateau connu, registre des clients connus.
  *        Chaque artefact n'est réécrit que si SON compteur de mutations a
  *        bougé depuis SA dernière écriture — `consistent_backup` reste
  *        appelée en un seul appel couvrant stock+analysé dès que L'UN DES
  *        DEUX a une mutation en attente (cohérence à l'instant T préservée,
- *        cf. PR2) ; `best_board`/`known_clients` sont deux portes
+ *        `best_board`/`known_clients` sont deux portes
  *        entièrement indépendantes l'une de l'autre et du stock.
  */
 typedef struct
@@ -242,8 +242,7 @@ extern unsigned long long server_prune_starved;
  *
  * Seuils choisis comme point de départ raisonnable (hystérésis et délai
  * minimal restent la vraie garantie de stabilité, cf. `check_server_step`) —
- * à remesurer une fois `--auto-roles` exercé en conditions réelles, même
- * esprit que `docs/conception/elagage_recherche.md` §4.7.
+ * à remesurer une fois `--auto-roles` exercé en conditions réelles.
  *
  * @param unchecked_stock       Σ taille des files non vérifiées (travail
  *                              disponible pour un pruner).
@@ -411,8 +410,8 @@ char *build_file_queues_table(unsigned long long *out_unchecked,
                               unsigned long long *out_analysed);
 
 /**
- * @brief File du pool analysé assignée à CETTE connexion serveur (PR8,
- *        répartition de charge ADD/GET par connexion, cf. datamanager.c).
+ * @brief File du pool analysé assignée à CETTE connexion serveur
+ *        (répartition de charge ADD/GET par connexion, cf. datamanager.c).
  *
  * `client->compteur` (slot de thread serveur, stable pour la durée de la
  * connexion) modulo `nb_file_possibility` : tous les GET et tous les ACK
@@ -429,7 +428,7 @@ int server_analysed_file_hint(client_t *client);
 
 /**
  * @brief Enregistre une possibilité servie comme « en cours d'analyse »,
- *        attribuée au client courant si son identité est connue (PR6).
+ *        attribuée au client courant si son identité est connue.
  *
  * Extrait des trois points de service (`INST_GET`/`INST_GET_TO_CHECK[_BATCH]`)
  * pour être testable hors thread (comme `communicate_with_client_step`) et
@@ -437,7 +436,7 @@ int server_analysed_file_hint(client_t *client);
  *
  * Peut échouer (pool analysé intégralement verrouillé par une maintenance en
  * cours, au-delà d'un délai borné) — l'appelant NE DOIT PAS servir cette possibilité au
- * client dans ce cas, sous peine de l'échapper au bail (PR7) et à
+ * client dans ce cas, sous peine de l'échapper au bail et à
  * `requeue_last_sent_possibility`.
  *
  * @param client      Contexte du thread serveur (identité déclarée si connue).
@@ -465,7 +464,7 @@ int record_possibility_analysed_for_client(client_t *client, struct possibility_
  * `client` sert UNIQUEMENT à vérifier si le client reste vivant (son canal de
  * contrôle est-il toujours enregistré ?) : si oui, cette fonction ne remet
  * RIEN au stock — voir le corps de la fonction pour le raisonnement complet
- * (même critère de vivacité que le bail d'expiration, PR7).
+ * (même critère de vivacité que le bail d'expiration).
  *
  * @param lastSent Dernier lot de possibilités envoyé au client (peut être NULL).
  * @param client   Client dont la connexion de travail se termine (peut être NULL).

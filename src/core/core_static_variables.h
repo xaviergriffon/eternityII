@@ -9,7 +9,7 @@
 // app/static_variables.h : `core/` en dépendait pour des constantes/globales
 // qui n'ont pourtant rien d'applicatif (géométrie du puzzle, compteurs de
 // recherche, machine à états de pause) — une violation directe de la règle
-// "core/ ne doit jamais dépendre de app/" (cf. AGENTS.md). Ce fichier-ci
+// "core/ ne doit jamais dépendre de app/". Ce fichier-ci
 // contient le sous-ensemble EFFECTIVEMENT référencé par du code sous
 // `src/core/` (vérifié par grep, pas reconstitué de mémoire) : puzzle/
 // géométrie, forward-checking, machine à états `request`, compteurs du
@@ -55,7 +55,7 @@
 // serveur v11 (ou l'inverse) désignerait des cases différentes pour le même
 // indice de curseur (alloc) — bump de version pour forcer tous les clients
 // à se resynchroniser sur le nouveau parcours plutôt que corrompre le board.
-// v12 : identité déclarée des clients (PR2).
+// v12 : identité déclarée des clients.
 // Nouveau INST_CLIENT_HELLO sur la connexion de TRAVAIL (net/etii_protocol.h) :
 // chaque fork l'envoie une fois, juste après le handshake de version, avec son
 // identité (machine_uid, client_uid, fork_seq, label, mode — net/client_identity.h).
@@ -138,7 +138,7 @@
 #define PRUNER_BATCH_MAX 65536
 
 // Budget de nœuds par défaut de la preuve de fermeture bornée du pruner CPU
-// (§4.6b de docs/conception/elagage_recherche.md, `pruner_dfs_budget`) :
+// (`pruner_dfs_budget`) :
 // nombre de nœuds de backtracking RÉEL (search_packet_backtracking_budgeted)
 // qu'une possibilité jugée vivante par le contrôle superficiel
 // (`possibility_all_has_a_next_counted`) mais pas encore `checked` peut encore
@@ -153,7 +153,6 @@
 // pipeline réel `autoprune_step`) : la preuve DFS ferme bien +4,6 à +5,6
 // points de pourcentage de possibilités au-delà du contrôle superficiel
 // gratuit (lui-même à 50,2 % sur ce stock), reproduit sur un second stock.
-// Voir §4.6b de docs/conception/elagage_recherche.md pour la table complète.
 // NE PAS reprendre l'affirmation « 0 % de fermeture, mécanisme inutile » —
 // elle est fausse. Le défaut reste 0 malgré tout : basculer par défaut change
 // le coût CPU de tout pruner déployé, décision laissée à l'opérateur, pas
@@ -215,8 +214,7 @@
  * délégation, tests) garde l'ancienne sémantique de fenêtre : après avoir
  * placé une pièce à `directions[i]`, il vérifie que les `FORWARD_CHECK_K`
  * prochaines cases (`directions[i+1] ... directions[i+K]`) possèdent encore
- * au moins une pièce candidate. Voir `docs/conception/elagage_recherche.md`
- * §4.1 pour la mesure qui motive ce changement (39 % des relations de
+ * au moins une pièce candidate (39 % des relations de
  * voisinage jamais couvertes par l'ancienne fenêtre K=6).
  *
  * `FORWARD_CHECK_K == 0` reste le seul interrupteur : il compile TOUT le
@@ -283,13 +281,13 @@ extern volatile unsigned long long fc_attempts;
  * `FORWARD_CHECK_K`, cf. `etii_statistic.h`) pour rester sûr quel que soit le
  * plus petit des deux domaines. La somme de tous les indices vaut toujours
  * `fc_pruned` ; sa répartition n'estime plus une distance de parcours
- * uniforme — voir `docs/conception/elagage_recherche.md` (§4.1).
+ * uniforme.
  */
 extern volatile unsigned long long fc_pruned_at[FC_STAT_MAX_K + 1];
 
 /**
  * @brief Compteur du nombre d'élagages dus à un CONFLIT DE SINGLETONS —
- *        sous-ensemble de `fc_pruned` (§4.4 de docs/conception/elagage_recherche.md).
+ *        sous-ensemble de `fc_pruned`.
  *
  * Incrémenté par `bt_forward_check` quand deux voisines de la pièce posée
  * exigent chacune, comme seul candidat encore libre, la MÊME pièce — cas
@@ -416,7 +414,7 @@ extern volatile unsigned long long pruner_dfs_nodes;
 /**
  * @brief Nombre de possibilités déplacées de la file la plus pleine vers la
  *        plus vide à chaque tour de `check_server_step` (option CLI
- *        `--rebalance-budget <n>`, PR3) — NON, voir app_static_variables.h :
+ *        `--rebalance-budget <n>`) — NON, voir app_static_variables.h :
  *        `rebalance_budget` lui-même reste app (seul `check_server_step`, un
  *        fichier app/, l'utilise).
  */
@@ -507,7 +505,7 @@ extern int server_hunger;
  * @brief Arme la détection de CONFLIT DE SINGLETONS dans `bt_forward_check` —
  *        expérience de mesure, jamais un réglage d'exploitation (défaut 0).
  *
- * §4.4 de docs/conception/elagage_recherche.md, réimplémentation post-PR 10 :
+ * Réimplémentation ultérieure :
  * pendant le balayage des voisines, au lieu de s'arrêter au premier candidat
  * libre trouvé (comportement par défaut), compte jusqu'à 2 candidats libres
  * — assez pour distinguer « singleton » de « pas singleton », inutile

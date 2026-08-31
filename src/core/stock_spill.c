@@ -74,7 +74,7 @@ void stock_spill_set_segment_bytes_for_tests(long bytes)
 	g_segment_bytes_override = bytes;
 }
 
-/// Manifeste texte du cliché (PR3) : en-tête magique + une ligne par
+/// Manifeste texte du cliché: en-tête magique + une ligne par
 /// (pool, file) débordé au moment du cliché.
 #define STOCK_SPILL_MANIFEST_MAGIC "eternityii-spill-manifest-v1"
 #define STOCK_SPILL_MANIFEST_NAME "manifest.txt"
@@ -90,7 +90,7 @@ void stock_spill_set_segment_bytes_for_tests(long bytes)
 /// `PATH_MAX` de quelques dizaines d'octets — un faux positif sur les
 /// valeurs réelles (jamais aussi grandes en pratique), mais un vrai calcul
 /// de gcc, pas un bug de son analyseur (même piège que documenté dans
-/// AGENTS.md, section « Build croisé ARM 64-bit », pour `http_server.c`).
+/// (même piège documenté pour `http_server.c`).
 /// Un tampon destination `g_spill_dir` (chaîne `strdup`, taille inconnue du
 /// compilateur) n'a PAS besoin de cette marge : gcc ne peut alors établir
 /// aucune borne supérieure finie et ne déclenche pas l'avertissement.
@@ -101,16 +101,15 @@ static void spill_segment_path(char *buf, size_t bufsize, int is_checked, int fi
 	snprintf(buf, bufsize, "%s/spill_%c_%d_%d.dat", g_spill_dir, is_checked ? 'c' : 'u', file_index, seq);
 }
 
-/// Variante de `spill_segment_path` pour un répertoire EXPLICITE (PR3 :
-/// snapshot/restauration jonglent avec `g_spill_dir` ET `snap_dir`, deux
-/// répertoires distincts). Le motif "buf/bufsize en paramètres de fonction"
+/// Variante de `spill_segment_path` pour un répertoire EXPLICITE (snapshot/
+/// restauration jonglent avec `g_spill_dir` ET `snap_dir`, deux répertoires
+/// distincts). Le motif "buf/bufsize en paramètres de fonction"
 /// est délibéré, pas seulement pour la réutilisation : passer par une
 /// fonction plutôt qu'un `snprintf` direct dans un tableau local
 /// `char[PATH_MAX]` évite les faux positifs `-Wformat-truncation` de gcc
 /// (glibc/`_FORTIFY_SOURCE`) — gcc calcule un pire cas précis uniquement
 /// quand la taille du tampon est visible statiquement au point d'appel, pas
-/// quand elle transite par un paramètre `size_t bufsize` (cf. `AGENTS.md`,
-/// section « Build croisé ARM 64-bit », pour un autre cas de ce même piège).
+/// quand elle transite par un paramètre `size_t bufsize`.
 static void spill_segment_path_in(char *buf, size_t bufsize, const char *dir, int is_checked, int file_index, int seq)
 {
 	snprintf(buf, bufsize, "%s/spill_%c_%d_%d.dat", dir, is_checked ? 'c' : 'u', file_index, seq);
@@ -141,7 +140,7 @@ static stock_spill_descriptor_t *spill_descriptor(int is_checked, int file_index
  *        jamais un effacement générique du répertoire. Partagée par
  *        `stock_spill_configure` (purge de démarrage) et
  *        `stock_spill_restore_snapshot` (remplacement intégral avant
- *        remise en place du cliché, PR3).
+ *        remise en place du cliché).
  */
 static void spill_purge_live_segments(unsigned long long *out_packets, unsigned long long *out_files)
 {
@@ -215,7 +214,7 @@ void stock_spill_configure(const char *dir, int nb_files)
 	// Purge des segments résiduels d'un précédent démarrage : ce module lui
 	// même n'a aucune conscience de sauvegarde/restauration — c'est
 	// `stock_spill_restore_snapshot` (appelée par `restore_apply`,
-	// `ui/command_lines.c`, PR3) qui remet en place un cliché APRÈS ce point.
+	// `ui/command_lines.c`) qui remet en place un cliché APRÈS ce point.
 	// Tout segment trouvé ici et non suivi d'un `restore` est un débordement
 	// que le processus PRÉCÉDENT n'a jamais eu l'occasion de sauvegarder
 	// (`backup`) avant de s'arrêter — perte réelle si aucun `restore` ne suit
@@ -226,7 +225,7 @@ void stock_spill_configure(const char *dir, int nb_files)
 	if (discarded_packets > 0) {
 		log_error("stock_spill_configure : %llu possibilité(s) dans %llu segment(s) résiduel(s) "
 		          "de « %s » supprimées au démarrage — lancer « restore » immédiatement si un "
-		          "cliché de débordement existe (commande backup/PR3), sinon ces possibilités "
+		          "cliché de débordement existe (commande backup), sinon ces possibilités "
 		          "sont perdues\n",
 		          discarded_packets, discarded_files, g_spill_dir);
 	}
@@ -574,7 +573,7 @@ int stock_spill_step(int max_packets)
 }
 
 // ---------------------------------------------------------------------
-// PR3 : cohérence sauvegarde/restauration (stock_spill_snapshot /
+// Cohérence sauvegarde/restauration (stock_spill_snapshot /
 // stock_spill_restore_snapshot) — cf. la doc de ces fonctions dans
 // stock_spill.h.
 // ---------------------------------------------------------------------
