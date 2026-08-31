@@ -146,7 +146,7 @@ static file_possibility_t **file_possibility_checked = NULL;
 static int analysed_index_may_be_incomplete = 0;
 
 /*
- * Attribution des analyses en cours (PR6) : `owner_uid` est le `client_uid` du
+ * Attribution des analyses en cours: `owner_uid` est le `client_uid` du
  * client à qui LE SERVEUR a servi cette possibilité (INST_GET /
  * INST_GET_TO_CHECK[_BATCH]). C'est une table latérale adossée à
  * `analysed_index`, jamais un champ ajouté à `possibility_packet` (fil +
@@ -165,7 +165,7 @@ typedef struct AnalysedIndexNode {
 	uint8_t owner_uid[CLIENT_UID_BYTES];
 	int has_owner;
 	/*
-	 * Échéance du bail (PR7, section 4.3) : instant (epoch) au-delà duquel
+	 * Échéance du bail (section 4.3): instant (epoch) au-delà duquel
 	 * cette possibilité, si toujours non acquittée, est réputée abandonnée
 	 * et rendue au stock par datamanager_reclaim_expired_leases(). Valide
 	 * seulement si has_owner (une possibilité sans propriétaire connu n'a pas
@@ -176,7 +176,7 @@ typedef struct AnalysedIndexNode {
 	struct AnalysedIndexNode *next;
 } AnalysedIndexNode;
 
-// PR4 : tableau de POINTEURS (un par file) vers un tableau de
+// Tableau de POINTEURS (un par file) vers un tableau de
 // ANALYSED_INDEX_BUCKETS pointeurs chacun — alloué par
 // datamanager_configure_stock_files, comme les trois pools ci-dessus.
 // analysed_index[fileidx][bucket] reste une expression valide identique à
@@ -258,7 +258,7 @@ static unsigned long long stock_max_ram_packets = 0;
  *        d'inonder les logs à ce rythme (contrairement à un refus de
  *        contention passager, celui-ci signale une action opérateur réelle —
  *        resserrer le débit, relever le plafond ou activer le débordement
- *        (PR2) — donc il DOIT rester visible, juste pas à chaque appel).
+ *        — donc il DOIT rester visible, juste pas à chaque appel).
  */
 static time_t last_ram_cap_warning = 0;
 #define STOCK_RAM_CAP_WARN_COOLDOWN_SEC 10
@@ -357,7 +357,7 @@ int datamanager_pool_drain_head(int is_checked, int file_index, struct possibili
  * suivante + micro-sommeil, sans budget borné — le stock déplacé a déjà
  * quitté sa file d'origine, abandonner reviendrait à le perdre) : jamais
  * utilisée sur le chemin chaud d'un client, seulement par le thread de
- * débordement (PR2), où un blocage occasionnel de quelques dizaines de ms
+ * débordement, où un blocage occasionnel de quelques dizaines de ms
  * est sans conséquence.
  *
  * @param is_checked 0 = pool non vérifié, 1 = pool vérifié.
@@ -415,7 +415,7 @@ int maintenance = 0;
  *
  * Accesseur plutôt qu'un `extern int maintenance` brut — même convention que
  * `datas_size()`/`file_size()` pour l'état interne de ce module. Réservé à
- * `core/stock_spill.c` (PR2) pour suspendre son propre travail (éviction/
+ * `core/stock_spill.c` pour suspendre son propre travail (éviction/
  * rechargement) pendant qu'un cliché RAM est en train d'être pris : sans
  * cette pause, une possibilité pourrait migrer entre RAM et disque au
  * mauvais instant et se retrouver comptée deux fois — ou aucune — dans une
@@ -427,7 +427,7 @@ int datamanager_is_maintenance_active(void)
 }
 
 /**
- * @brief Pose/lève `maintenance` pour un appelant EXTERNE à ce module (PR3) —
+ * @brief Pose/lève `maintenance` pour un appelant EXTERNE à ce module —
  *        `restore_apply` (`ui/command_lines.c`) encadre `stock_spill_restore_snapshot`
  *        (`core/stock_spill.c`) PUIS `restore`/`restore_analysed` dans une
  *        seule fenêtre : sans elle, `stock_spill_step` (qui ne consulte QUE
@@ -620,9 +620,9 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
 		int8_t ack = recv_instruction(socket_id);
 		if(ack != INST_CONSIDERED) {
 			// INST_ERROR n'est PAS une anomalie : c'est la dégradation gracieuse
-			// prévue (PR1) quand le stock du serveur est momentanément
+			// prévue quand le stock du serveur est momentanément
 			// intégralement verrouillé — typiquement la phase 1 de
-			// consistent_backup (PR2), qui gèle toutes les files à l'instant T
+			// consistent_backup, qui gèle toutes les files à l'instant T
 			// puis les libère une à une. `put_to_pool` y épuise son budget borné
 			// (DATAMANAGER_TRYLOCK_MAX_SWEEPS × MICRO_SLEEP ≈ 500 ms) et refuse
 			// l'insertion plutôt que de bloquer le thread serveur — et donc la
@@ -712,10 +712,13 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
  * Trylock pour trouver une file libre ; toutes les possibilités retenues
  * vont dans la même file.
  *
- * @param rr_counter État round-robin du pool — fait démarrer chaque appel
- *                   sur une file différente plutôt que toujours la file 0.
- * @param pool_rate  Compteur de débit ventilé par pool, enregistré en plus
- *                   de l'agrégat `stock_adds_rate`, jamais à sa place.
+ * @param pool          Pool de files cible.
+ * @param possibilities Tableau de possibilités à filtrer/insérer.
+ * @param want_checked  1 pour le pool vérifié (checked == 1), 0 pour le reste.
+ * @param rr_counter    État round-robin du pool — fait démarrer chaque appel
+ *                      sur une file différente plutôt que toujours la file 0.
+ * @param pool_rate     Compteur de débit ventilé par pool, enregistré en plus
+ *                      de l'agrégat `stock_adds_rate`, jamais à sa place.
  * @return 0 si inséré (ou rien à insérer), 1 si `pool` est resté
  *         intégralement verrouillé au-delà de
  *         `DATAMANAGER_TRYLOCK_MAX_SWEEPS` tours (maintenance en cours) —
@@ -740,7 +743,7 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 		return 0;
 	}
 
-	// Plafond RAM (PR1, --stock-max-ram / commande stockMaxRam) : refuse AVANT
+	// Plafond RAM (--stock-max-ram / commande stockMaxRam): refuse AVANT
 	// toute insertion si l'ajout ferait dépasser le budget publié par
 	// datamanager_configure_ram_limit (0 = illimité, chemin inchangé). Compte
 	// les DEUX pools de stock ensemble (datamanager_resident_packets, alias de
@@ -749,7 +752,7 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 	// budget de trylock plus bas (1 = rien inséré, sûr à réessayer) :
 	// l'appelant (put_to_server côté serveur) sait déjà dégrader gracieusement
 	// ce refus en INST_ERROR / repli local (cf. l'épilogue documenté dans
-	// AGENTS.md pour ce chemin).
+	// pour ce chemin).
 	if (stock_max_ram_packets > 0 &&
 	    datamanager_resident_packets() + (unsigned long long)count > stock_max_ram_packets)
 	{
@@ -828,7 +831,7 @@ int put_to_local(array_possibility_packet *possibilities)
 	// Routage par le flag `checked` : les possibilités vérifiées par un pruner
 	// vont dans leur pool dédié, les autres dans le pool historique. Chaque
 	// sous-tableau (checked / unchecked) est indépendant : un échec borné
-	// (PR1) sur l'un des deux pools n'empêche pas l'insertion dans l'autre.
+	// sur l'un des deux pools n'empêche pas l'insertion dans l'autre.
 	int err_unchecked = put_to_pool(file_possibility, possibilities, 0, &rr_put_unchecked, &stock_adds_unchecked_rate);
 	int err_checked = put_to_pool(file_possibility_checked, possibilities, 1, &rr_put_checked, &stock_adds_checked_rate);
 	return (err_unchecked || err_checked) ? 1 : 0;
@@ -894,12 +897,12 @@ static uint64_t hash_possibility_key(const struct possibility_packet *p)
  * mais non indexé : bascule `analysed_index_may_be_incomplete` à 1, pour que
  * `remove_possibility_analysed` réactive son repli par balayage linéaire (le
  * retrouvant ainsi, jamais silencieusement perdu) — et
- * `datamanager_analysed_owned_by` (PR6) ne le verra simplement pas, comme
+ * `datamanager_analysed_owned_by` ne le verra simplement pas, comme
  * documenté sur `AnalysedIndexNode` ci-dessus.
  *
  * @param fileidx   Indice de la file analysée (0..nb_file_possibility-1).
  * @param e         Élément (déjà présent dans la file) à indexer.
- * @param owner_uid `client_uid` du client servi côté serveur (PR6), ou `NULL`
+ * @param owner_uid `client_uid` du client servi côté serveur, ou `NULL`
  *                  si aucune attribution n'est connue/pertinente ici.
  */
 static void analysed_index_add(int fileidx, Element *e, const uint8_t owner_uid[CLIENT_UID_BYTES])
@@ -914,7 +917,7 @@ static void analysed_index_add(int fileidx, Element *e, const uint8_t owner_uid[
 	if (owner_uid != NULL) {
 		memcpy(node->owner_uid, owner_uid, CLIENT_UID_BYTES);
 		node->has_owner = 1;
-		// Bail (PR7) : échéance calculée MAINTENANT, à l'insertion — jamais
+		// Bail: échéance calculée MAINTENANT, à l'insertion — jamais
 		// recalculée ensuite. analysed_lease_seconds <= 0 désactive le bail
 		// (sentinelle 0, cf. analysed_lease_is_expired) : comportement
 		// d'avant cette PR, une possibilité attribuée n'expire jamais.
@@ -1036,7 +1039,7 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 	int currfile = 0;
 	int waits = 0;
 	// `scan_start` fixe le point de départ du balayage exhaustif (thread < 0
-	// uniquement) : `preferred_file` (PR8, indice « probable » dérivé côté
+	// uniquement): `preferred_file` (indice « probable » dérivé côté
 	// serveur de la connexion — server_analysed_file_hint) s'il est valide,
 	// sinon 0 comme avant ce correctif. `step` compte les files déjà
 	// essayées CE tour-ci pour détecter qu'on a fait le tour complet, quel
@@ -1113,8 +1116,8 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 			}
 		} else {
 			usleep(MICRO_SLEEP);
-			// Sortie bornée (même motif que add_possibility_analysed_impl,
-			// PR1) : au-delà de DATAMANAGER_TRYLOCK_MAX_SWEEPS attentes
+			// Sortie bornée (même motif que add_possibility_analysed_impl) :
+			// au-delà de DATAMANAGER_TRYLOCK_MAX_SWEEPS attentes
 			// consécutives sans jamais réussir à verrouiller la moindre file,
 			// abandonner plutôt que de bloquer indéfiniment l'appelant (et par
 			// ricochet la connexion TCP du client jusqu'à son timeout) —
@@ -1235,8 +1238,8 @@ void send_possibility_analysed(client_possibility_t *client_possibility) {
 }
 
 /**
- * @brief Corps commun de `add_possibility_analysed`/`add_possibility_analysed_owned`
- *        (PR6) : seule la présence d'un `owner_uid` diffère entre les deux.
+ * @brief Corps commun de `add_possibility_analysed`/`add_possibility_analysed_owned` :
+ *        seule la présence d'un `owner_uid` diffère entre les deux.
  *
  * Tente un trylock sur `file_possibility_analysed[thread]`. Si `thread < 0`,
  * tourne sur toutes les files jusqu'à en trouver une disponible. Met à jour
@@ -1297,7 +1300,7 @@ static int add_possibility_analysed_impl(struct possibility_packet *possiblity, 
 			usleep(MICRO_SLEEP);
 			waits++;
 		}
-		// Sortie bornée (PR1) : cf. le commentaire de la fonction. `waits`
+		// Sortie bornée: cf. le commentaire de la fonction. `waits`
 		// compte les usleep() effectivement exécutés dans les deux modes
 		// (rotation sur thread < 0, une file fixe sur thread >= 0) pour borner
 		// le même temps d'horloge quel que soit le mode, plutôt qu'un nombre
@@ -1542,7 +1545,7 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner
 				AnalysedIndexNode *prev = NULL;
 				while (node != NULL) {
 					AnalysedIndexNode *next = node->next;
-					// Deux conditions requises pour réclamer (correctif PR7) :
+					// Deux conditions requises pour réclamer :
 					// l'échéance ET l'absence de preuve de vivacité. Un client
 					// toujours vivant (owner_alive vrai) n'est JAMAIS réclamé,
 					// aussi longtemps l'analyse ait-elle mis.
@@ -1895,8 +1898,8 @@ void scroll_from_server(client_possibility_t *client_possibility, array_possibil
  * @param rr_counter État round-robin du pool (`rr_scroll_unchecked`/`rr_scroll_checked`) —
  *                   fait démarrer chaque appel sur une file différente plutôt que
  *                   toujours la file 0 (cf. `datamanager_rr_next_start`).
- * @param pool_rate  Compteur de débit VENTILÉ par pool (PR2,
- *                   `stock_removes_unchecked_rate`/`stock_removes_checked_rate`) —
+ * @param pool_rate Compteur de débit VENTILÉ par pool
+ *                   (`stock_removes_unchecked_rate`/`stock_removes_checked_rate`) —
  *                   enregistré EN PLUS de l'agrégat `stock_removes_rate`
  *                   (inchangé), jamais à sa place.
  */
@@ -1971,7 +1974,7 @@ static void scroll_from_pool(file_possibility_t **pool, array_possibility_packet
 			// premier essai) ne passe jamais par ici. Même motif que
 			// add_possibility_analysed.
 			usleep(MICRO_SLEEP);
-			// Sortie bornée (PR1) : cf. le commentaire de la fonction. `result`
+			// Sortie bornée: cf. le commentaire de la fonction. `result`
 			// est déjà à taille 0 (initialisé par l'appelant) : rien à défaire.
 			failed_sweeps++;
 			if (failed_sweeps >= DATAMANAGER_TRYLOCK_MAX_SWEEPS)
@@ -2445,7 +2448,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 		pthread_mutex_lock(&file_possibility_checked[fp]->lock);
 	}
 
-	// Cliché du débordement disque (PR3), pendant que `maintenance` interdit
+	// Cliché du débordement disque, pendant que `maintenance` interdit
 	// toute éviction/rechargement concurrent (cf. `stock_spill_step`) — sans
 	// cette fenêtre, une possibilité pourrait migrer entre RAM et disque
 	// pendant la capture et finir dupliquée ou absente des deux côtés. Le
@@ -3374,8 +3377,8 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                     unlock_all_file();
                     // Sans cliché de débordement ici (spill_snapshot_dir/fn
                     // à NULL) : ce module (core/) ne peut pas dépendre de
-                    // core/stock_spill.h (règle de dépendance à sens unique,
-                    // AGENTS.md). Lacune documentée — plus étroite que celle
+                    // core/stock_spill.h (règle de dépendance à sens unique).
+                    // Lacune documentée — plus étroite que celle
                     // qu'elle remplace : seul CE chemin (solution trouvée par
                     // le passe de fond rmnonext, pas celui, plus courant, où
                     // un client la rapporte via etii_server.c) manque de
@@ -4239,7 +4242,7 @@ int statistic_datas(void)
              rate.adds_last_1m, rate.adds_last_1h, rate.adds_last_1d);
     log_info("stock GET (1min/1h/1j) : %llu / %llu / %llu\n",
              rate.removes_last_1m, rate.removes_last_1h, rate.removes_last_1d);
-    // Ventilation par pool (PR2) : distingue ce qui alimente/consomme le pool
+    // Ventilation par pool : distingue ce qui alimente/consomme le pool
     // vérifié (chercheurs) du pool non vérifié (pruners) — l'agrégat ci-dessus
     // ne le permettait pas.
     log_info("  dont pool verifie     ADD %llu/%llu/%llu  GET %llu/%llu/%llu\n",

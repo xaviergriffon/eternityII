@@ -235,8 +235,8 @@ static command_description commands[NB_COMMANDS] = {
      "même code que la recherche réelle) et jamais redistribuée -- sinon, comportement\n"
      "inchangé (conservée, marquée checked). <n> <= 0 désactive ce contrôle supplémentaire\n"
      "(comme « limit 0 »). Bornée à [0, PRUNER_DFS_BUDGET_MAX]. DÉSACTIVÉ PAR DÉFAUT (0) :\n"
-     "mesuré sans gain sur le stock réel actuel (mur structurel max_result ~74/256, voir\n"
-     "docs/conception/elagage_recherche.md §4.6b) -- opt-in, pas un défaut prudent.", NULL},
+     "mesuré sans gain sur le stock réel actuel (mur structurel max_result ~74/256)\n"
+     "-- opt-in, pas un défaut prudent.", NULL},
 
     {"sortAsc", sort_ascending_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
      "trie le stock par ordre croissant (moins avancées d'abord)", NULL, NULL},
@@ -275,7 +275,7 @@ static command_description commands[NB_COMMANDS] = {
     {"restockAnalysed", restockanalysed_interpreter, 0, CMD_CAT_STOCK, 0, NULL,
      "remet les possibilités en cours d'analyse dans le stock", NULL, NULL},
     {"rebalance", rebalance_interpreter, 0, CMD_CAT_STOCK, 0, "rebalance [n]",
-     "rééquilibre le stock : file la plus pleine -> la plus vide (PR3)",
+     "rééquilibre le stock : file la plus pleine -> la plus vide",
      "Déplace jusqu'à <n> possibilités (défaut rebalance_budget, réglable via\n"
      "--rebalance-budget au démarrage) de la file la plus pleine vers la plus\n"
      "vide, pour les deux pools (non vérifié et vérifié) indépendamment --\n"
@@ -306,7 +306,7 @@ static command_description commands[NB_COMMANDS] = {
      "déjà résident -- seuls les ADD futurs sont refusés jusqu'à repasser sous\n"
      "le plafond. Ne couvre pas le pool analysé (cf. stockMemory).", NULL},
     {"spill", spill_interpreter, 0, CMD_CAT_STOCK, 1, "spill [n]",
-     "déclenche immédiatement un pas de débordement/rechargement sur disque (PR2)",
+     "déclenche immédiatement un pas de débordement/rechargement sur disque",
      "Même appel que celui automatique du thread de débordement (100 ms) --\n"
      "utile pour forcer un pas immédiat plutôt que d'attendre le prochain tick.\n"
      "<n> optionnel : budget de possibilités pour CE pas (défaut\n"
@@ -888,7 +888,7 @@ int backup_interpreter(void) {
         def_known_clients_file = temp;
     }
     int rba = 0;
-    // "snapshot" (débordement disque, PR3) : sans effet côté client
+    // "snapshot" (débordement disque) : sans effet côté client
     // (stock_spill n'est jamais configuré hors du rôle serveur — la
     // fonction est un no-op silencieux via son propre g_spill_enabled).
     int rb = consistent_backup(def_file, def_analyse_file, &rba, "snapshot", stock_spill_snapshot);
@@ -909,7 +909,7 @@ int backup_interpreter(void) {
     if (best_board_save(&g_server_best_board, def_best_board_file) != 0) {
         log_info("backup de %s échoué\n", def_best_board_file);
     }
-    // Cumul par machine (PR5) : même cadence que
+    // Cumul par machine : même cadence que
     // le reste du stock, fichier dédié (cf. app/known_clients_registry.h).
     if (known_clients_registry_save(def_known_clients_file) != 0) {
         log_info("backup de %s échoué\n", def_known_clients_file);
@@ -1070,7 +1070,7 @@ static int restore_apply(char *file, char *analyse_file) {
     // PUIS RAM) : `stock_spill_step` ne consulte que ce drapeau, jamais les
     // verrous par file que `restore()` pose/lève lui-même — sans cette
     // fenêtre, une éviction/un rechargement concurrent pourrait migrer une
-    // possibilité au beau milieu du remplacement (PR3).
+    // possibilité au beau milieu du remplacement.
     datamanager_begin_maintenance();
 
     // Remise en place des segments de débordement EN PREMIER (« snapshot »
@@ -1081,7 +1081,7 @@ static int restore_apply(char *file, char *analyse_file) {
     // écraser — c'est cet ordre qui le garantit. Un `restore` d'un fichier
     // personnalisé (chemin explicite, hors convention par défaut) n'a pas de
     // cliché de débordement correspondant : no-op tolérant, RAM restaurée
-    // quand même, limitation documentée (AGENTS.md).
+    // quand même — limitation documentée.
     unsigned long long spill_restored = stock_spill_restore_snapshot("snapshot");
 
     // Correctif : `stock_spill_restore_snapshot` était tolérante par
@@ -1090,8 +1090,8 @@ static int restore_apply(char *file, char *analyse_file) {
     // celui utilisé à la sauvegarde, ou un cliché supprimé/corrompu
     // produisait donc une restauration RAPPORTÉE COMME RÉUSSIE mais en
     // réalité amputée du débordement, en silence (perte de possibilités
-    // contraire au principe du projet — voir AGENTS.md, aucune perte
-    // tolérée sans plan de secours). `<file>.spillcount`
+    // contraire au principe du projet : aucune perte tolérée sans plan de
+    // secours. `<file>.spillcount`
     // (`datamanager_read_spillcount_sidecar`), écrit par `consistent_backup`
     // au moment de CETTE sauvegarde précise et donc indépendant du
     // répertoire de débordement (qui peut, lui, être absent/mal configuré à
@@ -1309,7 +1309,7 @@ int statistic_interpreter(void) {
  *
  * L'avertissement sur le stock débordé est émis ICI et non dans `check_origin` :
  * `core/datamanager.c` n'a pas le droit de dépendre de `core/stock_spill.c`
- * (l'inverse seul est permis, cf. AGENTS.md).
+ * (l'inverse seul est permis).
  */
 int check_origin_interpreter(void) {
     char *arguments = strtok(NULL, " ");
@@ -2161,7 +2161,7 @@ int clients_roles_interpreter(void) {
 
 /**
  * @brief Interpréteur de `knownClients` : liste les machines connues du
- *        registre de cumul (`known_clients_registry.h`, PR4).
+ *        registre de cumul (`known_clients_registry.h`).
  *
  * Contrairement à `clients` (sessions ACTUELLEMENT actives), cette liste
  * inclut aussi les machines déconnectées depuis le démarrage du serveur,
@@ -2239,7 +2239,7 @@ int clients_work_interpreter(void) {
 
 /**
  * @brief Interpréteur de `leaseDuration <n>` : fixe la durée (secondes) du
- *        bail à expiration des possibilités attribuées à un client (PR7).
+ *        bail à expiration des possibilités attribuées à un client.
  *
  * Purement serveur (le bail n'a de sens que côté serveur, qui seul enregistre
  * une attribution — `add_possibility_analysed_owned`) : commande SERVEUR pure
@@ -2391,7 +2391,7 @@ int stock_max_ram_interpreter(void) {
 
 /**
  * @brief Interpréteur de `spill [n]` : déclenche immédiatement un pas de
- *        débordement/rechargement sur disque (PR2, `core/stock_spill.h`).
+ *        débordement/rechargement sur disque (`core/stock_spill.h`).
  *
  * `n` optionnel : budget de possibilités pour CE pas (défaut
  * `STOCK_SPILL_BLOCK_PACKETS`) -- même convention `<n> <= 0` = usage invalide

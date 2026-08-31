@@ -70,8 +70,8 @@ int scroll (File * suite, void *dest);
  * Contrairement à `scroll` (dépile la QUEUE, `end` — les possibilités les
  * plus récemment ajoutées), extrait la TÊTE (`start`) : les éléments les
  * plus anciens, jamais retouchés tant que la file ne se vide pas
- * complètement. Utilisée par `core/stock_spill.c` (débordement sur disque,
- * PR2) pour évincer précisément la donnée FROIDE, jamais celle qu'un GET
+ * complètement. Utilisée par `core/stock_spill.c` (débordement sur disque)
+ * pour évincer précisément la donnée FROIDE, jamais celle qu'un GET
  * normal (`scroll`) aurait servie en premier.
  *
  * @param suite File source.

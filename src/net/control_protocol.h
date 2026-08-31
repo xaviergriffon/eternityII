@@ -108,7 +108,7 @@ int ctrl_recv_frame(int socket_id, void **out_payload, int32_t *out_len);
  * @brief Annonce d'un client se déclarant canal de contrôle (payload de
  *        CTRL_* futur / INST_CONTROL_HELLO).
  *
- * Étendu en v12 (PR2) de l'identité déclarée du client (`identity`) —
+ * Étendu en v12 de l'identité déclarée du client (`identity`) —
  * `identity.fork_seq` vaut
  * toujours -1 ici : ce hello représente le process PARENT dans son ensemble,
  * jamais un fork particulier (cf. INST_CLIENT_HELLO, net/etii_protocol.h,

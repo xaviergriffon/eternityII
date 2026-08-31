@@ -131,7 +131,7 @@ void known_clients_registry_on_stats(const uint8_t *machine_uid, const uint8_t *
 void known_clients_registry_on_disconnect(const uint8_t *machine_uid, const uint8_t *client_uid);
 
 /**
- * @brief Marqueur de format du fichier `.back` de ce registre (PR5). Vérifié
+ * @brief Marqueur de format du fichier `.back` de ce registre. Vérifié
  *        en tête de fichier par `known_clients_registry_load` ; un magic
  *        différent (fichier d'une autre nature, ou corrompu) fait échouer le
  *        chargement — jamais un octet interprété au hasard. Pas de champ de
@@ -159,7 +159,7 @@ typedef struct {
  *
  * Champs de largeur fixe explicite (comme `control_protocol.h`), même si ce
  * n'est pas un format réseau : `time_t`/`int` ont une largeur dépendante du
- * build, écrire ces types bruts rendrait un fichier PR5 illisible par un
+ * build, écrire ces types bruts rendrait un fichier illisible par un
  * binaire compilé différemment sur la même machine (ex. build 32 vs 64 bits).
  */
 typedef struct {

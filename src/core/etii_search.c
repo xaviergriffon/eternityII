@@ -53,6 +53,11 @@ void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibil
 /**
  * @brief Niveau de la pile de décisions du backtracking in-place.
  *
+ * Chaque case explorée depuis le paquet racine occupe un niveau de pile. Un
+ * niveau mémorise la case concernée, la liste de candidats de la map (pointeur
+ * stable, la map est en lecture seule pendant la recherche) et la position de
+ * reprise : le plateau lui-même est partagé et modifié en place.
+ *
  * La case (`x`, `y`) est stockée plutôt que déduite de
  * `dirx[depth]/diry[depth]` : en ordre dynamique (MRV) elle est choisie à
  * chaque nœud par `mrv_choose_cell`. Permet aux mécanismes de délégation
@@ -98,9 +103,10 @@ static void bt_init_constraints(key_part constraints[ETERN_SIZE][ETERN_SIZE],
  * Frontière incrémentale du balayage MRV
  *
  * `mrv_choose_cell` ne s'intéresse qu'aux cases vides et contraintes
- * (~52 en moyenne sur le puzzle 256) ; les repérer par balayage des 256
- * cases à chaque nœud coûtait plus cher que le comptage lui-même. Deux
- * masques de bits maintenus incrémentalement donnent la même liste.
+ * (~52 en moyenne sur le puzzle 256 — cf. sa doc pour les conditions et
+ * pourquoi §3.2 annonce 29) ; les repérer par balayage des 256 cases à
+ * chaque nœud coûtait plus cher que le comptage lui-même. Deux masques de
+ * bits maintenus incrémentalement donnent la même liste.
  *
  * Position d'une case : `pos = x * ETERN_SIZE + y`, donc l'ordre croissant
  * des bits reproduit l'ordre `for x { for y }` de l'ancien balayage — même
@@ -274,7 +280,7 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
 /**
  * @brief Forward-checking de la boucle chaude, basé sur le cache de contraintes.
  *
- * Inspecte les VOISINES géométriques de la pièce posée en `(cx, cy)` (au plus
+ * Inspecte les voisines géométriques de la pièce posée en `(cx, cy)` (au plus
  * 4) plutôt que les `FORWARD_CHECK_K` prochaines cases du parcours
  * `directions[]` — seul un placement modifie la clé de ses voisines directes,
  * une case du parcours peut être à des dizaines de cases sans jamais être
@@ -856,7 +862,7 @@ static inline int mrv_free_candidates(const map_big_array *map, const key_part *
  * `nconstr` minimal et perd +4,4 % de coût de réfutation en production contre
  * −6,3 % pour `nconstr` maximal ici). Ne pas inverser ce sens sans re-mesurer.
  *
- * Le balayage reste COMPLET (pas d'arrêt anticipé sur 1 candidat) : sa
+ * Le balayage reste complet (pas d'arrêt anticipé sur 1 candidat) : sa
  * détection de case morte est un sous-produit gratuit, strictement plus
  * large que le forward-check local.
  *
@@ -929,9 +935,13 @@ typedef enum {
 } bt_core_result_t;
 
 /**
- * @brief Recherche à ordre de variable DYNAMIQUE (MRV) — seul moteur de
+ * @brief Recherche à ordre de variable dynamique (MRV) — seul moteur de
  *        backtracking, pour la recherche réelle comme pour la preuve bornée
- *        du pruner.
+ *        du pruner (`search_packet_backtracking_budgeted`) : l'ancien moteur
+ *        à ordre fixe (`search_packet_backtracking_core`, sélectionné par
+ *        les drapeaux `mrv_enabled`/`pruner_dfs_mrv`) a été supprimé — mesuré
+ *        favorable dans les deux usages, un interrupteur laissé en place
+ *        aurait été un chemin de code non testé.
  *
  * Un unique plateau (copie locale du paquet racine) est modifié en place ;
  * aucune copie de `possibility_packet` ni allocation dans la boucle chaude.
@@ -1181,11 +1191,14 @@ static int search_packet_backtracking(client_possibility_t *client,
  * @brief Preuve de fermeture bornée en nœuds du sous-arbre d'une possibilité.
  *
  * Rejoue `root` par le même backtracking MRV que la recherche réelle,
- * plafonné à `node_budget` nœuds, sans délégation. `BT_CORE_EXHAUSTED` est
- * une condition nécessaire exacte : si retourné, le sous-arbre entier a été
- * parcouru par le même code que la recherche, aucun faux positif possible.
- * `BT_CORE_BUDGET`/`BT_CORE_STOPPED` signifient « statut indéterminé » —
- * aucune conclusion n'en découle.
+ * plafonné à `node_budget` nœuds, sans délégation. L'ancien drapeau
+ * `pruner_dfs_mrv`, qui sélectionnait entre ordre fixe et ordre dynamique
+ * pour cette preuve, a disparu avec le moteur à ordre fixe qu'il
+ * sélectionnait — mesuré ×3 à ×4 de fermetures à budget égal sur du stock de
+ * production. `BT_CORE_EXHAUSTED` est une condition nécessaire exacte : si
+ * retourné, le sous-arbre entier a été parcouru par le même code que la
+ * recherche, aucun faux positif possible. `BT_CORE_BUDGET`/`BT_CORE_STOPPED`
+ * signifient « statut indéterminé » — aucune conclusion n'en découle.
  *
  * @param node_budget Plafond de nœuds (`<= 0` : ne pas appeler cette
  *                    fonction — budgétisation désactivée en amont).

@@ -292,7 +292,7 @@ void *feed_thread_aposs(void *param) {
     // cette fonction — tout ce qui restait en attente d'acquittement au
     // moment de l'arrêt (`exit`, Ctrl-C, SIGKILL) était donc perdu : le
     // serveur le garde attribué à ce client jusqu'à expiration du bail
-    // (leaseDuration, 300s par défaut, PR7) avant de le remettre au stock —
+    // (leaseDuration, 300s par défaut) avant de le remettre au stock —
     // travail d'analyse déjà fait, jeté pour rien. Pendant cet appel,
     // send_possibility_analysed lève elle-même server_io_active (via
     // server_socket_io_lock/_unlock, core/datamanager.h) — fork_checker

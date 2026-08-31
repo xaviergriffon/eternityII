@@ -9,7 +9,7 @@
 // app/static_variables.h : `core/` en dépendait pour des constantes/globales
 // qui n'ont pourtant rien d'applicatif (géométrie du puzzle, compteurs de
 // recherche, machine à états de pause) — une violation directe de la règle
-// "core/ ne doit jamais dépendre de app/" (cf. AGENTS.md). Ce fichier-ci
+// "core/ ne doit jamais dépendre de app/". Ce fichier-ci
 // contient le sous-ensemble EFFECTIVEMENT référencé par du code sous
 // `src/core/` (vérifié par grep, pas reconstitué de mémoire) : puzzle/
 // géométrie, forward-checking, machine à états `request`, compteurs du
@@ -55,7 +55,7 @@
 // serveur v11 (ou l'inverse) désignerait des cases différentes pour le même
 // indice de curseur (alloc) — bump de version pour forcer tous les clients
 // à se resynchroniser sur le nouveau parcours plutôt que corrompre le board.
-// v12 : identité déclarée des clients (PR2).
+// v12 : identité déclarée des clients.
 // Nouveau INST_CLIENT_HELLO sur la connexion de TRAVAIL (net/etii_protocol.h) :
 // chaque fork l'envoie une fois, juste après le handshake de version, avec son
 // identité (machine_uid, client_uid, fork_seq, label, mode — net/client_identity.h).
@@ -138,7 +138,7 @@
 #define PRUNER_BATCH_MAX 65536
 
 // Budget de nœuds par défaut de la preuve de fermeture bornée du pruner CPU
-// (§4.6b de docs/conception/elagage_recherche.md, `pruner_dfs_budget`) :
+// (`pruner_dfs_budget`) :
 // nombre de nœuds de backtracking RÉEL (search_packet_backtracking_budgeted)
 // qu'une possibilité jugée vivante par le contrôle superficiel
 // (`possibility_all_has_a_next_counted`) mais pas encore `checked` peut encore
@@ -153,7 +153,6 @@
 // pipeline réel `autoprune_step`) : la preuve DFS ferme bien +4,6 à +5,6
 // points de pourcentage de possibilités au-delà du contrôle superficiel
 // gratuit (lui-même à 50,2 % sur ce stock), reproduit sur un second stock.
-// Voir §4.6b de docs/conception/elagage_recherche.md pour la table complète.
 // NE PAS reprendre l'affirmation « 0 % de fermeture, mécanisme inutile » —
 // elle est fausse. Le défaut reste 0 malgré tout : basculer par défaut change
 // le coût CPU de tout pruner déployé, décision laissée à l'opérateur, pas

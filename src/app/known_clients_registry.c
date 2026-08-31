@@ -24,7 +24,7 @@ typedef struct {
     uint8_t client_uid[CLIENT_UID_BYTES];
     /// Rôle déclaré par CETTE session (`CLIENT_MODE_*`), figé à la connexion —
     /// nécessaire pour décrémenter le bon compteur `nb_active_search`/
-    /// `nb_active_prune` de la machine à la déconnexion (PR2), puisque
+    /// `nb_active_prune` de la machine à la déconnexion, puisque
     /// `known_client_t.mode` (dernière valeur déclarée, toutes sessions
     /// confondues) peut ne plus correspondre à CETTE session précise dans un
     /// dosage mixte.
@@ -66,7 +66,7 @@ static known_client_t g_known_clients[MAX_KNOWN_CLIENTS];
  * pas de granularité par entrée. */
 static pthread_mutex_t g_known_clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Compteur de mutations persistées (PR5) : voir la doc de
+// Compteur de mutations persistées: voir la doc de
 // known_clients_registry_mutation_count (known_clients_registry.h).
 static unsigned long long g_known_clients_mutation_count = 0;
 
@@ -211,7 +211,7 @@ void known_clients_registry_on_connect(const client_identity_t *identity, const 
         kc->sessions[sidx].last_pruner_checked = 0;
         kc->sessions[sidx].last_pruner_removed = 0;
         kc->nb_active_sessions++;
-        // Ventilation par rôle (PR2) : la même distinction binaire que
+        // Ventilation par rôle : la même distinction binaire que
         // control_registry_count_roles (control_registry.h) — GPU_PRUNER
         // compte comme « contrôle ».
         if (identity->mode == CLIENT_MODE_SEARCH) {

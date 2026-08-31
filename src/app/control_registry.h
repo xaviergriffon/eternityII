@@ -47,7 +47,7 @@ typedef struct {
     /// Identifiant de session monotone, jamais réutilisé même après
     /// `control_registry_unregister` (contrairement à l'indice de slot du
     /// registre — « session_no n'est pas un slot »). Clé d'adressage acceptée par
-    /// `control_registry_send_command_to` (`clientsCmd --to <session_no>`, PR3).
+    /// `control_registry_send_command_to` (`clientsCmd --to <session_no>`).
     uint64_t session_no;
     /// PID du processus parent annoncé au hello.
     int32_t pid;
@@ -155,7 +155,7 @@ int control_registry_count(void);
 /**
  * @brief Recopie l'identité déclarée (`client_identity_t`) annoncée au hello
  *        de la session `index` — utilisé par `known_clients_registry.h`
- *        (PR4) pour retrouver
+ *        pour retrouver
  *        `machine_uid`/`client_uid` à des points d'appel (réception de
  *        `CTRL_STATS`, déconnexion) qui ne détiennent que l'indice de session,
  *        pas le hello complet.
@@ -262,7 +262,7 @@ int control_registry_broadcast_get_stats(void);
 /**
  * @brief Résout `target` vers l'unique session de contrôle active qu'il
  *        désigne et lui poste `cmd`/`command_line` (adressage
- *        `clientsCmd --to <cible>`, PR3).
+ *        `clientsCmd --to <cible>`).
  *
  * `target` est essayé, dans cet ordre, comme : (1) un `session_no` décimal ;
  * (2) un `client_uid` hexadécimal (longueur exacte) ; (3) un `label` déclaré

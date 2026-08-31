@@ -56,13 +56,13 @@ typedef struct
 
 /**
  * @brief Regroupe les quatre portes d'autobackup indépendantes de
- *        `check_server_step` (PR5) : stock (pools non vérifié + vérifié),
+ *        `check_server_step` : stock (pools non vérifié + vérifié),
  *        pool analysé, meilleur plateau connu, registre des clients connus.
  *        Chaque artefact n'est réécrit que si SON compteur de mutations a
  *        bougé depuis SA dernière écriture — `consistent_backup` reste
  *        appelée en un seul appel couvrant stock+analysé dès que L'UN DES
  *        DEUX a une mutation en attente (cohérence à l'instant T préservée,
- *        cf. PR2) ; `best_board`/`known_clients` sont deux portes
+ *        `best_board`/`known_clients` sont deux portes
  *        entièrement indépendantes l'une de l'autre et du stock.
  */
 typedef struct
@@ -219,14 +219,29 @@ extern unsigned long long server_prune_starved;
  * vite ; (6) ratio stock non-vérifié/vérifié déséquilibré dans un sens ou
  * l'autre.
  *
- * @param unchecked_stock Σ taille des files non vérifiées (travail pruner).
- * @param checked_stock   Σ taille des files vérifiées (travail chercheur).
- * @param nb_search       Σ `nb_forks` des sessions en rôle recherche — pas un
- *                        compte de sessions, qui resterait toujours ≤1 avec
- *                        une seule machine connectée et fausserait le
- *                        garde-fou (4).
- * @param nb_prune        Σ `nb_forks` des sessions en rôle contrôle, idem.
- * @return                Le sens d'ajustement (jamais une cible absolue).
+ * Seuils choisis comme point de départ raisonnable (hystérésis et délai
+ * minimal restent la vraie garantie de stabilité, cf. `check_server_step`) —
+ * à remesurer une fois `--auto-roles` exercé en conditions réelles.
+ *
+ * @param unchecked_stock       Σ taille des files non vérifiées (travail
+ *                              disponible pour un pruner).
+ * @param checked_stock         Σ taille des files vérifiées (travail
+ *                              disponible pour un chercheur).
+ * @param ram_pressure_high     1 si `resident/limite ≥ STOCK_SPILL_HIGH_PERCENT`
+ *                              (0 si le plafond RAM est désactivé — pas de
+ *                              notion de pression sans plafond).
+ * @param search_starved_delta  Δ `server_search_starved` depuis le tour précédent.
+ * @param prune_starved_delta   Δ `server_prune_starved` depuis le tour précédent.
+ * @param nb_search             Σ `nb_forks` des sessions en rôle recherche
+ *                              (`control_registry_count_role_forks`, pas un
+ *                              compte de sessions — avec une seule machine
+ *                              connectée, un compte de sessions vaudrait
+ *                              toujours au plus 1, déclenchant à tort le
+ *                              garde-fou ci-dessous quel que soit son nombre
+ *                              réel de forks).
+ * @param nb_prune              Σ `nb_forks` des sessions en rôle contrôle,
+ *                              même remarque.
+ * @return                      Le sens d'ajustement (jamais une cible absolue).
  */
 role_mix_decision_t compute_desired_role_mix(unsigned long long unchecked_stock,
                                               unsigned long long checked_stock,
@@ -344,8 +359,8 @@ char *build_file_queues_table(unsigned long long *out_unchecked,
                               unsigned long long *out_analysed);
 
 /**
- * @brief File du pool analysé assignée à CETTE connexion serveur (PR8,
- *        répartition de charge ADD/GET par connexion, cf. datamanager.c).
+ * @brief File du pool analysé assignée à CETTE connexion serveur
+ *        (répartition de charge ADD/GET par connexion, cf. datamanager.c).
  *
  * `client->compteur` (slot de thread serveur, stable pour la durée de la
  * connexion) modulo `nb_file_possibility` : tous les GET et tous les ACK
@@ -362,7 +377,7 @@ int server_analysed_file_hint(client_t *client);
 
 /**
  * @brief Enregistre une possibilité servie comme « en cours d'analyse »,
- *        attribuée au client courant si son identité est connue (PR6).
+ *        attribuée au client courant si son identité est connue.
  *
  * Extrait des trois points de service (`INST_GET`/`INST_GET_TO_CHECK[_BATCH]`)
  * pour être testable hors thread (comme `communicate_with_client_step`) et
@@ -370,7 +385,7 @@ int server_analysed_file_hint(client_t *client);
  *
  * Peut échouer (pool analysé intégralement verrouillé par une maintenance en
  * cours, au-delà d'un délai borné) — l'appelant NE DOIT PAS servir cette possibilité au
- * client dans ce cas, sous peine de l'échapper au bail (PR7) et à
+ * client dans ce cas, sous peine de l'échapper au bail et à
  * `requeue_last_sent_possibility`.
  *
  * @param client      Contexte du thread serveur (identité déclarée si connue).
@@ -394,6 +409,9 @@ int record_possibility_analysed_for_client(client_t *client, struct possibility_
  * `client` sert uniquement à vérifier si le client reste vivant (canal de
  * contrôle toujours enregistré) : si oui, rien n'est remis au stock — même
  * critère de vivacité que le bail d'expiration.
+ *
+ * @param lastSent Dernier lot de possibilités envoyé au client (peut être NULL).
+ * @param client   Client dont la connexion de travail se termine (peut être NULL).
  */
 void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t *client);
 
