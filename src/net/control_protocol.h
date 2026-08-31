@@ -259,7 +259,7 @@ control_command_class_t control_command_classify(const char *command_name);
  *
  * `start`/`stopForks`/`configApply`/`config`/`configSave` pilotent à
  * distance le cycle de vie des fils de recherche d'un client, sans sens
- * côté serveur (masquées par `command_is_client_only`). `exit` n'entre
+ * côté serveur (masquées par `command_scope_classify`). `exit` n'entre
  * jamais dans cette liste.
  *
  * Ne distingue pas lecture/écriture — voir `control_command_read_only`.

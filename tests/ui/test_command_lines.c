@@ -263,7 +263,7 @@ TEST help_interpreter_output_survives_past_log_line_max(void)
 
 /*
  * config/configSave sont désormais disponibles dans les DEUX rôles (voir
- * command_is_client_only, command_lines.c) : leurs interpréteurs branchent
+ * command_scope_classify, command_lines.c) : leurs interpréteurs branchent
  * eux-mêmes sur `server` -- configuration SERVEUR (server_config.h) d'un
  * côté, configuration CLIENT (client_config.h) de l'autre. Seule la forme
  * "config <clé> <valeur>" reste refusée côté serveur (pas de configuration
@@ -2448,7 +2448,7 @@ TEST admin_apply_remote_command_configsave_writes_file(void)
    refusées : POST /api/v1/command (seul appelant HTTP de cette fonction)
    n'est atteignable que depuis runserver, où elles agiraient sur un
    orchestrateur qu'aucune boucle ne consomme jamais côté serveur -- même
-   raisonnement que command_is_client_only pour la console.
+   raisonnement que command_scope_classify pour la console.
    "config nb_forks 2" (forme <clé> <valeur>) reste aussi refusée : le serveur
    n'a pas de configuration "en préparation" à appliquer à chaud. */
 TEST admin_apply_remote_command_lifecycle_forbidden_on_server(void)
@@ -3063,8 +3063,81 @@ TEST admin_apply_privileged_command_sorts_run(void)
     PASS();
 }
 
+/* ---------- command_scope_classify ----------------------------------------- */
+
+TEST command_scope_classify_client_only(void)
+{
+    ASSERT_EQ_FMT((int)CMD_SCOPE_CLIENT_ONLY, (int)command_scope_classify("start"), "%d");
+    ASSERT_EQ_FMT((int)CMD_SCOPE_CLIENT_ONLY, (int)command_scope_classify("stopForks"), "%d");
+    ASSERT_EQ_FMT((int)CMD_SCOPE_CLIENT_ONLY, (int)command_scope_classify("configApply"), "%d");
+    PASS();
+}
+
+TEST command_scope_classify_server_only(void)
+{
+    ASSERT_EQ_FMT((int)CMD_SCOPE_SERVER_ONLY, (int)command_scope_classify("clientsWork"), "%d");
+    ASSERT_EQ_FMT((int)CMD_SCOPE_SERVER_ONLY, (int)command_scope_classify("stockMaxRam"), "%d");
+    ASSERT_EQ_FMT((int)CMD_SCOPE_SERVER_ONLY, (int)command_scope_classify("clientsCommand"), "%d");
+    PASS();
+}
+
+TEST command_scope_classify_common(void)
+{
+    ASSERT_EQ_FMT((int)CMD_SCOPE_COMMON, (int)command_scope_classify("pause"), "%d");
+    ASSERT_EQ_FMT((int)CMD_SCOPE_COMMON, (int)command_scope_classify("restore"), "%d");
+    ASSERT_EQ_FMT((int)CMD_SCOPE_COMMON, (int)command_scope_classify("config"), "%d");
+    PASS();
+}
+
+TEST command_scope_classify_unknown_defaults_to_common(void)
+{
+    ASSERT_EQ_FMT((int)CMD_SCOPE_COMMON, (int)command_scope_classify("notACommand"), "%d");
+    ASSERT_EQ_FMT((int)CMD_SCOPE_COMMON, (int)command_scope_classify(NULL), "%d");
+    PASS();
+}
+
+/* ---------- command_lookup_help_text ---------------------------------------- */
+
+TEST command_lookup_help_text_found_with_usage(void)
+{
+    const char *summary = NULL;
+    const char *usage = NULL;
+    ASSERT_EQ_FMT(1, command_lookup_help_text("pause", &summary, &usage), "%d");
+    ASSERT(summary != NULL);
+    /* "pause" ne prend pas d'argument -> usage NULL dans command_description. */
+    ASSERT(usage == NULL);
+    PASS();
+}
+
+TEST command_lookup_help_text_found_without_usage(void)
+{
+    const char *summary = NULL;
+    const char *usage = NULL;
+    ASSERT_EQ_FMT(1, command_lookup_help_text("limit", &summary, &usage), "%d");
+    ASSERT(summary != NULL);
+    ASSERT(usage != NULL);
+    PASS();
+}
+
+TEST command_lookup_help_text_not_found(void)
+{
+    const char *summary = (const char *)0x1; /* sentinelle : ne doit pas être touchée */
+    const char *usage = (const char *)0x1;
+    ASSERT_EQ_FMT(0, command_lookup_help_text("notACommand", &summary, &usage), "%d");
+    ASSERT(summary == (const char *)0x1);
+    ASSERT(usage == (const char *)0x1);
+    PASS();
+}
+
 SUITE(command_lines_suite)
 {
+    RUN_TEST(command_scope_classify_client_only);
+    RUN_TEST(command_scope_classify_server_only);
+    RUN_TEST(command_scope_classify_common);
+    RUN_TEST(command_scope_classify_unknown_defaults_to_common);
+    RUN_TEST(command_lookup_help_text_found_with_usage);
+    RUN_TEST(command_lookup_help_text_found_without_usage);
+    RUN_TEST(command_lookup_help_text_not_found);
     RUN_TEST(do_command_line_handles_empty_input);
     RUN_TEST(do_command_line_unknown_returns_error);
     RUN_TEST(do_command_line_help_runs);
