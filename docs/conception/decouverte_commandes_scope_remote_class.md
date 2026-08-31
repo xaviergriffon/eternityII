@@ -98,8 +98,8 @@ toute façon `403`/n'existe pas pour un tiers HTTP.
       "scope": "server_only",
       "remote_class": "write_relayable",
       "requires_token": true,
-      "summary": "relaie une commande à un ou tous les clients connectés",
-      "usage": "clientsCommand [--to <cible>] <ligne...>"
+      "summary": "pousse une commande à un client précis ou à tous les clients connectés",
+      "usage": "clientsCommand [--to <session_no|client_uid|label>] <commande...>"
     }
   ]
 }

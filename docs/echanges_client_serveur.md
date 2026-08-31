@@ -355,7 +355,7 @@ poussables par le serveur vers un client, exactement comme `pause`/`limit`/…
 chacune côté console). Deux points à retenir, propres à ces cinq commandes :
 
 - **Elles n'ont de sens que sur un CLIENT.** Comme sur la console
-  (`command_is_client_only`, `src/ui/command_lines.c`), elles agissent sur
+  (`command_scope_classify`, `src/ui/command_lines.c`), elles agissent sur
   `fork_orchestrator`/`client_config` — inexistants côté rôle serveur
   (`fork_orchestrator_run` n'est jamais appelée par `handle_server`). Poussées
   via `clientsCommand`/`clientsCmd` (canal de contrôle), elles n'atteignent de
@@ -370,11 +370,13 @@ chacune côté console). Deux points à retenir, propres à ces cinq commandes :
   [l'API HTTP admin](api_http_rest.md#post-apiv1command) pour la manière
   correcte de les déclencher à distance : `clientsCommand --to <cible>
   <commande>`).
-- **`config`/`configSave` restent, elles, masquées côté SERVEUR sur sa PROPRE
-  console** (`command_is_client_only`) et ne figurent dans
-  `control_command_allowed` que pour être poussées vers un CLIENT — un
-  `clientsCmd config` depuis un serveur n'a jamais de sens sur le serveur lui-
-  même, pour la raison ci-dessus.
+- **`config`/`configSave` fonctionnent, elles, dans les DEUX rôles** : leurs
+  interpréteurs branchent eux-mêmes sur `server` et agissent sur
+  `server_config_t` côté serveur (affichage/persistance de sa propre
+  config effective) au lieu de `client_config_t` — seule la forme `config
+  <clé> <valeur>` (mise en attente d'un changement) y est refusée, faute
+  d'endroit où la mettre en attente côté serveur (voir « Deferred-start
+  orchestrator » dans [AGENTS.md](../AGENTS.md)).
 
 Exemple : reconfigurer `nb_forks` d'un client `jetson-1` déjà en cours
 d'exécution, sans jamais couper sa console ni sa connexion :

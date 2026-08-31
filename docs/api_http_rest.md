@@ -304,8 +304,8 @@ n'est atteignable que depuis `runserver` (`--http-port` est une option serveur
 uniquement), et ces cinq commandes agissent sur `fork_orchestrator`/`client_config`,
 qui ne veulent rien dire côté serveur (`NB_THREADS` y désigne le pool de connexions,
 pas un nombre de forks ; `fork_orchestrator_run` n'y tourne jamais) — même garde-fou
-que `command_is_client_only` pour la console (`admin_remote_command_is_client_only`,
-`src/ui/command_lines.c`). Pour les déclencher à distance sur un client précis,
+que `command_scope_classify` pour la console (`src/ui/command_lines.c`). Pour les
+déclencher à distance sur un client précis,
 passer par `clientsCommand --to <cible> <commande>` (ligne du tableau ci-dessus), qui
 les relaie telles quelles sur le canal de contrôle de ce client — ex.
 `{"command":"clientsCommand --to jetson-1 stopForks"}` puis
@@ -768,6 +768,15 @@ autres routes `GET`).
 | `requires_token` | booléen | `true` sauf pour `clientsWork` — équivalent à `remote_class != "read_only"`, exposé explicitement pour qu'un consommateur n'ait pas à redériver la règle d'authentification lui-même |
 | `summary` | chaîne | Résumé d'aide d'une ligne (même texte que la console `help <commande>`) |
 | `usage` | chaîne ou `null` | Syntaxe avec arguments, `null` si la commande n'en prend pas |
+
+Pour une commande alias (ex. `clientsCmd`, alias de `clientsCommand`), `summary`
+et `usage` reflètent le texte de la commande CANONIQUE, pas celui de l'alias —
+un consommateur qui lit `usage` pour un `name` aliasé y voit donc un verbe
+différent de `name` lui-même.
+
+Les entrées sont renvoyées dans un ordre stable — celui de la table interne
+(`read_only` d'abord, puis `write_relayable`, puis `write_server_only`) — et
+non triées alphabétiquement ou autrement.
 
 `scope` et `remote_class` sont **orthogonaux** : `restore` est `common` ×
 `write_server_only` (exécutable en local sur un client, jamais relayable) ;
