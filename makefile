@@ -355,6 +355,14 @@ test-integration:
 # copie les ignore donc explicitement (`find ! -type s`), plutôt que de
 # dépendre d'un répertoire propre. Les sockets n'ont de toute façon aucun sens
 # à être recopiées dans le conteneur.
+#
+# Par défaut, les 3 jobs de test de la CI (build+unit, ASan, intégration) sont
+# rejoués dans 3 conteneurs indépendants EN PARALLÈLE (chacun avec sa propre
+# copie /work, donc aucun conflit) — comme les 3 runners GitHub séparés,
+# plutôt qu'un seul conteneur séquentiel qui n'utilise jamais plus d'un cœur.
+# Fournir DOCKER_TEST_CMD explicitement bascule sur l'ancien mode : un seul
+# conteneur qui rejoue exactement cette commande (pour cibler un job précis) :
+#   make test-docker DOCKER_TEST_CMD="make test ASAN=1"
 # ---------------------------------------------------------------------------
 DOCKER          ?= docker
 DOCKER_IMAGE    ?= eternityii-ci
@@ -364,6 +372,7 @@ DOCKER_TEST_CMD ?= make WERROR=1 && make test && make test ASAN=1 && make test-i
 # doit rester celui des commandes de build qui suivent.
 DOCKER_COPY_SRC  = (cd /src && find . ! -type s -print0 | tar --null --no-recursion -T - -cf -) | tar -xf - -C /work
 .PHONY: test-docker
+ifeq ($(origin DOCKER_TEST_CMD),command line)
 test-docker:
 	$(DOCKER) build -t $(DOCKER_IMAGE) tests/docker
 	$(DOCKER) run --rm \
@@ -371,6 +380,34 @@ test-docker:
 		-e ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
 		$(DOCKER_IMAGE) \
 		bash -ce '$(DOCKER_COPY_SRC) && make clean && $(DOCKER_TEST_CMD)'
+else
+test-docker:
+	$(DOCKER) build -t $(DOCKER_IMAGE) tests/docker
+	@logdir=$$(mktemp -d) || exit 1; \
+	trap 'rm -rf "$$logdir"' EXIT; \
+	run_job() { \
+		name=$$1; cmd=$$2; \
+		$(DOCKER) run --rm \
+			-v "$(CURDIR):/src:ro" \
+			-e ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
+			$(DOCKER_IMAGE) \
+			bash -ce "$(DOCKER_COPY_SRC) && make clean && $$cmd" \
+			> "$$logdir/$$name.log" 2>&1; \
+		echo $$? > "$$logdir/$$name.rc"; \
+	}; \
+	run_job unit        "make WERROR=1 && make test" & \
+	run_job asan        "make WERROR=1 && make test ASAN=1" & \
+	run_job integration "make WERROR=1 && make test-integration" & \
+	wait; \
+	fail=0; \
+	for name in unit asan integration; do \
+		echo "=== test-docker: $$name ==="; \
+		cat "$$logdir/$$name.log"; \
+		rc=$$(cat "$$logdir/$$name.rc"); \
+		if [ "$$rc" != "0" ]; then fail=1; echo ">>> test-docker: $$name a ECHOUE (code $$rc)"; fi; \
+	done; \
+	exit $$fail
+endif
 
 # ---------------------------------------------------------------------------
 # Compilation croisée ARM 64-bit (Raspberry Pi OS 64-bit), même conteneur que

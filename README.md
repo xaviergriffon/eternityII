@@ -119,7 +119,7 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard.
 ```sh
 make test             # tests unitaires (framework greatest, vendoré)
 make test-integration # scénarios bout-en-bout client/serveur (16 pièces)
-make test-docker      # rejoue les jobs de test CI dans un conteneur Linux
+make test-docker      # rejoue les jobs de test CI dans 3 conteneurs Linux en parallèle
 make test-docker-arm  # vérifie la compilation croisée ARM 64-bit (Raspberry Pi) dans le même conteneur
 make coverage-report  # rapports de couverture gcovr (XML + HTML + Markdown)
 

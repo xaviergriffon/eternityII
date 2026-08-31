@@ -10,7 +10,7 @@ fixtures, ajout d'un test) sont dans [tests/README.md](../tests/README.md).
 ```sh
 make test             # compile tests/ + lance la suite unitaire (code de sortie non nul si échec)
 make test-integration # scénarios bout-en-bout 16 pièces : solution client/serveur + canal de contrôle
-make test-docker      # rejoue les jobs de test CI dans un conteneur Linux (nécessite Docker)
+make test-docker      # rejoue les jobs de test CI dans 3 conteneurs Linux en parallèle (nécessite Docker)
 make test-docker-arm  # vérifie la compilation croisée ARM 64-bit (Raspberry Pi) dans le même conteneur (nécessite Docker)
 make coverage         # les deux passes (256 + 16) + résumé texte gcovr fusionné (nécessite gcovr)
 make coverage-256     # passe 256 pièces seule ; résumé gcov par module
@@ -77,8 +77,20 @@ AddressSanitizer et tests d'intégration client/serveur.
 C'est le moyen de détecter **avant de pousser** les écarts entre macOS/clang et
 Linux/gcc (diagnostics `-Werror` plus stricts, over-reads vus par ASan sous Linux
 seulement, glibc vs libSystem). Le dépôt est monté en lecture seule et copié dans le
-conteneur : les artefacts Linux ne se mélangent jamais à ceux du poste hôte. La
-séquence est surchargeable pour rejouer un seul job :
+conteneur : les artefacts Linux ne se mélangent jamais à ceux du poste hôte.
+
+Par défaut, les 3 jobs (build+unitaire, ASan, intégration) tournent dans **3
+conteneurs indépendants en parallèle**, comme les 3 runners GitHub séparés de la
+CI (`test`, `test-asan`, `integration-test`), plutôt qu'un seul conteneur
+séquentiel qui n'utilise jamais plus d'un cœur. Chaque conteneur reçoit sa
+propre copie `/work` (montage `/src` en lecture seule commun, `make clean`
+individuel) : aucun conflit entre jobs. Les logs de chaque job sont capturés
+puis affichés une fois le job terminé (pas d'entrelacement), et la cible échoue
+si **au moins un** des 3 jobs échoue.
+
+Fournir `DOCKER_TEST_CMD` explicitement bascule sur l'ancien mode — un seul
+conteneur qui rejoue exactement cette commande — pratique pour cibler un job
+précis sans attendre les deux autres :
 
 ```sh
 make test-docker DOCKER_TEST_CMD="make test ASAN=1"
