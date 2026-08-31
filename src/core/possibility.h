@@ -213,26 +213,20 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 int possibility_all_has_a_next_counted(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part, unsigned int *out_cells_studied);
 
 /**
- * @brief Forward-checking sur les `FORWARD_CHECK_K` prochaines cases VIDES du parcours.
+ * @brief Forward-checking sur les `FORWARD_CHECK_K` prochaines cases vides du parcours.
  *
  * Après avoir sélectionné une pièce candidate, parcourt `directions[]` dans
- * l'ordre (simple énumération, cf. `possibility_placed_count`), saute les
- * cases déjà remplies, et vérifie que les `FORWARD_CHECK_K` premières cases
- * VIDES rencontrées ont encore au moins un candidat disponible. Si l'une est
- * morte, la branche est abandonnée. Variante volontairement simple (« les K
- * premières cases vides du parcours », pas « les K cases les plus
- * contraintes ») : cette dernière suppose un score déjà calculé côté
- * appelant, absent de ce chemin froid — cf. docs/autosearch_step.md.
+ * l'ordre, saute les cases déjà remplies, et vérifie que les
+ * `FORWARD_CHECK_K` premières cases vides rencontrées ont encore un
+ * candidat. Variante volontairement simple (K premières cases vides, pas K
+ * cases les plus contraintes) : cette dernière suppose un score déjà
+ * calculé côté appelant, absent de ce chemin froid.
  *
- * Version sans cache (recalcule chaque clé), réservée aux chemins froids ;
- * le hot path du backtracking utilise `bt_forward_check` (etii_search.c),
- * qui lit le cache de contraintes incrémental. Voir le commentaire détaillé
- * dans possibility.c.
+ * Version sans cache, réservée aux chemins froids ; le hot path utilise
+ * `bt_forward_check` (etii_search.c), qui lit le cache de contraintes
+ * incrémental — voir le commentaire détaillé dans possibility.c.
  *
- * @param possibility     Paquet courant (après placement de la pièce candidate).
- * @param mapParts        Tableau 4D de lookup.
- * @param all_rotate_part Tableau de toutes les rotations.
- * @return                1 si toutes les cases dans la fenêtre ont un candidat, 0 sinon.
+ * @return 1 si toutes les cases dans la fenêtre ont un candidat, 0 sinon.
  */
 int forward_check_next_k(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part);
 
@@ -264,20 +258,12 @@ int put_possibility(File *suite, struct possibility_packet *value);
  *
  * Choisit, parmi les cases encore vides, celle qui admet le moins de
  * candidats libres (variante autonome de MRV — `light_choose_cell`, chemin
- * froid sans le cache de contraintes du moteur, cf. sa doc dans possibility.c),
- * puis développe tous les candidats compatibles avec CETTE case. Ne dépend
- * plus d'une clé pré-calculée par l'appelant (le paquet ne porte plus de
- * curseur de parcours faisant autorité, cf. `possibility_placed_count`) :
- * la case et sa clé sont déterminées ici. `alloc` de chaque enfant est fixé
- * par recomptage, jamais par incrément du curseur.
+ * froid sans le cache de contraintes du moteur), puis développe tous les
+ * candidats compatibles avec cette case. `alloc` de chaque enfant est fixé
+ * par recomptage, jamais par incrément d'un curseur.
  *
- * @param result          File de destination des nouveaux paquets.
- * @param possiblity      Paquet source à développer.
- * @param mapParts        Tableau 4D de lookup.
- * @param all_rotate_part Tableau de toutes les rotations.
- * @param idParts         Table de pré-calcul des indices de rotation [id][rotation].
- * @return                Nombre de pièces dans le meilleur paquet produit, ou 0 si aucune
- *                        (plateau déjà complet, ou aucune case vide n'a de candidat).
+ * @return Nombre de pièces dans le meilleur paquet produit, ou 0 si aucune
+ *         (plateau déjà complet, ou aucune case vide n'a de candidat).
  */
 int search_possiblity_light(File *result, struct possibility_packet *possiblity, map_big_array *mapParts, struct array_part *all_rotate_part, int16_t idParts[ETERN_PARTS][4]);
 
@@ -295,17 +281,10 @@ int print_possibility_packet(struct possibility_packet *packet);
  * @brief Affiche un `possibility_packet` au format JSON, au niveau ERREUR.
  *
  * Même format que print_possibility_packet, mais via log_error() au lieu de
- * log_info() : à réserver au contexte de diagnostic d'une erreur (ex. la
- * possibilité en cause lors d'un problème de communication avec le serveur),
- * jamais aux commandes console de dump en masse (`print`/`printFile`/
- * `printAnalysed`, qui restent sur print_possibility_packet/log_info — un
- * gros stock ne doit pas noyer events.log). Contrairement à log_info,
- * log_error persiste dans events.log (voir logger.h), donc le paquet en
- * cause reste traçable après coup, pas seulement visible sur la console au
- * moment de l'erreur.
- *
- * @param packet Paquet à afficher.
- * @return       0.
+ * log_info() : à réserver au diagnostic d'une erreur, jamais aux commandes
+ * console de dump en masse (un gros stock ne doit pas noyer events.log).
+ * Contrairement à log_info, log_error persiste dans events.log, donc le
+ * paquet en cause reste traçable après coup.
  */
 int log_error_possibility_packet(struct possibility_packet *packet);
 
@@ -381,18 +360,14 @@ int possibility_placed_count(const struct possibility_packet *packet);
  *  - -2 : x ou y ≥ ETERN_SIZE
  *  - -3 : direction hors bornes
  *  - -4 : alloc > ETERN_PARTS (alloc = 0 est l'état genèse, valide)
- *  - -5 : alloc incohérent avec le masque faceused (`faceused < alloc` — un
- *    moteur à ordre FIXE peut légitimement avoir `faceused > alloc` : des
- *    indices officiels sont posés au-delà du curseur de parcours historique
- *    (cf. docs/autosearch_step.md) ; ce n'est PAS un bug, donc pas une
- *    inégalité stricte)
+ *  - -5 : alloc incohérent avec le masque faceused (`faceused < alloc` —
+ *    `faceused > alloc` reste légitime : des indices officiels sont posés
+ *    au-delà du curseur de parcours historique, pas une inégalité stricte)
  *
- * Contrôle de cohérence de couleur : porte sur TOUTES les cases non vides de
- * la grille (`grid[x][y] != -2`), pas seulement les `alloc` premières du
- * parcours `directions[]` — `alloc` n'indexe plus une position de curseur
- * (cf. `possibility_placed_count`).
+ * Contrôle de cohérence de couleur : porte sur toutes les cases non vides
+ * de la grille, pas seulement les `alloc` premières du parcours
+ * `directions[]`.
  *
- * @param packet      Paquet à vérifier.
  * @param rotateParts Tableau de toutes les rotations (peut être NULL pour un contrôle partiel).
  * @return            0 si valide, code d'erreur négatif sinon.
  */

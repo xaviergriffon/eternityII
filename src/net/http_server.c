@@ -394,25 +394,15 @@ static void send_response_unauthorized(int socket_id, const char *json_body)
  * @brief Traite POST /api/v1/command : extrait "command", décide de son
  *        autorisation, puis l'applique via `admin_apply_privileged_command`.
  *
- * **Toute commande de modification requiert un jeton Bearer valide** — seule
- * exception, `clientsWork` (`CTRL_CMD_READ_ONLY`), une consultation pure qui
- * ne change aucun état. La classification par `control_command_classify`
- * (`net/control_protocol.h`) réduit ici à deux drapeaux : `is_public`
- * (`CTRL_CMD_READ_ONLY`, jamais de jeton requis) et `needs_auth` (toute
- * commande reconnue mais PAS `is_public` — regroupe indifféremment les
- * commandes relayables à un client, `CTRL_CMD_WRITE_RELAYABLE` : `pause`,
- * `resume`, `limit`, `maxStockByThread`, `prunerBatch`,
- * `clientsCommand`/`clientsCmd`, `start`/`stopForks`/`configApply`/`config`/
- * `configSave`, et les commandes serveur-seulement, `CTRL_CMD_WRITE_SERVER_ONLY` :
- * `restore`/`backup`/`sortAsc`/`sortDesc`/`sortDescMulti`/`split`/`regroup` —
- * ces deux catégories exigent aujourd'hui exactement le même jeton, seule
- * leur relayabilité vers un client diffère, un axe sans effet sur cette
- * route). Le jeton n'est extrait/comparé QUE si `needs_auth` est vrai — une
- * commande purement lecture (`clientsWork`, ou une route `GET`) n'en a jamais
- * eu besoin. Sans `--http-token-file` configuré, toute commande de
- * modification reste donc inaccessible via cette API (401), quel que soit
- * l'en-tête fourni — seule la lecture (GET, `clientsWork`) fonctionne sans
- * jeton.
+ * Toute commande de modification requiert un jeton Bearer valide — seule
+ * exception, `clientsWork`, une consultation pure qui ne change aucun état.
+ * `control_command_classify` réduit ici à deux drapeaux : `is_public`
+ * (jamais de jeton requis) et `needs_auth` (toute commande reconnue mais
+ * pas `is_public`, relayable ou serveur-seulement confondues — les deux
+ * exigent aujourd'hui le même jeton). Le jeton n'est extrait/comparé que si
+ * `needs_auth` est vrai. Sans `--http-token-file` configuré, toute commande
+ * de modification reste inaccessible via cette API (401), quel que soit
+ * l'en-tête fourni.
  */
 static void handle_command_route(int socket_id, const http_request_t *req)
 {

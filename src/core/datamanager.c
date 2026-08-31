@@ -707,35 +707,19 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
 }
 
 /**
- * @brief Insère un tableau de possibilités dans les files locales (sans serveur).
- *
- * Utilise un trylock pour trouver une file non verrouillée parmi les 10 disponibles.
- * Toutes les possibilités sont insérées dans la même file (première libre trouvée).
- *
- * @param possibilities Tableau de possibilités à insérer.
- * @return              0.
- */
-/**
  * @brief Insère dans `pool` les possibilités du tableau retenues par le filtre `want_checked`.
  *
- * Même mécanique que l'historique `put_to_local` : trylock pour trouver une
- * file libre, toutes les possibilités retenues vont dans la même file.
+ * Trylock pour trouver une file libre ; toutes les possibilités retenues
+ * vont dans la même file.
  *
- * @param pool          Pool de files cible.
- * @param possibilities Tableau de possibilités à filtrer/insérer.
- * @param want_checked   1 pour le pool vérifié (checked == 1), 0 pour le reste.
- * @param rr_counter    État round-robin du pool (`rr_put_unchecked`/`rr_put_checked`) —
- *                      fait démarrer chaque appel sur une file différente plutôt que
- *                      toujours la file 0 (cf. `datamanager_rr_next_start`).
- * @param pool_rate     Compteur de débit VENTILÉ par pool (PR2,
- *                      `stock_adds_unchecked_rate`/`stock_adds_checked_rate`) —
- *                      enregistré EN PLUS de l'agrégat `stock_adds_rate`
- *                      (inchangé), jamais à sa place.
- * @return              0 si inséré (ou rien à insérer), 1 si `pool` est resté
- *                       intégralement verrouillé au-delà de
- *                       DATAMANAGER_TRYLOCK_MAX_SWEEPS tours (maintenance en
- *                       cours : sauvegarde, restore, tri...) — rien n'a été
- *                       inséré dans ce cas, sûr à réessayer par l'appelant.
+ * @param rr_counter État round-robin du pool — fait démarrer chaque appel
+ *                   sur une file différente plutôt que toujours la file 0.
+ * @param pool_rate  Compteur de débit ventilé par pool, enregistré en plus
+ *                   de l'agrégat `stock_adds_rate`, jamais à sa place.
+ * @return 0 si inséré (ou rien à insérer), 1 si `pool` est resté
+ *         intégralement verrouillé au-delà de
+ *         `DATAMANAGER_TRYLOCK_MAX_SWEEPS` tours (maintenance en cours) —
+ *         rien n'a été inséré, sûr à réessayer.
  */
 static int put_to_pool(file_possibility_t **pool, array_possibility_packet *possibilities, int want_checked,
                         unsigned int *rr_counter, stock_rate_counter_t *pool_rate)
@@ -1337,22 +1321,17 @@ int add_possibility_analysed_owned(struct possibility_packet *possiblity, int th
 
 /**
  * @brief Balaye `analysed_index` pour résumer ce qu'un `client_uid` donné
- *        détient actuellement (consultation « que travaille X ? », PR6).
+ *        détient actuellement (consultation « que travaille X ? »).
  *
- * Verrouille chaque file `file_possibility_analysed[f]` (comme tout autre
- * accès à ces files) le temps de son propre balayage — jamais toutes les
- * files à la fois — puis la relâche avant de passer à la suivante. Ce n'est
- * pas un chemin chaud (commande console/diagnostic), un simple
- * `pthread_mutex_lock` bloquant est donc préférable au `trylock` utilisé
- * ailleurs dans ce fichier : on veut une réponse exacte, pas céder la main.
+ * Verrouille chaque file `file_possibility_analysed[f]` le temps de son
+ * propre balayage — jamais toutes à la fois. Pas un chemin chaud : un
+ * simple `pthread_mutex_lock` bloquant est préférable au `trylock` utilisé
+ * ailleurs, on veut une réponse exacte.
  *
- * Ne voit que les possibilités effectivement indexées (cf. le commentaire
- * sur `AnalysedIndexNode`) : une entrée non indexée (OOM à l'insertion, cas
- * limite déjà toléré par `remove_possibility_analysed`) est simplement
- * absente du compte, jamais une source d'erreur.
+ * Ne voit que les possibilités effectivement indexées : une entrée non
+ * indexée (OOM à l'insertion) est simplement absente du compte, jamais une
+ * source d'erreur.
  *
- * @param owner_uid `client_uid` recherché (16 octets, jamais NULL).
- * @param out_count Nombre de possibilités actuellement attribuées à ce client.
  * @param out_max_alloc Le plus grand `alloc` parmi elles, ou -1 si `*out_count == 0`.
  * @return 0 si OK, -1 si `owner_uid`/`out_count`/`out_max_alloc` est NULL.
  */
@@ -1508,25 +1487,19 @@ unsigned long long datamanager_purge_descendants_of(const struct possibility_pac
  *        drapeau `checked`.
  *
  * Chemin commun aux deux réinjections « en bloc » (`restock_analysed` et
- * `datamanager_reclaim_expired_leases`). Le troisième chemin,
- * `requeue_last_sent_possibility`, passe par `add_possibility`/`put_to_local`
- * et route déjà selon le drapeau : c'est ce comportement-là qui fait
- * référence.
+ * `datamanager_reclaim_expired_leases`) ; le troisième chemin,
+ * `requeue_last_sent_possibility`, route déjà selon le drapeau de la même
+ * façon.
  *
  * Router selon `checked` et non forcer le pool non vérifié : la réinjection
- * ne modifie pas le plateau, donc la vérification du pruner — qui porte sur
- * cet état exact — vaut toujours (`checked` n'est remis à 0 que sur un paquet
- * issu d'une EXPANSION, cf. `core/possibility.h`). Renvoyer un paquet vérifié
- * dans le pool non vérifié le ferait re-vérifier pour rien et placerait le
- * paquet dans un pool que son propre drapeau contredit — contradiction qui ne
- * se résorbait qu'au prochain `restore`, lequel réaiguille selon le drapeau.
+ * ne modifie pas le plateau, donc la vérification du pruner vaut toujours.
+ * Renvoyer un paquet vérifié dans le pool non vérifié le ferait re-vérifier
+ * pour rien et contredirait son propre drapeau.
  *
- * Délibérément SANS contrôle de plafond RAM (à la différence de
- * `put_to_pool`) : une réinjection ne doit jamais pouvoir échouer, sous peine
- * de perdre une possibilité. La boucle `trylock` en tourniquet garantit
- * qu'elle finit toujours par aboutir sur une file.
- *
- * @param pk Paquet à réinsérer (copié dans la file).
+ * Délibérément sans contrôle de plafond RAM (à la différence de
+ * `put_to_pool`) : une réinjection ne doit jamais pouvoir échouer, sous
+ * peine de perdre une possibilité. La boucle `trylock` en tourniquet
+ * garantit qu'elle finit toujours par aboutir sur une file.
  */
 static void put_back_to_stock(struct possibility_packet *pk)
 {
@@ -1676,23 +1649,17 @@ int restock_analysed(void) {
  *        déplace jusqu'à `max_packets` possibilités de la file la plus
  *        pleine vers la plus vide.
  *
- * Lecture des tailles en O(1) (`.file.size`, sans verrou — même convention
- * que `file_size`/`datas_size`) pour choisir la file source/destination,
- * puis extraction bloquante de la SEULE file source (`pthread_mutex_lock`,
- * jamais `lock_all_file`), relâchée avant l'insertion — jamais deux verrous
- * de pool tenus ensemble, même discipline que `restock_analysed`/
- * `datamanager_reclaim_expired_leases`. L'insertion vise la file la plus
- * vide en priorité, avec repli en balayage rotatif (`trylock` + tour suivant)
- * si elle est momentanément prise par un autre thread — jamais de perte,
- * même motif que `restock_analysed`.
+ * Lecture des tailles en O(1) (`.file.size`, sans verrou) pour choisir la
+ * file source/destination, puis extraction bloquante de la seule file
+ * source, relâchée avant l'insertion — jamais deux verrous de pool tenus
+ * ensemble. L'insertion vise la file la plus vide en priorité, avec repli
+ * en balayage rotatif si elle est momentanément prise par un autre thread.
  *
  * Ne déplace rien si `pool[fullest] <= total/nb_file_possibility` (déjà
- * équilibré) : évite un va-et-vient perpétuel entre deux tours pour de
- * petites variations dues au trafic concurrent normal.
+ * équilibré) : évite un va-et-vient perpétuel pour de petites variations
+ * dues au trafic concurrent normal.
  *
- * @param pool        Pool cible (`file_possibility` ou `file_possibility_checked`).
- * @param max_packets Borne du nombre de possibilités déplacées par cet appel.
- * @return            Nombre de possibilités effectivement déplacées.
+ * @return Nombre de possibilités effectivement déplacées.
  */
 static int rebalance_pool_step(file_possibility_t **pool, int max_packets)
 {
@@ -1756,25 +1723,21 @@ static int rebalance_pool_step(file_possibility_t **pool, int max_packets)
 }
 
 /**
- * @brief Répète `rebalance_pool_step` sur UN pool jusqu'à épuisement du
- *        budget ou équilibre complet (PR3).
+ * @brief Répète `rebalance_pool_step` sur un pool jusqu'à épuisement du
+ *        budget ou équilibre complet.
  *
- * `rebalance_pool_step` ne fixe qu'UNE paire (la plus pleine vers la plus
- * vide) par appel : son propre plafond de mouvement (`min(surplus, deficit)`)
- * est souvent plus petit que le budget disponible, laissant une grande
- * partie du budget d'un tour inutilisée alors que d'autres files restent
- * déséquilibrées. Cette boucle enchaîne les paires jusqu'à consommer tout
- * `max_packets` (converge plus vite, même budget total par tour) — chaque
- * pas individuel reste court (un seul verrou de pool à la fois, comme avant)
- * : ce n'est que le NOMBRE de pas par appel qui change, pas leur coût
- * unitaire.
+ * `rebalance_pool_step` ne fixe qu'une paire (la plus pleine vers la plus
+ * vide) par appel : son propre plafond de mouvement est souvent plus petit
+ * que le budget disponible, laissant une grande partie du budget d'un tour
+ * inutilisée. Cette boucle enchaîne les paires jusqu'à consommer tout
+ * `max_packets` — chaque pas individuel reste court (un seul verrou de pool
+ * à la fois), ce n'est que le nombre de pas par appel qui change.
  *
  * Termine en au plus `nb_file_possibility` pas structurellement (chaque pas
- * fixe définitivement au moins une file à sa cible, cf. `rebalance_pool_step`)
- * — garde-fou de boucle par prudence, même discipline que `split_datas`.
+ * fixe définitivement au moins une file à sa cible) — garde-fou de boucle
+ * par prudence.
  *
- * @param pool        Pool cible.
- * @param max_packets Budget total pour CE pool, réparti sur autant de pas
+ * @param max_packets Budget total pour ce pool, réparti sur autant de pas
  *                     que nécessaire.
  * @return             Nombre total de possibilités déplacées.
  */
@@ -3146,30 +3109,24 @@ static int add_possibility_with_retry_or_abort(array_possibility_packet *single,
 }
 
 /**
- * @brief Attend, ENTRE deux passes de `expand_datas_to_level`, que le stock
+ * @brief Attend, entre deux passes de `expand_datas_to_level`, que le stock
  *        résident redescende sous le plafond RAM avant de tenter
  *        d'approfondir davantage.
  *
- * Une pression RAM rencontrée pendant une passe est TRANSITOIRE — le thread
- * de débordement (`core/stock_spill.h`) a justement vocation à la faire
- * retomber en quelques dizaines/centaines de ms — contrairement au
- * garde-fou de VOLUME (`--expand-max-stock`), qui lui reste définitif (cf.
- * `expand_datas_to_level`, où seul ce dernier arrête la boucle externe).
- * Sans cette attente, une seule insertion ayant dû patienter arrêtait toute
- * l'expansion pour de bon, quel que soit `--expand-max-levels` configuré —
- * le niveau visé restait sous-atteint alors que les passes restantes
+ * Une pression RAM rencontrée pendant une passe est transitoire — le thread
+ * de débordement a vocation à la faire retomber en quelques dizaines/
+ * centaines de ms — contrairement au garde-fou de volume
+ * (`--expand-max-stock`), qui lui reste définitif. Sans cette attente, une
+ * seule insertion ayant dû patienter arrêtait toute l'expansion pour de
+ * bon, le niveau visé restant sous-atteint alors que les passes restantes
  * auraient pu progresser une fois la pression retombée.
  *
  * Non bornée sauf par `REQUEST_STOP` (même philosophie que
- * `add_possibility_with_retry_or_abort` : un délai fixe réintroduirait le
- * risque qu'on cherche justement à éliminer). Journalise le début et la
- * fin de l'attente, avec un rappel toutes les `EXPAND_RAM_WAIT_LOG_INTERVAL_SEC`
- * secondes tant qu'elle se prolonge — même convention que ci-dessus.
+ * `add_possibility_with_retry_or_abort`). Journalise le début et la fin de
+ * l'attente, avec un rappel périodique tant qu'elle se prolonge.
  *
  * @return 1 si de la place a été retrouvée (ou si aucun plafond n'est
- *         configuré), 0 si `REQUEST_STOP` a été demandé pendant l'attente
- *         (l'appelant doit alors arrêter proprement, comme pour
- *         `add_possibility_with_retry_or_abort`).
+ *         configuré), 0 si `REQUEST_STOP` a été demandé pendant l'attente.
  */
 static int expand_wait_for_ram_headroom_between_passes(void)
 {

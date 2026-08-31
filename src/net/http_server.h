@@ -7,19 +7,15 @@
  * Modèle volontairement minimal : accept séquentiel, une requête par
  * connexion (`Connection: close`), un seul thread — API d'administration
  * occasionnelle, pas un serveur web de production. Démarré uniquement si
- * `HTTP_PORT > 0` (option CLI `--http-port <n>`, cf. app_static_variables.h),
- * depuis `runserver` (src/app/etii_server.c).
+ * `HTTP_PORT > 0`, depuis `runserver`.
  *
- * Authentification (`--http-token-file <chemin>`, `HTTP_ADMIN_TOKEN`, cf.
- * app_static_variables.h) : par défaut (aucun jeton configuré), seule la LECTURE
- * fonctionne — les routes `GET` et la seule commande de lecture pure de
- * `POST /api/v1/command` (`clientsWork`, `control_command_read_only`). Toute
- * commande de MODIFICATION (`pause`, `resume`, `limit`, `maxStockByThread`,
- * `prunerBatch`, `clientsCommand`/`clientsCmd`, plus les privilégiées
- * `restore`/`backup`) exige un en-tête `Authorization: Bearer <jeton>` valide,
- * et reste donc inaccessible tant qu'aucun jeton n'est configuré. Le bind
- * loopback reste la première barrière : un accès distant passe par un
- * tunnel/reverse-proxy explicite, à la charge de l'opérateur.
+ * Authentification : par défaut (aucun jeton configuré), seule la lecture
+ * fonctionne — routes `GET` et la seule commande de lecture pure de
+ * `POST /api/v1/command` (`clientsWork`). Toute commande de modification
+ * exige un en-tête `Authorization: Bearer <jeton>` valide, et reste donc
+ * inaccessible tant qu'aucun jeton n'est configuré. Le bind loopback reste
+ * la première barrière : un accès distant passe par un tunnel/reverse-proxy
+ * explicite, à la charge de l'opérateur.
  */
 #ifndef eternityII_http_server_h
 #define eternityII_http_server_h
@@ -46,24 +42,15 @@ int http_server_start(int port);
  * @brief Charge et valide le jeton d'authentification Bearer de l'API HTTP
  *        admin depuis un fichier (`--http-token-file <chemin>`).
  *
- * Appelée une seule fois au démarrage, avant tout fork (`main()`), quel que
- * soit le mode (server/client/pruner/test) — même schéma que les autres
- * options globales. Refuse explicitement (retourne -1, message journalisé
- * via `log_error`, jamais le contenu du jeton) :
- *  - un fichier inaccessible (`stat`/`fopen` échoue) ;
- *  - un fichier aux permissions plus larges que propriétaire-seul (`mode &
- *    0077 != 0`, même exigence qu'une clé privée SSH — un jeton lisible par
- *    d'autres comptes de la machine n'apporte aucune garantie) ;
- *  - un fichier vide ou dont la première ligne, une fois les espaces/retours
- *    à la ligne de fin retirés, est vide ;
+ * Appelée une seule fois au démarrage, avant tout fork. Refuse explicitement
+ * (retourne -1, message journalisé, jamais le contenu du jeton) :
+ *  - un fichier inaccessible ;
+ *  - un fichier aux permissions plus larges que propriétaire-seul (même
+ *    exigence qu'une clé privée SSH) ;
+ *  - un fichier vide ou dont la première ligne, une fois nettoyée, est vide ;
  *  - un jeton trop long pour `out_size` (`HTTP_ADMIN_TOKEN_MAX`).
  *
- * @param path     Chemin du fichier jeton (`HTTP_TOKEN_FILE`, non NULL garanti
- *                 par l'appelant).
- * @param out      Tampon destination (`HTTP_ADMIN_TOKEN`), rempli et terminé
- *                 par NUL en cas de succès.
- * @param out_size Taille de `out`.
- * @return         Longueur du jeton chargé (>= 1), ou -1 en cas d'échec.
+ * @return Longueur du jeton chargé (>= 1), ou -1 en cas d'échec.
  */
 int http_token_load(const char *path, char *out, size_t out_size);
 

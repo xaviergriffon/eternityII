@@ -525,31 +525,22 @@ static void run_client(const char *hostname, const char *file, int fork_seq)
 /**
  * @brief Corps exécuté par le fils juste après son `fork()` (ou par la
  *        branche fusionnée sous `DEBUG_IN_MONO_PROCESS`) : exécute la
- *        recherche puis TERMINE le process explicitement via `exit()`.
+ *        recherche puis termine le process explicitement via `exit()`.
  *
- * Les verrous de quiescence sont déjà relâchés par l'appelant (juste après le
- * `fork()`, cf. `orchestrator_spawn_forks` — AVANT tout `log_*`, voir sa doc)
- * : rien à faire ici de ce côté.
+ * Les verrous de quiescence sont déjà relâchés par l'appelant, juste après
+ * le `fork()` : rien à faire ici de ce côté.
  *
- * PREMIÈRE instruction (après `status_zone_disown_child()`, déjà exécuté par
- * l'appelant — avant TOUT `log_*` de ce corps) : fixe `pruner_mode` et
- * `g_client_identity_template.mode` PAR FORK (`current_fork_role`), pendant
- * que `NB_THREADS` vaut encore le total du lot hérité par COW du parent — la
- * ligne suivante l'écrase à 1 pour ce process. C'est le SEUL point
- * d'injection du dosage recherche/contrôle : aucun des cinq sites qui lisent
- * ensuite `pruner_mode` (dont la vraie bifurcation `autoprune()`/`autosearch()`,
- * `src/app/etii_client.c`) n'a besoin d'être touché.
+ * Première instruction (après `status_zone_disown_child()`, déjà exécuté
+ * par l'appelant, avant tout `log_*`) : fixe `pruner_mode` et
+ * `g_client_identity_template.mode` par fork, pendant que `NB_THREADS` vaut
+ * encore le total du lot hérité par COW du parent — la ligne suivante
+ * l'écrase à 1 pour ce process. Seul point d'injection du dosage
+ * recherche/contrôle.
  *
- * Ne retourne JAMAIS : à la différence de l'ancienne boucle de `main.c`, où
- * un fils qui tombait hors de `run_client()` (fin de recherche, Ctrl-C)
- * finissait par ressortir de `handle_client()` — via le porte-à-faux
- * `NB_THREADS = 1` qui vidait sa propre copie de la boucle de fork puis deux
- * gardes `parent_pid == getpid()` successives qui sautaient tout le reste —
- * jusqu'au `exit(EXIT_SUCCESS)` final de `main()`. Ici, `orchestrator_spawn_forks`
- * est appelée par la boucle de l'orchestrateur (`fork_orchestrator_run`) :
- * si ce fils y REVENAIT normalement, il reprendrait à tort la boucle
- * d'orchestration. `exit()` plutôt que `_exit()` : garde le flush de
- * couverture gcov/llvm-cov, pas de raison ici de s'en passer.
+ * Ne retourne jamais : `orchestrator_spawn_forks` est appelée par la boucle
+ * de l'orchestrateur — si ce fils y revenait normalement, il reprendrait à
+ * tort la boucle d'orchestration. `exit()` plutôt que `_exit()` : garde le
+ * flush de couverture gcov/llvm-cov.
  */
 static void spawn_child_body(int fork_seq)
 {
@@ -606,14 +597,12 @@ int orchestrator_spawn_forks(void)
             break;
         }
         if (parent_pid == getpid()) {
-            // Quiescence + verrous d'E/S pris JUSTE AVANT ce fork() précis
-            // et relâchés JUSTE APRÈS, dans le parent ET dans le fils — PAS
-            // une seule fois pour toute la boucle : un `log_error`/`log_info` de bilan
-            // (fork raté, ligne DEBUG_THREAD) prend lui aussi le verrou de
-            // sortie du logger (non récursif), et le garder au-delà du
-            // fork() provoquerait un auto-interblocage du thread forkeur
-            // sur son propre message. Section critique volontairement
-            // réduite au strict `fork()`.
+            // Quiescence + verrous d'E/S pris juste avant ce fork() précis
+            // et relâchés juste après, dans le parent et le fils — pas une
+            // seule fois pour toute la boucle : un log de bilan (fork raté)
+            // prend lui aussi le verrou de sortie du logger (non récursif),
+            // le garder au-delà du fork() auto-interbloquerait le thread
+            // forkeur sur son propre message.
             fork_gate_result_t qr = fork_gate_request_quiesce(FORK_GATE_DEFAULT_TIMEOUT_MS);
             if (qr != FORK_GATE_QUIESCED) {
                 log_error("orchestrateur : quiescence non atteinte — fork du process %i/%i refusé "
@@ -638,39 +627,20 @@ int orchestrator_spawn_forks(void)
             // fils a hérité (COW) ce verrou VERROUILLÉ et doit relâcher SA
             // PROPRE copie pour ne pas s'auto-bloquer à son premier log_*.
             fork_gate_release_io_locks();
-            // `fork_gate_release_quiesce()` en revanche NE DOIT JAMAIS être
+            // `fork_gate_release_quiesce()` en revanche ne doit JAMAIS être
             // appelée par le fils — trouvé en investiguant un blocage
-            // permanent et intermittent (aarch64 ET x86_64, glibc 2.35 ET
-            // 2.39 : pas un bug d'architecture précis), via le journal de
-            // trace en mémoire de fork_gate.c (cf.
-            // docs/investigations/blocage_fork_gate_release_quiesce.md) —
-            // celui-ci a montré, sur un process réellement bloqué, que
-            // l'appelant de `fork_gate_release_quiesce` avait un tid DIFFÉRENT
-            // de celui qui venait de réussir le `fork_gate_request_quiesce`
-            // précédent : le "process" observé n'était en réalité PAS le
-            // parent mais LE FILS fraîchement créé, toujours en train
-            // d'exécuter cette même fonction (son pile d'appels contient
-            // encore `main()`, hérité du parent, puisqu'il n'a pas encore
-            // atteint la branche `spawn_child_body` ci-dessous). Avant ce
-            // correctif, l'appel était placé ICI — donc exécuté par les DEUX
-            // branches. Le fils hérite (COW) `g_mutex`/`g_released`/`g_slots`
-            // du parent : si l'état interne de `pthread_cond_t g_released`
-            // était, à l'instant précis du `fork()`, en cours de transition
-            // dans un AUTRE thread du parent (un réveil de
-            // `pthread_cond_wait` pas encore totalement achevé — le fils n'a
-            // par construction copié QUE le thread appelant, jamais les
-            // autres), le fils hérite un instantané figé et incohérent de
-            // cette condvar ; son propre `pthread_cond_broadcast` dessus peut
-            // alors rester bloqué à jamais sur une comptabilité interne que
-            // plus aucun thread (le fils n'en a qu'un, fraîchement créé) ne
-            // peut jamais compléter. Un piège général et documenté de
-            // `fork()` combiné aux condvars (POSIX ne garantit leur
-            // cohérence dans le fils que si elles étaient IDLE au moment du
-            // fork — jamais si un AUTRE thread du parent était en transition
-            // dessus), pas un bug glibc précis : cohérent avec la
-            // reproduction sur deux architectures et deux versions de glibc
-            // très éloignées. Le fils n'a de toute façon RIEN à relâcher : il
-            // vient de naître avec un seul thread, aucun participant à lui.
+            // permanent et intermittent (deux architectures, deux versions
+            // de glibc, donc pas un bug précis d'une plateforme). Le fils
+            // hérite (COW) `g_mutex`/`g_released`/`g_slots` du parent : si
+            // `pthread_cond_t g_released` était, au moment du `fork()`, en
+            // cours de transition dans un autre thread du parent, le fils
+            // hérite un instantané incohérent de cette condvar, et son
+            // propre `pthread_cond_broadcast` dessus peut rester bloqué à
+            // jamais — un piège général de `fork()` combiné aux condvars
+            // (POSIX ne garantit leur cohérence dans le fils que si elles
+            // étaient idle au moment du fork). Le fils n'a de toute façon
+            // rien à relâcher : il vient de naître avec un seul thread,
+            // aucun participant à lui.
             if (child_pid != 0) {
                 fork_gate_release_quiesce();
 
@@ -703,25 +673,19 @@ int orchestrator_spawn_forks(void)
                 }
 #ifndef DEBUG_IN_MONO_PROCESS
             } else {
-                // Neutralise IMMÉDIATEMENT, avant tout autre code (y compris
-                // le log_info DEBUG_THREAD ci-dessous), l'atexit(status_zone_teardown)
-                // hérité du parent : status_zone_init() (console.c, appelée
-                // AVANT tout fork, cf. le démarrage différé plus haut) l'enregistre dans le parent, et
-                // fork() duplique la liste des handlers atexit — ce fils
-                // l'hérite donc aussi, bien qu'il ne "possède" jamais le
-                // terminal partagé. Sans ce garde-fou, le exit() normal de ce
-                // fils (spawn_child_body, en fin de recherche OU après un
-                // SIGINT/SIGTERM de stopForks/configApply) ré-exécute ce
-                // handler hérité et restaure le terminal (endwin() en
-                // NCURSES=1, région de défilement complète en ANSI) — visible
-                // depuis le PARENT puisque le terminal est un état PARTAGÉ,
-                // pas un état par-process : "on quitte le mode ncurses" à
-                // chaque fils qui meurt proprement (SIGKILL, qui saute
-                // atexit, n'est pas concerné — d'où le caractère
-                // intermittent observé). `status_zone_disown_child()` ne
-                // touche JAMAIS le terminal lui-même : elle ne fait que
-                // rendre le handler hérité NO-OP dans CE process (écriture
-                // dans la copie COW du fils, sans effet sur le parent).
+                // Neutralise immédiatement, avant tout autre code, l'atexit
+                // (status_zone_teardown) hérité du parent : status_zone_init()
+                // l'enregistre dans le parent avant tout fork, et fork()
+                // duplique la liste des handlers atexit — ce fils l'hérite
+                // donc aussi, bien qu'il ne possède jamais le terminal
+                // partagé. Sans ce garde-fou, le exit() normal de ce fils
+                // ré-exécute ce handler hérité et restaure le terminal
+                // (endwin() en NCURSES=1) — visible depuis le parent
+                // puisque le terminal est un état partagé, pas par-process
+                // (SIGKILL, qui saute atexit, n'est pas concerné, d'où le
+                // caractère intermittent observé). `status_zone_disown_child()`
+                // ne touche jamais le terminal lui-même : rend le handler
+                // hérité no-op dans ce process seulement (copie COW).
                 status_zone_disown_child();
 #endif // DEBUG_IN_MONO_PROCESS
 #ifdef DEBUG_THREAD
@@ -768,27 +732,21 @@ int orchestrator_spawn_forks(void)
 /**
  * @brief Séquence d'arrêt/escalade/récolte des fils vivants (ORCH_STOPPING).
  *
- * SIGCHLD masqué pour toute la durée SUR CE THREAD (`pthread_sigmask`) :
- * `sigchld_handler` moissonne en `WNOHANG` sur N'IMPORTE QUEL pid, ce qui
- * rendrait le `waitpid(pid, …)` ciblé ci-dessous non déterministe sans ce
- * masquage. SIGINT à chaque slot vivant,
- * puis scrutation bornée (`waitpid(pid, …, WNOHANG)`, cadence `MICRO_SLEEP`)
- * avec escalade `stop_escalation_next` (SIGTERM à +5 s, SIGKILL à +10 s) —
- * un process déjà mort au moment du SIGINT (recherche terminée entre-temps,
- * `--stop-on-solution`) est simplement récolté au premier tour, sans jamais
- * recevoir d'escalade. Slots nettoyés au fil de l'eau, comme
- * `reap_dead_child_slots`. Ne retourne qu'une fois tous les slots vides.
+ * SIGCHLD masqué pour toute la durée sur ce thread : `sigchld_handler`
+ * moissonne en `WNOHANG` sur n'importe quel pid, ce qui rendrait le
+ * `waitpid(pid, …)` ciblé ci-dessous non déterministe sans ce masquage.
+ * SIGINT à chaque slot vivant, puis scrutation bornée avec escalade
+ * `stop_escalation_next` (SIGTERM à +5s, SIGKILL à +10s) — un process déjà
+ * mort au moment du SIGINT est simplement récolté au premier tour. Slots
+ * nettoyés au fil de l'eau. Ne retourne qu'une fois tous les slots vides.
  *
- * Le masquage de SIGCHLD ne porte QUE sur ce thread — les autres threads du
- * parent (checker, `server_tcp`, canal de contrôle, console) ne le bloquent
- * pas. Un enfant qui meurt pendant cette séquence peut donc être moissonné
- * par `sigchld_handler` sur N'IMPORTE LEQUEL de ces autres threads AVANT que
- * le `waitpid(pid, …)` ci-dessous n'ait sa chance : sans
- * `waitpid_target_is_reaped` (qui traite `-1`/`ECHILD` — « déjà réclamé
- * ailleurs » — comme une mort, pas comme « encore vivant ») la boucle
- * tournait INDÉFINIMENT, croyant l'enfant toujours vivant même après
- * escalade SIGKILL. Bogue réel trouvé en testant manuellement `configApply`
- * (état `STOPPING` qui ne se résorbait jamais).
+ * Le masquage de SIGCHLD ne porte que sur ce thread — un enfant qui meurt
+ * pendant cette séquence peut donc être moissonné par `sigchld_handler` sur
+ * un autre thread du parent avant que le `waitpid(pid, …)` ci-dessous n'ait
+ * sa chance : sans `waitpid_target_is_reaped` (qui traite `-1`/`ECHILD`
+ * comme une mort, pas « encore vivant ») la boucle tournait indéfiniment,
+ * croyant l'enfant vivant même après escalade SIGKILL. Bogue réel trouvé en
+ * testant manuellement `configApply`.
  */
 static void orchestrator_do_stop_forks(void)
 {

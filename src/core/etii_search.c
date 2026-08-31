@@ -470,19 +470,13 @@ static unsigned long long bt_count_pending(const struct possibility_packet *boar
 /**
  * @brief Enregistre une solution complète trouvée par un thread de recherche.
  *
- * Toujours :
- *   1. `log_solution` : affiche la grille (routée vers la console du parent) et
- *      écrit un fichier solution unique.
- *   2. `send_solution` : signale la solution au serveur via TCP (synchrone,
- *      acquittée). Ce passage bloquant joue aussi le rôle de barrière : il laisse
- *      au processus parent le temps de vider les datagrammes IPC de l'étape 1.
+ * Toujours : `log_solution` (affiche la grille, écrit un fichier solution
+ * unique) puis `send_solution` (signale la solution au serveur via TCP,
+ * synchrone, acquittée — ce passage bloquant laisse aussi au parent le
+ * temps de vider les datagrammes IPC de l'étape précédente).
  *
- * Avec `--stop-on-solution`, on termine ensuite le processus (`exit`) ; sinon on
- * rend la main à l'appelant, qui poursuit l'exploration pour trouver d'autres
- * solutions.
- *
- * @param client Contexte du thread (socket serveur + table des rotations).
- * @param poss   Paquet solution (toutes les pièces placées).
+ * Avec `--stop-on-solution`, termine ensuite le processus (`exit`) ; sinon
+ * rend la main pour poursuivre l'exploration.
  */
 static void record_solution(client_possibility_t *client, struct possibility_packet *poss)
 {
@@ -772,19 +766,15 @@ static void bt_flush_pending(client_possibility_t *client,
 /**
  * @brief Construit le miroir 64 bits du masque des pièces utilisées du plateau.
  *
- * `possibility_packet.b_faceused` est un masque en groupes de 16 bits (bit
- * `p & 15` du groupe `p >> 4`, pour `p = id - 1`) : parfait pour un test
- * unitaire, trop étroit pour compter par `popcount`. Ce miroir regroupe 4
- * groupes par mot de 64 bits — explicitement, par décalage, jamais par
- * réinterprétation de la mémoire du paquet (qui dépendrait de l'endianness de
- * la machine).
+ * `possibility_packet.b_faceused` est un masque en groupes de 16 bits :
+ * parfait pour un test unitaire, trop étroit pour compter par `popcount`.
+ * Ce miroir regroupe 4 groupes par mot de 64 bits — explicitement, par
+ * décalage, jamais par réinterprétation de la mémoire du paquet (qui
+ * dépendrait de l'endianness de la machine).
  *
- * Le miroir est ensuite maintenu en place par `mrv_used_set` / `mrv_used_clear`
- * à chaque pose/retrait, exactement comme le cache de contraintes : jamais
- * reconstruit dans la boucle chaude.
- *
- * @param used  Miroir à remplir (`MRV_USED_WORDS` mots).
- * @param board Plateau source.
+ * Le miroir est ensuite maintenu en place par `mrv_used_set`/`mrv_used_clear`
+ * à chaque pose/retrait, comme le cache de contraintes : jamais reconstruit
+ * dans la boucle chaude.
  */
 static void mrv_used_init(uint64_t used[MRV_USED_WORDS], const struct possibility_packet *board)
 {
@@ -809,27 +799,18 @@ static inline void mrv_used_clear(uint64_t used[MRV_USED_WORDS], int position)
 }
 
 /**
- * @brief Nombre de pièces ENCORE LIBRES candidates à une case, pour le choix MRV.
+ * @brief Nombre de pièces encore libres candidates à une case, pour le choix MRV.
  *
- * Chemin rapide : `popcount` du masque d'ids du compartiment (`bucket_id_mask`,
- * construit une fois avec la map) contre le miroir des pièces utilisées —
- * indépendant de la TAILLE du compartiment, alors que le prototype de mesure
- * parcourait toutes ses entrées (jusqu'à plusieurs centaines). C'est le premier
- * des deux verrous de coût identifiés par §4.7 ; l'autre est la restriction du
- * balayage aux cases de frontière (`mrv_choose_cell`).
+ * Chemin rapide : `popcount` du masque d'ids du compartiment
+ * (`bucket_id_mask`) contre le miroir des pièces utilisées — indépendant de
+ * la taille du compartiment, alors que le prototype de mesure parcourait
+ * toutes ses entrées (jusqu'à plusieurs centaines).
  *
- * Repli (map bâtie à la main dans un test, index compact absent, ou masque plus
- * large que le miroir) : comptage par parcours, résultat identique. Les deux
- * chemins comptent des IDENTIFIANTS distincts, jamais des entrées : une pièce
- * présente sous deux rotations dans le même compartiment compte une fois. Ce
- * choix est indifférent aux deux usages : `== 0` (case morte) est équivalent
- * dans les deux comptages, et le reste n'est qu'un critère d'ORDRE.
+ * Repli (map bâtie à la main dans un test, index absent, ou masque plus
+ * large que le miroir) : comptage par parcours, résultat identique — les
+ * deux chemins comptent des identifiants distincts, jamais des entrées.
  *
- * @param map   Table de lookup.
- * @param key   Clé de la case.
- * @param board Plateau (masque des pièces utilisées, pour le repli).
- * @param used  Miroir 64 bits du même masque.
- * @return      Nombre de pièces distinctes candidates et libres (0 = case morte).
+ * @return Nombre de pièces distinctes candidates et libres (0 = case morte).
  */
 static inline int mrv_free_candidates(const map_big_array *map, const key_part *key,
                                       struct possibility_packet *board,
