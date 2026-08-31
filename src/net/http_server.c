@@ -266,6 +266,9 @@ int http_known_clients_collect(http_known_client_info_t *out, int max)
 
 int http_commands_collect(http_command_info_t *out, int max)
 {
+    if (out == NULL || max <= 0) {
+        return 0;
+    }
     const char *names[CONTROL_COMMAND_TABLE_MAX];
     control_command_class_t classes[CONTROL_COMMAND_TABLE_MAX];
     int n = control_command_enumerate(names, classes, CONTROL_COMMAND_TABLE_MAX);

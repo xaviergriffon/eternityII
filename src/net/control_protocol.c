@@ -181,6 +181,7 @@ static const command_table_entry_t g_command_table[] = {
 	{ "spill", CTRL_CMD_WRITE_SERVER_ONLY },
 };
 #define COMMAND_TABLE_SIZE (sizeof(g_command_table) / sizeof(g_command_table[0]))
+_Static_assert(COMMAND_TABLE_SIZE <= CONTROL_COMMAND_TABLE_MAX, "g_command_table exceeds CONTROL_COMMAND_TABLE_MAX");
 
 control_command_class_t control_command_classify(const char *command_name)
 {
