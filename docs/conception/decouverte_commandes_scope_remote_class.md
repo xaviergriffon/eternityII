@@ -1,6 +1,6 @@
 # Endpoint de découverte des commandes (`scope` × `remote_class`)
 
-**Statut : implémenté** — voir [api_http_rest.md](../api_http_rest.md#get-apiv1commands) pour le comportement de référence à jour. Ce document garde le raisonnement, les approches écartées (A/C) et les points laissés ouverts.
+**Statut : implémenté** — voir [api_http_rest.md](../api_http_rest.md#get-apiv1commands) pour le comportement de référence à jour. Ce document garde le raisonnement, les approches écartées et les points laissés ouverts.
 
 ## Le problème
 

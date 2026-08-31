@@ -744,7 +744,7 @@ autres routes `GET`).
       "scope": "common",
       "remote_class": "write_relayable",
       "requires_token": true,
-      "summary": "pose une pause administrative",
+      "summary": "met la recherche en pause administrative (locale + clients connectés)",
       "usage": null
     },
     {
@@ -752,7 +752,7 @@ autres routes `GET`).
       "scope": "server_only",
       "remote_class": "read_only",
       "requires_token": false,
-      "summary": "consultation en lecture seule d'une session",
+      "summary": "affiche ce qu'un client précis détient actuellement en cours d'analyse",
       "usage": "clientsWork <session_no|client_uid|label>"
     }
   ]
