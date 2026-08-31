@@ -146,20 +146,46 @@ int control_stats_decode(const uint8_t *buf, int32_t len, control_stats_t *out)
 	return 0;
 }
 
-/**
- * @brief Compare le premier mot de `command_name` (avant un espace éventuel)
- *        à une liste de commandes candidates. Cœur partagé de
- *        `control_command_allowed` et `control_command_privileged`.
- *
- * @param command_name Ligne (ou nom) de commande, `NULL` géré explicitement.
- * @param candidates    Tableau de noms de commandes candidates.
- * @param nb_candidates Nombre d'entrées dans `candidates`.
- * @return              1 si le premier mot correspond à l'une des candidates, 0 sinon.
- */
-static int command_first_word_matches(const char *command_name, const char *const candidates[], size_t nb_candidates)
+typedef struct {
+	const char *name;
+	control_command_class_t cls;
+} command_table_entry_t;
+
+static const command_table_entry_t g_command_table[] = {
+	{ "clientsWork", CTRL_CMD_READ_ONLY },
+	{ "pause", CTRL_CMD_WRITE_RELAYABLE },
+	{ "resume", CTRL_CMD_WRITE_RELAYABLE },
+	{ "limit", CTRL_CMD_WRITE_RELAYABLE },
+	{ "maxStockByThread", CTRL_CMD_WRITE_RELAYABLE },
+	{ "prunerBatch", CTRL_CMD_WRITE_RELAYABLE },
+	{ "prunerDfsBudget", CTRL_CMD_WRITE_RELAYABLE },
+	{ "clientsCommand", CTRL_CMD_WRITE_RELAYABLE },
+	{ "clientsCmd", CTRL_CMD_WRITE_RELAYABLE },
+	{ "clientsRoles", CTRL_CMD_WRITE_RELAYABLE },
+	{ "start", CTRL_CMD_WRITE_RELAYABLE },
+	{ "stopForks", CTRL_CMD_WRITE_RELAYABLE },
+	{ "configApply", CTRL_CMD_WRITE_RELAYABLE },
+	{ "config", CTRL_CMD_WRITE_RELAYABLE },
+	{ "configSave", CTRL_CMD_WRITE_RELAYABLE },
+	{ "restore", CTRL_CMD_WRITE_SERVER_ONLY },
+	{ "backup", CTRL_CMD_WRITE_SERVER_ONLY },
+	{ "sortAsc", CTRL_CMD_WRITE_SERVER_ONLY },
+	{ "sortAscFiles", CTRL_CMD_WRITE_SERVER_ONLY },
+	{ "sortDesc", CTRL_CMD_WRITE_SERVER_ONLY },
+	{ "sortDescFiles", CTRL_CMD_WRITE_SERVER_ONLY },
+	{ "sortDescMulti", CTRL_CMD_WRITE_SERVER_ONLY },
+	{ "split", CTRL_CMD_WRITE_SERVER_ONLY },
+	{ "regroup", CTRL_CMD_WRITE_SERVER_ONLY },
+	{ "rebalance", CTRL_CMD_WRITE_SERVER_ONLY },
+	{ "stockMaxRam", CTRL_CMD_WRITE_SERVER_ONLY },
+	{ "spill", CTRL_CMD_WRITE_SERVER_ONLY },
+};
+#define COMMAND_TABLE_SIZE (sizeof(g_command_table) / sizeof(g_command_table[0]))
+
+control_command_class_t control_command_classify(const char *command_name)
 {
 	if (command_name == NULL) {
-		return 0;
+		return CTRL_CMD_UNKNOWN;
 	}
 
 	/* Longueur du premier mot (avant un espace éventuel). */
@@ -168,64 +194,27 @@ static int command_first_word_matches(const char *command_name, const char *cons
 		word_len++;
 	}
 	if (word_len == 0) {
-		return 0;
+		return CTRL_CMD_UNKNOWN;
 	}
 
-	for (size_t i = 0; i < nb_candidates; i++) {
-		if (strlen(candidates[i]) == word_len
-		    && strncmp(candidates[i], command_name, word_len) == 0) {
-			return 1;
+	for (size_t i = 0; i < COMMAND_TABLE_SIZE; i++) {
+		if (strlen(g_command_table[i].name) == word_len
+		    && strncmp(g_command_table[i].name, command_name, word_len) == 0) {
+			return g_command_table[i].cls;
 		}
 	}
-	return 0;
+	return CTRL_CMD_UNKNOWN;
 }
 
-control_command_class_t control_command_classify(const char *command_name)
+int control_command_enumerate(const char *out_names[], control_command_class_t out_classes[], int max)
 {
-	static const char *const read_only[] = {
-		"clientsWork",
-	};
-	static const char *const write_relayable[] = {
-		"pause",
-		"resume",
-		"limit",
-		"maxStockByThread",
-		"prunerBatch",
-		"prunerDfsBudget",
-		"clientsCommand",
-		"clientsCmd",
-		"clientsRoles",
-		"start",
-		"stopForks",
-		"configApply",
-		"config",
-		"configSave",
-	};
-	static const char *const write_server_only[] = {
-		"restore",
-		"backup",
-		"sortAsc",
-		"sortAscFiles",
-		"sortDesc",
-		"sortDescFiles",
-		"sortDescMulti",
-		"split",
-		"regroup",
-		"rebalance",
-		"stockMaxRam",
-		"spill",
-	};
-
-	if (command_first_word_matches(command_name, read_only, sizeof(read_only) / sizeof(read_only[0]))) {
-		return CTRL_CMD_READ_ONLY;
+	int n = 0;
+	for (size_t i = 0; i < COMMAND_TABLE_SIZE && n < max; i++) {
+		out_names[n] = g_command_table[i].name;
+		out_classes[n] = g_command_table[i].cls;
+		n++;
 	}
-	if (command_first_word_matches(command_name, write_relayable, sizeof(write_relayable) / sizeof(write_relayable[0]))) {
-		return CTRL_CMD_WRITE_RELAYABLE;
-	}
-	if (command_first_word_matches(command_name, write_server_only, sizeof(write_server_only) / sizeof(write_server_only[0]))) {
-		return CTRL_CMD_WRITE_SERVER_ONLY;
-	}
-	return CTRL_CMD_UNKNOWN;
+	return n;
 }
 
 int control_command_allowed(const char *command_name)

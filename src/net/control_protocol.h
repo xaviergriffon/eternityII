@@ -229,6 +229,13 @@ typedef enum {
     CTRL_CMD_WRITE_SERVER_ONLY,
 } control_command_class_t;
 
+/// Borne haute du nombre de commandes réseau-pertinentes (les trois classes
+/// de control_command_class_t confondues, hors CTRL_CMD_UNKNOWN) que
+/// control_command_enumerate peut rapporter. 27 aujourd'hui ; marge incluse
+/// pour ne pas avoir à retoucher les appelants (GET /api/v1/commands) à
+/// chaque commande ajoutée.
+#define CONTROL_COMMAND_TABLE_MAX 40
+
 /**
  * @brief Classifie `command_name` (fonction pure) — compare uniquement son
  *        premier mot. `NULL` ou vide retourne `CTRL_CMD_UNKNOWN`.
@@ -297,5 +304,20 @@ int control_command_privileged(const char *command_name);
  * @return 1 si la commande est un pur read, 0 sinon.
  */
 int control_command_read_only(const char *command_name);
+
+/**
+ * @brief Énumère toutes les commandes connues de control_command_classify
+ *        (les trois classes confondues), pour construire une réponse
+ *        GET /api/v1/commands (src/net/http_server.c) sans dupliquer la
+ *        table interne à cette fonction.
+ *
+ * @param out_names   Tableau de sortie de pointeurs vers des noms de
+ *                     commande (littéraux statiques, jamais à libérer),
+ *                     capacité au moins `max`.
+ * @param out_classes Tableau de sortie parallèle à `out_names`, même capacité.
+ * @param max         Capacité des deux tableaux de sortie.
+ * @return             Nombre d'entrées écrites (borné par `max`).
+ */
+int control_command_enumerate(const char *out_names[], control_command_class_t out_classes[], int max);
 
 #endif

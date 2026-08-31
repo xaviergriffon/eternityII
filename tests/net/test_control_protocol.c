@@ -422,6 +422,58 @@ TEST control_command_read_only_handles_null(void)
     PASS();
 }
 
+/* control_command_enumerate : énumère exactement la table interne, sans
+   doublon, et control_command_classify sur chaque nom retourné doit
+   redonner la classe rapportée -- garde-fou contre une table qui
+   divergerait de la fonction de classification qu'elle alimente. */
+TEST control_command_enumerate_lists_all_known_commands(void)
+{
+    const char *names[CONTROL_COMMAND_TABLE_MAX];
+    control_command_class_t classes[CONTROL_COMMAND_TABLE_MAX];
+
+    int n = control_command_enumerate(names, classes, CONTROL_COMMAND_TABLE_MAX);
+
+    ASSERT_EQ_FMT(27, n, "%d");
+    for (int i = 0; i < n; i++) {
+        ASSERT_EQ_FMT((int)classes[i], (int)control_command_classify(names[i]), "%d");
+        for (int j = 0; j < n; j++) {
+            if (i != j) {
+                ASSERT(strcmp(names[i], names[j]) != 0);
+            }
+        }
+    }
+    PASS();
+}
+
+TEST control_command_enumerate_respects_max(void)
+{
+    const char *names[3];
+    control_command_class_t classes[3];
+
+    int n = control_command_enumerate(names, classes, 3);
+
+    ASSERT_EQ_FMT(3, n, "%d");
+    PASS();
+}
+
+TEST control_command_enumerate_covers_all_three_classes(void)
+{
+    const char *names[CONTROL_COMMAND_TABLE_MAX];
+    control_command_class_t classes[CONTROL_COMMAND_TABLE_MAX];
+    int n = control_command_enumerate(names, classes, CONTROL_COMMAND_TABLE_MAX);
+
+    int seen_read_only = 0, seen_relayable = 0, seen_server_only = 0;
+    for (int i = 0; i < n; i++) {
+        if (classes[i] == CTRL_CMD_READ_ONLY) seen_read_only = 1;
+        if (classes[i] == CTRL_CMD_WRITE_RELAYABLE) seen_relayable = 1;
+        if (classes[i] == CTRL_CMD_WRITE_SERVER_ONLY) seen_server_only = 1;
+    }
+    ASSERT_EQ_FMT(1, seen_read_only, "%d");
+    ASSERT_EQ_FMT(1, seen_relayable, "%d");
+    ASSERT_EQ_FMT(1, seen_server_only, "%d");
+    PASS();
+}
+
 SUITE(control_protocol_suite)
 {
     signal(SIGPIPE, SIG_IGN);
@@ -452,4 +504,7 @@ SUITE(control_protocol_suite)
     RUN_TEST(control_command_read_only_rejects_modifying_standard_commands);
     RUN_TEST(control_command_read_only_rejects_others);
     RUN_TEST(control_command_read_only_handles_null);
+    RUN_TEST(control_command_enumerate_lists_all_known_commands);
+    RUN_TEST(control_command_enumerate_respects_max);
+    RUN_TEST(control_command_enumerate_covers_all_three_classes);
 }
