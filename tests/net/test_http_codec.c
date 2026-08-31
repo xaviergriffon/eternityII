@@ -655,6 +655,67 @@ TEST http_json_format_known_clients_buffer_too_small_fails(void)
     PASS();
 }
 
+/* ---------- http_json_format_commands -------------------------------------- */
+
+TEST http_json_format_commands_golden(void)
+{
+    http_command_info_t infos[2];
+    memset(&infos, 0, sizeof(infos));
+
+    strncpy(infos[0].name, "pause", sizeof(infos[0].name) - 1);
+    infos[0].scope = CMD_SCOPE_COMMON;
+    infos[0].remote_class = CTRL_CMD_WRITE_RELAYABLE;
+    infos[0].requires_token = 1;
+    infos[0].summary = "pose une pause administrative";
+    infos[0].usage = NULL;
+
+    strncpy(infos[1].name, "clientsWork", sizeof(infos[1].name) - 1);
+    infos[1].scope = CMD_SCOPE_SERVER_ONLY;
+    infos[1].remote_class = CTRL_CMD_READ_ONLY;
+    infos[1].requires_token = 0;
+    infos[1].summary = "consultation en lecture seule d'une session";
+    infos[1].usage = "clientsWork <session_no|client_uid|label>";
+
+    char buf[2048];
+    int written = http_json_format_commands(buf, sizeof(buf), infos, 2);
+
+    ASSERT(written > 0);
+    ASSERT(strstr(buf, "{\"commands\":[") == buf);
+    ASSERT(strstr(buf, "\"name\":\"pause\"") != NULL);
+    ASSERT(strstr(buf, "\"scope\":\"common\"") != NULL);
+    ASSERT(strstr(buf, "\"remote_class\":\"write_relayable\"") != NULL);
+    ASSERT(strstr(buf, "\"requires_token\":true") != NULL);
+    ASSERT(strstr(buf, "\"summary\":\"pose une pause administrative\"") != NULL);
+    ASSERT(strstr(buf, "\"usage\":null") != NULL);
+    ASSERT(strstr(buf, "\"name\":\"clientsWork\"") != NULL);
+    ASSERT(strstr(buf, "\"scope\":\"server_only\"") != NULL);
+    ASSERT(strstr(buf, "\"remote_class\":\"read_only\"") != NULL);
+    ASSERT(strstr(buf, "\"requires_token\":false") != NULL);
+    ASSERT(strstr(buf, "\"usage\":\"clientsWork <session_no|client_uid|label>\"") != NULL);
+    PASS();
+}
+
+TEST http_json_format_commands_empty(void)
+{
+    char buf[64];
+    int written = http_json_format_commands(buf, sizeof(buf), NULL, 0);
+    ASSERT(written > 0);
+    ASSERT_STR_EQ("{\"commands\":[]}", buf);
+    PASS();
+}
+
+TEST http_json_format_commands_rejects_bad_args(void)
+{
+    http_command_info_t infos[1];
+    memset(&infos, 0, sizeof(infos));
+    char buf[64];
+    ASSERT_EQ_FMT(-1, http_json_format_commands(NULL, sizeof(buf), infos, 1), "%d");
+    ASSERT_EQ_FMT(-1, http_json_format_commands(buf, 0, infos, 1), "%d");
+    ASSERT_EQ_FMT(-1, http_json_format_commands(buf, sizeof(buf), NULL, 1), "%d");
+    ASSERT_EQ_FMT(-1, http_json_format_commands(buf, sizeof(buf), infos, -1), "%d");
+    PASS();
+}
+
 /* ---------- http_json_format_best_board ------------------------------------ */
 
 TEST http_json_format_best_board_no_record_is_false(void)
@@ -991,6 +1052,10 @@ SUITE(http_codec_suite)
     RUN_TEST(http_json_format_known_clients_golden);
     RUN_TEST(http_json_format_known_clients_empty_is_empty_array);
     RUN_TEST(http_json_format_known_clients_buffer_too_small_fails);
+
+    RUN_TEST(http_json_format_commands_golden);
+    RUN_TEST(http_json_format_commands_empty);
+    RUN_TEST(http_json_format_commands_rejects_bad_args);
 
     RUN_TEST(http_request_parse_captures_authorization_header);
     RUN_TEST(http_request_parse_authorization_header_case_insensitive);

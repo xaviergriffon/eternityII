@@ -697,6 +697,74 @@ int http_json_format_known_clients(char *buf, size_t size, const http_known_clie
     return (int)offset;
 }
 
+static const char *command_scope_label(command_scope_t scope)
+{
+    switch (scope) {
+        case CMD_SCOPE_CLIENT_ONLY: return "client_only";
+        case CMD_SCOPE_SERVER_ONLY: return "server_only";
+        case CMD_SCOPE_COMMON:
+        default: return "common";
+    }
+}
+
+static const char *command_remote_class_label(control_command_class_t cls)
+{
+    switch (cls) {
+        case CTRL_CMD_READ_ONLY: return "read_only";
+        case CTRL_CMD_WRITE_SERVER_ONLY: return "write_server_only";
+        case CTRL_CMD_WRITE_RELAYABLE:
+        default: return "write_relayable";
+    }
+}
+
+int http_json_format_commands(char *buf, size_t size, const http_command_info_t *infos, int count)
+{
+    if (buf == NULL || size == 0 || (infos == NULL && count > 0) || count < 0) {
+        return -1;
+    }
+
+    size_t offset = 0;
+    int written = snprintf(buf + offset, size - offset, "{\"commands\":[");
+    if (written < 0 || (size_t)written >= size - offset) {
+        return -1;
+    }
+    offset += (size_t)written;
+
+    for (int i = 0; i < count; i++) {
+        written = snprintf(buf + offset, size - offset,
+            "%s{\"name\":\"%s\",\"scope\":\"%s\",\"remote_class\":\"%s\","
+            "\"requires_token\":%s,\"summary\":\"%s\",\"usage\":",
+            (i == 0) ? "" : ",",
+            infos[i].name,
+            command_scope_label(infos[i].scope),
+            command_remote_class_label(infos[i].remote_class),
+            infos[i].requires_token ? "true" : "false",
+            infos[i].summary != NULL ? infos[i].summary : "");
+        if (written < 0 || (size_t)written >= size - offset) {
+            return -1;
+        }
+        offset += (size_t)written;
+
+        if (infos[i].usage != NULL) {
+            written = snprintf(buf + offset, size - offset, "\"%s\"}", infos[i].usage);
+        } else {
+            written = snprintf(buf + offset, size - offset, "null}");
+        }
+        if (written < 0 || (size_t)written >= size - offset) {
+            return -1;
+        }
+        offset += (size_t)written;
+    }
+
+    written = snprintf(buf + offset, size - offset, "]}");
+    if (written < 0 || (size_t)written >= size - offset) {
+        return -1;
+    }
+    offset += (size_t)written;
+
+    return (int)offset;
+}
+
 int http_json_format_status(char *buf, size_t size, const http_status_view_t *view)
 {
     if (buf == NULL || size == 0 || view == NULL || view->state == NULL) {
