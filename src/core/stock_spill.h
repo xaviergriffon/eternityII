@@ -1,9 +1,9 @@
 /**
  * @file stock_spill.h
- * @brief Débordement sur disque du stock serveur (PR2 de la série plafond
- *        RAM — voir `--stock-max-ram`, `core/datamanager.h`).
+ * @brief Débordement sur disque du stock serveur, en complément du plafond
+ *        RAM (voir `--stock-max-ram`, `core/datamanager.h`).
  *
- * PR1 (déjà livré) plafonne le nombre de possibilités RÉSIDENTES en RAM,
+ * Le plafond RAM (déjà livré) borne le nombre de possibilités RÉSIDENTES en RAM,
  * refusant tout ADD au-delà du budget (`stock_max_ram_packets`,
  * `datamanager.c`) — un mur dur, sans recours. Ce module ajoute un recours :
  * une fois le budget approché, la possibilité la plus FROIDE (la plus
@@ -18,7 +18,7 @@
  *   sont des fichiers de travail, jamais liés à `consistent_backup`/`restore`
  *   (`datamanager.c`). Au redémarrage, `stock_spill_configure` PURGE tout
  *   segment résiduel — le débordement ne survit PAS à un redémarrage tant
- *   que ce travail (PR3, cohérence sauvegarde/restauration) n'est pas livré.
+ *   que ce travail (cohérence sauvegarde/restauration) n'est pas livré.
  * - Aucun changement du chemin chaud ADD/GET (`put_to_pool`/`scroll_from_pool`,
  *   `datamanager.c`) : tout le travail se fait dans un thread dédié
  *   (`spill_thread`, `app/etii_server.c`), au tick périodique. Un GET qui
@@ -38,7 +38,7 @@
  * le haut (numéro décroissant) — jamais de compactage, jamais de réécriture
  * d'un segment déjà plein.
  *
- * **PR3 — cohérence sauvegarde/restauration** (`stock_spill_snapshot`/
+ * **Cohérence sauvegarde/restauration** (`stock_spill_snapshot`/
  * `stock_spill_restore_snapshot` ci-dessous) referme la portée ouverte plus
  * haut : le débordement SURVIT désormais à un `backup`/`restore` (console,
  * HTTP, autobackup, arrêt sur solution) — voir la doc de chaque fonction.
@@ -84,7 +84,7 @@
  * Dégradation gracieuse, jamais fatale : si le répertoire ne peut être créé
  * ni utilisé (permissions, chemin invalide, disque plein), le module reste
  * DÉSACTIVÉ pour tout le process — `stock_spill_step` devient un no-op
- * silencieux, le plafond RAM (PR1) reste alors un mur dur sans recours,
+ * silencieux, le plafond RAM reste alors un mur dur sans recours,
  * comme avant ce module. Une erreur est journalisée une seule fois, à ce
  * moment-là.
  *
@@ -92,8 +92,8 @@
  * `spill_[uc]_<n>_<n>.dat` — jamais un effacement générique du répertoire,
  * qui peut être fourni tel quel par l'opérateur. Si des segments non vides
  * sont purgés, le nombre de possibilités perdues est journalisé
- * explicitement (`log_error` : c'est une perte de données réelle tant que
- * PR3 n'existe pas, jamais silencieuse).
+ * explicitement (`log_error` : c'est une perte de données réelle, jamais
+ * silencieuse).
  *
  * @param dir       Répertoire cible (`NULL` ⇒ `STOCK_SPILL_DIR_DEFAULT`).
  * @param nb_files  Nombre de files de stock actives (`nb_file_possibility`).
@@ -165,7 +165,7 @@ unsigned long long stock_spill_total_segments(void);
  * **Précondition (jamais vérifiée ici) : l'appelant doit garantir qu'aucune
  * éviction/rechargement concurrent ne peut avoir lieu pendant tout l'appel**
  * — en pratique, appelée exclusivement depuis `consistent_backup`
- * (`core/datamanager.c`, PR3) pendant sa fenêtre `maintenance = 1`, qui fait
+ * (`core/datamanager.c`) pendant sa fenêtre `maintenance = 1`, qui fait
  * déjà de `stock_spill_step` un no-op. Un appelant hors de cette fenêtre
  * doit poser `maintenance` lui-même en premier.
  *
@@ -220,7 +220,7 @@ unsigned long long stock_spill_snapshot(const char *snapshot_subdir);
  *
  * Manifeste absent/illisible/en-tête non reconnu : tolérant, `log_info`,
  * aucune action (pas une erreur — un `.back` sans cliché de débordement
- * associé est un cas normal, ex. sauvegarde antérieure à PR3).
+ * associé est un cas normal, ex. sauvegarde antérieure à l'ajout du débordement).
  *
  * **Re-séquencement si `--stock-files` a changé depuis la sauvegarde** :
  * chaque entrée `(pool, ancienne_file)` du manifeste est reportée sur la

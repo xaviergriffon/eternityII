@@ -15,7 +15,7 @@
 // programme — y compris des constantes/globales purement algorithmiques
 // (géométrie du puzzle, compteurs de recherche) dont `src/core/` dépendait,
 // en violation de la règle "core/ ne doit jamais dépendre de app/"
-// (cf. AGENTS.md). Ce sous-ensemble a été extrait vers
+// Ce sous-ensemble a été extrait vers
 // `src/core/core_static_variables.h` (inclus ci-dessus dans l'AUTRE sens
 // autorisé : app/ PEUT dépendre de core/, jamais l'inverse). Ce fichier-ci ne
 // garde que l'état réellement applicatif : options CLI, identité client, API
@@ -78,7 +78,7 @@
 // de possibilités déplacées de la file la plus pleine vers la plus vide à
 // chaque tour de `check_server_step` (variable globale `rebalance_budget`,
 // configurable via l'option CLI `--rebalance-budget <n>`). Ce qui rend le
-// « temps de blocage ≤ 1 s par file » de la sauvegarde cohérente (PR2) vrai :
+// « temps de blocage ≤ 1 s par file » de la sauvegarde cohérente vrai :
 // des files de tailles comparables. Un budget modeste par tour (comme
 // `expand_max_stock`, un plafond nul n'a pas de sens utile) répartit
 // progressivement la charge sur plusieurs tours plutôt que de bloquer un
@@ -106,7 +106,7 @@
 // politique sur un stock encore quasi vide.
 #define ROLE_MIX_BACKLOG_FLOOR 8
 
-// Bail à expiration des analyses en cours (PR7) : durée par défaut, en
+// Bail à expiration des analyses en cours : durée par défaut, en
 // secondes, au-delà de laquelle une possibilité attribuée à un client
 // (owner_uid connu, cf. add_possibility_analysed_owned) et jamais acquittée
 // devient ÉLIGIBLE à être rendue au stock non vérifié.
@@ -139,7 +139,7 @@
 #define MAX_CONTROL_SESSIONS 64
 
 // Nombre maximal de MACHINES distinctes (clé `machine_uid`) suivies par le
-// registre de clients connus (`known_clients_registry.h`, PR4). Distinct de MAX_CONTROL_SESSIONS :
+// registre de clients connus (`known_clients_registry.h`). Distinct de MAX_CONTROL_SESSIONS :
 // ce registre survit à la déconnexion (contrairement à `control_registry`),
 // donc un parc qui tourne longtemps peut accumuler des machines vues puis
 // définitivement parties.
@@ -327,7 +327,7 @@ extern int expand_max_levels;
 /**
  * @brief Nombre de possibilités déplacées de la file la plus pleine vers la
  *        plus vide à chaque tour de `check_server_step` (option CLI
- *        `--rebalance-budget <n>`, PR3).
+ *        `--rebalance-budget <n>`).
  *
  * Valeur par défaut `REBALANCE_BUDGET_DEFAULT` (1000). Consommé par
  * `datamanager_rebalance_step` (`core/datamanager.h`), appelé une fois par
@@ -340,7 +340,7 @@ extern int rebalance_budget;
 
 /**
  * @brief Nombre de files de stock demandé au démarrage (option CLI
- *        `--stock-files <n>`, PR4).
+ *        `--stock-files <n>`).
  *
  * 0 = non demandé (défaut `NB_FILE_POSSIBILITY_DEFAULT`, `core/datamanager.h`
  * — inchangé). Stocké ici plutôt qu'appliqué directement dans
@@ -392,8 +392,8 @@ extern int stock_max_ram_mb;
 
 /**
  * @brief Répertoire de débordement sur disque du stock serveur (option CLI
- *        `--stock-spill-dir <chemin>`, PR2 — débordement, distinct de PR1
- *        ci-dessus qui ne fait que refuser au-delà du plafond).
+ *        `--stock-spill-dir <chemin>` — débordement, distinct du plafond
+ *        ci-dessus qui ne fait que refuser au-delà de la limite).
  *
  * Défaut `STOCK_SPILL_DIR_DEFAULT` (`"./eternityii-spill"`, `core/
  * stock_spill.h`), même convention de chemin littéral que
@@ -424,7 +424,7 @@ extern int headless_mode;
 
 /**
  * @brief Durée (secondes) du bail à expiration des possibilités attribuées à
- *        un client (PR7).
+ *        un client.
  *
  * Configurable à l'exécution via la commande console `leaseDuration <n>`.
  * Défaut `ANALYSED_LEASE_DEFAULT_SECONDS`. `<= 0` désactive le bail : les

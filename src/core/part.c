@@ -493,8 +493,8 @@ static uint32_t *build_packed_index(map_big_array *map, unsigned long long nbKey
  * `arena` est lu dans `packed`, et sert d'indice du masque). Comme `packed`,
  * l'index est purement redondant : il ne change aucune donnée, il rend
  * seulement le comptage des pièces libres d'un compartiment indépendant de sa
- * taille (quelques `popcount` au lieu d'un parcours) — cf. §4.7 (ordre
- * dynamique MRV) de `docs/conception/elagage_recherche.md`.
+ * taille (quelques `popcount` au lieu d'un parcours) — support de l'ordre
+ * dynamique MRV.
  *
  * Le nombre de mots est déduit du plus grand id RÉELLEMENT présent dans
  * l'arène, jamais de `ETERN_PARTS` : `part.c` reste agnostique de la taille du
@@ -571,9 +571,8 @@ static uint64_t *build_bucket_id_mask(map_big_array *map, unsigned long long nbK
  * `apart` est le résultat de `rotate_all_parts` (4 rotations par pièce
  * physique), chaque couleur est comptée ×4 par rapport à un dénombrement sur
  * les seules pièces physiques — un facteur d'échelle UNIFORME sur toutes les
- * couleurs, qui ne change donc pas leur ordre relatif de rareté. Support de
- * §4.8 (docs/conception/elagage_recherche.md) : le score de rareté utilisé
- * pour trier chaque compartiment de `buildBigArray`.
+ * couleurs, qui ne change donc pas leur ordre relatif de rareté. Le score de
+ * rareté utilisé pour trier chaque compartiment de `buildBigArray`.
  *
  * @return Tableau alloué de `maxFace + 1` entrées (à libérer par l'appelant),
  *         ou NULL si `maxFace < 0` ou si l'allocation échoue.
@@ -605,7 +604,7 @@ long *compute_face_frequency(struct array_part *apart, int maxFace)
  * compartiment, elle ne discrimine donc aucun ordre. Seuls les côtés
  * « wildcard » (f_i == -1) varient d'une pièce à l'autre : ce sont les
  * couleurs que cette pièce EXPOSERA vers une case encore vide si elle est
- * posée ici — §4.8 de docs/conception/elagage_recherche.md.
+ * posée ici.
  *
  * @param freq    Fréquence globale de chaque couleur, cf. `compute_face_frequency`.
  * @param maxFace Borne supérieure de `freq` (même valeur que pour sa construction).
@@ -624,8 +623,7 @@ long arena_exposed_score(const struct part *p, int f1, int f2, int f3, int f4,
 /**
  * @brief Trie EN PLACE les candidats d'un compartiment par rareté CROISSANTE
  *        de couleur exposée — la pièce exposant la couleur la plus RARE
- *        d'abord (§4.8 de docs/conception/elagage_recherche.md, ADOPTÉ après
- *        mesure : +3,2 % de débit médian, taux d'élagage forward-check et
+ *        d'abord (ADOPTÉ après mesure : +3,2 % de débit médian, taux d'élagage forward-check et
  *        profondeur atteinte inchangés — voir la mesure complète dans le
  *        document). Comportement de production INCONDITIONNEL depuis cette
  *        adoption : pas d'interrupteur laissé en place, même discipline que
@@ -682,7 +680,7 @@ void sort_compartment_by_exposed_rarity(struct array_part *arraypart,
  * Cette structure est la principale table de lookup du moteur de recherche :
  * un accès direct en O(1) retourne toutes les pièces posables à un emplacement.
  *
- * §4.8 (docs/conception/elagage_recherche.md, ADOPTÉ) : chaque compartiment
+ * Chaque compartiment
  * est trié par rareté de couleur exposée CROISSANTE (la pièce la plus rare
  * essayée en premier) avant compactage dans `arena` — voir
  * `sort_compartment_by_exposed_rarity`. Coût : négligeable et payé une seule

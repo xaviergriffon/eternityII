@@ -85,7 +85,7 @@ typedef struct {
    qu'une fois par process dans le code applicatif (thread principal du parent
    avant tout fork, thread `fork_checker` d'un fils juste après son fork), et
    un mutex ici deviendrait un piège de plus vis-à-vis de l'invariant « aucun
-   thread du parent ne tourne pendant fork() » (cf. AGENTS.md, fork_gate). */
+   thread du parent ne tourne pendant fork() » (voir fork_gate.c). */
 static owned_local_socket_t g_owned_sockets[LOCAL_SOCKET_MAX_OWNED];
 static int g_cleanup_registered = 0;
 

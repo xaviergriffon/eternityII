@@ -32,8 +32,8 @@
  *        jamais à chaud).
  *
  * Défaut `NB_FILE_POSSIBILITY_DEFAULT` (10). Un plus grand nombre de files réduit le
- * temps d'écriture par file de la sauvegarde cohérente (PR2) et affine la granularité du
- * rééquilibrage incrémental (PR3). Lu par TOUTES les boucles `for (fp = 0; fp <
+ * temps d'écriture par file de la sauvegarde cohérente et affine la granularité du
+ * rééquilibrage incrémental. Lu par TOUTES les boucles `for (fp = 0; fp <
  * nb_file_possibility; fp++)` de ce fichier (et de `src/net/http_codec.c`,
  * `src/net/http_server.c`, `src/app/etii_server.c`, `src/app/app_runtime.c`).
  *
@@ -44,13 +44,13 @@
  * et `tests/bench/bench_refutation.c` (banc de mesure, par prudence — il n'exerce
  * aujourd'hui aucune fonction de pool, mais lie `datamanager.c` via `TEST_MODULES`).
  * Contrairement au reste de ce module — dont les échecs dégradent toujours gracieusement
- * (PR1) — indexer une file avant cet appel est un déréférencement de pointeur NULL, pas
+ * — indexer une file avant cet appel est un déréférencement de pointeur NULL, pas
  * une dégradation : ce n'est PAS un état à tolérer, seulement à ne jamais créer.
  */
 extern int nb_file_possibility;
 
 /**
- * @brief (Ré)alloue les files de stock pour couvrir `n` (PR4) — croît, ne
+ * @brief (Ré)alloue les files de stock pour couvrir `n` — croît, ne
  *        réduit jamais la mémoire déjà allouée.
  *
  * Premier appel du processus (`nb_file_possibility` encore à 0) : alloue les
@@ -161,13 +161,13 @@ unsigned long long datamanager_resident_packets(void);
  *        tri…) tient actuellement toutes les files verrouillées, 0 sinon.
  *
  * Accesseur pour l'état interne `maintenance` — réservé à
- * `core/stock_spill.c` (PR2), pour suspendre l'éviction/le rechargement
+ * `core/stock_spill.c`, pour suspendre l'éviction/le rechargement
  * pendant qu'un cliché RAM est en train d'être pris.
  */
 int datamanager_is_maintenance_active(void);
 
 /**
- * @brief Pose/lève `maintenance` pour un appelant EXTERNE à ce module (PR3)
+ * @brief Pose/lève `maintenance` pour un appelant EXTERNE à ce module
  *        — réservé à `restore_apply` (`ui/command_lines.c`), pour encadrer
  *        `stock_spill_restore_snapshot` (`core/stock_spill.c`) PUIS
  *        `restore`/`restore_analysed` dans une seule fenêtre où
@@ -181,7 +181,7 @@ void datamanager_end_maintenance(void);
 /**
  * @brief Draine jusqu'à `max_packets` possibilités depuis la tête (mode
  *        FIFO) de la file `file_index` du pool désigné — interface étroite
- *        réservée à `core/stock_spill.c` (PR2). Un seul essai de verrou,
+ *        réservée à `core/stock_spill.c`. Un seul essai de verrou,
  *        jamais de ré-essai (rattrapé au tick suivant).
  *
  * @param is_checked  0 = pool non vérifié, 1 = pool vérifié.
@@ -196,7 +196,7 @@ int datamanager_pool_drain_head(int is_checked, int file_index, struct possibili
 /**
  * @brief Réinsère `count` possibilités au bout chaud de la file
  *        `file_index` du pool désigné — interface étroite réservée à
- *        `core/stock_spill.c` (PR2). DOIT réussir (ces possibilités n'ont
+ *        `core/stock_spill.c`. DOIT réussir (ces possibilités n'ont
  *        nulle part ailleurs où aller) : trylock + rotation + micro-sommeil
  *        sans budget borné, même discipline que la réinsertion de
  *        `rebalance_pool_step`.
@@ -257,7 +257,7 @@ typedef struct
  * @param possibilities      Tableau de paquets à ajouter.
  * @return                   0 si OK, non nul en cas d'erreur (-1 : connexion
  *                           serveur perdue ; 1 : pool local resté verrouillé
- *                           au-delà d'un délai borné, PR1 — rien n'a été
+ *                           au-delà d'un délai borné — rien n'a été
  *                           inséré dans les deux cas, sûr à réessayer).
  */
 int add_possibility(client_possibility_t *client_possibility, array_possibility_packet *possibilities);
@@ -305,7 +305,7 @@ array_possibility_packet *get_last_possibility_tocheck(int max_result);
  * @param possiblity Paquet à enregistrer.
  * @param thread     Index du thread (−1 = choix automatique).
  * @return           0 si ajouté, -1 si le pool est resté intégralement
- *                    verrouillé au-delà d'un délai borné (PR1, maintenance
+ *                    verrouillé au-delà d'un délai borné (maintenance
  *                    en cours) — rien n'est inséré dans ce cas.
  */
 int add_possibility_analysed(struct possibility_packet *possiblity, int thread);
@@ -313,7 +313,7 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread);
 /**
  * @brief Comme `add_possibility_analysed`, mais enregistre en plus le
  *        `client_uid` du client à qui LE SERVEUR sert cette possibilité
- *        (PR6, attribution des analyses en cours). Réservé au côté serveur — côté
+ *        (attribution des analyses en cours). Réservé au côté serveur — côté
  *        client, `thread` est un index de fork local, sans rapport avec
  *        cette notion d'attribution, et `add_possibility_analysed` reste
  *        l'appel à utiliser (aucune attribution enregistrée).
@@ -323,7 +323,7 @@ int add_possibility_analysed(struct possibility_packet *possiblity, int thread);
  * @param owner_uid  `client_uid` (16 octets) du client servi, jamais NULL
  *                    (utiliser `add_possibility_analysed` sinon).
  * @return           0 si ajouté, -1 si le pool est resté intégralement
- *                    verrouillé au-delà d'un délai borné (PR1, maintenance
+ *                    verrouillé au-delà d'un délai borné (maintenance
  *                    en cours) — rien n'est inséré dans ce cas.
  */
 int add_possibility_analysed_owned(struct possibility_packet *possiblity, int thread,
@@ -331,7 +331,7 @@ int add_possibility_analysed_owned(struct possibility_packet *possiblity, int th
 
 /**
  * @brief Résume ce qu'un client (`client_uid`) détient actuellement dans le
- *        pool « analysed » — consultation « que travaille X ? » (PR6).
+ *        pool « analysed » — consultation « que travaille X ? ».
  *
  * Balaye l'index latéral d'attribution adossé à `analysed_index` (jamais
  * `possibility_packet` lui-même, cf. arbitrage C du document de conception) :
@@ -348,7 +348,7 @@ int datamanager_analysed_owned_by(const uint8_t owner_uid[CLIENT_UID_BYTES],
                                    unsigned long long *out_count, int *out_max_alloc);
 
 /**
- * @brief Décide si un bail est expiré à l'instant `now` (PR7, bail à
+ * @brief Décide si un bail est expiré à l'instant `now` (bail à
  *        expiration).
  *
  * Fonction pure : ne consulte JAMAIS l'horloge réelle elle-même, `now` est
@@ -364,7 +364,7 @@ int analysed_lease_is_expired(time_t lease_deadline, time_t now);
 
 /**
  * @brief Callback de vivacité consulté par `datamanager_reclaim_expired_leases`
- *        (PR7, correctif) : indique si le propriétaire `owner_uid` est encore
+ *        (correctif) : indique si le propriétaire `owner_uid` est encore
  *        observable côté serveur (typiquement, un canal de contrôle toujours
  *        enregistré — `control_registry_has_active_client`, `src/app/control_registry.h`).
  *
@@ -383,7 +383,7 @@ typedef int (*analysed_owner_alive_fn)(const uint8_t owner_uid[CLIENT_UID_BYTES]
 /**
  * @brief Balaie la table latérale d'attribution et remet dans le stock non
  *        vérifié toute possibilité dont le bail a expiré à `now` **et** dont
- *        le propriétaire n'est plus vivant (PR7, bail à expiration).
+ *        le propriétaire n'est plus vivant (bail à expiration).
  *
  * Un client disparu (mort, coupure réseau) sans avoir acquitté ce qu'il tenait
  * ne gèle plus indéfiniment sa part du stock : passé `analysed_lease_seconds`
@@ -528,7 +528,7 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
  *                        jamais) ; −1 pour balayer toutes les files, voir
  *                        `preferred_file`.
  * @param preferred_file Indice de file à essayer EN PREMIER quand `thread < 0`
- *                        (`server_analysed_file_hint`, PR8, répartition de
+ *                        (`server_analysed_file_hint`, répartition de
  *                        charge ADD/GET par connexion serveur) — ignoré si
  *                        `thread >= 0`. Sur un manque à cette file, le
  *                        balayage se poursuit sur TOUTES les autres
@@ -617,12 +617,12 @@ int backup_analysed(char *filename);
  * `spill_snapshot_fn` (optionnel, `NULL` accepté) est appelée UNE FOIS,
  * pendant la fenêtre `maintenance` (après la pose des verrous, avant leur
  * relâchement) avec `spill_snapshot_dir` — c'est le point d'intégration du
- * débordement disque (PR3, `core/stock_spill.h`) : le module `core/` ne peut
+ * débordement disque (`core/stock_spill.h`) : le module `core/` ne peut
  * pas dépendre de `stock_spill.h` (règle de dépendance à sens unique de ce
  * fichier), donc l'appelant (`app/`, `ui/`) injecte la fonction réelle
  * (`stock_spill_snapshot`) ; les appels internes à `datamanager.c` (ex. arrêt
  * sur solution détectée par `rmnonext`) passent `NULL` — lacune documentée,
- * cf. `AGENTS.md`. Son retour (nombre de possibilités effectivement
+ * lacune documentée. Son retour (nombre de possibilités effectivement
  * déportées au moment du cliché) est écrit dans un fichier accessoire
  * `<stock_filename>.spillcount` dès que le volet stock a réussi (jamais si
  * `spill_snapshot_fn` est `NULL` — pas de faux « 0 possibilité déportée »
@@ -657,7 +657,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
  *        même convention de nommage centralisée ici plutôt que dupliquée
  *        côté appelant).
  *
- * Réservé à `restore_apply` (`ui/command_lines.c`, PR3, correctif) : compare
+ * Réservé à `restore_apply` (`ui/command_lines.c`, correctif) : compare
  * ce compte à ce que `stock_spill_restore_snapshot` (`core/stock_spill.h`)
  * a RÉELLEMENT récupéré, pour détecter une restauration partielle du
  * débordement (mauvais/absent `--stock-spill-dir`, cliché supprimé…) plutôt

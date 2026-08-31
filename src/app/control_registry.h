@@ -57,7 +57,7 @@ typedef struct {
     /// Identifiant de session monotone, jamais réutilisé même après
     /// `control_registry_unregister` (contrairement à l'indice de slot du
     /// registre — « session_no n'est pas un slot »). Clé d'adressage acceptée par
-    /// `control_registry_send_command_to` (`clientsCmd --to <session_no>`, PR3).
+    /// `control_registry_send_command_to` (`clientsCmd --to <session_no>`).
     uint64_t session_no;
     /// PID du processus parent annoncé au hello.
     int32_t pid;
@@ -165,7 +165,7 @@ int control_registry_count(void);
 /**
  * @brief Recopie l'identité déclarée (`client_identity_t`) annoncée au hello
  *        de la session `index` — utilisé par `known_clients_registry.h`
- *        (PR4) pour retrouver
+ *        pour retrouver
  *        `machine_uid`/`client_uid` à des points d'appel (réception de
  *        `CTRL_STATS`, déconnexion) qui ne détiennent que l'indice de session,
  *        pas le hello complet.
@@ -281,7 +281,7 @@ int control_registry_broadcast_get_stats(void);
 /**
  * @brief Résout `target` vers l'unique session de contrôle active qu'il
  *        désigne et lui poste `cmd`/`command_line` (adressage
- *        `clientsCmd --to <cible>`, PR3).
+ *        `clientsCmd --to <cible>`).
  *
  * `target` est essayé, dans cet ordre, comme :
  *  1. un `session_no` décimal (chaîne entièrement numérique) ;
@@ -319,7 +319,7 @@ int control_registry_send_command_to(const char *target, uint8_t cmd, const char
  * @brief Résout `target` vers le `client_uid` de l'unique session de contrôle
  *        active qu'il désigne, SANS poster de commande (contrairement à
  *        `control_registry_send_command_to`) — lecture pure pour la
- *        consultation « que travaille X ? » (PR6, attribution des analyses
+ *        consultation « que travaille X ? » (attribution des analyses
  *        en cours).
  *
  * Mêmes règles de résolution, dans le même ordre, que
@@ -379,7 +379,7 @@ int control_registry_apply_role_dosage(const char *target, int pruner_forks);
  * @brief Indique si `client_uid` correspond à une session de contrôle
  *        ACTUELLEMENT active (enregistrée) dans le registre.
  *
- * Correctif PR7 (bail à expiration) : un test réel a montré qu'un bail purement temporel (échéance
+ * Bail à expiration : un test réel a montré qu'un bail purement temporel (échéance
  * fixe depuis l'attribution) réclame le travail d'un client encore vivant dès
  * qu'une possibilité met plus longtemps que `analysed_lease_seconds` à
  * s'analyser — rien ne garantit qu'une analyse tienne dans ce budget. Cette

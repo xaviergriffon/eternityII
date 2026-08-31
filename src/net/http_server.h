@@ -138,7 +138,7 @@ void http_best_board_collect(http_best_board_view_t *out);
 
 /**
  * @brief Construit un instantané des machines connues (registre de cumul,
- *        `app/known_clients_registry.h`, PR4) pour `GET /api/v1/known-clients`,
+ *        `app/known_clients_registry.h`) pour `GET /api/v1/known-clients`,
  *        via `known_clients_registry_snapshot` — même source que la commande
  *        console `knownClients`.
  *

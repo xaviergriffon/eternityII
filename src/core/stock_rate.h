@@ -6,8 +6,7 @@
  * Module côté serveur uniquement : instrumente `put_to_pool`/`scroll_from_pool`
  * (`core/datamanager.c`) pour répondre à « combien d'ajouts/consommations le
  * stock a-t-il vus durant chaque tranche ? », sans attendre qu'un niveau
- * instantané change visiblement. Ne dépend d'aucun module `app/` (règle
- * AGENTS.md).
+ * instantané change visiblement. Ne dépend d'aucun module `app/`.
  */
 #ifndef eternityII_stock_rate_h
 #define eternityII_stock_rate_h
@@ -30,7 +29,7 @@
  * correspond plus à l'horodatage courant. Champs accédés via `__atomic_*`
  * (même convention que le reste du projet — `possibility.c`, `etii_search.c`,
  * `app_runtime.c` — jamais le mot-clé `_Atomic` ni `<stdatomic.h>`), sans
- * verrou : cohérent avec la philosophie PR1 (jamais de blocage sur le chemin
+ * verrou : cohérent avec le principe de ce module (jamais de blocage sur le chemin
  * chaud `put_to_pool`/`scroll_from_pool`) ; une statistique d'affichage
  * tolère la rare course entre la remise à zéro et l'incrément suivant.
  */
