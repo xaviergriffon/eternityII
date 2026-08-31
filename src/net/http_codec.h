@@ -181,46 +181,21 @@ int http_token_equals_constant_time(const char *a, const char *b, size_t max_len
 
 /**
  * @brief Décision d'autorisation pure pour `POST /api/v1/command` : combine
- *        deux drapeaux calculés par l'appelant et le résultat de la
- *        vérification du jeton — sans connaître `control_protocol.h`, ni le
- *        jeton lui-même, ni le détail de la classification des commandes.
- *
- * Cette fonction ignore tout de la classification par NOM de commande : elle
- * ne voit que deux booléens déjà tranchés par l'appelant (`src/net/http_server.c`),
- * nommés d'après ce qu'ils décident réellement sur CETTE route plutôt que
- * d'après les noms des listes blanches de `control_protocol.h` — ces
- * dernières encodent un axe différent (relayable vers un client ou non, cf.
- * `control_command_class_t`), qui a cessé de correspondre à un niveau
- * d'authentification distinct depuis l'exigence « toute commande de
- * modification doit être authentifiée » : `is_public` et `needs_auth` sont
- * calculés par l'appelant comme
- * `is_public  = control_command_allowed(command) && control_command_read_only(command)`
- * (aujourd'hui : seulement `clientsWork`) et
- * `needs_auth = !is_public && (control_command_allowed(command) || control_command_privileged(command))`
- * — c.-à-d. `control_command_classify(command) != CTRL_CMD_UNKNOWN` et pas
- * `CTRL_CMD_READ_ONLY`, ce qui regroupe `pause`, `resume`, `limit`,
- * `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`,
- * `start`/`stopForks`/`configApply`/`config`/`configSave`
- * (`CTRL_CMD_WRITE_RELAYABLE`) ET `restore`/`backup`/`sortAsc`/`sortDesc`/
- * `sortDescMulti`/`split`/`regroup` (`CTRL_CMD_WRITE_SERVER_ONLY`) sous LA
- * MÊME exigence d'authentification. La logique de CETTE fonction reste
- * inchangée — seule la façon dont l'appelant peuple ses deux entrées a changé.
+ *        deux drapeaux déjà tranchés par l'appelant (`http_server.c`) et le
+ *        résultat de la vérification du jeton — sans connaître
+ *        `control_protocol.h` ni le jeton lui-même.
  *
  * Règles :
- * - `is_public` : toujours OK, sans vérification de jeton.
+ * - `is_public` : toujours OK, sans vérification de jeton (aujourd'hui :
+ *   seulement `clientsWork`).
  * - `needs_auth` : OK seulement si un jeton est configuré ET que
- *   `token_valid` l'atteste ; sinon UNAUTHORIZED (401), qu'un jeton soit
- *   configuré ou non — un serveur sans jeton configuré refuse aussi ces
- *   commandes plutôt que de les exécuter sans aucune preuve d'identité.
- * - Ni l'un ni l'autre (commande hors des deux listes blanches, ex. `exit`,
- *   `import`) : FORBIDDEN (403).
+ *   `token_valid` l'atteste ; sinon UNAUTHORIZED (401), même sans jeton
+ *   configuré — pas d'exécution sans preuve d'identité.
+ * - Ni l'un ni l'autre (ex. `exit`, `import`) : FORBIDDEN (403).
  *
- * @param is_public            Commande exécutable sans authentification (voir ci-dessus).
- * @param needs_auth           Commande nécessitant un jeton Bearer valide (voir ci-dessus).
- * @param has_configured_token 1 si le serveur a chargé un jeton au démarrage
- *                             (`--http-token-file`), 0 sinon.
- * @param token_valid          1 si un jeton Bearer a été fourni ET correspond
- *                             au jeton configuré (comparaison temps constant), 0 sinon.
+ * @param has_configured_token 1 si le serveur a chargé un jeton au démarrage.
+ * @param token_valid          1 si un jeton Bearer fourni correspond au
+ *                             jeton configuré (comparaison temps constant).
  * @return                     La décision (cf. `http_cmd_auth_result_t`).
  */
 typedef enum {

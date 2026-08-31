@@ -53,18 +53,11 @@ void checkAndDelegatePossibilitiesIfNeeded(client_possibility_t *client_possibil
 /**
  * @brief Niveau de la pile de décisions du backtracking in-place.
  *
- * Chaque case explorée depuis le paquet racine occupe un niveau de pile. Un
- * niveau mémorise la case concernée, la liste de candidats de la map (pointeur
- * stable, la map est en lecture seule pendant la recherche) et la position de
- * reprise : le plateau lui-même est partagé et modifié en place.
- *
- * La case (`x`, `y`) est stockée plutôt que déduite de `dirx[depth]/diry[depth]`
- * : en ordre FIXE elle vaut exactement cela, mais en ordre DYNAMIQUE (MRV,
- * §4.7 de `docs/conception/elagage_recherche.md`) elle est choisie à chaque
- * nœud par `mrv_choose_cell`. C'est ce qui permet aux mécanismes de délégation
+ * La case (`x`, `y`) est stockée plutôt que déduite de
+ * `dirx[depth]/diry[depth]` : en ordre dynamique (MRV) elle est choisie à
+ * chaque nœud par `mrv_choose_cell`. Permet aux mécanismes de délégation
  * (`bt_count_pending`, `bt_materialize_pending`, `bt_flush_pending`) d'être
- * strictement les mêmes pour les deux moteurs — une seule sémantique de
- * délégation, testée une seule fois.
+ * les mêmes pour les deux moteurs.
  */
 typedef struct {
     /** Liste des candidats pour cette case (NULL = case pré-remplie ou sans issue, aucune décision). */
@@ -77,30 +70,18 @@ typedef struct {
     uint8_t x;
     /** Ligne de la case de ce niveau. */
     uint8_t y;
-    /** Score MRV (nombre de candidats) de la case (x,y) au moment où
-     * `mrv_choose_cell` l'a choisie — donc AVANT le placement de ce niveau.
-     * `POSSIBILITY_MIN_CANDIDATS_UNKNOWN` si la case n'était pas contrainte
-     * (repli `fallback`) ou si aucune case n'avait de candidat (sous-arbre
-     * mort, `search == NULL`). Recopié tel quel dans `min_candidats` de tout
-     * paquet dont la dernière pièce posée est celle de ce niveau — gratuit,
-     * déjà calculé par `mrv_choose_cell`. */
+    /** Score MRV de la case au moment où `mrv_choose_cell` l'a choisie (avant
+     * placement) ; `POSSIBILITY_MIN_CANDIDATS_UNKNOWN` si non contrainte ou
+     * sans candidat. Recopié dans `min_candidats` du paquet correspondant. */
     int16_t mrv_score;
 } bt_level;
 
 /**
  * @brief Initialise le cache de contraintes : la clé de recherche de chaque case de la grille.
  *
- * Pour chaque case, `constraints[x][y]` contient la clé (k1=top, k2=right,
- * k3=bottom, k4=left) que `what_search_in_grid_to_key` calculerait : 0 pour un
- * bord de grille, `all_face` pour un voisin vide, sinon la couleur imposée par
- * le voisin placé. Le cache est ensuite maintenu incrémentalement à chaque
- * placement/retrait (`bt_propagate_place`/`bt_propagate_undo`), ce qui rend le
- * calcul de clé de la boucle chaude gratuit (une lecture de 4 octets).
- *
- * @param constraints     Cache à initialiser.
- * @param board           Plateau courant.
- * @param all_rotate_part Tableau de toutes les rotations.
- * @param all_face        Valeur « toute face » (= map->sizearrayM).
+ * Maintenu ensuite incrémentalement à chaque placement/retrait
+ * (`bt_propagate_place`/`bt_propagate_undo`), rendant le calcul de clé de la
+ * boucle chaude gratuit (une lecture de 4 octets).
  */
 static void bt_init_constraints(key_part constraints[ETERN_SIZE][ETERN_SIZE],
                                 struct possibility_packet *board,
@@ -116,18 +97,14 @@ static void bt_init_constraints(key_part constraints[ETERN_SIZE][ETERN_SIZE],
 /* ======================================================================
  * Frontière incrémentale du balayage MRV
  *
- * `mrv_choose_cell` ne s'intéresse qu'aux cases VIDES et CONTRAINTES (§4.7 de
- * docs/conception/elagage_recherche.md) : ~52 cases en moyenne sur le puzzle
- * 256 (mesuré, cf. la doc de `mrv_choose_cell` pour les conditions et pour
- * pourquoi §3.2 annonce 29). Les repérer par un balayage des 256 cases à chaque nœud coûtait plus
- * cher que le comptage lui-même. Deux masques de bits maintenus
- * incrémentalement — comme le cache de contraintes et le miroir des pièces
- * utilisées — donnent la même liste sans balayer la grille.
+ * `mrv_choose_cell` ne s'intéresse qu'aux cases vides et contraintes
+ * (~52 en moyenne sur le puzzle 256) ; les repérer par balayage des 256
+ * cases à chaque nœud coûtait plus cher que le comptage lui-même. Deux
+ * masques de bits maintenus incrémentalement donnent la même liste.
  *
- * Position d'une case : `pos = x * ETERN_SIZE + y`, donc l'ordre croissant des
- * bits reproduit EXACTEMENT l'ordre `for x { for y }` de l'ancien balayage.
- * C'est ce qui garantit un départage d'égalité identique, donc le même arbre
- * exploré.
+ * Position d'une case : `pos = x * ETERN_SIZE + y`, donc l'ordre croissant
+ * des bits reproduit l'ordre `for x { for y }` de l'ancien balayage — même
+ * départage d'égalité, même arbre exploré.
  * ====================================================================== */
 
 /** @brief Nombre de cases de la grille. */
@@ -297,46 +274,25 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
 /**
  * @brief Forward-checking de la boucle chaude, basé sur le cache de contraintes.
  *
- * Inspecte les VOISINES géométriques de la pièce qu'on vient de placer en
- * `(cx, cy)` — au plus 4 (haut/droite/bas/gauche, cf. `bt_propagate_place`) —
- * plutôt que les `FORWARD_CHECK_K` prochaines cases du parcours `directions[]`.
- * Seul un placement modifie la clé de ses voisines directes ; une case du
- * parcours peut se trouver à des dizaines de cases de distance sans jamais
- * être une voisine (mesuré sur le puzzle 256 : 39 % des relations de
- * voisinage ne sont jamais couvertes par l'ancienne fenêtre K=6, retard de
- * détection médian 8 niveaux, max 152 — cf.
- * `docs/conception/elagage_recherche.md` §3.1/§4.1). Moins cher aussi : 1,9
- * case voisine à inspecter en moyenne contre 6 avec l'ancienne fenêtre.
+ * Inspecte les VOISINES géométriques de la pièce posée en `(cx, cy)` (au plus
+ * 4) plutôt que les `FORWARD_CHECK_K` prochaines cases du parcours
+ * `directions[]` — seul un placement modifie la clé de ses voisines directes,
+ * une case du parcours peut être à des dizaines de cases sans jamais être
+ * voisine (mesuré : ~39 % des relations de voisinage jamais couvertes par
+ * l'ancienne fenêtre K=6). Ne lit pas `FORWARD_CHECK_K` : ce paramètre ne
+ * borne plus que l'activation (`#if FORWARD_CHECK_K > 0`). La variante à
+ * fenêtre (`forward_check_next_k`, possibility.c) reste utilisée sur les
+ * chemins froids seulement.
  *
- * Ne lit PAS `FORWARD_CHECK_K` : ce paramètre ne borne plus que l'activation
- * du forward-checking (`#if FORWARD_CHECK_K > 0`), pas la taille d'une
- * fenêtre — le nombre de voisines est une propriété de la grille (4 au plus),
- * indépendante de tout réglage. La variante `forward_check_next_k`
- * (possibility.c) garde, elle, l'ancienne sémantique de fenêtre : elle ne
- * sert que les chemins froids (`bt_materialize_pending`, throttlé, et les
- * tests), pour lesquels une fenêtre de parcours reste un contrat valide et
- * testé indépendamment. Tout nouveau code de la boucle chaude doit passer
- * par ici.
+ * Le test « voisine a-t-elle un candidat libre ? » passe par le masque d'ids
+ * du compartiment (`bucket_id_mask`) quand disponible. Le parcours d'entrées
+ * reste le seul chemin quand `singleton_conflict_check` est levé : il compte
+ * des entrées (deux rotations d'une même pièce = 2), ce qu'un masque d'ids ne
+ * reproduit pas.
  *
- * Le test « cette voisine a-t-elle encore un candidat libre ? » passe par le
- * masque d'ids du compartiment (`bucket_id_mask`) quand il est disponible :
- * quelques `AND` sur `map->id_mask_words` mots, au lieu d'un parcours des
- * entrées. Le parcours reste en repli, et reste le seul chemin quand
- * `singleton_conflict_check` est levé — cette variante-là compte des ENTRÉES
- * (deux rotations d'une même pièce libre valent 2, donc « pas un singleton »),
- * ce qu'un masque d'identifiants ne sait pas reproduire ; la convertir
- * changerait son verdict, pas seulement son coût.
- *
- * @param constraints Cache de contraintes maintenu par le backtracking.
- * @param board       Plateau courant (grille + masque des pièces utilisées).
- * @param mapParts    Table de lookup.
- * @param used        Miroir 64 bits des pièces utilisées, tenu par la boucle
- *                    chaude (`mrv_used_init`/`_set`/`_clear`).
- * @param cx          Colonne de la pièce qu'on vient de placer.
- * @param cy          Ligne de la pièce qu'on vient de placer.
- * @return            1 si toutes les voisines vides ont au moins une pièce candidate
- *                    (et, si `singleton_conflict_check` est levé, qu'aucune paire de
- *                    voisines n'exige la même pièce comme unique candidat), 0 sinon.
+ * @return 1 si toutes les voisines vides ont un candidat (et, si
+ *         `singleton_conflict_check`, qu'aucune paire n'exige la même pièce
+ *         comme unique candidat), 0 sinon.
  */
 static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
                             struct possibility_packet *board,
@@ -561,16 +517,10 @@ static void record_solution(client_possibility_t *client, struct possibility_pac
  * @param out        Tableau de destination des paquets matérialisés.
  * @param max_out    Nombre maximal de paquets à produire.
  * @param new_next_s Sortie : nouveau `next_s` par niveau si l'envoi réussit.
- *                   MRV étant le seul moteur (docs/autosearch_step.md), la
- *                   profondeur de pile n'a aucun rapport avec le nombre de
- *                   pièces posées : `alloc` est donc TOUJOURS fixé par
- *                   RECOMPTAGE (`possibility_placed_count`) après le
- *                   placement du candidat — le comptage est déjà exact par
- *                   construction (on vient de placer une pièce de plus sur
- *                   `scratch`), aucune canonisation nécessaire. `min_candidats`
- *                   est fixé en parallèle à `lvl->mrv_score` : le score que
- *                   `mrv_choose_cell` a calculé pour (cx,cy) quand ce niveau a
- *                   été ouvert, gratuit, aucun recalcul.
+ *                   La profondeur de pile n'a aucun rapport avec le nombre de
+ *                   pièces posées (MRV) : `alloc` est donc toujours fixé par
+ *                   recomptage (`possibility_placed_count`), jamais dérivé de
+ *                   la profondeur. `min_candidats` reprend `lvl->mrv_score`.
  * @return           Nombre de paquets effectivement matérialisés.
  */
 static int bt_materialize_pending(client_possibility_t *client,
@@ -909,75 +859,31 @@ static inline int mrv_free_candidates(const map_big_array *map, const key_part *
 
 /**
  * @brief Choisit la case vide la plus contrainte (MRV, « minimum remaining
- *        values ») — §4.7 de `docs/conception/elagage_recherche.md`.
+ *        values »).
  *
- * Trois différences avec le prototype de mesure, qui coûtait un parcours de
- * compartiment pour CHACUNE des cases vides du plateau (jusqu'à 256) :
+ * Restreint aux cases de FRONTIÈRE (au moins un côté contraint) : une case
+ * dont les 4 côtés sont libres offre par construction toutes les pièces et ne
+ * peut jamais être le minimum. Une case de frontière existe toujours tant
+ * qu'une case vide existe ; le repli `fallback` couvre le cas dégénéré sans
+ * le supposer. Énumérée par masque de bits (`bt_frontier`, maintenu par
+ * `bt_frontier_place`/`_undo`) plutôt que par balayage des 256 cases —
+ * l'ordre croissant des bits reproduit l'ordre `for x { for y }` de l'ancien
+ * balayage, donc le même départage d'égalité.
  *
- * 1. **Restriction aux cases de FRONTIÈRE** : une case dont les 4 côtés valent
- *    `all_face` n'est contrainte par rien (ni bord de plateau, ni voisine
- *    posée) et offre donc, par construction, toutes les pièces libres — elle ne
- *    peut jamais être le minimum tant qu'une case contrainte existe.
- *    Sur le puzzle 256 la frontière compte **52,2 cases en moyenne (max 79)**
- *    contre 256 cases balayées par le prototype — mesuré sous MRV, départ
- *    genèse, 1,5 M nœuds.
- *    Ce n'est PAS le « 29 en moyenne (max 52) » de §3.2, et l'écart a deux
- *    causes distinctes, toutes deux mesurées : (a) §3.2 compte les cases vides
- *    adjacentes à une case POSÉE, là où le balayage retient aussi toute case de
- *    bord vide — `what_search_in_grid_to_key` y pose la clé 0, une vraie
- *    couleur, donc une contrainte permanente ; (b) surtout, §3.2 vient d'une
- *    analyse statique de l'ordre FIXE `dirx[]`/`diry[]`, qui remplit de proche
- *    en proche, alors que MRV saute d'un bout à l'autre du plateau et laisse
- *    une frontière bien plus déchiquetée. À définition de §3.2 mais sous MRV,
- *    la même grandeur vaut 45,2 en moyenne (max 54) : l'ordre de remplissage
- *    pèse plus lourd que la définition. La restriction reste largement
- *    payante (52 cases sur 256), le chiffre de §3.2 la surestimait de ~1,8×.
- *    Il existe TOUJOURS une case de frontière tant qu'une case vide existe :
- *    la première case vide dans l'ordre lexicographique a soit un bord de
- *    plateau, soit une voisine de rang inférieur nécessairement remplie. Le
- *    repli `fallback` couvre malgré tout ce cas, plutôt que de le supposer.
- * 2. **Énumération de la frontière par masque de bits** (`bt_frontier`) plutôt
- *    que par balayage des 256 cases. La restriction ci-dessus n'était qu'un
- *    TEST : elle évitait le lookup, pas la visite. Or repérer les ~29 cases
- *    utiles en lisant 256 cases de grille puis ~182 clés coûtait plus cher que
- *    le comptage lui-même. Les deux masques sont maintenus par
- *    `bt_frontier_place`/`_undo`, exactement comme le cache de contraintes et
- *    le miroir des pièces utilisées, et l'ordre croissant des bits reproduit
- *    l'ordre `for x { for y }` de l'ancien balayage — donc le même départage
- *    d'égalité, donc le même arbre exploré.
- * 3. **Comptage par `popcount`** au lieu d'un parcours du compartiment
- *    (`mrv_free_candidates`).
- * 4. **Départage des égalités par le nombre de côtés contraints** (`nconstr`,
- *    porté par la frontière incrémentale, donc gratuit à lire) : à score MRV
- *    égal, la case dont le PLUS de côtés sont déjà contraints l'emporte, au
- *    lieu de la première rencontrée. À défaut d'égalité sur `nconstr` aussi,
- *    l'ordre d'énumération tranche comme avant.
+ * Départage à score MRV égal par `nconstr` (nombre de côtés déjà contraints)
+ * MAXIMAL — MESURÉ, pas l'heuristique de degré CSP classique (qui préfère
+ * `nconstr` minimal et perd +4,4 % de coût de réfutation en production contre
+ * −6,3 % pour `nconstr` maximal ici). Ne pas inverser ce sens sans re-mesurer.
  *
- *    Le sens du critère a été MESURÉ, pas supposé : l'heuristique de degré
- *    classique de la littérature CSP recommande l'inverse (préférer la case
- *    qui contraint le plus de variables NON affectées, soit `nconstr` minimal
- *    puisqu'il est borné par 4). Sur un stock de production, cette variante-là
- *    est nettement PERDANTE (+4,4 % de coût de réfutation), quand `nconstr`
- *    maximal gagne −6,3 %. Cf. §4.12 de `docs/conception/elagage_recherche.md`.
+ * Le balayage reste COMPLET (pas d'arrêt anticipé sur 1 candidat) : sa
+ * détection de case morte est un sous-produit gratuit, strictement plus
+ * large que le forward-check local.
  *
- * Le balayage reste COMPLET (pas d'arrêt anticipé sur une case à 1 candidat) :
- * sa détection de case morte, où qu'elle soit sur la frontière, est un
- * sous-produit gratuit et strictement plus large que le forward-check local —
- * on ne la sacrifie pas pour quelques cycles.
- *
- * @param board       Plateau courant.
- * @param constraints Cache de contraintes du moteur.
- * @param mapParts    Table de lookup.
- * @param used        Miroir 64 bits des pièces utilisées.
- * @param front       Frontière incrémentale (cases vides / cases contraintes).
- * @param out_x/out_y Remplis avec la case choisie si succès ; non modifiés sinon.
- * @param out_count   Rempli avec le score MRV (nombre de candidats) de la case
- *                     choisie si succès ; `POSSIBILITY_MIN_CANDIDATS_UNKNOWN`
- *                     si le repli `fallback` a été utilisé (case non
- *                     contrainte, comptage non calculé). Non modifié en cas
- *                     d'échec (valeur de retour 0).
- * @return 1 si une case a été choisie, 0 si au moins une case vide n'a AUCUN
- *         candidat (branche morte détectée par le balayage lui-même).
+ * @param out_count Rempli avec le score MRV si succès ;
+ *                  `POSSIBILITY_MIN_CANDIDATS_UNKNOWN` si le repli fallback a
+ *                  été utilisé. Non modifié en cas d'échec.
+ * @return 1 si une case a été choisie, 0 si une case vide n'a aucun candidat
+ *         (branche morte détectée par le balayage lui-même).
  */
 static int mrv_choose_cell(struct possibility_packet *board,
                            key_part constraints[ETERN_SIZE][ETERN_SIZE],
@@ -999,8 +905,7 @@ static int mrv_choose_cell(struct possibility_packet *board,
             int y = pos % ETERN_SIZE;
             int count = mrv_free_candidates(mapParts, &constraints[x][y], board, used);
             if (count == 0) {
-                // Case sans issue : sous-arbre mort, inutile de continuer.
-                return 0;
+                return 0; // sous-arbre mort
             }
             if (best_count < 0 || count < best_count) {
                 best_count = count;
@@ -1008,10 +913,6 @@ static int mrv_choose_cell(struct possibility_packet *board,
                 best_y = (uint8_t)y;
                 best_nc = front->nconstr[pos];
             } else if (count == best_count && front->nconstr[pos] > best_nc) {
-                // Départage à score MRV égal : la case dont le PLUS de côtés
-                // sont déjà contraints (bords de grille + voisines posées).
-                // `nconstr` est maintenu par la frontière incrémentale, donc
-                // ce critère ne coûte qu'une lecture d'octet.
                 best_x = (uint8_t)x;
                 best_y = (uint8_t)y;
                 best_nc = front->nconstr[pos];
@@ -1020,8 +921,7 @@ static int mrv_choose_cell(struct possibility_packet *board,
     }
 
     if (best_count < 0) {
-        // Aucune case de frontière : repli sur la première case vide non
-        // contrainte, dans le même ordre que le balayage ci-dessus.
+        // Repli : première case vide non contrainte, même ordre que ci-dessus.
         for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
             uint64_t bits = front->empty[w] & ~front->constrained[w];
             if (bits != 0) {
@@ -1032,9 +932,7 @@ static int mrv_choose_cell(struct possibility_packet *board,
                 return 1;
             }
         }
-        // Aucune case vide : l'appelant vérifie le plateau complet avant
-        // d'appeler, ce retour n'est donc pas atteint en pratique.
-        return 0;
+        return 0; // pas atteint en pratique : l'appelant vérifie déjà plateau complet
     }
     *out_x = best_x;
     *out_y = best_y;
@@ -1042,58 +940,33 @@ static int mrv_choose_cell(struct possibility_packet *board,
     return 1;
 }
 
-/**
- * @brief Issue de `search_packet_backtracking_mrv`, seul moteur de backtracking
- *        depuis la bascule MRV (cf. docs/autosearch_step.md).
- */
+/** @brief Issue de `search_packet_backtracking_mrv`, seul moteur de backtracking. */
 typedef enum {
-    BT_CORE_EXHAUSTED = 0, /**< Sous-arbre entièrement exploré : mort, prouvé (solutions éventuelles déjà signalées). */
+    BT_CORE_EXHAUSTED = 0, /**< Sous-arbre entièrement exploré : mort, prouvé. */
     BT_CORE_STOPPED = 1,   /**< REQUEST_STOP : arrêt demandé. */
     BT_CORE_BUDGET = 2,    /**< `node_budget` épuisé avant exhaustivité : statut indéterminé. */
 } bt_core_result_t;
 
 /**
- * @brief Recherche à ordre de variable DYNAMIQUE (MRV) — §4.7 de
- *        `docs/conception/elagage_recherche.md`. C'est le SEUL moteur de
- *        backtracking (cf. docs/autosearch_step.md), pour la recherche réelle
- *        comme pour la preuve bornée du pruner
- *        (`search_packet_backtracking_budgeted`) : l'ancien moteur à ordre
- *        FIXE (`search_packet_backtracking_core`, sélectionné par les
- *        drapeaux `mrv_enabled`/`pruner_dfs_mrv`) a été supprimé — mesuré
- *        favorable dans les deux usages, un interrupteur laissé en place
- *        aurait été un chemin de code non testé.
+ * @brief Recherche à ordre de variable DYNAMIQUE (MRV) — seul moteur de
+ *        backtracking, pour la recherche réelle comme pour la preuve bornée
+ *        du pruner.
  *
- * Un unique plateau (copie locale du paquet racine) est modifié en place.
- * Avancer = écrire une case et positionner un bit ; reculer = effacer la case,
- * libérer le bit et passer au candidat suivant du niveau. Aucune copie de
- * `possibility_packet` ni allocation dans la boucle chaude. La case traitée à
- * chaque niveau est choisie par `mrv_choose_cell` (la plus contrainte) au lieu
- * d'être imposée par `dirx[depth]/diry[depth]`, qui ne sert plus que de simple
- * énumération pour les cases sans contrainte (repli de `mrv_choose_cell`).
+ * Un unique plateau (copie locale du paquet racine) est modifié en place ;
+ * aucune copie de `possibility_packet` ni allocation dans la boucle chaude.
+ * La case traitée à chaque niveau vient de `mrv_choose_cell` plutôt que de
+ * `dirx[depth]/diry[depth]` (qui ne sert plus que de repli).
  *
- * Conséquences de l'ordre dynamique, qui distinguent ce moteur du prototype de
- * mesure de la PR 9 (lequel ne déléguait jamais) :
- * - la profondeur de pile n'a aucun rapport avec le nombre de pièces posées,
- *   donc les paquets délégués ont leur `alloc` fixé par RECOMPTAGE avant
- *   émission (`bt_materialize_pending`, `possibility_placed_count`) — un
- *   client, un pruner ou un `.back` lisent `alloc` avec exactement la même
- *   définition (nombre de pièces posées) quelle que soit sa provenance ;
- * - le nombre de pièces posées est compté explicitement
- *   (`possibility_placed_count`) puis maintenu localement (`placed_count`),
- *   au lieu d'être lu dans `alloc` : un paquet reçu peut être troué (cases
- *   remplies dans le désordre par rapport à `directions[]`), y compris s'il
- *   vient d'un autre client MRV ;
- * - `board.alloc` n'est mis à jour que là où il est OBSERVÉ (record de
- *   `max_result`, solution, délégation), jamais comme compteur de boucle.
+ * Conséquences de l'ordre dynamique : la profondeur de pile n'a aucun rapport
+ * avec le nombre de pièces posées, donc `alloc` des paquets délégués est fixé
+ * par RECOMPTAGE avant émission (`bt_materialize_pending`,
+ * `possibility_placed_count`), jamais lu comme compteur de boucle — un paquet
+ * reçu peut être troué (cases remplies dans le désordre), y compris venant
+ * d'un autre client MRV.
  *
- * @param client         Contexte du thread client.
- * @param root           Paquet racine à explorer (non modifié).
- * @param idParts        Table de pré-calcul des indices de rotation.
  * @param node_budget    Plafond de nœuds (`<= 0` = illimité).
  * @param allow_delegate 1 : délégation périodique + renvoi du travail restant
  *                       à l'arrêt ; 0 : ni l'un ni l'autre.
- * @param out_nodes      Optionnel : nombre de nœuds explorés.
- * @return               `BT_CORE_EXHAUSTED`, `BT_CORE_STOPPED` ou `BT_CORE_BUDGET`.
  */
 static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *client,
                                                        struct possibility_packet *root,
@@ -1310,17 +1183,10 @@ backtrack:;
  * @brief Explore en profondeur le sous-arbre d'un paquet racine par backtracking in-place.
  *
  * Fine enveloppe de `search_packet_backtracking_mrv` (illimité, délégation
- * autorisée) préservant la signature/le contrat historiques de cette fonction :
- * seule la recherche réelle (`autosearch_step`) l'appelle. MRV est le seul
- * moteur (cf. docs/autosearch_step.md) : plus de branchement à faire ici,
- * l'ancien drapeau `mrv_enabled` a disparu avec le moteur à ordre fixe qu'il
- * sélectionnait.
+ * autorisée) ; seule la recherche réelle (`autosearch_step`) l'appelle.
  *
- * @param client  Contexte du thread client.
- * @param root    Paquet racine à explorer (non modifié).
- * @param idParts Table de pré-calcul des indices de rotation [id][rotation].
- * @return        0 si le sous-arbre est entièrement exploré, 1 si arrêt demandé
- *                (le travail restant a été renvoyé au serveur).
+ * @return 0 si le sous-arbre est entièrement exploré, 1 si arrêt demandé
+ *         (le travail restant a été renvoyé au serveur).
  */
 static int search_packet_backtracking(client_possibility_t *client,
                                       struct possibility_packet *root,
@@ -1331,33 +1197,17 @@ static int search_packet_backtracking(client_possibility_t *client,
 }
 
 /**
- * @brief Preuve de fermeture bornée en nœuds du sous-arbre d'une possibilité (§4.6b
- *        de `docs/conception/elagage_recherche.md`).
+ * @brief Preuve de fermeture bornée en nœuds du sous-arbre d'une possibilité.
  *
- * Rejoue `root` par le même backtracking MRV que la recherche réelle, plafonné
- * à `node_budget` nœuds et sans délégation (`allow_delegate = 0`, cf. sa doc).
- * MRV est le seul moteur (cf. docs/autosearch_step.md) : l'ancien drapeau
- * `pruner_dfs_mrv`, qui sélectionnait entre ordre fixe et ordre dynamique pour
- * cette preuve précisément, a disparu avec le moteur à ordre fixe qu'il
- * sélectionnait — mesuré ×3 à ×4 de fermetures à budget égal sur du stock de
- * production (§4.10 de docs/conception/elagage_recherche.md).
- * `BT_CORE_EXHAUSTED` est une condition nécessaire exacte, pas une
- * heuristique : si retourné, le sous-arbre entier a été parcouru par le même
- * code que la recherche fait foi — aucun faux positif possible, exactement la
- * même garantie qu'une fermeture découverte par la recherche elle-même.
- * `BT_CORE_BUDGET` et `BT_CORE_STOPPED` signifient seulement « statut
- * indéterminé dans ce budget » : l'appelant doit alors traiter la possibilité
- * comme avant cette PR (aucune conclusion, ni positive ni négative, n'en
- * découle).
+ * Rejoue `root` par le même backtracking MRV que la recherche réelle,
+ * plafonné à `node_budget` nœuds, sans délégation. `BT_CORE_EXHAUSTED` est
+ * une condition nécessaire exacte : si retourné, le sous-arbre entier a été
+ * parcouru par le même code que la recherche, aucun faux positif possible.
+ * `BT_CORE_BUDGET`/`BT_CORE_STOPPED` signifient « statut indéterminé » —
+ * aucune conclusion n'en découle.
  *
- * @param client      Contexte du thread client (pruner).
- * @param root        Possibilité à contrôler (non modifiée).
- * @param idParts     Table de pré-calcul des indices de rotation [id][rotation].
- * @param node_budget Plafond de nœuds (`<= 0` : appelant ne doit pas appeler
- *                    cette fonction — la budgétisation est désactivée en amont).
- * @param out_nodes   Optionnel (NULL si non désiré) : nœuds explorés, coût de
- *                    la preuve pour instrumentation.
- * @return            `BT_CORE_EXHAUSTED`, `BT_CORE_BUDGET` ou `BT_CORE_STOPPED`.
+ * @param node_budget Plafond de nœuds (`<= 0` : ne pas appeler cette
+ *                    fonction — budgétisation désactivée en amont).
  */
 static bt_core_result_t search_packet_backtracking_budgeted(client_possibility_t *client,
                                       struct possibility_packet *root,
@@ -1532,19 +1382,14 @@ void *autosearch (void *userdata)
  *
  * Attend du travail, contrôle chaque paquet de `client->aposs`
  * (`possibility_all_has_a_next` : vivant -> renvoyé marqué `checked`, mort ->
- * éliminé), gère l'arrêt (REQUEST_STOP : renvoi du lot non traité + acquittement)
- * puis nettoie le cycle. Extrait du corps de `while(1)` pour être testable hors
- * de la boucle infinie.
+ * éliminé), gère l'arrêt (renvoi du lot non traité + acquittement).
  *
- * Depuis §4.6b (`docs/conception/elagage_recherche.md`) : une possibilité que
- * le contrôle superficiel juge vivante mais pas encore `checked` est en plus
- * soumise à `search_packet_backtracking_budgeted`, une preuve de fermeture par
- * backtracking RÉEL borné en nœuds (`pruner_dfs_budget`). Si le budget suffit
- * à épuiser tout le sous-arbre, la possibilité est prouvée morte au même titre
- * qu'une trouvaille de la recherche elle-même — éliminée, jamais redistribuée.
- * Sinon (budget épuisé, ou arrêt demandé en cours de preuve), comportement
- * inchangé : conservée, marquée `checked`. `pruner_dfs_budget <= 0` désactive
- * entièrement ce contrôle supplémentaire (même convention que `limit 0`).
+ * Une possibilité jugée vivante mais pas encore `checked` est en plus
+ * soumise à `search_packet_backtracking_budgeted`, une preuve de fermeture
+ * par backtracking réel bornée en nœuds (`pruner_dfs_budget`) : si le budget
+ * suffit à épuiser le sous-arbre, elle est prouvée morte et éliminée, jamais
+ * redistribuée. Sinon, comportement inchangé : conservée, marquée `checked`.
+ * `pruner_dfs_budget <= 0` désactive ce contrôle supplémentaire.
  *
  * @return 1 pour poursuivre la boucle, 0 pour s'arrêter (REQUEST_STOP).
  */

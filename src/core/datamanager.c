@@ -113,32 +113,20 @@ static file_possibility_t **file_possibility_checked = NULL;
  * Index de recherche du pool « analysed » (accélère remove_possibility_analysed)
  * ==========================================================================
  *
- * remove_possibility_analysed() est appelée pour CHAQUE possibilité acquittée
- * (INST_POSSIBILITY_ANALYSED / _BATCH, requeue côté serveur) et balayait
- * linéairement toute la file avec compare_possibility() : O(n) par retrait,
- * O(n·M) pour un acquittement de M paquets. Cet index (une table de hachage
- * par file, à chaînage séparé) ramène le cas courant — la possibilité
- * recherchée est bien présente — à O(1) amorti : compare_possibility() n'est
- * plus appelée que sur les quelques candidats du seau concerné, jamais sur
- * toute la file.
+ * remove_possibility_analysed() balayait linéairement toute la file avec
+ * compare_possibility() : O(n) par retrait. Cet index (table de hachage par
+ * file, chaînage séparé) ramène le cas courant à O(1) amorti.
  *
- * Le hash ne porte QUE sur les champs réellement comparés par
- * compare_possibility() : alloc, x, y, les ETERN_PARTS premiers bits de
- * b_faceused (soit ETERN_PARTS/16 mots), et grid. Il exclut `checked`
- * (jamais comparé) ainsi que tout octet de bourrage de struct — b_faceused
- * porte un `__attribute__((aligned(16)))` qui, combiné au `packed` global,
- * introduit du padding avant lui ; ce padding n'est pas garanti initialisé et
- * hacher l'image mémoire brute du paquet ferait diverger le hash de deux
- * paquets pourtant égaux au sens de compare_possibility().
+ * Le hash ne porte que sur les champs comparés par compare_possibility()
+ * (alloc, x, y, les ETERN_PARTS premiers bits de b_faceused, grid), jamais
+ * sur l'image mémoire brute : b_faceused porte un padding d'alignement non
+ * garanti initialisé, qui ferait diverger le hash de deux paquets pourtant
+ * égaux.
  *
- * L'index n'est jamais une source de vérité : sur un « miss » (rien dans le
- * seau), remove_possibility_analysed() retombe sur le balayage linéaire
- * historique — mais SEULEMENT si `analysed_index_may_be_incomplete` (ci-dessous)
- * l'exige : dans l'écrasante majorité du temps, un miss signifie une absence
- * RÉELLE (voir sa doc), et le repli — O(taille de la file), sous verrou —
- * serait une régression de performance pure sur le chemin le plus fréquent
- * (acquittement d'une possibilité déjà retirée par un autre acquittement
- * concurrent, ou par requeue_last_sent_possibility).
+ * L'index n'est jamais une source de vérité : sur un miss, l'appelant
+ * retombe sur le balayage linéaire seulement si
+ * `analysed_index_may_be_incomplete` l'exige — sinon un miss signifie une
+ * absence réelle, et le repli O(n) régresserait le chemin le plus fréquent.
  */
 #define ANALYSED_INDEX_BUCKETS 8191
 
@@ -322,19 +310,15 @@ unsigned long long datamanager_resident_packets(void)
  * @brief Draine jusqu'à `max_packets` possibilités depuis la TÊTE (mode FIFO,
  *        `scroll_fifo`) de la file `file_index` du pool désigné.
  *
- * Interface étroite réservée à `core/stock_spill.c` (débordement sur disque,
- * PR2) : ce module ne connaît ni `file_possibility_t`, ni les tableaux
- * privés `file_possibility`/`file_possibility_checked`, seulement cette
- * fonction et `datamanager_pool_refill` ci-dessous. La tête de file contient
- * les possibilités les plus ANCIENNES (jamais servies tant que la file ne se
- * vide pas — `scroll()`, utilisée par `scroll_from_pool` pour servir un GET,
- * dépile la QUEUE) : c'est exactement la donnée froide à évincer.
+ * Interface étroite réservée à `core/stock_spill.c` (débordement sur disque) :
+ * ce module ne connaît ni `file_possibility_t` ni les tableaux privés, juste
+ * cette fonction et `datamanager_pool_refill`. La tête de file contient les
+ * possibilités les plus anciennes (`scroll()` dépile la queue) — la donnée
+ * froide à évincer.
  *
- * Un seul essai de verrouillage (`trylock`), jamais de ré-essai ni
- * d'attente : appelée depuis le tick périodique (100 ms) du thread de
- * débordement, un échec ponctuel se rattrape simplement au tick suivant —
- * inutile de bloquer ce thread sur une file momentanément contestée par le
- * trafic ADD/GET normal.
+ * Un seul essai de verrouillage (`trylock`), jamais d'attente : appelée
+ * depuis le tick périodique du thread de débordement, un échec se rattrape
+ * au tick suivant.
  *
  * @param is_checked   0 = pool non vérifié, 1 = pool vérifié (même
  *                     convention que `want_checked` dans `put_to_pool`).
@@ -3112,72 +3096,33 @@ int regroup_datas(void)
 	return 0;
 }
 
-/// Intervalle de re-essai (µs) pendant l'attente d'une place en RAM
-/// (`add_possibility_with_retry_or_abort`) — délibérément beaucoup plus long
-/// que `MICRO_SLEEP` (100 µs, backoff de contention de verrou) : on n'attend
-/// pas un verrou momentanément pris, on attend le tick du thread de
-/// débordement (100 ms, `core/stock_spill.h`) ou un GET client qui libère de
-/// la place. Un `usleep(MICRO_SLEEP)` ici tournerait à ~10 000 essais/s pour
-/// rien ; 20 ms donne 5 essais par tick de débordement, réactif sans être
-/// une boucle chaude.
+/// Intervalle de re-essai (µs) pendant l'attente d'une place en RAM — plus
+/// long que `MICRO_SLEEP` (contention de verrou) : on attend le tick du
+/// thread de débordement (100 ms) ou un GET client, pas un verrou pris
+/// momentanément. 20 ms = 5 essais par tick, réactif sans boucle chaude.
 #define EXPAND_RAM_WAIT_POLL_US 20000
 /// Fréquence (s) du rappel journalisé pendant une attente prolongée.
 #define EXPAND_RAM_WAIT_LOG_INTERVAL_SEC 5
 
 /**
- * @brief Insère `single` via `add_possibility`, en ATTENDANT patiemment
- *        qu'une place se libère si le plafond RAM (`--stock-max-ram`) est
- *        atteint — jamais un abandon silencieux. Réservée à
- *        `expand_datas_to_level`.
+ * @brief Insère `single` via `add_possibility`, en attendant patiemment
+ *        qu'une place se libère si le plafond RAM est atteint — jamais un
+ *        abandon silencieux. Réservée à `expand_datas_to_level`.
  *
- * Même principe que côté client (`put_to_server` : un ADD refusé n'est
- * jamais perdu, seulement retenté plus tard) — adapté ici au contexte
- * mono-thread, pré-fork, de l'expansion au démarrage : il n'existe pas de
- * « prochaine tentative naturelle » comme côté client (thread
- * d'alimentation, délégation périodique) ; la pause et la nouvelle
- * tentative doivent donc se faire DANS cette fonction. Le seul
- * relâchement de pression possible pendant l'attente est le thread de
- * débordement (`spill_thread`, 100 ms, `core/stock_spill.h`), déjà démarré
- * à ce stade (`runserver` l'appelle avant toute expansion) — ou un GET
- * client si l'expansion tourne pendant que le serveur sert déjà des
- * connexions. Cette fonction ne dépend d'aucun symbole `stock_spill`
- * (`datamanager.c` -> `stock_spill.h` resterait une inversion de
- * dépendance non désirée) : elle se contente de retenter, ce qui suffit
- * puisque le débordement libère la RAM indépendamment de qui la demande.
+ * Contexte mono-thread pré-fork : pas de « prochaine tentative naturelle »
+ * comme côté client, donc la pause et le retry se font ici. Ne dépend
+ * d'aucun symbole `stock_spill` (éviterait une inversion de dépendance) : se
+ * contente de retenter, le débordement libère la RAM indépendamment de qui
+ * la demande.
  *
- * Retente INDÉFINIMENT tant que le refus persiste ET que le process n'est
- * pas en cours d'arrêt (`request == REQUEST_STOP`, ex. Ctrl-C pendant le
- * démarrage) : aucune autre limite de temps, conformément au principe
- * qu'aucune possibilité générée ne doit être perdue. Un plafond RAM mal
- * configuré (trop bas même pour le débordement, ou `--stock-spill-dir` non
- * fonctionnel) se traduit alors par un démarrage qui NE PROGRESSE PLUS
- * plutôt que par une perte silencieuse — le journal explique pourquoi
- * (ci-dessous) ; c'est à l'opérateur de corriger la configuration puis de
- * relancer, jamais au serveur de sacrifier des possibilités pour continuer
- * coûte que coûte.
+ * Retente indéfiniment tant que le refus persiste et que le process n'est
+ * pas en arrêt : un plafond RAM mal configuré se traduit par un démarrage
+ * qui ne progresse plus (journalisé), jamais par une perte silencieuse.
  *
- * Journalise le premier refus, puis un rappel toutes les
- * `EXPAND_RAM_WAIT_LOG_INTERVAL_SEC` secondes tant que l'attente continue
- * (jamais à chaque tentative — plusieurs dizaines par seconde sinon) ainsi
- * qu'une confirmation de reprise une fois la place libérée, pour qu'un
- * opérateur sache que le ralentissement vient du plafond RAM et non d'un
- * autre problème.
- *
- * @param single     Possibilité à insérer (déjà enveloppée dans un tableau
- *                    à un élément, cf. `build_single_array_possibility_packet`).
- * @param had_to_wait Mis à 1 si au moins un refus a été essuyé (utilisé par
- *                    l'appelant pour cesser d'approfondir davantage POUR LA
- *                    PASSE COURANTE seulement — inutile de produire plus de
- *                    travail au moment précis où la RAM est constatée sous
- *                    tension ; l'appelant marque ensuite une pause AVANT la
- *                    passe suivante, cf. `expand_wait_for_ram_headroom_between_passes`,
- *                    plutôt que d'arrêter l'expansion pour de bon), inchangé
- *                    sinon.
- * @return            1 si insérée (avec ou sans attente), 0 si le process a
- *                     demandé l'arrêt PENDANT l'attente (`single` n'a pas
- *                     été inséré — le process s'arrête de toute façon ;
- *                     l'appelant est responsable de drainer proprement le
- *                     reste de son travail en cours sans l'insérer).
+ * @param had_to_wait Mis à 1 si au moins un refus a été essuyé — l'appelant
+ *                    cesse d'approfondir pour la passe courante seulement.
+ * @return 1 si insérée, 0 si arrêt demandé pendant l'attente (`single` non
+ *         inséré, à l'appelant de drainer proprement).
  */
 static int add_possibility_with_retry_or_abort(array_possibility_packet *single, int *had_to_wait)
 {

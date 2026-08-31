@@ -213,57 +213,26 @@ extern unsigned long long server_prune_starved;
  * @brief Calcule le sens d'ajustement du dosage recherche/contrôle à partir
  *        des signaux de besoin déjà mesurés côté serveur.
  *
- * Fonction PURE (aucune I/O, aucun accès au registre ni à l'horloge) — les
- * deltas de famine et le ratio de pression RAM sont calculés par l'appelant
- * (`check_server_step`), qui tient l'état cumulatif d'un tour à l'autre.
+ * Fonction PURE — deltas de famine et ratio de pression RAM sont calculés
+ * par l'appelant (`check_server_step`).
  *
- * Priorité des signaux, du plus urgent au plus indicatif :
- *  1. Un parc déjà à 0 chercheur avec au moins un pruner est une violation de
- *     l'invariant (ne devrait jamais arriver si cette fonction est la seule
- *     à piloter le dosage) : corrigée immédiatement, prioritaire sur tout
- *     le reste.
- *  2. Un parc vide (aucune session) : rien à décider.
- *  3. Une famine (chercheur OU pruner) signale un parc mal dimensionné pour
- *     le travail disponible MAINTENANT ; la recherche étant le seul rôle qui
- *     régénère du stock à partir de rien, réduire le dosage est la
- *     correction sûre dans les deux cas.
- *  4. Garde-fou : tant que le parc n'a plus qu'un seul chercheur (ou zéro),
- *     jamais d'augmentation — c'est le double garde-fou du document
- *     (« jamais 0 chercheur » / « jamais 100% pruner », deux formulations
- *     de la même limite).
- *  5. Pression RAM haute (seuil `STOCK_SPILL_HIGH_PERCENT`) : plus de
- *     vérification aide à éliminer les possibilités mortes plus vite.
- *  6. Ratio de stock non-vérifié / vérifié : un déséquilibre marqué en
- *     faveur du non-vérifié signale trop peu de pruners pour absorber le
- *     flux produit par la recherche (le problème initial du document —
- *     jusqu'à 50% de stock mort distribué sans pruner) ; l'inverse
- *     (beaucoup de stock déjà vérifié, peu de non-vérifié) signale
- *     l'excès contraire.
+ * Priorité des signaux, du plus urgent au plus indicatif : (1) 0 chercheur
+ * avec un pruner présent = violation d'invariant, corrigée en priorité ;
+ * (2) parc vide : rien à décider ; (3) famine (chercheur ou pruner) : réduire
+ * le dosage, la recherche étant le seul rôle qui régénère du stock ;
+ * (4) garde-fou : jamais d'augmentation avec un seul chercheur ou moins ;
+ * (5) pression RAM haute : plus de vérification pour éliminer le mort plus
+ * vite ; (6) ratio stock non-vérifié/vérifié déséquilibré dans un sens ou
+ * l'autre.
  *
- * Seuils choisis comme point de départ raisonnable (hystérésis et délai
- * minimal restent la vraie garantie de stabilité, cf. `check_server_step`) —
- * à remesurer une fois `--auto-roles` exercé en conditions réelles, même
- * esprit que `docs/conception/elagage_recherche.md` §4.7.
- *
- * @param unchecked_stock       Σ taille des files non vérifiées (travail
- *                              disponible pour un pruner).
- * @param checked_stock         Σ taille des files vérifiées (travail
- *                              disponible pour un chercheur).
- * @param ram_pressure_high     1 si `resident/limite ≥ STOCK_SPILL_HIGH_PERCENT`
- *                              (0 si le plafond RAM est désactivé — pas de
- *                              notion de pression sans plafond).
- * @param search_starved_delta  Δ `server_search_starved` depuis le tour précédent.
- * @param prune_starved_delta   Δ `server_prune_starved` depuis le tour précédent.
- * @param nb_search             Σ `nb_forks` des sessions en rôle recherche
- *                              (`control_registry_count_role_forks`, PAS un
- *                              compte de sessions — avec une seule machine
- *                              connectée, un compte de sessions vaudrait
- *                              toujours au plus 1, déclenchant à tort le
- *                              garde-fou ci-dessous quel que soit son nombre
- *                              réel de forks).
- * @param nb_prune              Σ `nb_forks` des sessions en rôle contrôle,
- *                              même remarque.
- * @return                      Le sens d'ajustement (jamais une cible absolue).
+ * @param unchecked_stock Σ taille des files non vérifiées (travail pruner).
+ * @param checked_stock   Σ taille des files vérifiées (travail chercheur).
+ * @param nb_search       Σ `nb_forks` des sessions en rôle recherche — pas un
+ *                        compte de sessions, qui resterait toujours ≤1 avec
+ *                        une seule machine connectée et fausserait le
+ *                        garde-fou (4).
+ * @param nb_prune        Σ `nb_forks` des sessions en rôle contrôle, idem.
+ * @return                Le sens d'ajustement (jamais une cible absolue).
  */
 role_mix_decision_t compute_desired_role_mix(unsigned long long unchecked_stock,
                                               unsigned long long checked_stock,

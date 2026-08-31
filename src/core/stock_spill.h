@@ -1,47 +1,30 @@
 /**
  * @file stock_spill.h
- * @brief Débordement sur disque du stock serveur (PR2 de la série plafond
- *        RAM — voir `--stock-max-ram`, `core/datamanager.h`).
+ * @brief Débordement sur disque du stock serveur (`--stock-max-ram`,
+ *        `core/datamanager.h`).
  *
- * PR1 (déjà livré) plafonne le nombre de possibilités RÉSIDENTES en RAM,
- * refusant tout ADD au-delà du budget (`stock_max_ram_packets`,
- * `datamanager.c`) — un mur dur, sans recours. Ce module ajoute un recours :
- * une fois le budget approché, la possibilité la plus FROIDE (la plus
- * ancienne, jamais servie — tête de la file, `scroll_fifo`) est écrite dans
- * un fichier de « segment » sur disque plutôt que d'être refusée, et
- * rechargée plus tard si la RAM se libère et qu'un débordement existe. Le
- * plafond RAM lui-même (`put_to_pool`) est INCHANGÉ par ce module : il reste
- * le filet de sécurité si l'éviction ne suit pas assez vite un pic d'ADD.
+ * Le plafond RAM (`stock_max_ram_packets`, `datamanager.c`) refuse tout ADD
+ * au-delà du budget — un mur dur, sans recours. Ce module ajoute un recours :
+ * une fois le budget approché, la possibilité la plus froide (tête de file,
+ * `scroll_fifo`) est écrite dans un fichier de segment sur disque plutôt que
+ * refusée, et rechargée plus tard si la RAM se libère. Le plafond RAM lui-même
+ * (`put_to_pool`) reste inchangé, filet de sécurité si l'éviction ne suit pas
+ * assez vite un pic d'ADD.
  *
- * **Portée exacte de ce module — ce qu'il NE fait PAS** :
- * - Aucune conscience de sauvegarde/restauration : les segments écrits ici
- *   sont des fichiers de travail, jamais liés à `consistent_backup`/`restore`
- *   (`datamanager.c`). Au redémarrage, `stock_spill_configure` PURGE tout
- *   segment résiduel — le débordement ne survit PAS à un redémarrage tant
- *   que ce travail (PR3, cohérence sauvegarde/restauration) n'est pas livré.
- * - Aucun changement du chemin chaud ADD/GET (`put_to_pool`/`scroll_from_pool`,
- *   `datamanager.c`) : tout le travail se fait dans un thread dédié
- *   (`spill_thread`, `app/etii_server.c`), au tick périodique. Un GET qui
- *   tombe sur une file vidée en RAM (tout son contenu déporté) reçoit
- *   simplement K=0 — réponse déjà normale et supportée du protocole depuis
- *   la v7 — le rechargement suit au tick suivant (~100 ms).
- * - Le pool ANALYSÉ n'est jamais concerné (cf. `stock_max_ram_mb`,
- *   `app/app_static_variables.h`, pour le raisonnement).
+ * **Hors périmètre** : aucun changement du chemin chaud ADD/GET — tout le
+ * travail se fait dans un thread dédié (`spill_thread`), au tick périodique ;
+ * un GET qui tombe sur une file vidée en RAM reçoit K=0 (déjà normal depuis la
+ * v7), le rechargement suit au tick suivant. Le pool analysé n'est jamais
+ * concerné.
  *
- * Format des segments : un flux brut de `struct possibility_packet`,
- * strictement identique au format `.back` (`datamanager.c`, `backup()`) —
- * aucun en-tête, aucun index, le nombre de possibilités se déduit de la
- * taille du fichier. Chaque (pool, file de stock) déborde dans sa propre
- * PILE de segments numérotés (`spill_<u|c>_<file>_<seq>.dat`,
- * `STOCK_SPILL_SEGMENT_BYTES` chacun sauf le dernier, partiel) : l'éviction
- * empile en haut de pile (numéro croissant), le rechargement dépile depuis
- * le haut (numéro décroissant) — jamais de compactage, jamais de réécriture
- * d'un segment déjà plein.
+ * Format des segments : flux brut de `struct possibility_packet`, identique
+ * au format `.back` — aucun en-tête, taille déduite de la taille du fichier.
+ * Chaque (pool, file) déborde dans sa propre pile de segments numérotés
+ * (`spill_<u|c>_<file>_<seq>.dat`) : éviction empile en haut, rechargement
+ * dépile du haut — jamais de compactage ni de réécriture d'un segment plein.
  *
- * **PR3 — cohérence sauvegarde/restauration** (`stock_spill_snapshot`/
- * `stock_spill_restore_snapshot` ci-dessous) referme la portée ouverte plus
- * haut : le débordement SURVIT désormais à un `backup`/`restore` (console,
- * HTTP, autobackup, arrêt sur solution) — voir la doc de chaque fonction.
+ * Le débordement survit à un `backup`/`restore` (console, HTTP, autobackup,
+ * arrêt sur solution) — voir `stock_spill_snapshot`/`_restore_snapshot`.
  */
 #ifndef eternityII_stock_spill_h
 #define eternityII_stock_spill_h
