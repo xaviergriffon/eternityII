@@ -1,37 +1,34 @@
 /**
  * @file known_clients_registry.h
- * @brief Registre des clients CONNUS (cumul, PR4), distinct de
+ * @brief Registre des clients connus (cumul), distinct de
  *        `control_registry.h` (sessions vivantes, pilotage).
  *
  * Deux registres serveur qui ne se recouvrent pas.
  *
- * |              | `control_registry` (existant)      | ce registre (nouveau)          |
+ * |              | `control_registry`                 | ce registre                    |
  * |--------------|-------------------------------------|---------------------------------|
  * | Indexé par   | slot de session (réutilisé)         | `machine_uid` (clé de cumul)    |
- * | Durée de vie | la session TCP                      | la vie du serveur (PR5 : + persisté) |
+ * | Durée de vie | la session TCP                      | la vie du serveur (persisté)    |
  * | Contenu      | hello, file de commandes, dernier `CTRL_STATS` | totaux cumulés, première/dernière vue, statut |
  * | Rôle         | piloter                              | mesurer                         |
  *
  * `control_registry` est vidé à la déconnexion ; celui-ci ne l'est
- * précisément PAS — une entrée reste visible (statut « déconnecté ») tant que
+ * précisément pas — une entrée reste visible (statut « déconnecté ») tant que
  * la borne `MAX_KNOWN_CLIENTS` n'impose pas son éviction.
  *
- * Pourquoi `machine_uid` et pas `client_uid` comme clé : `machine_uid` est le
- * SEUL identifiant qui survit au redémarrage d'un processus client (cf.
- * `client_identity.h`) — c'est donc la seule clé stable pour un cumul qui doit
- * lui-même survivre à un redémarrage du serveur (PR5, persistance ci-dessous).
- * `client_uid` reste la clé de SESSION : une même
- * machine peut avoir plusieurs sessions actives simultanément (ex. un client
- * de recherche et un pruner sur le même hôte), chacune suivie séparément dans
- * le petit tableau `sessions[]` d'une entrée, borné par
+ * Clé `machine_uid` et pas `client_uid` : `machine_uid` est le seul
+ * identifiant qui survit au redémarrage d'un processus client, donc la
+ * seule clé stable pour un cumul qui doit lui-même survivre à un
+ * redémarrage du serveur. `client_uid` reste la clé de session : une même
+ * machine peut avoir plusieurs sessions actives (recherche + pruner sur le
+ * même hôte), suivies dans `sessions[]`, bornée par
  * `KNOWN_CLIENT_MAX_SESSIONS`.
  *
- * Persisté depuis PR5 sur un fichier `.back` dédié (`known_clients_registry_save`/
- * `_load` ci-dessous), tolérant en lecture : un fichier absent, illisible ou
- * d'un format inconnu fait simplement repartir le cumul de zéro, jamais
- * échouer le démarrage du serveur. Branché sur les mêmes points d'appel que
- * le reste du stock (autobackup, `--stop-on-solution`, commandes console
- * `backup`/`restore` — voir `src/app/etii_server.c` et `src/ui/command_lines.c`).
+ * Persisté sur un fichier `.back` dédié, tolérant en lecture : un fichier
+ * absent, illisible ou d'un format inconnu fait repartir le cumul de zéro,
+ * jamais échouer le démarrage du serveur. Branché sur les mêmes points
+ * d'appel que le reste du stock (autobackup, `--stop-on-solution`,
+ * `backup`/`restore`).
  */
 #ifndef eternityII_known_clients_registry_h
 #define eternityII_known_clients_registry_h
@@ -100,58 +97,36 @@ typedef struct {
 
 /**
  * @brief Signale une nouvelle session de contrôle pour la machine `identity`
- *        (appelé par `communicate_with_client_step`, src/app/etii_server.c,
- *        juste après un `control_registry_register` réussi sur
- *        `INST_CONTROL_HELLO` — mêmes données, `hello.identity`).
+ *        (appelé juste après un `control_registry_register` réussi sur
+ *        `INST_CONTROL_HELLO`).
  *
- * Crée l'entrée si `identity->machine_uid` est vu pour la première fois
- * (`first_seen` = maintenant), ou met à jour une entrée existante : `label`/
- * `peer_ip`/`mode` (dernière valeur déclarée gagne), incrémente
- * `nb_connections_total` et `nb_active_sessions`, ouvre un slot de session
- * pour `identity->client_uid` (baseline des compteurs pruner à 0 — cf. doc du
- * .c). Si le registre est plein ET qu'aucune entrée déconnectée n'est
- * disponible pour éviction, la machine n'est simplement PAS suivie (avertit
- * en log) : cette absence ne doit jamais empêcher la session de contrôle de
- * fonctionner, ce registre est purement observationnel.
- *
- * @param identity Identité déclarée de la session (non NULL).
- * @param peer_ip  Adresse IP du pair (`client_t.peer_ip`), `NULL` accepté
- *                 (stockée comme `""`).
+ * Crée l'entrée si `identity->machine_uid` est vu pour la première fois, ou
+ * met à jour une entrée existante (`label`/`peer_ip`/`mode`), incrémente
+ * `nb_connections_total`/`nb_active_sessions`, ouvre un slot de session. Si
+ * le registre est plein sans entrée déconnectée à évincer, la machine n'est
+ * simplement pas suivie (log) — ce registre est purement observationnel, ne
+ * doit jamais empêcher la session de contrôle de fonctionner.
  */
 void known_clients_registry_on_connect(const client_identity_t *identity, const char *peer_ip);
 
 /**
- * @brief Met à jour le cumul de la machine désignée par `machine_uid` avec un
- *        `CTRL_STATS` frais reçu pour la session `client_uid` (appelé par
- *        `control_session_poll_stats`, src/app/etii_server.c, juste après
- *        `control_registry_record_stats`).
+ * @brief Met à jour le cumul de la machine `machine_uid` avec un
+ *        `CTRL_STATS` frais reçu pour la session `client_uid`.
  *
- * No-op silencieux si la machine ou la session ne sont pas trouvées (ex.
- * registre plein au moment du connect, ou appel hors séquence) : ce registre
- * ne doit jamais faire échouer un échange réseau réel.
- *
- * @param machine_uid Nonce machine (16 octets, `MACHINE_UID_BYTES`).
- * @param client_uid  Nonce de session (16 octets, `CLIENT_UID_BYTES`) —
- *                     désigne le slot de session à mettre à jour.
- * @param stats       Statistiques décodées (non NULL attendu).
+ * No-op silencieux si la machine ou la session ne sont pas trouvées : ce
+ * registre ne doit jamais faire échouer un échange réseau réel.
  */
 void known_clients_registry_on_stats(const uint8_t *machine_uid, const uint8_t *client_uid,
                                       const control_stats_t *stats);
 
 /**
  * @brief Signale la fin de la session `client_uid` de la machine
- *        `machine_uid` (appelé par `run_control_session`,
- *        src/app/etii_server.c, AVANT `control_registry_unregister` — cette
- *        fonction a besoin de l'identité encore présente dans
- *        `control_registry` pour résoudre le slot).
+ *        `machine_uid` (appelé avant `control_registry_unregister`, dont
+ *        cette fonction a besoin pour résoudre le slot).
  *
- * Accumule la durée de cette session dans `cumulative_uptime_seconds`,
- * décrémente `nb_active_sessions`, libère le slot de session. L'entrée de la
- * machine N'EST PAS supprimée : elle reste consultable, marquée déconnectée
- * dès que `nb_active_sessions` atteint 0.
- *
- * @param machine_uid Nonce machine (16 octets).
- * @param client_uid  Nonce de session (16 octets).
+ * Accumule la durée dans `cumulative_uptime_seconds`, décrémente
+ * `nb_active_sessions`, libère le slot. L'entrée de la machine n'est pas
+ * supprimée : reste consultable, marquée déconnectée à 0 session active.
  */
 void known_clients_registry_on_disconnect(const uint8_t *machine_uid, const uint8_t *client_uid);
 
@@ -214,31 +189,22 @@ typedef struct {
 int known_clients_registry_save(const char *filename);
 
 /**
- * @brief Charge `filename` (écrit par `known_clients_registry_save`) et
- *        FUSIONNE chaque enregistrement dans le registre en mémoire — jamais
- *        un remplacement complet, contrairement à `restore()`
- *        (`src/core/datamanager.c`) sur le stock de possibilités :
- *         - machine absente du registre (cas normal, redémarrage du
- *           serveur) : nouvelle entrée créée, marquée déconnectée
- *           (`nb_active_sessions = 0`), avec les totaux du fichier ;
- *         - machine déjà présente (une session s'est reconnectée avant que
- *           `restore` ne soit exécuté) : les compteurs cumulés du fichier
- *           s'AJOUTENT à ceux déjà en mémoire (jamais un écrasement, qui
- *           ferait régresser un cumul déjà mesuré depuis le démarrage du
- *           serveur) ; `label`/`peer_ip`/`mode`/le statut connecté restent
- *           ceux, plus récents, déjà en mémoire.
+ * @brief Charge `filename` et FUSIONNE chaque enregistrement dans le
+ *        registre en mémoire — jamais un remplacement complet :
+ *         - machine absente : nouvelle entrée créée, marquée déconnectée,
+ *           avec les totaux du fichier ;
+ *         - machine déjà présente (reconnectée avant `restore`) : les
+ *           compteurs du fichier s'ajoutent à ceux en mémoire (jamais un
+ *           écrasement, qui ferait régresser un cumul déjà mesuré) ;
+ *           `label`/`peer_ip`/`mode`/statut restent ceux, plus récents,
+ *           déjà en mémoire.
  *
- * Tolérant en lecture, comme documenté en tête de ce fichier : un fichier
- * absent ou dont l'en-tête ne correspond pas à `KNOWN_CLIENTS_FILE_MAGIC`
- * fait échouer l'appel SANS toucher au registre (retour -1) ; un fichier
- * tronqué en cours d'enregistrements applique ceux lus jusque-là et s'arrête
- * proprement (retour 0) — jamais de crash sur un fichier corrompu ou d'une
- * version antérieure du format.
+ * Tolérant en lecture : en-tête invalide fait échouer l'appel sans toucher
+ * au registre (-1) ; un fichier tronqué applique les enregistrements lus
+ * jusque-là et s'arrête proprement (0).
  *
- * @param filename Chemin du fichier source.
- * @return         0 si l'en-tête a pu être lu et validé (y compris en cas de
- *                 troncature partielle des enregistrements), -1 si le fichier
- *                 est absent, illisible, ou d'un format inconnu.
+ * @return 0 si l'en-tête a pu être lu et validé (même en cas de troncature
+ *         partielle), -1 si le fichier est absent, illisible, ou invalide.
  */
 int known_clients_registry_load(const char *filename);
 
@@ -261,20 +227,14 @@ int known_clients_registry_snapshot(known_client_info_t *out, int max);
 int known_clients_registry_count(void);
 
 /**
- * @brief Compteur monotone de mutations persistées du registre : incrémenté à chaque
- *        appel de `known_clients_registry_on_connect`/`_on_stats`/
- *        `_on_disconnect` qui modifie réellement une entrée (jamais sur un
- *        rejet — registre plein, identité NULL, machine/session introuvable).
- *        Ne rentre jamais à zéro (n'est jamais réinitialisé par `restore`,
- *        propriété volontaire : seule la valeur COURANTE importe, comparée
- *        par égalité à un instantané précédent — `check_server_step` s'en
- *        sert pour savoir si `known_clients_registry_save` a du travail réel
- *        à faire depuis sa dernière écriture, sans dupliquer cette logique.
- *        Ne compte PAS les mutations en mémoire pure des champs volatils
- *        (`nb_active_sessions`, `sessions[]`) séparément de celles des champs
- *        persistés : les deux catégories changent ensemble aux mêmes points
- *        d'appel, une distinction plus fine n'aurait aucune valeur pratique
- *        ici.
+ * @brief Compteur monotone de mutations persistées du registre : incrémenté
+ *        à chaque appel de `_on_connect`/`_on_stats`/`_on_disconnect` qui
+ *        modifie réellement une entrée (jamais sur un rejet).
+ *
+ * Ne rentre jamais à zéro (jamais réinitialisé par `restore`) : seule la
+ * valeur courante importe, comparée par égalité à un instantané précédent —
+ * `check_server_step` s'en sert pour savoir si `known_clients_registry_save`
+ * a du travail réel depuis sa dernière écriture.
  */
 unsigned long long known_clients_registry_mutation_count(void);
 

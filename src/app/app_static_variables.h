@@ -227,209 +227,134 @@ extern int g_active_forks;
 extern int pruner_mode;
 
 /**
- * @brief Dosage recherche/contrôle demandé pour LE LOT de forks à venir
- *        (option CLI `--pruner-forks <n>`, ou clé de configuration
- *        `pruner_forks` — cf. `client_config.h`).
+ * @brief Dosage recherche/contrôle demandé pour le lot de forks à venir
+ *        (`--pruner-forks <n>`, ou clé de configuration `pruner_forks`).
  *
- * `-1` (défaut) : non demandé — chaque fork garde le rôle impliqué par le
- * mode de lancement (`pruner_mode`), exactement le comportement d'avant
- * cette option. `0..NB_THREADS` : nombre de forks affectés au CONTRÔLE
- * (`FORK_ROLE_PRUNE`) parmi `NB_THREADS` ; les autres cherchent. Une valeur
- * hors `[0, NB_THREADS]` est clampée au moment de la résolution
- * (`resolve_pruner_forks`, `src/app/fork_orchestrator.h`), jamais ici : cette
- * globale ne porte que ce qui a été DEMANDÉ, pas ce qui est effectivement
- * appliqué — même distinction que `NB_THREADS` (visé) vs `g_active_forks`
- * (réel). Lue en tête de `spawn_child_body` (`src/app/fork_orchestrator.c`),
- * dans la branche fille, pour décider `pruner_mode` PAR FORK avant que
- * celui-ci n'entame sa recherche/son contrôle.
+ * `-1` (défaut) : non demandé, chaque fork garde le rôle impliqué par
+ * `pruner_mode`. `0..NB_THREADS` : nombre de forks affectés au contrôle,
+ * les autres cherchent. Une valeur hors bornes est clampée au moment de la
+ * résolution (`resolve_pruner_forks`), jamais ici — cette globale ne porte
+ * que ce qui a été demandé, pas ce qui est effectivement appliqué.
  */
 extern int pruner_forks_requested;
 
 /**
  * @brief 1 si la politique automatique de dosage recherche/contrôle a été
- *        demandée (option CLI `--auto-roles`).
+ *        demandée (`--auto-roles`).
  *
- * `0` (défaut) : désactivée — l'opérateur garde la main via `clientsRoles`,
- * aucun comportement changé. `1` : `check_server_step` (serveur
- * uniquement) ajuste lui-même, à chaque tour de 10s, le dosage diffusé au
- * parc via `control_registry_apply_role_dosage`, sous hystérésis (délai
- * minimal entre deux changements) — voir `compute_desired_role_mix`
- * (`src/app/etii_server.h`).
+ * `0` (défaut) : désactivée, l'opérateur garde la main via `clientsRoles`.
+ * `1` : `check_server_step` ajuste lui-même, à chaque tour de 10s, le
+ * dosage diffusé au parc, sous hystérésis (voir `compute_desired_role_mix`).
  */
 extern int auto_roles_requested;
 
-/**
- * @brief 1 si l'exécution GPU du pruner a été demandée (option `--gpu`).
- *
- * Position-indépendante, retirée d'argv par `parse_cli_options`. Lue dans
- * `main()` par le mode `pruner` uniquement (les autres modes l'ignorent, comme
- * `--expand-level` hors serveur) : sur un build CUDA elle active
- * `gpu_pruner_mode` ; sur un build sans CUDA elle produit une erreur explicite
- * (plutôt qu'un mode silencieusement absent).
- */
+/** @brief 1 si l'exécution GPU du pruner a été demandée (`--gpu`) : sur build CUDA active `gpu_pruner_mode`, sinon erreur explicite. */
 extern int gpu_requested;
 
-/**
- * @brief 1 si l'aide CLI a été demandée (option `--help` / `-h`).
- *
- * Position-indépendante comme `--stop-on-solution`. Lue dans `main()` avant
- * le dispatch des modes : l'aide générale est affichée puis le programme
- * sort avec EXIT_SUCCESS.
- */
+/** @brief 1 si l'aide CLI a été demandée (`--help`/`-h`) : affichée puis sortie immédiate. */
 extern int help_requested;
 
 /**
  * @brief Niveau de curseur (`alloc`) minimal visé par l'expansion du stock au
- *        démarrage du serveur (option CLI `--expand-level <n>`).
+ *        démarrage du serveur (`--expand-level <n>`).
  *
  * 0 (défaut) : pas d'expansion. Sinon, `runserver` développe le stock genèse
- * jusqu'à ce que chaque possibilité atteigne ce niveau, borné par
- * `EXPAND_MAX_LEVELS` passes et `expand_max_stock` possibilités. Lu côté
- * serveur uniquement (les autres modes l'ignorent). Position-indépendant,
- * retiré d'argv par `parse_cli_options` avant le parsing positionnel.
+ * jusqu'à ce niveau, borné par `EXPAND_MAX_LEVELS` passes et
+ * `expand_max_stock` possibilités.
  */
 extern int expand_min_level;
 
 /**
- * @brief Plafond en NOMBRE de possibilités de l'expansion du stock au
- *        démarrage du serveur (option CLI `--expand-max-stock <n>`).
+ * @brief Plafond en nombre de possibilités de l'expansion du stock au
+ *        démarrage du serveur (`--expand-max-stock <n>`).
  *
- * Valeur par défaut `EXPAND_MAX_STOCK` (100000, ~54 Mo) — la mémoire qu'un
- * serveur "moyen" peut consacrer à cette pré-expansion. Un serveur disposant
- * de plus de capacité (RAM, cœurs) peut relever ce plafond pour produire une
- * réserve distribuable plus grande à `--expand-level` égal. `<n> <= 0` est
- * ignoré (garde la valeur par défaut ou celle déjà fixée) — contrairement à
- * `expand_min_level`, un plafond nul n'a pas de sens utile (l'expansion
- * s'arrêterait avant même la première pièce placée). Lu côté serveur
- * uniquement, position-indépendant, retiré d'argv par `parse_cli_options`
- * avant le parsing positionnel.
+ * Défaut `EXPAND_MAX_STOCK` (100000, ~54 Mo). Contrairement à
+ * `expand_min_level`, `<n> <= 0` est ignoré : un plafond nul arrêterait
+ * l'expansion avant même la première pièce placée.
  */
 extern int expand_max_stock;
 
 /**
- * @brief Plafond en NOMBRE DE PASSES de l'expansion du stock au démarrage du
- *        serveur (option CLI `--expand-max-levels <n>`).
+ * @brief Plafond en nombre de passes de l'expansion du stock au démarrage
+ *        (`--expand-max-levels <n>`).
  *
- * Valeur par défaut `EXPAND_MAX_LEVELS` (4) — garde-fou en *profondeur*,
- * indépendant du garde-fou en *volume* `expand_max_stock` ci-dessus : même
- * avec un plafond de volume élevé, une consigne `expand_min_level` absurdement
- * grande ne peut pas faire tourner le serveur indéfiniment. Un serveur à plus
- * grosse capacité qui relève aussi `expand_max_stock` peut vouloir relever ce
- * plafond en parallèle pour atteindre un `expand_min_level` élevé sans être
- * arrêté prématurément par le nombre de passes. Même convention que
- * `expand_max_stock` : `<n> <= 0` est ignoré (garde la valeur par défaut ou
- * celle déjà fixée), un plafond nul empêcherait toute expansion. Lu côté
- * serveur uniquement, position-indépendant, retiré d'argv par
- * `parse_cli_options` avant le parsing positionnel.
+ * Défaut `EXPAND_MAX_LEVELS` (4) — garde-fou en profondeur, indépendant du
+ * garde-fou en volume `expand_max_stock` : même à volume élevé, un
+ * `expand_min_level` absurdement grand ne peut pas tourner indéfiniment.
  */
 extern int expand_max_levels;
 
 /**
  * @brief Nombre de possibilités déplacées de la file la plus pleine vers la
- *        plus vide à chaque tour de `check_server_step` (option CLI
- *        `--rebalance-budget <n>`, PR3).
+ *        plus vide à chaque tour de `check_server_step`
+ *        (`--rebalance-budget <n>`).
  *
- * Valeur par défaut `REBALANCE_BUDGET_DEFAULT` (1000). Consommé par
- * `datamanager_rebalance_step` (`core/datamanager.h`), appelé une fois par
- * tour (10 s) — jamais un chemin chaud. `<n> <= 0` est ignoré (garde la
- * valeur par défaut ou celle déjà fixée), même convention que
- * `expand_max_stock`. Lu côté serveur uniquement, position-indépendant,
- * retiré d'argv par `parse_cli_options` avant le parsing positionnel.
+ * Défaut `REBALANCE_BUDGET_DEFAULT` (1000). Consommé par
+ * `datamanager_rebalance_step`, appelé une fois par tour (10s), jamais un
+ * chemin chaud.
  */
 extern int rebalance_budget;
 
 /**
- * @brief Nombre de files de stock demandé au démarrage (option CLI
- *        `--stock-files <n>`, PR4).
+ * @brief Nombre de files de stock demandé au démarrage (`--stock-files <n>`).
  *
- * 0 = non demandé (défaut `NB_FILE_POSSIBILITY_DEFAULT`, `core/datamanager.h`
- * — inchangé). Stocké ici plutôt qu'appliqué directement dans
- * `parse_cli_options` : ce fichier reste volontairement sans dépendance sur
- * `core/datamanager.h` (même raison que `HTTP_TOKEN_FILE`, dont le chargement
- * réel est aussi différé à `main()`) ; `main()` applique la valeur via
- * `datamanager_configure_stock_files`, avant tout fork/thread. `<n> <= 0`
- * fourni explicitement est ignoré (garde 0 = défaut), même convention que
- * `expand_max_stock`. Position-indépendant, retiré d'argv par
- * `parse_cli_options` avant le parsing positionnel.
+ * 0 = non demandé (défaut `NB_FILE_POSSIBILITY_DEFAULT`). Stocké ici plutôt
+ * qu'appliqué directement dans `parse_cli_options` : ce fichier reste
+ * volontairement sans dépendance sur `core/datamanager.h` ; `main()`
+ * applique la valeur via `datamanager_configure_stock_files`, avant tout
+ * fork/thread.
  */
 extern int stock_files_requested;
 
 /**
- * @brief Plafond en Mo de la RAM consacrée aux DEUX pools de stock serveur
- *        (non vérifié + vérifié — option CLI `--stock-max-ram <mo>`).
+ * @brief Plafond en Mo de la RAM consacrée aux deux pools de stock serveur
+ *        (non vérifié + vérifié — `--stock-max-ram <mo>`).
  *
- * 0 (défaut) = illimité, comportement inchangé — même convention que `limit 0`
- * et `leaseDuration 0`. Une valeur strictement positive fixe la limite en Mo
- * telle que fournie par l'opérateur ; la conversion en NOMBRE de possibilités
- * (l'unité réellement comparée par `put_to_pool`) est faite une seule fois,
- * après le parsing, par `datamanager_configure_ram_limit`
- * (`core/datamanager.h`) — ce fichier reste volontairement sans dépendance
- * sur `core/datamanager.h`, même raison que `stock_files_requested`
- * ci-dessus. Le pool ANALYSÉ n'est délibérément PAS couvert par ce plafond :
- * il est déjà borné par le nombre de clients en vol et par les baux
- * d'expiration (`analysed_lease_seconds`), et son index de hachage impose une
- * recherche par correspondance exacte qu'un déport casserait. `<mo> <= 0`
- * fourni explicitement est ignoré (garde 0 = illimité), même convention que
- * `expand_max_stock`. Position-indépendant, retiré d'argv par
- * `parse_cli_options` avant le parsing positionnel.
+ * 0 (défaut) = illimité. La conversion en nombre de possibilités (l'unité
+ * comparée par `put_to_pool`) est faite une seule fois, après le parsing,
+ * par `datamanager_configure_ram_limit`. Le pool analysé n'est
+ * délibérément pas couvert : déjà borné par le nombre de clients en vol et
+ * les baux d'expiration, et son index de hachage impose une correspondance
+ * exacte qu'un déport casserait.
  *
- * Contrairement à `expand_min_level` (lu UNIQUEMENT par `runserver`),
  * `datamanager_configure_ram_limit` est appelé sans condition de rôle dans
- * `main()`, avant tout fork — même endroit et même raison que
- * `stock_files_requested`/`datamanager_configure_stock_files` juste
- * au-dessus : `put_to_pool` (`core/datamanager.c`), qui applique le plafond,
- * est du code PARTAGÉ, utilisé aussi bien par le stock local d'un client/
- * pruner (`put_to_local`) que par le serveur. Même précédent que la commande
- * console `rebalance` (elle aussi mécaniquement active sur le stock local
- * d'un client, sans garde de rôle). En pratique, seul le stock SERVEUR
- * atteint un volume significatif : le stock local d'un client/pruner reste
- * déjà borné par `max_stock_by_thread`/`pruner_batch_size`, largement sous
- * tout plafond RAM raisonnable — d'où la description « serveur » de cette
- * option dans l'aide CLI (`--help`), qui reflète l'usage réel, pas une
- * restriction de code.
+ * `main()`, avant tout fork : `put_to_pool` est du code partagé, utilisé
+ * aussi bien par le stock local d'un client/pruner que par le serveur. En
+ * pratique seul le stock serveur atteint un volume significatif — d'où la
+ * description « serveur » de cette option dans l'aide CLI.
  */
 extern int stock_max_ram_mb;
 
 /**
- * @brief Répertoire de débordement sur disque du stock serveur (option CLI
- *        `--stock-spill-dir <chemin>`, PR2 — débordement, distinct de PR1
- *        ci-dessus qui ne fait que refuser au-delà du plafond).
+ * @brief Répertoire de débordement sur disque du stock serveur
+ *        (`--stock-spill-dir <chemin>`).
  *
- * Défaut `STOCK_SPILL_DIR_DEFAULT` (`"./eternityii-spill"`, `core/
- * stock_spill.h`), même convention de chemin littéral que
- * `machine_uid_file_path`. Aucune E/S ici — la création/purge effective du
- * répertoire est différée à `stock_spill_configure` (`core/stock_spill.h`),
- * appelée UNIQUEMENT depuis `runserver` (`app/etii_server.c`) : contrairement
- * à `stock_max_ram_mb`, ce chemin n'a de sens que côté serveur (le stock
- * local d'un client/pruner n'a pas de thread de débordement) — jamais lu ni
- * appliqué sur les autres rôles. Position-indépendant, retiré d'argv par
- * `parse_cli_options` avant le parsing positionnel.
+ * Défaut `STOCK_SPILL_DIR_DEFAULT` (`"./eternityii-spill"`). Aucune E/S ici
+ * — la création/purge effective est différée à `stock_spill_configure`,
+ * appelée uniquement depuis `runserver` : ce chemin n'a de sens que côté
+ * serveur (le stock local d'un client/pruner n'a pas de thread de
+ * débordement).
  */
 extern const char *stock_spill_dir;
 
 /**
  * @brief 1 si la console interactive (lecture de stdin) ne doit pas démarrer
- *        (option CLI `--headless`).
+ *        (`--headless`).
  *
- * Défaut 0 : `run_console()` est démarré normalement (serveur, client, mode
- * test). Pensé pour une exécution en service (systemd, `StandardInput=null`) :
- * sans ce flag, le thread console se termine déjà proprement sur EOF immédiat
- * quand stdin n'est pas un TTY, mais démarre et meurt inutilement à chaque
- * lancement. Le journal reste inchangé dans les deux cas — `logger.c` détecte
- * déjà `isatty(STDOUT_FILENO)` et n'émet jamais de codes ANSI hors TTY.
- * Position-indépendant, retiré d'argv par `parse_cli_options` avant le parsing
- * positionnel, comme `--stop-on-solution`.
+ * Défaut 0. Pensé pour une exécution en service (systemd,
+ * `StandardInput=null`) : sans ce flag, le thread console se termine déjà
+ * proprement sur EOF immédiat hors TTY, mais démarre et meurt inutilement à
+ * chaque lancement.
  */
 extern int headless_mode;
 
 /**
  * @brief Durée (secondes) du bail à expiration des possibilités attribuées à
- *        un client (PR7).
+ *        un client.
  *
- * Configurable à l'exécution via la commande console `leaseDuration <n>`.
- * Défaut `ANALYSED_LEASE_DEFAULT_SECONDS`. `<= 0` désactive le bail : les
- * possibilités attribuées ne sont alors jamais rendues automatiquement au
- * stock (comportement d'avant cette PR).
+ * Configurable à l'exécution via `leaseDuration <n>`. Défaut
+ * `ANALYSED_LEASE_DEFAULT_SECONDS`. `<= 0` désactive le bail : les
+ * possibilités attribuées ne sont jamais rendues automatiquement au stock.
  */
 extern int analysed_lease_seconds;
 
@@ -535,18 +460,13 @@ extern int HTTP_PORT;
 
 /**
  * @brief Chemin du fichier contenant le jeton d'authentification Bearer de
- *        l'API HTTP admin (option CLI `--http-token-file <chemin>`).
+ *        l'API HTTP admin (`--http-token-file <chemin>`).
  *
- * `NULL` (défaut) : aucun jeton — les commandes privilégiées (`restore`,
- * `backup`, `control_command_privileged`) restent inaccessibles via
- * `POST /api/v1/command` quel que soit `HTTP_PORT`. Pointeur direct dans
- * `argv` (même convention que `parts_files`) : jamais copié, valable pour
- * toute la durée du process. Lu une seule fois au démarrage (`main()`, avant
- * tout fork) via `http_token_load` (`src/net/http_server.h`), qui remplit
- * `HTTP_ADMIN_TOKEN` et fait échouer le démarrage (message explicite + exit)
- * si le fichier est illisible ou a des permissions plus larges que
- * propriétaire-seul (mode & 0077 != 0, comme une clé privée SSH). Position-
- * indépendant, retiré d'argv par `parse_cli_options`.
+ * `NULL` (défaut) : aucun jeton, les commandes privilégiées restent
+ * inaccessibles via `POST /api/v1/command`. Lu une seule fois au démarrage,
+ * avant tout fork, via `http_token_load`, qui fait échouer le démarrage si
+ * le fichier est illisible ou a des permissions plus larges que
+ * propriétaire-seul (comme une clé privée SSH).
  */
 extern const char *HTTP_TOKEN_FILE;
 
@@ -562,92 +482,66 @@ extern const char *HTTP_TOKEN_FILE;
 extern char HTTP_ADMIN_TOKEN[HTTP_ADMIN_TOKEN_MAX];
 
 /**
- * @brief Libellé déclaré du client (option CLI `--name <label>`).
+ * @brief Libellé déclaré du client (`--name <label>`).
  *
- * `NULL` (défaut) : `init_client_identity` (src/app/app_runtime.h) retombe
- * sur le nom d'hôte (`gethostname`). Pointeur direct dans `argv` (même
- * convention que `parts_files`/`HTTP_TOKEN_FILE`) : jamais copié, valable
- * pour toute la durée du process. Position-indépendant, retiré d'argv par
- * `parse_cli_options`. Purement déclaratif : jamais vérifié par le serveur,
- * à la différence de `peer_ip`.
+ * `NULL` (défaut) : `init_client_identity` retombe sur le nom d'hôte.
+ * Purement déclaratif : jamais vérifié par le serveur, à la différence de
+ * `peer_ip`.
  */
 extern const char *client_label;
 
 /**
- * @brief Chemin du fichier d'identité machine persistante (option CLI
- *        `--machine-uid-file <chemin>`).
+ * @brief Chemin du fichier d'identité machine persistante
+ *        (`--machine-uid-file <chemin>`).
  *
- * Défaut `"./eternityii-machine_uid"` (même répertoire que les `.back`
- * existants). Lu/créé une seule fois au démarrage (`init_client_identity`,
- * avant tout fork) via `machine_uid_load_or_create` (net/client_identity.h).
- * Position-indépendant, retiré d'argv par `parse_cli_options`.
+ * Défaut `"./eternityii-machine_uid"`. Lu/créé une seule fois au démarrage,
+ * avant tout fork, via `machine_uid_load_or_create`.
  */
 extern const char *machine_uid_file_path;
 
 /**
- * @brief Chemin du fichier de configuration client (option CLI
- *        `--config-file <chemin>`).
+ * @brief Chemin du fichier de configuration client (`--config-file <chemin>`).
  *
- * Défaut `"./eternityii-client.conf"` (même convention que les `.back` et
- * `machine_uid_file_path`). Lu au démarrage du client/pruner (`handle_client`,
- * src/app/main.c) via `client_config_load` (src/app/client_config.h), qui
- * pré-remplit les valeurs par défaut des positions non fournies en ligne de
- * commande (priorité CLI > fichier > défauts) — jamais un échec de démarrage
- * si ce fichier est absent ou illisible. Position-indépendant, retiré d'argv
- * par `parse_cli_options`.
+ * Défaut `"./eternityii-client.conf"`. Lu au démarrage via
+ * `client_config_load`, qui pré-remplit les valeurs par défaut des options
+ * non fournies en ligne de commande (priorité CLI > fichier > défauts) —
+ * jamais un échec de démarrage si le fichier est absent ou illisible.
  */
 extern const char *client_config_file_path;
 
 /**
- * @brief Chemin du fichier de configuration serveur (option CLI
- *        `--config-file <chemin>`, partagée avec le client — un seul mode
- *        s'exécute par process, cf. `client_config_file_path` ci-dessus).
+ * @brief Chemin du fichier de configuration serveur (`--config-file
+ *        <chemin>`, partagée avec le client — un seul mode par process).
  *
- * Défaut `"./eternityii-server.conf"` (nom distinct du client, même
- * répertoire). Lu au démarrage du serveur (`main`/`handle_server`,
- * src/app/main.c) via `server_config_load` (src/app/server_config.h), qui
- * pré-remplit les valeurs par défaut des options non fournies en ligne de
- * commande (priorité CLI > fichier > défauts) — jamais un échec de démarrage
- * si ce fichier est absent ou illisible. Position-indépendant, retiré d'argv
- * par `parse_cli_options`.
+ * Défaut `"./eternityii-server.conf"`. Même comportement que
+ * `client_config_file_path` côté serveur.
  */
 extern const char *server_config_file_path;
 
 /**
- * @brief Identité déclarée de CE process client, résolue une seule fois par
- *        `init_client_identity` (src/app/app_runtime.h) AVANT tout fork —
- *        chaque fork en hérite une copie identique par copy-on-write
- *        (`machine_uid`, `client_uid`, `mode`, `label` partagés ; seul
- *        `fork_seq` diffère, ajusté par chaque connexion au moment de
- *        l'émission de son hello, jamais ici). `fork_seq` vaut -1 dans ce
- *        gabarit (ni le parent ni aucun fork en particulier) : c'est au
- *        point d'envoi (INST_CLIENT_HELLO côté fork, INST_CONTROL_HELLO côté
- *        parent) de le fixer à sa valeur réelle sur une COPIE locale.
+ * @brief Identité déclarée de ce process client, résolue une seule fois par
+ *        `init_client_identity` avant tout fork — chaque fork en hérite une
+ *        copie identique par copy-on-write. `fork_seq` vaut -1 dans ce
+ *        gabarit : c'est au point d'envoi (hello) de le fixer sur une copie
+ *        locale.
  */
 extern client_identity_t g_client_identity_template;
 
 /**
  * @brief Débit de recherche courant du serveur (essais/seconde), publié
- *        toutes les 10 s par `check_server_step` (src/app/etii_server.c).
+ *        toutes les 10s par `check_server_step`.
  *
- * Lecture par l'API REST (`GET /api/v1/stats`) sans verrou : une lecture
- * concurrente à la publication peut voir une valeur en cours d'écriture d'au
- * plus quelques dizaines de millisecondes de retard, sans conséquence pour un
- * indicateur de télémétrie.
+ * Lecture par l'API REST sans verrou : une lecture concurrente peut voir
+ * une valeur en cours d'écriture, sans conséquence pour un indicateur de
+ * télémétrie.
  */
 extern volatile unsigned long long server_shots_per_second;
 
 /**
- * @brief Durée (millisecondes) de la DERNIÈRE sauvegarde automatique
- *        effectivement exécutée — englobe tout ce que `check_server_step` déclenche à ce tour :
- *        `consistent_backup` (si stock ou pool analysé a bougé),
- *        `best_board_save`, `known_clients_registry_save` (chacun
- *        indépendamment sauté si son propre artefact n'a pas changé). 0 tant
- *        qu'aucune sauvegarde n'a encore eu lieu. Écrite par le seul thread
- *        `check_server` (pas de concurrence réelle), lue sans verrou par
- *        `GET /api/v1/status` — même tolérance que `server_shots_per_second`
- *        ci-dessus : un lecteur concurrent voit au pire une valeur d'un tour
- *        de retard, sans conséquence pour un indicateur de télémétrie.
+ * @brief Durée (ms) de la dernière sauvegarde automatique effectivement
+ *        exécutée — englobe tout ce que `check_server_step` déclenche ce
+ *        tour (chaque artefact indépendamment sauté si inchangé). 0 tant
+ *        qu'aucune sauvegarde n'a encore eu lieu.
  */
 extern volatile unsigned long long server_last_backup_duration_ms;
 
@@ -662,15 +556,11 @@ extern int opened_tcp;
 extern long nb_client;
 
 // Timeout d'inactivité (secondes) des sockets TCP de travail, des deux côtés
-// de la connexion : SO_RCVTIMEO/SO_SNDTIMEO côté client (create_tcp_client,
-// src/net/tcpclient.c) et côté serveur (configure_client_socket,
-// src/app/etii_server.c). Défaut DEFAULT_TCP_TIMEOUT (10 s) ; réglable via
-// --tcp-timeout (src/app/app_static_variables.c:parse_cli_options), option
-// globale sans restriction de mode (les deux côtés en dépendent). Une
-// maintenance longue (sauvegarde, restore, tri) qui gèle temporairement le
-// stock (cf. DATAMANAGER_TRYLOCK_MAX_SWEEPS, core/core_static_variables.h)
-// reste largement sous ce budget par construction ; cette option reste une
-// soupape pour un réseau plus lent ou un stock encore plus volumineux.
+// (SO_RCVTIMEO/SO_SNDTIMEO client et serveur). Défaut DEFAULT_TCP_TIMEOUT
+// (10s), réglable via --tcp-timeout. Une maintenance longue qui gèle
+// temporairement le stock reste largement sous ce budget par construction ;
+// cette option reste une soupape pour un réseau plus lent ou un stock plus
+// volumineux.
 extern int tcp_timeout;
 
 extern int server;
@@ -678,28 +568,22 @@ extern int server;
 extern int server_rmnonext_timing;
 
 /**
- * @brief Nombre de nœuds cible du banc de mesure (variable d'environnement
- *        `ETII_BENCH_NODES`), 0 = désactivé.
+ * @brief Nombre de nœuds cible du banc de mesure (`ETII_BENCH_NODES`), 0 =
+ *        désactivé.
  *
- * Lue une seule fois au démarrage (`bench_parse_nodes_env`, appelée dans
- * `main()` avant tout fork) depuis l'environnement plutôt qu'une option CLI :
- * hors du chemin de production, elle n'a donc pas besoin d'entrée dans
- * `cli_topics[]`. Un critère d'arrêt par nombre de nœuds est bien moins bruité
- * qu'un arrêt par durée — en mode `test` la recherche est déterministe, donc à
- * N fixé le travail exploré est strictement identique d'un run à l'autre.
- * Consommée uniquement par `check_client_threads` / `check_client_threads_step`
- * (src/app/etii_client.c), qui échantillonnent déjà `counters[]` : AUCUN coût
- * n'est ajouté à la boucle chaude de `autosearch()` (src/core/etii_search.c).
- * Voir `tests/bench/bench_search.sh`.
+ * Lue depuis l'environnement plutôt qu'une option CLI : hors du chemin de
+ * production. Un critère d'arrêt par nombre de nœuds est moins bruité qu'un
+ * arrêt par durée — en mode `test` la recherche est déterministe. Consommée
+ * uniquement par `check_client_threads_step`, qui échantillonne déjà
+ * `counters[]` : aucun coût ajouté à la boucle chaude de `autosearch()`.
  */
 extern unsigned long long bench_target_nodes;
 
 /**
  * @brief Parse la variable d'environnement `ETII_BENCH_NODES` en nombre de
- *        nœuds cible. Fonction pure et testable : ne lit pas l'environnement
- *        elle-même, reçoit la valeur déjà récupérée par `getenv()`.
+ *        nœuds cible. Fonction pure : reçoit la valeur déjà récupérée par
+ *        `getenv()`.
  *
- * @param env_value Valeur de la variable d'environnement, ou NULL si absente.
  * @return Le nombre de nœuds cible (0 si absente, vide, ou non numérique).
  */
 unsigned long long bench_parse_nodes_env(const char *env_value);

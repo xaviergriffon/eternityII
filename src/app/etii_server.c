@@ -289,23 +289,21 @@ static int owner_control_session_alive(const uint8_t owner_uid[CLIENT_UID_BYTES]
 }
 
 /**
- * @brief Vivacité utilisée par le BAIL d'expiration : session de contrôle
+ * @brief Vivacité utilisée par le bail d'expiration : session de contrôle
  *        enregistrée **ou** connexion de travail ouverte.
  *
  * Deux signaux, pas un seul. Quand un client s'arrête, son canal de contrôle
- * se ferme EN PREMIER ; ses forks de travail sont alors encore en train
- * d'envoyer leurs résultats et leurs acquittements. Sur le seul canal de
- * contrôle, le bail réclamait donc une possibilité dont le client avait DÉJÀ
- * poussé les enfants : parent et enfants se retrouvaient tous deux en stock,
- * le parent devenant la racine de ses propres enfants. Diagnostic complet et
- * mesures : `docs/investigations/bail_expire_racines_en_stock.md`.
+ * se ferme en premier ; ses forks de travail sont alors encore en train
+ * d'envoyer leurs résultats et acquittements. Sur le seul canal de contrôle,
+ * le bail réclamait donc une possibilité dont le client avait déjà poussé
+ * les enfants : parent et enfants se retrouvaient tous deux en stock, le
+ * parent devenant la racine de ses propres enfants (diagnostic complet :
+ * `docs/investigations/bail_expire_racines_en_stock.md`).
  *
- * Volontairement DISTINCTE de `owner_control_session_alive`, qui reste le
- * critère de `requeue_last_sent_possibility` : celle-ci est appelée par la
- * connexion de travail qui se termine, laquelle serait comptée comme « encore
- * ouverte » par `client_has_open_work_connection` selon l'instant où
- * `socket_id` repasse à -1. Élargir ce critère-là changerait un comportement
- * qui n'est pas en cause ici.
+ * Volontairement distincte de `owner_control_session_alive`, critère de
+ * `requeue_last_sent_possibility` : celle-ci est appelée par la connexion de
+ * travail qui se termine, laquelle serait comptée comme encore ouverte selon
+ * l'instant où `socket_id` repasse à -1.
  */
 static int owner_client_alive(const uint8_t owner_uid[CLIENT_UID_BYTES])
 {
@@ -605,32 +603,20 @@ void *check_server(void *param)
 }
 
 /**
- * @brief File du pool analysé assignée à CETTE connexion serveur (PR8,
- *        répartition de charge ADD/GET entre les files de --stock-files).
+ * @brief File du pool analysé assignée à CETTE connexion serveur
+ *        (répartition de charge ADD/GET entre les files de --stock-files).
  *
- * `client->compteur` (indice du slot de thread serveur, stable pour toute la
- * durée de la connexion — jamais réutilisé pendant qu'une connexion est
- * active) sert de clé déterministe : tous les GET *et* tous les ACK d'une
- * même connexion tombent ainsi sur la MÊME file, ce qui rend le retrait côté
- * serveur direct (une seule file verrouillée, cf. `remove_possibility_analysed`,
- * paramètre `preferred_file`) au lieu de balayer toutes les files comme avant
- * ce correctif. Deux connexions concurrentes occupent des slots distincts
- * (jamais le même pendant qu'elles sont actives toutes les deux), donc
- * atterrissent en général sur des files différentes ; une collision modulo
- * `nb_file_possibility` reste possible sous forte concurrence — se règle par
- * `--stock-files`, pas par ce mécanisme.
+ * `client->compteur` (indice du slot de thread serveur, stable pour toute
+ * la connexion) sert de clé déterministe : tous les GET et ACK d'une même
+ * connexion tombent sur la même file, ce qui rend le retrait direct (une
+ * seule file verrouillée) au lieu de balayer toutes les files.
  *
- * MODULO obligatoire : `client->compteur` va jusqu'à `NB_THREADS` (80 par
+ * Modulo obligatoire : `client->compteur` va jusqu'à `NB_THREADS` (80 par
  * défaut) alors que `nb_file_possibility` peut être bien plus petit (10 par
- * défaut) — passer `compteur` tel quel à `add_possibility_analysed[_owned]`
- * (qui l'utilise directement comme indice de tableau quand `thread >= 0`,
- * sans jamais le borner lui-même) serait un déréférencement hors bornes.
+ * défaut) — passer `compteur` tel quel serait un déréférencement hors bornes.
  *
- * @param client Connexion serveur concernée ; `NULL` toléré (retourne -1,
- *               « pas de préférence » — comportement historique).
- * @return       Indice de file dans `[0, nb_file_possibility)`, ou -1 si
- *               `client == NULL` ou si `nb_file_possibility <= 0` (pas encore
- *               configuré).
+ * @return Indice de file dans `[0, nb_file_possibility)`, ou -1 si
+ *         `client == NULL` ou si `nb_file_possibility <= 0`.
  */
 int server_analysed_file_hint(client_t *client)
 {
@@ -645,30 +631,22 @@ int server_analysed_file_hint(client_t *client)
  *
  * Extrait du bloc de fin de `communicate_with_client` (voir etii_server.h).
  *
- * Un client dont le canal de CONTRÔLE reste enregistré est vivant : CETTE
- * connexion de TRAVAIL a pu se terminer par un simple aléa réseau (timeout
- * pendant une maintenance serveur — sauvegarde, restore, tri —, ou une
- * saturation transitoire du fil d'alimentation unique qui sert tous les
- * forks d'un même process côté client), pas par la mort du client : le fork
- * qui explorait ces possibilités est très probablement toujours en train de
- * le faire, et les remettre au stock IMMÉDIATEMENT les ferait explorer une
- * seconde fois en double dès qu'un autre client les recevrait. Dans ce cas
- * on ne les remet PAS ici — même critère de vivacité que le bail
- * d'expiration (PR7, `owner_control_session_alive`) : si le fork ne les
- * acquitte jamais malgré tout, elles seront de toute façon récupérées par ce
- * mécanisme (`analysed_lease_seconds`, 300 s par défaut), avec sa propre
- * vérification de vivacité à CE moment-là — pas de fenêtre de perte, juste
- * une récupération plus lente. Un `client` sans identité déclarée
- * (`has_identity == 0`, client ancien) ou `NULL` (contexte de test, ou
- * appelant qui n'en a pas) ne peut pas être vérifié : comportement
- * INCHANGÉ, remise immédiate, comme avant cette vérification.
+ * Un client dont le canal de contrôle reste enregistré est vivant : cette
+ * connexion de travail a pu se terminer par un simple aléa réseau, pas par
+ * la mort du client — le fork qui explorait ces possibilités en est très
+ * probablement toujours là, et les remettre au stock immédiatement les
+ * ferait explorer une seconde fois dès qu'un autre client les recevrait.
+ * Dans ce cas on ne les remet pas ici — même critère de vivacité que le
+ * bail d'expiration : si le fork ne les acquitte jamais malgré tout, elles
+ * seront récupérées par ce mécanisme (`analysed_lease_seconds`), pas de
+ * fenêtre de perte, juste une récupération plus lente. Un `client` sans
+ * identité déclarée ou `NULL` ne peut pas être vérifié : remise immédiate,
+ * comportement inchangé.
  *
- * @param lastSent Possibilités non acquittées de la connexion de travail qui
- *                 se termine (peut être `NULL`).
- * @param client   Client dont CETTE connexion de travail se termine — sert
- *                 UNIQUEMENT à vérifier la vivacité de son canal de contrôle,
- *                 jamais à identifier le propriétaire attribué (`owner_uid`,
- *                 inchangé) des possibilités de `lastSent`. `NULL` toléré.
+ * @param client Client dont cette connexion de travail se termine — sert
+ *               uniquement à vérifier la vivacité de son canal de contrôle,
+ *               jamais à identifier le propriétaire attribué des
+ *               possibilités de `lastSent`. `NULL` toléré.
  */
 void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t *client)
 {
@@ -718,33 +696,29 @@ void requeue_last_sent_possibility(array_possibility_packet *lastSent, client_t 
 
 /**
  * @brief Enregistre une possibilité servie comme « en cours d'analyse »,
- *        attribuée au client courant si son identité est connue (PR6).
+ *        attribuée au client courant si son identité est connue.
  *
  * Extrait des trois points de service (`INST_GET`/`INST_GET_TO_CHECK[_BATCH]`)
  * pour n'écrire cette décision qu'à un seul endroit. `client->has_identity`
- * dépend d'un `INST_CLIENT_HELLO` reçu sur CETTE connexion de travail (v12) :
- * un client plus ancien, ou dont le hello n'est pas encore arrivé, sert la
- * possibilité sans attribution — exactement le comportement d'avant cette PR.
+ * dépend d'un `INST_CLIENT_HELLO` reçu sur cette connexion de travail : un
+ * client plus ancien sert la possibilité sans attribution.
  *
- * `add_possibility_analysed[_owned]` peut échouer (pool analysé intégralement verrouillé par une
- * maintenance en cours, au-delà d'un délai borné) plutôt que bloquer
- * indéfiniment. Le résultat est propagé à l'appelant, qui NE DOIT PAS servir
- * cette possibilité au client dans ce cas — sinon elle échapperait au bail
- * (PR7) et à `requeue_last_sent_possibility` : personne, côté serveur, ne
- * saurait qu'elle est en cours d'analyse.
+ * `add_possibility_analysed[_owned]` peut échouer (pool analysé verrouillé
+ * par une maintenance, au-delà d'un délai borné) plutôt que bloquer
+ * indéfiniment. Le résultat est propagé à l'appelant, qui ne doit pas
+ * servir cette possibilité dans ce cas — sinon elle échapperait au bail et
+ * à `requeue_last_sent_possibility` : personne, côté serveur, ne saurait
+ * qu'elle est en cours d'analyse.
  *
- * Insérée directement dans la file assignée à CETTE connexion
- * (`server_analysed_file_hint`, PR8) plutôt que via la rotation `thread < 0`
- * (qui concentrait tout sur la file 0 en l'absence de contention) : le
- * retrait ultérieur (acquittement, ou requeue à la déconnexion) sait ainsi
- * directement où chercher, sans balayer les autres files.
+ * Insérée directement dans la file assignée à cette connexion
+ * (`server_analysed_file_hint`) plutôt que via la rotation `thread < 0` (qui
+ * concentrait tout sur la file 0) : le retrait ultérieur sait ainsi
+ * directement où chercher.
  *
- * @param client      Contexte du thread serveur (identité déclarée si connue),
- *                     JAMAIS NULL (déréférencé sans garde, comme avant PR8).
- * @param possibility Paquet tout juste extrait du stock et envoyé au client.
- * @return            0 si enregistrée, -1 si le pool analysé est resté
- *                     verrouillé au-delà du délai borné (rien n'est
- *                     enregistré dans ce cas).
+ * @param client Contexte du thread serveur, jamais NULL (déréférencé sans
+ *               garde).
+ * @return 0 si enregistrée, -1 si le pool analysé est resté verrouillé
+ *         au-delà du délai borné.
  */
 int record_possibility_analysed_for_client(client_t *client, struct possibility_packet *possibility)
 {
@@ -1866,23 +1840,17 @@ int try_assign_client_slot(int client_id, const char *peer_ip, int *busy_logged)
 }
 
 /**
- * @brief Journalise dans `events.log` (jamais sur la console — `log_file`,
- *        pas `log_console`/`log_event` : un dump de configuration noierait la
- *        zone d'événements/le scrollback) un instantané de la configuration
- *        effective et de l'environnement du serveur.
+ * @brief Journalise dans `events.log` (jamais sur la console : un dump de
+ *        configuration noierait la zone d'événements) un instantané de la
+ *        configuration effective et de l'environnement du serveur.
  *
- * Pendant du diagnostic déjà fait côté client (cf. `log_startup_diagnostics`,
- * `fork_orchestrator.c`) : diagnostiquer après coup un déploiement serveur
- * (quelles options CLI étaient réellement actives à cet instant) sans
- * dépendre du scrollback de la console. Appelée une fois par `runserver`,
- * juste avant que le serveur commence à accepter des connexions — tous les
- * globaux issus du CLI sont résolus à ce point.
+ * Pendant du diagnostic côté client (`log_startup_diagnostics`) : permet de
+ * diagnostiquer après coup un déploiement serveur sans dépendre du
+ * scrollback de la console. Appelée une fois par `runserver`, juste avant
+ * que le serveur commence à accepter des connexions.
  *
- * Extraite en fonction nommée (plutôt que restée inline dans `runserver`)
- * spécifiquement pour être testable sans socket ni boucle `accept()` réelle.
- *
- * @param file Chemin du fichier de pièces effectivement utilisé (résolu par
- *             l'appelant — positionnel CLI ou `parts_files` par défaut).
+ * Extraite en fonction nommée pour être testable sans socket ni boucle
+ * `accept()` réelle.
  */
 void log_server_startup_diagnostics(const char *file)
 {

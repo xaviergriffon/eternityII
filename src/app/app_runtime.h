@@ -55,52 +55,40 @@ void init_childs(void);
  * @brief Agrandit si besoin `childrens_pid`/`forkId`/`fork_statistics` pour
  *        couvrir au moins @p needed slots, en préservant les slots existants.
  *
- * `init_childs()` dimensionne ces trois tableaux sur `NB_THREADS` AU MOMENT
- * de son appel — avant tout fork, dans `handle_client`. Depuis que
- * `config nb_forks <n>` (console) suivi de `start` peut modifier `NB_THREADS`
- * APRÈS cet appel (`fork_orchestrator_apply_staged_config`,
- * `src/app/fork_orchestrator.c`), un `nb_forks` augmenté fait que
- * `orchestrator_spawn_forks` écrit hors bornes dans ces tableaux — trouvé via
- * un crash réel (`segmentation fault`) reproduit par un opérateur : démarrer,
- * `config nb_forks 6` (au-delà du nombre initial), `configSave`, `start`. Les
- * fils forkés avant le débordement restent vivants (observé), seul le parent
- * segfault dans la boucle de fork elle-même.
+ * `init_childs()` dimensionne ces tableaux sur `NB_THREADS` au moment de son
+ * appel, avant tout fork. `config nb_forks <n>` suivi de `start` peut
+ * modifier `NB_THREADS` après cet appel : sans cette fonction, un
+ * `nb_forks` augmenté fait écrire `orchestrator_spawn_forks` hors bornes —
+ * crash réel reproduit en démarrant, augmentant `nb_forks`, `configSave`,
+ * `start`.
  *
- * Sans effet si @p needed est déjà couvert (jamais de rétrécissement — un
- * `nb_forks` réduit laisse simplement des slots surnuméraires inutilisés,
- * inoffensif). Les nouveaux slots sont initialisés exactement comme
- * `init_childs()` : `childrens_pid[c] = -1`, `forkId[c]` alloué et vide,
- * `fork_statistics[c]` remis à zéro.
+ * Sans effet si @p needed est déjà couvert (jamais de rétrécissement). Les
+ * nouveaux slots sont initialisés exactement comme `init_childs()`.
  *
- * @param needed Capacité minimale requise (typiquement `NB_THREADS`, relu
- *               APRÈS l'application d'une configuration en préparation).
+ * @param needed Capacité minimale requise, relue après l'application d'une
+ *               configuration en préparation.
  */
 void ensure_childs_capacity(int needed);
 
 /**
  * @brief Libère `childrens_pid`/`forkId`/`fork_statistics` et remet la
- *        capacité suivie (`ensure_childs_capacity`) à 0 — symétrique
- *        d'`init_childs()`.
+ *        capacité suivie à 0 — symétrique d'`init_childs()`.
  *
- * Réservée à la phase `ORCH_APPLYING` d'un redémarrage à chaud
- * (`src/app/fork_orchestrator.c`) quand `nb_forks` change : appelée seulement une fois `NB_THREADS`
- * fils vivants ont été récoltés (zéro fils restant), immédiatement suivie
- * d'un nouvel `init_childs()` (qui alloue sur le `NB_THREADS` désormais à
- * jour) et d'un `init_counters()`. Ne PAS appeler pendant que des fils sont
- * encore vivants : les tableaux libérés sont ceux que `send_command_to_childs`/
- * le checker/le canal de contrôle lisent.
+ * Réservée à la phase `ORCH_APPLYING` d'un redémarrage à chaud quand
+ * `nb_forks` change : appelée une fois tous les fils récoltés, suivie d'un
+ * nouvel `init_childs()`/`init_counters()`. Ne pas appeler pendant que des
+ * fils sont encore vivants.
  *
- * Tolère un état déjà libéré (NULL) : idempotente, comme `client_config_free`.
+ * Tolère un état déjà libéré : idempotente.
  */
 void free_childs(void);
 
 /**
  * @brief Prédicat de vivacité d'un pid par défaut (production) : `kill(pid, 0)`.
  *
- * `ESRCH` ⇒ mort ; tout le reste (succès, ou `EPERM` — un pid vivant possédé
- * par un autre utilisateur, situation qui ne se produit pas ici puisque ce
- * sont toujours nos propres enfants) ⇒ vivant. Même technique que la commande
- * console `exit` (`src/ui/command_lines.c`).
+ * `ESRCH` ⇒ mort ; tout le reste (succès, ou `EPERM` — un pid vivant, situation
+ * qui ne se produit pas ici puisque ce sont toujours nos propres enfants) ⇒
+ * vivant.
  */
 int pid_is_alive(pid_t pid);
 
@@ -113,22 +101,15 @@ typedef int (*child_pid_alive_fn)(pid_t pid);
  * @brief Nettoie les slots de `childrens_pid`/`forkId`/`fork_statistics` dont
  *        le process n'est plus vivant.
  *
- * Corrige un trou existant : `sigchld_handler` moissonne les zombies (`waitpid`) mais ne touche jamais
- * ces tableaux, si bien qu'un fils mort de façon inattendue laisse un slot
- * fantôme — `forkId[]` continue de cibler une socket Unix `etii_fork.<pid>`
- * disparue, vers laquelle `send_command_to_childs`
- * (`src/net/local_socket.c`) continue d'émettre en pure perte. Un slot
- * détecté mort est remis à l'état de `init_childs` : `childrens_pid[c] = -1`,
- * `forkId[c][0] = '\0'`, `fork_statistics[c]` remis à zéro.
+ * Corrige un trou existant : `sigchld_handler` moissonne les zombies mais
+ * ne touche jamais ces tableaux, si bien qu'un fils mort de façon
+ * inattendue laisse un slot fantôme — `forkId[]` continue de cibler une
+ * socket Unix disparue, vers laquelle `send_command_to_childs` continue
+ * d'émettre en pure perte. Un slot détecté mort est remis à l'état de
+ * `init_childs`.
  *
- * @param childrens_pid   Tableau des pids (NULL/`nb == 0` accepté : no-op).
- * @param forkId          Tableau des chemins de socket Unix par slot.
- * @param fork_statistics Tableau des dernières statistiques connues par slot.
- * @param nb              Nombre de slots (`NB_THREADS` en production).
- * @param alive           Prédicat de vivacité. NULL accepté : repli sur
- *                        `pid_is_alive` (comportement de production), pour
- *                        qu'un appelant qui ne veut pas injecter de prédicat
- *                        obtienne quand même le comportement par défaut.
+ * @param alive Prédicat de vivacité. NULL accepté : repli sur
+ *              `pid_is_alive` (comportement de production).
  * @return Le nombre de slots nettoyés.
  */
 /**
@@ -227,20 +208,14 @@ void child_death_format_reason(int status, char *out, size_t out_size);
  * @brief Prédicat PUR : ce statut waitpid() correspond-il à une fin de
  *        process propre et volontaire (`WIFEXITED` + code de sortie 0) ?
  *
- * Un fork de recherche peut légitimement `exit(EXIT_SUCCESS)` de lui-même en
- * dehors de toute séquence `stopForks`/`configApply` — typiquement en
- * exhaustant tout l'espace de recherche local d'un tout petit puzzle
- * (`ETERN_PARTS=16`, cf. les scripts `tests/integration/`), qui peut se vider
- * entièrement en quelques dizaines de millisecondes. Sans ce prédicat,
- * `fork_orchestrator_run` classait CETTE mort — un succès, pas une anomalie —
- * comme « disparu de façon inattendue » (`log_error`) simplement parce
- * qu'elle survenait en `ORCH_RUNNING` plutôt que pendant un arrêt piloté
- * (`ORCH_STOPPING`/`ORCH_APPLYING`), un faux positif trouvé sur le test
- * d'intégration `run_client_lifecycle.sh` (16 pièces, plusieurs cycles
- * start/stopForks/configApply). Un code de sortie non nul, ou une
- * terminaison par signal (crash, OOM killer, `kill -9`), reste classé comme
- * anomalie potentielle quel que soit l'état — seul le "succès propre" est
- * inconditionnellement bénin.
+ * Un fork de recherche peut légitimement `exit(EXIT_SUCCESS)` de lui-même
+ * hors de toute séquence `stopForks`/`configApply` — en exhaustant tout
+ * l'espace de recherche local d'un petit puzzle (`ETERN_PARTS=16`). Sans ce
+ * prédicat, `fork_orchestrator_run` classait cette mort comme « disparu de
+ * façon inattendue » simplement parce qu'elle survenait hors d'un arrêt
+ * piloté — faux positif trouvé sur `run_client_lifecycle.sh`. Un code de
+ * sortie non nul ou une terminaison par signal reste classé comme anomalie
+ * potentielle — seul le succès propre est inconditionnellement bénin.
  */
 int child_death_is_clean_exit(int status);
 

@@ -58,25 +58,19 @@
  * @brief Initialise le module de débordement : prépare le répertoire cible
  *        et purge les segments résiduels d'un précédent démarrage.
  *
- * Appelée une seule fois, côté SERVEUR uniquement (`runserver`,
- * `app/etii_server.c`), avant `create_spill_thread` et avant toute
+ * Appelée une seule fois, côté serveur, avant `create_spill_thread` et toute
  * expansion `--expand-level` — `nb_files` doit déjà être la valeur finale de
- * `nb_file_possibility` (fixée par `datamanager_configure_stock_files` avant
- * tout fork, jamais modifiée ensuite).
+ * `nb_file_possibility`.
  *
  * Dégradation gracieuse, jamais fatale : si le répertoire ne peut être créé
- * ni utilisé (permissions, chemin invalide, disque plein), le module reste
- * DÉSACTIVÉ pour tout le process — `stock_spill_step` devient un no-op
- * silencieux, le plafond RAM (PR1) reste alors un mur dur sans recours,
- * comme avant ce module. Une erreur est journalisée une seule fois, à ce
- * moment-là.
+ * ni utilisé, le module reste désactivé pour tout le process —
+ * `stock_spill_step` devient un no-op silencieux, le plafond RAM reste un
+ * mur dur sans recours. Erreur journalisée une seule fois.
  *
- * La purge ne supprime QUE les fichiers correspondant EXACTEMENT au motif
- * `spill_[uc]_<n>_<n>.dat` — jamais un effacement générique du répertoire,
- * qui peut être fourni tel quel par l'opérateur. Si des segments non vides
- * sont purgés, le nombre de possibilités perdues est journalisé
- * explicitement (`log_error` : c'est une perte de données réelle tant que
- * PR3 n'existe pas, jamais silencieuse).
+ * La purge ne supprime QUE les fichiers correspondant exactement au motif
+ * `spill_[uc]_<n>_<n>.dat`, jamais un effacement générique du répertoire. Si
+ * des segments non vides sont purgés, le nombre perdu est journalisé
+ * explicitement — perte de données réelle, jamais silencieuse.
  *
  * @param dir       Répertoire cible (`NULL` ⇒ `STOCK_SPILL_DIR_DEFAULT`).
  * @param nb_files  Nombre de files de stock actives (`nb_file_possibility`).
@@ -94,33 +88,21 @@ void stock_spill_configure(const char *dir, int nb_files);
  * | Bas | 75 | Sort du mode ÉVICTION si actif ; sort AUSSI du mode RECHARGEMENT si actif |
  * | Rechargement | 25 | Bascule en mode RECHARGEMENT (si un débordement existe) |
  *
- * L'hystérésis évite le battement : sans deux seuils distincts pour ENTRER
- * puis SORTIR d'un mode, une occupation qui oscille juste autour d'un seuil
- * unique ferait alterner écriture/lecture de segment à chaque tick pour
- * rien. Les DEUX modes partagent le même seuil de SORTIE (75 %, « Bas ») —
- * l'éviction y DESCEND, le rechargement y REMONTE — mais ont chacun leur
- * propre seuil d'ENTRÉE (90 % / 25 %) : le rechargement ne peut donc jamais
- * réutiliser son propre seuil d'entrée (25 %) comme seuil de sortie, sous
- * peine de s'arrêter après un seul bloc rechargé dès qu'il dépasse ces 25 %
- * — souvent le cas dès le premier bloc, `STOCK_SPILL_BLOCK_PACKETS` valant
- * fréquemment déjà plus que 25 % d'un petit plafond. L'état (mode courant)
- * est interne à ce module,
- * recalculé à chaque appel à partir de l'occupation ACTUELLE — jamais
- * persisté, jamais un compteur incrémental maintenu en parallèle de
- * `datamanager_resident_packets()` (qui reste l'unique source de vérité).
+ * L'hystérésis évite le battement : sans deux seuils distincts pour entrer
+ * puis sortir d'un mode, une occupation oscillant autour d'un seuil unique
+ * ferait alterner écriture/lecture à chaque tick. Les deux modes partagent
+ * le même seuil de sortie (75 %) mais ont chacun leur propre seuil d'entrée
+ * (90 % / 25 %) — le rechargement ne peut pas réutiliser son propre seuil
+ * d'entrée comme seuil de sortie, sous peine de s'arrêter après un seul bloc
+ * rechargé dès qu'il dépasse ces 25 %. État recalculé à chaque appel depuis
+ * l'occupation actuelle, jamais persisté.
  *
- * No-op silencieux (retourne 0) si le module est désactivé
- * (`stock_spill_configure` a échoué), si `datamanager_ram_limit_packets()`
- * vaut 0 (illimité — le débordement n'a de sens que sous un plafond), ou
- * pendant une sauvegarde/restauration en cours (`maintenance`,
- * `datamanager.c` — évite qu'une possibilité migre entre RAM et disque
- * pendant qu'un cliché est en train d'être pris).
+ * No-op silencieux si le module est désactivé, si le plafond RAM est
+ * illimité, ou pendant une sauvegarde/restauration en cours (évite qu'une
+ * possibilité migre RAM/disque pendant un cliché).
  *
- * @param max_packets Budget de CET appel (le thread périodique passe
- *                     `STOCK_SPILL_BLOCK_PACKETS` ; la commande console
- *                     `spill [n]` peut le surcharger pour un pas immédiat).
- * @return             Nombre de possibilités effectivement déplacées (dans
- *                      un sens ou dans l'autre), 0 si rien à faire ce tick.
+ * @param max_packets Budget de cet appel.
+ * @return Nombre de possibilités effectivement déplacées, 0 si rien à faire.
  */
 int stock_spill_step(int max_packets);
 
@@ -128,10 +110,8 @@ int stock_spill_step(int max_packets);
  * @brief Nombre total de possibilités actuellement déportées sur disque,
  *        tous pools et toutes files confondus.
  *
- * Lecture protégée par le verrou interne du module — cohérente à l'instant
- * de l'appel, mais un thread de débordement concurrent peut la faire évoluer
- * l'instant d'après (même convention d'estimation que `datas_size()`,
- * `core/datamanager.c`).
+ * Lecture cohérente à l'instant de l'appel, mais un thread de débordement
+ * concurrent peut la faire évoluer l'instant d'après.
  */
 unsigned long long stock_spill_total_packets(void);
 
@@ -145,103 +125,63 @@ unsigned long long stock_spill_total_segments(void);
  * @brief Produit/actualise un cliché durable du débordement, dans le
  *        sous-répertoire `snapshot_subdir` de `--stock-spill-dir`.
  *
- * **Précondition (jamais vérifiée ici) : l'appelant doit garantir qu'aucune
- * éviction/rechargement concurrent ne peut avoir lieu pendant tout l'appel**
- * — en pratique, appelée exclusivement depuis `consistent_backup`
- * (`core/datamanager.c`, PR3) pendant sa fenêtre `maintenance = 1`, qui fait
- * déjà de `stock_spill_step` un no-op. Un appelant hors de cette fenêtre
- * doit poser `maintenance` lui-même en premier.
+ * Précondition (jamais vérifiée ici) : l'appelant doit garantir qu'aucune
+ * éviction/rechargement concurrent n'a lieu pendant l'appel — en pratique
+ * appelée uniquement depuis `consistent_backup` pendant sa fenêtre
+ * `maintenance = 1`, qui fait déjà de `stock_spill_step` un no-op.
  *
- * **Incrémental et idempotent** : chaque segment PLEIN est dupliqué par
- * `link()` (O(1), aucune copie de données) — comparé par inode à l'entrée du
- * cliché existante pour ne relier QUE les segments nouveaux ou renumérotés
- * depuis le dernier appel (un segment rechargé puis réévincé peut réutiliser
- * le même numéro de séquence avec un contenu DIFFÉRENT ; comparer l'inode,
- * pas seulement le nom de fichier, est ce qui détecte ce cas). Le segment de
- * QUEUE (partiel, encore mutable côté vivant) est toujours une COPIE
- * fraîche, jamais un lien — sinon une éviction ultérieure muterait aussi le
- * cliché déjà publié. Les entrées du cliché qui ne correspondent plus à
- * aucun segment vivant (rechargé/renuméroté depuis le cliché précédent) sont
- * purgées. Repli sur la copie octet si `link()` échoue (EXDEV, système de
- * fichiers sans liens physiques) — averti une seule fois par processus.
+ * Incrémental et idempotent : chaque segment plein est dupliqué par `link()`
+ * (O(1)), comparé par inode à l'entrée existante pour ne relier que les
+ * segments nouveaux ou renumérotés (comparer l'inode et pas seulement le
+ * nom détecte un segment rechargé puis réévincé sous le même numéro avec un
+ * contenu différent). Le segment de queue (partiel, encore mutable) est
+ * toujours une copie fraîche, jamais un lien — sinon une éviction
+ * ultérieure muterait le cliché déjà publié. Repli sur copie octet si
+ * `link()` échoue (EXDEV).
  *
  * Termine par l'écriture atomique (`.tmp` + `rename`) d'un manifeste texte
- * listant, par (pool, file), `last_seq`/`packets`/`tail_bytes` — c'est ce
- * manifeste que `stock_spill_restore_snapshot` relit.
+ * que `stock_spill_restore_snapshot` relit.
  *
- * No-op silencieux si le module est désactivé (`stock_spill_configure` a
- * échoué, ou jamais appelée — cas du rôle client) ou si `snapshot_subdir`
- * est `NULL`. Échec de création du sous-répertoire : `log_error`, le cliché
- * est sauté pour cet appel (la sauvegarde RAM appelante reste, elle, valide
- * — dégradation indépendante, même convention que `best_board_save`).
+ * No-op silencieux si le module est désactivé ou `snapshot_subdir` est
+ * `NULL`. Échec de création du sous-répertoire : `log_error`, le cliché est
+ * sauté pour cet appel (la sauvegarde RAM appelante reste valide).
  *
- * @param snapshot_subdir Nom du sous-répertoire, relatif à `--stock-spill-dir`
- *                        (ex. `"snapshot"` pour la commande `backup`,
- *                        `"snapshot-temp"` pour l'autobackup — même
- *                        convention que `eternityII.back` / `temp.back`).
- * @return Nombre total de possibilités déportées à l'instant du cliché (0 si
- *         le module est désactivé ou en cas d'échec de création du
- *         sous-répertoire) — c'est ce compte que l'appelant
- *         (`consistent_backup`, `core/datamanager.c`) écrit dans
- *         `<stock_filename>.spillcount`, pour que `restore` puisse ensuite
- *         détecter une restauration partielle du débordement plutôt que de
- *         la tolérer en silence (correctif : un cliché absent/mal configuré
- *         à la restauration perdait des possibilités sans le signaler).
+ * @return Nombre total de possibilités déportées à l'instant du cliché — ce
+ *         que `consistent_backup` écrit dans `<stock_filename>.spillcount`
+ *         pour que `restore` détecte une restauration partielle plutôt que
+ *         de la tolérer en silence.
  */
 unsigned long long stock_spill_snapshot(const char *snapshot_subdir);
 
 /**
- * @brief Reconstruit intégralement l'état de débordement VIVANT à partir du
+ * @brief Reconstruit intégralement l'état de débordement vivant à partir du
  *        cliché `snapshot_subdir`, en remplaçant tout ce qui s'y trouvait.
  *
- * Doit être appelée **avant** `import()`/`restore()` (`core/datamanager.c`)
- * — jamais après : un import qui déborde doit COMPLÉTER les segments déjà
- * remis en place, jamais les écraser. `stock_spill_configure` doit déjà
- * avoir tourné pour ce process (au démarrage du serveur, avant toute
- * commande `restore`) : le nombre de files courant (`--stock-files`) est lu
- * depuis l'état déjà configuré, jamais un paramètre de cette fonction.
+ * Doit être appelée AVANT `import()`/`restore()` — jamais après : un import
+ * qui déborde doit compléter les segments déjà remis en place, jamais les
+ * écraser. `stock_spill_configure` doit déjà avoir tourné pour ce process.
  *
- * Manifeste absent/illisible/en-tête non reconnu : tolérant, `log_info`,
- * aucune action (pas une erreur — un `.back` sans cliché de débordement
- * associé est un cas normal, ex. sauvegarde antérieure à PR3).
+ * Manifeste absent/illisible : tolérant, aucune action — un `.back` sans
+ * cliché de débordement associé est un cas normal.
  *
- * **Re-séquencement si `--stock-files` a changé depuis la sauvegarde** :
- * chaque entrée `(pool, ancienne_file)` du manifeste est reportée sur la
- * file VIVANTE `ancienne_file %% nb_file_possibility_courant`.
- * - **Sans collision** (la file vivante ne reçoit qu'UNE seule entrée du
- *   cliché — le cas courant, `--stock-files` inchangé ou agrandi) : PURE
- *   `link()` (repli copie), même numérotation de séquence conservée. Aucun
- *   déplacement de données.
- * - **Avec collision** (`--stock-files` réduit : plusieurs anciennes files
- *   convergent vers la même file vivante) : chaque source est RELUE et
- *   réempaquetée via la même fonction d'écriture que l'éviction normale
- *   (`stock_spill_write_block`), pour ne jamais violer l'invariant « tout
- *   segment sous le sommet est plein » avec un sommet partiel venu d'une
- *   AUTRE source placé au milieu de la pile fusionnée.
+ * **Re-séquencement si `--stock-files` a changé** : chaque entrée
+ * `(pool, ancienne_file)` est reportée sur la file vivante
+ * `ancienne_file %% nb_file_possibility_courant`. Sans collision (cas
+ * courant) : pur `link()`, aucun déplacement de données. Avec collision
+ * (`--stock-files` réduit, plusieurs anciennes files convergent) : chaque
+ * source est relue et réempaquetée comme une éviction normale, pour ne
+ * jamais violer l'invariant « tout segment sous le sommet est plein ».
  *
- * **Un segment `.dat` que le manifeste liste mais que le disque n'a plus**
- * (supprimé, corrompu, cliché partiellement transféré…) **n'est jamais
- * silencieusement ignoré.** Sans collision : le groupe entier
- * `(pool, ancienne_file)` est invalidé (ni compté dans le total renvoyé, ni
- * reflété dans le descripteur vivant, qui reste vide pour cette file — les
- * segments qui avaient déjà été placés avant l'échec sont nettoyés plutôt
- * que laissés orphelins) et un `log_error` nomme le rang du segment en
- * cause. Avec collision : seule la source en défaut est amputée du total
- * (celles qui restent intactes reviennent normalement) ; un segment source
- * *tronqué* (lu partiellement) compte pour les octets réellement relus, pas
- * pour la promesse du manifeste. Dans tous les cas, le total RENVOYÉ reflète
- * fidèlement ce qui a été RÉELLEMENT placé sur disque — jamais celui promis
- * par le manifeste — ce qui est précisément ce qui permet à `restore_apply`
- * (`ui/command_lines.c`) de détecter l'anomalie via `<stock_filename>.spillcount`
- * (`datamanager_read_spillcount_sidecar`).
+ * Un segment `.dat` listé par le manifeste mais absent du disque n'est
+ * jamais silencieusement ignoré : sans collision, le groupe
+ * `(pool, ancienne_file)` entier est invalidé et nettoyé ; avec collision,
+ * seule la source en défaut est amputée. Le total renvoyé reflète toujours
+ * ce qui a été réellement placé sur disque, jamais ce que promettait le
+ * manifeste — ce qui permet à `restore_apply` de détecter l'anomalie via
+ * `<stock_filename>.spillcount`.
  *
- * @param snapshot_subdir Même convention que `stock_spill_snapshot`.
- * @return Nombre total de possibilités effectivement remises en place (0 si
- *         le module est désactivé, si aucun manifeste valide n'a été
- *         trouvé, ou si tous les groupes ont échoué) — à comparer par
- *         l'appelant avec `<stock_filename>.spillcount`
- *         (`datamanager_read_spillcount_sidecar`) pour détecter une
- *         restauration incomplète du débordement.
+ * @return Nombre total de possibilités effectivement remises en place — à
+ *         comparer par l'appelant avec `<stock_filename>.spillcount`.
  */
 unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir);
 

@@ -213,24 +213,17 @@ int datamanager_pool_refill(int is_checked, int file_index, const struct possibi
 /**
  * @brief Indice de file de départ pour un balayage round-robin ADD/GET.
  *
- * `put_to_pool`/`scroll_from_pool` (datamanager.c) trylock la première file
- * libre à partir de cet indice plutôt que de toujours démarrer à la file 0 :
- * un appel non contesté (trylock réussi dès le premier essai — le cas nominal
- * à faible concurrence) tombait sinon systématiquement sur la file 0, où tout
- * le trafic ADD/GET se concentrait, à l'exact opposé de l'objectif de
- * `--stock-files` (répartir la charge sur plusieurs files) et au prix d'un
- * travail constant pour `datamanager_rebalance_step`, qui devait sans cesse
- * compenser ce biais structurel plutôt qu'un simple déséquilibre de trafic.
+ * `put_to_pool`/`scroll_from_pool` trylock la première file libre à partir
+ * de cet indice plutôt que de toujours démarrer à la file 0 : sinon un
+ * appel non contesté tombait systématiquement sur la file 0, où tout le
+ * trafic se concentrait, à l'opposé de l'objectif de `--stock-files`.
  *
- * Fonction pure côté logique : l'état vit dans `*counter`, fourni par
- * l'appelant (jamais une globale interne), ce qui la rend directement
- * testable avec un compteur local sans dépendre de l'état module de
- * `datamanager.c`. Incrémente `*counter` atomiquement (`__atomic_fetch_add`,
- * jamais remis à 0) : sûr à appeler concurremment depuis plusieurs threads
- * serveur.
+ * Fonction pure : l'état vit dans `*counter`, fourni par l'appelant, ce qui
+ * la rend directement testable. Incrémente `*counter` atomiquement, jamais
+ * remis à 0 : sûr à appeler concurremment depuis plusieurs threads serveur.
  *
  * @param counter État partagé, incrémenté à chaque appel.
- * @param n       Nombre de files (`nb_file_possibility`) ; `n <= 0` renvoie 0.
+ * @param n       Nombre de files ; `n <= 0` renvoie 0.
  * @return        Indice de file dans `[0, n[`.
  */
 int datamanager_rr_next_start(unsigned int *counter, int n);
@@ -269,24 +262,15 @@ int add_possibility(client_possibility_t *client_possibility, array_possibility_
  *
  * @param client_possibility Contexte du thread client.
  * @param max_result         Nombre maximum de possibilités à extraire.
- * @param from_server         Optionnel (peut être `NULL`). En sortie, mis à 1
- *                            si le lot retourné vient réellement d'un
- *                            `INST_GET_TO_CHECK[_BATCH]` serveur (le serveur a
- *                            donc enregistré CES possibilités comme « en
- *                            analyse » pour ce client), 0 s'il vient des files
- *                            locales (`scroll_from_local` — un repli
- *                            `put_to_local`, par exemple un ADD refusé par le
- *                            serveur sous contention, ou tout autre reliquat
- *                            local ; le serveur n'a alors RIEN à acquitter
- *                            pour ce lot). Distinction nécessaire à l'appelant
- *                            pour ne pas envoyer d'acquittement
- *                            (`INST_POSSIBILITY_ANALYSED[_BATCH]`) pour un lot
- *                            que le serveur n'a jamais servi cette fois-ci —
- *                            sans quoi un lot recyclé localement peut ré-
- *                            acquitter une possibilité déjà retirée du pool
- *                            analysé serveur par son acquittement d'origine
- *                            (« absence confirmée » côté serveur).
- * @return                   Tableau alloué (à libérer avec `free_array_possibility_packet`).
+ * @param from_server Optionnel. En sortie, mis à 1 si le lot vient
+ *                    réellement d'un `INST_GET_TO_CHECK[_BATCH]` serveur (le
+ *                    serveur a donc enregistré ces possibilités comme « en
+ *                    analyse »), 0 s'il vient des files locales — auquel cas
+ *                    le serveur n'a rien à acquitter. Sans cette
+ *                    distinction, un lot recyclé localement pourrait
+ *                    ré-acquitter une possibilité déjà retirée du pool
+ *                    analysé serveur.
+ * @return Tableau alloué (à libérer avec `free_array_possibility_packet`).
  */
 array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result, int *from_server);
 /**
@@ -490,31 +474,22 @@ int send_solution(client_possibility_t *client_possibility, struct possibility_p
  *
  * Parcourt les files d'analyse en cherchant le paquet correspondant et le supprime.
  *
- * @param possiblity     Paquet à retirer.
- * @param thread         Index de file EXACT et exclusif (≥ 0 : une seule file
- *                        essayée, absence CONFIRMÉE si absente de celle-ci —
- *                        aucun repli. Réservé à l'usage historique client
- *                        (une file dédiée par fork, où rien d'autre n'écrit
- *                        jamais) ; −1 pour balayer toutes les files, voir
- *                        `preferred_file`.
- * @param preferred_file Indice de file à essayer EN PREMIER quand `thread < 0`
- *                        (`server_analysed_file_hint`, PR8, répartition de
- *                        charge ADD/GET par connexion serveur) — ignoré si
- *                        `thread >= 0`. Sur un manque à cette file, le
- *                        balayage se poursuit sur TOUTES les autres
- *                        (garantie inchangée : jamais d'absence déclarée sans
- *                        avoir verrouillé et parcouru chaque file). `-1` (ou
- *                        hors bornes) : comportement historique inchangé,
- *                        balayage démarrant à la file 0.
- * @return               0 si trouvé et retiré ; 1 si absent (toutes les files
- *                    concernées ont été verrouillées et parcourues sans le
- *                    trouver — absence CONFIRMÉE) ; -1 si le budget borné
- *                    (`DATAMANAGER_TRYLOCK_MAX_SWEEPS`) a été épuisé sans
- *                    jamais réussir à verrouiller ne serait-ce qu'une file
- *                    (maintenance en cours) — absence NON confirmée, à ne
- *                    jamais traiter comme un 1 par un appelant qui rendrait
- *                    silencieusement une possibilité peut-être toujours en
- *                    cours d'analyse.
+ * @param thread         Index de file exact et exclusif (≥ 0 : une seule
+ *                        file essayée, absence confirmée si absente de
+ *                        celle-ci, aucun repli — réservé à l'usage client,
+ *                        une file dédiée par fork) ; -1 pour balayer toutes
+ *                        les files, voir `preferred_file`.
+ * @param preferred_file Indice de file à essayer en premier quand
+ *                        `thread < 0` (répartition de charge par connexion
+ *                        serveur) — ignoré si `thread >= 0`. Sur un manque à
+ *                        cette file, le balayage se poursuit sur toutes les
+ *                        autres. `-1` (ou hors bornes) : balayage démarrant
+ *                        à la file 0.
+ * @return 0 si trouvé et retiré ; 1 si absent (toutes les files concernées
+ *         ont été verrouillées et parcourues sans le trouver — absence
+ *         confirmée) ; -1 si le budget borné a été épuisé sans jamais
+ *         réussir à verrouiller ne serait-ce qu'une file (maintenance en
+ *         cours) — absence non confirmée, à ne jamais traiter comme un 1.
  */
 int remove_possibility_analysed(struct possibility_packet *possiblity, int thread, int preferred_file);
 /** @brief Nombre de possibilités dans la file `nfile` du pool principal (non vérifiées). */

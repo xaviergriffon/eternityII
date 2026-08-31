@@ -125,40 +125,28 @@ int fork_gate_is_quiescing(void);
 
 /**
  * @brief Primitives d'E/S autour du `fork()` : prend le verrou de sortie du
- *        logger (`logger_lock_output`) et vide `stdout`/`stderr`
- *        (`fflush(stdout)`/`fflush(stderr)`).
+ *        logger (`logger_lock_output`) et vide `stdout`/`stderr`.
  *
- * Deux écarts DÉLIBÉRÉS par rapport à une version initiale de cette primitive
- * (`flockfile(stdout)`/`flockfile(stderr)` + `fflush(NULL)`), découverts au
- * premier usage réel, en forkant réellement à chaud avec l'orchestrateur :
+ * Deux écarts délibérés par rapport à une version initiale
+ * (`flockfile`+`fflush(NULL)`), trouvés en forkant réellement à chaud :
  *
- * 1. **Pas de `fflush(NULL)`** : il parcourt TOUS les `FILE*` ouverts du
- *    process, y compris `stdin` — et le thread console détient le verrou
- *    stdio de `stdin` pour toute la durée de son `fgetc()` bloquant,
- *    indépendamment de `fork_gate_mark_blocked` (qui ne fait que déclarer
- *    la quiescence au sens de CE module, sans toucher aux verrous internes
- *    de la libc). Un opérateur simplement assis au prompt — le cas
- *    courant — provoquait donc un interblocage systématique.
+ * 1. Pas de `fflush(NULL)` : parcourt tous les `FILE*` ouverts, y compris
+ *    `stdin` — le thread console détient le verrou stdio de `stdin` pour
+ *    toute la durée de son `fgetc()` bloquant, indépendamment de
+ *    `fork_gate_mark_blocked`. Un opérateur simplement assis au prompt
+ *    provoquait donc un interblocage systématique.
  *
- * 2. **Pas de `flockfile(stdout)`/`flockfile(stderr)`** : à la différence
- *    d'un `pthread_mutex_t` "normal" (sans suivi de propriétaire, donc sûr
- *    à déverrouiller depuis le fils), le verrou stdio récursif de
- *    `flockfile` suit un propriétaire — et ce suivi ne survit PAS
- *    fiablement à `fork()` sous macOS dans un process multi-thread : le
- *    fils hérite un verrou marqué comme détenu par un thread dont
- *    l'identité OS a changé, et son PREMIER `flockfile()` (le premier
- *    `log_info` après le fork, par exemple) bloque alors indéfiniment.
- *    Reproduit systématiquement (`sample(1)` montre le fils bloqué dans
- *    `flockfile → _pthread_mutex_firstfit_lock_wait`). La quiescence
- *    coopérative protège déjà entièrement contre le risque que
- *    `flockfile` était censé couvrir (un AUTRE thread mi-écriture au
- *    moment du fork) : aucun thread parké/marqué bloqué ne touche stdio,
- *    donc `flockfile` par le thread forkeur lui-même n'apportait aucune
- *    protection supplémentaire tout en introduisant ce risque.
+ * 2. Pas de `flockfile(stdout)`/`flockfile(stderr)` : ce verrou stdio
+ *    récursif suit un propriétaire, et ce suivi ne survit pas fiablement à
+ *    `fork()` sous macOS multi-thread — le fils hérite un verrou marqué
+ *    détenu par un thread dont l'identité OS a changé, et son premier
+ *    `flockfile()` bloque indéfiniment. La quiescence coopérative protège
+ *    déjà entièrement contre le risque que `flockfile` couvrait (un autre
+ *    thread mi-écriture au moment du fork).
  *
- * À appeler par le thread forkeur UNIQUEMENT après un
- * `fork_gate_request_quiesce` réussi, et à relâcher (`fork_gate_release_io_locks`)
- * dans le parent ET dans l'enfant juste après le `fork()`.
+ * À appeler par le thread forkeur uniquement après un
+ * `fork_gate_request_quiesce` réussi, et à relâcher dans le parent et
+ * l'enfant juste après le `fork()`.
  */
 void fork_gate_acquire_io_locks(void);
 
@@ -172,22 +160,12 @@ void fork_gate_release_io_locks(void);
  *        d'une fonction de ce module qui modifie l'état d'un participant ou
  *        de la quiescence globale.
  *
- * Contexte : une investigation en cours (voir
- * docs/investigations/blocage_fork_gate_release_quiesce.md) a montré un
- * blocage permanent, intermittent, dans `fork_gate_release_quiesce`
- * (`pthread_cond_broadcast` bloqué à demeure dans un mécanisme interne de
- * glibc) — et a aussi montré qu'entourer le process avec `strace` (même
- * limité à quelques appels système) empêche la reproduction : le
- * ralentissement introduit par l'interception ptrace de CHAQUE appel
- * système referme la fenêtre de course. Ce module trace donc chaque
- * transition d'état SANS AUCUN appel système sur le chemin chaud
- * (`clock_gettime` + une écriture atomique dans un tableau préalloué,
- * quelques nanosecondes) — invisible pour `strace`/ptrace, donc sans effet
- * sur la reproductibilité — et le résultat se lit APRÈS COUP, une fois le
- * blocage survenu, via `gdb -p <pid>` (`print g_fork_gate_trace_buf` /
- * `print g_fork_gate_trace_write_index`) — cette lecture ponctuelle
- * n'intervient qu'une fois la course déjà terminée, donc sans le même
- * risque de la masquer.
+ * Un blocage intermittent dans `fork_gate_release_quiesce` ne se
+ * reproduisait pas sous `strace` (l'interception ptrace referme la fenêtre
+ * de course). Ce module trace donc chaque transition sans aucun appel
+ * système sur le chemin chaud (`clock_gettime` + écriture atomique dans un
+ * tableau préalloué) — invisible pour ptrace — et se relit après coup via
+ * `gdb -p <pid>` une fois le blocage survenu.
  */
 typedef enum {
     FGT_REGISTER = 0,          /**< fork_gate_register : slot attribué. */
