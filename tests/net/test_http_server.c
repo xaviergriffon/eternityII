@@ -1105,6 +1105,28 @@ TEST http_server_get_commands_returns_200(void)
     PASS();
 }
 
+/* Protège exactement le mode de défaillance nommé par la revue finale : une
+   commande ajoutée à g_command_table (control_protocol.c) sans entrée
+   correspondante dans commands[] (command_lines.c) produirait aujourd'hui un
+   summary vide, sans qu'aucun test ne le détecte. */
+TEST http_commands_collect_returns_all_entries_with_summaries(void)
+{
+    http_command_info_t infos[CONTROL_COMMAND_TABLE_MAX];
+    int n = http_commands_collect(infos, CONTROL_COMMAND_TABLE_MAX);
+
+    ASSERT_EQ_FMT(27, n, "%d");
+    int nb_public = 0;
+    for (int i = 0; i < n; i++) {
+        ASSERT(infos[i].name[0] != '\0');
+        ASSERT(infos[i].summary != NULL && infos[i].summary[0] != '\0');
+        if (!infos[i].requires_token) {
+            nb_public++;
+        }
+    }
+    ASSERT_EQ_FMT(1, nb_public, "%d"); /* clientsWork seule */
+    PASS();
+}
+
 SUITE(http_server_suite)
 {
     RUN_TEST(http_server_get_stats_returns_200);
@@ -1146,4 +1168,5 @@ SUITE(http_server_suite)
     RUN_TEST(http_server_get_best_board_returns_200_with_record_no_rotate_table);
     RUN_TEST(http_server_get_best_board_reflects_real_part_with_rotate_table);
     RUN_TEST(http_server_get_commands_returns_200);
+    RUN_TEST(http_commands_collect_returns_all_entries_with_summaries);
 }
