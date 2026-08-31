@@ -64,7 +64,7 @@ make CUDA=1                   # Build with the GPU pruner (nvcc kernel, see docs
 make clean                    # Remove all build artifacts
 make test                     # Unit-test suite (tests/) + bench shell tests
 make test-integration         # End-to-end client/server scenarios on the 16-piece puzzle
-make test-docker               # Replay CI (WERROR, ASan, integration) in a Linux/gcc container
+make test-docker               # Replay CI (WERROR, ASan, integration) in 3 parallel Linux/gcc containers
 make coverage / coverage-report
 ```
 
@@ -142,7 +142,7 @@ Eight PRs (all shipped) fixing a real production incident: an unbounded lock hel
 ```sh
 make test               # unit suites (tests/, greatest framework) + bench shell tests
 make test-integration   # end-to-end 16-piece client/server scenarios
-make test-docker         # replay CI (WERROR, ASan, integration) in a Linux/gcc container
+make test-docker         # replay CI (WERROR, ASan, integration) in 3 parallel Linux/gcc containers
 make test-docker-arm     # compile-check the ARM64 cross-build
 make coverage            # gcovr merged summary (256 + 16 piece passes)
 make coverage-report     # Cobertura XML + HTML + Markdown
@@ -151,7 +151,7 @@ make bench-refutation    # refutation-cost bench, see docs/tests_et_ci.md
 
 Suite layout, `fork_assert.h` (for testing `exit()`-calling code without killing the runner), hand-built fixtures, coverage artefacts, and both benchmark harnesses: [docs/tests_et_ci.md](docs/tests_et_ci.md) and [tests/README.md](tests/README.md).
 
-**Reproducing a CI failure that doesn't show up locally**: if a test fails on the GitHub runner (Linux/gcc) but passes on macOS/clang, reproduce it with `make test-docker` **before** investigating further — it replays the exact CI jobs (`WERROR=1` build, unit tests, ASan, integration) in a pinned `ubuntu:24.04` container, and catches classes of bug invisible on macOS (stricter `-Werror` diagnostics, ASan over-reads, glibc vs libSystem). `DOCKER_TEST_CMD="make test ASAN=1"` replays a single job. If the failure is ARM/Raspberry-Pi-specific (e.g. a `-Wformat-truncation` that only fires on aarch64), use `make test-docker-arm` instead — a cross-compiler compile+link check only, not an execution test. Full detail (including why the container runs as root and which two tests are deliberately skipped there): [docs/tests_et_ci.md](docs/tests_et_ci.md#tests-sous-linux-via-docker-make-test-docker).
+**Reproducing a CI failure that doesn't show up locally**: if a test fails on the GitHub runner (Linux/gcc) but passes on macOS/clang, reproduce it with `make test-docker` **before** investigating further — it replays the exact CI jobs (`WERROR=1` build, unit tests, ASan, integration) in 3 parallel `ubuntu:24.04` containers (one per job, mirroring the CI's separate runners — no single-core bottleneck), and catches classes of bug invisible on macOS (stricter `-Werror` diagnostics, ASan over-reads, glibc vs libSystem). `DOCKER_TEST_CMD="make test ASAN=1"` switches back to a single container replaying just that one job. If the failure is ARM/Raspberry-Pi-specific (e.g. a `-Wformat-truncation` that only fires on aarch64), use `make test-docker-arm` instead — a cross-compiler compile+link check only, not an execution test. Full detail (including why the container runs as root and which two tests are deliberately skipped there): [docs/tests_et_ci.md](docs/tests_et_ci.md#tests-sous-linux-via-docker-make-test-docker).
 
 **Guiding rule: add a unit test for every bug you fix and every behaviour you add**, so a past anomaly can never silently come back. When fixing a bug, first write (or extend) a test that fails on the old behaviour and passes on the fix; when adding a feature, cover its observable contract. If a piece of logic is hard to test, that's usually a sign to extract it into a small pure function rather than skip the test (e.g. `parse_cli_options`, `orchestrator_step`, `bench_should_stop`). This project has a long track record of production bugs caught exactly this way — `git log` and `docs/tests_et_ci.md` carry the running list.
 
