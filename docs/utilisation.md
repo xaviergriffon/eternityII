@@ -710,6 +710,22 @@ Ces fichiers permettent de reprendre une recherche interrompue avec la commande
 | `events.log` | Journal des évènements horodatés (nouveaux records, solutions, etc.), **des erreurs** (`log_error`/`log_errno`, ex. écriture de fichier échouée) **et de la configuration effective de démarrage** (client/pruner et serveur — jamais affichée sur la console, uniquement dans ce fichier). Append-only ; voir [Console interactive](console.md#zone-events-en-bas-de-lécran). |
 | `solution_<pid>_<seq>` | Plateau sérialisé quand une solution complète est trouvée (déclenche aussi un évènement). |
 
+### Sockets Unix de l'IPC parent↔fork
+
+| Fichier | Contenu |
+|---|---|
+| `etii_main.<pid>` | Socket AF_UNIX du process parent (client/pruner) : y arrivent les statistiques, les logs et les records de ses forks |
+| `etii_fork.<pid>` | Socket AF_UNIX d'un process de recherche : y arrivent les commandes console propagées par le parent |
+
+Ce ne sont pas des fichiers ordinaires mais des **fichiers spéciaux**, créés par
+`bind()` et supprimés à la terminaison du process qui les possède (`atexit`, cf.
+[Architecture](architecture.md#cycle-de-vie-des-fichiers-socket)). Un `SIGKILL`
+les laisse en revanche derrière lui : ils sont alors sans effet (le prochain
+démarrage utilise un `<pid>` différent, et un `bind()` sur un même nom écrase
+le résidu), mais `git status` ne les montre pas — git ne suit pas les fichiers
+spéciaux. Ils peuvent surprendre un outil qui parcourt le répertoire de travail :
+`cp -R`, par exemple, s'arrête net dessus (« Operation not supported »).
+
 ## Limitations connues
 
 - **Cadence d'attente figée quand le serveur n'a rien à fournir.** Un thread de

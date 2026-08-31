@@ -343,10 +343,26 @@ test-integration:
 # répertoire de travail macOS, et réciproquement (`make clean` purge la copie).
 # La séquence par défaut rejoue les jobs de test de la CI ; surchargeable :
 #   make test-docker DOCKER_TEST_CMD="make test ASAN=1"
+#
+# La copie /src -> /work n'est PAS un `cp -R` : `cp` ne sait pas copier un
+# fichier spécial et s'arrête net dessus (« cannot stat './etii_main.<pid>':
+# Operation not supported »), ce qui suffit à bloquer TOUT le rejeu de la CI.
+# Or le répertoire de travail peut légitimement en contenir : les sockets Unix
+# `etii_main.<pid>` / `etii_fork.<pid>` de l'IPC parent<->fork (cf.
+# docs/architecture.md) y sont créées par `bind()`. Elles sont désormais
+# supprimées à la terminaison du process (local_socket_cleanup_owned), mais un
+# process ENCORE VIVANT — ou tué par SIGKILL — en laisse forcément une : la
+# copie les ignore donc explicitement (`find ! -type s`), plutôt que de
+# dépendre d'un répertoire propre. Les sockets n'ont de toute façon aucun sens
+# à être recopiées dans le conteneur.
 # ---------------------------------------------------------------------------
 DOCKER          ?= docker
 DOCKER_IMAGE    ?= eternityii-ci
 DOCKER_TEST_CMD ?= make WERROR=1 && make test && make test ASAN=1 && make test-integration
+# Copie de /src vers /work en ignorant les fichiers spéciaux (sockets Unix).
+# Sous-shell pour le `cd` : le répertoire courant (/work, WORKDIR de l'image)
+# doit rester celui des commandes de build qui suivent.
+DOCKER_COPY_SRC  = (cd /src && find . ! -type s -print0 | tar --null --no-recursion -T - -cf -) | tar -xf - -C /work
 .PHONY: test-docker
 test-docker:
 	$(DOCKER) build -t $(DOCKER_IMAGE) tests/docker
@@ -354,7 +370,7 @@ test-docker:
 		-v "$(CURDIR):/src:ro" \
 		-e ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
 		$(DOCKER_IMAGE) \
-		bash -ce 'cp -R /src/. /work && make clean && $(DOCKER_TEST_CMD)'
+		bash -ce '$(DOCKER_COPY_SRC) && make clean && $(DOCKER_TEST_CMD)'
 
 # ---------------------------------------------------------------------------
 # Compilation croisée ARM 64-bit (Raspberry Pi OS 64-bit), même conteneur que
@@ -374,7 +390,7 @@ test-docker-arm:
 	$(DOCKER) run --rm \
 		-v "$(CURDIR):/src:ro" \
 		$(DOCKER_IMAGE) \
-		bash -ce 'cp -R /src/. /work && $(DOCKER_ARM_TEST_CMD)'
+		bash -ce '$(DOCKER_COPY_SRC) && $(DOCKER_ARM_TEST_CMD)'
 
 # ---------------------------------------------------------------------------
 # Couverture de code (gcov, intégré à gcc/clang — aucune install requise).

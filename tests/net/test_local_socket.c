@@ -18,6 +18,9 @@
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include <stdio.h>
 
 /* Non déclarée dans local_socket.h (helper interne non statique). */
 socklen_t size_of_sockaddr_un(struct sockaddr_un *svaddr);
@@ -274,6 +277,116 @@ TEST build_udp_local_socket_allows_max_ipc_datagram(void)
     PASS();
 }
 
+/* ------------------------------------------------------------------------
+ * Nettoyage des fichiers socket à la terminaison (cf. local_socket.h).
+ * ------------------------------------------------------------------------ */
+
+/* local_socket_cleanup_owned : supprime le fichier du socket créé par CE
+ * process. Régression : sans ce nettoyage, chaque exécution laissait une
+ * socket `etii_main.<pid>` orpheline dans le répertoire de travail — invisible
+ * de `git status` (git ne suit pas les fichiers spéciaux) et fatale au
+ * `cp -R` de `make test-docker` (« cannot stat ... : Operation not supported »). */
+TEST cleanup_owned_removes_socket_file(void)
+{
+    const char *path = "/tmp/etii_ls_cleanup_owned";
+    struct sockaddr_un *addr = build_sockaddr(path);
+    int fd = build_udp_local_socket(addr);
+    ASSERT(fd >= 0);
+
+    struct stat st;
+    ASSERT_EQ_FMT(0, stat(path, &st), "%d"); /* bind a bien créé le fichier */
+
+    local_socket_cleanup_owned();
+
+    ASSERT_EQ_FMT(-1, stat(path, &st), "%d"); /* le fichier a disparu */
+    ASSERT_EQ_FMT((int)ENOENT, errno, "%d");
+
+    close(fd);
+    free(addr);
+    PASS();
+}
+
+/* Idempotence : un second appel (ou un `remove()` explicite déjà fait par le
+ * chemin de sortie normal de main.c/fork_orchestrator.c) ne doit rien casser. */
+TEST cleanup_owned_is_idempotent(void)
+{
+    const char *path = "/tmp/etii_ls_cleanup_twice";
+    struct sockaddr_un *addr = build_sockaddr(path);
+    int fd = build_udp_local_socket(addr);
+    ASSERT(fd >= 0);
+
+    local_socket_cleanup_owned();
+    local_socket_cleanup_owned(); /* ne doit pas crasher */
+
+    struct stat st;
+    ASSERT_EQ_FMT(-1, stat(path, &st), "%d");
+
+    close(fd);
+    free(addr);
+    PASS();
+}
+
+/* Invariant de fork (AGENTS.md) : un FILS ne doit JAMAIS supprimer la socket
+ * de son parent. Le fils hérite pourtant de la table d'enregistrement et de la
+ * chaîne atexit() du parent : seule la comparaison du pid propriétaire l'en
+ * empêche. On forke un fils qui appelle explicitement le nettoyage puis sort ;
+ * la socket du parent doit survivre aux deux (appel direct + atexit du fils). */
+TEST cleanup_owned_never_removes_parent_socket_from_child(void)
+{
+    const char *path = "/tmp/etii_ls_cleanup_parent_owned";
+    struct sockaddr_un *addr = build_sockaddr(path);
+    int fd = build_udp_local_socket(addr);
+    ASSERT(fd >= 0);
+
+    pid_t child = fork();
+    ASSERT(child >= 0);
+    if (child == 0) {
+        /* Fils : hérite de l'enregistrement du parent, ne doit rien supprimer. */
+        local_socket_cleanup_owned();
+        exit(EXIT_SUCCESS); /* exit() et non _exit() : joue aussi la chaîne atexit */
+    }
+    int status = 0;
+    ASSERT(waitpid(child, &status, 0) == child);
+
+    struct stat st;
+    ASSERT_EQ_FMT(0, stat(path, &st), "%d"); /* la socket du parent est intacte */
+
+    local_socket_cleanup_owned();
+    close(fd);
+    free(addr);
+    PASS();
+}
+
+/* Câblage atexit() : un process qui crée une socket locale puis se termine
+ * (ici par `exit()`, comme le fait `exit_interpreter` de la console ou le
+ * `exit(0)` de signal_end_handler côté serveur) ne doit RIEN laisser derrière
+ * lui, même sans passer par le `remove()` explicite du chemin de sortie
+ * nominal de main.c. On l'observe depuis le parent, sur un fils dédié. */
+TEST socket_file_removed_at_process_exit(void)
+{
+    char path[64];
+    pid_t child = fork();
+    ASSERT(child >= 0);
+    if (child == 0) {
+        char child_path[64];
+        snprintf(child_path, sizeof child_path, "/tmp/etii_ls_atexit.%d", (int)getpid());
+        struct sockaddr_un *a = build_sockaddr(child_path);
+        int cfd = build_udp_local_socket(a);
+        /* Sortie sans remove() explicite : seul atexit() peut nettoyer. */
+        exit(cfd >= 0 ? EXIT_SUCCESS : EXIT_FAILURE);
+    }
+    int status = 0;
+    ASSERT(waitpid(child, &status, 0) == child);
+    ASSERT(WIFEXITED(status));
+    ASSERT_EQ_FMT(EXIT_SUCCESS, WEXITSTATUS(status), "%d");
+
+    snprintf(path, sizeof path, "/tmp/etii_ls_atexit.%d", (int)child);
+    struct stat st;
+    ASSERT_EQ_FMT(-1, stat(path, &st), "%d"); /* plus de socket orpheline */
+    ASSERT_EQ_FMT((int)ENOENT, errno, "%d");
+    PASS();
+}
+
 SUITE(local_socket_suite)
 {
     RUN_TEST(build_sockaddr_sets_family_and_path);
@@ -285,4 +398,8 @@ SUITE(local_socket_suite)
     RUN_TEST(build_udp_local_socket_does_not_leak_fd_on_bind_failure);
     RUN_TEST(ipc_max_datagram_covers_all_message_types);
     RUN_TEST(build_udp_local_socket_allows_max_ipc_datagram);
+    RUN_TEST(cleanup_owned_removes_socket_file);
+    RUN_TEST(cleanup_owned_is_idempotent);
+    RUN_TEST(cleanup_owned_never_removes_parent_socket_from_child);
+    RUN_TEST(socket_file_removed_at_process_exit);
 }

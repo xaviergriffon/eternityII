@@ -63,6 +63,109 @@ socklen_t size_of_sockaddr_un(struct sockaddr_un *svaddr) {
     return (socklen_t)(strlen(svaddr->sun_path) + sizeof(svaddr->sun_family) + 1);
 }
 
+/* ---- Nettoyage des fichiers socket à la terminaison ---------------------- */
+
+/**
+ * @brief Nombre de sockets locaux dont un même process peut retenir le chemin.
+ *
+ * En production un process n'en possède qu'UN (le parent son `etii_main.<pid>`,
+ * un fork son `etii_fork.<pid>`) ; la marge sert aux tests unitaires, qui en
+ * ouvrent plusieurs simultanément dans le même process.
+ */
+#define LOCAL_SOCKET_MAX_OWNED 16
+
+/** @brief Chemin d'un socket lié, avec le pid du process qui l'a créé. */
+typedef struct {
+    pid_t owner;   /**< 0 = slot libre. Comparé à getpid() : un fils hérite de
+                        la table de son parent et ne doit RIEN y supprimer. */
+    char  path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+} owned_local_socket_t;
+
+/* Pas de verrou, volontairement : `build_udp_local_socket` n'est appelée
+   qu'une fois par process dans le code applicatif (thread principal du parent
+   avant tout fork, thread `fork_checker` d'un fils juste après son fork), et
+   un mutex ici deviendrait un piège de plus vis-à-vis de l'invariant « aucun
+   thread du parent ne tourne pendant fork() » (cf. AGENTS.md, fork_gate). */
+static owned_local_socket_t g_owned_sockets[LOCAL_SOCKET_MAX_OWNED];
+static int g_cleanup_registered = 0;
+
+void local_socket_cleanup_owned(void)
+{
+    pid_t me = getpid();
+    for (int i = 0; i < LOCAL_SOCKET_MAX_OWNED; i++) {
+        if (g_owned_sockets[i].owner == me && g_owned_sockets[i].path[0] != '\0') {
+            /* ENOENT attendu et sans conséquence : le chemin de sortie nominal
+               (main.c / fork_orchestrator.c) fait déjà son propre remove(). */
+            unlink(g_owned_sockets[i].path);
+            g_owned_sockets[i].owner = 0;
+            g_owned_sockets[i].path[0] = '\0';
+        }
+    }
+}
+
+/**
+ * @brief Mémorise le chemin d'un socket lié pour le supprimer à la sortie.
+ *
+ * Réutilise un slot libre, un slot déjà occupé par LE MÊME chemin pour ce
+ * process, ou un slot appartenant à un AUTRE pid (entrée héritée d'un parent
+ * via fork : périmée dans ce process, jamais à supprimer par lui — la recycler
+ * est donc à la fois correct et ce qui permet un nombre illimité de
+ * générations de forks). Branche `local_socket_cleanup_owned` sur `atexit` au
+ * premier enregistrement.
+ *
+ * Échec (table pleine) non bloquant : le socket reste fonctionnel, seul son
+ * nettoyage automatique est perdu — on le signale plutôt que de le taire.
+ *
+ * @param path Chemin du fichier socket créé par `bind()`.
+ */
+static void register_owned_socket(const char *path)
+{
+    pid_t me = getpid();
+    int slot = -1;
+    int foreign = -1;
+    for (int i = 0; i < LOCAL_SOCKET_MAX_OWNED; i++) {
+        if (g_owned_sockets[i].owner == me && strcmp(g_owned_sockets[i].path, path) == 0) {
+            slot = i; /* même chemin re-lié par ce process : on ne duplique pas */
+            break;
+        }
+        if (g_owned_sockets[i].owner == 0) {
+            if (slot == -1) slot = i;
+        } else if (g_owned_sockets[i].owner != me && foreign == -1) {
+            foreign = i; /* entrée héritée d'un parent : recyclable ici */
+        }
+    }
+    if (slot == -1) slot = foreign;
+    if (slot == -1) {
+        log_error("local_socket : table de nettoyage pleine (%d entrées) — %s "
+                  "ne sera pas supprimé automatiquement à la sortie\n",
+                  LOCAL_SOCKET_MAX_OWNED, path);
+        return;
+    }
+
+    /* `memcpy` + terminaison explicite plutôt que `strncpy` : source et
+       destination ont la MÊME taille (`sun_path`), et gcc/aarch64 en -Ofast
+       diagnostique alors un -Wstringop-truncation légitime sur le cas limite
+       d'un chemin exactement plein. La borne est ici explicite. */
+    size_t len = strlen(path);
+    if (len >= sizeof(g_owned_sockets[slot].path)) {
+        len = sizeof(g_owned_sockets[slot].path) - 1;
+    }
+    g_owned_sockets[slot].owner = me;
+    memcpy(g_owned_sockets[slot].path, path, len);
+    g_owned_sockets[slot].path[len] = '\0';
+
+    /* Un fils hérite du drapeau ET de la chaîne atexit() du parent : ne pas
+       ré-enregistrer chez lui est correct, le handler y est déjà. */
+    if (!g_cleanup_registered) {
+        if (atexit(local_socket_cleanup_owned) != 0) {
+            log_error("local_socket : atexit(local_socket_cleanup_owned) a échoué — "
+                      "les sockets locaux ne seront pas nettoyés automatiquement\n");
+            return;
+        }
+        g_cleanup_registered = 1;
+    }
+}
+
 /**
  * @brief Crée un socket UDP Unix lié à l'adresse donnée.
  *
@@ -115,6 +218,11 @@ int build_udp_local_socket(struct sockaddr_un *svaddr) {
         close(socket_id);
         return -1;
     }
+
+    /* `bind` vient de créer le fichier spécial : on retient son chemin pour
+       qu'il soit supprimé à la terminaison du process, quel que soit le chemin
+       de sortie emprunté (cf. local_socket_cleanup_owned, local_socket.h). */
+    register_owned_socket(svaddr->sun_path);
 
     return socket_id;
 }

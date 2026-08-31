@@ -174,6 +174,35 @@ locaux** (`etii_main.<pid>` et `etii_fork.<pid>`,
 - **propager les commandes console** du parent vers les enfants (commandes marquées
   « propagées aux enfants », voir [Console interactive](console.md)).
 
+### Cycle de vie des fichiers socket
+
+`bind()` matérialise chaque socket AF_UNIX par un **fichier spécial dans le
+répertoire de travail** (`etii_main.<pid>` pour le parent, `etii_fork.<pid>`
+pour chaque fork). Ce fichier n'est pas nettoyé par la fermeture du descripteur :
+il faut l'`unlink()` explicitement, sinon il survit au process.
+
+`build_udp_local_socket` retient donc le chemin de chaque socket qu'il lie, et
+branche `local_socket_cleanup_owned()` sur `atexit()`
+([src/net/local_socket.c](../src/net/local_socket.c)). Le nettoyage couvre ainsi
+**tous** les chemins de sortie, pas seulement les `remove()` explicites du retour
+nominal de `handle_client()` et de `spawn_child_body()` : la commande console
+`exit`, les `exit(EXIT_FAILURE)` d'erreur et le `exit(0)` de `signal_end_handler`
+côté serveur passent eux aussi par la chaîne `atexit`.
+
+Deux points à ne pas casser :
+
+- **Un fils ne supprime jamais la socket de son parent.** Il hérite pourtant de
+  la table d'enregistrement *et* de la chaîne `atexit()` du parent : seul le pid
+  propriétaire mémorisé à l'enregistrement (comparé à `getpid()`) l'en empêche.
+  La socket du parent doit rester vivante tant que le parent tourne — les forks
+  y adressent leurs statistiques, leurs logs et leur meilleur plateau.
+- **Un `SIGKILL` reste hors de portée** (aucun handler, aucun `atexit`), tout
+  comme un process encore vivant. Un résidu reste donc possible : c'est pourquoi
+  la copie `/src` → `/work` de `make test-docker` ignore explicitement les
+  fichiers spéciaux (cf. [Tests et CI](tests_et_ci.md#tests-sous-linux-via-docker-make-test-docker)).
+  Ces sockets orphelines sont invisibles de `git status` — git ne suit pas les
+  fichiers spéciaux.
+
 ## Structure des sources
 
 Le code est rangé sous `src/`, réparti en quatre domaines ; les `#include` sont

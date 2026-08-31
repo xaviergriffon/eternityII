@@ -99,6 +99,7 @@ Client/pruner processes don't fork their search workers immediately: a small pur
 - **Never `flockfile(stdout)`/`flockfile(stderr)` around a `fork()`** — the lock "owner" doesn't survive the fork on macOS; the child deadlocks on its own first log call. Use the plain, non-owner-tracked `logger_lock_output` mutex instead.
 - **`fflush(NULL)` can deadlock** if a console thread is mid-`fgetc()` (it holds `stdin`'s stdio lock) — flush only `stdout`/`stderr` explicitly.
 - **A forked child inherits the parent's `atexit()` chain**, including ncurses/ANSI terminal teardown — call `status_zone_disown_child()` as the very first statement in a freshly-forked child, or the child's own `exit()` corrupts the shared terminal.
+- **A forked child must never delete its parent's Unix socket file.** `build_udp_local_socket` registers each bound path for `atexit` removal (`local_socket_cleanup_owned`, `src/net/local_socket.c`), and a child inherits both that table and the `atexit` chain — only the owner pid recorded at registration keeps it from unlinking `etii_main.<pid>` out from under a live parent. Without the cleanup, every run left an orphan socket in the working directory: invisible to `git status` (git doesn't track special files) and fatal to `make test-docker`'s copy step, which now skips special files rather than trusting a clean directory.
 - **Never set `SA_RESTART` on `SIGINT` in a child** (`configure_child_signals`) — blocking calls (`recvfrom`, `connect`) must return `EINTR` so shutdown can interrupt them.
 
 ## Server load management

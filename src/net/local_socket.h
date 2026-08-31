@@ -29,6 +29,30 @@ struct sockaddr_un *build_sockaddr(const char *filename);
  */
 int build_udp_local_socket(struct sockaddr_un *svaddr);
 /**
+ * @brief Supprime les fichiers socket créés par CE process, et eux seuls.
+ *
+ * `bind()` matérialise chaque socket AF_UNIX par un fichier spécial dans le
+ * répertoire de travail (`etii_main.<pid>` côté parent, `etii_fork.<pid>`
+ * côté fork). `build_udp_local_socket` enregistre ce chemin ; cette fonction
+ * l'`unlink()`. Elle est branchée sur `atexit()` au premier enregistrement, de
+ * sorte que TOUS les chemins de sortie la jouent — pas seulement le retour
+ * nominal de `handle_client()`/`spawn_child_body()` qui font déjà un `remove()`
+ * explicite, mais aussi le `exit()` de la commande console `exit`, les
+ * `exit(EXIT_FAILURE)` d'erreur et le `exit(0)` de `signal_end_handler` côté
+ * serveur. Sans elle, chaque exécution laissait une socket orpheline derrière
+ * elle : invisible de `git status` (git ne suit pas les fichiers spéciaux) et
+ * fatale au `cp -R` de `make test-docker` (« Operation not supported »).
+ *
+ * **Invariant de fork** : un fils hérite de la table d'enregistrement ET de la
+ * chaîne `atexit()` de son parent ; seul le pid propriétaire mémorisé à
+ * l'enregistrement l'empêche de supprimer la socket de son parent. Un fils ne
+ * nettoie donc QUE la socket qu'il a lui-même créée.
+ *
+ * Idempotente, sûre depuis un gestionnaire de signal (`unlink` est
+ * async-signal-safe) et sans effet si le fichier a déjà disparu.
+ */
+void local_socket_cleanup_owned(void);
+/**
  * @brief Transmet une commande aux process fils
  * 
  * @param command commande à transmettre

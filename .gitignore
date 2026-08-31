@@ -30,3 +30,8 @@ tests/fixtures/solution16.h
 # Binaire du banc de réfutation (make bench-refutation / bench-refutation-gpu)
 tests/bench/bench_refutation
 tests/bench/bench_refutation_gpu
+
+# Sockets Unix de l'IPC parent<->fork (supprimées à la terminaison du process,
+# mais présentes tant qu'il tourne — cf. docs/architecture.md).
+etii_main.*
+etii_fork.*
