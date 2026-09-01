@@ -21,6 +21,17 @@
 size_t ipc_max_datagram(void);
 
 /**
+ * @brief Nombre maximal de `possibility_packet` tenant dans UNE offre de travail.
+ *
+ * Dérivé d'`ipc_max_datagram()` : octet de type + `IPC_WORK_OFFER_HEADER_SIZE`
+ * + N paquets. Un datagramme AF_UNIX n'est jamais réassemblé — au-delà de cette
+ * borne il faut plusieurs offres, jamais un message plus grand.
+ *
+ * @return Nombre de paquets par offre (>= 1 sur toute configuration supportée).
+ */
+size_t ipc_work_offer_max_packets(void);
+
+/**
  * @brief Construction d'une adresse de socket AF_UNIX vers le fichier
  * @return L'adresse du socket AF_UNIX
  */

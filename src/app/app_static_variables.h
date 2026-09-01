@@ -248,6 +248,17 @@ extern int pruner_forks_requested;
  */
 extern int auto_roles_requested;
 
+/**
+ * @brief Option `--local-dispatch` (client/pruner) : active le courtier de
+ *        travail du process parent.
+ *
+ * Défaut 0 — aucun crochet installé, chaque fork envoie lui-même ses
+ * délégations au serveur (comportement historique). Cf.
+ * `src/app/work_broker.h` et
+ * `docs/conception/dispatch_local_possibilites_forks.md`.
+ */
+extern int local_dispatch_enabled;
+
 /** @brief 1 si l'exécution GPU du pruner a été demandée (`--gpu`) : sur build CUDA active `gpu_pruner_mode`, sinon erreur explicite. */
 extern int gpu_requested;
 

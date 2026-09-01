@@ -837,11 +837,43 @@ int put_to_local(array_possibility_packet *possibilities)
 	return (err_unchecked || err_checked) ? 1 : 0;
 }
 
+/* Aiguillages optionnels injectés par app/ (cf. datamanager.h) — NULL par
+ * défaut, donc comportement historique tant que rien ne les installe. */
+static possibility_local_offer_fn local_offer_hook = NULL;
+static possibility_ack_gate_fn ack_gate_hook = NULL;
+
+void datamanager_set_local_offer(possibility_local_offer_fn fn) { local_offer_hook = fn; }
+
+void datamanager_set_ack_gate(possibility_ack_gate_fn fn) { ack_gate_hook = fn; }
+
 int add_possibility(client_possibility_t *client_possibility, array_possibility_packet *possibilities)
 {
 	int error = 0;
     if(server_ip != NULL && client_possibility != NULL)
 	{
+		// Courtier local d'abord : s'il accepte le lot, il en devient
+		// responsable et aucun aller-retour TCP n'est fait ici. Son refus
+		// (fenêtre pleine, IPC saturé, courtier absent) est un cas NOMINAL,
+		// pas une erreur : on retombe sur l'envoi direct, inchangé.
+		if (local_offer_hook != NULL)
+		{
+			int consumed = 0;
+			if (local_offer_hook(possibilities, &consumed) == 0)
+			{
+				return 0;
+			}
+			if (consumed > 0 && consumed < possibilities->size)
+			{
+				// Prise en charge PARTIELLE : seul le reste part au serveur.
+				// Renvoyer le lot entier ferait explorer deux fois le préfixe
+				// déjà cédé au courtier.
+				array_possibility_packet rest = {
+					.size = possibilities->size - consumed,
+					.possibilities = possibilities->possibilities + consumed
+				};
+				return put_to_server(client_possibility, &rest);
+			}
+		}
 		error = put_to_server(client_possibility, possibilities);
 	} else
 	{
@@ -1152,6 +1184,14 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
  */
 void send_possibility_analysed(client_possibility_t *client_possibility) {
 	int thread = client_possibility->id;
+	if (ack_gate_hook != NULL && !ack_gate_hook()) {
+		// Acquittement différé : du travail cédé au courtier n'est pas encore
+		// durable. Ne rien faire est le repli sûr — la racine reste attribuée
+		// côté serveur, et un client vivant n'est JAMAIS réclamé (cf.
+		// datamanager_reclaim_expired_leases), donc rien ne se perd ni ne
+		// s'expire tant que ce client tourne.
+		return;
+	}
 	if (server_ip == NULL) {
 		if(pthread_mutex_trylock(&file_possibility_analysed[thread]->lock) == 0)
 		{

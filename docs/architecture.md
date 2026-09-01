@@ -172,15 +172,24 @@ locaux** (`etii_main.<pid>` et `etii_fork.<pid>`,
   possède la seule console, ce qui évite tout entrelacement dans le terminal et
   permet le bon fonctionnement de l'interface ncurses ;
 - **propager les commandes console** du parent vers les enfants (commandes marquées
-  « propagées aux enfants », voir [Console interactive](console.md)).
+  « propagées aux enfants », voir [Console interactive](console.md)) ;
+- sous [`--local-dispatch`](utilisation.md#relais-des-délégations-par-le-parent---local-dispatch),
+  **relayer au serveur les délégations des forks** : le fork offre son lot au parent
+  ([src/app/work_broker.c](../src/app/work_broker.c)) au lieu de payer un aller-retour TCP
+  synchrone par possibilité depuis son thread de recherche. Le parent porte alors sa
+  propre connexion de travail, identifiée `fork_seq=-1`.
 
 ### Cadrage des datagrammes
 
 Les **deux sens** sont cadrés de la même façon : un **octet de type**
 (`IPC_MSG_*`, [src/net/ipc_protocol.h](../src/net/ipc_protocol.h)) suivi de la charge
-utile. Les types 1 à 7 vont de l'enfant vers le parent (`server_tcp`), le type 8
-(`IPC_MSG_COMMAND`) du parent vers l'enfant (`fork_udp`) — un même octet ne désigne jamais
-deux choses selon la direction, bien que les deux sens empruntent des sockets distinctes.
+utile. La direction est portée par chaque entrée de la table, jamais déduite de la valeur : un
+même octet ne désigne jamais deux choses selon la direction, bien que les deux sens
+empruntent des sockets distinctes. Enfant → parent : statistiques, lignes de journal,
+meilleur plateau (`IPC_MSG_STATS`, `IPC_MSG_LOG_*`, `IPC_MSG_EVENT`, `IPC_MSG_BEST_BOARD`)
+et, sous `--local-dispatch`, les **offres de travail** (`IPC_MSG_WORK_OFFER`).
+Parent → enfant : les commandes console propagées (`IPC_MSG_COMMAND`) et, sous la même
+option, les **règlements** d'offres (`IPC_MSG_WORK_SETTLED`).
 
 **La longueur de la charge utile est celle du datagramme, jamais un `strlen()`.** Le sens
 parent → enfant n'a longtemps transporté que du texte, sa longueur étant mesurée par

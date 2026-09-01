@@ -1,4 +1,5 @@
 #include "app/fork_orchestrator.h"
+#include "app/work_broker.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -545,6 +546,12 @@ static void run_client(const char *hostname, const char *file, int fork_seq)
 static void spawn_child_body(int fork_seq)
 {
     pruner_mode = (current_fork_role(fork_seq) == FORK_ROLE_PRUNE) ? 1 : 0;
+    // Crochets du courtier : installés ICI, dans l'enfant, après le fork —
+    // le parent ne doit pas les porter (ils détourneraient ses propres
+    // add_possibility vers lui-même). Sans --local-dispatch, no-op.
+    if (local_dispatch_enabled) {
+        work_broker_child_install();
+    }
 #ifdef WITH_CUDA
     g_client_identity_template.mode = (uint8_t)(gpu_pruner_mode ? CLIENT_MODE_GPU_PRUNER
                                          : (pruner_mode ? CLIENT_MODE_PRUNER : CLIENT_MODE_SEARCH));

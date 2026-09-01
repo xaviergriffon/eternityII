@@ -38,6 +38,15 @@ size_t ipc_max_datagram(void)
 }
 
 /**
+ * @brief Voir la doc dans local_socket.h.
+ */
+size_t ipc_work_offer_max_packets(void)
+{
+    size_t room = ipc_max_datagram() - 1 - IPC_WORK_OFFER_HEADER_SIZE;
+    return room / sizeof(struct possibility_packet);
+}
+
+/**
  * @brief Alloue et initialise une structure `sockaddr_un` pour un socket Unix.
  * @param filename Chemin du socket Unix (tronqué à `sizeof(sun_path) - 1`).
  * @return         Pointeur alloué (à libérer par l'appelant).
