@@ -169,10 +169,13 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
         // appels ne font rien.
         work_broker_child_report_done();
         work_broker_child_request_work();
-        // I/O réseau hors du mutex. Elle sert aussi de délai naturel à la
-        // réponse du courtier (datagramme local) : au retour, l'attribution
-        // éventuelle est déjà là, sans la moindre attente ajoutée.
-        send_possibility_analysed(client_possibility);
+        int exclusive = work_broker_child_is_exclusive();
+        if (!exclusive) {
+            // I/O réseau hors du mutex. Elle sert aussi de délai naturel à la
+            // réponse du courtier (datagramme local) : au retour, l'attribution
+            // éventuelle est déjà là, sans la moindre attente ajoutée.
+            send_possibility_analysed(client_possibility);
+        }
         // Un pruner consomme vite : on demande un lot pour amortir les
         // allers-retours TCP ; un client de recherche garde 1 racine
         int from_server = 0;
@@ -182,8 +185,20 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
         // à 0 : cette possibilité n'a jamais été soumise au serveur, il n'y a
         // donc rien à lui acquitter (cf. le garde-fou ci-dessous).
         array_possibility_packet *aposs = work_broker_child_take_grant();
-        if (aposs == NULL) {
+        if (exclusive) {
+            // Mode exclusif (A2) : la connexion de travail est portée par le
+            // SEUL parent. À défaut d'attribution, on reprend ce qu'on avait dû
+            // garder faute de place chez le courtier ; sinon rien, et le
+            // back-off joue — le courtier a été prévenu par la demande
+            // ci-dessus et diffuse la faim aux fils qui détiennent du travail.
+            if (aposs == NULL) {
+                aposs = work_broker_child_take_local();
+            }
+        } else if (aposs == NULL) {
             aposs = get_last_possibility(client_possibility, pruner_mode ? pruner_batch_size : 1, &from_server);
+        }
+        if (aposs == NULL) {
+            return;
         }
         if(aposs->size > 0)
         {
@@ -216,7 +231,7 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
             free_array_possibility_packet(aposs);
         }
     }
-    else if (client_possibility->socket_id != -1)
+    else if (client_possibility->socket_id != -1 && !work_broker_child_is_exclusive())
     {
         // Sonde de faim + keepalive : un worker occupé sur son stock local ne
         // parle pas au serveur. Sans échange, le serveur ferme la session après

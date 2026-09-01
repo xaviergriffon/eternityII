@@ -160,6 +160,19 @@ int server_active_client_count(void) {
     return get_active_threads(thread_params);
 }
 
+int server_declared_worker_count(void)
+{
+    control_session_info_t sessions[MAX_CONTROL_SESSIONS];
+    int n = control_registry_snapshot(sessions, MAX_CONTROL_SESSIONS);
+    int search_forks = 0, prune_forks = 0;
+    control_registry_count_role_forks(sessions, n, &search_forks, &prune_forks);
+    int declared = search_forks + prune_forks;
+    /* Repli sur le compte de connexions tant qu'aucun canal de contrôle n'est
+       enregistré (client d'une version antérieure, ou session pas encore
+       ouverte) : mieux vaut l'ancienne approximation que zéro. */
+    return declared > 0 ? declared : get_active_threads(thread_params);
+}
+
 /**
  * @brief Voir la doc dans etii_server.h.
  */
@@ -623,6 +636,17 @@ int server_analysed_file_hint(client_t *client)
     if (client == NULL || nb_file_possibility <= 0) {
         return -1;
     }
+    // L'indice DOIT être une fonction stable de la connexion : il est calculé
+    // une fois à l'enregistrement (record_possibility_analysed_for_client) et
+    // recalculé à l'identique au retrait (requeue_last_sent_possibility). Un
+    // compteur tournant par requête, essayé pour mieux répartir sous
+    // --local-dispatch, désynchronise les deux et fait échouer les retraits.
+    //
+    // Effet connu de --local-dispatch, laissé ouvert : un client ne présentant
+    // plus qu'UNE connexion, tout SON pool analysé tient sur une file. C'est
+    // une question de répartition, pas de correction (avec plusieurs clients,
+    // les `compteur` diffèrent et la répartition tient) — la traiter demande de
+    // dériver l'indice du PAQUET, aux deux sites à la fois, et de le mesurer.
     return client->compteur % nb_file_possibility;
 }
 
@@ -1138,8 +1162,16 @@ int communicate_with_client_step(client_t *client, int8_t instruction,
             // Sonde de faim (v8) : le client demande combien de possibilités le
             // serveur souhaiterait recevoir pour nourrir les autres sessions.
             // Sert aussi de keepalive (échange = preuve d'activité).
+            // Dimensionnée sur le nombre de FORKS déclarés, pas sur le nombre
+            // de connexions ouvertes : sous --local-dispatch un client ne
+            // présente plus qu'UNE connexion pour tous ses forks (arbitrage A2),
+            // et compter les connexions diviserait la cible par son nombre de
+            // forks — la sonde cesserait d'annoncer la faim réelle et la
+            // délégation anticipée mourrait avec elle. Même classe de bug que
+            // celui déjà corrigé sur le dosage des rôles, d'où la réutilisation
+            // de control_registry_count_role_forks (cf. control_registry.h).
             int32_t hunger = compute_server_hunger(datas_size(),
-                                                   get_active_threads(thread_params));
+                                                   server_declared_worker_count());
             if (send_all(client->socket_id, &hunger, sizeof(hunger)) != (long)sizeof(hunger))
             {
                 log_errno("Erreur d'envoi (need work) => ");

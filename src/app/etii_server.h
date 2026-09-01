@@ -293,6 +293,17 @@ int get_active_threads(client_t *thread_params);
 int server_active_client_count(void);
 
 /**
+ * @brief Nombre de forks de travail DÉCLARÉS par le parc, tous clients confondus.
+ *
+ * Somme les `nb_forks` des sessions de contrôle enregistrées, au lieu de
+ * compter les connexions de travail ouvertes : sous `--local-dispatch` un
+ * client ne présente plus qu'UNE connexion pour tous ses forks, et compter les
+ * connexions sous-estimerait le parc d'un facteur `nb_forks`. Retombe sur le
+ * compte de connexions si aucune session de contrôle n'est enregistrée.
+ */
+int server_declared_worker_count(void);
+
+/**
  * @brief Un fork de travail actuellement connecté, avec son rôle déclaré.
  */
 typedef struct {

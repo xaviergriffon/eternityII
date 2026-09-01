@@ -205,6 +205,15 @@ void work_broker_child_reset(void)
 
 int work_broker_ack_allowed(void)
 {
+    if (local_dispatch_enabled) {
+        /* Mode exclusif : ce fils n'a AUCUNE connexion de travail, et rien à
+           acquitter — c'est le parent qui détient les racines et les acquitte.
+           Sans ce refus, `send_possibility_analysed` ouvrirait une connexion
+           au serveur (elle se connecte avant de regarder si la file est vide),
+           ce qui ferait réapparaître exactement les N connexions par client
+           que l'arbitrage A2 supprime. */
+        return 0;
+    }
     uint32_t offered = __atomic_load_n(&child_last_offer_seq, __ATOMIC_RELAXED);
     uint32_t settled = __atomic_load_n(&child_last_settled_seq, __ATOMIC_RELAXED);
     return offered == settled;
@@ -294,10 +303,38 @@ static int child_offer_hook(array_possibility_packet *aposs, int *consumed)
         }
         done += chunk;
     }
+    if (done < aposs->size && local_dispatch_enabled) {
+        /* Mode exclusif : pas de serveur pour ce fils. Le reste va dans ses
+           propres pools, d'où il le reprendra (cf. work_broker_child_take_local).
+           Perdu si le fils meurt — sans conséquence : le parent réinjecte alors
+           la racine attribuée, et rien n'a été acquitté. */
+        array_possibility_packet rest = {
+            .size = aposs->size - done,
+            .possibilities = aposs->possibilities + done
+        };
+        put_to_local(&rest);
+        done = aposs->size;
+    }
     if (consumed != NULL) {
         *consumed = done;
     }
     return (done == aposs->size) ? 0 : -1;
+}
+
+array_possibility_packet *work_broker_child_take_local(void)
+{
+    array_possibility_packet *out = malloc(sizeof(*out));
+    if (out == NULL) {
+        return NULL;
+    }
+    out->size = 0;
+    out->possibilities = NULL;
+    scroll_from_local(out, 1);
+    if (out->size == 0) {
+        free_array_possibility_packet(out);
+        return NULL;
+    }
+    return out;
 }
 
 void work_broker_child_on_grant(const void *payload, size_t len)
@@ -384,6 +421,24 @@ void work_broker_child_report_done(void)
     work_broker_tag_encode(slot, seq, frame + 1, IPC_WORK_TAG_SIZE);
     sendto(fork_checker_socket_id, frame, sizeof frame, MSG_DONTWAIT,
            (struct sockaddr *)main_addr, sizeof(struct sockaddr_un));
+}
+
+int work_broker_child_is_exclusive(void)
+{
+    return local_dispatch_enabled ? 1 : 0;
+}
+
+void work_broker_child_on_hunger(const void *payload, size_t len)
+{
+    if (payload == NULL || len < sizeof(int32_t)) {
+        return;
+    }
+    int32_t hunger;
+    memcpy(&hunger, payload, sizeof hunger);
+    if (hunger < 0) {
+        hunger = 0;
+    }
+    __atomic_store_n(&server_hunger, (int)hunger, __ATOMIC_RELAXED);
 }
 
 void work_broker_child_install(void)
@@ -611,6 +666,8 @@ static int broker_send_one(const struct possibility_packet *pkt)
  */
 static void broker_dispose_and_settle(int slot, uint32_t seq)
 {
+    /* slot < 0 : racine obtenue du serveur par le parent, pas l'offre d'un
+       fils — rien à décompter ni à régler. */
     if (slot < 0 || slot >= BROKER_MAX_SLOTS) {
         return;
     }
@@ -625,6 +682,26 @@ static void broker_dispose_and_settle(int slot, uint32_t seq)
     }
 }
 
+/**
+ * @brief Annonce à tous les fils que le courtier manque de travail.
+ *
+ * La valeur est un ORDRE DE GRANDEUR, pas une cible exacte : elle borne ce
+ * qu'un fils cède d'un coup (`bt_delegation_quota` en prend au plus la moitié
+ * de son stock implicite). Un fils presque à sec ne se vide donc jamais pour
+ * cette annonce.
+ */
+static void broker_broadcast_hunger(void)
+{
+    int32_t hunger = (int32_t)(NB_THREADS > 0 ? NB_THREADS : 1)
+                     * (int32_t)ipc_work_offer_max_packets();
+    uint8_t frame[1 + sizeof(int32_t)];
+    frame[0] = (uint8_t)IPC_MSG_WORK_HUNGER;
+    memcpy(frame + 1, &hunger, sizeof hunger);
+    for (int s = 0; s < NB_THREADS; s++) {
+        broker_send_to_child(s, frame, sizeof frame);
+    }
+}
+
 void work_broker_on_request(int fork_slot)
 {
     if (fork_slot < 0 || fork_slot >= BROKER_MAX_SLOTS) {
@@ -634,11 +711,18 @@ void work_broker_on_request(int fork_slot)
     pthread_mutex_lock(&broker_lock);
     if (broker_granted[fork_slot].valid || !broker_queue_ready
         || !scroll_fifo(&broker_queue, &e)) {
-        /* Déjà servi, ou rien en tampon : on ne répond pas. Le fils enchaîne
-           sur le serveur, exactement comme avant — une demande sans réponse
-           n'est pas une erreur, c'est le cas nominal quand le courtier est à
-           sec. */
+        /* Déjà servi, ou rien en tampon : pas d'attribution. En mode
+           historique le fils enchaîne sur le serveur ; en mode exclusif il
+           n'a personne d'autre, donc on RÉCLAME aux autres fils — c'est la
+           délégation anticipée de la v8, repointée sur le courtier. Sans
+           cela, un fils tenant une racine profonde ne cède rien avant
+           `max_stock_by_thread` et ses frères restent à sec pendant ce
+           temps. */
+        int was_empty = !broker_granted[fork_slot].valid;
         pthread_mutex_unlock(&broker_lock);
+        if (was_empty && local_dispatch_enabled) {
+            broker_broadcast_hunger();
+        }
         return;
     }
     broker_granted[fork_slot].valid = 1;
@@ -772,6 +856,77 @@ int work_broker_relay_step(void)
     return sent;
 }
 
+/**
+ * @brief Nombre d'attributions en cours (fils en train d'explorer).
+ */
+static int broker_grants_outstanding(void)
+{
+    int n = 0;
+    pthread_mutex_lock(&broker_lock);
+    for (int s = 0; s < BROKER_MAX_SLOTS; s++) {
+        if (broker_granted[s].valid) {
+            n++;
+        }
+    }
+    pthread_mutex_unlock(&broker_lock);
+    return n;
+}
+
+/**
+ * @brief Acquitte les racines terminées, puis en réclame une au serveur.
+ *
+ * N'agit QUE lorsque le tampon est vide ET qu'aucun fils n'explore : à cet
+ * instant précis, tout ce qui descendait des racines détenues a été soit
+ * poussé au serveur (donc durable), soit prouvé mort. C'est exactement la
+ * condition de l'invariant A4 — ni conservatrice, ni optimiste — et c'est
+ * aussi le moment où le client n'a plus rien à faire, donc où il faut
+ * redemander.
+ *
+ * @return 1 si une racine a été obtenue, 0 sinon.
+ */
+static int broker_ack_and_refill(void)
+{
+    if (broker_client == NULL || !local_dispatch_enabled) {
+        return 0;
+    }
+    if (work_broker_pending_packets() > 0 || broker_grants_outstanding() > 0) {
+        return 0;
+    }
+    /* Le sous-arbre local est épuisé : les racines détenues peuvent partir. */
+    send_possibility_analysed(broker_client);
+
+    int from_server = 0;
+    array_possibility_packet *aposs = get_last_possibility(broker_client, 1, &from_server);
+    if (aposs == NULL) {
+        return 0;
+    }
+    int got = 0;
+    if (aposs->size > 0) {
+        long long now_ms = broker_now_ms();
+        pthread_mutex_lock(&broker_lock);
+        for (int i = 0; i < aposs->size; i++) {
+            if (from_server) {
+                /* Enregistrée comme « en analyse » : c'est ce que le futur
+                   acquittement retirera côté serveur. */
+                add_possibility_analysed(&aposs->possibilities[i], broker_client->id);
+            }
+            broker_entry_t e;
+            /* Racine venue du serveur : aucune offre d'un fils à régler, d'où
+               le slot sentinelle — `broker_dispose_and_settle` l'ignore. */
+            e.slot = -1;
+            e.seq = 0;
+            e.enqueued_ms = now_ms;
+            memcpy(&e.pkt, &aposs->possibilities[i], sizeof e.pkt);
+            if (put(&broker_queue, &e)) {
+                got++;
+            }
+        }
+        pthread_mutex_unlock(&broker_lock);
+    }
+    free_array_possibility_packet(aposs);
+    return got;
+}
+
 static void *broker_relay_thread(void *unused)
 {
     (void)unused;
@@ -787,6 +942,9 @@ static void *broker_relay_thread(void *unused)
            serait refusé. */
         fork_gate_mark_blocked(gate_slot, 1);
         int moved = work_broker_relay_step();
+        /* En mode exclusif le parent est la SEULE source de travail du client :
+           s'il ne réclame pas au serveur, personne ne le fait. */
+        moved += broker_ack_and_refill();
         fork_gate_mark_blocked(gate_slot, 0);
         fork_gate_checkpoint(gate_slot);
         if (moved == 0) {

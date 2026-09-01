@@ -324,6 +324,30 @@ void datamanager_set_ack_gate(possibility_ack_gate_fn fn);
  * @return Tableau alloué (à libérer avec `free_array_possibility_packet`).
  */
 array_possibility_packet *get_last_possibility(client_possibility_t *client_possibility, int max_result, int *from_server);
+
+/**
+ * @brief Extrait des possibilités des pools LOCAUX de ce process, sans jamais
+ *        toucher au réseau (pool vérifié d'abord, pool historique ensuite).
+ *
+ * Déclarée ici (elle ne l'était pas, bien que non `static`) pour le mode
+ * exclusif du courtier : un fils y range ce que le courtier a refusé, et doit
+ * pouvoir le reprendre sans ouvrir de connexion — cf. app/work_broker.h.
+ *
+ * @param result     Tableau à remplir (déjà initialisé à size 0).
+ * @param max_result Nombre maximum de possibilités à extraire.
+ */
+void scroll_from_local(array_possibility_packet *result, int max_result);
+
+/**
+ * @brief Range un lot dans les pools LOCAUX de ce process (routage par le
+ *        drapeau `checked`), sans jamais toucher au réseau.
+ *
+ * Déclarée ici pour la même raison que `scroll_from_local` : le mode exclusif
+ * du courtier s'en sert comme repli lorsque le courtier refuse un lot.
+ *
+ * @return 0 si tout est inséré, 1 si un pool a refusé (plafond RAM, verrous).
+ */
+int put_to_local(array_possibility_packet *possibilities);
 /**
  * @brief Extrait des possibilités non vérifiées du datamanager local (côté serveur).
  *

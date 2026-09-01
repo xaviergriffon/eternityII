@@ -453,13 +453,16 @@ l'envoi direct » — de l'extérieur les trois se ressemblent :
 [19:13:08] courtier : 0 possibilités redistribuées aux fils, 960 relayées au serveur (156 en tampon)
 ```
 
-> **En l'état, la redistribution ne se déclenche quasiment jamais** (le `0`
-> ci-dessus est une mesure réelle, pas un exemple). Un fork ne réclame du travail
-> qu'une fois sa racine terminée, et chaque fork tirant sa propre racine du
-> serveur, aucun n'est jamais disponible. Le relais vers le serveur, lui,
-> fonctionne et apporte déjà son gain. Voir
-> [l'analyse §5.1](conception/dispatch_local_possibilites_forks.md) : c'est le
-> passage à **une seule demande par client** qui rendra la redistribution utile.
+Sous cette option, la connexion de travail est portée par le **seul process
+parent** : un fork ne fait plus ni `GET`, ni `ADD`, ni acquittement. Le serveur
+voit donc **une connexion par client** (identifiée `fork_seq=-1`) au lieu d'une
+par fork. Le parent réclame une racine quand son tampon est vide et qu'aucun
+fork n'explore, et redistribue tout le reste en local.
+
+Mesure sur un client 4 forks (serveur `--expand-level 4`, 50 s) : **273
+possibilités redistribuées** entre forks contre 540 relayées au serveur, là où
+le même code avec une connexion par fork n'en redistribuait **aucune** — un fork
+n'étant jamais disponible tant qu'il tire sa propre racine.
 
 **Rien ne peut être perdu.** Le tampon du parent n'est pas sauvegardé : un fork
 qui a cédé du travail pas encore poussé au serveur **n'acquitte pas** la racine

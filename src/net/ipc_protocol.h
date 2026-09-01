@@ -88,6 +88,13 @@
  * décompter la mauvaise offre. */
 #define IPC_MSG_WORK_DONE    ((int8_t)13)
 
+/* Parent → enfant. Suivi d'un `int32` : nombre de possibilités que le courtier
+ * souhaiterait recevoir. Publié dans `server_hunger`, que `bt_delegation_quota`
+ * lit déjà — le mécanisme de délégation anticipée de la v8, repointé sur le
+ * courtier. Sans lui, un fils qui détient une racine profonde ne cède rien
+ * avant `max_stock_by_thread`, et ses frères restent à sec pendant ce temps. */
+#define IPC_MSG_WORK_HUNGER  ((int8_t)14)
+
 /* Charge utile commune à GRANT (hors paquet) et DONE : origin_slot + origin_seq. */
 #define IPC_WORK_TAG_SIZE 8
 

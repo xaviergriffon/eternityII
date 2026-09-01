@@ -203,6 +203,25 @@ int work_broker_tag_encode(int32_t slot, uint32_t seq, void *buf, size_t bufsz);
 int work_broker_tag_decode(const void *buf, size_t len, int32_t *out_slot, uint32_t *out_seq);
 
 /**
+ * @brief Ce fils doit-il ignorer complètement le serveur ?
+ *
+ * Sous `--local-dispatch`, la connexion de travail est portée par le SEUL
+ * process parent (arbitrage A2) : un fils ne fait plus ni GET, ni ADD, ni
+ * acquittement — il est nourri par le courtier et lui rend tout. Seule la
+ * remontée d'une solution garde le droit d'ouvrir une connexion, événement
+ * assez rare pour ne pas peser sur le modèle.
+ *
+ * @return 1 en mode exclusif, 0 en mode historique.
+ */
+int work_broker_child_is_exclusive(void);
+
+/**
+ * @brief Traite un `IPC_MSG_WORK_HUNGER` : publie la faim du courtier dans
+ *        `server_hunger`, que `bt_delegation_quota` consulte déjà.
+ */
+void work_broker_child_on_hunger(const void *payload, size_t len);
+
+/**
  * @brief Installe les crochets `datamanager` de ce fils (offre + verrou
  *        d'acquittement). À appeler dans l'enfant, après le `fork()`, et
  *        seulement si `--local-dispatch` est actif.
@@ -252,6 +271,15 @@ void work_broker_child_request_work(void);
  *         l'enregistrer dans le pool analysé.
  */
 array_possibility_packet *work_broker_child_take_grant(void);
+
+/**
+ * @brief Reprend une possibilité que ce fils avait dû garder faute de place
+ *        chez le courtier (mode exclusif). Ne touche jamais au réseau.
+ *
+ * @return Un tableau d'un paquet, à libérer par `free_array_possibility_packet`,
+ *         ou NULL si les pools locaux sont vides.
+ */
+array_possibility_packet *work_broker_child_take_local(void);
 
 /**
  * @brief Signale au courtier que l'attribution en cours est entièrement
