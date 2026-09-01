@@ -228,26 +228,84 @@ int build_udp_local_socket(struct sockaddr_un *svaddr) {
 }
 
 /**
- * @brief Envoie une commande texte à tous les processus enfants via UDP Unix.
- *
- * N'envoie que si le processus courant est le parent (`parent_pid == getpid()`).
- * Itère sur les `NB_THREADS` entrées de `forkId` et envoie `command` en mode
- * non-bloquant (`MSG_DONTWAIT`) à chacun.
- *
- * @param command Chaîne de commande à transmettre (ex. "backup", "exit").
+ * @brief Voir la doc dans local_socket.h.
+ */
+int send_typed_to_childs(int8_t type, const void *payload, size_t len) {
+    if (parent_pid != getpid()) {
+        return 0;
+    }
+    size_t frame_len = 1 + len;
+    if (frame_len > ipc_max_datagram()) {
+        /* Refus explicite plutôt que troncature : le datagramme ne passerait
+           de toute façon pas (SO_SNDBUF est dimensionné sur cette borne), et
+           un message amputé serait interprété comme un message court. */
+        log_error("send_typed_to_childs : message de type %d trop grand (%zu octets, max %zu)\n",
+                  (int)type, frame_len, ipc_max_datagram());
+        return 0;
+    }
+
+    char stack_frame[256];
+    char *frame = stack_frame;
+    char *heap_frame = NULL;
+    if (frame_len > sizeof stack_frame) {
+        heap_frame = malloc(frame_len);
+        if (heap_frame == NULL) {
+            log_error("send_typed_to_childs : allocation de %zu octets impossible\n", frame_len);
+            return 0;
+        }
+        frame = heap_frame;
+    }
+    frame[0] = (char)type;
+    if (len > 0) {
+        memcpy(frame + 1, payload, len);
+    }
+
+    int delivered = 0;
+    for (int f = 0; f < NB_THREADS; f++) {
+        if (strcmp(forkId[f], "") == 0) {
+            continue;
+        }
+        struct sockaddr_un *cl_addr = build_sockaddr(forkId[f]);
+        if (sendto(*main_socket_id, frame, frame_len, MSG_DONTWAIT,
+                   (struct sockaddr *) cl_addr, sizeof(struct sockaddr_un)) != (ssize_t)frame_len) {
+            log_errno("Error on send_typed_to_childs cl %d => ", getpid());
+        } else {
+            delivered++;
+        }
+        free(cl_addr);
+    }
+    free(heap_frame);
+    return delivered;
+}
+
+/**
+ * @brief Voir la doc dans local_socket.h.
  */
 void send_command_to_childs(char *command) {
-    if (parent_pid == getpid()) {
-        for (int f = 0; f < NB_THREADS; f++) {
-            if (strcmp(forkId[f], "") != 0) {
-                struct sockaddr_un *cl_addr = build_sockaddr(forkId[f]);
-                if (sendto(*main_socket_id, command, strlen(command), MSG_DONTWAIT, (struct sockaddr *) cl_addr,
-                            sizeof(struct sockaddr_un)) != (ssize_t)strlen(command)) {
-                    log_errno("Error on send_command_to_childs cl %d => ", getpid());
-                    
-                }
-                free(cl_addr);
-            }
-        }
+    send_typed_to_childs(IPC_MSG_COMMAND, command, strlen(command));
+}
+
+/**
+ * @brief Voir la doc dans local_socket.h.
+ */
+int ipc_child_frame_decode(char *buf, size_t bufcap, ssize_t nbytes,
+                           int8_t *out_type, char **out_payload) {
+    if (buf == NULL || nbytes < 1) {
+        /* nbytes < 0 : erreur de recvfrom, déjà journalisée par l'appelant.
+           nbytes == 0 : datagramme vide — légal en DGRAM, sans octet de type. */
+        return 0;
     }
+    if (bufcap <= (size_t)nbytes) {
+        /* Le terminateur n'a pas de place : refuser plutôt qu'écrire hors
+           bornes (le bogue que cette fonction existe pour rendre testable). */
+        return 0;
+    }
+    buf[nbytes] = '\0';
+    if (out_type != NULL) {
+        *out_type = (int8_t)buf[0];
+    }
+    if (out_payload != NULL) {
+        *out_payload = buf + 1;
+    }
+    return 1;
 }

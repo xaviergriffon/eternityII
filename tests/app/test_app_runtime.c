@@ -23,6 +23,7 @@
 #include "core/best_board.h"
 #include "net/local_socket.h"
 #include "net/ipc_protocol.h"
+#include "core/core_static_variables.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1355,8 +1356,16 @@ TEST server_tcp_updates_stats_and_handles_event_and_unknown_type(void)
 
 /* ---------- fork_udp --------------------------------------------------------- */
 
-/* Reçoit une commande, la délègue à do_command_line (ici « help », inoffensive),
- * puis sort sur REQUEST_STOP après un dernier datagramme de déblocage. */
+/* Reçoit une commande CADRÉE (octet IPC_MSG_COMMAND + ligne), la délègue à
+ * do_command_line, puis sort sur REQUEST_STOP après un dernier datagramme de
+ * déblocage.
+ *
+ * La commande est `maxStockByThread`, choisie pour son effet OBSERVABLE sur un
+ * global : la version précédente de ce test envoyait « help » et n'assérait
+ * rien de son exécution — elle serait passée à l'identique si fork_udp avait
+ * jeté le datagramme en silence. Elle vérifie aussi qu'un datagramme NON cadré
+ * (l'ancien format texte brut) est bien ignoré : son premier octet est lu comme
+ * un type, et aucun type ne vaut 'm'. */
 TEST fork_udp_delegates_command_then_stops(void)
 {
     char sock_path[] = "/tmp/etii_ar_udp_XXXXXX";
@@ -1390,19 +1399,38 @@ TEST fork_udp_delegates_command_then_stops(void)
 
     usleep(300000); /* >= 1 timeout de réception -> branche d'erreur prise */
 
-    char cmd[] = "help";
-    sendto(sender, cmd, strlen(cmd), 0, (struct sockaddr *)addr, sizeof(struct sockaddr_un));
+    int saved_max_stock = max_stock_by_thread;
+
+    /* 1) Datagramme NON cadré (ancien format) : doit être ignoré. */
+    const char *raw = "maxStockByThread 1111";
+    sendto(sender, raw, strlen(raw), 0, (struct sockaddr *)addr, sizeof(struct sockaddr_un));
+    usleep(30000);
+    int after_raw = max_stock_by_thread;
+
+    /* 2) Datagramme CADRÉ : doit être exécuté. */
+    char framed[64];
+    framed[0] = (char)IPC_MSG_COMMAND;
+    size_t cmd_len = strlen("maxStockByThread 4242");
+    memcpy(framed + 1, "maxStockByThread 4242", cmd_len);
+    sendto(sender, framed, 1 + cmd_len, 0, (struct sockaddr *)addr, sizeof(struct sockaddr_un));
     usleep(30000); /* laisse fork_udp traiter la commande et reboucler sur recvfrom */
+    int after_framed = max_stock_by_thread;
 
     request = REQUEST_STOP;
-    sendto(sender, cmd, strlen(cmd), 0, (struct sockaddr *)addr, sizeof(struct sockaddr_un));
+    sendto(sender, framed, 1 + cmd_len, 0, (struct sockaddr *)addr, sizeof(struct sockaddr_un));
     pthread_join(tid, NULL);
 
     fflush(NULL);
     dup2(s1, 1); dup2(s2, 2);
     close(s1); close(s2);
 
+    max_stock_by_thread = saved_max_stock;
     request = saved_req;
+
+    /* Assertions après restauration de stdout/stderr, pour que greatest puisse
+       rapporter un échec lisible. */
+    ASSERT_EQ_FMT(saved_max_stock, after_raw, "%d");  /* non cadré -> ignoré */
+    ASSERT_EQ_FMT(4242, after_framed, "%d");          /* cadré -> exécuté */
     close(sender);
     close(fd);
     unlink(sock_path);
@@ -1494,8 +1522,12 @@ TEST fork_checker_sends_stats_to_parent(void)
     int sender = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (sender >= 0) {
         struct sockaddr_un *child_addr = build_sockaddr(child_sock_path);
-        char wake[] = "help";
-        sendto(sender, wake, strlen(wake), 0, (struct sockaddr *)child_addr, sizeof(struct sockaddr_un));
+        /* Datagramme VIDE : le seul but est de débloquer recvfrom pour que la
+           boucle relise `request`. Aucune commande n'est attendue ici — un
+           datagramme non cadré serait lu comme un type inconnu et journalisé
+           pour rien (cf. ipc_child_frame_decode, qui traite nbytes == 0 comme
+           « rien à décoder »). */
+        sendto(sender, "", 0, 0, (struct sockaddr *)child_addr, sizeof(struct sockaddr_un));
         free(child_addr);
         close(sender);
     }
@@ -1636,8 +1668,12 @@ TEST run_fork_checker_sends_stats(void)
     int sender = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (sender >= 0) {
         struct sockaddr_un *child_addr = build_sockaddr(child_sock_path);
-        char wake[] = "help";
-        sendto(sender, wake, strlen(wake), 0, (struct sockaddr *)child_addr, sizeof(struct sockaddr_un));
+        /* Datagramme VIDE : le seul but est de débloquer recvfrom pour que la
+           boucle relise `request`. Aucune commande n'est attendue ici — un
+           datagramme non cadré serait lu comme un type inconnu et journalisé
+           pour rien (cf. ipc_child_frame_decode, qui traite nbytes == 0 comme
+           « rien à décoder »). */
+        sendto(sender, "", 0, 0, (struct sockaddr *)child_addr, sizeof(struct sockaddr_un));
         free(child_addr);
         close(sender);
     }

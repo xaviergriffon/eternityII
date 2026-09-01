@@ -174,6 +174,36 @@ locaux** (`etii_main.<pid>` et `etii_fork.<pid>`,
 - **propager les commandes console** du parent vers les enfants (commandes marquées
   « propagées aux enfants », voir [Console interactive](console.md)).
 
+### Cadrage des datagrammes
+
+Les **deux sens** sont cadrés de la même façon : un **octet de type**
+(`IPC_MSG_*`, [src/net/ipc_protocol.h](../src/net/ipc_protocol.h)) suivi de la charge
+utile. Les types 1 à 7 vont de l'enfant vers le parent (`server_tcp`), le type 8
+(`IPC_MSG_COMMAND`) du parent vers l'enfant (`fork_udp`) — un même octet ne désigne jamais
+deux choses selon la direction, bien que les deux sens empruntent des sockets distinctes.
+
+**La longueur de la charge utile est celle du datagramme, jamais un `strlen()`.** Le sens
+parent → enfant n'a longtemps transporté que du texte, sa longueur étant mesurée par
+`strlen()` à l'émission : un payload binaire — un `possibility_packet` contient des octets
+nuls dès sa deuxième case vide — y aurait été tronqué au premier zéro.
+`send_typed_to_childs` ([src/net/local_socket.c](../src/net/local_socket.c)) prend donc la
+longueur en paramètre ; `send_command_to_childs` n'en est plus qu'une enveloppe.
+
+Deux bornes à respecter :
+
+- **Tout tampon de réception se dimensionne sur `ipc_max_datagram()`**, jamais sur une
+  constante locale — c'est la même source de vérité que les `SO_SNDBUF`/`SO_RCVBUF` posés
+  par `build_udp_local_socket` (indispensables sur macOS, où
+  `net.local.dgram.maxdgram` plafonne un datagramme AF_UNIX à 2048 octets par défaut).
+  Le récepteur `fork_udp` lisait auparavant 100 octets dans un tampon de 100, puis écrivait
+  son terminateur à l'indice 100 : un débordement d'un octet dès qu'un datagramme
+  remplissait exactement le tampon. Le découpage est désormais fait par
+  `ipc_child_frame_decode`, fonction pure qui **vérifie** que la place du terminateur
+  existe au lieu de la supposer, et refuse la trame sinon.
+- **Une charge utile qui dépasse `ipc_max_datagram() - 1` est refusée, pas tronquée** :
+  un message amputé serait un message court parfaitement bien formé côté récepteur, donc
+  indétectable.
+
 ### Cycle de vie des fichiers socket
 
 `bind()` matérialise chaque socket AF_UNIX par un **fichier spécial dans le

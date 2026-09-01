@@ -5,6 +5,8 @@
 #ifndef local_socket_h
 #define local_socket_h
 #include <stddef.h>
+#include <sys/types.h>
+#include <stdint.h>
 #include <sys/un.h>
 
 /**
@@ -50,9 +52,59 @@ int build_udp_local_socket(struct sockaddr_un *svaddr);
  */
 void local_socket_cleanup_owned(void);
 /**
- * @brief Transmet une commande aux process fils
- * 
+ * @brief Transmet un message typé à tous les process fils.
+ *
+ * Cadre le datagramme comme le sens enfant → parent : un octet de type
+ * (cf. `net/ipc_protocol.h`) suivi de `len` octets bruts. La longueur est
+ * passée explicitement et JAMAIS redérivée par `strlen()` — un
+ * `possibility_packet` contient des octets nuls et serait tronqué au premier.
+ *
+ * Sans effet si le process courant n'est pas le parent
+ * (`parent_pid != getpid()`), comme `send_command_to_childs`.
+ *
+ * @param type    Type de message (`IPC_MSG_*`).
+ * @param payload Charge utile (peut être NULL si `len == 0`).
+ * @param len     Longueur de la charge utile, hors octet de type. Bornée par
+ *                `ipc_max_datagram() - 1` : au-delà, rien n'est envoyé et
+ *                l'appel est journalisé (le datagramme ne passerait pas, et
+ *                une troncature silencieuse serait pire qu'un refus).
+ * @return        Nombre de fils auxquels le message a été remis, 0 si aucun
+ *                (non-parent, aucun fils enregistré, ou payload trop grand).
+ */
+int send_typed_to_childs(int8_t type, const void *payload, size_t len);
+
+/**
+ * @brief Transmet une commande aux process fils (cadre `IPC_MSG_COMMAND`).
+ *
+ * Enveloppe de `send_typed_to_childs` : la commande voyage sans son octet
+ * nul terminal, sa longueur étant celle du datagramme.
+ *
  * @param command commande à transmettre
  */
 void send_command_to_childs(char *command);
+
+/**
+ * @brief Décode en place un datagramme reçu par un fils (fonction pure).
+ *
+ * Sépare l'octet de type de la charge utile et TERMINE cette dernière par un
+ * octet nul, écrit à l'indice `nbytes` de `buf` — d'où l'exigence
+ * `bufcap > nbytes`, que cette fonction vérifie au lieu de la supposer :
+ * l'ancien récepteur écrivait ce nul à l'indice 100 d'un tampon de 100
+ * octets dès qu'un datagramme remplissait exactement le tampon.
+ *
+ * Ne connaît aucun type : elle ne fait que découper. C'est à l'appelant de
+ * décider quoi faire de `*out_type`.
+ *
+ * @param buf         Tampon reçu, modifié en place (ajout du terminateur).
+ * @param bufcap      Capacité totale de `buf`, terminateur compris.
+ * @param nbytes      Nombre d'octets effectivement reçus (retour de `recvfrom`).
+ * @param out_type    Reçoit le type du message. Non écrit si le retour est 0.
+ * @param out_payload Reçoit un pointeur dans `buf` sur la charge utile
+ *                    NUL-terminée. Non écrit si le retour est 0.
+ * @return            1 si le datagramme est exploitable, 0 sinon (reçu vide,
+ *                    erreur de `recvfrom`, ou tampon trop court d'un octet
+ *                    pour le terminateur).
+ */
+int ipc_child_frame_decode(char *buf, size_t bufcap, ssize_t nbytes,
+                           int8_t *out_type, char **out_payload);
 #endif // local_socket_h

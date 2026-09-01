@@ -1,7 +1,8 @@
 # Dispatch local des possibilités entre les forks d'un client
 
-**Statut : proposition.** Ce document décrit une **cible**, pas le comportement actuel du
-code. Rien de ce qui suit n'est implémenté.
+**Statut : en cours d'implémentation (1/5 PR livrée).** Ce document décrit une **cible** ;
+tout ce qui n'est pas explicitement marqué « livré » ci-dessous n'est pas encore le
+comportement du code.
 
 Aujourd'hui, chaque fork d'un client demande **sa** possibilité au serveur et l'étudie seul,
 sans borne de durée. Cette proposition décrit un workflow où le client demande le travail
@@ -190,8 +191,8 @@ traitée par la PR qui introduit A2, sinon l'implémentation les découvrira en 
 | **R4** | `owner_client_alive` = session de contrôle **OU** connexion de travail ouverte | Les deux signaux se rejoignent sur le même process : c'est le cas dégénéré à un seul signal que [bail_expire_racines_en_stock.md](../investigations/bail_expire_racines_en_stock.md) a documenté (28,5 % d'un stock de production devenu racine de lui-même) | Le résultat est en fait **plus sûr** — le parent survit à ses forks, alors que le canal de contrôle se fermait *avant* que les forks aient fini de vider. Mais le raisonnement doit être **réécrit et re-testé**, pas hérité en silence |
 | **R5** | Métriques de besoin ventilées par rôle, via `identity.mode` de la connexion de travail | Une connexion parent porte **un seul** `mode` | Même source que R2 : le canal de contrôle |
 | **R6** | Le parent devient le goulot du travail | Ordre de grandeur à mesurer, pas à supposer : 16 forks × jusqu'à 300 paquets / 500 ms × 577 o ≈ **5,5 Mo/s** sur AF_UNIX, chez un process qui porte déjà la console (ncurses) et le routage des logs de tous ses forks | Mesure §6 ; borne du tampon (A3) ; lots plutôt que datagrammes unitaires |
-| **R7** | `fork_udp` ([src/app/app_runtime.c](../../src/app/app_runtime.c)) : tampon de **100 octets**, canal **texte seul**, et `value[numBytes]` écrit à l'indice 100 sur une lecture pleine — **débordement d'un octet, préexistant** | Un paquet de 576 o ne peut pas passer parent → fils, même si les tampons de la socket le permettraient déjà | Messages typés (comme le sens fils → parent) + tampon dimensionné par `ipc_max_datagram()`. **Le débordement est à corriger de toute façon**, indépendamment de cette proposition |
-| **R8** | `send_command_to_childs` ([src/net/local_socket.c](../../src/net/local_socket.c)) mesure la charge utile par `strlen()` | Impossible d'envoyer un binaire (un paquet contient des octets nuls) | Variante portant une longueur explicite |
+| **R7** ✅ *(PR1)* | `fork_udp` ([src/app/app_runtime.c](../../src/app/app_runtime.c)) : tampon de **100 octets**, canal **texte seul**, et `value[numBytes]` écrit à l'indice 100 sur une lecture pleine — **débordement d'un octet, préexistant** | Un paquet de 576 o ne peut pas passer parent → fils, même si les tampons de la socket le permettraient déjà | Messages typés (comme le sens fils → parent) + tampon dimensionné par `ipc_max_datagram()`. **Le débordement est à corriger de toute façon**, indépendamment de cette proposition |
+| **R8** ✅ *(PR1)* | `send_command_to_childs` ([src/net/local_socket.c](../../src/net/local_socket.c)) mesure la charge utile par `strlen()` | Impossible d'envoyer un binaire (un paquet contient des octets nuls) | Variante portant une longueur explicite |
 
 ---
 
@@ -242,7 +243,7 @@ pour amorcer un stock réaliste, et au moins deux nombres de forks (1 — pour v
 
 | PR | Contenu | Mesurable seule |
 |---|---|---|
-| **1** | **IPC typé bidirectionnel** : types `IPC_MSG_WORK_*`, tampon de `fork_udp` dimensionné par `ipc_max_datagram()` (**corrige au passage le débordement d'un octet**, R7), envoi parent → fils portant une longueur explicite (R8), tests unitaires. **Aucun changement de comportement** | non (préparatoire) |
+| **1** ✅ **livrée** | **IPC typé bidirectionnel** : le sens parent → fils est cadré comme l'autre (octet de type `IPC_MSG_COMMAND`), `send_typed_to_childs` prend la longueur en paramètre (R8), `fork_udp` dimensionne son tampon sur `ipc_max_datagram()` et délègue le découpage à `ipc_child_frame_decode`, fonction pure qui vérifie la place du terminateur (**corrige le débordement d'un octet**, R7). **Écart assumé avec le plan initial** : les types `IPC_MSG_WORK_*` ne sont **pas** introduits ici — un constant sans émetteur ni récepteur ne se teste pas et rote ; ils arrivent en PR2 avec leur usage. Le transport, lui, est générique et **testé sur une charge utile binaire réelle** (un `possibility_packet` complet, octets nuls compris). Effet de bord : une commande de plus de 99 caractères n'est plus tronquée en silence | non (préparatoire) |
 | **2** | **Courtier dans le parent** : pools locaux, dispatch aux forks au repos, compteur de terminaison par racine (A4), borne du tampon et poussée sur péremption (A3). Derrière l'option, défaut inactif (A7) | oui |
 | **3** | **Partage à la racine côté fork** : mode « moins profond d'abord » de `bt_materialize_pending` (A6), déclenchement au **début** de l'étude au lieu d'attendre 500 ms / 1 M nœuds | oui |
 | **4** | **Connexion de travail unique portée par le parent** (A2), avec les correctifs R1, R3, R4, R5 dans la même PR — ils ne sont pas séparables de A2 | oui |
