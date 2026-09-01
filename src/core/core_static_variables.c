@@ -95,6 +95,7 @@ unsigned long long non_null_possibilities = 0;
 volatile int request = REQUEST_CONTINUE;
 
 int max_stock_by_thread = MAX_STOCK_BY_THREAD;
+int delegate_shallow_first = 0;
 
 volatile int server_io_active = 0;
 

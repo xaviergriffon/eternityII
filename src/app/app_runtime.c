@@ -203,6 +203,16 @@ static const cli_help_topic_t cli_topics[] = {
 	  "travail cédé non encore poussé au serveur, il n'acquitte pas la racine dont\n"
 	  "il descend — un arrêt brutal du parent fait alors simplement réattribuer\n"
 	  "cette racine par le serveur, rien n'est perdu." },
+	{ "--split-shallow-first",
+	  "--split-shallow-first",
+	  "Client : céder les frères les MOINS profonds d'abord (défaut : les plus profonds).",
+	  "Quand un fil cède du travail non exploré, il matérialise par défaut les frères\n"
+	  "les PLUS profonds — les sous-arbres les moins chers — et garde le haut de\n"
+	  "l'arbre en local. Cette option inverse le sens : les frères peu profonds sont\n"
+	  "les gros sous-arbres, et ce sont eux dont la parallélisation raccourcirait\n"
+	  "l'étude d'une racine. PISTE NON TRANCHÉE : la première mesure ne montre PAS\n"
+	  "de gain, d'où le défaut inchangé et cette option pour la comparer.\n"
+	  "Voir docs/conception/dispatch_local_possibilites_forks.md (arbitrage A6)." },
 	{ "--auto-roles",
 	  "--auto-roles",
 	  "Serveur : active la politique automatique de dosage recherche/contrôle du parc.",

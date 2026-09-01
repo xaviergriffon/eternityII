@@ -1,4 +1,5 @@
 #include "app/app_static_variables.h"
+#include "core/core_static_variables.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -294,6 +295,10 @@ int parse_cli_options(int argc, const char *argv[])
             // client (main.c, fork_orchestrator.c) pour armer le courtier du
             // parent et les crochets des forks.
             local_dispatch_enabled = 1;
+        } else if (strcmp(argv[r], "--split-shallow-first") == 0) {
+            // Sens de cession des frères non explorés. Drapeau booléen, lu par
+            // le moteur de recherche (delegate_shallow_first, core).
+            delegate_shallow_first = 1;
         } else if (strcmp(argv[r], "--auto-roles") == 0) {
             // Drapeau booléen, même schéma que --stop-on-solution : lu par
             // le mode serveur uniquement (main.c), avant le lancement du

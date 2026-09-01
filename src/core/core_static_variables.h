@@ -128,6 +128,14 @@
 // nœud coûterait plus cher que le nœud lui-même : on n'évalue la fenêtre
 // DELEGATE_MIN_INTERVAL_MS qu'une fois tous les N nœuds.
 #define DELEGATE_CHECK_INTERVAL_NODES 1000000
+// Nombre de nœuds après lequel on envisage le PREMIER partage d'une racine
+// fraîche, bien avant la cadence de croisière ci-dessus. Une racine profonde
+// peut s'explorer très longtemps : attendre 1 000 000 de nœuds pour la première
+// cession laisse les autres fils à sec pendant tout ce temps, alors que c'est
+// précisément au DÉBUT qu'il y a des frères peu profonds — donc de gros
+// sous-arbres — à partager. Assez grand pour que la pile ait de la profondeur
+// et des frères à céder, assez petit pour être atteint en quelques ms.
+#define EARLY_SPLIT_CHECK_NODES 20000
 // Nombre de possibilités demandées au serveur par requête d'un client pruner
 // (valeur PAR DÉFAUT de `pruner_batch_size`). Le contrôle d'une possibilité est
 // rapide : sans lot, l'aller-retour TCP dominerait le coût.
@@ -410,6 +418,22 @@ extern unsigned long long non_null_possibilities;
 extern volatile int request;
 
 extern int max_stock_by_thread;
+
+/**
+ * @brief Sens de matérialisation des frères cédés : 0 = plus profonds d'abord
+ *        (défaut historique), 1 = MOINS profonds d'abord.
+ *
+ * Vers le SERVEUR, céder les frères les plus profonds est correct : ce sont les
+ * sous-arbres les moins chers, on garde le haut de l'arbre en local. Vers un
+ * COURTIER local (`--local-dispatch`), c'est l'inverse qu'on veut : les frères
+ * les moins profonds sont les gros sous-arbres, et ce sont eux dont la
+ * parallélisation raccourcit l'étude de la racine.
+ *
+ * Posé par `app/` (le mode de dispatch est une décision applicative) mais lu
+ * par le moteur de recherche : d'où sa présence ici, et non dans
+ * `app_static_variables` — `core/` ne doit jamais dépendre d'`app/`.
+ */
+extern int delegate_shallow_first;
 
 /**
  * @brief Vrai (1) tant que ce fork est en train d'échanger avec le serveur

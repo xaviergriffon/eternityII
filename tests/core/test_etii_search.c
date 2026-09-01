@@ -1362,6 +1362,11 @@ static int build_two_level_fixture(struct possibility_packet *board, bt_level st
     /* Case du niveau : en ordre fixe elle vaut dirx[d]/diry[d] (cf. bt_level). */
     stack[0].x = dirx[0]; stack[0].y = diry[0];
     stack[1].x = dirx[1]; stack[1].y = diry[1];
+    /* Initialisé explicitement : `min_candidats` des paquets émis en est une
+       copie directe, et le laisser indéterminé rendait non reproductible tout
+       test comparant deux constructions du même fixture. */
+    stack[0].mrv_score = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+    stack[1].mrv_score = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 
     memset(client, 0, sizeof(*client));
     client->compteur = 0;
@@ -1715,6 +1720,11 @@ TEST bt_materialize_skips_no_decision_level_and_zero_id(void)
     stack[1].search = &list; stack[1].next_s = 1; stack[1].placed_pos = 5;
     stack[0].x = dirx[0]; stack[0].y = diry[0];
     stack[1].x = dirx[1]; stack[1].y = diry[1];
+    /* Initialisé explicitement : `min_candidats` des paquets émis en est une
+       copie directe, et le laisser indéterminé rendait non reproductible tout
+       test comparant deux constructions du même fixture. */
+    stack[0].mrv_score = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+    stack[1].mrv_score = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 
     client_possibility_t client;
     memset(&client, 0, sizeof client);
@@ -3517,6 +3527,130 @@ TEST autoprune_stops_immediately_on_request_stop(void)
     PASS();
 }
 
+
+/* ----------------------------------------------------------------------
+ * Sens de matérialisation (delegate_shallow_first) — arbitrage A6 de
+ * docs/conception/dispatch_local_possibilites_forks.md.
+ * ---------------------------------------------------------------------- */
+
+/* LE test du refactor : les deux sens produisent EXACTEMENT le même ENSEMBLE de
+ * paquets. Le sens ne doit changer QUE l'ordre de cession — un frère produit ne
+ * doit dépendre en rien de l'ordre dans lequel on visite les niveaux, sous peine
+ * de fabriquer des plateaux différents selon le mode de dispatch.
+ *
+ * Comparaison en multiensemble, et non par simple inversion du tableau : seul
+ * l'ordre des NIVEAUX s'inverse, celui des frères d'un même niveau est
+ * préservé dans les deux sens. */
+static int same_packet(const struct possibility_packet *a, const struct possibility_packet *b)
+{
+    /* Champ à champ : le paquet porte du bourrage de compilation, un memcmp
+       brut serait faux (cf. AGENTS.md). */
+    if (a->alloc != b->alloc || a->min_candidats != b->min_candidats) {
+        return 0;
+    }
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            if (a->grid[x][y] != b->grid[x][y]) {
+                return 0;
+            }
+        }
+    }
+    for (int g = 0; g < ETERN_PARTS / 16; g++) {
+        if (a->b_faceused[g] != b->b_faceused[g]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+TEST bt_materialize_pending_shallow_first_same_set_reversed_levels(void)
+{
+    drain_local();
+    ensure_counters();
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    struct possibility_packet board_a, board_b;
+    bt_level stack_a[2], stack_b[2];
+    client_possibility_t client_a, client_b;
+    int top_a = build_two_level_fixture(&board_a, stack_a, &client_a);
+    int top_b = build_two_level_fixture(&board_b, stack_b, &client_b);
+
+    struct possibility_packet deep[8], shallow[8];
+    int next_deep[2], next_shallow[2];
+
+    int saved = delegate_shallow_first;
+    delegate_shallow_first = 0;
+    int n_deep = bt_materialize_pending(&client_a, &board_a, stack_a, top_a,
+                                        idParts, deep, 8, next_deep);
+    delegate_shallow_first = 1;
+    int n_shallow = bt_materialize_pending(&client_b, &board_b, stack_b, top_b,
+                                           idParts, shallow, 8, next_shallow);
+    delegate_shallow_first = saved;
+
+    ASSERT_EQ_FMT(n_deep, n_shallow, "%d");
+    ASSERT(n_deep >= 2);
+
+    /* Même ensemble : chaque paquet d'un sens a un correspondant unique dans
+       l'autre. */
+    int matched[8] = {0};
+    for (int i = 0; i < n_shallow; i++) {
+        int found = -1;
+        for (int j = 0; j < n_deep; j++) {
+            if (!matched[j] && same_packet(&shallow[i], &deep[j])) {
+                found = j;
+                break;
+            }
+        }
+        ASSERT(found >= 0);
+        matched[found] = 1;
+    }
+
+    /* Ordre des NIVEAUX inversé : le premier paquet du sens « moins profond
+       d'abord » est le moins avancé, celui du sens historique le plus avancé. */
+    ASSERT(shallow[0].alloc < deep[0].alloc);
+    ASSERT_EQ_FMT((int)deep[0].alloc, (int)shallow[n_shallow - 1].alloc, "%d");
+
+    /* Les positions de reprise sont les mêmes : le travail consommé est
+       identique, seul l'ordre d'émission change. */
+    ASSERT_EQ_FMT(next_deep[0], next_shallow[0], "%d");
+    ASSERT_EQ_FMT(next_deep[1], next_shallow[1], "%d");
+    PASS();
+}
+
+/* Sous budget contraint, le sens décide QUI est cédé : « moins profond
+ * d'abord » doit rendre le frère de la RACINE, pas celui de la feuille. C'est
+ * tout l'intérêt de l'arbitrage A6 — les frères peu profonds sont les gros
+ * sous-arbres, ceux dont la parallélisation raccourcit l'étude. */
+TEST bt_materialize_pending_shallow_first_yields_the_shallow_sibling(void)
+{
+    drain_local();
+    ensure_counters();
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+
+    struct possibility_packet out[1];
+    int new_next_s[2];
+    int saved = delegate_shallow_first;
+    delegate_shallow_first = 1;
+    int n = bt_materialize_pending(&client, &board, stack, top, idParts, out, 1, new_next_s);
+    delegate_shallow_first = saved;
+
+    ASSERT_EQ_FMT(1, n, "%d");
+    /* Niveau 0 (le moins profond) : alloc = 1, contre 2 pour le frère profond
+       que le sens historique aurait rendu. */
+    ASSERT_EQ_FMT(1, (int)out[0].alloc, "%d");
+    ASSERT_EQ_FMT(2, (int)out[0].grid[dirx[0]][diry[0]], "%d");
+    /* Le niveau profond n'a PAS été entamé : sa position de reprise est intacte. */
+    ASSERT_EQ_FMT(stack[1].next_s, new_next_s[1], "%d");
+    PASS();
+}
+
 SUITE(etii_search_suite)
 {
     RUN_TEST(delegate_noop_below_threshold);
@@ -3545,6 +3679,8 @@ SUITE(etii_search_suite)
     RUN_TEST(mrv_choose_cell_breaks_ties_by_constrained_sides);
     RUN_TEST(mrv_choose_cell_full_board_and_unconstrained_fallback);
     RUN_TEST(bt_materialize_pending_orders_deepest_first);
+    RUN_TEST(bt_materialize_pending_shallow_first_same_set_reversed_levels);
+    RUN_TEST(bt_materialize_pending_shallow_first_yields_the_shallow_sibling);
     RUN_TEST(bt_materialize_pending_respects_max_out);
     RUN_TEST(bt_materialize_pending_dynamic_order_recomputes_alloc);
     RUN_TEST(bt_materialize_skips_no_decision_level_and_zero_id);

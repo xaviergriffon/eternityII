@@ -445,6 +445,10 @@ void work_broker_child_install(void)
 {
     datamanager_set_local_offer(child_offer_hook);
     datamanager_set_ack_gate(work_broker_ack_allowed);
+    // `delegate_shallow_first` n'est PAS forcé ici : l'arbitrage A6 (« vers un
+    // courtier local, céder les frères les moins profonds ») attendait sa
+    // mesure, et la première ne le confirme pas. Il reste piloté par
+    // --split-shallow-first, pour être comparé proprement en PR6.
 }
 
 /* ------------------------------------------------------------------ */
