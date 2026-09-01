@@ -1,6 +1,6 @@
 # Dispatch local des possibilités entre les forks d'un client
 
-**Statut : en cours d'implémentation (3/6 PR livrées).** Ce document décrit une **cible** ;
+**Statut : en cours d'implémentation (4/6 PR livrées).** Ce document décrit une **cible** ;
 tout ce qui n'est pas explicitement marqué « livré » ci-dessous n'est pas encore le
 comportement du code.
 
@@ -185,11 +185,11 @@ traitée par la PR qui introduit A2, sinon l'implémentation les découvrira en 
 
 | # | Mécanisme | Ce qui casse | Correctif proposé |
 |---|---|---|---|
-| **R1** | `compute_server_hunger(stock, active_clients)`, alimenté par `get_active_threads()` (compte les `socket_id != -1`) — [src/app/etii_server.c](../../src/app/etii_server.c) | La cible `active_clients * SERVER_HUNGER_PER_CLIENT` est **divisée par le nombre de forks**. La sonde v8 cesse d'annoncer la faim réelle, et la délégation anticipée (`bt_delegation_quota`) meurt avec elle — on casserait précisément le mécanisme de §1.6 qu'on cherche à compléter | `control_hello_t.nb_forks` est **déjà sur le fil** ([src/net/control_protocol.h](../../src/net/control_protocol.h), lu par le serveur au hello de contrôle) : pondérer par lui plutôt que par le nombre de connexions |
+| **R1** ✅ *(PR4)* | `compute_server_hunger(stock, active_clients)`, alimenté par `get_active_threads()` (compte les `socket_id != -1`) — [src/app/etii_server.c](../../src/app/etii_server.c) | La cible `active_clients * SERVER_HUNGER_PER_CLIENT` est **divisée par le nombre de forks**. La sonde v8 cesse d'annoncer la faim réelle, et la délégation anticipée (`bt_delegation_quota`) meurt avec elle — on casserait précisément le mécanisme de §1.6 qu'on cherche à compléter | `control_hello_t.nb_forks` est **déjà sur le fil** ([src/net/control_protocol.h](../../src/net/control_protocol.h), lu par le serveur au hello de contrôle) : pondérer par lui plutôt que par le nombre de connexions |
 | **R2** | `client_work_fork_roles` → console `clientsWork` ([src/ui/command_lines.c](../../src/ui/command_lines.c)) | N'énumère plus qu'une connexion : la vue « rôle de chaque fork » disparaît | Reconstruire la vue depuis le canal de contrôle (`nb_forks` + dosage désiré déjà mémorisé par `machine_uid`), ou assumer et **documenter** la dégradation |
-| **R3** | `server_analysed_file_hint` = `client->compteur % nb_file_possibility` | Une connexion par client ⇒ indice **constant** par client ⇒ tout le pool analysé d'un client se concentre sur **une** file, annulant le round-robin de PR8 (*Server load management*) et ramenant l'acquittement au comportement qui avait motivé cette PR | Dériver l'indice d'un compteur **par requête** plutôt que par connexion |
-| **R4** | `owner_client_alive` = session de contrôle **OU** connexion de travail ouverte | Les deux signaux se rejoignent sur le même process : c'est le cas dégénéré à un seul signal que [bail_expire_racines_en_stock.md](../investigations/bail_expire_racines_en_stock.md) a documenté (28,5 % d'un stock de production devenu racine de lui-même) | Le résultat est en fait **plus sûr** — le parent survit à ses forks, alors que le canal de contrôle se fermait *avant* que les forks aient fini de vider. Mais le raisonnement doit être **réécrit et re-testé**, pas hérité en silence |
-| **R5** | Métriques de besoin ventilées par rôle, via `identity.mode` de la connexion de travail | Une connexion parent porte **un seul** `mode` | Même source que R2 : le canal de contrôle |
+| **R3** ⚠️ *(différé, cf. §5.2)* | `server_analysed_file_hint` = `client->compteur % nb_file_possibility` | Une connexion par client ⇒ indice **constant** par client ⇒ tout le pool analysé d'un client se concentre sur **une** file, annulant le round-robin de PR8 (*Server load management*) et ramenant l'acquittement au comportement qui avait motivé cette PR | Dériver l'indice d'un compteur **par requête** plutôt que par connexion |
+| **R4** ⏸ *(différé — observabilité)* | `owner_client_alive` = session de contrôle **OU** connexion de travail ouverte | Les deux signaux se rejoignent sur le même process : c'est le cas dégénéré à un seul signal que [bail_expire_racines_en_stock.md](../investigations/bail_expire_racines_en_stock.md) a documenté (28,5 % d'un stock de production devenu racine de lui-même) | Le résultat est en fait **plus sûr** — le parent survit à ses forks, alors que le canal de contrôle se fermait *avant* que les forks aient fini de vider. Mais le raisonnement doit être **réécrit et re-testé**, pas hérité en silence |
+| **R5** ⏸ *(différé — observabilité)* | Métriques de besoin ventilées par rôle, via `identity.mode` de la connexion de travail | Une connexion parent porte **un seul** `mode` | Même source que R2 : le canal de contrôle |
 | **R6** | Le parent devient le goulot du travail | Ordre de grandeur à mesurer, pas à supposer : 16 forks × jusqu'à 300 paquets / 500 ms × 577 o ≈ **5,5 Mo/s** sur AF_UNIX, chez un process qui porte déjà la console (ncurses) et le routage des logs de tous ses forks | Mesure §6 ; borne du tampon (A3) ; lots plutôt que datagrammes unitaires |
 | **R7** ✅ *(PR1)* | `fork_udp` ([src/app/app_runtime.c](../../src/app/app_runtime.c)) : tampon de **100 octets**, canal **texte seul**, et `value[numBytes]` écrit à l'indice 100 sur une lecture pleine — **débordement d'un octet, préexistant** | Un paquet de 576 o ne peut pas passer parent → fils, même si les tampons de la socket le permettraient déjà | Messages typés (comme le sens fils → parent) + tampon dimensionné par `ipc_max_datagram()`. **Le débordement est à corriger de toute façon**, indépendamment de cette proposition |
 | **R8** ✅ *(PR1)* | `send_command_to_childs` ([src/net/local_socket.c](../../src/net/local_socket.c)) mesure la charge utile par `strlen()` | Impossible d'envoyer un binaire (un paquet contient des octets nuls) | Variante portant une longueur explicite |
@@ -246,6 +246,27 @@ pour le stock serveur.
 La PR4 (connexion unique) est donc ce qui **active** la PR3, et la mesure de la
 PR3 seule n'a de sens qu'en tant que référence à zéro.
 
+### 5.2 R3 tenté puis retiré : l'indice de file analysée doit rester stable
+
+Le correctif annoncé pour R3 — remplacer `client->compteur % nb_file_possibility`
+par un compteur tournant par requête — a été écrit, puis **retiré** : il casse un
+invariant que la suite de tests protégeait déjà
+(`record_and_remove_same_connection_use_same_file_hint`).
+
+L'indice est calculé **deux fois** : à l'enregistrement
+(`record_possibility_analysed_for_client`) et au retrait
+(`requeue_last_sent_possibility`). Il doit donc être une fonction **stable de la
+connexion** ; un compteur tournant désynchronise les deux et fait échouer les
+retraits — c'est-à-dire les acquittements.
+
+L'effet réel de A2 est par ailleurs plus étroit qu'annoncé au §4 : ce n'est pas
+une perte de correction, seulement de répartition, et seulement **au sein d'un
+client** (avec plusieurs clients, les `compteur` diffèrent et la répartition
+tient). Le traiter proprement demande de dériver l'indice du **paquet** — aux
+deux sites à la fois — et de le mesurer ; c'est une PR à part entière, pas un
+effet de bord de celle-ci. Le raisonnement est consigné en commentaire sur
+`server_analysed_file_hint`, pour qu'il ne soit pas retenté sans le savoir.
+
 ## 6. Protocole de mesure
 
 Une seule de ces métriques est à instrumenter ; les autres existent.
@@ -288,7 +309,7 @@ courtier capable de les nourrir.
 | **1** ✅ **livrée** | **IPC typé bidirectionnel** : le sens parent → fils est cadré comme l'autre (octet de type `IPC_MSG_COMMAND`), `send_typed_to_childs` prend la longueur en paramètre (R8), `fork_udp` dimensionne son tampon sur `ipc_max_datagram()` et délègue le découpage à `ipc_child_frame_decode`, fonction pure qui vérifie la place du terminateur (**corrige le débordement d'un octet**, R7). **Écart assumé avec le plan initial** : les types `IPC_MSG_WORK_*` ne sont **pas** introduits ici — une constante sans émetteur ni récepteur ne se teste pas et rote ; ils arrivent avec leur usage. Le transport est générique et **testé sur une charge utile binaire réelle** (un `possibility_packet` complet, octets nuls compris). Effet de bord : une commande de plus de 99 caractères n'est plus tronquée en silence | non (préparatoire) |
 | **2** ✅ **livrée** | **Le parent ouvre une connexion de travail et relaie les ADD de ses forks** (`--local-dispatch`, défaut inactif). Un fork offre son lot au parent (`IPC_MSG_WORK_OFFER`) au lieu d'`ADD`er lui-même ; le parent l'empile et le pousse au serveur depuis son propre socket (`fork_seq=-1`). Acquittement différé (A4) par numéro d'offre : le courtier renvoie le plus grand `seq` rendu durable (`IPC_MSG_WORK_SETTLED`), et `send_possibility_analysed` ne fait rien tant qu'il reste des offres non réglées. Contrôle de flux par fenêtre : au-delà de `WORK_BROKER_OFFER_WINDOW` offres en vol, le fork retombe sur l'envoi direct — le tampon du parent est donc borné **par construction**, ce qu'un datagramme UDP (aucun refus à faire remonter) impose de toute façon. **Écart assumé avec A1** : le courtier utilise une file privée, pas les pools `datamanager` du parent — ceux-ci sont ce que `backup`/`restore`/`stockDistribution` manipulent, et y verser un tampon de transit ferait écrire sur disque, sous le nom de « stock », de la donnée qui n'en est pas ; la file privée porte en plus l'origine (`slot`, `seq`) de chaque paquet, dont le règlement a besoin et qu'un pool ne transporte pas. Deux crochets injectés dans `datamanager` (offre, verrou d'acquittement) préservent la règle « `core/` ne dépend jamais d'`app/` ». Vérifié bout-en-bout : 276 possibilités réellement relayées sur un client 3 forks contre un serveur `--expand-level 4` | oui |
 | **3** ✅ **livrée, mais MESURÉE INERTE seule** | **Redistribution aux forks au repos** : `IPC_MSG_WORK_REQUEST`/`_GRANT`/`_DONE`, comptabilité **par offre** (anneau `{seq, remaining}` par fils, règlement qui ne saute jamais une offre incomplète), réinjection auto-réparante des attributions d'un fils mort, sursis `WORK_BROKER_HOLD_MS` avant relais (la péremption d'A3 : sans lui le relais viderait le tampon avant que quiconque puisse le réclamer). **Résultat mesuré : 0 attribution.** Sur 45 s, 4 forks, 156 possibilités en tampon, le courtier n'a reçu qu'**une seule** demande — voir §5.1 | oui |
-| **4** | **Connexion de travail unique** (A2) : les forks abandonnent la leur, avec les correctifs R1, R3, R4, R5 dans la même PR — ils ne sont pas séparables de A2 | oui |
+| **4** ✅ **livrée — ACTIVE la PR3** | **Connexion de travail unique** (A2) : sous `--local-dispatch`, un fils ne fait plus ni GET, ni ADD, ni acquittement ; le parent réclame les racines, les distribue et les acquitte quand son tampon est vide ET qu'aucun fils n'explore — instant où tout descendant est soit durable, soit prouvé mort, donc exactement la condition d'A4. Ajout d'`IPC_MSG_WORK_HUNGER` : le courtier réclame aux fils qui détiennent du travail (la délégation anticipée v8, repointée sur lui), sans quoi un fils tenant une racine profonde ne cède rien avant `max_stock_by_thread`. **R1 corrigé** (faim dimensionnée sur les forks déclarés via `control_registry_count_role_forks`, pas sur les connexions). **R3 tenté puis retiré** — voir §5.2. **R4/R5 différés** : observabilité, pas correction. **Mesure : 0 → 273 attributions**, et le serveur ne voit plus qu'UNE connexion de travail (`fork_seq=-1`) au lieu de 4 | oui |
 | **5** | **Partage à la racine côté fork** : mode « moins profond d'abord » de `bt_materialize_pending` (A6), déclenchement au **début** de l'étude au lieu d'attendre 500 ms / 1 M nœuds | oui |
 | **6** | Campagne de mesure (§6), puis bascule du défaut — **ou abandon motivé, consigné dans ce même document** | — |
 

@@ -1559,6 +1559,8 @@ void *fork_udp(void *param) {
             work_broker_child_on_settled(payload, (size_t)numBytes - 1);
         } else if (type == IPC_MSG_WORK_GRANT) {
             work_broker_child_on_grant(payload, (size_t)numBytes - 1);
+        } else if (type == IPC_MSG_WORK_HUNGER) {
+            work_broker_child_on_hunger(payload, (size_t)numBytes - 1);
         } else if (!unknown_type_warned) {
             /* Une seule fois par process : un type inconnu signale un
                décalage de protocole entre parent et fils, pas un incident
