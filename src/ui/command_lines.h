@@ -173,6 +173,11 @@ typedef enum {
  * complète (aucun appelant actuel ou prévu n'a jamais qu'un verbe déjà
  * isolé). NULL ou un nom inconnu retourne CMD_SCOPE_COMMON.
  *
+ * `client_only` reste une liste de noms en dur plutôt qu'un champ sur
+ * `command_description` : cette table compte ~50 entrées initialisées
+ * positionnellement, y ajouter un champ forcerait à toucher chaque entrée
+ * ou déclencherait `-Wmissing-field-initializers`.
+ *
  * @param command_name Nom de commande (ex. "pause", "start").
  * @return              CMD_SCOPE_COMMON / CMD_SCOPE_CLIENT_ONLY / CMD_SCOPE_SERVER_ONLY.
  */
