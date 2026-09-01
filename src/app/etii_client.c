@@ -9,6 +9,7 @@
 #include "ui/logger.h"
 #include "core/readdata.h"
 #include "core/datamanager.h"
+#include "app/work_broker.h"
 #include "core/etii_search.h"
 #include "net/etii_protocol.h"
 #include "app/fork_gate.h"
@@ -161,12 +162,29 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
     if(need_work)
     {
         (*needed_work)++;
-        // I/O réseau hors du mutex
+        // Courtier (--local-dispatch) : la racine précédente est terminée dès
+        // lors qu'on redemande du travail — on le signale AVANT de réclamer,
+        // pour que le fils qui avait cédé ce sous-arbre voie son offre réglée
+        // au plus tôt. Puis on demande au courtier. Sans l'option, les deux
+        // appels ne font rien.
+        work_broker_child_report_done();
+        work_broker_child_request_work();
+        // I/O réseau hors du mutex. Elle sert aussi de délai naturel à la
+        // réponse du courtier (datagramme local) : au retour, l'attribution
+        // éventuelle est déjà là, sans la moindre attente ajoutée.
         send_possibility_analysed(client_possibility);
         // Un pruner consomme vite : on demande un lot pour amortir les
         // allers-retours TCP ; un client de recherche garde 1 racine
         int from_server = 0;
-        array_possibility_packet *aposs = get_last_possibility(client_possibility, pruner_mode ? pruner_batch_size : 1, &from_server);
+        // Le travail attribué par le courtier passe AVANT le serveur : il est
+        // déjà en RAM, et le laisser dormir pendant qu'on sollicite le réseau
+        // annulerait tout l'intérêt de la redistribution. `from_server` reste
+        // à 0 : cette possibilité n'a jamais été soumise au serveur, il n'y a
+        // donc rien à lui acquitter (cf. le garde-fou ci-dessous).
+        array_possibility_packet *aposs = work_broker_child_take_grant();
+        if (aposs == NULL) {
+            aposs = get_last_possibility(client_possibility, pruner_mode ? pruner_batch_size : 1, &from_server);
+        }
         if(aposs->size > 0)
         {
             (*got_work)++;

@@ -66,6 +66,31 @@
  * app/work_broker.h). */
 #define IPC_MSG_WORK_SETTLED ((int8_t)10)
 
+/* Enfant → parent. Demande de travail au courtier, sans charge utile :
+ * l'expéditeur identifie le fils. Émise par le thread d'alimentation juste
+ * avant d'interroger le serveur — la réponse (`IPC_MSG_WORK_GRANT`) arrive
+ * pendant l'acquittement réseau qui suit, donc sans attente ajoutée. */
+#define IPC_MSG_WORK_REQUEST ((int8_t)11)
+
+/* Parent → enfant. Attribution d'UNE possibilité prélevée sur le tampon du
+ * courtier. Charge utile :
+ *   int32  origin_slot — fils d'où vient l'offre dont ce paquet descend ;
+ *   uint32 origin_seq  — numéro de cette offre ;
+ *   struct possibility_packet.
+ * Le couple (origin_slot, origin_seq) est renvoyé tel quel dans
+ * `IPC_MSG_WORK_DONE` : c'est lui qui permet de régler l'offre d'ORIGINE, et
+ * donc de débloquer l'acquittement du fils qui avait cédé ce travail. */
+#define IPC_MSG_WORK_GRANT   ((int8_t)12)
+
+/* Enfant → parent. Le sous-arbre attribué par `IPC_MSG_WORK_GRANT` est
+ * entièrement exploré. Charge utile : le même couple (origin_slot, origin_seq),
+ * réémis pour que le courtier puisse écarter un message périmé au lieu de
+ * décompter la mauvaise offre. */
+#define IPC_MSG_WORK_DONE    ((int8_t)13)
+
+/* Charge utile commune à GRANT (hors paquet) et DONE : origin_slot + origin_seq. */
+#define IPC_WORK_TAG_SIZE 8
+
 /* Taille maximale du payload texte (hors octet de type). */
 #define IPC_LINE_MAX 4000
 

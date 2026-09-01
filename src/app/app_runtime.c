@@ -1397,6 +1397,13 @@ void *server_tcp(void *param) {
                 work_broker_on_offer(find_fork_index(claddr->sun_path, forkId, NB_THREADS),
                                      buf + 1, (size_t)numBytes - 1);
                 break;
+            case IPC_MSG_WORK_REQUEST:
+                work_broker_on_request(find_fork_index(claddr->sun_path, forkId, NB_THREADS));
+                break;
+            case IPC_MSG_WORK_DONE:
+                work_broker_on_done(find_fork_index(claddr->sun_path, forkId, NB_THREADS),
+                                    buf + 1, (size_t)numBytes - 1);
+                break;
             case IPC_MSG_STATS:
                 if (numBytes >= (ssize_t)(1 + sizeof(struct client_statistics))) {
                     int cpt = find_fork_index(claddr->sun_path, forkId, NB_THREADS);
@@ -1550,6 +1557,8 @@ void *fork_udp(void *param) {
             do_command_line(payload);
         } else if (type == IPC_MSG_WORK_SETTLED) {
             work_broker_child_on_settled(payload, (size_t)numBytes - 1);
+        } else if (type == IPC_MSG_WORK_GRANT) {
+            work_broker_child_on_grant(payload, (size_t)numBytes - 1);
         } else if (!unknown_type_warned) {
             /* Une seule fois par process : un type inconnu signale un
                décalage de protocole entre parent et fils, pas un incident

@@ -236,6 +236,189 @@ TEST relay_step_is_inert_without_broker(void)
     PASS();
 }
 
+
+/* ---------- comptabilité des offres (invariant d'acquittement A4) ---------- */
+
+/* Le règlement avance dès qu'une offre est entièrement disposée. */
+TEST acc_settles_when_offer_fully_disposed(void)
+{
+    work_broker_offer_acc_t ring[WORK_BROKER_OFFER_WINDOW];
+    memset(ring, 0, sizeof ring);
+
+    ASSERT_EQ_FMT(0, work_broker_acc_add(ring, WORK_BROKER_OFFER_WINDOW, 1u, 2), "%d");
+    ASSERT_EQ_FMT(0u, work_broker_acc_settle(ring, WORK_BROKER_OFFER_WINDOW, 0u), "%u");
+
+    ASSERT_EQ_FMT(0, work_broker_acc_dispose(ring, WORK_BROKER_OFFER_WINDOW, 1u), "%d");
+    ASSERT_EQ_FMT(0u, work_broker_acc_settle(ring, WORK_BROKER_OFFER_WINDOW, 0u), "%u");
+
+    ASSERT_EQ_FMT(0, work_broker_acc_dispose(ring, WORK_BROKER_OFFER_WINDOW, 1u), "%d");
+    ASSERT_EQ_FMT(1u, work_broker_acc_settle(ring, WORK_BROKER_OFFER_WINDOW, 0u), "%u");
+    PASS();
+}
+
+/* LE test de l'invariant : une offre plus récente entièrement disposée ne doit
+ * PAS faire sauter par-dessus une offre plus ancienne encore en vol. Régler 2
+ * alors que l'offre 1 circule encore laisserait le fils acquitter une racine
+ * dont du travail n'est ni durable ni terminé — la branche serait perdue si le
+ * client mourait ensuite. */
+TEST acc_never_settles_past_an_outstanding_offer(void)
+{
+    work_broker_offer_acc_t ring[WORK_BROKER_OFFER_WINDOW];
+    memset(ring, 0, sizeof ring);
+    work_broker_acc_add(ring, WORK_BROKER_OFFER_WINDOW, 1u, 1);
+    work_broker_acc_add(ring, WORK_BROKER_OFFER_WINDOW, 2u, 1);
+
+    /* L'offre 2 est disposée la première (un fils l'a prouvée morte vite). */
+    work_broker_acc_dispose(ring, WORK_BROKER_OFFER_WINDOW, 2u);
+    ASSERT_EQ_FMT(0u, work_broker_acc_settle(ring, WORK_BROKER_OFFER_WINDOW, 0u), "%u");
+
+    /* L'offre 1 se dispose à son tour : les DEUX se règlent d'un coup. */
+    work_broker_acc_dispose(ring, WORK_BROKER_OFFER_WINDOW, 1u);
+    ASSERT_EQ_FMT(2u, work_broker_acc_settle(ring, WORK_BROKER_OFFER_WINDOW, 0u), "%u");
+    PASS();
+}
+
+/* Anneau plein : l'ajout échoue, pour que l'appelant REFUSE l'offre entière
+ * plutôt que de n'en suivre qu'une partie (règlement alors incohérent). */
+TEST acc_add_refuses_when_ring_is_full(void)
+{
+    work_broker_offer_acc_t ring[WORK_BROKER_OFFER_WINDOW];
+    memset(ring, 0, sizeof ring);
+    for (int i = 0; i < WORK_BROKER_OFFER_WINDOW; i++) {
+        ASSERT_EQ_FMT(0, work_broker_acc_add(ring, WORK_BROKER_OFFER_WINDOW,
+                                             (uint32_t)(i + 1), 1), "%d");
+    }
+    ASSERT_EQ_FMT(-1, work_broker_acc_add(ring, WORK_BROKER_OFFER_WINDOW, 99u, 1), "%d");
+
+    /* Un règlement libère une place. */
+    work_broker_acc_dispose(ring, WORK_BROKER_OFFER_WINDOW, 1u);
+    ASSERT_EQ_FMT(1u, work_broker_acc_settle(ring, WORK_BROKER_OFFER_WINDOW, 0u), "%u");
+    ASSERT_EQ_FMT(0, work_broker_acc_add(ring, WORK_BROKER_OFFER_WINDOW, 99u, 1), "%d");
+    PASS();
+}
+
+/* Décompter une offre inconnue (message périmé) est signalé, jamais imputé à
+ * une autre offre. */
+TEST acc_dispose_reports_unknown_offer(void)
+{
+    work_broker_offer_acc_t ring[WORK_BROKER_OFFER_WINDOW];
+    memset(ring, 0, sizeof ring);
+    work_broker_acc_add(ring, WORK_BROKER_OFFER_WINDOW, 5u, 1);
+    ASSERT_EQ_FMT(-1, work_broker_acc_dispose(ring, WORK_BROKER_OFFER_WINDOW, 4u), "%d");
+    /* L'offre 5 est intacte : partant de 4, le règlement ne bouge pas. */
+    ASSERT_EQ_FMT(4u, work_broker_acc_settle(ring, WORK_BROKER_OFFER_WINDOW, 4u), "%u");
+    /* Une fois vraiment disposée, elle se règle. */
+    ASSERT_EQ_FMT(0, work_broker_acc_dispose(ring, WORK_BROKER_OFFER_WINDOW, 5u), "%d");
+    ASSERT_EQ_FMT(5u, work_broker_acc_settle(ring, WORK_BROKER_OFFER_WINDOW, 4u), "%u");
+    PASS();
+}
+
+/* ---------- cadrage du couple (origin_slot, origin_seq) ---------- */
+
+TEST tag_encode_decode_roundtrip(void)
+{
+    uint8_t buf[IPC_WORK_TAG_SIZE];
+    ASSERT_EQ_FMT(IPC_WORK_TAG_SIZE, work_broker_tag_encode(3, 77u, buf, sizeof buf), "%d");
+    int32_t slot = -1; uint32_t seq = 0;
+    ASSERT_EQ_FMT(0, work_broker_tag_decode(buf, sizeof buf, &slot, &seq), "%d");
+    ASSERT_EQ_FMT(3, slot, "%d");
+    ASSERT_EQ_FMT(77u, seq, "%u");
+
+    uint8_t small[IPC_WORK_TAG_SIZE - 1];
+    ASSERT_EQ_FMT(-1, work_broker_tag_encode(3, 77u, small, sizeof small), "%d");
+    ASSERT_EQ_FMT(-1, work_broker_tag_decode(buf, IPC_WORK_TAG_SIZE - 1, &slot, &seq), "%d");
+    PASS();
+}
+
+/* ---------- redistribution ---------- */
+
+/* Une demande servie retire la possibilité du tampon : elle est alors chez le
+ * fils, plus dans la file — et n'est donc pas poussée au serveur en double. */
+TEST request_takes_one_packet_out_of_the_buffer(void)
+{
+    work_broker_parent_reset();
+    struct possibility_packet pkts[2];
+    for (int i = 0; i < 2; i++) fill_packet(&pkts[i], 0x50 + i);
+    uint8_t buf[IPC_WORK_OFFER_HEADER_SIZE + 2 * sizeof(struct possibility_packet)];
+    int32_t n = work_broker_offer_encode(1u, pkts, 2, buf, sizeof buf);
+    work_broker_on_offer(0, buf, (size_t)n);
+    ASSERT_EQ_FMT(2ULL, work_broker_pending_packets(), "%llu");
+
+    /* Le fils 1 réclame. L'envoi du GRANT échoue (aucun forkId câblé dans ce
+       test), donc la possibilité est REMISE en tampon — c'est précisément le
+       comportement voulu : une attribution que le fils n'a jamais reçue ne
+       doit pas disparaître du tampon. */
+    work_broker_on_request(1);
+    ASSERT_EQ_FMT(2ULL, work_broker_pending_packets(), "%llu");
+
+    work_broker_parent_reset();
+    PASS();
+}
+
+/* Un slot hors bornes ne sert rien et ne touche pas au tampon. */
+TEST request_from_unknown_slot_is_ignored(void)
+{
+    work_broker_parent_reset();
+    struct possibility_packet pkt;
+    fill_packet(&pkt, 3);
+    uint8_t buf[IPC_WORK_OFFER_HEADER_SIZE + sizeof(struct possibility_packet)];
+    int32_t n = work_broker_offer_encode(1u, &pkt, 1, buf, sizeof buf);
+    work_broker_on_offer(0, buf, (size_t)n);
+
+    work_broker_on_request(-1);
+    ASSERT_EQ_FMT(1ULL, work_broker_pending_packets(), "%llu");
+    work_broker_parent_reset();
+    PASS();
+}
+
+/* Un DONE qui ne correspond à aucune attribution en cours est ignoré :
+ * décompter sur la foi d'un message périmé retirerait une unité à une offre
+ * encore en vol, et réglerait donc un fils trop tôt. */
+TEST done_without_matching_grant_is_ignored(void)
+{
+    work_broker_parent_reset();
+    struct possibility_packet pkt;
+    fill_packet(&pkt, 4);
+    uint8_t buf[IPC_WORK_OFFER_HEADER_SIZE + sizeof(struct possibility_packet)];
+    int32_t n = work_broker_offer_encode(1u, &pkt, 1, buf, sizeof buf);
+    work_broker_on_offer(0, buf, (size_t)n);
+
+    uint8_t tag[IPC_WORK_TAG_SIZE];
+    work_broker_tag_encode(0, 1u, tag, sizeof tag);
+    work_broker_on_done(1, tag, sizeof tag);   /* le fils 1 n'a rien reçu */
+    work_broker_on_done(1, tag, IPC_WORK_TAG_SIZE - 1); /* trop court */
+
+    /* Le tampon n'a pas bougé : l'offre reste à disposer. */
+    ASSERT_EQ_FMT(1ULL, work_broker_pending_packets(), "%llu");
+    work_broker_parent_reset();
+    PASS();
+}
+
+/* Une offre qui déborde la fenêtre est refusée en BLOC : ne suivre qu'une
+ * partie de ses paquets rendrait le règlement de ce fils incohérent. */
+TEST offer_beyond_window_is_refused_whole(void)
+{
+    work_broker_parent_reset();
+    struct possibility_packet pkt;
+    fill_packet(&pkt, 6);
+    uint8_t buf[IPC_WORK_OFFER_HEADER_SIZE + sizeof(struct possibility_packet)];
+
+    for (int i = 1; i <= WORK_BROKER_OFFER_WINDOW; i++) {
+        int32_t n = work_broker_offer_encode((uint32_t)i, &pkt, 1, buf, sizeof buf);
+        work_broker_on_offer(0, buf, (size_t)n);
+    }
+    ASSERT_EQ_FMT((unsigned long long)WORK_BROKER_OFFER_WINDOW,
+                  work_broker_pending_packets(), "%llu");
+
+    int32_t n = work_broker_offer_encode(WORK_BROKER_OFFER_WINDOW + 1u, &pkt, 1, buf, sizeof buf);
+    work_broker_on_offer(0, buf, (size_t)n);
+    ASSERT_EQ_FMT((unsigned long long)WORK_BROKER_OFFER_WINDOW,
+                  work_broker_pending_packets(), "%llu");
+
+    work_broker_parent_reset();
+    PASS();
+}
+
 SUITE(work_broker_suite)
 {
     RUN_TEST(offer_encode_decode_roundtrip);
@@ -251,4 +434,13 @@ SUITE(work_broker_suite)
     RUN_TEST(on_offer_queues_packets);
     RUN_TEST(on_offer_drops_unknown_slot_and_malformed);
     RUN_TEST(relay_step_is_inert_without_broker);
+    RUN_TEST(acc_settles_when_offer_fully_disposed);
+    RUN_TEST(acc_never_settles_past_an_outstanding_offer);
+    RUN_TEST(acc_add_refuses_when_ring_is_full);
+    RUN_TEST(acc_dispose_reports_unknown_offer);
+    RUN_TEST(tag_encode_decode_roundtrip);
+    RUN_TEST(request_takes_one_packet_out_of_the_buffer);
+    RUN_TEST(request_from_unknown_slot_is_ignored);
+    RUN_TEST(done_without_matching_grant_is_ignored);
+    RUN_TEST(offer_beyond_window_is_refused_whole);
 }
