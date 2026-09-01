@@ -73,6 +73,61 @@
  */
 #define WORK_BROKER_OFFER_WINDOW 8
 
+/**
+ * @brief Délai minimal (ms) avant qu'une possibilité en tampon parte au serveur.
+ *
+ * Sans ce sursis, le thread de relais viderait le tampon aussitôt et il n'y
+ * aurait jamais rien à redistribuer : les fils au repos ne verraient que du
+ * vide. C'est le réglage de « péremption » de l'arbitrage A3 — passé ce délai,
+ * ce qu'aucun fils n'a réclamé repart au serveur plutôt que de dormir en RAM.
+ */
+#define WORK_BROKER_HOLD_MS 200
+
+/* ------------------------------------------------------------------ */
+/* Comptabilité des offres — le cœur de l'invariant d'acquittement.    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief Suivi d'UNE offre : combien de ses paquets restent à disposer.
+ *
+ * Un paquet est « disposé » quand il est devenu durable (poussé au serveur) OU
+ * qu'un fils a prouvé son sous-arbre mort (`IPC_MSG_WORK_DONE`). Les deux
+ * comptent : dans un cas le travail est chez le serveur, dans l'autre il n'y a
+ * plus de travail du tout.
+ */
+typedef struct {
+    uint32_t seq;   /**< numéro de l'offre */
+    int remaining;  /**< paquets pas encore disposés */
+    int used;       /**< 0 = entrée libre */
+} work_broker_offer_acc_t;
+
+/**
+ * @brief Enregistre une offre de `count` paquets dans l'anneau d'un fils.
+ *
+ * @return 0 si l'offre est suivie, -1 si l'anneau est plein — ce qui signifie
+ *         que le fils a dépassé sa fenêtre, donc un bogue : l'appelant doit
+ *         alors REFUSER l'offre plutôt que de la suivre à moitié.
+ */
+int work_broker_acc_add(work_broker_offer_acc_t *ring, int n, uint32_t seq, int count);
+
+/**
+ * @brief Décompte un paquet disposé de l'offre `seq`.
+ * @return 0 si l'offre était suivie, -1 si elle est inconnue (message périmé).
+ */
+int work_broker_acc_dispose(work_broker_offer_acc_t *ring, int n, uint32_t seq);
+
+/**
+ * @brief Fait avancer le `seq` réglé aussi loin que possible.
+ *
+ * Avance de `settled + 1` en `settled + 1` tant que l'offre correspondante est
+ * entièrement disposée, en libérant les entrées au passage. **Ne saute jamais
+ * une offre incomplète** : régler `n+1` alors que `n` est encore en vol
+ * laisserait le fils acquitter une racine dont du travail circule encore.
+ *
+ * @return Le nouveau `seq` réglé (égal à `settled` si rien n'a pu avancer).
+ */
+uint32_t work_broker_acc_settle(work_broker_offer_acc_t *ring, int n, uint32_t settled);
+
 /* ------------------------------------------------------------------ */
 /* Fonctions pures — cadrage et politique, testables sans socket.      */
 /* ------------------------------------------------------------------ */
@@ -136,6 +191,18 @@ int work_broker_window_allows(uint32_t last_offer, uint32_t last_settled, uint32
 /* ------------------------------------------------------------------ */
 
 /**
+ * @brief Cadre le couple (origin_slot, origin_seq) commun à GRANT et DONE.
+ * @return `IPC_WORK_TAG_SIZE`, ou -1 si `bufsz` est insuffisant.
+ */
+int work_broker_tag_encode(int32_t slot, uint32_t seq, void *buf, size_t bufsz);
+
+/**
+ * @brief Décode le couple cadré par `work_broker_tag_encode`.
+ * @return 0 si bien formé, -1 sinon.
+ */
+int work_broker_tag_decode(const void *buf, size_t len, int32_t *out_slot, uint32_t *out_seq);
+
+/**
  * @brief Installe les crochets `datamanager` de ce fils (offre + verrou
  *        d'acquittement). À appeler dans l'enfant, après le `fork()`, et
  *        seulement si `--local-dispatch` est actif.
@@ -160,7 +227,40 @@ void work_broker_child_on_settled(const void *payload, size_t len);
 int work_broker_ack_allowed(void);
 
 /**
- * @brief Réinitialise l'état du fils (numéros d'offre). Réservé aux tests.
+ * @brief Traite un `IPC_MSG_WORK_GRANT` reçu par ce fils : mémorise la
+ *        possibilité attribuée et l'origine à régler.
+ *
+ * Une seule attribution est détenue à la fois (un fork de recherche n'étudie
+ * qu'une racine à la fois) : un second GRANT arrivé alors que le précédent
+ * n'est pas terminé est ignoré, le courtier n'en émet pas.
+ */
+void work_broker_child_on_grant(const void *payload, size_t len);
+
+/**
+ * @brief Demande du travail au courtier (datagramme, sans attente).
+ *
+ * Sans effet si ce fils détient déjà une attribution non terminée.
+ */
+void work_broker_child_request_work(void);
+
+/**
+ * @brief Prélève l'attribution reçue, s'il y en a une.
+ *
+ * @return Un tableau d'UN paquet, à libérer par `free_array_possibility_packet`,
+ *         ou NULL si rien n'a été attribué. Le paquet n'est PAS acquitté auprès
+ *         du serveur (il ne lui a jamais été soumis) : l'appelant ne doit pas
+ *         l'enregistrer dans le pool analysé.
+ */
+array_possibility_packet *work_broker_child_take_grant(void);
+
+/**
+ * @brief Signale au courtier que l'attribution en cours est entièrement
+ *        explorée. Sans effet si ce fils n'en détient aucune.
+ */
+void work_broker_child_report_done(void);
+
+/**
+ * @brief Réinitialise l'état du fils (numéros d'offre, attribution). Réservé aux tests.
  */
 void work_broker_child_reset(void);
 
@@ -198,6 +298,16 @@ void work_broker_parent_stop(void);
 void work_broker_on_offer(int fork_slot, const void *payload, size_t len);
 
 /**
+ * @brief Sert une demande de travail d'un fils (appelé par `server_tcp`).
+ */
+void work_broker_on_request(int fork_slot);
+
+/**
+ * @brief Encaisse un `IPC_MSG_WORK_DONE` d'un fils (appelé par `server_tcp`).
+ */
+void work_broker_on_done(int fork_slot, const void *payload, size_t len);
+
+/**
  * @brief Un tour de relais : draine le tampon vers le serveur, puis règle les
  *        fils dont le travail est devenu durable.
  *
@@ -215,6 +325,16 @@ int work_broker_relay_step(void);
  * ressemblent. Journalisé périodiquement par le thread de relais.
  */
 unsigned long long work_broker_relayed_total(void);
+
+/**
+ * @brief Nombre total de possibilités ATTRIBUÉES à un fils depuis le démarrage.
+ *
+ * C'est la mesure de la redistribution elle-même : le compteur de relais ne la
+ * voit pas (une possibilité attribuée n'est jamais poussée au serveur). Sans
+ * ces deux nombres côte à côte, « le courtier redistribue » et « le courtier ne
+ * fait que relayer » sont indiscernables de l'extérieur.
+ */
+unsigned long long work_broker_granted_total(void);
 
 /**
  * @brief Nombre de paquets actuellement en tampon (diagnostic et tests).

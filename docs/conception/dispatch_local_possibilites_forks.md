@@ -1,6 +1,6 @@
 # Dispatch local des possibilités entre les forks d'un client
 
-**Statut : en cours d'implémentation (2/6 PR livrées).** Ce document décrit une **cible** ;
+**Statut : en cours d'implémentation (3/6 PR livrées).** Ce document décrit une **cible** ;
 tout ce qui n'est pas explicitement marqué « livré » ci-dessous n'est pas encore le
 comportement du code.
 
@@ -212,6 +212,40 @@ traitée par la PR qui introduit A2, sinon l'implémentation les découvrira en 
 
 ---
 
+### 5.1 Mesuré : la redistribution est inerte tant que chaque fork tire sa propre racine
+
+La PR3 a livré le mécanisme complet de redistribution. **Il ne se déclenche
+presque jamais**, et la raison est structurelle, pas un défaut d'implémentation.
+
+Un fork ne réclame du travail que lorsque `works == 0`, c'est-à-dire quand il a
+**fini** sa racine. Or finir une racine est précisément l'événement long que ce
+workflow cherche à raccourcir. Mesure sur un client 4 forks, 45 s, serveur amorcé
+au paquet genèse :
+
+| Observation | Valeur |
+|---|---|
+| Possibilités relayées au serveur par le courtier | 960 |
+| Possibilités en tampon (donc disponibles à l'attribution) | 156 |
+| Demandes de travail reçues par le courtier | **1** |
+| Possibilités attribuées à un fork | **0** |
+
+Les deux populations sont **anti-corrélées** : le tampon se remplit grâce aux
+forks qui ont trop de travail, et ne se vide que vers les forks qui n'en ont
+plus — état où ils ne sont quasiment jamais, puisque chacun a tiré sa propre
+racine du serveur au démarrage et l'explore depuis.
+
+**Conséquence sur l'ordre des PR** : l'arbitrage A2 (une seule demande par
+client) n'est pas une préférence d'architecture, c'est **la condition qui rend la
+redistribution utile**. Tant que chaque fork tire sa racine indépendamment, il
+n'y a rien à se partager : le travail circule déjà fork → courtier → serveur →
+fork, et couper le serveur de ce circuit économise un aller-retour réseau sans
+changer qui fait quoi. C'est en ne prenant **qu'une** racine par client que les
+autres forks deviennent des consommateurs du tampon plutôt que des concurrents
+pour le stock serveur.
+
+La PR4 (connexion unique) est donc ce qui **active** la PR3, et la mesure de la
+PR3 seule n'a de sens qu'en tant que référence à zéro.
+
 ## 6. Protocole de mesure
 
 Une seule de ces métriques est à instrumenter ; les autres existent.
@@ -253,7 +287,7 @@ courtier capable de les nourrir.
 |---|---|---|
 | **1** ✅ **livrée** | **IPC typé bidirectionnel** : le sens parent → fils est cadré comme l'autre (octet de type `IPC_MSG_COMMAND`), `send_typed_to_childs` prend la longueur en paramètre (R8), `fork_udp` dimensionne son tampon sur `ipc_max_datagram()` et délègue le découpage à `ipc_child_frame_decode`, fonction pure qui vérifie la place du terminateur (**corrige le débordement d'un octet**, R7). **Écart assumé avec le plan initial** : les types `IPC_MSG_WORK_*` ne sont **pas** introduits ici — une constante sans émetteur ni récepteur ne se teste pas et rote ; ils arrivent avec leur usage. Le transport est générique et **testé sur une charge utile binaire réelle** (un `possibility_packet` complet, octets nuls compris). Effet de bord : une commande de plus de 99 caractères n'est plus tronquée en silence | non (préparatoire) |
 | **2** ✅ **livrée** | **Le parent ouvre une connexion de travail et relaie les ADD de ses forks** (`--local-dispatch`, défaut inactif). Un fork offre son lot au parent (`IPC_MSG_WORK_OFFER`) au lieu d'`ADD`er lui-même ; le parent l'empile et le pousse au serveur depuis son propre socket (`fork_seq=-1`). Acquittement différé (A4) par numéro d'offre : le courtier renvoie le plus grand `seq` rendu durable (`IPC_MSG_WORK_SETTLED`), et `send_possibility_analysed` ne fait rien tant qu'il reste des offres non réglées. Contrôle de flux par fenêtre : au-delà de `WORK_BROKER_OFFER_WINDOW` offres en vol, le fork retombe sur l'envoi direct — le tampon du parent est donc borné **par construction**, ce qu'un datagramme UDP (aucun refus à faire remonter) impose de toute façon. **Écart assumé avec A1** : le courtier utilise une file privée, pas les pools `datamanager` du parent — ceux-ci sont ce que `backup`/`restore`/`stockDistribution` manipulent, et y verser un tampon de transit ferait écrire sur disque, sous le nom de « stock », de la donnée qui n'en est pas ; la file privée porte en plus l'origine (`slot`, `seq`) de chaque paquet, dont le règlement a besoin et qu'un pool ne transporte pas. Deux crochets injectés dans `datamanager` (offre, verrou d'acquittement) préservent la règle « `core/` ne dépend jamais d'`app/` ». Vérifié bout-en-bout : 276 possibilités réellement relayées sur un client 3 forks contre un serveur `--expand-level 4` | oui |
-| **3** | **Redistribution aux forks au repos** : le parent sert ses forks depuis son tampon (`IPC_MSG_WORK_GRANT`), compteurs de terminaison **par racine** (A4), réinjection du travail en vol à la mort d'un fork, borne et péremption du tampon (A3) | oui |
+| **3** ✅ **livrée, mais MESURÉE INERTE seule** | **Redistribution aux forks au repos** : `IPC_MSG_WORK_REQUEST`/`_GRANT`/`_DONE`, comptabilité **par offre** (anneau `{seq, remaining}` par fils, règlement qui ne saute jamais une offre incomplète), réinjection auto-réparante des attributions d'un fils mort, sursis `WORK_BROKER_HOLD_MS` avant relais (la péremption d'A3 : sans lui le relais viderait le tampon avant que quiconque puisse le réclamer). **Résultat mesuré : 0 attribution.** Sur 45 s, 4 forks, 156 possibilités en tampon, le courtier n'a reçu qu'**une seule** demande — voir §5.1 | oui |
 | **4** | **Connexion de travail unique** (A2) : les forks abandonnent la leur, avec les correctifs R1, R3, R4, R5 dans la même PR — ils ne sont pas séparables de A2 | oui |
 | **5** | **Partage à la racine côté fork** : mode « moins profond d'abord » de `bt_materialize_pending` (A6), déclenchement au **début** de l'étude au lieu d'attendre 500 ms / 1 M nœuds | oui |
 | **6** | Campagne de mesure (§6), puis bascule du défaut — **ou abandon motivé, consigné dans ce même document** | — |

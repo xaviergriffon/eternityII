@@ -440,12 +440,26 @@ recherche ne paie plus que le coût d'un `sendto` local.
 ./eternityII client 127.0.0.1 8 300 --local-dispatch data/pieces.csv
 ```
 
+Le parent **attribue aussi** ces possibilités à ses propres forks quand l'un
+d'eux vient à manquer de travail, plutôt que de les renvoyer au serveur pour
+qu'un autre fork les redemande. Une possibilité n'est poussée au serveur que si
+personne ne l'a réclamée pendant un court sursis.
+
 Le parent journalise périodiquement son activité, seul moyen de distinguer
-« le courtier travaille » de « tout retombe sur l'envoi direct » :
+« le courtier redistribue », « il ne fait que relayer » et « tout retombe sur
+l'envoi direct » — de l'extérieur les trois se ressemblent :
 
 ```
-[18:30:19] courtier : 276 possibilités relayées au serveur (24 en tampon)
+[19:13:08] courtier : 0 possibilités redistribuées aux fils, 960 relayées au serveur (156 en tampon)
 ```
+
+> **En l'état, la redistribution ne se déclenche quasiment jamais** (le `0`
+> ci-dessus est une mesure réelle, pas un exemple). Un fork ne réclame du travail
+> qu'une fois sa racine terminée, et chaque fork tirant sa propre racine du
+> serveur, aucun n'est jamais disponible. Le relais vers le serveur, lui,
+> fonctionne et apporte déjà son gain. Voir
+> [l'analyse §5.1](conception/dispatch_local_possibilites_forks.md) : c'est le
+> passage à **une seule demande par client** qui rendra la redistribution utile.
 
 **Rien ne peut être perdu.** Le tampon du parent n'est pas sauvegardé : un fork
 qui a cédé du travail pas encore poussé au serveur **n'acquitte pas** la racine
