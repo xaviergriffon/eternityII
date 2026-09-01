@@ -20,6 +20,8 @@
 #include <stdint.h>
 
 #include "core/datamanager.h"
+#include "net/control_protocol.h"
+#include "ui/command_lines.h"
 
 /// Taille maximale d'une requête acceptée (ligne + en-têtes + corps), au-delà
 /// de laquelle la connexion est refusée (413) plutôt que de croître sans borne.
@@ -44,6 +46,10 @@
 /// (app/app_static_variables.h) plutôt qu'importée : ce fichier n'a AUCUNE
 /// dépendance vers `app/` (cf. en-tête de fichier ci-dessus).
 #define HTTP_CLIENT_IP_MAX 46
+/// Longueur maximale (avec terminateur) d'un nom de commande dans
+/// http_command_info_t.name -- la plus longue actuelle est
+/// "maxStockByThread" (16 caractères), marge incluse.
+#define HTTP_COMMAND_NAME_MAX 32
 
 /**
  * @brief Requête HTTP parsée : méthode, chemin, et vue sur le corps (pas de
@@ -101,6 +107,7 @@ typedef enum {
     HTTP_ROUTE_STATS,         ///< GET /api/v1/stats
     HTTP_ROUTE_STATUS,        ///< GET /api/v1/status
     HTTP_ROUTE_COMMAND,       ///< POST /api/v1/command
+    HTTP_ROUTE_COMMANDS,      ///< GET /api/v1/commands
     HTTP_ROUTE_CLIENTS,       ///< GET /api/v1/clients
     HTTP_ROUTE_CLIENTS_STATS, ///< POST /api/v1/clients/stats
     HTTP_ROUTE_BEST_BOARD,    ///< GET /api/v1/best-board
@@ -517,6 +524,46 @@ typedef struct {
  * @return       Longueur écrite (hors NUL final), ou -1 si `buf` est trop petit.
  */
 int http_json_format_known_clients(char *buf, size_t size, const http_known_client_info_t *infos, int count);
+
+/**
+ * @brief Vue en lecture d'une commande whitelistée, pour
+ *        GET /api/v1/commands. Remplie par http_commands_collect
+ *        (src/net/http_server.h) à partir de control_command_enumerate
+ *        (net/control_protocol.h) et command_scope_classify/
+ *        command_lookup_help_text (ui/command_lines.h) -- voir
+ *        docs/conception/decouverte_commandes_scope_remote_class.md.
+ */
+typedef struct {
+    /// Nom de la commande (ex. "pause", "restore").
+    char name[HTTP_COMMAND_NAME_MAX];
+    /// Où cette commande a un sens en local (command_scope_t).
+    command_scope_t scope;
+    /// Comment/si elle voyage sur le réseau (control_command_class_t).
+    control_command_class_t remote_class;
+    /// 1 si POST /api/v1/command exige un jeton Bearer pour cette commande
+    /// (toujours `!control_command_read_only(name)` -- champ explicite pour
+    /// qu'un consommateur n'ait pas à redériver la règle d'auth lui-même).
+    int requires_token;
+    /// Résumé d'aide (littéral statique de command_description, jamais NULL
+    /// pour une commande de control_command_enumerate).
+    const char *summary;
+    /// Syntaxe avec arguments (littéral statique), NULL si la commande n'en
+    /// prend pas.
+    const char *usage;
+} http_command_info_t;
+
+/**
+ * @brief Sérialise un tableau de commandes en JSON dans `buf` (cf. schéma
+ *        documenté dans docs/api_http_rest.md).
+ *
+ * @param buf    Tampon destination.
+ * @param size   Taille de `buf`.
+ * @param infos  Tableau de commandes (peut être vide/NULL si `count == 0`).
+ * @param count  Nombre d'entrées valides dans `infos`.
+ * @return       Longueur écrite (hors NUL final), ou -1 si `buf` est trop
+ *               petit ou les arguments incohérents.
+ */
+int http_json_format_commands(char *buf, size_t size, const http_command_info_t *infos, int count);
 
 /**
  * @brief Vue en lecture du meilleur plateau connu du serveur (agrégat

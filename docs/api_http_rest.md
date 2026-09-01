@@ -12,8 +12,8 @@ Le code correspondant vit dans :
 
 - [src/net/http_codec.h](../src/net/http_codec.h) / [http_codec.c](../src/net/http_codec.c) — parsing HTTP/1.1 (dont l'en-tête `Authorization`), routage, formatage JSON, extraction/vérification du jeton Bearer (`http_extract_bearer_token`, `http_token_equals_constant_time`, `http_command_authorize`) : fonctions pures, sans socket ;
 - [src/net/http_server.h](../src/net/http_server.h) / [http_server.c](../src/net/http_server.c) — écouteur réseau (thread détaché, boucle accept), les fonctions `http_*_collect` qui alimentent les vues JSON à partir de l'état serveur/registre vivant, et `http_token_load` (chargement/validation du fichier jeton au démarrage) ;
-- [src/ui/command_lines.c](../src/ui/command_lines.c) (`admin_apply_remote_command`, `admin_apply_privileged_command`) — exécution des commandes admin, réentrante ;
-- [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_classify`, source unique de vérité ; `control_command_allowed`/`control_command_privileged`/`control_command_read_only` n'en sont que des projections, voir encadré ci-dessous) — `control_command_allowed` (lecture + écriture relayable) est **partagée** avec le canal de contrôle binaire, `control_command_privileged` (écriture serveur-seulement : restore/backup/sortAsc/sortAscFiles/sortDesc/sortDescFiles/sortDescMulti/split/regroup/rebalance/stockMaxRam/spill) ne l'est **pas** (accessible uniquement via cette API, jamais via le canal de contrôle) ;
+- [src/ui/command_lines.c](../src/ui/command_lines.c) (`admin_apply_remote_command`, `admin_apply_privileged_command`, `command_scope_classify`) — exécution des commandes admin, réentrante ;
+- [src/net/control_protocol.c](../src/net/control_protocol.c) (`control_command_classify`, `control_command_enumerate`, source unique de vérité ; `control_command_allowed`/`control_command_privileged`/`control_command_read_only` n'en sont que des projections, voir encadré ci-dessous) — `control_command_allowed` (lecture + écriture relayable) est **partagée** avec le canal de contrôle binaire, `control_command_privileged` (écriture serveur-seulement : restore/backup/sortAsc/sortAscFiles/sortDesc/sortDescFiles/sortDescMulti/split/regroup/rebalance/stockMaxRam/spill) ne l'est **pas** (accessible uniquement via cette API, jamais via le canal de contrôle) ;
 - [src/app/control_registry.h](../src/app/control_registry.h) / [control_registry.c](../src/app/control_registry.c) (`control_registry_snapshot`, `control_registry_record_stats`, `control_registry_broadcast_get_stats`) — registre des sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9), source de `GET /api/v1/clients` et `POST /api/v1/clients/stats` ;
 - [src/app/known_clients_registry.h](../src/app/known_clients_registry.h) / [known_clients_registry.c](../src/app/known_clients_registry.c) (`known_clients_registry_snapshot`) — [registre de clients connus](echanges_client_serveur.md#registre-de-clients-connus) (cumul par `machine_uid`, survit à la déconnexion), source de `GET /api/v1/known-clients` ;
 - [src/core/best_board.h](../src/core/best_board.h) / [best_board.c](../src/core/best_board.c) (`g_server_best_board`) — représentation du meilleur plateau connu, source de `GET /api/v1/best-board` ;
@@ -304,8 +304,8 @@ n'est atteignable que depuis `runserver` (`--http-port` est une option serveur
 uniquement), et ces cinq commandes agissent sur `fork_orchestrator`/`client_config`,
 qui ne veulent rien dire côté serveur (`NB_THREADS` y désigne le pool de connexions,
 pas un nombre de forks ; `fork_orchestrator_run` n'y tourne jamais) — même garde-fou
-que `command_is_client_only` pour la console (`admin_remote_command_is_client_only`,
-`src/ui/command_lines.c`). Pour les déclencher à distance sur un client précis,
+que `command_scope_classify` pour la console (`src/ui/command_lines.c`). Pour les
+déclencher à distance sur un client précis,
 passer par `clientsCommand --to <cible> <commande>` (ligne du tableau ci-dessus), qui
 les relaie telles quelles sur le canal de contrôle de ce client — ex.
 `{"command":"clientsCommand --to jetson-1 stopForks"}` puis
@@ -725,6 +725,65 @@ sont lus sous une famille de verrous, le pool analysé sous une autre, jamais le
 deux en même temps (discipline de verrouillage de `datamanager.c`). Une
 possibilité servie à un client pile entre les deux passes peut donc être comptée
 deux fois ou pas du tout. C'est une donnée d'observation, pas une comptabilité.
+
+### GET /api/v1/commands
+
+Liste les commandes réseau-pertinentes (celles de `control_command_classify`,
+[src/net/control_protocol.c](../src/net/control_protocol.c)) avec leur
+classification sur les deux axes orthogonaux `scope` et `remote_class` — pour
+qu'un consommateur tiers (ex. le dashboard `eternityII_web`) cesse de
+recopier cette taxonomie à la main à chaque commande ajoutée ou retirée.
+Aucune authentification requise (pure métadonnée statique, comme toutes les
+autres routes `GET`).
+
+```json
+{
+  "commands": [
+    {
+      "name": "pause",
+      "scope": "common",
+      "remote_class": "write_relayable",
+      "requires_token": true,
+      "summary": "met la recherche en pause administrative (locale + clients connectés)",
+      "usage": null
+    },
+    {
+      "name": "clientsWork",
+      "scope": "server_only",
+      "remote_class": "read_only",
+      "requires_token": false,
+      "summary": "affiche ce qu'un client précis détient actuellement en cours d'analyse",
+      "usage": "clientsWork <session_no|client_uid|label>"
+    }
+  ]
+}
+```
+
+| Champ | Type | Sens |
+|---|---|---|
+| `commands` | tableau | Une entrée par commande de `control_command_classify` (27 aujourd'hui) |
+| `name` | chaîne | Nom de la commande, tel qu'accepté par `POST /api/v1/command` |
+| `scope` | chaîne | Où la commande a un sens en LOCAL : `common` (les deux rôles), `client_only` (pilotage du cycle de vie des fils, masqué côté serveur), `server_only` (n'a de sens que sur un serveur) |
+| `remote_class` | chaîne | Comment/si elle voyage sur le réseau : `read_only` (relayable, sans jeton), `write_relayable` (relayable, jeton requis), `write_server_only` (jamais relayable, jeton requis) — voir `control_command_class_t`, [src/net/control_protocol.h](../src/net/control_protocol.h) |
+| `requires_token` | booléen | `true` sauf pour `clientsWork` — équivalent à `remote_class != "read_only"`, exposé explicitement pour qu'un consommateur n'ait pas à redériver la règle d'authentification lui-même |
+| `summary` | chaîne | Résumé d'aide d'une ligne (même texte que la console `help <commande>`) |
+| `usage` | chaîne ou `null` | Syntaxe avec arguments, `null` si la commande n'en prend pas |
+
+Pour une commande alias (ex. `clientsCmd`, alias de `clientsCommand`), `summary`
+et `usage` reflètent le texte de la commande CANONIQUE, pas celui de l'alias —
+un consommateur qui lit `usage` pour un `name` aliasé y voit donc un verbe
+différent de `name` lui-même.
+
+Les entrées sont renvoyées dans un ordre stable — celui de la table interne
+(`read_only` d'abord, puis `write_relayable`, puis `write_server_only`) — et
+non triées alphabétiquement ou autrement.
+
+`scope` et `remote_class` sont **orthogonaux** : `restore` est `common` ×
+`write_server_only` (exécutable en local sur un client, jamais relayable) ;
+`clientsWork` est `server_only` × `read_only` (n'a de sens que sur un
+serveur, relayable et sans jeton). Voir
+[docs/conception/decouverte_commandes_scope_remote_class.md](conception/decouverte_commandes_scope_remote_class.md)
+pour le raisonnement complet.
 
 ## Séquences typiques
 

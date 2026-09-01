@@ -1780,23 +1780,6 @@ static int admin_remote_config(char *rest) {
 }
 
 /**
- * @brief "start"/"stopForks"/"configApply" agissent sur le cycle de vie de
- *        fils client (`fork_orchestrator`), qui ne veut rien dire côté
- *        serveur — même raisonnement que `command_is_client_only` pour la
- *        console, mais appliqué ici car `admin_apply_remote_command` ne
- *        consulte jamais `command_is_client_only`.
- *
- * "config"/"configSave" n'en font plus partie : `admin_remote_config` et
- * `config_save_interpreter` branchent désormais eux-mêmes sur `server` —
- * seule la forme "config <clé> <valeur>" reste refusée.
- */
-static int admin_remote_command_is_client_only(const char *word) {
-    return strcmp(word, "start") == 0 ||
-           strcmp(word, "stopForks") == 0 ||
-           strcmp(word, "configApply") == 0;
-}
-
-/**
  * @brief Voir la doc dans command_lines.h.
  */
 int admin_apply_remote_command(const char *line) {
@@ -1812,7 +1795,7 @@ int admin_apply_remote_command(const char *line) {
     char *word = strtok_r(copy, " ", &save);
     int result = ADMIN_CMD_BAD_ARGS;
     if (word != NULL) {
-        if (server && admin_remote_command_is_client_only(word)) {
+        if (server && command_scope_classify(word) == CMD_SCOPE_CLIENT_ONLY) {
             result = ADMIN_CMD_FORBIDDEN;
         } else if (strcmp(word, "clientsCommand") == 0 || strcmp(word, "clientsCmd") == 0) {
             result = admin_remote_clients_command(save);
@@ -2430,33 +2413,9 @@ int min_interpreter(void) {
  * @return            Pointeur vers la commande canonique trouvée, ou NULL si inconnue.
  */
 /**
- * @brief `start`/`stopForks`/`configApply` agissent sur le cycle de vie
- *        client (`fork_orchestrator.h`) : exécutées côté serveur, elles
- *        posteraient un événement à un orchestrateur qu'aucune boucle ne
- *        consomme jamais là — trompeur plutôt qu'un no-op inoffensif comme
- *        les commandes `server_only` à l'inverse. D'où un masquage
- *        explicite (ni listées, ni exécutables, ni suggérées).
- *
- * `config`/`configSave` n'ont plus besoin de ce masquage : leurs
- * interpréteurs branchent désormais eux-mêmes sur `server`. Seule la forme
- * `config <clé> <valeur>` reste refusée côté serveur, qui n'a pas de
- * configuration en préparation à appliquer à chaud.
- *
- * Délibérément une liste de noms plutôt qu'un nouveau champ sur
- * `command_description` : la table `commands[]` compte ~50 entrées
- * initialisées positionnellement, ajouter un champ y forcerait à toucher
- * chaque entrée ou déclencherait `-Wmissing-field-initializers`.
- */
-static int command_is_client_only(const command_description *command) {
-    return strcmp(command->command, "start") == 0 ||
-           strcmp(command->command, "stopForks") == 0 ||
-           strcmp(command->command, "configApply") == 0;
-}
-
-/**
  * @brief Copie dans @p out les noms de commandes VISIBLES dans le rôle
  *        courant (masquage server-side de `config`/`configSave`, voir
- *        `command_is_client_only`) — utilisé pour la suggestion Levenshtein
+ *        `command_scope_classify`) — utilisé pour la suggestion Levenshtein
  *        (`closest_command`), afin qu'un serveur ne suggère jamais une
  *        commande qu'il refuserait ensuite d'exécuter.
  *
@@ -2466,7 +2425,7 @@ static int command_is_client_only(const command_description *command) {
 static int visible_command_names(const char *out[NB_COMMANDS]) {
     int n = 0;
     for (int c = 0; c < NB_COMMANDS; c++) {
-        if (server && command_is_client_only(&commands[c])) {
+        if (server && command_scope_classify(commands[c].command) == CMD_SCOPE_CLIENT_ONLY) {
             continue;
         }
         out[n++] = commands[c].command;
@@ -2485,6 +2444,40 @@ command_description *find_command(const char *instruction) {
         }
     }
     return NULL;
+}
+
+command_scope_t command_scope_classify(const char *command_name)
+{
+    static const char *const client_only[] = { "start", "stopForks", "configApply" };
+
+    if (command_name == NULL) {
+        return CMD_SCOPE_COMMON;
+    }
+    for (size_t i = 0; i < sizeof(client_only) / sizeof(client_only[0]); i++) {
+        if (strcmp(client_only[i], command_name) == 0) {
+            return CMD_SCOPE_CLIENT_ONLY;
+        }
+    }
+
+    const command_description *command = find_command(command_name);
+    if (command != NULL && command->server_only) {
+        return CMD_SCOPE_SERVER_ONLY;
+    }
+    return CMD_SCOPE_COMMON;
+}
+
+int command_lookup_help_text(const char *command_name, const char **out_summary, const char **out_usage)
+{
+    if (command_name == NULL) {
+        return 0;
+    }
+    const command_description *command = find_command(command_name);
+    if (command == NULL) {
+        return 0;
+    }
+    *out_summary = command->summary;
+    *out_usage = command->usage;
+    return 1;
 }
 
 /**
@@ -2558,8 +2551,8 @@ static void help_append_category(int category, char *out, size_t cap, size_t *le
         if (command->alias_of != NULL || command->category != category) {
             continue;
         }
-        if (server && command_is_client_only(command)) {
-            /* Masquée côté serveur, cf. command_is_client_only. */
+        if (server && command_scope_classify(command->command) == CMD_SCOPE_CLIENT_ONLY) {
+            /* Masquée côté serveur, cf. command_scope_classify. */
             continue;
         }
         const char *shown = command->usage != NULL ? command->usage : command->command;
@@ -2607,8 +2600,8 @@ int help_format_topic(const char *topic, char *out, size_t out_size) {
     }
 
     command_description *command = find_command(topic);
-    if (command != NULL && server && command_is_client_only(command)) {
-        /* Masquée côté serveur, cf. command_is_client_only : traitée comme un
+    if (command != NULL && server && command_scope_classify(command->command) == CMD_SCOPE_CLIENT_ONLY) {
+        /* Masquée côté serveur, cf. command_scope_classify : traitée comme un
            sujet inconnu plutôt que d'en détailler l'usage. */
         command = NULL;
     }
@@ -2699,8 +2692,8 @@ int do_command_line(char *command) {
             return 0;
         }
         command_description *command_desc = find_command(instruction);
-        if (command_desc != NULL && server && command_is_client_only(command_desc)) {
-            /* Masquée côté serveur, cf. command_is_client_only : traitée comme
+        if (command_desc != NULL && server && command_scope_classify(command_desc->command) == CMD_SCOPE_CLIENT_ONLY) {
+            /* Masquée côté serveur, cf. command_scope_classify : traitée comme
                une commande inconnue plutôt que d'être exécutée (elle
                agirait sur les globales du serveur, sans rapport avec la
                configuration client qu'elle est censée afficher/écrire). */

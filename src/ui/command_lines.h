@@ -146,6 +146,59 @@ int admin_apply_privileged_command(const char *line);
 const char *command_canonical_name(const char *name);
 
 /**
+ * @brief Axe "où cette commande a-t-elle un sens en local" -- orthogonal à
+ *        control_command_class_t (src/net/control_protocol.h), qui répond à
+ *        "comment/si elle voyage sur le réseau". Voir
+ *        docs/conception/decouverte_commandes_scope_remote_class.md.
+ */
+typedef enum {
+    /// Exécutable des deux côtés (la majorité des commandes).
+    CMD_SCOPE_COMMON = 0,
+    /// N'a de sens que côté CLIENT (pilotage du cycle de vie des fils de
+    /// recherche) -- masquée côté serveur (do_command_line, help_format_*,
+    /// admin_apply_remote_command).
+    CMD_SCOPE_CLIENT_ONLY,
+    /// N'a de sens que côté SERVEUR (champ command_description.server_only).
+    CMD_SCOPE_SERVER_ONLY,
+} command_scope_t;
+
+/**
+ * @brief Classifie une commande sur l'axe `scope` (fonction pure) -- source
+ *        unique de vérité, remplace les anciennes command_is_client_only/
+ *        admin_remote_command_is_client_only (dupliquées, même littéral
+ *        "start"/"stopForks"/"configApply" porté deux fois).
+ *
+ * Contrat : `command_name` est un nom SEUL, sans arguments -- contrairement à
+ * control_command_classify, cette fonction ne tokenise pas une ligne
+ * complète (aucun appelant actuel ou prévu n'a jamais qu'un verbe déjà
+ * isolé). NULL ou un nom inconnu retourne CMD_SCOPE_COMMON.
+ *
+ * `client_only` reste une liste de noms en dur plutôt qu'un champ sur
+ * `command_description` : cette table compte ~50 entrées initialisées
+ * positionnellement, y ajouter un champ forcerait à toucher chaque entrée
+ * ou déclencherait `-Wmissing-field-initializers`.
+ *
+ * @param command_name Nom de commande (ex. "pause", "start").
+ * @return              CMD_SCOPE_COMMON / CMD_SCOPE_CLIENT_ONLY / CMD_SCOPE_SERVER_ONLY.
+ */
+command_scope_t command_scope_classify(const char *command_name);
+
+/**
+ * @brief Cherche le résumé/usage d'aide d'une commande, pour construire une
+ *        réponse GET /api/v1/commands (src/net/http_server.c) sans exposer
+ *        command_description/find_command hors de ce fichier.
+ *
+ * @param command_name Nom de commande (alias résolus, comme find_command).
+ * @param out_summary  Reçoit un pointeur vers le résumé (littéral statique),
+ *                      inchangé si la commande est introuvable.
+ * @param out_usage    Reçoit un pointeur vers la syntaxe (littéral statique),
+ *                      NULL si la commande ne prend pas d'argument, inchangé
+ *                      si la commande est introuvable.
+ * @return              1 si trouvée, 0 sinon.
+ */
+int command_lookup_help_text(const char *command_name, const char **out_summary, const char **out_usage);
+
+/**
  * @brief Formate l'aide générale : commandes groupées par catégorie, une ligne
  *        `usage  résumé` par commande, alias entre parenthèses.
  *
