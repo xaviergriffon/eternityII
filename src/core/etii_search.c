@@ -494,6 +494,88 @@ static void record_solution(client_possibility_t *client, struct possibility_pac
 }
 
 /**
+ * @brief Défait le placement d'un niveau dans `scratch` : l'état redevient
+ *        celui que ce niveau voyait au moment de son choix.
+ */
+static inline void bt_unplace_level(struct possibility_packet *scratch, const bt_level *lvl)
+{
+    if (lvl->placed_pos >= 0) {
+        scratch->grid[lvl->x][lvl->y] = -2;
+        BOARD_SET_FACE(scratch, lvl->placed_pos, 0);
+    }
+}
+
+/**
+ * @brief Matérialise les frères non explorés d'UN niveau, dans la limite du
+ *        budget restant.
+ *
+ * Extrait de `bt_materialize_pending` pour que les deux sens de parcours
+ * (plus profond d'abord / moins profond d'abord) partagent exactement le même
+ * corps — un frère produit ne doit pas dépendre de l'ordre dans lequel on
+ * visite les niveaux.
+ *
+ * @param scratch     Plateau à l'état vu par ce niveau (placement déjà défait).
+ * @param out         Tampon de sortie.
+ * @param max_out     Capacité totale de `out`.
+ * @param count_in    Nombre de paquets déjà produits.
+ * @param out_next_s  Reçoit la position de reprise de ce niveau.
+ * @return            Nombre de paquets produits par CE niveau.
+ */
+static int bt_emit_level_siblings(client_possibility_t *client,
+                                  struct possibility_packet *scratch,
+                                  const bt_level *lvl,
+                                  int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
+                                  struct possibility_packet *out, int max_out,
+                                  int count_in, int *out_next_s)
+{
+    if (lvl->search == NULL) {
+        return 0;
+    }
+    int count = count_in;
+    uint8_t cx = lvl->x;
+    uint8_t cy = lvl->y;
+    int s = lvl->next_s;
+    for (; s < lvl->search->size && count < max_out; s++) {
+        struct part *cand = &lvl->search->parts[s];
+        if (cand->id == 0) {
+            continue;
+        }
+        int position = cand->id - 1;
+        if (BOARD_FACE_USED(scratch, position)) {
+            // Pièce prise par un ancêtre : ce candidat est définitivement
+            // imposable à ce niveau, il peut être consommé
+            continue;
+        }
+        struct possibility_packet *pkt = &out[count];
+        memcpy(pkt, scratch, sizeof(*pkt));
+        pkt->grid[cx][cy] = idParts[cand->id][cand->rotation];
+        BOARD_SET_FACE(pkt, position, 1);
+        pkt->alloc = (uint16_t)possibility_placed_count(pkt);
+        // Score MRV de la case (cx,cy) au moment où ce niveau l'a choisie —
+        // exactement la case qui reçoit `cand` ci-dessus.
+        pkt->min_candidats = lvl->mrv_score;
+        if (pkt->alloc >= ETERN_PARTS) {
+            // Plateau complet : enregistre + signale, rien à matérialiser.
+            record_solution(client, pkt);
+            continue;
+        }
+        // Nouvel état de plateau : le contrôle pruner ne vaut plus
+        pkt->checked = 0;
+#if FORWARD_CHECK_K > 0
+        __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
+        if (!forward_check_next_k(pkt, client->map_part, client->all_rotate_part)) {
+            // Branche morte : consommée sans être envoyée (comme à l'expansion)
+            __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
+            continue;
+        }
+#endif // FORWARD_CHECK_K > 0
+        count++;
+    }
+    *out_next_s = s;
+    return count - count_in;
+}
+
+/**
  * @brief Matérialise en paquets les frères non explorés de la pile, du plus profond vers la racine.
  *
  * Reconstruit l'état du plateau à chaque niveau (annulation progressive des
@@ -533,62 +615,50 @@ static int bt_materialize_pending(client_possibility_t *client,
     struct possibility_packet scratch;
     memcpy(&scratch, board, sizeof(scratch));
 
-    int count = 0;
-    int i;
-    for (i = top; i >= 0 && count < max_out; i--) {
-        const bt_level *lvl = &stack[i];
-        new_next_s[i] = lvl->next_s;
-        // Annulation du placement du niveau : scratch = état au moment du choix
-        if (lvl->placed_pos >= 0) {
-            scratch.grid[lvl->x][lvl->y] = -2;
-            BOARD_SET_FACE(&scratch, lvl->placed_pos, 0);
-        }
-        if (lvl->search != NULL) {
-            uint8_t cx = lvl->x;
-            uint8_t cy = lvl->y;
-            int s = lvl->next_s;
-            for (; s < lvl->search->size && count < max_out; s++) {
-                struct part *cand = &lvl->search->parts[s];
-                if (cand->id == 0) {
-                    continue;
-                }
-                int position = cand->id - 1;
-                if (BOARD_FACE_USED(&scratch, position)) {
-                    // Pièce prise par un ancêtre : ce candidat est définitivement
-                    // imposable à ce niveau, il peut être consommé
-                    continue;
-                }
-                struct possibility_packet *pkt = &out[count];
-                memcpy(pkt, &scratch, sizeof(*pkt));
-                pkt->grid[cx][cy] = idParts[cand->id][cand->rotation];
-                BOARD_SET_FACE(pkt, position, 1);
-                pkt->alloc = (uint16_t)possibility_placed_count(pkt);
-                // Score MRV de la case (cx,cy) au moment où ce niveau l'a
-                // choisie — exactement la case qui reçoit `cand` ci-dessus.
-                pkt->min_candidats = lvl->mrv_score;
-                if (pkt->alloc >= ETERN_PARTS) {
-                    // Plateau complet : enregistre + signale, rien à matérialiser.
-                    record_solution(client, pkt);
-                    continue;
-                }
-                // Nouvel état de plateau : le contrôle pruner ne vaut plus
-                pkt->checked = 0;
-#if FORWARD_CHECK_K > 0
-                __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
-                if (!forward_check_next_k(pkt, client->map_part, client->all_rotate_part)) {
-                    // Branche morte : consommée sans être envoyée (comme à l'expansion)
-                    __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
-                    continue;
-                }
-#endif // FORWARD_CHECK_K > 0
-                count++;
-            }
-            new_next_s[i] = s;
-        }
+    // Positions de reprise inchangées par défaut : les niveaux non parcourus
+    // (budget épuisé) gardent la leur, quel que soit le sens de parcours.
+    for (int k = 0; k <= top; k++) {
+        new_next_s[k] = stack[k].next_s;
     }
-    // Niveaux non parcourus (limite atteinte) : positions de reprise inchangées
-    for (; i >= 0; i--) {
-        new_next_s[i] = stack[i].next_s;
+
+    int count = 0;
+    if (!delegate_shallow_first) {
+        // Sens historique — vers le SERVEUR : les frères les PLUS profonds
+        // d'abord, c'est-à-dire les sous-arbres les moins chers, en gardant le
+        // haut de l'arbre en local. Le défaisage de `scratch` suit
+        // naturellement ce sens.
+        for (int i = top; i >= 0 && count < max_out; i--) {
+            bt_unplace_level(&scratch, &stack[i]);
+            count += bt_emit_level_siblings(client, &scratch, &stack[i], idParts,
+                                            out, max_out, count, &new_next_s[i]);
+        }
+        return count;
+    }
+
+    // Sens « moins profond d'abord » — vers un COURTIER local : les frères peu
+    // profonds sont les GROS sous-arbres, et ce sont eux dont la
+    // parallélisation raccourcit l'étude de la racine.
+    //
+    // Le parcours ne peut pas être simplement inversé : `scratch` est défait de
+    // proche en proche, ce qui impose d'aller du plus profond au moins profond.
+    // On défait donc TOUT d'abord (sans rien produire), puis on REFAIT en
+    // remontant, en émettant au passage — l'exact inverse, à coût identique.
+    for (int i = top; i >= 0; i--) {
+        bt_unplace_level(&scratch, &stack[i]);
+    }
+    for (int i = 0; i <= top && count < max_out; i++) {
+        count += bt_emit_level_siblings(client, &scratch, &stack[i], idParts,
+                                        out, max_out, count, &new_next_s[i]);
+        // Replace la pièce de ce niveau : `scratch` redevient l'état vu par le
+        // niveau suivant. La valeur de grille est reprise du PLATEAU COURANT et
+        // non reconstruite depuis `idParts` : `bt_level` ne mémorise que l'id
+        // de la pièce (`placed_pos`), pas sa rotation — la rebâtir supposerait
+        // la rotation 0 et falsifierait les paquets émis plus bas.
+        const bt_level *lvl = &stack[i];
+        if (lvl->placed_pos >= 0) {
+            scratch.grid[lvl->x][lvl->y] = board->grid[lvl->x][lvl->y];
+            BOARD_SET_FACE(&scratch, lvl->placed_pos, 1);
+        }
     }
     return count;
 }
@@ -989,6 +1059,9 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
     int placed_count = possibility_placed_count(&board);
     int noCheckDelegate = 0;
     struct timespec last_delegate = {0, 0};
+    // Premier partage de CETTE racine : envisagé bien plus tôt que la cadence
+    // de croisière (cf. EARLY_SPLIT_CHECK_NODES). Une seule fois par racine.
+    int early_split_done = 0;
 
     unsigned long long nodes = 1;
     counters[client->compteur]++;
@@ -1019,6 +1092,20 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
 
         if (allow_delegate) {
             noCheckDelegate++;
+            // Partage PRÉCOCE : une racine profonde peut s'explorer très
+            // longtemps, et attendre DELEGATE_CHECK_INTERVAL_NODES pour la
+            // première cession laisse les autres fils à sec pendant tout ce
+            // temps — alors que c'est au début qu'il reste des frères peu
+            // profonds, donc de gros sous-arbres, à partager. Le quota reste
+            // celui de bt_delegation_quota : sans faim annoncée et sous le
+            // seuil, il vaut 0 et rien n'est cédé. On ne brade donc jamais du
+            // travail que personne n'a réclamé — on répond juste plus vite.
+            if (!early_split_done && noCheckDelegate >= EARLY_SPLIT_CHECK_NODES) {
+                early_split_done = 1;
+                noCheckDelegate = 0;
+                bt_delegate_if_needed(client, &board, stack, top, idParts);
+                clock_gettime(CLOCK_MONOTONIC, &last_delegate);
+            }
             if (noCheckDelegate == DELEGATE_CHECK_INTERVAL_NODES) {
                 noCheckDelegate = 0;
                 struct timespec now;

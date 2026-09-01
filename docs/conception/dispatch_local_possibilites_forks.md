@@ -1,6 +1,6 @@
 # Dispatch local des possibilités entre les forks d'un client
 
-**Statut : en cours d'implémentation (4/6 PR livrées).** Ce document décrit une **cible** ;
+**Statut : en cours d'implémentation (5/6 PR livrées).** Ce document décrit une **cible** ;
 tout ce qui n'est pas explicitement marqué « livré » ci-dessous n'est pas encore le
 comportement du code.
 
@@ -172,7 +172,7 @@ transporte déjà un paquet entier fils → parent.
 | **A3** | La file locale est un **tampon de dispatch transitoire, pas un stock** : bornée en volume, avec poussée au serveur sur péremption | Elle n'est **pas durable** : rien n'y survit à un crash du client, alors que le stock serveur est sauvegardé (`consistent_backup`). En faire un stock déplacerait de la donnée non sauvegardée hors du seul endroit qui la sauvegarde |
 | **A4** | **Invariant d'acquittement** : une racine n'est acquittée au serveur que lorsque toute sa descendance dispatchée localement est terminée ou a été ré-`ADD`ée au serveur. Implémenté par un **compteur de terminaison par racine** dans le parent, jamais par inspection de filiation | Préserve l'invariant actuel : « acquitté ⇒ mort prouvé, ou déjà remis en stock ». Le compteur est en O(1) par message ; comparer les plateaux (`is_origin_of`) serait en O(stock). **Mode dégradé correct par défaut** : si un fork meurt, le compteur n'atteint jamais zéro, le parent n'acquitte simplement pas, et le bail existant reprend la main (`datamanager_reclaim_expired_leases` puis `datamanager_purge_descendants_of`). Aucun nouveau mode de défaillance n'est introduit |
 | **A5** | Phase 1 : **forks de recherche uniquement**. Les forks pruner gardent leur connexion propre | Le pruner a son propre pool (non vérifié), son propre protocole par lot (`INST_GET_TO_CHECK_BATCH`, 100 paquets) et son propre dosage (`--pruner-forks`, `--auto-roles`). Les intégrer doublerait la surface de la première étape. **Conséquence assumée** : un client mixte garde 1 connexion de recherche + 1 par fork pruner, pas strictement 1 connexion |
-| **A6** | Dispatch **local** : frères **les moins profonds d'abord** (nouveau mode de `bt_materialize_pending`). Délégation **serveur** : plus profonds d'abord, inchangée | En local on veut paralléliser les **gros** sous-arbres, c'est là qu'est la latence ; vers le serveur on veut céder du travail bon marché à bas coût. **À confirmer par la mesure** (§6) — la direction du tri est exactement le genre d'arbitrage que ce dépôt a déjà tranché par mesure et non par intuition (cf. le départage MRV par nombre de côtés contraints, [elagage_recherche.md §4.12](elagage_recherche.md)) |
+| **A6** ⚠️ *(non confirmé, cf. §5.3)* | Dispatch **local** : frères **les moins profonds d'abord** (nouveau mode de `bt_materialize_pending`). Délégation **serveur** : plus profonds d'abord, inchangée | En local on veut paralléliser les **gros** sous-arbres, c'est là qu'est la latence ; vers le serveur on veut céder du travail bon marché à bas coût. **À confirmer par la mesure** (§6) — la direction du tri est exactement le genre d'arbitrage que ce dépôt a déjà tranché par mesure et non par intuition (cf. le départage MRV par nombre de côtés contraints, [elagage_recherche.md §4.12](elagage_recherche.md)) |
 | **A7** | Comportement **opt-in** derrière une option, défaut inactif | Pour que l'A/B tienne dans **un seul binaire**, condition d'une mesure appariée honnête. Précédents : `--auto-roles` (défaut off), `pruner_dfs_budget` (opt-in) |
 
 ---
@@ -267,6 +267,35 @@ deux sites à la fois — et de le mesurer ; c'est une PR à part entière, pas 
 effet de bord de celle-ci. Le raisonnement est consigné en commentaire sur
 `server_analysed_file_hint`, pour qu'il ne soit pas retenté sans le savoir.
 
+### 5.3 A6 mesuré : « moins profond d'abord » ne tient pas ses promesses
+
+L'arbitrage A6 portait la mention « à confirmer par la mesure ». **Elle ne le
+confirme pas.** Deux paires alternées (chaque sens passant en premier une fois),
+client 4 forks, serveur `--expand-level 4`, 45 s :
+
+| Sens | Attributions aux fils | Relais au serveur |
+|---|---|---|
+| Plus profond d'abord (défaut) | 160, puis 40 | 192, puis 139 |
+| **Moins profond d'abord** | **6, puis 6** | 157, puis 127 |
+
+Le signal est stable et d'un ordre de grandeur. L'explication la plus probable :
+en cédant les frères les moins profonds, le fil donne le HAUT de son arbre, et
+son stock implicite (`bt_count_pending`) s'effondre du même coup — or
+`bt_delegation_quota` sous le seuil est borné par la moitié de ce stock. Il ne
+lui reste ensuite quasiment plus rien à céder. Le sens historique, lui, garde le
+haut de l'arbre et continue d'essaimer des sous-arbres profonds bon marché.
+
+**Ce que cette mesure ne dit PAS.** « Possibilités déplacées » n'est pas la
+métrique cible : moins de mouvement peut aussi vouloir dire moins de frais
+généraux à débit égal. Le temps de séjour d'une racine et le débit cumulé —
+les deux métriques qui trancheraient — ne sont pas encore instrumentés (§6).
+Le verdict revient donc à la campagne de la PR6 ; le défaut reste inchangé et
+l'option `--split-shallow-first` existe pour la mener.
+
+C'est le même schéma que le départage MRV par nombre de côtés contraints
+([elagage_recherche.md §4.12](elagage_recherche.md)) : l'heuristique attendue
+perdait, et seule la mesure l'a montré.
+
 ## 6. Protocole de mesure
 
 Une seule de ces métriques est à instrumenter ; les autres existent.
@@ -310,7 +339,7 @@ courtier capable de les nourrir.
 | **2** ✅ **livrée** | **Le parent ouvre une connexion de travail et relaie les ADD de ses forks** (`--local-dispatch`, défaut inactif). Un fork offre son lot au parent (`IPC_MSG_WORK_OFFER`) au lieu d'`ADD`er lui-même ; le parent l'empile et le pousse au serveur depuis son propre socket (`fork_seq=-1`). Acquittement différé (A4) par numéro d'offre : le courtier renvoie le plus grand `seq` rendu durable (`IPC_MSG_WORK_SETTLED`), et `send_possibility_analysed` ne fait rien tant qu'il reste des offres non réglées. Contrôle de flux par fenêtre : au-delà de `WORK_BROKER_OFFER_WINDOW` offres en vol, le fork retombe sur l'envoi direct — le tampon du parent est donc borné **par construction**, ce qu'un datagramme UDP (aucun refus à faire remonter) impose de toute façon. **Écart assumé avec A1** : le courtier utilise une file privée, pas les pools `datamanager` du parent — ceux-ci sont ce que `backup`/`restore`/`stockDistribution` manipulent, et y verser un tampon de transit ferait écrire sur disque, sous le nom de « stock », de la donnée qui n'en est pas ; la file privée porte en plus l'origine (`slot`, `seq`) de chaque paquet, dont le règlement a besoin et qu'un pool ne transporte pas. Deux crochets injectés dans `datamanager` (offre, verrou d'acquittement) préservent la règle « `core/` ne dépend jamais d'`app/` ». Vérifié bout-en-bout : 276 possibilités réellement relayées sur un client 3 forks contre un serveur `--expand-level 4` | oui |
 | **3** ✅ **livrée, mais MESURÉE INERTE seule** | **Redistribution aux forks au repos** : `IPC_MSG_WORK_REQUEST`/`_GRANT`/`_DONE`, comptabilité **par offre** (anneau `{seq, remaining}` par fils, règlement qui ne saute jamais une offre incomplète), réinjection auto-réparante des attributions d'un fils mort, sursis `WORK_BROKER_HOLD_MS` avant relais (la péremption d'A3 : sans lui le relais viderait le tampon avant que quiconque puisse le réclamer). **Résultat mesuré : 0 attribution.** Sur 45 s, 4 forks, 156 possibilités en tampon, le courtier n'a reçu qu'**une seule** demande — voir §5.1 | oui |
 | **4** ✅ **livrée — ACTIVE la PR3** | **Connexion de travail unique** (A2) : sous `--local-dispatch`, un fils ne fait plus ni GET, ni ADD, ni acquittement ; le parent réclame les racines, les distribue et les acquitte quand son tampon est vide ET qu'aucun fils n'explore — instant où tout descendant est soit durable, soit prouvé mort, donc exactement la condition d'A4. Ajout d'`IPC_MSG_WORK_HUNGER` : le courtier réclame aux fils qui détiennent du travail (la délégation anticipée v8, repointée sur lui), sans quoi un fils tenant une racine profonde ne cède rien avant `max_stock_by_thread`. **R1 corrigé** (faim dimensionnée sur les forks déclarés via `control_registry_count_role_forks`, pas sur les connexions). **R3 tenté puis retiré** — voir §5.2. **R4/R5 différés** : observabilité, pas correction. **Mesure : 0 → 273 attributions**, et le serveur ne voit plus qu'UNE connexion de travail (`fork_seq=-1`) au lieu de 4 | oui |
-| **5** | **Partage à la racine côté fork** : mode « moins profond d'abord » de `bt_materialize_pending` (A6), déclenchement au **début** de l'étude au lieu d'attendre 500 ms / 1 M nœuds | oui |
+| **5** ✅ **livrée — A6 NON confirmé, défaut inchangé** | **Partage à la racine côté fork** : `bt_materialize_pending` sait matérialiser dans les deux sens (corps par niveau extrait et partagé, donc un frère produit ne dépend en rien de l'ordre de visite — vérifié par un test d'égalité des multiensembles) ; **partage précoce** au bout de `EARLY_SPLIT_CHECK_NODES` nœuds au lieu d'attendre 1 000 000. Le sens « moins profond d'abord » est livré derrière `--split-shallow-first`, **désactivé par défaut** : mesuré, il ne confirme pas A6 — voir §5.3 | oui |
 | **6** | Campagne de mesure (§6), puis bascule du défaut — **ou abandon motivé, consigné dans ce même document** | — |
 
 ## 8. Points laissés ouverts

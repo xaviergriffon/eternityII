@@ -486,6 +486,22 @@ courtier refuse ou s'arrête.
 Conception, mesures attendues et suite prévue :
 [docs/conception/dispatch_local_possibilites_forks.md](conception/dispatch_local_possibilites_forks.md).
 
+## Sens de cession des frères non explorés (`--split-shallow-first`)
+
+**Client/pruner, désactivée par défaut. Piste non tranchée.**
+
+Quand un fil cède du travail non exploré, il matérialise par défaut les frères
+les **plus profonds** — les sous-arbres les moins chers — et garde le haut de
+l'arbre en local. `--split-shallow-first` inverse ce sens : les frères peu
+profonds sont les gros sous-arbres, et ce sont eux dont la parallélisation
+raccourcirait l'étude d'une racine.
+
+**La première mesure ne montre pas de gain**, au contraire : le volume
+redistribué entre fils s'effondre (160 et 40 attributions dans le sens
+historique, 6 et 6 avec cette option, sur deux paires alternées). L'option est
+livrée pour permettre la comparaison, pas parce qu'elle est recommandée — voir
+[l'analyse §5.3](conception/dispatch_local_possibilites_forks.md).
+
 ## Dosage recherche/contrôle par fork (`--pruner-forks`)
 
 Un process client/pruner héberge `nb_threads` forks de travail ; par défaut, ils
