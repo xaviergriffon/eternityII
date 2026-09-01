@@ -1499,9 +1499,18 @@ void *fork_udp(void *param) {
     struct sockaddr_un *srv_addr = malloc(sizeof(struct sockaddr_un));
     ssize_t numBytes;
     socklen_t len = sizeof(struct sockaddr_un);
-    char *value = malloc(sizeof(char) * 100);
+    /* Tampon dimensionné pour le plus gros datagramme IPC — même source de
+       vérité que build_udp_local_socket et que server_tcp dans l'autre sens.
+       Le +1 réserve la place du terminateur qu'ipc_child_frame_decode écrit à
+       l'indice numBytes : avec l'ancien tampon de 100 octets lu sur 100
+       octets, ce terminateur tombait à l'indice 100, un octet hors bornes dès
+       qu'un datagramme remplissait exactement le tampon. Au passage, une
+       commande de plus de 99 caractères n'est plus tronquée en silence. */
+    size_t bufcap = ipc_max_datagram() + 1;
+    char *value = malloc(bufcap);
+    int unknown_type_warned = 0;
     while (request != REQUEST_STOP) {
-        numBytes = recvfrom(socket_id, value, sizeof(char) * 100, 0,
+        numBytes = recvfrom(socket_id, value, bufcap - 1, 0,
                             (struct sockaddr *) srv_addr, &len);
         if (numBytes == -1) {
             if (request != REQUEST_STOP) {
@@ -1510,8 +1519,21 @@ void *fork_udp(void *param) {
             }
             continue;
         }
-		value[numBytes] = '\0';
-        do_command_line(value);
+        int8_t type = 0;
+        char *payload = NULL;
+        if (!ipc_child_frame_decode(value, bufcap, numBytes, &type, &payload)) {
+            continue;
+        }
+        if (type == IPC_MSG_COMMAND) {
+            do_command_line(payload);
+        } else if (!unknown_type_warned) {
+            /* Une seule fois par process : un type inconnu signale un
+               décalage de protocole entre parent et fils, pas un incident
+               ponctuel — le répéter noierait la console du parent, à qui ce
+               log est justement routé. */
+            log_error("fork_udp : message IPC de type inconnu (%d), ignoré\n", (int)type);
+            unknown_type_warned = 1;
+        }
     }
     free(srv_addr);
     free(value);

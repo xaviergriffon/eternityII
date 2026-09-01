@@ -4,11 +4,13 @@
 #include <stdint.h>
 
 /*
- * Protocole IPC enfant → parent (UDP sur socket Unix domain).
+ * Protocole IPC parent <-> enfants (UDP sur socket Unix domain).
  *
  * Chaque datagramme commence par un octet de type, suivi d'un payload dont
- * la structure dépend du type. Le receiver côté parent (`server_tcp` dans
- * main.c) discrimine sur ce premier octet.
+ * la structure dépend du type. Les deux sens empruntent des sockets
+ * distinctes (`etii_main.<pid>` pour enfant → parent, `etii_fork.<pid>` pour
+ * parent → enfant) mais partagent cette table de types : un octet ne
+ * désigne jamais deux choses selon la direction.
  *
  * Cette indirection permet aux processus forkés (en mode client) de :
  *   - continuer à envoyer leurs statistiques (comportement historique) ;
@@ -16,9 +18,15 @@
  *     la console unique du parent (utile en particulier sous ncurses,
  *     où une écriture directe sur le terminal depuis un enfant
  *     corromprait l'affichage).
+ *
+ * La LONGUEUR de la charge utile est celle du datagramme, jamais un
+ * `strlen()` : un payload binaire (un `possibility_packet` contient des
+ * octets nuls) doit pouvoir transiter tel quel dans les deux sens.
  */
 
-/* Types de messages — premier octet du datagramme. */
+/* Types de messages — premier octet du datagramme.
+ * 1..7 : enfant → parent (reçus par `server_tcp`, app_runtime.c).
+ * 8..  : parent → enfant (reçus par `fork_udp`, app_runtime.c). */
 #define IPC_MSG_STATS        ((int8_t)1)  /* suivi de struct client_statistics */
 #define IPC_MSG_LOG_INFO     ((int8_t)2)  /* suivi d'une chaîne UTF-8           */
 #define IPC_MSG_LOG_ERROR    ((int8_t)3)  /* idem (destinée à stderr en ANSI)   */
@@ -30,6 +38,15 @@
  * (best_board_try_record sur g_search_best_board renvoie 1), jamais à chaque
  * tour comme IPC_MSG_STATS — cf. core/best_board.h. */
 #define IPC_MSG_BEST_BOARD   ((int8_t)7)
+
+/* --- parent → enfant --- */
+/* Suivi d'une ligne de commande console, NON terminée par un octet nul : sa
+ * longueur est celle du datagramme. Le récepteur (`fork_udp`) la termine
+ * lui-même avant de la passer à `do_command_line`. Émis par
+ * `send_command_to_childs` (local_socket.c) pour les commandes marquées
+ * « propagées aux enfants » et par la ré-application de configuration de
+ * `fork_orchestrator.c`. */
+#define IPC_MSG_COMMAND      ((int8_t)8)
 
 /* Taille maximale du payload texte (hors octet de type). */
 #define IPC_LINE_MAX 4000

@@ -81,10 +81,13 @@ TEST send_command_to_childs_delivers_datagram(void)
 
     send_command_to_childs("hello");
 
+    /* Trame typée : un octet IPC_MSG_COMMAND puis la commande, SANS son octet
+       nul terminal (la longueur est celle du datagramme). */
     char buf[64] = { 0 };
     ssize_t n = recvfrom(child_fd, buf, sizeof(buf) - 1, 0, NULL, NULL);
-    ASSERT_EQ_FMT(5, (int)n, "%d");
-    ASSERT_STR_EQ("hello", buf);
+    ASSERT_EQ_FMT(6, (int)n, "%d");
+    ASSERT_EQ_FMT((int)IPC_MSG_COMMAND, (int)(int8_t)buf[0], "%d");
+    ASSERT_EQ_FMT(0, memcmp(buf + 1, "hello", 5), "%d");
 
     /* restauration des globaux */
     free(forkId);
@@ -387,6 +390,182 @@ TEST socket_file_removed_at_process_exit(void)
     PASS();
 }
 
+/* R8 — send_typed_to_childs transporte une charge utile BINAIRE intacte.
+ * `send_command_to_childs` mesurait la charge par strlen() : un
+ * possibility_packet, qui contient des octets nuls dès sa deuxième case vide,
+ * aurait été tronqué au premier zéro. Ce test envoie un paquet complet et
+ * exige l'égalité octet pour octet. */
+TEST send_typed_to_childs_carries_binary_payload(void)
+{
+    const char *child_path = "/tmp/etii_lsock_bin_child";
+    const char *main_path  = "/tmp/etii_lsock_bin_main";
+
+    struct sockaddr_un *child_addr = build_sockaddr(child_path);
+    int child_fd = build_udp_local_socket(child_addr);
+    ASSERT(child_fd >= 0);
+    struct sockaddr_un *main_addr = build_sockaddr(main_path);
+    int main_fd = build_udp_local_socket(main_addr);
+    ASSERT(main_fd >= 0);
+
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(child_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    int      saved_nb = NB_THREADS;
+    pid_t    saved_pp = parent_pid;
+    char   **saved_fk = forkId;
+    int     *saved_ms = main_socket_id;
+    NB_THREADS = 1;
+    parent_pid = getpid();
+    forkId = malloc(sizeof(char *));
+    forkId[0] = (char *)child_path;
+    main_socket_id = &main_fd;
+
+    /* Motif contenant des octets nuls dès le deuxième octet : strlen() aurait
+       annoncé une longueur de 1. */
+    struct possibility_packet pkt;
+    memset(&pkt, 0, sizeof pkt);
+    ((unsigned char *)&pkt)[0] = 0x42;
+    ((unsigned char *)&pkt)[sizeof pkt - 1] = 0x99;
+
+    int delivered = send_typed_to_childs(IPC_MSG_BEST_BOARD, &pkt, sizeof pkt);
+    ASSERT_EQ_FMT(1, delivered, "%d");
+
+    char rxbuf[1 + sizeof(struct possibility_packet)];
+    ssize_t n = recvfrom(child_fd, rxbuf, sizeof rxbuf, 0, NULL, NULL);
+    ASSERT_EQ_FMT((long)(1 + sizeof pkt), (long)n, "%ld");
+    ASSERT_EQ_FMT((int)IPC_MSG_BEST_BOARD, (int)(int8_t)rxbuf[0], "%d");
+    ASSERT_EQ_FMT(0, memcmp(rxbuf + 1, &pkt, sizeof pkt), "%d");
+
+    free(forkId);
+    NB_THREADS = saved_nb;
+    parent_pid = saved_pp;
+    forkId = saved_fk;
+    main_socket_id = saved_ms;
+    close(child_fd);
+    close(main_fd);
+    unlink(child_path);
+    unlink(main_path);
+    free(child_addr);
+    free(main_addr);
+    PASS();
+}
+
+/* Une charge utile qui déborde ipc_max_datagram() est REFUSÉE, pas tronquée :
+ * rien n'est envoyé et l'appel renvoie 0. Une troncature serait pire qu'un
+ * refus — le récepteur lirait un message court parfaitement bien formé. */
+TEST send_typed_to_childs_refuses_oversized_payload(void)
+{
+    const char *child_path = "/tmp/etii_lsock_big_child";
+    const char *main_path  = "/tmp/etii_lsock_big_main";
+
+    struct sockaddr_un *child_addr = build_sockaddr(child_path);
+    int child_fd = build_udp_local_socket(child_addr);
+    ASSERT(child_fd >= 0);
+    struct sockaddr_un *main_addr = build_sockaddr(main_path);
+    int main_fd = build_udp_local_socket(main_addr);
+    ASSERT(main_fd >= 0);
+
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+    setsockopt(child_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    int      saved_nb = NB_THREADS;
+    pid_t    saved_pp = parent_pid;
+    char   **saved_fk = forkId;
+    int     *saved_ms = main_socket_id;
+    NB_THREADS = 1;
+    parent_pid = getpid();
+    forkId = malloc(sizeof(char *));
+    forkId[0] = (char *)child_path;
+    main_socket_id = &main_fd;
+
+    /* Un octet de trop : 1 (type) + len > ipc_max_datagram(). */
+    size_t too_big = ipc_max_datagram();
+    char *payload = malloc(too_big);
+    ASSERT(payload != NULL);
+    memset(payload, 'x', too_big);
+
+    ASSERT_EQ_FMT(0, send_typed_to_childs(IPC_MSG_COMMAND, payload, too_big), "%d");
+
+    /* Rien n'est arrivé : le recvfrom borné expire. */
+    char rxbuf[64];
+    ASSERT_EQ_FMT(-1, (int)recvfrom(child_fd, rxbuf, sizeof rxbuf, 0, NULL, NULL), "%d");
+
+    /* La borne exacte, elle, passe. */
+    ASSERT_EQ_FMT(1, send_typed_to_childs(IPC_MSG_COMMAND, payload, too_big - 1), "%d");
+
+    free(payload);
+    free(forkId);
+    NB_THREADS = saved_nb;
+    parent_pid = saved_pp;
+    forkId = saved_fk;
+    main_socket_id = saved_ms;
+    close(child_fd);
+    close(main_fd);
+    unlink(child_path);
+    unlink(main_path);
+    free(child_addr);
+    free(main_addr);
+    PASS();
+}
+
+/* ------------------------------------------------------------------------
+ * ipc_child_frame_decode — découpage pur du datagramme reçu par un fils.
+ * ------------------------------------------------------------------------ */
+
+/* Cas nominal : le type est extrait, la charge utile pointe dans le tampon et
+ * est terminée par un octet nul écrit à l'indice numBytes. */
+TEST ipc_child_frame_decode_splits_type_and_payload(void)
+{
+    char buf[16];
+    memcpy(buf, "\x08hello", 6); /* IPC_MSG_COMMAND + "hello", sans terminateur */
+    int8_t type = 0;
+    char *payload = NULL;
+
+    ASSERT_EQ_FMT(1, ipc_child_frame_decode(buf, sizeof buf, 6, &type, &payload), "%d");
+    ASSERT_EQ_FMT((int)IPC_MSG_COMMAND, (int)type, "%d");
+    ASSERT_STR_EQ("hello", payload);
+    ASSERT_EQ_FMT('\0', buf[6], "%d"); /* terminateur écrit à l'indice numBytes */
+    PASS();
+}
+
+/* RÉGRESSION (R7) : un datagramme qui remplit EXACTEMENT le tampon est refusé
+ * plutôt que terminé hors bornes. L'ancien fork_udp lisait 100 octets dans un
+ * tampon de 100 puis écrivait value[100] — un débordement d'un octet, silencieux
+ * en release et invisible sans ASan. */
+TEST ipc_child_frame_decode_refuses_full_buffer(void)
+{
+    char buf[8];
+    memset(buf, 'a', sizeof buf);
+    int8_t type = 0;
+    char *payload = NULL;
+
+    /* nbytes == bufcap : aucune place pour le terminateur. */
+    ASSERT_EQ_FMT(0, ipc_child_frame_decode(buf, sizeof buf, (ssize_t)sizeof buf, &type, &payload), "%d");
+    /* Le tampon n'a pas été touché : aucun octet nul n'y a été écrit. */
+    for (size_t i = 0; i < sizeof buf; i++) {
+        ASSERT_EQ_FMT('a', buf[i], "%c");
+    }
+    /* Un octet de moins : la place existe, le décodage réussit. */
+    ASSERT_EQ_FMT(1, ipc_child_frame_decode(buf, sizeof buf, (ssize_t)sizeof buf - 1, &type, &payload), "%d");
+    PASS();
+}
+
+/* Datagramme vide (légal en DGRAM) et erreur de recvfrom : rien à décoder. */
+TEST ipc_child_frame_decode_rejects_empty_and_error(void)
+{
+    char buf[8] = { 0 };
+    int8_t type = 42;
+    char *payload = (char *)0x1;
+
+    ASSERT_EQ_FMT(0, ipc_child_frame_decode(buf, sizeof buf, 0, &type, &payload), "%d");
+    ASSERT_EQ_FMT(0, ipc_child_frame_decode(buf, sizeof buf, -1, &type, &payload), "%d");
+    ASSERT_EQ_FMT(0, ipc_child_frame_decode(NULL, sizeof buf, 4, &type, &payload), "%d");
+    /* Sorties laissées intactes quand le décodage échoue. */
+    ASSERT_EQ_FMT(42, (int)type, "%d");
+    ASSERT(payload == (char *)0x1);
+    PASS();
+}
+
 SUITE(local_socket_suite)
 {
     RUN_TEST(build_sockaddr_sets_family_and_path);
@@ -398,6 +577,11 @@ SUITE(local_socket_suite)
     RUN_TEST(build_udp_local_socket_does_not_leak_fd_on_bind_failure);
     RUN_TEST(ipc_max_datagram_covers_all_message_types);
     RUN_TEST(build_udp_local_socket_allows_max_ipc_datagram);
+    RUN_TEST(send_typed_to_childs_carries_binary_payload);
+    RUN_TEST(send_typed_to_childs_refuses_oversized_payload);
+    RUN_TEST(ipc_child_frame_decode_splits_type_and_payload);
+    RUN_TEST(ipc_child_frame_decode_refuses_full_buffer);
+    RUN_TEST(ipc_child_frame_decode_rejects_empty_and_error);
     RUN_TEST(cleanup_owned_removes_socket_file);
     RUN_TEST(cleanup_owned_is_idempotent);
     RUN_TEST(cleanup_owned_never_removes_parent_socket_from_child);
