@@ -102,6 +102,7 @@ void init_client_possibility(client_possibility_t *p, struct array_part *rotateP
     pthread_mutex_t smutex = PTHREAD_MUTEX_INITIALIZER;
     p->socket_mutex = smutex;
     p->last_socket_activity = time(NULL);
+    p->root_started_ms = 0;
     p->delegate_buf = NULL;
     p->delegate_buf_capacity = 0;
     times(&p->start_socket);
@@ -137,6 +138,17 @@ int find_fork_index(const char *sun_path, char **forkIds, int nb) {
  * @param needed_work Compteur in/out des threads ayant réclamé du travail.
  * @param got_work    Compteur in/out des threads ayant reçu du travail.
  */
+/**
+ * @brief Horloge monotone en millisecondes (jamais l'heure murale : un
+ *        changement d'heure fausserait une durée mesurée).
+ */
+unsigned long long client_monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long long)ts.tv_sec * 1000ULL + (unsigned long long)ts.tv_nsec / 1000000ULL;
+}
+
 void feed_one_thread(client_possibility_t *thread_params, int i,
                      int *needed_work, int *got_work)
 {
@@ -167,6 +179,14 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
         // pour que le fils qui avait cédé ce sous-arbre voie son offre réglée
         // au plus tôt. Puis on demande au courtier. Sans l'option, les deux
         // appels ne font rien.
+        // Temps de séjour de la racine précédente : elle est terminée dès lors
+        // qu'on en redemande une. Mesuré ICI, au même endroit dans les deux
+        // modes, pour que la comparaison porte sur la même définition.
+        if (client_possibility->root_started_ms != 0) {
+            unsigned long long now_ms = client_monotonic_ms();
+            root_residence_record(now_ms - client_possibility->root_started_ms);
+            client_possibility->root_started_ms = 0;
+        }
         work_broker_child_report_done();
         work_broker_child_request_work();
         int exclusive = work_broker_child_is_exclusive();
@@ -220,6 +240,9 @@ void feed_one_thread(client_possibility_t *thread_params, int i,
                 for (int p = 0; p < aposs->size; p++) {
                     add_possibility_analysed(&aposs->possibilities[p], i);
                 }
+                // Départ du chronomètre : seule une racine venue DU SERVEUR est
+                // détenue au sens du bail, donc seule elle a un temps de séjour.
+                client_possibility->root_started_ms = client_monotonic_ms();
             }
             // Réacquisition du mutex uniquement pour la mise à jour de aposs/works
             pthread_mutex_lock(&thread_params[i].works_mutex);
@@ -764,6 +787,29 @@ void check_client_threads_step(int *last_record)
         // Ajout à la suite : écrire à partir de la fin courante de `temp` plutôt
         // que de le repasser en argument %s (destination/source qui se
         // chevauchent → comportement indéfini, -Wrestrict).
+        // Temps de séjour d'une racine (obtention -> acquittement) : métrique
+        // CIBLE du dispatch local. Agrégée des forks (mode historique, où
+        // chacun détient ses propres racines) ET du process courant (sous
+        // --local-dispatch, où c'est le parent qui les détient) : les deux
+        // sources ne sont jamais actives en même temps, la somme est donc
+        // toujours la bonne quel que soit le mode.
+        {
+            unsigned long long rc = root_residence_count;
+            unsigned long long rt = root_residence_total_ms;
+            unsigned long long rm = root_residence_max_ms;
+            for (int r = 0; r < NB_THREADS; r++) {
+                rc += fork_statistics[r].root_residence_count;
+                rt += fork_statistics[r].root_residence_total_ms;
+                if (fork_statistics[r].root_residence_max_ms > rm) {
+                    rm = fork_statistics[r].root_residence_max_ms;
+                }
+            }
+            if (rc > 0) {
+                sprintf(temp + strlen(temp),
+                        "sejour racine : %llu racines, moyenne %llu ms, max %llu ms\n",
+                        rc, rt / rc, rm);
+            }
+        }
         sprintf(temp + strlen(temp), "socket opened :%i\n", opened_tcp);
 #endif // DEBUG_SOCKET
         strcat(report, temp);

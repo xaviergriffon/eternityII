@@ -3651,6 +3651,34 @@ TEST bt_materialize_pending_shallow_first_yields_the_shallow_sibling(void)
     PASS();
 }
 
+
+/* root_residence_record : cumul, moyenne et maximum. Fonction pure hors des
+ * trois compteurs (aucune horloge à l'intérieur), donc testable sans dormir. */
+TEST root_residence_record_accumulates_and_tracks_max(void)
+{
+    unsigned long long c = root_residence_count;
+    unsigned long long t = root_residence_total_ms;
+    unsigned long long m = root_residence_max_ms;
+    root_residence_count = 0;
+    root_residence_total_ms = 0;
+    root_residence_max_ms = 0;
+
+    root_residence_record(100);
+    root_residence_record(300);
+    root_residence_record(50);
+
+    ASSERT_EQ_FMT(3ULL, root_residence_count, "%llu");
+    ASSERT_EQ_FMT(450ULL, root_residence_total_ms, "%llu");
+    ASSERT_EQ_FMT(150ULL, root_residence_total_ms / root_residence_count, "%llu");
+    /* Le maximum ne recule pas sur une valeur plus petite. */
+    ASSERT_EQ_FMT(300ULL, root_residence_max_ms, "%llu");
+
+    root_residence_count = c;
+    root_residence_total_ms = t;
+    root_residence_max_ms = m;
+    PASS();
+}
+
 SUITE(etii_search_suite)
 {
     RUN_TEST(delegate_noop_below_threshold);
@@ -3678,6 +3706,7 @@ SUITE(etii_search_suite)
     RUN_TEST(mrv_choose_cell_matches_full_scan_reference);
     RUN_TEST(mrv_choose_cell_breaks_ties_by_constrained_sides);
     RUN_TEST(mrv_choose_cell_full_board_and_unconstrained_fallback);
+    RUN_TEST(root_residence_record_accumulates_and_tracks_max);
     RUN_TEST(bt_materialize_pending_orders_deepest_first);
     RUN_TEST(bt_materialize_pending_shallow_first_same_set_reversed_levels);
     RUN_TEST(bt_materialize_pending_shallow_first_yields_the_shallow_sibling);

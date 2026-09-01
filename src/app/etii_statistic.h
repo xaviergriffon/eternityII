@@ -37,6 +37,13 @@ struct client_statistics {
     unsigned long long pruner_cells_studied;
     /** Débit des cases étudiées au prunage (moyenne glissante 5 s, comme shots_per_second). */
     unsigned long long pruner_cells_per_second;
+    /** Temps de séjour des racines détenues par CE fork (cf.
+        `root_residence_*`, core_static_variables.h). Toujours 0 sous
+        `--local-dispatch` : la racine y est détenue par le parent, qui compte
+        lui-même. */
+    unsigned long long root_residence_count;
+    unsigned long long root_residence_total_ms;
+    unsigned long long root_residence_max_ms;
 } __attribute__((__packed__));
 
 

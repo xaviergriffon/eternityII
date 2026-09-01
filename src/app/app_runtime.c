@@ -1197,6 +1197,9 @@ void *fork_checker(void *param) {
             pps = 0;
         }
         statistic->pruner_cells_per_second = pps;
+        statistic->root_residence_count = root_residence_count;
+        statistic->root_residence_total_ms = root_residence_total_ms;
+        statistic->root_residence_max_ms = root_residence_max_ms;
 
         int analyses_in_stock = 0;
         for (int f = 0; f < nb_file_possibility; f++) {

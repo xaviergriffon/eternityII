@@ -423,7 +423,19 @@ Exemples :
 
 ## Relais des délégations par le parent (`--local-dispatch`)
 
-**Client/pruner, désactivée par défaut.**
+**Client, désactivée par défaut. Recommandée pour un client de recherche.**
+
+Mesure en paires alternées (client 4 forks, serveur `--expand-level 4`, fenêtres
+de 120 s) : **×2,8 de travail exploré** à durée égale, moyenne géométrique sur
+trois paires, la plus défavorable donnant encore +90 %. `max_result` est
+identique dans les deux modes et le stock stagnant dans les forks tombe de 900 à
+249 possibilités — ce sont de vrais nœuds, pas de la ré-exploration. Le défaut
+reste inchangé parce que la mesure porte sur un seul client d'une seule machine
+et que l'option change le contrat client/serveur ; voir
+[le verdict §6.1](conception/dispatch_local_possibilites_forks.md).
+
+**Sans effet sur les forks pruner** : ils gardent leur connexion, leur pool et
+leur protocole par lot.
 
 Quand un fork de recherche délègue son travail excédentaire, il l'envoie
 aujourd'hui au serveur lui-même : `put_to_server` fait **un aller-retour TCP

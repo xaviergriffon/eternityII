@@ -425,7 +425,12 @@ void work_broker_child_report_done(void)
 
 int work_broker_child_is_exclusive(void)
 {
-    return local_dispatch_enabled ? 1 : 0;
+    // Les forks PRUNER gardent leur connexion (arbitrage A5) : ils ont leur
+    // propre pool (non vérifié), leur propre protocole par lot
+    // (INST_GET_TO_CHECK_BATCH) et leur propre dosage. Le courtier ne sait
+    // servir que des racines de recherche — couper leur connexion les
+    // priverait de travail sans rien leur donner en échange.
+    return (local_dispatch_enabled && !pruner_mode) ? 1 : 0;
 }
 
 void work_broker_child_on_hunger(const void *payload, size_t len)
@@ -501,6 +506,8 @@ static unsigned long long broker_relayed_total = 0;
 /* Possibilités attribuées à un fils plutôt que poussées au serveur : c'est la
    mesure de la redistribution elle-même, invisible du compteur de relais. */
 static unsigned long long broker_granted_total = 0;
+/* Horloge d'obtention des racines actuellement détenues (0 = aucune). */
+static long long broker_roots_started_ms = 0;
 #define BROKER_MAX_SLOTS ((int)(sizeof broker_settled_seq / sizeof broker_settled_seq[0]))
 
 void work_broker_parent_reset(void)
@@ -896,7 +903,14 @@ static int broker_ack_and_refill(void)
     if (work_broker_pending_packets() > 0 || broker_grants_outstanding() > 0) {
         return 0;
     }
-    /* Le sous-arbre local est épuisé : les racines détenues peuvent partir. */
+    /* Le sous-arbre local est épuisé : les racines détenues peuvent partir.
+       C'est aussi la fin de leur séjour — même définition que côté fork en
+       mode historique (obtention -> acquittement), pour que les deux modes
+       soient comparables. */
+    if (broker_roots_started_ms != 0) {
+        root_residence_record(broker_now_ms() - broker_roots_started_ms);
+        broker_roots_started_ms = 0;
+    }
     send_possibility_analysed(broker_client);
 
     int from_server = 0;
@@ -926,6 +940,9 @@ static int broker_ack_and_refill(void)
             }
         }
         pthread_mutex_unlock(&broker_lock);
+    }
+    if (got > 0) {
+        broker_roots_started_ms = broker_now_ms();
     }
     free_array_possibility_packet(aposs);
     return got;
