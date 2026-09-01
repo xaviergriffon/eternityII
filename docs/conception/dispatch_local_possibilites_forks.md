@@ -1,6 +1,6 @@
 # Dispatch local des possibilités entre les forks d'un client
 
-**Statut : en cours d'implémentation (1/5 PR livrée).** Ce document décrit une **cible** ;
+**Statut : en cours d'implémentation (2/6 PR livrées).** Ce document décrit une **cible** ;
 tout ce qui n'est pas explicitement marqué « livré » ci-dessous n'est pas encore le
 comportement du code.
 
@@ -241,15 +241,22 @@ pour amorcer un stock réaliste, et au moins deux nombres de forks (1 — pour v
 
 ## 7. Découpage en PR
 
+**Resséquencé après PR1** : le découpage initial faisait de la connexion de travail du
+parent la 4ᵉ étape, alors que le courtier de la 2ᵉ en a besoin comme **sortie serveur** —
+et réciproquement, le passage à la connexion *unique* est impossible tant que le courtier
+ne sait pas alimenter les forks, qui perdraient toute source de travail. La dépendance est
+circulaire ; elle se dénoue en donnant sa connexion au parent **en même temps** que son
+premier usage (le relais sortant), et en ne retirant celles des forks qu'une fois le
+courtier capable de les nourrir.
+
 | PR | Contenu | Mesurable seule |
 |---|---|---|
-| **1** ✅ **livrée** | **IPC typé bidirectionnel** : le sens parent → fils est cadré comme l'autre (octet de type `IPC_MSG_COMMAND`), `send_typed_to_childs` prend la longueur en paramètre (R8), `fork_udp` dimensionne son tampon sur `ipc_max_datagram()` et délègue le découpage à `ipc_child_frame_decode`, fonction pure qui vérifie la place du terminateur (**corrige le débordement d'un octet**, R7). **Écart assumé avec le plan initial** : les types `IPC_MSG_WORK_*` ne sont **pas** introduits ici — un constant sans émetteur ni récepteur ne se teste pas et rote ; ils arrivent en PR2 avec leur usage. Le transport, lui, est générique et **testé sur une charge utile binaire réelle** (un `possibility_packet` complet, octets nuls compris). Effet de bord : une commande de plus de 99 caractères n'est plus tronquée en silence | non (préparatoire) |
-| **2** | **Courtier dans le parent** : pools locaux, dispatch aux forks au repos, compteur de terminaison par racine (A4), borne du tampon et poussée sur péremption (A3). Derrière l'option, défaut inactif (A7) | oui |
-| **3** | **Partage à la racine côté fork** : mode « moins profond d'abord » de `bt_materialize_pending` (A6), déclenchement au **début** de l'étude au lieu d'attendre 500 ms / 1 M nœuds | oui |
-| **4** | **Connexion de travail unique portée par le parent** (A2), avec les correctifs R1, R3, R4, R5 dans la même PR — ils ne sont pas séparables de A2 | oui |
-| **5** | Campagne de mesure (§6), puis bascule du défaut — **ou abandon motivé, consigné dans ce même document** | — |
-
----
+| **1** ✅ **livrée** | **IPC typé bidirectionnel** : le sens parent → fils est cadré comme l'autre (octet de type `IPC_MSG_COMMAND`), `send_typed_to_childs` prend la longueur en paramètre (R8), `fork_udp` dimensionne son tampon sur `ipc_max_datagram()` et délègue le découpage à `ipc_child_frame_decode`, fonction pure qui vérifie la place du terminateur (**corrige le débordement d'un octet**, R7). **Écart assumé avec le plan initial** : les types `IPC_MSG_WORK_*` ne sont **pas** introduits ici — une constante sans émetteur ni récepteur ne se teste pas et rote ; ils arrivent avec leur usage. Le transport est générique et **testé sur une charge utile binaire réelle** (un `possibility_packet` complet, octets nuls compris). Effet de bord : une commande de plus de 99 caractères n'est plus tronquée en silence | non (préparatoire) |
+| **2** ✅ **livrée** | **Le parent ouvre une connexion de travail et relaie les ADD de ses forks** (`--local-dispatch`, défaut inactif). Un fork offre son lot au parent (`IPC_MSG_WORK_OFFER`) au lieu d'`ADD`er lui-même ; le parent l'empile et le pousse au serveur depuis son propre socket (`fork_seq=-1`). Acquittement différé (A4) par numéro d'offre : le courtier renvoie le plus grand `seq` rendu durable (`IPC_MSG_WORK_SETTLED`), et `send_possibility_analysed` ne fait rien tant qu'il reste des offres non réglées. Contrôle de flux par fenêtre : au-delà de `WORK_BROKER_OFFER_WINDOW` offres en vol, le fork retombe sur l'envoi direct — le tampon du parent est donc borné **par construction**, ce qu'un datagramme UDP (aucun refus à faire remonter) impose de toute façon. **Écart assumé avec A1** : le courtier utilise une file privée, pas les pools `datamanager` du parent — ceux-ci sont ce que `backup`/`restore`/`stockDistribution` manipulent, et y verser un tampon de transit ferait écrire sur disque, sous le nom de « stock », de la donnée qui n'en est pas ; la file privée porte en plus l'origine (`slot`, `seq`) de chaque paquet, dont le règlement a besoin et qu'un pool ne transporte pas. Deux crochets injectés dans `datamanager` (offre, verrou d'acquittement) préservent la règle « `core/` ne dépend jamais d'`app/` ». Vérifié bout-en-bout : 276 possibilités réellement relayées sur un client 3 forks contre un serveur `--expand-level 4` | oui |
+| **3** | **Redistribution aux forks au repos** : le parent sert ses forks depuis son tampon (`IPC_MSG_WORK_GRANT`), compteurs de terminaison **par racine** (A4), réinjection du travail en vol à la mort d'un fork, borne et péremption du tampon (A3) | oui |
+| **4** | **Connexion de travail unique** (A2) : les forks abandonnent la leur, avec les correctifs R1, R3, R4, R5 dans la même PR — ils ne sont pas séparables de A2 | oui |
+| **5** | **Partage à la racine côté fork** : mode « moins profond d'abord » de `bt_materialize_pending` (A6), déclenchement au **début** de l'étude au lieu d'attendre 500 ms / 1 M nœuds | oui |
+| **6** | Campagne de mesure (§6), puis bascule du défaut — **ou abandon motivé, consigné dans ce même document** | — |
 
 ## 8. Points laissés ouverts
 

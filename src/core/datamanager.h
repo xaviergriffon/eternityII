@@ -256,6 +256,57 @@ typedef struct
 int add_possibility(client_possibility_t *client_possibility, array_possibility_packet *possibilities);
 
 /**
+ * @brief Aiguillage optionnel des ADD d'un fork client vers un courtier local.
+ *
+ * `add_possibility` essaie ce point d'entrée AVANT `put_to_server`, et n'y
+ * revient que si le courtier refuse. Injecté par `app/` (function pointer)
+ * plutôt qu'appelé directement : **`core/` ne doit jamais dépendre d'`app/`**
+ * — même motif que `owner_alive` dans `datamanager_reclaim_expired_leases`.
+ *
+ * @param possibilities Lot à céder.
+ * @param consumed      Reçoit le nombre de paquets du DÉBUT du lot que le
+ *                      courtier a effectivement pris en charge. Permet à
+ *                      `add_possibility` de n'envoyer au serveur que le
+ *                      RESTE quand la prise en charge est partielle — renvoyer
+ *                      le lot entier dupliquerait le préfixe déjà cédé.
+ * @return              0 si le courtier prend TOUT le lot en charge, non nul
+ *                      sinon (l'appelant envoie alors `*consumed`..fin au
+ *                      serveur, comportement historique pour ce reste).
+ */
+typedef int (*possibility_local_offer_fn)(array_possibility_packet *possibilities, int *consumed);
+
+/**
+ * @brief Installe (ou retire, avec NULL) l'aiguillage ci-dessus.
+ *
+ * À appeler dans le process fork, après le `fork()`. NULL = comportement
+ * historique, tout part directement au serveur.
+ */
+void datamanager_set_local_offer(possibility_local_offer_fn fn);
+
+/**
+ * @brief Verrou optionnel sur l'acquittement des possibilités analysées.
+ *
+ * `send_possibility_analysed` ne fait rien tant que ce prédicat renvoie 0.
+ * Sert l'invariant d'acquittement du courtier : tant qu'un fork a cédé du
+ * travail qui n'est pas encore durable (poussé au serveur), il ne doit pas
+ * acquitter la racine dont ce travail descend — sinon un arrêt brutal du
+ * parent perdrait la branche, la racine ayant déjà quitté le pool analysé du
+ * serveur. Ne rien acquitter est le repli SÛR : le bail reprend la main.
+ *
+ * Injecté depuis `app/` pour la même raison que ci-dessus.
+ *
+ * @return 1 si l'acquittement est autorisé, 0 pour le différer.
+ */
+typedef int (*possibility_ack_gate_fn)(void);
+
+/**
+ * @brief Installe (ou retire, avec NULL) le verrou ci-dessus.
+ *
+ * NULL = aucun verrou, acquittement immédiat (comportement historique).
+ */
+void datamanager_set_ack_gate(possibility_ack_gate_fn fn);
+
+/**
  * @brief Extrait des possibilités à traiter pour un thread de recherche.
  *
  * Essaie d'abord les files locales, puis le serveur TCP si disponible.
@@ -432,6 +483,21 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner
  * @param client_possibility Contexte du thread client dont le socket va être
  *                            utilisé.
  */
+/**
+ * @brief Ouvre (ou réutilise) la connexion de travail d'un contexte client.
+ *
+ * Fait le handshake de version puis envoie le hello d'identité
+ * (`INST_CLIENT_HELLO`) sur une connexion FRAÎCHE uniquement. À appeler entre
+ * `server_socket_io_lock` et `server_socket_io_unlock`.
+ *
+ * Déclarée ici (elle ne l'était pas, bien que non `static`) pour le courtier
+ * du parent, qui porte sa propre connexion de travail — cf. app/work_broker.h.
+ *
+ * @return Le descripteur utilisable, ou -1 (connexion impossible ; en cas de
+ *         version refusée, `request` passe aussi à REQUEST_STOP).
+ */
+int check_and_connect_to_server(client_possibility_t *client_possibility);
+
 void server_socket_io_lock(client_possibility_t *client_possibility);
 
 /**

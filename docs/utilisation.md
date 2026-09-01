@@ -421,6 +421,54 @@ Exemples :
 > (`--name`) n'est qu'un affichage, jamais une clé : deux clients peuvent
 > légitimement partager le même.
 
+## Relais des délégations par le parent (`--local-dispatch`)
+
+**Client/pruner, désactivée par défaut.**
+
+Quand un fork de recherche délègue son travail excédentaire, il l'envoie
+aujourd'hui au serveur lui-même : `put_to_server` fait **un aller-retour TCP
+synchrone par possibilité**, jusqu'à `max_stock_by_thread` d'affilée (300 par
+défaut), exécutés par le **thread de recherche** et sous le verrou du socket —
+donc en bloquant aussi le thread d'alimentation du même fork.
+
+`--local-dispatch` intercale le **process parent** : le fork lui *offre* le lot
+par socket Unix locale (un datagramme, sans attendre de réponse), et le parent
+le pousse au serveur depuis sa propre connexion de travail. Le thread de
+recherche ne paie plus que le coût d'un `sendto` local.
+
+```sh
+./eternityII client 127.0.0.1 8 300 --local-dispatch data/pieces.csv
+```
+
+Le parent journalise périodiquement son activité, seul moyen de distinguer
+« le courtier travaille » de « tout retombe sur l'envoi direct » :
+
+```
+[18:30:19] courtier : 276 possibilités relayées au serveur (24 en tampon)
+```
+
+**Rien ne peut être perdu.** Le tampon du parent n'est pas sauvegardé : un fork
+qui a cédé du travail pas encore poussé au serveur **n'acquitte pas** la racine
+dont ce travail descend. Cette racine reste donc attribuée à ce client côté
+serveur — et un client **vivant** n'est jamais réclamé, quelle que soit la durée
+de l'analyse (voir [Attribution des analyses en cours](echanges_client_serveur.md#attribution-des-analyses-en-cours)).
+Si le client meurt, la réclamation du bail réinjecte la racine et purge ses
+descendants, exactement comme pour un client qui aurait été interrompu en pleine
+recherche.
+
+**Le tampon est borné par construction**, pas par un plafond : un fork ne garde
+jamais plus d'un nombre fixe d'offres non réglées, et retombe sur l'envoi direct
+au-delà. Le parent ne peut donc héberger plus de
+`nb_forks × fenêtre × paquets par offre` possibilités.
+
+Côté serveur, ce client présente une connexion de travail **supplémentaire**
+(celle du parent, identifiée `fork_seq=-1`) en plus de celles de ses forks ; les
+forks gardent la leur, et le repli sur l'envoi direct reste immédiat si le
+courtier refuse ou s'arrête.
+
+Conception, mesures attendues et suite prévue :
+[docs/conception/dispatch_local_possibilites_forks.md](conception/dispatch_local_possibilites_forks.md).
+
 ## Dosage recherche/contrôle par fork (`--pruner-forks`)
 
 Un process client/pruner héberge `nb_threads` forks de travail ; par défaut, ils
@@ -435,7 +483,7 @@ réel en temps réel, peut ainsi ajuster ce dosage à distance
 sans redéployer le client.
 
 ```sh
-./eternityII client [--pruner-forks N] [serveur] [nb_threads] [max_stock_par_thread] [fichier_pieces.csv]
+./eternityII client [--pruner-forks N] [--local-dispatch] [serveur] [nb_threads] [max_stock_par_thread] [fichier_pieces.csv]
 ```
 
 | Valeur | Effet |

@@ -10,6 +10,7 @@ int pruner_mode = 0;
 int pruner_forks_requested = -1;
 
 int auto_roles_requested = 0;
+int local_dispatch_enabled = 0;
 
 int gpu_requested = 0;
 
@@ -288,6 +289,11 @@ int parse_cli_options(int argc, const char *argv[])
                 pruner_forks_requested = (n < 0) ? 0 : n;
                 r++; // consomme aussi la valeur
             }
+        } else if (strcmp(argv[r], "--local-dispatch") == 0) {
+            // Drapeau booléen, même schéma que --auto-roles : lu par le mode
+            // client (main.c, fork_orchestrator.c) pour armer le courtier du
+            // parent et les crochets des forks.
+            local_dispatch_enabled = 1;
         } else if (strcmp(argv[r], "--auto-roles") == 0) {
             // Drapeau booléen, même schéma que --stop-on-solution : lu par
             // le mode serveur uniquement (main.c), avant le lancement du

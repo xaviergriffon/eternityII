@@ -118,6 +118,7 @@ set(PROD_SRCS
     src/app/app_runtime.c
     src/app/fork_gate.c
     src/app/fork_orchestrator.c
+    src/app/work_broker.c
     src/core/etii_search.c
     src/ui/command_lines.c
     src/ui/command_match.c
@@ -222,6 +223,7 @@ set(TEST_MODULES
     src/app/etii_control.c
     src/app/fork_gate.c
     src/app/fork_orchestrator.c
+    src/app/work_broker.c
 )
 
 # Suites communes (ETERN_PARTS-agnostiques, jouées en 16 ET 256)
@@ -333,6 +335,7 @@ add_executable(eternityII16 EXCLUDE_FROM_ALL
     src/app/app_runtime.c
     src/app/fork_gate.c
     src/app/fork_orchestrator.c
+    src/app/work_broker.c
     src/core/etii_search.c
     src/ui/command_lines.c
     src/ui/command_match.c

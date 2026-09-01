@@ -19,6 +19,7 @@
 #include "app/client_config.h"
 #include "app/server_config.h"
 #include "app/fork_orchestrator.h"
+#include "app/work_broker.h"
 #include "net/http_server.h"
 #include "net/local_socket.h"
 #include "ui/command_lines.h"
@@ -343,7 +344,17 @@ void handle_client(int argc, const char *argv[]) {
     // tant qu'aucun fork n'existe encore.
     start_control_channel(serverIp);
 
+    // Courtier de travail (--local-dispatch) : démarré APRÈS les autres threads
+    // du parent et AVANT fork_orchestrator_run, comme eux — son thread de relais
+    // s'enregistre auprès de fork_gate, donc il doit exister avant la première
+    // demande de quiescence. Sans l'option, l'appel ne fait rien.
+    work_broker_parent_start(serverIp);
+
     fork_orchestrator_run(config_loaded_at_boot, &shared_parts);
+
+    // Plus aucun fork ne subsiste : plus personne n'offre. On arrête le relais
+    // après avoir tenté un dernier vidage vers le serveur (cf. work_broker.h).
+    work_broker_parent_stop();
 
     close(*socket_id);
 #ifdef DEBUG_LOCAL_SOCKET

@@ -31,6 +31,7 @@
 #include "net/client_identity.h"
 #include "net/local_socket.h"
 #include "net/ipc_protocol.h"
+#include "app/work_broker.h"
 #include "ui/command_lines.h"
 #include "ui/logger.h"
 
@@ -189,6 +190,19 @@ static const cli_help_topic_t cli_topics[] = {
 	  "la plus vide, par petits lots, pour que les files restent de taille\n"
 	  "comparable (temps de blocage court à la sauvegarde). Valeur absente ou <= 0 :\n"
 	  "ignorée (garde le défaut)." },
+	{ "--local-dispatch",
+	  "--local-dispatch",
+	  "Client : le process parent relaie au serveur les délégations de ses forks.",
+	  "Défaut désactivé (comportement historique : chaque fork envoie lui-même).\n"
+	  "Activée, un fork qui délègue offre son lot au parent par IPC local au lieu\n"
+	  "de payer un aller-retour TCP synchrone PAR POSSIBILITÉ depuis son thread de\n"
+	  "recherche (jusqu'à max_stock_by_thread d'affilée) ; le parent l'empile et le\n"
+	  "pousse au serveur depuis sa propre connexion. Un fork ne garde qu'un nombre\n"
+	  "borné d'offres non réglées : au-delà il retombe sur l'envoi direct, si bien\n"
+	  "que le tampon du parent est borné par construction. Tant qu'un fork a du\n"
+	  "travail cédé non encore poussé au serveur, il n'acquitte pas la racine dont\n"
+	  "il descend — un arrêt brutal du parent fait alors simplement réattribuer\n"
+	  "cette racine par le serveur, rien n'est perdu." },
 	{ "--auto-roles",
 	  "--auto-roles",
 	  "Serveur : active la politique automatique de dosage recherche/contrôle du parc.",
@@ -1375,6 +1389,14 @@ void *server_tcp(void *param) {
 
         int8_t type = (int8_t)buf[0];
         switch (type) {
+            case IPC_MSG_WORK_OFFER:
+                /* Offre de travail d'un fils au courtier. Même contrôle
+                   d'expéditeur que les stats : un datagramme venant d'un
+                   sun_path inconnu n'est pas attribuable à un fils, donc pas
+                   réglable — on le jette plutôt que de l'attribuer au hasard. */
+                work_broker_on_offer(find_fork_index(claddr->sun_path, forkId, NB_THREADS),
+                                     buf + 1, (size_t)numBytes - 1);
+                break;
             case IPC_MSG_STATS:
                 if (numBytes >= (ssize_t)(1 + sizeof(struct client_statistics))) {
                     int cpt = find_fork_index(claddr->sun_path, forkId, NB_THREADS);
@@ -1526,6 +1548,8 @@ void *fork_udp(void *param) {
         }
         if (type == IPC_MSG_COMMAND) {
             do_command_line(payload);
+        } else if (type == IPC_MSG_WORK_SETTLED) {
+            work_broker_child_on_settled(payload, (size_t)numBytes - 1);
         } else if (!unknown_type_warned) {
             /* Une seule fois par process : un type inconnu signale un
                décalage de protocole entre parent et fils, pas un incident

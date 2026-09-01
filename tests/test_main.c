@@ -44,6 +44,7 @@ SUITE_EXTERN(app_runtime_suite);
 SUITE_EXTERN(etii_control_suite);
 SUITE_EXTERN(fork_gate_suite);
 SUITE_EXTERN(fork_orchestrator_suite);
+SUITE_EXTERN(work_broker_suite);
 #if ETERN_PARTS == 16
 /* Suite « solution réelle » : n'existe que dans le build 4×4 (cf. test-16). */
 SUITE_EXTERN(solution16_suite);
@@ -90,6 +91,7 @@ int main(int argc, char **argv)
     RUN_SUITE(etii_control_suite);
     RUN_SUITE(fork_gate_suite);
     RUN_SUITE(fork_orchestrator_suite);
+    RUN_SUITE(work_broker_suite);
 #if ETERN_PARTS == 16
     RUN_SUITE(solution16_suite);
 #endif
