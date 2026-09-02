@@ -3580,11 +3580,75 @@ struct arg_duplicate_thread {
 };
 
 /**
+ * @brief Résout un indice virtuel `[0, 2*nb_file_possibility[` vers la
+ *        `file_possibility_t` réelle qu'il désigne.
+ *
+ * `check_duplicate`/`check_duplicate_thread` traitent le stock comme UNE
+ * séquence virtuelle de `2 * nb_file_possibility` files : `[0,
+ * nb_file_possibility[` retombe sur `file_possibility[]` (pool non vérifié),
+ * `[nb_file_possibility, 2*nb_file_possibility[` sur `file_possibility_checked[]`
+ * (pool vérifié) — même idiome que `is_checked ? file_possibility_checked :
+ * file_possibility` utilisé par `datamanager_pool_drain_head`/`_refill`.
+ * Ce ré-adressage est ce qui manquait pour que la détection de doublons
+ * couvre le pool vérifié.
+ *
+ * @param vidx Indice virtuel, `[0, 2*nb_file_possibility[`.
+ * @return     La `file_possibility_t` correspondante.
+ */
+static file_possibility_t *duplicate_pool_at(int vidx) {
+    if (vidx < nb_file_possibility) {
+        return file_possibility[vidx];
+    }
+    return file_possibility_checked[vidx - nb_file_possibility];
+}
+
+/** @brief "U" (non vérifié) ou "C" (vérifié) selon l'indice virtuel `vidx`, pour le logging. */
+static const char *duplicate_pool_label(int vidx) {
+    return (vidx < nb_file_possibility) ? "U" : "C";
+}
+
+/** @brief Indice de file réel (dans son propre pool) correspondant à l'indice virtuel `vidx`. */
+static int duplicate_pool_index(int vidx) {
+    return (vidx < nb_file_possibility) ? vidx : vidx - nb_file_possibility;
+}
+
+/**
+ * @brief Avance `*fp` jusqu'à la première file virtuelle non vide (à partir de
+ *        sa valeur courante incluse), ou jusqu'à `2*nb_file_possibility` si le
+ *        reste de la séquence est vide.
+ *
+ * Nécessaire depuis l'extension à deux pools : contrairement à un pool unique
+ * (quasi toujours peuplé en tête dans les scénarios de production), un pool
+ * ENTIER (typiquement le non vérifié, une fois tout passé aux pruners) peut
+ * désormais être vide alors que l'autre contient tout le stock. Sans ce saut
+ * multi-files, un simple `fp++` isolé (l'ancien comportement) laisse
+ * `currElement` à NULL dès qu'il atterrit sur UNE file vide et la boucle
+ * appelante s'arrête là — y compris quand des données existent plus loin
+ * dans la séquence virtuelle.
+ *
+ * @param fp Indice de file virtuel de départ (modifié en place).
+ * @return   Premier élément trouvé, ou NULL si la séquence restante est vide
+ *           (`*fp` vaut alors `2*nb_file_possibility`).
+ */
+static Element *duplicate_pool_skip_empty(int *fp) {
+    int totalFiles = 2 * nb_file_possibility;
+    while (*fp < totalFiles && duplicate_pool_at(*fp)->file.start == NULL) {
+        (*fp)++;
+    }
+    if (*fp >= totalFiles) {
+        return NULL;
+    }
+    return duplicate_pool_at(*fp)->file.start;
+}
+
+/**
  * @brief Thread de détection des doublons dans les files de possibilités.
  *
  * Chaque thread traite un sous-ensemble des paires (nbCombinations / nbDuplicateThread).
  * Utilise `compare_possibility` et `is_origin_of` pour détecter les doublons exacts
- * et les relations ancêtre-descendant entre possibilités.
+ * et les relations ancêtre-descendant entre possibilités. Balaie les DEUX pools
+ * (non vérifié et vérifié), adressés comme une seule séquence virtuelle de
+ * `2 * nb_file_possibility` files via `duplicate_pool_at` (cf. sa doc).
  *
  * @param arguments Pointeur vers un `arg_duplicate_thread` décrivant la partition à analyser.
  * @return          NULL.
@@ -3595,10 +3659,11 @@ void *check_duplicate_thread(void *arguments) {
     int fp= args->filePossibility;
     unsigned long long position = args->position;
     int cfp;
+    int totalFiles = 2 * nb_file_possibility;
     while (currElement != NULL && duplicateAnalyzed[args->threadPosition] <= args->nbCombinations)
     {
         duplicateCount[args->threadPosition]++;
-        for (cfp=fp; cfp < nb_file_possibility; cfp++)
+        for (cfp=fp; cfp < totalFiles; cfp++)
         {
             unsigned long long comparePosition = 0;
             Element *elementToCompare = NULL;
@@ -3607,7 +3672,7 @@ void *check_duplicate_thread(void *arguments) {
                 comparePosition = position + 1;
                 //printf("%i position %llu start with next for %llu\n", args->threadPosition, position, duplicateCount[args->threadPosition]);
             } else {
-                elementToCompare = file_possibility[cfp]->file.start;
+                elementToCompare = duplicate_pool_at(cfp)->file.start;
                 //printf("%i position %llu start with start %i for %llu\n", args->threadPosition, position, cfp, duplicateCount[args->threadPosition]);
             }
             while (elementToCompare != NULL)
@@ -3616,41 +3681,43 @@ void *check_duplicate_thread(void *arguments) {
                     int analyse = compare_possibility((struct possibility_packet *)currElement->value, (struct possibility_packet *)elementToCompare->value);
                     if (analyse == 0)
                     {
-                        log_info("possibility error : %i F%i:%llu to F%i:%llu\n",analyse, fp, position, cfp, comparePosition);
+                        log_info("possibility error : %i %s%i:%llu to %s%i:%llu\n", analyse, duplicate_pool_label(fp), duplicate_pool_index(fp), position, duplicate_pool_label(cfp), duplicate_pool_index(cfp), comparePosition);
                         // print_possibility_packet((struct possibility_packet *)currElement->value);
                         duplicateErrors[args->threadPosition]++;
                     } else {
                         analyse = is_origin_of(currElement->value, elementToCompare->value);
                         if (analyse == 1) {
-                            log_info("possibility origin error : F%i:%llu to F%i:%llu\n", fp, position, cfp, comparePosition);
+                            log_info("possibility origin error : %s%i:%llu to %s%i:%llu\n", duplicate_pool_label(fp), duplicate_pool_index(fp), position, duplicate_pool_label(cfp), duplicate_pool_index(cfp), comparePosition);
                             duplicateErrors[args->threadPosition]++;
                         }
                     }
                 } else {
-                    log_info("possibility error : equals F%i:%llu to F%i:%llu\n", fp, position, cfp, comparePosition);
+                    log_info("possibility error : equals %s%i:%llu to %s%i:%llu\n", duplicate_pool_label(fp), duplicate_pool_index(fp), position, duplicate_pool_label(cfp), duplicate_pool_index(cfp), comparePosition);
                     duplicateErrors[args->threadPosition]++;
                 }
                 elementToCompare = elementToCompare->next;
                 comparePosition++;
                 duplicateAnalyzed[args->threadPosition]++;
             }
-            
+
         }
         if (currElement != NULL) {
             currElement = currElement->next;
             position++;
         }
-        if (position >= file_possibility[fp]->file.size) {
+        if (position >= duplicate_pool_at(fp)->file.size) {
             fp++;
             position = 0;
-            currElement = NULL;
-            if (fp < nb_file_possibility) {
-                currElement = file_possibility[fp]->file.start;
-            }
+            // duplicate_pool_skip_empty saute d'un coup toute suite de files
+            // vides (ex. le reste du pool non vérifié) plutôt qu'un simple
+            // fp++ isolé, qui laisserait currElement à NULL — et donc la
+            // boucle englobante s'arrêter — dès la première file vide
+            // rencontrée, même quand des données existent plus loin.
+            currElement = duplicate_pool_skip_empty(&fp);
         }
 
     }
-    
+
     duplicateFinish[args->threadPosition] = 1;
     return NULL;
 }
@@ -3750,24 +3817,28 @@ int check_duplicate(void)
     unsigned long long count = 0;
     unsigned long long errors = 0;
 
-    // NOTE : la détection de doublons ne balaie que le pool non vérifié.
-    // Le walker threadé (check_duplicate_thread) référence directement
-    // file_possibility[] pour partitionner et comparer ; étendre la recherche
-    // au pool vérifié (checked == 1) imposerait de chaîner 2*nb_file_possibility
-    // files dans une même séquence — hors périmètre ici. On dimensionne donc le
-    // travail sur la taille du seul pool non vérifié (et non datas_size(), qui
-    // inclut le pool vérifié) pour que le nombre de combinaisons corresponde
-    // exactement aux éléments réellement parcourus.
+    // La détection de doublons balaie les DEUX pools (non vérifié et vérifié),
+    // adressés comme une seule séquence virtuelle de `totalFiles =
+    // 2 * nb_file_possibility` files : [0, nb_file_possibility[ pour
+    // file_possibility[], [nb_file_possibility, totalFiles[ pour
+    // file_possibility_checked[] — cf. `duplicate_pool_at`. dataSize doit donc
+    // sommer les deux pools (comme datas_size()) pour que le nombre de
+    // combinaisons corresponde exactement aux éléments réellement parcourus.
+    int totalFiles = 2 * nb_file_possibility;
     unsigned long long dataSize = 0;
-    for (int f = 0; f < nb_file_possibility; f++) {
-        dataSize += file_size(f);
+    for (int f = 0; f < totalFiles; f++) {
+        dataSize += duplicate_pool_at(f)->file.size;
     }
     unsigned long long nbCombinations = count_combinations(dataSize);
     unsigned long long nbByThread = nbCombinations / nbDuplicateThread;
     log_info("qt: %llu nb combinations %llu | nb/threads: %llu\n", dataSize, nbCombinations, nbByThread);
-    
+
     int fp = 0;
-    Element *currElement = file_possibility[fp]->file.start;
+    // duplicate_pool_skip_empty (et non un simple file_possibility[0]->file.start) :
+    // le pool non vérifié entier peut être vide (tout déjà passé aux pruners),
+    // il faut alors démarrer directement dans le pool vérifié plutôt que de
+    // rester bloqué sur une tête de séquence vide.
+    Element *currElement = duplicate_pool_skip_empty(&fp);
     unsigned long long position = 0;
     unsigned long long allocated = 0;
     unsigned long long remains = dataSize;
@@ -3778,7 +3849,7 @@ int check_duplicate(void)
     // lancé garde un duplicateFinish résiduel qui ferait boucler l'attente sans
     // fin sur un thread jamais créé.
     int spawned = 0;
-    for (int t = 0; t < nbDuplicateThread && fp < nb_file_possibility && allocated < nbCombinations; t++) {
+    for (int t = 0; t < nbDuplicateThread && fp < totalFiles && allocated < nbCombinations; t++) {
         duplicateCount[t] = 0;
         duplicateErrors[t] = 0;
         duplicateFinish[t] = 0;
@@ -3796,14 +3867,17 @@ int check_duplicate(void)
                 remains--;
                 allocatedToThread += remains;
                 position++;
-                if (position > file_possibility[fp]->file.size) {
+                if (position > duplicate_pool_at(fp)->file.size) {
                     fp++;
                     position = 0;
-                    if (fp >= nb_file_possibility) {
-                        currElement = NULL;
+                    // Même remarque que dans check_duplicate_thread : sauter
+                    // d'un coup toute suite de files vides plutôt qu'un
+                    // fp++ isolé, qui abandonnerait ici alors que des
+                    // données existent plus loin (ex. pool vérifié entier).
+                    currElement = duplicate_pool_skip_empty(&fp);
+                    if (currElement == NULL) {
                         break;
                     }
-                    currElement = file_possibility[fp]->file.start;
                 } else {
                     currElement = currElement->next;
                 }

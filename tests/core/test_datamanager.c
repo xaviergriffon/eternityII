@@ -6244,6 +6244,68 @@ TEST check_duplicate_detects_identical_packets(void)
     PASS();
 }
 
+/* check_duplicate : les DEUX copies d'un doublon exact sont dans le pool
+ * VÉRIFIÉ (checked == 1 des deux côtés). Avant le fix, check_duplicate ne
+ * balayait jamais file_possibility_checked[] : ce doublon était invisible,
+ * quand bien même checkOrigin le voyait déjà (check_origin_flags_exact_
+ * duplicate_in_checked_pool ci-dessus). Régression : les deux pools sont
+ * désormais couverts par le même mécanisme threadé. */
+TEST check_duplicate_detects_identical_packets_in_checked_pool(void)
+{
+    drain_all();
+    struct possibility_packet pks[2];
+    memset(pks, 0, sizeof pks);
+    pks[0].alloc = 2;
+    pks[0].checked = 1;
+    pks[0].grid[dirx[0]][diry[0]] = 7;
+    pks[1] = pks[0];             /* copie parfaite, elle aussi vérifiée */
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_duplicate();
+    restore_std();
+    ASSERT_EQ_FMT(-1, rc, "%d");
+
+    drain_all();
+    PASS();
+}
+
+/* check_duplicate : un doublon SCINDÉ entre les deux pools — une copie non
+ * vérifiée (checked == 0), une copie vérifiée (checked == 1) du même
+ * contenu (compare_possibility ne compare ni ne dépend du flag `checked`
+ * lui-même : alloc/x/y/b_faceused/grid identiques suffisent). C'est
+ * exactement le cas décrit par l'audit : avant le fix, le walker ne
+ * référençait que file_possibility[] et ne pouvait jamais confronter une
+ * entrée du pool vérifié à son double dans le pool non vérifié. */
+TEST check_duplicate_detects_split_pool_duplicate(void)
+{
+    drain_all();
+    struct possibility_packet pks[2];
+    memset(pks, 0, sizeof pks);
+    pks[0].alloc = 2;
+    pks[0].checked = 0;
+    pks[0].grid[dirx[0]][diry[0]] = 9;
+    pks[1] = pks[0];
+    pks[1].checked = 1;          /* même contenu, pool vérifié */
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    /* Avant le fix : file_size ne comptait que le pool non vérifié (1 ici),
+     * donc nbCombinations == 0 -> aucun thread lancé -> rc == 0 à tort.
+     * Après : dataSize couvre les deux pools -> la paire est comparée. */
+    ASSERT_EQ_FMT(1ULL, file_size(0), "%llu");
+    ASSERT_EQ_FMT(1ULL, file_checked_size(0), "%llu");
+
+    silence_std();
+    int rc = check_duplicate();
+    restore_std();
+    ASSERT_EQ_FMT(-1, rc, "%d");
+
+    drain_all();
+    PASS();
+}
+
 /* --------------------------------------------------------------------------
  * expand_datas_to_level : expansion du stock au démarrage du serveur
  *
@@ -6690,6 +6752,8 @@ SUITE(datamanager_suite)
     RUN_TEST(check_duplicate_small_stock_no_error);
     RUN_TEST(check_duplicate_detects_identical_packets);
     RUN_TEST(check_duplicate_detects_identical_packets_across_files);
+    RUN_TEST(check_duplicate_detects_identical_packets_in_checked_pool);
+    RUN_TEST(check_duplicate_detects_split_pool_duplicate);
 
     RUN_TEST(add_possibility_spins_until_lock_released);
     RUN_TEST(add_possibility_gives_up_when_stock_never_unlocked);
