@@ -4190,6 +4190,73 @@ int check_origin(int purge)
 }
 
 /**
+ * @brief Renvoie l'INTÉGRALITÉ du pool vérifié dans le pool non vérifié
+ *        (`checked` remis à 0), pour forcer tout le passif à repasser
+ *        devant les pruners.
+ *
+ * `autoprune_step` (src/core/etii_search.c) ne retente JAMAIS la preuve de
+ * fermeture bornée (search_packet_backtracking_budgeted) sur une
+ * possibilité déjà `checked == 1` -- même si `prunerDfsBudget` est augmenté
+ * ou la logique de prunage améliorée après coup, le passif déjà vérifié
+ * n'en bénéficie jamais sans cette commande. Maintenance ponctuelle,
+ * déclenchée à la main (console `resetChecked`), pas un pas incrémental
+ * façon `rebalance` : coût O(n) trivial par entrée, contrairement aux
+ * O(n²)/O(n log n) de `checkOrigin`/`checkDuplicate`.
+ *
+ * Déplace chaque entrée EN PLACE, du fichier `fp` du pool vérifié vers le
+ * MÊME index `fp` du pool non vérifié (jamais round-robinée ailleurs) --
+ * simple concaténation de listes chaînées, sans copie (contrairement à
+ * `put_back_to_stock`, qui prend en plus ses propres verrous et
+ * s'auto-bloquerait ici : l'appelant tient déjà tous les verrous via
+ * `lock_all_file`). Le pool « en cours d'analyse » (batches en vol chez les
+ * pruners) est hors périmètre, comme pour `checkOrigin`.
+ *
+ * @return Nombre de possibilités déplacées (cette commande ne peut pas
+ *         « échouer » au sens diagnostic de `checkOrigin`/`checkDuplicate`).
+ */
+unsigned long long reset_checked_pool(void)
+{
+	lock_all_file();
+
+	unsigned long long moved = 0;
+	for (int fp = 0; fp < nb_file_possibility; fp++) {
+		File *checked_file = &file_possibility_checked[fp]->file;
+		File *unchecked_file = &file_possibility[fp]->file;
+
+		if (checked_file->size == 0) {
+			continue;
+		}
+
+		for (Element *e = checked_file->start; e != NULL; e = e->next) {
+			if (e->value != NULL) {
+				((struct possibility_packet *)e->value)->checked = 0;
+			}
+		}
+
+		if (unchecked_file->end != NULL) {
+			unchecked_file->end->next = checked_file->start;
+			checked_file->start->previous = unchecked_file->end;
+			unchecked_file->end = checked_file->end;
+		} else {
+			unchecked_file->start = checked_file->start;
+			unchecked_file->end = checked_file->end;
+		}
+		unchecked_file->size += checked_file->size;
+		moved += checked_file->size;
+
+		checked_file->start = NULL;
+		checked_file->end = NULL;
+		checked_file->size = 0;
+	}
+
+	unlock_all_file();
+
+	log_event("resetChecked : %llu possibilite(s) repassees du pool verifie vers le pool non verifie\n",
+	          moved);
+	return moved;
+}
+
+/**
  * @brief Cumule dans `levels` la répartition par `alloc` des paquets de `file`,
  *        et dans `min_candidats_sum`/`min_candidats_known` la seconde
  *        coordonnée (score MRV de la dernière pièce posée).

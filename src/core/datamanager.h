@@ -815,6 +815,17 @@ int check_duplicate(void);
 int check_origin(int purge);
 
 /**
+ * @brief Renvoie l'intégralité du pool vérifié dans le pool non vérifié
+ *        (`checked` remis à 0 sur chaque possibilité déplacée).
+ *
+ * Déplacement EN PLACE (même index de file), sans passer par
+ * `put_back_to_stock`. Le pool « en cours d'analyse » n'est pas concerné.
+ *
+ * @return Nombre de possibilités déplacées.
+ */
+unsigned long long reset_checked_pool(void);
+
+/**
  * @brief Nombre de niveaux d'un histogramme de répartition par `alloc`.
  *
  * `+1` : `alloc` peut valoir `ETERN_PARTS` (plateau complet), donc les
