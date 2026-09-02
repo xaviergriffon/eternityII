@@ -3858,6 +3858,9 @@ typedef struct
 	uint16_t file_index;
 	uint8_t pool;          /* 0 = pool non vérifié, 1 = pool vérifié */
 	uint8_t is_descendant; /* posé par le balayage : a une racine en stock */
+	uint8_t is_duplicate;  /* posé par le balayage : doublon exact d'une entrée
+	                        * de même alloc et d'indice trié inférieur, dans
+	                        * la même bande à alloc égal — voir check_origin_thread */
 } origin_entry_t;
 
 struct arg_origin_thread {
@@ -3868,10 +3871,14 @@ struct arg_origin_thread {
 	int thread_position;
 };
 
-/* Partagés par les threads de check_origin : compteur de descendants trouvés,
- * budget de lignes de rapport, progression. Tous manipulés en atomique. */
+/* Partagés par les threads de check_origin : compteurs de descendants et de
+ * doublons exacts trouvés (deux notions distinctes, cf. check_origin_thread),
+ * budget de lignes de rapport (un par notion, même plafond), progression.
+ * Tous manipulés en atomique. */
 static unsigned long long origin_found;
 static unsigned long long origin_reported;
+static unsigned long long duplicate_found;
+static unsigned long long duplicate_reported;
 static unsigned long long origin_progress[NB_ORIGIN_THREAD];
 static unsigned long long origin_finish[NB_ORIGIN_THREAD];
 
@@ -3929,10 +3936,30 @@ static unsigned long long origin_upper_bound(const origin_entry_t *entries, unsi
  * blocs contigus : le travail d'une entrée décroît avec son indice, un
  * découpage par blocs donnerait au dernier thread une part dérisoire).
  *
- * Une entrée déjà marquée descendante est sautée : elle sera supprimée de
- * toute façon, lui trouver une seconde racine n'apprendrait rien. La course
- * sur `is_descendant` est bénigne (seule la valeur 1 est écrite) et le
- * comptage reste exact grâce à l'échange atomique, qui n'attribue la
+ * Chaque indice `i` sert à deux détections distinctes :
+ *   - doublons exacts (`compare_possibility == 0`) dans la bande à alloc
+ *     ÉGAL, c'est-à-dire `]i, start[` — précisément la bande que
+ *     `origin_upper_bound` fait sauter à la détection ancêtre/descendant
+ *     ci-dessous, et où un doublon strict (même plateau, stocké deux fois)
+ *     est donc aujourd'hui invisible à `checkOrigin` (confirmé sur une
+ *     sauvegarde de production : 10 855 possibilités, 0 relation
+ *     ancêtre/descendant, 1 paire de doublons stricts en alloc=112) ;
+ *   - ancêtre/descendant dans la bande strictement plus profonde `[start,
+ *     count[`, comme avant.
+ * `j > i` uniquement pour les doublons : chaque paire n'est ainsi visitée
+ * qu'une fois, par le plus petit indice trié du groupe — qui ne se voit
+ * donc jamais marquer `is_duplicate` et devient le survivant déterministe
+ * de la purge (les indices supérieurs marqués sont ceux supprimés). Un
+ * groupe de N > 2 entrées identiques se réduit ainsi à exactement 1
+ * survivant : le premier membre du groupe marque tous les suivants, qui à
+ * leur tour sautent leur propre recherche de doublon (`is_duplicate` déjà
+ * posé) sans que cela change le résultat, la relation étant transitive.
+ *
+ * Une entrée déjà marquée descendante ou doublon est sautée dans la boucle
+ * INTERNE correspondante : elle sera supprimée de toute façon, lui trouver
+ * une seconde racine/un second doublon n'apprendrait rien. La course sur
+ * `is_descendant`/`is_duplicate` est bénigne (seule la valeur 1 est écrite)
+ * et le comptage reste exact grâce à l'échange atomique, qui n'attribue la
  * découverte qu'à un seul thread.
  *
  * @param arguments `struct arg_origin_thread` décrivant la part à traiter.
@@ -3950,6 +3977,31 @@ void *check_origin_thread(void *arguments)
 		 * l'autre. On saute donc directement à la première entrée
 		 * strictement plus profonde — elle vient forcément après i. */
 		unsigned long long start = origin_upper_bound(entries, args->count, entries[i].alloc);
+
+		for (unsigned long long j = i + 1; j < start; j++) {
+			if (__atomic_load_n(&entries[j].is_duplicate, __ATOMIC_RELAXED)) {
+				continue;
+			}
+			if (compare_possibility((struct possibility_packet *)root,
+			                        (struct possibility_packet *)entries[j].element->value) != 0) {
+				continue;
+			}
+			if (__atomic_exchange_n(&entries[j].is_duplicate, (uint8_t)1, __ATOMIC_RELAXED)) {
+				continue; /* un autre thread l'a marquée en même temps */
+			}
+			__atomic_fetch_add(&duplicate_found, 1ULL, __ATOMIC_RELAXED);
+			if (__atomic_fetch_add(&duplicate_reported, 1ULL, __ATOMIC_RELAXED)
+			    < ORIGIN_REPORT_MAX_LINES) {
+				log_info("possibility duplicate : %s F%u:%llu (alloc %u) doublon exact de %s F%u:%llu (alloc %u)\n",
+				         entries[j].pool ? "checked" : "unchecked",
+				         (unsigned)entries[j].file_index, entries[j].position,
+				         (unsigned)entries[j].alloc,
+				         entries[i].pool ? "checked" : "unchecked",
+				         (unsigned)entries[i].file_index, entries[i].position,
+				         (unsigned)entries[i].alloc);
+			}
+		}
+
 		for (unsigned long long j = start; j < args->count; j++) {
 			if (__atomic_load_n(&entries[j].is_descendant, __ATOMIC_RELAXED)) {
 				continue;
@@ -4008,6 +4060,7 @@ static unsigned long long collect_origin_entries(origin_entry_t *entries, unsign
 				entries[n].file_index = (uint16_t)fp;
 				entries[n].pool = (uint8_t)p;
 				entries[n].is_descendant = 0;
+				entries[n].is_duplicate = 0;
 				n++;
 				position++;
 			}
@@ -4040,6 +4093,8 @@ int check_origin(int purge)
 
 	origin_found = 0;
 	origin_reported = 0;
+	duplicate_found = 0;
+	duplicate_reported = 0;
 	log_info("check_origin : %llu possibilites, %llu paires a comparer\n",
 	         count, count > 1 ? count_combinations(count) : 0ULL);
 
@@ -4099,11 +4154,16 @@ int check_origin(int purge)
 		pthread_join(threads[t], NULL);
 	}
 
-	unsigned long long found = origin_found;
+	// Deux notions distinctes qui se cumulent dans le contrat de retour
+	// existant (found > 0 => -1) : une entrée peut être posée descendante,
+	// doublon, ou les deux à la fois (ex. deux copies exactes d'un même
+	// descendant) — la purge ci-dessous ne la supprime qu'UNE fois quel que
+	// soit le nombre de raisons.
+	unsigned long long found = origin_found + duplicate_found;
 	unsigned long long removed = 0;
 	if (purge) {
 		for (unsigned long long i = 0; i < count; i++) {
-			if (entries[i].is_descendant) {
+			if (entries[i].is_descendant || entries[i].is_duplicate) {
 				file_remove_element(entries[i].file, entries[i].element);
 				removed++;
 			}
@@ -4113,15 +4173,19 @@ int check_origin(int purge)
 	free(entries);
 	unlock_all_file();
 
-	if (found > ORIGIN_REPORT_MAX_LINES) {
-		log_info("check_origin : %llu relations non detaillees (plafond de %i lignes)\n",
-		         found - ORIGIN_REPORT_MAX_LINES, ORIGIN_REPORT_MAX_LINES);
+	if (origin_found > ORIGIN_REPORT_MAX_LINES) {
+		log_info("check_origin : %llu relations origine non detaillees (plafond de %i lignes)\n",
+		         origin_found - ORIGIN_REPORT_MAX_LINES, ORIGIN_REPORT_MAX_LINES);
+	}
+	if (duplicate_found > ORIGIN_REPORT_MAX_LINES) {
+		log_info("check_origin : %llu doublons non detailles (plafond de %i lignes)\n",
+		         duplicate_found - ORIGIN_REPORT_MAX_LINES, ORIGIN_REPORT_MAX_LINES);
 	}
 	if (purge) {
 		log_event("check_origin : %llu possibilites supprimees sur %llu -- lancer « backup » pour graver l'etat purge\n",
 		         removed, count);
 	}
-	log_event("check_origin errors %llu on %llu\n", found, count);
+	log_event("check_origin errors %llu on %llu (dont %llu doublons exacts)\n", found, count, duplicate_found);
 	return found > 0 ? -1 : 0;
 }
 
