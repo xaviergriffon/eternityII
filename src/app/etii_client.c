@@ -604,12 +604,12 @@ char *build_thread_queues_table(unsigned long long *out_stock,
 }
 
 /** @brief Formate une profondeur pour `build_thread_depth_table` : `-1` -> "-". */
-static void format_depth(int depth, char out[8])
+static void format_depth(int depth, char out[12])
 {
     if (depth >= 0) {
-        snprintf(out, 8, "%d", depth);
+        snprintf(out, 12, "%d", depth);
     } else {
-        snprintf(out, 8, "-");
+        snprintf(out, 12, "-");
     }
 }
 
@@ -635,7 +635,7 @@ char *build_thread_depth_table(void)
         int root = fork_statistics[f].root_depth;
         int pending = fork_statistics[f].min_pending_depth;
         const char *role = (current_fork_role(f) == FORK_ROLE_PRUNE) ? "prune " : "search";
-        char root_buf[8], pending_buf[8];
+        char root_buf[12], pending_buf[12];
         format_depth(root, root_buf);
         format_depth(pending, pending_buf);
         off += snprintf(table + off, size - off,
@@ -647,7 +647,7 @@ char *build_thread_depth_table(void)
             min_pending = pending;
         }
     }
-    char min_root_buf[8], min_pending_buf[8];
+    char min_root_buf[12], min_pending_buf[12];
     format_depth(min_root, min_root_buf);
     format_depth(min_pending, min_pending_buf);
     snprintf(table + off, size - off,
