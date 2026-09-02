@@ -4781,6 +4781,158 @@ TEST check_origin_across_files(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * reset_checked_pool : bascule l'INTÉGRALITÉ du pool vérifié vers le pool non
+ * vérifié (`checked` remis à 0) -- console `resetChecked`. Escape hatch pour
+ * autoprune_step, qui ne retente jamais search_packet_backtracking_budgeted
+ * sur une possibilité déjà `checked == 1`.
+ * ------------------------------------------------------------------------ */
+
+/* Chaque possibilité du pool vérifié est déplacée vers le pool non vérifié,
+ * avec `checked` remis à 0 ; rien n'est perdu (datas_size inchangé). */
+TEST reset_checked_moves_checked_to_unchecked_and_clears_flag(void)
+{
+    drain_all();
+    int allocs[] = { 2, 3, 4 };
+    add_checked_packets(allocs, 3);
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+
+    silence_std();
+    unsigned long long moved = reset_checked_pool();
+    restore_std();
+
+    ASSERT_EQ_FMT(3ULL, moved, "%llu");
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu"); /* rien perdu */
+
+    unsigned long long checked_total = 0;
+    for (int f = 0; f < nb_file_possibility; f++) { checked_total += file_checked_size(f); }
+    ASSERT_EQ_FMT(0ULL, checked_total, "%llu"); /* pool vérifié entièrement vidé */
+
+    array_possibility_packet *all = get_last_possibility(NULL, 10, NULL);
+    ASSERT_EQ_FMT(3, all->size, "%d");
+    for (int i = 0; i < all->size; i++) {
+        ASSERT_EQ_FMT(0, (int)all->possibilities[i].checked, "%d");
+    }
+    free_array_possibility_packet(all);
+    drain_all();
+    PASS();
+}
+
+/* Les possibilités déjà dans le pool non vérifié ne sont ni dupliquées ni
+ * re-traitées : seul le pool vérifié contribue au compte déplacé. */
+TEST reset_checked_pool_leaves_already_unchecked_untouched(void)
+{
+    drain_all();
+    int unchecked_allocs[] = { 5, 6 };
+    add_packets(unchecked_allocs, 2);
+    int checked_allocs[] = { 7 };
+    add_checked_packets(checked_allocs, 1);
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+
+    silence_std();
+    unsigned long long moved = reset_checked_pool();
+    restore_std();
+
+    ASSERT_EQ_FMT(1ULL, moved, "%llu");
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu"); /* pas de duplication */
+
+    unsigned long long unchecked_total = 0, checked_total = 0;
+    for (int f = 0; f < nb_file_possibility; f++) {
+        unchecked_total += file_size(f);
+        checked_total += file_checked_size(f);
+    }
+    ASSERT_EQ_FMT(3ULL, unchecked_total, "%llu"); /* les 2 + le 1 déplacé */
+    ASSERT_EQ_FMT(0ULL, checked_total, "%llu");
+    drain_all();
+    PASS();
+}
+
+/* Pool vérifié vide : no-op propre, compte 0, pool non vérifié inchangé. */
+TEST reset_checked_pool_on_empty_checked_pool_is_a_noop(void)
+{
+    drain_all();
+    int allocs[] = { 1, 2 };
+    add_packets(allocs, 2);
+
+    silence_std();
+    unsigned long long moved = reset_checked_pool();
+    restore_std();
+
+    ASSERT_EQ_FMT(0ULL, moved, "%llu");
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* Le pool « en cours d'analyse » (batches en vol chez les pruners) est hors
+ * périmètre -- même précédent que checkOrigin. */
+TEST reset_checked_pool_leaves_analysed_pool_untouched(void)
+{
+    drain_all();
+    int checked_allocs[] = { 8 };
+    add_checked_packets(checked_allocs, 1);
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof(pk));
+    pk.alloc = 9;
+    add_possibility_analysed(&pk, 0);
+    unsigned long long analysed_before = analysed_total();
+    ASSERT_EQ_FMT(1ULL, analysed_before, "%llu");
+
+    silence_std();
+    unsigned long long moved = reset_checked_pool();
+    restore_std();
+
+    ASSERT_EQ_FMT(1ULL, moved, "%llu");
+    ASSERT_EQ_FMT(analysed_before, analysed_total(), "%llu"); /* inchangé */
+
+    silence_std();
+    restock_analysed(); /* nettoyage : remet le pool analysed dans le stock avant drain_all */
+    restore_std();
+    drain_all();
+    PASS();
+}
+
+/* Stock réparti sur plusieurs files (chaque lot atterrit dans une file
+ * distincte via la rotation ADD) : chaque possibilité vérifiée est déplacée
+ * DANS SA PROPRE FILE, jamais round-robinée vers une autre. */
+TEST reset_checked_pool_moves_within_the_same_file_index(void)
+{
+    drain_all();
+    ASSERT(nb_file_possibility >= 3);
+
+    /* Un appel = une file (rotation ADD avancée d'un cran par appel, cf.
+     * datamanager_rr_next_start) : le lot n atterrit dans la file n. */
+    int a0[] = { 10 };
+    add_checked_packets(a0, 1); /* file 0 */
+    int a1[] = { 11 };
+    add_checked_packets(a1, 1); /* file 1 */
+    int a2[] = { 12 };
+    add_checked_packets(a2, 1); /* file 2 */
+
+    ASSERT_EQ_FMT(1ULL, file_checked_size(0), "%llu");
+    ASSERT_EQ_FMT(1ULL, file_checked_size(1), "%llu");
+    ASSERT_EQ_FMT(1ULL, file_checked_size(2), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_size(0), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_size(1), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_size(2), "%llu");
+
+    silence_std();
+    unsigned long long moved = reset_checked_pool();
+    restore_std();
+
+    ASSERT_EQ_FMT(3ULL, moved, "%llu");
+    /* Chaque possibilité est réapparue dans le pool non vérifié de SA PROPRE
+     * file d'origine -- pas regroupée ni redistribuée ailleurs. */
+    ASSERT_EQ_FMT(1ULL, file_size(0), "%llu");
+    ASSERT_EQ_FMT(1ULL, file_size(1), "%llu");
+    ASSERT_EQ_FMT(1ULL, file_size(2), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_checked_size(0), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_checked_size(1), "%llu");
+    ASSERT_EQ_FMT(0ULL, file_checked_size(2), "%llu");
+    drain_all();
+    PASS();
+}
+
 /* Tris sur un stock mélangé assez gros pour déclencher l'affichage de
  * progression et les déplacements dans les deux sens : comptage préservé. */
 TEST sort_large_shuffled_stock_both_directions(void)
@@ -6467,6 +6619,11 @@ SUITE(datamanager_suite)
     RUN_TEST(check_origin_purge_removes_the_descendant_only);
     RUN_TEST(check_origin_purge_removes_a_whole_chain);
     RUN_TEST(check_origin_across_files);
+    RUN_TEST(reset_checked_moves_checked_to_unchecked_and_clears_flag);
+    RUN_TEST(reset_checked_pool_leaves_already_unchecked_untouched);
+    RUN_TEST(reset_checked_pool_on_empty_checked_pool_is_a_noop);
+    RUN_TEST(reset_checked_pool_leaves_analysed_pool_untouched);
+    RUN_TEST(reset_checked_pool_moves_within_the_same_file_index);
     RUN_TEST(sort_large_shuffled_stock_both_directions);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);

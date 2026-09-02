@@ -28,7 +28,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 63
+#define NB_COMMANDS 64
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -133,6 +133,7 @@ int known_clients_interpreter(void);
 int clients_work_interpreter(void);
 int lease_duration_interpreter(void);
 int rebalance_interpreter(void);
+int reset_checked_interpreter(void);
 int stock_memory_interpreter(void);
 int stock_max_ram_interpreter(void);
 int spill_interpreter(void);
@@ -284,6 +285,22 @@ static command_description commands[NB_COMMANDS] = {
      "pour forcer un rééquilibrage immédiat plutôt que d'attendre plusieurs\n"
      "tours. Contrairement à split, borné par <n> : peut s'arrêter avant un\n"
      "équilibre complet sur un très gros déséquilibre.", NULL},
+    {"resetChecked", reset_checked_interpreter, 0, CMD_CAT_STOCK, 1, NULL,
+     "remet tout le pool vérifié dans le pool non vérifié (re-soumis aux pruners)",
+     "Bascule `checked` à 0 pour TOUTE possibilité actuellement dans le pool\n"
+     "vérifié, et la déplace dans le pool non vérifié -- elle redevient donc\n"
+     "servable via INST_GET_TO_CHECK, comme n'importe quelle possibilité\n"
+     "jamais encore vérifiée (aucun câblage de distribution supplémentaire :\n"
+     "c'est déjà le chemin existant). Utile après un réglage de prunerDfsBudget\n"
+     "ou toute amélioration de la logique de prunage : autoprune_step ne\n"
+     "retente JAMAIS la preuve de fermeture bornée sur une possibilité déjà\n"
+     "`checked == 1` -- sans cette commande, ce passif ne bénéficie jamais\n"
+     "d'une amélioration ultérieure du pruner. Déplacement EN PLACE (même\n"
+     "index de file, jamais round-robiné ailleurs). Le pool « en cours\n"
+     "d'analyse » n'est pas concerné. Maintenance ponctuelle sur demande de\n"
+     "l'opérateur, pas un pas incrémental façon rebalance : balaie tout le\n"
+     "pool vérifié en un seul appel (coût trivial par entrée, contrairement\n"
+     "aux O(n²)/O(n log n) de checkOrigin/checkDuplicate).", NULL},
     {"stockMemory", stock_memory_interpreter, 0, CMD_CAT_STOCK, 1, NULL,
      "affiche le plafond RAM du stock, l'occupation actuelle et le débordement disque",
      "Deux pools comptés ensemble (non vérifié + vérifié), jamais le pool\n"
@@ -2318,6 +2335,21 @@ int rebalance_interpreter(void) {
     }
     int moved = datamanager_rebalance_step(budget);
     log_info("rebalance : %d possibilité(s) déplacée(s)\n", moved);
+    return 0;
+}
+
+/**
+ * @brief Interpréteur de `resetChecked` : bascule tout le pool vérifié vers
+ *        le pool non vérifié (`checked` remis à 0), pour le resoumettre aux
+ *        pruners -- cf. reset_checked_pool (src/core/datamanager.c).
+ *
+ * Sans argument, balayage O(n) complet en un seul appel (comme `checkOrigin`/
+ * `removeNoNext`, contrairement à `rebalance [n]`) : ne peut pas échouer au
+ * sens diagnostic de ces commandes, donc renvoie toujours 0.
+ */
+int reset_checked_interpreter(void) {
+    unsigned long long moved = reset_checked_pool();
+    log_info("resetChecked : %llu possibilité(s) repassée(s) au pool non vérifié\n", moved);
     return 0;
 }
 

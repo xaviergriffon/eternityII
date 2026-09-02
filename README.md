@@ -94,7 +94,7 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard.
 
 - **Commandes principales** :
   - Sauvegarde/restauration du stock : `backup`, `restore`.
-  - Tri et élagage des files : `sortDesc`, `sortAscFiles`, `sortDescFiles`, `removeNoNext`, `expand`.
+  - Tri et élagage des files : `sortDesc`, `sortAscFiles`, `sortDescFiles`, `removeNoNext`, `expand`, `resetChecked` (rebascule tout le pool vérifié vers le pool non vérifié, pour le resoumettre aux pruners).
   - Régulation : `limit`, `pause`/`resume`.
   - Diagnostic du stock : `checkDatas` (intégrité des plateaux), `checkDuplicate` (doublons), `checkOrigin [purge]` — vérifie qu'aucune possibilité en stock n'est la **racine** d'une autre (plateau entièrement contenu dans un plateau plus profond, dont le sous-arbre est donc exploré deux fois) ; avec `purge`, supprime les descendants et garde les racines, sans perdre de branche de recherche.
   - Cycle de vie des fils côté client/pruner : `start`, `stopForks`, `configApply`, `config [<clé> <valeur>]`, `configSave`.
