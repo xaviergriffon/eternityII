@@ -1294,6 +1294,17 @@ int statistic_interpreter(void) {
     log_info("service a vide (depuis le demarrage) : recherche=%llu controle=%llu\n",
               server_search_starved, server_prune_starved);
 
+    // Temps de séjour d'une racine (obtention -> acquittement) : métrique cible
+    // du dispatch local. Toujours 0 côté serveur, et côté client elle est
+    // portée soit par les forks (mode historique), soit par le parent
+    // (--local-dispatch) — cf. root_residence_*, core_static_variables.h.
+    if (root_residence_count > 0) {
+        log_info("sejour racine : %llu racines, moyenne %llu ms, max %llu ms\n",
+                  root_residence_count,
+                  root_residence_total_ms / root_residence_count,
+                  root_residence_max_ms);
+    }
+
     control_session_info_t sessions[MAX_CONTROL_SESSIONS];
     int n = control_registry_snapshot(sessions, MAX_CONTROL_SESSIONS);
     int nb_search = 0, nb_prune = 0;

@@ -1,6 +1,6 @@
 # Dispatch local des possibilités entre les forks d'un client
 
-**Statut : en cours d'implémentation (5/6 PR livrées).** Ce document décrit une **cible** ;
+**Statut : implémenté (6/6 PR livrées), défaut inchangé — voir le verdict au §6.1.** Ce document décrit une **cible** ;
 tout ce qui n'est pas explicitement marqué « livré » ci-dessous n'est pas encore le
 comportement du code.
 
@@ -323,6 +323,57 @@ pour amorcer un stock réaliste, et au moins deux nombres de forks (1 — pour v
 
 ---
 
+### 6.1 Résultat de la campagne, et verdict
+
+**Métrique retenue : travail cumulé sur une fenêtre de 120 s fixe**
+(`fc_attempts`, tentatives de placement soumises au forward-check). Le premier
+essai utilisait « études/s » du rapport périodique : c'est une **moyenne
+glissante de 5 s** lue à un instant, donc un estimateur bruité — deux paires s'y
+contredisaient (+94 % puis −24 %). Le cumul sur fenêtre fixe supprime ce bruit.
+
+Client 4 forks, serveur `--expand-level 4`, paires **alternées** :
+
+| Paire | Ordre | Défaut | `--local-dispatch` | Rapport |
+|---|---|---|---|---|
+| 1 | défaut d'abord | 201 318 547 | 692 194 493 | ×3,44 |
+| 2 | option d'abord | 200 748 793 | 381 573 873 | ×1,90 |
+| 3 | défaut d'abord | 201 609 824 | 689 547 926 | ×3,42 |
+| | **moyenne géométrique** | | | **×2,82** |
+
+Le témoin est remarquablement stable (201,3 / 200,7 / 201,6 M, soit 0,4 %
+d'écart) : la mesure est fiable sur cette machine. Les trois paires vont dans le
+même sens, la plus défavorable donnant encore +90 %.
+
+**Contrôle — ce ne sont pas des nœuds ré-explorés** : `max_result` est identique
+(205) dans les deux modes, le taux d'élagage forward-check reste comparable
+(45,3 % contre 41,1 % — légèrement plus bas, cohérent avec des plateaux moins
+profonds servis par le courtier, pas avec de la duplication), et le stock
+stagnant dans les forks tombe de 900 à 249 possibilités : le travail cesse de
+dormir dans les fils, ce qui était l'objectif annoncé.
+
+**Le temps de séjour d'une racine n'a PAS pu être mesuré** — et c'est un
+résultat sur le protocole du §6, pas un oubli. Sur toutes les configurations
+essayées (jusqu'à `--expand-level 9`), **aucune racine n'est épuisée** dans une
+fenêtre de 90 à 120 s : le compteur reste à zéro dans les deux modes. « La durée
+d'étude d'une racine » n'est pas une quantité mesurable à cette échelle ; elle
+ne le deviendra que sur des exécutions longues, ce pour quoi l'instrumentation
+est désormais en place.
+
+**Verdict : le défaut reste inchangé**, malgré un gain mesuré de ×2,8. Non parce
+que le résultat est douteux, mais parce que sa portée est étroite et que
+l'option change le contrat client/serveur :
+
+- une seule machine, un seul client, 4 forks, **recherche seule** ;
+- le comportement à l'échelle d'un **parc** (plusieurs clients ne présentant
+  qu'une connexion chacun) n'est pas mesuré — c'est précisément là que compte le
+  correctif R1, et je n'ai pas de données dessus ;
+- **R3, R4 et R5 restent ouverts** (concentration du pool analysé, vivacité,
+  métriques par rôle) ;
+- les forks **pruner** sont hors périmètre par construction (A5).
+
+`--local-dispatch` est donc **recommandée pour un client de recherche**, et le
+basculement du défaut est à décider après R4/R5 et une mesure multi-clients.
+
 ## 7. Découpage en PR
 
 **Resséquencé après PR1** : le découpage initial faisait de la connexion de travail du
@@ -340,7 +391,7 @@ courtier capable de les nourrir.
 | **3** ✅ **livrée, mais MESURÉE INERTE seule** | **Redistribution aux forks au repos** : `IPC_MSG_WORK_REQUEST`/`_GRANT`/`_DONE`, comptabilité **par offre** (anneau `{seq, remaining}` par fils, règlement qui ne saute jamais une offre incomplète), réinjection auto-réparante des attributions d'un fils mort, sursis `WORK_BROKER_HOLD_MS` avant relais (la péremption d'A3 : sans lui le relais viderait le tampon avant que quiconque puisse le réclamer). **Résultat mesuré : 0 attribution.** Sur 45 s, 4 forks, 156 possibilités en tampon, le courtier n'a reçu qu'**une seule** demande — voir §5.1 | oui |
 | **4** ✅ **livrée — ACTIVE la PR3** | **Connexion de travail unique** (A2) : sous `--local-dispatch`, un fils ne fait plus ni GET, ni ADD, ni acquittement ; le parent réclame les racines, les distribue et les acquitte quand son tampon est vide ET qu'aucun fils n'explore — instant où tout descendant est soit durable, soit prouvé mort, donc exactement la condition d'A4. Ajout d'`IPC_MSG_WORK_HUNGER` : le courtier réclame aux fils qui détiennent du travail (la délégation anticipée v8, repointée sur lui), sans quoi un fils tenant une racine profonde ne cède rien avant `max_stock_by_thread`. **R1 corrigé** (faim dimensionnée sur les forks déclarés via `control_registry_count_role_forks`, pas sur les connexions). **R3 tenté puis retiré** — voir §5.2. **R4/R5 différés** : observabilité, pas correction. **Mesure : 0 → 273 attributions**, et le serveur ne voit plus qu'UNE connexion de travail (`fork_seq=-1`) au lieu de 4 | oui |
 | **5** ✅ **livrée — A6 NON confirmé, défaut inchangé** | **Partage à la racine côté fork** : `bt_materialize_pending` sait matérialiser dans les deux sens (corps par niveau extrait et partagé, donc un frère produit ne dépend en rien de l'ordre de visite — vérifié par un test d'égalité des multiensembles) ; **partage précoce** au bout de `EARLY_SPLIT_CHECK_NODES` nœuds au lieu d'attendre 1 000 000. Le sens « moins profond d'abord » est livré derrière `--split-shallow-first`, **désactivé par défaut** : mesuré, il ne confirme pas A6 — voir §5.3 | oui |
-| **6** | Campagne de mesure (§6), puis bascule du défaut — **ou abandon motivé, consigné dans ce même document** | — |
+| **6** ✅ **livrée** | Instrumentation du **temps de séjour d'une racine** (`root_residence_*`, remontée par `client_statistics`, affichée par `statistic` et le rapport périodique), campagne en paires alternées, **verdict au §6.1**. Ferme au passage un trou de périmètre : le mode exclusif ne s'applique plus aux forks **pruner** (A5) | — |
 
 ## 8. Points laissés ouverts
 

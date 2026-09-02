@@ -47,6 +47,9 @@ typedef struct
     pid_t pid;
     int socket_id;
     struct tms start_socket;
+    /** Horloge monotone (ms) de l'obtention de la racine en cours, 0 si aucune.
+        Sert à mesurer son temps de séjour — cf. `root_residence_*`. */
+    unsigned long long root_started_ms;
     /// Horodatage (wall-clock) du dernier échange réseau, pour le keepalive :
     /// un worker occupé sur son stock local doit pinguer le serveur avant son
     /// timeout d'inactivité (tcp_timeout), sinon le serveur ferme la session.
@@ -193,6 +196,8 @@ void init_client_possibility(client_possibility_t *p, struct array_part *rotateP
  * @param nb   Taille du tableau.
  * @return     Nombre d'entrées où `pids[i] > 0`.
  */
+unsigned long long client_monotonic_ms(void);
+
 int count_created_forks(pid_t *pids, int nb);
 
 /**

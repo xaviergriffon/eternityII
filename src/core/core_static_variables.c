@@ -96,6 +96,18 @@ volatile int request = REQUEST_CONTINUE;
 
 int max_stock_by_thread = MAX_STOCK_BY_THREAD;
 int delegate_shallow_first = 0;
+unsigned long long root_residence_count = 0;
+unsigned long long root_residence_total_ms = 0;
+unsigned long long root_residence_max_ms = 0;
+
+void root_residence_record(unsigned long long ms)
+{
+    root_residence_count++;
+    root_residence_total_ms += ms;
+    if (ms > root_residence_max_ms) {
+        root_residence_max_ms = ms;
+    }
+}
 
 volatile int server_io_active = 0;
 

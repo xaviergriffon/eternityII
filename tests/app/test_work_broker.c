@@ -11,6 +11,8 @@
 #include "net/ipc_protocol.h"
 #include "net/local_socket.h"
 #include "core/possibility.h"
+#include "app/app_static_variables.h"
+#include "core/core_static_variables.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -419,6 +421,27 @@ TEST offer_beyond_window_is_refused_whole(void)
     PASS();
 }
 
+
+/* Périmètre A5 : un fork PRUNER garde sa connexion même sous --local-dispatch.
+ * Le courtier ne sert que des racines de recherche ; couper la connexion d'un
+ * pruner le priverait de travail sans rien lui donner en échange. */
+TEST exclusive_mode_never_applies_to_pruner_forks(void)
+{
+    int saved_opt = local_dispatch_enabled;
+    int saved_mode = pruner_mode;
+
+    local_dispatch_enabled = 0; pruner_mode = 0;
+    ASSERT_EQ_FMT(0, work_broker_child_is_exclusive(), "%d");
+    local_dispatch_enabled = 1; pruner_mode = 0;
+    ASSERT_EQ_FMT(1, work_broker_child_is_exclusive(), "%d");
+    local_dispatch_enabled = 1; pruner_mode = 1;
+    ASSERT_EQ_FMT(0, work_broker_child_is_exclusive(), "%d");
+
+    local_dispatch_enabled = saved_opt;
+    pruner_mode = saved_mode;
+    PASS();
+}
+
 SUITE(work_broker_suite)
 {
     RUN_TEST(offer_encode_decode_roundtrip);
@@ -434,6 +457,7 @@ SUITE(work_broker_suite)
     RUN_TEST(on_offer_queues_packets);
     RUN_TEST(on_offer_drops_unknown_slot_and_malformed);
     RUN_TEST(relay_step_is_inert_without_broker);
+    RUN_TEST(exclusive_mode_never_applies_to_pruner_forks);
     RUN_TEST(acc_settles_when_offer_fully_disposed);
     RUN_TEST(acc_never_settles_past_an_outstanding_offer);
     RUN_TEST(acc_add_refuses_when_ring_is_full);

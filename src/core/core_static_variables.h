@@ -436,6 +436,28 @@ extern int max_stock_by_thread;
 extern int delegate_shallow_first;
 
 /**
+ * @brief Temps de séjour d'une racine : de son obtention auprès du serveur à
+ *        son acquittement. Cumuls, jamais remis à zéro en cours de route.
+ *
+ * C'est la métrique CIBLE du dispatch local (« raccourcir la durée d'étude
+ * d'une possibilité ») : sans elle, on ne peut comparer les deux modes que sur
+ * des volumes déplacés, qui ne disent rien de la latence. Comptée là où la
+ * racine est réellement détenue — dans chaque fork en mode historique, dans le
+ * process parent sous `--local-dispatch`.
+ */
+extern unsigned long long root_residence_count;
+extern unsigned long long root_residence_total_ms;
+extern unsigned long long root_residence_max_ms;
+
+/**
+ * @brief Enregistre un séjour de `ms` millisecondes.
+ *
+ * Fonction pure hors des trois compteurs : testable, et sans horloge — c'est
+ * l'appelant qui mesure, pour que le test n'ait pas à dormir.
+ */
+void root_residence_record(unsigned long long ms);
+
+/**
  * @brief Vrai (1) tant que ce fork est en train d'échanger avec le serveur
  *        (connexion, envoi/réception, sonde de faim) depuis n'importe lequel
  *        de ses deux threads réseau. Faux sinon.
