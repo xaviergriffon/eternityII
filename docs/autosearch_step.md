@@ -294,6 +294,40 @@ de la branche `feat/dispatch-local-possibilites-forks`, non retenue) — la vale
 128 (moitié du puzzle) n'est donc qu'un point de départ documenté, pas un défaut
 recommandé.
 
+### 1.5ter Observabilité : profondeur minimale en attente (commande `min`)
+
+`placed_count` (profondeur du chemin COURANT) ne fait que croître le long
+d'une seule branche : un fil peut afficher `placed_count=200` tout en
+détenant encore, quelque part dans sa pile de décisions, un frère non exploré
+au niveau 1 — exactement le stock implicite que `shallow_root_abandon_depth`
+cible. `placed_count` seul serait donc un majorant trompeur si on cherchait
+« la profondeur la plus superficielle que ce fil détient encore ».
+`bt_min_pending_depth(board, stack, top)` répond correctement à cette
+question : même parcours racine → pile que `bt_count_pending`, mais en
+maintenant aussi `scratch.grid[][]` (pas seulement les faces) pour pouvoir
+recompter par `possibility_placed_count` dès le premier niveau PENDING
+trouvé, en partant du moins profond — jamais dérivé de l'indice de niveau
+(la pile n'a pas de rapport fiable avec `alloc`, cf. §1.5). Coût borné par
+`top` (≤ `ETERN_PARTS`), évalué au même point de contrôle périodique que
+`shallow_root_abandon_depth` — toujours à coût nul sur la boucle chaude.
+
+```
+lastroot[compteur]  = root_depth               ← figé une fois, à la réception de la racine
+lastdepth[compteur] = bt_min_pending_depth(…)   ← réévalué à chaque point de contrôle périodique
+```
+
+Remontés au parent par IPC (`client_statistics.root_depth`/`min_pending_depth`,
+comme `lastfilesize`/`possibilities_in_stock`), agrégés par fork (minimum,
+sentinelle `-1` = idle ou rôle pruner ignorée) et affichés par la commande
+console `min` côté client/pruner — tableau « Search depth », une ligne par
+fork, colonnes **Racine** (profondeur de la possibilité reçue du serveur) et
+**Min** (profondeur minimale encore en attente). Voir
+[Utilisation](utilisation.md#option---shallow-root-abandon-depth-client-et-pruner)
+et [Console interactive](console.md) pour l'usage. Côté SERVEUR, `min` garde
+son sens historique (`search_min_datas`, minimum dans les files du
+datamanager) : sans objet côté client, dont les files restent vides après
+fork (chaque fork explore en interne, cf. AGENTS.md).
+
 ### 1.6 Solution trouvée
 
 Quand `depth >= ETERN_PARTS` (toutes les pièces placées) :

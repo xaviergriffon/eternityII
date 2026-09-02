@@ -474,6 +474,62 @@ static unsigned long long bt_count_pending(const struct possibility_packet *boar
 }
 
 /**
+ * @brief Profondeur minimale parmi les possibilités encore en attente dans
+ *        la pile de décisions (fonction pure, ne modifie ni `board` ni `stack`).
+ *
+ * PAS la profondeur du chemin courant (`placed_count`) : celle-ci ne fait que
+ * croître le long d'une seule branche, alors que le niveau le MOINS profond
+ * qui a encore un candidat non essayé peut être bien plus proche de la
+ * racine — c'est exactement le stock implicite que `bt_count_pending`/
+ * `bt_materialize_pending` cèdent au serveur. Même parcours racine → pile
+ * que `bt_count_pending`, mais `scratch.grid[][]` est aussi maintenu (pas
+ * seulement les faces) pour pouvoir recompter par `possibility_placed_count`
+ * dès le premier niveau pendant trouvé — jamais dérivé de l'indice de
+ * niveau (cf. la mise en garde de `bt_materialize_pending` : la profondeur
+ * de pile n'a pas de rapport fiable avec le nombre de pièces posées).
+ *
+ * @param board Plateau courant (non modifié).
+ * @param stack Pile de décisions.
+ * @param top   Indice du dernier niveau occupé (-1 si pile vide).
+ * @return      Profondeur du candidat en attente le moins profond, ou `-1`
+ *              si rien n'est en attente (rare : juste avant épuisement).
+ */
+static int bt_min_pending_depth(const struct possibility_packet *board, const bt_level *stack, int top)
+{
+    struct possibility_packet scratch;
+    memcpy(&scratch, board, sizeof(scratch));
+
+    // Retour à l'état racine : annulation du chemin courant (grille + faces).
+    for (int i = top; i >= 0; i--) {
+        if (stack[i].placed_pos >= 0) {
+            scratch.grid[stack[i].x][stack[i].y] = -2;
+            BOARD_SET_FACE(&scratch, stack[i].placed_pos, 0);
+        }
+    }
+
+    for (int i = 0; i <= top; i++) {
+        const bt_level *lvl = &stack[i];
+        if (lvl->search != NULL) {
+            for (int s = lvl->next_s; s < lvl->search->size; s++) {
+                int16_t id = lvl->search->parts[s].id;
+                if (id != 0 && !BOARD_FACE_USED(&scratch, id - 1)) {
+                    // Valeur non -2 : possibility_placed_count ne regarde que
+                    // ça, jamais la pièce/rotation réelle (cf. sa doc).
+                    scratch.grid[lvl->x][lvl->y] = 0;
+                    return possibility_placed_count(&scratch);
+                }
+            }
+        }
+        // Ré-application du placement du niveau pour passer à l'état du niveau suivant.
+        if (lvl->placed_pos >= 0) {
+            scratch.grid[lvl->x][lvl->y] = 0;
+            BOARD_SET_FACE(&scratch, lvl->placed_pos, 1);
+        }
+    }
+    return -1;
+}
+
+/**
  * @brief Enregistre une solution complète trouvée par un thread de recherche.
  *
  * Toujours : `log_solution` (affiche la grille, écrit un fichier solution
@@ -1040,6 +1096,13 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
 
     unsigned long long nodes = 1;
     counters[client->compteur]++;
+    if (allow_delegate) {
+        // Remonté par la commande console `min` côté client (voir
+        // build_thread_depth_table, app/etii_client.c) : jamais écrit par le
+        // chemin budgétisé du pruner (allow_delegate=0), qui rejoue une
+        // racine différente hors du contexte de recherche réelle.
+        lastroot[client->compteur] = root_depth;
+    }
 
     for (;;) {
         if (placed_count >= ETERN_PARTS) {
@@ -1074,6 +1137,11 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
                 long long elapsed_ms = (now.tv_sec - last_delegate.tv_sec) * 1000LL
                                      + (now.tv_nsec - last_delegate.tv_nsec) / 1000000LL;
                 if (elapsed_ms >= DELEGATE_MIN_INTERVAL_MS) {
+                    // Remonté par la commande console `min` côté client :
+                    // profondeur minimale encore en attente dans la pile,
+                    // PAS placed_count (qui ne fait que croître le long du
+                    // chemin courant) — cf. bt_min_pending_depth ci-dessus.
+                    lastdepth[client->compteur] = bt_min_pending_depth(&board, stack, top);
                     // Un seul déclenchement possible par racine : la fonction
                     // retourne aussitôt, se repositionnant sur une nouvelle
                     // racine au prochain GET (voir shallow_root_abandon_depth,
@@ -1383,6 +1451,8 @@ static int autosearch_step(client_possibility_t *client,
     client->works = 0;
     pthread_mutex_unlock(&client->works_mutex);
     lastfilesize[client->compteur] = 0;
+    lastroot[client->compteur] = -1;
+    lastdepth[client->compteur] = -1;
 
     if (request == REQUEST_STOP) {
         return 0;
@@ -1556,6 +1626,8 @@ static int autoprune_step(client_possibility_t *client)
         a++;
     }
     lastfilesize[client->compteur] = 0;
+    lastroot[client->compteur] = -1;
+    lastdepth[client->compteur] = -1;
 
     if (request == REQUEST_STOP)
     {
@@ -1793,6 +1865,8 @@ void *autoprune_gpu (void *userdata)
             }
         }
         lastfilesize[client->compteur] = 0;
+        lastroot[client->compteur] = -1;
+        lastdepth[client->compteur] = -1;
 
         if (request == REQUEST_STOP)
         {

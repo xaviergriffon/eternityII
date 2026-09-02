@@ -60,6 +60,10 @@ unsigned long long *counters = NULL;
 
 unsigned long long *lastfilesize = NULL;
 
+int *lastroot = NULL;
+
+int *lastdepth = NULL;
+
 volatile uint16_t max_result = 0;
 
 /**

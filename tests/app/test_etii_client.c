@@ -244,6 +244,91 @@ TEST thread_queues_table_large_nb_threads_no_overflow(void)
     PASS();
 }
 
+/* ---------- build_thread_depth_table -------------------------------------- */
+
+/* Colonnes Racine/Min par fork, sentinelle -1 affichée `-`, ligne Min = plus
+ * petite valeur ignorant les sentinelles (pas juste le fork 0). */
+TEST thread_depth_table_shows_root_and_min_per_fork(void)
+{
+    int saved_nb = NB_THREADS;
+    struct client_statistics *saved = fork_statistics;
+    int saved_pfr = pruner_forks_requested;
+    int saved_pm = pruner_mode;
+
+    struct client_statistics fs[3];
+    memset(fs, 0, sizeof fs);
+    fs[0].root_depth = 6;  fs[0].min_pending_depth = 47;
+    fs[1].root_depth = 12; fs[1].min_pending_depth = -1; /* idle : aucune racine en attente */
+    fs[2].root_depth = -1; fs[2].min_pending_depth = -1; /* rôle pruner : jamais écrit */
+    NB_THREADS = 3;
+    fork_statistics = fs;
+    pruner_mode = 0;
+    pruner_forks_requested = 1; /* rang le plus haut (fork 2) : pruner -- forks 0,1 restent search */
+
+    char *t = build_thread_depth_table();
+    int header = (strstr(t, "Search depth") != NULL);
+    int row0   = (strstr(t, "   0 | search |      6 |   47") != NULL);
+    int row1   = (strstr(t, "   1 | search |     12 |    -") != NULL);
+    int row2   = (strstr(t, "   2 | prune  |      - |    -") != NULL);
+    int footer = (strstr(t, "Min  |        |      6 |   47") != NULL);
+    free(t);
+
+    fork_statistics = saved; NB_THREADS = saved_nb;
+    pruner_forks_requested = saved_pfr; pruner_mode = saved_pm;
+
+    ASSERT(header);
+    ASSERT(row0);
+    ASSERT(row1);
+    ASSERT(row2);
+    ASSERT(footer);
+    PASS();
+}
+
+/* fork_statistics == NULL (aucun fork démarré, WAITING_CONFIG/COUNTDOWN
+ * avant `start`) : contrairement à `check` (rapport déjà mis en cache),
+ * `min` lit l'état à l'instant T et doit gérer l'absence de données sans
+ * déréférencer un pointeur NULL -- crash réel reproduit par
+ * do_command_line_inspect_commands_run (tests/ui/test_command_lines.c), qui
+ * exécute `min` sans jamais avoir démarré de fork. */
+TEST thread_depth_table_no_forks_started_returns_placeholder(void)
+{
+    struct client_statistics *saved = fork_statistics;
+    fork_statistics = NULL;
+
+    char *t = build_thread_depth_table();
+    int ok = (t != NULL && strstr(t, "Search depth") != NULL);
+    free(t);
+
+    fork_statistics = saved;
+
+    ASSERT(ok);
+    PASS();
+}
+
+/* Aucun fork avec une racine/min connue : la ligne Min affiche `-` des deux
+ * côtés plutôt qu'un 0 trompeur. */
+TEST thread_depth_table_all_idle_shows_dash_footer(void)
+{
+    int saved_nb = NB_THREADS;
+    struct client_statistics *saved = fork_statistics;
+
+    struct client_statistics fs[2];
+    memset(fs, 0, sizeof fs);
+    fs[0].root_depth = -1; fs[0].min_pending_depth = -1;
+    fs[1].root_depth = -1; fs[1].min_pending_depth = -1;
+    NB_THREADS = 2;
+    fork_statistics = fs;
+
+    char *t = build_thread_depth_table();
+    int footer = (strstr(t, "Min  |        |      - |    -") != NULL);
+    free(t);
+
+    fork_statistics = saved; NB_THREADS = saved_nb;
+
+    ASSERT(footer);
+    PASS();
+}
+
 /* ---------- control_step ------------------------------------------------- */
 /*
  * control_step régule le débit via la globale `request`. Les tests sauvegardent
@@ -1444,6 +1529,9 @@ SUITE(etii_client_suite)
     RUN_TEST(thread_queues_table_aggregates_forks);
     RUN_TEST(thread_queues_table_shows_per_fork_role);
     RUN_TEST(thread_queues_table_large_nb_threads_no_overflow);
+    RUN_TEST(thread_depth_table_no_forks_started_returns_placeholder);
+    RUN_TEST(thread_depth_table_shows_root_and_min_per_fork);
+    RUN_TEST(thread_depth_table_all_idle_shows_dash_footer);
 
     RUN_TEST(control_step_unlimited_leaves_request);
     RUN_TEST(control_step_high_rate_pauses);

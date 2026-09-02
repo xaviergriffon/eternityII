@@ -83,7 +83,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 | `stockMemory` | Affiche le [plafond RAM du stock](utilisation.md#plafond-ram-du-stock---stock-max-ram) et l'occupation actuelle (Mo, possibilités) — deux pools comptés ensemble, jamais le pool analysé — ainsi que le [débordement sur disque](utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir) (toujours affiché, même à 0) et le total résident + déporté |
 | `stockMaxRam <mo>` | Fixe à chaud le [plafond RAM du stock](utilisation.md#plafond-ram-du-stock---stock-max-ram) (équivalent de `--stock-max-ram`) ; `<mo> <= 0` désactive le plafond (illimité) |
 | `spill [n]` | Déclenche immédiatement un pas de [débordement/rechargement sur disque](utilisation.md#débordement-sur-disque-du-stock---stock-spill-dir) — équivalent du tick automatique du thread de débordement (100 ms) ; `n` optionnel : budget de possibilités pour ce pas (défaut 4096) |
-| `min` | Affiche le niveau minimum dans les files |
+| `min` | Serveur : niveau minimum de pièces placées dans les files. Client/pruner : tableau « Search depth » par fork — profondeur de la racine reçue du serveur (Racine) et profondeur minimale ENCORE EN ATTENTE dans la pile de décisions (Min, PAS la profondeur du chemin en cours d'exploration). `-` : fork idle ou de rôle pruner. Non propagée aux forks (`send_to_childs = 0`) : seul le parent peut construire cette vue agrégée |
 
 ### Sauvegarde & restauration
 
@@ -124,7 +124,7 @@ Les commandes sont présentées ici par catégorie, comme dans `help`.
 
 Les commandes marquées comme « propagées aux enfants » (`backup`, `restore`,
 `removeNoNext`, `limit`, `maxStockByThread`, `shallowRootAbandonDepth`, `prunerBatch`,
-`prunerDfsBudget`, `min`, `printAnalysed`,
+`prunerDfsBudget`, `printAnalysed`,
 `pause`, `resume`) sont automatiquement retransmises à tous les processus fils via
 socket Unix. Les commandes `clients*` sont **serveur uniquement** : elles agissent sur
 le [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) distant, pas

@@ -23,6 +23,7 @@
 #include "app/server_config.h"
 #include "app/fork_orchestrator.h"
 #include "app/etii_server.h"
+#include "app/etii_client.h"
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
@@ -341,8 +342,18 @@ static command_description commands[NB_COMMANDS] = {
      "si elle redescend sous 25 % (jusqu'à remonter à 75 %). No-op silencieux\n"
      "sans --stock-max-ram (illimité) ou sans\n"
      "--stock-spill-dir utilisable (voir stockMemory pour l'état courant).", NULL},
-    {"min", min_interpreter, 1, CMD_CAT_STOCK, 0, NULL,
-     "affiche le niveau minimal de pièces placées dans les files", NULL, NULL},
+    {"min", min_interpreter, 0, CMD_CAT_STOCK, 0, "min",
+     "serveur : minimum de pièces placées dans les files ; client/pruner : profondeur par fork",
+     "Serveur : niveau minimal de pièces placées parmi les possibilités en stock\n"
+     "(search_min_datas, files du datamanager). Client/pruner : les files du\n"
+     "datamanager restent vides après fork (chaque fork explore en interne, cf.\n"
+     "AGENTS.md) -- affiche à la place un tableau \"Search depth\" par fork : la\n"
+     "profondeur de la racine reçue du serveur (Racine) et la profondeur minimale\n"
+     "ENCORE EN ATTENTE dans sa pile de décisions (Min) -- pas la profondeur du\n"
+     "chemin en cours d'exploration, qui ne fait que croître. `-` : fork idle ou\n"
+     "de rôle pruner. Jamais propagée aux forks (send_to_childs = 0) : le\n"
+     "process parent est la seule source de vérité pour ce tableau, un fork n'a\n"
+     "aucune vue sur ses frères.", NULL},
 
     {"backup", backup_interpreter, 1, CMD_CAT_BACKUP, 0, NULL,
      "sauvegarde les files dans les fichiers .back",
@@ -2463,10 +2474,26 @@ int spill_interpreter(void) {
     return 0;
 }
 
-/** @brief Interpréteur de `min` : affiche le nombre minimal de pièces placées parmi toutes les possibilités. */
+/**
+ * @brief Interpréteur de `min`.
+ *
+ * Serveur : nombre minimal de pièces placées parmi les possibilités
+ * actuellement en stock (`search_min_datas`, files du datamanager).
+ *
+ * Client/pruner : les files du datamanager restent vides après fork (chaque
+ * fork explore en interne, cf. AGENTS.md) — `search_min_datas` y serait donc
+ * toujours dégénéré. Affiche à la place le tableau « Search depth »
+ * (`build_thread_depth_table`, app/etii_client.c) : profondeur de la racine
+ * reçue et profondeur minimale ENCORE EN ATTENTE dans la pile, par fork.
+ */
 int min_interpreter(void) {
-    log_info("min : %i\n",search_min_datas());
-    
+    if (server) {
+        log_info("min : %i\n", search_min_datas());
+        return 0;
+    }
+    char *table = build_thread_depth_table();
+    log_info("%s", table);
+    free(table);
     return 0;
 }
 

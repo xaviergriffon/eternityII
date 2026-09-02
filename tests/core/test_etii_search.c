@@ -808,6 +808,14 @@ static void ensure_counters(void)
 {
     if (counters == NULL)     counters     = calloc(NB_THREADS, sizeof(*counters));
     if (lastfilesize == NULL) lastfilesize = calloc(NB_THREADS, sizeof(*lastfilesize));
+    if (lastroot == NULL) {
+        lastroot = malloc(NB_THREADS * sizeof(*lastroot));
+        for (int i = 0; i < NB_THREADS; i++) lastroot[i] = -1;
+    }
+    if (lastdepth == NULL) {
+        lastdepth = malloc(NB_THREADS * sizeof(*lastdepth));
+        for (int i = 0; i < NB_THREADS; i++) lastdepth[i] = -1;
+    }
 }
 
 /* idParts comme dans autosearch : idParts[p][r] = p + ETERN_PARTS*r. */
@@ -1697,6 +1705,52 @@ TEST bt_delegate_hunger_moves_below_threshold(void)
     if (client.delegate_buf != NULL) free(client.delegate_buf);
     __atomic_store_n(&server_hunger, 0, __ATOMIC_RELAXED);
     drain_local();
+    PASS();
+}
+
+/* bt_min_pending_depth : le niveau 0 (le moins profond) a encore un candidat
+ * non essayé (id 2) alors que le chemin courant est déjà au niveau 1 (2
+ * pièces posées) -- la profondeur minimale en attente (1) doit être TROUVÉE,
+ * pas confondue avec placed_count (2). C'est exactement le cas que placed_count
+ * seul manquait : le fil peut détenir plus superficiel que sa position courante. */
+TEST bt_min_pending_depth_finds_shallowest_level(void)
+{
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+
+    ASSERT_EQ_FMT(1, bt_min_pending_depth(&board, stack, top), "%d");
+    PASS();
+}
+
+/* bt_min_pending_depth : niveau 0 ÉPUISÉ (plus aucun candidat, next_s == size)
+ * -- le parcours doit continuer au niveau 1 plutôt que de s'arrêter, et
+ * trouver son candidat restant (id 5), donnant la même profondeur que le
+ * chemin courant (2) puisque rien de plus superficiel n'existe. */
+TEST bt_min_pending_depth_skips_exhausted_shallow_level(void)
+{
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+    stack[0].next_s = stack[0].search->size; /* niveau 0 épuisé : id 2,3 déjà essayés ailleurs */
+
+    ASSERT_EQ_FMT(2, bt_min_pending_depth(&board, stack, top), "%d");
+    PASS();
+}
+
+/* bt_min_pending_depth : les DEUX niveaux épuisés -- rien en attente, -1. */
+TEST bt_min_pending_depth_returns_minus_one_when_nothing_pending(void)
+{
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+    stack[0].next_s = stack[0].search->size;
+    stack[1].next_s = stack[1].search->size;
+
+    ASSERT_EQ_FMT(-1, bt_min_pending_depth(&board, stack, top), "%d");
     PASS();
 }
 
@@ -3626,6 +3680,9 @@ SUITE(etii_search_suite)
     RUN_TEST(abandon_shallow_root_not_deep_enough_yet);
     RUN_TEST(abandon_shallow_root_triggers_at_boundary);
     RUN_TEST(bt_delegate_hunger_moves_below_threshold);
+    RUN_TEST(bt_min_pending_depth_finds_shallowest_level);
+    RUN_TEST(bt_min_pending_depth_skips_exhausted_shallow_level);
+    RUN_TEST(bt_min_pending_depth_returns_minus_one_when_nothing_pending);
     RUN_TEST(bt_flush_pending_sends_all_plus_current);
     RUN_TEST(bt_abandon_shallow_root_flushes_and_counts);
     RUN_TEST(bt_flush_error_reputs_locally);

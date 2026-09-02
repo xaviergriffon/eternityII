@@ -603,6 +603,59 @@ char *build_thread_queues_table(unsigned long long *out_stock,
     return table;
 }
 
+/** @brief Formate une profondeur pour `build_thread_depth_table` : `-1` -> "-". */
+static void format_depth(int depth, char out[8])
+{
+    if (depth >= 0) {
+        snprintf(out, 8, "%d", depth);
+    } else {
+        snprintf(out, 8, "-");
+    }
+}
+
+char *build_thread_depth_table(void)
+{
+    if (fork_statistics == NULL) {
+        // Aucun fork démarré (WAITING_CONFIG/COUNTDOWN, avant `start`) :
+        // fork_statistics n'est alloué que par init_counters, appelée juste
+        // avant le premier fork() réel. Contrairement à `check` (qui affiche
+        // un rapport déjà mis en cache par le thread périodique, jamais
+        // avant sa première publication), cette commande lit l'état à
+        // l'instant T -- doit donc gérer explicitement l'absence de données.
+        return strdup("Search depth\n(aucun fork démarré)\n");
+    }
+    size_t size = 256 + (size_t)NB_THREADS * 40;
+    char *table = calloc(size, sizeof(char));
+    int off = snprintf(table, size,
+        "Search depth\n"
+        "Fork | Type   | Racine |  Min\n"
+        "-----+--------+--------+-----\n");
+    int min_root = -1, min_pending = -1;
+    for (int f = 0; f < NB_THREADS; f++) {
+        int root = fork_statistics[f].root_depth;
+        int pending = fork_statistics[f].min_pending_depth;
+        const char *role = (current_fork_role(f) == FORK_ROLE_PRUNE) ? "prune " : "search";
+        char root_buf[8], pending_buf[8];
+        format_depth(root, root_buf);
+        format_depth(pending, pending_buf);
+        off += snprintf(table + off, size - off,
+                        "%4i | %s | %6s | %4s\n", f, role, root_buf, pending_buf);
+        if (root >= 0 && (min_root < 0 || root < min_root)) {
+            min_root = root;
+        }
+        if (pending >= 0 && (min_pending < 0 || pending < min_pending)) {
+            min_pending = pending;
+        }
+    }
+    char min_root_buf[8], min_pending_buf[8];
+    format_depth(min_root, min_root_buf);
+    format_depth(min_pending, min_pending_buf);
+    snprintf(table + off, size - off,
+             "-----+--------+--------+-----\n"
+             "Min  |        | %6s | %4s\n", min_root_buf, min_pending_buf);
+    return table;
+}
+
 /**
  * @brief Un tour de la boucle de `check_client_threads` (corps extrait pour être
  *        testable hors thread, comme `check_server_step`).

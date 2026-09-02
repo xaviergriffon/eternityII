@@ -427,13 +427,19 @@ int init_counters(void)
 	// tampon.
 	free(counters);
 	free(lastfilesize);
+	free(lastroot);
+	free(lastdepth);
 	counters = malloc(sizeof(unsigned long long) * NB_THREADS);
 	lastfilesize = malloc(sizeof(unsigned long long) * NB_THREADS);
-	
+	lastroot = malloc(sizeof(int) * NB_THREADS);
+	lastdepth = malloc(sizeof(int) * NB_THREADS);
+
 	for(int c = 0; c < NB_THREADS;c++)
 	{
 		counters[c] = 0;
 		lastfilesize[c] = 0;
+		lastroot[c] = -1;
+		lastdepth[c] = -1;
 	}
 
 	return 0;
@@ -1125,8 +1131,20 @@ void *fork_checker(void *param) {
 	while((request != REQUEST_STOP || server_io_active) && fork_checker_socket_id > 0) {
         unsigned long long counter = 0;
         unsigned long long possibilities_in_stock = 0;
+        // Minimum ignorant la sentinelle -1 (idle/rôle pruner) : un seul fil
+        // de recherche par fork en production, mais généralise correctement
+        // au mode mono-processus (DEBUG_IN_MONO_PROCESS, plusieurs fils
+        // réels dans un même process) où plusieurs cases peuvent être écrites.
+        int min_root_depth = -1;
+        int min_pending_depth = -1;
         for (t = 0; t < NB_THREADS; t++) {
             counter += counters[t];
+            if (lastroot[t] >= 0 && (min_root_depth < 0 || lastroot[t] < min_root_depth)) {
+                min_root_depth = lastroot[t];
+            }
+            if (lastdepth[t] >= 0 && (min_pending_depth < 0 || lastdepth[t] < min_pending_depth)) {
+                min_pending_depth = lastdepth[t];
+            }
             possibilities_in_stock += lastfilesize[t];
         }
         unsigned long long sps = 0;
@@ -1219,6 +1237,10 @@ void *fork_checker(void *param) {
         // cf. core_static_variables.h) : indépendant du forward-checking, pas
         // conditionné par FORWARD_CHECK_K.
         statistic->shallow_root_abandoned = __atomic_load_n(&shallow_root_abandoned, __ATOMIC_RELAXED);
+        // Remontés par la commande console `min` côté client (voir
+        // build_thread_depth_table, app/etii_client.c).
+        statistic->root_depth = min_root_depth;
+        statistic->min_pending_depth = min_pending_depth;
         /* On préfixe le datagramme d'un octet de type pour permettre au
            parent de multiplexer stats / logs / événements sur le même
            socket. Voir ipc_protocol.h. */

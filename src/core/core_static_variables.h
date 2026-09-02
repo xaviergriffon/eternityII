@@ -387,6 +387,33 @@ extern volatile unsigned long long pruner_dfs_nodes;
 extern unsigned long long *counters;
 extern unsigned long long *lastfilesize;
 
+/**
+ * @brief Profondeur (pièces posées) de la racine REÇUE du serveur par chaque
+ *        fil de recherche, un élément par indice `client->compteur`.
+ *
+ * Figée une fois par racine (jamais réévaluée en cours d'étude) — voir
+ * `root_depth`, `search_packet_backtracking_mrv` (core/etii_search.c).
+ * Sentinelle `-1` : aucune racine en cours d'étude par ce fil (idle, ou rôle
+ * pruner). Alloué/remis à zéro par `init_counters` (app/app_runtime.c),
+ * remonté au parent via `client_statistics.root_depth`.
+ */
+extern int *lastroot;
+
+/**
+ * @brief Profondeur minimale parmi les possibilités encore en attente dans
+ *        la pile de décisions de chaque fil de recherche (`bt_min_pending_depth`,
+ *        core/etii_search.c), un élément par indice `client->compteur`.
+ *
+ * PAS la profondeur du chemin courant (`placed_count`) : celle-ci ne fait
+ * que croître le long d'une seule branche et peut donc être largement
+ * supérieure à ce qu'un fil détient encore de plus superficiel — précisément
+ * le stock implicite que `bt_count_pending`/`bt_materialize_pending` cèdent
+ * au serveur. Sentinelle `-1` : rien en attente (idle, rôle pruner, ou
+ * juste avant `BT_CORE_EXHAUSTED`). Alloué/remis à zéro par `init_counters`
+ * (app/app_runtime.c), remonté au parent via `client_statistics.min_pending_depth`.
+ */
+extern int *lastdepth;
+
 extern volatile uint16_t max_result;
 
 /**
