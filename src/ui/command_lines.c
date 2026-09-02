@@ -1299,7 +1299,12 @@ int checkdatas_interpreter(void) {
     return check_datas();
 }
 
-/** @brief Interpréteur de `checkDuplicate` : recherche et supprime les doublons dans les files. */
+/** @brief Interpréteur de `checkDuplicate` : recherche et supprime les doublons dans les files.
+ *  Balaie les deux pools (non vérifié et vérifié) — adressés comme une seule
+ *  séquence virtuelle de `2 * nb_file_possibility` files, cf. `duplicate_pool_at`
+ *  dans `core/datamanager.c` — donc détecte aussi un doublon scindé entre les
+ *  deux pools ou logé entièrement dans le pool vérifié, invisible avant ce
+ *  correctif. */
 int check_duplicate_interpreter(void) {
     return check_duplicate();
 }
