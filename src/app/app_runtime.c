@@ -154,8 +154,9 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Serveur (défaut ./eternityii-server.conf) : clés nb_threads, parts_file,\n"
 	  "expand_level, expand_max_stock, expand_max_levels, http_port, http_token_file,\n"
 	  "stock_files, stock_max_ram, stock_spill_dir, rebalance_budget, tcp_timeout,\n"
-	  "auto_roles, stop_on_solution, headless. Lu une seule fois, de façon synchrone,\n"
-	  "avant le démarrage du serveur -- pas d'orchestrateur différé, pas de configApply\n"
+	  "sort_enabled, sort_interval, sort_direction, auto_roles, stop_on_solution,\n"
+	  "headless. Lu une seule fois, de façon synchrone, avant le démarrage du\n"
+	  "serveur -- pas d'orchestrateur différé, pas de configApply\n"
 	  "(pas de configuration \"en préparation\" à appliquer à chaud) ; config/configSave\n"
 	  "fonctionnent en revanche côté serveur (affichage/persistance de la config\n"
 	  "effective), mais \"config <clé> <valeur>\" y est refusée.\n"
@@ -234,6 +235,28 @@ static const cli_help_topic_t cli_topics[] = {
 	  "à un redémarrage (purge au démarrage, tant que la cohérence sauvegarde/\n"
 	  "restauration n'est pas livrée) : sauvegarder (backup) avant tout arrêt\n"
 	  "pour ne rien perdre. Réglage immédiat via la commande console `spill [n]`." },
+	{ "--sort-enabled",
+	  "--sort-enabled",
+	  "Serveur : active le tri périodique du stock par file (désactivé par défaut).",
+	  "Défaut désactivée — opt-in, comme --auto-roles. Une fois activée, un thread\n"
+	  "dédié (même modèle que le thread d'élagage automatique removeNoNext) appelle\n"
+	  "sortAscFiles/sortDescFiles (selon --sort-direction) toutes les\n"
+	  "--sort-interval secondes. Trie CHAQUE file EN PLACE, SANS regroupement\n"
+	  "(contrairement à sortAsc/sortDesc, qui fusionnent tout dans la file 0) :\n"
+	  "préserve la distribution round-robin entre files. Suspendu tant qu'un\n"
+	  "client est connecté (même garde-fou que removeNoNext) pour ne pas\n"
+	  "concurrencer l'alimentation des files." },
+	{ "--sort-interval",
+	  "--sort-interval <n>",
+	  "Serveur : intervalle (secondes) entre deux passes de tri périodique.",
+	  "Défaut SORT_PERIODIC_INTERVAL_DEFAULT (60). Sans effet si --sort-enabled\n"
+	  "n'est pas activée (le thread n'est alors jamais démarré). Valeur absente\n"
+	  "ou <= 0 : ignorée (garde le défaut)." },
+	{ "--sort-direction",
+	  "--sort-direction <asc|desc>",
+	  "Serveur : sens du tri périodique (asc ou desc, défaut asc).",
+	  "Valeur absente ou ni \"asc\" ni \"desc\" : ignorée (garde le défaut ou la\n"
+	  "valeur déjà fixée)." },
 	{ "--tcp-timeout",
 	  "--tcp-timeout <n>",
 	  "Serveur et client/pruner : timeout d'inactivité (secondes) des sockets TCP de travail.",
@@ -375,8 +398,11 @@ int format_cli_help_topic(const char *name, char *buf, size_t bufsz)
 	return (int)len;
 }
 
-/* Taille suffisante pour l'aide générale complète (la plus longue des sorties). */
-#define CLI_HELP_BUF_SIZE 4096
+/* Taille suffisante pour l'aide générale complète (la plus longue des sorties).
+ * Relevée de 4096 à 6144 lors de l'ajout de --sort-enabled/--sort-interval/
+ * --sort-direction : la liste générale (usage + résumé d'une ligne par sujet)
+ * dépassait alors 4096 octets, tronquant silencieusement la dernière ligne. */
+#define CLI_HELP_BUF_SIZE 6144
 
 void print_cli_help(void)
 {

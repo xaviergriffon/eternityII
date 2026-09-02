@@ -168,6 +168,64 @@ TEST parse_line_boolean_keys_reject_other_values(void)
     PASS();
 }
 
+TEST parse_line_sort_enabled_accepts_zero_and_one(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("sort_enabled = 1\n", &cfg), "%d");
+    ASSERT_EQ_FMT(1, cfg.has_sort_enabled, "%d");
+    ASSERT_EQ_FMT(1, cfg.sort_enabled, "%d");
+    PASS();
+}
+
+TEST parse_line_sort_enabled_rejects_other_values(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("sort_enabled = 2\n", &cfg), "%d");
+    PASS();
+}
+
+TEST parse_line_sort_interval_valid(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("sort_interval = 120\n", &cfg), "%d");
+    ASSERT_EQ_FMT(1, cfg.has_sort_interval, "%d");
+    ASSERT_EQ_FMT(120, cfg.sort_interval, "%d");
+    PASS();
+}
+
+TEST parse_line_sort_interval_zero_or_negative_is_invalid(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("sort_interval = 0\n", &cfg), "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("sort_interval = -1\n", &cfg), "%d");
+    PASS();
+}
+
+TEST parse_line_sort_direction_accepts_asc_and_desc(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("sort_direction = desc\n", &cfg), "%d");
+    ASSERT_EQ_FMT(1, cfg.has_sort_direction, "%d");
+    ASSERT_EQ_FMT(SORT_DIRECTION_DESC, cfg.sort_direction, "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("sort_direction = asc\n", &cfg), "%d");
+    ASSERT_EQ_FMT(SORT_DIRECTION_ASC, cfg.sort_direction, "%d");
+    PASS();
+}
+
+TEST parse_line_sort_direction_rejects_other_values(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("sort_direction = bogus\n", &cfg), "%d");
+    ASSERT_EQ_FMT(0, cfg.has_sort_direction, "%d");
+    PASS();
+}
+
 /* ------------------------------ server_config_load ------------------------- */
 
 TEST load_missing_file_is_absent_not_an_error(void)
@@ -209,6 +267,9 @@ TEST load_valid_file_sets_all_keys(void)
     fputs("auto_roles        = 1\n", f);
     fputs("stop_on_solution  = 1\n", f);
     fputs("headless          = 1\n", f);
+    fputs("sort_enabled      = 1\n", f);
+    fputs("sort_interval     = 90\n", f);
+    fputs("sort_direction    = desc\n", f);
     fclose(f);
 
     server_config_t cfg;
@@ -230,6 +291,9 @@ TEST load_valid_file_sets_all_keys(void)
     ASSERT_EQ_FMT(1, cfg.auto_roles, "%d");
     ASSERT_EQ_FMT(1, cfg.stop_on_solution, "%d");
     ASSERT_EQ_FMT(1, cfg.headless, "%d");
+    ASSERT_EQ_FMT(1, cfg.sort_enabled, "%d");
+    ASSERT_EQ_FMT(90, cfg.sort_interval, "%d");
+    ASSERT_EQ_FMT(SORT_DIRECTION_DESC, cfg.sort_direction, "%d");
 
     server_config_free(&cfg);
     unlink(path);
@@ -289,6 +353,26 @@ TEST format_includes_only_present_keys(void)
     ASSERT(strstr(buf, "tcp_timeout") != NULL);
     ASSERT(strstr(buf, "http_port") == NULL);
     ASSERT(strstr(buf, "parts_file") == NULL);
+    PASS();
+}
+
+TEST format_includes_sort_direction_as_text(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    cfg.has_sort_enabled = 1;
+    cfg.sort_enabled = 1;
+    cfg.has_sort_interval = 1;
+    cfg.sort_interval = 90;
+    cfg.has_sort_direction = 1;
+    cfg.sort_direction = SORT_DIRECTION_DESC;
+
+    char buf[256];
+    int n = server_config_format(&cfg, buf, sizeof(buf));
+    ASSERT(n > 0);
+    ASSERT(strstr(buf, "sort_enabled       = 1") != NULL);
+    ASSERT(strstr(buf, "sort_interval      = 90") != NULL);
+    ASSERT(strstr(buf, "sort_direction     = desc") != NULL);
     PASS();
 }
 
@@ -449,6 +533,52 @@ TEST apply_pre_dispatch_expand_max_stock_uses_file_value_only_at_default(void)
     PASS();
 }
 
+/* server_sort_enabled/server_sort_interval/server_sort_direction sont des
+   globales partagées avec le reste de la suite -- restaurées à leur défaut
+   après coup pour ne pas polluer les tests suivants. */
+TEST apply_pre_dispatch_sort_options_use_file_value_when_global_is_default(void)
+{
+    server_sort_enabled = 0;
+    server_sort_interval = SORT_PERIODIC_INTERVAL_DEFAULT;
+    server_sort_direction = SORT_DIRECTION_ASC;
+
+    server_config_t cfg;
+    server_config_init(&cfg);
+    cfg.has_sort_enabled = 1;
+    cfg.sort_enabled = 1;
+    cfg.has_sort_interval = 1;
+    cfg.sort_interval = 120;
+    cfg.has_sort_direction = 1;
+    cfg.sort_direction = SORT_DIRECTION_DESC;
+
+    server_config_apply_pre_dispatch(&cfg);
+
+    ASSERT_EQ_FMT(1, server_sort_enabled, "%d");
+    ASSERT_EQ_FMT(120, server_sort_interval, "%d");
+    ASSERT_EQ_FMT(SORT_DIRECTION_DESC, server_sort_direction, "%d");
+
+    server_sort_enabled = 0;
+    server_sort_interval = SORT_PERIODIC_INTERVAL_DEFAULT;
+    server_sort_direction = SORT_DIRECTION_ASC;
+    PASS();
+}
+
+TEST apply_pre_dispatch_sort_interval_leaves_cli_value_untouched_when_already_provided(void)
+{
+    server_sort_interval = 45;
+
+    server_config_t cfg;
+    server_config_init(&cfg);
+    cfg.has_sort_interval = 1;
+    cfg.sort_interval = 120;
+
+    server_config_apply_pre_dispatch(&cfg);
+    ASSERT_EQ_FMT(45, server_sort_interval, "%d");
+
+    server_sort_interval = SORT_PERIODIC_INTERVAL_DEFAULT;
+    PASS();
+}
+
 TEST apply_to_globals_uses_file_nb_threads_when_cli_did_not_provide_it(void)
 {
     NB_THREADS = 80;
@@ -513,6 +643,12 @@ SUITE(server_config_suite)
     RUN_TEST(parse_line_stock_spill_dir_valid);
     RUN_TEST(parse_line_boolean_keys_accept_zero_and_one);
     RUN_TEST(parse_line_boolean_keys_reject_other_values);
+    RUN_TEST(parse_line_sort_enabled_accepts_zero_and_one);
+    RUN_TEST(parse_line_sort_enabled_rejects_other_values);
+    RUN_TEST(parse_line_sort_interval_valid);
+    RUN_TEST(parse_line_sort_interval_zero_or_negative_is_invalid);
+    RUN_TEST(parse_line_sort_direction_accepts_asc_and_desc);
+    RUN_TEST(parse_line_sort_direction_rejects_other_values);
 
     RUN_TEST(load_missing_file_is_absent_not_an_error);
     RUN_TEST(load_null_path_is_absent);
@@ -521,6 +657,7 @@ SUITE(server_config_suite)
 
     RUN_TEST(format_empty_config_produces_empty_string);
     RUN_TEST(format_includes_only_present_keys);
+    RUN_TEST(format_includes_sort_direction_as_text);
     RUN_TEST(format_truncates_safely_on_small_buffer);
 
     RUN_TEST(save_load_round_trip_preserves_values);
@@ -529,6 +666,8 @@ SUITE(server_config_suite)
     RUN_TEST(apply_pre_dispatch_uses_file_value_when_global_is_default);
     RUN_TEST(apply_pre_dispatch_leaves_cli_value_untouched_when_already_provided);
     RUN_TEST(apply_pre_dispatch_expand_max_stock_uses_file_value_only_at_default);
+    RUN_TEST(apply_pre_dispatch_sort_options_use_file_value_when_global_is_default);
+    RUN_TEST(apply_pre_dispatch_sort_interval_leaves_cli_value_untouched_when_already_provided);
     RUN_TEST(apply_to_globals_uses_file_nb_threads_when_cli_did_not_provide_it);
     RUN_TEST(apply_to_globals_leaves_cli_nb_threads_untouched_when_already_provided);
     RUN_TEST(apply_to_globals_uses_file_parts_file_when_cli_did_not_provide_it);

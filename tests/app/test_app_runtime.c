@@ -427,7 +427,7 @@ TEST failed_arg_prints_usage(void)
    mode ET chaque option), dans un tampon assez grand pour ne rien tronquer. */
 TEST cli_help_general_lists_every_topic(void)
 {
-    char buf[4096];
+    char buf[6144]; /* même taille que CLI_HELP_BUF_SIZE (src/app/app_runtime.c) */
     int len = format_cli_help(buf, sizeof buf);
     ASSERT(len > 0);
     ASSERT(len < (int)sizeof buf - 1); /* non tronquée */

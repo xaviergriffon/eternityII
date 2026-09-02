@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--sort-enabled] [--sort-interval N] [--sort-direction asc|desc] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -40,6 +40,9 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--rebalance-budget N` | `REBALANCE_BUDGET_DEFAULT` (1000) | Nombre de possibilités rééquilibrées entre files à chaque tour serveur (10 s) — voir ci-dessous |
 | `--stock-max-ram N` | *(absent, illimité)* | Plafond en Mo des DEUX pools de stock (non vérifié + vérifié) — voir ci-dessous |
 | `--stock-spill-dir CHEMIN` | `./eternityii-spill` | Répertoire de débordement sur disque une fois `--stock-max-ram` approché — voir ci-dessous |
+| `--sort-enabled` | *(absente, désactivée)* | Active le tri périodique du stock par file — voir ci-dessous |
+| `--sort-interval N` | `SORT_PERIODIC_INTERVAL_DEFAULT` (60) | Intervalle en secondes entre deux passes de tri périodique ; sans effet si `--sort-enabled` est absent |
+| `--sort-direction asc\|desc` | `asc` | Sens du tri périodique |
 | `--auto-roles` | *(absente, désactivée)* | Active la politique automatique de dosage recherche/contrôle du parc — voir ci-dessous |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
 | `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `shallowRootAbandonDepth`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
@@ -56,6 +59,7 @@ Exemples :
 ./eternityII server 80 --stock-files 32 --rebalance-budget 5000 data/pieces.csv
 ./eternityII server 80 --stock-max-ram 4096 data/pieces.csv
 ./eternityII server 80 --stock-max-ram 4096 --stock-spill-dir /var/lib/eternityii/spill data/pieces.csv
+./eternityII server 80 --sort-enabled --sort-interval 120 --sort-direction desc data/pieces.csv
 ./eternityII server 80 --http-port 8080 data/pieces.csv
 ./eternityII server 80 --http-port 8080 --http-token-file /etc/eternityii/http-token data/pieces.csv
 ./eternityII server --config-file /etc/eternityii/server.conf
@@ -98,6 +102,9 @@ stock_max_ram      = 4096
 stock_spill_dir    = /var/lib/eternityii/spill
 rebalance_budget   = 5000
 tcp_timeout        = 20
+sort_enabled       = 1
+sort_interval      = 120
+sort_direction     = desc
 auto_roles         = 1
 stop_on_solution   = 0
 headless           = 1
@@ -105,9 +112,10 @@ headless           = 1
 
 `nb_threads` et `parts_file` correspondent aux paramètres positionnels
 (`server [nb_threads] [pieces.csv]`) ; toutes les autres clés correspondent à
-l'option CLI de même nom (`stop_on_solution`/`headless`/`auto_roles` valent `0`
-ou `1`). Une ligne à clé inconnue ou à valeur invalide est journalisée (avertissement)
-puis ignorée, le chargement continue avec les lignes suivantes.
+l'option CLI de même nom (`stop_on_solution`/`headless`/`auto_roles`/`sort_enabled`
+valent `0` ou `1` ; `sort_direction` vaut `asc` ou `desc`). Une ligne à clé inconnue
+ou à valeur invalide est journalisée (avertissement) puis ignorée, le chargement
+continue avec les lignes suivantes.
 
 ### Maîtrise de la charge serveur (`--stock-files`, `--rebalance-budget`, `--tcp-timeout`)
 
@@ -157,6 +165,29 @@ sauvegarde effectivement exécutée est exposée par `GET /api/v1/status`
 > slot du **même** pool. Un serveur dimensionné au plus juste doit compter
 > (connexions de travail simultanées) **+** (processus clients connectés), pas
 > seulement le premier terme. Le défaut (80) laisse une large marge.
+
+### Tri périodique du stock (`--sort-enabled`)
+
+`--sort-enabled` active un thread dédié qui trie **chaque file** du stock, à intervalle
+régulier (`--sort-interval`, défaut 60 s), dans le sens choisi par `--sort-direction`
+(`asc` par défaut, ou `desc`). Comme le thread d'élagage automatique `removeNoNext`
+(voir [Console interactive](console.md#stock--files)), il est suspendu tant qu'au moins
+un client est connecté — le tri verrouille les files, il ne doit pas concurrencer leur
+alimentation — et reprend dès que le serveur redevient inactif.
+
+Le tri se fait **file par file, sans regroupement** (même comportement que la commande
+console `sortAscFiles`/`sortDescFiles`) : chaque file reste à sa taille d'origine, la
+distribution round-robin entre files (voir ci-dessus) n'est pas perturbée — contrairement
+à `sortAsc`/`sortDesc`, qui fusionnent tout dans la file 0 avant de trier et sont donc
+réservées à un appel console manuel.
+
+Désactivé par défaut (opt-in, comme `--auto-roles`) : aucun thread supplémentaire n'est
+démarré sans demande explicite. `--sort-interval` et `--sort-direction` sont sans effet
+tant que `--sort-enabled` est absent.
+
+```sh
+./eternityII server 80 --sort-enabled --sort-interval 120 --sort-direction desc data/pieces.csv
+```
 
 ### Plafond RAM du stock (`--stock-max-ram`)
 

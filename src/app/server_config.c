@@ -189,6 +189,28 @@ server_config_line_status_t server_config_parse_line(const char *line, server_co
         }
         cfg->has_headless = 1;
         cfg->headless = n;
+    } else if (strcmp(key, "sort_enabled") == 0) {
+        if (parse_int(value, 0, 1, &n) != 0) {
+            return SERVER_CONFIG_LINE_INVALID_VALUE;
+        }
+        cfg->has_sort_enabled = 1;
+        cfg->sort_enabled = n;
+    } else if (strcmp(key, "sort_interval") == 0) {
+        if (parse_int(value, 1, INT_MAX, &n) != 0) {
+            return SERVER_CONFIG_LINE_INVALID_VALUE;
+        }
+        cfg->has_sort_interval = 1;
+        cfg->sort_interval = n;
+    } else if (strcmp(key, "sort_direction") == 0) {
+        if (strcmp(value, "asc") == 0) {
+            n = SORT_DIRECTION_ASC;
+        } else if (strcmp(value, "desc") == 0) {
+            n = SORT_DIRECTION_DESC;
+        } else {
+            return SERVER_CONFIG_LINE_INVALID_VALUE;
+        }
+        cfg->has_sort_direction = 1;
+        cfg->sort_direction = n;
     } else {
         return SERVER_CONFIG_LINE_UNKNOWN_KEY;
     }
@@ -295,6 +317,15 @@ int server_config_format(const server_config_t *cfg, char *out, size_t out_size)
     }
     if (cfg->has_headless) {
         APPEND("headless           = %d\n", cfg->headless);
+    }
+    if (cfg->has_sort_enabled) {
+        APPEND("sort_enabled       = %d\n", cfg->sort_enabled);
+    }
+    if (cfg->has_sort_interval) {
+        APPEND("sort_interval      = %d\n", cfg->sort_interval);
+    }
+    if (cfg->has_sort_direction) {
+        APPEND("sort_direction     = %s\n", cfg->sort_direction == SORT_DIRECTION_DESC ? "desc" : "asc");
     }
 #undef APPEND
 
@@ -407,6 +438,15 @@ void server_config_apply_pre_dispatch(const server_config_t *cfg)
     if (cfg->has_headless && headless_mode == 0) {
         headless_mode = cfg->headless;
     }
+    if (cfg->has_sort_enabled && server_sort_enabled == 0) {
+        server_sort_enabled = cfg->sort_enabled;
+    }
+    if (cfg->has_sort_interval && server_sort_interval == SORT_PERIODIC_INTERVAL_DEFAULT) {
+        server_sort_interval = cfg->sort_interval;
+    }
+    if (cfg->has_sort_direction && server_sort_direction == SORT_DIRECTION_ASC) {
+        server_sort_direction = cfg->sort_direction;
+    }
 }
 
 void server_config_capture_effective(server_config_t *out)
@@ -467,6 +507,15 @@ void server_config_capture_effective(server_config_t *out)
 
     out->has_headless = 1;
     out->headless = headless_mode ? 1 : 0;
+
+    out->has_sort_enabled = 1;
+    out->sort_enabled = server_sort_enabled ? 1 : 0;
+
+    out->has_sort_interval = 1;
+    out->sort_interval = server_sort_interval;
+
+    out->has_sort_direction = 1;
+    out->sort_direction = server_sort_direction;
 }
 
 void server_config_apply_to_globals(const server_config_t *cfg, int cli_gave_nb_threads, int cli_gave_parts_file)

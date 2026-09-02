@@ -1679,6 +1679,58 @@ void create_rmnonext_thread(void) {
 }
 
 /**
+ * @brief Une passe de tri périodique du stock par file (corps de boucle de
+ *        `sort_periodic_thread`, extrait pour être testable hors thread).
+ *
+ * Trie chaque file du stock EN PLACE (`sort_ascending_files`/
+ * `sort_descending_files` selon `server_sort_direction`), SANS regroupement —
+ * préserve la distribution round-robin entre files (contrairement à
+ * `sort_ascending`/`sort_descending`, réservées à un appel console manuel).
+ * Comme `rmnonext_pass`, suspendue tant qu'un client est connecté : le tri
+ * verrouille les files, il ne doit pas concurrencer leur alimentation.
+ */
+void sort_periodic_pass(void)
+{
+    if (get_active_threads(thread_params) <= 0) {
+        if (server_sort_direction == SORT_DIRECTION_DESC) {
+            sort_descending_files();
+        } else {
+            sort_ascending_files();
+        }
+    }
+}
+
+void *sort_periodic_thread(void *param) {
+    (void)param;
+    while (request != REQUEST_STOP) {
+        sort_periodic_pass();
+        sleep(server_sort_interval);
+    }
+    return NULL;
+}
+
+/**
+ * @brief Démarre le thread de tri périodique en mode détaché — même motif
+ *        que `create_rmnonext_thread` ci-dessus. N'est appelé (voir
+ *        `runserver`) que si `server_sort_enabled` est actif : opt-in,
+ *        désactivé par défaut.
+ */
+void create_sort_periodic_thread(void) {
+    pthread_attr_t *thread_attributes = malloc(sizeof *thread_attributes);
+    pthread_attr_init(thread_attributes);
+    pthread_attr_setdetachstate(thread_attributes, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    if(0 != pthread_create(&thread, thread_attributes, sort_periodic_thread, NULL))
+    {
+        log_error("create_sort_periodic_thread : Problème avec pthread_create()\n");
+        free(thread_attributes);
+        exit(EXIT_FAILURE);
+    }
+    pthread_attr_destroy(thread_attributes);
+    free(thread_attributes);
+}
+
+/**
  * @brief Boucle du thread de débordement sur disque (`core/
  *        stock_spill.h`) : un pas incrémental toutes les 100 ms.
  *
@@ -1906,6 +1958,16 @@ void runserver(const char* file)
 
     // Demarrage d'un thread de nettoyage des possibilités sans suite
     create_rmnonext_thread();
+
+    // Tri périodique du stock par file (option --sort-enabled) : désactivé
+    // par défaut, aucun thread démarré sans demande explicite (le serveur
+    // n'a pas de reconfiguration à chaud, cf. server_config.h).
+    if (server_sort_enabled) {
+        log_event("tri périodique du stock activé (intervalle %ds, sens %s)",
+                   server_sort_interval,
+                   server_sort_direction == SORT_DIRECTION_DESC ? "desc" : "asc");
+        create_sort_periodic_thread();
+    }
 
     init_server_thread_pool(rotateParts);
 

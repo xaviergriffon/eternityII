@@ -85,6 +85,16 @@
 // tour entier sur un rééquilibrage complet.
 #define REBALANCE_BUDGET_DEFAULT 1000
 
+// Tri périodique du stock par file (option `--sort-enabled`, désactivée par
+// défaut) : intervalle par DÉFAUT (secondes) entre deux passes, variable
+// globale `server_sort_interval`, configurable via `--sort-interval <n>`.
+#define SORT_PERIODIC_INTERVAL_DEFAULT 60
+
+// Sens du tri périodique (variable globale `server_sort_direction`,
+// configurable via `--sort-direction <asc|desc>`, défaut ASC).
+#define SORT_DIRECTION_ASC 0
+#define SORT_DIRECTION_DESC 1
+
 // Politique automatique de dosage recherche/contrôle (option `--auto-roles`).
 // Chaque changement de dosage coûte un stopForks+re-fork chez le(s)
 // client(s) visé(s) : un délai minimal entre deux changements (en tours de
@@ -567,6 +577,33 @@ extern int tcp_timeout;
 extern int server;
 
 extern int server_rmnonext_timing;
+
+/**
+ * @brief Active le tri périodique du stock par file (`--sort-enabled`).
+ *
+ * Défaut 0 (désactivé) — opt-in, comme `--expand-level`. Une fois activé,
+ * un thread dédié (`sort_periodic_thread`, `src/app/etii_server.c`) appelle
+ * `sort_ascending_files()`/`sort_descending_files()` (selon
+ * `server_sort_direction`) toutes les `server_sort_interval` secondes, sur
+ * le même modèle que `rmnonext_thread` (suspendu tant qu'un client est
+ * connecté, cf. `sort_periodic_pass`).
+ */
+extern int server_sort_enabled;
+
+/**
+ * @brief Intervalle (secondes) entre deux passes de tri périodique
+ *        (`--sort-interval <n>`).
+ *
+ * Défaut `SORT_PERIODIC_INTERVAL_DEFAULT` (60). Sans effet si
+ * `server_sort_enabled` est resté à 0 (le thread n'est jamais démarré).
+ */
+extern int server_sort_interval;
+
+/**
+ * @brief Sens du tri périodique (`--sort-direction <asc|desc>`) :
+ *        `SORT_DIRECTION_ASC` (défaut) ou `SORT_DIRECTION_DESC`.
+ */
+extern int server_sort_direction;
 
 /**
  * @brief Nombre de nœuds cible du banc de mesure (`ETII_BENCH_NODES`), 0 =

@@ -525,6 +525,18 @@ int should_autobackup(int *lastBack, unsigned long long *lastBackupUpdates,
 void rmnonext_pass(map_big_array *map_parts, struct array_part *rotateParts);
 
 /**
+ * @brief Une passe de tri périodique du stock par file (corps de boucle de
+ *        `sort_periodic_thread`, extrait pour être testable hors thread).
+ *
+ * Trie chaque file EN PLACE (`sort_ascending_files`/`sort_descending_files`
+ * selon `server_sort_direction`), SANS regroupement — préserve la
+ * distribution round-robin. Suspendue tant qu'un client est connecté
+ * (`get_active_threads(thread_params) <= 0`), même garde-fou que
+ * `rmnonext_pass`.
+ */
+void sort_periodic_pass(void);
+
+/**
  * @brief Alloue et initialise le pool de threads de communication du serveur
  *        (extrait de `runserver` pour être testable hors boucle accept).
  *
