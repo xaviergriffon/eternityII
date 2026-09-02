@@ -4645,21 +4645,23 @@ TEST check_origin_flags_a_root_of_another(void)
     PASS();
 }
 
-/* Ni deux plateaux frères (qui divergent), ni un doublon exact (alloc égal,
- * donc aucun des deux n'est la RACINE de l'autre) ne sont signalés. */
-TEST check_origin_ignores_siblings_and_exact_duplicates(void)
+/* Deux plateaux frères (qui divergent) ne sont jamais signalés : à alloc
+ * égal, aucun des deux n'est la RACINE de l'autre au sens ancêtre/descendant
+ * (`is_origin_of`). Non-régression pour la détection de doublons exacts
+ * ajoutée séparément (voir `check_origin_flags_exact_duplicate*` ci-dessous) :
+ * deux entrées de même alloc mais de contenu DIFFÉRENT ne doivent jamais être
+ * prises pour des doublons. */
+TEST check_origin_ignores_siblings(void)
 {
     drain_all();
     const int a[][3] = { {0,0,100}, {0,1,101} };
     const int b[][3] = { {0,0,100}, {0,1,999} };            /* frère de a */
-    const int c[][3] = { {0,0,100}, {0,1,101} };            /* doublon exact de a */
     const int d[][3] = { {0,0,555}, {0,1,999}, {0,2,7} };   /* plus profond, mais diverge */
-    struct possibility_packet pks[4];
+    struct possibility_packet pks[3];
     build_board(&pks[0], a, 2, 0);
     build_board(&pks[1], b, 2, 0);
-    build_board(&pks[2], c, 2, 0);
-    build_board(&pks[3], d, 3, 0);
-    array_possibility_packet arr = { .size = 4, .possibilities = pks };
+    build_board(&pks[2], d, 3, 0);
+    array_possibility_packet arr = { .size = 3, .possibilities = pks };
     add_possibility(NULL, &arr);
 
     silence_std();
@@ -4667,7 +4669,141 @@ TEST check_origin_ignores_siblings_and_exact_duplicates(void)
     restore_std();
 
     ASSERT_EQ_FMT(0, rc, "%d");
-    ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(3ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* --------------------------------------------------------------------------
+ * check_origin : doublons exacts (même alloc, contenu identique) au sein de
+ * la bande à alloc égal que origin_upper_bound saute pour la détection
+ * ancêtre/descendant. Reproduit le trou constaté sur une sauvegarde de
+ * production (10 855 possibilités, alloc=112) : 0 relation ancêtre/descendant
+ * mais une paire de doublons stricts, invisible à checkOrigin comme à
+ * checkDuplicate (qui, lui, ne balaie jamais le pool vérifié).
+ * ------------------------------------------------------------------------ */
+
+/* (a) Deux possibilités identiques à alloc égal sont détectées sans purge :
+ * les deux restent en stock, la fonction rapporte/retourne l'état en échec. */
+TEST check_origin_flags_exact_duplicate(void)
+{
+    drain_all();
+    const int a[][3] = { {0,0,100}, {0,1,101} };
+    struct possibility_packet pks[2];
+    build_board(&pks[0], a, 2, 0);
+    build_board(&pks[1], a, 2, 0);
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_origin(0);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu"); /* rapport seul : rien supprimé */
+    drain_all();
+    PASS();
+}
+
+/* Même scénario que ci-dessus, mais avec les deux entrées dans le pool
+ * VÉRIFIÉ (checked == 1 des deux côtés) : c'est exactement la configuration
+ * du doublon de production (alloc=112, checked des deux côtés), invisible à
+ * checkDuplicate qui ne balaie que le pool non vérifié. */
+TEST check_origin_flags_exact_duplicate_in_checked_pool(void)
+{
+    drain_all();
+    const int a[][3] = { {2,2,42}, {2,3,43} };
+    struct possibility_packet pks[2];
+    build_board(&pks[0], a, 2, 1);
+    build_board(&pks[1], a, 2, 1);
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_origin(0);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* (b) purge retire exactement UNE des deux entrées d'une paire de doublons,
+ * garde l'autre, et une seconde passe rapporte alors un stock propre. */
+TEST check_origin_purge_removes_one_exact_duplicate(void)
+{
+    drain_all();
+    const int a[][3] = { {0,0,100}, {0,1,101} };
+    struct possibility_packet pks[2];
+    build_board(&pks[0], a, 2, 0);
+    build_board(&pks[1], a, 2, 0);
+    array_possibility_packet arr = { .size = 2, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_origin(1);
+    int rc_again = check_origin(0);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(0, rc_again, "%d"); /* clôture : plus aucun doublon en stock */
+    drain_all();
+    PASS();
+}
+
+/* (d) Groupe de TROIS possibilités identiques : la purge ne garde qu'UN seul
+ * survivant (pas seulement le cas N=2). Limite assumée : au-delà, un groupe
+ * de N doublons se réduit toujours à exactement 1 survivant, quel que soit N. */
+TEST check_origin_purge_removes_a_whole_duplicate_group(void)
+{
+    drain_all();
+    const int a[][3] = { {0,0,100}, {0,1,101} };
+    struct possibility_packet pks[3];
+    build_board(&pks[0], a, 2, 0);
+    build_board(&pks[1], a, 2, 0);
+    build_board(&pks[2], a, 2, 0);
+    array_possibility_packet arr = { .size = 3, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_origin(1);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
+/* Non-régression : un doublon exact ET une relation ancêtre/descendant
+ * distincte cohabitent dans le même balayage sans se marcher dessus — le
+ * doublon le plus profond est purgé (comme descendant ET/OU comme doublon,
+ * peu importe lequel des deux mécanismes le détecte en premier), la racine
+ * la moins profonde survit, exactement comme sans doublon. */
+TEST check_origin_duplicate_and_ancestor_coexist(void)
+{
+    drain_all();
+    const int root[][3] = { {0,0,100}, {0,1,101} };
+    const int desc[][3] = { {0,0,100}, {0,1,101}, {0,2,102} };
+    struct possibility_packet pks[3];
+    build_board(&pks[0], root, 2, 0);
+    build_board(&pks[1], desc, 3, 0);
+    build_board(&pks[2], desc, 3, 0); /* doublon exact du descendant */
+    array_possibility_packet arr = { .size = 3, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    int rc = check_origin(1);
+    restore_std();
+
+    ASSERT_EQ_FMT(-1, rc, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu"); /* seule la racine survit */
+    array_possibility_packet *left = get_last_possibility(NULL, 10, NULL);
+    ASSERT_EQ_FMT(1, left->size, "%d");
+    ASSERT_EQ_FMT(2, (int)left->possibilities[0].alloc, "%d");
+    free_array_possibility_packet(left);
     drain_all();
     PASS();
 }
@@ -6614,7 +6750,7 @@ SUITE(datamanager_suite)
     RUN_TEST(check_duplicate_flags_duplicates_and_origins);
     RUN_TEST(check_duplicate_multi_thread_across_files);
     RUN_TEST(check_origin_flags_a_root_of_another);
-    RUN_TEST(check_origin_ignores_siblings_and_exact_duplicates);
+    RUN_TEST(check_origin_ignores_siblings);
     RUN_TEST(check_origin_spans_both_pools);
     RUN_TEST(check_origin_purge_removes_the_descendant_only);
     RUN_TEST(check_origin_purge_removes_a_whole_chain);
@@ -6624,6 +6760,11 @@ SUITE(datamanager_suite)
     RUN_TEST(reset_checked_pool_on_empty_checked_pool_is_a_noop);
     RUN_TEST(reset_checked_pool_leaves_analysed_pool_untouched);
     RUN_TEST(reset_checked_pool_moves_within_the_same_file_index);
+    RUN_TEST(check_origin_flags_exact_duplicate);
+    RUN_TEST(check_origin_flags_exact_duplicate_in_checked_pool);
+    RUN_TEST(check_origin_purge_removes_one_exact_duplicate);
+    RUN_TEST(check_origin_purge_removes_a_whole_duplicate_group);
+    RUN_TEST(check_origin_duplicate_and_ancestor_coexist);
     RUN_TEST(sort_large_shuffled_stock_both_directions);
     RUN_TEST(expand_grows_stock_and_advances_level);
     RUN_TEST(expand_noop_when_already_deep_enough);

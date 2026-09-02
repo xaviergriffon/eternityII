@@ -96,7 +96,7 @@ Une fois lancé, le programme écoute des commandes sur l'entrée standard.
   - Sauvegarde/restauration du stock : `backup`, `restore`.
   - Tri et élagage des files : `sortDesc`, `sortAscFiles`, `sortDescFiles`, `removeNoNext`, `expand`, `resetChecked` (rebascule tout le pool vérifié vers le pool non vérifié, pour le resoumettre aux pruners).
   - Régulation : `limit`, `pause`/`resume`.
-  - Diagnostic du stock : `checkDatas` (intégrité des plateaux), `checkDuplicate` (doublons), `checkOrigin [purge]` — vérifie qu'aucune possibilité en stock n'est la **racine** d'une autre (plateau entièrement contenu dans un plateau plus profond, dont le sous-arbre est donc exploré deux fois) ; avec `purge`, supprime les descendants et garde les racines, sans perdre de branche de recherche.
+  - Diagnostic du stock : `checkDatas` (intégrité des plateaux), `checkDuplicate` (doublons dans le pool non vérifié), `checkOrigin [purge]` — vérifie qu'aucune possibilité en stock n'est la **racine** d'une autre (plateau entièrement contenu dans un plateau plus profond, dont le sous-arbre est donc exploré deux fois) et détecte aussi les **doublons exacts** à `alloc` égal, dans les deux pools ; avec `purge`, supprime les descendants/doublons redondants et garde les racines/un seul survivant par groupe de doublons, sans perdre de branche de recherche.
   - Cycle de vie des fils côté client/pruner : `start`, `stopForks`, `configApply`, `config [<clé> <valeur>]`, `configSave`.
   - Pilotage des clients connectés depuis le serveur :
     - `clients`, `clientsStats` — état des clients connectés.
