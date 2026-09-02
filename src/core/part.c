@@ -462,7 +462,7 @@ static uint32_t *build_packed_index(map_big_array *map, unsigned long long nbKey
 	if (!map_packed_fits(totalParts, maxBucket))
 	{
 		// Puzzle hors gabarit : on renonce à l'index plutôt que de tronquer.
-		log_info("index compact non construit : %llu pièces / plus gros compartiment %llu"
+		log_event("index compact non construit : %llu pièces / plus gros compartiment %llu"
 		         " dépassent la capacité 16 bits (%u)\n",
 		         totalParts, maxBucket, MAP_PACKED_FIELD_MAX);
 		return NULL;

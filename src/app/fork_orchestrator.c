@@ -703,7 +703,7 @@ int orchestrator_spawn_forks(void)
         return 0;
     }
     if (fork_error > 0) {
-        log_info("%i/%i process créés ; %i non créés (ressources insuffisantes) — poursuite\n",
+        log_event("%i/%i process créés ; %i non créés (ressources insuffisantes) — poursuite\n",
                  created, NB_THREADS, fork_error);
     } else {
         // Confirmation explicite du succès complet : avant ce log, un
@@ -711,7 +711,7 @@ int orchestrator_spawn_forks(void)
         // trace de son résultat effectif (seul le côté échec était couvert
         // ci-dessus) — l'opérateur devait déduire le succès de l'absence
         // d'erreur plutôt que de le lire directement.
-        log_info("orchestrateur : %i process de recherche démarrés\n", created);
+        log_event("orchestrateur : %i process de recherche démarrés\n", created);
     }
 
     g_active_forks = created;
@@ -833,7 +833,7 @@ static void orchestrator_do_stop_forks(void)
 
     g_active_forks = 0;
     control_channel_request_reconnect();
-    log_info("orchestrateur : fils arrêtés\n");
+    log_event("orchestrateur : fils arrêtés\n");
 }
 
 int orchestrator_apply_restart_config(struct search_parts *shared_parts)
@@ -876,7 +876,7 @@ int orchestrator_apply_restart_config(struct search_parts *shared_parts)
     fork_orchestrator_apply_staged_config();
 
     if (NB_THREADS != old_nb_threads) {
-        log_info("orchestrateur : nb_forks %i -> %i — reconstruction des tableaux de fils\n",
+        log_event("orchestrateur : nb_forks %i -> %i — reconstruction des tableaux de fils\n",
                   old_nb_threads, NB_THREADS);
         free_childs();
         init_childs();
@@ -886,7 +886,7 @@ int orchestrator_apply_restart_config(struct search_parts *shared_parts)
     int parts_file_changed = (parts_files != NULL) &&
         (old_parts_files == NULL || strcmp(parts_files, old_parts_files) != 0);
     if (parts_file_changed && shared_parts != NULL) {
-        log_info("orchestrateur : parts_file \"%s\" -> \"%s\" — reconstruction de la map de recherche\n",
+        log_event("orchestrateur : parts_file \"%s\" -> \"%s\" — reconstruction de la map de recherche\n",
                   old_parts_files != NULL ? old_parts_files : "(aucun)", parts_files);
         set_inherited_search_parts(NULL);
         free_search_parts(shared_parts);
@@ -1172,7 +1172,7 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
                               "%d restant(s) sur %d — voir les lignes ci-dessus pour la cause\n",
                               cleaned, remaining, NB_THREADS);
                 } else {
-                    log_info("orchestrateur : %d fork(s) terminé(s), %d restant(s) sur %d\n",
+                    log_event("orchestrateur : %d fork(s) terminé(s), %d restant(s) sur %d\n",
                               cleaned, remaining, NB_THREADS);
                 }
                 fork_orchestrator_post_event(EV_CHILD_DIED, NULL);
@@ -1221,7 +1221,7 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
             pthread_mutex_lock(&g_orch_mutex);
             restart_after_stop = g_restart_after_stop;
             pthread_mutex_unlock(&g_orch_mutex);
-            log_info("orchestrateur : arrêt des fils en cours (%s)\n",
+            log_event("orchestrateur : arrêt des fils en cours (%s)\n",
                       restart_after_stop ? "redémarrage à chaud" : "stopForks");
             orchestrator_do_stop_forks();
 
@@ -1232,7 +1232,7 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
 
                 forks_parked = 1; // levé par le prochain do_spawn réussi
 
-                log_info("orchestrateur : application de la configuration à chaud "
+                log_event("orchestrateur : application de la configuration à chaud "
                           "(reconstruction éventuelle des structures) en cours\n");
                 if (orchestrator_apply_restart_config(shared_parts)) {
                     // Même chemin EV_START qu'un `start` manuel ou qu'un

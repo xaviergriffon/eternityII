@@ -411,8 +411,22 @@ TEST do_command_line_expand_requires_arg(void)
    Sur un stock vide il n'y a aucune relation -> 0. */
 TEST do_command_line_check_origin_reports_on_empty_stock(void)
 {
+    unlink("events.log");
     char cmd[] = "checkOrigin";
     ASSERT_EQ_FMT(0, run_command_quiet(cmd), "%d");
+
+    /* Régression : le résultat de checkOrigin (comme les autres commandes de
+     * vérification) journalisait via log_info -- un check lancé en
+     * production, notamment via clientsCommand, ne laissait alors aucune
+     * trace exploitable après coup dans events.log. */
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[512] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    ASSERT(strstr(line, "check_origin errors 0 on 0") != NULL);
+    unlink("events.log");
     PASS();
 }
 
@@ -1530,6 +1544,56 @@ TEST do_command_line_backup_fails_on_unwritable_dir(void)
     PASS();
 }
 
+/* Régression : un échec RÉEL de sauvegarde (par opposition au "sauté, maintenance
+ * en cours" ci-dessus) journalisait via log_info -- console uniquement, jamais
+ * persisté dans events.log. Un backup automatique qui échoue sans personne
+ * devant l'écran ne laissait alors AUCUNE trace consultable après coup. On
+ * force l'échec d'un seul volet (best_board_save) en plaçant un RÉPERTOIRE à la
+ * place du fichier cible (EISDIR sur fopen, indépendant des permissions donc
+ * valable même en root) -- les autres volets de backup_interpreter réussissent
+ * normalement, dans un répertoire par ailleurs inscriptible où events.log peut
+ * bien être créé. */
+TEST do_command_line_backup_failure_persists_to_events_log(void)
+{
+    char saved_cwd[4096];
+    const char *got = getcwd(saved_cwd, sizeof saved_cwd);
+    char tmpl[] = "/tmp/etii_bke_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (got == NULL || dir == NULL || chdir(dir) != 0) {
+        if (dir != NULL) rmdir(dir);
+        FAILm("setup du répertoire temporaire impossible");
+    }
+    mkdir("eternityII-best_board.back", 0755);
+
+    int saved_server = server;
+    server = 1;
+    best_board_init(&g_server_best_board);
+    unlink("events.log");
+
+    char cmd[] = "backup";
+    int r = run_command_quiet(cmd);
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[1024] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    ASSERT(strstr(line, "backup de ./eternityII-best_board.back échoué") != NULL);
+
+    unlink("events.log");
+    unlink("eternityII.back");
+    unlink("eternityII-in_analyse.back");
+    unlink("eternityII-known_clients.back");
+    rmdir("eternityII-best_board.back");
+    if (chdir(saved_cwd) != 0) { /* best-effort */ }
+    rmdir(dir);
+    server = saved_server;
+
+    ASSERT_EQ_FMT(0, r, "%d"); /* backup_interpreter retourne toujours 0 */
+    PASS();
+}
+
 /* restore avec request != REQUEST_CONTINUE : la branche de pause (L285 fausse)
  * et la remise en route (L299 fausse) ne sont jamais prises. En passant
  * request=REQUEST_STOP avant l'appel, on couvre les deux branches fausses.
@@ -2254,6 +2318,7 @@ TEST admin_apply_remote_command_does_not_disturb_external_strtok(void)
 TEST admin_apply_remote_command_start_transitions_to_running(void)
 {
     fork_orchestrator_reset();
+    unlink("events.log");
 
     ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("start"), "%d");
     orch_state_t state;
@@ -2262,6 +2327,18 @@ TEST admin_apply_remote_command_start_transitions_to_running(void)
 
     /* Un second "start" alors qu'on est déjà RUNNING est refusé. */
     ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("start"), "%d");
+
+    /* Régression : "start" journalisait via log_info (console uniquement) --
+     * un démarrage distant (clientsCommand/--auto-roles) ne laissait alors
+     * aucune trace dans events.log du client concerné. */
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[512] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    ASSERT(strstr(line, "start : démarrage demandé") != NULL);
+    unlink("events.log");
 
     fork_orchestrator_reset();
     PASS();
@@ -2275,10 +2352,23 @@ TEST admin_apply_remote_command_stopforks_requires_running(void)
     ASSERT_EQ_FMT(ADMIN_CMD_BAD_ARGS, admin_apply_remote_command("stopForks"), "%d");
 
     ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("start"), "%d");
+    unlink("events.log");
     ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("stopForks"), "%d");
     orch_state_t state;
     fork_orchestrator_snapshot(&state, NULL);
     ASSERT_EQ_FMT((int)ORCH_STOPPING, (int)state, "%d");
+
+    /* Même régression que "start" ci-dessus : un stopForks distant réussi
+     * (ex. dérivé d'une politique --auto-roles côté serveur) ne laissait
+     * aucune trace dans events.log avant ce comportement. */
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[512] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    ASSERT(strstr(line, "stopForks : arrêt des process de recherche demandé") != NULL);
+    unlink("events.log");
 
     fork_orchestrator_reset();
     PASS();
@@ -2348,12 +2438,25 @@ TEST admin_apply_remote_command_configapply_hot_only(void)
 
     ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("start"), "%d");
     ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("config limit 777"), "%d");
+    unlink("events.log");
     ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("configApply"), "%d");
 
     ASSERT_EQ_FMT(777ULL, max_search_by_sec, "%llu");
     orch_state_t state;
     fork_orchestrator_snapshot(&state, NULL);
     ASSERT_EQ_FMT((int)ORCH_RUNNING, (int)state, "%d");
+
+    /* Régression : la branche HOT_ONLY de configApply journalisait via
+     * log_info -- une reconfiguration à chaud poussée à distance ne laissait
+     * alors aucune trace dans events.log du client concerné. */
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[512] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    ASSERT(strstr(line, "configApply : configuration à chaud appliquée") != NULL);
+    unlink("events.log");
 
     max_search_by_sec = saved_limit;
     fork_orchestrator_reset();
@@ -3212,6 +3315,7 @@ SUITE(command_lines_suite)
     RUN_TEST(do_command_line_check_with_non_null_lastcheck);
     RUN_TEST(do_command_line_backup_skipped_when_maintenance);
     RUN_TEST(do_command_line_backup_fails_on_unwritable_dir);
+    RUN_TEST(do_command_line_backup_failure_persists_to_events_log);
     RUN_TEST(do_command_line_restore_when_not_running);
     RUN_TEST(do_command_line_restore_fails_on_missing_file);
     RUN_TEST(exit_interpreter_client_with_children_array_exits);

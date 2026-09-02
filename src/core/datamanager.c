@@ -488,6 +488,11 @@ char *get_server_ip(void)
  */
 int check_and_connect_to_server(client_possibility_t *client_possibility) {
 	int socket_id = client_possibility->socket_id;
+	// Mémorisé AVANT réassignation de socket_id ci-dessous : distingue la toute
+	// première connexion d'un thread (routine, pas de trace utile) d'une VRAIE
+	// reconnexion après coupure (pendant utile pour reconstituer une chronologie
+	// de connectivité, cf. le "socket deconnected" de is_connected/poll_server_hunger).
+	int had_connection = (socket_id != -1);
     // Création de connexion si "non connecté" ou "si erreur lors du test"
 	if (socket_id == -1 || is_connected(socket_id) <= 0) {
 		if(-1 == (socket_id = create_tcp_client(server_ip, SERVER_PORT)))
@@ -518,7 +523,7 @@ int check_and_connect_to_server(client_possibility_t *client_possibility) {
 			// une erreur de version : on ne doit donc PAS arrêter le client. On
 			// ferme cette tentative et on rend la main — l'appelant réessaiera
 			// plus tard (avec back-off), le temps qu'un thread serveur se libère.
-			log_info("handshake serveur sans réponse (result=%i, serveur occupé ?) — nouvelle tentative ultérieure\n", result);
+			log_event("handshake serveur sans réponse (result=%i, serveur occupé ?) — nouvelle tentative ultérieure\n", result);
 			close_socket(socket_id);
 			return -1;
 		}
@@ -546,6 +551,9 @@ int check_and_connect_to_server(client_possibility_t *client_possibility) {
 
 		client_possibility->socket_id = socket_id;
 		times(&client_possibility->start_socket);
+		if (had_connection) {
+			log_event("connexion serveur retablie (socket=%d)\n", socket_id);
+		}
 	}
 
 	// Tout échange réseau passe ici : on rafraîchit l'horodatage d'activité
@@ -3553,7 +3561,7 @@ int check_datas(void)
 
 	unlock_all_file();
 
-	log_info("check_datas errors %i on %i\n", errors, count);
+	log_event("check_datas errors %i on %i\n", errors, count);
     return errors > 0 ? -1 : 0;
 }
 
@@ -3821,7 +3829,7 @@ int check_duplicate(void)
     
     unlock_all_file();
     
-    log_info("check_duplicate errors %llu on %llu\n", errors, count);
+    log_event("check_duplicate errors %llu on %llu\n", errors, count);
     return errors > 0 ? -1 : 0;
 }
 
@@ -4110,10 +4118,10 @@ int check_origin(int purge)
 		         found - ORIGIN_REPORT_MAX_LINES, ORIGIN_REPORT_MAX_LINES);
 	}
 	if (purge) {
-		log_info("check_origin : %llu possibilites supprimees sur %llu -- lancer « backup » pour graver l'etat purge\n",
+		log_event("check_origin : %llu possibilites supprimees sur %llu -- lancer « backup » pour graver l'etat purge\n",
 		         removed, count);
 	}
-	log_info("check_origin errors %llu on %llu\n", found, count);
+	log_event("check_origin errors %llu on %llu\n", found, count);
 	return found > 0 ? -1 : 0;
 }
 
@@ -4592,9 +4600,11 @@ int check_files(void)
 	{
 		if(check_file(f))
 		{
+			log_event("checkFiles : incoherence detectee sur le fichier %d\n", f);
 			return 1;
 		}
 	}
+	log_event("checkFiles : %d fichier(s) verifie(s), aucune incoherence\n", nb_file_possibility);
 	return 0;
 }
 

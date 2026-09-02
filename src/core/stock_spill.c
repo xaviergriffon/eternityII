@@ -544,15 +544,23 @@ int stock_spill_step(int max_packets)
 	unsigned long long low = cap * STOCK_SPILL_LOW_PERCENT / 100;
 	unsigned long long reload_threshold = cap * STOCK_SPILL_RELOAD_PERCENT / 100;
 
+	// Un seul log_event par TRANSITION de mode (pas par appel -- stock_spill_step
+	// tourne toutes les 100 ms) : la fréquence de la bascule 90 %/75 %/25 % est
+	// elle-même le signal utile pour un post-mortem (pression RAM soutenue vs.
+	// pic isolé), un log par tick noierait ce signal dans du bruit.
 	if (g_spill_mode != SPILL_MODE_EVICTING && resident >= high) {
 		g_spill_mode = SPILL_MODE_EVICTING;
+		log_event("stock_spill : eviction disque demarree (resident=%llu plafond=%llu)\n", resident, cap);
 	} else if (g_spill_mode == SPILL_MODE_EVICTING && resident <= low) {
 		g_spill_mode = SPILL_MODE_IDLE;
+		log_event("stock_spill : eviction disque terminee (resident=%llu plafond=%llu)\n", resident, cap);
 	}
 
 	unsigned long long total_spilled = stock_spill_total_packets();
 	if (g_spill_mode != SPILL_MODE_RELOADING && resident <= reload_threshold && total_spilled > 0) {
 		g_spill_mode = SPILL_MODE_RELOADING;
+		log_event("stock_spill : rechargement disque demarre (resident=%llu plafond=%llu debordees=%llu)\n",
+		          resident, cap, total_spilled);
 	} else if (g_spill_mode == SPILL_MODE_RELOADING && (resident >= low || total_spilled == 0)) {
 		// Sort au seuil BAS (75 %), pas au seuil d'ENTRÉE (25 %) : avec le
 		// même seuil pour entrer et sortir, un seul bloc rechargé (souvent
@@ -561,6 +569,8 @@ int stock_spill_step(int max_packets)
 		// bloc, même quand la RAM a largement la place d'en accueillir plus
 		// -- symétrique de l'éviction, qui vise elle aussi 75 % en sortie.
 		g_spill_mode = SPILL_MODE_IDLE;
+		log_event("stock_spill : rechargement disque termine (resident=%llu plafond=%llu debordees=%llu)\n",
+		          resident, cap, total_spilled);
 	}
 
 	if (g_spill_mode == SPILL_MODE_EVICTING) {
@@ -892,7 +902,7 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 	spill_manifest_entry_t *entries = NULL;
 	int n = 0;
 	if (spill_read_manifest(snap_dir, &entries, &n) != 0) {
-		log_info("stock_spill_restore_snapshot : aucun cliché de débordement valide dans « %s » — "
+		log_event("stock_spill_restore_snapshot : aucun cliché de débordement valide dans « %s » — "
 		         "rien à restaurer côté disque\n", snap_dir);
 		return 0;
 	}
@@ -906,7 +916,7 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 	unsigned long long discarded_files = 0;
 	spill_purge_live_segments(&discarded_packets, &discarded_files);
 	if (discarded_packets > 0) {
-		log_info("stock_spill_restore_snapshot : %llu possibilité(s) déportée(s) courante(s) "
+		log_event("stock_spill_restore_snapshot : %llu possibilité(s) déportée(s) courante(s) "
 		         "(%llu segment(s)) remplacées par le cliché restauré\n", discarded_packets, discarded_files);
 	}
 
@@ -1075,7 +1085,12 @@ unsigned long long stock_spill_restore_snapshot(const char *snapshot_subdir)
 	}
 
 	free(entries);
-	log_info("stock_spill_restore_snapshot : cliché « %s » restauré (%llu possibilité(s) sur %d file(s) "
+	// log_file, pas log_event : le détail (chemin, 4 compteurs) dépasse
+	// facilement les 200 octets d'EVENT_MSG_MAX et serait tronqué -- une
+	// restauration est rare/à fort enjeu, la trace complète prime sur la
+	// visibilité console immédiate (déjà couverte par le "backup restore"
+	// court de restore_apply, cf. command_lines.c).
+	log_file("stock_spill_restore_snapshot : cliché « %s » restauré (%llu possibilité(s) sur %d file(s) "
 	         "sans collision, %llu possibilité(s) réempaquetée(s) sur %d file(s) — collision due à un "
 	         "--stock-files réduit depuis la sauvegarde)\n",
 	         snap_dir, total_linked, linked_groups, total_repacked, repacked_groups);

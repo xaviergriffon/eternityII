@@ -3368,6 +3368,64 @@ TEST connect_and_handshake_ok(void)
     PASS();
 }
 
+/* check_and_connect_to_server : reconnexion (cp.socket_id != -1 en entrée,
+ * mais invalide -> is_connected() le détecte comme coupé). Avant ce
+ * comportement, une reconnexion réussie ne laissait AUCUNE trace dans
+ * events.log (symétrique du "socket deconnected" déjà journalisé côté
+ * détection de coupure, cf. etii_protocol.c) -- seule la toute première
+ * connexion d'un thread (cp.socket_id == -1, cf. connect_and_handshake_ok
+ * ci-dessus) reste silencieuse, par distinction volontaire avec une VRAIE
+ * reconnexion. */
+TEST connect_reconnect_after_prior_connection_logs_event(void)
+{
+    drain_datamanager();
+
+    int port;
+    int srv_fd = make_local_tcp_server(&port);
+    ASSERT(srv_fd >= 0);
+
+    handshake_srv_arg_t ha = { .srv_fd = srv_fd, .response = INST_SUPPORTED_VERSION };
+    pthread_t srv;
+    pthread_create(&srv, NULL, mini_srv_handshake, &ha);
+
+    set_server_ip("127.0.0.1");
+    SERVER_PORT = port;
+
+    client_possibility_t cp;
+    memset(&cp, 0, sizeof(cp));
+    pthread_mutex_init(&cp.socket_mutex, NULL);
+    /* Descripteur invalide mais != -1 : is_connected() y échoue (EBADF sur le
+     * premier send()), ce qui est exactement le signal de coupure que la
+     * fonction sait déjà gérer -- ce test porte sur le log de reconnexion,
+     * pas sur la détection de coupure elle-même (déjà couverte ailleurs). */
+    cp.socket_id = 99999;
+    unlink("events.log");
+
+    silence_std();
+    int rc = check_and_connect_to_server(&cp);
+    restore_std();
+
+    ASSERT(rc >= 0);
+    ASSERT_EQ_FMT(rc, cp.socket_id, "%d");
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[512] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    ASSERT(strstr(line, "connexion serveur retablie") != NULL);
+
+    unlink("events.log");
+    pthread_join(srv, NULL);
+    close(srv_fd);
+    if (cp.socket_id >= 0) close(cp.socket_id);
+    set_server_ip(NULL);
+    pthread_mutex_destroy(&cp.socket_mutex);
+    drain_datamanager();
+    PASS();
+}
+
 /* check_and_connect_to_server : version refusée (INST_UNSUPPORTED_VERSION).
  * Vérifie retour == -1 et request == REQUEST_STOP. */
 TEST connect_handshake_version_rejected(void)
@@ -6329,6 +6387,7 @@ SUITE(datamanager_suite)
     RUN_TEST(put_to_server_success);
     RUN_TEST(put_to_server_connection_lost);
     RUN_TEST(connect_and_handshake_ok);
+    RUN_TEST(connect_reconnect_after_prior_connection_logs_event);
     RUN_TEST(connect_handshake_version_rejected);
     RUN_TEST(connect_handshake_retry);
     RUN_TEST(connect_create_tcp_client_fails);

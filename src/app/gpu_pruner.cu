@@ -256,7 +256,7 @@ extern "C" int gpu_pruner_init(const map_big_array *map, const struct array_part
 
     cudaDeviceProp prop;
     if ((err = cudaGetDeviceProperties(&prop, 0)) == cudaSuccess) {
-        log_info("gpu_pruner: GPU '%s' (integrated=%d, SM %d.%d)\n",
+        log_event("gpu_pruner: GPU '%s' (integrated=%d, SM %d.%d)\n",
                  prop.name, prop.integrated, prop.major, prop.minor);
         if (!prop.integrated) {
             log_info("gpu_pruner: GPU discret — la mémoire managed sera migrée à la demande "

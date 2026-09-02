@@ -453,6 +453,83 @@ TEST reload_restores_evicted_data_when_ram_drops_and_preserves_fields(void)
     PASS();
 }
 
+/* Avant ce comportement, stock_spill_step (appelé toutes les 100 ms par le
+ * thread de débordement) ne journalisait RIEN sur ses bascules de mode --
+ * seules les erreurs d'E/S l'étaient. Une pression RAM prolongée (bascules
+ * répétées éviction/rechargement) n'était donc reconstituable après coup
+ * qu'en croisant des métriques indirectes, jamais directement dans
+ * events.log. Un log_event par TRANSITION (pas par tick, cf. le commentaire
+ * dans stock_spill_step) doit maintenant y apparaître aux 4 franchissements :
+ * début/fin d'éviction, début/fin de rechargement. events.log est écrit dans
+ * le CWD du process de test (indépendant du répertoire de débordement dédié
+ * ci-dessus), d'où le nettoyage séparé. */
+TEST step_logs_eviction_and_reload_transitions_to_events_log(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+    stock_spill_configure(dir, nb_file_possibility);
+    unlink("events.log");
+
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    int allocs[2000];
+    for (int i = 0; i < 2000; i++) {
+        allocs[i] = i + 1;
+    }
+    add_packets(allocs, 2000);
+
+    /* Plafond à 1000 : haut=900, bas=750 -- déclenche EVICTING puis, une fois
+     * sous 750, la sortie vers IDLE. */
+    datamanager_set_ram_limit_packets_for_tests(1000);
+    int rounds = 0;
+    while (file_size(0) > 750 && rounds < 60) {
+        stock_spill_step(100);
+        rounds++;
+    }
+    ASSERT(stock_spill_total_packets() > 0ULL);
+
+    /* Vide le résident restant PUIS relève largement le plafond (bien
+     * au-dessus du total déporté) avant de recharger : sous le plafond
+     * précédent (1000), le rechargement viserait seulement le seuil BAS
+     * (75 % = 750) et s'arrêterait là par conception (cf. la doc de
+     * stock_spill_step) sans jamais atteindre IDLE -- même repli que
+     * reload_restores_evicted_data_when_ram_drops_and_preserves_fields. */
+    array_possibility_packet *drained = get_last_possibility(NULL, 1000, NULL);
+    free_array_possibility_packet(drained);
+    ASSERT_EQ_FMT(0ULL, file_size(0), "%llu");
+    datamanager_set_ram_limit_packets_for_tests(1000000);
+    rounds = 0;
+    while (stock_spill_total_packets() > 0ULL && rounds < 60) {
+        stock_spill_step(100);
+        rounds++;
+    }
+    ASSERT_EQ_FMT(0ULL, stock_spill_total_packets(), "%llu");
+    // La bascule RELOADING -> IDLE (et son log_event "termine") est détectée
+    // en TÊTE de stock_spill_step, sur le prochain appel APRÈS que le
+    // débordement soit tombé à 0 -- un appel de plus est donc nécessaire ici
+    // pour l'observer (même raison que la bascule EVICTING -> IDLE ci-dessus,
+    // déclenchée par le premier stock_spill_step de CETTE boucle).
+    stock_spill_step(100);
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char buf[8192] = {0};
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    (void)n;
+    ASSERT(strstr(buf, "stock_spill : eviction disque demarree") != NULL);
+    ASSERT(strstr(buf, "stock_spill : eviction disque terminee") != NULL);
+    ASSERT(strstr(buf, "stock_spill : rechargement disque demarre") != NULL);
+    ASSERT(strstr(buf, "stock_spill : rechargement disque termine") != NULL);
+
+    unlink("events.log");
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
 /* Franchissement d'une frontière de segment : avec une taille de segment
  * minuscule (test-only), 50 possibilités s'étalent sur plusieurs segments.
  * Vérifie que l'éviction écrit correctement à travers plusieurs segments en
@@ -1090,6 +1167,7 @@ SUITE(stock_spill_suite)
     RUN_TEST(step_is_noop_without_ram_cap);
     RUN_TEST(evict_removes_oldest_first_and_conserves_total);
     RUN_TEST(reload_restores_evicted_data_when_ram_drops_and_preserves_fields);
+    RUN_TEST(step_logs_eviction_and_reload_transitions_to_events_log);
     RUN_TEST(evict_and_reload_span_multiple_segments);
     RUN_TEST(snapshot_links_full_segments_and_copies_tail);
     RUN_TEST(snapshot_refreshes_stale_reused_segment_number);
