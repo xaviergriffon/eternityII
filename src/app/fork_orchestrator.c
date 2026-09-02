@@ -397,6 +397,10 @@ void fork_orchestrator_merge_staged_config(client_config_t *out)
         out->has_max_stock_by_thread = 1;
         out->max_stock_by_thread = g_staged_config.max_stock_by_thread;
     }
+    if (g_staged_config.has_shallow_root_abandon_depth) {
+        out->has_shallow_root_abandon_depth = 1;
+        out->shallow_root_abandon_depth = g_staged_config.shallow_root_abandon_depth;
+    }
     if (g_staged_config.has_limit) {
         out->has_limit = 1;
         out->limit = g_staged_config.limit;
@@ -460,8 +464,9 @@ int fork_orchestrator_staged_gpu_pruner_conflict(void)
 
 void fork_orchestrator_apply_hot_staged_config(void)
 {
-    int has_max_stock, has_limit, has_pruner_batch, has_dfs_budget;
+    int has_max_stock, has_shallow_abandon, has_limit, has_pruner_batch, has_dfs_budget;
     int max_stock_val = 0;
+    int shallow_abandon_val = 0;
     unsigned long long limit_val = 0;
     int pruner_batch_val = 0;
     int dfs_budget_val = 0;
@@ -471,6 +476,8 @@ void fork_orchestrator_apply_hot_staged_config(void)
     client_config_apply_direct(&g_staged_config, &g_client_server_host);
     has_max_stock = g_staged_config.has_max_stock_by_thread;
     max_stock_val = g_staged_config.max_stock_by_thread;
+    has_shallow_abandon = g_staged_config.has_shallow_root_abandon_depth;
+    shallow_abandon_val = g_staged_config.shallow_root_abandon_depth;
     has_limit = g_staged_config.has_limit;
     limit_val = g_staged_config.limit;
     has_pruner_batch = g_staged_config.has_pruner_batch;
@@ -486,6 +493,10 @@ void fork_orchestrator_apply_hot_staged_config(void)
     char cmd[64];
     if (has_max_stock) {
         snprintf(cmd, sizeof(cmd), "maxStockByThread %d", max_stock_val);
+        send_command_to_childs(cmd);
+    }
+    if (has_shallow_abandon) {
+        snprintf(cmd, sizeof(cmd), "shallowRootAbandonDepth %d", shallow_abandon_val);
         send_command_to_childs(cmd);
     }
     if (has_limit) {

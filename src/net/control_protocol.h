@@ -216,7 +216,7 @@ typedef enum {
     /// distant) ; relayable par le canal de contrôle binaire ET par
     /// `clientsCommand`/`clientsCmd` ; exposée par l'API HTTP avec
     /// authentification requise (`pause`, `resume`, `limit`,
-    /// `maxStockByThread`, `prunerBatch`, `prunerDfsBudget`,
+    /// `maxStockByThread`, `shallowRootAbandonDepth`, `prunerBatch`, `prunerDfsBudget`,
     /// `clientsCommand`/`clientsCmd`, `start`, `stopForks`, `configApply`,
     /// `config`, `configSave`).
     CTRL_CMD_WRITE_RELAYABLE,
@@ -231,7 +231,7 @@ typedef enum {
 
 /// Borne haute du nombre de commandes réseau-pertinentes (les trois classes
 /// de control_command_class_t confondues, hors CTRL_CMD_UNKNOWN) que
-/// control_command_enumerate peut rapporter. 27 aujourd'hui ; marge incluse
+/// control_command_enumerate peut rapporter. 28 aujourd'hui ; marge incluse
 /// pour ne pas avoir à retoucher les appelants (GET /api/v1/commands) à
 /// chaque commande ajoutée.
 #define CONTROL_COMMAND_TABLE_MAX 40

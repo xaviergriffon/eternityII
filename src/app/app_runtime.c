@@ -243,6 +243,21 @@ static const cli_help_topic_t cli_topics[] = {
 	  "construction (cf. les boucles bornées de datamanager.c) ; cette option\n"
 	  "reste une soupape pour un réseau plus lent ou un stock plus volumineux.\n"
 	  "Valeur absente ou <= 0 : ignorée (garde le défaut)." },
+	{ "--shallow-root-abandon-depth",
+	  "--shallow-root-abandon-depth <n>",
+	  "Client/pruner : rend au serveur tout le travail d'une racine reçue trop peu profonde, une fois creusée jusqu'à <n>.",
+	  "Défaut 0 (désactivé) : seul max_stock_by_thread régit la délégation.\n"
+	  "Sous ce seuil, un branchement MRV fin peut garder le stock implicite\n"
+	  "(`pending`) sous max_stock_by_thread indéfiniment alors que le\n"
+	  "sous-arbre reçu (racine à faible profondeur) reste énorme -- le fil y\n"
+	  "reste des heures sans jamais déclencher max_stock_by_thread. Quand la\n"
+	  "racine REÇUE (profondeur au moment du GET) est sous <n> et que la\n"
+	  "profondeur COURANTE l'atteint, tout le travail restant est rendu au\n"
+	  "serveur (même mécanisme que l'arrêt propre) et le fil se repositionne\n"
+	  "sur une nouvelle racine. Opt-in : à calibrer par la mesure (paires\n"
+	  "alternées) avant d'envisager un défaut actif -- voir\n"
+	  "shallow_root_abandon_depth, core/core_static_variables.h. Réglage\n"
+	  "immédiat via la commande console `shallowRootAbandonDepth [n]`." },
 	{ "--gpu",
 	  "--gpu",
 	  "Pruner : exécute le contrôle des lots sur le GPU (build CUDA=1 uniquement).",
@@ -412,13 +427,19 @@ int init_counters(void)
 	// tampon.
 	free(counters);
 	free(lastfilesize);
+	free(lastroot);
+	free(lastdepth);
 	counters = malloc(sizeof(unsigned long long) * NB_THREADS);
 	lastfilesize = malloc(sizeof(unsigned long long) * NB_THREADS);
-	
+	lastroot = malloc(sizeof(int) * NB_THREADS);
+	lastdepth = malloc(sizeof(int) * NB_THREADS);
+
 	for(int c = 0; c < NB_THREADS;c++)
 	{
 		counters[c] = 0;
 		lastfilesize[c] = 0;
+		lastroot[c] = -1;
+		lastdepth[c] = -1;
 	}
 
 	return 0;
@@ -1110,8 +1131,20 @@ void *fork_checker(void *param) {
 	while((request != REQUEST_STOP || server_io_active) && fork_checker_socket_id > 0) {
         unsigned long long counter = 0;
         unsigned long long possibilities_in_stock = 0;
+        // Minimum ignorant la sentinelle -1 (idle/rôle pruner) : un seul fil
+        // de recherche par fork en production, mais généralise correctement
+        // au mode mono-processus (DEBUG_IN_MONO_PROCESS, plusieurs fils
+        // réels dans un même process) où plusieurs cases peuvent être écrites.
+        int min_root_depth = -1;
+        int min_pending_depth = -1;
         for (t = 0; t < NB_THREADS; t++) {
             counter += counters[t];
+            if (lastroot[t] >= 0 && (min_root_depth < 0 || lastroot[t] < min_root_depth)) {
+                min_root_depth = lastroot[t];
+            }
+            if (lastdepth[t] >= 0 && (min_pending_depth < 0 || lastdepth[t] < min_pending_depth)) {
+                min_pending_depth = lastdepth[t];
+            }
             possibilities_in_stock += lastfilesize[t];
         }
         unsigned long long sps = 0;
@@ -1200,6 +1233,14 @@ void *fork_checker(void *param) {
         statistic->pruner_checked = pruner_checked;
         statistic->pruner_removed = pruner_removed;
         statistic->pruner_cells_studied = pruner_cells_studied;
+        // Racines abandonnées par shallow_root_abandon_depth (0 si désactivé,
+        // cf. core_static_variables.h) : indépendant du forward-checking, pas
+        // conditionné par FORWARD_CHECK_K.
+        statistic->shallow_root_abandoned = __atomic_load_n(&shallow_root_abandoned, __ATOMIC_RELAXED);
+        // Remontés par la commande console `min` côté client (voir
+        // build_thread_depth_table, app/etii_client.c).
+        statistic->root_depth = min_root_depth;
+        statistic->min_pending_depth = min_pending_depth;
         /* On préfixe le datagramme d'un octet de type pour permettre au
            parent de multiplexer stats / logs / événements sur le même
            socket. Voir ipc_protocol.h. */

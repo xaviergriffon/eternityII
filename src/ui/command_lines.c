@@ -23,12 +23,13 @@
 #include "app/server_config.h"
 #include "app/fork_orchestrator.h"
 #include "app/etii_server.h"
+#include "app/etii_client.h"
 
 #define DEF_FILE "./eternityII.back"
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 64
+#define NB_COMMANDS 65
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -95,6 +96,7 @@ int sort_ascending_files_interpreter(void);
 int sort_descending_files_interpreter(void);
 int sort_descending_interpreter(void);
 int max_stock_by_thread_interpreter(void);
+int shallow_root_abandon_depth_interpreter(void);
 int pruner_batch_interpreter(void);
 int pruner_dfs_budget_interpreter(void);
 int limit_interpreter(void);
@@ -169,7 +171,8 @@ static command_description commands[NB_COMMANDS] = {
      "EFFECTIVE (celle réellement en vigueur) et la configuration EN PRÉPARATION.\n"
      "N'annule pas le décompte. Client/pruner, avec <clé> <valeur> : écrit dans la\n"
      "configuration en préparation (clés : nb_forks, server_host, parts_file,\n"
-     "max_stock_by_thread, limit, pruner_batch, dfs_budget) et ANNULE\n"
+     "max_stock_by_thread, shallow_root_abandon_depth, limit, pruner_batch,\n"
+     "dfs_budget) et ANNULE\n"
      "DÉFINITIVEMENT le décompte d'auto-démarrage — `start` consomme toujours la\n"
      "configuration EFFECTIVE, pas celle en préparation.\n"
      "Serveur, sans argument : affiche la configuration EFFECTIVE du serveur (clés :\n"
@@ -206,7 +209,8 @@ static command_description commands[NB_COMMANDS] = {
     {"configApply", config_apply_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
      "applique la configuration en préparation, à chaud si possible",
      "Erreur si aucun fork n'est en cours d'exécution. Si seules des clés à chaud\n"
-     "(max_stock_by_thread/limit/pruner_batch/dfs_budget) sont préparées : appliquées immédiatement\n"
+     "(max_stock_by_thread/shallow_root_abandon_depth/limit/pruner_batch/dfs_budget)\n"
+     "sont préparées : appliquées immédiatement\n"
      "et diffusées aux fils en cours par IPC, sans interruption. Si nb_forks/server_host/\n"
      "parts_file est préparé (cf. `client_config_diff`) : arrête les fils (comme\n"
      "`stopForks`), reconstruit les tableaux de fils et/ou la map de recherche partagée,\n"
@@ -225,6 +229,11 @@ static command_description commands[NB_COMMANDS] = {
      "borne le débit de recherche à <n> coups/s (0 = illimité)", NULL, NULL},
     {"maxStockByThread", max_stock_by_thread_interpreter, 1, CMD_CAT_SEARCH, 0, "maxStockByThread <n>",
      "fixe le stock maximum de possibilités par thread", NULL, NULL},
+    {"shallowRootAbandonDepth", shallow_root_abandon_depth_interpreter, 1, CMD_CAT_SEARCH, 0,
+     "shallowRootAbandonDepth <n>",
+     "fixe la profondeur d'abandon d'une racine reçue trop peu profonde (0 = désactivé)",
+     "Opt-in, à calibrer par la mesure : voir shallow_root_abandon_depth\n"
+     "(core/core_static_variables.h) et --shallow-root-abandon-depth (`help shallow-root-abandon-depth`).", NULL},
     {"prunerBatch", pruner_batch_interpreter, 1, CMD_CAT_SEARCH, 0, "prunerBatch <n>",
      "fixe la taille de lot d'échange du pruner",
      "Bornée à [1, PRUNER_BATCH_MAX] pour maîtriser la mémoire du pruner et les tampons GPU.", NULL},
@@ -333,8 +342,18 @@ static command_description commands[NB_COMMANDS] = {
      "si elle redescend sous 25 % (jusqu'à remonter à 75 %). No-op silencieux\n"
      "sans --stock-max-ram (illimité) ou sans\n"
      "--stock-spill-dir utilisable (voir stockMemory pour l'état courant).", NULL},
-    {"min", min_interpreter, 1, CMD_CAT_STOCK, 0, NULL,
-     "affiche le niveau minimal de pièces placées dans les files", NULL, NULL},
+    {"min", min_interpreter, 0, CMD_CAT_STOCK, 0, "min",
+     "serveur : minimum de pièces placées dans les files ; client/pruner : profondeur par fork",
+     "Serveur : niveau minimal de pièces placées parmi les possibilités en stock\n"
+     "(search_min_datas, files du datamanager). Client/pruner : les files du\n"
+     "datamanager restent vides après fork (chaque fork explore en interne, cf.\n"
+     "AGENTS.md) -- affiche à la place un tableau \"Search depth\" par fork : la\n"
+     "profondeur de la racine reçue du serveur (Racine) et la profondeur minimale\n"
+     "ENCORE EN ATTENTE dans sa pile de décisions (Min) -- pas la profondeur du\n"
+     "chemin en cours d'exploration, qui ne fait que croître. `-` : fork idle ou\n"
+     "de rôle pruner. Jamais propagée aux forks (send_to_childs = 0) : le\n"
+     "process parent est la seule source de vérité pour ce tableau, un fork n'a\n"
+     "aucune vue sur ses frères.", NULL},
 
     {"backup", backup_interpreter, 1, CMD_CAT_BACKUP, 0, NULL,
      "sauvegarde les files dans les fichiers .back",
@@ -504,6 +523,24 @@ int max_stock_by_thread_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments != NULL) {
         max_stock_by_thread = atoi(arguments);
+        return 0;
+    }
+    return CMD_ERR_USAGE;
+}
+
+/**
+ * @brief Interpréteur de `shallowRootAbandonDepth <n>` : fixe la profondeur
+ *        d'abandon d'une racine reçue trop peu profonde (0 = désactivé).
+ *
+ * Voir la doc de `shallow_root_abandon_depth` (core/core_static_variables.h)
+ * pour le mécanisme. Aucune validation de signe : une valeur négative se
+ * comporte comme 0 (désactivé), le test `> 0` dans etii_search.c la traite
+ * de la même façon.
+ */
+int shallow_root_abandon_depth_interpreter(void) {
+    char *arguments = strtok(NULL, " ");
+    if (arguments != NULL) {
+        shallow_root_abandon_depth = atoi(arguments);
         return 0;
     }
     return CMD_ERR_USAGE;
@@ -2437,10 +2474,26 @@ int spill_interpreter(void) {
     return 0;
 }
 
-/** @brief Interpréteur de `min` : affiche le nombre minimal de pièces placées parmi toutes les possibilités. */
+/**
+ * @brief Interpréteur de `min`.
+ *
+ * Serveur : nombre minimal de pièces placées parmi les possibilités
+ * actuellement en stock (`search_min_datas`, files du datamanager).
+ *
+ * Client/pruner : les files du datamanager restent vides après fork (chaque
+ * fork explore en interne, cf. AGENTS.md) — `search_min_datas` y serait donc
+ * toujours dégénéré. Affiche à la place le tableau « Search depth »
+ * (`build_thread_depth_table`, app/etii_client.c) : profondeur de la racine
+ * reçue et profondeur minimale ENCORE EN ATTENTE dans la pile, par fork.
+ */
 int min_interpreter(void) {
-    log_info("min : %i\n",search_min_datas());
-    
+    if (server) {
+        log_info("min : %i\n", search_min_datas());
+        return 0;
+    }
+    char *table = build_thread_depth_table();
+    log_info("%s", table);
+    free(table);
     return 0;
 }
 

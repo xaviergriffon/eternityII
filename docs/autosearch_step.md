@@ -254,6 +254,80 @@ délégation *sous* le seuil quand le stock serveur ne suffit plus à nourrir le
 clients (famine du démarrage). Le thread ne cède jamais le chemin courant ni son
 dernier frère (`pending < 2` → quota 0), et au plus la moitié de son stock implicite.
 
+### 1.5bis Abandon d'une racine trop peu profonde (`shallow_root_abandon_depth`)
+
+`max_stock_by_thread` seul peut ne **jamais** se déclencher sur une racine reçue
+à faible profondeur : si le branchement MRV est fin (peu de candidats par case),
+`pending` (le stock implicite compté par `bt_count_pending`) reste petit alors que
+le sous-arbre total de la racine reste énorme — le thread peut y rester des heures
+sans jamais délivrer `max_stock_by_thread` frères. `shallow_root_abandon_depth`
+(défaut `0`, désactivé — CLI `--shallow-root-abandon-depth <n>`, console
+`shallowRootAbandonDepth <n>`, clé `config`/`--config-file`
+`shallow_root_abandon_depth`) ajoute un second critère, évalué **au même point de
+contrôle périodique** que la délégation (donc à coût nul sur la boucle chaude) :
+
+```
+root_depth   = possibility_placed_count(root)   ← figé une fois, avant la boucle
+placed_count = possibility_placed_count(board)  ← courant, réévalué à chaque contrôle
+
+bt_should_abandon_shallow_root(root_depth, placed_count, shallow_root_abandon_depth)
+   │  abandon_depth > 0 ET root_depth < abandon_depth ET placed_count >= abandon_depth
+   ▼
+si vrai :
+   bt_abandon_shallow_root()
+      ├── bt_flush_pending()              ← même mécanisme que l'arrêt propre (§1.7) :
+      │                                      tous les frères de la pile + le chemin courant
+      └── shallow_root_abandoned++        ← compteur, remonté par `statistic`
+   return BT_CORE_EXHAUSTED               ← le fil se repositionne sur une nouvelle
+                                             racine au prochain GET (batch de 1 en recherche)
+```
+
+Un seul déclenchement possible par racine : la fonction retourne aussitôt après
+avoir tout rendu, donc rien ne peut re-déclencher pendant l'étude de la MÊME
+racine. Opt-in, désactivé par défaut : à calibrer par le protocole de mesure en
+paires alternées déjà employé dans ce dépôt (moyenne géométrique, métrique
+cumulée sur fenêtre fixe — cf. [conception/elagage_recherche.md](conception/elagage_recherche.md)
+§6) avant d'envisager un défaut actif. Deux heuristiques de profondeur/ordre très
+proches ont déjà perdu à la mesure ici (départage MRV par nombre de côtés
+contraints, §4.12 du même document ; sens de cession « moins profond d'abord »
+de la branche `feat/dispatch-local-possibilites-forks`, non retenue) — la valeur
+128 (moitié du puzzle) n'est donc qu'un point de départ documenté, pas un défaut
+recommandé.
+
+### 1.5ter Observabilité : profondeur minimale en attente (commande `min`)
+
+`placed_count` (profondeur du chemin COURANT) ne fait que croître le long
+d'une seule branche : un fil peut afficher `placed_count=200` tout en
+détenant encore, quelque part dans sa pile de décisions, un frère non exploré
+au niveau 1 — exactement le stock implicite que `shallow_root_abandon_depth`
+cible. `placed_count` seul serait donc un majorant trompeur si on cherchait
+« la profondeur la plus superficielle que ce fil détient encore ».
+`bt_min_pending_depth(board, stack, top)` répond correctement à cette
+question : même parcours racine → pile que `bt_count_pending`, mais en
+maintenant aussi `scratch.grid[][]` (pas seulement les faces) pour pouvoir
+recompter par `possibility_placed_count` dès le premier niveau PENDING
+trouvé, en partant du moins profond — jamais dérivé de l'indice de niveau
+(la pile n'a pas de rapport fiable avec `alloc`, cf. §1.5). Coût borné par
+`top` (≤ `ETERN_PARTS`), évalué au même point de contrôle périodique que
+`shallow_root_abandon_depth` — toujours à coût nul sur la boucle chaude.
+
+```
+lastroot[compteur]  = root_depth               ← figé une fois, à la réception de la racine
+lastdepth[compteur] = bt_min_pending_depth(…)   ← réévalué à chaque point de contrôle périodique
+```
+
+Remontés au parent par IPC (`client_statistics.root_depth`/`min_pending_depth`,
+comme `lastfilesize`/`possibilities_in_stock`), agrégés par fork (minimum,
+sentinelle `-1` = idle ou rôle pruner ignorée) et affichés par la commande
+console `min` côté client/pruner — tableau « Search depth », une ligne par
+fork, colonnes **Racine** (profondeur de la possibilité reçue du serveur) et
+**Min** (profondeur minimale encore en attente). Voir
+[Utilisation](utilisation.md#option---shallow-root-abandon-depth-client-et-pruner)
+et [Console interactive](console.md) pour l'usage. Côté SERVEUR, `min` garde
+son sens historique (`search_min_datas`, minimum dans les files du
+datamanager) : sans objet côté client, dont les files restent vides après
+fork (chaque fork explore en interne, cf. AGENTS.md).
+
 ### 1.6 Solution trouvée
 
 Quand `depth >= ETERN_PARTS` (toutes les pièces placées) :

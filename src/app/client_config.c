@@ -112,6 +112,14 @@ client_config_line_status_t client_config_parse_line(const char *line, client_co
         }
         cfg->has_max_stock_by_thread = 1;
         cfg->max_stock_by_thread = (int)n;
+    } else if (strcmp(key, "shallow_root_abandon_depth") == 0) {
+        char *end = NULL;
+        long n = strtol(value, &end, 10);
+        if (end == value || *end != '\0' || n < 0 || n > INT_MAX) {
+            return CLIENT_CONFIG_LINE_INVALID_VALUE;
+        }
+        cfg->has_shallow_root_abandon_depth = 1;
+        cfg->shallow_root_abandon_depth = (int)n;
     } else if (strcmp(key, "limit") == 0) {
         /* strtoull accepte un '-' de tête et enroule silencieusement (norme
            C) au lieu d'échouer : un signe négatif est donc rejeté avant même
@@ -230,6 +238,9 @@ int client_config_format(const client_config_t *cfg, char *out, size_t out_size)
     if (cfg->has_max_stock_by_thread) {
         APPEND("max_stock_by_thread = %d\n", cfg->max_stock_by_thread);
     }
+    if (cfg->has_shallow_root_abandon_depth) {
+        APPEND("shallow_root_abandon_depth = %d\n", cfg->shallow_root_abandon_depth);
+    }
     if (cfg->has_limit) {
         APPEND("limit               = %llu\n", cfg->limit);
     }
@@ -320,6 +331,15 @@ void client_config_apply_to_globals(const client_config_t *cfg, int argc, const 
         max_stock_by_thread = cfg->max_stock_by_thread;
     }
 
+    if (cfg->has_shallow_root_abandon_depth
+        && shallow_root_abandon_depth == SHALLOW_ROOT_ABANDON_DEPTH) {
+        /* Aucun équivalent positionnel : même schéma que tcp_timeout/http_port
+           (server_config.c) -- la priorité CLI (--shallow-root-abandon-depth,
+           déjà appliquée par parse_cli_options avant ce chargement) se lit sur
+           la globale elle-même plutôt que sur argc. */
+        shallow_root_abandon_depth = cfg->shallow_root_abandon_depth;
+    }
+
     if (cfg->has_limit) {
         /* Aucun équivalent positionnel au démarrage : rien ne peut être
            "déjà fourni par la CLI" pour cette clé. */
@@ -352,6 +372,9 @@ void client_config_apply_direct(const client_config_t *cfg, const char **server_
     }
     if (cfg->has_max_stock_by_thread) {
         max_stock_by_thread = cfg->max_stock_by_thread;
+    }
+    if (cfg->has_shallow_root_abandon_depth) {
+        shallow_root_abandon_depth = cfg->shallow_root_abandon_depth;
     }
     if (cfg->has_limit) {
         max_search_by_sec = cfg->limit;
@@ -417,6 +440,9 @@ void client_config_capture_effective(client_config_t *out, const char *server_ho
 
     out->has_max_stock_by_thread = 1;
     out->max_stock_by_thread = max_stock_by_thread;
+
+    out->has_shallow_root_abandon_depth = 1;
+    out->shallow_root_abandon_depth = shallow_root_abandon_depth;
 
     out->has_limit = 1;
     out->limit = max_search_by_sec;

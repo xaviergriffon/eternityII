@@ -216,6 +216,25 @@ char *build_thread_queues_table(unsigned long long *out_stock,
                                 unsigned long long *out_shots_per_sec);
 
 /**
+ * @brief Construit le tableau « Search depth » de la commande console `min`
+ *        côté client/pruner (une ligne par fork + Min) dans une chaîne
+ *        allouée ; à libérer par l'appelant.
+ *
+ * Remplace `search_min_datas()` côté client : les files du datamanager
+ * restent vides après fork (chaque fork explore en interne — voir AGENTS.md),
+ * donc la seule source de vérité est ce que chaque fork remonte lui-même par
+ * IPC (`client_statistics.root_depth`/`min_pending_depth`). Colonne
+ * « Racine » : profondeur de la possibilité reçue du serveur, fixe pour
+ * toute la durée de son étude. Colonne « Min » : profondeur minimale ENCORE
+ * EN ATTENTE dans la pile de décisions de ce fork — PAS la profondeur du
+ * chemin en cours d'exploration, qui ne fait que croître et peut donc être
+ * bien plus profonde que ce que ce fork détient encore de plus superficiel
+ * (voir `bt_min_pending_depth`, core/etii_search.c). `-1` (idle, ou rôle
+ * pruner : pas de recherche en cours) s'affiche `-`.
+ */
+char *build_thread_depth_table(void);
+
+/**
  * @brief Alimente un thread de recherche en travail (un tour de la boucle `for`
  *        de `feed_thread_aposs`).
  *

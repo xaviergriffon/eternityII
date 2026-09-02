@@ -157,6 +157,7 @@ static const command_table_entry_t g_command_table[] = {
 	{ "resume", CTRL_CMD_WRITE_RELAYABLE },
 	{ "limit", CTRL_CMD_WRITE_RELAYABLE },
 	{ "maxStockByThread", CTRL_CMD_WRITE_RELAYABLE },
+	{ "shallowRootAbandonDepth", CTRL_CMD_WRITE_RELAYABLE },
 	{ "prunerBatch", CTRL_CMD_WRITE_RELAYABLE },
 	{ "prunerDfsBudget", CTRL_CMD_WRITE_RELAYABLE },
 	{ "clientsCommand", CTRL_CMD_WRITE_RELAYABLE },

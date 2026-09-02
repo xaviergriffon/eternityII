@@ -808,6 +808,14 @@ static void ensure_counters(void)
 {
     if (counters == NULL)     counters     = calloc(NB_THREADS, sizeof(*counters));
     if (lastfilesize == NULL) lastfilesize = calloc(NB_THREADS, sizeof(*lastfilesize));
+    if (lastroot == NULL) {
+        lastroot = malloc(NB_THREADS * sizeof(*lastroot));
+        for (int i = 0; i < NB_THREADS; i++) lastroot[i] = -1;
+    }
+    if (lastdepth == NULL) {
+        lastdepth = malloc(NB_THREADS * sizeof(*lastdepth));
+        for (int i = 0; i < NB_THREADS; i++) lastdepth[i] = -1;
+    }
 }
 
 /* idParts comme dans autosearch : idParts[p][r] = p + ETERN_PARTS*r. */
@@ -1633,6 +1641,41 @@ TEST delegation_quota_anticipates_capped_at_half(void)
     PASS();
 }
 
+/* bt_should_abandon_shallow_root : désactivé (abandon_depth <= 0) -> jamais,
+ * quels que soient root_depth/placed_count. */
+TEST abandon_shallow_root_disabled_never_triggers(void)
+{
+    ASSERT_EQ_FMT(0, bt_should_abandon_shallow_root(6, 200, 0), "%d");
+    ASSERT_EQ_FMT(0, bt_should_abandon_shallow_root(6, 200, -1), "%d");
+    PASS();
+}
+
+/* bt_should_abandon_shallow_root : racine reçue déjà AU-DESSUS du seuil (pas
+ * "trop peu profonde") -> jamais, même très creusée. */
+TEST abandon_shallow_root_deep_root_never_triggers(void)
+{
+    ASSERT_EQ_FMT(0, bt_should_abandon_shallow_root(128, 200, 128), "%d");
+    ASSERT_EQ_FMT(0, bt_should_abandon_shallow_root(129, 200, 128), "%d");
+    PASS();
+}
+
+/* bt_should_abandon_shallow_root : racine peu profonde MAIS pas encore
+ * creusée jusqu'au seuil -> pas encore. */
+TEST abandon_shallow_root_not_deep_enough_yet(void)
+{
+    ASSERT_EQ_FMT(0, bt_should_abandon_shallow_root(6, 127, 128), "%d");
+    PASS();
+}
+
+/* bt_should_abandon_shallow_root : racine peu profonde ET creusée jusqu'au
+ * seuil (frontière incluse, placed_count >= abandon_depth) -> déclenche. */
+TEST abandon_shallow_root_triggers_at_boundary(void)
+{
+    ASSERT_EQ_FMT(1, bt_should_abandon_shallow_root(6, 128, 128), "%d");
+    ASSERT_EQ_FMT(1, bt_should_abandon_shallow_root(0, 300, 128), "%d");
+    PASS();
+}
+
 /* bt_delegate_if_needed : stock sous le seuil MAIS serveur affamé
  * (server_hunger > 0) -> délégation anticipée d'au plus pending/2, pile
  * avancée, faim décrémentée du nombre envoyé. */
@@ -1665,6 +1708,52 @@ TEST bt_delegate_hunger_moves_below_threshold(void)
     PASS();
 }
 
+/* bt_min_pending_depth : le niveau 0 (le moins profond) a encore un candidat
+ * non essayé (id 2) alors que le chemin courant est déjà au niveau 1 (2
+ * pièces posées) -- la profondeur minimale en attente (1) doit être TROUVÉE,
+ * pas confondue avec placed_count (2). C'est exactement le cas que placed_count
+ * seul manquait : le fil peut détenir plus superficiel que sa position courante. */
+TEST bt_min_pending_depth_finds_shallowest_level(void)
+{
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+
+    ASSERT_EQ_FMT(1, bt_min_pending_depth(&board, stack, top), "%d");
+    PASS();
+}
+
+/* bt_min_pending_depth : niveau 0 ÉPUISÉ (plus aucun candidat, next_s == size)
+ * -- le parcours doit continuer au niveau 1 plutôt que de s'arrêter, et
+ * trouver son candidat restant (id 5), donnant la même profondeur que le
+ * chemin courant (2) puisque rien de plus superficiel n'existe. */
+TEST bt_min_pending_depth_skips_exhausted_shallow_level(void)
+{
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+    stack[0].next_s = stack[0].search->size; /* niveau 0 épuisé : id 2,3 déjà essayés ailleurs */
+
+    ASSERT_EQ_FMT(2, bt_min_pending_depth(&board, stack, top), "%d");
+    PASS();
+}
+
+/* bt_min_pending_depth : les DEUX niveaux épuisés -- rien en attente, -1. */
+TEST bt_min_pending_depth_returns_minus_one_when_nothing_pending(void)
+{
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+    stack[0].next_s = stack[0].search->size;
+    stack[1].next_s = stack[1].search->size;
+
+    ASSERT_EQ_FMT(-1, bt_min_pending_depth(&board, stack, top), "%d");
+    PASS();
+}
+
 /* bt_flush_pending : renvoie TOUS les frères (3) + le paquet du chemin courant. */
 TEST bt_flush_pending_sends_all_plus_current(void)
 {
@@ -1683,6 +1772,32 @@ TEST bt_flush_pending_sends_all_plus_current(void)
 
     /* 3 frères matérialisés + 1 paquet « chemin courant » = 4. */
     ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
+
+    drain_local();
+    PASS();
+}
+
+/* bt_abandon_shallow_root : même effet que bt_flush_pending (tout le travail
+ * restant rendu) PLUS le comptage de l'abandon (shallow_root_abandoned). */
+TEST bt_abandon_shallow_root_flushes_and_counts(void)
+{
+    drain_local();
+    ensure_counters();
+    unsigned long long before = __atomic_load_n(&shallow_root_abandoned, __ATOMIC_RELAXED);
+
+    struct possibility_packet board;
+    bt_level stack[2];
+    client_possibility_t client;
+    int top = build_two_level_fixture(&board, stack, &client);
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    fill_idparts(idParts);
+
+    bt_abandon_shallow_root(&client, &board, stack, top, idParts);
+
+    /* Même bilan que bt_flush_pending : 3 frères + 1 chemin courant = 4. */
+    ASSERT_EQ_FMT(4ULL, datas_size(), "%llu");
+    ASSERT_EQ_FMT(before + 1, __atomic_load_n(&shallow_root_abandoned, __ATOMIC_RELAXED), "%llu");
 
     drain_local();
     PASS();
@@ -3560,8 +3675,16 @@ SUITE(etii_search_suite)
     RUN_TEST(delegation_quota_above_threshold_ignores_hunger);
     RUN_TEST(delegation_quota_below_threshold_needs_hunger);
     RUN_TEST(delegation_quota_anticipates_capped_at_half);
+    RUN_TEST(abandon_shallow_root_disabled_never_triggers);
+    RUN_TEST(abandon_shallow_root_deep_root_never_triggers);
+    RUN_TEST(abandon_shallow_root_not_deep_enough_yet);
+    RUN_TEST(abandon_shallow_root_triggers_at_boundary);
     RUN_TEST(bt_delegate_hunger_moves_below_threshold);
+    RUN_TEST(bt_min_pending_depth_finds_shallowest_level);
+    RUN_TEST(bt_min_pending_depth_skips_exhausted_shallow_level);
+    RUN_TEST(bt_min_pending_depth_returns_minus_one_when_nothing_pending);
     RUN_TEST(bt_flush_pending_sends_all_plus_current);
+    RUN_TEST(bt_abandon_shallow_root_flushes_and_counts);
     RUN_TEST(bt_flush_error_reputs_locally);
     RUN_TEST(search_backtracking_stop_flushes_and_returns_one);
     RUN_TEST(search_backtracking_prefilled_cells_no_decision);

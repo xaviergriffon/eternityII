@@ -60,6 +60,10 @@ unsigned long long *counters = NULL;
 
 unsigned long long *lastfilesize = NULL;
 
+int *lastroot = NULL;
+
+int *lastdepth = NULL;
+
 volatile uint16_t max_result = 0;
 
 /**
@@ -95,6 +99,10 @@ unsigned long long non_null_possibilities = 0;
 volatile int request = REQUEST_CONTINUE;
 
 int max_stock_by_thread = MAX_STOCK_BY_THREAD;
+
+int shallow_root_abandon_depth = SHALLOW_ROOT_ABANDON_DEPTH;
+
+volatile unsigned long long shallow_root_abandoned = 0;
 
 volatile int server_io_active = 0;
 

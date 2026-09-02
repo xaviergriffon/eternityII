@@ -34,7 +34,7 @@ désactivée) plutôt que d'ouvrir un port au hasard.
 
 Optionnellement, `--http-token-file <chemin>` active l'authentification de toutes
 les commandes de MODIFICATION (`pause`, `resume`, `limit`, `maxStockByThread`,
-`prunerBatch`, `prunerDfsBudget`, `clientsCommand`/`clientsCmd`, `clientsRoles`, `restore`, `backup` — voir
+`shallowRootAbandonDepth`, `prunerBatch`, `prunerDfsBudget`, `clientsCommand`/`clientsCmd`, `clientsRoles`, `restore`, `backup` — voir
 [Authentification](#authentification) ci-dessous) :
 
 ```sh
@@ -52,7 +52,7 @@ chmod 600 /etc/eternityii/http-token
   (`POST /api/v1/command`) fonctionnent sans authentification (réseau de confiance
   supposé — la machine elle-même, ou un tunnel authentifié en amont — ne jamais
   exposer directement sur un réseau non maîtrisé), mais **aucune commande de
-  modification** (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`,
+  modification** (`pause`, `resume`, `limit`, `maxStockByThread`, `shallowRootAbandonDepth`, `prunerBatch`,
   `prunerDfsBudget`, `clientsCommand`/`clientsCmd`, `clientsRoles`, `restore`, `backup`) n'est exécutable. Avec
   `--http-token-file`, un jeton Bearer devient nécessaire pour toutes ces commandes de
   modification — plus seulement `restore`/`backup` (voir
@@ -287,6 +287,7 @@ pratique car toutes les commandes whitelistées n'utilisent que `[A-Za-z0-9 ]`.
 | `resume` | Lève une pause administrative posée par `pause` | **requise** |
 | `limit <n>` | Fixe le débit maximum de recherche à `n` essais/seconde (`0` = illimité) | **requise** |
 | `maxStockByThread <n>` | Fixe le seuil de stock local par thread | **requise** |
+| `shallowRootAbandonDepth <n>` | Fixe la profondeur d'abandon d'une racine reçue trop peu profonde (`0` = désactivé, voir [Utilisation](utilisation.md#option---shallow-root-abandon-depth-client-et-pruner)) | **requise** |
 | `prunerBatch <n>` | Fixe la taille de lot du pruner, bornée à `[1, PRUNER_BATCH_MAX]` (65536) — une valeur hors borne est silencieusement ramenée à la borne la plus proche, pas un `400` | **requise** |
 | `prunerDfsBudget <n>` | Fixe le budget de nœuds de la preuve de fermeture bornée du pruner (§4.6b), bornée à `[0, PRUNER_DFS_BUDGET_MAX]` (10000000) — `n <= 0` la désactive ; valeur hors borne ramenée silencieusement, pas un `400` | **requise** |
 | `clientsCommand [--to <session_no\|client_uid\|label>] <ligne...>` (alias `clientsCmd`) | Équivalent HTTP de la commande console du même nom : sans `--to`, diffuse `<ligne...>` à toutes les sessions de [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) actives ; avec `--to <cible>`, l'envoie à UNE SEULE session (résolue par `session_no` décimal, `client_uid` hexadécimal, ou `label` déclaré — cf. `control_registry_send_command_to`). `<ligne...>` elle-même est revérifiée par `control_command_allowed` avant tout envoi : cibler une session n'élargit jamais le jeu de commandes exécutables sur un client (`exit`, `restore`, … restent hors de portée même via `clientsCommand --to`) | **requise** |
@@ -398,7 +399,7 @@ ne corrompt jamais le découpage de l'autre.
 ### Authentification
 
 **Toute commande de modification** — `pause`, `resume`, `limit`, `maxStockByThread`,
-`prunerBatch`, `prunerDfsBudget`, `clientsCommand`/`clientsCmd`, `clientsRoles`, `restore`, `backup` — exige un jeton
+`shallowRootAbandonDepth`, `prunerBatch`, `prunerDfsBudget`, `clientsCommand`/`clientsCmd`, `clientsRoles`, `restore`, `backup` — exige un jeton
 Bearer valide. Seule `clientsWork` (pure lecture, `control_command_read_only`) en est
 dispensée, au même titre que les routes `GET`. Par défaut (sans `--http-token-file`),
 **aucune** commande de modification n'est exécutable via cette API : sans jeton
@@ -761,7 +762,7 @@ autres routes `GET`).
 
 | Champ | Type | Sens |
 |---|---|---|
-| `commands` | tableau | Une entrée par commande de `control_command_classify` (27 aujourd'hui) |
+| `commands` | tableau | Une entrée par commande de `control_command_classify` (28 aujourd'hui) |
 | `name` | chaîne | Nom de la commande, tel qu'accepté par `POST /api/v1/command` |
 | `scope` | chaîne | Où la commande a un sens en LOCAL : `common` (les deux rôles), `client_only` (pilotage du cycle de vie des fils, masqué côté serveur), `server_only` (n'a de sens que sur un serveur) |
 | `remote_class` | chaîne | Comment/si elle voyage sur le réseau : `read_only` (relayable, sans jeton), `write_relayable` (relayable, jeton requis), `write_server_only` (jamais relayable, jeton requis) — voir `control_command_class_t`, [src/net/control_protocol.h](../src/net/control_protocol.h) |
@@ -844,7 +845,7 @@ sequenceDiagram
 ```
 
 Le même échange s'applique à `pause`, `resume`, `limit`, `maxStockByThread`,
-`prunerBatch`, `prunerDfsBudget`, `clientsCommand`/`clientsCmd`, `clientsRoles` — pas seulement `restore`/`backup`.
+`shallowRootAbandonDepth`, `prunerBatch`, `prunerDfsBudget`, `clientsCommand`/`clientsCmd`, `clientsRoles` — pas seulement `restore`/`backup`.
 `clientsWork` est la seule commande de `POST /api/v1/command` qui ne suit jamais ce
 schéma : elle répond directement `200`, sans en-tête `Authorization`.
 
