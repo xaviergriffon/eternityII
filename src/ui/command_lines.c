@@ -718,7 +718,7 @@ int start_interpreter(void) {
         log_error("start : la recherche est déjà en cours d'exécution\n");
         return -1;
     }
-    log_info("start : démarrage demandé\n");
+    log_event("start : démarrage demandé\n");
     return 0;
 }
 
@@ -740,7 +740,7 @@ int stop_forks_interpreter(void) {
         log_error("stopForks : aucun fork en cours d'exécution\n");
         return -1;
     }
-    log_info("stopForks : arrêt des process de recherche demandé\n");
+    log_event("stopForks : arrêt des process de recherche demandé\n");
     return 0;
 }
 
@@ -812,13 +812,13 @@ int config_apply_interpreter(void) {
                       "\"config\" puis \"start\"\n");
             return -1;
         }
-        log_info("configApply : redémarrage à chaud demandé (nb_forks/server_host/"
+        log_event("configApply : redémarrage à chaud demandé (nb_forks/server_host/"
                   "parts_file modifié)\n");
         return 0;
     }
 
     fork_orchestrator_apply_hot_staged_config();
-    log_info("configApply : configuration à chaud appliquée, aucun redémarrage nécessaire\n");
+    log_event("configApply : configuration à chaud appliquée, aucun redémarrage nécessaire\n");
     return 0;
 }
 
@@ -867,7 +867,7 @@ int config_save_interpreter(void) {
 
 /** @brief Interpréteur de `backup` : sauvegarde les files de possibilités dans les fichiers `.back`. */
 int backup_interpreter(void) {
-    log_info("start backup\n");
+    log_event("start backup\n");
     char *def_file = DEF_FILE;
     char *def_analyse_file = DEF_ANALYSE_FILE;
     char *def_best_board_file = DEF_BEST_BOARD_FILE;
@@ -895,26 +895,31 @@ int backup_interpreter(void) {
     if (rb == BACKUP_SKIPPED_MAINTENANCE) {
         log_info("backup de %s sauté (maintenance en cours)\n", def_file);
     } else if (rb != BACKUP_OK) {
-        log_info("backup de %s échoué\n", def_file);
+        // Échec réel d'une sauvegarde non surveillée : contrairement au "sauté"
+        // ci-dessus (attendu, cf. datamanager.c:640), c'était log_info jusqu'ici
+        // -- un backup automatique qui échoue en pleine nuit ne laissait ALORS
+        // aucune trace, ni console (personne ne regarde) ni events.log (log_info
+        // n'y persiste pas).
+        log_error("backup de %s échoué\n", def_file);
     }
     if (rba == BACKUP_SKIPPED_MAINTENANCE) {
         log_info("backup de %s sauté (maintenance en cours)\n", def_analyse_file);
     } else if (rba != BACKUP_OK) {
-        log_info("backup de %s échoué\n", def_analyse_file);
+        log_error("backup de %s échoué\n", def_analyse_file);
     }
     // Représentation du meilleur plateau connu (pas seulement max_result) :
     // même commande console, fichier dédié (cf. core/best_board.h). Absent des
     // codes BACKUP_SKIPPED_MAINTENANCE/BACKUP_OK (best_board_save n'a pas de
     // section « maintenance » à sauter, cf. best_board.c) : 0 = succès.
     if (best_board_save(&g_server_best_board, def_best_board_file) != 0) {
-        log_info("backup de %s échoué\n", def_best_board_file);
+        log_error("backup de %s échoué\n", def_best_board_file);
     }
     // Cumul par machine : même cadence que
     // le reste du stock, fichier dédié (cf. app/known_clients_registry.h).
     if (known_clients_registry_save(def_known_clients_file) != 0) {
-        log_info("backup de %s échoué\n", def_known_clients_file);
+        log_error("backup de %s échoué\n", def_known_clients_file);
     }
-    log_info("backup ended\n");
+    log_event("backup ended\n");
     if (isServer == 0) {
         free(def_file);
         free(def_analyse_file);
@@ -1055,7 +1060,7 @@ int exit_interpreter(void) {
  * @return             0 si la restauration a réussi, une valeur négative sinon.
  */
 static int restore_apply(char *file, char *analyse_file) {
-    log_info("start restore\n");
+    log_event("start restore\n");
 
     // Suspension de la recherche pendant le remplacement du stock : sans cela,
     // les threads de recherche consomment et délèguent des possibilités au
@@ -1168,7 +1173,7 @@ static int restore_apply(char *file, char *analyse_file) {
     // (console, API HTTP admin) plutôt que de le taire.
     int result = (core_result == 0 && !spill_mismatch) ? 0 : -1;
     if (result == 0) {
-        log_info("backup restore\n");
+        log_event("backup restore\n");
     }
     return result;
 }
@@ -1192,10 +1197,10 @@ int restore_interpreter(void) {
 int import_interpreter(void) {
     char *def_file = DEF_FILE;
     char *def_analyse_file = DEF_ANALYSE_FILE;
-    log_info("start import\n");
+    log_event("start import\n");
     import(NULL, def_file);
     import_analysed(def_analyse_file);
-    log_info("backup restore\n");
+    log_event("backup restore\n");
     
     return 0;
 }
@@ -1324,7 +1329,7 @@ int check_origin_interpreter(void) {
     }
     unsigned long long spilled = stock_spill_total_packets();
     if (spilled > 0) {
-        log_info("checkOrigin : %llu possibilites debordees sur disque ne sont PAS balayees\n", spilled);
+        log_event("checkOrigin : %llu possibilites debordees sur disque ne sont PAS balayees\n", spilled);
     }
     return check_origin(purge);
 }
@@ -1371,10 +1376,10 @@ int checkfile_interpreter(void) {
 int checkdirections_interpreter(void) {
     if(test_directions() == 0)
     {
-        log_info("directions : ok\n");
+        log_event("directions : ok\n");
     } else
     {
-        log_info("directions : NOK !\n");
+        log_event("directions : NOK !\n");
     }
     
     return 0;
@@ -2067,12 +2072,12 @@ int clients_cmd_interpreter(void) {
             log_error("clientsCommand : cible \"%s\" introuvable, déconnectée ou ambiguë -- rien envoyé\n", target);
             return -1;
         }
-        log_info("clientsCommand : \"%s\" envoyée à la cible \"%s\"\n", rest, target);
+        log_event("clientsCommand : \"%s\" envoyée à la cible \"%s\"\n", rest, target);
         return 0;
     }
 
     int n = control_registry_broadcast_command(CTRL_COMMAND, rest);
-    log_info("clientsCommand : \"%s\" diffusée à %d session(s)\n", rest, n);
+    log_event("clientsCommand : \"%s\" diffusée à %d session(s)\n", rest, n);
     return 0;
 }
 
@@ -2132,12 +2137,12 @@ int clients_roles_interpreter(void) {
             log_error("clientsRoles : cible \"%s\" introuvable, déconnectée ou ambiguë -- rien envoyé\n", target);
             return -1;
         }
-        log_info("clientsRoles : pruner_forks=%d envoyé à la cible \"%s\" (mémorisé pour les reconnexions futures)\n",
+        log_event("clientsRoles : pruner_forks=%d envoyé à la cible \"%s\" (mémorisé pour les reconnexions futures)\n",
                   (int)n, target);
         return 0;
     }
 
-    log_info("clientsRoles : pruner_forks=%d diffusé à %d session(s) (mémorisé pour les reconnexions futures)\n",
+    log_event("clientsRoles : pruner_forks=%d diffusé à %d session(s) (mémorisé pour les reconnexions futures)\n",
               (int)n, touched);
     return 0;
 }

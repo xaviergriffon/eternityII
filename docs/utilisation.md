@@ -707,7 +707,7 @@ Ces fichiers permettent de reprendre une recherche interrompue avec la commande
 
 | Fichier | Contenu |
 |---|---|
-| `events.log` | Journal des évènements horodatés (nouveaux records, solutions, etc.), **des erreurs** (`log_error`/`log_errno`, ex. écriture de fichier échouée) **et de la configuration effective de démarrage** (client/pruner et serveur — jamais affichée sur la console, uniquement dans ce fichier). Append-only ; voir [Console interactive](console.md#zone-events-en-bas-de-lécran). |
+| `events.log` | Journal des évènements horodatés (nouveaux records, solutions, etc.), **des erreurs** (`log_error`/`log_errno`, ex. écriture de fichier échouée), **de la configuration effective de démarrage** (client/pruner et serveur — jamais affichée sur la console, uniquement dans ce fichier), ainsi que **du résultat des commandes de vérification, des actions de cycle de vie (start/stopForks/configApply), du pilotage distant et des transitions de débordement disque** — voir [Console interactive](console.md#zone-events-en-bas-de-lécran) pour la liste complète. Append-only. |
 | `solution_<pid>_<seq>` | Plateau sérialisé quand une solution complète est trouvée (déclenche aussi un évènement). |
 
 ### Sockets Unix de l'IPC parent↔fork

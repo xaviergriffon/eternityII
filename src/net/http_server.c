@@ -476,7 +476,7 @@ static void handle_command_route(int socket_id, const http_request_t *req)
     }
 
     if (needs_auth) {
-        log_info("commande \"%s\" (authentification requise) exécutée via l'API HTTP admin\n", command);
+        log_event("commande \"%s\" (authentification requise) exécutée via l'API HTTP admin\n", command);
     }
 
     int result = admin_apply_privileged_command(command);

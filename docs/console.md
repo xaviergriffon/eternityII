@@ -294,6 +294,51 @@ réellement actives à cet instant précis) via `tail -f events.log`, sans
 dépendre du scrollback de la console ni d'avoir pensé à lancer
 `config`/`configSave` avant un incident.
 
+**Le résultat des commandes de vérification, les actions de cycle de vie et
+les évènements réseau/RAM significatifs sont eux aussi persistés**, sur le
+même principe que la configuration de démarrage ci-dessus : reconstituer
+après coup la chronologie qui a mené à une anomalie, sans dépendre d'un
+opérateur qui regardait l'écran au bon moment. Avant cela, tous ces sites
+journalisaient via `log_info` — visible sur la console au moment où la
+commande s'exécutait, mais absent de `events.log` une fois sorti du
+scrollback ou en session non interactive (démarrage automatique, pilotage
+distant via `clientsCommand`/l'API HTTP admin, `--auto-roles`). Ils utilisent
+désormais `log_event` (ou `log_file` pour un dump trop volumineux pour tenir
+sur une ligne de 200 octets) :
+
+- **Commandes de vérification** — résultat final de `checkDatas`,
+  `checkDuplicate`, `checkOrigin` (y compris l'avertissement sur le
+  débordement disque non balayé et le décompte de purge), `checkFiles` et
+  `checkDirections`.
+- **Sauvegarde/restauration** — début/fin de `backup`, `restore` et `import`.
+  Une sauvegarde réellement ÉCHOUÉE (par opposition à « sautée, sauvegarde
+  déjà en cours ») utilise maintenant `log_error`, pas `log_info` : avant ce
+  correctif, un backup automatique qui échouait sans personne devant l'écran
+  ne laissait aucune trace, ni console ni `events.log`.
+- **Cycle de vie des fils de recherche** — `start`, `stopForks`, `configApply`
+  (les deux branches : application à chaud et redémarrage), ainsi que les
+  transitions internes de l'orchestrateur (début/fin de séquence d'arrêt,
+  reconstruction des structures sur `nb_forks`/`parts_file` modifié, bilan de
+  (re)démarrage des forks).
+- **Pilotage distant côté serveur** — `clientsCommand`/`clientsRoles`
+  (émission, avec la cible), et l'exécution réussie d'une commande privilégiée
+  via l'API HTTP admin (les refus, eux, étaient déjà persistés via
+  `log_error`).
+- **Connectivité** — coupure détectée côté client (`socket deconnected`),
+  reconnexion réussie après une coupure (jamais sur la toute première
+  connexion d'un thread, qui reste une trace routinière), et tentative de
+  handshake sans réponse (serveur occupé), sur le canal de travail comme sur
+  le canal de contrôle.
+- **Débordement disque (`--stock-max-ram`/`--stock-spill-dir`)** — une ligne
+  par TRANSITION de mode (début/fin d'éviction, début/fin de rechargement),
+  jamais par cycle de 100 ms du thread de débordement : la fréquence des
+  bascules 90 %/75 %/25 % est elle-même le signal utile (pression RAM
+  soutenue vs. pic isolé), un log par tick noierait ce signal dans du bruit.
+- **Notices de démarrage ponctuelles** — GPU CUDA identifié (`--gpu`),
+  `--stock-files` relevé automatiquement pour couvrir `nb_forks`, nouveau
+  `machine_uid` généré, et repli sur l'index de recherche non compact
+  (puzzle hors gabarit 16 bits).
+
 ## Effacement de l'écran : la commande `clear` (Ctrl-L)
 
 La politique d'affichage est uniforme : **aucune commande n'efface l'écran

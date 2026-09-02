@@ -154,7 +154,7 @@ int control_channel_handle_frame(int socket_id, uint8_t cmd, const void *payload
         // n'existait pas avant ce maintien de session : la connexion était
         // déjà fermée à cet instant.
         if (!request_keeps_running(request)) {
-            log_info("canal de contrôle : commande ignorée, arrêt en cours : \"%s\"\n",
+            log_event("canal de contrôle : commande ignorée, arrêt en cours : \"%s\"\n",
                      command_line);
             result = -1;
         }
@@ -244,7 +244,7 @@ void *run_control_channel(void *param)
             return NULL;
         }
         if (verdict == HANDSHAKE_RETRY) {
-            log_info("canal de contrôle : handshake sans réponse (serveur occupé ?) — "
+            log_event("canal de contrôle : handshake sans réponse (serveur occupé ?) — "
                       "nouvelle tentative ultérieure\n");
             close_socket(socket_id);
             backoff = next_no_work_sleep(backoff);

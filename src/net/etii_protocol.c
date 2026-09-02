@@ -144,7 +144,7 @@ long send_all(int socket_id, const void *buf, size_t len)
 int is_connected(int socket_id) {
 	long result = send_instruction(socket_id, INST_TEST_CONNECTED);
 	if (result <= 0) {
-        log_info("socket deconnected s\n");
+        log_event("socket deconnected s\n");
 #ifdef DEBUG_SOCKET
 		opened_tcp--;
 #endif // DEBUG_SOCKET

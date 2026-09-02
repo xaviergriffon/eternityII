@@ -954,7 +954,7 @@ int ensure_stock_files_cover_forks(int nb_threads)
 	}
 	int previous = nb_file_possibility;
 	datamanager_configure_stock_files(nb_threads);
-	log_info("stock-files : relevé de %d à %d (couvre les %d threads demandés)\n",
+	log_event("stock-files : relevé de %d à %d (couvre les %d threads demandés)\n",
 	          previous, nb_file_possibility, nb_threads);
 	return 1;
 }
@@ -966,7 +966,7 @@ void init_client_identity(void)
 	machine_uid_status_t st = machine_uid_load_or_create(machine_uid_file_path,
 	                                                      g_client_identity_template.machine_uid);
 	if (st == MACHINE_UID_CREATED) {
-		log_info("identité : nouveau machine_uid généré et enregistré dans \"%s\"\n",
+		log_event("identité : nouveau machine_uid généré et enregistré dans \"%s\"\n",
 		         machine_uid_file_path);
 	} else if (st == MACHINE_UID_VOLATILE) {
 		log_error("identité : impossible d'écrire le machine_uid dans \"%s\" — "
