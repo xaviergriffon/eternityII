@@ -106,6 +106,7 @@ int server_rmnonext_timing = 30;
 int server_sort_enabled = 0;
 int server_sort_interval = SORT_PERIODIC_INTERVAL_DEFAULT;
 int server_sort_direction = SORT_DIRECTION_ASC;
+int server_sort_lock_attempts = SORT_LOCK_ATTEMPTS_DEFAULT;
 
 unsigned long long bench_target_nodes = 0;
 
@@ -260,6 +261,19 @@ int parse_cli_options(int argc, const char *argv[])
                     server_sort_direction = SORT_DIRECTION_ASC;
                 } else if (strcmp(argv[r + 1], "desc") == 0) {
                     server_sort_direction = SORT_DIRECTION_DESC;
+                }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--sort-lock-attempts") == 0) {
+            // Option valuée, même schéma que --rebalance-budget : un nombre
+            // de tentatives <= 0 n'a pas de sens utile (abandon immédiat sur
+            // le moindre segment busy), valeur absente ou <= 0 ignorée,
+            // server_sort_lock_attempts garde sa valeur par défaut
+            // (SORT_LOCK_ATTEMPTS_DEFAULT) ou celle déjà fixée.
+            if (r + 1 < argc) {
+                int attempts = atoi(argv[r + 1]);
+                if (attempts > 0) {
+                    server_sort_lock_attempts = attempts;
                 }
                 r++; // consomme aussi la valeur
             }

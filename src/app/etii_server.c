@@ -1682,22 +1682,38 @@ void create_rmnonext_thread(void) {
  * @brief Une passe de tri périodique du stock par file (corps de boucle de
  *        `sort_periodic_thread`, extrait pour être testable hors thread).
  *
- * Trie chaque file du stock EN PLACE (`sort_ascending_files`/
- * `sort_descending_files` selon `server_sort_direction`), SANS regroupement —
- * préserve la distribution round-robin entre files (contrairement à
- * `sort_ascending`/`sort_descending`, réservées à un appel console manuel).
- * Comme `rmnonext_pass`, suspendue tant qu'un client est connecté : le tri
- * verrouille les files, il ne doit pas concurrencer leur alimentation.
+ * Trie chaque file du stock EN PLACE (`sort_ascending_files_bounded`/
+ * `sort_descending_files_bounded` selon `server_sort_direction`), SANS
+ * regroupement — préserve la distribution round-robin entre files
+ * (contrairement à `sort_ascending`/`sort_descending`, réservées à un appel
+ * console manuel).
+ *
+ * Contrairement à une première version qui suspendait TOUTE la passe dès
+ * qu'un client était connecté (même garde-fou que `rmnonext_pass`), cette
+ * passe tourne EN CONTINU, quel que soit le trafic : `sort_*_files_bounded`
+ * verrouille chaque file (et chaque pool) individuellement, via un `trylock`
+ * borné par `server_sort_lock_attempts` tentatives — un segment toujours pris
+ * après ce nombre de tentatives est simplement sauté (jamais perdu, retenté
+ * à la prochaine passe), sans jamais bloquer les threads ADD/GET. Le garde-fou
+ * client-connecté rendait en pratique le tri quasi inatteignable sur un
+ * serveur de production, presque toujours occupé par au moins un client.
+ *
+ * Journalise une ligne courte dans events.log à chaque passe (segments
+ * effectivement triés / total) : seul moyen, hors build debug, de savoir
+ * quand le tri automatique s'est déclenché et s'il a dû sauter des segments.
  */
 void sort_periodic_pass(void)
 {
-    if (get_active_threads(thread_params) <= 0) {
-        if (server_sort_direction == SORT_DIRECTION_DESC) {
-            sort_descending_files();
-        } else {
-            sort_ascending_files();
-        }
+    int sorted = 0;
+    int total = 0;
+    if (server_sort_direction == SORT_DIRECTION_DESC) {
+        sort_descending_files_bounded(server_sort_lock_attempts, &sorted, &total);
+    } else {
+        sort_ascending_files_bounded(server_sort_lock_attempts, &sorted, &total);
     }
+    log_event("tri périodique du stock (%s, %d/%d segments)",
+               server_sort_direction == SORT_DIRECTION_DESC ? "desc" : "asc",
+               sorted, total);
 }
 
 void *sort_periodic_thread(void *param) {

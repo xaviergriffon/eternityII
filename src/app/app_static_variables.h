@@ -95,6 +95,15 @@
 #define SORT_DIRECTION_ASC 0
 #define SORT_DIRECTION_DESC 1
 
+// Tentatives de trylock par segment (une file d'un pool) avant abandon pour
+// cette passe, dans le tri périodique (variable globale
+// `server_sort_lock_attempts`, configurable via `--sort-lock-attempts <n>`).
+// Défaut 50 tentatives x MICRO_SLEEP (100 µs) ~= 5 ms de patience par segment
+// avant de passer au suivant -- jamais un blocage : sort_*_files_bounded
+// (core/datamanager.h) ne bloque jamais les threads ADD/GET, ce budget ne fait
+// que régler la persévérance du thread de tri lui-même sur un segment busy.
+#define SORT_LOCK_ATTEMPTS_DEFAULT 50
+
 // Politique automatique de dosage recherche/contrôle (option `--auto-roles`).
 // Chaque changement de dosage coûte un stopForks+re-fork chez le(s)
 // client(s) visé(s) : un délai minimal entre deux changements (en tours de
@@ -604,6 +613,17 @@ extern int server_sort_interval;
  *        `SORT_DIRECTION_ASC` (défaut) ou `SORT_DIRECTION_DESC`.
  */
 extern int server_sort_direction;
+
+/**
+ * @brief Tentatives de trylock par segment avant abandon, dans le tri
+ *        périodique (`--sort-lock-attempts <n>`).
+ *
+ * Défaut `SORT_LOCK_ATTEMPTS_DEFAULT` (50). Consommé par `sort_periodic_pass`
+ * (`src/app/etii_server.c`), transmis tel quel à
+ * `sort_ascending_files_bounded`/`sort_descending_files_bounded`
+ * (`core/datamanager.h`).
+ */
+extern int server_sort_lock_attempts;
 
 /**
  * @brief Nombre de nœuds cible du banc de mesure (`ETII_BENCH_NODES`), 0 =

@@ -759,6 +759,43 @@ TEST sort_direction_without_value_is_ignored(void)
     PASS();
 }
 
+/* --sort-lock-attempts <n> : option VALUÉE, même schéma que --rebalance-budget
+   (0/négatif/absent ignoré, garde la valeur courante). */
+TEST sort_lock_attempts_strips_option_and_value_sets_global(void)
+{
+    server_sort_lock_attempts = SORT_LOCK_ATTEMPTS_DEFAULT;
+    const char *argv[] = {"prog", "server", "--sort-lock-attempts", "10", "8"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(10, server_sort_lock_attempts, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);
+    PASS();
+}
+
+TEST sort_lock_attempts_without_value_is_ignored(void)
+{
+    server_sort_lock_attempts = SORT_LOCK_ATTEMPTS_DEFAULT;
+    const char *argv[] = {"prog", "server", "--sort-lock-attempts"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(SORT_LOCK_ATTEMPTS_DEFAULT, server_sort_lock_attempts, "%d");
+    PASS();
+}
+
+TEST sort_lock_attempts_non_positive_value_is_ignored(void)
+{
+    server_sort_lock_attempts = 30;
+    const char *argv[] = {"prog", "server", "--sort-lock-attempts", "0"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(30, server_sort_lock_attempts, "%d");
+    PASS();
+}
+
 SUITE(app_static_variables_suite)
 {
     RUN_TEST(flag_absent_leaves_argv_and_flag_untouched);
@@ -816,4 +853,7 @@ SUITE(app_static_variables_suite)
     RUN_TEST(sort_direction_asc_strips_option_and_sets_global);
     RUN_TEST(sort_direction_invalid_value_is_ignored);
     RUN_TEST(sort_direction_without_value_is_ignored);
+    RUN_TEST(sort_lock_attempts_strips_option_and_value_sets_global);
+    RUN_TEST(sort_lock_attempts_without_value_is_ignored);
+    RUN_TEST(sort_lock_attempts_non_positive_value_is_ignored);
 }

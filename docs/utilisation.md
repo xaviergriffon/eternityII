@@ -27,7 +27,7 @@ lancement affichent la même aide générale sur la sortie d'erreur.
 Lance le serveur qui distribue les possibilités aux clients.
 
 ```sh
-./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--sort-enabled] [--sort-interval N] [--sort-direction asc|desc] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
+./eternityII server [nb_threads] [--expand-level N] [--expand-max-stock N] [--expand-max-levels N] [--stock-files N] [--rebalance-budget N] [--stock-max-ram N] [--stock-spill-dir CHEMIN] [--sort-enabled] [--sort-interval N] [--sort-direction asc|desc] [--sort-lock-attempts N] [--auto-roles] [--http-port N] [--http-token-file CHEMIN] [--config-file CHEMIN] [fichier_pieces.csv]
 ```
 
 | Paramètre | Défaut | Description |
@@ -43,6 +43,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--sort-enabled` | *(absente, désactivée)* | Active le tri périodique du stock par file — voir ci-dessous |
 | `--sort-interval N` | `SORT_PERIODIC_INTERVAL_DEFAULT` (60) | Intervalle en secondes entre deux passes de tri périodique ; sans effet si `--sort-enabled` est absent |
 | `--sort-direction asc\|desc` | `asc` | Sens du tri périodique |
+| `--sort-lock-attempts N` | `SORT_LOCK_ATTEMPTS_DEFAULT` (50) | Tentatives de trylock par segment (une file d'un pool) avant abandon pour cette passe — voir ci-dessous |
 | `--auto-roles` | *(absente, désactivée)* | Active la politique automatique de dosage recherche/contrôle du parc — voir ci-dessous |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
 | `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `shallowRootAbandonDepth`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
@@ -170,10 +171,7 @@ sauvegarde effectivement exécutée est exposée par `GET /api/v1/status`
 
 `--sort-enabled` active un thread dédié qui trie **chaque file** du stock, à intervalle
 régulier (`--sort-interval`, défaut 60 s), dans le sens choisi par `--sort-direction`
-(`asc` par défaut, ou `desc`). Comme le thread d'élagage automatique `removeNoNext`
-(voir [Console interactive](console.md#stock--files)), il est suspendu tant qu'au moins
-un client est connecté — le tri verrouille les files, il ne doit pas concurrencer leur
-alimentation — et reprend dès que le serveur redevient inactif.
+(`asc` par défaut, ou `desc`).
 
 Le tri se fait **file par file, sans regroupement** (même comportement que la commande
 console `sortAscFiles`/`sortDescFiles`) : chaque file reste à sa taille d'origine, la
@@ -181,12 +179,32 @@ distribution round-robin entre files (voir ci-dessus) n'est pas perturbée — c
 à `sortAsc`/`sortDesc`, qui fusionnent tout dans la file 0 avant de trier et sont donc
 réservées à un appel console manuel.
 
+**Tourne EN CONTINU, quel que soit le trafic.** Une première version suspendait toute
+la passe dès qu'un client était connecté (même garde-fou que l'élagage automatique
+`removeNoNext`), mais cela rendait le tri quasi inatteignable sur un serveur de
+production, presque toujours occupé par au moins un client. Le tri verrouille
+désormais **chaque file (et chaque pool, non vérifié/vérifié) individuellement**, via
+un `pthread_mutex_trylock` borné par `--sort-lock-attempts` tentatives (défaut 50, soit
+~5 ms de patience par segment) — même discipline que le rééquilibrage incrémental ou
+l'extraction round-robin (`scroll_from_pool`/`put_to_pool`, voir
+[Maîtrise de la charge serveur](#maîtrise-de-la-charge-serveur---stock-files---rebalance-budget---tcp-timeout)
+ci-dessus). Un segment toujours verrouillé après ce nombre de tentatives est simplement
+**sauté pour cette passe** — jamais perdu, retenté à la passe suivante — sans jamais
+bloquer les threads ADD/GET, quel que soit le trafic en cours.
+
 Désactivé par défaut (opt-in, comme `--auto-roles`) : aucun thread supplémentaire n'est
-démarré sans demande explicite. `--sort-interval` et `--sort-direction` sont sans effet
-tant que `--sort-enabled` est absent.
+démarré sans demande explicite. `--sort-interval`, `--sort-direction` et
+`--sort-lock-attempts` sont sans effet tant que `--sort-enabled` est absent.
+
+Chaque passe journalise une courte ligne `tri périodique du stock (asc|desc, N/M
+segments)` dans `events.log` (M = 2 × nombre de files ; N = segments effectivement
+triés) — seul moyen, hors build debug, de savoir quand le tri automatique s'est
+déclenché et s'il a dû sauter des segments occupés (`N < M`, signe qu'il faudrait
+relever `--sort-lock-attempts` ou l'intervalle). Voir
+[Console interactive](console.md#zone-events-en-bas-de-lécran).
 
 ```sh
-./eternityII server 80 --sort-enabled --sort-interval 120 --sort-direction desc data/pieces.csv
+./eternityII server 80 --sort-enabled --sort-interval 120 --sort-direction desc --sort-lock-attempts 100 data/pieces.csv
 ```
 
 ### Plafond RAM du stock (`--stock-max-ram`)

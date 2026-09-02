@@ -226,6 +226,25 @@ TEST parse_line_sort_direction_rejects_other_values(void)
     PASS();
 }
 
+TEST parse_line_sort_lock_attempts_valid(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_SET, server_config_parse_line("sort_lock_attempts = 10\n", &cfg), "%d");
+    ASSERT_EQ_FMT(1, cfg.has_sort_lock_attempts, "%d");
+    ASSERT_EQ_FMT(10, cfg.sort_lock_attempts, "%d");
+    PASS();
+}
+
+TEST parse_line_sort_lock_attempts_zero_or_negative_is_invalid(void)
+{
+    server_config_t cfg;
+    server_config_init(&cfg);
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("sort_lock_attempts = 0\n", &cfg), "%d");
+    ASSERT_EQ_FMT(SERVER_CONFIG_LINE_INVALID_VALUE, server_config_parse_line("sort_lock_attempts = -1\n", &cfg), "%d");
+    PASS();
+}
+
 /* ------------------------------ server_config_load ------------------------- */
 
 TEST load_missing_file_is_absent_not_an_error(void)
@@ -270,6 +289,7 @@ TEST load_valid_file_sets_all_keys(void)
     fputs("sort_enabled      = 1\n", f);
     fputs("sort_interval     = 90\n", f);
     fputs("sort_direction    = desc\n", f);
+    fputs("sort_lock_attempts = 10\n", f);
     fclose(f);
 
     server_config_t cfg;
@@ -294,6 +314,7 @@ TEST load_valid_file_sets_all_keys(void)
     ASSERT_EQ_FMT(1, cfg.sort_enabled, "%d");
     ASSERT_EQ_FMT(90, cfg.sort_interval, "%d");
     ASSERT_EQ_FMT(SORT_DIRECTION_DESC, cfg.sort_direction, "%d");
+    ASSERT_EQ_FMT(10, cfg.sort_lock_attempts, "%d");
 
     server_config_free(&cfg);
     unlink(path);
@@ -366,6 +387,8 @@ TEST format_includes_sort_direction_as_text(void)
     cfg.sort_interval = 90;
     cfg.has_sort_direction = 1;
     cfg.sort_direction = SORT_DIRECTION_DESC;
+    cfg.has_sort_lock_attempts = 1;
+    cfg.sort_lock_attempts = 10;
 
     char buf[256];
     int n = server_config_format(&cfg, buf, sizeof(buf));
@@ -373,6 +396,7 @@ TEST format_includes_sort_direction_as_text(void)
     ASSERT(strstr(buf, "sort_enabled       = 1") != NULL);
     ASSERT(strstr(buf, "sort_interval      = 90") != NULL);
     ASSERT(strstr(buf, "sort_direction     = desc") != NULL);
+    ASSERT(strstr(buf, "sort_lock_attempts = 10") != NULL);
     PASS();
 }
 
@@ -541,6 +565,7 @@ TEST apply_pre_dispatch_sort_options_use_file_value_when_global_is_default(void)
     server_sort_enabled = 0;
     server_sort_interval = SORT_PERIODIC_INTERVAL_DEFAULT;
     server_sort_direction = SORT_DIRECTION_ASC;
+    server_sort_lock_attempts = SORT_LOCK_ATTEMPTS_DEFAULT;
 
     server_config_t cfg;
     server_config_init(&cfg);
@@ -550,16 +575,20 @@ TEST apply_pre_dispatch_sort_options_use_file_value_when_global_is_default(void)
     cfg.sort_interval = 120;
     cfg.has_sort_direction = 1;
     cfg.sort_direction = SORT_DIRECTION_DESC;
+    cfg.has_sort_lock_attempts = 1;
+    cfg.sort_lock_attempts = 10;
 
     server_config_apply_pre_dispatch(&cfg);
 
     ASSERT_EQ_FMT(1, server_sort_enabled, "%d");
     ASSERT_EQ_FMT(120, server_sort_interval, "%d");
     ASSERT_EQ_FMT(SORT_DIRECTION_DESC, server_sort_direction, "%d");
+    ASSERT_EQ_FMT(10, server_sort_lock_attempts, "%d");
 
     server_sort_enabled = 0;
     server_sort_interval = SORT_PERIODIC_INTERVAL_DEFAULT;
     server_sort_direction = SORT_DIRECTION_ASC;
+    server_sort_lock_attempts = SORT_LOCK_ATTEMPTS_DEFAULT;
     PASS();
 }
 
@@ -649,6 +678,8 @@ SUITE(server_config_suite)
     RUN_TEST(parse_line_sort_interval_zero_or_negative_is_invalid);
     RUN_TEST(parse_line_sort_direction_accepts_asc_and_desc);
     RUN_TEST(parse_line_sort_direction_rejects_other_values);
+    RUN_TEST(parse_line_sort_lock_attempts_valid);
+    RUN_TEST(parse_line_sort_lock_attempts_zero_or_negative_is_invalid);
 
     RUN_TEST(load_missing_file_is_absent_not_an_error);
     RUN_TEST(load_null_path_is_absent);

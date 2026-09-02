@@ -1673,6 +1673,214 @@ TEST sort_descending_files_sorts_each_file_without_merging(void)
     PASS();
 }
 
+/* sort_ascending_files_bounded() : même résultat que sort_ascending_files()
+ * quand rien ne contend (mono-thread, trylock réussit toujours) — MAIS via un
+ * trylock par segment (file d'un pool) plutôt que le verrou global bloquant.
+ * out_sorted doit couvrir tous les segments (2 * nb_file_possibility). */
+TEST sort_ascending_files_bounded_sorts_each_file_without_merging(void)
+{
+    drain_all();
+
+    enum { N = 40 };
+    struct possibility_packet pks[N];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < N; i++) {
+        pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
+    }
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas();
+    restore_std();
+
+    unsigned long long sizes_before[NB_FILE_POSSIBILITY_MAX];
+    for (int f = 0; f < nb_file_possibility; f++) {
+        sizes_before[f] = file_size(f);
+    }
+
+    int sorted = -1, total = -1;
+    int rc = sort_ascending_files_bounded(5, &sorted, &total);
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(nb_file_possibility * 2, total, "%d");
+    ASSERT_EQ_FMT(total, sorted, "%d"); /* rien ne contend : tous les segments triés */
+
+    ASSERT_EQ_FMT((unsigned long long)N, datas_size(), "%llu");
+
+    for (int f = 0; f < nb_file_possibility; f++) {
+        ASSERT_EQ_FMT(sizes_before[f], file_size(f), "%llu"); /* aucune fusion */
+        if (sizes_before[f] == 0) {
+            continue;
+        }
+        char *buf = NULL;
+        size_t buf_size = 0;
+        FILE *mem = open_memstream(&buf, &buf_size);
+        ASSERT(mem != NULL);
+        ASSERT_EQ_FMT(0, fprint_file(mem, f, NULL), "%d");
+        fclose(mem);
+
+        int prev = -1;
+        char *line = buf;
+        char *nl;
+        while ((nl = strchr(line, '\n')) != NULL) {
+            *nl = '\0';
+            int a = -1;
+            ASSERT_EQ_FMT(1, sscanf(line, "{\"alloc\": %d,", &a), "%d");
+            ASSERT(a >= prev);
+            prev = a;
+            line = nl + 1;
+        }
+        free(buf);
+    }
+
+    drain_all();
+    PASS();
+}
+
+/* Symétrique pour l'ordre décroissant. */
+TEST sort_descending_files_bounded_sorts_each_file_without_merging(void)
+{
+    drain_all();
+
+    enum { N = 40 };
+    struct possibility_packet pks[N];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < N; i++) {
+        pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
+    }
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas();
+    restore_std();
+
+    int sorted = -1, total = -1;
+    int rc = sort_descending_files_bounded(5, &sorted, &total);
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(nb_file_possibility * 2, total, "%d");
+    ASSERT_EQ_FMT(total, sorted, "%d");
+
+    ASSERT_EQ_FMT((unsigned long long)N, datas_size(), "%llu");
+
+    for (int f = 0; f < nb_file_possibility; f++) {
+        if (file_size(f) == 0) {
+            continue;
+        }
+        char *buf = NULL;
+        size_t buf_size = 0;
+        FILE *mem = open_memstream(&buf, &buf_size);
+        ASSERT(mem != NULL);
+        ASSERT_EQ_FMT(0, fprint_file(mem, f, NULL), "%d");
+        fclose(mem);
+
+        int prev = ETERN_PARTS + 1;
+        char *line = buf;
+        char *nl;
+        while ((nl = strchr(line, '\n')) != NULL) {
+            *nl = '\0';
+            int a = ETERN_PARTS + 1;
+            ASSERT_EQ_FMT(1, sscanf(line, "{\"alloc\": %d,", &a), "%d");
+            ASSERT(a <= prev);
+            prev = a;
+            line = nl + 1;
+        }
+        free(buf);
+    }
+
+    drain_all();
+    PASS();
+}
+
+/* Segments déjà verrouillés (lock_all_file, même thread -- trylock rend la
+ * main sans jamais bloquer, contrairement à pthread_mutex_lock) : la passe
+ * bornée doit rendre la main immédiatement, ABANDONNER tous les segments
+ * (out_sorted == 0) et ne RIEN perdre — c'est exactement le scénario qui
+ * bloquait sort_ascending_files()/sort_descending_files() (verrou global) en
+ * continu sous trafic réel, motivant cette variante. */
+TEST sort_ascending_files_bounded_skips_segments_held_by_others(void)
+{
+    drain_all();
+
+    enum { N = 20 };
+    struct possibility_packet pks[N];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < N; i++) {
+        pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
+    }
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas();
+    restore_std();
+
+    char *before = NULL;
+    size_t before_size = 0;
+    FILE *mem_before = open_memstream(&before, &before_size);
+    ASSERT(mem_before != NULL);
+    ASSERT_EQ_FMT(0, fprint_datamanager(mem_before, NULL), "%d");
+    fclose(mem_before);
+
+    lock_all_file();
+    int sorted = -1, total = -1;
+    int rc = sort_ascending_files_bounded(3, &sorted, &total);
+    unlock_all_file();
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(0, sorted, "%d");
+    ASSERT_EQ_FMT(nb_file_possibility * 2, total, "%d");
+
+    char *after = NULL;
+    size_t after_size = 0;
+    FILE *mem_after = open_memstream(&after, &after_size);
+    ASSERT(mem_after != NULL);
+    ASSERT_EQ_FMT(0, fprint_datamanager(mem_after, NULL), "%d");
+    fclose(mem_after);
+
+    ASSERT_STR_EQ(before, after); /* rien touché */
+
+    free(before);
+    free(after);
+    drain_all();
+    PASS();
+}
+
+/* max_attempts < 1 est ramené à 1 plutôt que rejeté (même convention que les
+ * options CLI/config : valeur hors domaine clampée, jamais un abandon total). */
+TEST sort_ascending_files_bounded_clamps_non_positive_max_attempts(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    add_possibility(NULL, &arr);
+
+    int sorted = -1, total = -1;
+    int rc = sort_ascending_files_bounded(0, &sorted, &total);
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(total, sorted, "%d"); /* rien ne contend : réussit malgré 0 */
+
+    drain_all();
+    PASS();
+}
+
+/* out_sorted/out_total sont optionnels (NULL accepté). */
+TEST sort_ascending_files_bounded_accepts_null_out_params(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    add_possibility(NULL, &arr);
+
+    int rc = sort_ascending_files_bounded(3, NULL, NULL);
+    ASSERT_EQ_FMT(0, rc, "%d");
+
+    drain_all();
+    PASS();
+}
+
 TEST statistic_and_print_run(void)
 {
     drain_all();
@@ -6698,6 +6906,11 @@ SUITE(datamanager_suite)
     RUN_TEST(sort_preserves_count);
     RUN_TEST(sort_ascending_files_sorts_each_file_without_merging);
     RUN_TEST(sort_descending_files_sorts_each_file_without_merging);
+    RUN_TEST(sort_ascending_files_bounded_sorts_each_file_without_merging);
+    RUN_TEST(sort_descending_files_bounded_sorts_each_file_without_merging);
+    RUN_TEST(sort_ascending_files_bounded_skips_segments_held_by_others);
+    RUN_TEST(sort_ascending_files_bounded_clamps_non_positive_max_attempts);
+    RUN_TEST(sort_ascending_files_bounded_accepts_null_out_params);
     RUN_TEST(statistic_and_print_run);
     RUN_TEST(statistic_datas_handles_full_board_alloc);
     RUN_TEST(stock_distribution_separates_the_three_pools);
