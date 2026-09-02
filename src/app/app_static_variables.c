@@ -276,6 +276,18 @@ int parse_cli_options(int argc, const char *argv[])
                 }
                 r++; // consomme aussi la valeur
             }
+        } else if (strcmp(argv[r], "--shallow-root-abandon-depth") == 0) {
+            // Option valuée, même schéma que --tcp-timeout : une profondeur
+            // <= 0 n'a pas de sens utile (0 est déjà le sentinel "désactivé"),
+            // valeur absente ou <= 0 ignorée, shallow_root_abandon_depth garde
+            // sa valeur par défaut (désactivé) ou celle déjà fixée.
+            if (r + 1 < argc) {
+                int depth = atoi(argv[r + 1]);
+                if (depth > 0) {
+                    shallow_root_abandon_depth = depth;
+                }
+                r++; // consomme aussi la valeur
+            }
         } else if (strcmp(argv[r], "--pruner-forks") == 0) {
             // Option valuée : dosage recherche/contrôle demandé pour le lot de
             // forks à venir (résolu contre NB_THREADS, pas encore connu ici,

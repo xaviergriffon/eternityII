@@ -626,6 +626,27 @@ static int bt_delegation_quota(unsigned long long pending, int max_stock, int hu
 }
 
 /**
+ * @brief Prédicat pur : faut-il abandonner la racine reçue plutôt que de
+ *        continuer à l'explorer seul ? (fonction pure, cf. `bt_delegation_quota`.)
+ *
+ * Vrai quand la racine REÇUE (profondeur au moment du `GET`, fixe pour toute
+ * la durée de l'appel) est sous `abandon_depth` ET que la profondeur COURANTE
+ * de la pile l'atteint désormais — cf. `shallow_root_abandon_depth`
+ * (core_static_variables.h) pour le rationale complet (un branchement MRV fin
+ * peut garder le stock implicite sous `max_stock_by_thread` indéfiniment,
+ * alors que la racine reçue reste énorme).
+ *
+ * @param root_depth    Profondeur de la racine reçue (fixe pour cet appel).
+ * @param placed_count  Profondeur courante (nombre de pièces posées).
+ * @param abandon_depth Seuil (`shallow_root_abandon_depth`). `<= 0` : désactivé.
+ * @return              1 si la racine doit être abandonnée, 0 sinon.
+ */
+static int bt_should_abandon_shallow_root(int root_depth, int placed_count, int abandon_depth)
+{
+    return abandon_depth > 0 && root_depth < abandon_depth && placed_count >= abandon_depth;
+}
+
+/**
  * @brief Garantit que le buffer de délégation pré-alloué du thread peut contenir
  *        `capacity` paquets.
  *
@@ -767,6 +788,30 @@ static void bt_flush_pending(client_possibility_t *client,
         log_error("Error on add_possibility \n");
     }
     free_array_possibility_packet(aposs);
+}
+
+/**
+ * @brief Abandonne la racine reçue (`bt_should_abandon_shallow_root` vrai) :
+ *        rend tout le travail restant au serveur (même mécanisme que l'arrêt
+ *        propre, `bt_flush_pending`) et compte l'abandon.
+ *
+ * Extraite de `search_packet_backtracking_mrv` pour rester directement
+ * testable — le point d'appel réel n'est atteint qu'après
+ * `DELEGATE_CHECK_INTERVAL_NODES` nœuds, hors de portée d'un test unitaire.
+ *
+ * @param client Contexte du thread client.
+ * @param board  Plateau courant.
+ * @param stack  Pile de décisions.
+ * @param top    Indice du dernier niveau occupé.
+ * @param idParts Table de pré-calcul des indices de rotation.
+ */
+static void bt_abandon_shallow_root(client_possibility_t *client,
+                                    struct possibility_packet *board,
+                                    bt_level *stack, int top,
+                                    int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
+{
+    bt_flush_pending(client, board, stack, top, idParts);
+    __atomic_fetch_add(&shallow_root_abandoned, 1, __ATOMIC_RELAXED);
 }
 
 /**
@@ -987,6 +1032,9 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
     // Le compteur de progression est `placed_count` (pas la profondeur de
     // pile, sans rapport avec le nombre de pièces posées en ordre dynamique).
     int placed_count = possibility_placed_count(&board);
+    // Profondeur de la racine REÇUE (fixe pour toute la durée de cet appel) :
+    // référence pour shallow_root_abandon_depth, cf. core_static_variables.h.
+    const int root_depth = placed_count;
     int noCheckDelegate = 0;
     struct timespec last_delegate = {0, 0};
 
@@ -1026,6 +1074,18 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
                 long long elapsed_ms = (now.tv_sec - last_delegate.tv_sec) * 1000LL
                                      + (now.tv_nsec - last_delegate.tv_nsec) / 1000000LL;
                 if (elapsed_ms >= DELEGATE_MIN_INTERVAL_MS) {
+                    // Un seul déclenchement possible par racine : la fonction
+                    // retourne aussitôt, se repositionnant sur une nouvelle
+                    // racine au prochain GET (voir shallow_root_abandon_depth,
+                    // core_static_variables.h).
+                    if (bt_should_abandon_shallow_root(root_depth, placed_count,
+                                                       shallow_root_abandon_depth)) {
+                        bt_abandon_shallow_root(client, &board, stack, top, idParts);
+                        if (out_nodes != NULL) {
+                            *out_nodes = nodes;
+                        }
+                        return BT_CORE_EXHAUSTED;
+                    }
                     bt_delegate_if_needed(client, &board, stack, top, idParts);
                     last_delegate = now;
                 }

@@ -715,6 +715,21 @@ void check_client_threads_step(int *last_record)
             free(prtemp);
         }
 
+        // Racines abandonnées par shallow_root_abandon_depth (0 si le
+        // mécanisme est désactivé, cf. core_static_variables.h) : agrégat des
+        // forks + compteur du processus courant (mode test/DEBUG_IN_MONO_PROCESS).
+        unsigned long long sra = __atomic_load_n(&shallow_root_abandoned, __ATOMIC_RELAXED);
+        for (f = 0; f < NB_THREADS; f++) {
+            sra += fork_statistics[f].shallow_root_abandoned;
+        }
+        if (sra > 0) {
+            char *sratemp = calloc(120, sizeof(char));
+            sprintf(sratemp, "racines abandonnées (profondeur < %d) : %llu\n",
+                    shallow_root_abandon_depth, sra);
+            strcat(report, sratemp);
+            free(sratemp);
+        }
+
         // Indice cumulé « études/s » : somme de deux flux DISJOINTS — les coups
         // (`bys`, recherche / possibilités pruner) et les études de prunage
         // case par case (`prune_bys` : forward-check + pruner + rmnonext).

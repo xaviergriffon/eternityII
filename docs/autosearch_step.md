@@ -254,6 +254,46 @@ délégation *sous* le seuil quand le stock serveur ne suffit plus à nourrir le
 clients (famine du démarrage). Le thread ne cède jamais le chemin courant ni son
 dernier frère (`pending < 2` → quota 0), et au plus la moitié de son stock implicite.
 
+### 1.5bis Abandon d'une racine trop peu profonde (`shallow_root_abandon_depth`)
+
+`max_stock_by_thread` seul peut ne **jamais** se déclencher sur une racine reçue
+à faible profondeur : si le branchement MRV est fin (peu de candidats par case),
+`pending` (le stock implicite compté par `bt_count_pending`) reste petit alors que
+le sous-arbre total de la racine reste énorme — le thread peut y rester des heures
+sans jamais délivrer `max_stock_by_thread` frères. `shallow_root_abandon_depth`
+(défaut `0`, désactivé — CLI `--shallow-root-abandon-depth <n>`, console
+`shallowRootAbandonDepth <n>`, clé `config`/`--config-file`
+`shallow_root_abandon_depth`) ajoute un second critère, évalué **au même point de
+contrôle périodique** que la délégation (donc à coût nul sur la boucle chaude) :
+
+```
+root_depth   = possibility_placed_count(root)   ← figé une fois, avant la boucle
+placed_count = possibility_placed_count(board)  ← courant, réévalué à chaque contrôle
+
+bt_should_abandon_shallow_root(root_depth, placed_count, shallow_root_abandon_depth)
+   │  abandon_depth > 0 ET root_depth < abandon_depth ET placed_count >= abandon_depth
+   ▼
+si vrai :
+   bt_abandon_shallow_root()
+      ├── bt_flush_pending()              ← même mécanisme que l'arrêt propre (§1.7) :
+      │                                      tous les frères de la pile + le chemin courant
+      └── shallow_root_abandoned++        ← compteur, remonté par `statistic`
+   return BT_CORE_EXHAUSTED               ← le fil se repositionne sur une nouvelle
+                                             racine au prochain GET (batch de 1 en recherche)
+```
+
+Un seul déclenchement possible par racine : la fonction retourne aussitôt après
+avoir tout rendu, donc rien ne peut re-déclencher pendant l'étude de la MÊME
+racine. Opt-in, désactivé par défaut : à calibrer par le protocole de mesure en
+paires alternées déjà employé dans ce dépôt (moyenne géométrique, métrique
+cumulée sur fenêtre fixe — cf. [conception/elagage_recherche.md](conception/elagage_recherche.md)
+§6) avant d'envisager un défaut actif. Deux heuristiques de profondeur/ordre très
+proches ont déjà perdu à la mesure ici (départage MRV par nombre de côtés
+contraints, §4.12 du même document ; sens de cession « moins profond d'abord »
+de la branche `feat/dispatch-local-possibilites-forks`, non retenue) — la valeur
+128 (moitié du puzzle) n'est donc qu'un point de départ documenté, pas un défaut
+recommandé.
+
 ### 1.6 Solution trouvée
 
 Quand `depth >= ETERN_PARTS` (toutes les pièces placées) :

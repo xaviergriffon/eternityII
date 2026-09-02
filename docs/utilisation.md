@@ -42,7 +42,7 @@ Lance le serveur qui distribue les possibilités aux clients.
 | `--stock-spill-dir CHEMIN` | `./eternityii-spill` | Répertoire de débordement sur disque une fois `--stock-max-ram` approché — voir ci-dessous |
 | `--auto-roles` | *(absente, désactivée)* | Active la politique automatique de dosage recherche/contrôle du parc — voir ci-dessous |
 | `--http-port N` | *(absent)* | Active l'[API HTTP REST admin](api_http_rest.md) sur `127.0.0.1:N` (désactivée par défaut) |
-| `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
+| `--http-token-file CHEMIN` | *(absent)* | Jeton Bearer requis pour toute commande de MODIFICATION de l'[API HTTP](api_http_rest.md#authentification) (`pause`, `resume`, `limit`, `maxStockByThread`, `shallowRootAbandonDepth`, `prunerBatch`, `clientsCommand`/`clientsCmd`, `restore`, `backup`) — sans cette option, ces commandes restent inaccessibles via l'API (seule `clientsWork`, en lecture seule, reste utilisable) |
 | `--config-file CHEMIN` | `./eternityii-server.conf` | Fichier de configuration `clé = valeur`, lu une seule fois au démarrage — voir ci-dessous |
 | `fichier_pieces.csv` | `data/pieces.csv` | Fichier de définition des pièces |
 
@@ -397,6 +397,7 @@ effectif (qu'il soit automatique ou déclenché par `start`).
 | `--name LABEL` | nom d'hôte | Libellé déclaré, affiché côté serveur (commande console `clients`, `GET /api/v1/clients`) — purement déclaratif, jamais vérifié |
 | `--machine-uid-file CHEMIN` | `./eternityii-machine_uid` | Fichier d'identité machine persistante (nonce hexadécimal, tiré et écrit au premier lancement) — absent/illisible : régénéré silencieusement ; répertoire non inscriptible : identité volatile pour cette exécution (la recherche continue) |
 | `--config-file CHEMIN` | `./eternityii-client.conf` | Fichier de configuration `clé = valeur` : présent au démarrage → décompte d'auto-démarrage de 5 s (`COUNTDOWN`) ; absent → attente d'un `start`/`config` en console (`WAITING_CONFIG`). Priorité CLI > fichier > défauts. Voir la commande console `config`/`configSave` |
+| `--shallow-root-abandon-depth N` | *(absent, 0 = désactivé)* | Abandonne une racine reçue trop peu profonde une fois creusée jusqu'à `N` pièces posées — voir [ci-dessous](#option---shallow-root-abandon-depth-client-et-pruner) |
 
 > En conteneur, monter ce fichier en volume (ou pointer `--machine-uid-file` dessus) :
 > sans ça, chaque redémarrage de conteneur régénère un `machine_uid` et fragmente le
@@ -661,6 +662,30 @@ volumineux. Valeur absente ou `<= 0` : ignorée (garde le défaut).
 ./eternityII server 80 --tcp-timeout 30 data/pieces.csv
 ./eternityII client --tcp-timeout 30 localhost 4
 ```
+
+## Option `--shallow-root-abandon-depth` (client et pruner)
+
+`max_stock_by_thread` (ci-dessus) borne le stock implicite d'un thread, mais peut
+ne **jamais** se déclencher sur une racine reçue à faible profondeur : si le
+branchement MRV est fin (peu de candidats par case), le stock implicite reste
+petit alors que le sous-arbre total de la racine reste énorme — le thread peut y
+rester des heures sans jamais rendre le moindre paquet. `--shallow-root-abandon-depth
+N` (défaut `0`, désactivé) ajoute un second critère : quand la racine REÇUE (profondeur
+au moment du `GET`) est sous `N` et que la profondeur COURANTE de l'étude l'atteint,
+tout le travail restant est rendu au serveur (même mécanisme que l'arrêt propre) et
+le thread se repositionne sur une nouvelle racine.
+
+```sh
+./eternityII client --shallow-root-abandon-depth 128 localhost 4
+```
+
+Réglable aussi à chaud (console `shallowRootAbandonDepth <n>`) ou via la clé
+`shallow_root_abandon_depth` du `--config-file` (`config`/`configApply` — clé à
+chaud, pas de redémarrage nécessaire). **Opt-in, à calibrer par la mesure** avant
+d'envisager un défaut actif : le compteur cumulatif `shallow_root_abandoned`,
+affiché par la console `statistic` (« racines abandonnées (profondeur < N) »),
+sert précisément à ça. Détail du mécanisme et rationale de la valeur par défaut
+(0, jamais une valeur devinée) : [autosearch_step.md §1.5bis](autosearch_step.md#15bis-abandon-dune-racine-trop-peu-profonde-shallow_root_abandon_depth).
 
 ## Canal de contrôle et pilotage à distance
 

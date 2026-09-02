@@ -28,7 +28,7 @@
 #define DEF_ANALYSE_FILE "./eternityII-in_analyse.back"
 #define DEF_BEST_BOARD_FILE "./eternityII-best_board.back"
 #define DEF_KNOWN_CLIENTS_FILE "./eternityII-known_clients.back"
-#define NB_COMMANDS 64
+#define NB_COMMANDS 65
 /// Taille du tampon de construction des textes d'aide (aide générale comprise).
 #define HELP_BUFFER_SIZE 16384
 
@@ -95,6 +95,7 @@ int sort_ascending_files_interpreter(void);
 int sort_descending_files_interpreter(void);
 int sort_descending_interpreter(void);
 int max_stock_by_thread_interpreter(void);
+int shallow_root_abandon_depth_interpreter(void);
 int pruner_batch_interpreter(void);
 int pruner_dfs_budget_interpreter(void);
 int limit_interpreter(void);
@@ -169,7 +170,8 @@ static command_description commands[NB_COMMANDS] = {
      "EFFECTIVE (celle réellement en vigueur) et la configuration EN PRÉPARATION.\n"
      "N'annule pas le décompte. Client/pruner, avec <clé> <valeur> : écrit dans la\n"
      "configuration en préparation (clés : nb_forks, server_host, parts_file,\n"
-     "max_stock_by_thread, limit, pruner_batch, dfs_budget) et ANNULE\n"
+     "max_stock_by_thread, shallow_root_abandon_depth, limit, pruner_batch,\n"
+     "dfs_budget) et ANNULE\n"
      "DÉFINITIVEMENT le décompte d'auto-démarrage — `start` consomme toujours la\n"
      "configuration EFFECTIVE, pas celle en préparation.\n"
      "Serveur, sans argument : affiche la configuration EFFECTIVE du serveur (clés :\n"
@@ -206,7 +208,8 @@ static command_description commands[NB_COMMANDS] = {
     {"configApply", config_apply_interpreter, 0, CMD_CAT_GENERAL, 0, NULL,
      "applique la configuration en préparation, à chaud si possible",
      "Erreur si aucun fork n'est en cours d'exécution. Si seules des clés à chaud\n"
-     "(max_stock_by_thread/limit/pruner_batch/dfs_budget) sont préparées : appliquées immédiatement\n"
+     "(max_stock_by_thread/shallow_root_abandon_depth/limit/pruner_batch/dfs_budget)\n"
+     "sont préparées : appliquées immédiatement\n"
      "et diffusées aux fils en cours par IPC, sans interruption. Si nb_forks/server_host/\n"
      "parts_file est préparé (cf. `client_config_diff`) : arrête les fils (comme\n"
      "`stopForks`), reconstruit les tableaux de fils et/ou la map de recherche partagée,\n"
@@ -225,6 +228,11 @@ static command_description commands[NB_COMMANDS] = {
      "borne le débit de recherche à <n> coups/s (0 = illimité)", NULL, NULL},
     {"maxStockByThread", max_stock_by_thread_interpreter, 1, CMD_CAT_SEARCH, 0, "maxStockByThread <n>",
      "fixe le stock maximum de possibilités par thread", NULL, NULL},
+    {"shallowRootAbandonDepth", shallow_root_abandon_depth_interpreter, 1, CMD_CAT_SEARCH, 0,
+     "shallowRootAbandonDepth <n>",
+     "fixe la profondeur d'abandon d'une racine reçue trop peu profonde (0 = désactivé)",
+     "Opt-in, à calibrer par la mesure : voir shallow_root_abandon_depth\n"
+     "(core/core_static_variables.h) et --shallow-root-abandon-depth (`help shallow-root-abandon-depth`).", NULL},
     {"prunerBatch", pruner_batch_interpreter, 1, CMD_CAT_SEARCH, 0, "prunerBatch <n>",
      "fixe la taille de lot d'échange du pruner",
      "Bornée à [1, PRUNER_BATCH_MAX] pour maîtriser la mémoire du pruner et les tampons GPU.", NULL},
@@ -504,6 +512,24 @@ int max_stock_by_thread_interpreter(void) {
     char *arguments = strtok(NULL, " ");
     if (arguments != NULL) {
         max_stock_by_thread = atoi(arguments);
+        return 0;
+    }
+    return CMD_ERR_USAGE;
+}
+
+/**
+ * @brief Interpréteur de `shallowRootAbandonDepth <n>` : fixe la profondeur
+ *        d'abandon d'une racine reçue trop peu profonde (0 = désactivé).
+ *
+ * Voir la doc de `shallow_root_abandon_depth` (core/core_static_variables.h)
+ * pour le mécanisme. Aucune validation de signe : une valeur négative se
+ * comporte comme 0 (désactivé), le test `> 0` dans etii_search.c la traite
+ * de la même façon.
+ */
+int shallow_root_abandon_depth_interpreter(void) {
+    char *arguments = strtok(NULL, " ");
+    if (arguments != NULL) {
+        shallow_root_abandon_depth = atoi(arguments);
         return 0;
     }
     return CMD_ERR_USAGE;

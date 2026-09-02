@@ -249,11 +249,13 @@ TEST control_command_allowed_accepts_whitelist(void)
     ASSERT_EQ_FMT(1, control_command_allowed("resume"), "%d");
     ASSERT_EQ_FMT(1, control_command_allowed("limit"), "%d");
     ASSERT_EQ_FMT(1, control_command_allowed("maxStockByThread"), "%d");
+    ASSERT_EQ_FMT(1, control_command_allowed("shallowRootAbandonDepth"), "%d");
     ASSERT_EQ_FMT(1, control_command_allowed("prunerBatch"), "%d");
     ASSERT_EQ_FMT(1, control_command_allowed("prunerDfsBudget"), "%d");
     /* Avec argument : seul le premier mot compte. */
     ASSERT_EQ_FMT(1, control_command_allowed("limit 100"), "%d");
     ASSERT_EQ_FMT(1, control_command_allowed("maxStockByThread 5000"), "%d");
+    ASSERT_EQ_FMT(1, control_command_allowed("shallowRootAbandonDepth 128"), "%d");
     PASS();
 }
 
@@ -359,7 +361,8 @@ TEST control_command_privileged_accepts_spill(void)
 TEST control_command_allowed_and_privileged_are_disjoint(void)
 {
     static const char *const allowed_names[] = {
-        "pause", "resume", "limit", "maxStockByThread", "prunerBatch", "prunerDfsBudget",
+        "pause", "resume", "limit", "maxStockByThread", "shallowRootAbandonDepth",
+        "prunerBatch", "prunerDfsBudget",
         "clientsCommand", "clientsCmd", "clientsRoles", "clientsWork",
         "start", "stopForks", "configApply", "config", "configSave"
     };
@@ -392,6 +395,7 @@ TEST control_command_read_only_rejects_modifying_standard_commands(void)
     ASSERT_EQ_FMT(0, control_command_read_only("resume"), "%d");
     ASSERT_EQ_FMT(0, control_command_read_only("limit"), "%d");
     ASSERT_EQ_FMT(0, control_command_read_only("maxStockByThread"), "%d");
+    ASSERT_EQ_FMT(0, control_command_read_only("shallowRootAbandonDepth"), "%d");
     ASSERT_EQ_FMT(0, control_command_read_only("prunerBatch"), "%d");
     ASSERT_EQ_FMT(0, control_command_read_only("prunerDfsBudget"), "%d");
     ASSERT_EQ_FMT(0, control_command_read_only("clientsCommand"), "%d");
@@ -433,7 +437,7 @@ TEST control_command_enumerate_lists_all_known_commands(void)
 
     int n = control_command_enumerate(names, classes, CONTROL_COMMAND_TABLE_MAX);
 
-    ASSERT_EQ_FMT(27, n, "%d");
+    ASSERT_EQ_FMT(28, n, "%d");
     for (int i = 0; i < n; i++) {
         ASSERT_EQ_FMT((int)classes[i], (int)control_command_classify(names[i]), "%d");
         for (int j = 0; j < n; j++) {

@@ -118,6 +118,10 @@
 // encore la charge CPU (2 réveils/s/thread au lieu de 100).
 #define ADMIN_PAUSE_POLL_SLEEP_US 500000
 #define MAX_STOCK_BY_THREAD 300
+// Défaut de shallow_root_abandon_depth : 0 = mécanisme désactivé. Voir la doc
+// de la variable elle-même pour le rationale (le seuil de stock seul ne se
+// déclenche jamais sur une racine peu profonde à branchement MRV fin).
+#define SHALLOW_ROOT_ABANDON_DEPTH 0
 // Intervalle minimal entre deux délégations de possibilités au serveur (ms).
 // Une délégation coûte jusqu'à max_stock_by_thread aller-retours TCP synchrones
 // exécutés par le thread de recherche : sa fréquence doit être bornée en temps,
@@ -410,6 +414,48 @@ extern unsigned long long non_null_possibilities;
 extern volatile int request;
 
 extern int max_stock_by_thread;
+
+/**
+ * @brief Profondeur (nombre de pièces posées) à partir de laquelle un fil
+ *        abandonne une racine reçue trop peu profonde plutôt que de
+ *        continuer à l'explorer seul.
+ *
+ * `0` (défaut) : mécanisme désactivé — seul `max_stock_by_thread` régit la
+ * délégation (cf. `bt_delegate_if_needed`, `src/core/etii_search.c`).
+ *
+ * Sous ce seuil, `pending` (le stock implicite visible sur la pile de
+ * décisions) peut rester indéfiniment sous `max_stock_by_thread` alors que le
+ * sous-arbre total reste énorme — un branchement MRV très fin (peu de
+ * candidats par case) fait grimper `placed_count` sans jamais faire grimper
+ * `pending`. `max_stock_by_thread` seul ne se déclenche donc jamais dans ce
+ * cas, et le fil reste des heures sur une racine reçue à faible profondeur.
+ *
+ * Quand la racine REÇUE (profondeur fixée au moment du `GET`, jamais
+ * réévaluée en cours d'étude) est sous ce seuil et que la profondeur COURANTE
+ * de la pile l'atteint, tout le travail restant (frères non explorés à tous
+ * les niveaux + chemin courant) est rendu au serveur via `bt_flush_pending`
+ * — même mécanisme que l'arrêt propre (`REQUEST_STOP`) — et le fil se
+ * repositionne sur une nouvelle racine au prochain `GET`. Un seul
+ * déclenchement possible par racine : une fois rendue, il n'y a plus rien à
+ * réévaluer sur cette racine.
+ *
+ * Opt-in, à calibrer par la mesure (protocole de paires alternées déjà
+ * employé dans ce dépôt, cf. docs/conception/elagage_recherche.md) avant
+ * d'envisager un défaut actif — deux heuristiques de profondeur/ordre très
+ * proches de celle-ci ont déjà perdu à la mesure ici (départage MRV par
+ * nombre de côtés contraints, sens de cession `--split-shallow-first`).
+ */
+extern int shallow_root_abandon_depth;
+
+/**
+ * @brief Compteur global du nombre de racines abandonnées par
+ *        `shallow_root_abandon_depth` (cumul depuis le démarrage du fil).
+ *
+ * Remonté par `client_statistics.shallow_root_abandoned`, affiché par le
+ * rapport périodique (console `statistic`) — sert à mesurer l'effet du
+ * mécanisme ci-dessus plutôt qu'à le deviner.
+ */
+extern volatile unsigned long long shallow_root_abandoned;
 
 /**
  * @brief Vrai (1) tant que ce fork est en train d'échanger avec le serveur

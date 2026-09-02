@@ -96,6 +96,10 @@ volatile int request = REQUEST_CONTINUE;
 
 int max_stock_by_thread = MAX_STOCK_BY_THREAD;
 
+int shallow_root_abandon_depth = SHALLOW_ROOT_ABANDON_DEPTH;
+
+volatile unsigned long long shallow_root_abandoned = 0;
+
 volatile int server_io_active = 0;
 
 // Faim du serveur (réponse INST_NEED_WORK), accès via __atomic_* uniquement.

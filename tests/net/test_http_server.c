@@ -1114,7 +1114,7 @@ TEST http_commands_collect_returns_all_entries_with_summaries(void)
     http_command_info_t infos[CONTROL_COMMAND_TABLE_MAX];
     int n = http_commands_collect(infos, CONTROL_COMMAND_TABLE_MAX);
 
-    ASSERT_EQ_FMT(27, n, "%d");
+    ASSERT_EQ_FMT(28, n, "%d");
     int nb_public = 0;
     for (int i = 0; i < n; i++) {
         ASSERT(infos[i].name[0] != '\0');

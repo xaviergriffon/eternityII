@@ -309,7 +309,7 @@ entre elles. Verrouillé par
 
 Seules quelques commandes console sont déclenchables à distance
 (`control_command_allowed`) : `pause`, `resume`, `limit`, `maxStockByThread`,
-`prunerBatch`, `clientsCommand` (alias `clientsCmd`), `clientsRoles`, `clientsWork`, `start`,
+`shallowRootAbandonDepth`, `prunerBatch`, `clientsCommand` (alias `clientsCmd`), `clientsRoles`, `clientsWork`, `start`,
 `stopForks`, `configApply`, `config`, `configSave` — jamais `exit`,
 `restore`, `import`, ni rien de destructeur. Cette vérification est faite **deux fois
 indépendamment** : côté serveur dans l'interpréteur de `clientsCmd` (qui refuse même

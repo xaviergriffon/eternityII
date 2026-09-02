@@ -37,6 +37,8 @@ struct client_statistics {
     unsigned long long pruner_cells_studied;
     /** Débit des cases étudiées au prunage (moyenne glissante 5 s, comme shots_per_second). */
     unsigned long long pruner_cells_per_second;
+    /** Cumul des racines abandonnées par `shallow_root_abandon_depth` (0 si désactivé). */
+    unsigned long long shallow_root_abandoned;
 } __attribute__((__packed__));
 
 

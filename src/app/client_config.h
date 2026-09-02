@@ -45,6 +45,9 @@ typedef struct {
 
     int has_dfs_budget;
     int dfs_budget;
+
+    int has_shallow_root_abandon_depth;
+    int shallow_root_abandon_depth;
 } client_config_t;
 
 /// Résultat de `client_config_parse_line`.
