@@ -345,6 +345,50 @@ static inline const uint64_t *map_bucket_id_mask(const map_big_array *map, const
 }
 
 /**
+ * @brief `popcount` 64 bits par décalages et masques (SWAR), toujours en ligne.
+ *
+ * Repli de `etii_popcount64` quand la cible n'offre pas d'instruction de
+ * comptage de bits. **Compilé sur toutes les cibles**, y compris celles qui
+ * n'en ont pas besoin, pour qu'il ne devienne jamais un chemin de code non
+ * testé : `tests/core/test_part.c` le vérifie contre un oracle naïf quelle
+ * que soit la plate-forme.
+ */
+static inline int etii_popcount64_swar(uint64_t v)
+{
+	v = v - ((v >> 1) & 0x5555555555555555ULL);
+	v = (v & 0x3333333333333333ULL) + ((v >> 2) & 0x3333333333333333ULL);
+	v = (v + (v >> 4)) & 0x0f0f0f0f0f0f0f0fULL;
+	return (int)((v * 0x0101010101010101ULL) >> 56);
+}
+
+/**
+ * @brief Le `popcount` de la boucle chaude, **jamais un appel de bibliothèque**.
+ *
+ * `__builtin_popcountll` n'est pris que là où le compilateur le rend
+ * inconditionnellement en ligne :
+ *   - `__POPCNT__` (x86 avec `-mpopcnt`, ajouté par le makefile quand le
+ *     compilateur l'accepte) → une seule instruction `popcntq` ;
+ *   - `__aarch64__` → séquence NEON `cnt`/`addv` native, sans appel.
+ *
+ * Partout ailleurs on prend le SWAR en ligne. La raison est mesurée : sur
+ * x86 sans `-mpopcnt`, **gcc compile `__builtin_popcountll` en `call
+ * __popcountdi2`** (helper libgcc de 21 instructions, plus `call`/`ret` et
+ * l'indirection PLT), là où clang déplie la séquence en ligne. Le balayage
+ * MRV en fait 218 par nœud (54,5 cases de frontière × 4 mots de masque) :
+ * c'est ~54 % de ses instructions, et cet écart de génération de code — à
+ * source, machine et arbre exploré identiques — vaut à lui seul 21 % de temps
+ * d'exécution. Voir docs/autosearch_step.md §1.3 quater.
+ */
+static inline int etii_popcount64(uint64_t v)
+{
+#if defined(__POPCNT__) || defined(__aarch64__)
+	return __builtin_popcountll(v);
+#else
+	return etii_popcount64_swar(v);
+#endif
+}
+
+/**
  * @brief Nombre de pièces d'un compartiment encore libres, par `popcount`.
  *
  * @param mask  Masque des ids du compartiment (`map_bucket_id_mask`).
@@ -358,7 +402,7 @@ static inline int map_mask_free_count(const uint64_t *mask, int words, const uin
 	int count = 0;
 	for (int w = 0; w < words; w++)
 	{
-		count += __builtin_popcountll(mask[w] & ~used[w]);
+		count += etii_popcount64(mask[w] & ~used[w]);
 	}
 	return count;
 }
