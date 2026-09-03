@@ -34,6 +34,44 @@ make clean                    # Supprime les binaires et objets
   `-framework OpenCL` au lieu de `-lOpenCL` (le support OpenCL est actuellement
   commenté dans l'édition de liens).
 
+### `-mpopcnt` : ajouté automatiquement, et pourquoi c'est indispensable
+
+Le build de production est `-Ofast` **sans `-march`**, donc sur la ligne de base
+`x86-64` — antérieure à SSE4.2. Sans rien de plus, `__builtin_popcountll` ne
+peut pas devenir une instruction : **gcc le compile en `call __popcountdi2`**,
+le helper logiciel de libgcc (21 instructions, plus `call`/`ret` et
+l'indirection PLT). Le balayage MRV en fait **218 par nœud**, soit ~54 % de ses
+instructions. Mesuré : **×2,10** en nœuds/s avec le drapeau, à arbre exploré
+identique (cf. [autosearch_step.md §1.3 quater](autosearch_step.md#13-quater-mrv_choose_cell--la-case-la-plus-contrainte-pas-la-suivante-du-parcours)).
+
+Le makefile et `CMakeLists.txt` **sondent** donc le compilateur
+(`POPCNT_FLAG` / `check_c_compiler_flag`) et ajoutent `-mpopcnt` s'il
+l'accepte. C'est une sonde et non un test de plate-forme, parce que le drapeau
+n'existe que sur x86 : la compilation croisée ARM (`make test-docker-arm`, avec
+`CC=aarch64-linux-gnu-gcc`) le refuserait, et aarch64 n'en a pas besoin — le
+builtin y est déjà rendu en ligne (`cnt`/`addv`).
+
+```sh
+make                          # -mpopcnt ajouté si le compilateur l'accepte
+make CC=aarch64-linux-gnu-gcc # sonde négative : drapeau omis, build ARM intact
+```
+
+Deux conséquences à connaître :
+
+- **Le binaire produit exige POPCNT**, c'est-à-dire un x86 postérieur à Nehalem
+  (2008) ou Barcelona (2007). Pour viser plus ancien, forcer `POPCNT_FLAG=` :
+  le programme reste correct, simplement plus lent.
+- **Sans le drapeau, il n'y a jamais d'appel de bibliothèque pour autant.**
+  `etii_popcount64` ([src/core/part.h](../src/core/part.h)) ne prend
+  `__builtin_popcountll` que sous `__POPCNT__` ou `__aarch64__`, et retombe
+  sinon sur un SWAR **en ligne** — ce que clang fait spontanément, et qui vaut
+  déjà 21 % de temps en moins face à l'appel libgcc. C'est ce qui explique
+  qu'un même code source ait longtemps tourné plus vite sur un Mac (clang) que
+  sur un Linux (gcc) à fréquence de cœur comparable. Le repli est compilé sur
+  toutes les cibles et testé sur toutes les cibles
+  (`popcount64_swar_matches_naive_oracle`, `tests/core/test_part.c`), pour ne
+  jamais devenir un chemin de code non exécuté.
+
 ## Configuration du puzzle
 
 [src/core/core_static_variables.h](../src/core/core_static_variables.h) contrôle la taille du

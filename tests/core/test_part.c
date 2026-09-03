@@ -759,6 +759,106 @@ TEST packed_index_matches_flat_for_every_key(void)
  * d'un mot, et `used` en réserve 8 — aucune hypothèse sur ETERN_PARTS. */
 #define MASK_TEST_MAX_ID 64
 
+/* --------------------------------------------------------------------------
+ * etii_popcount64 : le `popcount` de la boucle chaude MRV.
+ *
+ * Deux implémentations coexistent (builtin là où le compilateur le rend en
+ * ligne, SWAR partout ailleurs — cf. part.h) et le choix est fait à la
+ * COMPILATION. Les tests ci-dessous valident les DEUX sur n'importe quelle
+ * plate-forme : le SWAR contre un oracle naïf, puis le chemin réellement
+ * sélectionné contre le SWAR ainsi validé. Sans ce doublon, le repli serait
+ * un chemin de code jamais exécuté sur les machines de CI x86.
+ * ------------------------------------------------------------------------ */
+
+/** @brief Oracle : comptage bit à bit, sans aucune astuce. */
+static int naive_popcount64(uint64_t v)
+{
+    int n = 0;
+    while (v != 0) {
+        n += (int)(v & 1u);
+        v >>= 1;
+    }
+    return n;
+}
+
+/** @brief xorshift64 : suite pseudo-aléatoire déterministe, sans dépendre de rand(). */
+static uint64_t popcount_test_next(uint64_t *state)
+{
+    uint64_t x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    return x;
+}
+
+TEST popcount64_swar_matches_naive_oracle(void)
+{
+    ASSERT_EQ_FMT(0, etii_popcount64_swar(0), "%d");
+    ASSERT_EQ_FMT(64, etii_popcount64_swar(~(uint64_t)0), "%d");
+
+    /* Chaque bit isolé, et chaque préfixe de bits à 1 : couvre les retenues
+     * inter-octets du dernier étage (la multiplication par 0x0101…). */
+    for (int b = 0; b < 64; b++) {
+        uint64_t one = (uint64_t)1 << b;
+        ASSERT_EQ_FMT(1, etii_popcount64_swar(one), "%d");
+        uint64_t prefix = (b == 63) ? ~(uint64_t)0 : (((uint64_t)1 << (b + 1)) - 1);
+        ASSERT_EQ_FMT(b + 1, etii_popcount64_swar(prefix), "%d");
+    }
+
+    uint64_t state = 0x9E3779B97F4A7C15ULL;
+    for (int i = 0; i < 2000; i++) {
+        uint64_t v = popcount_test_next(&state);
+        ASSERT_EQ_FMT(naive_popcount64(v), etii_popcount64_swar(v), "%d");
+    }
+    PASS();
+}
+
+TEST popcount64_selected_path_matches_naive_oracle(void)
+{
+    /* Verrouille le chemin réellement choisi à la compilation (builtin sous
+     * __POPCNT__ ou aarch64, SWAR sinon) contre le MÊME oracle naïf — et non
+     * contre le SWAR, qui rendrait ce test tautologique sur les builds où
+     * c'est justement lui qui est sélectionné. */
+    ASSERT_EQ_FMT(0, etii_popcount64(0), "%d");
+    ASSERT_EQ_FMT(64, etii_popcount64(~(uint64_t)0), "%d");
+
+    uint64_t state = 0x123456789ABCDEFULL;
+    for (int i = 0; i < 2000; i++) {
+        uint64_t v = popcount_test_next(&state);
+        ASSERT_EQ_FMT(naive_popcount64(v), etii_popcount64(v), "%d");
+    }
+    PASS();
+}
+
+TEST map_mask_free_count_matches_naive_count(void)
+{
+    /* Contrat de map_mask_free_count sur plusieurs mots : somme des bits
+     * présents dans le masque et absents de `used`. Testé ici directement,
+     * indépendamment d'une vraie map, sur des motifs multi-mots. */
+    uint64_t state = 0xC0FFEE123456789ULL;
+    for (int words = 1; words <= 4; words++) {
+        for (int rep = 0; rep < 500; rep++) {
+            uint64_t mask[4], used[4];
+            int expected = 0;
+            for (int w = 0; w < words; w++) {
+                mask[w] = popcount_test_next(&state);
+                used[w] = popcount_test_next(&state);
+                expected += naive_popcount64(mask[w] & ~used[w]);
+            }
+            ASSERT_EQ_FMT(expected, map_mask_free_count(mask, words, used), "%d");
+        }
+    }
+
+    /* Cas limites : masque vide, tout utilisé, rien utilisé. */
+    uint64_t full[2]  = { ~(uint64_t)0, ~(uint64_t)0 };
+    uint64_t zero[2]  = { 0, 0 };
+    ASSERT_EQ_FMT(0,   map_mask_free_count(zero, 2, zero), "%d");
+    ASSERT_EQ_FMT(128, map_mask_free_count(full, 2, zero), "%d");
+    ASSERT_EQ_FMT(0,   map_mask_free_count(full, 2, full), "%d");
+    PASS();
+}
+
 TEST bucket_id_mask_matches_flat_for_every_key(void)
 {
     map_big_array *map = prepare_map_part(make_varied_parts());
@@ -948,6 +1048,9 @@ SUITE(part_suite)
     RUN_TEST(free_bigarray_with_null_arena);
     RUN_TEST(check_array_handles_valid_and_null);
     RUN_TEST(packed_index_matches_flat_for_every_key);
+    RUN_TEST(popcount64_swar_matches_naive_oracle);
+    RUN_TEST(popcount64_selected_path_matches_naive_oracle);
+    RUN_TEST(map_mask_free_count_matches_naive_count);
     RUN_TEST(bucket_id_mask_matches_flat_for_every_key);
     RUN_TEST(packed_index_handles_empty_and_largest_bucket);
     RUN_TEST(packed_index_falls_back_to_flat_when_absent);

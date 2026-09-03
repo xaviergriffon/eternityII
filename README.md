@@ -40,6 +40,8 @@ make clean          # Supprime les binaires et objets
 
 Prérequis : `gcc`, `make`, pthreads (disponibles en standard sur macOS et Linux).
 
+Le build sonde le compilateur et ajoute `-mpopcnt` s'il l'accepte : le balayage MRV fait 218 `popcount` par nœud, et sans ce drapeau gcc les compile en appels à `__popcountdi2` (libgcc) — **×2,10 en nœuds/s** avec, à arbre exploré identique. Le binaire x86 produit exige donc POPCNT (Nehalem 2008 / Barcelona 2007) ; `make POPCNT_FLAG=` revient à la ligne de base, correct mais plus lent. Voir [docs/compilation.md](docs/compilation.md#-mpopcnt--ajouté-automatiquement-et-pourquoi-cest-indispensable).
+
 > Détails (options `DEBUG`/`WERROR`/`ASAN`, configuration du puzzle `ETERN_PARTS`/`FORWARD_CHECK_K`, drapeaux de debug) : [docs/compilation.md](docs/compilation.md) — build CUDA : [docs/pruner_gpu_cuda.md](docs/pruner_gpu_cuda.md).
 
 ## Utilisation

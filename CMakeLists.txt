@@ -45,6 +45,17 @@ else()
     set(OPT_FLAGS -Ofast)
 endif()
 
+# POPCNT : même sonde que le Makefile (POPCNT_FLAG). Sans `-mpopcnt`, gcc rend
+# `__builtin_popcountll` par un appel à `__popcountdi2` (libgcc) — 218 appels
+# par nœud dans le balayage MRV, ×2,10 mesuré avec le drapeau. Testé plutôt
+# qu'imposé : le drapeau n'existe que sur x86 (la compilation croisée ARM le
+# refuserait). Repli sans drapeau : `etii_popcount64`, src/core/part.h.
+include(CheckCCompilerFlag)
+check_c_compiler_flag(-mpopcnt HAVE_MPOPCNT)
+if(HAVE_MPOPCNT)
+    list(APPEND OPT_FLAGS -mpopcnt)
+endif()
+
 # ============================================================
 # Flags globaux : warnings uniquement (pas d'optim globale —
 # les cibles test/coverage surcharge avec -O2/-O0 via target_compile_options).

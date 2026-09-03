@@ -29,6 +29,21 @@ endif
 # binaires de test/couverture restent liés avec gcc de l'hôte (ils s'exécutent localement).
 CC ?= gcc
 
+# POPCNT : sans `-mpopcnt`, gcc compile `__builtin_popcountll` en appel à
+# `__popcountdi2` (helper libgcc : 21 instructions, plus call/ret et
+# l'indirection PLT). Le balayage MRV en fait 218 par nœud (54,5 cases de
+# frontière × 4 mots de masque), soit ~54 % de ses instructions — mesuré ×2,1
+# (ETII_BENCH_NODES, répétitions alternées), à arbre exploré identique.
+#
+# Sonde du compilateur plutôt que test d'OS : `-mpopcnt` n'existe que sur x86,
+# et la compilation croisée ARM (`make test-docker-arm`, CC surchargé) le
+# refuserait. Sur aarch64 le builtin est déjà rendu en ligne (`cnt`/`addv`).
+# Sans le drapeau, `etii_popcount64` (src/core/part.h) retombe sur un SWAR EN
+# LIGNE : cela supprime l'appel de bibliothèque, pas l'émulation — le drapeau
+# reste 1,7× meilleur. POPCNT existe depuis Nehalem (2008) / Barcelona (2007).
+POPCNT_FLAG := $(shell $(CC) -mpopcnt -E -x c /dev/null >/dev/null 2>&1 && echo -mpopcnt)
+OPTFLAGS += $(POPCNT_FLAG)
+
 # Ajout d'une variable DEBUG pour activer ou désactiver les informations de débogage
 DEBUG ?= 0
 ifeq ($(DEBUG),1)
