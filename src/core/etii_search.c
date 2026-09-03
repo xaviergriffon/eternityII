@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #include "ui/logger.h"
 #include "core/core_static_variables.h"
@@ -139,6 +140,16 @@ typedef struct {
      *  contraindre la même case, le retrait de l'une ne la libère pas. */
     uint8_t nconstr[BT_CELLS];
 } bt_frontier;
+
+/** @brief Largeur du champ `nconstr` dans la clé composite de `mrv_choose_cell`.
+ *
+ * Une case a 4 côtés, donc `nconstr` tient toujours sur 3 bits. La clé vaut
+ * `(count << MRV_KEY_NC_BITS) | (MRV_KEY_NC_MAX - nconstr)` : le champ bas ne
+ * doit jamais déborder sur `count`, sinon le critère principal (le MRV
+ * lui-même) serait faussé — d'où la vérification à la compilation. */
+#define MRV_KEY_NC_BITS 3
+#define MRV_KEY_NC_MAX  ((1 << MRV_KEY_NC_BITS) - 1)
+typedef char mrv_key_nc_fits_check[(4 <= MRV_KEY_NC_MAX) ? 1 : -1];
 
 /**
  * @brief Construit l'état de frontière depuis un plateau.
@@ -1035,9 +1046,8 @@ static int mrv_choose_cell(struct possibility_packet *board,
                            const uint64_t *cell_mask[BT_CELLS],
                            uint8_t *out_x, uint8_t *out_y, int *out_count)
 {
-    int best_count = -1;
-    uint8_t best_x = 0, best_y = 0;
-    int best_nc = 0;
+    int best_key = INT_MAX;
+    int best_pos = 0;
 
     for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
         uint64_t bits = front->empty[w] & front->constrained[w];
@@ -1050,20 +1060,20 @@ static int mrv_choose_cell(struct possibility_packet *board,
             if (count == 0) {
                 return 0; // sous-arbre mort
             }
-            if (best_count < 0 || count < best_count) {
-                best_count = count;
-                best_x = (uint8_t)x;
-                best_y = (uint8_t)y;
-                best_nc = front->nconstr[pos];
-            } else if (count == best_count && front->nconstr[pos] > best_nc) {
-                best_x = (uint8_t)x;
-                best_y = (uint8_t)y;
-                best_nc = front->nconstr[pos];
-            }
+            // Clé composite : le plus petit `key` gagne, et l'ordre lexicographique
+            // qu'elle encode EST la règle de choix MRV — count croissant d'abord,
+            // puis nconstr DÉCROISSANT (le plus contraint gagne, cf. §4.12 de
+            // docs/conception/elagage_recherche.md), puis l'ordre des bits (`<`
+            // strict : le premier rencontré garde la main). Comparer une seule
+            // valeur au lieu de trois rend la réduction sans branchement.
+            int key = (count << MRV_KEY_NC_BITS) | (MRV_KEY_NC_MAX - front->nconstr[pos]);
+            int better = (key < best_key);
+            best_key = better ? key : best_key;
+            best_pos = better ? pos : best_pos;
         }
     }
 
-    if (best_count < 0) {
+    if (best_key == INT_MAX) {
         // Repli : première case vide non contrainte, même ordre que ci-dessus.
         for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
             uint64_t bits = front->empty[w] & ~front->constrained[w];
@@ -1077,9 +1087,9 @@ static int mrv_choose_cell(struct possibility_packet *board,
         }
         return 0; // pas atteint en pratique : l'appelant vérifie déjà plateau complet
     }
-    *out_x = best_x;
-    *out_y = best_y;
-    *out_count = best_count;
+    *out_x = (uint8_t)(best_pos / ETERN_SIZE);
+    *out_y = (uint8_t)(best_pos % ETERN_SIZE);
+    *out_count = best_key >> MRV_KEY_NC_BITS;
     return 1;
 }
 
