@@ -237,6 +237,7 @@ Les évènements suivants sont câblés :
 | `session de contrôle enregistrée (pid=…) -> slot N` | Côté serveur, quand un client annonce son [canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) (`INST_CONTROL_HELLO`) |
 | `session de contrôle déconnectée (slot N)` | Côté serveur, à la fin d'une session de canal de contrôle |
 | `commande distante "…" exécutée (code retour N)` | Côté serveur, après qu'une commande `clientsCommand` ou `pause`/`resume` (diffusion) a été acquittée par le client |
+| `tri périodique du stock (asc\|desc, N/M segments)` | Côté serveur, à chaque passe du tri périodique (`--sort-enabled`, voir [Utilisation](utilisation.md#tri-périodique-du-stock---sort-enabled)) — tourne en continu quel que soit le trafic ; N/M = segments effectivement triés / total, un segment occupé étant simplement sauté (N < M) plutôt que de suspendre toute la passe |
 
 Tout évènement est **horodaté et écrit dans `events.log`** (en plus de l'affichage
 dans la zone), ce qui permet de garder une trace persistante hors session :

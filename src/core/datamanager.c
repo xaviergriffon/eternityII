@@ -4930,3 +4930,70 @@ int sort_descending_files(void)
 	unlock_all_file();
 	return 0;
 }
+
+/**
+ * @brief Corps commun de `sort_ascending_files_bounded()`/
+ *        `sort_descending_files_bounded()` : trylock borné, un segment
+ *        (une file d'un pool) à la fois, jamais le verrou global.
+ *
+ * @param max_attempts Tentatives de trylock par segment avant abandon.
+ * @param descending   0 = ordre croissant, non-nul = décroissant.
+ * @param out_sorted   Optionnel : nombre de segments triés.
+ * @param out_total    Optionnel : nombre total de segments (2 * nb_file_possibility).
+ */
+static void sort_files_bounded(int max_attempts, int descending, int *out_sorted, int *out_total)
+{
+	if (max_attempts < 1) {
+		max_attempts = 1;
+	}
+	int sorted = 0;
+	for (int fp = 0; fp < nb_file_possibility; fp++)
+	{
+		file_possibility_t *segments[2] = { file_possibility[fp], file_possibility_checked[fp] };
+		for (int s = 0; s < 2; s++)
+		{
+			int locked = 0;
+			for (int attempt = 0; attempt < max_attempts; attempt++)
+			{
+				if (pthread_mutex_trylock(&segments[s]->lock) == 0)
+				{
+					locked = 1;
+					break;
+				}
+				usleep(MICRO_SLEEP);
+			}
+			if (!locked)
+			{
+				continue; // segment toujours pris : sauté, retenté à la prochaine passe
+			}
+			if (descending)
+			{
+				sort_one_file_descending(&segments[s]->file);
+			}
+			else
+			{
+				sort_one_file_ascending(&segments[s]->file);
+			}
+			pthread_mutex_unlock(&segments[s]->lock);
+			sorted++;
+		}
+	}
+	if (out_sorted != NULL) {
+		*out_sorted = sorted;
+	}
+	if (out_total != NULL) {
+		*out_total = nb_file_possibility * 2;
+	}
+}
+
+int sort_ascending_files_bounded(int max_attempts, int *out_sorted, int *out_total)
+{
+	sort_files_bounded(max_attempts, 0, out_sorted, out_total);
+	return 0;
+}
+
+int sort_descending_files_bounded(int max_attempts, int *out_sorted, int *out_total)
+{
+	sort_files_bounded(max_attempts, 1, out_sorted, out_total);
+	return 0;
+}

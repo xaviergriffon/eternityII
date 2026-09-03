@@ -154,8 +154,9 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Serveur (défaut ./eternityii-server.conf) : clés nb_threads, parts_file,\n"
 	  "expand_level, expand_max_stock, expand_max_levels, http_port, http_token_file,\n"
 	  "stock_files, stock_max_ram, stock_spill_dir, rebalance_budget, tcp_timeout,\n"
-	  "auto_roles, stop_on_solution, headless. Lu une seule fois, de façon synchrone,\n"
-	  "avant le démarrage du serveur -- pas d'orchestrateur différé, pas de configApply\n"
+	  "sort_enabled, sort_interval, sort_direction, sort_lock_attempts,\n"
+	  "auto_roles, stop_on_solution, headless. Lu une seule fois, de façon synchrone, avant le démarrage du\n"
+	  "serveur -- pas d'orchestrateur différé, pas de configApply\n"
 	  "(pas de configuration \"en préparation\" à appliquer à chaud) ; config/configSave\n"
 	  "fonctionnent en revanche côté serveur (affichage/persistance de la config\n"
 	  "effective), mais \"config <clé> <valeur>\" y est refusée.\n"
@@ -234,6 +235,41 @@ static const cli_help_topic_t cli_topics[] = {
 	  "à un redémarrage (purge au démarrage, tant que la cohérence sauvegarde/\n"
 	  "restauration n'est pas livrée) : sauvegarder (backup) avant tout arrêt\n"
 	  "pour ne rien perdre. Réglage immédiat via la commande console `spill [n]`." },
+	{ "--sort-enabled",
+	  "--sort-enabled",
+	  "Serveur : active le tri périodique du stock par file (désactivé par défaut).",
+	  "Défaut désactivée — opt-in, comme --auto-roles. Une fois activée, un thread\n"
+	  "dédié appelle sortAscFiles/sortDescFiles (selon --sort-direction) toutes les\n"
+	  "--sort-interval secondes. Trie CHAQUE file EN PLACE, SANS regroupement\n"
+	  "(contrairement à sortAsc/sortDesc, qui fusionnent tout dans la file 0) :\n"
+	  "préserve la distribution round-robin entre files. Tourne EN CONTINU, quel\n"
+	  "que soit le trafic : chaque file (et chaque pool) est verrouillée\n"
+	  "INDIVIDUELLEMENT via un trylock borné par --sort-lock-attempts tentatives —\n"
+	  "un segment toujours pris est simplement sauté pour cette passe (jamais\n"
+	  "perdu, retenté à la suivante), sans jamais bloquer les threads ADD/GET. Une\n"
+	  "ligne courte est journalisée dans events.log à chaque passe (segments\n"
+	  "triés/total)." },
+	{ "--sort-interval",
+	  "--sort-interval <n>",
+	  "Serveur : intervalle (secondes) entre deux passes de tri périodique.",
+	  "Défaut SORT_PERIODIC_INTERVAL_DEFAULT (60). Sans effet si --sort-enabled\n"
+	  "n'est pas activée (le thread n'est alors jamais démarré). Valeur absente\n"
+	  "ou <= 0 : ignorée (garde le défaut)." },
+	{ "--sort-lock-attempts",
+	  "--sort-lock-attempts <n>",
+	  "Serveur : tentatives de trylock par segment avant abandon, dans le tri périodique.",
+	  "Défaut SORT_LOCK_ATTEMPTS_DEFAULT (50) x MICRO_SLEEP (100 µs) ~= 5 ms de\n"
+	  "patience par segment (une file d'un pool) avant de passer au suivant. Ne\n"
+	  "bloque JAMAIS les threads ADD/GET (trylock, jamais un verrou bloquant) :\n"
+	  "ce budget règle uniquement la persévérance du thread de tri lui-même face à\n"
+	  "un segment occupé, pas une attente subie par les clients. Sans effet si\n"
+	  "--sort-enabled n'est pas activée. Valeur absente ou <= 0 : ignorée (garde\n"
+	  "le défaut)." },
+	{ "--sort-direction",
+	  "--sort-direction <asc|desc>",
+	  "Serveur : sens du tri périodique (asc ou desc, défaut asc).",
+	  "Valeur absente ou ni \"asc\" ni \"desc\" : ignorée (garde le défaut ou la\n"
+	  "valeur déjà fixée)." },
 	{ "--tcp-timeout",
 	  "--tcp-timeout <n>",
 	  "Serveur et client/pruner : timeout d'inactivité (secondes) des sockets TCP de travail.",
@@ -375,14 +411,50 @@ int format_cli_help_topic(const char *name, char *buf, size_t bufsz)
 	return (int)len;
 }
 
-/* Taille suffisante pour l'aide générale complète (la plus longue des sorties). */
-#define CLI_HELP_BUF_SIZE 4096
+/* Taille suffisante pour l'aide générale complète (la plus longue des sorties).
+ * Relevée de 4096 à 6144 lors de l'ajout de --sort-enabled/--sort-interval/
+ * --sort-direction : la liste générale (usage + résumé d'une ligne par sujet)
+ * dépassait alors 4096 octets. Ce tampon-ci n'est PAS le seul verrou : voir
+ * `print_multiline` ci-dessous pour l'autre moitié du correctif. */
+#define CLI_HELP_BUF_SIZE 6144
+
+/**
+ * @brief Émet @p text via @p logfn, une LIGNE à la fois plutôt qu'en un seul
+ *        appel.
+ *
+ * `log_console`/`log_error` (`src/ui/logger.c`) ont leur propre tampon
+ * interne borné à `LOG_LINE_MAX` (4096 octets) — un seul appel avec tout le
+ * texte de l'aide générale tronque silencieusement au-delà, quelle que soit
+ * la taille du tampon SOURCE (`CLI_HELP_BUF_SIZE`, largement suffisant côté
+ * `format_cli_help`) : le tampon qui compte est celui du LOGGER, en aval.
+ * Émettre ligne par ligne (chaque ligne individuelle restant très en deçà de
+ * `LOG_LINE_MAX`) élimine le problème à la racine plutôt que de repousser la
+ * limite. Le `'\n'` de chaque ligne est conservé dans l'appel (même rendu
+ * qu'un seul gros appel réussi).
+ *
+ * @param logfn `log_console` ou `log_error` (même signature `(const char *, ...)`).
+ * @param text  Texte à émettre, potentiellement multi-lignes.
+ */
+static void print_multiline(void (*logfn)(const char *format, ...), const char *text)
+{
+	const char *line = text;
+	while (*line != '\0') {
+		const char *nl = strchr(line, '\n');
+		if (nl != NULL) {
+			logfn("%.*s\n", (int)(nl - line), line);
+			line = nl + 1;
+		} else {
+			logfn("%s", line);
+			break;
+		}
+	}
+}
 
 void print_cli_help(void)
 {
 	char buf[CLI_HELP_BUF_SIZE];
 	format_cli_help(buf, sizeof buf);
-	log_console("%s", buf);
+	print_multiline(log_console, buf);
 	flush_console();
 }
 
@@ -392,7 +464,7 @@ int print_cli_help_topic(const char *name)
 	if (format_cli_help_topic(name, buf, sizeof buf) < 0) {
 		return -1;
 	}
-	log_console("%s", buf);
+	print_multiline(log_console, buf);
 	flush_console();
 	return 0;
 }
@@ -406,7 +478,8 @@ void failed_arg(void)
 {
 	char buf[CLI_HELP_BUF_SIZE];
 	format_cli_help(buf, sizeof buf);
-	log_error("arguments invalides.\n%s", buf);
+	log_error("arguments invalides.\n");
+	print_multiline(log_error, buf);
 }
 /**
  * @brief Initialise les compteurs utilisés dans le programme.

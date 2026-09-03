@@ -638,6 +638,164 @@ TEST bench_should_stop_true_at_or_above_target(void)
     PASS();
 }
 
+/* --sort-enabled : position-indépendant, même schéma que --auto-roles —
+   retiré d'argv, server_sort_enabled positionné, arguments positionnels
+   intacts. */
+TEST sort_enabled_flag_is_stripped_and_sets_global(void)
+{
+    server_sort_enabled = 0;
+    const char *argv[] = {"prog", "server", "--sort-enabled", "8"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(1, server_sort_enabled, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);
+    PASS();
+}
+
+/* Sans --sort-enabled, le drapeau reste à 0 (désactivé par défaut). */
+TEST sort_enabled_flag_absent_leaves_global_untouched(void)
+{
+    server_sort_enabled = 0;
+    const char *argv[] = {"prog", "server", "8"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(0, server_sort_enabled, "%d");
+    PASS();
+}
+
+/* --sort-interval <n> : option VALUÉE, même schéma que --rebalance-budget
+   (0/négatif/absent ignoré, garde la valeur courante). */
+TEST sort_interval_strips_option_and_value_sets_global(void)
+{
+    server_sort_interval = SORT_PERIODIC_INTERVAL_DEFAULT;
+    const char *argv[] = {"prog", "server", "--sort-interval", "120", "8"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");              /* option + valeur retirées (5 → 3) */
+    ASSERT_EQ_FMT(120, server_sort_interval, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);               /* argument positionnel non décalé */
+    PASS();
+}
+
+/* Valeur absente : ignorée sans lire hors argv, server_sort_interval reste
+   inchangé, l'option est tout de même consommée. */
+TEST sort_interval_without_value_is_ignored(void)
+{
+    server_sort_interval = SORT_PERIODIC_INTERVAL_DEFAULT;
+    const char *argv[] = {"prog", "server", "--sort-interval"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(SORT_PERIODIC_INTERVAL_DEFAULT, server_sort_interval, "%d");
+    PASS();
+}
+
+/* Valeur <= 0 : ignorée (garde la valeur déjà fixée), un intervalle nul
+   n'a pas de sens utile. */
+TEST sort_interval_non_positive_value_is_ignored(void)
+{
+    server_sort_interval = 45;                    /* valeur résiduelle à préserver */
+    const char *argv[] = {"prog", "server", "--sort-interval", "0"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(45, server_sort_interval, "%d");
+    PASS();
+}
+
+/* --sort-direction <asc|desc> : option VALUÉE, seules "asc"/"desc" sont
+   reconnues. */
+TEST sort_direction_desc_strips_option_and_sets_global(void)
+{
+    server_sort_direction = SORT_DIRECTION_ASC;
+    const char *argv[] = {"prog", "server", "--sort-direction", "desc", "8"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(SORT_DIRECTION_DESC, server_sort_direction, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);
+    PASS();
+}
+
+TEST sort_direction_asc_strips_option_and_sets_global(void)
+{
+    server_sort_direction = SORT_DIRECTION_DESC;
+    const char *argv[] = {"prog", "server", "--sort-direction", "asc"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(SORT_DIRECTION_ASC, server_sort_direction, "%d");
+    PASS();
+}
+
+/* Valeur ni "asc" ni "desc" : ignorée (garde la valeur déjà fixée), l'option
+   et sa valeur sont tout de même consommées. */
+TEST sort_direction_invalid_value_is_ignored(void)
+{
+    server_sort_direction = SORT_DIRECTION_DESC;   /* valeur résiduelle à préserver */
+    const char *argv[] = {"prog", "server", "--sort-direction", "bogus"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(SORT_DIRECTION_DESC, server_sort_direction, "%d");
+    PASS();
+}
+
+/* Valeur absente : ignorée sans lire hors argv, server_sort_direction reste
+   inchangé, l'option est tout de même consommée. */
+TEST sort_direction_without_value_is_ignored(void)
+{
+    server_sort_direction = SORT_DIRECTION_ASC;
+    const char *argv[] = {"prog", "server", "--sort-direction"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(SORT_DIRECTION_ASC, server_sort_direction, "%d");
+    PASS();
+}
+
+/* --sort-lock-attempts <n> : option VALUÉE, même schéma que --rebalance-budget
+   (0/négatif/absent ignoré, garde la valeur courante). */
+TEST sort_lock_attempts_strips_option_and_value_sets_global(void)
+{
+    server_sort_lock_attempts = SORT_LOCK_ATTEMPTS_DEFAULT;
+    const char *argv[] = {"prog", "server", "--sort-lock-attempts", "10", "8"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_EQ_FMT(10, server_sort_lock_attempts, "%d");
+    ASSERT_STR_EQ("server", argv[1]);
+    ASSERT_STR_EQ("8", argv[2]);
+    PASS();
+}
+
+TEST sort_lock_attempts_without_value_is_ignored(void)
+{
+    server_sort_lock_attempts = SORT_LOCK_ATTEMPTS_DEFAULT;
+    const char *argv[] = {"prog", "server", "--sort-lock-attempts"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(SORT_LOCK_ATTEMPTS_DEFAULT, server_sort_lock_attempts, "%d");
+    PASS();
+}
+
+TEST sort_lock_attempts_non_positive_value_is_ignored(void)
+{
+    server_sort_lock_attempts = 30;
+    const char *argv[] = {"prog", "server", "--sort-lock-attempts", "0"};
+    int argc = parse_cli_options(4, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_EQ_FMT(30, server_sort_lock_attempts, "%d");
+    PASS();
+}
+
 SUITE(app_static_variables_suite)
 {
     RUN_TEST(flag_absent_leaves_argv_and_flag_untouched);
@@ -686,4 +844,16 @@ SUITE(app_static_variables_suite)
     RUN_TEST(bench_should_stop_disabled_when_target_is_zero);
     RUN_TEST(bench_should_stop_false_while_below_target);
     RUN_TEST(bench_should_stop_true_at_or_above_target);
+    RUN_TEST(sort_enabled_flag_is_stripped_and_sets_global);
+    RUN_TEST(sort_enabled_flag_absent_leaves_global_untouched);
+    RUN_TEST(sort_interval_strips_option_and_value_sets_global);
+    RUN_TEST(sort_interval_without_value_is_ignored);
+    RUN_TEST(sort_interval_non_positive_value_is_ignored);
+    RUN_TEST(sort_direction_desc_strips_option_and_sets_global);
+    RUN_TEST(sort_direction_asc_strips_option_and_sets_global);
+    RUN_TEST(sort_direction_invalid_value_is_ignored);
+    RUN_TEST(sort_direction_without_value_is_ignored);
+    RUN_TEST(sort_lock_attempts_strips_option_and_value_sets_global);
+    RUN_TEST(sort_lock_attempts_without_value_is_ignored);
+    RUN_TEST(sort_lock_attempts_non_positive_value_is_ignored);
 }

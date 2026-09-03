@@ -103,6 +103,11 @@ int server = 0;
 
 int server_rmnonext_timing = 30;
 
+int server_sort_enabled = 0;
+int server_sort_interval = SORT_PERIODIC_INTERVAL_DEFAULT;
+int server_sort_direction = SORT_DIRECTION_ASC;
+int server_sort_lock_attempts = SORT_LOCK_ATTEMPTS_DEFAULT;
+
 unsigned long long bench_target_nodes = 0;
 
 unsigned long long bench_parse_nodes_env(const char *env_value)
@@ -226,6 +231,49 @@ int parse_cli_options(int argc, const char *argv[])
                 int budget = atoi(argv[r + 1]);
                 if (budget > 0) {
                     rebalance_budget = budget;
+                }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--sort-enabled") == 0) {
+            // Drapeau booléen, même schéma que --auto-roles : active le thread
+            // de tri périodique du stock par file (src/app/etii_server.c,
+            // sort_periodic_thread), désactivé par défaut.
+            server_sort_enabled = 1;
+        } else if (strcmp(argv[r], "--sort-interval") == 0) {
+            // Option valuée, même schéma que --rebalance-budget : un
+            // intervalle <= 0 n'a pas de sens utile, valeur absente ou <= 0
+            // ignorée, server_sort_interval garde sa valeur par défaut
+            // (SORT_PERIODIC_INTERVAL_DEFAULT) ou celle déjà fixée.
+            if (r + 1 < argc) {
+                int interval = atoi(argv[r + 1]);
+                if (interval > 0) {
+                    server_sort_interval = interval;
+                }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--sort-direction") == 0) {
+            // Option valuée : "asc"/"desc" uniquement. Valeur absente ou
+            // reconnue ni l'une ni l'autre : ignorée, server_sort_direction
+            // garde sa valeur par défaut (SORT_DIRECTION_ASC) ou celle déjà
+            // fixée.
+            if (r + 1 < argc) {
+                if (strcmp(argv[r + 1], "asc") == 0) {
+                    server_sort_direction = SORT_DIRECTION_ASC;
+                } else if (strcmp(argv[r + 1], "desc") == 0) {
+                    server_sort_direction = SORT_DIRECTION_DESC;
+                }
+                r++; // consomme aussi la valeur
+            }
+        } else if (strcmp(argv[r], "--sort-lock-attempts") == 0) {
+            // Option valuée, même schéma que --rebalance-budget : un nombre
+            // de tentatives <= 0 n'a pas de sens utile (abandon immédiat sur
+            // le moindre segment busy), valeur absente ou <= 0 ignorée,
+            // server_sort_lock_attempts garde sa valeur par défaut
+            // (SORT_LOCK_ATTEMPTS_DEFAULT) ou celle déjà fixée.
+            if (r + 1 < argc) {
+                int attempts = atoi(argv[r + 1]);
+                if (attempts > 0) {
+                    server_sort_lock_attempts = attempts;
                 }
                 r++; // consomme aussi la valeur
             }

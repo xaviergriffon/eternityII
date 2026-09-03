@@ -745,6 +745,33 @@ int sort_ascending(void);
  */
 int sort_ascending_files(void);
 
+/**
+ * @brief Trie chaque file (et chaque pool, non vérifié/vérifié) par ordre
+ *        croissant de `alloc`, EN PLACE, via un `trylock` borné par segment
+ *        plutôt que le verrou global bloquant de `sort_ascending_files()`.
+ *
+ * Contrairement à `sort_ascending_files()`, qui verrouille TOUTES les files
+ * des DEUX pools d'un bloc (`lock_all_file`, bloquant) — incompatible avec un
+ * déclenchement automatique régulier sous trafic réel, un client connecté
+ * suffisant à le tenir verrouillé en continu — cette variante verrouille
+ * CHAQUE segment (une file d'un pool) INDÉPENDAMMENT, avec jusqu'à
+ * @p max_attempts tentatives de `pthread_mutex_trylock` espacées de
+ * `MICRO_SLEEP` — même discipline que `scroll_from_pool`/`put_to_pool` (PR1,
+ * voir docs/echanges_client_serveur.md#gestion-de-charge). Un segment
+ * toujours verrouillé après @p max_attempts tentatives est simplement SAUTÉ
+ * pour cette passe (jamais perdu : retenté à la prochaine passe périodique) —
+ * jamais de drapeau `maintenance` global, jamais de blocage des threads
+ * ADD/GET, quel que soit le trafic en cours.
+ *
+ * @param max_attempts Tentatives de trylock par segment avant abandon (>= 1,
+ *                      une valeur < 1 est ramenée à 1).
+ * @param out_sorted    Optionnel : nombre de segments effectivement triés.
+ * @param out_total     Optionnel : nombre total de segments
+ *                       (2 * nb_file_possibility).
+ * @return 0.
+ */
+int sort_ascending_files_bounded(int max_attempts, int *out_sorted, int *out_total);
+
 /** @brief Trie toutes les files de possibilités par ordre décroissant de `alloc`. */
 int sort_descending(void);
 
@@ -757,6 +784,13 @@ int sort_descending(void);
  * qui ne concentrent le tri que sur la file 0 après fusion.
  */
 int sort_descending_files(void);
+
+/**
+ * @brief Symétrique de `sort_ascending_files_bounded()` pour l'ordre
+ *        décroissant — mêmes garanties (trylock borné par segment, jamais de
+ *        blocage global). Voir sa documentation pour le détail.
+ */
+int sort_descending_files_bounded(int max_attempts, int *out_sorted, int *out_total);
 
 /** @brief Trie les files par ordre décroissant en parallèle (multi-thread). */
 int sort_descending_mthread(void);

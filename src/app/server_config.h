@@ -12,8 +12,10 @@
  * nombre de threads et le fichier de pièces (positionnels), et les options
  * valuées `--expand-level`, `--expand-max-stock`, `--expand-max-levels`,
  * `--http-port`, `--http-token-file`, `--stock-files`, `--stock-max-ram`,
- * `--stock-spill-dir`, `--rebalance-budget`, `--tcp-timeout`, ainsi que les
- * drapeaux `--auto-roles`, `--stop-on-solution`, `--headless`.
+ * `--stock-spill-dir`, `--rebalance-budget`, `--tcp-timeout`,
+ * `--sort-interval`, `--sort-direction`, `--sort-lock-attempts`, ainsi que
+ * les drapeaux `--auto-roles`, `--stop-on-solution`, `--headless`,
+ * `--sort-enabled`.
  */
 #ifndef server_config_h
 #define server_config_h
@@ -75,6 +77,18 @@ typedef struct {
 
     int has_headless;
     int headless;
+
+    int has_sort_enabled;
+    int sort_enabled;
+
+    int has_sort_interval;
+    int sort_interval;
+
+    int has_sort_direction;
+    int sort_direction;
+
+    int has_sort_lock_attempts;
+    int sort_lock_attempts;
 } server_config_t;
 
 /// Résultat de `server_config_parse_line`.
@@ -113,8 +127,10 @@ void server_config_free(server_config_t *cfg);
  * Clés reconnues : `nb_threads`, `parts_file`, `expand_level`,
  * `expand_max_stock`, `expand_max_levels`, `http_port` ([1, 65535]),
  * `http_token_file`, `stock_files`, `stock_max_ram`, `stock_spill_dir`,
- * `rebalance_budget`, `tcp_timeout`, `auto_roles`/`stop_on_solution`/
- * `headless` (0 ou 1). La dernière occurrence d'une clé l'emporte.
+ * `rebalance_budget`, `tcp_timeout`, `sort_interval`, `sort_direction`
+ * (`asc`/`desc`), `sort_lock_attempts`,
+ * `auto_roles`/`stop_on_solution`/`headless`/`sort_enabled` (0 ou 1). La
+ * dernière occurrence d'une clé l'emporte.
  *
  * @return Le statut de la ligne (voir `server_config_line_status_t`).
  */

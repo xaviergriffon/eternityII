@@ -427,7 +427,7 @@ TEST failed_arg_prints_usage(void)
    mode ET chaque option), dans un tampon assez grand pour ne rien tronquer. */
 TEST cli_help_general_lists_every_topic(void)
 {
-    char buf[4096];
+    char buf[6144]; /* même taille que CLI_HELP_BUF_SIZE (src/app/app_runtime.c) */
     int len = format_cli_help(buf, sizeof buf);
     ASSERT(len > 0);
     ASSERT(len < (int)sizeof buf - 1); /* non tronquée */
@@ -486,6 +486,40 @@ TEST cli_help_truncates_safely_in_small_buffer(void)
     int len = format_cli_help(buf, sizeof buf);
     ASSERT(len <= (int)sizeof buf - 1);
     ASSERT_EQ_FMT((int)strlen(buf), len, "%d");
+    PASS();
+}
+
+/* print_cli_help : l'aide générale RÉELLEMENT AFFICHÉE (via log_console, pas
+ * juste le tampon format_cli_help) ne doit rien tronquer. Régression visée :
+ * log_console/log_error ont leur propre tampon interne borné à LOG_LINE_MAX
+ * (4096 octets, src/ui/logger.c) -- un seul appel avec tout le texte en une
+ * fois tronque silencieusement au-delà, quelle que soit la taille du tampon
+ * source (CLI_HELP_BUF_SIZE). Le dernier sujet de la table et la phrase de
+ * fin ("./eternityII help <sujet>...") ne doivent JAMAIS manquer. */
+TEST print_cli_help_writes_full_untruncated_help(void)
+{
+    char out[8192];
+    char path[] = "/tmp/etii_help_capture_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    fflush(stdout);
+    int saved = dup(1);
+    dup2(fd, 1);
+
+    print_cli_help();
+
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    lseek(fd, 0, SEEK_SET);
+    memset(out, 0, sizeof(out));
+    ssize_t n = read(fd, out, sizeof(out) - 1);
+    (void)n;
+    close(fd);
+    unlink(path);
+
+    ASSERT(strstr(out, "--help | -h") != NULL);
+    ASSERT(strstr(out, "./eternityII help <sujet>") != NULL);
     PASS();
 }
 
@@ -1793,6 +1827,7 @@ SUITE(app_runtime_suite)
     RUN_TEST(cli_help_find_topic_matches_flexibly);
     RUN_TEST(cli_help_topic_formats_known_and_rejects_unknown);
     RUN_TEST(cli_help_truncates_safely_in_small_buffer);
+    RUN_TEST(print_cli_help_writes_full_untruncated_help);
     RUN_TEST(print_cli_help_topic_returns_status);
     RUN_TEST(signal_ignored_is_noop);
     RUN_TEST(signal_end_handler_sets_request_stop);

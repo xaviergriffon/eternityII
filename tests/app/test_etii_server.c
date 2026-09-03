@@ -31,6 +31,7 @@
 #include <pthread.h>
 #include <limits.h>
 #include <signal.h>
+#include <fcntl.h>
 
 extern unsigned long long *fileUpdates;   /* global défini dans etii_server.c */
 extern unsigned long long *analysedFileUpdates; /* global défini dans etii_server.c (PR5) */
@@ -40,6 +41,23 @@ void create_server_thread(client_t *thread_params, int i);
 void lock_all_file(void);                 /* maintenance datamanager (cf. test_datamanager.c) */
 void unlock_all_file(void);
 void *rmnonext_thread(void *param);       /* thread interne à etii_server.c */
+void *sort_periodic_thread(void *param);  /* thread interne à etii_server.c */
+
+/* Coupe temporairement stdout/stderr (fonctions verbeuses : tri, split_datas). */
+static int g_sort_test_fd1 = -1, g_sort_test_fd2 = -1;
+static void silence_std(void)
+{
+    fflush(stdout); fflush(stderr);
+    g_sort_test_fd1 = dup(1); g_sort_test_fd2 = dup(2);
+    int dn = open("/dev/null", O_WRONLY);
+    dup2(dn, 1); dup2(dn, 2); close(dn);
+}
+static void restore_std(void)
+{
+    fflush(stdout); fflush(stderr);
+    dup2(g_sort_test_fd1, 1); dup2(g_sort_test_fd2, 2);
+    close(g_sort_test_fd1); close(g_sort_test_fd2);
+}
 
 /* Vide le pool local du datamanager (état global partagé entre suites). */
 static void dm_drain_all(void)
@@ -3027,6 +3045,283 @@ TEST rmnonext_thread_stops_immediately_on_request_stop(void)
     PASS();
 }
 
+/* ---------- sort_periodic_pass / sort_periodic_thread --------------------- */
+
+/* Sens ASC : la passe trie chaque file du stock en place, sans regroupement
+ * (même fixture que sort_ascending_files_sorts_each_file_without_merging
+ * dans test_datamanager.c). Tourne sans condition, plus de garde-fou
+ * client-connecté (cf. sort_periodic_pass_sorts_even_with_client_connected
+ * ci-dessous). */
+TEST sort_periodic_pass_sorts_ascending(void)
+{
+    dm_drain_all();
+    int saved_dir = server_sort_direction;
+    server_sort_direction = SORT_DIRECTION_ASC;
+
+    enum { N = 40 };
+    struct possibility_packet pks[N];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < N; i++) {
+        pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
+    }
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas(); /* répartit sur toutes les files, comme en usage réel */
+    sort_periodic_pass();
+    restore_std();
+
+    ASSERT_EQ_FMT((unsigned long long)N, datas_size(), "%llu"); /* total inchangé */
+
+    for (int f = 0; f < nb_file_possibility; f++) {
+        if (file_size(f) == 0) {
+            continue;
+        }
+        char *buf = NULL;
+        size_t buf_size = 0;
+        FILE *mem = open_memstream(&buf, &buf_size);
+        ASSERT(mem != NULL);
+        int prc = fprint_file(mem, f, NULL);
+        fclose(mem);
+        ASSERT_EQ_FMT(0, prc, "%d");
+
+        int prev = -1;
+        char *line = buf;
+        char *nl;
+        while ((nl = strchr(line, '\n')) != NULL) {
+            *nl = '\0';
+            int a = -1;
+            ASSERT_EQ_FMT(1, sscanf(line, "{\"alloc\": %d,", &a), "%d");
+            ASSERT(a >= prev); /* ordre croissant */
+            prev = a;
+            line = nl + 1;
+        }
+        free(buf);
+    }
+
+    server_sort_direction = saved_dir;
+    dm_drain_all();
+    PASS();
+}
+
+/* Sens DESC : symétrique du test ci-dessus. */
+TEST sort_periodic_pass_sorts_descending(void)
+{
+    dm_drain_all();
+    int saved_dir = server_sort_direction;
+    server_sort_direction = SORT_DIRECTION_DESC;
+
+    enum { N = 40 };
+    struct possibility_packet pks[N];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < N; i++) {
+        pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
+    }
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas();
+    sort_periodic_pass();
+    restore_std();
+
+    ASSERT_EQ_FMT((unsigned long long)N, datas_size(), "%llu");
+
+    for (int f = 0; f < nb_file_possibility; f++) {
+        if (file_size(f) == 0) {
+            continue;
+        }
+        char *buf = NULL;
+        size_t buf_size = 0;
+        FILE *mem = open_memstream(&buf, &buf_size);
+        ASSERT(mem != NULL);
+        int prc = fprint_file(mem, f, NULL);
+        fclose(mem);
+        ASSERT_EQ_FMT(0, prc, "%d");
+
+        int prev = INT_MAX;
+        char *line = buf;
+        char *nl;
+        while ((nl = strchr(line, '\n')) != NULL) {
+            *nl = '\0';
+            int a = -1;
+            ASSERT_EQ_FMT(1, sscanf(line, "{\"alloc\": %d,", &a), "%d");
+            ASSERT(a <= prev); /* ordre décroissant */
+            prev = a;
+            line = nl + 1;
+        }
+        free(buf);
+    }
+
+    server_sort_direction = saved_dir;
+    dm_drain_all();
+    PASS();
+}
+
+/* Un client connecté : ne suspend PLUS la passe (plus de garde-fou
+ * client-connecté, cf. sort_periodic_pass ci-dessus) — le tri s'exécute quand
+ * même, verrouillage par segment via sort_ascending_files_bounded. Régression
+ * visée : l'ancien garde-fou rendait le tri quasi inatteignable sur un
+ * serveur de production presque toujours occupé par au moins un client. */
+TEST sort_periodic_pass_sorts_even_with_client_connected(void)
+{
+    dm_drain_all();
+    client_t *saved_tp = thread_params;
+    int saved_nb = NB_THREADS;
+    int saved_dir = server_sort_direction;
+
+    client_t slots[1];
+    memset(slots, 0, sizeof slots);
+    slots[0].exist = 1; slots[0].socket_id = 5;    /* client connecté */
+    thread_params = slots;
+    NB_THREADS = 1;
+    server_sort_direction = SORT_DIRECTION_ASC;
+
+    enum { N = 20 };
+    struct possibility_packet pks[N];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < N; i++) {
+        pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
+    }
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas();
+    restore_std();
+
+    sort_periodic_pass();
+
+    ASSERT_EQ_FMT((unsigned long long)N, datas_size(), "%llu"); /* rien perdu */
+
+    for (int f = 0; f < nb_file_possibility; f++) {
+        if (file_size(f) == 0) {
+            continue;
+        }
+        char *buf = NULL;
+        size_t buf_size = 0;
+        FILE *mem = open_memstream(&buf, &buf_size);
+        ASSERT(mem != NULL);
+        ASSERT_EQ_FMT(0, fprint_file(mem, f, NULL), "%d");
+        fclose(mem);
+
+        int prev = -1;
+        char *line = buf;
+        char *nl;
+        while ((nl = strchr(line, '\n')) != NULL) {
+            *nl = '\0';
+            int a = -1;
+            ASSERT_EQ_FMT(1, sscanf(line, "{\"alloc\": %d,", &a), "%d");
+            ASSERT(a >= prev); /* effectivement trié, malgré le client connecté */
+            prev = a;
+            line = nl + 1;
+        }
+        free(buf);
+    }
+
+    thread_params = saved_tp;
+    NB_THREADS = saved_nb;
+    server_sort_direction = saved_dir;
+    dm_drain_all();
+    PASS();
+}
+
+/* Aucun client connecté : la passe effectivement exécutée journalise une
+ * ligne courte dans events.log (seule façon, hors debug, de savoir quand le
+ * tri automatique s'est déclenché) -- segments triés/total inclus, pour
+ * repérer d'un coup d'oeil une passe qui a dû sauter des segments busy. */
+TEST sort_periodic_pass_logs_segment_counts(void)
+{
+    dm_drain_all();
+    unlink("events.log");
+    int saved_dir = server_sort_direction;
+    server_sort_direction = SORT_DIRECTION_DESC;
+
+    struct possibility_packet pks[3];
+    memset(pks, 0, sizeof pks);
+    array_possibility_packet arr = { .size = 3, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    sort_periodic_pass(); /* rien ne contend : tous les segments sont triés */
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[256] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    unlink("events.log");
+
+    ASSERT(strstr(line, "tri périodique") != NULL);
+    ASSERT(strstr(line, "desc") != NULL);
+    ASSERT(strstr(line, "[") != NULL); /* horodatage entre crochets, même style que log_event */
+
+    char expect_counts[64];
+    int total = nb_file_possibility * 2;
+    snprintf(expect_counts, sizeof expect_counts, "%d/%d segments", total, total);
+    ASSERT(strstr(line, expect_counts) != NULL);
+
+    server_sort_direction = saved_dir;
+    dm_drain_all();
+    PASS();
+}
+
+/* Segments tous occupés (lock_all_file) : la passe journalise quand même une
+ * ligne, avec 0 segment trié -- distingue « le tri n'a jamais tourné » de
+ * « le tri a tourné mais tout était busy », utile pour diagnostiquer un
+ * serveur où --sort-lock-attempts serait trop bas pour le trafic réel. */
+TEST sort_periodic_pass_logs_zero_sorted_when_all_segments_busy(void)
+{
+    dm_drain_all();
+    unlink("events.log");
+    int saved_dir = server_sort_direction;
+    int saved_attempts = server_sort_lock_attempts;
+    server_sort_direction = SORT_DIRECTION_ASC;
+    server_sort_lock_attempts = 2; /* borné, pour un test rapide */
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    add_possibility(NULL, &arr);
+
+    lock_all_file();
+    sort_periodic_pass();
+    unlock_all_file();
+
+    FILE *f = fopen("events.log", "r");
+    ASSERT(f != NULL);
+    char line[256] = {0};
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    (void)n;
+    unlink("events.log");
+
+    char expect_zero[32];
+    int total = nb_file_possibility * 2;
+    snprintf(expect_zero, sizeof expect_zero, "0/%d segments", total);
+    ASSERT(strstr(line, expect_zero) != NULL);
+
+    server_sort_direction = saved_dir;
+    server_sort_lock_attempts = saved_attempts;
+    dm_drain_all();
+    PASS();
+}
+
+/* Enveloppe de thread : REQUEST_STOP prépositionné, la boucle ne s'exécute
+ * jamais. */
+TEST sort_periodic_thread_stops_immediately_on_request_stop(void)
+{
+    int saved_req = request;
+    request = REQUEST_STOP;
+
+    void *ret = sort_periodic_thread(NULL);
+    ASSERT_EQ(NULL, ret);
+
+    request = saved_req;
+    PASS();
+}
+
 /* ---------- INST_CONTROL_HELLO (bascule en session de contrôle) --------- */
 /*
  * Ces tests exercent le contrat de communicate_with_client_step pour
@@ -3566,6 +3861,12 @@ SUITE(etii_server_suite)
     RUN_TEST(rmnonext_pass_prunes_when_idle);
     RUN_TEST(rmnonext_pass_skips_when_client_active);
     RUN_TEST(rmnonext_thread_stops_immediately_on_request_stop);
+    RUN_TEST(sort_periodic_pass_sorts_ascending);
+    RUN_TEST(sort_periodic_pass_sorts_descending);
+    RUN_TEST(sort_periodic_pass_sorts_even_with_client_connected);
+    RUN_TEST(sort_periodic_pass_logs_segment_counts);
+    RUN_TEST(sort_periodic_pass_logs_zero_sorted_when_all_segments_busy);
+    RUN_TEST(sort_periodic_thread_stops_immediately_on_request_stop);
 
     RUN_TEST(step_control_hello_switches_session);
     RUN_TEST(step_control_hello_out_param_null_is_accepted);
