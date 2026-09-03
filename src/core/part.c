@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <sys/mman.h>
+
 #include "core/core_static_variables.h"
 
 #include "ui/logger.h"
@@ -429,6 +431,46 @@ int map_packed_fits(unsigned long long total_parts, unsigned long long max_bucke
 	return (total_parts <= MAP_PACKED_FIELD_MAX && max_bucket <= MAP_PACKED_FIELD_MAX) ? 1 : 0;
 }
 
+
+/**
+ * @brief Alloue un bloc aligné et dimensionné sur une grande page (2 Mio).
+ *
+ * Réservé aux deux tables du chemin chaud MRV, `packed` (1 296 Kio) et
+ * `bucket_id_mask` (450 Kio) : ensemble 1 746 Kio, donc **une seule grande
+ * page suffit pour les deux**. Le balayage MRV y fait des accès dispersés qui
+ * touchaient ~59 pages de 4 Kio distinctes par nœud, contre un dTLB L1 de 64
+ * entrées — mesuré 82,6 défauts de dTLB par nœud sur E5-2640 v4.
+ *
+ * Le gain est réel mais modeste (+4,5 % seul, +1,5 % une fois le cache de
+ * masque en place, cf. docs/autosearch_step.md §1.3 quater) : les défauts sont
+ * absorbés par le STLB — les page walks restent à 0,01 % des cycles — et
+ * largement recouverts par l'exécution dans le désordre.
+ *
+ * `madvise` n'est qu'une ceinture : un bloc aligné et dimensionné sur 2 Mio
+ * suffit là où THP est à `always`. Sur les systèmes sans `MADV_HUGEPAGE`
+ * (macOS notamment) l'appel est simplement absent et il ne reste que
+ * l'alignement — jamais un échec d'allocation.
+ *
+ * @return Bloc mis à zéro, à libérer par `free`, ou NULL.
+ */
+static void *alloc_hugepage_zeroed(size_t bytes)
+{
+	const size_t hp = 2UL * 1024 * 1024;
+	size_t rounded = ((bytes + hp - 1) / hp) * hp;
+	void *block = NULL;
+	if (posix_memalign(&block, hp, rounded) != 0)
+	{
+		return NULL;
+	}
+#ifdef MADV_HUGEPAGE
+	// Valeur de retour volontairement ignorée : l'échec (noyau sans THP,
+	// THP à `never`) n'est pas une erreur, seulement une occasion manquée.
+	(void)madvise(block, rounded, MADV_HUGEPAGE);
+#endif
+	memset(block, 0, rounded);
+	return block;
+}
+
 /**
  * @brief Construit l'index compact `{offset:16 | size:16}` d'une map compactée.
  *
@@ -468,7 +510,7 @@ static uint32_t *build_packed_index(map_big_array *map, unsigned long long nbKey
 		return NULL;
 	}
 
-	uint32_t *packed = malloc(sizeof(uint32_t) * nbKeys);
+	uint32_t *packed = alloc_hugepage_zeroed(sizeof(uint32_t) * nbKeys);
 	if (packed == NULL)
 	{
 		return NULL;
@@ -524,7 +566,7 @@ static uint64_t *build_bucket_id_mask(map_big_array *map, unsigned long long nbK
 	}
 
 	int words = ((int)maxId + 63) / 64;
-	uint64_t *masks = calloc((size_t)totalParts * (size_t)words, sizeof(uint64_t));
+	uint64_t *masks = alloc_hugepage_zeroed((size_t)totalParts * (size_t)words * sizeof(uint64_t));
 	if (masks == NULL)
 	{
 		return NULL;
