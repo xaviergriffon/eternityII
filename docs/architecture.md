@@ -63,6 +63,8 @@ est **construite une seule fois par le processus parent**, avant sa boucle de
 `fork()` ([src/app/main.c](../src/app/main.c), `handle_client`), puis publiée via
 `set_inherited_search_parts` ([src/app/etii_client.c](../src/app/etii_client.c)).
 
+`packed` (1 296 Kio) et `bucket_id_mask` (450 Kio) sont alloués par `alloc_hugepage_zeroed` (`src/core/part.c`), aligné et dimensionné sur 2 Mio : ensemble ils font 1 746 Kio, donc **une seule grande page les couvre tous les deux**. Le balayage MRV y fait des accès dispersés qui touchaient ~59 pages de 4 Kio distinctes par nœud, contre un dTLB L1 de 64 entrées. Gain modeste et mesuré (+1,5 % une fois le cache `cell_mask` en place, cf. [autosearch_step §1.3 quater](autosearch_step.md#13-quater-mrv_choose_cell--la-case-la-plus-contrainte-pas-la-suivante-du-parcours)) : les défauts de dTLB sont absorbés par le STLB et recouverts par l'exécution dans le désordre.
+
 Elle n'est **jamais réécrite** après sa construction : les processus enfants en
 héritent donc par **copy-on-write** et se partagent physiquement **une seule
 copie**, sans `mmap` partagé explicite ni changement de format. Auparavant chaque

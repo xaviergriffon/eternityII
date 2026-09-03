@@ -410,6 +410,18 @@ static map_big_array *make_dead_map(void)
     return make_uniform_map(&empty);
 }
 
+/* Résout le cache de pointeur de masque depuis `constraints`, comme
+ * `bt_mask_init` le fait au démarrage du moteur. Les tests appellent
+ * `mrv_choose_cell`/`bt_forward_check` sur des plateaux fabriqués à la main :
+ * ils re-résolvent donc à chaque appel, là où la boucle chaude maintient le
+ * cache incrémentalement. Passer par le `bt_mask_init` de production garantit
+ * qu'on teste le contrat « masque de CETTE clé », pas une ré-implémentation. */
+static void fill_mask_cache(const uint64_t *cell_mask[BT_CELLS], map_big_array *m,
+                            key_part C[ETERN_SIZE][ETERN_SIZE])
+{
+    bt_mask_init(cell_mask, m, C);
+}
+
 #if FORWARD_CHECK_K > 0
 /* Appelle bt_forward_check en dérivant le miroir des pièces utilisées du
  * plateau, au lieu de le maintenir comme le fait la boucle chaude. Le miroir
@@ -420,7 +432,9 @@ static int fc_verdict(key_part C[ETERN_SIZE][ETERN_SIZE], struct possibility_pac
 {
     uint64_t used[MRV_USED_WORDS];
     mrv_used_init(used, b);
-    return bt_forward_check(C, b, m, used, cx, cy);
+    const uint64_t *cell_mask[BT_CELLS];
+    fill_mask_cache(cell_mask, m, C);
+    return bt_forward_check(C, b, m, used, cell_mask, cx, cy);
 }
 
 /* bt_forward_check : 1 si chaque voisine VIDE de la pièce qu'on vient de
@@ -701,6 +715,87 @@ static map_big_array *build_singleton_conflict_fixture(int16_t id_a, int16_t id_
     return map;
 }
 
+/* --------------------------------------------------------------------------
+ * bt_mask_refresh : le QUATRIÈME cache en lockstep avec le plateau
+ *
+ * `cell_mask` doit à tout instant valoir la re-résolution complète depuis
+ * `constraints` — c'est sa définition. Le test le vérifie après chaque
+ * pose ET chaque retrait, sur toutes les cases de la grille.
+ *
+ * Il porte un CONTRE-CONTRÔLE : une pose sans rafraîchissement doit faire
+ * diverger le cache. Sans lui, le test passerait encore si `bt_mask_refresh`
+ * devenait un no-op — c'est-à-dire s'il ne prouvait plus rien.
+ * ------------------------------------------------------------------------ */
+TEST bt_mask_cache_stays_in_lockstep_with_constraints(void)
+{
+    static struct part parts[] = {
+        { .id = 0 },                                              /* bouchon bordure */
+        { .id = 1, .top = 0, .right = 1, .bottom = 1, .left = 0 },
+        { .id = 2, .top = 0, .right = 0, .bottom = 1, .left = 1 },
+        { .id = 3, .top = 1, .right = 0, .bottom = 0, .left = 1 },
+        { .id = 4, .top = 1, .right = 1, .bottom = 0, .left = 0 },
+        { .id = 5, .top = 0, .right = 1, .bottom = 1, .left = 1 },
+        { .id = 6, .top = 1, .right = 0, .bottom = 1, .left = 1 },
+        { .id = 7, .top = 1, .right = 1, .bottom = 0, .left = 1 },
+        { .id = 8, .top = 1, .right = 1, .bottom = 1, .left = 0 },
+        { .id = 9, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+    };
+    static struct array_part a = { .size = 10, .parts = parts };
+
+    map_big_array *map = prepare_map_part(&a);
+    ASSERT(map->bucket_id_mask != NULL); /* sinon tous les pointeurs seraient NULL */
+    const int8_t all_face = (int8_t)map->sizearrayM;
+
+    struct possibility_packet board;
+    make_empty_board(&board);
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, &a, all_face);
+
+    const uint64_t *cache[BT_CELLS];
+    const uint64_t *expected[BT_CELLS];
+    bt_mask_init(cache, map, C);
+
+    int saw_non_null = 0;
+    for (int cx = 0; cx < ETERN_SIZE; cx++) {
+        for (int cy = 0; cy < ETERN_SIZE; cy++) {
+            const struct part *piece = &parts[1 + ((cx * ETERN_SIZE + cy) % 9)];
+
+            /* Pose : constraints change pour les <=4 voisines, le cache suit. */
+            bt_propagate_place(C, cx, cy, piece);
+            bt_mask_refresh(cache, map, C, cx, cy);
+            bt_mask_init(expected, map, C);
+            for (int c = 0; c < BT_CELLS; c++) {
+                if (expected[c] != NULL) saw_non_null = 1;
+                ASSERT_EQ(expected[c], cache[c]);
+            }
+
+            /* Retrait : les mêmes voisines redeviennent non contraintes. */
+            bt_propagate_undo(C, cx, cy, all_face);
+            bt_mask_refresh(cache, map, C, cx, cy);
+            bt_mask_init(expected, map, C);
+            for (int c = 0; c < BT_CELLS; c++) {
+                ASSERT_EQ(expected[c], cache[c]);
+            }
+        }
+    }
+    ASSERT(saw_non_null); /* la fixture doit produire de vrais masques */
+
+    /* Contre-contrôle : une pose SANS rafraîchissement doit diverger. On vise
+     * une case intérieure, dont les 4 voisines existent. */
+    const int mx = ETERN_SIZE / 2, my = ETERN_SIZE / 2;
+    bt_propagate_place(C, mx, my, &parts[1]);
+    bt_mask_init(expected, map, C);
+    int diverged = 0;
+    for (int c = 0; c < BT_CELLS; c++) {
+        if (expected[c] != cache[c]) { diverged = 1; break; }
+    }
+    ASSERT(diverged);
+    bt_propagate_undo(C, mx, my, all_face);
+
+    free_bigarray(map);
+    PASS();
+}
+
 /* Cas « doit tirer » : (0,1) et (1,0) exigent chacune, comme SEUL candidat
  * libre, la même pièce (id 20) -> conflit de Hall |S|=2 -> branche morte. */
 TEST bt_forward_check_singleton_conflict_detects_matching_ids(void)
@@ -923,7 +1018,9 @@ TEST mrv_choose_cell_picks_the_most_constrained_cell(void)
     mrv_used_init(used, &board);
     bt_frontier front;
     bt_frontier_init(&front, &board);
-    int rc = mrv_choose_cell(&board, C, map, used, &front, &x, &y, &count);
+    const uint64_t *cell_mask_0[BT_CELLS];
+    fill_mask_cache(cell_mask_0, map, C);
+    int rc = mrv_choose_cell(&board, C, map, used, &front, cell_mask_0, &x, &y, &count);
 
     ASSERT_EQ_FMT(1, rc, "%d");
     ASSERT_EQ_FMT(0, (int)x, "%d");
@@ -959,7 +1056,9 @@ TEST mrv_choose_cell_detects_dead_cell(void)
     mrv_used_init(used, &board);
     bt_frontier front;
     bt_frontier_init(&front, &board);
-    int rc = mrv_choose_cell(&board, C, map, used, &front, &x, &y, &count);
+    const uint64_t *cell_mask_1[BT_CELLS];
+    fill_mask_cache(cell_mask_1, map, C);
+    int rc = mrv_choose_cell(&board, C, map, used, &front, cell_mask_1, &x, &y, &count);
 
     ASSERT_EQ_FMT(0, rc, "%d");
 
@@ -1118,7 +1217,7 @@ static int reference_choose_cell(struct possibility_packet *board,
                 }
                 continue;
             }
-            int count = mrv_free_candidates(mapParts, key, board, used);
+            int count = mrv_free_candidates(mapParts, key, board, used, map_bucket_id_mask(mapParts, key));
             if (count == 0) {
                 return 0;
             }
@@ -1183,7 +1282,9 @@ TEST mrv_choose_cell_matches_full_scan_reference(void)
         uint8_t rx = 200, ry = 200; int rcount = -99;
         uint8_t nx = 100, ny = 100; int ncount = -77;
         int rrc = reference_choose_cell(&board, C, map, used, all_face, &rx, &ry, &rcount);
-        int nrc = mrv_choose_cell(&board, C, map, used, &f, &nx, &ny, &ncount);
+        const uint64_t *cell_mask_2[BT_CELLS];
+        fill_mask_cache(cell_mask_2, map, C);
+        int nrc = mrv_choose_cell(&board, C, map, used, &f, cell_mask_2, &nx, &ny, &ncount);
 
         ASSERT_EQ_FMT(rrc, nrc, "%d");
         if (rrc == 1) {
@@ -1238,7 +1339,9 @@ TEST mrv_choose_cell_breaks_ties_by_constrained_sides(void)
     ASSERT_EQ_FMT(4, (int)f.nconstr[BT_CELL_POS(ix, iy)], "%d");
 
     uint8_t x = 200, y = 200; int count = -99;
-    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, &x, &y, &count), "%d");
+    const uint64_t *cell_mask_3[BT_CELLS];
+    fill_mask_cache(cell_mask_3, map, C);
+    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, cell_mask_3, &x, &y, &count), "%d");
     ASSERT_EQ_FMT(ix, (int)x, "%d");
     ASSERT_EQ_FMT(iy, (int)y, "%d");
 
@@ -1247,7 +1350,9 @@ TEST mrv_choose_cell_breaks_ties_by_constrained_sides(void)
     board.grid[ix][iy] = 1;
     bt_init_constraints(C, &board, make_filler_part(), all_face);
     bt_frontier_init(&f, &board);
-    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, &x, &y, &count), "%d");
+    const uint64_t *cell_mask_4[BT_CELLS];
+    fill_mask_cache(cell_mask_4, map, C);
+    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, cell_mask_4, &x, &y, &count), "%d");
     ASSERT_EQ_FMT(0, (int)x, "%d");
     ASSERT_EQ_FMT(0, (int)y, "%d");
 
@@ -1285,7 +1390,9 @@ TEST mrv_choose_cell_full_board_and_unconstrained_fallback(void)
     /* (a) plateau plein */
     bt_frontier full_f;
     bt_frontier_init(&full_f, &board);
-    ASSERT_EQ_FMT(0, mrv_choose_cell(&board, C, map, used, &full_f, &x, &y, &count), "%d");
+    const uint64_t *cell_mask_5[BT_CELLS];
+    fill_mask_cache(cell_mask_5, map, C);
+    ASSERT_EQ_FMT(0, mrv_choose_cell(&board, C, map, used, &full_f, cell_mask_5, &x, &y, &count), "%d");
 
     /* (b) une case vide, mais déclarée non contrainte */
     const int hx = ETERN_SIZE / 2, hy = ETERN_SIZE / 2;
@@ -1295,7 +1402,9 @@ TEST mrv_choose_cell_full_board_and_unconstrained_fallback(void)
     for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
         f.constrained[w] = 0;
     }
-    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, &x, &y, &count), "%d");
+    const uint64_t *cell_mask_6[BT_CELLS];
+    fill_mask_cache(cell_mask_6, map, C);
+    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, cell_mask_6, &x, &y, &count), "%d");
     ASSERT_EQ_FMT(hx, (int)x, "%d");
     ASSERT_EQ_FMT(hy, (int)y, "%d");
     ASSERT_EQ_FMT(POSSIBILITY_MIN_CANDIDATS_UNKNOWN, count, "%d");
@@ -3648,6 +3757,7 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_forward_check_inspects_at_most_geometric_neighbors);
     RUN_TEST(bt_forward_check_same_verdict_with_and_without_packed_index);
     RUN_TEST(bt_forward_check_same_verdict_with_and_without_id_mask);
+    RUN_TEST(bt_mask_cache_stays_in_lockstep_with_constraints);
     RUN_TEST(bt_forward_check_singleton_conflict_detects_matching_ids);
     RUN_TEST(bt_forward_check_singleton_conflict_ignores_distinct_ids);
     RUN_TEST(bt_forward_check_singleton_conflict_disabled_by_default);

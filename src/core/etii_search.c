@@ -235,6 +235,58 @@ static inline void bt_frontier_undo(bt_frontier *f, int cx, int cy)
     if (cx > 0)              bt_frontier_release(f, cx - 1, cy);
 }
 
+/* ======================================================================
+ * Cache du pointeur de masque par case
+ *
+ * `map_bucket_id_mask` n'est pas une simple lecture : elle recalcule l'index
+ * 4D de la clé (3 `imul` + 3 `add`), lit `packed[idx]` — un accès dispersé
+ * dans 1,3 Mio — puis en dérive l'adresse du masque. Le balayage MRV
+ * l'appelait une fois par case de frontière, soit 54,5 fois par nœud.
+ *
+ * Or la clé d'une case ne change QUE lorsqu'une de ses voisines est posée ou
+ * retirée (`bt_propagate_place`/`_undo` n'écrivent que les ≤4 voisines). Le
+ * pointeur est donc mémorisé par case et rafraîchi aux mêmes endroits, ce qui
+ * ramène le balayage à ~13 résolutions par nœud. Mesuré ×1,22 en nœuds/s à
+ * arbre exploré identique — cf. docs/autosearch_step.md §1.3 quater.
+ *
+ * QUATRIÈME cache maintenu en lockstep avec le plateau, après `constraints`,
+ * `used` et `bt_frontier` : `bt_mask_refresh` s'appelle À CÔTÉ de
+ * `bt_propagate_place`/`_undo`, jamais depuis eux, exactement comme
+ * `bt_frontier_place`/`_undo`. Un site de placement qui l'oublierait est
+ * détecté par la re-dérivation des builds DEBUG_CHECK_POSSIBILITY.
+ *
+ * NULL est une valeur NORMALE (compartiment vide, index absent, map bâtie à
+ * la main) : les lecteurs retombent sur le comptage par parcours.
+ * ====================================================================== */
+
+/** @brief Résout le masque de chaque case depuis `constraints`. */
+static void bt_mask_init(const uint64_t *cell_mask[BT_CELLS], map_big_array *map,
+                         key_part constraints[ETERN_SIZE][ETERN_SIZE])
+{
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            cell_mask[BT_CELL_POS(x, y)] = map_bucket_id_mask(map, &constraints[x][y]);
+        }
+    }
+}
+
+/**
+ * @brief Re-résout le masque des ≤4 voisines de (cx, cy).
+ *
+ * Même énumération que `bt_propagate_place`/`_undo` (haut, droite, bas,
+ * gauche) : ce sont exactement les cases dont la clé vient de changer. La
+ * case (cx, cy) elle-même n'est pas touchée — sa propre clé n'est modifiée
+ * par aucune des deux.
+ */
+static inline void bt_mask_refresh(const uint64_t *cell_mask[BT_CELLS], map_big_array *map,
+                                   key_part constraints[ETERN_SIZE][ETERN_SIZE], int cx, int cy)
+{
+    if (cy > 0)              cell_mask[BT_CELL_POS(cx, cy - 1)] = map_bucket_id_mask(map, &constraints[cx][cy - 1]);
+    if (cx < ETERN_SIZE - 1) cell_mask[BT_CELL_POS(cx + 1, cy)] = map_bucket_id_mask(map, &constraints[cx + 1][cy]);
+    if (cy < ETERN_SIZE - 1) cell_mask[BT_CELL_POS(cx, cy + 1)] = map_bucket_id_mask(map, &constraints[cx][cy + 1]);
+    if (cx > 0)              cell_mask[BT_CELL_POS(cx - 1, cy)] = map_bucket_id_mask(map, &constraints[cx - 1][cy]);
+}
+
 /**
  * @brief Propage les couleurs d'une pièce placée en (cx, cy) vers les clés de ses voisines.
  * @param constraints Cache de contraintes.
@@ -304,6 +356,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
                             struct possibility_packet *board,
                             map_big_array *mapParts,
                             const uint64_t used[MRV_USED_WORDS],
+                            const uint64_t *cell_mask[BT_CELLS],
                             int cx, int cy)
 {
     // Même ordre que bt_propagate_place/undo (haut, droite, bas, gauche) :
@@ -346,7 +399,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         // ne sert pas la variante `singleton_conflict_check`, qui a besoin de
         // COMPTER (cf. la doc ci-dessus).
         if (!singleton_conflict_check) {
-            const uint64_t *id_mask = map_bucket_id_mask(mapParts, &constraints[x][y]);
+            const uint64_t *id_mask = cell_mask[BT_CELL_POS(x, y)];
             if (id_mask != NULL && mapParts->id_mask_words <= MRV_USED_WORDS) {
                 if (!map_mask_any_free(id_mask, mapParts->id_mask_words, used)) {
                     // case morte : aucune pièce candidate libre
@@ -913,17 +966,18 @@ static inline void mrv_used_clear(uint64_t used[MRV_USED_WORDS], int position)
  * la taille du compartiment, alors que le prototype de mesure parcourait
  * toutes ses entrées (jusqu'à plusieurs centaines).
  *
- * Repli (map bâtie à la main dans un test, index absent, ou masque plus
- * large que le miroir) : comptage par parcours, résultat identique — les
+ * Repli (`mask` NULL — map bâtie à la main dans un test, index absent,
+ * compartiment vide — ou masque plus large que le miroir) : comptage par
+ * parcours, résultat identique — les
  * deux chemins comptent des identifiants distincts, jamais des entrées.
  *
  * @return Nombre de pièces distinctes candidates et libres (0 = case morte).
  */
 static inline int mrv_free_candidates(const map_big_array *map, const key_part *key,
                                       struct possibility_packet *board,
-                                      const uint64_t used[MRV_USED_WORDS])
+                                      const uint64_t used[MRV_USED_WORDS],
+                                      const uint64_t *mask)
 {
-    const uint64_t *mask = map_bucket_id_mask(map, key);
     if (mask != NULL && map->id_mask_words <= MRV_USED_WORDS) {
         return map_mask_free_count(mask, map->id_mask_words, used);
     }
@@ -978,6 +1032,7 @@ static int mrv_choose_cell(struct possibility_packet *board,
                            map_big_array *mapParts,
                            const uint64_t used[MRV_USED_WORDS],
                            const bt_frontier *front,
+                           const uint64_t *cell_mask[BT_CELLS],
                            uint8_t *out_x, uint8_t *out_y, int *out_count)
 {
     int best_count = -1;
@@ -991,7 +1046,7 @@ static int mrv_choose_cell(struct possibility_packet *board,
             bits &= bits - 1;
             int x = pos / ETERN_SIZE;
             int y = pos % ETERN_SIZE;
-            int count = mrv_free_candidates(mapParts, &constraints[x][y], board, used);
+            int count = mrv_free_candidates(mapParts, &constraints[x][y], board, used, cell_mask[pos]);
             if (count == 0) {
                 return 0; // sous-arbre mort
             }
@@ -1083,6 +1138,11 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
     bt_frontier frontier;
     bt_frontier_init(&frontier, &board);
 
+    // Quatrième cache en lockstep (cf. bt_mask_init) : le pointeur de masque
+    // de chaque case, rafraîchi à côté de bt_propagate_place/_undo.
+    const uint64_t *cell_mask[BT_CELLS];
+    bt_mask_init(cell_mask, client->map_part, constraints);
+
     bt_level stack[ETERN_PARTS];
     int top = -1;
     // Le compteur de progression est `placed_count` (pas la profondeur de
@@ -1166,7 +1226,7 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
 
         uint8_t x, y;
         int mrv_count;
-        if (mrv_choose_cell(&board, constraints, client->map_part, used, &frontier, &x, &y, &mrv_count)) {
+        if (mrv_choose_cell(&board, constraints, client->map_part, used, &frontier, cell_mask, &x, &y, &mrv_count)) {
             stack[top].x = x;
             stack[top].y = y;
             stack[top].mrv_score = (int16_t)mrv_count;
@@ -1194,6 +1254,7 @@ backtrack:;
                 mrv_used_clear(used, lvl->placed_pos);
                 bt_propagate_undo(constraints, cx, cy, all_face);
                 bt_frontier_undo(&frontier, cx, cy);
+                bt_mask_refresh(cell_mask, client->map_part, constraints, cx, cy);
                 lvl->placed_pos = -1;
                 placed_count--;
             }
@@ -1213,16 +1274,18 @@ backtrack:;
                     mrv_used_set(used, position);
                     bt_propagate_place(constraints, cx, cy, &search->parts[s]);
                     bt_frontier_place(&frontier, cx, cy);
+                    bt_mask_refresh(cell_mask, client->map_part, constraints, cx, cy);
                     placed_count++;
 #if FORWARD_CHECK_K > 0
                     if (placed_count < ETERN_PARTS) {
                         __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
-                        if (!bt_forward_check(constraints, &board, client->map_part, used, cx, cy)) {
+                        if (!bt_forward_check(constraints, &board, client->map_part, used, cell_mask, cx, cy)) {
                             board.grid[cx][cy] = -2;
                             BOARD_SET_FACE(&board, position, 0);
                             mrv_used_clear(used, position);
                             bt_propagate_undo(constraints, cx, cy, all_face);
                             bt_frontier_undo(&frontier, cx, cy);
+                            bt_mask_refresh(cell_mask, client->map_part, constraints, cx, cy);
                             placed_count--;
                             __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
                             continue;
@@ -1285,6 +1348,17 @@ backtrack:;
                 if (expected_front.empty[w] != frontier.empty[w]
                     || expected_front.constrained[w] != frontier.constrained[w]) {
                     log_error("frontière MRV désynchronisée (mot %i)\n", w);
+                }
+            }
+            // Idem pour le cache de masque : bt_mask_refresh est appelé À CÔTÉ
+            // de bt_propagate_place/_undo, un site de placement qui l'oublierait
+            // ne se verrait qu'ici. Comparé à une re-résolution complète depuis
+            // `constraints`, qui est la définition même du cache.
+            const uint64_t *expected_mask[BT_CELLS];
+            bt_mask_init(expected_mask, client->map_part, constraints);
+            for (int c = 0; c < BT_CELLS; c++) {
+                if (expected_mask[c] != cell_mask[c]) {
+                    log_error("cache de masque MRV désynchronisé (case %i)\n", c);
                 }
             }
         }
