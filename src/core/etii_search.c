@@ -275,6 +275,187 @@ static inline void bt_frontier_undo(bt_frontier *f, int cx, int cy)
 }
 
 /* ======================================================================
+ * Instrumentation §4.9 — zones d'angle entourées mais incomplètes
+ *
+ * §4.9 de docs/conception/elagage_recherche.md écarte la famille « table de
+ * région / pattern database » sur un verrou de DÉCLENCHEMENT, pas de coût :
+ * une table ne renseigne que si la frontière d'une zone est connue AVANT que
+ * la zone soit remplie, et l'ordre fixe `directions[]` remplit chaque zone
+ * d'angle 20 à 75 niveaux avant que sa frontière existe. La section laisse
+ * une seule condition de réouverture : « un ordre de parcours où une zone peut
+ * être entourée avant d'être remplie — structurellement possible en MRV, où
+ * l'ordre est dynamique ». C'est ce que ce compteur mesure, et rien d'autre.
+ *
+ * Zone d'angle : le bloc 3×3 qui va du coin jusqu'à la case de l'indice
+ * officiel (208/255/181/249 tombent exactement sur la case opposée au coin).
+ * Anneau : les 6 cases orthogonalement adjacentes à la zone et hors d'elle —
+ * exactement les porteuses des 6 couleurs sortantes de la mesure 2.
+ *
+ * Coût : ZÉRO en production. Masques et prédicat sont toujours compilés (donc
+ * toujours couverts par les tests), mais l'appel par nœud est derrière
+ * `ETII_STAT_CORNER_ZONES`, car la boucle chaude est limitée par le débit
+ * d'émission (IPC ≈ 3,15, docs/autosearch_step.md §1.3 quater) : instrumenter
+ * inconditionnellement perturberait le débit que le banc mesure.
+ * ====================================================================== */
+
+/** @brief Côté de la zone d'angle (du coin jusqu'à la case de l'indice). */
+#define CZ_ZONE_SIDE 3
+
+/** @brief Masques de bits d'une zone d'angle et de son anneau extérieur. */
+typedef struct {
+    /** Les `CZ_ZONE_SIDE`² cases de la zone. */
+    uint64_t zone[BT_FRONTIER_WORDS];
+    /** Les cases orthogonalement adjacentes à la zone, hors zone et dans la grille. */
+    uint64_t ring[BT_FRONTIER_WORDS];
+} cz_masks;
+
+/** @brief Lève le bit de la case (x,y) dans un masque de cases. */
+static inline void cz_mask_set(uint64_t m[BT_FRONTIER_WORDS], int x, int y)
+{
+    int pos = BT_CELL_POS(x, y);
+    m[pos / 64] |= (uint64_t)1 << (pos % 64);
+}
+
+/**
+ * @brief Construit les masques des 4 zones d'angle et de leurs anneaux.
+ *
+ * Générique en `ETERN_SIZE` : sur le puzzle 256 les 4 zones sont disjointes et
+ * chaque anneau compte 6 cases ; sur un plateau plus petit que
+ * `2 * CZ_ZONE_SIDE` les zones se recouvrent et la mesure n'a pas de sens —
+ * d'où le refus à la compilation ci-dessous quand l'instrumentation est
+ * demandée sur un tel plateau.
+ *
+ * `unused` : toujours COMPILÉE (donc toujours couverte par les tests, qui
+ * incluent cette unité de compilation), mais appelée uniquement sous
+ * `ETII_STAT_CORNER_ZONES` — sans l'attribut, le build de production
+ * `WERROR=1` échouerait sur -Wunused-function. Même raison pour
+ * `cz_surrounded_and_incomplete`.
+ */
+__attribute__((unused))
+static void cz_build_masks(cz_masks out[CZ_CORNERS])
+{
+    const int side = (ETERN_SIZE < CZ_ZONE_SIDE) ? ETERN_SIZE : CZ_ZONE_SIDE;
+    const int hi = ETERN_SIZE - side;
+    const int bx[CZ_CORNERS] = { 0, hi, 0, hi };
+    const int by[CZ_CORNERS] = { 0, 0, hi, hi };
+    // Même énumération des voisines que bt_propagate_place (haut, droite, bas, gauche).
+    static const int dx[4] = { 0, 1, 0, -1 };
+    static const int dy[4] = { -1, 0, 1, 0 };
+
+    memset(out, 0, sizeof(cz_masks) * CZ_CORNERS);
+    for (int k = 0; k < CZ_CORNERS; k++) {
+        for (int x = bx[k]; x < bx[k] + side; x++) {
+            for (int y = by[k]; y < by[k] + side; y++) {
+                cz_mask_set(out[k].zone, x, y);
+            }
+        }
+        for (int x = bx[k]; x < bx[k] + side; x++) {
+            for (int y = by[k]; y < by[k] + side; y++) {
+                for (int d = 0; d < 4; d++) {
+                    int nx = x + dx[d];
+                    int ny = y + dy[d];
+                    if (nx < 0 || ny < 0 || nx >= ETERN_SIZE || ny >= ETERN_SIZE) {
+                        continue;
+                    }
+                    if (nx >= bx[k] && nx < bx[k] + side
+                        && ny >= by[k] && ny < by[k] + side) {
+                        continue;
+                    }
+                    cz_mask_set(out[k].ring, nx, ny);
+                }
+            }
+        }
+    }
+}
+
+/**
+ * @brief La zone est-elle entièrement entourée alors qu'elle est incomplète ?
+ *
+ * Seule situation dans laquelle une table de région pourrait être interrogée
+ * utilement (§4.9, mesure 3a : tester une zone DÉJÀ remplie n'apporte rien,
+ * la table la contient par construction).
+ *
+ * Retourne le NOMBRE de trous plutôt qu'un booléen : à un seul trou la table
+ * de région dégénère en la recherche par clé 4D que le moteur fait déjà (cf.
+ * `cz_holes_hist`), donc le verdict de §4.9 se joue sur cette valeur.
+ *
+ * @param empty Masque des cases vides (`bt_frontier.empty`, tenu en lockstep).
+ * @param m     Masques de la zone visée.
+ * @return Nombre de cases vides de la zone si l'anneau est entièrement posé,
+ *         0 sinon (anneau incomplet, ou zone pleine).
+ */
+__attribute__((unused))
+static inline int cz_surrounded_and_incomplete(const uint64_t empty[BT_FRONTIER_WORDS],
+                                               const cz_masks *m)
+{
+    uint64_t ring_empty = 0;
+    int holes = 0;
+    for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+        ring_empty |= empty[w] & m->ring[w];
+        holes += __builtin_popcountll(empty[w] & m->zone[w]);
+    }
+    return (ring_empty == 0) ? holes : 0;
+}
+
+#ifdef ETII_STAT_CORNER_ZONES
+#if ETERN_SIZE < 2 * CZ_ZONE_SIDE
+#error "ETII_STAT_CORNER_ZONES exige ETERN_SIZE >= 6 (zones d'angle disjointes)"
+#endif
+
+/** @brief Relève les 4 zones pour un nœud (mesure §4.9). */
+/** @brief Sous-arbre déclencheur encore ouvert (voir `cz_subtree_nodes`). */
+typedef struct {
+    int active;                    /**< 1 si un déclenchement est ouvert. */
+    int top;                       /**< Niveau de pile du nœud déclencheur. */
+    unsigned long long at_node;    /**< Valeur de `nodes` à ce moment-là. */
+} cz_pending;
+
+/**
+ * @brief Ferme le sous-arbre ouvert dès que la recherche remonte au-dessus.
+ *
+ * Appelée avant `cz_observe` sur chaque nœud : tant que `top` reste STRICTEMENT
+ * sous le niveau du déclencheur, on est dans son sous-arbre ; à l'égalité on
+ * est revenu sur le nœud lui-même (candidat suivant), donc chez un frère.
+ */
+static inline void cz_close_pending(cz_pending *p, int top, unsigned long long nodes)
+{
+    if (p->active && top <= p->top) {
+        cz_subtree_nodes += nodes - p->at_node;
+        p->active = 0;
+    }
+}
+
+static inline void cz_observe(const uint64_t empty[BT_FRONTIER_WORDS],
+                              const cz_masks masks[CZ_CORNERS],
+                              int placed_count,
+                              cz_pending *pending,
+                              int top,
+                              unsigned long long nodes)
+{
+    cz_nodes++;
+    for (int k = 0; k < CZ_CORNERS; k++) {
+        int holes = cz_surrounded_and_incomplete(empty, &masks[k]);
+        if (holes > 0) {
+            cz_surrounded_incomplete[k]++;
+            cz_holes_hist[holes]++;
+            cz_depth_sum += (unsigned long long)placed_count;
+            if (cz_depth_min == 0 || (unsigned long long)placed_count < cz_depth_min) {
+                cz_depth_min = (unsigned long long)placed_count;
+            }
+            if ((unsigned long long)placed_count > cz_depth_max) {
+                cz_depth_max = (unsigned long long)placed_count;
+            }
+            if (!pending->active) {
+                pending->active = 1;
+                pending->top = top;
+                pending->at_node = nodes;
+            }
+        }
+    }
+}
+#endif // ETII_STAT_CORNER_ZONES
+
+/* ======================================================================
  * Cache du pointeur de masque par case
  *
  * `map_bucket_id_mask` n'est pas une simple lecture : elle recalcule l'index
@@ -1413,6 +1594,14 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
     bt_frontier frontier;
     bt_frontier_init(&frontier, &board);
 
+#ifdef ETII_STAT_CORNER_ZONES
+    // Masques des 4 zones d'angle : constants, construits une fois par racine
+    // (hors boucle chaude). Mesure §4.9 uniquement, cf. cz_build_masks.
+    cz_masks cz[CZ_CORNERS];
+    cz_build_masks(cz);
+    cz_pending cz_open = { 0, 0, 0 };
+#endif
+
     // Quatrième cache en lockstep (cf. bt_mask_init) : le pointeur de masque
     // de chaque case, rafraîchi à côté de bt_propagate_place/_undo.
     const uint64_t *cell_mask[BT_CELLS];
@@ -1599,6 +1788,10 @@ backtrack:;
 
         counters[client->compteur]++;
         nodes++;
+#ifdef ETII_STAT_CORNER_ZONES
+        cz_close_pending(&cz_open, top, nodes);
+        cz_observe(frontier.empty, cz, placed_count, &cz_open, top, nodes);
+#endif
         // `alloc` porte le NOMBRE de pièces posées (définition canonique
         // depuis VERSION 13, cf. possibility.h), jamais un curseur de
         // parcours : tout paquet délégué a `alloc` fixé par recomptage
@@ -1817,6 +2010,61 @@ static int autosearch_step(client_possibility_t *client,
         return 0;
     }
     return 1;
+}
+
+
+/**
+ * @brief Rapporte la mesure §4.9 des zones d'angle, une fois la recherche finie.
+ *
+ * Sans `ETII_STAT_CORNER_ZONES`, corps vide : l'appelant n'a pas à savoir si
+ * l'instrumentation est compilée. Cf. cz_observe / cz_surrounded_and_incomplete
+ * et docs/conception/elagage_recherche.md §4.9.
+ */
+void corner_zone_report(void)
+{
+#ifdef ETII_STAT_CORNER_ZONES
+    unsigned long long total = 0;
+    for (int k = 0; k < CZ_CORNERS; k++) {
+        total += cz_surrounded_incomplete[k];
+    }
+    // UN SEUL log_info : le rapport tombe en fin de processus, au moment où le
+    // fork se démonte — une série d'appels s'y fait tronquer (seule la
+    // première ligne survivait). Le bloc tient largement sous LOG_LINE_MAX.
+    char buf[1024];
+    int n = snprintf(buf, sizeof(buf),
+                     "mesure zones d'angle (§4.9) : %llu nœuds inspectés\n", cz_nodes);
+    for (int k = 0; k < CZ_CORNERS && n > 0 && n < (int)sizeof(buf); k++) {
+        n += snprintf(buf + n, sizeof(buf) - (size_t)n,
+                      "  angle %d : %llu nœud(s) « entourée mais incomplète »\n",
+                      k, cz_surrounded_incomplete[k]);
+    }
+    if (n > 0 && n < (int)sizeof(buf)) {
+        n += snprintf(buf + n, sizeof(buf) - (size_t)n,
+                      "  total : %llu (%.9f %% des nœuds)\n", total,
+                      cz_nodes > 0 ? (100.0 * (double)total / (double)cz_nodes) : 0.0);
+    }
+    for (int h = 1; h <= CZ_ZONE_CELLS && n > 0 && n < (int)sizeof(buf); h++) {
+        if (cz_holes_hist[h] > 0) {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n,
+                          "  %d trou(s) dans la zone : %llu\n", h, cz_holes_hist[h]);
+        }
+    }
+    if (n > 0 && n < (int)sizeof(buf)) {
+        n += snprintf(buf + n, sizeof(buf) - (size_t)n,
+                      "  nœuds sous les déclencheurs : %llu (%.9f %% des nœuds) — "
+                      "borne SUPÉRIEURE de l'économie possible\n",
+                      cz_subtree_nodes,
+                      cz_nodes > 0 ? (100.0 * (double)cz_subtree_nodes / (double)cz_nodes) : 0.0);
+    }
+    if (n > 0 && n < (int)sizeof(buf)) {
+        snprintf(buf + n, sizeof(buf) - (size_t)n,
+                 "  profondeur des déclenchements : min %llu / moy %.1f / max %llu\n",
+                 cz_depth_min,
+                 total > 0 ? (double)cz_depth_sum / (double)total : 0.0,
+                 cz_depth_max);
+    }
+    log_info("%s", buf);
+#endif
 }
 
 /**

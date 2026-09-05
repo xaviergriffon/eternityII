@@ -40,6 +40,16 @@ volatile unsigned long long fc_singleton_conflict = 0;
 
 volatile unsigned long long fc_cells_studied = 0;
 
+#ifdef ETII_STAT_CORNER_ZONES
+volatile unsigned long long cz_surrounded_incomplete[CZ_CORNERS] = {0};
+volatile unsigned long long cz_nodes = 0;
+volatile unsigned long long cz_holes_hist[CZ_ZONE_CELLS + 1] = {0};
+volatile unsigned long long cz_depth_sum = 0;
+volatile unsigned long long cz_depth_min = 0;
+volatile unsigned long long cz_depth_max = 0;
+volatile unsigned long long cz_subtree_nodes = 0;
+#endif
+
 int stop_on_solution = 0;
 
 int pruner_batch_size = PRUNER_BATCH_SIZE;

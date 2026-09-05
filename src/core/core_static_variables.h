@@ -309,6 +309,77 @@ extern uint8_t diry[ETERN_PARTS];
 extern volatile unsigned long long fc_cells_studied;
 
 /**
+ * @brief Nombre d'angles du plateau (mesure §4.9).
+ *
+ * Défini inconditionnellement : les masques et le prédicat de zone d'angle
+ * sont toujours compilés (donc toujours testés), seuls les compteurs et leur
+ * incrément dans la boucle chaude sont derrière `ETII_STAT_CORNER_ZONES`.
+ */
+#define CZ_CORNERS 4
+
+#ifdef ETII_STAT_CORNER_ZONES
+/**
+ * @brief Instrumentation §4.9 : nœuds où une zone d'angle 3×3 est entièrement
+ *        entourée alors qu'elle est encore incomplète.
+ *
+ * `cz_surrounded_incomplete[k]` compte, pour l'angle `k`, les nœuds du moteur
+ * MRV où les 6 cases de l'anneau extérieur de la zone 3×3 sont TOUTES posées
+ * alors qu'au moins une des 9 cases de la zone est encore vide. C'est la
+ * seule situation dans laquelle une table de région (« pattern database »)
+ * pourrait être interrogée utilement — cf.
+ * docs/conception/elagage_recherche.md §4.9, mesure 3 : sous l'ordre fixe
+ * `directions[]` elle est impossible par construction, mais l'ordre MRV étant
+ * dynamique, seule la mesure peut trancher.
+ *
+ * Compteurs de MESURE, jamais compilés en production : tout le mécanisme est
+ * derrière `ETII_STAT_CORNER_ZONES` parce que la boucle chaude est limitée par
+ * le débit d'émission (IPC ≈ 3,15, cf. docs/autosearch_step.md §1.3 quater) —
+ * une instrumentation inconditionnelle perturberait le débit qu'elle mesure.
+ */
+extern volatile unsigned long long cz_surrounded_incomplete[CZ_CORNERS];
+
+/**
+ * @brief Dénominateur de `cz_surrounded_incomplete` : nœuds MRV inspectés.
+ */
+extern volatile unsigned long long cz_nodes;
+
+/**
+ * @brief Nombre de cases d'une zone d'angle 3×3 (borne du histogramme de trous).
+ */
+#define CZ_ZONE_CELLS 9
+
+/**
+ * @brief Répartition du nombre de cases encore vides quand la zone se
+ *        retrouve entourée.
+ *
+ * Indicateur décisif, et pas un simple détail : à UN seul trou, la « table de
+ * région » dégénère exactement en la recherche par clé 4D que le moteur fait
+ * déjà à chaque nœud — elle n'apporte alors rigoureusement aucun pouvoir
+ * d'élagage supplémentaire. Seuls les déclenchements à ≥ 2 trous comptent.
+ */
+extern volatile unsigned long long cz_holes_hist[CZ_ZONE_CELLS + 1];
+
+/** @brief Somme des profondeurs (pièces posées) des déclenchements. */
+extern volatile unsigned long long cz_depth_sum;
+/** @brief Profondeur minimale observée sur un déclenchement (0 si aucun). */
+extern volatile unsigned long long cz_depth_min;
+/** @brief Profondeur maximale observée sur un déclenchement. */
+extern volatile unsigned long long cz_depth_max;
+
+/**
+ * @brief Nœuds explorés SOUS les nœuds déclencheurs (union des sous-arbres).
+ *
+ * Borne supérieure de ce qu'une table de région pourrait économiser : même en
+ * supposant qu'elle réfute 100 % des déclenchements, elle ne peut pas faire
+ * l'économie de plus que ces nœuds-là. À comparer au coût du seul DÉTECTEUR,
+ * mesuré indépendamment (cf. §4.9). Les déclenchements imbriqués ne sont
+ * comptés qu'une fois : un déclenchement survenu alors qu'un autre est encore
+ * ouvert est déjà inclus dans le sous-arbre de celui-ci.
+ */
+extern volatile unsigned long long cz_subtree_nodes;
+#endif // ETII_STAT_CORNER_ZONES
+
+/**
  * @brief 1 si l'on s'arrête à la première solution (`--stop-on-solution`).
  *
  * Défaut 0 : on continue après une solution, le serveur reste en service. À

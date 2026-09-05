@@ -4053,6 +4053,119 @@ TEST autoprune_stops_immediately_on_request_stop(void)
     PASS();
 }
 
+
+/* ----------------------------------------------------------------------
+ * Instrumentation §4.9 : zones d'angle entourées mais incomplètes
+ *
+ * Masques et prédicat sont TOUJOURS compilés (seul l'appel par nœud est
+ * derrière ETII_STAT_CORNER_ZONES), donc toujours testés. La géométrie n'a de
+ * sens qu'à partir d'un plateau 6×6 — en deçà les 4 zones se recouvrent —
+ * d'où la garde sur ETERN_SIZE.
+ * -------------------------------------------------------------------- */
+#if ETERN_SIZE >= 2 * CZ_ZONE_SIDE
+
+/** Lève le bit (x,y) dans un masque de cases vides, comme bt_frontier.empty. */
+static void cz_test_set_empty(uint64_t empty[BT_FRONTIER_WORDS], int x, int y)
+{
+    int pos = BT_CELL_POS(x, y);
+    empty[pos / 64] |= (uint64_t)1 << (pos % 64);
+}
+
+static int cz_test_bit(const uint64_t m[BT_FRONTIER_WORDS], int x, int y)
+{
+    int pos = BT_CELL_POS(x, y);
+    return (m[pos / 64] >> (pos % 64)) & 1u;
+}
+
+static int cz_test_popcount(const uint64_t m[BT_FRONTIER_WORDS])
+{
+    int n = 0;
+    for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+        n += __builtin_popcountll(m[w]);
+    }
+    return n;
+}
+
+TEST cz_masks_are_nine_cells_and_a_six_cell_ring(void)
+{
+    cz_masks m[CZ_CORNERS];
+    cz_build_masks(m);
+
+    for (int k = 0; k < CZ_CORNERS; k++) {
+        ASSERT_EQ_FMT(CZ_ZONE_SIDE * CZ_ZONE_SIDE, cz_test_popcount(m[k].zone), "%d");
+        /* Deux côtés de la zone sont sur le bord du plateau : l'anneau ne
+         * compte donc que 2 * CZ_ZONE_SIDE cases, porteuses des 6 couleurs
+         * sortantes de la mesure 2 de §4.9. */
+        ASSERT_EQ_FMT(2 * CZ_ZONE_SIDE, cz_test_popcount(m[k].ring), "%d");
+        /* Zone et anneau sont disjoints. */
+        for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+            ASSERT_EQ_FMT((uint64_t)0, m[k].zone[w] & m[k].ring[w], "%llu");
+        }
+    }
+
+    /* Angle 0 : géométrie explicite, pour verrouiller l'orientation. */
+    for (int x = 0; x < CZ_ZONE_SIDE; x++) {
+        for (int y = 0; y < CZ_ZONE_SIDE; y++) {
+            ASSERT(cz_test_bit(m[0].zone, x, y));
+        }
+    }
+    for (int i = 0; i < CZ_ZONE_SIDE; i++) {
+        ASSERT(cz_test_bit(m[0].ring, CZ_ZONE_SIDE, i));
+        ASSERT(cz_test_bit(m[0].ring, i, CZ_ZONE_SIDE));
+    }
+    PASS();
+}
+
+TEST cz_predicate_needs_a_full_ring_and_a_holed_zone(void)
+{
+    cz_masks m[CZ_CORNERS];
+    cz_build_masks(m);
+
+    uint64_t empty[BT_FRONTIER_WORDS];
+
+    /* 1. Zone pleine, anneau plein : rien à interroger — la table
+     *    contiendrait la zone par construction (§4.9, mesure 3a). */
+    memset(empty, 0, sizeof(empty));
+    ASSERT_EQ_FMT(0, cz_surrounded_and_incomplete(empty, &m[0]), "%d");
+
+    /* 2. Anneau plein, deux trous dans la zone : c'est LE cas mesuré, et le
+     *    prédicat rend le nombre de trous (1 seul trou = dégénérescence en la
+     *    recherche par clé 4D que le moteur fait déjà). */
+    memset(empty, 0, sizeof(empty));
+    cz_test_set_empty(empty, 0, 0);
+    cz_test_set_empty(empty, 1, 2);
+    ASSERT_EQ_FMT(2, cz_surrounded_and_incomplete(empty, &m[0]), "%d");
+
+    /* 3. Contre-épreuve : une seule case d'anneau vide suffit à annuler le
+     *    déclenchement, zone trouée ou non. Sans quoi le compteur mesurerait
+     *    autre chose que « entourée ». */
+    cz_test_set_empty(empty, CZ_ZONE_SIDE, 0);
+    ASSERT_EQ_FMT(0, cz_surrounded_and_incomplete(empty, &m[0]), "%d");
+
+    /* 4. Les cases vides HORS zone et hors anneau n'ont aucun effet. */
+    memset(empty, 0, sizeof(empty));
+    cz_test_set_empty(empty, 0, 1);
+    cz_test_set_empty(empty, ETERN_SIZE - 1, ETERN_SIZE - 1);
+    ASSERT_EQ_FMT(1, cz_surrounded_and_incomplete(empty, &m[0]), "%d");
+    PASS();
+}
+
+TEST cz_zones_are_disjoint_across_the_four_corners(void)
+{
+    cz_masks m[CZ_CORNERS];
+    cz_build_masks(m);
+    for (int a = 0; a < CZ_CORNERS; a++) {
+        for (int b = a + 1; b < CZ_CORNERS; b++) {
+            for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+                ASSERT_EQ_FMT((uint64_t)0, m[a].zone[w] & m[b].zone[w], "%llu");
+            }
+        }
+    }
+    PASS();
+}
+
+#endif /* ETERN_SIZE >= 2 * CZ_ZONE_SIDE */
+
 SUITE(etii_search_suite)
 {
     RUN_TEST(delegate_noop_below_threshold);
@@ -4075,6 +4188,11 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_forward_check_singleton_conflict_detects_matching_ids);
     RUN_TEST(bt_forward_check_singleton_conflict_ignores_distinct_ids);
     RUN_TEST(bt_forward_check_singleton_conflict_disabled_by_default);
+#endif
+#if ETERN_SIZE >= 2 * CZ_ZONE_SIDE
+    RUN_TEST(cz_masks_are_nine_cells_and_a_six_cell_ring);
+    RUN_TEST(cz_predicate_needs_a_full_ring_and_a_holed_zone);
+    RUN_TEST(cz_zones_are_disjoint_across_the_four_corners);
 #endif
     RUN_TEST(mrv_choose_cell_picks_the_most_constrained_cell);
     RUN_TEST(mrv_choose_cell_detects_dead_cell);
