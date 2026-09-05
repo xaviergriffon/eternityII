@@ -114,6 +114,30 @@ La CI compile un build avec **tous** ces drapeaux à la fois (et `WERROR=1`), po
 ce code de trace normalement mort ne se dégrade pas en silence — voir
 [Tests et CI](tests_et_ci.md#intégration-continue).
 
+## Drapeaux de mesure
+
+Distincts des drapeaux de debug ci-dessus : ils n'ajoutent pas de traces mais des
+**compteurs**, et ne sont jamais compilés en production parce que leur coût
+fausserait la mesure qu'ils servent à faire. Ils se passent uniquement via
+`CPPFLAGS`, jamais en décommentant quoi que ce soit.
+
+| Drapeau | Ce qu'il mesure | Coût mesuré |
+|---|---|---|
+| `ETII_STAT_CORNER_ZONES` | Nœuds du moteur MRV où une zone d'angle 3×3 est entièrement entourée alors qu'elle est encore incomplète, avec la répartition des trous, la profondeur, et le nombre de nœuds explorés sous ces nœuds. Répond à la seule condition de réouverture laissée par [§4.9 de l'étude d'élagage](conception/elagage_recherche.md) — voir son verdict. | **+2,1 % de temps CPU** (banc 20 M nœuds, A/B alterné) |
+
+```sh
+make WERROR=1 CPPFLAGS="-DETII_STAT_CORNER_ZONES"
+env ETII_BENCH_NODES=200000000 ./eternityII test data/pieces.csv   # rapport en fin de run
+```
+
+Le rapport est émis par `corner_zone_report()` en fin de `run_mono_client`, donc
+aussi bien en mode `test` qu'en mode `client` (côté fork de recherche). Hors
+build instrumenté, cette fonction a un corps vide : l'appelant n'a aucun
+`#ifdef`. Les masques de zone et le prédicat, eux, sont **toujours** compilés —
+donc toujours couverts par les tests unitaires — seul l'appel par nœud est
+conditionnel. `ETII_STAT_CORNER_ZONES` exige `ETERN_SIZE >= 6` (en deçà les
+quatre zones se recouvrent) et le refuse à la compilation.
+
 ## Ajouter un fichier source
 
 Un nouveau `.c` se range sous le bon `src/<domaine>/` (voir la

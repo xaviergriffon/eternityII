@@ -1339,13 +1339,74 @@ parcours (les 60 cases de cadre sont bouclées à l'index 74, §3.2). Les deux m
 proposition — table de zones et consistance du cadre — sont des raisonnements exacts et
 corrects qui travaillent là où **rien ne meurt**. Ils n'ont rien à réfuter.
 
+#### Mesure 5 — la condition de réouverture, mesurée sous MRV : la famille est CLOSE
+
+**Statut : mesuré, la seule question laissée ouverte par cette section est tranchée.**
+
+§4.9 ne fermait la famille que sous l'ordre fixe `directions[]`, et laissait une porte :
+« un ordre de parcours où une zone peut être entourée avant d'être remplie —
+structurellement possible en MRV, où l'ordre est dynamique ». Cette porte est maintenant
+fermée par la mesure qu'elle réclamait, et le verdict est plus net que ce que le critère
+énoncé (« nul ou marginal ») demandait.
+
+**Instrumentation** (`ETII_STAT_CORNER_ZONES`, [compilation.md](../compilation.md#drapeaux-de-mesure)).
+À chaque nœud du moteur MRV, pour chacune des 4 zones d'angle : l'anneau des 6 cases
+extérieures est-il entièrement posé alors que la zone est encore trouée ? Tout tient en
+deux `AND` de masques sur `bt_frontier.empty`, qui est déjà tenu en lockstep avec le
+plateau. Trois grandeurs relevées en plus du simple compteur, parce que le compteur seul
+ne suffit pas à conclure :
+
+1. **le nombre de trous** — à UN seul trou la « table de région » dégénère exactement en la
+   recherche par clé 4D que le moteur fait déjà, donc ces déclenchements-là ne comptent pas ;
+2. **la profondeur** — le modèle de branchement ci-dessus dit que rien ne meurt au-delà de ~180 ;
+3. **les nœuds explorés SOUS le nœud déclencheur** — borne supérieure absolue de l'économie :
+   même en supposant que la table réfute 100 % des déclenchements, elle ne peut pas
+   économiser plus que ces nœuds-là.
+
+| Surface de mesure | Nœuds | Déclenchements | Trous | Profondeur | Nœuds sous les déclencheurs |
+|---|---|---|---|---|---|
+| Banc `test` (racines de `first_possibility`) | 200 001 775 | **303** (0,00015 %), tous sur le même angle | 4 (×201), 5 (×15), 6 (×87) | min 163 / moy 167,9 / max 178 | **303**, soit exactement 1 par déclenchement |
+| Stock de PRODUCTION (`eternityII.back` restauré, client réel) | 1 172 560 240 | **0** | — | — | **0** |
+
+**Lecture.** Sur le banc, la situation que l'ordre fixe rendait impossible se produit bel et
+bien sous MRV — la porte laissée ouverte était réelle. Mais « 303 nœuds sous 303
+déclencheurs » veut dire **un sous-arbre vide sous chacun** : la recherche remonte au nœud
+suivant, sans jamais descendre. Autrement dit le moteur réfute déjà ces nœuds au coup
+d'après, par le balayage MRV lui-même (la zone enclose est aussitôt la case la plus
+contrainte, et elle n'a aucun candidat). La table n'aurait rien à réfuter que le moteur ne
+réfute déjà, un nœud plus tard. Le plafond absolu de l'économie est **0,00015 % des nœuds**.
+
+En face, le seul DÉTECTEUR — pas la table, pas son interrogation, juste le test qui décide
+s'il faut interroger — coûte **+2,1 % de temps CPU** (banc 20 M nœuds, protocole A/B à
+ordre alterné : baseline 6,12 / 6,12 / 6,07 s contre 6,25 / 6,22 / 6,23 s instrumenté,
+plages disjointes). Le rapport est de l'ordre de **14 000 contre 1**, avant même d'avoir
+écrit une ligne de table.
+
+Et sur le stock de production — la seule surface qui vaille pour un phénomène de forme
+d'arbre — le compteur reste à **zéro sur 1,17 milliard de nœuds**. Les racines réelles sont
+plus profondes que celles de `first_possibility` et leurs zones d'angle sont déjà pleines :
+la situation ne se présente jamais.
+
+**Décision : la famille est close définitivement**, y compris sous ordre dynamique. Le
+verdict de la mesure 3 tenait par impossibilité de déclenchement ; il tient désormais aussi
+là où le déclenchement est possible, par nullité de l'enjeu. Ne pas reproposer.
+
+**Piège de mesure rencontré, à ne pas reproduire.** Compter les déclenchements ne suffit
+pas : à s'arrêter au « 303 » du banc, on conclut « marginal mais non nul, donc à creuser »,
+ce qui est faux. C'est la mesure du sous-arbre — trois lignes d'instrumentation de plus —
+qui transforme un jugement en arithmétique. Toute future piste d'élagage doit se voir
+demander la même chose : pas « combien de fois ça tire », mais « combien de nœuds ça
+économise », mesuré, face au coût du seul déclencheur. C'est le pendant quantitatif du
+diagnostic corrigé de §4.4 (« se déclenche mais jamais là où ça compte »).
+
 #### Décision : ne pas implémenter
 
 Ni la table de zones, ni le filtre par cadre. Le verdict ne tient pas à un coût mesuré
 trop élevé (contrairement à §4.3 ou §4.5) mais à une **impossibilité de déclenchement**
 établie avant écriture, et il couvre par le même argument les variantes voisines (zone
 4×4, zone ancrée sur l'indice, table de la bande frontière côté angles). Ne pas
-reproposer sans avoir d'abord invalidé la mesure 3.
+reproposer sans avoir d'abord invalidé la mesure 3 — ni, depuis, la mesure 5, qui ferme aussi la
+variante « ordre dynamique ».
 
 **Ce qui reste utilisable de l'analyse :**
 
@@ -1356,13 +1417,16 @@ reproposer sans avoir d'abord invalidé la mesure 3.
   futures pistes : une piste qui ne s'applique qu'au-dessus de la profondeur ~180 n'a
   pratiquement rien à réfuter, quelle que soit sa force théorique. À rapprocher du
   diagnostic corrigé de §4.4 (« se déclenche mais jamais là où ça compte »).
-- **Une seule condition rouvrirait la famille : un ordre de parcours où une zone peut être
-  entourée avant d'être remplie.** C'est structurellement possible en MRV (§4.7), où
-  l'ordre est dynamique. La mesure à faire, et la seule, serait d'instrumenter le moteur
-  MRV pour compter les occurrences « zone d'angle entièrement entourée, encore incomplète ».
-  Si ce compteur est nul ou marginal, la famille est close définitivement ; s'il ne l'est
-  pas, la mesure 2 dit que le test exact serait bon marché. Ne pas retoucher `directions[]`
-  pour provoquer artificiellement cette situation : bump de `VERSION` (§5).
+- ~~**Une seule condition rouvrirait la famille : un ordre de parcours où une zone peut être
+  entourée avant d'être remplie.**~~ **Tranché — voir la mesure 5 ci-dessus.** La condition
+  se réalise bien sous MRV (303 nœuds sur 200 M au banc), mais chaque déclenchement a un
+  sous-arbre VIDE — le moteur les réfute déjà au nœud suivant — et le compteur reste à zéro
+  sur 1,17 milliard de nœuds de stock de production. Plafond d'économie 0,00015 %, coût du
+  seul détecteur +2,1 %. La famille est close, ordre fixe comme ordre dynamique.
+- **L'instrumentation reste disponible** (`ETII_STAT_CORNER_ZONES`) pour qui voudrait
+  refaire la mesure après un changement de forme d'arbre ; elle n'est jamais compilée en
+  production. Ne pas retoucher `directions[]` pour provoquer artificiellement la situation :
+  bump de `VERSION` (§5).
 
 ### 4.10 Moteur de la preuve bornée du pruner : MRV plutôt qu'ordre fixe — devenu permanent (PR3 de mrv_moteur_unique.md)
 

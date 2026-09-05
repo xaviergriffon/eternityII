@@ -14,6 +14,15 @@
 void *autosearch (void *userdata);
 
 /**
+ * @brief Émet le rapport de la mesure §4.9 (zones d'angle entourées mais
+ *        incomplètes) en fin de recherche.
+ *
+ * No-op quand `ETII_STAT_CORNER_ZONES` n'est pas défini — c'est-à-dire dans
+ * tous les builds de production.
+ */
+void corner_zone_report(void);
+
+/**
  * @brief Thread de vérification d'un client pruner (mode `pruner`).
  *
  * @param userdata contexte du thread client (type attendu : client_possibility_t)

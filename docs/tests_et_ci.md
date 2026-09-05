@@ -247,6 +247,25 @@ calculer le débit, jamais N lui-même. En mode `test`, le débit artificiel de
 100000 coups/s (pensé pour un usage interactif) est aussi désactivé quand le
 banc est actif, pour mesurer le débit brut de la machine.
 
+**`ETII_BENCH_NODES` ne vaut que pour le mode `test`, et deux pièges vont avec.**
+Le premier est un simple fait d'architecture : le thread de statistiques sonde
+`counters[]` du **processus courant**, or en mode `client` la recherche tourne
+dans des **forks**, dont les compteurs ne remontent au parent que par IPC
+(`fork_statistics`). Le seuil n'est donc jamais atteint côté parent et la
+recherche ne s'arrête pas d'elle-même : pour une mesure en mode `client`
+(instrumentation sur stock réel, cf. `ETII_STAT_CORNER_ZONES`), on laisse tourner
+un temps choisi puis on arrête par `SIGINT` — chaque fork émet son rapport en
+sortant. Le second était un bug, corrigé : la boucle de sondage à 1 ms
+n'appelait pas `fork_gate_checkpoint`, ce qui rendait le thread injoignable
+pendant sa tranche de 10 s, très au-delà du budget de 2 s de
+`fork_gate_request_quiesce` — **tout fork décidé par l'orchestrateur était
+refusé** (« quiescence non atteinte — fork refusé ») et un client lancé avec
+`ETII_BENCH_NODES` ne démarrait jamais ses process de recherche. Le découpage en
+tranches avait été appliqué à la branche sans banc uniquement. Verrouillé par
+`checker_thread_parks_at_the_fork_gate_in_bench_mode`
+(`tests/app/test_etii_client.c`), qui échoue si le point de rendez-vous
+disparaît.
+
 La décision d'arrêt (`bench_should_stop`) et le parsing de la variable
 d'environnement (`bench_parse_nodes_env`) sont des fonctions pures
 (`src/app/app_static_variables.h`/`.c`), testées unitairement dans

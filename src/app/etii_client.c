@@ -547,6 +547,9 @@ void run_mono_client(const char *file, int fork_seq)
     }
     pthread_mutex_unlock(&thread_params->socket_mutex);
 
+    // Mesure §4.9 : no-op hors build instrumenté (cf. corner_zone_report).
+    corner_zone_report();
+
     if (owns_parts) {
         // Map construite ici : plus personne ne la lit (threads auxiliaires
         // joints, recherche terminée). Une map héritée, elle, appartient au
@@ -936,6 +939,15 @@ void *check_client_threads(void *param)
             for (int i = 0; i < ticks && request != REQUEST_STOP; i++) {
                 usleep(poll_interval_us);
                 bench_poll_and_maybe_stop();
+                // Même raison que la branche sans banc ci-dessous : sans ce
+                // point de rendez-vous, ce thread reste injoignable pendant
+                // toute la tranche de 10 s, très au-delà du budget de
+                // fork_gate_request_quiesce (2 s) — et TOUT fork décidé par
+                // l'orchestrateur est refusé. Le découpage avait été appliqué
+                // à l'autre branche seulement : un client lancé avec
+                // ETII_BENCH_NODES ne démarrait donc jamais ses process de
+                // recherche (« quiescence non atteinte — fork refusé »).
+                fork_gate_checkpoint(gate_slot);
             }
         } else {
             // Découpé en tranches de 200 ms (au lieu d'un seul sleep(10)) :

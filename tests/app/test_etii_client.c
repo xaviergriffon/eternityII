@@ -11,6 +11,7 @@
 #include "greatest.h"
 #include "app/etii_client.h"
 #include "app/app_static_variables.h"
+#include "app/fork_gate.h"   /* quiescence coopérative : test du thread checker */
 #include "app/fork_orchestrator.h"
 #include "app/etii_statistic.h"
 #include "core/datamanager.h"
@@ -1154,6 +1155,52 @@ TEST check_client_threads_step_shows_numeric_limit(void)
     PASS();
 }
 
+/* Le thread checker doit rester joignable par le gate de quiescence MÊME
+ * quand le banc de mesure est actif (bench_target_nodes > 0), sinon
+ * l'orchestrateur refuse tout fork pendant 10 s : « quiescence non atteinte —
+ * fork refusé », et un client lancé avec ETII_BENCH_NODES ne démarre jamais.
+ * Le découpage en tranches n'avait été appliqué qu'à la branche sans banc.
+ *
+ * Contre-épreuve intégrée : retirer fork_gate_checkpoint de la boucle de
+ * sondage fait échouer ce test (la quiescence n'est pas obtenue dans le
+ * budget), ce qui est exactement le symptôme observé en production. */
+TEST checker_thread_parks_at_the_fork_gate_in_bench_mode(void)
+{
+    int saved_nb = NB_THREADS;
+    struct client_statistics *saved_fs = fork_statistics;
+    unsigned long long saved_bench = bench_target_nodes;
+    volatile int saved_request = request;
+
+    struct client_statistics fs[1];
+    memset(fs, 0, sizeof fs);
+    NB_THREADS = 1;
+    fork_statistics = fs;
+    /* Cible inatteignable : bench_poll_and_maybe_stop ne doit pas arrêter la
+       boucle avant que la quiescence soit demandée. */
+    bench_target_nodes = ~0ULL;
+    request = REQUEST_CONTINUE;
+    fork_gate_reset();
+
+    pthread_t t;
+    ASSERT_EQ_FMT(0, pthread_create(&t, NULL, check_client_threads, NULL), "%d");
+    /* Laisse le thread atteindre sa boucle de sondage de 1 ms. */
+    usleep(50000);
+
+    fork_gate_result_t rc = fork_gate_request_quiesce(FORK_GATE_DEFAULT_TIMEOUT_MS);
+    fork_gate_release_quiesce();
+
+    request = REQUEST_STOP;
+    pthread_join(t, NULL);
+
+    bench_target_nodes = saved_bench;
+    fork_statistics = saved_fs;
+    NB_THREADS = saved_nb;
+    request = saved_request;
+
+    ASSERT_EQ_FMT((int)FORK_GATE_QUIESCED, (int)rc, "%d");
+    PASS();
+}
+
 /* ---------- control_thread / feed_thread_aposs : un tour réel de boucle ---- */
 
 static void *ec_stop_after_delay(void *arg)
@@ -1569,6 +1616,7 @@ SUITE(etii_client_suite)
     RUN_TEST(check_client_threads_step_reports_forward_check_and_pruner);
 #endif
     RUN_TEST(check_client_threads_step_shows_numeric_limit);
+    RUN_TEST(checker_thread_parks_at_the_fork_gate_in_bench_mode);
     RUN_TEST(check_client_threads_stops_immediately_on_request_stop);
 
     RUN_TEST(acquire_search_parts_builds_and_owns_when_nothing_published);
