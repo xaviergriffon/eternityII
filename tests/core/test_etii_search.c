@@ -1487,6 +1487,232 @@ static int build_two_level_fixture(struct possibility_packet *board, bt_level st
     return 1;
 }
 
+
+/* --------------------------------------------------------------------------
+ * Chemin rapide « masques complets » (bt_masks_complete)
+ *
+ * Fixture : une map RÉELLE (prepare_map_part, donc index compact + masque
+ * d'ids) dont l'id maximal vaut ETERN_PARTS, pour que `id_mask_words` soit
+ * exactement BT_MASK_WORDS quelle que soit la taille de puzzle compilée —
+ * sans cela la map ne serait pas « complète » et le chemin rapide ne serait
+ * jamais exercé (sous ETERN_PARTS=256, 15 ids ne font qu'un mot sur 4).
+ *
+ * Un côté joker de la map n'accepte que les faces NON NULLES (0 est la couleur
+ * de bordure, cf. search_face) : pour qu'une clé de plateau aléatoire — 0 sur
+ * les côtés bordure/voisine posée (pièce de remplissage à faces 0), joker
+ * ailleurs — soit toujours non vide, il faut, pour chaque sous-ensemble S de
+ * côtés, une pièce à 0 exactement sur S et non nulle ailleurs. Les ids 1..15
+ * portent les 15 motifs à au moins un zéro (bits de l'id) en couleur 1 ; la
+ * pièce ETERN_PARTS porte le motif sans zéro en couleur 2 — ce qui laisse
+ * en outre des compartiments réellement VIDES (clés en 1 pur, ou mêlant 2 et
+ * 0) pour le test du masque à zéro. Une case ne meurt donc que par pièces
+ * UTILISÉES : les deux verdicts sont observables.
+ * ------------------------------------------------------------------------ */
+#define COMPLETE_MAP_NB_SMALL_IDS 15
+static struct array_part *make_complete_map_parts(void)
+{
+    static struct part parts[COMPLETE_MAP_NB_SMALL_IDS + 2];
+    static struct array_part a;
+    parts[0] = (struct part){ .id = 0 }; /* bouchon bordure */
+    for (int id = 1; id <= COMPLETE_MAP_NB_SMALL_IDS; id++) {
+        int zeros = id; /* bit levé = côté à 0 (motifs 1..15) */
+        parts[id] = (struct part){ .id = (int16_t)id,
+                                   .top = (int8_t)(((zeros >> 3) & 1) ? 0 : 1),
+                                   .right = (int8_t)(((zeros >> 2) & 1) ? 0 : 1),
+                                   .bottom = (int8_t)(((zeros >> 1) & 1) ? 0 : 1),
+                                   .left = (int8_t)((zeros & 1) ? 0 : 1) };
+    }
+    parts[COMPLETE_MAP_NB_SMALL_IDS + 1] = (struct part){ .id = ETERN_PARTS, .top = 2, .right = 2, .bottom = 2, .left = 2 };
+    a = (struct array_part){ .size = COMPLETE_MAP_NB_SMALL_IDS + 2, .parts = parts };
+    return &a;
+}
+
+/* Marque « utilisés », avec probabilité 1/8 chacun, les ids de la fixture
+ * ci-dessus (1..15 et ETERN_PARTS) — chaque clé n'ayant qu'une pièce, une
+ * probabilité plus forte tuerait presque tout plateau 16×16. */
+static void mark_random_used(struct possibility_packet *b, unsigned *state)
+{
+    for (int id = 1; id <= COMPLETE_MAP_NB_SMALL_IDS; id++) {
+        if ((lcg_next(state) & 7) == 0) set_face_used(b->b_faceused, (uint16_t)(id - 1), 1);
+    }
+    if ((lcg_next(state) & 7) == 0) set_face_used(b->b_faceused, (uint16_t)(ETERN_PARTS - 1), 1);
+}
+
+/* Première clé de la map dont le compartiment est VIDE (taille 0), ou 0 si
+ * aucune — la fixture en garantit au moins une (couleur 2 isolée). */
+static int find_empty_key(map_big_array *map, key_part *out)
+{
+    int m = map->sizearray;
+    for (int k1 = 0; k1 < m; k1++) for (int k2 = 0; k2 < m; k2++)
+        for (int k3 = 0; k3 < m; k3++) for (int k4 = 0; k4 < m; k4++) {
+            key_part key = { .k1 = (int8_t)k1, .k2 = (int8_t)k2, .k3 = (int8_t)k3, .k4 = (int8_t)k4 };
+            if (get_parts_bigarray_with_key(map, &key)->size == 0) {
+                *out = key;
+                return 1;
+            }
+        }
+    return 0;
+}
+
+/* bt_mask_resolve : sur une map qui porte l'index, un compartiment VIDE donne
+ * `bt_zero_mask` dans le cache (jamais NULL) ; sans index, NULL reste NULL
+ * (le repli par parcours des lecteurs génériques en dépend). Le contrat de
+ * map_bucket_id_mask lui-même — NULL pour vide — est inchangé. */
+TEST bt_mask_cache_uses_zero_mask_for_empty_bucket_in_fast_mode(void)
+{
+    map_big_array *map = prepare_map_part(make_complete_map_parts());
+    ASSERT(bt_masks_complete(map));
+
+    key_part empty_key;
+    ASSERT(find_empty_key(map, &empty_key)); /* sinon le test ne prouverait rien */
+    ASSERT_EQ(NULL, map_bucket_id_mask(map, &empty_key));
+    ASSERT_EQ(bt_zero_mask, bt_mask_resolve(map, &empty_key));
+
+    /* Un compartiment non vide garde son vrai masque. */
+    key_part full_key = { .k1 = 0, .k2 = 0, .k3 = 0, .k4 = 0 }; /* pièce 15 (et le bouchon) */
+    ASSERT(get_parts_bigarray_with_key(map, &full_key)->size > 0);
+    ASSERT_EQ(map_bucket_id_mask(map, &full_key), bt_mask_resolve(map, &full_key));
+    ASSERT(bt_mask_resolve(map, &full_key) != bt_zero_mask);
+
+    /* Verdict identique des deux côtés : zéro pièce libre. */
+    struct possibility_packet board;
+    make_empty_board(&board);
+    uint64_t used[MRV_USED_WORDS];
+    mrv_used_init(used, &board);
+    ASSERT_EQ_FMT(0, mrv_free_candidates(map, &empty_key, &board, used, bt_zero_mask), "%d");
+    ASSERT_EQ_FMT(0, mrv_free_candidates(map, &empty_key, &board, used, NULL), "%d");
+
+    /* Contre-contrôle : sans index compact, plus de map « complète », et le
+     * cache garde NULL. */
+    uint32_t *saved = map->packed;
+    map->packed = NULL;
+    ASSERT(!bt_masks_complete(map));
+    ASSERT_EQ(NULL, bt_mask_resolve(map, &empty_key));
+    map->packed = saved;
+
+    /* Sur une map complète, bt_mask_init ne laisse AUCUN NULL. */
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, make_filler_part(), (int8_t)map->sizearrayM);
+    const uint64_t *cache[BT_CELLS];
+    bt_mask_init(cache, map, C);
+    for (int c = 0; c < BT_CELLS; c++) {
+        ASSERT(cache[c] != NULL);
+    }
+
+    free_bigarray(map);
+    PASS();
+}
+
+/* mrv_choose_cell_fast doit rendre EXACTEMENT ce que rendent la version
+ * générique et l'oracle indépendant (reference_choose_cell) : même verdict,
+ * même case, même score — sur 300 plateaux pseudo-aléatoires avec des
+ * sous-ensembles de pièces utilisées variés, sur une map réelle complète.
+ * Les deux issues (case choisie / sous-arbre mort) doivent être observées,
+ * sinon l'égalité ne prouverait rien. */
+TEST mrv_choose_cell_fast_matches_generic_on_real_map(void)
+{
+    map_big_array *map = prepare_map_part(make_complete_map_parts());
+    ASSERT(bt_masks_complete(map)); /* sinon le chemin rapide n'est pas testé */
+    const int8_t all_face = (int8_t)map->sizearrayM;
+
+    unsigned state = 20260905u;
+    int seen_chosen = 0, seen_dead = 0;
+    for (int iter = 0; iter < 300; iter++) {
+        struct possibility_packet board;
+        make_random_board(&board, &state);
+        mark_random_used(&board, &state);
+
+        key_part C[ETERN_SIZE][ETERN_SIZE];
+        bt_init_constraints(C, &board, make_filler_part(), all_face);
+        uint64_t used[MRV_USED_WORDS];
+        mrv_used_init(used, &board);
+        bt_frontier f;
+        bt_frontier_init(&f, &board);
+        const uint64_t *cell_mask[BT_CELLS];
+        bt_mask_init(cell_mask, map, C);
+
+        uint8_t rx = 200, ry = 200; int rcount = -99;
+        uint8_t gx = 201, gy = 201; int gcount = -98;
+        uint8_t fx = 202, fy = 202; int fcount = -97;
+        int rrc = reference_choose_cell(&board, C, map, used, all_face, &rx, &ry, &rcount);
+        int grc = mrv_choose_cell(&board, C, map, used, &f, cell_mask, &gx, &gy, &gcount);
+        int frc = mrv_choose_cell_fast(used, &f, cell_mask, &fx, &fy, &fcount);
+
+        ASSERT_EQ_FMT(rrc, frc, "%d");
+        ASSERT_EQ_FMT(grc, frc, "%d");
+        if (frc == 1) {
+            seen_chosen = 1;
+            ASSERT_EQ_FMT((int)rx, (int)fx, "%d");
+            ASSERT_EQ_FMT((int)ry, (int)fy, "%d");
+            ASSERT_EQ_FMT(rcount, fcount, "%d");
+            ASSERT_EQ_FMT((int)gx, (int)fx, "%d");
+            ASSERT_EQ_FMT((int)gy, (int)fy, "%d");
+            ASSERT_EQ_FMT(gcount, fcount, "%d");
+        } else {
+            seen_dead = 1;
+        }
+    }
+    ASSERT(seen_chosen);
+    ASSERT(seen_dead);
+
+    free_bigarray(map);
+    PASS();
+}
+
+#if FORWARD_CHECK_K > 0
+/* bt_forward_check_fast : même verdict que bt_forward_check (chemin masque
+ * ET chemin parcours, index neutralisé) sur toutes les cases d'une map réelle
+ * complète, sous trois occupations (aucune pièce utilisée, un tirage
+ * aléatoire, toutes utilisées) — les deux verdicts doivent être observés. */
+TEST bt_forward_check_fast_same_verdict_as_generic(void)
+{
+    struct array_part *a = make_complete_map_parts();
+    map_big_array *map = prepare_map_part(a);
+    ASSERT(bt_masks_complete(map));
+    const int nb_ids = COMPLETE_MAP_NB_SMALL_IDS;
+
+    struct possibility_packet board;
+    make_empty_board(&board);
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, a, (int8_t)map->sizearrayM);
+
+    unsigned state = 777u;
+    int seen_alive = 0, seen_dead = 0;
+    for (int phase = 0; phase < 3; phase++) {
+        if (phase == 1) {
+            mark_random_used(&board, &state);
+        } else if (phase == 2) {
+            for (int id = 1; id <= nb_ids; id++) set_face_used(board.b_faceused, (uint16_t)(id - 1), 1);
+            set_face_used(board.b_faceused, (uint16_t)(ETERN_PARTS - 1), 1);
+        }
+        uint64_t used[MRV_USED_WORDS];
+        mrv_used_init(used, &board);
+        const uint64_t *cell_mask[BT_CELLS];
+        bt_mask_init(cell_mask, map, C);
+        for (int cx = 0; cx < ETERN_SIZE; cx++) for (int cy = 0; cy < ETERN_SIZE; cy++) {
+            int generic = bt_forward_check(C, &board, map, used, cell_mask, cx, cy);
+            int fast = bt_forward_check_fast(&board, used, cell_mask, cx, cy);
+            ASSERT_EQ_FMT(generic, fast, "%d");
+
+            uint32_t *saved = map->packed;
+            map->packed = NULL; /* force le parcours des entrées */
+            const uint64_t *cell_mask_generic[BT_CELLS];
+            bt_mask_init(cell_mask_generic, map, C);
+            int traversal = bt_forward_check(C, &board, map, used, cell_mask_generic, cx, cy);
+            map->packed = saved;
+            ASSERT_EQ_FMT(traversal, fast, "%d");
+
+            if (fast) seen_alive = 1; else seen_dead = 1;
+        }
+    }
+    ASSERT(seen_alive);
+    ASSERT(seen_dead);
+
+    free_bigarray(map);
+    PASS();
+}
+#endif // FORWARD_CHECK_K > 0
+
 /* bt_materialize_pending : matérialise les frères du plus profond vers la racine. */
 TEST bt_materialize_pending_orders_deepest_first(void)
 {
@@ -3769,6 +3995,11 @@ SUITE(etii_search_suite)
     RUN_TEST(mrv_choose_cell_matches_full_scan_reference);
     RUN_TEST(mrv_choose_cell_breaks_ties_by_constrained_sides);
     RUN_TEST(mrv_choose_cell_full_board_and_unconstrained_fallback);
+    RUN_TEST(bt_mask_cache_uses_zero_mask_for_empty_bucket_in_fast_mode);
+    RUN_TEST(mrv_choose_cell_fast_matches_generic_on_real_map);
+#if FORWARD_CHECK_K > 0
+    RUN_TEST(bt_forward_check_fast_same_verdict_as_generic);
+#endif
     RUN_TEST(bt_materialize_pending_orders_deepest_first);
     RUN_TEST(bt_materialize_pending_respects_max_out);
     RUN_TEST(bt_materialize_pending_dynamic_order_recomputes_alloc);

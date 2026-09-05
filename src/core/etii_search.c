@@ -121,6 +121,16 @@ static void bt_init_constraints(key_part constraints[ETERN_SIZE][ETERN_SIZE],
 /** @brief Position d'une case dans les masques (ordre x-major, cf. ci-dessus). */
 #define BT_CELL_POS(x, y) ((x) * ETERN_SIZE + (y))
 
+/** @brief Largeur du champ `nconstr` dans la clé composite de `mrv_choose_cell`.
+ *
+ * Une case a 4 côtés, donc `nconstr` tient toujours sur 3 bits. La clé vaut
+ * `(count << MRV_KEY_NC_BITS) | (MRV_KEY_NC_MAX - nconstr)` : le champ bas ne
+ * doit jamais déborder sur `count`, sinon le critère principal (le MRV
+ * lui-même) serait faussé — d'où la vérification à la compilation. */
+#define MRV_KEY_NC_BITS 3
+#define MRV_KEY_NC_MAX  ((1 << MRV_KEY_NC_BITS) - 1)
+typedef char mrv_key_nc_fits_check[(4 <= MRV_KEY_NC_MAX) ? 1 : -1];
+
 /**
  * @brief État incrémental permettant d'énumérer la frontière sans balayer la grille.
  *
@@ -139,17 +149,32 @@ typedef struct {
      *  posées. Compteur, et non simple booléen : deux voisines peuvent
      *  contraindre la même case, le retrait de l'une ne la libère pas. */
     uint8_t nconstr[BT_CELLS];
+    /** Bas de la valeur de choix de `mrv_choose_cell_fast`, précalculé :
+     *  `((MRV_KEY_NC_MAX - nconstr) << MRV_POS_BITS) | pos`. Tenu en lockstep
+     *  avec `nconstr` (mêmes trois sites d'écriture) pour que le balayage n'ait
+     *  qu'une charge de 16 bits et un `or` par case au lieu de recalculer le
+     *  départage et d'y empiler la position. */
+    uint16_t nc_key[BT_CELLS];
 } bt_frontier;
 
-/** @brief Largeur du champ `nconstr` dans la clé composite de `mrv_choose_cell`.
+/** @brief Largeur du champ position dans la valeur combinée de `mrv_choose_cell_fast`.
  *
- * Une case a 4 côtés, donc `nconstr` tient toujours sur 3 bits. La clé vaut
- * `(count << MRV_KEY_NC_BITS) | (MRV_KEY_NC_MAX - nconstr)` : le champ bas ne
- * doit jamais déborder sur `count`, sinon le critère principal (le MRV
- * lui-même) serait faussé — d'où la vérification à la compilation. */
-#define MRV_KEY_NC_BITS 3
-#define MRV_KEY_NC_MAX  ((1 << MRV_KEY_NC_BITS) - 1)
-typedef char mrv_key_nc_fits_check[(4 <= MRV_KEY_NC_MAX) ? 1 : -1];
+ * `pos < BT_CELLS` doit tenir dans ce champ, `nconstr` (3 bits) au-dessus
+ * dans 16 bits pour `nc_key`, et `count << (MRV_KEY_NC_BITS + MRV_POS_BITS)`
+ * dans 32 bits : `count` ≤ ETERN_PARTS (9 bits), 20 bits en tout. Vérifié à
+ * la compilation. */
+#define MRV_POS_BITS 8
+#define MRV_POS_MASK ((1u << MRV_POS_BITS) - 1u)
+typedef char mrv_pos_fits_check[(BT_CELLS <= (1 << MRV_POS_BITS)
+                                 && (MRV_KEY_NC_BITS + MRV_POS_BITS) <= 16
+                                 && ((unsigned long)(ETERN_PARTS + 1) << (MRV_KEY_NC_BITS + MRV_POS_BITS)) < 0x7fffffffUL) ? 1 : -1];
+
+/** @brief Valeur de `bt_frontier.nc_key` pour une case à `nconstr` côtés contraints. */
+static inline uint16_t bt_nc_key(int pos, int nconstr)
+{
+    return (uint16_t)(((MRV_KEY_NC_MAX - nconstr) << MRV_POS_BITS) | pos);
+}
+
 
 /**
  * @brief Construit l'état de frontière depuis un plateau.
@@ -187,6 +212,7 @@ static void bt_frontier_init(bt_frontier *f, const struct possibility_packet *bo
             if (y < ETERN_SIZE - 1 && board->grid[x][y + 1] >= 0) n++;
             if (x > 0              && board->grid[x - 1][y] >= 0) n++;
             f->nconstr[pos] = (uint8_t)n;
+            f->nc_key[pos] = bt_nc_key(pos, n);
             if (n > 0) {
                 f->constrained[pos / 64] |= (uint64_t)1 << (pos % 64);
             }
@@ -201,6 +227,7 @@ static inline void bt_frontier_constrain(bt_frontier *f, int x, int y)
     if (f->nconstr[pos]++ == 0) {
         f->constrained[pos / 64] |= (uint64_t)1 << (pos % 64);
     }
+    f->nc_key[pos] = bt_nc_key(pos, f->nconstr[pos]);
 }
 
 /** @brief Une voisine de (x,y) vient d'être retirée : un côté de moins contraint. */
@@ -210,6 +237,7 @@ static inline void bt_frontier_release(bt_frontier *f, int x, int y)
     if (--f->nconstr[pos] == 0) {
         f->constrained[pos / 64] &= ~((uint64_t)1 << (pos % 64));
     }
+    f->nc_key[pos] = bt_nc_key(pos, f->nconstr[pos]);
 }
 
 /**
@@ -270,13 +298,84 @@ static inline void bt_frontier_undo(bt_frontier *f, int cx, int cy)
  * la main) : les lecteurs retombent sur le comptage par parcours.
  * ====================================================================== */
 
+/**
+ * @brief Nombre de mots de 64 bits couvrant le masque des pièces utilisées.
+ *
+ * Dérivé de `FACES_USED_SIZE` (le masque du paquet, en groupes de 16 bits) et
+ * non de `ETERN_PARTS` : 4 groupes du paquet tiennent dans un mot, le dernier
+ * mot peut être partiellement rempli. Garantit `MRV_USED_WORDS >=
+ * map->id_mask_words` pour toute map dont les ids tiennent dans le masque du
+ * paquet — c'est-à-dire toute map de production.
+ */
+#define MRV_USED_WORDS ((FACES_USED_SIZE + 3) / 4)
+
+/**
+ * @brief Nombre de mots de 64 bits d'un masque d'ids sur une map de production.
+ *
+ * `build_bucket_id_mask` dimensionne le masque sur l'id maximal de la map :
+ * pour un jeu complet de `ETERN_PARTS` pièces, c'est exactement cette valeur
+ * (4 pour 256, 1 pour 16). Le chemin rapide du balayage MRV et du
+ * forward-check est compilé avec ce nombre de mots CONSTANT — c'est ce qui
+ * permet au compilateur de dérouler sans cascade de tests — et n'est pris
+ * que si la map le respecte (`bt_masks_complete`).
+ */
+#define BT_MASK_WORDS ((ETERN_PARTS + 63) / 64)
+typedef char bt_mask_words_fit_check[(BT_MASK_WORDS <= MRV_USED_WORDS) ? 1 : -1];
+
+/**
+ * @brief Masque « aucune pièce », substitué dans le cache aux compartiments vides.
+ *
+ * `map_bucket_id_mask` rend NULL pour un compartiment vide (son offset 0 est
+ * partagé avec le premier vrai compartiment) : le moteur mettait ce NULL dans
+ * `cell_mask` et chaque lecteur devait le tester puis retomber sur le parcours
+ * des entrées — qui, pour 0 entrée, compte 0. Ce masque à zéro donne le même
+ * verdict (`popcount` 0, aucune pièce libre) sans test ni repli : c'est ce
+ * qui autorise le chemin rapide à ne jamais tester NULL. Dimensionné sur
+ * `MRV_USED_WORDS` ≥ `BT_MASK_WORDS`, il couvre tout lecteur.
+ */
+static const uint64_t bt_zero_mask[MRV_USED_WORDS] = { 0 };
+
+/**
+ * @brief La map porte-t-elle un masque d'ids exploitable pour TOUTE case ?
+ *
+ * Vrai quand l'index compact et `bucket_id_mask` existent avec exactement
+ * `BT_MASK_WORDS` mots : alors `bt_mask_resolve` ne rend jamais NULL et le
+ * moteur prend `mrv_choose_cell_fast`/`bt_forward_check_fast`. Faux pour une
+ * map bâtie à la main (tests) ou hors gabarit : les versions génériques, à
+ * repli par parcours, restent seules en jeu. Propriété de la map, constante
+ * pour toute la durée du processus : évaluée une fois par recherche.
+ */
+static inline int bt_masks_complete(const map_big_array *map)
+{
+    return map->bucket_id_mask != NULL && map->packed != NULL
+        && map->id_mask_words == BT_MASK_WORDS;
+}
+
+/**
+ * @brief Masque d'ids d'une clé tel que le cache le mémorise.
+ *
+ * `map_bucket_id_mask`, plus la substitution de `bt_zero_mask` au NULL d'un
+ * compartiment VIDE dès que la map porte l'index — jamais au NULL « index
+ * absent », qui doit rester NULL pour que les lecteurs génériques retombent
+ * sur le parcours des entrées. Le contrat de `map_bucket_id_mask` lui-même ne
+ * change pas : la substitution vit dans le cache du moteur.
+ */
+static inline const uint64_t *bt_mask_resolve(const map_big_array *map, const key_part *key)
+{
+    const uint64_t *mask = map_bucket_id_mask(map, key);
+    if (mask == NULL && map->bucket_id_mask != NULL && map->packed != NULL) {
+        return bt_zero_mask;
+    }
+    return mask;
+}
+
 /** @brief Résout le masque de chaque case depuis `constraints`. */
 static void bt_mask_init(const uint64_t *cell_mask[BT_CELLS], map_big_array *map,
                          key_part constraints[ETERN_SIZE][ETERN_SIZE])
 {
     for (int x = 0; x < ETERN_SIZE; x++) {
         for (int y = 0; y < ETERN_SIZE; y++) {
-            cell_mask[BT_CELL_POS(x, y)] = map_bucket_id_mask(map, &constraints[x][y]);
+            cell_mask[BT_CELL_POS(x, y)] = bt_mask_resolve(map, &constraints[x][y]);
         }
     }
 }
@@ -292,10 +391,10 @@ static void bt_mask_init(const uint64_t *cell_mask[BT_CELLS], map_big_array *map
 static inline void bt_mask_refresh(const uint64_t *cell_mask[BT_CELLS], map_big_array *map,
                                    key_part constraints[ETERN_SIZE][ETERN_SIZE], int cx, int cy)
 {
-    if (cy > 0)              cell_mask[BT_CELL_POS(cx, cy - 1)] = map_bucket_id_mask(map, &constraints[cx][cy - 1]);
-    if (cx < ETERN_SIZE - 1) cell_mask[BT_CELL_POS(cx + 1, cy)] = map_bucket_id_mask(map, &constraints[cx + 1][cy]);
-    if (cy < ETERN_SIZE - 1) cell_mask[BT_CELL_POS(cx, cy + 1)] = map_bucket_id_mask(map, &constraints[cx][cy + 1]);
-    if (cx > 0)              cell_mask[BT_CELL_POS(cx - 1, cy)] = map_bucket_id_mask(map, &constraints[cx - 1][cy]);
+    if (cy > 0)              cell_mask[BT_CELL_POS(cx, cy - 1)] = bt_mask_resolve(map, &constraints[cx][cy - 1]);
+    if (cx < ETERN_SIZE - 1) cell_mask[BT_CELL_POS(cx + 1, cy)] = bt_mask_resolve(map, &constraints[cx + 1][cy]);
+    if (cy < ETERN_SIZE - 1) cell_mask[BT_CELL_POS(cx, cy + 1)] = bt_mask_resolve(map, &constraints[cx][cy + 1]);
+    if (cx > 0)              cell_mask[BT_CELL_POS(cx - 1, cy)] = bt_mask_resolve(map, &constraints[cx - 1][cy]);
 }
 
 /**
@@ -327,17 +426,6 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
     if (cy < ETERN_SIZE - 1) constraints[cx][cy + 1].k1 = all_face;
     if (cx > 0)              constraints[cx - 1][cy].k2 = all_face;
 }
-
-/**
- * @brief Nombre de mots de 64 bits couvrant le masque des pièces utilisées.
- *
- * Dérivé de `FACES_USED_SIZE` (le masque du paquet, en groupes de 16 bits) et
- * non de `ETERN_PARTS` : 4 groupes du paquet tiennent dans un mot, le dernier
- * mot peut être partiellement rempli. Garantit `MRV_USED_WORDS >=
- * map->id_mask_words` pour toute map dont les ids tiennent dans le masque du
- * paquet — c'est-à-dire toute map de production.
- */
-#define MRV_USED_WORDS ((FACES_USED_SIZE + 3) / 4)
 
 #if FORWARD_CHECK_K > 0
 /**
@@ -488,6 +576,59 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         }
     }
 
+    __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+    return 1;
+}
+
+/**
+ * @brief Forward-checking du chemin rapide : masques complets, largeur constante.
+ *
+ * Même énumération, mêmes statistiques et même verdict que `bt_forward_check`
+ * hors `singleton_conflict_check`, sur une map où `bt_masks_complete` est
+ * vrai : `cell_mask` ne contient alors jamais NULL (compartiment vide =
+ * `bt_zero_mask`) et chaque masque fait exactement `BT_MASK_WORDS` mots. Le
+ * test « reste-t-il une pièce libre ? » devient un OU de `BT_MASK_WORDS`
+ * `and` à borne constante — plus de test NULL, plus de rechargement de
+ * `id_mask_words`, plus de boucle à sortie mal prédite par mot (mesurées
+ * ~10 % des mauvaises prédictions du moteur, cf. docs/autosearch_step.md
+ * §1.3 quater). L'appelant garantit `!singleton_conflict_check` : ce
+ * chemin-là compte des entrées et reste sur la version générique.
+ */
+static int bt_forward_check_fast(const struct possibility_packet *board,
+                                 const uint64_t used[MRV_USED_WORDS],
+                                 const uint64_t *cell_mask[BT_CELLS],
+                                 int cx, int cy)
+{
+    int8_t nx[4];
+    int8_t ny[4];
+    int n = 0;
+    if (cy > 0)              { nx[n] = (int8_t)cx;       ny[n] = (int8_t)(cy - 1); n++; }
+    if (cx < ETERN_SIZE - 1) { nx[n] = (int8_t)(cx + 1); ny[n] = (int8_t)cy;       n++; }
+    if (cy < ETERN_SIZE - 1) { nx[n] = (int8_t)cx;       ny[n] = (int8_t)(cy + 1); n++; }
+    if (cx > 0)              { nx[n] = (int8_t)(cx - 1); ny[n] = (int8_t)cy;       n++; }
+
+    unsigned int cells = 0;
+    int rank = 0;
+    for (int i = 0; i < n; i++) {
+        int8_t x = nx[i];
+        int8_t y = ny[i];
+        if (board->grid[x][y] != -2) {
+            continue;
+        }
+        cells++;
+        rank++;
+        const uint64_t *id_mask = cell_mask[BT_CELL_POS(x, y)];
+        uint64_t any = 0;
+        for (int k = 0; k < BT_MASK_WORDS; k++) {
+            any |= id_mask[k] & ~used[k];
+        }
+        if (any == 0) {
+            // case morte : aucune pièce candidate libre
+            __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+            return 0;
+        }
+    }
     __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
     return 1;
 }
@@ -1011,6 +1152,35 @@ static inline int mrv_free_candidates(const map_big_array *map, const key_part *
 }
 
 /**
+ * @brief Épilogue commun des deux balayages MRV : repli et sorties.
+ *
+ * `best_key == INT_MAX` signifie « aucune case de frontière » : première case
+ * vide non contrainte, dans le même ordre de bits (repli `fallback`). Sinon la
+ * case et le score se lisent dans la clé composite.
+ */
+static inline int mrv_finish_choice(const bt_frontier *front, int best_key, int best_pos,
+                                    uint8_t *out_x, uint8_t *out_y, int *out_count)
+{
+    if (best_key == INT_MAX) {
+        for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+            uint64_t bits = front->empty[w] & ~front->constrained[w];
+            if (bits != 0) {
+                int pos = w * 64 + __builtin_ctzll(bits);
+                *out_x = (uint8_t)(pos / ETERN_SIZE);
+                *out_y = (uint8_t)(pos % ETERN_SIZE);
+                *out_count = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+                return 1;
+            }
+        }
+        return 0; // pas atteint en pratique : l'appelant vérifie déjà plateau complet
+    }
+    *out_x = (uint8_t)(best_pos / ETERN_SIZE);
+    *out_y = (uint8_t)(best_pos % ETERN_SIZE);
+    *out_count = best_key >> MRV_KEY_NC_BITS;
+    return 1;
+}
+
+/**
  * @brief Choisit la case vide la plus contrainte (MRV, « minimum remaining
  *        values »).
  *
@@ -1073,24 +1243,78 @@ static int mrv_choose_cell(struct possibility_packet *board,
         }
     }
 
-    if (best_key == INT_MAX) {
-        // Repli : première case vide non contrainte, même ordre que ci-dessus.
-        for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
-            uint64_t bits = front->empty[w] & ~front->constrained[w];
-            if (bits != 0) {
-                int pos = w * 64 + __builtin_ctzll(bits);
-                *out_x = (uint8_t)(pos / ETERN_SIZE);
-                *out_y = (uint8_t)(pos % ETERN_SIZE);
-                *out_count = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
-                return 1;
-            }
-        }
-        return 0; // pas atteint en pratique : l'appelant vérifie déjà plateau complet
+    return mrv_finish_choice(front, best_key, best_pos, out_x, out_y, out_count);
+}
+
+/**
+ * @brief Balayage MRV du chemin rapide : masques complets, largeur constante.
+ *
+ * Même énumération par `bt_frontier` (même ordre de bits, donc même
+ * départage), même clé composite et même réduction sans branchement que
+ * `mrv_choose_cell` ; ne vaut que si `bt_masks_complete` est vrai — alors
+ * `cell_mask` ne contient jamais NULL et chaque masque fait exactement
+ * `BT_MASK_WORDS` mots. Ce que la version générique payait par case et qui
+ * disparaît ici, lu sur le désassemblage (docs/autosearch_step.md §1.3
+ * quater) : le calcul de `&constraints[x][y]` (servi au seul repli), le test
+ * NULL, le rechargement de `map->id_mask_words` (charge conditionnelle que
+ * gcc ne peut pas hisser) et la cascade `cmp/je` d'une boucle de mots à borne
+ * dynamique — ~35 des ~57 instructions par case de frontière. `~used` est
+ * calculé une fois par appel.
+ *
+ * Verdict, case et score rigoureusement identiques à `mrv_choose_cell` sur
+ * toute map où les deux s'appliquent : verrouillé par
+ * `mrv_choose_cell_fast_matches_generic_on_real_map`.
+ */
+static int mrv_choose_cell_fast(const uint64_t used[MRV_USED_WORDS],
+                                const bt_frontier *front,
+                                const uint64_t *cell_mask[BT_CELLS],
+                                uint8_t *out_x, uint8_t *out_y, int *out_count)
+{
+    uint64_t free_ids[BT_MASK_WORDS];
+    for (int k = 0; k < BT_MASK_WORDS; k++) {
+        free_ids[k] = ~used[k];
     }
-    *out_x = (uint8_t)(best_pos / ETERN_SIZE);
-    *out_y = (uint8_t)(best_pos % ETERN_SIZE);
-    *out_count = best_key >> MRV_KEY_NC_BITS;
-    return 1;
+    // Clé et position empilées dans UNE valeur : `(count << 11) | nc_key`, où
+    // `nc_key` = `((7 - nconstr) << 8) | pos` est précalculé par la frontière.
+    // Les positions étant énumérées en ordre croissant, le minimum strict de
+    // cette valeur est exactement « plus petite clé, et à clé égale la
+    // première rencontrée » — la règle de mrv_choose_cell — pour une seule
+    // comparaison et une seule affectation conditionnelle par case.
+    uint32_t best = UINT32_MAX;
+
+    for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+        uint64_t bits = front->empty[w] & front->constrained[w];
+        // Bases du mot : l'indice dans le mot (`ctz`) suffit ensuite, sans
+        // recomposer `pos` (la position est déjà dans `nc_key`).
+        const uint64_t *const *masks_w = cell_mask + w * 64;
+        const uint16_t *nc_key_w = front->nc_key + w * 64;
+        while (bits != 0) {
+            unsigned bit = (unsigned)__builtin_ctzll(bits);
+            bits &= bits - 1;
+            const uint64_t *mask = masks_w[bit];
+            int count = 0;
+            for (int k = 0; k < BT_MASK_WORDS; k++) {
+                count += etii_popcount64(mask[k] & free_ids[k]);
+            }
+            // Pas de sortie anticipée sur `count == 0` : la case morte passe
+            // par la réduction comme les autres (sa valeur, `count` nul en
+            // poids fort, est forcément le minimum) et le verdict tombe après
+            // la boucle. Un saut de moins par case, mesuré −1,0 % de cycles à
+            // arbre identique — les nœuds morts sont trop rares pour que le
+            // balayage complet qu'ils paient alors change quelque chose.
+            uint32_t cand = ((uint32_t)count << (MRV_KEY_NC_BITS + MRV_POS_BITS)) | nc_key_w[bit];
+            best = (cand < best) ? cand : best;
+        }
+    }
+    if ((best >> (MRV_KEY_NC_BITS + MRV_POS_BITS)) == 0) {
+        return 0; // sous-arbre mort : une case de frontière sans candidat libre
+    }
+
+    if (best == UINT32_MAX) {
+        return mrv_finish_choice(front, INT_MAX, 0, out_x, out_y, out_count);
+    }
+    return mrv_finish_choice(front, (int)(best >> MRV_POS_BITS), (int)(best & MRV_POS_MASK),
+                             out_x, out_y, out_count);
 }
 
 /** @brief Issue de `search_packet_backtracking_mrv`, seul moteur de backtracking. */
@@ -1152,6 +1376,10 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
     // de chaque case, rafraîchi à côté de bt_propagate_place/_undo.
     const uint64_t *cell_mask[BT_CELLS];
     bt_mask_init(cell_mask, client->map_part, constraints);
+    // Chemin rapide (masques complets, largeur constante) ou générique (repli
+    // par parcours) : propriété de la map, décidée une fois ici, jamais par
+    // case — cf. bt_masks_complete.
+    const int fast = bt_masks_complete(client->map_part);
 
     bt_level stack[ETERN_PARTS];
     int top = -1;
@@ -1236,7 +1464,10 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
 
         uint8_t x, y;
         int mrv_count;
-        if (mrv_choose_cell(&board, constraints, client->map_part, used, &frontier, cell_mask, &x, &y, &mrv_count)) {
+        int chosen = fast
+            ? mrv_choose_cell_fast(used, &frontier, cell_mask, &x, &y, &mrv_count)
+            : mrv_choose_cell(&board, constraints, client->map_part, used, &frontier, cell_mask, &x, &y, &mrv_count);
+        if (chosen) {
             stack[top].x = x;
             stack[top].y = y;
             stack[top].mrv_score = (int16_t)mrv_count;
@@ -1289,7 +1520,10 @@ backtrack:;
 #if FORWARD_CHECK_K > 0
                     if (placed_count < ETERN_PARTS) {
                         __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
-                        if (!bt_forward_check(constraints, &board, client->map_part, used, cell_mask, cx, cy)) {
+                        int alive = (fast && !singleton_conflict_check)
+                            ? bt_forward_check_fast(&board, used, cell_mask, cx, cy)
+                            : bt_forward_check(constraints, &board, client->map_part, used, cell_mask, cx, cy);
+                        if (!alive) {
                             board.grid[cx][cy] = -2;
                             BOARD_SET_FACE(&board, position, 0);
                             mrv_used_clear(used, position);
