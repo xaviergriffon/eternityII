@@ -437,6 +437,92 @@ static int fc_verdict(key_part C[ETERN_SIZE][ETERN_SIZE], struct possibility_pac
     return bt_forward_check(C, b, m, used, cell_mask, cx, cy);
 }
 
+/* fc_stat_bump : équivalence stricte avec le `__atomic_fetch_add` qu'il
+ * remplace, sur une globale comme sur une case de tableau.
+ *
+ * Ce que le remplacement retire est l'ATOMICITÉ DE L'ENSEMBLE lecture+écriture,
+ * dont un écrivain unique n'a pas besoin ; ce qu'il doit conserver est la
+ * valeur produite. Le test compare donc une séquence de `fc_stat_bump` à la
+ * même séquence de `__atomic_fetch_add` sur un second compteur, plutôt qu'à
+ * une constante : si un jour l'implémentation dérivait (saturation, largeur,
+ * signe), l'écart se verrait sans qu'il faille réviser une valeur écrite en
+ * dur. */
+TEST fc_stat_bump_matches_atomic_fetch_add(void)
+{
+    static volatile unsigned long long a;
+    static volatile unsigned long long b;
+    a = 0;
+    b = 0;
+
+    const unsigned long long steps[] = { 1, 0, 7, 1, 4294967296ULL, 3 };
+    for (unsigned i = 0; i < sizeof steps / sizeof steps[0]; i++) {
+        fc_stat_bump(&a, steps[i]);
+        __atomic_fetch_add(&b, steps[i], __ATOMIC_RELAXED);
+        /* Visible IMMÉDIATEMENT : aucune publication différée, aucun cumul
+         * local en attente — c'est la propriété qui distingue cette approche
+         * d'une fenêtre de publication (cf. sa doc dans etii_search.c). */
+        ASSERT_EQ_FMT(b, a, "%llu");
+    }
+    ASSERT_EQ_FMT(12ULL + 4294967296ULL, a, "%llu");
+
+    /* Une case de tableau se comporte pareil : c'est la forme qu'utilise
+     * fc_pruned_at[rank]. */
+    static volatile unsigned long long tab[3];
+    tab[1] = 5;
+    fc_stat_bump(&tab[1], 4);
+    ASSERT_EQ_FMT(9ULL, tab[1], "%llu");
+    ASSERT_EQ_FMT(0ULL, tab[0], "%llu");
+    ASSERT_EQ_FMT(0ULL, tab[2], "%llu");
+
+    PASS();
+}
+
+/* Garde-fou anti-régression : les compteurs de prunage sont à jour DÈS le
+ * retour du forward-check, jamais cumulés pour être publiés plus tard.
+ *
+ * C'est ce que le banc exige : `bench_poll_and_maybe_stop` (app/etii_client.c)
+ * lit `fc_attempts`/`fc_pruned` PENDANT que la recherche tourne, et le rapport
+ * s'appuie sur l'identité `fc_attempts = nœuds + fc_pruned` (exacte à 1 près,
+ * la racine n'étant précédée d'aucune tentative). Une publication différée la
+ * mettrait en défaut de plusieurs centaines — c'est la raison pour laquelle
+ * cette variante-là a été écartée. Ce test échouerait si on la réintroduisait. */
+TEST fc_counters_are_visible_as_soon_as_the_forward_check_returns(void)
+{
+    static struct part parts[] = {
+        { .id = 0 },
+        { .id = 1, .top = 0, .right = 1, .bottom = 1, .left = 0 },
+        { .id = 2, .top = 0, .right = 0, .bottom = 1, .left = 1 },
+        { .id = 3, .top = 1, .right = 0, .bottom = 0, .left = 1 },
+    };
+    static struct array_part a = { .size = 4, .parts = parts };
+    map_big_array *map = prepare_map_part(&a);
+
+    struct possibility_packet board;
+    make_empty_board(&board);
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, &a, (int8_t)map->sizearrayM);
+
+    /* Le nombre exact de cases étudiées appartient aux tests du forward-check
+     * lui-même (voisines géométriques, arrêt sur case morte) ; ici seule
+     * compte la DATE à laquelle le compteur bouge. On mesure donc le delta du
+     * premier appel au lieu de le coder en dur : le test reste vrai si la
+     * fixture change. */
+    unsigned long long before = fc_cells_studied;
+    int first = fc_verdict(C, &board, map, 0, 0);
+    unsigned long long after_first = fc_cells_studied;
+    unsigned long long delta = after_first - before;
+    ASSERT(delta > 0); /* le compteur a bougé AVANT le retour, pas plus tard */
+
+    /* Un second appel identique ajoute exactement autant : le compteur est
+     * cumulatif et monotone, rien n'est mis en attente ni réinitialisé. */
+    int second = fc_verdict(C, &board, map, 0, 0);
+    ASSERT_EQ_FMT(first, second, "%d");
+    ASSERT_EQ_FMT(after_first + delta, fc_cells_studied, "%llu");
+
+    free_bigarray(map);
+    PASS();
+}
+
 /* bt_forward_check : 1 si chaque voisine VIDE de la pièce qu'on vient de
  * placer en (cx, cy) a un candidat libre, 0 si l'une est morte (aucun
  * candidat / tous utilisés). Coin (0,0) : 2 voisines dans la grille,
@@ -3978,6 +4064,8 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_count_pending_counts_remaining_free);
     RUN_TEST(bt_count_pending_skips_no_decision_and_zero_id);
 #if FORWARD_CHECK_K > 0
+    RUN_TEST(fc_stat_bump_matches_atomic_fetch_add);
+    RUN_TEST(fc_counters_are_visible_as_soon_as_the_forward_check_returns);
     RUN_TEST(bt_forward_check_detects_dead_cells);
     RUN_TEST(bt_forward_check_skips_prefilled_and_zero_id);
     RUN_TEST(bt_forward_check_inspects_at_most_geometric_neighbors);

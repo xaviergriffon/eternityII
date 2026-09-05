@@ -429,6 +429,47 @@ static inline void bt_propagate_undo(key_part constraints[ETERN_SIZE][ETERN_SIZE
 
 #if FORWARD_CHECK_K > 0
 /**
+ * @brief Incrémente un compteur de prunage SANS lecture-modification-écriture verrouillée.
+ *
+ * `fc_attempts`, `fc_pruned`, `fc_cells_studied` et `fc_pruned_at[]` sont
+ * écrits, dans un processus donné, par le SEUL thread de recherche :
+ * `run_mono_client` (`app/etii_client.c`) exécute `autosearch`/`autoprune`
+ * dans le thread courant, et `NB_THREADS` compte des FORKS — des processus,
+ * dont chacun a sa propre copie de ces globales (agrégées par IPC, cf.
+ * `fork_statistics`). Les autres threads du processus (alimentation,
+ * contrôle, statistiques) ne font que LIRE.
+ *
+ * Un `__atomic_fetch_add` était donc un verrou pris contre personne : ~4,6
+ * par nœud, chacun sérialisant le pipeline. Une lecture relâchée suivie d'une
+ * écriture relâchée fait exactement le même travail pour un écrivain unique,
+ * en `mov`/`add`/`mov` sans préfixe `lock`.
+ *
+ * **Ce n'est pas une course de données** : les deux accès restent atomiques
+ * (modèle mémoire C11), seule la garantie d'atomicité de l'ENSEMBLE
+ * lecture+écriture disparaît — celle dont un écrivain unique n'a pas besoin.
+ * C'est déjà le contrat de `counters[]`, le compteur de nœuds, incrémenté en
+ * clair par ce même thread et lu par le thread de statistiques.
+ *
+ * Les chemins FROIDS gardent `__atomic_fetch_add` : `possibility.c`
+ * (`possibility_all_has_a_next_counted`) est atteignable depuis le thread de
+ * console via `removeNoNext`, donc potentiellement concurrent en mode `test`.
+ * Y mêler une écriture non-RMW ne pourrait coûter qu'un incrément de
+ * STATISTIQUE perdu, jamais une incohérence de recherche — mais ces chemins
+ * ne sont pas chauds, ils n'ont rien à y gagner.
+ *
+ * Fraîcheur INCHANGÉE : la globale est écrite au même instant qu'avant. C'est
+ * ce qui distingue cette approche d'un cumul local publié périodiquement, qui
+ * décalerait le taux d'élagage lu par `bench_poll_and_maybe_stop` pendant que
+ * la recherche tourne.
+ */
+static inline void fc_stat_bump(volatile unsigned long long *counter, unsigned long long n)
+{
+    __atomic_store_n(counter, __atomic_load_n(counter, __ATOMIC_RELAXED) + n, __ATOMIC_RELAXED);
+}
+#endif // FORWARD_CHECK_K > 0
+
+#if FORWARD_CHECK_K > 0
+/**
  * @brief Forward-checking de la boucle chaude, basé sur le cache de contraintes.
  *
  * Inspecte les voisines géométriques de la pièce posée en `(cx, cy)` (au plus
@@ -502,8 +543,8 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
             if (id_mask != NULL && mapParts->id_mask_words <= MRV_USED_WORDS) {
                 if (!map_mask_any_free(id_mask, mapParts->id_mask_words, used)) {
                     // case morte : aucune pièce candidate libre
-                    __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
-                    __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+                    fc_stat_bump(&fc_pruned_at[rank], 1);
+                    fc_stat_bump(&fc_cells_studied, cells);
                     return 0;
                 }
                 continue;
@@ -520,8 +561,8 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         map_bucket search = map_bucket_packed(mapParts, &constraints[x][y]);
         if (search.size == 0) {
             // case morte : aucune pièce candidate
-            __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
-            __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+            fc_stat_bump(&fc_pruned_at[rank], 1);
+            fc_stat_bump(&fc_cells_studied, cells);
             return 0;
         }
 
@@ -536,8 +577,8 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
             }
             if (!found) {
                 // case morte : toutes les pièces candidates sont déjà utilisées
-                __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
-                __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+                fc_stat_bump(&fc_pruned_at[rank], 1);
+                fc_stat_bump(&fc_cells_studied, cells);
                 return 0;
             }
             continue;
@@ -557,8 +598,8 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         }
         if (free_count == 0) {
             // case morte : toutes les pièces candidates sont déjà utilisées
-            __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
-            __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+            fc_stat_bump(&fc_pruned_at[rank], 1);
+            fc_stat_bump(&fc_cells_studied, cells);
             return 0;
         }
         if (free_count == 1) {
@@ -566,9 +607,9 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
             // même balayage exige déjà la même pièce (théorème de Hall, |S|=2).
             for (int k = 0; k < nb_singletons; k++) {
                 if (singleton_ids[k] == first_free_id) {
-                    __atomic_fetch_add(&fc_singleton_conflict, 1, __ATOMIC_RELAXED);
-                    __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
-                    __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+                    fc_stat_bump(&fc_singleton_conflict, 1);
+                    fc_stat_bump(&fc_pruned_at[rank], 1);
+                    fc_stat_bump(&fc_cells_studied, cells);
                     return 0;
                 }
             }
@@ -576,7 +617,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
         }
     }
 
-    __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+    fc_stat_bump(&fc_cells_studied, cells);
     return 1;
 }
 
@@ -624,12 +665,12 @@ static int bt_forward_check_fast(const struct possibility_packet *board,
         }
         if (any == 0) {
             // case morte : aucune pièce candidate libre
-            __atomic_fetch_add(&fc_pruned_at[rank], 1, __ATOMIC_RELAXED);
-            __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+            fc_stat_bump(&fc_pruned_at[rank], 1);
+            fc_stat_bump(&fc_cells_studied, cells);
             return 0;
         }
     }
-    __atomic_fetch_add(&fc_cells_studied, cells, __ATOMIC_RELAXED);
+    fc_stat_bump(&fc_cells_studied, cells);
     return 1;
 }
 #endif // FORWARD_CHECK_K > 0
@@ -1519,7 +1560,7 @@ backtrack:;
                     placed_count++;
 #if FORWARD_CHECK_K > 0
                     if (placed_count < ETERN_PARTS) {
-                        __atomic_fetch_add(&fc_attempts, 1, __ATOMIC_RELAXED);
+                        fc_stat_bump(&fc_attempts, 1);
                         int alive = (fast && !singleton_conflict_check)
                             ? bt_forward_check_fast(&board, used, cell_mask, cx, cy)
                             : bt_forward_check(constraints, &board, client->map_part, used, cell_mask, cx, cy);
@@ -1531,7 +1572,7 @@ backtrack:;
                             bt_frontier_undo(&frontier, cx, cy);
                             bt_mask_refresh(cell_mask, client->map_part, constraints, cx, cy);
                             placed_count--;
-                            __atomic_fetch_add(&fc_pruned, 1, __ATOMIC_RELAXED);
+                            fc_stat_bump(&fc_pruned, 1);
                             continue;
                         }
                     }
