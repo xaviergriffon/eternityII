@@ -98,6 +98,48 @@ wait_for_log() {
     return 1
 }
 
+# --- Idem, en RÉÉMETTANT la commande console tant qu'on attend --------------
+# wait_for_log_repeating <fichier> <motif> <timeout_s> <commande console>
+#
+# Les commandes de la console SERVEUR qui pilotent un client (`clientsStats`,
+# `pause`, `resume`) sont ASYNCHRONES : elles déposent une demande dans la file
+# de la session de contrôle (`control_registry_post_command`) et rendent la main
+# aussitôt. Le thread de session ne la relève qu'à son prochain passage par
+# `control_registry_wait_command` ; s'il est à cet instant au milieu d'un
+# aller-retour CTRL_PING, dont la réception est bornée par le `SO_RCVTIMEO` du
+# socket (`tcp_timeout`, 10 s par défaut), le relevé attend d'autant.
+#
+# En local ce délai est indiscernable (mesuré : < 1 s sur 12 exécutions), mais
+# sur un runner GitHub à 2 vCPU il a été observé à 9 s dans un cas et au-delà
+# des 60 s du timeout dans un autre — sur le MÊME commit, l'exécution
+# déclenchée par `pull_request` passant et celle déclenchée par `push`
+# échouant. Attendre un unique relevé rend donc ce test tributaire de l'instant
+# où la commande tombe dans le cycle de la session.
+#
+# Réémettre la commande toutes les 2 s supprime cette dépendance — c'est ce que
+# ferait un opérateur devant une console qui ne répond pas — sans rien changer
+# au comportement mesuré : les trois commandes concernées sont idempotentes
+# (`pause` sur un client déjà en pause, `resume` sur un client déjà actif et
+# `clientsStats` sont sans effet supplémentaire), et le motif attendu reste
+# rigoureusement le même.
+wait_for_log_repeating() {
+    local file="$1" pattern="$2" tmax="$3" cmd="$4"
+    local ticks=$(( tmax * 5 )) i=0
+    while [ "$i" -lt "$ticks" ]; do
+        if [ -f "$file" ] && grep -Eq "$pattern" "$file" 2>/dev/null; then
+            return 0
+        fi
+        # Réémission toutes les 10 ticks (2 s), jamais au premier tour : le
+        # cas normal est que la commande déjà envoyée suffise.
+        if [ "$i" -gt 0 ] && [ $(( i % 10 )) -eq 0 ]; then
+            echo "$cmd" >&3
+        fi
+        sleep 0.2
+        i=$(( i + 1 ))
+    done
+    return 1
+}
+
 # --- Lancement serveur puis client, pilotés par FIFO ------------------------
 # 2 threads serveur : 1 pour le fork de recherche du client, 1 pour la session
 # de contrôle de son parent (même pool NB_THREADS, cf. control_registry.h).
@@ -129,19 +171,19 @@ check $? "session de contrôle enregistrée côté serveur"
 
 # --- 2. clientsStats : round-trip CTRL_GET_STATS ----------------------------
 echo "clientsStats" >&3
-wait_for_log server.log "stats client :" "$TIMEOUT"
+wait_for_log_repeating server.log "stats client :" "$TIMEOUT" "clientsStats"
 check $? "clientsStats : statistiques agrégées reçues (server.log)"
 
 # --- 3. pause (console serveur) : round-trip CTRL_COMMAND "pause" -----------
 echo "pause" >&3
-wait_for_log server.log 'commande distante "pause" exécutée \(code retour 0\)' "$TIMEOUT"
+wait_for_log_repeating server.log 'commande distante "pause" exécutée \(code retour 0\)' "$TIMEOUT" "pause"
 check $? "pause : commande diffusée et acquittée avec succès (server.log)"
 wait_for_log client.log "pause administrative demandée" "$TIMEOUT"
 check $? "pause : pause administrative appliquée côté client (client.log)"
 
 # --- 4. resume (console serveur) : round-trip CTRL_COMMAND "resume" ---------
 echo "resume" >&3
-wait_for_log server.log 'commande distante "resume" exécutée \(code retour 0\)' "$TIMEOUT"
+wait_for_log_repeating server.log 'commande distante "resume" exécutée \(code retour 0\)' "$TIMEOUT" "resume"
 check $? "resume : commande diffusée et acquittée avec succès (server.log)"
 wait_for_log client.log "pause administrative levée" "$TIMEOUT"
 check $? "resume : pause administrative levée côté client (client.log)"
