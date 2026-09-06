@@ -4,7 +4,7 @@
 
 **Goal:** Build a permanent tool that exhaustively counts every valid closed border ring (60 cells on the real 16×16 puzzle: 4 corners + 56 edge pieces) anchored at corner `(0,0)`, and reports the total mass (`N` found × 4, one multiplier per corner placement obtained by rotation) — phase 1 output is a number only, no root files.
 
-**Architecture:** A pure-core sequential DFS (`tests/tools/border_walk.c`) walks a fixed 60-cell perimeter order and reuses the existing lookup/key machinery (`prepare_map_part`, `map_bucket_packed`, `what_search_in_grid_to_key`, `set_face_used`/`is_face_used`) unmodified — interior cells are never touched, so their wildcard behavior already gives the right "don't care" semantics for free. A thin CLI driver (`tests/tools/border_mass.c`) loads the real puzzle data, checks that no official index sits on a border cell (the precondition the ×4 symmetry depends on), and prints the count.
+**Architecture:** A pure-core sequential DFS (`tests/tools/border_walk.c`) walks a fixed 60-cell perimeter order and reuses the existing lookup/key machinery (`prepare_map_part`, `map_bucket_packed`, `what_search_in_grid_to_key`, `set_face_used`/`is_face_used`) unmodified — interior cells are never touched, so their wildcard behavior already gives the right "don't care" semantics for free. Because no neighbor is placed yet at the very first cell, the DFS itself explores all 4 corners as possible openers at `(0,0)`, so its raw count *is* the total mass already (discovered during Task 2 — see that task's dispatch notes; no external ×4). A thin CLI driver (`tests/tools/border_mass.c`) loads the real puzzle data, checks that no official index sits on a border cell (the precondition this counting depends on), and prints the count.
 
 **Tech Stack:** C (gnu99), existing `src/core/` puzzle data structures, `greatest` test framework (already vendored at `tests/greatest.h`), GNU Make.
 
@@ -27,7 +27,7 @@
 | `tests/tools/border_walk.h` | Public API of the pure core: `BORDER_RING_LEN`, `border_ring_order`, `border_ring_found_cb`, `border_walk_count`. |
 | `tests/tools/border_walk.c` | Implementation: ring traversal order, sequential DFS enumeration. No I/O. |
 | `tests/tools/test_border_walk.c` | Unit tests (greatest), covering geometry (Task 1) and enumeration correctness (Task 2). |
-| `tests/tools/border_mass.c` | CLI driver: loads `pieces.csv`/`indices.csv`, checks the border-index precondition, prints `N` and `4×N`. |
+| `tests/tools/border_mass.c` | CLI driver: loads `pieces.csv`/`indices.csv`, checks the border-index precondition, prints `N` (the total mass directly — see Task 2). |
 | `makefile` | New `.PHONY: border-mass` target; `border_walk.c` added to `TEST_MODULES`; `test_border_walk.c` added to `TEST_SUITES_COMMON`. |
 | `tests/test_main.c` | New `SUITE_EXTERN(border_walk_suite)` / `RUN_SUITE(border_walk_suite)`. |
 | `docs/tests_et_ci.md` | New `## Outil border_mass` section, modeled on the existing `## Outil gen_root` section. |
@@ -279,8 +279,12 @@ typedef void (*border_ring_found_cb)(const struct possibility_packet *ring_state
  * @param all_rotate_parts Tableau de toutes les rotations (`rotate_all_parts`).
  * @param on_found         Appelé pour chaque anneau trouvé (peut être NULL).
  * @param ctx              Passé tel quel à `on_found`.
- * @return                 N, le nombre d'anneaux trouvés (jamais ×4 — cette
- *                         multiplication reste à la charge de l'appelant).
+ * @return                 N — la masse totale directement. Aucun voisin
+ *                         n'est encore posé à la toute première case : le DFS
+ *                         explore donc déjà les 4 coins possibles comme point
+ *                         d'ouverture en (0,0), retrouvant chaque anneau
+ *                         abstrait une fois par coin. Pas de ×4 à appliquer
+ *                         en aval.
  */
 long long border_walk_count(map_big_array *map,
                              struct array_part *all_rotate_parts,
@@ -292,8 +296,13 @@ long long border_walk_count(map_big_array *map,
 In `tests/tools/test_border_walk.c`, add `#include "core/readdata.h"`, `#include <stdio.h>`, `#include <stdlib.h>`, `#include <unistd.h>` to the includes, then add before `SUITE(border_walk_suite)`:
 
 ```c
-#define BW_EDGE_BASE 2000
-#define BW_INTERIOR_PLACEHOLDER 999
+/* Bases choisies pour rester à l'intérieur de int8_t (les faces de `struct
+   part` sont des int8_t, cf. src/core/part.h) tout en restant juste après la
+   plage des leurres ([1,10]) : maxFace = BW_EDGE_BASE + BORDER_RING_LEN - 1
+   ≈ 71 sur le jeu 256 pièces (contre 22 pour data/pieces.csv), gardant la
+   table de lookup de la fixture proche de l'échelle de production. */
+#define BW_EDGE_BASE 12
+#define BW_INTERIOR_PLACEHOLDER 11
 
 /* Couleur requise sur la face de `ring[i]` tournée vers `(nx,ny)` : 0 hors
    grille, une couleur unique par arête de l'anneau si `(nx,ny)` est le
@@ -393,7 +402,17 @@ TEST border_walk_count_returns_zero_without_any_border_shaped_piece(void)
     PASS();
 }
 
-TEST border_walk_count_finds_the_single_crafted_ring(void)
+/* Une pièce crée un anneau valide UNIQUE (en tant qu'objet cyclique abstrait)
+   quand `with_unique_ring` est vrai — et pourtant border_walk_count doit
+   retourner 4, pas 1 : le DFS ne fixe aucune pièce à l'ouverture en (0,0), et
+   à cette toute première étape aucun voisin n'est encore posé, donc n'importe
+   lequel des 4 coins de l'anneau peut servir de point d'ouverture. Chacun
+   produit un placement complet différent sur la grille absolue (le même
+   anneau, mais tourné) — c'est exactement le mécanisme dont dépend la
+   masse totale (`N` EST la masse, pas `4×N`, cf. la spec). Vérifié
+   empiriquement (12 et 60 cases) avant d'écrire cette assertion — ne pas la
+   « corriger » vers 1 sans revérifier. */
+TEST border_walk_count_finds_the_crafted_ring_once_per_opening_corner(void)
 {
     struct array_part *all = bw_make_rotate_parts(1);
     ASSERT(all != NULL);
@@ -404,8 +423,8 @@ TEST border_walk_count_finds_the_single_crafted_ring(void)
     memset(&rec, 0, sizeof rec);
     long long n = border_walk_count(map, all, bw_on_found, &rec);
 
-    ASSERT_EQ_FMT(1LL, n, "%lld");
-    ASSERT_EQ_FMT(1, rec.calls, "%d");
+    ASSERT_EQ_FMT(4LL, n, "%lld");
+    ASSERT_EQ_FMT(4, rec.calls, "%d");
     ASSERT_EQ_FMT(BORDER_RING_LEN, possibility_placed_count(&rec.last), "%d");
 
     int8_t ring[BORDER_RING_LEN][2];
@@ -432,7 +451,7 @@ SUITE(border_walk_suite)
     RUN_TEST(border_ring_order_visits_every_perimeter_cell_exactly_once);
     RUN_TEST(border_ring_order_is_a_closed_walk_of_adjacent_cells);
     RUN_TEST(border_walk_count_returns_zero_without_any_border_shaped_piece);
-    RUN_TEST(border_walk_count_finds_the_single_crafted_ring);
+    RUN_TEST(border_walk_count_finds_the_crafted_ring_once_per_opening_corner);
 }
 ```
 
@@ -550,10 +569,14 @@ Create `tests/tools/border_mass.c`:
  *
  * Énumère par recherche exhaustive tous les anneaux de bordure valides
  * (BORDER_RING_LEN cases du pourtour du plateau), ancrés au coin (0,0), et
- * rapporte N (nombre trouvé) et la masse totale 4×N — les 3 autres coins
- * s'obtiennent par rotation de la grille absolue, gratuite tant qu'aucun
- * indice officiel ne touche le bord (vérifié ci-dessous). Raisonnement
- * complet : docs/superpowers/specs/2026-09-06-masse-bordure-design.md.
+ * rapporte N — la masse totale directement. Aucun voisin n'est encore posé à
+ * la toute première case : le DFS explore donc déjà les 4 coins possibles
+ * comme point d'ouverture, retrouvant chaque anneau abstrait une fois par
+ * coin — pas de ×4 supplémentaire à appliquer (constaté empiriquement
+ * pendant l'implémentation, cf. docs/superpowers/specs/2026-09-06-masse-bordure-design.md
+ * pour le raisonnement complet). Cela suppose qu'aucun indice officiel ne
+ * touche le bord (vérifié ci-dessous) — sinon un seul coin serait valide,
+ * pas 4.
  *
  * Toute la logique d'énumération vit dans tests/tools/border_walk.c, testée
  * unitairement ; ce fichier n'est que l'enveloppe d'entrées/sorties.
@@ -578,7 +601,8 @@ static int border_mass_check_indices_not_on_border(const struct array_index *ind
         if (x == 0 || x == ETERN_SIZE - 1 || y == 0 || y == ETERN_SIZE - 1) {
             fprintf(stderr,
                     "border_mass : l'indice officiel id=%d est en (%d,%d), sur le bord — "
-                    "l'hypothèse de symétrie par rotation (x4) ne tient plus, refus de continuer\n",
+                    "un seul coin pourrait alors ouvrir la recherche, ce chiffre ne serait "
+                    "plus la masse totale, refus de continuer\n",
                     indices->indices[i].id, x, y);
             return -1;
         }
@@ -609,8 +633,7 @@ int main(int argc, char **argv)
     }
 
     long long n = border_walk_count(map, all, NULL, NULL);
-    printf("anneaux trouvés (ancrés au coin (0,0)) : %lld\n", n);
-    printf("masse totale (x4, symétrie de rotation) : %lld\n", n * 4);
+    printf("masse totale des anneaux de bordure valides : %lld\n", n);
 
     return 0;
 }
@@ -641,7 +664,7 @@ Run: `make border-mass`
 Expected: compiles cleanly, produces `tests/tools/border_mass`.
 
 Run: `tests/tools/border_mass data/pieces.csv data/indices.csv`
-Expected: two lines printed, `anneaux trouvés (ancrés au coin (0,0)) : <N>` and `masse totale (x4, symétrie de rotation) : <4N>`, process exits 0. This is the phase-1 deliverable number — record it wherever the spec's "Critères de succès" asks (this plan does not prescribe where to publish it; report it back once obtained). If the run does not terminate in an acceptable time, interrupt it and report that instead — per the spec, non-termination is itself a valid phase-1 finding.
+Expected: one line printed, `masse totale des anneaux de bordure valides : <N>`, process exits 0. This is the phase-1 deliverable number — record it wherever the spec's "Critères de succès" asks (this plan does not prescribe where to publish it; report it back once obtained). If the run does not terminate in an acceptable time, interrupt it and report that instead — per the spec, non-termination is itself a valid phase-1 finding.
 
 Run: `make border-mass CPPFLAGS="-DETERN_PARTS=16"` then `tests/tools/border_mass data/pieces16.csv data/indices.csv` if a 16-piece dataset with matching indices exists under `data/`; otherwise skip this smaller-scale run (check `ls data/` for what's actually available before assuming a specific filename).
 
@@ -672,10 +695,13 @@ In `docs/tests_et_ci.md`, immediately after the existing `## Outil gen_root (mak
 Mesure la **masse totale** des anneaux de bordure valides (les
 `BORDER_RING_LEN` = `4×(ETERN_SIZE-1)` cases du pourtour du plateau — 60 sur
 le puzzle 256 pièces) : une recherche exhaustive ancrée au coin `(0,0)`
-trouve toute la population d'anneaux (un anneau, objet cyclique, n'a pas de
-coin de départ privilégié), et la masse totale s'obtient en multipliant par 4
-— un facteur purement arithmétique, valable tant qu'aucun indice officiel ne
-touche une case de bord (vérifié au démarrage par l'outil lui-même). Voir
+trouve toute la population d'anneaux, et le nombre brut trouvé **est** déjà
+la masse totale — aucun voisin n'est encore posé à la toute première case,
+donc le DFS explore de lui-même les 4 coins possibles comme point
+d'ouverture, retrouvant chaque anneau abstrait une fois par coin (constaté
+empiriquement pendant l'implémentation). Cela suppose qu'aucun indice
+officiel ne touche une case de bord (vérifié au démarrage par l'outil
+lui-même) — sinon un seul coin serait valide comme ouverture, pas 4. Voir
 [docs/superpowers/specs/2026-09-06-masse-bordure-design.md](superpowers/specs/2026-09-06-masse-bordure-design.md)
 pour le raisonnement complet.
 
@@ -686,8 +712,8 @@ tests/tools/border_mass data/pieces.csv data/indices.csv
 
 Contrairement à `gen_root`, cet outil ne produit aucune racine de stock —
 c'est la **phase 1** d'un projet en deux temps : seul un chiffre est
-rapporté (`N` anneaux trouvés, masse `4×N`). La génération de racines `.back`
-à partir des anneaux trouvés est un sous-projet distinct, non implémenté.
+rapporté (la masse totale `N`). La génération de racines `.back` à partir des
+anneaux trouvés est un sous-projet distinct, non implémenté.
 
 Le cœur pur (`border_walk.c`) est compilé avec les autres modules et couvert
 par `test_border_walk.c`, comme `root_from_board.c` pour `gen_root`. Il
@@ -745,3 +771,9 @@ git commit -m "Documente l'outil border_mass"
 - **Spec coverage:** every phase-1 requirement in the spec has a task — ring order + wiring (Task 1), enumeration + precondition-dependent correctness (Task 2), CLI + precondition check itself (Task 3), doc updates (Task 4). The spec's explicit non-objectives (root generation, persistence, meet-in-the-middle) have deliberately no task here.
 - **Type consistency checked:** `BORDER_RING_LEN`, `border_ring_order`, `border_ring_found_cb`, `border_walk_count` are declared once in Task 1/2's header edits and used with identical signatures in `border_walk.c`, `test_border_walk.c`, and `border_mass.c`.
 - **No placeholders:** every step carries real, complete code; the one adaptive step (Task 3, Step 3's "if it doesn't terminate, report that instead") is a legitimate measurement-outcome branch explicitly anticipated by the spec's "Risque connu, assumé" section, not a vague instruction.
+
+### Mid-execution correction (during Task 2, 2026-09-06)
+
+The original Task 2 text (and the spec) claimed `border_walk_count` returns `N` and the caller multiplies by 4 for the total mass. This was wrong, discovered when the Task 2 implementer's crafted "exactly one ring" fixture returned 4 instead of 1. Root cause verified independently with a standalone diagnostic (empirically, at both `BORDER_RING_LEN=12` and `=60`): the DFS places no constraint on either non-outward side of the very first cell (no neighbor is placed yet), so any of a ring's 4 corner pieces can open the search at `(0,0)`, and each produces a distinct, valid, complete grid placement (the same ring, rotated). `N` therefore already **is** the total mass — the external `×4` in the original plan/spec text would have double-counted it as `×16`. This document has been corrected throughout (Task 2's test now expects 4 for one crafted ring, Task 3's driver prints `N` directly, the spec's "Pourquoi la symétrie de rotation tient" section carries the corrected reasoning) before Task 2 was completed, so no task built on the wrong formula.
+
+A secondary, independently-measured finding from the same diagnostic: the crafted-ring test fixture's per-edge-unique-color scheme pushes `maxFace` to ~71 for the 256-piece build (vs. 22 for real puzzle data), costing ~8.7s and ~866MB peak per `make test` run for that one test. `BW_EDGE_BASE` was tightened from an original (buggy, `int8_t`-overflowing) `2000` down to `12` — starting right after the fixture's decoy-color range instead of an arbitrary offset — but the underlying `O(BORDER_RING_LEN)`-many-unique-colors cost remains. Accepted as a known, documented phase-1 cost (see spec's Tests section) rather than pursued further (a smaller palette needs pair-uniqueness, e.g. a de Bruijn-style construction, judged disproportionate complexity for a test fixture right now).

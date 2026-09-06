@@ -31,4 +31,37 @@
  */
 void border_ring_order(int8_t ring[BORDER_RING_LEN][2]);
 
+/**
+ * @brief Appelé pour chaque anneau de bordure fermé trouvé par
+ * `border_walk_count`. `ring_state` n'est valide que pendant l'appel (le
+ * DFS continue son backtracking juste après) — le copier si on veut le
+ * garder.
+ */
+typedef void (*border_ring_found_cb)(const struct possibility_packet *ring_state, void *ctx);
+
+/**
+ * @brief Énumère par recherche exhaustive tous les anneaux de bordure
+ * valides, ancrés au coin `(0,0)`.
+ *
+ * Ne pose jamais de case intérieure : `what_search_in_grid_to_key` traite
+ * alors le côté intérieur d'une pièce de bord comme joker, exactement le
+ * comportement voulu. La fermeture du cycle (dernière case posée, `(0,1)`,
+ * adjacente à `(0,0)` déjà posé) est vérifiée par ce même mécanisme, sans
+ * code dédié.
+ *
+ * @param map              Table de lookup pré-calculée (`prepare_map_part`).
+ * @param all_rotate_parts Tableau de toutes les rotations (`rotate_all_parts`).
+ * @param on_found         Appelé pour chaque anneau trouvé (peut être NULL).
+ * @param ctx              Passé tel quel à `on_found`.
+ * @return                 N — la masse totale directement. Aucun voisin
+ *                         n'est encore posé à la toute première case : le DFS
+ *                         explore donc déjà les 4 coins possibles comme point
+ *                         d'ouverture en (0,0), retrouvant chaque anneau
+ *                         abstrait une fois par coin. Pas de ×4 à appliquer
+ *                         en aval.
+ */
+long long border_walk_count(map_big_array *map,
+                             struct array_part *all_rotate_parts,
+                             border_ring_found_cb on_found, void *ctx);
+
 #endif /* eternityII_border_walk_h */

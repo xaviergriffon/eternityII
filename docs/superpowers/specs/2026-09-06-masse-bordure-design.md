@@ -40,23 +40,39 @@ plateau font chacun 14 pièces de bord + 1 coin, donc de longueur égale).
 
 Conséquence : une recherche exhaustive ancrée en un seul coin trouve déjà
 **toute** la population d'anneaux valides — un anneau, en tant qu'objet
-cyclique, n'a pas de coin de départ privilégié ; l'ancrer ailleurs retrouverait
-les mêmes anneaux, pas d'autres. Ce que la rotation apporte, c'est 3
-**placements** supplémentaires sur la grille absolue par anneau trouvé (lequel
-de ses 4 coins tombe en `(0,0)` physique vs `(15,0)` vs `(15,15)` vs `(0,15)`)
-— donc potentiellement 4 racines candidates par anneau, mais cela ne concerne
-que la phase 2. Seule la réflexion (miroir) ne s'applique pas : les pièces ne
-se retournent pas, seulement 0/90/180/270°.
+cyclique, n'a pas de coin de départ privilégié.
+
+**Correction post-implémentation (découverte pendant la phase 1, cf. ledger de
+la tâche 2) :** le DFS ne fixe pas quelle pièce occupe `(0,0)` — il explore
+tous les candidats compatibles avec la forme de coin à cette case. Or, à la
+toute première étape, **aucun voisin n'est encore posé** : les deux côtés non
+tournés vers l'extérieur sont donc joker, pas seulement le côté intérieur.
+N'importe lequel des 4 coins d'un anneau valide peut donc « ouvrir » la
+recherche en `(0,0)`, et chacun mène, en suivant le reste de l'anneau, à un
+placement complet différent sur la grille absolue (le même anneau, mais
+tourné). **Le DFS retrouve donc chaque anneau abstrait une fois par coin, soit
+4 fois** — vérifié empiriquement sur une fixture jouet (12 cases) et à
+l'échelle réelle (60 cases, 4 solutions trouvées dans les deux cas, voir
+tests/tools/test_border_walk.c). Autrement dit, **`N` (la valeur brute
+retournée par `border_walk_count`) EST DÉJÀ la masse totale** — il n'y a pas
+de `×4` supplémentaire à appliquer en aval : cette multiplication externe
+existait dans une version antérieure de cette spec et double-comptait ce que
+le DFS fait déjà tout seul. Seule la réflexion (miroir) ne s'applique pas :
+les pièces ne se retournent pas, seulement 0/90/180/270°.
 
 ## Objectif (phase 1)
 
 Un outil qui :
 1. Énumère par recherche exhaustive tous les anneaux de bordure valides,
    ancrés en `(0,0)`.
-2. Rapporte `N` (nombre d'anneaux trouvés) et la masse totale `4×N`.
+2. Rapporte `N` (nombre d'anneaux trouvés) — `N` **est** la masse totale (le
+   DFS explore déjà les 4 coins possibles comme point d'ouverture en `(0,0)`,
+   voir « Pourquoi la symétrie de rotation tient »), pas de multiplication
+   supplémentaire.
 3. Vérifie explicitement, avant de lancer la recherche, qu'aucun indice
-   officiel ne tombe sur une case de bord — précondition dont dépend le
-   raisonnement `×4`.
+   officiel ne tombe sur une case de bord — précondition dont dépend la
+   validité de ce comptage (un indice sur le bord fixerait quel coin peut
+   ouvrir la recherche, et casserait le ×4 implicite).
 
 Rien d'autre : pas de fichier `.back` produit, pas de stockage des anneaux
 trouvés (au-delà d'un compteur). C'est un outil **permanent** (pas un
@@ -163,10 +179,14 @@ n'est nécessaire.
 
 ### Comptage et masse
 
-`N` = nombre d'anneaux fermés trouvés par le DFS ancré en `(0,0)`.
-Masse totale rapportée = `4 × N` (voir « Pourquoi la symétrie tient »). Cette
-multiplication reste purement arithmétique en phase 1 : aucune rotation n'est
-matérialisée, aucun anneau n'est stocké.
+`N` = nombre d'anneaux fermés trouvés par le DFS ancré en `(0,0)`. `N` **est**
+la masse totale : le DFS n'exige aucune couleur réelle sur les deux côtés non
+tournés vers l'extérieur de la toute première case posée (aucun voisin n'est
+encore placé) — n'importe lequel des 4 coins d'un anneau valide peut donc
+servir de point d'ouverture, et chacun produit un placement complet différent
+sur la grille absolue. Le DFS retrouve ainsi chaque anneau abstrait 4 fois,
+sans multiplication externe à appliquer (voir « Pourquoi la symétrie de
+rotation tient » pour le raisonnement complet et sa vérification empirique).
 
 Signature du cœur pur, pensée pour rester stable en phase 2 (callback
 optionnel non utilisé pour l'instant) :
@@ -178,8 +198,9 @@ typedef void (*border_ring_found_cb)(const struct possibility_packet *ring, void
  * Énumère tous les anneaux de bordure valides ancrés en (0,0).
  * on_found (peut être NULL) est appelé pour chaque anneau complet trouvé ;
  * inutilisé en phase 1, réservé à une extension (génération de racines).
- * Retourne N (nombre d'anneaux trouvés ancrés en un coin), jamais la masse
- * ×4 — cette multiplication reste à la charge de l'appelant.
+ * Retourne N — la masse totale directement (le DFS explore déjà les 4 coins
+ * possibles comme point d'ouverture, cf. section "Pourquoi la symétrie de
+ * rotation tient" ; aucune multiplication supplémentaire n'est nécessaire).
  */
 long long border_walk_count(map_big_array *map,
                              struct array_part *all_rotate_parts,
@@ -204,14 +225,30 @@ possibilité).
 (`-DETERN_PARTS=<n> -DETERN_SIZE=<n>`, comme les tests existants qui
 paramètrent la taille du puzzle) :
 
-- Un petit jeu de pièces de bord construit à la main (par ex. un carré 4×4,
-  12 cases de bord) où le nombre d'anneaux valides est calculable/vérifiable
-  à la main.
-- `border_walk_count` retourne exactement ce nombre.
+- Un jeu de `ETERN_PARTS` pièces construit à la main où les `BORDER_RING_LEN`
+  premières forment un unique anneau de bordure abstrait, chaque arête portant
+  une couleur qui n'apparaît que sur les deux pièces qui la partagent (le
+  reste du jeu, des leurres sans face à 0, jamais candidats sur le bord).
+  `border_walk_count` doit retourner **4**, pas 1 — vérifié empiriquement (12
+  et 60 cases) avant d'écrire l'assertion : un unique anneau abstrait est
+  toujours retrouvé une fois par coin d'ouverture (cf. « Pourquoi la symétrie
+  de rotation tient »), jamais une fois.
 - Aucun anneau trouvé ne réutilise une pièce deux fois (assertion sur
   `b_faceused` à la fermeture de chaque anneau trouvé, via le callback).
 - Cas dégénéré : jeu de pièces sans solution de bordure valide →
   `border_walk_count` retourne 0 sans planter.
+
+**Coût mesuré de cette fixture à l'échelle du jeu 256 pièces** (couleurs
+uniques par arête ⇒ `maxFace` ≈ 71 contre 22 pour les données réelles,
+`data/pieces.csv`) : ~8,7 s et ~866 Mo de pic mémoire pour ce seul test — la
+table de lookup de la fixture est `((maxFace+2)/(22+2))^4` ≈ 130× plus grosse
+que celle de la production. Accepté comme coût connu de `make test` en phase
+1 (voir aussi la plage retenue pour `BW_EDGE_BASE`, ci-dessous, qui limite ce
+facteur en démarrant juste après la plage des leurres plutôt qu'à une valeur
+arbitrairement plus haute) ; à réduire dans une passe ultérieure si ce temps
+devient gênant en pratique (palette plus petite avec unicité des *paires*
+plutôt que des valeurs individuelles — non implémenté, complexité jugée
+disproportionnée pour la phase 1).
 
 ## Build
 
