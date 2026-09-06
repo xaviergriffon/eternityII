@@ -252,18 +252,10 @@ disproportionnée pour la phase 1).
 
 ## Build
 
-Nouvelle cible dans `makefile`, calquée sur `gen-root` :
-
-```make
-BORDER_MASS_BIN := tests/tools/border_mass
-
-.PHONY: border-mass
-border-mass:
-	gcc -Wall -Wextra -std=gnu99 -O2 -Isrc -Itests $(CPPFLAGS) -Werror -o $(BORDER_MASS_BIN) \
-	    tests/tools/border_mass.c tests/tools/border_walk.c \
-	    src/core/readdata.c src/core/part.c src/ui/logger.c \
-	    src/core/core_static_variables.c src/app/app_static_variables.c -lm -pthread
-```
+Nouvelle cible `border-mass` dans `makefile`, calquée sur `gen-root` — voir le
+makefile lui-même pour la ligne de link exacte (elle réutilise `$(TEST_MODULES)`
+tel quel plutôt qu'une liste de fichiers à la main, `border_walk.c` en dépendant
+transitivement via `core/possibility.c`).
 
 `tests/tools/border_walk.c` ajouté à `TEST_MODULES` pour être couvert par
 `make test`/`make coverage`, comme `root_from_board.c`.

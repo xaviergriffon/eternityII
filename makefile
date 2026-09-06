@@ -324,6 +324,10 @@ gen-root:
 # appelle what_search_in_grid_to_key (core/possibility.c), qui entraîne au
 # link tout le graphe déjà nécessaire à `make test` (datamanager.c compris) —
 # plus simple et plus sûr que reconstituer un sous-ensemble minimal à la main.
+# src/core/etii_search.c est ajouté séparément car TEST_MODULES l'exclut à
+# dessein (cf. son propre commentaire, ~100 lignes plus haut) — pas de risque
+# de double symbole ici puisque rien d'autre sur cette ligne de link ne le
+# fournit.
 BORDER_MASS_BIN := tests/tools/border_mass
 
 .PHONY: border-mass

@@ -259,6 +259,13 @@ make border-mass
 tests/tools/border_mass data/pieces.csv data/indices.csv
 ```
 
+Mesuré empiriquement sur `data/pieces.csv` (256 pièces) : ne termine pas en 15
+minutes (interrompu par sécurité, aucun résultat produit) — le DFS séquentiel
+n'a aucune heuristique d'élagage (MRV, forward-check), contrairement au
+moteur de recherche principal, par choix de conception explicite (voir la
+spec). Reste à mesurer si une durée plus longue suffit, ou si l'approche
+meet-in-the-middle (§ « Risque connu, assumé » de la spec) est nécessaire.
+
 Contrairement à `gen_root`, cet outil ne produit aucune racine de stock —
 c'est la **phase 1** d'un projet en deux temps : seul un chiffre est
 rapporté (la masse totale `N`). La génération de racines `.back` à partir des

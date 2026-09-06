@@ -32,7 +32,8 @@ static int border_mass_check_indices_not_on_border(const struct array_index *ind
     for (int i = 0; i < indices->size; i++) {
         int x = indices->indices[i].x;
         int y = indices->indices[i].y;
-        if (x == 0 || x == ETERN_SIZE - 1 || y == 0 || y == ETERN_SIZE - 1) {
+        if (x == 0 || x == ETERN_SIZE - 1 || y == 0 || y == ETERN_SIZE - 1 ||
+            x >= ETERN_SIZE || y >= ETERN_SIZE) {
             fprintf(stderr,
                     "border_mass : l'indice officiel id=%d est en (%d,%d), sur le bord — "
                     "un seul coin pourrait alors ouvrir la recherche, ce chiffre ne serait "

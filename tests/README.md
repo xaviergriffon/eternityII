@@ -87,6 +87,9 @@ make border-mass
 tests/tools/border_mass data/pieces.csv data/indices.csv
 ```
 
+Ne termine pas en 15 minutes sur les données réelles (256 pièces) — voir
+docs/tests_et_ci.md pour le détail.
+
 ## Tests d'intégration bout-en-bout
 
 `tests/integration/` contient des scripts shell séparés de la suite `greatest`

@@ -203,6 +203,16 @@ TEST border_walk_count_finds_the_crafted_ring_once_per_opening_corner(void)
     for (int i = 0; i < BORDER_RING_LEN; i++) {
         ASSERT(rec.last.grid[ring[i][0]][ring[i][1]] != -2);
     }
+    /* Aucune pièce ne doit apparaître deux fois dans l'anneau trouvé. */
+    int seen_id[ETERN_PARTS + 1];
+    memset(seen_id, 0, sizeof seen_id);
+    for (int i = 0; i < BORDER_RING_LEN; i++) {
+        int16_t g = rec.last.grid[ring[i][0]][ring[i][1]];
+        int id = g % ETERN_PARTS;
+        if (id == 0) id = ETERN_PARTS;
+        ASSERT_EQ_FMT(0, seen_id[id], "%d");
+        seen_id[id] = 1;
+    }
     /* Contre-épreuve : le centre du plateau (jamais un bord) doit être resté
        vide — le walker ne pose jamais l'intérieur. */
     ASSERT_EQ_FMT((int16_t)-2, rec.last.grid[ETERN_SIZE / 2][ETERN_SIZE / 2], "%d");

@@ -58,6 +58,9 @@ static void bw_dfs(struct bw_ctx *ctx, int i)
 
     for (int s = 0; s < bucket.size; s++) {
         const struct part *cand = &bucket.parts[s];
+        if (cand->id <= 0) {
+            continue;
+        }
         uint16_t face_idx = (uint16_t)(cand->id - 1);
         if (is_face_used(ctx->state.b_faceused, face_idx)) {
             continue;
@@ -65,11 +68,13 @@ static void bw_dfs(struct bw_ctx *ctx, int i)
 
         ctx->state.grid[x][y] = (int16_t)id_for_rotated_part((uint16_t)cand->id, (uint8_t)cand->rotation);
         set_face_used(ctx->state.b_faceused, face_idx, 1);
+        ctx->state.alloc = (uint16_t)(i + 1);
 
         bw_dfs(ctx, i + 1);
 
         set_face_used(ctx->state.b_faceused, face_idx, 0);
         ctx->state.grid[x][y] = -2;
+        ctx->state.alloc = (uint16_t)i;
     }
 }
 
