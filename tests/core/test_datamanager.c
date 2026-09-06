@@ -53,6 +53,11 @@ void datamanager_reset_rr_state_for_tests(void);
  * ci-dessus, pour l'isolation entre tests. */
 void datamanager_reset_stock_rate_counters_for_tests(void);
 
+/* Réservée aux tests (même rôle que les deux ci-dessus) : remet sort_state à
+ * FILE_SORT_UNKNOWN sur tous les segments, sans quoi un test de tri laisse
+ * des segments (souvent vides) marqués déjà triés pour le test suivant. */
+void datamanager_reset_sort_state_for_tests(void);
+
 /* Fixe (réservé aux tests) le plafond RAM DIRECTEMENT en possibilités, sans
  * passer par l'arrondi Mo -> possibilités — cf. sa doc, datamanager.c. */
 void datamanager_set_ram_limit_packets_for_tests(unsigned long long packets);
@@ -103,6 +108,7 @@ static void drain_datamanager(void)
     }
     datamanager_reset_rr_state_for_tests();
     datamanager_reset_stock_rate_counters_for_tests();
+    datamanager_reset_sort_state_for_tests();
 }
 
 /* Vide aussi le pool « analysed » (réinjecté dans le stock puis drainé). */
@@ -1876,6 +1882,115 @@ TEST sort_ascending_files_bounded_accepts_null_out_params(void)
 
     int rc = sort_ascending_files_bounded(3, NULL, NULL);
     ASSERT_EQ_FMT(0, rc, "%d");
+
+    drain_all();
+    PASS();
+}
+
+/* Optimisation "sauter les files déjà triées" : une passe qui ne suit
+ * immédiatement une autre (aucune insertion entre les deux) ne doit RIEN
+ * re-trier — chaque segment garde en mémoire sa dernière direction triée et
+ * saute le trylock si elle correspond déjà à celle demandée. */
+TEST sort_ascending_files_bounded_skips_unchanged_segments_on_second_pass(void)
+{
+    drain_all();
+
+    enum { N = 40 };
+    struct possibility_packet pks[N];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < N; i++) {
+        pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
+    }
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas();
+    restore_std();
+
+    int sorted = -1, total = -1;
+    int rc = sort_ascending_files_bounded(5, &sorted, &total);
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(total, sorted, "%d"); /* première passe : tout est trié */
+
+    sorted = -1;
+    rc = sort_ascending_files_bounded(5, &sorted, &total);
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT(0, sorted, "%d"); /* rien n'a changé : aucun segment re-trié */
+
+    ASSERT_EQ_FMT((unsigned long long)N, datas_size(), "%llu"); /* rien perdu */
+
+    drain_all();
+    PASS();
+}
+
+/* Une insertion entre deux passes ne dirtie QUE le(s) segment(s) touché(s) :
+ * la passe suivante doit re-trier au moins un segment. */
+TEST sort_ascending_files_bounded_resorts_after_new_insert(void)
+{
+    drain_all();
+
+    enum { N = 40 };
+    struct possibility_packet pks[N];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < N; i++) {
+        pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
+    }
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas();
+    restore_std();
+
+    int sorted = -1, total = -1;
+    ASSERT_EQ_FMT(0, sort_ascending_files_bounded(5, &sorted, &total), "%d");
+    ASSERT_EQ_FMT(total, sorted, "%d");
+
+    struct possibility_packet extra;
+    memset(&extra, 0, sizeof extra);
+    extra.alloc = 3;
+    array_possibility_packet extra_arr = { .size = 1, .possibilities = &extra };
+    add_possibility(NULL, &extra_arr);
+
+    sorted = -1;
+    ASSERT_EQ_FMT(0, sort_ascending_files_bounded(5, &sorted, &total), "%d");
+    ASSERT(sorted >= 1); /* au moins le segment touché par l'ADD est re-trié */
+    ASSERT(sorted < total); /* mais pas les segments non touchés */
+
+    ASSERT_EQ_FMT((unsigned long long)(N + 1), datas_size(), "%llu");
+
+    drain_all();
+    PASS();
+}
+
+/* Un changement de DIRECTION (asc -> desc) ne doit jamais être sauté, même
+ * sans la moindre insertion entre les deux passes : la direction mémorisée
+ * par segment ne correspond plus à celle demandée. */
+TEST sort_files_bounded_resorts_when_direction_changes(void)
+{
+    drain_all();
+
+    enum { N = 40 };
+    struct possibility_packet pks[N];
+    memset(pks, 0, sizeof pks);
+    for (int i = 0; i < N; i++) {
+        pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
+    }
+    array_possibility_packet arr = { .size = N, .possibilities = pks };
+    add_possibility(NULL, &arr);
+
+    silence_std();
+    split_datas();
+    restore_std();
+
+    int sorted = -1, total = -1;
+    ASSERT_EQ_FMT(0, sort_ascending_files_bounded(5, &sorted, &total), "%d");
+    ASSERT_EQ_FMT(total, sorted, "%d");
+
+    sorted = -1;
+    ASSERT_EQ_FMT(0, sort_descending_files_bounded(5, &sorted, &total), "%d");
+    ASSERT_EQ_FMT(total, sorted, "%d"); /* direction différente : rien sauté */
 
     drain_all();
     PASS();
@@ -6911,6 +7026,9 @@ SUITE(datamanager_suite)
     RUN_TEST(sort_ascending_files_bounded_skips_segments_held_by_others);
     RUN_TEST(sort_ascending_files_bounded_clamps_non_positive_max_attempts);
     RUN_TEST(sort_ascending_files_bounded_accepts_null_out_params);
+    RUN_TEST(sort_ascending_files_bounded_skips_unchanged_segments_on_second_pass);
+    RUN_TEST(sort_ascending_files_bounded_resorts_after_new_insert);
+    RUN_TEST(sort_files_bounded_resorts_when_direction_changes);
     RUN_TEST(statistic_and_print_run);
     RUN_TEST(statistic_datas_handles_full_board_alloc);
     RUN_TEST(stock_distribution_separates_the_three_pools);

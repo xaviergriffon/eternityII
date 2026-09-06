@@ -192,15 +192,28 @@ ci-dessus). Un segment toujours verrouillé après ce nombre de tentatives est s
 **sauté pour cette passe** — jamais perdu, retenté à la passe suivante — sans jamais
 bloquer les threads ADD/GET, quel que soit le trafic en cours.
 
+**Chaque segment mémorise sa dernière direction de tri** (`asc`/`desc`/inconnu) et une
+passe **saute directement** (sans même tenter le `trylock`) tout segment déjà trié dans
+le sens demandé et non modifié depuis — la grande majorité du temps en régime stable,
+où la plupart des files n'ont reçu aucun ADD/réinjection/rééquilibrage entre deux passes.
+Toute écriture dans une file (ADD client, rechargement depuis le débordement disque,
+réinjection d'un bail expiré, pas de rééquilibrage, regroupement/répartition console)
+oublie ce souvenir : le segment repasse "à trier" et sera retrié à la prochaine passe. Un
+changement de `--sort-direction` (à chaud via `configApply`) invalide également le
+souvenir de tous les segments, puisque la direction mémorisée ne correspond plus à celle
+demandée.
+
 Désactivé par défaut (opt-in, comme `--auto-roles`) : aucun thread supplémentaire n'est
 démarré sans demande explicite. `--sort-interval`, `--sort-direction` et
 `--sort-lock-attempts` sont sans effet tant que `--sort-enabled` est absent.
 
 Chaque passe journalise une courte ligne `tri périodique du stock (asc|desc, N/M
 segments)` dans `events.log` (M = 2 × nombre de files ; N = segments effectivement
-triés) — seul moyen, hors build debug, de savoir quand le tri automatique s'est
-déclenché et s'il a dû sauter des segments occupés (`N < M`, signe qu'il faudrait
-relever `--sort-lock-attempts` ou l'intervalle). Voir
+(re)triés lors de CETTE passe, jamais ceux sautés parce que déjà à jour). `N` est donc
+bas — souvent 0 — en régime stable, ce qui est le comportement ATTENDU depuis
+l'optimisation ci-dessus, et ne signale un problème que si des segments restent modifiés
+en continu sans jamais retomber à 0 : dans ce cas seulement, `N < M` répété peut indiquer
+des segments occupés au delà de `--sort-lock-attempts` (à relever, comme avant). Voir
 [Console interactive](console.md#zone-events-en-bas-de-lécran).
 
 ```sh

@@ -229,14 +229,40 @@ int datamanager_pool_refill(int is_checked, int file_index, const struct possibi
 int datamanager_rr_next_start(unsigned int *counter, int n);
 
 /**
+ * @brief Dernière direction de tri connue d'un segment (`file_possibility_t`).
+ *
+ * `FILE_SORT_UNKNOWN` (valeur 0, donc défaut d'un `malloc` non initialisé
+ * explicitement) signifie "état inconnu, à trier" — un segment neuf ou
+ * fraîchement modifié doit toujours être retrié, jamais sauté par excès de
+ * confiance.
+ */
+typedef enum
+{
+    FILE_SORT_UNKNOWN = 0,
+    FILE_SORT_ASC,
+    FILE_SORT_DESC,
+} file_sort_state_t;
+
+/**
  * @brief Structure représentant un file de possibilités
- * 
+ *
  * Cette structure permet d'indiquer qu'une file est "lockée" en mutli-thread
+ *
+ * `sort_state` : dernière direction dans laquelle CE segment a été trié par
+ * `sort_files_bounded` (tri périodique --sort-enabled), remise à
+ * `FILE_SORT_UNKNOWN` par tout site qui insère dans `file` (voir
+ * put_to_pool/datamanager_pool_refill/put_back_to_stock/rebalance_pool_step/
+ * regroup_pool_nolock/split_pool_nolock). Lue/écrite sans mutex dédié : chaque
+ * accès a lieu alors que le VERROU DE CE SEGMENT (`lock` ci-dessous, ou
+ * `lock_all_file()` pour les variantes "_nolock") est déjà tenu par
+ * l'appelant, donc jamais concurrent avec lui-même — juste un octet de
+ * bookkeeping, pas une variable de synchronisation.
  */
 typedef struct
 {
     File file;
     pthread_mutex_t lock;
+    file_sort_state_t sort_state;
 } file_possibility_t;
 
 /**
