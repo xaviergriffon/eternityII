@@ -31,7 +31,7 @@ void border_ring_order(int8_t ring[BORDER_RING_LEN][2])
 struct bw_ctx {
     map_big_array *map;
     struct array_part *all_rotate_parts;
-    int8_t ring[BORDER_RING_LEN][2];
+    const int8_t (*order)[2];
     struct possibility_packet state;
     long long count;
     border_ring_found_cb on_found;
@@ -48,8 +48,8 @@ static void bw_dfs(struct bw_ctx *ctx, int i)
         return;
     }
 
-    int8_t x = ctx->ring[i][0];
-    int8_t y = ctx->ring[i][1];
+    int8_t x = ctx->order[i][0];
+    int8_t y = ctx->order[i][1];
 
     key_part key;
     what_search_in_grid_to_key(ctx->all_rotate_parts, &ctx->state, x, y, &key,
@@ -78,27 +78,43 @@ static void bw_dfs(struct bw_ctx *ctx, int i)
     }
 }
 
-long long border_walk_count(map_big_array *map,
-                             struct array_part *all_rotate_parts,
-                             border_ring_found_cb on_found, void *ctx)
+long long border_walk_count_ordered(map_big_array *map,
+                                     struct array_part *all_rotate_parts,
+                                     const int8_t order[BORDER_RING_LEN][2],
+                                     int start_depth,
+                                     const struct possibility_packet *start_state,
+                                     border_ring_found_cb on_found, void *ctx)
 {
     struct bw_ctx bw;
     bw.map = map;
     bw.all_rotate_parts = all_rotate_parts;
-    border_ring_order(bw.ring);
+    bw.order = order;
 
-    memset(&bw.state, 0, sizeof bw.state);
-    for (int x = 0; x < ETERN_SIZE; x++) {
-        for (int y = 0; y < ETERN_SIZE; y++) {
-            bw.state.grid[x][y] = -2;
+    if (start_state != NULL) {
+        bw.state = *start_state;
+    } else {
+        memset(&bw.state, 0, sizeof bw.state);
+        for (int x = 0; x < ETERN_SIZE; x++) {
+            for (int y = 0; y < ETERN_SIZE; y++) {
+                bw.state.grid[x][y] = -2;
+            }
         }
+        bw.state.min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
     }
-    bw.state.min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
 
     bw.count = 0;
     bw.on_found = on_found;
     bw.user_ctx = ctx;
 
-    bw_dfs(&bw, 0);
+    bw_dfs(&bw, start_depth);
     return bw.count;
+}
+
+long long border_walk_count(map_big_array *map,
+                             struct array_part *all_rotate_parts,
+                             border_ring_found_cb on_found, void *ctx)
+{
+    int8_t ring[BORDER_RING_LEN][2];
+    border_ring_order(ring);
+    return border_walk_count_ordered(map, all_rotate_parts, ring, 0, NULL, on_found, ctx);
 }

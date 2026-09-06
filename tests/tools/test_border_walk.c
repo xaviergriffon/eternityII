@@ -222,6 +222,65 @@ TEST border_walk_count_finds_the_crafted_ring_once_per_opening_corner(void)
     PASS();
 }
 
+/* border_walk_count_ordered avec start_depth=0/start_state=NULL doit se
+   comporter EXACTEMENT comme border_walk_count — non-régression du
+   refactor qui a fait de border_walk_count un simple appel à cette
+   fonction. */
+TEST border_walk_count_ordered_matches_border_walk_count_from_scratch(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    int8_t ring[BORDER_RING_LEN][2];
+    border_ring_order(ring);
+
+    long long n = border_walk_count_ordered(map, all, ring, 0, NULL, NULL, NULL);
+    ASSERT_EQ_FMT(4LL, n, "%lld");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+/* Reprendre depuis un état partiel (le premier coin déjà posé avec SA pièce
+   spécifique, pas n'importe laquelle des 4) doit trouver exactement 1
+   solution, pas 4 — fixer quelle pièce ouvre l'anneau élimine les 3 autres
+   placements rotationnels. Construit l'état partiel à la main : la pièce
+   d'id 1, rotation 0, est par construction (bw_required_face) l'UNIQUE
+   pièce qui satisfait exactement la clé de la case ring[0] sans rotation
+   (voir le commentaire de bw_required_face). */
+TEST border_walk_count_ordered_resumes_from_a_partial_state(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    int8_t ring[BORDER_RING_LEN][2];
+    border_ring_order(ring);
+
+    struct possibility_packet start;
+    memset(&start, 0, sizeof start);
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            start.grid[x][y] = -2;
+        }
+    }
+    start.min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+    start.grid[ring[0][0]][ring[0][1]] = (int16_t)id_for_rotated_part(1, 0);
+    set_face_used(start.b_faceused, 0, 1); /* pièce id 1, base 0 */
+    start.alloc = 1;
+
+    long long n = border_walk_count_ordered(map, all, ring, 1, &start, NULL, NULL);
+    ASSERT_EQ_FMT(1LL, n, "%lld");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
 SUITE(border_walk_suite)
 {
     RUN_TEST(border_ring_order_has_the_right_length_and_starts_at_origin);
@@ -229,4 +288,6 @@ SUITE(border_walk_suite)
     RUN_TEST(border_ring_order_is_a_closed_walk_of_adjacent_cells);
     RUN_TEST(border_walk_count_returns_zero_without_any_border_shaped_piece);
     RUN_TEST(border_walk_count_finds_the_crafted_ring_once_per_opening_corner);
+    RUN_TEST(border_walk_count_ordered_matches_border_walk_count_from_scratch);
+    RUN_TEST(border_walk_count_ordered_resumes_from_a_partial_state);
 }
