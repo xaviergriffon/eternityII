@@ -208,3 +208,10 @@ En CI (`.github/workflows/ci.yml`), ces sorties alimentent trois visualisations 
    que le module sous `src/`) avec sa `SUITE`, l'ajouter à `SUITE_EXTERN`/`RUN_SUITE`
    dans `test_main.c`, et compléter `TEST_SRCS` / `TEST_MODULES` dans le `Makefile`
    (en ajoutant les dépendances de link transitives du module).
+3. **Si le module ajouté à `TEST_MODULES` ne vit pas sous `src/`** (le cœur pur
+   d'un outil de `tests/tools/`, par exemple), l'ajouter aussi à
+   `COV_TESTTREE_MODULES` : les boucles d'instrumentation de `coverage-256` /
+   `coverage-16` ne balaient que `src/*/*.c`, alors que leur étape de link
+   réclame `TEST_MODULES` en entier. L'oubli ne se voit ni à `make test` ni à
+   `make test-docker` — seulement au job de couverture de la CI, par un
+   « cannot find …/<module>.o ».
