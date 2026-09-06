@@ -259,6 +259,17 @@ make border-mass
 tests/tools/border_mass data/pieces.csv data/indices.csv
 ```
 
+`--forks N` (défaut : nombre de cœurs détecté) parallélise la recherche :
+le plateau est posé dans l'ordre « coins d'abord » plutôt que l'ordre
+séquentiel (très peu de pièces ont 2 faces nulles adjacentes — 4 sur le
+jeu 256 pièces réel — donc le facteur de branchement des 4 premières étapes
+est minuscule), la recherche est étendue en largeur jusqu'à `N*8` états
+partiels puis distribuée à `N` process forkés. Chaque worker journalise sa
+progression sur `stderr` (une ligne par partition terminée). Voir
+[docs/superpowers/specs/2026-09-06-border-mass-parallel-design.md](superpowers/specs/2026-09-06-border-mass-parallel-design.md)
+pour le raisonnement complet (notamment pourquoi ceci ne réutilise pas
+`fork_gate.c`).
+
 Mesuré empiriquement sur `data/pieces.csv` (256 pièces) : ne termine pas en 15
 minutes (interrompu par sécurité, aucun résultat produit) — le DFS séquentiel
 n'a aucune heuristique d'élagage (MRV, forward-check), contrairement au

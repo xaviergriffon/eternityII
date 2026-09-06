@@ -89,6 +89,8 @@ tests/tools/border_mass data/pieces.csv data/indices.csv
 
 Ne termine pas en 15 minutes sur les données réelles (256 pièces) — voir
 docs/tests_et_ci.md pour le détail.
+`--forks N` parallélise par forks (coins d'abord, expansion en largeur,
+distribution round-robin) — voir la spec liée depuis `docs/tests_et_ci.md`.
 
 ## Tests d'intégration bout-en-bout
 
