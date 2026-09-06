@@ -115,6 +115,18 @@ int main(int argc, const char *argv[]) {
                   bench_target_nodes);
     }
 
+    // ETII_PRUNER_COLOUR_CHECK : variable d'environnement (pas d'option CLI,
+    // expérience de mesure hors du chemin de production, cf.
+    // pruner_colour_starvation_check dans core_static_variables.h) armant le
+    // contrôle de pénurie de couleur du pruner (autoprune_step). Même
+    // précédent que ETII_BENCH_NODES ci-dessus : lue une seule fois ici,
+    // avant tout fork.
+    const char *colour_check_env = getenv("ETII_PRUNER_COLOUR_CHECK");
+    if (colour_check_env != NULL && strcmp(colour_check_env, "0") != 0) {
+        pruner_colour_starvation_check = 1;
+        log_info("pruner : contrôle de pénurie de couleur armé (ETII_PRUNER_COLOUR_CHECK)\n");
+    }
+
     // --stock-files : appliqué ici, avant tout fork/thread, quel que soit le mode — même
     // emplacement que les autres options globales. Appel OBLIGATOIRE et
     // INCONDITIONNEL depuis le passage aux pools alloués dynamiquement

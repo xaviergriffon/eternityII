@@ -643,6 +643,48 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
     return possibility_all_has_a_next_counted(possibility, mapParts, all_rotate_part, NULL);
 }
 
+int possibility_colour_demand_satisfiable(struct possibility_packet *possibility, struct array_part *all_rotate_part, int8_t all_face)
+{
+    int demande[MAX_FACE_MAP] = { 0 };
+    int disponible[MAX_FACE_MAP] = { 0 };
+
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            if (possibility->grid[x][y] != -2) {
+                continue;
+            }
+            key_part key;
+            what_search_in_grid_to_key(all_rotate_part, possibility, (int8_t)x, (int8_t)y, &key, all_face);
+            int8_t sides[4] = { key.k1, key.k2, key.k3, key.k4 };
+            for (int s = 0; s < 4; s++) {
+                if (sides[s] != all_face && sides[s] >= 0 && sides[s] < MAX_FACE_MAP) {
+                    demande[sides[s]]++;
+                }
+            }
+        }
+    }
+
+    for (int id = 1; id <= ETERN_PARTS; id++) {
+        if (is_face_used(possibility->b_faceused, id - 1)) {
+            continue;
+        }
+        const struct part *p = &all_rotate_part->parts[id];
+        int8_t sides[4] = { p->top, p->right, p->bottom, p->left };
+        for (int s = 0; s < 4; s++) {
+            if (sides[s] >= 0 && sides[s] < MAX_FACE_MAP) {
+                disponible[sides[s]]++;
+            }
+        }
+    }
+
+    for (int c = 0; c < MAX_FACE_MAP; c++) {
+        if (demande[c] > disponible[c]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /**
  * @brief Ajoute un `possibility_packet` en fin de file.
  *

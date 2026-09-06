@@ -2556,6 +2556,102 @@ TEST search_light_aborts_on_put_failure(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * possibility_colour_demand_satisfiable : mini-Hall par couleur, pruner only
+ *
+ * Fixture commune : deux cases vides SANS lien de voisinage entre elles,
+ * (1,1) et (2,2), chacune exigeant la couleur 9 via son unique voisin du
+ * haut, PLACÉ ((1,0) et (2,1) respectivement). Le reste de la grille reste au
+ * remplissage par défaut de `new_zeroed_packet` (valeur 0 partout, id fictif
+ * 0 de `parts[]`, jamais compté par la boucle « pièces non posées » qui part
+ * de l'id 1) : les 3 autres côtés de chaque case vide ne réclament donc que
+ * de la couleur 0, dont l'offre (toutes les pièces neutres, ids >= 5,
+ * jamais posées) est surabondante.
+ *
+ * `all_rotate_part` est un tableau plein (indices 0..ETERN_PARTS, requis par
+ * le balayage « pièces non posées » de la fonction testée) : ids 1 et 2 sont
+ * les voisins PLACÉS ci-dessus (couleur 9 en bottom) ; les ids à partir de
+ * CDS_SUPPLY_BASE portent chacun UNE face de couleur 9 et restent LIBRES
+ * (sauf si `mark_one_supply_used` en marque un déjà posé) ; tout le reste est
+ * neutre (couleur 0 sur les 4 faces, libre).
+ * ------------------------------------------------------------------------ */
+#define CDS_NEIGH_A 1
+#define CDS_NEIGH_B 2
+#define CDS_SUPPLY_BASE 3
+
+static struct array_part *build_colour_demand_fixture(int nb_colour9_supply, int mark_one_supply_used,
+                                                       struct possibility_packet *board)
+{
+    static struct part parts[ETERN_PARTS + 1];
+    static struct array_part ap;
+
+    memset(parts, 0, sizeof(parts));
+    for (int id = 0; id <= ETERN_PARTS; id++) {
+        parts[id].id = (int16_t)id; /* faces à 0 (neutre), déjà mises par memset */
+    }
+    parts[CDS_NEIGH_A].bottom = 9;
+    parts[CDS_NEIGH_B].bottom = 9;
+    for (int i = 0; i < nb_colour9_supply; i++) {
+        parts[CDS_SUPPLY_BASE + i].top = 9;
+    }
+    ap.size = ETERN_PARTS + 1;
+    ap.parts = parts;
+
+    memset(board, 0, sizeof(*board)); /* grid à 0 partout (id fictif 0) */
+    board->grid[1][0] = CDS_NEIGH_A;
+    set_face_used(board->b_faceused, CDS_NEIGH_A - 1, 1);
+    board->grid[1][1] = -2; /* case vide A : exige couleur 9 via son voisin du haut */
+    board->grid[2][1] = CDS_NEIGH_B;
+    set_face_used(board->b_faceused, CDS_NEIGH_B - 1, 1);
+    board->grid[2][2] = -2; /* case vide B : exige couleur 9 via son voisin du haut */
+    if (mark_one_supply_used) {
+        /* Marque la 2e pièce d'appoint comme déjà posée ailleurs : son demi-arête
+         * de couleur 9 ne doit plus compter dans le stock disponible. */
+        set_face_used(board->b_faceused, CDS_SUPPLY_BASE, 1);
+    }
+
+    return &ap;
+}
+
+/* Deux cases vides exigent chacune la couleur 9 (demande = 2) ; deux pièces
+ * d'appoint LIBRES portent chacune une face de couleur 9 (disponible = 2) :
+ * demande <= disponible pour toutes les couleurs -> vivant. */
+TEST colour_demand_satisfiable_enough_supply_returns_one(void)
+{
+    struct possibility_packet board;
+    struct array_part *ap = build_colour_demand_fixture(2, 0, &board);
+
+    ASSERT_EQ_FMT(1, possibility_colour_demand_satisfiable(&board, ap, (int8_t)MAX_FACE_MAP), "%d");
+    PASS();
+}
+
+/* Même demande (2), mais UNE SEULE pièce d'appoint libre porte la couleur 9 :
+ * demande (2) > disponible (1) -> mort, sans qu'aucune des deux cases prise
+ * isolément n'ait 0 candidat (condition invisible au forward-check case par
+ * case). */
+TEST colour_demand_satisfiable_starved_colour_returns_zero(void)
+{
+    struct possibility_packet board;
+    struct array_part *ap = build_colour_demand_fixture(1, 0, &board);
+
+    ASSERT_EQ_FMT(0, possibility_colour_demand_satisfiable(&board, ap, (int8_t)MAX_FACE_MAP), "%d");
+    PASS();
+}
+
+/* Deux pièces d'appoint portent la couleur 9, mais l'une des deux est déjà
+ * POSÉE ailleurs sur le plateau : le stock RÉELLEMENT disponible retombe à 1,
+ * insuffisant pour une demande de 2 -> mort. Verrou direct sur l'exclusion
+ * des pièces utilisées (`is_face_used`) du calcul de `disponible[]` : un
+ * balayage qui l'oublierait verrait ce test rester à 1 (faux vivant). */
+TEST colour_demand_satisfiable_excludes_used_pieces_from_supply(void)
+{
+    struct possibility_packet board;
+    struct array_part *ap = build_colour_demand_fixture(2, 1, &board);
+
+    ASSERT_EQ_FMT(0, possibility_colour_demand_satisfiable(&board, ap, (int8_t)MAX_FACE_MAP), "%d");
+    PASS();
+}
+
 SUITE(possibility_suite)
 {
     RUN_TEST(test_directions_covers_every_cell);
@@ -2637,6 +2733,9 @@ SUITE(possibility_suite)
     RUN_TEST(all_has_a_next_counted_skips_already_filled_cells);
     RUN_TEST(all_has_a_next_counted_dead_first_cell_counts_one);
     RUN_TEST(all_has_a_next_counted_complete_board_counts_zero);
+    RUN_TEST(colour_demand_satisfiable_enough_supply_returns_one);
+    RUN_TEST(colour_demand_satisfiable_starved_colour_returns_zero);
+    RUN_TEST(colour_demand_satisfiable_excludes_used_pieces_from_supply);
 #if ETERN_PARTS == 256
     RUN_TEST(all_has_a_next_unconstrained_cell_does_not_hide_later_dead_cell);
     RUN_TEST(all_has_a_next_fixpoint_detects_cascading_forced_dead_cell);

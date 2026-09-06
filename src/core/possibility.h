@@ -213,6 +213,35 @@ int possibility_all_has_a_next(struct possibility_packet *possibility, map_big_a
 int possibility_all_has_a_next_counted(struct possibility_packet *possibility, map_big_array *mapParts, struct array_part *all_rotate_part, unsigned int *out_cells_studied);
 
 /**
+ * @brief Condition nécessaire de disponibilité des couleurs (mini-Hall),
+ *        pruner uniquement, une seule passe sur toute la possibilité.
+ *
+ * Pour chaque couleur `c` : `demande[c]` (demi-arêtes de couleur `c` exigées
+ * par une case encore VIDE, via `what_search_in_grid_to_key`) ne peut jamais
+ * dépasser `disponible[c]` (demi-arêtes de couleur `c` portées par les pièces
+ * NON posées, cf. `is_face_used`/`b_faceused`) : toute demi-arête de
+ * frontière sera appariée à une face DISTINCTE d'une pièce encore libre.
+ * Contrairement au forward-check case par case
+ * (`possibility_all_has_a_next[_counted]`), voit une pénurie répartie sur
+ * PLUSIEURS cases à la fois — structurellement invisible à un test case par
+ * case, chaque case prise isolément pouvant avoir ≥ 1 candidat.
+ *
+ * Contrairement à la piste voisine (§4.3 de
+ * `docs/conception/elagage_recherche.md`, maintenue en incrémental à CHAQUE
+ * pose d'une recherche de plusieurs millions de nœuds, mesurée à −24 % de
+ * débit pour un gain quasi nul), ce contrôle est recalculé UNE SEULE FOIS par
+ * possibilité reçue par le pruner (`autoprune_step`) — jamais pendant une
+ * pose de la recherche.
+ *
+ * @param possibility     Paquet à analyser (non modifié).
+ * @param all_rotate_part Tableau de toutes les rotations, indexé id-comme-indice
+ *                        (rotation 0) pour lire les couleurs d'une pièce.
+ * @param all_face        Valeur sentinelle « toute face » (`mapParts->sizearrayM`).
+ * @return                1 si aucune couleur n'est en pénurie, 0 sinon (mort).
+ */
+int possibility_colour_demand_satisfiable(struct possibility_packet *possibility, struct array_part *all_rotate_part, int8_t all_face);
+
+/**
  * @brief Forward-checking sur les `FORWARD_CHECK_K` prochaines cases vides du parcours.
  *
  * Après avoir sélectionné une pièce candidate, parcourt `directions[]` dans
