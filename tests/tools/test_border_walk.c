@@ -341,6 +341,87 @@ TEST border_corners_first_order_does_not_change_the_count(void)
     PASS();
 }
 
+struct bw_frontier_collect {
+    struct possibility_packet states[BORDER_RING_LEN + 1];
+    int depths[BORDER_RING_LEN + 1];
+    int count;
+};
+
+static void bw_collect_partial(const struct possibility_packet *partial_state, int depth, void *ctx)
+{
+    struct bw_frontier_collect *c = (struct bw_frontier_collect *)ctx;
+    c->states[c->count] = *partial_state;
+    c->depths[c->count] = depth;
+    c->count++;
+}
+
+/* La toute première case (un coin) n'a aucun voisin posé : n'importe lequel
+   des 4 coins-pièces peut l'occuper. L'expansion à un seul niveau (target
+   petit) doit donc produire exactement 4 états partiels, tous à la
+   profondeur 1 — et reprendre chacun avec border_walk_count_ordered doit
+   donner un total de 4, identique à border_walk_count. */
+TEST border_walk_expand_frontier_then_resume_matches_direct_count(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    int8_t ring[BORDER_RING_LEN][2];
+    border_ring_order(ring);
+
+    struct bw_frontier_collect collect;
+    memset(&collect, 0, sizeof collect);
+
+    long long completed_during_expansion =
+        border_walk_expand_frontier(map, all, ring, 2, bw_collect_partial, &collect, NULL, NULL);
+
+    ASSERT_EQ_FMT(0LL, completed_during_expansion, "%lld");
+    ASSERT_EQ_FMT(4, collect.count, "%d");
+    for (int i = 0; i < collect.count; i++) {
+        ASSERT_EQ_FMT(1, collect.depths[i], "%d");
+    }
+
+    long long total = completed_during_expansion;
+    for (int i = 0; i < collect.count; i++) {
+        total += border_walk_count_ordered(map, all, ring, collect.depths[i], &collect.states[i], NULL, NULL);
+    }
+    ASSERT_EQ_FMT(4LL, total, "%lld");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+/* Cas dégénéré : la fixture n'a qu'un seul anneau abstrait possible, donc le
+   facteur de branchement au-delà du premier niveau est minuscule (au plus 1
+   candidat par case, les couleurs étant uniques par arête) — un target de
+   partitions énorme force l'expansion à épuiser tout l'arbre : toutes les
+   complétions sont comptées via on_complete, la frontière finale est vide. */
+TEST border_walk_expand_frontier_exhausts_the_tree_when_target_is_too_high(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    int8_t ring[BORDER_RING_LEN][2];
+    border_ring_order(ring);
+
+    struct bw_frontier_collect collect;
+    memset(&collect, 0, sizeof collect);
+
+    long long completed = border_walk_expand_frontier(map, all, ring, 10000,
+                                                        bw_collect_partial, &collect, NULL, NULL);
+
+    ASSERT_EQ_FMT(4LL, completed, "%lld");
+    ASSERT_EQ_FMT(0, collect.count, "%d");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
 SUITE(border_walk_suite)
 {
     RUN_TEST(border_ring_order_has_the_right_length_and_starts_at_origin);
@@ -353,4 +434,6 @@ SUITE(border_walk_suite)
     RUN_TEST(border_corners_first_order_visits_the_same_cells_as_border_ring_order);
     RUN_TEST(border_corners_first_order_puts_all_4_corners_first);
     RUN_TEST(border_corners_first_order_does_not_change_the_count);
+    RUN_TEST(border_walk_expand_frontier_then_resume_matches_direct_count);
+    RUN_TEST(border_walk_expand_frontier_exhausts_the_tree_when_target_is_too_high);
 }

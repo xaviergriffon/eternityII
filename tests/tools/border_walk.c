@@ -1,6 +1,7 @@
 #include "tools/border_walk.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 void border_ring_order(int8_t ring[BORDER_RING_LEN][2])
 {
@@ -144,4 +145,85 @@ long long border_walk_count(map_big_array *map,
     int8_t ring[BORDER_RING_LEN][2];
     border_ring_order(ring);
     return border_walk_count_ordered(map, all_rotate_parts, ring, 0, NULL, on_found, ctx);
+}
+
+long long border_walk_expand_frontier(map_big_array *map,
+                                       struct array_part *all_rotate_parts,
+                                       const int8_t order[BORDER_RING_LEN][2],
+                                       int target_partitions,
+                                       border_partial_cb on_partial, void *partial_ctx,
+                                       border_ring_found_cb on_complete, void *complete_ctx)
+{
+    struct possibility_packet *level = malloc(sizeof *level);
+    int level_size = 1;
+    memset(&level[0], 0, sizeof level[0]);
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            level[0].grid[x][y] = -2;
+        }
+    }
+    level[0].min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+
+    long long completed = 0;
+    int depth = 0;
+
+    while (level_size < target_partitions && depth < BORDER_RING_LEN) {
+        int8_t x = order[depth][0];
+        int8_t y = order[depth][1];
+
+        struct possibility_packet *next_level = NULL;
+        int next_size = 0;
+        int next_cap = 0;
+
+        for (int e = 0; e < level_size; e++) {
+            struct possibility_packet *base = &level[e];
+            key_part key;
+            what_search_in_grid_to_key(all_rotate_parts, base, x, y, &key, (int8_t)map->sizearrayM);
+            map_bucket bucket = map_bucket_packed(map, &key);
+
+            for (int s = 0; s < bucket.size; s++) {
+                const struct part *cand = &bucket.parts[s];
+                if (cand->id <= 0) {
+                    continue;
+                }
+                uint16_t face_idx = (uint16_t)(cand->id - 1);
+                if (is_face_used(base->b_faceused, face_idx)) {
+                    continue;
+                }
+
+                struct possibility_packet child = *base;
+                child.grid[x][y] = (int16_t)id_for_rotated_part((uint16_t)cand->id, (uint8_t)cand->rotation);
+                set_face_used(child.b_faceused, face_idx, 1);
+                child.alloc = (uint16_t)(depth + 1);
+
+                if (depth + 1 == BORDER_RING_LEN) {
+                    completed++;
+                    if (on_complete != NULL) {
+                        on_complete(&child, complete_ctx);
+                    }
+                    continue;
+                }
+
+                if (next_size == next_cap) {
+                    next_cap = (next_cap == 0) ? 16 : next_cap * 2;
+                    next_level = realloc(next_level, (size_t)next_cap * sizeof *next_level);
+                }
+                next_level[next_size++] = child;
+            }
+        }
+
+        free(level);
+        level = next_level;
+        level_size = next_size;
+        depth++;
+    }
+
+    if (on_partial != NULL) {
+        for (int e = 0; e < level_size; e++) {
+            on_partial(&level[e], depth, partial_ctx);
+        }
+    }
+    free(level);
+
+    return completed;
 }

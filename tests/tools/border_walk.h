@@ -116,4 +116,57 @@ long long border_walk_count(map_big_array *map,
                              struct array_part *all_rotate_parts,
                              border_ring_found_cb on_found, void *ctx);
 
+/**
+ * @brief Appelé pour chaque état partiel de la frontière finale produite par
+ * `border_walk_expand_frontier`. `partial_state` n'est valide que pendant
+ * l'appel — le copier si on veut le garder (c'est un besoin réel : ces
+ * états sont ensuite distribués à des workers forkés).
+ */
+typedef void (*border_partial_cb)(const struct possibility_packet *partial_state,
+                                   int depth, void *ctx);
+
+/**
+ * @brief Étend le plateau en largeur (BFS, un niveau entier à la fois)
+ * jusqu'à ce que le nombre d'états partiels atteigne `target_partitions`,
+ * ou que `BORDER_RING_LEN` soit atteint (jeu de pièces trop petit pour
+ * produire assez de partitions).
+ *
+ * Développe toujours un niveau ENTIER avant de tester la cible — jamais
+ * coupé en cours de route — pour ne pas biaiser la frontière vers les
+ * premières branches explorées dans `order`.
+ *
+ * Analogue en miniature de `expand_datas_to_level` (`core/datamanager.c`) :
+ * même idée (peupler un ensemble d'états à répartir), sans stock ni
+ * persistance — tout tient en mémoire, le temps de l'appel.
+ *
+ * @param map                Table de lookup pré-calculée.
+ * @param all_rotate_parts   Tableau de toutes les rotations.
+ * @param order              Ordre de parcours (`border_ring_order` ou
+ *                           `border_corners_first_order`).
+ * @param target_partitions  Nombre d'états partiels visés (peut être
+ *                           dépassé : un niveau entier est toujours
+ *                           développé en une fois).
+ * @param on_partial         Appelé pour chaque état partiel de la frontière
+ *                           finale, avec sa profondeur (l'index dans
+ *                           `order` à partir duquel `border_walk_count_ordered`
+ *                           doit reprendre). Peut être NULL.
+ * @param partial_ctx        Passé tel quel à `on_partial`.
+ * @param on_complete        Appelé pour chaque anneau complet trouvé
+ *                           PENDANT l'expansion (jeu de pièces trop petit
+ *                           pour atteindre `target_partitions` sans épuiser
+ *                           l'arbre) — ne jamais compter ces anneaux une
+ *                           deuxième fois côté appelant. Peut être NULL.
+ * @param complete_ctx       Passé tel quel à `on_complete`.
+ * @return                   Nombre d'anneaux comptés via `on_complete`
+ *                           pendant l'expansion elle-même (0 dans le cas
+ *                           courant où la frontière est atteinte avant
+ *                           d'épuiser l'arbre).
+ */
+long long border_walk_expand_frontier(map_big_array *map,
+                                       struct array_part *all_rotate_parts,
+                                       const int8_t order[BORDER_RING_LEN][2],
+                                       int target_partitions,
+                                       border_partial_cb on_partial, void *partial_ctx,
+                                       border_ring_found_cb on_complete, void *complete_ctx);
+
 #endif /* eternityII_border_walk_h */
