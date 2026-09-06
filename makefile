@@ -493,6 +493,15 @@ COV_LINK_MODULES   := $(TEST_MODULES)
 # Cf. tests/core/test_etii_search.c (#include "core/etii_search.c").
 COV_INCLUDED_MODULES   := src/core/etii_search.c
 COV_STANDALONE_MODULES := $(filter-out $(COV_INCLUDED_MODULES),$(COV_ALL_MODULES))
+# Modules de TEST_MODULES qui ne vivent PAS sous src/ : le cœur pur d'un outil
+# de tests/tools/. COV_ALL_MODULES ne balaie que src/*/*.c, donc ils ne sont
+# compilés par aucune des deux boucles d'instrumentation ci-dessous sans cette
+# liste — et l'étape de LINK, elle, les réclame (elle lie TEST_MODULES en
+# entier), d'où un « cannot find …/root_from_board.o » qui ne se voit qu'en CI,
+# `make test`/`make test-docker` ne passant pas par cette cible. Ils sont
+# instrumentés comme les sources de test (TEST_SRCS) et restent hors du résumé
+# de couverture du code de PRODUCTION, qui n'énumère que COV_STANDALONE_MODULES.
+COV_TESTTREE_MODULES   := $(filter-out src/%,$(TEST_MODULES))
 
 .PHONY: coverage-256
 coverage-256:
@@ -505,7 +514,7 @@ coverage-256:
 	# 1. Instrumente les modules standalone + les sources de test → un .gcno par
 	#    fichier (les modules jamais exécutés → 0 %). Les COV_INCLUDED_MODULES sont
 	#    instrumentés via leur TU de test (TEST_SRCS), pas compilés seuls.
-	@for src in $(COV_STANDALONE_MODULES) $(TEST_SRCS); do \
+	@for src in $(COV_STANDALONE_MODULES) $(TEST_SRCS) $(COV_TESTTREE_MODULES); do \
 		gcc $(COV_CFLAGS) --coverage -pthread -c $$src \
 			-o $(COV_DIR)/`basename $${src%.c}`.o || exit 1; \
 	done
@@ -543,7 +552,7 @@ coverage-16: $(SOLUTION16_H)
 
 	@mkdir -p $(COV_DIR_16)
 	@rm -f $(COV_DIR_16)/*.gcda
-	@for src in $(COV_STANDALONE_MODULES) $(TEST_SRCS_16); do \
+	@for src in $(COV_STANDALONE_MODULES) $(TEST_SRCS_16) $(COV_TESTTREE_MODULES); do \
 		gcc $(COV_CFLAGS) -DETERN_PARTS=16 --coverage -pthread -c $$src \
 			-o $(COV_DIR_16)/`basename $${src%.c}`.o || exit 1; \
 	done
