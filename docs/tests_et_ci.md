@@ -239,6 +239,38 @@ des faces plutôt que calculé). Détail d'usage et les deux pièges rencontrés
 (`restore` et non `import` ; indices officiels obligatoires) :
 [tests/README.md](../tests/README.md#outils-teststools).
 
+## Outil `border_mass` (`make border-mass`)
+
+Mesure la **masse totale** des anneaux de bordure valides (les
+`BORDER_RING_LEN` = `4×(ETERN_SIZE-1)` cases du pourtour du plateau — 60 sur
+le puzzle 256 pièces) : une recherche exhaustive ancrée au coin `(0,0)`
+trouve toute la population d'anneaux, et le nombre brut trouvé **est** déjà
+la masse totale — aucun voisin n'est encore posé à la toute première case,
+donc le DFS explore de lui-même les 4 coins possibles comme point
+d'ouverture, retrouvant chaque anneau abstrait une fois par coin (constaté
+empiriquement pendant l'implémentation). Cela suppose qu'aucun indice
+officiel ne touche une case de bord (vérifié au démarrage par l'outil
+lui-même) — sinon un seul coin serait valide comme ouverture, pas 4. Voir
+[docs/superpowers/specs/2026-09-06-masse-bordure-design.md](superpowers/specs/2026-09-06-masse-bordure-design.md)
+pour le raisonnement complet.
+
+```sh
+make border-mass
+tests/tools/border_mass data/pieces.csv data/indices.csv
+```
+
+Contrairement à `gen_root`, cet outil ne produit aucune racine de stock —
+c'est la **phase 1** d'un projet en deux temps : seul un chiffre est
+rapporté (la masse totale `N`). La génération de racines `.back` à partir des
+anneaux trouvés est un sous-projet distinct, non implémenté.
+
+Le cœur pur (`border_walk.c`) est compilé avec les autres modules et couvert
+par `test_border_walk.c`, comme `root_from_board.c` pour `gen_root`. Il
+réutilise sans modification `prepare_map_part`/`map_bucket_packed`/
+`what_search_in_grid_to_key` : le côté intérieur d'une pièce de bord n'est
+jamais posé donc toujours traité comme joker par ces fonctions existantes,
+exactement le comportement voulu.
+
 ## Banc de mesure du débit de recherche (`tests/bench/bench_search.sh`)
 
 `make test`/`coverage` valident la correction ; ils ne disent rien du **débit** de

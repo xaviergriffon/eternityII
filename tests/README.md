@@ -36,7 +36,7 @@ partagé reste à la racine de `tests/`.
 | `tests/net/` | Suites des modules `src/net/` (`test_etii_protocol`, `test_control_protocol` — codec du [canal de contrôle](../docs/echanges_client_serveur.md#canal-de-contrôle-v9), `test_local_socket`, `test_tcp`). |
 | `tests/ui/` | Suites des modules `src/ui/` (`test_command_history`, `test_command_match`, `test_command_lines`, `test_console`, `test_logger`). |
 | `tests/app/` | Suites des modules `src/app/` (`test_static_variables`, `test_app_runtime`, `test_etii_client`, `test_etii_server`, `test_control_registry` — registre serveur du canal de contrôle, `test_etii_control` — thread client du canal de contrôle). |
-| `tests/tools/` | Outils autonomes + leur cœur testé (`gen_root` / `root_from_board` — conversion d'un plateau externe en racine de stock). |
+| `tests/tools/` | Outils autonomes + leur cœur testé (`gen_root` / `root_from_board` — conversion d'un plateau externe en racine de stock ; `border_mass` / `border_walk` — masse totale des anneaux de bordure). |
 
 Chaque `test_<module>.c` inclut ses en-têtes de production en forme qualifiée
 (`#include "core/part.h"`, résolu via `-Isrc`) et le harnais en forme courte
@@ -75,6 +75,17 @@ Deux pièges à l'usage, tous deux rencontrés :
   vaut 1 par défaut, donc `first_possibility` pose les 5 indices de
   `data/indices.csv` : un plateau qui en contredit un est hors de l'espace de
   recherche, et sa racine ne mènera jamais à rien.
+
+`border_mass` mesure la masse totale des anneaux de bordure valides (voir
+[docs/tests_et_ci.md](../docs/tests_et_ci.md#outil-border_mass-make-border-mass)
+et [docs/superpowers/specs/2026-09-06-masse-bordure-design.md](../docs/superpowers/specs/2026-09-06-masse-bordure-design.md)).
+Son cœur pur (`border_walk.c`) est, comme celui de `gen_root`, compilé avec
+les autres modules et couvert par `test_border_walk.c`.
+
+```sh
+make border-mass
+tests/tools/border_mass data/pieces.csv data/indices.csv
+```
 
 ## Tests d'intégration bout-en-bout
 
