@@ -6,20 +6,45 @@
  * rapporte N — la masse totale directement. Aucun voisin n'est encore posé à
  * la toute première case : le DFS explore donc déjà les 4 coins possibles
  * comme point d'ouverture, retrouvant chaque anneau abstrait une fois par
- * coin — pas de ×4 supplémentaire à appliquer (constaté empiriquement
- * pendant l'implémentation, cf. docs/superpowers/specs/2026-09-06-masse-bordure-design.md
- * pour le raisonnement complet). Cela suppose qu'aucun indice officiel ne
- * touche le bord (vérifié ci-dessous) — sinon un seul coin serait valide,
- * pas 4.
+ * coin — pas de ×4 supplémentaire à appliquer. Cela suppose qu'aucun indice
+ * officiel ne touche le bord (vérifié ci-dessous).
+ *
+ * `--forks N` (défaut : nombre de cœurs détecté) parallélise : le plateau
+ * est posé dans l'ordre « coins d'abord » (border_corners_first_order —
+ * très peu de pièces ont 2 faces nulles adjacentes, donc le facteur de
+ * branchement des 4 premières étapes est minuscule), étendu en largeur
+ * jusqu'à N*8 états partiels (border_walk_expand_frontier), puis distribué
+ * en round-robin à N process forkés — chacun termine sa part avec
+ * border_walk_count_ordered et renvoie son sous-total au parent par un
+ * pipe dédié. La map de lookup est construite UNE SEULE FOIS avant tout
+ * fork (héritée en COW par les enfants), comme le fait déjà main.c pour le
+ * serveur/client réel.
+ *
+ * Aucune coordination façon fork_gate.c : border_mass est mono-thread avant
+ * de forker ses workers, donc le problème que fork_gate.c résout (un thread
+ * du parent qui tourne encore pendant le fork()) ne se pose pas ici — voir
+ * docs/superpowers/specs/2026-09-06-border-mass-parallel-design.md.
+ *
+ * Aucun gestionnaire de signal : Ctrl-C envoie SIGINT à tout le groupe de
+ * process (parent + enfants forkés, aucun setpgid/setsid n'est appelé) —
+ * comportement par défaut du terminal, suffisant, volontairement pas
+ * réimplémenté.
  *
  * Toute la logique d'énumération vit dans tests/tools/border_walk.c, testée
- * unitairement ; ce fichier n'est que l'enveloppe d'entrées/sorties.
+ * unitairement ; ce fichier n'est que l'enveloppe d'entrées/sorties et
+ * l'orchestration fork/pipe/wait, non testée unitairement (comme
+ * gen_root.c) — vérifiée par smoke test manuel (--forks 1 vs --forks 4 sur
+ * le jeu 16 pièces, même total).
  *
  * Usage :
  *   make border-mass
- *   tests/tools/border_mass data/pieces.csv data/indices.csv
+ *   tests/tools/border_mass [--forks N] data/pieces.csv data/indices.csv
  */
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 #include "core/readdata.h"
 #include "core/part.h"
@@ -45,21 +70,93 @@ static int border_mass_check_indices_not_on_border(const struct array_index *ind
     return 0;
 }
 
+struct bm_partition {
+    struct possibility_packet state;
+    int depth;
+};
+
+struct bm_collect_ctx {
+    struct bm_partition *partitions;
+    int count;
+    int cap;
+};
+
+static void bm_collect_partial(const struct possibility_packet *partial_state, int depth, void *ctx_)
+{
+    struct bm_collect_ctx *ctx = (struct bm_collect_ctx *)ctx_;
+    if (ctx->count == ctx->cap) {
+        ctx->cap = (ctx->cap == 0) ? 16 : ctx->cap * 2;
+        ctx->partitions = realloc(ctx->partitions, (size_t)ctx->cap * sizeof *ctx->partitions);
+    }
+    ctx->partitions[ctx->count].state = *partial_state;
+    ctx->partitions[ctx->count].depth = depth;
+    ctx->count++;
+}
+
+static int bm_default_forks(void)
+{
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) {
+        n = 1;
+    }
+    return (int)n;
+}
+
+/* Traite les partitions worker_id, worker_id+nb_workers, worker_id+2*nb_workers,
+   ... — round-robin plutôt qu'un bloc contigu, pour ne pas concentrer un
+   déséquilibre de charge entre sous-arbres voisins sur un seul worker. */
+static long long bm_run_worker(int worker_id, int nb_workers,
+                                map_big_array *map, struct array_part *all,
+                                const int8_t order[BORDER_RING_LEN][2],
+                                const struct bm_partition *partitions, int nb_partitions)
+{
+    long long total = 0;
+    int done = 0;
+    int assigned = 0;
+    for (int p = worker_id; p < nb_partitions; p += nb_workers) {
+        assigned++;
+    }
+    for (int p = worker_id; p < nb_partitions; p += nb_workers) {
+        long long sub = border_walk_count_ordered(map, all, order, partitions[p].depth,
+                                                    &partitions[p].state, NULL, NULL);
+        total += sub;
+        done++;
+        fprintf(stderr, "border_mass[worker %d] : partition %d/%d terminee, sous-total %lld\n",
+                worker_id, done, assigned, total);
+    }
+    return total;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s <pieces.csv> <indices.csv>\n", argv[0]);
+    int forks = bm_default_forks();
+    int argi = 1;
+    if (argc >= 2 && strcmp(argv[1], "--forks") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "usage: %s [--forks N] <pieces.csv> <indices.csv>\n", argv[0]);
+            return 2;
+        }
+        forks = atoi(argv[2]);
+        if (forks < 1) {
+            forks = 1;
+        }
+        argi = 3;
+    }
+    if (argc - argi != 2) {
+        fprintf(stderr, "usage: %s [--forks N] <pieces.csv> <indices.csv>\n", argv[0]);
         return 2;
     }
+    const char *pieces_path = argv[argi];
+    const char *indices_path = argv[argi + 1];
 
-    struct array_index *indices = read_indices(argv[2]);
+    struct array_index *indices = read_indices(indices_path);
     int indices_ok = (border_mass_check_indices_not_on_border(indices) == 0);
     free_array_index(indices);
     if (!indices_ok) {
         return 1;
     }
 
-    struct array_part *apart = read_parts(argv[1]);
+    struct array_part *apart = read_parts(pieces_path);
     struct array_part *all = rotate_all_parts(apart);
     map_big_array *map = prepare_map_part(all);
     if (map == NULL) {
@@ -67,8 +164,73 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    long long n = border_walk_count(map, all, NULL, NULL);
-    printf("masse totale des anneaux de bordure valides : %lld\n", n);
+    int8_t order[BORDER_RING_LEN][2];
+    border_corners_first_order(order);
 
+    struct bm_collect_ctx collect;
+    memset(&collect, 0, sizeof collect);
+    long long completed_during_expansion =
+        border_walk_expand_frontier(map, all, order, forks * 8,
+                                     bm_collect_partial, &collect, NULL, NULL);
+
+    fprintf(stderr, "border_mass : %d partitions, %d worker(s)\n", collect.count, forks);
+
+    if (collect.count == 0) {
+        printf("masse totale des anneaux de bordure valides : %lld\n", completed_during_expansion);
+        free(collect.partitions);
+        return 0;
+    }
+
+    /* Vider les tampons stdio AVANT fork() : sinon chaque enfant hérite d'une
+       copie du contenu déjà écrit (mais pas encore vidé) par read_parts/read_indices
+       plus haut, et le revide indépendamment à son propre exit() — dupliquant les
+       lignes de log une fois par worker. */
+    fflush(stdout);
+    fflush(stderr);
+
+    int (*pipes)[2] = malloc((size_t)forks * sizeof *pipes);
+    pid_t *pids = malloc((size_t)forks * sizeof *pids);
+
+    for (int w = 0; w < forks; w++) {
+        if (pipe(pipes[w]) != 0) {
+            fprintf(stderr, "border_mass : pipe() a echoue pour le worker %d\n", w);
+            return 1;
+        }
+        pid_t pid = fork();
+        if (pid < 0) {
+            fprintf(stderr, "border_mass : fork() a echoue pour le worker %d\n", w);
+            return 1;
+        }
+        if (pid == 0) {
+            close(pipes[w][0]);
+            long long sub = bm_run_worker(w, forks, map, all, order, collect.partitions, collect.count);
+            dprintf(pipes[w][1], "%lld\n", sub);
+            close(pipes[w][1]);
+            exit(0);
+        }
+        close(pipes[w][1]);
+        pids[w] = pid;
+    }
+
+    long long total = completed_during_expansion;
+    for (int w = 0; w < forks; w++) {
+        char buf[64];
+        ssize_t n = read(pipes[w][0], buf, sizeof buf - 1);
+        close(pipes[w][0]);
+        int status;
+        waitpid(pids[w], &status, 0);
+        if (n <= 0) {
+            fprintf(stderr, "border_mass : aucun resultat lu du worker %d\n", w);
+            continue;
+        }
+        buf[n] = '\0';
+        total += strtoll(buf, NULL, 10);
+    }
+
+    printf("masse totale des anneaux de bordure valides : %lld\n", total);
+
+    free(pipes);
+    free(pids);
+    free(collect.partitions);
     return 0;
 }
