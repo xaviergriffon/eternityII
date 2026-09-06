@@ -207,7 +207,8 @@ TEST_SUITES_COMMON := \
                 tests/app/test_app_static_variables.c tests/app/test_client_config.c tests/app/test_server_config.c \
                 tests/app/test_etii_client.c tests/app/test_etii_server.c tests/app/test_app_runtime.c tests/app/test_etii_control.c \
                 tests/app/test_control_registry.c tests/app/test_known_clients_registry.c tests/app/test_fork_gate.c \
-                tests/app/test_fork_orchestrator.c
+                tests/app/test_fork_orchestrator.c \
+                tests/tools/test_root_from_board.c
 TEST_SOLUTION16 := tests/core/test_solution16.c
 # Jeu 256 (secondaire) : runner + suites communes. Jeu 16 (principal) : + solution16.
 TEST_SRCS    := $(TEST_RUNNER) $(TEST_SUITES_COMMON)
@@ -228,7 +229,7 @@ $(SOLUTION16_H): $(SOLUTION16_JSON) $(GEN_SOLUTION16)
 # tests/core/test_etii_search.c l'inclut directement (#include "core/etii_search.c")
 # pour tester ses helpers static ; le compiler aussi ici provoquerait des doubles
 # symboles au link. Ce test est donc l'unique fournisseur des symboles etii_search.
-TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/command_history.c src/ui/command_match.c src/ui/line_edit.c src/core/possibility.c src/core/best_board.c src/net/etii_protocol.c src/net/client_identity.c src/net/control_protocol.c src/net/http_codec.c src/net/http_server.c src/core/datamanager.c src/core/stock_spill.c src/core/stock_rate.c src/net/local_socket.c src/net/tcpclient.c src/net/tcpserver.c src/ui/command_lines.c src/ui/console.c src/ui/logger.c src/core/core_static_variables.c src/app/app_static_variables.c src/app/client_config.c src/app/server_config.c src/app/etii_client.c src/app/etii_server.c src/app/control_registry.c src/app/known_clients_registry.c src/app/app_runtime.c src/app/etii_control.c src/app/fork_gate.c src/app/fork_orchestrator.c
+TEST_MODULES := src/core/lifo.c src/core/part.c src/core/readdata.c src/ui/command_history.c src/ui/command_match.c src/ui/line_edit.c src/core/possibility.c src/core/best_board.c src/net/etii_protocol.c src/net/client_identity.c src/net/control_protocol.c src/net/http_codec.c src/net/http_server.c src/core/datamanager.c src/core/stock_spill.c src/core/stock_rate.c src/net/local_socket.c src/net/tcpclient.c src/net/tcpserver.c src/ui/command_lines.c src/ui/console.c src/ui/logger.c src/core/core_static_variables.c src/app/app_static_variables.c src/app/client_config.c src/app/server_config.c src/app/etii_client.c src/app/etii_server.c src/app/control_registry.c src/app/known_clients_registry.c src/app/app_runtime.c src/app/etii_control.c src/app/fork_gate.c src/app/fork_orchestrator.c tests/tools/root_from_board.c
 # -Isrc : en-têtes de prod en "domaine/x.h". -Itests : greatest.h / fork_assert.h
 # (harnais partagé à la racine de tests/, alors que les suites sont en sous-dossiers).
 TEST_CFLAGS  := -Wall -std=gnu99 -O2 -g -Isrc -Itests
@@ -302,6 +303,20 @@ bench-refutation-gpu:
 	    -o $(BENCH_REFUT_GPU_BIN) tests/bench/bench_refutation.c $(TEST_MODULES) $(BENCH_GPU_OBJ) \
 	    -L$(BENCH_CUDA_PATH)/lib64 -lcudart -lstdc++ -lm
 	./$(BENCH_REFUT_GPU_BIN) $(BENCH_REFUT_ARGS)
+
+# Outil gen_root (tests/tools/) : convertit un plateau externe en racine de
+# stock .back, chargeable par la console `restore`/`import`. Compilé à la
+# demande, jamais rattaché à `make test` — c'est un outil, pas une suite ; son
+# cœur pur (root_from_board.c) est, lui, testé avec les autres modules.
+# CPPFLAGS est propagé pour permettre -DETERN_PARTS=16.
+GEN_ROOT_BIN := tests/tools/gen_root
+
+.PHONY: gen-root
+gen-root:
+	gcc -Wall -Wextra -std=gnu99 -O2 -Isrc -Itests $(CPPFLAGS) -Werror -o $(GEN_ROOT_BIN) \
+	    tests/tools/gen_root.c tests/tools/root_from_board.c \
+	    src/core/readdata.c src/core/part.c src/ui/logger.c \
+	    src/core/core_static_variables.c src/app/app_static_variables.c -lm -pthread
 
 # Fonctions pures du banc de mesure (tests/bench/bench_lib.sh) : pas de C, donc
 # hors des suites greatest, mais rattaché à `make test` pour tourner partout où

@@ -36,10 +36,45 @@ partagé reste à la racine de `tests/`.
 | `tests/net/` | Suites des modules `src/net/` (`test_etii_protocol`, `test_control_protocol` — codec du [canal de contrôle](../docs/echanges_client_serveur.md#canal-de-contrôle-v9), `test_local_socket`, `test_tcp`). |
 | `tests/ui/` | Suites des modules `src/ui/` (`test_command_history`, `test_command_match`, `test_command_lines`, `test_console`, `test_logger`). |
 | `tests/app/` | Suites des modules `src/app/` (`test_static_variables`, `test_app_runtime`, `test_etii_client`, `test_etii_server`, `test_control_registry` — registre serveur du canal de contrôle, `test_etii_control` — thread client du canal de contrôle). |
+| `tests/tools/` | Outils autonomes + leur cœur testé (`gen_root` / `root_from_board` — conversion d'un plateau externe en racine de stock). |
 
 Chaque `test_<module>.c` inclut ses en-têtes de production en forme qualifiée
 (`#include "core/part.h"`, résolu via `-Isrc`) et le harnais en forme courte
 (`#include "greatest.h"`, résolu via `-Itests`).
+
+## Outils (`tests/tools/`)
+
+`gen_root` convertit un plateau externe (plateau publié, sauvegarde d'un autre
+solveur, réparation locale d'un plateau connu dont on retire quelques cases)
+en **racine de stock** au format `.back`, chargeable par la console `restore`
+ou `import`.
+
+```sh
+make gen-root                                   # ou : make gen-root CPPFLAGS="-DETERN_PARTS=16"
+tests/tools/gen_root data/pieces.csv plateau.txt racine.back
+```
+
+`plateau.txt` compte `ETERN_SIZE²` lignes « id top right bottom left » en ordre
+**ligne-majeur**, `0 0 0 0 0` pour une case vide.
+
+L'outil lui-même n'est qu'une enveloppe d'entrées/sorties : toute la conversion
+vit dans `root_from_board.c`, compilé avec les autres modules et couvert par
+`test_root_from_board.c`. Deux conventions y sont verrouillées, chacune avec sa
+contre-épreuve, parce qu'un outil externe les inverse sans que rien ne
+proteste : l'orientation `grid[colonne][ligne]`, et l'indice de rotation — qui
+n'est jamais calculé mais **retrouvé** dans la table de `rotate_all_parts` par
+correspondance des 4 faces.
+
+Deux pièges à l'usage, tous deux rencontrés :
+
+- **Le serveur sème toujours ses paquets genèse** (`first_possibility`, appelé
+  par `runserver`). Pour ne chercher QUE la racine importée, il faut `restore`
+  (qui remplace le stock), pas `import` (qui ajoute) — sinon les clients
+  travaillent sur la genèse et l'on croit à tort que la racine est explorée.
+- **Le plateau doit respecter les indices officiels.** `ETERN_WITH_INDICES`
+  vaut 1 par défaut, donc `first_possibility` pose les 5 indices de
+  `data/indices.csv` : un plateau qui en contredit un est hors de l'espace de
+  recherche, et sa racine ne mènera jamais à rien.
 
 ## Tests d'intégration bout-en-bout
 

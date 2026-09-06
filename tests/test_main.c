@@ -38,6 +38,7 @@ SUITE_EXTERN(client_config_suite);
 SUITE_EXTERN(server_config_suite);
 SUITE_EXTERN(etii_client_suite);
 SUITE_EXTERN(etii_server_suite);
+SUITE_EXTERN(root_from_board_suite);
 SUITE_EXTERN(control_registry_suite);
 SUITE_EXTERN(known_clients_registry_suite);
 SUITE_EXTERN(app_runtime_suite);
@@ -84,6 +85,7 @@ int main(int argc, char **argv)
     RUN_SUITE(server_config_suite);
     RUN_SUITE(etii_client_suite);
     RUN_SUITE(etii_server_suite);
+    RUN_SUITE(root_from_board_suite);
     RUN_SUITE(control_registry_suite);
     RUN_SUITE(known_clients_registry_suite);
     RUN_SUITE(app_runtime_suite);
