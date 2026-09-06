@@ -15,6 +15,7 @@ make test-docker-arm  # vérifie la compilation croisée ARM 64-bit (Raspberry P
 make coverage         # les deux passes (256 + 16) + résumé texte gcovr fusionné (nécessite gcovr)
 make coverage-256     # passe 256 pièces seule ; résumé gcov par module
 make coverage-report  # rapports gcovr : Cobertura XML + HTML + résumé Markdown
+make gen-root         # outil : convertit un plateau externe en racine de stock .back
 ```
 
 ## Tests unitaires (`make test`)
@@ -210,6 +211,33 @@ Le toolkit CUDA est installé sur le runner (action `Jimver/cuda-toolkit`) pour 
 n'est pas exécuté (la validation fonctionnelle se fait sur Jetson). Il en va de même
 pour les autres variantes : ce sont des contrôles de compilation/édition de liens,
 pas des exécutions.
+
+## Outil `gen_root` (`make gen-root`)
+
+Convertit un plateau externe — plateau publié, sauvegarde d'un autre solveur,
+réparation locale d'un plateau connu dont on retire quelques cases pour laisser
+le moteur rejouer la région — en **racine de stock** au format `.back`. Le
+fichier produit est un dump brut de `struct possibility_packet` (576 octets),
+chargeable par la console `restore` ou `import`.
+
+```sh
+make gen-root
+tests/tools/gen_root data/pieces.csv plateau.txt racine.back
+```
+
+Entrée : `ETERN_SIZE²` lignes « id top right bottom left » en ordre
+ligne-majeur, `0 0 0 0 0` pour une case vide. `CPPFLAGS="-DETERN_PARTS=16"` est
+propagé par la cible pour produire une racine du puzzle 16.
+
+Ce n'est pas une suite de tests : la cible n'est pas rattachée à `make test`,
+au même titre que `make bench-refutation`. Son **cœur pur**
+(`tests/tools/root_from_board.c`), lui, est compilé avec les autres modules et
+couvert par `tests/tools/test_root_from_board.c` — c'est là que vivent les deux
+conventions qu'un outil externe inverse sans que rien ne proteste
+(`grid[colonne][ligne]`, et l'indice de rotation retrouvé par correspondance
+des faces plutôt que calculé). Détail d'usage et les deux pièges rencontrés
+(`restore` et non `import` ; indices officiels obligatoires) :
+[tests/README.md](../tests/README.md#outils-teststools).
 
 ## Banc de mesure du débit de recherche (`tests/bench/bench_search.sh`)
 
