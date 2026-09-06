@@ -32,6 +32,10 @@ un stock de production de 126 287 possibilités — c'est la conséquence direct
 §4.9 (table de région sur les zones d'angle,
 et élimination par résolution d'un cadre complet) est **écartée sans implémentation** —
 seule piste du document tranchée avant écriture de code, par quatre mesures statiques.
+§4.14 (pénurie de couleur **côté pruner uniquement**, une seule passe par possibilité plutôt
+qu'un maintien incrémental à chaque pose) **implémentée, opt-in
+(`ETII_PRUNER_COLOUR_CHECK=1`), mesurée sur stock de production réel : 0 élimination
+supplémentaire, code conservé en opt-in**.
 
 ## 1. Question posée
 
@@ -1795,6 +1799,83 @@ cases, §4.7). **`bench_search.sh` surestime donc ce que gagne le travail réell
 sans épinglage — `bench_search.sh` le signale dans chaque rapport). Les deltas appariés à
 ordre alterné sont robustes à la charge et à la dérive ; les valeurs absolues de nœuds/s ne
 sont pas transposables à un autre matériel.
+
+### 4.14 Pénurie de couleur côté pruner, une seule passe par possibilité — IMPLÉMENTÉE, OPT-IN, MESURE EN COURS
+
+**Statut : implémentée, testée, opt-in — jamais pendant une pose de la recherche.**
+Contrairement à §4.3 (comptage global couleur maintenu en incrémental à CHAQUE pose d'une
+recherche de plusieurs millions de nœuds, −24 % de débit pour un recoupement quasi total
+avec le forward-check) et à §4.4 (conflit de singletons, même boucle chaude, −9,5 à −11,4 %
+pour un déclenchement qui ne profite jamais à une preuve de fermeture), cette piste applique
+le MÊME principe de nécessité (théorème de Hall par comptage de couleur) mais à un endroit et
+un rythme différents : **une seule fois par possibilité reçue par le pruner**
+(`autoprune_step`, `src/core/etii_search.c`), jamais maintenue à travers les nœuds d'une
+recherche.
+
+**Principe.** `possibility_colour_demand_satisfiable` (`src/core/possibility.c`) calcule,
+pour la possibilité entière : `demande[c]` (demi-arêtes de couleur `c` exigées par une case
+encore VIDE, via `what_search_in_grid_to_key`) et `disponible[c]` (demi-arêtes de couleur `c`
+portées par les pièces NON posées, via `is_face_used`/`b_faceused`) — même preuve de
+nécessité que §4.3 (deux demi-arêtes de frontière distinctes s'apparient à deux faces
+distinctes d'une pièce libre). Si `demande[c] > disponible[c]` pour une couleur quelconque,
+la possibilité est morte — invisible au contrôle superficiel case par case
+(`possibility_all_has_a_next_counted`), qui ne voit jamais qu'une pénurie est répartie sur
+plusieurs cases à la fois.
+
+**Pourquoi une seule passe change le calcul coût/bénéfice.** §4.3 était rentable en
+DÉCLENCHEMENT (~47–49 % des élagages) mais pas en COÛT NET, parce que le mécanisme payait 8
+compteurs à maintenir à CHAQUE pose d'une recherche de plusieurs millions de nœuds, pour un
+gain qui recoupait presque entièrement le forward-check existant. Recalculer `demande[]` et
+`disponible[]` depuis zéro une seule fois par possibilité — au moment où le pruner la reçoit,
+pas à chaque nœud d'une preuve de fermeture bornée — change l'échelle du coût de plusieurs
+millions d'incréments à quelques centaines de comparaisons par possibilité (deux balayages du
+plateau, `ETERN_SIZE²` cases + `ETERN_PARTS` pièces). Le recoupement structurel avec le
+forward-check identifié en §4.3 reste probablement valable ici aussi (une pénurie de couleur
+signifie que le stock de cette couleur est bas, donc que les cases qui la réclament sont
+souvent déjà voisines d'une pièce posée) — non encore mesuré à cette échelle.
+
+**Activation.** `pruner_colour_starvation_check` (`src/core/core_static_variables.{h,c}`,
+défaut 0, coût nul quand bas), armé via la variable d'environnement
+`ETII_PRUNER_COLOUR_CHECK=1` (lue une fois dans `main()`, avant tout fork — même précédent que
+`ETII_BENCH_NODES`) plutôt qu'une commande console : comme `singleton_conflict_check` et
+`global_dead_check`, ce drapeau n'a jamais eu de commande console dédiée (recompilation ou
+banc de mesure), une variable d'environnement suffit pour un test A/B ponctuel sans
+reconstruire le binaire entre deux exécutions. Compteur dédié :
+`pruner_colour_starvation`, sous-ensemble de `pruner_removed`, isolant la contribution propre
+du mécanisme — même esprit que `pruner_dfs_closed` pour §4.6a/4.6b.
+
+**Intégration.** Dans `autoprune_step`, juste après `possibility_all_has_a_next_counted` :
+si le contrôle superficiel dit « vivant » (`has_next`) mais que le nouveau contrôle dit
+« pénurie », la possibilité est traitée comme morte — sans même tenter la preuve de
+fermeture bornée (`search_packet_backtracking_budgeted`), économisant tout son budget de
+nœuds. Jamais évalué quand `work.checked` est déjà vrai (même court-circuit que §4.6b).
+
+**Tests.** `possibility_colour_demand_satisfiable` verrouillée directement
+(`tests/core/test_possibility.c`) : stock suffisant → vivant ; stock insuffisant pour une
+couleur réclamée par deux cases vides distinctes → mort (condition invisible à un contrôle
+case par case) ; une pièce d'appoint déjà posée ailleurs n'est plus comptée dans le stock
+disponible (verrou direct sur `is_face_used`). Intégration dans `autoprune_step`
+(`tests/core/test_etii_search.c`) : drapeau bas → comportement historique inchangé (paquet
+conservé, `pruner_colour_starvation` immobile) ; drapeau haut → possibilité éliminée avant la
+preuve de fermeture bornée, sur une fixture où le contrôle superficiel (`make_free_map`, deux
+candidats toujours libres) ne peut structurellement pas voir la pénurie.
+
+**Mesure sur stock de production réel — 0 élimination supplémentaire.** Protocole :
+`resetChecked` puis un pruner (4 threads, lot 500) exécuté jusqu'à épuisement complet du
+pool non vérifié, une fois SANS `ETII_PRUNER_COLOUR_CHECK`, une fois AVEC, sur le MÊME stock
+de 10 837 possibilités remis à zéro entre les deux passes. Répartition par `alloc` (commande
+`statistic`) : très concentré entre 8 et 20 pièces posées (plusieurs centaines par niveau),
+une longue traîne jusqu'à 183 s'amenuisant après 110. Résultat : **les deux passes éliminent
+exactement 0 possibilité** — non seulement le nouveau contrôle n'ajoute rien, mais le
+contrôle superficiel existant (`possibility_all_has_a_next_counted`) n'en éliminait déjà
+aucune sur ce stock précis. Les deux échecs à distinguer restent ouverts : (a) ce stock n'a
+tout simplement aucune possibilité morte détectable par un contrôle en une passe (à n'importe
+quel `alloc`), ou (b) une éventuelle pénurie de couleur dans la traîne profonde (>100) est de
+toute façon déjà recoupée par le contrôle superficiel — même hypothèse structurelle que §4.3,
+non départagée ici faute d'un stock de référence où le contrôle superficiel seul élague déjà
+une fraction non nulle. **Code conservé en opt-in** (comme `singleton_conflict_check`) : coût
+nul par défaut, verdict de rentabilité à revoir si un stock avec un taux d'élagage superficiel
+non nul devient disponible pour un test comparatif.
 
 ## 5. Arbitrages tranchés
 

@@ -380,6 +380,37 @@ extern volatile unsigned long long pruner_dfs_closed;
 extern volatile unsigned long long pruner_dfs_nodes;
 
 /**
+ * @brief Arme le contrôle de pénurie de couleur du pruner (`autoprune_step`)
+ *        — expérience de mesure, jamais un réglage d'exploitation (défaut 0).
+ *
+ * Avant de tenter la preuve de fermeture bornée, vérifie une condition
+ * nécessaire de disponibilité des couleurs sur TOUTE la possibilité
+ * (`possibility_colour_demand_satisfiable`, `src/core/possibility.c`) : pour
+ * chaque couleur, la demande des cases encore vides ne peut dépasser le
+ * stock de pièces non posées. Contrairement au contrôle superficiel case par
+ * case (`possibility_all_has_a_next_counted`), voit une pénurie répartie sur
+ * plusieurs cases à la fois — mais, contrairement à la piste voisine §4.3 de
+ * `docs/conception/elagage_recherche.md` (maintenue en incrémental à CHAQUE
+ * pose d'une recherche de plusieurs millions de nœuds, −24 % de débit), ce
+ * contrôle est recalculé UNE SEULE FOIS par possibilité reçue par le pruner
+ * — jamais pendant une pose de la recherche.
+ *
+ * Coût nul quand il vaut 0. Lu par `autoprune_step` uniquement.
+ */
+extern int pruner_colour_starvation_check;
+
+/**
+ * @brief Cumul des possibilités éliminées par le contrôle de pénurie de
+ *        couleur du pruner, sous-ensemble de `pruner_removed`.
+ *
+ * Isole la contribution propre de ce mécanisme, par opposition au contrôle
+ * superficiel qui incrémente `pruner_removed` sans le toucher — même esprit
+ * que `pruner_dfs_closed`. Actif seulement quand
+ * `pruner_colour_starvation_check` est levé.
+ */
+extern volatile unsigned long long pruner_colour_starvation;
+
+/**
  * @brief Nombre de possibilités déplacées de la file la plus pleine vers la
  *        plus vide à chaque tour de `check_server_step` (`--rebalance-budget`).
  */

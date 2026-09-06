@@ -56,6 +56,10 @@ volatile unsigned long long pruner_dfs_closed = 0;
 
 volatile unsigned long long pruner_dfs_nodes = 0;
 
+int pruner_colour_starvation_check = 0;
+
+volatile unsigned long long pruner_colour_starvation = 0;
+
 unsigned long long *counters = NULL;
 
 unsigned long long *lastfilesize = NULL;

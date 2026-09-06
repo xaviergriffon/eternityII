@@ -3826,6 +3826,142 @@ TEST autoprune_step_dfs_budget_disabled_skips_dfs(void)
     PASS();
 }
 
+/* ======================================================================
+ * autoprune_step : contrôle de pénurie de couleur (`pruner_colour_starvation_check`)
+ *
+ * Fixture indépendante du contrôle superficiel (make_free_map, ids 6/7
+ * toujours libres, cf. autoprune_step_dfs_budget_*) : deux cases vides SANS
+ * lien de voisinage, (1,1) et (2,2), exigent chacune la couleur 1 via leur
+ * unique voisin du haut PLACÉ ((1,0) et (2,1)). Une seule pièce d'appoint
+ * libre porte la couleur 1 (id ES_CDS_SUPPLY) -> demande (2) > disponible
+ * (1), invisible au contrôle superficiel (make_free_map répond toujours
+ * « vivant », quelle que soit la couleur exigée). `all_rotate_part` doit donc
+ * être PLEIN (indices 0..ETERN_PARTS), contrairement à make_small_parts (8
+ * entrées) utilisé par les autres tests de ce bloc : le nouveau contrôle
+ * parcourt id 1..ETERN_PARTS pour compter les pièces non posées.
+ * ====================================================================== */
+#define ES_CDS_NEIGH_A 1
+#define ES_CDS_NEIGH_B 2
+#define ES_CDS_SUPPLY 3
+
+static struct array_part *make_colour_starved_parts(void)
+{
+    static struct part parts[ETERN_PARTS + 1];
+    static struct array_part ap;
+    memset(parts, 0, sizeof(parts));
+    for (int id = 0; id <= ETERN_PARTS; id++) {
+        parts[id].id = (int16_t)id;
+    }
+    /* Couleur 1 (pas 9) : make_free_map()->flat[] ne fait que 3^4 entrées
+     * (sizearray=3) -- une couleur hors [0, sizearray-1] ferait déborder son
+     * indexation pendant le contrôle superficiel, avant même d'atteindre le
+     * nouveau contrôle testé ici. */
+    parts[ES_CDS_NEIGH_A].bottom = 1;
+    parts[ES_CDS_NEIGH_B].bottom = 1;
+    parts[ES_CDS_SUPPLY].top = 1; /* unique pièce d'appoint libre de couleur 1 */
+    ap.size = ETERN_PARTS + 1;
+    ap.parts = parts;
+    return &ap;
+}
+
+static void make_colour_starved_board(struct possibility_packet *b)
+{
+    memset(b, 0, sizeof(*b)); /* grid à 0 partout (id fictif 0) */
+    b->grid[1][0] = ES_CDS_NEIGH_A;
+    set_face_used(b->b_faceused, ES_CDS_NEIGH_A - 1, 1);
+    b->grid[1][1] = -2; /* case vide A : exige couleur 1 via son voisin du haut */
+    b->grid[2][1] = ES_CDS_NEIGH_B;
+    set_face_used(b->b_faceused, ES_CDS_NEIGH_B - 1, 1);
+    b->grid[2][2] = -2; /* case vide B : exige couleur 1 via son voisin du haut */
+}
+
+/* Drapeau BAS (défaut) : comportement historique inchangé, la possibilité
+ * affamée en couleur reste conservée comme n'importe quel paquet « vivant »
+ * selon le contrôle superficiel seul. */
+TEST autoprune_step_colour_starvation_disabled_by_default_keeps_possibility(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_colour_starved_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 1;
+    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
+    make_colour_starved_board(&aposs->possibilities[0]);
+    client.aposs = aposs;
+
+    int saved_budget = pruner_dfs_budget;
+    pruner_dfs_budget = 0; /* isole du mécanisme §4.6b */
+    int saved_flag = pruner_colour_starvation_check;
+    pruner_colour_starvation_check = 0;
+    unsigned long long checked_before = pruner_checked;
+    unsigned long long starved_before = pruner_colour_starvation;
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    int cont = autoprune_step(&client);
+    request = saved;
+    pruner_dfs_budget = saved_budget;
+    pruner_colour_starvation_check = saved_flag;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");                 /* renvoyée au stock */
+    ASSERT_EQ_FMT(checked_before + 1, pruner_checked, "%llu");
+    ASSERT_EQ_FMT(starved_before, pruner_colour_starvation, "%llu");
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
+/* Drapeau HAUT : la pénurie de couleur, invisible au contrôle superficiel,
+ * élimine la possibilité avant même une tentative de fermeture bornée. */
+TEST autoprune_step_colour_starvation_removes_starved_possibility(void)
+{
+    drain_local();
+    ensure_counters();
+    client_possibility_t client;
+    memset(&client, 0, sizeof client);
+    client.compteur = 0;
+    client.map_part = make_free_map();
+    client.all_rotate_part = make_colour_starved_parts();
+    pthread_mutex_init(&client.works_mutex, NULL);
+    client.works = 1;
+
+    array_possibility_packet *aposs = malloc(sizeof *aposs);
+    aposs->size = 1;
+    aposs->possibilities = calloc(1, sizeof(struct possibility_packet));
+    make_colour_starved_board(&aposs->possibilities[0]);
+    client.aposs = aposs;
+
+    int saved_budget = pruner_dfs_budget;
+    pruner_dfs_budget = 0;
+    int saved_flag = pruner_colour_starvation_check;
+    pruner_colour_starvation_check = 1;
+    unsigned long long removed_before = pruner_removed;
+    unsigned long long starved_before = pruner_colour_starvation;
+    int saved = request;
+    request = REQUEST_CONTINUE;
+    int cont = autoprune_step(&client);
+    request = saved;
+    pruner_dfs_budget = saved_budget;
+    pruner_colour_starvation_check = saved_flag;
+
+    ASSERT_EQ_FMT(1, cont, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");                      /* éliminée */
+    ASSERT_EQ_FMT(removed_before + 1, pruner_removed, "%llu");
+    ASSERT_EQ_FMT(starved_before + 1, pruner_colour_starvation, "%llu");
+
+    pthread_mutex_destroy(&client.works_mutex);
+    drain_local();
+    PASS();
+}
+
 /* Échec d'envoi du paquet vivant : log + remise en local par put_to_server. */
 TEST autoprune_step_add_error_reputs_locally(void)
 {
@@ -4139,6 +4275,8 @@ SUITE(etii_search_suite)
     RUN_TEST(autoprune_step_dfs_budget_closes_possibility);
     RUN_TEST(autoprune_step_dfs_budget_too_small_keeps_possibility);
     RUN_TEST(autoprune_step_dfs_budget_disabled_skips_dfs);
+    RUN_TEST(autoprune_step_colour_starvation_disabled_by_default_keeps_possibility);
+    RUN_TEST(autoprune_step_colour_starvation_removes_starved_possibility);
     RUN_TEST(autoprune_step_add_error_reputs_locally);
     RUN_TEST(autoprune_step_complete_board_records_solution_and_continues);
     RUN_TEST(autoprune_step_complete_board_stop_on_solution_exits);

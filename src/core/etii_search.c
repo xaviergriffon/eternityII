@@ -1926,6 +1926,16 @@ static int autoprune_step(client_possibility_t *client)
         unsigned int cells_studied = 0;
         int has_next = possibility_all_has_a_next_counted(&work, client->map_part, client->all_rotate_part, &cells_studied);
         pruner_cells_studied += (cells_studied > 0) ? cells_studied : 1;
+        if (!work.checked && has_next && pruner_colour_starvation_check
+            && !possibility_colour_demand_satisfiable(&work, client->all_rotate_part, (int8_t)client->map_part->sizearrayM))
+        {
+            // Pénurie de couleur répartie sur plusieurs cases (mini-Hall) :
+            // invisible au contrôle superficiel case par case ci-dessus.
+            // Jamais évalué quand work.checked est déjà vrai, même short-circuit
+            // que la preuve de fermeture bornée ci-dessous (§4.6b).
+            pruner_colour_starvation++;
+            has_next = 0;
+        }
         if (work.alloc >= ETERN_PARTS)
         {
             // Plateau complété par les placements forcés du contrôle : solution.
