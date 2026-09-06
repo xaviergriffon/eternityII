@@ -28,6 +28,33 @@ void border_ring_order(int8_t ring[BORDER_RING_LEN][2])
     }
 }
 
+static int bw_is_corner_cell(int x, int y)
+{
+    return (x == 0 || x == ETERN_SIZE - 1) && (y == 0 || y == ETERN_SIZE - 1);
+}
+
+void border_corners_first_order(int8_t order[BORDER_RING_LEN][2])
+{
+    int8_t ring[BORDER_RING_LEN][2];
+    border_ring_order(ring);
+
+    int k = 0;
+    for (int i = 0; i < BORDER_RING_LEN; i++) {
+        if (bw_is_corner_cell(ring[i][0], ring[i][1])) {
+            order[k][0] = ring[i][0];
+            order[k][1] = ring[i][1];
+            k++;
+        }
+    }
+    for (int i = 0; i < BORDER_RING_LEN; i++) {
+        if (!bw_is_corner_cell(ring[i][0], ring[i][1])) {
+            order[k][0] = ring[i][0];
+            order[k][1] = ring[i][1];
+            k++;
+        }
+    }
+}
+
 struct bw_ctx {
     map_big_array *map;
     struct array_part *all_rotate_parts;

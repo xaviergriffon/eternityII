@@ -32,6 +32,25 @@
 void border_ring_order(int8_t ring[BORDER_RING_LEN][2]);
 
 /**
+ * @brief Remplit `order` avec les BORDER_RING_LEN cases du pourtour, les 4
+ * coins en premier (dans leur ordre `border_ring_order`), puis les cases de
+ * bord dans leur ordre `border_ring_order` habituel.
+ *
+ * Ne change aucune propriété de comptage de `border_walk_count_ordered` : le
+ * raisonnement « N est déjà la masse » (aucun voisin posé à la toute
+ * première case, donc n'importe lequel des 4 coins peut ouvrir la
+ * recherche) tient toujours — les 4 coins sont simplement tous posés tôt au
+ * lieu qu'un seul le soit et que les 3 autres se déduisent en refermant le
+ * cycle. Sert à réduire drastiquement le facteur de branchement initial :
+ * très peu de pièces ont 2 faces nulles adjacentes (4 sur le jeu 256
+ * pièces réel), contre des dizaines de candidats pour une case de bord
+ * arbitraire.
+ *
+ * @param order Tableau de sortie, `BORDER_RING_LEN` couples `(x,y)`.
+ */
+void border_corners_first_order(int8_t order[BORDER_RING_LEN][2]);
+
+/**
  * @brief Appelé pour chaque anneau de bordure fermé trouvé par
  * `border_walk_count`. `ring_state` n'est valide que pendant l'appel (le
  * DFS continue son backtracking juste après) — le copier si on veut le

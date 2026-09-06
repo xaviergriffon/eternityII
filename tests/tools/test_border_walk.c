@@ -281,6 +281,66 @@ TEST border_walk_count_ordered_resumes_from_a_partial_state(void)
     PASS();
 }
 
+static int bw_is_corner(int x, int y)
+{
+    return (x == 0 || x == ETERN_SIZE - 1) && (y == 0 || y == ETERN_SIZE - 1);
+}
+
+TEST border_corners_first_order_visits_the_same_cells_as_border_ring_order(void)
+{
+    int8_t ring[BORDER_RING_LEN][2];
+    int8_t order[BORDER_RING_LEN][2];
+    border_ring_order(ring);
+    border_corners_first_order(order);
+
+    int seen[ETERN_SIZE][ETERN_SIZE];
+    memset(seen, 0, sizeof seen);
+    for (int i = 0; i < BORDER_RING_LEN; i++) {
+        ASSERT_EQ_FMT(0, seen[order[i][0]][order[i][1]], "%d");
+        seen[order[i][0]][order[i][1]] = 1;
+    }
+    for (int i = 0; i < BORDER_RING_LEN; i++) {
+        ASSERT_EQ_FMT(1, seen[ring[i][0]][ring[i][1]], "%d");
+    }
+    PASS();
+}
+
+TEST border_corners_first_order_puts_all_4_corners_first(void)
+{
+    int8_t order[BORDER_RING_LEN][2];
+    border_corners_first_order(order);
+
+    for (int i = 0; i < 4; i++) {
+        ASSERT(bw_is_corner(order[i][0], order[i][1]));
+    }
+    for (int i = 4; i < BORDER_RING_LEN; i++) {
+        ASSERT(!bw_is_corner(order[i][0], order[i][1]));
+    }
+    PASS();
+}
+
+/* Le réordonnement ne doit rien changer au compte : chaque coin peut
+   toujours ouvrir la recherche indépendamment (aucun voisin posé à la toute
+   première case, quel que soit l'ordre), donc le même anneau unique est
+   toujours retrouvé 4 fois. */
+TEST border_corners_first_order_does_not_change_the_count(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    int8_t order[BORDER_RING_LEN][2];
+    border_corners_first_order(order);
+
+    long long n = border_walk_count_ordered(map, all, order, 0, NULL, NULL, NULL);
+    ASSERT_EQ_FMT(4LL, n, "%lld");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
 SUITE(border_walk_suite)
 {
     RUN_TEST(border_ring_order_has_the_right_length_and_starts_at_origin);
@@ -290,4 +350,7 @@ SUITE(border_walk_suite)
     RUN_TEST(border_walk_count_finds_the_crafted_ring_once_per_opening_corner);
     RUN_TEST(border_walk_count_ordered_matches_border_walk_count_from_scratch);
     RUN_TEST(border_walk_count_ordered_resumes_from_a_partial_state);
+    RUN_TEST(border_corners_first_order_visits_the_same_cells_as_border_ring_order);
+    RUN_TEST(border_corners_first_order_puts_all_4_corners_first);
+    RUN_TEST(border_corners_first_order_does_not_change_the_count);
 }
