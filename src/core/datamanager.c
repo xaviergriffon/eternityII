@@ -226,15 +226,35 @@ int datamanager_configure_stock_files(int n)
 			}
 			init_file(&file_possibility[fp]->file, sizeof(struct possibility_packet));
 			pthread_mutex_init(&file_possibility[fp]->lock, NULL);
+			file_possibility[fp]->sort_state = FILE_SORT_UNKNOWN;
 			init_file(&file_possibility_checked[fp]->file, sizeof(struct possibility_packet));
 			pthread_mutex_init(&file_possibility_checked[fp]->lock, NULL);
+			file_possibility_checked[fp]->sort_state = FILE_SORT_UNKNOWN;
 			init_file(&file_possibility_analysed[fp]->file, sizeof(struct possibility_packet));
 			pthread_mutex_init(&file_possibility_analysed[fp]->lock, NULL);
+			file_possibility_analysed[fp]->sort_state = FILE_SORT_UNKNOWN;
 		}
 		nb_file_possibility_capacity = n;
 	}
 	nb_file_possibility = n;
 	return 0;
+}
+
+// Réservée aux tests (même convention que datamanager_reset_rr_state_for_tests
+// / datamanager_reset_stock_rate_counters_for_tests ci-dessus) : un test qui a
+// déjà trié un segment laisse son sort_state à FILE_SORT_ASC/DESC même une
+// fois vidé (drain_datamanager() ne vide que le contenu, jamais cet état),
+// faisant sauter à tort son tri par un test suivant qui s'attend à repartir
+// de zéro. Parcourt nb_file_possibility_capacity (pas nb_file_possibility) :
+// des segments alloués par un test précédent puis "rétrécis" (configure_stock_files
+// shrink) restent réinitialisés eux aussi.
+void datamanager_reset_sort_state_for_tests(void)
+{
+	for (int fp = 0; fp < nb_file_possibility_capacity; fp++) {
+		file_possibility[fp]->sort_state = FILE_SORT_UNKNOWN;
+		file_possibility_checked[fp]->sort_state = FILE_SORT_UNKNOWN;
+		file_possibility_analysed[fp]->sort_state = FILE_SORT_UNKNOWN;
+	}
 }
 
 /**
@@ -381,6 +401,7 @@ int datamanager_pool_refill(int is_checked, int file_index, const struct possibi
 		while (!added) {
 			if (pthread_mutex_trylock(&pool[dest]->lock) == 0) {
 				put(&pool[dest]->file, (void *)&in[i]);
+				pool[dest]->sort_state = FILE_SORT_UNKNOWN;
 				pthread_mutex_unlock(&pool[dest]->lock);
 				added = 1;
 			} else {
@@ -796,6 +817,7 @@ static int put_to_pool(file_possibility_t **pool, array_possibility_packet *poss
 
                 put(&pool[currfile]->file, &possibilities->possibilities[t]);
             }
+			pool[currfile]->sort_state = FILE_SORT_UNKNOWN;
 			addpossibility = 1;
 			pthread_mutex_unlock(&pool[currfile]->lock);
 			time_t now_rate = time(NULL);
@@ -1521,6 +1543,7 @@ static void put_back_to_stock(struct possibility_packet *pk)
 		if (pthread_mutex_trylock(&pool[dest]->lock) == 0) {
 			if (pk->alloc > max_result) max_result = pk->alloc;
 			put(&pool[dest]->file, pk);
+			pool[dest]->sort_state = FILE_SORT_UNKNOWN;
 			pthread_mutex_unlock(&pool[dest]->lock);
 			added = 1;
 		} else {
@@ -1721,6 +1744,7 @@ static int rebalance_pool_step(file_possibility_t **pool, int max_packets)
 		while (!added) {
 			if (pthread_mutex_trylock(&pool[dest]->lock) == 0) {
 				put(&pool[dest]->file, &buf[i]);
+				pool[dest]->sort_state = FILE_SORT_UNKNOWN;
 				pthread_mutex_unlock(&pool[dest]->lock);
 				added = 1;
 			} else {
@@ -3022,6 +3046,7 @@ static unsigned long long regroup_pool_nolock(file_possibility_t **pool)
 
 			scroll(&pool[fp]->file,packet);
 			put(&pool[0]->file, packet);
+			pool[0]->sort_state = FILE_SORT_UNKNOWN;
 			size++;
 
 		}
@@ -3488,6 +3513,7 @@ static int split_pool_nolock(file_possibility_t **pool, int nbsplit)
 			if(scroll(file, possibility))
 			{
 				put(&pool[f]->file, possibility);
+				pool[f]->sort_state = FILE_SORT_UNKNOWN;
 			}
 		}
 	}
@@ -3497,6 +3523,7 @@ static int split_pool_nolock(file_possibility_t **pool, int nbsplit)
 		if(scroll(file, possibility))
 		{
 			put(&pool[0]->file, possibility);
+			pool[0]->sort_state = FILE_SORT_UNKNOWN;
 		}
 	}
 
@@ -4950,8 +4977,17 @@ static void sort_files_bounded(int max_attempts, int descending, int *out_sorted
 	for (int fp = 0; fp < nb_file_possibility; fp++)
 	{
 		file_possibility_t *segments[2] = { file_possibility[fp], file_possibility_checked[fp] };
+		file_sort_state_t wanted = descending ? FILE_SORT_DESC : FILE_SORT_ASC;
 		for (int s = 0; s < 2; s++)
 		{
+			// Déjà trié dans le sens demandé et non modifié depuis (aucun
+			// site d'insertion ne l'a remis à FILE_SORT_UNKNOWN) : sauté SANS
+			// même tenter le trylock, contrairement au cas "toujours pris"
+			// plus bas — c'est tout le gain de cette optimisation.
+			if (segments[s]->sort_state == wanted)
+			{
+				continue;
+			}
 			int locked = 0;
 			for (int attempt = 0; attempt < max_attempts; attempt++)
 			{
@@ -4974,6 +5010,7 @@ static void sort_files_bounded(int max_attempts, int descending, int *out_sorted
 			{
 				sort_one_file_ascending(&segments[s]->file);
 			}
+			segments[s]->sort_state = wanted;
 			pthread_mutex_unlock(&segments[s]->lock);
 			sorted++;
 		}
