@@ -259,6 +259,12 @@ make border-mass
 tests/tools/border_mass data/pieces.csv data/indices.csv
 ```
 
+Depuis l'ajout du parallélisme, la recherche parallèle « coins d'abord » est
+le comportement PAR DÉFAUT (pas une option opt-in) — `--forks 1` est la
+façon de demander un seul worker, pas de revenir au DFS séquentiel
+`border_ring_order` historique (qui reste accessible en code, via
+`border_walk_count`, mais plus utilisé par cet outil).
+
 `--forks N` (défaut : nombre de cœurs détecté) parallélise la recherche :
 le plateau est posé dans l'ordre « coins d'abord » plutôt que l'ordre
 séquentiel (très peu de pièces ont 2 faces nulles adjacentes — 4 sur le

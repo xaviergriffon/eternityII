@@ -9,9 +9,9 @@
  * coin — pas de ×4 supplémentaire à appliquer. Cela suppose qu'aucun indice
  * officiel ne touche le bord (vérifié ci-dessous).
  *
- * `--forks N` (défaut : nombre de cœurs détecté) parallélise : le plateau
- * est posé dans l'ordre « coins d'abord » (border_corners_first_order —
- * très peu de pièces ont 2 faces nulles adjacentes, donc le facteur de
+ * `--forks N` (défaut : nombre de cœurs détecté, borné à 1024) parallélise :
+ * le plateau est posé dans l'ordre « coins d'abord » (border_corners_first_order
+ * — très peu de pièces ont 2 faces nulles adjacentes, donc le facteur de
  * branchement des 4 premières étapes est minuscule), étendu en largeur
  * jusqu'à N*8 états partiels (border_walk_expand_frontier), puis distribué
  * en round-robin à N process forkés — chacun termine sa part avec
@@ -23,12 +23,19 @@
  * Aucune coordination façon fork_gate.c : border_mass est mono-thread avant
  * de forker ses workers, donc le problème que fork_gate.c résout (un thread
  * du parent qui tourne encore pendant le fork()) ne se pose pas ici — voir
- * docs/superpowers/specs/2026-09-06-border-mass-parallel-design.md.
+ * docs/superpowers/specs/2026-09-06-border-mass-parallel-design.md pour la
+ * parallélisation, et docs/superpowers/specs/2026-09-06-masse-bordure-design.md
+ * pour le raisonnement complet sur « N est déjà la masse ».
  *
  * Aucun gestionnaire de signal : Ctrl-C envoie SIGINT à tout le groupe de
  * process (parent + enfants forkés, aucun setpgid/setsid n'est appelé) —
  * comportement par défaut du terminal, suffisant, volontairement pas
  * réimplémenté.
+ *
+ * Si un worker échoue (tué, code de sortie non nul, ou pipe vide), le total
+ * n'est PAS affiché comme définitif : border_mass échoue bruyamment (code de
+ * sortie 1) plutôt que d'imprimer un nombre plausible mais sous-évalué en
+ * silence — ce nombre est la seule sortie observable de l'outil.
  *
  * Toute la logique d'énumération vit dans tests/tools/border_walk.c, testée
  * unitairement ; ce fichier n'est que l'enveloppe d'entrées/sorties et
@@ -44,6 +51,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/wait.h>
 
 #include "core/readdata.h"
@@ -51,6 +59,8 @@
 #include "core/possibility.h"
 #include "core/core_static_variables.h"
 #include "tools/border_walk.h"
+
+#define BM_MAX_FORKS 1024
 
 static int border_mass_check_indices_not_on_border(const struct array_index *indices)
 {
@@ -99,6 +109,9 @@ static int bm_default_forks(void)
     if (n < 1) {
         n = 1;
     }
+    if (n > BM_MAX_FORKS) {
+        n = BM_MAX_FORKS;
+    }
     return (int)n;
 }
 
@@ -127,6 +140,22 @@ static long long bm_run_worker(int worker_id, int nb_workers,
     return total;
 }
 
+/* Tue et récolte les `count` premiers workers déjà forkés (0..count-1) — utilisé
+   quand pipe()/fork() échoue en cours de boucle : sans cela, les workers déjà
+   lancés continueraient de tourner sans personne pour les attendre, parfois
+   pendant des heures sur un vrai run. */
+static void bm_abort_workers(int (*pipes)[2], const pid_t *pids, int count)
+{
+    for (int i = 0; i < count; i++) {
+        kill(pids[i], SIGTERM);
+    }
+    for (int i = 0; i < count; i++) {
+        int status;
+        waitpid(pids[i], &status, 0);
+        close(pipes[i][0]);
+    }
+}
+
 int main(int argc, char **argv)
 {
     int forks = bm_default_forks();
@@ -136,9 +165,14 @@ int main(int argc, char **argv)
             fprintf(stderr, "usage: %s [--forks N] <pieces.csv> <indices.csv>\n", argv[0]);
             return 2;
         }
-        forks = atoi(argv[2]);
-        if (forks < 1) {
+        char *endptr = NULL;
+        long forks_long = strtol(argv[2], &endptr, 10);
+        if (endptr == argv[2] || *endptr != '\0' || forks_long < 1) {
             forks = 1;
+        } else if (forks_long > BM_MAX_FORKS) {
+            forks = BM_MAX_FORKS;
+        } else {
+            forks = (int)forks_long;
         }
         argi = 3;
     }
@@ -194,14 +228,31 @@ int main(int argc, char **argv)
     for (int w = 0; w < forks; w++) {
         if (pipe(pipes[w]) != 0) {
             fprintf(stderr, "border_mass : pipe() a echoue pour le worker %d\n", w);
+            bm_abort_workers(pipes, pids, w);
+            free(pipes);
+            free(pids);
+            free(collect.partitions);
             return 1;
         }
         pid_t pid = fork();
         if (pid < 0) {
             fprintf(stderr, "border_mass : fork() a echoue pour le worker %d\n", w);
+            close(pipes[w][0]);
+            close(pipes[w][1]);
+            bm_abort_workers(pipes, pids, w);
+            free(pipes);
+            free(pids);
+            free(collect.partitions);
             return 1;
         }
         if (pid == 0) {
+            /* Un enfant n'a besoin que de l'extrémité écriture de SON pipe —
+               il hérite aussi des extrémités lecture de tous les pipes des
+               workers déjà forkés avant lui (pipes[0..w-1][0]), jamais
+               utilisées ici : les fermer explicitement. */
+            for (int i = 0; i < w; i++) {
+                close(pipes[i][0]);
+            }
             close(pipes[w][0]);
             long long sub = bm_run_worker(w, forks, map, all, order, collect.partitions, collect.count);
             dprintf(pipes[w][1], "%lld\n", sub);
@@ -213,18 +264,37 @@ int main(int argc, char **argv)
     }
 
     long long total = completed_during_expansion;
+    int any_worker_failed = 0;
     for (int w = 0; w < forks; w++) {
         char buf[64];
-        ssize_t n = read(pipes[w][0], buf, sizeof buf - 1);
+        size_t got = 0;
+        ssize_t r;
+        while (got < sizeof buf - 1 && (r = read(pipes[w][0], buf + got, sizeof buf - 1 - got)) > 0) {
+            got += (size_t)r;
+        }
         close(pipes[w][0]);
+
         int status;
         waitpid(pids[w], &status, 0);
-        if (n <= 0) {
-            fprintf(stderr, "border_mass : aucun resultat lu du worker %d\n", w);
+
+        if (got == 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "border_mass : le worker %d a echoue (status=%d, %zu octets lus)\n",
+                    w, status, got);
+            any_worker_failed = 1;
             continue;
         }
-        buf[n] = '\0';
+
+        buf[got] = '\0';
         total += strtoll(buf, NULL, 10);
+    }
+
+    if (any_worker_failed) {
+        fprintf(stderr,
+                "border_mass : au moins un worker a echoue, total incomplet non affiche comme definitif\n");
+        free(pipes);
+        free(pids);
+        free(collect.partitions);
+        return 1;
     }
 
     printf("masse totale des anneaux de bordure valides : %lld\n", total);

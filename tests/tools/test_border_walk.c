@@ -350,6 +350,10 @@ struct bw_frontier_collect {
 static void bw_collect_partial(const struct possibility_packet *partial_state, int depth, void *ctx)
 {
     struct bw_frontier_collect *c = (struct bw_frontier_collect *)ctx;
+    if (c->count >= BORDER_RING_LEN + 1) {
+        fprintf(stderr, "bw_collect_partial: frontier overflowed the fixed test collector\n");
+        abort();
+    }
     c->states[c->count] = *partial_state;
     c->depths[c->count] = depth;
     c->count++;
@@ -385,6 +389,38 @@ TEST border_walk_expand_frontier_then_resume_matches_direct_count(void)
     long long total = completed_during_expansion;
     for (int i = 0; i < collect.count; i++) {
         total += border_walk_count_ordered(map, all, ring, collect.depths[i], &collect.states[i], NULL, NULL);
+    }
+    ASSERT_EQ_FMT(4LL, total, "%lld");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+/* Même propriété que border_walk_expand_frontier_then_resume_matches_direct_count,
+   mais avec border_corners_first_order — l'ordre que border_mass.c utilise
+   RÉELLEMENT. La sum-preservation property n'était vérifiée jusqu'ici que
+   pour border_ring_order ; ce test verrouille qu'elle tient aussi pour
+   l'ordre de production, pas seulement pour l'ordre historique. */
+TEST border_walk_expand_frontier_then_resume_matches_direct_count_with_corners_first(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    int8_t order[BORDER_RING_LEN][2];
+    border_corners_first_order(order);
+
+    struct bw_frontier_collect collect;
+    memset(&collect, 0, sizeof collect);
+
+    long long completed_during_expansion =
+        border_walk_expand_frontier(map, all, order, 2, bw_collect_partial, &collect, NULL, NULL);
+
+    long long total = completed_during_expansion;
+    for (int i = 0; i < collect.count; i++) {
+        total += border_walk_count_ordered(map, all, order, collect.depths[i], &collect.states[i], NULL, NULL);
     }
     ASSERT_EQ_FMT(4LL, total, "%lld");
 
@@ -435,5 +471,6 @@ SUITE(border_walk_suite)
     RUN_TEST(border_corners_first_order_puts_all_4_corners_first);
     RUN_TEST(border_corners_first_order_does_not_change_the_count);
     RUN_TEST(border_walk_expand_frontier_then_resume_matches_direct_count);
+    RUN_TEST(border_walk_expand_frontier_then_resume_matches_direct_count_with_corners_first);
     RUN_TEST(border_walk_expand_frontier_exhausts_the_tree_when_target_is_too_high);
 }

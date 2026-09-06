@@ -1239,8 +1239,8 @@ int main(int argc, char **argv)
 
 - [ ] **Step 2: Build**
 
-Run: `make border-mass 2>&1 | tail -30`
-Expected: compiles cleanly under `-Werror`.
+Run: `make border-mass CPPFLAGS="-DETERN_PARTS=16" 2>&1 | tail -30`
+Expected: compiles cleanly under `-Werror`. **The CPPFLAGS override is required** — the smoke test in Step 3 uses the 16-piece fixture, and without this flag the default build's `BORDER_RING_LEN=60` is unreachable from a 16-piece board, so the frontier expansion never produces any partitions, `--forks` never actually forks anything, and the smoke test would silently validate nothing about the orchestration.
 
 - [ ] **Step 3: Smoke test — `--forks 1` and `--forks 4` agree, on the small real puzzle**
 

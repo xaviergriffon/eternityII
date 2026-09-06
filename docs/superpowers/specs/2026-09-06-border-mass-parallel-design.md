@@ -206,15 +206,16 @@ Séquence :
 
 ### Progression pendant l'exécution
 
-Un run complet peut prendre longtemps même parallélisé. Chaque worker
-journalise sa progression sur `stderr` à intervalle régulier (nombre de
-nœuds visités, toutes les N secondes ou tous les K nœuds — mécanisme
-similaire à `bench_search.sh`/`ETII_BENCH_NODES`, mais pas un arrêt, un
-simple point de contrôle affiché). Les lignes de workers différents peuvent
-s'entrelacer sur un terminal partagé — acceptable pour un outil de
-diagnostic lancé manuellement, chaque ligne reste elle-même cohérente (une
-seule `write()` par ligne, taille très inférieure à `PIPE_BUF`/la garantie
-d'écriture atomique d'un terminal).
+Chaque worker journalise sur `stderr` une ligne PAR PARTITION TERMINÉE
+(numéro de partition, total courant) plutôt qu'un point de contrôle
+périodique en temps ou en nœuds visités (que l'idée initiale envisageait,
+à la `ETII_BENCH_NODES`) — plus simple, et n'exige pas d'ajouter un nouveau
+paramètre de callback de progression à `border_walk_count_ordered`, déjà
+stable et testé. Compromis assumé : une partition inhabituellement grosse
+(le déséquilibre de charge documenté dans les Risques ci-dessous) peut
+laisser un worker silencieux un long moment. Si cela s'avère gênant en
+pratique, un point de contrôle en nombre de nœuds à l'intérieur même du
+DFS resterait la voie la plus simple pour y remédier — non implémenté ici.
 
 ### Interruption
 

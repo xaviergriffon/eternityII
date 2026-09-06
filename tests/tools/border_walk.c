@@ -66,6 +66,16 @@ struct bw_ctx {
     void *user_ctx;
 };
 
+/* ATTENTION : `border_walk_expand_frontier` (plus bas dans ce fichier)
+   réimplémente indépendamment la même logique de candidats à une case (le
+   filtre `id <= 0`, le filtre `is_face_used`, le placement via
+   `id_for_rotated_part`) — un changement ici doit être répercuté là-bas,
+   sinon le total obtenu en parallélisant (frontière + reprise) diverge
+   silencieusement du total séquentiel. Les tests
+   `border_walk_expand_frontier_then_resume_matches_direct_count` et sa
+   variante « coins d'abord » verrouillent que les deux restent en
+   lockstep — s'ils échouent après une modification d'un seul des deux
+   sites, c'est exactement ce dont il s'agit. */
 static void bw_dfs(struct bw_ctx *ctx, int i)
 {
     if (i == BORDER_RING_LEN) {
@@ -147,6 +157,9 @@ long long border_walk_count(map_big_array *map,
     return border_walk_count_ordered(map, all_rotate_parts, ring, 0, NULL, on_found, ctx);
 }
 
+/* ATTENTION : réimplémente indépendamment la même logique de candidats que
+   `bw_dfs` (plus haut dans ce fichier) — voir le commentaire sur `bw_dfs`
+   pour pourquoi les deux doivent rester en lockstep. */
 long long border_walk_expand_frontier(map_big_array *map,
                                        struct array_part *all_rotate_parts,
                                        const int8_t order[BORDER_RING_LEN][2],
@@ -216,6 +229,10 @@ long long border_walk_expand_frontier(map_big_array *map,
         level = next_level;
         level_size = next_size;
         depth++;
+
+        if (level_size == 0) {
+            break;
+        }
     }
 
     if (on_partial != NULL) {
