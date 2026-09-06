@@ -318,6 +318,19 @@ gen-root:
 	    src/core/readdata.c src/core/part.c src/ui/logger.c \
 	    src/core/core_static_variables.c src/app/app_static_variables.c -lm -pthread
 
+# Outil border_mass (tests/tools/) : mesure la masse totale des anneaux de
+# bordure valides — voir docs/superpowers/specs/2026-09-06-masse-bordure-design.md
+# et docs/tests_et_ci.md. Réutilise $(TEST_MODULES) tel quel : border_walk.c
+# appelle what_search_in_grid_to_key (core/possibility.c), qui entraîne au
+# link tout le graphe déjà nécessaire à `make test` (datamanager.c compris) —
+# plus simple et plus sûr que reconstituer un sous-ensemble minimal à la main.
+BORDER_MASS_BIN := tests/tools/border_mass
+
+.PHONY: border-mass
+border-mass:
+	gcc -Wall -Wextra -std=gnu99 -O2 -Isrc -Itests $(CPPFLAGS) -Werror -pthread -o $(BORDER_MASS_BIN) \
+	    tests/tools/border_mass.c src/core/etii_search.c $(TEST_MODULES) -lm
+
 # Fonctions pures du banc de mesure (tests/bench/bench_lib.sh) : pas de C, donc
 # hors des suites greatest, mais rattaché à `make test` pour tourner partout où
 # elles tournent (CI, make test-docker). Ni compilation ni process lancé.
