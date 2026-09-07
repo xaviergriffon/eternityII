@@ -70,11 +70,16 @@
  * de niveau généreuse (mesurée insuffisante même sur une machine à 48 Go de
  * RAM sans ce mécanisme), un niveau bascule en fragments sur disque
  * (partitionnement externe par hachage) au lieu d'une table unique en
- * mémoire — voir border_ring_dp.h pour le raisonnement complet.
+ * mémoire — voir border_ring_dp.h pour le raisonnement complet. `--spill-dir
+ * DIR` redirige ces fragments (et les fichiers temporaires de `--forks`) vers
+ * DIR au lieu de `/tmp`, souvent une petite partition ou un tmpfs plafonné
+ * bien en-deçà de la RAM de la machine — observé en pratique, `/tmp` saturé
+ * par plusieurs dizaines de Go de fragments même sur une machine bien dotée
+ * (2x10 cœurs/48 Go), cf. docs/tests_et_ci.md.
  *
  * Usage :
  *   make border-mass
- *   tests/tools/border_mass [--dp] [--forks N] data/pieces.csv data/indices.csv
+ *   tests/tools/border_mass [--dp] [--forks N] [--spill-dir DIR] data/pieces.csv data/indices.csv
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -243,20 +248,27 @@ int main(int argc, char **argv)
 {
     int forks = bm_default_forks();
     int use_dp = 0;
+    const char *spill_dir = NULL;
     int argi = 1;
-    /* `--dp` et `--forks N` sont deux options indépendantes, combinables
-       dans n'importe quel ordre — `--dp --forks N` choisit l'algorithme ET
-       le nombre de process forkés pour sa parallélisation par niveau (cf.
-       border_ring_dp.h) ; `--forks N` seul garde son sens historique (DFS
-       par forks) ; `--dp` seul reprend le nombre de cœurs détecté par
-       défaut, comme `--forks` seul. */
+    /* `--dp`, `--forks N` et `--spill-dir DIR` sont des options indépendantes,
+       combinables dans n'importe quel ordre — `--dp --forks N` choisit
+       l'algorithme ET le nombre de process forkés pour sa parallélisation par
+       niveau (cf. border_ring_dp.h) ; `--forks N` seul garde son sens
+       historique (DFS par forks) ; `--dp` seul reprend le nombre de cœurs
+       détecté par défaut, comme `--forks` seul. `--spill-dir` n'a d'effet
+       qu'avec `--dp` (fragments du mode disque, cf. `border_ring_dp_set_spill_dir`) —
+       `/tmp` est souvent une petite partition ou un tmpfs plafonné bien
+       en-deçà de la RAM de la machine, qui peut saturer même sur une machine
+       par ailleurs bien dotée (observé en pratique, cf. docs/tests_et_ci.md). */
     while (argi < argc && argv[argi][0] == '-') {
         if (strcmp(argv[argi], "--dp") == 0) {
             use_dp = 1;
             argi++;
         } else if (strcmp(argv[argi], "--forks") == 0) {
             if (argi + 1 >= argc) {
-                fprintf(stderr, "usage: %s [--dp] [--forks N] <pieces.csv> <indices.csv>\n", argv[0]);
+                fprintf(stderr,
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] <pieces.csv> <indices.csv>\n",
+                        argv[0]);
                 return 2;
             }
             char *endptr = NULL;
@@ -269,12 +281,22 @@ int main(int argc, char **argv)
                 forks = (int)forks_long;
             }
             argi += 2;
+        } else if (strcmp(argv[argi], "--spill-dir") == 0) {
+            if (argi + 1 >= argc) {
+                fprintf(stderr,
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] <pieces.csv> <indices.csv>\n",
+                        argv[0]);
+                return 2;
+            }
+            spill_dir = argv[argi + 1];
+            argi += 2;
         } else {
             break;
         }
     }
     if (argc - argi != 2) {
-        fprintf(stderr, "usage: %s [--dp] [--forks N] <pieces.csv> <indices.csv>\n", argv[0]);
+        fprintf(stderr, "usage: %s [--dp] [--forks N] [--spill-dir DIR] <pieces.csv> <indices.csv>\n",
+                argv[0]);
         return 2;
     }
     const char *pieces_path = argv[argi];
@@ -296,6 +318,9 @@ int main(int argc, char **argv)
     }
 
     if (use_dp) {
+        if (spill_dir != NULL) {
+            border_ring_dp_set_spill_dir(spill_dir);
+        }
         long long total = border_ring_count_dp(map, all, forks);
         printf("masse totale des anneaux de bordure valides : %lld\n", total);
         return 0;

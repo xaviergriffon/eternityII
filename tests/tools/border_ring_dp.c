@@ -18,6 +18,24 @@
    beaucoup moins encore (chaque pièce y forme sa propre classe). */
 #define BD_MAX_CLASSES 64
 
+/* Répertoire des fichiers temporaires (niveaux forkés ET fragments du mode
+   disque) — `/tmp` par défaut, comme le reste du fichier avant l'ajout du
+   mode disque. `/tmp` est souvent une petite partition ou un tmpfs plafonné
+   bien en-deçà de la RAM de la machine (indépendamment de sa taille) : un
+   niveau en mode disque peut y déposer plusieurs dizaines de Go de fragments
+   AVANT compactage (bruts, donc plus gros que leur forme finale
+   dédupliquée), qui peuvent saturer `/tmp` même sur une machine par ailleurs
+   bien dotée — observé en pratique (échec au niveau 21 sur la machine visée,
+   2x10 cœurs/48 Go, cf. docs/tests_et_ci.md). `border_ring_dp_set_spill_dir`
+   permet de rediriger vers un disque plus grand, comme `--stock-spill-dir`
+   pour le stock principal (`core/stock_spill.c`). */
+static const char *bd_spill_dir = "/tmp";
+
+void border_ring_dp_set_spill_dir(const char *dir)
+{
+    bd_spill_dir = dir;
+}
+
 /* Paire ORDONNÉE (couleur requise en entrée, couleur produite en sortie) —
    PAS une paire non ordonnée, cf. le commentaire de bd_build_classes pour
    pourquoi cette distinction est cruciale (32× de sur-comptage sinon). */
@@ -386,6 +404,36 @@ void border_ring_dp_set_fork_min_states_for_tests(size_t n)
     bd_fork_min_states = n;
 }
 
+/* Un fwrite() qui echoue silencieusement (retour < nmemb, jamais verifie
+   avant cette correction) laisse un fichier TRONQUE sans le signaler — vu
+   une fois en pratique sur la machine visee (disque /tmp sature pendant
+   l'eclatement d'un niveau a 14 Go, cf. docs/tests_et_ci.md) : la
+   corruption ne se decouvrait qu'au COMPACTAGE suivant ("fragment tronque"),
+   bien apres le worker fautif qui, lui, se terminait avec un code de succes.
+   Toute ecriture de fragment passe desormais par ici, jamais un fwrite() nu,
+   pour echouer bruyamment au bon endroit — meme philosophie que
+   bd_level_alloc_or_die pour une allocation. */
+static void bd_write_or_die(FILE *fp, const void *buf, size_t size, const char *context)
+{
+    if (fwrite(buf, size, 1, fp) != 1) {
+        fprintf(stderr, "border_ring_count_dp : ecriture impossible (%s, disque plein ?) — arret\n", context);
+        exit(1);
+    }
+}
+
+static void bd_close_or_die(FILE *fp, const char *context)
+{
+    /* fclose() peut echouer ICI meme si tous les fwrite() precedents ont
+       « reussi » : les octets restaient dans le tampon stdio, jamais
+       physiquement ecrits avant le vidage final — meme piege que ci-dessus,
+       a l'autre bout de l'ecriture. */
+    if (fclose(fp) != 0) {
+        fprintf(stderr, "border_ring_count_dp : cloture de '%s' impossible (disque plein ?) — arret\n",
+                context);
+        exit(1);
+    }
+}
+
 static void bd_level_write_file(const struct bd_level *level, const char *path)
 {
     FILE *fp = fopen(path, "wb");
@@ -395,15 +443,15 @@ static void bd_level_write_file(const struct bd_level *level, const char *path)
     }
     int32_t key_len = level->key_len;
     uint64_t count = level->used;
-    fwrite(&key_len, sizeof key_len, 1, fp);
-    fwrite(&count, sizeof count, 1, fp);
+    bd_write_or_die(fp, &key_len, sizeof key_len, path);
+    bd_write_or_die(fp, &count, sizeof count, path);
     for (size_t idx = 0; idx < level->capacity; idx++) {
         if (bd_level_is_occupied(level, idx)) {
-            fwrite(level->keys + idx * (size_t)level->key_len, (size_t)level->key_len, 1, fp);
-            fwrite(&level->values[idx], sizeof(long long), 1, fp);
+            bd_write_or_die(fp, level->keys + idx * (size_t)level->key_len, (size_t)level->key_len, path);
+            bd_write_or_die(fp, &level->values[idx], sizeof(long long), path);
         }
     }
-    fclose(fp);
+    bd_close_or_die(fp, path);
 }
 
 static void bd_level_merge_file(struct bd_level *level, const char *path)
@@ -451,7 +499,10 @@ static void bd_transition_parallel(const struct bd_ctx *ctx, int want_corner,
                                     const struct bd_level *level_cur, int nb_workers,
                                     struct bd_level *level_next)
 {
-    char (*paths)[64] = malloc((size_t)nb_workers * sizeof *paths);
+    /* Assez pour bd_spill_dir (configurable, cf. border_ring_dp_set_spill_dir)
+       + le suffixe — pas 64, insuffisant dès que bd_spill_dir n'est plus
+       "/tmp". */
+    char (*paths)[300] = malloc((size_t)nb_workers * sizeof *paths);
     pid_t *pids = malloc((size_t)nb_workers * sizeof *pids);
     size_t chunk = (level_cur->capacity + (size_t)nb_workers - 1) / (size_t)nb_workers;
 
@@ -465,7 +516,7 @@ static void bd_transition_parallel(const struct bd_ctx *ctx, int want_corner,
     fflush(stderr);
 
     for (int w = 0; w < nb_workers; w++) {
-        snprintf(paths[w], sizeof paths[w], "/tmp/etii_bd_level_%d_%d", (int)getpid(), w);
+        snprintf(paths[w], sizeof paths[w], "%s/etii_bd_level_%d_%d", bd_spill_dir, (int)getpid(), w);
 
         pid_t pid = fork();
         if (pid < 0) {
@@ -696,7 +747,7 @@ static void bd_raw_merge_file(struct bd_level *level, const char *path, int key_
    charger qu'UN fragment source à la fois, jamais le niveau entier. */
 static void bd_transition_range_scatter(const struct bd_ctx *ctx, int want_corner,
                                          const struct bd_level *level_cur, int nb_shards_next,
-                                         FILE **out_files)
+                                         FILE **out_files, const char *context)
 {
     int nb = ctx->nb_classes;
     uint8_t next_key[1 + BD_MAX_CLASSES];
@@ -720,8 +771,8 @@ static void bd_transition_range_scatter(const struct bd_ctx *ctx, int want_corne
             next_key[1 + c]--;
             long long delta = ways * counts[c];
             int d = bd_shard_of(next_key, 1 + nb, nb_shards_next);
-            fwrite(next_key, (size_t)(1 + nb), 1, out_files[d]);
-            fwrite(&delta, sizeof delta, 1, out_files[d]);
+            bd_write_or_die(out_files[d], next_key, (size_t)(1 + nb), context);
+            bd_write_or_die(out_files[d], &delta, sizeof delta, context);
         }
     }
 }
@@ -789,10 +840,10 @@ static void bd_compact_dir(const char *dir, int nb_sources, int nb_shards, int k
                 fprintf(stderr, "border_ring_count_dp : ecriture de '%s' impossible — arret\n", summary_paths[w]);
                 exit(1);
             }
-            fwrite(&used_sum, sizeof used_sum, 1, sf);
-            fwrite(&bytes_sum, sizeof bytes_sum, 1, sf);
-            fwrite(&max_bytes, sizeof max_bytes, 1, sf);
-            fclose(sf);
+            bd_write_or_die(sf, &used_sum, sizeof used_sum, summary_paths[w]);
+            bd_write_or_die(sf, &bytes_sum, sizeof bytes_sum, summary_paths[w]);
+            bd_write_or_die(sf, &max_bytes, sizeof max_bytes, summary_paths[w]);
+            bd_close_or_die(sf, summary_paths[w]);
             exit(0);
         }
         pids[w] = pid;
@@ -868,11 +919,11 @@ static void bd_level_to_shards(const struct bd_level *level, const char *dir, in
         }
         const uint8_t *key = level->keys + idx * (size_t)level->key_len;
         int d = bd_shard_of(key, level->key_len, nb_shards);
-        fwrite(key, (size_t)level->key_len, 1, out_files[d]);
-        fwrite(&level->values[idx], sizeof(long long), 1, out_files[d]);
+        bd_write_or_die(out_files[d], key, (size_t)level->key_len, dir);
+        bd_write_or_die(out_files[d], &level->values[idx], sizeof(long long), dir);
     }
     for (int d = 0; d < nb_shards; d++) {
-        fclose(out_files[d]);
+        bd_close_or_die(out_files[d], dir);
     }
     free(out_files);
 
@@ -932,11 +983,23 @@ static void bd_transition_disk(const struct bd_ctx *ctx, int want_corner, const 
                 snprintf(path, sizeof path, "%s/shard_%d.bin", cur->dir, (int)s);
                 struct bd_level shard;
                 bd_level_load_file(&shard, path);
-                bd_transition_range_scatter(ctx, want_corner, &shard, nb_shards_next, out_files);
+                /* Supprime la source dès qu'elle est chargée en mémoire,
+                   PAS seulement à la toute fin de la transition
+                   (bd_rm_shard_set(cur), plus bas) : un fragment source lu
+                   une fois n'est plus jamais nécessaire (chaque fragment
+                   n'est assigné qu'à UN SEUL worker), et le retarder fait
+                   cohabiter sur disque le niveau ENTIER sortant ET les
+                   fragments bruts (non dédupliqués, donc plus gros que le
+                   niveau entrant final) du niveau suivant en construction —
+                   exactement le pic qui a saturé /tmp sur la machine visée
+                   (14 Go de niveau 20 encore présent pendant l'éclatement du
+                   niveau 21, cf. docs/tests_et_ci.md). */
+                unlink(path);
+                bd_transition_range_scatter(ctx, want_corner, &shard, nb_shards_next, out_files, next_dir);
                 bd_level_free(&shard);
             }
             for (int d = 0; d < nb_shards_next; d++) {
-                fclose(out_files[d]);
+                bd_close_or_die(out_files[d], next_dir);
             }
             free(out_files);
             exit(0);
@@ -1016,8 +1079,8 @@ static long long bd_finalize_shards(const struct bd_ctx *ctx, int want_corner, i
                 fprintf(stderr, "border_ring_count_dp : ecriture de '%s' impossible — arret\n", paths[w]);
                 exit(1);
             }
-            fwrite(&total, sizeof total, 1, fp);
-            fclose(fp);
+            bd_write_or_die(fp, &total, sizeof total, paths[w]);
+            bd_close_or_die(fp, paths[w]);
             exit(0);
         }
         pids[w] = pid;
@@ -1108,7 +1171,7 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
             if (bytes >= bd_disk_mode_min_bytes) {
                 int nb_shards = bd_pick_nb_shards(bytes, nb_workers);
                 char dir[128];
-                snprintf(dir, sizeof dir, "/tmp/etii_bd_%d_pos%d", (int)getpid(), pos);
+                snprintf(dir, sizeof dir, "%s/etii_bd_%d_pos%d", bd_spill_dir, (int)getpid(), pos);
                 bd_level_to_shards(&cur, dir, nb_shards, nb_workers, &cur_shards);
                 bd_level_free(&cur);
                 disk_mode = 1;
@@ -1121,7 +1184,7 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
         } else {
             int nb_shards_next = bd_pick_nb_shards(cur_shards.total_bytes, nb_workers);
             char dir[128];
-            snprintf(dir, sizeof dir, "/tmp/etii_bd_%d_pos%d", (int)getpid(), pos);
+            snprintf(dir, sizeof dir, "%s/etii_bd_%d_pos%d", bd_spill_dir, (int)getpid(), pos);
             struct bd_shard_set next_shards;
             bd_transition_disk(ctx, want_corner, &cur_shards, nb_workers, dir, nb_shards_next, &next_shards);
             cur_shards = next_shards;

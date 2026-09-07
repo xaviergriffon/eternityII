@@ -100,9 +100,12 @@ transition répartie sur N process forkés ; au-delà d'un seuil (2 Go par
 défaut), le niveau lui-même bascule en fragments sur disque (partitionnement
 externe par hachage, comme un GROUP BY qui ne tient pas en RAM), pour ne
 jamais avoir à matérialiser un niveau entier en mémoire quelle que soit sa
-taille. Bien plus rapide et sobre en mémoire que le DFS brut ; voir
-`docs/tests_et_ci.md` pour les mesures (y compris sur la machine 2×10
-cœurs/48 Go visée) et le détail du mode disque.
+taille. `--spill-dir DIR` redirige les fragments et fichiers temporaires vers
+un disque plus grand que `/tmp` (souvent une petite partition ou un tmpfs
+plafonné indépendamment de la RAM de la machine — a saturé en pratique sur la
+machine 2×10 cœurs/48 Go visée avant correction). Bien plus rapide et sobre
+en mémoire que le DFS brut ; voir `docs/tests_et_ci.md` pour les mesures et
+le détail du mode disque.
 
 ## Tests d'intégration bout-en-bout
 

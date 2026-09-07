@@ -417,6 +417,35 @@ minuscule à passer par éclatement + compactage + transition suivante +
 finalisation fragmentée, jamais exercés par les autres tests (aucun de leurs
 fixtures n'approche 2 Go).
 
+**Échec réel observé sur la machine visée, corrigé** : le mode disque a
+d'abord échoué à la position 21/59 (17 fragments à 13,92 Go à la position 20)
+avec des messages « fragment brut tronqué » côté compactage, alors qu'AUCUN
+worker d'éclatement n'avait signalé d'échec. Cause racine : les `fwrite()`
+des fragments bruts (et le `fclose()` qui les clôt) n'étaient jamais
+vérifiés — un `ENOSPC` (disque plein) y échoue silencieusement, laissant un
+fichier tronqué que seul le compactage suivant découvre, bien après le
+worker fautif qui, lui, se termine avec un code de succès. `/tmp` peut
+saturer même sur une machine par ailleurs bien dotée (48 Go de RAM) : sa
+taille est indépendante de la RAM (petite partition ou tmpfs plafonné), et un
+niveau en mode disque y dépose ses fragments BRUTS (non dédupliqués, donc
+plus gros que leur forme finale compactée) — ici, l'ancien niveau (13,92 Go)
+restait sur disque tout le temps de l'éclatement du suivant, faute d'être
+supprimé avant la fin de toute la transition. Trois corrections :
+
+- Toute écriture de fragment passe désormais par `bd_write_or_die`/
+  `bd_close_or_die` (`border_ring_dp.c`) — échoue bruyamment (avec un indice
+  « disque plein ? ») au lieu de laisser un fichier tronqué se propager en
+  silence jusqu'au compactage suivant.
+- Un fragment SOURCE est supprimé dès qu'il est chargé en mémoire par son
+  worker d'éclatement (`bd_transition_disk`), pas seulement à la toute fin de
+  la transition — il n'est plus jamais utile après coup (chaque fragment
+  n'est assigné qu'à un seul worker), donc plus la peine de le garder pendant
+  tout l'éclatement du niveau suivant.
+- `border_ring_dp_set_spill_dir` (`border_mass --spill-dir DIR` combiné à
+  `--dp`) permet de rediriger fragments et fichiers temporaires vers un
+  disque plus grand que `/tmp` — même logique que `--stock-spill-dir` pour le
+  stock principal (`core/stock_spill.c`).
+
 Contrairement à `gen_root`, cet outil ne produit aucune racine de stock —
 c'est la **phase 1** d'un projet en deux temps : seul un chiffre est
 rapporté (la masse totale `N`). La génération de racines `.back` à partir des

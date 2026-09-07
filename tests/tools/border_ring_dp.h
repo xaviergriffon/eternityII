@@ -84,4 +84,22 @@
  */
 long long border_ring_count_dp(map_big_array *map, struct array_part *all_rotate_parts, int nb_workers);
 
+/**
+ * @brief Change le répertoire des fichiers temporaires du mode disque
+ * (fragments) et de la parallélisation par forks (`/tmp` par défaut) — comme
+ * `--stock-spill-dir` pour le stock principal (`core/stock_spill.c`).
+ *
+ * `/tmp` est souvent une petite partition ou un tmpfs plafonné bien en-deçà
+ * de la RAM de la machine, indépendamment de sa taille : un niveau en mode
+ * disque peut y déposer plusieurs dizaines de Go de fragments bruts (avant
+ * compactage, donc plus gros que leur forme finale dédupliquée) — observé en
+ * pratique, `/tmp` saturé sur une machine par ailleurs bien dotée
+ * (2x10 cœurs/48 Go), cf. docs/tests_et_ci.md.
+ *
+ * @param dir Chemin du répertoire — doit rester valide pendant toute la durée
+ *            de l'appel à `border_ring_count_dp` qui suit (aucune copie
+ *            interne n'en est faite, comme `argv` ne l'est jamais non plus).
+ */
+void border_ring_dp_set_spill_dir(const char *dir);
+
 #endif /* eternityII_border_ring_dp_h */
