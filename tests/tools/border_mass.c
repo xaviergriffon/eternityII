@@ -43,6 +43,15 @@
  * gen_root.c) — vérifiée par smoke test manuel (--forks 1 vs --forks 4 sur
  * le jeu 16 pièces, même total).
  *
+ * Chaque worker journalise sur stderr, en plus de la ligne « partition X/Y
+ * terminee » (qui n'arrive qu'une fois tout le sous-arbre d'une partition
+ * épuisé — potentiellement très long, cf. docs/tests_et_ci.md), une ligne de
+ * progression tous les BM_PROGRESS_INTERVAL_NODES nœuds DFS visités (voir
+ * `struct border_progress_opts`, tests/tools/border_walk.h) : nœuds explorés,
+ * anneaux trouvés jusqu'ici, et un débit nœuds/s calculé depuis la dernière
+ * ligne — un signal de vie et de vitesse indépendant du bouclage d'une
+ * partition entière.
+ *
  * Usage :
  *   make border-mass
  *   tests/tools/border_mass [--forks N] data/pieces.csv data/indices.csv
@@ -53,6 +62,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <time.h>
 
 #include "core/readdata.h"
 #include "core/part.h"
@@ -61,6 +71,48 @@
 #include "tools/border_walk.h"
 
 #define BM_MAX_FORKS 1024
+
+/* Nombre de nœuds DFS entre deux lignes de progression par worker — choisi
+   empiriquement (~23M nœuds/s constatés sur data/pieces.csv, 256 pièces,
+   avec ce réglage : une ligne toutes les 4-5 secondes) pour ni un flot
+   illisible, ni un silence de plusieurs minutes entre deux signes de vie. */
+#define BM_PROGRESS_INTERVAL_NODES 100000000LL
+
+struct bm_progress_ctx {
+    int worker_id;
+    int partition_index;  /* 1-based, position du worker dans SA liste */
+    int partition_total;  /* nombre de partitions assignées à ce worker */
+    struct timespec last_time;
+    long long last_nodes;
+};
+
+static double bm_elapsed_seconds(const struct timespec *from, const struct timespec *to)
+{
+    return (double)(to->tv_sec - from->tv_sec) + (double)(to->tv_nsec - from->tv_nsec) / 1e9;
+}
+
+/* Callback `border_progress_cb` : appelé par border_walk_count_ordered tous
+   les BM_PROGRESS_INTERVAL_NODES nœuds. border_walk.c ne lit aucune horloge
+   (cœur pur, cf. son commentaire) — tout le calcul de vitesse vit ici. */
+static void bm_report_progress(long long nodes_visited, long long rings_found, void *ctx_)
+{
+    struct bm_progress_ctx *ctx = (struct bm_progress_ctx *)ctx_;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    double elapsed_s = bm_elapsed_seconds(&ctx->last_time, &now);
+    long long delta_nodes = nodes_visited - ctx->last_nodes;
+    double rate = (elapsed_s > 0.0) ? (double)delta_nodes / elapsed_s : 0.0;
+
+    fprintf(stderr,
+            "border_mass[worker %d] : partition %d/%d en cours, %lld noeuds explores, "
+            "%lld anneaux trouves (dans cette partition), %.0f noeuds/s\n",
+            ctx->worker_id, ctx->partition_index, ctx->partition_total,
+            nodes_visited, rings_found, rate);
+
+    ctx->last_time = now;
+    ctx->last_nodes = nodes_visited;
+}
 
 static int border_mass_check_indices_not_on_border(const struct array_index *indices)
 {
@@ -129,9 +181,19 @@ static long long bm_run_worker(int worker_id, int nb_workers,
     for (int p = worker_id; p < nb_partitions; p += nb_workers) {
         assigned++;
     }
+
+    struct bm_progress_ctx progress_ctx;
+    progress_ctx.worker_id = worker_id;
+    progress_ctx.partition_total = assigned;
+    struct border_progress_opts progress = { BM_PROGRESS_INTERVAL_NODES, bm_report_progress, &progress_ctx };
+
     for (int p = worker_id; p < nb_partitions; p += nb_workers) {
+        progress_ctx.partition_index = done + 1;
+        progress_ctx.last_nodes = 0;
+        clock_gettime(CLOCK_MONOTONIC, &progress_ctx.last_time);
+
         long long sub = border_walk_count_ordered(map, all, order, partitions[p].depth,
-                                                    &partitions[p].state, NULL, NULL);
+                                                    &partitions[p].state, NULL, NULL, &progress);
         total += sub;
         done++;
         fprintf(stderr, "border_mass[worker %d] : partition %d/%d terminee, sous-total %lld\n",

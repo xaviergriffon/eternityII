@@ -271,7 +271,19 @@ séquentiel (très peu de pièces ont 2 faces nulles adjacentes — 4 sur le
 jeu 256 pièces réel — donc le facteur de branchement des 4 premières étapes
 est minuscule), la recherche est étendue en largeur jusqu'à `N*8` états
 partiels puis distribuée à `N` process forkés. Chaque worker journalise sa
-progression sur `stderr` (une ligne par partition terminée). Voir
+progression sur `stderr` à deux granularités : une ligne par partition
+terminée (« partition X/Y terminee, sous-total N »), et — comme une seule
+partition peut à elle seule tourner bien plus de 15 minutes sans jamais se
+terminer — une ligne tous les `BM_PROGRESS_INTERVAL_NODES` nœuds DFS visités
+(défaut 10⁸, réglé empiriquement sur `data/pieces.csv` pour ~1 ligne toutes
+les 4-5 secondes) donnant le nombre de nœuds explorés, d'anneaux trouvés
+dans la partition en cours, et un débit nœuds/s instantané — un signal de
+vie et de vitesse indépendant du bouclage d'une partition entière. Le
+callback de progression (`struct border_progress_opts`,
+`tests/tools/border_walk.h`) est un point d'extension générique du cœur
+d'énumération ; `border_walk.c` ne lit aucune horloge (reste un cœur pur
+sans I/O), tout le calcul de vitesse et le formatage du message vivent dans
+`border_mass.c`. Voir
 [docs/superpowers/specs/2026-09-06-border-mass-parallel-design.md](superpowers/specs/2026-09-06-border-mass-parallel-design.md)
 pour le raisonnement complet (notamment pourquoi ceci ne réutilise pas
 `fork_gate.c`).

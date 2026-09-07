@@ -59,6 +59,24 @@ void border_corners_first_order(int8_t order[BORDER_RING_LEN][2]);
 typedef void (*border_ring_found_cb)(const struct possibility_packet *ring_state, void *ctx);
 
 /**
+ * @brief Suivi de progression pour `border_walk_count_ordered` — appelé tous
+ * les `interval_nodes` nœuds DFS entièrement traités (une case candidate
+ * essayée, qu'elle mène à un anneau ou à un échec, backtrack compris ;
+ * signalé en post-ordre, une fois le sous-arbre du nœud épuisé, pour que
+ * `rings_found` soit toujours à jour au moment de l'appel — y compris pour
+ * le nœud qui vient de fermer le dernier anneau). Aucune horloge lue ici :
+ * `border_walk.c` reste un cœur pur sans I/O, c'est l'appelant qui décide
+ * quoi faire du signal (mesurer une vitesse, journaliser une ligne…).
+ * `interval_nodes` doit être > 0 pour être actif ; passer `progress = NULL`
+ * à `border_walk_count_ordered` désactive tout suivi (coût nul).
+ */
+struct border_progress_opts {
+    long long interval_nodes;
+    void (*on_progress)(long long nodes_visited, long long rings_found, void *ctx);
+    void *ctx;
+};
+
+/**
  * @brief Variante de `border_walk_count` acceptant un ordre de parcours
  * explicite et un état de départ optionnel — permet de reprendre depuis un
  * état partiel produit par `border_walk_expand_frontier` (parallélisation
@@ -81,6 +99,7 @@ typedef void (*border_ring_found_cb)(const struct possibility_packet *ring_state
  *                         `start_depth = 0`).
  * @param on_found         Appelé pour chaque anneau trouvé (peut être NULL).
  * @param ctx              Passé tel quel à `on_found`.
+ * @param progress         Suivi de progression optionnel (peut être NULL).
  * @return                 Nombre d'anneaux trouvés en complétant depuis
  *                         `start_state`/`start_depth`.
  */
@@ -89,7 +108,8 @@ long long border_walk_count_ordered(map_big_array *map,
                                      const int8_t order[BORDER_RING_LEN][2],
                                      int start_depth,
                                      const struct possibility_packet *start_state,
-                                     border_ring_found_cb on_found, void *ctx);
+                                     border_ring_found_cb on_found, void *ctx,
+                                     const struct border_progress_opts *progress);
 
 /**
  * @brief Énumère par recherche exhaustive tous les anneaux de bordure

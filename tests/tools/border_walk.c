@@ -64,6 +64,9 @@ struct bw_ctx {
     long long count;
     border_ring_found_cb on_found;
     void *user_ctx;
+    long long nodes;
+    long long progress_since_last;
+    const struct border_progress_opts *progress;
 };
 
 /* ATTENTION : `border_walk_expand_frontier` (plus bas dans ce fichier)
@@ -76,6 +79,12 @@ struct bw_ctx {
    variante « coins d'abord » verrouillent que les deux restent en
    lockstep — s'ils échouent après une modification d'un seul des deux
    sites, c'est exactement ce dont il s'agit. */
+/* Le décompte de progression (`ctx->nodes`/`ctx->progress`) est signalé en
+   POST-ordre, à la toute fin de la fonction — après que la case courante
+   (feuille ou nœud interne) a fini tout son travail, fermeture d'anneau
+   comprise. Un signal en pré-ordre raterait de peu le nœud qui vient de
+   fermer le dernier anneau : `ctx->count` n'y serait pas encore incrémenté
+   au moment de l'appel. */
 static void bw_dfs(struct bw_ctx *ctx, int i)
 {
     if (i == BORDER_RING_LEN) {
@@ -83,36 +92,44 @@ static void bw_dfs(struct bw_ctx *ctx, int i)
         if (ctx->on_found != NULL) {
             ctx->on_found(&ctx->state, ctx->user_ctx);
         }
-        return;
+    } else {
+        int8_t x = ctx->order[i][0];
+        int8_t y = ctx->order[i][1];
+
+        key_part key;
+        what_search_in_grid_to_key(ctx->all_rotate_parts, &ctx->state, x, y, &key,
+                                    (int8_t)ctx->map->sizearrayM);
+        map_bucket bucket = map_bucket_packed(ctx->map, &key);
+
+        for (int s = 0; s < bucket.size; s++) {
+            const struct part *cand = &bucket.parts[s];
+            if (cand->id <= 0) {
+                continue;
+            }
+            uint16_t face_idx = (uint16_t)(cand->id - 1);
+            if (is_face_used(ctx->state.b_faceused, face_idx)) {
+                continue;
+            }
+
+            ctx->state.grid[x][y] = (int16_t)id_for_rotated_part((uint16_t)cand->id, (uint8_t)cand->rotation);
+            set_face_used(ctx->state.b_faceused, face_idx, 1);
+            ctx->state.alloc = (uint16_t)(i + 1);
+
+            bw_dfs(ctx, i + 1);
+
+            set_face_used(ctx->state.b_faceused, face_idx, 0);
+            ctx->state.grid[x][y] = -2;
+            ctx->state.alloc = (uint16_t)i;
+        }
     }
 
-    int8_t x = ctx->order[i][0];
-    int8_t y = ctx->order[i][1];
-
-    key_part key;
-    what_search_in_grid_to_key(ctx->all_rotate_parts, &ctx->state, x, y, &key,
-                                (int8_t)ctx->map->sizearrayM);
-    map_bucket bucket = map_bucket_packed(ctx->map, &key);
-
-    for (int s = 0; s < bucket.size; s++) {
-        const struct part *cand = &bucket.parts[s];
-        if (cand->id <= 0) {
-            continue;
+    ctx->nodes++;
+    if (ctx->progress != NULL) {
+        ctx->progress_since_last++;
+        if (ctx->progress_since_last == ctx->progress->interval_nodes) {
+            ctx->progress_since_last = 0;
+            ctx->progress->on_progress(ctx->nodes, ctx->count, ctx->progress->ctx);
         }
-        uint16_t face_idx = (uint16_t)(cand->id - 1);
-        if (is_face_used(ctx->state.b_faceused, face_idx)) {
-            continue;
-        }
-
-        ctx->state.grid[x][y] = (int16_t)id_for_rotated_part((uint16_t)cand->id, (uint8_t)cand->rotation);
-        set_face_used(ctx->state.b_faceused, face_idx, 1);
-        ctx->state.alloc = (uint16_t)(i + 1);
-
-        bw_dfs(ctx, i + 1);
-
-        set_face_used(ctx->state.b_faceused, face_idx, 0);
-        ctx->state.grid[x][y] = -2;
-        ctx->state.alloc = (uint16_t)i;
     }
 }
 
@@ -121,7 +138,8 @@ long long border_walk_count_ordered(map_big_array *map,
                                      const int8_t order[BORDER_RING_LEN][2],
                                      int start_depth,
                                      const struct possibility_packet *start_state,
-                                     border_ring_found_cb on_found, void *ctx)
+                                     border_ring_found_cb on_found, void *ctx,
+                                     const struct border_progress_opts *progress)
 {
     struct bw_ctx bw;
     bw.map = map;
@@ -143,6 +161,9 @@ long long border_walk_count_ordered(map_big_array *map,
     bw.count = 0;
     bw.on_found = on_found;
     bw.user_ctx = ctx;
+    bw.nodes = 0;
+    bw.progress_since_last = 0;
+    bw.progress = progress;
 
     bw_dfs(&bw, start_depth);
     return bw.count;
@@ -154,7 +175,7 @@ long long border_walk_count(map_big_array *map,
 {
     int8_t ring[BORDER_RING_LEN][2];
     border_ring_order(ring);
-    return border_walk_count_ordered(map, all_rotate_parts, ring, 0, NULL, on_found, ctx);
+    return border_walk_count_ordered(map, all_rotate_parts, ring, 0, NULL, on_found, ctx, NULL);
 }
 
 /* ATTENTION : réimplémente indépendamment la même logique de candidats que

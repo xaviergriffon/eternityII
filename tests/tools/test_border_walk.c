@@ -236,7 +236,7 @@ TEST border_walk_count_ordered_matches_border_walk_count_from_scratch(void)
     int8_t ring[BORDER_RING_LEN][2];
     border_ring_order(ring);
 
-    long long n = border_walk_count_ordered(map, all, ring, 0, NULL, NULL, NULL);
+    long long n = border_walk_count_ordered(map, all, ring, 0, NULL, NULL, NULL, NULL);
     ASSERT_EQ_FMT(4LL, n, "%lld");
 
     free_bigarray(map);
@@ -273,7 +273,7 @@ TEST border_walk_count_ordered_resumes_from_a_partial_state(void)
     set_face_used(start.b_faceused, 0, 1); /* pièce id 1, base 0 */
     start.alloc = 1;
 
-    long long n = border_walk_count_ordered(map, all, ring, 1, &start, NULL, NULL);
+    long long n = border_walk_count_ordered(map, all, ring, 1, &start, NULL, NULL, NULL);
     ASSERT_EQ_FMT(1LL, n, "%lld");
 
     free_bigarray(map);
@@ -333,8 +333,91 @@ TEST border_corners_first_order_does_not_change_the_count(void)
     int8_t order[BORDER_RING_LEN][2];
     border_corners_first_order(order);
 
-    long long n = border_walk_count_ordered(map, all, order, 0, NULL, NULL, NULL);
+    long long n = border_walk_count_ordered(map, all, order, 0, NULL, NULL, NULL, NULL);
     ASSERT_EQ_FMT(4LL, n, "%lld");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+struct bw_progress_record {
+    int calls;
+    long long last_nodes;
+    long long last_rings;
+    int monotonic_ok;
+};
+
+static void bw_on_progress(long long nodes_visited, long long rings_found, void *ctx_)
+{
+    struct bw_progress_record *rec = (struct bw_progress_record *)ctx_;
+    if (rec->calls > 0 &&
+        (nodes_visited <= rec->last_nodes || rings_found < rec->last_rings)) {
+        rec->monotonic_ok = 0;
+    }
+    rec->calls++;
+    rec->last_nodes = nodes_visited;
+    rec->last_rings = rings_found;
+}
+
+/* interval_nodes=1 : un appel par nœud DFS post-ordre, donc `calls` doit
+   égaler `last_nodes` (compteurs en lockstep) et le tout dernier appel doit
+   déjà voir `rings_found == n` — la feuille qui ferme le 4ᵉ et dernier
+   anneau incrémente `ctx->count` AVANT le signal de progression (post-ordre,
+   cf. le commentaire de bw_dfs), pas après. Un signal en pré-ordre raterait
+   ce dernier anneau de justesse : c'est exactement le bug que ce test
+   verrouille contre une régression. */
+TEST border_walk_count_ordered_reports_progress_in_lockstep_with_nodes(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    int8_t ring[BORDER_RING_LEN][2];
+    border_ring_order(ring);
+
+    struct bw_progress_record rec;
+    memset(&rec, 0, sizeof rec);
+    rec.monotonic_ok = 1;
+    struct border_progress_opts progress = { 1, bw_on_progress, &rec };
+
+    long long n = border_walk_count_ordered(map, all, ring, 0, NULL, NULL, NULL, &progress);
+
+    ASSERT_EQ_FMT(4LL, n, "%lld");
+    ASSERT(rec.calls > 0);
+    ASSERT(rec.monotonic_ok);
+    ASSERT_EQ_FMT((long long)rec.calls, rec.last_nodes, "%lld");
+    ASSERT_EQ_FMT(n, rec.last_rings, "%lld");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+/* interval_nodes=3 : ne doit déclencher on_progress qu'un nœud sur trois —
+   verrouille que le compteur intermédiaire (`progress_since_last`) est bien
+   remis à zéro à chaque déclenchement plutôt que de dériver. */
+TEST border_walk_count_ordered_respects_the_progress_interval(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    int8_t ring[BORDER_RING_LEN][2];
+    border_ring_order(ring);
+
+    struct bw_progress_record rec;
+    memset(&rec, 0, sizeof rec);
+    rec.monotonic_ok = 1;
+    struct border_progress_opts progress = { 3, bw_on_progress, &rec };
+
+    border_walk_count_ordered(map, all, ring, 0, NULL, NULL, NULL, &progress);
+
+    ASSERT(rec.calls > 0);
+    ASSERT_EQ_FMT(0LL, rec.last_nodes % 3, "%lld");
+    ASSERT_EQ_FMT((long long)rec.calls * 3, rec.last_nodes, "%lld");
 
     free_bigarray(map);
     free_array_part(all);
@@ -388,7 +471,7 @@ TEST border_walk_expand_frontier_then_resume_matches_direct_count(void)
 
     long long total = completed_during_expansion;
     for (int i = 0; i < collect.count; i++) {
-        total += border_walk_count_ordered(map, all, ring, collect.depths[i], &collect.states[i], NULL, NULL);
+        total += border_walk_count_ordered(map, all, ring, collect.depths[i], &collect.states[i], NULL, NULL, NULL);
     }
     ASSERT_EQ_FMT(4LL, total, "%lld");
 
@@ -420,7 +503,7 @@ TEST border_walk_expand_frontier_then_resume_matches_direct_count_with_corners_f
 
     long long total = completed_during_expansion;
     for (int i = 0; i < collect.count; i++) {
-        total += border_walk_count_ordered(map, all, order, collect.depths[i], &collect.states[i], NULL, NULL);
+        total += border_walk_count_ordered(map, all, order, collect.depths[i], &collect.states[i], NULL, NULL, NULL);
     }
     ASSERT_EQ_FMT(4LL, total, "%lld");
 
@@ -470,6 +553,8 @@ SUITE(border_walk_suite)
     RUN_TEST(border_corners_first_order_visits_the_same_cells_as_border_ring_order);
     RUN_TEST(border_corners_first_order_puts_all_4_corners_first);
     RUN_TEST(border_corners_first_order_does_not_change_the_count);
+    RUN_TEST(border_walk_count_ordered_reports_progress_in_lockstep_with_nodes);
+    RUN_TEST(border_walk_count_ordered_respects_the_progress_interval);
     RUN_TEST(border_walk_expand_frontier_then_resume_matches_direct_count);
     RUN_TEST(border_walk_expand_frontier_then_resume_matches_direct_count_with_corners_first);
     RUN_TEST(border_walk_expand_frontier_exhausts_the_tree_when_target_is_too_high);
