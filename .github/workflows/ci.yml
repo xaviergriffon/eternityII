@@ -314,3 +314,18 @@ jobs:
       # supprimé à la compilation (chemin conçu exprès). On repart propre.
       - name: Build FORWARD_CHECK_K=0 (forward-checking désactivé)
         run: make clean && make WERROR=1 CPPFLAGS="-DFORWARD_CHECK_K=0"
+
+      # border_mass et gen_root (tests/tools/) sont des outils CLI autonomes,
+      # chacun avec sa propre cible make (border-mass / gen-root) — jamais
+      # rattachés à `make test`, qui ne compile que leur cœur pur
+      # (border_walk.c / root_from_board.c, via TEST_MODULES). Sans ce job,
+      # aucune CI ne compilait les deux drivers CLI eux-mêmes : un warning ou
+      # une erreur dans border_mass.c (qui porte désormais l'orchestration
+      # fork/pipe/wait de --forks) ou gen_root.c pouvait passer inaperçue.
+      # Les deux cibles sont déjà à -Werror en dur ; compile-only, comme le
+      # reste de ce job — les binaires ne sont pas exécutés.
+      - name: Build border-mass + gen-root (256 pièces)
+        run: make border-mass gen-root
+
+      - name: Build border-mass + gen-root (ETERN_PARTS=16)
+        run: make border-mass gen-root CPPFLAGS="-DETERN_PARTS=16"
