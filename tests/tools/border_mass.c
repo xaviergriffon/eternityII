@@ -52,9 +52,26 @@
  * ligne — un signal de vie et de vitesse indépendant du bouclage d'une
  * partition entière.
  *
+ * `--dp` bascule sur un algorithme radicalement différent et EXACT :
+ * `border_ring_count_dp` (tests/tools/border_ring_dp.c) regroupe les
+ * pièces de bord interchangeables (même paire ORDONNÉE de couleurs "anneau",
+ * la face intérieure n'étant jamais vérifiée par ce comptage) en classes, et
+ * calcule niveau par niveau (une position de l'anneau à la fois, jamais les
+ * 59 mémoïsées ensemble) le nombre de façons d'atteindre chaque état — bien
+ * plus petit qu'un masque de bits par pièce réelle, et bien plus sobre en
+ * mémoire qu'une mémoïsation globale — là où le DFS aveugle (par défaut,
+ * sans `--dp`) explose (des dizaines de milliards de nœuds pour UNE SEULE
+ * partition sur 270 sur `data/pieces.csv`, cf. docs/tests_et_ci.md). Combine
+ * `--dp` avec `--forks N` : la transition d'un niveau assez gros est
+ * répartie sur N process forkés (chacun traite une plage d'états déjà
+ * calculés, en lecture seule, et écrit sa part du niveau suivant dans un
+ * fichier temporaire fusionné par le parent) — sans `--forks`, `--dp` prend
+ * le nombre de cœurs détecté par défaut, comme le DFS. Voir border_ring_dp.h
+ * pour le raisonnement complet.
+ *
  * Usage :
  *   make border-mass
- *   tests/tools/border_mass [--forks N] data/pieces.csv data/indices.csv
+ *   tests/tools/border_mass [--dp] [--forks N] data/pieces.csv data/indices.csv
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,6 +86,7 @@
 #include "core/possibility.h"
 #include "core/core_static_variables.h"
 #include "tools/border_walk.h"
+#include "tools/border_ring_dp.h"
 
 #define BM_MAX_FORKS 1024
 
@@ -221,25 +239,39 @@ static void bm_abort_workers(int (*pipes)[2], const pid_t *pids, int count)
 int main(int argc, char **argv)
 {
     int forks = bm_default_forks();
+    int use_dp = 0;
     int argi = 1;
-    if (argc >= 2 && strcmp(argv[1], "--forks") == 0) {
-        if (argc < 3) {
-            fprintf(stderr, "usage: %s [--forks N] <pieces.csv> <indices.csv>\n", argv[0]);
-            return 2;
-        }
-        char *endptr = NULL;
-        long forks_long = strtol(argv[2], &endptr, 10);
-        if (endptr == argv[2] || *endptr != '\0' || forks_long < 1) {
-            forks = 1;
-        } else if (forks_long > BM_MAX_FORKS) {
-            forks = BM_MAX_FORKS;
+    /* `--dp` et `--forks N` sont deux options indépendantes, combinables
+       dans n'importe quel ordre — `--dp --forks N` choisit l'algorithme ET
+       le nombre de process forkés pour sa parallélisation par niveau (cf.
+       border_ring_dp.h) ; `--forks N` seul garde son sens historique (DFS
+       par forks) ; `--dp` seul reprend le nombre de cœurs détecté par
+       défaut, comme `--forks` seul. */
+    while (argi < argc && argv[argi][0] == '-') {
+        if (strcmp(argv[argi], "--dp") == 0) {
+            use_dp = 1;
+            argi++;
+        } else if (strcmp(argv[argi], "--forks") == 0) {
+            if (argi + 1 >= argc) {
+                fprintf(stderr, "usage: %s [--dp] [--forks N] <pieces.csv> <indices.csv>\n", argv[0]);
+                return 2;
+            }
+            char *endptr = NULL;
+            long forks_long = strtol(argv[argi + 1], &endptr, 10);
+            if (endptr == argv[argi + 1] || *endptr != '\0' || forks_long < 1) {
+                forks = 1;
+            } else if (forks_long > BM_MAX_FORKS) {
+                forks = BM_MAX_FORKS;
+            } else {
+                forks = (int)forks_long;
+            }
+            argi += 2;
         } else {
-            forks = (int)forks_long;
+            break;
         }
-        argi = 3;
     }
     if (argc - argi != 2) {
-        fprintf(stderr, "usage: %s [--forks N] <pieces.csv> <indices.csv>\n", argv[0]);
+        fprintf(stderr, "usage: %s [--dp] [--forks N] <pieces.csv> <indices.csv>\n", argv[0]);
         return 2;
     }
     const char *pieces_path = argv[argi];
@@ -258,6 +290,12 @@ int main(int argc, char **argv)
     if (map == NULL) {
         fprintf(stderr, "border_mass : construction de la map de lookup impossible\n");
         return 1;
+    }
+
+    if (use_dp) {
+        long long total = border_ring_count_dp(map, all, forks);
+        printf("masse totale des anneaux de bordure valides : %lld\n", total);
+        return 0;
     }
 
     int8_t order[BORDER_RING_LEN][2];

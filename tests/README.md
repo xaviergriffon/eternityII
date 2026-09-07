@@ -80,17 +80,25 @@ Deux pièges à l'usage, tous deux rencontrés :
 [docs/tests_et_ci.md](../docs/tests_et_ci.md#outil-border_mass-make-border-mass)
 et [docs/superpowers/specs/2026-09-06-masse-bordure-design.md](../docs/superpowers/specs/2026-09-06-masse-bordure-design.md)).
 Son cœur pur (`border_walk.c`) est, comme celui de `gen_root`, compilé avec
-les autres modules et couvert par `test_border_walk.c`.
+les autres modules et couvert par `test_border_walk.c` ; le second algorithme
+(`--dp`, `border_ring_dp.c`) l'est de même, couvert par
+`test_border_ring_dp.c`.
 
 ```sh
 make border-mass
 tests/tools/border_mass data/pieces.csv data/indices.csv
 ```
 
-Ne termine pas en 15 minutes sur les données réelles (256 pièces) — voir
+Ne termine pas en plusieurs heures sur les données réelles (256 pièces) — voir
 docs/tests_et_ci.md pour le détail.
 `--forks N` parallélise par forks (coins d'abord, expansion en largeur,
 distribution round-robin) — voir la spec liée depuis `docs/tests_et_ci.md`.
+`--dp` bascule sur un algorithme exact par programmation dynamique sur des
+classes de pièces interchangeables, niveau par niveau — combinable avec
+`--forks N` (la transition d'un niveau assez gros est répartie sur N process
+forkés). Bien plus rapide et sobre en mémoire que le DFS brut, mais pas
+encore une solution complète pour le vrai jeu 256 pièces sur une machine à
+6-8 Go de RAM ; voir `docs/tests_et_ci.md` pour la mesure et ses limites.
 
 ## Tests d'intégration bout-en-bout
 

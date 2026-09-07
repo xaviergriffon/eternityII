@@ -288,12 +288,86 @@ sans I/O), tout le calcul de vitesse et le formatage du message vivent dans
 pour le raisonnement complet (notamment pourquoi ceci ne réutilise pas
 `fork_gate.c`).
 
-Mesuré empiriquement sur `data/pieces.csv` (256 pièces) : ne termine pas en 15
-minutes (interrompu par sécurité, aucun résultat produit) — le DFS séquentiel
-n'a aucune heuristique d'élagage (MRV, forward-check), contrairement au
-moteur de recherche principal, par choix de conception explicite (voir la
-spec). Reste à mesurer si une durée plus longue suffit, ou si l'approche
-meet-in-the-middle (§ « Risque connu, assumé » de la spec) est nécessaire.
+Mesuré empiriquement sur `data/pieces.csv` (256 pièces) : ne termine pas en
+plusieurs heures (une seule partition sur 270 avait déjà dépassé 33 milliards
+d'anneaux trouvés sans se terminer, `--forks 4`, run interrompu) — le DFS
+séquentiel n'a aucune heuristique d'élagage (MRV, forward-check), contrairement
+au moteur de recherche principal, par choix de conception explicite (voir la
+spec). Ordre de grandeur explicable : les faces "anneau" du vrai puzzle
+n'utilisent que 5 couleurs, chacune partagée par 24 des 120 faces de bord —
+une bordure volontairement peu contrainte par conception du puzzle réel, qui
+donne un facteur de branchement élevé au DFS séquentiel.
+
+### `--dp` : comptage exact par programmation dynamique sur classes de pièces
+
+`--dp` bascule sur `border_ring_count_dp` (`tests/tools/border_ring_dp.c`),
+un algorithme radicalement différent et EXACT (même définition, même
+résultat que `border_walk_count`) : la face intérieure d'une pièce de bord
+n'étant jamais vérifiée par ce comptage, deux pièces de bord partageant les
+deux mêmes couleurs "anneau" **dans le même ordre** (laquelle est attendue en
+entrée, laquelle est produite en sortie — une propriété FIXE de chaque pièce
+réelle, pas un choix libre, cf. le commentaire de `bd_build_classes`) sont
+strictement interchangeables. Les regrouper en classes et calculer, NIVEAU
+PAR NIVEAU (une position de l'anneau à la fois — voir plus bas pourquoi),
+le nombre de façons d'atteindre chaque état (couleur requise, compteurs
+restants PAR CLASSE — `nb_classes≈28` sur le vrai jeu 256 pièces, au lieu
+d'un masque de bits par pièce parmi 60) transforme l'énumération
+exponentielle en programmation dynamique.
+
+**Piège corrigé pendant l'implémentation** : grouper par paire de couleurs
+NON ORDONNÉE (au lieu de la paire ORDONNÉE entrée/sortie) donnait 128 au lieu
+de 4 sur `data/pieces16.csv` (32× trop) — deux pièces réelles peuvent
+partager les deux mêmes couleurs "anneau" avec une orientation opposée l'une
+de l'autre, et ne sont alors PAS interchangeables. `tests/tools/test_border_ring_dp.c`
+verrouille ce cas précis avec les vraies données `data/pieces16.csv`
+(gated `#if ETERN_PARTS == 16`, même convention que `test_solution16.c`).
+
+**Architecture « niveau par niveau », pas une table globale** : une première
+version mémoïsait les 59 positions de l'anneau dans UNE SEULE table (position
+incluse dans la clé). Or un état à la position P ne dépend jamais que du
+niveau P+1 déjà calculé, jamais des autres positions — cette table globale
+gardait donc en mémoire des positions déjà consommées, inutilement.
+`border_ring_count_dp` ne garde plus que le niveau courant et le niveau en
+construction (`struct bd_level`, tableaux parallèles `keys`/`values`/bitmap
+`occupied` — un `struct { clé; valeur; occupé; }` gâchait ~40 % de
+remplissage d'alignement à cause du `long long` voisin, et dimensionnait
+chaque clé sur une borne `BD_MAX_CLASSES=64` plutôt que sur `nb_classes` réel).
+Le vrai levier mémoire est la structure par niveau elle-même (borne le pic à
+la position la PLUS chargée, pas la somme des 59), le gain d'octets par
+emplacement n'étant qu'un facteur secondaire (~×2,3 à lui seul, mesuré avant
+ce changement de structure).
+
+**Parallélisation par forks (`--forks N` combiné à `--dp`)** : la transition
+d'un niveau vers le suivant ne dépend que du niveau courant, déjà calculé et
+immuable — ses états sont donc indépendants les uns des autres. Dès qu'un
+niveau dépasse 50 000 états, sa transition est répartie sur `N` process
+forkés (chacun une plage d'indices disjointe), chaque worker écrivant sa part
+du niveau suivant dans un fichier temporaire (jamais un pipe : la sortie
+sérialisée peut atteindre des dizaines de Mo, bien au-delà du tampon noyau
+d'un pipe, et le parent ne lit qu'un worker à la fois — un pipe bloquerait un
+worker en écriture pendant que le parent lit un autre worker, interblocage
+classique). Le parent fusionne les fichiers par ACCUMULATION
+(`bd_level_add`), pas une simple concaténation : deux workers différents
+peuvent légitimement produire le même état suivant depuis des états de
+départ différents. Correctness verrouillée par
+`border_ring_count_dp_matches_brute_force_when_forked`
+(`tests/tools/test_border_ring_dp.c`), qui abaisse le seuil de déclenchement
+à 1 état via le hook test-only `border_ring_dp_set_fork_min_states_for_tests`
+(même schéma que `stock_spill_set_segment_bytes_for_tests`) pour exercer
+réellement fork+fichier+fusion sur un fixture minuscule.
+
+**Limite mesurée** : sur `data/pieces.csv`, la taille des niveaux croît vite
+et ne semble pas près de plafonner — 21 001 574 états (2,32 Go) déjà atteints
+à la position 17/59, sous un plafond `ulimit -v` de 5 Go (échec propre en
+tentant la position 18). Contrairement à l'ancienne table globale (qui
+cumulait TOUTES les positions), ce chiffre ne concerne qu'UN SEUL niveau —
+mais son pic à lui seul dépasse déjà ce que cette machine (6,9 Go de RAM)
+peut lui offrir. Amélioration nette sur le DFS brut (des dizaines de
+milliards de nœuds aveugles pour une fraction du problème, contre des
+dizaines de millions d'états distincts par niveau), et la parallélisation
+par forks devrait bien exploiter une machine mieux dotée (plus de cœurs pour
+la vitesse, plus de RAM pour dépasser le pic mesuré ici) — reste à mesurer
+sur une telle machine.
 
 Contrairement à `gen_root`, cet outil ne produit aucune racine de stock —
 c'est la **phase 1** d'un projet en deux temps : seul un chiffre est
