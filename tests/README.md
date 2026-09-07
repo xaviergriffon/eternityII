@@ -95,10 +95,14 @@ docs/tests_et_ci.md pour le détail.
 distribution round-robin) — voir la spec liée depuis `docs/tests_et_ci.md`.
 `--dp` bascule sur un algorithme exact par programmation dynamique sur des
 classes de pièces interchangeables, niveau par niveau — combinable avec
-`--forks N` (la transition d'un niveau assez gros est répartie sur N process
-forkés). Bien plus rapide et sobre en mémoire que le DFS brut, mais pas
-encore une solution complète pour le vrai jeu 256 pièces sur une machine à
-6-8 Go de RAM ; voir `docs/tests_et_ci.md` pour la mesure et ses limites.
+`--forks N`. Un niveau assez gros mais qui tient encore en RAM voit sa
+transition répartie sur N process forkés ; au-delà d'un seuil (2 Go par
+défaut), le niveau lui-même bascule en fragments sur disque (partitionnement
+externe par hachage, comme un GROUP BY qui ne tient pas en RAM), pour ne
+jamais avoir à matérialiser un niveau entier en mémoire quelle que soit sa
+taille. Bien plus rapide et sobre en mémoire que le DFS brut ; voir
+`docs/tests_et_ci.md` pour les mesures (y compris sur la machine 2×10
+cœurs/48 Go visée) et le détail du mode disque.
 
 ## Tests d'intégration bout-en-bout
 

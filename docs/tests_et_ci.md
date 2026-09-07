@@ -356,18 +356,66 @@ départ différents. Correctness verrouillée par
 (même schéma que `stock_spill_set_segment_bytes_for_tests`) pour exercer
 réellement fork+fichier+fusion sur un fixture minuscule.
 
-**Limite mesurée** : sur `data/pieces.csv`, la taille des niveaux croît vite
-et ne semble pas près de plafonner — 21 001 574 états (2,32 Go) déjà atteints
-à la position 17/59, sous un plafond `ulimit -v` de 5 Go (échec propre en
-tentant la position 18). Contrairement à l'ancienne table globale (qui
-cumulait TOUTES les positions), ce chiffre ne concerne qu'UN SEUL niveau —
-mais son pic à lui seul dépasse déjà ce que cette machine (6,9 Go de RAM)
-peut lui offrir. Amélioration nette sur le DFS brut (des dizaines de
-milliards de nœuds aveugles pour une fraction du problème, contre des
-dizaines de millions d'états distincts par niveau), et la parallélisation
-par forks devrait bien exploiter une machine mieux dotée (plus de cœurs pour
-la vitesse, plus de RAM pour dépasser le pic mesuré ici) — reste à mesurer
-sur une telle machine.
+**Limite mesurée (niveau en mémoire, avant le mode disque décrit plus bas)** :
+sur `data/pieces.csv`, la taille des niveaux croît vite et ne semble pas près
+de plafonner — 21 001 574 états (2,32 Go) déjà atteints à la position 17/59
+sur une petite machine (échec propre sous un plafond `ulimit -v` de 5 Go en
+tentant la position 18), et **9,28 Go déjà atteints à la position 19/59 sur
+la machine cible (2×10 cœurs, 48 Go de RAM)**, qui a fini par échouer à la
+position 20 — la parallélisation par forks borne le CALCUL d'une transition
+par plages d'indices, mais la table de sortie fusionnée par le parent reste
+un niveau ENTIER en mémoire : plus de cœurs accélère le calcul, plus de RAM
+recule l'échec, mais aucun des deux n'empêche un niveau de continuer à
+grossir sans borne.
+
+**Mode disque : partitionnement externe par hachage, au-delà d'un niveau
+« raisonnable » (`bd_disk_mode_min_bytes`, 2 Go par défaut)** — la même
+technique qu'un GROUP BY externe qui ne tient pas en RAM (l'équivalent, pour
+un regroupement, d'un tri externe pour un ORDER BY trop gros). Au lieu d'UNE
+table couvrant tout le niveau, celui-ci devient K fragments sur disque
+(`shard_<d>.bin`, K = `bd_pick_nb_shards`, dimensionné pour que chaque
+fragment tienne large en mémoire — cible 768 Mo par défaut, calée sur la
+machine visée : jusqu'à `nb_workers` fragments simultanés en mémoire pendant
+une compaction, 768 Mo × 20 = 15 Go de pic sur 48 Go, large marge). Chaque
+transition de niveau devient deux vagues de forks successives (jamais
+chevauchées) :
+
+1. **Éclatement** (`bd_transition_disk`) : chaque worker prend une plage de
+   fragments SOURCE, charge chacun un par un (petit, borné par construction),
+   transite, et route chaque résultat — SANS dédupliquer — vers l'un des
+   fichiers bruts qu'il tient ouverts pour toute sa plage, désigné par
+   hachage (FNV-1a) de la clé produite.
+2. **Compactage** (`bd_compact_dir`) : chaque worker prend une plage de
+   fragments DESTINATION, fusionne par ACCUMULATION (`bd_level_add`, pas un
+   écrasement — deux sources différentes peuvent légitimement produire la
+   même clé) les morceaux bruts qu'y ont déposés tous les workers de
+   l'éclatement, et écrit LE fragment canonique (dédupliqué) correspondant.
+
+Le pic mémoire d'une transition devient donc `nb_workers` fragments
+simultanés — indépendant de la taille totale du niveau — au lieu du niveau
+entier. Le nombre de fragments du niveau suivant est recalculé à chaque
+transition à partir de la taille mesurée du niveau qui vient d'être compacté
+(réactif, pas prédictif : la taille réelle n'est connue qu'après coup, mais
+la croissance d'un niveau à l'autre reste lisse sur ce problème). La
+finalisation (dernière position de l'anneau) a sa propre variante fragmentée
+(`bd_finalize_shards`), même principe de plages de fragments par worker.
+
+Un niveau qui a basculé en mode disque y reste jusqu'à la fin de l'ouverture
+courante (jamais de retour en arrière vers le mode mémoire, même si le
+compte diminue ensuite près de la fermeture de l'anneau) — simplicité de
+préférence à un gain marginal sur les dernières positions, déjà bon marché à
+fragmenter par rapport au reste du calcul.
+
+Verrouillé par deux tests dédiés dans `test_border_ring_dp.c`
+(`border_ring_count_dp_matches_brute_force_when_sharded_to_disk` et son
+pendant `..._on_real_pieces16_sharded_to_disk`, gated `#if ETERN_PARTS == 16`)
+qui abaissent `bd_disk_mode_min_bytes`/`bd_shard_target_bytes` (hooks
+test-only `border_ring_dp_set_disk_mode_min_bytes_for_tests`/
+`_set_shard_target_bytes_for_tests`, même schéma que
+`border_ring_dp_set_fork_min_states_for_tests`) pour forcer un fixture
+minuscule à passer par éclatement + compactage + transition suivante +
+finalisation fragmentée, jamais exercés par les autres tests (aucun de leurs
+fixtures n'approche 2 Go).
 
 Contrairement à `gen_root`, cet outil ne produit aucune racine de stock —
 c'est la **phase 1** d'un projet en deux temps : seul un chiffre est

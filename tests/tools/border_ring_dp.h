@@ -37,6 +37,17 @@
  * les états du niveau courant, déjà calculé et immuable, sont indépendants
  * les uns des autres — chaque worker traite une plage disjointe et écrit son
  * niveau-suivant local dans un fichier temporaire, fusionné par le parent.
+ *
+ * Au-delà d'une taille de niveau généreuse (`bd_disk_mode_min_bytes`, 2 Go
+ * par défaut — mesuré insuffisant même sur une machine à 48 Go de RAM sans
+ * ce mécanisme), un niveau bascule d'une table unique en mémoire vers K
+ * fragments sur disque (partitionnement externe par hachage de la clé,
+ * `struct bd_shard_set`), chacun assez petit pour tenir large en mémoire.
+ * Chaque transition devient alors deux vagues de forks (éclatement puis
+ * compactage, cf. `bd_transition_disk`/`bd_compact_dir`) au lieu d'une
+ * seule : le pic mémoire devient `nb_workers` fragments simultanés,
+ * indépendant de la taille totale du niveau — voir le commentaire de tête de
+ * la section « Mode disque » dans `border_ring_dp.c` pour le détail.
  */
 #ifndef eternityII_border_ring_dp_h
 #define eternityII_border_ring_dp_h

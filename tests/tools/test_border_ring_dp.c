@@ -29,6 +29,14 @@
    les petits fixtures ci-dessous). */
 void border_ring_dp_set_fork_min_states_for_tests(size_t n);
 
+/* Test-only, jamais déclarées dans border_ring_dp.h — même schéma. Abaisser
+   ces deux seuils force le mode disque (répartition en fragments, cf. le
+   commentaire de tête de la section "Mode disque" dans border_ring_dp.c) dès
+   le premier niveau, sur un fixture minuscule, sans avoir à construire un
+   niveau de plusieurs Go. */
+void border_ring_dp_set_disk_mode_min_bytes_for_tests(double n);
+void border_ring_dp_set_shard_target_bytes_for_tests(double n);
+
 #define BRD_EDGE_BASE 12
 #define BRD_INTERIOR_PLACEHOLDER 11
 
@@ -215,6 +223,39 @@ TEST border_ring_count_dp_matches_brute_force_when_forked(void)
     PASS();
 }
 
+/* Force le mode disque dès le premier niveau (seuil abaissé à 1 octet) avec
+   une cible de fragment minuscule (32 octets, quelques entrées à peine) sur
+   le fixture à multiplicité : verrouille tout le chemin externe par hachage
+   (éclatement -> compactage -> transition suivante -> finalisation
+   fragmentée), jamais exercé par les tests précédents qui ne dépassent
+   jamais bd_disk_mode_min_bytes par défaut (2 Go). Sans l'accumulation lors
+   du compactage (bd_level_add, pas un écrasement), deux fragments bruts
+   déposant la même clé se marcheraient dessus au lieu de s'additionner —
+   exactement le même risque que bd_transition_parallel, à la granularité du
+   fragment plutôt que du niveau entier. */
+TEST border_ring_count_dp_matches_brute_force_when_sharded_to_disk(void)
+{
+    struct array_part *all = brd_make_rotate_parts(2);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    long long brute = border_walk_count(map, all, NULL, NULL);
+
+    border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0);
+    border_ring_dp_set_shard_target_bytes_for_tests(32.0);
+    long long dp = border_ring_count_dp(map, all, 4);
+    border_ring_dp_set_disk_mode_min_bytes_for_tests(2.0 * 1024.0 * 1024.0 * 1024.0);
+    border_ring_dp_set_shard_target_bytes_for_tests(768.0 * 1024.0 * 1024.0);
+
+    ASSERT_EQ_FMT(12LL, brute, "%lld");
+    ASSERT_EQ_FMT(brute, dp, "%lld");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
 #if ETERN_PARTS == 16
 /* Contenu de data/pieces16.csv, embarqué pour rester indépendant du CWD
    (même convention que tests/core/test_solution16.c). Le vrai jeu 16 pièces
@@ -280,6 +321,33 @@ TEST border_ring_count_dp_matches_border_walk_count_on_real_pieces16(void)
     free_array_part(all);
     PASS();
 }
+
+/* Même régression que border_ring_count_dp_matches_border_walk_count_on_real_pieces16,
+   mais forcée en mode disque : la table des classes réelles (ordre des
+   couleurs required/outgoing) doit rester correcte y compris quand chaque
+   fragment ne voit qu'une fraction des états. */
+TEST border_ring_count_dp_matches_border_walk_count_on_real_pieces16_sharded_to_disk(void)
+{
+    struct array_part *all = brd_make_rotate_parts_pieces16();
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    long long brute = border_walk_count(map, all, NULL, NULL);
+
+    border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0);
+    border_ring_dp_set_shard_target_bytes_for_tests(32.0);
+    long long dp = border_ring_count_dp(map, all, 4);
+    border_ring_dp_set_disk_mode_min_bytes_for_tests(2.0 * 1024.0 * 1024.0 * 1024.0);
+    border_ring_dp_set_shard_target_bytes_for_tests(768.0 * 1024.0 * 1024.0);
+
+    ASSERT_EQ_FMT(4LL, brute, "%lld");
+    ASSERT_EQ_FMT(brute, dp, "%lld");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
 #endif
 
 SUITE(border_ring_dp_suite)
@@ -288,7 +356,9 @@ SUITE(border_ring_dp_suite)
     RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_a_unique_ring);
     RUN_TEST(border_ring_count_dp_counts_class_multiplicity_correctly);
     RUN_TEST(border_ring_count_dp_matches_brute_force_when_forked);
+    RUN_TEST(border_ring_count_dp_matches_brute_force_when_sharded_to_disk);
 #if ETERN_PARTS == 16
     RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_real_pieces16);
+    RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_real_pieces16_sharded_to_disk);
 #endif
 }

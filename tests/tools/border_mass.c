@@ -66,8 +66,11 @@
  * répartie sur N process forkés (chacun traite une plage d'états déjà
  * calculés, en lecture seule, et écrit sa part du niveau suivant dans un
  * fichier temporaire fusionné par le parent) — sans `--forks`, `--dp` prend
- * le nombre de cœurs détecté par défaut, comme le DFS. Voir border_ring_dp.h
- * pour le raisonnement complet.
+ * le nombre de cœurs détecté par défaut, comme le DFS. Au-delà d'une taille
+ * de niveau généreuse (mesurée insuffisante même sur une machine à 48 Go de
+ * RAM sans ce mécanisme), un niveau bascule en fragments sur disque
+ * (partitionnement externe par hachage) au lieu d'une table unique en
+ * mémoire — voir border_ring_dp.h pour le raisonnement complet.
  *
  * Usage :
  *   make border-mass
