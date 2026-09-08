@@ -314,6 +314,15 @@ restants PAR CLASSE — `nb_classes≈28` sur le vrai jeu 256 pièces, au lieu
 d'un masque de bits par pièce parmi 60) transforme l'énumération
 exponentielle en programmation dynamique.
 
+**Une seule pièce-coin d'ouverture est calculée en entier** (`bd_count_openings`) : par
+symétrie de rotation à 90° du plateau, toute bordure valide utilise
+nécessairement l'ensemble des pièces-coin candidates à `(0,0)`, une fois
+chacune — leurs totaux individuels sont donc rigoureusement égaux (vérifié
+empiriquement avant ce changement : les 4 candidats de `data/pieces16.csv`
+donnent chacun `N=1`). Un seul est calculé, puis multiplié par le nombre de
+candidats — au lieu de rejouer le DP complet une fois par candidat (÷4 sur le
+temps total pour le jeu 256 pièces, qui en a exactement 4).
+
 **Piège corrigé pendant l'implémentation** : grouper par paire de couleurs
 NON ORDONNÉE (au lieu de la paire ORDONNÉE entrée/sortie) donnait 128 au lieu
 de 4 sur `data/pieces16.csv` (32× trop) — deux pièces réelles peuvent
@@ -368,54 +377,60 @@ un niveau ENTIER en mémoire : plus de cœurs accélère le calcul, plus de RAM
 recule l'échec, mais aucun des deux n'empêche un niveau de continuer à
 grossir sans borne.
 
-**Mode disque : partitionnement externe par hachage, au-delà d'un niveau
-« raisonnable » (`bd_disk_mode_min_bytes`, 2 Go par défaut)** — la même
-technique qu'un GROUP BY externe qui ne tient pas en RAM (l'équivalent, pour
-un regroupement, d'un tri externe pour un ORDER BY trop gros). Au lieu d'UNE
-table couvrant tout le niveau, celui-ci devient K fragments sur disque
-(`shard_<d>.bin`, K = `bd_pick_nb_shards`, dimensionné pour que chaque
-fragment tienne large en mémoire — cible 768 Mo par défaut, calée sur la
-machine visée : jusqu'à `nb_workers` fragments simultanés en mémoire pendant
-une compaction, 768 Mo × 20 = 15 Go de pic sur 48 Go, large marge). Chaque
-transition de niveau devient deux vagues de forks successives (jamais
-chevauchées) :
+**Scission par pile LIFO, au-delà d'un budget RAM obligatoire
+(`--dp-max-ram-mo MO`, aucune valeur par défaut)** — remplace un mécanisme
+antérieur de « mode disque » permanent (deux vagues de forks à CHAQUE
+position tant qu'un niveau restait trop gros), qui réécrivait/relisait
+l'intégralité d'un niveau à chaque position tant qu'il dépassait le seuil :
+sur une plage de plusieurs dizaines de positions consécutives toutes trop
+grosses, ça multipliait le volume d'E/S par le nombre de positions
+concernées (mesuré : ~777 Go d'E/S cumulées pour une masse de pointe de
+111 Go étalée sur ~7 positions, sur la machine cible). `--dp-max-ram-mo`
+pilote deux seuils dérivés (`border_ring_dp_set_max_ram_mo`) :
+`bd_split_threshold_bytes` (déclenche une scission dès qu'un niveau dépasse
+ce budget) prend directement la valeur donnée ; `bd_shard_target_bytes`
+(taille cible d'un fragment) en est dérivée — `budget / (nb_workers × 3)`,
+pour que `nb_workers` fragments simultanés pendant une compaction restent,
+ensemble, sous ce même budget.
 
-1. **Éclatement** (`bd_transition_disk`) : chaque worker prend une plage de
-   fragments SOURCE, charge chacun un par un (petit, borné par construction),
-   transite, et route chaque résultat — SANS dédupliquer — vers l'un des
-   fichiers bruts qu'il tient ouverts pour toute sa plage, désigné par
-   hachage (FNV-1a) de la clé produite.
-2. **Compactage** (`bd_compact_dir`) : chaque worker prend une plage de
-   fragments DESTINATION, fusionne par ACCUMULATION (`bd_level_add`, pas un
-   écrasement — deux sources différentes peuvent légitimement produire la
-   même clé) les morceaux bruts qu'y ont déposés tous les workers de
-   l'éclatement, et écrit LE fragment canonique (dédupliqué) correspondant.
+Quand un niveau dépasse le seuil, il est scindé en K fragments sur disque
+(`bd_level_to_shards`, partitionnement externe par hachage FNV-1a de la
+clé — la même technique qu'un GROUP BY externe qui ne tient pas en RAM) :
+**un seul** fragment est rechargé IMMÉDIATEMENT en mémoire et la progression
+continue sans interruption ; les K-1 autres sont empilés (**pile LIFO**,
+`struct bd_pending_stack`) pour être repris plus tard, chacun depuis la
+position où il a été mis de côté — jamais retouché entre-temps, quel que
+soit le nombre de positions qui s'écoulent pendant qu'il attend. Une fois
+qu'une tranche atteint la fermeture de l'anneau, sa contribution s'ajoute au
+total et la tranche suivante est dépilée (LIFO : le dernier fragment créé
+est repris en premier, pas le plus ancien — borne la profondeur de la pile
+par le nombre de positions de l'anneau, pas par la largeur de l'espace
+d'états, même raisonnement qu'une pile explicite remplaçant une récursion en
+profondeur d'abord) — jusqu'à la pile vide. Chaque fragment n'est donc écrit
+qu'UNE fois (à sa création) et relu qu'UNE fois (à sa reprise), contre un
+réécriture/relecture de la totalité à CHAQUE position sous l'ancien
+mécanisme.
 
-Le pic mémoire d'une transition devient donc `nb_workers` fragments
-simultanés — indépendant de la taille totale du niveau — au lieu du niveau
-entier. Le nombre de fragments du niveau suivant est recalculé à chaque
-transition à partir de la taille mesurée du niveau qui vient d'être compacté
-(réactif, pas prédictif : la taille réelle n'est connue qu'après coup, mais
-la croissance d'un niveau à l'autre reste lisse sur ce problème). La
-finalisation (dernière position de l'anneau) a sa propre variante fragmentée
-(`bd_finalize_shards`), même principe de plages de fragments par worker.
+**Garde contre une scission dégénérée** : un niveau à 0 ou 1 entrée réelle
+n'est jamais scindé (`cur.used > 1`), même si sa taille nominale dépasse le
+seuil — la capacité plancher d'une table de hachage (~200 octets, `struct
+bd_level`) dépasse n'importe quel seuil assez bas indépendamment du contenu
+réel ; sans cette garde, un fragment vide rechargé se re-scinderait
+indéfiniment (observé pendant le développement : boucle sans fin sur un
+seuil de test à 1 octet — pas qu'un artefact de test, rien n'empêcherait la
+même situation en production avec un budget mal choisi).
 
-Un niveau qui a basculé en mode disque y reste jusqu'à la fin de l'ouverture
-courante (jamais de retour en arrière vers le mode mémoire, même si le
-compte diminue ensuite près de la fermeture de l'anneau) — simplicité de
-préférence à un gain marginal sur les dernières positions, déjà bon marché à
-fragmenter par rapport au reste du calcul.
-
-Verrouillé par deux tests dédiés dans `test_border_ring_dp.c`
+Verrouillé par des tests dédiés dans `test_border_ring_dp.c`
 (`border_ring_count_dp_matches_brute_force_when_sharded_to_disk` et son
 pendant `..._on_real_pieces16_sharded_to_disk`, gated `#if ETERN_PARTS == 16`)
-qui abaissent `bd_disk_mode_min_bytes`/`bd_shard_target_bytes` (hooks
+qui abaissent `bd_split_threshold_bytes`/`bd_shard_target_bytes` (hooks
 test-only `border_ring_dp_set_disk_mode_min_bytes_for_tests`/
 `_set_shard_target_bytes_for_tests`, même schéma que
-`border_ring_dp_set_fork_min_states_for_tests`) pour forcer un fixture
-minuscule à passer par éclatement + compactage + transition suivante +
-finalisation fragmentée, jamais exercés par les autres tests (aucun de leurs
-fixtures n'approche 2 Go).
+`border_ring_dp_set_fork_min_states_for_tests`) au point où CHAQUE position
+déclenche une nouvelle scission — y compris pour les tranches reprises
+depuis la pile — exerçant plusieurs niveaux d'empilement en cascade, jamais
+atteints par les autres tests (aucun de leurs fixtures n'approche le budget
+par défaut).
 
 **Échec réel observé sur la machine visée, corrigé** : le mode disque a
 d'abord échoué à la position 21/59 (17 fragments à 13,92 Go à la position 20)
@@ -436,11 +451,12 @@ supprimé avant la fin de toute la transition. Trois corrections :
   `bd_close_or_die` (`border_ring_dp.c`) — échoue bruyamment (avec un indice
   « disque plein ? ») au lieu de laisser un fichier tronqué se propager en
   silence jusqu'au compactage suivant.
-- Un fragment SOURCE est supprimé dès qu'il est chargé en mémoire par son
-  worker d'éclatement (`bd_transition_disk`), pas seulement à la toute fin de
-  la transition — il n'est plus jamais utile après coup (chaque fragment
-  n'est assigné qu'à un seul worker), donc plus la peine de le garder pendant
-  tout l'éclatement du niveau suivant.
+- Un fragment est supprimé dès qu'il est chargé en mémoire, pas seulement une
+  fois son traitement fini — principe conservé par la pile LIFO qui a
+  remplacé ce mécanisme depuis (`bd_run_opening` : `unlink()` juste après
+  `bd_level_load_file`, aussi bien à la création d'une tranche qu'à sa
+  reprise) : un fragment lu une fois n'est plus jamais utile après coup, donc
+  plus la peine de le garder sur disque plus longtemps que nécessaire.
 - `border_ring_dp_set_spill_dir` (`border_mass --spill-dir DIR` combiné à
   `--dp`) permet de rediriger fragments et fichiers temporaires vers un
   disque plus grand que `/tmp` — même logique que `--stock-spill-dir` pour le

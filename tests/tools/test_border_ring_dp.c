@@ -30,10 +30,10 @@
 void border_ring_dp_set_fork_min_states_for_tests(size_t n);
 
 /* Test-only, jamais déclarées dans border_ring_dp.h — même schéma. Abaisser
-   ces deux seuils force le mode disque (répartition en fragments, cf. le
-   commentaire de tête de la section "Mode disque" dans border_ring_dp.c) dès
-   le premier niveau, sur un fixture minuscule, sans avoir à construire un
-   niveau de plusieurs Go. */
+   ces deux seuils force une scission (répartition en fragments, cf. le
+   commentaire de tête de la section "Scission par pile LIFO" dans
+   border_ring_dp.c) dès le premier niveau, sur un fixture minuscule, sans
+   avoir à construire un niveau de plusieurs Go. */
 void border_ring_dp_set_disk_mode_min_bytes_for_tests(double n);
 void border_ring_dp_set_shard_target_bytes_for_tests(double n);
 
@@ -223,16 +223,21 @@ TEST border_ring_count_dp_matches_brute_force_when_forked(void)
     PASS();
 }
 
-/* Force le mode disque dès le premier niveau (seuil abaissé à 1 octet) avec
+/* Force une scission dès le premier niveau (seuil abaissé à 1 octet) avec
    une cible de fragment minuscule (32 octets, quelques entrées à peine) sur
-   le fixture à multiplicité : verrouille tout le chemin externe par hachage
-   (éclatement -> compactage -> transition suivante -> finalisation
-   fragmentée), jamais exercé par les tests précédents qui ne dépassent
-   jamais bd_disk_mode_min_bytes par défaut (2 Go). Sans l'accumulation lors
-   du compactage (bd_level_add, pas un écrasement), deux fragments bruts
-   déposant la même clé se marcheraient dessus au lieu de s'additionner —
-   exactement le même risque que bd_transition_parallel, à la granularité du
-   fragment plutôt que du niveau entier. */
+   le fixture à multiplicité : tout niveau non vide dépasse ce seuil, donc
+   CHAQUE position (y compris celles des tranches reprises depuis la pile)
+   déclenche une nouvelle scission — verrouille tout le chemin externe par
+   hachage (éclatement -> compactage -> reprise -> nouvelle scission...) en
+   cascade sur plusieurs niveaux d'empilement, jamais exercé par les tests
+   précédents qui ne dépassent jamais bd_split_threshold_bytes par défaut
+   (2 Go). Sans l'accumulation lors du compactage (bd_level_add, pas un
+   écrasement), deux fragments bruts déposant la même clé se marcheraient
+   dessus au lieu de s'additionner — exactement le même risque que
+   bd_transition_parallel, à la granularité du fragment plutôt que du niveau
+   entier. Verrouille aussi la pile LIFO elle-même (bd_pending_stack) : si une
+   tranche empilée était perdue, dupliquée, ou reprise à la mauvaise position,
+   le total s'écarterait du brute-force. */
 TEST border_ring_count_dp_matches_brute_force_when_sharded_to_disk(void)
 {
     struct array_part *all = brd_make_rotate_parts(2);

@@ -569,43 +569,42 @@ static void bd_transition_parallel(const struct bd_ctx *ctx, int want_corner,
 }
 
 /* ===========================================================================
- * Mode disque : au-delà de bd_disk_mode_min_bytes, un niveau n'est plus
- * représenté par une seule table en mémoire mais par K fragments sur disque
- * (K = bd_pick_nb_shards), chacun assez petit pour tenir large en mémoire —
- * hachage de partitionnement externe classique (l'équivalent, pour un
- * GROUP BY, d'un tri externe pour un ORDER BY qui ne tient pas en RAM). Le
- * pic mémoire d'une transition devient K/nb_workers fragments simultanés au
- * lieu du niveau entier — c'est ce qui manquait à bd_transition_parallel
- * seule : elle bornait le CALCUL par plages d'indices, mais sa table de
- * sortie fusionnée par le parent restait un niveau ENTIER en mémoire (9,28 Go
- * mesurés au niveau 19 sur la machine visée, avant l'échec au niveau 20).
+ * Scission par pile LIFO : au-delà de bd_split_threshold_bytes, un niveau
+ * n'est plus tenu tout entier en mémoire — il est éclaté en K fragments sur
+ * disque (K = bd_pick_nb_shards), un seul repris IMMÉDIATEMENT (assez petit
+ * pour tenir large en mémoire), les K-1 autres empilés (LIFO, cf.
+ * bd_pending_stack) pour être repris plus tard, chacun depuis la position où
+ * il a été mis de côté.
+ *
+ * Remplace un mécanisme antérieur ("mode disque" permanent, deux vagues de
+ * forks à CHAQUE position tant qu'un niveau restait trop gros) qui
+ * réécrivait/relisait la totalité d'un niveau à chaque position tant qu'il
+ * dépassait le seuil — sur une plage de plusieurs dizaines de positions
+ * consécutives toutes trop grosses, ça multipliait le volume d'E/S par le
+ * nombre de positions concernées (mesuré : ~777 Go d'E/S cumulées pour une
+ * masse de pointe de 111 Go étalée sur ~7 positions). Ici, chaque fragment
+ * mis de côté n'est écrit qu'UNE FOIS (à sa création) et relu qu'UNE FOIS (à
+ * sa reprise) — jamais retouché entre les deux, quel que soit le nombre de
+ * positions qui s'écoulent pendant qu'il attend sur la pile. L'ordre LIFO
+ * (le dernier fragment créé est repris en premier) borne la profondeur de la
+ * pile par le nombre de positions de l'anneau (59), pas par la largeur de
+ * l'espace d'états — même raisonnement qu'une pile explicite remplaçant une
+ * récursion en profondeur d'abord.
  *
  * Un fragment "canonique" (`shard_<d>.bin`) est toujours dédupliqué — même
  * format qu'un niveau en mémoire sérialisé par bd_level_write_file, jamais
- * une simple concaténation. Un fragment "brut" (`part_<source>_<dest>.bin`,
- * transitoire, supprimé dès qu'il est fusionné) ne l'est pas : deux sources
- * différentes peuvent y déposer la même clé, à fusionner par accumulation
- * (bd_level_add) — exactement ce que bd_transition_parallel fait déjà pour
- * les niveaux locaux de ses workers, seule la granularité change (par
- * fragment plutôt que par le niveau entier).
- *
- * Chaque transition en mode disque se fait en DEUX vagues de forks
- * successives, jamais chevauchées (la seconde attend que la première ait
- * fini) :
- *   1. Éclatement (bd_transition_disk) : chaque worker prend une plage
- *      contiguë de fragments SOURCE, charge chacun (petit, borné par
- *      construction) en mémoire l'un après l'autre, transite, et route
- *      chaque résultat par hachage de sa clé vers l'un des fichiers bruts
- *      qu'il tient ouverts pour toute sa plage — jamais un fichier par
- *      fragment source, ce qui ferait exploser le nombre de fichiers
- *      transitoires en (fragments source × fragments suivants).
- *   2. Compactage (bd_compact_dir) : chaque worker prend une plage contiguë
- *      de fragments DESTINATION, fusionne (accumule) les morceaux bruts
- *      qu'y ont déposés tous les workers de l'éclatement, et écrit LE
- *      fragment canonique correspondant.
+ * une simple concaténation. Un fragment "brut" (`part_<dest>.bin`,
+ * transitoire, supprimé dès qu'il est fusionné) ne l'est pas : deux entrées
+ * du niveau source peuvent y déposer la même clé, à fusionner par
+ * accumulation (bd_level_add) — exactement ce que bd_transition_parallel
+ * fait déjà pour les niveaux locaux de ses workers, seule la granularité
+ * change (par fragment plutôt que par le niveau entier). La scission d'UN
+ * niveau (bd_level_to_shards) route séquentiellement chaque entrée vers son
+ * fragment brut puis compacte (bd_compact_dir, forké) — jamais deux niveaux
+ * scindés simultanément, contrairement à l'ancien mécanisme.
  */
 struct bd_shard_set {
-    /* Assez pour "/tmp/etii_bd_<pid>_pos<pos>" avec de la marge ; volontairement
+    /* Assez pour "/tmp/etii_bd_<pid>_s<n>" avec de la marge ; volontairement
        petit (pas 512) pour que gcc puisse prouver, a la compilation, qu'aucune
        concatenation de suffixe ("/shard_%d.bin" etc.) dans un buffer de 512
        octets ne peut tronquer — sinon -Wformat-truncation (WERROR=1) refuse de
@@ -617,30 +616,47 @@ struct bd_shard_set {
     double total_bytes;
 };
 
-/* Bornes calées sur la machine visée (2x10 cœurs, 48 Go) : une compaction ou
-   un éclatement peut faire tourner jusqu'à nb_workers fragments à la fois,
-   donc nb_workers x bd_shard_target_bytes doit rester très en-dessous de la
-   RAM disponible — 768 Mo x 20 = 15 Go au pic sur 48 Go, large marge pour
-   l'OS et les tampons d'E/S. bd_disk_mode_min_bytes fait basculer en mode
-   disque BIEN avant qu'un niveau unique n'approche cette même limite (2 Go,
-   très en-dessous des 9,28 Go qui ont fait échouer la version précédente) :
-   l'objectif est de ne JAMAIS matérialiser un niveau entier au-delà de ce
-   seuil, pas de rattraper après coup. */
+/* Plus de constante calée à la main sur une machine précise : le budget vient
+   de `--dp-max-ram-mo` (obligatoire dès que `--dp` est utilisé, cf.
+   border_mass.c) via `border_ring_dp_set_max_ram_mo`, seule façon de faire
+   varier ces deux seuils en production — les setters "_for_tests" ci-dessous
+   restent réservés aux fixtures unitaires. bd_split_threshold_bytes déclenche
+   la scission dès qu'un niveau dépasse le budget donné. bd_shard_target_bytes
+   en dérive : une compaction peut faire tourner jusqu'à nb_workers fragments
+   à la fois, donc nb_workers x bd_shard_target_bytes doit rester sous ce
+   même budget — divisé par 3 pour laisser de la marge à l'OS et aux tampons
+   d'E/S (rapport mesuré sur la machine ayant motivé ce mécanisme : 768 Mo x
+   20 travailleurs = 15 Go sur un budget de 48 Go, soit /3,2). */
 static double bd_shard_target_bytes = 768.0 * 1024.0 * 1024.0;
-static double bd_disk_mode_min_bytes = 2.0 * 1024.0 * 1024.0 * 1024.0;
+static double bd_split_threshold_bytes = 2.0 * 1024.0 * 1024.0 * 1024.0;
+
+/* Plancher bas pour bd_shard_target_bytes : évite qu'un budget RAM minuscule
+   combiné à beaucoup de workers ne produise une cible de fragment
+   dégénérée (quelques octets), qui exploserait BD_MAX_SHARDS pour rien. */
+#define BD_SHARD_TARGET_BYTES_FLOOR (1.0 * 1024.0 * 1024.0)
 
 /* Test-only, jamais dans border_ring_dp.h — même schéma que
-   border_ring_dp_set_fork_min_states_for_tests : abaisser ces deux seuils
-   permet à un fixture minuscule d'exercer réellement le mode disque (et
-   plusieurs fragments) sans construire un niveau de plusieurs Go. */
+   border_ring_dp_set_fork_min_states_for_tests : abaisser ces seuils permet à
+   un fixture minuscule de déclencher réellement une scission (et plusieurs
+   reprises en cascade) sans construire un niveau de plusieurs Go. */
 void border_ring_dp_set_disk_mode_min_bytes_for_tests(double n)
 {
-    bd_disk_mode_min_bytes = n;
+    bd_split_threshold_bytes = n;
 }
 
 void border_ring_dp_set_shard_target_bytes_for_tests(double n)
 {
     bd_shard_target_bytes = n;
+}
+
+void border_ring_dp_set_max_ram_mo(long mo, int nb_workers)
+{
+    double ram_bytes = (double)mo * 1024.0 * 1024.0;
+    bd_split_threshold_bytes = ram_bytes;
+
+    int workers = nb_workers < 1 ? 1 : nb_workers;
+    double target = ram_bytes / ((double)workers * 3.0);
+    bd_shard_target_bytes = target < BD_SHARD_TARGET_BYTES_FLOOR ? BD_SHARD_TARGET_BYTES_FLOOR : target;
 }
 
 /* Borne haute généreuse : au-delà, on dégrade gracieusement (fragments plus
@@ -672,16 +688,6 @@ static void bd_mkdir_or_die(const char *dir)
         fprintf(stderr, "border_ring_count_dp : creation du repertoire '%s' impossible — arret\n", dir);
         exit(1);
     }
-}
-
-static void bd_rm_shard_set(const struct bd_shard_set *set)
-{
-    for (int d = 0; d < set->nb_shards; d++) {
-        char path[512];
-        snprintf(path, sizeof path, "%s/shard_%d.bin", set->dir, d);
-        unlink(path);
-    }
-    rmdir(set->dir);
 }
 
 /* Comme bd_level_merge_file, mais construit un niveau NEUF à partir d'un
@@ -741,50 +747,12 @@ static void bd_raw_merge_file(struct bd_level *level, const char *path, int key_
     fclose(fp);
 }
 
-/* Variante de bd_transition_range qui ne mémoïse PAS en mémoire : chaque
-   transition produite est écrite brute (non dédupliquée) dans le fichier de
-   fragment destination désigné par le hachage de sa clé — permet de ne
-   charger qu'UN fragment source à la fois, jamais le niveau entier. */
-static void bd_transition_range_scatter(const struct bd_ctx *ctx, int want_corner,
-                                         const struct bd_level *level_cur, int nb_shards_next,
-                                         FILE **out_files, const char *context)
-{
-    int nb = ctx->nb_classes;
-    uint8_t next_key[1 + BD_MAX_CLASSES];
-
-    for (size_t idx = 0; idx < level_cur->capacity; idx++) {
-        if (!bd_level_is_occupied(level_cur, idx)) {
-            continue;
-        }
-        const uint8_t *key = level_cur->keys + idx * (size_t)level_cur->key_len;
-        int8_t required = (int8_t)key[0];
-        const int8_t *counts = (const int8_t *)(key + 1);
-        long long ways = level_cur->values[idx];
-
-        for (int c = 0; c < nb; c++) {
-            if (ctx->classes[c].is_corner != want_corner || counts[c] == 0 ||
-                ctx->classes[c].color_a != required) {
-                continue;
-            }
-            next_key[0] = (uint8_t)ctx->classes[c].color_b;
-            memcpy(next_key + 1, counts, (size_t)nb);
-            next_key[1 + c]--;
-            long long delta = ways * counts[c];
-            int d = bd_shard_of(next_key, 1 + nb, nb_shards_next);
-            bd_write_or_die(out_files[d], next_key, (size_t)(1 + nb), context);
-            bd_write_or_die(out_files[d], &delta, sizeof delta, context);
-        }
-    }
-}
-
-/* Fusionne les fragments bruts déposés sous `dir` (un par (source, fragment
-   destination)) en fragments canoniques `shard_<d>.bin`, un worker par plage
-   contiguë de fragments destination — jamais plus d'UN fragment en mémoire à
-   la fois par worker. Réutilisé à la fois par bd_transition_disk
-   (`nb_sources` = nombre de workers d'éclatement) et par bd_level_to_shards
-   (`nb_sources` = 1, un seul passage séquentiel de répartition). */
-static void bd_compact_dir(const char *dir, int nb_sources, int nb_shards, int key_len, int nb_workers,
-                            size_t *out_total_used, double *out_total_bytes, double *out_max_shard_bytes)
+/* Fusionne les fragments bruts déposés sous `dir` (un par fragment
+   destination, cf. bd_level_to_shards) en fragments canoniques `shard_<d>.bin`,
+   un worker par plage contiguë de fragments destination — jamais plus d'UN
+   fragment en mémoire à la fois par worker. */
+static void bd_compact_dir(const char *dir, int nb_shards, int key_len, int nb_workers, size_t *out_total_used,
+                            double *out_total_bytes, double *out_max_shard_bytes)
 {
     int workers = nb_workers < nb_shards ? nb_workers : nb_shards;
     if (workers < 1) {
@@ -818,12 +786,10 @@ static void bd_compact_dir(const char *dir, int nb_sources, int nb_shards, int k
             for (size_t d = start; d < end; d++) {
                 struct bd_level level;
                 bd_level_init(&level, key_len, 1 << 4);
-                for (int s = 0; s < nb_sources; s++) {
-                    char path[512];
-                    snprintf(path, sizeof path, "%s/part_%d_%d.bin", dir, s, (int)d);
-                    bd_raw_merge_file(&level, path, key_len);
-                    unlink(path);
-                }
+                char path[512];
+                snprintf(path, sizeof path, "%s/part_%d.bin", dir, (int)d);
+                bd_raw_merge_file(&level, path, key_len);
+                unlink(path);
                 char out_path[512];
                 snprintf(out_path, sizeof out_path, "%s/shard_%d.bin", dir, (int)d);
                 bd_level_write_file(&level, out_path);
@@ -891,13 +857,11 @@ static void bd_compact_dir(const char *dir, int nb_sources, int nb_shards, int k
     free(summary_paths);
 }
 
-/* Bascule ponctuelle (une seule fois par ouverture) d'un niveau encore en
-   mémoire vers sa représentation en fragments sur disque, une fois le seuil
-   bd_disk_mode_min_bytes franchi — simple répartition par hachage de clé (la
-   clé et la valeur ne changent pas, contrairement à une transition), donc
-   sans passer par bd_transition_range_scatter. Réutilise bd_compact_dir avec
-   `nb_sources = 1` : un seul passage séquentiel a rempli les fragments
-   bruts. */
+/* Scinde un niveau encore en mémoire en `nb_shards` fragments sur disque, une
+   fois bd_split_threshold_bytes franchi (cf. bd_run_opening) — simple
+   répartition par hachage de clé (la clé et la valeur ne changent pas,
+   contrairement à une transition), en un seul passage séquentiel sur les
+   entrées de `level` avant compactage (bd_compact_dir, forké). */
 static void bd_level_to_shards(const struct bd_level *level, const char *dir, int nb_shards, int nb_workers,
                                 struct bd_shard_set *out)
 {
@@ -906,7 +870,7 @@ static void bd_level_to_shards(const struct bd_level *level, const char *dir, in
     FILE **out_files = malloc((size_t)nb_shards * sizeof *out_files);
     for (int d = 0; d < nb_shards; d++) {
         char path[512];
-        snprintf(path, sizeof path, "%s/part_0_%d.bin", dir, d);
+        snprintf(path, sizeof path, "%s/part_%d.bin", dir, d);
         out_files[d] = fopen(path, "wb");
         if (out_files[d] == NULL) {
             fprintf(stderr, "border_ring_count_dp : ecriture de '%s' impossible — arret\n", path);
@@ -931,229 +895,80 @@ static void bd_level_to_shards(const struct bd_level *level, const char *dir, in
     out->nb_shards = nb_shards;
     out->key_len = level->key_len;
     double max_shard_bytes;
-    bd_compact_dir(dir, 1, nb_shards, level->key_len, nb_workers, &out->total_used, &out->total_bytes,
+    bd_compact_dir(dir, nb_shards, level->key_len, nb_workers, &out->total_used, &out->total_bytes,
                    &max_shard_bytes);
 }
 
-/* Transition disque -> disque : voir le commentaire de tête de cette section
-   pour les deux vagues (éclatement puis compactage). Supprime le fragment
-   set SOURCE une fois le suivant construit — jamais les deux sur disque en
-   même temps plus longtemps que nécessaire. */
-static void bd_transition_disk(const struct bd_ctx *ctx, int want_corner, const struct bd_shard_set *cur,
-                                int nb_workers, const char *next_dir, int nb_shards_next,
-                                struct bd_shard_set *next)
+/* Une tranche mise de côté lors d'une scission (cf. bd_run_opening) : un
+   fragment canonique unique à recharger, et la position de l'anneau où
+   reprendre sa progression — jamais retouché entre les deux. */
+struct bd_pending_slice {
+    /* 512, pas 300 : construit par snprintf(..., "%s/shard_%d.bin", shards.dir, d)
+       où shards.dir peut déjà remplir bd_shard_set.dir (128 octets) — sinon
+       -Wformat-truncation (WERROR=1) refuse de compiler, gcc ne pouvant pas
+       prouver l'absence de troncature même si aucun chemin réel n'en approche. */
+    char shard_path[512];
+    char shard_dir[128];
+    int resume_pos;
+};
+
+/* Pile LIFO des tranches en attente — le dernier fragment créé est repris en
+   premier (cf. le commentaire de tête de la section "Scission par pile
+   LIFO"), jamais le plus ancien : ça borne la profondeur de la pile par le
+   nombre de positions de l'anneau, pas par la largeur de l'espace d'états.
+   Grandit par doublement, comme struct bm_collect_ctx dans border_mass.c. */
+struct bd_pending_stack {
+    struct bd_pending_slice *items;
+    int count;
+    int cap;
+};
+
+static void bd_pending_push(struct bd_pending_stack *stack, const char *path, const char *dir, int resume_pos)
 {
-    bd_mkdir_or_die(next_dir);
-    int scatter_workers = nb_workers < cur->nb_shards ? nb_workers : cur->nb_shards;
-    if (scatter_workers < 1) {
-        scatter_workers = 1;
+    if (stack->count == stack->cap) {
+        stack->cap = stack->cap == 0 ? 16 : stack->cap * 2;
+        stack->items = realloc(stack->items, (size_t)stack->cap * sizeof *stack->items);
     }
-
-    fflush(stdout);
-    fflush(stderr);
-
-    pid_t *pids = malloc((size_t)scatter_workers * sizeof *pids);
-    size_t chunk = ((size_t)cur->nb_shards + (size_t)scatter_workers - 1) / (size_t)scatter_workers;
-
-    for (int w = 0; w < scatter_workers; w++) {
-        pid_t pid = fork();
-        if (pid < 0) {
-            fprintf(stderr, "border_ring_count_dp : fork() a echoue (eclatement, worker %d) — arret\n", w);
-            bd_abort_workers(pids, w);
-            exit(1);
-        }
-        if (pid == 0) {
-            FILE **out_files = malloc((size_t)nb_shards_next * sizeof *out_files);
-            for (int d = 0; d < nb_shards_next; d++) {
-                char path[512];
-                snprintf(path, sizeof path, "%s/part_%d_%d.bin", next_dir, w, d);
-                out_files[d] = fopen(path, "wb");
-                if (out_files[d] == NULL) {
-                    fprintf(stderr, "border_ring_count_dp : ecriture de '%s' impossible — arret\n", path);
-                    exit(1);
-                }
-            }
-            size_t start = (size_t)w * chunk;
-            size_t end = start + chunk;
-            if (end > (size_t)cur->nb_shards) {
-                end = (size_t)cur->nb_shards;
-            }
-            for (size_t s = start; s < end; s++) {
-                char path[512];
-                snprintf(path, sizeof path, "%s/shard_%d.bin", cur->dir, (int)s);
-                struct bd_level shard;
-                bd_level_load_file(&shard, path);
-                /* Supprime la source dès qu'elle est chargée en mémoire,
-                   PAS seulement à la toute fin de la transition
-                   (bd_rm_shard_set(cur), plus bas) : un fragment source lu
-                   une fois n'est plus jamais nécessaire (chaque fragment
-                   n'est assigné qu'à UN SEUL worker), et le retarder fait
-                   cohabiter sur disque le niveau ENTIER sortant ET les
-                   fragments bruts (non dédupliqués, donc plus gros que le
-                   niveau entrant final) du niveau suivant en construction —
-                   exactement le pic qui a saturé /tmp sur la machine visée
-                   (14 Go de niveau 20 encore présent pendant l'éclatement du
-                   niveau 21, cf. docs/tests_et_ci.md). */
-                unlink(path);
-                bd_transition_range_scatter(ctx, want_corner, &shard, nb_shards_next, out_files, next_dir);
-                bd_level_free(&shard);
-            }
-            for (int d = 0; d < nb_shards_next; d++) {
-                bd_close_or_die(out_files[d], next_dir);
-            }
-            free(out_files);
-            exit(0);
-        }
-        pids[w] = pid;
-    }
-
-    int any_failed = 0;
-    for (int w = 0; w < scatter_workers; w++) {
-        int status;
-        waitpid(pids[w], &status, 0);
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            fprintf(stderr, "border_ring_count_dp : l'eclatement du worker %d a echoue (status=%d) — arret\n",
-                    w, status);
-            any_failed = 1;
-        }
-    }
-    free(pids);
-    if (any_failed) {
-        exit(1);
-    }
-
-    next->key_len = cur->key_len;
-    snprintf(next->dir, sizeof next->dir, "%s", next_dir);
-    next->nb_shards = nb_shards_next;
-    double max_shard_bytes;
-    bd_compact_dir(next_dir, scatter_workers, nb_shards_next, cur->key_len, nb_workers, &next->total_used,
-                   &next->total_bytes, &max_shard_bytes);
-
-    bd_rm_shard_set(cur);
-}
-
-/* Variante fragmentée de bd_finalize_range : un worker par plage contiguë de
-   fragments, chacun charge et clôt ses fragments un par un (jamais plus d'UN
-   en mémoire à la fois), le parent additionne les sommes partielles. */
-static long long bd_finalize_shards(const struct bd_ctx *ctx, int want_corner, int8_t closure_target,
-                                     const struct bd_shard_set *set, int nb_workers)
-{
-    int workers = nb_workers < set->nb_shards ? nb_workers : set->nb_shards;
-    if (workers < 1) {
-        workers = 1;
-    }
-
-    fflush(stdout);
-    fflush(stderr);
-
-    pid_t *pids = malloc((size_t)workers * sizeof *pids);
-    char (*paths)[512] = malloc((size_t)workers * sizeof *paths);
-    size_t chunk = ((size_t)set->nb_shards + (size_t)workers - 1) / (size_t)workers;
-
-    for (int w = 0; w < workers; w++) {
-        snprintf(paths[w], sizeof paths[w], "%s/finalize_%d.bin", set->dir, w);
-
-        pid_t pid = fork();
-        if (pid < 0) {
-            fprintf(stderr, "border_ring_count_dp : fork() a echoue (finalisation, worker %d) — arret\n", w);
-            bd_abort_workers(pids, w);
-            exit(1);
-        }
-        if (pid == 0) {
-            size_t start = (size_t)w * chunk;
-            size_t end = start + chunk;
-            if (end > (size_t)set->nb_shards) {
-                end = (size_t)set->nb_shards;
-            }
-            long long total = 0;
-            for (size_t d = start; d < end; d++) {
-                char path[512];
-                snprintf(path, sizeof path, "%s/shard_%d.bin", set->dir, (int)d);
-                struct bd_level level;
-                bd_level_load_file(&level, path);
-                total += bd_finalize_range(ctx, want_corner, closure_target, &level, 0, level.capacity);
-                bd_level_free(&level);
-            }
-            FILE *fp = fopen(paths[w], "wb");
-            if (fp == NULL) {
-                fprintf(stderr, "border_ring_count_dp : ecriture de '%s' impossible — arret\n", paths[w]);
-                exit(1);
-            }
-            bd_write_or_die(fp, &total, sizeof total, paths[w]);
-            bd_close_or_die(fp, paths[w]);
-            exit(0);
-        }
-        pids[w] = pid;
-    }
-
-    int any_failed = 0;
-    for (int w = 0; w < workers; w++) {
-        int status;
-        waitpid(pids[w], &status, 0);
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            fprintf(stderr,
-                    "border_ring_count_dp : la finalisation du worker %d a echoue (status=%d) — arret\n", w,
-                    status);
-            any_failed = 1;
-        }
-    }
-    free(pids);
-    if (any_failed) {
-        for (int w = 0; w < workers; w++) {
-            unlink(paths[w]);
-        }
-        free(paths);
-        exit(1);
-    }
-
-    long long total = 0;
-    for (int w = 0; w < workers; w++) {
-        FILE *fp = fopen(paths[w], "rb");
-        long long partial = 0;
-        if (fp == NULL || fread(&partial, sizeof partial, 1, fp) != 1) {
-            fprintf(stderr, "border_ring_count_dp : resultat '%s' illisible — arret\n", paths[w]);
-            exit(1);
-        }
-        fclose(fp);
-        unlink(paths[w]);
-        total += partial;
-    }
-    free(paths);
-    return total;
+    struct bd_pending_slice *slice = &stack->items[stack->count++];
+    snprintf(slice->shard_path, sizeof slice->shard_path, "%s", path);
+    snprintf(slice->shard_dir, sizeof slice->shard_dir, "%s", dir);
+    slice->resume_pos = resume_pos;
 }
 
 /* ===========================================================================
- * Orchestration : un niveau par position de l'anneau, du premier au dernier,
- * en ne gardant jamais que le niveau courant + le niveau en construction —
- * PAS une table unique mémoïsant les 59 positions à la fois. Deux
- * représentations possibles pour le niveau courant, jamais les deux à la
- * fois : en mémoire (`cur`, tant que bd_disk_mode_min_bytes n'est pas
- * franchi — chemin rapide sans E/S, celui qu'empruntent tous les fixtures de
- * test par défaut) ou en fragments sur disque (`cur_shards`, au-delà — cf.
- * le commentaire de tête de la section "Mode disque"). Le passage de l'un à
- * l'autre ne se fait qu'une fois par ouverture, jamais dans l'autre sens :
- * un niveau qui a dû passer sur disque reste géré par fragments même si son
- * compte diminue ensuite (les dernières positions, près de la fermeture,
- * restent bon marché à fragmenter par rapport au reste du calcul).
+ * Orchestration : fait avancer un niveau, position par position, jusqu'à la
+ * fermeture de l'anneau — TOUJOURS en mémoire (jamais de représentation
+ * fragmentée "vivante" à travers plusieurs positions, contrairement à
+ * l'ancien mécanisme). Quand un niveau dépasse bd_split_threshold_bytes, il
+ * est scindé en K fragments (bd_level_to_shards) : UN seul repris
+ * immédiatement (la progression continue sans interruption), les K-1 autres
+ * empilés sur `stack` (LIFO — cf. son commentaire) pour être repris plus
+ * tard, chacun depuis la position où il a été mis de côté. Une fois une
+ * tranche fermée (fermeture de l'anneau atteinte), sa contribution s'ajoute
+ * au total et la tranche suivante est dépilée — jusqu'à la pile vide. Aucune
+ * tranche n'est jamais retouchée entre sa création et sa reprise : chaque
+ * fragment n'est écrit qu'une fois et relu qu'une fois, quel que soit le
+ * nombre de positions qui s'écoulent pendant qu'il attend.
  */
 static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_required,
                                  const int8_t *initial_counts, int8_t closure_target, int nb_workers)
 {
+    struct bd_pending_stack stack;
+    memset(&stack, 0, sizeof stack);
+    long long total = 0;
+
     struct bd_level cur;
     bd_level_init(&cur, 1 + ctx->nb_classes, 1 << 10);
     uint8_t key0[1 + BD_MAX_CLASSES];
     key0[0] = (uint8_t)initial_required;
     memcpy(key0 + 1, initial_counts, (size_t)ctx->nb_classes);
     bd_level_add(&cur, key0, 1);
+    int pos = 1;
+    int split_seq = 0; /* rend chaque repertoire de scission unique, meme a la meme position */
 
-    int disk_mode = 0;
-    struct bd_shard_set cur_shards = { .dir = "", .nb_shards = 0, .key_len = 0, .total_used = 0,
-                                        .total_bytes = 0.0 };
-
-    for (int pos = 1; pos < BORDER_RING_LEN - 1; pos++) {
-        int want_corner = ctx->is_corner_at[pos];
-
-        if (!disk_mode) {
+    for (;;) {
+        while (pos < BORDER_RING_LEN - 1) {
+            int want_corner = ctx->is_corner_at[pos];
             struct bd_level next;
             if (nb_workers > 1 && cur.used >= bd_fork_min_states) {
                 bd_transition_parallel(ctx, want_corner, &cur, nb_workers, &next);
@@ -1163,48 +978,65 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
             }
             bd_level_free(&cur);
             cur = next;
+            pos++;
 
             double bytes = bd_level_bytes(&cur);
-            fprintf(stderr, "border_ring_count_dp : position %d/%d, %zu etats (%.2f Go)\n", pos + 1,
+            fprintf(stderr, "border_ring_count_dp : position %d/%d, %zu etats (%.2f Go)\n", pos,
                     BORDER_RING_LEN - 1, cur.used, bytes / (1024.0 * 1024.0 * 1024.0));
 
-            if (bytes >= bd_disk_mode_min_bytes) {
+            /* `cur.used > 1` : un niveau à 0 ou 1 entrée ne peut physiquement
+               pas être scindé en plusieurs fragments utiles — le scinder quand
+               même produirait des fragments vides qui, une fois rechargés,
+               rapportent la même capacité plancher (~200 octets, cf.
+               bd_level_init) donc "dépassent" tout seuil assez bas, ce qui
+               redéclencherait une scission indéfiniment (observé : boucle sans
+               fin sur un seuil de test à 1 octet). Sans garde, ce n'est pas
+               qu'un cas de test dégénéré : RIEN n'empêcherait la même
+               situation en production si un budget venait à être fixé
+               au-dessous de cette capacité plancher. */
+            if (bytes >= bd_split_threshold_bytes && cur.used > 1) {
                 int nb_shards = bd_pick_nb_shards(bytes, nb_workers);
                 char dir[128];
-                snprintf(dir, sizeof dir, "%s/etii_bd_%d_pos%d", bd_spill_dir, (int)getpid(), pos);
-                bd_level_to_shards(&cur, dir, nb_shards, nb_workers, &cur_shards);
+                snprintf(dir, sizeof dir, "%s/etii_bd_%d_s%d", bd_spill_dir, (int)getpid(), split_seq++);
+                struct bd_shard_set shards;
+                bd_level_to_shards(&cur, dir, nb_shards, nb_workers, &shards);
                 bd_level_free(&cur);
-                disk_mode = 1;
+
                 fprintf(stderr,
-                        "border_ring_count_dp : position %d/%d, bascule en mode disque "
-                        "(%d fragments, %.2f Go)\n",
-                        pos + 1, BORDER_RING_LEN - 1, nb_shards,
-                        cur_shards.total_bytes / (1024.0 * 1024.0 * 1024.0));
+                        "border_ring_count_dp : position %d/%d, scission en %d fragments "
+                        "(%.2f Go, %zu etats au total)\n",
+                        pos, BORDER_RING_LEN - 1, shards.nb_shards,
+                        shards.total_bytes / (1024.0 * 1024.0 * 1024.0), shards.total_used);
+
+                char path0[512];
+                snprintf(path0, sizeof path0, "%s/shard_0.bin", shards.dir);
+                bd_level_load_file(&cur, path0);
+                unlink(path0);
+                rmdir(shards.dir); /* echoue silencieusement si non vide : les K-1 autres y restent */
+
+                for (int d = shards.nb_shards - 1; d >= 1; d--) {
+                    char path[512];
+                    snprintf(path, sizeof path, "%s/shard_%d.bin", shards.dir, d);
+                    bd_pending_push(&stack, path, shards.dir, pos);
+                }
             }
-        } else {
-            int nb_shards_next = bd_pick_nb_shards(cur_shards.total_bytes, nb_workers);
-            char dir[128];
-            snprintf(dir, sizeof dir, "%s/etii_bd_%d_pos%d", bd_spill_dir, (int)getpid(), pos);
-            struct bd_shard_set next_shards;
-            bd_transition_disk(ctx, want_corner, &cur_shards, nb_workers, dir, nb_shards_next, &next_shards);
-            cur_shards = next_shards;
-
-            fprintf(stderr, "border_ring_count_dp : position %d/%d, %zu etats (%.2f Go, %d fragments)\n",
-                    pos + 1, BORDER_RING_LEN - 1, cur_shards.total_used,
-                    cur_shards.total_bytes / (1024.0 * 1024.0 * 1024.0), cur_shards.nb_shards);
         }
+
+        total += bd_finalize_range(ctx, ctx->is_corner_at[BORDER_RING_LEN - 1], closure_target, &cur, 0,
+                                    cur.capacity);
+        bd_level_free(&cur);
+
+        if (stack.count == 0) {
+            break;
+        }
+        struct bd_pending_slice slice = stack.items[--stack.count];
+        bd_level_load_file(&cur, slice.shard_path);
+        unlink(slice.shard_path);
+        rmdir(slice.shard_dir); /* echoue silencieusement si non vide : des tranches soeurs y restent */
+        pos = slice.resume_pos;
     }
 
-    long long total;
-    if (!disk_mode) {
-        total = bd_finalize_range(ctx, ctx->is_corner_at[BORDER_RING_LEN - 1], closure_target, &cur, 0,
-                                   cur.capacity);
-        bd_level_free(&cur);
-    } else {
-        total = bd_finalize_shards(ctx, ctx->is_corner_at[BORDER_RING_LEN - 1], closure_target, &cur_shards,
-                                    nb_workers);
-        bd_rm_shard_set(&cur_shards);
-    }
+    free(stack.items);
     return total;
 }
 
@@ -1218,9 +1050,27 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
    dernière case) et sa sortie (vers la case 1) dans le même ordre — c'est
    une propriété de la pièce RÉELLE (son orientation d'origine dans le CSV),
    pas de la classe abstraite. Regrouper ici risquerait donc de mélanger
-   deux fermetures différentes sous un seul poids ; comme il n'y a de toute
-   façon que quatre pièces-coin réelles à essayer, le gain de regroupement
-   serait nul. */
+   deux fermetures différentes sous un seul poids.
+ *
+ * N'exécute qu'UNE SEULE fois `bd_run_opening` (sur le premier candidat
+ * trouvé), puis multiplie par `nb_candidates` au lieu de sommer un
+ * `bd_run_opening` complet par candidat : par symétrie de rotation à 90° du
+ * plateau (cf. docs/superpowers/specs/2026-09-06-masse-bordure-design.md),
+ * toute bordure valide utilise nécessairement les `nb_candidates` pièces-coin
+ * réelles disponibles, une fois chacune — il y a exactement autant de
+ * positions-coin sur l'anneau que de pièces-coin réelles, aucune
+ * substitution possible. Faire tourner le plateau entier de 90° envoie donc
+ * toute solution comptée pour un candidat donné vers une solution tout aussi
+ * valide comptée pour le candidat suivant (même pièce, coin suivant,
+ * réorientée) — les `nb_candidates` totaux par candidat sont donc
+ * rigoureusement égaux, et pas seulement dans le cas où l'ouverture ne
+ * change rien à la forme du reste de l'anneau. Vérifié empiriquement avant
+ * ce changement (instrumentation temporaire, jamais committée) : les 4
+ * candidats de `data/pieces16.csv` donnent chacun N=1 ; `data/pieces.csv` n'a
+ * que 4 pièces à 2 faces à 0 (ids 1-4), sans couleurs partagées entre elles,
+ * donc la prémisse (chaque anneau valide utilise les 4, une fois chacune)
+ * tient aussi sur le jeu réel. Ce court-circuit économise ~(nb_candidates-1)
+ * fois le coût du DP complet — le poste dominant du temps de calcul. */
 static long long bd_count_openings(map_big_array *map, struct array_part *all_rotate_parts,
                                     struct bd_ctx *ctx, const int16_t *id_to_class,
                                     const int base_counts[BD_MAX_CLASSES], int nb_workers)
@@ -1238,22 +1088,31 @@ static long long bd_count_openings(map_big_array *map, struct array_part *all_ro
     what_search_in_grid_to_key(all_rotate_parts, &state, 0, 0, &key, (int8_t)map->sizearrayM);
     map_bucket bucket = map_bucket_packed(map, &key);
 
-    long long total = 0;
+    const struct part *first_cand = NULL;
+    int nb_candidates = 0;
     for (int s = 0; s < bucket.size; s++) {
         const struct part *cand = &bucket.parts[s];
         if (cand->id <= 0 || id_to_class[cand->id] < 0) {
             continue;
         }
-        int8_t counts[BD_MAX_CLASSES];
-        for (int c = 0; c < ctx->nb_classes; c++) {
-            counts[c] = (int8_t)base_counts[c];
+        if (first_cand == NULL) {
+            first_cand = cand;
         }
-        counts[id_to_class[cand->id]]--;
-
-        /* case 1 : k4(LEFT) = grid[0][0].right ; derniere case : k1(TOP) = grid[0][0].bottom */
-        total += bd_run_opening(ctx, cand->right, counts, cand->bottom, nb_workers);
+        nb_candidates++;
     }
-    return total;
+    if (first_cand == NULL) {
+        return 0;
+    }
+
+    int8_t counts[BD_MAX_CLASSES];
+    for (int c = 0; c < ctx->nb_classes; c++) {
+        counts[c] = (int8_t)base_counts[c];
+    }
+    counts[id_to_class[first_cand->id]]--;
+
+    /* case 1 : k4(LEFT) = grid[0][0].right ; derniere case : k1(TOP) = grid[0][0].bottom */
+    long long n_single_opening = bd_run_opening(ctx, first_cand->right, counts, first_cand->bottom, nb_workers);
+    return n_single_opening * (long long)nb_candidates;
 }
 
 long long border_ring_count_dp(map_big_array *map, struct array_part *all_rotate_parts, int nb_workers)

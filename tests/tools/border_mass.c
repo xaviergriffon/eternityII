@@ -61,25 +61,35 @@
  * plus petit qu'un masque de bits par pièce réelle, et bien plus sobre en
  * mémoire qu'une mémoïsation globale — là où le DFS aveugle (par défaut,
  * sans `--dp`) explose (des dizaines de milliards de nœuds pour UNE SEULE
- * partition sur 270 sur `data/pieces.csv`, cf. docs/tests_et_ci.md). Combine
- * `--dp` avec `--forks N` : la transition d'un niveau assez gros est
- * répartie sur N process forkés (chacun traite une plage d'états déjà
- * calculés, en lecture seule, et écrit sa part du niveau suivant dans un
- * fichier temporaire fusionné par le parent) — sans `--forks`, `--dp` prend
- * le nombre de cœurs détecté par défaut, comme le DFS. Au-delà d'une taille
- * de niveau généreuse (mesurée insuffisante même sur une machine à 48 Go de
- * RAM sans ce mécanisme), un niveau bascule en fragments sur disque
- * (partitionnement externe par hachage) au lieu d'une table unique en
- * mémoire — voir border_ring_dp.h pour le raisonnement complet. `--spill-dir
- * DIR` redirige ces fragments (et les fichiers temporaires de `--forks`) vers
- * DIR au lieu de `/tmp`, souvent une petite partition ou un tmpfs plafonné
- * bien en-deçà de la RAM de la machine — observé en pratique, `/tmp` saturé
- * par plusieurs dizaines de Go de fragments même sur une machine bien dotée
+ * partition sur 270 sur `data/pieces.csv`, cf. docs/tests_et_ci.md). Une
+ * seule pièce-coin d'ouverture est traitée en entier (les autres candidats
+ * lui sont rigoureusement égaux par symétrie de rotation à 90° du plateau,
+ * cf. docs/superpowers/specs/2026-09-06-masse-bordure-design.md) — le
+ * résultat est multiplié par le nombre de candidats plutôt que rejoué une
+ * fois par candidat. Combine `--dp` avec `--forks N` : la transition d'un
+ * niveau assez gros est répartie sur N process forkés (chacun traite une
+ * plage d'états déjà calculés, en lecture seule, et écrit sa part du niveau
+ * suivant dans un fichier temporaire fusionné par le parent) — sans
+ * `--forks`, `--dp` prend le nombre de cœurs détecté par défaut, comme le
+ * DFS. `--dp-max-ram-mo MO` est OBLIGATOIRE avec `--dp` : budget mémoire
+ * dédié à un niveau (cf. `border_ring_dp_set_max_ram_mo`) — au-delà, un
+ * niveau est scindé en fragments sur disque (partitionnement externe par
+ * hachage), un seul repris immédiatement en mémoire, les autres empilés
+ * (LIFO) pour être repris plus tard chacun depuis sa position de mise de
+ * côté — jamais retouchés entre-temps, contrairement à un mécanisme
+ * antérieur qui réécrivait/relisait tout un niveau à chaque position tant
+ * qu'il restait trop gros — voir border_ring_dp.h pour le raisonnement
+ * complet. `--spill-dir DIR`
+ * redirige ces fragments (et les fichiers temporaires de `--forks`) vers DIR
+ * au lieu de `/tmp`, souvent une petite partition ou un tmpfs plafonné bien
+ * en-deçà de la RAM de la machine — observé en pratique, `/tmp` saturé par
+ * plusieurs dizaines de Go de fragments même sur une machine bien dotée
  * (2x10 cœurs/48 Go), cf. docs/tests_et_ci.md.
  *
  * Usage :
  *   make border-mass
- *   tests/tools/border_mass [--dp] [--forks N] [--spill-dir DIR] data/pieces.csv data/indices.csv
+ *   tests/tools/border_mass [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] \
+ *       data/pieces.csv data/indices.csv
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -249,17 +259,24 @@ int main(int argc, char **argv)
     int forks = bm_default_forks();
     int use_dp = 0;
     const char *spill_dir = NULL;
+    long dp_max_ram_mo = -1;
     int argi = 1;
-    /* `--dp`, `--forks N` et `--spill-dir DIR` sont des options indépendantes,
-       combinables dans n'importe quel ordre — `--dp --forks N` choisit
-       l'algorithme ET le nombre de process forkés pour sa parallélisation par
-       niveau (cf. border_ring_dp.h) ; `--forks N` seul garde son sens
-       historique (DFS par forks) ; `--dp` seul reprend le nombre de cœurs
-       détecté par défaut, comme `--forks` seul. `--spill-dir` n'a d'effet
-       qu'avec `--dp` (fragments du mode disque, cf. `border_ring_dp_set_spill_dir`) —
-       `/tmp` est souvent une petite partition ou un tmpfs plafonné bien
-       en-deçà de la RAM de la machine, qui peut saturer même sur une machine
-       par ailleurs bien dotée (observé en pratique, cf. docs/tests_et_ci.md). */
+    /* `--dp`, `--forks N`, `--spill-dir DIR` et `--dp-max-ram-mo MO` sont des
+       options indépendantes, combinables dans n'importe quel ordre — `--dp
+       --forks N` choisit l'algorithme ET le nombre de process forkés pour sa
+       parallélisation par niveau (cf. border_ring_dp.h) ; `--forks N` seul
+       garde son sens historique (DFS par forks) ; `--dp` seul reprend le
+       nombre de cœurs détecté par défaut, comme `--forks` seul. `--spill-dir`
+       n'a d'effet qu'avec `--dp` (fragments du mode disque, cf.
+       `border_ring_dp_set_spill_dir`) — `/tmp` est souvent une petite
+       partition ou un tmpfs plafonné bien en-deçà de la RAM de la machine,
+       qui peut saturer même sur une machine par ailleurs bien dotée (observé
+       en pratique, cf. docs/tests_et_ci.md). `--dp-max-ram-mo MO` est
+       OBLIGATOIRE avec `--dp` (vérifié plus bas) — budget mémoire dédié à un
+       niveau de la DP, en Mo (cf. `border_ring_dp_set_max_ram_mo`) ; aucune
+       valeur par défaut n'est choisie à la place de l'utilisateur, une
+       machine différente de celle qui a motivé ce mécanisme rendrait
+       n'importe quel défaut faux dans un sens ou dans l'autre. */
     while (argi < argc && argv[argi][0] == '-') {
         if (strcmp(argv[argi], "--dp") == 0) {
             use_dp = 1;
@@ -267,7 +284,8 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argi], "--forks") == 0) {
             if (argi + 1 >= argc) {
                 fprintf(stderr,
-                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] <pieces.csv> <indices.csv>\n",
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                        "<pieces.csv> <indices.csv>\n",
                         argv[0]);
                 return 2;
             }
@@ -284,19 +302,43 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argi], "--spill-dir") == 0) {
             if (argi + 1 >= argc) {
                 fprintf(stderr,
-                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] <pieces.csv> <indices.csv>\n",
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                        "<pieces.csv> <indices.csv>\n",
                         argv[0]);
                 return 2;
             }
             spill_dir = argv[argi + 1];
+            argi += 2;
+        } else if (strcmp(argv[argi], "--dp-max-ram-mo") == 0) {
+            if (argi + 1 >= argc) {
+                fprintf(stderr,
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                        "<pieces.csv> <indices.csv>\n",
+                        argv[0]);
+                return 2;
+            }
+            char *endptr = NULL;
+            dp_max_ram_mo = strtol(argv[argi + 1], &endptr, 10);
+            if (endptr == argv[argi + 1] || *endptr != '\0' || dp_max_ram_mo < 1) {
+                fprintf(stderr, "border_mass : --dp-max-ram-mo attend un entier positif (Mo)\n");
+                return 2;
+            }
             argi += 2;
         } else {
             break;
         }
     }
     if (argc - argi != 2) {
-        fprintf(stderr, "usage: %s [--dp] [--forks N] [--spill-dir DIR] <pieces.csv> <indices.csv>\n",
+        fprintf(stderr,
+                "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                "<pieces.csv> <indices.csv>\n",
                 argv[0]);
+        return 2;
+    }
+    if (use_dp && dp_max_ram_mo < 0) {
+        fprintf(stderr,
+                "border_mass : --dp necessite --dp-max-ram-mo MO (budget memoire dedie a un "
+                "niveau de la DP, en Mo)\n");
         return 2;
     }
     const char *pieces_path = argv[argi];
@@ -321,6 +363,7 @@ int main(int argc, char **argv)
         if (spill_dir != NULL) {
             border_ring_dp_set_spill_dir(spill_dir);
         }
+        border_ring_dp_set_max_ram_mo(dp_max_ram_mo, forks);
         long long total = border_ring_count_dp(map, all, forks);
         printf("masse totale des anneaux de bordure valides : %lld\n", total);
         return 0;

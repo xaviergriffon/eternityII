@@ -38,16 +38,19 @@
  * les uns des autres — chaque worker traite une plage disjointe et écrit son
  * niveau-suivant local dans un fichier temporaire, fusionné par le parent.
  *
- * Au-delà d'une taille de niveau généreuse (`bd_disk_mode_min_bytes`, 2 Go
- * par défaut — mesuré insuffisant même sur une machine à 48 Go de RAM sans
- * ce mécanisme), un niveau bascule d'une table unique en mémoire vers K
- * fragments sur disque (partitionnement externe par hachage de la clé,
- * `struct bd_shard_set`), chacun assez petit pour tenir large en mémoire.
- * Chaque transition devient alors deux vagues de forks (éclatement puis
- * compactage, cf. `bd_transition_disk`/`bd_compact_dir`) au lieu d'une
- * seule : le pic mémoire devient `nb_workers` fragments simultanés,
- * indépendant de la taille totale du niveau — voir le commentaire de tête de
- * la section « Mode disque » dans `border_ring_dp.c` pour le détail.
+ * Au-delà du budget RAM donné (`bd_split_threshold_bytes`, fixé par
+ * `border_ring_dp_set_max_ram_mo` — `--dp-max-ram-mo`, obligatoire dès que
+ * `--dp` est utilisé), un niveau est scindé en K fragments sur disque
+ * (partitionnement externe par hachage de la clé, `struct bd_shard_set`,
+ * `bd_level_to_shards`, forké) — un seul repris IMMÉDIATEMENT en mémoire (la
+ * progression continue sans interruption), les K-1 autres empilés (pile LIFO
+ * `struct bd_pending_stack`) pour être repris plus tard, chacun depuis la
+ * position où il a été mis de côté. Contrairement à un mécanisme antérieur
+ * (mode disque permanent, tout un niveau réécrit/relu à CHAQUE position tant
+ * qu'il restait trop gros), un fragment mis de côté n'est écrit qu'une fois
+ * et relu qu'une fois, jamais retouché entre les deux — voir le commentaire
+ * de tête de la section « Scission par pile LIFO » dans `border_ring_dp.c`
+ * pour le détail et le gain d'E/S mesuré.
  */
 #ifndef eternityII_border_ring_dp_h
 #define eternityII_border_ring_dp_h
@@ -60,13 +63,17 @@
  * programmation dynamique sur les classes de pièces interchangeables.
  *
  * Aucun voisin n'est encore posé à la case d'ouverture `(0,0)` : comme
- * `border_walk_count`, cette fonction explore donc déjà les 4 coins
- * possibles comme point d'ouverture (chaque pièce de coin candidate est
- * essayée individuellement, jamais regroupée en classe — sa pièce de coin
- * "jumelle" au sein d'une même classe ne présente pas forcément la même
- * couleur de fermeture, cf. le commentaire de `bd_count_openings` dans
- * `border_ring_dp.c`) — pas de ×4 supplémentaire à appliquer en aval, comme
- * pour `border_walk_count`.
+ * `border_walk_count`, cette fonction explore donc les candidats d'ouverture
+ * possibles à cette case (chaque pièce de coin candidate est identifiée
+ * individuellement, jamais regroupée en classe — sa pièce de coin "jumelle"
+ * au sein d'une même classe ne présente pas forcément la même couleur de
+ * fermeture, cf. le commentaire de `bd_count_openings` dans
+ * `border_ring_dp.c`). Contrairement à `border_walk_count`, le DP ne rejoue
+ * PAS le calcul complet pour chaque candidat : par symétrie de rotation à
+ * 90° du plateau, toute bordure valide utilise nécessairement l'ensemble des
+ * pièces-coin candidates, une fois chacune, donc leurs totaux individuels
+ * sont rigoureusement égaux — un seul est calculé, puis multiplié par le
+ * nombre de candidats (cf. le commentaire de `bd_count_openings`).
  *
  * @param map              Table de lookup pré-calculée (`prepare_map_part`) —
  *                         utilisée uniquement pour énumérer les candidats
@@ -85,14 +92,12 @@
 long long border_ring_count_dp(map_big_array *map, struct array_part *all_rotate_parts, int nb_workers);
 
 /**
- * @brief Change le répertoire des fichiers temporaires du mode disque
- * (fragments) et de la parallélisation par forks (`/tmp` par défaut) — comme
+ * @brief Change le répertoire des fragments de scission et des fichiers
+ * temporaires de la parallélisation par forks (`/tmp` par défaut) — comme
  * `--stock-spill-dir` pour le stock principal (`core/stock_spill.c`).
  *
  * `/tmp` est souvent une petite partition ou un tmpfs plafonné bien en-deçà
- * de la RAM de la machine, indépendamment de sa taille : un niveau en mode
- * disque peut y déposer plusieurs dizaines de Go de fragments bruts (avant
- * compactage, donc plus gros que leur forme finale dédupliquée) — observé en
+ * de la RAM de la machine, indépendamment de sa taille — observé en
  * pratique, `/tmp` saturé sur une machine par ailleurs bien dotée
  * (2x10 cœurs/48 Go), cf. docs/tests_et_ci.md.
  *
@@ -101,5 +106,27 @@ long long border_ring_count_dp(map_big_array *map, struct array_part *all_rotate
  *            interne n'en est faite, comme `argv` ne l'est jamais non plus).
  */
 void border_ring_dp_set_spill_dir(const char *dir);
+
+/**
+ * @brief Fixe le budget mémoire dédié à UN NIVEAU (ou une tranche reprise
+ * depuis la pile, cf. le commentaire de tête du fichier) de la DP —
+ * obligatoire dès que `--dp` est utilisé (cf. `border_mass.c`,
+ * `--dp-max-ram-mo`), remplace les anciennes constantes calées à la main sur
+ * une seule machine (2 Go de seuil de scission, 768 Mo de cible de fragment).
+ *
+ * Pilote deux seuils : `bd_split_threshold_bytes` (déclenche une scission dès
+ * qu'un niveau dépasse ce budget) prend directement la valeur donnée ;
+ * `bd_shard_target_bytes` (taille cible d'un fragment) en est dérivée —
+ * `budget / (nb_workers * 3)`, avec un plancher bas — pour que
+ * `nb_workers` fragments simultanés pendant une compaction restent,
+ * ensemble, sous ce même budget.
+ *
+ * @param mo         Budget en Mo. Doit rester valide pour tout l'appel à
+ *                   `border_ring_count_dp` qui suit.
+ * @param nb_workers Nombre de process forkés (même valeur que celle passée à
+ *                   `border_ring_count_dp`) — utilisé pour dimensionner
+ *                   `bd_shard_target_bytes`.
+ */
+void border_ring_dp_set_max_ram_mo(long mo, int nb_workers);
 
 #endif /* eternityII_border_ring_dp_h */
