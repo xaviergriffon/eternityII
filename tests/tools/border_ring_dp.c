@@ -660,6 +660,15 @@ struct bd_shard_set {
 static double bd_shard_target_bytes = 768.0 * 1024.0 * 1024.0;
 static double bd_split_threshold_bytes = 2.0 * 1024.0 * 1024.0 * 1024.0;
 
+/* Budget POOL (somme visee sur tous les slots actifs, cf. bd_run_opening) —
+   distinct de bd_split_threshold_bytes : ce dernier est aussi manipule par
+   les hooks test-only qui forcent des scissions a taille quasi nulle
+   (border_ring_dp_set_disk_mode_min_bytes_for_tests), un usage sans rapport
+   avec le budget RAM reel du pool. Les decoupler evite qu'un test qui force
+   des scissions minuscules n'ecrase aussi, par effet de bord, le budget
+   d'admission du pool. */
+static double bd_pool_budget_bytes = 2.0 * 1024.0 * 1024.0 * 1024.0;
+
 /* Plancher bas pour bd_shard_target_bytes : évite qu'un budget RAM minuscule
    combiné à beaucoup de workers ne produise une cible de fragment
    dégénérée (quelques octets), qui exploserait BD_MAX_SHARDS pour rien. */
@@ -683,6 +692,7 @@ void border_ring_dp_set_max_ram_mo(long mo, int nb_workers)
 {
     double ram_bytes = (double)mo * 1024.0 * 1024.0;
     bd_split_threshold_bytes = ram_bytes;
+    bd_pool_budget_bytes = ram_bytes;
 
     int workers = nb_workers < 1 ? 1 : nb_workers;
     double target = ram_bytes / ((double)workers * 3.0);
@@ -1109,6 +1119,99 @@ static void bd_apply_job_result(struct bd_pending_stack *stack, long long *total
     }
 }
 
+struct bd_active_job {
+    pid_t pid;
+    char result_path[300];
+    double estimated_bytes;
+};
+
+static double bd_active_bytes_sum(const struct bd_active_job *jobs, int active)
+{
+    double sum = 0.0;
+    for (int i = 0; i < active; i++) {
+        sum += jobs[i].estimated_bytes;
+    }
+    return sum;
+}
+
+static int bd_find_slot(const struct bd_active_job *jobs, int active, pid_t pid)
+{
+    for (int i = 0; i < active; i++) {
+        if (jobs[i].pid == pid) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void bd_remove_slot(struct bd_active_job *jobs, int *active, int slot)
+{
+    jobs[slot] = jobs[(*active) - 1];
+    (*active)--;
+}
+
+/* Lit l'en-tete (12 octets) d'un fragment DEJA sur disque pour estimer sa
+   taille de rechargement, sans jamais le charger — cf. bd_estimate_reload_bytes
+   (Tache 1). */
+static double bd_pending_fragment_estimate_bytes(const char *shard_path)
+{
+    FILE *fp = fopen(shard_path, "rb");
+    if (fp == NULL) {
+        fprintf(stderr, "border_ring_count_dp : lecture de '%s' impossible pour estimation — arret\n",
+                shard_path);
+        exit(1);
+    }
+    int32_t key_len = 0;
+    uint64_t count = 0;
+    if (fread(&key_len, sizeof key_len, 1, fp) != 1 || fread(&count, sizeof count, 1, fp) != 1) {
+        fprintf(stderr, "border_ring_count_dp : en-tete de '%s' illisible — arret\n", shard_path);
+        exit(1);
+    }
+    fclose(fp);
+    return bd_estimate_reload_bytes(key_len, count);
+}
+
+/* Fork un job strictement monoprocessus (allow_parallel=0, cf. spec) pour le
+   fragment `slice` — le charge, l'efface du disque, avance jusqu'a fermeture
+   ou nouvelle scission, ecrit son resultat dans result_path. Retourne le pid
+   de l'enfant. */
+static pid_t bd_fork_pool_job(const struct bd_ctx *ctx, int8_t closure_target,
+                               const struct bd_pending_slice *slice, int nb_workers,
+                               double effective_budget_bytes, char *result_path, size_t result_path_size)
+{
+    static int job_seq = 0;
+    snprintf(result_path, result_path_size, "%s/etii_bd_job_%d_%d.bin", bd_spill_dir, (int)getpid(),
+             job_seq++);
+
+    fflush(stdout);
+    fflush(stderr);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "border_ring_count_dp : fork() a echoue pour un job du pool — arret\n");
+        exit(1);
+    }
+    if (pid == 0) {
+        struct bd_level cur;
+        bd_level_load_file(&cur, slice->shard_path);
+        unlink(slice->shard_path);
+        rmdir(slice->shard_dir);
+        struct bd_job_result r =
+            bd_run_fragment_job(ctx, closure_target, &cur, slice->resume_pos, /*allow_parallel=*/0, nb_workers,
+                                 effective_budget_bytes);
+        bd_job_result_write_or_die(&r, result_path);
+        exit(0);
+    }
+    return pid;
+}
+
+/* bd_effective_solo_budget_bytes() est remplace par une vraie marge a la
+   Tache 6 — provisoire ici pour que cette tache compile isolement. */
+static double bd_effective_solo_budget_bytes(void)
+{
+    return bd_split_threshold_bytes; /* remplace par une vraie marge a la Tache 6 */
+}
+
 /* ===========================================================================
  * Orchestration : fait avancer un niveau, position par position, jusqu'à la
  * fermeture de l'anneau — TOUJOURS en mémoire (jamais de représentation
@@ -1124,37 +1227,103 @@ static void bd_apply_job_result(struct bd_pending_stack *stack, long long *total
  * tranche n'est jamais retouchée entre sa création et sa reprise : chaque
  * fragment n'est écrit qu'une fois et relu qu'une fois, quel que soit le
  * nombre de positions qui s'écoulent pendant qu'il attend.
+ *
+ * Deux modes de dispatch, jamais simultanés (cf. bd_should_run_solo) : SOLO
+ * (un seul job actif, autorise a se paralleliser en interne via
+ * bd_transition_parallel) tant que la pile n'a pas de quoi remplir tous les
+ * workers, POOL (jusqu'a nb_workers jobs forkes concurrents, chacun
+ * strictement monoprocessus) des que la pile en a assez — bascule reevaluee
+ * a chaque tour de la boucle principale.
  */
 static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_required,
                                  const int8_t *initial_counts, int8_t closure_target, int nb_workers)
 {
+    int nb_workers_eff = nb_workers < 1 ? 1 : nb_workers;
+    double budget_solo = bd_effective_solo_budget_bytes();
+    double budget_pool_total = bd_pool_budget_bytes; /* somme visee sur TOUS les slots actifs */
+
     struct bd_pending_stack stack;
     memset(&stack, 0, sizeof stack);
     long long total = 0;
 
-    struct bd_level cur;
-    bd_level_init(&cur, 1 + ctx->nb_classes, 1 << 10);
+    /* Job d'amorcage (l'ouverture) : toujours SOLO, rien d'autre a
+       repartir a cet instant. */
+    struct bd_level seed;
+    bd_level_init(&seed, 1 + ctx->nb_classes, 1 << 10);
     uint8_t key0[1 + BD_MAX_CLASSES];
     key0[0] = (uint8_t)initial_required;
     memcpy(key0 + 1, initial_counts, (size_t)ctx->nb_classes);
-    bd_level_add(&cur, key0, 1);
-    int start_pos = 1;
+    bd_level_add(&seed, key0, 1);
+    struct bd_job_result r0 =
+        bd_run_fragment_job(ctx, closure_target, &seed, 1, /*allow_parallel=*/1, nb_workers_eff, budget_solo);
+    bd_apply_job_result(&stack, &total, &r0);
 
-    for (;;) {
-        struct bd_job_result r = bd_run_fragment_job(ctx, closure_target, &cur, start_pos,
-                                                      /*allow_parallel=*/1, nb_workers, bd_split_threshold_bytes);
-        bd_apply_job_result(&stack, &total, &r);
+    struct bd_active_job *jobs = malloc((size_t)nb_workers_eff * sizeof *jobs);
+    int active = 0;
 
-        if (stack.count == 0) {
-            break;
+    while (stack.count > 0 || active > 0) {
+        if (bd_should_run_solo(active, stack.count, nb_workers_eff)) {
+            struct bd_pending_slice slice = stack.items[--stack.count];
+            struct bd_level cur;
+            bd_level_load_file(&cur, slice.shard_path);
+            unlink(slice.shard_path);
+            rmdir(slice.shard_dir);
+            struct bd_job_result r = bd_run_fragment_job(ctx, closure_target, &cur, slice.resume_pos,
+                                                          /*allow_parallel=*/1, nb_workers_eff, budget_solo);
+            bd_apply_job_result(&stack, &total, &r);
+            continue;
         }
-        struct bd_pending_slice slice = stack.items[--stack.count];
-        bd_level_load_file(&cur, slice.shard_path);
-        unlink(slice.shard_path);
-        rmdir(slice.shard_dir); /* echoue silencieusement si non vide : des tranches soeurs y restent */
-        start_pos = slice.resume_pos;
+
+        /* Mode POOL : ne consulte que le sommet de la pile (pas de recherche
+           plus profonde pour un fragment plus petit qui tiendrait mieux —
+           simplicite assumee, cf. spec § Risques connus). */
+        while (active < nb_workers_eff && stack.count > 0) {
+            double est = bd_pending_fragment_estimate_bytes(stack.items[stack.count - 1].shard_path);
+            if (bd_active_bytes_sum(jobs, active) + est > budget_pool_total) {
+                break;
+            }
+            struct bd_pending_slice slice = stack.items[--stack.count];
+            jobs[active].estimated_bytes = est;
+            jobs[active].pid = bd_fork_pool_job(ctx, closure_target, &slice, nb_workers_eff,
+                                                 budget_pool_total / (double)nb_workers_eff,
+                                                 jobs[active].result_path, sizeof jobs[active].result_path);
+            active++;
+        }
+
+        if (active == 0) {
+            fprintf(stderr,
+                    "border_ring_count_dp : --dp-max-ram-mo trop bas pour traiter ne serait-ce qu'un "
+                    "fragment en attente (meme reduit a sa part par worker) — arret\n");
+            exit(1);
+        }
+
+        int status;
+        pid_t done = waitpid(-1, &status, 0);
+        int slot = bd_find_slot(jobs, active, done);
+        if (slot < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "border_ring_count_dp : un job du pool a echoue (pid=%d, status=%d) — arret\n",
+                    (int)done, status);
+            for (int i = 0; i < active; i++) {
+                if (jobs[i].pid != done) {
+                    kill(jobs[i].pid, SIGTERM);
+                    waitpid(jobs[i].pid, NULL, 0);
+                }
+            }
+            exit(1);
+        }
+
+        struct bd_job_result r;
+        if (bd_job_result_read(&r, jobs[slot].result_path) != 0) {
+            fprintf(stderr, "border_ring_count_dp : resultat du job pid=%d illisible ('%s') — arret\n",
+                    (int)done, jobs[slot].result_path);
+            exit(1);
+        }
+        unlink(jobs[slot].result_path);
+        bd_apply_job_result(&stack, &total, &r);
+        bd_remove_slot(jobs, &active, slot);
     }
 
+    free(jobs);
     free(stack.items);
     return total;
 }

@@ -284,6 +284,34 @@ TEST border_ring_count_dp_matches_brute_force_when_sharded_to_disk(void)
     PASS();
 }
 
+/* Force plusieurs scissions consecutives avec un seuil de fragment minuscule
+   ET un nombre de workers assez petit pour que la pile depasse nb_workers
+   fragments en attente en cours de route — exerce reellement le mode POOL
+   (jobs forkes concurrents), pas seulement le mode SOLO deja verrouille par
+   border_ring_count_dp_matches_brute_force_when_sharded_to_disk. */
+TEST border_ring_count_dp_matches_brute_force_when_pool_mode_engages(void)
+{
+    struct array_part *all = brd_make_rotate_parts(2);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    long long brute = border_walk_count(map, all, NULL, NULL);
+
+    border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0);
+    border_ring_dp_set_shard_target_bytes_for_tests(32.0);
+    long long dp = border_ring_count_dp(map, all, 2);
+    border_ring_dp_set_disk_mode_min_bytes_for_tests(2.0 * 1024.0 * 1024.0 * 1024.0);
+    border_ring_dp_set_shard_target_bytes_for_tests(768.0 * 1024.0 * 1024.0);
+
+    ASSERT_EQ_FMT(12LL, brute, "%lld");
+    ASSERT_EQ_FMT(brute, dp, "%lld");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
 #if ETERN_PARTS == 16
 /* Contenu de data/pieces16.csv, embarqué pour rester indépendant du CWD
    (même convention que tests/core/test_solution16.c). Le vrai jeu 16 pièces
@@ -476,6 +504,7 @@ SUITE(border_ring_dp_suite)
     RUN_TEST(border_ring_count_dp_counts_class_multiplicity_correctly);
     RUN_TEST(border_ring_count_dp_matches_brute_force_when_forked);
     RUN_TEST(border_ring_count_dp_matches_brute_force_when_sharded_to_disk);
+    RUN_TEST(border_ring_count_dp_matches_brute_force_when_pool_mode_engages);
 #if ETERN_PARTS == 16
     RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_real_pieces16);
     RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_real_pieces16_sharded_to_disk);
