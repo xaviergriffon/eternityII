@@ -38,11 +38,14 @@
  * les uns des autres — chaque worker traite une plage disjointe et écrit son
  * niveau-suivant local dans un fichier temporaire, fusionné par le parent.
  *
- * Au-delà du budget RAM donné (`bd_split_threshold_bytes`, fixé par
+ * Au-delà du budget effectif du job qui le porte (`bd_solo_budget_bytes` en
+ * mode SOLO, `bd_pool_job_budget_bytes` en mode POOL — tous deux dérivés de
  * `border_ring_dp_set_max_ram_mo` — `--dp-max-ram-mo`, obligatoire dès que
  * `--dp` est utilisé), un niveau est scindé en K fragments sur disque
  * (partitionnement externe par hachage de la clé, `struct bd_shard_set`,
- * `bd_level_to_shards`, forké) — les K fragments sont TOUS repoussés vers
+ * `bd_level_to_shards`, forké seulement si plus d'un worker de compaction est
+ * disponible — un seul compacte directement, sans fork) — les K fragments
+ * sont TOUS repoussés vers
  * une pile LIFO partagée (`struct bd_pending_stack`), jamais l'un d'eux
  * repris immédiatement par le job qui vient de scinder. Un coordinateur
  * central (`bd_run_opening`) redistribue ensuite ces fragments entre deux
@@ -124,14 +127,16 @@ void border_ring_dp_set_spill_dir(const char *dir);
  * `--dp-max-ram-mo`), remplace les anciennes constantes calées à la main sur
  * une seule machine (2 Go de seuil de scission, 768 Mo de cible de fragment).
  *
- * Pilote plusieurs seuils : `bd_split_threshold_bytes` (déclenche une
- * scission dès qu'un niveau dépasse ce budget) et `bd_pool_budget_bytes`
- * (admission d'un fragment dans un slot du mode POOL, cf. le commentaire de
- * tête du fichier) prennent directement la valeur donnée ; `bd_shard_target_bytes`
+ * Pilote plusieurs seuils dérivés du même budget brut : `bd_pool_budget_bytes`
+ * (plafond d'admission POOL, somme visée sur tous les slots actifs, cf. le
+ * commentaire de tête du fichier) prend directement la valeur donnée ;
+ * `bd_pool_job_budget_bytes` (seuil de scission PAR JOB en mode POOL, jamais
+ * l'admission) en est dérivé — `budget / (nb_workers * 2)` ; `bd_shard_target_bytes`
  * (taille cible d'un fragment) en est dérivée — `budget / (nb_workers * 3)`,
  * avec un plancher bas — pour que `nb_workers` fragments simultanés pendant
  * une compaction restent, ensemble, sous ce même budget ; `bd_solo_budget_bytes`
- * (budget heuristique du mode SOLO) en est également dérivé — `budget / 4`.
+ * (seuil de scission heuristique du mode SOLO) en est également dérivé —
+ * `budget / 4`.
  *
  * @param mo         Budget en Mo. Doit rester valide pour tout l'appel à
  *                   `border_ring_count_dp` qui suit.

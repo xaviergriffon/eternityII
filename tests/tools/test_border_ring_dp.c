@@ -51,6 +51,19 @@ double border_ring_dp_get_solo_budget_bytes_for_tests(void);
    autres. Predicat pur de choix de mode (solo vs pool). */
 int bd_should_run_solo(int active, int stack_count, int nb_workers);
 
+/* Test-only, jamais déclarées dans border_ring_dp.h — même schéma que les
+   autres. Compteur de fork() reussis dans bd_fork_pool_job (incremente par
+   le PARENT, jamais l'enfant), seul moyen pour un test de prouver que le
+   mode POOL a REELLEMENT forke des jobs concurrents, et pas seulement que
+   le mode SOLO a produit, par coincidence, le meme total en traitant tout
+   sequentiellement — un test qui ne verifie que le total final ne peut pas
+   distinguer les deux (c'est exactement ce qui s'est produit une fois : un
+   renommage de variable pendant un refactor avait rendu le hook
+   border_ring_dp_set_disk_mode_min_bytes_for_tests sans effet, et le test
+   pool-mode passait quand meme, via SOLO). */
+void border_ring_dp_reset_pool_jobs_forked_for_tests(void);
+long border_ring_dp_get_pool_jobs_forked_for_tests(void);
+
 /* Struct de resultat d'un job, serialisable fichier. */
 struct bd_job_result {
     long long total;
@@ -120,6 +133,107 @@ static struct array_part *brd_make_rotate_parts(int nb_duplicates)
             right = brd_required_face(ring, ring_i, x + 1, y);
             bottom = brd_required_face(ring, ring_i, x, y + 1);
             left = brd_required_face(ring, ring_i, x - 1, y);
+        } else {
+            int base = id % 7;
+            top = base + 1;
+            left = base + 2;
+            bottom = base + 3;
+            right = base + 4;
+        }
+        fprintf(fp, "%d %d %d %d %d\n", id, top, left, bottom, right);
+    }
+    fclose(fp);
+
+    struct array_part *apart = read_parts(path);
+    unlink(path);
+    if (apart == NULL) return NULL;
+    struct array_part *rot = rotate_all_parts(apart);
+    free_array_part(apart);
+    return rot;
+}
+
+/* Comme brd_make_rotate_parts, mais ajoute UNE pièce-arête de plus, à un
+   nouvel id `BORDER_RING_LEN + nb_duplicates + 1` : même couleur d'ENTRÉE que
+   ring[1] (donc candidate valide à la MÊME position que le vrai chemin de
+   l'anneau) mais une couleur de SORTIE inédite (`fork_color`, jamais utilisée
+   ailleurs) — donc une CLASSE distincte, contrairement à `nb_duplicates` qui
+   ne fait que multiplier le poids d'une classe déjà existante.
+ *
+ * Nécessaire pour que `border_ring_count_dp_matches_brute_force_when_sharded_to_disk`
+ * et `..._when_pool_mode_engages` exercent réellement une scission : la
+ * topologie de `brd_make_rotate_parts` seule garantit qu'à CHAQUE position il
+ * n'existe qu'UNE SEULE classe candidate (chaque position de l'anneau a une
+ * couleur requise unique, cf. `brd_required_face`) — `cur.used` (le nombre
+ * d'états DISTINCTS occupant un niveau) y reste donc `== 1` du début à la fin
+ * de la DP, quel que soit le nombre de pièces réelles dupliquées au sein
+ * d'une classe (`nb_duplicates` ne fait que multiplier `ways`, jamais le
+ * nombre d'états). La garde anti-dégénérescence de `bd_run_fragment_job`
+ * (`cur.used > 1`, cf. Correctif 4) bloquerait alors TOUJOURS la scission —
+ * les tests de scission sur disque ne testeraient jamais réellement ce
+ * chemin, seuil de test ou pas (constaté en instrumentant temporairement le
+ * calcul : `cur.used` valait 1 à CHAQUE position sur `brd_make_rotate_parts`
+ * seul, y compris avec `nb_duplicates=2`). La pièce fourche crée une branche
+ * MORTE (sa couleur de sortie ne correspond à rien d'attendu par la suite,
+ * donc `border_walk_count` ne compte jamais de fermeture supplémentaire par
+ * cette voie — le total brut attendu reste inchangé) qui coexiste avec la
+ * branche réelle pendant EXACTEMENT une transition — assez pour que
+ * `cur.used` passe à 2 et déclenche une scission réelle avec les seuils de
+ * test quasi nuls (`border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0)`).
+ * `bd_pick_nb_shards` garantit `nb_shards >= nb_workers`, donc cette unique
+ * scission suffit à elle seule à remplir la pile d'au moins `nb_workers`
+ * fragments — assez pour que le mode POOL s'engage réellement (cf.
+ * `bd_should_run_solo`), pas seulement le mode SOLO qui traiterait tout
+ * séquentiellement. */
+static struct array_part *brd_make_rotate_parts_with_fork(int nb_duplicates)
+{
+    int8_t ring[BORDER_RING_LEN][2];
+    border_ring_order(ring);
+
+    char path[] = "/tmp/etii_brd_fork_XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) return NULL;
+    FILE *fp = fdopen(fd, "w");
+    if (fp == NULL) { close(fd); return NULL; }
+    fprintf(fp, "ntiles: %d\n", ETERN_PARTS);
+
+    int fork_id = BORDER_RING_LEN + nb_duplicates + 1;
+    /* > tout id d'arête réel (BRD_EDGE_BASE + BORDER_RING_LEN - 1 au plus) et
+       tient dans un int8_t (cf. struct part) pour n'importe quelle taille de
+       plateau compilée. */
+    int fork_color = BRD_EDGE_BASE + BORDER_RING_LEN + 20;
+
+    for (int id = 1; id <= ETERN_PARTS; id++) {
+        int top, right, bottom, left;
+        int ring_i = -1;
+        if (id <= BORDER_RING_LEN) {
+            ring_i = id - 1;
+        } else if (id <= BORDER_RING_LEN + nb_duplicates) {
+            ring_i = 1;
+        }
+        if (ring_i >= 0) {
+            int x = ring[ring_i][0];
+            int y = ring[ring_i][1];
+            top = brd_required_face(ring, ring_i, x, y - 1);
+            right = brd_required_face(ring, ring_i, x + 1, y);
+            bottom = brd_required_face(ring, ring_i, x, y + 1);
+            left = brd_required_face(ring, ring_i, x - 1, y);
+        } else if (id == fork_id) {
+            int x = ring[1][0];
+            int y = ring[1][1];
+            top = brd_required_face(ring, 1, x, y - 1);
+            right = brd_required_face(ring, 1, x + 1, y);
+            bottom = brd_required_face(ring, 1, x, y + 1);
+            left = brd_required_face(ring, 1, x - 1, y);
+            /* La face "sortante" de ring[1] (celle qui vaut BRD_EDGE_BASE+1,
+               cf. brd_required_face : `return BRD_EDGE_BASE + i` quand le
+               voisin est ring[next]) devient fork_color — seule face
+               modifiée, donc même forme (une seule face à 0, arête) et même
+               couleur d'entrée que ring[1]. */
+            int outgoing_marker = BRD_EDGE_BASE + 1;
+            if (top == outgoing_marker) top = fork_color;
+            else if (right == outgoing_marker) right = fork_color;
+            else if (bottom == outgoing_marker) bottom = fork_color;
+            else if (left == outgoing_marker) left = fork_color;
         } else {
             int base = id % 7;
             top = base + 1;
@@ -253,14 +367,17 @@ TEST border_ring_count_dp_matches_brute_force_when_forked(void)
 
 /* Force une scission dès le premier niveau (seuil abaissé à 1 octet) avec
    une cible de fragment minuscule (32 octets, quelques entrées à peine) sur
-   le fixture à multiplicité : tout niveau non vide dépasse ce seuil, donc
-   CHAQUE position (y compris celles des tranches reprises depuis la pile)
-   déclenche une nouvelle scission — verrouille tout le chemin externe par
-   hachage (éclatement -> compactage -> reprise -> nouvelle scission...) en
-   cascade sur plusieurs niveaux d'empilement, jamais exercé par les tests
-   précédents qui ne dépassent jamais bd_split_threshold_bytes par défaut
-   (2 Go). Sans l'accumulation lors du compactage (bd_level_add, pas un
-   écrasement), deux fragments bruts déposant la même clé se marcheraient
+   le fixture À FOURCHE (brd_make_rotate_parts_with_fork, cf. son commentaire
+   pour pourquoi brd_make_rotate_parts seul — multiplicité sans embranchement
+   réel — ne peut JAMAIS satisfaire la garde `cur.used > 1` et ne
+   testerait donc jamais réellement ce chemin, quel que soit le seuil) :
+   `cur.used` passe à 2 exactement à la position où la fourche diverge,
+   suffisant pour déclencher une scission réelle en K fragments (`bd_pick_nb_shards`
+   garantissant K >= nb_workers) — verrouille tout le chemin externe par
+   hachage (éclatement -> compactage -> reprise) sur des fragments réels,
+   pas seulement sur un niveau qui ne dépasse jamais la garde de
+   dégénérescence. Sans l'accumulation lors du compactage (bd_level_add, pas
+   un écrasement), deux fragments bruts déposant la même clé se marcheraient
    dessus au lieu de s'additionner — exactement le même risque que
    bd_transition_parallel, à la granularité du fragment plutôt que du niveau
    entier. Verrouille aussi la pile LIFO elle-même (bd_pending_stack) : si une
@@ -268,7 +385,7 @@ TEST border_ring_count_dp_matches_brute_force_when_forked(void)
    le total s'écarterait du brute-force. */
 TEST border_ring_count_dp_matches_brute_force_when_sharded_to_disk(void)
 {
-    struct array_part *all = brd_make_rotate_parts(2);
+    struct array_part *all = brd_make_rotate_parts_with_fork(2);
     ASSERT(all != NULL);
     map_big_array *map = prepare_map_part(all);
     ASSERT(map != NULL);
@@ -289,14 +406,24 @@ TEST border_ring_count_dp_matches_brute_force_when_sharded_to_disk(void)
     PASS();
 }
 
-/* Force plusieurs scissions consecutives avec un seuil de fragment minuscule
-   ET un nombre de workers assez petit pour que la pile depasse nb_workers
-   fragments en attente en cours de route — exerce reellement le mode POOL
-   (jobs forkes concurrents), pas seulement le mode SOLO deja verrouille par
-   border_ring_count_dp_matches_brute_force_when_sharded_to_disk. */
+/* Même fixture à fourche que border_ring_count_dp_matches_brute_force_when_sharded_to_disk
+   (cf. son commentaire pour pourquoi une fourche réelle, pas juste
+   `nb_duplicates`, est nécessaire pour franchir la garde `cur.used > 1`),
+   mais avec un `nb_workers` assez petit (2) pour que l'unique scission
+   qu'elle déclenche — K fragments, K >= nb_workers garanti par
+   `bd_pick_nb_shards` — dépasse `nb_workers` fragments en attente sur la
+   pile dès qu'elle survient, faisant basculer le coordinateur en mode POOL
+   (`bd_should_run_solo`), pas seulement le mode SOLO déjà verrouillé par
+   border_ring_count_dp_matches_brute_force_when_sharded_to_disk.
+   Le total seul ne suffirait PAS a verrouiller ca : il est identique que le
+   mode POOL ait reellement fork des jobs concurrents ou que le mode SOLO ait
+   tout traite sequentiellement en tombant, par coincidence, sur le meme
+   resultat — border_ring_dp_get_pool_jobs_forked_for_tests() est le seul
+   temoin qui distingue les deux (cf. son commentaire), donc verrouille ici
+   en plus du total. */
 TEST border_ring_count_dp_matches_brute_force_when_pool_mode_engages(void)
 {
-    struct array_part *all = brd_make_rotate_parts(2);
+    struct array_part *all = brd_make_rotate_parts_with_fork(2);
     ASSERT(all != NULL);
     map_big_array *map = prepare_map_part(all);
     ASSERT(map != NULL);
@@ -305,12 +432,18 @@ TEST border_ring_count_dp_matches_brute_force_when_pool_mode_engages(void)
 
     border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0);
     border_ring_dp_set_shard_target_bytes_for_tests(32.0);
+    border_ring_dp_reset_pool_jobs_forked_for_tests();
     long long dp = border_ring_count_dp(map, all, 2);
+    long long pool_jobs_forked = border_ring_dp_get_pool_jobs_forked_for_tests();
     border_ring_dp_set_disk_mode_min_bytes_for_tests(2.0 * 1024.0 * 1024.0 * 1024.0);
     border_ring_dp_set_shard_target_bytes_for_tests(768.0 * 1024.0 * 1024.0);
 
     ASSERT_EQ_FMT(12LL, brute, "%lld");
     ASSERT_EQ_FMT(brute, dp, "%lld");
+    /* >= 2 : nb_workers=2 ci-dessus, donc un vrai engagement du mode POOL
+       doit forker au moins 2 jobs concurrents pour remplir le pool — pas
+       seulement > 0, qui n'exclurait pas un pool degenere a 1 seul job. */
+    ASSERT(pool_jobs_forked >= 2);
 
     free_bigarray(map);
     free_array_part(all);

@@ -599,12 +599,17 @@ static void bd_transition_parallel(const struct bd_ctx *ctx, int want_corner,
 }
 
 /* ===========================================================================
- * Scission par pile LIFO : au-delà de bd_split_threshold_bytes, un niveau
- * n'est plus tenu tout entier en mémoire — il est éclaté en K fragments sur
- * disque (K = bd_pick_nb_shards), un seul repris IMMÉDIATEMENT (assez petit
- * pour tenir large en mémoire), les K-1 autres empilés (LIFO, cf.
- * bd_pending_stack) pour être repris plus tard, chacun depuis la position où
- * il a été mis de côté.
+ * Scission par pile LIFO : au-delà du budget effectif du job en cours
+ * (`bd_solo_budget_bytes` en mode SOLO, `bd_pool_job_budget_bytes` en mode
+ * POOL — chaque job lit le sien, cf. bd_run_fragment_job), un niveau n'est
+ * plus tenu tout entier en mémoire — il est éclaté en K fragments sur disque
+ * (K = bd_pick_nb_shards), TOUS empilés (LIFO, cf. bd_pending_stack) sur la
+ * pile partagée `bd_pending_stack` — aucun n'est gardé résident par le job
+ * qui vient de scinder, il repousse sa production entière et sort. Un
+ * coordinateur central (`bd_run_opening`) redistribue ensuite les fragments
+ * en attente entre les modes SOLO et POOL selon la profondeur de la pile
+ * (`bd_should_run_solo`), chacun repris depuis la position où il a été mis
+ * de côté.
  *
  * Remplace un mécanisme antérieur ("mode disque" permanent, deux vagues de
  * forks à CHAQUE position tant qu'un niveau restait trop gros) qui
@@ -630,8 +635,10 @@ static void bd_transition_parallel(const struct bd_ctx *ctx, int want_corner,
  * fait déjà pour les niveaux locaux de ses workers, seule la granularité
  * change (par fragment plutôt que par le niveau entier). La scission d'UN
  * niveau (bd_level_to_shards) route séquentiellement chaque entrée vers son
- * fragment brut puis compacte (bd_compact_dir, forké) — jamais deux niveaux
- * scindés simultanément, contrairement à l'ancien mécanisme.
+ * fragment brut puis compacte (bd_compact_dir, forké seulement si
+ * `nb_workers > 1` — un seul worker compacte directement, sans fork, cf. son
+ * commentaire) — jamais deux niveaux scindés simultanément, contrairement à
+ * l'ancien mécanisme.
  */
 struct bd_shard_set {
     /* Assez pour "/tmp/etii_bd_<pid>_s<n>" avec de la marge ; volontairement
@@ -649,20 +656,22 @@ struct bd_shard_set {
 /* Plus de constante calée à la main sur une machine précise : le budget vient
    de `--dp-max-ram-mo` (obligatoire dès que `--dp` est utilisé, cf.
    border_mass.c) via `border_ring_dp_set_max_ram_mo`, seule façon de faire
-   varier ces deux seuils en production — les setters "_for_tests" ci-dessous
-   restent réservés aux fixtures unitaires. bd_split_threshold_bytes déclenche
-   la scission dès qu'un niveau dépasse le budget donné. bd_shard_target_bytes
-   en dérive : une compaction peut faire tourner jusqu'à nb_workers fragments
-   à la fois, donc nb_workers x bd_shard_target_bytes doit rester sous ce
-   même budget — divisé par 3 pour laisser de la marge à l'OS et aux tampons
-   d'E/S (rapport mesuré sur la machine ayant motivé ce mécanisme : 768 Mo x
-   20 travailleurs = 15 Go sur un budget de 48 Go, soit /3,2). */
+   varier ces seuils en production — les setters "_for_tests" ci-dessous
+   restent réservés aux fixtures unitaires. bd_solo_budget_bytes/
+   bd_pool_job_budget_bytes (déclarés plus bas) déclenchent chacun la
+   scission d'un job dans leur mode respectif dès que le niveau qu'il porte
+   dépasse ce budget. bd_shard_target_bytes en dérive : une compaction peut
+   faire tourner jusqu'à nb_workers fragments à la fois, donc nb_workers x
+   bd_shard_target_bytes doit rester sous ce même budget — divisé par 3 pour
+   laisser de la marge à l'OS et aux tampons d'E/S (rapport mesuré sur la
+   machine ayant motivé ce mécanisme : 768 Mo x 20 travailleurs = 15 Go sur
+   un budget de 48 Go, soit /3,2). */
 static double bd_shard_target_bytes = 768.0 * 1024.0 * 1024.0;
-static double bd_split_threshold_bytes = 2.0 * 1024.0 * 1024.0 * 1024.0;
 
 /* Budget POOL (somme visee sur tous les slots actifs, cf. bd_run_opening) —
-   distinct de bd_split_threshold_bytes : ce dernier est aussi manipule par
-   les hooks test-only qui forcent des scissions a taille quasi nulle
+   distinct des seuils de scission par job (bd_solo_budget_bytes/
+   bd_pool_job_budget_bytes) : ces derniers sont aussi manipules par les
+   hooks test-only qui forcent des scissions a taille quasi nulle
    (border_ring_dp_set_disk_mode_min_bytes_for_tests), un usage sans rapport
    avec le budget RAM reel du pool. Les decoupler evite qu'un test qui force
    des scissions minuscules n'ecrase aussi, par effet de bord, le budget
@@ -679,9 +688,16 @@ static double bd_pool_budget_bytes = 2.0 * 1024.0 * 1024.0 * 1024.0;
    Déclarée ici (et non près de bd_effective_solo_budget_bytes, son seul
    lecteur, plus bas dans ce fichier) pour rester visible depuis
    border_ring_dp_set_max_ram_mo, son unique point d'écriture — même
-   contrainte d'ordre que bd_split_threshold_bytes/bd_pool_budget_bytes
-   ci-dessus. */
+   contrainte d'ordre que bd_pool_budget_bytes ci-dessus. */
 static double bd_solo_budget_bytes = 2.0 * 1024.0 * 1024.0 * 1024.0 / 4.0;
+
+/* Seuil de scission PAR JOB en mode POOL (jamais l'admission — cf.
+   bd_pool_budget_bytes ci-dessus, qui reste separee) — marge heuristique
+   /2 pour la co-residence ancien+nouveau niveau pendant une transition
+   (un job POOL est toujours sequentiel, jamais bd_transition_parallel,
+   donc pas de marge supplementaire pour la non-deduplication entre
+   workers comme bd_solo_budget_bytes en a besoin — /2 suffit ici, pas /4). */
+static double bd_pool_job_budget_bytes = 2.0 * 1024.0 * 1024.0 * 1024.0 / 2.0;
 
 /* Plancher bas pour bd_shard_target_bytes : évite qu'un budget RAM minuscule
    combiné à beaucoup de workers ne produise une cible de fragment
@@ -694,7 +710,8 @@ static double bd_solo_budget_bytes = 2.0 * 1024.0 * 1024.0 * 1024.0 / 4.0;
    reprises en cascade) sans construire un niveau de plusieurs Go. */
 void border_ring_dp_set_disk_mode_min_bytes_for_tests(double n)
 {
-    bd_split_threshold_bytes = n;
+    bd_solo_budget_bytes = n;
+    bd_pool_job_budget_bytes = n;
 }
 
 void border_ring_dp_set_shard_target_bytes_for_tests(double n)
@@ -705,7 +722,6 @@ void border_ring_dp_set_shard_target_bytes_for_tests(double n)
 void border_ring_dp_set_max_ram_mo(long mo, int nb_workers)
 {
     double ram_bytes = (double)mo * 1024.0 * 1024.0;
-    bd_split_threshold_bytes = ram_bytes;
     bd_pool_budget_bytes = ram_bytes;
 
     int workers = nb_workers < 1 ? 1 : nb_workers;
@@ -713,6 +729,7 @@ void border_ring_dp_set_max_ram_mo(long mo, int nb_workers)
     bd_shard_target_bytes = target < BD_SHARD_TARGET_BYTES_FLOOR ? BD_SHARD_TARGET_BYTES_FLOOR : target;
 
     bd_solo_budget_bytes = ram_bytes / 4.0;
+    bd_pool_job_budget_bytes = (ram_bytes / (double)workers) / 2.0;
 }
 
 /* Borne haute généreuse : au-delà, on dégrade gracieusement (fragments plus
@@ -803,16 +820,95 @@ static void bd_raw_merge_file(struct bd_level *level, const char *path, int key_
     fclose(fp);
 }
 
+/* Compacte la plage [start, end) de fragments bruts destination sous `dir`
+   en fragments canoniques `shard_<d>.bin`, et ecrit le resume (compte total,
+   octets totaux, plus gros fragment) dans `summary_path` — corps commun aux
+   deux chemins de bd_compact_dir (forke quand workers > 1, appele
+   directement sinon, cf. son commentaire). */
+static void bd_compact_range(const char *dir, size_t start, size_t end, int key_len, const char *summary_path)
+{
+    size_t used_sum = 0;
+    double bytes_sum = 0.0, max_bytes = 0.0;
+    for (size_t d = start; d < end; d++) {
+        struct bd_level level;
+        bd_level_init(&level, key_len, 1 << 4);
+        char path[512];
+        snprintf(path, sizeof path, "%s/part_%d.bin", dir, (int)d);
+        bd_raw_merge_file(&level, path, key_len);
+        unlink(path);
+        char out_path[512];
+        snprintf(out_path, sizeof out_path, "%s/shard_%d.bin", dir, (int)d);
+        bd_level_write_file(&level, out_path);
+        used_sum += level.used;
+        double bytes = bd_level_bytes(&level);
+        bytes_sum += bytes;
+        if (bytes > max_bytes) {
+            max_bytes = bytes;
+        }
+        bd_level_free(&level);
+    }
+    FILE *sf = fopen(summary_path, "wb");
+    if (sf == NULL) {
+        fprintf(stderr, "border_ring_count_dp : ecriture de '%s' impossible — arret\n", summary_path);
+        exit(1);
+    }
+    bd_write_or_die(sf, &used_sum, sizeof used_sum, summary_path);
+    bd_write_or_die(sf, &bytes_sum, sizeof bytes_sum, summary_path);
+    bd_write_or_die(sf, &max_bytes, sizeof max_bytes, summary_path);
+    bd_close_or_die(sf, summary_path);
+}
+
+/* Lit un fichier de resume ecrit par bd_compact_range et l'accumule dans
+   les totaux `out_*` — factorise entre le chemin monoprocessus et la boucle
+   de fusion des resumes forkes. */
+static void bd_compact_summary_accumulate(const char *summary_path, size_t *out_total_used,
+                                           double *out_total_bytes, double *out_max_shard_bytes)
+{
+    FILE *sf = fopen(summary_path, "rb");
+    size_t used_sum = 0;
+    double bytes_sum = 0.0, max_bytes = 0.0;
+    if (sf == NULL || fread(&used_sum, sizeof used_sum, 1, sf) != 1 ||
+        fread(&bytes_sum, sizeof bytes_sum, 1, sf) != 1 || fread(&max_bytes, sizeof max_bytes, 1, sf) != 1) {
+        fprintf(stderr, "border_ring_count_dp : resume '%s' illisible — arret\n", summary_path);
+        exit(1);
+    }
+    fclose(sf);
+    unlink(summary_path);
+    *out_total_used += used_sum;
+    *out_total_bytes += bytes_sum;
+    if (max_bytes > *out_max_shard_bytes) {
+        *out_max_shard_bytes = max_bytes;
+    }
+}
+
 /* Fusionne les fragments bruts déposés sous `dir` (un par fragment
    destination, cf. bd_level_to_shards) en fragments canoniques `shard_<d>.bin`,
    un worker par plage contiguë de fragments destination — jamais plus d'UN
-   fragment en mémoire à la fois par worker. */
+   fragment en mémoire à la fois par worker. `workers == 1` ne forke PAS :
+   un job du mode POOL est strictement monoprocessus (cf. spec § Pourquoi
+   fork), et cette fonction est aussi appelee par un job POOL qui doit se
+   scinder a nouveau (bd_run_fragment_job, allow_parallel=0 => compact_workers
+   force a 1) — la forcer a forker malgre tout y creerait un petit-fils
+   nested, contraire a l'invariant "jamais de fork imbrique en mode POOL"
+   meme si, en pratique, un seul enfant a la fois. */
 static void bd_compact_dir(const char *dir, int nb_shards, int key_len, int nb_workers, size_t *out_total_used,
                             double *out_total_bytes, double *out_max_shard_bytes)
 {
     int workers = nb_workers < nb_shards ? nb_workers : nb_shards;
     if (workers < 1) {
         workers = 1;
+    }
+
+    *out_total_used = 0;
+    *out_total_bytes = 0.0;
+    *out_max_shard_bytes = 0.0;
+
+    if (workers == 1) {
+        char summary_path[512];
+        snprintf(summary_path, sizeof summary_path, "%s/summary_0.bin", dir);
+        bd_compact_range(dir, 0, (size_t)nb_shards, key_len, summary_path);
+        bd_compact_summary_accumulate(summary_path, out_total_used, out_total_bytes, out_max_shard_bytes);
+        return;
     }
 
     fflush(stdout);
@@ -837,35 +933,7 @@ static void bd_compact_dir(const char *dir, int nb_shards, int key_len, int nb_w
             if (end > (size_t)nb_shards) {
                 end = (size_t)nb_shards;
             }
-            size_t used_sum = 0;
-            double bytes_sum = 0.0, max_bytes = 0.0;
-            for (size_t d = start; d < end; d++) {
-                struct bd_level level;
-                bd_level_init(&level, key_len, 1 << 4);
-                char path[512];
-                snprintf(path, sizeof path, "%s/part_%d.bin", dir, (int)d);
-                bd_raw_merge_file(&level, path, key_len);
-                unlink(path);
-                char out_path[512];
-                snprintf(out_path, sizeof out_path, "%s/shard_%d.bin", dir, (int)d);
-                bd_level_write_file(&level, out_path);
-                used_sum += level.used;
-                double bytes = bd_level_bytes(&level);
-                bytes_sum += bytes;
-                if (bytes > max_bytes) {
-                    max_bytes = bytes;
-                }
-                bd_level_free(&level);
-            }
-            FILE *sf = fopen(summary_paths[w], "wb");
-            if (sf == NULL) {
-                fprintf(stderr, "border_ring_count_dp : ecriture de '%s' impossible — arret\n", summary_paths[w]);
-                exit(1);
-            }
-            bd_write_or_die(sf, &used_sum, sizeof used_sum, summary_paths[w]);
-            bd_write_or_die(sf, &bytes_sum, sizeof bytes_sum, summary_paths[w]);
-            bd_write_or_die(sf, &max_bytes, sizeof max_bytes, summary_paths[w]);
-            bd_close_or_die(sf, summary_paths[w]);
+            bd_compact_range(dir, start, end, key_len, summary_paths[w]);
             exit(0);
         }
         pids[w] = pid;
@@ -890,34 +958,19 @@ static void bd_compact_dir(const char *dir, int nb_shards, int key_len, int nb_w
         exit(1);
     }
 
-    *out_total_used = 0;
-    *out_total_bytes = 0.0;
-    *out_max_shard_bytes = 0.0;
     for (int w = 0; w < workers; w++) {
-        FILE *sf = fopen(summary_paths[w], "rb");
-        size_t used_sum = 0;
-        double bytes_sum = 0.0, max_bytes = 0.0;
-        if (sf == NULL || fread(&used_sum, sizeof used_sum, 1, sf) != 1 ||
-            fread(&bytes_sum, sizeof bytes_sum, 1, sf) != 1 || fread(&max_bytes, sizeof max_bytes, 1, sf) != 1) {
-            fprintf(stderr, "border_ring_count_dp : resume '%s' illisible — arret\n", summary_paths[w]);
-            exit(1);
-        }
-        fclose(sf);
-        unlink(summary_paths[w]);
-        *out_total_used += used_sum;
-        *out_total_bytes += bytes_sum;
-        if (max_bytes > *out_max_shard_bytes) {
-            *out_max_shard_bytes = max_bytes;
-        }
+        bd_compact_summary_accumulate(summary_paths[w], out_total_used, out_total_bytes, out_max_shard_bytes);
     }
     free(summary_paths);
 }
 
 /* Scinde un niveau encore en mémoire en `nb_shards` fragments sur disque, une
-   fois bd_split_threshold_bytes franchi (cf. bd_run_opening) — simple
-   répartition par hachage de clé (la clé et la valeur ne changent pas,
-   contrairement à une transition), en un seul passage séquentiel sur les
-   entrées de `level` avant compactage (bd_compact_dir, forké). */
+   fois le budget effectif du job (`bd_solo_budget_bytes` ou
+   `bd_pool_job_budget_bytes` selon le mode, cf. bd_run_fragment_job) franchi
+   — simple répartition par hachage de clé (la clé et la valeur ne changent
+   pas, contrairement à une transition), en un seul passage séquentiel sur
+   les entrées de `level` avant compactage (bd_compact_dir, forké seulement
+   si `nb_workers > 1`). */
 static void bd_level_to_shards(const struct bd_level *level, const char *dir, int nb_shards, int nb_workers,
                                 struct bd_shard_set *out)
 {
@@ -1055,6 +1108,11 @@ static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t
     memset(&result, 0, sizeof result);
 
     struct bd_level cur = *level;
+    /* Rend le contrat "prend possession de *level" auto-applicable : plus
+       aucun appelant ne peut se retrouver avec des pointeurs pendants dans
+       sa propre copie une fois cette fonction rentrée (elle libere `cur`,
+       l'alias interne, dans tous les cas de sortie). */
+    memset(level, 0, sizeof *level);
     int pos = start_pos;
 
     while (pos < BORDER_RING_LEN - 1) {
@@ -1074,8 +1132,16 @@ static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t
         fprintf(stderr, "border_ring_count_dp : position %d/%d, %zu etats (%.2f Go)\n", pos,
                 BORDER_RING_LEN - 1, cur.used, bytes / (1024.0 * 1024.0 * 1024.0));
 
-        /* cur.used > 1 : cf. la garde documentee dans border_ring_dp.h contre
-           une scission degeneree d'un niveau a 0 ou 1 entree. */
+        /* `cur.used > 1` : un niveau à 0 ou 1 entrée ne peut physiquement
+           pas être scindé en plusieurs fragments utiles — le scinder quand
+           même produirait des fragments vides qui, une fois rechargés,
+           rapportent la même capacité plancher (~200 octets, cf.
+           bd_level_init) donc "dépassent" tout seuil assez bas, ce qui
+           redéclencherait une scission indéfiniment (observé : boucle sans
+           fin sur un seuil de test à 1 octet). Sans garde, ce n'est pas
+           qu'un cas de test dégénéré : RIEN n'empêcherait la même
+           situation en production si un budget venait à être fixé
+           au-dessous de cette capacité plancher. */
         if (bytes >= effective_budget_bytes && cur.used > 1) {
             /* `pos` seul ne suffit pas a nommer le repertoire : la meme
                position d'anneau peut etre re-scindee plusieurs fois au cours
@@ -1168,23 +1234,49 @@ static void bd_remove_slot(struct bd_active_job *jobs, int *active, int slot)
 
 /* Lit l'en-tete (12 octets) d'un fragment DEJA sur disque pour estimer sa
    taille de rechargement, sans jamais le charger — cf. bd_estimate_reload_bytes
-   (Tache 1). */
+   (Tache 1). Retourne -1.0 (jamais une taille de fragment valide, toujours
+   >= 0) sur echec au lieu d'appeler exit(1) directement : cette fonction est
+   appelee depuis la boucle d'admission de bd_run_opening pendant que des
+   freres peuvent deja tourner (active > 0) — sortir d'ici les laisserait
+   orphelins, contrairement aux autres echecs de cette boucle qui passent
+   tous par bd_abort_active_jobs avant d'arreter le programme. */
 static double bd_pending_fragment_estimate_bytes(const char *shard_path)
 {
     FILE *fp = fopen(shard_path, "rb");
     if (fp == NULL) {
         fprintf(stderr, "border_ring_count_dp : lecture de '%s' impossible pour estimation — arret\n",
                 shard_path);
-        exit(1);
+        return -1.0;
     }
     int32_t key_len = 0;
     uint64_t count = 0;
     if (fread(&key_len, sizeof key_len, 1, fp) != 1 || fread(&count, sizeof count, 1, fp) != 1) {
         fprintf(stderr, "border_ring_count_dp : en-tete de '%s' illisible — arret\n", shard_path);
-        exit(1);
+        fclose(fp);
+        return -1.0;
     }
     fclose(fp);
     return bd_estimate_reload_bytes(key_len, count);
+}
+
+/* Compteur test-only, incremente par le PARENT juste apres un fork() du pool
+   REUSSI (jamais par l'enfant : pas de memoire partagee entre process, donc
+   rien a synchroniser) — seul moyen pour un test de distinguer "le mode POOL
+   a reellement forke des jobs concurrents" de "le mode SOLO a tout traite
+   sequentiellement en produisant, par coincidence, le meme total" : un test
+   qui ne verifie que le total final ne peut pas faire cette distinction, cf.
+   le commentaire de border_ring_count_dp_matches_brute_force_when_pool_mode_engages
+   dans test_border_ring_dp.c. */
+static long bd_pool_jobs_forked_for_tests_counter = 0;
+
+void border_ring_dp_reset_pool_jobs_forked_for_tests(void)
+{
+    bd_pool_jobs_forked_for_tests_counter = 0;
+}
+
+long border_ring_dp_get_pool_jobs_forked_for_tests(void)
+{
+    return bd_pool_jobs_forked_for_tests_counter;
 }
 
 /* Fork un job strictement monoprocessus (allow_parallel=0, cf. spec) pour le
@@ -1205,6 +1297,9 @@ static pid_t bd_fork_pool_job(const struct bd_ctx *ctx, int8_t closure_target,
     pid_t pid = fork();
     if (pid < 0) {
         return -1;   /* le caller (bd_run_opening) a jobs[]/active en portee pour nettoyer les freres */
+    }
+    if (pid > 0) {
+        bd_pool_jobs_forked_for_tests_counter++;
     }
     if (pid == 0) {
         struct bd_level cur;
@@ -1239,13 +1334,18 @@ static void bd_abort_active_jobs(const struct bd_active_job *jobs, int active, i
     }
 }
 
-/* bd_solo_budget_bytes est déclarée plus haut dans ce fichier, à côté de
-   bd_split_threshold_bytes/bd_pool_budget_bytes, pour rester visible depuis
-   border_ring_dp_set_max_ram_mo — voir le commentaire à sa déclaration pour
-   le détail de la marge heuristique appliquée. */
+/* bd_solo_budget_bytes/bd_pool_job_budget_bytes sont déclarées plus haut dans
+   ce fichier, à côté de bd_pool_budget_bytes, pour rester visibles depuis
+   border_ring_dp_set_max_ram_mo — voir les commentaires à leur déclaration
+   pour le détail des marges heuristiques appliquées. */
 static double bd_effective_solo_budget_bytes(void)
 {
     return bd_solo_budget_bytes;
+}
+
+static double bd_effective_pool_job_budget_bytes(void)
+{
+    return bd_pool_job_budget_bytes;
 }
 
 double border_ring_dp_get_solo_budget_bytes_for_tests(void)
@@ -1253,12 +1353,19 @@ double border_ring_dp_get_solo_budget_bytes_for_tests(void)
     return bd_solo_budget_bytes;
 }
 
+double border_ring_dp_get_pool_job_budget_bytes_for_tests(void)
+{
+    return bd_pool_job_budget_bytes;
+}
+
 /* ===========================================================================
  * Orchestration : fait avancer un niveau, position par position, jusqu'à la
  * fermeture de l'anneau — TOUJOURS en mémoire (jamais de représentation
  * fragmentée "vivante" à travers plusieurs positions, contrairement à
- * l'ancien mécanisme). Quand un niveau dépasse bd_split_threshold_bytes, il
- * est scindé en K fragments (bd_level_to_shards) et TOUS empilés sur `stack`
+ * l'ancien mécanisme). Quand un niveau dépasse le budget effectif du job qui
+ * le porte (`bd_solo_budget_bytes` ou `bd_pool_job_budget_bytes` selon le
+ * mode, cf. bd_run_fragment_job), il est scindé en K fragments
+ * (bd_level_to_shards) et TOUS empilés sur `stack`
  * (LIFO — cf. son commentaire, et bd_apply_job_result) : un job ne garde
  * jamais de fragment pour lui-même après une scission (cf. bd_run_fragment_job)
  * — le sommet de pile est repris au tour suivant, les autres restent en
@@ -1300,6 +1407,11 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
     bd_apply_job_result(&stack, &total, &r0);
 
     struct bd_active_job *jobs = malloc((size_t)nb_workers_eff * sizeof *jobs);
+    if (jobs == NULL) {
+        fprintf(stderr, "border_ring_count_dp : allocation de %d emplacements de jobs impossible — arret\n",
+                nb_workers_eff);
+        exit(1);
+    }
     int active = 0;
 
     while (stack.count > 0 || active > 0) {
@@ -1320,12 +1432,18 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
            simplicite assumee, cf. spec § Risques connus). */
         while (active < nb_workers_eff && stack.count > 0) {
             double est = bd_pending_fragment_estimate_bytes(stack.items[stack.count - 1].shard_path);
+            if (est < 0.0) {
+                fprintf(stderr,
+                        "border_ring_count_dp : estimation d'un fragment en attente impossible — arret\n");
+                bd_abort_active_jobs(jobs, active, -1);
+                exit(1);
+            }
             if (bd_active_bytes_sum(jobs, active) + est > budget_pool_total) {
                 break;
             }
             struct bd_pending_slice slice = stack.items[--stack.count];
             pid_t pid = bd_fork_pool_job(ctx, closure_target, &slice, nb_workers_eff,
-                                          budget_pool_total / (double)nb_workers_eff,
+                                          bd_effective_pool_job_budget_bytes(),
                                           jobs[active].result_path, sizeof jobs[active].result_path);
             if (pid < 0) {
                 fprintf(stderr, "border_ring_count_dp : fork() a echoue pour un job du pool — arret\n");
@@ -1344,18 +1462,13 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
             exit(1);
         }
 
-        int status;
+        int status = 0; /* waitpid peut echouer (ex: EINTR) sans jamais l'ecrire */
         pid_t done = waitpid(-1, &status, 0);
         int slot = bd_find_slot(jobs, active, done);
         if (slot < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
             fprintf(stderr, "border_ring_count_dp : un job du pool a echoue (pid=%d, status=%d) — arret\n",
                     (int)done, status);
-            for (int i = 0; i < active; i++) {
-                if (jobs[i].pid != done) {
-                    kill(jobs[i].pid, SIGTERM);
-                    waitpid(jobs[i].pid, NULL, 0);
-                }
-            }
+            bd_abort_active_jobs(jobs, active, slot);
             exit(1);
         }
 

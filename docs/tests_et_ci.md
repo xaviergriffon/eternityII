@@ -386,14 +386,23 @@ sur une plage de plusieurs dizaines de positions consécutives toutes trop
 grosses, ça multipliait le volume d'E/S par le nombre de positions
 concernées (mesuré : ~777 Go d'E/S cumulées pour une masse de pointe de
 111 Go étalée sur ~7 positions, sur la machine cible). `--dp-max-ram-mo`
-pilote plusieurs seuils dérivés (`border_ring_dp_set_max_ram_mo`) :
-`bd_split_threshold_bytes` (déclenche une scission dès qu'un niveau dépasse
-ce budget) prend directement la valeur donnée ; `bd_shard_target_bytes`
-(taille cible d'un fragment) en est dérivée — `budget / (nb_workers × 3)`,
-pour que `nb_workers` fragments simultanés pendant une compaction restent,
-ensemble, sous ce même budget. Deux seuils supplémentaires,
-`bd_pool_budget_bytes` et `bd_solo_budget_bytes`, gouvernent la reprise des
-fragments mis de côté — détaillés ci-dessous.
+pilote plusieurs seuils dérivés (`border_ring_dp_set_max_ram_mo`), tous du
+même budget brut mais PAS de la même valeur en octets : `bd_pool_budget_bytes`
+(plafond d'admission du mode POOL, somme visée sur tous les slots actifs)
+prend directement la valeur donnée ; les scissions elles-mêmes sont
+déclenchées PAR JOB, jamais par ce plafond d'admission, par deux seuils
+distincts selon le mode — `bd_solo_budget_bytes` (mode SOLO, = budget / 4) et
+`bd_pool_job_budget_bytes` (mode POOL, = budget / (nb_workers × 2)) ;
+`bd_shard_target_bytes` (taille cible d'un fragment) est dérivée du budget
+brut — `budget / (nb_workers × 3)` — pour que `nb_workers` fragments
+simultanés pendant une compaction restent, ensemble, sous ce même budget.
+Les deux seuils de scission par job sont détaillés ci-dessous. **Note pour
+qui règle `--dp-max-ram-mo` en production** : à budget brut égal, le seuil de
+scission effectif par job est maintenant plus bas qu'avant ce mécanisme
+(`/4` en SOLO, `/(nb_workers × 2)` en POOL, au lieu d'une seule valeur brute)
+— une conséquence voulue des marges de co-résidence ci-dessous, pas une
+régression, mais qui vaut la peine d'être su avant d'augmenter la valeur du
+flag pour compenser.
 
 Quand un niveau dépasse le seuil, il est scindé en K fragments sur disque
 (`bd_level_to_shards`, partitionnement externe par hachage FNV-1a de la
@@ -426,8 +435,8 @@ réévalué.
   tables locales de `bd_transition_parallel` (chaque worker produit sa
   propre table de niveau-suivant avant fusion par le parent, donc une même
   clé peut exister en double dans plusieurs tables simultanément) — cf. le
-  commentaire à la déclaration de `bd_solo_budget_bytes`
-  (`tests/tools/border_ring_dp.c:672-678`).
+  commentaire à la déclaration de `bd_solo_budget_bytes` dans
+  `tests/tools/border_ring_dp.c`.
 - **Mode POOL** (dès que la pile contient au moins `nb_workers` fragments en
   attente) : le coordinateur forke jusqu'à `nb_workers` jobs concurrents, un
   par fragment (`bd_fork_pool_job`), chacun STRICTEMENT monoprocessus
@@ -438,26 +447,34 @@ réévalué.
   `bd_job_result_read`) puis sort — il ne garde JAMAIS un fragment pour
   lui-même après une nouvelle scission, tous les fragments qu'il produit
   sont repoussés sur la pile partagée pour que le coordinateur les
-  redistribue (`bd_apply_job_result`). L'admission dans un slot du pool est
-  gardée par une estimation RAM **EXACTE** : `bd_estimate_reload_bytes`
-  relit uniquement l'en-tête sérialisé (12 octets) d'un fragment — sans le
-  charger — pour calculer précisément ce que `bd_level_load_file`
-  allouerait à sa reprise, comparé à un budget dédié `bd_pool_budget_bytes`
-  (une somme visée sur tous les slots actifs). Si le coordinateur ne peut
-  admettre ne serait-ce qu'un seul fragment en attente, il échoue bruyamment
-  (`exit(1)`) plutôt que de rester bloqué.
+  redistribue (`bd_apply_job_result`). Son budget de scission (passé à
+  `bd_run_fragment_job` comme `effective_budget_bytes`) est
+  `bd_effective_pool_job_budget_bytes()`, c'est-à-dire `bd_pool_job_budget_bytes`
+  — marge heuristique `/2` (co-résidence ancien+nouveau niveau ; pas de
+  seconde `/2` comme en SOLO puisqu'un job POOL n'appelle jamais
+  `bd_transition_parallel`) — une variable **distincte** de l'admission dans
+  un slot du pool, gardée par une estimation RAM **EXACTE** :
+  `bd_estimate_reload_bytes` relit uniquement l'en-tête sérialisé (12 octets)
+  d'un fragment — sans le charger — pour calculer précisément ce que
+  `bd_level_load_file` allouerait à sa reprise, comparé au plafond
+  `bd_pool_budget_bytes` (une somme visée sur tous les slots actifs). Si le
+  coordinateur ne peut admettre ne serait-ce qu'un seul fragment en attente,
+  il échoue bruyamment (`exit(1)`) plutôt que de rester bloqué.
 
-**`bd_split_threshold_bytes` et `bd_pool_budget_bytes` sont deux variables
-distinctes**, bien que toutes deux dérivées du même `--dp-max-ram-mo` en
-production (`border_ring_dp_set_max_ram_mo` leur donne la même valeur en
-octets). Il fallait les découpler : les hooks test-only existants
-(`border_ring_dp_set_disk_mode_min_bytes_for_tests`) poussent délibérément
-`bd_split_threshold_bytes` à une valeur quasi nulle pour forcer des
-scissions sur des fixtures minuscules — réutiliser cette même variable comme
-budget d'admission du pool aurait rendu même un fragment de ~200 octets
-inadmissible en test. En production, les deux variables portent toujours la
-même valeur réelle en méga-octets — invisible pour un utilisateur final,
-mais un détail d'implémentation qui compte pour quiconque relit le code.
+**`bd_pool_budget_bytes` (admission POOL) et les seuils de scission par job
+(`bd_solo_budget_bytes`, `bd_pool_job_budget_bytes`) sont des variables
+distinctes**, bien que toutes dérivées du même `--dp-max-ram-mo` en
+production. Il fallait les découpler : le hook test-only
+`border_ring_dp_set_disk_mode_min_bytes_for_tests` pousse délibérément
+`bd_solo_budget_bytes` ET `bd_pool_job_budget_bytes` à une valeur quasi
+nulle pour forcer des scissions sur des fixtures minuscules — réutiliser
+`bd_pool_budget_bytes` (l'admission) à cette fin aurait rendu même un
+fragment de ~200 octets inadmissible en test, empêchant tout job POOL de
+démarrer. En production, `bd_pool_budget_bytes` porte la valeur brute
+donnée par `--dp-max-ram-mo`, alors que les deux seuils de scission par job
+en portent chacun une fraction (`/4` et `/(nb_workers × 2)` respectivement)
+— un détail d'implémentation qui compte pour quiconque relit le code, ou
+règle le flag en production (cf. la note plus haut).
 
 En cas d'échec d'un job du pool (code de sortie non nul, fichier résultat
 illisible, ou `fork()` lui-même en échec en cours d'admission d'un lot), le
@@ -486,14 +503,30 @@ même situation en production avec un budget mal choisi).
 Verrouillé par des tests dédiés dans `test_border_ring_dp.c`
 (`border_ring_count_dp_matches_brute_force_when_sharded_to_disk` et son
 pendant `..._on_real_pieces16_sharded_to_disk`, gated `#if ETERN_PARTS == 16`)
-qui abaissent `bd_split_threshold_bytes`/`bd_shard_target_bytes` (hooks
-test-only `border_ring_dp_set_disk_mode_min_bytes_for_tests`/
+qui abaissent `bd_solo_budget_bytes`/`bd_pool_job_budget_bytes`/
+`bd_shard_target_bytes` (hooks test-only
+`border_ring_dp_set_disk_mode_min_bytes_for_tests` — qui pousse les DEUX
+seuils de scission par job à la fois, cf. plus haut —
 `_set_shard_target_bytes_for_tests`, même schéma que
 `border_ring_dp_set_fork_min_states_for_tests`) au point où CHAQUE position
 déclenche une nouvelle scission — y compris pour les tranches reprises
 depuis la pile — exerçant plusieurs niveaux d'empilement en cascade, jamais
 atteints par les autres tests (aucun de leurs fixtures n'approche le budget
 par défaut).
+
+`border_ring_count_dp_matches_brute_force_when_pool_mode_engages` va plus
+loin : un total final identique ne suffit pas à distinguer « le mode POOL a
+réellement forké des jobs concurrents » de « le mode SOLO a tout traité
+séquentiellement et produit, par coïncidence, le même total » — c'est
+précisément ce qui s'est produit une fois en pratique (une variable de seuil
+renommée pendant un refactor avait rendu le hook `_set_disk_mode_min_bytes_for_tests`
+sans effet, si bien que ce test passait via SOLO sans jamais engager POOL).
+Le test compte donc, en plus du total, un compteur test-only
+(`border_ring_dp_reset_pool_jobs_forked_for_tests`/
+`_get_pool_jobs_forked_for_tests`) incrémenté par le PARENT juste après
+chaque `fork()` réussi dans `bd_fork_pool_job`, et vérifie qu'il est bien
+`> 0` après l'appel — la seule façon de faire échouer ce test si POOL
+dégradait de nouveau silencieusement en SOLO.
 
 **Échec réel observé sur la machine visée, corrigé** : le mode disque a
 d'abord échoué à la position 21/59 (17 fragments à 13,92 Go à la position 20)
