@@ -976,15 +976,111 @@ int bd_should_run_solo(int active, int stack_count, int nb_workers)
     return active == 0 && stack_count < nb_workers;
 }
 
+/* Resultat d'un job : soit il a ferme l'anneau (closed=1, total valide),
+   soit il a du se scinder (closed=0, K fragments deposes dans shard_dir,
+   tous a reprendre depuis resume_pos) — un job ne garde JAMAIS un fragment
+   pour lui-meme apres une scission, cf. spec § Comportement uniforme d'un
+   job. */
+struct bd_job_result {
+    long long total;
+    int closed;
+    char shard_dir[128];
+    int nb_shards;
+    int resume_pos;
+};
+
+/* Coeur d'un job, commun aux modes SOLO et POOL — prend possession de
+   `*level` (le libere avant de retourner, dans tous les cas). `allow_parallel`
+   n'autorise bd_transition_parallel ET la compaction forkee de
+   bd_level_to_shards QUE si vrai (mode SOLO) — en mode POOL (allow_parallel=0)
+   un job reste strictement monoprocessus, cf. spec § Pourquoi fork / Non-objectifs
+   (pas de fork imbrique). */
+static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t closure_target,
+                                                 struct bd_level *level, int start_pos, int allow_parallel,
+                                                 int nb_workers, double effective_budget_bytes)
+{
+    struct bd_job_result result;
+    memset(&result, 0, sizeof result);
+
+    struct bd_level cur = *level;
+    int pos = start_pos;
+
+    while (pos < BORDER_RING_LEN - 1) {
+        int want_corner = ctx->is_corner_at[pos];
+        struct bd_level next;
+        if (allow_parallel && nb_workers > 1 && cur.used >= bd_fork_min_states) {
+            bd_transition_parallel(ctx, want_corner, &cur, nb_workers, &next);
+        } else {
+            bd_level_init(&next, 1 + ctx->nb_classes, cur.used / 2 + 16);
+            bd_transition_range(ctx, want_corner, &cur, 0, cur.capacity, &next);
+        }
+        bd_level_free(&cur);
+        cur = next;
+        pos++;
+
+        double bytes = bd_level_bytes(&cur);
+        fprintf(stderr, "border_ring_count_dp : position %d/%d, %zu etats (%.2f Go)\n", pos,
+                BORDER_RING_LEN - 1, cur.used, bytes / (1024.0 * 1024.0 * 1024.0));
+
+        /* cur.used > 1 : cf. la garde documentee dans border_ring_dp.h contre
+           une scission degeneree d'un niveau a 0 ou 1 entree. */
+        if (bytes >= effective_budget_bytes && cur.used > 1) {
+            int nb_shards = bd_pick_nb_shards(bytes, nb_workers);
+            char dir[128];
+            snprintf(dir, sizeof dir, "%s/etii_bd_%d_p%d", bd_spill_dir, (int)getpid(), pos);
+            struct bd_shard_set shards;
+            int compact_workers = allow_parallel ? nb_workers : 1;
+            bd_level_to_shards(&cur, dir, nb_shards, compact_workers, &shards);
+            bd_level_free(&cur);
+
+            fprintf(stderr,
+                    "border_ring_count_dp : position %d/%d, scission en %d fragments "
+                    "(%.2f Go, %zu etats au total)\n",
+                    pos, BORDER_RING_LEN - 1, shards.nb_shards,
+                    shards.total_bytes / (1024.0 * 1024.0 * 1024.0), shards.total_used);
+
+            result.closed = 0;
+            snprintf(result.shard_dir, sizeof result.shard_dir, "%s", dir);
+            result.nb_shards = nb_shards;
+            result.resume_pos = pos;
+            return result;
+        }
+    }
+
+    long long total = bd_finalize_range(ctx, ctx->is_corner_at[BORDER_RING_LEN - 1], closure_target, &cur, 0,
+                                         cur.capacity);
+    bd_level_free(&cur);
+    result.closed = 1;
+    result.total = total;
+    return result;
+}
+
+/* Repousse le resultat d'un job vers la pile partagee : accumule le total
+   s'il a ferme l'anneau, ou empile les K fragments produits sinon — jamais
+   les deux. */
+static void bd_apply_job_result(struct bd_pending_stack *stack, long long *total, const struct bd_job_result *r)
+{
+    if (r->closed) {
+        *total += r->total;
+        return;
+    }
+    for (int d = r->nb_shards - 1; d >= 0; d--) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/shard_%d.bin", r->shard_dir, d);
+        bd_pending_push(stack, path, r->shard_dir, r->resume_pos);
+    }
+}
+
 /* ===========================================================================
  * Orchestration : fait avancer un niveau, position par position, jusqu'à la
  * fermeture de l'anneau — TOUJOURS en mémoire (jamais de représentation
  * fragmentée "vivante" à travers plusieurs positions, contrairement à
  * l'ancien mécanisme). Quand un niveau dépasse bd_split_threshold_bytes, il
- * est scindé en K fragments (bd_level_to_shards) : UN seul repris
- * immédiatement (la progression continue sans interruption), les K-1 autres
- * empilés sur `stack` (LIFO — cf. son commentaire) pour être repris plus
- * tard, chacun depuis la position où il a été mis de côté. Une fois une
+ * est scindé en K fragments (bd_level_to_shards) et TOUS empilés sur `stack`
+ * (LIFO — cf. son commentaire, et bd_apply_job_result) : un job ne garde
+ * jamais de fragment pour lui-même après une scission (cf. bd_run_fragment_job)
+ * — le sommet de pile est repris au tour suivant, les autres restent en
+ * attente, chacun depuis la position où il a été mis de côté. Une fois une
  * tranche fermée (fermeture de l'anneau atteinte), sa contribution s'ajoute
  * au total et la tranche suivante est dépilée — jusqu'à la pile vide. Aucune
  * tranche n'est jamais retouchée entre sa création et sa reprise : chaque
@@ -1004,68 +1100,12 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
     key0[0] = (uint8_t)initial_required;
     memcpy(key0 + 1, initial_counts, (size_t)ctx->nb_classes);
     bd_level_add(&cur, key0, 1);
-    int pos = 1;
-    int split_seq = 0; /* rend chaque repertoire de scission unique, meme a la meme position */
+    int start_pos = 1;
 
     for (;;) {
-        while (pos < BORDER_RING_LEN - 1) {
-            int want_corner = ctx->is_corner_at[pos];
-            struct bd_level next;
-            if (nb_workers > 1 && cur.used >= bd_fork_min_states) {
-                bd_transition_parallel(ctx, want_corner, &cur, nb_workers, &next);
-            } else {
-                bd_level_init(&next, 1 + ctx->nb_classes, cur.used / 2 + 16);
-                bd_transition_range(ctx, want_corner, &cur, 0, cur.capacity, &next);
-            }
-            bd_level_free(&cur);
-            cur = next;
-            pos++;
-
-            double bytes = bd_level_bytes(&cur);
-            fprintf(stderr, "border_ring_count_dp : position %d/%d, %zu etats (%.2f Go)\n", pos,
-                    BORDER_RING_LEN - 1, cur.used, bytes / (1024.0 * 1024.0 * 1024.0));
-
-            /* `cur.used > 1` : un niveau à 0 ou 1 entrée ne peut physiquement
-               pas être scindé en plusieurs fragments utiles — le scinder quand
-               même produirait des fragments vides qui, une fois rechargés,
-               rapportent la même capacité plancher (~200 octets, cf.
-               bd_level_init) donc "dépassent" tout seuil assez bas, ce qui
-               redéclencherait une scission indéfiniment (observé : boucle sans
-               fin sur un seuil de test à 1 octet). Sans garde, ce n'est pas
-               qu'un cas de test dégénéré : RIEN n'empêcherait la même
-               situation en production si un budget venait à être fixé
-               au-dessous de cette capacité plancher. */
-            if (bytes >= bd_split_threshold_bytes && cur.used > 1) {
-                int nb_shards = bd_pick_nb_shards(bytes, nb_workers);
-                char dir[128];
-                snprintf(dir, sizeof dir, "%s/etii_bd_%d_s%d", bd_spill_dir, (int)getpid(), split_seq++);
-                struct bd_shard_set shards;
-                bd_level_to_shards(&cur, dir, nb_shards, nb_workers, &shards);
-                bd_level_free(&cur);
-
-                fprintf(stderr,
-                        "border_ring_count_dp : position %d/%d, scission en %d fragments "
-                        "(%.2f Go, %zu etats au total)\n",
-                        pos, BORDER_RING_LEN - 1, shards.nb_shards,
-                        shards.total_bytes / (1024.0 * 1024.0 * 1024.0), shards.total_used);
-
-                char path0[512];
-                snprintf(path0, sizeof path0, "%s/shard_0.bin", shards.dir);
-                bd_level_load_file(&cur, path0);
-                unlink(path0);
-                rmdir(shards.dir); /* echoue silencieusement si non vide : les K-1 autres y restent */
-
-                for (int d = shards.nb_shards - 1; d >= 1; d--) {
-                    char path[512];
-                    snprintf(path, sizeof path, "%s/shard_%d.bin", shards.dir, d);
-                    bd_pending_push(&stack, path, shards.dir, pos);
-                }
-            }
-        }
-
-        total += bd_finalize_range(ctx, ctx->is_corner_at[BORDER_RING_LEN - 1], closure_target, &cur, 0,
-                                    cur.capacity);
-        bd_level_free(&cur);
+        struct bd_job_result r = bd_run_fragment_job(ctx, closure_target, &cur, start_pos,
+                                                      /*allow_parallel=*/1, nb_workers, bd_split_threshold_bytes);
+        bd_apply_job_result(&stack, &total, &r);
 
         if (stack.count == 0) {
             break;
@@ -1074,7 +1114,7 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
         bd_level_load_file(&cur, slice.shard_path);
         unlink(slice.shard_path);
         rmdir(slice.shard_dir); /* echoue silencieusement si non vide : des tranches soeurs y restent */
-        pos = slice.resume_pos;
+        start_pos = slice.resume_pos;
     }
 
     free(stack.items);
