@@ -46,6 +46,20 @@ int bd_reload_estimate_matches_real_alloc_for_tests(int32_t key_len, uint64_t co
    autres. Predicat pur de choix de mode (solo vs pool). */
 int bd_should_run_solo(int active, int stack_count, int nb_workers);
 
+/* Struct de resultat d'un job, serialisable fichier. */
+struct bd_job_result {
+    long long total;
+    int closed;
+    char shard_dir[128];
+    int nb_shards;
+    int resume_pos;
+};
+
+/* Non-static, utilisees par le coordinateur (Tache 5) pour communiquer entre
+   un job forke et le parent. */
+void bd_job_result_write_or_die(const struct bd_job_result *r, const char *path);
+int bd_job_result_read(struct bd_job_result *r, const char *path);
+
 #define BRD_EDGE_BASE 12
 #define BRD_INTERIOR_PLACEHOLDER 11
 
@@ -397,6 +411,64 @@ TEST bd_should_run_solo_picks_mode_from_queue_depth(void)
     PASS();
 }
 
+TEST bd_job_result_round_trips_through_a_file_when_closed(void)
+{
+    char path[] = "/tmp/etii_brd_result_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    struct bd_job_result written;
+    memset(&written, 0, sizeof written);
+    written.closed = 1;
+    written.total = 4242;
+
+    bd_job_result_write_or_die(&written, path);
+
+    struct bd_job_result read_back;
+    memset(&read_back, 0, sizeof read_back);
+    ASSERT_EQ(0, bd_job_result_read(&read_back, path));
+    ASSERT_EQ(1, read_back.closed);
+    ASSERT_EQ_FMT(4242LL, read_back.total, "%lld");
+
+    unlink(path);
+    PASS();
+}
+
+TEST bd_job_result_round_trips_through_a_file_when_split(void)
+{
+    char path[] = "/tmp/etii_brd_result_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    struct bd_job_result written;
+    memset(&written, 0, sizeof written);
+    written.closed = 0;
+    snprintf(written.shard_dir, sizeof written.shard_dir, "/tmp/etii_bd_test_dir");
+    written.nb_shards = 7;
+    written.resume_pos = 21;
+
+    bd_job_result_write_or_die(&written, path);
+
+    struct bd_job_result read_back;
+    memset(&read_back, 0, sizeof read_back);
+    ASSERT_EQ(0, bd_job_result_read(&read_back, path));
+    ASSERT_EQ(0, read_back.closed);
+    ASSERT_STR_EQ("/tmp/etii_bd_test_dir", read_back.shard_dir);
+    ASSERT_EQ(7, read_back.nb_shards);
+    ASSERT_EQ(21, read_back.resume_pos);
+
+    unlink(path);
+    PASS();
+}
+
+TEST bd_job_result_read_reports_failure_on_missing_file(void)
+{
+    ASSERT_EQ(-1, bd_job_result_read(&(struct bd_job_result){0}, "/tmp/etii_brd_does_not_exist"));
+    PASS();
+}
+
 SUITE(border_ring_dp_suite)
 {
     RUN_TEST(border_ring_count_dp_returns_zero_without_any_border_shaped_piece);
@@ -411,4 +483,7 @@ SUITE(border_ring_dp_suite)
     RUN_TEST(bd_estimate_reload_bytes_matches_known_capacity_growth);
     RUN_TEST(bd_estimate_reload_bytes_matches_real_allocation_for_various_sizes);
     RUN_TEST(bd_should_run_solo_picks_mode_from_queue_depth);
+    RUN_TEST(bd_job_result_round_trips_through_a_file_when_closed);
+    RUN_TEST(bd_job_result_round_trips_through_a_file_when_split);
+    RUN_TEST(bd_job_result_read_reports_failure_on_missing_file);
 }

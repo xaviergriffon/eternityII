@@ -989,6 +989,32 @@ struct bd_job_result {
     int resume_pos;
 };
 
+/* Communication entre un job (potentiellement forke, cf. Tache 5) et le
+   coordinateur : struct de taille fixe, ecrite/lue en un seul bloc — pas de
+   variable-length, un job ne produit jamais qu'UNE scission avant de sortir
+   (il ne garde jamais de fragment pour lui-meme, cf. bd_apply_job_result). */
+void bd_job_result_write_or_die(const struct bd_job_result *r, const char *path)
+{
+    FILE *fp = fopen(path, "wb");
+    if (fp == NULL) {
+        fprintf(stderr, "border_ring_count_dp : ecriture du resultat '%s' impossible — arret\n", path);
+        exit(1);
+    }
+    bd_write_or_die(fp, r, sizeof *r, path);
+    bd_close_or_die(fp, path);
+}
+
+int bd_job_result_read(struct bd_job_result *r, const char *path)
+{
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return -1;
+    }
+    int ok = (fread(r, sizeof *r, 1, fp) == 1);
+    fclose(fp);
+    return ok ? 0 : -1;
+}
+
 /* Coeur d'un job, commun aux modes SOLO et POOL — prend possession de
    `*level` (le libere avant de retourner, dans tous les cas). `allow_parallel`
    n'autorise bd_transition_parallel ET la compaction forkee de
