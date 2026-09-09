@@ -42,6 +42,10 @@ void border_ring_dp_set_shard_target_bytes_for_tests(double n);
 double bd_estimate_reload_bytes(int32_t key_len, uint64_t count);
 int bd_reload_estimate_matches_real_alloc_for_tests(int32_t key_len, uint64_t count);
 
+/* Test-only, jamais déclarée dans border_ring_dp.h — même schéma que les
+   autres. Predicat pur de choix de mode (solo vs pool). */
+int bd_should_run_solo(int active, int stack_count, int nb_workers);
+
 #define BRD_EDGE_BASE 12
 #define BRD_INTERIOR_PLACEHOLDER 11
 
@@ -378,6 +382,21 @@ TEST bd_estimate_reload_bytes_matches_real_allocation_for_various_sizes(void)
     PASS();
 }
 
+TEST bd_should_run_solo_picks_mode_from_queue_depth(void)
+{
+    /* Aucun job actif, peu de fragments en attente (< nb_workers) : solo. */
+    ASSERT(bd_should_run_solo(0, 0, 4));
+    ASSERT(bd_should_run_solo(0, 3, 4));
+    /* Assez de fragments pour remplir tous les workers : pool. */
+    ASSERT_FALSE(bd_should_run_solo(0, 4, 4));
+    ASSERT_FALSE(bd_should_run_solo(0, 10, 4));
+    /* Un job deja actif (pool en cours) : jamais solo tant qu'il tourne,
+       meme si la pile s'est videe entre-temps — on laisse le pool en cours
+       se terminer avant de rebasculer. */
+    ASSERT_FALSE(bd_should_run_solo(1, 0, 4));
+    PASS();
+}
+
 SUITE(border_ring_dp_suite)
 {
     RUN_TEST(border_ring_count_dp_returns_zero_without_any_border_shaped_piece);
@@ -391,4 +410,5 @@ SUITE(border_ring_dp_suite)
 #endif
     RUN_TEST(bd_estimate_reload_bytes_matches_known_capacity_growth);
     RUN_TEST(bd_estimate_reload_bytes_matches_real_allocation_for_various_sizes);
+    RUN_TEST(bd_should_run_solo_picks_mode_from_queue_depth);
 }

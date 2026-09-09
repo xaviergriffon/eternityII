@@ -965,6 +965,17 @@ static void bd_pending_push(struct bd_pending_stack *stack, const char *path, co
     slice->resume_pos = resume_pos;
 }
 
+/* Mode SOLO (un seul job, autorise a utiliser bd_transition_parallel) tant
+   qu'aucun pool n'est deja en cours ET que la pile ne contient pas encore de
+   quoi remplir tous les workers ; MODE POOL sinon. Jamais les deux modes
+   actifs en meme temps (cf. spec) : un pool deja lance va jusqu'au bout de
+   ses jobs actifs avant qu'on reevalue. Non-static, test-only — utilisee par
+   le coordinateur (bd_run_opening). */
+int bd_should_run_solo(int active, int stack_count, int nb_workers)
+{
+    return active == 0 && stack_count < nb_workers;
+}
+
 /* ===========================================================================
  * Orchestration : fait avancer un niveau, position par position, jusqu'à la
  * fermeture de l'anneau — TOUJOURS en mémoire (jamais de représentation
