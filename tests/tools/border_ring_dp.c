@@ -137,6 +137,36 @@ static void bd_level_free(struct bd_level *level)
     level->occupied = NULL;
 }
 
+/* Taille RAM EXACTE qu'occupera un fragment sérialisé (en-tête key_len+count,
+   format bd_level_write_file) une fois rechargé par bd_level_load_file — sans
+   jamais le charger. bd_level_load_file appelle toujours
+   bd_level_init(level, key_len, count*2+16) : la capacité finale est donc
+   entièrement déterminée par ces deux nombres, lisibles depuis les 12
+   premiers octets du fichier. Non-static uniquement pour être testée
+   directement depuis test_border_ring_dp.c — jamais déclarée dans
+   border_ring_dp.h, appelée uniquement en interne par le coordinateur. */
+double bd_estimate_reload_bytes(int32_t key_len, uint64_t count)
+{
+    size_t hint = (size_t)(count * 2 + 16);
+    size_t capacity = 1u << 4;
+    while (capacity < hint) {
+        capacity <<= 1;
+    }
+    return (double)capacity * ((size_t)key_len + sizeof(long long)) + (double)((capacity + 7) / 8);
+}
+
+/* Test-only : vérifie que l'estimation ci-dessus égale EXACTEMENT ce qu'un
+   vrai bd_level_init(key_len, count*2+16) allouerait — verrouille que la
+   formule ne diverge jamais silencieusement de l'allocation réelle. */
+int bd_reload_estimate_matches_real_alloc_for_tests(int32_t key_len, uint64_t count)
+{
+    struct bd_level level;
+    bd_level_init(&level, key_len, (size_t)count * 2 + 16);
+    double real_bytes = bd_level_bytes(&level);
+    bd_level_free(&level);
+    return bd_estimate_reload_bytes(key_len, count) == real_bytes;
+}
+
 static int bd_level_is_occupied(const struct bd_level *level, size_t idx)
 {
     return (level->occupied[idx >> 3] >> (idx & 7)) & 1;

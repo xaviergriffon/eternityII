@@ -37,6 +37,11 @@ void border_ring_dp_set_fork_min_states_for_tests(size_t n);
 void border_ring_dp_set_disk_mode_min_bytes_for_tests(double n);
 void border_ring_dp_set_shard_target_bytes_for_tests(double n);
 
+/* Test-only, jamais déclarées dans border_ring_dp.h — même schéma que
+   border_ring_dp_set_fork_min_states_for_tests. */
+double bd_estimate_reload_bytes(int32_t key_len, uint64_t count);
+int bd_reload_estimate_matches_real_alloc_for_tests(int32_t key_len, uint64_t count);
+
 #define BRD_EDGE_BASE 12
 #define BRD_INTERIOR_PLACEHOLDER 11
 
@@ -355,6 +360,24 @@ TEST border_ring_count_dp_matches_border_walk_count_on_real_pieces16_sharded_to_
 }
 #endif
 
+TEST bd_estimate_reload_bytes_matches_known_capacity_growth(void)
+{
+    /* key_len=5, count=0 : hint=16, capacity reste 16 (deja >= hint). */
+    ASSERT_EQ_FMT(16.0 * (5 + 8) + 2.0, bd_estimate_reload_bytes(5, 0), "%.1f");
+    /* key_len=5, count=10 : hint=36, capacite double 16->32->64. */
+    ASSERT_EQ_FMT(64.0 * (5 + 8) + 8.0, bd_estimate_reload_bytes(5, 10), "%.1f");
+    PASS();
+}
+
+TEST bd_estimate_reload_bytes_matches_real_allocation_for_various_sizes(void)
+{
+    ASSERT(bd_reload_estimate_matches_real_alloc_for_tests(5, 0));
+    ASSERT(bd_reload_estimate_matches_real_alloc_for_tests(5, 10));
+    ASSERT(bd_reload_estimate_matches_real_alloc_for_tests(20, 1000));
+    ASSERT(bd_reload_estimate_matches_real_alloc_for_tests(3, 1000003));
+    PASS();
+}
+
 SUITE(border_ring_dp_suite)
 {
     RUN_TEST(border_ring_count_dp_returns_zero_without_any_border_shaped_piece);
@@ -366,4 +389,6 @@ SUITE(border_ring_dp_suite)
     RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_real_pieces16);
     RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_real_pieces16_sharded_to_disk);
 #endif
+    RUN_TEST(bd_estimate_reload_bytes_matches_known_capacity_growth);
+    RUN_TEST(bd_estimate_reload_bytes_matches_real_allocation_for_various_sizes);
 }
