@@ -669,6 +669,20 @@ static double bd_split_threshold_bytes = 2.0 * 1024.0 * 1024.0 * 1024.0;
    d'admission du pool. */
 static double bd_pool_budget_bytes = 2.0 * 1024.0 * 1024.0 * 1024.0;
 
+/* Marge heuristique du mode SOLO, PAS un calcul exact (contrairement a
+   bd_estimate_reload_bytes, cf. plus bas dans ce fichier) : /2 pour la
+   co-residence ancien+nouveau niveau pendant toute la duree d'une
+   transition, /2 supplementaire pour la non-deduplication entre les
+   nb_workers tables locales de bd_transition_parallel — valeur a ajuster
+   empiriquement une fois mesuree sur un run reel, meme demarche que le /3
+   de bd_shard_target_bytes ci-dessus. Cf. spec § Comptabilite RAM.
+   Déclarée ici (et non près de bd_effective_solo_budget_bytes, son seul
+   lecteur, plus bas dans ce fichier) pour rester visible depuis
+   border_ring_dp_set_max_ram_mo, son unique point d'écriture — même
+   contrainte d'ordre que bd_split_threshold_bytes/bd_pool_budget_bytes
+   ci-dessus. */
+static double bd_solo_budget_bytes = 2.0 * 1024.0 * 1024.0 * 1024.0 / 4.0;
+
 /* Plancher bas pour bd_shard_target_bytes : évite qu'un budget RAM minuscule
    combiné à beaucoup de workers ne produise une cible de fragment
    dégénérée (quelques octets), qui exploserait BD_MAX_SHARDS pour rien. */
@@ -697,6 +711,8 @@ void border_ring_dp_set_max_ram_mo(long mo, int nb_workers)
     int workers = nb_workers < 1 ? 1 : nb_workers;
     double target = ram_bytes / ((double)workers * 3.0);
     bd_shard_target_bytes = target < BD_SHARD_TARGET_BYTES_FLOOR ? BD_SHARD_TARGET_BYTES_FLOOR : target;
+
+    bd_solo_budget_bytes = ram_bytes / 4.0;
 }
 
 /* Borne haute généreuse : au-delà, on dégrade gracieusement (fragments plus
@@ -1223,11 +1239,18 @@ static void bd_abort_active_jobs(const struct bd_active_job *jobs, int active, i
     }
 }
 
-/* bd_effective_solo_budget_bytes() est remplace par une vraie marge a la
-   Tache 6 — provisoire ici pour que cette tache compile isolement. */
+/* bd_solo_budget_bytes est déclarée plus haut dans ce fichier, à côté de
+   bd_split_threshold_bytes/bd_pool_budget_bytes, pour rester visible depuis
+   border_ring_dp_set_max_ram_mo — voir le commentaire à sa déclaration pour
+   le détail de la marge heuristique appliquée. */
 static double bd_effective_solo_budget_bytes(void)
 {
-    return bd_split_threshold_bytes; /* remplace par une vraie marge a la Tache 6 */
+    return bd_solo_budget_bytes;
+}
+
+double border_ring_dp_get_solo_budget_bytes_for_tests(void)
+{
+    return bd_solo_budget_bytes;
 }
 
 /* ===========================================================================

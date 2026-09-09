@@ -43,6 +43,11 @@ double bd_estimate_reload_bytes(int32_t key_len, uint64_t count);
 int bd_reload_estimate_matches_real_alloc_for_tests(int32_t key_len, uint64_t count);
 
 /* Test-only, jamais déclarée dans border_ring_dp.h — même schéma que les
+   autres. Expose la marge heuristique du budget SOLO (Tâche 6) fixée en
+   dernier lieu par border_ring_dp_set_max_ram_mo. */
+double border_ring_dp_get_solo_budget_bytes_for_tests(void);
+
+/* Test-only, jamais déclarée dans border_ring_dp.h — même schéma que les
    autres. Predicat pur de choix de mode (solo vs pool). */
 int bd_should_run_solo(int active, int stack_count, int nb_workers);
 
@@ -439,6 +444,21 @@ TEST bd_should_run_solo_picks_mode_from_queue_depth(void)
     PASS();
 }
 
+TEST border_ring_dp_set_max_ram_mo_derives_a_conservative_solo_budget(void)
+{
+    border_ring_dp_set_max_ram_mo(4096, 10);
+    double solo_budget = border_ring_dp_get_solo_budget_bytes_for_tests();
+    double raw_budget = 4096.0 * 1024.0 * 1024.0;
+
+    /* La marge doit reserver une fraction reelle du budget brut : ni egale
+       (aucune marge), ni degenere (proche de 0). */
+    ASSERT(solo_budget < raw_budget);
+    ASSERT(solo_budget > raw_budget / 10.0);
+
+    border_ring_dp_set_max_ram_mo(2048, 4);
+    PASS();
+}
+
 TEST bd_job_result_round_trips_through_a_file_when_closed(void)
 {
     char path[] = "/tmp/etii_brd_result_XXXXXX";
@@ -512,6 +532,7 @@ SUITE(border_ring_dp_suite)
     RUN_TEST(bd_estimate_reload_bytes_matches_known_capacity_growth);
     RUN_TEST(bd_estimate_reload_bytes_matches_real_allocation_for_various_sizes);
     RUN_TEST(bd_should_run_solo_picks_mode_from_queue_depth);
+    RUN_TEST(border_ring_dp_set_max_ram_mo_derives_a_conservative_solo_budget);
     RUN_TEST(bd_job_result_round_trips_through_a_file_when_closed);
     RUN_TEST(bd_job_result_round_trips_through_a_file_when_split);
     RUN_TEST(bd_job_result_read_reports_failure_on_missing_file);
