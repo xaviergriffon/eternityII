@@ -1025,9 +1025,21 @@ static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t
         /* cur.used > 1 : cf. la garde documentee dans border_ring_dp.h contre
            une scission degeneree d'un niveau a 0 ou 1 entree. */
         if (bytes >= effective_budget_bytes && cur.used > 1) {
+            /* `pos` seul ne suffit pas a nommer le repertoire : la meme
+               position d'anneau peut etre re-scindee plusieurs fois au cours
+               d'un meme run (fragments soeurs repris depuis la pile, chacun
+               pouvant a nouveau depasser le seuil exactement a cette
+               position) — sans compteur, deux scissions a la meme position
+               calculeraient le meme chemin, et bd_mkdir_or_die tolerant
+               EEXIST, la seconde ecraserait silencieusement les fragments pas
+               encore depiles de la premiere. `static` : ce compteur doit
+               survivre aux appels successifs de bd_run_fragment_job depuis la
+               boucle de bd_run_opening, un appel par fragment depile — pas
+               juste a l'interieur d'un seul appel. */
+            static int split_seq = 0;
             int nb_shards = bd_pick_nb_shards(bytes, nb_workers);
             char dir[128];
-            snprintf(dir, sizeof dir, "%s/etii_bd_%d_p%d", bd_spill_dir, (int)getpid(), pos);
+            snprintf(dir, sizeof dir, "%s/etii_bd_%d_s%d", bd_spill_dir, (int)getpid(), split_seq++);
             struct bd_shard_set shards;
             int compact_workers = allow_parallel ? nb_workers : 1;
             bd_level_to_shards(&cur, dir, nb_shards, compact_workers, &shards);
