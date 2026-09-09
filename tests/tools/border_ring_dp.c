@@ -1188,8 +1188,7 @@ static pid_t bd_fork_pool_job(const struct bd_ctx *ctx, int8_t closure_target,
 
     pid_t pid = fork();
     if (pid < 0) {
-        fprintf(stderr, "border_ring_count_dp : fork() a echoue pour un job du pool — arret\n");
-        exit(1);
+        return -1;   /* le caller (bd_run_opening) a jobs[]/active en portee pour nettoyer les freres */
     }
     if (pid == 0) {
         struct bd_level cur;
@@ -1203,6 +1202,25 @@ static pid_t bd_fork_pool_job(const struct bd_ctx *ctx, int8_t closure_target,
         exit(0);
     }
     return pid;
+}
+
+/* Tue et attend tous les jobs actifs sauf, eventuellement, celui a
+   l'indice skip_index (deja sorti proprement — jamais tue une deuxieme
+   fois) — utilisee sur les deux chemins d'echec du coordinateur pool ou
+   des freres pourraient encore tourner (fork() rate en cours d'admission,
+   fichier resultat illisible). skip_index = -1 pour n'exclure personne. */
+static void bd_abort_active_jobs(const struct bd_active_job *jobs, int active, int skip_index)
+{
+    for (int i = 0; i < active; i++) {
+        if (i != skip_index) {
+            kill(jobs[i].pid, SIGTERM);
+        }
+    }
+    for (int i = 0; i < active; i++) {
+        if (i != skip_index) {
+            waitpid(jobs[i].pid, NULL, 0);
+        }
+    }
 }
 
 /* bd_effective_solo_budget_bytes() est remplace par une vraie marge a la
@@ -1283,10 +1301,16 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
                 break;
             }
             struct bd_pending_slice slice = stack.items[--stack.count];
+            pid_t pid = bd_fork_pool_job(ctx, closure_target, &slice, nb_workers_eff,
+                                          budget_pool_total / (double)nb_workers_eff,
+                                          jobs[active].result_path, sizeof jobs[active].result_path);
+            if (pid < 0) {
+                fprintf(stderr, "border_ring_count_dp : fork() a echoue pour un job du pool — arret\n");
+                bd_abort_active_jobs(jobs, active, -1);
+                exit(1);
+            }
+            jobs[active].pid = pid;
             jobs[active].estimated_bytes = est;
-            jobs[active].pid = bd_fork_pool_job(ctx, closure_target, &slice, nb_workers_eff,
-                                                 budget_pool_total / (double)nb_workers_eff,
-                                                 jobs[active].result_path, sizeof jobs[active].result_path);
             active++;
         }
 
@@ -1316,6 +1340,7 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
         if (bd_job_result_read(&r, jobs[slot].result_path) != 0) {
             fprintf(stderr, "border_ring_count_dp : resultat du job pid=%d illisible ('%s') — arret\n",
                     (int)done, jobs[slot].result_path);
+            bd_abort_active_jobs(jobs, active, slot);
             exit(1);
         }
         unlink(jobs[slot].result_path);
