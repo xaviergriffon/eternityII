@@ -37,3 +37,7 @@ tests/bench/bench_refutation_gpu
 # mais présentes tant qu'il tourne — cf. docs/architecture.md).
 etii_main.*
 etii_fork.*
+
+# Espace de travail scratch de la skill subagent-driven-development (ledgers,
+# briefs, rapports, paquets de revue) — jamais committé.
+.superpowers/
