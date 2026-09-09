@@ -292,3 +292,11 @@ Aucune nouvelle cible Makefile — `border-mass` existe déjà (PR #298),
   d'atteindre la cible (peu probable vu la croissance rapide du facteur de
   branchement hors des coins), ce serait un signal à mesurer, pas à
   anticiper ici.
+
+**Suite (hors scope de cette spec)** : le DFS séquentiel décrit ici (même
+parallélisé par forks) n'a en pratique pas terminé sur le jeu 256 pièces,
+ce qui a mené à `--dp`, une programmation dynamique sur classes de pièces —
+algorithme différent, sans rapport avec le parcours par forks décrit ici. Sa
+gestion RAM/fragments courante (coordinateur à deux modes SOLO/POOL) est
+décrite dans
+`docs/superpowers/specs/2026-09-09-border-ring-dp-pool-ram-design.md`.

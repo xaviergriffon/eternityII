@@ -42,15 +42,25 @@
  * `border_ring_dp_set_max_ram_mo` — `--dp-max-ram-mo`, obligatoire dès que
  * `--dp` est utilisé), un niveau est scindé en K fragments sur disque
  * (partitionnement externe par hachage de la clé, `struct bd_shard_set`,
- * `bd_level_to_shards`, forké) — un seul repris IMMÉDIATEMENT en mémoire (la
- * progression continue sans interruption), les K-1 autres empilés (pile LIFO
- * `struct bd_pending_stack`) pour être repris plus tard, chacun depuis la
- * position où il a été mis de côté. Contrairement à un mécanisme antérieur
- * (mode disque permanent, tout un niveau réécrit/relu à CHAQUE position tant
- * qu'il restait trop gros), un fragment mis de côté n'est écrit qu'une fois
- * et relu qu'une fois, jamais retouché entre les deux — voir le commentaire
- * de tête de la section « Scission par pile LIFO » dans `border_ring_dp.c`
- * pour le détail et le gain d'E/S mesuré.
+ * `bd_level_to_shards`, forké) — les K fragments sont TOUS repoussés vers
+ * une pile LIFO partagée (`struct bd_pending_stack`), jamais l'un d'eux
+ * repris immédiatement par le job qui vient de scinder. Un coordinateur
+ * central (`bd_run_opening`) redistribue ensuite ces fragments entre deux
+ * modes mutuellement exclusifs, selon la profondeur de la pile
+ * (`bd_should_run_solo`) : mode SOLO (un seul job actif, autorisé à se
+ * paralléliser en interne via `bd_transition_parallel`, budget mémoire
+ * heuristique) tant que la pile n'a pas de quoi remplir tous les workers,
+ * mode POOL (jusqu'à `nb_workers` jobs forkés concurrents, chacun
+ * strictement monoprocessus, admis sur une estimation RAM exacte de leur
+ * rechargement) dès qu'elle en a assez. Chaque fragment repris, dans l'un ou
+ * l'autre mode, continue depuis la position où il a été mis de côté.
+ * Contrairement à un mécanisme antérieur (mode disque permanent, tout un
+ * niveau réécrit/relu à CHAQUE position tant qu'il restait trop gros), un
+ * fragment mis de côté n'est écrit qu'une fois et relu qu'une fois, jamais
+ * retouché entre les deux — voir le commentaire de tête de la section
+ * « Scission par pile LIFO » dans `border_ring_dp.c`, et
+ * `docs/superpowers/specs/2026-09-09-border-ring-dp-pool-ram-design.md`,
+ * pour le détail (comptabilité RAM, ordonnancement, gestion des échecs).
  */
 #ifndef eternityII_border_ring_dp_h
 #define eternityII_border_ring_dp_h
@@ -114,12 +124,14 @@ void border_ring_dp_set_spill_dir(const char *dir);
  * `--dp-max-ram-mo`), remplace les anciennes constantes calées à la main sur
  * une seule machine (2 Go de seuil de scission, 768 Mo de cible de fragment).
  *
- * Pilote deux seuils : `bd_split_threshold_bytes` (déclenche une scission dès
- * qu'un niveau dépasse ce budget) prend directement la valeur donnée ;
- * `bd_shard_target_bytes` (taille cible d'un fragment) en est dérivée —
- * `budget / (nb_workers * 3)`, avec un plancher bas — pour que
- * `nb_workers` fragments simultanés pendant une compaction restent,
- * ensemble, sous ce même budget.
+ * Pilote plusieurs seuils : `bd_split_threshold_bytes` (déclenche une
+ * scission dès qu'un niveau dépasse ce budget) et `bd_pool_budget_bytes`
+ * (admission d'un fragment dans un slot du mode POOL, cf. le commentaire de
+ * tête du fichier) prennent directement la valeur donnée ; `bd_shard_target_bytes`
+ * (taille cible d'un fragment) en est dérivée — `budget / (nb_workers * 3)`,
+ * avec un plancher bas — pour que `nb_workers` fragments simultanés pendant
+ * une compaction restent, ensemble, sous ce même budget ; `bd_solo_budget_bytes`
+ * (budget heuristique du mode SOLO) en est également dérivé — `budget / 4`.
  *
  * @param mo         Budget en Mo. Doit rester valide pour tout l'appel à
  *                   `border_ring_count_dp` qui suit.

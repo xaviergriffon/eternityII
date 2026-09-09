@@ -284,3 +284,11 @@ vrai jeu 256 pièces — la mesure sur ce jeu fait partie du livrable de phase 1
 pas une simple vérification a posteriori. Bascule vers l'approche C
 (meet-in-the-middle, deux demi-anneaux calculés séparément puis joints)
 seulement si la mesure le justifie.
+
+**Suite (hors scope de cette spec, phase 1 archivée telle quelle)** : le DFS
+séquentiel n'a en pratique pas terminé sur le jeu 256 pièces (cf.
+`docs/tests_et_ci.md`), ce qui a mené à `--dp`, une programmation dynamique
+sur classes de pièces (algorithme différent de l'approche C envisagée
+ci-dessus). Sa gestion RAM/fragments courante — un coordinateur à deux modes
+SOLO/POOL, pas le mécanisme d'origine — est décrite dans
+`docs/superpowers/specs/2026-09-09-border-ring-dp-pool-ram-design.md`.

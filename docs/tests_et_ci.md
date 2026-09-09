@@ -386,30 +386,93 @@ sur une plage de plusieurs dizaines de positions consécutives toutes trop
 grosses, ça multipliait le volume d'E/S par le nombre de positions
 concernées (mesuré : ~777 Go d'E/S cumulées pour une masse de pointe de
 111 Go étalée sur ~7 positions, sur la machine cible). `--dp-max-ram-mo`
-pilote deux seuils dérivés (`border_ring_dp_set_max_ram_mo`) :
+pilote plusieurs seuils dérivés (`border_ring_dp_set_max_ram_mo`) :
 `bd_split_threshold_bytes` (déclenche une scission dès qu'un niveau dépasse
 ce budget) prend directement la valeur donnée ; `bd_shard_target_bytes`
 (taille cible d'un fragment) en est dérivée — `budget / (nb_workers × 3)`,
 pour que `nb_workers` fragments simultanés pendant une compaction restent,
-ensemble, sous ce même budget.
+ensemble, sous ce même budget. Deux seuils supplémentaires,
+`bd_pool_budget_bytes` et `bd_solo_budget_bytes`, gouvernent la reprise des
+fragments mis de côté — détaillés ci-dessous.
 
 Quand un niveau dépasse le seuil, il est scindé en K fragments sur disque
 (`bd_level_to_shards`, partitionnement externe par hachage FNV-1a de la
 clé — la même technique qu'un GROUP BY externe qui ne tient pas en RAM) :
-**un seul** fragment est rechargé IMMÉDIATEMENT en mémoire et la progression
-continue sans interruption ; les K-1 autres sont empilés (**pile LIFO**,
-`struct bd_pending_stack`) pour être repris plus tard, chacun depuis la
-position où il a été mis de côté — jamais retouché entre-temps, quel que
-soit le nombre de positions qui s'écoulent pendant qu'il attend. Une fois
-qu'une tranche atteint la fermeture de l'anneau, sa contribution s'ajoute au
-total et la tranche suivante est dépilée (LIFO : le dernier fragment créé
-est repris en premier, pas le plus ancien — borne la profondeur de la pile
-par le nombre de positions de l'anneau, pas par la largeur de l'espace
-d'états, même raisonnement qu'une pile explicite remplaçant une récursion en
-profondeur d'abord) — jusqu'à la pile vide. Chaque fragment n'est donc écrit
-qu'UNE fois (à sa création) et relu qu'UNE fois (à sa reprise), contre un
+les K fragments sont TOUS empilés (**pile LIFO**, `struct bd_pending_stack`)
+sur une pile partagée — un job qui vient de scinder ne garde jamais l'un des
+fragments produits pour lui-même, il repousse sa production entière et
+sort. L'ordre LIFO (le dernier fragment créé est repris en premier, pas le
+plus ancien) borne la profondeur de la pile par le nombre de positions de
+l'anneau, pas par la largeur de l'espace d'états — même raisonnement qu'une
+pile explicite remplaçant une récursion en profondeur d'abord. C'est un
+coordinateur central (`bd_run_opening`) qui décide, à chaque tour de boucle,
+lequel des fragments en attente reprendre et comment.
+
+**Pool de workers à deux modes (SOLO / POOL)** — `bd_should_run_solo(active,
+stack_count, nb_workers)` tranche entre les deux, jamais simultanément : un
+pool déjà lancé va jusqu'au bout de ses jobs actifs avant que le mode soit
+réévalué.
+
+- **Mode SOLO** (`active == 0 && stack_count < nb_workers`, c'est-à-dire tant
+  que la pile n'a pas de quoi remplir tous les workers) : un seul job
+  tourne, dans le process du coordinateur, et reste autorisé à se
+  paralléliser en interne via `bd_transition_parallel` pour ses propres
+  transitions de niveau — le comportement historique (un seul fragment
+  actif à la fois). Son budget est `bd_effective_solo_budget_bytes()`, qui
+  vaut `bd_solo_budget_bytes` (= budget donné / 4) — une marge
+  **HEURISTIQUE, PAS un calcul exact** : `/2` pour la co-résidence de
+  l'ancien et du nouveau niveau pendant toute la durée d'une transition,
+  `/2` supplémentaire pour la non-déduplication entre les `nb_workers`
+  tables locales de `bd_transition_parallel` (chaque worker produit sa
+  propre table de niveau-suivant avant fusion par le parent, donc une même
+  clé peut exister en double dans plusieurs tables simultanément) — cf. le
+  commentaire à la déclaration de `bd_solo_budget_bytes`
+  (`tests/tools/border_ring_dp.c:672-678`).
+- **Mode POOL** (dès que la pile contient au moins `nb_workers` fragments en
+  attente) : le coordinateur forke jusqu'à `nb_workers` jobs concurrents, un
+  par fragment (`bd_fork_pool_job`), chacun STRICTEMENT monoprocessus
+  (`allow_parallel=0` — jamais `bd_transition_parallel`, jamais de
+  compaction forkée dans une scission ultérieure). Un job ne reste jamais
+  résident : il communique son résultat au coordinateur via un petit fichier
+  (`struct bd_job_result`, écrit par `bd_job_result_write_or_die`, lu par
+  `bd_job_result_read`) puis sort — il ne garde JAMAIS un fragment pour
+  lui-même après une nouvelle scission, tous les fragments qu'il produit
+  sont repoussés sur la pile partagée pour que le coordinateur les
+  redistribue (`bd_apply_job_result`). L'admission dans un slot du pool est
+  gardée par une estimation RAM **EXACTE** : `bd_estimate_reload_bytes`
+  relit uniquement l'en-tête sérialisé (12 octets) d'un fragment — sans le
+  charger — pour calculer précisément ce que `bd_level_load_file`
+  allouerait à sa reprise, comparé à un budget dédié `bd_pool_budget_bytes`
+  (une somme visée sur tous les slots actifs). Si le coordinateur ne peut
+  admettre ne serait-ce qu'un seul fragment en attente, il échoue bruyamment
+  (`exit(1)`) plutôt que de rester bloqué.
+
+**`bd_split_threshold_bytes` et `bd_pool_budget_bytes` sont deux variables
+distinctes**, bien que toutes deux dérivées du même `--dp-max-ram-mo` en
+production (`border_ring_dp_set_max_ram_mo` leur donne la même valeur en
+octets). Il fallait les découpler : les hooks test-only existants
+(`border_ring_dp_set_disk_mode_min_bytes_for_tests`) poussent délibérément
+`bd_split_threshold_bytes` à une valeur quasi nulle pour forcer des
+scissions sur des fixtures minuscules — réutiliser cette même variable comme
+budget d'admission du pool aurait rendu même un fragment de ~200 octets
+inadmissible en test. En production, les deux variables portent toujours la
+même valeur réelle en méga-octets — invisible pour un utilisateur final,
+mais un détail d'implémentation qui compte pour quiconque relit le code.
+
+En cas d'échec d'un job du pool (code de sortie non nul, fichier résultat
+illisible, ou `fork()` lui-même en échec en cours d'admission d'un lot), le
+coordinateur tue et récupère (`waitpid`) tous les AUTRES jobs du pool
+actuellement en cours (`bd_abort_active_jobs`) avant de sortir en échec —
+jamais d'enfant orphelin laissé derrière, jamais un total partiel rapporté
+comme définitif.
+
+Chaque fragment n'est donc écrit qu'UNE fois (à sa création) et relu qu'UNE
+fois (à sa reprise, par le mode qui le dépile), contre une
 réécriture/relecture de la totalité à CHAQUE position sous l'ancien
-mécanisme.
+mécanisme. Voir
+[docs/superpowers/specs/2026-09-09-border-ring-dp-pool-ram-design.md](superpowers/specs/2026-09-09-border-ring-dp-pool-ram-design.md)
+pour le raisonnement complet (comptabilité RAM détaillée, ordonnancement,
+gestion des échecs, alternatives écartées).
 
 **Garde contre une scission dégénérée** : un niveau à 0 ou 1 entrée réelle
 n'est jamais scindé (`cur.used > 1`), même si sa taille nominale dépasse le
