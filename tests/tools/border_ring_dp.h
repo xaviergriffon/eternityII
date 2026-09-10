@@ -62,7 +62,7 @@
  * fragment mis de côté n'est écrit qu'une fois et relu qu'une fois, jamais
  * retouché entre les deux — voir le commentaire de tête de la section
  * « Scission par pile LIFO » dans `border_ring_dp.c`, et
- * `docs/superpowers/specs/2026-09-09-border-ring-dp-pool-ram-design.md`,
+ * `docs/conception/border_mass.md`,
  * pour le détail (comptabilité RAM, ordonnancement, gestion des échecs).
  */
 #ifndef eternityII_border_ring_dp_h

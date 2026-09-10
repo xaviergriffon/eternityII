@@ -1646,7 +1646,7 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
  * N'exécute qu'UNE SEULE fois `bd_run_opening` (sur le premier candidat
  * trouvé), puis multiplie par `nb_candidates` au lieu de sommer un
  * `bd_run_opening` complet par candidat : par symétrie de rotation à 90° du
- * plateau (cf. docs/superpowers/specs/2026-09-06-masse-bordure-design.md),
+ * plateau (cf. docs/conception/border_mass.md),
  * toute bordure valide utilise nécessairement les `nb_candidates` pièces-coin
  * réelles disponibles, une fois chacune — il y a exactement autant de
  * positions-coin sur l'anneau que de pièces-coin réelles, aucune

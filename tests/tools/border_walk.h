@@ -3,7 +3,7 @@
  * @brief Énumération exhaustive des anneaux de bordure valides du plateau.
  *
  * Cœur pur de l'outil `tests/tools/border_mass.c` (voir
- * docs/superpowers/specs/2026-09-06-masse-bordure-design.md) : aucune
+ * docs/conception/border_mass.md) : aucune
  * entrée/sortie, testable en isolation. Réutilise tel quel l'infrastructure
  * de lookup de `core/part.h`/`core/possibility.h` — aucune fonction nouvelle
  * n'y est nécessaire.

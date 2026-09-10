@@ -23,9 +23,8 @@
  * Aucune coordination façon fork_gate.c : border_mass est mono-thread avant
  * de forker ses workers, donc le problème que fork_gate.c résout (un thread
  * du parent qui tourne encore pendant le fork()) ne se pose pas ici — voir
- * docs/superpowers/specs/2026-09-06-border-mass-parallel-design.md pour la
- * parallélisation, et docs/superpowers/specs/2026-09-06-masse-bordure-design.md
- * pour le raisonnement complet sur « N est déjà la masse ».
+ * docs/conception/border_mass.md pour la parallélisation
+ * et le raisonnement complet sur « N est déjà la masse ».
  *
  * Aucun gestionnaire de signal : Ctrl-C envoie SIGINT à tout le groupe de
  * process (parent + enfants forkés, aucun setpgid/setsid n'est appelé) —
@@ -64,7 +63,7 @@
  * partition sur 270 sur `data/pieces.csv`, cf. docs/tests_et_ci.md). Une
  * seule pièce-coin d'ouverture est traitée en entier (les autres candidats
  * lui sont rigoureusement égaux par symétrie de rotation à 90° du plateau,
- * cf. docs/superpowers/specs/2026-09-06-masse-bordure-design.md) — le
+ * cf. docs/conception/border_mass.md) — le
  * résultat est multiplié par le nombre de candidats plutôt que rejoué une
  * fois par candidat. Combine `--dp` avec `--forks N` : la transition d'un
  * niveau assez gros est répartie sur N process forkés (chacun traite une

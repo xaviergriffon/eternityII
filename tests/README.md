@@ -78,7 +78,7 @@ Deux pièges à l'usage, tous deux rencontrés :
 
 `border_mass` mesure la masse totale des anneaux de bordure valides (voir
 [docs/tests_et_ci.md](../docs/tests_et_ci.md#outil-border_mass-make-border-mass)
-et [docs/superpowers/specs/2026-09-06-masse-bordure-design.md](../docs/superpowers/specs/2026-09-06-masse-bordure-design.md)).
+et [docs/conception/border_mass.md](../docs/conception/border_mass.md)).
 Son cœur pur (`border_walk.c`) est, comme celui de `gen_root`, compilé avec
 les autres modules et couvert par `test_border_walk.c` ; le second algorithme
 (`--dp`, `border_ring_dp.c`) l'est de même, couvert par

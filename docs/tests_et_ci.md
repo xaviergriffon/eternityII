@@ -251,7 +251,7 @@ d'ouverture, retrouvant chaque anneau abstrait une fois par coin (constaté
 empiriquement pendant l'implémentation). Cela suppose qu'aucun indice
 officiel ne touche une case de bord (vérifié au démarrage par l'outil
 lui-même) — sinon un seul coin serait valide comme ouverture, pas 4. Voir
-[docs/superpowers/specs/2026-09-06-masse-bordure-design.md](superpowers/specs/2026-09-06-masse-bordure-design.md)
+[docs/conception/border_mass.md](conception/border_mass.md)
 pour le raisonnement complet.
 
 ```sh
@@ -284,7 +284,7 @@ callback de progression (`struct border_progress_opts`,
 d'énumération ; `border_walk.c` ne lit aucune horloge (reste un cœur pur
 sans I/O), tout le calcul de vitesse et le formatage du message vivent dans
 `border_mass.c`. Voir
-[docs/superpowers/specs/2026-09-06-border-mass-parallel-design.md](superpowers/specs/2026-09-06-border-mass-parallel-design.md)
+[docs/conception/border_mass.md](conception/border_mass.md)
 pour le raisonnement complet (notamment pourquoi ceci ne réutilise pas
 `fork_gate.c`).
 
@@ -487,7 +487,7 @@ Chaque fragment n'est donc écrit qu'UNE fois (à sa création) et relu qu'UNE
 fois (à sa reprise, par le mode qui le dépile), contre une
 réécriture/relecture de la totalité à CHAQUE position sous l'ancien
 mécanisme. Voir
-[docs/superpowers/specs/2026-09-09-border-ring-dp-pool-ram-design.md](superpowers/specs/2026-09-09-border-ring-dp-pool-ram-design.md)
+[docs/conception/border_mass.md](conception/border_mass.md)
 pour le raisonnement complet (comptabilité RAM détaillée, ordonnancement,
 gestion des échecs, alternatives écartées).
 

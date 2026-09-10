@@ -1,7 +1,7 @@
 /*
  * Tests de tests/tools/border_walk.c — cœur pur du walker de bordure.
  *
- * Voir docs/superpowers/specs/2026-09-06-masse-bordure-design.md pour le
+ * Voir docs/conception/border_mass.md pour le
  * raisonnement complet (pourquoi aucune modification à part.c/readdata.c,
  * pourquoi la fermeture du cycle se vérifie gratuitement, etc.).
  */
