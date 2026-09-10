@@ -650,6 +650,117 @@ TEST bd_job_result_read_reports_failure_on_missing_file(void)
     PASS();
 }
 
+struct brd_recon_ctx {
+    struct possibility_packet *found;
+    int count;
+    int cap;
+};
+
+static void brd_on_ring_found(const struct possibility_packet *ring, void *ctx_)
+{
+    struct brd_recon_ctx *ctx = (struct brd_recon_ctx *)ctx_;
+    if (ctx->count == ctx->cap) {
+        ctx->cap = (ctx->cap == 0) ? 8 : ctx->cap * 2;
+        ctx->found = realloc(ctx->found, (size_t)ctx->cap * sizeof *ctx->found);
+    }
+    ctx->found[ctx->count++] = *ring;
+}
+
+/* Le total réel reconstruit (border_ring_reconstruct_dp) doit correspondre
+   exactement à border_ring_count_dp, sur le fixture SANS multiplicité (4
+   anneaux, chacun sa propre suite de classes — aucune expansion combinatoire
+   à cette étape) — non-régression avant le fixture à multiplicité. */
+TEST border_ring_reconstruct_dp_matches_count_on_a_unique_ring(void)
+{
+    struct array_part *all = brd_make_rotate_parts(0);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    long long total = border_ring_count_dp(map, all, 1);
+    ASSERT_EQ_FMT(4LL, total, "%lld");
+
+    struct brd_recon_ctx ctx;
+    memset(&ctx, 0, sizeof ctx);
+    long long delivered = border_ring_reconstruct_dp(map, all, 1, 1000, brd_on_ring_found, &ctx);
+
+    ASSERT_EQ_FMT(total, delivered, "%lld");
+    ASSERT_EQ(4, ctx.count);
+
+    for (int i = 0; i < ctx.count; i++) {
+        ASSERT_EQ_FMT(BORDER_RING_LEN, possibility_placed_count(&ctx.found[i]), "%d");
+        for (int j = i + 1; j < ctx.count; j++) {
+            ASSERT(compare_possibility(&ctx.found[i], &ctx.found[j]) != 0);
+        }
+    }
+
+    free(ctx.found);
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+/* Avec 2 pièces surnuméraires (12 anneaux réels attendus, cf.
+   border_ring_count_dp_counts_class_multiplicity_correctly) : le nombre de
+   SUITES DE CLASSES distinctes doit être strictement inférieur à 12 (la
+   classe dupliquée, utilisée une fois par anneau, se développe en plusieurs
+   anneaux réels par suite de classes) alors que le nombre d'anneaux RÉELS
+   délivrés doit rester exactement 12 — c'est la distinction clarifiée
+   pendant la conception (cf. AGENTS.md/plan) : la masse compte des pièces
+   réelles, pas des suites de classes. */
+TEST border_ring_reconstruct_dp_expands_class_multiplicity_to_all_real_rings(void)
+{
+    struct array_part *all = brd_make_rotate_parts(2);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    long long total = border_ring_count_dp(map, all, 1);
+    ASSERT_EQ_FMT(12LL, total, "%lld");
+
+    struct brd_recon_ctx ctx;
+    memset(&ctx, 0, sizeof ctx);
+    long long delivered = border_ring_reconstruct_dp(map, all, 1, 1000, brd_on_ring_found, &ctx);
+
+    ASSERT_EQ_FMT(total, delivered, "%lld");
+    ASSERT_EQ(12, ctx.count);
+
+    for (int i = 0; i < ctx.count; i++) {
+        ASSERT_EQ_FMT(BORDER_RING_LEN, possibility_placed_count(&ctx.found[i]), "%d");
+        for (int j = i + 1; j < ctx.count; j++) {
+            ASSERT(compare_possibility(&ctx.found[i], &ctx.found[j]) != 0);
+        }
+    }
+
+    free(ctx.found);
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+/* max_rings coupe la délivrance avant terme : le total délivré doit être
+   exactement le plafond demandé (pas d'échec bruyant — ce cas est
+   explicitement distingué d'un vrai écart, cf. border_ring_reconstruct_dp). */
+TEST border_ring_reconstruct_dp_stops_at_max_rings(void)
+{
+    struct array_part *all = brd_make_rotate_parts(2);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    struct brd_recon_ctx ctx;
+    memset(&ctx, 0, sizeof ctx);
+    long long delivered = border_ring_reconstruct_dp(map, all, 1, 3, brd_on_ring_found, &ctx);
+
+    ASSERT_EQ_FMT(3LL, delivered, "%lld");
+    ASSERT_EQ(3, ctx.count);
+
+    free(ctx.found);
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
 SUITE(border_ring_dp_suite)
 {
     RUN_TEST(border_ring_count_dp_returns_zero_without_any_border_shaped_piece);
@@ -658,6 +769,9 @@ SUITE(border_ring_dp_suite)
     RUN_TEST(border_ring_count_dp_matches_brute_force_when_forked);
     RUN_TEST(border_ring_count_dp_matches_brute_force_when_sharded_to_disk);
     RUN_TEST(border_ring_count_dp_matches_brute_force_when_pool_mode_engages);
+    RUN_TEST(border_ring_reconstruct_dp_matches_count_on_a_unique_ring);
+    RUN_TEST(border_ring_reconstruct_dp_expands_class_multiplicity_to_all_real_rings);
+    RUN_TEST(border_ring_reconstruct_dp_stops_at_max_rings);
 #if ETERN_PARTS == 16
     RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_real_pieces16);
     RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_real_pieces16_sharded_to_disk);

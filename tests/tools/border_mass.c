@@ -86,10 +86,26 @@
  * plusieurs dizaines de Go de fragments même sur une machine bien dotée
  * (2x10 cœurs/48 Go), cf. docs/tests_et_ci.md.
  *
+ * `--save-rings FILE --max-rings N` (uniquement avec `--dp` — rejeté sinon,
+ * le DFS brut restant mesuré trop lent pour cet usage) reconstruit chaque
+ * anneau de bordure réel (pièces réelles, pas seulement le total) et les
+ * écrit dans FILE au format `.back` (flux headerless de possibility_packet,
+ * même format que `gen_root` — utilisable comme racines de stock pour la
+ * recherche réelle). `border_ring_reconstruct_dp` (tests/tools/border_ring_dp.c)
+ * calcule, pour chaque niveau déjà persisté de la passe `--dp`, une table de
+ * complétion (nombre de façons de finir l'anneau à partir de cet état) qui
+ * sert d'oracle d'élagage à un DFS guidé sur les CLASSES (~15-18 sur le jeu
+ * réel, pas les pièces individuellement) — chaque suite de classes complète
+ * est ensuite développée en toutes ses assignations de pièces réelles
+ * possibles. `--max-rings N` est un plafond de SÉCURITÉ, obligatoire (aucune
+ * valeur par défaut) : la reconstruction échoue bruyamment si le total
+ * reconstruit diverge du total exact sans que ce plafond en soit la cause —
+ * jamais un fichier `.back` silencieusement incomplet.
+ *
  * Usage :
  *   make border-mass
  *   tests/tools/border_mass [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] \
- *       data/pieces.csv data/indices.csv
+ *       [--save-rings FILE --max-rings N] data/pieces.csv data/indices.csv
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -179,6 +195,32 @@ struct bm_collect_ctx {
     int cap;
 };
 
+/* Contexte de `bm_on_ring_found` — `--save-rings FILE`. */
+struct bm_rings_ctx {
+    FILE *file;
+    long long written;
+};
+
+/* Écrit un anneau réel reconstruit (border_ring_reconstruct_dp) dans le
+   fichier `.back` ouvert — même format headerless qu'un `.back` produit par
+   le serveur (`docs/utilisation.md`) et que `gen_root.c:76-86` : un
+   `fwrite(&packet, sizeof packet, 1, f)` brut, `checked` forcé à 0 (pool non
+   vérifié — `import()` le sanitize et recalcule `alloc`/`min_candidats` au
+   chargement de toute façon, cf. src/core/datamanager.c). Toute écriture
+   ratée est fatale immédiatement — jamais un fichier tronqué qui passe pour
+   un succès (même principe que `bd_write_or_die`, border_ring_dp.c). */
+static void bm_on_ring_found(const struct possibility_packet *ring, void *ctx_)
+{
+    struct bm_rings_ctx *ctx = (struct bm_rings_ctx *)ctx_;
+    struct possibility_packet packet = *ring;
+    packet.checked = 0;
+    if (fwrite(&packet, sizeof packet, 1, ctx->file) != 1) {
+        fprintf(stderr, "border_mass : ecriture d'un anneau reconstruit impossible (disque plein ?) — arret\n");
+        exit(1);
+    }
+    ctx->written++;
+}
+
 static void bm_collect_partial(const struct possibility_packet *partial_state, int depth, void *ctx_)
 {
     struct bm_collect_ctx *ctx = (struct bm_collect_ctx *)ctx_;
@@ -260,6 +302,8 @@ int main(int argc, char **argv)
     int use_dp = 0;
     const char *spill_dir = NULL;
     long dp_max_ram_mo = -1;
+    const char *save_rings_path = NULL;
+    long long max_rings = -1;
     int argi = 1;
     /* `--dp`, `--forks N`, `--spill-dir DIR` et `--dp-max-ram-mo MO` sont des
        options indépendantes, combinables dans n'importe quel ordre — `--dp
@@ -276,7 +320,22 @@ int main(int argc, char **argv)
        niveau de la DP, en Mo (cf. `border_ring_dp_set_max_ram_mo`) ; aucune
        valeur par défaut n'est choisie à la place de l'utilisateur, une
        machine différente de celle qui a motivé ce mécanisme rendrait
-       n'importe quel défaut faux dans un sens ou dans l'autre. */
+       n'importe quel défaut faux dans un sens ou dans l'autre.
+
+       `--save-rings FILE --max-rings N` reconstruit chaque anneau réel
+       (pièces réelles, pas seulement le compte) et les écrit dans FILE au
+       format `.back` (flux headerless de `struct possibility_packet`, même
+       format que produit `gen_root`) — cf. `border_ring_reconstruct_dp`,
+       tests/tools/border_ring_dp.h. Utilisable UNIQUEMENT avec `--dp` : le
+       DFS brut (sans `--dp`) n'a aucune heuristique guidée par les classes et
+       reste, mesuré empiriquement, bien trop lent pour cet usage sur le jeu
+       réel (cf. docs/tests_et_ci.md) — rejeté explicitement plus bas. Les
+       deux options sont obligatoires ensemble : `--max-rings N` est un
+       plafond de sécurité (aucune valeur par défaut choisie à la place de
+       l'utilisateur, même principe que `--dp-max-ram-mo`), pas une
+       estimation de la masse réelle — border_ring_reconstruct_dp échoue
+       bruyamment si le total reconstruit diverge du total exact SANS que ce
+       plafond en soit la cause. */
     while (argi < argc && argv[argi][0] == '-') {
         if (strcmp(argv[argi], "--dp") == 0) {
             use_dp = 1;
@@ -284,7 +343,7 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argi], "--forks") == 0) {
             if (argi + 1 >= argc) {
                 fprintf(stderr,
-                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] [--save-rings FILE --max-rings N] "
                         "<pieces.csv> <indices.csv>\n",
                         argv[0]);
                 return 2;
@@ -302,7 +361,7 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argi], "--spill-dir") == 0) {
             if (argi + 1 >= argc) {
                 fprintf(stderr,
-                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] [--save-rings FILE --max-rings N] "
                         "<pieces.csv> <indices.csv>\n",
                         argv[0]);
                 return 2;
@@ -312,7 +371,7 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argi], "--dp-max-ram-mo") == 0) {
             if (argi + 1 >= argc) {
                 fprintf(stderr,
-                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] [--save-rings FILE --max-rings N] "
                         "<pieces.csv> <indices.csv>\n",
                         argv[0]);
                 return 2;
@@ -324,13 +383,38 @@ int main(int argc, char **argv)
                 return 2;
             }
             argi += 2;
+        } else if (strcmp(argv[argi], "--save-rings") == 0) {
+            if (argi + 1 >= argc) {
+                fprintf(stderr,
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] [--save-rings FILE --max-rings N] "
+                        "<pieces.csv> <indices.csv>\n",
+                        argv[0]);
+                return 2;
+            }
+            save_rings_path = argv[argi + 1];
+            argi += 2;
+        } else if (strcmp(argv[argi], "--max-rings") == 0) {
+            if (argi + 1 >= argc) {
+                fprintf(stderr,
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] [--save-rings FILE --max-rings N] "
+                        "<pieces.csv> <indices.csv>\n",
+                        argv[0]);
+                return 2;
+            }
+            char *endptr = NULL;
+            max_rings = strtoll(argv[argi + 1], &endptr, 10);
+            if (endptr == argv[argi + 1] || *endptr != '\0' || max_rings < 1) {
+                fprintf(stderr, "border_mass : --max-rings attend un entier positif\n");
+                return 2;
+            }
+            argi += 2;
         } else {
             break;
         }
     }
     if (argc - argi != 2) {
         fprintf(stderr,
-                "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] [--save-rings FILE --max-rings N] "
                 "<pieces.csv> <indices.csv>\n",
                 argv[0]);
         return 2;
@@ -339,6 +423,16 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "border_mass : --dp necessite --dp-max-ram-mo MO (budget memoire dedie a un "
                 "niveau de la DP, en Mo)\n");
+        return 2;
+    }
+    if ((save_rings_path != NULL) != (max_rings >= 0)) {
+        fprintf(stderr, "border_mass : --save-rings et --max-rings sont obligatoires ensemble\n");
+        return 2;
+    }
+    if (save_rings_path != NULL && !use_dp) {
+        fprintf(stderr,
+                "border_mass : --save-rings necessite --dp (le DFS brut reste, mesure, trop lent pour "
+                "reconstruire les anneaux reels sur le jeu reel)\n");
         return 2;
     }
     const char *pieces_path = argv[argi];
@@ -364,6 +458,24 @@ int main(int argc, char **argv)
             border_ring_dp_set_spill_dir(spill_dir);
         }
         border_ring_dp_set_max_ram_mo(dp_max_ram_mo, forks);
+
+        if (save_rings_path != NULL) {
+            FILE *rings_file = fopen(save_rings_path, "wb");
+            if (rings_file == NULL) {
+                fprintf(stderr, "border_mass : ouverture de '%s' impossible\n", save_rings_path);
+                return 1;
+            }
+            struct bm_rings_ctx rings_ctx = { rings_file, 0 };
+            long long delivered =
+                border_ring_reconstruct_dp(map, all, forks, max_rings, bm_on_ring_found, &rings_ctx);
+            if (fclose(rings_file) != 0) {
+                fprintf(stderr, "border_mass : cloture de '%s' impossible (disque plein ?)\n", save_rings_path);
+                return 1;
+            }
+            printf("%lld anneau(x) reconstruit(s) et sauvegarde(s) dans %s\n", delivered, save_rings_path);
+            return 0;
+        }
+
         long long total = border_ring_count_dp(map, all, forks);
         printf("masse totale des anneaux de bordure valides : %lld\n", total);
         return 0;

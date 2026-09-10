@@ -19,6 +19,13 @@ système normal (génération de vraies racines `.back` à partir des anneaux
 trouvés, injection dans le stock) est un **sous-projet 2, hors scope**, à
 spécifier séparément une fois le chiffre de phase 1 obtenu et jugé exploitable.
 
+**Sous-projet 2 désormais implémenté** : `border_mass --dp --save-rings FILE
+--max-rings N` (`border_ring_reconstruct_dp`, `tests/tools/border_ring_dp.c`)
+— voir `docs/tests_et_ci.md` (section `border_mass`) pour le mécanisme complet
+(passe avant persistée + tables de complétion + DFS guidé sur les classes +
+expansion en pièces réelles) et le chiffre de phase 1 obtenu sur le jeu réel
+(32 anneaux).
+
 ## Pourquoi la symétrie de rotation tient
 
 `data/indices.csv` contient les 5 indices officiels du puzzle 256 pièces :

@@ -69,6 +69,7 @@
 #define eternityII_border_ring_dp_h
 
 #include "core/part.h"
+#include "tools/border_walk.h"
 
 /**
  * @brief Calcule la masse totale des anneaux de bordure valides, EXACTEMENT
@@ -145,5 +146,60 @@ void border_ring_dp_set_spill_dir(const char *dir);
  *                   `bd_shard_target_bytes`.
  */
 void border_ring_dp_set_max_ram_mo(long mo, int nb_workers);
+
+/**
+ * @brief Reconstruit et délivre, via `on_found`, chaque anneau de bordure
+ * réel (pièces réelles, pas classes abstraites) — jusqu'à `max_rings`.
+ *
+ * `border_ring_count_dp` ne conserve rien d'exploitable une fois le total
+ * calculé (chaque niveau de la DP est jeté dès le suivant construit). Cette
+ * fonction calcule une SECONDE DP, miroir de la première (classes avec
+ * couleur d'entrée/sortie échangées, positions parcourues en sens inverse),
+ * dont chaque niveau est cette fois PERSISTÉ sur disque — donnant, pour tout
+ * état, le nombre de façons de compléter l'anneau à partir de là. Cette table
+ * sert d'oracle d'élagage à un DFS guidé sur l'alphabet des CLASSES
+ * (~15-18 sur le jeu réel, jamais les pièces réelles individuellement) :
+ * chaque suite de classes complète trouvée est ensuite développée en TOUTES
+ * les assignations de pièces réelles possibles (une par combinaison de
+ * pièces disponibles quand une classe utilisée a plusieurs pièces encore
+ * libres) — cf. `tests/tools/border_ring_dp.c` pour le détail complet et
+ * `docs/tests_et_ci.md` pour l'exemple concret (32 anneaux réels sur le jeu
+ * 256 pièces, regroupés en un nombre potentiellement inférieur de suites de
+ * classes distinctes).
+ *
+ * Coût disque réel important : la passe arrière persiste TOUS les niveaux
+ * intermédiaires (jusqu'à `BORDER_RING_LEN - 1`), chacun pouvant peser autant
+ * que son équivalent dans la passe avant (dizaines de Go observés sur le jeu
+ * réel, cf. docs/tests_et_ci.md) — `border_ring_dp_set_spill_dir` doit
+ * pointer vers un disque avec assez d'espace libre. Coût temps : une passe
+ * arrière complète PAR pièce-coin d'ouverture réelle (typiquement ×4 sur le
+ * jeu réel, pas de raccourci par rotation ici) — de l'ordre de plusieurs fois
+ * le temps d'un `border_ring_count_dp` seul.
+ *
+ * Le total délivré DOIT correspondre exactement à
+ * `border_ring_count_dp(map, all_rotate_parts, nb_workers)` — échec bruyant
+ * (`exit(1)`) si ce n'est pas le cas ET que `max_rings` n'a pas coupé la
+ * délivrance avant terme (dans ce dernier cas, un total inférieur au total
+ * réel est attendu, pas une erreur).
+ *
+ * @param map              Table de lookup pré-calculée (`prepare_map_part`).
+ * @param all_rotate_parts Tableau de toutes les rotations (`rotate_all_parts`).
+ * @param nb_workers       Nombre de process forkés pour la passe arrière
+ *                         (même paramètre que `border_ring_count_dp`).
+ * @param max_rings        Plafond de sécurité — obligatoire côté appelant
+ *                         (`border_mass --max-rings`, pas de valeur par
+ *                         défaut) : arrête la délivrance dès qu'il est
+ *                         atteint, utile si un jeu de pièces différent
+ *                         produisait un total bien plus grand que prévu.
+ * @param on_found         Appelé pour chaque anneau réel reconstruit — le
+ *                         paquet reçu est un `possibility_packet` complet
+ *                         (bordure remplie, intérieur à `-2`), directement
+ *                         écrivable dans un fichier `.back` (même format que
+ *                         `gen_root`).
+ * @param ctx              Passé tel quel à `on_found`.
+ * @return                 Nombre total d'anneaux réels délivrés.
+ */
+long long border_ring_reconstruct_dp(map_big_array *map, struct array_part *all_rotate_parts, int nb_workers,
+                                      long long max_rings, border_ring_found_cb on_found, void *ctx);
 
 #endif /* eternityII_border_ring_dp_h */

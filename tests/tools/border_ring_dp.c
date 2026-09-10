@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 /* Borne généreuse : le vrai jeu 256 pièces n'en produit que 15-18 (paires
    de couleurs "anneau" x forme coin/bord), le jeu 16 pièces des tests
@@ -1094,15 +1095,142 @@ int bd_job_result_read(struct bd_job_result *r, const char *path)
     return ok ? 0 : -1;
 }
 
+/* ===========================================================================
+ * Persistance des niveaux pour la passe arrière (reconstruction) — cf.
+ * `border_ring_reconstruct_dp` plus bas. La passe avant normale (comptage
+ * seul) n'utilise jamais ceci (`persist_dir == NULL`) : chaque niveau reste
+ * jeté dès que le suivant est construit, comme avant. Quand `persist_dir` est
+ * fourni, CHAQUE niveau produit (y compris l'état reçu en entrée, avant toute
+ * transition) est sérialisé sous `persist_dir/level_<pos>/` — un fichier par
+ * job/fragment qui contribue à cette position, jamais fusionnés sur le
+ * moment (un job du mode POOL ne voit qu'une fraction du niveau réel à une
+ * position donnée) : la fusion se fait à la LECTURE, cf.
+ * `bd_persist_load_merged`. */
+static void bd_mkdir_p_or_die(const char *dir)
+{
+    bd_mkdir_or_die(dir);
+}
+
+static void bd_persist_snapshot(const char *persist_dir, int pos, const struct bd_level *level)
+{
+    if (persist_dir == NULL) {
+        return;
+    }
+    static long bd_persist_seq = 0;
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/level_%d", persist_dir, pos);
+    bd_mkdir_p_or_die(dir);
+    char path[900];
+    snprintf(path, sizeof path, "%s/frag_%d_%ld.bin", dir, (int)getpid(), bd_persist_seq++);
+    bd_level_write_file(level, path);
+}
+
+/* Fusionne TOUS les fragments persistés à `pos` (un ou plusieurs jobs/fragments
+   ont pu y contribuer) en un seul niveau en mémoire — utilisé par la
+   reconstruction guidée, jamais par la passe avant normale. Répertoire absent
+   (position jamais atteinte, ex. jeu trop petit) : niveau vide, pas une
+   erreur — le DFS guidé n'y trouvera simplement aucune complétion possible. */
+static void bd_persist_load_merged(const char *persist_dir, int pos, int key_len, struct bd_level *out)
+{
+    bd_level_init(out, key_len, 1 << 4);
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/level_%d", persist_dir, pos);
+    DIR *dp = opendir(dir);
+    if (dp == NULL) {
+        return;
+    }
+    struct dirent *ent;
+    while ((ent = readdir(dp)) != NULL) {
+        if (ent->d_name[0] == '.') {
+            continue;
+        }
+        char path[900];
+        snprintf(path, sizeof path, "%s/%s", dir, ent->d_name);
+        bd_level_merge_file(out, path);
+    }
+    closedir(dp);
+}
+
+/* Recherche pure (sans insertion), sur le même schéma d'adressage ouvert que
+   bd_level_add — jamais utilisée par la passe avant (comptage), seulement par
+   la reconstruction guidée pour tester si un état a une complétion connue. */
+static int bd_level_lookup(const struct bd_level *level, const uint8_t *key, long long *out_value)
+{
+    if (level->capacity == 0) {
+        return 0;
+    }
+    uint64_t h = bd_fnv1a(key, level->key_len);
+    size_t mask = level->capacity - 1;
+    size_t idx = (size_t)h & mask;
+    for (size_t probed = 0; probed < level->capacity; probed++) {
+        if (!bd_level_is_occupied(level, idx)) {
+            return 0;
+        }
+        if (memcmp(level->keys + idx * (size_t)level->key_len, key, (size_t)level->key_len) == 0) {
+            *out_value = level->values[idx];
+            return 1;
+        }
+        idx = (idx + 1) & mask;
+    }
+    return 0;
+}
+
+/* Supprime récursivement l'arborescence `persist_dir` créée par
+   `bd_persist_snapshot` (sous-répertoires `level_*`) ET les fichiers
+   `completion_*.bin` écrits directement sous `persist_dir` par
+   `bd_build_and_persist_completions` — pour UNE reconstruction (un coin
+   d'ouverture réel), jamais laissée traîner après un run réussi. Un
+   `opendir()` qui échoue (entrée = fichier plat, pas un répertoire — le cas
+   des `completion_*.bin`) n'est pas une erreur ici : `unlink()` directement
+   dessus. Best-effort sur les erreurs de suppression individuelles (un
+   fichier déjà absent n'est pas fatal ici, contrairement à l'écriture). */
+static void bd_persist_cleanup(const char *persist_dir)
+{
+    DIR *base = opendir(persist_dir);
+    if (base == NULL) {
+        return;
+    }
+    struct dirent *ent;
+    while ((ent = readdir(base)) != NULL) {
+        if (ent->d_name[0] == '.') {
+            continue;
+        }
+        char path[900];
+        snprintf(path, sizeof path, "%s/%s", persist_dir, ent->d_name);
+        DIR *sub = opendir(path);
+        if (sub == NULL) {
+            unlink(path);
+            continue;
+        }
+        struct dirent *fent;
+        while ((fent = readdir(sub)) != NULL) {
+            if (fent->d_name[0] == '.') {
+                continue;
+            }
+            char fpath[1200];
+            snprintf(fpath, sizeof fpath, "%s/%s", path, fent->d_name);
+            unlink(fpath);
+        }
+        closedir(sub);
+        rmdir(path);
+    }
+    closedir(base);
+    rmdir(persist_dir);
+}
+
 /* Coeur d'un job, commun aux modes SOLO et POOL — prend possession de
    `*level` (le libere avant de retourner, dans tous les cas). `allow_parallel`
    n'autorise bd_transition_parallel ET la compaction forkee de
    bd_level_to_shards QUE si vrai (mode SOLO) — en mode POOL (allow_parallel=0)
    un job reste strictement monoprocessus, cf. spec § Pourquoi fork / Non-objectifs
-   (pas de fork imbrique). */
+   (pas de fork imbrique). `persist_dir` (NULL sauf pendant la reconstruction,
+   cf. `border_ring_reconstruct_dp`) fait persister chaque niveau produit
+   (y compris l'état reçu en entrée) au lieu de le jeter — cf. le commentaire
+   de tête de `bd_persist_snapshot` ci-dessus. */
 static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t closure_target,
                                                  struct bd_level *level, int start_pos, int allow_parallel,
-                                                 int nb_workers, double effective_budget_bytes)
+                                                 int nb_workers, double effective_budget_bytes,
+                                                 const char *persist_dir)
 {
     struct bd_job_result result;
     memset(&result, 0, sizeof result);
@@ -1114,6 +1242,7 @@ static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t
        l'alias interne, dans tous les cas de sortie). */
     memset(level, 0, sizeof *level);
     int pos = start_pos;
+    bd_persist_snapshot(persist_dir, pos, &cur);
 
     while (pos < BORDER_RING_LEN - 1) {
         int want_corner = ctx->is_corner_at[pos];
@@ -1127,6 +1256,7 @@ static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t
         bd_level_free(&cur);
         cur = next;
         pos++;
+        bd_persist_snapshot(persist_dir, pos, &cur);
 
         double bytes = bd_level_bytes(&cur);
         fprintf(stderr, "border_ring_count_dp : position %d/%d, %zu etats (%.2f Go)\n", pos,
@@ -1285,7 +1415,8 @@ long border_ring_dp_get_pool_jobs_forked_for_tests(void)
    de l'enfant. */
 static pid_t bd_fork_pool_job(const struct bd_ctx *ctx, int8_t closure_target,
                                const struct bd_pending_slice *slice, int nb_workers,
-                               double effective_budget_bytes, char *result_path, size_t result_path_size)
+                               double effective_budget_bytes, char *result_path, size_t result_path_size,
+                               const char *persist_dir)
 {
     static int job_seq = 0;
     snprintf(result_path, result_path_size, "%s/etii_bd_job_%d_%d.bin", bd_spill_dir, (int)getpid(),
@@ -1308,7 +1439,7 @@ static pid_t bd_fork_pool_job(const struct bd_ctx *ctx, int8_t closure_target,
         rmdir(slice->shard_dir);
         struct bd_job_result r =
             bd_run_fragment_job(ctx, closure_target, &cur, slice->resume_pos, /*allow_parallel=*/0, nb_workers,
-                                 effective_budget_bytes);
+                                 effective_budget_bytes, persist_dir);
         bd_job_result_write_or_die(&r, result_path);
         exit(0);
     }
@@ -1384,7 +1515,8 @@ double border_ring_dp_get_pool_job_budget_bytes_for_tests(void)
  * a chaque tour de la boucle principale.
  */
 static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_required,
-                                 const int8_t *initial_counts, int8_t closure_target, int nb_workers)
+                                 const int8_t *initial_counts, int8_t closure_target, int nb_workers,
+                                 const char *persist_dir)
 {
     int nb_workers_eff = nb_workers < 1 ? 1 : nb_workers;
     double budget_solo = bd_effective_solo_budget_bytes();
@@ -1402,8 +1534,8 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
     key0[0] = (uint8_t)initial_required;
     memcpy(key0 + 1, initial_counts, (size_t)ctx->nb_classes);
     bd_level_add(&seed, key0, 1);
-    struct bd_job_result r0 =
-        bd_run_fragment_job(ctx, closure_target, &seed, 1, /*allow_parallel=*/1, nb_workers_eff, budget_solo);
+    struct bd_job_result r0 = bd_run_fragment_job(ctx, closure_target, &seed, 1, /*allow_parallel=*/1,
+                                                    nb_workers_eff, budget_solo, persist_dir);
     bd_apply_job_result(&stack, &total, &r0);
 
     struct bd_active_job *jobs = malloc((size_t)nb_workers_eff * sizeof *jobs);
@@ -1422,7 +1554,8 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
             unlink(slice.shard_path);
             rmdir(slice.shard_dir);
             struct bd_job_result r = bd_run_fragment_job(ctx, closure_target, &cur, slice.resume_pos,
-                                                          /*allow_parallel=*/1, nb_workers_eff, budget_solo);
+                                                          /*allow_parallel=*/1, nb_workers_eff, budget_solo,
+                                                          persist_dir);
             bd_apply_job_result(&stack, &total, &r);
             continue;
         }
@@ -1444,7 +1577,8 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
             struct bd_pending_slice slice = stack.items[--stack.count];
             pid_t pid = bd_fork_pool_job(ctx, closure_target, &slice, nb_workers_eff,
                                           bd_effective_pool_job_budget_bytes(),
-                                          jobs[active].result_path, sizeof jobs[active].result_path);
+                                          jobs[active].result_path, sizeof jobs[active].result_path,
+                                          persist_dir);
             if (pid < 0) {
                 fprintf(stderr, "border_ring_count_dp : fork() a echoue pour un job du pool — arret\n");
                 bd_abort_active_jobs(jobs, active, -1);
@@ -1560,7 +1694,8 @@ static long long bd_count_openings(map_big_array *map, struct array_part *all_ro
     counts[id_to_class[first_cand->id]]--;
 
     /* case 1 : k4(LEFT) = grid[0][0].right ; derniere case : k1(TOP) = grid[0][0].bottom */
-    long long n_single_opening = bd_run_opening(ctx, first_cand->right, counts, first_cand->bottom, nb_workers);
+    long long n_single_opening =
+        bd_run_opening(ctx, first_cand->right, counts, first_cand->bottom, nb_workers, NULL);
     return n_single_opening * (long long)nb_candidates;
 }
 
@@ -1590,4 +1725,402 @@ long long border_ring_count_dp(map_big_array *map, struct array_part *all_rotate
     free(id_to_class);
     free(ctx);
     return total;
+}
+
+/* ===========================================================================
+ * Reconstruction des anneaux réels (voir le commentaire de tête de
+ * border_ring_dp.h et le plan approuvé pour le raisonnement complet).
+ *
+ * Principe : la DP normale ne conserve rien d'exploitable une fois le total
+ * calculé (chaque niveau est jeté). Pour reconstruire, on calcule une SECONDE
+ * DP — miroir de la première (classes avec couleur d'entrée/sortie
+ * échangées, positions parcourues en sens inverse) — dont chaque niveau est
+ * PERSISTÉ sur disque (bd_run_fragment_job(persist_dir=...)) plutôt que
+ * jeté : le niveau miroir à la position `i` donne, pour tout état
+ * (couleur requise, compteurs restants), le nombre de façons de COMPLÉTER
+ * l'anneau réel à partir de la position `BORDER_RING_LEN - i` — l'oracle
+ * d'élagage qui rend un DFS guidé sur les CLASSES (pas les pièces réelles)
+ * praticable : à chaque position, seules les classes dont l'état résultant a
+ * une complétion non nulle sont essayées, donc toute branche explorée mène
+ * forcément à une fermeture valide.
+ *
+ * Une fois une SUITE DE CLASSES complète trouvée, elle est immédiatement
+ * développée en pièces réelles (bd_expand_dfs) — un DFS restreint à la seule
+ * classe choisie à chaque position, réutilisant la même mécanique de lookup
+ * que `bw_dfs` (tests/tools/border_walk.c) : correction géométrique héritée
+ * gratuitement, aucune logique de rotation dupliquée ici.
+ */
+
+/* Calcule, pour CHAQUE état occupant `forward_level` (le niveau réellement
+ * atteignable à la position `pos` de la passe AVANT, persisté par
+ * `bd_run_opening(..., persist_dir)`), le nombre de façons de COMPLÉTER
+ * l'anneau jusqu'à la fermeture — la vraie table de « complétion » qui sert
+ * d'oracle d'élagage au DFS guidé sur les classes. `completion_next` est la
+ * table déjà calculée pour la position `pos + 1` (NULL seulement quand
+ * `pos == BORDER_RING_LEN - 1`, où la fermeture se vérifie directement contre
+ * `closure_target`, sans niveau suivant). ATTENTION à ne jamais confondre
+ * ceci avec une DP miroir indépendante (tentative initiale, incorrecte) :
+ * la complétion d'un état DOIT être calculée à partir des états RÉELLEMENT
+ * atteints par la passe avant à cette position — recalculer un « niveau
+ * arrière » depuis un point de départ générique produit un espace d'états
+ * sans rapport avec celui réellement parcouru par la passe avant. */
+static void bd_completion_step(const struct bd_ctx *ctx, int pos, int8_t closure_target,
+                                const struct bd_level *forward_level, const struct bd_level *completion_next,
+                                struct bd_level *completion_cur)
+{
+    int nb = ctx->nb_classes;
+    int want_corner = ctx->is_corner_at[pos];
+    bd_level_init(completion_cur, forward_level->key_len, forward_level->used * 2 + 16);
+
+    for (size_t idx = 0; idx < forward_level->capacity; idx++) {
+        if (!bd_level_is_occupied(forward_level, idx)) {
+            continue;
+        }
+        const uint8_t *key = forward_level->keys + idx * (size_t)forward_level->key_len;
+        int8_t required = (int8_t)key[0];
+        const int8_t *counts = (const int8_t *)(key + 1);
+
+        long long comp = 0;
+        for (int c = 0; c < nb; c++) {
+            if (ctx->classes[c].is_corner != want_corner || counts[c] == 0 || ctx->classes[c].color_a != required) {
+                continue;
+            }
+            if (pos == BORDER_RING_LEN - 1) {
+                if (ctx->classes[c].color_b == closure_target) {
+                    comp += counts[c];
+                }
+                continue;
+            }
+            uint8_t next_key[1 + BD_MAX_CLASSES];
+            next_key[0] = (uint8_t)ctx->classes[c].color_b;
+            memcpy(next_key + 1, counts, (size_t)nb);
+            next_key[1 + c]--;
+            long long next_comp;
+            if (bd_level_lookup(completion_next, next_key, &next_comp)) {
+                comp += counts[c] * next_comp;
+            }
+        }
+        if (comp > 0) {
+            bd_level_add(completion_cur, key, comp);
+        }
+    }
+}
+
+/* Balaie les niveaux AVANT persistés (positions BORDER_RING_LEN-1 downto 1)
+ * et écrit, pour chacun, sa table de complétion sous
+ * `persist_dir/completion_<pos>.bin` — un seul fichier par position (calculé
+ * ici en un seul process, jamais scindé/forké, contrairement aux niveaux
+ * avant qui peuvent l'être) : chargeable directement par `bd_level_load_file`,
+ * sans fusion de fragments. */
+static void bd_build_and_persist_completions(const struct bd_ctx *ctx, int8_t closure_target,
+                                              const char *persist_dir)
+{
+    int nb = ctx->nb_classes;
+    struct bd_level completion_next;
+    int have_next = 0;
+
+    for (int pos = BORDER_RING_LEN - 1; pos >= 1; pos--) {
+        struct bd_level forward_level;
+        bd_persist_load_merged(persist_dir, pos, 1 + nb, &forward_level);
+
+        struct bd_level completion_cur;
+        bd_completion_step(ctx, pos, closure_target, &forward_level, have_next ? &completion_next : NULL,
+                            &completion_cur);
+        bd_level_free(&forward_level);
+        if (have_next) {
+            bd_level_free(&completion_next);
+        }
+
+        char path[900];
+        snprintf(path, sizeof path, "%s/completion_%d.bin", persist_dir, pos);
+        bd_level_write_file(&completion_cur, path);
+
+        completion_next = completion_cur;
+        have_next = 1;
+    }
+    if (have_next) {
+        bd_level_free(&completion_next);
+    }
+}
+
+struct bd_reconstruct_ctx {
+    map_big_array *map;
+    struct array_part *all_rotate_parts;
+    const struct bd_ctx *ctx;      /* contexte direct (classes + is_corner_at) */
+    const int16_t *id_to_class;
+    const char *back_dir;          /* niveaux persistés de la passe arrière miroir */
+    int8_t closure_target;         /* couleur de fermeture (passe avant) */
+    int8_t class_seq[BORDER_RING_LEN]; /* indices 1..BORDER_RING_LEN-1 utilisés */
+    border_ring_found_cb on_found;
+    void *user_ctx;
+    long long max_rings;
+    long long delivered;
+    int cached_pos;                /* position dont le niveau arrière est en cache, -1 = aucun */
+    struct bd_level cached_level;
+    struct possibility_packet board;
+    uint16_t opening_id;
+    uint8_t opening_rotation;
+};
+
+static void bd_expand_dfs(struct bd_reconstruct_ctx *rc, const int8_t order[BORDER_RING_LEN][2], int pos)
+{
+    if (rc->delivered >= rc->max_rings) {
+        return;
+    }
+    if (pos == BORDER_RING_LEN) {
+        rc->on_found(&rc->board, rc->user_ctx);
+        rc->delivered++;
+        return;
+    }
+
+    int8_t x = order[pos][0];
+    int8_t y = order[pos][1];
+    key_part key;
+    what_search_in_grid_to_key(rc->all_rotate_parts, &rc->board, x, y, &key, (int8_t)rc->map->sizearrayM);
+    map_bucket bucket = map_bucket_packed(rc->map, &key);
+    int8_t want_class = rc->class_seq[pos];
+
+    for (int s = 0; s < bucket.size; s++) {
+        const struct part *cand = &bucket.parts[s];
+        if (cand->id <= 0 || rc->id_to_class[cand->id] != want_class) {
+            continue;
+        }
+        uint16_t face_idx = (uint16_t)(cand->id - 1);
+        if (is_face_used(rc->board.b_faceused, face_idx)) {
+            continue;
+        }
+
+        rc->board.grid[x][y] = (int16_t)id_for_rotated_part((uint16_t)cand->id, (uint8_t)cand->rotation);
+        set_face_used(rc->board.b_faceused, face_idx, 1);
+        rc->board.alloc = (uint16_t)(pos + 1);
+
+        bd_expand_dfs(rc, order, pos + 1);
+
+        set_face_used(rc->board.b_faceused, face_idx, 0);
+        rc->board.grid[x][y] = -2;
+        rc->board.alloc = (uint16_t)pos;
+
+        if (rc->delivered >= rc->max_rings) {
+            return;
+        }
+    }
+}
+
+/* Développe UNE suite de classes complète (rc->class_seq, positions
+ * 1..BORDER_RING_LEN-1) en toutes les assignations de pièces réelles
+ * possibles — une par combinaison de pièces disponibles à chaque position où
+ * la classe choisie a plusieurs pièces encore libres, exactement comme un
+ * DFS réel les essaierait une à une (cf. bw_dfs, tests/tools/border_walk.c,
+ * dont ce DFS restreint reprend la mécanique de lookup telle quelle). */
+static void bd_expand_class_sequence(struct bd_reconstruct_ctx *rc)
+{
+    int8_t order[BORDER_RING_LEN][2];
+    border_ring_order(order);
+
+    memset(&rc->board, 0, sizeof rc->board);
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            rc->board.grid[x][y] = -2;
+        }
+    }
+    rc->board.min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+
+    int8_t x0 = order[0][0];
+    int8_t y0 = order[0][1];
+    rc->board.grid[x0][y0] = (int16_t)id_for_rotated_part(rc->opening_id, rc->opening_rotation);
+    set_face_used(rc->board.b_faceused, (uint16_t)(rc->opening_id - 1), 1);
+    rc->board.alloc = 1;
+
+    bd_expand_dfs(rc, order, 1);
+}
+
+/* DFS guidé sur l'alphabet des CLASSES (~15-18, jamais les pièces réelles) —
+ * élagué par la table de complétion persistée (`bd_build_and_persist_completions`) :
+ * à la position `pos`, une classe candidate n'est essayée que si l'état
+ * résultant a une complétion non nulle connue à la position `pos + 1`
+ * (chargée à la demande, gardée en cache tant qu'on reste à la même
+ * position — la descente en profondeur d'abord ne change la position
+ * courante que de ±1 à la fois). Position `BORDER_RING_LEN - 1` (dernière) :
+ * pas de niveau suivant à consulter, la fermeture se vérifie directement
+ * contre `closure_target`, comme `bd_finalize_range`. */
+static void bd_reconstruct_class_dfs(struct bd_reconstruct_ctx *rc, int pos, int8_t required, int8_t *counts)
+{
+    if (rc->delivered >= rc->max_rings) {
+        return;
+    }
+    int nb = rc->ctx->nb_classes;
+
+    if (pos == BORDER_RING_LEN - 1) {
+        for (int c = 0; c < nb; c++) {
+            if (rc->ctx->classes[c].is_corner != rc->ctx->is_corner_at[pos] || counts[c] == 0 ||
+                rc->ctx->classes[c].color_a != required || rc->ctx->classes[c].color_b != rc->closure_target) {
+                continue;
+            }
+            rc->class_seq[pos] = (int8_t)c;
+            bd_expand_class_sequence(rc);
+            if (rc->delivered >= rc->max_rings) {
+                return;
+            }
+        }
+        return;
+    }
+
+    if (rc->cached_pos != pos + 1) {
+        if (rc->cached_pos != -1) {
+            bd_level_free(&rc->cached_level);
+        }
+        char path[900];
+        snprintf(path, sizeof path, "%s/completion_%d.bin", rc->back_dir, pos + 1);
+        bd_level_load_file(&rc->cached_level, path);
+        rc->cached_pos = pos + 1;
+    }
+
+    for (int c = 0; c < nb; c++) {
+        if (rc->ctx->classes[c].is_corner != rc->ctx->is_corner_at[pos] || counts[c] == 0 ||
+            rc->ctx->classes[c].color_a != required) {
+            continue;
+        }
+        int8_t next_required = rc->ctx->classes[c].color_b;
+        uint8_t key[1 + BD_MAX_CLASSES];
+        key[0] = (uint8_t)next_required;
+        memcpy(key + 1, counts, (size_t)nb);
+        key[1 + c]--;
+
+        long long completion;
+        if (!bd_level_lookup(&rc->cached_level, key, &completion)) {
+            continue;
+        }
+
+        counts[c]--;
+        rc->class_seq[pos] = (int8_t)c;
+        bd_reconstruct_class_dfs(rc, pos + 1, next_required, counts);
+        counts[c]++;
+
+        if (rc->delivered >= rc->max_rings) {
+            return;
+        }
+    }
+}
+
+/* Reconstruit et délivre, via on_found, chaque anneau de bordure réel
+ * (jusqu'à max_rings) — cf. le commentaire de tête de cette section pour le
+ * mécanisme (passe arrière miroir persistée + DFS de classes guidé par
+ * l'oracle de complétion + expansion en pièces réelles). Contrairement à
+ * bd_count_openings, énumère explicitement les nb_candidates pièces-coin
+ * réelles (pas de raccourci ×4 : reconstruire une rotation géométrique du
+ * paquet serait un risque de bug pour un gain minime, le coût de 4
+ * reconstructions complètes restant négligeable). Le total délivré DOIT
+ * correspondre à border_ring_count_dp — échec bruyant sinon (jamais un
+ * fichier .back silencieusement incomplet, sauf si max_rings a
+ * délibérément coupé la délivrance avant). */
+long long border_ring_reconstruct_dp(map_big_array *map, struct array_part *all_rotate_parts, int nb_workers,
+                                      long long max_rings, border_ring_found_cb on_found, void *user_ctx)
+{
+    int n = (all_rotate_parts->size - 1) / 4;
+
+    struct bd_ctx *ctx = malloc(sizeof *ctx);
+    int base_counts[BD_MAX_CLASSES];
+    int16_t *id_to_class = malloc((size_t)(n + 1) * sizeof *id_to_class);
+    ctx->nb_classes = bd_build_classes(all_rotate_parts, ctx, base_counts, id_to_class, n);
+
+    int8_t order[BORDER_RING_LEN][2];
+    border_ring_order(order);
+    for (int i = 0; i < BORDER_RING_LEN; i++) {
+        int x = order[i][0], y = order[i][1];
+        ctx->is_corner_at[i] = (int8_t)((x == 0 || x == ETERN_SIZE - 1) && (y == 0 || y == ETERN_SIZE - 1));
+    }
+
+    if (nb_workers < 1) {
+        nb_workers = 1;
+    }
+
+    long long known_total = border_ring_count_dp(map, all_rotate_parts, nb_workers);
+
+    struct possibility_packet empty_state;
+    memset(&empty_state, 0, sizeof empty_state);
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            empty_state.grid[x][y] = -2;
+        }
+    }
+    empty_state.min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
+
+    key_part key0;
+    what_search_in_grid_to_key(all_rotate_parts, &empty_state, 0, 0, &key0, (int8_t)map->sizearrayM);
+    map_bucket bucket0 = map_bucket_packed(map, &key0);
+
+    long long total_delivered = 0;
+
+    for (int s = 0; s < bucket0.size && total_delivered < max_rings; s++) {
+        const struct part *cand = &bucket0.parts[s];
+        if (cand->id <= 0 || id_to_class[cand->id] < 0) {
+            continue;
+        }
+
+        int8_t counts[BD_MAX_CLASSES];
+        for (int c = 0; c < ctx->nb_classes; c++) {
+            counts[c] = (int8_t)base_counts[c];
+        }
+        counts[id_to_class[cand->id]]--;
+
+        int8_t initial_required = cand->right;
+        int8_t closure_target = cand->bottom;
+
+        char persist_dir[300];
+        snprintf(persist_dir, sizeof persist_dir, "%s/etii_bd_recon_%d_%d", bd_spill_dir, (int)getpid(), s);
+        bd_mkdir_or_die(persist_dir);
+
+        long long forward_total_for_opening =
+            bd_run_opening(ctx, initial_required, counts, closure_target, nb_workers, persist_dir);
+        bd_build_and_persist_completions(ctx, closure_target, persist_dir);
+
+        struct bd_reconstruct_ctx rc;
+        memset(&rc, 0, sizeof rc);
+        rc.map = map;
+        rc.all_rotate_parts = all_rotate_parts;
+        rc.ctx = ctx;
+        rc.id_to_class = id_to_class;
+        rc.back_dir = persist_dir;
+        rc.closure_target = closure_target;
+        rc.on_found = on_found;
+        rc.user_ctx = user_ctx;
+        rc.max_rings = max_rings - total_delivered;
+        rc.delivered = 0;
+        rc.cached_pos = -1;
+        rc.opening_id = (uint16_t)cand->id;
+        rc.opening_rotation = (uint8_t)cand->rotation;
+
+        int8_t working_counts[BD_MAX_CLASSES];
+        memcpy(working_counts, counts, sizeof counts);
+        bd_reconstruct_class_dfs(&rc, 1, initial_required, working_counts);
+
+        if (rc.cached_pos != -1) {
+            bd_level_free(&rc.cached_level);
+        }
+        bd_persist_cleanup(persist_dir);
+
+        if (rc.delivered != forward_total_for_opening && rc.delivered < rc.max_rings) {
+            fprintf(stderr,
+                    "border_ring_count_dp : reconstruction incomplete pour le coin d'ouverture id=%d — "
+                    "%lld anneau(x) reconstruit(s), %lld attendu(s) pour ce coin — arret\n",
+                    cand->id, rc.delivered, forward_total_for_opening);
+            free(id_to_class);
+            free(ctx);
+            exit(1);
+        }
+
+        total_delivered += rc.delivered;
+    }
+
+    if (total_delivered != known_total && total_delivered < max_rings) {
+        fprintf(stderr,
+                "border_ring_count_dp : reconstruction incomplete — %lld anneau(x) reconstruit(s), "
+                "%lld attendu(s) (masse totale) — arret\n",
+                total_delivered, known_total);
+        exit(1);
+    }
+
+    free(id_to_class);
+    free(ctx);
+    return total_delivered;
 }

@@ -558,10 +558,62 @@ supprimé avant la fin de toute la transition. Trois corrections :
   disque plus grand que `/tmp` — même logique que `--stock-spill-dir` pour le
   stock principal (`core/stock_spill.c`).
 
-Contrairement à `gen_root`, cet outil ne produit aucune racine de stock —
-c'est la **phase 1** d'un projet en deux temps : seul un chiffre est
-rapporté (la masse totale `N`). La génération de racines `.back` à partir des
-anneaux trouvés est un sous-projet distinct, non implémenté.
+**`--save-rings FILE --max-rings N` (uniquement avec `--dp`) reconstruit les
+anneaux réels** et les écrit dans `FILE` au format `.back` — le sous-projet 2
+mentionné plus haut, désormais implémenté. Sur le jeu réel (256 pièces),
+Xavier a mesuré (comptage `--dp` avec un seul coin fixé) `n_single_opening = 8`,
+soit un total réel de `8 × 4 = 32` anneaux — minuscule, malgré le DFS brut qui
+ne termine pas (voir plus haut). `border_ring_count_dp` ne conserve pourtant
+rien d'exploitable une fois le total calculé (chaque niveau est jeté dès le
+suivant construit) — reconstruire exige donc un vrai mécanisme dédié
+(`border_ring_reconstruct_dp`, `tests/tools/border_ring_dp.c`) :
+
+1. **Passe avant persistée** : la même DP que `border_ring_count_dp`, mais
+   chaque niveau produit est en plus écrit sur disque
+   (`bd_run_opening(..., persist_dir)`) au lieu d'être jeté — un fichier par
+   job/fragment contributeur à chaque position (fusionnés à la LECTURE, pas
+   à l'écriture, cf. `bd_persist_load_merged`).
+2. **Tables de complétion** (`bd_build_and_persist_completions`) : un balayage
+   BOTTOM-UP des niveaux persistés, de la dernière position vers la première —
+   pour CHAQUE état réellement atteint par la passe avant à une position,
+   calcule le nombre de façons de compléter l'anneau jusqu'à la fermeture à
+   partir de cet état (`bd_completion_step`). ATTENTION : une tentative
+   initiale utilisant une DP « miroir » indépendante (classes couleur
+   d'entrée/sortie échangées, repartant d'un état générique) s'est révélée
+   incorrecte — la complétion d'un état DOIT être dérivée des états
+   RÉELLEMENT atteints par la passe avant à cette position, jamais d'un
+   espace d'états recalculé séparément.
+3. **DFS guidé sur les CLASSES** (`bd_reconstruct_class_dfs`) : à chaque
+   position, une classe candidate n'est essayée que si son état résultant a
+   une complétion non nulle dans la table de la position suivante — chaque
+   branche explorée mène donc forcément à une fermeture valide. Bien moins
+   coûteux qu'un DFS sur les pièces réelles : l'alphabet de branchement est
+   ~15-18 classes, pas des dizaines de candidats par case.
+4. **Expansion en pièces réelles** (`bd_expand_class_sequence`/`bd_expand_dfs`) :
+   chaque suite de classes complète trouvée est développée en toutes ses
+   assignations de pièces réelles possibles (une par combinaison de pièces
+   disponibles quand une classe utilisée a plusieurs pièces encore libres) —
+   réutilise directement la mécanique de lookup de `bw_dfs`
+   (`tests/tools/border_walk.c`), aucune logique de rotation dupliquée.
+
+Le total délivré DOIT correspondre exactement à `border_ring_count_dp` — échec
+bruyant (`exit(1)`) sinon, sauf si `--max-rings` a délibérément coupé la
+délivrance avant (dans ce cas un total inférieur est attendu, pas une erreur).
+`--max-rings` est un plafond de SÉCURITÉ obligatoire (aucune valeur par défaut
+choisie à la place de l'utilisateur, même principe que `--dp-max-ram-mo`), pas
+une estimation de la masse réelle. Chaque anneau reconstruit est un
+`possibility_packet` complet (bordure remplie, intérieur à `-2`) écrit tel
+quel (`checked` forcé à 0) — même format headerless que `gen_root.c:76-86` et
+`docs/utilisation.md` (§ format `.back`).
+
+**Coût réel important** : la passe avant persistée écrit TOUS les niveaux
+intermédiaires sur disque (jusqu'à `BORDER_RING_LEN - 1` d'entre eux), chacun
+pouvant peser autant que son équivalent en mode `--dp` normal (dizaines de Go
+observés) — `--spill-dir` doit pointer vers un disque avec assez d'espace
+libre. Coût temps : une reconstruction complète PAR pièce-coin d'ouverture
+réelle (typiquement ×4 sur le jeu réel — pas de raccourci par rotation ici,
+contrairement à `bd_count_openings` : reconstruire une rotation géométrique du
+paquet serait un risque de bug pour un gain minime).
 
 Le cœur pur (`border_walk.c`) est compilé avec les autres modules et couvert
 par `test_border_walk.c`, comme `root_from_board.c` pour `gen_root`. Il
