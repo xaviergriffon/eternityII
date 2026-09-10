@@ -179,11 +179,13 @@ static struct array_part *brd_make_rotate_parts(int nb_duplicates)
  * branche réelle pendant EXACTEMENT une transition — assez pour que
  * `cur.used` passe à 2 et déclenche une scission réelle avec les seuils de
  * test quasi nuls (`border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0)`).
- * `bd_pick_nb_shards` garantit `nb_shards >= nb_workers`, donc cette unique
- * scission suffit à elle seule à remplir la pile d'au moins `nb_workers`
- * fragments — assez pour que le mode POOL s'engage réellement (cf.
- * `bd_should_run_solo`), pas seulement le mode SOLO qui traiterait tout
- * séquentiellement. */
+ * `bd_pick_nb_shards` ne dimensionne plus que sur la taille à écouler
+ * (`total_bytes / bd_shard_target_bytes`, plus de plancher `nb_workers`) —
+ * `border_ring_dp_set_shard_target_bytes_for_tests` est donc réglé assez bas
+ * par les tests qui l'utilisent pour que cette unique scission produise
+ * quand même au moins `nb_workers` fragments, assez pour que le mode POOL
+ * s'engage réellement (cf. `bd_should_run_solo`), pas seulement le mode SOLO
+ * qui traiterait tout séquentiellement. */
 static struct array_part *brd_make_rotate_parts_with_fork(int nb_duplicates)
 {
     int8_t ring[BORDER_RING_LEN][2];
@@ -373,7 +375,9 @@ TEST border_ring_count_dp_matches_brute_force_when_forked(void)
    testerait donc jamais réellement ce chemin, quel que soit le seuil) :
    `cur.used` passe à 2 exactement à la position où la fourche diverge,
    suffisant pour déclencher une scission réelle en K fragments (`bd_pick_nb_shards`
-   garantissant K >= nb_workers) — verrouille tout le chemin externe par
+   dimensionné par `bd_shard_target_bytes`, abaissé ci-dessous à 32 octets pour
+   que K dépasse `nb_workers` malgré un niveau minuscule) — verrouille tout le
+   chemin externe par
    hachage (éclatement -> compactage -> reprise) sur des fragments réels,
    pas seulement sur un niveau qui ne dépasse jamais la garde de
    dégénérescence. Sans l'accumulation lors du compactage (bd_level_add, pas
@@ -410,9 +414,11 @@ TEST border_ring_count_dp_matches_brute_force_when_sharded_to_disk(void)
    (cf. son commentaire pour pourquoi une fourche réelle, pas juste
    `nb_duplicates`, est nécessaire pour franchir la garde `cur.used > 1`),
    mais avec un `nb_workers` assez petit (2) pour que l'unique scission
-   qu'elle déclenche — K fragments, K >= nb_workers garanti par
-   `bd_pick_nb_shards` — dépasse `nb_workers` fragments en attente sur la
-   pile dès qu'elle survient, faisant basculer le coordinateur en mode POOL
+   qu'elle déclenche — K fragments, K déterminé par `bd_pick_nb_shards` à
+   partir de `bd_shard_target_bytes` seul (abaissé à 32 octets ci-dessous,
+   assez pour que K dépasse 2 même sur ce niveau minuscule) — dépasse
+   `nb_workers` fragments en attente sur la pile dès qu'elle survient,
+   faisant basculer le coordinateur en mode POOL
    (`bd_should_run_solo`), pas seulement le mode SOLO déjà verrouillé par
    border_ring_count_dp_matches_brute_force_when_sharded_to_disk.
    Le total seul ne suffirait PAS a verrouiller ca : il est identique que le

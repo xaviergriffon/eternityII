@@ -738,11 +738,19 @@ void border_ring_dp_set_max_ram_mo(long mo, int nb_workers)
    transitoires ouverts simultanément par un worker. */
 #define BD_MAX_SHARDS 4096
 
-static int bd_pick_nb_shards(double total_bytes, int nb_workers)
+/* Dimensionne SEULEMENT sur la taille à écouler (`total_bytes` /
+   `bd_shard_target_bytes`) — plus de plancher `>= nb_workers` ici : le forcer
+   fragmentait un niveau à peine au-dessus du seuil de scission en autant de
+   petits fragments qu'il y a de workers configurés, même quand 2 auraient
+   suffi à repasser sous le budget. `nb_workers` reste pertinent ailleurs
+   (`bd_compact_dir` : degré de compaction parallèle, `bd_run_opening` :
+   largeur du pool) mais n'a plus sa place dans le calcul de granularité —
+   voir docs/tests_et_ci.md § Scission par pile LIFO. */
+static int bd_pick_nb_shards(double total_bytes)
 {
     size_t want = (size_t)(total_bytes / bd_shard_target_bytes) + 1;
     size_t n = 1;
-    while (n < want || n < (size_t)nb_workers) {
+    while (n < want) {
         if (n >= BD_MAX_SHARDS) {
             return BD_MAX_SHARDS;
         }
@@ -1285,7 +1293,7 @@ static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t
                boucle de bd_run_opening, un appel par fragment depile — pas
                juste a l'interieur d'un seul appel. */
             static int split_seq = 0;
-            int nb_shards = bd_pick_nb_shards(bytes, nb_workers);
+            int nb_shards = bd_pick_nb_shards(bytes);
             char dir[128];
             snprintf(dir, sizeof dir, "%s/etii_bd_%d_s%d", bd_spill_dir, (int)getpid(), split_seq++);
             struct bd_shard_set shards;
