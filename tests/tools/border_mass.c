@@ -475,8 +475,10 @@ int main(int argc, char **argv)
             return 0;
         }
 
-        long long total = border_ring_count_dp(map, all, forks);
-        printf("masse totale des anneaux de bordure valides : %lld\n", total);
+        bd_ring_count_t total = border_ring_count_dp(map, all, forks);
+        char total_str[BD_RING_COUNT_STRLEN];
+        bd_ring_count_format(total, total_str, sizeof total_str);
+        printf("masse totale des anneaux de bordure valides : %s\n", total_str);
         return 0;
     }
 

@@ -72,6 +72,40 @@
 #include "tools/border_walk.h"
 
 /**
+ * @brief Type des "masses" d'anneaux (nombre de façons) manipulées par ce
+ * module — `unsigned __int128`, pas `long long`.
+ *
+ * Sur le jeu réel (256 pièces), la masse totale dépasse le plafond d'un
+ * `long long` signé (2^63-1 ≈ 9,223x10^18) : le compteur "fragment fermé,
+ * +N anneaux" débordait silencieusement en négatif (UB en C, wrap en
+ * pratique) avant l'introduction de ce type. Une borne haute jetable
+ * (permuter librement 56 pièces de bord + 4 coins, sans aucune contrainte de
+ * couleur) donne 56!x4! ≈ 1,7x10^76 — bien au-delà même d'un `unsigned
+ * __int128` (~3,4x10^38) — donc AUCUN entier fixe n'est prouvablement
+ * suffisant dans l'absolu. En pratique, la multiplicité par classe reste
+ * petite (max 4 sur `data/pieces.csv`, cf. `bd_build_classes`), ce qui rend
+ * un dépassement de 128 bits hautement improbable pour ce jeu de pièces —
+ * mais `bd_ring_count_format`/l'addition et la multiplication protégées de
+ * `border_ring_dp.c` existent précisément pour transformer un futur
+ * dépassement (jeu de pièces différent, bordure plus permissive) en arrêt
+ * bruyant plutôt qu'en un nouveau wrap silencieux.
+ */
+typedef unsigned __int128 bd_ring_count_t;
+
+/** Taille minimale d'un buffer passé à `bd_ring_count_format` — 39 chiffres
+ * décimaux pour la valeur maximale d'un `bd_ring_count_t` (2^128-1), plus le
+ * terminateur nul. */
+#define BD_RING_COUNT_STRLEN 40
+
+/**
+ * @brief Formate `value` en décimal dans `buf` (tronqué si `buflen` est trop
+ * petit, jamais un débordement de `buf`) — seul moyen d'afficher un
+ * `bd_ring_count_t`, `printf` n'ayant aucune conversion native pour
+ * `__int128`. `buflen` doit être au moins `BD_RING_COUNT_STRLEN`.
+ */
+void bd_ring_count_format(bd_ring_count_t value, char *buf, size_t buflen);
+
+/**
  * @brief Calcule la masse totale des anneaux de bordure valides, EXACTEMENT
  * (même définition et même résultat que `border_walk_count`), par
  * programmation dynamique sur les classes de pièces interchangeables.
@@ -103,7 +137,7 @@
  *                         retournerait, mais sans jamais matérialiser
  *                         d'anneau complet.
  */
-long long border_ring_count_dp(map_big_array *map, struct array_part *all_rotate_parts, int nb_workers);
+bd_ring_count_t border_ring_count_dp(map_big_array *map, struct array_part *all_rotate_parts, int nb_workers);
 
 /**
  * @brief Change le répertoire des fragments de scission et des fichiers

@@ -286,7 +286,7 @@ TEST border_ring_count_dp_returns_zero_without_any_border_shaped_piece(void)
     map_big_array *map = prepare_map_part(all);
     ASSERT(map != NULL);
 
-    ASSERT_EQ_FMT(0LL, border_ring_count_dp(map, all, 1), "%lld");
+    ASSERT_EQ_FMT(0LL, (long long)border_ring_count_dp(map, all, 1), "%lld");
 
     free_bigarray(map);
     free_array_part(all);
@@ -304,7 +304,7 @@ TEST border_ring_count_dp_matches_border_walk_count_on_a_unique_ring(void)
     ASSERT(map != NULL);
 
     long long brute = border_walk_count(map, all, NULL, NULL);
-    long long dp = border_ring_count_dp(map, all, 1);
+    long long dp = (long long)border_ring_count_dp(map, all, 1);
 
     ASSERT_EQ_FMT(4LL, brute, "%lld");
     ASSERT_EQ_FMT(brute, dp, "%lld");
@@ -329,7 +329,7 @@ TEST border_ring_count_dp_counts_class_multiplicity_correctly(void)
     ASSERT(map != NULL);
 
     long long brute = border_walk_count(map, all, NULL, NULL);
-    long long dp = border_ring_count_dp(map, all, 1);
+    long long dp = (long long)border_ring_count_dp(map, all, 1);
 
     ASSERT_EQ_FMT(12LL, brute, "%lld");
     ASSERT_EQ_FMT(brute, dp, "%lld");
@@ -356,7 +356,7 @@ TEST border_ring_count_dp_matches_brute_force_when_forked(void)
     long long brute = border_walk_count(map, all, NULL, NULL);
 
     border_ring_dp_set_fork_min_states_for_tests(1);
-    long long dp = border_ring_count_dp(map, all, 4);
+    long long dp = (long long)border_ring_count_dp(map, all, 4);
     border_ring_dp_set_fork_min_states_for_tests(50000);
 
     ASSERT_EQ_FMT(12LL, brute, "%lld");
@@ -398,7 +398,7 @@ TEST border_ring_count_dp_matches_brute_force_when_sharded_to_disk(void)
 
     border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0);
     border_ring_dp_set_shard_target_bytes_for_tests(32.0);
-    long long dp = border_ring_count_dp(map, all, 4);
+    long long dp = (long long)border_ring_count_dp(map, all, 4);
     border_ring_dp_set_disk_mode_min_bytes_for_tests(2.0 * 1024.0 * 1024.0 * 1024.0);
     border_ring_dp_set_shard_target_bytes_for_tests(768.0 * 1024.0 * 1024.0);
 
@@ -439,7 +439,7 @@ TEST border_ring_count_dp_matches_brute_force_when_pool_mode_engages(void)
     border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0);
     border_ring_dp_set_shard_target_bytes_for_tests(32.0);
     border_ring_dp_reset_pool_jobs_forked_for_tests();
-    long long dp = border_ring_count_dp(map, all, 2);
+    long long dp = (long long)border_ring_count_dp(map, all, 2);
     long long pool_jobs_forked = border_ring_dp_get_pool_jobs_forked_for_tests();
     border_ring_dp_set_disk_mode_min_bytes_for_tests(2.0 * 1024.0 * 1024.0 * 1024.0);
     border_ring_dp_set_shard_target_bytes_for_tests(768.0 * 1024.0 * 1024.0);
@@ -512,7 +512,7 @@ TEST border_ring_count_dp_matches_border_walk_count_on_real_pieces16(void)
     ASSERT(map != NULL);
 
     long long brute = border_walk_count(map, all, NULL, NULL);
-    long long dp = border_ring_count_dp(map, all, 1);
+    long long dp = (long long)border_ring_count_dp(map, all, 1);
 
     ASSERT_EQ_FMT(4LL, brute, "%lld");
     ASSERT_EQ_FMT(brute, dp, "%lld");
@@ -537,7 +537,7 @@ TEST border_ring_count_dp_matches_border_walk_count_on_real_pieces16_sharded_to_
 
     border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0);
     border_ring_dp_set_shard_target_bytes_for_tests(32.0);
-    long long dp = border_ring_count_dp(map, all, 4);
+    long long dp = (long long)border_ring_count_dp(map, all, 4);
     border_ring_dp_set_disk_mode_min_bytes_for_tests(2.0 * 1024.0 * 1024.0 * 1024.0);
     border_ring_dp_set_shard_target_bytes_for_tests(768.0 * 1024.0 * 1024.0);
 
@@ -552,10 +552,13 @@ TEST border_ring_count_dp_matches_border_walk_count_on_real_pieces16_sharded_to_
 
 TEST bd_estimate_reload_bytes_matches_known_capacity_growth(void)
 {
-    /* key_len=5, count=0 : hint=16, capacity reste 16 (deja >= hint). */
-    ASSERT_EQ_FMT(16.0 * (5 + 8) + 2.0, bd_estimate_reload_bytes(5, 0), "%.1f");
+    /* key_len=5, count=0 : hint=16, capacity reste 16 (deja >= hint). sizeof
+       bd_ring_count_t (unsigned __int128) = 16, pas sizeof(long long) = 8 —
+       cf. le commentaire de bd_ring_count_t dans border_ring_dp.h pour
+       pourquoi la masse totale d'anneaux a besoin de 128 bits. */
+    ASSERT_EQ_FMT(16.0 * (5 + 16) + 2.0, bd_estimate_reload_bytes(5, 0), "%.1f");
     /* key_len=5, count=10 : hint=36, capacite double 16->32->64. */
-    ASSERT_EQ_FMT(64.0 * (5 + 8) + 8.0, bd_estimate_reload_bytes(5, 10), "%.1f");
+    ASSERT_EQ_FMT(64.0 * (5 + 16) + 8.0, bd_estimate_reload_bytes(5, 10), "%.1f");
     PASS();
 }
 
@@ -683,7 +686,7 @@ TEST border_ring_reconstruct_dp_matches_count_on_a_unique_ring(void)
     map_big_array *map = prepare_map_part(all);
     ASSERT(map != NULL);
 
-    long long total = border_ring_count_dp(map, all, 1);
+    long long total = (long long)border_ring_count_dp(map, all, 1);
     ASSERT_EQ_FMT(4LL, total, "%lld");
 
     struct brd_recon_ctx ctx;
@@ -721,7 +724,7 @@ TEST border_ring_reconstruct_dp_expands_class_multiplicity_to_all_real_rings(voi
     map_big_array *map = prepare_map_part(all);
     ASSERT(map != NULL);
 
-    long long total = border_ring_count_dp(map, all, 1);
+    long long total = (long long)border_ring_count_dp(map, all, 1);
     ASSERT_EQ_FMT(12LL, total, "%lld");
 
     struct brd_recon_ctx ctx;

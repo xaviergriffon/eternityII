@@ -77,7 +77,7 @@ struct bd_ctx {
  * mémoire, plus important que le gain d'octets par emplacement. */
 struct bd_level {
     uint8_t *keys;      /* capacity * key_len octets */
-    long long *values;  /* capacity emplacements */
+    bd_ring_count_t *values; /* capacity emplacements */
     uint8_t *occupied;  /* bitmap, ceil(capacity/8) octets */
     size_t capacity;    /* toujours une puissance de 2 */
     size_t used;
@@ -86,8 +86,67 @@ struct bd_level {
 
 static double bd_level_bytes(const struct bd_level *level)
 {
-    return (double)level->capacity * ((size_t)level->key_len + sizeof(long long)) +
+    return (double)level->capacity * ((size_t)level->key_len + sizeof(bd_ring_count_t)) +
            (double)((level->capacity + 7) / 8);
+}
+
+/* bd_ring_count_format : cf. border_ring_dp.h. Seul moyen d'afficher un
+   bd_ring_count_t (__int128 n'a aucune conversion printf native). */
+void bd_ring_count_format(bd_ring_count_t value, char *buf, size_t buflen)
+{
+    char tmp[BD_RING_COUNT_STRLEN];
+    size_t i = 0;
+    if (value == 0) {
+        tmp[i++] = '0';
+    } else {
+        while (value > 0 && i < sizeof tmp) {
+            tmp[i++] = (char)('0' + (int)(value % 10));
+            value /= 10;
+        }
+    }
+    size_t n = 0;
+    while (i > 0 && n + 1 < buflen) {
+        buf[n++] = tmp[--i];
+    }
+    if (buflen > 0) {
+        buf[n] = '\0';
+    }
+}
+
+/* Addition/multiplication protégées contre un dépassement de bd_ring_count_t
+   (128 bits) : plutôt qu'un wrap silencieux (le piège corrigé ici — un
+   `long long` débordait déjà sur le jeu réel, cf. le commentaire de tête de
+   bd_ring_count_t dans border_ring_dp.h), échec bruyant immédiat, même
+   philosophie que bd_level_alloc_or_die/bd_write_or_die. */
+static bd_ring_count_t bd_count_add_or_die(bd_ring_count_t a, bd_ring_count_t b, const char *context)
+{
+    bd_ring_count_t r = a + b;
+    if (r < a) {
+        char sa[BD_RING_COUNT_STRLEN], sb[BD_RING_COUNT_STRLEN];
+        bd_ring_count_format(a, sa, sizeof sa);
+        bd_ring_count_format(b, sb, sizeof sb);
+        fprintf(stderr,
+                "border_ring_count_dp : depassement de bd_ring_count_t (128 bits) dans %s (%s + %s) — "
+                "arret\n",
+                context, sa, sb);
+        exit(1);
+    }
+    return r;
+}
+
+static bd_ring_count_t bd_count_mul_or_die(bd_ring_count_t a, bd_ring_count_t b, const char *context)
+{
+    if (a != 0 && b > (bd_ring_count_t)-1 / a) {
+        char sa[BD_RING_COUNT_STRLEN], sb[BD_RING_COUNT_STRLEN];
+        bd_ring_count_format(a, sa, sizeof sa);
+        bd_ring_count_format(b, sb, sizeof sb);
+        fprintf(stderr,
+                "border_ring_count_dp : depassement de bd_ring_count_t (128 bits) dans %s (%s * %s) — "
+                "arret\n",
+                context, sa, sb);
+        exit(1);
+    }
+    return a * b;
 }
 
 /* Pas de repli silencieux sur un échec d'allocation : un niveau à moitié
@@ -153,7 +212,7 @@ double bd_estimate_reload_bytes(int32_t key_len, uint64_t count)
     while (capacity < hint) {
         capacity <<= 1;
     }
-    return (double)capacity * ((size_t)key_len + sizeof(long long)) + (double)((capacity + 7) / 8);
+    return (double)capacity * ((size_t)key_len + sizeof(bd_ring_count_t)) + (double)((capacity + 7) / 8);
 }
 
 /* Test-only : vérifie que l'estimation ci-dessus égale EXACTEMENT ce qu'un
@@ -193,7 +252,7 @@ static void bd_level_grow(struct bd_level *level);
 /* Insère `key` avec la valeur `delta`, ou l'AJOUTE à la valeur existante si
    `key` est déjà présente — jamais un simple écrasement, cf. le commentaire
    de `struct bd_level`. */
-static void bd_level_add(struct bd_level *level, const uint8_t *key, long long delta)
+static void bd_level_add(struct bd_level *level, const uint8_t *key, bd_ring_count_t delta)
 {
     if (level->used * 10 >= level->capacity * 6) { /* facteur de charge > 0,6 */
         bd_level_grow(level);
@@ -210,7 +269,7 @@ static void bd_level_add(struct bd_level *level, const uint8_t *key, long long d
             return;
         }
         if (memcmp(level->keys + idx * (size_t)level->key_len, key, (size_t)level->key_len) == 0) {
-            level->values[idx] += delta;
+            level->values[idx] = bd_count_add_or_die(level->values[idx], delta, "bd_level_add");
             return;
         }
         idx = (idx + 1) & mask;
@@ -363,7 +422,7 @@ static void bd_transition_range(const struct bd_ctx *ctx, int want_corner,
         const uint8_t *key = level_cur->keys + idx * (size_t)level_cur->key_len;
         int8_t required = (int8_t)key[0];
         const int8_t *counts = (const int8_t *)(key + 1);
-        long long ways = level_cur->values[idx];
+        bd_ring_count_t ways = level_cur->values[idx];
 
         for (int c = 0; c < nb; c++) {
             if (ctx->classes[c].is_corner != want_corner || counts[c] == 0 ||
@@ -373,7 +432,8 @@ static void bd_transition_range(const struct bd_ctx *ctx, int want_corner,
             next_key[0] = (uint8_t)ctx->classes[c].color_b;
             memcpy(next_key + 1, counts, (size_t)nb);
             next_key[1 + c]--;
-            bd_level_add(level_next, next_key, ways * counts[c]);
+            bd_level_add(level_next, next_key,
+                         bd_count_mul_or_die(ways, (bd_ring_count_t)counts[c], "bd_transition_range"));
         }
     }
 }
@@ -381,11 +441,11 @@ static void bd_transition_range(const struct bd_ctx *ctx, int want_corner,
 /* Variante terminale (dernière case de l'anneau) : au lieu de produire un
    niveau suivant, cumule directement dans le total dès que la couleur
    produite ferme l'anneau sur la pièce d'ouverture. */
-static long long bd_finalize_range(const struct bd_ctx *ctx, int want_corner, int8_t closure_target,
-                                    const struct bd_level *level_cur, size_t start, size_t end)
+static bd_ring_count_t bd_finalize_range(const struct bd_ctx *ctx, int want_corner, int8_t closure_target,
+                                          const struct bd_level *level_cur, size_t start, size_t end)
 {
     int nb = ctx->nb_classes;
-    long long total = 0;
+    bd_ring_count_t total = 0;
 
     for (size_t idx = start; idx < end; idx++) {
         if (!bd_level_is_occupied(level_cur, idx)) {
@@ -394,14 +454,16 @@ static long long bd_finalize_range(const struct bd_ctx *ctx, int want_corner, in
         const uint8_t *key = level_cur->keys + idx * (size_t)level_cur->key_len;
         int8_t required = (int8_t)key[0];
         const int8_t *counts = (const int8_t *)(key + 1);
-        long long ways = level_cur->values[idx];
+        bd_ring_count_t ways = level_cur->values[idx];
 
         for (int c = 0; c < nb; c++) {
             if (ctx->classes[c].is_corner != want_corner || counts[c] == 0 ||
                 ctx->classes[c].color_a != required || ctx->classes[c].color_b != closure_target) {
                 continue;
             }
-            total += ways * counts[c];
+            total = bd_count_add_or_die(
+                total, bd_count_mul_or_die(ways, (bd_ring_count_t)counts[c], "bd_finalize_range"),
+                "bd_finalize_range");
         }
     }
     return total;
@@ -479,7 +541,7 @@ static void bd_level_write_file(const struct bd_level *level, const char *path)
     for (size_t idx = 0; idx < level->capacity; idx++) {
         if (bd_level_is_occupied(level, idx)) {
             bd_write_or_die(fp, level->keys + idx * (size_t)level->key_len, (size_t)level->key_len, path);
-            bd_write_or_die(fp, &level->values[idx], sizeof(long long), path);
+            bd_write_or_die(fp, &level->values[idx], sizeof(bd_ring_count_t), path);
         }
     }
     bd_close_or_die(fp, path);
@@ -501,7 +563,7 @@ static void bd_level_merge_file(struct bd_level *level, const char *path)
     }
     uint8_t key[1 + BD_MAX_CLASSES];
     for (uint64_t i = 0; i < count; i++) {
-        long long value;
+        bd_ring_count_t value;
         if (fread(key, (size_t)key_len, 1, fp) != 1 || fread(&value, sizeof value, 1, fp) != 1) {
             fprintf(stderr, "border_ring_count_dp : fichier de fusion '%s' tronque — arret\n", path);
             exit(1);
@@ -791,7 +853,7 @@ static void bd_level_load_file(struct bd_level *level, const char *path)
     bd_level_init(level, key_len, (size_t)count * 2 + 16);
     uint8_t key[1 + BD_MAX_CLASSES];
     for (uint64_t i = 0; i < count; i++) {
-        long long value;
+        bd_ring_count_t value;
         if (fread(key, (size_t)key_len, 1, fp) != 1 || fread(&value, sizeof value, 1, fp) != 1) {
             fprintf(stderr, "border_ring_count_dp : fragment '%s' tronque — arret\n", path);
             exit(1);
@@ -819,7 +881,7 @@ static void bd_raw_merge_file(struct bd_level *level, const char *path, int key_
         if (fread(key, (size_t)key_len, 1, fp) != 1) {
             break;
         }
-        long long value;
+        bd_ring_count_t value;
         if (fread(&value, sizeof value, 1, fp) != 1) {
             fprintf(stderr, "border_ring_count_dp : fragment brut '%s' tronque — arret\n", path);
             exit(1);
@@ -1002,7 +1064,7 @@ static void bd_level_to_shards(const struct bd_level *level, const char *dir, in
         const uint8_t *key = level->keys + idx * (size_t)level->key_len;
         int d = bd_shard_of(key, level->key_len, nb_shards);
         bd_write_or_die(out_files[d], key, (size_t)level->key_len, dir);
-        bd_write_or_die(out_files[d], &level->values[idx], sizeof(long long), dir);
+        bd_write_or_die(out_files[d], &level->values[idx], sizeof(bd_ring_count_t), dir);
     }
     for (int d = 0; d < nb_shards; d++) {
         bd_close_or_die(out_files[d], dir);
@@ -1070,7 +1132,7 @@ int bd_should_run_solo(int active, int stack_count, int nb_workers)
    pour lui-meme apres une scission, cf. spec § Comportement uniforme d'un
    job. */
 struct bd_job_result {
-    long long total;
+    bd_ring_count_t total;
     int closed;
     char shard_dir[128];
     int nb_shards;
@@ -1162,7 +1224,7 @@ static void bd_persist_load_merged(const char *persist_dir, int pos, int key_len
 /* Recherche pure (sans insertion), sur le même schéma d'adressage ouvert que
    bd_level_add — jamais utilisée par la passe avant (comptage), seulement par
    la reconstruction guidée pour tester si un état a une complétion connue. */
-static int bd_level_lookup(const struct bd_level *level, const uint8_t *key, long long *out_value)
+static int bd_level_lookup(const struct bd_level *level, const uint8_t *key, bd_ring_count_t *out_value)
 {
     if (level->capacity == 0) {
         return 0;
@@ -1315,8 +1377,8 @@ static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t
         }
     }
 
-    long long total = bd_finalize_range(ctx, ctx->is_corner_at[BORDER_RING_LEN - 1], closure_target, &cur, 0,
-                                         cur.capacity);
+    bd_ring_count_t total = bd_finalize_range(ctx, ctx->is_corner_at[BORDER_RING_LEN - 1], closure_target, &cur,
+                                               0, cur.capacity);
     bd_level_free(&cur);
     result.closed = 1;
     result.total = total;
@@ -1326,13 +1388,17 @@ static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t
 /* Repousse le resultat d'un job vers la pile partagee : accumule le total
    s'il a ferme l'anneau, ou empile les K fragments produits sinon — jamais
    les deux. */
-static void bd_apply_job_result(struct bd_pending_stack *stack, long long *total, const struct bd_job_result *r)
+static void bd_apply_job_result(struct bd_pending_stack *stack, bd_ring_count_t *total,
+                                 const struct bd_job_result *r)
 {
     if (r->closed) {
-        *total += r->total;
+        *total = bd_count_add_or_die(*total, r->total, "bd_apply_job_result");
+        char sr[BD_RING_COUNT_STRLEN], st[BD_RING_COUNT_STRLEN];
+        bd_ring_count_format(r->total, sr, sizeof sr);
+        bd_ring_count_format(*total, st, sizeof st);
         fprintf(stderr,
-                "border_ring_count_dp : fragment ferme, +%lld anneaux (total cumule %lld, %d fragment(s) en attente)\n",
-                r->total, *total, stack->count);
+                "border_ring_count_dp : fragment ferme, +%s anneaux (total cumule %s, %d fragment(s) en attente)\n",
+                sr, st, stack->count);
         return;
     }
     for (int d = r->nb_shards - 1; d >= 0; d--) {
@@ -1525,7 +1591,7 @@ double border_ring_dp_get_pool_job_budget_bytes_for_tests(void)
  * strictement monoprocessus) des que la pile en a assez — bascule reevaluee
  * a chaque tour de la boucle principale.
  */
-static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_required,
+static bd_ring_count_t bd_run_opening(const struct bd_ctx *ctx, int8_t initial_required,
                                  const int8_t *initial_counts, int8_t closure_target, int nb_workers,
                                  const char *persist_dir)
 {
@@ -1535,7 +1601,7 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
 
     struct bd_pending_stack stack;
     memset(&stack, 0, sizeof stack);
-    long long total = 0;
+    bd_ring_count_t total = 0;
 
     /* Job d'amorcage (l'ouverture) : toujours SOLO, rien d'autre a
        repartir a cet instant. */
@@ -1665,7 +1731,7 @@ static long long bd_run_opening(const struct bd_ctx *ctx, int8_t initial_require
  * donc la prémisse (chaque anneau valide utilise les 4, une fois chacune)
  * tient aussi sur le jeu réel. Ce court-circuit économise ~(nb_candidates-1)
  * fois le coût du DP complet — le poste dominant du temps de calcul. */
-static long long bd_count_openings(map_big_array *map, struct array_part *all_rotate_parts,
+static bd_ring_count_t bd_count_openings(map_big_array *map, struct array_part *all_rotate_parts,
                                     struct bd_ctx *ctx, const int16_t *id_to_class,
                                     const int base_counts[BD_MAX_CLASSES], int nb_workers)
 {
@@ -1705,12 +1771,12 @@ static long long bd_count_openings(map_big_array *map, struct array_part *all_ro
     counts[id_to_class[first_cand->id]]--;
 
     /* case 1 : k4(LEFT) = grid[0][0].right ; derniere case : k1(TOP) = grid[0][0].bottom */
-    long long n_single_opening =
+    bd_ring_count_t n_single_opening =
         bd_run_opening(ctx, first_cand->right, counts, first_cand->bottom, nb_workers, NULL);
-    return n_single_opening * (long long)nb_candidates;
+    return bd_count_mul_or_die(n_single_opening, (bd_ring_count_t)nb_candidates, "bd_count_openings");
 }
 
-long long border_ring_count_dp(map_big_array *map, struct array_part *all_rotate_parts, int nb_workers)
+bd_ring_count_t border_ring_count_dp(map_big_array *map, struct array_part *all_rotate_parts, int nb_workers)
 {
     int n = (all_rotate_parts->size - 1) / 4;
 
@@ -1731,7 +1797,7 @@ long long border_ring_count_dp(map_big_array *map, struct array_part *all_rotate
     if (nb_workers < 1) {
         nb_workers = 1;
     }
-    long long total = bd_count_openings(map, all_rotate_parts, ctx, id_to_class, base_counts, nb_workers);
+    bd_ring_count_t total = bd_count_openings(map, all_rotate_parts, ctx, id_to_class, base_counts, nb_workers);
 
     free(id_to_class);
     free(ctx);
@@ -1791,14 +1857,14 @@ static void bd_completion_step(const struct bd_ctx *ctx, int pos, int8_t closure
         int8_t required = (int8_t)key[0];
         const int8_t *counts = (const int8_t *)(key + 1);
 
-        long long comp = 0;
+        bd_ring_count_t comp = 0;
         for (int c = 0; c < nb; c++) {
             if (ctx->classes[c].is_corner != want_corner || counts[c] == 0 || ctx->classes[c].color_a != required) {
                 continue;
             }
             if (pos == BORDER_RING_LEN - 1) {
                 if (ctx->classes[c].color_b == closure_target) {
-                    comp += counts[c];
+                    comp = bd_count_add_or_die(comp, (bd_ring_count_t)counts[c], "bd_completion_step");
                 }
                 continue;
             }
@@ -1806,9 +1872,11 @@ static void bd_completion_step(const struct bd_ctx *ctx, int pos, int8_t closure
             next_key[0] = (uint8_t)ctx->classes[c].color_b;
             memcpy(next_key + 1, counts, (size_t)nb);
             next_key[1 + c]--;
-            long long next_comp;
+            bd_ring_count_t next_comp;
             if (bd_level_lookup(completion_next, next_key, &next_comp)) {
-                comp += counts[c] * next_comp;
+                comp = bd_count_add_or_die(
+                    comp, bd_count_mul_or_die(next_comp, (bd_ring_count_t)counts[c], "bd_completion_step"),
+                    "bd_completion_step");
             }
         }
         if (comp > 0) {
@@ -1997,7 +2065,7 @@ static void bd_reconstruct_class_dfs(struct bd_reconstruct_ctx *rc, int pos, int
         memcpy(key + 1, counts, (size_t)nb);
         key[1 + c]--;
 
-        long long completion;
+        bd_ring_count_t completion;
         if (!bd_level_lookup(&rc->cached_level, key, &completion)) {
             continue;
         }
@@ -2045,7 +2113,7 @@ long long border_ring_reconstruct_dp(map_big_array *map, struct array_part *all_
         nb_workers = 1;
     }
 
-    long long known_total = border_ring_count_dp(map, all_rotate_parts, nb_workers);
+    bd_ring_count_t known_total = border_ring_count_dp(map, all_rotate_parts, nb_workers);
 
     struct possibility_packet empty_state;
     memset(&empty_state, 0, sizeof empty_state);
@@ -2081,7 +2149,7 @@ long long border_ring_reconstruct_dp(map_big_array *map, struct array_part *all_
         snprintf(persist_dir, sizeof persist_dir, "%s/etii_bd_recon_%d_%d", bd_spill_dir, (int)getpid(), s);
         bd_mkdir_or_die(persist_dir);
 
-        long long forward_total_for_opening =
+        bd_ring_count_t forward_total_for_opening =
             bd_run_opening(ctx, initial_required, counts, closure_target, nb_workers, persist_dir);
         bd_build_and_persist_completions(ctx, closure_target, persist_dir);
 
@@ -2110,11 +2178,13 @@ long long border_ring_reconstruct_dp(map_big_array *map, struct array_part *all_
         }
         bd_persist_cleanup(persist_dir);
 
-        if (rc.delivered != forward_total_for_opening && rc.delivered < rc.max_rings) {
+        if ((bd_ring_count_t)rc.delivered != forward_total_for_opening && rc.delivered < rc.max_rings) {
+            char sf[BD_RING_COUNT_STRLEN];
+            bd_ring_count_format(forward_total_for_opening, sf, sizeof sf);
             fprintf(stderr,
                     "border_ring_count_dp : reconstruction incomplete pour le coin d'ouverture id=%d — "
-                    "%lld anneau(x) reconstruit(s), %lld attendu(s) pour ce coin — arret\n",
-                    cand->id, rc.delivered, forward_total_for_opening);
+                    "%lld anneau(x) reconstruit(s), %s attendu(s) pour ce coin — arret\n",
+                    cand->id, rc.delivered, sf);
             free(id_to_class);
             free(ctx);
             exit(1);
@@ -2123,11 +2193,13 @@ long long border_ring_reconstruct_dp(map_big_array *map, struct array_part *all_
         total_delivered += rc.delivered;
     }
 
-    if (total_delivered != known_total && total_delivered < max_rings) {
+    if ((bd_ring_count_t)total_delivered != known_total && total_delivered < max_rings) {
+        char sk[BD_RING_COUNT_STRLEN];
+        bd_ring_count_format(known_total, sk, sizeof sk);
         fprintf(stderr,
                 "border_ring_count_dp : reconstruction incomplete — %lld anneau(x) reconstruit(s), "
-                "%lld attendu(s) (masse totale) — arret\n",
-                total_delivered, known_total);
+                "%s attendu(s) (masse totale) — arret\n",
+                total_delivered, sk);
         exit(1);
     }
 
