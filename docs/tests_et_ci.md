@@ -417,6 +417,24 @@ pile explicite remplaçant une récursion en profondeur d'abord. C'est un
 coordinateur central (`bd_run_opening`) qui décide, à chaque tour de boucle,
 lequel des fragments en attente reprendre et comment.
 
+**Signal de progression à la fermeture d'un fragment** : chaque ligne
+`position %d/%d, %zu etats` n'affiche que la taille du niveau COURANT. Or le
+nombre d'états atteignables à la DERNIÈRE position de l'anneau est borné par
+le nombre de classes (chaque transition consomme exactement une pièce d'une
+classe, donc à la dernière position il ne reste jamais qu'UNE seule pièce à
+placer, toutes classes confondues) — indépendant de la taille du fragment qui
+y arrive. Sur un run avec beaucoup de fragments, cette dernière position
+revient donc répéter la même poignée d'états à chaque fragment traité, sans
+rien montrer qui avance visiblement. `bd_apply_job_result` journalise donc,
+dès qu'un fragment FERME l'anneau (`r->closed`), sa contribution et le total
+cumulé :
+`fragment ferme, +N anneaux (total cumule T, K fragment(s) en attente)` — un
+signe de vie indépendant du numéro de position, utile pour distinguer un run
+qui avance encore d'un run bloqué. Ce total cumulé est celui de l'UNIQUE
+ouverture traitée par `bd_run_opening` (`bd_count_openings` le multiplie par
+`nb_candidates` seulement après, donc ce nombre n'est pas encore le total
+final affiché par `border_mass`).
+
 **Pool de workers à deux modes (SOLO / POOL)** — `bd_should_run_solo(active,
 stack_count, nb_workers)` tranche entre les deux, jamais simultanément : un
 pool déjà lancé va jusqu'au bout de ses jobs actifs avant que le mode soit

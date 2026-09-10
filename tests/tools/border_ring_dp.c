@@ -1330,6 +1330,9 @@ static void bd_apply_job_result(struct bd_pending_stack *stack, long long *total
 {
     if (r->closed) {
         *total += r->total;
+        fprintf(stderr,
+                "border_ring_count_dp : fragment ferme, +%lld anneaux (total cumule %lld, %d fragment(s) en attente)\n",
+                r->total, *total, stack->count);
         return;
     }
     for (int d = r->nb_shards - 1; d >= 0; d--) {
