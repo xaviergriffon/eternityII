@@ -37,6 +37,21 @@ void border_ring_dp_set_fork_min_states_for_tests(size_t n);
 void border_ring_dp_set_disk_mode_min_bytes_for_tests(double n);
 void border_ring_dp_set_shard_target_bytes_for_tests(double n);
 
+/* Test-only, jamais déclarée dans border_ring_dp.h — même schéma. Abaisse le
+   nombre d'emplacements de `cur` traités entre deux contrôles de taille de
+   `next` pendant une transition séquentielle, pour qu'un fixture minuscule
+   suffise à exercer réellement une pause MI-transition (cf. la section
+   "Pause mi-transition" de bd_run_fragment_job), pas seulement une scission
+   de fin de position. */
+void border_ring_dp_set_transition_chunk_slots_for_tests(size_t n);
+
+/* Test-only, jamais déclarées dans border_ring_dp.h — même schéma que
+   border_ring_dp_reset_pool_jobs_forked_for_tests/_get_. Seul moyen pour un
+   test de prouver qu'une pause mi-transition a réellement eu lieu (cf. le
+   commentaire à sa déclaration dans border_ring_dp.c). */
+void border_ring_dp_reset_mid_transition_pauses_for_tests(void);
+long border_ring_dp_get_mid_transition_pauses_for_tests(void);
+
 /* Test-only, jamais déclarées dans border_ring_dp.h — même schéma que
    border_ring_dp_set_fork_min_states_for_tests. */
 double bd_estimate_reload_bytes(int32_t key_len, uint64_t count);
@@ -64,13 +79,23 @@ int bd_should_run_solo(int active, int stack_count, int nb_workers);
 void border_ring_dp_reset_pool_jobs_forked_for_tests(void);
 long border_ring_dp_get_pool_jobs_forked_for_tests(void);
 
-/* Struct de resultat d'un job, serialisable fichier. */
+/* Struct de resultat d'un job, serialisable fichier — doit rester en tout
+   point identique à la vraie déclaration (border_ring_dp.c) : ces deux
+   déclarations sont liées par nom à travers deux unités de traduction
+   distinctes, rien ne les fait divériger automatiquement si l'une change
+   sans l'autre (piège déjà vécu une fois : `total` était resté `long long`
+   ici après le passage à `bd_ring_count_t`/`unsigned __int128` côté
+   production — un `sizeof` différent entre les deux structs aurait fait
+   lire/écrire hors bornes dans les trois tests de round-trip ci-dessous,
+   invisible sur ce fixture minuscule mais un vrai dépassement de tampon). */
 struct bd_job_result {
-    long long total;
+    bd_ring_count_t total;
     int closed;
     char shard_dir[128];
     int nb_shards;
     int resume_pos;
+    char leftover_path[512];
+    char next_partial_path[512];
 };
 
 /* Non-static, utilisees par le coordinateur (Tache 5) pour communiquer entre
@@ -456,6 +481,52 @@ TEST border_ring_count_dp_matches_brute_force_when_pool_mode_engages(void)
     PASS();
 }
 
+/* Force une pause MI-TRANSITION (cf. bd_run_fragment_job, section "Pause
+   mi-transition") en abaissant à la fois le budget de scission (comme les
+   tests de scission normale ci-dessus) ET le nombre d'emplacements traités
+   entre deux contrôles de taille pendant une transition séquentielle
+   (border_ring_dp_set_transition_chunk_slots_for_tests(1)), sur le même
+   fixture à fourche — nb_workers assez grand (4) pour que la pile ne
+   dépasse jamais nb_workers fragments en attente (une pause ne produit
+   jamais qu'UN SEUL successeur, jamais de fan-out), donc pour que tout reste
+   en mode SOLO / job d'ouverture, jamais forké (condition nécessaire pour
+   que border_ring_dp_get_mid_transition_pauses_for_tests() — incrémenté par
+   bd_run_fragment_job lui-même, invisible d'un process parent si ça se
+   produit dans un enfant — reste observable ici, cf. son commentaire).
+   Le total doit rester EXACT malgré une ou plusieurs pauses en cascade
+   (chaque reprise peut elle-même re-dépasser le budget quasi nul et se
+   remettre en pause) : sans l'accumulation correcte à travers la ou les
+   reprises, ou avec un reliquat de `cur` mal sérialisé, ce test s'écarterait
+   du brute-force — même risque que
+   border_ring_count_dp_matches_brute_force_when_pool_mode_engages (cf. son
+   commentaire), qu'un test qui ne vérifie que le total ne pourrait pas
+   distinguer d'un budget jamais franchi. */
+TEST border_ring_count_dp_matches_brute_force_when_mid_transition_pauses(void)
+{
+    struct array_part *all = brd_make_rotate_parts_with_fork(2);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    long long brute = border_walk_count(map, all, NULL, NULL);
+
+    border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0);
+    border_ring_dp_set_transition_chunk_slots_for_tests(1);
+    border_ring_dp_reset_mid_transition_pauses_for_tests();
+    long long dp = (long long)border_ring_count_dp(map, all, 4);
+    long long pauses = border_ring_dp_get_mid_transition_pauses_for_tests();
+    border_ring_dp_set_disk_mode_min_bytes_for_tests(2.0 * 1024.0 * 1024.0 * 1024.0);
+    border_ring_dp_set_transition_chunk_slots_for_tests((size_t)1 << 16);
+
+    ASSERT_EQ_FMT(12LL, brute, "%lld");
+    ASSERT_EQ_FMT(brute, dp, "%lld");
+    ASSERT(pauses >= 1);
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
 #if ETERN_PARTS == 16
 /* Contenu de data/pieces16.csv, embarqué pour rester indépendant du CWD
    (même convention que tests/core/test_solution16.c). Le vrai jeu 16 pièces
@@ -619,7 +690,7 @@ TEST bd_job_result_round_trips_through_a_file_when_closed(void)
     memset(&read_back, 0, sizeof read_back);
     ASSERT_EQ(0, bd_job_result_read(&read_back, path));
     ASSERT_EQ(1, read_back.closed);
-    ASSERT_EQ_FMT(4242LL, read_back.total, "%lld");
+    ASSERT_EQ_FMT(4242LL, (long long)read_back.total, "%lld");
 
     unlink(path);
     PASS();
@@ -648,6 +719,45 @@ TEST bd_job_result_round_trips_through_a_file_when_split(void)
     ASSERT_STR_EQ("/tmp/etii_bd_test_dir", read_back.shard_dir);
     ASSERT_EQ(7, read_back.nb_shards);
     ASSERT_EQ(21, read_back.resume_pos);
+    /* Une scission normale ne porte jamais les champs de pause
+       mi-transition — les deux formes de "closed=0" sont mutuellement
+       exclusives, cf. le commentaire de tête de bd_job_result. */
+    ASSERT_EQ('\0', read_back.leftover_path[0]);
+    ASSERT_EQ('\0', read_back.next_partial_path[0]);
+
+    unlink(path);
+    PASS();
+}
+
+/* Même round-trip que bd_job_result_round_trips_through_a_file_when_split,
+   mais pour l'AUTRE forme de "closed=0" (cf. le commentaire de tête de
+   bd_job_result) : une pause mi-transition, un seul successeur (jamais de
+   shard_dir/nb_shards pour cette forme). */
+TEST bd_job_result_round_trips_through_a_file_when_mid_transition_paused(void)
+{
+    char path[] = "/tmp/etii_brd_result_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    close(fd);
+
+    struct bd_job_result written;
+    memset(&written, 0, sizeof written);
+    written.closed = 0;
+    snprintf(written.leftover_path, sizeof written.leftover_path, "/tmp/etii_bd_leftover_test.bin");
+    snprintf(written.next_partial_path, sizeof written.next_partial_path,
+              "/tmp/etii_bd_nextpartial_test.bin");
+    written.resume_pos = 5;
+
+    bd_job_result_write_or_die(&written, path);
+
+    struct bd_job_result read_back;
+    memset(&read_back, 0, sizeof read_back);
+    ASSERT_EQ(0, bd_job_result_read(&read_back, path));
+    ASSERT_EQ(0, read_back.closed);
+    ASSERT_STR_EQ("/tmp/etii_bd_leftover_test.bin", read_back.leftover_path);
+    ASSERT_STR_EQ("/tmp/etii_bd_nextpartial_test.bin", read_back.next_partial_path);
+    ASSERT_EQ(5, read_back.resume_pos);
+    ASSERT_EQ(0, read_back.nb_shards);
 
     unlink(path);
     PASS();
@@ -778,6 +888,7 @@ SUITE(border_ring_dp_suite)
     RUN_TEST(border_ring_count_dp_matches_brute_force_when_forked);
     RUN_TEST(border_ring_count_dp_matches_brute_force_when_sharded_to_disk);
     RUN_TEST(border_ring_count_dp_matches_brute_force_when_pool_mode_engages);
+    RUN_TEST(border_ring_count_dp_matches_brute_force_when_mid_transition_pauses);
     RUN_TEST(border_ring_reconstruct_dp_matches_count_on_a_unique_ring);
     RUN_TEST(border_ring_reconstruct_dp_expands_class_multiplicity_to_all_real_rings);
     RUN_TEST(border_ring_reconstruct_dp_stops_at_max_rings);
@@ -791,5 +902,6 @@ SUITE(border_ring_dp_suite)
     RUN_TEST(border_ring_dp_set_max_ram_mo_derives_a_conservative_solo_budget);
     RUN_TEST(bd_job_result_round_trips_through_a_file_when_closed);
     RUN_TEST(bd_job_result_round_trips_through_a_file_when_split);
+    RUN_TEST(bd_job_result_round_trips_through_a_file_when_mid_transition_paused);
     RUN_TEST(bd_job_result_read_reports_failure_on_missing_file);
 }

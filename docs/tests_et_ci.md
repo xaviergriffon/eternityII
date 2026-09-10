@@ -532,6 +532,68 @@ depuis la pile — exerçant plusieurs niveaux d'empilement en cascade, jamais
 atteints par les autres tests (aucun de leurs fixtures n'approche le budget
 par défaut).
 
+**Pause mi-transition, au-delà de la scission de fin de position ci-dessus**
+— incident de production du 2026-09-10 : `--dp-max-ram-mo 30000 --forks 10`
+a tué un job du pool par OOM (`oom-kill:constraint=CONSTRAINT_NONE`, un vrai
+manque de RAM globale, pas une limite de cgroup) alors que son budget nominal
+par job (`bd_pool_job_budget_bytes = budget / (nb_workers × 2)`, ~1,5 Gio)
+aurait dû l'empêcher — RSS réel observé 3 à 8,5 Gio, x2 à x6 le budget. Cause
+racine : le contrôle de taille (`bd_run_fragment_job`, ci-dessus) ne
+s'exécutait QU'UNE FOIS PAR POSITION, après que le niveau suivant `next`
+ait été bâti EN ENTIER (`bd_transition_range` sur `0..cur.capacity` en un
+seul appel) — un niveau au facteur de branchement élevé pouvait donc
+dépasser le budget de plusieurs fois avant que le moindre contrôle n'ait
+lieu, le pic mémoire réel ayant déjà eu lieu au moment où le code
+« découvrait » qu'il fallait scinder.
+
+Le chemin séquentiel (celui utilisé par TOUT job POOL, `allow_parallel=0`,
+et par un job SOLO tant que `cur.used < bd_fork_min_states`) traite
+désormais `cur` par tronçons de `bd_transition_chunk_slots` emplacements
+(65536 par défaut, ajustable pour les tests via
+`border_ring_dp_set_transition_chunk_slots_for_tests`), avec un contrôle de
+`bd_level_bytes(&next)` après chaque tronçon **ayant réellement traité au
+moins une entrée occupée** (jamais après un tronçon entièrement vide — cf.
+le piège de livelock ci-dessous). Si `next` dépasse le budget avant que tout
+`cur` n'ait été consommé, le job s'arrête : le reliquat de `cur` (les
+entrées pas encore traitées, sérialisées par `bd_level_write_slice_file` —
+une variante de `bd_level_write_file` bornée à une plage d'emplacements) et
+`next` tel qu'accumulé jusque-là (`bd_level_write_file`, format inchangé)
+sont écrits séparément et renvoyés comme un successeur **unique** (jamais de
+fan-out en K fragments comme la scission de fin de position — `struct
+bd_job_result`/`bd_pending_slice` portent pour cela deux nouveaux champs,
+`leftover_path`/`next_partial_path`, vides sauf dans ce cas précis) à
+reprendre plus tard, exactement à cette position — `bd_run_fragment_job`
+recharge alors `next` (au lieu de le rebâtir de zéro) et continue de le
+nourrir depuis là où il s'était arrêté.
+
+**Piège corrigé avant que ce mécanisme ne parte en production** (repéré sous
+test, `bd_transition_chunk_slots=1` + budget quasi nul, avant tout run réel)
+: contrôler la taille après CHAQUE tronçon, y compris un tronçon vide,
+bouclait indéfiniment. Un reliquat rechargé a une capacité RECALCULÉE à
+partir de son SEUL compte d'entrées (`bd_level_load_file` — jamais de
+l'étendue qu'il représentait avant sa pause), donc la ou les entrées qu'il
+contient peuvent retomber À LA MÊME position de hachage qu'avant (même clé,
+même capacité, fonction de hachage déterministe) sans jamais tomber dans le
+tout premier tronçon parcouru — recontrôler après un tronçon vide (rien de
+nouveau dans `next`, `chunk_start` reparti de 0 à chaque reprise) répétait
+alors indéfiniment le même diagnostic « il reste du travail, le budget est
+dépassé » sans jamais progresser jusqu'à l'entrée réelle : un vrai livelock,
+pas qu'une inefficacité. Corrigé en ne (re)contrôlant qu'après un tronçon
+ayant fait progresser `occupied_seen` (le compte d'entrées occupées de `cur`
+réellement traitées) — ce qui garantit que `cur.used` du reliquat persisté
+décroît STRICTEMENT à chaque pause, donc une terminaison bornée par le
+nombre fini d'entrées d'origine.
+
+Verrouillé par `border_ring_count_dp_matches_brute_force_when_mid_transition_pauses`
+(même fixture à fourche que les tests de scission ci-dessus,
+`bd_transition_chunk_slots` abaissé à 1) et par
+`border_ring_dp_get_mid_transition_pauses_for_tests()` (même schéma que
+`_get_pool_jobs_forked_for_tests` : incrémenté par `bd_run_fragment_job`
+lui-même, invisible d'un process parent si la pause survient dans un job
+POOL forké — le test reste donc en mode SOLO, `nb_workers` assez grand pour
+qu'une pause, qui ne produit jamais qu'UN SEUL successeur, ne fasse jamais
+basculer le coordinateur en mode POOL).
+
 `border_ring_count_dp_matches_brute_force_when_pool_mode_engages` va plus
 loin : un total final identique ne suffit pas à distinguer « le mode POOL a
 réellement forké des jobs concurrents » de « le mode SOLO a tout traité

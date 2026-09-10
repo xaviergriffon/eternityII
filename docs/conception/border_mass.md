@@ -36,7 +36,15 @@ comme racines `.back` injectables dans le stock normal.
   la taille nominale d'un niveau — en scindant les niveaux trop gros en
   fragments sur une pile LIFO partagée, rechargés avec une marge RAM exacte
   en mode POOL et heuristique en mode SOLO) et avec `--spill-dir` pour
-  rediriger les fragments vers un disque plus grand que `/tmp`.
+  rediriger les fragments vers un disque plus grand que `/tmp`. Le contrôle
+  de budget se fait désormais aussi **pendant** la construction d'un niveau
+  (« pause mi-transition »), pas seulement une fois un niveau complet —
+  corrigé après un OOM de production (`--dp-max-ram-mo 30000 --forks 10`,
+  2026-09-10 : jobs à 3-8,5 Gio de RSS réel contre un budget nominal par job
+  de 1,5 Gio) où le contrôle ne s'exécutait qu'une fois par position, trop
+  tard pour empêcher le pic mémoire réel — voir docs/tests_et_ci.md §
+  Scission par pile LIFO pour le détail (mécanisme, piège de livelock trouvé
+  et corrigé sous test, tests dédiés).
 - **`--save-rings FILE --max-rings N`** (avec `--dp`) : reconstruit les
   anneaux réels et les écrit en `.back` — passe avant persistée, tables de
   complétion calculées bottom-up, DFS guidé sur les classes (jamais sur les

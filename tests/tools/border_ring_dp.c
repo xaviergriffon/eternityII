@@ -497,6 +497,29 @@ void border_ring_dp_set_fork_min_states_for_tests(size_t n)
     bd_fork_min_states = n;
 }
 
+/* Nombre d'emplacements de `cur` traités par appel à `bd_transition_range`
+ * avant de recontrôler la taille de `next` (chemin séquentiel de
+ * `bd_run_fragment_job` uniquement — cf. la section "Pause mi-transition"
+ * plus bas) : le contrôle de budget existant ne s'exécutait qu'UNE FOIS PAR
+ * POSITION, après que `next` ait été bâti EN ENTIER — un niveau dont le
+ * facteur de branchement est grand pouvait donc dépasser le budget de
+ * plusieurs fois avant que le moindre contrôle n'ait lieu, le pic mémoire
+ * réel ayant déjà eu lieu (bug d'origine, OOM constaté en production avec
+ * `--dp-max-ram-mo 30000 --forks 10` : jobs à 3-8,5 Gio de RSS réel contre un
+ * budget nominal par job POOL de 1,5 Gio, cf. l'incident du 2026-09-10).
+ * 65536 : assez petit pour réagir bien avant qu'un niveau qui dérape
+ * n'atteigne plusieurs Go, assez grand pour que le contrôle lui-même (un
+ * `bd_level_bytes()`, quelques comparaisons) reste négligeable face au
+ * travail utile d'un tronçon. Ajustable pour les tests, même schéma que
+ * `bd_fork_min_states`/`bd_shard_target_bytes` — le seuil par défaut n'est
+ * jamais atteint par les petits fixtures de test_border_ring_dp.c. */
+static size_t bd_transition_chunk_slots = 1 << 16;
+
+void border_ring_dp_set_transition_chunk_slots_for_tests(size_t n)
+{
+    bd_transition_chunk_slots = n == 0 ? 1 : n;
+}
+
 /* Un fwrite() qui echoue silencieusement (retour < nmemb, jamais verifie
    avant cette correction) laisse un fichier TRONQUE sans le signaler — vu
    une fois en pratique sur la machine visee (disque /tmp sature pendant
@@ -539,6 +562,39 @@ static void bd_level_write_file(const struct bd_level *level, const char *path)
     bd_write_or_die(fp, &key_len, sizeof key_len, path);
     bd_write_or_die(fp, &count, sizeof count, path);
     for (size_t idx = 0; idx < level->capacity; idx++) {
+        if (bd_level_is_occupied(level, idx)) {
+            bd_write_or_die(fp, level->keys + idx * (size_t)level->key_len, (size_t)level->key_len, path);
+            bd_write_or_die(fp, &level->values[idx], sizeof(bd_ring_count_t), path);
+        }
+    }
+    bd_close_or_die(fp, path);
+}
+
+/* Comme bd_level_write_file, mais limitée aux emplacements [start, end) de
+ * `level` — sert UNIQUEMENT à sérialiser le reliquat de `cur` pas encore
+ * transité au moment d'une pause mi-transition (cf. bd_run_fragment_job) :
+ * `level` reste vivant et pleinement utilisable après l'appel (contrairement
+ * à bd_level_to_shards, qui consomme son entrée), donc pas de nettoyage ici.
+ * Deux passes (compte puis écriture) plutôt qu'un tampon intermédiaire :
+ * cohérent avec bd_compact_range qui fait de même sur un fragment complet. */
+static void bd_level_write_slice_file(const struct bd_level *level, size_t start, size_t end, const char *path)
+{
+    uint64_t count = 0;
+    for (size_t idx = start; idx < end; idx++) {
+        if (bd_level_is_occupied(level, idx)) {
+            count++;
+        }
+    }
+
+    FILE *fp = fopen(path, "wb");
+    if (fp == NULL) {
+        fprintf(stderr, "border_ring_count_dp : ecriture de '%s' impossible — arret\n", path);
+        exit(1);
+    }
+    int32_t key_len = level->key_len;
+    bd_write_or_die(fp, &key_len, sizeof key_len, path);
+    bd_write_or_die(fp, &count, sizeof count, path);
+    for (size_t idx = start; idx < end; idx++) {
         if (bd_level_is_occupied(level, idx)) {
             bd_write_or_die(fp, level->keys + idx * (size_t)level->key_len, (size_t)level->key_len, path);
             bd_write_or_die(fp, &level->values[idx], sizeof(bd_ring_count_t), path);
@@ -1090,6 +1146,15 @@ struct bd_pending_slice {
     char shard_path[512];
     char shard_dir[128];
     int resume_pos;
+    /* Reprise MI-TRANSITION uniquement (cf. bd_run_fragment_job, section
+       "Pause mi-transition") : chaîne vide (défaut) pour une reprise
+       normale au tout début de `resume_pos` (comportement historique —
+       `shard_path` porte alors le niveau COMPLET à `resume_pos`). Non vide
+       => `shard_path` ne porte QUE le reliquat de `cur` pas encore transité
+       vers `resume_pos + 1`, et ce champ le niveau `resume_pos + 1`
+       accumulé jusque-là — les deux à recharger et à CONTINUER de nourrir,
+       jamais à écraser. */
+    char next_partial_path[512];
 };
 
 /* Pile LIFO des tranches en attente — le dernier fragment créé est repris en
@@ -1103,7 +1168,8 @@ struct bd_pending_stack {
     int cap;
 };
 
-static void bd_pending_push(struct bd_pending_stack *stack, const char *path, const char *dir, int resume_pos)
+static void bd_pending_push(struct bd_pending_stack *stack, const char *path, const char *dir, int resume_pos,
+                             const char *next_partial_path)
 {
     if (stack->count == stack->cap) {
         stack->cap = stack->cap == 0 ? 16 : stack->cap * 2;
@@ -1113,6 +1179,7 @@ static void bd_pending_push(struct bd_pending_stack *stack, const char *path, co
     snprintf(slice->shard_path, sizeof slice->shard_path, "%s", path);
     snprintf(slice->shard_dir, sizeof slice->shard_dir, "%s", dir);
     slice->resume_pos = resume_pos;
+    snprintf(slice->next_partial_path, sizeof slice->next_partial_path, "%s", next_partial_path);
 }
 
 /* Mode SOLO (un seul job, autorise a utiliser bd_transition_parallel) tant
@@ -1127,16 +1194,27 @@ int bd_should_run_solo(int active, int stack_count, int nb_workers)
 }
 
 /* Resultat d'un job : soit il a ferme l'anneau (closed=1, total valide),
-   soit il a du se scinder (closed=0, K fragments deposes dans shard_dir,
-   tous a reprendre depuis resume_pos) — un job ne garde JAMAIS un fragment
-   pour lui-meme apres une scission, cf. spec § Comportement uniforme d'un
-   job. */
+   soit il a du se scinder — deux formes possibles, jamais les deux a la
+   fois, distinguees par LEQUEL des deux groupes de champs ci-dessous est
+   rempli :
+     - scission normale (fin de position, K fragments COMPLETS deposes dans
+       shard_dir, tous a reprendre depuis resume_pos) — comportement
+       historique ;
+     - pause MI-TRANSITION (leftover_path non vide, cf. bd_run_fragment_job
+       section "Pause mi-transition") : un seul successeur, portant a la
+       fois le reliquat de `cur` pas encore transite (leftover_path) et le
+       niveau resume_pos+1 accumule jusque-la (next_partial_path) — jamais
+       de fan-out ici, contrairement a une scission normale.
+   Dans les deux cas, un job ne garde JAMAIS rien pour lui-meme, cf. spec §
+   Comportement uniforme d'un job. */
 struct bd_job_result {
     bd_ring_count_t total;
     int closed;
     char shard_dir[128];
     int nb_shards;
     int resume_pos;
+    char leftover_path[512];
+    char next_partial_path[512];
 };
 
 /* Communication entre un job (potentiellement forke, cf. Tache 5) et le
@@ -1288,6 +1366,29 @@ static void bd_persist_cleanup(const char *persist_dir)
     rmdir(persist_dir);
 }
 
+/* Compteur test-only, meme schema/meme mise en garde que
+   bd_pool_jobs_forked_for_tests_counter (declare plus bas, incremente par le
+   PARENT apres un fork() reussi) : invisible d'un process PARENT si la pause
+   survient dans un job POOL forke — un test qui veut l'observer doit rester
+   en mode SOLO/job d'ouverture, jamais forcer le mode POOL. Seul moyen pour
+   un test de prouver qu'une pause mi-transition a REELLEMENT eu lieu (cf.
+   bd_run_fragment_job), pas seulement que le total final coïncide par une
+   autre voie (scission normale de fin de position, ou pas de scission du
+   tout sur un budget assez large). Déclaré ici (avant bd_run_fragment_job,
+   pas à côté de son homologue POOL) : c'est bd_run_fragment_job lui-même,
+   pas un caller, qui l'incrémente. */
+static long bd_mid_transition_pauses_for_tests_counter = 0;
+
+void border_ring_dp_reset_mid_transition_pauses_for_tests(void)
+{
+    bd_mid_transition_pauses_for_tests_counter = 0;
+}
+
+long border_ring_dp_get_mid_transition_pauses_for_tests(void)
+{
+    return bd_mid_transition_pauses_for_tests_counter;
+}
+
 /* Coeur d'un job, commun aux modes SOLO et POOL — prend possession de
    `*level` (le libere avant de retourner, dans tous les cas). `allow_parallel`
    n'autorise bd_transition_parallel ET la compaction forkee de
@@ -1296,11 +1397,20 @@ static void bd_persist_cleanup(const char *persist_dir)
    (pas de fork imbrique). `persist_dir` (NULL sauf pendant la reconstruction,
    cf. `border_ring_reconstruct_dp`) fait persister chaque niveau produit
    (y compris l'état reçu en entrée) au lieu de le jeter — cf. le commentaire
-   de tête de `bd_persist_snapshot` ci-dessus. */
+   de tête de `bd_persist_snapshot` ci-dessus.
+
+   `resume_next_partial_path` (NULL sauf reprise d'une pause mi-transition,
+   cf. section "Pause mi-transition" ci-dessous) : non-NULL => `*level` ne
+   porte QUE le reliquat de `cur` pas encore transité vers `start_pos + 1` —
+   ce niveau `start_pos + 1` complet a déjà été partiellement construit et
+   snapshotté sous ce chemin, à recharger et à CONTINUER de nourrir plutôt
+   qu'à reconstruire de zéro. Dans ce cas `*level` n'est PAS la position
+   `start_pos` complète : elle ne doit surtout pas être re-snapshottée (la
+   version complète l'a déjà été, avant la pause). */
 static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t closure_target,
                                                  struct bd_level *level, int start_pos, int allow_parallel,
                                                  int nb_workers, double effective_budget_bytes,
-                                                 const char *persist_dir)
+                                                 const char *persist_dir, const char *resume_next_partial_path)
 {
     struct bd_job_result result;
     memset(&result, 0, sizeof result);
@@ -1312,16 +1422,144 @@ static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t
        l'alias interne, dans tous les cas de sortie). */
     memset(level, 0, sizeof *level);
     int pos = start_pos;
-    bd_persist_snapshot(persist_dir, pos, &cur);
+    if (resume_next_partial_path == NULL) {
+        bd_persist_snapshot(persist_dir, pos, &cur);
+    }
+
+    /* Consommé au plus une fois : seule la TOUTE PREMIÈRE transition de cet
+       appel peut reprendre un `next` partiel (c'est exactement l'endroit où
+       l'appel précédent s'est arrêté) — toute position suivante repart
+       normalement de zéro. */
+    int resuming = resume_next_partial_path != NULL;
 
     while (pos < BORDER_RING_LEN - 1) {
         int want_corner = ctx->is_corner_at[pos];
         struct bd_level next;
-        if (allow_parallel && nb_workers > 1 && cur.used >= bd_fork_min_states) {
+        if (!resuming && allow_parallel && nb_workers > 1 && cur.used >= bd_fork_min_states) {
             bd_transition_parallel(ctx, want_corner, &cur, nb_workers, &next);
         } else {
-            bd_level_init(&next, 1 + ctx->nb_classes, cur.used / 2 + 16);
-            bd_transition_range(ctx, want_corner, &cur, 0, cur.capacity, &next);
+            /* ===================================================================
+             * Pause mi-transition — chemin séquentiel UNIQUEMENT (jamais
+             * bd_transition_parallel ci-dessus, Tâche future). Bug d'origine :
+             * l'ancien code bâtissait `next` EN ENTIER (`bd_transition_range`
+             * sur `0..cur.capacity` en un seul appel) avant le moindre contrôle
+             * de taille, qui n'avait lieu qu'une fois par POSITION — un niveau
+             * au facteur de branchement élevé pouvait donc dépasser le budget
+             * de plusieurs fois avant qu'on s'en aperçoive, le pic mémoire réel
+             * ayant déjà eu lieu (OOM constaté en production le 2026-09-10,
+             * `--dp-max-ram-mo 30000 --forks 10` : jobs à 3-8,5 Gio de RSS
+             * contre un budget nominal par job POOL de 1,5 Gio — cf.
+             * docs/tests_et_ci.md § Scission par pile LIFO).
+             *
+             * Ici, `cur` est traitée par tronçons de `bd_transition_chunk_slots`
+             * emplacements, avec un contrôle de `bd_level_bytes(&next)` après
+             * CHAQUE tronçon. Si `next` dépasse le budget AVANT que tout `cur`
+             * n'ait été consommé, on s'arrête : le reliquat de `cur` (les
+             * emplacements pas encore traités) et `next` tel qu'accumulé
+             * jusque-là sont sérialisés séparément et renvoyés comme un
+             * successeur UNIQUE (jamais de fan-out en K fragments comme une
+             * scission normale — cf. bd_job_result) à reprendre plus tard,
+             * exactement à cette position. */
+            if (resuming) {
+                bd_level_load_file(&next, resume_next_partial_path);
+                unlink(resume_next_partial_path);
+            } else {
+                bd_level_init(&next, 1 + ctx->nb_classes, cur.used / 2 + 16);
+            }
+            resuming = 0;
+
+            /* `occupied_seen` compte les entrées OCCUPÉES de `cur` déjà
+               traitées (pas les emplacements bruts parcourus, dont la
+               plupart sont vides) — c'est LUI, pas `chunk_start`, qui
+               détermine s'il reste vraiment du travail : un reliquat rechargé
+               après une pause a presque toujours 0 entrée occupée (celles qui
+               restaient à traiter au moment de la pause), mais SA capacité
+               nominale (`bd_level_init` reparti d'un compte à 0, cf.
+               bd_level_load_file) peut rester bien au-dessus de
+               `bd_transition_chunk_slots` — sans cette garde, un reliquat
+               vide continuerait à se re-scinder indéfiniment (une entrée
+               vide « dépasse » n'importe quel budget aussi bas soit-il,
+               exactement le même piège que la garde `cur.used > 1` plus bas,
+               mais ici sur l'ENTRÉE plutôt que la SORTIE de la transition). */
+            size_t chunk_start = 0;
+            size_t occupied_seen = 0;
+            while (chunk_start < cur.capacity && occupied_seen < cur.used) {
+                size_t chunk_end = chunk_start + bd_transition_chunk_slots;
+                if (chunk_end > cur.capacity) {
+                    chunk_end = cur.capacity;
+                }
+                size_t occupied_before_chunk = occupied_seen;
+                for (size_t idx = chunk_start; idx < chunk_end; idx++) {
+                    if (bd_level_is_occupied(&cur, idx)) {
+                        occupied_seen++;
+                    }
+                }
+                bd_transition_range(ctx, want_corner, &cur, chunk_start, chunk_end, &next);
+                chunk_start = chunk_end;
+
+                /* Ne (re)contrôler la taille de `next` — et ne jamais se
+                   mettre en pause — qu'après un tronçon ayant RÉELLEMENT
+                   traité au moins une entrée occupée. Piège corrigé après
+                   l'avoir vu boucler indéfiniment sous test
+                   (`bd_transition_chunk_slots=1`, budget quasi nul) : un
+                   reliquat rechargé a une capacité RECALCULÉE à partir de
+                   son SEUL compte d'entrées (`bd_level_load_file`), pas de
+                   l'étendue qu'il représentait avant sa pause — la ou les
+                   entrées qu'il contient peuvent donc retomber À LA MÊME
+                   position de hachage qu'avant (même clé, même capacité,
+                   fonction de hachage déterministe) sans jamais tomber dans
+                   le tout premier tronçon. Contrôler après un tronçon VIDE
+                   (rien de nouveau dans `next`, `chunk_start` reparti de 0 à
+                   chaque appel) répétait donc indéfiniment le même
+                   diagnostic « il reste du travail, le budget est dépassé »
+                   sans jamais avancer jusqu'à l'entrée réelle — un livelock,
+                   pas juste une inefficacité. Ne contrôler qu'après un vrai
+                   progrès garantit qu'aucune pause ne peut se reproduire à
+                   l'identique : soit le tronçon courant a touché la seule
+                   entrée restante (plus rien à faire, la garde `occupied_seen
+                   < cur.used` de la boucle empêche déjà toute pause
+                   inutile), soit il en reste d'autres, mais celle-ci vient
+                   d'être durablement retirée de `cur` (jamais réinsérée). */
+                double next_bytes = bd_level_bytes(&next);
+                /* `next.used >= 1` : ne se met en pause qu'après un progrès
+                   RÉEL (au moins un état produit) — pas de garde `> 1` ici,
+                   contrairement au contrôle de fin de position plus bas : ce
+                   dernier protège une SORTIE dégénérée qu'on s'apprêterait à
+                   RE-scinder pour rien, alors qu'ici c'est `occupied_seen <
+                   cur.used` ci-dessus qui protège l'ENTRÉE dégénérée — les
+                   deux gardes répondent à des dégénérescences différentes,
+                   pas la même. */
+                if (occupied_seen > occupied_before_chunk && occupied_seen < cur.used &&
+                    next_bytes >= effective_budget_bytes && next.used >= 1) {
+                    static int mid_split_seq = 0;
+                    bd_mid_transition_pauses_for_tests_counter++;
+                    char leftover_path[512], next_partial_path[512];
+                    snprintf(leftover_path, sizeof leftover_path, "%s/etii_bd_leftover_%d_%d.bin",
+                             bd_spill_dir, (int)getpid(), mid_split_seq);
+                    snprintf(next_partial_path, sizeof next_partial_path,
+                             "%s/etii_bd_nextpartial_%d_%d.bin", bd_spill_dir, (int)getpid(), mid_split_seq);
+                    mid_split_seq++;
+
+                    size_t remaining = cur.capacity - chunk_start;
+                    bd_level_write_slice_file(&cur, chunk_start, cur.capacity, leftover_path);
+                    bd_level_write_file(&next, next_partial_path);
+                    bd_level_free(&next);
+                    bd_level_free(&cur);
+
+                    fprintf(stderr,
+                            "border_ring_count_dp : position %d/%d, pause mi-transition (%.2f Go, "
+                            "%zu/%zu emplacements de la case courante restant a traiter)\n",
+                            pos, BORDER_RING_LEN - 1, next_bytes / (1024.0 * 1024.0 * 1024.0), remaining,
+                            remaining + chunk_start);
+
+                    result.closed = 0;
+                    snprintf(result.leftover_path, sizeof result.leftover_path, "%s", leftover_path);
+                    snprintf(result.next_partial_path, sizeof result.next_partial_path, "%s",
+                             next_partial_path);
+                    result.resume_pos = pos;
+                    return result;
+                }
+            }
         }
         bd_level_free(&cur);
         cur = next;
@@ -1386,8 +1624,9 @@ static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t
 }
 
 /* Repousse le resultat d'un job vers la pile partagee : accumule le total
-   s'il a ferme l'anneau, ou empile les K fragments produits sinon — jamais
-   les deux. */
+   s'il a ferme l'anneau, empile SOIT les K fragments d'une scission normale
+   SOIT l'unique successeur d'une pause mi-transition (leftover_path non
+   vide, cf. bd_job_result) sinon — jamais deux de ces trois cas a la fois. */
 static void bd_apply_job_result(struct bd_pending_stack *stack, bd_ring_count_t *total,
                                  const struct bd_job_result *r)
 {
@@ -1401,10 +1640,14 @@ static void bd_apply_job_result(struct bd_pending_stack *stack, bd_ring_count_t 
                 sr, st, stack->count);
         return;
     }
+    if (r->leftover_path[0] != '\0') {
+        bd_pending_push(stack, r->leftover_path, "", r->resume_pos, r->next_partial_path);
+        return;
+    }
     for (int d = r->nb_shards - 1; d >= 0; d--) {
         char path[512];
         snprintf(path, sizeof path, "%s/shard_%d.bin", r->shard_dir, d);
-        bd_pending_push(stack, path, r->shard_dir, r->resume_pos);
+        bd_pending_push(stack, path, r->shard_dir, r->resume_pos, "");
     }
 }
 
@@ -1514,9 +1757,10 @@ static pid_t bd_fork_pool_job(const struct bd_ctx *ctx, int8_t closure_target,
         bd_level_load_file(&cur, slice->shard_path);
         unlink(slice->shard_path);
         rmdir(slice->shard_dir);
-        struct bd_job_result r =
-            bd_run_fragment_job(ctx, closure_target, &cur, slice->resume_pos, /*allow_parallel=*/0, nb_workers,
-                                 effective_budget_bytes, persist_dir);
+        struct bd_job_result r = bd_run_fragment_job(
+            ctx, closure_target, &cur, slice->resume_pos, /*allow_parallel=*/0, nb_workers,
+            effective_budget_bytes, persist_dir,
+            slice->next_partial_path[0] != '\0' ? slice->next_partial_path : NULL);
         bd_job_result_write_or_die(&r, result_path);
         exit(0);
     }
@@ -1568,11 +1812,18 @@ double border_ring_dp_get_pool_job_budget_bytes_for_tests(void)
 
 /* ===========================================================================
  * Orchestration : fait avancer un niveau, position par position, jusqu'à la
- * fermeture de l'anneau — TOUJOURS en mémoire (jamais de représentation
- * fragmentée "vivante" à travers plusieurs positions, contrairement à
- * l'ancien mécanisme). Quand un niveau dépasse le budget effectif du job qui
- * le porte (`bd_solo_budget_bytes` ou `bd_pool_job_budget_bytes` selon le
- * mode, cf. bd_run_fragment_job), il est scindé en K fragments
+ * fermeture de l'anneau — un niveau COMPLET reste toujours entièrement en
+ * mémoire entre deux positions (jamais de représentation fragmentée
+ * "vivante" à travers plusieurs positions, contrairement à l'ancien
+ * mécanisme) ; PENDANT la construction d'une position, en revanche,
+ * `bd_run_fragment_job` peut se mettre en pause mi-transition dès que le
+ * niveau en cours de construction dépasse le budget, sans attendre qu'il
+ * soit fini (cf. sa section "Pause mi-transition") — un garde-fou de plus,
+ * jamais un troisième mode de dispatch : ça reste strictement interne à un
+ * job, invisible du coordinateur au-delà du fragment de reprise qu'il
+ * produit. Quand un niveau COMPLET dépasse le budget effectif du job qui le
+ * porte (`bd_solo_budget_bytes` ou `bd_pool_job_budget_bytes` selon le mode,
+ * cf. bd_run_fragment_job), il est scindé en K fragments
  * (bd_level_to_shards) et TOUS empilés sur `stack`
  * (LIFO — cf. son commentaire, et bd_apply_job_result) : un job ne garde
  * jamais de fragment pour lui-même après une scission (cf. bd_run_fragment_job)
@@ -1612,7 +1863,7 @@ static bd_ring_count_t bd_run_opening(const struct bd_ctx *ctx, int8_t initial_r
     memcpy(key0 + 1, initial_counts, (size_t)ctx->nb_classes);
     bd_level_add(&seed, key0, 1);
     struct bd_job_result r0 = bd_run_fragment_job(ctx, closure_target, &seed, 1, /*allow_parallel=*/1,
-                                                    nb_workers_eff, budget_solo, persist_dir);
+                                                    nb_workers_eff, budget_solo, persist_dir, NULL);
     bd_apply_job_result(&stack, &total, &r0);
 
     struct bd_active_job *jobs = malloc((size_t)nb_workers_eff * sizeof *jobs);
@@ -1630,9 +1881,9 @@ static bd_ring_count_t bd_run_opening(const struct bd_ctx *ctx, int8_t initial_r
             bd_level_load_file(&cur, slice.shard_path);
             unlink(slice.shard_path);
             rmdir(slice.shard_dir);
-            struct bd_job_result r = bd_run_fragment_job(ctx, closure_target, &cur, slice.resume_pos,
-                                                          /*allow_parallel=*/1, nb_workers_eff, budget_solo,
-                                                          persist_dir);
+            struct bd_job_result r = bd_run_fragment_job(
+                ctx, closure_target, &cur, slice.resume_pos, /*allow_parallel=*/1, nb_workers_eff, budget_solo,
+                persist_dir, slice.next_partial_path[0] != '\0' ? slice.next_partial_path : NULL);
             bd_apply_job_result(&stack, &total, &r);
             continue;
         }
@@ -1641,7 +1892,19 @@ static bd_ring_count_t bd_run_opening(const struct bd_ctx *ctx, int8_t initial_r
            plus profonde pour un fragment plus petit qui tiendrait mieux —
            simplicite assumee, cf. spec § Risques connus). */
         while (active < nb_workers_eff && stack.count > 0) {
-            double est = bd_pending_fragment_estimate_bytes(stack.items[stack.count - 1].shard_path);
+            const struct bd_pending_slice *top = &stack.items[stack.count - 1];
+            double est = bd_pending_fragment_estimate_bytes(top->shard_path);
+            /* Pause mi-transition (cf. bd_job_result) : la reprise recharge
+               AUSSI next_partial_path — l'admission doit compter les deux
+               fichiers, sinon un fragment sous-estime pourrait a nouveau
+               depasser le budget reel une fois recharge (c'est exactement le
+               genre d'ecart qui a cause l'OOM de production du 2026-09-10,
+               une position plus haut : sous-estimer ce qu'une reprise va
+               reellement allouer). */
+            if (est >= 0.0 && top->next_partial_path[0] != '\0') {
+                double est_next = bd_pending_fragment_estimate_bytes(top->next_partial_path);
+                est = est_next < 0.0 ? est_next : est + est_next;
+            }
             if (est < 0.0) {
                 fprintf(stderr,
                         "border_ring_count_dp : estimation d'un fragment en attente impossible — arret\n");
