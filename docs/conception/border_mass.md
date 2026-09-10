@@ -40,9 +40,15 @@ comme racines `.back` injectables dans le stock normal.
 - **`--save-rings FILE --max-rings N`** (avec `--dp`) : reconstruit les
   anneaux réels et les écrit en `.back` — passe avant persistée, tables de
   complétion calculées bottom-up, DFS guidé sur les classes (jamais sur les
-  pièces brutes), puis expansion en assignations de pièces réelles. Résultat
-  mesuré sur le jeu réel : 8 anneaux pour l'ouverture unique calculée, soit
-  32 au total.
+  pièces brutes), puis expansion en assignations de pièces réelles. Un run de
+  test avait produit 8 anneaux pour l'ouverture unique calculée (32 au
+  total) — **ce chiffre est un échantillon borné par `--max-rings`, pas la
+  masse réelle** : sur le jeu réel (256 pièces), la masse totale exacte
+  (`--dp` sans `--save-rings`) dépasse la capacité d'un `long long` signé
+  (> 9,2x10^18), au point qu'un seul fragment fermé pouvait déjà déborder —
+  corrigé le 2026-09-10 par le passage à `bd_ring_count_t` (`unsigned
+  __int128`, voir `border_ring_dp.h`). À revérifier/rechiffrer avec ce
+  correctif avant de citer un total définitif.
 
 ## Arbitrages qui restent valables
 
