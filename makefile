@@ -318,6 +318,21 @@ gen-root:
 	    src/core/readdata.c src/core/part.c src/ui/logger.c \
 	    src/core/core_static_variables.c src/app/app_static_variables.c -lm -pthread
 
+# Outil border_ring_conditioned (tests/tools/) : mesure A de l'étude « recherche
+# par anneaux intérieurs avec bordure différée » (plan
+# etudies-les-besoins-la-toasty-starfish.md) — compte, premier anneau
+# intérieur réel connu, combien de complétions de bordure restent valides.
+# Comptage seul, aucune dépendance à la branche border-mass-walker-design.
+BORDER_RING_COND_BIN := tests/tools/border_ring_conditioned
+
+.PHONY: border-ring-conditioned
+border-ring-conditioned:
+	gcc -Wall -Wextra -std=gnu99 -O2 -Isrc -Itests $(CPPFLAGS) -Werror -o $(BORDER_RING_COND_BIN) \
+	    tests/tools/border_ring_conditioned.c \
+	    src/core/readdata.c src/core/part.c src/ui/logger.c \
+	    src/core/core_static_variables.c src/app/app_static_variables.c -lm -pthread
+	./$(BORDER_RING_COND_BIN) $(BORDER_RING_COND_ARGS)
+
 # Fonctions pures du banc de mesure (tests/bench/bench_lib.sh) : pas de C, donc
 # hors des suites greatest, mais rattaché à `make test` pour tourner partout où
 # elles tournent (CI, make test-docker). Ni compilation ni process lancé.
