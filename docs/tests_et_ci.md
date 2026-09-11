@@ -258,7 +258,7 @@ tests/tools/border_ring_conditioned data/pieces.csv eternityII.back \
     --synth-rings 50 --synth-rings-aware 50 --gen-node-budget 5000000
 ```
 
-Trois passes : racines **réelles** du stock à premier anneau complet (mesuré :
+Quatre passes : racines **réelles** du stock à premier anneau complet (mesuré :
 aucune, sur la population entière — MRV pose bordure et anneau au fil de
 l'eau) ; anneaux **synthétiques aveugles**, générés sans égard pour la rareté
 des couleurs de bordure (150/150 échantillons infaisables) ; anneaux
@@ -266,18 +266,25 @@ des couleurs de bordure (150/150 échantillons infaisables) ; anneaux
 guide la construction elle-même, rejetant toute pose qui le dépasserait
 (80/80 échantillons infaisables malgré tout — un garde-fou interne vérifie à
 chaque échantillon que le quota imposé pendant la génération se retrouve bien
-dans la demande extraite). `--selftest` valide géométrie/forme/adjacence sur
-tout le stock réel, un témoin négatif (DFS sans épinglage : ne converge pas
-sous 300 000 nœuds, cohérent avec la masse inconditionnelle > 9,2×10¹⁸,
-`border_ring_dp` sur la branche non mergée `border-mass-walker-design`), et
-un témoin positif (bordure réelle 100 % posée : les pièces réelles sont bien
-candidates, la chaîne d'adjacence et la fermeture du cycle tiennent).
+dans la demande extraite) ; **contrôle inverse** — chaque bordure réelle
+complète du stock (345/13 739) essaie de se faire remplir un premier anneau à
+partir de zéro (sans indice), avec un témoin qui reboucle l'anneau obtenu dans
+la méthode des passes 1-3 pour vérifier qu'elle retrouve bien la bordure
+réelle d'origine (345/345 solvables, témoin OK — confirme que le 0/230 des
+passes 2/3 est un vrai zéro, pas un DFS aveugle à une solution existante).
+`--selftest` valide géométrie/forme/adjacence sur tout le stock réel, un
+témoin négatif (DFS sans épinglage : ne converge pas sous 300 000 nœuds,
+cohérent avec la masse inconditionnelle > 9,2×10¹⁸, `border_ring_dp` sur la
+branche non mergée `border-mass-walker-design`), et un témoin positif
+(bordure réelle 100 % posée : les pièces réelles sont bien candidates, la
+chaîne d'adjacence et la fermeture du cycle tiennent).
 
 Verdict : le budget de couleur est une condition nécessaire mais très
 insuffisante — le verrou réel est la continuité des couleurs de cadre entre
-pièces de bordure voisines, pas la seule disponibilité de couleur. Proposition
-écartée sans code de production ; l'outil est conservé, coût nul hors
-invocation explicite.
+pièces de bordure voisines, pas la seule disponibilité de couleur, et il est
+directionnel (bordure → anneau facile, anneau → bordure quasi impossible).
+Proposition écartée sans code de production ; l'outil est conservé, coût nul
+hors invocation explicite.
 
 ## Banc de mesure du débit de recherche (`tests/bench/bench_search.sh`)
 

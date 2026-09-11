@@ -159,6 +159,49 @@ pièce et sans rompre la boucle, qui échoue — structurellement le même genre
 qu'un circuit eulérien sous contraintes de sommets étiquetés : localement libre partout,
 globalement sur-contraint.
 
+### Passe 4 — contrôle inverse : l'asymétrie est directionnelle, pas un artefact du DFS
+
+Question naturelle après un 0/230 aussi net (Passes 2 et 3) : est-ce que le DFS de
+complétion de bordure (`brc_dfs`) est simplement incapable de trouver une complétion même
+quand il en existe une ? Pour trancher, `border_ring_conditioned` fait maintenant le
+chemin **inverse** des passes 1-3 : partir d'une bordure **réelle et complète** (60/60,
+345/13 739 sur `eternityII.back`), et essayer de remplir le premier anneau intérieur à
+partir de zéro — sans regarder l'intérieur réellement posé dans ce paquet (ignoré), sans
+indice, seule la bordure fixe contraint (plus la cohérence de l'anneau avec lui-même).
+
+**Résultat sur les 345/345 bordures réelles complètes du stock : 345/345 admettent un
+anneau intérieur complet**, trouvé en 134 à 217 nœuds de DFS (quasiment aucun retour
+arrière) — 0 prouvé infaisable, 0 inconclusif. L'exact miroir inversé des passes 2/3 :
+anneau → bordure échoue 230/230, bordure → anneau réussit 345/345.
+
+**Témoin** : le premier anneau ainsi obtenu est ensuite rebouclé dans la méthode des
+passes 1-3 elle-même (extraction de la demande positionnelle + `brc_dfs`), pour vérifier
+que cette méthode retrouve bien la bordure réelle qui a servi à le construire — sinon un
+0/230 pourrait signaler un bug de méthode plutôt qu'un verrou réel du puzzle :
+
+- la bordure réelle satisfait **exactement** la demande extraite de l'anneau généré, et
+  toute sa chaîne d'adjacence (fermeture du cycle comprise) — vérifié position par
+  position, indépendamment du DFS ;
+- le DFS de bordure (même code que les passes 1-3) trouve **2 complétions** en 193 nœuds,
+  sans épuisement de budget ni de plafond — donc un résultat exhaustif : il n'existe que 2
+  bordures valides pour cet anneau précis, et la bordure réelle en fait partie.
+
+La méthode n'est donc pas aveugle à une solution qui existerait : quand on lui donne un
+cas construit pour avoir une solution, elle la trouve, et prouve qu'il n'y en a que 2 au
+total — cohérent avec « verrou global, points d'ancrage figés » plutôt qu'avec un DFS
+défaillant. Le 0/230 des passes 2/3 est un vrai zéro.
+
+L'asymétrie elle-même est cohérente avec le reste de l'étude : les 196 pièces intérieures
+et leurs 17 couleurs offrent beaucoup de marge locale pour accorder un anneau à une
+bordure déjà fixée (5 couleurs de cadre seulement, offre 21-24 chacune) ; mais l'inverse —
+fixer l'anneau puis chaîner 60 pièces de bordure autour de 56 couleurs intérieures
+épinglées positionnellement (offre 1-6 par couleur) — est bien plus rigide. C'est
+précisément le sens de construction que choisit MRV (bordure portée tôt par la contrainte
+de grille, cf. Antériorité) et l'inverse de celui que proposait ce mécanisme.
+
+Reproductible : `make border-ring-conditioned BORDER_RING_COND_ARGS="data/pieces.csv
+eternityII.back"` (passe 4 incluse par défaut, ~0,15 s pour les 345 bordures + le témoin).
+
 ## Décision
 
 **Ne pas implémenter** l'ordre « anneaux intérieurs d'abord, bordure différée », guidé

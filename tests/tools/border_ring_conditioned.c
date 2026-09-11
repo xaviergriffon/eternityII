@@ -30,9 +30,25 @@
  *   --leaf-cap <n>      arrête le comptage d'une racine une fois ce nombre de
  *                       complétions trouvées (défaut 2000000) — suffisant pour
  *                       conclure "loin de 9,2e18" sans épuiser le budget
+ *   --reverse-max <n>        bordures réelles complètes examinées en passe 4
+ *                            (défaut : toutes)
+ *   --reverse-node-budget <n> budget de nœuds DFS par bordure, passe 4 (défaut 3000000)
+ *   --reverse-leaf-cap <n>    complétions d'anneau à trouver par bordure avant
+ *                            d'arrêter, passe 4 (défaut 3 — l'existence suffit)
+ *   --witness-node-budget <n> budget de nœuds du DFS-témoin, passe 4 (défaut 30000000)
+ *   --witness-leaf-cap <n>    plafond de complétions du DFS-témoin, passe 4 (défaut 5000000)
  *   --selftest          valide la géométrie/l'appariement sur les données
  *                       réelles du stock (pas de DFS pleine échelle), puis
  *                       s'arrête
+ *
+ * Passe 4 (contrôle inverse) : sens opposé des passes 1-3. Prend chaque
+ * bordure RÉELLE complète du stock (60/60), tente de remplir le premier
+ * anneau intérieur à partir de zéro (sans regarder l'intérieur réellement
+ * posé dans ce paquet), puis reboucle l'anneau obtenu dans la méthode des
+ * passes 1-3 (extraction de demande + DFS de bordure) pour vérifier que
+ * cette méthode retrouve bien la bordure réelle qui a servi à le
+ * construire — sinon un 0/230 en passes 2/3 pourrait être un bug de
+ * méthode plutôt qu'un verrou réel du puzzle.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -428,6 +444,123 @@ static int brc_verify_generated_ring(const struct possibility_packet *ring_pkt, 
     return 1;
 }
 
+/* ===========================================================================
+ * PASSE 4 (contrôle inverse) : partant d'une bordure RÉELLE et COMPLÈTE
+ * (60/60, mesuré : 345/13739 sur eternityII.back), remplir le premier
+ * anneau intérieur À PARTIR DE ZÉRO — sans regarder l'intérieur réellement
+ * posé dans ce paquet (ignoré), sans indice : seule la bordure fixe
+ * contraint, plus la cohérence de l'anneau avec lui-même (adjacence +
+ * non-réutilisation de pièce). C'est le sens INVERSE des passes 1-3
+ * (anneau connu -> bordure) : mesure si l'asymétrie observée (anneau ->
+ * bordure toujours infaisable) est bien directionnelle, et pas un artefact
+ * du DFS de bordure lui-même.
+ * ------------------------------------------------------------------------- */
+
+typedef struct {
+    long long node_budget;
+    long long nodes_used;
+    long long leaf_cap;
+    long long leaves_found;
+    int budget_exceeded;
+    int8_t used[ETERN_PARTS + 1];
+    int order[ETERN_PARTS + 1];
+    int n_interior_ids;
+    brc_candidate_t placed[BRC_IRING_LEN];
+    struct part *border_face_cache[ETERN_SIZE][ETERN_SIZE]; /* NULL si pas bordure */
+} brc_fill_ctx_t;
+
+static void brc_fill_dfs(struct array_part *rot, int pos_idx, brc_fill_ctx_t *ctx)
+{
+    if (ctx->leaves_found >= ctx->leaf_cap) return;
+    ctx->nodes_used++;
+    if (ctx->nodes_used > ctx->node_budget) {
+        ctx->budget_exceeded = 1;
+        return;
+    }
+    if (pos_idx == BRC_IRING_LEN) {
+        ctx->leaves_found++;
+        return;
+    }
+
+    const brc_iring_pos_t *pos = &g_iring[pos_idx];
+    for (int oi = 0; oi < ctx->n_interior_ids; oi++) {
+        int id = ctx->order[oi];
+        if (ctx->used[id]) continue;
+        for (int r = 0; r < 4; r++) {
+            struct part *p = &rot->parts[id + ETERN_PARTS * r];
+            brc_candidate_t c;
+            c.rotated_id = (int16_t)(id + ETERN_PARTS * r);
+            c.id = (int8_t)id;
+            c.faces[0] = p->top; c.faces[1] = p->right; c.faces[2] = p->bottom; c.faces[3] = p->left;
+
+            if (pos_idx > 0) {
+                const brc_candidate_t *prevp = &ctx->placed[pos_idx - 1];
+                if (c.faces[pos->prev_dir] != prevp->faces[g_iring[pos_idx - 1].next_dir]) continue;
+            }
+            if (pos_idx == BRC_IRING_LEN - 1) {
+                const brc_candidate_t *firstp = &ctx->placed[0];
+                if (c.faces[pos->next_dir] != firstp->faces[g_iring[0].prev_dir]) continue;
+            }
+            int ok = 1;
+            for (int b = 0; b < pos->n_border_dirs && ok; b++) {
+                int dir = pos->border_dirs[b];
+                int nx = pos->x + brc_dx[dir], ny = pos->y + brc_dy[dir];
+                struct part *bp = ctx->border_face_cache[nx][ny];
+                int8_t bface[4] = { bp->top, bp->right, bp->bottom, bp->left };
+                if (c.faces[dir] != bface[brc_opposite[dir]]) ok = 0;
+            }
+            if (!ok) continue;
+
+            ctx->used[id] = 1;
+            ctx->placed[pos_idx] = c;
+            brc_fill_dfs(rot, pos_idx + 1, ctx);
+            ctx->used[id] = 0;
+            if (ctx->leaves_found >= ctx->leaf_cap || ctx->budget_exceeded) return;
+        }
+    }
+}
+
+/**
+ * @brief Remplit `out` (anneau seul, bordure et intérieur profond laissés
+ * à -2) à partir d'une bordure réelle connue et déjà vérifiée complète
+ * (`border_pkt`) — les 60 pièces de bordure sont exclues des candidats.
+ * @return 1 si au moins une complétion trouvée (`out` rempli), 0 sinon —
+ * `*budget_exceeded_out` distingue alors « prouvé infaisable » (DFS
+ * exhaustif, 0) de « inconclusif » (budget de nœuds épuisé, 1).
+ */
+static int brc_fill_iring_from_border(struct array_part *rot, const struct possibility_packet *border_pkt,
+                                       long long node_budget, long long leaf_cap,
+                                       struct possibility_packet *out, int *budget_exceeded_out)
+{
+    brc_fill_ctx_t ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.node_budget = node_budget;
+    ctx.leaf_cap = leaf_cap;
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            if (!brc_is_border_cell(x, y)) continue;
+            struct part *bp = &rot->parts[border_pkt->grid[x][y]];
+            ctx.border_face_cache[x][y] = bp;
+            ctx.used[bp->id] = 1; /* pieces de bordure indisponibles pour l'anneau */
+        }
+    }
+    ctx.n_interior_ids = 0;
+    for (int id = 1; id <= ETERN_PARTS; id++) {
+        if (g_shape[id].is_interior_shape && !ctx.used[id]) {
+            ctx.order[ctx.n_interior_ids++] = id;
+        }
+    }
+    brc_fill_dfs(rot, 0, &ctx);
+    *budget_exceeded_out = ctx.budget_exceeded;
+    if (ctx.leaves_found == 0) return 0;
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++) out->grid[x][y] = -2;
+    for (int i = 0; i < BRC_IRING_LEN; i++) {
+        out->grid[g_iring[i].x][g_iring[i].y] = ctx.placed[i].rotated_id;
+    }
+    return 1;
+}
+
 typedef struct {
     brc_candidate_t cand[BRC_MAX_CANDIDATES_PER_POS];
     int n;
@@ -723,6 +856,8 @@ static void usage(const char *prog)
 {
     fprintf(stderr, "usage: %s <pieces.csv> <stock.back> [--max-roots n] [--node-budget n]"
                      " [--leaf-cap n] [--synth-rings n] [--synth-rings-aware n] [--gen-node-budget n]"
+                     " [--reverse-max n] [--reverse-node-budget n] [--reverse-leaf-cap n]"
+                     " [--witness-node-budget n] [--witness-leaf-cap n]"
                      " [--selftest]\n",
             prog);
 }
@@ -777,6 +912,11 @@ int main(int argc, char **argv)
     long long synth_rings = 20;
     long long synth_rings_aware = 20;
     long long gen_node_budget = 2000000;
+    long long reverse_max = 1000000000LL;
+    long long reverse_node_budget = 3000000;
+    long long reverse_leaf_cap = 3;
+    long long witness_node_budget = 30000000;
+    long long witness_leaf_cap = 5000000;
     int do_selftest = 0;
 
     for (int i = 3; i < argc; i++) {
@@ -792,6 +932,16 @@ int main(int argc, char **argv)
             synth_rings_aware = atoll(argv[++i]);
         } else if (strcmp(argv[i], "--gen-node-budget") == 0 && i + 1 < argc) {
             gen_node_budget = atoll(argv[++i]);
+        } else if (strcmp(argv[i], "--reverse-max") == 0 && i + 1 < argc) {
+            reverse_max = atoll(argv[++i]);
+        } else if (strcmp(argv[i], "--reverse-node-budget") == 0 && i + 1 < argc) {
+            reverse_node_budget = atoll(argv[++i]);
+        } else if (strcmp(argv[i], "--reverse-leaf-cap") == 0 && i + 1 < argc) {
+            reverse_leaf_cap = atoll(argv[++i]);
+        } else if (strcmp(argv[i], "--witness-node-budget") == 0 && i + 1 < argc) {
+            witness_node_budget = atoll(argv[++i]);
+        } else if (strcmp(argv[i], "--witness-leaf-cap") == 0 && i + 1 < argc) {
+            witness_leaf_cap = atoll(argv[++i]);
         } else if (strcmp(argv[i], "--selftest") == 0) {
             do_selftest = 1;
         } else {
@@ -935,6 +1085,136 @@ int main(int argc, char **argv)
     }
     brc_agg_print("mesure A (3/3) : anneaux synthetiques CONSCIENTS de la bordure (quota respecte en construisant)",
                   &aware_agg);
+
+    /* --- Passe 4 : CONTROLE INVERSE — bordures REELLES connues -> anneau. */
+    FILE *f4 = fopen(back_path, "rb");
+    if (f4 == NULL) {
+        fprintf(stderr, "border_ring_conditioned : ouverture de %s impossible\n", back_path);
+        return 1;
+    }
+    long long rev_border_complete = 0, rev_examined = 0;
+    long long rev_solvable = 0, rev_infeasible_proven = 0, rev_inconclusive = 0;
+    int have_witness = 0;
+    struct possibility_packet witness_border_pkt, witness_ring_pkt;
+    struct possibility_packet pkt4;
+    while (fread(&pkt4, sizeof pkt4, 1, f4) == 1) {
+        int bc = 1;
+        for (int x = 0; x < ETERN_SIZE && bc; x++)
+            for (int y = 0; y < ETERN_SIZE && bc; y++)
+                if (brc_is_border_cell(x, y) && pkt4.grid[x][y] == -2) bc = 0;
+        if (!bc) continue;
+        rev_border_complete++;
+        if (rev_examined >= reverse_max) continue;
+        rev_examined++;
+
+        struct possibility_packet ring_out;
+        int budget_exceeded = 0;
+        int found = brc_fill_iring_from_border(rot, &pkt4, reverse_node_budget, reverse_leaf_cap, &ring_out,
+                                                &budget_exceeded);
+        if (found) {
+            rev_solvable++;
+            if (!have_witness) {
+                have_witness = 1;
+                witness_border_pkt = pkt4;
+                witness_ring_pkt = ring_out;
+            }
+        } else if (budget_exceeded) {
+            rev_inconclusive++;
+        } else {
+            rev_infeasible_proven++;
+        }
+    }
+    fclose(f4);
+
+    printf("\n=== mesure A (4/4) : controle inverse, bordures REELLES connues -> anneau ===\n");
+    printf("bordures reelles completes (60/60) dans le stock : %lld\n", rev_border_complete);
+    printf("bordures examinees                                : %lld\n", rev_examined);
+    printf("  -> anneau trouve (solvable)                     : %lld\n", rev_solvable);
+    printf("  -> prouve infaisable (DFS exhaustif)             : %lld\n", rev_infeasible_proven);
+    printf("  -> inconclusif (budget de noeuds epuise)         : %lld\n", rev_inconclusive);
+
+    /* Témoin : reprendre l'anneau ainsi obtenu et le donner à la méthode
+       des passes 1-3 (extraction de demande + DFS de bordure). Ferme la
+       boucle : si la bordure réelle qui a servi à construire cet anneau
+       n'était PAS retrouvée par le DFS de bordure, ce serait un bug de la
+       méthode elle-même, pas un verrou du puzzle — pas seulement pour cet
+       anneau-ci, mais pour tout le 0/230 des passes 2/3. */
+    if (have_witness) {
+        if (!brc_verify_generated_ring(&witness_ring_pkt, rot)) {
+            fprintf(stderr, "border_ring_conditioned : TEMOIN ECHEC — anneau du controle inverse invalide\n");
+            return 1;
+        }
+        int demand[BRC_RING_LEN];
+        brc_extract_demand(&witness_ring_pkt, rot, demand);
+
+        int witness_ok = 1;
+        for (int i = 0; i < BRC_RING_LEN; i++) {
+            int16_t rid = witness_border_pkt.grid[g_ring[i].x][g_ring[i].y];
+            struct part *p = &rot->parts[rid];
+            int8_t face[4] = { p->top, p->right, p->bottom, p->left };
+            if (!g_ring[i].is_corner) {
+                brc_candidate_list_t cands;
+                brc_candidates_for_position(rot, i, demand[i], &cands);
+                int found_cand = 0;
+                for (int k = 0; k < cands.n; k++) {
+                    if (cands.cand[k].rotated_id == rid) { found_cand = 1; break; }
+                }
+                if (!found_cand) {
+                    fprintf(stderr,
+                            "border_ring_conditioned : TEMOIN ECHEC — piece reelle en position %d absente"
+                            " des candidats pour la demande extraite (%d)\n",
+                            i, demand[i]);
+                    witness_ok = 0;
+                }
+            }
+            if (i > 0) {
+                int16_t prid = witness_border_pkt.grid[g_ring[i - 1].x][g_ring[i - 1].y];
+                struct part *pp = &rot->parts[prid];
+                int8_t pf[4] = { pp->top, pp->right, pp->bottom, pp->left };
+                if (face[g_ring[i].prev_dir] != pf[g_ring[i - 1].next_dir]) {
+                    fprintf(stderr, "border_ring_conditioned : TEMOIN ECHEC — adjacence bordure rompue en"
+                                     " position %d\n",
+                            i);
+                    witness_ok = 0;
+                }
+            }
+            if (i == BRC_RING_LEN - 1) {
+                int16_t frid = witness_border_pkt.grid[g_ring[0].x][g_ring[0].y];
+                struct part *fp = &rot->parts[frid];
+                int8_t ff[4] = { fp->top, fp->right, fp->bottom, fp->left };
+                if (face[g_ring[i].next_dir] != ff[g_ring[0].prev_dir]) {
+                    fprintf(stderr,
+                            "border_ring_conditioned : TEMOIN ECHEC — fermeture du cycle de bordure rompue\n");
+                    witness_ok = 0;
+                }
+            }
+        }
+        printf("\ntemoin (4/4) : bordure reelle vs demande extraite de l'anneau genere : %s\n",
+               witness_ok ? "OK - satisfait exactement la demande et la chaine d'adjacence"
+                          : "ECHEC (voir messages ci-dessus)");
+        if (!witness_ok) {
+            return 1;
+        }
+
+        brc_dfs_ctx_t wctx;
+        memset(&wctx, 0, sizeof wctx);
+        wctx.node_budget = witness_node_budget;
+        wctx.leaf_cap = witness_leaf_cap;
+        brc_dfs(rot, demand, 0, &wctx);
+        printf("temoin (4/4) : DFS de completion (methode des passes 1-3) sur cet anneau -> %llu"
+               " completion(s) trouvee(s) sur %lld noeuds%s%s\n",
+               wctx.leaves_found, wctx.nodes_used,
+               wctx.budget_exceeded ? " [budget de noeuds epuise -- inconclusif]" : "",
+               wctx.cap_reached ? " [plafond atteint -- il y en a au moins autant]" : "");
+        if (wctx.leaves_found == 0) {
+            fprintf(stderr,
+                    "border_ring_conditioned : TEMOIN ECHEC — le DFS de bordure ne retrouve pas la bordure"
+                    " reelle connue (0 completion) : bug de methode, pas verrou du puzzle\n");
+            return 1;
+        }
+    } else {
+        printf("\n(pas de temoin possible : aucune bordure reelle n'a permis de completer un anneau)\n");
+    }
 
     printf("\nrappel : la masse INCONDITIONNELLE (couleur interieure wildcard) depasse 9.2e18\n"
            "(border_ring_dp, branche border-mass-walker-design).\n");
