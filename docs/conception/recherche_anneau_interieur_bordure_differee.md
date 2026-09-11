@@ -100,6 +100,65 @@ de cadre se recouvrent deux à deux, `elagage_recherche.md` §4.9 mesure un remp
 quasi sans retour arrière) — le verrou est ailleurs, dans le chaînage de cadre sur
 l'ensemble du pourtour, pas dans une zone particulière.
 
+### Un budget plus fin : diversité de cadre par couleur intérieure
+
+Entre le budget agrégé (« combien de pièces de cette couleur ») déjà mesuré ci-dessus et
+la mesure décisive complète (DFS conditionné), il existe un budget intermédiaire, statique
+et gratuit : pour chaque couleur intérieure, combien de paires de couleurs de cadre
+*distinctes* ses pièces candidates offrent-elles ? Recensement sur `data/pieces.csv` (56
+pièces de bord non-coin) :
+
+| couleur | offre (pièces) | paires de cadre distinctes |
+|---|---|---|
+| **12** | **1** | **1** — pièce 38, cadre (20,22) uniquement |
+| **17** | **1** | **1** — pièce 17, cadre (21,22) uniquement |
+| 3, 10, 13 | 2 | 2 |
+| 1, 2, 5, 11 | 3 | 3 |
+| 15 | 3 | 2 (deux pièces partagent le même cadre) |
+| 4, 7, 8, 16 | 4 | 4 |
+| 6 | 5 | 4 (deux pièces partagent un cadre) |
+| 9, 14 | 6 | 6 |
+
+Pour une couleur rare (12, 17), il n'y a pas qu'une seule pièce disponible — il y a une
+**seule transition de cadre possible**, point : dès qu'une position de l'anneau exige
+cette couleur, la pièce ET son cadre sont entièrement figés, sans aucune marge pour
+s'accorder avec les voisines de bordure. Ce n'est pas un budget à vérifier séparément du
+DFS conditionné (couleur intérieure et paire de cadre sont deux attributs de la **même**
+pièce, pas deux degrés de liberté indépendants) — c'est le mécanisme précis qui explique
+*pourquoi* le DFS conditionné échoue systématiquement : ces couleurs rares imposent des
+points de passage figés dans le circuit de cadre.
+
+### Le blocage est global, pas local : aucune paire de couleurs de cadre n'est absente
+
+Question naturelle à ce stade : est-ce qu'il existe des paires de couleurs de cadre
+*totalement incompatibles* (aucune pièce ne les relie jamais), ce qui expliquerait le
+verrou par un simple « trou » dans le graphe ? Vérifié sur les 60 pièces de bordure (56
++ 4 coins), les 15 paires possibles de couleurs de cadre (5 couleurs, répétitions
+comprises) — notation `bord+coin` :
+
+```
+(18,18):2  (18,19):1+1  (18,20):6+1  (18,21):6  (18,22):5
+(19,19):4  (19,20):4     (19,21):4+2  (19,22):4
+(20,20):3  (20,21):3     (20,22):4
+(21,21):2  (21,22):5
+(22,22):3
+```
+
+**Aucune des 15 paires n'est absente.** Le graphe des couleurs de cadre est complet :
+n'importe quelle couleur peut en théorie succéder à n'importe quelle autre. Cohérent avec
+la masse inconditionnelle astronomique (9,2×10¹⁸) — une transition manquante aurait borné
+le nombre de circuits bien plus bas.
+
+Ça élimine l'explication la plus simple (« telle paire de couleurs est structurellement
+interdite ») et précise la nature du verrou : il n'est **pas local** (chaque transition
+individuelle reste toujours possible), il est **global**. Il faut faire tenir
+*simultanément*, dans un seul circuit qui utilise chaque pièce une fois exactement, tous
+les points d'ancrage figés qu'imposent les couleurs rares (le tableau ci-dessus). Chaque
+transition prise séparément existe ; c'est leur assemblage conjoint, sans réutiliser une
+pièce et sans rompre la boucle, qui échoue — structurellement le même genre de problème
+qu'un circuit eulérien sous contraintes de sommets étiquetés : localement libre partout,
+globalement sur-contraint.
+
 ## Décision
 
 **Ne pas implémenter** l'ordre « anneaux intérieurs d'abord, bordure différée », guidé
