@@ -16,6 +16,7 @@ make coverage         # les deux passes (256 + 16) + résumé texte gcovr fusion
 make coverage-256     # passe 256 pièces seule ; résumé gcov par module
 make coverage-report  # rapports gcovr : Cobertura XML + HTML + résumé Markdown
 make gen-root         # outil : convertit un plateau externe en racine de stock .back
+make border-ring-conditioned # outil : masse de bordure conditionnée au premier anneau intérieur (mesure)
 ```
 
 ## Tests unitaires (`make test`)
@@ -238,6 +239,45 @@ conventions qu'un outil externe inverse sans que rien ne proteste
 des faces plutôt que calculé). Détail d'usage et les deux pièges rencontrés
 (`restore` et non `import` ; indices officiels obligatoires) :
 [tests/README.md](../tests/README.md#outils-teststools).
+
+## Outil `border_ring_conditioned` (`make border-ring-conditioned`)
+
+Outil de mesure ponctuel pour
+[docs/conception/recherche_anneau_interieur_bordure_differee.md](conception/recherche_anneau_interieur_bordure_differee.md) —
+comptage/génération pur, aucun changement sous `src/`, jamais rattaché à
+`make test`. Question posée : une fois le premier anneau intérieur (52 cases)
+connu, combien de complétions de bordure (60 pièces) restent valides une fois
+la couleur intérieure exigée fixée **positionnellement** à chacune des 56
+positions non-coin — par opposition au budget agrégé déjà mesuré et clos dans
+`recherche_interieur_budget_couleur.md` ?
+
+```sh
+make border-ring-conditioned
+tests/tools/border_ring_conditioned data/pieces.csv eternityII.back --selftest
+tests/tools/border_ring_conditioned data/pieces.csv eternityII.back \
+    --synth-rings 50 --synth-rings-aware 50 --gen-node-budget 5000000
+```
+
+Trois passes : racines **réelles** du stock à premier anneau complet (mesuré :
+aucune, sur la population entière — MRV pose bordure et anneau au fil de
+l'eau) ; anneaux **synthétiques aveugles**, générés sans égard pour la rareté
+des couleurs de bordure (150/150 échantillons infaisables) ; anneaux
+**synthétiques conscients de la bordure**, où le budget de couleur restant
+guide la construction elle-même, rejetant toute pose qui le dépasserait
+(80/80 échantillons infaisables malgré tout — un garde-fou interne vérifie à
+chaque échantillon que le quota imposé pendant la génération se retrouve bien
+dans la demande extraite). `--selftest` valide géométrie/forme/adjacence sur
+tout le stock réel, un témoin négatif (DFS sans épinglage : ne converge pas
+sous 300 000 nœuds, cohérent avec la masse inconditionnelle > 9,2×10¹⁸,
+`border_ring_dp` sur la branche non mergée `border-mass-walker-design`), et
+un témoin positif (bordure réelle 100 % posée : les pièces réelles sont bien
+candidates, la chaîne d'adjacence et la fermeture du cycle tiennent).
+
+Verdict : le budget de couleur est une condition nécessaire mais très
+insuffisante — le verrou réel est la continuité des couleurs de cadre entre
+pièces de bordure voisines, pas la seule disponibilité de couleur. Proposition
+écartée sans code de production ; l'outil est conservé, coût nul hors
+invocation explicite.
 
 ## Banc de mesure du débit de recherche (`tests/bench/bench_search.sh`)
 

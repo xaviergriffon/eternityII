@@ -142,20 +142,35 @@ typedef struct {
     int8_t is_corner_shape;
     int8_t is_border_shape;
     int8_t is_interior_shape;
+    int8_t inner_colour; /* face opposee a l'unique face grise, -1 si pas une piece de bord */
 } brc_shape_t;
 
 static brc_shape_t g_shape[ETERN_PARTS + 1];
 
+/* Offre : nombre de pieces de bord par couleur interieure exigee (1..6 sur
+   data/pieces.csv) — le budget qu'une construction d'anneau « consciente de
+   la bordure » doit respecter EN CONSTRUISANT, pas seulement verifier apres
+   coup (cf. brc_gen_iring_dfs, ctx->border_aware). */
+static int g_offre[MAX_FACE_MAP];
+
 static void brc_compute_shapes(struct array_part *rot)
 {
+    memset(g_offre, 0, sizeof g_offre);
     for (int id = 1; id <= ETERN_PARTS; id++) {
         struct part *p = &rot->parts[id]; /* rotation 0 : forme invariante par rotation */
         int8_t f[4] = { p->top, p->right, p->bottom, p->left };
-        int ngrey = 0;
-        for (int s = 0; s < 4; s++) if (f[s] == 0) ngrey++;
+        int ngrey = 0, grey_slot = -1;
+        for (int s = 0; s < 4; s++) {
+            if (f[s] == 0) { ngrey++; grey_slot = s; }
+        }
         g_shape[id].is_corner_shape = (ngrey == 2);
         g_shape[id].is_border_shape = (ngrey == 1);
         g_shape[id].is_interior_shape = (ngrey == 0);
+        g_shape[id].inner_colour = -1;
+        if (ngrey == 1) {
+            g_shape[id].inner_colour = f[(grey_slot + 2) % 4];
+            g_offre[g_shape[id].inner_colour]++;
+        }
     }
 }
 
@@ -186,6 +201,8 @@ typedef struct {
 typedef struct {
     int8_t x, y;
     int8_t prev_dir, next_dir;
+    int8_t border_dirs[2]; /* directions pointant vers une case de bordure (0, 1 ou 2) */
+    int8_t n_border_dirs;
 } brc_iring_pos_t;
 
 static brc_iring_pos_t g_iring[BRC_IRING_LEN];
@@ -216,6 +233,14 @@ static void brc_build_iring(void)
         int next = (i + 1) % BRC_IRING_LEN;
         g_iring[i].prev_dir = (int8_t)brc_dir_between(g_iring[i].x, g_iring[i].y, g_iring[prev].x, g_iring[prev].y);
         g_iring[i].next_dir = (int8_t)brc_dir_between(g_iring[i].x, g_iring[i].y, g_iring[next].x, g_iring[next].y);
+
+        g_iring[i].n_border_dirs = 0;
+        for (int s = 0; s < 4; s++) {
+            int nx = g_iring[i].x + brc_dx[s], ny = g_iring[i].y + brc_dy[s];
+            if (brc_is_border_cell(nx, ny)) {
+                g_iring[i].border_dirs[g_iring[i].n_border_dirs++] = (int8_t)s;
+            }
+        }
     }
 }
 
@@ -226,6 +251,12 @@ typedef struct {
     int order[ETERN_PARTS + 1]; /* ordre (mélangé) de balayage des ids intérieurs */
     int n_interior_ids;
     brc_candidate_t placed[BRC_IRING_LEN];
+    /* Mode « conscient de la bordure » : n'accepte une pose que si elle ne
+       fait dépasser aucun budget de couleur (g_offre) sur les demi-arêtes
+       tournées vers la bordure — condition nécessaire de Hall, appliquée EN
+       CONSTRUISANT, pas vérifiée après coup. */
+    int border_aware;
+    int used_colour_count[MAX_FACE_MAP];
 } brc_gen_ctx_t;
 
 static int brc_gen_iring_dfs(struct array_part *rot, int pos_idx, brc_gen_ctx_t *ctx)
@@ -257,9 +288,36 @@ static int brc_gen_iring_dfs(struct array_part *rot, int pos_idx, brc_gen_ctx_t 
                 if (c.faces[pos->next_dir] != firstp->faces[g_iring[0].prev_dir]) continue;
             }
 
+            if (ctx->border_aware) {
+                int ok = 1;
+                for (int b = 0; b < pos->n_border_dirs && ok; b++) {
+                    int8_t colour = c.faces[pos->border_dirs[b]];
+                    int already = ctx->used_colour_count[colour];
+                    /* Compte aussi les autres demi-arêtes DE CETTE MÊME pose
+                       vers cette couleur (cas des 4 coins d'anneau, 2 demi-
+                       arêtes) avant de comparer à l'offre. */
+                    int this_piece_same_colour = 0;
+                    for (int b2 = 0; b2 < b; b2++) {
+                        if (c.faces[pos->border_dirs[b2]] == colour) this_piece_same_colour++;
+                    }
+                    if (already + this_piece_same_colour + 1 > g_offre[colour]) ok = 0;
+                }
+                if (!ok) continue;
+            }
+
             ctx->used[id] = 1;
             ctx->placed[pos_idx] = c;
+            if (ctx->border_aware) {
+                for (int b = 0; b < pos->n_border_dirs; b++) {
+                    ctx->used_colour_count[(int)c.faces[pos->border_dirs[b]]]++;
+                }
+            }
             if (brc_gen_iring_dfs(rot, pos_idx + 1, ctx)) return 1;
+            if (ctx->border_aware) {
+                for (int b = 0; b < pos->n_border_dirs; b++) {
+                    ctx->used_colour_count[(int)c.faces[pos->border_dirs[b]]]--;
+                }
+            }
             ctx->used[id] = 0;
         }
     }
@@ -270,14 +328,19 @@ static int brc_gen_iring_dfs(struct array_part *rot, int pos_idx, brc_gen_ctx_t 
  * @brief Synthétise un premier anneau intérieur (52 cases) valide et
  * complet, écrit dans `out` (bordure et intérieur profond laissés à -2).
  * `seed` mélange l'ordre de balayage des pièces intérieures pour produire
- * des échantillons différents. @return 1 si trouvé, 0 sinon (budget épuisé).
+ * des échantillons différents. `border_aware` : n'accepte une pose que si
+ * elle respecte le budget de couleur de bordure restant (condition
+ * nécessaire de Hall) — sinon génération « aveugle » (ne regarde que la
+ * cohérence de l'anneau avec lui-même). @return 1 si trouvé, 0 sinon
+ * (budget épuisé — plus probable en mode conscient, plus contraint).
  */
-static int brc_generate_iring(struct array_part *rot, unsigned int seed, long long node_budget,
+static int brc_generate_iring(struct array_part *rot, unsigned int seed, long long node_budget, int border_aware,
                                struct possibility_packet *out)
 {
     brc_gen_ctx_t ctx;
     memset(&ctx, 0, sizeof ctx);
     ctx.node_budget = node_budget;
+    ctx.border_aware = border_aware;
     ctx.n_interior_ids = 0;
     for (int id = 1; id <= ETERN_PARTS; id++) {
         if (g_shape[id].is_interior_shape) {
@@ -602,7 +665,8 @@ static int brc_selftest(const char *back_path, struct array_part *rot)
 static void usage(const char *prog)
 {
     fprintf(stderr, "usage: %s <pieces.csv> <stock.back> [--max-roots n] [--node-budget n]"
-                     " [--leaf-cap n] [--synth-rings n] [--selftest]\n",
+                     " [--leaf-cap n] [--synth-rings n] [--synth-rings-aware n] [--gen-node-budget n]"
+                     " [--selftest]\n",
             prog);
 }
 
@@ -654,6 +718,8 @@ int main(int argc, char **argv)
     long long node_budget = 5000000;
     long long leaf_cap = 2000000;
     long long synth_rings = 20;
+    long long synth_rings_aware = 20;
+    long long gen_node_budget = 2000000;
     int do_selftest = 0;
 
     for (int i = 3; i < argc; i++) {
@@ -665,6 +731,10 @@ int main(int argc, char **argv)
             leaf_cap = atoll(argv[++i]);
         } else if (strcmp(argv[i], "--synth-rings") == 0 && i + 1 < argc) {
             synth_rings = atoll(argv[++i]);
+        } else if (strcmp(argv[i], "--synth-rings-aware") == 0 && i + 1 < argc) {
+            synth_rings_aware = atoll(argv[++i]);
+        } else if (strcmp(argv[i], "--gen-node-budget") == 0 && i + 1 < argc) {
+            gen_node_budget = atoll(argv[++i]);
         } else if (strcmp(argv[i], "--selftest") == 0) {
             do_selftest = 1;
         } else {
@@ -722,13 +792,14 @@ int main(int argc, char **argv)
                " anneaux complets. Voir la passe 2, anneaux synthetiques, ci-dessous.)\n");
     }
 
-    /* --- Passe 2 : anneaux SYNTHETIQUES, valides et complets, generes a --- *
-     * partir des memes pieces reelles (voir brc_generate_iring). ---------- */
+    /* --- Passe 2 : anneaux SYNTHETIQUES AVEUGLES, valides et complets, ---- *
+     * generes sans aucun egard pour la rareté des couleurs de bordure. ----- */
     brc_agg_t synth_agg = {0};
     long long synth_gen_failed = 0;
     for (long long s = 0; s < synth_rings; s++) {
         struct possibility_packet ring_pkt;
-        if (!brc_generate_iring(rot, (unsigned int)(0x9E3779B9u * (unsigned int)(s + 1)), 2000000, &ring_pkt)) {
+        if (!brc_generate_iring(rot, (unsigned int)(0x9E3779B9u * (unsigned int)(s + 1)), gen_node_budget, 0,
+                                 &ring_pkt)) {
             synth_gen_failed++;
             continue;
         }
@@ -740,17 +811,67 @@ int main(int argc, char **argv)
         ctx.leaf_cap = leaf_cap;
         brc_dfs(rot, demand, 0, &ctx);
         brc_agg_update(&synth_agg, &ctx);
-        printf("anneau synthetique #%lld : -> %llu completion(s)%s%s\n",
+        printf("anneau synthetique aveugle #%lld : -> %llu completion(s)%s%s\n",
                s + 1, ctx.leaves_found,
                ctx.cap_reached ? " [plafond atteint]" : "",
                ctx.budget_exceeded ? " [budget de noeuds epuise]" : "");
     }
     if (synth_gen_failed > 0) {
-        printf("\n(generation d'anneau synthetique echouee %lld fois sur %lld — budget de synthese"
-               " insuffisant)\n",
-               synth_gen_failed, synth_rings);
+        printf("\n(generation d'anneau synthetique aveugle echouee %lld fois sur %lld)\n", synth_gen_failed,
+               synth_rings);
     }
-    brc_agg_print("mesure A (2/2) : anneaux synthetiques valides et complets", &synth_agg);
+    brc_agg_print("mesure A (2/3) : anneaux synthetiques AVEUGLES, valides et complets", &synth_agg);
+
+    /* --- Passe 3 : anneaux SYNTHETIQUES CONSCIENTS DE LA BORDURE — le vrai -*
+     * test du mecanisme propose (le budget de couleur guide la pose du     -*
+     * premier anneau, il n'est pas verifie apres coup). ---------------------*/
+    brc_agg_t aware_agg = {0};
+    long long aware_gen_failed = 0;
+    for (long long s = 0; s < synth_rings_aware; s++) {
+        struct possibility_packet ring_pkt;
+        if (!brc_generate_iring(rot, (unsigned int)(0x2545F491u * (unsigned int)(s + 1)), gen_node_budget, 1,
+                                 &ring_pkt)) {
+            aware_gen_failed++;
+            continue;
+        }
+        int demand[BRC_RING_LEN];
+        brc_extract_demand(&ring_pkt, rot, demand);
+
+        /* Garde-fou : le quota impose PENDANT la generation doit se retrouver
+           tel quel dans la demande extraite — sinon brc_gen_iring_dfs a un
+           bug (le mode conscient ne servirait a rien silencieusement). */
+        int demand_count[MAX_FACE_MAP] = {0};
+        for (int i = 0; i < BRC_RING_LEN; i++) {
+            if (demand[i] >= 0) demand_count[demand[i]]++;
+        }
+        for (int c = 0; c < MAX_FACE_MAP; c++) {
+            if (demand_count[c] > g_offre[c]) {
+                fprintf(stderr,
+                        "border_ring_conditioned : BUG — anneau #%lld conscient de la bordure viole quand"
+                        " meme le quota (couleur %d : demande %d > offre %d)\n",
+                        s + 1, c, demand_count[c], g_offre[c]);
+                return 1;
+            }
+        }
+
+        brc_dfs_ctx_t ctx;
+        memset(&ctx, 0, sizeof ctx);
+        ctx.node_budget = node_budget;
+        ctx.leaf_cap = leaf_cap;
+        brc_dfs(rot, demand, 0, &ctx);
+        brc_agg_update(&aware_agg, &ctx);
+        printf("anneau synthetique conscient de la bordure #%lld : -> %llu completion(s)%s%s\n",
+               s + 1, ctx.leaves_found,
+               ctx.cap_reached ? " [plafond atteint]" : "",
+               ctx.budget_exceeded ? " [budget de noeuds epuise]" : "");
+    }
+    if (aware_gen_failed > 0) {
+        printf("\n(generation d'anneau conscient de la bordure echouee %lld fois sur %lld — budget de"
+               " synthese insuffisant : la contrainte de quota rend la construction elle-meme plus dure)\n",
+               aware_gen_failed, synth_rings_aware);
+    }
+    brc_agg_print("mesure A (3/3) : anneaux synthetiques CONSCIENTS de la bordure (quota respecte en construisant)",
+                  &aware_agg);
 
     printf("\nrappel : la masse INCONDITIONNELLE (couleur interieure wildcard) depasse 9.2e18\n"
            "(border_ring_dp, branche border-mass-walker-design).\n");
