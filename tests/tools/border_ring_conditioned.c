@@ -371,6 +371,63 @@ static int brc_generate_iring(struct array_part *rot, unsigned int seed, long lo
     return 1;
 }
 
+/**
+ * @brief Contrôle INDÉPENDANT d'un anneau intérieur généré par
+ * `brc_generate_iring` — ne relit rien de son contexte interne (`ctx`),
+ * uniquement les pièces réellement écrites dans `ring_pkt->grid`. Vérifie :
+ * (1) qu'aucune pièce (identifiant réel, pas `rotated_id` — deux rotations
+ * de la même pièce comptent comme UN seul usage) n'apparaît deux fois dans
+ * les 52 cases de l'anneau ; (2) que chaque paire de cases voisines le long
+ * de l'anneau (fermeture du cycle comprise) montre bien la même couleur sur
+ * l'arête qu'elles partagent. Échec bruyant (message + 0) plutôt que
+ * silencieux : un anneau qui réutiliserait une pièce ou romprait une
+ * adjacence rendrait toute la mesure sans objet.
+ * @return 1 si l'anneau est valide, 0 sinon (message d'erreur déjà émis).
+ */
+static int brc_verify_generated_ring(const struct possibility_packet *ring_pkt, struct array_part *rot)
+{
+    int8_t seen[ETERN_PARTS + 1] = {0};
+    for (int i = 0; i < BRC_IRING_LEN; i++) {
+        int16_t v = ring_pkt->grid[g_iring[i].x][g_iring[i].y];
+        if (v == -2) {
+            fprintf(stderr,
+                    "border_ring_conditioned : VERIF ECHEC — case (%d,%d) de l'anneau genere non posee\n",
+                    g_iring[i].x, g_iring[i].y);
+            return 0;
+        }
+        int id = rot->parts[v].id;
+        if (id < 1 || id > ETERN_PARTS) {
+            fprintf(stderr,
+                    "border_ring_conditioned : VERIF ECHEC — case (%d,%d), identifiant de piece invalide (%d)\n",
+                    g_iring[i].x, g_iring[i].y, id);
+            return 0;
+        }
+        if (seen[id]) {
+            fprintf(stderr,
+                    "border_ring_conditioned : VERIF ECHEC — piece %d utilisee plus d'une fois dans l'anneau"
+                    " genere (derniere occurrence en (%d,%d))\n",
+                    id, g_iring[i].x, g_iring[i].y);
+            return 0;
+        }
+        seen[id] = 1;
+    }
+    for (int i = 0; i < BRC_IRING_LEN; i++) {
+        int prev = (i - 1 + BRC_IRING_LEN) % BRC_IRING_LEN;
+        struct part *pc = &rot->parts[ring_pkt->grid[g_iring[i].x][g_iring[i].y]];
+        struct part *pp = &rot->parts[ring_pkt->grid[g_iring[prev].x][g_iring[prev].y]];
+        int8_t fc[4] = { pc->top, pc->right, pc->bottom, pc->left };
+        int8_t fp[4] = { pp->top, pp->right, pp->bottom, pp->left };
+        if (fc[g_iring[i].prev_dir] != fp[g_iring[prev].next_dir]) {
+            fprintf(stderr,
+                    "border_ring_conditioned : VERIF ECHEC — adjacence rompue dans l'anneau genere,"
+                    " position %d (%d,%d)\n",
+                    i, g_iring[i].x, g_iring[i].y);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 typedef struct {
     brc_candidate_t cand[BRC_MAX_CANDIDATES_PER_POS];
     int n;
@@ -803,6 +860,9 @@ int main(int argc, char **argv)
             synth_gen_failed++;
             continue;
         }
+        if (!brc_verify_generated_ring(&ring_pkt, rot)) {
+            return 1;
+        }
         int demand[BRC_RING_LEN];
         brc_extract_demand(&ring_pkt, rot, demand);
         brc_dfs_ctx_t ctx;
@@ -833,6 +893,9 @@ int main(int argc, char **argv)
                                  &ring_pkt)) {
             aware_gen_failed++;
             continue;
+        }
+        if (!brc_verify_generated_ring(&ring_pkt, rot)) {
+            return 1;
         }
         int demand[BRC_RING_LEN];
         brc_extract_demand(&ring_pkt, rot, demand);
