@@ -548,9 +548,9 @@ lieu, le pic mémoire réel ayant déjà eu lieu au moment où le code
 
 Le chemin séquentiel (celui utilisé par TOUT job POOL, `allow_parallel=0`,
 et par un job SOLO tant que `cur.used < bd_fork_min_states`) traite
-désormais `cur` par tronçons de `bd_transition_chunk_slots` emplacements
-(65536 par défaut, ajustable pour les tests via
-`border_ring_dp_set_transition_chunk_slots_for_tests`), avec un contrôle de
+désormais `cur` par tronçons d'au moins `bd_transition_chunk_slots`
+emplacements (65536, un PLANCHER, pas la taille réellement utilisée — cf.
+l'incident du 2026-09-11 ci-dessous), avec un contrôle de
 `bd_level_bytes(&next)` après chaque tronçon **ayant réellement traité au
 moins une entrée occupée** (jamais après un tronçon entièrement vide — cf.
 le piège de livelock ci-dessous). Si `next` dépasse le budget avant que tout
@@ -593,6 +593,33 @@ lui-même, invisible d'un process parent si la pause survient dans un job
 POOL forké — le test reste donc en mode SOLO, `nb_workers` assez grand pour
 qu'une pause, qui ne produit jamais qu'UN SEUL successeur, ne fasse jamais
 basculer le coordinateur en mode POOL).
+
+**Incident de performance du 2026-09-11, corrigé le jour même** : un run réel
+(`--dp-max-ram-mo 35000 --forks 20`) a tourné 8h en ne dépassant pas la
+position 25/59, avec `bd_transition_chunk_slots` (65536) utilisé TEL QUEL
+comme taille de tronçon. Diagnostic à partir du log : plus de 4500 pauses
+mi-transition en 8h, `next` déjà à 1,4-2,8 Gio à chaque pause (contre un
+budget POOL nominal de ~875 Mo pour cette commande) — une fois `next`
+au-dessus du budget il y RESTE (il ne fait que grossir), donc chaque tronçon
+suivant redéclenchait une pause, chacune réécrivant PUIS relisant
+l'intégralité de `next` sur disque : des dizaines de To d'E/S cumulées pour
+rien, le mécanisme protégeait bien contre l'OOM mais au prix d'un
+ralentissement catastrophique. Cause : `bd_transition_chunk_slots` est une
+constante FIXE, indépendante de la taille réelle du niveau — sur les
+capacités observées (131072 à 16777216), ça donnait de 2 à 256 tronçons
+possibles par transition, chacun pouvant re-pauser.
+
+Corrigé en introduisant `BD_TRANSITION_CHUNK_DIVISOR` (16) :
+`bd_transition_chunk_slots` devient un PLANCHER, la taille de tronçon
+réellement utilisée est `max(bd_transition_chunk_slots, cur.capacity /
+BD_TRANSITION_CHUNK_DIVISOR)` — borne le nombre de pauses possibles par
+transition à 16 au pire, quelle que soit l'échelle du niveau, au lieu de le
+laisser croître avec la capacité. Aucun nouveau test dédié (le mécanisme
+existant, `border_ring_count_dp_matches_brute_force_when_mid_transition_pauses`,
+continue de verrouiller la correction du chemin — cette correction ne touche
+que la FRÉQUENCE des pauses, jamais leur exactitude) ; à réévaluer sur un
+run réel si 16 s'avère encore trop bas (trop de pauses) ou trop haut (un
+tronçon isolé dépasse trop largement le budget).
 
 `border_ring_count_dp_matches_brute_force_when_pool_mode_engages` va plus
 loin : un total final identique ne suffit pas à distinguer « le mode POOL a

@@ -497,28 +497,51 @@ void border_ring_dp_set_fork_min_states_for_tests(size_t n)
     bd_fork_min_states = n;
 }
 
-/* Nombre d'emplacements de `cur` traités par appel à `bd_transition_range`
- * avant de recontrôler la taille de `next` (chemin séquentiel de
- * `bd_run_fragment_job` uniquement — cf. la section "Pause mi-transition"
- * plus bas) : le contrôle de budget existant ne s'exécutait qu'UNE FOIS PAR
- * POSITION, après que `next` ait été bâti EN ENTIER — un niveau dont le
- * facteur de branchement est grand pouvait donc dépasser le budget de
- * plusieurs fois avant que le moindre contrôle n'ait lieu, le pic mémoire
- * réel ayant déjà eu lieu (bug d'origine, OOM constaté en production avec
- * `--dp-max-ram-mo 30000 --forks 10` : jobs à 3-8,5 Gio de RSS réel contre un
- * budget nominal par job POOL de 1,5 Gio, cf. l'incident du 2026-09-10).
- * 65536 : assez petit pour réagir bien avant qu'un niveau qui dérape
- * n'atteigne plusieurs Go, assez grand pour que le contrôle lui-même (un
- * `bd_level_bytes()`, quelques comparaisons) reste négligeable face au
- * travail utile d'un tronçon. Ajustable pour les tests, même schéma que
- * `bd_fork_min_states`/`bd_shard_target_bytes` — le seuil par défaut n'est
- * jamais atteint par les petits fixtures de test_border_ring_dp.c. */
+/* PLANCHER du nombre d'emplacements de `cur` traités par appel à
+ * `bd_transition_range` avant de recontrôler la taille de `next` (chemin
+ * séquentiel de `bd_run_fragment_job` uniquement — cf. la section "Pause
+ * mi-transition" plus bas) : le contrôle de budget existant ne s'exécutait
+ * qu'UNE FOIS PAR POSITION, après que `next` ait été bâti EN ENTIER — un
+ * niveau dont le facteur de branchement est grand pouvait donc dépasser le
+ * budget de plusieurs fois avant que le moindre contrôle n'ait lieu, le pic
+ * mémoire réel ayant déjà eu lieu (bug d'origine, OOM constaté en production
+ * avec `--dp-max-ram-mo 30000 --forks 10` : jobs à 3-8,5 Gio de RSS réel
+ * contre un budget nominal par job POOL de 1,5 Gio, cf. l'incident du
+ * 2026-09-10). Un simple PLANCHER, PAS la taille de tronçon réellement
+ * utilisée (`chunk_slots_effective`, cf. bd_run_fragment_job) : sur un
+ * niveau réel, cette valeur seule aurait causé un second incident le
+ * lendemain (2026-09-11, `--dp-max-ram-mo 35000 --forks 20` : plus de 4500
+ * pauses en 8h, chacune réécrivant puis relisant l'intégralité d'un `next`
+ * déjà à 1,4-2,8 Go — des dizaines de To d'E/S cumulées, cf.
+ * BD_TRANSITION_CHUNK_DIVISOR). 65536 reste un plancher pertinent pour les
+ * petits fixtures de test (`cur.capacity` minuscule, où la fraction
+ * `capacity/BD_TRANSITION_CHUNK_DIVISOR` tomberait sous 1). Ajustable pour
+ * les tests, même schéma que `bd_fork_min_states`/`bd_shard_target_bytes`. */
 static size_t bd_transition_chunk_slots = 1 << 16;
 
 void border_ring_dp_set_transition_chunk_slots_for_tests(size_t n)
 {
     bd_transition_chunk_slots = n == 0 ? 1 : n;
 }
+
+/* Borne le nombre de pauses mi-transition POSSIBLES pour une seule
+ * transition à `BD_TRANSITION_CHUNK_DIVISOR` (jamais plus), quelle que soit
+ * l'échelle réelle du niveau traité — `chunk_slots_effective =
+ * max(bd_transition_chunk_slots, cur.capacity / BD_TRANSITION_CHUNK_DIVISOR)`
+ * dans `bd_run_fragment_job`. Introduit après l'incident du 2026-09-11 (cf.
+ * le commentaire de `bd_transition_chunk_slots` ci-dessus) : un plancher
+ * FIXE de tronçon, indépendant de la taille du niveau, faisait dépendre le
+ * nombre de pauses de la capacité du niveau plutôt que de le borner — sur un
+ * niveau à 16 777 216 emplacements avec un plancher à 65536, ça fait 256
+ * tronçons possibles, chacun pouvant redéclencher une pause dès que `next`
+ * dépasse le budget (ce qui reste vrai indéfiniment une fois franchi, `next`
+ * ne fait que grossir) — d'où les >4500 pauses mesurées. 16 : compromis
+ * mesuré nulle part encore, mais qui borne le pire cas à 16 réécritures
+ * complètes de `next` par transition au lieu de centaines — à ajuster si la
+ * mesure sur un run réel montre qu'il faut encore le baisser (moins de
+ * pauses, plus de dépassement de budget par tronçon) ou le monter
+ * (l'inverse). */
+#define BD_TRANSITION_CHUNK_DIVISOR ((size_t)16)
 
 /* Un fwrite() qui echoue silencieusement (retour < nmemb, jamais verifie
    avant cette correction) laisse un fichier TRONQUE sans le signaler — vu
@@ -1481,10 +1504,38 @@ static struct bd_job_result bd_run_fragment_job(const struct bd_ctx *ctx, int8_t
                vide « dépasse » n'importe quel budget aussi bas soit-il,
                exactement le même piège que la garde `cur.used > 1` plus bas,
                mais ici sur l'ENTRÉE plutôt que la SORTIE de la transition). */
+            /* Taille de tronçon RÉELLEMENT utilisée : le plus grand entre le
+               plancher `bd_transition_chunk_slots` et `cur.capacity /
+               BD_TRANSITION_CHUNK_DIVISOR` — jamais `bd_transition_chunk_slots`
+               seul. Correctif d'un incident de production (2026-09-10/11,
+               `--dp-max-ram-mo 35000 --forks 20`) : à `bd_transition_chunk_slots`
+               fixe (65536), un niveau réel (capacités observées 131072 à
+               16777216, `next` déjà à 1,4-2,8 Go à chaque pause contre un
+               budget POOL nominal de ~875 Mo) déclenchait des MILLIERS de
+               pauses par transition — une fois `next` au-dessus du budget il
+               y RESTE (il ne fait que grossir), donc CHAQUE tronçon suivant
+               re-déclenchait une pause, chacune réécrivant PUIS relisant
+               l'intégralité de `next` (déjà plusieurs Go) sur disque : plus
+               de 4500 pauses mesurées sur un seul run, des dizaines de To
+               d'E/S cumulées pour rien — le mécanisme protégeait bien contre
+               l'OOM mais au prix d'un ralentissement catastrophique (run
+               bloqué ~8h vers la position 25/59). Borner le nombre de
+               tronçons à une fraction FIXE de `cur.capacity` (jamais plus de
+               `BD_TRANSITION_CHUNK_DIVISOR` pauses par transition, quelle
+               que soit l'échelle réelle) élimine cet effet — contrairement à
+               `bd_transition_chunk_slots` seul, qui ne dit rien de la taille
+               du niveau traité. Le plancher reste nécessaire pour les petits
+               fixtures de test (`cur.capacity` minuscule, la fraction
+               tomberait sous 1). */
+            size_t chunk_slots_effective = cur.capacity / BD_TRANSITION_CHUNK_DIVISOR;
+            if (chunk_slots_effective < bd_transition_chunk_slots) {
+                chunk_slots_effective = bd_transition_chunk_slots;
+            }
+
             size_t chunk_start = 0;
             size_t occupied_seen = 0;
             while (chunk_start < cur.capacity && occupied_seen < cur.used) {
-                size_t chunk_end = chunk_start + bd_transition_chunk_slots;
+                size_t chunk_end = chunk_start + chunk_slots_effective;
                 if (chunk_end > cur.capacity) {
                     chunk_end = cur.capacity;
                 }
