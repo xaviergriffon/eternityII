@@ -36,7 +36,7 @@ partagé reste à la racine de `tests/`.
 | `tests/net/` | Suites des modules `src/net/` (`test_etii_protocol`, `test_control_protocol` — codec du [canal de contrôle](../docs/echanges_client_serveur.md#canal-de-contrôle-v9), `test_local_socket`, `test_tcp`). |
 | `tests/ui/` | Suites des modules `src/ui/` (`test_command_history`, `test_command_match`, `test_command_lines`, `test_console`, `test_logger`). |
 | `tests/app/` | Suites des modules `src/app/` (`test_static_variables`, `test_app_runtime`, `test_etii_client`, `test_etii_server`, `test_control_registry` — registre serveur du canal de contrôle, `test_etii_control` — thread client du canal de contrôle). |
-| `tests/tools/` | Outils autonomes + leur cœur testé (`gen_root` / `root_from_board` — conversion d'un plateau externe en racine de stock). |
+| `tests/tools/` | Outils autonomes + leur cœur testé (`gen_root` / `root_from_board` — conversion d'un plateau externe en racine de stock ; `border_mass` / `border_walk` — masse totale des anneaux de bordure). |
 
 Chaque `test_<module>.c` inclut ses en-têtes de production en forme qualifiée
 (`#include "core/part.h"`, résolu via `-Isrc`) et le harnais en forme courte
@@ -75,6 +75,37 @@ Deux pièges à l'usage, tous deux rencontrés :
   vaut 1 par défaut, donc `first_possibility` pose les 5 indices de
   `data/indices.csv` : un plateau qui en contredit un est hors de l'espace de
   recherche, et sa racine ne mènera jamais à rien.
+
+`border_mass` mesure la masse totale des anneaux de bordure valides (voir
+[docs/tests_et_ci.md](../docs/tests_et_ci.md#outil-border_mass-make-border-mass)
+et [docs/conception/border_mass.md](../docs/conception/border_mass.md)).
+Son cœur pur (`border_walk.c`) est, comme celui de `gen_root`, compilé avec
+les autres modules et couvert par `test_border_walk.c` ; le second algorithme
+(`--dp`, `border_ring_dp.c`) l'est de même, couvert par
+`test_border_ring_dp.c`.
+
+```sh
+make border-mass
+tests/tools/border_mass data/pieces.csv data/indices.csv
+```
+
+Ne termine pas en plusieurs heures sur les données réelles (256 pièces) — voir
+docs/tests_et_ci.md pour le détail.
+`--forks N` parallélise par forks (coins d'abord, expansion en largeur,
+distribution round-robin) — voir la spec liée depuis `docs/tests_et_ci.md`.
+`--dp` bascule sur un algorithme exact par programmation dynamique sur des
+classes de pièces interchangeables, niveau par niveau — combinable avec
+`--forks N`. Un niveau assez gros mais qui tient encore en RAM voit sa
+transition répartie sur N process forkés ; au-delà d'un seuil (2 Go par
+défaut), le niveau lui-même bascule en fragments sur disque (partitionnement
+externe par hachage, comme un GROUP BY qui ne tient pas en RAM), pour ne
+jamais avoir à matérialiser un niveau entier en mémoire quelle que soit sa
+taille. `--spill-dir DIR` redirige les fragments et fichiers temporaires vers
+un disque plus grand que `/tmp` (souvent une petite partition ou un tmpfs
+plafonné indépendamment de la RAM de la machine — a saturé en pratique sur la
+machine 2×10 cœurs/48 Go visée avant correction). Bien plus rapide et sobre
+en mémoire que le DFS brut ; voir `docs/tests_et_ci.md` pour les mesures et
+le détail du mode disque.
 
 ## Tests d'intégration bout-en-bout
 
