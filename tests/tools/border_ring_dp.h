@@ -32,38 +32,42 @@
  * pièces de cette classe encore disponibles, exactement comme un DFS réel
  * essaierait chacune séparément.
  *
+ * Chaque niveau est un TABLEAU TRIÉ par clé, sans doublon — pas une table de
+ * hachage : les états identiques se retrouvent par l'ORDRE (tri puis fusion
+ * des clés égales adjacentes), jamais par co-résidence en mémoire. Un niveau
+ * qui dépasse le budget devient donc un FICHIER trié, lu séquentiellement
+ * par la position suivante, et reste un niveau UNIQUE et intégralement
+ * fusionné quelle que soit sa taille. C'est la différence de fond avec le
+ * mécanisme précédent (scission en fragments repris indépendamment), qui
+ * perdait toute fusion entre fragments dès la position suivant la scission
+ * et faisait dégénérer la DP en somme de sous-DP redondantes — mesures et
+ * chiffres du run de production qui l'a montré : commentaire de tête de
+ * `border_ring_dp.c`.
+ *
+ * Un état tient dans une clé compacte : chaque compteur de classe est borné
+ * par la multiplicité de SA classe, donc codé sur `ceil(log2(m+1))` bits
+ * (59 bits en tout pour le jeu réel, compteurs et couleur requise compris —
+ * mais 68 pour certaines fixtures de test, d'où une clé de 128 bits plutôt
+ * que 64, cf. `bd_key_t` dans border_ring_dp.c). Un état stocké coûte
+ * 32 octets contre 111 pour la version précédente (clé de 29 octets dans une
+ * table de hachage tenue sous 60 % de charge).
+ *
  * La transition d'un niveau assez gros vers le suivant est parallélisée par
  * forks (`nb_workers`, cf. `bd_transition_parallel` dans `border_ring_dp.c`) :
  * les états du niveau courant, déjà calculé et immuable, sont indépendants
- * les uns des autres — chaque worker traite une plage disjointe et écrit son
- * niveau-suivant local dans un fichier temporaire, fusionné par le parent.
+ * les uns des autres — chaque worker traite une plage disjointe et rend UN
+ * fichier déjà TRIÉ, que le parent fusionne en une passe linéaire. C'est ce
+ * qui rend la parallélisation franche ici : la version précédente faisait
+ * RÉINSÉRER au parent, une à une dans une table de hachage, la totalité de
+ * la production de ses workers — une partie série valant ~100 % du travail
+ * utile, donc un speedup borné à ~2 quel que soit `--forks`.
  *
- * Au-delà du budget effectif du job qui le porte (`bd_solo_budget_bytes` en
- * mode SOLO, `bd_pool_job_budget_bytes` en mode POOL — tous deux dérivés de
- * `border_ring_dp_set_max_ram_mo` — `--dp-max-ram-mo`, obligatoire dès que
- * `--dp` est utilisé), un niveau est scindé en K fragments sur disque
- * (partitionnement externe par hachage de la clé, `struct bd_shard_set`,
- * `bd_level_to_shards`, forké seulement si plus d'un worker de compaction est
- * disponible — un seul compacte directement, sans fork) — les K fragments
- * sont TOUS repoussés vers
- * une pile LIFO partagée (`struct bd_pending_stack`), jamais l'un d'eux
- * repris immédiatement par le job qui vient de scinder. Un coordinateur
- * central (`bd_run_opening`) redistribue ensuite ces fragments entre deux
- * modes mutuellement exclusifs, selon la profondeur de la pile
- * (`bd_should_run_solo`) : mode SOLO (un seul job actif, autorisé à se
- * paralléliser en interne via `bd_transition_parallel`, budget mémoire
- * heuristique) tant que la pile n'a pas de quoi remplir tous les workers,
- * mode POOL (jusqu'à `nb_workers` jobs forkés concurrents, chacun
- * strictement monoprocessus, admis sur une estimation RAM exacte de leur
- * rechargement) dès qu'elle en a assez. Chaque fragment repris, dans l'un ou
- * l'autre mode, continue depuis la position où il a été mis de côté.
- * Contrairement à un mécanisme antérieur (mode disque permanent, tout un
- * niveau réécrit/relu à CHAQUE position tant qu'il restait trop gros), un
- * fragment mis de côté n'est écrit qu'une fois et relu qu'une fois, jamais
- * retouché entre les deux — voir le commentaire de tête de la section
- * « Scission par pile LIFO » dans `border_ring_dp.c`, et
- * `docs/conception/border_mass.md`,
- * pour le détail (comptabilité RAM, ordonnancement, gestion des échecs).
+ * Le budget mémoire (`border_ring_dp_set_max_ram_mo` — `--dp-max-ram-mo`,
+ * obligatoire dès que `--dp` est utilisé) ne dimensionne QUE le tampon de
+ * tri. Le dépasser ajoute un run trié à fusionner : jamais un fragment qui
+ * cesserait de fusionner ses doublons avec les autres, et jamais un seuil
+ * dérivé (`/4`, `/(workers*2)`, `/(workers*3)`) qui rendait le budget réel
+ * de la version précédente 20 fois plus petit que celui demandé.
  */
 #ifndef eternityII_border_ring_dp_h
 #define eternityII_border_ring_dp_h
@@ -140,9 +144,10 @@ void bd_ring_count_format(bd_ring_count_t value, char *buf, size_t buflen);
 bd_ring_count_t border_ring_count_dp(map_big_array *map, struct array_part *all_rotate_parts, int nb_workers);
 
 /**
- * @brief Change le répertoire des fragments de scission et des fichiers
- * temporaires de la parallélisation par forks (`/tmp` par défaut) — comme
- * `--stock-spill-dir` pour le stock principal (`core/stock_spill.c`).
+ * @brief Change le répertoire des runs déversés par le trieur, des tranches
+ * triées rendues par les workers forkés et des niveaux trop gros pour la RAM
+ * (`/tmp` par défaut) — comme `--stock-spill-dir` pour le stock principal
+ * (`core/stock_spill.c`).
  *
  * `/tmp` est souvent une petite partition ou un tmpfs plafonné bien en-deçà
  * de la RAM de la machine, indépendamment de sa taille — observé en
@@ -156,30 +161,28 @@ bd_ring_count_t border_ring_count_dp(map_big_array *map, struct array_part *all_
 void border_ring_dp_set_spill_dir(const char *dir);
 
 /**
- * @brief Fixe le budget mémoire dédié à UN NIVEAU (ou une tranche reprise
- * depuis la pile, cf. le commentaire de tête du fichier) de la DP —
- * obligatoire dès que `--dp` est utilisé (cf. `border_mass.c`,
- * `--dp-max-ram-mo`), remplace les anciennes constantes calées à la main sur
- * une seule machine (2 Go de seuil de scission, 768 Mo de cible de fragment).
+ * @brief Fixe la taille du TAMPON DE TRI de la DP — obligatoire dès que
+ * `--dp` est utilisé (cf. `border_mass.c`, `--dp-max-ram-mo`).
  *
- * Pilote plusieurs seuils dérivés du même budget brut : `bd_pool_budget_bytes`
- * (plafond d'admission POOL, somme visée sur tous les slots actifs, cf. le
- * commentaire de tête du fichier) prend directement la valeur donnée ;
- * `bd_pool_job_budget_bytes` (seuil de scission PAR JOB en mode POOL, jamais
- * l'admission) en est dérivé — `budget / (nb_workers * 2)` ; `bd_shard_target_bytes`
- * (taille cible d'un fragment) en est dérivée — `budget / (nb_workers * 3)`,
- * avec un plancher bas — pour que `nb_workers` fragments simultanés pendant
- * une compaction restent, ensemble, sous ce même budget ; `bd_solo_budget_bytes`
- * (seuil de scission heuristique du mode SOLO) en est également dérivé —
- * `budget / 4`.
+ * Un seul seuil, et rien n'en est dérivé : c'est la mémoire que le trieur
+ * s'autorise avant de déverser un run trié sur disque. Le dépasser n'a
+ * AUCUNE conséquence algorithmique — un run de plus à fusionner en fin de
+ * position, le niveau reste entier et intégralement fusionné.
  *
- * @param mo         Budget en Mo. Doit rester valide pour tout l'appel à
- *                   `border_ring_count_dp` qui suit.
- * @param nb_workers Nombre de process forkés (même valeur que celle passée à
- *                   `border_ring_count_dp`) — utilisé pour dimensionner
- *                   `bd_shard_target_bytes`.
+ * Ne pas confondre avec le mécanisme précédent, où ce même nombre était
+ * divisé quatre fois (`/4` en mode SOLO, `/(nb_workers*2)` par job du pool,
+ * `/(nb_workers*3)` par fragment) pour servir de seuil de SCISSION : avec
+ * `--dp-max-ram-mo 35000 --forks 10`, un job n'y disposait que de 1,75 Go,
+ * et ajouter des workers fragmentait donc la DP plus tôt — la
+ * parallélisation créait le problème qu'elle devait résoudre.
+ *
+ * Le pic mémoire réel d'un process reste ce budget PLUS le niveau courant
+ * s'il est résident (il est lu pendant toute la transition) : la capacité du
+ * tampon est calculée en retranchant ce niveau, jamais en l'ignorant.
+ *
+ * @param mo Budget en Mo.
  */
-void border_ring_dp_set_max_ram_mo(long mo, int nb_workers);
+void border_ring_dp_set_max_ram_mo(long mo);
 
 /**
  * @brief Reconstruit et délivre, via `on_found`, chaque anneau de bordure

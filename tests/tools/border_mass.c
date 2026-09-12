@@ -70,14 +70,12 @@
  * plage d'états déjà calculés, en lecture seule, et écrit sa part du niveau
  * suivant dans un fichier temporaire fusionné par le parent) — sans
  * `--forks`, `--dp` prend le nombre de cœurs détecté par défaut, comme le
- * DFS. `--dp-max-ram-mo MO` est OBLIGATOIRE avec `--dp` : budget mémoire
- * dédié à un niveau (cf. `border_ring_dp_set_max_ram_mo`) — au-delà, un
- * niveau est scindé en fragments sur disque (partitionnement externe par
- * hachage), un seul repris immédiatement en mémoire, les autres empilés
- * (LIFO) pour être repris plus tard chacun depuis sa position de mise de
- * côté — jamais retouchés entre-temps, contrairement à un mécanisme
- * antérieur qui réécrivait/relisait tout un niveau à chaque position tant
- * qu'il restait trop gros — voir border_ring_dp.h pour le raisonnement
+ * DFS. `--dp-max-ram-mo MO` est OBLIGATOIRE avec `--dp` : taille du tampon
+ * de tri (cf. `border_ring_dp_set_max_ram_mo`) — au-delà, le tampon déverse
+ * un run trié sur disque et les runs sont fusionnés en fin de position, ce
+ * qui laisse le niveau ENTIER et intégralement fusionné quelle que soit sa
+ * taille ; dépasser le budget ne change plus la forme du calcul, seulement
+ * son nombre d'E/S — voir border_ring_dp.h pour le raisonnement
  * complet. `--spill-dir DIR`
  * redirige ces fragments (et les fichiers temporaires de `--forks`) vers DIR
  * au lieu de `/tmp`, souvent une petite partition ou un tmpfs plafonné bien
@@ -315,8 +313,8 @@ int main(int argc, char **argv)
        partition ou un tmpfs plafonné bien en-deçà de la RAM de la machine,
        qui peut saturer même sur une machine par ailleurs bien dotée (observé
        en pratique, cf. docs/tests_et_ci.md). `--dp-max-ram-mo MO` est
-       OBLIGATOIRE avec `--dp` (vérifié plus bas) — budget mémoire dédié à un
-       niveau de la DP, en Mo (cf. `border_ring_dp_set_max_ram_mo`) ; aucune
+       OBLIGATOIRE avec `--dp` (vérifié plus bas) — taille du tampon de tri
+       de la DP, en Mo (cf. `border_ring_dp_set_max_ram_mo`) ; aucune
        valeur par défaut n'est choisie à la place de l'utilisateur, une
        machine différente de celle qui a motivé ce mécanisme rendrait
        n'importe quel défaut faux dans un sens ou dans l'autre.
@@ -456,7 +454,7 @@ int main(int argc, char **argv)
         if (spill_dir != NULL) {
             border_ring_dp_set_spill_dir(spill_dir);
         }
-        border_ring_dp_set_max_ram_mo(dp_max_ram_mo, forks);
+        border_ring_dp_set_max_ram_mo(dp_max_ram_mo);
 
         if (save_rings_path != NULL) {
             FILE *rings_file = fopen(save_rings_path, "wb");

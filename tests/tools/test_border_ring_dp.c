@@ -29,79 +29,30 @@
    les petits fixtures ci-dessous). */
 void border_ring_dp_set_fork_min_states_for_tests(size_t n);
 
-/* Test-only, jamais déclarées dans border_ring_dp.h — même schéma. Abaisser
-   ces deux seuils force une scission (répartition en fragments, cf. le
-   commentaire de tête de la section "Scission par pile LIFO" dans
-   border_ring_dp.c) dès le premier niveau, sur un fixture minuscule, sans
-   avoir à construire un niveau de plusieurs Go. */
-void border_ring_dp_set_disk_mode_min_bytes_for_tests(double n);
-void border_ring_dp_set_shard_target_bytes_for_tests(double n);
+/* Test-only, jamais déclarée dans border_ring_dp.h — même schéma. Force la
+   capacité du tampon de tri, PLANCHER COMPRIS (contrairement à
+   border_ring_dp_set_max_ram_mo, qui ne descend jamais sous
+   BD_SORTER_MIN_ENTRIES) : seul moyen de faire déborder le trieur sur un
+   fixture minuscule et d'exercer pour de bon runs sur disque, fusion
+   k-voies et niveau resté résident sur disque. 0 remet le calcul normal. */
+void border_ring_dp_set_sorter_capacity_for_tests(size_t entries);
 
-/* Test-only, jamais déclarée dans border_ring_dp.h — même schéma. Abaisse le
-   nombre d'emplacements de `cur` traités entre deux contrôles de taille de
-   `next` pendant une transition séquentielle, pour qu'un fixture minuscule
-   suffise à exercer réellement une pause MI-transition (cf. la section
-   "Pause mi-transition" de bd_run_fragment_job), pas seulement une scission
-   de fin de position. */
-void border_ring_dp_set_transition_chunk_slots_for_tests(size_t n);
+/* Test-only, jamais déclarées dans border_ring_dp.h — même schéma. Comptent
+   les runs RÉELLEMENT déversés sur disque : un test qui ne vérifie que le
+   total ne peut pas distinguer « le chemin externe a servi et il est juste »
+   de « tout est resté en mémoire, le chemin externe n'a jamais tourné » —
+   c'est exactement le piège qui avait laissé passer un hook devenu sans
+   effet après un renommage, dans la version précédente de ce fichier. */
+void border_ring_dp_reset_runs_spilled_for_tests(void);
+long border_ring_dp_get_runs_spilled_for_tests(void);
 
-/* Test-only, jamais déclarées dans border_ring_dp.h — même schéma que
-   border_ring_dp_reset_pool_jobs_forked_for_tests/_get_. Seul moyen pour un
-   test de prouver qu'une pause mi-transition a réellement eu lieu (cf. le
-   commentaire à sa déclaration dans border_ring_dp.c). */
-void border_ring_dp_reset_mid_transition_pauses_for_tests(void);
-long border_ring_dp_get_mid_transition_pauses_for_tests(void);
+/* Test-only, jamais déclarées dans border_ring_dp.h — les deux briques PURES
+   du moteur : le tri+fusion qui remplace la table de hachage, et la clé
+   compacte qui rend un état stockable sur 8 octets. */
+void border_ring_dp_set_merge_fanin_for_tests(int fanin);
 
-/* Test-only, jamais déclarées dans border_ring_dp.h — même schéma que
-   border_ring_dp_set_fork_min_states_for_tests. */
-double bd_estimate_reload_bytes(int32_t key_len, uint64_t count);
-int bd_reload_estimate_matches_real_alloc_for_tests(int32_t key_len, uint64_t count);
-
-/* Test-only, jamais déclarée dans border_ring_dp.h — même schéma que les
-   autres. Expose la marge heuristique du budget SOLO (Tâche 6) fixée en
-   dernier lieu par border_ring_dp_set_max_ram_mo. */
-double border_ring_dp_get_solo_budget_bytes_for_tests(void);
-
-/* Test-only, jamais déclarée dans border_ring_dp.h — même schéma que les
-   autres. Predicat pur de choix de mode (solo vs pool). */
-int bd_should_run_solo(int active, int stack_count, int nb_workers);
-
-/* Test-only, jamais déclarées dans border_ring_dp.h — même schéma que les
-   autres. Compteur de fork() reussis dans bd_fork_pool_job (incremente par
-   le PARENT, jamais l'enfant), seul moyen pour un test de prouver que le
-   mode POOL a REELLEMENT forke des jobs concurrents, et pas seulement que
-   le mode SOLO a produit, par coincidence, le meme total en traitant tout
-   sequentiellement — un test qui ne verifie que le total final ne peut pas
-   distinguer les deux (c'est exactement ce qui s'est produit une fois : un
-   renommage de variable pendant un refactor avait rendu le hook
-   border_ring_dp_set_disk_mode_min_bytes_for_tests sans effet, et le test
-   pool-mode passait quand meme, via SOLO). */
-void border_ring_dp_reset_pool_jobs_forked_for_tests(void);
-long border_ring_dp_get_pool_jobs_forked_for_tests(void);
-
-/* Struct de resultat d'un job, serialisable fichier — doit rester en tout
-   point identique à la vraie déclaration (border_ring_dp.c) : ces deux
-   déclarations sont liées par nom à travers deux unités de traduction
-   distinctes, rien ne les fait divériger automatiquement si l'une change
-   sans l'autre (piège déjà vécu une fois : `total` était resté `long long`
-   ici après le passage à `bd_ring_count_t`/`unsigned __int128` côté
-   production — un `sizeof` différent entre les deux structs aurait fait
-   lire/écrire hors bornes dans les trois tests de round-trip ci-dessous,
-   invisible sur ce fixture minuscule mais un vrai dépassement de tampon). */
-struct bd_job_result {
-    bd_ring_count_t total;
-    int closed;
-    char shard_dir[128];
-    int nb_shards;
-    int resume_pos;
-    char leftover_path[512];
-    char next_partial_path[512];
-};
-
-/* Non-static, utilisees par le coordinateur (Tache 5) pour communiquer entre
-   un job forke et le parent. */
-void bd_job_result_write_or_die(const struct bd_job_result *r, const char *path);
-int bd_job_result_read(struct bd_job_result *r, const char *path);
+size_t bd_sort_and_compact_for_tests(uint64_t *keys, uint64_t *values, size_t n);
+int bd_key_layout_roundtrip_for_tests(const int *counts_max, int nb_classes);
 
 #define BRD_EDGE_BASE 12
 #define BRD_INTERIOR_PLACEHOLDER 11
@@ -188,29 +139,23 @@ static struct array_part *brd_make_rotate_parts(int nb_duplicates)
  * et `..._when_pool_mode_engages` exercent réellement une scission : la
  * topologie de `brd_make_rotate_parts` seule garantit qu'à CHAQUE position il
  * n'existe qu'UNE SEULE classe candidate (chaque position de l'anneau a une
- * couleur requise unique, cf. `brd_required_face`) — `cur.used` (le nombre
- * d'états DISTINCTS occupant un niveau) y reste donc `== 1` du début à la fin
- * de la DP, quel que soit le nombre de pièces réelles dupliquées au sein
- * d'une classe (`nb_duplicates` ne fait que multiplier `ways`, jamais le
- * nombre d'états). La garde anti-dégénérescence de `bd_run_fragment_job`
- * (`cur.used > 1`, cf. Correctif 4) bloquerait alors TOUJOURS la scission —
- * les tests de scission sur disque ne testeraient jamais réellement ce
- * chemin, seuil de test ou pas (constaté en instrumentant temporairement le
- * calcul : `cur.used` valait 1 à CHAQUE position sur `brd_make_rotate_parts`
- * seul, y compris avec `nb_duplicates=2`). La pièce fourche crée une branche
- * MORTE (sa couleur de sortie ne correspond à rien d'attendu par la suite,
- * donc `border_walk_count` ne compte jamais de fermeture supplémentaire par
- * cette voie — le total brut attendu reste inchangé) qui coexiste avec la
- * branche réelle pendant EXACTEMENT une transition — assez pour que
- * `cur.used` passe à 2 et déclenche une scission réelle avec les seuils de
- * test quasi nuls (`border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0)`).
- * `bd_pick_nb_shards` ne dimensionne plus que sur la taille à écouler
- * (`total_bytes / bd_shard_target_bytes`, plus de plancher `nb_workers`) —
- * `border_ring_dp_set_shard_target_bytes_for_tests` est donc réglé assez bas
- * par les tests qui l'utilisent pour que cette unique scission produise
- * quand même au moins `nb_workers` fragments, assez pour que le mode POOL
- * s'engage réellement (cf. `bd_should_run_solo`), pas seulement le mode SOLO
- * qui traiterait tout séquentiellement. */
+ * couleur requise unique, cf. `brd_required_face`) — un niveau y compte donc
+ * TOUJOURS exactement UN état, du début à la fin de la DP, quel que soit le
+ * nombre de pièces réelles dupliquées au sein d'une classe (`nb_duplicates`
+ * ne fait que multiplier le nombre de FAÇONS, jamais le nombre d'états).
+ * Conséquence : le tampon de tri n'y déborde jamais, quelle que soit sa
+ * capacité — un seul successeur poussé par transition ne remplit rien. Les
+ * tests du chemin externe (runs sur disque, fusion k-voies, niveau resté
+ * résident sur disque) ne testeraient donc jamais rien sur ce fixture, hook
+ * ou pas.
+ *
+ * La pièce fourche crée une branche MORTE (sa couleur de sortie ne
+ * correspond à rien d'attendu par la suite, donc `border_walk_count` ne
+ * compte jamais de fermeture supplémentaire par cette voie — le total brut
+ * attendu reste inchangé) qui coexiste avec la branche réelle pendant
+ * EXACTEMENT une transition : assez pour qu'un niveau compte 2 états et que
+ * le tampon de tri, forcé à 1 entrée par
+ * `border_ring_dp_set_sorter_capacity_for_tests`, déborde pour de bon. */
 static struct array_part *brd_make_rotate_parts_with_fork(int nb_duplicates)
 {
     int8_t ring[BORDER_RING_LEN][2];
@@ -392,141 +337,6 @@ TEST border_ring_count_dp_matches_brute_force_when_forked(void)
     PASS();
 }
 
-/* Force une scission dès le premier niveau (seuil abaissé à 1 octet) avec
-   une cible de fragment minuscule (32 octets, quelques entrées à peine) sur
-   le fixture À FOURCHE (brd_make_rotate_parts_with_fork, cf. son commentaire
-   pour pourquoi brd_make_rotate_parts seul — multiplicité sans embranchement
-   réel — ne peut JAMAIS satisfaire la garde `cur.used > 1` et ne
-   testerait donc jamais réellement ce chemin, quel que soit le seuil) :
-   `cur.used` passe à 2 exactement à la position où la fourche diverge,
-   suffisant pour déclencher une scission réelle en K fragments (`bd_pick_nb_shards`
-   dimensionné par `bd_shard_target_bytes`, abaissé ci-dessous à 32 octets pour
-   que K dépasse `nb_workers` malgré un niveau minuscule) — verrouille tout le
-   chemin externe par
-   hachage (éclatement -> compactage -> reprise) sur des fragments réels,
-   pas seulement sur un niveau qui ne dépasse jamais la garde de
-   dégénérescence. Sans l'accumulation lors du compactage (bd_level_add, pas
-   un écrasement), deux fragments bruts déposant la même clé se marcheraient
-   dessus au lieu de s'additionner — exactement le même risque que
-   bd_transition_parallel, à la granularité du fragment plutôt que du niveau
-   entier. Verrouille aussi la pile LIFO elle-même (bd_pending_stack) : si une
-   tranche empilée était perdue, dupliquée, ou reprise à la mauvaise position,
-   le total s'écarterait du brute-force. */
-TEST border_ring_count_dp_matches_brute_force_when_sharded_to_disk(void)
-{
-    struct array_part *all = brd_make_rotate_parts_with_fork(2);
-    ASSERT(all != NULL);
-    map_big_array *map = prepare_map_part(all);
-    ASSERT(map != NULL);
-
-    long long brute = border_walk_count(map, all, NULL, NULL);
-
-    border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0);
-    border_ring_dp_set_shard_target_bytes_for_tests(32.0);
-    long long dp = (long long)border_ring_count_dp(map, all, 4);
-    border_ring_dp_set_disk_mode_min_bytes_for_tests(2.0 * 1024.0 * 1024.0 * 1024.0);
-    border_ring_dp_set_shard_target_bytes_for_tests(768.0 * 1024.0 * 1024.0);
-
-    ASSERT_EQ_FMT(12LL, brute, "%lld");
-    ASSERT_EQ_FMT(brute, dp, "%lld");
-
-    free_bigarray(map);
-    free_array_part(all);
-    PASS();
-}
-
-/* Même fixture à fourche que border_ring_count_dp_matches_brute_force_when_sharded_to_disk
-   (cf. son commentaire pour pourquoi une fourche réelle, pas juste
-   `nb_duplicates`, est nécessaire pour franchir la garde `cur.used > 1`),
-   mais avec un `nb_workers` assez petit (2) pour que l'unique scission
-   qu'elle déclenche — K fragments, K déterminé par `bd_pick_nb_shards` à
-   partir de `bd_shard_target_bytes` seul (abaissé à 32 octets ci-dessous,
-   assez pour que K dépasse 2 même sur ce niveau minuscule) — dépasse
-   `nb_workers` fragments en attente sur la pile dès qu'elle survient,
-   faisant basculer le coordinateur en mode POOL
-   (`bd_should_run_solo`), pas seulement le mode SOLO déjà verrouillé par
-   border_ring_count_dp_matches_brute_force_when_sharded_to_disk.
-   Le total seul ne suffirait PAS a verrouiller ca : il est identique que le
-   mode POOL ait reellement fork des jobs concurrents ou que le mode SOLO ait
-   tout traite sequentiellement en tombant, par coincidence, sur le meme
-   resultat — border_ring_dp_get_pool_jobs_forked_for_tests() est le seul
-   temoin qui distingue les deux (cf. son commentaire), donc verrouille ici
-   en plus du total. */
-TEST border_ring_count_dp_matches_brute_force_when_pool_mode_engages(void)
-{
-    struct array_part *all = brd_make_rotate_parts_with_fork(2);
-    ASSERT(all != NULL);
-    map_big_array *map = prepare_map_part(all);
-    ASSERT(map != NULL);
-
-    long long brute = border_walk_count(map, all, NULL, NULL);
-
-    border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0);
-    border_ring_dp_set_shard_target_bytes_for_tests(32.0);
-    border_ring_dp_reset_pool_jobs_forked_for_tests();
-    long long dp = (long long)border_ring_count_dp(map, all, 2);
-    long long pool_jobs_forked = border_ring_dp_get_pool_jobs_forked_for_tests();
-    border_ring_dp_set_disk_mode_min_bytes_for_tests(2.0 * 1024.0 * 1024.0 * 1024.0);
-    border_ring_dp_set_shard_target_bytes_for_tests(768.0 * 1024.0 * 1024.0);
-
-    ASSERT_EQ_FMT(12LL, brute, "%lld");
-    ASSERT_EQ_FMT(brute, dp, "%lld");
-    /* >= 2 : nb_workers=2 ci-dessus, donc un vrai engagement du mode POOL
-       doit forker au moins 2 jobs concurrents pour remplir le pool — pas
-       seulement > 0, qui n'exclurait pas un pool degenere a 1 seul job. */
-    ASSERT(pool_jobs_forked >= 2);
-
-    free_bigarray(map);
-    free_array_part(all);
-    PASS();
-}
-
-/* Force une pause MI-TRANSITION (cf. bd_run_fragment_job, section "Pause
-   mi-transition") en abaissant à la fois le budget de scission (comme les
-   tests de scission normale ci-dessus) ET le nombre d'emplacements traités
-   entre deux contrôles de taille pendant une transition séquentielle
-   (border_ring_dp_set_transition_chunk_slots_for_tests(1)), sur le même
-   fixture à fourche — nb_workers assez grand (4) pour que la pile ne
-   dépasse jamais nb_workers fragments en attente (une pause ne produit
-   jamais qu'UN SEUL successeur, jamais de fan-out), donc pour que tout reste
-   en mode SOLO / job d'ouverture, jamais forké (condition nécessaire pour
-   que border_ring_dp_get_mid_transition_pauses_for_tests() — incrémenté par
-   bd_run_fragment_job lui-même, invisible d'un process parent si ça se
-   produit dans un enfant — reste observable ici, cf. son commentaire).
-   Le total doit rester EXACT malgré une ou plusieurs pauses en cascade
-   (chaque reprise peut elle-même re-dépasser le budget quasi nul et se
-   remettre en pause) : sans l'accumulation correcte à travers la ou les
-   reprises, ou avec un reliquat de `cur` mal sérialisé, ce test s'écarterait
-   du brute-force — même risque que
-   border_ring_count_dp_matches_brute_force_when_pool_mode_engages (cf. son
-   commentaire), qu'un test qui ne vérifie que le total ne pourrait pas
-   distinguer d'un budget jamais franchi. */
-TEST border_ring_count_dp_matches_brute_force_when_mid_transition_pauses(void)
-{
-    struct array_part *all = brd_make_rotate_parts_with_fork(2);
-    ASSERT(all != NULL);
-    map_big_array *map = prepare_map_part(all);
-    ASSERT(map != NULL);
-
-    long long brute = border_walk_count(map, all, NULL, NULL);
-
-    border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0);
-    border_ring_dp_set_transition_chunk_slots_for_tests(1);
-    border_ring_dp_reset_mid_transition_pauses_for_tests();
-    long long dp = (long long)border_ring_count_dp(map, all, 4);
-    long long pauses = border_ring_dp_get_mid_transition_pauses_for_tests();
-    border_ring_dp_set_disk_mode_min_bytes_for_tests(2.0 * 1024.0 * 1024.0 * 1024.0);
-    border_ring_dp_set_transition_chunk_slots_for_tests((size_t)1 << 16);
-
-    ASSERT_EQ_FMT(12LL, brute, "%lld");
-    ASSERT_EQ_FMT(brute, dp, "%lld");
-    ASSERT(pauses >= 1);
-
-    free_bigarray(map);
-    free_array_part(all);
-    PASS();
-}
-
 #if ETERN_PARTS == 16
 /* Contenu de data/pieces16.csv, embarqué pour rester indépendant du CWD
    (même convention que tests/core/test_solution16.c). Le vrai jeu 16 pièces
@@ -594,10 +404,11 @@ TEST border_ring_count_dp_matches_border_walk_count_on_real_pieces16(void)
 }
 
 /* Même régression que border_ring_count_dp_matches_border_walk_count_on_real_pieces16,
-   mais forcée en mode disque : la table des classes réelles (ordre des
-   couleurs required/outgoing) doit rester correcte y compris quand chaque
-   fragment ne voit qu'une fraction des états. */
-TEST border_ring_count_dp_matches_border_walk_count_on_real_pieces16_sharded_to_disk(void)
+   mais forcée sur le chemin EXTERNE (tampon de tri réduit à 2 entrées) : la
+   table des classes réelles (ordre des couleurs required/outgoing) doit
+   rester correcte quand les états transitent par des runs sur disque et une
+   fusion k-voies plutôt que par un tableau résident. */
+TEST border_ring_count_dp_matches_border_walk_count_on_real_pieces16_spilled(void)
 {
     struct array_part *all = brd_make_rotate_parts_pieces16();
     ASSERT(all != NULL);
@@ -606,14 +417,15 @@ TEST border_ring_count_dp_matches_border_walk_count_on_real_pieces16_sharded_to_
 
     long long brute = border_walk_count(map, all, NULL, NULL);
 
-    border_ring_dp_set_disk_mode_min_bytes_for_tests(1.0);
-    border_ring_dp_set_shard_target_bytes_for_tests(32.0);
+    border_ring_dp_reset_runs_spilled_for_tests();
+    border_ring_dp_set_sorter_capacity_for_tests(2);
     long long dp = (long long)border_ring_count_dp(map, all, 4);
-    border_ring_dp_set_disk_mode_min_bytes_for_tests(2.0 * 1024.0 * 1024.0 * 1024.0);
-    border_ring_dp_set_shard_target_bytes_for_tests(768.0 * 1024.0 * 1024.0);
+    border_ring_dp_set_sorter_capacity_for_tests(0);
+    long spilled = border_ring_dp_get_runs_spilled_for_tests();
 
     ASSERT_EQ_FMT(4LL, brute, "%lld");
     ASSERT_EQ_FMT(brute, dp, "%lld");
+    ASSERT(spilled > 0);
 
     free_bigarray(map);
     free_array_part(all);
@@ -621,154 +433,197 @@ TEST border_ring_count_dp_matches_border_walk_count_on_real_pieces16_sharded_to_
 }
 #endif
 
-TEST bd_estimate_reload_bytes_matches_known_capacity_growth(void)
+
+/* ===========================================================================
+ * Les deux briques pures du moteur de tri externe.
+ */
+
+/* Le tri + la fusion des clés égales REMPLACENT l'accumulation par hachage de
+   la version précédente : c'est ici, et nulle part ailleurs, que deux chemins
+   menant au même état voient leurs nombres de façons s'additionner. Une
+   régression qui écraserait au lieu d'additionner (ou qui laisserait deux
+   entrées de même clé côte à côte) fausserait tous les totaux d'un facteur
+   dépendant des données — donc sans jamais échouer franchement. */
+TEST bd_sort_and_compact_sorts_and_sums_duplicate_keys(void)
 {
-    /* key_len=5, count=0 : hint=16, capacity reste 16 (deja >= hint). sizeof
-       bd_ring_count_t (unsigned __int128) = 16, pas sizeof(long long) = 8 —
-       cf. le commentaire de bd_ring_count_t dans border_ring_dp.h pour
-       pourquoi la masse totale d'anneaux a besoin de 128 bits. */
-    ASSERT_EQ_FMT(16.0 * (5 + 16) + 2.0, bd_estimate_reload_bytes(5, 0), "%.1f");
-    /* key_len=5, count=10 : hint=36, capacite double 16->32->64. */
-    ASSERT_EQ_FMT(64.0 * (5 + 16) + 8.0, bd_estimate_reload_bytes(5, 10), "%.1f");
+    uint64_t keys[] =   { 7, 3, 7, 1, 3, 7, 9, 1 };
+    uint64_t values[] = { 10, 20, 30, 40, 50, 60, 70, 80 };
+
+    size_t n = bd_sort_and_compact_for_tests(keys, values, 8);
+
+    ASSERT_EQ_FMT((size_t)4, n, "%zu");
+    ASSERT_EQ_FMT(1ULL, (unsigned long long)keys[0], "%llu");
+    ASSERT_EQ_FMT(120ULL, (unsigned long long)values[0], "%llu"); /* 40 + 80 */
+    ASSERT_EQ_FMT(3ULL, (unsigned long long)keys[1], "%llu");
+    ASSERT_EQ_FMT(70ULL, (unsigned long long)values[1], "%llu"); /* 20 + 50 */
+    ASSERT_EQ_FMT(7ULL, (unsigned long long)keys[2], "%llu");
+    ASSERT_EQ_FMT(100ULL, (unsigned long long)values[2], "%llu"); /* 10 + 30 + 60 */
+    ASSERT_EQ_FMT(9ULL, (unsigned long long)keys[3], "%llu");
+    ASSERT_EQ_FMT(70ULL, (unsigned long long)values[3], "%llu");
     PASS();
 }
 
-TEST bd_estimate_reload_bytes_matches_real_allocation_for_various_sizes(void)
+/* Deux entrées adverses pour un quicksort : tout égal (le cas que le
+   partitionnement À 3 VOIES retire en une passe, et qu'un partitionnement
+   binaire ferait dégénérer en O(n^2) — sur cette DP, les doublons SONT la
+   matière première), et strictement décroissant. Le résultat doit rester
+   juste dans les deux cas. */
+TEST bd_sort_and_compact_handles_all_equal_and_reversed_input(void)
 {
-    ASSERT(bd_reload_estimate_matches_real_alloc_for_tests(5, 0));
-    ASSERT(bd_reload_estimate_matches_real_alloc_for_tests(5, 10));
-    ASSERT(bd_reload_estimate_matches_real_alloc_for_tests(20, 1000));
-    ASSERT(bd_reload_estimate_matches_real_alloc_for_tests(3, 1000003));
+    enum { N = 512 };
+    uint64_t keys[N], values[N];
+
+    for (int i = 0; i < N; i++) {
+        keys[i] = 42;
+        values[i] = 1;
+    }
+    ASSERT_EQ_FMT((size_t)1, bd_sort_and_compact_for_tests(keys, values, N), "%zu");
+    ASSERT_EQ_FMT(42ULL, (unsigned long long)keys[0], "%llu");
+    ASSERT_EQ_FMT((unsigned long long)N, (unsigned long long)values[0], "%llu");
+
+    for (int i = 0; i < N; i++) {
+        keys[i] = (uint64_t)(N - i);
+        values[i] = 2;
+    }
+    ASSERT_EQ_FMT((size_t)N, bd_sort_and_compact_for_tests(keys, values, N), "%zu");
+    for (int i = 0; i < N; i++) {
+        ASSERT_EQ_FMT((unsigned long long)(i + 1), (unsigned long long)keys[i], "%llu");
+        ASSERT_EQ_FMT(2ULL, (unsigned long long)values[i], "%llu");
+    }
     PASS();
 }
 
-TEST bd_should_run_solo_picks_mode_from_queue_depth(void)
+/* La clé compacte doit être INJECTIVE : deux états distincts sous la même
+   clé se fusionneraient à tort, et le total serait faux sans que rien ne le
+   signale (ni assertion, ni dépassement — juste un chiffre erroné). Vérifié
+   par réversibilité sur TOUS les vecteurs de compteurs possibles du jeu de
+   multiplicités donné, pas sur un échantillon. Les multiplicités choisies
+   reproduisent celles du vrai jeu 256 pièces (4, 3, 2 et 1 exemplaires), y
+   compris le cas m=1 qui tient sur un seul bit. */
+TEST bd_key_layout_is_reversible_on_every_state(void)
 {
-    /* Aucun job actif, peu de fragments en attente (< nb_workers) : solo. */
-    ASSERT(bd_should_run_solo(0, 0, 4));
-    ASSERT(bd_should_run_solo(0, 3, 4));
-    /* Assez de fragments pour remplir tous les workers : pool. */
-    ASSERT_FALSE(bd_should_run_solo(0, 4, 4));
-    ASSERT_FALSE(bd_should_run_solo(0, 10, 4));
-    /* Un job deja actif (pool en cours) : jamais solo tant qu'il tourne,
-       meme si la pile s'est videe entre-temps — on laisse le pool en cours
-       se terminer avant de rebasculer. */
-    ASSERT_FALSE(bd_should_run_solo(1, 0, 4));
+    const int counts[] = { 4, 3, 2, 1, 2, 1 };
+    ASSERT(bd_key_layout_roundtrip_for_tests(counts, 6));
     PASS();
 }
 
-TEST border_ring_dp_set_max_ram_mo_derives_a_conservative_solo_budget(void)
+/* ===========================================================================
+ * Le chemin externe de bout en bout.
+ */
+
+/* Tampon de tri réduit à une entrée : CHAQUE état produit devient son propre
+   run sur disque, donc toute la chaîne externe (déversement, fusion k-voies,
+   niveau resté résident sur disque, relecture séquentielle par la position
+   suivante) est traversée à chaque position — sur un fixture minuscule dont
+   le total est connu par force brute. C'est le test qui remplace ceux de
+   l'ancienne scission par fragments : la garantie n'est plus « les fragments
+   se recombinent » mais « le niveau n'est jamais fragmenté du tout ».
+   `spilled > 0` verrouille que le chemin a RÉELLEMENT servi : sans ce
+   témoin, un hook devenu sans effet (déjà vécu une fois sur ce fichier)
+   laisserait le test passer par le chemin tout-en-mémoire. */
+TEST border_ring_count_dp_matches_brute_force_when_the_sorter_spills(void)
 {
-    border_ring_dp_set_max_ram_mo(4096, 10);
-    double solo_budget = border_ring_dp_get_solo_budget_bytes_for_tests();
-    double raw_budget = 4096.0 * 1024.0 * 1024.0;
+    struct array_part *all = brd_make_rotate_parts_with_fork(2);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
 
-    /* La marge doit reserver une fraction reelle du budget brut : ni egale
-       (aucune marge), ni degenere (proche de 0). */
-    ASSERT(solo_budget < raw_budget);
-    ASSERT(solo_budget > raw_budget / 10.0);
+    long long brute = border_walk_count(map, all, NULL, NULL);
 
-    border_ring_dp_set_max_ram_mo(2048, 4);
+    border_ring_dp_reset_runs_spilled_for_tests();
+    border_ring_dp_set_sorter_capacity_for_tests(1);
+    long long dp = (long long)border_ring_count_dp(map, all, 1);
+    border_ring_dp_set_sorter_capacity_for_tests(0);
+    long spilled = border_ring_dp_get_runs_spilled_for_tests();
+
+    ASSERT_EQ_FMT(12LL, brute, "%lld");
+    ASSERT_EQ_FMT(brute, dp, "%lld");
+    ASSERT(spilled > 0);
+
+    free_bigarray(map);
+    free_array_part(all);
     PASS();
 }
 
-TEST bd_job_result_round_trips_through_a_file_when_closed(void)
+/* Contre-épreuve du test précédent : avec un budget confortable, AUCUN run ne
+   doit partir sur disque. Sans cette vérification, `spilled > 0` ne prouve
+   rien (un compteur incrémenté inconditionnellement passerait les deux). */
+TEST border_ring_count_dp_never_touches_disk_when_the_budget_fits(void)
 {
-    char path[] = "/tmp/etii_brd_result_XXXXXX";
-    int fd = mkstemp(path);
-    ASSERT(fd >= 0);
-    close(fd);
+    struct array_part *all = brd_make_rotate_parts_with_fork(2);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
 
-    struct bd_job_result written;
-    memset(&written, 0, sizeof written);
-    written.closed = 1;
-    written.total = 4242;
+    border_ring_dp_reset_runs_spilled_for_tests();
+    long long dp = (long long)border_ring_count_dp(map, all, 1);
 
-    bd_job_result_write_or_die(&written, path);
+    ASSERT_EQ_FMT(12LL, dp, "%lld");
+    ASSERT_EQ_FMT(0L, border_ring_dp_get_runs_spilled_for_tests(), "%ld");
 
-    struct bd_job_result read_back;
-    memset(&read_back, 0, sizeof read_back);
-    ASSERT_EQ(0, bd_job_result_read(&read_back, path));
-    ASSERT_EQ(1, read_back.closed);
-    ASSERT_EQ_FMT(4242LL, (long long)read_back.total, "%lld");
-
-    unlink(path);
+    free_bigarray(map);
+    free_array_part(all);
     PASS();
 }
 
-TEST bd_job_result_round_trips_through_a_file_when_split(void)
+/* Déversement ET forks simultanés : chaque worker rend un fichier trié, que
+   le parent fusionne. Deux workers peuvent produire authentiquement la même
+   clé (deux états du niveau courant transitant vers le même état suivant) —
+   si la fusion écrasait au lieu d'additionner, le total s'écarterait ici. */
+TEST border_ring_count_dp_matches_brute_force_when_spilling_and_forked(void)
 {
-    char path[] = "/tmp/etii_brd_result_XXXXXX";
-    int fd = mkstemp(path);
-    ASSERT(fd >= 0);
-    close(fd);
+    struct array_part *all = brd_make_rotate_parts_with_fork(2);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
 
-    struct bd_job_result written;
-    memset(&written, 0, sizeof written);
-    written.closed = 0;
-    snprintf(written.shard_dir, sizeof written.shard_dir, "/tmp/etii_bd_test_dir");
-    written.nb_shards = 7;
-    written.resume_pos = 21;
+    long long brute = border_walk_count(map, all, NULL, NULL);
 
-    bd_job_result_write_or_die(&written, path);
+    border_ring_dp_set_fork_min_states_for_tests(1);
+    border_ring_dp_set_sorter_capacity_for_tests(1);
+    long long dp = (long long)border_ring_count_dp(map, all, 4);
+    border_ring_dp_set_sorter_capacity_for_tests(0);
+    border_ring_dp_set_fork_min_states_for_tests(50000);
 
-    struct bd_job_result read_back;
-    memset(&read_back, 0, sizeof read_back);
-    ASSERT_EQ(0, bd_job_result_read(&read_back, path));
-    ASSERT_EQ(0, read_back.closed);
-    ASSERT_STR_EQ("/tmp/etii_bd_test_dir", read_back.shard_dir);
-    ASSERT_EQ(7, read_back.nb_shards);
-    ASSERT_EQ(21, read_back.resume_pos);
-    /* Une scission normale ne porte jamais les champs de pause
-       mi-transition — les deux formes de "closed=0" sont mutuellement
-       exclusives, cf. le commentaire de tête de bd_job_result. */
-    ASSERT_EQ('\0', read_back.leftover_path[0]);
-    ASSERT_EQ('\0', read_back.next_partial_path[0]);
+    ASSERT_EQ_FMT(12LL, brute, "%lld");
+    ASSERT_EQ_FMT(brute, dp, "%lld");
 
-    unlink(path);
+    free_bigarray(map);
+    free_array_part(all);
     PASS();
 }
 
-/* Même round-trip que bd_job_result_round_trips_through_a_file_when_split,
-   mais pour l'AUTRE forme de "closed=0" (cf. le commentaire de tête de
-   bd_job_result) : une pause mi-transition, un seul successeur (jamais de
-   shard_dir/nb_shards pour cette forme). */
-TEST bd_job_result_round_trips_through_a_file_when_mid_transition_paused(void)
+/* Degré de fusion abaissé à 2 : la fusion devient RÉCURSIVE (tours
+   intermédiaires de bd_sorter_merge_all) au lieu d'une passe unique. Ce
+   palier n'existe que pour ne jamais ouvrir des milliers de descripteurs
+   d'un coup ; s'il perdait ou dupliquait un run entre deux tours, le total
+   s'en écarterait — aucun autre test ne le traverse, le degré réel (64)
+   n'étant jamais atteint par un fixture de cette taille. */
+TEST border_ring_count_dp_matches_brute_force_across_several_merge_rounds(void)
 {
-    char path[] = "/tmp/etii_brd_result_XXXXXX";
-    int fd = mkstemp(path);
-    ASSERT(fd >= 0);
-    close(fd);
+    struct array_part *all = brd_make_rotate_parts_with_fork(2);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
 
-    struct bd_job_result written;
-    memset(&written, 0, sizeof written);
-    written.closed = 0;
-    snprintf(written.leftover_path, sizeof written.leftover_path, "/tmp/etii_bd_leftover_test.bin");
-    snprintf(written.next_partial_path, sizeof written.next_partial_path,
-              "/tmp/etii_bd_nextpartial_test.bin");
-    written.resume_pos = 5;
+    long long brute = border_walk_count(map, all, NULL, NULL);
 
-    bd_job_result_write_or_die(&written, path);
+    border_ring_dp_set_sorter_capacity_for_tests(1);
+    border_ring_dp_set_merge_fanin_for_tests(2);
+    long long dp = (long long)border_ring_count_dp(map, all, 1);
+    border_ring_dp_set_merge_fanin_for_tests(64);
+    border_ring_dp_set_sorter_capacity_for_tests(0);
 
-    struct bd_job_result read_back;
-    memset(&read_back, 0, sizeof read_back);
-    ASSERT_EQ(0, bd_job_result_read(&read_back, path));
-    ASSERT_EQ(0, read_back.closed);
-    ASSERT_STR_EQ("/tmp/etii_bd_leftover_test.bin", read_back.leftover_path);
-    ASSERT_STR_EQ("/tmp/etii_bd_nextpartial_test.bin", read_back.next_partial_path);
-    ASSERT_EQ(5, read_back.resume_pos);
-    ASSERT_EQ(0, read_back.nb_shards);
+    ASSERT_EQ_FMT(12LL, brute, "%lld");
+    ASSERT_EQ_FMT(brute, dp, "%lld");
 
-    unlink(path);
+    free_bigarray(map);
+    free_array_part(all);
     PASS();
 }
 
-TEST bd_job_result_read_reports_failure_on_missing_file(void)
-{
-    ASSERT_EQ(-1, bd_job_result_read(&(struct bd_job_result){0}, "/tmp/etii_brd_does_not_exist"));
-    PASS();
-}
-
+/* Collecte les anneaux réels délivrés par border_ring_reconstruct_dp, pour
+   les compter et vérifier qu'ils sont tous distincts. */
 struct brd_recon_ctx {
     struct possibility_packet *found;
     int count;
@@ -857,6 +712,53 @@ TEST border_ring_reconstruct_dp_expands_class_multiplicity_to_all_real_rings(voi
     PASS();
 }
 
+/* Même reconstruction, mais sur le fixture À FOURCHE (le seul dont un niveau
+   compte plus d'UN état — cf. brd_make_rotate_parts_with_fork : sans
+   embranchement réel, chaque position n'a qu'une classe candidate et le
+   tampon de tri ne déborde jamais, quelle que soit sa capacité) et avec un
+   tampon réduit à une entrée : les
+   niveaux avant ET les tables de complétion restent alors sur DISQUE, donc
+   `bd_level_lookup` travaille par dichotomie sur fichier (fseek + lecture
+   d'une entrée par sonde) au lieu d'un tableau résident. Aucun autre test ne
+   traverse ce chemin, et il porte tout l'élagage du DFS guidé : un lookup
+   sur fichier qui se tromperait de position couperait des branches valides,
+   et la reconstruction s'arrêterait sur « reconstruction incomplete ».
+   Verrouille aussi, au passage, le rafraîchissement du cache de complétion
+   après chaque récursion (bd_reconstruct_ensure_cache) : la version
+   précédente ne rechargeait qu'en entrée de frame et interrogeait ensuite la
+   table laissée par sa descendance. */
+TEST border_ring_reconstruct_dp_matches_count_when_levels_live_on_disk(void)
+{
+    struct array_part *all = brd_make_rotate_parts_with_fork(2);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    struct brd_recon_ctx ctx;
+    memset(&ctx, 0, sizeof ctx);
+
+    border_ring_dp_reset_runs_spilled_for_tests();
+    border_ring_dp_set_sorter_capacity_for_tests(1);
+    long long delivered = border_ring_reconstruct_dp(map, all, 1, 1000, brd_on_ring_found, &ctx);
+    border_ring_dp_set_sorter_capacity_for_tests(0);
+
+    ASSERT_EQ_FMT(12LL, delivered, "%lld");
+    ASSERT_EQ(12, ctx.count);
+    ASSERT(border_ring_dp_get_runs_spilled_for_tests() > 0);
+
+    for (int i = 0; i < ctx.count; i++) {
+        ASSERT_EQ_FMT(BORDER_RING_LEN, possibility_placed_count(&ctx.found[i]), "%d");
+        for (int j = i + 1; j < ctx.count; j++) {
+            ASSERT(compare_possibility(&ctx.found[i], &ctx.found[j]) != 0);
+        }
+    }
+
+    free(ctx.found);
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
 /* max_rings coupe la délivrance avant terme : le total délivré doit être
    exactement le plafond demandé (pas d'échec bruyant — ce cas est
    explicitement distingué d'un vrai écart, cf. border_ring_reconstruct_dp). */
@@ -886,22 +788,22 @@ SUITE(border_ring_dp_suite)
     RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_a_unique_ring);
     RUN_TEST(border_ring_count_dp_counts_class_multiplicity_correctly);
     RUN_TEST(border_ring_count_dp_matches_brute_force_when_forked);
-    RUN_TEST(border_ring_count_dp_matches_brute_force_when_sharded_to_disk);
-    RUN_TEST(border_ring_count_dp_matches_brute_force_when_pool_mode_engages);
-    RUN_TEST(border_ring_count_dp_matches_brute_force_when_mid_transition_pauses);
+
+    RUN_TEST(bd_sort_and_compact_sorts_and_sums_duplicate_keys);
+    RUN_TEST(bd_sort_and_compact_handles_all_equal_and_reversed_input);
+    RUN_TEST(bd_key_layout_is_reversible_on_every_state);
+
+    RUN_TEST(border_ring_count_dp_matches_brute_force_when_the_sorter_spills);
+    RUN_TEST(border_ring_count_dp_never_touches_disk_when_the_budget_fits);
+    RUN_TEST(border_ring_count_dp_matches_brute_force_when_spilling_and_forked);
+    RUN_TEST(border_ring_count_dp_matches_brute_force_across_several_merge_rounds);
+
     RUN_TEST(border_ring_reconstruct_dp_matches_count_on_a_unique_ring);
     RUN_TEST(border_ring_reconstruct_dp_expands_class_multiplicity_to_all_real_rings);
+    RUN_TEST(border_ring_reconstruct_dp_matches_count_when_levels_live_on_disk);
     RUN_TEST(border_ring_reconstruct_dp_stops_at_max_rings);
 #if ETERN_PARTS == 16
     RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_real_pieces16);
-    RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_real_pieces16_sharded_to_disk);
+    RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_real_pieces16_spilled);
 #endif
-    RUN_TEST(bd_estimate_reload_bytes_matches_known_capacity_growth);
-    RUN_TEST(bd_estimate_reload_bytes_matches_real_allocation_for_various_sizes);
-    RUN_TEST(bd_should_run_solo_picks_mode_from_queue_depth);
-    RUN_TEST(border_ring_dp_set_max_ram_mo_derives_a_conservative_solo_budget);
-    RUN_TEST(bd_job_result_round_trips_through_a_file_when_closed);
-    RUN_TEST(bd_job_result_round_trips_through_a_file_when_split);
-    RUN_TEST(bd_job_result_round_trips_through_a_file_when_mid_transition_paused);
-    RUN_TEST(bd_job_result_read_reports_failure_on_missing_file);
 }

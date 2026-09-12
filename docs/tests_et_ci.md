@@ -337,333 +337,190 @@ incluse dans la clé). Or un état à la position P ne dépend jamais que du
 niveau P+1 déjà calculé, jamais des autres positions — cette table globale
 gardait donc en mémoire des positions déjà consommées, inutilement.
 `border_ring_count_dp` ne garde plus que le niveau courant et le niveau en
-construction (`struct bd_level`, tableaux parallèles `keys`/`values`/bitmap
-`occupied` — un `struct { clé; valeur; occupé; }` gâchait ~40 % de
-remplissage d'alignement à cause du `long long` voisin, et dimensionnait
-chaque clé sur une borne `BD_MAX_CLASSES=64` plutôt que sur `nb_classes` réel).
-Le vrai levier mémoire est la structure par niveau elle-même (borne le pic à
-la position la PLUS chargée, pas la somme des 59), le gain d'octets par
-emplacement n'étant qu'un facteur secondaire (~×2,3 à lui seul, mesuré avant
-ce changement de structure).
+construction (`struct bd_level` : un tableau TRIÉ d'entrées de 24 octets, en
+mémoire ou sur disque — voir « Tri externe » plus bas). Le vrai levier
+mémoire est la structure par niveau elle-même (borne le pic à la position la
+PLUS chargée, pas la somme des 59), le coût par état n'étant qu'un facteur
+secondaire — quoique décisif à l'échelle réelle : 32 octets contre 111 dans
+la version à table de hachage.
 
 **Parallélisation par forks (`--forks N` combiné à `--dp`)** : la transition
 d'un niveau vers le suivant ne dépend que du niveau courant, déjà calculé et
 immuable — ses états sont donc indépendants les uns des autres. Dès qu'un
 niveau dépasse 50 000 états, sa transition est répartie sur `N` process
-forkés (chacun une plage d'indices disjointe), chaque worker écrivant sa part
-du niveau suivant dans un fichier temporaire (jamais un pipe : la sortie
-sérialisée peut atteindre des dizaines de Mo, bien au-delà du tampon noyau
-d'un pipe, et le parent ne lit qu'un worker à la fois — un pipe bloquerait un
-worker en écriture pendant que le parent lit un autre worker, interblocage
-classique). Le parent fusionne les fichiers par ACCUMULATION
-(`bd_level_add`), pas une simple concaténation : deux workers différents
-peuvent légitimement produire le même état suivant depuis des états de
-départ différents. Correctness verrouillée par
+forkés (chacun une plage d'indices disjointe), chaque worker rendant sa part
+du niveau suivant **déjà triée** dans un fichier temporaire (jamais un pipe :
+la sortie sérialisée peut atteindre des dizaines de Mo, bien au-delà du
+tampon noyau d'un pipe, et le parent ne lit qu'un worker à la fois — un pipe
+bloquerait un worker en écriture pendant que le parent lit un autre worker,
+interblocage classique). Le parent les fusionne en une passe k-voies qui
+SOMME les clés égales, pas une simple concaténation : deux workers différents
+peuvent légitimement produire le même état suivant depuis des états de départ
+différents. Que chaque part arrive triée est ce qui rend cette remise
+linéaire — la version précédente y réinsérait une à une la production de ses
+workers dans une table de hachage, soit autant de travail que la transition
+séquentielle entière. Correctness verrouillée par
 `border_ring_count_dp_matches_brute_force_when_forked`
 (`tests/tools/test_border_ring_dp.c`), qui abaisse le seuil de déclenchement
 à 1 état via le hook test-only `border_ring_dp_set_fork_min_states_for_tests`
 (même schéma que `stock_spill_set_segment_bytes_for_tests`) pour exercer
 réellement fork+fichier+fusion sur un fixture minuscule.
 
-**Limite mesurée (niveau en mémoire, avant le mode disque décrit plus bas)** :
-sur `data/pieces.csv`, la taille des niveaux croît vite et ne semble pas près
-de plafonner — 21 001 574 états (2,32 Go) déjà atteints à la position 17/59
-sur une petite machine (échec propre sous un plafond `ulimit -v` de 5 Go en
-tentant la position 18), et **9,28 Go déjà atteints à la position 19/59 sur
-la machine cible (2×10 cœurs, 48 Go de RAM)**, qui a fini par échouer à la
-position 20 — la parallélisation par forks borne le CALCUL d'une transition
-par plages d'indices, mais la table de sortie fusionnée par le parent reste
-un niveau ENTIER en mémoire : plus de cœurs accélère le calcul, plus de RAM
-recule l'échec, mais aucun des deux n'empêche un niveau de continuer à
-grossir sans borne.
+**Limite fondamentale : un niveau dépasse la RAM, quelle qu'elle soit** — sur
+`data/pieces.csv`, la taille des niveaux croît vite et ne plafonne pas avant
+la position ~30 : 21 001 574 états à la position 17/59, 109 077 416 états
+(11,28 Gio) à la position 19/59, et une extrapolation de la borne
+combinatoire donne un pic de l'ordre de 2 à 9 milliards d'états. La
+parallélisation par forks borne le CALCUL d'une transition, pas la taille de
+sa sortie : plus de cœurs accélère, plus de RAM recule l'échéance, aucun des
+deux n'empêche un niveau de dépasser la mémoire. Le mécanisme qui gère ce
+dépassement est donc LE point de conception de ce fichier.
 
-**Scission par pile LIFO, au-delà d'un budget RAM obligatoire
-(`--dp-max-ram-mo MO`, aucune valeur par défaut)** — remplace un mécanisme
-antérieur de « mode disque » permanent (deux vagues de forks à CHAQUE
-position tant qu'un niveau restait trop gros), qui réécrivait/relisait
-l'intégralité d'un niveau à chaque position tant qu'il dépassait le seuil :
-sur une plage de plusieurs dizaines de positions consécutives toutes trop
-grosses, ça multipliait le volume d'E/S par le nombre de positions
-concernées (mesuré : ~777 Go d'E/S cumulées pour une masse de pointe de
-111 Go étalée sur ~7 positions, sur la machine cible). `--dp-max-ram-mo`
-pilote plusieurs seuils dérivés (`border_ring_dp_set_max_ram_mo`), tous du
-même budget brut mais PAS de la même valeur en octets : `bd_pool_budget_bytes`
-(plafond d'admission du mode POOL, somme visée sur tous les slots actifs)
-prend directement la valeur donnée ; les scissions elles-mêmes sont
-déclenchées PAR JOB, jamais par ce plafond d'admission, par deux seuils
-distincts selon le mode — `bd_solo_budget_bytes` (mode SOLO, = budget / 4) et
-`bd_pool_job_budget_bytes` (mode POOL, = budget / (nb_workers × 2)) ;
-`bd_shard_target_bytes` (taille cible d'un fragment) est dérivée du budget
-brut — `budget / (nb_workers × 3)` — pour que `nb_workers` fragments
-simultanés pendant une compaction restent, ensemble, sous ce même budget.
-Les deux seuils de scission par job sont détaillés ci-dessous. **Note pour
-qui règle `--dp-max-ram-mo` en production** : à budget brut égal, le seuil de
-scission effectif par job est maintenant plus bas qu'avant ce mécanisme
-(`/4` en SOLO, `/(nb_workers × 2)` en POOL, au lieu d'une seule valeur brute)
-— une conséquence voulue des marges de co-résidence ci-dessous, pas une
-régression, mais qui vaut la peine d'être su avant d'augmenter la valeur du
-flag pour compenser.
+### Tri externe : un niveau trop gros devient un fichier trié, jamais des fragments
 
-Quand un niveau dépasse le seuil, il est scindé en K fragments sur disque
-(`bd_level_to_shards`, partitionnement externe par hachage FNV-1a de la
-clé — la même technique qu'un GROUP BY externe qui ne tient pas en RAM) :
-les K fragments sont TOUS empilés (**pile LIFO**, `struct bd_pending_stack`)
-sur une pile partagée — un job qui vient de scinder ne garde jamais l'un des
-fragments produits pour lui-même, il repousse sa production entière et
-sort. L'ordre LIFO (le dernier fragment créé est repris en premier, pas le
-plus ancien) borne la profondeur de la pile par le nombre de positions de
-l'anneau, pas par la largeur de l'espace d'états — même raisonnement qu'une
-pile explicite remplaçant une récursion en profondeur d'abord. C'est un
-coordinateur central (`bd_run_opening`) qui décide, à chaque tour de boucle,
-lequel des fragments en attente reprendre et comment.
+`--dp-max-ram-mo MO` (obligatoire, aucune valeur par défaut) fixe **la taille
+du tampon de tri, et rien d'autre**. Une transition pousse ses successeurs
+dans ce tampon (`bd_sorter_push`) sans aucune contrainte d'ordre ; quand il
+est plein, il est trié et ses clés égales fusionnées SUR PLACE
+(`bd_sort_entries` + `bd_compact_sorted`), et il n'est déversé en un « run »
+trié sur disque que si cette compaction n'a pas libéré la moitié de sa
+capacité. En fin de position, les runs sont fusionnés en une passe k-voies
+(`bd_merge_group`, tas binaire) qui somme les clés égales à la volée : le
+niveau suivant en sort **trié, dédupliqué et entier**, en mémoire s'il y tient,
+sur disque sinon.
 
-**Signal de progression à la fermeture d'un fragment** : chaque ligne
-`position %d/%d, %zu etats` n'affiche que la taille du niveau COURANT. Or le
-nombre d'états atteignables à la DERNIÈRE position de l'anneau est borné par
-le nombre de classes (chaque transition consomme exactement une pièce d'une
-classe, donc à la dernière position il ne reste jamais qu'UNE seule pièce à
-placer, toutes classes confondues) — indépendant de la taille du fragment qui
-y arrive. Sur un run avec beaucoup de fragments, cette dernière position
-revient donc répéter la même poignée d'états à chaque fragment traité, sans
-rien montrer qui avance visiblement. `bd_apply_job_result` journalise donc,
-dès qu'un fragment FERME l'anneau (`r->closed`), sa contribution et le total
-cumulé :
-`fragment ferme, +N anneaux (total cumule T, K fragment(s) en attente)` — un
-signe de vie indépendant du numéro de position, utile pour distinguer un run
-qui avance encore d'un run bloqué. Ce total cumulé est celui de l'UNIQUE
-ouverture traitée par `bd_run_opening` (`bd_count_openings` le multiplie par
-`nb_candidates` seulement après, donc ce nombre n'est pas encore le total
-final affiché par `border_mass`).
+Trois conséquences, qui sont tout l'intérêt du mécanisme :
 
-**Pool de workers à deux modes (SOLO / POOL)** — `bd_should_run_solo(active,
-stack_count, nb_workers)` tranche entre les deux, jamais simultanément : un
-pool déjà lancé va jusqu'au bout de ses jobs actifs avant que le mode soit
-réévalué.
+- **Un niveau reste toujours intégralement fusionné.** Les états identiques
+  se retrouvent par l'ORDRE, jamais par co-résidence en mémoire.
+- **Dépasser le budget n'a plus de conséquence algorithmique** — un run de
+  plus à fusionner, c'est tout. Le budget ne pilote plus aucun seuil dérivé.
+- **La parallélisation devient franche** : chaque worker forké rend UN fichier
+  déjà trié, que le parent fusionne en une passe linéaire.
 
-- **Mode SOLO** (`active == 0 && stack_count < nb_workers`, c'est-à-dire tant
-  que la pile n'a pas de quoi remplir tous les workers) : un seul job
-  tourne, dans le process du coordinateur, et reste autorisé à se
-  paralléliser en interne via `bd_transition_parallel` pour ses propres
-  transitions de niveau — le comportement historique (un seul fragment
-  actif à la fois). Son budget est `bd_effective_solo_budget_bytes()`, qui
-  vaut `bd_solo_budget_bytes` (= budget donné / 4) — une marge
-  **HEURISTIQUE, PAS un calcul exact** : `/2` pour la co-résidence de
-  l'ancien et du nouveau niveau pendant toute la durée d'une transition,
-  `/2` supplémentaire pour la non-déduplication entre les `nb_workers`
-  tables locales de `bd_transition_parallel` (chaque worker produit sa
-  propre table de niveau-suivant avant fusion par le parent, donc une même
-  clé peut exister en double dans plusieurs tables simultanément) — cf. le
-  commentaire à la déclaration de `bd_solo_budget_bytes` dans
-  `tests/tools/border_ring_dp.c`.
-- **Mode POOL** (dès que la pile contient au moins `nb_workers` fragments en
-  attente) : le coordinateur forke jusqu'à `nb_workers` jobs concurrents, un
-  par fragment (`bd_fork_pool_job`), chacun STRICTEMENT monoprocessus
-  (`allow_parallel=0` — jamais `bd_transition_parallel`, jamais de
-  compaction forkée dans une scission ultérieure). Un job ne reste jamais
-  résident : il communique son résultat au coordinateur via un petit fichier
-  (`struct bd_job_result`, écrit par `bd_job_result_write_or_die`, lu par
-  `bd_job_result_read`) puis sort — il ne garde JAMAIS un fragment pour
-  lui-même après une nouvelle scission, tous les fragments qu'il produit
-  sont repoussés sur la pile partagée pour que le coordinateur les
-  redistribue (`bd_apply_job_result`). Son budget de scission (passé à
-  `bd_run_fragment_job` comme `effective_budget_bytes`) est
-  `bd_effective_pool_job_budget_bytes()`, c'est-à-dire `bd_pool_job_budget_bytes`
-  — marge heuristique `/2` (co-résidence ancien+nouveau niveau ; pas de
-  seconde `/2` comme en SOLO puisqu'un job POOL n'appelle jamais
-  `bd_transition_parallel`) — une variable **distincte** de l'admission dans
-  un slot du pool, gardée par une estimation RAM **EXACTE** :
-  `bd_estimate_reload_bytes` relit uniquement l'en-tête sérialisé (12 octets)
-  d'un fragment — sans le charger — pour calculer précisément ce que
-  `bd_level_load_file` allouerait à sa reprise, comparé au plafond
-  `bd_pool_budget_bytes` (une somme visée sur tous les slots actifs). Si le
-  coordinateur ne peut admettre ne serait-ce qu'un seul fragment en attente,
-  il échoue bruyamment (`exit(1)`) plutôt que de rester bloqué.
+**Clé compacte** (`struct bd_key_layout`) : chaque compteur de classe est
+borné par la multiplicité de SA classe (4 au plus sur `data/pieces.csv`),
+donc codé sur `ceil(log2(m+1))` bits — 51 bits pour les 28 classes du jeu
+réel, plus 8 bits de couleur requise, soit **59 bits**. Un état stocké coûte
+**32 octets** (clé 128 bits + nombre de façons 128 bits) contre **111 octets**
+mesurés dans la version précédente (clé de 29 octets dans une table de
+hachage tenue sous 60 % de charge).
 
-**`bd_pool_budget_bytes` (admission POOL) et les seuils de scission par job
-(`bd_solo_budget_bytes`, `bd_pool_job_budget_bytes`) sont des variables
-distinctes**, bien que toutes dérivées du même `--dp-max-ram-mo` en
-production. Il fallait les découpler : le hook test-only
-`border_ring_dp_set_disk_mode_min_bytes_for_tests` pousse délibérément
-`bd_solo_budget_bytes` ET `bd_pool_job_budget_bytes` à une valeur quasi
-nulle pour forcer des scissions sur des fixtures minuscules — réutiliser
-`bd_pool_budget_bytes` (l'admission) à cette fin aurait rendu même un
-fragment de ~200 octets inadmissible en test, empêchant tout job POOL de
-démarrer. En production, `bd_pool_budget_bytes` porte la valeur brute
-donnée par `--dp-max-ram-mo`, alors que les deux seuils de scission par job
-en portent chacun une fraction (`/4` et `/(nb_workers × 2)` respectivement)
-— un détail d'implémentation qui compte pour quiconque relit le code, ou
-règle le flag en production (cf. la note plus haut).
+La clé est un `unsigned __int128` et non un `uint64_t`, bien que le jeu réel
+tienne largement dans 64 bits : les fixtures de test montées sur un plateau
+16×16 (`brd_make_rotate_parts`, 60 classes de multiplicité 1 par
+construction) en demandent **68**. Une seule largeur valable pour tout jeu de
+pièces a été préférée à un chemin rapide 64 bits doublé d'un mode dégradé —
+le surcoût est de 32 octets contre 24, soit 33 % d'E/S en plus sur un niveau
+qui déborde. Spécialiser la clé en 64 bits quand la disposition y tient reste
+une optimisation ouverte, chiffrée à ces 33 %. Au-delà de 128 bits,
+`bd_key_layout_init` échoue BRUYAMMENT : une troncature silencieuse ferait
+fusionner deux états distincts et fausserait le total sans rien signaler.
 
-En cas d'échec d'un job du pool (code de sortie non nul, fichier résultat
-illisible, ou `fork()` lui-même en échec en cours d'admission d'un lot), le
-coordinateur tue et récupère (`waitpid`) tous les AUTRES jobs du pool
-actuellement en cours (`bd_abort_active_jobs`) avant de sortir en échec —
-jamais d'enfant orphelin laissé derrière, jamais un total partiel rapporté
-comme définitif.
+#### Ce que ce mécanisme remplace, et les mesures qui l'ont imposé
 
-Chaque fragment n'est donc écrit qu'UNE fois (à sa création) et relu qu'UNE
-fois (à sa reprise, par le mode qui le dépile), contre une
-réécriture/relecture de la totalité à CHAQUE position sous l'ancien
-mécanisme. Voir
-[docs/conception/border_mass.md](conception/border_mass.md)
-pour le raisonnement complet (comptabilité RAM détaillée, ordonnancement,
-gestion des échecs, alternatives écartées).
+La version précédente scindait un niveau trop gros en K fragments
+(partitionnement par hachage de la clé) empilés sur une pile LIFO, repris
+plus tard et poursuivis **indépendamment** jusqu'à la fermeture de l'anneau,
+par un coordinateur à deux modes (SOLO/POOL), avec en plus une « pause
+mi-transition » sérialisant le niveau en construction dès qu'il dépassait le
+budget.
 
-**Garde contre une scission dégénérée** : un niveau à 0 ou 1 entrée réelle
-n'est jamais scindé (`cur.used > 1`), même si sa taille nominale dépasse le
-seuil — la capacité plancher d'une table de hachage (~200 octets, `struct
-bd_level`) dépasse n'importe quel seuil assez bas indépendamment du contenu
-réel ; sans cette garde, un fragment vide rechargé se re-scinderait
-indéfiniment (observé pendant le développement : boucle sans fin sur un
-seuil de test à 1 octet — pas qu'un artefact de test, rien n'empêcherait la
-même situation en production avec un budget mal choisi).
+Le partitionnement par hachage ne sépare aucun doublon **au moment** de la
+scission (même clé ⇒ même fragment). Mais dès la position suivante, deux
+fragments produisent les mêmes clés — et ne les fusionnent plus jamais. La DP
+dégénérait en somme de sous-DP redondantes, et la duplication composait à
+chaque position. Mesuré sur un run de production de 27 h
+(`--dp --dp-max-ram-mo 35000 --forks 10 --spill-dir /mnt/nvme`, jeu 256) :
 
-Verrouillé par des tests dédiés dans `test_border_ring_dp.c`
-(`border_ring_count_dp_matches_brute_force_when_sharded_to_disk` et son
-pendant `..._on_real_pieces16_sharded_to_disk`, gated `#if ETERN_PARTS == 16`)
-qui abaissent `bd_solo_budget_bytes`/`bd_pool_job_budget_bytes`/
-`bd_shard_target_bytes` (hooks test-only
-`border_ring_dp_set_disk_mode_min_bytes_for_tests` — qui pousse les DEUX
-seuils de scission par job à la fois, cf. plus haut —
-`_set_shard_target_bytes_for_tests`, même schéma que
-`border_ring_dp_set_fork_min_states_for_tests`) au point où CHAQUE position
-déclenche une nouvelle scission — y compris pour les tranches reprises
-depuis la pile — exerçant plusieurs niveaux d'empilement en cascade, jamais
-atteints par les autres tests (aucun de leurs fixtures n'approche le budget
-par défaut).
+| Observation | Valeur |
+|---|---|
+| États matérialisés en 27 h | 1,67 × 10¹⁰ |
+| Débit global (10 forks) | 172 000 états/s |
+| Débit d'UN cœur, niveau en RAM | ~1,7 × 10⁶ états/s |
+| Pauses mi-transition | 6768 (chacune réécrivant puis relisant ~2,8 Gio) |
+| Fragments créés / fermés | 916 / 224 (la pile ne se vidait pas) |
+| Part du travail en positions 43-59 | 56 % |
+| Total cumulé / masse réelle estimée | 1,01 × 10²⁷ / ~3,8 × 10³⁷ |
 
-**Pause mi-transition, au-delà de la scission de fin de position ci-dessus**
-— incident de production du 2026-09-10 : `--dp-max-ram-mo 30000 --forks 10`
-a tué un job du pool par OOM (`oom-kill:constraint=CONSTRAINT_NONE`, un vrai
-manque de RAM globale, pas une limite de cgroup) alors que son budget nominal
-par job (`bd_pool_job_budget_bytes = budget / (nb_workers × 2)`, ~1,5 Gio)
-aurait dû l'empêcher — RSS réel observé 3 à 8,5 Gio, x2 à x6 le budget. Cause
-racine : le contrôle de taille (`bd_run_fragment_job`, ci-dessus) ne
-s'exécutait QU'UNE FOIS PAR POSITION, après que le niveau suivant `next`
-ait été bâti EN ENTIER (`bd_transition_range` sur `0..cur.capacity` en un
-seul appel) — un niveau au facteur de branchement élevé pouvait donc
-dépasser le budget de plusieurs fois avant que le moindre contrôle n'ait
-lieu, le pic mémoire réel ayant déjà eu lieu au moment où le code
-« découvrait » qu'il fallait scinder.
+Les 10 workers réunis tournaient donc **8,7× moins vite qu'un seul process
+tenant son niveau en mémoire**. Deux chiffres isolent la cause :
 
-Le chemin séquentiel (celui utilisé par TOUT job POOL, `allow_parallel=0`,
-et par un job SOLO tant que `cur.used < bd_fork_min_states`) traite
-désormais `cur` par tronçons d'au moins `bd_transition_chunk_slots`
-emplacements (65536, un PLANCHER, pas la taille réellement utilisée — cf.
-l'incident du 2026-09-11 ci-dessous), avec un contrôle de
-`bd_level_bytes(&next)` après chaque tronçon **ayant réellement traité au
-moins une entrée occupée** (jamais après un tronçon entièrement vide — cf.
-le piège de livelock ci-dessous). Si `next` dépasse le budget avant que tout
-`cur` n'ait été consommé, le job s'arrête : le reliquat de `cur` (les
-entrées pas encore traitées, sérialisées par `bd_level_write_slice_file` —
-une variante de `bd_level_write_file` bornée à une plage d'emplacements) et
-`next` tel qu'accumulé jusque-là (`bd_level_write_file`, format inchangé)
-sont écrits séparément et renvoyés comme un successeur **unique** (jamais de
-fan-out en K fragments comme la scission de fin de position — `struct
-bd_job_result`/`bd_pending_slice` portent pour cela deux nouveaux champs,
-`leftover_path`/`next_partial_path`, vides sauf dans ce cas précis) à
-reprendre plus tard, exactement à cette position — `bd_run_fragment_job`
-recharge alors `next` (au lieu de le rebâtir de zéro) et continue de le
-nourrir depuis là où il s'était arrêté.
+- position 19 (109 077 416 états fusionnés) scindée en 16 fragments : chaque
+  fragment produisait ~21 M états à la position 20, soit 336 M au total pour
+  un facteur de branchement brut de ×3,08 — autrement dit **plus aucune
+  fusion à l'intérieur d'un fragment**, là où la croissance fusionnée venait
+  d'être mesurée à ×1,89 ;
+- position 45 : 224 fragments portant ensemble 3 × 10⁹ états, pour un niveau
+  fusionné de quelques millions.
 
-**Piège corrigé avant que ce mécanisme ne parte en production** (repéré sous
-test, `bd_transition_chunk_slots=1` + budget quasi nul, avant tout run réel)
-: contrôler la taille après CHAQUE tronçon, y compris un tronçon vide,
-bouclait indéfiniment. Un reliquat rechargé a une capacité RECALCULÉE à
-partir de son SEUL compte d'entrées (`bd_level_load_file` — jamais de
-l'étendue qu'il représentait avant sa pause), donc la ou les entrées qu'il
-contient peuvent retomber À LA MÊME position de hachage qu'avant (même clé,
-même capacité, fonction de hachage déterministe) sans jamais tomber dans le
-tout premier tronçon parcouru — recontrôler après un tronçon vide (rien de
-nouveau dans `next`, `chunk_start` reparti de 0 à chaque reprise) répétait
-alors indéfiniment le même diagnostic « il reste du travail, le budget est
-dépassé » sans jamais progresser jusqu'à l'entrée réelle : un vrai livelock,
-pas qu'une inefficacité. Corrigé en ne (re)contrôlant qu'après un tronçon
-ayant fait progresser `occupied_seen` (le compte d'entrées occupées de `cur`
-réellement traitées) — ce qui garantit que `cur.used` du reliquat persisté
-décroît STRICTEMENT à chaque pause, donc une terminaison bornée par le
-nombre fini d'entrées d'origine.
+**Le budget était en outre divisé quatre fois** (`/4` en mode SOLO,
+`/(nb_workers × 2)` par job du pool, `/(nb_workers × 3)` par fragment) : avec
+`--dp-max-ram-mo 35000 --forks 10`, un job ne disposait que de 1,75 Go, soit
+5 % du budget demandé. Comme le seuil de SCISSION était ce budget par job,
+**ajouter des workers fragmentait la DP plus tôt** — la parallélisation créait
+le problème qu'elle devait résoudre.
 
-Verrouillé par `border_ring_count_dp_matches_brute_force_when_mid_transition_pauses`
-(même fixture à fourche que les tests de scission ci-dessus,
-`bd_transition_chunk_slots` abaissé à 1) et par
-`border_ring_dp_get_mid_transition_pauses_for_tests()` (même schéma que
-`_get_pool_jobs_forked_for_tests` : incrémenté par `bd_run_fragment_job`
-lui-même, invisible d'un process parent si la pause survient dans un job
-POOL forké — le test reste donc en mode SOLO, `nb_workers` assez grand pour
-qu'une pause, qui ne produit jamais qu'UN SEUL successeur, ne fasse jamais
-basculer le coordinateur en mode POOL).
+**Et la remise au parent coûtait la transition entière** : chaque worker
+écrivait son niveau local, que le parent RÉINSÉRAIT une à une dans une table
+de hachage (`bd_level_add`). La partie série d'Amdahl valait donc ~100 % du
+travail utile : speedup borné à ~2, quel que soit `--forks`.
 
-**Incident de performance du 2026-09-11, corrigé le jour même** : un run réel
-(`--dp-max-ram-mo 35000 --forks 20`) a tourné 8h en ne dépassant pas la
-position 25/59, avec `bd_transition_chunk_slots` (65536) utilisé TEL QUEL
-comme taille de tronçon. Diagnostic à partir du log : plus de 4500 pauses
-mi-transition en 8h, `next` déjà à 1,4-2,8 Gio à chaque pause (contre un
-budget POOL nominal de ~875 Mo pour cette commande) — une fois `next`
-au-dessus du budget il y RESTE (il ne fait que grossir), donc chaque tronçon
-suivant redéclenchait une pause, chacune réécrivant PUIS relisant
-l'intégralité de `next` sur disque : des dizaines de To d'E/S cumulées pour
-rien, le mécanisme protégeait bien contre l'OOM mais au prix d'un
-ralentissement catastrophique. Cause : `bd_transition_chunk_slots` est une
-constante FIXE, indépendante de la taille réelle du niveau — sur les
-capacités observées (131072 à 16777216), ça donnait de 2 à 256 tronçons
-possibles par transition, chacun pouvant re-pauser.
+#### Ce qui est verrouillé par des tests
 
-Corrigé en introduisant `BD_TRANSITION_CHUNK_DIVISOR` (16) :
-`bd_transition_chunk_slots` devient un PLANCHER, la taille de tronçon
-réellement utilisée est `max(bd_transition_chunk_slots, cur.capacity /
-BD_TRANSITION_CHUNK_DIVISOR)` — borne le nombre de pauses possibles par
-transition à 16 au pire, quelle que soit l'échelle du niveau, au lieu de le
-laisser croître avec la capacité. Aucun nouveau test dédié (le mécanisme
-existant, `border_ring_count_dp_matches_brute_force_when_mid_transition_pauses`,
-continue de verrouiller la correction du chemin — cette correction ne touche
-que la FRÉQUENCE des pauses, jamais leur exactitude) ; à réévaluer sur un
-run réel si 16 s'avère encore trop bas (trop de pauses) ou trop haut (un
-tronçon isolé dépasse trop largement le budget).
+`tests/tools/test_border_ring_dp.c` — tous sur des fixtures minuscules dont
+le total est connu par force brute (`border_walk_count`) :
 
-`border_ring_count_dp_matches_brute_force_when_pool_mode_engages` va plus
-loin : un total final identique ne suffit pas à distinguer « le mode POOL a
-réellement forké des jobs concurrents » de « le mode SOLO a tout traité
-séquentiellement et produit, par coïncidence, le même total » — c'est
-précisément ce qui s'est produit une fois en pratique (une variable de seuil
-renommée pendant un refactor avait rendu le hook `_set_disk_mode_min_bytes_for_tests`
-sans effet, si bien que ce test passait via SOLO sans jamais engager POOL).
-Le test compte donc, en plus du total, un compteur test-only
-(`border_ring_dp_reset_pool_jobs_forked_for_tests`/
-`_get_pool_jobs_forked_for_tests`) incrémenté par le PARENT juste après
-chaque `fork()` réussi dans `bd_fork_pool_job`, et vérifie qu'il est bien
-`> 0` après l'appel — la seule façon de faire échouer ce test si POOL
-dégradait de nouveau silencieusement en SOLO.
+- `bd_sort_and_compact_sorts_and_sums_duplicate_keys` et
+  `bd_sort_and_compact_handles_all_equal_and_reversed_input` : la brique qui
+  remplace l'accumulation par hachage, y compris sur les deux entrées
+  adverses d'un quicksort (tout égal — le cas que le partitionnement à
+  3 voies retire en une passe — et strictement décroissant).
+- `bd_key_layout_is_reversible_on_every_state` : la clé compacte est
+  INJECTIVE, vérifié par réversibilité sur TOUS les vecteurs de compteurs
+  possibles, pas un échantillon.
+- `border_ring_count_dp_matches_brute_force_when_the_sorter_spills` : tampon
+  forcé à UNE entrée (`border_ring_dp_set_sorter_capacity_for_tests`, qui
+  court-circuite le plancher `BD_SORTER_MIN_ENTRIES`) — toute la chaîne
+  externe est traversée à chaque position. Le test exige en plus
+  `runs_spilled > 0` : sans ce témoin, un hook devenu sans effet laisserait
+  le test passer par le chemin tout-en-mémoire — **c'est exactement ce qui
+  s'était produit une fois dans la version précédente de ce fichier**, un
+  renommage ayant rendu un hook inopérant sans faire échouer le test.
+- `border_ring_count_dp_never_touches_disk_when_the_budget_fits` : la
+  contre-épreuve (un compteur incrémenté inconditionnellement passerait les
+  deux tests sinon).
+- `border_ring_count_dp_matches_brute_force_when_spilling_and_forked` et
+  `..._across_several_merge_rounds` (degré de fusion abaissé à 2, donc fusion
+  RÉCURSIVE) : les deux chemins que le total seul ne distingue pas.
+- `border_ring_reconstruct_dp_matches_count_when_levels_live_on_disk` :
+  niveaux et tables de complétion restés sur disque, donc `bd_level_lookup`
+  travaille par dichotomie **sur fichier** (`fseek` + une entrée par sonde).
 
-**Échec réel observé sur la machine visée, corrigé** : le mode disque a
-d'abord échoué à la position 21/59 (17 fragments à 13,92 Go à la position 20)
-avec des messages « fragment brut tronqué » côté compactage, alors qu'AUCUN
-worker d'éclatement n'avait signalé d'échec. Cause racine : les `fwrite()`
-des fragments bruts (et le `fclose()` qui les clôt) n'étaient jamais
-vérifiés — un `ENOSPC` (disque plein) y échoue silencieusement, laissant un
-fichier tronqué que seul le compactage suivant découvre, bien après le
-worker fautif qui, lui, se termine avec un code de succès. `/tmp` peut
-saturer même sur une machine par ailleurs bien dotée (48 Go de RAM) : sa
-taille est indépendante de la RAM (petite partition ou tmpfs plafonné), et un
-niveau en mode disque y dépose ses fragments BRUTS (non dédupliqués, donc
-plus gros que leur forme finale compactée) — ici, l'ancien niveau (13,92 Go)
-restait sur disque tout le temps de l'éclatement du suivant, faute d'être
-supprimé avant la fin de toute la transition. Trois corrections :
+**Bug latent corrigé au passage** : `bd_reconstruct_class_dfs` ne rechargeait
+sa table de complétion qu'en ENTRÉE de frame, puis interrogeait, pour tous les
+candidats suivants de sa boucle, la table laissée en cache par sa propre
+descendance (position `pos+2` au lieu de `pos+1`). Un lookup qui échoue élague
+alors une branche pourtant valide, et la reconstruction se termine en
+« reconstruction incomplete » — le garde-fou final, pas un résultat faux
+silencieux, ce qui explique que le défaut soit passé inaperçu sur les
+fixtures existantes. `bd_reconstruct_ensure_cache` est désormais appelée avant
+CHAQUE lookup.
 
-- Toute écriture de fragment passe désormais par `bd_write_or_die`/
-  `bd_close_or_die` (`border_ring_dp.c`) — échoue bruyamment (avec un indice
-  « disque plein ? ») au lieu de laisser un fichier tronqué se propager en
-  silence jusqu'au compactage suivant.
-- Un fragment est supprimé dès qu'il est chargé en mémoire, pas seulement une
-  fois son traitement fini — principe conservé par la pile LIFO qui a
-  remplacé ce mécanisme depuis (`bd_run_opening` : `unlink()` juste après
-  `bd_level_load_file`, aussi bien à la création d'une tranche qu'à sa
-  reprise) : un fragment lu une fois n'est plus jamais utile après coup, donc
-  plus la peine de le garder sur disque plus longtemps que nécessaire.
-- `border_ring_dp_set_spill_dir` (`border_mass --spill-dir DIR` combiné à
-  `--dp`) permet de rediriger fragments et fichiers temporaires vers un
-  disque plus grand que `/tmp` — même logique que `--stock-spill-dir` pour le
-  stock principal (`core/stock_spill.c`).
+#### Points conservés de l'ancien mécanisme
+
+- Toute écriture est vérifiée, `fclose()` compris (`bd_write_or_die` /
+  `bd_close_or_die`) : un disque plein échoue bruyamment, jamais en laissant
+  un fichier tronqué se propager.
+- `border_ring_dp_set_spill_dir` (`border_mass --spill-dir DIR`) redirige runs
+  et niveaux sur disque vers un volume plus grand que `/tmp` — même logique
+  que `--stock-spill-dir` pour le stock principal (`core/stock_spill.c`).
+  `/tmp` est souvent un tmpfs plafonné bien en-deçà de la RAM : saturation
+  observée en pratique sur une machine par ailleurs bien dotée
+  (2×10 cœurs/48 Go).
+- Un fichier temporaire est supprimé dès qu'il est consommé, jamais gardé
+  « au cas où ».
+
 
 **`--save-rings FILE --max-rings N` (uniquement avec `--dp`) reconstruit les
 anneaux réels** et les écrit dans `FILE` au format `.back` — le sous-projet 2
@@ -677,9 +534,9 @@ suivant construit) — reconstruire exige donc un vrai mécanisme dédié
 
 1. **Passe avant persistée** : la même DP que `border_ring_count_dp`, mais
    chaque niveau produit est en plus écrit sur disque
-   (`bd_run_opening(..., persist_dir)`) au lieu d'être jeté — un fichier par
-   job/fragment contributeur à chaque position (fusionnés à la LECTURE, pas
-   à l'écriture, cf. `bd_persist_load_merged`).
+   (`bd_run_opening(..., persist_dir)`) au lieu d'être jeté — UN fichier trié
+   par position (`level_<pos>.bin`), le niveau n'étant jamais fragmenté
+   (cf. `bd_level_persist`).
 2. **Tables de complétion** (`bd_build_and_persist_completions`) : un balayage
    BOTTOM-UP des niveaux persistés, de la dernière position vers la première —
    pour CHAQUE état réellement atteint par la passe avant à une position,
