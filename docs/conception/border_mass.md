@@ -29,50 +29,63 @@ comme racines `.back` injectables dans le stock normal.
   — regroupe les pièces de bord interchangeables en classes (couleur
   d'entrée/sortie ordonnée) et calcule niveau par niveau le nombre de façons
   d'atteindre chaque état. Une seule pièce-coin d'ouverture est développée
-  (les 4 sont rigoureusement équivalentes par symétrie de rotation), le
+  (les 4 sont rigoureusement équivalentes par symétrie de rotation à 90°), le
   résultat est multiplié par 4. Combinable avec `--forks` (une transition de
-  niveau se parallélise par plage d'indices) et avec `--dp-max-ram-mo` (un
-  coordinateur à deux modes SOLO/POOL borne la RAM réelle — pas seulement
-  la taille nominale d'un niveau — en scindant les niveaux trop gros en
-  fragments sur une pile LIFO partagée, rechargés avec une marge RAM exacte
-  en mode POOL et heuristique en mode SOLO) et avec `--spill-dir` pour
-  rediriger les fragments vers un disque plus grand que `/tmp`. Le contrôle
-  de budget se fait désormais aussi **pendant** la construction d'un niveau
-  (« pause mi-transition »), pas seulement une fois un niveau complet —
-  corrigé après un OOM de production (`--dp-max-ram-mo 30000 --forks 10`,
-  2026-09-10 : jobs à 3-8,5 Gio de RSS réel contre un budget nominal par job
-  de 1,5 Gio) où le contrôle ne s'exécutait qu'une fois par position, trop
-  tard pour empêcher le pic mémoire réel — voir docs/tests_et_ci.md §
-  Scission par pile LIFO pour le détail (mécanisme, piège de livelock trouvé
-  et corrigé sous test, tests dédiés).
-- **`--save-rings FILE --max-rings N`** (avec `--dp`) : reconstruit les
-  anneaux réels et les écrit en `.back` — passe avant persistée, tables de
-  complétion calculées bottom-up, DFS guidé sur les classes (jamais sur les
-  pièces brutes), puis expansion en assignations de pièces réelles. Un run de
-  test avait produit 8 anneaux pour l'ouverture unique calculée (32 au
-  total) — **ce chiffre est un échantillon borné par `--max-rings`, pas la
-  masse réelle** : sur le jeu réel (256 pièces), la masse totale exacte
-  (`--dp` sans `--save-rings`) dépasse la capacité d'un `long long` signé
-  (> 9,2x10^18), au point qu'un seul fragment fermé pouvait déjà déborder —
-  corrigé le 2026-09-10 par le passage à `bd_ring_count_t` (`unsigned
-  __int128`, voir `border_ring_dp.h`). À revérifier/rechiffrer avec ce
-  correctif avant de citer un total définitif.
+  niveau se parallélise par plage d'états), `--dp-max-ram-mo` (taille du
+  tampon de tri) et `--spill-dir`.
+- **Tri externe** (2026-09-12) : un niveau est un TABLEAU TRIÉ, pas une table
+  de hachage ; un niveau trop gros pour la RAM devient un FICHIER trié, lu
+  séquentiellement par la position suivante. Remplace la scission en
+  fragments repris indépendamment, qui perdait toute fusion des états entre
+  fragments dès la position suivant la scission et faisait dégénérer la DP en
+  somme de sous-DP redondantes (mesures : docs/tests_et_ci.md § Tri externe).
+  Un état tient sur 64 bits et coûte 24 octets stocké, contre 111 avant.
+
+## Où en est le calcul, et ce que ça change
+
+Un run de production de 27 h (`--dp-max-ram-mo 35000 --forks 10`) sur la
+version à fragments n'avait accumulé que **1,01 × 10²⁷** — pour une masse
+réelle estimée à **3,80 × 10³⁷ ± 6 %**, soit 3 × 10⁻⁹ % du total.
+
+Cette estimation vient d'une voie **totalement indépendante du DP**, validée
+en retrouvant exactement le `4` de `data/pieces16.csv` : les 60 pièces de
+bord forment un multigraphe dirigé sur les 5 couleurs de bordure,
+parfaitement équilibré (12 entrantes / 12 sortantes par couleur), et un
+anneau est exactement un circuit eulérien de ce graphe. Le **théorème BEST**
+en donne le compte exact en quelques microsecondes —
+`ec = tw × ∏(deg−1)! = 3432 × (11!)⁵ = 3,478 × 10⁴¹` — et un échantillonnage
+uniforme de circuits eulériens donne la fraction de ceux dont les 4 coins
+tombent aux positions 0/15/30/45 (2,73 × 10⁻⁵ sur 9 M tirages).
+
+Conséquence pour le sous-projet 2 (reconstruire les anneaux comme racines
+`.back`) : avec ~10³⁷ anneaux, la population n'est pas exploitable comme jeu
+de racines — `--max-rings 10⁹` en échantillonnerait 10⁻²⁸. Le chiffre exact
+garde un intérêt propre, mais la décision qu'il devait éclairer est déjà
+tranchée par sa borne.
 
 ## Arbitrages qui restent valables
 
 - **Fork, jamais threads**, à chaque étage de parallélisme (marche
   historique du projet) : isolation mémoire et de panne entre workers,
-  aucune synchronisation partagée à auditer.
-- **Pile LIFO** pour les fragments en attente : borne la profondeur par le
-  nombre de positions de l'anneau, pas par la largeur de l'espace d'états.
-- **Aucune perte de fragment sur refus RAM** : un job qui ne peut être admis
-  attend qu'un slot se libère, jamais un abandon silencieux — même principe
-  que `expand_datas_to_level` (AGENTS.md § RAM cap).
+  aucune synchronisation partagée à auditer. Le tri externe rend ce choix
+  gratuit : un worker rend un fichier DÉJÀ TRIÉ, donc la remise au parent est
+  une fusion linéaire — alors qu'elle coûtait la transition entière tant que
+  le parent devait réinsérer dans une table de hachage.
+- **Aucune perte de donnée sur dépassement du budget RAM** : le trieur déverse
+  un run trié et poursuit, jamais un abandon silencieux — même principe que
+  `expand_datas_to_level` (AGENTS.md § RAM cap).
 
 ## Pistes écartées, avec preuve
 
 - Optimisation meet-in-the-middle (approche C) pour le DFS séquentiel : non
   nécessaire, `--dp` a changé d'algorithme plutôt que d'optimiser le DFS.
+- **Scission d'un niveau en fragments repris indépendamment** (pile LIFO,
+  coordinateur SOLO/POOL, pause mi-transition) : correcte mais catastrophique
+  — le partitionnement par hachage ne sépare aucun doublon au moment de la
+  scission, mais dès la position suivante deux fragments produisent les mêmes
+  clés sans plus jamais les fusionner. Remplacée par le tri externe, qui
+  garde le niveau entier. Ne pas y revenir : chiffres à l'appui dans
+  docs/tests_et_ci.md § Tri externe.
 - Table de mémoïsation globale (toutes les positions dans une seule table) :
   un état à la position P ne dépend que du niveau P+1 — remplacée par une
   structure à deux niveaux (courant + suivant), qui borne le pic mémoire à
