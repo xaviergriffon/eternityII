@@ -139,14 +139,18 @@
 
 #define BM_MAX_FORKS 1024
 
-/* Marge confortable au-dessus de PATH_MAX pour `<chemin>.w<N>`. */
-#define BM_RINGS_PATH_MAX 5120
-
 /* Nombre de nœuds DFS entre deux lignes de progression par worker — choisi
    empiriquement (~23M nœuds/s constatés sur data/pieces.csv, 256 pièces,
    avec ce réglage : une ligne toutes les 4-5 secondes) pour ni un flot
    illisible, ni un silence de plusieurs minutes entre deux signes de vie. */
 #define BM_PROGRESS_INTERVAL_NODES 100000000LL
+
+/* En mode `--save-rings`, chaque anneau fermé part sur le disque : le débit
+   tombe de ~19 M à ~170 k nœuds/s par worker (mesuré sur un run de 576 Go),
+   et l'intervalle ci-dessus donnerait UNE LIGNE TOUTES LES 10 MINUTES — le
+   silence que cette constante existe précisément pour éviter. Réglé ici pour
+   ~30 s entre deux lignes dans ce régime. */
+#define BM_PROGRESS_INTERVAL_NODES_SAMPLING 5000000LL
 
 struct bm_progress_ctx {
     int worker_id;
@@ -258,69 +262,38 @@ static int bm_on_ring_found(const struct possibility_packet *ring, void *ctx_)
     return (ctx->bounded && (bd_ring_count_t)ctx->written >= ctx->budget);
 }
 
-/* `<base>.<tag>` — un fichier d'anneaux par producteur. Les workers sont des
-   forks : un unique `FILE*` partagé à travers `fork()` leur donnerait des
-   offsets et des tampons indépendants sur la MÊME description de fichier, et
-   leurs enregistrements s'entrelaceraient. Chacun écrit donc le sien, que le
-   parent concatène une fois tout le monde sorti. */
-static int bm_rings_part_path(char *dst, size_t dstlen, const char *base, const char *tag)
+/* Décale un bloc d'anneaux vers la GAUCHE dans le fichier (from > to), par
+   tranches. Sert au seul cas dégénéré du placement par plages : un worker qui
+   épuise ses partitions avant son quota laisse un trou derrière lui. Sur le
+   jeu réel ça n'arrive jamais — une seule partition contient bien plus
+   d'anneaux qu'un quota n'en demande — mais un trou lu comme des
+   enregistrements nuls n'est pas une option (cf. le principe « aucune perte
+   silencieuse » d'AGENTS.md). Retourne 0, ou -1 en cas d'échec d'E/S. */
+static int bm_rings_move_block(FILE *f, long long from, long long to, long long count)
 {
-    int n = snprintf(dst, dstlen, "%s.%s", base, tag);
-    if (n < 0 || (size_t)n >= dstlen) {
-        fprintf(stderr, "border_mass : nom de fichier d'anneaux trop long pour '%s'\n", base);
+    if (count <= 0 || from == to) {
+        return 0;
+    }
+    enum { CHUNK = 4096 };
+    struct possibility_packet *buf = malloc(CHUNK * sizeof *buf);
+    if (buf == NULL) {
         return -1;
     }
-    return 0;
-}
-
-/* Concatène `<base>.expand` puis `<base>.w0..w<nb-1>` dans `base`, et efface
-   les morceaux. Retourne le nombre d'anneaux (enregistrements de taille fixe)
-   écrits, ou -1 en cas d'échec. Toute erreur est fatale côté appelant : un
-   `.back` tronqué se relit sans broncher, `import()` lisant des blocs de
-   taille fixe. */
-static long long bm_rings_concat(const char *base, const char *expand_path, const char *worker_base,
-                                  int nb_workers)
-{
-    FILE *out = fopen(base, "wb");
-    if (out == NULL) {
-        fprintf(stderr, "border_mass : ouverture de '%s' impossible\n", base);
-        return -1;
-    }
-    long long records = 0;
-    for (int i = -1; i < nb_workers; i++) {
-        char path[BM_RINGS_PATH_MAX];
-        if (i < 0) {
-            snprintf(path, sizeof path, "%s", expand_path);
-        } else {
-            char tag[32];
-            snprintf(tag, sizeof tag, "w%d", i);
-            if (bm_rings_part_path(path, sizeof path, worker_base, tag) != 0) {
-                fclose(out);
-                return -1;
-            }
+    long long moved = 0;
+    int rc = 0;
+    while (moved < count) {
+        size_t n = (size_t)((count - moved) < CHUNK ? (count - moved) : CHUNK);
+        if (fseeko(f, (off_t)(from + moved) * (off_t)sizeof *buf, SEEK_SET) != 0 ||
+            fread(buf, sizeof *buf, n, f) != n ||
+            fseeko(f, (off_t)(to + moved) * (off_t)sizeof *buf, SEEK_SET) != 0 ||
+            fwrite(buf, sizeof *buf, n, f) != n) {
+            rc = -1;
+            break;
         }
-        FILE *in = fopen(path, "rb");
-        if (in == NULL) {
-            continue; /* un worker sans quota n'a rien créé */
-        }
-        struct possibility_packet packet;
-        while (fread(&packet, sizeof packet, 1, in) == 1) {
-            if (fwrite(&packet, sizeof packet, 1, out) != 1) {
-                fprintf(stderr, "border_mass : ecriture dans '%s' impossible (disque plein ?)\n", base);
-                fclose(in);
-                fclose(out);
-                return -1;
-            }
-            records++;
-        }
-        fclose(in);
-        remove(path);
+        moved += (long long)n;
     }
-    if (fclose(out) != 0) {
-        fprintf(stderr, "border_mass : cloture de '%s' impossible (disque plein ?)\n", base);
-        return -1;
-    }
-    return records;
+    free(buf);
+    return rc;
 }
 
 static void bm_collect_partial(const struct possibility_packet *partial_state, int depth, void *ctx_)
@@ -366,7 +339,10 @@ static long long bm_run_worker(int worker_id, int nb_workers,
     struct bm_progress_ctx progress_ctx;
     progress_ctx.worker_id = worker_id;
     progress_ctx.partition_total = assigned;
-    struct border_progress_opts progress = { BM_PROGRESS_INTERVAL_NODES, bm_report_progress, &progress_ctx };
+    struct border_progress_opts progress = {
+        rings != NULL ? BM_PROGRESS_INTERVAL_NODES_SAMPLING : BM_PROGRESS_INTERVAL_NODES,
+        bm_report_progress, &progress_ctx
+    };
 
     for (int p = worker_id; p < nb_partitions; p += nb_workers) {
         progress_ctx.partition_index = done + 1;
@@ -629,21 +605,27 @@ int main(int argc, char **argv)
     int8_t order[BORDER_RING_LEN][2];
     border_corners_first_order(order);
 
-    /* Échantillonnage (`--save-rings` sans `--dp`) : le parent écrit lui-même
-       les anneaux que l'expansion de frontière referme au passage — ils sont
-       trouvés AVANT le fork, donc aucun worker ne les verra. Fichier à part
-       (`<path>.expand`), concaténé avec ceux des workers à la fin : un seul
-       `FILE*` partagé à travers `fork()` entrelacerait les écritures des
-       workers dans le même fichier. */
+    /* Échantillonnage (`--save-rings` sans `--dp`) : UN SEUL fichier, écrit
+       en place par tout le monde à des plages disjointes.
+       Le parent écrit d'abord, séquentiellement, les anneaux que l'expansion
+       de frontière referme au passage (trouvés AVANT le fork, donc invisibles
+       aux workers) ; chaque worker écrira ensuite dans SA plage, dont le
+       décalage se calcule d'avance puisque son quota est connu avant le fork.
+
+       La version précédente donnait un fichier par worker puis les
+       concaténait : sur un run de production de 576 Go, cette recopie a coûté
+       122 min sur 211 — 58 % du temps total à relire et réécrire des octets
+       déjà corrects (1 728 Go d'E/S pour 576 Go de résultat). Écrire
+       directement aux bons décalages supprime les deux tiers de ces E/S.
+       Un `kill` en cours de route laisse un fichier troué : les trous se
+       lisent comme des paquets nuls, que `border_ring_validate` rejette
+       bruyamment (`make check-rings`) — jamais un `.back` silencieusement
+       faux. */
     struct bm_rings_ctx expand_rings = { NULL, 0, max_rings, save_rings_path != NULL };
-    char expand_path[BM_RINGS_PATH_MAX];
     if (save_rings_path != NULL) {
-        if (bm_rings_part_path(expand_path, sizeof expand_path, save_rings_path, "expand") != 0) {
-            return 1;
-        }
-        expand_rings.file = fopen(expand_path, "wb");
+        expand_rings.file = fopen(save_rings_path, "wb");
         if (expand_rings.file == NULL) {
-            fprintf(stderr, "border_mass : ouverture de '%s' impossible\n", expand_path);
+            fprintf(stderr, "border_mass : ouverture de '%s' impossible\n", save_rings_path);
             return 1;
         }
     }
@@ -656,7 +638,7 @@ int main(int argc, char **argv)
                                      save_rings_path != NULL ? bm_on_ring_found : NULL, &expand_rings);
 
     if (expand_rings.file != NULL && fclose(expand_rings.file) != 0) {
-        fprintf(stderr, "border_mass : cloture de '%s' impossible (disque plein ?)\n", expand_path);
+        fprintf(stderr, "border_mass : cloture de '%s' impossible (disque plein ?)\n", save_rings_path);
         return 1;
     }
 
@@ -664,8 +646,7 @@ int main(int argc, char **argv)
 
     if (collect.count == 0) {
         if (save_rings_path != NULL) {
-            long long written = bm_rings_concat(save_rings_path, expand_path, NULL, 0);
-            printf("%lld anneau(x) sauvegarde(s) dans %s\n", written, save_rings_path);
+            printf("%lld anneau(x) sauvegarde(s) dans %s\n", expand_rings.written, save_rings_path);
         } else {
             printf("masse totale des anneaux de bordure valides : %lld\n", completed_during_expansion);
         }
@@ -684,6 +665,9 @@ int main(int argc, char **argv)
        rien ne la redistribue (il faudrait un compteur partagé entre process
        pour cela). Sans conséquence sur le jeu réel, où chaque partition
        contient plus d'anneaux qu'on n'en demandera jamais. */
+    long long *quota = NULL;    /* quota de chaque worker, connu AVANT le fork */
+    long long *offset = NULL;   /* premier anneau de sa plage dans le fichier */
+    long long *count = NULL;    /* ce qu'il a réellement écrit */
     bd_ring_count_t rings_remaining = 0;
     if (save_rings_path != NULL && max_rings > (bd_ring_count_t)expand_rings.written) {
         rings_remaining = max_rings - (bd_ring_count_t)expand_rings.written;
@@ -695,6 +679,23 @@ int main(int argc, char **argv)
        lignes de log une fois par worker. */
     fflush(stdout);
     fflush(stderr);
+
+    if (save_rings_path != NULL) {
+        quota = malloc((size_t)forks * sizeof *quota);
+        offset = malloc((size_t)forks * sizeof *offset);
+        count = calloc((size_t)forks, sizeof *count);
+        if (quota == NULL || offset == NULL || count == NULL) {
+            fprintf(stderr, "border_mass : allocation des quotas impossible\n");
+            return 1;
+        }
+        long long next = expand_rings.written;
+        for (int w = 0; w < forks; w++) {
+            quota[w] = (long long)(rings_remaining / (bd_ring_count_t)forks
+                                   + ((bd_ring_count_t)w < rings_remaining % (bd_ring_count_t)forks ? 1 : 0));
+            offset[w] = next;
+            next += quota[w];
+        }
+    }
 
     int (*pipes)[2] = malloc((size_t)forks * sizeof *pipes);
     pid_t *pids = malloc((size_t)forks * sizeof *pids);
@@ -729,19 +730,27 @@ int main(int argc, char **argv)
             }
             close(pipes[w][0]);
 
-            bd_ring_count_t budget = rings_remaining / (bd_ring_count_t)forks
-                                     + ((bd_ring_count_t)w < rings_remaining % (bd_ring_count_t)forks ? 1 : 0);
-            struct bm_rings_ctx worker_rings = { NULL, 0, budget, 1 };
-            char worker_path[BM_RINGS_PATH_MAX];
-            if (save_rings_path != NULL && budget > 0) {
-                char tag[32];
-                snprintf(tag, sizeof tag, "w%d", w);
-                if (bm_rings_part_path(worker_path, sizeof worker_path, save_rings_path, tag) != 0) {
-                    exit(1);
-                }
-                worker_rings.file = fopen(worker_path, "wb");
-                if (worker_rings.file == NULL) {
-                    fprintf(stderr, "border_mass : ouverture de '%s' impossible\n", worker_path);
+            /* Quota nul : ce worker n'a rien à produire. Il doit sortir tout
+               de suite — le laisser appeler bm_run_worker SANS contexte
+               d'anneaux lui ferait énumérer ses partitions en ENTIER, sans
+               borne, donc tourner indéfiniment sur le jeu réel. */
+            struct bm_rings_ctx worker_rings = { NULL, 0, 0, 1 };
+            if (save_rings_path != NULL && quota[w] == 0) {
+                dprintf(pipes[w][1], "0\n");
+                close(pipes[w][1]);
+                exit(0);
+            }
+            if (save_rings_path != NULL) {
+                worker_rings.budget = (bd_ring_count_t)quota[w];
+                /* "r+b" : le fichier existe déjà (le parent y a écrit les
+                   anneaux de l'expansion), on se place dans SA plage sans
+                   toucher à celles des autres. */
+                worker_rings.file = fopen(save_rings_path, "r+b");
+                if (worker_rings.file == NULL ||
+                    fseeko(worker_rings.file, (off_t)offset[w] * (off_t)sizeof(struct possibility_packet),
+                           SEEK_SET) != 0) {
+                    fprintf(stderr, "border_mass : ouverture de '%s' a l'offset du worker %d impossible\n",
+                            save_rings_path, w);
                     exit(1);
                 }
             }
@@ -750,10 +759,11 @@ int main(int argc, char **argv)
                                           worker_rings.file != NULL ? &worker_rings : NULL);
 
             if (worker_rings.file != NULL && fclose(worker_rings.file) != 0) {
-                fprintf(stderr, "border_mass : cloture de '%s' impossible (disque plein ?)\n", worker_path);
+                fprintf(stderr, "border_mass : cloture de '%s' impossible (disque plein ?)\n",
+                        save_rings_path);
                 exit(1);
             }
-            dprintf(pipes[w][1], "%lld\n", sub);
+            dprintf(pipes[w][1], "%lld\n", worker_rings.file != NULL ? worker_rings.written : sub);
             close(pipes[w][1]);
             exit(0);
         }
@@ -783,7 +793,11 @@ int main(int argc, char **argv)
         }
 
         buf[got] = '\0';
-        total += strtoll(buf, NULL, 10);
+        long long sub = strtoll(buf, NULL, 10);
+        if (count != NULL) {
+            count[w] = sub;
+        }
+        total += sub;
     }
 
     if (any_worker_failed) {
@@ -796,12 +810,39 @@ int main(int argc, char **argv)
     }
 
     if (save_rings_path != NULL) {
-        long long written = bm_rings_concat(save_rings_path, expand_path, save_rings_path, forks);
-        if (written < 0) {
-            free(pipes);
-            free(pids);
-            free(collect.partitions);
+        /* Cas courant : chaque worker a rempli sa plage, le fichier est déjà
+           exactement le bon — rien à recopier. Le compactage ne sert qu'au
+           cas dégénéré d'un worker qui épuise ses partitions avant son quota
+           (jeux de pièces minuscules), et ne déplace que ce qui suit le
+           premier trou. */
+        FILE *out = fopen(save_rings_path, "r+b");
+        if (out == NULL) {
+            fprintf(stderr, "border_mass : reouverture de '%s' impossible\n", save_rings_path);
             return 1;
+        }
+        long long written = expand_rings.written;
+        int compacted = 0;
+        for (int w = 0; w < forks; w++) {
+            if (written != offset[w]) {
+                if (bm_rings_move_block(out, offset[w], written, count[w]) != 0) {
+                    fprintf(stderr, "border_mass : compactage de '%s' impossible\n", save_rings_path);
+                    fclose(out);
+                    return 1;
+                }
+                compacted = 1;
+            }
+            written += count[w];
+        }
+        if (fflush(out) != 0 ||
+            ftruncate(fileno(out), (off_t)written * (off_t)sizeof(struct possibility_packet)) != 0 ||
+            fclose(out) != 0) {
+            fprintf(stderr, "border_mass : finalisation de '%s' impossible (disque plein ?)\n",
+                    save_rings_path);
+            return 1;
+        }
+        if (compacted) {
+            fprintf(stderr, "border_mass : au moins un worker a livre moins que son quota, "
+                            "fichier compacte\n");
         }
         printf("%lld anneau(x) sauvegarde(s) dans %s\n", written, save_rings_path);
     } else {
