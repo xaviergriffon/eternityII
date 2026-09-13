@@ -552,12 +552,26 @@ anneau tous les ~10 nœuds DFS (ratio mesuré 0,097 anneau/nœud), ce qui rend
 l'échantillonnage essentiellement gratuit — c'est *terminer* l'énumération
 qui est impossible, pas en produire.
 
-**Ne pas confondre les deux débits.** Le walker FERME ~15 M anneaux/s
-(8 forks, sans écriture) ; en mode `--save-rings` le débit utile est celui
-des anneaux ÉCRITS, **~1 M/s**, soit ~500 Mo/s — c'est le disque qui borne,
-pas la recherche. Conséquence sur `--forks` : au-delà d'une douzaine de
-workers la contention d'E/S l'emporte. Mesuré sur 10⁷ anneaux (2×10 cœurs
-HT, NVMe) :
+**Trois débits à ne pas confondre.**
+
+| Régime | Débit | Ce qui borne |
+|---|---|---|
+| Walker seul, sans écriture | ~15 M anneaux/s (8 forks) | le CPU |
+| `--save-rings`, sortie **dans le cache de page** | ~0,7-1 M anneaux/s | les E/S vers le cache |
+| `--save-rings`, sortie **au-delà du cache** | **~190 k anneaux/s** | le disque, pour de bon |
+
+Le troisième est le seul qui compte pour un gros run, et c'est celui qu'on
+oublie : les mesures ci-dessous portent sur 10⁷ à 2×10⁷ anneaux (5 à 11 Go),
+que 47 Go de RAM absorbent largement. Le run de production de 576 Go, lui, a
+tenu ~108 Mo/s soutenus. Le disque de la machine de test (Crucial P3, QLC à
+cache SLC dynamique) fait 2,6 Go/s en rafale et s'effondre vers 100 Mo/s une
+fois son cache SLC saturé — un `dd` de 8 Go peut donc mesurer 98 Mo/s juste
+après une grosse écriture, et 1,9 Go/s sur 48 Go quand le cache s'est
+rétabli. **Toute mesure d'écriture sur cette machine doit préciser le volume
+et l'état du disque**, sans quoi elle ne veut rien dire.
+
+Conséquence sur `--forks` : au-delà d'une douzaine de workers la contention
+d'E/S l'emporte. Mesuré sur 10⁷ anneaux (2×10 cœurs HT, NVMe, régime caché) :
 
 | `--forks` | 2 | 4 | 8 | 12 | 16 | 20 | 40 |
 |---|---|---|---|---|---|---|---|
@@ -566,9 +580,17 @@ HT, NVMe) :
 Les plages viennent d'un A/B à ordre alterné : entre 8 et 16 la variance
 d'un run à l'autre (±25 %) dépasse l'écart entre les réglages — inutile de
 chercher un optimum fin, **~12 est un bon choix**, 2 et 40 sont clairement
-mauvais. Le `fflush` par anneau coûte ~12 % (11,24 s contre 12,84 s sur 10⁷
-à 8 forks) : conservé, la garantie qu'un `kill` ne laisse jamais un
-enregistrement à moitié écrit vaut ce prix.
+mauvais. Le `fflush` par anneau coûte ~12-13 % (mesuré deux fois : 11,24 s
+contre 12,84 s sur 10⁷ à 8 forks, puis 234 s contre 265 s sur 35 M
+d'enregistrements avec `fsync` final) : conservé, la garantie qu'un `kill` ne
+laisse jamais un enregistrement à moitié écrit vaut ce prix. Ce n'est PAS le
+levier de performance — la triple écriture l'était.
+
+La ligne de progression utilise un intervalle différent selon le mode
+(`BM_PROGRESS_INTERVAL_NODES_SAMPLING`) : en `--save-rings` le débit tombe de
+~19 M à ~170 k nœuds/s par worker, et l'intervalle du mode exhaustif (10⁸
+nœuds) donnerait **une ligne toutes les 10 minutes** — le silence que cette
+constante existe pour éviter.
 
 **Les anneaux du walker valent ceux du DP comme racines.** Le doute légitime
 est qu'un DFS non élagué ne livre que des anneaux quasi identiques. Mesuré :
@@ -596,10 +618,26 @@ jamais tronquée à son préfixe numérique. Verrouillé par
 Répartition du quota entre workers : `--max-rings N` est réparti en parts
 égales entre les `--forks`, le reste de la division allant aux premiers
 workers (un de plus chacun) — sans quoi `--max-rings 1` sur 2 workers
-donnerait 0. Chaque worker écrit son propre `FILE.w<N>` (un `FILE*` partagé à
-travers `fork()` entrelacerait les enregistrements), le parent écrit
-`FILE.expand` pour les anneaux que l'expansion de frontière referme avant le
-fork, et tout est concaténé dans `FILE` en fin de run, les morceaux effacés.
+donnerait 0. Comme le quota est connu **avant** le `fork`, la plage de chaque
+worker dans le fichier de sortie l'est aussi : tous écrivent dans un fichier
+UNIQUE, chacun à son décalage, sur des plages disjointes. Le parent écrit en
+tête les anneaux que l'expansion de frontière referme avant le fork.
+
+Une version antérieure donnait un fichier par worker puis les concaténait.
+Sur un run de production de 576 Go, **cette recopie a coûté 122 min sur 211**
+— 58 % du temps total — pour relire et réécrire des octets déjà corrects :
+1 728 Go d'E/S (576 écrits par les workers, 576 relus, 576 réécrits) pour
+576 Go de résultat. Écrire aux bons décalages supprime les deux tiers de ces
+E/S. Diagnostic : l'écart entre la durée prédite depuis le débit affiché dans
+les logs (89 min) et la durée réelle mesurée aux horodatages (211 min).
+
+Un `kill` en cours de route laisse un fichier troué (les plages des workers
+ne sont pas encore pleines). Ce n'est pas silencieux : un trou se lit comme un
+paquet nul, que `border_ring_validate` rejette en `BAD_PLACED_COUNT` — un
+`make check-rings` le dit immédiatement. Un worker qui épuise ses partitions
+avant son quota (jeux de pièces minuscules seulement) laisse le même genre de
+trou à la fin de sa plage ; le parent le détecte via le compte que chaque
+worker lui renvoie par son tube, compacte, et l'annonce sur `stderr`.
 `--max-rings` reste une borne SUPÉRIEURE : un worker dont les partitions
 s'épuisent avant son quota laisse sa part inutilisée (visible seulement sur
 des jeux minuscules ; sur le jeu réel chaque partition contient plus
