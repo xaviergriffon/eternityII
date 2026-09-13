@@ -301,6 +301,35 @@ void bd_ring_count_format(bd_ring_count_t value, char *buf, size_t buflen)
     }
 }
 
+/* bd_ring_count_parse : cf. border_ring_dp.h. Pendant de
+   bd_ring_count_format — `strtoull` plafonne à 64 bits et SATURE en silence
+   (il rend ULLONG_MAX et pose errno, que presque personne ne relit), ce qui
+   transformerait un `--max-rings 10^38` en une borne 10^19 fois plus petite
+   sans le moindre message. On accumule donc chiffre à chiffre, avec un test
+   de débordement à chaque étape. */
+int bd_ring_count_parse(const char *s, bd_ring_count_t *out)
+{
+    if (s == NULL || *s == '\0') {
+        return -1;
+    }
+    bd_ring_count_t acc = 0;
+    for (const char *p = s; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9') {
+            return -1;
+        }
+        bd_ring_count_t digit = (bd_ring_count_t)(*p - '0');
+        /* `acc * 10 + digit` doit rester représentable : les deux tests
+           reproduisent bd_count_mul_or_die/bd_count_add_or_die sans leur
+           exit(1), un argument invalide devant remonter à l'appelant. */
+        if (acc > (~(bd_ring_count_t)0 - digit) / 10) {
+            return -1;
+        }
+        acc = acc * 10 + digit;
+    }
+    *out = acc;
+    return 0;
+}
+
 /* Addition/multiplication protégées contre un dépassement de bd_ring_count_t
    (128 bits) : plutôt qu'un wrap silencieux (un `long long` débordait déjà
    sur le jeu réel, cf. le commentaire de tête de bd_ring_count_t dans
@@ -1971,8 +2000,9 @@ struct bd_reconstruct_ctx {
     int8_t class_seq[BORDER_RING_LEN]; /* indices 1..BORDER_RING_LEN-1 utilisés */
     border_ring_found_cb on_found;
     void *user_ctx;
-    long long max_rings;
+    bd_ring_count_t max_rings;     /* 128 bits : `--max-rings` doit pouvoir viser la masse réelle (~10^37) */
     long long delivered;
+    int stopped;                   /* `on_found` a demandé l'arrêt — ne plus ouvrir de coin suivant */
     int cached_pos;                /* position dont la table de complétion est en cache, -1 = aucune */
     struct bd_level cached_level;
     struct possibility_packet board;
@@ -1982,12 +2012,21 @@ struct bd_reconstruct_ctx {
 
 static void bd_expand_dfs(struct bd_reconstruct_ctx *rc, const int8_t order[BORDER_RING_LEN][2], int pos)
 {
-    if (rc->delivered >= rc->max_rings) {
+    if ((bd_ring_count_t)rc->delivered >= rc->max_rings) {
         return;
     }
     if (pos == BORDER_RING_LEN) {
-        rc->on_found(&rc->board, rc->user_ctx);
+        int stop = (rc->on_found(&rc->board, rc->user_ctx) != 0);
         rc->delivered++;
+        /* Un arrêt demandé par l'appelant est une troncature délibérée, au
+           même titre que `max_rings` atteint : ramener la borne sur le
+           compte livré fait déclencher tous les tests `delivered >=
+           max_rings` déjà en place, garde-fou final compris (qui ne doit
+           alors PAS crier « reconstruction incomplete »). */
+        if (stop) {
+            rc->max_rings = (bd_ring_count_t)rc->delivered;
+            rc->stopped = 1;
+        }
         return;
     }
 
@@ -2018,7 +2057,7 @@ static void bd_expand_dfs(struct bd_reconstruct_ctx *rc, const int8_t order[BORD
         rc->board.grid[x][y] = -2;
         rc->board.alloc = (uint16_t)pos;
 
-        if (rc->delivered >= rc->max_rings) {
+        if ((bd_ring_count_t)rc->delivered >= rc->max_rings) {
             return;
         }
     }
@@ -2087,7 +2126,7 @@ static void bd_reconstruct_ensure_cache(struct bd_reconstruct_ctx *rc, int want_
 
 static void bd_reconstruct_class_dfs(struct bd_reconstruct_ctx *rc, int pos, bd_key_t key)
 {
-    if (rc->delivered >= rc->max_rings) {
+    if ((bd_ring_count_t)rc->delivered >= rc->max_rings) {
         return;
     }
     const struct bd_key_layout *l = &rc->ctx->layout;
@@ -2104,7 +2143,7 @@ static void bd_reconstruct_class_dfs(struct bd_reconstruct_ctx *rc, int pos, bd_
             }
             rc->class_seq[pos] = (int8_t)c;
             bd_expand_class_sequence(rc);
-            if (rc->delivered >= rc->max_rings) {
+            if ((bd_ring_count_t)rc->delivered >= rc->max_rings) {
                 return;
             }
         }
@@ -2126,7 +2165,7 @@ static void bd_reconstruct_class_dfs(struct bd_reconstruct_ctx *rc, int pos, bd_
         rc->class_seq[pos] = (int8_t)c;
         bd_reconstruct_class_dfs(rc, pos + 1, next_key);
 
-        if (rc->delivered >= rc->max_rings) {
+        if ((bd_ring_count_t)rc->delivered >= rc->max_rings) {
             return;
         }
     }
@@ -2160,7 +2199,8 @@ static void bd_persist_cleanup(const char *persist_dir)
  * échec bruyant sinon (jamais un fichier .back silencieusement incomplet,
  * sauf si max_rings a délibérément coupé la délivrance avant). */
 long long border_ring_reconstruct_dp(map_big_array *map, struct array_part *all_rotate_parts, int nb_workers,
-                                      long long max_rings, border_ring_found_cb on_found, void *user_ctx)
+                                      bd_ring_count_t max_rings, border_ring_found_cb on_found,
+                                      void *user_ctx)
 {
     int n = (all_rotate_parts->size - 1) / 4;
 
@@ -2193,8 +2233,9 @@ long long border_ring_reconstruct_dp(map_big_array *map, struct array_part *all_
     map_bucket bucket0 = map_bucket_packed(map, &key0);
 
     long long total_delivered = 0;
+    int stopped = 0;
 
-    for (int s = 0; s < bucket0.size && total_delivered < max_rings; s++) {
+    for (int s = 0; s < bucket0.size && (bd_ring_count_t)total_delivered < max_rings; s++) {
         const struct part *cand = &bucket0.parts[s];
         if (cand->id <= 0 || id_to_class[cand->id] < 0) {
             continue;
@@ -2228,7 +2269,7 @@ long long border_ring_reconstruct_dp(map_big_array *map, struct array_part *all_
         rc.closure_target = closure_target;
         rc.on_found = on_found;
         rc.user_ctx = user_ctx;
-        rc.max_rings = max_rings - total_delivered;
+        rc.max_rings = max_rings - (bd_ring_count_t)total_delivered;
         rc.delivered = 0;
         rc.cached_pos = -1;
         rc.opening_id = (uint16_t)cand->id;
@@ -2241,7 +2282,8 @@ long long border_ring_reconstruct_dp(map_big_array *map, struct array_part *all_
         }
         bd_persist_cleanup(persist_dir);
 
-        if ((bd_ring_count_t)rc.delivered != forward_total_for_opening && rc.delivered < rc.max_rings) {
+        if (!rc.stopped && (bd_ring_count_t)rc.delivered != forward_total_for_opening &&
+            (bd_ring_count_t)rc.delivered < rc.max_rings) {
             char sf[BD_RING_COUNT_STRLEN];
             bd_ring_count_format(forward_total_for_opening, sf, sizeof sf);
             fprintf(stderr,
@@ -2254,9 +2296,20 @@ long long border_ring_reconstruct_dp(map_big_array *map, struct array_part *all_
         }
 
         total_delivered += rc.delivered;
+
+        /* Arrêt demandé par l'appelant : les coins d'ouverture suivants ne
+           doivent pas être développés — chacun coûte une passe avant ENTIÈRE
+           plus ses tables de complétion. Sans ce test, `on_found` était bien
+           rappelé puis re-stoppé à chaque coin, livrant un anneau de plus par
+           coin restant et payant tout le calcul pour eux. */
+        if (rc.stopped) {
+            stopped = 1;
+            break;
+        }
     }
 
-    if ((bd_ring_count_t)total_delivered != known_total && total_delivered < max_rings) {
+    if (!stopped && (bd_ring_count_t)total_delivered != known_total &&
+        (bd_ring_count_t)total_delivered < max_rings) {
         char sk[BD_RING_COUNT_STRLEN];
         bd_ring_count_format(known_total, sk, sizeof sk);
         fprintf(stderr,

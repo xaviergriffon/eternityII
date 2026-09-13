@@ -151,11 +151,12 @@ struct bw_found_record {
     struct possibility_packet last;
 };
 
-static void bw_on_found(const struct possibility_packet *ring_state, void *ctx)
+static int bw_on_found(const struct possibility_packet *ring_state, void *ctx)
 {
     struct bw_found_record *rec = (struct bw_found_record *)ctx;
     rec->calls++;
     rec->last = *ring_state;
+    return 0;
 }
 
 TEST border_walk_count_returns_zero_without_any_border_shaped_piece(void)
@@ -541,6 +542,97 @@ TEST border_walk_expand_frontier_exhausts_the_tree_when_target_is_too_high(void)
     PASS();
 }
 
+/* Callback d'arrêt : rend la main au bout de `stop_after` anneaux. C'est le
+   contrat sur lequel repose l'échantillonnage (`border_mass --save-rings`
+   sans `--dp`) : la population d'anneaux du jeu réel ne s'énumère jamais
+   entièrement, un appelant qui n'en veut que N doit pouvoir couper. */
+struct bw_stop_record {
+    int calls;
+    int stop_after;
+};
+
+static int bw_on_found_stopping(const struct possibility_packet *ring_state, void *ctx)
+{
+    struct bw_stop_record *rec = (struct bw_stop_record *)ctx;
+    (void)ring_state;
+    rec->calls++;
+    return rec->calls >= rec->stop_after;
+}
+
+/* Le fixture porte 4 anneaux. Un callback qui coupe au 1er doit faire
+   retourner 1 — et surtout n'être appelé qu'UNE fois : c'est la différence
+   entre « on ignore les suivants » (le DFS continuerait de tourner, sans fin
+   sur le jeu réel) et « on s'arrête vraiment ». La contre-épreuve à
+   stop_after = 4 vérifie que le mécanisme ne tronque pas de lui-même. */
+TEST border_walk_count_ordered_stops_as_soon_as_the_callback_asks(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    int8_t ring[BORDER_RING_LEN][2];
+    border_ring_order(ring);
+
+    for (int stop_after = 1; stop_after <= 4; stop_after++) {
+        struct bw_stop_record rec;
+        memset(&rec, 0, sizeof rec);
+        rec.stop_after = stop_after;
+
+        long long n = border_walk_count_ordered(map, all, ring, 0, NULL, bw_on_found_stopping, &rec, NULL);
+
+        ASSERT_EQ_FMT((long long)stop_after, n, "%lld");
+        ASSERT_EQ_FMT(stop_after, rec.calls, "%d");
+    }
+
+    /* Sans demande d'arrêt, le même parcours livre bien les 4. */
+    struct bw_found_record all_rec;
+    memset(&all_rec, 0, sizeof all_rec);
+    long long full = border_walk_count_ordered(map, all, ring, 0, NULL, bw_on_found, &all_rec, NULL);
+    ASSERT_EQ_FMT(4LL, full, "%lld");
+    ASSERT_EQ_FMT(4, all_rec.calls, "%d");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+/* Même contrat pour les anneaux refermés PENDANT l'expansion de frontière —
+   un chemin distinct de bw_dfs, qui réimplémente sa propre boucle de
+   candidats (cf. le commentaire de lockstep dans border_walk.c) et pouvait
+   donc ignorer l'arrêt alors que le DFS le respecte. */
+TEST border_walk_expand_frontier_stops_as_soon_as_on_complete_asks(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    int8_t ring[BORDER_RING_LEN][2];
+    border_ring_order(ring);
+
+    struct bw_frontier_collect collect;
+    memset(&collect, 0, sizeof collect);
+    struct bw_stop_record rec;
+    memset(&rec, 0, sizeof rec);
+    rec.stop_after = 1;
+
+    /* Cible inatteignable : l'expansion épuise l'arbre et referme ses 4
+       anneaux elle-même (cf.
+       border_walk_expand_frontier_exhausts_the_tree_when_target_is_too_high). */
+    long long completed = border_walk_expand_frontier(map, all, ring, 10000,
+                                                        bw_collect_partial, &collect,
+                                                        bw_on_found_stopping, &rec);
+
+    ASSERT_EQ_FMT(1LL, completed, "%lld");
+    ASSERT_EQ_FMT(1, rec.calls, "%d");
+    ASSERT_EQ_FMT(0, collect.count, "%d");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
 SUITE(border_walk_suite)
 {
     RUN_TEST(border_ring_order_has_the_right_length_and_starts_at_origin);
@@ -558,4 +650,6 @@ SUITE(border_walk_suite)
     RUN_TEST(border_walk_expand_frontier_then_resume_matches_direct_count);
     RUN_TEST(border_walk_expand_frontier_then_resume_matches_direct_count_with_corners_first);
     RUN_TEST(border_walk_expand_frontier_exhausts_the_tree_when_target_is_too_high);
+    RUN_TEST(border_walk_count_ordered_stops_as_soon_as_the_callback_asks);
+    RUN_TEST(border_walk_expand_frontier_stops_as_soon_as_on_complete_asks);
 }

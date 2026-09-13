@@ -55,8 +55,18 @@ void border_corners_first_order(int8_t order[BORDER_RING_LEN][2]);
  * `border_walk_count`. `ring_state` n'est valide que pendant l'appel (le
  * DFS continue son backtracking juste après) — le copier si on veut le
  * garder.
+ *
+ * @return 0 pour continuer l'énumération, non nul pour l'ARRÊTER net.
+ *
+ * L'arrêt est ce qui rend l'échantillonnage possible : la population
+ * d'anneaux du jeu réel (~10³⁷) ne s'énumère jamais entièrement, mais le
+ * walker en ferme ~15 M/s, et un appelant qui n'en veut que N doit
+ * pouvoir rendre la main après le N-ième au lieu de laisser tourner un DFS
+ * qui ne se terminera pas. L'arrêt remonte toute la récursion : le compte
+ * retourné par `border_walk_count`/`_ordered` est alors partiel (les
+ * anneaux livrés jusque-là), jamais une masse totale.
  */
-typedef void (*border_ring_found_cb)(const struct possibility_packet *ring_state, void *ctx);
+typedef int (*border_ring_found_cb)(const struct possibility_packet *ring_state, void *ctx);
 
 /**
  * @brief Suivi de progression pour `border_walk_count_ordered` — appelé tous
@@ -176,6 +186,10 @@ typedef void (*border_partial_cb)(const struct possibility_packet *partial_state
  *                           pour atteindre `target_partitions` sans épuiser
  *                           l'arbre) — ne jamais compter ces anneaux une
  *                           deuxième fois côté appelant. Peut être NULL.
+ *                           S'il demande l'arrêt (retour non nul),
+ *                           l'expansion s'interrompt immédiatement et
+ *                           `on_partial` n'est appelé pour AUCUN état : il
+ *                           n'y a plus de travail à distribuer.
  * @param complete_ctx       Passé tel quel à `on_complete`.
  * @return                   Nombre d'anneaux comptés via `on_complete`
  *                           pendant l'expansion elle-même (0 dans le cas

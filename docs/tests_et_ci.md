@@ -288,12 +288,15 @@ sans I/O), tout le calcul de vitesse et le formatage du message vivent dans
 pour le raisonnement complet (notamment pourquoi ceci ne réutilise pas
 `fork_gate.c`).
 
-Mesuré empiriquement sur `data/pieces.csv` (256 pièces) : ne termine pas en
-plusieurs heures (une seule partition sur 270 avait déjà dépassé 33 milliards
-d'anneaux trouvés sans se terminer, `--forks 4`, run interrompu) — le DFS
-séquentiel n'a aucune heuristique d'élagage (MRV, forward-check), contrairement
-au moteur de recherche principal, par choix de conception explicite (voir la
-spec). Ordre de grandeur explicable : les faces "anneau" du vrai puzzle
+Mesuré empiriquement sur `data/pieces.csv` (256 pièces) : **ne termine
+jamais**, tout en produisant des anneaux à très haut débit — les deux ne se
+contredisent pas, et il faut les distinguer. Relevé de 43 s sur 8 workers :
+6,4 × 10⁹ nœuds explorés, **6,4 × 10⁸ anneaux fermés** (~19 M nœuds/s par
+worker, un anneau tous les ~10 nœuds). Face à une masse estimée à
+3,8 × 10³⁷, épuiser l'arbre est hors d'atteinte ; en échantillonner autant
+qu'on veut est immédiat (voir `--save-rings` plus bas). Le DFS n'a aucune
+heuristique d'élagage (MRV, forward-check), contrairement au moteur de
+recherche principal, par choix de conception explicite (voir la spec). Ordre de grandeur explicable : les faces "anneau" du vrai puzzle
 n'utilisent que 5 couleurs, chacune partagée par 24 des 120 faces de bord —
 une bordure volontairement peu contrainte par conception du puzzle réel, qui
 donne un facteur de branchement élevé au DFS séquentiel.
@@ -522,14 +525,104 @@ CHAQUE lookup.
   « au cas où ».
 
 
-**`--save-rings FILE --max-rings N` (uniquement avec `--dp`) reconstruit les
-anneaux réels** et les écrit dans `FILE` au format `.back` — le sous-projet 2
-mentionné plus haut, désormais implémenté. Sur le jeu réel (256 pièces),
-Xavier a mesuré (comptage `--dp` avec un seul coin fixé) `n_single_opening = 8`,
-soit un total réel de `8 × 4 = 32` anneaux — minuscule, malgré le DFS brut qui
-ne termine pas (voir plus haut). `border_ring_count_dp` ne conserve pourtant
-rien d'exploitable une fois le total calculé (chaque niveau est jeté dès le
-suivant construit) — reconstruire exige donc un vrai mécanisme dédié
+### `--save-rings FILE --max-rings N` : produire des anneaux réels
+
+Écrit des anneaux de bordure RÉELS (pièces posées, pas seulement un total)
+dans `FILE` au format `.back` — flux headerless de `possibility_packet`, même
+format que `gen_root.c:76-86` et `docs/utilisation.md` (§ format `.back`),
+donc injectable comme racines de stock. Chaque anneau est un paquet complet
+(bordure remplie, intérieur à `-2`, `checked` forcé à 0), écrit puis `fflush`
+immédiatement : ces runs se coupent au `kill` une fois qu'on en a assez, et
+`import()` lit des blocs de taille fixe — il ne détecterait pas un dernier
+enregistrement tronqué par un tampon stdio perdu.
+
+**Deux modes, et c'est le mode SANS `--dp` qu'il faut par défaut.**
+
+| | sans `--dp` (échantillonnage) | avec `--dp` (reconstruction exhaustive) |
+|---|---|---|
+| Producteur | le walker (`border_walk_count_ordered`) | oracle de complétion + DFS guidé |
+| Avant le 1er anneau | ~1 s | ~31 h et ~537 Go (mesuré, `data/pieces.csv`) |
+| Débit | ~1 M anneaux/s écrits (limité par le disque) | — |
+| Disque temporaire | aucun | tous les niveaux + toutes les tables de complétion |
+| `--max-rings` | borne le travail ET la sortie | borne la sortie SEULEMENT |
+
+Mesure de référence (`data/pieces.csv`, 8 forks) : **10⁶ anneaux écrits en
+0,94 s**, fichier de 576 Mo, 0 doublon d'enregistrement. Le walker ferme un
+anneau tous les ~10 nœuds DFS (ratio mesuré 0,097 anneau/nœud), ce qui rend
+l'échantillonnage essentiellement gratuit — c'est *terminer* l'énumération
+qui est impossible, pas en produire.
+
+**Ne pas confondre les deux débits.** Le walker FERME ~15 M anneaux/s
+(8 forks, sans écriture) ; en mode `--save-rings` le débit utile est celui
+des anneaux ÉCRITS, **~1 M/s**, soit ~500 Mo/s — c'est le disque qui borne,
+pas la recherche. Conséquence sur `--forks` : au-delà d'une douzaine de
+workers la contention d'E/S l'emporte. Mesuré sur 10⁷ anneaux (2×10 cœurs
+HT, NVMe) :
+
+| `--forks` | 2 | 4 | 8 | 12 | 16 | 20 | 40 |
+|---|---|---|---|---|---|---|---|
+| M anneaux/s | 0,38 | 0,65 | 0,75–0,82 | 0,77–0,95 | 0,56–0,93 | 0,68 | 0,49 |
+
+Les plages viennent d'un A/B à ordre alterné : entre 8 et 16 la variance
+d'un run à l'autre (±25 %) dépasse l'écart entre les réglages — inutile de
+chercher un optimum fin, **~12 est un bon choix**, 2 et 40 sont clairement
+mauvais. Le `fflush` par anneau coûte ~12 % (11,24 s contre 12,84 s sur 10⁷
+à 8 forks) : conservé, la garantie qu'un `kill` ne laisse jamais un
+enregistrement à moitié écrit vaut ce prix.
+
+**Les anneaux du walker valent ceux du DP comme racines.** Le doute légitime
+est qu'un DFS non élagué ne livre que des anneaux quasi identiques. Mesuré :
+sur 10⁶ anneaux consécutifs, **10⁶ frontières intérieures distinctes**, zéro
+doublon. La raison est structurelle — la classe d'une pièce de bord
+(`bd_build_classes`) est la paire ORDONNÉE de ses deux faces adjacentes sur
+l'anneau ; sa face tournée vers l'intérieur n'y entre pas. Deux anneaux de
+même motif de classes présentent donc des frontières intérieures différentes,
+et sont deux sous-problèmes distincts pour la recherche intérieure. (Le motif
+de CLASSES, lui, se répète : ~500 anneaux par motif en séquentiel. C'est une
+métrique trompeuse ici, elle décrit les faces que la recherche intérieure ne
+voit jamais.)
+
+`--max-rings N` se lit sur **128 bits** (`bd_ring_count_parse`, le pendant de
+`bd_ring_count_format`) : la masse réelle est estimée à ~3,8 × 10³⁷, soit 19
+ordres de grandeur au-dessus de ce qu'un `long long` porte, et `strtoll`
+saturait ici **en silence** — un plafond volontairement énorme devenait
+~9,2 × 10¹⁸ sans le moindre message. Le maximum acceptable est 2¹²⁸−1
+(`340282366920938463463374607431768211455`) ; une valeur qui n'est pas un
+entier décimal pur (signe, espace, suffixe, `0x`, débordement) est refusée,
+jamais tronquée à son préfixe numérique. Verrouillé par
+`bd_ring_count_parse_round_trips_values_far_beyond_64_bits` et
+`bd_ring_count_parse_rejects_anything_that_is_not_a_plain_decimal`.
+
+Répartition du quota entre workers : `--max-rings N` est réparti en parts
+égales entre les `--forks`, le reste de la division allant aux premiers
+workers (un de plus chacun) — sans quoi `--max-rings 1` sur 2 workers
+donnerait 0. Chaque worker écrit son propre `FILE.w<N>` (un `FILE*` partagé à
+travers `fork()` entrelacerait les enregistrements), le parent écrit
+`FILE.expand` pour les anneaux que l'expansion de frontière referme avant le
+fork, et tout est concaténé dans `FILE` en fin de run, les morceaux effacés.
+`--max-rings` reste une borne SUPÉRIEURE : un worker dont les partitions
+s'épuisent avant son quota laisse sa part inutilisée (visible seulement sur
+des jeux minuscules ; sur le jeu réel chaque partition contient plus
+d'anneaux qu'on n'en demandera jamais).
+
+L'arrêt lui-même passe par la valeur de retour de `border_ring_found_cb`
+(`tests/tools/border_walk.h`) : non nul = arrêter net. Il remonte toute la
+récursion de `bw_dfs`, la boucle de `border_walk_expand_frontier` (qui
+n'émet alors AUCUN état partiel — il n'y a plus de travail à distribuer), et
+côté `--dp` la boucle sur les coins d'ouverture de
+`border_ring_reconstruct_dp` — chaque coin suivant y coûterait une passe
+avant entière. Verrouillé par
+`border_walk_count_ordered_stops_as_soon_as_the_callback_asks`,
+`border_walk_expand_frontier_stops_as_soon_as_on_complete_asks` et
+`border_ring_reconstruct_dp_honours_a_stopping_callback`.
+
+### Reconstruction exhaustive (`--save-rings` AVEC `--dp`)
+
+Ne se justifie que pour reconstruire *tous* les anneaux d'un jeu de pièces —
+sur `data/pieces.csv`, dont la masse est estimée à 3,8 × 10³⁷, ça n'arrivera
+pas ; c'est utilisable sur des jeux de test. `border_ring_count_dp` ne
+conserve rien d'exploitable une fois le total calculé (chaque niveau est jeté
+dès le suivant construit) — reconstruire exige donc un mécanisme dédié
 (`border_ring_reconstruct_dp`, `tests/tools/border_ring_dp.c`) :
 
 1. **Passe avant persistée** : la même DP que `border_ring_count_dp`, mais
