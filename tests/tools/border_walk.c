@@ -143,6 +143,91 @@ static int bw_dfs(struct bw_ctx *ctx, int i)
     return stop;
 }
 
+/* Cohérence de couleur — MÊME convention que check_possibility()
+   (src/core/possibility.c), voir border_walk.h pour le détail et pour
+   pourquoi cette fonction n'est pas appelée directement. */
+static int bw_check_colors(const struct possibility_packet *p, struct array_part *all)
+{
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            int16_t g = p->grid[x][y];
+            if (g == -2) {
+                continue;
+            }
+            if (g < 0 || g >= all->size) {
+                return BORDER_RING_BAD_PIECE_ID;
+            }
+            struct part me = all->parts[g];
+
+            /* 0 = hors plateau (la bordure doit y présenter une face nulle),
+               -1 = voisin vide, donc rien à comparer. */
+            int8_t want_top = 0, want_right = 0, want_bottom = 0, want_left = 0;
+            if (y - 1 >= 0) {
+                want_top = (p->grid[x][y - 1] < 0) ? -1 : all->parts[p->grid[x][y - 1]].bottom;
+            }
+            if (x + 1 < ETERN_SIZE) {
+                want_right = (p->grid[x + 1][y] < 0) ? -1 : all->parts[p->grid[x + 1][y]].left;
+            }
+            if (y + 1 < ETERN_SIZE) {
+                want_bottom = (p->grid[x][y + 1] < 0) ? -1 : all->parts[p->grid[x][y + 1]].top;
+            }
+            if (x - 1 >= 0) {
+                want_left = (p->grid[x - 1][y] < 0) ? -1 : all->parts[p->grid[x - 1][y]].right;
+            }
+            if ((want_top != -1 && me.top != want_top) || (want_right != -1 && me.right != want_right) ||
+                (want_bottom != -1 && me.bottom != want_bottom) ||
+                (want_left != -1 && me.left != want_left)) {
+                return BORDER_RING_BAD_COLOR;
+            }
+        }
+    }
+    return 0;
+}
+
+int border_ring_validate(const struct possibility_packet *ring, struct array_part *all_rotate_parts)
+{
+    if (possibility_placed_count(ring) != BORDER_RING_LEN) {
+        return BORDER_RING_BAD_PLACED_COUNT;
+    }
+
+    int8_t order[BORDER_RING_LEN][2];
+    border_ring_order(order);
+
+    /* Pas de balayage de l'intérieur : `possibility_placed_count` compte les
+       cases non vides du PLATEAU ENTIER, donc « exactement BORDER_RING_LEN
+       posées » (ci-dessus) et « les BORDER_RING_LEN cases du pourtour sont
+       remplies » (ci-dessous) impliquent déjà qu'aucune case intérieure ne
+       l'est. Une case intérieure posée sort en BAD_PLACED_COUNT, ou en
+       BAD_EMPTY_CELL si elle a été déplacée depuis le pourtour — les deux
+       sont couverts par `border_ring_validate_catches_each_kind_of_corruption`.
+       Un contrôle dédié serait inatteignable, donc jamais testé. */
+    int seen[ETERN_PARTS + 1];
+    memset(seen, 0, sizeof seen);
+
+    for (int i = 0; i < BORDER_RING_LEN; i++) {
+        int x = order[i][0], y = order[i][1];
+        int16_t v = ring->grid[x][y];
+        if (v == -2) {
+            return BORDER_RING_BAD_EMPTY_CELL;
+        }
+        if (v < 0 || v >= all_rotate_parts->size) {
+            return BORDER_RING_BAD_PIECE_ID;
+        }
+        int base = ((v - 1) % ETERN_PARTS) + 1;
+        if (seen[base]) {
+            return BORDER_RING_BAD_DUPLICATE_ID;
+        }
+        seen[base] = 1;
+        /* `b_faceused` est indexé sur l'id de BASE (0-based), pas sur l'id
+           tourné — cf. bw_dfs, qui fait `set_face_used(..., cand->id - 1)`. */
+        if (!is_face_used((uint16_t *)ring->b_faceused, (uint16_t)(base - 1))) {
+            return BORDER_RING_BAD_FACEUSED;
+        }
+    }
+
+    return bw_check_colors(ring, all_rotate_parts);
+}
+
 long long border_walk_count_ordered(map_big_array *map,
                                      struct array_part *all_rotate_parts,
                                      const int8_t order[BORDER_RING_LEN][2],

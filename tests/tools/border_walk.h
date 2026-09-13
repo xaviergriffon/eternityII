@@ -147,6 +147,50 @@ long long border_walk_count(map_big_array *map,
                              border_ring_found_cb on_found, void *ctx);
 
 /**
+ * @brief Codes de retour de `border_ring_validate` — tous < 0, 0 valant
+ * « anneau valide ». Distincts les uns des autres pour qu'un diagnostic sur
+ * un fichier de plusieurs centaines de Go dise QUOI est cassé, pas seulement
+ * QUE quelque chose l'est.
+ */
+#define BORDER_RING_BAD_PLACED_COUNT   (-10) /**< `alloc` ≠ BORDER_RING_LEN */
+#define BORDER_RING_BAD_EMPTY_CELL     (-11) /**< une case du pourtour est vide */
+#define BORDER_RING_BAD_PIECE_ID       (-12) /**< id de pièce hors domaine */
+#define BORDER_RING_BAD_DUPLICATE_ID   (-13) /**< une pièce posée deux fois */
+#define BORDER_RING_BAD_FACEUSED       (-15) /**< grille et `b_faceused` désaccordés */
+#define BORDER_RING_BAD_COLOR          (-20) /**< adjacence de couleur violée */
+
+/**
+ * @brief Vérifie qu'un paquet est un anneau de bordure valide et complet.
+ *
+ * Contrôle : exactement `BORDER_RING_LEN` cases posées sur le plateau ET
+ * toutes celles du pourtour remplies — ce qui implique l'intérieur vide sans
+ * avoir à le balayer —, chaque pièce utilisée exactement une fois, `b_faceused`
+ * d'accord avec la grille, et toutes les adjacences de couleur — fermeture
+ * du cycle comprise, puisqu'elle n'est qu'une adjacence de plus.
+ *
+ * La convention d'adjacence est celle de `check_possibility`
+ * (`src/core/possibility.c`) : voisin `(x,y-1)` = TOP, son `bottom` doit
+ * égaler notre `top` ; `(x+1,y)` = RIGHT contre son `left` ; `(x,y+1)` =
+ * BOTTOM contre son `top` ; `(x-1,y)` = LEFT contre son `right`. Un voisin
+ * HORS PLATEAU attend la couleur 0 — c'est ce qui vérifie, gratuitement, que
+ * la bordure présente bien ses faces nulles vers l'extérieur.
+ *
+ * Pourquoi ne pas appeler `check_possibility` directement : sur le puzzle
+ * 256 pièces elle exige l'indice officiel (`grid[7][8]` = pièce 139 rotation
+ * 2, code -6), qu'un anneau de bordure ne pose jamais puisqu'il ne touche
+ * pas l'intérieur. Tout anneau valide y échouerait. La boucle de couleur est
+ * donc reprise ici, cet ancrage en moins — si la convention changeait
+ * là-bas, celle-ci deviendrait fausse en silence, d'où le test
+ * `border_ring_validate_accepts_a_ring_produced_by_the_walker` qui valide
+ * directement la sortie du walker plutôt qu'un plateau écrit à la main.
+ *
+ * @param ring             Paquet à vérifier.
+ * @param all_rotate_parts Tableau de toutes les rotations (`rotate_all_parts`).
+ * @return                 0 si l'anneau est valide, un `BORDER_RING_BAD_*` sinon.
+ */
+int border_ring_validate(const struct possibility_packet *ring, struct array_part *all_rotate_parts);
+
+/**
  * @brief Appelé pour chaque état partiel de la frontière finale produite par
  * `border_walk_expand_frontier`. `partial_state` n'est valide que pendant
  * l'appel — le copier si on veut le garder (c'est un besoin réel : ces
