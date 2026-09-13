@@ -43,6 +43,7 @@
 #include "core/part.h"
 #include "core/possibility.h"
 #include "tools/border_walk.h"
+#include "tools/ring_codec.h"
 
 #define NB_BUCKETS 256
 #define READ_BATCH 2048
@@ -61,6 +62,12 @@ static int u128_cmp(const void *a, const void *b)
 static int8_t ring_order[BORDER_RING_LEN][2];
 
 /* Empreinte des 60 cases de l'anneau — JAMAIS les octets bruts du struct. */
+/* Empreinte d'un anneau. En `.back`, on hache les valeurs de GRILLE, jamais
+   les octets bruts du paquet : `possibility_packet` a du padding caché (cf.
+   AGENTS.md) et deux anneaux identiques pourraient différer dessus, laissant
+   passer un doublon. En packed6 le problème disparaît — l'enregistrement est
+   déjà une forme canonique, sans bourrage ni champ annexe : on hache les
+   octets tels quels. */
 static struct u128 ring_fingerprint(const struct possibility_packet *p)
 {
     uint64_t h1 = 1469598103934665603ULL, h2 = 1099511628211ULL;
@@ -68,6 +75,18 @@ static struct u128 ring_fingerprint(const struct possibility_packet *p)
         uint64_t v = (uint64_t)(uint16_t)p->grid[ring_order[i][0]][ring_order[i][1]];
         h1 = (h1 ^ v) * 1099511628211ULL;
         h2 = (h2 ^ (v + (uint64_t)i)) * 0x9E3779B97F4A7C15ULL;
+        h2 ^= h2 >> 29;
+    }
+    struct u128 r = { h1, h2 };
+    return r;
+}
+
+static struct u128 bytes_fingerprint(const uint8_t *b, size_t n)
+{
+    uint64_t h1 = 1469598103934665603ULL, h2 = 1099511628211ULL;
+    for (size_t i = 0; i < n; i++) {
+        h1 = (h1 ^ b[i]) * 1099511628211ULL;
+        h2 = (h2 ^ (b[i] + (uint64_t)i)) * 0x9E3779B97F4A7C15ULL;
         h2 ^= h2 >> 29;
     }
     struct u128 r = { h1, h2 };
@@ -112,14 +131,38 @@ int main(int argc, char **argv)
     off_t size = ftello(f);
     fclose(f);
 
-    const off_t rec = (off_t)sizeof(struct possibility_packet);
-    if (size % rec != 0) {
+    /* Format reconnu à la magie, jamais supposé : un `.back` relu comme du
+       packed6 (ou l'inverse) donnerait des anneaux absurdes en silence. */
+    struct ring_codec_table table;
+    int packed = 0;
+    off_t hdr = 0;
+    off_t rec = (off_t)sizeof(struct possibility_packet);
+
+    f = fopen(rings_path, "rb");
+    if (f == NULL) { perror("fopen"); return 1; }
+    uint8_t probe[RING_CODEC_HEADER_BYTES];
+    if (size >= (off_t)sizeof probe && fread(probe, sizeof probe, 1, f) == 1 &&
+        memcmp(probe, RING_CODEC_MAGIC, 8) == 0) {
+        if (ring_codec_read_header(probe, &table) != 0) {
+            fprintf(stderr, "check_rings : ECHEC — en-tete packed6 illisible (version, geometrie "
+                            "ou table incompatibles avec ce binaire)\n");
+            fclose(f);
+            return 1;
+        }
+        packed = 1;
+        hdr = (off_t)RING_CODEC_HEADER_BYTES;
+        rec = (off_t)RING_CODEC_PACKED_BYTES;
+    }
+    fclose(f);
+
+    if ((size - hdr) % rec != 0) {
         fprintf(stderr, "check_rings : ECHEC — taille %lld non multiple de %lld (enregistrement tronque)\n",
-                (long long)size, (long long)rec);
+                (long long)(size - hdr), (long long)rec);
         return 1;
     }
-    long long total = (long long)(size / rec);
-    fprintf(stderr, "check_rings : %lld anneaux, %d workers, seaux dans %s\n", total, nb_workers, work_dir);
+    long long total = (long long)((size - hdr) / rec);
+    fprintf(stderr, "check_rings : format %s, %lld anneaux (%lld o/anneau), %d workers, seaux dans %s\n",
+            packed ? "packed6" : "back", total, (long long)rec, nb_workers, work_dir);
 
     /* --- Passe 1 : validation + repartition des empreintes en seaux --- */
     pid_t *pids = malloc((size_t)nb_workers * sizeof *pids);
@@ -139,16 +182,38 @@ int main(int argc, char **argv)
             }
 
             FILE *in = fopen(rings_path, "rb");
-            if (in == NULL || fseeko(in, lo * rec, SEEK_SET) != 0) { perror("open/seek"); exit(1); }
+            if (in == NULL || fseeko(in, hdr + lo * rec, SEEK_SET) != 0) { perror("open/seek"); exit(1); }
 
-            struct possibility_packet *batch = malloc(READ_BATCH * sizeof *batch);
+            uint8_t *batch = malloc(READ_BATCH * (size_t)rec);
             long long done = 0, bad = 0;
             while (done < hi - lo) {
                 size_t want = (size_t)((hi - lo - done) < READ_BATCH ? (hi - lo - done) : READ_BATCH);
-                size_t got = fread(batch, sizeof *batch, want, in);
+                size_t got = fread(batch, (size_t)rec, want, in);
                 if (got == 0) break;
                 for (size_t i = 0; i < got; i++) {
-                    int rc = border_ring_validate(&batch[i], all);
+                    const uint8_t *raw = batch + i * (size_t)rec;
+                    struct possibility_packet ring;
+                    struct u128 h;
+                    int rc;
+
+                    if (packed) {
+                        /* -30 : le décodage lui-même a échoué (index hors
+                           table, ou aucune rotation ne met les faces nulles
+                           vers l'extérieur) — distinct des BORDER_RING_BAD_*,
+                           qui portent sur un plateau déjà reconstruit. */
+                        rc = (ring_codec_unpack(raw, &table, all, &ring) != 0) ? -30 : 0;
+                        if (rc == 0) {
+                            rc = border_ring_validate(&ring, all);
+                        }
+                        /* L'enregistrement packed6 est déjà canonique : on le
+                           hache tel quel, sans repasser par la grille. */
+                        h = bytes_fingerprint(raw, (size_t)rec);
+                    } else {
+                        memcpy(&ring, raw, sizeof ring);
+                        rc = border_ring_validate(&ring, all);
+                        h = ring_fingerprint(&ring);
+                    }
+
                     if (rc != 0) {
                         if (bad < 5) {
                             fprintf(stderr, "check_rings[w%d] : anneau #%lld INVALIDE (code %d)\n",
@@ -156,7 +221,6 @@ int main(int argc, char **argv)
                         }
                         bad++;
                     }
-                    struct u128 h = ring_fingerprint(&batch[i]);
                     int b = (int)(h.hi >> 56);
                     o->buf[b][o->n[b]++] = h;
                     if (o->n[b] == BUCKET_BUF) bucket_flush(o, b);

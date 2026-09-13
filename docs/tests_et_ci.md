@@ -654,6 +654,49 @@ avant entière. Verrouillé par
 `border_walk_expand_frontier_stops_as_soon_as_on_complete_asks` et
 `border_ring_reconstruct_dp_honours_a_stopping_callback`.
 
+### `--rings-format packed6` : 12,8× plus petit, accès aléatoire conservé
+
+Un `possibility_packet` pèse 576 octets alors qu'un anneau ne porte que
+`BORDER_RING_LEN` pièces. Deux observations, **mesurées sur 3 M d'anneaux
+réels** de `data/pieces.csv`, ramènent ça à 45 octets :
+
+1. **La rotation ne porte aucune information.** La face nulle d'une pièce de
+   bord doit regarder vers l'extérieur, et la position dit où est
+   l'extérieur : une seule rotation convient par case. Vérifié — **zéro**
+   position où la rotation varie, sur 3 M × 60 cases. Seul l'id est stocké,
+   et le décodeur retrouve la rotation en cherchant celle qui met les faces
+   nulles vers les bords adjacents.
+2. **Il n'y a que 60 pièces de bordure**, donc un index local tient sur
+   6 bits. 60 × 6 bits = 360 bits = **45 octets**, pile.
+
+| Format | o/anneau | 10⁹ anneaux |
+|---|---|---|
+| `.back` (`possibility_packet`) | 576 | 576 Go |
+| **`packed6`** | **45** | **45 Go** |
+
+**L'accès aléatoire est conservé**, et c'est ce qui l'a fait préférer à un
+encodage différentiel — mesuré à 6,39 o/anneau (90×, les anneaux consécutifs
+ne diffèrent que par 5,39 cases en moyenne), mais **séquentiel** : on ne peut
+pas atteindre l'anneau *n* sans décoder depuis le début, et un octet corrompu
+emporte toute la suite. En `packed6` les enregistrements sont de taille fixe :
+le n-ième est en `RING_CODEC_HEADER_BYTES + n × RING_CODEC_PACKED_BYTES`.
+
+L'en-tête (160 o, magie `ETIIRING` + version + géométrie + table index → id)
+existe pour qu'un fichier d'un autre format soit **refusé** et non mal
+interprété : un `.back` relu comme du packed6 donnerait des anneaux absurdes
+en silence.
+
+⚠️ **Ce n'est pas un `.back`** : il ne s'importe pas tel quel dans un stock.
+Arbitrage explicite — compacité d'abord, compatibilité plus tard si le besoin
+se confirme.
+
+Vérifications de bout en bout (`data/pieces.csv`, 5 M d'anneaux, 12 workers) :
+fichier de 225 Mo contre 2,88 Go en `.back` (**12,8×**), `make check-rings`
+sans invalide ni doublon, et une comparaison **case par case des 5 M
+d'anneaux entre les deux formats : 0 différence**. Deux runs identiques
+produisent d'ailleurs des fichiers bit à bit identiques — l'énumération est
+déterministe.
+
 ### Vérifier le fichier produit (`make check-rings`)
 
 ```sh
@@ -661,8 +704,9 @@ make check-rings
 tests/tools/check_rings rings.back data/pieces.csv /mnt/nvme/work 12
 ```
 
-Code de sortie 0 **si et seulement si** le fichier est intègre. Deux
-questions distinctes, une seule passe :
+Code de sortie 0 **si et seulement si** le fichier est intègre. Le format est
+reconnu **à la magie**, jamais supposé (`.back` ou `packed6`). Deux questions
+distinctes, une seule passe :
 
 - **Cohérence** — chaque enregistrement est-il un anneau valide ? Délégué à
   `border_ring_validate` (`tests/tools/border_walk.c`) : exactement
