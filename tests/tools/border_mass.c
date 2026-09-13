@@ -379,17 +379,33 @@ static long long bm_run_worker(int worker_id, int nb_workers,
                                                     &progress);
         total += sub;
         done++;
-        fprintf(stderr, "border_mass[worker %d] : partition %d/%d terminee, sous-total %lld\n",
-                worker_id, done, assigned, total);
 
         /* Quota épuisé : les partitions restantes de ce worker ne servent
            plus à rien. Sans ce test, le DFS repartirait sur la suivante et
            `bm_on_ring_found` la stopperait à son premier anneau — en
            l'écrivant, donc en dépassant le quota d'une unité par partition
-           restante. */
+           restante.
+
+           Et le message DIFFÈRE de celui d'une partition épuisée : sur le jeu
+           réel, une seule partition contient bien plus d'anneaux qu'un quota
+           n'en demande, donc tous les workers sortent par ici, à leur
+           première partition. Annoncer « partition 1/23 terminee » serait
+           faux (elle a été coupée en plein milieu), et « sous-total » ne
+           dirait rien de plus que le quota lui-même — c'est ce qui a fait
+           croire à des sous-totaux mystérieusement identiques entre
+           workers. */
         if (rings != NULL && rings->bounded && (bd_ring_count_t)rings->written >= rings->budget) {
+            char quota[BD_RING_COUNT_STRLEN];
+            bd_ring_count_format(rings->budget, quota, sizeof quota);
+            fprintf(stderr,
+                    "border_mass[worker %d] : quota atteint (%s anneaux) pendant la partition %d/%d, "
+                    "arret\n",
+                    worker_id, quota, done, assigned);
             break;
         }
+
+        fprintf(stderr, "border_mass[worker %d] : partition %d/%d terminee, sous-total %lld\n",
+                worker_id, done, assigned, total);
     }
     return total;
 }
