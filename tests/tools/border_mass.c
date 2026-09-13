@@ -91,6 +91,12 @@
  * `--max-rings` se lit sur 128 bits (bd_ring_count_parse) — la masse réelle
  * vaut ~10^37, et strtoll y saturait en silence.
  *
+ * `--rings-format packed6` remplace le `.back` par un format compact de
+ * 45 o/anneau (12,8x) : la rotation n'est pas stockee (la position la
+ * determine, verifie sur 3 M d'anneaux) et l'id tient sur 6 bits (60 pieces
+ * de bordure). Taille d'enregistrement FIXE, donc accès aléatoire conservé.
+ * Pas importable tel quel dans un stock — cf. tests/tools/ring_codec.h.
+ *
  * SANS `--dp` : échantillonnage par le walker. Mode par défaut à privilégier
  * — ~1 M anneaux/s ECRITS (~500 Mo/s, le disque est le facteur limitant :
  * le walker en FERME ~15 M/s), premier anneau écrit en ~1 s, aucun fichier
@@ -136,6 +142,7 @@
 #include "core/core_static_variables.h"
 #include "tools/border_walk.h"
 #include "tools/border_ring_dp.h"
+#include "tools/ring_codec.h"
 
 #define BM_MAX_FORKS 1024
 
@@ -229,6 +236,8 @@ struct bm_rings_ctx {
     long long written;
     bd_ring_count_t budget;
     int bounded;
+    int packed;                            /**< 1 = format compact packed6, 0 = `.back` */
+    const struct ring_codec_table *table;  /**< table des pièces de bordure, si `packed` */
 };
 
 /* Écrit un anneau réel (reconstruit par border_ring_reconstruct_dp, ou
@@ -248,11 +257,24 @@ struct bm_rings_ctx {
 static int bm_on_ring_found(const struct possibility_packet *ring, void *ctx_)
 {
     struct bm_rings_ctx *ctx = (struct bm_rings_ctx *)ctx_;
-    struct possibility_packet packet = *ring;
-    packet.checked = 0;
-    if (fwrite(&packet, sizeof packet, 1, ctx->file) != 1) {
-        fprintf(stderr, "border_mass : ecriture d'un anneau reconstruit impossible (disque plein ?) — arret\n");
-        exit(1);
+
+    if (ctx->packed) {
+        uint8_t buf[RING_CODEC_PACKED_BYTES];
+        if (ring_codec_pack(ring, ctx->table, buf) != 0) {
+            fprintf(stderr, "border_mass : anneau non encodable en packed6 — arret\n");
+            exit(1);
+        }
+        if (fwrite(buf, sizeof buf, 1, ctx->file) != 1) {
+            fprintf(stderr, "border_mass : ecriture d'un anneau impossible (disque plein ?) — arret\n");
+            exit(1);
+        }
+    } else {
+        struct possibility_packet packet = *ring;
+        packet.checked = 0;
+        if (fwrite(&packet, sizeof packet, 1, ctx->file) != 1) {
+            fprintf(stderr, "border_mass : ecriture d'un anneau impossible (disque plein ?) — arret\n");
+            exit(1);
+        }
     }
     if (fflush(ctx->file) != 0) {
         fprintf(stderr, "border_mass : vidage du fichier d'anneaux impossible (disque plein ?) — arret\n");
@@ -269,13 +291,14 @@ static int bm_on_ring_found(const struct possibility_packet *ring, void *ctx_)
    d'anneaux qu'un quota n'en demande — mais un trou lu comme des
    enregistrements nuls n'est pas une option (cf. le principe « aucune perte
    silencieuse » d'AGENTS.md). Retourne 0, ou -1 en cas d'échec d'E/S. */
-static int bm_rings_move_block(FILE *f, long long from, long long to, long long count)
+static int bm_rings_move_block(FILE *f, size_t hdr, size_t rec, long long from, long long to,
+                                long long count)
 {
     if (count <= 0 || from == to) {
         return 0;
     }
     enum { CHUNK = 4096 };
-    struct possibility_packet *buf = malloc(CHUNK * sizeof *buf);
+    uint8_t *buf = malloc(CHUNK * rec);
     if (buf == NULL) {
         return -1;
     }
@@ -283,10 +306,10 @@ static int bm_rings_move_block(FILE *f, long long from, long long to, long long 
     int rc = 0;
     while (moved < count) {
         size_t n = (size_t)((count - moved) < CHUNK ? (count - moved) : CHUNK);
-        if (fseeko(f, (off_t)(from + moved) * (off_t)sizeof *buf, SEEK_SET) != 0 ||
-            fread(buf, sizeof *buf, n, f) != n ||
-            fseeko(f, (off_t)(to + moved) * (off_t)sizeof *buf, SEEK_SET) != 0 ||
-            fwrite(buf, sizeof *buf, n, f) != n) {
+        if (fseeko(f, (off_t)hdr + (off_t)(from + moved) * (off_t)rec, SEEK_SET) != 0 ||
+            fread(buf, rec, n, f) != n ||
+            fseeko(f, (off_t)hdr + (off_t)(to + moved) * (off_t)rec, SEEK_SET) != 0 ||
+            fwrite(buf, rec, n, f) != n) {
             rc = -1;
             break;
         }
@@ -411,6 +434,7 @@ int main(int argc, char **argv)
     const char *save_rings_path = NULL;
     bd_ring_count_t max_rings = 0;
     int max_rings_set = 0;
+    int rings_packed = 0;   /* --rings-format packed6 */
     int argi = 1;
     /* `--dp`, `--forks N`, `--spill-dir DIR` et `--dp-max-ram-mo MO` sont des
        options indépendantes, combinables dans n'importe quel ordre — `--dp
@@ -450,7 +474,8 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argi], "--forks") == 0) {
             if (argi + 1 >= argc) {
                 fprintf(stderr,
-                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] [--save-rings FILE --max-rings N] "
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                        "[--save-rings FILE --max-rings N [--rings-format back|packed6]] "
                         "<pieces.csv> <indices.csv>\n",
                         argv[0]);
                 return 2;
@@ -468,7 +493,8 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argi], "--spill-dir") == 0) {
             if (argi + 1 >= argc) {
                 fprintf(stderr,
-                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] [--save-rings FILE --max-rings N] "
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                        "[--save-rings FILE --max-rings N [--rings-format back|packed6]] "
                         "<pieces.csv> <indices.csv>\n",
                         argv[0]);
                 return 2;
@@ -478,7 +504,8 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argi], "--dp-max-ram-mo") == 0) {
             if (argi + 1 >= argc) {
                 fprintf(stderr,
-                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] [--save-rings FILE --max-rings N] "
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                        "[--save-rings FILE --max-rings N [--rings-format back|packed6]] "
                         "<pieces.csv> <indices.csv>\n",
                         argv[0]);
                 return 2;
@@ -493,17 +520,33 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argi], "--save-rings") == 0) {
             if (argi + 1 >= argc) {
                 fprintf(stderr,
-                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] [--save-rings FILE --max-rings N] "
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                        "[--save-rings FILE --max-rings N [--rings-format back|packed6]] "
                         "<pieces.csv> <indices.csv>\n",
                         argv[0]);
                 return 2;
             }
             save_rings_path = argv[argi + 1];
             argi += 2;
+        } else if (strcmp(argv[argi], "--rings-format") == 0) {
+            if (argi + 1 >= argc) {
+                fprintf(stderr, "border_mass : --rings-format attend 'back' ou 'packed6'\n");
+                return 2;
+            }
+            if (strcmp(argv[argi + 1], "back") == 0) {
+                rings_packed = 0;
+            } else if (strcmp(argv[argi + 1], "packed6") == 0) {
+                rings_packed = 1;
+            } else {
+                fprintf(stderr, "border_mass : --rings-format attend 'back' ou 'packed6'\n");
+                return 2;
+            }
+            argi += 2;
         } else if (strcmp(argv[argi], "--max-rings") == 0) {
             if (argi + 1 >= argc) {
                 fprintf(stderr,
-                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] [--save-rings FILE --max-rings N] "
+                        "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                        "[--save-rings FILE --max-rings N [--rings-format back|packed6]] "
                         "<pieces.csv> <indices.csv>\n",
                         argv[0]);
                 return 2;
@@ -526,7 +569,8 @@ int main(int argc, char **argv)
     }
     if (argc - argi != 2) {
         fprintf(stderr,
-                "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] [--save-rings FILE --max-rings N] "
+                "usage: %s [--dp] [--forks N] [--spill-dir DIR] [--dp-max-ram-mo MO] "
+                        "[--save-rings FILE --max-rings N [--rings-format back|packed6]] "
                 "<pieces.csv> <indices.csv>\n",
                 argv[0]);
         return 2;
@@ -584,7 +628,10 @@ int main(int argc, char **argv)
                 fprintf(stderr, "border_mass : ouverture de '%s' impossible\n", save_rings_path);
                 return 1;
             }
-            struct bm_rings_ctx rings_ctx = { rings_file, 0, max_rings, 1 };
+            /* La reconstruction --dp n'ecrit qu'en `.back` : packed6 est un
+               format d'echantillonnage, et --save-rings avec --dp vise la
+               reconstruction exhaustive, donc l'import. */
+            struct bm_rings_ctx rings_ctx = { rings_file, 0, max_rings, 1, 0, NULL };
             long long delivered =
                 border_ring_reconstruct_dp(map, all, forks, max_rings, bm_on_ring_found, &rings_ctx);
             if (fclose(rings_file) != 0) {
@@ -621,12 +668,38 @@ int main(int argc, char **argv)
        lisent comme des paquets nuls, que `border_ring_validate` rejette
        bruyamment (`make check-rings`) — jamais un `.back` silencieusement
        faux. */
-    struct bm_rings_ctx expand_rings = { NULL, 0, max_rings, save_rings_path != NULL };
+    struct ring_codec_table rings_table;
+    size_t rings_rec = sizeof(struct possibility_packet);
+    size_t rings_hdr = 0;
+    if (save_rings_path != NULL && rings_packed) {
+        if (ring_codec_build_table(all, &rings_table) != 0) {
+            fprintf(stderr, "border_mass : plus de %d pieces de bordure, packed6 impossible\n",
+                    RING_CODEC_MAX_BORDER_PIECES);
+            return 1;
+        }
+        rings_rec = RING_CODEC_PACKED_BYTES;
+        rings_hdr = RING_CODEC_HEADER_BYTES;
+    }
+
+    struct bm_rings_ctx expand_rings = { NULL, 0, max_rings, save_rings_path != NULL, rings_packed,
+                                         rings_packed ? &rings_table : NULL };
     if (save_rings_path != NULL) {
         expand_rings.file = fopen(save_rings_path, "wb");
         if (expand_rings.file == NULL) {
             fprintf(stderr, "border_mass : ouverture de '%s' impossible\n", save_rings_path);
             return 1;
+        }
+        if (rings_packed) {
+            /* L'en-tête porte la table index → id : un fichier doit pouvoir
+               se relire sans supposer l'ordre qu'une version future
+               donnerait aux pièces de bordure. */
+            uint8_t hdr[RING_CODEC_HEADER_BYTES];
+            ring_codec_write_header(hdr, &rings_table);
+            if (fwrite(hdr, sizeof hdr, 1, expand_rings.file) != 1) {
+                fprintf(stderr, "border_mass : ecriture de l'en-tete de '%s' impossible\n",
+                        save_rings_path);
+                return 1;
+            }
         }
     }
 
@@ -734,7 +807,7 @@ int main(int argc, char **argv)
                de suite — le laisser appeler bm_run_worker SANS contexte
                d'anneaux lui ferait énumérer ses partitions en ENTIER, sans
                borne, donc tourner indéfiniment sur le jeu réel. */
-            struct bm_rings_ctx worker_rings = { NULL, 0, 0, 1 };
+            struct bm_rings_ctx worker_rings = { NULL, 0, 0, 1, 0, NULL };
             if (save_rings_path != NULL && quota[w] == 0) {
                 dprintf(pipes[w][1], "0\n");
                 close(pipes[w][1]);
@@ -745,9 +818,11 @@ int main(int argc, char **argv)
                 /* "r+b" : le fichier existe déjà (le parent y a écrit les
                    anneaux de l'expansion), on se place dans SA plage sans
                    toucher à celles des autres. */
+                worker_rings.packed = rings_packed;
+                worker_rings.table = rings_packed ? &rings_table : NULL;
                 worker_rings.file = fopen(save_rings_path, "r+b");
                 if (worker_rings.file == NULL ||
-                    fseeko(worker_rings.file, (off_t)offset[w] * (off_t)sizeof(struct possibility_packet),
+                    fseeko(worker_rings.file, (off_t)rings_hdr + (off_t)offset[w] * (off_t)rings_rec,
                            SEEK_SET) != 0) {
                     fprintf(stderr, "border_mass : ouverture de '%s' a l'offset du worker %d impossible\n",
                             save_rings_path, w);
@@ -824,7 +899,8 @@ int main(int argc, char **argv)
         int compacted = 0;
         for (int w = 0; w < forks; w++) {
             if (written != offset[w]) {
-                if (bm_rings_move_block(out, offset[w], written, count[w]) != 0) {
+                if (bm_rings_move_block(out, rings_hdr, rings_rec, offset[w], written,
+                                        count[w]) != 0) {
                     fprintf(stderr, "border_mass : compactage de '%s' impossible\n", save_rings_path);
                     fclose(out);
                     return 1;
@@ -834,7 +910,7 @@ int main(int argc, char **argv)
             written += count[w];
         }
         if (fflush(out) != 0 ||
-            ftruncate(fileno(out), (off_t)written * (off_t)sizeof(struct possibility_packet)) != 0 ||
+            ftruncate(fileno(out), (off_t)rings_hdr + (off_t)written * (off_t)rings_rec) != 0 ||
             fclose(out) != 0) {
             fprintf(stderr, "border_mass : finalisation de '%s' impossible (disque plein ?)\n",
                     save_rings_path);
