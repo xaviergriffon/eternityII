@@ -335,6 +335,18 @@ border-mass:
 	gcc -Wall -Wextra -std=gnu99 -O2 -Isrc -Itests $(CPPFLAGS) -Werror -pthread -o $(BORDER_MASS_BIN) \
 	    tests/tools/border_mass.c src/core/etii_search.c $(TEST_MODULES) -lm
 
+# Outil check_rings (tests/tools/) : verifie un .back d'anneaux de bordure
+# produit par `border_mass --save-rings` (coherence de chaque anneau +
+# absence de doublon), en une passe et a memoire bornee. Meme liste de
+# modules que border-mass : il partage border_walk.c, qui porte la
+# validation (border_ring_validate), elle-meme testee par `make test`.
+CHECK_RINGS_BIN := tests/tools/check_rings
+
+.PHONY: check-rings
+check-rings:
+	gcc -Wall -Wextra -std=gnu99 -O2 -Isrc -Itests $(CPPFLAGS) -Werror -pthread -o $(CHECK_RINGS_BIN) \
+	    tests/tools/check_rings.c src/core/etii_search.c $(TEST_MODULES) -lm
+
 # Fonctions pures du banc de mesure (tests/bench/bench_lib.sh) : pas de C, donc
 # hors des suites greatest, mais rattaché à `make test` pour tourner partout où
 # elles tournent (CI, make test-docker). Ni compilation ni process lancé.

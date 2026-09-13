@@ -31,6 +31,7 @@ tests/fixtures/solution16.h
 tests/bench/bench_refutation
 tests/tools/gen_root
 tests/tools/border_mass
+tests/tools/check_rings
 tests/bench/bench_refutation_gpu
 
 # Sockets Unix de l'IPC parent<->fork (supprimées à la terminaison du process,

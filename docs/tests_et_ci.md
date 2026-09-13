@@ -616,6 +616,64 @@ avant entière. Verrouillé par
 `border_walk_expand_frontier_stops_as_soon_as_on_complete_asks` et
 `border_ring_reconstruct_dp_honours_a_stopping_callback`.
 
+### Vérifier le fichier produit (`make check-rings`)
+
+```sh
+make check-rings
+tests/tools/check_rings rings.back data/pieces.csv /mnt/nvme/work 12
+```
+
+Code de sortie 0 **si et seulement si** le fichier est intègre. Deux
+questions distinctes, une seule passe :
+
+- **Cohérence** — chaque enregistrement est-il un anneau valide ? Délégué à
+  `border_ring_validate` (`tests/tools/border_walk.c`) : exactement
+  `BORDER_RING_LEN` cases posées sur le plateau et toutes celles du pourtour
+  remplies (ce qui implique l'intérieur vide sans le balayer), chaque pièce
+  utilisée une seule fois, `b_faceused` d'accord avec la grille, et toutes
+  les adjacences de couleur — fermeture du cycle comprise, plus les faces
+  nulles vers l'extérieur, qu'on obtient gratuitement puisque la convention
+  attend la couleur 0 d'un voisin hors plateau.
+- **Doublons** — deux enregistrements décrivent-ils le même anneau ?
+
+⚠️ **Ne jamais hacher un `possibility_packet` brut** pour ça : le struct a du
+padding caché, deux anneaux identiques peuvent différer sur des octets de
+bourrage, et le doublon passerait inaperçu. `check_rings` hache les
+`BORDER_RING_LEN` valeurs de grille dans l'ordre de l'anneau — l'identité de
+l'anneau, pas sa représentation mémoire.
+
+On ne peut pas garder 10⁹ empreintes en RAM, et on n'en a pas besoin : chaque
+empreinte 128 bits part dans l'un de 256 **seaux** choisis sur ses bits de
+poids fort, et deux empreintes égales tombent forcément dans le même. Les
+seaux se traitent donc un par un — tri en mémoire, balayage des adjacents.
+
+Mesuré sur le fichier de production (537 Gio, 10⁹ anneaux, 12 workers) :
+
+| | |
+|---|---|
+| Pic RAM | **239 Mo** (13 process) sur une machine de 47 Go |
+| Fichiers temporaires | 14 Go, effacés au fil des seaux |
+| Débit | 1,67 M anneaux/s, 959 Mo/s en lecture |
+| Durée | ~10 min (cohérence) + ~8 min (doublons) |
+| Verdict | 10⁹ anneaux, 0 invalide, 0 doublon |
+
+**`border_ring_validate` n'appelle PAS `check_possibility`** : sur le puzzle
+256 pièces, celle-ci exige l'indice officiel (`grid[7][8]` = pièce 139
+rotation 2, code `-6`), qu'un anneau de bordure ne pose jamais — *tout*
+anneau valide y échoue. Constaté en dur : les 100 000 premiers anneaux d'un
+fichier sain sont sortis invalides au premier essai. La boucle de couleur est
+donc reprise dans `border_walk.c`, cet ancrage en moins ; si la convention
+d'adjacence changeait dans `possibility.c`, celle-ci deviendrait fausse en
+silence, d'où un test qui valide un anneau **réellement produit par le
+walker** plutôt qu'un plateau écrit à la main.
+
+Les contre-épreuves (`border_ring_validate_catches_each_kind_of_corruption`)
+vérifient que chaque sabotage sort SON code, pas seulement « non nul » : case
+du pourtour vidée, pièce déplacée vers l'intérieur, pièce en double,
+`b_faceused` désaccordé, et — le seul que les contrôles structurels laissent
+passer — une case remplacée par une autre ROTATION de la même pièce, qui ne
+casse que les couleurs.
+
 ### Reconstruction exhaustive (`--save-rings` AVEC `--dp`)
 
 Ne se justifie que pour reconstruire *tous* les anneaux d'un jeu de pièces —

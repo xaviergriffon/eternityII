@@ -633,6 +633,97 @@ TEST border_walk_expand_frontier_stops_as_soon_as_on_complete_asks(void)
     PASS();
 }
 
+/* La validation doit accepter ce que le walker produit — et c'est la seule
+   épreuve qui vaille : un plateau écrit à la main dans le test encoderait MA
+   lecture de la convention d'adjacence, pas celle du moteur. On valide donc
+   un anneau réellement trouvé par border_walk_count. */
+TEST border_ring_validate_accepts_a_ring_produced_by_the_walker(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    struct bw_found_record rec;
+    memset(&rec, 0, sizeof rec);
+    ASSERT_EQ_FMT(4LL, border_walk_count(map, all, bw_on_found, &rec), "%lld");
+    ASSERT_EQ_FMT(4, rec.calls, "%d");
+
+    ASSERT_EQ_FMT(0, border_ring_validate(&rec.last, all), "%d");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+/* Contre-épreuves : chaque sabotage doit produire SON code, pas juste « non
+   nul ». Sans elles, une validation qui retournerait 0 en toute circonstance
+   passerait le test précédent — et un fichier de plusieurs centaines de Go
+   serait déclaré sain sans que rien ne l'ait regardé. */
+TEST border_ring_validate_catches_each_kind_of_corruption(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    struct bw_found_record rec;
+    memset(&rec, 0, sizeof rec);
+    ASSERT_EQ_FMT(4LL, border_walk_count(map, all, bw_on_found, &rec), "%lld");
+
+    int8_t order[BORDER_RING_LEN][2];
+    border_ring_order(order);
+    const int x0 = order[0][0], y0 = order[0][1];
+    const int x1 = order[1][0], y1 = order[1][1];
+
+    /* a) une case du pourtour vidée : il ne reste que 59 pièces posées. */
+    struct possibility_packet p = rec.last;
+    p.grid[x0][y0] = -2;
+    ASSERT_EQ_FMT(BORDER_RING_BAD_PLACED_COUNT, border_ring_validate(&p, all), "%d");
+
+    /* b) une pièce DÉPLACÉE du pourtour vers l'intérieur : le décompte reste
+          à BORDER_RING_LEN, donc le contrôle précédent ne voit rien — c'est
+          le trou laissé sur l'anneau qui trahit. C'est aussi la raison pour
+          laquelle border_ring_validate ne balaie pas l'intérieur : ce cas-ci
+          est le seul par lequel une case intérieure peut être posée sans que
+          le décompte ne bouge, et il est déjà couvert. */
+    p = rec.last;
+    p.grid[ETERN_SIZE / 2][ETERN_SIZE / 2] = p.grid[x0][y0];
+    p.grid[x0][y0] = -2;
+    ASSERT_EQ_FMT(BORDER_RING_BAD_EMPTY_CELL, border_ring_validate(&p, all), "%d");
+
+    /* c) une pièce de l'anneau recopiée sur une autre case : doublon. */
+    p = rec.last;
+    p.grid[x1][y1] = p.grid[x0][y0];
+    ASSERT_EQ_FMT(BORDER_RING_BAD_DUPLICATE_ID, border_ring_validate(&p, all), "%d");
+
+    /* d) `b_faceused` désaccordé de la grille. */
+    p = rec.last;
+    int base0 = ((p.grid[x0][y0] - 1) % ETERN_PARTS) + 1;
+    set_face_used(p.b_faceused, (uint16_t)(base0 - 1), 0);
+    ASSERT_EQ_FMT(BORDER_RING_BAD_FACEUSED, border_ring_validate(&p, all), "%d");
+
+    /* e) adjacence de couleur cassée : on remplace une case par une autre
+          ROTATION de la même pièce — id de base inchangé, b_faceused
+          inchangé, décompte inchangé ; seules les couleurs ne collent plus.
+          C'est le seul sabotage que les contrôles structurels laissent
+          passer, donc celui qui prouve que la boucle de couleur tourne. */
+    p = rec.last;
+    uint16_t rotated = (uint16_t)p.grid[x0][y0];
+    uint16_t base = (uint16_t)(((rotated - 1) % ETERN_PARTS) + 1);
+    uint8_t rot = (uint8_t)((rotated - base) / ETERN_PARTS);
+    p.grid[x0][y0] = (int16_t)id_for_rotated_part(base, (uint8_t)((rot + 1) % 4));
+    ASSERT_EQ_FMT(BORDER_RING_BAD_COLOR, border_ring_validate(&p, all), "%d");
+
+    /* Contre-contre-épreuve : l'anneau intact repasse, donc aucun des
+       sabotages ci-dessus n'a laissé le paquet d'origine modifié. */
+    ASSERT_EQ_FMT(0, border_ring_validate(&rec.last, all), "%d");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
 SUITE(border_walk_suite)
 {
     RUN_TEST(border_ring_order_has_the_right_length_and_starts_at_origin);
@@ -652,4 +743,6 @@ SUITE(border_walk_suite)
     RUN_TEST(border_walk_expand_frontier_exhausts_the_tree_when_target_is_too_high);
     RUN_TEST(border_walk_count_ordered_stops_as_soon_as_the_callback_asks);
     RUN_TEST(border_walk_expand_frontier_stops_as_soon_as_on_complete_asks);
+    RUN_TEST(border_ring_validate_accepts_a_ring_produced_by_the_walker);
+    RUN_TEST(border_ring_validate_catches_each_kind_of_corruption);
 }
