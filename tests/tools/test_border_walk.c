@@ -888,6 +888,76 @@ TEST ring_codec_pack_refuses_an_incomplete_ring(void)
     PASS();
 }
 
+/* Le chemin rapide (masques 64 bits) et le chemin générique (map) doivent
+   énumérer le MÊME ENSEMBLE d'anneaux. Ils n'énumèrent PAS dans le même
+   ordre — le rapide itère les pièces par index croissant via `ctz`, le
+   générique suit l'ordre du bucket de la map — donc un `--max-rings N`
+   tronqué ne donne pas le même échantillon selon le chemin. Seul le TOTAL
+   est un invariant, et c'est lui qu'on verrouille ici, sur les deux fixtures
+   (anneau unique, et multiplicité de pièces). */
+TEST border_walk_fast_and_generic_paths_agree(void)
+{
+    for (int with_ring = 0; with_ring <= 1; with_ring++) {
+        struct array_part *all = bw_make_rotate_parts(with_ring);
+        ASSERT(all != NULL);
+        map_big_array *map = prepare_map_part(all);
+        ASSERT(map != NULL);
+
+        border_walk_set_fastmap_enabled_for_tests(1);
+        long long fast = border_walk_count(map, all, NULL, NULL);
+
+        border_walk_set_fastmap_enabled_for_tests(0);
+        long long generic = border_walk_count(map, all, NULL, NULL);
+
+        border_walk_set_fastmap_enabled_for_tests(1);
+
+        ASSERT_EQ_FMT(generic, fast, "%lld");
+
+        free_bigarray(map);
+        free_array_part(all);
+    }
+    PASS();
+}
+
+/* Même exigence sur la reprise depuis un état partiel : c'est le chemin que
+   `--forks` emprunte, et `used` doit y être reconstruit à partir du plateau
+   de départ — un oubli ne se verrait pas sur un départ à plateau vide. */
+TEST border_walk_fast_and_generic_paths_agree_when_resuming(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    int8_t order[BORDER_RING_LEN][2];
+    border_ring_order(order);
+
+    struct bw_frontier_collect collect;
+    memset(&collect, 0, sizeof collect);
+    border_walk_expand_frontier(map, all, order, 3, bw_collect_partial, &collect, NULL, NULL);
+    ASSERT(collect.count > 0);
+
+    long long fast = 0, generic = 0;
+    border_walk_set_fastmap_enabled_for_tests(1);
+    for (int i = 0; i < collect.count; i++) {
+        fast += border_walk_count_ordered(map, all, order, collect.depths[i], &collect.states[i],
+                                           NULL, NULL, NULL);
+    }
+    border_walk_set_fastmap_enabled_for_tests(0);
+    for (int i = 0; i < collect.count; i++) {
+        generic += border_walk_count_ordered(map, all, order, collect.depths[i], &collect.states[i],
+                                              NULL, NULL, NULL);
+    }
+    border_walk_set_fastmap_enabled_for_tests(1);
+
+    ASSERT_EQ_FMT(generic, fast, "%lld");
+    ASSERT(fast > 0);
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
 SUITE(border_walk_suite)
 {
     RUN_TEST(border_ring_order_has_the_right_length_and_starts_at_origin);
@@ -907,6 +977,8 @@ SUITE(border_walk_suite)
     RUN_TEST(border_walk_expand_frontier_exhausts_the_tree_when_target_is_too_high);
     RUN_TEST(border_walk_count_ordered_stops_as_soon_as_the_callback_asks);
     RUN_TEST(border_walk_expand_frontier_stops_as_soon_as_on_complete_asks);
+    RUN_TEST(border_walk_fast_and_generic_paths_agree);
+    RUN_TEST(border_walk_fast_and_generic_paths_agree_when_resuming);
     RUN_TEST(border_ring_validate_accepts_a_ring_produced_by_the_walker);
     RUN_TEST(border_ring_validate_catches_each_kind_of_corruption);
     RUN_TEST(ring_codec_packs_the_ring_into_exactly_the_announced_size);

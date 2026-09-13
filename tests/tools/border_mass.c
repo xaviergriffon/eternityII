@@ -250,10 +250,17 @@ struct bm_rings_ctx {
    fatale immédiatement — jamais un fichier tronqué qui passe pour un succès
    (même principe que `bd_write_or_die`, border_ring_dp.c).
 
-   Le `fflush` par anneau est délibéré : ces runs se coupent au `kill` une
-   fois qu'on en a assez, et un tampon stdio perdu ferait finir le fichier
-   sur un enregistrement partiel — `import()` lit des blocs de taille fixe et
-   ne le détecterait pas. Le coût est invisible devant le prix d'un anneau. */
+   PAS de `fflush` par anneau : il coûtait ×15 en packed6 (0,74 M contre
+   11,4 M nœuds/s par worker, mesuré). En `.back` il ne pesait que 12 %,
+   amorti sur 576 octets ; en packed6 il porte 12,8× moins d'octets pour le
+   même nombre d'appels système, donc 12,8× plus lourd — le format compact a
+   déplacé le goulot d'étranglement sur lui.
+   La garantie qu'il achetait est conservée autrement : le tampon posé par
+   `bm_rings_setvbuf` a une taille MULTIPLE EXACTE de l'enregistrement, donc
+   tout vidage tombe sur une frontière d'enregistrement et le fichier ne peut
+   pas finir sur un anneau à moitié écrit. Ce qu'un `kill` perd désormais,
+   c'est au plus un tampon d'anneaux entiers — trou que `make check-rings`
+   signale, jamais une lecture silencieusement fausse. */
 static int bm_on_ring_found(const struct possibility_packet *ring, void *ctx_)
 {
     struct bm_rings_ctx *ctx = (struct bm_rings_ctx *)ctx_;
@@ -276,12 +283,31 @@ static int bm_on_ring_found(const struct possibility_packet *ring, void *ctx_)
             exit(1);
         }
     }
-    if (fflush(ctx->file) != 0) {
-        fprintf(stderr, "border_mass : vidage du fichier d'anneaux impossible (disque plein ?) — arret\n");
-        exit(1);
-    }
     ctx->written++;
     return (ctx->bounded && (bd_ring_count_t)ctx->written >= ctx->budget);
+}
+
+/* Tampon d'écriture dont la taille est un MULTIPLE EXACT de la taille d'un
+   enregistrement : chaque vidage tombe alors sur une frontière
+   d'enregistrement, donc le fichier ne peut jamais finir sur un anneau
+   tronqué — c'est ce qui remplace le `fflush` par anneau, ×15 plus coûteux.
+   À appeler juste après `fopen`, AVANT toute E/S sur le flux (contrainte de
+   `setvbuf`), donc avant le `fseeko` qui place un worker dans sa plage.
+   Retourne le tampon à libérer après `fclose`, ou NULL si l'allocation
+   échoue — auquel cas le flux garde son tampon par défaut, correct mais
+   lent, jamais incorrect. */
+static char *bm_rings_setvbuf(FILE *f, size_t rec)
+{
+    size_t want = (4u << 20) / rec * rec;   /* ~4 Mo, arrondi au multiple inférieur */
+    if (want == 0) {
+        want = rec;
+    }
+    char *buf = malloc(want);
+    if (buf != NULL && setvbuf(f, buf, _IOFBF, want) != 0) {
+        free(buf);
+        buf = NULL;
+    }
+    return buf;
 }
 
 /* Décale un bloc d'anneaux vers la GAUCHE dans le fichier (from > to), par
@@ -681,6 +707,7 @@ int main(int argc, char **argv)
         rings_hdr = RING_CODEC_HEADER_BYTES;
     }
 
+    char *expand_buf = NULL;
     struct bm_rings_ctx expand_rings = { NULL, 0, max_rings, save_rings_path != NULL, rings_packed,
                                          rings_packed ? &rings_table : NULL };
     if (save_rings_path != NULL) {
@@ -689,6 +716,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "border_mass : ouverture de '%s' impossible\n", save_rings_path);
             return 1;
         }
+        expand_buf = bm_rings_setvbuf(expand_rings.file, rings_rec);
         if (rings_packed) {
             /* L'en-tête porte la table index → id : un fichier doit pouvoir
                se relire sans supposer l'ordre qu'une version future
@@ -714,6 +742,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "border_mass : cloture de '%s' impossible (disque plein ?)\n", save_rings_path);
         return 1;
     }
+    free(expand_buf);
 
     fprintf(stderr, "border_mass : %d partitions, %d worker(s)\n", collect.count, forks);
 
@@ -807,6 +836,7 @@ int main(int argc, char **argv)
                de suite — le laisser appeler bm_run_worker SANS contexte
                d'anneaux lui ferait énumérer ses partitions en ENTIER, sans
                borne, donc tourner indéfiniment sur le jeu réel. */
+            char *worker_buf = NULL;
             struct bm_rings_ctx worker_rings = { NULL, 0, 0, 1, 0, NULL };
             if (save_rings_path != NULL && quota[w] == 0) {
                 dprintf(pipes[w][1], "0\n");
@@ -821,6 +851,9 @@ int main(int argc, char **argv)
                 worker_rings.packed = rings_packed;
                 worker_rings.table = rings_packed ? &rings_table : NULL;
                 worker_rings.file = fopen(save_rings_path, "r+b");
+                if (worker_rings.file != NULL) {
+                    worker_buf = bm_rings_setvbuf(worker_rings.file, rings_rec);
+                }
                 if (worker_rings.file == NULL ||
                     fseeko(worker_rings.file, (off_t)rings_hdr + (off_t)offset[w] * (off_t)rings_rec,
                            SEEK_SET) != 0) {
@@ -838,6 +871,7 @@ int main(int argc, char **argv)
                         save_rings_path);
                 exit(1);
             }
+            free(worker_buf);
             dprintf(pipes[w][1], "%lld\n", worker_rings.file != NULL ? worker_rings.written : sub);
             close(pipes[w][1]);
             exit(0);

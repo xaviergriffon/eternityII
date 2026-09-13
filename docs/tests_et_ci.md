@@ -654,6 +654,52 @@ avant entière. Verrouillé par
 `border_walk_expand_frontier_stops_as_soon_as_on_complete_asks` et
 `border_ring_reconstruct_dp_honours_a_stopping_callback`.
 
+### Optimisation du walker : masques 64 bits et écriture tamponnée
+
+Deux goulots distincts, selon qu'on **compte** la masse ou qu'on **conserve**
+les anneaux. Mesuré en nœuds/s par worker, 12 workers, `data/pieces.csv` :
+
+| Régime | Avant | Après | Gain |
+|---|---|---|---|
+| Comptage pur, sans écriture | 20,8 M | **34,6 M** | ×1,66 |
+| Écriture `packed6` | 0,74 M | **16,2 M** | **×22** |
+
+**Côté écriture : le `fflush` par anneau était le goulot**, pas le disque. À
+0,74 M nœuds/s on n'écrivait que 37 Mo/s, très loin des 100 Mo/s soutenus du
+disque : ce n'étaient pas les octets mais les ~0,8 M d'appels système par
+seconde. En `.back` ce `fflush` ne coûtait que 12 %, amorti sur 576 octets ;
+en `packed6` il porte 12,8× moins d'octets pour le même nombre d'appels, donc
+12,8× plus lourd — **le format compact avait déplacé le goulot sur lui**.
+Remplacé par un tampon (`bm_rings_setvbuf`) dont la taille est un multiple
+EXACT de l'enregistrement : tout vidage tombe alors sur une frontière
+d'enregistrement, donc le fichier ne peut pas finir sur un anneau à moitié
+écrit. Ce qu'un `kill` perd désormais, c'est au plus un tampon d'anneaux
+entiers, trou que `make check-rings` signale.
+
+**Côté recherche : toute la bordure tient dans UN mot de 64 bits.** Le jeu
+réel n'a que 60 pièces de bordure, donc l'ensemble des pièces libres est un
+`uint64_t` et l'ensemble des candidates à une case est un masque précalculé
+(`struct bw_fastmap`). Par nœud, on remplace la construction de clé
+(`what_search_in_grid_to_key`), le lookup dans la map et un `is_face_used`
+PAR CANDIDAT par deux `AND` et une boucle `__builtin_ctzll`. C'est la
+transposition du `bucket_id_mask`/popcount du moteur principal, dans un cas
+plus favorable : là-bas 256 pièces demandent 4 mots, ici 60 en demandent un.
+
+Trois masques par position d'anneau — forme compatible (`at`), face tournée
+vers le voisin précédent (`prev`), vers le suivant (`next`) — la rotation
+étant forcée par la position. Un voisin non posé n'impose rien ; la face
+intérieure reste joker, le walker ne posant jamais l'intérieur.
+
+**Le chemin rapide change l'ORDRE d'énumération, pas l'ensemble** : il itère
+les pièces par index croissant (`ctz`), le générique suit l'ordre du bucket.
+Conséquence pratique : un `--max-rings N` tronqué ne donne plus le même
+échantillon qu'avant l'optimisation. Seul le TOTAL est invariant, et c'est ce
+que verrouillent `border_walk_fast_and_generic_paths_agree` et sa variante
+« reprise depuis un état partiel » (le chemin de `--forks`, où `used` doit
+être reconstruit depuis le plateau de départ), via
+`border_walk_set_fastmap_enabled_for_tests`. Repli automatique sur le chemin
+générique si le jeu compte plus de 64 pièces de bordure.
+
 ### `--rings-format packed6` : 12,8× plus petit, accès aléatoire conservé
 
 Un `possibility_packet` pèse 576 octets alors qu'un anneau ne porte que
