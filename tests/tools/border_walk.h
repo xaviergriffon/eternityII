@@ -147,6 +147,14 @@ long long border_walk_count(map_big_array *map,
                              border_ring_found_cb on_found, void *ctx);
 
 /**
+ * @brief Test-only : désactive le chemin rapide (masques 64 bits) pour forcer
+ * le chemin générique par la map. Jamais appelé en production — sert à
+ * comparer les deux implémentations sur le même jeu de pièces
+ * (`border_walk_fast_and_generic_paths_agree`).
+ */
+void border_walk_set_fastmap_enabled_for_tests(int enabled);
+
+/**
  * @brief Codes de retour de `border_ring_validate` — tous < 0, 0 valant
  * « anneau valide ». Distincts les uns des autres pour qu'un diagnostic sur
  * un fichier de plusieurs centaines de Go dise QUOI est cassé, pas seulement
