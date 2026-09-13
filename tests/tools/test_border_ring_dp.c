@@ -249,6 +249,66 @@ static struct array_part *brd_make_rotate_parts_no_border_piece(void)
     return rot;
 }
 
+/* `--max-rings` doit pouvoir viser la masse RÉELLE (~3,8x10^37), 19 ordres
+   de grandeur au-dessus d'un `long long`. La régression que ce test
+   verrouille est silencieuse par nature : `strtoll`/`strtoull` saturent à
+   leur maximum ET rendent une valeur d'apparence valide, donc un plafond
+   énorme devenait un plafond ~10^19 fois plus petit sans le moindre message.
+   L'aller-retour parse -> format est la seule vérification qui ne peut pas
+   passer sur une valeur tronquée. */
+TEST bd_ring_count_parse_round_trips_values_far_beyond_64_bits(void)
+{
+    static const char *const values[] = {
+        "0",
+        "1",
+        "18446744073709551615",                     /* 2^64-1 : dernière valeur qu'un strtoull rend juste */
+        "18446744073709551616",                     /* 2^64   : la première qu'il saturerait */
+        "38000000000000000000000000000000000000",   /* ~3,8x10^37, l'estimation de la masse réelle */
+        "340282366920938463463374607431768211455",  /* 2^128-1, le maximum représentable */
+    };
+
+    for (size_t i = 0; i < sizeof values / sizeof values[0]; i++) {
+        bd_ring_count_t parsed = 0;
+        ASSERT_EQ_FMT(0, bd_ring_count_parse(values[i], &parsed), "%d");
+
+        char back[BD_RING_COUNT_STRLEN];
+        bd_ring_count_format(parsed, back, sizeof back);
+        ASSERT_STR_EQ(values[i], back);
+    }
+    PASS();
+}
+
+/* Une valeur d'option est exacte ou refusée, jamais tronquée à son préfixe
+   numérique comme le ferait `strtoull` (qui accepte « 12a » en rendant 12, et
+   « -1 » en rendant un très grand non signé). */
+TEST bd_ring_count_parse_rejects_anything_that_is_not_a_plain_decimal(void)
+{
+    static const char *const bad[] = {
+        "",
+        " 12",
+        "12 ",
+        "12a",
+        "-1",
+        "+1",
+        "0x10",
+        "1e9",
+        "340282366920938463463374607431768211456", /* 2^128, débordement d'un cran */
+        "999999999999999999999999999999999999999999",
+    };
+
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        bd_ring_count_t parsed = 12345;
+        ASSERT_EQ_FMT(-1, bd_ring_count_parse(bad[i], &parsed), "%d");
+        /* Rejet = sortie intacte : l'appelant ne doit pas hériter d'un
+           plafond a moitié lu. */
+        ASSERT(parsed == (bd_ring_count_t)12345);
+    }
+
+    bd_ring_count_t parsed = 0;
+    ASSERT_EQ_FMT(-1, bd_ring_count_parse(NULL, &parsed), "%d");
+    PASS();
+}
+
 TEST border_ring_count_dp_returns_zero_without_any_border_shaped_piece(void)
 {
     struct array_part *all = brd_make_rotate_parts_no_border_piece();
@@ -630,7 +690,7 @@ struct brd_recon_ctx {
     int cap;
 };
 
-static void brd_on_ring_found(const struct possibility_packet *ring, void *ctx_)
+static int brd_on_ring_found(const struct possibility_packet *ring, void *ctx_)
 {
     struct brd_recon_ctx *ctx = (struct brd_recon_ctx *)ctx_;
     if (ctx->count == ctx->cap) {
@@ -638,6 +698,7 @@ static void brd_on_ring_found(const struct possibility_packet *ring, void *ctx_)
         ctx->found = realloc(ctx->found, (size_t)ctx->cap * sizeof *ctx->found);
     }
     ctx->found[ctx->count++] = *ring;
+    return 0;
 }
 
 /* Le total réel reconstruit (border_ring_reconstruct_dp) doit correspondre
@@ -669,6 +730,46 @@ TEST border_ring_reconstruct_dp_matches_count_on_a_unique_ring(void)
     }
 
     free(ctx.found);
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+/* Un callback qui demande l'arrêt tronque la reconstruction SANS déclencher
+   le garde-fou « reconstruction incomplete » (qui fait exit(1), donc ferait
+   mourir le binaire de test — l'assertion de comptage ci-dessous n'est
+   atteinte que si le garde-fou s'est bien tu). Même raisonnement que
+   `max_rings` : une troncature demandée n'est pas une reconstruction ratée.
+   Le fixture porte 4 anneaux ; on coupe au 2e. */
+struct brd_stop_ctx {
+    int calls;
+    int stop_after;
+};
+
+static int brd_on_ring_found_stopping(const struct possibility_packet *ring, void *ctx_)
+{
+    struct brd_stop_ctx *ctx = (struct brd_stop_ctx *)ctx_;
+    (void)ring;
+    ctx->calls++;
+    return ctx->calls >= ctx->stop_after;
+}
+
+TEST border_ring_reconstruct_dp_honours_a_stopping_callback(void)
+{
+    struct array_part *all = brd_make_rotate_parts(0);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    struct brd_stop_ctx ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.stop_after = 2;
+
+    long long delivered = border_ring_reconstruct_dp(map, all, 1, 1000, brd_on_ring_found_stopping, &ctx);
+
+    ASSERT_EQ_FMT(2LL, delivered, "%lld");
+    ASSERT_EQ_FMT(2, ctx.calls, "%d");
+
     free_bigarray(map);
     free_array_part(all);
     PASS();
@@ -784,6 +885,8 @@ TEST border_ring_reconstruct_dp_stops_at_max_rings(void)
 
 SUITE(border_ring_dp_suite)
 {
+    RUN_TEST(bd_ring_count_parse_round_trips_values_far_beyond_64_bits);
+    RUN_TEST(bd_ring_count_parse_rejects_anything_that_is_not_a_plain_decimal);
     RUN_TEST(border_ring_count_dp_returns_zero_without_any_border_shaped_piece);
     RUN_TEST(border_ring_count_dp_matches_border_walk_count_on_a_unique_ring);
     RUN_TEST(border_ring_count_dp_counts_class_multiplicity_correctly);
@@ -799,6 +902,7 @@ SUITE(border_ring_dp_suite)
     RUN_TEST(border_ring_count_dp_matches_brute_force_across_several_merge_rounds);
 
     RUN_TEST(border_ring_reconstruct_dp_matches_count_on_a_unique_ring);
+    RUN_TEST(border_ring_reconstruct_dp_honours_a_stopping_callback);
     RUN_TEST(border_ring_reconstruct_dp_expands_class_multiplicity_to_all_real_rings);
     RUN_TEST(border_ring_reconstruct_dp_matches_count_when_levels_live_on_disk);
     RUN_TEST(border_ring_reconstruct_dp_stops_at_max_rings);

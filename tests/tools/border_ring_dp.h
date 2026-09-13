@@ -110,6 +110,23 @@ typedef unsigned __int128 bd_ring_count_t;
 void bd_ring_count_format(bd_ring_count_t value, char *buf, size_t buflen);
 
 /**
+ * @brief Lit un `bd_ring_count_t` depuis une chaîne décimale — pendant de
+ * `bd_ring_count_format`, et seul moyen sûr de saisir une valeur dépassant
+ * 64 bits (`strtoull` sature à `ULLONG_MAX` sans que rien ne le signale à un
+ * appelant qui ne relit pas `errno`).
+ *
+ * N'accepte QUE des chiffres décimaux : ni signe, ni espace, ni suffixe —
+ * une valeur d'option doit être exacte ou refusée, jamais tronquée à son
+ * préfixe numérique comme le ferait `strtoull`.
+ *
+ * @param s   Chaîne à lire (non NULL, non vide).
+ * @param out Reçoit la valeur si et seulement si la lecture réussit.
+ * @return    0 si la chaîne est un entier décimal représentable sur 128 bits,
+ *            -1 sinon (vide, caractère non décimal, ou débordement).
+ */
+int bd_ring_count_parse(const char *s, bd_ring_count_t *out);
+
+/**
  * @brief Calcule la masse totale des anneaux de bordure valides, EXACTEMENT
  * (même définition et même résultat que `border_walk_count`), par
  * programmation dynamique sur les classes de pièces interchangeables.
@@ -237,6 +254,6 @@ void border_ring_dp_set_max_ram_mo(long mo);
  * @return                 Nombre total d'anneaux réels délivrés.
  */
 long long border_ring_reconstruct_dp(map_big_array *map, struct array_part *all_rotate_parts, int nb_workers,
-                                      long long max_rings, border_ring_found_cb on_found, void *ctx);
+                                      bd_ring_count_t max_rings, border_ring_found_cb on_found, void *ctx);
 
 #endif /* eternityII_border_ring_dp_h */

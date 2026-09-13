@@ -85,12 +85,17 @@ struct bw_ctx {
    comprise. Un signal en pré-ordre raterait de peu le nœud qui vient de
    fermer le dernier anneau : `ctx->count` n'y serait pas encore incrémenté
    au moment de l'appel. */
-static void bw_dfs(struct bw_ctx *ctx, int i)
+/* Retourne non nul si `on_found` a demandé l'arrêt : l'appelant doit alors
+   remonter sans essayer le moindre candidat suivant. L'état du plateau
+   (`ctx->state`) reste celui de l'anneau qui a déclenché l'arrêt — on ne
+   défait pas les placements en remontant, personne ne le relit après. */
+static int bw_dfs(struct bw_ctx *ctx, int i)
 {
+    int stop = 0;
     if (i == BORDER_RING_LEN) {
         ctx->count++;
         if (ctx->on_found != NULL) {
-            ctx->on_found(&ctx->state, ctx->user_ctx);
+            stop = (ctx->on_found(&ctx->state, ctx->user_ctx) != 0);
         }
     } else {
         int8_t x = ctx->order[i][0];
@@ -115,11 +120,15 @@ static void bw_dfs(struct bw_ctx *ctx, int i)
             set_face_used(ctx->state.b_faceused, face_idx, 1);
             ctx->state.alloc = (uint16_t)(i + 1);
 
-            bw_dfs(ctx, i + 1);
+            stop = bw_dfs(ctx, i + 1);
 
             set_face_used(ctx->state.b_faceused, face_idx, 0);
             ctx->state.grid[x][y] = -2;
             ctx->state.alloc = (uint16_t)i;
+
+            if (stop) {
+                break;
+            }
         }
     }
 
@@ -131,6 +140,7 @@ static void bw_dfs(struct bw_ctx *ctx, int i)
             ctx->progress->on_progress(ctx->nodes, ctx->count, ctx->progress->ctx);
         }
     }
+    return stop;
 }
 
 long long border_walk_count_ordered(map_big_array *map,
@@ -165,7 +175,7 @@ long long border_walk_count_ordered(map_big_array *map,
     bw.progress_since_last = 0;
     bw.progress = progress;
 
-    bw_dfs(&bw, start_depth);
+    (void)bw_dfs(&bw, start_depth);
     return bw.count;
 }
 
@@ -200,8 +210,9 @@ long long border_walk_expand_frontier(map_big_array *map,
 
     long long completed = 0;
     int depth = 0;
+    int stop = 0;
 
-    while (level_size < target_partitions && depth < BORDER_RING_LEN) {
+    while (!stop && level_size < target_partitions && depth < BORDER_RING_LEN) {
         int8_t x = order[depth][0];
         int8_t y = order[depth][1];
 
@@ -209,7 +220,7 @@ long long border_walk_expand_frontier(map_big_array *map,
         int next_size = 0;
         int next_cap = 0;
 
-        for (int e = 0; e < level_size; e++) {
+        for (int e = 0; e < level_size && !stop; e++) {
             struct possibility_packet *base = &level[e];
             key_part key;
             what_search_in_grid_to_key(all_rotate_parts, base, x, y, &key, (int8_t)map->sizearrayM);
@@ -232,8 +243,9 @@ long long border_walk_expand_frontier(map_big_array *map,
 
                 if (depth + 1 == BORDER_RING_LEN) {
                     completed++;
-                    if (on_complete != NULL) {
-                        on_complete(&child, complete_ctx);
+                    if (on_complete != NULL && on_complete(&child, complete_ctx) != 0) {
+                        stop = 1;
+                        break;
                     }
                     continue;
                 }
@@ -256,7 +268,10 @@ long long border_walk_expand_frontier(map_big_array *map,
         }
     }
 
-    if (on_partial != NULL) {
+    /* Arrêt demandé : aucun état partiel n'est livré. Les distribuer quand
+       même ferait repartir des workers sur un travail dont l'appelant vient
+       précisément de dire qu'il n'en voulait plus. */
+    if (on_partial != NULL && !stop) {
         for (int e = 0; e < level_size; e++) {
             on_partial(&level[e], depth, partial_ctx);
         }

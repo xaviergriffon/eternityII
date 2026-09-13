@@ -22,9 +22,11 @@ comme racines `.back` injectables dans le stock normal.
   termine pas en temps raisonnable sur le jeu réel (256 pièces).
 - **Parallélisation par forks** (`--forks N`, ordre « coins d'abord » +
   expansion en largeur de la frontière) : accélère mais ne suffit pas non
-  plus à terminer sur le jeu réel — une seule partition peut dépasser
-  33 milliards d'anneaux trouvés sans se clore, faute d'heuristique
-  d'élagage (le walker n'utilise ni MRV ni forward-check, par choix).
+  plus à terminer sur le jeu réel, faute d'heuristique d'élagage (le walker
+  n'utilise ni MRV ni forward-check, par choix). Mesure du 13/09/2026,
+  43 s sur 8 workers : 6,4 × 10⁹ nœuds, **6,4 × 10⁸ anneaux fermés**
+  (un anneau tous les ~10 nœuds). Ne pas confondre « ne termine pas » et
+  « ne produit rien » : c'est ce débit qui rend l'échantillonnage viable.
 - **`--dp`** (`tests/tools/border_ring_dp.c`) : algorithme différent et exact
   — regroupe les pièces de bord interchangeables en classes (couleur
   d'entrée/sortie ordonnée) et calcule niveau par niveau le nombre de façons
@@ -58,10 +60,43 @@ uniforme de circuits eulériens donne la fraction de ceux dont les 4 coins
 tombent aux positions 0/15/30/45 (2,73 × 10⁻⁵ sur 9 M tirages).
 
 Conséquence pour le sous-projet 2 (reconstruire les anneaux comme racines
-`.back`) : avec ~10³⁷ anneaux, la population n'est pas exploitable comme jeu
-de racines — `--max-rings 10⁹` en échantillonnerait 10⁻²⁸. Le chiffre exact
-garde un intérêt propre, mais la décision qu'il devait éclairer est déjà
-tranchée par sa borne.
+`.back`) : avec ~10³⁷ anneaux, la population n'est pas *exhaustible* comme
+jeu de racines — `--max-rings 10⁹` en échantillonnerait 10⁻²⁸. Le chiffre
+exact garde un intérêt propre, mais la décision qu'il devait éclairer est
+déjà tranchée par sa borne.
+
+## Échantillonner plutôt que reconstruire (13/09/2026)
+
+`--save-rings` a d'abord été câblé sur `--dp` seul, au motif que « le DFS
+brut est trop lent pour reconstruire les anneaux réels ». Vrai pour
+l'énumération EXHAUSTIVE, faux pour un échantillon — et c'est l'échantillon
+qu'on veut. Le refus a été levé : `--save-rings` sans `--dp` produit
+**10⁶ anneaux en 0,94 s** (8 forks), là où la voie `--dp` demande ~31 h et
+~537 Go avant de livrer le premier (un run de production a été arrêté à
+18 h 41, position 26/59 de sa deuxième passe avant, `rings.bin` encore vide).
+
+Attention à ne pas surestimer ce débit, comme la première rédaction de cette
+section le faisait : le walker FERME ~15 M anneaux/s, mais en écrire est 17×
+plus lent — **~1 M/s, ~500 Mo/s, borné par le disque**. Le chiffre à citer
+pour `--save-rings` est le second.
+
+Deux mesures ont écarté les objections à cet échantillon :
+
+- **« les anneaux se ressembleront tous »** — faux : sur 10⁶ anneaux
+  consécutifs, 10⁶ **frontières intérieures distinctes**, zéro doublon. La
+  classe d'une pièce de bord ne retient que ses deux faces adjacentes sur
+  l'anneau ; sa face intérieure — la seule que voit la recherche intérieure —
+  n'y entre pas.
+- **« le motif de couleurs, lui, se répète »** — vrai (~500 anneaux par motif
+  de classes en séquentiel, ~17 en étalant sur 270 partitions), mais c'est
+  une métrique portant sur des faces que la recherche intérieure ne consulte
+  jamais. Elle a été mesurée puis écartée comme critère : ne pas la
+  reproposer sans revenir à ce paragraphe.
+
+La conséquence sur l'outil : `--max-rings` borne désormais le TRAVAIL et pas
+seulement la sortie, via une valeur de retour d'arrêt sur
+`border_ring_found_cb` qui remonte `bw_dfs`, l'expansion de frontière et la
+boucle des coins d'ouverture du DP.
 
 ## Arbitrages qui restent valables
 
