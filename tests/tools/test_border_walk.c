@@ -8,6 +8,7 @@
 #include "greatest.h"
 
 #include "tools/border_walk.h"
+#include "tools/ring_codec.h"
 #include "core/core_static_variables.h"
 #include "core/readdata.h"
 
@@ -633,6 +634,330 @@ TEST border_walk_expand_frontier_stops_as_soon_as_on_complete_asks(void)
     PASS();
 }
 
+/* La validation doit accepter ce que le walker produit — et c'est la seule
+   épreuve qui vaille : un plateau écrit à la main dans le test encoderait MA
+   lecture de la convention d'adjacence, pas celle du moteur. On valide donc
+   un anneau réellement trouvé par border_walk_count. */
+TEST border_ring_validate_accepts_a_ring_produced_by_the_walker(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    struct bw_found_record rec;
+    memset(&rec, 0, sizeof rec);
+    ASSERT_EQ_FMT(4LL, border_walk_count(map, all, bw_on_found, &rec), "%lld");
+    ASSERT_EQ_FMT(4, rec.calls, "%d");
+
+    ASSERT_EQ_FMT(0, border_ring_validate(&rec.last, all), "%d");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+/* Contre-épreuves : chaque sabotage doit produire SON code, pas juste « non
+   nul ». Sans elles, une validation qui retournerait 0 en toute circonstance
+   passerait le test précédent — et un fichier de plusieurs centaines de Go
+   serait déclaré sain sans que rien ne l'ait regardé. */
+TEST border_ring_validate_catches_each_kind_of_corruption(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    struct bw_found_record rec;
+    memset(&rec, 0, sizeof rec);
+    ASSERT_EQ_FMT(4LL, border_walk_count(map, all, bw_on_found, &rec), "%lld");
+
+    int8_t order[BORDER_RING_LEN][2];
+    border_ring_order(order);
+    const int x0 = order[0][0], y0 = order[0][1];
+    const int x1 = order[1][0], y1 = order[1][1];
+
+    /* a) une case du pourtour vidée : il ne reste que 59 pièces posées. */
+    struct possibility_packet p = rec.last;
+    p.grid[x0][y0] = -2;
+    ASSERT_EQ_FMT(BORDER_RING_BAD_PLACED_COUNT, border_ring_validate(&p, all), "%d");
+
+    /* b) une pièce DÉPLACÉE du pourtour vers l'intérieur : le décompte reste
+          à BORDER_RING_LEN, donc le contrôle précédent ne voit rien — c'est
+          le trou laissé sur l'anneau qui trahit. C'est aussi la raison pour
+          laquelle border_ring_validate ne balaie pas l'intérieur : ce cas-ci
+          est le seul par lequel une case intérieure peut être posée sans que
+          le décompte ne bouge, et il est déjà couvert. */
+    p = rec.last;
+    p.grid[ETERN_SIZE / 2][ETERN_SIZE / 2] = p.grid[x0][y0];
+    p.grid[x0][y0] = -2;
+    ASSERT_EQ_FMT(BORDER_RING_BAD_EMPTY_CELL, border_ring_validate(&p, all), "%d");
+
+    /* c) une pièce de l'anneau recopiée sur une autre case : doublon. */
+    p = rec.last;
+    p.grid[x1][y1] = p.grid[x0][y0];
+    ASSERT_EQ_FMT(BORDER_RING_BAD_DUPLICATE_ID, border_ring_validate(&p, all), "%d");
+
+    /* d) `b_faceused` désaccordé de la grille. */
+    p = rec.last;
+    int base0 = ((p.grid[x0][y0] - 1) % ETERN_PARTS) + 1;
+    set_face_used(p.b_faceused, (uint16_t)(base0 - 1), 0);
+    ASSERT_EQ_FMT(BORDER_RING_BAD_FACEUSED, border_ring_validate(&p, all), "%d");
+
+    /* e) adjacence de couleur cassée : on remplace une case par une autre
+          ROTATION de la même pièce — id de base inchangé, b_faceused
+          inchangé, décompte inchangé ; seules les couleurs ne collent plus.
+          C'est le seul sabotage que les contrôles structurels laissent
+          passer, donc celui qui prouve que la boucle de couleur tourne. */
+    p = rec.last;
+    uint16_t rotated = (uint16_t)p.grid[x0][y0];
+    uint16_t base = (uint16_t)(((rotated - 1) % ETERN_PARTS) + 1);
+    uint8_t rot = (uint8_t)((rotated - base) / ETERN_PARTS);
+    p.grid[x0][y0] = (int16_t)id_for_rotated_part(base, (uint8_t)((rot + 1) % 4));
+    ASSERT_EQ_FMT(BORDER_RING_BAD_COLOR, border_ring_validate(&p, all), "%d");
+
+    /* Contre-contre-épreuve : l'anneau intact repasse, donc aucun des
+       sabotages ci-dessus n'a laissé le paquet d'origine modifié. */
+    ASSERT_EQ_FMT(0, border_ring_validate(&rec.last, all), "%d");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+/* ---------------------------------------------------------------------------
+ * Format compact « packed6 » (tests/tools/ring_codec.c) — testé ici parce
+ * qu'il sérialise exactement l'objet de ce fichier, et pour réutiliser
+ * `bw_make_rotate_parts` plutôt que d'en recopier une variante.
+ *
+ * L'enjeu : ce format JETTE de l'information (la rotation de chaque pièce,
+ * et tout ce qui n'est pas le pourtour). Si cette information n'était pas
+ * réellement redondante, la perte serait silencieuse — un fichier relu
+ * donnerait des anneaux plausibles mais faux.
+ */
+
+TEST ring_codec_packs_the_ring_into_exactly_the_announced_size(void)
+{
+    /* 6 bits par case, arrondi à l'octet supérieur. La taille doit rester
+       une CONSTANTE connue : c'est d'elle que dépend l'accès aléatoire
+       (offset = en-tête + n × taille). */
+    ASSERT_EQ_FMT((BORDER_RING_LEN * 6 + 7) / 8, RING_CODEC_PACKED_BYTES, "%d");
+    PASS();
+}
+
+/* Deux cases voisines partagent des octets : une erreur de décalage d'un bit
+   corromprait un VOISIN sans toucher la case visée. On écrit donc des index
+   qui changent à chaque case et on relit les 60. */
+TEST ring_codec_bit_packing_round_trips_every_slot(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    struct ring_codec_table table;
+    ASSERT_EQ_FMT(0, ring_codec_build_table(all, &table), "%d");
+    ASSERT(table.count > 0);
+
+    int8_t order[BORDER_RING_LEN][2];
+    border_ring_order(order);
+
+    struct possibility_packet ring;
+    memset(&ring, 0, sizeof ring);
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            ring.grid[x][y] = -2;
+        }
+    }
+    for (int i = 0; i < BORDER_RING_LEN; i++) {
+        ring.grid[order[i][0]][order[i][1]] = (int16_t)table.id[i % table.count];
+    }
+
+    uint8_t buf[RING_CODEC_PACKED_BYTES];
+    ASSERT_EQ_FMT(0, ring_codec_pack(&ring, &table, buf), "%d");
+
+    struct possibility_packet back;
+    ASSERT_EQ_FMT(0, ring_codec_unpack(buf, &table, all, &back), "%d");
+    for (int i = 0; i < BORDER_RING_LEN; i++) {
+        int got = ((back.grid[order[i][0]][order[i][1]] - 1) % ETERN_PARTS) + 1;
+        ASSERT_EQ_FMT((int)table.id[i % table.count], got, "%d");
+    }
+
+    free_array_part(all);
+    PASS();
+}
+
+/* L'épreuve qui décide du format : un anneau RÉEL du walker doit survivre à
+   l'aller-retour, case par case, ROTATIONS COMPRISES — alors que la rotation
+   n'est écrite nulle part. C'est la démonstration que la position la
+   détermine. Si ce n'était pas vrai, la pièce reviendrait dans une autre
+   orientation et la comparaison échouerait ici. */
+TEST ring_codec_round_trips_a_real_ring_without_storing_the_rotation(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    struct ring_codec_table table;
+    ASSERT_EQ_FMT(0, ring_codec_build_table(all, &table), "%d");
+
+    struct bw_found_record rec;
+    memset(&rec, 0, sizeof rec);
+    ASSERT_EQ_FMT(4LL, border_walk_count(map, all, bw_on_found, &rec), "%lld");
+
+    uint8_t buf[RING_CODEC_PACKED_BYTES];
+    ASSERT_EQ_FMT(0, ring_codec_pack(&rec.last, &table, buf), "%d");
+
+    struct possibility_packet back;
+    ASSERT_EQ_FMT(0, ring_codec_unpack(buf, &table, all, &back), "%d");
+
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            ASSERT_EQ_FMT((int)rec.last.grid[x][y], (int)back.grid[x][y], "%d");
+        }
+    }
+    /* Et le plateau reconstruit est un anneau valide à part entière —
+       b_faceused et alloc reconstitués compris. */
+    ASSERT_EQ_FMT(0, border_ring_validate(&back, all), "%d");
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
+/* Un fichier d'un AUTRE format ne doit jamais être accepté : un `.back` relu
+   comme du packed6 donnerait des anneaux absurdes sans que rien ne le dise. */
+TEST ring_codec_header_round_trips_and_rejects_foreign_files(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    struct ring_codec_table table;
+    ASSERT_EQ_FMT(0, ring_codec_build_table(all, &table), "%d");
+
+    uint8_t hdr[RING_CODEC_HEADER_BYTES];
+    ring_codec_write_header(hdr, &table);
+
+    struct ring_codec_table back;
+    ASSERT_EQ_FMT(0, ring_codec_read_header(hdr, &back), "%d");
+    ASSERT_EQ_FMT(table.count, back.count, "%d");
+    for (int i = 0; i < table.count; i++) {
+        ASSERT_EQ_FMT((int)table.id[i], (int)back.id[i], "%d");
+        ASSERT_EQ_FMT(i, (int)back.index_of[table.id[i]], "%d");
+    }
+
+    uint8_t corrupt[RING_CODEC_HEADER_BYTES];
+
+    memset(corrupt, 0, sizeof corrupt);                      /* magie absente */
+    ASSERT_EQ_FMT(-1, ring_codec_read_header(corrupt, &back), "%d");
+
+    memcpy(corrupt, hdr, sizeof corrupt);                    /* version future */
+    corrupt[8] = (uint8_t)(RING_CODEC_VERSION + 1);
+    ASSERT_EQ_FMT(-1, ring_codec_read_header(corrupt, &back), "%d");
+
+    memcpy(corrupt, hdr, sizeof corrupt);                    /* autre géométrie */
+    corrupt[10] = (uint8_t)(ETERN_SIZE + 1);
+    ASSERT_EQ_FMT(-1, ring_codec_read_header(corrupt, &back), "%d");
+
+    memcpy(corrupt, hdr, sizeof corrupt);                    /* table vide */
+    corrupt[16] = 0;
+    corrupt[17] = 0;
+    ASSERT_EQ_FMT(-1, ring_codec_read_header(corrupt, &back), "%d");
+
+    free_array_part(all);
+    PASS();
+}
+
+/* Un plateau incomplet doit être REFUSÉ, pas encodé en un enregistrement de
+   zéros qui passerait ensuite pour un anneau valide. */
+TEST ring_codec_pack_refuses_an_incomplete_ring(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    struct ring_codec_table table;
+    ASSERT_EQ_FMT(0, ring_codec_build_table(all, &table), "%d");
+
+    struct possibility_packet ring;
+    memset(&ring, 0, sizeof ring);
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            ring.grid[x][y] = -2;
+        }
+    }
+    uint8_t buf[RING_CODEC_PACKED_BYTES];
+    ASSERT_EQ_FMT(-1, ring_codec_pack(&ring, &table, buf), "%d");
+
+    free_array_part(all);
+    PASS();
+}
+
+/* Le chemin rapide (masques 64 bits) et le chemin générique (map) doivent
+   énumérer le MÊME ENSEMBLE d'anneaux. Ils n'énumèrent PAS dans le même
+   ordre — le rapide itère les pièces par index croissant via `ctz`, le
+   générique suit l'ordre du bucket de la map — donc un `--max-rings N`
+   tronqué ne donne pas le même échantillon selon le chemin. Seul le TOTAL
+   est un invariant, et c'est lui qu'on verrouille ici, sur les deux fixtures
+   (anneau unique, et multiplicité de pièces). */
+TEST border_walk_fast_and_generic_paths_agree(void)
+{
+    for (int with_ring = 0; with_ring <= 1; with_ring++) {
+        struct array_part *all = bw_make_rotate_parts(with_ring);
+        ASSERT(all != NULL);
+        map_big_array *map = prepare_map_part(all);
+        ASSERT(map != NULL);
+
+        border_walk_set_fastmap_enabled_for_tests(1);
+        long long fast = border_walk_count(map, all, NULL, NULL);
+
+        border_walk_set_fastmap_enabled_for_tests(0);
+        long long generic = border_walk_count(map, all, NULL, NULL);
+
+        border_walk_set_fastmap_enabled_for_tests(1);
+
+        ASSERT_EQ_FMT(generic, fast, "%lld");
+
+        free_bigarray(map);
+        free_array_part(all);
+    }
+    PASS();
+}
+
+/* Même exigence sur la reprise depuis un état partiel : c'est le chemin que
+   `--forks` emprunte, et `used` doit y être reconstruit à partir du plateau
+   de départ — un oubli ne se verrait pas sur un départ à plateau vide. */
+TEST border_walk_fast_and_generic_paths_agree_when_resuming(void)
+{
+    struct array_part *all = bw_make_rotate_parts(1);
+    ASSERT(all != NULL);
+    map_big_array *map = prepare_map_part(all);
+    ASSERT(map != NULL);
+
+    int8_t order[BORDER_RING_LEN][2];
+    border_ring_order(order);
+
+    struct bw_frontier_collect collect;
+    memset(&collect, 0, sizeof collect);
+    border_walk_expand_frontier(map, all, order, 3, bw_collect_partial, &collect, NULL, NULL);
+    ASSERT(collect.count > 0);
+
+    long long fast = 0, generic = 0;
+    border_walk_set_fastmap_enabled_for_tests(1);
+    for (int i = 0; i < collect.count; i++) {
+        fast += border_walk_count_ordered(map, all, order, collect.depths[i], &collect.states[i],
+                                           NULL, NULL, NULL);
+    }
+    border_walk_set_fastmap_enabled_for_tests(0);
+    for (int i = 0; i < collect.count; i++) {
+        generic += border_walk_count_ordered(map, all, order, collect.depths[i], &collect.states[i],
+                                              NULL, NULL, NULL);
+    }
+    border_walk_set_fastmap_enabled_for_tests(1);
+
+    ASSERT_EQ_FMT(generic, fast, "%lld");
+    ASSERT(fast > 0);
+
+    free_bigarray(map);
+    free_array_part(all);
+    PASS();
+}
+
 SUITE(border_walk_suite)
 {
     RUN_TEST(border_ring_order_has_the_right_length_and_starts_at_origin);
@@ -652,4 +977,13 @@ SUITE(border_walk_suite)
     RUN_TEST(border_walk_expand_frontier_exhausts_the_tree_when_target_is_too_high);
     RUN_TEST(border_walk_count_ordered_stops_as_soon_as_the_callback_asks);
     RUN_TEST(border_walk_expand_frontier_stops_as_soon_as_on_complete_asks);
+    RUN_TEST(border_walk_fast_and_generic_paths_agree);
+    RUN_TEST(border_walk_fast_and_generic_paths_agree_when_resuming);
+    RUN_TEST(border_ring_validate_accepts_a_ring_produced_by_the_walker);
+    RUN_TEST(border_ring_validate_catches_each_kind_of_corruption);
+    RUN_TEST(ring_codec_packs_the_ring_into_exactly_the_announced_size);
+    RUN_TEST(ring_codec_bit_packing_round_trips_every_slot);
+    RUN_TEST(ring_codec_round_trips_a_real_ring_without_storing_the_rotation);
+    RUN_TEST(ring_codec_header_round_trips_and_rejects_foreign_files);
+    RUN_TEST(ring_codec_pack_refuses_an_incomplete_ring);
 }

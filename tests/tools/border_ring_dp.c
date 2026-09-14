@@ -386,6 +386,91 @@ struct bd_entry {
 
 typedef char bd_entry_is_32_bytes[sizeof(struct bd_entry) == 32 ? 1 : -1];
 
+/* ---------------------------------------------------------------------------
+ * Forme SUR DISQUE d'une entrée — 24 octets au lieu de 32 quand la clé tient
+ * en 64 bits.
+ *
+ * En RAM une entrée reste un `struct bd_entry` de 32 octets (clé 128 bits +
+ * valeur 128 bits) : la clé garde sa largeur pour que TOUT jeu de pièces
+ * reste calculable, y compris les fixtures de test synthétiques qui demandent
+ * 68 bits (60 pièces de bordure toutes de classes distinctes = 60 bits
+ * incompressibles, plus la couleur). Mais `data/pieces.csv` n'en demande que
+ * 59, et dans ce cas les 8 octets de poids fort de la clé sont TOUJOURS nuls
+ * — les écrire est du gaspillage pur.
+ *
+ * Pourquoi ça vaut le détour : la DP est étranglée en ÉCRITURE, pas en CPU.
+ * Mesuré en régime de débordement — 164 Mo/s d'écriture, 0 de lecture, forks
+ * en état `D` bloqués dans `balance_dirty_pages` (le noyau les freine parce
+ * qu'ils salissent des pages plus vite que le disque ne les absorbe). Dans
+ * cette phase, le temps c'est « octets écrits ÷ 164 Mo/s », donc −25 %
+ * d'octets valent −25 % de temps.
+ *
+ * Ce qui n'est PAS gagné ici : la capacité du tampon de tri et le seuil de
+ * résidence d'un niveau en RAM, tous deux calculés sur les 32 octets. Les
+ * réduire demanderait de narrowir la forme EN MÉMOIRE, donc un second jeu de
+ * fonctions de tri/fusion (789 lignes dupliquées, 26 sites de dispatch) sur
+ * le cœur d'un calcul exact — écarté faute de mesure justifiant ce risque.
+ */
+#define BD_DISK_ENTRY_WIDE 32
+#define BD_DISK_ENTRY_NARROW 24
+
+static size_t bd_disk_entry_bytes = BD_DISK_ENTRY_WIDE;
+
+/* Appelé une fois la disposition connue. `total_bits <= 64` ⇒ forme étroite.
+ *
+ * COUVERTURE DES DEUX FORMES — les deux builds de `make test` s'en chargent,
+ * chacun par construction : à `ETERN_PARTS=16` la fixture DP demande 20 bits
+ * (12 classes + couleur) donc la forme ÉTROITE, à 256 elle en demande 68 donc
+ * la forme LARGE. Vérifié par sabotage : fausser volontairement le décodage
+ * étroit fait tomber `border_ring_count_dp_matches_brute_force_when_forked`
+ * et `..._when_spilling_and_forked`, qui comparent la DP à une énumération
+ * par force brute indépendante.
+ *
+ * Une bascule test-only pour comparer les deux formes sur le MÊME jeu a été
+ * tentée puis retirée : elle ne faisait pas échouer le sabotage (le décodage
+ * depuis un fichier n'était pas atteint dans sa configuration), donc elle
+ * n'aurait apporté qu'une fausse assurance. Ne pas la réintroduire sans
+ * vérifier d'abord qu'elle tombe sur un décodage volontairement faux. */
+static void bd_disk_form_select(int total_bits)
+{
+    bd_disk_entry_bytes = (total_bits <= 64) ? BD_DISK_ENTRY_NARROW : BD_DISK_ENTRY_WIDE;
+}
+
+/* Sérialisation. La forme large recopie le struct tel quel : le format de
+   fichier des jeux qui dépassent 64 bits est donc inchangé, octet pour
+   octet. La forme étroite ne garde que les 64 bits de poids faible de la
+   clé — nuls au-delà par construction, puisque la disposition tient. */
+static inline void bd_entry_encode(uint8_t *dst, const struct bd_entry *e)
+{
+    if (bd_disk_entry_bytes == BD_DISK_ENTRY_NARROW) {
+        uint64_t k = (uint64_t)e->key;
+        memcpy(dst, &k, sizeof k);
+        memcpy(dst + 8, &e->val_lo, sizeof e->val_lo);
+        memcpy(dst + 16, &e->val_hi, sizeof e->val_hi);
+    } else {
+        memcpy(dst, e, sizeof *e);
+    }
+}
+
+static inline void bd_entry_decode(struct bd_entry *e, const uint8_t *src)
+{
+    if (bd_disk_entry_bytes == BD_DISK_ENTRY_NARROW) {
+        uint64_t k;
+        memcpy(&k, src, sizeof k);
+        e->key = (bd_key_t)k;
+        memcpy(&e->val_lo, src + 8, sizeof e->val_lo);
+        memcpy(&e->val_hi, src + 16, sizeof e->val_hi);
+    } else {
+        memcpy(e, src, sizeof *e);
+    }
+}
+
+/* Décalage du n-ième enregistrement, en-tête de comptage compris. */
+static inline off_t bd_disk_offset(size_t index)
+{
+    return (off_t)sizeof(uint64_t) + (off_t)index * (off_t)bd_disk_entry_bytes;
+}
+
 static inline bd_ring_count_t bd_entry_value(const struct bd_entry *e)
 {
     return ((bd_ring_count_t)e->val_hi << 64) | (bd_ring_count_t)e->val_lo;
@@ -490,7 +575,22 @@ static void bd_entries_write_file(const struct bd_entry *entries, size_t count, 
     FILE *fp = bd_fopen_or_die(path, "wb");
     uint64_t n = count;
     bd_write_or_die(fp, &n, sizeof n, 1, path);
-    bd_write_or_die(fp, entries, sizeof *entries, count, path);
+
+    enum { CHUNK = 4096 };
+    uint8_t *raw = malloc(CHUNK * BD_DISK_ENTRY_WIDE);
+    if (raw == NULL) {
+        fprintf(stderr, "border_ring_count_dp : tampon d'ecriture de '%s' impossible — arret\n", path);
+        exit(1);
+    }
+    for (size_t done = 0; done < count; ) {
+        size_t k = (count - done) < CHUNK ? (count - done) : CHUNK;
+        for (size_t i = 0; i < k; i++) {
+            bd_entry_encode(raw + i * bd_disk_entry_bytes, &entries[done + i]);
+        }
+        bd_write_or_die(fp, raw, bd_disk_entry_bytes, k, path);
+        done += k;
+    }
+    free(raw);
     bd_close_or_die(fp, path);
 }
 
@@ -519,7 +619,12 @@ static void bd_level_free(struct bd_level *level)
 
 static double bd_level_bytes(const struct bd_level *level)
 {
-    return (double)level->count * (double)sizeof(struct bd_entry);
+    /* Un niveau sur disque occupe la forme ÉTROITE quand la clé y tient : le
+       journal doit annoncer la taille RÉELLE du fichier, pas l'empreinte RAM
+       qu'il aurait une fois chargé. Les deux diffèrent de 25 % depuis que la
+       sérialisation est narrow. */
+    size_t unit = (level->entries != NULL) ? sizeof(struct bd_entry) : bd_disk_entry_bytes;
+    return (double)level->count * (double)unit;
 }
 
 /* ===========================================================================
@@ -625,6 +730,7 @@ struct bd_reader {
     size_t ram_n;
     FILE *fp;
     struct bd_entry *buf;
+    uint8_t *raw;               /* forme sur disque, décodée au remplissage */
     size_t buf_n;
     size_t buf_i;
     uint64_t remaining; /* entrées pas encore lues du fichier */
@@ -641,7 +747,8 @@ static void bd_reader_open_file(struct bd_reader *r, const char *path)
         exit(1);
     }
     r->buf = malloc(BD_READER_ENTRIES * sizeof *r->buf);
-    if (r->buf == NULL) {
+    r->raw = malloc(BD_READER_ENTRIES * BD_DISK_ENTRY_WIDE);
+    if (r->buf == NULL || r->raw == NULL) {
         fprintf(stderr, "border_ring_count_dp : tampon de lecture de '%s' impossible — arret\n", path);
         exit(1);
     }
@@ -665,7 +772,9 @@ static void bd_reader_close(struct bd_reader *r)
         r->fp = NULL;
     }
     free(r->buf);
+    free(r->raw);
     r->buf = NULL;
+    r->raw = NULL;
 }
 
 /* Retourne l'entrée suivante, ou NULL à l'épuisement. Le pointeur rendu
@@ -684,9 +793,12 @@ static const struct bd_entry *bd_reader_next(struct bd_reader *r)
             return NULL;
         }
         size_t want = r->remaining < BD_READER_ENTRIES ? (size_t)r->remaining : BD_READER_ENTRIES;
-        if (fread(r->buf, sizeof *r->buf, want, r->fp) != want) {
+        if (fread(r->raw, bd_disk_entry_bytes, want, r->fp) != want) {
             fprintf(stderr, "border_ring_count_dp : '%s' tronque — arret\n", r->path);
             exit(1);
+        }
+        for (size_t i = 0; i < want; i++) {
+            bd_entry_decode(&r->buf[i], r->raw + i * bd_disk_entry_bytes);
         }
         r->remaining -= want;
         r->buf_n = want;
@@ -703,6 +815,7 @@ static const struct bd_entry *bd_reader_next(struct bd_reader *r)
 struct bd_writer {
     FILE *fp;
     struct bd_entry *buf;
+    uint8_t *raw;           /* forme sur disque, encodée au vidage */
     size_t n;
     uint64_t count;
     char path[BD_PATH_MAX];
@@ -716,7 +829,8 @@ static void bd_writer_open(struct bd_writer *w, const char *path)
     uint64_t placeholder = 0;
     bd_write_or_die(w->fp, &placeholder, sizeof placeholder, 1, path);
     w->buf = malloc(BD_READER_ENTRIES * sizeof *w->buf);
-    if (w->buf == NULL) {
+    w->raw = malloc(BD_READER_ENTRIES * BD_DISK_ENTRY_WIDE);
+    if (w->buf == NULL || w->raw == NULL) {
         fprintf(stderr, "border_ring_count_dp : tampon d'ecriture de '%s' impossible — arret\n", path);
         exit(1);
     }
@@ -724,7 +838,10 @@ static void bd_writer_open(struct bd_writer *w, const char *path)
 
 static void bd_writer_flush(struct bd_writer *w)
 {
-    bd_write_or_die(w->fp, w->buf, sizeof *w->buf, w->n, w->path);
+    for (size_t i = 0; i < w->n; i++) {
+        bd_entry_encode(w->raw + i * bd_disk_entry_bytes, &w->buf[i]);
+    }
+    bd_write_or_die(w->fp, w->raw, bd_disk_entry_bytes, w->n, w->path);
     w->n = 0;
 }
 
@@ -748,7 +865,9 @@ static uint64_t bd_writer_close(struct bd_writer *w)
     bd_write_or_die(w->fp, &w->count, sizeof w->count, 1, w->path);
     bd_close_or_die(w->fp, w->path);
     free(w->buf);
+    free(w->raw);
     w->buf = NULL;
+    w->raw = NULL;
     w->fp = NULL;
     return w->count;
 }
@@ -774,7 +893,7 @@ static void bd_reader_open_range(struct bd_reader *r, const struct bd_level *lev
     bd_reader_open_file(r, level->path);
     /* `fseeko`/`off_t` et non `fseek`/`long` : un niveau réel dépasse
        largement 2 Go, borne d'un `long` 32 bits. */
-    off_t offset = (off_t)(sizeof(uint64_t) + start * sizeof(struct bd_entry));
+    off_t offset = bd_disk_offset(start);
     if (fseeko(r->fp, offset, SEEK_SET) != 0) {
         fprintf(stderr, "border_ring_count_dp : positionnement dans '%s' impossible — arret\n", level->path);
         exit(1);
@@ -1636,12 +1755,14 @@ static int bd_level_lookup(const struct bd_level *level, bd_key_t key, bd_ring_c
         size_t mid = lo + (hi - lo) / 2;
         struct bd_entry probe;
         if (fp != NULL) {
-            off_t offset = (off_t)(sizeof(uint64_t) + mid * sizeof(struct bd_entry));
-            if (fseeko(fp, offset, SEEK_SET) != 0 || fread(&probe, sizeof probe, 1, fp) != 1) {
+            uint8_t raw[BD_DISK_ENTRY_WIDE];
+            if (fseeko(fp, bd_disk_offset(mid), SEEK_SET) != 0 ||
+                fread(raw, bd_disk_entry_bytes, 1, fp) != 1) {
                 fprintf(stderr, "border_ring_count_dp : lecture dichotomique de '%s' impossible — arret\n",
                         level->path);
                 exit(1);
             }
+            bd_entry_decode(&probe, raw);
         } else {
             probe = level->entries[mid];
         }
@@ -1733,6 +1854,9 @@ static void bd_ctx_init(struct bd_ctx *ctx, struct array_part *all_rotate_parts,
 {
     ctx->nb_classes = bd_build_classes(all_rotate_parts, ctx, counts, id_to_class, n);
     bd_key_layout_init(&ctx->layout, counts, ctx->nb_classes);
+    /* La disposition est connue : on fige ici la largeur de la forme sur
+       disque, avant toute écriture. */
+    bd_disk_form_select(ctx->layout.total_bits);
     bd_index_classes_by_color(ctx);
 
     int8_t order[BORDER_RING_LEN][2];

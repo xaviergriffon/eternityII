@@ -552,12 +552,26 @@ anneau tous les ~10 nœuds DFS (ratio mesuré 0,097 anneau/nœud), ce qui rend
 l'échantillonnage essentiellement gratuit — c'est *terminer* l'énumération
 qui est impossible, pas en produire.
 
-**Ne pas confondre les deux débits.** Le walker FERME ~15 M anneaux/s
-(8 forks, sans écriture) ; en mode `--save-rings` le débit utile est celui
-des anneaux ÉCRITS, **~1 M/s**, soit ~500 Mo/s — c'est le disque qui borne,
-pas la recherche. Conséquence sur `--forks` : au-delà d'une douzaine de
-workers la contention d'E/S l'emporte. Mesuré sur 10⁷ anneaux (2×10 cœurs
-HT, NVMe) :
+**Trois débits à ne pas confondre.**
+
+| Régime | Débit | Ce qui borne |
+|---|---|---|
+| Walker seul, sans écriture | ~15 M anneaux/s (8 forks) | le CPU |
+| `--save-rings`, sortie **dans le cache de page** | ~0,7-1 M anneaux/s | les E/S vers le cache |
+| `--save-rings`, sortie **au-delà du cache** | **~190 k anneaux/s** | le disque, pour de bon |
+
+Le troisième est le seul qui compte pour un gros run, et c'est celui qu'on
+oublie : les mesures ci-dessous portent sur 10⁷ à 2×10⁷ anneaux (5 à 11 Go),
+que 47 Go de RAM absorbent largement. Le run de production de 576 Go, lui, a
+tenu ~108 Mo/s soutenus. Le disque de la machine de test (Crucial P3, QLC à
+cache SLC dynamique) fait 2,6 Go/s en rafale et s'effondre vers 100 Mo/s une
+fois son cache SLC saturé — un `dd` de 8 Go peut donc mesurer 98 Mo/s juste
+après une grosse écriture, et 1,9 Go/s sur 48 Go quand le cache s'est
+rétabli. **Toute mesure d'écriture sur cette machine doit préciser le volume
+et l'état du disque**, sans quoi elle ne veut rien dire.
+
+Conséquence sur `--forks` : au-delà d'une douzaine de workers la contention
+d'E/S l'emporte. Mesuré sur 10⁷ anneaux (2×10 cœurs HT, NVMe, régime caché) :
 
 | `--forks` | 2 | 4 | 8 | 12 | 16 | 20 | 40 |
 |---|---|---|---|---|---|---|---|
@@ -566,9 +580,17 @@ HT, NVMe) :
 Les plages viennent d'un A/B à ordre alterné : entre 8 et 16 la variance
 d'un run à l'autre (±25 %) dépasse l'écart entre les réglages — inutile de
 chercher un optimum fin, **~12 est un bon choix**, 2 et 40 sont clairement
-mauvais. Le `fflush` par anneau coûte ~12 % (11,24 s contre 12,84 s sur 10⁷
-à 8 forks) : conservé, la garantie qu'un `kill` ne laisse jamais un
-enregistrement à moitié écrit vaut ce prix.
+mauvais. Le `fflush` par anneau coûte ~12-13 % (mesuré deux fois : 11,24 s
+contre 12,84 s sur 10⁷ à 8 forks, puis 234 s contre 265 s sur 35 M
+d'enregistrements avec `fsync` final) : conservé, la garantie qu'un `kill` ne
+laisse jamais un enregistrement à moitié écrit vaut ce prix. Ce n'est PAS le
+levier de performance — la triple écriture l'était.
+
+La ligne de progression utilise un intervalle différent selon le mode
+(`BM_PROGRESS_INTERVAL_NODES_SAMPLING`) : en `--save-rings` le débit tombe de
+~19 M à ~170 k nœuds/s par worker, et l'intervalle du mode exhaustif (10⁸
+nœuds) donnerait **une ligne toutes les 10 minutes** — le silence que cette
+constante existe pour éviter.
 
 **Les anneaux du walker valent ceux du DP comme racines.** Le doute légitime
 est qu'un DFS non élagué ne livre que des anneaux quasi identiques. Mesuré :
@@ -596,10 +618,26 @@ jamais tronquée à son préfixe numérique. Verrouillé par
 Répartition du quota entre workers : `--max-rings N` est réparti en parts
 égales entre les `--forks`, le reste de la division allant aux premiers
 workers (un de plus chacun) — sans quoi `--max-rings 1` sur 2 workers
-donnerait 0. Chaque worker écrit son propre `FILE.w<N>` (un `FILE*` partagé à
-travers `fork()` entrelacerait les enregistrements), le parent écrit
-`FILE.expand` pour les anneaux que l'expansion de frontière referme avant le
-fork, et tout est concaténé dans `FILE` en fin de run, les morceaux effacés.
+donnerait 0. Comme le quota est connu **avant** le `fork`, la plage de chaque
+worker dans le fichier de sortie l'est aussi : tous écrivent dans un fichier
+UNIQUE, chacun à son décalage, sur des plages disjointes. Le parent écrit en
+tête les anneaux que l'expansion de frontière referme avant le fork.
+
+Une version antérieure donnait un fichier par worker puis les concaténait.
+Sur un run de production de 576 Go, **cette recopie a coûté 122 min sur 211**
+— 58 % du temps total — pour relire et réécrire des octets déjà corrects :
+1 728 Go d'E/S (576 écrits par les workers, 576 relus, 576 réécrits) pour
+576 Go de résultat. Écrire aux bons décalages supprime les deux tiers de ces
+E/S. Diagnostic : l'écart entre la durée prédite depuis le débit affiché dans
+les logs (89 min) et la durée réelle mesurée aux horodatages (211 min).
+
+Un `kill` en cours de route laisse un fichier troué (les plages des workers
+ne sont pas encore pleines). Ce n'est pas silencieux : un trou se lit comme un
+paquet nul, que `border_ring_validate` rejette en `BAD_PLACED_COUNT` — un
+`make check-rings` le dit immédiatement. Un worker qui épuise ses partitions
+avant son quota (jeux de pièces minuscules seulement) laisse le même genre de
+trou à la fin de sa plage ; le parent le détecte via le compte que chaque
+worker lui renvoie par son tube, compacte, et l'annonce sur `stderr`.
 `--max-rings` reste une borne SUPÉRIEURE : un worker dont les partitions
 s'épuisent avant son quota laisse sa part inutilisée (visible seulement sur
 des jeux minuscules ; sur le jeu réel chaque partition contient plus
@@ -615,6 +653,195 @@ avant entière. Verrouillé par
 `border_walk_count_ordered_stops_as_soon_as_the_callback_asks`,
 `border_walk_expand_frontier_stops_as_soon_as_on_complete_asks` et
 `border_ring_reconstruct_dp_honours_a_stopping_callback`.
+
+### Optimisation du walker : masques 64 bits et écriture tamponnée
+
+Deux goulots distincts, selon qu'on **compte** la masse ou qu'on **conserve**
+les anneaux. Mesuré en nœuds/s par worker, 12 workers, `data/pieces.csv` :
+
+| Régime | Avant | Après | Gain |
+|---|---|---|---|
+| Comptage pur, sans écriture | 20,8 M | **34,6 M** | ×1,66 |
+| Écriture `packed6` | 0,74 M | **16,2 M** | **×22** |
+
+**Côté écriture : le `fflush` par anneau était le goulot**, pas le disque. À
+0,74 M nœuds/s on n'écrivait que 37 Mo/s, très loin des 100 Mo/s soutenus du
+disque : ce n'étaient pas les octets mais les ~0,8 M d'appels système par
+seconde. En `.back` ce `fflush` ne coûtait que 12 %, amorti sur 576 octets ;
+en `packed6` il porte 12,8× moins d'octets pour le même nombre d'appels, donc
+12,8× plus lourd — **le format compact avait déplacé le goulot sur lui**.
+Remplacé par un tampon (`bm_rings_setvbuf`) dont la taille est un multiple
+EXACT de l'enregistrement : tout vidage tombe alors sur une frontière
+d'enregistrement, donc le fichier ne peut pas finir sur un anneau à moitié
+écrit. Ce qu'un `kill` perd désormais, c'est au plus un tampon d'anneaux
+entiers, trou que `make check-rings` signale.
+
+**Côté recherche : toute la bordure tient dans UN mot de 64 bits.** Le jeu
+réel n'a que 60 pièces de bordure, donc l'ensemble des pièces libres est un
+`uint64_t` et l'ensemble des candidates à une case est un masque précalculé
+(`struct bw_fastmap`). Par nœud, on remplace la construction de clé
+(`what_search_in_grid_to_key`), le lookup dans la map et un `is_face_used`
+PAR CANDIDAT par deux `AND` et une boucle `__builtin_ctzll`. C'est la
+transposition du `bucket_id_mask`/popcount du moteur principal, dans un cas
+plus favorable : là-bas 256 pièces demandent 4 mots, ici 60 en demandent un.
+
+Trois masques par position d'anneau — forme compatible (`at`), face tournée
+vers le voisin précédent (`prev`), vers le suivant (`next`) — la rotation
+étant forcée par la position. Un voisin non posé n'impose rien ; la face
+intérieure reste joker, le walker ne posant jamais l'intérieur.
+
+**Le chemin rapide change l'ORDRE d'énumération, pas l'ensemble** : il itère
+les pièces par index croissant (`ctz`), le générique suit l'ordre du bucket.
+Conséquence pratique : un `--max-rings N` tronqué ne donne plus le même
+échantillon qu'avant l'optimisation. Seul le TOTAL est invariant, et c'est ce
+que verrouillent `border_walk_fast_and_generic_paths_agree` et sa variante
+« reprise depuis un état partiel » (le chemin de `--forks`, où `used` doit
+être reconstruit depuis le plateau de départ), via
+`border_walk_set_fastmap_enabled_for_tests`. Repli automatique sur le chemin
+générique si le jeu compte plus de 64 pièces de bordure.
+
+### DP : forme sur disque en 24 octets au lieu de 32
+
+La DP en régime de débordement est **étranglée en écriture, pas en CPU**.
+Mesuré (`--dp-max-ram-mo 300`, 12 forks, `data/pieces.csv`) : 164 Mo/s
+d'écriture, **0 Mo/s de lecture**, et les forks en état `D` avec
+`wchan = balance_dirty_pages` — le noyau les freine parce qu'ils salissent des
+pages plus vite que le disque ne les absorbe. Dans cette phase, le temps
+c'est « octets écrits ÷ 164 Mo/s ».
+
+Or une entrée pesait 32 octets : 16 de clé + 16 de valeur. La valeur a besoin
+de ses 128 bits (les comptes atteignent 10³⁷), mais la clé, un
+`unsigned __int128`, n'en utilise que **59** sur `data/pieces.csv` (51 bits de
+compteurs pour 28 classes + 8 de couleur) — les 8 octets de poids fort sont
+toujours nuls. Ils ne sont plus écrits : **24 octets sur disque, −25 %**.
+Vérifié sur un fichier de niveau réel (109 077 416 entrées, 2 617 857 992
+octets = 24,0 o/entrée).
+
+**Ce qui n'est PAS gagné** : la capacité du tampon de tri et le seuil de
+résidence d'un niveau en RAM, tous deux calculés sur la forme en mémoire, qui
+reste à 32 octets. La clé y garde sa largeur pour que TOUT jeu de pièces reste
+calculable — les fixtures de test synthétiques demandent 68 bits (60 pièces de
+bordure toutes de classes distinctes = 60 bits incompressibles, plus la
+couleur ; aucun encodage ne fait tenir ça en 64 bits, c'est une borne
+d'information). Narrowir la forme en mémoire imposerait un second jeu de
+fonctions de tri/fusion — **789 lignes dupliquées et 26 sites de dispatch**
+sur le cœur d'un calcul exact — écarté faute de mesure justifiant ce risque.
+
+Couverture des deux formes : les deux builds de `make test` s'en chargent par
+construction — à `ETERN_PARTS=16` la fixture DP demande 20 bits donc la forme
+étroite, à 256 elle en demande 68 donc la large. Vérifié par sabotage :
+fausser le décodage étroit fait tomber
+`border_ring_count_dp_matches_brute_force_when_forked` et
+`..._when_spilling_and_forked`. Une bascule test-only comparant les deux
+formes sur le même jeu a été tentée puis **retirée** : elle ne tombait pas sur
+ce sabotage, donc n'offrait qu'une fausse assurance — ne pas la
+réintroduire sans vérifier d'abord qu'elle mord.
+
+Effet de bord corrigé au passage : le journal annonçait la taille RAM d'un
+niveau même quand il était sur disque (« 3,25 Go » pour un fichier de 2,44 Go).
+Il annonce désormais la taille réelle.
+
+### `--rings-format packed6` : 12,8× plus petit, accès aléatoire conservé
+
+Un `possibility_packet` pèse 576 octets alors qu'un anneau ne porte que
+`BORDER_RING_LEN` pièces. Deux observations, **mesurées sur 3 M d'anneaux
+réels** de `data/pieces.csv`, ramènent ça à 45 octets :
+
+1. **La rotation ne porte aucune information.** La face nulle d'une pièce de
+   bord doit regarder vers l'extérieur, et la position dit où est
+   l'extérieur : une seule rotation convient par case. Vérifié — **zéro**
+   position où la rotation varie, sur 3 M × 60 cases. Seul l'id est stocké,
+   et le décodeur retrouve la rotation en cherchant celle qui met les faces
+   nulles vers les bords adjacents.
+2. **Il n'y a que 60 pièces de bordure**, donc un index local tient sur
+   6 bits. 60 × 6 bits = 360 bits = **45 octets**, pile.
+
+| Format | o/anneau | 10⁹ anneaux |
+|---|---|---|
+| `.back` (`possibility_packet`) | 576 | 576 Go |
+| **`packed6`** | **45** | **45 Go** |
+
+**L'accès aléatoire est conservé**, et c'est ce qui l'a fait préférer à un
+encodage différentiel — mesuré à 6,39 o/anneau (90×, les anneaux consécutifs
+ne diffèrent que par 5,39 cases en moyenne), mais **séquentiel** : on ne peut
+pas atteindre l'anneau *n* sans décoder depuis le début, et un octet corrompu
+emporte toute la suite. En `packed6` les enregistrements sont de taille fixe :
+le n-ième est en `RING_CODEC_HEADER_BYTES + n × RING_CODEC_PACKED_BYTES`.
+
+L'en-tête (160 o, magie `ETIIRING` + version + géométrie + table index → id)
+existe pour qu'un fichier d'un autre format soit **refusé** et non mal
+interprété : un `.back` relu comme du packed6 donnerait des anneaux absurdes
+en silence.
+
+⚠️ **Ce n'est pas un `.back`** : il ne s'importe pas tel quel dans un stock.
+Arbitrage explicite — compacité d'abord, compatibilité plus tard si le besoin
+se confirme.
+
+Vérifications de bout en bout (`data/pieces.csv`, 5 M d'anneaux, 12 workers) :
+fichier de 225 Mo contre 2,88 Go en `.back` (**12,8×**), `make check-rings`
+sans invalide ni doublon, et une comparaison **case par case des 5 M
+d'anneaux entre les deux formats : 0 différence**. Deux runs identiques
+produisent d'ailleurs des fichiers bit à bit identiques — l'énumération est
+déterministe.
+
+### Vérifier le fichier produit (`make check-rings`)
+
+```sh
+make check-rings
+tests/tools/check_rings rings.back data/pieces.csv /mnt/nvme/work 12
+```
+
+Code de sortie 0 **si et seulement si** le fichier est intègre. Le format est
+reconnu **à la magie**, jamais supposé (`.back` ou `packed6`). Deux questions
+distinctes, une seule passe :
+
+- **Cohérence** — chaque enregistrement est-il un anneau valide ? Délégué à
+  `border_ring_validate` (`tests/tools/border_walk.c`) : exactement
+  `BORDER_RING_LEN` cases posées sur le plateau et toutes celles du pourtour
+  remplies (ce qui implique l'intérieur vide sans le balayer), chaque pièce
+  utilisée une seule fois, `b_faceused` d'accord avec la grille, et toutes
+  les adjacences de couleur — fermeture du cycle comprise, plus les faces
+  nulles vers l'extérieur, qu'on obtient gratuitement puisque la convention
+  attend la couleur 0 d'un voisin hors plateau.
+- **Doublons** — deux enregistrements décrivent-ils le même anneau ?
+
+⚠️ **Ne jamais hacher un `possibility_packet` brut** pour ça : le struct a du
+padding caché, deux anneaux identiques peuvent différer sur des octets de
+bourrage, et le doublon passerait inaperçu. `check_rings` hache les
+`BORDER_RING_LEN` valeurs de grille dans l'ordre de l'anneau — l'identité de
+l'anneau, pas sa représentation mémoire.
+
+On ne peut pas garder 10⁹ empreintes en RAM, et on n'en a pas besoin : chaque
+empreinte 128 bits part dans l'un de 256 **seaux** choisis sur ses bits de
+poids fort, et deux empreintes égales tombent forcément dans le même. Les
+seaux se traitent donc un par un — tri en mémoire, balayage des adjacents.
+
+Mesuré sur le fichier de production (537 Gio, 10⁹ anneaux, 12 workers) :
+
+| | |
+|---|---|
+| Pic RAM | **239 Mo** (13 process) sur une machine de 47 Go |
+| Fichiers temporaires | 14 Go, effacés au fil des seaux |
+| Débit | 1,67 M anneaux/s, 959 Mo/s en lecture |
+| Durée | ~10 min (cohérence) + ~8 min (doublons) |
+| Verdict | 10⁹ anneaux, 0 invalide, 0 doublon |
+
+**`border_ring_validate` n'appelle PAS `check_possibility`** : sur le puzzle
+256 pièces, celle-ci exige l'indice officiel (`grid[7][8]` = pièce 139
+rotation 2, code `-6`), qu'un anneau de bordure ne pose jamais — *tout*
+anneau valide y échoue. Constaté en dur : les 100 000 premiers anneaux d'un
+fichier sain sont sortis invalides au premier essai. La boucle de couleur est
+donc reprise dans `border_walk.c`, cet ancrage en moins ; si la convention
+d'adjacence changeait dans `possibility.c`, celle-ci deviendrait fausse en
+silence, d'où un test qui valide un anneau **réellement produit par le
+walker** plutôt qu'un plateau écrit à la main.
+
+Les contre-épreuves (`border_ring_validate_catches_each_kind_of_corruption`)
+vérifient que chaque sabotage sort SON code, pas seulement « non nul » : case
+du pourtour vidée, pièce déplacée vers l'intérieur, pièce en double,
+`b_faceused` désaccordé, et — le seul que les contrôles structurels laissent
+passer — une case remplacée par une autre ROTATION de la même pièce, qui ne
+casse que les couleurs.
 
 ### Reconstruction exhaustive (`--save-rings` AVEC `--dp`)
 

@@ -324,8 +324,8 @@ jobs:
       # fork/pipe/wait de --forks) ou gen_root.c pouvait passer inaperçue.
       # Les deux cibles sont déjà à -Werror en dur ; compile-only, comme le
       # reste de ce job — les binaires ne sont pas exécutés.
-      - name: Build border-mass + gen-root (256 pièces)
-        run: make border-mass gen-root
+      - name: Build border-mass + gen-root + check-rings (256 pièces)
+        run: make border-mass gen-root check-rings
 
-      - name: Build border-mass + gen-root (ETERN_PARTS=16)
-        run: make border-mass gen-root CPPFLAGS="-DETERN_PARTS=16"
+      - name: Build border-mass + gen-root + check-rings (ETERN_PARTS=16)
+        run: make border-mass gen-root check-rings CPPFLAGS="-DETERN_PARTS=16"
