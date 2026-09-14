@@ -126,6 +126,7 @@ void bd_ring_count_format(bd_ring_count_t value, char *buf, size_t buflen);
  */
 int bd_ring_count_parse(const char *s, bd_ring_count_t *out);
 
+
 /**
  * @brief Calcule la masse totale des anneaux de bordure valides, EXACTEMENT
  * (même définition et même résultat que `border_walk_count`), par

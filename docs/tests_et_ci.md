@@ -700,6 +700,47 @@ que verrouillent `border_walk_fast_and_generic_paths_agree` et sa variante
 `border_walk_set_fastmap_enabled_for_tests`. Repli automatique sur le chemin
 générique si le jeu compte plus de 64 pièces de bordure.
 
+### DP : forme sur disque en 24 octets au lieu de 32
+
+La DP en régime de débordement est **étranglée en écriture, pas en CPU**.
+Mesuré (`--dp-max-ram-mo 300`, 12 forks, `data/pieces.csv`) : 164 Mo/s
+d'écriture, **0 Mo/s de lecture**, et les forks en état `D` avec
+`wchan = balance_dirty_pages` — le noyau les freine parce qu'ils salissent des
+pages plus vite que le disque ne les absorbe. Dans cette phase, le temps
+c'est « octets écrits ÷ 164 Mo/s ».
+
+Or une entrée pesait 32 octets : 16 de clé + 16 de valeur. La valeur a besoin
+de ses 128 bits (les comptes atteignent 10³⁷), mais la clé, un
+`unsigned __int128`, n'en utilise que **59** sur `data/pieces.csv` (51 bits de
+compteurs pour 28 classes + 8 de couleur) — les 8 octets de poids fort sont
+toujours nuls. Ils ne sont plus écrits : **24 octets sur disque, −25 %**.
+Vérifié sur un fichier de niveau réel (109 077 416 entrées, 2 617 857 992
+octets = 24,0 o/entrée).
+
+**Ce qui n'est PAS gagné** : la capacité du tampon de tri et le seuil de
+résidence d'un niveau en RAM, tous deux calculés sur la forme en mémoire, qui
+reste à 32 octets. La clé y garde sa largeur pour que TOUT jeu de pièces reste
+calculable — les fixtures de test synthétiques demandent 68 bits (60 pièces de
+bordure toutes de classes distinctes = 60 bits incompressibles, plus la
+couleur ; aucun encodage ne fait tenir ça en 64 bits, c'est une borne
+d'information). Narrowir la forme en mémoire imposerait un second jeu de
+fonctions de tri/fusion — **789 lignes dupliquées et 26 sites de dispatch**
+sur le cœur d'un calcul exact — écarté faute de mesure justifiant ce risque.
+
+Couverture des deux formes : les deux builds de `make test` s'en chargent par
+construction — à `ETERN_PARTS=16` la fixture DP demande 20 bits donc la forme
+étroite, à 256 elle en demande 68 donc la large. Vérifié par sabotage :
+fausser le décodage étroit fait tomber
+`border_ring_count_dp_matches_brute_force_when_forked` et
+`..._when_spilling_and_forked`. Une bascule test-only comparant les deux
+formes sur le même jeu a été tentée puis **retirée** : elle ne tombait pas sur
+ce sabotage, donc n'offrait qu'une fausse assurance — ne pas la
+réintroduire sans vérifier d'abord qu'elle mord.
+
+Effet de bord corrigé au passage : le journal annonçait la taille RAM d'un
+niveau même quand il était sur disque (« 3,25 Go » pour un fichier de 2,44 Go).
+Il annonce désormais la taille réelle.
+
 ### `--rings-format packed6` : 12,8× plus petit, accès aléatoire conservé
 
 Un `possibility_packet` pèse 576 octets alors qu'un anneau ne porte que
