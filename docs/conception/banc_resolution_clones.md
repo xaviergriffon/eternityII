@@ -540,9 +540,16 @@ suffisamment haut pour que 100 % des instances aboutissent.
 Le critère (b) — « ne dégrade pas `bench_refutation` » — n'a été exercé pour
 aucune de ces décisions, puisque aucune n'entraîne de changement de moteur. Il
 resterait à passer avant toute adoption ultérieure. Pour l'ordre des valeurs il
-est de toute façon neutre par construction, ce que les 183 auto-tests
-concluants de cette campagne vérifient empiriquement : une racine MORTE coûte
-le même nombre de nœuds sous les cinq politiques.
+est neutre **sous une condition qu'il faut énoncer** : que l'ordre des
+VARIABLES ne dépende pas de l'ordre des VALEURS. C'est vrai du moteur mesuré
+ici, et les 183 auto-tests concluants de cette campagne le vérifient
+empiriquement — une racine MORTE y coûte le même nombre de nœuds sous les cinq
+politiques. Ce n'est PAS une propriété générale : un départage de cases qui
+apprend de la recherche (§4.14 de [elagage_recherche.md](elagage_recherche.md))
+lie les deux ordres, et la même racine morte y ferme alors en 168 152 à 225 683
+nœuds selon la politique. Sur un tel moteur, (b) redevient une vraie
+obligation, et une comparaison de politiques mesure deux effets à la fois —
+l'auto-test du banc le détecte et le dit désormais explicitement.
 
 **Le résultat d'ensemble est négatif, et c'est un résultat.** Le §1 posait que
 l'ordre des valeurs et le point de départ « décident à quel moment la branche
