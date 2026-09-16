@@ -434,7 +434,9 @@ static int fc_verdict(key_part C[ETERN_SIZE][ETERN_SIZE], struct possibility_pac
     mrv_used_init(used, b);
     const uint64_t *cell_mask[BT_CELLS];
     fill_mask_cache(cell_mask, m, C);
-    return bt_forward_check(C, b, m, used, cell_mask, cx, cy);
+    bt_frontier f;
+    bt_frontier_init(&f, b);
+    return bt_forward_check(C, b, m, used, cell_mask, &f, cx, cy);
 }
 
 /* fc_stat_bump : équivalence stricte avec le `__atomic_fetch_add` qu'il
@@ -1445,6 +1447,140 @@ TEST mrv_choose_cell_breaks_ties_by_constrained_sides(void)
     PASS();
 }
 
+
+/* §4.14 — départage appris. À score MRV ET nconstr égaux, la case au poids
+ * d'échec le plus ÉLEVÉ gagne ; sans poids, l'ordre d'énumération tranche
+ * comme avant. Le sens est mesuré (poids élevé d'abord : −83 % de nœuds de
+ * réfutation ; poids faible d'abord : +210 %) — l'inverser fait tomber ce
+ * test. Fixture : deux cases vides (0,0) et (0,1), même compartiment, même
+ * nconstr (3). */
+TEST mrv_choose_cell_breaks_remaining_ties_by_failure_weight(void)
+{
+    static struct part cand[2] = { { .id = 6 }, { .id = 7 } };
+    static struct array_part list = { .size = 2, .parts = cand };
+    map_big_array *map = make_uniform_map(&list);
+    const int8_t all_face = (int8_t)map->sizearrayM;
+
+    struct possibility_packet board;
+    make_empty_board(&board);
+    for (int x = 0; x < ETERN_SIZE; x++)
+        for (int y = 0; y < ETERN_SIZE; y++)
+            board.grid[x][y] = 1;
+    board.grid[0][0] = -2;
+    board.grid[0][1] = -2;
+
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, make_filler_part(), all_face);
+    uint64_t used[MRV_USED_WORDS];
+    mrv_used_init(used, &board);
+    bt_frontier f;
+    bt_frontier_init(&f, &board);
+    ASSERT_EQ_FMT((int)f.nconstr[BT_CELL_POS(0, 0)], (int)f.nconstr[BT_CELL_POS(0, 1)], "%d");
+    const uint64_t *cell_mask[BT_CELLS];
+    fill_mask_cache(cell_mask, map, C);
+
+    uint8_t x = 200, y = 200; int count = -99;
+    /* Poids nuls : ordre d'énumération, (0,0). */
+    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, cell_mask, &x, &y, &count), "%d");
+    ASSERT_EQ_FMT(0, (int)x, "%d");
+    ASSERT_EQ_FMT(0, (int)y, "%d");
+
+    /* Un échec imputé à (0,1) : elle passe devant. */
+    bt_frontier_fail(&f, BT_CELL_POS(0, 1));
+    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, cell_mask, &x, &y, &count), "%d");
+    ASSERT_EQ_FMT(0, (int)x, "%d");
+    ASSERT_EQ_FMT(1, (int)y, "%d");
+    ASSERT_EQ_FMT(2, count, "%d"); /* le score MRV reste le nombre de candidats */
+
+    /* Contre-contrôle : deux échecs sur (0,0) la ramènent devant. */
+    bt_frontier_fail(&f, BT_CELL_POS(0, 0));
+    bt_frontier_fail(&f, BT_CELL_POS(0, 0));
+    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, cell_mask, &x, &y, &count), "%d");
+    ASSERT_EQ_FMT(0, (int)x, "%d");
+    ASSERT_EQ_FMT(0, (int)y, "%d");
+
+    /* Le poids ne prime JAMAIS sur nconstr : (0,1) contrainte d'un côté de plus
+     * (case (1,1) vidée puis... non : on rend (0,0) MOINS contrainte en vidant
+     * (1,0)) reprend la main malgré le poids de (0,0). */
+    board.grid[1][0] = -2;
+    bt_init_constraints(C, &board, make_filler_part(), all_face);
+    fill_mask_cache(cell_mask, map, C);
+    bt_frontier g;
+    bt_frontier_init(&g, &board);
+    ASSERT(g.nconstr[BT_CELL_POS(0, 0)] < g.nconstr[BT_CELL_POS(0, 1)]);
+    for (int i = 0; i < 10; i++) bt_frontier_fail(&g, BT_CELL_POS(0, 0));
+    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &g, cell_mask, &x, &y, &count), "%d");
+    ASSERT_EQ_FMT(0, (int)x, "%d");
+    ASSERT_EQ_FMT(1, (int)y, "%d");
+
+    PASS();
+}
+
+/* bt_frontier_fail : compteur saturant. À 255, TOUS les poids sont divisés par
+ * deux (ordre relatif conservé) et nc_key reste cohérent avec (nconstr, poids)
+ * pour toutes les cases — nc_key est la seule chose que lit le chemin rapide. */
+TEST bt_frontier_fail_halves_all_weights_at_saturation(void)
+{
+    struct possibility_packet board;
+    make_empty_board(&board);
+    bt_frontier f;
+    bt_frontier_init(&f, &board);
+    const int a = BT_CELL_POS(1, 1), b = BT_CELL_POS(2, 2);
+
+    for (int i = 0; i < 100; i++) bt_frontier_fail(&f, a);
+    for (int i = 0; i < 254; i++) bt_frontier_fail(&f, b);
+    ASSERT_EQ_FMT(100, (int)f.weight[a], "%d");
+    ASSERT_EQ_FMT(254, (int)f.weight[b], "%d");
+    ASSERT(f.nc_key[b] < f.nc_key[a]); /* poids élevé = clé plus petite = choisi d'abord */
+
+    bt_frontier_fail(&f, b); /* 255 : halving global */
+    ASSERT_EQ_FMT(50, (int)f.weight[a], "%d");
+    ASSERT_EQ_FMT(127, (int)f.weight[b], "%d");
+    ASSERT(f.nc_key[b] < f.nc_key[a]);
+    for (int pos = 0; pos < BT_CELLS; pos++) {
+        ASSERT_EQ_FMT((unsigned long)bt_nc_key(pos, f.nconstr[pos], f.weight[pos]),
+                      (unsigned long)f.nc_key[pos], "%lu");
+    }
+    PASS();
+}
+
+#if FORWARD_CHECK_K > 0
+/* Un échec du forward-check impute un poids à la voisine morte ET à la case
+ * posée ; un succès n'en impute aucun. Même fixture que
+ * bt_forward_check_detects_dead_cells : coin (0,0), voisines (1,0) et (0,1),
+ * la première inspectée est (1,0) (ordre haut, droite, bas, gauche). */
+TEST bt_forward_check_failure_bumps_dead_and_placed_cells(void)
+{
+    struct possibility_packet board;
+    make_empty_board(&board);
+    key_part C[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(C, &board, make_parts(), 2);
+    struct part p_free[1] = { { .id = 9 } };
+    struct array_part cand_free = { .size = 1, .parts = p_free };
+    map_big_array *map = make_uniform_map(&cand_free);
+    uint64_t used[MRV_USED_WORDS];
+    const uint64_t *cell_mask[BT_CELLS];
+    fill_mask_cache(cell_mask, map, C);
+    bt_frontier f;
+    bt_frontier_init(&f, &board);
+
+    mrv_used_init(used, &board);
+    ASSERT_EQ_FMT(1, bt_forward_check(C, &board, map, used, cell_mask, &f, 0, 0), "%d");
+    for (int pos = 0; pos < BT_CELLS; pos++) ASSERT_EQ_FMT(0, (int)f.weight[pos], "%d");
+
+    set_face_used(board.b_faceused, 8, 1); /* pièce 9 : plus aucun candidat libre */
+    mrv_used_init(used, &board);
+    ASSERT_EQ_FMT(0, bt_forward_check(C, &board, map, used, cell_mask, &f, 0, 0), "%d");
+    ASSERT_EQ_FMT(1, (int)f.weight[BT_CELL_POS(1, 0)], "%d"); /* voisine morte */
+    ASSERT_EQ_FMT(1, (int)f.weight[BT_CELL_POS(0, 0)], "%d"); /* case posée */
+    ASSERT_EQ_FMT(0, (int)f.weight[BT_CELL_POS(0, 1)], "%d"); /* jamais inspectée */
+    ASSERT_EQ_FMT((unsigned long)bt_nc_key(BT_CELL_POS(1, 0), f.nconstr[BT_CELL_POS(1, 0)], 1),
+                  (unsigned long)f.nc_key[BT_CELL_POS(1, 0)], "%lu");
+
+    PASS();
+}
+#endif // FORWARD_CHECK_K > 0
+
 /* Deux sorties que les plateaux aléatoires n'atteignent pas.
  *
  * (a) plateau PLEIN : aucune case vide -> 0, comme l'ancien balayage.
@@ -1745,6 +1881,56 @@ TEST mrv_choose_cell_fast_matches_generic_on_real_map(void)
     PASS();
 }
 
+/* Chemin rapide = version générique aussi quand les poids sont NON nuls :
+ * l'oracle indépendant ne connaît pas le départage appris, ce test ne le
+ * consulte donc pas — il vérifie que les deux implémentations lisent la même
+ * règle (nc_key précalculé contre champs lus séparément). */
+TEST mrv_choose_cell_fast_matches_generic_with_failure_weights(void)
+{
+    map_big_array *map = prepare_map_part(make_complete_map_parts());
+    ASSERT(bt_masks_complete(map));
+    const int8_t all_face = (int8_t)map->sizearrayM;
+
+    unsigned state = 20260916u;
+    int seen_chosen = 0, seen_dead = 0;
+    for (int iter = 0; iter < 300; iter++) {
+        struct possibility_packet board;
+        make_random_board(&board, &state);
+        mark_random_used(&board, &state);
+
+        key_part C[ETERN_SIZE][ETERN_SIZE];
+        bt_init_constraints(C, &board, make_filler_part(), all_face);
+        uint64_t used[MRV_USED_WORDS];
+        mrv_used_init(used, &board);
+        bt_frontier f;
+        bt_frontier_init(&f, &board);
+        for (int k = 0; k < 400; k++) {
+            state = state * 1103515245u + 12345u;
+            bt_frontier_fail(&f, (int)((state >> 8) % BT_CELLS));
+        }
+        const uint64_t *cell_mask[BT_CELLS];
+        bt_mask_init(cell_mask, map, C);
+
+        uint8_t gx = 201, gy = 201; int gcount = -98;
+        uint8_t fx = 202, fy = 202; int fcount = -97;
+        int grc = mrv_choose_cell(&board, C, map, used, &f, cell_mask, &gx, &gy, &gcount);
+        int frc = mrv_choose_cell_fast(used, &f, cell_mask, &fx, &fy, &fcount);
+        ASSERT_EQ_FMT(grc, frc, "%d");
+        if (frc == 1) {
+            seen_chosen = 1;
+            ASSERT_EQ_FMT((int)gx, (int)fx, "%d");
+            ASSERT_EQ_FMT((int)gy, (int)fy, "%d");
+            ASSERT_EQ_FMT(gcount, fcount, "%d");
+        } else {
+            seen_dead = 1;
+        }
+    }
+    ASSERT(seen_chosen);
+    ASSERT(seen_dead);
+    free_bigarray(map);
+    PASS();
+}
+
 #if FORWARD_CHECK_K > 0
 /* bt_forward_check_fast : même verdict que bt_forward_check (chemin masque
  * ET chemin parcours, index neutralisé) sur toutes les cases d'une map réelle
@@ -1775,16 +1961,18 @@ TEST bt_forward_check_fast_same_verdict_as_generic(void)
         mrv_used_init(used, &board);
         const uint64_t *cell_mask[BT_CELLS];
         bt_mask_init(cell_mask, map, C);
+        bt_frontier f;
+        bt_frontier_init(&f, &board);
         for (int cx = 0; cx < ETERN_SIZE; cx++) for (int cy = 0; cy < ETERN_SIZE; cy++) {
-            int generic = bt_forward_check(C, &board, map, used, cell_mask, cx, cy);
-            int fast = bt_forward_check_fast(&board, used, cell_mask, cx, cy);
+            int generic = bt_forward_check(C, &board, map, used, cell_mask, &f, cx, cy);
+            int fast = bt_forward_check_fast(&board, used, cell_mask, &f, cx, cy);
             ASSERT_EQ_FMT(generic, fast, "%d");
 
             uint32_t *saved = map->packed;
             map->packed = NULL; /* force le parcours des entrées */
             const uint64_t *cell_mask_generic[BT_CELLS];
             bt_mask_init(cell_mask_generic, map, C);
-            int traversal = bt_forward_check(C, &board, map, used, cell_mask_generic, cx, cy);
+            int traversal = bt_forward_check(C, &board, map, used, cell_mask_generic, &f, cx, cy);
             map->packed = saved;
             ASSERT_EQ_FMT(traversal, fast, "%d");
 
@@ -4082,6 +4270,12 @@ SUITE(etii_search_suite)
     RUN_TEST(bt_frontier_place_undo_matches_full_recompute);
     RUN_TEST(mrv_choose_cell_matches_full_scan_reference);
     RUN_TEST(mrv_choose_cell_breaks_ties_by_constrained_sides);
+    RUN_TEST(mrv_choose_cell_breaks_remaining_ties_by_failure_weight);
+    RUN_TEST(bt_frontier_fail_halves_all_weights_at_saturation);
+    RUN_TEST(mrv_choose_cell_fast_matches_generic_with_failure_weights);
+#if FORWARD_CHECK_K > 0
+    RUN_TEST(bt_forward_check_failure_bumps_dead_and_placed_cells);
+#endif
     RUN_TEST(mrv_choose_cell_full_board_and_unconstrained_fallback);
     RUN_TEST(bt_mask_cache_uses_zero_mask_for_empty_bucket_in_fast_mode);
     RUN_TEST(mrv_choose_cell_fast_matches_generic_on_real_map);
