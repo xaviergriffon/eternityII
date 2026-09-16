@@ -451,18 +451,100 @@ static void bench_hook_bind(map_big_array *map, struct array_part *rot)
  * ========================================================================== */
 
 /**
- * @brief Vérifie que toutes les politiques explorent le MÊME arbre sur un
- *        sous-arbre MORT, au nœud près.
+ * @brief Contrôle DIRECT : chaque politique rend-elle bien une PERMUTATION ?
  *
- * C'est la validation de l'instrument, et elle découle directement de sa
- * raison d'être (§1 du document de conception) : dans un sous-arbre sans
- * solution, tous les candidats de chaque case sont essayés, donc le compte de
- * nœuds NE PEUT PAS dépendre de leur ordre. Un désaccord ne signalerait donc
- * pas « une politique est meilleure » — il signalerait une permutation FAUSSE
- * (candidat perdu, dupliqué, ou indice hors compartiment), c'est-à-dire des
- * chiffres à jeter. Même intention que l'auto-test `--w2x2` de
- * bench_refutation, et que son oracle indépendant : le symptôme qu'on espère
- * d'une politique gagnante est exactement ce qu'un hook bogué produit.
+ * C'est la propriété que l'auto-test par comptage de nœuds (ci-dessous) ne
+ * vérifiait qu'indirectement — et l'indirection s'est révélée fragile, cf. sa
+ * doc. Ici on appelle le point d'entrée sur les vrais compartiments d'un
+ * plateau et on vérifie que les indices rendus sont une bijection de
+ * [0, taille[ : aucun candidat perdu, aucun dupliqué, aucun indice hors
+ * compartiment. Ce contrôle-ci ne suppose RIEN du moteur, il ne regarde que le
+ * hook — il reste donc valide quel que soit l'ordre de variable.
+ *
+ * @return 0 si toutes les permutations sont valides, -1 sinon.
+ */
+static int bench_check_permutations(const policy_t *policies, int nb_policies,
+                                    const struct possibility_packet *board)
+{
+    static uint8_t seen[4 * ETERN_PARTS + 4];
+    const value_order_t saved = g_value_order;
+    int checked = 0, rc = 0;
+
+    /* Arrêt au PREMIER défaut : une permutation fausse l'est en général sur
+     * toutes les cases, et cent messages identiques n'apprennent rien de plus
+     * que le premier. */
+    for (int cx = 0; cx < ETERN_SIZE && rc == 0; cx++) {
+        for (int cy = 0; cy < ETERN_SIZE && rc == 0; cy++) {
+            if (board->grid[cx][cy] != -2) {
+                continue;
+            }
+            struct possibility_packet probe;
+            memcpy(&probe, board, sizeof(probe));
+            key_part key;
+            what_search_in_grid_to_key(g_rot, &probe, (int8_t)cx, (int8_t)cy, &key, g_all_face);
+            struct array_part *bucket = get_parts_bigarray_with_key(g_map, &key);
+            if (bucket == NULL || bucket->size <= 1) {
+                continue;
+            }
+            for (int p = 0; p < nb_policies && rc == 0; p++) {
+                g_value_order = policies[p].value_order;
+                g_rng_state = 0x9E3779B97F4A7C15ULL;
+                const uint16_t *order = etii_bench_value_order(board, bucket, cx, cy, 0);
+                if (order == NULL) {
+                    continue;   /* ordre naturel du compartiment : rien à vérifier */
+                }
+                checked++;
+                memset(seen, 0, (size_t)bucket->size);
+                for (int i = 0; i < bucket->size; i++) {
+                    if (order[i] >= (uint16_t)bucket->size || seen[order[i]]) {
+                        fprintf(stderr, "AUTO-TEST ÉCHOUÉ : « %s » ne rend pas une"
+                                " permutation sur la case (%d,%d) — compartiment de %d"
+                                " candidats, rang %d vaut %u%s. Des candidats sont perdus"
+                                " ou dupliqués : les chiffres de ce run sont à jeter.\n",
+                                policies[p].name, cx, cy, bucket->size, i,
+                                (unsigned)order[i],
+                                order[i] < (uint16_t)bucket->size ? " (déjà vu)" : " (hors compartiment)");
+                        rc = -1;
+                        break;
+                    }
+                    seen[order[i]] = 1;
+                }
+            }
+        }
+    }
+    g_value_order = saved;
+    if (rc == 0) {
+        printf("auto-test : %d permutations vérifiées (bijection sur le compartiment)\n",
+               checked);
+    }
+    return rc;
+}
+
+/**
+ * @brief Sur un sous-arbre MORT, toutes les politiques explorent-elles le même
+ *        nombre de nœuds — et sinon, POURQUOI ?
+ *
+ * L'intention initiale : dans un sous-arbre sans solution, tous les candidats
+ * de chaque case sont essayés, donc le compte de nœuds ne dépend pas de leur
+ * ordre ; un désaccord trahissait une permutation fausse. Cette lecture
+ * repose sur une hypothèse qui n'était pas écrite : que **l'ordre des
+ * VARIABLES ne dépend pas de l'ordre des VALEURS**. Elle est vraie du moteur
+ * actuel, elle ne l'est pas d'un moteur dont le départage de cases APPREND de
+ * la recherche (§4.14 de docs/conception/elagage_recherche.md : un poids
+ * d'échec par case, accumulé dans l'ordre où les échecs surviennent — donc
+ * dans un ordre que la politique de valeurs détermine). Mesuré sur un tel
+ * moteur : la même racine morte ferme en 168 152 à 225 683 nœuds selon la
+ * politique, sans qu'aucune permutation soit fausse.
+ *
+ * Le contrôle est donc scindé. `bench_check_permutations` ci-dessus vérifie
+ * DIRECTEMENT ce qui importe — les permutations en sont bien — et c'est lui
+ * qui est fatal. Ce qui reste ici est un **détecteur de couplage** : les
+ * permutations étant déjà validées, un désaccord de comptage ne peut plus
+ * signifier qu'une chose, à savoir que le moteur lie l'ordre des variables à
+ * l'ordre des valeurs. C'est une propriété du moteur, pas un bogue — donc
+ * signalée et non fatale. Elle a une conséquence qu'il faut connaître avant de
+ * lire les résultats : sur un tel moteur, « l'ordre des valeurs est neutre
+ * pour la réfutation » cesse d'être vrai (§7.2 du document de conception).
  *
  * Tourne EN PROCESSUS COURANT (pas de fork) sur la première racine que la
  * politique de référence ferme dans `budget` nœuds. Aucune racine fermée dans
@@ -524,7 +606,7 @@ static int bench_selftest(const policy_t *policies, int nb_policies,
     /* Rejeu de la racine fermée sous les autres politiques — TOUJOURS dans la
      * parenthèse isolée : c'est la partie qui explore le plus, donc celle qui
      * rencontre le plus de solutions à journaliser. */
-    int rc = 0;
+    int coupled = 0;
     int disagreements[NB_ALL_POLICIES];
     unsigned long long counts[NB_ALL_POLICIES];
     bt_core_result_t statuses[NB_ALL_POLICIES];
@@ -544,7 +626,7 @@ static int bench_selftest(const policy_t *policies, int nb_policies,
             counts[p] = nodes;
             if (statuses[p] != BT_CORE_EXHAUSTED || nodes != reference) {
                 disagreements[p] = 1;
-                rc = -1;
+                coupled = 1;
             }
         }
     }
@@ -565,22 +647,25 @@ static int bench_selftest(const policy_t *policies, int nb_policies,
                " relancer avec --selftest-budget plus grand\n\n", budget);
         return 0;
     }
-    for (int p = 1; p < nb_policies; p++) {
-        if (disagreements[p]) {
-            fprintf(stderr, "AUTO-TEST ÉCHOUÉ : sur la racine morte #%d, « %s » explore"
-                    " %llu nœuds (statut %d) contre %llu pour « %s ». Un sous-arbre MORT"
-                    " ne dépend pas de l'ordre des valeurs : la permutation est fausse,"
-                    " les chiffres de ce run sont à jeter.\n",
-                    closed_root, policies[p].name, counts[p], (int)statuses[p], reference,
-                    policies[0].name);
+    if (coupled) {
+        printf("auto-test : sur la racine MORTE #%d, le nombre de nœuds DÉPEND de la"
+               " politique de valeurs :\n", closed_root);
+        printf("%-14s %14llu   (référence)\n", policies[0].name, reference);
+        for (int p = 1; p < nb_policies; p++) {
+            printf("%-14s %14llu%s\n", policies[p].name, counts[p],
+                   statuses[p] != BT_CORE_EXHAUSTED ? "   (non fermée !)" : "");
         }
+        printf("Les permutations ayant déjà été validées une par une, cela veut dire que\n"
+               "ce moteur lie l'ordre des VARIABLES à l'ordre des VALEURS (départage de\n"
+               "cases appris, p.ex.). Ce n'est pas un bogue, mais deux lectures tombent :\n"
+               "  - « l'ordre des valeurs est neutre pour la réfutation » (§7.2) ;\n"
+               "  - la comparaison de politiques mesure ici DEUX effets à la fois.\n\n");
+        return 0;
     }
-    if (rc == 0) {
-        printf("auto-test : racine morte #%d fermée en %llu nœuds, identique pour les"
-               " %d politiques — les permutations sont bien des permutations\n\n",
-               closed_root, reference, nb_policies);
-    }
-    return rc;
+    printf("auto-test : racine morte #%d fermée en %llu nœuds, identique pour les"
+           " %d politiques — l'ordre des valeurs n'influe pas sur l'arbre mort\n\n",
+           closed_root, reference, nb_policies);
+    return 0;
 }
 
 /* ==========================================================================
@@ -1155,6 +1240,12 @@ int main(int argc, char **argv)
             probe.compteur = 0;
             probe.all_rotate_part = rot;
             probe.map_part = map;
+            /* Contrôle DIRECT d'abord : il est fatal, et il désambiguïse le
+             * verdict du second (un désaccord de comptage ne peut plus être
+             * imputé à une permutation fausse une fois celle-ci validée). */
+            if (bench_check_permutations(policies, nb_policies, &roots[0]) != 0) {
+                return EXIT_FAILURE;
+            }
             if (bench_selftest(policies, nb_policies, &probe, roots, nb_roots,
                                idParts, selftest_budget, workdir) != 0) {
                 return EXIT_FAILURE;

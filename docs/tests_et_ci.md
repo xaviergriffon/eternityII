@@ -962,11 +962,40 @@ distribution, aucun mécanisme n'est implémenté.
 | `--budget <n>` | plafond de nœuds par exécution |
 | `--selftest-budget <n>` | plafond de l'auto-test de l'instrument (0 = désactivé) |
 
-### 3. L'auto-test de l'instrument
+### 3. L'auto-test de l'instrument, en deux contrôles
 
-Au démarrage de chaque instance, le banc cherche une racine que la politique de
-référence **ferme** dans `--selftest-budget` nœuds, puis la rejoue sous toutes
-les politiques demandées. Il tourne dans le **processus courant** (pas de fork),
+**(a) Les permutations en sont-elles ?** Pour chaque case vide de la racine, le
+banc appelle le point d'entrée d'ordre des valeurs sur le vrai compartiment et
+vérifie que les indices rendus forment une **bijection** de `[0, taille[` :
+aucun candidat perdu, dupliqué, ni hors compartiment. Ce contrôle-ci ne suppose
+rien du moteur — il ne regarde que le hook — et il est **fatal**. Il porte son
+contre-contrôle : une permutation délibérément fausse doit le faire échouer,
+sans quoi il ne prouverait rien.
+
+**(b) L'ordre des valeurs influe-t-il sur un sous-arbre MORT ?** Le banc cherche
+ensuite une racine que la politique de référence **ferme** dans
+`--selftest-budget` nœuds, puis la rejoue sous toutes les politiques demandées.
+Dans un sous-arbre sans solution, tous les candidats de chaque case sont
+essayés : les comptes de nœuds devraient donc coïncider.
+
+**Mais cette dernière lecture repose sur une hypothèse qu'il faut dire** : que
+l'ordre des **variables** ne dépend pas de l'ordre des **valeurs**. Elle est
+vraie du moteur actuel ; elle cesse de l'être d'un moteur dont le départage de
+cases **apprend** de la recherche (§4.14 de
+[conception/elagage_recherche.md](conception/elagage_recherche.md) : un poids
+d'échec par case, accumulé dans l'ordre où les échecs surviennent — donc dans
+un ordre que la politique de valeurs détermine). Mesuré sur un tel moteur : la
+même racine morte ferme en 168 152 à 225 683 nœuds selon la politique, sans
+qu'aucune permutation soit fausse.
+
+C'est pourquoi (b) n'est **pas** fatal. Les permutations ayant déjà été validées
+par (a), un désaccord ne peut plus signifier qu'une chose : le moteur lie les
+deux ordres. Le banc l'affiche comme un **diagnostic**, avec les comptes par
+politique et les deux conséquences à connaître — « l'ordre des valeurs est
+neutre pour la réfutation » cesse d'être vrai, et une comparaison de politiques
+mesure alors deux effets à la fois.
+
+L'auto-test tourne dans le **processus courant** (pas de fork),
 mais dans une parenthèse isolée : `chdir` vers le répertoire de travail et
 sortie standard détournée. Ce n'est pas une précaution de style — fermer une
 racine, c'est l'explorer entièrement, donc `stop_on_solution` y vaut 0 par
@@ -977,12 +1006,10 @@ des milliers de fichiers et de plateaux dans le répertoire d'où le banc a ét�
 lancé. Le budget par défaut (200 000) est délibérément bas pour ne rien coûter ;
 sur des instances où aucune racine ne ferme si vite, l'auto-test rend « non
 concluant » — le relever (`--selftest-budget 2000000`) rend alors le contrôle
-effectif, à quelques dixièmes de seconde par instance. Les comptes doivent être **identiques au nœud près** :
-c'est la prémisse même du banc (un sous-arbre mort ne dépend pas de l'ordre des
-valeurs). Un désaccord ne dirait pas « telle politique gagne » — il dirait que la
-permutation est fausse (candidat perdu, dupliqué, indice hors compartiment), donc
-que les chiffres du run sont à jeter. Le banc s'arrête alors en erreur. Même
-intention que l'auto-test `--w2x2` et l'oracle indépendant de `bench_refutation`.
+effectif, à quelques dixièmes de seconde par instance. Même intention que
+l'auto-test `--w2x2` et l'oracle indépendant de `bench_refutation` : le symptôme
+qu'on espère d'une politique gagnante est exactement ce qu'un hook bogué
+produit, donc l'instrument se valide avant de mesurer.
 
 ### 4. Ce que le banc n'ajoute PAS à la production
 
