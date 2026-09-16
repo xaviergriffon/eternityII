@@ -1914,6 +1914,17 @@ n'ont ni les tailles de compartiments ni la dureté du vrai 16×16. Ce que la me
 utile — que le gain **ne dépend pas du régime** : quatre régimes très différents, même
 verdict.
 
+**Le mécanisme est CONDITIONNÉ au forward-check.** Sa seule source de signal est le
+refus de `bt_forward_check`/`_fast` : compilé sans forward-check
+(`FORWARD_CHECK_K=0`), il n'a rien à apprendre, les poids restent à zéro et le
+départage retombe sur l'ordre positionnel — comportement correct, mais gain nul. Tout
+le mécanisme vit donc sous `#if FORWARD_CHECK_K > 0`, ce qui est aussi **nécessaire à la
+compilation d'une façon que la CI ne voit pas** : sans cette garde, `bt_frontier_fail`
+perd son unique appelant et clang refuse une `static inline` inutilisée sous `-Werror`,
+là où gcc ne la signale pas (`-Wunused-function` ne couvre que les statiques
+NON-inline). Le job `FORWARD_CHECK_K=0` de la CI passe en Linux/gcc pendant que le build
+macOS casse — le piège de plate-forme de `AGENTS.md`, mais dans l'autre sens.
+
 **Verrous.** `mrv_choose_cell_breaks_remaining_ties_by_failure_weight` (le sens, avec
 contre-contrôle ; et le poids ne prime jamais sur `nconstr`),
 `bt_frontier_fail_halves_all_weights_at_saturation` (compteur saturant, `nc_key` cohérent
