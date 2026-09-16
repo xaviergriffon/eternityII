@@ -257,6 +257,21 @@ static inline void bt_frontier_release(bt_frontier *f, int x, int y)
     f->nc_key[pos] = bt_nc_key(pos, f->nconstr[pos], f->weight[pos]);
 }
 
+/* Tout le départage appris vit sous cette garde : son unique source de signal
+ * est le REFUS du forward-check. Sans forward-check (`FORWARD_CHECK_K == 0`),
+ * il n'y a rien à apprendre — les poids resteraient à 0 et le départage
+ * retomberait sur l'ordre positionnel, ce qui est le comportement correct.
+ * La garde n'est donc pas qu'une formalité de compilation : elle dit que le
+ * gain de §4.14 est CONDITIONNÉ au forward-check.
+ *
+ * Elle est aussi nécessaire à la compilation, et d'une façon que la CI ne voit
+ * pas : sans elle, `bt_frontier_fail` perd son unique appelant (`bt_fc_failed`,
+ * déjà sous cette garde) et clang refuse une `static inline` inutilisée sous
+ * `-Werror`, là où gcc ne la signale pas (`-Wunused-function` ne couvre que
+ * les statiques NON-inline). Le job `FORWARD_CHECK_K=0` de la CI passe donc en
+ * Linux/gcc pendant que le build macOS casse — le piège de plate-forme
+ * habituel, à l'envers. */
+#if FORWARD_CHECK_K > 0
 /**
  * @brief Un échec du forward-check vient d'impliquer la case `pos` : son poids monte.
  *
@@ -280,6 +295,7 @@ static inline void bt_frontier_fail(bt_frontier *f, int pos)
         f->nc_key[p] = bt_nc_key(p, f->nconstr[p], f->weight[p]);
     }
 }
+#endif // FORWARD_CHECK_K > 0
 
 /**
  * @brief Met à jour la frontière après le placement d'une pièce en (cx, cy).
