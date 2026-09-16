@@ -139,7 +139,8 @@ tests/bench/bench_search.sh --nodes 5000000 --reps 5
 
 # Banc « CÔTÉ TROUVER » : coût de l'ATTEINTE d'une solution, sur des CLONES à solution
 # connue — la seule grandeur que les deux bancs ci-dessus ne peuvent PAS voir, puisqu'un
-# sous-arbre mort est exploré en entier quel que soit l'ordre des valeurs.
+# sous-arbre mort est exploré en entier quel que soit l'ordre des valeurs. Première
+# campagne (2 640 exécutions) : aucun ordre des valeurs ne bat celui de production.
 python3 tools/gen_clone.py --size 10 --inner-colours 17 --seed 1 --hints 5 --out-dir data/clones
 make bench-solve CPPFLAGS=-DETERN_PARTS=100 BENCH_SOLVE_ARGS="--instance-dir data/clones"
 ```

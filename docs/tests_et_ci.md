@@ -1002,6 +1002,27 @@ compilées dans le binaire de test et couvertes par
 `tests/bench/test_bench_solve_stats.c` — rattachées à `make test`, comme le
 cœur pur de `gen_root`. Le banc lui-même ne l'est pas.
 
+### 5. Ce que la première campagne a donné
+
+Résultat d'ensemble, sur 2 640 exécutions et quatre régimes d'instances :
+**aucun ordre des valeurs ne bat celui de production**, et le seul point de
+départ réellement distinct du choix de MRV est nettement plus mauvais. Détail,
+chiffres et décisions :
+[conception/banc_resolution_clones.md §6 et §7](conception/banc_resolution_clones.md).
+
+Trois enseignements de méthode, utiles avant toute campagne future :
+
+- **Mesurer le temps autant que les nœuds.** `mcv` gagne en nœuds sur une
+  cellule (p = 0,025) et perd en temps sur les quatre (1,27× à 1,40× par nœud).
+  En ne lisant que les nœuds, on l'adopterait.
+- **Compter les paires indécises comme telles.** Sur les cellules dures, c'est
+  la *part résolue au plafond* (14/60 contre 54/60) et non l'appariement qui
+  départage `center`, l'appariement restant indécis faute de paires complètes.
+- **Une référence censurée ne conclut pas.** Le coût « sans redémarrage » n'est
+  qu'une borne inférieure dès qu'une exécution bute sur le plafond, et la
+  censure joue dans le sens qui favoriserait le redémarrage : on ne peut donc
+  rien conclure contre lui sur ces cellules-là.
+
 ## Voir aussi
 
 - [tests/README.md](../tests/README.md) — organisation des suites, conventions, ajout d'un test.
