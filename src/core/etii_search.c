@@ -160,14 +160,21 @@ static void bt_init_constraints(key_part constraints[ETERN_SIZE][ETERN_SIZE],
 /** @brief Position d'une case dans les masques (ordre x-major, cf. ci-dessus). */
 #define BT_CELL_POS(x, y) ((x) * ETERN_SIZE + (y))
 
-/** @brief Largeur du champ `nconstr` dans la clé composite de `mrv_choose_cell`.
+/** @brief Largeurs des champs de la clé composite de `mrv_choose_cell`.
  *
- * Une case a 4 côtés, donc `nconstr` tient toujours sur 3 bits. La clé vaut
- * `(count << MRV_KEY_NC_BITS) | (MRV_KEY_NC_MAX - nconstr)` : le champ bas ne
- * doit jamais déborder sur `count`, sinon le critère principal (le MRV
- * lui-même) serait faussé — d'où la vérification à la compilation. */
+ * La clé vaut `(count << (NC + W)) | ((MRV_KEY_NC_MAX - nconstr) << W)
+ * | (MRV_KEY_W_MAX - weight)` : `count` (score MRV) en poids fort, puis
+ * `nconstr` DÉCROISSANT (§4.12), puis le poids d'échec appris DÉCROISSANT
+ * (§4.14 de docs/conception/elagage_recherche.md — la case qui a le plus
+ * souvent tué une branche est essayée d'abord). Une case a 4 côtés, donc
+ * `nconstr` tient sur 3 bits ; le poids est un compteur saturant sur 8 bits
+ * (`bt_frontier_fail`). Aucun champ bas ne doit déborder sur le champ au-dessus,
+ * sinon le critère principal serait faussé — d'où la vérification à la
+ * compilation. */
 #define MRV_KEY_NC_BITS 3
 #define MRV_KEY_NC_MAX  ((1 << MRV_KEY_NC_BITS) - 1)
+#define MRV_KEY_W_BITS  8
+#define MRV_KEY_W_MAX   ((1 << MRV_KEY_W_BITS) - 1)
 typedef char mrv_key_nc_fits_check[(4 <= MRV_KEY_NC_MAX) ? 1 : -1];
 
 /**
@@ -188,30 +195,40 @@ typedef struct {
      *  posées. Compteur, et non simple booléen : deux voisines peuvent
      *  contraindre la même case, le retrait de l'une ne la libère pas. */
     uint8_t nconstr[BT_CELLS];
+    /** Poids d'échec appris par case (§4.14) : incrémenté par
+     *  `bt_frontier_fail` à chaque échec du forward-check, sur la case morte
+     *  ET sur la case qui venait d'être posée ; à saturation (255) tous les
+     *  poids sont divisés par deux (ordre relatif conservé). Remis à zéro à
+     *  chaque racine par `bt_frontier_init` : l'apprentissage est intra-racine,
+     *  mesuré équivalent à un apprentissage persistant (−79,6 % contre −78,8 % de
+     *  nœuds de réfutation). Ce n'est PAS un état dérivable du plateau — la
+     *  re-dérivation des builds DEBUG_CHECK_POSSIBILITY ne le compare pas. */
+    uint8_t weight[BT_CELLS];
     /** Bas de la valeur de choix de `mrv_choose_cell_fast`, précalculé :
-     *  `((MRV_KEY_NC_MAX - nconstr) << MRV_POS_BITS) | pos`. Tenu en lockstep
-     *  avec `nconstr` (mêmes trois sites d'écriture) pour que le balayage n'ait
-     *  qu'une charge de 16 bits et un `or` par case au lieu de recalculer le
-     *  départage et d'y empiler la position. */
-    uint16_t nc_key[BT_CELLS];
+     *  `((MRV_KEY_NC_MAX - nconstr) << (W + POS)) | ((MRV_KEY_W_MAX - weight)
+     *  << POS) | pos`. Tenu en lockstep avec `nconstr` (trois sites) et
+     *  `weight` (`bt_frontier_fail`) pour que le balayage n'ait qu'une charge
+     *  de 32 bits et un `or` par case. */
+    uint32_t nc_key[BT_CELLS];
 } bt_frontier;
 
 /** @brief Largeur du champ position dans la valeur combinée de `mrv_choose_cell_fast`.
  *
- * `pos < BT_CELLS` doit tenir dans ce champ, `nconstr` (3 bits) au-dessus
- * dans 16 bits pour `nc_key`, et `count << (MRV_KEY_NC_BITS + MRV_POS_BITS)`
- * dans 32 bits : `count` ≤ ETERN_PARTS (9 bits), 20 bits en tout. Vérifié à
- * la compilation. */
+ * `pos < BT_CELLS` doit tenir dans ce champ, le poids (8 bits) et `nconstr`
+ * (3 bits) au-dessus, et `count << (NC + W + POS)` dans 31 bits : `count`
+ * ≤ ETERN_PARTS (9 bits), 28 bits en tout. Vérifié à la compilation. */
 #define MRV_POS_BITS 8
 #define MRV_POS_MASK ((1u << MRV_POS_BITS) - 1u)
+#define MRV_KEY_LOW_BITS (MRV_KEY_NC_BITS + MRV_KEY_W_BITS + MRV_POS_BITS)
 typedef char mrv_pos_fits_check[(BT_CELLS <= (1 << MRV_POS_BITS)
-                                 && (MRV_KEY_NC_BITS + MRV_POS_BITS) <= 16
-                                 && ((unsigned long)(ETERN_PARTS + 1) << (MRV_KEY_NC_BITS + MRV_POS_BITS)) < 0x7fffffffUL) ? 1 : -1];
+                                 && ((unsigned long)(ETERN_PARTS + 1) << MRV_KEY_LOW_BITS) < 0x7fffffffUL) ? 1 : -1];
 
-/** @brief Valeur de `bt_frontier.nc_key` pour une case à `nconstr` côtés contraints. */
-static inline uint16_t bt_nc_key(int pos, int nconstr)
+/** @brief Valeur de `bt_frontier.nc_key` pour une case à `nconstr` côtés contraints et de poids `weight`. */
+static inline uint32_t bt_nc_key(int pos, int nconstr, int weight)
 {
-    return (uint16_t)(((MRV_KEY_NC_MAX - nconstr) << MRV_POS_BITS) | pos);
+    return ((uint32_t)(MRV_KEY_NC_MAX - nconstr) << (MRV_KEY_W_BITS + MRV_POS_BITS))
+         | ((uint32_t)(MRV_KEY_W_MAX - weight) << MRV_POS_BITS)
+         | (uint32_t)pos;
 }
 
 
@@ -251,7 +268,7 @@ static void bt_frontier_init(bt_frontier *f, const struct possibility_packet *bo
             if (y < ETERN_SIZE - 1 && board->grid[x][y + 1] >= 0) n++;
             if (x > 0              && board->grid[x - 1][y] >= 0) n++;
             f->nconstr[pos] = (uint8_t)n;
-            f->nc_key[pos] = bt_nc_key(pos, n);
+            f->nc_key[pos] = bt_nc_key(pos, n, 0);
             if (n > 0) {
                 f->constrained[pos / 64] |= (uint64_t)1 << (pos % 64);
             }
@@ -266,7 +283,7 @@ static inline void bt_frontier_constrain(bt_frontier *f, int x, int y)
     if (f->nconstr[pos]++ == 0) {
         f->constrained[pos / 64] |= (uint64_t)1 << (pos % 64);
     }
-    f->nc_key[pos] = bt_nc_key(pos, f->nconstr[pos]);
+    f->nc_key[pos] = bt_nc_key(pos, f->nconstr[pos], f->weight[pos]);
 }
 
 /** @brief Une voisine de (x,y) vient d'être retirée : un côté de moins contraint. */
@@ -276,8 +293,48 @@ static inline void bt_frontier_release(bt_frontier *f, int x, int y)
     if (--f->nconstr[pos] == 0) {
         f->constrained[pos / 64] &= ~((uint64_t)1 << (pos % 64));
     }
-    f->nc_key[pos] = bt_nc_key(pos, f->nconstr[pos]);
+    f->nc_key[pos] = bt_nc_key(pos, f->nconstr[pos], f->weight[pos]);
 }
+
+/* Tout le départage appris vit sous cette garde : son unique source de signal
+ * est le REFUS du forward-check. Sans forward-check (`FORWARD_CHECK_K == 0`),
+ * il n'y a rien à apprendre — les poids resteraient à 0 et le départage
+ * retomberait sur l'ordre positionnel, ce qui est le comportement correct.
+ * La garde n'est donc pas qu'une formalité de compilation : elle dit que le
+ * gain de §4.14 est CONDITIONNÉ au forward-check.
+ *
+ * Elle est aussi nécessaire à la compilation, et d'une façon que la CI ne voit
+ * pas : sans elle, `bt_frontier_fail` perd son unique appelant (`bt_fc_failed`,
+ * déjà sous cette garde) et clang refuse une `static inline` inutilisée sous
+ * `-Werror`, là où gcc ne la signale pas (`-Wunused-function` ne couvre que
+ * les statiques NON-inline). Le job `FORWARD_CHECK_K=0` de la CI passe donc en
+ * Linux/gcc pendant que le build macOS casse — le piège de plate-forme
+ * habituel, à l'envers. */
+#if FORWARD_CHECK_K > 0
+/**
+ * @brief Un échec du forward-check vient d'impliquer la case `pos` : son poids monte.
+ *
+ * Départage appris de `mrv_choose_cell` (§4.14) : à score MRV et `nconstr`
+ * égaux, la case au poids le PLUS élevé — celle qui a le plus souvent tué une
+ * branche — est essayée d'abord. Le sens est MESURÉ, pas déduit : sur 418
+ * racines de production, poids élevé d'abord = −79,6 % de nœuds de réfutation
+ * et 410 fermetures contre 378 ; poids faible d'abord = +210 % et 313. Le
+ * poids est un compteur saturant : à 255, TOUS les poids sont divisés par
+ * deux (l'ordre relatif est conservé, les échecs récents pèsent plus que les
+ * anciens) et toutes les clés sont recalculées — rare, hors boucle chaude.
+ */
+static inline void bt_frontier_fail(bt_frontier *f, int pos)
+{
+    if (++f->weight[pos] < MRV_KEY_W_MAX) {
+        f->nc_key[pos] = bt_nc_key(pos, f->nconstr[pos], f->weight[pos]);
+        return;
+    }
+    for (int p = 0; p < BT_CELLS; p++) {
+        f->weight[p] >>= 1;
+        f->nc_key[p] = bt_nc_key(p, f->nconstr[p], f->weight[p]);
+    }
+}
+#endif // FORWARD_CHECK_K > 0
 
 /**
  * @brief Met à jour la frontière après le placement d'une pièce en (cx, cy).
@@ -509,6 +566,21 @@ static inline void fc_stat_bump(volatile unsigned long long *counter, unsigned l
 
 #if FORWARD_CHECK_K > 0
 /**
+ * @brief Échec du forward-check : la voisine morte (x, y) ET la case posée
+ *        (cx, cy) montent d'un poids (§4.14, cf. bt_frontier_fail).
+ *
+ * Les deux cases sont impliquées dans la contradiction — la seconde parce que
+ * c'est son remplissage qui a asséché la première. C'est la variante mesurée
+ * (−79,6 % de nœuds de réfutation) ; la variante « case morte seule » n'a pas été
+ * mesurée séparément.
+ */
+static inline void bt_fc_failed(bt_frontier *front, int x, int y, int cx, int cy)
+{
+    bt_frontier_fail(front, BT_CELL_POS(x, y));
+    bt_frontier_fail(front, BT_CELL_POS(cx, cy));
+}
+
+/**
  * @brief Forward-checking de la boucle chaude, basé sur le cache de contraintes.
  *
  * Inspecte les voisines géométriques de la pièce posée en `(cx, cy)` (au plus
@@ -536,6 +608,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
                             map_big_array *mapParts,
                             const uint64_t used[MRV_USED_WORDS],
                             const uint64_t *cell_mask[BT_CELLS],
+                            bt_frontier *front,
                             int cx, int cy)
 {
     // Même ordre que bt_propagate_place/undo (haut, droite, bas, gauche) :
@@ -584,6 +657,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
                     // case morte : aucune pièce candidate libre
                     fc_stat_bump(&fc_pruned_at[rank], 1);
                     fc_stat_bump(&fc_cells_studied, cells);
+                    bt_fc_failed(front, x, y, cx, cy);
                     return 0;
                 }
                 continue;
@@ -602,6 +676,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
             // case morte : aucune pièce candidate
             fc_stat_bump(&fc_pruned_at[rank], 1);
             fc_stat_bump(&fc_cells_studied, cells);
+            bt_fc_failed(front, x, y, cx, cy);
             return 0;
         }
 
@@ -618,6 +693,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
                 // case morte : toutes les pièces candidates sont déjà utilisées
                 fc_stat_bump(&fc_pruned_at[rank], 1);
                 fc_stat_bump(&fc_cells_studied, cells);
+                bt_fc_failed(front, x, y, cx, cy);
                 return 0;
             }
             continue;
@@ -639,6 +715,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
             // case morte : toutes les pièces candidates sont déjà utilisées
             fc_stat_bump(&fc_pruned_at[rank], 1);
             fc_stat_bump(&fc_cells_studied, cells);
+            bt_fc_failed(front, x, y, cx, cy);
             return 0;
         }
         if (free_count == 1) {
@@ -649,6 +726,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
                     fc_stat_bump(&fc_singleton_conflict, 1);
                     fc_stat_bump(&fc_pruned_at[rank], 1);
                     fc_stat_bump(&fc_cells_studied, cells);
+                    bt_fc_failed(front, x, y, cx, cy);
                     return 0;
                 }
             }
@@ -677,6 +755,7 @@ static int bt_forward_check(key_part constraints[ETERN_SIZE][ETERN_SIZE],
 static int bt_forward_check_fast(const struct possibility_packet *board,
                                  const uint64_t used[MRV_USED_WORDS],
                                  const uint64_t *cell_mask[BT_CELLS],
+                                 bt_frontier *front,
                                  int cx, int cy)
 {
     int8_t nx[4];
@@ -706,6 +785,7 @@ static int bt_forward_check_fast(const struct possibility_packet *board,
             // case morte : aucune pièce candidate libre
             fc_stat_bump(&fc_pruned_at[rank], 1);
             fc_stat_bump(&fc_cells_studied, cells);
+            bt_fc_failed(front, x, y, cx, cy);
             return 0;
         }
     }
@@ -1256,7 +1336,7 @@ static inline int mrv_finish_choice(const bt_frontier *front, int best_key, int 
     }
     *out_x = (uint8_t)(best_pos / ETERN_SIZE);
     *out_y = (uint8_t)(best_pos % ETERN_SIZE);
-    *out_count = best_key >> MRV_KEY_NC_BITS;
+    *out_count = best_key >> (MRV_KEY_NC_BITS + MRV_KEY_W_BITS);
     return 1;
 }
 
@@ -1313,10 +1393,13 @@ static int mrv_choose_cell(struct possibility_packet *board,
             // Clé composite : le plus petit `key` gagne, et l'ordre lexicographique
             // qu'elle encode EST la règle de choix MRV — count croissant d'abord,
             // puis nconstr DÉCROISSANT (le plus contraint gagne, cf. §4.12 de
-            // docs/conception/elagage_recherche.md), puis l'ordre des bits (`<`
-            // strict : le premier rencontré garde la main). Comparer une seule
-            // valeur au lieu de trois rend la réduction sans branchement.
-            int key = (count << MRV_KEY_NC_BITS) | (MRV_KEY_NC_MAX - front->nconstr[pos]);
+            // docs/conception/elagage_recherche.md), puis poids d'échec
+            // DÉCROISSANT (§4.14, cf. bt_frontier_fail), puis l'ordre des bits
+            // (`<` strict : le premier rencontré garde la main). Comparer une
+            // seule valeur au lieu de quatre rend la réduction sans branchement.
+            int key = (count << (MRV_KEY_NC_BITS + MRV_KEY_W_BITS))
+                    | ((MRV_KEY_NC_MAX - front->nconstr[pos]) << MRV_KEY_W_BITS)
+                    | (MRV_KEY_W_MAX - front->weight[pos]);
             int better = (key < best_key);
             best_key = better ? key : best_key;
             best_pos = better ? pos : best_pos;
@@ -1354,8 +1437,9 @@ static int mrv_choose_cell_fast(const uint64_t used[MRV_USED_WORDS],
     for (int k = 0; k < BT_MASK_WORDS; k++) {
         free_ids[k] = ~used[k];
     }
-    // Clé et position empilées dans UNE valeur : `(count << 11) | nc_key`, où
-    // `nc_key` = `((7 - nconstr) << 8) | pos` est précalculé par la frontière.
+    // Clé et position empilées dans UNE valeur : `(count << 19) | nc_key`, où
+    // `nc_key` = `((7 - nconstr) << 16) | ((255 - poids) << 8) | pos` est
+    // précalculé par la frontière.
     // Les positions étant énumérées en ordre croissant, le minimum strict de
     // cette valeur est exactement « plus petite clé, et à clé égale la
     // première rencontrée » — la règle de mrv_choose_cell — pour une seule
@@ -1367,7 +1451,7 @@ static int mrv_choose_cell_fast(const uint64_t used[MRV_USED_WORDS],
         // Bases du mot : l'indice dans le mot (`ctz`) suffit ensuite, sans
         // recomposer `pos` (la position est déjà dans `nc_key`).
         const uint64_t *const *masks_w = cell_mask + w * 64;
-        const uint16_t *nc_key_w = front->nc_key + w * 64;
+        const uint32_t *nc_key_w = front->nc_key + w * 64;
         while (bits != 0) {
             unsigned bit = (unsigned)__builtin_ctzll(bits);
             bits &= bits - 1;
@@ -1382,11 +1466,11 @@ static int mrv_choose_cell_fast(const uint64_t used[MRV_USED_WORDS],
             // la boucle. Un saut de moins par case, mesuré −1,0 % de cycles à
             // arbre identique — les nœuds morts sont trop rares pour que le
             // balayage complet qu'ils paient alors change quelque chose.
-            uint32_t cand = ((uint32_t)count << (MRV_KEY_NC_BITS + MRV_POS_BITS)) | nc_key_w[bit];
+            uint32_t cand = ((uint32_t)count << MRV_KEY_LOW_BITS) | nc_key_w[bit];
             best = (cand < best) ? cand : best;
         }
     }
-    if ((best >> (MRV_KEY_NC_BITS + MRV_POS_BITS)) == 0) {
+    if ((best >> MRV_KEY_LOW_BITS) == 0) {
         return 0; // sous-arbre mort : une case de frontière sans candidat libre
     }
 
@@ -1610,8 +1694,8 @@ backtrack:;
                     if (placed_count < ETERN_PARTS) {
                         fc_stat_bump(&fc_attempts, 1);
                         int alive = (fast && !singleton_conflict_check)
-                            ? bt_forward_check_fast(&board, used, cell_mask, cx, cy)
-                            : bt_forward_check(constraints, &board, client->map_part, used, cell_mask, cx, cy);
+                            ? bt_forward_check_fast(&board, used, cell_mask, &frontier, cx, cy)
+                            : bt_forward_check(constraints, &board, client->map_part, used, cell_mask, &frontier, cx, cy);
                         if (!alive) {
                             board.grid[cx][cy] = -2;
                             BOARD_SET_FACE(&board, position, 0);

@@ -271,7 +271,7 @@ BENCH_REFUT_BIN := tests/bench/bench_refutation
 
 .PHONY: bench-refutation
 bench-refutation:
-	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Werror -pthread -o $(BENCH_REFUT_BIN) tests/bench/bench_refutation.c $(TEST_MODULES) -lm
+	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests -Werror -pthread -o $(BENCH_REFUT_BIN) tests/bench/bench_refutation.c $(TEST_MODULES) -lm
 	./$(BENCH_REFUT_BIN) $(BENCH_REFUT_ARGS)
 
 # Variante GPU du banc de réfutation (option --pruner-profile --gpu) : mesure le
@@ -300,7 +300,7 @@ bench-refutation-gpu:
 	@command -v $(BENCH_NVCC) >/dev/null 2>&1 || { echo "bench-refutation-gpu exige nvcc (BENCH_NVCC=$(BENCH_NVCC) introuvable dans le PATH). Installez le toolkit CUDA ou indiquez BENCH_NVCC=/chemin/vers/nvcc." >&2; exit 1; }
 	@mkdir -p $(dir $(BENCH_GPU_OBJ))
 	$(BENCH_NVCC) $(BENCH_NVCCFLAGS) -DWITH_CUDA -Isrc -c src/app/gpu_pruner.cu -o $(BENCH_GPU_OBJ)
-	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -DWITH_CUDA -Werror -pthread \
+	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests -DWITH_CUDA -Werror -pthread \
 	    -o $(BENCH_REFUT_GPU_BIN) tests/bench/bench_refutation.c $(TEST_MODULES) $(BENCH_GPU_OBJ) \
 	    -L$(BENCH_CUDA_PATH)/lib64 -lcudart -lstdc++ -lm
 	./$(BENCH_REFUT_GPU_BIN) $(BENCH_REFUT_ARGS)

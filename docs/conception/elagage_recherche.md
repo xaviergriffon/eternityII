@@ -1802,11 +1802,184 @@ cases, §4.7). **`bench_search.sh` surestime donc ce que gagne le travail réell
 | §4.1 suppression du forward-check | **écartée** | +15,90 % de temps sans lui |
 | cumul local des compteurs de prunage | **écartée** | +1,00 %, jugé trop coûteux à prouver pour ce qu'il rapporte |
 | §4.11 backjumping dirigé par conflit | **écartée** | gain nul à 100,00 % sur 152 128 mesures |
+| §4.14 départage appris par poids d'échec | livrée | −79,6 % de nœuds, +32 fermetures (hors bilan §4.13, postérieure) ; reproduit sur une seconde machine, et gagnant aussi **côté trouver** sur les 4 cellules de `bench_solve` |
+| §4.15 appariement de Hall / comptage couleur à chaque nœud | **écartée** | plafond mesuré 0,35 à 3 % des nœuds |
 
 **Réserve de portée.** Toutes ces mesures viennent d'une seule machine (macOS, 16 cœurs,
 sans épinglage — `bench_search.sh` le signale dans chaque rapport). Les deltas appariés à
 ordre alterné sont robustes à la charge et à la dérive ; les valeurs absolues de nœuds/s ne
 sont pas transposables à un autre matériel.
+
+### 4.14 Départage appris des égalités MRV par poids d'échec — ADOPTÉ
+
+**Statut : mesuré sur stock de production, adopté.** Troisième critère de la clé
+composite de `mrv_choose_cell`, après le score MRV et `nconstr` (§4.12), avant l'ordre
+d'énumération.
+
+**L'idée.** Après §4.12, deux cases à score et `nconstr` égaux sont départagées par
+l'ordre positionnel `pos = x * ETERN_SIZE + y`, c'est-à-dire par un critère qui ne sait
+rien de la recherche en cours. Or le moteur apprend quelque chose à chaque échec du
+forward-check : *quelle* case vient de mourir, et *quel* placement l'a tuée. C'est le
+principe de `dom/wdeg` (Boussemart et al., 2004) ramené à sa forme la plus légère : un
+compteur d'échecs par case (`bt_frontier.weight`, `bt_frontier_fail`), incrémenté sur la
+voisine morte ET sur la case posée, saturant sur 8 bits (halving global à 255, l'ordre
+relatif est conservé et les échecs récents pèsent plus), remis à zéro à chaque racine. À
+égalité complète, la case au poids le plus ÉLEVÉ — celle qui a le plus souvent tué une
+branche — est essayée d'abord (*fail-first*).
+
+**Le sens et la valeur d'un départage ne se devinent pas — le contrôle aléatoire le prouve.**
+Quatre départages ont été comparés, appariés sur les mêmes racines, plus un contrôle :
+tirer l'ordre au hasard (permutation des positions, nouvelle à chaque racine, deux
+graines).
+
+**Mesure.** Stock de production `eternityII.back` (13 739 possibilités), les **418** racines
+de ≥ 130 pièces posées (population entière), plafond 2 000 000 nœuds, un seul moteur par
+binaire ; intersection explicite des racines fermées par les deux binaires comparés (cf.
+le piège de §4.13). Machine : 4 cœurs, Linux/gcc, `-mpopcnt`.
+
+| Départage à égalité de score et de `nconstr` | Fermées / 418 | Nœuds (racines fermées par les deux) | Gagne / perd / égal |
+|---|---|---|---|
+| ordre positionnel (`master`) | 378 | référence | — |
+| aléatoire, graine 1 | 385 | **−56,2 %** | 163 / 82 / 122 |
+| aléatoire, graine 2 | 386 | **−37,1 %** | 165 / 93 / 112 |
+| poids d'échec, FAIBLE d'abord | 313 | **+210 %** | 39 / 157 / 116 |
+| poids d'échec, ÉLEVÉ d'abord, persistant d'une racine à l'autre | 411 | **−78,8 %** | 213 / 36 / 128 |
+| **poids d'échec, ÉLEVÉ d'abord, remis à zéro par racine — adopté** | **410** | **−79,6 %** | 197 / 35 / 146 |
+
+Sur les 112 racines communes coûtant ≥ 10 000 nœuds en référence, le ratio de nœuds
+vaut **0,045 en médiane** (quartiles 0,025 et 0,12, pire cas ×7,7). 32 racines que la
+référence ne ferme pas en 2 M de nœuds sont fermées ; aucune dans l'autre sens. En temps
+réel alterné sur 60 racines : 16,2 s → 4,35 s, 52 → 57 fermées, débit par nœud inchangé
+(le coût du critère — une charge 32 bits au lieu de 16 dans le balayage, deux incréments
+par échec du forward-check — n'est pas mesurable).
+
+**Trois lectures.**
+
+1. **L'ordre positionnel était un mauvais départage en soi** : même le hasard le bat de
+   37 à 56 %. Toujours prendre la première case en haut à gauche concentre la croissance
+   dans une région et laisse mourir les branches tard ; c'est le seul critère de la clé
+   dont la direction n'avait jamais été mesurée.
+2. **Le sens est décisif et dans le sens *fail-first*** : la même information, lue à
+   l'envers, triple le coût. Comme en §4.12, ne pas inverser sans re-mesurer.
+3. **L'apprentissage est intra-racine** : remettre les poids à zéro à chaque racine coûte
+   moins d'un point sur le gain (−79,6 % contre −78,8 %) — c'est la variante retenue, sans
+   état global, donc sans question de portée entre racines, forks ou bancs.
+
+**Reproduction indépendante.** Rejouée sur une autre machine (i9-9880H, macOS/clang)
+avec le même protocole — mêmes 418 racines, même plafond, ordre de passes ABBA :
+378 → 410 fermetures, **−79,6 % de nœuds**, apparié **197 / 35 / 146**
+(`p = 1,4·10⁻²⁸` au test des signes), ratio médian **0,045** (q1 0,025, q3 0,120,
+pire 7,66×) sur les 112 racines à ≥ 10 000 nœuds, 32 racines gagnées et **aucune
+perdue**. Tous les chiffres du tableau ci-dessus retombent juste.
+
+**Le coût par nœud, isolé.** Comparés bruts, les deux binaires ne donnent pas le même
+débit : 3,11 contre 2,97 M nœuds/s, soit +4,9 % pour le départage appris. Ce n'est
+**pas** le coût du critère, et le distinguer demande une variante de mesure : garder
+les compteurs et leur mise à jour, mais retirer la contribution du poids à la clé.
+L'arbre exploré redevient alors celui de `master` **au nœud près** (38 526 664 des deux
+côtés, apparié 0/0/378, ratio 1,000 partout — le contrôle intégré de l'expérience), et
+le surcoût résiduel ressort à **−2,8 %** : un surcoût négatif étant impossible, cela
+situe le coût propre du mécanisme **sous le plancher de bruit** (±3 %), ce qui confirme
+le « débit par nœud inchangé » ci-dessus. Les +4,9 % observés bruts viennent donc d'un
+**mélange de nœuds** différent — la politique apprise dirige la recherche vers les cases
+qui échouent, et un nœud qui se termine par un échec du forward-check est le plus cher.
+
+**Côté TROUVER — le gain n'est pas réservé à la réfutation.** `bench_refutation` mesure
+le coût de fermeture d'un sous-arbre MORT. Le temps d'ATTEINTE d'une solution est une
+autre grandeur, mesurable seulement sur des clones à solution connue
+([banc_resolution_clones.md](banc_resolution_clones.md), `make bench-solve`) — et le
+§7.7 de ce document-là listait précisément le départage des cases comme l'axe qu'il
+n'avait pas su mesurer. Rejoué ici, 60 instances par cellule, plafond 2·10⁷ nœuds,
+politique de valeurs de production, passes alternées :
+
+| Cellule | Résolues `master` → appris | Médiane nœuds | Apparié nœuds | Apparié temps |
+|---|---|---|---|---|
+| `n10k14` (10×10, accessible) | 60/60 → 60/60 | 782 117 → **468 226** | 58 / 2 (p = 3,2·10⁻¹⁵) | 58 / 2 |
+| `n12k22` (12×12, accessible) | 60/60 → 60/60 | 232 188 → **100 546** | 59 / 1 (p = 1,1·10⁻¹⁶) | 59 / 1 |
+| `n10k13` (10×10, dur) | 54/60 → **58/60** | 5 898 930 → **3 575 133** | 52 / 2 (p = 1,6·10⁻¹³) | 52 / 2 |
+| `n12k20` (12×12, dur) | 56/60 → **60/60** | 6 256 228 → **2 795 474** | **56 / 0** (p = 2,8·10⁻¹⁷) | 56 / 0 |
+
+Gain apparié sur les quatre cellules, **en nœuds comme en temps**, part résolue au
+plafond en hausse là où elle n'était pas saturée, débit par nœud inchangé (4,08 vs
+4,11 et 3,19 vs 3,07 M nœuds/s). C'est la règle de décision du §3.5 de l'autre document
+satisfaite en entier — (a) gain apparié sur les quatre régimes, (c) coût par nœud nul.
+
+**Conséquence pour les bancs : ce départage COUPLE l'ordre des variables à l'ordre des
+valeurs.** Les poids s'accumulent dans l'ordre où les échecs surviennent, donc changer
+l'ordre des valeurs change le choix des cases. Mesuré : une racine morte ferme en
+425 451 nœuds sous les cinq politiques de `bench_solve` sur `master`, et en 168 152 à
+225 683 nœuds selon la politique avec ce départage. Cela n'affecte aucune des mesures
+ci-dessus, toutes faites à ordre des valeurs FIXÉ, mais deux lectures tombent : « l'ordre
+des valeurs est neutre pour la réfutation » (§7.2 de l'autre document) cesse d'être vrai,
+et une comparaison de politiques de valeurs mesure désormais deux effets à la fois.
+L'auto-test de `bench_solve` détecte et rapporte ce couplage au lieu de l'imputer à une
+permutation fausse.
+
+**Réserve de portée.** Le gain n'est prouvé qu'à partir de 130 pièces posées ; entre 100
+et 129, presque rien ne ferme en 2 M de nœuds dans les deux cas (6 contre 7 fermetures sur
+60 racines), et rien ne peut donc être dit sur le régime des racines peu profondes. La
+variante « poids sur la seule case morte » et un poids en critère principal (dom/wdeg
+complet, poids divisant le score) n'ont pas été mesurés. Les quatre cellules du côté
+« trouver » sont des CLONES calibrés : le §6.4 de l'autre document a consigné qu'elles
+n'ont ni les tailles de compartiments ni la dureté du vrai 16×16. Ce que la mesure
+établit n'est donc pas une extrapolation au puzzle réel, mais quelque chose de plus
+utile — que le gain **ne dépend pas du régime** : quatre régimes très différents, même
+verdict.
+
+**Le mécanisme est CONDITIONNÉ au forward-check.** Sa seule source de signal est le
+refus de `bt_forward_check`/`_fast` : compilé sans forward-check
+(`FORWARD_CHECK_K=0`), il n'a rien à apprendre, les poids restent à zéro et le
+départage retombe sur l'ordre positionnel — comportement correct, mais gain nul. Tout
+le mécanisme vit donc sous `#if FORWARD_CHECK_K > 0`, ce qui est aussi **nécessaire à la
+compilation d'une façon que la CI ne voit pas** : sans cette garde, `bt_frontier_fail`
+perd son unique appelant et clang refuse une `static inline` inutilisée sous `-Werror`,
+là où gcc ne la signale pas (`-Wunused-function` ne couvre que les statiques
+NON-inline). Le job `FORWARD_CHECK_K=0` de la CI passe en Linux/gcc pendant que le build
+macOS casse — le piège de plate-forme de `AGENTS.md`, mais dans l'autre sens.
+
+**Verrous.** `mrv_choose_cell_breaks_remaining_ties_by_failure_weight` (le sens, avec
+contre-contrôle ; et le poids ne prime jamais sur `nconstr`),
+`bt_frontier_fail_halves_all_weights_at_saturation` (compteur saturant, `nc_key` cohérent
+sur toutes les cases), `mrv_choose_cell_fast_matches_generic_with_failure_weights` (chemin
+rapide = générique à poids non nuls), `bt_forward_check_failure_bumps_dead_and_placed_cells`
+(qui reçoit un poids, et qui n'en reçoit pas), tous dans `tests/core/test_etii_search.c` ;
+et le verrou d'intégration existant sur le vrai puzzle 4×4 (même nombre de solutions).
+
+### 4.15 Plafond des raisonnements globaux sous MRV : appariement de Hall et comptage couleur — FAMILLE CLOSE
+
+**Statut : mesuré, sans code de production.** Répond aux portes laissées ouvertes par §4.3
+(« reprendre après MRV si le recoupement avec le forward-check diminue ») et §4.4.
+
+**Méthode.** Copie instrumentée du moteur (hors dépôt), rejouant des racines du stock de
+production. À CHAQUE nœud, deux tests globaux sont évalués sur la frontière (cases vides
+contraintes) : un **appariement maximal** frontière ↔ pièces libres (algorithme de Kuhn sur
+les masques `bucket_id_mask & ~used` — la condition de Hall complète, dont §4.4 n'était
+que le cas |S| = 2 entre voisines) et le **comptage couleur** demande/offre de §4.3. Les
+nœuds où une case de frontière n'a déjà plus aucun candidat sont exclus (le balayage MRV
+les voit au nœud suivant). Pour chaque tir, on compte les nœuds explorés SOUS le nœud
+déclencheur avant que le moteur ne remonte : c'est la borne supérieure absolue de ce que
+le test pourrait économiser, avant tout coût.
+
+| Racines | Nœuds | Tirs Hall | Nœuds sous un tir Hall | Tirs couleur | Nœuds sous un tir couleur |
+|---|---|---|---|---|---|
+| 12 racines de 130-136 pièces | 7 494 265 | 23 100 | **0,35 %** | 237 | 0,005 % |
+| 8 racines de 100-120 pièces | 7 999 992 | 32 364 | **1,16 %** | 2 186 | 0,03 % |
+| 4 racines de 10-20 pièces | 2 999 997 | 53 244 | **3,0 %** | 14 621 | 0,49 % |
+
+La déficience de l'appariement vaut 1 dans plus de 99 % des tirs, et le moteur remonte
+au-dessus du nœud déclencheur après 0 ou 1 niveau dans 75 à 88 % des cas. Autrement dit
+le forward-check et le balayage MRV trouvent déjà, un ou deux nœuds plus tard, ce qu'un
+appariement complet verrait : **une branche meurt au placement suivant, jamais « à
+distance »**. Le profil par profondeur de ces mêmes exécutions le confirme : les nœuds se
+concentrent entre 150 et 180 pièces, avec 2,0 à 2,7 candidats par case choisie et 30 à
+40 % de cases forcées, et les détections de case morte par le balayage lui-même sont
+rares (0,06 % des nœuds) — la mort est constatée par le forward-check du placement.
+
+**Décision : ne pas implémenter, ni Hall complet, ni comptage couleur ciblé (§4.3), ni
+filtrage global à la Benoist-Bourreau.** Le plafond de la famille entière est de 0,35 % à
+3 % des nœuds avant d'en payer le coût, sur la population qui compte (racines profondes).
+C'est la mesure qui manquait à §4.3 et §4.4 ; le levier restant est la forme de l'arbre
+(§4.14), pas l'élagage.
 
 ## 5. Arbitrages tranchés
 
@@ -1916,6 +2089,8 @@ sont pas transposables à un autre matériel.
   ne pas oublier : §4.4, §4.5 et §4.6b ont été écartés/désactivés à cause du mur à 74, qui a
   bougé — à remesurer, cf. §4.7.
 
+- **Départage MRV appris (§4.14) : adopté, poids ÉLEVÉ d'abord, remis à zéro par racine.** Mesuré −79,6 % de nœuds de réfutation et 410/418 fermetures contre 378 ; le sens inverse coûte +210 %, et le contrôle aléatoire bat déjà l'ordre positionnel de 37 à 56 %. Ne pas inverser le sens, ne pas revenir à l'ordre positionnel sans re-mesurer.
+- **Pas de raisonnement global à chaque nœud (§4.15) : appariement de Hall complet et comptage couleur plafonnent à 0,35 – 3 % des nœuds épargnables.** Ferme les portes laissées ouvertes par §4.3 et §4.4 : sous MRV, une branche meurt au placement suivant.
 - **Pas de table de région sur les zones d'angle, ni d'élimination par le cadre (§4.9).**
   Écartée **sans implémentation**, cas unique dans ce document : quatre mesures statiques
   suffisent. La table est pourtant tractable (2 633 221 remplissages du 3×3 d'angle sans
