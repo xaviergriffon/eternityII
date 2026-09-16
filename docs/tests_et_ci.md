@@ -966,7 +966,18 @@ distribution, aucun mécanisme n'est implémenté.
 
 Au démarrage de chaque instance, le banc cherche une racine que la politique de
 référence **ferme** dans `--selftest-budget` nœuds, puis la rejoue sous toutes
-les politiques demandées. Les comptes doivent être **identiques au nœud près** :
+les politiques demandées. Il tourne dans le **processus courant** (pas de fork),
+mais dans une parenthèse isolée : `chdir` vers le répertoire de travail et
+sortie standard détournée. Ce n'est pas une précaution de style — fermer une
+racine, c'est l'explorer entièrement, donc `stop_on_solution` y vaut 0 par
+nécessité, et toute solution rencontrée en chemin passe par `log_solution`
+(un fichier `solution_<pid>_<seq>` dans le répertoire courant, la grille
+complète sur stdout). Sans cet isolement, une campagne de 60 instances déverse
+des milliers de fichiers et de plateaux dans le répertoire d'où le banc a été
+lancé. Le budget par défaut (200 000) est délibérément bas pour ne rien coûter ;
+sur des instances où aucune racine ne ferme si vite, l'auto-test rend « non
+concluant » — le relever (`--selftest-budget 2000000`) rend alors le contrôle
+effectif, à quelques dixièmes de seconde par instance. Les comptes doivent être **identiques au nœud près** :
 c'est la prémisse même du banc (un sous-arbre mort ne dépend pas de l'ordre des
 valeurs). Un désaccord ne dirait pas « telle politique gagne » — il dirait que la
 permutation est fausse (candidat perdu, dupliqué, indice hors compartiment), donc

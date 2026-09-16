@@ -880,28 +880,34 @@ static void print_tally(const policy_t *policies, int nb_policies,
      * relancer une politique déterministe rejouerait la même exécution. */
     printf("\ncoût attendu d'un redémarrage à seuil (lecture de la distribution,\n"
            "aucun mécanisme : ne vaut que pour une politique ALÉATOIRE) :\n");
-    printf("%-10s %13s %9s %16s %16s\n",
-           "politique", "seuil", "P(succès)", "E[coût] (nœuds)", "sans redémarrage");
+    printf("%-10s %13s %9s %16s %18s\n",
+           "politique", "seuil", "P(succès)", "E[coût] (nœuds)", "E sans redémarrage");
     for (int p = 0; p < nb_policies; p++) {
-        double no_restart[MAX_RUNS];
-        int nb_solved = 0;
+        /* La référence est une MOYENNE, pas la médiane. `expected_nodes` est un
+         * coût ESPÉRÉ ; le comparer à une médiane sur une distribution à queue
+         * lourde fausse la lecture au détriment du redémarrage, la médiane
+         * étant très en dessous de la moyenne. Une exécution non résolue est
+         * comptée à sa valeur observée (le plafond), donc la référence est
+         * alors une BORNE INFÉRIEURE de E[N] — signalée par « >= ». */
+        double sum_nodes = 0.0;
+        int censored = 0;
         for (int i = 0; i < series[p].count; i++) {
-            if (series[p].solved[i]) {
-                no_restart[nb_solved++] = series[p].nodes[i];
+            sum_nodes += series[p].nodes[i];
+            if (!series[p].solved[i]) {
+                censored++;
             }
         }
-        double sorted[MAX_RUNS];
-        memcpy(sorted, no_restart, sizeof(double) * (size_t)nb_solved);
-        bench_stats_sort(sorted, nb_solved);
-        double baseline = bench_stats_median_sorted(sorted, nb_solved);
+        double baseline = series[p].count > 0 ? sum_nodes / (double)series[p].count : 0.0;
+        const char *bound = (censored > 0) ? ">=" : "  ";
         for (double c = 1e4; c <= (double)budget; c *= 10.0) {
             bench_restart_t r = bench_stats_restart(series[p].nodes, series[p].solved,
                                                     series[p].count, c);
             if (r.expected_nodes < 0) {
                 continue;
             }
-            printf("%-10s %13.0e %8.0f%% %16.0f %16.0f\n",
-                   policies[p].name, c, 100.0 * r.p_success, r.expected_nodes, baseline);
+            printf("%-10s %13.0e %8.0f%% %16.0f %15s %.0f\n",
+                   policies[p].name, c, 100.0 * r.p_success, r.expected_nodes,
+                   bound, baseline);
         }
     }
 }

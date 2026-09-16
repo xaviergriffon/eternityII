@@ -1,7 +1,7 @@
 # Banc « côté trouver » : clones d'Eternity II à solution connue
 
-**Statut : en cours d'implémentation — PR1 à PR3 livrées, PR4/PR5 (campagnes de
-mesure) à faire.** Suite 3 de la campagne du 2026-09-16 (§4.14/§4.15 de
+**Statut : en cours — PR1 à PR3 livrées, PR4 (calibration) mesurée et consignée
+au §6, PR5 (campagne de politiques) au §7.** Suite 3 de la campagne du 2026-09-16 (§4.14/§4.15 de
 [elagage_recherche.md](elagage_recherche.md)) : après le départage appris, la seule
 grandeur que le projet ne sait pas encore mesurer est le temps pour **trouver** la
 solution, par opposition au coût pour **réfuter** un sous-arbre.
@@ -18,8 +18,8 @@ et [compilation.md](../compilation.md#tailles-supportées).
 | 1 | **livrée** | `ETERN_SIZE` dérivé d'`ETERN_PARTS` pour 16/64/100/144/196/256 (toute autre valeur : `#error`), `FACES_USED_SIZE` en expression unique, parcours `directions[]`/`dirx[]`/`diry[]` construit à l'exécution pour les tailles de clone, genèse branchée sur `indices_file != NULL` (runtime, plus `#if ETERN_PARTS == 256`), option `--indices-file`, bornes en dur levées, taille 100 ajoutée à la matrice `WERROR=1` de la CI |
 | 2 | **livrée** | `tools/gen_clone.py` : tirage équilibré, rejet des doublons et des pièces symétriques, indices aux positions relatives officielles, auto-contrôle par ré-assemblage **depuis les fichiers produits**, passage par `validate_pieces.py` |
 | 3 | **livrée** | `tests/bench/bench_solve.c`, cible `make bench-solve`, hook `ETII_BENCH_HOOKS` d'ordre des valeurs, cœur pur `bench_solve_stats.{h,c}` testé dans `make test`, auto-test de l'instrument |
-| 4 | à faire | Campagne de calibration (n ∈ {8, 10, 12}, familles A et B) |
-| 5 | à faire | Campagne de politiques (§3.4) et décisions |
+| 4 | **mesurée** (§6) | Calibration : **aucune des deux familles du §3.2 ne donne deux tailles exploitables**, et le comptage de l'annexe n'est pas une échelle de dureté transposable d'une taille à l'autre. Quatre cellules retenues à la place, calibrées par le nombre de couleurs |
+| 5 | **mesurée** (§7) | Campagne de politiques sur les quatre cellules (60 instances chacune) |
 
 **Verrou de PR1 tenu** : un clone 10×10 à 17 couleurs et 5 indices est résolu de bout en
 bout par `./eternityII test … --indices-file … --stop-on-solution`, et le plateau trouvé
@@ -228,7 +228,118 @@ n'est pas un résultat : c'est une propriété de la calibration, à consigner c
 - Une racine tirée d'un stock (travail délégué) plutôt que la genèse : hors de ce plan,
   le banc est mono-processus par construction.
 
-## 6. Découpage en PR
+## 6. Mesures — PR4, campagne de calibration (2026-09-16)
+
+**Protocole.** Pour chaque cellule : 10 instances (graines 1 à 10), 5 indices,
+politique de production (`natural`, racine `genesis`), plafond 5·10⁷ nœuds pour
+le premier tableau et 2·10⁷ pour le balayage. Machine : i9-9880H, macOS/clang,
+binaire `-O3`. Médiane calculée sur les seules exécutions résolues.
+
+### 6.1 Les deux familles du §3.2, mesurées
+
+| Cellule | n | k | log₁₀E (5 indices) | Résolues | Médiane nœuds |
+|---|---|---|---|---|---|
+| A8  | 8  | 17 | −45,3 | 10/10 | **60** |
+| B8  | 8  | 6  | −7,3  | 3/10  | 4,0·10⁶ |
+| A10 | 10 | 17 | −50,0 | 10/10 | 2,1·10⁴ |
+| B10 | 10 | 9  | −10,2 | **0/10** | — |
+| A12 | 12 | 17 | −47,0 | **0/10** | — |
+| B12 | 12 | 12 | −13,7 | **0/10** | — |
+
+**Aucune des deux familles ne donne deux tailles exploitables.** La famille A
+passe de trivial (60 nœuds en 8×8 — MRV descend droit sur la solution) à hors
+d'atteinte (12×12) en sautant par-dessus la fenêtre visée : la seule taille
+utilisable, 10×10, y est encore sous la borne basse (2,1·10⁴ pour 10⁵ visés).
+La famille B, elle, n'est jamais vraiment atteignable : marginalement en 8×8
+(3 instances sur 10), plus du tout dès 10×10.
+
+**La règle de décision du §3.5 — « gagner dans les deux familles et sur deux
+tailles » — n'est donc pas satisfiable telle qu'elle est écrite.** Ce n'est pas
+un défaut du banc : c'est le résultat que la calibration était chargée de
+produire.
+
+### 6.2 Le comptage de l'annexe n'est pas une échelle de difficulté
+
+La famille B repose entièrement sur une équivalence : *même nombre attendu de
+solutions accidentelles ⇒ même dureté*. La mesure la réfute directement — les
+trois cellules construites pour être **également dures** ne le sont pas, et
+l'écart n'est pas marginal :
+
+| Cellule | log₁₀E (5 indices) | Résolues à 5·10⁷ |
+|---|---|---|
+| B8  | −7,3  | 3/10 |
+| B10 | −10,2 | 0/10 |
+| B12 | −13,7 | 0/10 |
+
+Le balayage du §6.3 précise le diagnostic. **À taille fixée**, E ordonne
+correctement : en 12×12, de k = 17 à k = 34, log₁₀E descend de −47 à −113 et la
+médiane passe de « hors d'atteinte » à 5,3·10³ — plus l'instance est
+surcontrainte, plus l'élagage mord, plus la recherche est courte. **Entre deux
+tailles, l'ordre s'inverse** :
+
+| Cellule | log₁₀E (5 indices) | Médiane nœuds |
+|---|---|---|
+| n10k17 | −50,0 | 2,1·10⁴ |
+| n12k22 | −71,6 | 2,9·10⁵ (14× **plus** dur) |
+| n10k14 | −37,8 | 7,4·10⁵ |
+| n12k20 | −62,5 | 5,1·10⁶ (7× **plus** dur) |
+
+Vingt et un ordres de grandeur d'E de moins, et une instance 14 fois plus dure.
+E mesure une **densité de solutions** ; le coût de recherche, lui, dépend aussi
+du nombre de pièces à poser, que E ne voit pas. Les deux grandeurs ne sont
+comparables qu'à taille égale.
+
+**Ce que l'annexe garde.** Sa conclusion du §1 — solution quasi unique,
+≈ 10¹ solutions accidentelles sans les indices contre ≈ 10⁻¹³ avec — reste
+valide : c'est un comptage, et c'est bien ce qu'elle sait faire. Seul son emploi
+comme **échelle de dureté** (la définition de la famille B) est écarté.
+
+### 6.3 Balayage du nombre de couleurs, à taille fixée
+
+La taille est un levier trop grossier ; `k` en est un fin. Balayage à 10
+instances, plafond 2·10⁷ :
+
+| n | k | log₁₀E (5 indices) | Résolues | Médiane | Moy. géom. |
+|---|---|---|---|---|---|
+| 10 | 17 | −50,0 | 10/10 | 2,1·10⁴ | 2,0·10⁴ |
+| 10 | **14** | −37,8 | **10/10** | **7,4·10⁵** | 6,7·10⁵ |
+| 10 | **13** | −33,2 | 7/10 | **5,6·10⁶** | 3,6·10⁶ |
+| 10 | 12 | −28,2 | 0/10 | — | — |
+| 10 | 11 | −22,7 | 0/10 | — | — |
+| 12 | 34 | −113,2 | 10/10 | 5,3·10³ | 9,2·10³ |
+| 12 | 28 | −94,7 | 10/10 | 9,4·10³ | 1,1·10⁴ |
+| 12 | 24 | −79,9 | 10/10 | 8,0·10⁴ | 5,1·10⁴ |
+| 12 | **22** | −71,6 | **10/10** | **2,9·10⁵** | 2,5·10⁵ |
+| 12 | **20** | −62,5 | **10/10** | **5,1·10⁶** | 4,1·10⁶ |
+
+**La fenêtre 10⁵–10⁷ tient en un ou deux crans de couleur.** En 10×10 elle est
+bornée par k = 14 et k = 13 : un cran au-dessus la médiane tombe à 2,1·10⁴, un
+cran en dessous plus rien n'aboutit. Le régime change d'environ un ordre de
+grandeur par couleur retirée — à comparer aux ~5 unités de log₁₀E que le même
+cran déplace.
+
+### 6.4 Cellules retenues pour la campagne de politiques
+
+| Cellule | n | k | log₁₀E | Médiane | Rôle |
+|---|---|---|---|---|---|
+| `n10k14` | 10 | 14 | −37,8 | 7,4·10⁵ | 10×10, régime « accessible » |
+| `n10k13` | 10 | 13 | −33,2 | 5,6·10⁶ | 10×10, régime « dur » |
+| `n12k22` | 12 | 22 | −71,6 | 2,9·10⁵ | 12×12, régime « accessible » |
+| `n12k20` | 12 | 20 | −62,5 | 5,1·10⁶ | 12×12, régime « dur » |
+
+**Substitution assumée au §3.2**, et ce qu'elle coûte : les familles A (mêmes
+couleurs) et B (même dureté) sont remplacées par une grille **deux tailles ×
+deux régimes de dureté**, tous calibrés dans la fenêtre. L'intention du §3.2 est
+préservée — un classement de politiques qui change d'une cellule à l'autre est
+une propriété de la calibration, pas un résultat. Ce qui est perdu est explicite :
+aucune cellule n'a les tailles de compartiments du vrai puzzle (c'était l'apport
+de la famille A, qui exigeait k = 17), et aucune n'a sa dureté au sens du
+comptage (c'était celui de la famille B, dont le §6.2 montre qu'il ne mesurait
+pas ce qu'il prétendait). **Les conclusions de la campagne ne se transportent
+donc au 16×16 qu'avec cette réserve**, et la robustesse d'un classement se juge
+sur sa stabilité à travers les quatre cellules, pas sur une extrapolation.
+
+## 7. Découpage en PR
 
 | PR | Contenu | Risque | Livrable / verrou |
 |---|---|---|---|
