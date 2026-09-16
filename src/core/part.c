@@ -410,7 +410,7 @@ void check_array(struct array_part *apart)
 		for (int i = 0; i < apart->size; i++)
 		{
 			struct part p = apart->parts[i];
-			if (p.id < 0 || p.id > 256)
+			if (p.id < 0 || p.id > ETERN_PARTS)
 			{
 				log_info("p[%i] id false:%i\n", i, p.id);
 				print_part(&p);

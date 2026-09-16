@@ -1,0 +1,1136 @@
+/*
+ * Banc « CÔTÉ TROUVER » : combien coûte l'ATTEINTE d'une solution ?
+ *
+ * Pourquoi ce banc existe, à côté de tests/bench/bench_refutation.c :
+ *
+ *   - `bench_refutation` mesure le coût de la PREUVE qu'un sous-arbre est mort.
+ *     Dans un sous-arbre mort, TOUS les candidats d'une case sont essayés, quel
+ *     que soit leur ordre : le compte de nœuds d'une réfutation est donc
+ *     rigoureusement INDÉPENDANT de l'ordre des valeurs.
+ *   - `bench_search.sh` mesure un débit (nœuds/s) depuis la genèse, avec
+ *     `max_result` en garde-fou : il ne voit pas davantage l'ordre des valeurs.
+ *
+ * Or c'est précisément l'ordre des valeurs (quelle pièce essayer d'abord sur
+ * une case) et le choix du point de départ qui décident À QUEL MOMENT la
+ * branche portant la solution est atteinte. Le puzzle réel n'ayant jamais été
+ * résolu, rien ne permet de mesurer cela sur `data/pieces.csv` : ce banc tourne
+ * donc sur des CLONES à solution connue (`tools/gen_clone.py`), construits
+ * autour d'une solution plantée.
+ *
+ * Conception complète : docs/conception/banc_resolution_clones.md.
+ *
+ * Ce que ce fichier n'ajoute PAS au chemin de production :
+ *   - l'ordre des valeurs est un `#ifdef ETII_BENCH_HOOKS` d'etii_search.c,
+ *     défini par cette seule unité de compilation (cf. la doc du hook) ;
+ *   - une exécution = un PROCESSUS FILS, donc `stop_on_solution` est exercé tel
+ *     quel (`record_solution` sort par `exit()`) sans qu'aucun retour
+ *     « solution trouvée » n'ait à être ajouté au moteur.
+ *
+ * Compilation/exécution : `make bench-solve` (voir le makefile). La taille du
+ * plateau est celle du binaire : `make bench-solve CPPFLAGS=-DETERN_PARTS=100`
+ * pour des clones 10×10.
+ */
+#include <dirent.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+/* Le hook d'ordre des valeurs doit être visible AVANT l'inclusion du moteur :
+ * etii_search.c déclare `etii_bench_value_order` sous ce drapeau et l'appelle
+ * à l'ouverture de chaque niveau. La définition, elle, vient plus bas dans
+ * cette même unité de compilation. */
+#define ETII_BENCH_HOOKS 1
+
+/* L'unité de compilation complète : le moteur est `static`. Même technique que
+ * tests/bench/bench_refutation.c et tests/core/test_etii_search.c — d'où
+ * l'absence d'etii_search.c de la liste des modules liés (cf. makefile). */
+#include "core/etii_search.c"
+
+#include "core/readdata.h"
+#include "core/part.h"
+#include "core/possibility.h"
+#include "core/datamanager.h"
+#include "ui/logger.h"
+#include "app/etii_client.h"
+
+#include "bench_solve_stats.h"
+
+#define MAX_INSTANCES 64
+#define MAX_SEEDS     16
+#define MAX_RUNS      (MAX_INSTANCES * MAX_SEEDS)
+
+/* ==========================================================================
+ * Politiques comparées (§3.4 du document de conception)
+ * ========================================================================== */
+
+/** @brief Ordre dans lequel les candidats d'une case sont essayés. */
+typedef enum {
+    /** Ordre naturel du compartiment : c'est EXACTEMENT la production
+     *  (l'ordre d'arène, §4.8 de docs/conception/elagage_recherche.md, dit
+     *  « rare_first »). Le hook rend NULL, aucune indirection. */
+    VO_NATURAL = 0,
+    /** L'ordre inverse — le contrôle « common_first » vis-à-vis du précédent. */
+    VO_REVERSE,
+    /** Permutation tirée au sort. Contrôle OBLIGATOIRE : §4.14 a montré qu'un
+     *  ordre « naturel » peut perdre contre le hasard, donc aucune politique
+     *  ordonnée ne se juge sans lui. */
+    VO_RANDOM,
+    /** Valeur la MOINS contraignante : maximise la somme des candidats encore
+     *  libres sur les voisines vides une fois la pièce posée. */
+    VO_LCV,
+    /** Valeur la PLUS contraignante : la même somme, minimisée. */
+    VO_MCV,
+} value_order_t;
+
+/** @brief D'où part la recherche (§3.4, axe « point de départ »). */
+typedef enum {
+    /** La genèse de production : `search_possiblity_light` choisit lui-même la
+     *  case (MRV) et la développe. C'est ce que fait `first_possibility`. */
+    ROOT_GENESIS = 0,
+    /** Développe la case vide la plus proche du centre du plateau. */
+    ROOT_CENTER,
+    /** Développe le premier coin vide. */
+    ROOT_BORDER,
+} root_policy_t;
+
+typedef struct {
+    const char *name;
+    value_order_t value_order;
+} policy_t;
+
+static const policy_t ALL_POLICIES[] = {
+    { "natural", VO_NATURAL },
+    { "reverse", VO_REVERSE },
+    { "random",  VO_RANDOM  },
+    { "lcv",     VO_LCV     },
+    { "mcv",     VO_MCV     },
+};
+#define NB_ALL_POLICIES ((int)(sizeof(ALL_POLICIES) / sizeof(ALL_POLICIES[0])))
+
+static const struct { const char *name; root_policy_t root; } ALL_ROOTS[] = {
+    { "genesis", ROOT_GENESIS },
+    { "center",  ROOT_CENTER  },
+    { "border",  ROOT_BORDER  },
+};
+#define NB_ALL_ROOTS ((int)(sizeof(ALL_ROOTS) / sizeof(ALL_ROOTS[0])))
+
+/* ==========================================================================
+ * État du hook d'ordre des valeurs (fils uniquement)
+ * ========================================================================== */
+
+static value_order_t g_value_order = VO_NATURAL;
+static uint64_t      g_rng_state   = 1;
+static uint16_t     *g_order_buf   = NULL;   /* [ETERN_PARTS][g_order_stride] */
+static int           g_order_stride = 0;
+static map_big_array   *g_map = NULL;
+static struct array_part *g_rot = NULL;
+static int8_t            g_all_face = 0;
+
+/** @brief xorshift64* : générateur reproductible, indépendant de la libc. */
+static uint64_t bench_rand(void)
+{
+    uint64_t x = g_rng_state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    g_rng_state = x;
+    return x * 0x2545F4914F6CDD1DULL;
+}
+
+/**
+ * @brief Somme des candidats encore libres sur les voisines VIDES de (cx,cy)
+ *        une fois `cand` posée — le score de LCV/MCV.
+ *
+ * Réutilise les primitives du moteur (`what_search_in_grid_to_key`,
+ * `map_bucket_id_mask`, `map_mask_free_count`) plutôt qu'un calcul maison :
+ * la mesure doit porter sur le POUVOIR de l'heuristique, pas sur une
+ * implémentation particulière, et aucune divergence de convention de faces
+ * n'est alors possible. Repli par parcours du compartiment quand le masque est
+ * absent (map hors gabarit), exactement comme `mrv_free_candidates`.
+ *
+ * @param scratch Plateau de travail, `cand` DÉJÀ posée en (cx,cy).
+ * @param used    Masque des pièces utilisées, bit de `cand` DÉJÀ levé.
+ */
+static int bench_neighbour_freedom(struct possibility_packet *scratch,
+                                   const uint64_t *used, int cx, int cy)
+{
+    static const int dx[4] = {0, 1, 0, -1};
+    static const int dy[4] = {-1, 0, 1, 0};
+    int total = 0;
+    for (int d = 0; d < 4; d++) {
+        int nx = cx + dx[d], ny = cy + dy[d];
+        if (nx < 0 || ny < 0 || nx >= ETERN_SIZE || ny >= ETERN_SIZE) {
+            continue;
+        }
+        if (scratch->grid[nx][ny] != -2) {
+            continue;
+        }
+        key_part key;
+        what_search_in_grid_to_key(g_rot, scratch, (int8_t)nx, (int8_t)ny, &key, g_all_face);
+        const uint64_t *mask = map_bucket_id_mask(g_map, &key);
+        if (mask != NULL) {
+            total += map_mask_free_count(mask, g_map->id_mask_words, used);
+        } else {
+            struct array_part *cands = get_parts_bigarray_with_key(g_map, &key);
+            for (int s = 0; s < cands->size; s++) {
+                int16_t id = cands->parts[s].id;
+                if (id != 0 && !((used[(id - 1) / 64] >> ((id - 1) % 64)) & 1ULL)) {
+                    total++;
+                }
+            }
+        }
+    }
+    return total;
+}
+
+/**
+ * @brief Le point d'entrée déclaré par etii_search.c sous ETII_BENCH_HOOKS.
+ *
+ * Rend NULL pour la politique de production (aucune indirection, aucune
+ * allocation, aucun calcul : le banc mesure alors exactement l'arbre que
+ * `./eternityII` explore — c'est le verrou de PR3).
+ */
+static const uint16_t *etii_bench_value_order(const struct possibility_packet *board,
+                                              const struct array_part *bucket,
+                                              int cx, int cy, int depth)
+{
+    if (g_value_order == VO_NATURAL || bucket == NULL || bucket->size <= 1) {
+        return NULL;
+    }
+    const int n = bucket->size;
+    uint16_t *out = g_order_buf + (size_t)depth * (size_t)g_order_stride;
+
+    if (g_value_order == VO_REVERSE) {
+        for (int i = 0; i < n; i++) {
+            out[i] = (uint16_t)(n - 1 - i);
+        }
+        return out;
+    }
+    if (g_value_order == VO_RANDOM) {
+        for (int i = 0; i < n; i++) {
+            out[i] = (uint16_t)i;
+        }
+        for (int i = n - 1; i > 0; i--) {
+            int j = (int)(bench_rand() % (uint64_t)(i + 1));
+            uint16_t tmp = out[i];
+            out[i] = out[j];
+            out[j] = tmp;
+        }
+        return out;
+    }
+
+    /* LCV / MCV : score par candidat, puis tri par insertion STABLE — à score
+     * égal l'ordre de production est conservé, donc la politique ne mesure que
+     * ce qu'elle départage réellement. */
+    struct possibility_packet scratch;
+    memcpy(&scratch, board, sizeof(scratch));
+    uint64_t used[MRV_USED_WORDS];
+    mrv_used_init(used, board);
+
+    static int scores[4 * ETERN_PARTS + 4];
+    for (int s = 0; s < n; s++) {
+        int16_t id = bucket->parts[s].id;
+        if (id == 0 || ((used[(id - 1) / 64] >> ((id - 1) % 64)) & 1ULL)) {
+            /* Candidat que la boucle chaude sautera de toute façon : score
+             * neutre, sa place dans l'ordre n'a aucun effet observable. */
+            scores[s] = -1;
+            continue;
+        }
+        int position = id - 1;
+        scratch.grid[cx][cy] = (int16_t)id_for_rotated_part((uint16_t)id, bucket->parts[s].rotation);
+        mrv_used_set(used, position);
+        scores[s] = bench_neighbour_freedom(&scratch, used, cx, cy);
+        mrv_used_clear(used, position);
+        scratch.grid[cx][cy] = -2;
+    }
+
+    const int sign = (g_value_order == VO_LCV) ? -1 : 1; /* LCV : score décroissant */
+    for (int i = 0; i < n; i++) {
+        out[i] = (uint16_t)i;
+    }
+    for (int i = 1; i < n; i++) {
+        uint16_t key = out[i];
+        int key_score = sign * scores[key];
+        int j = i - 1;
+        while (j >= 0 && sign * scores[out[j]] > key_score) {
+            out[j + 1] = out[j];
+            j--;
+        }
+        out[j + 1] = key;
+    }
+    return out;
+}
+
+/* ==========================================================================
+ * Chargement d'une instance
+ * ========================================================================== */
+
+typedef struct {
+    char pieces[512];
+    char indices[512];   /* vide = instance sans indice */
+    char label[64];
+} instance_t;
+
+static double now_seconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/** @brief Lit le `ntiles:` d'un fichier de pièces sans le charger. */
+static int read_ntiles(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        return -1;
+    }
+    int np = -1;
+    if (fscanf(f, "ntiles: %d", &np) != 1) {
+        np = -1;
+    }
+    fclose(f);
+    return np;
+}
+
+/** @brief Plateau vide (toutes cases à -2, aucune pièce utilisée). */
+static void make_empty_board(struct possibility_packet *b)
+{
+    memset(b, 0, sizeof(*b));
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            b->grid[x][y] = -2;
+        }
+    }
+    b->alloc = 0;
+    b->x = dirx[0];
+    b->y = diry[0];
+}
+
+/**
+ * @brief Plateau de genèse : vide, plus les indices de l'instance s'il y en a.
+ *
+ * Reproduit la pose d'indices de `first_possibility` (même lecture, même
+ * indexation `id + ETERN_PARTS*rotation`) sans passer par le datamanager :
+ * ce banc est mono-racine par construction (§4 du document de conception).
+ */
+static void build_genesis(struct possibility_packet *out, const char *indices_path,
+                          struct array_part *rot)
+{
+    make_empty_board(out);
+    if (indices_path == NULL || indices_path[0] == '\0') {
+        return;
+    }
+    struct array_index *indices = read_indices(indices_path);
+    for (int i = 0; i < indices->size; i++) {
+        struct board_index *hint = &indices->indices[i];
+        int position = hint->id + ETERN_PARTS * hint->rotation;
+        if (position < 0 || position >= rot->size || rot->parts[position].id != hint->id) {
+            fprintf(stderr, "indices : pièce %i rotation %i introuvable dans %s\n",
+                    hint->id, hint->rotation, indices_path);
+            exit(EXIT_FAILURE);
+        }
+        if (hint->x >= ETERN_SIZE || hint->y >= ETERN_SIZE) {
+            fprintf(stderr, "indices : case (%i,%i) hors du plateau\n", hint->x, hint->y);
+            exit(EXIT_FAILURE);
+        }
+        out->grid[hint->x][hint->y] = (int16_t)position;
+        set_face_used(out->b_faceused, (uint16_t)(hint->id - 1), 1);
+    }
+    free_array_index(indices);
+    out->alloc = (uint16_t)possibility_placed_count(out);
+}
+
+/**
+ * @brief Case vide sur laquelle une politique de RACINE demande de développer.
+ *
+ * `ROOT_CENTER` prend la case vide la plus proche du centre géométrique,
+ * `ROOT_BORDER` le premier coin vide, puis à défaut la première case de bord.
+ * Développer une case, quelle qu'elle soit, reste EXHAUSTIF (tous ses
+ * candidats deviennent des racines) : changer de case change l'ordre dans
+ * lequel l'espace est visité, jamais l'espace visité.
+ *
+ * @return 1 si une case a été choisie.
+ */
+static int choose_root_cell(const struct possibility_packet *board, root_policy_t policy,
+                            int *out_x, int *out_y)
+{
+    int best_x = -1, best_y = -1;
+    long best_score = -1;
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            if (board->grid[x][y] != -2) {
+                continue;
+            }
+            long score;
+            if (policy == ROOT_CENTER) {
+                /* Distance (au carré, ×4 pour rester entière) au centre du
+                 * plateau ; on MINIMISE, d'où le signe. */
+                long ddx = 2 * x - (ETERN_SIZE - 1);
+                long ddy = 2 * y - (ETERN_SIZE - 1);
+                score = -(ddx * ddx + ddy * ddy);
+            } else {
+                /* ROOT_BORDER : un coin vaut mieux qu'un bord, un bord mieux
+                 * que l'intérieur. */
+                int on_x_edge = (x == 0 || x == ETERN_SIZE - 1);
+                int on_y_edge = (y == 0 || y == ETERN_SIZE - 1);
+                score = (long)on_x_edge + (long)on_y_edge;
+            }
+            if (best_x < 0 || score > best_score) {
+                best_score = score;
+                best_x = x;
+                best_y = y;
+            }
+        }
+    }
+    if (best_x < 0) {
+        return 0;
+    }
+    *out_x = best_x;
+    *out_y = best_y;
+    return 1;
+}
+
+/**
+ * @brief Développe `genesis` sur la case (cx,cy) : une racine par candidat.
+ *
+ * @return nombre de racines produites (écrites dans `out`, borné par `max_out`).
+ */
+static int expand_at_cell(const struct possibility_packet *genesis, int cx, int cy,
+                          map_big_array *map, struct array_part *rot,
+                          struct possibility_packet *out, int max_out)
+{
+    struct possibility_packet scratch;
+    memcpy(&scratch, genesis, sizeof(scratch));
+    key_part key;
+    what_search_in_grid_to_key(rot, &scratch, (int8_t)cx, (int8_t)cy, &key,
+                               (int8_t)map->sizearrayM);
+    struct array_part *cands = get_parts_bigarray_with_key(map, &key);
+    int count = 0;
+    for (int s = 0; s < cands->size && count < max_out; s++) {
+        int16_t id = cands->parts[s].id;
+        if (id == 0 || is_face_used(scratch.b_faceused, (uint16_t)(id - 1))) {
+            continue;
+        }
+        memcpy(&out[count], genesis, sizeof(out[count]));
+        out[count].grid[cx][cy] = (int16_t)id_for_rotated_part((uint16_t)id, cands->parts[s].rotation);
+        set_face_used(out[count].b_faceused, (uint16_t)(id - 1), 1);
+        out[count].alloc = (uint16_t)possibility_placed_count(&out[count]);
+        count++;
+    }
+    return count;
+}
+
+/**
+ * @brief Rattache le hook à une instance (map, rotations, tampons d'ordre).
+ *
+ * Appelée dans le PARENT, une fois par instance : les fils héritent l'état par
+ * copie sur écriture, et l'auto-test ci-dessous tourne dans le parent.
+ */
+static void bench_hook_bind(map_big_array *map, struct array_part *rot)
+{
+    g_map = map;
+    g_rot = rot;
+    g_all_face = (int8_t)map->sizearrayM;
+    free(g_order_buf);
+    g_order_stride = rot->size + 1;
+    g_order_buf = calloc((size_t)ETERN_PARTS * (size_t)g_order_stride, sizeof(*g_order_buf));
+    if (g_order_buf == NULL) {
+        fprintf(stderr, "allocation des tampons d'ordre impossible\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
+/* ==========================================================================
+ * Auto-test de l'instrument
+ * ========================================================================== */
+
+/**
+ * @brief Vérifie que toutes les politiques explorent le MÊME arbre sur un
+ *        sous-arbre MORT, au nœud près.
+ *
+ * C'est la validation de l'instrument, et elle découle directement de sa
+ * raison d'être (§1 du document de conception) : dans un sous-arbre sans
+ * solution, tous les candidats de chaque case sont essayés, donc le compte de
+ * nœuds NE PEUT PAS dépendre de leur ordre. Un désaccord ne signalerait donc
+ * pas « une politique est meilleure » — il signalerait une permutation FAUSSE
+ * (candidat perdu, dupliqué, ou indice hors compartiment), c'est-à-dire des
+ * chiffres à jeter. Même intention que l'auto-test `--w2x2` de
+ * bench_refutation, et que son oracle indépendant : le symptôme qu'on espère
+ * d'une politique gagnante est exactement ce qu'un hook bogué produit.
+ *
+ * Tourne EN PROCESSUS COURANT (pas de fork) sur la première racine que la
+ * politique de référence ferme dans `budget` nœuds. Aucune racine fermée dans
+ * ce budget : auto-test non concluant, signalé mais non bloquant.
+ *
+ * @return 0 si tout concorde ou si aucune racine n'a pu être fermée, -1 sur désaccord.
+ */
+static int bench_selftest(const policy_t *policies, int nb_policies,
+                          client_possibility_t *client,
+                          struct possibility_packet *roots, int nb_roots,
+                          int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
+                          long budget)
+{
+    const value_order_t saved_order = g_value_order;
+    int closed_root = -1;
+    unsigned long long reference = 0;
+
+    stop_on_solution = 0;   /* le sous-arbre doit être fermé, pas interrompu */
+    g_value_order = policies[0].value_order;
+    for (int r = 0; r < nb_roots && closed_root < 0; r++) {
+        struct possibility_packet work = roots[r];
+        unsigned long long nodes = 0;
+        request = REQUEST_CONTINUE;
+        counters[0] = 0;
+        if (search_packet_backtracking_mrv(client, &work, idParts, budget, 0, &nodes)
+            == BT_CORE_EXHAUSTED) {
+            closed_root = r;
+            reference = nodes;
+        }
+    }
+    if (closed_root < 0) {
+        printf("auto-test : aucune racine fermée en %ld nœuds — non concluant,"
+               " relancer avec --selftest-budget plus grand\n\n", budget);
+        g_value_order = saved_order;
+        return 0;
+    }
+
+    int rc = 0;
+    for (int p = 1; p < nb_policies; p++) {
+        g_value_order = policies[p].value_order;
+        g_rng_state = 0x9E3779B97F4A7C15ULL;
+        struct possibility_packet work = roots[closed_root];
+        unsigned long long nodes = 0;
+        request = REQUEST_CONTINUE;
+        counters[0] = 0;
+        bt_core_result_t res = search_packet_backtracking_mrv(client, &work, idParts,
+                                                              budget * 4, 0, &nodes);
+        if (res != BT_CORE_EXHAUSTED || nodes != reference) {
+            fprintf(stderr, "AUTO-TEST ÉCHOUÉ : sur la racine morte #%d, « %s » explore"
+                    " %llu nœuds (statut %d) contre %llu pour « %s ». Un sous-arbre MORT"
+                    " ne dépend pas de l'ordre des valeurs : la permutation est fausse,"
+                    " les chiffres de ce run sont à jeter.\n",
+                    closed_root, policies[p].name, nodes, (int)res, reference,
+                    policies[0].name);
+            rc = -1;
+        }
+    }
+    if (rc == 0) {
+        printf("auto-test : racine morte #%d fermée en %llu nœuds, identique pour les"
+               " %d politiques — les permutations sont bien des permutations\n\n",
+               closed_root, reference, nb_policies);
+    }
+    g_value_order = saved_order;
+    return rc;
+}
+
+/* ==========================================================================
+ * Une exécution = un processus fils
+ * ========================================================================== */
+
+typedef enum {
+    RUN_SOLVED = 0,   /* record_solution a fait exit(EXIT_SUCCESS) */
+    RUN_BUDGET,       /* plafond de nœuds atteint */
+    RUN_EXHAUSTED,    /* espace épuisé sans solution (racines partielles) */
+    RUN_STOPPED,      /* arrêt demandé */
+    RUN_FAILED,       /* le fils est mort sans rapporter */
+} run_status_t;
+
+/** @brief Ce que le fils écrit sur le tube avant de mourir. */
+typedef struct {
+    unsigned long long nodes;
+    double seconds;
+    int roots;          /* nombre de racines déjà consommées */
+} run_report_t;
+
+/* Codes de sortie du fils. 0 est RÉSERVÉ à `record_solution` (exit(EXIT_SUCCESS)) :
+ * c'est justement ce qui permet de reconnaître une solution sans rien ajouter
+ * au moteur (§4 du document de conception). */
+#define CHILD_EXIT_BUDGET    10
+#define CHILD_EXIT_EXHAUSTED 11
+#define CHILD_EXIT_STOPPED   12
+
+static int         g_report_fd = -1;
+static run_report_t g_report;
+static double      g_child_t0 = 0.0;
+
+/**
+ * @brief Rapporte nœuds et temps, quel que soit le CHEMIN de sortie du fils.
+ *
+ * Enregistré par `atexit` : c'est ce qui rend le cas « solution trouvée »
+ * mesurable sans toucher au moteur — `record_solution` sort par `exit()` au
+ * beau milieu de la boucle chaude, et cette fonction s'exécute quand même.
+ * `counters[0]` est le compteur de nœuds que la boucle incrémente
+ * (`counters[client->compteur]`), cumulé sur toutes les racines consommées.
+ */
+static void bench_child_report(void)
+{
+    if (g_report_fd < 0) {
+        return;
+    }
+    g_report.nodes = counters[0];
+    g_report.seconds = now_seconds() - g_child_t0;
+    ssize_t w = write(g_report_fd, &g_report, sizeof(g_report));
+    (void)w;
+    close(g_report_fd);
+    g_report_fd = -1;
+}
+
+typedef struct {
+    value_order_t value_order;
+    root_policy_t root_policy;
+    uint64_t      seed;
+    long          budget;
+    const char   *workdir;
+} run_config_t;
+
+/**
+ * @brief Corps du fils : pose la genèse, cherche, sort. NE REVIENT JAMAIS.
+ */
+static void run_child(const run_config_t *cfg,
+                      map_big_array *map, struct array_part *rot,
+                      struct possibility_packet *roots, int nb_roots,
+                      int16_t idParts[ETERN_PARTS + 1][PART_SIZES])
+{
+    /* Première instruction du fils, comme l'exige la règle de sûreté du fork
+     * (AGENTS.md) : un fils hérite la chaîne `atexit()` de son parent, y
+     * compris la remise en état du terminal. Ce banc ne démarre aucune console,
+     * donc rien n'est aujourd'hui enregistré — l'appel est là pour que ça reste
+     * vrai le jour où un module lié en enregistrerait un. */
+    status_zone_disown_child();
+
+    /* Répertoire de travail dédié : `log_solution` écrit `solution_<pid>_<seq>`
+     * dans le répertoire courant, et `events.log` avec lui. */
+    if (chdir(cfg->workdir) != 0) {
+        _exit(CHILD_EXIT_STOPPED);
+    }
+    /* `log_solution` imprime le plateau trouvé sur la sortie standard : une
+     * centaine de lignes par exécution, qui noieraient le tableau du banc.
+     * Détourné vers un fichier du répertoire de travail — la preuve est
+     * conservée, le récapitulatif reste lisible. stderr reste ouvert : une
+     * vraie erreur doit rester visible immédiatement. */
+    if (freopen("bench_solve_children.log", "a", stdout) == NULL) {
+        _exit(CHILD_EXIT_STOPPED);
+    }
+
+    /* g_map/g_rot/g_order_buf sont déjà en place : bench_hook_bind les a posés
+     * dans le parent, le fils en hérite par copie sur écriture. */
+    g_value_order = cfg->value_order;
+    g_rng_state = cfg->seed != 0 ? cfg->seed : 0x9E3779B97F4A7C15ULL;
+
+    client_possibility_t client;
+    memset(&client, 0, sizeof(client));
+    client.compteur = 0;
+    client.all_rotate_part = rot;
+    client.map_part = map;
+
+    counters[0] = 0;
+    max_result = 0;
+    request = REQUEST_CONTINUE;
+    /* Le chemin réel est exercé tel quel : une solution fait sortir le fils. */
+    stop_on_solution = 1;
+
+    g_child_t0 = now_seconds();
+    memset(&g_report, 0, sizeof(g_report));
+    atexit(bench_child_report);
+
+    int status = CHILD_EXIT_EXHAUSTED;
+    for (int r = 0; r < nb_roots; r++) {
+        g_report.roots = r + 1;
+        long remaining = cfg->budget > 0
+            ? cfg->budget - (long)counters[0]
+            : 0;
+        if (cfg->budget > 0 && remaining <= 0) {
+            status = CHILD_EXIT_BUDGET;
+            break;
+        }
+        unsigned long long nodes = 0;
+        /* allow_delegate = 0 : aucun serveur, et céder une partie du
+         * sous-arbre fausserait la mesure — même raison que bench_refutation. */
+        bt_core_result_t rc = search_packet_backtracking_mrv(&client, &roots[r], idParts,
+                                                             remaining, 0, &nodes);
+        if (rc == BT_CORE_BUDGET) {
+            status = CHILD_EXIT_BUDGET;
+            break;
+        }
+        if (rc == BT_CORE_STOPPED) {
+            status = CHILD_EXIT_STOPPED;
+            break;
+        }
+        /* BT_CORE_EXHAUSTED : racine morte, on passe à la suivante. */
+    }
+    /* exit() et non _exit() : l'atexit ci-dessus DOIT s'exécuter (et sur macOS
+     * _exit sauterait aussi le vidage gcov, cf. AGENTS.md). */
+    exit(status);
+}
+
+/** @brief Lance une exécution et récupère son rapport. */
+static run_status_t run_once(const run_config_t *cfg,
+                             map_big_array *map, struct array_part *rot,
+                             struct possibility_packet *roots, int nb_roots,
+                             int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
+                             run_report_t *out)
+{
+    int fds[2];
+    if (pipe(fds) != 0) {
+        perror("pipe");
+        exit(EXIT_FAILURE);
+    }
+    /* stdout/stderr vidés AVANT le fork : un tampon non vidé serait écrit deux
+     * fois (règle générale du dépôt sur le fork, cf. AGENTS.md). */
+    fflush(stdout);
+    fflush(stderr);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        exit(EXIT_FAILURE);
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        g_report_fd = fds[1];
+        run_child(cfg, map, rot, roots, nb_roots, idParts);
+        _exit(CHILD_EXIT_STOPPED); /* inatteignable */
+    }
+
+    close(fds[1]);
+    run_report_t report;
+    memset(&report, 0, sizeof(report));
+    size_t got = 0;
+    while (got < sizeof(report)) {
+        ssize_t n = read(fds[0], (char *)&report + got, sizeof(report) - got);
+        if (n <= 0) {
+            break;
+        }
+        got += (size_t)n;
+    }
+    close(fds[0]);
+
+    int wstatus = 0;
+    while (waitpid(pid, &wstatus, 0) < 0 && errno == EINTR) {
+        /* signal : on réessaie */
+    }
+    *out = report;
+    if (got != sizeof(report)) {
+        return RUN_FAILED;
+    }
+    if (!WIFEXITED(wstatus)) {
+        return RUN_FAILED;
+    }
+    switch (WEXITSTATUS(wstatus)) {
+        case EXIT_SUCCESS:        return RUN_SOLVED;
+        case CHILD_EXIT_BUDGET:   return RUN_BUDGET;
+        case CHILD_EXIT_EXHAUSTED:return RUN_EXHAUSTED;
+        default:                  return RUN_STOPPED;
+    }
+}
+
+static const char *status_label(run_status_t s)
+{
+    switch (s) {
+        case RUN_SOLVED:    return "RÉSOLU";
+        case RUN_BUDGET:    return "plafond";
+        case RUN_EXHAUSTED: return "épuisé";
+        case RUN_STOPPED:   return "arrêt";
+        case RUN_FAILED:    return "ÉCHEC";
+    }
+    return "?";
+}
+
+/* ==========================================================================
+ * Grille de mesure et bilan
+ * ========================================================================== */
+
+typedef struct {
+    double nodes[MAX_RUNS];
+    int    solved[MAX_RUNS];
+    int    count;
+} series_t;
+
+static void print_tally(const policy_t *policies, int nb_policies,
+                        const series_t *series, long budget)
+{
+    printf("\n%-10s %8s %14s %14s %12s\n",
+           "politique", "résolus", "médiane nœuds", "moy. géom.", "temps total");
+    for (int p = 0; p < nb_policies; p++) {
+        const series_t *s = &series[p];
+        double solved_nodes[MAX_RUNS];
+        int nb_solved = 0;
+        for (int i = 0; i < s->count; i++) {
+            if (s->solved[i]) {
+                solved_nodes[nb_solved++] = s->nodes[i];
+            }
+        }
+        double sorted[MAX_RUNS];
+        memcpy(sorted, solved_nodes, sizeof(double) * (size_t)nb_solved);
+        bench_stats_sort(sorted, nb_solved);
+        printf("%-10s %4d/%-3d %14.0f %14.0f\n",
+               policies[p].name, nb_solved, s->count,
+               bench_stats_median_sorted(sorted, nb_solved),
+               bench_stats_geomean(solved_nodes, nb_solved));
+    }
+
+    /* Courbe de survie : la médiane seule ne dit rien dès qu'une moitié des
+     * exécutions bute sur le plafond. */
+    printf("\ncourbe de survie (part des exécutions résolues sous N nœuds) :\n");
+    printf("%-10s", "politique");
+    for (double t = 1e4; t <= (double)budget; t *= 10.0) {
+        printf(" %11.0e", t);
+    }
+    printf(" %11s\n", "plafond");
+    for (int p = 0; p < nb_policies; p++) {
+        printf("%-10s", policies[p].name);
+        for (double t = 1e4; t <= (double)budget; t *= 10.0) {
+            printf(" %10.0f%%",
+                   100.0 * bench_stats_survival(series[p].nodes, series[p].solved,
+                                                series[p].count, t));
+        }
+        printf(" %10.0f%%\n",
+               100.0 * bench_stats_survival(series[p].nodes, series[p].solved,
+                                            series[p].count, (double)budget));
+    }
+
+    /* Comparaison appariée contre la politique de PRODUCTION (la première
+     * demandée) : la seule lecture honnête, toutes explorent la même instance. */
+    printf("\ncomparaison appariée contre « %s » (référence) :\n", policies[0].name);
+    printf("%-10s %8s %8s %8s %11s\n", "politique", "gagne", "perd", "égal", "indécis");
+    for (int p = 1; p < nb_policies; p++) {
+        int w = 0, l = 0, t = 0, u = 0;
+        bench_stats_paired(series[p].nodes, series[p].solved,
+                           series[0].nodes, series[0].solved,
+                           series[p].count, &w, &l, &t, &u);
+        printf("%-10s %8d %8d %8d %11d\n", policies[p].name, w, l, t, u);
+    }
+
+    /* Analyse de redémarrage : AUCUNE implémentation, une simple lecture de la
+     * distribution (§3.4). Elle ne vaut que pour les politiques aléatoires —
+     * relancer une politique déterministe rejouerait la même exécution. */
+    printf("\ncoût attendu d'un redémarrage à seuil (lecture de la distribution,\n"
+           "aucun mécanisme : ne vaut que pour une politique ALÉATOIRE) :\n");
+    printf("%-10s %13s %9s %16s %16s\n",
+           "politique", "seuil", "P(succès)", "E[coût] (nœuds)", "sans redémarrage");
+    for (int p = 0; p < nb_policies; p++) {
+        double no_restart[MAX_RUNS];
+        int nb_solved = 0;
+        for (int i = 0; i < series[p].count; i++) {
+            if (series[p].solved[i]) {
+                no_restart[nb_solved++] = series[p].nodes[i];
+            }
+        }
+        double sorted[MAX_RUNS];
+        memcpy(sorted, no_restart, sizeof(double) * (size_t)nb_solved);
+        bench_stats_sort(sorted, nb_solved);
+        double baseline = bench_stats_median_sorted(sorted, nb_solved);
+        for (double c = 1e4; c <= (double)budget; c *= 10.0) {
+            bench_restart_t r = bench_stats_restart(series[p].nodes, series[p].solved,
+                                                    series[p].count, c);
+            if (r.expected_nodes < 0) {
+                continue;
+            }
+            printf("%-10s %13.0e %8.0f%% %16.0f %16.0f\n",
+                   policies[p].name, c, 100.0 * r.p_success, r.expected_nodes, baseline);
+        }
+    }
+}
+
+static void usage(void)
+{
+    printf("Usage : bench_solve [options]\n"
+           "  --pieces <f>        une instance (clone de tools/gen_clone.py)\n"
+           "  --indices <f>       ses indices (défaut : aucun)\n"
+           "  --instance-dir <d>  toutes les instances pieces_*.csv d'un répertoire,\n"
+           "                      appariées avec indices_*.csv de même suffixe\n"
+           "  --budget <n>        plafond de nœuds par exécution (défaut 50000000)\n"
+           "  --policies <liste>  ordres de valeurs parmi natural,reverse,random,lcv,mcv\n"
+           "                      (défaut : tous ; le PREMIER sert de référence appariée)\n"
+           "  --root <nom>        point de départ parmi genesis,center,border (défaut genesis)\n"
+           "  --seeds <n>         graines par instance pour les politiques aléatoires (défaut 1)\n"
+           "  --workdir <d>       répertoire de travail des fils (défaut : un mkdtemp)\n"
+           "  --selftest-budget <n> plafond de l'auto-test de l'instrument (défaut 200000,\n"
+           "                      0 = auto-test désactivé)\n"
+           "\n"
+           "La taille du plateau est celle du binaire : make bench-solve"
+           " CPPFLAGS=-DETERN_PARTS=100\n"
+           "pour des clones 10x10. Une instance dont le ntiles ne vaut pas %d est refusée.\n",
+           ETERN_PARTS);
+}
+
+/** @brief Ajoute les instances `pieces_*.csv` d'un répertoire. */
+static int scan_instance_dir(const char *dir, instance_t *out, int max_out)
+{
+    DIR *d = opendir(dir);
+    if (d == NULL) {
+        fprintf(stderr, "ouverture du répertoire %s impossible\n", dir);
+        exit(EXIT_FAILURE);
+    }
+    int count = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && count < max_out) {
+        if (strncmp(e->d_name, "pieces_", 7) != 0) {
+            continue;
+        }
+        size_t len = strlen(e->d_name);
+        if (len < 5 || strcmp(e->d_name + len - 4, ".csv") != 0) {
+            continue;
+        }
+        snprintf(out[count].pieces, sizeof(out[count].pieces), "%s/%s", dir, e->d_name);
+        snprintf(out[count].label, sizeof(out[count].label), "%.*s",
+                 (int)(len - 7 - 4), e->d_name + 7);
+        snprintf(out[count].indices, sizeof(out[count].indices), "%s/indices_%s",
+                 dir, e->d_name + 7);
+        /* Pas d'indices appariés : instance sans indice, pas une erreur. */
+        if (access(out[count].indices, R_OK) != 0) {
+            out[count].indices[0] = '\0';
+        }
+        count++;
+    }
+    closedir(d);
+    /* Ordre de `readdir` non spécifié : on trie pour que deux exécutions du
+     * banc alignent les mêmes instances sur les mêmes lignes. */
+    for (int i = 1; i < count; i++) {
+        instance_t key = out[i];
+        int j = i - 1;
+        while (j >= 0 && strcmp(out[j].pieces, key.pieces) > 0) {
+            out[j + 1] = out[j];
+            j--;
+        }
+        out[j + 1] = key;
+    }
+    return count;
+}
+
+int main(int argc, char **argv)
+{
+    /* Pools alloués dynamiquement : appel OBLIGATOIRE avant tout usage de
+     * datamanager.c (lié via TEST_MODULES), même si ce banc n'en exerce
+     * aucune fonction de pool. Même préambule que bench_refutation. */
+    datamanager_configure_stock_files(NB_FILE_POSSIBILITY_DEFAULT);
+
+    instance_t instances[MAX_INSTANCES];
+    int nb_instances = 0;
+    long budget = 50000000;
+    int nb_seeds = 1;
+    long selftest_budget = 200000;
+    const char *workdir = NULL;
+    root_policy_t root_policy = ROOT_GENESIS;
+    const char *root_name = "genesis";
+
+    policy_t policies[NB_ALL_POLICIES];
+    int nb_policies = NB_ALL_POLICIES;
+    memcpy(policies, ALL_POLICIES, sizeof(ALL_POLICIES));
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--pieces") == 0 && i + 1 < argc) {
+            if (nb_instances >= MAX_INSTANCES) { fprintf(stderr, "trop d'instances\n"); return EXIT_FAILURE; }
+            snprintf(instances[nb_instances].pieces, sizeof(instances[0].pieces), "%s", argv[++i]);
+            instances[nb_instances].indices[0] = '\0';
+            snprintf(instances[nb_instances].label, sizeof(instances[0].label), "%s",
+                     strrchr(instances[nb_instances].pieces, '/')
+                         ? strrchr(instances[nb_instances].pieces, '/') + 1
+                         : instances[nb_instances].pieces);
+            nb_instances++;
+        } else if (strcmp(argv[i], "--indices") == 0 && i + 1 < argc) {
+            if (nb_instances == 0) { fprintf(stderr, "--indices doit suivre --pieces\n"); return EXIT_FAILURE; }
+            snprintf(instances[nb_instances - 1].indices, sizeof(instances[0].indices), "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--instance-dir") == 0 && i + 1 < argc) {
+            nb_instances += scan_instance_dir(argv[++i], instances + nb_instances,
+                                              MAX_INSTANCES - nb_instances);
+        } else if (strcmp(argv[i], "--budget") == 0 && i + 1 < argc) {
+            budget = atol(argv[++i]);
+        } else if (strcmp(argv[i], "--seeds") == 0 && i + 1 < argc) {
+            nb_seeds = atoi(argv[++i]);
+            if (nb_seeds < 1) nb_seeds = 1;
+            if (nb_seeds > MAX_SEEDS) nb_seeds = MAX_SEEDS;
+        } else if (strcmp(argv[i], "--selftest-budget") == 0 && i + 1 < argc) {
+            selftest_budget = atol(argv[++i]);
+        } else if (strcmp(argv[i], "--workdir") == 0 && i + 1 < argc) {
+            workdir = argv[++i];
+        } else if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) {
+            root_name = argv[++i];
+            int found = 0;
+            for (int r = 0; r < NB_ALL_ROOTS; r++) {
+                if (strcmp(root_name, ALL_ROOTS[r].name) == 0) {
+                    root_policy = ALL_ROOTS[r].root;
+                    found = 1;
+                }
+            }
+            if (!found) { usage(); return EXIT_FAILURE; }
+        } else if (strcmp(argv[i], "--policies") == 0 && i + 1 < argc) {
+            nb_policies = 0;
+            char *copy = strdup(argv[++i]);
+            for (char *tok = strtok(copy, ","); tok != NULL; tok = strtok(NULL, ",")) {
+                for (int p = 0; p < NB_ALL_POLICIES; p++) {
+                    if (strcmp(tok, ALL_POLICIES[p].name) == 0) {
+                        policies[nb_policies++] = ALL_POLICIES[p];
+                    }
+                }
+            }
+            free(copy);
+            if (nb_policies == 0) { usage(); return EXIT_FAILURE; }
+        } else {
+            usage();
+            return EXIT_FAILURE;
+        }
+    }
+
+    if (nb_instances == 0) {
+        usage();
+        return EXIT_FAILURE;
+    }
+
+    char tmpl[] = "/tmp/etii_bench_solve_XXXXXX";
+    if (workdir == NULL) {
+        workdir = mkdtemp(tmpl);
+        if (workdir == NULL) {
+            perror("mkdtemp");
+            return EXIT_FAILURE;
+        }
+    }
+
+    counters = calloc(1, sizeof(*counters));
+    lastfilesize = calloc(1, sizeof(*lastfilesize));
+    lastroot = calloc(1, sizeof(*lastroot));
+    lastdepth = calloc(1, sizeof(*lastdepth));
+    if (counters == NULL || lastfilesize == NULL || lastroot == NULL || lastdepth == NULL) {
+        fprintf(stderr, "allocation des compteurs impossible\n");
+        return EXIT_FAILURE;
+    }
+    /* Aucun serveur : jamais de délégation ni d'envoi réseau depuis ce banc
+     * (send_solution devient un no-op, cf. datamanager.c). */
+    set_server_ip(NULL);
+
+    int16_t idParts[ETERN_PARTS + 1][PART_SIZES];
+    init_id_parts(idParts);
+
+    printf("\nbanc « côté trouver » : coût de l'ATTEINTE d'une solution\n");
+    printf("plateau %dx%d (%d pièces)   plafond : %ld nœuds par exécution   racine : %s\n",
+           ETERN_SIZE, ETERN_SIZE, ETERN_PARTS, budget, root_name);
+    printf("%d instance(s) x %d politique(s) x %d graine(s) = %d exécutions\n\n",
+           nb_instances, nb_policies, nb_seeds, nb_instances * nb_policies * nb_seeds);
+    printf("%-18s %-10s %6s %14s %10s %8s %s\n",
+           "instance", "politique", "graine", "nœuds", "temps", "racines", "statut");
+
+    series_t series[NB_ALL_POLICIES];
+    memset(series, 0, sizeof(series));
+
+    /* Toutes les racines d'une instance tiennent en mémoire : le développement
+     * d'une seule case borne leur nombre par la taille d'un compartiment. */
+    static struct possibility_packet roots[4 * ETERN_PARTS + 4];
+
+    for (int inst_i = 0; inst_i < nb_instances; inst_i++) {
+        instance_t *inst = &instances[inst_i];
+        int np = read_ntiles(inst->pieces);
+        if (np != ETERN_PARTS) {
+            fprintf(stderr, "%s : ntiles=%d, ce binaire est compilé pour %d pièces"
+                    " (make bench-solve CPPFLAGS=-DETERN_PARTS=%d)\n",
+                    inst->pieces, np, ETERN_PARTS, np > 0 ? np : ETERN_PARTS);
+            return EXIT_FAILURE;
+        }
+
+        struct array_part *parts = read_parts(inst->pieces);
+        struct array_part *rot = rotate_all_parts(parts);
+        map_big_array *map = buildBigArray(rot, search_max_face(rot));
+
+        struct possibility_packet genesis;
+        build_genesis(&genesis, inst->indices[0] ? inst->indices : NULL, rot);
+
+        int nb_roots;
+        if (root_policy == ROOT_GENESIS) {
+            /* La genèse de PRODUCTION : même appel que first_possibility.
+             * `File` alloué au TAS, jamais sur la pile : free_file libère aussi
+             * la structure elle-même (free(suite)) — un `File` local y serait
+             * un free() sur une adresse de pile. */
+            File *file = malloc(sizeof(File));
+            if (file == NULL) {
+                fprintf(stderr, "allocation de la file de genèse impossible\n");
+                return EXIT_FAILURE;
+            }
+            init_file(file, sizeof(struct possibility_packet));
+            struct possibility_packet seed_board = genesis;
+            search_possiblity_light(file, &seed_board, map, rot, idParts);
+            nb_roots = 0;
+            while (file->size > 0 && nb_roots < (int)(sizeof(roots) / sizeof(roots[0]))) {
+                scroll(file, &roots[nb_roots]);
+                nb_roots++;
+            }
+            free_file(file);
+        } else {
+            int cx = 0, cy = 0;
+            if (!choose_root_cell(&genesis, root_policy, &cx, &cy)) {
+                fprintf(stderr, "%s : aucune case vide pour la racine\n", inst->pieces);
+                return EXIT_FAILURE;
+            }
+            nb_roots = expand_at_cell(&genesis, cx, cy, map, rot, roots,
+                                      (int)(sizeof(roots) / sizeof(roots[0])));
+        }
+        if (nb_roots == 0) {
+            fprintf(stderr, "%s : la genèse ne produit aucune racine\n", inst->pieces);
+            return EXIT_FAILURE;
+        }
+
+        bench_hook_bind(map, rot);
+
+        if (selftest_budget > 0 && nb_policies > 1) {
+            client_possibility_t probe;
+            memset(&probe, 0, sizeof(probe));
+            probe.compteur = 0;
+            probe.all_rotate_part = rot;
+            probe.map_part = map;
+            if (bench_selftest(policies, nb_policies, &probe, roots, nb_roots,
+                               idParts, selftest_budget) != 0) {
+                return EXIT_FAILURE;
+            }
+        }
+
+        for (int p = 0; p < nb_policies; p++) {
+            /* La grille est (instance × graine) pour TOUTES les politiques : la
+             * comparaison appariée lit `series[p].nodes[i]` contre
+             * `series[0].nodes[i]`, donc l'indice i doit désigner la même
+             * exécution partout. Une politique DÉTERMINISTE n'est EXÉCUTÉE
+             * qu'une fois — la graine ne change rien pour elle — mais son
+             * résultat remplit quand même ses `nb_seeds` cases : sans cela, ses
+             * séries seraient plus courtes et l'appariement comparerait des
+             * instances différentes (constaté : `random` gagnait/perdait contre
+             * une case jamais remplie). Le poids de chaque instance reste
+             * identique d'une politique à l'autre, médiane et courbe de survie
+             * sont donc inchangées par cette duplication. */
+            run_report_t rep;
+            run_status_t st = RUN_FAILED;
+            memset(&rep, 0, sizeof(rep));
+            for (int s = 0; s < nb_seeds; s++) {
+                if (s == 0 || policies[p].value_order == VO_RANDOM) {
+                    run_config_t cfg;
+                    cfg.value_order = policies[p].value_order;
+                    cfg.root_policy = root_policy;
+                    cfg.seed = (uint64_t)(s + 1) * 0x9E3779B97F4A7C15ULL + (uint64_t)inst_i;
+                    cfg.budget = budget;
+                    cfg.workdir = workdir;
+
+                    st = run_once(&cfg, map, rot, roots, nb_roots, idParts, &rep);
+
+                    printf("%-18.18s %-10s %6d %14llu %8.3f s %8d %s\n",
+                           inst->label, policies[p].name, s, rep.nodes, rep.seconds,
+                           rep.roots, status_label(st));
+                    fflush(stdout);
+                }
+                if (series[p].count < MAX_RUNS) {
+                    series[p].nodes[series[p].count] = (double)rep.nodes;
+                    series[p].solved[series[p].count] = (st == RUN_SOLVED);
+                    series[p].count++;
+                }
+            }
+        }
+
+        free_bigarray(map);
+        free_array_part(rot);
+        free_array_part(parts);
+    }
+
+    print_tally(policies, nb_policies, series, budget);
+    printf("\nrépertoire de travail des fils (solutions écrites) : %s\n", workdir);
+    return EXIT_SUCCESS;
+}

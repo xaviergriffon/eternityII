@@ -214,6 +214,18 @@ int parse_cli_options(int argc, const char *argv[])
                 client_label = argv[r + 1];
                 r++; // consomme aussi la valeur
             }
+        } else if (strcmp(argv[r], "--indices-file") == 0) {
+            // Option valuée, même schéma que --http-token-file : pointeur
+            // direct dans argv, jamais copié. Lue (une seule fois, par
+            // first_possibility) au moment de la genèse — aucune I/O ici.
+            // Résolue AVANT tout fork comme le reste de parse_cli_options :
+            // chaque fils hérite du même chemin par copie sur écriture.
+            if (r + 1 < argc) {
+                // `indices_file` est un `char *` historique (core/), jamais
+                // écrit : le cast suit le même schéma que parts_files.
+                indices_file = (char *)argv[r + 1];
+                r++; // consomme aussi la valeur
+            }
         } else if (strcmp(argv[r], "--machine-uid-file") == 0) {
             // Option valuée, même schéma. Chargement effectif (lecture/écriture
             // du fichier) dans init_client_identity, pas ici (aucune I/O dans

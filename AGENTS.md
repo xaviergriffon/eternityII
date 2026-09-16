@@ -80,7 +80,7 @@ Darwin auto-links OpenCL with `-framework OpenCL` (currently unused — commente
 ./eternityII --help | help [topic]      # position-independent, case-insensitive topics
 ```
 
-Full option reference per mode — `--expand-level`, `--stock-max-ram`, `--stock-spill-dir`, `--stock-files`, `--rebalance-budget`, `--tcp-timeout`, `--http-port`, `--http-token-file`, `--name`, `--machine-uid-file`, `--config-file`, `--stop-on-solution`, `--headless` — is in [docs/utilisation.md](docs/utilisation.md).
+Full option reference per mode — `--expand-level`, `--stock-max-ram`, `--stock-spill-dir`, `--stock-files`, `--rebalance-budget`, `--tcp-timeout`, `--http-port`, `--http-token-file`, `--name`, `--machine-uid-file`, `--config-file`, `--indices-file`, `--stop-on-solution`, `--headless` — is in [docs/utilisation.md](docs/utilisation.md).
 
 **CLI help system**: single source of truth is the `cli_topics[]` table in `src/app/app_runtime.c` — it feeds general help, per-topic help, and the invalid-arguments message alike. **Adding a mode or a global option ⇒ add its entry to that table.**
 
@@ -150,6 +150,7 @@ make test-docker-arm     # compile-check the ARM64 cross-build
 make coverage            # gcovr merged summary (256 + 16 piece passes)
 make coverage-report     # Cobertura XML + HTML + Markdown
 make bench-refutation    # refutation-cost bench, see docs/tests_et_ci.md
+make bench-solve         # « find-side » bench on known-solution clones (tools/gen_clone.py)
 ```
 
 Suite layout, `fork_assert.h` (for testing `exit()`-calling code without killing the runner), hand-built fixtures, coverage artefacts, and both benchmark harnesses: [docs/tests_et_ci.md](docs/tests_et_ci.md) and [tests/README.md](tests/README.md).
@@ -237,3 +238,7 @@ MRV (most-constrained-first cell choice) is the **sole** search engine, for both
 ## Debug Flags & Puzzle Configuration
 
 Debug traces (`DEBUG_SOCKET`, `DEBUG_THREAD`, …) and puzzle size (`ETERN_PARTS`, `FORWARD_CHECK_K`) are `#ifndef`-guarded constants in `src/core/core_static_variables.h`, overridable via `CPPFLAGS` without editing the file (e.g. `make CPPFLAGS="-DETERN_PARTS=16"`). CI compiles every combination with `WERROR=1` so conditionally-compiled code can't rot unnoticed. Full flag list and rationale: [docs/compilation.md](docs/compilation.md).
+
+**`ETERN_PARTS` accepts exactly 16, 64, 100, 144, 196, 256 — anything else is an `#error`**, because the preprocessor can't take a square root and a non-square size would silently produce an incoherent grid. `ETERN_SIZE` and `FACES_USED_SIZE` are derived from it. 256 and 16 keep their literal `directions[]`/`dirx[]`/`diry[]` tables (the 16×16 tour is a *chosen* order, v11); the intermediate sizes build theirs at startup from an `__attribute__((constructor))`, column by column. **There is no `directions[] ↔ (dirx,diry)` convention to uphold** — the two literal tables disagree on it (16×16 encodes `diry*ETERN_SIZE + dirx`, 4×4 the other way round), and since VERSION 13 `directions[]` owes nothing but being a *permutation* of `[0, ETERN_PARTS[`. Writing that invariant into a test is what proved it false. The two properties that are real, and are locked by unit tests: `directions[]` is a permutation, and `(dirx[i], diry[i])` visits every cell exactly once. `decode_direction` used to re-derive coordinates from `directions[]` in the 16×16 convention — it printed x and y swapped for the 4×4 — and now reads `dirx`/`diry` directly, leaving no reader of that phantom convention at all. Those intermediate sizes exist only for the **known-solution clones** of the « find-side » bench: no piece set is shipped for them, `tools/gen_clone.py` draws one. See [docs/conception/banc_resolution_clones.md](docs/conception/banc_resolution_clones.md) and [docs/tests_et_ci.md](docs/tests_et_ci.md#banc-de-résolution--clones-à-solution-connue-make-bench-solve).
+
+**Hints are an instance property, not a compiled one**: `first_possibility` reads `indices_file` whenever it is non-NULL (`--indices-file <path>`). It defaults to `./data/indices.csv` for 256 and to NULL for every other size, so a clone carries its own hints and the 4×4 keeps having none. Measurement variants of the search engine live under `#ifdef ETII_BENCH_HOOKS`, defined only by `tests/bench/bench_solve.c` — never a runtime flag; `etii_search.o` is byte-for-byte identical with and without the hook, and that check is the thing to redo before touching it.

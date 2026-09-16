@@ -17,7 +17,15 @@
  * @brief Affiche dans les logs les coordonnées x et y de chaque position du parcours.
  *
  * Outil de débogage permettant de visualiser l'ordre dans lequel les cases
- * de la grille sont parcourues (tableau `directions`).
+ * de la grille sont parcourues.
+ *
+ * Lit `dirx[]`/`diry[]`, PAS `directions[]` : les deux tables littérales
+ * n'encodent pas la case de la même façon dans `directions[]` (le 16×16 pose
+ * `diry*ETERN_SIZE + dirx`, le 4×4 l'inverse), et cette fonction redérivait
+ * les coordonnées dans la convention du 16×16 — elle imprimait donc x et y
+ * intervertis pour toute autre taille. Depuis VERSION 13, `directions[]` n'a
+ * plus qu'à être une permutation (cf. `test_directions`) : les coordonnées
+ * sont dans `dirx`/`diry`, et plus aucun code n'a à les en redéduire.
  *
  * @return 0.
  */
@@ -26,17 +34,14 @@ int decode_direction(void)
 	log_info("/nx : ");
 	int i;
 	for(i=0;i < ETERN_PARTS;i++) {
-		int x = directions[i] % ETERN_SIZE;
-        log_info("%i,",x);
+        log_info("%i,", (int)dirx[i]);
 	}
-	
+
     log_info("/ny : ");
 	for(i=0;i < ETERN_PARTS;i++) {
-		int x = directions[i] % ETERN_SIZE;
-		int y = (directions[i] - x) / ETERN_SIZE;
-        log_info("%i,",y);
+        log_info("%i,", (int)diry[i]);
 	}
-	
+
 
 	return 0;
 }
@@ -1235,10 +1240,13 @@ int fprint_possibility_packet(FILE *out, struct possibility_packet *packet)
 /**
  * @brief Génère l'ensemble des possibilités initiales et les injecte dans le datamanager.
  *
- * Pour le puzzle 16×16 (ETERN_PARTS == 256), place les indices officiels lus
- * depuis `indices_file` (CSV `id x y rotation mandatory`, voir readdata.h),
- * puis développe la première case libre pour produire toutes les positions
- * de départ.
+ * Quand l'instance déclare des indices (`indices_file` non NULL — les cinq
+ * indices officiels du 16×16, ou ceux d'un clone généré par
+ * tools/gen_clone.py), les place d'abord, lus depuis ce fichier (CSV
+ * `id x y rotation mandatory`, voir readdata.h) ; puis développe la première
+ * case libre pour produire toutes les positions de départ. Sans indices
+ * (`indices_file == NULL` : le 4×4 de test, un clone tiré sans indice), la
+ * genèse part du plateau vide.
  *
  * Ces possibilités initiales sont ensuite distribuées par le serveur aux clients.
  *
@@ -1258,33 +1266,41 @@ void first_possibility(map_big_array *mapParts, struct array_part *all_rotate_pa
         }
     }
 
-#if ETERN_PARTS == 256
+    // `directory` est ignoré par generate_possibility_packet depuis le passage
+    // à MRV (cf. sa doc) : la valeur n'a plus d'effet observable, seule la
+    // signature la réclame encore.
     int cur_dir = DIR_UP;
 
-    // Indices officiels du puzzle, lus depuis indices_file (data/indices.csv
-    // par défaut) plutôt que codés en dur : voir docs/architecture.md et le
-    // format attendu dans readdata.h (read_indices). La case sera enjambée
-    // par le parcours directions[] (niveau sans décision), pour chaque indice.
-    struct array_index *indices = read_indices(indices_file);
-    for (int i = 0; i < indices->size; i++) {
-        struct board_index *hint = &indices->indices[i];
+    // Indices de l'instance, lus depuis indices_file plutôt que codés en dur :
+    // voir docs/architecture.md et le format attendu dans readdata.h
+    // (read_indices). Le test est RUNTIME et non `#if ETERN_PARTS == 256` :
+    // la présence d'indices est une propriété de l'INSTANCE (le 16×16 officiel
+    // en a cinq, un clone en a cinq ou zéro, le 4×4 aucun), pas de la taille
+    // compilée. La case sera enjambée par le parcours directions[] (niveau
+    // sans décision), pour chaque indice.
+    if (indices_file != NULL) {
+        struct array_index *indices = read_indices(indices_file);
+        for (int i = 0; i < indices->size; i++) {
+            struct board_index *hint = &indices->indices[i];
 #if !ETERN_WITH_INDICES
-        // Seul l'indice géométrique (mandatory) reste posé sans ETERN_WITH_INDICES.
-        if (!hint->mandatory) {
-            continue;
-        }
+            // Seul l'indice géométrique (mandatory) reste posé sans ETERN_WITH_INDICES.
+            if (!hint->mandatory) {
+                continue;
+            }
 #endif
-        int position = hint->id + ETERN_PARTS * hint->rotation;
-        if (position < 0 || position >= all_rotate_part->size
-            || all_rotate_part->parts[position].id != hint->id) {
-            fatal_error("indices : pièce %i rotation %i introuvable\n", hint->id, hint->rotation);
+            int position = hint->id + ETERN_PARTS * hint->rotation;
+            if (position < 0 || position >= all_rotate_part->size
+                || all_rotate_part->parts[position].id != hint->id) {
+                fatal_error("indices : pièce %i rotation %i introuvable\n", hint->id, hint->rotation);
+            }
+            if (hint->x >= ETERN_SIZE || hint->y >= ETERN_SIZE) {
+                fatal_error("indices : case (%i,%i) hors du plateau %ix%i\n",
+                            hint->x, hint->y, ETERN_SIZE, ETERN_SIZE);
+            }
+            etern[hint->x][hint->y] = &all_rotate_part->parts[position];
         }
-        etern[hint->x][hint->y] = &all_rotate_part->parts[position];
+        free_array_index(indices);
     }
-    free_array_index(indices);
-#else
-    int cur_dir = DIR_LEFT;
-#endif
 
     // x/y du paquet genèse : sans objet pour search_possiblity_light (qui
     // choisit lui-même la case la plus contrainte, cf. light_choose_cell) —

@@ -107,6 +107,31 @@ donc en `2.:00` au lieu de `3.000`, qu'`awk` lit comme 2.0 — débit surestimé
 50 %, min/max et écart-type du rapport faussés, JSON invalide. Le banc ne
 testait auparavant que la non-vacuité de la valeur.
 
+### Banc « côté trouver » : `bench_solve_stats.{h,c}`
+
+Même règle, côté C cette fois. `tests/bench/bench_solve.c`
+(voir [Tests et CI](../docs/tests_et_ci.md#banc-de-résolution--clones-à-solution-connue-make-bench-solve))
+`fork()` un processus par exécution et cherche pendant des minutes : il n'est
+pas rattaché à `make test`. Mais c'est son **agrégation** qui décide si une
+politique est adoptée — médiane, moyenne géométrique, courbe de survie,
+comparaison appariée, coût attendu d'un redémarrage. Ces fonctions sont donc
+pures (aucune E/S, aucun global, aucune allocation), vivent dans
+`tests/bench/bench_solve_stats.{h,c}` — compilé avec les autres modules de test,
+comme le cœur pur de `gen_root` — et sont couvertes par
+`tests/bench/test_bench_solve_stats.c`.
+
+Deux règles qui s'y verrouillent, parce que les rater produit des chiffres
+*plausibles* plutôt qu'un plantage : une paire dont l'une des deux exécutions a
+buté sur le plafond est **indécise**, jamais une victoire de l'autre (le plafond
+ne dit pas de combien elle aurait perdu) ; et le coût d'un redémarrage ne charge
+le seuil que sur les tentatives **infructueuses**, pas sur celle qui aboutit.
+
+Le banc porte en outre son propre **auto-test d'instrument** : sur une racine
+MORTE, toutes les politiques doivent explorer exactement le même nombre de
+nœuds — c'est la prémisse du banc (l'ordre des valeurs n'a aucun effet sur un
+sous-arbre sans solution) retournée en contrôle. Un désaccord y signale une
+permutation fausse, pas une politique gagnante.
+
 ## Conventions et limites
 
 - **Fixtures construites à la main** plutôt que via `rotate_all_parts` /
