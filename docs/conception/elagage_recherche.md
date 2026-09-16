@@ -1790,7 +1790,7 @@ cases, §4.7). **`bench_search.sh` surestime donc ce que gagne le travail réell
 | §4.1 suppression du forward-check | **écartée** | +15,90 % de temps sans lui |
 | cumul local des compteurs de prunage | **écartée** | +1,00 %, jugé trop coûteux à prouver pour ce qu'il rapporte |
 | §4.11 backjumping dirigé par conflit | **écartée** | gain nul à 100,00 % sur 152 128 mesures |
-| §4.14 départage appris par poids d'échec | livrée | −79,6 % de nœuds, +32 fermetures (hors bilan §4.13, postérieure) |
+| §4.14 départage appris par poids d'échec | livrée | −79,6 % de nœuds, +32 fermetures (hors bilan §4.13, postérieure) ; reproduit sur une seconde machine, et gagnant aussi **côté trouver** sur les 4 cellules de `bench_solve` |
 | §4.15 appariement de Hall / comptage couleur à chaque nœud | **écartée** | plafond mesuré 0,35 à 3 % des nœuds |
 
 **Réserve de portée.** Toutes ces mesures viennent d'une seule machine (macOS, 16 cœurs,
@@ -1853,11 +1853,66 @@ par échec du forward-check — n'est pas mesurable).
    moins d'un point sur le gain (−79,6 % contre −78,8 %) — c'est la variante retenue, sans
    état global, donc sans question de portée entre racines, forks ou bancs.
 
+**Reproduction indépendante.** Rejouée sur une autre machine (i9-9880H, macOS/clang)
+avec le même protocole — mêmes 418 racines, même plafond, ordre de passes ABBA :
+378 → 410 fermetures, **−79,6 % de nœuds**, apparié **197 / 35 / 146**
+(`p = 1,4·10⁻²⁸` au test des signes), ratio médian **0,045** (q1 0,025, q3 0,120,
+pire 7,66×) sur les 112 racines à ≥ 10 000 nœuds, 32 racines gagnées et **aucune
+perdue**. Tous les chiffres du tableau ci-dessus retombent juste.
+
+**Le coût par nœud, isolé.** Comparés bruts, les deux binaires ne donnent pas le même
+débit : 3,11 contre 2,97 M nœuds/s, soit +4,9 % pour le départage appris. Ce n'est
+**pas** le coût du critère, et le distinguer demande une variante de mesure : garder
+les compteurs et leur mise à jour, mais retirer la contribution du poids à la clé.
+L'arbre exploré redevient alors celui de `master` **au nœud près** (38 526 664 des deux
+côtés, apparié 0/0/378, ratio 1,000 partout — le contrôle intégré de l'expérience), et
+le surcoût résiduel ressort à **−2,8 %** : un surcoût négatif étant impossible, cela
+situe le coût propre du mécanisme **sous le plancher de bruit** (±3 %), ce qui confirme
+le « débit par nœud inchangé » ci-dessus. Les +4,9 % observés bruts viennent donc d'un
+**mélange de nœuds** différent — la politique apprise dirige la recherche vers les cases
+qui échouent, et un nœud qui se termine par un échec du forward-check est le plus cher.
+
+**Côté TROUVER — le gain n'est pas réservé à la réfutation.** `bench_refutation` mesure
+le coût de fermeture d'un sous-arbre MORT. Le temps d'ATTEINTE d'une solution est une
+autre grandeur, mesurable seulement sur des clones à solution connue
+([banc_resolution_clones.md](banc_resolution_clones.md), `make bench-solve`) — et le
+§7.7 de ce document-là listait précisément le départage des cases comme l'axe qu'il
+n'avait pas su mesurer. Rejoué ici, 60 instances par cellule, plafond 2·10⁷ nœuds,
+politique de valeurs de production, passes alternées :
+
+| Cellule | Résolues `master` → appris | Médiane nœuds | Apparié nœuds | Apparié temps |
+|---|---|---|---|---|
+| `n10k14` (10×10, accessible) | 60/60 → 60/60 | 782 117 → **468 226** | 58 / 2 (p = 3,2·10⁻¹⁵) | 58 / 2 |
+| `n12k22` (12×12, accessible) | 60/60 → 60/60 | 232 188 → **100 546** | 59 / 1 (p = 1,1·10⁻¹⁶) | 59 / 1 |
+| `n10k13` (10×10, dur) | 54/60 → **58/60** | 5 898 930 → **3 575 133** | 52 / 2 (p = 1,6·10⁻¹³) | 52 / 2 |
+| `n12k20` (12×12, dur) | 56/60 → **60/60** | 6 256 228 → **2 795 474** | **56 / 0** (p = 2,8·10⁻¹⁷) | 56 / 0 |
+
+Gain apparié sur les quatre cellules, **en nœuds comme en temps**, part résolue au
+plafond en hausse là où elle n'était pas saturée, débit par nœud inchangé (4,08 vs
+4,11 et 3,19 vs 3,07 M nœuds/s). C'est la règle de décision du §3.5 de l'autre document
+satisfaite en entier — (a) gain apparié sur les quatre régimes, (c) coût par nœud nul.
+
+**Conséquence pour les bancs : ce départage COUPLE l'ordre des variables à l'ordre des
+valeurs.** Les poids s'accumulent dans l'ordre où les échecs surviennent, donc changer
+l'ordre des valeurs change le choix des cases. Mesuré : une racine morte ferme en
+425 451 nœuds sous les cinq politiques de `bench_solve` sur `master`, et en 168 152 à
+225 683 nœuds selon la politique avec ce départage. Cela n'affecte aucune des mesures
+ci-dessus, toutes faites à ordre des valeurs FIXÉ, mais deux lectures tombent : « l'ordre
+des valeurs est neutre pour la réfutation » (§7.2 de l'autre document) cesse d'être vrai,
+et une comparaison de politiques de valeurs mesure désormais deux effets à la fois.
+L'auto-test de `bench_solve` détecte et rapporte ce couplage au lieu de l'imputer à une
+permutation fausse.
+
 **Réserve de portée.** Le gain n'est prouvé qu'à partir de 130 pièces posées ; entre 100
 et 129, presque rien ne ferme en 2 M de nœuds dans les deux cas (6 contre 7 fermetures sur
 60 racines), et rien ne peut donc être dit sur le régime des racines peu profondes. La
 variante « poids sur la seule case morte » et un poids en critère principal (dom/wdeg
-complet, poids divisant le score) n'ont pas été mesurés.
+complet, poids divisant le score) n'ont pas été mesurés. Les quatre cellules du côté
+« trouver » sont des CLONES calibrés : le §6.4 de l'autre document a consigné qu'elles
+n'ont ni les tailles de compartiments ni la dureté du vrai 16×16. Ce que la mesure
+établit n'est donc pas une extrapolation au puzzle réel, mais quelque chose de plus
+utile — que le gain **ne dépend pas du régime** : quatre régimes très différents, même
+verdict.
 
 **Verrous.** `mrv_choose_cell_breaks_remaining_ties_by_failure_weight` (le sens, avec
 contre-contrôle ; et le poids ne prime jamais sur `nconstr`),
