@@ -32,6 +32,7 @@
  */
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -467,14 +468,42 @@ static void bench_hook_bind(map_big_array *map, struct array_part *rot)
  * politique de référence ferme dans `budget` nœuds. Aucune racine fermée dans
  * ce budget : auto-test non concluant, signalé mais non bloquant.
  *
+ * **Le processus courant n'est PAS le fils** : il n'a pas fait le `chdir` vers
+ * `workdir` ni détourné sa sortie standard. Or fermer une racine, c'est
+ * l'explorer entièrement, et `stop_on_solution` étant à 0 ici (il FAUT aller
+ * jusqu'à l'épuisement), toute solution rencontrée en chemin passe par
+ * `log_solution` : un fichier `solution_<pid>_<seq>` dans le répertoire
+ * courant et la grille complète sur la sortie standard. Sur une campagne de
+ * 60 instances cela déversait des milliers de fichiers et de plateaux dans le
+ * répertoire d'où le banc était lancé (le dépôt), et noyait son propre
+ * récapitulatif. D'où la parenthèse ci-dessous : on se place dans `workdir` et
+ * on détourne stdout le temps de l'auto-test, puis on rétablit les deux.
+ *
  * @return 0 si tout concorde ou si aucune racine n'a pu être fermée, -1 sur désaccord.
  */
 static int bench_selftest(const policy_t *policies, int nb_policies,
                           client_possibility_t *client,
                           struct possibility_packet *roots, int nb_roots,
                           int16_t idParts[ETERN_PARTS + 1][PART_SIZES],
-                          long budget)
+                          long budget, const char *workdir)
 {
+    char cwd[4096];
+    if (getcwd(cwd, sizeof(cwd)) == NULL) {
+        fprintf(stderr, "auto-test : getcwd impossible\n");
+        return -1;
+    }
+    int saved_stdout = dup(STDOUT_FILENO);
+    int sink = open("/dev/null", O_WRONLY);
+    if (saved_stdout < 0 || sink < 0 || chdir(workdir) != 0) {
+        fprintf(stderr, "auto-test : impossible d'isoler le répertoire de travail\n");
+        if (saved_stdout >= 0) close(saved_stdout);
+        if (sink >= 0) close(sink);
+        return -1;
+    }
+    fflush(stdout);
+    dup2(sink, STDOUT_FILENO);
+    close(sink);
+
     const value_order_t saved_order = g_value_order;
     int closed_root = -1;
     unsigned long long reference = 0;
@@ -492,31 +521,58 @@ static int bench_selftest(const policy_t *policies, int nb_policies,
             reference = nodes;
         }
     }
+    /* Rejeu de la racine fermée sous les autres politiques — TOUJOURS dans la
+     * parenthèse isolée : c'est la partie qui explore le plus, donc celle qui
+     * rencontre le plus de solutions à journaliser. */
+    int rc = 0;
+    int disagreements[NB_ALL_POLICIES];
+    unsigned long long counts[NB_ALL_POLICIES];
+    bt_core_result_t statuses[NB_ALL_POLICIES];
+    memset(disagreements, 0, sizeof(disagreements));
+    memset(counts, 0, sizeof(counts));
+    memset(statuses, 0, sizeof(statuses));
+    if (closed_root >= 0) {
+        for (int p = 1; p < nb_policies; p++) {
+            g_value_order = policies[p].value_order;
+            g_rng_state = 0x9E3779B97F4A7C15ULL;
+            struct possibility_packet work = roots[closed_root];
+            unsigned long long nodes = 0;
+            request = REQUEST_CONTINUE;
+            counters[0] = 0;
+            statuses[p] = search_packet_backtracking_mrv(client, &work, idParts,
+                                                         budget * 4, 0, &nodes);
+            counts[p] = nodes;
+            if (statuses[p] != BT_CORE_EXHAUSTED || nodes != reference) {
+                disagreements[p] = 1;
+                rc = -1;
+            }
+        }
+    }
+
+    /* Fin de la parenthèse : on rétablit AVANT toute écriture destinée à
+     * l'utilisateur, et avant de rendre la main. */
+    g_value_order = saved_order;
+    fflush(stdout);
+    dup2(saved_stdout, STDOUT_FILENO);
+    close(saved_stdout);
+    if (chdir(cwd) != 0) {
+        fprintf(stderr, "auto-test : retour au répertoire d'origine impossible\n");
+        return -1;
+    }
+
     if (closed_root < 0) {
         printf("auto-test : aucune racine fermée en %ld nœuds — non concluant,"
                " relancer avec --selftest-budget plus grand\n\n", budget);
-        g_value_order = saved_order;
         return 0;
     }
-
-    int rc = 0;
     for (int p = 1; p < nb_policies; p++) {
-        g_value_order = policies[p].value_order;
-        g_rng_state = 0x9E3779B97F4A7C15ULL;
-        struct possibility_packet work = roots[closed_root];
-        unsigned long long nodes = 0;
-        request = REQUEST_CONTINUE;
-        counters[0] = 0;
-        bt_core_result_t res = search_packet_backtracking_mrv(client, &work, idParts,
-                                                              budget * 4, 0, &nodes);
-        if (res != BT_CORE_EXHAUSTED || nodes != reference) {
+        if (disagreements[p]) {
             fprintf(stderr, "AUTO-TEST ÉCHOUÉ : sur la racine morte #%d, « %s » explore"
                     " %llu nœuds (statut %d) contre %llu pour « %s ». Un sous-arbre MORT"
                     " ne dépend pas de l'ordre des valeurs : la permutation est fausse,"
                     " les chiffres de ce run sont à jeter.\n",
-                    closed_root, policies[p].name, nodes, (int)res, reference,
+                    closed_root, policies[p].name, counts[p], (int)statuses[p], reference,
                     policies[0].name);
-            rc = -1;
         }
     }
     if (rc == 0) {
@@ -524,7 +580,6 @@ static int bench_selftest(const policy_t *policies, int nb_policies,
                " %d politiques — les permutations sont bien des permutations\n\n",
                closed_root, reference, nb_policies);
     }
-    g_value_order = saved_order;
     return rc;
 }
 
@@ -747,6 +802,11 @@ static const char *status_label(run_status_t s)
 
 typedef struct {
     double nodes[MAX_RUNS];
+    /** Temps mural de l'exécution. Sert au COÛT PAR NŒUD (§3.5 c) : une
+     *  politique qui divise le nombre de nœuds par deux mais coûte 60 % de plus
+     *  par nœud n'est pas un gain — et seule la comparaison des deux colonnes
+     *  le dit. */
+    double seconds[MAX_RUNS];
     int    solved[MAX_RUNS];
     int    count;
 } series_t;
@@ -754,13 +814,20 @@ typedef struct {
 static void print_tally(const policy_t *policies, int nb_policies,
                         const series_t *series, long budget)
 {
-    printf("\n%-10s %8s %14s %14s %12s\n",
-           "politique", "résolus", "médiane nœuds", "moy. géom.", "temps total");
+    printf("\n%-10s %8s %14s %14s %12s %14s\n",
+           "politique", "résolus", "médiane nœuds", "moy. géom.", "temps total", "nœuds/s");
     for (int p = 0; p < nb_policies; p++) {
         const series_t *s = &series[p];
         double solved_nodes[MAX_RUNS];
         int nb_solved = 0;
+        /* Débit agrégé sur TOUTES les exécutions, résolues ou non : c'est un
+         * coût par nœud de la politique, pas une mesure de son succès. Une
+         * exécution au plafond y contribue autant qu'une autre — c'est même
+         * celle qui le mesure le mieux, le plafond fixant le nombre de nœuds. */
+        double total_seconds = 0.0, total_nodes = 0.0;
         for (int i = 0; i < s->count; i++) {
+            total_seconds += s->seconds[i];
+            total_nodes += s->nodes[i];
             if (s->solved[i]) {
                 solved_nodes[nb_solved++] = s->nodes[i];
             }
@@ -768,10 +835,12 @@ static void print_tally(const policy_t *policies, int nb_policies,
         double sorted[MAX_RUNS];
         memcpy(sorted, solved_nodes, sizeof(double) * (size_t)nb_solved);
         bench_stats_sort(sorted, nb_solved);
-        printf("%-10s %4d/%-3d %14.0f %14.0f\n",
+        printf("%-10s %4d/%-3d %14.0f %14.0f %10.3f s %14.0f\n",
                policies[p].name, nb_solved, s->count,
                bench_stats_median_sorted(sorted, nb_solved),
-               bench_stats_geomean(solved_nodes, nb_solved));
+               bench_stats_geomean(solved_nodes, nb_solved),
+               total_seconds,
+               total_seconds > 0.0 ? total_nodes / total_seconds : 0.0);
     }
 
     /* Courbe de survie : la médiane seule ne dit rien dès qu'une moitié des
@@ -1081,7 +1150,7 @@ int main(int argc, char **argv)
             probe.all_rotate_part = rot;
             probe.map_part = map;
             if (bench_selftest(policies, nb_policies, &probe, roots, nb_roots,
-                               idParts, selftest_budget) != 0) {
+                               idParts, selftest_budget, workdir) != 0) {
                 return EXIT_FAILURE;
             }
         }
@@ -1119,6 +1188,7 @@ int main(int argc, char **argv)
                 }
                 if (series[p].count < MAX_RUNS) {
                     series[p].nodes[series[p].count] = (double)rep.nodes;
+                    series[p].seconds[series[p].count] = rep.seconds;
                     series[p].solved[series[p].count] = (st == RUN_SOLVED);
                     series[p].count++;
                 }
