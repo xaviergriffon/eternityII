@@ -190,21 +190,45 @@
 
 #define PART_SIZES 4
 // Surchargeable via -DETERN_PARTS=16 (puzzle 4×4) sans éditer ce fichier : la CI
-// compile les deux tailles. Défaut 256 (16×16). Cf. section Puzzle Configuration.
+// compile plusieurs tailles. Défaut 256 (16×16). Cf. section Puzzle Configuration.
 #ifndef ETERN_PARTS
 #define ETERN_PARTS 256
 #endif
 #define ETERN_WITH_INDICES 1
+// Tailles supportées. 256 (le vrai puzzle) et 16 (le 4×4 de test) sont
+// historiques ; les tailles intermédiaires servent aux CLONES à solution
+// connue du banc « côté trouver » (tools/gen_clone.py,
+// tests/bench/bench_solve.c, docs/conception/banc_resolution_clones.md).
+// L'énumération est explicite plutôt que calculée : le préprocesseur ne sait
+// pas extraire une racine carrée, et une taille non carrée doit être refusée
+// à la COMPILATION, pas produire une grille silencieusement incohérente.
 #if ETERN_PARTS == 256
 #define ETERN_SIZE 16
-#define FACES_USED_SIZE 17// (ETERN_PARTS / 16) + 1;
-#else
-// 16 pieces
+#elif ETERN_PARTS == 196
+#define ETERN_SIZE 14
+#elif ETERN_PARTS == 144
+#define ETERN_SIZE 12
+#elif ETERN_PARTS == 100
+#define ETERN_SIZE 10
+#elif ETERN_PARTS == 64
+#define ETERN_SIZE 8
+#elif ETERN_PARTS == 16
 #define ETERN_SIZE 4
-#define FACES_USED_SIZE 2// (ETERN_PARTS / 16) + 1;
-#endif // ETERN_PARTS == 256
+#else
+#error "ETERN_PARTS non supporté : attendu 16, 64, 100, 144, 196 ou 256 (cf. docs/compilation.md)"
+#endif // ETERN_PARTS
+// Nombre de mots de 16 bits du masque `b_faceused` : ceil(ETERN_PARTS/16),
+// plus un mot de marge (la formule donne déjà ceil+1 quand ETERN_PARTS est
+// multiple de 16, et ceil quand il ne l'est pas — les deux couvrent
+// ETERN_PARTS bits). Écrite en dur (17 / 2) jusqu'ici, un chiffre par taille ;
+// l'expression unique évite d'avoir à en ajouter un par taille de clone.
+#define FACES_USED_SIZE ((ETERN_PARTS / 16) + 1)
 
 #define BUF_SIZE 300
+
+/** @brief Stringification d'une macro (double expansion obligatoire). */
+#define ETII_STRINGIFY_(x) #x
+#define ETII_STRINGIFY(x) ETII_STRINGIFY_(x)
 
 /**
  * @brief Bascule d'activation du forward-checking, et taille de fenêtre du

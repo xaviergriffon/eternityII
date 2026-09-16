@@ -23,12 +23,48 @@ uint8_t dirx[ETERN_PARTS] = {0, 1, 2, 2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
 
 uint8_t diry[ETERN_PARTS] = {0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 1, 2, 2, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 15, 15, 14, 13, 14, 13, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 14, 13, 15, 15, 14, 13, 13, 14, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 2, 1, 1, 12, 14, 14, 13, 12, 11, 12, 14, 14, 13, 12, 11, 1, 3, 4, 3, 2, 1, 1, 3, 1, 2, 3, 4, 1, 1, 1, 1, 1, 1, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 14, 14, 14, 14, 14, 14, 11, 12, 13, 13, 12, 11, 10, 9, 10, 11, 12, 13, 13, 12, 11, 10, 9, 8, 8, 9, 10, 11, 12, 11, 10, 9, 8, 8, 9, 10, 9, 8, 8, 11, 12, 13, 13, 12, 11, 10, 9, 10, 11, 12, 13, 13, 12, 12, 11, 10, 9, 8, 8, 9, 10, 11, 11, 10, 10, 9, 8, 8, 9, 9, 8, 8, 2, 3, 4, 5, 4, 3, 2, 2, 3, 4, 5, 6, 7, 6, 7, 5, 4, 3, 2, 3, 4, 5, 6, 7, 6, 7, 5, 4, 5, 6, 7, 6, 7, 7, 6, 7, 7, 6, 5, 4, 5, 6, 7, 7, 7, 6, 5, 4, 3, 4, 5, 6, 6, 5, 5, 4, 3, 2, 3, 2, 4, 4, 3, 2, 3, 2};
 
-#else
+#elif ETERN_PARTS == 16
 uint8_t directions[ETERN_PARTS] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
 
 uint8_t dirx[ETERN_PARTS] = {0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3};
 
 uint8_t diry[ETERN_PARTS] = {0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3};
+
+#else
+
+// Tailles de CLONE (64, 100, 144, 196 : cf. ETERN_SIZE dans le .h). Le
+// parcours n'est plus qu'un ordre d'énumération depuis VERSION 13 (MRV est le
+// seul moteur, il choisit sa case lui-même) : une énumération colonne par
+// colonne suffit, exactement celle que le 4×4 ci-dessus écrit à la main.
+// La SEULE obligation de `directions[]` depuis VERSION 13 est d'être une
+// permutation de 0..ETERN_PARTS-1 (`test_directions`) : plus aucun code n'en
+// redéduit de coordonnées. Les deux tables historiques ne l'encodent d'ailleurs
+// pas de la même façon (le 16×16 pose `diry*ETERN_SIZE + dirx`, le 4×4
+// l'inverse) — ne pas tenter de rétablir une convention commune, elle n'aurait
+// aucun lecteur. Ce qui compte, et ce qu'un test verrouille, c'est que
+// `(dirx[i], diry[i])` visite chaque case exactement une fois.
+//
+// Pourquoi un constructeur plutôt qu'un initialiseur littéral : ces tables ne
+// sont pas `const` et C n'offre aucun moyen de les CALCULER à la compilation
+// (il faudrait 196 valeurs écrites à la main par taille, la faute d'index
+// n'étant alors visible qu'à l'exécution). `__attribute__((constructor))`
+// s'exécute avant `main` dans tout binaire qui lie ce module — production,
+// suites de tests et bancs — donc aucun appelant n'a à s'en souvenir. Les
+// tailles 256 et 16 gardent leurs tables littérales : le parcours 16×16 est
+// un ordre CHOISI (v11), pas une énumération.
+uint8_t directions[ETERN_PARTS];
+uint8_t dirx[ETERN_PARTS];
+uint8_t diry[ETERN_PARTS];
+
+__attribute__((constructor))
+static void core_geometry_init(void)
+{
+    for (int i = 0; i < ETERN_PARTS; i++) {
+        directions[i] = (uint8_t)i;
+        dirx[i] = (uint8_t)(i / ETERN_SIZE);
+        diry[i] = (uint8_t)(i % ETERN_SIZE);
+    }
+}
 
 #endif
 #if FORWARD_CHECK_K > 0
@@ -85,14 +121,25 @@ int request_keeps_running(int r) {
 // TODO : deplacer dans un parametre ?
 #if ETERN_PARTS == 256
 char* parts_files = "./data/pieces.csv";
-#else
+#elif ETERN_PARTS == 16
 char* parts_files = "./data/pieces16.csv";
-#endif // ETERN_PARTS == 256
+#else
+// Tailles de clone : aucun jeu de pièces n'est livré dans le dépôt (il est
+// TIRÉ, cf. tools/gen_clone.py). Ce défaut n'est qu'une convention de nommage
+// — un clone est toujours désigné explicitement (argument positionnel du CLI,
+// ou --pieces côté banc).
+char* parts_files = "./data/pieces" ETII_STRINGIFY(ETERN_PARTS) ".csv";
+#endif // ETERN_PARTS
 
-// Indices officiels du puzzle 256 pièces : lu par first_possibility (possibility.c)
-// uniquement quand ETERN_PARTS == 256. Le chemin reste défini inconditionnellement
-// pour rester surchargeable sans #if côté appelant.
+// Indices du puzzle, lus par first_possibility (possibility.c) quand ce
+// pointeur est non NULL. NULL = instance sans indice : c'est le cas du 4×4 de
+// test (aucun indice n'a jamais été posé pour cette taille) et le défaut des
+// clones, qui apportent le leur via --indices-file quand ils en ont un.
+#if ETERN_PARTS == 256
 char* indices_file = "./data/indices.csv";
+#else
+char* indices_file = NULL;
+#endif // ETERN_PARTS == 256
 
 unsigned long long non_null_possibilities = 0;
 

@@ -93,6 +93,45 @@ make NCURSES=1 CPPFLAGS="-DOUTPUT_PAD_LINES=10000"  # profondeur d'historique du
 
 Changer `ETERN_PARTS` nécessite un rebuild complet (`make clean` d'abord).
 
+### Tailles supportées
+
+| `ETERN_PARTS` | `ETERN_SIZE` | Jeu de pièces | Indices par défaut |
+|---|---|---|---|
+| 256 | 16×16 | `data/pieces.csv` (le vrai puzzle) | `data/indices.csv` (les 5 officiels) |
+| 196 | 14×14 | clone | aucun |
+| 144 | 12×12 | clone | aucun |
+| 100 | 10×10 | clone | aucun |
+| 64 | 8×8 | clone | aucun |
+| 16 | 4×4 | `data/pieces16.csv` | aucun |
+
+Toute autre valeur est refusée **à la compilation** (`#error`) : une taille non
+carrée produirait une grille silencieusement incohérente. `ETERN_SIZE` et
+`FACES_USED_SIZE` sont dérivés d'`ETERN_PARTS` ; le parcours
+`directions[]`/`dirx[]`/`diry[]` est une énumération colonne par colonne pour
+les tailles intermédiaires, construite au démarrage par un constructeur (le
+16×16 garde son parcours choisi, v11, et le 4×4 sa table littérale).
+
+Depuis VERSION 13, `directions[]` n'a plus qu'une obligation : être une
+**permutation** de `[0, ETERN_PARTS[`. Les deux tables historiques n'encodent
+d'ailleurs pas la case de la même façon (le 16×16 pose `diry*ETERN_SIZE + dirx`,
+le 4×4 l'inverse) — il n'y a **pas** de convention commune à rétablir, aucun
+code n'en redéduit plus de coordonnées. Ce qui compte, et que des tests
+verrouillent, c'est que `(dirx[i], diry[i])` visite chaque case exactement une
+fois.
+
+Les tailles intermédiaires n'existent que pour les **clones à solution connue**
+du banc « côté trouver » : aucun jeu de pièces n'est livré pour elles, il se
+génère (`tools/gen_clone.py`). Voir
+[docs/conception/banc_resolution_clones.md](conception/banc_resolution_clones.md)
+et [docs/tests_et_ci.md](tests_et_ci.md#banc-de-résolution--clones-à-solution-connue-make-bench-solve).
+
+```sh
+python3 tools/gen_clone.py --size 10 --inner-colours 17 --seed 1 --hints 5 --out-dir data/clones
+make clean && make CPPFLAGS="-DETERN_PARTS=100"
+./eternityII test data/clones/pieces_10_17_1.csv \
+    --indices-file data/clones/indices_10_17_1.csv --stop-on-solution
+```
+
 ## Drapeaux de debug
 
 Des traces conditionnelles sont définies (et commentées) dans

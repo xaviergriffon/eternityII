@@ -131,6 +131,17 @@ static const cli_help_topic_t cli_topics[] = {
 	  "Purement déclaratif (jamais vérifié par le serveur, à la différence de l'IP\n"
 	  "du pair). Visible dans la commande console `clients` et\n"
 	  "`GET /api/v1/clients`. Ignorée en mode serveur." },
+	{ "--indices-file",
+	  "--indices-file <chemin>",
+	  "Fichier d'indices imposés de l'instance (défaut ./data/indices.csv en 16×16, aucun sinon).",
+	  "Format CSV `nindices: N` puis `id x y rotation mandatory` (cf. readdata.h).\n"
+	  "Posés sur la genèse par first_possibility, AVANT toute expansion : un\n"
+	  "serveur et ses clients doivent donc partir du même fichier, exactement\n"
+	  "comme du même fichier de pièces. Sert surtout aux CLONES à solution connue\n"
+	  "(tools/gen_clone.py) : chaque clone porte ses propres indices. Chemin\n"
+	  "introuvable ou malformé : erreur fatale au démarrage (jamais une genèse\n"
+	  "silencieusement sans indice). Sans l'option, le 16×16 garde les cinq\n"
+	  "indices officiels et les autres tailles démarrent sans aucun indice." },
 	{ "--machine-uid-file",
 	  "--machine-uid-file <chemin>",
 	  "Client/pruner : chemin de l'identité machine persistante (défaut ./eternityii-machine_uid).",

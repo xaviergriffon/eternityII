@@ -310,6 +310,14 @@ jobs:
       - name: Build ETERN_PARTS=16 (puzzle 4×4)
         run: make WERROR=1 CPPFLAGS="-DETERN_PARTS=16"
 
+      # Taille de CLONE (10×10) : exerce les chemins GÉNÉRIQUES que ni 256 ni 16
+      # n'empruntent — ETERN_SIZE/FACES_USED_SIZE dérivés, parcours
+      # directions[]/dirx[]/diry[] construit à l'exécution, genèse sans indices.
+      # Les 16/256 écrits en dur ne se voient qu'à la compilation d'une TROISIÈME
+      # taille : c'est ce que ce job garde vert.
+      - name: Build ETERN_PARTS=100 (clone 10×10)
+        run: make clean && make WERROR=1 CPPFLAGS="-DETERN_PARTS=100"
+
       # Forward-checking désactivé : tout le bloc #if FORWARD_CHECK_K > 0 est
       # supprimé à la compilation (chemin conçu exprès). On repart propre.
       - name: Build FORWARD_CHECK_K=0 (forward-checking désactivé)

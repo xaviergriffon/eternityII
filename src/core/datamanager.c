@@ -628,12 +628,6 @@ int put_to_server(client_possibility_t *client_possibility, array_possibility_pa
 		{
 			max_result = possibilities->possibilities[t].alloc;
 		}
-        /*
-		if(possibilities->possibilities[t].x < 0 || possibilities->possibilities[t].y < 0 || possibilities->possibilities[t].x > 16 || possibilities->possibilities[t].y > 16)
-		{
-			printf("alert\n");
-		}
-         */
 		send_instruction(socket_id, INST_ADD);
 		struct possibility_packet *possibility = &possibilities->possibilities[t];
 		// send_all : un send() brut pouvait n'écrire qu'une partie du paquet

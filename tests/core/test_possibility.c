@@ -108,6 +108,60 @@ TEST test_directions_covers_every_cell(void)
     PASS();
 }
 
+/* Les coordonnées du parcours restent TOUJOURS dans le plateau -- le seul
+   contrôle qui porte sur dirx[]/diry[] pris isolément, et celui qu'une future
+   table de parcours violerait en premier (grid[x][y] hors bornes).
+
+   NE PAS y ajouter « directions[i] == dirx[i]*ETERN_SIZE + diry[i] » : cette
+   relation est FAUSSE, et l'avoir écrite a fait tomber ce test. Les deux tables
+   littérales ne partagent PAS la même convention -- le 16x16 encode
+   diry*ETERN_SIZE + dirx (240 indices sur 256 contredisent l'autre sens), le
+   4x4 encode dirx*ETERN_SIZE + diry. Ce n'est pas un bogue : depuis VERSION 13,
+   `directions[]` n'a plus qu'une seule obligation, être une PERMUTATION de
+   [0, ETERN_PARTS[ (test_directions ci-dessus), et plus aucun code n'en
+   redéduit de coordonnées. Les tailles de clone reprennent la convention du
+   4x4. */
+TEST dirx_diry_stay_inside_the_board(void)
+{
+    for (int i = 0; i < ETERN_PARTS; i++) {
+        ASSERT(dirx[i] < ETERN_SIZE);
+        ASSERT(diry[i] < ETERN_SIZE);
+    }
+    PASS();
+}
+
+/* Le couple (dirx, diry) visite chaque case du plateau exactement une fois --
+   le pendant géométrique de test_directions(), qui ne contrôle que directions[]. */
+TEST dirx_diry_visit_every_cell_exactly_once(void)
+{
+    int seen[ETERN_SIZE][ETERN_SIZE];
+    memset(seen, 0, sizeof(seen));
+    for (int i = 0; i < ETERN_PARTS; i++) {
+        seen[dirx[i]][diry[i]]++;
+    }
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            ASSERT_EQ_FMT(1, seen[x][y], "%d");
+        }
+    }
+    PASS();
+}
+
+/* FACES_USED_SIZE doit couvrir ETERN_PARTS bits : dérivé d'ETERN_PARTS depuis
+   l'ouverture aux tailles de clone, il valait un chiffre écrit à la main par
+   taille. Un mot de trop coûte de la place, un mot de moins fait déborder
+   set_face_used/is_face_used sur la pièce d'indice le plus élevé. */
+TEST faces_used_size_covers_every_piece_bit(void)
+{
+    ASSERT(FACES_USED_SIZE * 16 >= ETERN_PARTS);
+    struct possibility_packet packet;
+    memset(&packet, 0, sizeof(packet));
+    set_face_used(packet.b_faceused, (uint16_t)(ETERN_PARTS - 1), 1);
+    ASSERT_EQ_FMT(1, (int)is_face_used(packet.b_faceused, (uint16_t)(ETERN_PARTS - 1)), "%d");
+    ASSERT_EQ_FMT(0, (int)is_face_used(packet.b_faceused, 0), "%d");
+    PASS();
+}
+
 /* directions[] corrompu (doublon -> un indice jamais visité) -> -1.
  * directions est un vrai global mutable (core_static_variables.c) : on le corrompt
  * temporairement puis on le restaure, quel que soit le résultat du test. */
@@ -2442,6 +2496,32 @@ TEST first_possibility_missing_indices_file_is_fatal(void)
     PASS();
 }
 
+/* indices_file == NULL : l'instance ne déclare AUCUN indice (le 4x4, un clone
+ * tiré sans indice). first_possibility doit alors sauter entièrement la lecture
+ * -- pas fopen(NULL). Le contraste avec le test précédent est le contrat
+ * exact : chemin ABSENT = fatal, chemin NUL = genèse sur plateau vide. Tant que
+ * la lecture était sous `#if ETERN_PARTS == 256`, la distinction n'existait pas.
+ * La carte synthétique n'a aucune pièce à face bordure : sans indice posé, le
+ * développement d'un coin ne trouve aucun candidat et la genèse reste bornée. */
+static void run_fp_null_indices_file(void)
+{
+    struct array_part *base = make_synthetic_base_256();
+    struct array_part *rot  = rotate_all_parts(base);
+    map_big_array     *map  = prepare_map_part(rot);
+    indices_file = NULL;
+    first_possibility(map, rot); /* doit revenir normalement */
+    exit(0);
+}
+
+TEST first_possibility_without_indices_file_is_not_fatal(void)
+{
+    pid_t pid;
+    int code = run_in_fork(run_fp_null_indices_file, &pid);
+    ASSERT_EQ_FMTm("indices_file NULL doit donner une genèse sans indice, pas une erreur",
+                   0, code, "%d");
+    PASS();
+}
+
 /* Un indices_file dont une ligne référence un id hors de 1..ETERN_PARTS (donc
  * jamais peuplé par rotate_all_parts, cf. sa doc) doit rendre first_possibility
  * fatal, quand bien même la position (id + ETERN_PARTS*rotation) reste dans les
@@ -2559,6 +2639,9 @@ TEST search_light_aborts_on_put_failure(void)
 SUITE(possibility_suite)
 {
     RUN_TEST(test_directions_covers_every_cell);
+    RUN_TEST(dirx_diry_stay_inside_the_board);
+    RUN_TEST(dirx_diry_visit_every_cell_exactly_once);
+    RUN_TEST(faces_used_size_covers_every_piece_bit);
     RUN_TEST(test_directions_detects_missing_cell);
     RUN_TEST(decode_direction_runs);
     RUN_TEST(check_possibility_null_packet_is_minus_one);
@@ -2572,6 +2655,7 @@ SUITE(possibility_suite)
     RUN_TEST(check_possibility_valid_genesis_is_zero);
     RUN_TEST(check_possibility_top_left_empty_neighbors_is_zero);
     RUN_TEST(first_possibility_missing_indices_file_is_fatal);
+    RUN_TEST(first_possibility_without_indices_file_is_not_fatal);
     RUN_TEST(first_possibility_unknown_index_part_is_fatal);
     RUN_TEST(first_possibility_valid_injects_one_possibility);
 #endif

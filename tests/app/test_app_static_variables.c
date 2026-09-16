@@ -407,6 +407,37 @@ TEST machine_uid_file_option_without_value_is_ignored(void)
     PASS();
 }
 
+/* --indices-file <chemin> : option VALUÉE pointeur, même schéma que
+   --machine-uid-file. Le global appartient à core/ (indices_file) et d'autres
+   suites s'en servent : chaque test le restaure. */
+TEST indices_file_option_strips_option_and_value_sets_global(void)
+{
+    char *saved = indices_file;
+    const char *argv[] = {"prog", "test", "--indices-file", "clones/indices_10_17_1.csv", "clones/pieces_10_17_1.csv"};
+    int argc = parse_cli_options(5, argv);
+
+    ASSERT_EQ_FMT(3, argc, "%d");
+    ASSERT_STR_EQ("clones/indices_10_17_1.csv", indices_file);
+    ASSERT_STR_EQ("test", argv[1]);
+    ASSERT_STR_EQ("clones/pieces_10_17_1.csv", argv[2]);
+    indices_file = saved;
+    PASS();
+}
+
+/* Valeur absente : ignorée sans lire hors argv, indices_file garde sa valeur. */
+TEST indices_file_option_without_value_is_ignored(void)
+{
+    char *saved = indices_file;
+    indices_file = (char *)"./data/indices.csv";
+    const char *argv[] = {"prog", "server", "--indices-file"};
+    int argc = parse_cli_options(3, argv);
+
+    ASSERT_EQ_FMT(2, argc, "%d");
+    ASSERT_STR_EQ("./data/indices.csv", indices_file);
+    indices_file = saved;
+    PASS();
+}
+
 /* --gpu : position-indépendante — retirée d'argv, gpu_requested positionné,
    arguments positionnels du pruner intacts (l'interprétation CUDA/non-CUDA se
    fait dans main(), pas ici). */
@@ -825,6 +856,8 @@ SUITE(app_static_variables_suite)
     RUN_TEST(name_option_without_value_is_ignored);
     RUN_TEST(machine_uid_file_option_strips_option_and_value_sets_global);
     RUN_TEST(machine_uid_file_option_without_value_is_ignored);
+    RUN_TEST(indices_file_option_strips_option_and_value_sets_global);
+    RUN_TEST(indices_file_option_without_value_is_ignored);
     RUN_TEST(gpu_flag_is_stripped_and_sets_global);
     RUN_TEST(gpu_flag_absent_leaves_global_untouched);
     RUN_TEST(pruner_forks_strips_option_and_value_sets_global);

@@ -772,6 +772,42 @@ ntiles: 256
 - Le fichier `data/pieces.csv` contient les 256 pièces officielles du puzzle 16×16.
 - Le fichier `data/pieces16.csv` contient 16 pièces pour un puzzle 4×4 (tests rapides,
   nécessite un build `ETERN_PARTS=16` — voir [Compilation](compilation.md#configuration-du-puzzle)).
+- Les **clones à solution connue** (`tools/gen_clone.py`, tailles 8×8 à 14×14) suivent
+  exactement ce format ; ils ne sont pas versionnés, ils se régénèrent à partir d'une
+  graine. Voir [Compilation](compilation.md#tailles-supportées).
+
+## Option `--indices-file` (indices imposés de l'instance)
+
+```sh
+./eternityII test data/clones/pieces_10_17_1.csv --indices-file data/clones/indices_10_17_1.csv
+```
+
+Acceptée par tous les modes, à n'importe quelle position, comme
+`--stop-on-solution`. Désigne le fichier d'indices posés sur la **genèse**
+(`first_possibility`), avant toute expansion :
+
+```
+nindices: 5
+<id> <x> <y> <rotation> <mandatory>
+...
+```
+
+`x` est la colonne, `y` la ligne ; `rotation` est l'indice de rotation du moteur
+(`rotatePart`) ; `mandatory` distingue l'indice géométrique, toujours posé, des
+indices de coin (ignorés par un build `ETERN_WITH_INDICES=0`).
+
+| Taille | Défaut sans l'option |
+|---|---|
+| 16×16 | `./data/indices.csv` — les cinq indices officiels |
+| toute autre | **aucun indice** : la genèse part du plateau vide |
+
+Un serveur et ses clients doivent partir du **même** fichier d'indices, exactement
+comme du même fichier de pièces : les possibilités échangées sur le fil supposent la
+même genèse. Un chemin introuvable ou malformé est une **erreur fatale au démarrage** —
+jamais une genèse silencieusement sans indice.
+
+L'option existe pour les clones, qui portent chacun les leurs
+(`indices_<n>_<k>_<graine>.csv`, produit par `tools/gen_clone.py --hints 5`).
 
 ## Fichiers générés
 
