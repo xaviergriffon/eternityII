@@ -1119,6 +1119,18 @@ resté en place derrière `pruner_dfs_budget` justement pour ce cas de figure.
 **inconditionnel** depuis cette PR — aucun interrupteur laissé en place, même discipline
 que §4.1 (« voisines seules, pas de fenêtre résiduelle »).
 
+> **Confirmé « côté trouver » (2026-09-16).** Cet ordre avait été adopté sur un
+> critère de DÉBIT, sur lequel l'ordre des candidats ne devrait rien changer dans
+> un sous-arbre mort. La campagne de
+> [banc_resolution_clones.md §7.2](banc_resolution_clones.md) l'a remesuré sur le
+> critère qu'aucun instrument du dépôt ne savait voir jusque-là — le temps
+> d'ATTEINTE d'une solution, sur 2 640 exécutions et quatre régimes d'instances à
+> solution connue. Ni l'ordre inverse (*common_first*), ni un ordre aléatoire, ni
+> la valeur la moins contraignante, ni la plus contraignante ne le battent : à
+> égalité en nœuds partout, perdantes en temps partout (1,12× à 1,42× par nœud).
+> `lcv` — l'heuristique de valeur classique de la littérature CSP — est même
+> significativement perdante EN NŒUDS sur les deux régimes durs.
+
 **Principe.** Trier chaque compartiment **à la construction** — pièce exposant les
 couleurs les plus rares en premier, ou l'inverse — coûte **zéro à l'exécution** (le tri a
 lieu une seule fois, à la construction de la map, avant tout fork et avant toute

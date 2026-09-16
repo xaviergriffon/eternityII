@@ -966,7 +966,18 @@ distribution, aucun mécanisme n'est implémenté.
 
 Au démarrage de chaque instance, le banc cherche une racine que la politique de
 référence **ferme** dans `--selftest-budget` nœuds, puis la rejoue sous toutes
-les politiques demandées. Les comptes doivent être **identiques au nœud près** :
+les politiques demandées. Il tourne dans le **processus courant** (pas de fork),
+mais dans une parenthèse isolée : `chdir` vers le répertoire de travail et
+sortie standard détournée. Ce n'est pas une précaution de style — fermer une
+racine, c'est l'explorer entièrement, donc `stop_on_solution` y vaut 0 par
+nécessité, et toute solution rencontrée en chemin passe par `log_solution`
+(un fichier `solution_<pid>_<seq>` dans le répertoire courant, la grille
+complète sur stdout). Sans cet isolement, une campagne de 60 instances déverse
+des milliers de fichiers et de plateaux dans le répertoire d'où le banc a été
+lancé. Le budget par défaut (200 000) est délibérément bas pour ne rien coûter ;
+sur des instances où aucune racine ne ferme si vite, l'auto-test rend « non
+concluant » — le relever (`--selftest-budget 2000000`) rend alors le contrôle
+effectif, à quelques dixièmes de seconde par instance. Les comptes doivent être **identiques au nœud près** :
 c'est la prémisse même du banc (un sous-arbre mort ne dépend pas de l'ordre des
 valeurs). Un désaccord ne dirait pas « telle politique gagne » — il dirait que la
 permutation est fausse (candidat perdu, dupliqué, indice hors compartiment), donc
@@ -990,6 +1001,27 @@ redémarrage) sont pures et vivent dans `tests/bench/bench_solve_stats.{h,c}`,
 compilées dans le binaire de test et couvertes par
 `tests/bench/test_bench_solve_stats.c` — rattachées à `make test`, comme le
 cœur pur de `gen_root`. Le banc lui-même ne l'est pas.
+
+### 5. Ce que la première campagne a donné
+
+Résultat d'ensemble, sur 2 640 exécutions et quatre régimes d'instances :
+**aucun ordre des valeurs ne bat celui de production**, et le seul point de
+départ réellement distinct du choix de MRV est nettement plus mauvais. Détail,
+chiffres et décisions :
+[conception/banc_resolution_clones.md §6 et §7](conception/banc_resolution_clones.md).
+
+Trois enseignements de méthode, utiles avant toute campagne future :
+
+- **Mesurer le temps autant que les nœuds.** `mcv` gagne en nœuds sur une
+  cellule (p = 0,025) et perd en temps sur les quatre (1,27× à 1,40× par nœud).
+  En ne lisant que les nœuds, on l'adopterait.
+- **Compter les paires indécises comme telles.** Sur les cellules dures, c'est
+  la *part résolue au plafond* (14/60 contre 54/60) et non l'appariement qui
+  départage `center`, l'appariement restant indécis faute de paires complètes.
+- **Une référence censurée ne conclut pas.** Le coût « sans redémarrage » n'est
+  qu'une borne inférieure dès qu'une exécution bute sur le plafond, et la
+  censure joue dans le sens qui favoriserait le redémarrage : on ne peut donc
+  rien conclure contre lui sur ces cellules-là.
 
 ## Voir aussi
 
