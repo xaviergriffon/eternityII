@@ -1,0 +1,191 @@
+# Banc « côté trouver » : clones d'Eternity II à solution connue
+
+**Statut : proposition (plan), aucune ligne de code.** Suite 3 de la campagne du
+2026-09-16 (§4.14/§4.15 de [elagage_recherche.md](elagage_recherche.md)) : après le
+départage appris, la seule grandeur que le projet ne sait pas encore mesurer est le
+temps pour **trouver** la solution, par opposition au coût pour **réfuter** un sous-arbre.
+
+## 1. Question posée
+
+> Quel ordre des valeurs (quelle pièce essayer d'abord sur une case), quel point de
+> départ et quelle politique de diversification atteignent la solution le plus tôt ?
+
+Tous les instruments du dépôt mesurent la réfutation (`bench_refutation`, coût de
+fermeture d'un sous-arbre mort) ou le débit (`bench_search.sh`, nœuds/s depuis la
+genèse, avec `max_result` en garde-fou). Aucun ne peut voir l'ordre des valeurs : dans
+un sous-arbre mort, **tous** les fils sont explorés quelle que soit leur ordre, donc le
+compte de nœuds d'une réfutation n'en dépend pas. Or c'est précisément l'ordre des
+valeurs, et le choix de la racine, qui décident *à quel moment* la branche portant la
+solution est atteinte. Le puzzle réel n'ayant jamais été résolu, rien ne permet de
+mesurer ce côté-là sur `data/pieces.csv`.
+
+La solution d'Eternity II est de plus quasi unique. Estimation par comptage (voir
+annexe) du nombre attendu de solutions **accidentelles** d'une instance aléatoire aux
+statistiques de `pieces.csv` (16×16, 17 couleurs intérieures, 5 de cadre) :
+≈ 10¹ sans les indices, ≈ 10⁻¹³ avec les 5 indices officiels. C'est cohérent avec ce
+que le concepteur annonçait (les indices ont été ajoutés pour rendre la solution
+unique). Conséquence : la recherche complète ne peut pas s'appuyer sur la multiplicité
+des solutions ; elle est une course vers une branche unique, et cette course n'est
+mesurable que sur des instances **construites** autour d'une solution plantée.
+
+## 2. Contraintes du code existant
+
+| Point | État | Conséquence pour ce plan |
+|---|---|---|
+| Taille du plateau | `ETERN_PARTS` compilé, deux valeurs seulement (256 → 16×16, sinon 4×4), `core/core_static_variables.h` | il faut dériver `ETERN_SIZE`/`FACES_USED_SIZE` pour 64, 100, 144, 196 |
+| `directions[]`/`dirx[]`/`diry[]` | tableaux en dur pour 256 et 16 | simple énumération depuis VERSION 13 : un ordre ligne par ligne suffit pour les nouvelles tailles |
+| Genèse (`first_possibility`) | `#if ETERN_PARTS == 256` lit `indices_file`, sinon pas d'indices | brancher sur `ETERN_WITH_INDICES` et un fichier d'indices par instance |
+| Bornes en dur | `datamanager.c:632` (`x > 16`), `part.c:413` (`p.id > 256`) | à exprimer en `ETERN_SIZE`/`ETERN_PARTS` |
+| Arrêt sur solution | `record_solution` fait `exit()` sous `stop_on_solution` ; `counters[]` porte le compte de nœuds | un banc **en processus fils** récupère les nœuds par un `atexit` sans toucher au moteur |
+| Fichiers `solution_<pid>_<seq>` | écrits par `log_solution` dans le répertoire courant | le fils tourne dans un répertoire temporaire |
+| Interrupteurs de mesure | règle du dépôt : pas de drapeau runtime inutilisé en production (§6 de `mrv_moteur_unique.md`) | les variantes vivent sous `#ifdef ETII_BENCH_HOOKS`, définie par le seul banc qui inclut `etii_search.c` — coût nul en production, même discipline que `ETII_ARENA_ORDER` (§4.8) |
+
+## 3. Conception
+
+### 3.1 Générateur de clones — `tools/gen_clone.py`
+
+Entrées : `--size n`, `--inner-colours k`, `--frame-colours m`, `--seed`, `--hints`
+(0 ou 5). Sortie : `pieces_<n>_<k>_<seed>.csv` (format de `data/pieces.csv`),
+`indices_<…>.csv` (format de `data/indices.csv`) et `solution_<…>.txt` (la grille
+plantée, pour contrôle).
+
+1. Tirer une couleur sur chaque arête intérieure de la grille n×n : couleurs de cadre
+   (`1..m` réservées, comme 18–22 dans `pieces.csv`) sur les arêtes entre deux cases de
+   bordure, couleurs intérieures sur les autres, gris (0) sur le pourtour. Le tirage
+   suit l'histogramme de `pieces.csv` mis à l'échelle (cadre uniforme, intérieur
+   quasi uniforme : 48 à 50 demi-arêtes par couleur sur 256 pièces) — pas un uniforme
+   naïf.
+2. Découper en pièces, appliquer une rotation aléatoire et une permutation aléatoire
+   des identifiants. La solution existe par construction.
+3. Rejeter et retirer les instances à pièces dupliquées (`pieces.csv` n'en a aucune, à
+   vérifier une fois par `tools/validate_pieces.py`, qui sert aussi de contrôle de
+   format sur chaque clone produit).
+4. Indices : les 5 mêmes positions relatives que les officiels — `(2,2)`, `(n−3,2)`,
+   `(2,n−3)`, `(n−3,n−3)` et le centre — avec la pièce et la rotation lues dans la
+   solution plantée.
+5. Auto-contrôle : ré-assembler la solution depuis le CSV et vérifier chaque arête.
+
+Python plutôt que C : l'outil n'est jamais sur le chemin de production, et
+`validate_pieces.py` établit déjà ce précédent.
+
+### 3.2 Calibrer la taille : deux familles d'instances, pas une
+
+Une instance 16×16 clone est aussi dure que le puzzle réel — inutilisable comme banc.
+Il faut des tailles où la solution est atteinte en secondes ou minutes, tout en gardant
+un régime de recherche comparable. Deux façons de réduire `n`, à mesurer toutes deux :
+
+| Famille | Choix de `k` | Ce qu'elle conserve | Ce qu'elle perd |
+|---|---|---|---|
+| **A — mêmes couleurs** | `k = 17`, `m = 5` | les statistiques de compartiments (candidats par clé) | la dureté relative : l'instance est bien plus surcontrainte (log₁₀ E ≈ −38 à n = 10 contre +1,2 à n = 16), l'arbre meurt plus tôt |
+| **B — même dureté** | `k*(n)` tel que log₁₀ E ≈ +1,2 comme le 16×16 | la position du « seuil » (branchement qui croise 1 à la même fraction de la profondeur) | les tailles de compartiments |
+
+Valeurs de `k*` par le comptage de l'annexe (m = 5) : n = 8 → 6, n = 10 → 9, n = 12 →
+12, n = 14 → 14, n = 16 → 17. Le comptage est un modèle (couleurs uniformes,
+indépendance des arêtes) : il fixe un ordre de grandeur, la calibration réelle est
+faite au banc (PR4) — on retient la taille où la médiane des nœuds jusqu'à la solution
+tombe entre 10⁵ et 10⁷ avec le moteur actuel (secondes à minutes par instance), et on
+ne fait confiance qu'aux classements de politiques **identiques dans les deux
+familles et sur deux tailles**.
+
+### 3.3 Le banc — `tests/bench/bench_solve.c`
+
+Même squelette que `bench_refutation.c` (inclusion de `core/etii_search.c`, un
+`client_possibility_t` local, `make bench-solve`), et un contrat aussi strict : ne rien
+ajouter au chemin de production.
+
+- **Une exécution = un processus fils** (`fork`) : le fils charge l'instance, pose la
+  genèse (`first_possibility`, indices compris), positionne `stop_on_solution = 1`,
+  enregistre un `atexit` qui écrit `counters[0]` (nœuds) et le temps sur un tube, puis
+  appelle `search_packet_backtracking_mrv` avec un plafond de nœuds et sans
+  délégation. Solution ⇒ `record_solution` sort par `exit()` et l'`atexit` rapporte ;
+  plafond ⇒ le fils rapporte lui-même et sort. Le fils tourne dans un répertoire
+  temporaire (fichiers `solution_*`). Aucune modification du moteur pour cela.
+- **Grille de mesure** : instances × politiques × graines (pour les politiques
+  aléatoires). Une ligne par exécution (`instance politique graine nœuds temps
+  statut`), puis par politique : médiane et moyenne géométrique des nœuds (la
+  distribution est à queue lourde, la moyenne arithmétique ne veut rien dire), part
+  d'instances résolues à chaque plafond (courbe de survie à 10⁴, 10⁵, …, plafond), et
+  comparaison **appariée** contre la politique de production (gagne / perd / égal par
+  instance), exactement comme `compare.py` de la campagne §4.14.
+- **Politiques** sélectionnées par option, implémentées dans le moteur sous
+  `#ifdef ETII_BENCH_HOOKS` : un point d'entrée à l'ouverture d'un niveau (ordre des
+  candidats d'un compartiment) et un à la genèse (racine). Rien de tout cela n'est
+  compilé dans `eternityII`.
+- Les parties pures (courbe de survie, moyenne géométrique, appariement, analyse de
+  redémarrage ci-dessous) sont des fonctions sans E/S, testées dans `tests/bench/`
+  comme `bench_lib.sh` l'est déjà.
+
+### 3.4 Première campagne : ce qui est comparé
+
+| Axe | Variantes | Pourquoi |
+|---|---|---|
+| Ordre des valeurs | `rare_first` (production, §4.8) ; `common_first` ; **valeur la moins contraignante** (dynamique : somme des candidats restants sur les voisines vides après pose, `popcount` sur les masques déjà en cache) ; la plus contraignante ; **aléatoire, 3 graines** | c'est l'axe aveugle de tous les bancs actuels ; le contrôle aléatoire est obligatoire — §4.14 a montré qu'un ordre « naturel » peut perdre contre le hasard |
+| Départage des cases | positionnel ; appris (§4.14) ; aléatoire | connus pour la réfutation, inconnus pour la découverte |
+| Point de départ | genèse actuelle (indices seuls) ; centre d'abord (racine pré-remplie autour de l'indice central) ; bordure d'abord (coins + premières pièces de bord) | réponse mesurée à la question « partir d'où ? », impossible à obtenir sur le puzzle réel |
+| Redémarrages | **aucune implémentation** : la courbe de survie d'une politique aléatoire donne directement le coût attendu d'une stratégie de redémarrage à seuil `c` (`E[coût] = (c + E[nœuds \| résolu avant c]) / P(résolu avant c)`), à comparer au coût sans redémarrage | si la distribution est à queue lourde, c'est le levier connu le plus fort de la littérature, et il correspond à ce que fait déjà `shallow_root_abandon_depth` et la répartition du stock entre clients |
+| Indices | avec / sans | contrôle : sans indices la solution n'est plus unique (≈ 10 accidentelles attendues à n = 16) et les comparaisons doivent le refléter |
+
+### 3.5 Règle de décision
+
+Une politique n'est adoptée que si : (a) elle gagne en apparié sur ≥ 60 instances,
+dans les **deux** familles d'instances et sur **deux** tailles, en médiane et en part
+résolue au plafond ; (b) elle ne dégrade pas `bench_refutation` sur le stock de
+production (pour l'ordre des valeurs c'est neutre par construction ; pour un départage
+ou une racine, ce n'est pas garanti) ; (c) son coût par nœud est mesuré en temps
+apparié alterné, comme en §4.12. Un classement qui change entre les familles A et B
+n'est pas un résultat : c'est une propriété de la calibration, à consigner comme telle.
+
+## 4. Arbitrages proposés
+
+- **Tailles à la compilation**, un binaire par taille comme aujourd'hui (`ETERN_PARTS`
+  ∈ {16, 64, 100, 144, 196, 256}), `ETERN_SIZE` et `FACES_USED_SIZE` dérivés. Pas de
+  taille dynamique : `possibility_packet` et tous les caches sont dimensionnés par ces
+  constantes, et rien dans ce plan n'a besoin de deux tailles dans un même processus.
+- **Aucun bump de `VERSION`** : le format du paquet dépend déjà de `ETERN_PARTS`
+  (c'est le cas du 4×4), un clone n'est jamais servi par un serveur de production.
+- **Processus fils par exécution** plutôt qu'un retour `BT_CORE_SOLVED` ajouté au
+  moteur : zéro changement dans la boucle chaude, isolation de la queue lourde, et le
+  chemin `stop_on_solution` réel est exercé tel quel.
+- **Variantes sous `#ifdef ETII_BENCH_HOOKS`**, jamais des globales runtime.
+- **Générateur en Python**, pas en C.
+
+## 5. Points laissés ouverts
+
+- Les positions relatives des indices sur un petit plateau (`(2,2)` sur un 8×8 n'a pas
+  le même rôle que sur un 16×16) ; à défaut, ne mesurer les indices qu'à n ≥ 10.
+- La règle « pas de pièce dupliquée » et l'absence de pièce à symétrie de rotation dans
+  `pieces.csv` : à vérifier avant de les imposer au générateur.
+- Le budget CPU réel : 60 instances × 6 politiques × plafond 5·10⁷ nœuds à 2 M nœuds/s
+  font au plus 2,5 h par taille et par famille sur 4 cœurs ; la calibration (PR4) peut
+  imposer un plafond plus bas.
+- Une racine tirée d'un stock (travail délégué) plutôt que la genèse : hors de ce plan,
+  le banc est mono-processus par construction.
+
+## 6. Découpage en PR
+
+| PR | Contenu | Risque | Livrable / verrou |
+|---|---|---|---|
+| 1 | Tailles génériques : dérivation de `ETERN_SIZE`/`FACES_USED_SIZE`, énumération ligne par ligne pour les nouvelles tailles, `first_possibility` sur `ETERN_WITH_INDICES`, les deux bornes en dur ; ajout d'une taille (100) à la matrice `WERROR=1` de la CI | moyen (les `16`/`256` implicites ne se voient qu'à la compilation et aux tests) | `make WERROR=1 CPPFLAGS=-DETERN_PARTS=100` vert ; suite de tests inchangée sur 16 et 256 |
+| 2 | `tools/gen_clone.py` + auto-contrôle + passage par `validate_pieces.py` | faible | un clone 10×10 résolu de bout en bout par `./eternityII test` avec `--stop-on-solution` |
+| 3 | `tests/bench/bench_solve.c`, cible `make bench-solve`, hooks `ETII_BENCH_HOOKS` (ordre des valeurs, racine), fonctions pures testées | moyen | même nombre de nœuds à politique « production » qu'un `./eternityII test` sur la même instance ; `make test` inchangé |
+| 4 | Campagne de calibration : n ∈ {8, 10, 12}, familles A et B, moteur actuel ; choix des tailles de mesure, consigné ici | faible (mesure) | ce document passe en « en cours », section Mesures |
+| 5 | Campagne de politiques (§3.4) et décisions ; toute adoption passe aussi par `bench_refutation` | mesure | §4.16 et suivants de `elagage_recherche.md` |
+
+PR1 et PR2 sont indépendantes ; PR3 dépend des deux ; PR4 et PR5 sont des campagnes,
+pas du code.
+
+## Annexe — le comptage des solutions accidentelles
+
+Pour une grille n×n aux couleurs tirées indépendamment (k intérieures, m de cadre),
+le nombre attendu de solutions d'une instance aléatoire vaut, aux symétries près :
+
+```
+E = 4! · (4n−8)! · ((n−2)²)! · 4^((n−2)²) · m^−(4n−4) · k^−(2n(n−1) − (4n−4)) · (4(n−2)²)^−h
+```
+
+(coins, bords et intérieurs placés dans leurs zones respectives ; chaque arête
+intérieure s'apparie avec probabilité 1/k, chaque arête de cadre 1/m ; `h` indices
+imposent chacun une pièce et une rotation à une case). Pour `pieces.csv` :
+log₁₀ E ≈ +1,2 sans indices, ≈ −13 avec les 5 indices. Le modèle ignore la
+non-uniformité des couleurs et la dépendance entre arêtes : il sert à calibrer un ordre
+de grandeur (§3.2), pas à prédire un nombre.
