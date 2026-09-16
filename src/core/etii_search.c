@@ -80,7 +80,46 @@ typedef struct {
      * placement) ; `POSSIBILITY_MIN_CANDIDATS_UNKNOWN` si non contrainte ou
      * sans candidat. Recopié dans `min_candidats` du paquet correspondant. */
     int16_t mrv_score;
+#ifdef ETII_BENCH_HOOKS
+    /** Permutation des indices de `search` à essayer, ou NULL pour l'ordre
+     * naturel du compartiment. Voir ETII_BENCH_HOOKS ci-dessous. */
+    const uint16_t *order;
+#endif
 } bt_level;
+
+#ifdef ETII_BENCH_HOOKS
+/* ======================================================================
+ * Point d'entrée de mesure : ORDRE DES VALEURS (tests/bench/bench_solve.c)
+ *
+ * Pourquoi un `#ifdef` et non un drapeau runtime : aucun interrupteur de
+ * mesure ne vit dans le binaire de production (règle §6 de
+ * docs/conception/mrv_moteur_unique.md, même discipline que ETII_ARENA_ORDER).
+ * `ETII_BENCH_HOOKS` n'est défini que par l'unité de compilation du banc, qui
+ * inclut `etii_search.c` — `./eternityII` ne compile pas une instruction de ce
+ * qui suit, pas même un test de pointeur dans la boucle chaude.
+ *
+ * Ce que ce point d'entrée rend mesurable, et qu'AUCUN instrument du dépôt ne
+ * voyait : l'ordre dans lequel les candidats d'une case sont essayés. Dans un
+ * sous-arbre MORT — ce que mesurent `bench_refutation` et le pruner — tous les
+ * candidats sont essayés quel que soit leur ordre, donc le compte de nœuds
+ * d'une réfutation en est rigoureusement indépendant. Seule une instance à
+ * solution CONNUE (tools/gen_clone.py) rend l'ordre des valeurs observable.
+ *
+ * Contrat : le banc définit `etii_bench_value_order` AVANT d'inclure ce
+ * fichier. Elle reçoit le niveau qu'on vient d'ouvrir et rend soit NULL
+ * (ordre naturel du compartiment, c'est-à-dire la production), soit un tableau
+ * de `search->size` indices, valide jusqu'à la fermeture de ce niveau — d'où
+ * le paramètre `depth` : un tampon par profondeur suffit, la pile étant
+ * strictement empilée/dépilée.
+ * ====================================================================== */
+static const uint16_t *etii_bench_value_order(const struct possibility_packet *board,
+                                              const struct array_part *bucket,
+                                              int cx, int cy, int depth);
+/** @brief Indice réellement essayé au rang `s` du niveau `lvl`. */
+#define ETII_BENCH_ORDER_INDEX(lvl, s) ((lvl)->order != NULL ? (int)(lvl)->order[(s)] : (s))
+#else
+#define ETII_BENCH_ORDER_INDEX(lvl, s) (s)
+#endif // ETII_BENCH_HOOKS
 
 /**
  * @brief Initialise le cache de contraintes : la clé de recherche de chaque case de la grille.
@@ -705,7 +744,7 @@ static unsigned long long bt_count_pending(const struct possibility_packet *boar
         const bt_level *lvl = &stack[i];
         if (lvl->search != NULL) {
             for (int s = lvl->next_s; s < lvl->search->size; s++) {
-                int16_t id = lvl->search->parts[s].id;
+                int16_t id = lvl->search->parts[ETII_BENCH_ORDER_INDEX(lvl, s)].id;
                 if (id != 0 && !BOARD_FACE_USED(&scratch, id - 1)) {
                     pending++;
                 }
@@ -757,7 +796,7 @@ static int bt_min_pending_depth(const struct possibility_packet *board, const bt
         const bt_level *lvl = &stack[i];
         if (lvl->search != NULL) {
             for (int s = lvl->next_s; s < lvl->search->size; s++) {
-                int16_t id = lvl->search->parts[s].id;
+                int16_t id = lvl->search->parts[ETII_BENCH_ORDER_INDEX(lvl, s)].id;
                 if (id != 0 && !BOARD_FACE_USED(&scratch, id - 1)) {
                     // Valeur non -2 : possibility_placed_count ne regarde que
                     // ça, jamais la pièce/rotation réelle (cf. sa doc).
@@ -850,7 +889,7 @@ static int bt_materialize_pending(client_possibility_t *client,
             uint8_t cy = lvl->y;
             int s = lvl->next_s;
             for (; s < lvl->search->size && count < max_out; s++) {
-                struct part *cand = &lvl->search->parts[s];
+                struct part *cand = &lvl->search->parts[ETII_BENCH_ORDER_INDEX(lvl, s)];
                 if (cand->id == 0) {
                     continue;
                 }
@@ -1513,6 +1552,9 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
             stack[top].y = y;
             stack[top].mrv_score = (int16_t)mrv_count;
             stack[top].search = get_parts_bigarray_with_key(client->map_part, &constraints[x][y]);
+#ifdef ETII_BENCH_HOOKS
+            stack[top].order = etii_bench_value_order(&board, stack[top].search, x, y, top);
+#endif
         } else {
             // Case sans issue détectée par le balayage : niveau sans aucun
             // candidat à essayer — le backtrack normal (search == NULL) le
@@ -1521,6 +1563,9 @@ static bt_core_result_t search_packet_backtracking_mrv(client_possibility_t *cli
             stack[top].y = 0;
             stack[top].mrv_score = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
             stack[top].search = NULL;
+#ifdef ETII_BENCH_HOOKS
+            stack[top].order = NULL;
+#endif
         }
 
 backtrack:;
@@ -1544,17 +1589,20 @@ backtrack:;
             if (lvl->search != NULL) {
                 struct array_part *search = lvl->search;
                 for (int s = lvl->next_s; s < search->size; s++) {
-                    if (search->parts[s].id == 0) {
+                    // Hors banc, `si` EST `s` : la macro se réduit à l'identité
+                    // et le code généré est inchangé (cf. ETII_BENCH_HOOKS).
+                    const int si = ETII_BENCH_ORDER_INDEX(lvl, s);
+                    if (search->parts[si].id == 0) {
                         continue;
                     }
-                    int position = search->parts[s].id - 1;
+                    int position = search->parts[si].id - 1;
                     if (BOARD_FACE_USED(&board, position)) {
                         continue;
                     }
-                    board.grid[cx][cy] = idParts[search->parts[s].id][search->parts[s].rotation];
+                    board.grid[cx][cy] = idParts[search->parts[si].id][search->parts[si].rotation];
                     BOARD_SET_FACE(&board, position, 1);
                     mrv_used_set(used, position);
-                    bt_propagate_place(constraints, cx, cy, &search->parts[s]);
+                    bt_propagate_place(constraints, cx, cy, &search->parts[si]);
                     bt_frontier_place(&frontier, cx, cy);
                     bt_mask_refresh(cell_mask, client->map_part, constraints, cx, cy);
                     placed_count++;

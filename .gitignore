@@ -31,6 +31,7 @@ tests/fixtures/solution16.h
 tests/bench/bench_refutation
 tests/tools/gen_root
 tests/bench/bench_refutation_gpu
+tests/bench/bench_solve
 
 # Sockets Unix de l'IPC parent<->fork (supprimées à la terminaison du process,
 # mais présentes tant qu'il tourne — cf. docs/architecture.md).

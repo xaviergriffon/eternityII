@@ -16,6 +16,7 @@ make coverage         # les deux passes (256 + 16) + résumé texte gcovr fusion
 make coverage-256     # passe 256 pièces seule ; résumé gcov par module
 make coverage-report  # rapports gcovr : Cobertura XML + HTML + résumé Markdown
 make gen-root         # outil : convertit un plateau externe en racine de stock .back
+make bench-solve      # banc « côté trouver » : coût de l'ATTEINTE d'une solution (clones)
 ```
 
 ## Tests unitaires (`make test`)
@@ -889,8 +890,110 @@ coûteux pour dominer le coût fixe du lancement, ce qui n'est pas le cas de ce
 contrôle à cette échelle de lot. Voir [pruner_gpu_cuda.md](pruner_gpu_cuda.md)
 pour la discussion complète (à ne pas vendre sur le débit brut).
 
+## Banc de résolution : clones à solution connue (`make bench-solve`)
+
+`bench_refutation` mesure le coût de la **preuve qu'un sous-arbre est mort** ;
+`bench_search.sh` mesure un **débit**. Ni l'un ni l'autre ne peut voir **l'ordre
+des valeurs** — quelle pièce essayer d'abord sur une case — pour une raison de
+fond : dans un sous-arbre mort, *tous* les candidats sont essayés quel que soit
+leur ordre, donc le compte de nœuds d'une réfutation en est rigoureusement
+indépendant. Or c'est l'ordre des valeurs, et le point de départ, qui décident
+**à quel moment** la branche portant la solution est atteinte.
+
+Le puzzle réel n'ayant jamais été résolu, ce côté-là n'est mesurable que sur des
+instances **construites autour d'une solution plantée** : des *clones*.
+Conception complète : [conception/banc_resolution_clones.md](conception/banc_resolution_clones.md).
+
+### 1. Générer des clones — `tools/gen_clone.py`
+
+```sh
+python3 tools/gen_clone.py --size 10 --inner-colours 17 --frame-colours 5 \
+        --seed 1 --hints 5 --out-dir data/clones
+```
+
+Produit `pieces_10_17_1.csv` (format de `data/pieces.csv`),
+`indices_10_17_1.csv` (format de `data/indices.csv`) et `solution_10_17_1.txt`
+(la grille plantée, pour contrôle). Le générateur :
+
+- tire les couleurs des arêtes selon l'histogramme de `data/pieces.csv` mis à
+  l'échelle, **pas un uniforme naïf** — sur le 16×16 la règle redonne exactement
+  les comptes observés (12 couleurs à 25 arêtes, 5 à 24 ; cadre 12 chacune) ;
+- **rejette et retire** toute instance à pièce dupliquée ou à symétrie de
+  rotation — les deux propriétés ont été vérifiées sur `data/pieces.csv`
+  (0 doublon, 0 pièce symétrique) avant d'être imposées ;
+- ré-assemble la solution **depuis les fichiers produits** et vérifie chaque
+  arête, puis passe le clone par `tools/validate_pieces.py`.
+
+Deux familles à mesurer, jamais une seule (§3.2 du document de conception) :
+`--inner-colours 17` garde les statistiques de compartiments du puzzle réel,
+une valeur calibrée par taille garde sa **dureté** relative. Un classement de
+politiques qui change entre les deux familles n'est pas un résultat.
+
+### 2. Mesurer — `make bench-solve`
+
+La taille du plateau est celle du binaire, donc `CPPFLAGS` :
+
+```sh
+make bench-solve CPPFLAGS=-DETERN_PARTS=100 \
+     BENCH_SOLVE_ARGS="--instance-dir data/clones --budget 50000000 --seeds 3"
+```
+
+Une exécution = **un processus fils** : il pose la genèse, met
+`stop_on_solution` à 1 et cherche ; une solution fait sortir `record_solution`
+par `exit()`, et un `atexit` rapporte nœuds et temps sur un tube. Rien n'est
+ajouté au moteur pour cela — le chemin `stop_on_solution` réel est exercé tel
+quel, et la queue lourde de la distribution ne peut pas polluer les exécutions
+suivantes.
+
+Le banc imprime une ligne par exécution, puis, par politique : médiane et
+**moyenne géométrique** des nœuds (la distribution est à queue lourde, la
+moyenne arithmétique ne classe rien), la **courbe de survie** (part résolue sous
+10⁴, 10⁵, … nœuds), la **comparaison appariée** contre la politique de référence,
+et le coût attendu d'une stratégie de **redémarrage** à seuil — une lecture de la
+distribution, aucun mécanisme n'est implémenté.
+
+| Option | Rôle |
+|---|---|
+| `--pieces <f>` / `--indices <f>` | une instance et ses indices |
+| `--instance-dir <d>` | toutes les `pieces_*.csv` d'un répertoire, appariées aux `indices_*.csv` |
+| `--policies <liste>` | `natural` (production), `reverse`, `random`, `lcv`, `mcv` — la **première** sert de référence appariée |
+| `--root <nom>` | `genesis` (production), `center`, `border` : sur quelle case la genèse est développée |
+| `--seeds <n>` | graines des politiques aléatoires (les déterministes n'en consomment qu'une) |
+| `--budget <n>` | plafond de nœuds par exécution |
+| `--selftest-budget <n>` | plafond de l'auto-test de l'instrument (0 = désactivé) |
+
+### 3. L'auto-test de l'instrument
+
+Au démarrage de chaque instance, le banc cherche une racine que la politique de
+référence **ferme** dans `--selftest-budget` nœuds, puis la rejoue sous toutes
+les politiques demandées. Les comptes doivent être **identiques au nœud près** :
+c'est la prémisse même du banc (un sous-arbre mort ne dépend pas de l'ordre des
+valeurs). Un désaccord ne dirait pas « telle politique gagne » — il dirait que la
+permutation est fausse (candidat perdu, dupliqué, indice hors compartiment), donc
+que les chiffres du run sont à jeter. Le banc s'arrête alors en erreur. Même
+intention que l'auto-test `--w2x2` et l'oracle indépendant de `bench_refutation`.
+
+### 4. Ce que le banc n'ajoute PAS à la production
+
+L'ordre des valeurs entre dans le moteur par un **`#ifdef ETII_BENCH_HOOKS`**
+(`src/core/etii_search.c`), défini par la seule unité de compilation du banc —
+jamais un drapeau runtime, conformément à la règle §6 de
+[conception/mrv_moteur_unique.md](conception/mrv_moteur_unique.md) et à la même
+discipline que `ETII_ARENA_ORDER`. Hors banc, la macro `ETII_BENCH_ORDER_INDEX`
+se réduit à l'identité. **Vérifié objectivement** : `build/core/etii_search.o`
+compilé avant et après l'ajout du hook est **octet pour octet identique**
+(`cc -O3 -ffast-math -mpopcnt -Isrc -Werror -c`). Refaire ce contrôle avant de
+toucher au hook.
+
+Les fonctions d'agrégation (médiane, moyenne géométrique, survie, appariement,
+redémarrage) sont pures et vivent dans `tests/bench/bench_solve_stats.{h,c}`,
+compilées dans le binaire de test et couvertes par
+`tests/bench/test_bench_solve_stats.c` — rattachées à `make test`, comme le
+cœur pur de `gen_root`. Le banc lui-même ne l'est pas.
+
 ## Voir aussi
 
 - [tests/README.md](../tests/README.md) — organisation des suites, conventions, ajout d'un test.
 - [Compilation](compilation.md) — options de build et drapeaux de configuration.
 - `tests/bench/bench_search.sh` — banc de mesure du débit de recherche (voir ci-dessus).
+- `tools/gen_clone.py` — générateur de clones à solution connue (voir ci-dessus).

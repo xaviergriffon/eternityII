@@ -136,11 +136,17 @@ make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --min-pieces 90 --
 
 # Banc de mesure du débit de la boucle de recherche (préalable à toute optimisation)
 tests/bench/bench_search.sh --nodes 5000000 --reps 5
+
+# Banc « CÔTÉ TROUVER » : coût de l'ATTEINTE d'une solution, sur des CLONES à solution
+# connue — la seule grandeur que les deux bancs ci-dessus ne peuvent PAS voir, puisqu'un
+# sous-arbre mort est exploré en entier quel que soit l'ordre des valeurs.
+python3 tools/gen_clone.py --size 10 --inner-colours 17 --seed 1 --hints 5 --out-dir data/clones
+make bench-solve CPPFLAGS=-DETERN_PARTS=100 BENCH_SOLVE_ARGS="--instance-dir data/clones"
 ```
 
 La CI GitHub Actions compile **toutes les combinaisons du code** avec `WERROR=1`, lance les tests unitaires et d'intégration, et publie la couverture sur Codecov.
 
-> Détails (scripts d'intégration, Docker, couverture, matrice CI, banc de mesure `ETII_BENCH_NODES`, outil `make gen-root` qui convertit un plateau externe en racine de stock) : [docs/tests_et_ci.md](docs/tests_et_ci.md) — conventions d'écriture des tests : [tests/README.md](tests/README.md).
+> Détails (scripts d'intégration, Docker, couverture, matrice CI, banc de mesure `ETII_BENCH_NODES`, outil `make gen-root` qui convertit un plateau externe en racine de stock, générateur de clones `tools/gen_clone.py` et banc `make bench-solve`) : [docs/tests_et_ci.md](docs/tests_et_ci.md) — conventions d'écriture des tests : [tests/README.md](tests/README.md).
 
 ## Documentation
 
