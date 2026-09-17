@@ -164,7 +164,7 @@ static double now_seconds(void)
  * `bench-refutation` du makefile** — le retirer le dégraderait en simple
  * avertissement, et le débordement redeviendrait silencieux.
  */
-#define NB_ALL_ENGINES 8
+#define NB_ALL_ENGINES 10
 
 /**
  * @brief Nombre de variantes jouées quand `--engines` n'est pas donné.
@@ -183,7 +183,13 @@ typedef enum {
     CELL_NONE = 0,  /**< Aucun : l'ordre de production. */
     CELL_CROSS,     /**< La croix séparatrice (§3 du document de conception). */
     CELL_ANTI,      /**< Son complément — contrôle « anti-croix » (§6.2). */
-    CELL_RANDOM,    /**< Un tirage de MÊME densité — contrôle « aléatoire » (§6.2). */
+    CELL_RANDOM,    /**< Un tirage à la densité de la CROIX — contrôle de `cross-*`. */
+    /** Un tirage à la densité du COMPLÉMENT — contrôle d'`anti-*`.
+     *  Un contrôle aléatoire ne vaut qu'à la densité du bras qu'il contrôle :
+     *  la croix marque 88 cases sur 256, son complément 168. Les opposer au
+     *  même tirage confondrait « la géométrie compte » avec « la densité
+     *  compte » — et la campagne PR2 a justement buté là-dessus. */
+    CELL_RANDOM_COMP,
 } cell_mask_kind_t;
 
 typedef struct {
@@ -462,6 +468,7 @@ static int w2_scan(struct possibility_packet *b, map_big_array *map,
 static uint8_t g_mask_cross[ETERN_PARTS];
 static uint8_t g_mask_anti[ETERN_PARTS];
 static uint8_t g_mask_random[ETERN_PARTS];
+static uint8_t g_mask_random_comp[ETERN_PARTS];
 
 /** @brief Construit les trois masques. `seed` ensemence le contrôle aléatoire. */
 static void build_cell_masks(uint64_t seed)
@@ -469,6 +476,10 @@ static void build_cell_masks(uint64_t seed)
     int n = cross_fill(g_mask_cross);
     cross_fill_complement(g_mask_anti);
     cross_fill_random(g_mask_random, n, seed);
+    /* Graine décalée : deux tirages de densités différentes issus de la MÊME
+       graine partageraient leur préfixe de permutation, donc l'un serait inclus
+       dans l'autre — deux contrôles corrélés ne sont qu'un seul contrôle. */
+    cross_fill_random(g_mask_random_comp, ETERN_PARTS - n, seed ^ 0x9E3779B97F4A7C15ULL);
 }
 
 /** @brief Masque d'un bras, ou NULL pour l'ordre de production. */
@@ -478,6 +489,7 @@ static const uint8_t *arm_cell_mask(const engine_t *eng)
         case CELL_CROSS:  return g_mask_cross;
         case CELL_ANTI:   return g_mask_anti;
         case CELL_RANDOM: return g_mask_random;
+        case CELL_RANDOM_COMP: return g_mask_random_comp;
         case CELL_NONE:   break;
     }
     return NULL;
@@ -892,6 +904,8 @@ static void usage(void)
            "                       cross-mrv / rand-mrv / anti-mrv : case marquée avant TOUTES les autres\n"
            "                     rand-* et anti-* sont les deux contrôles OBLIGATOIRES du §6.2 :\n"
            "                     un bras qui ne les bat pas ne mesure pas ce qu'il prétend.\n"
+           "                     rand-* a la densité de la CROIX (88/256), randc-* celle de son\n"
+           "                     COMPLÉMENT (168/256) : chaque bras se contrôle à SA densité.\n"
            "  --cross-seed <n>   graine du contrôle aléatoire (défaut 1)\n"
            "  --pruner-profile <n> rejoue le VRAI pipeline du pruner (autoprune_step) sur n\n"
            "                     possibilités échantillonnées régulièrement dans le .back :\n"
@@ -946,6 +960,9 @@ int main(int argc, char **argv)
         { "cross-mrv",     0, CELL_CROSS,  1 },
         { "rand-mrv",      0, CELL_RANDOM, 1 },
         { "anti-mrv",      0, CELL_ANTI,   1 },
+        /* Contrôles aléatoires à la densité du COMPLÉMENT (cf. CELL_RANDOM_COMP). */
+        { "randc-key",     0, CELL_RANDOM_COMP, 0 },
+        { "randc-mrv",     0, CELL_RANDOM_COMP, 1 },
     };
     engine_t engines[NB_ALL_ENGINES];
     int nb_engines = NB_DEFAULT_ENGINES;
@@ -1028,8 +1045,9 @@ int main(int argc, char **argv)
         uses_cell_hook |= (engines[e].cell_mask_kind != CELL_NONE);
     }
     if (uses_cell_hook) {
-        printf("ordre des cases : croix de %d cases sur %d, contrôle aléatoire de même"
-               " densité (graine %llu)\n", cross_size(), ETERN_PARTS, cross_seed);
+        printf("ordre des cases : croix de %d cases sur %d ; contrôles aléatoires à %d"
+               " (rand-*) et %d (randc-*) cases, graine %llu\n",
+               cross_size(), ETERN_PARTS, cross_size(), ETERN_PARTS - cross_size(), cross_seed);
         if (cross_size() >= ETERN_PARTS) {
             fprintf(stderr, "la croix couvre le plateau ENTIER à cette taille compilée :"
                     " tous les bras d'ordre des cases y sont des no-op, la mesure ne dirait"

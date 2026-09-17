@@ -658,8 +658,9 @@ cinq indices officiels. Son cœur est pur et rattaché à `make test`
 |---|---|---|
 | `cross-key` | sous `count` | à score MRV ÉGAL, une case de croix d'abord |
 | `cross-mrv` | au-dessus de `count` | une case de croix avant TOUTES les autres |
-| `rand-key` / `rand-mrv` | idem | **contrôle** : un tirage de MÊME densité |
-| `anti-key` / `anti-mrv` | idem | **contrôle** : le complément de la croix |
+| `rand-key` / `rand-mrv` | idem | **contrôle** : un tirage à la densité de la CROIX (88/256) |
+| `anti-key` / `anti-mrv` | idem | **contrôle** : le complément de la croix (168/256) |
+| `randc-key` / `randc-mrv` | idem | **contrôle** : un tirage à la densité du COMPLÉMENT |
 
 **Les deux contrôles ne sont pas optionnels.** Le §4.14 de
 [elagage_recherche.md](conception/elagage_recherche.md) a mesuré qu'un départage
@@ -668,6 +669,21 @@ du champ de position perturbe cet ordre par construction : sans `rand-*` à mêm
 densité, un gain ne distingue pas « la croix est un bon a priori » de
 « n'importe quoi vaut mieux que l'ordre des bits ». `--cross-seed <n>` ensemence
 le tirage (défaut 1).
+
+**Et un contrôle ne vaut qu'à la densité du bras qu'il contrôle** — c'est la
+raison d'être de `randc-*`, ajouté en cours de campagne. La croix marque 88
+cases sur 256, son complément 168 : les opposer au même tirage confond « la
+géométrie compte » avec « la densité compte », et c'est exactement ce sur quoi
+la campagne a buté (§7.4 du document de conception). Les deux tirages partent de
+graines décalées, faute de quoi l'un serait un préfixe de l'autre — deux
+contrôles corrélés ne font qu'un seul contrôle.
+
+**Résultat de la campagne (2026-09-17) : négatif, aucun bras adopté.**
+`cross-key` change réellement l'arbre sur 232 racines de production sur 499 et
+n'y gagne rien (113/119, p = 0,74) ; `cross-mrv` ferme 94 racines sur 200 là où
+la production en ferme 199. Les bras restent dans le banc — ils ne coûtent rien
+tant qu'on ne les demande pas, et c'est ce qui permet de refaire la mesure
+plutôt que de la croire sur parole.
 
 ```sh
 make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --min-pieces 130 --max-roots 50 --engines mrv,cross-key,rand-key,anti-key --budget 5000000"

@@ -1,6 +1,6 @@
 # Croix séparatrice : un a priori structurel dans l'ordre des variables
 
-**Statut : en cours d'implémentation — PR1 livrée, la campagne (PR2) reste à exécuter.** Aucune ligne de moteur en production. Le document tranche deux
+**Statut : campagne exécutée, résultat NÉGATIF — aucun changement de moteur adopté.** PR1 (outillage) livrée, PR2 (campagne) au §7, PR3 et PR4 sans objet. Aucune ligne de moteur en production, et il n'y en aura pas : la croix séparatrice ne vaut rien comme a priori d'ordre des variables. L'outillage, lui, reste — le second point d'entrée rend l'ordre des VARIABLES mesurable sur `bench_refutation`, ce qu'aucun instrument du dépôt ne savait faire. Le document tranche deux
 choses avant tout code — la **géométrie** de la croix (normalisée, et démontrée
 séparatrice) et le **rejet de la variante à ordre imposé**, écartée sur quatre
 pré-mesures statiques reproductibles en moins d'une seconde, dans la méthode du
@@ -24,9 +24,9 @@ il ne ferme rien ici.
 | PR | État | Ce qui a été livré |
 |---|---|---|
 | 1 | **livrée** | `tests/bench/cross_mask.{h,c}` (croix en compréhension, complément, tirage de contrôle à densité imposée) + `tests/bench/test_cross_mask.c` rattaché à `make test` ; second point d'entrée `ETII_BENCH_CELL_HOOKS` dans `mrv_choose_cell`/`_fast` ; les six bras dans `bench_refutation` (`cross-key`/`rand-key`/`anti-key`, `cross-mrv`/`rand-mrv`/`anti-mrv`), `--cross-seed` ; auto-test des deux balayages par bras |
-| 2 | à exécuter | Campagne `bench_refutation` sur stock de production (§6) |
-| 3 | conditionnelle | `bench_solve` sur clones, si un bras passe le §6.5 (1-3) |
-| 4 | conditionnelle | Adoption inconditionnelle du bras retenu |
+| 2 | **exécutée** (§7) | 2 300 fermetures de sous-arbres sur stock de production. `cross-key` strictement neutre (113/119, p = 0,74 sur 232 racines réellement modifiées) ; `cross-mrv` ferme 94 racines sur 200 contre 199 ; le seul signal (`anti-mrv`) est dissous par son contrôle de densité. Un bras de contrôle ajouté en cours de route (`randc-*`, cf. §7.4) |
+| 3 | **sans objet** | Aucun bras ne passe le §6.5 (1-3) : rien à confirmer sur clones |
+| 4 | **sans objet** | Rien à adopter |
 
 **Verrou de PR1 tenu** : `build/core/etii_search.o` compilé avant et après
 l'ajout du hook est **octet pour octet identique** — la production ne voit
@@ -57,10 +57,11 @@ avec les drapeaux du makefile.
   (en 4×4 la croix est le plateau entier) : plutôt que de produire des chiffres
   qui ne veulent rien dire, il sort en erreur.
 
-**Première observation, à l'exécution et non encore une mesure** : sur des
-racines fabriquées que `mrv` ferme en 4 nœuds, `cross-mrv` épuise un plafond de
-2 000 000. C'est la direction annoncée par le §4.3, sur trop peu de racines pour
-compter comme un résultat — la campagne reste à faire.
+**Écart de PR2 par rapport au plan** : le §6.2 exigeait un contrôle aléatoire
+« à même densité », sans voir que deux bras de densités différentes en exigent
+**deux**. Le contrôle `randc-*` (densité du complément) a donc été ajouté en
+cours de campagne — et c'est lui qui a dissous le seul signal qu'elle avait
+produit (§7.4).
 
 ## 1. Question posée
 
@@ -391,6 +392,169 @@ survivant est un chemin de code non testé).
 | Portée | `mrv_choose_cell` seulement | `light_choose_cell` (expansion serveur) est hors périmètre : hors boucle chaude, et la question y est celle de la *forme du stock*, pas de l'ordre de recherche |
 | Interrupteur | `#ifdef ETII_BENCH_HOOKS` | règle du dépôt ; adoption ⇒ inconditionnel |
 
+## 7. Mesures — PR2, campagne (2026-09-17)
+
+### 7.1 Protocole
+
+Stock de **production** (`eternityII.back`) : 32 480 possibilités, pièces posées
+min/moy/max = 8 / 102,5 / 184, intégrité vérifiée par le banc (0 paquet
+incohérent, 0 `alloc` différent du recomptage). 11 224 racines à ≥ 130 pièces —
+la bande du §4.14, qui n'en avait que 418 sur son stock.
+
+Quatre séries, toutes en comparaison **appariée** (mêmes racines, même ordre,
+même plafond de 5 000 000 de nœuds), les racines étant les N premières de la
+bande dans l'ordre du fichier — donc identiques pour tous les bras d'une série.
+
+| Série | Bras | Racines |
+|---|---|---|
+| A | `mrv` `cross-key` `rand-key` `anti-key` | 500 |
+| B | `mrv` `cross-mrv` `rand-mrv` `anti-mrv` | 200 |
+| C | A moins `anti-key`, aux graines 2, 3, 4 | 500 × 3 |
+| D | `mrv` `anti-mrv` `randc-mrv` `anti-key` `randc-key` | 200 |
+
+La série D a été ajoutée **en cours de campagne** : voir §7.4.
+
+### 7.2 Hauteur « -key » : `cross-key` est strictement neutre
+
+| Bras | Fermées | Racines changées | Apparié V/D | Moy. géo | p |
+|---|---|---|---|---|---|
+| `mrv` | 499/500 | — | — | — | — |
+| `cross-key` | 499/500 | 232 | 113/119 | 0,999 | **0,74** |
+| `rand-key` | 494/500 | 319 | 170/149 | 1,041 | 0,26 |
+| `anti-key` | 499/500 | 269 | 110/159 | 0,710 | 0,003 |
+
+`cross-key` **change réellement l'arbre** — 232 racines sur 499, soit 46 % — et
+n'y gagne rien : 113 victoires contre 119 défaites, moyenne géométrique 0,999.
+Aucune bande de profondeur ne le sauve (130-139 : 60/70, p = 0,43 ; 140-149 :
+41/35, p = 0,57 ; 150-159 : 9/10 ; 160+ : 3/4).
+
+**Le critère (c) passe, et c'est la seule bonne nouvelle du tableau** : sur les
+494 racines fermées par tous, le coût par nœud est de **0,734 µs pour
+`cross-key` contre 0,738 µs pour la production**. Le « coût par nœud nul »
+annoncé au §5.3 — bit statique cuit dans `nc_key`, balayage inchangé — est donc
+vérifié à la mesure. Mais (c) ne sert qu'à départager un gain, et il n'y en a
+pas.
+
+**La moyenne géométrique de 0,710 d'`anti-key` est un mirage, et c'est la
+première leçon d'instrument de cette campagne.** Sa médiane vaut 1,019, sa
+moyenne géométrique élaguée à 10 % vaut 0,913, et il **perd** le test des
+signes (110/159, p = 0,003). Les 0,710 viennent de trois racines chanceuses
+(1 477 421 → 21 nœuds, 3 785 855 → 1 026, 552 283 → 269) qui portent à elles
+seules 15 % de la somme des |log| des ratios. Sur cette distribution, une
+moyenne — géométrique comprise — ne classe rien.
+
+### 7.3 Hauteur « -mrv » : `cross-mrv` s'effondre, et ce n'est pas la croix
+
+| Bras | Fermées | Nœuds totaux | Temps | µs/nœud |
+|---|---|---|---|---|
+| `mrv` | **199/200** | 20 051 814 | 15,0 s | 0,748 |
+| `cross-mrv` | **94/200** | 551 475 608 | 579,6 s | 1,051 |
+| `rand-mrv` | **86/200** | 574 318 659 | 1 027,7 s | 1,789 |
+| `anti-mrv` | 198/200 | 15 550 846 | 16,9 s | 1,085 |
+
+**`cross-mrv` ferme 94 racines sur 200 là où la production en ferme 199.** La
+direction annoncée par le §4.3 est confirmée. Sa magnitude ne l'est pas, et il
+faut le dire : le §4.3 annonçait 10³⁶ sur un produit de facteurs de branchement
+**sans aucun élagage**, la mesure donne un facteur 27 en nœuds et surtout une
+censure massive. Le majorant était bon pour trancher une direction, pas pour
+prédire un nombre.
+
+**Et ce n'est pas la géométrie de la croix qui est en cause, c'est la hauteur.**
+`rand-mrv` — un tirage aléatoire de même densité, à la même hauteur — ferme 86
+racines sur 200, c'est-à-dire **encore moins**. Contraindre fortement l'ordre
+des cases est mauvais en soi ; le faire selon la croix n'est ni meilleur ni pire
+que de le faire au hasard. C'est exactement ce que le contrôle du §6.2 devait
+établir, et il l'établit.
+
+### 7.4 Le seul signal de la campagne — et son contrôle de densité le dissout
+
+`anti-mrv` (les cases HORS croix d'abord) est le seul bras à réduire les nœuds
+de façon systématique : médiane 0,555, 106 victoires contre 50 défaites,
+p < 0,001. Assez pour arrêter la campagne et regarder de plus près.
+
+**La campagne, telle que le §6.2 la spécifiait, ne pouvait pas l'interpréter** :
+son contrôle aléatoire était à la densité de la CROIX (88 cases sur 256), alors
+qu'`anti-*` en marque 168. Opposer les deux confond « la géométrie compte » avec
+« la densité compte ». Le §6.2 exigeait un contrôle « à même densité » — il
+n'avait pas vu que deux bras de densités différentes exigent **deux** contrôles.
+D'où la série D, et un bras de plus dans le banc (`randc-*`, tirage à la densité
+du complément, graine décalée pour que les deux tirages ne soient pas l'un
+inclus dans l'autre).
+
+| Bras (série D, 200 racines) | Fermées | Médiane du ratio | Apparié V/D | p | µs/nœud |
+|---|---|---|---|---|---|
+| `mrv` | 199 | — | — | — | 0,803 |
+| `anti-mrv` | 198 | 0,555 | 106/50 | 0,000 | 1,103 |
+| `randc-mrv` (contrôle) | 183 | 0,590 | 96/66 | 0,022 | 1,245 |
+| `anti-key` | 199 | 1,020 | 45/68 | 0,038 | 0,751 |
+| `randc-key` (contrôle) | 199 | 0,998 | 64/61 | 0,86 | 0,753 |
+
+**Le contrôle fait presque aussi bien que le bras.** Un masque ALÉATOIRE de 168
+cases à la hauteur forte réduit les nœuds dans les mêmes proportions
+(médiane 0,590 contre 0,555). Ce que mesure `anti-mrv` n'est donc pas la
+croix : c'est **la densité et la hauteur**. Il reste un écart en sa faveur
+(106/50 contre 96/66, et surtout 198 fermetures contre 183), mais pas de quoi
+attribuer quoi que ce soit à la géométrie du séparateur.
+
+Deux réserves qui achèvent de vider ce signal :
+
+- **Il ne paie pas en temps.** `anti-mrv` coûte 1,103 µs/nœud contre 0,803 :
+  22 % de nœuds en moins, 7 % de temps en **plus** (17,2 s contre 16,1 s). Une
+  partie de ce surcoût est l'implémentation du banc (la seconde passe du §0),
+  mais le §5.3 avait déjà établi qu'aucune forme « au-dessus de `count` » n'est
+  gratuite. Le critère (c) échoue.
+- **La population est censurée en sa faveur.** Les statistiques appariées ne
+  portent que sur les racines fermées des DEUX côtés : les racines où le bras
+  bute sur le plafond — c'est-à-dire celles où il est le plus mauvais — en sont
+  exclues. Léger pour `anti-mrv` (2 non fermées contre 1), massif pour
+  `randc-mrv` (17). C'est la leçon du §7.5 de
+  [banc_resolution_clones.md](banc_resolution_clones.md), qui se repose ici à
+  l'identique.
+
+### 7.5 Trois leçons d'instrument, payées par cette campagne
+
+- **Compter les racines où le bras change QUELQUE CHOSE.** La médiane du ratio
+  vaut 1,000 dès que la majorité des racines sont des égalités exactes, et ne
+  dit alors plus rien. `cross-key` ne touche que 232 racines sur 499 : c'est sur
+  celles-là que tout se joue, et c'est ce dénominateur-là qu'il faut publier.
+- **Seul le test des signes sur les paires fermées des deux côtés est robuste.**
+  Sommes de nœuds et moyennes géométriques sont dominées par trois racines sur
+  269 (§7.2). Sur une distribution à queue aussi lourde, elles pointent
+  régulièrement dans la direction opposée au test apparié — et c'est ce dernier
+  qui a raison.
+- **Une seule graine de contrôle aléatoire ne conclut rien.** Sur les quatre
+  graines de la série C, `rand-key` donne 170/149, 150/167, 142/150 et 157/157,
+  moyennes géométriques de 0,839 à 1,154 : du bruit, dans les deux sens. Un
+  contrôle jugé sur une graine aurait pu « prouver » à peu près n'importe quoi.
+  Contrôle de cohérence de l'instrument au passage : `cross-key` rend exactement
+  le même résultat aux quatre graines (232 racines changées, 113/119, 0,999) —
+  il ne dépend pas du tirage, et l'instrument le confirme.
+
+### 7.6 Décisions
+
+| Bras | Décision | Critère §6.5 |
+|---|---|---|
+| `cross-key` | **Aucun changement.** | (1) échoue : 113/119, p = 0,74, sur 232 racines réellement modifiées, aucune bande de profondeur favorable. (2) passe (0,734 contre 0,738 µs/nœud) mais ne départage rien |
+| `cross-mrv` | **Rejeté.** | (1) échoue catégoriquement : 94 fermetures sur 200 contre 199 |
+| `anti-mrv` | **Non adopté**, consigné comme piste ouverte | (3) échoue : son contrôle de densité fait presque aussi bien. (2) échoue : +7 % de temps total |
+
+**Le résultat est négatif pour la proposition, et il est net.** La croix
+séparatrice ne vaut rien comme a priori d'ordre des variables : à la hauteur où
+elle est gratuite, elle ne change rien (p = 0,74 sur 232 racines modifiées) ; à
+la hauteur où elle contraint, elle détruit la capacité de fermeture — et pas
+plus qu'un masque aléatoire de même densité, ce qui montre que la faute est à la
+contrainte d'ordre, pas à la géométrie.
+
+**Ce que la campagne ne dit PAS**, et qu'il serait tentant de lui faire dire :
+elle ne montre pas que la décomposition en quatre régions est sans valeur. Elle
+montre qu'**un biais d'ordre ne suffit pas à l'encaisser** — ce que le §8
+annonçait déjà, et qui reste l'explication à retenir en premier.
+
+**L'outillage, lui, reste.** Le second point d'entrée `ETII_BENCH_CELL_HOOKS`
+rend désormais mesurable n'importe quel ordre de variables sur ce banc : c'est
+l'axe que le §7.7 de [banc_resolution_clones.md](banc_resolution_clones.md)
+listait comme non mesurable, et il ne l'est plus.
+
 ## 8. Points laissés ouverts
 
 - **Le séparateur ne se monnaye pas tout seul — et ce document ne prétend pas le
@@ -414,19 +578,31 @@ survivant est un chemin de code non testé).
   distribution changerait la forme du stock, pas l'ordre de recherche. Question
   distincte, non instruite ici.
 - **La transposition au 16×16** depuis les clones, à fraction de croix non
-  constante (§4.4).
+  constante (§4.4) — sans objet désormais, aucune campagne sur clones n'ayant
+  eu lieu.
+- **Ouvert PAR la mesure : une restriction grossière de l'ensemble de choix de
+  MRV réduit les nœuds de réfutation.** À la hauteur forte, un masque de 168
+  cases sur 256 — la croix inversée comme un tirage aléatoire — divise la
+  médiane du ratio par presque deux (0,555 et 0,590, §7.4). Ce n'est pas la
+  géométrie, puisque le hasard y suffit ; ce n'est pas exploitable en l'état,
+  puisque le coût par nœud mange le gain. Mais l'effet est net, il n'était pas
+  prévu, et personne ne sait d'où il vient. La question — pourquoi
+  *n'importe quelle* restriction à deux tiers du plateau aide-t-elle ? — n'est
+  pas celle de ce document.
+- **Le seuil de densité.** 88 cases : effondrement. 168 : gain en nœuds. Entre
+  les deux, rien n'est mesuré.
 
 ## 9. Découpage en PR
 
 | PR | Contenu | Risque | Verrou |
 |---|---|---|---|
 | 1 | **livrée** (cf. §0). Table de croix en compréhension + tests ; second point d'entrée (`ETII_BENCH_CELL_HOOKS`) ; les six bras dans `bench_refutation` ; seconde passe restreinte plutôt que second minimum sur `count` (§0) | moyen — le piège de la détection de case morte est silencieux | `etii_search.o` **octet pour octet identique** avec et sans le hook ✓ ; équivalence des deux balayages contrôlée **pour chaque bras** par l'auto-test du banc ✓ ; `make test` vert ✓ |
-| 2 | Campagne `bench_refutation` sur stock de production, consignée ici | mesure | les quatre bras sur les mêmes racines, nœuds **et** temps, fermetures comptées, censure déclarée |
-| 3 | *Conditionnelle* — `bench_solve` sur clones si un bras passe le §6.5 (1-3) | mesure | réserve du §4.4 écrite avec le résultat |
-| 4 | *Conditionnelle* — adoption inconditionnelle, suppression du hook du bras retenu | faible | `bench_refutation` non régressé, doc `docs/` et `AGENTS.md` mises à jour |
+| 2 | **exécutée, §7.** Campagne sur stock de production ; contrôle de densité ajouté en cours de route | mesure | quatre séries appariées, nœuds **et** temps, fermetures comptées, censure déclarée |
+| 3 | **sans objet** — aucun bras ne passe le §6.5 (1-3) | — | — |
+| 4 | **sans objet** — rien à adopter | — | — |
 
-PR1 ne touche aucun chemin de production. PR2 peut conclure négativement, et
-c'est une issue prévue : le §8 dit déjà quelle explication retenir.
+PR1 ne touche aucun chemin de production. PR2 **a** conclu négativement — c'était
+l'issue prévue, et le §8 disait déjà quelle explication retenir.
 
 ## Annexe — script des pré-mesures du §4
 
