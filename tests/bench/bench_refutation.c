@@ -51,10 +51,22 @@
 #include <string.h>
 #include <time.h>
 
+/* Hook d'ordre des CASES (variables) : celui du §5.4 de
+ * docs/conception/croix_separatrice_ordre_variables.md, et l'axe que le §7.7 de
+ * banc_resolution_clones.md avait laissé ouvert. Ce banc ne définit PAS
+ * `ETII_BENCH_HOOKS` (qui active en plus l'ordre des valeurs) : l'indirection
+ * de l'ordre des valeurs coûterait un test de pointeur par candidat dans sa
+ * boucle chaude et rendrait ses temps incomparables à ses campagnes
+ * précédentes — or l'ordre des valeurs n'a de toute façon aucun effet sur un
+ * sous-arbre MORT, qui est tout ce que ce banc mesure. */
+#define ETII_BENCH_CELL_HOOKS 1
+
 /* L'unité de compilation complète : les deux moteurs sont `static`. Même
  * technique que tests/core/test_etii_search.c — d'où le retrait d'etii_search.c
  * de la liste des modules liés (cf. makefile). */
 #include "core/etii_search.c"
+
+#include "bench/cross_mask.h"
 
 #include "core/readdata.h"
 #include "core/part.h"
@@ -152,12 +164,39 @@ static double now_seconds(void)
  * `bench-refutation` du makefile** — le retirer le dégraderait en simple
  * avertissement, et le débordement redeviendrait silencieux.
  */
-#define NB_ALL_ENGINES 2
+#define NB_ALL_ENGINES 8
+
+/**
+ * @brief Nombre de variantes jouées quand `--engines` n'est pas donné.
+ *
+ * Les six bras d'ordre des cases sont DÉCLARÉS mais pas joués par défaut : une
+ * invocation existante de ce banc doit continuer de mesurer exactement ce
+ * qu'elle mesurait, et une campagne qui compare huit moteurs sur les mêmes
+ * racines coûte quatre fois plus cher. Ils se demandent par `--engines`. Les
+ * `NB_DEFAULT_ENGINES` premières entrées d'`all_engines` sont donc les
+ * historiques, et leur ORDRE est significatif.
+ */
+#define NB_DEFAULT_ENGINES 2
+
+/** @brief Quel masque de cases un bras injecte dans le hook d'ordre des cases. */
+typedef enum {
+    CELL_NONE = 0,  /**< Aucun : l'ordre de production. */
+    CELL_CROSS,     /**< La croix séparatrice (§3 du document de conception). */
+    CELL_ANTI,      /**< Son complément — contrôle « anti-croix » (§6.2). */
+    CELL_RANDOM,    /**< Un tirage de MÊME densité — contrôle « aléatoire » (§6.2). */
+} cell_mask_kind_t;
 
 typedef struct {
     const char *name;
     /** 1 : arme le conflit de singletons dans bt_forward_check (§4.4). */
     int singleton_check;
+    /** Masque injecté dans le hook d'ordre des cases (CELL_NONE : production). */
+    cell_mask_kind_t cell_mask_kind;
+    /** 1 : masque AU-DESSUS de `count` (les cases marquées avant toutes les
+     *  autres, « -mrv ») ; 0 : SOUS `count` (départage à score MRV égal,
+     *  « -key »). Cf. §5.1 du document de conception — les deux bras sont le
+     *  même bit à deux hauteurs. */
+    int cell_first;
 } engine_t;
 
 /** @brief Résultat d'une tentative de fermeture. */
@@ -408,6 +447,52 @@ static int w2_scan(struct possibility_packet *b, map_big_array *map,
     return refuted;
 }
 
+/* ==========================================================================
+ * Masques d'ordre des cases (§5 de croix_separatrice_ordre_variables.md)
+ *
+ * Trois masques construits une fois, au démarrage : la croix, son complément,
+ * et un tirage de MÊME densité. Le troisième n'est pas un luxe — le §4.14 de
+ * elagage_recherche.md a mesuré qu'un départage ALÉATOIRE bat déjà l'ordre
+ * positionnel de 37 à 56 %, et un bit inséré au-dessus du champ de position
+ * perturbe cet ordre par construction : sans ce contrôle, un gain ne
+ * distinguerait pas « la croix est un bon a priori » de « n'importe quoi vaut
+ * mieux que l'ordre des bits ».
+ * ========================================================================== */
+
+static uint8_t g_mask_cross[ETERN_PARTS];
+static uint8_t g_mask_anti[ETERN_PARTS];
+static uint8_t g_mask_random[ETERN_PARTS];
+
+/** @brief Construit les trois masques. `seed` ensemence le contrôle aléatoire. */
+static void build_cell_masks(uint64_t seed)
+{
+    int n = cross_fill(g_mask_cross);
+    cross_fill_complement(g_mask_anti);
+    cross_fill_random(g_mask_random, n, seed);
+}
+
+/** @brief Masque d'un bras, ou NULL pour l'ordre de production. */
+static const uint8_t *arm_cell_mask(const engine_t *eng)
+{
+    switch (eng->cell_mask_kind) {
+        case CELL_CROSS:  return g_mask_cross;
+        case CELL_ANTI:   return g_mask_anti;
+        case CELL_RANDOM: return g_mask_random;
+        case CELL_NONE:   break;
+    }
+    return NULL;
+}
+
+/** @brief Arme le hook d'ordre des cases pour ce bras (et le désarme avec NULL). */
+static void arm_cell_hook(const engine_t *eng)
+{
+    const uint8_t *m = (eng != NULL) ? arm_cell_mask(eng) : NULL;
+    int first = (eng != NULL) && eng->cell_first;
+
+    etii_bench_cell_bias  = (m != NULL && !first) ? m : etii_bench_no_bias;
+    etii_bench_cell_first = (m != NULL &&  first) ? m : NULL;
+}
+
 static closure_t close_subtree(const struct possibility_packet *root, const engine_t *eng, long budget)
 {
     closure_t out;
@@ -418,6 +503,8 @@ static closure_t close_subtree(const struct possibility_packet *root, const engi
     max_result = 0;
     request = REQUEST_CONTINUE;
     singleton_conflict_check = eng->singleton_check;
+    /* Avant l'appel : `bt_frontier_init` cuit le biais dans `nc_key`. */
+    arm_cell_hook(eng);
 
     unsigned long long nodes = 0;
     double t0 = now_seconds();
@@ -425,6 +512,7 @@ static closure_t close_subtree(const struct possibility_packet *root, const engi
     out.seconds = now_seconds() - t0;
     out.nodes = nodes;
     singleton_conflict_check = 0;
+    arm_cell_hook(NULL);
     return out;
 }
 
@@ -482,6 +570,113 @@ static void build_prefix_root(const struct possibility_packet *deep, int k,
     // docs/autosearch_step.md) — plus une re-canonisation sur le
     // premier trou de `directions[]` (`bt_canonicalize_packet`, supprimée par PR1).
     out->alloc = (uint16_t)possibility_placed_count(out);
+}
+
+/* ==========================================================================
+ * Auto-test de l'instrument : les deux balayages MRV doivent s'accorder
+ * SOUS CHAQUE BRAS.
+ *
+ * Le moteur a deux chemins choisis une fois par recherche (`bt_masks_complete`)
+ * : `mrv_choose_cell_fast` sur une map de production, `mrv_choose_cell` en
+ * repli. Leur équivalence est verrouillée en production par
+ * `mrv_choose_cell_fast_matches_generic_on_real_map` — mais ce test-là compile
+ * sans le hook, donc il ne dit rien des bras. Or les deux chemins n'ont PAS la
+ * même forme : le générique sort immédiatement sur `count == 0`, le rapide va
+ * au bout de son balayage. Un bras qui se tromperait de place dans cette
+ * mécanique rendrait des CASES différentes selon le chemin, sans qu'aucune
+ * assertion de production ne s'en aperçoive.
+ *
+ * L'auto-test compare donc verdict, case ET score MRV sur une série de
+ * plateaux de profondeurs croissantes, pour chaque bras demandé. Il ne
+ * contrôle PAS que les bras coûtent le même nombre de nœuds : ce serait faux,
+ * et c'est même tout l'objet de la mesure — contrairement au banc « côté
+ * trouver », dont la prémisse (un sous-arbre mort coûte pareil quel que soit
+ * l'ordre des VALEURS) se retourne en test. Ici l'ordre des VARIABLES change,
+ * et le coût de réfutation avec lui.
+ * ========================================================================== */
+
+/** @brief Compare les deux balayages sur un plateau, pour le bras déjà armé. */
+static int selftest_compare_one(const struct possibility_packet *root)
+{
+    struct possibility_packet board;
+    memcpy(&board, root, sizeof(board));
+
+    const int8_t all_face = (int8_t)g_client.map_part->sizearrayM;
+    key_part constraints[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(constraints, &board, g_client.all_rotate_part, all_face);
+
+    uint64_t used[MRV_USED_WORDS];
+    mrv_used_init(used, &board);
+
+    /* `nc_key` cuit le biais : la frontière se construit APRÈS l'armement. */
+    bt_frontier front;
+    bt_frontier_init(&front, &board);
+
+    const uint64_t *cell_mask[BT_CELLS];
+    bt_mask_init(cell_mask, g_client.map_part, constraints);
+
+    uint8_t xg = 0, yg = 0, xf = 0, yf = 0;
+    int cg = 0, cf = 0;
+    int rg = mrv_choose_cell(&board, constraints, g_client.map_part, used, &front,
+                             cell_mask, &xg, &yg, &cg);
+    int rf = mrv_choose_cell_fast(used, &front, cell_mask, &xf, &yf, &cf);
+
+    if (rg != rf) {
+        return 1;
+    }
+    if (rg == 0) {
+        return 0; /* les deux disent « mort » : rien d'autre à comparer */
+    }
+    return (xg != xf || yg != yf || cg != cf) ? 1 : 0;
+}
+
+/**
+ * @brief Joue l'auto-test sur des plateaux de profondeurs croissantes.
+ * @return Nombre de désaccords (0 attendu).
+ */
+static int selftest_choose_cell_paths(const engine_t *engines, int nb_engines, long descent_nodes)
+{
+    if (!bt_masks_complete(g_client.map_part)) {
+        printf("auto-test : map hors gabarit, le chemin rapide ne s'applique pas —"
+               " comparaison sans objet\n");
+        return 0;
+    }
+
+    struct possibility_packet root, deep;
+    unsigned long long nodes = 0;
+    uint16_t deep_alloc = 0;
+
+    make_empty_board(&root);
+    request = REQUEST_CONTINUE;
+    arm_cell_hook(NULL); /* la descente se fait en ordre de production */
+    search_packet_backtracking_mrv(&g_client, &root, g_idParts, descent_nodes, 0, &nodes);
+    if (!best_board_get(&g_search_best_board, &deep, &deep_alloc)) {
+        printf("auto-test : aucune descente exploitable, contrôle ignoré\n");
+        return 0;
+    }
+
+    int deepest = placed_count(&deep);
+    int mismatches = 0;
+    int boards = 0;
+
+    for (int e = 0; e < nb_engines; e++) {
+        arm_cell_hook(&engines[e]);
+        for (int k = 20; k <= deepest; k += 10) {
+            struct possibility_packet r;
+            build_prefix_root(&deep, k, &r);
+            boards++;
+            if (selftest_compare_one(&r)) {
+                mismatches++;
+                printf("auto-test : DÉSACCORD balayage rapide/générique — moteur %s,"
+                       " racine à %d pièces\n", engines[e].name, k);
+            }
+        }
+    }
+    arm_cell_hook(NULL);
+
+    printf("auto-test : %d comparaisons rapide/générique sur %d moteur(s), %d désaccord(s)\n",
+           boards, nb_engines, mismatches);
+    return mismatches;
 }
 
 /* ==========================================================================
@@ -689,7 +884,15 @@ static void usage(void)
            "  --kpi <n>          mode KPI : échantillonne n racines RÉGULIÈREMENT réparties dans le\n"
            "                     .back (aucun filtre de profondeur — c'est ce que le serveur sert\n"
            "                     réellement), n'imprime que le bilan fermetures/seconde\n"
-           "  --engines <liste>  variantes MRV à comparer parmi mrv,mrv+singleton (défaut : les deux)\n"
+           "  --engines <liste>  variantes MRV à comparer, séparées par des virgules.\n"
+           "                     Défaut : mrv,mrv+singleton (les historiques).\n"
+           "                     Ordre des CASES (docs/conception/croix_separatrice_ordre_variables.md),\n"
+           "                     déclarés mais jamais joués par défaut :\n"
+           "                       cross-key / rand-key / anti-key : départage à score MRV ÉGAL\n"
+           "                       cross-mrv / rand-mrv / anti-mrv : case marquée avant TOUTES les autres\n"
+           "                     rand-* et anti-* sont les deux contrôles OBLIGATOIRES du §6.2 :\n"
+           "                     un bras qui ne les bat pas ne mesure pas ce qu'il prétend.\n"
+           "  --cross-seed <n>   graine du contrôle aléatoire (défaut 1)\n"
            "  --pruner-profile <n> rejoue le VRAI pipeline du pruner (autoprune_step) sur n\n"
            "                     possibilités échantillonnées régulièrement dans le .back :\n"
            "                     part morte au contrôle superficiel seul, part fermée par la\n"
@@ -727,16 +930,26 @@ int main(int argc, char **argv)
     int w2x2 = 0;
     int gpu = 0;
     int gpu_batch = 100;
+    unsigned long long cross_seed = 1;
     int depths[MAX_DEPTHS] = {150, 165, 175, 180, 185};
     int nb_depths = 5;
 
     engine_t all_engines[NB_ALL_ENGINES] = {
-        { "mrv",           0 },
-        { "mrv+singleton", 1 },
+        /* Les NB_DEFAULT_ENGINES premières : les historiques, jouées par défaut. */
+        { "mrv",           0, CELL_NONE,   0 },
+        { "mrv+singleton", 1, CELL_NONE,   0 },
+        /* Départage à score MRV égal — le bras réellement candidat (§4.3). */
+        { "cross-key",     0, CELL_CROSS,  0 },
+        { "rand-key",      0, CELL_RANDOM, 0 },
+        { "anti-key",      0, CELL_ANTI,   0 },
+        /* Case marquée avant toutes les autres — forme forte, prédite perdante. */
+        { "cross-mrv",     0, CELL_CROSS,  1 },
+        { "rand-mrv",      0, CELL_RANDOM, 1 },
+        { "anti-mrv",      0, CELL_ANTI,   1 },
     };
     engine_t engines[NB_ALL_ENGINES];
-    int nb_engines = NB_ALL_ENGINES;
-    memcpy(engines, all_engines, sizeof(all_engines));
+    int nb_engines = NB_DEFAULT_ENGINES;
+    memcpy(engines, all_engines, NB_DEFAULT_ENGINES * sizeof(all_engines[0]));
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--pieces") == 0 && i + 1 < argc)           pieces = argv[++i];
@@ -751,6 +964,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--w2x2") == 0)                         w2x2 = 1;
         else if (strcmp(argv[i], "--gpu") == 0)                          gpu = 1;
         else if (strcmp(argv[i], "--gpu-batch") == 0 && i + 1 < argc)    gpu_batch = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--cross-seed") == 0 && i + 1 < argc)   cross_seed = strtoull(argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--engines") == 0 && i + 1 < argc) {
             nb_engines = 0;
             char *copy = strdup(argv[++i]);
@@ -807,6 +1021,29 @@ int main(int argc, char **argv)
 
     printf("\nbanc de réfutation : coût de la PREUVE qu'un sous-arbre est mort\n");
     printf("pièces : %s   plafond : %ld nœuds par racine et par moteur\n", pieces, budget);
+
+    build_cell_masks(cross_seed);
+    int uses_cell_hook = 0;
+    for (int e = 0; e < nb_engines; e++) {
+        uses_cell_hook |= (engines[e].cell_mask_kind != CELL_NONE);
+    }
+    if (uses_cell_hook) {
+        printf("ordre des cases : croix de %d cases sur %d, contrôle aléatoire de même"
+               " densité (graine %llu)\n", cross_size(), ETERN_PARTS, cross_seed);
+        if (cross_size() >= ETERN_PARTS) {
+            fprintf(stderr, "la croix couvre le plateau ENTIER à cette taille compilée :"
+                    " tous les bras d'ordre des cases y sont des no-op, la mesure ne dirait"
+                    " rien (cf. l'en-tête de tests/bench/cross_mask.h).\n");
+            return EXIT_FAILURE;
+        }
+        /* Descente courte : l'auto-test compare des CHEMINS, pas des coûts —
+           quelques plateaux de profondeurs variées suffisent. */
+        if (selftest_choose_cell_paths(engines, nb_engines, 100000) != 0) {
+            fprintf(stderr, "auto-test en échec : les deux balayages MRV divergent sous au"
+                    " moins un bras. Les chiffres de ce run seraient à jeter.\n");
+            return EXIT_FAILURE;
+        }
+    }
 
     tally_t tally[NB_ALL_ENGINES], common[NB_ALL_ENGINES];
     memset(tally, 0, sizeof(tally));

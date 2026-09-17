@@ -132,6 +132,25 @@ nœuds — c'est la prémisse du banc (l'ordre des valeurs n'a aucun effet sur u
 sous-arbre sans solution) retournée en contrôle. Un désaccord y signale une
 permutation fausse, pas une politique gagnante.
 
+### Croix séparatrice : `cross_mask.{h,c}`
+
+Même découpage, troisième occurrence. La croix des deux diagonales
+([conception](../docs/conception/croix_separatrice_ordre_variables.md)) n'existe
+que pour les bras d'ordre des cases de `bench_refutation` — donc hors `make
+test`. Mais c'est une **géométrie**, et c'est sur elle que reposent toutes les
+affirmations du document : qu'elle sépare le plateau en quatre régions égales,
+qu'elle porte les cinq indices officiels, qu'elle vaut pour toute taille
+compilée. Elle est donc définie **en compréhension** plutôt que par une table
+recopiée, et `tests/bench/test_cross_mask.c` la contrôle par deux oracles
+**indépendants de l'implémentation** : l'appartenance est recalculée par
+distance de Manhattan à une diagonale (parcours explicite des cases diagonales,
+pas la formule), et les régions sont comptées par remplissage par diffusion.
+
+Un cas dégénéré y est verrouillé plutôt qu'écarté : **en 4×4 la croix couvre le
+plateau entier**, donc zéro région. Le test l'affirme (au lieu de se sauter), et
+c'est ce qui interdit d'aller mesurer ces variantes en build 16 — le banc s'y
+refuse explicitement.
+
 ## Conventions et limites
 
 - **Fixtures construites à la main** plutôt que via `rotate_all_parts` /

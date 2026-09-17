@@ -639,6 +639,72 @@ où ça compterait pour une preuve de fermeture, et son coût par nœud reste
 supérieur à tout bénéfice observé sur trois mesures indépendantes. Voir §4.4
 du document de conception pour la trace complète.
 
+### Bras d'ordre des CASES : la croix séparatrice
+
+Les moteurs ci-dessus ne varient que le contenu du forward-check. `--engines`
+déclare en plus **six bras d'ordre des variables** — quelle case le balayage MRV
+ouvre en premier — l'axe que le §7.7 de
+[banc_resolution_clones.md](conception/banc_resolution_clones.md) avait laissé
+ouvert faute d'un second point d'entrée dans le moteur. Conception complète :
+[croix_separatrice_ordre_variables.md](conception/croix_separatrice_ordre_variables.md).
+
+La croix est définie en compréhension (`tests/bench/cross_mask.c`,
+`abs(x−y) ≤ 1 ou abs(x+y−(n−1)) ≤ 1`) : 88 cases au 16×16, découpant le reste du
+plateau en quatre régions de 42 sans aucun passage orthogonal, et portant les
+cinq indices officiels. Son cœur est pur et rattaché à `make test`
+(`tests/bench/test_cross_mask.c`), comme `bench_solve_stats.c`.
+
+| Bras | Hauteur du bit dans la clé MRV | Ce qu'il fait |
+|---|---|---|
+| `cross-key` | sous `count` | à score MRV ÉGAL, une case de croix d'abord |
+| `cross-mrv` | au-dessus de `count` | une case de croix avant TOUTES les autres |
+| `rand-key` / `rand-mrv` | idem | **contrôle** : un tirage de MÊME densité |
+| `anti-key` / `anti-mrv` | idem | **contrôle** : le complément de la croix |
+
+**Les deux contrôles ne sont pas optionnels.** Le §4.14 de
+[elagage_recherche.md](conception/elagage_recherche.md) a mesuré qu'un départage
+**aléatoire** bat déjà l'ordre positionnel de 37 à 56 %. Un bit inséré au-dessus
+du champ de position perturbe cet ordre par construction : sans `rand-*` à même
+densité, un gain ne distingue pas « la croix est un bon a priori » de
+« n'importe quoi vaut mieux que l'ordre des bits ». `--cross-seed <n>` ensemence
+le tirage (défaut 1).
+
+```sh
+make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --min-pieces 130 --max-roots 50 --engines mrv,cross-key,rand-key,anti-key --budget 5000000"
+```
+
+**Ces six bras ne sont jamais joués par défaut** (`--engines` vaut
+`mrv,mrv+singleton` sans argument) : une invocation existante mesure exactement
+ce qu'elle mesurait, et comparer huit moteurs sur les mêmes racines coûte quatre
+fois plus cher.
+
+**Auto-test, joué dès qu'un bras d'ordre des cases est demandé.** Le moteur a
+deux balayages choisis une fois par recherche (`bt_masks_complete`) :
+`mrv_choose_cell_fast` sur une map de production, `mrv_choose_cell` en repli.
+Leur équivalence est verrouillée en production par
+`mrv_choose_cell_fast_matches_generic_on_real_map` — mais ce test-là compile
+**sans le hook** et ne dit donc rien des bras, alors que les deux chemins n'ont
+pas la même forme (le générique sort dès `count == 0`, le rapide va au bout de
+son balayage). L'auto-test compare verdict, case et score sur des plateaux de
+profondeurs croissantes, pour chaque bras demandé, et **refuse de mesurer** en
+cas de désaccord. Il ne contrôle PAS que les bras coûtent le même nombre de
+nœuds — ce serait faux, et c'est tout l'objet de la mesure ; contrairement au
+banc « côté trouver », dont la prémisse (un sous-arbre mort coûte pareil quel
+que soit l'ordre des VALEURS) se retourne, elle, en test.
+
+**Le banc refuse aussi de tourner en build 16** : en 4×4 la croix couvre le
+plateau entier, tous les bras y sont des no-op, et une mesure y serait une
+mesure de rien.
+
+**Rien de tout cela n'entre en production.** Le hook vit sous
+`ETII_BENCH_CELL_HOOKS`, défini par ce seul banc ; `build/core/etii_search.o`
+est **octet pour octet identique** avec et sans lui, et c'est le contrôle à
+refaire avant d'y toucher. Ce banc ne définit volontairement pas
+`ETII_BENCH_HOOKS` (qui active en plus l'ordre des valeurs) : l'indirection de
+l'ordre des valeurs coûterait un test de pointeur par candidat dans sa boucle
+chaude et rendrait ses temps incomparables à ses campagnes précédentes — et
+l'ordre des valeurs n'a de toute façon aucun effet sur un sous-arbre mort.
+
 ### Mode `--pruner-profile` : rejoue le VRAI pipeline du pruner
 
 Les modes précédents mesurent des moteurs de RECHERCHE. `--pruner-profile <n>`

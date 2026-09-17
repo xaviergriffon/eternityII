@@ -1,6 +1,6 @@
 # Croix séparatrice : un a priori structurel dans l'ordre des variables
 
-**Statut : proposition.** Aucune ligne de moteur écrite. Le document tranche deux
+**Statut : en cours d'implémentation — PR1 livrée, la campagne (PR2) reste à exécuter.** Aucune ligne de moteur en production. Le document tranche deux
 choses avant tout code — la **géométrie** de la croix (normalisée, et démontrée
 séparatrice) et le **rejet de la variante à ordre imposé**, écartée sur quatre
 pré-mesures statiques reproductibles en moins d'une seconde, dans la méthode du
@@ -18,6 +18,49 @@ mesuré […] le mesurer demanderait un second point d'entrée sous
 `ETII_BENCH_HOOKS`, que PR3 n'a pas livré ». Le résultat négatif de la campagne
 « côté trouver » porte sur l'ordre des **valeurs** et sur le point de **départ** :
 il ne ferme rien ici.
+
+## 0. État de l'implémentation
+
+| PR | État | Ce qui a été livré |
+|---|---|---|
+| 1 | **livrée** | `tests/bench/cross_mask.{h,c}` (croix en compréhension, complément, tirage de contrôle à densité imposée) + `tests/bench/test_cross_mask.c` rattaché à `make test` ; second point d'entrée `ETII_BENCH_CELL_HOOKS` dans `mrv_choose_cell`/`_fast` ; les six bras dans `bench_refutation` (`cross-key`/`rand-key`/`anti-key`, `cross-mrv`/`rand-mrv`/`anti-mrv`), `--cross-seed` ; auto-test des deux balayages par bras |
+| 2 | à exécuter | Campagne `bench_refutation` sur stock de production (§6) |
+| 3 | conditionnelle | `bench_solve` sur clones, si un bras passe le §6.5 (1-3) |
+| 4 | conditionnelle | Adoption inconditionnelle du bras retenu |
+
+**Verrou de PR1 tenu** : `build/core/etii_search.o` compilé avant et après
+l'ajout du hook est **octet pour octet identique** — la production ne voit
+strictement rien de ce mécanisme. Vérifié par recompilation des deux versions
+avec les drapeaux du makefile.
+
+**Écarts assumés par rapport au plan.**
+
+- **Deux macros, pas une.** Le §5.4 parlait d'« un second point d'entrée sous
+  `ETII_BENCH_HOOKS` ». L'implémentation en fait une macro distincte,
+  `ETII_BENCH_CELL_HOOKS`, qu'`ETII_BENCH_HOOKS` implique. Raison : si
+  `bench_refutation` définissait `ETII_BENCH_HOOKS`, il hériterait de
+  l'indirection d'ordre des VALEURS (un test de pointeur par candidat dans sa
+  boucle chaude) et ses temps cesseraient d'être comparables à ses campagnes
+  précédentes — pour un mécanisme qui, par construction, n'a aucun effet sur un
+  sous-arbre mort.
+- **`cross-mrv` n'est pas un bit en poids fort, c'est une seconde passe.** Le
+  §5.3 identifiait le piège (un bit au-dessus de `count` casse la détection de
+  case morte du chemin rapide) et proposait un second minimum sur `count` seul.
+  La seconde passe restreinte, exécutée **après** le verdict de mort, obtient le
+  même résultat et ne coûte rien aux autres bras (un test de pointeur par nœud
+  au lieu d'un registre et d'un `cmov` par case de frontière). Le verdict de
+  mort reste celui du balayage complet, ce qui était l'exigence.
+- **Les six bras ne sont pas joués par défaut.** `--engines` vaut toujours
+  `mrv,mrv+singleton` sans argument : une invocation existante du banc mesure
+  exactement ce qu'elle mesurait.
+- **Le banc refuse de tourner en build 16.** Conséquence du cas dégénéré du §3
+  (en 4×4 la croix est le plateau entier) : plutôt que de produire des chiffres
+  qui ne veulent rien dire, il sort en erreur.
+
+**Première observation, à l'exécution et non encore une mesure** : sur des
+racines fabriquées que `mrv` ferme en 4 nœuds, `cross-mrv` épuise un plafond de
+2 000 000. C'est la direction annoncée par le §4.3, sur trop peu de racines pour
+compter comme un résultat — la campagne reste à faire.
 
 ## 1. Question posée
 
@@ -377,7 +420,7 @@ survivant est un chemin de code non testé).
 
 | PR | Contenu | Risque | Verrou |
 |---|---|---|---|
-| 1 | Table de croix en compréhension + tests (séparation en 4 régions, indices inclus, valable sur toutes les tailles compilées) ; second point d'entrée `ETII_BENCH_HOOKS` (ordre des cases) ; les quatre bras `cross-key` / `cross-mrv` / `random` / `anti-croix` dans `bench_refutation` ; second minimum sur `count` pour `cross-mrv` (§5.3) | moyen — le piège de la détection de case morte est silencieux | `etii_search.o` **octet pour octet identique** avec et sans le hook ; `mrv_choose_cell_fast_matches_generic_on_real_map` vert **pour chaque bras** ; `make test` inchangé |
+| 1 | **livrée** (cf. §0). Table de croix en compréhension + tests ; second point d'entrée (`ETII_BENCH_CELL_HOOKS`) ; les six bras dans `bench_refutation` ; seconde passe restreinte plutôt que second minimum sur `count` (§0) | moyen — le piège de la détection de case morte est silencieux | `etii_search.o` **octet pour octet identique** avec et sans le hook ✓ ; équivalence des deux balayages contrôlée **pour chaque bras** par l'auto-test du banc ✓ ; `make test` vert ✓ |
 | 2 | Campagne `bench_refutation` sur stock de production, consignée ici | mesure | les quatre bras sur les mêmes racines, nœuds **et** temps, fermetures comptées, censure déclarée |
 | 3 | *Conditionnelle* — `bench_solve` sur clones si un bras passe le §6.5 (1-3) | mesure | réserve du §4.4 écrite avec le résultat |
 | 4 | *Conditionnelle* — adoption inconditionnelle, suppression du hook du bras retenu | faible | `bench_refutation` non régressé, doc `docs/` et `AGENTS.md` mises à jour |
