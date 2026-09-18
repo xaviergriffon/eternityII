@@ -627,3 +627,24 @@ coverage-report: coverage
 	@echo "Cobertura : $(COV_XML)"
 	@echo "HTML      : $(COV_HTML)/index.html"
 	@echo "Markdown  : $(COV_MD)  (avec section par domaine)"
+
+# Banc « ORACLE CDCL » (tests/bench/bench_cdcl.py) : les MÊMES racines soumises
+# au DFS du dépôt (bench_refutation) et à un solveur SAT à APPRENTISSAGE DE
+# CLAUSES, pour mesurer le plafond de la famille d'inférence « à distance »
+# laissée non mesurée par docs/conception/elagage_recherche.md §4.11. Aucun code
+# de src/ n'est touché : c'est un instrument de mesure.
+#
+# Le solveur n'est PAS fourni par le dépôt (aucun binaire téléchargé n'y entre) :
+# il se cherche via $(KISSAT) puis dans le PATH. Source officielle :
+# github.com/arminbiere/kissat (./configure && make, sans installation système).
+#
+# PAS rattaché à `make test` (c'est un banc, et il exige un solveur externe).
+# Verdict de la campagne : docs/conception/oracle_cdcl.md
+.PHONY: bench-cdcl
+bench-cdcl: $(BENCH_REFUT_BIN)
+	python3 tests/bench/bench_cdcl.py $(BENCH_CDCL_ARGS)
+
+# Le banc de réfutation sert de bras DFS : construit ici sans le JOUER (la règle
+# .PHONY bench-refutation ci-dessus l'exécute aussitôt compilé).
+$(BENCH_REFUT_BIN): tests/bench/bench_refutation.c
+	gcc -Wall -Wextra -std=gnu99 -O3 -Isrc -Itests -Werror -pthread -o $@ $< $(TEST_MODULES) -lm
