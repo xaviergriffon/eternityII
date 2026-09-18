@@ -170,6 +170,42 @@ locaux** (`etii_main.<pid>` et `etii_fork.<pid>`,
   **représentation complète** du plateau à ce moment (pas seulement le compte,
   cf. [Canal de contrôle](echanges_client_serveur.md#canal-de-contrôle-v9) et
   [src/core/best_board.h](../src/core/best_board.h)) ;
+
+#### Ce que contient `IPC_MSG_STATS`, et par quel rôle
+
+La structure envoyée chaque seconde par le thread `fork_checker` de chaque
+enfant est `struct client_statistics`
+([src/app/etii_statistic.h](../src/app/etii_statistic.h)). Elle couvre **les deux
+rôles de fork** — et c'est important pour qui diagnostique un fork
+« silencieux » : un fork de RECHERCHE et un fork de PRUNAGE ne remplissent pas
+les mêmes champs, et les champs de l'autre rôle restent nuls par construction.
+
+| Champs | Renseignés par | Toujours nuls sur |
+|---|---|---|
+| `possibilities_in_stock`, `analyses_in_stock`, `shots_per_second`, `max_result`, `min_pending_depth` | fork de recherche (`autosearch`) | — (un pruner met `possibilities_in_stock` et les profondeurs à 0, cf. `autoprune_step`) |
+| `fc_attempts`, `fc_pruned`, `fc_pruned_at[]` | forward-checking de la recherche | fork de prunage |
+| `pruner_checked`, `pruner_removed`, `pruner_cells_studied` | `autoprune_step` / `autoprune_gpu` | fork de recherche |
+| `pruner_cells_per_second` | les DEUX (prunage **et** forward-check, flux cumulés) | — |
+| `server_io_active`, `root_depth` | les deux | — |
+
+Les trois compteurs de prunage **remontent bien au parent** : le maillon a été
+vérifié par la mesure (serveur 16 pièces + client pruner réel, la ligne
+`pruner : …` du rapport `check` contient exactement la somme des compteurs des
+forks). Deux conséquences, toutes deux devenues des invariants après le faux
+diagnostic du 2026-09-18 (un pruner qui éliminait 22 006 possibilités sur
+32 480 pris pour un pruner en panne) :
+
+- **tout jugement d'activité d'un fork doit tenir compte de son rôle.**
+  `fork_stat_is_zero` ([src/app/fork_orchestrator.c](../src/app/fork_orchestrator.c))
+  teste donc aussi les trois compteurs de prunage : ne regarder que
+  stock/analysé/coups-s déclarait « ne rapporte aucun travail » trois forks
+  pruner parfaitement sains. Le message d'avertissement passe par
+  `fork_diagnostic_summary`, qui énumère les compteurs **du rôle concerné** ;
+- **toute commande console qui prétend montrer l'activité du process doit lire
+  `fork_statistics[]`**, jamais les files locales du parent : côté client comme
+  côté pruner, elles sont vides par construction (tout le travail a lieu dans les
+  forks). C'est le cas de `check` et, depuis, de `statistic`
+  (voir [Console interactive](console.md)).
 - **router leurs logs** (`log_info`, `log_error`, `log_event`, …) au parent — qui
   possède la seule console, ce qui évite tout entrelacement dans le terminal et
   permet le bon fonctionnement de l'interface ncurses ;

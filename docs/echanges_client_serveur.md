@@ -1399,6 +1399,49 @@ de recherche…) — seulement LEQUEL, avec son pid et son ancienneté, pour
 que l'opérateur puisse cibler son investigation (ex. `lsof -p <pid>`,
 `gdb -p <pid>`) sans devoir d'abord deviner quel fork est en cause.
 
+### Correctif : le filet ignorait le travail des forks PRUNER (faux positif)
+
+Deuxième cas réel, 2026-09-18 : un client pruner (3 forks, `dfs_budget = 10000`,
+lots de 100) lancé contre un serveur dont le stock venait d'être rebasculé vers
+le pool non vérifié a éliminé **22 006 possibilités sur 32 480** (67,8 %,
+palier 10 474 vérifié côté serveur par `statistic`, reproduit à l'identique sur
+une seconde machine) — et l'orchestrateur a signalé les **trois** forks comme
+« ne rapporte aucun travail (stock/analysé/coups-s à 0) ». Un pruner
+parfaitement fonctionnel présenté comme en panne, ce qui a fait chercher un
+blocage réseau puis un deadlock, deux fois pour rien.
+
+Cause : `fork_stat_is_zero` ne regardait que `possibilities_in_stock`,
+`analyses_in_stock` et `shots_per_second` — les trois indicateurs d'un fork de
+RECHERCHE. Un fork de prunage ne produit aucun des trois par construction
+(`autoprune_step` remet `lastfilesize`/`lastroot`/`lastdepth` à 0 et n'alimente
+que `pruner_checked`/`pruner_removed`/`pruner_cells_studied`) : le prédicat
+mesurait, sur un pruner, exactement les compteurs que son rôle laisse à zéro.
+
+Correctif en deux points :
+
+- **le critère** inclut désormais les trois compteurs de prunage. Ils sont nuls
+  sur un fork de recherche (seuls `autoprune_step`/`autoprune_gpu` les écrivent),
+  donc la détection côté recherche est inchangée — c'est ce qui rend l'ajout
+  sûr. Compteurs cumulés et non des débits : c'est la sémantique voulue ici,
+  l'avertissement n'étant émis qu'une seule fois par fork, `STUCK_FORKS_WARN_MS`
+  après son démarrage (« ce fork a-t-il jamais rapporté quoi que ce soit ? ») ;
+- **le message** n'énumère plus une liste figée de compteurs mais délègue à
+  `fork_diagnostic_summary`, qui affichait déjà le détail **du rôle concerné**
+  (`vérifiées=… éliminées=… cases/s=… serveur=…` pour un pruner,
+  `stock=… analysé=… coups/s=… max=… serveur=…` pour une recherche) — le même
+  formatage que l'escalade d'arrêt, pour que l'opérateur ne se voie jamais
+  désigner les mauvais compteurs.
+
+Le lien IPC lui-même, soupçonné pendant l'incident, a été mis hors de cause par
+la mesure : les trois compteurs de prunage remontent bien au parent dans
+`IPC_MSG_STATS` (cf.
+[Architecture § Communication parent ↔ enfants](architecture.md#communication-parent--enfants-ipc)).
+Ce qui manquait côté console était ailleurs : `statistic` — la commande
+effectivement utilisée pendant la campagne — n'affichait que les files LOCALES
+du process parent, vides par construction sur un client. Elle publie désormais
+la même ligne `pruner : …` que le rapport `check` (voir
+[Console interactive](console.md)).
+
 ### Correctif : `SA_RESTART` sur SIGINT rendait certains forks sourds à l'arrêt
 
 Le filet par fork ci-dessus a permis d'identifier LEQUEL était en cause à

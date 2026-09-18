@@ -241,6 +241,39 @@ TEST fork_stat_is_zero_detects_any_nonzero_field(void)
     PASS();
 }
 
+/* Un fork PRUNER ne produit ni stock local, ni analysé, ni coups/s : son
+   travail utile est le contrôle de possibilités. Avant ce correctif, trois
+   forks pruner en train d'éliminer 22 006 possibilités sur 32 480 (constaté le
+   2026-09-18, palier vérifié côté serveur) étaient tous les trois déclarés « ne
+   rapporte aucun travail » par le filet de sécurité de l'orchestrateur. Chacun
+   des trois compteurs de prunage suffit, seul, à prouver l'activité. */
+TEST fork_stat_is_zero_counts_pruner_activity_as_work(void)
+{
+    struct client_statistics stat;
+    memset(&stat, 0, sizeof(stat));
+    ASSERT_EQ_FMT(1, fork_stat_is_zero(&stat), "%d");
+
+    stat.pruner_checked = 1;
+    ASSERT_EQ_FMT(0, fork_stat_is_zero(&stat), "%d");
+    stat.pruner_checked = 0;
+
+    stat.pruner_removed = 1;
+    ASSERT_EQ_FMT(0, fork_stat_is_zero(&stat), "%d");
+    stat.pruner_removed = 0;
+
+    stat.pruner_cells_studied = 1;
+    ASSERT_EQ_FMT(0, fork_stat_is_zero(&stat), "%d");
+    stat.pruner_cells_studied = 0;
+
+    /* Contre-épreuve : un fork de RECHERCHE laisse ces trois compteurs à zéro
+       (seuls autoprune_step/autoprune_gpu les alimentent), donc le verdict
+       « aucun travail » est inchangé de ce côté — c'est ce qui rend l'ajout
+       sûr. */
+    stat.max_result = 200;          /* jamais un indicateur d'activité courante */
+    ASSERT_EQ_FMT(1, fork_stat_is_zero(&stat), "%d");
+    PASS();
+}
+
 TEST fork_stat_is_zero_treats_null_as_zero(void)
 {
     ASSERT_EQ_FMT(1, fork_stat_is_zero(NULL), "%d");
@@ -1030,6 +1063,7 @@ SUITE(fork_orchestrator_suite)
     RUN_TEST(countdown_elapsed_before_at_and_after_deadline);
     RUN_TEST(stuck_forks_threshold_before_at_and_after_deadline);
     RUN_TEST(fork_stat_is_zero_detects_any_nonzero_field);
+    RUN_TEST(fork_stat_is_zero_counts_pruner_activity_as_work);
     RUN_TEST(fork_stat_is_zero_treats_null_as_zero);
     RUN_TEST(fork_stats_all_zero_detects_any_nonzero_indicator);
     RUN_TEST(fork_stats_all_zero_treats_empty_input_as_zero);
