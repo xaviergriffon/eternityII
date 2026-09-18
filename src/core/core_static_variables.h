@@ -149,24 +149,38 @@
 // consommer avant que le pruner renonce à prouver sa fermeture et la
 // conserve, comme avant cette PR.
 //
-// DÉSACTIVÉ PAR DÉFAUT (0) — décision de DÉPLOIEMENT, pas verdict de mesure.
+// ACTIVÉ PAR DÉFAUT À 10000 depuis §4.6c — ce fut 0 pendant deux mesures, pour
+// deux raisons différentes, toutes deux levées aujourd'hui.
+//
 // Une mesure initiale (stock synthétique trop peu profond, même erreur de
 // méthode que corrigée pour MRV) avait conclu à 0 % de fermeture à tout
-// budget testé jusqu'à 1 000 000 de nœuds. REMESURÉ depuis sur du VRAI stock
-// serveur (`--pruner-profile`, tests/bench/bench_refutation.c, rejouant le
-// pipeline réel `autoprune_step`) : la preuve DFS ferme bien +4,6 à +5,6
-// points de pourcentage de possibilités au-delà du contrôle superficiel
-// gratuit (lui-même à 50,2 % sur ce stock), reproduit sur un second stock.
-// NE PAS reprendre l'affirmation « 0 % de fermeture, mécanisme inutile » —
-// elle est fausse. Le défaut reste 0 malgré tout : basculer par défaut change
-// le coût CPU de tout pruner déployé, décision laissée à l'opérateur, pas
-// encore prise. Valeur recommandée par la mesure si activé : 10000 (capture
-// 82 % du gain mesuré à 1 000 000 pour 1 % du coût CPU, rendements
-// décroissants nets au-delà). Reste configurable à l'exécution (console
-// `prunerDfsBudget <n>`, fichier de configuration client `dfs_budget`) : le
-// mécanisme est correct et sans coût quand désactivé (`pruner_dfs_budget <= 0`
-// court-circuite avant tout backtracking).
-#define PRUNER_DFS_BUDGET_DEFAULT 0
+// budget testé jusqu'à 1 000 000 de nœuds. NE PAS reprendre cette
+// affirmation, elle est fausse. La remesure sur du VRAI stock serveur
+// (`--pruner-profile`, tests/bench/bench_refutation.c, rejouant le pipeline
+// réel `autoprune_step`) donnait déjà +4,6 à +5,6 points de fermeture au-delà
+// du contrôle superficiel. Le défaut restait 0 pour une raison de DÉPLOIEMENT
+// explicitement énoncée : « activer un défaut consomme plus de CPU sur toute
+// une flotte déployée sans confirmation en conditions réelles au-delà de ce
+// banc ». C'est cette confirmation qui manquait, et elle existe désormais
+// (§4.6c) : un serveur et un pruner réels, sur deux machines, éliminent
+// 22 006 possibilités sur 32 480 (67,8 %) en moins de 5 minutes.
+//
+// 10000 capture 88 % de ce que ferme un budget de 1 000 000 pour 1,5 % de son
+// coût (94 s de CPU pour un stock de 32 480). Ce N'EST PAS un coude : sur ce
+// stock la courbe monte encore (56,4 % à 1 000, 66,4 % à 10 000, 73,2 % à
+// 100 000), là où celle de §4.10, sur un autre stock, plafonnait dès 1 000.
+// Le point de fonctionnement dépend donc du stock, et 10000 est un ARBITRAGE
+// -- celui qui a été validé de bout en bout, pas une valeur dérivée d'un
+// optimum. 1000 reste un choix conservateur défendable (56,4 % pour 14 s).
+// Reste configurable à l'exécution (console `prunerDfsBudget
+// <n>`, fichier de configuration client `dfs_budget`) ; `<= 0` court-circuite
+// avant tout backtracking, donc désactiver reste strictement gratuit.
+//
+// ATTENTION, le défaut ne traite QUE le flux : une possibilité déjà marquée
+// `checked` n'est jamais resoumise à la preuve (cf. reset_checked_pool,
+// src/core/datamanager.c). Traiter le passif d'un stock existant demande la
+// commande console `resetChecked`, une fois, après déploiement.
+#define PRUNER_DFS_BUDGET_DEFAULT 10000
 // Plafond de sécurité du budget configurable : au-delà, un seul contrôle de
 // possibilité cesse d'être une opération bornée bon marché (l'objet même de
 // cette PR) et se rapproche d'une recherche non plafonnée. Ne borne pas la
@@ -359,8 +373,8 @@ extern int pruner_batch_size;
  *
  * Configurable au démarrage (clé `dfs_budget`) et via `prunerDfsBudget <n>`.
  * `<= 0` désactive ce contrôle supplémentaire — `autoprune_step` retombe sur
- * le seul contrôle superficiel. Défaut `PRUNER_DFS_BUDGET_DEFAULT` = 0
- * (désactivé) : mesuré sans gain sur le stock actuel, opt-in délibéré.
+ * le seul contrôle superficiel. Défaut `PRUNER_DFS_BUDGET_DEFAULT` = 10000
+ * (activé) : mesuré en conditions réelles, 67,8 % du stock éliminé (§4.6c).
  * Plafonné à `PRUNER_DFS_BUDGET_MAX` par `pruner_dfs_budget_clamp`.
  */
 extern int pruner_dfs_budget;

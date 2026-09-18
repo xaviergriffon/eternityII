@@ -2143,6 +2143,33 @@ TEST pruner_dfs_budget_clamp_bounds(void)
     PASS();
 }
 
+/*
+ * §4.6c : la preuve de fermeture bornée du pruner est ACTIVÉE par défaut, à
+ * 10000 nœuds -- un arbitrage mesuré (88 % de ce que ferme un budget de
+ * 1 000 000 pour 1,5 % de son coût), validé de bout en bout sur deux
+ * machines, et non un optimum : la courbe monte encore au-delà. Ce qui est
+ * verrouillé ici est la valeur LIVRÉE. Le passage de 0 à une valeur non nulle est ce
+ * qui distingue un pruner qui se contente du contrôle superficiel d'un pruner
+ * qui prouve. Un retour silencieux à 0 rendrait le mécanisme inopérant sans
+ * qu'aucun autre test ne tombe : les trois tests d'intégration d'autoprune
+ * fixent `pruner_dfs_budget` explicitement, précisément pour ne pas dépendre
+ * du défaut. Ce test est donc le SEUL garde-fou de la valeur livrée.
+ */
+TEST pruner_dfs_budget_default_enables_the_bounded_proof(void)
+{
+    ASSERT_EQ_FMT(10000, PRUNER_DFS_BUDGET_DEFAULT, "%d");
+    /* Contre-vérification : le défaut doit passer le clamp sans être modifié,
+     * sinon la valeur livrée ne serait pas celle qui s'applique. */
+    ASSERT_EQ_FMT(PRUNER_DFS_BUDGET_DEFAULT,
+                  pruner_dfs_budget_clamp(PRUNER_DFS_BUDGET_DEFAULT), "%d");
+    /* Et il doit rester STRICTEMENT sous le plafond de sécurité : un défaut
+     * égal au plafond voudrait dire qu'un contrôle unitaire peut engager le
+     * temps d'une recherche non plafonnée. */
+    ASSERT(PRUNER_DFS_BUDGET_DEFAULT > 0);
+    ASSERT(PRUNER_DFS_BUDGET_DEFAULT < PRUNER_DFS_BUDGET_MAX);
+    PASS();
+}
+
 /* ---------- admin_apply_remote_command ------------------------------------ */
 /*
  * Chemin d'exécution réentrant (strtok_r) destiné à un appelant concurrent
@@ -3350,6 +3377,7 @@ SUITE(command_lines_suite)
 
     RUN_TEST(pruner_batch_clamp_bounds);
     RUN_TEST(pruner_dfs_budget_clamp_bounds);
+    RUN_TEST(pruner_dfs_budget_default_enables_the_bounded_proof);
     RUN_TEST(admin_apply_remote_command_pause_resume);
     RUN_TEST(admin_apply_remote_command_pause_broadcasts_to_control_sessions);
     RUN_TEST(admin_apply_remote_command_limit_sets_global);

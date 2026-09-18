@@ -246,7 +246,7 @@ Instantané de l'état et de la configuration courante.
 | `limit` | entier ≥ 0 | Débit de recherche maximum configuré (essais/seconde) ; `0` = illimité |
 | `max_stock_by_thread` | entier | Seuil de stock local par thread avant délégation au serveur |
 | `pruner_batch` | entier | Taille de lot d'échange du pruner courante |
-| `pruner_dfs_budget` | entier | Budget de nœuds courant de la preuve de fermeture bornée du pruner (§4.6b) ; `0` = désactivée |
+| `pruner_dfs_budget` | entier | Budget de nœuds courant de la preuve de fermeture bornée du pruner (§4.6b/§4.6c) ; défaut `10000`, `0` = désactivée |
 | `last_backup_duration_ms` | entier ≥ 0 | Durée (millisecondes) de la DERNIÈRE sauvegarde automatique effectivement exécutée — englobe tout ce que ce tour a réellement déclenché (stock/analysé, meilleur plateau, clients connus — chacun sauté indépendamment si son propre artefact n'a pas changé). `0` tant qu'aucune sauvegarde n'a encore eu lieu |
 | `stock_ram_limit_mb` | entier ≥ 0 | Plafond RAM configuré des deux pools de stock (non vérifié + vérifié), en Mo — [`--stock-max-ram`](utilisation.md#plafond-ram-du-stock---stock-max-ram)/commande `stockMaxRam`. `0` = illimité |
 | `stock_ram_used_mb` | entier ≥ 0 | Occupation ESTIMÉE actuelle des deux pools de stock, en Mo (jamais un relevé RSS réel du process — dérivée du nombre de possibilités résidentes) |
