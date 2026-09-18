@@ -1684,6 +1684,22 @@ mesurable du gain est nulle à 100 %.
 **Décision : ne pas implémenter.** À ne rouvrir que si le choix de variable cesse d'être
 MRV — c'est l'hypothèse dont dépend tout le raisonnement ci-dessus.
 
+**Le résidu laissé ouvert ci-dessus a depuis été mesuré, et il n'est PAS nul.** La
+« propagation des ensembles de conflit » — tout ce qu'un moteur à APPRENTISSAGE DE
+CLAUSES sait faire et que le saut immédiat ne fait pas — a été chiffrée en donnant les
+MÊMES racines de production à kissat 4.0.4 et CaDiCaL 3.0.1 : voir
+[oracle_cdcl.md](oracle_cdcl.md). Sur les racines de 100 à 120 pièces, les conflits CDCL
+sont sous les nœuds DFS d'un facteur **107 en médiane** (jusqu'à 2 833), sur 25 des 28
+racines tranchées. Le raisonnement à distance existe donc bel et bien, et le verdict
+« 100,00 % de sauts immédiats » ci-dessus ne le contredit pas : il ne portait que sur le
+saut, pas sur la mémoire.
+
+Ce qui ne change pas, c'est la **décision** : à ~200 fois le coût d'un nœud par conflit,
+ce facteur 100 en inférences ne se convertit pas en temps — le DFS gagne la médiane des
+trois régimes et 70 racines sur 79, aucune racine ne voit le CDCL gagner un ordre de
+grandeur (max 6,2×), et le CDCL ne ferme **rien** que le DFS ne ferme à 4·10⁸ nœuds.
+La famille reste donc non implémentée, mais **non close** : cf. §6.
+
 ### 4.12 Départage des égalités du balayage MRV par le nombre de côtés contraints — ADOPTÉ
 
 **Statut : mesuré sur stock de production, adopté.** Première piste de la série tranchée par
@@ -1974,6 +1990,14 @@ distance »**. Le profil par profondeur de ces mêmes exécutions le confirme : 
 concentrent entre 150 et 180 pièces, avec 2,0 à 2,7 candidats par case choisie et 30 à
 40 % de cases forcées, et les détections de case morte par le balayage lui-même sont
 rares (0,06 % des nœuds) — la mort est constatée par le forward-check du placement.
+
+**Portée du « jamais à distance », corrigée depuis.** Cette conclusion structurelle est
+vraie **là où elle a été mesurée** — racines profondes, où l'oracle CDCL de
+[oracle_cdcl.md](oracle_cdcl.md) trouve 30 racines sur 50 réfutées par la seule
+propagation unitaire, sans un seul conflit. Elle est **fausse en 100-120 pièces**, où une
+preuve 100× plus courte que celle du DFS existe et où l'apprentissage de clauses la
+trouve. Ce que §4.15 plafonne est l'inférence LOCALE SANS MÉMOIRE, pas le raisonnement à
+distance en général.
 
 **Décision : ne pas implémenter, ni Hall complet, ni comptage couleur ciblé (§4.3), ni
 filtrage global à la Benoist-Bourreau.** Le plafond de la famille entière est de 0,35 % à
@@ -2430,6 +2454,23 @@ identiques).
   travail réel égal (la tentative de placement, pas le nœud, dont la définition change
   avec le réglage) : **+15,90 % de temps sans lui**. Redondant en pouvoir d'élagage
   n'est pas redondant en coût.
+- **Apprentissage de clauses (nogoods) : mesuré, non implémenté, NON CLOS.**
+  L'oracle de [oracle_cdcl.md](oracle_cdcl.md) (kissat 4.0.4 et CaDiCaL 3.0.1 sur 80
+  racines du stock de production, encodage compact de Heule, contrôle positif SAT
+  re-vérifié pièce par pièce) tranche le résidu de §4.11 : le raisonnement à distance
+  **existe** (conflits CDCL sous les nœuds DFS d'un facteur 107 en médiane sur les
+  racines de 100-120 pièces, 25 racines sur 28), mais **ne paie pas en temps** (un
+  conflit coûte ~200 nœuds ; le DFS gagne la médiane des trois régimes et 70 racines sur
+  79 ; accélération CDCL maximale 6,2×, jamais 10×) et **ne ferme aucune racine** que le
+  DFS ne ferme à 4·10⁸ nœuds — la seule racine du régime qui résiste au DFS résiste aussi
+  à kissat. Ce qui rouvrirait la piste est une mesure qui n'a PAS été faite : **combien
+  coûte le nogood le moins cher qui capture ce que kissat capture ?** Le facteur 200 est
+  celui d'un solveur généraliste (clauses apprises générales, watched literals, base à
+  réduire) ; une forme restreinte aux seuls sous-ensembles de cases mortes serait bien
+  moins chère et bien moins puissante, et le rapport des deux est inconnu. Deux autres
+  inconnues consignées : le régime sous 100 pièces posées (5 % du stock, non mesuré, et
+  c'est là que l'avantage CDCL croît) et la dépendance du verdict en temps à l'encodage
+  CNF choisi.
 - **Cumul des élagages.** Les gains ne s'additionnent pas : 4.1 et 4.2 attrapent en partie
   les mêmes branches. Chaque PR doit être mesurée **par-dessus** la précédente, jamais
   contre `master`. Corollaire : ce que vaut une série cumulée ne se déduit pas de ses

@@ -1197,9 +1197,100 @@ Trois enseignements de méthode, utiles avant toute campagne future :
   censure joue dans le sens qui favoriserait le redémarrage : on ne peut donc
   rien conclure contre lui sur ces cellules-là.
 
+## Banc « oracle CDCL » (`make bench-cdcl`)
+
+`bench_refutation` mesure ce que le moteur du dépôt dépense pour prouver qu'un
+sous-arbre est mort. Il ne peut pas dire si ce coût est **intrinsèque à
+l'instance** ou **propre à sa famille d'inférence** : pour cela il faut donner
+les mêmes racines à une famille d'inférence différente. Ce banc le fait avec un
+solveur SAT à **apprentissage de clauses** (CDCL), la seule famille qui, elle,
+a une mémoire des conflits — le résidu que
+[conception/elagage_recherche.md](conception/elagage_recherche.md) §4.11 laisse
+explicitement non mesuré (« la propagation des ensembles de conflit »).
+
+C'est un **oracle**, pas un moteur : rien n'entre dans `src/`, et la campagne
+n'a débouché sur aucun changement de production. Méthode, encodage, tables et
+verdict : [conception/oracle_cdcl.md](conception/oracle_cdcl.md).
+
+```sh
+# le solveur n'est PAS fourni par le dépôt
+git clone https://github.com/arminbiere/kissat && (cd kissat && ./configure && make)
+KISSAT=$PWD/kissat/build/kissat make bench-cdcl
+
+# le régime qui compte (racines peu profondes, les plus chères pour le DFS)
+KISSAT=... make bench-cdcl BENCH_CDCL_ARGS="--min-pieces 100 --max-pieces 120 --roots 30"
+```
+
+Comme `bench-refutation` et `bench-solve`, la cible est `.PHONY` et **n'entre
+pas dans `make test`** — c'est un banc, et il exige un binaire externe que le
+dépôt ne fournit ni ne télécharge (`$KISSAT`, sinon le `PATH`). Sans solveur,
+la cible sort proprement en disant où en trouver un.
+
+### Ce que le banc joue, et dans quel ordre
+
+1. **Contrôle positif, obligatoire.** `tools/root_to_cnf.py --self-test` encode
+   trois instances à **solution connue** — le puzzle 16 pièces
+   (`data/pieces16.csv`, plateau vide) et deux racines d'un clone 16×16 tiré par
+   `tools/gen_clone.py`, à 139 et 120 pièces posées, soit exactement les deux
+   profondeurs mesurées ensuite. Le solveur doit rendre SAT, **et le modèle est
+   re-vérifié pièce par pièce** par le script : une et une seule pièce par case,
+   une et une seule case par pièce, les quatre faces de chaque case contrôlées
+   contre leurs voisines et contre le cadre. Le banc **refuse de mesurer** si ce
+   contrôle échoue. C'est la garde la plus importante de l'instrument : un
+   encodage sur-contraint rend des UNSAT gratuits, et toute la campagne
+   mesurerait alors un bug plutôt qu'une instance.
+2. **Bras DFS.** `bench_refutation` sur le filtre demandé.
+3. **Bras CDCL.** La même racine, encodée puis soumise au solveur.
+4. **Bilan apparié** : ratios nœuds/conflits et temps/temps, médiane et bornes,
+   nombre de racines où le CDCL gagne d'un facteur 10, et — le second volet du
+   critère — nombre de racines **laissées ouvertes par le DFS** que le solveur
+   tranche.
+
+### L'appariement, et pourquoi il est exact
+
+Une racine est désignée par **(filtre de taille, rang)**. C'est la règle de
+sélection de `bench_refutation` lui-même : les paquets du `.back` sont lus dans
+l'**ordre du fichier**, ceux qui passent `--min-pieces`/`--max-pieces` sont
+retenus, et les `--max-roots` premiers joués sous les étiquettes `back#0`,
+`back#1`… `tools/root_to_cnf.py --min-placed/--max-placed/--rank` applique la
+même règle, donc le rang `k` du bras CDCL **est** la ligne `back#k` du bras DFS.
+Aucune agrégation sur deux populations différentes — le piège relevé au §4.13 de
+`elagage_recherche.md`.
+
+### `tools/root_to_cnf.py` seul
+
+L'encodeur s'emploie aussi hors du banc :
+
+```sh
+# contrôle positif
+python3 tools/root_to_cnf.py --self-test --solver /chemin/kissat
+
+# contrôle du décodage du stock : 32 480 paquets, adjacences, cadre, doublons
+python3 tools/root_to_cnf.py --check-back eternityII.back
+
+# une racine -> CNF, puis re-vérification d'un éventuel modèle
+python3 tools/root_to_cnf.py --back eternityII.back --placed 139 --rank 0 \
+        --out /tmp/r.cnf --map /tmp/r.map.json
+kissat /tmp/r.cnf > /tmp/r.log
+python3 tools/root_to_cnf.py --verify --map /tmp/r.map.json --model /tmp/r.log
+```
+
+Un **SAT sur une racine réelle** serait soit une **solution du puzzle**, soit un
+bug d'encodage : les deux instruments s'arrêtent, conservent le modèle et le
+passent au vérificateur plutôt que de poursuivre la mesure.
+
+L'encodage est celui de Heule (SAT 2008), compact : les pièces voisines ne sont
+jamais comparées deux à deux, l'appariement transite par une variable de couleur
+portée par l'arête. Une racine de 139 pièces donne ≈ 5,6·10⁴ variables et
+≈ 2,0·10⁵ clauses (3,0 Mo de DIMACS), produites en ≈ 0,65 s de Python pur — à
+comparer aux ≈ 0,7 ms que le DFS met à fermer la même racine. **Ce coût
+d'encodage compte dans la lecture** : il est à lui seul de trois ordres de
+grandeur au-dessus du bras qu'il sert à mesurer.
+
 ## Voir aussi
 
 - [tests/README.md](../tests/README.md) — organisation des suites, conventions, ajout d'un test.
 - [Compilation](compilation.md) — options de build et drapeaux de configuration.
 - `tests/bench/bench_search.sh` — banc de mesure du débit de recherche (voir ci-dessus).
 - `tools/gen_clone.py` — générateur de clones à solution connue (voir ci-dessus).
+- `tools/root_to_cnf.py` — encodeur DIMACS d'une racine, et son contrôle positif (voir ci-dessus).
