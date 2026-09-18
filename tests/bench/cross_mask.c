@@ -53,6 +53,34 @@ int cross_fill_complement(uint8_t *out)
     return n;
 }
 
+int cross_fill_halo(uint8_t *out, const int16_t grid[][ETERN_SIZE])
+{
+    static const int dx[4] = {1, -1, 0, 0};
+    static const int dy[4] = {0, 0, 1, -1};
+    int n = 0;
+
+    memset(out, 0, (size_t)ETERN_PARTS);
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            if (grid[x][y] != -2) {
+                continue; /* case posée : ce n'est pas elle qu'on veut ouvrir */
+            }
+            for (int d = 0; d < 4; d++) {
+                int nx = x + dx[d], ny = y + dy[d];
+                if (nx < 0 || ny < 0 || nx >= ETERN_SIZE || ny >= ETERN_SIZE) {
+                    continue; /* le bord de plateau contraint, mais n'est pas une pièce */
+                }
+                if (grid[nx][ny] != -2) {
+                    out[x * ETERN_SIZE + y] = 1;
+                    n++;
+                    break;
+                }
+            }
+        }
+    }
+    return n;
+}
+
 /** @brief xorshift64* — reproductible et indépendant de la libc. */
 static uint64_t cross_rand(uint64_t *state)
 {

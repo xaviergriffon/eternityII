@@ -289,6 +289,88 @@ TEST random_mask_clamps_its_count_and_accepts_the_degenerate_cases(void)
     PASS();
 }
 
+/* --------------------------------------------------------------------------
+ * Halo : le bras minimal (§8 du document de conception)
+ * ------------------------------------------------------------------------ */
+
+/** @brief Plateau vide sauf les cases données — la genèse, en miniature. */
+static void board_with(int16_t grid[ETERN_SIZE][ETERN_SIZE],
+                       const int cells[][2], int nb)
+{
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            grid[x][y] = -2;
+        }
+    }
+    for (int i = 0; i < nb; i++) {
+        grid[cells[i][0]][cells[i][1]] = 1; /* une pièce quelconque : seule la présence compte */
+    }
+}
+
+TEST halo_of_one_interior_piece_is_its_four_neighbours(void)
+{
+    int16_t grid[ETERN_SIZE][ETERN_SIZE];
+    uint8_t mask[ETERN_PARTS];
+    const int one[][2] = {{2, 2}};
+
+    board_with(grid, one, 1);
+    ASSERT_EQ_FMT(4, cross_fill_halo(mask, grid), "%d");
+    ASSERT_EQ_FMT(1, (int)mask[1 * ETERN_SIZE + 2], "%d");
+    ASSERT_EQ_FMT(1, (int)mask[3 * ETERN_SIZE + 2], "%d");
+    ASSERT_EQ_FMT(1, (int)mask[2 * ETERN_SIZE + 1], "%d");
+    ASSERT_EQ_FMT(1, (int)mask[2 * ETERN_SIZE + 3], "%d");
+    /* La case posée elle-même n'est PAS dans son halo. */
+    ASSERT_EQ_FMT(0, (int)mask[2 * ETERN_SIZE + 2], "%d");
+    PASS();
+}
+
+/* Un indice collé au bord : le bord de plateau contraint la case, mais il
+   n'est pas une pièce — le halo est plus petit, il ne déborde pas. */
+TEST halo_of_a_corner_piece_has_only_two_cells(void)
+{
+    int16_t grid[ETERN_SIZE][ETERN_SIZE];
+    uint8_t mask[ETERN_PARTS];
+    const int corner[][2] = {{0, 0}};
+
+    board_with(grid, corner, 1);
+    ASSERT_EQ_FMT(2, cross_fill_halo(mask, grid), "%d");
+    PASS();
+}
+
+#if ETERN_PARTS == 256
+/* La propriété qui fonde le bras « halo » : sur la genèse du vrai puzzle, il
+   fait 20 cases, et elles sont TOUTES sur la croix — compléter la croix
+   consomme donc bien toutes les contraintes d'indice, mais en 88 cases au lieu
+   de 20. */
+TEST halo_of_the_official_hints_is_twenty_cells_all_on_the_cross(void)
+{
+    int16_t grid[ETERN_SIZE][ETERN_SIZE];
+    uint8_t mask[ETERN_PARTS];
+    const int hints[][2] = {{7, 8}, {2, 2}, {13, 2}, {2, 13}, {13, 13}};
+
+    board_with(grid, hints, 5);
+    ASSERT_EQ_FMT(20, cross_fill_halo(mask, grid), "%d");
+    for (int x = 0; x < ETERN_SIZE; x++) {
+        for (int y = 0; y < ETERN_SIZE; y++) {
+            if (mask[x * ETERN_SIZE + y]) {
+                ASSERT(cross_cell_on(x, y));
+            }
+        }
+    }
+    PASS();
+}
+#endif // ETERN_PARTS == 256
+
+TEST halo_of_an_empty_board_is_empty(void)
+{
+    int16_t grid[ETERN_SIZE][ETERN_SIZE];
+    uint8_t mask[ETERN_PARTS];
+
+    board_with(grid, NULL, 0);
+    ASSERT_EQ_FMT(0, cross_fill_halo(mask, grid), "%d");
+    PASS();
+}
+
 SUITE(cross_mask_suite)
 {
     RUN_TEST(cross_membership_matches_an_independent_oracle);
@@ -305,4 +387,10 @@ SUITE(cross_mask_suite)
     RUN_TEST(random_mask_draws_exactly_the_requested_count);
     RUN_TEST(random_mask_is_reproducible_for_a_given_seed);
     RUN_TEST(random_mask_clamps_its_count_and_accepts_the_degenerate_cases);
+    RUN_TEST(halo_of_one_interior_piece_is_its_four_neighbours);
+    RUN_TEST(halo_of_a_corner_piece_has_only_two_cells);
+#if ETERN_PARTS == 256
+    RUN_TEST(halo_of_the_official_hints_is_twenty_cells_all_on_the_cross);
+#endif
+    RUN_TEST(halo_of_an_empty_board_is_empty);
 }

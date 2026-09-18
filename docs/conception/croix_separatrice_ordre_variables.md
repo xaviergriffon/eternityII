@@ -1,6 +1,6 @@
 # Croix séparatrice : un a priori structurel dans l'ordre des variables
 
-**Statut : campagne exécutée, résultat NÉGATIF — aucun changement de moteur adopté.** PR1 (outillage) livrée, PR2 (campagne) au §7, PR3 et PR4 sans objet. Aucune ligne de moteur en production, et il n'y en aura pas : la croix séparatrice ne vaut rien comme a priori d'ordre des variables. L'outillage, lui, reste — le second point d'entrée rend l'ordre des VARIABLES mesurable sur `bench_refutation`, ce qu'aucun instrument du dépôt ne savait faire. Le document tranche deux
+**Statut : deux campagnes exécutées, résultat NÉGATIF dans les deux régimes — aucun changement de moteur adopté.** PR1 (outillage) livrée, PR2 (réfutation) au §7, PR3 (« côté trouver ») au §7 bis, PR4 sans objet. Aucune ligne de moteur en production, et il n'y en aura pas : la croix séparatrice ne vaut rien comme a priori d'ordre des variables. L'outillage, lui, reste — le second point d'entrée rend l'ordre des VARIABLES mesurable sur `bench_refutation`, ce qu'aucun instrument du dépôt ne savait faire. Le document tranche deux
 choses avant tout code — la **géométrie** de la croix (normalisée, et démontrée
 séparatrice) et le **rejet de la variante à ordre imposé**, écartée sur quatre
 pré-mesures statiques reproductibles en moins d'une seconde, dans la méthode du
@@ -25,7 +25,7 @@ il ne ferme rien ici.
 |---|---|---|
 | 1 | **livrée** | `tests/bench/cross_mask.{h,c}` (croix en compréhension, complément, tirage de contrôle à densité imposée) + `tests/bench/test_cross_mask.c` rattaché à `make test` ; second point d'entrée `ETII_BENCH_CELL_HOOKS` dans `mrv_choose_cell`/`_fast` ; les six bras dans `bench_refutation` (`cross-key`/`rand-key`/`anti-key`, `cross-mrv`/`rand-mrv`/`anti-mrv`), `--cross-seed` ; auto-test des deux balayages par bras |
 | 2 | **exécutée** (§7) | 2 300 fermetures de sous-arbres sur stock de production. `cross-key` strictement neutre (113/119, p = 0,74 sur 232 racines réellement modifiées) ; `cross-mrv` ferme 94 racines sur 200 contre 199 ; le seul signal (`anti-mrv`) est dissous par son contrôle de densité. Un bras de contrôle ajouté en cours de route (`randc-*`, cf. §7.4) |
-| 3 | **sans objet** | Aucun bras ne passe le §6.5 (1-3) : rien à confirmer sur clones |
+| 3 | **exécutée** (§7 bis) | Campagne « côté trouver » sur clones — le régime que le §7 ne pouvait pas voir, et celui où la proposition se jouait vraiment. 540 exécutions, 2 cellules, 9 bras dont 4 contrôles. Bras `halo-*` ajouté (le halo des indices : 20 cases au lieu de 88 pour le même effet). Aucun bras ne gagne ; `halo-mrv` ne résout **aucune** des 60 instances |
 | 4 | **sans objet** | Rien à adopter |
 
 **Verrou de PR1 tenu** : `build/core/etii_search.o` compilé avant et après
@@ -555,6 +555,108 @@ rend désormais mesurable n'importe quel ordre de variables sur ce banc : c'est
 l'axe que le §7.7 de [banc_resolution_clones.md](banc_resolution_clones.md)
 listait comme non mesurable, et il ne l'est plus.
 
+## 7 bis. Mesures — campagne « côté trouver » (2026-09-18)
+
+### 7bis.1 Pourquoi une seconde campagne : le §7 mesurait le mauvais régime
+
+L'objectif d'origine de la proposition n'était pas la réfutation. Il était
+**d'atteindre les contraintes d'indice tôt** : la croix passe par les cinq
+indices, donc une fois faite, les pièces restantes n'ont plus de contrainte
+fixe à satisfaire. Le §7 ne pouvait pas en juger — il mesurait le coût de
+fermeture de sous-arbres MORTS, sur des racines de ≥ 130 pièces où les indices
+sont déjà rencontrés depuis longtemps.
+
+**La prémisse, elle, est vraie, et mesurée sur le stock de production**
+(32 480 possibilités ; les cinq indices sont posés dès la genèse par
+`first_possibility` — 0 absent — mais leurs contraintes ne portent que sur les
+20 cases voisines) :
+
+| Pièces posées | Possibilités | Indices rencontrés | 5/5 rencontrés | Halo rempli |
+|---|---|---|---|---|
+| 0-20 | 4 376 | 0,91 / 5 | **0 %** | 1,0 / 20 |
+| 41-60 | 1 335 | 2,75 / 5 | **0 %** | 7,0 / 20 |
+| 81-100 | 893 | 3,76 / 5 | **0 %** | 12,1 / 20 |
+| 121-140 | 9 082 | 4,15 / 5 | 14,7 % | 15,1 / 20 |
+| 161-180 | 988 | 4,57 / 5 | 57,1 % | 16,9 / 20 |
+
+**Aucune possibilité en dessous de 100 pièces posées n'a ses cinq indices
+rencontrés.** La production les rencontre donc bien très tard, exactement comme
+la proposition le soutenait.
+
+**Et le bras minimal de cette idée n'est pas la croix.** Les 20 cases du halo
+des indices sont toutes sur la croix (vérifié par test) : compléter la croix
+consomme toutes les contraintes d'indice — mais en 88 cases là où 20 suffisent.
+Le halo a en outre l'avantage d'être défini par l'INSTANCE et non par la
+géométrie, donc il se transpose sans la distorsion de densité du §4.4.
+
+### 7bis.2 Protocole
+
+`bench_solve` sur clones à solution connue, deux cellules « accessibles » du
+§6.4 de [banc_resolution_clones.md](banc_resolution_clones.md), 30 instances
+chacune, plafond 20 000 000 de nœuds (≈ 40× la médiane de production), ordre
+des valeurs tenu à `natural` pour ne faire varier qu'un axe. Neuf bras :
+production, croix et halo aux deux hauteurs, et **un contrôle aléatoire par
+densité et par hauteur** — la leçon du §7.4, appliquée cette fois d'avance.
+
+### 7bis.3 Hauteur « -key » : rien ne bat la production, sur les deux cellules
+
+| Bras | n10k14 résolus / moy. géo | apparié V/D | n12k22 résolus / moy. géo | apparié V/D |
+|---|---|---|---|---|
+| `natural` | 30/30 — 402 166 | — | 30/30 — 77 028 | — |
+| `cross-key` | 30/30 — 458 351 | 9/21 | 30/30 — 114 033 | 3/27 |
+| `halo-key` | 30/30 — 420 833 | 8/22 | 30/30 — 78 056 | 10/20 |
+| `randc-key` (contrôle) | 30/30 — 536 935 | 2/28 | 30/30 — 100 339 | 4/26 |
+| `randh-key` (contrôle) | 30/30 — 425 730 | 10/20 | 30/30 — 115 047 | 0/30 |
+
+Les quatre bras **perdent la comparaison appariée sur les deux cellules**, et
+les contrôles aléatoires sont dans la même fourchette que les bras géométriques.
+`halo-key` est le moins mauvais (+5 % et +1,3 % de moyenne géométrique) sans
+jamais gagner. Même verdict qu'au §7.2, dans un régime entièrement différent.
+
+### 7bis.4 Hauteur « -mrv » : le bras MINIMAL est le PIRE
+
+| Bras | n10k14 | n12k22 |
+|---|---|---|
+| `natural` | **30/30** | **30/30** |
+| `cross-mrv` | 15/30 | 2/30 |
+| `halo-mrv` | **0/30** | **0/30** |
+| `randc-mrv` (contrôle) | 0/30 | 0/30 |
+| `randh-mrv` (contrôle) | 0/30 | 0/30 |
+
+Le résultat qui tranche la question, et qui n'était pas prévu : **forcer les 20
+cases du halo est PIRE que forcer les 88 de la croix** — 0 instance résolue
+contre 15. Le bras le plus économique en apparence est le plus cher en pratique,
+et le mécanisme est exactement celui du §4.2 :
+
+> Un indice est une pièce **isolée**. Tant que la région n'est pas arrivée, ses
+> quatre voisines n'ont qu'**un seul côté contraint**, soit 47,4 candidats
+> contre 4,33 pour deux côtés. `halo-mrv` n'a QUE ces 20 cases dans son
+> ensemble de choix : il est obligé d'ouvrir une case mono-contrainte vingt fois
+> de suite. `cross-mrv` a 88 cases, dont les coins et les bandes qui se
+> contraignent mutuellement en avançant — il commence par les cases à deux côtés
+> contraints et ne touche au halo que lorsqu'il est devenu bon marché.
+
+Autrement dit, **le retard de la production à rencontrer les indices n'est pas
+un oubli : c'est le prix qu'elle refuse de payer.** MRV diffère le halo jusqu'à
+ce que la région arrivée le rende bi-contraint — et le tableau du §7bis.1 montre
+précisément ce report en action, le halo se remplissant de 1,0 à 16,9 cases à
+mesure que la région avance.
+
+### 7bis.5 Décision
+
+| Bras | Décision | Critère |
+|---|---|---|
+| `halo-key` | **Aucun changement.** | Perd l'apparié sur les deux cellules (8/22 et 10/20) sans jamais gagner |
+| `halo-mrv` | **Rejeté.** | 0 instance résolue sur 60, contre 60/60 pour la production |
+| `cross-key` / `cross-mrv` | Rejet du §7.6 **confirmé dans un second régime** | 9/21 et 3/27 ; 15/30 puis 2/30 |
+
+**La question du §7bis.1 est donc tranchée, et négativement : confronter les
+indices tôt ne fait pas trouver plus vite.** La prémisse était juste — la
+production les rencontre très tard — mais la conclusion qu'on en tirait ne
+l'est pas : les rencontrer tôt coûte plus cher que ce que leur élagage rapporte.
+Ce n'est plus une conjecture, c'est mesuré dans les deux régimes que le dépôt
+sait mesurer, avec des contrôles aléatoires appariés en densité dans les deux.
+
 ## 8. Points laissés ouverts
 
 - **Le séparateur ne se monnaye pas tout seul — et ce document ne prétend pas le
@@ -580,6 +682,13 @@ listait comme non mesurable, et il ne l'est plus.
 - **La transposition au 16×16** depuis les clones, à fraction de croix non
   constante (§4.4) — sans objet désormais, aucune campagne sur clones n'ayant
   eu lieu.
+- **CLOS par le §7 bis** : « et si l'objectif était de rencontrer les indices
+  tôt ? ». La prémisse est vraie et mesurée (aucune possibilité de production
+  sous 100 pièces n'a ses cinq indices rencontrés), la conclusion est fausse
+  (aucun bras ne gagne, et le bras minimal ne résout rien). Le mécanisme est
+  acquis : une case voisine d'un indice ISOLÉ est mono-contrainte, donc à 47,4
+  candidats — la production ne « rate » pas les indices, elle refuse de les
+  payer au prix fort et attend que la région les rende bon marché.
 - **Ouvert PAR la mesure : une restriction grossière de l'ensemble de choix de
   MRV réduit les nœuds de réfutation.** À la hauteur forte, un masque de 168
   cases sur 256 — la croix inversée comme un tirage aléatoire — divise la
@@ -598,7 +707,7 @@ listait comme non mesurable, et il ne l'est plus.
 |---|---|---|---|
 | 1 | **livrée** (cf. §0). Table de croix en compréhension + tests ; second point d'entrée (`ETII_BENCH_CELL_HOOKS`) ; les six bras dans `bench_refutation` ; seconde passe restreinte plutôt que second minimum sur `count` (§0) | moyen — le piège de la détection de case morte est silencieux | `etii_search.o` **octet pour octet identique** avec et sans le hook ✓ ; équivalence des deux balayages contrôlée **pour chaque bras** par l'auto-test du banc ✓ ; `make test` vert ✓ |
 | 2 | **exécutée, §7.** Campagne sur stock de production ; contrôle de densité ajouté en cours de route | mesure | quatre séries appariées, nœuds **et** temps, fermetures comptées, censure déclarée |
-| 3 | **sans objet** — aucun bras ne passe le §6.5 (1-3) | — | — |
+| 3 | **exécutée, §7 bis.** Campagne « côté trouver » sur clones ; bras `halo-*` et axe d'ordre des cases ajoutés à `bench_solve` | mesure | 9 bras sur 2 cellules, contrôles aléatoires appariés en densité ET en hauteur, auto-test de l'instrument adapté (un bras d'ordre des cases n'est pas tenu au même nombre de nœuds sur une racine morte — seule sa FERMETURE l'est) |
 | 4 | **sans objet** — rien à adopter | — | — |
 
 PR1 ne touche aucun chemin de production. PR2 **a** conclu négativement — c'était

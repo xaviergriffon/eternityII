@@ -146,6 +146,14 @@ recopiée, et `tests/bench/test_cross_mask.c` la contrôle par deux oracles
 distance de Manhattan à une diagonale (parcours explicite des cases diagonales,
 pas la formule), et les régions sont comptées par remplissage par diffusion.
 
+Le même fichier porte le **halo** — les cases vides voisines d'une case posée,
+qui sur le plateau de genèse sont exactement celles où une contrainte d'indice
+s'applique (20 cases pour les cinq indices du 16×16, toutes sur la croix : le
+test le vérifie). Il est dérivé du PLATEAU et non d'une liste de coordonnées, ce
+qui évite de dupliquer les indices et fait qu'un indice collé au bord donne
+naturellement un halo plus petit au lieu de déborder — ce que le test contrôle
+aussi, sur un indice en coin.
+
 Un cas dégénéré y est verrouillé plutôt qu'écarté : **en 4×4 la croix couvre le
 plateau entier**, donc zéro région. Le test l'affirme (au lieu de se sauter), et
 c'est ce qui interdit d'aller mesurer ces variantes en build 16 — le banc s'y

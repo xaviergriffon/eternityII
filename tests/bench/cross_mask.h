@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "core/core_static_variables.h"
+
 /**
  * @file cross_mask.h
  * @brief La croix séparatrice : cœur PUR, partagé par les bancs et par `make test`.
@@ -89,5 +91,30 @@ int cross_fill_complement(uint8_t *out);
  * @return      Nombre de cases levées.
  */
 int cross_fill_random(uint8_t *out, int count, uint64_t seed);
+
+/**
+ * @brief Remplit `out` avec le HALO d'un plateau : les cases VIDES ayant au
+ *        moins une voisine orthogonale posée.
+ *
+ * Appliqué au plateau de GENÈSE — vide hormis les indices de l'instance — il
+ * donne exactement les cases sur lesquelles une contrainte d'indice porte : 20
+ * cases pour les cinq indices du 16×16 officiel, toutes sur la croix.
+ *
+ * C'est le bras minimal de l'idée de croix. Si l'objectif est de consommer les
+ * contraintes d'indice tôt, le halo fait en 20 cases ce que la croix fait en
+ * 88 — et il est défini par l'INSTANCE (ses indices), pas par la géométrie du
+ * plateau, donc il se transpose sans distorsion d'une taille à l'autre, ce que
+ * la croix ne fait pas (cf. §4.4 du document de conception).
+ *
+ * Dérivé du plateau plutôt que des coordonnées des indices : aucune
+ * duplication de la liste d'indices, et un indice posé en bord de plateau (que
+ * `tools/gen_clone.py` ne produit pas, mais rien ne l'interdit) donne
+ * naturellement un halo plus petit au lieu de déborder.
+ *
+ * @param out  Tableau d'au moins `ETERN_PARTS` octets, indexé `x * ETERN_SIZE + y`.
+ * @param grid Grille du plateau ; `-2` marque une case vide (sentinelle du projet).
+ * @return     Nombre de cases du halo.
+ */
+int cross_fill_halo(uint8_t *out, const int16_t grid[][ETERN_SIZE]);
 
 #endif // eternityII_cross_mask_h

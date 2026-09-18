@@ -1044,6 +1044,44 @@ distribution, aucun mécanisme n'est implémenté.
 | `--budget <n>` | plafond de nœuds par exécution |
 | `--selftest-budget <n>` | plafond de l'auto-test de l'instrument (0 = désactivé) |
 
+### 2 bis. Axe « ordre des CASES » (variables)
+
+`--policies` ne sélectionne pas que des ordres de valeurs : huit bras d'ordre
+des **cases** y sont déclarés, tous à l'ordre de valeurs de production pour ne
+faire varier qu'un axe à la fois. Ils passent par le même hook
+`ETII_BENCH_CELL_HOOKS` que `bench_refutation`, et répondent à une question que
+le banc de réfutation ne peut pas poser : la recherche met plus de 100 pièces à
+**rencontrer** les indices, bien qu'ils soient posés dès la genèse — les
+rencontrer plus tôt fait-il TROUVER plus vite ?
+
+| Bras | Masque | Hauteur |
+|---|---|---|
+| `cross-key` / `cross-mrv` | la croix séparatrice (88 cases en 16×16) | sous / au-dessus de `count` |
+| `halo-key` / `halo-mrv` | le **halo des indices de l'instance** (20 cases) | idem |
+| `randc-*` / `randh-*` | contrôles aléatoires aux densités de la croix / du halo | idem |
+
+Le **halo** est dérivé du plateau de genèse — les cases vides voisines d'une
+case posée, c'est-à-dire exactement celles sur lesquelles une contrainte
+d'indice porte. Il est donc une propriété de l'INSTANCE, pas de la géométrie du
+plateau : contrairement à la croix, il se transpose d'une taille de clone à
+l'autre sans distorsion de densité.
+
+```sh
+make bench-solve CPPFLAGS=-DETERN_PARTS=100 \
+     BENCH_SOLVE_ARGS="--instance-dir data/clones --policies natural,halo-key,halo-mrv,randh-key,randh-mrv --budget 20000000"
+```
+
+**Ces huit bras ne sont pas joués par défaut** (`--policies` vaut les cinq
+ordres de valeurs), pour la même raison que dans `bench_refutation` : une
+invocation existante doit continuer de mesurer ce qu'elle mesurait.
+`--cross-seed <n>` ensemence les contrôles aléatoires.
+
+**Résultat de la campagne (2026-09-18) : négatif, aucun bras adopté.** Sur deux
+cellules × 30 instances, tous les bras perdent la comparaison appariée, et
+`halo-mrv` — le bras le plus économique en apparence — ne résout **aucune** des
+60 instances quand la production les résout toutes. Détail et mécanisme :
+§7 bis de [croix_separatrice_ordre_variables.md](conception/croix_separatrice_ordre_variables.md).
+
 ### 3. L'auto-test de l'instrument, en deux contrôles
 
 **(a) Les permutations en sont-elles ?** Pour chaque case vide de la racine, le

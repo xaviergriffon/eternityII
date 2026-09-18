@@ -59,6 +59,7 @@
 #include "app/etii_client.h"
 
 #include "bench_solve_stats.h"
+#include "cross_mask.h"
 
 #define MAX_INSTANCES 64
 #define MAX_SEEDS     16
@@ -98,19 +99,62 @@ typedef enum {
     ROOT_BORDER,
 } root_policy_t;
 
+/**
+ * @brief Ordre des CASES (variables), via le hook `ETII_BENCH_CELL_HOOKS`.
+ *
+ * Axe distinct de l'ordre des valeurs, et le seul qui puisse répondre à la
+ * question du §8 du document de conception : la recherche met plus de 100
+ * pièces à RENCONTRER les indices (mesuré sur stock de production), alors
+ * qu'ils sont posés dès la genèse. Les confronter tôt aide-t-il à TROUVER ?
+ *
+ * `bench_refutation` ne pouvait pas y répondre : il mesure le coût de fermeture
+ * d'un sous-arbre MORT, à des profondeurs (≥ 130 pièces) où les indices sont
+ * déjà rencontrés. Ce banc-ci part de la genèse, c'est-à-dire du régime où la
+ * question se pose.
+ *
+ * Deux géométries, deux hauteurs de clé, et un contrôle aléatoire PAR DENSITÉ
+ * (leçon du §7.4 : un contrôle ne vaut qu'à la densité du bras qu'il contrôle).
+ */
+typedef enum {
+    CO_NONE = 0,        /**< L'ordre de production. */
+    CO_CROSS_KEY,       /**< Croix, sous `count` : départage à score MRV égal. */
+    CO_CROSS_FIRST,     /**< Croix, au-dessus de `count`. */
+    CO_HALO_KEY,        /**< Halo des indices (20 cases au 16×16), sous `count`. */
+    CO_HALO_FIRST,      /**< Halo, au-dessus de `count` — le bras minimal. */
+    CO_RANDC_KEY,       /**< Contrôle : tirage à la densité de la CROIX. */
+    CO_RANDC_FIRST,
+    CO_RANDH_KEY,       /**< Contrôle : tirage à la densité du HALO. */
+    CO_RANDH_FIRST,
+} cell_order_t;
+
 typedef struct {
     const char *name;
     value_order_t value_order;
+    cell_order_t  cell_order;
 } policy_t;
 
 static const policy_t ALL_POLICIES[] = {
-    { "natural", VO_NATURAL },
-    { "reverse", VO_REVERSE },
-    { "random",  VO_RANDOM  },
-    { "lcv",     VO_LCV     },
-    { "mcv",     VO_MCV     },
+    /* Axe « ordre des valeurs » — campagne PR5, close (résultat négatif). */
+    { "natural", VO_NATURAL, CO_NONE },
+    { "reverse", VO_REVERSE, CO_NONE },
+    { "random",  VO_RANDOM,  CO_NONE },
+    { "lcv",     VO_LCV,     CO_NONE },
+    { "mcv",     VO_MCV,     CO_NONE },
+    /* Axe « ordre des cases » — toutes à l'ordre de valeurs de PRODUCTION, pour
+     * que la comparaison ne porte que sur un axe à la fois. */
+    { "cross-key",  VO_NATURAL, CO_CROSS_KEY   },
+    { "cross-mrv",  VO_NATURAL, CO_CROSS_FIRST },
+    { "halo-key",   VO_NATURAL, CO_HALO_KEY    },
+    { "halo-mrv",   VO_NATURAL, CO_HALO_FIRST  },
+    { "randc-key",  VO_NATURAL, CO_RANDC_KEY   },
+    { "randc-mrv",  VO_NATURAL, CO_RANDC_FIRST },
+    { "randh-key",  VO_NATURAL, CO_RANDH_KEY   },
+    { "randh-mrv",  VO_NATURAL, CO_RANDH_FIRST },
 };
 #define NB_ALL_POLICIES ((int)(sizeof(ALL_POLICIES) / sizeof(ALL_POLICIES[0])))
+/** @brief Politiques jouées quand `--policies` n'est pas donné : les cinq
+ *  ordres de VALEURS, soit les cinq premières entrées d'`ALL_POLICIES`. */
+#define NB_DEFAULT_POLICIES 5
 
 static const struct { const char *name; root_policy_t root; } ALL_ROOTS[] = {
     { "genesis", ROOT_GENESIS },
@@ -124,6 +168,55 @@ static const struct { const char *name; root_policy_t root; } ALL_ROOTS[] = {
  * ========================================================================== */
 
 static value_order_t g_value_order = VO_NATURAL;
+
+/* Masques d'ordre des cases, reconstruits À CHAQUE INSTANCE : la croix est
+ * géométrique mais le halo est une propriété de l'INSTANCE (ses indices), et
+ * chaque clone a les siens. */
+static uint8_t g_cm_cross[ETERN_PARTS];
+static uint8_t g_cm_halo[ETERN_PARTS];
+static uint8_t g_cm_randc[ETERN_PARTS];
+static uint8_t g_cm_randh[ETERN_PARTS];
+static int     g_cm_cross_n = 0;
+static int     g_cm_halo_n = 0;
+
+/**
+ * @brief (Re)construit les quatre masques d'ordre des cases pour une instance.
+ *
+ * Le halo est dérivé du plateau de GENÈSE — les cases vides voisines d'une
+ * case posée, c'est-à-dire exactement celles sur lesquelles une contrainte
+ * d'indice porte. Les deux tirages de contrôle partent de graines décalées :
+ * issus de la même, l'un serait un préfixe de l'autre et deux contrôles
+ * corrélés ne font qu'un seul contrôle (§7.4).
+ */
+static void bench_cell_masks_bind(const struct possibility_packet *genesis, uint64_t seed)
+{
+    g_cm_cross_n = cross_fill(g_cm_cross);
+    g_cm_halo_n  = cross_fill_halo(g_cm_halo, genesis->grid);
+    cross_fill_random(g_cm_randc, g_cm_cross_n, seed);
+    cross_fill_random(g_cm_randh, g_cm_halo_n, seed ^ 0x9E3779B97F4A7C15ULL);
+}
+
+/** @brief Arme le hook d'ordre des cases (CO_NONE le désarme). */
+static void bench_arm_cell_order(cell_order_t co)
+{
+    const uint8_t *m = NULL;
+    int first = 0;
+
+    switch (co) {
+        case CO_CROSS_KEY:   m = g_cm_cross; break;
+        case CO_CROSS_FIRST: m = g_cm_cross; first = 1; break;
+        case CO_HALO_KEY:    m = g_cm_halo;  break;
+        case CO_HALO_FIRST:  m = g_cm_halo;  first = 1; break;
+        case CO_RANDC_KEY:   m = g_cm_randc; break;
+        case CO_RANDC_FIRST: m = g_cm_randc; first = 1; break;
+        case CO_RANDH_KEY:   m = g_cm_randh; break;
+        case CO_RANDH_FIRST: m = g_cm_randh; first = 1; break;
+        case CO_NONE:        break;
+    }
+    etii_bench_cell_bias  = (m != NULL && !first) ? m : etii_bench_no_bias;
+    etii_bench_cell_first = (m != NULL &&  first) ? m : NULL;
+}
+
 static uint64_t      g_rng_state   = 1;
 static uint16_t     *g_order_buf   = NULL;   /* [ETERN_PARTS][g_order_stride] */
 static int           g_order_stride = 0;
@@ -592,6 +685,7 @@ static int bench_selftest(const policy_t *policies, int nb_policies,
 
     stop_on_solution = 0;   /* le sous-arbre doit être fermé, pas interrompu */
     g_value_order = policies[0].value_order;
+    bench_arm_cell_order(policies[0].cell_order);
     for (int r = 0; r < nb_roots && closed_root < 0; r++) {
         struct possibility_packet work = roots[r];
         unsigned long long nodes = 0;
@@ -608,14 +702,17 @@ static int bench_selftest(const policy_t *policies, int nb_policies,
      * rencontre le plus de solutions à journaliser. */
     int coupled = 0;
     int disagreements[NB_ALL_POLICIES];
+    int inconclusive[NB_ALL_POLICIES];
     unsigned long long counts[NB_ALL_POLICIES];
     bt_core_result_t statuses[NB_ALL_POLICIES];
     memset(disagreements, 0, sizeof(disagreements));
+    memset(inconclusive, 0, sizeof(inconclusive));
     memset(counts, 0, sizeof(counts));
     memset(statuses, 0, sizeof(statuses));
     if (closed_root >= 0) {
         for (int p = 1; p < nb_policies; p++) {
             g_value_order = policies[p].value_order;
+            bench_arm_cell_order(policies[p].cell_order);
             g_rng_state = 0x9E3779B97F4A7C15ULL;
             struct possibility_packet work = roots[closed_root];
             unsigned long long nodes = 0;
@@ -624,7 +721,31 @@ static int bench_selftest(const policy_t *policies, int nb_policies,
             statuses[p] = search_packet_backtracking_mrv(client, &work, idParts,
                                                          budget * 4, 0, &nodes);
             counts[p] = nodes;
-            if (statuses[p] != BT_CORE_EXHAUSTED || nodes != reference) {
+            /* Deux invariants de FORCE DIFFÉRENTE, et les confondre rendrait
+             * l'auto-test inutilisable dès qu'un bras d'ordre des CASES entre
+             * dans la comparaison :
+             *
+             *  - une racine MORTE reste morte sous tout bras (ordre, pas
+             *    correction) — invariant dur, vrai pour tous ;
+             *  - elle coûte le MÊME nombre de nœuds — vrai seulement à ordre
+             *    des CASES égal. Un bras qui change l'ordre des variables
+             *    change l'arbre exploré : y voir un « couplage » serait un
+             *    faux positif, et c'est tout l'objet de la mesure. */
+            const int same_cells = (policies[p].cell_order == policies[0].cell_order);
+            if (statuses[p] != BT_CORE_EXHAUSTED) {
+                /* Ne pas fermer dans le budget de l'auto-test n'est une ANOMALIE
+                 * que si le bras explore le MÊME arbre. Un bras d'ordre des
+                 * cases en explore un autre, et il peut légitimement y être
+                 * beaucoup plus cher — la campagne de réfutation en a mesuré un
+                 * à 27× la référence. L'exiger sous 4× ferait crier au couplage
+                 * à chaque exécution, c'est-à-dire rendrait l'auto-test inutile. */
+                if (same_cells) {
+                    disagreements[p] = 1;
+                    coupled = 1;
+                } else {
+                    inconclusive[p] = 1;
+                }
+            } else if (same_cells && nodes != reference) {
                 disagreements[p] = 1;
                 coupled = 1;
             }
@@ -634,6 +755,7 @@ static int bench_selftest(const policy_t *policies, int nb_policies,
     /* Fin de la parenthèse : on rétablit AVANT toute écriture destinée à
      * l'utilisateur, et avant de rendre la main. */
     g_value_order = saved_order;
+    bench_arm_cell_order(CO_NONE);
     fflush(stdout);
     dup2(saved_stdout, STDOUT_FILENO);
     close(saved_stdout);
@@ -657,14 +779,36 @@ static int bench_selftest(const policy_t *policies, int nb_policies,
         }
         printf("Les permutations ayant déjà été validées une par une, cela veut dire que\n"
                "ce moteur lie l'ordre des VARIABLES à l'ordre des VALEURS (départage de\n"
-               "cases appris, p.ex.). Ce n'est pas un bogue, mais deux lectures tombent :\n"
+               "cases appris, p.ex.), OU qu'un bras a cessé de fermer une racine morte.\n"
+               "Ce n'est pas un bogue, mais deux lectures tombent :\n"
                "  - « l'ordre des valeurs est neutre pour la réfutation » (§7.2) ;\n"
-               "  - la comparaison de politiques mesure ici DEUX effets à la fois.\n\n");
+               "  - la comparaison de politiques mesure ici DEUX effets à la fois.\n"
+               "(Les bras d'ordre des CASES ne sont PAS tenus au même nombre de nœuds :\n"
+               " ils changent l'arbre par construction. Seule leur FERMETURE est exigée.)\n\n");
         return 0;
     }
+    int nb_same_cells = 0, nb_other = 0, nb_inconclusive = 0;
+    for (int p = 0; p < nb_policies; p++) {
+        if (policies[p].cell_order == policies[0].cell_order) {
+            nb_same_cells++;
+        } else if (inconclusive[p]) {
+            nb_inconclusive++;
+        } else {
+            nb_other++;
+        }
+    }
     printf("auto-test : racine morte #%d fermée en %llu nœuds, identique pour les"
-           " %d politiques — l'ordre des valeurs n'influe pas sur l'arbre mort\n\n",
-           closed_root, reference, nb_policies);
+           " %d politique(s) de MÊME ordre de cases", closed_root, reference, nb_same_cells);
+    if (nb_other > 0) {
+        printf(" ; fermée aussi par %d bras d'ordre de cases, en un nombre de nœuds"
+               " différent — attendu, ils changent l'arbre", nb_other);
+    }
+    if (nb_inconclusive > 0) {
+        printf(" ; %d bras n'ont pas fermé sous %ld nœuds — NON CONCLUANT pour eux,"
+               " pas une anomalie (--selftest-budget plus grand pour trancher)",
+               nb_inconclusive, budget * 4);
+    }
+    printf("\n\n");
     return 0;
 }
 
@@ -722,6 +866,7 @@ static void bench_child_report(void)
 
 typedef struct {
     value_order_t value_order;
+    cell_order_t  cell_order;
     root_policy_t root_policy;
     uint64_t      seed;
     long          budget;
@@ -760,6 +905,7 @@ static void run_child(const run_config_t *cfg,
     /* g_map/g_rot/g_order_buf sont déjà en place : bench_hook_bind les a posés
      * dans le parent, le fils en hérite par copie sur écriture. */
     g_value_order = cfg->value_order;
+    bench_arm_cell_order(cfg->cell_order);
     g_rng_state = cfg->seed != 0 ? cfg->seed : 0x9E3779B97F4A7C15ULL;
 
     client_possibility_t client;
@@ -1005,8 +1151,15 @@ static void usage(void)
            "  --instance-dir <d>  toutes les instances pieces_*.csv d'un répertoire,\n"
            "                      appariées avec indices_*.csv de même suffixe\n"
            "  --budget <n>        plafond de nœuds par exécution (défaut 50000000)\n"
-           "  --policies <liste>  ordres de valeurs parmi natural,reverse,random,lcv,mcv\n"
-           "                      (défaut : tous ; le PREMIER sert de référence appariée)\n"
+           "  --policies <liste>  politiques comparées (défaut : les cinq ordres de VALEURS ;\n"
+           "                      le PREMIER sert de référence appariée)\n"
+           "                      ordres de VALEURS : natural,reverse,random,lcv,mcv\n"
+           "                      ordres de CASES (tous à l'ordre de valeurs de production) :\n"
+           "                        cross-key,cross-mrv : la croix séparatrice (88 cases en 16x16)\n"
+           "                        halo-key,halo-mrv   : le halo des indices de l'instance (20)\n"
+           "                        randc-*,randh-*     : contrôles aléatoires aux MÊMES densités\n"
+           "                      -key = départage à score MRV égal ; -mrv = avant toutes les autres\n"
+           "  --cross-seed <n>    graine des contrôles aléatoires d'ordre des cases (défaut 1)\n"
            "  --root <nom>        point de départ parmi genesis,center,border (défaut genesis)\n"
            "  --seeds <n>         graines par instance pour les politiques aléatoires (défaut 1)\n"
            "  --workdir <d>       répertoire de travail des fils (défaut : un mkdtemp)\n"
@@ -1077,11 +1230,19 @@ int main(int argc, char **argv)
     long selftest_budget = 200000;
     const char *workdir = NULL;
     root_policy_t root_policy = ROOT_GENESIS;
+    uint64_t cross_seed = 1;
     const char *root_name = "genesis";
 
     policy_t policies[NB_ALL_POLICIES];
-    int nb_policies = NB_ALL_POLICIES;
-    memcpy(policies, ALL_POLICIES, sizeof(ALL_POLICIES));
+    /* Défaut : les NB_DEFAULT_POLICIES premières entrées, c'est-à-dire les cinq
+     * ordres de VALEURS. Les bras d'ordre des CASES sont déclarés mais se
+     * demandent par `--policies` : une invocation existante de ce banc doit
+     * continuer de mesurer exactement ce qu'elle mesurait, et comparer treize
+     * politiques coûte plus du double. L'ORDRE des entrées est donc
+     * significatif (même discipline que NB_DEFAULT_ENGINES dans
+     * tests/bench/bench_refutation.c). */
+    int nb_policies = NB_DEFAULT_POLICIES;
+    memcpy(policies, ALL_POLICIES, NB_DEFAULT_POLICIES * sizeof(ALL_POLICIES[0]));
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--pieces") == 0 && i + 1 < argc) {
@@ -1109,6 +1270,8 @@ int main(int argc, char **argv)
             selftest_budget = atol(argv[++i]);
         } else if (strcmp(argv[i], "--workdir") == 0 && i + 1 < argc) {
             workdir = argv[++i];
+        } else if (strcmp(argv[i], "--cross-seed") == 0 && i + 1 < argc) {
+            cross_seed = strtoull(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) {
             root_name = argv[++i];
             int found = 0;
@@ -1233,6 +1396,7 @@ int main(int argc, char **argv)
         }
 
         bench_hook_bind(map, rot);
+        bench_cell_masks_bind(&genesis, cross_seed);
 
         if (selftest_budget > 0 && nb_policies > 1) {
             client_possibility_t probe;
@@ -1271,6 +1435,7 @@ int main(int argc, char **argv)
                 if (s == 0 || policies[p].value_order == VO_RANDOM) {
                     run_config_t cfg;
                     cfg.value_order = policies[p].value_order;
+                    cfg.cell_order = policies[p].cell_order;
                     cfg.root_policy = root_policy;
                     cfg.seed = (uint64_t)(s + 1) * 0x9E3779B97F4A7C15ULL + (uint64_t)inst_i;
                     cfg.budget = budget;
