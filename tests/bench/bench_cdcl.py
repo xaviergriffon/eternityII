@@ -118,6 +118,7 @@ def main(argv=None):
     print(f"solveur : {solver}")
     if not args.skip_self_test:
         print("\n--- contrôle positif (obligatoire) ---")
+        sys.stdout.flush()   # sinon la sortie du sous-processus passe devant
         rc = subprocess.run([sys.executable, ENC, "--self-test", "--solver", solver],
                             cwd=REPO).returncode
         if rc != 0:
@@ -126,6 +127,7 @@ def main(argv=None):
             return 1
 
     print(f"\n--- DFS du dépôt (bench_refutation, plafond {args.budget} nœuds) ---")
+    sys.stdout.flush()
     dfs = run_dfs(args.back, args.min_pieces, args.max_pieces, args.roots, args.budget)
     if not dfs:
         print("bench-cdcl : aucune racine retenue par le filtre.", file=sys.stderr)
@@ -187,7 +189,11 @@ def main(argv=None):
           f"{len(dfs_open_sat_closed)}")
     if both:
         ratio_n = [d["nodes"] / max(c, 1) for d, c, _ in both]
-        ratio_t = [d["seconds"] / max(s, 1e-6) for d, _, s in both]
+        # `bench_refutation` arrondit son temps à la milliseconde : sur les racines
+        # fermées en quelques dizaines de nœuds il affiche 0.000 s. Un plancher à
+        # 0,5 ms (la moitié du quantum) évite un ratio nul qui se lirait « le DFS
+        # met zéro seconde » alors qu'il met « moins d'une milliseconde ».
+        ratio_t = [max(d["seconds"], 0.0005) / max(s, 1e-6) for d, _, s in both]
         print(f"nœuds DFS / conflits CDCL — médiane {statistics.median(ratio_n):.1f}, "
               f"min {min(ratio_n):.1f}, max {max(ratio_n):.1f}")
         print(f"temps DFS / temps CDCL    — médiane {statistics.median(ratio_t):.4f}, "
