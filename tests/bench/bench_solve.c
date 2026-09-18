@@ -1312,6 +1312,17 @@ int main(int argc, char **argv)
             perror("mkdtemp");
             return EXIT_FAILURE;
         }
+    } else if (access(workdir, X_OK | W_OK) != 0) {
+        /* Un `--workdir` inexistant ou non traversable faisait échouer le
+         * `chdir` de CHAQUE fils, qui sortait alors sans avoir rien exécuté :
+         * le banc affichait 30 lignes « ÉCHEC / 0 nœud / 0,000 s » sans le
+         * moindre diagnostic, et la campagne entière ressemblait à un moteur
+         * qui ne résout plus rien. Le chemin est donc éprouvé UNE fois, dans le
+         * parent, avant le premier fork. */
+        fprintf(stderr, "--workdir %s : répertoire inutilisable (%s). Les fils ne"
+                " pourraient pas s'y placer et n'exécuteraient rien.\n",
+                workdir, strerror(errno));
+        return EXIT_FAILURE;
     }
 
     counters = calloc(1, sizeof(*counters));
