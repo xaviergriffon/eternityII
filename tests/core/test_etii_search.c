@@ -1448,11 +1448,15 @@ TEST mrv_choose_cell_breaks_ties_by_constrained_sides(void)
 }
 
 
-/* §4.14 — départage appris. À score MRV ET nconstr égaux, la case au poids
- * d'échec le plus ÉLEVÉ gagne ; sans poids, l'ordre d'énumération tranche
- * comme avant. Le sens est mesuré (poids élevé d'abord : −83 % de nœuds de
- * réfutation ; poids faible d'abord : +210 %) — l'inverser fait tomber ce
- * test. Fixture : deux cases vides (0,0) et (0,1), même compartiment, même
+/* §4.14, promu en §4.16 — poids d'échec appris en critère PRINCIPAL (dom/wdeg).
+ * Le poids ne départage plus les égalités : il DIVISE le score MRV
+ * (`count << mrv_wdeg_shl(weight)`), donc la case au poids le plus ÉLEVÉ passe
+ * devant, y compris devant une case à `nconstr` supérieur — c'est exactement
+ * l'inverse de la hiérarchie de §4.14, et c'est ce que ce test verrouille.
+ * Le sens est mesuré (poids faible d'abord : +210 %, §4.14 ; poids en critère
+ * principal : −96 % de nœuds de réfutation et 124 → 287 fermetures sur les
+ * racines peu profondes, §4.16) — l'inverser fait tomber ce test.
+ * Fixture : deux cases vides (0,0) et (0,1), même compartiment, même
  * nconstr (3). */
 TEST mrv_choose_cell_breaks_remaining_ties_by_failure_weight(void)
 {
@@ -1485,40 +1489,78 @@ TEST mrv_choose_cell_breaks_remaining_ties_by_failure_weight(void)
     ASSERT_EQ_FMT(0, (int)x, "%d");
     ASSERT_EQ_FMT(0, (int)y, "%d");
 
-    /* Un échec imputé à (0,1) : elle passe devant. */
+    /* Un échec imputé à (0,1) : son score est divisé par deux, elle passe devant. */
     bt_frontier_fail(&f, BT_CELL_POS(0, 1));
     ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, cell_mask, &x, &y, &count), "%d");
     ASSERT_EQ_FMT(0, (int)x, "%d");
     ASSERT_EQ_FMT(1, (int)y, "%d");
-    ASSERT_EQ_FMT(2, count, "%d"); /* le score MRV reste le nombre de candidats */
+    ASSERT_EQ_FMT(2, count, "%d"); /* `min_candidats` reste le NOMBRE de candidats,
+                                      jamais le score pénalisé */
 
-    /* Contre-contrôle : deux échecs sur (0,0) la ramènent devant. */
-    bt_frontier_fail(&f, BT_CELL_POS(0, 0));
-    bt_frontier_fail(&f, BT_CELL_POS(0, 0));
+    /* Contre-contrôle : assez d'échecs sur (0,0) pour la ramener STRICTEMENT
+     * devant (3 échecs -> décalage 2 contre 3, donc score 8 contre 16). */
+    for (int i = 0; i < 3; i++) bt_frontier_fail(&f, BT_CELL_POS(0, 0));
+    ASSERT(f.wshl[BT_CELL_POS(0, 0)] < f.wshl[BT_CELL_POS(0, 1)]);
     ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &f, cell_mask, &x, &y, &count), "%d");
     ASSERT_EQ_FMT(0, (int)x, "%d");
     ASSERT_EQ_FMT(0, (int)y, "%d");
 
-    /* Le poids ne prime JAMAIS sur nconstr : (0,1) contrainte d'un côté de plus
-     * (case (1,1) vidée puis... non : on rend (0,0) MOINS contrainte en vidant
-     * (1,0)) reprend la main malgré le poids de (0,0). */
+    /* §4.16 — LE POIDS PRIME SUR `nconstr`, et c'est le renversement mesuré.
+     * (0,0) est rendue MOINS contrainte que (0,1) (on vide (1,0)) : sous la
+     * hiérarchie de §4.14, (0,1) reprenait la main quel que soit le poids.
+     * Désormais un poids suffisant sur (0,0) la fait passer devant. */
     board.grid[1][0] = -2;
     bt_init_constraints(C, &board, make_filler_part(), all_face);
     fill_mask_cache(cell_mask, map, C);
     bt_frontier g;
     bt_frontier_init(&g, &board);
     ASSERT(g.nconstr[BT_CELL_POS(0, 0)] < g.nconstr[BT_CELL_POS(0, 1)]);
-    for (int i = 0; i < 10; i++) bt_frontier_fail(&g, BT_CELL_POS(0, 0));
+    /* Sans poids, c'est bien `nconstr` qui tranche : (0,1) d'abord. */
     ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &g, cell_mask, &x, &y, &count), "%d");
     ASSERT_EQ_FMT(0, (int)x, "%d");
     ASSERT_EQ_FMT(1, (int)y, "%d");
+    for (int i = 0; i < 10; i++) bt_frontier_fail(&g, BT_CELL_POS(0, 0));
+    ASSERT_EQ_FMT(1, mrv_choose_cell(&board, C, map, used, &g, cell_mask, &x, &y, &count), "%d");
+    ASSERT_EQ_FMT(0, (int)x, "%d");
+    ASSERT_EQ_FMT(0, (int)y, "%d");
 
     PASS();
 }
 
+/* §4.16 — la table de pénalité elle-même : décalage MAXIMAL à poids nul, un
+ * décalage de moins à chaque DOUBLEMENT du poids, plancher à zéro. C'est ce qui
+ * rend la pénalité bornée (×2^MRV_WDEG_SHIFT au plus) : une case très
+ * lourdement pénalisée ne peut jamais passer devant une case MORTE, dont le
+ * score reste nul — l'invariant dont dépend la détection de sous-arbre mort du
+ * balayage rapide (`(best >> MRV_KEY_LOW_BITS) == 0`). */
+TEST mrv_wdeg_shl_halves_the_score_at_every_weight_doubling(void)
+{
+    ASSERT_EQ_FMT(MRV_WDEG_SHIFT, (int)mrv_wdeg_shl(0), "%d");
+    for (int w = 0; w < 256; w++) {
+        int shl = (int)mrv_wdeg_shl(w);
+        ASSERT(shl >= 0 && shl <= MRV_WDEG_SHIFT);
+        if (w > 0) {
+            ASSERT(shl <= (int)mrv_wdeg_shl(w - 1)); /* monotone décroissant */
+        }
+        /* Un score non nul le reste : la case morte garde le monopole du zéro. */
+        ASSERT((1 << shl) >= 1);
+        ASSERT_EQ_FMT(0, 0 << shl, "%d");
+    }
+    /* Doublements successifs : 0 -> SHIFT, 1 -> SHIFT-1, 3 -> SHIFT-2, ... */
+    for (int k = 0; k <= MRV_WDEG_SHIFT; k++) {
+        int w = (1 << k) - 1;
+        ASSERT_EQ_FMT(MRV_WDEG_SHIFT - k, (int)mrv_wdeg_shl(w), "%d");
+    }
+    ASSERT_EQ_FMT(0, (int)mrv_wdeg_shl(255), "%d"); /* plancher */
+    /* Le score maximal tient dans le champ annoncé. */
+    ASSERT(((ETERN_PARTS << MRV_WDEG_SHIFT)) == MRV_WDEG_MAX_SCORE);
+    PASS();
+}
+
 /* bt_frontier_fail : compteur saturant. À 255, TOUS les poids sont divisés par
- * deux (ordre relatif conservé) et nc_key reste cohérent avec (nconstr, poids)
- * pour toutes les cases — nc_key est la seule chose que lit le chemin rapide. */
+ * deux (ordre relatif conservé) et `wshl` reste cohérent avec le poids pour
+ * toutes les cases — depuis §4.16 c'est `wshl`, et non plus `nc_key`, que le
+ * chemin rapide lit pour la pénalité. */
 TEST bt_frontier_fail_halves_all_weights_at_saturation(void)
 {
     struct possibility_packet board;
@@ -1531,14 +1573,15 @@ TEST bt_frontier_fail_halves_all_weights_at_saturation(void)
     for (int i = 0; i < 254; i++) bt_frontier_fail(&f, b);
     ASSERT_EQ_FMT(100, (int)f.weight[a], "%d");
     ASSERT_EQ_FMT(254, (int)f.weight[b], "%d");
-    ASSERT(f.nc_key[b] < f.nc_key[a]); /* poids élevé = clé plus petite = choisi d'abord */
+    ASSERT(f.wshl[b] <= f.wshl[a]); /* poids élevé = score plus pénalisé = choisi d'abord */
 
     bt_frontier_fail(&f, b); /* 255 : halving global */
     ASSERT_EQ_FMT(50, (int)f.weight[a], "%d");
     ASSERT_EQ_FMT(127, (int)f.weight[b], "%d");
-    ASSERT(f.nc_key[b] < f.nc_key[a]);
+    ASSERT(f.wshl[b] <= f.wshl[a]);
     for (int pos = 0; pos < BT_CELLS; pos++) {
-        ASSERT_EQ_FMT((unsigned long)bt_nc_key(pos, f.nconstr[pos], f.weight[pos]),
+        ASSERT_EQ_FMT((int)mrv_wdeg_shl(f.weight[pos]), (int)f.wshl[pos], "%d");
+        ASSERT_EQ_FMT((unsigned long)bt_nc_key(pos, f.nconstr[pos]),
                       (unsigned long)f.nc_key[pos], "%lu");
     }
     PASS();
@@ -1574,7 +1617,10 @@ TEST bt_forward_check_failure_bumps_dead_and_placed_cells(void)
     ASSERT_EQ_FMT(1, (int)f.weight[BT_CELL_POS(1, 0)], "%d"); /* voisine morte */
     ASSERT_EQ_FMT(1, (int)f.weight[BT_CELL_POS(0, 0)], "%d"); /* case posée */
     ASSERT_EQ_FMT(0, (int)f.weight[BT_CELL_POS(0, 1)], "%d"); /* jamais inspectée */
-    ASSERT_EQ_FMT((unsigned long)bt_nc_key(BT_CELL_POS(1, 0), f.nconstr[BT_CELL_POS(1, 0)], 1),
+    /* `nc_key` ne porte plus le poids depuis §4.16 : c'est `wshl` qui l'encode. */
+    ASSERT_EQ_FMT((int)mrv_wdeg_shl(1), (int)f.wshl[BT_CELL_POS(1, 0)], "%d");
+    ASSERT_EQ_FMT((int)mrv_wdeg_shl(1), (int)f.wshl[BT_CELL_POS(0, 0)], "%d");
+    ASSERT_EQ_FMT((unsigned long)bt_nc_key(BT_CELL_POS(1, 0), f.nconstr[BT_CELL_POS(1, 0)]),
                   (unsigned long)f.nc_key[BT_CELL_POS(1, 0)], "%lu");
 
     PASS();
@@ -4271,6 +4317,7 @@ SUITE(etii_search_suite)
     RUN_TEST(mrv_choose_cell_matches_full_scan_reference);
     RUN_TEST(mrv_choose_cell_breaks_ties_by_constrained_sides);
     RUN_TEST(mrv_choose_cell_breaks_remaining_ties_by_failure_weight);
+    RUN_TEST(mrv_wdeg_shl_halves_the_score_at_every_weight_doubling);
     RUN_TEST(bt_frontier_fail_halves_all_weights_at_saturation);
     RUN_TEST(mrv_choose_cell_fast_matches_generic_with_failure_weights);
 #if FORWARD_CHECK_K > 0
