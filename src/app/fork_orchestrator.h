@@ -130,13 +130,19 @@ typedef enum {
 int stuck_forks_threshold_elapsed(long running_since_ms, long now_ms);
 
 /**
- * @brief Prédicat PUR : ce fork rapporte-t-il zéro sur les trois indicateurs
- *        qui comptent (stock en cours, stock analysé, coups/s) ? `stat ==
- *        NULL` renvoie 1 (rien à montrer = suspect).
+ * @brief Prédicat PUR : ce fork rapporte-t-il zéro sur TOUS les indicateurs qui
+ *        comptent, quel que soit son rôle — recherche (stock en cours, stock
+ *        analysé, coups/s) comme prunage (possibilités vérifiées, éliminées,
+ *        cases étudiées) ? `stat == NULL` renvoie 1 (rien à montrer = suspect).
  *
  * Version par fork de `fork_stats_all_zero` : repère un sous-ensemble de
  * forks bloqués pendant que les autres travaillent, cas où l'agrégat "tous à
  * zéro" ne s'alarme jamais.
+ *
+ * Les trois compteurs de prunage sont nuls sur un fork de recherche (seuls
+ * `autoprune_step`/`autoprune_gpu` les alimentent) : les ajouter ne change
+ * rien de ce côté, et supprime le faux positif qui présentait trois forks
+ * pruner bien vivants comme « ne rapportant aucun travail ».
  */
 int fork_stat_is_zero(const struct client_statistics *stat);
 

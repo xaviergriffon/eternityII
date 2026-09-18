@@ -20,6 +20,9 @@
 #include "core/best_board.h"
 #include "app/fork_orchestrator.h"
 #include "app/etii_server.h"
+#include "app/etii_client.h"
+#include "app/etii_statistic.h"
+#include "core/core_static_variables.h"
 
 extern client_t *thread_params;           /* global défini dans etii_server.c */
 
@@ -36,6 +39,8 @@ int exit_interpreter(void);
 /* Même raison : stock_memory_interpreter n'est pas non plus exposé dans
  * command_lines.h. */
 int stock_memory_interpreter(void);
+/* Même raison : statistic_interpreter non plus. */
+int statistic_interpreter(void);
 
 /* lock_all_file / unlock_all_file ne sont pas dans datamanager.h mais sont
  * accessibles via liaison directe (datamanager.c est toujours dans TEST_MODULES).
@@ -3151,6 +3156,61 @@ TEST stock_memory_interpreter_reports_spill_totals(void)
     PASS();
 }
 
+/* `statistic` sur un client/pruner doit rapporter l'activite de PRUNAGE de ses
+ * forks. Sans cela (comportement d'avant ce correctif), la commande n'affichait
+ * que les files LOCALES du process parent -- vides par construction, tout le
+ * travail ayant lieu dans les forks -- plus deux compteurs serveur toujours
+ * nuls : le 2026-09-18, un pruner qui eliminait reellement 22 006 possibilites
+ * sur 32 480 (palier verifie cote serveur) y paraissait totalement inactif, ce
+ * qui a fait diagnostiquer une panne inexistante. Meme technique de capture de
+ * stdout que stock_memory_interpreter_reports_spill_totals ci-dessus. */
+TEST statistic_interpreter_reports_pruner_activity(void)
+{
+    int saved_nb = NB_THREADS;
+    struct client_statistics *saved = fork_statistics;
+    unsigned long long sc = pruner_checked, sr = pruner_removed, scl = pruner_cells_studied;
+
+    struct client_statistics fs[2];
+    memset(fs, 0, sizeof fs);
+    fs[0].pruner_checked = 4000; fs[0].pruner_removed = 6000; fs[0].pruner_cells_studied = 70000;
+    fs[1].pruner_checked = 1000; fs[1].pruner_removed = 4000; fs[1].pruner_cells_studied = 30000;
+    NB_THREADS = 2;
+    fork_statistics = fs;
+    pruner_checked = 0; pruner_removed = 0; pruner_cells_studied = 0;
+
+    char tmpl[] = "/tmp/etii_statistic_pruner_XXXXXX";
+    int fd = mkstemp(tmpl);
+    ASSERT(fd >= 0);
+
+    fflush(stdout);
+    int saved_stdout = dup(1);
+    dup2(fd, 1);
+    close(fd);
+
+    int rc = statistic_interpreter();
+
+    fflush(stdout);
+    dup2(saved_stdout, 1);
+    close(saved_stdout);
+
+    fork_statistics = saved; NB_THREADS = saved_nb;
+    pruner_checked = sc; pruner_removed = sr; pruner_cells_studied = scl;
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+
+    FILE *f = fopen(tmpl, "r");
+    ASSERT(f != NULL);
+    char buf[8192];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    unlink(tmpl);
+
+    /* 10 000 mortes sur 15 000 controlees (5 000 verifiees + 10 000 mortes). */
+    ASSERT(strstr(buf, "pruner : 10000 mortes / 15000 vérifiées (66.67%), 100000 cases étudiées") != NULL);
+    PASS();
+}
+
 /* spill [n] (PR2, debordement sur disque) : meme famille que rebalance --
  * privilegiee, refusee sur le chemin standard, appliquee via le chemin
  * privilegie. Le module stock_spill peut etre active ou non selon ce qui a
@@ -3430,6 +3490,7 @@ SUITE(command_lines_suite)
     RUN_TEST(admin_apply_privileged_command_stock_max_ram_requires_argument);
     RUN_TEST(admin_apply_privileged_command_stock_memory_is_not_remotely_reachable);
     RUN_TEST(stock_memory_interpreter_reports_spill_totals);
+    RUN_TEST(statistic_interpreter_reports_pruner_activity);
     RUN_TEST(admin_apply_privileged_command_spill_runs);
     RUN_TEST(admin_apply_privileged_command_spill_rejects_non_positive_budget);
     RUN_TEST(admin_apply_privileged_command_sorts_run);

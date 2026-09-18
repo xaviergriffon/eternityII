@@ -7,6 +7,8 @@
  *   - find_fork_index          : recherche d'un socket fork par son chemin
  *   - build_thread_queues_table: tableau de stats par fork (corps extrait de la
  *                                boucle check_client_threads)
+ *   - build_pruner_activity_line: ligne « pruner : … » du rapport d'activité,
+ *                                partagée par `check` et `statistic`
  */
 #include "greatest.h"
 #include "app/etii_client.h"
@@ -14,6 +16,7 @@
 #include "app/fork_gate.h"   /* quiescence coopérative : test du thread checker */
 #include "app/fork_orchestrator.h"
 #include "app/etii_statistic.h"
+#include "core/core_static_variables.h"  /* pruner_checked/_removed/_cells_studied */
 #include "core/datamanager.h"
 #include "core/possibility.h"
 #include "net/etii_protocol.h"
@@ -242,6 +245,94 @@ TEST thread_queues_table_large_nb_threads_no_overflow(void)
 
     ASSERT(ok);
     ASSERT_EQ_FMT(100ULL, stock, "%llu");   /* 100 forks * 1 */
+    PASS();
+}
+
+/* ---------- build_pruner_activity_line ------------------------------------ */
+
+/* Agrège les compteurs de prunage REMONTÉS PAR LES FORKS (le parent d'un client
+   pruner n'en produit aucun lui-même : tout le travail a lieu dans les forks).
+   C'est cette agrégation qui manquait à la commande `statistic` le 2026-09-18,
+   faisant passer pour inactif un pruner qui éliminait réellement des dizaines
+   de milliers de possibilités. */
+TEST pruner_activity_line_aggregates_fork_counters(void)
+{
+    int saved_nb = NB_THREADS;
+    struct client_statistics *saved = fork_statistics;
+    unsigned long long sc = pruner_checked, sr = pruner_removed, scl = pruner_cells_studied;
+
+    struct client_statistics fs[3];
+    memset(fs, 0, sizeof fs);
+    fs[0].pruner_checked = 100; fs[0].pruner_removed = 300; fs[0].pruner_cells_studied = 1000;
+    fs[1].pruner_checked =  50; fs[1].pruner_removed = 150; fs[1].pruner_cells_studied =  500;
+    fs[2].pruner_checked =  50; fs[2].pruner_removed = 150; fs[2].pruner_cells_studied =  500;
+    NB_THREADS = 3;
+    fork_statistics = fs;
+    pruner_checked = 0; pruner_removed = 0; pruner_cells_studied = 0;
+
+    char *line = build_pruner_activity_line();
+    int ok = (line != NULL);
+    /* 600 mortes sur 800 contrôlées (200 vérifiées + 600 mortes) = 75,00 %. */
+    int content = ok && strstr(line, "pruner : 600 mortes / 800 vérifiées (75.00%), 2000 cases étudiées") != NULL;
+    free(line);
+
+    fork_statistics = saved; NB_THREADS = saved_nb;
+    pruner_checked = sc; pruner_removed = sr; pruner_cells_studied = scl;
+
+    ASSERT(ok);
+    ASSERT(content);
+    PASS();
+}
+
+/* Aucun contrôle de possibilité (client de recherche, ou serveur) : NULL, donc
+   aucune ligne ajoutée au rapport ni affichée par `statistic`. */
+TEST pruner_activity_line_absent_without_pruning(void)
+{
+    int saved_nb = NB_THREADS;
+    struct client_statistics *saved = fork_statistics;
+    unsigned long long sc = pruner_checked, sr = pruner_removed, scl = pruner_cells_studied;
+
+    struct client_statistics fs[2];
+    memset(fs, 0, sizeof fs);
+    fs[0].shots_per_second = 4242;   /* recherche active, mais aucun prunage */
+    NB_THREADS = 2;
+    fork_statistics = fs;
+    pruner_checked = 0; pruner_removed = 0; pruner_cells_studied = 0;
+
+    char *line = build_pruner_activity_line();
+    int is_null = (line == NULL);
+    free(line);
+
+    fork_statistics = saved; NB_THREADS = saved_nb;
+    pruner_checked = sc; pruner_removed = sr; pruner_cells_studied = scl;
+
+    ASSERT(is_null);
+    PASS();
+}
+
+/* `fork_statistics == NULL` (avant le premier `start`, ou côté serveur) : pas
+   de déréférencement, et les compteurs du processus courant suffisent à eux
+   seuls (modes `test` / DEBUG_IN_MONO_PROCESS, où le contrôle tourne ici). */
+TEST pruner_activity_line_without_forks_uses_local_counters(void)
+{
+    int saved_nb = NB_THREADS;
+    struct client_statistics *saved = fork_statistics;
+    unsigned long long sc = pruner_checked, sr = pruner_removed, scl = pruner_cells_studied;
+
+    NB_THREADS = 4;              /* volontairement non nul : rien ne doit être lu */
+    fork_statistics = NULL;
+    pruner_checked = 7; pruner_removed = 3; pruner_cells_studied = 42;
+
+    char *line = build_pruner_activity_line();
+    int ok = (line != NULL);
+    int content = ok && strstr(line, "pruner : 3 mortes / 10 vérifiées (30.00%), 42 cases étudiées") != NULL;
+    free(line);
+
+    fork_statistics = saved; NB_THREADS = saved_nb;
+    pruner_checked = sc; pruner_removed = sr; pruner_cells_studied = scl;
+
+    ASSERT(ok);
+    ASSERT(content);
     PASS();
 }
 
@@ -1579,6 +1670,10 @@ SUITE(etii_client_suite)
     RUN_TEST(thread_depth_table_no_forks_started_returns_placeholder);
     RUN_TEST(thread_depth_table_shows_root_and_min_per_fork);
     RUN_TEST(thread_depth_table_all_idle_shows_dash_footer);
+
+    RUN_TEST(pruner_activity_line_aggregates_fork_counters);
+    RUN_TEST(pruner_activity_line_absent_without_pruning);
+    RUN_TEST(pruner_activity_line_without_forks_uses_local_counters);
 
     RUN_TEST(control_step_unlimited_leaves_request);
     RUN_TEST(control_step_high_rate_pauses);

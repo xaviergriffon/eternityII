@@ -148,7 +148,23 @@ int fork_stat_is_zero(const struct client_statistics *stat)
     }
     return stat->possibilities_in_stock == 0
         && stat->analyses_in_stock == 0
-        && stat->shots_per_second == 0;
+        && stat->shots_per_second == 0
+        // Le travail utile d'un fork PRUNER n'est ni du stock local, ni des
+        // coups/s : c'est le contrôle de possibilités. Sans ces trois
+        // compteurs, trois forks pruner en train d'éliminer 22 006
+        // possibilités sur 32 480 étaient tous les trois signalés « ne
+        // rapporte aucun travail » (constaté le 2026-09-18) — un pruner
+        // parfaitement sain présenté comme en panne. Ils restent nuls sur un
+        // fork de RECHERCHE (`pruner_cells_studied` n'est alimenté que par
+        // `autoprune_step`/`autoprune_gpu`, jamais par le forward-checking,
+        // cf. core/etii_search.c), donc le comportement de ce côté est
+        // inchangé. Compteurs CUMULÉS et non des débits : c'est exactement la
+        // sémantique voulue ici, l'avertissement étant émis une seule fois par
+        // fork, `STUCK_FORKS_WARN_MS` après son démarrage (« ce fork a-t-il
+        // jamais rapporté quoi que ce soit ? »).
+        && stat->pruner_checked == 0
+        && stat->pruner_removed == 0
+        && stat->pruner_cells_studied == 0;
 }
 
 int fork_stats_all_zero(const struct client_statistics *stats, int nb)
@@ -1207,11 +1223,25 @@ void fork_orchestrator_run(int config_loaded_at_boot, search_parts_t *shared_par
                     }
                     if (fork_stat_is_zero(&fork_statistics[c])) {
                         g_stuck_fork_warned[c] = 1;
+                        // Détail des compteurs SELON LE RÔLE du fork plutôt
+                        // qu'une énumération figée « stock/analysé/coups-s à
+                        // 0 » : sur un fork pruner ces trois-là sont nuls par
+                        // construction, et les citer désignait les mauvais
+                        // compteurs à qui devait diagnostiquer. Même
+                        // formatage que l'escalade d'arrêt
+                        // (`fork_diagnostic_summary`, qui distingue déjà les
+                        // deux rôles).
+                        char state_buf[160];
+                        fork_diagnostic_summary(
+                            &fork_statistics[c],
+                            (fork_last_activity != NULL) && fork_last_activity[c] != 0,
+                            current_fork_role(c) == FORK_ROLE_PRUNE,
+                            state_buf, sizeof(state_buf));
                         log_error("orchestrateur : fork %d (slot %d) ne rapporte aucun "
-                                  "travail (stock/analysé/coups-s à 0) depuis %lds — "
+                                  "travail (%s) depuis %lds — "
                                   "vérifier CE fork spécifiquement (connexion serveur "
                                   "bloquée, deadlock, ou stock serveur épuisé pour lui)\n",
-                                  (int)childrens_pid[c], c,
+                                  (int)childrens_pid[c], c, state_buf,
                                   (now_ms - g_running_since_ms) / 1000);
                     }
                 }
