@@ -1981,6 +1981,299 @@ filtrage global à la Benoist-Bourreau.** Le plafond de la famille entière est 
 C'est la mesure qui manquait à §4.3 et §4.4 ; le levier restant est la forme de l'arbre
 (§4.14), pas l'élagage.
 
+### 4.16 Poids d'échec appris en critère PRINCIPAL (dom/wdeg complet) — ADOPTÉ
+
+**Statut : mesuré sur stock de production dans trois régimes de profondeur disjoints,
+adopté.** Le poids d'échec appris cesse d'être le troisième champ de la clé composite de
+`mrv_choose_cell` et devient le **critère principal** : il divise le score MRV, et prime
+donc sur `nconstr` (§4.12) au lieu de le suivre.
+
+**Ce que §4.14 avait explicitement laissé ouvert**, et qui est la matière de cette
+section : « La variante *poids sur la seule case morte* et *un poids en critère principal
+(dom/wdeg complet, poids divisant le score)* n'ont pas été mesurés. » Une quatrième piste
+y a été jointe, le **dernier conflit** (*last-conflict reasoning*, Lecoutre et al. 2009),
+qui est l'autre façon classique de laisser l'échec dicter l'ordre des variables.
+
+#### La forme retenue : une division qui est un décalage
+
+`dom/wdeg` (Boussemart et al., 2004) minimise `dom(x) / wdeg(x)`. Une division par case de
+frontière est rédhibitoire dans cette boucle-ci : elle est **bornée par l'émission**
+(IPC ≈ 3,15, ~0,25 cycle par µop et par case, ~54 cases par nœud —
+[autosearch_step.md §1.3 quater](../autosearch_step.md)). Trois formes sans division ont
+été construites et mesurées :
+
+- **multiplicative** — `score = ⌈count · fac[poids] / 2¹²⌉`, `fac[w] = 2¹⁶·D/(D+w)`
+  tabulé et pré-cuit par case (une charge 16 bits, un `imul`, un `add`, un `shift`) ;
+- **par décalage** — `score = count << (S − min(S, ⌊log₂(poids+1)⌋))` : chaque
+  **doublement** du poids retire un décalage, donc divise le score par deux, jusqu'à un
+  plafond de 2^S. Une charge 8 bits et un `shlx`, **pas de table, pas de multiplication,
+  arithmétique exacte** ;
+- et leurs paramètres d'échelle respectifs (`D`, `S`).
+
+La forme par décalage est celle qui est livrée (`mrv_wdeg_shl`, `bt_frontier.wshl`). Les
+deux formes ont été mesurées côte à côte précisément pour que le choix ne repose pas sur
+le seul argument de coût.
+
+**L'invariant qui rend la chose sûre** : le décalage est une multiplication par une
+puissance de deux, donc `score = 0 ⟺ count = 0`. La détection de sous-arbre mort du
+balayage rapide (`(best >> MRV_KEY_LOW_BITS) == 0`) est **exactement** celle de la
+production — aucune case pénalisée, si lourdement soit-elle, ne peut prendre la place
+d'une case morte en tête de la réduction. C'est le piège documenté au §0 de
+[croix_separatrice_ordre_variables.md](croix_separatrice_ordre_variables.md), évité ici
+par construction plutôt que par une seconde passe.
+
+#### Protocole
+
+Stock de production `eternityII.back` **au 18/09/2026, 32 480 possibilités** — le stock a
+grossi depuis §4.14, qui en comptait 13 739 et en tirait 418 racines de ≥ 130 pièces.
+**Les deux sections ne décrivent donc pas le même échantillon et leurs pourcentages ne se
+comparent pas terme à terme.** Trois régimes de profondeur **disjoints** :
+
+| Régime | Sélection | Racines | Fermées par la référence |
+|---|---|---|---|
+| **A** | ≥ 130 pièces posées (le protocole de §4.14, rejoué sur le stock du jour) | 500 | 497 |
+| **B** | 100 à 120 pièces — *le régime que §4.14 déclarait non concluant* | 300 | 124 |
+| **C** | 121 à 129 pièces — échantillon de départage, disjoint des deux autres | 300 | 237 |
+
+Plafond 2 000 000 nœuds par racine et par bras, un seul moteur par binaire, comparaison
+appariée sur l'**intersection explicite des racines fermées par TOUS les bras comparés**
+(le piège de §4.13). Le **point de chute** se lit à budget égal sur **toutes** les racines
+communes, fermées ou non, et seulement en apparié — moyenne, médiane et décompte
+« + bas / + haut », jamais le maximum, qui n'est pas comparable sous censure (§7 ter de
+[croix_separatrice_ordre_variables.md](croix_separatrice_ordre_variables.md)). Machine :
+4 cœurs, Linux/gcc. Passes de temps séquentielles en ABBA, jamais deux bras en parallèle.
+
+#### Trois contrôles de solidité, avant toute lecture des gains
+
+Un bras qui « ferme » 60 racines de plus n'a de valeur que si ses fermetures sont des
+preuves. Trois contrôles, dans l'ordre où ils ont été faits :
+
+1. **Les fermetures supplémentaires sont réelles.** Les trois racines que la référence
+   laisse ouvertes en régime A se ferment toutes avec un plafond de 4·10⁸ nœuds
+   (3 785 855, 5 991 348 et 2 506 865 nœuds) : le verdict des bras y est le même que
+   celui de la référence, seul le coût diffère.
+2. **Le moteur reste correct.** La suite `make test` en 16 pièces a été rejouée sur
+   **chaque** variante. Ne tombent que les tests qui **verrouillent le critère de §4.14**
+   (pour les bras dom/wdeg : celui qui affirme que le poids ne prime jamais sur
+   `nconstr` ; pour `deadonly` : celui qui affirme que la case posée reçoit un poids).
+   Les 1 511 autres passent, y compris l'oracle indépendant de `mrv_choose_cell` et la
+   fixture « vraie solution 4×4 ».
+3. **Les deux balayages restent équivalents.** L'auto-test du banc (rapide contre
+   générique, §7 de croix_separatrice) rapporte **0 désaccord sur chacun des six bras** —
+   la variante a bien été portée dans les DEUX chemins, jamais dans le seul chemin rapide.
+
+#### Table 1 — les quatre pistes, régime A (489 racines fermées par tous les bras)
+
+| Bras | Fermées / 500 | Nœuds appariés | Gagne / perd / égal | p (test des signes) | Ratio médian (racines ≥ 10 000 nœuds) | Pire ratio |
+|---|---|---|---|---|---|---|
+| référence (§4.14, `master`) | 497 | 11 701 673 | — | — | 1,000 | 1,00 |
+| **dom/wdeg, décalage plafonné à 16 — adopté** | **500** | **474 330 (−95,95 %)** | **271 / 66 / 152** | 1,3·10⁻³⁰ | **0,018** | **1,09** |
+| poids sur la SEULE case morte | 493 | 17 080 975 (**+45,97 %**) | 65 / 211 / 213 | 3,6·10⁻¹⁹ | 1,192 | 29,2 |
+| dernier conflit (Lecoutre et al.) | 496 | 12 216 724 (**+4,40 %**) | 115 / 258 / 116 | 9,7·10⁻¹⁴ | 1,170 | 48,1 |
+
+Les deux dernières lignes sont des **résultats négatifs, et ce sont des résultats** :
+
+- **Le double incrément de §4.14 est maintenant mesuré, pas supposé.** §4.14 incrémentait
+  le poids sur la voisine morte ET sur la case posée « parce que les deux sont impliquées
+  dans la contradiction », sans avoir mesuré l'alternative. Retirer l'incrément de la case
+  posée coûte **+46 % de nœuds en A, +50 % en B** et fait perdre des fermetures dans les
+  trois régimes. Le choix d'origine était le bon, et il l'est désormais pour une raison
+  mesurée.
+- **Le dernier conflit perd, et perd deux fois.** Il coûte +4,4 % de nœuds en A, +8,4 % en
+  B, et **−27 % de débit par nœud** (0,98 contre 1,34 M nœuds/s) : la case rechoisie
+  n'est plus celle que MRV aurait prise, donc le facteur de branchement monte. Sa
+  dispersion est aussi la pire de la campagne (q1 0,21, q3 2,42, pire ×48) — il gagne
+  beaucoup sur quelques racines et perd beaucoup sur beaucoup d'autres, ce que le test
+  des signes tranche sans ambiguïté (115 / 258). **Réserve d'implémentation à consigner :
+  il a été mesuré DANS LE BANC seulement**, sous la forme « la dernière case morte est
+  rechoisie tant qu'elle est encore sur la frontière », sans instrumenter la pile de
+  décisions — la réserve du §4.11 sur la délégation (`bt_count_pending` /
+  `bt_materialize_pending`) rendait la forme complète de l'article trop intrusive pour une
+  mesure exploratoire. Une forme plus fidèle pourrait faire mieux ; elle partirait d'un
+  bras qui perd nettement dans les trois régimes.
+
+#### Table 2 — balayage du paramètre d'échelle, régime A (497 racines fermées par tous)
+
+Aucune des deux formes n'a de paramètre « naturel » : `D = 1` est le `dom/wdeg` de
+l'article, tout le reste est un amortissement. D'où le balayage complet, publié entier.
+
+| Forme | Paramètre | Nœuds appariés | vs référence |
+|---|---|---|---|
+| décalage plafonné | `S` = 1 | 3 502 612 | −77,06 % |
+| | `S` = 2 | 1 337 779 | −91,24 % |
+| | `S` = 3 | 779 407 | −94,90 % |
+| | **`S` = 4 (adopté)** | **480 217** | **−96,86 %** |
+| | `S` = 5 | 1 104 498 | −92,77 % |
+| | `S` = 6 | 671 457 | −95,60 % |
+| | `S` = 8 | 1 711 232 | −88,79 % |
+| multiplicatif | `D` = 1 (`dom/wdeg` de l'article) | 945 132 | −93,81 % |
+| | `D` = 2 | 675 915 | −95,57 % |
+| | `D` = 4 | 569 387 | −96,27 % |
+| | `D` = 8 | 366 155 | −97,60 % |
+| | `D` = 16 | 526 516 | −96,55 % |
+| | `D` = 32 | 594 386 | −96,11 % |
+
+Deux lectures. D'abord, **le `dom/wdeg` littéral (`D` = 1) est la plus faible des formes
+utiles** : la pénalité non amortie est trop brutale, et c'est un amortissement — division
+par deux à chaque doublement du poids, plafonnée — qui gagne. Ensuite, **le paramètre
+n'est pas critique** : de `S` = 2 à `S` = 8 et de `D` = 1 à `D` = 32, tout est entre
+−77 % et −98 %, contre +46 % pour la meilleure des pistes rejetées. Le choix du paramètre
+est un réglage ; celui du critère principal est le résultat.
+
+#### Table 3 — les trois régimes, six paramètres finalistes
+
+| Bras | A : fermées / nœuds | B : fermées / nœuds | C : fermées / nœuds | Pire ratio (A / B / C) |
+|---|---|---|---|---|
+| référence | 497 / — | **124** / — | 237 / — | 1,00 |
+| décalage `S` = 3 | 500 / −94,90 % | 282 / −96,01 % | 300 / −95,23 % | 4,9 / 7,2 / 1,4 |
+| **décalage `S` = 4 — adopté** | **500 / −96,86 %** | **287 / −94,00 %** | **300 / −97,93 %** | **1,1 / 7,2 / 1,9** |
+| décalage `S` = 6 | 500 / −95,60 % | 284 / −96,41 % | 298 / −97,66 % | 2,6 / 3,1 / 2,5 |
+| multiplicatif `D` = 4 | 500 / −96,27 % | 286 / −96,78 % | 299 / −98,27 % | 6,5 / 9,1 / 2,2 |
+| multiplicatif `D` = 8 | 500 / −97,60 % | 289 / −94,12 % | 300 / −98,24 % | 3,7 / 10,9 / 1,4 |
+| multiplicatif `D` = 16 | 500 / −96,55 % | 291 / −81,81 % | 300 / −97,92 % | 1,2 / 86,4 / 1,4 |
+
+Les six finalistes se tiennent en un mouchoir sur les nœuds ; le départage s'est fait sur
+trois critères **hors** de cette colonne : le nombre de fermetures dans le régime dur (B
+et C), le point de chute (table 4), et le pire ratio — `D` = 16 a le meilleur compte de
+fermetures en B et le pire cas le plus violent de la campagne (×86 sur une racine). Le
+décalage `S` = 4 est le seul bras qui soit dans le trio de tête des trois régimes **et**
+dont le pire cas reste sous ×2 dans le régime principal. À égalité de mesure, il est aussi
+le moins cher (un `shlx` contre une charge 16 bits + `imul` + `add` + `shift`) — mais
+c'est un argument de départage, pas de sélection.
+
+**Le résultat le plus important de cette campagne n'est pas dans la colonne « nœuds »,
+il est dans la colonne B « fermées » : 124 → 287 sur 300.** §4.14 concluait sa réserve
+de portée par « entre 100 et 129 pièces, presque rien ne ferme en 2 M de nœuds dans les
+deux cas […] rien ne peut donc être dit sur le régime des racines peu profondes ».
+**Cette réserve est levée** : dans ce régime, la référence ferme 41 % des racines et le
+critère principal en ferme 96 %.
+
+#### Table 4 — point de chute, à budget égal, sur toutes les racines communes
+
+Plus bas = mieux : la recherche est réfutée plus haut dans l'arbre, donc sans descendre
+remplir un plateau qu'elle devra défaire.
+
+| Bras | A : moy. / méd. / + bas-+ haut | B : moy. / méd. / + bas-+ haut | C : moy. / méd. / + bas-+ haut |
+|---|---|---|---|
+| référence | 161,21 / 160 / — | 171,33 / 183 / — | 161,62 / 168 / — |
+| **décalage `S` = 4 — adopté** | **156,74 / 156 / 222-46** | **146,23 / 140 / 247-13** | **146,70 / 144 / 201-11** |
+| décalage `S` = 6 | 156,77 / 156 / 221-46 | 145,64 / 140,5 / 247-12 | 146,50 / 144 / 204-11 |
+| multiplicatif `D` = 16 | 158,03 / 157 / 160-29 | 151,14 / 147 / 241-17 | 150,77 / 154 / 185-18 |
+| poids sur la seule case morte | 161,82 / 160 / 43-88 | 174,04 / 187 / 73-133 | — |
+| dernier conflit | 161,46 / 160 / 100-187 | 173,52 / 188 / 79-168 | — |
+
+La chute baisse de **4,5 points en A** et de **25 points en B et 15 en C**, appariée dans
+le bon sens à 222-46, 247-13 et 201-11. Les deux pistes rejetées la font **monter** — le
+même verdict que les nœuds, lu sur une grandeur indépendante et non censurée : c'est le
+contrôle croisé qui manquerait si l'on ne lisait que le compte de nœuds.
+
+#### Le coût par nœud, isolé — le contrôle intégré de l'expérience
+
+Comme en §4.14, les deux binaires bruts ne donnent pas le même débit, et ce n'est **pas**
+le coût du critère : la politique apprise dirige la recherche vers les cases qui échouent,
+et un nœud qui se termine par un refus du forward-check est le plus cher. Pour séparer les
+deux, une variante garde **toute** la mécanique — le tableau par case tenu en lockstep, la
+charge et le décalage dans la boucle chaude — mais avec un décalage **constant**, ce qui
+rend `score = count` et donc la clé, et l'arbre, ceux de la référence. Contrôle :
+**15 269 586 nœuds des deux côtés, apparié 0 / 0 / 497, ratio 1,000 partout.**
+
+| Bras (ABBA, 4 passes, 500 racines de ≥ 130 pièces) | Fermées | Temps moyen | Écart entre passes | Nœuds/s |
+|---|---|---|---|---|
+| référence | 497 | **16,297 s** | 0,216 s | 1 305 223 |
+| contrôle : même arbre, mécanique payée | 497 | **16,520 s** | 0,386 s | 1 287 640 |
+| **adopté** | **500** | **0,402 s** | 0,014 s | 1 205 632 |
+
+Le surcoût propre du mécanisme est de **+1,37 %** sur un arbre identique au nœud près —
+du même ordre que l'écart entre passes du bras de contrôle lui-même (0,386 s sur 16,5 s,
+soit 2,3 %), donc **sous le plancher de bruit**. Les −7,6 % de débit brut du bras adopté
+sont donc, comme en §4.14 mais dans l'autre sens, un effet de **mélange de nœuds**.
+Bout à bout, sur les mêmes 500 racines : **16,297 s → 0,402 s, soit ×40,5**, et
+497 → 500 fermetures.
+
+#### Côté TROUVER — le gain n'est pas réservé à la réfutation
+
+`bench_refutation` mesure le coût de fermeture d'un sous-arbre MORT ; le temps
+d'ATTEINTE d'une solution est une autre grandeur, mesurable seulement sur des clones à
+solution connue ([banc_resolution_clones.md](banc_resolution_clones.md), `make
+bench-solve`). Même contrôle qu'en §4.14, deux binaires ne différant que par le moteur,
+mêmes instances, même politique de valeurs (`natural`), passes alternées :
+
+| `n10k14` (10×10, 14 couleurs, 5 indices), 30 instances, plafond 2·10⁷ | Référence | Adopté |
+|---|---|---|
+| Résolues | 30 / 30 | 30 / 30 |
+| Médiane des nœuds | 504 429 | **69 826** |
+| Moyenne géométrique | 402 166 | **68 088** |
+| Temps total | 7,726 s | **2,135 s** |
+| Débit | 2,20 M nœuds/s | 1,81 M nœuds/s |
+
+Apparié : **29 / 1 en nœuds** (p = 5,8·10⁻⁸), **28 / 2 en temps** (p = 8,7·10⁻⁷), ratio
+médian **0,159** (q1 0,084, q3 0,355, pire 1,98). Les deux passes alternées donnent le
+même total à 3 % près. Le critère (a) de la règle de décision du §3.5 de l'autre document
+— gain apparié des deux côtés — est donc satisfait, et le −18 % de débit brut est encore
+l'effet de mélange de nœuds isolé plus haut.
+
+**Une seule cellule, et c'est la réserve de cette mesure.** §4.14 en avait joué quatre ;
+celle-ci est un contrôle de non-régression, pas une réplication : elle établit que le gain
+de réfutation ne se paie pas d'une perte côté trouver sur un régime accessible, pas que le
+gain s'y retrouve dans tous les régimes.
+
+**Un piège d'instrument rencontré au passage, et corrigé.** `--workdir` pointant sur un
+répertoire inexistant faisait échouer le `chdir` de **chaque fils**, qui sortait sans rien
+exécuter : le banc affichait 30 lignes « ÉCHEC / 0 nœud / 0,000 s » sans le moindre
+diagnostic, et la campagne ressemblait à un moteur qui ne résout plus rien — sur les DEUX
+binaires, ce qui est ce qui a mis sur la piste. Le chemin est désormais éprouvé une fois
+dans le parent, avant le premier fork, et le banc refuse de démarrer en le nommant.
+
+#### Ce que le portage garantit
+
+Le code de production **n'est pas** une réécriture de la variante mesurée : il en est
+l'équivalent exact, et la mesure le dit. Rejoué en régime A, le binaire de production
+donne **474 330 nœuds, apparié 0 / 0 / 500 contre la variante de banc**, chute identique
+racine par racine. Le contrat `etii_search.o` **octet pour octet identique avec et sans
+les hooks de banc** a été revérifié après le portage (7 blocs de hook retirés, objets
+identiques).
+
+#### Verrous
+
+- `mrv_choose_cell_breaks_remaining_ties_by_failure_weight`, réécrit : il affirmait que
+  « le poids ne prime JAMAIS sur `nconstr` » — c'est exactement ce que §4.16 renverse. Il
+  vérifie maintenant les deux sens de la nouvelle hiérarchie : sans poids, `nconstr`
+  tranche ; avec un poids suffisant, la case au poids le plus élevé passe devant une case
+  MIEUX contrainte. Avec son contre-contrôle (assez d'échecs sur l'autre case la ramène
+  devant) et la vérification que `min_candidats` reste le NOMBRE de candidats et non le
+  score pénalisé.
+- `mrv_wdeg_shl_halves_the_score_at_every_weight_doubling`, nouveau : la table de pénalité
+  elle-même — décalage maximal à poids nul, un de moins par doublement, plancher à zéro,
+  monotonie sur les 256 poids — et surtout **l'invariant dont dépend la détection de case
+  morte** : un score non nul le reste, la case morte garde le monopole du zéro.
+- `bt_frontier_fail_halves_all_weights_at_saturation`, adapté : c'est `wshl` et non plus
+  `nc_key` qui porte la pénalité ; la cohérence est vérifiée sur **toutes** les cases
+  après le halving global.
+- `bt_forward_check_failure_bumps_dead_and_placed_cells`, adapté : la case morte et la
+  case posée reçoivent toutes deux un poids — et la table 1 montre maintenant ce qu'il en
+  coûte de retirer le second.
+- Largeurs de champs vérifiées à la compilation (`mrv_pos_fits_check`, étendu au plafond
+  du score `MRV_WDEG_MAX_SCORE` et à la largeur de `nc_key`, qui passe à 16 bits).
+- Inchangés et toujours verrouillants : l'oracle indépendant de `mrv_choose_cell`,
+  `mrv_choose_cell_fast_matches_generic_on_real_map`,
+  `mrv_choose_cell_fast_matches_generic_with_failure_weights`, et la fixture
+  d'intégration sur le vrai puzzle 4×4 (même nombre de solutions).
+
+#### Réserves
+
+- **Le mécanisme reste CONDITIONNÉ au forward-check**, exactement comme en §4.14 : sa
+  seule source de signal est le refus de `bt_forward_check`/`_fast`. Compilé sans
+  (`FORWARD_CHECK_K = 0`), les poids restent nuls, le décalage est constant et le critère
+  redevient `count` puis `nconstr` puis l'ordre positionnel — comportement correct, gain
+  nul.
+- **L'ordre des variables reste couplé à l'ordre des valeurs**, et davantage qu'en §4.14
+  puisque le poids agit désormais en poids fort : une campagne de politiques de valeurs
+  mesure deux effets à la fois. L'auto-test de `bench_solve` détecte et rapporte ce
+  couplage ; la conséquence écrite au §4.14 n'est pas levée, elle est renforcée.
+- **Le stock a changé depuis §4.14** (32 480 possibilités contre 13 739). Les deux
+  sections sont chacune internement appariées, mais leurs pourcentages ne se comparent pas
+  entre elles.
+
 ## 5. Arbitrages tranchés
 
 - **Une condition nécessaire, jamais une heuristique.** Un faux positif jette
