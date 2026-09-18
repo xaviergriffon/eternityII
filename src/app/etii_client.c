@@ -656,6 +656,37 @@ char *build_thread_depth_table(void)
     return table;
 }
 
+char *build_pruner_activity_line(void)
+{
+    // Compteurs du processus courant (modes `test` / DEBUG_IN_MONO_PROCESS, où
+    // le contrôle tourne dans CE process) + agrégat des forks, qui portent la
+    // totalité du travail en fonctionnement normal.
+    unsigned long long prc = pruner_checked;
+    unsigned long long prr = pruner_removed;
+    unsigned long long prcells = pruner_cells_studied;
+    if (fork_statistics != NULL) {
+        for (int f = 0; f < NB_THREADS; f++) {
+            prc += fork_statistics[f].pruner_checked;
+            prr += fork_statistics[f].pruner_removed;
+            prcells += fork_statistics[f].pruner_cells_studied;
+        }
+    }
+    if (prc + prr == 0) {
+        // Aucun contrôle de possibilité : rien à dire (cas d'un client de
+        // recherche, ou d'un serveur — ces compteurs y restent nuls).
+        return NULL;
+    }
+    size_t size = 200;
+    char *line = calloc(size, sizeof(char));
+    if (line == NULL) {
+        return NULL;
+    }
+    snprintf(line, size,
+             "pruner : %llu mortes / %llu vérifiées (%.2f%%), %llu cases étudiées\n",
+             prr, prc + prr, 100.0 * (double)prr / (double)(prc + prr), prcells);
+    return line;
+}
+
 /**
  * @brief Un tour de la boucle de `check_client_threads` (corps extrait pour être
  *        testable hors thread, comme `check_server_step`).
@@ -749,21 +780,16 @@ void check_client_threads_step(int *last_record)
         }
 #endif // FORWARD_CHECK_K > 0
 
-        // Statistiques pruner : agrégat des forks + compteurs du processus courant
-        unsigned long long prc = pruner_checked;
-        unsigned long long prr = pruner_removed;
-        unsigned long long prcells = pruner_cells_studied;
+        // Statistiques pruner : la ligne elle-même est construite par
+        // `build_pruner_activity_line` (source de vérité unique, partagée avec
+        // la commande console `statistic` — cf. sa doc dans etii_client.h).
+        // Seul le débit `prune_bys`, propre à ce rapport, est agrégé ici.
         unsigned long long prune_bys = 0;
         for (f = 0; f < NB_THREADS; f++) {
-            prc += fork_statistics[f].pruner_checked;
-            prr += fork_statistics[f].pruner_removed;
-            prcells += fork_statistics[f].pruner_cells_studied;
             prune_bys += fork_statistics[f].pruner_cells_per_second;
         }
-        if (prc + prr > 0) {
-            char *prtemp = calloc(200, sizeof(char));
-            sprintf(prtemp, "pruner : %llu mortes / %llu vérifiées (%.2f%%), %llu cases étudiées\n",
-                    prr, prc + prr, 100.0 * (double)prr / (double)(prc + prr), prcells);
+        char *prtemp = build_pruner_activity_line();
+        if (prtemp != NULL) {
             strcat(report, prtemp);
             free(prtemp);
         }

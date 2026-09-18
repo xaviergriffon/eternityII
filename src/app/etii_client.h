@@ -235,6 +235,26 @@ char *build_thread_queues_table(unsigned long long *out_stock,
 char *build_thread_depth_table(void);
 
 /**
+ * @brief Construit la ligne « pruner : … » du rapport d'activité (agrégat des
+ *        forks + compteurs du processus courant), ou NULL si aucun contrôle de
+ *        possibilité n'a encore eu lieu. À libérer par l'appelant.
+ *
+ * Source de vérité UNIQUE de cette ligne, partagée par le rapport périodique
+ * `check` (`check_client_threads_step`) et par la commande console `statistic`
+ * (`statistic_interpreter`, ui/command_lines.c) : c'est l'absence de cette
+ * seconde utilisation qui a fait passer pour inactif, le 2026-09-18, un pruner
+ * qui éliminait réellement 22 006 possibilités sur 32 480 — `statistic` côté
+ * client/pruner n'affiche que les files LOCALES du process parent, vides par
+ * construction (le travail a lieu dans les forks, cf. `build_thread_queues_table`).
+ *
+ * `fork_statistics == NULL` (avant le premier `start`, ou côté serveur où
+ * `init_counters` n'est jamais appelée) : seuls les compteurs du processus
+ * courant sont pris en compte — ils restent nuls hors mode pruner, donc la
+ * fonction renvoie alors NULL et rien n'est affiché.
+ */
+char *build_pruner_activity_line(void);
+
+/**
  * @brief Alimente un thread de recherche en travail (un tour de la boucle `for`
  *        de `feed_thread_aposs`).
  *

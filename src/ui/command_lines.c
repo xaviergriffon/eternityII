@@ -1350,6 +1350,24 @@ int check_duplicate_interpreter(void) {
 int statistic_interpreter(void) {
     int rc = statistic_datas();
 
+    // Activité de prunage du parc de forks de CE process. Sans elle,
+    // `statistic` sur un client pruner n'affichait QUE les files locales du
+    // process parent — vides par construction, tout le travail ayant lieu dans
+    // les forks — et deux compteurs serveur toujours nuls : un pruner qui
+    // éliminait réellement 22 006 possibilités sur 32 480 (constaté le
+    // 2026-09-18, palier vérifié côté serveur) y paraissait totalement inactif,
+    // ce qui a fait diagnostiquer une panne là où il n'y en avait aucune. La
+    // ligne est construite par `build_pruner_activity_line` (app/etii_client.c),
+    // exactement la même que celle du rapport `check` : une seule source de
+    // vérité, jamais deux formatages à garder d'accord. NULL — donc rien
+    // d'affiché, comme avant — tant qu'aucun contrôle de possibilité n'a eu
+    // lieu : client de recherche, ou serveur.
+    char *pruner_line = build_pruner_activity_line();
+    if (pruner_line != NULL) {
+        log_info("%s", pruner_line);
+        free(pruner_line);
+    }
+
     // Métriques de besoin par rôle : core/ ne peut pas les afficher lui-même
     // (etii_server.h/control_registry.h sont app/), d'où leur ajout ICI
     // plutôt que dans statistic_datas().
