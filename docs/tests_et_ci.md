@@ -721,6 +721,33 @@ l'ordre des valeurs coûterait un test de pointeur par candidat dans sa boucle
 chaude et rendrait ses temps incomparables à ses campagnes précédentes — et
 l'ordre des valeurs n'a de toute façon aucun effet sur un sous-arbre mort.
 
+### Point de chute : la profondeur maximale atteinte
+
+Chaque ligne par racine porte une quatrième colonne, et le bilan deux agrégats :
+la **profondeur maximale atteinte** pendant la fermeture (`max_result`). C'est
+la grandeur qu'un parc de clients observe (« le max revient vers 206 ») et dont
+il n'a pas la moyenne.
+
+**Lecture : à budget de nœuds égal, PLUS BAS est MEILLEUR** — la branche morte a
+été abandonnée plus tôt, donc la contradiction a été vue plus tôt. C'est
+l'inverse de la lecture de `bench_search.sh`, où `max_result` est un garde-fou
+contre un moteur qui gagnerait en débit en cessant d'avancer.
+
+Deux précautions, toutes deux payées par une mesure fausse avant d'être écrites
+ici :
+
+- **`max_result` reste à 0 si aucun placement n'aboutit.** Le moteur ne l'écrit
+  qu'après un placement réussi, donc une racine réfutée d'emblée laisse le
+  compteur à zéro — pris tel quel, cela donne une « chute moyenne » inférieure à
+  la profondeur des racines, ce qui est impossible. Le banc rapporte donc
+  `max(max_result, profondeur de la racine)`, et publie à part le nombre de
+  racines **réfutées sans placer** : sur un stock de production, MRV en réfute
+  9 % à ce régime.
+- **Le maximum ne se compare pas entre deux échantillons de tailles
+  différentes.** Un maximum croît avec le nombre d'essais : les 206-216 d'un
+  parc de clients ne se comparent pas aux 200 d'un banc de 200 racines. Seul
+  l'écart apparié entre moteurs, à budget égal, se lit.
+
 ### Mode `--pruner-profile` : rejoue le VRAI pipeline du pruner
 
 Les modes précédents mesurent des moteurs de RECHERCHE. `--pruner-profile <n>`

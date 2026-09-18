@@ -1,6 +1,6 @@
 # Croix séparatrice : un a priori structurel dans l'ordre des variables
 
-**Statut : deux campagnes exécutées, résultat NÉGATIF dans les deux régimes — aucun changement de moteur adopté.** PR1 (outillage) livrée, PR2 (réfutation) au §7, PR3 (« côté trouver ») au §7 bis, PR4 sans objet. Aucune ligne de moteur en production, et il n'y en aura pas : la croix séparatrice ne vaut rien comme a priori d'ordre des variables. L'outillage, lui, reste — le second point d'entrée rend l'ordre des VARIABLES mesurable sur `bench_refutation`, ce qu'aucun instrument du dépôt ne savait faire. Le document tranche deux
+**Statut : deux campagnes exécutées, résultat NÉGATIF dans les deux régimes — aucun changement de moteur adopté.** PR1 (outillage) livrée, PR2 (réfutation) au §7, PR3 (« côté trouver ») au §7 bis, point de chute au §7 ter, PR4 sans objet. Aucune ligne de moteur en production, et il n'y en aura pas : la croix séparatrice ne vaut rien comme a priori d'ordre des variables. L'outillage, lui, reste — le second point d'entrée rend l'ordre des VARIABLES mesurable sur `bench_refutation`, ce qu'aucun instrument du dépôt ne savait faire. Le document tranche deux
 choses avant tout code — la **géométrie** de la croix (normalisée, et démontrée
 séparatrice) et le **rejet de la variante à ordre imposé**, écartée sur quatre
 pré-mesures statiques reproductibles en moins d'une seconde, dans la méthode du
@@ -656,6 +656,76 @@ production les rencontre très tard — mais la conclusion qu'on en tirait ne
 l'est pas : les rencontrer tôt coûte plus cher que ce que leur élagage rapporte.
 Ce n'est plus une conjecture, c'est mesuré dans les deux régimes que le dépôt
 sait mesurer, avec des contrôles aléatoires appariés en densité dans les deux.
+
+## 7 ter. Mesures — point de chute (2026-09-18)
+
+### 7ter.1 La grandeur, et pourquoi le dépôt ne la mesurait pas
+
+Un parc de clients observe une profondeur maximale atteinte — « le max revient
+régulièrement vers 206, record 216 ». C'est une **date**, pas un coût : à quel
+moment une branche morte est abandonnée. Descendre à 206 pour rien veut dire
+que la contradiction était là bien avant et n'a pas été vue, donc **plus bas est
+meilleur**, à budget de nœuds égal. C'est la lecture inverse de celle de
+`bench_search.sh`, où `max_result` sert de garde-fou contre un moteur qui
+gagnerait en débit en n'avançant plus.
+
+Le moteur la calcule déjà (`max_result`, `etii_search.c`) mais aucun banc ne la
+rapportait. `bench_refutation` le fait désormais : une colonne par racine, et
+deux agrégats (moyenne, maximum) — la moyenne étant précisément ce qu'un parc
+de clients ne sait pas mesurer.
+
+**Un piège de définition, trouvé à la première lecture des chiffres.** Le moteur
+n'écrit `max_result` qu'**après un placement réussi** : une racine réfutée sans
+qu'aucun placement n'aboutisse laisse le compteur à 0. Pris tel quel, cela
+donnait une « chute moyenne » inférieure à la profondeur des racines
+elles-mêmes — un excès négatif, impossible. L'état le plus profond réellement
+atteint est alors la racine : c'est ce que le banc rapporte, et le nombre de ces
+racines est publié à part, parce qu'il dit quelque chose. Sur 200 racines de
+production, **la production en réfute 18 (9 %) sans poser une seule pièce.**
+
+### 7ter.2 Résultat : aucun bras ne fait descendre la chute, et les bras forts la font MONTER
+
+200 racines de production (130-153 pièces, médiane 139), plafond 5 000 000 de
+nœuds, comparaison appariée racine par racine.
+
+| Bras | Fermées | Chute moy. | Chute méd. | Chute max | Racines modifiées | Apparié + bas / + haut | p |
+|---|---|---|---|---|---|---|---|
+| `mrv` | 199/200 | **159,6** | 158 | 200 | — | — | — |
+| `cross-key` | 199 | 159,4 | 158 | 200 | 41 | 24/17 | 0,35 |
+| `halo-key` | 199 | 159,5 | 158 | 200 | 28 | 13/15 | 0,85 |
+| `randh-key` | 199 | 159,7 | 158 | 200 | 36 | 17/19 | 0,87 |
+| `cross-mrv` | 94 | 164,7 | 170 | 192 | 194 | 76/118 | **0,003** |
+| `halo-mrv` | 191 | 162,5 | 161 | 196 | 193 | 68/125 | **0,000** |
+| `randh-mrv` | 104 | 164,1 | 162 | 196 | 194 | 64/130 | **0,000** |
+
+**À la hauteur libre, l'effet est nul** : moyennes à 0,2 pièce près, médianes
+identiques, et le test apparié est plat (p de 0,35 à 0,87) sur les 28 à 41
+racines que ces bras modifient.
+
+**À la hauteur forte, la chute MONTE** de 3 à 5 pièces en moyenne, et
+significativement en apparié. C'est le contraire de l'objectif : forcer
+l'ouverture de cases mal contraintes ne fait pas apparaître la contradiction
+plus tôt, cela élargit l'arbre en haut et fait passer plus de temps profond dans
+des branches qu'on ne sait pas réfuter.
+
+**Le « chute max » plus bas des bras forts (192 et 196 contre 200) n'est pas un
+gain** : c'est un maximum, donc une observation unique sur 200 racines, et il
+est censuré — `cross-mrv` ne ferme que 94 racines sur 200, donc ses excursions
+les plus profondes n'ont simplement pas eu lieu dans le budget. La moyenne et le
+test apparié, eux, disent l'inverse et portent sur toute la population.
+
+**Le chiffre qui résume** : la production réfute 18 racines sur 200 **sans poser
+une seule pièce** ; les bras forts n'y arrivent que 3 ou 4 fois. Là où la
+production voit la contradiction immédiatement, un ordre imposé commence par
+descendre.
+
+### 7ter.3 Sur la comparaison avec le parc de production
+
+La chute maximale mesurée ici est 200, contre 206-216 observés en production.
+Ce n'est **pas** une divergence : un maximum croît avec le nombre d'essais, et
+un parc de clients en fait des ordres de grandeur de plus que 200 racines × 5 M
+nœuds. Le maximum n'est donc pas la grandeur à comparer entre un banc et un
+parc — seul l'écart **apparié entre bras**, à budget égal, l'est.
 
 ## 8. Points laissés ouverts
 

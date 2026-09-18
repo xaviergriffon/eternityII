@@ -164,7 +164,7 @@ static double now_seconds(void)
  * `bench-refutation` du makefile** — le retirer le dégraderait en simple
  * avertissement, et le débordement redeviendrait silencieux.
  */
-#define NB_ALL_ENGINES 10
+#define NB_ALL_ENGINES 14
 
 /**
  * @brief Nombre de variantes jouées quand `--engines` n'est pas donné.
@@ -190,6 +190,13 @@ typedef enum {
      *  même tirage confondrait « la géométrie compte » avec « la densité
      *  compte » — et la campagne PR2 a justement buté là-dessus. */
     CELL_RANDOM_COMP,
+    /** Le HALO des indices de l'instance : les cases vides voisines d'un
+     *  indice sur le plateau de GENÈSE, c'est-à-dire exactement celles sur
+     *  lesquelles une contrainte d'indice porte (20 cases au 16×16, toutes sur
+     *  la croix). Le bras minimal de l'idée de croix. */
+    CELL_HALO,
+    /** Contrôle aléatoire à la densité du HALO. */
+    CELL_RANDOM_HALO,
 } cell_mask_kind_t;
 
 typedef struct {
@@ -210,6 +217,25 @@ typedef struct {
     bt_core_result_t status;
     unsigned long long nodes;
     double seconds;
+    /** Profondeur MAXIMALE atteinte pendant la fermeture (« point de chute ») :
+     *  le `max_result` du moteur, remis à zéro par `close_subtree` avant chaque
+     *  tentative. C'est la seule grandeur de ce banc qui ne mesure pas un COÛT
+     *  mais une DATE : à quel moment une branche morte est abandonnée.
+     *
+     *  Descendre loin dans une branche qui ne mène nulle part n'est pas
+     *  l'objectif du solveur (cf. l'en-tête de ce fichier) : à budget de nœuds
+     *  égal, une profondeur maximale PLUS BASSE est meilleure — la
+     *  contradiction a été vue plus tôt. C'est l'inverse de la lecture de
+     *  `bench_search.sh`, où `max_result` sert de garde-fou contre un moteur
+     *  qui gagnerait en débit en n'avançant plus. */
+    int max_depth;
+    /** 1 : la racine a été réfutée sans qu'AUCUN placement n'aboutisse.
+     *  `max_result` reste alors à 0 — le moteur ne l'écrit qu'après un
+     *  placement réussi — et le prendre pour une « chute nulle » ferait
+     *  descendre la moyenne sous la profondeur des racines elles-mêmes.
+     *  L'état le plus profond réellement atteint est la racine : c'est ce que
+     *  `max_depth` rapporte, et ce compteur-ci garde l'information. */
+    int no_descent;
 } closure_t;
 
 /**
@@ -469,6 +495,9 @@ static uint8_t g_mask_cross[ETERN_PARTS];
 static uint8_t g_mask_anti[ETERN_PARTS];
 static uint8_t g_mask_random[ETERN_PARTS];
 static uint8_t g_mask_random_comp[ETERN_PARTS];
+static uint8_t g_mask_halo[ETERN_PARTS];
+static uint8_t g_mask_random_halo[ETERN_PARTS];
+static int     g_halo_n = 0;
 
 /** @brief Construit les trois masques. `seed` ensemence le contrôle aléatoire. */
 static void build_cell_masks(uint64_t seed)
@@ -480,6 +509,26 @@ static void build_cell_masks(uint64_t seed)
        graine partageraient leur préfixe de permutation, donc l'un serait inclus
        dans l'autre — deux contrôles corrélés ne sont qu'un seul contrôle. */
     cross_fill_random(g_mask_random_comp, ETERN_PARTS - n, seed ^ 0x9E3779B97F4A7C15ULL);
+
+    /* Halo : dérivé du plateau de GENÈSE (vide hormis les indices), pas d'un
+     * paquet du stock — sur une racine à 130 pièces, « voisine d'une case
+     * posée » désignerait toute la frontière. Seule la PRÉSENCE d'une pièce
+     * compte pour `cross_fill_halo`, donc une valeur de grille quelconque
+     * suffit : inutile de résoudre la rotation de chaque indice. */
+    struct possibility_packet genesis;
+    make_empty_board(&genesis);
+    if (indices_file != NULL) {
+        struct array_index *idx = read_indices(indices_file);
+        for (int i = 0; i < idx->size; i++) {
+            struct board_index *h = &idx->indices[i];
+            if (h->x < ETERN_SIZE && h->y < ETERN_SIZE) {
+                genesis.grid[h->x][h->y] = 1;
+            }
+        }
+        free_array_index(idx);
+    }
+    g_halo_n = cross_fill_halo(g_mask_halo, genesis.grid);
+    cross_fill_random(g_mask_random_halo, g_halo_n, seed ^ 0xD1B54A32D192ED03ULL);
 }
 
 /** @brief Masque d'un bras, ou NULL pour l'ordre de production. */
@@ -490,6 +539,8 @@ static const uint8_t *arm_cell_mask(const engine_t *eng)
         case CELL_ANTI:   return g_mask_anti;
         case CELL_RANDOM: return g_mask_random;
         case CELL_RANDOM_COMP: return g_mask_random_comp;
+        case CELL_HALO:        return g_mask_halo;
+        case CELL_RANDOM_HALO: return g_mask_random_halo;
         case CELL_NONE:   break;
     }
     return NULL;
@@ -523,6 +574,10 @@ static closure_t close_subtree(const struct possibility_packet *root, const engi
     out.status = search_packet_backtracking_mrv(&g_client, &work, g_idParts, budget, 0, &nodes);
     out.seconds = now_seconds() - t0;
     out.nodes = nodes;
+    /* Plus profond état atteint : au moins la racine elle-même. */
+    const int root_depth = possibility_placed_count(root);
+    out.no_descent = (max_result == 0);
+    out.max_depth = (max_result > root_depth) ? max_result : root_depth;
     singleton_conflict_check = 0;
     arm_cell_hook(NULL);
     return out;
@@ -699,10 +754,10 @@ static void print_header(const engine_t *engines, int nb)
 {
     printf("%-12s %6s", "racine", "pièces");
     for (int e = 0; e < nb; e++) {
-        printf(" | %-11s %12s %9s", engines[e].name, "nœuds", "temps");
+        printf(" | %-11s %12s %9s %6s", engines[e].name, "nœuds", "temps", "chute");
     }
     printf("\n");
-    for (int i = 0; i < 19 + nb * 37; i++) putchar('-');
+    for (int i = 0; i < 19 + nb * 44; i++) putchar('-');
     printf("\n");
 }
 
@@ -710,8 +765,8 @@ static void print_row(const char *label, int pieces, int nb, const closure_t *re
 {
     printf("%-12s %6d", label, pieces);
     for (int e = 0; e < nb; e++) {
-        printf(" | %-11s %12llu %7.3f s",
-               status_label(res[e].status), res[e].nodes, res[e].seconds);
+        printf(" | %-11s %12llu %7.3f s %6d",
+               status_label(res[e].status), res[e].nodes, res[e].seconds, res[e].max_depth);
     }
     printf("\n");
     fflush(stdout);
@@ -722,7 +777,29 @@ typedef struct {
     int closed;
     unsigned long long nodes;
     double seconds;
+    /** Profondeur maximale (« point de chute ») : somme, compte et maximum.
+     *  Le maximum est la grandeur que la production observe (le record d'un
+     *  parc de clients) ; la moyenne est celle qu'elle ne sait pas mesurer. */
+    long long depth_sum;
+    int depth_n;
+    int depth_max;
+    /** Racines réfutées sans qu'aucun placement n'aboutisse (cf. closure_t). */
+    int no_descent;
 } tally_t;
+
+/** @brief Cumule une fermeture dans un bilan. */
+static void tally_add(tally_t *t, const closure_t *r)
+{
+    t->closed += (r->status == BT_CORE_EXHAUSTED);
+    t->nodes += r->nodes;
+    t->seconds += r->seconds;
+    t->depth_sum += r->max_depth;
+    t->depth_n++;
+    if (r->max_depth > t->depth_max) {
+        t->depth_max = r->max_depth;
+    }
+    t->no_descent += r->no_descent;
+}
 
 static void print_tally(const engine_t *engines, int nb, const tally_t *t, int roots,
                         const tally_t *common, int nb_common)
@@ -745,9 +822,29 @@ static void print_tally(const engine_t *engines, int nb, const tally_t *t, int r
     // ratio « fermetures/s » s'en trouve flatté. Le sous-ensemble fermé par
     // TOUS les moteurs est la seule comparaison appariée, sans plafond en jeu.
     printf("\ncomparaison appariée — les %d racines fermées par TOUS les moteurs :\n", nb_common);
-    printf("%-14s %14s %14s\n", "moteur", "nœuds", "temps");
+    printf("%-14s %14s %14s %12s %10s\n",
+           "moteur", "nœuds", "temps", "chute moy.", "chute max");
     for (int e = 0; e < nb; e++) {
-        printf("%-14s %14llu %12.3f s\n", engines[e].name, common[e].nodes, common[e].seconds);
+        printf("%-14s %14llu %12.3f s %12.1f %10d\n",
+               engines[e].name, common[e].nodes, common[e].seconds,
+               common[e].depth_n > 0 ? (double)common[e].depth_sum / common[e].depth_n : 0.0,
+               common[e].depth_max);
+    }
+
+    /* Point de chute sur TOUTES les racines, fermées ou non : c'est la
+     * grandeur qu'un parc de clients observe (« le max revient régulièrement
+     * vers 206, record 216 »), et la moyenne qu'il ne sait pas mesurer.
+     * Lecture : à budget de nœuds égal, PLUS BAS est MEILLEUR — la branche
+     * morte a été abandonnée plus tôt. Les racines non fermées y contribuent
+     * aussi, et c'est voulu : ce sont précisément celles où un client passe son
+     * temps. */
+    printf("\npoint de chute (profondeur maximale atteinte), sur les %d racines :\n", roots);
+    printf("%-14s %12s %10s %22s\n",
+           "moteur", "chute moy.", "chute max", "réfutées sans placer");
+    for (int e = 0; e < nb; e++) {
+        printf("%-14s %12.1f %10d %22d\n", engines[e].name,
+               t[e].depth_n > 0 ? (double)t[e].depth_sum / t[e].depth_n : 0.0,
+               t[e].depth_max, t[e].no_descent);
     }
 }
 
@@ -904,8 +1001,11 @@ static void usage(void)
            "                       cross-mrv / rand-mrv / anti-mrv : case marquée avant TOUTES les autres\n"
            "                     rand-* et anti-* sont les deux contrôles OBLIGATOIRES du §6.2 :\n"
            "                     un bras qui ne les bat pas ne mesure pas ce qu'il prétend.\n"
+           "                     halo-key,halo-mrv : le HALO des indices (20 cases en 16x16),\n"
+           "                     le bras minimal — les cases que les indices contraignent.\n"
            "                     rand-* a la densité de la CROIX (88/256), randc-* celle de son\n"
-           "                     COMPLÉMENT (168/256) : chaque bras se contrôle à SA densité.\n"
+           "                     COMPLÉMENT (168/256), randh-* celle du HALO (20/256) :\n"
+           "                     chaque bras se contrôle à SA densité.\n"
            "  --cross-seed <n>   graine du contrôle aléatoire (défaut 1)\n"
            "  --pruner-profile <n> rejoue le VRAI pipeline du pruner (autoprune_step) sur n\n"
            "                     possibilités échantillonnées régulièrement dans le .back :\n"
@@ -963,6 +1063,11 @@ int main(int argc, char **argv)
         /* Contrôles aléatoires à la densité du COMPLÉMENT (cf. CELL_RANDOM_COMP). */
         { "randc-key",     0, CELL_RANDOM_COMP, 0 },
         { "randc-mrv",     0, CELL_RANDOM_COMP, 1 },
+        /* Halo des indices, et son contrôle aléatoire à la même densité. */
+        { "halo-key",      0, CELL_HALO,        0 },
+        { "halo-mrv",      0, CELL_HALO,        1 },
+        { "randh-key",     0, CELL_RANDOM_HALO, 0 },
+        { "randh-mrv",     0, CELL_RANDOM_HALO, 1 },
     };
     engine_t engines[NB_ALL_ENGINES];
     int nb_engines = NB_DEFAULT_ENGINES;
@@ -1045,9 +1150,16 @@ int main(int argc, char **argv)
         uses_cell_hook |= (engines[e].cell_mask_kind != CELL_NONE);
     }
     if (uses_cell_hook) {
-        printf("ordre des cases : croix de %d cases sur %d ; contrôles aléatoires à %d"
-               " (rand-*) et %d (randc-*) cases, graine %llu\n",
-               cross_size(), ETERN_PARTS, cross_size(), ETERN_PARTS - cross_size(), cross_seed);
+        printf("ordre des cases : croix de %d cases sur %d, halo des indices de %d ;"
+               " contrôles aléatoires à %d (rand-*), %d (randc-*) et %d (randh-*) cases,"
+               " graine %llu\n",
+               cross_size(), ETERN_PARTS, g_halo_n,
+               cross_size(), ETERN_PARTS - cross_size(), g_halo_n, cross_seed);
+        if (g_halo_n == 0) {
+            fprintf(stderr, "halo vide : cette instance n'a pas d'indice (--indices-file),"
+                    " les bras halo-*/randh-* y seraient des no-op.\n");
+            return EXIT_FAILURE;
+        }
         if (cross_size() >= ETERN_PARTS) {
             fprintf(stderr, "la croix couvre le plateau ENTIER à cette taille compilée :"
                     " tous les bras d'ordre des cases y sont des no-op, la mesure ne dirait"
@@ -1345,9 +1457,7 @@ int main(int argc, char **argv)
             // canonisation à faire avant fermeture, contrairement à avant PR1.
             for (int e = 0; e < nb_engines; e++) {
                 res[e] = close_subtree(&pkt, &engines[e], budget);
-                tally[e].closed += (res[e].status == BT_CORE_EXHAUSTED);
-                tally[e].nodes += res[e].nodes;
-                tally[e].seconds += res[e].seconds;
+                tally_add(&tally[e], &res[e]);
             }
             int all_closed = 1;
             for (int e = 0; e < nb_engines; e++) {
@@ -1356,8 +1466,7 @@ int main(int argc, char **argv)
             if (all_closed) {
                 nb_common++;
                 for (int e = 0; e < nb_engines; e++) {
-                    common[e].nodes += res[e].nodes;
-                    common[e].seconds += res[e].seconds;
+                    tally_add(&common[e], &res[e]);
                 }
             }
             if (!kpi) {
@@ -1392,9 +1501,7 @@ int main(int argc, char **argv)
             build_prefix_root(&deep, depths[i], &r);
             for (int e = 0; e < nb_engines; e++) {
                 res[e] = close_subtree(&r, &engines[e], budget);
-                tally[e].closed += (res[e].status == BT_CORE_EXHAUSTED);
-                tally[e].nodes += res[e].nodes;
-                tally[e].seconds += res[e].seconds;
+                tally_add(&tally[e], &res[e]);
             }
             int all_closed = 1;
             for (int e = 0; e < nb_engines; e++) {
@@ -1403,8 +1510,7 @@ int main(int argc, char **argv)
             if (all_closed) {
                 nb_common++;
                 for (int e = 0; e < nb_engines; e++) {
-                    common[e].nodes += res[e].nodes;
-                    common[e].seconds += res[e].seconds;
+                    tally_add(&common[e], &res[e]);
                 }
             }
             print_row("préfixe", placed_count(&r), nb_engines, res);
