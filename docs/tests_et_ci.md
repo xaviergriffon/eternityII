@@ -639,6 +639,115 @@ où ça compterait pour une preuve de fermeture, et son coût par nœud reste
 supérieur à tout bénéfice observé sur trois mesures indépendantes. Voir §4.4
 du document de conception pour la trace complète.
 
+### Bras d'ordre des CASES : la croix séparatrice
+
+Les moteurs ci-dessus ne varient que le contenu du forward-check. `--engines`
+déclare en plus **six bras d'ordre des variables** — quelle case le balayage MRV
+ouvre en premier — l'axe que le §7.7 de
+[banc_resolution_clones.md](conception/banc_resolution_clones.md) avait laissé
+ouvert faute d'un second point d'entrée dans le moteur. Conception complète :
+[croix_separatrice_ordre_variables.md](conception/croix_separatrice_ordre_variables.md).
+
+La croix est définie en compréhension (`tests/bench/cross_mask.c`,
+`abs(x−y) ≤ 1 ou abs(x+y−(n−1)) ≤ 1`) : 88 cases au 16×16, découpant le reste du
+plateau en quatre régions de 42 sans aucun passage orthogonal, et portant les
+cinq indices officiels. Son cœur est pur et rattaché à `make test`
+(`tests/bench/test_cross_mask.c`), comme `bench_solve_stats.c`.
+
+| Bras | Hauteur du bit dans la clé MRV | Ce qu'il fait |
+|---|---|---|
+| `cross-key` | sous `count` | à score MRV ÉGAL, une case de croix d'abord |
+| `cross-mrv` | au-dessus de `count` | une case de croix avant TOUTES les autres |
+| `rand-key` / `rand-mrv` | idem | **contrôle** : un tirage à la densité de la CROIX (88/256) |
+| `anti-key` / `anti-mrv` | idem | **contrôle** : le complément de la croix (168/256) |
+| `randc-key` / `randc-mrv` | idem | **contrôle** : un tirage à la densité du COMPLÉMENT |
+
+**Les deux contrôles ne sont pas optionnels.** Le §4.14 de
+[elagage_recherche.md](conception/elagage_recherche.md) a mesuré qu'un départage
+**aléatoire** bat déjà l'ordre positionnel de 37 à 56 %. Un bit inséré au-dessus
+du champ de position perturbe cet ordre par construction : sans `rand-*` à même
+densité, un gain ne distingue pas « la croix est un bon a priori » de
+« n'importe quoi vaut mieux que l'ordre des bits ». `--cross-seed <n>` ensemence
+le tirage (défaut 1).
+
+**Et un contrôle ne vaut qu'à la densité du bras qu'il contrôle** — c'est la
+raison d'être de `randc-*`, ajouté en cours de campagne. La croix marque 88
+cases sur 256, son complément 168 : les opposer au même tirage confond « la
+géométrie compte » avec « la densité compte », et c'est exactement ce sur quoi
+la campagne a buté (§7.4 du document de conception). Les deux tirages partent de
+graines décalées, faute de quoi l'un serait un préfixe de l'autre — deux
+contrôles corrélés ne font qu'un seul contrôle.
+
+**Résultat de la campagne (2026-09-17) : négatif, aucun bras adopté.**
+`cross-key` change réellement l'arbre sur 232 racines de production sur 499 et
+n'y gagne rien (113/119, p = 0,74) ; `cross-mrv` ferme 94 racines sur 200 là où
+la production en ferme 199. Les bras restent dans le banc — ils ne coûtent rien
+tant qu'on ne les demande pas, et c'est ce qui permet de refaire la mesure
+plutôt que de la croire sur parole.
+
+```sh
+make bench-refutation BENCH_REFUT_ARGS="--from-back temp.back --min-pieces 130 --max-roots 50 --engines mrv,cross-key,rand-key,anti-key --budget 5000000"
+```
+
+**Ces six bras ne sont jamais joués par défaut** (`--engines` vaut
+`mrv,mrv+singleton` sans argument) : une invocation existante mesure exactement
+ce qu'elle mesurait, et comparer huit moteurs sur les mêmes racines coûte quatre
+fois plus cher.
+
+**Auto-test, joué dès qu'un bras d'ordre des cases est demandé.** Le moteur a
+deux balayages choisis une fois par recherche (`bt_masks_complete`) :
+`mrv_choose_cell_fast` sur une map de production, `mrv_choose_cell` en repli.
+Leur équivalence est verrouillée en production par
+`mrv_choose_cell_fast_matches_generic_on_real_map` — mais ce test-là compile
+**sans le hook** et ne dit donc rien des bras, alors que les deux chemins n'ont
+pas la même forme (le générique sort dès `count == 0`, le rapide va au bout de
+son balayage). L'auto-test compare verdict, case et score sur des plateaux de
+profondeurs croissantes, pour chaque bras demandé, et **refuse de mesurer** en
+cas de désaccord. Il ne contrôle PAS que les bras coûtent le même nombre de
+nœuds — ce serait faux, et c'est tout l'objet de la mesure ; contrairement au
+banc « côté trouver », dont la prémisse (un sous-arbre mort coûte pareil quel
+que soit l'ordre des VALEURS) se retourne, elle, en test.
+
+**Le banc refuse aussi de tourner en build 16** : en 4×4 la croix couvre le
+plateau entier, tous les bras y sont des no-op, et une mesure y serait une
+mesure de rien.
+
+**Rien de tout cela n'entre en production.** Le hook vit sous
+`ETII_BENCH_CELL_HOOKS`, défini par ce seul banc ; `build/core/etii_search.o`
+est **octet pour octet identique** avec et sans lui, et c'est le contrôle à
+refaire avant d'y toucher. Ce banc ne définit volontairement pas
+`ETII_BENCH_HOOKS` (qui active en plus l'ordre des valeurs) : l'indirection de
+l'ordre des valeurs coûterait un test de pointeur par candidat dans sa boucle
+chaude et rendrait ses temps incomparables à ses campagnes précédentes — et
+l'ordre des valeurs n'a de toute façon aucun effet sur un sous-arbre mort.
+
+### Point de chute : la profondeur maximale atteinte
+
+Chaque ligne par racine porte une quatrième colonne, et le bilan deux agrégats :
+la **profondeur maximale atteinte** pendant la fermeture (`max_result`). C'est
+la grandeur qu'un parc de clients observe (« le max revient vers 206 ») et dont
+il n'a pas la moyenne.
+
+**Lecture : à budget de nœuds égal, PLUS BAS est MEILLEUR** — la branche morte a
+été abandonnée plus tôt, donc la contradiction a été vue plus tôt. C'est
+l'inverse de la lecture de `bench_search.sh`, où `max_result` est un garde-fou
+contre un moteur qui gagnerait en débit en cessant d'avancer.
+
+Deux précautions, toutes deux payées par une mesure fausse avant d'être écrites
+ici :
+
+- **`max_result` reste à 0 si aucun placement n'aboutit.** Le moteur ne l'écrit
+  qu'après un placement réussi, donc une racine réfutée d'emblée laisse le
+  compteur à zéro — pris tel quel, cela donne une « chute moyenne » inférieure à
+  la profondeur des racines, ce qui est impossible. Le banc rapporte donc
+  `max(max_result, profondeur de la racine)`, et publie à part le nombre de
+  racines **réfutées sans placer** : sur un stock de production, MRV en réfute
+  9 % à ce régime.
+- **Le maximum ne se compare pas entre deux échantillons de tailles
+  différentes.** Un maximum croît avec le nombre d'essais : les 206-216 d'un
+  parc de clients ne se comparent pas aux 200 d'un banc de 200 racines. Seul
+  l'écart apparié entre moteurs, à budget égal, se lit.
+
 ### Mode `--pruner-profile` : rejoue le VRAI pipeline du pruner
 
 Les modes précédents mesurent des moteurs de RECHERCHE. `--pruner-profile <n>`
@@ -961,6 +1070,44 @@ distribution, aucun mécanisme n'est implémenté.
 | `--seeds <n>` | graines des politiques aléatoires (les déterministes n'en consomment qu'une) |
 | `--budget <n>` | plafond de nœuds par exécution |
 | `--selftest-budget <n>` | plafond de l'auto-test de l'instrument (0 = désactivé) |
+
+### 2 bis. Axe « ordre des CASES » (variables)
+
+`--policies` ne sélectionne pas que des ordres de valeurs : huit bras d'ordre
+des **cases** y sont déclarés, tous à l'ordre de valeurs de production pour ne
+faire varier qu'un axe à la fois. Ils passent par le même hook
+`ETII_BENCH_CELL_HOOKS` que `bench_refutation`, et répondent à une question que
+le banc de réfutation ne peut pas poser : la recherche met plus de 100 pièces à
+**rencontrer** les indices, bien qu'ils soient posés dès la genèse — les
+rencontrer plus tôt fait-il TROUVER plus vite ?
+
+| Bras | Masque | Hauteur |
+|---|---|---|
+| `cross-key` / `cross-mrv` | la croix séparatrice (88 cases en 16×16) | sous / au-dessus de `count` |
+| `halo-key` / `halo-mrv` | le **halo des indices de l'instance** (20 cases) | idem |
+| `randc-*` / `randh-*` | contrôles aléatoires aux densités de la croix / du halo | idem |
+
+Le **halo** est dérivé du plateau de genèse — les cases vides voisines d'une
+case posée, c'est-à-dire exactement celles sur lesquelles une contrainte
+d'indice porte. Il est donc une propriété de l'INSTANCE, pas de la géométrie du
+plateau : contrairement à la croix, il se transpose d'une taille de clone à
+l'autre sans distorsion de densité.
+
+```sh
+make bench-solve CPPFLAGS=-DETERN_PARTS=100 \
+     BENCH_SOLVE_ARGS="--instance-dir data/clones --policies natural,halo-key,halo-mrv,randh-key,randh-mrv --budget 20000000"
+```
+
+**Ces huit bras ne sont pas joués par défaut** (`--policies` vaut les cinq
+ordres de valeurs), pour la même raison que dans `bench_refutation` : une
+invocation existante doit continuer de mesurer ce qu'elle mesurait.
+`--cross-seed <n>` ensemence les contrôles aléatoires.
+
+**Résultat de la campagne (2026-09-18) : négatif, aucun bras adopté.** Sur deux
+cellules × 30 instances, tous les bras perdent la comparaison appariée, et
+`halo-mrv` — le bras le plus économique en apparence — ne résout **aucune** des
+60 instances quand la production les résout toutes. Détail et mécanisme :
+§7 bis de [croix_separatrice_ordre_variables.md](conception/croix_separatrice_ordre_variables.md).
 
 ### 3. L'auto-test de l'instrument, en deux contrôles
 

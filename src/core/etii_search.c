@@ -160,6 +160,58 @@ static void bt_init_constraints(key_part constraints[ETERN_SIZE][ETERN_SIZE],
 /** @brief Position d'une case dans les masques (ordre x-major, cf. ci-dessus). */
 #define BT_CELL_POS(x, y) ((x) * ETERN_SIZE + (y))
 
+#if defined(ETII_BENCH_HOOKS) && !defined(ETII_BENCH_CELL_HOOKS)
+/* `ETII_BENCH_HOOKS` (banc « côté trouver ») implique le hook d'ordre des
+ * cases ; `tests/bench/bench_refutation.c` ne définit QUE celui-ci, pour ne
+ * pas payer l'indirection d'ordre des valeurs dans sa boucle chaude et garder
+ * ses temps comparables à ses campagnes précédentes. */
+#define ETII_BENCH_CELL_HOOKS 1
+#endif
+
+#ifdef ETII_BENCH_CELL_HOOKS
+/* ======================================================================
+ * Point d'entrée de mesure : ORDRE DES CASES (variables)
+ *
+ * Second point d'entrée, celui que PR3 du banc « côté trouver » n'avait pas
+ * livré et que le §7.7 de docs/conception/banc_resolution_clones.md réclamait
+ * pour rendre le DÉPARTAGE DES CASES mesurable. Même discipline que le hook
+ * d'ordre des valeurs ci-dessus : aucun interrupteur de mesure dans le binaire
+ * de production (§6 de docs/conception/mrv_moteur_unique.md) — `./eternityII`
+ * ne compile pas une instruction de ce qui suit.
+ *
+ * Deux leviers, qui sont le MÊME bit d'un octet par case placé à deux hauteurs
+ * différentes de la clé composite (§5.1 de
+ * docs/conception/croix_separatrice_ordre_variables.md) :
+ *
+ *   `etii_bench_cell_bias`  — SOUS `count` : à score MRV égal, les cases
+ *                             marquées passent devant. Le bit est statique par
+ *                             case, donc cuit dans `bt_frontier.nc_key` : le
+ *                             balayage garde exactement une charge de 32 bits
+ *                             et un `or` par case. Coût par nœud : NUL.
+ *   `etii_bench_cell_first` — AU-DESSUS de `count` : les cases marquées
+ *                             passent devant TOUTES les autres. Implémenté par
+ *                             une SECONDE passe restreinte, exécutée après le
+ *                             verdict de mort, et non par un champ de clé.
+ *
+ * Pourquoi la seconde passe plutôt qu'un bit en poids fort — c'est le piège
+ * central de ce mécanisme : le chemin rapide détecte la case morte par
+ * `(best >> MRV_KEY_LOW_BITS) == 0`, ce qui n'est vrai QUE parce que `count`
+ * est le champ de poids fort. Un bit au-dessus de lui ferait cesser de voir
+ * une case morte NON marquée : on comparerait alors un élagage affaibli, pas
+ * un ordre différent, et la mesure ne dirait rien. La seconde passe laisse le
+ * verdict de mort intact et ne coûte un balayage de plus qu'au bras qui la
+ * demande — un test de pointeur par nœud pour tous les autres.
+ *
+ * Contrat : tableaux de `BT_CELLS` octets (0/1), indexés par `BT_CELL_POS`,
+ * valides pendant toute la recherche, affectés par le banc — qui inclut cette
+ * unité de compilation, comme pour `singleton_conflict_check`. Le tableau nul
+ * partagé évite un test de nullité au calcul de `nc_key`.
+ * ====================================================================== */
+static const uint8_t etii_bench_no_bias[BT_CELLS] = {0};
+static const uint8_t *etii_bench_cell_bias = etii_bench_no_bias;
+static const uint8_t *etii_bench_cell_first = NULL;
+#endif // ETII_BENCH_CELL_HOOKS
+
 /** @brief Largeurs des champs de la clé composite de `mrv_choose_cell`.
  *
  * La clé vaut `(count << (NC + W)) | ((MRV_KEY_NC_MAX - nconstr) << W)
@@ -176,6 +228,21 @@ static void bt_init_constraints(key_part constraints[ETERN_SIZE][ETERN_SIZE],
 #define MRV_KEY_W_BITS  8
 #define MRV_KEY_W_MAX   ((1 << MRV_KEY_W_BITS) - 1)
 typedef char mrv_key_nc_fits_check[(4 <= MRV_KEY_NC_MAX) ? 1 : -1];
+
+/** @brief Largeur du champ de biais du hook d'ordre des cases : 0 en production.
+ *
+ * Sous `ETII_BENCH_CELL_HOOKS`, un bit s'intercale entre `count` et `nconstr`
+ * (cf. le bloc du hook ci-dessus). Les trois bits de marge que laisse
+ * `mrv_pos_fits_check` suffisent largement : `MRV_KEY_LOW_BITS` passe de 19 à
+ * 20, et la borne n'est atteinte qu'à 22. */
+#ifdef ETII_BENCH_CELL_HOOKS
+#define MRV_KEY_BIAS_BITS 1
+#else
+#define MRV_KEY_BIAS_BITS 0
+#endif
+
+/** @brief Décalage du champ `count` dans la clé de `mrv_choose_cell`. */
+#define MRV_KEY_COUNT_SHIFT (MRV_KEY_NC_BITS + MRV_KEY_W_BITS + MRV_KEY_BIAS_BITS)
 
 /**
  * @brief État incrémental permettant d'énumérer la frontière sans balayer la grille.
@@ -208,27 +275,38 @@ typedef struct {
      *  `((MRV_KEY_NC_MAX - nconstr) << (W + POS)) | ((MRV_KEY_W_MAX - weight)
      *  << POS) | pos`. Tenu en lockstep avec `nconstr` (trois sites) et
      *  `weight` (`bt_frontier_fail`) pour que le balayage n'ait qu'une charge
-     *  de 32 bits et un `or` par case. */
+     *  de 32 bits et un `or` par case. Sous `ETII_BENCH_CELL_HOOKS` un bit de
+     *  biais s'ajoute AU-DESSUS (`bt_nc_key`) — statique par case, donc cuit
+     *  ici plutôt que payé par le balayage ; nul en production. */
     uint32_t nc_key[BT_CELLS];
 } bt_frontier;
 
 /** @brief Largeur du champ position dans la valeur combinée de `mrv_choose_cell_fast`.
  *
  * `pos < BT_CELLS` doit tenir dans ce champ, le poids (8 bits) et `nconstr`
- * (3 bits) au-dessus, et `count << (NC + W + POS)` dans 31 bits : `count`
- * ≤ ETERN_PARTS (9 bits), 28 bits en tout. Vérifié à la compilation. */
+ * (3 bits) au-dessus, et `count << MRV_KEY_LOW_BITS` dans 31 bits : `count`
+ * ≤ ETERN_PARTS (9 bits), 28 bits en tout — 29 sous `ETII_BENCH_CELL_HOOKS`,
+ * qui intercale un bit de biais. Vérifié à la compilation ; la borne n'est
+ * atteinte qu'à `MRV_KEY_LOW_BITS == 22`, soit trois bits de marge. */
 #define MRV_POS_BITS 8
 #define MRV_POS_MASK ((1u << MRV_POS_BITS) - 1u)
-#define MRV_KEY_LOW_BITS (MRV_KEY_NC_BITS + MRV_KEY_W_BITS + MRV_POS_BITS)
+#define MRV_KEY_LOW_BITS (MRV_KEY_COUNT_SHIFT + MRV_POS_BITS)
 typedef char mrv_pos_fits_check[(BT_CELLS <= (1 << MRV_POS_BITS)
                                  && ((unsigned long)(ETERN_PARTS + 1) << MRV_KEY_LOW_BITS) < 0x7fffffffUL) ? 1 : -1];
 
 /** @brief Valeur de `bt_frontier.nc_key` pour une case à `nconstr` côtés contraints et de poids `weight`. */
 static inline uint32_t bt_nc_key(int pos, int nconstr, int weight)
 {
-    return ((uint32_t)(MRV_KEY_NC_MAX - nconstr) << (MRV_KEY_W_BITS + MRV_POS_BITS))
-         | ((uint32_t)(MRV_KEY_W_MAX - weight) << MRV_POS_BITS)
-         | (uint32_t)pos;
+    uint32_t key = ((uint32_t)(MRV_KEY_NC_MAX - nconstr) << (MRV_KEY_W_BITS + MRV_POS_BITS))
+                 | ((uint32_t)(MRV_KEY_W_MAX - weight) << MRV_POS_BITS)
+                 | (uint32_t)pos;
+#ifdef ETII_BENCH_CELL_HOOKS
+    /* Le bit de biais est statique par case : le cuire ici, aux trois sites de
+     * lockstep de `nc_key`, laisse le balayage inchangé. */
+    key |= (uint32_t)etii_bench_cell_bias[pos]
+           << (MRV_KEY_NC_BITS + MRV_KEY_W_BITS + MRV_POS_BITS);
+#endif
+    return key;
 }
 
 
@@ -1336,7 +1414,7 @@ static inline int mrv_finish_choice(const bt_frontier *front, int best_key, int 
     }
     *out_x = (uint8_t)(best_pos / ETERN_SIZE);
     *out_y = (uint8_t)(best_pos % ETERN_SIZE);
-    *out_count = best_key >> (MRV_KEY_NC_BITS + MRV_KEY_W_BITS);
+    *out_count = best_key >> MRV_KEY_COUNT_SHIFT;
     return 1;
 }
 
@@ -1397,14 +1475,53 @@ static int mrv_choose_cell(struct possibility_packet *board,
             // DÉCROISSANT (§4.14, cf. bt_frontier_fail), puis l'ordre des bits
             // (`<` strict : le premier rencontré garde la main). Comparer une
             // seule valeur au lieu de quatre rend la réduction sans branchement.
-            int key = (count << (MRV_KEY_NC_BITS + MRV_KEY_W_BITS))
+            int key = (count << MRV_KEY_COUNT_SHIFT)
                     | ((MRV_KEY_NC_MAX - front->nconstr[pos]) << MRV_KEY_W_BITS)
                     | (MRV_KEY_W_MAX - front->weight[pos]);
+#ifdef ETII_BENCH_CELL_HOOKS
+            key |= (int)etii_bench_cell_bias[pos] << (MRV_KEY_NC_BITS + MRV_KEY_W_BITS);
+#endif
             int better = (key < best_key);
             best_key = better ? key : best_key;
             best_pos = better ? pos : best_pos;
         }
     }
+
+#ifdef ETII_BENCH_CELL_HOOKS
+    /* Seconde passe restreinte (`etii_bench_cell_first`). Le verdict de mort
+     * est déjà tombé — cette boucle-ci sort immédiatement sur `count == 0`,
+     * pour TOUTE case de frontière — donc restreindre ici ne peut plus
+     * l'affaiblir. C'est exactement ce que la forme « bit en poids fort »
+     * n'aurait pas su garantir. */
+    if (etii_bench_cell_first != NULL && best_key != INT_MAX) {
+        int first_key = INT_MAX;
+        int first_pos = 0;
+        for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+            uint64_t bits = front->empty[w] & front->constrained[w];
+            while (bits != 0) {
+                int pos = w * 64 + __builtin_ctzll(bits);
+                bits &= bits - 1;
+                if (!etii_bench_cell_first[pos]) {
+                    continue;
+                }
+                int x = pos / ETERN_SIZE;
+                int y = pos % ETERN_SIZE;
+                int count = mrv_free_candidates(mapParts, &constraints[x][y], board, used, cell_mask[pos]);
+                int key = (count << MRV_KEY_COUNT_SHIFT)
+                        | ((MRV_KEY_NC_MAX - front->nconstr[pos]) << MRV_KEY_W_BITS)
+                        | (MRV_KEY_W_MAX - front->weight[pos])
+                        | ((int)etii_bench_cell_bias[pos] << (MRV_KEY_NC_BITS + MRV_KEY_W_BITS));
+                int better = (key < first_key);
+                first_key = better ? key : first_key;
+                first_pos = better ? pos : first_pos;
+            }
+        }
+        if (first_key != INT_MAX) {
+            best_key = first_key;
+            best_pos = first_pos;
+        }
+    }
+#endif
 
     return mrv_finish_choice(front, best_key, best_pos, out_x, out_y, out_count);
 }
@@ -1473,6 +1590,38 @@ static int mrv_choose_cell_fast(const uint64_t used[MRV_USED_WORDS],
     if ((best >> MRV_KEY_LOW_BITS) == 0) {
         return 0; // sous-arbre mort : une case de frontière sans candidat libre
     }
+
+#ifdef ETII_BENCH_CELL_HOOKS
+    /* Seconde passe restreinte — même règle, même ordre de bits, après le
+     * verdict de mort (cf. mrv_choose_cell). Un test de pointeur par nœud pour
+     * les bras qui ne la demandent pas. */
+    if (etii_bench_cell_first != NULL && best != UINT32_MAX) {
+        uint32_t first = UINT32_MAX;
+        for (int w = 0; w < BT_FRONTIER_WORDS; w++) {
+            uint64_t bits = front->empty[w] & front->constrained[w];
+            const uint64_t *const *masks_w = cell_mask + w * 64;
+            const uint32_t *nc_key_w = front->nc_key + w * 64;
+            const uint8_t *first_w = etii_bench_cell_first + w * 64;
+            while (bits != 0) {
+                unsigned bit = (unsigned)__builtin_ctzll(bits);
+                bits &= bits - 1;
+                if (!first_w[bit]) {
+                    continue;
+                }
+                const uint64_t *mask = masks_w[bit];
+                int count = 0;
+                for (int k = 0; k < BT_MASK_WORDS; k++) {
+                    count += etii_popcount64(mask[k] & free_ids[k]);
+                }
+                uint32_t cand = ((uint32_t)count << MRV_KEY_LOW_BITS) | nc_key_w[bit];
+                first = (cand < first) ? cand : first;
+            }
+        }
+        if (first != UINT32_MAX) {
+            best = first;
+        }
+    }
+#endif
 
     if (best == UINT32_MAX) {
         return mrv_finish_choice(front, INT_MAX, 0, out_x, out_y, out_count);

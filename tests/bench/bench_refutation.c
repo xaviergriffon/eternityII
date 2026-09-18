@@ -51,10 +51,22 @@
 #include <string.h>
 #include <time.h>
 
+/* Hook d'ordre des CASES (variables) : celui du §5.4 de
+ * docs/conception/croix_separatrice_ordre_variables.md, et l'axe que le §7.7 de
+ * banc_resolution_clones.md avait laissé ouvert. Ce banc ne définit PAS
+ * `ETII_BENCH_HOOKS` (qui active en plus l'ordre des valeurs) : l'indirection
+ * de l'ordre des valeurs coûterait un test de pointeur par candidat dans sa
+ * boucle chaude et rendrait ses temps incomparables à ses campagnes
+ * précédentes — or l'ordre des valeurs n'a de toute façon aucun effet sur un
+ * sous-arbre MORT, qui est tout ce que ce banc mesure. */
+#define ETII_BENCH_CELL_HOOKS 1
+
 /* L'unité de compilation complète : les deux moteurs sont `static`. Même
  * technique que tests/core/test_etii_search.c — d'où le retrait d'etii_search.c
  * de la liste des modules liés (cf. makefile). */
 #include "core/etii_search.c"
+
+#include "bench/cross_mask.h"
 
 #include "core/readdata.h"
 #include "core/part.h"
@@ -152,12 +164,52 @@ static double now_seconds(void)
  * `bench-refutation` du makefile** — le retirer le dégraderait en simple
  * avertissement, et le débordement redeviendrait silencieux.
  */
-#define NB_ALL_ENGINES 2
+#define NB_ALL_ENGINES 14
+
+/**
+ * @brief Nombre de variantes jouées quand `--engines` n'est pas donné.
+ *
+ * Les six bras d'ordre des cases sont DÉCLARÉS mais pas joués par défaut : une
+ * invocation existante de ce banc doit continuer de mesurer exactement ce
+ * qu'elle mesurait, et une campagne qui compare huit moteurs sur les mêmes
+ * racines coûte quatre fois plus cher. Ils se demandent par `--engines`. Les
+ * `NB_DEFAULT_ENGINES` premières entrées d'`all_engines` sont donc les
+ * historiques, et leur ORDRE est significatif.
+ */
+#define NB_DEFAULT_ENGINES 2
+
+/** @brief Quel masque de cases un bras injecte dans le hook d'ordre des cases. */
+typedef enum {
+    CELL_NONE = 0,  /**< Aucun : l'ordre de production. */
+    CELL_CROSS,     /**< La croix séparatrice (§3 du document de conception). */
+    CELL_ANTI,      /**< Son complément — contrôle « anti-croix » (§6.2). */
+    CELL_RANDOM,    /**< Un tirage à la densité de la CROIX — contrôle de `cross-*`. */
+    /** Un tirage à la densité du COMPLÉMENT — contrôle d'`anti-*`.
+     *  Un contrôle aléatoire ne vaut qu'à la densité du bras qu'il contrôle :
+     *  la croix marque 88 cases sur 256, son complément 168. Les opposer au
+     *  même tirage confondrait « la géométrie compte » avec « la densité
+     *  compte » — et la campagne PR2 a justement buté là-dessus. */
+    CELL_RANDOM_COMP,
+    /** Le HALO des indices de l'instance : les cases vides voisines d'un
+     *  indice sur le plateau de GENÈSE, c'est-à-dire exactement celles sur
+     *  lesquelles une contrainte d'indice porte (20 cases au 16×16, toutes sur
+     *  la croix). Le bras minimal de l'idée de croix. */
+    CELL_HALO,
+    /** Contrôle aléatoire à la densité du HALO. */
+    CELL_RANDOM_HALO,
+} cell_mask_kind_t;
 
 typedef struct {
     const char *name;
     /** 1 : arme le conflit de singletons dans bt_forward_check (§4.4). */
     int singleton_check;
+    /** Masque injecté dans le hook d'ordre des cases (CELL_NONE : production). */
+    cell_mask_kind_t cell_mask_kind;
+    /** 1 : masque AU-DESSUS de `count` (les cases marquées avant toutes les
+     *  autres, « -mrv ») ; 0 : SOUS `count` (départage à score MRV égal,
+     *  « -key »). Cf. §5.1 du document de conception — les deux bras sont le
+     *  même bit à deux hauteurs. */
+    int cell_first;
 } engine_t;
 
 /** @brief Résultat d'une tentative de fermeture. */
@@ -165,6 +217,25 @@ typedef struct {
     bt_core_result_t status;
     unsigned long long nodes;
     double seconds;
+    /** Profondeur MAXIMALE atteinte pendant la fermeture (« point de chute ») :
+     *  le `max_result` du moteur, remis à zéro par `close_subtree` avant chaque
+     *  tentative. C'est la seule grandeur de ce banc qui ne mesure pas un COÛT
+     *  mais une DATE : à quel moment une branche morte est abandonnée.
+     *
+     *  Descendre loin dans une branche qui ne mène nulle part n'est pas
+     *  l'objectif du solveur (cf. l'en-tête de ce fichier) : à budget de nœuds
+     *  égal, une profondeur maximale PLUS BASSE est meilleure — la
+     *  contradiction a été vue plus tôt. C'est l'inverse de la lecture de
+     *  `bench_search.sh`, où `max_result` sert de garde-fou contre un moteur
+     *  qui gagnerait en débit en n'avançant plus. */
+    int max_depth;
+    /** 1 : la racine a été réfutée sans qu'AUCUN placement n'aboutisse.
+     *  `max_result` reste alors à 0 — le moteur ne l'écrit qu'après un
+     *  placement réussi — et le prendre pour une « chute nulle » ferait
+     *  descendre la moyenne sous la profondeur des racines elles-mêmes.
+     *  L'état le plus profond réellement atteint est la racine : c'est ce que
+     *  `max_depth` rapporte, et ce compteur-ci garde l'information. */
+    int no_descent;
 } closure_t;
 
 /**
@@ -408,6 +479,83 @@ static int w2_scan(struct possibility_packet *b, map_big_array *map,
     return refuted;
 }
 
+/* ==========================================================================
+ * Masques d'ordre des cases (§5 de croix_separatrice_ordre_variables.md)
+ *
+ * Trois masques construits une fois, au démarrage : la croix, son complément,
+ * et un tirage de MÊME densité. Le troisième n'est pas un luxe — le §4.14 de
+ * elagage_recherche.md a mesuré qu'un départage ALÉATOIRE bat déjà l'ordre
+ * positionnel de 37 à 56 %, et un bit inséré au-dessus du champ de position
+ * perturbe cet ordre par construction : sans ce contrôle, un gain ne
+ * distinguerait pas « la croix est un bon a priori » de « n'importe quoi vaut
+ * mieux que l'ordre des bits ».
+ * ========================================================================== */
+
+static uint8_t g_mask_cross[ETERN_PARTS];
+static uint8_t g_mask_anti[ETERN_PARTS];
+static uint8_t g_mask_random[ETERN_PARTS];
+static uint8_t g_mask_random_comp[ETERN_PARTS];
+static uint8_t g_mask_halo[ETERN_PARTS];
+static uint8_t g_mask_random_halo[ETERN_PARTS];
+static int     g_halo_n = 0;
+
+/** @brief Construit les trois masques. `seed` ensemence le contrôle aléatoire. */
+static void build_cell_masks(uint64_t seed)
+{
+    int n = cross_fill(g_mask_cross);
+    cross_fill_complement(g_mask_anti);
+    cross_fill_random(g_mask_random, n, seed);
+    /* Graine décalée : deux tirages de densités différentes issus de la MÊME
+       graine partageraient leur préfixe de permutation, donc l'un serait inclus
+       dans l'autre — deux contrôles corrélés ne sont qu'un seul contrôle. */
+    cross_fill_random(g_mask_random_comp, ETERN_PARTS - n, seed ^ 0x9E3779B97F4A7C15ULL);
+
+    /* Halo : dérivé du plateau de GENÈSE (vide hormis les indices), pas d'un
+     * paquet du stock — sur une racine à 130 pièces, « voisine d'une case
+     * posée » désignerait toute la frontière. Seule la PRÉSENCE d'une pièce
+     * compte pour `cross_fill_halo`, donc une valeur de grille quelconque
+     * suffit : inutile de résoudre la rotation de chaque indice. */
+    struct possibility_packet genesis;
+    make_empty_board(&genesis);
+    if (indices_file != NULL) {
+        struct array_index *idx = read_indices(indices_file);
+        for (int i = 0; i < idx->size; i++) {
+            struct board_index *h = &idx->indices[i];
+            if (h->x < ETERN_SIZE && h->y < ETERN_SIZE) {
+                genesis.grid[h->x][h->y] = 1;
+            }
+        }
+        free_array_index(idx);
+    }
+    g_halo_n = cross_fill_halo(g_mask_halo, genesis.grid);
+    cross_fill_random(g_mask_random_halo, g_halo_n, seed ^ 0xD1B54A32D192ED03ULL);
+}
+
+/** @brief Masque d'un bras, ou NULL pour l'ordre de production. */
+static const uint8_t *arm_cell_mask(const engine_t *eng)
+{
+    switch (eng->cell_mask_kind) {
+        case CELL_CROSS:  return g_mask_cross;
+        case CELL_ANTI:   return g_mask_anti;
+        case CELL_RANDOM: return g_mask_random;
+        case CELL_RANDOM_COMP: return g_mask_random_comp;
+        case CELL_HALO:        return g_mask_halo;
+        case CELL_RANDOM_HALO: return g_mask_random_halo;
+        case CELL_NONE:   break;
+    }
+    return NULL;
+}
+
+/** @brief Arme le hook d'ordre des cases pour ce bras (et le désarme avec NULL). */
+static void arm_cell_hook(const engine_t *eng)
+{
+    const uint8_t *m = (eng != NULL) ? arm_cell_mask(eng) : NULL;
+    int first = (eng != NULL) && eng->cell_first;
+
+    etii_bench_cell_bias  = (m != NULL && !first) ? m : etii_bench_no_bias;
+    etii_bench_cell_first = (m != NULL &&  first) ? m : NULL;
+}
+
 static closure_t close_subtree(const struct possibility_packet *root, const engine_t *eng, long budget)
 {
     closure_t out;
@@ -418,13 +566,20 @@ static closure_t close_subtree(const struct possibility_packet *root, const engi
     max_result = 0;
     request = REQUEST_CONTINUE;
     singleton_conflict_check = eng->singleton_check;
+    /* Avant l'appel : `bt_frontier_init` cuit le biais dans `nc_key`. */
+    arm_cell_hook(eng);
 
     unsigned long long nodes = 0;
     double t0 = now_seconds();
     out.status = search_packet_backtracking_mrv(&g_client, &work, g_idParts, budget, 0, &nodes);
     out.seconds = now_seconds() - t0;
     out.nodes = nodes;
+    /* Plus profond état atteint : au moins la racine elle-même. */
+    const int root_depth = possibility_placed_count(root);
+    out.no_descent = (max_result == 0);
+    out.max_depth = (max_result > root_depth) ? max_result : root_depth;
     singleton_conflict_check = 0;
+    arm_cell_hook(NULL);
     return out;
 }
 
@@ -485,6 +640,113 @@ static void build_prefix_root(const struct possibility_packet *deep, int k,
 }
 
 /* ==========================================================================
+ * Auto-test de l'instrument : les deux balayages MRV doivent s'accorder
+ * SOUS CHAQUE BRAS.
+ *
+ * Le moteur a deux chemins choisis une fois par recherche (`bt_masks_complete`)
+ * : `mrv_choose_cell_fast` sur une map de production, `mrv_choose_cell` en
+ * repli. Leur équivalence est verrouillée en production par
+ * `mrv_choose_cell_fast_matches_generic_on_real_map` — mais ce test-là compile
+ * sans le hook, donc il ne dit rien des bras. Or les deux chemins n'ont PAS la
+ * même forme : le générique sort immédiatement sur `count == 0`, le rapide va
+ * au bout de son balayage. Un bras qui se tromperait de place dans cette
+ * mécanique rendrait des CASES différentes selon le chemin, sans qu'aucune
+ * assertion de production ne s'en aperçoive.
+ *
+ * L'auto-test compare donc verdict, case ET score MRV sur une série de
+ * plateaux de profondeurs croissantes, pour chaque bras demandé. Il ne
+ * contrôle PAS que les bras coûtent le même nombre de nœuds : ce serait faux,
+ * et c'est même tout l'objet de la mesure — contrairement au banc « côté
+ * trouver », dont la prémisse (un sous-arbre mort coûte pareil quel que soit
+ * l'ordre des VALEURS) se retourne en test. Ici l'ordre des VARIABLES change,
+ * et le coût de réfutation avec lui.
+ * ========================================================================== */
+
+/** @brief Compare les deux balayages sur un plateau, pour le bras déjà armé. */
+static int selftest_compare_one(const struct possibility_packet *root)
+{
+    struct possibility_packet board;
+    memcpy(&board, root, sizeof(board));
+
+    const int8_t all_face = (int8_t)g_client.map_part->sizearrayM;
+    key_part constraints[ETERN_SIZE][ETERN_SIZE];
+    bt_init_constraints(constraints, &board, g_client.all_rotate_part, all_face);
+
+    uint64_t used[MRV_USED_WORDS];
+    mrv_used_init(used, &board);
+
+    /* `nc_key` cuit le biais : la frontière se construit APRÈS l'armement. */
+    bt_frontier front;
+    bt_frontier_init(&front, &board);
+
+    const uint64_t *cell_mask[BT_CELLS];
+    bt_mask_init(cell_mask, g_client.map_part, constraints);
+
+    uint8_t xg = 0, yg = 0, xf = 0, yf = 0;
+    int cg = 0, cf = 0;
+    int rg = mrv_choose_cell(&board, constraints, g_client.map_part, used, &front,
+                             cell_mask, &xg, &yg, &cg);
+    int rf = mrv_choose_cell_fast(used, &front, cell_mask, &xf, &yf, &cf);
+
+    if (rg != rf) {
+        return 1;
+    }
+    if (rg == 0) {
+        return 0; /* les deux disent « mort » : rien d'autre à comparer */
+    }
+    return (xg != xf || yg != yf || cg != cf) ? 1 : 0;
+}
+
+/**
+ * @brief Joue l'auto-test sur des plateaux de profondeurs croissantes.
+ * @return Nombre de désaccords (0 attendu).
+ */
+static int selftest_choose_cell_paths(const engine_t *engines, int nb_engines, long descent_nodes)
+{
+    if (!bt_masks_complete(g_client.map_part)) {
+        printf("auto-test : map hors gabarit, le chemin rapide ne s'applique pas —"
+               " comparaison sans objet\n");
+        return 0;
+    }
+
+    struct possibility_packet root, deep;
+    unsigned long long nodes = 0;
+    uint16_t deep_alloc = 0;
+
+    make_empty_board(&root);
+    request = REQUEST_CONTINUE;
+    arm_cell_hook(NULL); /* la descente se fait en ordre de production */
+    search_packet_backtracking_mrv(&g_client, &root, g_idParts, descent_nodes, 0, &nodes);
+    if (!best_board_get(&g_search_best_board, &deep, &deep_alloc)) {
+        printf("auto-test : aucune descente exploitable, contrôle ignoré\n");
+        return 0;
+    }
+
+    int deepest = placed_count(&deep);
+    int mismatches = 0;
+    int boards = 0;
+
+    for (int e = 0; e < nb_engines; e++) {
+        arm_cell_hook(&engines[e]);
+        for (int k = 20; k <= deepest; k += 10) {
+            struct possibility_packet r;
+            build_prefix_root(&deep, k, &r);
+            boards++;
+            if (selftest_compare_one(&r)) {
+                mismatches++;
+                printf("auto-test : DÉSACCORD balayage rapide/générique — moteur %s,"
+                       " racine à %d pièces\n", engines[e].name, k);
+            }
+        }
+    }
+    arm_cell_hook(NULL);
+
+    printf("auto-test : %d comparaisons rapide/générique sur %d moteur(s), %d désaccord(s)\n",
+           boards, nb_engines, mismatches);
+    return mismatches;
+}
+
+/* ==========================================================================
  * Sortie : un tableau par racine (colonnes = moteurs), puis un bilan.
  * ========================================================================== */
 
@@ -492,10 +754,10 @@ static void print_header(const engine_t *engines, int nb)
 {
     printf("%-12s %6s", "racine", "pièces");
     for (int e = 0; e < nb; e++) {
-        printf(" | %-11s %12s %9s", engines[e].name, "nœuds", "temps");
+        printf(" | %-11s %12s %9s %6s", engines[e].name, "nœuds", "temps", "chute");
     }
     printf("\n");
-    for (int i = 0; i < 19 + nb * 37; i++) putchar('-');
+    for (int i = 0; i < 19 + nb * 44; i++) putchar('-');
     printf("\n");
 }
 
@@ -503,8 +765,8 @@ static void print_row(const char *label, int pieces, int nb, const closure_t *re
 {
     printf("%-12s %6d", label, pieces);
     for (int e = 0; e < nb; e++) {
-        printf(" | %-11s %12llu %7.3f s",
-               status_label(res[e].status), res[e].nodes, res[e].seconds);
+        printf(" | %-11s %12llu %7.3f s %6d",
+               status_label(res[e].status), res[e].nodes, res[e].seconds, res[e].max_depth);
     }
     printf("\n");
     fflush(stdout);
@@ -515,7 +777,29 @@ typedef struct {
     int closed;
     unsigned long long nodes;
     double seconds;
+    /** Profondeur maximale (« point de chute ») : somme, compte et maximum.
+     *  Le maximum est la grandeur que la production observe (le record d'un
+     *  parc de clients) ; la moyenne est celle qu'elle ne sait pas mesurer. */
+    long long depth_sum;
+    int depth_n;
+    int depth_max;
+    /** Racines réfutées sans qu'aucun placement n'aboutisse (cf. closure_t). */
+    int no_descent;
 } tally_t;
+
+/** @brief Cumule une fermeture dans un bilan. */
+static void tally_add(tally_t *t, const closure_t *r)
+{
+    t->closed += (r->status == BT_CORE_EXHAUSTED);
+    t->nodes += r->nodes;
+    t->seconds += r->seconds;
+    t->depth_sum += r->max_depth;
+    t->depth_n++;
+    if (r->max_depth > t->depth_max) {
+        t->depth_max = r->max_depth;
+    }
+    t->no_descent += r->no_descent;
+}
 
 static void print_tally(const engine_t *engines, int nb, const tally_t *t, int roots,
                         const tally_t *common, int nb_common)
@@ -538,9 +822,29 @@ static void print_tally(const engine_t *engines, int nb, const tally_t *t, int r
     // ratio « fermetures/s » s'en trouve flatté. Le sous-ensemble fermé par
     // TOUS les moteurs est la seule comparaison appariée, sans plafond en jeu.
     printf("\ncomparaison appariée — les %d racines fermées par TOUS les moteurs :\n", nb_common);
-    printf("%-14s %14s %14s\n", "moteur", "nœuds", "temps");
+    printf("%-14s %14s %14s %12s %10s\n",
+           "moteur", "nœuds", "temps", "chute moy.", "chute max");
     for (int e = 0; e < nb; e++) {
-        printf("%-14s %14llu %12.3f s\n", engines[e].name, common[e].nodes, common[e].seconds);
+        printf("%-14s %14llu %12.3f s %12.1f %10d\n",
+               engines[e].name, common[e].nodes, common[e].seconds,
+               common[e].depth_n > 0 ? (double)common[e].depth_sum / common[e].depth_n : 0.0,
+               common[e].depth_max);
+    }
+
+    /* Point de chute sur TOUTES les racines, fermées ou non : c'est la
+     * grandeur qu'un parc de clients observe (« le max revient régulièrement
+     * vers 206, record 216 »), et la moyenne qu'il ne sait pas mesurer.
+     * Lecture : à budget de nœuds égal, PLUS BAS est MEILLEUR — la branche
+     * morte a été abandonnée plus tôt. Les racines non fermées y contribuent
+     * aussi, et c'est voulu : ce sont précisément celles où un client passe son
+     * temps. */
+    printf("\npoint de chute (profondeur maximale atteinte), sur les %d racines :\n", roots);
+    printf("%-14s %12s %10s %22s\n",
+           "moteur", "chute moy.", "chute max", "réfutées sans placer");
+    for (int e = 0; e < nb; e++) {
+        printf("%-14s %12.1f %10d %22d\n", engines[e].name,
+               t[e].depth_n > 0 ? (double)t[e].depth_sum / t[e].depth_n : 0.0,
+               t[e].depth_max, t[e].no_descent);
     }
 }
 
@@ -689,7 +993,20 @@ static void usage(void)
            "  --kpi <n>          mode KPI : échantillonne n racines RÉGULIÈREMENT réparties dans le\n"
            "                     .back (aucun filtre de profondeur — c'est ce que le serveur sert\n"
            "                     réellement), n'imprime que le bilan fermetures/seconde\n"
-           "  --engines <liste>  variantes MRV à comparer parmi mrv,mrv+singleton (défaut : les deux)\n"
+           "  --engines <liste>  variantes MRV à comparer, séparées par des virgules.\n"
+           "                     Défaut : mrv,mrv+singleton (les historiques).\n"
+           "                     Ordre des CASES (docs/conception/croix_separatrice_ordre_variables.md),\n"
+           "                     déclarés mais jamais joués par défaut :\n"
+           "                       cross-key / rand-key / anti-key : départage à score MRV ÉGAL\n"
+           "                       cross-mrv / rand-mrv / anti-mrv : case marquée avant TOUTES les autres\n"
+           "                     rand-* et anti-* sont les deux contrôles OBLIGATOIRES du §6.2 :\n"
+           "                     un bras qui ne les bat pas ne mesure pas ce qu'il prétend.\n"
+           "                     halo-key,halo-mrv : le HALO des indices (20 cases en 16x16),\n"
+           "                     le bras minimal — les cases que les indices contraignent.\n"
+           "                     rand-* a la densité de la CROIX (88/256), randc-* celle de son\n"
+           "                     COMPLÉMENT (168/256), randh-* celle du HALO (20/256) :\n"
+           "                     chaque bras se contrôle à SA densité.\n"
+           "  --cross-seed <n>   graine du contrôle aléatoire (défaut 1)\n"
            "  --pruner-profile <n> rejoue le VRAI pipeline du pruner (autoprune_step) sur n\n"
            "                     possibilités échantillonnées régulièrement dans le .back :\n"
            "                     part morte au contrôle superficiel seul, part fermée par la\n"
@@ -727,16 +1044,34 @@ int main(int argc, char **argv)
     int w2x2 = 0;
     int gpu = 0;
     int gpu_batch = 100;
+    unsigned long long cross_seed = 1;
     int depths[MAX_DEPTHS] = {150, 165, 175, 180, 185};
     int nb_depths = 5;
 
     engine_t all_engines[NB_ALL_ENGINES] = {
-        { "mrv",           0 },
-        { "mrv+singleton", 1 },
+        /* Les NB_DEFAULT_ENGINES premières : les historiques, jouées par défaut. */
+        { "mrv",           0, CELL_NONE,   0 },
+        { "mrv+singleton", 1, CELL_NONE,   0 },
+        /* Départage à score MRV égal — le bras réellement candidat (§4.3). */
+        { "cross-key",     0, CELL_CROSS,  0 },
+        { "rand-key",      0, CELL_RANDOM, 0 },
+        { "anti-key",      0, CELL_ANTI,   0 },
+        /* Case marquée avant toutes les autres — forme forte, prédite perdante. */
+        { "cross-mrv",     0, CELL_CROSS,  1 },
+        { "rand-mrv",      0, CELL_RANDOM, 1 },
+        { "anti-mrv",      0, CELL_ANTI,   1 },
+        /* Contrôles aléatoires à la densité du COMPLÉMENT (cf. CELL_RANDOM_COMP). */
+        { "randc-key",     0, CELL_RANDOM_COMP, 0 },
+        { "randc-mrv",     0, CELL_RANDOM_COMP, 1 },
+        /* Halo des indices, et son contrôle aléatoire à la même densité. */
+        { "halo-key",      0, CELL_HALO,        0 },
+        { "halo-mrv",      0, CELL_HALO,        1 },
+        { "randh-key",     0, CELL_RANDOM_HALO, 0 },
+        { "randh-mrv",     0, CELL_RANDOM_HALO, 1 },
     };
     engine_t engines[NB_ALL_ENGINES];
-    int nb_engines = NB_ALL_ENGINES;
-    memcpy(engines, all_engines, sizeof(all_engines));
+    int nb_engines = NB_DEFAULT_ENGINES;
+    memcpy(engines, all_engines, NB_DEFAULT_ENGINES * sizeof(all_engines[0]));
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--pieces") == 0 && i + 1 < argc)           pieces = argv[++i];
@@ -751,6 +1086,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--w2x2") == 0)                         w2x2 = 1;
         else if (strcmp(argv[i], "--gpu") == 0)                          gpu = 1;
         else if (strcmp(argv[i], "--gpu-batch") == 0 && i + 1 < argc)    gpu_batch = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--cross-seed") == 0 && i + 1 < argc)   cross_seed = strtoull(argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--engines") == 0 && i + 1 < argc) {
             nb_engines = 0;
             char *copy = strdup(argv[++i]);
@@ -807,6 +1143,37 @@ int main(int argc, char **argv)
 
     printf("\nbanc de réfutation : coût de la PREUVE qu'un sous-arbre est mort\n");
     printf("pièces : %s   plafond : %ld nœuds par racine et par moteur\n", pieces, budget);
+
+    build_cell_masks(cross_seed);
+    int uses_cell_hook = 0;
+    for (int e = 0; e < nb_engines; e++) {
+        uses_cell_hook |= (engines[e].cell_mask_kind != CELL_NONE);
+    }
+    if (uses_cell_hook) {
+        printf("ordre des cases : croix de %d cases sur %d, halo des indices de %d ;"
+               " contrôles aléatoires à %d (rand-*), %d (randc-*) et %d (randh-*) cases,"
+               " graine %llu\n",
+               cross_size(), ETERN_PARTS, g_halo_n,
+               cross_size(), ETERN_PARTS - cross_size(), g_halo_n, cross_seed);
+        if (g_halo_n == 0) {
+            fprintf(stderr, "halo vide : cette instance n'a pas d'indice (--indices-file),"
+                    " les bras halo-*/randh-* y seraient des no-op.\n");
+            return EXIT_FAILURE;
+        }
+        if (cross_size() >= ETERN_PARTS) {
+            fprintf(stderr, "la croix couvre le plateau ENTIER à cette taille compilée :"
+                    " tous les bras d'ordre des cases y sont des no-op, la mesure ne dirait"
+                    " rien (cf. l'en-tête de tests/bench/cross_mask.h).\n");
+            return EXIT_FAILURE;
+        }
+        /* Descente courte : l'auto-test compare des CHEMINS, pas des coûts —
+           quelques plateaux de profondeurs variées suffisent. */
+        if (selftest_choose_cell_paths(engines, nb_engines, 100000) != 0) {
+            fprintf(stderr, "auto-test en échec : les deux balayages MRV divergent sous au"
+                    " moins un bras. Les chiffres de ce run seraient à jeter.\n");
+            return EXIT_FAILURE;
+        }
+    }
 
     tally_t tally[NB_ALL_ENGINES], common[NB_ALL_ENGINES];
     memset(tally, 0, sizeof(tally));
@@ -1090,9 +1457,7 @@ int main(int argc, char **argv)
             // canonisation à faire avant fermeture, contrairement à avant PR1.
             for (int e = 0; e < nb_engines; e++) {
                 res[e] = close_subtree(&pkt, &engines[e], budget);
-                tally[e].closed += (res[e].status == BT_CORE_EXHAUSTED);
-                tally[e].nodes += res[e].nodes;
-                tally[e].seconds += res[e].seconds;
+                tally_add(&tally[e], &res[e]);
             }
             int all_closed = 1;
             for (int e = 0; e < nb_engines; e++) {
@@ -1101,8 +1466,7 @@ int main(int argc, char **argv)
             if (all_closed) {
                 nb_common++;
                 for (int e = 0; e < nb_engines; e++) {
-                    common[e].nodes += res[e].nodes;
-                    common[e].seconds += res[e].seconds;
+                    tally_add(&common[e], &res[e]);
                 }
             }
             if (!kpi) {
@@ -1137,9 +1501,7 @@ int main(int argc, char **argv)
             build_prefix_root(&deep, depths[i], &r);
             for (int e = 0; e < nb_engines; e++) {
                 res[e] = close_subtree(&r, &engines[e], budget);
-                tally[e].closed += (res[e].status == BT_CORE_EXHAUSTED);
-                tally[e].nodes += res[e].nodes;
-                tally[e].seconds += res[e].seconds;
+                tally_add(&tally[e], &res[e]);
             }
             int all_closed = 1;
             for (int e = 0; e < nb_engines; e++) {
@@ -1148,8 +1510,7 @@ int main(int argc, char **argv)
             if (all_closed) {
                 nb_common++;
                 for (int e = 0; e < nb_engines; e++) {
-                    common[e].nodes += res[e].nodes;
-                    common[e].seconds += res[e].seconds;
+                    tally_add(&common[e], &res[e]);
                 }
             }
             print_row("préfixe", placed_count(&r), nb_engines, res);
