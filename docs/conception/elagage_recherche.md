@@ -810,6 +810,118 @@ contrôle précis. Porter (a) au GPU réduirait l'écart de 10,8 points sans le 
 (toujours écarté du GPU pour la raison SIMT ci-dessus) ; ni l'un ni l'autre n'est fait à ce
 stade.
 
+### 4.6c Bascule du défaut de la preuve bornée : `PRUNER_DFS_BUDGET_DEFAULT` passe de 0 à 10000 — ADOPTÉ
+
+**Statut : mesuré en conditions réelles, défaut changé.** §4.6b avait tranché « la preuve
+DFS ferme bien, mais on ne bascule pas le défaut », et avait nommé la condition qui
+manquait — mot pour mot : « activer un défaut consomme plus de CPU sur toute une flotte
+déployée **sans confirmation en conditions réelles au-delà de ce banc** ». Cette section
+apporte cette confirmation. Elle n'infirme rien de §4.6b : elle en lève la réserve.
+
+#### Ce qui a changé depuis §4.6b
+
+Deux choses, et la seconde n'était pas prévisible en §4.6b :
+
+1. **Le moteur.** La preuve emploie `search_packet_backtracking_mrv`, donc elle a hérité du
+   départage appris (§4.14) puis du `dom/wdeg` complet (§4.16). À budget égal, elle ferme
+   maintenant ce qu'elle laissait passer.
+2. **Le rôle du drapeau `checked`.** `autoprune_step` ne resoumet JAMAIS à la preuve une
+   possibilité déjà marquée (`!work.checked`, `src/core/etii_search.c`). Ce n'est pas un
+   oubli : `reset_checked_pool` (`src/core/datamanager.c`) le documente et la console
+   `resetChecked` existe pour ça. Mais la conséquence n'avait jamais été chiffrée — sur un
+   stock de production courant, **32 332 possibilités sur 32 480 portent `checked = 1`**, si
+   bien que le profil nominal du pruner rapporte 0,6 % de fermetures : non parce que le
+   mécanisme échoue, mais parce qu'il ne s'exécute que sur les 3 possibilités éligibles de
+   l'échantillon — qu'il ferme toutes les trois.
+
+#### Mesure 1 — la courbe budget/fermeture sur un stock courant
+
+`bench_refutation --pruner-profile 500` sur un stock de production de 32 480 possibilités
+(profondeur médiane 120 pièces), **remis intégralement au pool non vérifié** (l'équivalent
+hors ligne de `resetChecked`, obtenu en remettant l'octet `checked` à zéro dans une copie du
+`.back`). Contrôle superficiel : 0 % de mortes sur ce stock — tout se joue sur la preuve.
+
+| Budget | Fermées / 500 | Part | Nœuds DFS | Temps |
+|---|---|---|---|---|
+| 100 | 172 | 34,4 % | 36 287 | 0,036 s |
+| 300 | 232 | 46,4 % | 94 949 | 0,082 s |
+| 1 000 | 282 | 56,4 % | 259 083 | 0,215 s |
+| 3 000 | 309 | 61,8 % | 663 922 | 0,525 s |
+| **10 000 — adopté** | **332** | **66,4 %** | **1 891 611** | **1,45 s** |
+| 100 000 | 366 | 73,2 % | 14 952 441 | 11,15 s |
+| 1 000 000 | 378 | 75,6 % | 128 545 161 | 97,65 s |
+
+**Il n'y a pas de coude, et c'est le point de méthode de cette section.** §4.10 concluait
+« les deux moteurs plafonnent au-delà de 1 000 nœuds, donc `prunerDfsBudget 1000` est le bon
+point de fonctionnement ». Sur CE stock la courbe monte encore : +10 points de 1 000 à
+10 000, +6,8 de 10 000 à 100 000. Le point de fonctionnement dépend donc du stock, et la
+valeur livrée est un **arbitrage**, pas un optimum dérivé. 10 000 capture 88 % de ce que
+ferme un budget cent fois plus grand pour 1,5 % de son coût, et c'est la valeur qui a été
+validée de bout en bout ci-dessous. 1 000 reste un choix conservateur défendable.
+
+#### Mesure 2 — ce que le moteur y apporte
+
+Même échantillon, même protocole, binaire construit à `b7e2a6e` (juste avant §4.16) :
+
+| Budget | master (`dom/wdeg`) | avant §4.16 |
+|---|---|---|
+| 10 000 | **66,4 %**, 1,89 M nœuds | 43,8 %, 2,97 M nœuds |
+| 100 000 | **73,2 %**, 14,95 M nœuds | 50,2 %, 26,10 M nœuds |
+| 1 000 000 | **75,6 %**, 128,5 M nœuds | 56,8 %, 230,2 M nœuds |
+
+Plus de fermetures pour moins de nœuds, aux trois budgets. Une partie du défaut à 0 se
+justifiait par un rendement que le moteur d'alors ne savait pas produire.
+
+#### Mesure 3 — la confirmation en conditions réelles, celle que §4.6b exigeait
+
+Serveur réel (6 threads), `restore` du stock ci-dessus intégralement non vérifié, puis un
+client pruner réel (3 forks, `dfs_budget = 10000`, lots de 100), à travers le protocole TCP
+et le pipeline `autoprune_step` complet — aucune copie instrumentée, aucun banc.
+
+| Instant | Stock serveur |
+|---|---|
+| départ | 32 480 |
+| +60 s | 25 643 |
+| +105 s | 20 900 |
+| +150 s | 15 426 |
+| palier | **10 474** |
+
+**22 006 possibilités éliminées, 67,8 %, en moins de 5 minutes de temps réel.** Le banc
+prédisait 66,4 % ; l'écart de 1,4 point tient à l'échantillon (500 contre 32 480). Les
+10 474 survivants sont tous passés au pool vérifié, donc le travail n'est pas refait.
+
+**Reproduction indépendante** : le même essai, contre un serveur de test sur une autre
+machine, atteint **exactement le même palier de 10 474**. À stock, moteur et budget
+identiques, la preuve bornée est déterministe.
+
+#### Décision, et la procédure qui va avec
+
+**`PRUNER_DFS_BUDGET_DEFAULT` passe de 0 à 10000.** Verrouillé par
+`pruner_dfs_budget_default_enables_the_bounded_proof` (`tests/ui/test_command_lines.c`) :
+les trois tests d'intégration d'`autoprune` fixent `pruner_dfs_budget` explicitement,
+précisément pour ne pas dépendre du défaut, donc un retour silencieux à 0 ne ferait tomber
+aucun autre test.
+
+**Le défaut ne traite que le FLUX.** Une possibilité déjà marquée `checked` ne repassera
+jamais devant la preuve, quel que soit le budget. Traiter le passif d'un stock existant
+demande, une fois, après déploiement :
+
+```sh
+resetChecked          # tout le pool vérifié repasse au pool non vérifié
+```
+
+C'est exactement la séquence des mesures 3 ci-dessus. Sans elle, un serveur déjà rempli ne
+verra aucun effet du nouveau défaut.
+
+**Deux angles morts d'instrumentation rencontrés pendant cette campagne**, tous deux
+capables de faire passer un pruner qui travaille pour un pruner en panne, et qui ont
+effectivement égaré deux diagnostics successifs : les compteurs `pruner_checked`/
+`pruner_removed` des forks ne remontent pas au parent (la console `statistic` d'un pruner
+n'affiche donc jamais sa ligne « mortes / vérifiées », même en éliminant 22 006
+possibilités), et l'avertissement « ne rapporte aucun travail (stock/analysé/coups-s à 0) »
+de l'orchestrateur est un faux positif sur un fork pruner, dont le travail utile n'est
+aucune de ces trois grandeurs. Hors périmètre de cette PR, traité séparément.
+
 ### 4.7 Ordre de variable dynamique (MRV) — implémenté et mesuré favorable (PR 10), devenu le moteur unique (PR3 de mrv_moteur_unique.md)
 
 **Statut : implémenté, testé, mesuré favorable, puis promu moteur UNIQUE.** La bascule

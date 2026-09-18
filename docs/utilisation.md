@@ -577,7 +577,7 @@ continuation possible. Deux variantes :
 un stock réel (`tests/bench/bench_refutation.c --pruner-profile`, voir
 [docs/tests_et_ci.md](tests_et_ci.md#mode---pruner-profile--rejoue-le-vrai-pipeline-du-pruner)) :
 le seul contrôle superficiel qu'un pruner exécute (`possibility_all_has_a_next_counted`,
-gratuit — un pruner ne fait rien de plus cher tant que `prunerDfsBudget` n'est pas réglé)
+gratuit, et seul contrôle exécuté si `prunerDfsBudget` est ramené à `0`)
 rejette déjà **50,2 %** d'un stock produit par un client à ordre fixe (16,3 % sur un stock
 produit par un client MRV, dont les possibilités sont en moyenne plus avancées avant
 délégation). Faire tourner au moins un pruner, même en CPU et avec un seul thread, réduit
@@ -627,9 +627,23 @@ Au-delà du contrôle superficiel gratuit ci-dessus, un pruner peut tenter de **
 qu'une possibilité est morte, en rejouant réellement son sous-arbre avec un plafond de
 nœuds — `prunerDfsBudget <n>` (commande console, clé `dfs_budget` du fichier de
 configuration client, pilotable à distance par `clientsCommand` et l'API HTTP).
-**Désactivé par défaut (`0`)** : c'est un coût CPU que l'opérateur engage sciemment.
-Valeur recommandée par la mesure : **`1000`** — le gain plafonne au-delà (voir ci-dessous),
-et le `10000` de la première mesure de §4.6b ne se justifie plus sur un stock de production.
+**Activé par défaut à `10000`** depuis la mesure en conditions réelles de
+[§4.6c](conception/elagage_recherche.md) : sur un stock de production de 32 480
+possibilités remis au pool non vérifié, un pruner à 3 forks en élimine **22 006 (67,8 %) en
+moins de 5 minutes**, palier reproduit à l'identique sur une seconde machine. Le défaut
+valait `0` jusque-là, faute exactement de cette confirmation hors banc.
+
+La valeur est un arbitrage, pas un optimum : la courbe budget/fermeture ne plafonne pas sur
+ce stock (56,4 % à `1000`, 66,4 % à `10000`, 73,2 % à `100000`), contrairement à celle du
+stock de §4.10 plus bas, qui plafonnait dès `1000`. Le point de fonctionnement dépend donc
+du stock. `1000` reste un choix conservateur défendable, `0` désactive toujours le
+mécanisme sans le moindre coût.
+
+> **Le défaut ne traite que le FLUX.** Une possibilité déjà marquée `checked` n'est jamais
+> resoumise à la preuve, quel que soit le budget. Sur un serveur dont le stock est déjà
+> constitué, il faut lancer **une fois** la commande console `resetChecked` après
+> déploiement pour que le passif repasse devant les pruners — sans quoi le nouveau défaut
+> n'aura aucun effet visible. Voir [console.md](console.md).
 
 Cette preuve emploie MRV, le seul moteur de backtracking depuis
 [docs/conception/mrv_moteur_unique.md](conception/mrv_moteur_unique.md) (PR3) — un ancien
@@ -647,13 +661,15 @@ n'atteignait que 33,8 %, soit toujours moins que MRV à budget 1 000 pour 10,7×
 temps.
 
 ```sh
-# machine puissante dédiée à l'élagage : preuve bornée activée
+# machine dédiée à l'élagage : la preuve bornée est active d'emblée (10000)
 ./eternityII pruner serveur 8 data/pieces.csv 500
-# puis, dans sa console (ou à distance) :
+# pour un autre point de fonctionnement, dans sa console (ou à distance) :
 prunerDfsBudget 1000
+# et UNE FOIS, côté serveur, pour soumettre le passif déjà vérifié :
+resetChecked
 ```
 
-> À vérifier avant d'activer : le profil de profondeur du stock du serveur
+> À vérifier pour choisir un autre budget : le profil de profondeur du stock du serveur
 > (`GET /api/v1/stock-distribution`). Et à garder en tête : élaguer profite surtout aux
 > AUTRES machines (le stock est distribué à toute la flotte) — un client qui tourne
 > lui-même en MRV refait déjà, à chaque nœud, l'essentiel du contrôle d'un pruner.
