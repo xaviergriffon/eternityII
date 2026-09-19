@@ -238,6 +238,10 @@ set(TEST_MODULES
 
 # Suites communes (ETERN_PARTS-agnostiques, jouées en 16 ET 256)
 set(TEST_SUITES_COMMON
+    # Isolation du runner (chdir dans un répertoire temporaire avant toute suite,
+    # cf. tests/sandbox.h) + sa suite de garde-fou, jouée en dernier.
+    tests/sandbox.c
+    tests/test_sandbox.c
     tests/core/test_lifo.c
     tests/core/test_part.c
     tests/core/test_readdata.c

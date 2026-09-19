@@ -32,6 +32,7 @@ partagé reste à la racine de `tests/`.
 |---|---|
 | `tests/test_main.c` | Point d'entrée unique du runner (enregistre toutes les suites). |
 | `tests/greatest.h`, `tests/fork_assert.h` | Framework greatest + helper d'assertions par `fork()`. |
+| `tests/sandbox.{h,c}`, `tests/test_sandbox.c` | Bac à sable du runner (voir ci-dessous) + sa suite de garde-fou, jouée en dernier. |
 | `tests/core/` | Suites des modules `src/core/` (`test_lifo`, `test_part`, `test_readdata`, `test_possibility`, `test_etii_search`, `test_datamanager`, `test_solution16`). |
 | `tests/net/` | Suites des modules `src/net/` (`test_etii_protocol`, `test_control_protocol` — codec du [canal de contrôle](../docs/echanges_client_serveur.md#canal-de-contrôle-v9), `test_local_socket`, `test_tcp`). |
 | `tests/ui/` | Suites des modules `src/ui/` (`test_command_history`, `test_command_match`, `test_command_lines`, `test_console`, `test_logger`). |
@@ -159,6 +160,35 @@ plateau entier**, donc zéro région. Le test l'affirme (au lieu de se sauter), 
 c'est ce qui interdit d'aller mesurer ces variantes en build 16 — le banc s'y
 refuse explicitement.
 
+## Le runner tourne dans un bac à sable
+
+`test_main.c` appelle `test_sandbox_enter()` (`tests/sandbox.h`) **avant la première
+suite** : le runner crée un répertoire temporaire et s'y place. Toute écriture sous
+chemin relatif — la sienne comme celle du code de production qu'il exerce
+(`./eternityII.back`, `events.log`, `solution_*`, sockets `etii_*`…) — y atterrit, et
+le répertoire est effacé à la sortie (conservé, avec son chemin affiché, si un test a
+échoué).
+
+Ce n'est pas une précaution théorique : un stock de production de 1,96 Go posé à la
+racine du dépôt a été **écrasé par un `make test`**, via la branche « solution
+trouvée » de `remove_possibilities_with_no_next` qui sauvegarde dans
+`./eternityII.back`. Détail complet et sabotage de vérification :
+[docs/tests_et_ci.md](../docs/tests_et_ci.md#le-runner-travaille-dans-un-bac-à-sable-jamais-dans-le-dépôt).
+
+Conséquences quand on écrit un test :
+
+- **Écrire sous chemin relatif est désormais sûr** — inutile de faire son propre
+  `mkdtemp`/`chdir` (ceux qui le font restent valides : ils s'isolent alors dans le
+  bac à sable). Si un test se déplace malgré tout, **il doit revenir** : la suite
+  `sandbox_suite` échoue si le runner ne finit pas dans son bac à sable.
+- **Écrire par chemin absolu construit à partir de `test_sandbox_origin()` est
+  interdit** : c'est précisément ce que le garde-fou détecte.
+- **Lire une donnée du dépôt par chemin relatif ne marche plus.** Les globales de
+  production `parts_files` / `indices_file` sont rendues absolues avant le `chdir`,
+  donc `access(parts_files, …)` et consorts continuent de fonctionner ; pour toute
+  autre donnée, préférer la fabriquer dans le test (convention déjà en vigueur, voir
+  ci-dessous) plutôt que de dépendre du dépôt.
+
 ## Conventions et limites
 
 - **Fixtures construites à la main** plutôt que via `rotate_all_parts` /
@@ -180,8 +210,10 @@ refuse explicitement.
   `array_part`, qui doit compter **exactement** les entrées renseignées.
 - **Une fixture jouée par le moteur ne doit pas pouvoir compléter le plateau**,
   sauf si c'est le sujet du test : `record_solution` écrirait un fichier
-  `solution_*` dans le répertoire courant au milieu de la suite. Le plus simple
-  est de fournir moins de pièces d'un type que le plateau n'a de cases
+  `solution_*` au milieu de la suite. Ce fichier tombe désormais dans le bac à
+  sable (plus dans le dépôt), mais il reste un effet de bord parasite, et le
+  plateau complété n'est presque jamais ce que le test voulait exercer. Le plus
+  simple est de fournir moins de pièces d'un type que le plateau n'a de cases
   correspondantes.
 - **Chemins d'erreur non testés là où le code appelle `exit()`** (ex. fichier
   CSV absent dans `read_parts`) : greatest tournant dans un seul processus, un
