@@ -1127,10 +1127,18 @@ static int restore_apply(char *file, char *analyse_file) {
     }
 
     // Fenêtre `maintenance` posée pour TOUTE la séquence (débordement disque
-    // PUIS RAM) : `stock_spill_step` ne consulte que ce drapeau, jamais les
+    // PUIS RAM) : `stock_spill_step` ne consulte que cet état, jamais les
     // verrous par file que `restore()` pose/lève lui-même — sans cette
     // fenêtre, une éviction/un rechargement concurrent pourrait migrer une
     // possibilité au beau milieu du remplacement.
+    //
+    // Elle tient RÉELLEMENT sur toute la séquence depuis que l'état compte sa
+    // profondeur d'imbrication : les `lock_all_file()`/`unlock_all_file()`
+    // internes à `restore`/`restore_analysed` ne la referment plus. Cette
+    // fenêtre-là fige le débordement, donc c'est `import()` qui fait la place
+    // en RAM lui-même (crochet `datamanager_set_ram_relief_hook` →
+    // `stock_spill_relieve`) ; sans ce crochet, une attente de place sous
+    // plafond RAM ne serait jamais servie et bloquerait indéfiniment.
     datamanager_begin_maintenance();
 
     // Remise en place des segments de débordement EN PREMIER (« snapshot »

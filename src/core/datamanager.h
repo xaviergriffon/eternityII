@@ -180,7 +180,7 @@ unsigned long long datamanager_resident_packets(void);
 
 /**
  * @brief 1 si une opération de maintenance (sauvegarde, restauration,
- *        tri…) tient actuellement toutes les files verrouillées, 0 sinon.
+ *        tri…) tient actuellement une fenêtre ouverte, 0 sinon.
  *
  * Accesseur pour l'état interne `maintenance` — réservé à
  * `core/stock_spill.c`, pour suspendre l'éviction/le rechargement
@@ -189,13 +189,25 @@ unsigned long long datamanager_resident_packets(void);
 int datamanager_is_maintenance_active(void);
 
 /**
- * @brief Pose/lève `maintenance` pour un appelant EXTERNE à ce module
- *        — réservé à `restore_apply` (`ui/command_lines.c`), pour encadrer
- *        `stock_spill_restore_snapshot` (`core/stock_spill.c`) PUIS
+ * @brief Ouvre/referme une fenêtre de maintenance pour un appelant EXTERNE à
+ *        ce module — réservé à `restore_apply` (`ui/command_lines.c`), pour
+ *        encadrer `stock_spill_restore_snapshot` (`core/stock_spill.c`) PUIS
  *        `restore`/`restore_analysed` dans une seule fenêtre où
- *        `stock_spill_step` reste garanti inactif. Non ré-entrant : ne
- *        jamais appeler depuis l'intérieur d'une fenêtre déjà posée par
- *        `consistent_backup`/`sort_*`.
+ *        `stock_spill_step` reste garanti inactif.
+ *
+ * RÉ-ENTRANT : l'état interne compte la profondeur d'imbrication, si bien que
+ * les `lock_all_file()`/`unlock_all_file()` posés par `restore` et
+ * `restore_analysed` ne referment PAS la fenêtre englobante — seul le
+ * `datamanager_end_maintenance()` correspondant la referme. (Avant que ce ne
+ * soit un compteur, le premier `unlock_*` imbriqué la refermait, et le
+ * débordement disque redevenait actif en plein import.)
+ *
+ * CONTREPARTIE À LA CHARGE DE L'APPELANT : tant que la fenêtre est tenue,
+ * `stock_spill_step` est un no-op. Un appelant qui a besoin de place en RAM
+ * doit donc la faire lui-même via le crochet
+ * `datamanager_set_ram_relief_hook` (`stock_spill_relieve`, qui ignore la
+ * fenêtre parce que son appelant la détient) — sans quoi une attente de
+ * place ne serait jamais servie. C'est ce que fait `import()`.
  */
 void datamanager_begin_maintenance(void);
 void datamanager_end_maintenance(void);

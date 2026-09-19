@@ -460,11 +460,81 @@ char*server_ip = NULL;
 
 int put_to_local(array_possibility_packet *possibilities);
 
+/**
+ * PROFONDEUR D'IMBRICATION des fenêtres de maintenance, pas un drapeau — 0
+ * signifie « aucune fenêtre ouverte », toute valeur > 0 « au moins une ».
+ *
+ * Le drapeau booléen d'origine ne tenait PAS la promesse de sa seule cliente
+ * externe : `restore_apply` (`ui/command_lines.c`) pose une fenêtre censée
+ * couvrir TOUTE la séquence de restauration, or `restore()` appelle
+ * `lock_all_file()` PUIS `unlock_all_file()` — et cet `unlock` remettait le
+ * drapeau à 0 avant même le début de l'import. La fenêtre se refermait donc
+ * au premier `unlock_*` imbriqué, et le thread de débordement
+ * (`spill_thread`, `app/etii_server.c`) redevenait actif en plein import
+ * alors que l'appelant la croyait tenue. Avec un compteur, un `unlock_*`
+ * imbriqué ramène la profondeur de 2 à 1 : la fenêtre externe survit et ne
+ * se referme qu'au `datamanager_end_maintenance()` correspondant.
+ *
+ * Reste un `int` non `static` de ce nom : des tests le lisent en
+ * `extern int maintenance` pour vérifier l'INSTANT où la fenêtre est tenue
+ * (cf. `consistent_backup_invokes_spill_snapshot_hook_within_maintenance_window`,
+ * `tests/core/test_datamanager.c`), et la convention « 0 / non-nul » qu'ils
+ * testent est inchangée.
+ *
+ * Accès par builtins `__atomic_*` — un compteur ne pardonne pas ce qu'un
+ * drapeau pardonnait. Deux threads peuvent écrire cet état concurremment
+ * (le thread serveur via l'autobackup, le thread console via `restore`/
+ * `sort_*`) : avec un drapeau, deux écritures perdues se soignaient toutes
+ * seules (tout le monde écrit 1, puis tout le monde écrit 0) ; avec un
+ * compteur, un incrément ou un décrément perdu est DÉFINITIF — une fenêtre
+ * jamais refermée condamnerait toute sauvegarde ultérieure à
+ * `BACKUP_SKIPPED_MAINTENANCE`. Ce n'est pas un chemin chaud (quelques
+ * appels par sauvegarde/restauration, à comparer aux millions de paquets
+ * qu'elles brassent) : l'atomicité y est gratuite, contrairement aux
+ * compteurs du forward-check (cf. `fc_stat_bump`, `core/etii_search.c`).
+ */
 int maintenance = 0;
 
 /**
+ * @brief Ouvre une fenêtre de maintenance (incrémente la profondeur).
+ *
+ * Interne au module : `lock_all_file`/`lock_all_file_analysed` et
+ * `consistent_backup` l'utilisent au même titre que
+ * `datamanager_begin_maintenance` — c'est précisément parce que ces sites
+ * écrivaient l'état chacun à leur manière que les fenêtres imbriquées se
+ * marchaient dessus.
+ */
+static void maintenance_enter(void)
+{
+	__atomic_add_fetch(&maintenance, 1, __ATOMIC_SEQ_CST);
+}
+
+/**
+ * @brief Referme une fenêtre de maintenance (décrémente la profondeur).
+ *
+ * Décrément SATURÉ à 0, jamais négatif : une profondeur négative rendrait
+ * `maintenance != 0` vrai et ferait croire à une maintenance permanente —
+ * exactement l'inverse de l'effet voulu, et un échec bien plus sournois que
+ * la saturation. Saturer reproduit par ailleurs le comportement historique
+ * du drapeau (un `unlock_*` sans `lock_*` préalable laissait simplement 0).
+ */
+static void maintenance_leave(void)
+{
+	int current = __atomic_load_n(&maintenance, __ATOMIC_SEQ_CST);
+	while (current > 0)
+	{
+		if (__atomic_compare_exchange_n(&maintenance, &current, current - 1, 0,
+		                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+		{
+			return;
+		}
+		// `current` a été rechargé par le compare-exchange : on retente.
+	}
+}
+
+/**
  * @brief 1 si une opération de maintenance (sauvegarde, restauration, tri…)
- *        tient actuellement toutes les files verrouillées, 0 sinon.
+ *        tient actuellement une fenêtre ouverte, 0 sinon.
  *
  * Accesseur plutôt qu'un `extern int maintenance` brut — même convention que
  * `datas_size()`/`file_size()` pour l'état interne de ce module. Réservé à
@@ -476,32 +546,39 @@ int maintenance = 0;
  */
 int datamanager_is_maintenance_active(void)
 {
-	return maintenance != 0;
+	return __atomic_load_n(&maintenance, __ATOMIC_SEQ_CST) > 0;
 }
 
 /**
- * @brief Pose/lève `maintenance` pour un appelant EXTERNE à ce module —
- *        `restore_apply` (`ui/command_lines.c`) encadre `stock_spill_restore_snapshot`
- *        (`core/stock_spill.c`) PUIS `restore`/`restore_analysed` dans une
- *        seule fenêtre : sans elle, `stock_spill_step` (qui ne consulte QUE
- *        `maintenance`, jamais les verrous par file que `restore()` pose et
- *        lève lui-même) pourrait démarrer une éviction/un rechargement au
- *        beau milieu du remplacement des segments ou du drainage/réimport
- *        RAM, migrant des possibilités au mauvais instant.
+ * @brief Pose/lève une fenêtre de maintenance pour un appelant EXTERNE à ce
+ *        module — `restore_apply` (`ui/command_lines.c`) encadre
+ *        `stock_spill_restore_snapshot` (`core/stock_spill.c`) PUIS
+ *        `restore`/`restore_analysed` dans une seule fenêtre : sans elle,
+ *        `stock_spill_step` (qui ne consulte QUE cet état, jamais les
+ *        verrous par file que `restore()` pose et lève lui-même) pourrait
+ *        démarrer une éviction/un rechargement au beau milieu du
+ *        remplacement des segments ou du drainage/réimport RAM, migrant des
+ *        possibilités au mauvais instant.
  *
- * Non ré-entrant à dessein (pas de compteur) : ni `restore` ni
- * `restore_analysed` ne touchent eux-mêmes `maintenance` aujourd'hui — ne
- * jamais appeler depuis l'intérieur d'une fenêtre déjà posée par
- * `consistent_backup`/`sort_*`, qui gèrent la leur en interne.
+ * RÉ-ENTRANT : la fenêtre survit aux `lock_all_file()`/`unlock_all_file()`
+ * que `restore` et `restore_analysed` posent en interne, et ne se referme
+ * qu'au `datamanager_end_maintenance()` correspondant (cf. la doc de
+ * `maintenance` ci-dessus — c'est le défaut que ce compteur corrige).
+ *
+ * Tenir cette fenêtre engage l'appelant : `stock_spill_step` devient un
+ * no-op, donc un appelant qui a besoin de place en RAM doit la faire
+ * LUI-MÊME (`datamanager_set_ram_relief_hook`, en pratique
+ * `stock_spill_relieve`) au lieu d'attendre le tick du thread de
+ * débordement, qui ne viendra jamais — c'est ce que fait `import()`.
  */
 void datamanager_begin_maintenance(void)
 {
-	maintenance = 1;
+	maintenance_enter();
 }
 
 void datamanager_end_maintenance(void)
 {
-	maintenance = 0;
+	maintenance_leave();
 }
 
 void set_server_ip(const char *server)
@@ -2186,10 +2263,14 @@ unsigned long long datas_size(void)
  *
  * Appel bloquant (pthread_mutex_lock) sur chacune des `nb_file_possibility` files.
  * Doit être suivi d'un appel à `unlock_all_file`.
+ *
+ * Ouvre une fenêtre de maintenance IMBRIQUABLE : si l'appelant en tenait déjà
+ * une (`datamanager_begin_maintenance`, cf. `restore_apply`), le
+ * `unlock_all_file` correspondant ne la refermera pas.
  */
 void lock_all_file(void)
 {
-	maintenance = 1;
+	maintenance_enter();
 	int fp;
 	// Bloquage des files (les deux pools : non vérifié et vérifié)
 	for (fp=0; fp < nb_file_possibility; fp++)
@@ -2200,7 +2281,9 @@ void lock_all_file(void)
 }
 
 /**
- * @brief Déverrouille toutes les files de possibilités et désactive le mode maintenance.
+ * @brief Déverrouille toutes les files de possibilités et referme LA fenêtre
+ *        de maintenance ouverte par `lock_all_file` — pas forcément le mode
+ *        maintenance lui-même, si une fenêtre englobante reste ouverte.
  */
 void unlock_all_file(void)
 {
@@ -2211,7 +2294,7 @@ void unlock_all_file(void)
 		pthread_mutex_unlock(&file_possibility[fp]->lock);
 		pthread_mutex_unlock(&file_possibility_checked[fp]->lock);
 	}
-	maintenance = 0;
+	maintenance_leave();
 }
 
 /**
@@ -2314,7 +2397,7 @@ static int stock_file_read_packet(FILE *f, int packed, struct possibility_packet
 
 int backup(char *filename)
 {
-	if(maintenance)
+	if(datamanager_is_maintenance_active())
 	{
 		return BACKUP_SKIPPED_MAINTENANCE;
 	}
@@ -2402,10 +2485,12 @@ int backup(char *filename)
 
 /**
  * @brief Verrouille toutes les files des possibilités en cours d'analyse.
+ *
+ * Même fenêtre imbriquable que `lock_all_file` (cf. sa doc).
  */
 void lock_all_file_analysed(void)
 {
-	maintenance = 1;
+	maintenance_enter();
 	int fp;
 	// Bloquage des files
 	for (fp=0; fp < nb_file_possibility; fp++)
@@ -2415,7 +2500,9 @@ void lock_all_file_analysed(void)
 }
 
 /**
- * @brief Déverrouille toutes les files des possibilités en cours d'analyse.
+ * @brief Déverrouille toutes les files des possibilités en cours d'analyse et
+ *        referme LA fenêtre ouverte par `lock_all_file_analysed` (une fenêtre
+ *        englobante, elle, reste ouverte).
  */
 void unlock_all_file_analysed(void)
 {
@@ -2425,12 +2512,12 @@ void unlock_all_file_analysed(void)
 	{
 		pthread_mutex_unlock(&file_possibility_analysed[fp]->lock);
 	}
-	maintenance = 0;
+	maintenance_leave();
 }
 
 int backup_analysed(char *filename)
 {
-	if(maintenance)
+	if(datamanager_is_maintenance_active())
 	{
 		return BACKUP_SKIPPED_MAINTENANCE;
 	}
@@ -2506,10 +2593,13 @@ int backup_analysed(char *filename)
  * Phase 1 : verrouille toutes les files des trois pools avant d'écrire quoi
  * que ce soit — cette fenêtre de gel simultané rend l'image cohérente à T,
  * pas un verrouillage progressif qui laisserait une possibilité migrer d'une
- * file pas encore gelée vers une file déjà écrite. `maintenance` est posé
- * une seule fois explicitement ici, pas via `lock_all_file()`/
- * `lock_all_file_analysed()` : leurs `unlock_*` remettraient le drapeau à 0
- * dès la première famille libérée.
+ * file pas encore gelée vers une file déjà écrite. Les verrous sont pris et
+ * rendus à la main ici, pas via `lock_all_file()`/`lock_all_file_analysed()`
+ * : la phase 2 relâche file par file, là où ces helpers ne savent
+ * verrouiller/déverrouiller qu'en bloc. La fenêtre de maintenance, elle,
+ * s'ouvre et se referme avec `maintenance_enter`/`maintenance_leave` comme
+ * partout ailleurs — depuis qu'elle compte sa profondeur d'imbrication, un
+ * `unlock_*` interne ne la referme plus prématurément.
  *
  * Phase 2 : écrit puis libère progressivement, une file à la fois — pool
  * analysé d'abord (un `INST_GET` exige les deux verrous, donc libérer le
@@ -2531,7 +2621,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 		*out_analysed_status = BACKUP_ERROR;
 	}
 
-	if (maintenance)
+	if (datamanager_is_maintenance_active())
 	{
 		if (out_analysed_status != NULL) { *out_analysed_status = BACKUP_SKIPPED_MAINTENANCE; }
 		return BACKUP_SKIPPED_MAINTENANCE;
@@ -2579,7 +2669,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 	int header_error_analysed = stock_file_write_header(fanalysed);
 
 	// Phase 1 : gel global à l'instant T (cf. docstring ci-dessus).
-	maintenance = 1;
+	maintenance_enter();
 	int fp;
 	for (fp = 0; fp < nb_file_possibility; fp++)
 	{
@@ -2662,7 +2752,7 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 		pthread_mutex_unlock(&file_possibility[fp]->lock);
 		pthread_mutex_unlock(&file_possibility_checked[fp]->lock);
 	}
-	maintenance = 0;
+	maintenance_leave();
 
 	int rc_analysed = BACKUP_OK;
 	if (fclose(fanalysed) != 0)

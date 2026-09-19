@@ -149,8 +149,8 @@ unsigned long long stock_spill_total_segments(void);
  *
  * Précondition (jamais vérifiée ici) : l'appelant doit garantir qu'aucune
  * éviction/rechargement concurrent n'a lieu pendant l'appel — en pratique
- * appelée uniquement depuis `consistent_backup` pendant sa fenêtre
- * `maintenance = 1`, qui fait déjà de `stock_spill_step` un no-op.
+ * appelée uniquement depuis `consistent_backup` pendant sa fenêtre de
+ * maintenance, qui fait déjà de `stock_spill_step` un no-op.
  *
  * Incrémental et idempotent : chaque segment plein est dupliqué par `link()`
  * (O(1)), comparé par inode à l'entrée existante pour ne relier que les
