@@ -117,9 +117,11 @@ Eight PRs (all shipped) fixing a real production incident: an unbounded lock hel
 
 **Coding rule**: `core/` must never depend on `app/`. Where server-only logic (e.g. control-registry liveness) is needed from `core/datamanager.c`, it's injected as a function pointer by the caller — see `owner_alive` in `datamanager_reclaim_expired_leases`. This is the rule the `core_static_variables`/`app_static_variables` split (above) exists to uphold for *global state*; `core/datamanager.c` and `core/etii_search.c` are its known, documented exceptions — they still read applicative state (protocol version, server config) directly rather than through injection, a larger refactor left for later.
 
-## On-disk form of a possibility (`core/packet_codec.{h,c}`)
+## Compact form of a possibility (`core/packet_codec.{h,c}`)
 
 `.back` files and spill segments store a **compact form** of `possibility_packet`, not the raw 576-byte struct: a 32-byte file header (magic `ETIISTK`, version, compiled geometry) then records serialised **field by field**, never an `fwrite` of the struct. Measured on a real production stock: 65 bytes per possibility instead of 576, **1 963 Mo → 222 Mo end to end (×8,83)**, exact round-trip on all 3 407 891. Format, measurements and discarded alternatives: [src/core/packet_codec.h](src/core/packet_codec.h), [docs/conception/compaction_stock.md](docs/conception/compaction_stock.md).
+
+The **stock pools hold that same compact form in RAM** (`init_file_variable`, `core/datamanager.c`), not raw packets: 632 → 121,2 bytes per resident possibility, **2154 Mo → 413 Mo (×5,21)** measured on the same production stock. The analysed pool deliberately stays raw — it is bounded by the possibilities in flight at clients, and its hot path is a deduplication at every acknowledgement, which a per-candidate decode would tax for nothing.
 
 **Invariants** — each one cost something to establish:
 
@@ -127,6 +129,7 @@ Eight PRs (all shipped) fixing a real production incident: an unbounded lock hel
 - **`alloc` and `b_faceused` are REBUILT at decode, never stored** — fully derivable from the grid (0 divergence over 3,4 M real packets). A packet whose `b_faceused` contradicts its grid does not survive a round trip; production never produces one, test fixtures used to.
 - **A serialiser does not judge the legality of what it is handed.** A non-empty cell's domain is `[0, 4 × ETERN_PARTS]`, `0` included — not a piece id, but what a `memset(0)` fixture produces. A first version refused it in the name of integrity and broke half a dozen fixtures across four files; widening cost one bit per cell. Only genuinely unrepresentable values are refused.
 - **Format detection is on the MAGIC, never on file size.** A legacy `.back` (no header, 576-byte records) stays readable; one carrying the magic with a foreign version or geometry is loudly refused, never reinterpreted.
+- **Neither a connected client nor a pruner ever executes the codec** — a client sends whole packets over TCP (`put_to_server`), a pruner acknowledges into the raw analysed pool; it runs in the SERVER process, and in the serverless `test` client. That is what makes the RAM compaction free for them, and it is measured, not assumed: −3,3 %/−0,4 % on the startup expansion (pure stock traffic), +1,6 % on the possibilities served to a pruner, the +0,52 µs per possibility being repaid by writing 65 bytes instead of 576. The client-side bench resolves nothing below ±10 % (it is governed by the search) — measurements and that caveat: [docs/conception/compaction_stock.md](docs/conception/compaction_stock.md).
 - **Spill segments use the same form at a FIXED stride** (`spill_record_bytes`, `core/stock_spill.c`): −32 % instead of −88,7 %, deliberately — every safety argument of the spill (peek-then-commit, byte-offset truncation, "any segment below the top is exactly full") is constant-stride byte arithmetic. A v1 snapshot manifest means legacy segments, re-encoded on restore, never linked.
 
 ## RAM cap & disk spillover
