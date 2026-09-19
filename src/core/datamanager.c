@@ -1022,6 +1022,126 @@ static uint64_t hash_possibility_key(const struct possibility_packet *p)
 	return h;
 }
 
+/* Déclarés plus bas : l'API d'opérations ci-dessous s'appuie dessus. */
+static int is_descendant_of_any(const struct possibility_packet *origins, unsigned long long n,
+                                struct possibility_packet *candidate);
+
+/* ===========================================================================
+ * Accès au contenu d'un élément de file — API d'OPÉRATIONS, pas d'accesseurs
+ *
+ * Aucun site ne déréférence `Element.value` directement. Ce n'est pas une
+ * coquetterie de style : c'est la condition pour que la REPRÉSENTATION du
+ * stock en mémoire puisse changer sans relire les cinquante-sept endroits qui
+ * la consultaient. Un accesseur qui rendrait un `struct possibility_packet *`
+ * interdirait ce changement — il suppose qu'un paquet décodé existe quelque
+ * part et reste valide après le retour. Les fonctions ci-dessous expriment
+ * donc ce qu'on VEUT FAIRE d'un élément (le hacher, le comparer, connaître sa
+ * profondeur, l'écrire), jamais « donne-moi le paquet ».
+ *
+ * Les rares opérations qui ont réellement besoin du paquet entier
+ * (`element_load`) le COPIENT chez l'appelant. C'est plus cher qu'un
+ * déréférencement, et c'est assumé : ces sites-là sont des balayages froids
+ * (sauvegarde, `checkOrigin`, tris, impression), jamais la boucle chaude de
+ * recherche — qui, elle, ne voit jamais un `Element`.
+ * ===========================================================================
+ */
+
+/// Vrai si l'élément ne porte aucune possibilité (sécurité historique : la
+/// file tolère un élément à valeur nulle).
+static inline int element_is_empty(const Element *e)
+{
+	return e == NULL || e->value == NULL;
+}
+
+/**
+ * @brief Copie la possibilité portée par `e` dans `out`.
+ * @return 1 si copiée, 0 si l'élément est vide (`out` alors intouché).
+ */
+static inline int element_load(const Element *e, struct possibility_packet *out)
+{
+	if (element_is_empty(e)) {
+		return 0;
+	}
+	memcpy(out, e->value, sizeof *out);
+	return 1;
+}
+
+/// Nombre de pièces posées (`alloc`) — sans copier le plateau.
+static inline uint16_t element_placed(const Element *e)
+{
+	return element_is_empty(e) ? 0 : ((const struct possibility_packet *)e->value)->alloc;
+}
+
+/// Score MRV de la dernière case posée — champ d'en-tête, lisible sans
+/// reconstituer le plateau (ce balayage passe sur tout le stock).
+static inline int16_t element_min_candidats(const Element *e)
+{
+	return element_is_empty(e) ? POSSIBILITY_MIN_CANDIDATS_UNKNOWN
+	                           : ((const struct possibility_packet *)e->value)->min_candidats;
+}
+
+/// Repasse la possibilité à « non vérifiée » — seule mutation en place que
+/// subisse un élément déjà en file (cf. `restock_analysed`).
+static inline void element_clear_checked(Element *e)
+{
+	if (!element_is_empty(e)) {
+		((struct possibility_packet *)e->value)->checked = 0;
+	}
+}
+
+/// Hash de l'élément, cohérent avec `hash_possibility_key` appliqué à un
+/// paquet égal au sens de `compare_possibility`.
+static inline uint64_t element_hash(const Element *e)
+{
+	return hash_possibility_key((const struct possibility_packet *)e->value);
+}
+
+/// Égalité au sens de `compare_possibility` (x, y, alloc, pièces utilisées,
+/// plateau — ni `checked` ni `min_candidats`).
+static inline int element_equals(const Element *e, const struct possibility_packet *key)
+{
+	return compare_possibility((struct possibility_packet *)e->value,
+	                           (struct possibility_packet *)key) == 0;
+}
+
+/// Égalité entre deux éléments, même contrat.
+static inline int element_equals_element(const Element *a, const Element *b)
+{
+	return compare_possibility((struct possibility_packet *)a->value,
+	                           (struct possibility_packet *)b->value) == 0;
+}
+
+/// Vrai si la possibilité de `e` descend de l'une des `n` origines.
+static inline int element_is_descendant_of_any(const struct possibility_packet *origins,
+                                               unsigned long long n, const Element *e)
+{
+	if (element_is_empty(e)) {
+		return 0;
+	}
+	return is_descendant_of_any(origins, n, (struct possibility_packet *)e->value);
+}
+
+/// Vrai si `root` est une origine (ancêtre) de la possibilité de `e`.
+static inline int element_has_origin(const struct possibility_packet *root, const Element *e)
+{
+	if (element_is_empty(e)) {
+		return 0;
+	}
+	return is_origin_of((struct possibility_packet *)root,
+	                    (struct possibility_packet *)e->value) == 1;
+}
+
+/// Vrai si la possibilité de `a` est une origine de celle de `b`.
+static inline int element_has_origin_element(const Element *a, const Element *b)
+{
+	if (element_is_empty(a) || element_is_empty(b)) {
+		return 0;
+	}
+	return is_origin_of((struct possibility_packet *)a->value,
+	                    (struct possibility_packet *)b->value) == 1;
+}
+
+
 /**
  * @brief Indexe le dernier élément ajouté à `file_possibility_analysed[fileidx]`.
  *
@@ -1045,7 +1165,7 @@ static void analysed_index_add(int fileidx, Element *e, const uint8_t owner_uid[
 		analysed_index_may_be_incomplete = 1;
 		return;
 	}
-	node->hash = hash_possibility_key((struct possibility_packet *)e->value);
+	node->hash = element_hash(e);
 	node->element = e;
 	if (owner_uid != NULL) {
 		memcpy(node->owner_uid, owner_uid, CLIENT_UID_BYTES);
@@ -1083,7 +1203,7 @@ static Element *analysed_index_find_and_remove(int fileidx, const struct possibi
 	AnalysedIndexNode *node = analysed_index[fileidx][bucket];
 	AnalysedIndexNode *prev = NULL;
 	while (node != NULL) {
-		if (node->hash == h && compare_possibility((struct possibility_packet *)node->element->value, (struct possibility_packet *)key) == 0) {
+		if (node->hash == h && element_equals(node->element, key)) {
 			Element *found = node->element;
 			if (prev == NULL) {
 				analysed_index[fileidx][bucket] = node->next;
@@ -1115,7 +1235,7 @@ static void analysed_index_remove_element(int fileidx, Element *victim)
 	if (victim == NULL) {
 		return;
 	}
-	uint64_t h = hash_possibility_key((struct possibility_packet *)victim->value);
+	uint64_t h = element_hash(victim);
 	size_t bucket = h % ANALYSED_INDEX_BUCKETS;
 	AnalysedIndexNode *node = analysed_index[fileidx][bucket];
 	AnalysedIndexNode *prev = NULL;
@@ -1210,7 +1330,7 @@ int remove_possibility_analysed(struct possibility_packet *possibility, int thre
 			Element *element = analysed_index_find_and_remove(currfile, possibility);
 			if (element == NULL && analysed_index_may_be_incomplete) {
 				element = file->start;
-				while (element != NULL && compare_possibility((struct possibility_packet *)element->value, possibility) != 0) {
+				while (element != NULL && !element_equals(element, possibility)) {
 					element = element->next;
 				}
 			}
@@ -1486,7 +1606,7 @@ int datamanager_analysed_owned_by(const uint8_t owner_uid[CLIENT_UID_BYTES],
 					continue;
 				}
 				(*out_count)++;
-				int alloc = ((struct possibility_packet *)node->element->value)->alloc;
+				int alloc = (int)element_placed(node->element);
 				if (alloc > *out_max_alloc) {
 					*out_max_alloc = alloc;
 				}
@@ -1547,7 +1667,7 @@ static int is_descendant_of_any(const struct possibility_packet *origins, unsign
  */
 static void analysed_index_forget_element(int fileidx, Element *e)
 {
-	size_t bucket = hash_possibility_key((struct possibility_packet *)e->value) % ANALYSED_INDEX_BUCKETS;
+	size_t bucket = element_hash(e) % ANALYSED_INDEX_BUCKETS;
 	AnalysedIndexNode *node = analysed_index[fileidx][bucket];
 	AnalysedIndexNode *prev = NULL;
 	while (node != NULL) {
@@ -1581,8 +1701,7 @@ unsigned long long datamanager_purge_descendants_of(const struct possibility_pac
 		Element *e = file->start;
 		while (e != NULL) {
 			Element *next = e->next;
-			if (e->value != NULL
-			    && is_descendant_of_any(origins, n, (struct possibility_packet *)e->value)) {
+			if (element_is_descendant_of_any(origins, n, e)) {
 				analysed_index_forget_element(f, e);
 				file_remove_element(file, e);
 				removed++;
@@ -1600,8 +1719,7 @@ unsigned long long datamanager_purge_descendants_of(const struct possibility_pac
 			Element *e = pools[p]->start;
 			while (e != NULL) {
 				Element *next = e->next;
-				if (e->value != NULL
-				    && is_descendant_of_any(origins, n, (struct possibility_packet *)e->value)) {
+				if (element_is_descendant_of_any(origins, n, e)) {
 					file_remove_element(pools[p], e);
 					removed++;
 				}
@@ -1686,7 +1804,7 @@ unsigned long long datamanager_reclaim_expired_leases(time_t now, analysed_owner
 					if (node->has_owner && analysed_lease_is_expired(node->lease_deadline, now)
 					    && (owner_alive == NULL || !owner_alive(node->owner_uid))) {
 						Element *victim = node->element;
-						memcpy(&buf[n], victim->value, sizeof(struct possibility_packet));
+						element_load(victim, &buf[n]);
 						n++;
 
 						if (prev == NULL) {
@@ -2430,9 +2548,10 @@ int backup(char *filename)
 		Element *currElement = file_possibility[fp]->file.start;
 		while(currElement != NULL)
 		{
-			if(currElement->value != NULL)
+			struct possibility_packet possibility_buf;
+			if (element_load(currElement, &possibility_buf))
 			{
-				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				struct possibility_packet *possibility = &possibility_buf;
 				if(packet_codec_fwrite(f, possibility) != 0)
 				{
 					write_error = 1;
@@ -2445,9 +2564,10 @@ int backup(char *filename)
 		currElement = file_possibility_checked[fp]->file.start;
 		while(currElement != NULL)
 		{
-			if(currElement->value != NULL)
+			struct possibility_packet possibility_buf;
+			if (element_load(currElement, &possibility_buf))
 			{
-				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				struct possibility_packet *possibility = &possibility_buf;
 				if(packet_codec_fwrite(f, possibility) != 0)
 				{
 					write_error = 1;
@@ -2546,9 +2666,10 @@ int backup_analysed(char *filename)
 		Element *currElement = file_possibility_analysed[fp]->file.start;
 		while(currElement != NULL)
 		{
-			if(currElement->value != NULL)
+			struct possibility_packet possibility_buf;
+			if (element_load(currElement, &possibility_buf))
 			{
-				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				struct possibility_packet *possibility = &possibility_buf;
 				if(packet_codec_fwrite(f, possibility) != 0)
 				{
 					write_error = 1;
@@ -2705,9 +2826,10 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 		Element *currElement = file_possibility_analysed[fp]->file.start;
 		while (currElement != NULL)
 		{
-			if (currElement->value != NULL)
+			struct possibility_packet possibility_buf;
+			if (element_load(currElement, &possibility_buf))
 			{
-				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				struct possibility_packet *possibility = &possibility_buf;
 				if (packet_codec_fwrite(fanalysed, possibility) != 0)
 				{
 					write_error_analysed = 1;
@@ -2726,9 +2848,10 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 		Element *currElement = file_possibility[fp]->file.start;
 		while (currElement != NULL)
 		{
-			if (currElement->value != NULL)
+			struct possibility_packet possibility_buf;
+			if (element_load(currElement, &possibility_buf))
 			{
-				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				struct possibility_packet *possibility = &possibility_buf;
 				if (packet_codec_fwrite(fstock, possibility) != 0)
 				{
 					write_error_stock = 1;
@@ -2739,9 +2862,10 @@ int consistent_backup(char *stock_filename, char *analysed_filename, int *out_an
 		currElement = file_possibility_checked[fp]->file.start;
 		while (currElement != NULL)
 		{
-			if (currElement->value != NULL)
+			struct possibility_packet possibility_buf;
+			if (element_load(currElement, &possibility_buf))
 			{
-				struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+				struct possibility_packet *possibility = &possibility_buf;
 				if (packet_codec_fwrite(fstock, possibility) != 0)
 				{
 					write_error_stock = 1;
@@ -3195,9 +3319,10 @@ int print_file(int fp)
         Element *currElement = pools[p]->start;
         while(currElement != NULL)
         {
-            if(currElement->value != NULL)
+            struct possibility_packet possibility_buf;
+            if (element_load(currElement, &possibility_buf))
             {
-                struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+                struct possibility_packet *possibility = &possibility_buf;
                 print_possibility_packet(possibility);
             } else {
                 log_info("null value\n");
@@ -3245,9 +3370,10 @@ int fprint_file(FILE *out, int fp, size_t *count)
         Element *currElement = pools[p]->start;
         while(currElement != NULL)
         {
-            if(currElement->value != NULL)
+            struct possibility_packet possibility_buf;
+            if (element_load(currElement, &possibility_buf))
             {
-                struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+                struct possibility_packet *possibility = &possibility_buf;
                 if (fprint_possibility_packet(out, possibility) != 0) {
                     return -1;
                 }
@@ -3288,9 +3414,10 @@ int print_file_analysed(int fp)
     Element *currElement = file_possibility_analysed[fp]->file.start;
     while(currElement != NULL)
     {
-        if(currElement->value != NULL)
+        struct possibility_packet possibility_buf;
+        if (element_load(currElement, &possibility_buf))
         {
-            struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+            struct possibility_packet *possibility = &possibility_buf;
             print_possibility_packet(possibility);
         } else {
             log_info("null value\n");
@@ -3312,9 +3439,10 @@ int fprint_file_analysed(FILE *out, int fp, size_t *count)
     Element *currElement = file_possibility_analysed[fp]->file.start;
     while(currElement != NULL)
     {
-        if(currElement->value != NULL)
+        struct possibility_packet possibility_buf;
+        if (element_load(currElement, &possibility_buf))
         {
-            struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+            struct possibility_packet *possibility = &possibility_buf;
             if (fprint_possibility_packet(out, possibility) != 0) {
                 return -1;
             }
@@ -3693,11 +3821,14 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
 		while (currElement != NULL)
 		{
             Element *nextElement = NULL;
-			struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
+			struct possibility_packet possibility_buf;
+			struct possibility_packet *possibility = element_load(currElement, &possibility_buf)
+			                                             ? &possibility_buf : NULL;
             unsigned int cells_studied = 0;
-            int has_next = possibility_all_has_a_next_counted(possibility, mapParts, all_rotate_part, &cells_studied);
+            int has_next = (possibility != NULL)
+                && possibility_all_has_a_next_counted(possibility, mapParts, all_rotate_part, &cells_studied);
             total_cells += (cells_studied > 0) ? cells_studied : 1;
-            int is_solution = (possibility->alloc >= ETERN_PARTS);
+            int is_solution = (possibility != NULL) && (possibility->alloc >= ETERN_PARTS);
 
             if (is_solution) {
                 /* Solution complète détectée par rmnonext (packet déjà complet ou
@@ -3751,8 +3882,7 @@ int remove_possibilities_with_no_next(map_big_array *mapParts, struct array_part
                     file_possibility[fp]->file.end = currElement->previous;
                 }
                 nextElement = currElement->next;
-                free (currElement->value);
-                free (currElement);
+                free_detached_element(currElement);
                 currElement = NULL;
                 file_possibility[fp]->file.size--;
 
@@ -3879,12 +4009,14 @@ int check_datas(void)
 			while (currElement != NULL)
 			{
 				count++;
-				int analyse = check_possibility((struct possibility_packet *)currElement->value, rotateParts);
+				struct possibility_packet check_buf;
+				int analyse = element_load(currElement, &check_buf)
+				                  ? check_possibility(&check_buf, rotateParts) : 0;
 				if (analyse < 0)
 				{
 					log_error("possibility error : %i\n",analyse);
 					log_error(" ---");
-					log_error_possibility_packet((struct possibility_packet *)currElement->value);
+					log_error_possibility_packet(&check_buf);
 					errors++;
 				}
 				currElement = currElement->next;
@@ -4011,14 +4143,14 @@ void *check_duplicate_thread(void *arguments) {
             while (elementToCompare != NULL)
             {
                 if (currElement != elementToCompare) {
-                    int analyse = compare_possibility((struct possibility_packet *)currElement->value, (struct possibility_packet *)elementToCompare->value);
+                    int analyse = element_equals_element(currElement, elementToCompare) ? 0 : -1;
                     if (analyse == 0)
                     {
                         log_info("possibility error : %i %s%i:%llu to %s%i:%llu\n", analyse, duplicate_pool_label(fp), duplicate_pool_index(fp), position, duplicate_pool_label(cfp), duplicate_pool_index(cfp), comparePosition);
                         // print_possibility_packet((struct possibility_packet *)currElement->value);
                         duplicateErrors[args->threadPosition]++;
                     } else {
-                        analyse = is_origin_of(currElement->value, elementToCompare->value);
+                        analyse = element_has_origin_element(currElement, elementToCompare) ? 1 : 0;
                         if (analyse == 1) {
                             log_info("possibility origin error : %s%i:%llu to %s%i:%llu\n", duplicate_pool_label(fp), duplicate_pool_index(fp), position, duplicate_pool_label(cfp), duplicate_pool_index(cfp), comparePosition);
                             duplicateErrors[args->threadPosition]++;
@@ -4378,8 +4510,11 @@ void *check_origin_thread(void *arguments)
 	origin_entry_t *entries = args->entries;
 
 	for (unsigned long long i = args->first; i < args->count; i += args->stride) {
-		const struct possibility_packet *root =
-			(const struct possibility_packet *)entries[i].element->value;
+		struct possibility_packet root_buf;
+		if (!element_load(entries[i].element, &root_buf)) {
+			continue;
+		}
+		const struct possibility_packet *root = &root_buf;
 		/* Tri croissant : à alloc égal aucune des deux n'est la racine de
 		 * l'autre. On saute donc directement à la première entrée
 		 * strictement plus profonde — elle vient forcément après i. */
@@ -4389,8 +4524,7 @@ void *check_origin_thread(void *arguments)
 			if (__atomic_load_n(&entries[j].is_duplicate, __ATOMIC_RELAXED)) {
 				continue;
 			}
-			if (compare_possibility((struct possibility_packet *)root,
-			                        (struct possibility_packet *)entries[j].element->value) != 0) {
+			if (!element_equals(entries[j].element, root)) {
 				continue;
 			}
 			if (__atomic_exchange_n(&entries[j].is_duplicate, (uint8_t)1, __ATOMIC_RELAXED)) {
@@ -4413,8 +4547,7 @@ void *check_origin_thread(void *arguments)
 			if (__atomic_load_n(&entries[j].is_descendant, __ATOMIC_RELAXED)) {
 				continue;
 			}
-			if (is_origin_of((struct possibility_packet *)root,
-			                 (struct possibility_packet *)entries[j].element->value) != 1) {
+			if (!element_has_origin(root, entries[j].element)) {
 				continue;
 			}
 			if (__atomic_exchange_n(&entries[j].is_descendant, (uint8_t)1, __ATOMIC_RELAXED)) {
@@ -4463,7 +4596,7 @@ static unsigned long long collect_origin_entries(origin_entry_t *entries, unsign
 				entries[n].element = e;
 				entries[n].file = pools[p];
 				entries[n].position = position;
-				entries[n].alloc = ((struct possibility_packet *)e->value)->alloc;
+				entries[n].alloc = element_placed(e);
 				entries[n].file_index = (uint16_t)fp;
 				entries[n].pool = (uint8_t)p;
 				entries[n].is_descendant = 0;
@@ -4635,8 +4768,8 @@ unsigned long long reset_checked_pool(void)
 		}
 
 		for (Element *e = checked_file->start; e != NULL; e = e->next) {
-			if (e->value != NULL) {
-				((struct possibility_packet *)e->value)->checked = 0;
+			if (!element_is_empty(e)) {
+				element_clear_checked(e);
 			}
 		}
 
@@ -4689,16 +4822,17 @@ static unsigned long long accumulate_alloc_levels(File *file, unsigned long long
     Element *currElement = file->start;
     while (currElement != NULL)
     {
-        struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-        if (possibility != NULL)
+        if (!element_is_empty(currElement))
         {
+            uint16_t alloc = element_placed(currElement);
+            int16_t minc = element_min_candidats(currElement);
             count++;
-            if (possibility->alloc < STOCK_DISTRIBUTION_LEVELS)
+            if (alloc < STOCK_DISTRIBUTION_LEVELS)
             {
-                levels[possibility->alloc]++;
-                if (possibility->min_candidats != POSSIBILITY_MIN_CANDIDATS_UNKNOWN) {
-                    min_candidats_sum[possibility->alloc] += (unsigned long long)possibility->min_candidats;
-                    min_candidats_known[possibility->alloc]++;
+                levels[alloc]++;
+                if (minc != POSSIBILITY_MIN_CANDIDATS_UNKNOWN) {
+                    min_candidats_sum[alloc] += (unsigned long long)minc;
+                    min_candidats_known[alloc]++;
                 }
             }
         }
@@ -4811,10 +4945,9 @@ static int min_alloc_in_file(File *file, int current)
 	Element *currElement = file->start;
 	while (currElement != NULL)
 	{
-		struct possibility_packet *possibility = (struct possibility_packet *)currElement->value;
-		if(possibility != NULL && possibility->alloc < current)
+		if(!element_is_empty(currElement) && element_placed(currElement) < current)
 		{
-			current = possibility->alloc;
+			current = (int)element_placed(currElement);
 		}
 		currElement = currElement->next;
 	}
@@ -4883,23 +5016,21 @@ static void sort_one_file_ascending(File *file)
 		}
 
 		Element *nextElement = currElement->next;
-		if (currElement->value != NULL) {
-			struct possibility_packet *curr = currElement->value;
-			int currAlloc = curr->alloc;
+		if (!element_is_empty(currElement)) {
+			int currAlloc = (int)element_placed(currElement);
 			if (orderedLair[currAlloc] == NULL) {
 				orderedLair[currAlloc] = currElement;
 			}
 
-			if(nextElement != NULL && nextElement->value != NULL)
+			if(!element_is_empty(nextElement))
 			{
-				struct possibility_packet *next = nextElement->value;
-				int nextAlloc = next->alloc;
+				int nextAlloc = (int)element_placed(nextElement);
 				if (orderedLair[nextAlloc] == NULL) {
 					orderedLair[nextAlloc] = nextElement;
 				}
 
 				// Si l'élément n'est pas trié, on le place par rapport aux repaires
-				if(curr->alloc > next->alloc)
+				if(currAlloc > nextAlloc)
 				{
 					// On essaye de voir si on peut le placer avant un "suivant"
 					Element *target = NULL;
@@ -5011,23 +5142,21 @@ static void sort_one_file_descending(File *file)
 		}
 
 		Element *nextElement = currElement->next;
-		if (currElement->value != NULL) {
-			struct possibility_packet *curr = currElement->value;
-			int currAlloc = curr->alloc;
+		if (!element_is_empty(currElement)) {
+			int currAlloc = (int)element_placed(currElement);
 			if (orderedLair[currAlloc] == NULL) {
 				orderedLair[currAlloc] = currElement;
 			}
 
-			if(nextElement != NULL && nextElement->value != NULL)
+			if(!element_is_empty(nextElement))
 			{
-				struct possibility_packet *next = nextElement->value;
-				int nextAlloc = next->alloc;
+				int nextAlloc = (int)element_placed(nextElement);
 				if (orderedLair[nextAlloc] == NULL) {
 					orderedLair[nextAlloc] = nextElement;
 				}
 
 				// Si l'élément n'est pas trié, on le place par rapport aux repaires
-				if(curr->alloc < next->alloc)
+				if(currAlloc < nextAlloc)
 				{
 					// On essaye de voir si on peut le placer avant un "précédent" repaire
 					Element *target = NULL;
@@ -5100,7 +5229,7 @@ int check_one_file(File *file, int f, const char *label)
 	Element *lastElement = currElement;
 	for(t=0; t < file->size && currElement != NULL;t++)
 	{
-		if(currElement->value == NULL){
+		if(element_is_empty(currElement)){
 			log_info("File:%i (%s) value NULL\n",f,label);
 			result = -1;
 		}

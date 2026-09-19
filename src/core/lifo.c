@@ -233,6 +233,14 @@ void move_after(File *suite, Element *element, Element *target) {
  * @param suite   File contenant l'élément.
  * @param element Élément à supprimer.
  */
+void free_detached_element(Element *element) {
+    if (element == NULL) {
+        return;
+    }
+    free(element->value);
+    free(element);
+}
+
 void file_remove_element(File *suite, Element *element) {
     extract_element(suite, element);
     free(element->value);
