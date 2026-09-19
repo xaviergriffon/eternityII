@@ -87,6 +87,24 @@ static inline void fixture_packet(struct possibility_packet *pk, int placed)
     pk->alloc = (uint16_t)placed;
 }
 
+/**
+ * @brief Plateau COMPLET — donc une SOLUTION.
+ *
+ * `fixture_packet` refuse d'en produire (cf. son commentaire) : c'est un garde-fou
+ * contre les fixtures qui en fabriquaient un par accident. Les rares tests qui
+ * veulent VRAIMENT une solution — parce que c'est leur sujet — passent par ici,
+ * explicitement, et savent ce qu'ils font.
+ */
+static inline void fixture_full_board(struct possibility_packet *pk)
+{
+    fixture_blank(pk);
+    for (int i = 0; i < ETERN_PARTS; i++) {
+        pk->grid[i / ETERN_SIZE][i % ETERN_SIZE] = (int16_t)(i + 1);
+        set_face_used(pk->b_faceused, (uint16_t)i, 1);
+    }
+    pk->alloc = (uint16_t)ETERN_PARTS;
+}
+
 /// Profondeur effective d'une fixture — à utiliser dans les assertions qui
 /// comparent `alloc`, pour qu'elles restent vraies dans les DEUX builds.
 #define FIXTURE_DEPTH(n) (((n) < ETERN_PARTS) ? (n) : (ETERN_PARTS - 1))

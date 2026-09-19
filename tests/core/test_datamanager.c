@@ -13,6 +13,11 @@
  */
 #include "greatest.h"
 #include "packet_fixture.h"
+
+/* Définie plus bas (près des tests d'origine/doublon) : plusieurs tests
+ * antérieurs s'en servent pour monter des plateaux cohérents. */
+static void build_board(struct possibility_packet *pk, const int cells[][3], int n, int checked);
+static void add_packets(const int *allocs, int n);
 #include "fork_assert.h"
 #include "core/datamanager.h"
 #include "core/packet_codec.h"
@@ -130,6 +135,24 @@ static unsigned long long analysed_total(void)
     unsigned long long s = 0;
     for (int f = 0; f < 10; f++) s += file_analysed_size(f);
     return s;
+}
+
+/* Coût MESURÉ d'une possibilité à `placed` pièces posées, surcoût de maillon
+ * compris. Un plafond RAM exprimé en « nombre de possibilités » supposerait une
+ * taille par possibilité constante : depuis que le stock range des
+ * enregistrements compacts, deux possibilités peu remplies pèsent bien moins
+ * que deux plateaux pleins. Les tests qui veulent « la place d'exactement N
+ * possibilités DE CETTE FORME » mesurent donc l'unité ici.
+ *
+ * Vide le stock : à appeler avant de le garnir. */
+static unsigned long long bytes_for_one(int placed)
+{
+    drain_datamanager();
+    int one[] = { placed };
+    add_packets(one, 1);
+    unsigned long long unit = datamanager_resident_bytes();
+    drain_datamanager();
+    return unit;
 }
 
 /* Ajoute n possibilités non vérifiées (checked = 0) d'allocs donnés. */
@@ -317,14 +340,17 @@ TEST hard_cap_refuses_add_beyond_budget(void)
     add_packets(allocs2, 2);
     ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
 
-    /* Plafond fixé À la taille actuelle : plus rien ne doit pouvoir entrer. */
-    datamanager_set_ram_limit_packets_for_tests(2);
+    /* Plafond fixé À l'occupation ACTUELLE, mesurée : plus rien ne doit pouvoir
+     * entrer. Exprimer ce plafond en « nombre de possibilités » supposerait une
+     * taille par possibilité constante, ce que la forme compacte n'assure plus —
+     * deux possibilités peu remplies pèsent bien moins que deux plateaux pleins. */
+    datamanager_set_ram_limit_bytes_for_tests(datamanager_resident_bytes());
 
     int allocs1[] = { 3 };
     array_possibility_packet arr;
     arr.size = 1;
     arr.possibilities = calloc(1, sizeof(struct possibility_packet));
-    arr.possibilities[0].alloc = (uint16_t)allocs1[0];
+    fixture_packet(&arr.possibilities[0], allocs1[0]);
     arr.possibilities[0].checked = 0;
     int rc = add_possibility(NULL, &arr);
     free(arr.possibilities);
@@ -2132,8 +2158,13 @@ TEST stock_distribution_on_empty_stock_is_all_zero(void)
 TEST stock_distribution_counts_full_board_alloc(void)
 {
     drain_all();
-    int allocs[] = { ETERN_PARTS };
-    add_packets(allocs, 1);
+    /* Plateau VRAIMENT complet : c'est le sujet de ce test, donc il le demande
+     * explicitement (`add_packets` borne à ETERN_PARTS - 1, garde-fou contre les
+     * fixtures qui fabriquaient une solution par accident). */
+    struct possibility_packet full;
+    fixture_full_board(&full);
+    array_possibility_packet arr = { .size = 1, .possibilities = &full };
+    add_possibility(NULL, &arr);
 
     stock_distribution_t d;
     datamanager_stock_distribution(&d);
@@ -2172,11 +2203,12 @@ TEST stock_distribution_aggregates_min_candidats_excluding_unknown(void)
     array_possibility_packet arr;
     arr.size = 3;
     arr.possibilities = calloc(3, sizeof(struct possibility_packet));
-    arr.possibilities[0].alloc = 4;
+    /* Quatre pièces RÉELLEMENT posées : c'est la grille qui donne le niveau. */
+    for (int i = 0; i < 3; i++) {
+        fixture_packet(&arr.possibilities[i], 4);
+    }
     arr.possibilities[0].min_candidats = 2;
-    arr.possibilities[1].alloc = 4;
     arr.possibilities[1].min_candidats = 6;
-    arr.possibilities[2].alloc = 4;
     arr.possibilities[2].min_candidats = POSSIBILITY_MIN_CANDIDATS_UNKNOWN;
     add_possibility(NULL, &arr);
     free(arr.possibilities);
@@ -2466,15 +2498,26 @@ TEST remove_no_next_prunes_dead_packets(void)
 {
     drain_all();
     /* map sans pièce « tout bord 0 » : une case (0,0) vide reste sans candidat. */
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
-    struct array_part rp = { .size = 2, .parts = parts };
+    /* Trois entrées, pas deux : la pièce 2 reste LIBRE, ce qui donne un candidat
+     * au trou d'un plateau rempli de pièces 1. Sans elle, le seul plateau qui
+     * survivait à l'élagage était un plateau COMPLET — or un plateau complet est
+     * une solution, et l'élagage la retire. Le test exerçait donc un état que
+     * `alloc` ne peut plus décrire depuis qu'il est déduit de la grille. */
+    struct part parts[] = { { .id = 0 },
+                            { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                            { .id = 2, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 3, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pks[2];
-    memset(pks, 0, sizeof(pks));
-    /* pks[0] : grille pleine (tout à 0) -> a une suite, conservée */
+    /* pks[0] : plateau de pièces 1 avec un trou AU CENTRE -> la pièce 2, libre, y convient
+       (un trou en coin ne conviendrait pas : deux de ses côtés sont des bords de
+       plateau, qui exigent une face nulle que la pièce 2 n'a pas)
+       -> a une suite, conservée. Jamais un plateau COMPLET : ce serait une
+       solution, et l'élagage la retirerait. */
+    fixture_board_with_hole(&pks[0], 1, 1, 1);
     /* pks[1] : trou sur la 1re case du parcours, clé (0,0,0,0) sans candidat -> impasse */
-    pks[1].grid[dirx[0]][diry[0]] = -2;
+    fixture_board_with_hole(&pks[1], 0, dirx[0], diry[0]);
     array_possibility_packet arr = { .size = 2, .possibilities = pks };
     add_possibility(NULL, &arr);
     ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
@@ -2504,8 +2547,15 @@ TEST remove_no_next_handles_complete_solution(void)
 {
     drain_all();
     /* map minimale (non utilisée car alloc == ETERN_PARTS → boucle vide) */
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
-    struct array_part rp = { .size = 2, .parts = parts };
+    /* Trois entrées, pas deux : la pièce 2 reste LIBRE, ce qui donne un candidat
+     * au trou d'un plateau rempli de pièces 1. Sans elle, le seul plateau qui
+     * survivait à l'élagage était un plateau COMPLET — or un plateau complet est
+     * une solution, et l'élagage la retire. Le test exerçait donc un état que
+     * `alloc` ne peut plus décrire depuis qu'il est déduit de la grille. */
+    struct part parts[] = { { .id = 0 },
+                            { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                            { .id = 2, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 3, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pk;
@@ -3067,8 +3117,7 @@ TEST get_last_possibility_reports_from_server_false_when_local_stock_used(void)
     drain_datamanager();
 
     struct possibility_packet *p = malloc(sizeof *p);
-    memset(p, 0, sizeof *p);
-    p->alloc = 5;
+    fixture_packet(p, 5);
     array_possibility_packet *ap = malloc(sizeof *ap);
     ap->size = 1;
     ap->possibilities = p;
@@ -4731,8 +4780,9 @@ TEST fprint_all_file_analysed_aggregates_every_file(void)
     fclose(in);
     unlink(path);
     (void)n;
-    ASSERT(strstr(buf, "\"alloc\": 77") != NULL);
-    ASSERT(({ char _needle[32]; snprintf(_needle, sizeof _needle, "\"alloc\": %d", FIXTURE_DEPTH(88)); strstr(buf, _needle); }) != NULL);
+    /* Profondeurs bornées comme les fixtures qui les ont produites. */
+    ASSERT(({ char _n[32]; snprintf(_n, sizeof _n, "\"alloc\": %d", FIXTURE_DEPTH(77)); strstr(buf, _n); }) != NULL);
+    ASSERT(({ char _n[32]; snprintf(_n, sizeof _n, "\"alloc\": %d", FIXTURE_DEPTH(88)); strstr(buf, _n); }) != NULL);
 
     drain_all();
     PASS();
@@ -4782,15 +4832,22 @@ TEST fprint_file_analysed_accepts_null_count(void)
 TEST remove_no_next_removes_dead_packet_at_head(void)
 {
     drain_all();
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
-    struct array_part rp = { .size = 2, .parts = parts };
+    /* Trois entrées, pas deux : la pièce 2 reste LIBRE, ce qui donne un candidat
+     * au trou d'un plateau rempli de pièces 1. Sans elle, le seul plateau qui
+     * survivait à l'élagage était un plateau COMPLET — or un plateau complet est
+     * une solution, et l'élagage la retire. Le test exerçait donc un état que
+     * `alloc` ne peut plus décrire depuis qu'il est déduit de la grille. */
+    struct part parts[] = { { .id = 0 },
+                            { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                            { .id = 2, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 3, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pks[2];
-    memset(pks, 0, sizeof pks);
     /* pks[0] : trou sur la 1re case du parcours -> impasse, en tête de file */
-    pks[0].grid[dirx[0]][diry[0]] = -2;
-    /* pks[1] : grille pleine -> a une suite, conservée derrière l'impasse */
+    fixture_board_with_hole(&pks[0], 0, dirx[0], diry[0]);
+    /* pks[1] : plateau de pièces 1 avec un trou AU CENTRE que la pièce 2 comble -> conservé */
+    fixture_board_with_hole(&pks[1], 1, 1, 1);
     array_possibility_packet arr = { .size = 2, .possibilities = pks };
     add_possibility(NULL, &arr);
     ASSERT_EQ_FMT(2ULL, datas_size(), "%llu");
@@ -4818,12 +4875,21 @@ static void fork_rmnonext_solution(void)
     extern int stop_on_solution;
     stop_on_solution = 1;
 
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
-    struct array_part rp = { .size = 2, .parts = parts };
+    /* Trois entrées, pas deux : la pièce 2 reste LIBRE, ce qui donne un candidat
+     * au trou d'un plateau rempli de pièces 1. Sans elle, le seul plateau qui
+     * survivait à l'élagage était un plateau COMPLET — or un plateau complet est
+     * une solution, et l'élagage la retire. Le test exerçait donc un état que
+     * `alloc` ne peut plus décrire depuis qu'il est déduit de la grille. */
+    struct part parts[] = { { .id = 0 },
+                            { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                            { .id = 2, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 3, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pk;
-    fixture_packet(&pk, (int)(ETERN_PARTS));                    /* plateau complet */
+    /* Ce test a pour SUJET la solution : il demande donc explicitement un plateau
+       complet, que `fixture_packet` refuse justement de produire par accident. */
+    fixture_full_board(&pk);
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
 
@@ -4864,14 +4930,12 @@ TEST check_duplicate_flags_duplicates_and_origins(void)
 {
     drain_all();
     struct possibility_packet pks[3];
-    memset(pks, 0, sizeof pks);
-    /* pks[0] (A) : préfixe commun, alloc=1 */
-    pks[0].alloc = 1;
-    pks[0].grid[dirx[0]][diry[0]] = 200;
-    /* pks[1] (B) : descendant de A (même préfixe, alloc=2) -> erreur origin */
-    pks[1].alloc = 2;
-    pks[1].grid[dirx[0]][diry[0]] = 200;
-    pks[1].grid[dirx[1]][diry[1]] = 201;
+    /* pks[0] (A) : préfixe commun, une pièce posée */
+    const int a_cells[][3] = { { dirx[0], diry[0], 5 } };
+    build_board(&pks[0], a_cells, 1, 0);
+    /* pks[1] (B) : descendant de A (même préfixe, une pièce de plus) -> erreur origin */
+    const int b_cells[][3] = { { dirx[0], diry[0], 5 }, { dirx[1], diry[1], 6 } };
+    build_board(&pks[1], b_cells, 2, 0);
     /* pks[2] : copie exacte de A -> erreur duplicate */
     pks[2] = pks[0];
     array_possibility_packet arr = { .size = 3, .possibilities = pks };
@@ -4891,12 +4955,16 @@ TEST check_duplicate_flags_duplicates_and_origins(void)
 TEST check_duplicate_multi_thread_across_files(void)
 {
     drain_all();
-    enum { N = 26 };
+    /* N borné par le nombre de pièces réellement DISTINCTES du puzzle : le
+       plateau 4x4 n'en a que 16, on ne peut donc pas y poser 26 possibilités
+       deux à deux différentes par leur seule pièce. Le sujet du test — répartir
+       sur les dix files et croiser les doublons — ne dépend pas de la valeur
+       exacte de N. */
+    enum { N = (26 < ETERN_PARTS) ? 26 : (ETERN_PARTS - 1) };
     struct possibility_packet pks[N];
-    memset(pks, 0, sizeof pks);
     for (int i = 0; i < N; i++) {
-        pks[i].alloc = 1;
-        pks[i].grid[dirx[0]][diry[0]] = (int16_t)(100 + i); /* tous distincts */
+        const int cells[][3] = { { dirx[0], diry[0], 1 + i } }; /* tous distincts */
+        build_board(&pks[i], cells, 1, 0);
     }
     array_possibility_packet arr = { .size = N, .possibilities = pks };
     add_possibility(NULL, &arr);
@@ -5216,14 +5284,16 @@ TEST check_origin_purge_removes_a_whole_chain(void)
 TEST check_origin_across_files(void)
 {
     drain_all();
-    enum { N = 26 };
+    /* Même borne que ci-dessus : autant de plateaux que le puzzle a de pièces
+       distinctes à leur donner. */
+    enum { N = (26 < ETERN_PARTS) ? 26 : (ETERN_PARTS - 1) };
     struct possibility_packet pks[N];
     for (int i = 0; i < N; i++) {
-        const int cells[][3] = { {0,0,100}, {0,1,(int)(200 + i)} };
+        const int cells[][3] = { {0,0,1}, {0,1,(int)(2 + i)} };
         build_board(&pks[i], cells, 2, 0);
     }
     /* Un seul descendant : celui du plateau 7. */
-    const int desc[][3] = { {0,0,100}, {0,1,207}, {0,2,42} };
+    const int desc[][3] = { {0,0,1}, {0,1,9}, {0,2,2} };
     build_board(&pks[N - 1], desc, 3, 0);
 
     array_possibility_packet arr = { .size = N, .possibilities = pks };
@@ -6650,12 +6720,11 @@ static map_big_array *make_expand_free_map(void)
 /* Sème une possibilité genèse (plateau vide, curseur en directions[0]). */
 static void seed_genesis(uint16_t alloc)
 {
+    /* Plateau COHÉRENT : `alloc` pièces réellement posées. Poser le champ sans
+       les pièces ne suffit plus — `alloc` est déduit de la grille, et un stock
+       « profond de 5 » avec un plateau vide serait vu comme profond de 0. */
     struct possibility_packet g;
-    memset(&g, 0, sizeof g);
-    for (int x = 0; x < ETERN_SIZE; x++)
-        for (int y = 0; y < ETERN_SIZE; y++)
-            g.grid[x][y] = -2;
-    g.alloc = alloc;
+    fixture_packet(&g, (int)alloc);
     g.x = dirx[alloc];
     g.y = diry[alloc];
     g.checked = 0;
@@ -6776,6 +6845,9 @@ TEST expand_waits_for_ram_and_never_loses_possibilities(void)
     expand_max_stock = EXPAND_MAX_STOCK;
 
     drain_all();
+    /* Unité mesurée AVANT de garnir : les enfants de la genèse portent une
+       pièce chacun. */
+    unsigned long long unit = bytes_for_one(1);
     seed_genesis(0);
     request = REQUEST_CONTINUE;
 
@@ -6785,7 +6857,7 @@ TEST expand_waits_for_ram_and_never_loses_possibilities(void)
      * 5 suivants doivent attendre -- puis, une fois le plafond levé par le
      * thread compagnon, la 2ᵉ passe (alloc 1 → 2, cf.
      * expand_grows_stock_and_advances_level) doit elle aussi s'exécuter. */
-    datamanager_set_ram_limit_packets_for_tests(3);
+    datamanager_set_ram_limit_bytes_for_tests(3 * unit);
 
     pthread_t releaser;
     ASSERT_EQ_FMT(0, pthread_create(&releaser, NULL, raise_ram_cap_after_delay_for_tests, NULL), "%d");
@@ -6835,6 +6907,9 @@ TEST expand_aborts_cleanly_on_request_stop_during_ram_wait(void)
     expand_max_stock = EXPAND_MAX_STOCK;
 
     drain_all();
+    /* Unité mesurée AVANT de garnir : les enfants de la genèse portent une
+       pièce chacun. */
+    unsigned long long unit = bytes_for_one(1);
     seed_genesis(0);
     request = REQUEST_CONTINUE;
 
@@ -6885,10 +6960,13 @@ TEST expand_aborts_cleanly_on_request_stop_during_between_pass_wait(void)
     expand_max_stock = EXPAND_MAX_STOCK;
 
     drain_all();
+    /* Unité mesurée AVANT de garnir : les enfants de la genèse portent une
+       pièce chacun. */
+    unsigned long long unit = bytes_for_one(1);
     seed_genesis(0);
     request = REQUEST_CONTINUE;
 
-    datamanager_set_ram_limit_packets_for_tests(3);
+    datamanager_set_ram_limit_bytes_for_tests(3 * unit);
 
     pthread_t stopper;
     ASSERT_EQ_FMT(0, pthread_create(&stopper, NULL, raise_ram_cap_to_exact_fit_then_stop_for_tests, NULL), "%d");

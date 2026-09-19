@@ -1114,8 +1114,7 @@ TEST step_get_serves_possibility(void)
     unsigned long long before_starved = server_search_starved;
 
     struct possibility_packet *p = malloc(sizeof *p);
-    memset(p, 0, sizeof *p);
-    p->alloc = 5;
+    fixture_packet(p, 5);
     array_possibility_packet *ap = malloc(sizeof *ap);
     ap->size = 1;
     ap->possibilities = p;
@@ -2960,8 +2959,15 @@ TEST rmnonext_pass_prunes_when_idle(void)
     client_t *saved_tp = thread_params;
     thread_params = NULL;                          /* get_active_threads -> 0 */
 
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
-    struct array_part rp = { .size = 2, .parts = parts };
+    /* Trois entrées, pas deux : la pièce 2 reste LIBRE, ce qui donne un candidat
+     * au trou d'un plateau rempli de pièces 1. Sans elle, le seul plateau qui
+     * survivait à l'élagage était un plateau COMPLET — or un plateau complet est
+     * une solution, et l'élagage la retire. Le test exerçait donc un état que
+     * `alloc` ne peut plus décrire depuis qu'il est déduit de la grille. */
+    struct part parts[] = { { .id = 0 },
+                            { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                            { .id = 2, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 3, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     /* Deux plateaux PRESQUE pleins, chacun avec un trou — jamais pleins : un
@@ -2970,7 +2976,7 @@ TEST rmnonext_pass_prunes_when_idle(void)
      * imposent (0,0,0,0), couleur qu'aucune pièce de cette map ne porte. Le
      * trou de `pks[0]` est en bordure de plateau, donc pourvu de candidats. */
     struct possibility_packet pks[2];
-    fixture_board_with_hole(&pks[0], 1, ETERN_SIZE - 1, ETERN_SIZE - 1);
+    fixture_board_with_hole(&pks[0], 1, 1, 1);
     fixture_board_with_hole(&pks[1], 0, dirx[0], diry[0]);
     array_possibility_packet arr = { .size = 2, .possibilities = pks };
     add_possibility(NULL, &arr);
@@ -3000,8 +3006,15 @@ TEST rmnonext_pass_skips_when_client_active(void)
     thread_params = slots;
     NB_THREADS = 1;
 
-    struct part parts[] = { { .id = 0 }, { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
-    struct array_part rp = { .size = 2, .parts = parts };
+    /* Trois entrées, pas deux : la pièce 2 reste LIBRE, ce qui donne un candidat
+     * au trou d'un plateau rempli de pièces 1. Sans elle, le seul plateau qui
+     * survivait à l'élagage était un plateau COMPLET — or un plateau complet est
+     * une solution, et l'élagage la retire. Le test exerçait donc un état que
+     * `alloc` ne peut plus décrire depuis qu'il est déduit de la grille. */
+    struct part parts[] = { { .id = 0 },
+                            { .id = 1, .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                            { .id = 2, .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    struct array_part rp = { .size = 3, .parts = parts };
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pks[2];
