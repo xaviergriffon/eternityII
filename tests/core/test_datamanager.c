@@ -5515,6 +5515,110 @@ TEST add_possibility_gives_up_when_stock_never_unlocked(void)
     PASS();
 }
 
+/* ------------------------------------------------------------------------
+ * Motif du refus : plafond RAM ou files verrouillées ?
+ *
+ * put_to_pool refuse pour ces DEUX raisons sans rapport, et toutes deux
+ * rendent 1. Les chemins qui JOURNALISENT le refus (expansion, import)
+ * accusaient le plafond RAM dans les deux cas : sur un serveur tournant en
+ * RAM ILLIMITÉE, une sauvegarde faisait écrire « expansion : plafond RAM
+ * atteint pendant cette passe » dans events.log — un diagnostic faux, qui
+ * envoie chercher une manette (--stock-max-ram, --stock-spill-dir) sans
+ * rapport avec la cause. Les deux tests ci-dessous verrouillent chacun un
+ * motif, l'un étant la contre-épreuve de l'autre : c'est leur PAIRE qui
+ * prouve que le motif est lu et non deviné.
+ * ------------------------------------------------------------------------ */
+
+static volatile int g_reason_put_done = 0;
+static int g_reason_put_rc = -99;
+static datamanager_add_refusal_t g_reason_put_reason = DATAMANAGER_ADD_OK;
+
+static void *th_put_reason_never_unlocked(void *arg)
+{
+    (void)arg;
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 7;
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    g_reason_put_rc = put_to_local_with_reason(&arr, &g_reason_put_reason);
+    g_reason_put_done = 1;
+    return NULL;
+}
+
+/* Stock verrouillé ET AUCUN plafond RAM configuré : le refus doit être
+ * attribué aux files occupées, jamais à la RAM. Sans le motif, ce même refus
+ * était journalisé comme un plafond RAM atteint alors qu'il n'y en avait pas. */
+TEST pool_busy_refusal_is_not_blamed_on_the_ram_cap(void)
+{
+    drain_all();
+    datamanager_set_ram_limit_packets_for_tests(0); /* RAM illimitée, sans ambiguïté */
+    g_reason_put_done = 0;
+    g_reason_put_rc = -99;
+    g_reason_put_reason = DATAMANAGER_ADD_OK;
+
+    lock_all_file();
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, th_put_reason_never_unlocked, NULL));
+    usleep(TEST_TRYLOCK_BOUND_MARGIN_US);
+    int returned_while_locked = g_reason_put_done;
+    unlock_all_file();
+    pthread_join(th, NULL);
+
+    ASSERT_EQ_FMT(1, returned_while_locked, "%d");
+    ASSERT_EQ_FMT(1, g_reason_put_rc, "%d");                       /* refusé */
+    ASSERT_EQ_FMT((int)DATAMANAGER_ADD_REFUSED_POOL_BUSY,
+                  (int)g_reason_put_reason, "%d");
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");                     /* rien inséré */
+    drain_all();
+    PASS();
+}
+
+/* Contre-épreuve : plafond RAM atteint, aucun verrou tenu — le motif doit
+ * cette fois désigner la RAM. Sans elle, un motif câblé en dur sur
+ * « files occupées » passerait le test ci-dessus. */
+TEST ram_cap_refusal_is_reported_as_a_ram_cap(void)
+{
+    drain_all();
+    int allocs[] = { 1 };
+    add_packets(allocs, 1);
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    datamanager_set_ram_limit_packets_for_tests(1); /* plafond = taille courante */
+
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 8;
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    datamanager_add_refusal_t reason = DATAMANAGER_ADD_OK;
+    int rc = put_to_local_with_reason(&arr, &reason);
+
+    ASSERT_EQ_FMT(1, rc, "%d");
+    ASSERT_EQ_FMT((int)DATAMANAGER_ADD_REFUSED_RAM_CAP, (int)reason, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_all();
+    PASS();
+}
+
+/* Le chemin nominal renseigne le motif à OK — un appelant qui ne réinitialise
+ * pas sa variable entre deux insertions ne doit pas hériter du refus d'avant. */
+TEST successful_add_reports_no_refusal_reason(void)
+{
+    drain_all();
+    struct possibility_packet pk;
+    memset(&pk, 0, sizeof pk);
+    pk.alloc = 9;
+    array_possibility_packet arr = { .size = 1, .possibilities = &pk };
+    datamanager_add_refusal_t reason = DATAMANAGER_ADD_REFUSED_RAM_CAP; /* résidu volontaire */
+    int rc = put_to_local_with_reason(&arr, &reason);
+
+    ASSERT_EQ_FMT(0, rc, "%d");
+    ASSERT_EQ_FMT((int)DATAMANAGER_ADD_OK, (int)reason, "%d");
+    ASSERT_EQ_FMT(1ULL, datas_size(), "%llu");
+    drain_all();
+    PASS();
+}
+
 static array_possibility_packet *g_cont_result;
 static void *th_get_possibility(void *arg)
 {
@@ -7211,6 +7315,9 @@ SUITE(datamanager_suite)
 
     RUN_TEST(add_possibility_spins_until_lock_released);
     RUN_TEST(add_possibility_gives_up_when_stock_never_unlocked);
+    RUN_TEST(pool_busy_refusal_is_not_blamed_on_the_ram_cap);
+    RUN_TEST(ram_cap_refusal_is_reported_as_a_ram_cap);
+    RUN_TEST(successful_add_reports_no_refusal_reason);
     RUN_TEST(get_last_possibility_spins_until_lock_released);
     RUN_TEST(get_last_possibility_gives_up_when_stock_never_unlocked);
     RUN_TEST(add_possibility_analysed_spins_both_modes);

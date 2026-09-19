@@ -422,6 +422,17 @@ plutôt que d'être abandonné. Une attente qui se prolonge signale un déséqui
 configuration (relever `--stock-max-ram`, configurer/vérifier `--stock-spill-dir`, ou réduire
 `--expand-level`/`--expand-max-stock`), pas une perte de données.
 
+**Un refus d'insertion n'est pas forcément la RAM.** Le stock refuse aussi un ADD quand ses
+files restent verrouillées au-delà d'un budget borné — une sauvegarde (`backup`,
+`consistent_backup`) ou une fenêtre de maintenance en cours, sans le moindre rapport avec
+`--stock-max-ram`. Les deux refus se traitent pareil (attente et réessai, jamais d'abandon)
+mais se **journalisent distinctement** : « stock momentanément verrouillé (sauvegarde ou
+maintenance) » d'un côté, « plafond RAM atteint » de l'autre. Les confondre faisait écrire
+`expansion : plafond RAM atteint pendant cette passe` dans `events.log` d'un serveur tournant
+en RAM **illimitée** — un diagnostic faux, qui envoie régler une option sans effet ici. La
+pause *entre deux passes* d'expansion, elle, ne concerne que le motif RAM : un stock
+momentanément verrouillé se libère de lui-même, il n'y a pas de place à attendre.
+
 > Cette expansion est le pendant *serveur* de la délégation anticipée côté *client*
 > (sonde de faim `INST_NEED_WORK`, VERSION 8) décrite dans
 > [Échanges client / serveur](echanges_client_serveur.md).

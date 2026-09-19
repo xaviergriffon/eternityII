@@ -300,6 +300,40 @@ typedef struct
 } file_possibility_t;
 
 /**
+ * @brief Motif d'un refus d'insertion dans les files locales.
+ *
+ * `put_to_pool` refuse pour DEUX raisons sans rapport l'une avec l'autre, et
+ * toutes deux rendent le même code 1 (« rien inséré, sûr à réessayer ») :
+ * le plafond `--stock-max-ram`, et l'épuisement du budget de trylock quand
+ * les files restent verrouillées (sauvegarde, maintenance). Les confondre a
+ * fait accuser le plafond RAM sur un serveur qui tournait en RAM ILLIMITÉE —
+ * diagnostic faux, et qui envoie chercher au mauvais endroit. Tout chemin qui
+ * JOURNALISE un refus doit donc en demander le motif.
+ */
+typedef enum {
+    DATAMANAGER_ADD_OK = 0,                 /**< Inséré (ou rien à insérer). */
+    DATAMANAGER_ADD_REFUSED_RAM_CAP = 1,    /**< Plafond `--stock-max-ram` atteint. */
+    DATAMANAGER_ADD_REFUSED_POOL_BUSY = 2   /**< Files verrouillées au-delà du budget de trylock. */
+} datamanager_add_refusal_t;
+
+/**
+ * @brief Insère dans les files LOCALES en rapportant le motif d'un refus.
+ *
+ * Variante de l'insertion locale utilisée par les chemins qui journalisent
+ * ou diagnostiquent le refus. Le code de retour est inchangé (0 / non nul).
+ *
+ * @param possibilities Tableau de paquets à insérer.
+ * @param reason        Motif du refus (peut être NULL). Mis à
+ *                      `DATAMANAGER_ADD_OK` en cas de succès. Si les deux
+ *                      pools refusent pour des motifs différents, le plafond
+ *                      RAM l'emporte : c'est le seul des deux sur lequel
+ *                      l'exploitant a une manette.
+ * @return 0 si inséré, non nul si refusé (rien inséré, sûr à réessayer).
+ */
+int put_to_local_with_reason(array_possibility_packet *possibilities,
+                             datamanager_add_refusal_t *reason);
+
+/**
  * @brief Ajoute des possibilités dans le datamanager (local ou serveur distant).
  *
  * Si une IP serveur est configurée et que `client_possibility` est non NULL,
@@ -309,9 +343,10 @@ typedef struct
  * @param client_possibility Contexte du thread client (peut être NULL en mode local).
  * @param possibilities      Tableau de paquets à ajouter.
  * @return                   0 si OK, non nul en cas d'erreur (-1 : connexion
- *                           serveur perdue ; 1 : pool local resté verrouillé
- *                           au-delà d'un délai borné — rien n'a été
- *                           inséré dans les deux cas, sûr à réessayer).
+ *                           serveur perdue ; non nul : pool local refusé —
+ *                           rien n'a été inséré dans les deux cas, sûr à
+ *                           réessayer. `put_to_local_with_reason` donne le
+ *                           motif exact du refus local.
  */
 int add_possibility(client_possibility_t *client_possibility, array_possibility_packet *possibilities);
 
