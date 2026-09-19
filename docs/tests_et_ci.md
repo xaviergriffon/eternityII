@@ -34,6 +34,55 @@ Voir [tests/README.md](../tests/README.md) pour les options du runner, les
 conventions (fixtures à la main, tests de chemins `exit()` via `fork_assert.h`) et la
 marche à suivre pour ajouter un test.
 
+### Le runner travaille dans un bac à sable, jamais dans le dépôt
+
+`tests/test_main.c` appelle `test_sandbox_enter()` (`tests/sandbox.{h,c}`) **avant
+toute suite** : le runner crée un répertoire temporaire (`mkdtemp`) et s'y place.
+Tous les artefacts écrits sous chemin relatif par le code de production —
+`./eternityII.back`, `./eternityII-in_analyse.back`, `./eternityII-best_board.back`,
+`events.log`, `solution_server_<pid>_<seq>`, `*.spillcount`, les sockets Unix
+`etii_main.<pid>` / `etii_fork.<pid>` — y atterrissent, et le répertoire est effacé à
+la sortie du process.
+
+**Pourquoi** : ces chemins relatifs sont *corrects* en production (un serveur
+sauvegarde dans son propre répertoire de travail) mais destructeurs sous `make test`,
+dont le répertoire courant est la racine du dépôt. Un stock de production de 1,96 Go
+posé à la racine y a été **écrasé par un `make test`** et réduit à 76 octets (en-tête
+`ETERN_SIZE=4` : le fichier venait du build 4×4 de la suite). Le déclencheur était un
+test exerçant la branche « solution trouvée » de `remove_possibilities_with_no_next`,
+qui appelle `consistent_backup("./eternityII.back", …)`. Rien ne le signalait : les
+motifs `*.back`, `*.spillcount`, `solution_*` et `etii_*` sont ignorés par le
+versionnage, donc l'état du dépôt restait « propre » — 76 fichiers `.spillcount`
+s'étaient accumulés à la racine sans que personne ne le voie.
+
+**Correction centrale, pas par site** : une seule protection couvre les tests
+existants *et à venir*. La variante « chaque test qui écrit se protège lui-même » a
+été écartée — c'est justement par un test nouvellement ajouté que l'accident est
+arrivé. Les scripts d'intégration appliquaient déjà ce schéma (`mktemp -d` + `cd`,
+chemins résolus en absolu avant), le runner unitaire ne fait que le rejoindre.
+
+**Contrepartie** : un test qui *lit* une donnée du dépôt par chemin relatif casserait
+après le `chdir`. Inventaire fait : les seuls chemins concernés sont les globales de
+production `parts_files` et `indices_file` (`core/core_static_variables.c`), rendues
+**absolues avant** le `chdir`. Les chemins d'*écriture* restent relatifs à dessein.
+Aucune modification de `src/` : le comportement de production est inchangé.
+
+**Garde-fou (la partie qui mord)** : `sandbox_suite` (`tests/test_sandbox.c`), jouée
+**en dernier**, compare le répertoire de lancement à la photographie prise au
+démarrage et échoue en nommant l'entrée apparue. Elle attrape les deux fuites que le
+bac à sable ne peut pas couvrir : une écriture par chemin **absolu**, et un `chdir`
+vers le dépôt sans retour (second test, `runner_stays_in_its_temporary_sandbox`).
+Vérifié par sabotage dans les deux sens : un test écrivant `<racine>/eternityII.back`
+fait tomber le garde-fou (`+ eternityII.back` nommé dans le message d'échec) ; le
+même test écrivant `./eternityII.back` **ne pollue plus rien** — le fichier atterrit
+dans le bac à sable. Sur échec, le bac à sable est conservé (son chemin est affiché)
+pour l'analyse post-mortem.
+
+La comparaison porte sur les entrées **directes** du répertoire de lancement, pas sur
+une descente récursive : la pollution y est toujours (les défauts de production sont
+des `"./…"`), et une récursion signalerait à tort les `.gcda` que `make coverage`
+sème dans ses sous-dossiers.
+
 ## Tests d'intégration (`make test-integration`)
 
 Compile un binaire dédié (`ETERN_PARTS=16`, plateau 4×4) et enchaîne deux scripts

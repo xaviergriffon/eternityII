@@ -8,6 +8,7 @@
  * Compilation : voir la cible `make test` à la racine.
  */
 #include "greatest.h"
+#include "sandbox.h"
 #include "core/datamanager.h"
 
 /* Suites définies dans les autres fichiers de test. */
@@ -48,6 +49,7 @@ SUITE_EXTERN(app_runtime_suite);
 SUITE_EXTERN(etii_control_suite);
 SUITE_EXTERN(fork_gate_suite);
 SUITE_EXTERN(fork_orchestrator_suite);
+SUITE_EXTERN(sandbox_suite);
 #if ETERN_PARTS == 16
 /* Suite « solution réelle » : n'existe que dans le build 4×4 (cf. test-16). */
 SUITE_EXTERN(solution16_suite);
@@ -57,6 +59,13 @@ GREATEST_MAIN_DEFS();
 
 int main(int argc, char **argv)
 {
+    /* TOUTE PREMIÈRE instruction : les modules de production écrivent sous des
+     * chemins relatifs ("./eternityII.back", "events.log", sockets etii_*),
+     * corrects pour un serveur réel mais destructeurs dans la racine du dépôt.
+     * On bascule une fois pour toutes dans un répertoire temporaire — après
+     * avoir rendu absolus les chemins de lecture. Cf. tests/sandbox.h. */
+    test_sandbox_enter();
+
     /* Pools alloués dynamiquement (tableaux de pointeurs, PR4) : appel
      * OBLIGATOIRE avant tout usage de datamanager.c, cf. sa doc. */
     datamanager_configure_stock_files(NB_FILE_POSSIBILITY_DEFAULT);
@@ -101,5 +110,14 @@ int main(int argc, char **argv)
 #if ETERN_PARTS == 16
     RUN_SUITE(solution16_suite);
 #endif
+    /* EN DERNIER : le bilan d'isolation, qui constate que le répertoire de
+     * lancement est resté intact après toutes les suites. */
+    RUN_SUITE(sandbox_suite);
+
+    /* Un échec quelconque : on garde le bac à sable pour l'analyse post-mortem
+     * (ses artefacts — stock, sauvegardes, journaux — sont la seule trace de ce
+     * que le test a fait). */
+    if (!greatest_all_passed()) test_sandbox_keep();
+
     GREATEST_MAIN_END(); /* affiche le récap et retourne le code de sortie */
 }
