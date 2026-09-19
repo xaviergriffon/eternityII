@@ -17,6 +17,7 @@
  * 139 (rotation 2) en (7,8).
  */
 #include "greatest.h"
+#include "packet_fixture.h"
 #include "core/possibility.h"
 #include "core/part.h"
 #include "core/datamanager.h"
@@ -155,7 +156,7 @@ TEST faces_used_size_covers_every_piece_bit(void)
 {
     ASSERT(FACES_USED_SIZE * 16 >= ETERN_PARTS);
     struct possibility_packet packet;
-    memset(&packet, 0, sizeof(packet));
+    fixture_blank(&packet);
     set_face_used(packet.b_faceused, (uint16_t)(ETERN_PARTS - 1), 1);
     ASSERT_EQ_FMT(1, (int)is_face_used(packet.b_faceused, (uint16_t)(ETERN_PARTS - 1)), "%d");
     ASSERT_EQ_FMT(0, (int)is_face_used(packet.b_faceused, 0), "%d");
@@ -2601,7 +2602,7 @@ TEST put_possibility_returns_zero_on_bad_sizeofvalue(void)
     File file;
     init_file(&file, 0); /* sizeofvalue=0 → chemin malloc échoue */
     struct possibility_packet p;
-    memset(&p, 0, sizeof(p));
+    fixture_blank(&p);
     int ret = put_possibility(&file, &p);
     ASSERT_EQ_FMT(0, ret, "%d");
     ASSERT_EQ_FMT(0ULL, (unsigned long long)file.size, "%llu");

@@ -12,6 +12,7 @@
  * dupliqués ici — chaque fichier de test est indépendant par convention).
  */
 #include "greatest.h"
+#include "packet_fixture.h"
 #include "fork_assert.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"

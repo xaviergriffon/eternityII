@@ -11,6 +11,7 @@
  * donc la garde interne empêche tout envoi (pas besoin de forkId).
  */
 #include "greatest.h"
+#include "packet_fixture.h"
 #include "fork_assert.h"
 #include "ui/command_lines.h"
 #include "app/app_static_variables.h"
@@ -798,8 +799,7 @@ TEST do_command_line_printanalysed_exports_without_pid_suffix_on_server(void)
 {
     dm_drain();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 91;
+    fixture_packet(&pk, (int)(91));
     add_possibility_analysed(&pk, 0);
 
     int saved_server = server;
@@ -843,8 +843,7 @@ TEST do_command_line_printanalysed_exports_with_pid_suffix_on_client(void)
 {
     dm_drain();
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 92;
+    fixture_packet(&pk, (int)(92));
     add_possibility_analysed(&pk, 0);
 
     int saved_server = server;
@@ -1056,7 +1055,7 @@ TEST do_command_line_backup_restore_import_round_trip(void)
     // pour que le round-trip ait quelque chose à sauvegarder/restaurer.
     best_board_init(&g_server_best_board);
     struct possibility_packet board;
-    memset(&board, 0, sizeof(board));
+    fixture_blank(&board);
     for (int x = 0; x < ETERN_SIZE; x++) {
         for (int y = 0; y < ETERN_SIZE; y++) {
             board.grid[x][y] = -2;
@@ -1137,7 +1136,7 @@ TEST do_command_line_restore_syncs_max_result_from_best_board(void)
 
     best_board_init(&g_server_best_board);
     struct possibility_packet board;
-    memset(&board, 0, sizeof(board));
+    fixture_blank(&board);
     for (int x = 0; x < ETERN_SIZE; x++) {
         for (int y = 0; y < ETERN_SIZE; y++) {
             board.grid[x][y] = -2;
@@ -2035,8 +2034,7 @@ TEST do_command_line_clientswork_reports_owned_attribution(void)
     ASSERT(idx >= 0);
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 55;
+    fixture_packet(&pk, (int)(55));
     add_possibility_analysed_owned(&pk, -1, h.identity.client_uid);
 
     char cmd[] = "clientsWork epsilon";
@@ -2848,8 +2846,7 @@ TEST admin_apply_remote_command_clientswork_reports_owned_attribution(void)
     ASSERT(idx >= 0);
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 77;
+    fixture_packet(&pk, (int)(77));
     add_possibility_analysed_owned(&pk, -1, h.identity.client_uid);
 
     ASSERT_EQ_FMT(ADMIN_CMD_OK, admin_apply_remote_command("clientsWork zeta"), "%d");

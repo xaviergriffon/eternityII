@@ -9,6 +9,7 @@
  * indéfiniment, il doit échouer proprement à la place.
  */
 #include "greatest.h"
+#include "packet_fixture.h"
 #include "net/http_server.h"
 #include "app/control_registry.h"
 #include "app/known_clients_registry.h"
@@ -898,7 +899,7 @@ TEST http_server_get_best_board_returns_200_with_record_no_rotate_table(void)
     best_board_init(&g_server_best_board);
 
     struct possibility_packet board;
-    memset(&board, 0, sizeof(board));
+    fixture_blank(&board);
     /* Toutes les cases vides par défaut (-2, comme un vrai paquet) : un
        memset à 0 laisserait des cases à l'indice 0 (une pièce "valide" à
        tort), gonflant la réponse et faisant déborder le tampon non lu du
@@ -958,7 +959,7 @@ TEST http_server_get_best_board_reflects_real_part_with_rotate_table(void)
     g_server_rotate_parts = &fake_rotate_parts;
 
     struct possibility_packet board;
-    memset(&board, 0, sizeof(board));
+    fixture_blank(&board);
     for (int x = 0; x < ETERN_SIZE; x++) {
         for (int y = 0; y < ETERN_SIZE; y++) {
             board.grid[x][y] = -2; /* même précaution que le test précédent */

@@ -10,6 +10,7 @@
  *                              boucle check_server)
  */
 #include "greatest.h"
+#include "packet_fixture.h"
 #include "app/etii_server.h"
 #include "app/app_static_variables.h"   /* counters, version */
 #include "app/control_registry.h"  /* sessions de contrôle : INST_CONTROL_HELLO, control_session_step */
@@ -491,7 +492,7 @@ TEST file_queues_table_reflects_unchecked_stock(void)
 {
     dm_drain_all();
     struct possibility_packet pks[3];
-    memset(pks, 0, sizeof pks);
+    for (int _i = 0; _i < (int)(sizeof pks / sizeof *pks); _i++) fixture_blank(&pks[_i]);
     for (int i = 0; i < 3; i++) pks[i].alloc = (uint16_t)(i + 1);
     array_possibility_packet arr = { .size = 3, .possibilities = pks };
     add_possibility(NULL, &arr);
@@ -525,8 +526,7 @@ TEST requeue_unacked_returns_to_stock(void)
     dm_drain_all();
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 7;
+    fixture_packet(&pkt, (int)(7));
     add_possibility_analysed(&pkt, -1);          /* le serveur l'avait servie */
 
     array_possibility_packet sent = { .size = 1, .possibilities = &pkt };
@@ -544,8 +544,7 @@ TEST requeue_acked_is_skipped(void)
     dm_drain_all();
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 9;
+    fixture_packet(&pkt, (int)(9));
     /* jamais ajoutée à file_analysed : simule un client ayant déjà acquitté */
 
     array_possibility_packet sent = { .size = 1, .possibilities = &pkt };
@@ -561,7 +560,7 @@ TEST requeue_mixed_batch_returns_only_unacked(void)
     dm_drain_all();
 
     struct possibility_packet pkts[3];
-    memset(pkts, 0, sizeof pkts);
+    for (int _i = 0; _i < (int)(sizeof pkts / sizeof *pkts); _i++) fixture_blank(&pkts[_i]);
     for (int i = 0; i < 3; i++) pkts[i].alloc = (uint16_t)(i + 1);
     /* Seules pkts[0] et pkts[2] sont « en analyse » (pkts[1] déjà acquittée). */
     add_possibility_analysed(&pkts[0], -1);
@@ -595,8 +594,7 @@ TEST requeue_skipped_when_client_control_session_alive(void)
     ASSERT(session_idx >= 0);
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 11;
+    fixture_packet(&pkt, (int)(11));
     add_possibility_analysed_owned(&pkt, -1, owner);   /* le serveur l'avait servie à `owner` */
 
     client_t client;
@@ -636,8 +634,7 @@ TEST requeue_returns_to_stock_when_client_not_alive(void)
     memset(owner, 0x9a, sizeof owner);
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 12;
+    fixture_packet(&pkt, (int)(12));
     add_possibility_analysed(&pkt, -1);
 
     client_t client;
@@ -663,8 +660,7 @@ TEST requeue_returns_to_stock_when_client_has_no_identity(void)
     dm_drain_all();
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 13;
+    fixture_packet(&pkt, (int)(13));
     add_possibility_analysed(&pkt, -1);
 
     client_t client;
@@ -1011,8 +1007,7 @@ TEST step_add_stores_possibility(void)
     int vsupp = 1;
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 3;
+    fixture_packet(&pkt, (int)(3));
     ASSERT_EQ((ssize_t)sizeof pkt, write(sv[1], &pkt, sizeof pkt));
 
     int cont = communicate_with_client_step(&client, INST_ADD, &last, &vsupp, NULL);
@@ -1145,7 +1140,7 @@ TEST step_get_serves_possibility(void)
     ASSERT_EQ((long)sizeof k, recv_all(sv[1], &k, sizeof k));
     ASSERT_EQ_FMT(1, (int)k, "%d");
     struct possibility_packet got;
-    memset(&got, 0, sizeof got);
+    fixture_blank(&got);
     ASSERT_EQ((long)sizeof got, recv_all(sv[1], &got, sizeof got));
     ASSERT_EQ_FMT(5, (int)got.alloc, "%d");
     ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");      /* retirée du stock */
@@ -1178,8 +1173,7 @@ TEST record_possibility_analysed_owns_when_identity_known(void)
     }
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 63;
+    fixture_packet(&pkt, (int)(63));
     record_possibility_analysed_for_client(&client, &pkt);
 
     unsigned long long count = 0;
@@ -1202,8 +1196,7 @@ TEST record_possibility_analysed_no_owner_when_identity_unknown(void)
     client.has_identity = 0;   /* client trop ancien, ou hello pas encore reçu */
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 64;
+    fixture_packet(&pkt, (int)(64));
     record_possibility_analysed_for_client(&client, &pkt);
 
     /* Aucun owner_uid n'a été enregistré : même un uid tout à zéro (celui,
@@ -1290,13 +1283,11 @@ TEST record_and_remove_same_connection_use_same_file_hint(void)
     unsigned long long before_b = file_analysed_size(hint_b);
 
     struct possibility_packet pkt_a;
-    memset(&pkt_a, 0, sizeof pkt_a);
-    pkt_a.alloc = 71;
+    fixture_packet(&pkt_a, (int)(71));
     record_possibility_analysed_for_client(&client_a, &pkt_a);
 
     struct possibility_packet pkt_b;
-    memset(&pkt_b, 0, sizeof pkt_b);
-    pkt_b.alloc = 72;
+    fixture_packet(&pkt_b, (int)(72));
     record_possibility_analysed_for_client(&client_b, &pkt_b);
 
     ASSERT_EQ_FMT(before_a + 1, file_analysed_size(hint_a), "%llu");
@@ -1330,8 +1321,7 @@ TEST step_possibility_analysed_acks(void)
     int vsupp = 1;
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 4;
+    fixture_packet(&pkt, (int)(4));
     add_possibility_analysed(&pkt, -1);
     ASSERT_EQ((long)sizeof pkt, send_all(sv[1], &pkt, sizeof pkt));
 
@@ -1427,7 +1417,7 @@ TEST step_analysed_batch_acks(void)
     int vsupp = 1;
 
     struct possibility_packet pkts[2];
-    memset(pkts, 0, sizeof pkts);
+    for (int _i = 0; _i < (int)(sizeof pkts / sizeof *pkts); _i++) fixture_blank(&pkts[_i]);
     pkts[0].alloc = 1;
     pkts[1].alloc = 2;
     add_possibility_analysed(&pkts[0], -1);
@@ -1555,7 +1545,7 @@ TEST step_second_get_frees_previous_batch(void)
     wire_counters();
 
     struct possibility_packet pks[2];
-    memset(pks, 0, sizeof pks);
+    for (int _i = 0; _i < (int)(sizeof pks / sizeof *pks); _i++) fixture_blank(&pks[_i]);
     pks[0].alloc = 1;
     pks[1].alloc = 2;
     array_possibility_packet arr = { .size = 2, .possibilities = pks };
@@ -1597,7 +1587,7 @@ TEST step_get_to_check_serves_possibility(void)
     wire_counters();
 
     struct possibility_packet pks[2];
-    memset(pks, 0, sizeof pks);
+    for (int _i = 0; _i < (int)(sizeof pks / sizeof *pks); _i++) fixture_blank(&pks[_i]);
     pks[0].alloc = 3;
     pks[1].alloc = 4;
     array_possibility_packet arr = { .size = 2, .possibilities = pks };
@@ -1659,7 +1649,7 @@ TEST step_get_to_check_batch_serves_batch(void)
     wire_counters();
 
     struct possibility_packet pks[2];
-    memset(pks, 0, sizeof pks);
+    for (int _i = 0; _i < (int)(sizeof pks / sizeof *pks); _i++) fixture_blank(&pks[_i]);
     pks[0].alloc = 5;
     pks[1].alloc = 6;
     array_possibility_packet arr = { .size = 2, .possibilities = pks };
@@ -1745,8 +1735,7 @@ TEST step_analysed_not_removed_sends_error(void)
     int vsupp = 1;
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 11;                /* jamais passée « en analyse » */
+    fixture_packet(&pkt, (int)(11));                /* jamais passée « en analyse » */
     ASSERT_EQ((long)sizeof pkt, send_all(sv[1], &pkt, sizeof pkt));
 
     int cont = communicate_with_client_step(&client, INST_POSSIBILITY_ANALYSED, &last, &vsupp, NULL);
@@ -1801,8 +1790,7 @@ TEST step_analysed_batch_incomplete_packet_stops(void)
     int vsupp = 1;
 
     struct possibility_packet pkt;
-    memset(&pkt, 0, sizeof pkt);
-    pkt.alloc = 12;
+    fixture_packet(&pkt, (int)(12));
     add_possibility_analysed(&pkt, -1);
 
     int32_t m = 2;
@@ -1840,8 +1828,7 @@ static void fork_solution_stop_server(void)
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) exit(8);
     struct possibility_packet sol;
-    memset(&sol, 0, sizeof sol);
-    sol.alloc = ETERN_PARTS;
+    fixture_packet(&sol, (int)(ETERN_PARTS));
     if (send_all(sv[1], &sol, sizeof sol) != (long)sizeof sol) exit(7);
 
     client_t client;
@@ -2275,8 +2262,7 @@ TEST check_server_step_reclaims_expired_lease(void)
     uint8_t owner[CLIENT_UID_BYTES];
     memset(owner, 0x77, sizeof owner);
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 33;
+    fixture_packet(&pk, (int)(33));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     unsigned long long count = 999;
@@ -2335,8 +2321,7 @@ TEST check_server_step_does_not_reclaim_lease_of_alive_client(void)
     ASSERT(session_idx >= 0);
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
-    pk.alloc = 34;
+    fixture_packet(&pk, (int)(34));
     add_possibility_analysed_owned(&pk, -1, owner);
 
     usleep(1100 * 1000);    /* le bail (1 s) est dépassé, mais le client reste "vivant" */
@@ -2979,7 +2964,7 @@ TEST rmnonext_pass_prunes_when_idle(void)
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pks[2];
-    memset(pks, 0, sizeof pks);
+    for (int _i = 0; _i < (int)(sizeof pks / sizeof *pks); _i++) fixture_blank(&pks[_i]);
     pks[1].grid[dirx[0]][diry[0]] = -2;            /* impasse : (0,0,0,0) sans candidat */
     array_possibility_packet arr = { .size = 2, .possibilities = pks };
     add_possibility(NULL, &arr);
@@ -3014,7 +2999,7 @@ TEST rmnonext_pass_skips_when_client_active(void)
     map_big_array *map = buildBigArray(&rp, search_max_face(&rp));
 
     struct possibility_packet pks[2];
-    memset(pks, 0, sizeof pks);
+    for (int _i = 0; _i < (int)(sizeof pks / sizeof *pks); _i++) fixture_blank(&pks[_i]);
     pks[1].grid[dirx[0]][diry[0]] = -2;            /* impasse, mais pas d'élagage */
     array_possibility_packet arr = { .size = 2, .possibilities = pks };
     add_possibility(NULL, &arr);
@@ -3060,7 +3045,7 @@ TEST sort_periodic_pass_sorts_ascending(void)
 
     enum { N = 40 };
     struct possibility_packet pks[N];
-    memset(pks, 0, sizeof pks);
+    for (int _i = 0; _i < (int)(sizeof pks / sizeof *pks); _i++) fixture_blank(&pks[_i]);
     for (int i = 0; i < N; i++) {
         pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
     }
@@ -3114,7 +3099,7 @@ TEST sort_periodic_pass_sorts_descending(void)
 
     enum { N = 40 };
     struct possibility_packet pks[N];
-    memset(pks, 0, sizeof pks);
+    for (int _i = 0; _i < (int)(sizeof pks / sizeof *pks); _i++) fixture_blank(&pks[_i]);
     for (int i = 0; i < N; i++) {
         pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
     }
@@ -3180,7 +3165,7 @@ TEST sort_periodic_pass_sorts_even_with_client_connected(void)
 
     enum { N = 20 };
     struct possibility_packet pks[N];
-    memset(pks, 0, sizeof pks);
+    for (int _i = 0; _i < (int)(sizeof pks / sizeof *pks); _i++) fixture_blank(&pks[_i]);
     for (int i = 0; i < N; i++) {
         pks[i].alloc = (uint16_t)((i * 7) % ETERN_PARTS + 1);
     }
@@ -3239,7 +3224,7 @@ TEST sort_periodic_pass_logs_segment_counts(void)
     server_sort_direction = SORT_DIRECTION_DESC;
 
     struct possibility_packet pks[3];
-    memset(pks, 0, sizeof pks);
+    for (int _i = 0; _i < (int)(sizeof pks / sizeof *pks); _i++) fixture_blank(&pks[_i]);
     array_possibility_packet arr = { .size = 3, .possibilities = pks };
     add_possibility(NULL, &arr);
 
@@ -3281,7 +3266,7 @@ TEST sort_periodic_pass_logs_zero_sorted_when_all_segments_busy(void)
     server_sort_lock_attempts = 2; /* borné, pour un test rapide */
 
     struct possibility_packet pk;
-    memset(&pk, 0, sizeof pk);
+    fixture_blank(&pk);
     array_possibility_packet arr = { .size = 1, .possibilities = &pk };
     add_possibility(NULL, &arr);
 
