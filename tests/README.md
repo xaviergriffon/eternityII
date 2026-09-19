@@ -36,7 +36,7 @@ partagé reste à la racine de `tests/`.
 | `tests/net/` | Suites des modules `src/net/` (`test_etii_protocol`, `test_control_protocol` — codec du [canal de contrôle](../docs/echanges_client_serveur.md#canal-de-contrôle-v9), `test_local_socket`, `test_tcp`). |
 | `tests/ui/` | Suites des modules `src/ui/` (`test_command_history`, `test_command_match`, `test_command_lines`, `test_console`, `test_logger`). |
 | `tests/app/` | Suites des modules `src/app/` (`test_static_variables`, `test_app_runtime`, `test_etii_client`, `test_etii_server`, `test_control_registry` — registre serveur du canal de contrôle, `test_etii_control` — thread client du canal de contrôle). |
-| `tests/tools/` | Outils autonomes + leur cœur testé (`gen_root` / `root_from_board` — conversion d'un plateau externe en racine de stock). |
+| `tests/tools/` | Outils autonomes + leur cœur testé (`gen_root` / `root_from_board` — conversion d'un plateau externe en racine de stock) et `check_build_lists.py` (garde-fou makefile ↔ CMakeLists.txt). |
 
 Chaque `test_<module>.c` inclut ses en-têtes de production en forme qualifiée
 (`#include "core/part.h"`, résolu via `-Isrc`) et le harnais en forme courte
@@ -267,3 +267,10 @@ En CI (`.github/workflows/ci.yml`), ces sorties alimentent trois visualisations 
    réclame `TEST_MODULES` en entier. L'oubli ne se voit ni à `make test` ni à
    `make test-docker` — seulement au job de couverture de la CI, par un
    « cannot find …/<module>.o ».
+4. **Reporter l'ajout dans `CMakeLists.txt`** (`TEST_SUITES_COMMON`,
+   `TEST_MODULES`) : le second système de build décrit les mêmes binaires et
+   personne ne l'exerce en CI, donc rien ne signale l'oubli avant le link chez
+   qui configure le projet avec CMake. `make check-build-lists` (dépendance de
+   `make test`) et le test CTest `build-lists-sync` comparent désormais les deux
+   jeux de listes et nomment chaque écart — cf.
+   [docs/tests_et_ci.md](../docs/tests_et_ci.md#second-système-de-build--cmake-et-son-garde-fou-make-check-build-lists).

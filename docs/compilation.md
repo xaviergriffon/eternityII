@@ -157,8 +157,10 @@ ce code de trace normalement mort ne se dégrade pas en silence — voir
 
 Un nouveau `.c` se range sous le bon `src/<domaine>/` (voir la
 [structure des sources](architecture.md#structure-des-sources)), son objet
-`build/<domaine>/<nom>.o` s'ajoute à la liste `OBJS` du Makefile (et à
-`add_executable` dans `CMakeLists.txt`).
+`build/<domaine>/<nom>.o` s'ajoute à la liste `OBJS` du Makefile **et** la source
+à `PROD_SRCS` dans `CMakeLists.txt` — les deux listes sont comparées par
+`make check-build-lists`, joué par `make test` (cf.
+[Tests et CI](tests_et_ci.md#second-système-de-build--cmake-et-son-garde-fou-make-check-build-lists)).
 
 ## Voir aussi
 

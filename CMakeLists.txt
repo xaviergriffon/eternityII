@@ -201,15 +201,26 @@ add_custom_target(solution16_h
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/solution16.h
 )
 
-# Modules de production exercés par les tests (sans main.c, toujours logger.c ANSI)
+# Modules de production exercés par les tests + leurs dépendances de link
+# transitives (sans main.c, toujours logger.c ANSI).
+#
+# NB : src/core/etii_search.c est ABSENT de cette liste à dessein —
+# tests/core/test_etii_search.c l'inclut directement (#include "core/etii_search.c")
+# pour tester ses helpers static ; le compiler aussi ici provoquerait des doubles
+# symboles au link. Ce test est donc l'unique fournisseur des symboles etii_search.
+#
+# ATTENTION : cette liste doit rester le miroir exact de TEST_MODULES du
+# makefile — `tests/tools/check_build_lists.py` (cible `make check-build-lists`,
+# test CTest `build-lists-sync`) échoue à la moindre divergence.
 set(TEST_MODULES
     src/core/lifo.c
     src/core/part.c
     src/core/readdata.c
     src/ui/command_history.c
-    src/ui/line_edit.c
     src/ui/command_match.c
+    src/ui/line_edit.c
     src/core/possibility.c
+    src/core/packet_codec.c
     src/core/best_board.c
     src/net/etii_protocol.c
     src/net/client_identity.c
@@ -224,19 +235,30 @@ set(TEST_MODULES
     src/net/tcpserver.c
     src/ui/command_lines.c
     src/ui/console.c
-    src/core/etii_search.c
     src/ui/logger.c
     src/core/core_static_variables.c
     src/app/app_static_variables.c
     src/app/client_config.c
     src/app/server_config.c
+    src/app/etii_client.c
+    src/app/etii_server.c
+    src/app/control_registry.c
+    src/app/known_clients_registry.c
     src/app/app_runtime.c
     src/app/etii_control.c
     src/app/fork_gate.c
     src/app/fork_orchestrator.c
+    # Cœurs purs d'outils/bancs hors src/ : testés par tests/tools/ et tests/bench/.
+    tests/tools/root_from_board.c
+    tests/bench/bench_solve_stats.c
+    tests/bench/cross_mask.c
 )
 
-# Suites communes (ETERN_PARTS-agnostiques, jouées en 16 ET 256)
+# Point d'entrée greatest, commun aux deux binaires.
+set(TEST_RUNNER tests/test_main.c)
+
+# Suites communes (ETERN_PARTS-agnostiques, jouées en 16 ET 256).
+# Miroir exact de TEST_SUITES_COMMON du makefile (cf. check_build_lists.py).
 set(TEST_SUITES_COMMON
     tests/core/test_lifo.c
     tests/core/test_part.c
@@ -245,28 +267,40 @@ set(TEST_SUITES_COMMON
     tests/core/test_etii_search.c
     tests/core/test_datamanager.c
     tests/core/test_packet_codec.c
+    tests/core/test_best_board.c
+    tests/core/test_stock_spill.c
     tests/core/test_stock_rate.c
     tests/net/test_etii_protocol.c
     tests/net/test_client_identity.c
     tests/net/test_control_protocol.c
-    tests/net/test_http_codec.c
-    tests/net/test_http_server.c
     tests/net/test_local_socket.c
     tests/net/test_tcp.c
+    tests/net/test_http_codec.c
+    tests/net/test_http_server.c
     tests/ui/test_command_history.c
-    tests/ui/test_line_edit.c
     tests/ui/test_command_match.c
+    tests/ui/test_line_edit.c
     tests/ui/test_command_lines.c
     tests/ui/test_console.c
     tests/ui/test_logger.c
     tests/app/test_app_static_variables.c
     tests/app/test_client_config.c
     tests/app/test_server_config.c
+    tests/app/test_etii_client.c
+    tests/app/test_etii_server.c
     tests/app/test_app_runtime.c
     tests/app/test_etii_control.c
+    tests/app/test_control_registry.c
+    tests/app/test_known_clients_registry.c
     tests/app/test_fork_gate.c
     tests/app/test_fork_orchestrator.c
+    tests/tools/test_root_from_board.c
+    tests/bench/test_bench_solve_stats.c
+    tests/bench/test_cross_mask.c
 )
+
+# Suite « solution réelle » : valide UNIQUEMENT en build 16.
+set(TEST_SOLUTION16 tests/core/test_solution16.c)
 
 # Options de compilation pour les tests (-O2 -g, distinct du release -Ofast)
 set(TEST_COMPILE_OPTS -Wall -Wextra -O2 -g)
@@ -280,7 +314,7 @@ endif()
 # Signature : add_unit_test_executable(<target> <etern_parts_or_empty> [extra_srcs...])
 function(add_unit_test_executable TARGET ETERN_PARTS_VAL)
     add_executable(${TARGET} EXCLUDE_FROM_ALL
-        tests/test_main.c ${TEST_SUITES_COMMON} ${ARGN} ${TEST_MODULES}
+        ${TEST_RUNNER} ${TEST_SUITES_COMMON} ${ARGN} ${TEST_MODULES}
     )
     target_include_directories(${TARGET} PRIVATE src tests)
     target_compile_options(${TARGET} PRIVATE ${TEST_COMPILE_OPTS})
@@ -291,7 +325,7 @@ function(add_unit_test_executable TARGET ETERN_PARTS_VAL)
 endfunction()
 
 # Binaire principal (16) : suites communes + test_solution16, ETERN_PARTS=16
-add_unit_test_executable(run_tests_16 16 tests/core/test_solution16.c)
+add_unit_test_executable(run_tests_16 16 ${TEST_SOLUTION16})
 add_dependencies(run_tests_16 solution16_h)
 
 # Binaire secondaire (256) : suites communes, ETERN_PARTS par défaut (256 du header)
@@ -300,6 +334,15 @@ add_unit_test_executable(run_tests_256 "")
 # Entrées CTest (les binaires doivent être compilés avant `ctest`)
 add_test(NAME test-16  COMMAND run_tests_16  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME test-256 COMMAND run_tests_256 WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Garde-fou de cohérence avec le makefile (qui reste la référence : c'est lui
+# que joue la CI). Une suite ajoutée au makefile et oubliée ici ne se voyait
+# jusqu'ici qu'au link, et seulement pour qui configure le projet avec CMake.
+# Pendant exact de la cible `make check-build-lists`.
+add_test(NAME build-lists-sync
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_build_lists.py
+                 ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Target `run-tests` : compile + exécute (pendant de `make test`)
 add_custom_target(run-tests
@@ -315,43 +358,16 @@ add_custom_target(run-tests
 # Le script vérifie que les deux côtés voient la solution avec un timeout borné.
 # ============================================================
 
-# Binaire ETERN_PARTS=16 dédié — toujours logger ANSI (pas de dépendance ncurses)
+# Binaire ETERN_PARTS=16 dédié — toujours logger ANSI (pas de dépendance ncurses).
+# Dérivé de PROD_SRCS plutôt que recopié : une liste recopiée dérive (c'est
+# exactement ce qui est arrivé aux listes de test), et le seul écart voulu ici
+# est le logger.
+set(PROD_SRCS_ANSI ${PROD_SRCS})
+list(REMOVE_ITEM PROD_SRCS_ANSI ${LOGGER_SRC})
+list(APPEND PROD_SRCS_ANSI src/ui/logger.c)
+
 add_executable(eternityII16 EXCLUDE_FROM_ALL
-    src/ui/logger.c
-    src/core/core_static_variables.c
-    src/app/app_static_variables.c
-    src/net/local_socket.c
-    src/core/lifo.c
-    src/net/tcpclient.c
-    src/net/tcpserver.c
-    src/core/part.c
-    src/core/readdata.c
-    src/core/datamanager.c
-    src/core/stock_spill.c
-    src/core/stock_rate.c
-    src/core/possibility.c
-    src/core/best_board.c
-    src/net/etii_protocol.c
-    src/net/client_identity.c
-    src/net/control_protocol.c
-    src/net/http_codec.c
-    src/net/http_server.c
-    src/app/etii_client.c
-    src/app/etii_server.c
-    src/app/etii_control.c
-    src/app/control_registry.c
-    src/app/known_clients_registry.c
-    src/app/client_config.c
-    src/app/server_config.c
-    src/app/app_runtime.c
-    src/app/fork_gate.c
-    src/app/fork_orchestrator.c
-    src/core/etii_search.c
-    src/ui/command_lines.c
-    src/ui/command_match.c
-    src/ui/command_history.c
-    src/ui/line_edit.c
-    src/ui/console.c
+    ${PROD_SRCS_ANSI}
     src/app/main.c
 )
 target_compile_definitions(eternityII16 PRIVATE ETERN_PARTS=16)
@@ -394,7 +410,7 @@ set(COV_COMPILE_OPTS -Wall -Wextra -O0 -g --coverage)
 # Helper : crée un binaire de test instrumenté pour la couverture
 function(add_coverage_executable TARGET ETERN_PARTS_VAL)
     add_executable(${TARGET} EXCLUDE_FROM_ALL
-        tests/test_main.c ${TEST_SUITES_COMMON} ${ARGN} ${TEST_MODULES}
+        ${TEST_RUNNER} ${TEST_SUITES_COMMON} ${ARGN} ${TEST_MODULES}
     )
     target_include_directories(${TARGET} PRIVATE src tests)
     target_compile_options(${TARGET} PRIVATE ${COV_COMPILE_OPTS})
@@ -409,7 +425,7 @@ endfunction()
 add_coverage_executable(run_tests_cov_256 "")
 
 # Passe 16 (suites communes + solution16, ETERN_PARTS=16)
-add_coverage_executable(run_tests_cov_16 16 tests/core/test_solution16.c)
+add_coverage_executable(run_tests_cov_16 16 ${TEST_SOLUTION16})
 add_dependencies(run_tests_cov_16 solution16_h)
 
 # Détection gcovr (utilisé par `coverage` pour le résumé texte et par `coverage-report`)
