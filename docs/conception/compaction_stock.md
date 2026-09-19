@@ -155,6 +155,70 @@ strictement plus court qu'un paquet entier.
   un code 0 et sans ligne de résumé : un faux succès. `tests/packet_fixture.h`
   existe pour que ça ne puisse plus arriver.
 
+### Performance client et pruner : mesurée, pas déduite
+
+La compaction échange de la mémoire contre du calcul. La question posée était
+donc : est-ce que le CLIENT ou le PRUNER y perdent ? L'objectif n'était pas un
+gain, seulement l'absence de dégradation notable.
+
+**Premier constat, structurel : ni l'un ni l'autre n'exécute le codec.** La
+forme compacte est confinée aux deux pools de STOCK (`init_file_variable`,
+`core/datamanager.c`) ; le pool analysé reste en paquets bruts. Un client
+connecté à un serveur envoie un `possibility_packet` entier sur TCP
+(`put_to_server`) et n'écrit dans son pool local que sur refus du serveur ; un
+pruner reçoit des lots bruts et acquitte dans le pool analysé. Le codec ne
+tourne donc que **dans le processus serveur** (et dans le client mono du mode
+`test`, sans serveur). Le risque pour un client est indirect : un serveur qui
+sert moins vite l'affame.
+
+**Coût absolu du codec** (200 000 paquets, 3 répétitions, aller-retour
+encodage + décodage, comparé au `memcpy` du struct entier que le stock payait
+avant) :
+
+| pièces posées | octets/enr. | encode+decode | `memcpy` aller-retour |
+|---|---|---|---|
+| 8 | 49 | 0,81 µs | 0,40 µs |
+| **19** (moyenne du stock réel) | 65 | **0,91 µs** | 0,39 µs |
+| 130 | 217 | 1,53 µs | 0,38 µs |
+| 255 | 389 | 2,28 µs | 0,39 µs |
+
+Soit **+0,52 µs par possibilité traversant le stock** à la profondeur réelle de
+production.
+
+**Bout en bout, ordre ALTERNÉ entre variantes** — la machine dérive
+thermiquement de plusieurs pour cent à l'heure, donc « toutes les répétitions de
+A puis toutes celles de B » compare deux températures autant que deux codes —
+binaires construits une fois et rejoués :
+
+| régime | instrument | master | compact | écart |
+|---|---|---|---|---|
+| **trafic de stock PUR** — expansion au démarrage, niveau 14 (142 415 possibilités), 11 répétitions | temps de l'expansion | 1,350 s | **1,306 s** | **−3,3 %** |
+| idem, niveau 18 (1 075 265 possibilités), 7 répétitions | temps de l'expansion | 15,987 s | **15,928 s** | −0,4 % |
+| **pruner** — serveur + pruner 4 forks, fenêtre 65 s, 3 répétitions | possibilités servies (`GET_TO_CHECK`, décodage) | 73 400 | **74 600** | +1,6 % |
+| idem | ADD encaissés (encodage) | 53 053 | **53 985** | +1,8 % |
+| **client** — serveur + client 4 forks, fenêtre 65 s, 8 répétitions | ADD encaissés | 31 850 | 31 500 | −1,1 % |
+
+**Aucune dégradation, et un léger gain là où le codec pèse le plus.** Ce n'est
+pas paradoxal : les 0,5 µs d'encodage sont remboursés par les 65 octets écrits
+au lieu de 576, une allocation de moins par possibilité (charge utile portée
+en place) et un cache bien mieux utilisé.
+
+Deux précautions de lecture, qui sont le vrai enseignement de cette campagne :
+
+- **Les écarts positifs ci-dessus ne sont pas des gains à annoncer.** Ils sont
+  de l'ordre du bruit de l'instrument ; seul le signe compte, et il exclut la
+  dégradation.
+- **Le banc CLIENT ne résout rien en dessous de ±10 %** : son étendue relative
+  est de 14 % (master) et 34 % (compact) sur 8 répétitions, parce que son débit
+  est gouverné par la recherche, chaotique, et non par le stock — 490 ADD/s,
+  contre ~2 000 opérations de codec par seconde dans le régime pruner. Son
+  −1,1 % médian ne peut donc pas être imputé au codec : le MÊME codec, sollicité
+  quatre fois plus fort, ne coûte rien. C'est l'expansion, quatre fois plus
+  précise et purement stock, qui répond pour lui. Un run a même dû être
+  diagnostiqué plutôt que moyenné (133 969 possibilités produites contre 142–147 k
+  ailleurs) : collision sur le port 2020, non paramétrable en CLI, avec un autre
+  `eternityII` de la machine.
+
 ## Étage 3 — mémoire client (NON IMPLÉMENTÉ)
 
 Même forme pour le stock local du client. **Aucun impact sur la recherche**, et
