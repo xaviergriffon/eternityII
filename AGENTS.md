@@ -136,7 +136,7 @@ Eight PRs (all shipped) fixing a real production incident: an unbounded lock hel
 **Key invariants**:
 - `core/stock_spill.c` may depend on `core/datamanager.h`; the reverse is forbidden — `put_to_pool`'s hard-cap check has zero awareness spillover exists.
 - Reload never destroys disk state until RAM insertion is confirmed ("peek, then commit"); eviction drains RAM first (cheap to undo) before writing to disk.
-- `expand_datas_to_level` never drops a possibility on a RAM-cap refusal — it **waits**, bounded only by `REQUEST_STOP`, never by a fixed timeout: a stuck configuration should stall visibly (logged every 5s), not lose data silently.
+- `expand_datas_to_level` **and `import`** never drop a possibility on a RAM-cap refusal — they **wait**, bounded only by `REQUEST_STOP`, never by a fixed timeout: a stuck configuration should stall visibly (logged every 5s), not lose data silently. `put_to_pool` refuses *without inserting anything*, so ignoring its return value is a silent loss — that was a real bug in `import` (3 407 891 possibilities restored under `--stock-max-ram 1024` kept 1 756 302, **lost 1 651 589**). The wait **makes room itself** through `datamanager_set_ram_relief_hook` (injected by `app/`, since `core/` must not depend on `core/stock_spill.c`): waiting on the spill thread's own tick — 4096 packets per 100 ms — is far below a bulk import's rate. That hook is `stock_spill_relieve`, not `stock_spill_step`: the latter deliberately no-ops under a maintenance window, which would turn the wait into a deadlock for a caller that *holds* that window.
 
 ## HTTP REST admin API
 

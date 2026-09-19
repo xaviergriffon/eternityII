@@ -274,6 +274,37 @@ void datamanager_reset_sort_state_for_tests(void)
 static unsigned long long stock_max_ram_packets = 0;
 
 /**
+ * @brief Crochet de DÉGAGEMENT du plafond RAM — injecté par l'appelant, jamais
+ *        appelé en dur.
+ *
+ * `core/` ne doit pas dépendre de `core/stock_spill.c` (règle de couche,
+ * AGENTS.md) : c'est `app/` qui branche ici `stock_spill_step`, exactement
+ * comme `owner_alive` est injecté dans `datamanager_reclaim_expired_leases` et
+ * `spill_snapshot_fn` dans `consistent_backup`.
+ *
+ * Sert aux chemins qui doivent ATTENDRE de la place plutôt que d'abandonner
+ * une possibilité (`import`, `expand_datas_to_level`) : sans lui, ils
+ * dépendraient du seul tick du thread de débordement — 4096 possibilités
+ * toutes les 100 ms, là où un import en masse en pousse des centaines de
+ * milliers par seconde. NULL (défaut) = pas de dégagement possible, l'attente
+ * reste correcte mais ne progresse que si quelqu'un d'autre libère de la
+ * place.
+ *
+ * @return Nombre de possibilités effectivement déplacées vers le disque.
+ */
+static datamanager_ram_relief_fn ram_relief_hook = NULL;
+
+void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn)
+{
+	ram_relief_hook = fn;
+}
+
+/// Taille d'un bloc de dégagement demandé au crochet ci-dessus — même ordre de
+/// grandeur que le bloc du thread de débordement (`STOCK_SPILL_BLOCK_PACKETS`,
+/// non incluable ici pour la raison de couche exposée plus haut).
+#define DATAMANAGER_RAM_RELIEF_BLOCK 4096
+
+/**
  * @brief Throttling du log « plafond RAM atteint » (`put_to_pool`) : un refus
  *        peut se produire à chaque ADD sous charge soutenue, pas question
  *        d'inonder les logs à ce rythme (contrairement à un refus de
@@ -2740,6 +2771,77 @@ int datamanager_read_spillcount_sidecar(const char *stock_filename, unsigned lon
 	return 1;
 }
 
+/// Cadence de scrutation pendant une attente de place sous plafond RAM.
+#define RAM_WAIT_POLL_US 20000
+/// Intervalle de rappel dans le journal tant que l'attente dure.
+#define RAM_WAIT_LOG_INTERVAL_SEC 5
+
+/**
+ * @brief Insère `single` (UNE possibilité), en attendant qu'il y ait de la
+ *        place si le plafond RAM la refuse — jamais en l'abandonnant.
+ *
+ * `put_to_pool` refuse sans rien insérer dès que le plafond est atteint
+ * (`--stock-max-ram`), et ce refus est explicitement documenté comme « sûr à
+ * réessayer ». Ignorer sa valeur de retour, c'est perdre une possibilité en
+ * silence — ce que faisait `import()` avant ce correctif.
+ *
+ * L'attente FAIT de la place elle-même via le crochet de dégagement
+ * (`datamanager_set_ram_relief_hook`, en pratique le débordement disque) au
+ * lieu de subir le tick du thread de débordement : un import en masse pousse
+ * des centaines de milliers de possibilités par seconde là où ce tick en
+ * évince 4096 toutes les 100 ms. Quand le dégagement rend du travail, on
+ * réessaie IMMÉDIATEMENT, sans dormir.
+ *
+ * Elle n'est bornée que par `REQUEST_STOP`, jamais par un délai fixe : une
+ * configuration bloquée (plafond trop bas ET débordement indisponible) doit
+ * caler VISIBLEMENT — un message toutes les 5 s — plutôt que de perdre des
+ * données sans le dire. Même contrat que `expand_datas_to_level`.
+ *
+ * @param context     Préfixe de journal (« expansion », « import »).
+ * @param single      Tableau d'UNE possibilité — la garantie « rien inséré »
+ *                    de `put_to_pool` rend le réessai exact.
+ * @param had_to_wait Mis à 1 si au moins un refus a été essuyé (peut être NULL).
+ * @return 1 si insérée, 0 si arrêt demandé pendant l'attente.
+ */
+static int add_possibility_waiting_for_room(const char *context, array_possibility_packet *single,
+                                            int *had_to_wait)
+{
+	int waited = 0;
+	time_t first_refusal = 0;
+	time_t last_log = 0;
+	while (add_possibility(NULL, single) != 0) {
+		if (request == REQUEST_STOP) {
+			return 0;
+		}
+		time_t now = time(NULL);
+		if (!waited) {
+			first_refusal = now;
+			last_log = now;
+			log_error("%s : plafond RAM atteint, possibilité mise en attente "
+			          "(le débordement --stock-spill-dir devrait libérer de la place "
+			          "sous peu ; si ce message persiste, relever --stock-max-ram ou "
+			          "vérifier --stock-spill-dir)\n", context);
+			waited = 1;
+			if (had_to_wait != NULL) {
+				*had_to_wait = 1;
+			}
+		} else if (now - last_log >= RAM_WAIT_LOG_INTERVAL_SEC) {
+			log_error("%s : toujours en attente de place (plafond RAM atteint depuis %ld s)\n",
+			          context, (long)(now - first_refusal));
+			last_log = now;
+		}
+		int moved = (ram_relief_hook != NULL) ? ram_relief_hook(DATAMANAGER_RAM_RELIEF_BLOCK) : 0;
+		if (moved <= 0) {
+			usleep(RAM_WAIT_POLL_US);
+		}
+	}
+	if (waited) {
+		log_info("%s : place libérée, reprise après %ld s d'attente\n",
+		         context, (long)(time(NULL) - first_refusal));
+	}
+	return 1;
+}
+
 int import(client_possibility_t *client_possibility, char *filename)
 {
     FILE *f = fopen(filename, "r");
@@ -2778,6 +2880,7 @@ int import(client_possibility_t *client_possibility, char *filename)
     struct possibility_packet *possibility = malloc(sizeof(struct possibility_packet));
     int read_status;
     unsigned long long imported = 0;
+    int aborted = 0;
     while((read_status = stock_file_read_packet(f, packed, possibility)) == 1)
     {
         // Anciens fichiers .back (v4) : l'octet `checked` correspond à du padding
@@ -2792,10 +2895,22 @@ int import(client_possibility_t *client_possibility, char *filename)
         possibilities->size = 1;
         possibilities->possibilities = malloc(sizeof(struct possibility_packet));
         memcpy(&possibilities->possibilities[0], possibility, sizeof(struct possibility_packet));
-        add_possibility(client_possibility, possibilities);
-        imported++;
-
+        /* Chemin SERVEUR/local (client_possibility == NULL) : un refus du
+           plafond RAM se traite par l'attente, jamais par l'abandon. Le chemin
+           client (envoi au serveur) garde le comportement historique — son
+           refus n'est pas un plafond RAM local et se gère côté serveur. */
+        int inserted;
+        if (client_possibility == NULL) {
+            inserted = add_possibility_waiting_for_room("import", possibilities, NULL);
+        } else {
+            inserted = (add_possibility(client_possibility, possibilities) == 0);
+        }
         free_array_possibility_packet(possibilities);
+        if (!inserted) {
+            aborted = 1;
+            break;
+        }
+        imported++;
     }
 
     free(possibility);
@@ -2812,6 +2927,19 @@ int import(client_possibility_t *client_possibility, char *filename)
     }
 
     fclose(f);
+
+    if (aborted)
+    {
+        // Arrêt demandé pendant une attente de place : l'import s'interrompt,
+        // mais AUCUNE possibilité n'est perdue — le fichier source est intact
+        // et rejouable. C'est ce qui distingue ce chemin d'une expansion, dont
+        // les possibilités n'existent nulle part ailleurs.
+        log_error("import file :%s — interrompu après %llu possibilité(s) ; le fichier "
+                  "est intact, relancer l'import une fois la place disponible\n",
+                  filename, imported);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -3229,35 +3357,7 @@ int regroup_datas(void)
  */
 static int add_possibility_with_retry_or_abort(array_possibility_packet *single, int *had_to_wait)
 {
-	int waited = 0;
-	time_t first_refusal = 0;
-	time_t last_log = 0;
-	while (add_possibility(NULL, single) != 0) {
-		if (request == REQUEST_STOP) {
-			return 0;
-		}
-		time_t now = time(NULL);
-		if (!waited) {
-			first_refusal = now;
-			last_log = now;
-			log_error("expansion : plafond RAM atteint, possibilité mise en attente "
-			          "(le débordement --stock-spill-dir devrait libérer de la place "
-			          "sous peu ; si ce message persiste, relever --stock-max-ram ou "
-			          "vérifier --stock-spill-dir)\n");
-			waited = 1;
-			*had_to_wait = 1;
-		} else if (now - last_log >= EXPAND_RAM_WAIT_LOG_INTERVAL_SEC) {
-			log_error("expansion : toujours en attente de place (plafond RAM atteint depuis %ld s)\n",
-			          (long)(now - first_refusal));
-			last_log = now;
-		}
-		usleep(EXPAND_RAM_WAIT_POLL_US);
-	}
-	if (waited) {
-		log_info("expansion : place libérée, reprise après %ld s d'attente\n",
-		         (long)(time(NULL) - first_refusal));
-	}
-	return 1;
+	return add_possibility_waiting_for_room("expansion", single, had_to_wait);
 }
 
 /**

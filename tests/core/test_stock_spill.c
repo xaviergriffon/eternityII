@@ -12,6 +12,7 @@
  * dupliqués ici — chaque fichier de test est indépendant par convention).
  */
 #include "greatest.h"
+#include "fork_assert.h"
 #include "core/datamanager.h"
 #include "core/possibility.h"
 #include "core/stock_spill.h"
@@ -1286,6 +1287,127 @@ TEST restore_snapshot_converts_a_legacy_format_snapshot(void)
     PASS();
 }
 
+/* Un `restore` sous plafond RAM ne perd AUCUNE possibilité : ce qui ne tient
+ * pas en RAM part sur disque, il n'en disparaît pas.
+ *
+ * Avant correctif : `import()` ignorait la valeur de retour d'
+ * `add_possibility`, or `put_to_pool` REFUSE (sans rien insérer) dès que le
+ * plafond est atteint. Chaque refus était donc une possibilité perdue en
+ * silence. Sur un cas réel — 3 407 891 possibilités restaurées sous
+ * `--stock-max-ram 1024` — il en restait 1 272 974 en RAM et 483 328 sur
+ * disque : **1 651 589 évaporées**. Le thread de débordement n'y pouvait rien,
+ * il évince 4096 possibilités par tick de 100 ms là où l'import en pousse des
+ * centaines de milliers par seconde.
+ *
+ * Restaurer sans plafond PUIS appliquer le plafond ne perdait rien, lui — d'où
+ * un bug longtemps invisible. */
+TEST restore_under_a_ram_cap_loses_nothing(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+
+    /* 1. Un .back de 200 possibilités, produit sans plafond. */
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_configure(dir, nb_file_possibility);
+    int allocs[200];
+    for (int i = 0; i < 200; i++) { allocs[i] = i + 1; }
+    add_packets(allocs, 200);
+    ASSERT_EQ_FMT(200ULL, datas_size(), "%llu");
+
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/stock.back", dir);
+    ASSERT_EQ_FMT(BACKUP_OK, backup(path), "%d");
+    drain_datamanager();
+    ASSERT_EQ_FMT(0ULL, datas_size(), "%llu");
+
+    /* 2. Restauration sous un plafond QUATRE FOIS trop petit. Le crochet de
+     *    dégagement rend l'import capable de faire de la place lui-même : sans
+     *    lui il dépendrait du tick du thread de débordement, qui n'existe pas
+     *    dans un test — et en production ne suit pas la cadence d'un import. */
+    stock_spill_configure(dir, nb_file_possibility);
+    datamanager_set_ram_relief_hook(stock_spill_relieve);
+    datamanager_set_ram_limit_packets_for_tests(50);
+
+    capture_stderr();
+    int rc = restore(path);
+    (void)restore_stderr_size();
+    ASSERT_EQ_FMT(0, rc, "%d");
+
+    /* 3. Rien n'a disparu : tout est soit résident, soit déporté. */
+    unsigned long long resident = datas_size();
+    unsigned long long spilled = stock_spill_total_packets();
+    ASSERT_EQ_FMT(200ULL, resident + spilled, "%llu");
+    ASSERT(resident <= 50ULL);   /* le plafond est bien respecté */
+    ASSERT(spilled > 0ULL);      /* et le surplus est bien parti sur disque */
+
+    datamanager_set_ram_relief_hook(NULL);
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
+/* Chemin de l'appelant qui DÉTIENT la fenêtre de maintenance et importe
+ * dedans : l'import doit pouvoir faire de la place LUI-MÊME, sinon il attend
+ * une éviction que le drapeau `maintenance` interdit, indéfiniment.
+ *
+ * `stock_spill_step` refuse délibérément de travailler sous maintenance (une
+ * éviction CONCURRENTE ferait migrer une possibilité au milieu d'une capture).
+ * `stock_spill_relieve` est la porte réservée à l'appelant qui détient
+ * lui-même la fenêtre : il n'y a alors aucune concurrence, l'éviction
+ * s'intercale entre deux de ses propres insertions.
+ *
+ * Exécuté dans un FILS avec `alarm()` : sans le correctif ce test ne renvoie
+ * jamais, et un test qui pend est un test qui bloque la CI au lieu d'échouer. */
+static char g_maint_import_path[PATH_MAX];
+
+static void maint_import_child(void)
+{
+    alarm(15); /* filet : un blocage tue le fils au lieu de figer le runner */
+    datamanager_begin_maintenance();
+    int rc = import(NULL, g_maint_import_path);
+    datamanager_end_maintenance();
+    if (rc != 0) {
+        exit(3);
+    }
+    unsigned long long total = datas_size() + stock_spill_total_packets();
+    exit(total == 200ULL ? 0 : 2);
+}
+
+TEST import_makes_room_itself_when_it_holds_the_maintenance_window(void)
+{
+    char tmpl[64];
+    char *dir = make_tmp_spill_dir(tmpl);
+    ASSERT(dir != NULL);
+
+    drain_datamanager();
+    datamanager_set_ram_limit_packets_for_tests(0);
+    stock_spill_configure(dir, nb_file_possibility);
+    int allocs[200];
+    for (int i = 0; i < 200; i++) { allocs[i] = i + 1; }
+    add_packets(allocs, 200);
+
+    snprintf(g_maint_import_path, sizeof g_maint_import_path, "%s/stock.back", dir);
+    ASSERT_EQ_FMT(BACKUP_OK, backup(g_maint_import_path), "%d");
+    drain_datamanager();
+
+    stock_spill_configure(dir, nb_file_possibility);
+    datamanager_set_ram_relief_hook(stock_spill_relieve);
+    datamanager_set_ram_limit_packets_for_tests(50);
+
+    /* 0 = les 200 possibilités sont là ; 2 = il en manque ; -1 = le fils a été
+     * tué par l'alarme, donc l'import ne rendait pas la main. */
+    ASSERT_EQ_FMT(0, run_in_fork(maint_import_child, NULL), "%d");
+
+    datamanager_set_ram_relief_hook(NULL);
+    datamanager_set_ram_limit_packets_for_tests(0);
+    drain_datamanager();
+    rmdir_recursive(dir);
+    PASS();
+}
+
 SUITE(stock_spill_suite)
 {
     RUN_TEST(configure_creates_directory_and_starts_empty);
@@ -1302,6 +1424,8 @@ SUITE(stock_spill_suite)
     RUN_TEST(restore_snapshot_collision_repacks_when_stock_files_shrinks);
     RUN_TEST(restore_snapshot_no_collision_missing_segment_reports_partial);
     RUN_TEST(restore_snapshot_collision_missing_segment_reports_partial);
+    RUN_TEST(restore_under_a_ram_cap_loses_nothing);
+    RUN_TEST(import_makes_room_itself_when_it_holds_the_maintenance_window);
     RUN_TEST(restore_snapshot_converts_a_legacy_format_snapshot);
     RUN_TEST(restore_snapshot_tolerates_missing_manifest);
     RUN_TEST(restore_snapshot_replaces_current_live_segments);

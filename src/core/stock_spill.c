@@ -630,12 +630,12 @@ static int stock_spill_reload_fullest(int max_packets)
 	return stock_spill_reload(best_pool, best_file, max_packets);
 }
 
-int stock_spill_step(int max_packets)
+static int stock_spill_step_impl(int max_packets, int caller_owns_maintenance)
 {
 	if (!g_spill_enabled || max_packets <= 0) {
 		return 0;
 	}
-	if (datamanager_is_maintenance_active()) {
+	if (!caller_owns_maintenance && datamanager_is_maintenance_active()) {
 		// Sauvegarde/restauration en cours : aucune E/S de débordement tant
 		// qu'un cliché est en train d'être pris, sinon une possibilité
 		// pourrait migrer entre RAM et disque pendant la capture (cf. doc
@@ -689,6 +689,16 @@ int stock_spill_step(int max_packets)
 		return stock_spill_reload_fullest(max_packets);
 	}
 	return 0;
+}
+
+int stock_spill_step(int max_packets)
+{
+	return stock_spill_step_impl(max_packets, 0);
+}
+
+int stock_spill_relieve(int max_packets)
+{
+	return stock_spill_step_impl(max_packets, 1);
 }
 
 // ---------------------------------------------------------------------

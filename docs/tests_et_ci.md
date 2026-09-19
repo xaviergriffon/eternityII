@@ -1339,6 +1339,28 @@ des données réelles traversent la frontière entre les deux formats, donc le
 seul qui puisse attraper une confusion de pas. Vérifié par sabotage — forcer la
 lecture au pas compact d'un cliché hérité le fait tomber.
 
+### Aucune perte sous plafond RAM : deux tests, deux sabotages
+
+`restore_under_a_ram_cap_loses_nothing` rejoue à petite échelle le cas réel
+(200 possibilités, plafond de 50) et vérifie que `résident + déporté` vaut
+toujours 200. Sabotage : faire ignorer à `import` la valeur de retour d'
+`add_possibility` — l'ancien comportement — rend 50 sur 200.
+
+`import_makes_room_itself_when_it_holds_the_maintenance_window` couvre
+l'appelant qui DÉTIENT la fenêtre de maintenance et importe dedans. Il tourne
+dans un FILS avec `alarm()`, parce que sans le correctif il ne rend jamais la
+main : un test qui pend bloque la CI au lieu d'échouer. Sabotage : refermer la
+porte de `stock_spill_relieve` (le faire abandonner sous maintenance comme
+`stock_spill_step`) fait tuer le fils par l'alarme — `run_in_fork` rend -1.
+
+**À savoir en relisant `restore_apply`** (`ui/command_lines.c`) : la fenêtre de
+maintenance qu'il pose pour « TOUTE la séquence » est en fait refermée par
+`restore()` lui-même, dont le `unlock_all_file()` remet `maintenance` à 0 avant
+l'import. Le débordement est donc actif pendant l'import du `restore`, contrairement
+à ce que le commentaire de `restore_apply` laisse croire. Le second test ci-dessus
+couvre le cas où la fenêtre tient réellement (appel direct à `import`), pour que
+corriger un jour cette incohérence ne réintroduise pas un blocage.
+
 ### Les lecteurs de `.back` hors du programme
 
 `bench_refutation --from-back` lit des stocks de PRODUCTION, donc des fichiers

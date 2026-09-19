@@ -1955,6 +1955,12 @@ void runserver(const char* file)
     // stock_spill_step est alors un no-op bon marché (le débordement n'a de
     // sens que sous un plafond).
     stock_spill_configure(stock_spill_dir, nb_file_possibility);
+    // Injection du dégagement RAM dans datamanager (qui ne peut pas dépendre de
+    // core/stock_spill.c, cf. AGENTS.md) : sans elle, un chemin qui ATTEND de la
+    // place — `import`, `expand_datas_to_level` — ne progresserait qu'au rythme
+    // du thread ci-dessous (4096 possibilités / 100 ms), très en deçà de la
+    // cadence d'un import en masse.
+    datamanager_set_ram_relief_hook(stock_spill_relieve);
     create_spill_thread();
 
     // Expansion du stock au démarrage (option --expand-level) : développe la

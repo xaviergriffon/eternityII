@@ -85,6 +85,28 @@ int datamanager_configure_stock_files(int n);
  *
  * @return Octets estimés par possibilité résidente.
  */
+/**
+ * @brief Signature du crochet de dégagement du plafond RAM.
+ * @param max_packets Nombre maximal de possibilités à déplacer en un appel.
+ * @return            Nombre effectivement déplacé.
+ */
+typedef int (*datamanager_ram_relief_fn)(int max_packets);
+
+/**
+ * @brief Branche le mécanisme capable de libérer de la place sous le plafond
+ *        RAM (en pratique `stock_spill_step`, cf. `core/stock_spill.h`).
+ *
+ * Injection délibérée : `core/datamanager.c` ne peut pas dépendre de
+ * `core/stock_spill.c` (règle de couche, AGENTS.md). À poser une fois au
+ * démarrage, après `stock_spill_configure`. `NULL` rétablit l'absence de
+ * dégagement.
+ *
+ * Sans ce crochet, les chemins qui attendent de la place plutôt que de perdre
+ * une possibilité (`import`, `expand_datas_to_level`) ne progressent qu'au
+ * rythme du thread de débordement — insuffisant face à un import en masse.
+ */
+void datamanager_set_ram_relief_hook(datamanager_ram_relief_fn fn);
+
 unsigned long long datamanager_bytes_per_possibility(void);
 
 /**

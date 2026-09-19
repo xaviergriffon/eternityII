@@ -295,6 +295,23 @@ temps, chaque ancienne file `i` du cliché est reportée sur la file vivante `i 
 nb_file_possibility` ; en cas de collision (`--stock-files` réduit), les sources concernées sont
 réempaquetées, jamais perdues.
 
+**Un `import`/`restore` sous plafond RAM ne perd jamais rien.** `put_to_pool` REFUSE
+(sans rien insérer) dès que le plafond est atteint ; l'import ATTEND alors qu'il y ait de
+la place au lieu d'abandonner la possibilité, et **fait cette place lui-même** en pilotant
+le débordement (`datamanager_set_ram_relief_hook`) plutôt qu'en subissant le tick du
+thread de débordement — 4096 possibilités toutes les 100 ms, très en deçà de la cadence
+d'un import en masse. L'attente n'est bornée que par l'arrêt (`REQUEST_STOP`), jamais par
+un délai fixe : une configuration bloquée (plafond trop bas ET débordement indisponible)
+cale VISIBLEMENT, un message toutes les 5 s, plutôt que de perdre des données en silence.
+Si l'arrêt survient pendant l'attente, l'import s'interrompt en le signalant — le fichier
+source est intact et rejouable, contrairement à une expansion dont les possibilités
+n'existent nulle part ailleurs.
+
+> Avant ce correctif, `import()` ignorait ce refus : restaurer 3 407 891 possibilités sous
+> `--stock-max-ram 1024` en laissait 1 272 974 en RAM et 483 328 sur disque — **1 651 589
+> évaporées sans le moindre message**. Restaurer sans plafond PUIS appliquer le plafond ne
+> perdait rien, d'où un défaut longtemps invisible.
+
 **Une restauration incomplète du débordement est détectée et signalée en échec, jamais tolérée
 en silence.** `backup` écrit, à côté du fichier de stock (`<fichier>.spillcount`), le nombre
 exact de possibilités déportées à cet instant précis — indépendant du répertoire de débordement

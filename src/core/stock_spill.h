@@ -107,6 +107,28 @@ void stock_spill_configure(const char *dir, int nb_files);
 int stock_spill_step(int max_packets);
 
 /**
+ * @brief Même pas incrémental que `stock_spill_step`, mais SANS l'abandon
+ *        pendant une fenêtre de maintenance.
+ *
+ * Réservé à un appelant qui DÉTIENT lui-même cette fenêtre et pilote
+ * l'éviction depuis son propre fil — en pratique `import()`
+ * (`core/datamanager.c`), branché via `datamanager_set_ram_relief_hook`.
+ *
+ * `stock_spill_step` refuse de travailler sous maintenance parce qu'une
+ * éviction CONCURRENTE ferait migrer une possibilité au milieu d'une capture.
+ * Ici il n'y a aucune concurrence : l'appelant est le seul à écrire dans le
+ * stock à cet instant, et l'éviction s'intercale entre deux de ses insertions.
+ * Sans cette porte, un `restore` sous plafond RAM se bloquerait indéfiniment —
+ * `restore_apply` (`ui/command_lines.c`) pose la fenêtre pour TOUTE la
+ * séquence, donc le débordement y serait muet et la place ne se libérerait
+ * jamais.
+ *
+ * @param max_packets Plafond de possibilités déplacées en un appel.
+ * @return            Nombre effectivement déplacé.
+ */
+int stock_spill_relieve(int max_packets);
+
+/**
  * @brief Nombre total de possibilités actuellement déportées sur disque,
  *        tous pools et toutes files confondus.
  *
