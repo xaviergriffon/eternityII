@@ -49,7 +49,7 @@
 #define STOCK_SPILL_DIR_DEFAULT "./eternityii-spill"
 
 /// Seuils d'hystérésis, en pourcentage du plafond RAM
-/// (`datamanager_ram_limit_packets()`) — cf. la doc de `stock_spill_step`.
+/// (`datamanager_ram_limit_bytes()`, en OCTETS) — cf. la doc de `stock_spill_step`.
 #define STOCK_SPILL_HIGH_PERCENT 90
 #define STOCK_SPILL_LOW_PERCENT 75
 #define STOCK_SPILL_RELOAD_PERCENT 25
